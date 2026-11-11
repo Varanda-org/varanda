@@ -1138,7 +1138,7 @@ What the implementation was also checked against, by reading and by the tests ab
 - The app reads as a social app for people: no sync chip (a calm 'Sem internet' note only while offline), refresh by pulling on touch and by the wheel or trackpad on desktop (with a visually hidden, focusable 'Atualizar' for the keyboard), plain-language copy, Diário showing publications only, and Ajustes split into a main list (Editar perfil, Conta e @nome, Guardar dados neste aparelho, Instalar o app, Sair) and a collapsed Avançado (Conexão, Sincronização, Identidade técnica, Recomeçar). Screens: `docs/app.md`; design: `apps/site/artwork/app-design.md`.
 - Staying signed in on the web: the passkey's PRF output is kept sealed (AES-GCM-256 under a non-extractable `CryptoKey`, bound to the rp.id and the identity) in its own IndexedDB database `varanda-session`, so a reload resumes without WebAuthn until 'Sair' or 30 days without opening the app (each open refreshes the period). This reverses the earlier "key only in memory" rule; the trade-off is in `docs/design.md` and `docs/rpc.md` section 11.
 - Follows on every device: `follow` records in the own diary (public), local-first on the browser node (only while unlocked; every queued change signed with the identity key and verified before it is appended), old per-device follows published only after the person confirms them (the Seguindo card 'Pessoas que você seguia neste aparelho', host controls `follows.legacy()` / `confirmLegacy(keys)`), folded back from the diary by the sync (RPC event `follows.changed { count }`). The CLI and the core node append the record too.
-- Photos and GIFs: posts carry up to 4 media descriptors pointing into a per-device media core; the seeder binds media cores to diaries two ways, keeps them under the same `admitted.json` invariants and serves blocks over `GET|HEAD /media/<D>/<K>/<start>/<blocks>`; the hosted PWA verifies every byte (length and SHA-256) before showing it. Images only, no video: the illegal-media hash check is not implemented (Residual risks).
+- Photos and GIFs: posts carry up to 10 media descriptors pointing into a per-device media core; the seeder binds media cores to diaries two ways, keeps them under the same `admitted.json` invariants and serves blocks over `GET|HEAD /media/<D>/<K>/<start>/<blocks>`; the hosted PWA verifies every byte (length and SHA-256) before showing it. Images only, no video: the illegal-media hash check is not implemented (Residual risks).
 - Contract: records `media-core` and `follow`, `post.media`, the media header (`docs/protocol.md` section 2), seeder media admission and the media route (sections 5 and 7), `post.create` / `post.reply` `media`, `FeedItem.media`, `follows.changed`, `report.sign` with an empty quote, and page maxima lowered to `FEED_LIMIT_MAX` 31 and `LOG_LIMIT_MAX` 36 (`docs/rpc.md`).
 
 ### What changed, per area
@@ -1444,7 +1444,7 @@ CI result on the final tree, Node 24.22.1 (run from the worktree root, in this o
 
 ### Limits
 
-- Constants: page 30 / 64; `MAX_NOTICES_MESSAGE` 16384; `MAX_BAD_NOTICES` 5; request timeout 10000 ms (terminal for the channel); `MAX_FOLLOW_TARGETS_PER_AUTHOR` 4096; `NOTICES_MAX_EDGES` 262144; read deadline 25000 ms; byte budget 16777216; 8 rows in parallel; 16 blocks per row; 8 seeder pages; evidence cache 300000 ms / 512 rows; app poll 300000 ms; seen ids 2048.
+- Constants: page 30 / 64; `MAX_NOTICES_MESSAGE` 16384; `MAX_BAD_NOTICES` 5; request timeout 10000 ms (terminal for the channel); `MAX_FOLLOW_TARGETS_PER_AUTHOR` 4096; `NOTICES_MAX_EDGES` 262144; read deadline 25000 ms; byte budget 16777216; 8 rows in parallel; 16 blocks per row, block 0 and the named block alone and first, the rest with 4 in flight per row (`NOTICES_WINDOW_INFLIGHT`, since PR perf/discovery-pipeline); 8 seeder pages; evidence cache 300000 ms / 512 rows; app poll 300000 ms; seen ids 2048.
 - Worst case of one `notices.list` page (64 notices): 42256 bytes against `MAX_MESSAGE` 262144 (`node packages/rpc/test/sizes.test.js`).
 - Capacity: each read occupies one extra external socket (default `maxExternal` 32), like a peek; a busy seeder can refuse it. Not measured on the pilot seeder.
 
@@ -2610,7 +2610,7 @@ As seções 1 a 43 não mudam. Esta seção documenta o splash animado: a cadeir
 
 ### O que mudou
 
-- Portão (`apps/app/src/splashGate.js`): `SPLASH_MIN_MS = 1500`, o splash fica pelo menos 1,5 s nas fases de carregamento e também, em qualquer fase, quando a próxima tela seria os cartões ou os Termos (`gateNext`, caso da primeira abertura). `CONNECT_PATIENCE_MS = 10000`, contado a partir de quando o splash passa a cobrir a fase `connecting` (o tempo nos cartões e nos Termos não conta); depois disso, num nó configurável, a tela Conectar aparece. A busca da configuração (`loading`) não entra nessa conta: ela tem o próprio limite de 8 s. Depois que aparece, Conectar fica no lugar durante uma nova tentativa ("tentar de novo"). Falhas (`config`, `config-error`, `error`) só esperam o piso quando os cartões ou os Termos vêm antes; quando a próxima tela é Conectar, ela aparece na hora.
+- Portão (`apps/app/src/splashGate.js`): `SPLASH_MIN_MS = 1500`, o splash fica pelo menos 1,5 s só nas fases de carregamento (`loading`, `connecting`) e também, em qualquer fase, quando a próxima tela seria os cartões ou os Termos (`gateNext`, caso da primeira abertura). `CONNECT_PATIENCE_MS = 10000`, contado a partir de quando o splash passa a cobrir a fase `connecting` (o tempo nos cartões e nos Termos não conta); depois disso, num nó configurável, a tela Conectar aparece. A busca da configuração (`loading`) não entra nessa conta: ela tem o próprio limite de 8 s. Depois que aparece, Conectar fica no lugar durante uma nova tentativa ("tentar de novo"). Falhas (`config`, `config-error`, `error`) só esperam o piso quando os cartões ou os Termos vêm antes; quando a próxima tela é Conectar, ela aparece na hora.
 - Coreografia (`apps/app/src/ui/Splash.js`): a cadeira sobe e assenta, as letras de "Varanda" entram uma a uma, e "conectando…" aparece e pulsa. Os números ficam em `apps/app/src/ui/splashMotion.js` (`ENTRANCE_MS = 1180`, `PULSE_MS = 1200`, entre outros). Com "reduzir movimento", tudo vai ao estado final de imediato.
 - Sobreposição na web (`apps/app/public/index.html`): um elemento fixo `#varanda-pre-splash`, desenhado só com CSS e um SVG inline (sem script), antes de o bundle do app carregar. O app o remove quando o splash sai. Uma regra CSS o esconde sozinho depois de 20 s, caso o app nunca monte. Sem JavaScript, ele fica oculto e aparece a frase do `<noscript>`.
 - Por que: na web hospedada `canConfigure` é verdadeiro, então a regra antiga do `App.js` mostrava Conectar enquanto o nó ainda conectava. Agora o splash cobre essa espera.
@@ -2646,11 +2646,11 @@ Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
 ### Limites
 
 - A sobreposição da web não conhece a fase real da conexão. Ela sai quando o app a remove, ou some sozinha em 20 s; se o app montar depois disso, o splash do app toca a entrada e passa a ser o anunciado para leitor de tela.
-- 1,5 s e 10 s são fixos, sem configuração.
+- 1,5 s e 10 s são fixos, sem configuração. O piso de 1,5 s não vale mais para quem volta ao app com a fase `ready` e sem cartões nem Termos a seguir (seção 152): a marca sai quando A Rua está pronta.
 - No nativo não há desenho animado em SVG, porque o app não tem biblioteca SVG. A cadeira é o PNG de 128 px, mostrado no máximo a 96 px.
 - Na primeira abertura, se o nó ainda estiver conectando depois dos cartões, o splash do app toca a entrada de novo (a sobreposição web já saiu).
 - No nativo, o primeiro quadro do splash é transparente (a entrada parte da opacidade 0), como no splash anterior; com "reduzir movimento", a marca aparece de uma vez.
-- Uma queda da conexão logo depois de `ready`, ainda dentro do 1,5 s, segue o caminho de antes: o app já marcou a conexão como vista e não volta para Conectar.
+- Uma queda da conexão logo depois de `ready`, ainda dentro do 1,5 s (que hoje só se aplica a quem tem cartões ou Termos a seguir), segue o caminho de antes: o app já marcou a conexão como vista e não volta para Conectar.
 
 ### Splash até a primeira tela (fix/boot-splash-first-screen, 2026-11-03)
 
@@ -4515,8 +4515,8 @@ No nó hospedado (web e app com a instalação), a Espiadinha e os Avisos começ
 
 Regras que os passos abaixo conferem:
 
-- Espiadinha: no nó hospedado, com a aba escondida, o app lê a primeira página da Espiadinha uma vez por conexão, depois de a sincronização ficar pronta (linha `sync ready`) e de o app passar 3 s sem nenhum pedido ao nó (as leituras do início só começam no `sync ready`; PR perf/warm-when-idle), e só com a página visível e em linha. A página fica guardada fora da tela (nada é desenhado com a aba escondida) e aparece na hora ao abrir a aba (PR fix/quiet-boot-warm: no celular, desenhar a lista escondida disputava a tela com A Rua). As citações, contagens e corações dessa página só começam quando a aba aparece, para não disputar a fila do nó com A Rua. Uma falha escondida não mostra erro; a aba, ao abrir, tenta de novo. Abrir a aba durante essa leitura mostra o esqueleto e espera, sem segunda leitura. No nó nativo sem instalação, nada muda (lá a Espiadinha não existe).
-- Avisos: cada página aparece assim que chega (antes, a tela esperava até 5 leituras e mostrava tudo de uma vez), com o indicador de atualização enquanto as continuações chegam. Com a aba escondida, uma leitura da primeira página acontece uma vez por conexão, depois de a sincronização ficar pronta e de o app passar 4 s sem nenhum pedido ao nó (depois da leitura da Espiadinha), e a leitura de 5 min também preenche a lista antes da primeira abertura. A lista escondida só muda o ponto do sino: nada é marcado como visto até a aba aparecer. Uma falha numa continuação mantém as linhas e oferece "tentar de novo" no fim da lista. Cada leitura continua com sua própria ligação curta ao semeador (decisão do dono).
+- Espiadinha: no nó hospedado, com a aba escondida, o app lê a primeira página da Espiadinha uma vez por conexão, depois de o semeador ficar verificado e de o app passar 500 ms sem nenhum pedido ao nó (desde a PR perf/discovery-pipeline não espera mais a linha `sync ready`, que antes pedia 3 s de silêncio; PR perf/warm-when-idle), e só com a página visível e em linha. Depois de uma resposta "ocupado" do semeador, nenhuma leitura escondida roda de novo naquele período. A página fica guardada fora da tela (nada é desenhado com a aba escondida) e aparece na hora ao abrir a aba (PR fix/quiet-boot-warm: no celular, desenhar a lista escondida disputava a tela com A Rua). As citações, contagens e corações dessa página só começam quando a aba aparece, para não disputar a fila do nó com A Rua. Uma falha escondida não mostra erro; a aba, ao abrir, tenta de novo. Abrir a aba durante essa leitura mostra o esqueleto e espera, sem segunda leitura. No nó nativo sem instalação, nada muda (lá a Espiadinha não existe).
+- Avisos: cada página aparece assim que chega (antes, a tela esperava até 5 leituras e mostrava tudo de uma vez), com o indicador de atualização enquanto as continuações chegam. Com a aba escondida, uma leitura da primeira página acontece uma vez por conexão, depois de o semeador ficar verificado e de o app passar 1000 ms sem nenhum pedido ao nó (só depois de a leitura escondida da Espiadinha terminar, ou quando ela não vai rodar; antes eram 4 s e o `sync ready`), e a leitura de 5 min também preenche a lista antes da primeira abertura. A lista escondida só muda o ponto do sino: nada é marcado como visto até a aba aparecer. Uma falha numa continuação mantém as linhas e oferece "tentar de novo" no fim da lista. Cada leitura continua com sua própria ligação curta ao semeador (decisão do dono).
 - Um "atualizar" vindo de fora (seguir, apagar, publicar) que chega durante uma leitura em andamento espera ela terminar e então relê uma vez.
 
 ### Como verificar
@@ -4525,7 +4525,7 @@ Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm ru
 
 Android (aparelho ou emulador, primeiro):
 
-- [ ] Com o registro do nó aberto e a instalação hospedada, abrir o app em A Rua: nenhum peek.read nem notices.list antes de "sync ready" nem enquanto aparecem pedidos do início (feed.read, profile.read, dm.*, community.*); só depois de uns 3 s sem pedidos, um peek.read; e uns 4 s depois de ele terminar, um notices.list.
+- [ ] Com o registro do nó aberto e a instalação hospedada, abrir o app em A Rua: nenhum peek.read nem notices.list enquanto não houver conexão verificada com o semeador nem enquanto aparecem pedidos do início (feed.read, profile.read, dm.*, community.*); o "sync ready" não é mais exigido (PR perf/discovery-pipeline): depois de verificado o semeador e de 500 ms sem pedidos, um peek.read; e o notices.list só depois de esse peek.read terminar, com 1000 ms de silêncio. Se o semeador responder "ocupado", nenhum dos dois roda de novo nesse período.
 - [ ] Abrir a Espiadinha depois disso: as linhas aparecem na hora, sem esqueleto.
 - [ ] Abrir a Espiadinha durante a leitura escondida: esqueleto, depois linhas, sem segundo peek.read.
 - [ ] Abrir Avisos antes da leitura escondida: a primeira página aparece assim que chega, com o indicador de atualização.
@@ -4540,7 +4540,7 @@ iOS (simulador ou aparelho, depois do Android):
 
 Web (navegador, depois do iOS):
 
-- [ ] Na web hospedada, com o registro de rede aberto, carregar a página: peek.read só depois de uns 3 s sem pedidos ao nó após "sync ready", e notices.list uns 4 s depois de o peek.read terminar.
+- [ ] Na web hospedada, com o registro de rede aberto, carregar a página: peek.read só depois de 500 ms sem pedidos ao nó com o semeador verificado (sem esperar o "sync ready"), e notices.list só depois de o peek.read terminar, com 1000 ms de silêncio; nenhum dos dois roda de novo depois de uma resposta "ocupado" no mesmo período.
 - [ ] Na web hospedada, abrir a Espiadinha depois disso: as linhas aparecem na hora.
 - [ ] Na web hospedada, abrir Avisos antes da leitura escondida: a primeira página aparece assim que chega.
 
@@ -4608,12 +4608,12 @@ Limites desta parte:
 
 ## 95. Abertura até A Rua ficar pronta, com barra de progresso (PR feat/splash-until-ready)
 
-A tela de abertura continua sobre A Rua depois de o perfil próprio ficar pronto, até a primeira página estar na tela com os nomes e as contagens das primeiras linhas, e nunca mais que 5 s além disso. A Rua termina de carregar por baixo da abertura; quem abre o app vê a lista já preenchida. O texto "conectando…" saiu: no lugar dele, uma barra fina que avança por etapas reais (conexão, perfil próprio, primeira página, nomes e contagens), nunca por um relógio. A barra só cresce.
+A tela de abertura continua sobre A Rua depois de o perfil próprio ficar pronto, até a primeira página estar na tela com os nomes e as contagens das primeiras linhas, e, desde a seção 152, nunca mais que 400 ms além de a primeira página chegar (`DETAILS_GRACE_MS`; o teto de 5 s, `CONTENT_PATIENCE_MS`, continua para uma primeira página que não chega). A Rua termina de carregar por baixo da abertura; quem abre o app vê a lista já preenchida. O texto "conectando…" saiu: no lugar dele, uma barra fina que avança por etapas reais (conexão, perfil próprio, primeira página, nomes e contagens), nunca por um relógio. A barra só cresce.
 
 Regras que os passos abaixo conferem:
 
 - Só A Rua como primeira tela espera as linhas. Um link aberto na entrada (uma conversa, um perfil) ou outra aba aparece na hora.
-- No máximo 5 s a mais (CONTENT_PATIENCE_MS) depois de o perfil ficar pronto; passou disso, A Rua aparece e termina de carregar à vista.
+- No máximo 400 ms a mais (DETAILS_GRACE_MS, marca `splash-end` com o motivo `grace`) depois de a primeira página chegar, e no máximo 5 s (CONTENT_PATIENCE_MS) depois de o perfil ficar pronto se a página nem chegar; passou disso, A Rua aparece e termina de carregar à vista.
 - As linhas estão prontas quando os autores das 6 primeiras foram consultados (um perfil sem nome também conta) e as contagens responderam para pelo menos uma delas. Sem nó hospedado, sem rede, com o índice indexando ou com a resposta de contagens falhando, não se espera pelas contagens. Uma primeira leitura que falha também libera a tela.
 - A abertura só aparece uma vez por carregamento: travar e destravar, reconectar ou trocar de aba nunca a traz de volta.
 - Na web e no PWA a barra é desenhada pela camada de `public/index.html`; o app só passa o avanço (variável CSS `--varanda-progress`). No celular nativo, o próprio componente da abertura desenha a barra.
@@ -4625,7 +4625,7 @@ Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm ru
 Android (aparelho ou emulador, primeiro):
 
 - [ ] Abrir o app já conectado: a abertura mostra a barra avançando, sem "conectando…", e some com A Rua já com nomes, fotos e números nas primeiras linhas.
-- [ ] Com a rede lenta, a abertura some no máximo cerca de 5 s depois de a barra passar da metade, e A Rua termina de carregar à vista.
+- [ ] Com a rede lenta, a abertura some no máximo cerca de 400 ms depois de a primeira página chegar (ou cerca de 5 s depois de a barra passar da metade, se a página não chegar), e A Rua termina de carregar à vista.
 - [ ] Abrir o app por um link de conversa ou de perfil: a tela do link aparece sem esperar A Rua.
 - [ ] Travar e destravar, ou perder e recuperar a rede: a abertura não volta.
 
@@ -7059,7 +7059,540 @@ Limites desta caminhada:
 - Os rótulos das setas e da capa foram conferidos na árvore de acessibilidade (Android e web), sem ligar TalkBack nem VoiceOver.
 - Na Vitrine o envio termina na hora, então as setas indisponíveis durante o envio não foram observadas; o código usa o mesmo bloqueio do "remover".
 
-## 152. Declaração de celular e `phone.sign` (PR1)
+## 152. Partida pela configuração lembrada e sem tempo fixo de abertura (PR perf/boot-fast-path)
+
+Quem volta ao app não espera mais a busca de `/varanda.json` nem um mínimo de 1,5 s de splash. O app usa a configuração lembrada da instalação, revalida em segundo plano e sai do splash quando as primeiras linhas de A Rua estão prontas, ou 400 ms depois de a primeira página chegar.
+
+O que mudou:
+
+- `discoverConfig` aceita `preferRemembered`: com uma cópia lembrada, devolve-a na hora (`source: 'remembered'`) e faz a busca ao vivo solta. Quando ela termina, `onRevalidated` roda uma vez com `same`, `changed`, `invalid` ou `transport`. `changed` e `invalid` limpam a fila com CLOSED e fecham a conexão; `transport` não faz nada. Nenhum pedido é reenviado.
+- `apps/app/src/attempts.js` dá um contador de tentativas: a revalidação e cada continuação de `connectNow` são ignoradas se a tentativa mudou (troca de instalação A para B e de volta para A, esquecer a configuração, desmontar).
+- `splashGate.js`: `SPLASH_MIN_MS` (1,5 s) vale só nas fases `loading` e `connecting` ou quando os cartões ou os Termos vêm a seguir. `DETAILS_GRACE_MS` (400 ms) libera o splash depois da primeira página mesmo sem nomes e contagens. `CONTENT_PATIENCE_MS` (5 s) segue como teto. A marca `splash-end` ganha o motivo `grace`.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/installationStore.test.js` (seis casos novos: busca que nunca termina, `same`, `changed`, `invalid`, sem cópia lembrada, instalação trocada; o primeiro falha sem a mudança), `node apps/app/test/attempts.test.js` e `node apps/app/test/splashGate.test.js` (`holdSplash` com `phase: 'ready'` e 100 ms é falso sem `gateNext`, e verdadeiro com ele).
+- `npm run lint`, `npm test` e `npm run demo`.
+
+Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA:
+
+- [ ] Abrir o app já conectado, com a instalação lembrada: a abertura não fica um tempo fixo e some com A Rua; a linha `perf: splash-end <ms> grace` ou `feedReady` aparece no console de desenvolvimento.
+- [ ] Primeira abertura do aparelho: os cartões e os Termos ainda seguram a abertura por 1,5 s no mínimo.
+- [ ] Sem rede, com a configuração lembrada: o app abre, mostra "sem conexão" como antes e nada é reenviado quando a rede volta sozinho.
+- [ ] Trocar a origem da instalação (A para B, e de volta para A) durante a partida: o app termina conectado à origem em que ficou, sem erro de uma tentativa antiga.
+- [ ] Mudar o `/varanda.json` no servidor (configuração `changed`): o app reconecta uma vez com a nova. Com `invalid`, mostra o erro de configuração.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação. Conferir no aparelho depois do deploy.
+
+## 153. Espiadinha e Avisos com blocos em paralelo e aquecidos mais cedo (PR perf/discovery-pipeline)
+
+A Espiadinha lê os blocos de cada diário com até 3 em voo (`PEEK_WINDOW_INFLIGHT`), os Avisos com até 4 por linha (`NOTICES_WINDOW_INFLIGHT`), sempre consumidos na mesma ordem de antes. As leituras escondidas começam mais cedo: 500 ms (`PEEK_WARM_QUIET_MS`) e 1000 ms (`NOTICES_FIRST_READ_QUIET_MS`) de silêncio depois de o semeador ser verificado, sem esperar o `sync ready`.
+
+O que mudou:
+
+- `packages/web-member/lib/block-window.js` entrega resultados na ordem de `seqs`, nunca começa mais que `inflight`, pergunta `canStart` antes de cada início e, em `stop()`, não começa mais nada. A cobrança do orçamento acontece na chegada do bloco, consumido ou não; a reserva `(pendentes + 1) x MAX_BLOCK_BYTES` mantém o limite de excesso.
+- Uma página de `peek.read` ou `notices.list` acima de 1 s escreve uma linha local no registro de sincronização (`espiadinha: conexão ..., inventário ..., blocos ...` e `avisos: conexão ..., suporte/prova ..., linhas ...`). Nada sai do aparelho.
+- A leitura dos Avisos só começa depois de a da Espiadinha da mesma época terminar (ou quando ela não vai rodar). Depois de uma resposta "ocupado" nenhuma das duas roda de novo na época. Tocar na aba lê na hora.
+
+Como verificar, a partir da raiz:
+
+- `node packages/web-member/test/block-window.test.js`, `node packages/web-member/test/peek.test.js` (no máximo 3 em voo, páginas iguais com janela 1 e 3, bloco descartado cobrado, nada começa depois do corte), `node packages/web-member/test/notices.test.js` (no máximo 4 em voo), `node apps/app/test/peek.test.js` (`shouldWarmPeek` é verdadeiro sem `syncReady`), `node apps/app/test/notices.test.js` e `node apps/app/test/avisosHosted.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`.
+
+Caminhada, no app com a instalação (celular primeiro) e depois na web hospedada, com o registro de rede aberto:
+
+- [ ] Abrir o app em A Rua: o primeiro `peek.read` sai 500 ms depois do último pedido do início, sem esperar o `sync ready`; o `notices.list` sai só depois de ele terminar, com 1000 ms de silêncio.
+- [ ] Abrir a aba Espiadinha e a aba Avisos antes disso: cada uma lê na hora, sem segunda leitura.
+- [ ] Com o semeador devolvendo "ocupado" (encher as 32 vagas externas): nenhuma leitura escondida volta a rodar na mesma época.
+- [ ] Com a rede lenta, uma leitura acima de 1 s deixa a linha `espiadinha:` ou `avisos:` no registro local.
+- [ ] A Espiadinha e os Avisos mostram as mesmas linhas de antes.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação. O tempo de uma página só se confere no aparelho.
+
+## 154. Nó que não espera o armazém de mensagens e lê chaves do disco uma vez (PR perf/node-boot)
+
+A instalação da identidade no nó não espera mais o carregamento do armazém de mensagens diretas, e o armazenamento em arquivos guarda a leitura de valores pequenos.
+
+O que mudou:
+
+- `file-storage.js` guarda em memória o texto das chaves de até 64 KiB (LRU, 4 MiB no total), não reescreve um valor igual e só preenche o cache de uma leitura se nenhuma escrita da chave começou desde então. Valores grandes (caixas de mídia de mensagens) nunca ficam na memória.
+- `session.js`: `setKeyPair` volta sem esperar `dmEngine.unlock`, que roda logo depois (`dmUnlocking`) com cópia própria da chave PRF, zerada uma vez. Os desbloqueios nunca se sobrepõem; os métodos de mensagem esperam o desbloqueio antes de entrar na fila, para uma leitura pública nunca esperar por ele. Ao terminar, rodam `dmTick()` e `refreshRemotePageRoots()`, e a execução reinicia se faltar uma raiz de página privada.
+- `docs/rpc.md`, `sync.start`: um `once` pedido com o desbloqueio pendente espera por ele; um stop ou desconexão nesse intervalo o rejeita com `sincronização interrompida` ou `conexão encerrada`.
+
+Como verificar, a partir da raiz:
+
+- `node packages/web-member/test/file-storage.test.js` (nenhuma segunda leitura, nenhum rename para valor igual, A depois B depois A termina com A no disco) e `node packages/web-member/test/session-dm-unlock.test.js` (com o desbloqueio preso: `setKeyPair` volta, `feed.read` responde, `dm.list` espera, `clearKeyPair` deixa travado, `block.set` ainda aplica a operação de mensagens).
+- `node packages/web-member/test/dm-store.test.js`, `dm-e2e.test.js`, `page-dm.test.js`, `page-groups-sync.test.js` e `session-groups.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`.
+
+Caminhada no app nativo e na web hospedada, com uma conta com conversas:
+
+- [ ] Entrar com a passkey e abrir A Rua: as linhas aparecem sem esperar as conversas; ao abrir Conversas, a lista chega logo depois.
+- [ ] Travar o app durante a partida e destravar: as conversas voltam a abrir e nenhuma abre com a chave de antes.
+- [ ] Enviar uma mensagem e fechar o app em seguida: ela está no histórico na próxima abertura.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+
+## 155. Linhas de publicação que não redesenham a cada sinal de sincronização (PR perf/row-context)
+
+`PostRow` lê um contexto estável com só a bandeira `hosted` (`useHosted()`), em vez de `useNode()`, e deixa de redesenhar a cada mudança de estado de sincronização. Nada muda na tela.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/hostedContext.test.js` (falha se `PostRow` voltar a chamar `useNode(`), `node apps/app/test/feedRender.test.js` e `node apps/app/test/uiKit.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`.
+
+Caminhada, primeiro no celular e depois na web:
+
+- [ ] Rolar A Rua durante uma sincronização: as linhas não piscam nem perdem a posição.
+- [ ] Curtir, republicar e abrir o menu de uma linha: tudo funciona como antes, na instalação e na web hospedada.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação. O ganho de redesenho só se mede no aparelho.
+
+## 156. Fotos de quem você segue guardadas entre aberturas (PR perf/media-keep)
+
+As fotos das suas publicações e das de quem você segue, e os avatares, ficam no aparelho entre uma abertura e outra, em `Paths.cache/varanda-media-keep` (subpastas `avatars/` e `posts/`), até 64 MiB e 2000 arquivos (`trimKept`, mais antigo primeiro, 5 s depois da partida). Só na instalação nativa; a web não guarda.
+
+O que mudou:
+
+- O nome do arquivo é montado só com a chave do autor (hex64) e um descritor válido: `<autor>-<núcleo>-<início>-<blocos>-<bytes>-<sha256>-<l>x<a>.<ext>`. Nenhum texto de um par chega a um caminho. `keptUrl` devolve nulo e apaga o arquivo se o tamanho não bate.
+- `apps/app/src/localCaches.js` registra os caches e apaga todos (`wipeLocalCaches`) antes de travar, sair ou reiniciar, quando o dono da chave muda, ao esquecer a configuração, ao trocar a origem da instalação e nos casos `changed` e `invalid` da seção 152. Todo apagamento sobe a geração do cache, então uma gravação preparada antes dele é descartada. `blocksProvider` apaga as fotos de quem acaba de ser bloqueado, no primeiro cálculo da lista de bloqueio de cada abertura também.
+- Avatares só entram pelo teste completo (`validAvatar` mais `checkAvatarBytes`) e só em `avatars/`. Espiadinha, conversas de resposta e desconhecidos (`persist: false`) nunca tocam o armazém.
+- O varrimento da abertura toca só `varanda-media`; as fotos guardadas ficam.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/mediaKeep.test.js`, `mediaKeptLoad.test.js` (acerto, falha, `persist: false`, avatar inválido, corridas com apagamento, bloqueio e revogação), `localCaches.test.js` (toda invalidação sobe a geração), `mediaDisplay.test.js`, `mediaCache.test.js`, `platformGate.test.js` e `metroBlocked.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`.
+
+Caminhada no Android e no iOS, com uma conta que segue gente com fotos (depois do deploy):
+
+- [ ] Abrir A Rua, ver fotos, fechar o app por completo e reabrir sem rede: as fotos de quem você segue aparecem sem pedido novo.
+- [ ] Sair da conta: a pasta `varanda-media-keep` fica vazia (Android: `adb shell run-as app.varanda.debug ls cache/varanda-media-keep/posts`; simulador iOS: `xcrun simctl get_app_container booted app.varanda data`, depois `Library/Caches/varanda-media-keep`). Nenhuma foto guardada sobrevive.
+- [ ] Travar (Ajustes), reiniciar o aparelho com o app (Ajustes, apagar dados locais) e trocar a instalação: o mesmo resultado, pasta vazia.
+- [ ] Bloquear um autor que você segue: as fotos e o avatar dele somem da pasta na hora; as dos outros ficam.
+- [ ] Deixar de seguir um autor (também por outro aparelho da mesma passkey): na próxima abertura, depois de a lista de seguidos chegar completa, as fotos e os avatares dele somem da pasta.
+- [ ] A pasta fica em `Library/Caches` (iOS) e `cache/` (Android), nunca em `Documents` nem na pasta que entra no backup do iCloud: `Documents` não tem `varanda-media-keep`.
+- [ ] Depois de encher a pasta (muitas fotos), na abertura seguinte ela volta para no máximo 64 MiB e 2000 arquivos.
+- [ ] Espiadinha: abrir a aba e conferir que nenhum arquivo novo aparece na pasta por causa dela.
+
+Limites desta caminhada:
+
+- Fotos mostradas numa sessão ficam protegidas do corte até a abertura seguinte, então uma sessão longa pode passar de 64 MiB; o corte da abertura seguinte devolve ao limite.
+- Uma foto lida logo antes de um apagamento pode guardar o endereço de um arquivo que o apagamento acabou de remover; ela é buscada de novo no próximo pedido.
+- Nenhuma caixa acima foi marcada nesta documentação.
+
+## 157. A Rua começa pela última primeira página (PR perf/feed-snapshot)
+
+A Rua guarda a última primeira página (sem os bloqueados), com nomes, contagens, curtidas e republicações das linhas mostradas, e começa por ela enquanto o nó sobe. A leitura ao vivo continua e substitui as linhas. O arquivo é `Paths.cache/varanda-rua-snapshot.json` no nativo (cache do app, fora do backup) e `localStorage` na web; vale 14 dias, até 512 KiB, ligado à origem, à associação e ao dono.
+
+O que mudou:
+
+- `feedSnapshot.js` (puro) monta e confere o instantâneo com validação estrita (chaves hex64, inteiros seguros, limites de texto, versão exata). Nada de quem você não segue entra: nem original republicado, nem citação, nem pai de resposta, nem nome. Originais só de autores próprios ou seguidos.
+- `ARua.js` semeia as linhas com `loadedAt` nulo, filtra pela lista de bloqueio assim que ela chega, regrava 2 s depois de cada primeira página nova e depois de apagar (protegido pela geração do cache) e, quando a lista de seguidos chega completa, apaga instantâneo e fotos de quem foi deixado de seguir (`keepOnlyAuthors`). Uma lista parcial não apaga nada. Se a lista de bloqueio não puder ser lida, as linhas do instantâneo não aparecem (falha fechada). Marcas: `rows-snapshot` e `rows-live`.
+- Nunca no modo Vitrine nem na A Rua de Página. Em `App.js`, o nome do instantâneo só satisfaz o passo do nome; identidade, certificado, idade e Termos não mudam.
+- Depois de limpar o cache, os conjuntos de autores permitidos e negados são refeitos para o mesmo dono.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/feedSnapshot.test.js`, `feedSnapshotStore.test.js`, `ruaSnapshot.test.js`, `feedRender.test.js`, `splashGate.test.js` e `platformGate.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`.
+
+Caminhada no Android e no iOS, com conta (depois do deploy):
+
+- [ ] Abrir A Rua, esperar as linhas, fechar o app por completo e reabrir: as mesmas linhas aparecem logo, com nomes e contagens, e depois são trocadas pelas ao vivo (`rows-snapshot` antes de `rows-live` no console de desenvolvimento).
+- [ ] Sair, travar, apagar dados locais e trocar a instalação: o arquivo `varanda-rua-snapshot.json` some do cache (Android: `adb shell run-as app.varanda.debug ls cache`; iOS: `Library/Caches` do contêiner).
+- [ ] O arquivo está em `Library/Caches` (iOS) e `cache/` (Android), não em `Documents`: `Documents` não tem `varanda-rua-snapshot.json`, então não entra no backup do iCloud nem do aparelho.
+- [ ] Bloquear um autor que aparece em A Rua e reabrir: nenhuma linha dele aparece, nem por um instante.
+- [ ] Deixar de seguir um autor por outro aparelho da mesma passkey, abrir A Rua neste aparelho e reabrir: as linhas e as fotos dele saíram do instantâneo.
+- [ ] Apagar uma publicação sua e reabrir: ela não volta do instantâneo.
+- [ ] Um instantâneo de mais de 14 dias, ou de outra instalação ou outro dono, é ignorado.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação. `rows-snapshot` de um membro com conta não se mede no emulador (docs/performance.md, "Limites").
+
+## 158. A Rua aparece no lugar do splash enquanto o nó sobe (PR perf/feed-preview)
+
+Se o aparelho tem um instantâneo de A Rua de no máximo 24 h (`PREVIEW_MAX_AGE_MS`) e uma sessão guardada viva para exatamente o dono dele, o app mostra as linhas do instantâneo, só leitura, no lugar do splash enquanto o nó sobe. Qualquer dúvida e o splash aparece como antes.
+
+O que mudou:
+
+- `previewAllowed` exige tudo isto junto: instantâneo válido para a origem e a associação; no máximo 24 h; `sessionStore.load({rpId, publicKey: dono})` não nulo (o mesmo registro que a retomada usa); nenhuma introdução nem Termos a seguir; nenhuma tela Conectar. Marca: `preview-shown`.
+- `ARuaPreview` desenha as linhas com ações inertes: nenhum pedido sai, a rolagem funciona e as fotos vêm só de `keptUrl`. Sai, e `wipeLocalCaches()` roda, no mesmo desenho que vê outro dono, uma identidade travada ou `entrar`. A posição de rolagem passa para a A Rua de verdade.
+- Sair, travar e reiniciar apagam o instantâneo antes de rodar, então um aparelho sem conta não tem o que mostrar.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/splashGate.test.js` (tabela de verdade de `previewAllowed`: instantâneo velho, sem sessão, sessão de outro dono, `gateNext`, `entrar`), `node apps/app/test/ruaSnapshot.test.js` (a prévia não envia pedido; o caminho do outro dono apaga) e `node apps/app/test/platformGate.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`.
+
+Caminhada no Android e no iOS, com conta (depois do deploy; o build de debug não entra com passkey em produção, então use o APK de preview do EAS):
+
+- [ ] Entrar, ver A Rua, fechar o app e reabrir: as linhas aparecem logo no lugar do splash, rolam, e a troca pela lista viva mantém a posição.
+- [ ] Sair e reabrir: o splash aparece e nenhuma linha da conta anterior aparece.
+- [ ] Travar o app (Ajustes) e reabrir: sem prévia.
+- [ ] Depois de apagar dados locais ou trocar a instalação: sem prévia.
+- [ ] Entrar com outra conta no mesmo aparelho: nenhuma linha da conta anterior, nem por um instante.
+- [ ] Deixar o aparelho 25 h sem abrir o app: sem prévia, o splash normal.
+- [ ] Tocar numa linha da prévia: nada acontece e nenhum pedido sai (registro de rede).
+- [ ] Primeira abertura (cartões, Termos): sem prévia.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+
+## 159. Medidor de carga de conteúdo e casos novos do bench (PR test/perf-harness)
+
+Só ferramentas de desenvolvimento: `apps/cli/scripts/content-load.js` sobe uma instalação temporária em 127.0.0.1 (semeador, escuta WebSocket, DHT local, pastas temporárias) e conduz N leitores no mesmo processo por uma "abertura de celular" (`sync.start`, `feed.read`, `profile.read`, `peek.read`, `notices.list`, um `GET /index/counts` com 27 referências e 4 `GET /media`). Recusa qualquer host que não seja loopback e qualquer configuração ou credencial do operador. O `startup-bench.js` ganha `--steps`, `--early-reads`, `--dm-rows` e `--groups` com `--group-blocks`.
+
+Como verificar, a partir da raiz:
+
+- `node apps/cli/test/content-load.test.js` (argumentos, percentis, recusa fora do loopback, uma execução de 2 clientes e 3 s que termina sem soquete aberto nem pasta temporária), `node apps/cli/test/load-ws.test.js` e `node apps/cli/test/hosted-lab.test.js`.
+- `node apps/cli/scripts/content-load.js --clients 16 --duration-ms 30000 --json` imprime um objeto JSON. Os comandos do bench estão em `docs/performance.md`.
+- `npm run lint`, `npm test` e `npm run demo`.
+
+Caminhada:
+
+- [ ] Rodar o comando acima com `--clients 1`: termina sem erro e sem deixar pasta temporária em `$TMPDIR`.
+- [ ] `--host 192.0.2.1` (ou outro endereço que não seja loopback) é recusado.
+
+Limites desta caminhada:
+
+- É medida em loopback, no mesmo processo dos leitores, e não promete capacidade de um semeador no ar.
+- Nenhuma caixa acima foi marcada nesta documentação.
+
+## 160. Semeador anuncia capacidades, oferece apresentação enxuta e páginas de candidatos (PR feat/discovery-server)
+
+O semeador negocia capacidades na abertura e serve um canal novo, `varanda/discovery/1`, com páginas de diários candidatos. Quem pede `CAP_NO_INVENTORY` recebe um `hello` sem inventário (`count: 0`, `have: []`, um token só) e nenhuma mensagem `have`. Quem não pede nada vê o que via antes, byte a byte.
+
+O que mudou (normativo em `docs/protocol.md` e `docs/rpc.md`):
+
+- Canal `admission`: o handshake carrega um inteiro compacto de capacidades (`CAP_NO_INVENTORY` = 1 do membro, `CAP_DISCOVERY` = 2 do semeador); a leitura é tolerante, ausente vale 0 e bits desconhecidos são ignorados. Nenhum tipo de mensagem novo.
+- Canal `varanda/discovery/1`: JSON de até 16384 bytes; pedido `{ type: 'page', id, after, limit 1..64 }`, resposta `{ type: 'page', id, items, next, total }`; uma requisição em voo por ligação, balde de 8 com 4 por segundo, no máximo 160 pedidos por ligação, mais de 5 mensagens ruins derrubam o par. Só diários servidos, liberados, não bloqueados e com `present >= 2`, ordenados por `recentAt` (mais novo primeiro) e depois por um hash com sal sorteado por processo; o cursor não guarda estado no servidor.
+- `recentAt` do diário vem das publicações e republicações em vigor (lista limitada das mais novas por diário). Apagar uma publicação ou desfazer uma republicação a tira da lista, então o horário de um post apagado não vaza pela ordem (correção da auditoria). As vistas ficam por `DISCOVERY_VIEWS_KEPT` (10), reconstruídas a cada 30 s, então uma página percorrida vive o TTL de 5 min.
+- `new Seeder({ discovery: false })` volta ao comportamento anterior (uso em testes e de reversão); não há opção na CLI.
+
+Como verificar, a partir da raiz:
+
+- `node packages/core/test/admission-caps.test.js`, `node packages/core/test/discovery-net.test.js`, `node apps/cli/test/seeder-discovery.test.js` e `node apps/cli/test/seed-ws-discovery.test.js` (inclui o teste que falha se o horário de um post apagado sobreviver na ordem).
+- `npm run lint`, `npm test` e `npm run demo`.
+
+Caminhada, com um semeador de teste e a CLI:
+
+- [ ] Um cliente antigo (sem capacidades) abre o semeador novo: recebe o inventário de sempre.
+- [ ] Um cliente novo sem `CAP_NO_INVENTORY` também.
+- [ ] Apagar a publicação mais nova de um diário e pedir a primeira página de candidatos: o diário cai na posição que o resto de suas publicações dá, e o horário apagado não aparece.
+- [ ] Depois do deploy, conferir nos registros do semeador que `maxExternal`, `INDEX_RATE`, `MEDIA_RATE` e os limites de quadro não mudaram.
+
+Limites desta caminhada:
+
+- Pelo canal, o semeador escolhe a ordem das páginas além de poder omitir chaves; o conteúdo continua autenticado.
+- Nenhuma caixa acima foi marcada nesta documentação.
+
+## 161. Espiadinha em lotes de candidatos e um só vínculo para os Avisos (PR feat/discovery-client)
+
+A Espiadinha lê candidatos em páginas de 48 diários (`PEEK_CANDIDATES`) em vez do inventário inteiro, e os Avisos reaproveitam um vínculo enxuto entre as páginas encadeadas (de 5 soquetes para 1 por rolagem). Com semeador ou cliente antigo, o caminho é o de antes.
+
+O que mudou:
+
+- `buildPeekPage` ganha `batchOf` e `more`: a ordem vira (rodada, lote, data, autor) e uma rodada sem vagas pede outro lote de candidatos antes de continuar. Sem os parâmetros, o resultado é igual ao de antes.
+- `peek.js` envia `CAP_NO_INVENTORY`, usa o canal de descoberta quando o semeador o oferece e a página volta `incomplete` se um pedido de candidatos vencer o tempo. Um instantâneo de candidatos guarda todas as chaves enquanto vive (limite `MAX_INVENTORY`). Uma página vazia incompleta com cursor não termina a lista: o app segue as páginas incompletas e a pausa de lista seca limita a repetição.
+- `notices.js` envia `CAP_NO_INVENTORY` e mantém o vínculo por `NOTICES_LINGER_MS` (2 s) quando uma leitura termina com `next`; só uma leitura com cursor, da mesma chave, no prazo, o reaproveita, sem novo `supported` nem nova prova. Primeira página, outra chave, vínculo perdido, `abort()`, `close()` ou o prazo o destroem.
+
+Como verificar, a partir da raiz:
+
+- `node packages/core/test/peek.test.js`, `node packages/web-member/test/peek.test.js`, `node packages/web-member/test/notices.test.js`, `node packages/web-member/test/peek-capacity.test.js` e `node packages/web-member/test/frame-guard-client.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`.
+
+Caminhada, na web hospedada com o registro de rede aberto e no app com a instalação:
+
+- [ ] Abrir a Espiadinha: aparece um `peek.read` com candidatos em páginas de 48, sem esperar o inventário inteiro, e as linhas são as de sempre.
+- [ ] Rolar a Espiadinha até o fim: pedem-se mais lotes; uma rodada sem vagas não termina a lista cedo.
+- [ ] Abrir os Avisos e rolar por 5 páginas: um só soquete serve as continuações dentro de 2 s (aba Rede, WebSocket).
+- [ ] Contra um semeador sem a versão nova, as duas abas funcionam como antes.
+- [ ] Conta que segue quase todos os candidatos do primeiro lote: a Espiadinha pode mostrar uma página vazia incompleta e oferece "carregar mais".
+
+Limites desta caminhada:
+
+- Um leitor cujos primeiros cerca de 384 candidatos sejam todos seguidos vê páginas vazias incompletas até a pausa da lista oferecer "carregar mais".
+- Nenhuma caixa acima foi marcada nesta documentação.
+
+## 162. Capacidade do semeador em loopback (PR perf/seeder-capacity)
+
+Só documentação: `docs/seeder-capacity.md` registra a máquina, os comandos, as tabelas e onde começam as recusas, medidas com o medidor da seção 159. O medidor não achou custo interno do semeador que valesse corrigir (cerca de 4% das amostras de CPU em 32 clientes); as recusas vêm dos tetos (`maxExternal` 32, `MEDIA_RATE`). Nenhum teto padrão mudou e nenhum código mudou.
+
+Como verificar:
+
+- Cada número de `docs/seeder-capacity.md` tem o comando ao lado; rodar um deles (por exemplo `--clients 16 --duration-ms 30000 --json`) e comparar com a tabela, lembrando que a carga da máquina move as latências.
+- `docs/README.md` lista o documento.
+
+Caminhada:
+
+- [ ] A tabela de recusas bate com o JSON de uma rodada sua (as contagens de 1013 e 503 vêm de tetos fixos).
+- [ ] O texto diz que é medida em loopback e não é promessa de capacidade.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+
+## 163. Leitor publicado antes de a sincronização da partida terminar (PR perf/reader-early)
+
+As leituras do diário próprio, dos perfis e de A Rua deixam de esperar até 3 s o fim da execução de sincronização: o leitor é publicado logo depois de abrir os grupos, com as promessas `opened` e `settled`. No bench (D1, arquivos), o leitor publicado foi de 327 para 9,5 ms e a leitura própria antecipada de 329 para 35 ms (medidas do E10 em `docs/performance.md`).
+
+O que mudou:
+
+- `sync.js` chama `reader.set` depois de `openGroups()`; `opened` resolve depois de `startGroupDiaries` e `settled` onde `reader.set` ficava. Os dois resolvem falso se a execução acabar antes. Até `settled`, só os núcleos de seguidos e dos grupos próprios são emprestados (varreduras podem apagar os outros).
+- `member-ops.js`: um ajudante nos três pontos de empréstimo usa o empréstimo na hora, ou espera `opened`, depois `settled`, antes da lógica antiga. `session.js` `withCores` toma um prazo único de `readerWaitMs`.
+- Um gancho de teste só em desenvolvimento segura a execução antes da passada dos seguidos.
+
+Como verificar, a partir da raiz:
+
+- `node packages/web-member/test/sync-reader.test.js`, `reader-early.test.js` e `read-while-sync.test.js`; a suíte `npm test -w packages/web-member`.
+- `node packages/web-member/scripts/startup-bench.js --follows 60 --blocks 150 --own 800 --file --issued --js-verify --steps --early-reads --runs 5 --json`: `readerPublishedMs`, `earlyOwnReadMs`, `earlyProfileReadMs` e `earlyFeedReadMs` (comandos e números em `docs/performance.md`, rodada M4).
+- `npm run lint`, `npm test` e `npm run demo`.
+
+Caminhada no app nativo e na web hospedada, com conta:
+
+- [ ] Abrir o app e ir direto ao Diário e ao perfil: as linhas chegam sem esperar a sincronização da partida terminar.
+- [ ] Publicar durante a sincronização: a publicação aparece e a execução não é interrompida.
+- [ ] Sair no meio da partida: nada de leitura trava e nenhum núcleo fica emprestado.
+
+Limites desta caminhada:
+
+- A leitura antecipada de A Rua quase não mudou (462 ms, a passada dos seguidos domina).
+- Nenhuma caixa acima foi marcada nesta documentação.
+
+## 164. Conversas e grupos lidos com memória (PR perf/dm-group-reads)
+
+O nó guarda em memória a dobra de mensagens diretas, de grupos e de comunidades por assinatura de todas as entradas, e responde a primeira página de `dm.list` com um resumo selado enquanto as linhas carregam. Nada de novo é gravado em claro.
+
+O que mudou:
+
+- `dm-store.js` ganha um contador de versão e `ops()` memorizado por versão; `dm.js` guarda uma dobra por armazém, com os textos de seguidos e de vistos comparados a cada chamada.
+- `member-ops.js`: `loadGroup` e `loadCommunity` calculam a assinatura de tudo que leem (diário próprio, lista de bloqueio, escritores, raiz, diários ligados e estado da chave) e devolvem a dobra guardada se for igual; no máximo 64 entradas. `VARANDA_MEMO_CHECK` (só testes) recalcula a cada acerto e falha em qualquer diferença. Uma dobra de grupo privado nunca sobrevive ao par de chaves.
+- `dm.list` da primeira página pode responder de um resumo `dmSummary` selado sob uma chave derivada da chave local, só se ele abre, nomeia este núcleo, tem o mesmo comprimento e os dois resumos conferem; senão espera as linhas. O passo da cadeia nunca espera pelas linhas (reentrada `DM_LIST_MISS`, no máximo 3 vezes e depois `LOCKED`).
+
+Como verificar, a partir da raiz:
+
+- `node packages/web-member/test/dm-memo.test.js`, `group-memo.test.js`, `dm-summary.test.js`, `dm-store.test.js`, `dm.test.js`, `dm-e2e.test.js`, `page-dm.test.js` e `session-groups.test.js`.
+- `node packages/web-member/scripts/startup-bench.js --follows 60 --blocks 150 --own 800 --file --issued --js-verify --steps --early-reads --groups 20 --group-blocks 200 --runs 5 --json` e o mesmo com `--dm-rows 5000` (números em `docs/performance.md`).
+- `npm run lint`, `npm test` e `npm run demo`.
+
+Caminhada, com uma conta que tem conversas e grupos:
+
+- [ ] Abrir Conversas e Comunidades: as listas aparecem e batem com as do dia anterior (nomes, não lidas, últimas mensagens).
+- [ ] Receber uma mensagem, uma entrada e uma saída de grupo: a lista muda na hora, sem o valor guardado.
+- [ ] Bloquear um membro de um grupo e reabrir a lista: o bloqueio aparece (a assinatura inclui a lista de bloqueio).
+- [ ] Sair da conta e entrar com outra: nenhuma dobra de grupo privado da conta anterior.
+- [ ] Nenhum texto de mensagem em claro em nenhum arquivo do app depois de usar Conversas: procurar uma frase que você enviou no contêiner do app (`grep -r` nas pastas de dados); só pode haver blocos selados do próprio nó, nunca o texto.
+
+Limites desta caminhada:
+
+- O desbloqueio do armazém de mensagens e o do motor ainda terminam depois da carga completa (`keyStage` e `onKey` são expostos).
+- A primeira lista a partir do resumo não foi medida em separado.
+- Nenhuma caixa acima foi marcada nesta documentação.
+
+## 165. Pedidos visíveis primeiro, abas escondidas em segundo plano (PR perf/request-priority)
+
+A fila de pedidos do app ganha uma faixa de segundo plano (`maxBackground` = 2) e as linhas na tela são enriquecidas primeiro. Nenhum pedido é reenviado, juntado nem descartado.
+
+O que mudou:
+
+- `createRequestQueue.run(method, params, send, { signal, priority, token })`: `visible` (padrão) ou `background`. Um pedido de fundo só começa se nenhum visível espera e há menos de 2 de fundo em voo; os totais (7 em voo, 24 esperando) e a lista de exceções não mudam. `promote(token)` leva um pedido de fundo que espera para o fim da faixa visível; o que já voa não é tocado. Um pedido de fundo que espera continua contando para o limite de espera.
+- `visibleFirst.js` ordena as referências: linhas na janela, depois abaixo, depois acima. `RefreshableList` repassa `onViewableItemsChanged`; A Rua resolve nomes e contagens nessa ordem.
+- A leitura aquecida da Espiadinha e a primeira dos Avisos (seção 153) vão como `background` com um token e são promovidas ao abrir a aba, sem segundo pedido. A segunda consulta de nomes do caminho "fresh" é de fundo.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/requestQueue.test.js` (um pedido de fundo não passa por cima do limite de espera; promoção) e `node apps/app/test/visibleFirst.test.js`, mais `peek.test.js`, `notices.test.js` e `namesCache.test.js` do app.
+- `npm run lint`, `npm test` e `npm run demo`.
+
+Caminhada, primeiro no celular:
+
+- [ ] Abrir A Rua e rolar rápido: as linhas na tela ganham nomes e contagens antes das de baixo.
+- [ ] Tocar na aba Espiadinha enquanto a leitura escondida ainda espera: ela é promovida e nenhum segundo `peek.read` aparece no registro de rede.
+- [ ] Um toque nunca espera atrás de uma leitura de fundo (aba Rede do app de desenvolvimento).
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+
+## 166. Diário, perfil, Membro e grupos começam pela última primeira página (PR perf/screen-snapshots)
+
+Mais telas guardam a última primeira página e começam por ela, com a leitura ao vivo substituindo as linhas: Diário, Membro (só de quem você segue) e as listas de grupos de Conversas e Comunidades. O próprio Perfil não guarda cópia: é um formulário de edição que não lê nada ao abrir. Mensagens diretas nunca são guardadas pelo app. Os arquivos são `Paths.cache/varanda-screen-<tipo>.json` no nativo (cache do app, fora do backup) e `localStorage` na web.
+
+O que mudou:
+
+- `screenSnapshot.js` (puro): envelope `{ v, kind, origin, association, owner, savedAt, body }`, validade de 14 dias, 256 KiB por tipo, validação estrita. Tipos: `diario` (primeira página do próprio diário), `perfil` (definido nas regras, nenhuma tela usa), `membro` (no máximo 8 autores, o menos recente sai; recusa quem não é seguido), `conversasGrupos` e `comunidades` (nome só de grupo público). Nunca guardado: nada de quem você não segue, Espiadinha, Avisos, linhas de mensagens diretas, prévias, pares, contagens, nomes de grupos privados nem não lidas.
+- Cada tela semeia com `loadedAt` nulo e a leitura ao vivo substitui; grava 2 s depois de uma leitura nova, guardada pela geração do cache. Membro grava só enquanto o autor é seguido e apaga a entrada ao deixar de seguir na própria tela; autor bloqueado, páginas e desconhecidos nunca usam o instantâneo. Conversas e Comunidades não semeiam nem gravam quando agem como Página. Marcas `rows-snapshot:<tela>` e `rows-live:<tela>`.
+- Mudar de instalação com a mesma chave de membro não apaga uma tela já semeada (o armazém já foi limpo).
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/screenSnapshot.test.js`, `screenSnapshotStore.test.js`, `diarioSnapshot.test.js`, `membroSnapshot.test.js`, `gruposSnapshot.test.js`, `snapshotSafety.test.js`, `conversasList.test.js`, `communitiesBoxScreen.test.js` e `platformGate.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`.
+
+Caminhada no Android e no iOS, com conta (depois do deploy):
+
+- [ ] Abrir Diário, o perfil de alguém que você segue e Comunidades; fechar o app e reabrir: cada tela começa pelas linhas de antes e depois troca pelas vivas.
+- [ ] Sair, travar, apagar dados locais e trocar a instalação: nenhum arquivo `varanda-screen-*.json` fica no cache (Android: `adb shell run-as app.varanda.debug ls cache`; iOS: `Library/Caches` do contêiner).
+- [ ] Os arquivos estão em `Library/Caches` e `cache/`, nunca em `Documents`.
+- [ ] Deixar de seguir um autor: a entrada dele some do instantâneo de Membro na hora; bloquear um autor: ele não é semeado.
+- [ ] Abrir o perfil de um desconhecido ou de uma Página: nenhuma linha vem de instantâneo.
+- [ ] Conversas: a caixa de mensagens diretas só aparece quando `dm.list` responde, e nenhum arquivo do app contém linhas de mensagens (procurar uma frase enviada por `grep -r` no contêiner).
+- [ ] Um grupo privado aparece com o texto provisório até a leitura ao vivo; o nome dele não está em nenhum arquivo `varanda-screen-*`.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+
+## 167. Hash das fotos pelo expo-crypto no nativo (PR perf/native-hash)
+
+O SHA-256 das fotos usa `expo-crypto` no nativo (`hash.native.js`, `nativeSubtle`); a web continua no WebCrypto e o caminho noble fica como reserva. A mudança foi mantida porque a mediana ficou muito abaixo de 20% nas duas plataformas: números em `docs/performance.md`, rodada M4. Há uma marca de desenvolvimento `media-hash` (`perf: media-hash <t> native X ms, js Y ms, N B`).
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/mediaHash.test.js`, `mediaFetch.test.js`, `mediaAvatar.test.js` e `platformGate.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`.
+
+Caminhada, primeiro no celular:
+
+- [ ] Abrir A Rua com fotos no Android e no iOS: as fotos aparecem, e uma foto com bytes adulterados (descritor com `sha256` trocado) não aparece.
+- [ ] Com `EXPO_PUBLIC_VARANDA_PERF=1`, a linha `media-hash` mostra o tempo nativo muito menor que o de JavaScript e `mismatches=0` no teste do bench.
+- [ ] Na web e no PWA, as fotos carregam como antes.
+- [ ] Anúncios e mídia de conversa (`Anuncio.js`, `chatMedia.js`) seguem no caminho noble e funcionam.
+
+Limites desta caminhada:
+
+- Os chamadores `Anuncio.js` e `chatMedia.js` continuam no noble.
+- Nenhuma caixa acima foi marcada nesta documentação.
+
+## 168. Amostrador de quadros da lista, só em desenvolvimento (PR perf/list-tuning)
+
+`createFrameStats` (em `perfMarks.js`) mede os intervalos entre quadros durante a rolagem e escreve uma linha `perf: frames n=... p50=... p95=... max=... over32=...` quando a rolagem para (1 s depois do último evento, mais 17 ms). Só com `EXPO_PUBLIC_VARANDA_PERF=1`; com as marcas desligadas, nenhum ouvinte nem temporizador é criado, e nada é guardado nem enviado. As constantes da lista (`FIRST_ROWS`, `ROWS_PER_BATCH`, `WINDOW_SCREENS`) não mudaram: o ajuste condicionado (E25) não rodou, motivo em `docs/performance.md`.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/perfMarks.test.js` (relógio monotônico, sem intervalo negativo, a cauda ociosa termina no último evento) e `node apps/app/test/feedRender.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`.
+
+Caminhada, na Vitrine grande (comandos em `docs/performance.md`):
+
+- [ ] Rolar por 60 s no Android e no iOS: aparece uma linha `frames` por rajada de rolagem.
+- [ ] Sem `EXPO_PUBLIC_VARANDA_PERF`, nenhuma linha `frames` aparece e a rolagem é a de antes.
+
+Limites desta caminhada:
+
+- Medida em build de desenvolvimento com a máquina carregada; o p95 do Android não é confiável.
+- Nenhuma caixa acima foi marcada nesta documentação.
+
+## 169. A Rua atualizada com o app fechado (PR feat/background-refresh)
+
+Com o app fechado, o sistema acorda uma tarefa de segundo plano (`expo-background-task` e `expo-task-manager`, `varanda-rua-refresh`, intervalo mínimo de 6 h) que atualiza o instantâneo de A Rua e guarda até 12 fotos e avatares das primeiras linhas (no máximo 8 MiB). Ela nunca lê identidade, sessão guardada nem chaveiro, nenhuma mensagem e nenhum aviso. É a mudança de maior risco do pacote.
+
+O que mudou:
+
+- `backgroundRefresh.js` (puro, dependências injetadas): `shouldRun` só aceita um instantâneo válido da instalação lembrada, nenhum nó rodando e pelo menos `BG_MIN_GAP_MS` (6 h) desde a última vez. `runRefresh` tem prazo de 20 s: sobe o nó com a configuração lembrada, `sync.start { once: true, timeoutMs: 12000, groups: false }`, confere que `node.info` nomeia o dono do instantâneo, lê `block.list`, `follow.list` (precisa vir completa), a primeira página de `feed.read` e os perfis, grava o instantâneo guardado pela geração do cache (página mais antiga primeiro, só originais de republicações levados adiante) e guarda as fotos. Sempre para o nó no fim.
+- `sync.start` ganha `groups: false` (só com `once: true`): a execução não abre núcleos de grupo, não anexa canal de grupo e não pede página de grupo (`docs/rpc.md`).
+- `backgroundTask.native.js`: a tarefa é definida no escopo do módulo (importado antes de `registerRootComponent`) e registrada uma vez, depois da primeira página viva de A Rua de uma sessão hospedada; desregistrada por `wipeLocalCaches` (sair, travar, reiniciar, trocar instalação). `varanda-last-open.json` (em `Paths.cache`) marca o último uso; a tarefa para sem ele ou com mais de 14 dias. Um app aberto cancela a execução em curso (`cancelBackgroundRefresh`) antes de subir o nó, para nunca haver dois worklets; um processo iniciado fora do primeiro plano só inicia o nó no primeiro `active` (`foregroundGate`).
+- Android: os dois módulos entram sozinhos. iOS: `Info.plist` com `UIBackgroundModes` `processing` e `BGTaskSchedulerPermittedIdentifiers`. As duas linhas de `ExpoTaskManager_privacy.bundle` que o `pod install` acrescenta ao `pbxproj` não foram commitadas (decidir na build iOS de produção).
+- `docs/design.md` (LGPD) descreve a tarefa de segundo plano e `docs/development.md` os dois módulos e o passo de reconstrução.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/backgroundRefresh.test.js`, `node apps/app/test/backgroundTask.test.js`, `node packages/web-member/test/sync-no-groups.test.js` e `node apps/app/test/platformGate.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`.
+
+Caminhada no Android (aparelho, fora do emulador sem conta) e no iOS, com conta (depois do deploy, com o APK de preview do EAS e a build de TestFlight):
+
+- [ ] Abrir o app, ver A Rua e fechar: a tarefa fica registrada (`TaskManager.isTaskRegisteredAsync('varanda-rua-refresh')` num registro de desenvolvimento).
+- [ ] Disparar a tarefa (`BackgroundTask.triggerTaskWorkerForTestingAsync()`): o `savedAt` do instantâneo avança e, ao abrir o app, as linhas novas aparecem na prévia.
+- [ ] Abrir o app durante uma execução de fundo: o app abre normalmente, a execução é cancelada, e nenhum erro "nó já iniciado" aparece na tela nem no registro.
+- [ ] Bloquear o aparelho no meio da partida do app: a sessão guardada continua valendo e o app não pede a passkey de novo (a tarefa nunca lê o chaveiro; o `bindPasskey` espera o app ficar ativo).
+- [ ] Rodar a tarefa com o aparelho bloqueado (iOS: depois do primeiro desbloqueio): a sessão guardada continua válida depois, sem pedir a passkey.
+- [ ] Sair da conta: a tarefa fica desregistrada e `varanda-rua-snapshot.json` e `varanda-last-open.json` somem do cache. Repetir com travar, apagar dados locais e trocar a instalação.
+- [ ] Um aparelho nunca aberto, ou sem instantâneo, ou fora de sessão: a tarefa não faz nada (nenhum soquete).
+- [ ] Um aparelho sem uso há mais de 14 dias: a tarefa para de vez.
+- [ ] Os arquivos `varanda-rua-snapshot.json` e `varanda-last-open.json` estão em `Library/Caches` ou `cache/`, nunca em `Documents`, então fora do backup do iCloud.
+- [ ] Nenhum texto de conversa em claro em arquivo do app depois de uma execução de fundo: a tarefa não lê mensagens, e `grep -r` por uma frase enviada no contêiner não acha nada em claro.
+- [ ] iOS: o identificador `BGTaskSchedulerPermittedIdentifiers` está no `Info.plist` da build, e a tarefa roda uma vez (Xcode: Debug, Simulate Background Fetch ou o comando de teste do módulo).
+- [ ] Android: nenhuma permissão nova no manifesto além das que os módulos acrescentam.
+
+Limites desta caminhada:
+
+- `sessionStore` apaga o item existente se a leitura mais antiga lançou e `setItemAsync` falha (já era assim; travada de mais de 10 s no meio de uma gravação).
+- Se `unregisterTaskAsync` falhar, fica uma tarefa sem nada para atualizar até a próxima fase `ready`.
+- O emulador não entra com conta, então estas caixas pedem um aparelho ou a build de produção.
+- Nenhuma caixa acima foi marcada nesta documentação.
+
+## 170. Rodada M4 de medidas e conferências que ficam por fazer (PR docs/perf-m4)
+
+Documentação (`docs/performance.md`, rodada M4 e metas, e este arquivo) e um medidor só de desenvolvimento: `apps/app/src/media/hashBench.js`, carregado por `apps/app/index.js` apenas com `__DEV__` e `EXPO_PUBLIC_VARANDA_HASH_BENCH=1`, que mede o hash nativo contra o JavaScript nos mesmos 30 buffers. `docs/seeder-capacity.md` é do PR perf/seeder-capacity.
+
+Como verificar:
+
+- Cada número da rodada M4 em `docs/performance.md` tem o comando ao lado; rodar o bench do nó com os mesmos argumentos e conferir a ordem de grandeza (a carga da máquina move os valores).
+- Nenhum texto novo usa travessão (U+2014).
+
+Ficam por fazer depois do deploy (não medidas nesta rodada):
+
+- [ ] Chrome com CPU 4x, laboratório D1, segunda abertura (com o instantâneo): linhas de A Rua, troca de aba, perfil e rajada de 2 minutos.
+- [ ] Celular de verdade, com conta: primeiro commit da lista, p95 de quadro, `rows-snapshot` e `preview-shown`, tarefa de segundo plano (seção 169).
+- [ ] Vitrine grande no Android com a máquina quieta (p95 de quadro), que decide se o ajuste condicionado E25 roda.
+- [ ] Todas as caixas das seções 152 a 169 e as de privacidade (sair, travar, apagar dados locais, bloquear, deixar de seguir e trocar de instalação não deixam instantâneo nem foto guardada; instantâneos no cache e fora do backup do iCloud; nenhuma conversa em claro em arquivo do app; tarefa de fundo desregistrada depois de sair; sessão guardada sobrevive a travar na partida e a uma execução de fundo com o aparelho bloqueado; abrir o app durante uma execução de fundo não mostra "nó já iniciado").
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+
+## 171. Até 10 fotos por publicação (PR feat/photo-cap-app)
+
+Publicações, respostas e citações, de pessoas e de Páginas, levam até 10 fotos ou GIFs. No Publicar, "Foto" escolhe até 10 imagens: o seletor nativo para em 10 e, numa segunda escolha com 10 já na publicação, a 11ª é recusada com "até 10 fotos por publicação". As setas reordenam as fotos antes de publicar. O carrossel mostra de 2 a 10 fotos, com um ponto por foto e a pílula "N de M", e a tela cheia percorre todas. No cartão da citação, a grade pequena continua (uma, duas lado a lado, três, 2x2); de 5 fotos em diante, a 2x2 mostra "+N" na quarta foto (N são as fotos que não aparecem) e um toque abre a tela cheia com todas. Os leitores de tela não leem o "+N". O Mural mostra só a capa, com o ícone de várias fotos e sem contagem na tela; o leitor de tela diz "N fotos". Uma lápide continua com no máximo 4 trechos, então apagar uma publicação de 5 a 10 fotos grava 2 ou 3 lápides num só append (10 fotos: 4+4+2). Conversas (mensagens diretas e grupos) e a Feira continuam em 4 fotos. Um app, uma CLI ou um semeador de antes desta mudança não mostra a publicação com mais de 4 fotos, nem o texto, e segue lendo as publicações seguintes do mesmo diário. O feed e a Espiadinha pedem páginas de 26, e o log, de 30. A descrição em `apps/app/store.config.json` diz 10; publicar a ficha na loja é um passo humano. Detalhes em [app.md](app.md) ("Fotos e GIFs").
+
+Como verificar, a partir da raiz:
+
+- `node packages/core/test/records.test.js`
+- `node packages/core/test/delete-session.test.js`
+- `node packages/core/test/seeder-delete.test.js`
+- `node packages/web-member/test/delete.test.js`
+- `node packages/rpc/test/sizes.test.js`
+- `node packages/rpc/test/methods.test.js`
+- `node apps/cli/test/page-cli.test.js`
+
+Caminhada, primeiro no celular, build de depuração do Android (emulador) e simulador iOS, e depois na web e no PWA:
+
+- [x] No Publicar, escolher 10 fotos. O seletor nativo para em 10. Tocar em "Foto" de novo com 10 já na publicação: a 11ª é recusada com "até 10 fotos por publicação". Reordenar as fotos e publicar. O carrossel mostra 10 pontos e "N de 10". A tela cheia percorre as 10. Executado em 2026-11-11 no Android e no iOS: o seletor do Android recusa a 11ª com "Select up to 10 items", e o do iOS para em 10. Com 10 na publicação, "Foto" mostra "até 10 fotos por publicação". Mover a capa para depois deixa a segunda foto como capa. O carrossel mostra 10 pontos e vai de "1 de 10" a "10 de 10", e a tela cheia chega a "10 de 10".
+- [x] Uma resposta e uma citação com 10 fotos. No cartão da citação, a grade 2x2 mostra "+6" na quarta foto. Um toque nessa foto abre a foto 4 de 10 na tela cheia. Executado em 2026-11-11: no iOS, a resposta e a citação com 10 fotos foram publicadas, e a resposta mostra "1 de 10". No Android e no iOS, a citação de uma publicação de 10 fotos mostra "+6", e o toque abre a tela cheia em "4 de 10".
+- [ ] O leitor de tela não lê o "+6" do cartão da citação.
+- [x] No Mural, uma publicação de 10 fotos mostra só a capa, com o ícone de várias fotos, sem contagem na tela. Executado em 2026-11-11 no Android e no iOS. O toque abre a publicação em "1 de 10".
+- [ ] Com TalkBack ou VoiceOver, o quadro do Mural é lido como "10 fotos".
+- [ ] `varanda page post --file` com 10 arquivos publica a Página; com 11, a CLI recusa (`uso: no máximo 10 fotos por publicação`).
+- [x] Apagar uma publicação de 10 fotos: ela sai do feed e do Mural. Executado em 2026-11-11 na Vitrine: no iOS, uma resposta de 10 fotos saiu de A Rua depois de "publicação apagada"; no Android, uma publicação de 10 fotos saiu do Mural.
+- [ ] Depois de apagar uma publicação de 10 fotos, as 10 fotos deixam de ser servidas pelo semeador, e o log mostra 3 lápides (4+4+2) num só append.
+- [x] Mensagem direta, grupo e Feira continuam parando em 4 fotos. Executado em 2026-11-11 no Android e no iOS, numa conversa direta, no grupo "Passeios de bicicleta" e em Anunciar: o seletor do Android recusa a 5ª foto com "Select up to 4 items", e o do iOS diz "Select up to 4 photos.". Nada foi enviado.
+- [ ] Um app ou uma CLI de antes desta mudança não mostra a publicação de 10 fotos, nem o texto, e continua lendo as publicações seguintes do mesmo diário.
+- [ ] O feed e a Espiadinha carregam em páginas de 26, e o log em páginas de 30, sem "parâmetro inválido".
+- [x] A descrição de `apps/app/store.config.json` diz até 10 fotos ou GIFs por publicação. Publicar a ficha na loja é um passo humano. Conferido em 2026-11-11 no arquivo; a ficha na loja não foi publicada.
+
+Limites desta caminhada:
+
+- Conferido em 2026-11-11 com os dados de demonstração do app (Vitrine), no emulador Android (build de depuração) e no simulador iOS (iPhone 17 Pro). A web e o PWA não foram percorridos nesta caminhada. Antes do PR, a Vitrine na web mostrou o "+6" na citação e abriu a tela cheia em "4 de 10".
+- Para ter uma publicação de 10 fotos que carregam, a caminhada mudou os dados de demonstração só na máquina local (a publicação 16 com 10 fotos e uma citação dela no topo de A Rua), e a mudança foi desfeita. Na Vitrine, a foto enviada aparece como "foto indisponível", e apagar não grava lápide.
+- TalkBack e VoiceOver não foram ouvidos. Na árvore de acessibilidade do Android, o quadro do Mural tem o rótulo "10 fotos, 5 nov". O "+6" não tem rótulo nem recebe foco, e fica dentro da foto de rótulo "foto 4 de 10", num bloco escondido dos leitores de tela (`importantForAccessibility='no-hide-descendants'` no celular, `aria-hidden` na web).
+- A CLI, o semeador, as lápides, os apps antigos e o tamanho das páginas não aparecem na Vitrine. Os comandos acima cobrem esses pontos: `page-cli.test.js` (10 arquivos passam, 11 são recusados), `seeder-delete.test.js` (3 lápides 4+4+2, os 10 trechos recusados, também depois de reiniciar), `delete-session.test.js` e `delete.test.js` do `web-member` (um só append), `records.test.js` (10 fotos aceitas, 11 recusadas), `methods.test.js` e `sizes.test.js` (páginas de 26, 29 e 30). Não há teste com o código de antes desta mudança: o comportamento do app antigo segue do validador antigo, que recusa mais de 4 fotos (`media-invalid`) e pula só aquela publicação.
+- Com 10 fotos no Publicar, a nota "até 10 fotos por publicação" aparece embaixo da barra de ferramentas; no iOS, fica abaixo da dobra e só aparece ao rolar. Num quadro que falhou, o "+6" fica por cima de "foto indisponível".
+- Cada lápide guarda no máximo 4 trechos. Por isso, 10 fotos viram 3 lápides (4+4+2) num só append, e quem não atualizou pula a publicação inteira, texto incluído, sem rejeitar o diário.
+
+## 172. Declaração de celular e `phone.sign` (PR1)
 
 A verificação de celular brasileiro ganha uma declaração assinada pela chave do diário, o método `phone.sign` e os dois atestados do serviço de conta, com `phone.proof`. O número e o código não entram na declaração nem nos atestados.
 

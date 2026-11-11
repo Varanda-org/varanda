@@ -847,3 +847,59 @@ test('diary peek and peek pages copy preview thumbnails', (t) => {
   t.not(page.items[0].preview.image, d.posts[0].preview.image)
   t.is(buildPeekPage({ diaries: [diary(B, 1)], limit: 1 }).items[0].preview, null)
 })
+
+test('buildPeekPage: batch 0 comes before batch 1 within a round, whatever the dates', (t) => {
+  const diaries = [diary(A, 2), diary(B, 2, 5000), diary(C, 2, 2000)]
+  const batchOf = new Map([[A, 0], [B, 1], [C, 0]])
+  const page = buildPeekPage({ diaries, limit: 35, batchOf })
+  t.alike(refs(page.items), [[C, 2, 0], [A, 2, 0], [B, 2, 0], [C, 1, 1], [A, 1, 1], [B, 1, 1]])
+  t.alike(page, { items: page.items, next: null, needs: [] }, 'no more key without more')
+  t.alike(Object.keys(page.items[0]), ['kind', 'author', 'name', 'avatar', 'username', 'seq', 'at', 'text', 'replyTo', 'quote', 'media', 'preview', 'round'])
+  const flat = new Map([[A, 0], [B, 0], [C, 0]])
+  t.alike(buildPeekPage({ diaries, limit: 35, batchOf: flat }), buildPeekPage({ diaries, limit: 35 }), 'one batch is the default order')
+  t.alike(buildPeekPage({ diaries, limit: 35, more: false }), buildPeekPage({ diaries, limit: 35 }))
+})
+
+test('buildPeekPage: round 1 starts only when no candidate batch is left', (t) => {
+  const diaries = [diary(A, 3), diary(B, 2, 1000)]
+  const batchOf = new Map([[A, 0], [B, 0]])
+  const waiting = buildPeekPage({ diaries, limit: 35, batchOf, more: true })
+  t.alike(refs(waiting.items), [[B, 2, 0], [A, 3, 0]])
+  t.alike(waiting, { items: waiting.items, next: null, needs: [], more: true })
+  const full = buildPeekPage({ diaries, limit: 2, batchOf, more: true })
+  t.ok(isPeekCursor(full.next), 'a page filled within the round needs no more batches')
+  t.is(full.more, undefined)
+  const pending = { ...diary(C, 0), exhausted: false }
+  const both = buildPeekPage({ diaries: [...diaries, pending], limit: 35, batchOf: new Map([...batchOf, [C, 0]]), more: true })
+  t.alike(both.needs, [C], 'needs still travel with more')
+  t.is(both.more, true)
+  const done = buildPeekPage({ diaries, limit: 35, batchOf })
+  t.alike(done.items.map((i) => i.round), [0, 0, 1, 1, 2])
+  t.is(done.next, null)
+})
+
+test('buildPeekPage: a cursor at the end of batch 0 continues into batch 1 without skipping newer items', (t) => {
+  const a = diary(A, 2)
+  const b = diary(B, 2, 5000)
+  const first = buildPeekPage({ diaries: [a], limit: 1, batchOf: new Map([[A, 0]]), more: true })
+  t.alike(refs(first.items), [[A, 2, 0]])
+  t.ok(isPeekCursor(first.next))
+  const batchOf = new Map([[A, 0], [B, 1]])
+  const second = buildPeekPage({ diaries: [a, b], limit: 35, batchOf, after: first.next })
+  t.alike(refs(second.items), [[B, 2, 0], [A, 1, 1], [B, 1, 1]], 'B is newer than the cursor but sits in a later batch')
+  t.is(second.next, null)
+})
+
+test('buildPeekPage refuses a cursor author outside batchOf and an invalid batchOf', (t) => {
+  const diaries = [diary(A, 1), diary(B, 1)]
+  const after = { round: 0, at: AT, author: C, seq: 1 }
+  t.exception.all(() => buildPeekPage({ diaries, limit: 1, after, batchOf: new Map([[A, 0], [B, 0]]) }), { name: 'TypeError', message: 'after inválido' })
+  for (const batchOf of [{}, [[A, 0]], new Map([[A, -1], [B, 0]]), new Map([[A, 0.5], [B, 0]]), new Map([[A, 0]])]) {
+    t.exception.all(() => buildPeekPage({ diaries, limit: 35, batchOf }), { name: 'TypeError', message: 'batchOf inválido' })
+  }
+  // A diary with no post yet (only in `needs`) is checked too, so the call
+  // that follows once its post is loaded cannot be the first to fail.
+  const pending = { key: C, name: 'cc', username: null, posts: [], exhausted: false }
+  t.exception.all(() => buildPeekPage({ diaries: [...diaries, pending], limit: 35, batchOf: new Map([[A, 0], [B, 0]]) }), { name: 'TypeError', message: 'batchOf inválido' })
+  t.alike(buildPeekPage({ diaries: [...diaries, pending], limit: 35, batchOf: new Map([[A, 0], [B, 0], [C, 1]]) }).needs, [C])
+})

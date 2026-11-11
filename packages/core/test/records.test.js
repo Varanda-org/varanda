@@ -560,7 +560,8 @@ test('media constants', async (t) => {
   t.is(MAX_MEDIA_BLOCKS, 8192)
   t.is(MAX_MEDIA_BYTES, 268435456)
   t.is(MAX_MEDIA_CORES, 4)
-  t.is(MAX_MEDIA_PER_POST, 4)
+  t.is(MAX_MEDIA_PER_POST, 10)
+  t.is(records.MAX_DELETE_RANGES, 4)
   t.is(MAX_MEDIA_ITEM_BLOCKS, 256)
   t.alike([...MEDIA_MIMES], ['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
   t.is(MAX_MEDIA_DIMENSION, 16384)
@@ -587,7 +588,7 @@ test('validateRecord: posts with media', async (t) => {
   t.is(validateRecord(withMedia([DESC], { replyTo: 'x' }), 1), 'reply-invalid')
   t.is(validateRecord(withMedia([DESC]), 0), 'genesis-required')
   // The media list.
-  for (const media of [null, [], [DESC, DESC, DESC, DESC, DESC], DESC, 'x', 1, {}, [null], [[]]]) {
+  for (const media of [null, [], new Array(11).fill(DESC), DESC, 'x', 1, {}, [null], [[]]]) {
     t.is(validateRecord(withMedia(media), 1), 'media-invalid', 'media ' + JSON.stringify(media))
   }
   // Sparse arrays: a hole is never a descriptor.
@@ -638,6 +639,32 @@ test('validateRecord: posts with media', async (t) => {
   const hostile = { ...DESC }
   Object.defineProperty(hostile, 'core', { enumerable: true, get () { throw new Error('boom') } })
   t.is(validateRecord(withMedia([hostile]), 1), 'media-invalid')
+})
+
+// The widest descriptor: every number at its longest decimal form.
+const WIDEST = { core: K2, mime: 'image/jpeg', start: MAX_MEDIA_BLOCKS - MAX_MEDIA_ITEM_BLOCKS, blocks: MAX_MEDIA_ITEM_BLOCKS, bytes: MAX_MEDIA_ITEM_BLOCKS * MEDIA_BLOCK_BYTES, sha256: 'd'.repeat(64), width: MAX_MEDIA_DIMENSION, height: MAX_MEDIA_DIMENSION }
+
+test('validateRecord: ten media items on a post, reply and quote', async (t) => {
+  await testnet(t)
+  const ten = new Array(10).fill(WIDEST)
+  const eleven = new Array(11).fill(WIDEST)
+  const shapes = {
+    post: { type: 'post', text: 'oi', at: AT, replyTo: null },
+    reply: { type: 'post', text: 'oi', at: AT, replyTo: { author: K1, seq: 2 } },
+    quote: { type: 'post', text: 'oi', at: AT, replyTo: null, quote: { author: K1, seq: 2 } }
+  }
+  for (const [name, rec] of Object.entries(shapes)) {
+    t.is(validateRecord({ ...rec, media: ten }, 3), null, name + ' with 10 media items')
+    t.is(validateRecord({ ...rec, media: eleven }, 3), 'media-invalid', name + ' with 11 media items')
+  }
+  t.is(postRecord({ text: '', at: AT, media: ten }).media.length, 10)
+  await t.exception.all(async () => postRecord({ text: '', at: AT, media: eleven }), /media-invalid/)
+  // A lone surrogate is escaped to six JSON bytes, the most any code point
+  // costs, and the year 275760 is the longest canonical date.
+  const worst = { ...shapes.quote, text: '\ud800'.repeat(MAX_TEXT), at: new Date(8.64e15).toISOString(), quote: { author: K1, seq: Number.MAX_SAFE_INTEGER }, media: ten }
+  t.is(validateRecord(worst, 3), null)
+  const bytes = b4a.byteLength(JSON.stringify(worst))
+  t.ok(bytes <= MAX_BLOCK_BYTES, 'worst ten-media quote ' + bytes + ' bytes')
 })
 
 test('postRecord with media', async (t) => {
@@ -1169,6 +1196,31 @@ test('validateRecord: delete records', async (t) => {
   await t.exception.all(async () => deleteRecord({ seq: 3, at: AT, media: [] }), /media-invalid/)
   await t.exception.all(async () => deleteRecord({ seq: 3, at: AT, media: null }), /media-invalid/)
   await t.exception.all(async () => deleteRecord({ seq: 3, at: 'x' }), /date-invalid/)
+
+  // deleteRecords keeps every record at MAX_DELETE_RANGES ranges or fewer.
+  const { deleteRecords, MAX_DELETE_RANGES } = records
+  const ranges = Array.from({ length: 10 }, (_, i) => ({ core: K2, start: i + 1, blocks: 1 }))
+  const split = deleteRecords({ seq: 3, at: AT, media: ranges })
+  t.is(split.length, 3)
+  t.alike(split.map((r) => r.media.length), [4, 4, 2])
+  t.alike(split.flatMap((r) => r.media), ranges, 'the chunks concatenate to the input in order')
+  for (const r of split) {
+    t.is(r.seq, 3)
+    t.is(r.at, AT)
+    t.ok(r.media.length <= MAX_DELETE_RANGES)
+    t.is(validateRecord(r, 7), null)
+  }
+  const nowSplit = deleteRecords({ seq: 3, media: ranges })
+  t.ok(nowSplit.every((r) => r.at === nowSplit[0].at), 'one at for every chunk')
+  t.ok(isCanonicalIso(nowSplit[0].at))
+  const four = deleteRecords({ seq: 3, at: AT, media: ranges.slice(0, 4) })
+  t.is(four.length, 1)
+  t.alike(four[0], { ...del, media: ranges.slice(0, 4) })
+  const bare = deleteRecords({ seq: 3, at: AT })
+  t.is(bare.length, 1)
+  t.alike(bare[0], del)
+  t.absent('media' in bare[0], 'no media key when absent')
+  await t.exception.all(async () => deleteRecords({ seq: 3, at: AT, media: [] }), /media-invalid/)
 
   // Hostile getters and proxies never throw.
   const hostileSeq = { type: 'delete', at: AT }

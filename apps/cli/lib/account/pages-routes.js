@@ -88,8 +88,8 @@ const { feira } = require('@varanda/rpc')
 const { MAX_PAGES_PER_OWNER, MAX_PAGE_MOVES } = require('./pages-store')
 const { parseBox, parseInviteShare } = require('./pages-dm')
 const {
-  postRecord, likeRecord, repostRecord, deleteRecord, profileRecords, followRecord, listingRecord, listingStatusRecord,
-  parseRef, validDescriptor, isCanonicalIso, PAGE_KEYS, MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS, MEDIA_MIMES, MAX_AVATAR_BYTES, AVATAR_MIMES
+  postRecord, likeRecord, repostRecord, deleteRecords, profileRecords, followRecord, listingRecord, listingStatusRecord,
+  parseRef, validDescriptor, isCanonicalIso, PAGE_KEYS, MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS, MEDIA_MIMES, MAX_AVATAR_BYTES, AVATAR_MIMES, MAX_MEDIA_PER_POST
 } = require('@varanda/core/lib/records')
 
 const PREFIX = '/account/pages/'
@@ -100,7 +100,6 @@ const NONCE_DOMAIN = 'varanda-page-nonce-v1'
 const NONCE_BYTES = 32
 const MAX_APPLIED = 100000
 const MAX_AUDIT = 1000
-const MAX_MEDIA_ITEMS = 4
 const MAX_OWNED = 8
 const MAX_ADMINS = 16
 const INVITE_FILE = 'page-invite-rosters.json'
@@ -927,9 +926,9 @@ function createPagesRoutes ({
 
   // ---- posts and engagement ------------------------------------------------
 
-  function mediaOf (page, media) {
+  function mediaOf (page, media, max = MAX_MEDIA_PER_POST) {
     if (media === undefined) return undefined
-    if (!Array.isArray(media) || media.length < 1 || media.length > MAX_MEDIA_ITEMS) throw refuse('midia-invalida')
+    if (!Array.isArray(media) || media.length < 1 || media.length > max) throw refuse('midia-invalida')
     let table
     try {
       table = writer.items(page)
@@ -991,11 +990,11 @@ function createPagesRoutes ({
         // roster, an accept or an offer.
         if (!e || !isPlainObject(e.record) || !['post', 'like', 'repost'].includes(e.record.type)) throw refuse('pedido-invalido')
         const media = Array.isArray(e.record.media) ? e.record.media.map((d) => ({ core: d.core, start: d.start, blocks: d.blocks })) : undefined
-        return [deleteRecord({ seq: t.seq, media })]
+        return deleteRecords({ seq: t.seq, media })
       }
       if (action === 'listing') {
         if (!exactKeys(op, ['kind', 'title', 'text', 'price', 'unit', 'cat', 'place'], ['media'])) throw refuse('pedido-invalido')
-        const record = listingRecord({ kind: op.kind, title: op.title, text: op.text, price: op.price, unit: op.unit, cat: op.cat, place: op.place, media: mediaOf(page, op.media) })
+        const record = listingRecord({ kind: op.kind, title: op.title, text: op.text, price: op.price, unit: op.unit, cat: op.cat, place: op.place, media: mediaOf(page, op.media, feira.MAX_LISTING_MEDIA) })
         if (countLive(await writer.readEntries(page)) >= feira.MAX_LISTINGS) throw refuse('limite')
         return [record]
       }
@@ -1003,7 +1002,7 @@ function createPagesRoutes ({
         if (!exactKeys(op, ['to', 'expectedRevision', 'title', 'text', 'price', 'unit', 'cat', 'place', 'media'])) throw refuse('pedido-invalido')
         if (!Number.isSafeInteger(op.expectedRevision) || op.expectedRevision < 0) throw refuse('pedido-invalido')
         const t = ownListingRef(page, op.to)
-        const media = op.media === null ? null : mediaOf(page, op.media)
+        const media = op.media === null ? null : mediaOf(page, op.media, feira.MAX_LISTING_MEDIA)
         const entries = await writer.readEntries(page)
         if (!foldListings(entries).bySeq.has(t.seq)) throw refuse('pedido-invalido')
         const live = liveEditOf(entries, t.seq)
@@ -1642,7 +1641,7 @@ function createPagesRoutes ({
       if (!isPlainObject(r) || !CLOSE_DELETES.includes(r.type)) continue
       const items = Array.isArray(r.media) ? r.media : isPlainObject(r.avatar) ? [r.avatar] : []
       const media = items.length > 0 ? items.map((d) => ({ core: d.core, start: d.start, blocks: d.blocks })) : undefined
-      out.push(deleteRecord({ seq: e.seq, media }))
+      out.push(...deleteRecords({ seq: e.seq, media }))
     }
     return out
   }

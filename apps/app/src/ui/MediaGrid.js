@@ -1,11 +1,14 @@
 /* global document */
 
-// The photos of a post under its text (1 to 4, gridLayout in
-// ../media/plan.js). One keeps its aspect ratio (clamped 0.5..2). Two to four
+// The photos of a post under its text (1 to 10, MAX_MEDIA_PER_POST in
+// ../media/plan.js). One keeps its aspect ratio (clamped 0.5..2). Two to ten
 // are a swipeable MediaCarousel with dots and a counter, so each photo gets
 // the full width instead of a thumbnail; quote cards pass mosaic to keep the
 // compact grid (two side by side, one big and two stacked, 2x2), which has no
-// room for dots. A tap opens the full-screen viewer, which fits the photo,
+// room for dots. Past four, that grid still shows the first four tiles and
+// paints "+N" on the last one. The scrim takes no touches and stays out of
+// assistive tech, so a tap still opens the viewer on photo 4, and the viewer
+// gets every photo. A tap opens the full-screen viewer, which fits the photo,
 // moves with the same carousel, the arrow buttons or the keyboard arrows (web,
 // only while open), closes with its button or Escape, and labels each photo
 // 'foto N de M'. Closing leaves the feed on the last photo seen. Descriptors
@@ -18,7 +21,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Modal, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
 import { useEscapeLayer } from './escapeLayer'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { MAX_MEDIA_PER_POST, gridLayout } from '../media/plan'
+import { MAX_MEDIA_PER_POST, gridLayout, mosaicLayout } from '../media/plan'
 import { Icon } from './Icon'
 import { MediaCarousel } from './MediaCarousel'
 import { MediaView } from './MediaView'
@@ -130,7 +133,9 @@ export function MediaGrid ({ author, media, persist = true, mosaic = false }) {
   }, [viewing])
   if (!Array.isArray(media) || media.length === 0) return null
   const items = media.slice(0, MAX_MEDIA_PER_POST)
-  const layout = gridLayout(items.length)
+  const mosaicPlan = mosaic ? mosaicLayout(items.length) : null
+  const layout = mosaic ? (mosaicPlan && mosaicPlan.kind) : gridLayout(items.length)
+  const more = mosaicPlan ? mosaicPlan.more : 0
   const n = items.length
   const tile = (i, style) => (
     <MediaView
@@ -176,11 +181,29 @@ export function MediaGrid ({ author, media, persist = true, mosaic = false }) {
         <View style={[styles.flex, styles.column]}>{tile(1, styles.flex)}{tile(2, styles.flex)}</View>
       </View>
     )
-  } else {
+  } else if (layout === 'four') {
     body = (
       <View style={[styles.box, styles.column]}>
         <View style={[styles.flex, styles.row]}>{tile(0, styles.flex)}{tile(1, styles.flex)}</View>
-        <View style={[styles.flex, styles.row]}>{tile(2, styles.flex)}{tile(3, styles.flex)}</View>
+        <View style={[styles.flex, styles.row]}>
+          {tile(2, styles.flex)}
+          {more > 0
+            ? (
+              <View style={styles.moreCell}>
+                {tile(3, styles.flex)}
+                <View
+                  pointerEvents='none'
+                  style={styles.moreScrim}
+                  accessibilityElementsHidden
+                  importantForAccessibility='no-hide-descendants'
+                  aria-hidden
+                >
+                  <Text style={styles.moreText}>{'+' + more}</Text>
+                </View>
+              </View>
+              )
+            : tile(3, styles.flex)}
+        </View>
       </View>
     )
   }
@@ -208,6 +231,14 @@ const styles = StyleSheet.create({
   column: { flexDirection: 'column', gap: GAP },
   flex: { flex: 1 },
   cell: { position: 'relative' },
+  moreCell: { flex: 1, position: 'relative' },
+  moreScrim: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.55)'
+  },
+  moreText: { color: '#ffffff', fontSize: 20, lineHeight: 24, fontWeight: '700' },
   viewer: { flex: 1, backgroundColor: '#000000' },
   viewerTop: { height: 52, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 12 },
   viewerBtn: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },

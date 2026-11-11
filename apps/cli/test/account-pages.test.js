@@ -784,3 +784,46 @@ test('account pages: 300 anonymous create and move starts do not stop a linked m
   const made = await s.create(ana, 'depois')
   t.is(made.status, 200, JSON.stringify(made.body))
 })
+
+test('account pages: a post, reply or quote takes up to 10 photos, a listing 4, and deleting 10 splits the tombstone', async (t) => {
+  t.timeout(300000)
+  const s = await setup(t)
+  const { ctx } = s
+  const ana = await s.newMember('ana')
+  const made = await s.create(ana, 'dezfotos')
+  t.is(made.status, 200, JSON.stringify(made.body))
+  const K = made.page
+
+  // Eleven distinct photos, all in the page's item table.
+  const ds = []
+  for (let i = 0; i < 11; i++) {
+    const img = jpeg(64, 48, 2048 + i)
+    const up = await s.upload(ana, K, img, { sha256: sha(img), mime: 'image/jpeg', width: 64, height: 48, bytes: img.length })
+    t.is(up.status, 200, JSON.stringify(up.body))
+    ds.push(up.body.descriptor)
+  }
+  const ten = ds.slice(0, 10)
+
+  t.is((await s.act(ana, 'post', K, { text: 'onze', media: ds })).body.error, 'midia-invalida', 'a post with 11 photos')
+  const post = await s.act(ana, 'post', K, { text: 'dez', media: ten })
+  t.is(post.status, 200, JSON.stringify(post.body))
+  const to = K + ':' + post.body.seq
+  t.is((await s.act(ana, 'reply', K, { to, text: 'onze', media: ds })).body.error, 'midia-invalida', 'a reply with 11 photos')
+  t.is((await s.act(ana, 'reply', K, { to, text: 'dez', media: ten })).status, 200, 'a reply with 10 photos')
+  t.is((await s.act(ana, 'quote', K, { to, text: 'onze', media: ds })).body.error, 'midia-invalida', 'a quote with 11 photos')
+  t.is((await s.act(ana, 'quote', K, { to, text: 'dez', media: ten })).status, 200, 'a quote with 10 photos')
+
+  const listing = { kind: 'servico', title: 'Conserto de bicicleta', text: 'Na garagem', price: 5000, unit: 'hora', cat: 'reparos', place: { uf: 'SP', city: 'São Paulo', bairro: null } }
+  t.is((await s.act(ana, 'listing', K, { ...listing, media: ds.slice(0, 5) })).body.error, 'midia-invalida', 'a listing with 5 photos')
+  t.is((await s.act(ana, 'listing', K, { ...listing, media: ds.slice(0, 4) })).status, 200, 'a listing with 4 photos')
+
+  // The tombstones of one post: three, at most 4 ranges each.
+  const before = ctx.writer.info(K).length
+  const del = await s.act(ana, 'delete', K, { to })
+  t.is(del.status, 200, JSON.stringify(del.body))
+  t.is(ctx.writer.info(K).length, before + 3, 'three tombstones')
+  const tail = (await ctx.writer.readEntries(K)).slice(before).map((e) => e.record)
+  t.alike(tail.map((r) => [r.type, r.seq, r.media.length]), [['delete', post.body.seq, 4], ['delete', post.body.seq, 4], ['delete', post.body.seq, 2]])
+  t.is(new Set(tail.map((r) => r.at)).size, 1, 'one at')
+  t.alike(tail.flatMap((r) => r.media), ten.map((d) => ({ core: d.core, start: d.start, blocks: d.blocks })), 'every range once')
+})

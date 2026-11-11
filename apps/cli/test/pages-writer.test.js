@@ -18,7 +18,7 @@ const { createSeederCert, createIssuerCert, createIssuedCert, createUsernameReco
 const { createSwarm, joinAndFlush, topicFor, attachAdmission } = require('@varanda/core/lib/net')
 const { execFileSync } = require('node:child_process')
 const { WebSocketServer, createWebSocketStream } = require('ws')
-const { postRecord, followRecord, profileRecord, mediaCoreRecord, deleteRecord } = require('@varanda/core/lib/records')
+const { postRecord, followRecord, profileRecord, mediaCoreRecord, deleteRecord, deleteRecords } = require('@varanda/core/lib/records')
 const { signRoster, signClose, signMoved, signOrigin, issuerCountersign } = require('@varanda/core/lib/page')
 const { pageLifecycle, originOf } = require('@varanda/core/lib/page-lifecycle')
 const { applyDeletes } = require('@varanda/core/lib/deletion')
@@ -863,6 +863,58 @@ test('pages-writer: closePage unfollows, deletes, closes and clears; unpushed, t
   await media.ready()
   t.teardown(() => media.close().catch(() => {}))
   t.absent(await media.has(item.start), 'the media blocks are cleared')
+})
+
+// The close list the route builds (closeDeletes in ../lib/account/pages-routes.js).
+async function routeCloseList (writer, key) {
+  const unfollows = writer.follows(key).map((f) => followRecord({ key: f.key, on: false }))
+  const deletes = []
+  for (const e of applyDeletes(await writer.readEntries(key))) {
+    if (!e || e.deleted || e.seq < 1 || !e.record || e.record.type !== 'post') continue
+    const media = Array.isArray(e.record.media) ? e.record.media.map((d) => ({ core: d.core, start: d.start, blocks: d.blocks })) : undefined
+    deletes.push(...deleteRecords({ seq: e.seq, media }))
+  }
+  return { unfollows, deletes }
+}
+
+test('pages-writer: a close cut short never splits the tombstones of one post, so its retry frees every photo', async (t) => {
+  const ctx = setup()
+  const dir = tmpDir(t, 'varanda-account-')
+  const keys = openPageKeys({ dir, env: { VARANDA_PAGE_KEYS: PAGE_KEYS } })
+  let cutAfter = -1
+  // Refuses once, after the first batch of the close is saved (a refusal
+  // while it saves would pause the page instead), then lets the retry run.
+  const guard = () => {
+    if (cutAfter < 0 || JSON.parse(stateBytes(dir, page.key)).length <= cutAfter) return true
+    cutAfter = -1
+    return false
+  }
+  const writer = createPagesWriter({ dir, keys, association: ctx.association, guard })
+  t.teardown(() => writer.close(), { force: true })
+  const page = newPage(ctx, keys, 'dezfotos')
+  await writer.createPage(page.args)
+  for (let i = 0; i < 7; i++) await writer.setFollow(page.key, hex(crypto.keyPair().publicKey), true)
+  const items = []
+  for (let i = 0; i < 10; i++) {
+    const pic = jpeg(64, 64, 3000 + i)
+    items.push(await writer.mediaItem(page.key, { bytes: pic, mime: 'image/jpeg', width: 64, height: 64, sha256: sha(pic) }))
+  }
+  const post = await writer.append(page.key, [postRecord({ text: 'dez fotos', media: items })])
+
+  const first = await routeCloseList(writer, page.key)
+  t.is(first.unfollows.length + first.deletes.length, 10, '7 unfollows and 3 tombstones of one post')
+  cutAfter = writer.info(page.key).length
+  await t.exception(writer.closePage(page.key, { ...first, closeRecord: closeRecordFor(ctx, page) }), /indisponivel/, 'the second batch fails')
+  t.ok(writer.info(page.key).length > cutAfter, 'the first batch landed')
+
+  const retry = await routeCloseList(writer, page.key)
+  const res = await writer.closePage(page.key, { ...retry, closeRecord: closeRecordFor(ctx, page) })
+  t.is(res.closed, true)
+  await writer.close()
+
+  const raw = await readRaw(await openRaw(t, dir, page.key, b4a.from(page.key, 'hex')))
+  const freed = raw.filter((e) => e.record && e.record.type === 'delete' && e.record.seq === post.seq).flatMap((e) => e.record.media || [])
+  for (const it of items) t.ok(freed.some((r) => r.core === it.core && r.start === it.start && r.blocks === it.blocks), 'photo at ' + it.start + ' is on a tombstone')
 })
 
 test('pages-writer: a paused page gets no close or page-moved; its move still creates K2', async (t) => {
