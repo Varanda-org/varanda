@@ -302,6 +302,10 @@ const DISCOVERY_REBUILD_MS = 30 * 1000
 const DISCOVERY_VIEW_TTL_MS = 5 * 60 * 1000
 const DISCOVERY_VIEWS_KEPT = DISCOVERY_VIEW_TTL_MS / DISCOVERY_REBUILD_MS
 const DISCOVERY_VIEW_MAX_KEYS = Math.min(4096, MAX_INVENTORY)
+// The newest posts and reposts in effect each diary keeps for recentAt: a
+// deletion or a repost undo drops its time, so the discovery cursor never
+// carries the time of something taken back (all of them gone: 0).
+const DISCOVERY_RECENT_KEPT = 8
 
 function noop () {}
 
@@ -2191,6 +2195,7 @@ class Seeder {
       // effect the index scan read (ms, never later than the seeder clock
       // when it was read; 0 until then), `discoveryH` the tie-break hash.
       recentAt: 0,
+      recent: [],
       discoveryH: null,
       prepared: null,
       clearing: null,
@@ -3068,6 +3073,7 @@ class Seeder {
       }
     }
     entry.deleted.add(target)
+    this._forgetRecent(entry, (r) => r.seq === target)
     if (media) countTombstone(entry, seq, record, block)
     this._index.removeRecord(key, target)
     this._topics.removePost(key, target)
@@ -4832,7 +4838,7 @@ class Seeder {
             entry.indexPaused = true
             return
           }
-          if (record !== null && !removed) this._noteRecent(entry, record)
+          if (record !== null && !removed) this._noteRecent(entry, i, record)
         }
         entry.indexed = i + 1
         entry.indexReadFailures = 0
@@ -4965,12 +4971,34 @@ class Seeder {
   // post, or a repost in effect, moves the diary's recentAt forward. A date
   // in the future counts as now, so a diary cannot jump the queue by lying
   // about its clock for longer than the wait until that date.
-  _noteRecent (entry, record) {
-    if (record.type !== 'post' && !(record.type === 'repost' && record.on === true)) return
+  _noteRecent (entry, seq, record) {
+    const to = record.type === 'repost' && record.to ? record.to.author + ':' + record.to.seq : null
+    // A repost undo takes back the repost of the same target.
+    if (record.type === 'repost' && record.on !== true) {
+      this._forgetRecent(entry, (r) => r.to === to)
+      return
+    }
+    if (record.type !== 'post' && record.type !== 'repost') return
     const at = Date.parse(record.at)
     if (!Number.isFinite(at)) return
     const t = Math.max(0, Math.min(at, Date.now()))
-    if (Number.isSafeInteger(t) && t > entry.recentAt) entry.recentAt = t
+    if (!Number.isSafeInteger(t)) return
+    const list = entry.recent.filter((r) => r.seq !== seq && (to === null || r.to !== to))
+    list.push({ seq, t, to })
+    list.sort((a, b) => b.t - a.t)
+    if (list.length > DISCOVERY_RECENT_KEPT) list.length = DISCOVERY_RECENT_KEPT
+    entry.recent = list
+    entry.recentAt = list[0].t
+  }
+
+  // Drops the kept posts and reposts `gone` matches and sets recentAt to the
+  // newest one left (0 when none is).
+  _forgetRecent (entry, gone) {
+    if (!Array.isArray(entry.recent) || entry.recent.length === 0) return
+    const list = entry.recent.filter((r) => !gone(r))
+    if (list.length === entry.recent.length) return
+    entry.recent = list
+    entry.recentAt = list.length > 0 ? list[0].t : 0
   }
 
   // Whether a served diary may be offered: gated, admitted, not dropped,
