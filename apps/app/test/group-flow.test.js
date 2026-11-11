@@ -667,7 +667,7 @@ test('Grupo reconciles an uncertain photo post and binds its retry to the acting
 test('a stale pick is dropped and a long press on a photo opens the bubble actions', (t) => {
   const sheet = ui('AttachSheet.js')
   const gen = sheet.indexOf('const gen = genRef.current')
-  const pick = sheet.indexOf('picked = await pickImages()')
+  const pick = sheet.indexOf('picked = await pickImages(MAX_MEDIA_PER_MESSAGE)')
   t.ok(gen > 0 && gen < pick, 'the generation is taken before the picker opens')
   t.ok(sheet.includes('if (gen !== genRef.current) return\n    if (!Array.isArray(picked)'), 'a stale result is dropped')
   t.ok(sheet.includes('revokeUrl(thumb)\n        continue'), 'a thumbnail made for a stale item is released')

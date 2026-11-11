@@ -12,7 +12,7 @@
 // module by itself.
 
 import rpc from '@varanda/rpc'
-import { MAX_MEDIA_PER_POST, MEDIA_MIMES, gridLayout } from './media/plan.js'
+import { MAX_MEDIA_PER_MESSAGE, MEDIA_MIMES, gridLayout } from './media/plan.js'
 
 export const CHAT_MEDIA_MAX_WIDTH = 240
 export const CHAT_MEDIA_GAP = 2
@@ -108,7 +108,7 @@ export function itemSize (item) {
 // in order; [] when there is no media or the row cannot name its sender.
 export function chatMediaRefs (kind, row) {
   if (!row || typeof row !== 'object' || !Array.isArray(row.media)) return []
-  const media = row.media.slice(0, MAX_MEDIA_PER_POST)
+  const media = row.media.slice(0, MAX_MEDIA_PER_MESSAGE)
   if (kind === 'dm') {
     if (typeof row.from !== 'string' || typeof row.id !== 'string') return []
     return media.map((item, index) => ({ kind: 'dm', from: row.from, id: row.id, index, item }))
