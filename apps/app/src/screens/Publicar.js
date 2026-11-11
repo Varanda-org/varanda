@@ -69,6 +69,7 @@ import { validDescriptor } from '../media/fetch'
 import { pickImages } from '../media/attach'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { encodeFile } from '../media/encode'
+import { moveById } from '../photoOrder'
 import { Btn, ErrorText, Soft, errorText, useAction } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { EmojiPicker } from '../ui/EmojiPicker'
@@ -1440,6 +1441,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     busy={held}
                     onRemove={() => removeItems([item.id])}
                     onRetry={send}
+                    onMoveBefore={() => setItems((list) => moveById(list, item.id, -1))}
+                    onMoveAfter={() => setItems((list) => moveById(list, item.id, 1))}
                   />
                 ))}
               </View>
@@ -1548,39 +1551,111 @@ function Chip ({ label, on, disabled, onPress }) {
 }
 
 // One attached item: the thumbnail of the encoded bytes, a remove button, a
-// progress bar while uploading and the retry line after a failure.
-function Thumb ({ item, index, count, busy, onRemove, onRetry }) {
+// progress bar while uploading and the retry line after a failure. With two
+// or more photos, arrows move this one earlier or later: the first is the
+// cover, so it sets the carousel frame and the Mural tile.
+function Thumb ({ item, index, count, busy, onRemove, onRetry, onMoveBefore, onMoveAfter }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const label = 'foto ' + (index + 1) + ' de ' + count
   const failed = item.status === 'failed'
   const invalid = item.status === 'invalid'
   const showBar = item.status === 'uploading'
+  const canMove = count >= 2
+  const cover = canMove && index === 0
+  // On the web, a move takes the pressed arrow out of the page (React moves
+  // the photo, or the arrow disappears at an end) and the sheet's focus trap
+  // sends the focus to Cancelar, where a second Enter would discard the draft.
+  // The focus comes back to this photo's arrow, the other one at an end.
+  // Native nodes have no activeElement, so nothing happens there.
+  const beforeRef = useRef(null)
+  const afterRef = useRef(null)
+  const refocus = useRef(0)
+  const hadFocus = (ref) => {
+    const node = ref.current
+    const doc = node && node.ownerDocument
+    return !!(doc && doc.activeElement && doc.activeElement === node)
+  }
+  useEffect(() => {
+    const dir = refocus.current
+    refocus.current = 0
+    if (!dir) return
+    const first = dir < 0 ? beforeRef.current : afterRef.current
+    const target = first || (dir < 0 ? afterRef.current : beforeRef.current)
+    if (target && typeof target.focus === 'function') target.focus()
+  }, [index])
+  const move = (dir) => {
+    refocus.current = hadFocus(dir < 0 ? beforeRef : afterRef) ? dir : 0
+    if (dir < 0) onMoveBefore()
+    else onMoveAfter()
+  }
   return (
-    <View style={styles.thumbWrap}>
-      <View style={styles.thumb} accessible accessibilityRole='image' accessibilityLabel={label}>
-        {item.thumb
-          ? <Image source={{ uri: item.thumb }} style={styles.thumbImg} resizeMode='cover' />
-          : <View style={[styles.thumbImg, styles.thumbEmpty]}><Icon name='image' size={20} color={colors.soft} /></View>}
-        {showBar
-          ? (
-            <View style={styles.bar}>
-              <View style={[styles.barFill, { width: Math.round(item.progress * 100) + '%' }]} />
-            </View>
-            )
-          : null}
+    <View style={[styles.thumbWrap, canMove && styles.thumbWrapWide]}>
+      {/* The X stays on the 80 image. The wider wrap is only for the arrows. */}
+      <View style={styles.thumbFrame}>
+        <View style={styles.thumb} accessible accessibilityRole='image' accessibilityLabel={cover ? label + ', capa' : label}>
+          {item.thumb
+            ? <Image source={{ uri: item.thumb }} style={styles.thumbImg} resizeMode='cover' />
+            : <View style={[styles.thumbImg, styles.thumbEmpty]}><Icon name='image' size={20} color={colors.soft} /></View>}
+          {showBar
+            ? (
+              <View style={styles.bar}>
+                <View style={[styles.barFill, { width: Math.round(item.progress * 100) + '%' }]} />
+              </View>
+              )
+            : null}
+          {cover
+            ? <Text style={styles.capa} accessibilityElementsHidden importantForAccessibility='no'>capa</Text>
+            : null}
+        </View>
+        <Pressable
+          accessibilityRole='button'
+          accessibilityLabel={'remover ' + label}
+          accessibilityState={{ disabled: busy }}
+          disabled={busy}
+          onPress={onRemove}
+          hitSlop={6}
+          style={styles.remove}
+        >
+          <Icon name='x' size={14} color='#ffffff' />
+        </Pressable>
       </View>
-      <Pressable
-        accessibilityRole='button'
-        accessibilityLabel={'remover ' + label}
-        accessibilityState={{ disabled: busy }}
-        disabled={busy}
-        onPress={onRemove}
-        hitSlop={6}
-        style={styles.remove}
-      >
-        <Icon name='x' size={14} color='#ffffff' />
-      </Pressable>
+      {canMove
+        ? (
+          <View style={styles.moveRow}>
+            {index > 0
+              ? (
+                <Pressable
+                  accessibilityRole='button'
+                  accessibilityLabel={'mover ' + label + ' para antes'}
+                  accessibilityState={{ disabled: busy }}
+                  disabled={busy}
+                  onPress={() => move(-1)}
+                  ref={beforeRef}
+                  style={styles.move}
+                >
+                  <Icon name='chevron-left' size={18} color={colors.soft} />
+                </Pressable>
+                )
+              : null}
+            {index < count - 1
+              ? (
+                <Pressable
+                  accessibilityRole='button'
+                  accessibilityLabel={'mover ' + label + ' para depois'}
+                  accessibilityState={{ disabled: busy }}
+                  disabled={busy}
+                  onPress={() => move(1)}
+                  ref={afterRef}
+                  style={[styles.move, styles.moveAfter]}
+                >
+                  <Icon name='chevron-right' size={18} color={colors.soft} />
+                </Pressable>
+                )
+              : null}
+          </View>
+          )
+        : null}
       {failed
         ? (
           <Pressable accessibilityRole='button' accessibilityLabel={label + ': falhou, tentar de novo'} disabled={busy} onPress={onRetry} hitSlop={4}>
@@ -1597,6 +1672,24 @@ const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1 },
   thumbs: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, paddingTop: 10, paddingLeft: 68, paddingRight: 16 },
   thumbWrap: { width: 80, gap: 4 },
+  thumbWrapWide: { width: 88 },
+  thumbFrame: { width: 80 },
+  capa: {
+    position: 'absolute',
+    left: 6,
+    bottom: 6,
+    paddingHorizontal: 4,
+    borderRadius: 6,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    color: '#ffffff',
+    fontSize: 11,
+    lineHeight: 14
+  },
+  moveRow: { flexDirection: 'row' },
+  move: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
+  // On the cover there is no "antes" arrow; "depois" keeps its right-hand place.
+  moveAfter: { marginLeft: 'auto' },
   thumb: { width: 80, height: 80, borderRadius: 12, overflow: 'hidden', backgroundColor: colors.skeleton },
   thumbImg: { ...StyleSheet.absoluteFillObject },
   thumbEmpty: { alignItems: 'center', justifyContent: 'center' },
