@@ -2047,6 +2047,8 @@ PODS:
   - ShareIntake (0.1.0):
     - ExpoModulesCore
   - UMAppLoader (55.0.5)
+  - VideoPrep (0.1.0):
+    - ExpoModulesCore
   - Yoga (0.0.0)
 
 DEPENDENCIES:
@@ -2151,6 +2153,7 @@ DEPENDENCIES:
   - ReactNativeDependencies (from `../../../node_modules/react-native/third-party-podspecs/ReactNativeDependencies.podspec`)
   - ShareIntake (from `../modules/share-intake/ios`)
   - UMAppLoader (from `../../../node_modules/unimodules-app-loader/ios`)
+  - VideoPrep (from `../modules/video-prep/ios`)
   - Yoga (from `../../../node_modules/react-native/ReactCommon/yoga`)
 
 SPEC REPOS:
@@ -2361,6 +2364,8 @@ EXTERNAL SOURCES:
     :path: "../modules/share-intake/ios"
   UMAppLoader:
     :path: "../../../node_modules/unimodules-app-loader/ios"
+  VideoPrep:
+    :path: "../modules/video-prep/ios"
   Yoga:
     :path: "../../../node_modules/react-native/ReactCommon/yoga"
 
@@ -2468,6 +2473,7 @@ SPEC CHECKSUMS:
   SDWebImageWebPCoder: 0e06e365080397465cc73a7a9b472d8a3bd0f377
   ShareIntake: ed8445713adfb691c24a941ad8827f33c2054083
   UMAppLoader: 045699ef1cc6afda399a5c78bde728f23bcce213
+  VideoPrep: d697316a7a76115ea3b6e263e529b42722d4fa2f
   Yoga: 3a3ee5afb97f3a990839cfae6092b0540c7441a4
 
 PODFILE CHECKSUM: 73745575230cae285b00c249a33da52d7ce8c04c
