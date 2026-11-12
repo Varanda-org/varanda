@@ -244,6 +244,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Alterado
 
+- Notas de voz recebidas passam a ser conferidas como os vídeos: cada caixa MP4 precisa estar na lista do que a verificação lê, e as tabelas de grupos de amostras precisam caber na própria caixa. Quem envia continua mandando qualquer gravação, porque a limpeza de metadados troca as outras caixas por caixas vazias do mesmo tamanho. Uma nota antiga com caixa fora da lista aparece como indisponível.
 - Operadores: com vídeos curtos, os núcleos de mídia e o depósito de blobs crescem mais rápido (até 8 MiB mais a capa por publicação, até 4 MiB por momento). Ainda não há rotação: um núcleo cheio continua em 256 MiB, e o depósito de blobs continua no teto `--blob-bytes` (padrão 2 GiB), por 7 dias.
 - Operadores: atualizem os semeadores e o serviço de conta antes do app que publica vídeos curtos em posts e momentos; versões antigas omitem essas publicações dos índices e das contagens.
 - Dá para assistir vídeos curtos em posts e momentos: a capa aparece em A Rua, o vídeo só baixa ao toque e os momentos reproduzem o vídeo. Detalhes em `docs/verification.md` seção 182.
