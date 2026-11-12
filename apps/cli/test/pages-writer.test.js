@@ -8,6 +8,7 @@ const http = require('node:http')
 const path = require('node:path')
 const nodeCrypto = require('node:crypto')
 const test = require('brittle')
+const { videoBounds } = require('@varanda/rpc')
 const b4a = require('b4a')
 const Corestore = require('corestore')
 const Hypercore = require('hypercore')
@@ -110,6 +111,52 @@ function jpeg (width, height, size) {
   return out
 }
 
+// One video sample with complete container tables, so refusal cannot be
+// explained by an invalid MPEG-4 container.
+function mp4 (width, height) {
+  const u32 = (n) => {
+    const b = Buffer.alloc(4)
+    b.writeUInt32BE(n)
+    return b
+  }
+  const box = (type, ...parts) => {
+    const body = Buffer.concat(parts)
+    return Buffer.concat([u32(body.length + 8), Buffer.from(type), body])
+  }
+  const time = (size) => {
+    const b = Buffer.alloc(size)
+    b.writeUInt32BE(1000, 12)
+    b.writeUInt32BE(3000, 16)
+    return b
+  }
+  const tkhd = Buffer.alloc(84)
+  tkhd.writeUInt32BE(7, 0)
+  tkhd.writeUInt32BE(1, 12)
+  tkhd.writeUInt32BE(3000, 20)
+  for (const offset of [40, 56]) tkhd.writeUInt32BE(0x10000, offset)
+  tkhd.writeUInt32BE(0x40000000, 72)
+  tkhd.writeUInt32BE(width * 0x10000, 76)
+  tkhd.writeUInt32BE(height * 0x10000, 80)
+  const entry = Buffer.alloc(78)
+  entry.writeUInt16BE(1, 6)
+  entry.writeUInt16BE(width, 24)
+  entry.writeUInt16BE(height, 26)
+  const avcC = box('avcC', Buffer.from([1, 100, 0, 40, 255, 225, 0, 4, 103, 100, 0, 40, 1, 0, 1, 104]))
+  const ftyp = box('ftyp', Buffer.from('isom'), u32(0), Buffer.from('isommp41'))
+  const stbl = box('stbl',
+    box('stsd', u32(0), u32(1), box('avc1', entry, avcC)),
+    box('stts', u32(0), u32(1), u32(1), u32(3000)),
+    box('stsz', u32(0), u32(10), u32(1)),
+    box('stsc', u32(0), u32(1), u32(1), u32(1), u32(1)),
+    box('stco', u32(0), u32(1), u32(ftyp.length + 8)))
+  const minf = box('minf', box('vmhd', u32(1), Buffer.alloc(8)),
+    box('dinf', box('dref', u32(0), u32(1), box('url ', u32(1)))), stbl)
+  const mdia = box('mdia', box('mdhd', time(24)),
+    box('hdlr', Buffer.alloc(8), Buffer.from('vide'), Buffer.alloc(13)), minf)
+  return Buffer.concat([ftyp, box('mdat', Buffer.alloc(10, 1)),
+    box('moov', box('mvhd', time(100)), box('trak', box('tkhd', tkhd), mdia))])
+}
+
 function sha (bytes) {
   return nodeCrypto.createHash('sha256').update(bytes).digest('hex')
 }
@@ -200,6 +247,15 @@ test('pages-writer: a page is created, pushed, admitted and served; media, follo
   const truncated = big.subarray(0, 12)
   await t.exception(writer.mediaItem(page.key, { bytes: truncated, mime: 'image/jpeg', width: 1200, height: 800, sha256: sha(truncated) }), /midia-invalida/, 'truncated jpeg')
   await t.exception(writer.mediaItem(page.key, { bytes: big, mime: 'image/jpeg', width: 10, height: 800, sha256: sha(big) }), /midia-invalida/, 'size mismatch')
+  const video = mp4(1200, 800)
+  t.alike(videoBounds(video), { width: 1200, height: 800, ms: 3000, audio: false }, 'a valid short video container')
+  const beforeVideo = writer.info(page.key).length
+  const beforeItems = writer.items(page.key)
+  for (const bytes of [video, big]) {
+    await t.exception(writer.mediaItem(page.key, { bytes, mime: 'video/mp4', width: 1200, height: 800, sha256: sha(bytes) }), /midia-invalida/, 'video MIME is refused even with image bytes')
+  }
+  t.is(writer.info(page.key).length, beforeVideo, 'a refused video appends no record')
+  t.alike(writer.items(page.key), beforeItems, 'a refused video stores no media item')
   const notPng = b4a.from('not a png at all')
   await t.exception(writer.mediaItem(page.key, { bytes: notPng, mime: 'image/png', width: 1, height: 1, sha256: sha(notPng) }), /midia-invalida/, 'png magic mismatch')
   t.is(writer.info(page.key).length, lengthBefore, 'refusals append nothing')

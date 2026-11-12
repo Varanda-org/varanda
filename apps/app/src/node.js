@@ -68,7 +68,9 @@
 // caller shows its errors (errorText). When the handle has them, also the
 // chat media calls (client/webnode.native.js, client/browser.js mediaOf):
 // putDm(args), putMoment(args), read(ref), forgetReadFile(name),
-// clearReadFiles(); a missing one means that capability is absent.
+// clearReadFiles(); a missing one means that capability is absent. `video`
+// is true only when the handle reports media.video === true (it uploads and
+// reads a short video); absent otherwise.
 //
 // `followsVersion` is bumped once per `follows.changed` event (the follows
 // of the own diary changed, possibly on another device) and `followCount` is
@@ -489,6 +491,8 @@ function LiveNodeProvider ({ children }) {
   // Which chat media calls the handle has (putDm, putMoment, read,
   // forgetReadFile, clearReadFiles); decided once per connection like hasMedia.
   const [mediaCaps, setMediaCaps] = useState('')
+  // The handle's media.video flag; decided with hasMedia.
+  const [mediaVideo, setMediaVideo] = useState(false)
   // The handle has follows.legacy / confirmLegacy (browser node).
   const [hasLegacy, setHasLegacy] = useState(false)
   // follows.changed (see the header): the version never goes back.
@@ -818,6 +822,7 @@ function LiveNodeProvider ({ children }) {
       setHasPasskey(identity !== null)
       setHasMedia(identity !== null && conn.media != null && typeof conn.media.upload === 'function')
       setMediaCaps(identity !== null && conn.media != null ? CHAT_MEDIA_CALLS.filter((k) => typeof conn.media[k] === 'function').join(',') : '')
+      setMediaVideo(identity !== null && conn.media != null && conn.media.video === true)
       setHasLegacy(identity !== null && conn.follows != null && typeof conn.follows.legacy === 'function' && typeof conn.follows.confirmLegacy === 'function')
       noteOwner(pk)
       setPkStatus(pk)
@@ -1621,8 +1626,9 @@ function LiveNodeProvider ({ children }) {
         return conn.media[k](args)
       }
     }
+    if (mediaVideo) out.video = true
     return out
-  }, [hasPasskey, hasMedia, unlocked, mediaUpload, mediaCaps])
+  }, [hasPasskey, hasMedia, unlocked, mediaUpload, mediaCaps, mediaVideo])
 
   const [legacyKeys, setLegacyKeys] = useState(null)
   const legacyCheckedRef = useRef(null)

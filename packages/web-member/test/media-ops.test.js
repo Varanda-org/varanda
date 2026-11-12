@@ -20,7 +20,7 @@ const { createHash } = require('node:crypto')
 const { testnet } = require('./helpers/net')
 const { createCert, createModeratorCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
-const { MEDIA_BLOCK_BYTES, MAX_MEDIA_BLOCKS, followRecord, profileRecord, profileRecords, latestProfile, decodeBlock } = require('@varanda/core/lib/records')
+const { MEDIA_BLOCK_BYTES, MAX_MEDIA_BLOCKS, followRecord, profileRecord, profileRecords, latestProfile, decodeBlock, validVideoDescriptor } = require('@varanda/core/lib/records')
 const { validateMediaHeader } = require('@varanda/core/lib/media')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { idbNodeStorage, memoryNodeStorage } = require('../lib/node-storage')
@@ -915,4 +915,150 @@ test('follows: own key and blocked author rules unchanged', async (t) => {
   await t.exception(() => ops.followAdd(m.ctx, blocked), /autor bloqueado/)
   t.alike(await store.readFollowsPending(m.storage), [], 'refused changes are not queued')
   t.alike(await store.readFollows(m.storage), [])
+})
+
+// A synthetic short video (the shape of packages/rpc/test/video-bounds.test.js
+// builders): ftyp, moov (mvhd, one H.264 avc1 track), mdat. `ms` is the
+// samples' duration at timescale 1000, in 30 samples of 10 bytes. type
+// 'hvc1' gives an HEVC entry; udta adds the place tag a camera writes.
+function mp4 ({ ms = 3000, width = 640, height = 360, type = 'avc1', udta = false } = {}) {
+  const be16 = (v) => [(v >>> 8) & 0xff, v & 0xff]
+  const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
+  const ascii = (str) => Array.from(str, (c) => c.charCodeAt(0))
+  const zeros = (n) => new Array(n).fill(0)
+  const box = (kind, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(kind), ...body] }
+  const full = (kind, ...parts) => box(kind, [0, 0, 0, 0], ...parts)
+  const n = 30
+  const q = Math.floor(ms / n)
+  const runs = [[n - 1, q], [1, ms - (n - 1) * q]]
+  const one = 0x10000
+  const avcC = box('avcC', [1, 100, 0, 40, 0xff, 0xe1], be16(6), [0x67, 100, 0, 40, 0xac, 0xd9], [1], be16(4), [0x68, 0xeb, 0xe3, 0xcb])
+  const entry = box(type, zeros(6), be16(1), zeros(16), be16(width), be16(height), be32(0x480000), be32(0x480000), be32(0), be16(1),
+    [4, ...ascii('x264'), ...zeros(27)], be16(0x18), be16(0xffff), type === 'avc1' ? avcC : box('hvcC', zeros(23)), box('pasp', be32(1), be32(1)))
+  const moovOf = (offset) => box('moov',
+    full('mvhd', be32(0), be32(0), be32(1000), be32(ms), zeros(80)),
+    box('trak',
+      box('tkhd', [0, 0, 0, 7], be32(0), be32(0), be32(1), be32(0), be32(ms), zeros(16),
+        ...[one, 0, 0, 0, one, 0, 0, 0, 0x40000000].map(be32), be32(width * one), be32(height * one)),
+      box('mdia',
+        full('mdhd', be32(0), be32(0), be32(1000), be32(ms), [0x55, 0xc4, 0, 0]),
+        full('hdlr', be32(0), ascii('vide'), zeros(12), [0]),
+        box('minf', box('vmhd', [0, 0, 0, 1], zeros(8)), box('dinf', full('dref', be32(1), box('url ', [0, 0, 0, 1]))),
+          box('stbl', full('stsd', be32(1), entry), full('stts', be32(runs.length), ...runs.map(([c, d]) => [...be32(c), ...be32(d)])),
+            full('stsc', be32(1), be32(1), be32(n), be32(1)), full('stsz', be32(0), be32(n), ...new Array(n).fill(be32(10))),
+            full('stco', be32(1), be32(offset)))))),
+    ...(udta ? [box('udta', box('©xyz', be16(18), be16(0x15c7), ascii('+12.3456-045.6789/')))] : []))
+  const head = box('ftyp', ascii('isom'), be32(0x200), ascii('isom'), ascii('avc1'))
+  const offset = head.length + moovOf(0).length + 8
+  return new Uint8Array([...head, ...moovOf(offset), ...box('mdat', new Array(n * 10).fill(1))])
+}
+
+// A baseline JPEG header of w x h (SOF0, three components), then the scan.
+function jpeg (w, h) {
+  return b4a.from([0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, h >> 8, h & 0xff, w >> 8, w & 0xff, 3, 1, 0x11, 0, 2, 0x11, 1, 3, 0x11, 1, 0xff, 0xda, 0, 2, 0xff, 0xd9])
+}
+
+// A minimal audio-only MPEG-4 file (dm.test.js m4a): a voice note.
+function m4a (ms = 3000) {
+  const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
+  const ascii = (str) => Array.from(str, (c) => c.charCodeAt(0))
+  const box = (type, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(type), ...body] }
+  const trak = box('trak', box('mdia', box('mdhd', new Array(12).fill(0), be32(1000), be32(0), [0, 0, 0, 0]), box('hdlr', [0, 0, 0, 0], be32(0), ascii('soun'), be32(0), be32(0), be32(0), [0]), box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 25, 0, 1, 0, 4, 17, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 2, 18, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(1), be32(ms)), box('stsz', [0, 0, 0, 0], be32(1), be32(1)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(1), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))))
+  return b4a.from([
+    ...box('ftyp', ascii('M4A '), be32(0), ascii('isom')),
+    ...box('moov', box('mvhd', [0, 0, 0, 0], be32(0), be32(0), be32(1000), be32(ms), new Array(80).fill(0)), trak),
+    ...box('mdat', [9])
+  ])
+}
+
+// Commits bytes as a video into the own (declared) media core: the bytes
+// are not checked here (the session checks them before the commit).
+async function commitVideo (m, bytes, { width = 640, height = 360, ms = 3000, ctx = m.ctx } = {}) {
+  const { core, declared } = await ops.mediaPrepare(m.ctx)
+  if (!declared) await ops.declareMediaCore(m.ctx, core)
+  const sha256 = createHash('sha256').update(bytes).digest('hex')
+  return ops.mediaCommitVideo(ctx, { blocks: blocksOf(b4a.from(bytes)), sha256, width, height, ms })
+}
+
+test('mediaCommitVideo: a video descriptor with its duration; bad arguments refused before any append', async (t) => {
+  await testnet(t, 1)
+  const m = await member()
+  const bytes = mp4()
+  const coreHex = hex(m.mediaKeyPair.publicKey)
+  await t.exception(() => commitVideo(m, bytes, { ctx: m.locked }), /identidade bloqueada/, 'locked')
+  await t.exception(() => commitVideo(m, bytes, { ctx: { ...m.ctx, mediaKeyPair: null } }), /identidade bloqueada/, 'no media key pair')
+  for (const [label, over] of [
+    ['ms 0', { ms: 0 }],
+    ['ms 30001', { ms: 30001 }],
+    ['ms null', { ms: null }],
+    ['a fractional ms', { ms: 1.5 }],
+    ['a side of 1921', { width: 1921 }],
+    ['over the pixel cap', { width: 1920, height: 1200 }],
+    ['a zero height', { height: 0 }]
+  ]) {
+    await t.exception(() => commitVideo(m, bytes, over), /mídia inválida/, label)
+  }
+  await t.exception(() => ops.mediaCommitVideo(m.ctx, { blocks: blocksOf(b4a.from(bytes)), sha256: item(10).sha256, width: 640, height: 360, ms: 3000 }), /mídia inválida/, 'SHA mismatch')
+  const ro = await store.openMediaCoreReadOnly(m.storage, coreHex)
+  t.is(ro.length, 1, 'header only: nothing appended by a refused commit')
+  await ro.close()
+
+  const d = await commitVideo(m, bytes, { ms: 3000 })
+  t.alike(d, { core: coreHex, mime: 'video/mp4', start: 1, blocks: 1, bytes: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex'), width: 640, height: 360, ms: 3000 })
+  t.ok(validVideoDescriptor(d), 'a valid video descriptor')
+})
+
+test('a video post: the pair\'s bytes decide at publish; reversed, forged and listing pairs are refused', async (t) => {
+  await testnet(t, 1)
+  const m = await member()
+  const poster = await commitImage(m, jpeg(640, 360), { mime: 'image/jpeg', width: 640, height: 360 })
+  const video = await commitVideo(m, mp4())
+  const { seq } = await ops.postCreate(m.ctx, { text: '', media: [poster, video] })
+  const reply = await ops.postReply(m.ctx, { to: { author: m.ownHex, seq }, text: 'resposta', media: [poster, video] })
+  const quote = await ops.postQuote(m.ctx, { to: { author: m.ownHex, seq }, text: 'citação', media: [poster, video] })
+  const { entries } = await ops.logRead(m.locked, {})
+  for (const s of [seq, reply.seq, quote.seq]) t.alike(entries[s].record.media, [poster, video], 'the pair intact at ' + s)
+  const length = await diaryLength(m)
+
+  const png = await commitImage(m, webp(640, 360), { mime: 'image/jpeg', width: 640, height: 360 })
+  const imageAsVideo = await commitVideo(m, jpeg(640, 360))
+  const voiceAsVideo = await commitVideo(m, m4a())
+  const hevc = await commitVideo(m, mp4({ type: 'hvc1' }))
+  const posterOther = await commitImage(m, jpeg(320, 180), { mime: 'image/jpeg', width: 640, height: 360 })
+  const longer = await commitVideo(m, mp4({ ms: 3000 }), { ms: 3001 })
+  const wider = await commitVideo(m, mp4(), { width: 641 })
+  for (const [label, media] of [
+    ['the pair reversed', [video, poster]],
+    ['a poster that is not a JPEG', [png, video]],
+    ['a poster whose sides are not its descriptor\'s', [posterOther, video]],
+    ['a video range holding an image', [poster, imageAsVideo]],
+    ['a video range holding a voice note', [poster, voiceAsVideo]],
+    ['an HEVC video', [poster, hevc]],
+    ['a forged ms', [poster, longer]],
+    ['forged sides', [poster, wider]],
+    ['a forged ms on the stored video', [poster, { ...video, ms: 3001 }]],
+    ['two videos', [video, video]]
+  ]) {
+    await t.exception(() => ops.postCreate(m.ctx, { text: '', media }), /mídia inválida/, 'post: ' + label)
+  }
+  await t.exception(() => ops.postReply(m.ctx, { to: { author: m.ownHex, seq }, text: 'x', media: [poster, longer] }), /mídia inválida/, 'reply: a forged ms')
+  await t.exception(() => ops.postQuote(m.ctx, { to: { author: m.ownHex, seq }, text: 'x', media: [poster, imageAsVideo] }), /mídia inválida/, 'quote: a video range holding an image')
+  const listing = { kind: 'produto', title: 'Bicicleta aro 26', text: 'Pouco usada', price: 25000, unit: null, cat: 'esporte', place: { uf: 'SP', city: 'São Paulo', bairro: null } }
+  await t.exception(() => ops.listingCreate(m.ctx, { ...listing, media: [poster, video] }), /mídia inválida/, 'a listing never takes the pair')
+  await t.exception(() => ops.listingCreate(m.ctx, { ...listing, media: [video] }), /mídia inválida/, 'nor a video alone')
+  t.is(await diaryLength(m), length, 'nothing appended by a refused post or listing')
+})
+
+test('video limits: records.js, the rpc limits and video-bounds agree', (t) => {
+  const records = require('@varanda/core/lib/records')
+  const rpc = require('@varanda/rpc')
+  const want = { MAX_VIDEO_MS: 30000, MAX_MOMENT_VIDEO_MS: 15000, MAX_VIDEO_DIMENSION: 1920, MAX_VIDEO_PIXELS: 2073600, MAX_MOMENT_VIDEO_BYTES: 4194304, VIDEO_MIME: 'video/mp4' }
+  for (const [name, value] of Object.entries(want)) t.alike([records[name], rpc[name]], [value, value], name)
+  // video-bounds keeps its own copies (not exported by the package): its
+  // answers at each edge are the same bounds.
+  const { videoBounds } = rpc
+  t.ok(videoBounds(mp4({ ms: 30000 })) && !videoBounds(mp4({ ms: 30001 }), { metadata: true }), '30000 ms')
+  t.ok(videoBounds(mp4({ ms: 15000 }), { maxMs: 15000 }) && !videoBounds(mp4({ ms: 15001 }), { maxMs: 15000 }), '15000 ms for a momento')
+  t.ok(videoBounds(mp4({ width: 1920, height: 1080 })) && !videoBounds(mp4({ width: 1921, height: 360 })), '1920 a side')
+  t.ok(videoBounds(mp4({ width: 1080, height: 1920 })) && !videoBounds(mp4({ width: 1920, height: 1081 })), '2073600 pixels')
 })
