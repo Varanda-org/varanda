@@ -8035,3 +8035,64 @@ Na PWA instalada a partir da origem hospedada, no Chrome do Android, com o worke
 - Um link compartilhado só ganha prévia depois do toque em "Mostrar prévia do link" ou de uma edição no texto.
 - Na web, uma foto acima de 16384 px num lado ou de 100 megapixels é recusada com "foto grande demais". Um PNG ou WebP animado com mais de 300 quadros não é lido e é recusado com "não foi possível abrir a foto". Um GIF passa pelos mesmos limites de mídia de uma imagem recebida (cada quadro, o número de quadros e o total de pixels), também no Android e no iOS; acima deles, "imagem grande demais".
 - No Android e no iOS, Sair e Recomeçar não apagam um compartilhamento marcado com um horário à frente do relógio do aparelho, a não ser o mais novo, nem um que esteja sendo gravado naquele milissegundo.
+
+## 181. Vídeos curtos em publicações e momentos
+
+Uma publicação, resposta ou citação aceita exatamente o par `[capa JPEG, vídeo MP4]`, com um vídeo de até 30 segundos e 8 MiB, sem fotos adicionais nem prévia de link. Um momento aceita uma foto, um GIF ou um vídeo de até 15 segundos e 4 MiB, sem par de capa; continua visível por 24 horas e o blob expira em 7 dias. Os dois formatos de vídeo limitam cada lado a 1920 e a área a 2073600 pixels. Não mudam os tetos de páginas, a retenção, os limites de conversas nem a regra de nunca repetir automaticamente um pedido que altera estado.
+
+Não há comparação de fotos, GIFs ou vídeos com listas de hashes de material ilegal conhecido antes de exibir ou repassar.
+
+Os controles são os limites, denúncia e bloqueio, com toda publicação denunciada que contém mídia destinada a uma pessoa. A IA não vê imagens nem vídeos. O bloqueio purga os núcleos de mídia do diário, mas não os blobs de momentos; quem reteve o descritor público pode abri-los até expirarem. Os riscos residuais estão em `protocol.md`, seção 8: núcleo de 256 MiB sem rotação, vídeo de até 8 MiB mais capa, H.264 não inspecionado, SEI não apagado, contêineres não percorridos e decodificador da plataforma recebendo bytes de pares.
+
+Cobertura automatizada:
+
+- `packages/core/test/records.test.js` e `packages/rpc/test/methods.test.js`: constantes e paridade dos validadores; chaves exatas; ordem e comprimento do par; JPEG obrigatório na capa; ausência de vídeo solto, mistura com fotos ou prévia; limites de duração, bytes, lados e área; ramo de vídeo do momento com 129 pedaços; recusa de vídeo nas mensagens diretas.
+- `packages/rpc/test/video-bounds.test.js`: MP4 sintético, H.264 com ou sem AAC, rotação, perfis e níveis, referências locais, durações de amostras e cabeçalhos, edições e B-frames, pedaços dentro de `mdat`, truncamentos, cifragem e fragmentação recusadas, remoção de metadados de contêiner e esquemas de codificadores. Os casos de AVAssetWriter são sintéticos: não comprovam compatibilidade com um arquivo de câmera real.
+- `packages/rpc/test/sizes.test.js`: o par máximo é menor que dez descritores de imagem; os máximos de páginas permanecem.
+- `packages/core/test/moments.test.js`: leitura e cópia de duração de momento em vídeo, além das regras existentes de expiração.
+- `packages/core/test/deletion.test.js`: capa e vídeo continuam referenciados enquanto o post está vivo.
+- `packages/web-member/test/session-media.test.js`: envio só da cópia sem metadados, recusa de vídeo inválido antes de gravar e `MEDIA_FULL` sem repetição do append.
+- `packages/web-member/test/media-ops.test.js`: descritor com duração, par em publicação, resposta e citação, recusa de pares invertidos ou forjados e de vídeo na Feira; paridade dos limites entre registros, RPC e contêiner.
+- `packages/web-member/test/e2e-media.test.js`: par recebido por outro nó, exclusão dos dois intervalos de mídia e recusa de pares forjados.
+- `packages/web-member/test/moments-e2e.test.js`: envio, criação e leitura de momento em vídeo com duração, remoção de metadados, limites de bytes e duração e indisponibilidade de blobs com conteúdo ou duração diferentes do descritor.
+- `packages/web-member/test/dm.test.js`: recusa de vídeo em mensagens diretas, inclusive de faixa de vídeo numa nota de voz.
+- `apps/app/test/identityInstall.test.js`: envio de tipo e duração ao nó, leitura estrita de dimensões e duração dos bytes, recusa de vídeo inválido sem gravar arquivo e recusa de nome com caminho.
+- `apps/app/test/webnodeHandle.test.js`: transporte de tipo e duração no IPC, capacidade de vídeo e leitura na web sem medir o vídeo como imagem.
+- `packages/core/test/group-media.test.js`: recusa de descritor de vídeo e do par de publicação em grupos.
+- `apps/cli/test/commands.test.js`: marcador `[vídeo]` em `feed` e `log`, com o par preservado em JSON.
+- `apps/cli/test/panel.test.js`: aviso de fotos ou vídeo no painel de moderação.
+- `apps/cli/test/pages-writer.test.js` e `apps/cli/test/account-pages.test.js`: recusa de vídeo em Páginas, inclusive de MP4 válido e de imagem com MIME de vídeo, sem gravar registro nem item de mídia.
+- `apps/cli/test/ai-triage.test.js`: mídia, inclusive vídeo, fica para decisão humana.
+- `apps/cli/test/ai-read-post.test.js`: par de vídeo reconhecido como mídia, com ou sem legenda, e denúncia mantida aberta para uma pessoa.
+
+Os testes usam mídia sintética e DHT local em `127.0.0.1`, sem baixar mídia, usar a DHT pública ou guardar arquivos binários de mídia como fixtures.
+
+Conferência das constantes e dos conjuntos de chaves:
+
+```sh
+rg -n 'VIDEO_MIME|MAX_VIDEO_MS|MAX_VIDEO_DIMENSION|MAX_VIDEO_PIXELS|MAX_MOMENT_VIDEO_MS|MAX_MOMENT_VIDEO_BYTES|VIDEO_DESCRIPTOR_KEYS|DESCRIPTOR_KEYS|MOMENT_MEDIA_KEYS|MOMENT_KEYS|MEDIA_BLOCK_BYTES|MAX_MEDIA_BLOCKS|MAX_MEDIA_ITEM_BLOCKS' packages/core/lib/records.js packages/rpc/lib/limits.js
+rg -n 'isVideoDescriptor|isPostMedia|isMomentVideoItem|isMomentMediaItem|mediaUploadFileCross|momentPutCross|DM_MEDIA_KEYS|AUDIO_DESCRIPTOR_KEYS|media.uploadFile|moment.putMedia|moment.create|media.readFile' packages/rpc/lib/methods.js
+```
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `node apps/cli/test/readme-help.test.js`
+- `npm test -w packages/rpc`
+- `npm test -w packages/core`
+- `npm test -w packages/web-member`
+- `node apps/app/test/identityInstall.test.js`
+- `node apps/app/test/webnodeHandle.test.js`
+- `npm test -w apps/cli`
+
+### Verificação manual
+
+Ordem: Android, iOS, depois web e PWA, num ambiente de teste local.
+
+- [ ] Em aparelhos Android e iOS, publicar um MP4 real de câmera H.264 com AAC e outro sem som, em retrato e paisagem, como post, resposta, citação e momento. Registrar aparelho, sistema e resultado; conferir capa, rotação, duração e reprodução. Um arquivo HEVC, fragmentado ou com faixa de metadados temporizados deve ser recusado; não afrouxar o validador para fazê-lo passar.
+- [ ] Com um arquivo real de câmera de celular contendo uma tag de localização, passar os bytes por `stripVideoMetadata` e conferir que a tag foi removida e que a saída passa em `videoBounds` estrito, sem `metadata: true`; conferir também a reprodução.
+- [ ] Na web e no PWA, repetir a publicação, resposta, citação e momento com os arquivos de câmera, conferindo capa, rotação, duração e reprodução.
+- [ ] Conferir os limites de 30 s/8 MiB e 15 s/4 MiB e suas recusas acima do teto, lados e área; conferir que o app não mistura vídeo com fotos nem prévia e que não oferece vídeo em publicações de Páginas, conversas, grupos, Feira, avatar ou prévia. Conferir a limpeza dos arquivos temporários ao trancar, sair e mandar o app para o fundo, sem nomes ou bytes em logs.
+- [ ] Simular perda de conexão depois do envio e confirmar a indicação de resultado incerto, sem repetição automática; reler o diário antes de publicar de novo. Conferir que o custo de até 129 selos por momento e as esperas de ritmo da seção 13 não são apresentados como uma falha antes de o envio terminar. Com a carteira vazia, `putPublicMedia` força o abastecimento até 300 selos, dentro da cota diária de 1024; uma compra completa em um único link soma `(300 - 28) × 270 ms = 73,44 s` de esperas deliberadas. O envio dos 129 pedaços soma `(129 - 28) × 135 ms = 13,635 s`, além da rede e das gravações.
+- [ ] Denunciar uma publicação com vídeo e outra com foto ou GIF: ambas ficam para uma pessoa, sem inferência sobre a mídia. No ambiente local, aplicar um bloqueio de teste e conferir a indisponibilidade dos núcleos de mídia do diário. Conferir separadamente que o blob do momento ainda abre com um descritor guardado até a retenção expirar e que a interface esconde o momento após 24 horas.
+- [ ] Ler o mesmo diário com um leitor e semeador anteriores: o post ou momento em vídeo inteiro é omitido; os blocos continuam servidos pelo semeador antigo, mas o post não entra nos índices nem nas contagens de posts vivos. Atualizar semeadores e serviço de conta antes do app publicador, como manda o CHANGELOG.

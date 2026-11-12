@@ -69,14 +69,19 @@ export function preloadNode () {
 
 // The node's media facade in the native handle's shape
 // (./webnode.native.js), so screens see one API: upload, putDm, putMoment and
-// read(ref) -> { bytes, mime, w, h } (the native handle answers a uri
-// instead). Here the bytes never cross RPC: they stay in the page. A method
-// the facade lacks is a capability this node does not have.
+// read(ref) -> { bytes, mime, w, h }, plus ms for a voice note or a video
+// (the native handle answers a uri instead). Here the bytes never cross RPC:
+// they stay in the page. A method the facade lacks is a capability this node
+// does not have; `video` is true where upload is, since the node script ships
+// with this app and its session takes a video (docs/rpc.md 5.56).
 export function mediaOf (facade) {
   if (facade === null || typeof facade !== 'object') return null
   const has = (k) => typeof facade[k] === 'function'
   const out = {}
-  if (has('upload')) out.upload = (args) => facade.upload(args)
+  if (has('upload')) {
+    out.upload = (args) => facade.upload(args)
+    out.video = true
+  }
   if (has('putDm')) out.putDm = (args) => facade.putDm(args)
   if (has('putMoment')) out.putMoment = (args) => facade.putMoment(args)
   if (has('readDm') || has('readGroup') || has('readMoment')) {
@@ -91,11 +96,13 @@ export function mediaOf (facade) {
       let w = got.w
       let h = got.h
       if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h)) {
-        const b = mediaBounds(got.bytes, got.mime)
+        // A video is never measured as an image: the session checked it with
+        // videoBounds and its answer carries the size and duration.
+        const b = got.mime === 'video/mp4' ? null : mediaBounds(got.bytes, got.mime)
         w = b === null ? null : b.width
         h = b === null ? null : b.height
       }
-      return { bytes: got.bytes, mime: got.mime, w, h }
+      return Number.isSafeInteger(got.ms) ? { bytes: got.bytes, mime: got.mime, w, h, ms: got.ms } : { bytes: got.bytes, mime: got.mime, w, h }
     }
   }
   return Object.keys(out).length > 0 ? out : null
