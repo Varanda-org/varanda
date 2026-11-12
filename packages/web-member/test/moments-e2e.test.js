@@ -25,6 +25,8 @@ const { MOMENT_TTL_MS } = require('@varanda/core/lib/moments')
 const { createBrowserNode } = require('../lib/node')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const store = require('../lib/node-store')
+const ops = require('../lib/member-ops')
+const { videoBounds, stripVideoMetadata } = require('@varanda/rpc')
 
 const ITEM_KEYS = ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms']
 const STALE = { code: 'USAGE', message: 'prepare a mídia de novo' }
@@ -287,4 +289,105 @@ test('momentos end to end: put, create, read, 24 h window, follower, photo, tamp
   })
   await copyDiary(A, B)
   t.alike((await B.web.request('moments.read', {})).authors, [], 'the follower sees the delete')
+})
+
+// A synthetic short video (the shape of packages/rpc/test/video-bounds.test.js
+// builders): ftyp, moov (mvhd, one H.264 avc1 track), mdat. `ms` is the
+// samples' duration at timescale 1000, in 30 samples of 10 bytes. type
+// 'hvc1' gives an HEVC entry; udta adds the place tag a camera writes.
+function mp4 ({ ms = 3000, width = 640, height = 360, type = 'avc1', udta = false } = {}) {
+  const be16 = (v) => [(v >>> 8) & 0xff, v & 0xff]
+  const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
+  const ascii = (str) => Array.from(str, (c) => c.charCodeAt(0))
+  const zeros = (n) => new Array(n).fill(0)
+  const box = (kind, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(kind), ...body] }
+  const full = (kind, ...parts) => box(kind, [0, 0, 0, 0], ...parts)
+  const n = 30
+  const q = Math.floor(ms / n)
+  const runs = [[n - 1, q], [1, ms - (n - 1) * q]]
+  const one = 0x10000
+  const avcC = box('avcC', [1, 100, 0, 40, 0xff, 0xe1], be16(6), [0x67, 100, 0, 40, 0xac, 0xd9], [1], be16(4), [0x68, 0xeb, 0xe3, 0xcb])
+  const entry = box(type, zeros(6), be16(1), zeros(16), be16(width), be16(height), be32(0x480000), be32(0x480000), be32(0), be16(1),
+    [4, ...ascii('x264'), ...zeros(27)], be16(0x18), be16(0xffff), type === 'avc1' ? avcC : box('hvcC', zeros(23)), box('pasp', be32(1), be32(1)))
+  const moovOf = (offset) => box('moov',
+    full('mvhd', be32(0), be32(0), be32(1000), be32(ms), zeros(16), ...[one, 0, 0, 0, one, 0, 0, 0, 0x40000000].map(be32), zeros(28)),
+    box('trak',
+      box('tkhd', [0, 0, 0, 7], be32(0), be32(0), be32(1), be32(0), be32(ms), zeros(16),
+        ...[one, 0, 0, 0, one, 0, 0, 0, 0x40000000].map(be32), be32(width * one), be32(height * one)),
+      box('mdia',
+        full('mdhd', be32(0), be32(0), be32(1000), be32(ms), [0x55, 0xc4, 0, 0]),
+        full('hdlr', be32(0), ascii('vide'), zeros(12), [0]),
+        box('minf', box('vmhd', [0, 0, 0, 1], zeros(8)), box('dinf', full('dref', be32(1), box('url ', [0, 0, 0, 1]))),
+          box('stbl', full('stsd', be32(1), entry), full('stts', be32(runs.length), ...runs.map(([c, d]) => [...be32(c), ...be32(d)])),
+            full('stsc', be32(1), be32(1), be32(n), be32(1)), full('stsz', be32(0), be32(n), ...new Array(n).fill(be32(10))),
+            full('stco', be32(1), be32(offset)))))),
+    ...(udta ? [box('udta', box('©xyz', be16(18), be16(0x15c7), ascii('+12.3456-045.6789/')))] : []))
+  const head = box('ftyp', ascii('isom'), be32(0x200), ascii('isom'), ascii('avc1'))
+  const offset = head.length + moovOf(0).length + 8
+  return new Uint8Array([...head, ...moovOf(offset), ...box('mdat', new Array(n * 10).fill(1))])
+}
+
+// A valid video of exactly `size` bytes: mp4() and a top-level free box.
+function mp4Sized (size) {
+  const video = mp4()
+  const out = new Uint8Array(size)
+  out.set(video)
+  const pad = size - video.byteLength
+  out.set([(pad >>> 24) & 0xff, (pad >>> 16) & 0xff, (pad >>> 8) & 0xff, pad & 0xff, 0x66, 0x72, 0x65, 0x65], video.byteLength)
+  return out
+}
+
+test('momento video: put, create, read with ms; bounds refused; a blob that is not the declared video reads as gone', async (t) => {
+  t.timeout(170000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const assoc = { kp, hex: hex(kp.publicKey) }
+  const host = await seederHost(t, bootstrap, assoc)
+  const A = await memberNode(t, assoc, host)
+  const B = await memberNode(t, assoc, host, { enable: false })
+  const args = { mime: 'video/mp4', width: 640, height: 360, ms: 3000, kind: 'video' }
+
+  t.exception.all(() => A.node.momentPutMedia({ ...args, bytes: mp4({ ms: 15001 }), ms: 15001 }), /mídia inválida/, '15001 ms given')
+  t.exception.all(() => A.node.momentPutMedia({ ...args, bytes: mp4({ ms: 15001 }), ms: 15000 }), /mídia inválida/, 'a 15001 ms container')
+  const over = mp4Sized(4194305)
+  t.ok(videoBounds(over, { maxMs: 15000 }), 'the oversize file is otherwise a valid video')
+  t.exception.all(() => A.node.momentPutMedia({ ...args, bytes: over }), /mídia inválida/, '4194305 bytes')
+  t.exception.all(() => A.node.momentPutMedia({ ...args, bytes: mp4({ type: 'hvc1' }) }), /mídia inválida/, 'HEVC')
+  t.exception.all(() => A.node.momentPutMedia({ ...args, bytes: mp4(), width: 641 }), /mídia inválida/, 'sides other than the container\'s')
+  t.exception.all(() => A.node.momentPutMedia({ ...args, bytes: png(100) }), /mídia inválida/, 'an image labelled video')
+
+  const input = mp4({ udta: true })
+  const stripped = b4a.from(stripVideoMetadata(input))
+  const item = await A.node.momentPutMedia({ ...args, bytes: input, ms: 3200 })
+  t.ok(input.every((b) => b === 0), 'the caller copy is wiped')
+  t.alike(Object.keys(item), ITEM_KEYS, 'the moment media item')
+  t.alike([item.mime, item.w, item.h, item.ms], ['video/mp4', 640, 360, 3000], 'the container\'s sides and duration')
+  const created = await A.web.request('moment.create', { text: 'vídeo', media: item })
+  const r1 = await A.web.request('moments.read', {})
+  t.alike(r1.own.map((m) => [m.seq, m.media]), [[created.seq, item]])
+  const got = await A.node.momentReadMedia({ author: A.key, seq: created.seq })
+  t.alike([got.mime, got.w, got.h, got.ms], ['video/mp4', 640, 360, 3000], 'read with its ms')
+  t.ok(b4a.equals(b4a.from(got.bytes), stripped), 'the stripped copy, no place tag')
+
+  // A member writes moments whose items name A's real blobs under a video
+  // label they are not: the blob opens and verifies, the bytes refuse it.
+  const photo = await A.node.momentPutMedia({ bytes: png(1000), mime: 'image/png', width: 64, height: 48 })
+  const C = { storage: memoryNodeStorage(), keyPair: crypto.keyPair() }
+  const ctx = { storage: C.storage, association: assoc.hex, keyPair: C.keyPair, mediaKeyPair: null }
+  await ops.idCreate(ctx)
+  C.key = hex(C.keyPair.publicKey)
+  await ops.certAdd(ctx, createCert({ member: C.key }, assoc.kp))
+  const own = () => true
+  const asVideo = await ops.momentCreate(ctx, { text: 'falso', media: { ...photo, mime: 'video/mp4', w: 640, h: 360, ms: 3000 }, owned: own })
+  const longer = await ops.momentCreate(ctx, { text: 'falso', media: { ...item, ms: 3001 }, owned: own })
+  await B.web.request('follow.add', { key: C.key })
+  await copyDiary(C, B)
+  t.alike(await failure(B.node.momentReadMedia({ author: C.key, seq: asVideo.seq })), GONE, 'an image blob under a video label')
+  t.alike(await failure(B.node.momentReadMedia({ author: C.key, seq: longer.seq })), GONE, 'a video blob with a forged ms')
+
+  // Photo momentos are unchanged.
+  const created2 = await A.web.request('moment.create', { text: 'foto', media: photo })
+  const pic = await A.node.momentReadMedia({ author: A.key, seq: created2.seq })
+  t.alike(Object.keys(pic), ['bytes', 'mime', 'w', 'h'], 'a photo reads without ms')
+  t.alike([pic.mime, pic.w, pic.h], ['image/png', 64, 48])
 })

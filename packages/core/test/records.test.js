@@ -1604,3 +1604,183 @@ test('listing builders treat media null or empty as no photos', (t) => {
   t.absent('media' in records.listingRecord({ kind: 'produto', ...fields, media: null }))
   t.is(validateRecord({ type: 'listing-edit', seq: 2, text: '', unit: null, ...fields, media: null }, 3), 'media-invalid', 'a null on the wire stays invalid')
 })
+
+const VDESC = { core: K2, mime: 'video/mp4', start: 3, blocks: 4, bytes: 100000, sha256: 'e'.repeat(64), width: 1080, height: 1920, ms: 15000 }
+const VPAIR = [DESC, VDESC]
+
+test('video constants', (t) => {
+  t.is(records.VIDEO_MIME, 'video/mp4')
+  t.is(records.MAX_VIDEO_MS, 30000)
+  t.is(records.MAX_VIDEO_DIMENSION, 1920)
+  t.is(records.MAX_VIDEO_PIXELS, 2073600)
+  t.is(records.MAX_MOMENT_VIDEO_MS, 15000)
+  t.is(records.MAX_MOMENT_VIDEO_BYTES, 4194304)
+  t.alike([...records.VIDEO_DESCRIPTOR_KEYS], ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height', 'ms'])
+  t.ok(Object.isFrozen(records.VIDEO_DESCRIPTOR_KEYS))
+  t.absent(MEDIA_MIMES.includes('video/mp4'), 'still images only')
+})
+
+test('validateRecord: a video post is exactly [JPEG poster, video]', (t) => {
+  const shapes = {
+    post: { type: 'post', text: '', at: AT, replyTo: null },
+    reply: { type: 'post', text: '', at: AT, replyTo: { author: K1, seq: 2 } },
+    quote: { type: 'post', text: 'oi', at: AT, replyTo: null, quote: { author: K1, seq: 2 } }
+  }
+  for (const [name, rec] of Object.entries(shapes)) {
+    t.is(validateRecord({ ...rec, media: VPAIR }, 3), null, name + ' with a video')
+  }
+  t.is(validateRecord({ ...shapes.quote, text: '', media: VPAIR }, 3), 'text-length', 'a video quote still needs text')
+  const post = (media) => ({ ...shapes.post, media })
+  for (const video of [
+    { ...VDESC, ms: 1 },
+    { ...VDESC, ms: 30000 },
+    { ...VDESC, width: 1920, height: 1080 },
+    { ...VDESC, width: 1, height: 1 },
+    { ...VDESC, start: MAX_MEDIA_BLOCKS - MAX_MEDIA_ITEM_BLOCKS, blocks: MAX_MEDIA_ITEM_BLOCKS, bytes: MAX_MEDIA_ITEM_BLOCKS * MEDIA_BLOCK_BYTES },
+    { ...VDESC, blocks: 1, bytes: 1 }
+  ]) t.is(validateRecord(post([DESC, video]), 1), null, 'valid ' + JSON.stringify(video))
+  const { ms, ...noMs } = VDESC
+  const holed = [DESC, VDESC]
+  delete holed[0]
+  const hostile = { ...VDESC }
+  Object.defineProperty(hostile, 'ms', { enumerable: true, get () { throw new Error('boom') } })
+  const hostilePoster = { ...DESC }
+  Object.defineProperty(hostilePoster, 'mime', { enumerable: true, get () { throw new Error('boom') } })
+  const bad = {
+    reversed: [VDESC, DESC],
+    'video alone': [VDESC],
+    'video plus photos': [DESC, VDESC, DESC],
+    'photos then video': [DESC, DESC, VDESC],
+    'two videos': [VDESC, VDESC],
+    'png poster': [{ ...DESC, mime: 'image/png' }, VDESC],
+    'poster with ms': [{ ...DESC, ms: 1 }, VDESC],
+    'ms 0': [DESC, { ...VDESC, ms: 0 }],
+    'ms 30001': [DESC, { ...VDESC, ms: 30001 }],
+    'ms 1.5': [DESC, { ...VDESC, ms: 1.5 }],
+    'ms string': [DESC, { ...VDESC, ms: '1000' }],
+    'width 1921': [DESC, { ...VDESC, width: 1921, height: 1 }],
+    'height 1921': [DESC, { ...VDESC, width: 1, height: 1921 }],
+    '1920x1920': [DESC, { ...VDESC, width: 1920, height: 1920 }],
+    'width 0': [DESC, { ...VDESC, width: 0 }],
+    'extra key': [DESC, { ...VDESC, extra: 1 }],
+    'no ms': [DESC, noMs],
+    'webm video': [DESC, { ...VDESC, mime: 'video/webm' }],
+    'audio second': [DESC, { ...VDESC, mime: 'audio/mp4', width: 0, height: 0 }],
+    'bytes over blocks': [DESC, { ...VDESC, bytes: 4 * MEDIA_BLOCK_BYTES + 1 }],
+    '257 blocks': [DESC, { ...VDESC, start: 1, blocks: 257, bytes: 257 * MEDIA_BLOCK_BYTES }],
+    'past the core': [DESC, { ...VDESC, start: MAX_MEDIA_BLOCKS - 1, blocks: 2 }],
+    'upper-case core': [DESC, { ...VDESC, core: K2.toUpperCase() }],
+    sparse: holed,
+    'sparse of two': new Array(2),
+    'getter-throwing video': [DESC, hostile],
+    'getter-throwing poster': [hostilePoster, VDESC]
+  }
+  for (const [name, media] of Object.entries(bad)) {
+    t.is(validateRecord(post(media), 1), 'media-invalid', name)
+    t.is(records.validRecordCopy(post(media), 1), null, name + ' copy')
+  }
+  // Only the pair takes a video: every other descriptor stays a still image.
+  t.absent(records.validDescriptor(VDESC), 'validDescriptor refuses a video')
+  t.absent(records.validDescriptor(noMs), 'even without ms')
+  t.ok(records.validVideoDescriptor(VDESC))
+  t.absent(records.validVideoDescriptor(DESC))
+  t.ok(records.validPostMedia(VPAIR))
+  for (const v of [null, undefined, 'x', {}, VDESC, [DESC]]) t.absent(records.validPostMedia(v))
+  t.absent(records.validAvatar(VDESC), 'not an avatar')
+  t.absent(records.validPreviewImage(VDESC), 'not a preview thumbnail')
+  t.is(validateRecord({ ...shapes.post, text: 'oi', preview: { url: 'https://example.com/a', host: 'example.com', title: 'T', desc: '', image: VDESC } }, 1), 'preview-invalid')
+  const listing = { type: 'listing', kind: 'produto', title: 'Bicicleta', text: 'Aro 29', price: 50000, unit: null, cat: 'esporte', place: { uf: 'SP', city: 'São Paulo', bairro: 'Pinheiros' }, at: AT }
+  t.is(validateRecord(listing, 1), null, 'the listing fixture is valid')
+  t.is(validateRecord({ ...listing, media: VPAIR }, 1), 'media-invalid', 'the pair in a listing')
+  t.is(validateRecord({ type: 'profile', name: 'Ana', bio: '', at: AT, avatar: VDESC }, 1), 'media-invalid', 'not an avatar record')
+  // The existing photo refusal of a video mime stands.
+  t.is(validateRecord(post([{ ...DESC, mime: 'video/mp4' }]), 1), 'media-invalid')
+  // The worst video quote fits one block.
+  const worst = { ...shapes.quote, text: '\ud800'.repeat(MAX_TEXT), at: new Date(8.64e15).toISOString(), quote: { author: K1, seq: Number.MAX_SAFE_INTEGER }, media: [WIDEST, { ...WIDEST, mime: 'video/mp4', width: 1920, height: 1080, ms: 30000 }] }
+  t.is(validateRecord(worst, 3), null)
+  t.ok(b4a.byteLength(JSON.stringify(worst)) <= MAX_BLOCK_BYTES)
+})
+
+test('postRecord with a video keeps ms on the video only', async (t) => {
+  const rec = postRecord({ text: '', at: AT, media: [{ ...DESC, extra: 1, ms: 5 }, { ...VDESC, extra: 1 }] })
+  t.alike(rec.media, VPAIR, 'extra keys dropped, ms kept on the video')
+  t.alike(Object.keys(rec.media[0]), ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height'])
+  t.alike(Object.keys(rec.media[1]), ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height', 'ms'])
+  t.ok(rec.media[1] !== VDESC, 'a copy')
+  t.alike(postRecord({ text: 'oi', at: AT, quote: { author: K1, seq: 2 }, media: VPAIR }).media, VPAIR)
+  t.alike(postRecord({ text: '', at: AT, replyTo: { author: K1, seq: 2 }, media: VPAIR }).media, VPAIR)
+  t.alike(records.validRecordCopy(rec, 1).media, VPAIR)
+  await t.exception.all(async () => postRecord({ text: '', at: AT, media: [VDESC, DESC] }), /media-invalid/)
+  await t.exception.all(async () => postRecord({ text: '', at: AT, media: [DESC, { ...VDESC, ms: 30001 }] }), /media-invalid/)
+})
+
+function momentVideo (over = {}) {
+  return momentMedia({ mime: 'video/mp4', w: 1080, h: 1920, ms: 15000, bytes: 4194304 + 16, chunks: 129, ...over })
+}
+
+test('moment records: a short video', async (t) => {
+  const { momentRecord } = records
+  const mr = { type: 'moment', text: '', at: AT, media: momentVideo() }
+  t.is(validateRecord(mr, 1), null, '4 MiB plus the MAC')
+  for (const media of [
+    momentVideo({ ms: 1 }),
+    momentVideo({ w: 1920, h: 1080 }),
+    momentVideo({ w: 1, h: 1 }),
+    momentVideo({ bytes: 17, chunks: 1 })
+  ]) t.is(validateRecord({ ...mr, media }, 1), null, 'valid ' + JSON.stringify(media))
+  const bad = {
+    'one byte over': momentVideo({ bytes: 4194304 + 17 }),
+    'one chunk over': momentVideo({ bytes: 130 * 32768, chunks: 130 }),
+    'ms 15001': momentVideo({ ms: 15001 }),
+    'ms 0': momentVideo({ ms: 0 }),
+    'ms 1.5': momentVideo({ ms: 1.5 }),
+    'w 1921': momentVideo({ w: 1921, h: 1 }),
+    '1920x1920': momentVideo({ w: 1920, h: 1920 }),
+    'h 0': momentVideo({ h: 0 }),
+    'chunks mismatch': momentVideo({ chunks: 128 }),
+    'extra key': momentVideo({ extra: 1 }),
+    webm: momentVideo({ mime: 'video/webm' })
+  }
+  for (const [name, media] of Object.entries(bad)) t.is(validateRecord({ ...mr, media }, 1), 'media-invalid', name)
+  // A photo momento is unchanged: an image with ms stays refused.
+  t.is(validateRecord({ ...mr, media: momentMedia({ ms: 1000 }) }, 1), 'media-invalid')
+  t.is(validateRecord({ ...mr, media: momentMedia({ bytes: 257 * 32768, chunks: 257 }) }, 1), null, 'a photo keeps the whole blob cap')
+  t.is(JSON.stringify(momentRecord({ text: 'oi', media: momentMedia(), at: AT })),
+    '{"type":"moment","text":"oi","at":"2026-01-01T00:00:00.000Z","media":{"id":"' + 'a'.repeat(64) + '","key":"' + 'b'.repeat(64) + '","nonce":"' + 'c'.repeat(48) + '","chunks":2,"bytes":40000,"sha256":"' + 'd'.repeat(64) + '","mime":"image/jpeg","w":1080,"h":1350,"ms":0}}',
+    'a photo momento is byte-identical')
+  t.alike(momentRecord({ media: { ...momentVideo(), extra: 1 }, at: AT }).media, momentVideo(), 'the builder keeps ms')
+  await t.exception.all(async () => momentRecord({ media: momentVideo({ ms: 15001 }), at: AT }), /media-invalid/)
+  const hostile = { ...momentVideo() }
+  Object.defineProperty(hostile, 'ms', { enumerable: true, get () { throw new Error('boom') } })
+  t.is(validateRecord({ ...mr, media: hostile }, 1), 'malformed', 'a throwing getter is caught')
+})
+
+test('video rules match @varanda/rpc (parity)', (t) => {
+  const rpc = require('@varanda/rpc')
+  for (const name of ['VIDEO_MIME', 'MAX_VIDEO_MS', 'MAX_VIDEO_DIMENSION', 'MAX_VIDEO_PIXELS', 'MAX_MOMENT_VIDEO_MS', 'MAX_MOMENT_VIDEO_BYTES']) {
+    t.is(rpc[name], records[name], name)
+  }
+  const posts = [
+    VPAIR, [VDESC, DESC], [VDESC], [DESC, VDESC, DESC], [VDESC, VDESC], [{ ...DESC, mime: 'image/png' }, VDESC],
+    [DESC, { ...VDESC, ms: 0 }], [DESC, { ...VDESC, ms: 30000 }], [DESC, { ...VDESC, ms: 30001 }],
+    [DESC, { ...VDESC, width: 1920, height: 1080 }], [DESC, { ...VDESC, width: 1921, height: 1 }],
+    [DESC, { ...VDESC, width: 1920, height: 1920 }], [DESC, { ...VDESC, extra: 1 }], [DESC, { ...VDESC, mime: 'video/webm' }],
+    [DESC, { ...VDESC, blocks: 1, bytes: 1 }], [DESC, { ...VDESC, bytes: 4 * MEDIA_BLOCK_BYTES + 1 }],
+    [DESC], [DESC, DESC], [{ ...DESC, mime: 'video/mp4' }]
+  ]
+  for (const media of posts) {
+    const core = validateRecord({ type: 'post', text: 'oi', at: AT, replyTo: null, media }, 1) === null
+    t.is(rpc.validateParams('post.create', { text: 'oi', media }).ok, core, 'post ' + JSON.stringify(media))
+    t.is(rpc.validateParams('post.quote', { to: K1 + ':1', text: 'oi', media }).ok, core, 'quote ' + JSON.stringify(media))
+  }
+  const moments = [
+    momentVideo(), momentVideo({ bytes: 4194304 + 17 }), momentVideo({ ms: 15000 }), momentVideo({ ms: 15001 }),
+    momentVideo({ ms: 0 }), momentVideo({ w: 1920, h: 1080 }), momentVideo({ w: 1920, h: 1920 }), momentVideo({ w: 1921, h: 1 }),
+    momentVideo({ bytes: 17, chunks: 1 }), momentVideo({ bytes: 16, chunks: 1 }), momentVideo({ chunks: 128 }),
+    momentMedia(), momentMedia({ ms: 1000 }), momentMedia({ bytes: 257 * 32768, chunks: 257 }), momentMedia({ mime: 'audio/mp4', w: 0, h: 0, ms: 1000 })
+  ]
+  for (const media of moments) {
+    const core = validateRecord({ type: 'moment', text: '', at: AT, media }, 1) === null
+    t.is(rpc.validateParams('moment.create', { text: '', media }).ok, core, 'moment ' + JSON.stringify(media))
+  }
+})
