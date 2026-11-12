@@ -7803,7 +7803,240 @@ Ordem: build de debug do Android, simulador do iOS, depois a web e o PWA. O buil
 - [ ] Serviço `account` sem `VARANDA_PHONE_KEY` (o id e o segredo do cliente Google continuam obrigatórios): entre as linhas de arranque, `cadastro de novas contas desligado: verificação de celular não configurada`. Com `--json`, `{"event":"cadastro"}`.
 - [ ] Ordem de deploy: este PR só sobe depois que o app do PR `feat/phone-only-signup-app` está nas lojas e os builds antigos passaram por um ciclo de revisão da loja. Até lá, o servidor do PR `feat/phone-only-signup-server` continua no ar e atende o vínculo pelo Google e o finish de celular.
 
-## 178. Players de música em publicações, ao toque, Termos 37 (PR feat/music-link-embeds)
+## 178. Receber compartilhamentos no Android (PR feat/share-to-varanda-android)
+
+No Android, a Varanda entra na folha de compartilhar do sistema. Outro app pode mandar uma foto, várias fotos, um GIF, um texto selecionado ou um link. Vídeo não entra: o protocolo de publicação não tem registro de vídeo, e o receptor não declara filtro de vídeo. O que chega abre o Publicar já preenchido, quando o app está pronto. A pessoa ainda toca em Publicar: nada é publicado e nenhuma foto é enviada antes disso. Um link no texto monta o cartão de link, como quando a pessoa cola um link. Mandar o compartilhamento para uma conversa não faz parte deste PR. A folha de compartilhar do iOS e a PWA instalada ficam para PRs seguintes.
+
+O alvo é uma activity à parte, `ShareReceiverActivity` (`apps/app/modules/share-intake/android`), exportada, com o tema `Theme.Translucent.NoTitleBar`, `noHistory`, `excludeFromRecents` e `taskAffinity` vazio. Ela não entra na pilha de quem enviou nem nos recentes. `MainActivity` continua sem a ação `SEND`, então os App Links dela não mudam e ela nunca vê o Uri nem o texto de outro app. Os filtros são `SEND` `image/*`, `SEND` `text/plain` e `SEND_MULTIPLE` `image/*`. Não há filtro de vídeo, de áudio nem de `*/*`.
+
+A activity copia os arquivos para o cache do app, em `cacheDir/varanda-share/<id>/`, e só então abre a Varanda pelo intent de lançamento, sem extras. O JavaScript nunca lê um Uri de outro app (`apps/app/modules/share-intake/index.js` só aceita um `file://` dentro desse diretório). Cada arquivo tem no máximo 50 MiB. Só entram Uris `content` que não são de um provedor do próprio app. A orientação EXIF de JPEG, HEIC, HEIF e WebP troca largura e altura quando a foto está de lado, para o caminho de foto que já existe não achatar o retrato. Quando o leitor de EXIF do Android não consegue abrir um arquivo num formato que carrega EXIF, só aquele arquivo é descartado. Um GIF é copiado como está. O manifesto (`manifest.json`) é gravado por último, com sync, então um diretório sem manifesto ainda está sendo escrito. No máximo 10 arquivos são copiados. Se vieram mais, o total fica no manifesto e o Publicar avisa "só as 10 primeiras fotos foram anexadas".
+
+Um arquivo que não entrega byte por cerca de 30 s (uma foto de galeria na nuvem que ainda não está no aparelho, com a rede desligada) é pulado, e o resto do compartilhamento segue. Voltar durante a cópia cancela o descritor aberto e apaga o diretório incompleto. Girar o aparelho não recria a activity (`configChanges` inclui orientação e tamanho de tela), então a cópia em andamento continua. Se nada pôde ser lido e não há texto, a activity mostra "Não deu para receber esse conteúdo." e não abre o Publicar.
+
+O estado fica em `apps/app/src/sharedIntent.js` e `apps/app/src/useSharedIntent.js`. O Publicar só abre com as abas na tela, sem folha por cima e fora da tela de conta excluída (`App.js`: `ready` exige `atTabs`, e `atTabs` é falso com o Publicar, Ajustes, Denunciar ou a ajuda abertos). Enquanto a pessoa está em Entrar, no meio da configuração ou com a sessão travada, o conteúdo fica no cache. O app fechado, em segundo plano ou já na frente chega no mesmo lugar: a leitura seguinte acha o manifesto. Matar o processo no meio da configuração, depois que a cópia terminou, não perde o compartilhamento. Ele vale 1 hora (`SHARE_TTL_MS`). Passado esse prazo, o app solta os arquivos e mostra "o compartilhamento expirou". O dono é a conta guardada no aparelho, que o app conhece também com a sessão travada e logo depois de reiniciar. Se o compartilhamento já tinha dono, entrar com outra conta, Sair ou Recomeçar também o soltam, sem aviso, mesmo com o app reiniciado no meio. Um compartilhamento feito sem sessão só abre o Publicar depois de Entrar, quando o app chega às abas.
+
+No Publicar, o texto compartilhado entra no rascunho. Se já havia texto, ele fica e o texto novo vai na linha de baixo. Se não cabe, o rascunho fica como estava e a nota diz "o texto compartilhado não coube no rascunho". Um texto maior que 1000 caracteres é cortado, com a nota "o texto compartilhado foi cortado em 1000 caracteres". Um link http ou https preenche o texto, e o cartão de link que o Publicar já monta aparece. As fotos passam pelo mesmo `encodeFile` da galeria (`apps/app/src/media/encode.native.js`): JPEG, PNG, WebP e HEIC são regravados sem EXIF nem GPS, e o GIF segue animado, sem redesenho. Uma foto que o app não abre (por exemplo um EXIF ilegível) sai da leva e as outras ficam, com a nota "algumas fotos não puderam ser abertas". Enquanto as fotos do primeiro compartilhamento ainda carregam, um segundo fica na fila e não tira as que já estão no Publicar. Ele abre depois que o primeiro é publicado ou o Publicar é fechado. Um Momento em publicação também segura o compartilhamento até essa publicação acabar. Com a tela de conta excluída na frente, o Publicar não abre.
+
+Quando as fotos terminam de carregar no Publicar, o app apaga o diretório daquele compartilhamento. `cacheDir/varanda-share` fica vazio. Reabrir pelos recentes não importa de novo: a activity de recepção não fica nos recentes, o lançamento não carrega o que foi compartilhado, e um id já entregue não é aplicado outra vez.
+
+Na web este módulo não recebe nada (`apps/app/src/shareIntake.web.js` devolve vazio). No iOS o módulo nativo não está ligado, então a folha de compartilhar do sistema ainda não oferece a Varanda (o iOS entra na seção 179). O Publicar pela galeria continua igual.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `node apps/app/test/sharedIntent.test.js`
+- `node apps/app/test/shareIntakeModule.test.js`
+- `node apps/app/test/shareTargetAndroid.test.js`
+
+Os testes conferem o texto composto, o prazo de 1 hora, a troca de conta, a nota das 10 fotos, os filtros do manifesto e a ausência de filtro de vídeo. Não abrem aparelho. A CI de pouso desta leva roda a suíte inteira. Esta seção não marca esses comandos como executados aqui.
+
+### Já conferido nesta branch (2026-11-12)
+
+Conferido nesta branch em 2026-11-12. Não é caminhada no aparelho.
+
+- [x] `npm run prepare:native -w apps/app -- android` na raiz e, em seguida, `./gradlew assembleDebug` dentro de `apps/app/android`: BUILD SUCCESSFUL. Conferido em 2026-11-12.
+- [x] O manifesto mesclado mostra `ShareReceiverActivity` exportada, translúcida, `noHistory`, `excludeFromRecents`, `taskAffinity` vazio, `configChanges` com as 12 mudanças, `requireContentUriPermissionFromCaller="read"`, com os filtros `SEND` `image/*`, `SEND` `text/plain` e `SEND_MULTIPLE` `image/*`, e sem filtro de vídeo. Conferido em 2026-11-12.
+- [x] `npx expo export --platform android` dentro de `apps/app` gera o bundle. Conferido em 2026-11-12.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Todos os itens estão em aberto.
+
+O APK de debug (emulador ou aparelho, depois de `npm run prepare:native -w apps/app`) serve para a folha de compartilhar e para o Publicar sem conta. O que precisa de Entrar usa o APK de preview do EAS: o build de debug não entra com uma passkey de produção (veja `docs/development.md`).
+
+- [ ] Uma foto. A Varanda aparece na folha de compartilhar. O Publicar abre com essa foto.
+- [ ] Várias fotos. A Varanda aparece. As fotos entram no Publicar.
+- [ ] Um GIF. A Varanda aparece. No Publicar o GIF continua animado.
+- [ ] Um texto selecionado. A Varanda aparece. O texto preenche o Publicar.
+- [ ] Um link do navegador. A Varanda aparece. O link preenche o texto e o cartão de link aparece.
+- [ ] Um vídeo. A Varanda não aparece na folha.
+- [ ] Uma seleção com foto e vídeo. A Varanda não aparece.
+- [ ] 12 fotos. O Publicar fica com 10 e mostra "só as 10 primeiras fotos foram anexadas".
+- [ ] Um JPEG de câmera em retrato e um HEIC. Os dois mantêm a proporção. Obrigatório.
+- [ ] Um WebP girado (orientação EXIF 90). Mantém a proporção.
+- [ ] Uma leva em que uma foto não abre (por exemplo um arquivo que diz ser JPEG e não é imagem). As outras ficam e a nota diz "algumas fotos não puderam ser abertas".
+- [ ] Um arquivo que o app não consegue ler, sozinho. Aparece "Não deu para receber esse conteúdo." O Publicar não abre com esse conteúdo.
+- [ ] App fechado, app em segundo plano e app já na frente. Nos três, o compartilhamento chega ao Publicar quando o app está pronto.
+- [ ] Compartilhar sem sessão. O Publicar não abre na tela Entrar. Ele abre depois de Entrar, quando o app chega às abas.
+- [ ] Compartilhar no meio da configuração da conta, depois que a cópia terminou. Matar o app e abrir de novo: o compartilhamento continua e abre o Publicar quando a configuração termina.
+- [ ] Publicar já com um rascunho de texto. O rascunho fica e o texto compartilhado entra na linha de baixo.
+- [ ] Compartilhar com o Publicar aberto, ou com Ajustes aberto. O conteúdo espera a folha fechar e só então abre o Publicar.
+- [ ] Compartilhar enquanto um Momento está sendo publicado. O Publicar do compartilhamento espera essa publicação terminar.
+- [ ] Compartilhar com a tela de conta excluída na frente. O Publicar não abre.
+- [ ] Com um compartilhamento já associado a uma conta, entrar com outra conta. Ele é descartado e o Publicar não abre com ele.
+- [ ] Com um compartilhamento já associado a uma conta, tocar em Sair (ou em Recomeçar), matar o app e entrar com outra conta. O compartilhamento foi descartado e o Publicar não abre com ele.
+- [ ] Com o app fechado e uma conta guardada que não destrava sozinha, compartilhar uma foto, deixar o app abrir travado, tocar em Recomeçar com outra passkey e entrar com ela. O compartilhamento foi descartado e o Publicar não abre com ele.
+- [ ] Deixar passar 1 hora. O compartilhamento é descartado e aparece "o compartilhamento expirou".
+- [ ] Antes de tocar em Publicar, nada é publicado e nenhuma foto é enviada.
+- [ ] A foto publicada não tem EXIF nem GPS.
+- [ ] Depois que as fotos terminam de carregar no Publicar, `cacheDir/varanda-share` fica vazio.
+- [ ] Reabrir o app pelos recentes não importa o mesmo compartilhamento de novo.
+- [ ] Um segundo compartilhamento enquanto as fotos do primeiro ainda carregam no Publicar. As fotos do primeiro não saem. O segundo abre depois que o primeiro é publicado ou o Publicar é fechado.
+- [ ] Uma foto de uma galeria na nuvem que ainda não está no aparelho, com a rede desligada. Depois de cerca de 30 s a Varanda pula esse arquivo e fica com o resto. Voltar durante a cópia não deixa nada para trás.
+- [ ] Girar o aparelho enquanto a Varanda está recebendo. O compartilhamento não se perde.
+- [ ] iOS, simulador: o app abre e o Publicar funciona (escolher uma foto da galeria e fechar). A folha de compartilhar do iOS não faz parte deste PR.
+
+### Limites conhecidos
+
+- Fechar o Publicar, ou mudar "Publicar como", enquanto as fotos compartilhadas ainda carregam, descarta essas fotos, como acontece com as fotos escolhidas na galeria.
+- Uma resposta ou uma citação deixada num rascunho anterior continua presa ao Publicar. Dá para tirá-la no próprio Publicar.
+- No Android o link chega dentro do texto. Um texto com link que passa de 1000 caracteres é cortado como qualquer texto, e o link pode ficar quebrado.
+- Se outra tela tomar o lugar do Publicar enquanto as fotos compartilhadas carregam (conta excluída, novo aceite dos Termos), o compartilhamento fica parado até o Publicar voltar, a sessão travar ou o app reiniciar.
+- Uma foto compartilhada que falha ao carregar no Publicar não pode ser tentada de novo: o arquivo original já foi solto.
+- Um EXIF corrompido que o leitor do Android ainda aceita conta como orientação normal: uma foto de lado pode chegar achatada ou deitada.
+- Vídeo não é aceito.
+
+## 179. Folha de compartilhar no iOS (PR feat/share-to-varanda-ios)
+
+### Pré-requisitos de quem opera
+
+Na conta Apple Developer:
+
+- Registrar o App Group `group.app.varanda`.
+- Ativar App Groups no App ID `app.varanda` e atribuir o grupo.
+- Registrar o App ID `app.varanda.share` e atribuir o mesmo grupo.
+- Manter Associated Domains no App ID `app.varanda`.
+
+Depois, em `apps/app`, rodar `eas credentials -p ios` para os perfis de produção e preview: atualizar o perfil do app mantendo Associated Domains e criar o perfil de `app.varanda.share` com o App Group.
+
+No iOS, a Varanda aparece na folha de compartilhar por uma Share Extension. Ela salva o conteúdo e pede que a pessoa abra o app; quando o app estiver pronto, Publicar abre preenchido. Nada é publicado sem tocar em Publicar. Vídeo não é aceito.
+
+### Automatizado
+
+Já executado em 2026-11-12:
+
+- [x] `node apps/app/test/shareTargetIos.test.js`.
+- [x] `node apps/app/test/hardening.test.js`, incluindo a comparação com um prebuild real.
+- [x] `node apps/app/test/shareIntakeModule.test.js`.
+- [x] `npm run prepare:native -w apps/app -- ios` e, em `apps/app/ios`, `xcodebuild -workspace Varanda.xcworkspace -scheme Varanda -configuration Debug -sdk iphonesimulator CODE_SIGNING_ALLOWED=NO build`: terminou em `BUILD SUCCEEDED`, e `Varanda.app/PlugIns/VarandaShare.appex` foi gerado.
+- [x] `PlistBuddy` confirmou que `CFBundleShortVersionString` e `CFBundleVersion` da extensão são iguais aos do app. A conferência também passou depois de uma alteração temporária em `CFBundleVersion` do app: a fase de build "Sync version with Varanda" copia os dois valores para a extensão em cada build.
+
+### Verificação manual
+
+Ainda não executada. Fazer num build assinado (EAS preview ou TestFlight), em iPhone com iOS 18 ou mais novo:
+
+- [ ] A Varanda aparece na folha de compartilhar do Fotos para uma foto, várias fotos e um GIF; no Safari para um link; e para texto selecionado em outro app.
+- [ ] A Varanda não aparece para vídeo, para uma seleção de foto com vídeo nem para PDF vindo de Arquivos. Se algum caso falhar, relatar: a regra de ativação precisa ser revista.
+- [ ] Depois de escolher Varanda, a folha mostra "Pronto. Abra o app Varanda para publicar." e fecha ao tocar em OK. A extensão não abre o app sozinha.
+- [ ] Abrir a Varanda com o app fechado ou em segundo plano, ou compartilhar, abrir o app e entrar se necessário: quando o app estiver pronto, Publicar abre com o conteúdo. Nada é publicado sem tocar em Publicar.
+- [ ] Compartilhar 12 fotos: Publicar mantém 10 e mostra "só as 10 primeiras fotos foram anexadas".
+- [ ] Uma foto HEIC e uma foto em retrato tirada pela câmera mantêm suas proporções; o GIF continua animado.
+- [ ] Compartilhar uma foto ProRAW (DNG) do Fotos e relatar se chega ao Publicar como JPEG ou HEIC ou se é recusada.
+- [ ] Compartilhar um link do Safari e um texto selecionado em outro app e relatar o texto que chega ao Publicar. Quando não há texto anexado, entra o texto que o app de origem pôs no próprio item.
+- [ ] Fazer um segundo compartilhamento antes de abrir o app: só o mais recente abre.
+- [ ] Depois de publicar ou fechar Publicar, o inbox do grupo (`Library/Caches/share-inbox`) e `Caches/varanda-share` do app estão vazios. Conferir pelo download do container do aparelho no Xcode ou relatar que não foi conferido.
+- [ ] Deixar um compartilhamento sem abrir por mais de 1 hora: aparece "o compartilhamento expirou" e Publicar não abre.
+- [ ] As verificações manuais da seção 178 continuam passando no Android.
+
+### Limites conhecidos
+
+- A pessoa precisa abrir a Varanda depois de compartilhar; a extensão não abre o app.
+- Um novo compartilhamento substitui outro que ainda não foi aberto.
+- Só o primeiro link de um compartilhamento é mantido. A extensão guarda até 4000 caracteres de texto, e o Publicar corta em 1000, como no Android.
+- Vídeo não é aceito.
+- Só entram JPEG, PNG, GIF, WebP, HEIC, HEIF e AVIF, os formatos que o Android também decodifica. Quando o app de origem oferece vários formatos, a extensão escolhe um desses; uma foto só em RAW, TIFF ou PSD é recusada quando o app importa o compartilhamento.
+- Uma imagem com mais de 100 megapixels, ou com um lado acima de 16384 pixels, é recusada. Uma foto de 48 MP e um panorama do iPhone entram.
+- Os arquivos compartilhados ficam no armazenamento do App Group, fora do backup do aparelho, até a Varanda ser aberta ou até um compartilhamento novo substituí-los. Os que passaram de 1 hora saem quando o app abre ou quando a extensão recebe outro compartilhamento.
+- Se o app de origem não entregar a foto, a folha desiste depois de 90 segundos e mantém o que já recebeu.
+
+## 180. Alvo de compartilhamento do PWA (PR feat/share-to-varanda-pwa)
+
+Na PWA instalada, no Chrome do Android, a Varanda entra na folha de compartilhar pelo Web Share Target do manifesto (`share_target` em `apps/app/public/manifest.webmanifest`). O alvo envia `POST` multipart para `/compartilhar`, com `title`, `text`, `url` e os arquivos no campo `fotos`. Os tipos aceitos são `image/jpeg`, `image/png`, `image/webp` e `image/gif`. Vídeo fica de fora, e HEIC também: o compositor da web não mostra nem envia esses formatos, e o manifesto não os declara.
+
+O service worker (`apps/app/scripts/sw.js`, `takeShare` e `storeShare`) responde a esse POST quando está no controle. Ele guarda o compartilhamento no Cache Storage, no cache `varanda-share`, e responde com um redirecionamento 303 para `/`. A resposta é esse redirecionamento também com um corpo malformado ou quando a gravação falha no meio, então a pessoa cai no app e não vê uma página de erro do navegador. Com o worker no controle, o corpo multipart não segue para o servidor.
+
+O worker guarda no máximo 10 fotos, só desses quatro tipos, cada uma de até 50 MiB. O que passa disso, ou que é de outro tipo, é pulado e mesmo assim entra na contagem. O Publicar mostra as mesmas notas do Android e do iOS: "só as 10 primeiras fotos foram anexadas" quando vieram mais de 10, e "algumas fotos não puderam ser abertas" quando uma foto foi pulada. `title`, `text` e `url` são cortados em 4000 caracteres no worker. O Publicar ainda corta o texto em 1000. Um compartilhamento só com link, só com texto ou só com título é guardado. Quando o texto veio vazio, o título entra no texto, como no Android e no iOS. Um compartilhamento sem título, texto, link e foto aproveitáveis não é guardado, e a página abre mesmo assim. Só o mais novo fica: um compartilhamento novo substitui outro que ainda não foi aberto, como no iOS. O anterior só sai depois que o novo está gravado por inteiro, e um pedido que chegou antes nunca toma o lugar de um que chegou depois.
+
+O nome `varanda-share` não começa com `varanda-shell-`, então a ativação do worker não apaga esse cache (seção 11). O app lê o cache ao abrir a página (`apps/app/src/shareIntake.web.js`) e, quando chega às abas, abre o Publicar preenchido, pelo mesmo caminho do Android e do iOS. A leitura não apaga o cache. Ele esvazia quando as fotos terminam de carregar no Publicar, quando passa 1 hora, ou quando um compartilhamento novo toma o lugar. Nada é publicado e nenhuma foto é enviada antes do toque em Publicar. A foto passa pelo `encodeFile` que já existe, sem EXIF nem GPS, e o GIF segue animado.
+
+Um link que chega num compartilhamento não monta a prévia sozinho. No lugar do cartão de link, o Publicar mostra "Mostrar prévia do link". A prévia só é montada depois desse toque ou de qualquer edição no texto. Publicar sem tocar publica sem cartão de link. Um segundo compartilhamento, com ou sem link, ou que não coube no texto, mantém a espera. Um compartilhamento sem link não muda nada, e um link que já estava no rascunho continua com a prévia de sempre. O Publicar é o mesmo no Android e no iOS, então lá vale o mesmo.
+
+Sair e Recomeçar apagam um compartilhamento que ainda está guardado, lido ou não por esta página. Isso vale também para um compartilhamento que chegou em outra janela da PWA. Travar a sessão mantém o compartilhamento. No Android e no iOS, Sair e Recomeçar apagam o compartilhamento que o app ofereceria e os anteriores.
+
+Na web, uma foto que declara mais de 16384 px num lado ou mais de 100 megapixels é recusada antes de ser aberta, com "foto grande demais". Uma foto cujo cabeçalho não dá para ler é recusada com "não foi possível abrir a foto". São os mesmos limites da extensão do iOS. Fotos de câmera de 48 MP passam.
+
+O alvo abre uma página nova. O compartilhamento fica no cache durante o desbloqueio com a passkey dessa página e durante uma recarga no meio da configuração da conta. O Publicar abre quando o app chega às abas.
+
+O Safari do iOS não tem Web Share Target. A folha de compartilhar do iPhone continua só pela extensão da seção 179. Uma aba do navegador que não instalou a PWA nunca aparece na folha. Sem um service worker no controle, o POST chega ao servidor e recebe 405. O compartilhamento se perde e a pessoa precisa repetir. O servidor não guarda o corpo.
+
+Depois de um deploy novo da web vale a mesma regra da seção 11: não há `skipWaiting` nem `clients.claim`, e o worker novo só assume quando todas as janelas da versão anterior fecham. Até lá, o primeiro compartilhamento pode chegar ao worker antigo. Se esse worker não trata `/compartilhar`, o POST segue para o servidor, recebe 405, e o compartilhamento se perde.
+
+### Automatizado
+
+Ainda não executado nesta seção. A CI de pouso desta leva roda a suíte inteira. Esta seção não marca esses comandos como executados aqui.
+
+- `node apps/app/test/pwa.test.js`
+- `node apps/app/test/sw.test.js`
+- `node apps/app/test/shareIntakeWeb.test.js`
+- `node apps/app/test/shareIntakeModule.test.js`
+- `node apps/app/test/sharedIntent.test.js`
+- `node apps/app/test/shareShell.test.js`
+- `node apps/app/test/localCaches.test.js`
+- `node apps/app/test/encodePhotoCap.test.js`
+- `node packages/rpc/test/media-bounds.test.js`
+- `node apps/cli/test/serve.test.js`
+
+Os testes conferem o alvo do manifesto (os quatro tipos de imagem, sem vídeo e sem `image/*`), o que o worker guarda e o redirecionamento para `/`, a leitura do cache `varanda-share` sem consumi-lo, a recusa 405 de `POST /compartilhar` no servidor quando o pedido chega lá, a prévia de link retida até o toque ou a edição, a limpeza do compartilhamento em Sair e Recomeçar (e não ao travar) e a recusa de foto grande antes de abrir. Não abrem o Chrome.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Todos os itens estão em aberto.
+
+Na PWA instalada a partir da origem hospedada, no Chrome do Android, com o worker desta versão no controle. Feche as janelas antigas para o worker novo ativar. Uma PWA instalada antes desta versão talvez só entre na folha depois que o Chrome atualizar o app instalado com o manifesto novo, o que não é imediato. Se a Varanda não aparecer, reinstale a PWA e anote aqui o que foi preciso.
+
+- [ ] Uma foto JPEG. A Varanda aparece na folha. O Publicar abre com essa foto.
+- [ ] Uma foto PNG. A Varanda aparece. A foto entra no Publicar.
+- [ ] Uma foto WebP. A Varanda aparece. A foto entra no Publicar.
+- [ ] Um GIF. A Varanda aparece. No Publicar o GIF continua animado.
+- [ ] Um texto selecionado. A Varanda aparece. O texto preenche o Publicar.
+- [ ] Um link. A Varanda aparece. O link preenche o texto e, no lugar do cartão de link, aparece "Mostrar prévia do link". Tocar nele monta o cartão.
+- [ ] Um link, sem tocar em "Mostrar prévia do link": editar o texto (uma letra basta) monta o cartão. Publicar sem tocar nem editar publica sem cartão de link.
+- [ ] No APK de debug do Android, compartilhar um link pela folha do sistema: o Publicar mostra "Mostrar prévia do link" e só monta o cartão depois do toque ou de uma edição.
+- [ ] Um link, sem tocar, e depois um segundo compartilhamento só com texto: o texto entra e "Mostrar prévia do link" continua no lugar do cartão.
+- [ ] Compartilhar uma foto, não abrir o Publicar e tocar em Sair. Entrar de novo: o Publicar não abre com o compartilhamento. Repetir com Recomeçar.
+- [ ] Com duas janelas da PWA: o compartilhamento chega numa janela que fica travada e é fechada. Na outra, tocar em Sair. Abrir a PWA de novo e entrar: o Publicar não abre com o compartilhamento.
+- [ ] Compartilhar uma foto com a sessão aberta e travar. Depois do desbloqueio, o Publicar abre com a foto.
+- [ ] Compartilhar uma imagem acima de 16384 px num lado ou de 100 megapixels. O Publicar mostra "foto grande demais" e a aba não trava. Uma foto de 48 MP de câmera entra normalmente.
+- [ ] Compartilhar um GIF cuja tela ou algum quadro passa dos limites de mídia (por exemplo 16384 x 16384). O Publicar mostra "imagem grande demais" e a aba não trava. Um GIF animado comum entra normalmente.
+- [ ] Um vídeo. A Varanda não aparece na folha.
+- [ ] Um HEIC. A Varanda não aparece na folha.
+- [ ] Compartilhar com a sessão travada. A página nova abre. Depois do desbloqueio com a passkey, o Publicar abre com o conteúdo.
+- [ ] Compartilhar no meio da configuração da conta e recarregar a página. O compartilhamento continua. O Publicar abre quando a configuração termina e o app chega às abas.
+- [ ] 12 fotos. O Publicar fica com 10 e mostra "só as 10 primeiras fotos foram anexadas".
+- [ ] 3 fotos, uma delas acima de 50 MiB. O Publicar fica com 2 e mostra "algumas fotos não puderam ser abertas".
+- [ ] Na origem hospedada, sem worker no controle (worker removido nas ferramentas do Chrome), um `POST /compartilhar` recebe uma recusa do servidor e nada é guardado. Anotar aqui o código que o Caddy responde (o `varanda-serve` responde 405, coberto por `serve.test.js`).
+- [ ] Deixar passar 1 hora. O compartilhamento é descartado e aparece "o compartilhamento expirou".
+- [ ] Depois que as fotos terminam de carregar no Publicar, o cache `varanda-share` fica vazio.
+- [ ] Com o worker no controle, o corpo multipart de `POST /compartilhar` não chega ao servidor.
+- [ ] Anotar aqui o valor de `Sec-Fetch-Site` que o Chrome envia na navegação do compartilhamento.
+- [ ] Depois de um deploy novo da web, com uma janela antiga ainda aberta: o primeiro compartilhamento pode chegar ao worker antigo. Fechar todas as janelas antigas e compartilhar de novo: o worker novo recebe e o Publicar abre.
+- [ ] Antes de tocar em Publicar, nada é publicado e nenhuma foto é enviada.
+- [ ] Um app que manda só o assunto (só título). O Publicar abre com o título no texto.
+- [ ] Compartilhar com a PWA já aberta e um texto sendo digitado no Publicar. Anotar aqui se a janela recarrega e o que acontece com esse texto (no app nativo o texto compartilhado é juntado ao rascunho).
+- [ ] O compartilhamento funciona com a política de conteúdo do site, que tem `form-action 'none'`: o Publicar abre. A navegação do compartilhamento vem da folha do sistema, não de um formulário da página.
+- [ ] Um compartilhamento que não cabe no espaço do navegador. A página abre sem rascunho e sem aviso. Um compartilhamento anterior ainda não aberto continua lá e abre no Publicar.
+- [ ] As verificações manuais da seção 178 continuam passando no Android.
+- [ ] As verificações manuais da seção 179 continuam passando no iOS.
+
+### Limites conhecidos
+
+- O Safari do iOS não tem Web Share Target. No iPhone a folha continua a da seção 179.
+- Uma aba que não instalou a PWA nunca aparece na folha de compartilhar.
+- Sem um service worker no controle, o POST chega ao servidor, recebe 405, o compartilhamento se perde e a pessoa precisa repetir.
+- Depois de um deploy, o primeiro compartilhamento pode chegar ao worker antigo até que as janelas antigas sejam fechadas (seção 11). Se esse worker não trata `/compartilhar`, o POST recebe 405 e o compartilhamento se perde.
+- Nesta folha entram JPEG, PNG, WebP e GIF. HEIC fica de fora. O app Android e a extensão do iOS aceitam HEIC (seções 178 e 179).
+- Vídeo fica de fora.
+- No máximo 10 fotos, cada uma de até 50 MiB. O worker corta título, texto e link em 4000 caracteres. O Publicar corta o texto em 1000.
+- Um compartilhamento novo substitui outro que ainda não foi aberto.
+- Um compartilhamento sem título, texto, link e foto aproveitáveis não é guardado. A página abre mesmo assim.
+- Se o cache não couber o compartilhamento, o worker apaga o que gravou dele pela metade, um anterior ainda não aberto continua, e a página abre sem o novo. A pessoa não vê aviso de que o novo se perdeu.
+- Compartilhar com a PWA aberta abre uma página nova. Um texto que estava sendo digitado e não foi publicado pode se perder (a verificar no aparelho).
+- Nada é publicado sem o toque em Publicar.
+- Um link compartilhado só ganha prévia depois do toque em "Mostrar prévia do link" ou de uma edição no texto.
+- Na web, uma foto acima de 16384 px num lado ou de 100 megapixels é recusada com "foto grande demais". Um PNG ou WebP animado com mais de 300 quadros não é lido e é recusado com "não foi possível abrir a foto". Um GIF passa pelos mesmos limites de mídia de uma imagem recebida (cada quadro, o número de quadros e o total de pixels), também no Android e no iOS; acima deles, "imagem grande demais".
+- No Android e no iOS, Sair e Recomeçar não apagam um compartilhamento marcado com um horário à frente do relógio do aparelho, a não ser o mais novo, nem um que esteja sendo gravado naquele milissegundo.
+
+## 181. Players de música em publicações, ao toque, Termos 37 (PR feat/music-link-embeds)
 
 Publicações com cartão de YouTube, SoundCloud, Spotify ou Apple Music oferecem **Tocar aqui**. O cartão fechado mostra só os dados guardados na publicação, sem pedido ao provedor. O aviso explica que o toque carrega o player do serviço e entrega a ele o endereço de internet do aparelho. Só esse toque monta o player dentro da publicação. O link continua podendo abrir fora, e músicas completas dependem do serviço. Não há mudança no registro: um leitor antigo continua mostrando o cartão comum, e um link de `audius.co` não ganha frame do provedor.
 
@@ -7858,9 +8091,9 @@ Nenhuma verificação manual foi feita. Todos os itens estão em aberto. Ordem: 
 - [ ] Nenhum navegador abre e nenhum download começa a partir de um player.
 - [ ] Uma conta que aceitou a versão 36 recebe os Termos 37 para novo aceite; os textos no app e nas páginas do site coincidem.
 
-## 179. Música do Audius no serviço de conta (PR feat/audius-proxy)
+## 182. Música do Audius no serviço de conta (PR feat/audius-proxy)
 
-O serviço de conta pode buscar e repassar áudio do Audius, para o aparelho do membro nunca falar com o provedor. Fica desligado sem `VARANDA_AUDIUS_API_KEY`, que não pode ser definida numa instalação com Termos abaixo da versão 38 (a versão 38 e o app estão descritos na seção 180). Com a chave, as rotas `/account/audius/*` respondem. `GET /account/audius/policy` responde `{ enabled, moments }` também desligado (aí `{ enabled: false, moments: false }`, e qualquer outra rota `/account/audius/*` responde 404 `feature-off`). `moments` só é verdadeiro com a música ligada e `VARANDA_AUDIUS_MOMENTS=1`.
+O serviço de conta pode buscar e repassar áudio do Audius, para o aparelho do membro nunca falar com o provedor. Fica desligado sem `VARANDA_AUDIUS_API_KEY`, que não pode ser definida numa instalação com Termos abaixo da versão 38 (a versão 38 e o app estão descritos na seção 183). Com a chave, as rotas `/account/audius/*` respondem. `GET /account/audius/policy` responde `{ enabled, moments }` também desligado (aí `{ enabled: false, moments: false }`, e qualquer outra rota `/account/audius/*` responde 404 `feature-off`). `moments` só é verdadeiro com a música ligada e `VARANDA_AUDIUS_MOMENTS=1`.
 
 A sessão é a mesma da busca de GIFs (`member-session.js`, prefixo `audius`), com domínio MAC próprio. Busca, item, resolve e play exigem `Authorization: Bearer`. O áudio é `GET /account/audius/audio/<ticket>`: o ticket vai no caminho porque um elemento de mídia não envia `Authorization`. O ticket não nomeia faixa, dura `TICKET_TTL_MS` (30 minutos), e a cada `RECHECK_MS` o serviço confere de novo se o membro continua vinculado e fora da lista de bloqueio. Quem falha perde o ticket. Enquanto o áudio é repassado, a conferência se repete a cada `RECHECK_MS`, com um temporizador por relé: quem falha perde o ticket e o relé é cortado, sem fechar o corpo, com a cobrança do que foi enviado, então quem é bloqueado ou desvinculado no meio da música perde o áudio em até um `RECHECK_MS`. Se o armazenamento não consegue responder a essa conferência, o relé também é cortado, mas o ticket fica. O `/play` também confere isso logo antes de criar o ticket, sem reaproveitar a conferência da sessão: quem falha recebe 404 `nao-encontrado`, nenhum ticket, e o uso de play não volta.
 
@@ -7868,7 +8101,7 @@ Por membro e por dia: `SEARCHES_PER_DAY` (200), `ITEMS_PER_DAY` (600), `RESOLVES
 
 Um 4xx do provedor que não seja 401, 403, 408 ou 429 é a resposta dele sobre o que foi pedido: em item, resolve e play vira 404 `nao-encontrado` (400, 404 e 410 igualmente) e o uso não volta; na busca vira 503 `indisponivel` e a busca não volta. Um 401 ou 403 (a chave do operador), um 408 ou 429 (carga), um 5xx, um prazo esgotado ou uma resposta que não é JSON utilizável vira 503 `indisponivel` e o uso da rota volta, mas a chamada de `PROVIDER_CALLS_PER_DAY` não. No áudio, um pedido com `Range` responde 206 com `Content-Range`. Se o nó de armazenamento ignora `Range` e manda `Content-Length`, o serviço corta a fatia pedida e responde 206; sem `Content-Length`, a resposta é 200 com o corpo inteiro desde o byte 0, e a busca de ponto não funciona. Um 206 que passa do fim pedido é cortado nesse fim, no `Content-Range`, no `Content-Length` e na cobrança. Um 416 de cima é repassado como 416, sem corpo. `Content-Range` (`bytes */N`) só quando está bem formado. Nada de byte é cobrado. Os cabeçalhos do áudio são `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox` e `Referrer-Policy: no-referrer`. Um corte de cota deixa o corpo visivelmente incompleto. Um nó que fecha, aborta ou dá erro no meio do corpo também é um corte: o que já foi escrito chega ao cliente (dentro de `STALL_MS`) e só então a conexão fecha, sem fechar o corpo. Depois do fim ou do corte a resposta fica aberta no máximo `STALL_MS` para o cliente ler o resto, nunca além de `TOTAL_MS`, e a vaga de stream fica presa até lá. O `TOTAL_MS` (15 minutos) conta desde o início do relé: toda resposta de áudio é cortada, sem fechar o corpo, `TOTAL_MS` depois dos cabeçalhos, mesmo com bytes ainda andando, e o cliente pede o resto com `Range`. Só `bytes=<início>-` e `bytes=<início>-<fim>` valem como `Range`; qualquer outra forma é ignorada e a resposta é 200 com o corpo inteiro. Se o nó ignora `Range` e o trecho a pular é maior ou igual ao espaço que sobra (do ticket ou do dia), a resposta é 429 `limite-musica`: o ticket fica, a abertura e a ficha do orçamento já foram gastas e nada é cobrado.
 
-A primeira ida fica presa ao host da API. Um redirecionamento de JSON também. O redirecionamento do áudio só vai a um host https público, na porta 443, pela consulta guardada. A chave vai no cabeçalho `x-api-key` só nessa primeira ida, nunca para um nó de armazenamento e nunca numa URL. O redirecionamento do resolve não leva a chave. Cursores de busca seguem `CURSOR_RE` e `MAX_CURSOR`. O item de playlist lista no máximo `MAX_PLAYLIST_TRACKS` faixas. O resolve de playlist não lista as faixas. Nada é gravado em disco: nenhum byte de áudio fica depois da resposta, e os metadados ficam na memória com validade de 10 minutos. Validade não é remoção: a linha dos metadados só sai quando é lida depois de vencer ou quando outras a empurram para fora de `MAX_CACHED`, e a linha de um ticket vencido sai no próximo uso dele ou no próximo `play` de qualquer membro, então ambas podem ficar na memória além do prazo, até um uso seguinte ou um reinício. O app passa a chamar essas rotas com a música nas publicações e os textos legais da versão 38 (seção 180). A chave nunca pode ser definida numa instalação abaixo dos Termos 38.
+A primeira ida fica presa ao host da API. Um redirecionamento de JSON também. O redirecionamento do áudio só vai a um host https público, na porta 443, pela consulta guardada. A chave vai no cabeçalho `x-api-key` só nessa primeira ida, nunca para um nó de armazenamento e nunca numa URL. O redirecionamento do resolve não leva a chave. Cursores de busca seguem `CURSOR_RE` e `MAX_CURSOR`. O item de playlist lista no máximo `MAX_PLAYLIST_TRACKS` faixas. O resolve de playlist não lista as faixas. Nada é gravado em disco: nenhum byte de áudio fica depois da resposta, e os metadados ficam na memória com validade de 10 minutos. Validade não é remoção: a linha dos metadados só sai quando é lida depois de vencer ou quando outras a empurram para fora de `MAX_CACHED`, e a linha de um ticket vencido sai no próximo uso dele ou no próximo `play` de qualquer membro, então ambas podem ficar na memória além do prazo, até um uso seguinte ou um reinício. O app passa a chamar essas rotas com a música nas publicações e os textos legais da versão 38 (seção 183). A chave nunca pode ser definida numa instalação abaixo dos Termos 38.
 
 Como verificar, a partir da raiz:
 
@@ -7888,7 +8121,7 @@ Os testes usam `127.0.0.1`, diretório temporário e provedor substituto. Não a
 
 ### Verificação manual
 
-Nenhuma verificação manual foi feita neste PR. O roteiro de busca e player do Audius no app (Android, iOS, web e PWA) está na seção 180. Um link de `audius.co` nunca carrega um frame do provedor.
+Nenhuma verificação manual foi feita neste PR. O roteiro de busca e player do Audius no app (Android, iOS, web e PWA) está na seção 183. Um link de `audius.co` nunca carrega um frame do provedor.
 
 ### Conferências do operador
 
@@ -7903,7 +8136,7 @@ Nenhuma conferência de operador foi feita. Todos os itens estão em aberto. As 
 - [ ] `VARANDA_AUDIUS_MOMENTS` permanece fora de `1` até o Audius confirmar por escrito que a música pode entrar nos momentos. Essa confirmação não foi obtida.
 - [ ] Respostas por escrito de api@audius.co. Perguntas: se repassar o áudio sem guardá-lo é permitido; se isso conta como tornar a API disponível a terceiros; se trechos de 15 s podem ser tocados; se um trecho pode tocar sobre uma foto; se o título, o artista e o link podem ficar guardados numa publicação; como é marcada uma faixa que saiu da licença. Também a colocação da chave, o caminho de resolve, o campo `permalink`, o redirecionamento do stream, o suporte a `Range`, o `Content-Type` do áudio e as formas de `access`, gated e unlisted. Não há resposta arquivada neste PR.
 
-## 180. Música do Audius em publicações, Termos 38 (PR feat/audius-posts)
+## 183. Música do Audius em publicações, Termos 38 (PR feat/audius-posts)
 
 Na publicação do diário, **Música** abre a busca do catálogo Audius quando a música está ligada na associação e a conta vinculada pode usá-la. O botão não aparece ao publicar como página. Escolher uma página descarta o rascunho de música, e voltar a publicar como pessoa não o recupera. Um rascunho de música não pode ser enviado como página. O seletor oferece **Faixas** e **Playlists**, sem capas. Uma faixa pode entrar inteira ou como trecho de 15 segundos, com controle acessível do início e prévia; uma playlist entra como fila. O cartão mostra artista, título, fonte Audius e link para a página do item. Exige texto de ao menos um caractere e não vai junto com fotos. Uma publicação com música não entra na fila de saída de texto sem rede.
 
@@ -7913,9 +8146,9 @@ O cartão usa o formato de link existente, sem chave nova no registro: página p
 
 O trecho só toca depois de confirmar o ponto inicial e para ao fim dos 15 segundos ou no fim da faixa, se vier antes. Falha de busca do ponto não toca desde zero. A faixa inteira tem controle de posição; a playlist tem próxima e anterior, e informa quando só parte dela está disponível no player, mantendo o link para a lista inteira. Só um player toca por vez; sair da tela para o áudio e descarta também respostas de pedidos ainda pendentes. Uma autorização vencida é renovada num novo toque. Uma falha de reprodução mostra **Música indisponível agora**; o teto diário, **Limite de músicas por hoje**.
 
-Termos e Política de Privacidade na versão 38 exigem novo aceite e descrevem a busca, o link colado, a escolha e a reprodução pelo serviço de conta. O Audius recebe texto da busca, posição e tamanho da página de resultados, id de faixa ou playlist ou permalink e o endereço da associação, nunca o endereço, a chave ou o token do membro. O serviço não guarda buscas nem áudio, e seus registros não levam texto, link, id nem ticket. Metadados e tickets ficam só em memória e somem ao reiniciar; seus prazos são de validade, não de remoção. Título, artista e link ficam na publicação. Base legal proposta e transferência internacional continuam sujeitas a parecer jurídico. Os textos não fixam cotas nem prazos que o serviço pode mudar. A frase sobre momentos é condicional à ativação pela associação; este PR não entrega a interface de música em momentos. Ela está na seção 181. As páginas do site são geradas de `apps/app/src/legal.js`. A tabela LGPD e a nota aos mantenedores sobre triagem sem mudança da lista "sempre humano" estão em `docs/design.md`.
+Termos e Política de Privacidade na versão 38 exigem novo aceite e descrevem a busca, o link colado, a escolha e a reprodução pelo serviço de conta. O Audius recebe texto da busca, posição e tamanho da página de resultados, id de faixa ou playlist ou permalink e o endereço da associação, nunca o endereço, a chave ou o token do membro. O serviço não guarda buscas nem áudio, e seus registros não levam texto, link, id nem ticket. Metadados e tickets ficam só em memória e somem ao reiniciar; seus prazos são de validade, não de remoção. Título, artista e link ficam na publicação. Base legal proposta e transferência internacional continuam sujeitas a parecer jurídico. Os textos não fixam cotas nem prazos que o serviço pode mudar. A frase sobre momentos é condicional à ativação pela associação; este PR não entrega a interface de música em momentos. Ela está na seção 184. As páginas do site são geradas de `apps/app/src/legal.js`. A tabela LGPD e a nota aos mantenedores sobre triagem sem mudança da lista "sempre humano" estão em `docs/design.md`.
 
-Nunca definir `VARANDA_AUDIUS_API_KEY` numa instalação com Termos abaixo da versão 38. As conferências do operador sobre API real, licença, áudio sobre foto e `Range` continuam abertas na seção 179; esta seção não as dá por feitas.
+Nunca definir `VARANDA_AUDIUS_API_KEY` numa instalação com Termos abaixo da versão 38. As conferências do operador sobre API real, licença, áudio sobre foto e `Range` continuam abertas na seção 182; esta seção não as dá por feitas.
 
 Como verificar, a partir da raiz, com Node 20.19 ou mais novo no PATH:
 
@@ -7953,7 +8186,7 @@ No compositor, conferir que **Música** não aparece ao publicar como página, q
 - [ ] PWA instalado: cumprir o mesmo roteiro; conferir parada ao sair da tela e, com música desligada, cartão inicial com **Ouvir** e **Abrir no Audius**, que vira cartão comum só após o primeiro toque em **Ouvir**.
 - [ ] Uma conta que aceitou a versão 37 recebe os Termos 38 para novo aceite; os textos no app e nas páginas do site coincidem.
 
-## 181. Música em momentos (PR feat/momento-music)
+## 184. Música em momentos (PR feat/momento-music)
 
 Um momento pode levar música. O registro passa a aceitar a quinta chave `music`, exatamente `{ p, id, start }` (`isMomentMusic` em `packages/rpc/lib/music.js`): `p` é `audius`, `id` tem de 1 a 32 letras e dígitos, `start` é um inteiro de 0 a 7200. O trecho que quem lê toca dura `MOMENT_SNIPPET_S` = 15 segundos. Sem música, o registro continua com as quatro chaves `type`, `text`, `at` e `media`. `music: null` não é um registro. O diário guarda só esse id e esse início, ao lado da foto pública. Título, artista e URL não entram no registro: o visualizador pede ao serviço da associação quando vai tocar.
 
