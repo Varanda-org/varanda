@@ -1204,7 +1204,7 @@ None of these was performed for this change.
 
 ### Residual risks
 
-- No illegal-media hash check: `docs/design.md` promises a comparison with lists of hashes of known illegal material before showing or relaying; it is not implemented. This PR therefore ships images only, no video (short videos: section 178; the hash-list comparison is still absent). A blocked diary's media cores are purged with it.
+- No illegal-media hash check: `docs/design.md` promises a comparison with lists of hashes of known illegal material before showing or relaying; it is not implemented. This PR therefore ships images only, no video (short videos: section 181; the hash-list comparison is still absent). A blocked diary's media cores are purged with it.
 - A same-origin script can use the stored session: the `CryptoKey` is not exportable, but any script on the origin can call decrypt and act as the member (an XSS was already a full compromise while unlocked); anyone holding the unlocked device or profile can post until 'Sair' or the 30-day idle expiry.
 - The wrapping AES key lives in the same browser profile as the sealed PRF output: a copy of the profile yields the identity until 'Sair' or 30 days idle. The sealing only keeps the PRF output out of plain storage and stops the record alone from opening elsewhere.
 - Follows stored on a device before the update are not published automatically: the person confirms them in the Seguindo card 'Pessoas que você seguia neste aparelho'. Until the person decides, that device keeps its old list locally and does not receive follow changes from other devices. A confirmed follow cannot be taken back from the diary (append-only; only a later `on: false` record undoes it).
@@ -8159,9 +8159,9 @@ Ordem: Android, iOS, depois web e PWA, num ambiente de teste local. Registrar ap
 - [ ] Um blob expirado mostra "vídeo indisponível".
 - [ ] O som para ao sair.
 
-## 180. Preparar e publicar um vídeo curto
+## 183. Preparar e publicar um vídeo curto
 
-Uma publicação, resposta ou citação leva exatamente o par `[capa JPEG, vídeo MP4]`: até 30 segundos e 8 MiB (`MAX_VIDEO_MS`, `MAX_VIDEO_BYTES` em `apps/app/src/media/plan.js`). Um momento leva uma foto, um GIF ou um vídeo de até 15 segundos e 4 MiB, sem par de capa, visível por 24 horas. Os dois formatos limitam cada lado a 1920 e a área a 2073600 pixels. Não há segunda mídia na mesma publicação, nem vídeo em Página, conversa, grupo, Feira, avatar ou prévia de link. A comparação com listas de hashes continua ausente (seção 178).
+Uma publicação, resposta ou citação leva exatamente o par `[capa JPEG, vídeo MP4]`: até 30 segundos e 8 MiB (`MAX_VIDEO_MS`, `MAX_VIDEO_BYTES` em `apps/app/src/media/plan.js`). Um momento leva uma foto, um GIF ou um vídeo de até 15 segundos e 4 MiB, sem par de capa, visível por 24 horas. Os dois formatos limitam cada lado a 1920 e a área a 2073600 pixels. Não há segunda mídia na mesma publicação, nem vídeo em Página, conversa, grupo, Feira, avatar ou prévia de link. A comparação com listas de hashes continua ausente (seção 181).
 
 `pickVideo()` (`apps/app/src/media/attach`) devolve um arquivo, ou `null` se a pessoa cancelar. O app não usa o tamanho nem a duração que o seletor informa. `prepareVideo(picked, { maxMs, maxBytes, signal })` (`videoPrep.native.js` e `videoPrep.web.js`, o mesmo contrato) devolve `{ bytes, mime: 'video/mp4', width, height, ms, poster }` ou `null` se o `signal` foi abortado (troca de modo, remoção ou desmonte: nada é mostrado). O texto de erro já está em pt-BR. Largura, altura e duração saem dos bytes depois de `stripVideoMetadata`. Uma preparação por vez: a ação Vídeo e o envio ficam indisponíveis enquanto ela corre. `node.media.video === true` só num handle real conectado (`apps/app/src/node.js`); a fachada da Vitrine não tem essa capacidade.
 
@@ -8178,8 +8178,8 @@ As conferências em simulador e emulador estão em "Conferido em 2026-11-12" aba
 - `apps/app/test/hardening.test.js`: o podspec `VideoPrep` na lista dos módulos locais.
 - `apps/app/test/podsLock.test.js`: o comparador `apps/app/scripts/check-pods-lock.js` (as duas somas que dependem do caminho e a versão do CocoaPods ficam de fora). Ele não roda o `pod install`: a comparação do lock commitado com o gerado roda no job iOS de `.github/workflows/native.yml`, e localmente como em `docs/development.md`.
 - `apps/app/test/legal.test.js` e `apps/app/test/terms-version.test.js`: versão 37, o texto de vídeos curtos e o par `LEGAL_VERSION` / `TERMS_VERSION`.
-- Seção 178: par, tetos, núcleo cheio, exclusão, Página, conversa, grupo, Feira, app antigo que pula a publicação, e a limpeza sintética de `udta`.
-- Seção 179: reprodução, tempo do momento e reduzir movimento, em teste, sem aparelho.
+- Seção 181: par, tetos, núcleo cheio, exclusão, Página, conversa, grupo, Feira, app antigo que pula a publicação, e a limpeza sintética de `udta`.
+- Seção 182: reprodução, tempo do momento e reduzir movimento, em teste, sem aparelho.
 
 A conferência em hexadecimal de um arquivo publicado (sem caixa `udta`, `meta` ou `uuid`, e sem localização) não foi feita. O teste de preparação só vê um `udta` sintético; os bytes preparados em simulador e emulador estão abaixo.
 
@@ -8196,7 +8196,7 @@ Como verificar, a partir da raiz:
 - `node apps/app/test/legal.test.js`
 - `node apps/app/test/terms-version.test.js`
 
-As baterias das seções 178 e 179 continuam valendo. Nada disso foi repetido nesta seção.
+As baterias das seções 181 e 182 continuam valendo. Nada disso foi repetido nesta seção.
 
 ### Matriz de aparelhos
 
