@@ -74,6 +74,7 @@ export function createStreamPlayer (url, { origin } = {}) {
   return {
     play () {
       if (el === null) return Promise.resolve()
+      failed = false
       let p
       try { p = el.play() } catch (err) { p = Promise.reject(err) }
       if (!p || typeof p.then !== 'function') return Promise.resolve()

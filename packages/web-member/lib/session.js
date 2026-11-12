@@ -2887,7 +2887,8 @@ function createBrowserSession ({
         followCount: (await store.readFollows(storage)).length,
         sync: syncState(),
         publicDht: false,
-        groups: true
+        groups: true,
+        momentMusic: true
       }
     }),
 
@@ -3676,10 +3677,10 @@ function createBrowserSession ({
     // Momentos (docs/rpc.md 5.113): the item must be one this node's
     // momentPutMedia answered in this unlock; published like post.create.
     // A published item is never offered for a second moment.
-    'moment.create': serialDm(async ({ text, media }, epoch) => {
+    'moment.create': serialDm(async ({ text, media, music }, epoch) => {
       await requireDm()
       await ensureCaughtUp(epoch)
-      const r = await withStore((c) => member.momentCreate(c, { text, media, owned: (item) => dmEngine.isOwnPublicItem(item) }))
+      const r = await withStore((c) => member.momentCreate(c, { text, media, music, owned: (item) => dmEngine.isOwnPublicItem(item) }))
       dmEngine.forgetPublicItem(media)
       wrote(r.seq)
       await pushAfterWrite()

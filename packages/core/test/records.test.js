@@ -1534,6 +1534,63 @@ test('moment records: old readers skip it as malformed', async (t) => {
   t.is(validateRecord({ type: 'post', text: 'oi', at: AT, replyTo: null, media: [momentMedia()] }, 1), 'media-invalid', 'not a post media descriptor')
 })
 
+test('moment records: music is the one other key set', async (t) => {
+  const { momentRecord, MOMENT_KEYS, MOMENT_MUSIC_RECORD_KEYS } = records
+  t.alike(MOMENT_MUSIC_RECORD_KEYS, ['type', 'text', 'at', 'media', 'music'])
+  const music = { p: 'audius', id: 'D7KyD', start: 30 }
+  const mr = { type: 'moment', text: 'oi', at: AT, media: momentMedia(), music }
+  t.is(validateRecord(mr, 1), null)
+  t.is(validateRecord({ ...mr, music: { p: 'audius', id: 'A'.repeat(32), start: 7200 } }, 1), null, 'maximal music')
+  t.is(validateRecord({ ...mr, music: { p: 'audius', id: 'a', start: 0 } }, 1), null, 'minimal music')
+  t.is(validateRecord({ ...mr, text: '' }, 1), null, 'photo and music only')
+  t.is(validateRecord(mr, 0), 'genesis-required')
+  const badMusic = [
+    null, undefined, 0, 'audius', [], [music], {},
+    { p: 'audius', id: 'D7KyD' },
+    { p: 'audius', start: 0 },
+    { id: 'D7KyD', start: 0 },
+    { ...music, title: 'Canção' },
+    { ...music, p: 'spotify' },
+    { ...music, p: 'Audius' },
+    { ...music, id: '' },
+    { ...music, id: 'A'.repeat(33) },
+    { ...music, id: 'a-b' },
+    { ...music, id: 'a b' },
+    { ...music, id: 7 },
+    { ...music, start: -1 },
+    { ...music, start: 7201 },
+    { ...music, start: 1.5 },
+    { ...music, start: '30' },
+    { ...music, start: null }
+  ]
+  for (let i = 0; i < badMusic.length; i++) t.is(validateRecord({ ...mr, music: badMusic[i] }, 1), 'music-invalid', 'bad music #' + i)
+  t.is(validateRecord({ ...mr, extra: 1 }, 1), 'malformed', 'an extra key next to music')
+  const { media, ...noMedia } = mr
+  t.is(validateRecord(noMedia, 1), 'malformed', 'music never replaces the photo')
+  t.is(validateRecord({ ...mr, media: momentMedia({ ms: 1 }) }, 1), 'media-invalid', 'the photo is still checked')
+  t.is(validateRecord({ ...mr, text: 'x'.repeat(201) }, 1), 'text-length')
+  t.is(validateRecord({ ...mr, at: '2026-01-01T00:00:00Z' }, 1), 'date-invalid')
+  // Builder: music only when given and not null, copied with exactly its keys.
+  t.alike(momentRecord({ text: 'oi', media: momentMedia(), music, at: AT }), mr)
+  t.alike(Object.keys(momentRecord({ media: momentMedia(), music })), MOMENT_MUSIC_RECORD_KEYS)
+  t.alike(Object.keys(momentRecord({ media: momentMedia(), music: null })), MOMENT_KEYS, 'null music writes the 4-key record')
+  t.alike(Object.keys(momentRecord({ media: momentMedia(), music: undefined })), MOMENT_KEYS)
+  t.not(momentRecord({ media: momentMedia(), music, at: AT }).music, music, 'the music is copied')
+  t.alike(momentRecord({ media: momentMedia(), music: { ...music, title: 'x' }, at: AT }).music, music, 'extra keys dropped')
+  await t.exception.all(async () => momentRecord({ media: momentMedia(), music: { ...music, start: -1 }, at: AT }), /music-invalid/)
+  await t.exception.all(async () => momentRecord({ media: momentMedia(), music: 'D7KyD', at: AT }), /music-invalid/)
+  await t.exception.all(async () => momentRecord({ media: momentMedia(), music: { p: 'audius', id: 'D7KyD' }, at: AT }), /music-invalid/)
+  // A reader from before music in momentos knows only the 4-key set.
+  const oldReader = (r) => (hasExact(r, MOMENT_KEYS) ? validateRecord(r, 1) : 'malformed')
+  t.is(oldReader(mr), 'malformed', 'an old reader skips a moment with music')
+  t.is(oldReader({ type: 'moment', text: 'oi', at: AT, media: momentMedia() }), null, 'and still reads one without')
+})
+
+function hasExact (obj, keys) {
+  const own = Object.keys(obj)
+  return own.length === keys.length && keys.every((k) => Object.prototype.hasOwnProperty.call(obj, k))
+}
+
 const PLACE = { uf: 'SP', city: 'São Paulo', bairro: 'Pinheiros' }
 const LDESC = (start) => ({ core: K1, mime: 'image/webp', start, blocks: 1, bytes: 1000, sha256: 'e'.repeat(64), width: 512, height: 512 })
 const listing = (over = {}) => ({ type: 'listing', kind: 'produto', title: 'Bicicleta', text: 'Aro 29', price: 50000, unit: null, cat: 'esporte', place: PLACE, at: AT, ...over })

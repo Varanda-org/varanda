@@ -236,8 +236,10 @@ test('momentos end to end: put, create, read, 24 h window, follower, photo, tamp
   const r1 = await A.web.request('moments.read', {})
   t.alike(r1.authors, [], 'the own key is never in authors')
   t.is(r1.own.length, 1)
-  t.alike(r1.own[0], { seq: created.seq, ref: created.ref, text: 'agora', at: r1.own[0].at, media: item })
+  t.alike(r1.own[0], { seq: created.seq, ref: created.ref, text: 'agora', at: r1.own[0].at, media: item, music: null })
   t.alike(r1.past, [])
+  const written = (await A.web.request('log.read', {})).entries.find((e) => e.seq === created.seq)
+  t.alike(Object.keys(written.record), ['type', 'text', 'at', 'media'], 'without music the 4-key record is written')
 
   // The photo, from the record's public key and nonce.
   const got = await A.node.momentReadMedia({ author: A.key, seq: created.seq })
@@ -287,4 +289,22 @@ test('momentos end to end: put, create, read, 24 h window, follower, photo, tamp
   })
   await copyDiary(A, B)
   t.alike((await B.web.request('moments.read', {})).authors, [], 'the follower sees the delete')
+
+  // A moment with music: the record keeps only { p, id, start }, and the
+  // author and a follower read it back through moments.read.
+  const music = { p: 'audius', id: 'D7KyD', start: 30 }
+  const tuneItem = await A.node.momentPutMedia({ bytes: png(1000), mime: 'image/png', width: 64, height: 48 })
+  t.alike(await failure(A.web.request('moment.create', { text: 'som', media: tuneItem, music: null })), { code: 'USAGE', message: 'parâmetro inválido: music' }, 'null music is refused')
+  t.alike(await failure(A.web.request('moment.create', { text: 'som', media: tuneItem, music: { ...music, title: 'x' } })), { code: 'USAGE', message: 'parâmetro inválido: music' }, 'extra music keys are refused')
+  const withMusic = await A.web.request('moment.create', { text: 'som', media: tuneItem, music })
+  const tuneRecord = (await A.web.request('log.read', {})).entries.find((e) => e.seq === withMusic.seq).record
+  t.alike(Object.keys(tuneRecord), ['type', 'text', 'at', 'media', 'music'], 'the 5-key record')
+  t.alike(tuneRecord.music, music)
+  const r4 = await A.web.request('moments.read', {})
+  t.alike(r4.own.map((i) => [i.seq, i.text, i.music]), [[withMusic.seq, 'som', music]])
+  await copyDiary(A, B)
+  const r5 = await B.web.request('moments.read', {})
+  t.alike(r5.authors[0].items.map((i) => [i.seq, i.music]), [[withMusic.seq, music]], 'the follower reads the music')
+  const heard = await B.node.momentReadMedia({ author: A.key, seq: withMusic.seq })
+  t.alike([heard.mime, heard.w, heard.h], ['image/png', 64, 48], 'the photo of a moment with music')
 })

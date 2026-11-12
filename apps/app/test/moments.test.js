@@ -102,3 +102,39 @@ test('progressOf', async (t) => {
   t.alike(progressOf(2, 3), [1, 1, 0])
   t.alike(progressOf(0, 0), [])
 })
+
+test('momentMusicOf accepts wire and cleaned references and copies only id and start', async (t) => {
+  const { momentMusicOf } = await load()
+  for (const id of ['a', 'aB19', 'Z'.repeat(32)]) {
+    for (const start of [0, 1, 7200]) {
+      const music = { p: 'audius', id, start }
+      const clean = momentMusicOf({ music })
+      t.alike(clean, { id, start })
+      t.alike(momentMusicOf({ music: clean }), clean, 'cleaning is idempotent')
+      t.not(clean, music)
+      t.alike(music, { p: 'audius', id, start }, 'input unchanged')
+    }
+  }
+})
+
+test('momentMusicOf refuses malformed references and holdMsOf extends only actual music playback', async (t) => {
+  const { momentMusicOf, holdMsOf, MUSIC_HOLD_MS, AUTO_ADVANCE_MS } = await load()
+  const valid = { p: 'audius', id: 'Ab12', start: 30 }
+  const invalid = [null, undefined, [], 'abc', {}, { id: 'abc' }, { start: 0 },
+    ...['', 'a'.repeat(33), 'a-b', 'a/b', 'é', 1].map((id) => ({ ...valid, id })),
+    ...[-1, 7201, 1.5, NaN, Infinity, '30', null, undefined].map((start) => ({ ...valid, start })),
+    ...['other', null, undefined].map((p) => ({ ...valid, p })),
+    { ...valid, url: '/audio' }, Object.assign(new Date(), valid)]
+  for (const music of invalid) {
+    t.is(momentMusicOf({ music }), null)
+    t.is(holdMsOf({ music }, true), AUTO_ADVANCE_MS)
+  }
+  t.is(momentMusicOf(null), null)
+  t.is(momentMusicOf({}), null)
+  t.is(holdMsOf(null, true), AUTO_ADVANCE_MS)
+  t.is(MUSIC_HOLD_MS, 15000)
+  for (const music of [valid, { id: 'Ab12', start: 30 }]) {
+    t.is(holdMsOf({ music }, true), MUSIC_HOLD_MS)
+    for (const playing of [false, undefined, null, 1, 'true']) t.is(holdMsOf({ music }, playing), AUTO_ADVANCE_MS)
+  }
+})

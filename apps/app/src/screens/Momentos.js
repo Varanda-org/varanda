@@ -13,7 +13,7 @@
 //
 // Tap the right half: next; the left half: previous; hold: pause; swipe down
 // or the close button: close. Every item advances by itself after
-// AUTO_ADVANCE_MS, paused while pressed or while a menu is open, and never
+// its photo or music hold, paused while pressed or a menu is open, and never
 // when the system asks for reduced motion. Past the last item of an author
 // the next author in ringOrder plays, then the viewer closes.
 //
@@ -33,7 +33,11 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
-import { AUTO_ADVANCE_MS, canReply, expiresIn, firstUnseenIndex, nextIndex, progressOf, replyContext, ringOrder } from '../moments'
+import { holdMsOf, momentMusicOf, canReply, expiresIn, firstUnseenIndex, nextIndex, progressOf, replyContext, ringOrder } from '../moments'
+import { audiusPolicy, audiusReady } from '../account'
+import { musicOriginOf } from '../music'
+import { openExternal } from '../openExternal'
+import { MomentMusic } from '../ui/MomentMusic'
 import { liveAuthors, liveItems, momentsOf } from '../momentSeen'
 import { loadMomentSeen, markMomentSeen, onMomentSeen } from '../momentSeenStore'
 import { revokeUrl, urlFromBytes } from '../media/display'
@@ -72,6 +76,8 @@ const CAPTION_PULL_SETTLE_MS = 120
 export const EXPIRY_TICK_MS = 15000
 // Longer than ActionsSheet's wait before it runs the chosen action.
 export const MENU_SETTLE_MS = 1000
+export const MUSIC_START_WAIT_MS = 3000
+export const LINK_HOLD_GRACE_MS = 1000
 
 const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
 
@@ -396,6 +402,36 @@ export default function Momentos (props) {
   )
 }
 
+function useMomentMusicPolicy (node, member, active) {
+  const origin = musicOriginOf(node)
+  const epoch = node.epoch
+  const [result, setResult] = useState(null)
+  useEffect(() => {
+    let live = true
+    setResult(null)
+    if (!active || origin === null) return undefined
+    const load = async () => {
+      try {
+        const policy = await audiusPolicy({ origin })
+        if (!live) return
+        if (policy.moments !== true) {
+          setResult({ epoch, member, origin, ok: false })
+          return
+        }
+        const ready = await audiusReady({ member, origin })
+        if (live) setResult({ epoch, member, origin, ok: ready === true })
+      } catch {
+        if (live) setResult({ epoch, member, origin, ok: false })
+      }
+    }
+    load()
+    return () => { live = false }
+  }, [active, epoch, member, origin])
+  if (!active || origin === null) return false
+  if (result?.epoch !== epoch || result?.member !== member || result?.origin !== origin) return null
+  return result.ok
+}
+
 function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage, onCreate }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
@@ -431,6 +467,15 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
   const photo = useMomentPhoto(author, item ? item.seq : null)
   const handlePhotoError = photo.fail
   const itemKey = item ? item.ref : ''
+  const music = momentMusicOf(item)
+  const musicOrigin = musicOriginOf(node)
+  const musicOn = useMomentMusicPolicy(node, own, music !== null)
+  const [musicState, setMusicState] = useState(null)
+  const musicStarted = musicOn === true && musicState?.key === itemKey && musicState.phase === 'playing'
+  const musicWaiting = music !== null && musicOn !== false && (musicState?.key !== itemKey || musicState.phase === 'waiting')
+  const duration = holdMsOf(item, musicStarted)
+  const [musicClosed, setMusicClosed] = useState(false)
+  useEffect(() => { setMusicState(null) }, [itemKey, node.epoch])
 
   // Seen on this device as soon as it is on screen.
   const { mark } = seenState
@@ -453,7 +498,12 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
   const closingRef = useRef(false)
   const closeTimer = useRef(null)
   useEffect(() => () => clearTimeout(closeTimer.current), [])
-  useEffect(() => { if (isTop) closingRef.current = false }, [isTop])
+  useEffect(() => {
+    if (isTop) {
+      closingRef.current = false
+      setMusicClosed(false)
+    }
+  }, [isTop])
   // Swipe down closes; the photo follows the finger until then. dragging
   // holds playback while a drag runs (the pan cancels the press that holds).
   const drag = useRef(new Animated.Value(0)).current
@@ -461,10 +511,12 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
   const close = useCallback(() => {
     if (closingRef.current || !isTopRef.current || typeof onBack !== 'function') return
     closingRef.current = true
+    setMusicClosed(true)
     clearTimeout(closeTimer.current)
     closeTimer.current = setTimeout(() => {
       if (!isTopRef.current) return
       closingRef.current = false
+      setMusicClosed(false)
       drag.setValue(0)
       setDragging(false)
     }, CLOSE_RELEASE_MS)
@@ -487,9 +539,31 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
     return Math.abs(e.nativeEvent.pageX - start.x) > TAP_SLOP || Math.abs(e.nativeEvent.pageY - start.y) > TAP_SLOP
   }
 
-  // Auto-advance: the current segment fills over AUTO_ADVANCE_MS; a pause
+  // Auto-advance: the current segment fills over its hold; a pause
   // keeps what is left. Off under reduced motion (the segment shows full).
   const [held, setHeld] = useState(false)
+  const [linkHeld, setLinkHeld] = useState(false)
+  const linkHidden = useRef(false)
+  const openMusicLink = (url) => {
+    linkHidden.current = false
+    setLinkHeld(true)
+    openExternal(url)
+  }
+  useEffect(() => { setLinkHeld(false) }, [itemKey])
+  useEffect(() => {
+    if (!linkHeld) return undefined
+    if (node.visible === false) {
+      linkHidden.current = true
+      return undefined
+    }
+    if (node.visible === true && linkHidden.current) {
+      setLinkHeld(false)
+      return undefined
+    }
+    // A popup or a blocked open may never hide the viewer.
+    const timer = setTimeout(() => setLinkHeld(false), LINK_HOLD_GRACE_MS)
+    return () => clearTimeout(timer)
+  }, [linkHeld, node.visible])
   // menuShown is the sheet; menuOpen holds playback from the menu's opening
   // until its action ran (ActionsSheet runs it up to 700 ms after closing) or
   // MENU_SETTLE_MS after a close without one, so 'Apagar' always finds the
@@ -514,12 +588,13 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
   }
   const [deleting, setDeleting] = useState(null)
   const progress = useRef(new Animated.Value(0)).current
-  const remaining = useRef(AUTO_ADVANCE_MS)
+  const remaining = useRef(duration)
   const [restartTick, setRestartTick] = useState(0)
   const restart = useRef(() => {})
   restart.current = () => {
+    setMusicState(null)
     progress.setValue(0)
-    remaining.current = AUTO_ADVANCE_MS
+    remaining.current = duration
     setRestartTick((n) => n + 1)
   }
   // Next / previous item; past the end of an author, the next author in
@@ -546,8 +621,6 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
   stepRef.current = step
 
   useEffect(() => {
-    progress.setValue(0)
-    remaining.current = AUTO_ADVANCE_MS
     // A new moment's caption starts at its top (the ScrollView is keyed too).
     captionOffsetRef.current = 0
     captionTouchRef.current = false
@@ -555,9 +628,26 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
     // delayed press-out ran: never carry its hold into the new moment.
     setHeld(false)
   }, [itemKey, progress])
+  useEffect(() => {
+    progress.setValue(0)
+    remaining.current = duration
+  }, [itemKey, duration, restartTick, progress])
   // node.visible: a hidden tab or a backgrounded app holds playback, so the
   // animation cannot finish unseen and skip the moment on return.
-  const running = isTop && node.visible !== false && autoOn && item !== null && photo.phase !== 'loading' && !held && !dragging && !menuOpen && deleting === null
+  const paused = !isTop || node.visible === false || item === null || photo.phase === 'loading' || held || dragging || menuOpen || deleting !== null || musicClosed || linkHeld
+  const running = autoOn && !paused && !musicWaiting
+  const musicWaitRemaining = useRef(MUSIC_START_WAIT_MS)
+  useEffect(() => { musicWaitRemaining.current = MUSIC_START_WAIT_MS }, [itemKey, restartTick, node.epoch])
+  useEffect(() => {
+    if (!musicWaiting || paused) return undefined
+    // Policy and audio share one budget, spent only while playback can run.
+    const started = Date.now()
+    const timer = setTimeout(() => setMusicState({ key: itemKey, phase: 'fallback' }), musicWaitRemaining.current)
+    return () => {
+      clearTimeout(timer)
+      musicWaitRemaining.current = Math.max(0, musicWaitRemaining.current - (Date.now() - started))
+    }
+  }, [musicWaiting, paused, itemKey, restartTick])
   useEffect(() => {
     if (!running) return undefined
     const anim = Animated.timing(progress, { toValue: 1, duration: Math.max(0, remaining.current), easing: Easing.linear, useNativeDriver: false })
@@ -565,10 +655,10 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
     return () => {
       anim.stop()
       progress.stopAnimation((value) => {
-        remaining.current = Math.max(0, (1 - value) * AUTO_ADVANCE_MS)
+        remaining.current = Math.max(0, (1 - value) * duration)
       })
     }
-  }, [running, itemKey, restartTick, progress])
+  }, [running, itemKey, restartTick, duration, progress])
 
   // A caption scrolled away from its top keeps a downward drag that starts
   // on it (it scrolls back); otherwise a drag down closes, as everywhere.
@@ -813,6 +903,21 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
         </View>
         <View style={[styles.bottom, { paddingBottom: insets.bottom + 12 }]} pointerEvents='box-none' onLayout={(e) => setBottomHeight(e.nativeEvent.layout.height)}>
           {meet ? null : <Scrim edge='bottom' alpha={BOTTOM_SCRIM.alpha} fade={BOTTOM_SCRIM.fade} style={styles.bottomScrim} />}
+          {musicOn
+            ? (
+              <MomentMusic
+                key={itemKey + ':' + restartTick}
+                music={music}
+                member={own}
+                origin={musicOrigin}
+                request={node.request}
+                paused={paused}
+                onStart={() => setMusicState({ key: itemKey, phase: 'playing' })}
+                onUnavailable={() => setMusicState({ key: itemKey, phase: 'fallback' })}
+                onOpenExternal={openMusicLink}
+              />
+              )
+            : null}
           {text !== ''
             ? (
               <ScrollView

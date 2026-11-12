@@ -151,7 +151,7 @@ export function createVitrineRequest (fixtures, options) {
     const now = demoNow()
     return t - now <= MOMENT_SKEW_MS && t + MOMENT_TTL_MS > now
   }
-  const momentRow = (author, { seq, record }) => ({ seq, ref: `${author}:${seq}`, text: record.text, at: shown(record.at), media: record.media })
+  const momentRow = (author, { seq, record }) => ({ seq, ref: `${author}:${seq}`, text: record.text, at: shown(record.at), media: record.media, music: record.music || null })
   data.momentMedia = (author, seq) => {
     const entry = typeof author === 'string' && Number.isSafeInteger(seq) ? momentsOf(author).find((e) => e.seq === seq) : null
     return entry && showing(entry.record) ? entry.record.media : null
@@ -872,12 +872,12 @@ export function createVitrineRequest (fixtures, options) {
     },
     // Only an item the Vitrine media handle's putMoment answered and no
     // moment published yet, as the web node's entry check.
-    'moment.create': ({ text, media }) => {
+    'moment.create': ({ text, media, music }) => {
       const prepared = data.momentUploads ? data.momentUploads.get(media.id) : null
       if (!prepared || JSON.stringify(prepared) !== JSON.stringify(media)) refuse('USAGE', 'prepare a mídia de novo')
       if (badText(text)) refuse('USAGE', 'registro inválido: malformed')
       data.momentUploads.delete(media.id)
-      return append({ type: 'moment', text, at: stamp(), media })
+      return append({ type: 'moment', text, at: stamp(), media, ...(music ? { music } : {}) })
     },
     'moments.read': () => {
       const authors = data.follows.filter((author) => author !== data.own).flatMap((author) => {
