@@ -412,7 +412,7 @@ function mp4Video ({ turn = false, moovExtra = [] } = {}) {
   const avcC = box('avcC', [1, 100, 0, 40, 0xff, 0xe1], be16(6), [0x67, 100, 0, 40, 0xac, 0xd9], [1], be16(4), [0x68, 0xeb, 0xe3, 0xcb])
   const avc1 = box('avc1', zeros(6), be16(1), zeros(16), be16(640), be16(360), be32(0x480000), be32(0x480000), be32(0), be16(1), [4, ...ascii('x264'), ...zeros(27)], be16(0x18), be16(0xffff), avcC)
   const moovAt = (offset) => box('moov',
-    box('mvhd', [0, 0, 0, 0], be32(7), be32(9), be32(1000), be32(3000), zeros(80)),
+    box('mvhd', [0, 0, 0, 0], be32(7), be32(9), be32(1000), be32(3000), zeros(16), ...[0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000].map(be32), zeros(28)),
     box('trak', tkhd, box('mdia',
       box('mdhd', [0, 0, 0, 0], be32(7), be32(9), be32(3000), be32(9000), [0x55, 0xc4, 0, 0]),
       box('hdlr', [0, 0, 0, 0], be32(0), ascii('vide'), zeros(12), ascii('VideoHandler'), [0]),
