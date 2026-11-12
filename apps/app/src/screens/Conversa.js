@@ -11,14 +11,20 @@
 // The peek, follow and like/repost helpers are exported for Membro.js.
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import { StyleSheet, Text, View } from 'react-native'
+import { KeyboardAvoidingView, StyleSheet, Text, View } from 'react-native'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { FOLLOW_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
 import { fetchCounts, fetchMember, fetchPost, COUNTS_MAX } from '../indexClient'
 import { assembleMember, assembleThread, planPeeks } from '../thread'
+import { childLabel, mergeChildren, threadRows, withOwnReply } from '../threadRows'
+import { quickReplyPlan, sendTextReply } from '../replySend'
+import { hasLink } from '../links'
+import { refusalOf } from '../wordCheck'
 import { applyToggle, countsAfter, diaryPeekSlots, emptyState, fromRead, mergeCounts } from '../engagement'
 import { noteLocalWrite } from '../localWrites'
+import { registerLocalCache, cacheGeneration } from '../localCaches'
 import { replyNameOf, whoOf } from '../who'
 import { avatarOf, pickAvatar } from '../media/avatar'
 import { canDelete, isPageRef } from '../deletion'
@@ -29,12 +35,14 @@ import { coreActor } from '../pageCore'
 import { Btn, ErrorText, Row, Soft, UNCERTAIN, errorText, useAction, useBottomPad, useNow } from '../ui'
 import { OfflineNote } from '../ui/OfflineNote'
 import { PostRow } from '../ui/PostRow'
+import { ReplyBar } from '../ui/ReplyBar'
+import { useKeyboardAvoidEnabled, useKeyboardOpen } from '../ui/keyboardAvoid'
 import { RefreshableList } from '../ui/RefreshableList'
 import { Sheet } from '../ui/Sheet'
 import { ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
 import { revokeDeletedMedia } from '../media/cache'
-import { type } from '../ui/theme'
+import { space, type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
 
 // Same value as packages/rpc/lib/limits.js ENGAGEMENT_LIMIT_MAX.
@@ -308,7 +316,7 @@ export function useFollowSet (request) {
 // confirm sends post.delete once. After an uncertain failure `recheck` (a read
 // of the diary) runs before the action is offered again; nothing is resent.
 // `node` (optional) lets a page post be deleted from a core node.
-export function useDelete ({ request, node, onToast, onDeleted, recheck }) {
+export function useDelete ({ request, node, onToast, onDeleted, recheck, onUncertain }) {
   const action = useAction()
   const sourceRef = useRef(null)
   sourceRef.current = node || request
@@ -334,6 +342,7 @@ export function useDelete ({ request, node, onToast, onDeleted, recheck }) {
       const member = await memberKeyOf(source.request, source)
       return actAs(source, { member, action: 'delete', page, op: { to: target.ref } })
     })
+    if (r.ok || r.uncertain) dropOwnReplies(ownReplyCache, new Set([target.ref]))
     if (r.ok) {
       setTarget(null)
       notify('publicação apagada')
@@ -343,6 +352,7 @@ export function useDelete ({ request, node, onToast, onDeleted, recheck }) {
       setRechecking(true)
       notify(UNCERTAIN)
       try {
+        if (onUncertain) onUncertain(target)
         await recheck()
       } catch {} finally {
         setRechecking(false)
@@ -624,6 +634,60 @@ async function quotePlan (items, peeked, known, alive) {
   return planWithHints(refs, known, alive)
 }
 
+// Only posts just signed on this device enter this cache.
+const ownReplyCache = new Map()
+registerLocalCache({ wipe: () => ownReplyCache.clear() })
+
+function cacheOwnReply (parentKey, item) {
+  const items = withOwnReply(ownReplyCache.get(parentKey) || [], item)
+  ownReplyCache.delete(parentKey)
+  ownReplyCache.set(parentKey, items.slice(-20))
+  while (ownReplyCache.size > 50) ownReplyCache.delete(ownReplyCache.keys().next().value)
+}
+
+function dropOwnReplies (cache, refs) {
+  for (const [key, items] of cache) {
+    const kept = items.filter((item) => !refs.has(refOf(item.author, item.seq)))
+    if (kept.length) cache.set(key, kept)
+    else cache.delete(key)
+  }
+}
+
+function pruneOwnReplies (refs, own) {
+  const listed = new Set(refs)
+  dropOwnReplies(ownReplyCache, listed)
+  dropOwnReplies(own, listed)
+}
+
+function ownFor (parentKey, own) {
+  return (own.get(parentKey) || []).reduce(withOwnReply, ownReplyCache.get(parentKey) || [])
+}
+
+export function branchView (replies, counts, children, own) {
+  const branches = new Map(children)
+  const floor = new Map(counts)
+  for (const parent of replies) {
+    const key = refOf(parent.author, parent.seq)
+    const direct = ownFor(key, own).reduce(withOwnReply, children.get(key) || [])
+    const items = []
+    const seen = new Set([key])
+    const append = (item) => {
+      const ref = refOf(item.author, item.seq)
+      if (seen.has(ref)) return
+      seen.add(ref)
+      items.push(item)
+      for (const reply of ownFor(ref, own)) append(reply)
+    }
+    for (const item of direct) append(item)
+    branches.set(key, items)
+    if (items.length > 0) {
+      const count = counts.get(key)
+      floor.set(key, { ...count, replies: Math.max(count && Number.isSafeInteger(count.replies) ? count.replies : 0, items.length) })
+    }
+  }
+  return { children: branches, counts: floor }
+}
+
 const INITIAL = {
   phase: 'loading', // 'loading' | 'ready' | 'error'
   error: '',
@@ -639,12 +703,15 @@ const INITIAL = {
   refreshing: false
 }
 
-export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onToast, onDeletedPost, onMessage }) {
+export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onToast, onDeletedPost, onMessage, composeSignal, onComposeSeen, onPublished }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
   const now = useNow(60000)
   const bottomPad = useBottomPad()
+  const insets = useSafeAreaInsets()
+  const avoidKeyboard = useKeyboardAvoidEnabled()
+  const keyboardOpen = useKeyboardOpen()
   const focal = entry.key
   const seed = useMemo(() => seedItem(entry.params ? entry.params.seed : null, focal), [entry, focal])
   const full = !!node.hosted && node.online !== false
@@ -654,6 +721,30 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
   const { follows, load: loadFollows } = useFollowSet(request)
   const [view, setView] = useState(INITIAL)
   const [parentHeight, setParentHeight] = useState(null)
+  const [open, setOpen] = useState(new Set())
+  const [children, setChildren] = useState(new Map())
+  const [childNext, setChildNext] = useState(new Map())
+  const [childErrors, setChildErrors] = useState(new Map())
+  const [childBusy, setChildBusy] = useState(new Set())
+  const [replyTarget, setReplyTarget] = useState(null)
+  const [focusSignal, setFocusSignal] = useState(undefined)
+  const [note, setNote] = useState('')
+  const [sending, setSending] = useState(false)
+  const sendingRef = useRef(false)
+  const childRequests = useRef(new Map())
+  // Bumped when the open branches are dropped, so a page still in flight
+  // cannot land in, or release, the branch that replaced it.
+  const branchGen = useRef(0)
+  const childrenRef = useRef(children)
+  childrenRef.current = children
+  const ownReplies = useRef(new Map())
+  const openRef = useRef(open)
+  openRef.current = open
+  const loadChildrenRef = useRef(null)
+  const replyDraft = useRef({ focal, text: '' })
+  if (replyDraft.current.focal !== focal) replyDraft.current = { focal, text: '' }
+  const sessionRef = useRef(0)
+  const lastCompose = useRef(null)
   const viewRef = useRef(view)
   const peekedRef = useRef(new Map())
   const followsRef = useRef(Promise.resolve(new Set()))
@@ -663,11 +754,43 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
     setView(viewRef.current)
   }, [])
 
+  useEffect(() => {
+    sessionRef.current += 1
+    setOpen(new Set())
+    setChildren(new Map())
+    setChildNext(new Map())
+    setChildBusy(new Set())
+    setChildErrors(new Map())
+    childRequests.current.clear()
+    branchGen.current += 1
+    ownReplies.current.clear()
+    setReplyTarget(null)
+    setFocusSignal(undefined)
+    setNote('')
+    return () => { sessionRef.current += 1 }
+  }, [focal])
+
+  const targetReply = useCallback((target) => {
+    if (sendingRef.current) return
+    setReplyTarget(target)
+    setNote('')
+    setFocusSignal((signal) => (signal || 0) + 1)
+  }, [])
+  useEffect(() => {
+    if (full && composeSignal && composeSignal !== lastCompose.current && composeSignal.target.ref === focal) {
+      lastCompose.current = composeSignal
+      targetReply(composeSignal.target)
+      if (typeof onComposeSeen === 'function') onComposeSeen()
+    }
+  }, [composeSignal, focal, full, targetReply, onComposeSeen])
+
   const { readOwn, readCounts, setCount, reset } = eng
-  const load = useCallback(async (refreshing = false) => {
+  const load = useCallback(async (refreshing = false, quiet = false) => {
+    if (quiet && (viewRef.current.phase !== 'ready' || viewRef.current.next !== null || viewRef.current.loadingMore || viewRef.current.refreshing)) return
+    const loadedChildren = [...childrenRef.current.values()].flat()
     const mine = ++genRef.current
     const alive = () => mine === genRef.current
-    commit(refreshing ? { refreshing: true, error: '' } : { ...INITIAL })
+    if (!quiet) commit(refreshing ? { refreshing: true, error: '' } : { ...INITIAL })
     try {
       let res = await fetchPost(focal)
       if (!alive()) return
@@ -678,13 +801,15 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
         if (!alive()) return
       }
       if (!res.ok) {
-        commit({ phase: 'error', refreshing: false, error: res.reason === 'not-found' ? 'Esta conversa não está disponível.' : 'Não foi possível abrir a conversa.' })
+        if (quiet) return
+        commit({ phase: (refreshing || quiet) && viewRef.current.phase === 'ready' ? 'ready' : 'error', refreshing: false, loadingMore: false, error: refreshing && viewRef.current.phase === 'ready' ? 'Não foi possível atualizar a conversa.' : res.reason === 'not-found' ? 'Esta conversa não está disponível.' : 'Não foi possível abrir a conversa.' })
         return
       }
       const index = res.value
-      const refs = [focal].concat(index.parent ? [index.parent] : [], index.replies)
+      const branchRefs = loadedChildren.map((item) => refOf(item.author, item.seq))
+      const refs = [focal].concat(index.parent ? [index.parent] : [], index.replies, branchRefs, quiet ? viewRef.current.replies.map((item) => refOf(item.author, item.seq)) : [])
       // engagement.read first: it preempts sync, so it goes before the peeks.
-      if (refreshing) reset()
+      if (refreshing && !quiet) reset()
       await readOwn(refs, alive)
       if (!alive()) return
       followsRef.current = loadFollows()
@@ -694,12 +819,22 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
       const { parent, post, replies, unavailable } = assembleThread({ focal, index, peeked })
       const followSet = await followsRef.current
       if (!alive()) return
-      await peekAll(request, await quotePlan([parent, post].concat(replies), peeked, knownAuthors({ ownKey, follows: followSet, hinted: index.authors, peeked }), alive), peeked, alive)
+      await peekAll(request, await quotePlan([parent, post].concat(replies, loadedChildren, quiet ? viewRef.current.replies : []), peeked, knownAuthors({ ownKey, follows: followSet, hinted: index.authors, peeked }), alive), peeked, alive)
       if (!alive()) return
       peekedRef.current = peeked
       learnPeeked(learnMany, peeked)
       resolveMany([...new Set([post, parent].concat(replies).filter(Boolean).flatMap((i) => i.quote ? [i.author, i.quote.author] : [i.author]))])
       setCount(focal, { replies: index.repliesTotal, likes: index.likes, reposts: index.reposts, quotes: index.quotesTotal })
+      if (refreshing) {
+        childrenRef.current = new Map()
+        setChildren(new Map())
+        setChildNext(new Map())
+        setChildErrors(new Map())
+        childRequests.current.clear()
+        branchGen.current += 1
+        setChildBusy(new Set())
+      }
+      pruneOwnReplies(index.replies, ownReplies.current)
       commit({
         phase: 'ready',
         error: '',
@@ -707,18 +842,19 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
         meta: { indexing: index.indexing, complete: index.complete, repliesTotal: index.repliesTotal },
         parent,
         post,
-        replies,
+        replies: ownFor(focal, ownReplies.current).reduce(withOwnReply, quiet ? replies.reduce(withOwnReply, viewRef.current.replies) : replies),
         // An unavailable parent is not counted as an unavailable reply.
         parentGone: !!index.parent && !parent,
         unavailable: unavailable - (index.parent && !parent ? 1 : 0),
-        next: index.next,
+        next: quiet ? viewRef.current.next : index.next,
         loadingMore: false,
         moreError: ''
       })
-      readCounts((parent ? [refOf(parent.author, parent.seq)] : []).concat(replies.map((r) => refOf(r.author, r.seq))), alive)
+      if (refreshing) for (const key of openRef.current) loadChildrenRef.current(key)
+      readCounts((parent ? [refOf(parent.author, parent.seq)] : []).concat(replies.map((r) => refOf(r.author, r.seq)), branchRefs), alive)
     } catch (err) {
-      if (!alive()) return
-      commit({ phase: 'error', refreshing: false, error: isSeederDown(err) ? 'Sem conexão com o servidor agora.' : errorText(err) })
+      if (!alive() || quiet) return
+      commit({ phase: (refreshing || quiet) && viewRef.current.phase === 'ready' ? 'ready' : 'error', refreshing: false, loadingMore: false, error: refreshing && viewRef.current.phase === 'ready' ? 'Não foi possível atualizar a conversa.' : isSeederDown(err) ? 'Sem conexão com o servidor agora.' : errorText(err) })
     }
   }, [focal, request, commit, readOwn, readCounts, setCount, reset, loadFollows, learnMany, resolveMany, ownKey])
 
@@ -749,6 +885,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
       if (!alive()) return
       learnPeeked(learnMany, peeked)
       resolveMany([...new Set(page.replies.flatMap((i) => i.quote ? [i.author, i.quote.author] : [i.author]))])
+      pruneOwnReplies(index.replies, ownReplies.current)
       const seen = new Set(viewRef.current.replies.map((r) => refOf(r.author, r.seq)))
       const fresh = page.replies.filter((r) => !seen.has(refOf(r.author, r.seq)))
       commit({
@@ -764,6 +901,78 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
     }
   }, [focal, request, commit, readOwn, readCounts, learnMany, resolveMany, ownKey])
 
+  const loadChildren = async (parentKey, cursor = null) => {
+    const mine = genRef.current
+    const branch = branchGen.current
+    const held = childRequests.current.get(parentKey)
+    if (!full || (held && held.mine === mine && held.branch === branch)) return
+    const token = { mine, branch }
+    childRequests.current.set(parentKey, token)
+    setChildBusy((previous) => new Set(previous).add(parentKey))
+    setChildErrors((previous) => {
+      const next = new Map(previous)
+      next.delete(parentKey)
+      return next
+    })
+    const alive = () => mine === genRef.current && branch === branchGen.current
+    try {
+      const res = await fetchPost(parentKey, cursor)
+      if (!alive()) return
+      if (!res.ok) throw new Error('Não foi possível carregar as respostas.')
+      const index = res.value
+      const refs = [parentKey].concat(index.replies)
+      await readOwn(refs, alive)
+      if (!alive()) return
+      const peeked = peekedRef.current
+      await peekAll(request, planPeeks({ refs, authors: index.authors }), peeked, alive)
+      if (!alive()) return
+      const page = assembleThread({ focal: parentKey, index, peeked })
+      const followSet = await followsRef.current
+      if (!alive()) return
+      await peekAll(request, await quotePlan(page.replies, peeked, knownAuthors({ ownKey, follows: followSet, hinted: index.authors, peeked }), alive), peeked, alive)
+      if (!alive()) return
+      learnPeeked(learnMany, peeked)
+      resolveMany([...new Set(page.replies.flatMap((item) => item.quote ? [item.author, item.quote.author] : [item.author]))])
+      pruneOwnReplies(index.replies, ownReplies.current)
+      const items = ownFor(parentKey, ownReplies.current).reduce(withOwnReply, page.replies)
+      setChildren((previous) => mergeChildren(previous, parentKey, items))
+      setChildNext((previous) => new Map(previous).set(parentKey, index.next === cursor ? null : index.next))
+      setCount(parentKey, { replies: index.repliesTotal, likes: index.likes, reposts: index.reposts, quotes: index.quotesTotal })
+      readCounts(items.map((item) => refOf(item.author, item.seq)), alive)
+    } catch (err) {
+      if (alive()) {
+        setChildErrors((previous) => new Map(previous).set(parentKey, errorText(err)))
+        setChildNext((previous) => {
+          const next = new Map(previous)
+          next.delete(parentKey)
+          return next
+        })
+      }
+    } finally {
+      if (childRequests.current.get(parentKey) === token) {
+        childRequests.current.delete(parentKey)
+        setChildBusy((previous) => {
+          const next = new Set(previous)
+          next.delete(parentKey)
+          return next
+        })
+      }
+    }
+  }
+
+  loadChildrenRef.current = loadChildren
+
+  const toggleChildren = (row) => {
+    const parentKey = refOf(row.parent.author, row.parent.seq)
+    setOpen((previous) => {
+      const next = new Set(previous)
+      if (row.open) next.delete(parentKey)
+      else next.add(parentKey)
+      return next
+    })
+    if (!row.open && !childNext.has(parentKey)) loadChildren(parentKey)
+  }
+
   useEffect(() => {
     if (full) load(false)
     else loadFollows()
@@ -775,6 +984,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
     node,
     onToast,
     recheck: () => load(true),
+    onUncertain: (target) => dropOwnReplies(ownReplies.current, new Set([target.ref])),
     onDeleted: async (t) => {
       // Drops the result of a load started before the delete: it would bring the row back.
       genRef.current += 1
@@ -789,6 +999,25 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
       const [author, seqText] = t.ref.split(':')
       const known = peekedRef.current.get(author)
       if (known) peekedRef.current.set(author, { ...known, entries: known.entries.filter((e) => e.seq !== Number(seqText)) })
+      const parents = new Set()
+      for (const [key, items] of [...childrenRef.current, ...ownReplies.current, ...ownReplyCache]) {
+        if (items.some((item) => refOf(item.author, item.seq) === t.ref)) parents.add(key)
+      }
+      for (const key of parents) {
+        const count = eng.counts.get(key)
+        const remaining = Math.max(0, (count && Number.isSafeInteger(count.replies) ? count.replies : 0) - 1)
+        setCount(key, { ...count, replies: remaining })
+        if (remaining === 0 && !(childrenRef.current.get(key) || []).concat(ownFor(key, ownReplies.current)).some((item) => refOf(item.author, item.seq) !== t.ref)) {
+          setOpen((previous) => {
+            const next = new Set(previous)
+            next.delete(key)
+            return next
+          })
+        }
+      }
+      for (const [key, items] of ownReplyCache) ownReplyCache.set(key, items.filter((item) => refOf(item.author, item.seq) !== t.ref))
+      setChildren((previous) => new Map([...previous].map(([key, items]) => [key, items.filter((item) => refOf(item.author, item.seq) !== t.ref)])))
+      ownReplies.current = new Map([...ownReplies.current].map(([key, items]) => [key, items.filter((item) => refOf(item.author, item.seq) !== t.ref)]))
       const cur = viewRef.current
       const wasReply = cur.replies.some((r) => refOf(r.author, r.seq) === t.ref)
       commit({
@@ -801,20 +1030,22 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
       })
     }
   })
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined, onMessage }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply: full ? targetReply : onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined, onMessage }
   const props = (item, extra) => rowProps({ item, names, peeked: peekedRef.current, now, ownKey, follows, eng: full ? eng : null, handlers, extra })
 
   const title = 'Conversa'
   const top = <TopBar title={title} onBack={onBack} />
 
-  if (!full) {
+  // A send in flight keeps the thread and its bar mounted: a bar remounted
+  // when the connection returns would bring the sent text back.
+  if (!full && !sending) {
     return (
       <View style={styles.flex}>
         {top}
         <DeletePrompt del={del} />
         <OfflineNote />
         <View style={styles.flex}>
-          {seed ? <PostRow {...props(seed)} /> : null}
+          {seed ? <PostRow {...props(seed)} expanded /> : null}
           <View style={styles.note}><Soft>{node.hosted ? OFFLINE_NOTE : NOT_HOSTED_NOTE}</Soft></View>
         </View>
       </View>
@@ -823,7 +1054,92 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
 
   const { phase, error, meta, parent, replies, unavailable, next, loadingMore, moreError, refreshing } = view
   const post = view.post || (phase !== 'ready' ? seed : null)
+  const focalTarget = { ref: focal, ...(post ? identityOf(names, post.author, post) : {}), text: post ? post.text : '' }
+  const target = replyTarget || focalTarget
+  const expandReply = async (draft, target = replyTarget || focalTarget) => {
+    if (typeof onReply !== 'function') return false
+    const accepted = await onReply({ ...target, draft })
+    if (accepted === true && replyDraft.current.focal === focal && replyDraft.current.text === draft) replyDraft.current.text = ''
+    return accepted
+  }
+  const sendReply = async (text) => {
+    if (sendingRef.current) return false
+    const refusal = refusalOf(text)
+    const plan = quickReplyPlan({ text, nodeReady: full, actingAsPage: actingPageKey() !== null, hasLink: hasLink(text), refusal })
+    if (plan.kind === 'empty') return false
+    if (plan.kind === 'refuse') {
+      setNote(refusal)
+      return false
+    }
+    if (plan.kind === 'expand') return expandReply(text, target)
+    sendingRef.current = true
+    setSending(true)
+    setNote('')
+    const session = sessionRef.current
+    const cacheEpoch = cacheGeneration()
+    const at = new Date().toISOString()
+    try {
+      const result = await sendTextReply({ request, text, replyTo: target.ref })
+      const sent = result.ok ? parseRef(result.ref) : null
+      const item = sent ? { kind: 'post', ...sent, at, text, replyTo: parseRef(target.ref), ...identityOf(names, sent.author) } : null
+      if (item && cacheEpoch === cacheGeneration()) cacheOwnReply(target.ref, item)
+      if (result.ok && replyDraft.current.focal === focal && replyDraft.current.text === text) replyDraft.current.text = ''
+      if (result.ok && typeof onPublished === 'function') onPublished('quick-reply', target.ref)
+      if (session !== sessionRef.current) return result.ok
+      if (result.gated) return expandReply(text, target)
+      if (!result.ok) {
+        setNote(result.refused || (result.error && result.error.uncertain === true
+          ? 'A resposta pode ter sido enviada. Confira a conversa antes de enviar de novo.'
+          : errorText(result.error)))
+        return false
+      }
+      ownReplies.current = mergeChildren(ownReplies.current, target.ref, [item])
+      if (target.ref === focal) commit({ replies: withOwnReply(viewRef.current.replies, item) })
+      else {
+        setChildren((previous) => mergeChildren(previous, target.ref, [item]))
+        const branches = branchView(viewRef.current.replies, eng.counts, childrenRef.current, ownReplies.current)
+        const parentKey = viewRef.current.replies.map((reply) => refOf(reply.author, reply.seq)).find((key) =>
+          (branches.children.get(key) || []).some((child) => refOf(child.author, child.seq) === target.ref))
+        setOpen((previous) => new Set(previous).add(parentKey || target.ref))
+      }
+      const count = eng.counts.get(target.ref)
+      setCount(target.ref, { ...count, replies: (count && Number.isSafeInteger(count.replies) ? count.replies : 0) + 1 })
+      if (viewRef.current.next === null) load(false, true)
+      return true
+    } finally {
+      sendingRef.current = false
+      setSending(false)
+    }
+  }
+  const childMore = new Map([...open].map((key) => [key, !childNext.has(key) || childNext.get(key) !== null]))
+  const branches = branchView(replies, eng.counts, children, ownReplies.current)
+  const rows = threadRows({ replies, ...branches, open, more: childMore })
+  const renderThreadRow = (row) => {
+    if (row.kind === 'expander') {
+      const key = refOf(row.parent.author, row.parent.seq)
+      return <View style={styles.branchAction}><Btn label={childLabel(row.count, row.open)} expanded={row.open} onPress={() => toggleChildren(row)} pending={childBusy.has(key)} /></View>
+    }
+    if (row.kind === 'more') {
+      const key = refOf(row.parent.author, row.parent.seq)
+      return (
+        <View style={styles.branchAction}>
+          {childErrors.has(key)
+            ? <><ErrorText>{displayText(childErrors.get(key))}</ErrorText><Btn label='Tentar de novo' onPress={() => loadChildren(key)} pending={childBusy.has(key)} /></>
+            : <Btn label='Ver mais respostas' onPress={() => loadChildren(key, childNext.get(key))} pending={childBusy.has(key)} />}
+        </View>
+      )
+    }
+    return (
+      <View style={row.depth === 1 ? styles.child : undefined}>
+        <PostRow {...props(row.item, row.depth === 0 ? { replyToName: null, onOpenParent: undefined } : undefined)} />
+        {row.depth === 1 && row.deeper !== 0
+          ? <View style={styles.branchAction}><Btn label='Ver conversa' onPress={() => onOpenThread({ ref: refOf(row.item.author, row.item.seq), seed: row.item })} /></View>
+          : null}
+      </View>
+    )
+  }
   const notes = []
+  if (error && phase === 'ready') notes.push(error)
   if (view.parentGone) notes.push(PARENT_GONE_NOTE)
   if (meta && meta.indexing) notes.push('Ainda montando a conversa completa…')
   else if (meta && meta.complete === false) notes.push('Algumas respostas podem faltar.')
@@ -842,7 +1158,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
       {post
         ? (
           <View style={styles.focal}>
-            <PostRow {...props(post, parent ? { onOpenParent: () => onOpenThread({ ref: refOf(parent.author, parent.seq), seed: parent }), replyToName: whoOf(identityOf(names, parent.author, parent)).title } : {})} />
+            <PostRow expanded {...props(post, parent ? { onOpenParent: () => onOpenThread({ ref: refOf(parent.author, parent.seq), seed: parent }), replyToName: whoOf(identityOf(names, parent.author, parent)).title } : {})} />
             {/* After the row: PostRow paints an opaque bg, and later siblings paint on top. */}
             <View pointerEvents='none' style={styles.accentBar} />
           </View>
@@ -864,7 +1180,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
             {hasReplies
               ? (
                 <Text style={styles.repliesTitle} accessibilityRole='header'>
-                  {meta && meta.repliesTotal === 1 ? '1 resposta' : String(meta ? meta.repliesTotal : 0) + ' respostas'}
+                  {Math.max(meta ? meta.repliesTotal : 0, replies.length) === 1 ? '1 resposta' : String(Math.max(meta ? meta.repliesTotal : 0, replies.length)) + ' respostas'}
                 </Text>
                 )
               : null}
@@ -875,17 +1191,19 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
     </View>
   )
 
+  // The screen pads for the keyboard, as Mensagem and Grupo do: padding on a
+  // view whose height follows its content would count the keyboard twice.
   return (
-    <View style={styles.flex}>
+    <KeyboardAvoidingView style={styles.flex} behavior='padding' enabled={avoidKeyboard}>
       {top}
       <DeletePrompt del={del} />
       <OfflineNote />
       <View style={styles.flex}>
         <RefreshableList
-          data={phase === 'ready' ? replies : []}
-          keyExtractor={(r) => refOf(r.author, r.seq)}
-          renderItem={({ item }) => <PostRow {...props(item, { replyToName: null, onOpenParent: undefined })} />}
-          extraData={{ eng, follows, now, profileOf: names.profileOf }}
+          data={phase === 'ready' ? rows : []}
+          keyExtractor={(row) => row.key}
+          renderItem={({ item: row }) => renderThreadRow(row)}
+          extraData={{ eng, follows, now, childBusy, childErrors, profileOf: names.profileOf }}
           ListHeaderComponent={header}
           ListEmptyComponent={phase === 'loading' ? <Skeleton /> : null}
           ListFooterComponent={phase === 'ready'
@@ -909,14 +1227,41 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
           atEnd={next === null}
         />
       </View>
-    </View>
+      {/* Kept through a send that outlives the connection, so its own
+          success clears the text instead of a remounted copy. */}
+      {full || sending
+        ? (
+          // The open keyboard already covers the gesture bar: its inset would
+          // leave a band between the bar and the keyboard. The padding takes the
+          // bar's colour so no strip of page shows under it.
+          <View style={[styles.barWrap, { paddingBottom: keyboardOpen ? 8 : Math.max(8, insets.bottom) }]}>
+            <ReplyBar
+              key={focal}
+              target={target}
+              draft={replyDraft.current.text}
+              onDraftChange={(text) => { if (replyDraft.current.focal === focal) replyDraft.current.text = text }}
+              onSend={sendReply}
+              onExpand={expandReply}
+              onClearTarget={() => setReplyTarget(null)}
+              busy={sending}
+              disabled={!post && !replyTarget}
+              note={note}
+              focusSignal={focusSignal}
+            />
+          </View>
+          )
+        : null}
+    </KeyboardAvoidingView>
   )
 }
 
 const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
+  barWrap: { backgroundColor: colors.card },
   note: { paddingHorizontal: 16, paddingVertical: 12 },
   prompt: { paddingHorizontal: 16, paddingVertical: 12, gap: 8 },
+  child: { marginLeft: space.xl, borderLeftWidth: 1, borderLeftColor: colors.line },
+  branchAction: { paddingHorizontal: space.lg, paddingVertical: space.sm, alignItems: 'flex-start' },
   header: { position: 'relative' },
   parent: { opacity: 0.72 },
   focal: { position: 'relative' },

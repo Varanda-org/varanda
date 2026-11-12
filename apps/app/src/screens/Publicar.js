@@ -59,8 +59,9 @@ import * as actingStore from '../actingAs'
 import { actAs, pagesMedia, pagesOrigin, pagesStart } from '../pages'
 import { memberKeyOf, useActing } from './Conversa'
 import { useOutbox } from '../outboxProvider'
-import { GATE_MESSAGE, LOCKED_MESSAGE, isQuoteRecord } from '../outbox'
+import { GATE_MESSAGE, LOCKED_MESSAGE } from '../outbox'
 import { countChars } from '../format'
+import { sentMatcher } from '../replySend'
 import { whoOf } from '../who'
 import { ringState } from '../composeRing'
 import { countAfterInsert, insertAt } from '../emoji'
@@ -435,25 +436,6 @@ function seqOf (value) {
   return value && Number.isInteger(value.seq) ? value.seq : null
 }
 
-// A reply reference as 'author:seq' (lowercase author), or null.
-function refOf (replyTo) {
-  if (!replyTo || typeof replyTo.author !== 'string') return null
-  return replyTo.author.toLowerCase() + ':' + String(replyTo.seq)
-}
-
-function sameRef (a, b) {
-  if (a === null || b === null) return a === b
-  return String(a).toLowerCase() === String(b).toLowerCase()
-}
-
-// True when a record's media is the list that was sent (null: none).
-function sameMedia (recorded, sent) {
-  const list = Array.isArray(recorded) && recorded.length > 0 ? recorded : null
-  if (list === null || sent === null) return list === sent
-  const id = (d) => d && d.core + ':' + d.start + ':' + d.blocks + ':' + d.sha256
-  return list.length === sent.length && list.every((d, i) => id(d) === id(sent[i]))
-}
-
 // An upload progress report as a fraction 0..1: a number, or an object with
 // done/loaded/uploaded and total.
 function fractionOf (p) {
@@ -507,13 +489,27 @@ function Ring ({ progress, tone }) {
 // `quote` takes precedence over `reply` (the shell keeps them exclusive);
 // `onClearQuote` (optional) adds 'cancelar citação'. onPublished(kind, ref)
 // with kind 'post' | 'reply' | 'quote' | 'queued-post' | 'queued-reply'.
-export default function Publicar ({ open, reply: replyProp, quote = null, momentRequest = 0, me, onClose, onClearReply, onClearQuote, onPublished }) {
+// onReplyDraft(accepted) settles the caller's onExpand promise.
+export default function Publicar ({ open, reply: replyProp, quote = null, momentRequest = 0, me, onClose, onClearReply, onClearQuote, onPublished, onReplyDraft }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const reply = quote ? null : replyProp
   const node = useNode()
   const outbox = useOutbox()
   const [text, setText] = useState('')
+  const [replyDrafts, setReplyDrafts] = useState(new Set())
+  const replyDraftsRef = useRef(replyDrafts)
+  const hasReplyDraft = reply && typeof reply.draft === 'string'
+  const replyDraftPending = open && hasReplyDraft && !replyDrafts.has(reply.handoff)
+  const settleReplyDraft = (accepted) => {
+    const prior = replyDraftsRef.current
+    if (prior.has(reply.handoff)) return
+    const next = new Set(prior).add(reply.handoff)
+    replyDraftsRef.current = next
+    setReplyDrafts(next)
+    if (onReplyDraft) onReplyDraft(accepted)
+  }
+
   // True while the own diary is re-read after an uncertain publish.
   const [checking, setChecking] = useState(false)
   const [checkError, setCheckError] = useState('')
@@ -1115,18 +1111,12 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     setChecking(true)
     try {
       const res = await node.request('log.read', {})
-      const wanted = sentReply ? sentReply.ref : null
-      const floor = lastSeqRef.current
-      const found = (res.entries || []).find((entry) => {
-        const record = entry && entry.record
-        const quoteOk = sentQuote
-          ? isQuoteRecord(record) && sameRef(refOf(record.quote), sentQuote.ref)
-          : !isQuoteRecord(record)
-        return record && record.type === 'post' && record.text === sent && quoteOk &&
-          sameRef(refOf(record.replyTo), wanted) && sameMedia(record.media, sentMedia) &&
-          Date.parse(record.at) >= startedAt - MATCH_SLACK_MS &&
-          (floor === null || (Number.isInteger(entry.seq) && entry.seq > floor))
-      })
+      const found = (res.entries || []).find(sentMatcher({
+        text: sent,
+        replyTo: sentReply ? sentReply.ref : null,
+        quote: sentQuote ? sentQuote.ref : null,
+        media: sentMedia
+      }, { startedAt, slackMs: MATCH_SLACK_MS, seqFloor: lastSeqRef.current }))
       if (found) {
         confirm(Number.isInteger(found.seq) ? found.seq : null)
         action.clearError()
@@ -1147,6 +1137,14 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // Locked: the draft is what was signed and waits for its retry. Frozen
   // also covers a page send in flight.
   const held = busy || frozen
+  const replyDraftConflict = replyDraftPending && (held || hasMedia || (text !== '' && text !== reply.draft))
+  useEffect(() => {
+    if (!replyDraftPending) return
+    if (held) return settleReplyDraft(false)
+    if (replyDraftConflict) return
+    setText(reply.draft)
+    settleReplyDraft(true)
+  }, [replyDraftPending, replyDraftConflict, held, reply, onReplyDraft])
   let pillLabel = offlineQueue && !hasMedia ? 'Guardar' : 'Publicar'
   if (locked) pillLabel = 'Tentar de novo'
 
@@ -1230,6 +1228,29 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const modeSwitch = momentOn
     ? <Segmented options={MODES} selected={momentMode ? 'moment' : 'post'} onSelect={(id) => { if (!busy && !moment.pending) setMode(id) }} />
     : null
+
+  if (replyDraftConflict) {
+    const keepDraft = () => {
+      settleReplyDraft(false)
+      return false
+    }
+    const useReplyDraft = () => {
+      if (held) return
+      genRef.current++
+      removeItems(Array.from(liveRef.current))
+      setText(reply.draft)
+      settleReplyDraft(true)
+    }
+    return (
+      <Sheet open={open} onClose={keepDraft} grabber>
+        <View style={styles.draftConflict}>
+          <Text style={styles.draftConflictText} maxFontSizeMultiplier={TEXT_CAP}>Você tem um rascunho não publicado.</Text>
+          <Pill label='Usar a resposta' onPress={useReplyDraft} disabled={held} maxFontSizeMultiplier={TEXT_CAP} />
+          <Pill label='Manter o rascunho' onPress={keepDraft} maxFontSizeMultiplier={TEXT_CAP} />
+        </View>
+      </Sheet>
+    )
+  }
 
   if (momentMode) {
     return (
@@ -1669,6 +1690,8 @@ function Thumb ({ item, index, count, busy, onRemove, onRetry, onMoveBefore, onM
 }
 
 const makeStyles = (colors) => StyleSheet.create({
+  draftConflict: { padding: 24, gap: 16 },
+  draftConflictText: { ...type.postText, color: colors.ink },
   flex: { flex: 1 },
   thumbs: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, paddingTop: 10, paddingLeft: 68, paddingRight: 16 },
   thumbWrap: { width: 80, gap: 4 },

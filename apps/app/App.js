@@ -1742,7 +1742,63 @@ function Member () {
   }, [followsVersion, followsChanged])
   const followCount = typeof node.followCount === 'number' ? node.followCount : (info ? info.followCount : null)
 
-  const startReply = (r) => setComposer({ open: true, reply: r, quote: null })
+  const [composeSignal, setComposeSignal] = useState(null)
+  const replyDraftResolve = useRef(null)
+  const replyDraftStash = useRef(null)
+  const replyHandoffSerial = useRef(0)
+  const settleReplyDraft = useCallback((accepted, restore = true) => {
+    const resolve = replyDraftResolve.current
+    const saved = replyDraftStash.current
+    replyDraftResolve.current = null
+    replyDraftStash.current = null
+    if (saved && accepted !== true && restore) setComposer((c) => ({ ...c, ...saved }))
+    if (resolve) resolve(accepted === true)
+  }, [])
+  useEffect(() => {
+    if (!composer.open || !composer.reply || locked) settleReplyDraft(false, !locked)
+  }, [composer.open, composer.reply, locked, settleReplyDraft])
+  useEffect(() => () => {
+    if (replyDraftResolve.current) replyDraftResolve.current(false)
+  }, [])
+  const startReply = (r) => {
+    const saved = replyDraftStash.current || { reply: composer.reply, quote: composer.quote }
+    settleReplyDraft(false)
+    if (node.hosted && node.online !== false && actingAs.get().kind !== 'page' && r.draft === undefined) {
+      pushScreen({ screen: 'conversa', key: r.ref })
+      setComposeSignal((previous) => ({ target: r, n: previous ? previous.n + 1 : 1 }))
+      return
+    }
+    if (typeof r.draft === 'string') {
+      return new Promise((resolve) => {
+        replyDraftResolve.current = resolve
+        replyDraftStash.current = saved
+        setComposer({ open: true, reply: { ...r, handoff: ++replyHandoffSerial.current }, quote: null })
+      })
+    }
+    setComposer({ open: true, reply: r, quote: null })
+  }
+  const onPublished = (kind, sentRef) => {
+    // A momento touches no post state: Publicar already told the
+    // Momentos readers (momentsChanged).
+    if (kind === 'moment') {
+      setComposer((c) => ({ ...c, open: false }))
+      return showToast('momento publicado')
+    }
+    // The reply context is dropped only if it is still the one sent; a
+    // sent quote always drops the quote context.
+    if (kind !== 'quick-reply') {
+      setComposer((c) => ({
+        open: false,
+        reply: c.reply && c.reply.ref === sentRef ? null : c.reply,
+        quote: kind === 'quote' || (c.quote && c.quote.ref === sentRef) ? null : c.quote
+      }))
+    }
+    // Kept in the outbox: nothing new in the diary yet.
+    if (kind === 'queued-post' || kind === 'queued-reply') return showToast('Vai sair quando a conexão voltar.')
+    setVersion((v) => v + 1)
+    setPeekVersion((v) => v + 1)
+    showToast(kind === 'reply' || kind === 'quick-reply' ? 'resposta publicada' : 'publicado')
+  }
   const startQuote = (q) => setComposer({ open: true, reply: null, quote: q })
 
   // --- the screen stack ---
@@ -1829,6 +1885,7 @@ function Member () {
     }
   }, [commitStack])
   const openThread = useCallback(({ ref, seed } = {}) => {
+    setComposeSignal(null)
     pushScreen({ screen: 'conversa', key: ref, params: { seed: seed || null } })
   }, [pushScreen])
   const openEngagers = useCallback(({ ref, kind } = {}) => {
@@ -3247,7 +3304,7 @@ function Member () {
       const Screen = entry.screen === 'conversa' ? Conversa : entry.screen === 'curtidas' ? Curtidas : Membro
       return (
         <StackLayer key={i + ':' + entry.screen + ':' + entry.key + (entry.screen === 'conversa' && entry.key === threadReload.ref ? ':' + threadReload.n : '')} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
-          <Screen entry={entry} {...screenProps} onTabChange={entry.screen === 'membro' ? (id) => reportProfileTab(i + ':' + entry.key, id) : undefined} />
+          <Screen entry={entry} {...screenProps} onComposeSeen={() => setComposeSignal(null)} composeSignal={entry.screen === 'conversa' && i === stack.length - 1 ? composeSignal : null} onPublished={onPublished} onTabChange={entry.screen === 'membro' ? (id) => reportProfileTab(i + ':' + entry.key, id) : undefined} />
         </StackLayer>
       )
     }
@@ -3520,26 +3577,8 @@ function Member () {
           onClose={() => setComposer((c) => ({ ...c, open: false }))}
           onClearReply={() => setComposer((c) => ({ ...c, reply: null }))}
           onClearQuote={() => setComposer((c) => ({ ...c, quote: null }))}
-          onPublished={(kind, sentRef) => {
-            // A momento touches no post state: Publicar already told the
-            // Momentos readers (momentsChanged).
-            if (kind === 'moment') {
-              setComposer((c) => ({ ...c, open: false }))
-              return showToast('momento publicado')
-            }
-            // The reply context is dropped only if it is still the one sent; a
-            // sent quote always drops the quote context.
-            setComposer((c) => ({
-              open: false,
-              reply: c.reply && c.reply.ref === sentRef ? null : c.reply,
-              quote: kind === 'quote' || (c.quote && c.quote.ref === sentRef) ? null : c.quote
-            }))
-            // Kept in the outbox: nothing new in the diary yet.
-            if (kind === 'queued-post' || kind === 'queued-reply') return showToast('Vai sair quando a conexão voltar.')
-            setVersion((v) => v + 1)
-            setPeekVersion((v) => v + 1)
-            showToast(kind === 'reply' ? 'resposta publicada' : 'publicado')
-          }}
+          onReplyDraft={settleReplyDraft}
+          onPublished={onPublished}
         />
       )}
       <BlockSheet onToast={showToast} />
