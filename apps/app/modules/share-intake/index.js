@@ -139,6 +139,20 @@ export async function sweep (ms) {
   } catch {}
 }
 
+// Sair and Recomeçar. The native side has no call that removes everything,
+// so the share peek offers goes by id (its time may be past the clock's), then
+// a 1 ms sweep takes every older one.
+export async function clear () {
+  try {
+    if (native === null) return
+    const current = await readPeek()
+    if (current !== null && typeof native.release === 'function') await native.release(current.id)
+  } catch {}
+  try {
+    if (native !== null && typeof native.sweep === 'function') await native.sweep(1)
+  } catch {}
+}
+
 export function listen (fn) {
   let sub = null
   try {

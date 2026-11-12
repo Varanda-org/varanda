@@ -30,6 +30,15 @@ test('Publicar claims a share before reading its files and lets go only while mo
   t.is((src.match(/failed: shared\.failed \|\| 0/g) || []).length, 2, 'both notes count the photos that could not be opened')
 })
 
+test('Publicar builds no preview for a shared link until the person asks or edits', (t) => {
+  const src = read('src/screens/Publicar.js')
+  t.ok(src.includes('const shareLinkHeld = linkHeld(linkHold, text)'), 'the hold is read from the pure helper')
+  t.ok(src.includes('useLinkDraft({ text, enabled: open === true && asPage === null && !shareLinkHeld,'), 'a held link never builds')
+  t.ok(src.includes('setLinkHold((hold) => sharedLinkHold(text, merged.text, hold))'), 'applying a share sets the hold, keeping one still in place')
+  t.ok(/if \(linkHold !== null && linkHold !== text\) setLinkHold\(null\)/.test(src), 'an edit releases it')
+  t.ok(/onPress=\{\(\) => setLinkHold\(null\)\}[\s\S]{0,200}Mostrar prévia do link/.test(src), 'the tap releases it')
+})
+
 test('the shell holds a share off the deleted-account screen and wires taken', (t) => {
   const app = read('App.js')
   t.ok(app.includes('ready: atTabs && atShell && !coveringBoot && !(deletedState !== null && member !== null && passkey !== null)'), 'ready mirrors the ContaExcluida early return')

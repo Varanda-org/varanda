@@ -46,6 +46,7 @@ module.exports = {
   activeMention: mentions.activeMention,
   MENTION_MAX: mentions.MENTION_MAX,
   mediaBounds: mediaBounds.mediaBounds,
+  mediaSize: mediaBounds.mediaSize,
   MAX_MEDIA_PIXELS: mediaBounds.MAX_MEDIA_PIXELS,
   MAX_MEDIA_FRAMES: mediaBounds.MAX_MEDIA_FRAMES,
   MAX_MEDIA_TOTAL_PIXELS: mediaBounds.MAX_MEDIA_TOTAL_PIXELS,

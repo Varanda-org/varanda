@@ -1,5 +1,6 @@
 import rpc from '@varanda/rpc'
 import { MAX_MEDIA_PER_POST } from './media/plan.js'
+import { previewTarget } from './preview.js'
 
 const { MAX_TEXT, displayText } = rpc
 
@@ -195,6 +196,24 @@ export function mergeDraft (draft, sharedText, max) {
   const merged = draft + '\n' + sharedText
   if (Array.from(merged).length <= max) return { text: merged, kept: true }
   return { text: draft, kept: false }
+}
+
+// A link the share brought builds its preview only once the person asks for
+// it or edits the text. The hold is the merged text, or null when the share
+// changed nothing the preview would read (no link, or the draft's own link
+// still comes first). A hold still on the draft moves to the next share's
+// text, even when that share did not fit, so a later share never starts the
+// preview the first one held.
+export function sharedLinkHold (draft, merged, hold = null) {
+  if (typeof draft !== 'string' || typeof merged !== 'string') return null
+  const target = previewTarget(merged)
+  if (target === null) return null
+  return target !== previewTarget(draft) || linkHeld(hold, draft) ? merged : null
+}
+
+// Any change to the text ends the hold for good.
+export function linkHeld (hold, text) {
+  return typeof hold === 'string' && hold === text && previewTarget(text) !== null
 }
 
 export function shareNote ({ canAttach, hadFiles, noRoom, dropped, failed = 0, kept, clipped }) {

@@ -136,11 +136,11 @@ test('share intake: missing module never throws', async (t) => {
   let called = false
   const lines = await silence(async () => {
     const mod = await load()
-    results.push(mod.isAvailable(), await mod.peek(), await mod.release(ID), await mod.sweep(1000))
+    results.push(mod.isAvailable(), await mod.peek(), await mod.release(ID), await mod.sweep(1000), await mod.clear())
     off = mod.listen(() => { called = true })
     off()
   })
-  t.alike(results, [false, null, undefined, undefined])
+  t.alike(results, [false, null, undefined, undefined, undefined])
   t.is(typeof off, 'function')
   t.is(called, false)
   t.alike(lines, [])
@@ -162,11 +162,11 @@ test('share intake: throwing native resolves null and never surfaces the error',
     let off
     const lines = await silence(async () => {
       const mod = await load()
-      results.push(mod.isAvailable(), await mod.peek(), await mod.release(ID), await mod.release('bad'), await mod.sweep(5))
+      results.push(mod.isAvailable(), await mod.peek(), await mod.release(ID), await mod.release('bad'), await mod.sweep(5), await mod.clear())
       off = mod.listen(() => {})
       off()
     })
-    t.alike(results, [true, null, undefined, undefined, undefined])
+    t.alike(results, [true, null, undefined, undefined, undefined, undefined])
     t.is(typeof off, 'function')
     t.alike(lines, [])
   }
@@ -182,6 +182,7 @@ test('share intake: native property access errors stay inside the facade', async
   t.is(await mod.peek(), null)
   t.is(await mod.release(ID), undefined)
   t.is(await mod.sweep(1), undefined)
+  t.is(await mod.clear(), undefined)
   const off = mod.listen(() => t.fail('no native listener'))
   t.is(typeof off, 'function')
   off()
@@ -437,6 +438,40 @@ test('share intake: release with a bad id never reaches native', async (t) => {
   t.alike(calls.sweep, [1, Number.MAX_SAFE_INTEGER])
 })
 
+test('share intake: clear releases the share peek offers, then sweeps every older one', async (t) => {
+  const order = []
+  const calls = fake({
+    onPeek () { order.push('peek'); return Promise.resolve(payload()) },
+    onRelease (id) { order.push('release ' + id) },
+    onSweep (ms) { order.push('sweep ' + ms) }
+  })
+  const mod = await load()
+  t.is(await mod.clear(), undefined)
+  t.alike(order, ['peek', 'release ' + ID, 'sweep 1'])
+  t.alike(calls.release, [ID])
+  t.alike(calls.sweep, [1])
+
+  const empty = fake()
+  const none = await load()
+  t.is(await none.clear(), undefined)
+  t.alike(empty.release, [], 'nothing pending, nothing released')
+  t.alike(empty.sweep, [1], 'the sweep still runs')
+
+  const failing = fake({ onPeek () { return Promise.reject(new Error('secret native detail')) } })
+  const broken = await load()
+  t.is(await broken.clear(), undefined)
+  t.alike(failing.sweep, [1], 'a failed peek still sweeps')
+
+  const releaseFails = fake({ answer: payload(), onRelease () { throw new Error('secret native detail') } })
+  const stubborn = await load()
+  t.is(await stubborn.clear(), undefined)
+  t.alike(releaseFails.sweep, [1], 'a failed release still sweeps')
+
+  globalThis.__shareNative = { peek () { return Promise.resolve(payload()) } }
+  const partial = await load()
+  t.is(await partial.clear(), undefined, 'a module without release or sweep is a no-op')
+})
+
 test('share intake: listen and its unsubscribe', async (t) => {
   const calls = fake()
   const mod = await load()
@@ -476,10 +511,13 @@ test('share intake: listen and its unsubscribe', async (t) => {
   offQuiet()
 })
 
-test('share intake web: no-ops', async (t) => {
+// Behaviour with Cache Storage is in shareIntakeWeb.test.js. Without it (Node
+// here) the web intake is inert, and it never reaches for a page API.
+test('share intake web: inert without Cache Storage, no page APIs', async (t) => {
   const web = await import('../src/shareIntake.web.js')
-  for (const name of ['peek', 'release', 'sweep', 'listen']) t.is(typeof web[name], 'function', name)
+  for (const name of ['peek', 'release', 'sweep', 'listen', 'clear']) t.is(typeof web[name], 'function', name)
   t.is(await web.peek(), null)
+  t.is(await web.clear(), undefined)
   t.is(await web.release(ID), undefined)
   t.is(await web.sweep(1000), undefined)
   let called = false
@@ -488,7 +526,8 @@ test('share intake web: no-ops', async (t) => {
   off()
   t.is(called, false)
   const src = fs.readFileSync(path.join(__dirname, '../src/shareIntake.web.js'), 'utf8')
-  t.is(/\b(window|document|navigator|localStorage|sessionStorage|globalThis|self)\b/.test(src), false)
+  t.is(/\b(window|document|navigator|localStorage|sessionStorage|self)\b/.test(src), false)
+  t.is(src.split('globalThis.').length - 1, src.split('globalThis.caches').length - 1, 'globalThis only for caches')
 })
 
 test('share intake native: listen follows onPending and the app becoming active', async (t) => {
@@ -527,6 +566,9 @@ test('share intake native: listen follows onPending and the app becoming active'
   await mod.sweep(2500)
   t.alike(calls.release, [ID])
   t.alike(calls.sweep, [2500])
+  t.is(typeof mod.clear, 'function', 'clear is re-exported')
+  await mod.clear()
+  t.alike(calls.sweep, [2500, 1])
   let hits = 0
   const off = mod.listen(() => { hits++ })
   t.is(calls.listen, 1)

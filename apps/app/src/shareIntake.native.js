@@ -1,7 +1,7 @@
 import { AppState } from 'react-native'
 import { listen as onPending } from '../modules/share-intake'
 
-export { peek, release, sweep } from '../modules/share-intake'
+export { clear, peek, release, sweep } from '../modules/share-intake'
 
 // A share stored while the app is suspended can miss onPending. Becoming
 // active runs the same callback so the composer still sees it.
