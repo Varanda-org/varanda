@@ -222,6 +222,17 @@ test('the iOS minimum is 18.0 everywhere it is set', (t) => {
   }
 })
 
+// expo-video's config plugin turns on picture-in-picture and background
+// playback, which add an iOS background mode and Android permissions. Short
+// videos in posts and momentos need none of them, so the plugin stays out.
+test('app.json does not list the expo-video config plugin', (t) => {
+  const plugins = JSON.parse(read('app.json')).expo.plugins
+  const names = plugins.map((plugin) => Array.isArray(plugin) ? plugin[0] : plugin)
+  t.ok(names.length > 0, 'the plugin list is read')
+  t.absent(names.some((name) => typeof name === 'string' && name.startsWith('expo-video')), 'no expo-video plugin')
+  t.absent(read('app.json').includes('expo-video'), 'expo-video is not configured anywhere in app.json')
+})
+
 // The share extension (ios/VarandaShare) writes into the app group container
 // and ShareIntakeModule.swift reads it there: a group missing from either
 // entitlements file, or spelled differently, makes every share vanish.

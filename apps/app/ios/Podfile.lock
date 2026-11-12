@@ -90,6 +90,8 @@ PODS:
   - ExpoTaskManager (55.0.20):
     - ExpoModulesCore
     - UMAppLoader
+  - ExpoVideo (55.0.21):
+    - ExpoModulesCore
   - FBLazyVector (0.83.10)
   - hermes-engine (0.14.1):
     - hermes-engine/Pre-built (= 0.14.1)
@@ -2068,6 +2070,7 @@ DEPENDENCIES:
   - ExpoModulesJSI (from `../../../node_modules/expo-modules-core`)
   - ExpoSecureStore (from `../../../node_modules/expo-secure-store/ios`)
   - ExpoTaskManager (from `../../../node_modules/expo-task-manager/ios`)
+  - ExpoVideo (from `../../../node_modules/expo-video/ios`)
   - FBLazyVector (from `../../../node_modules/react-native/Libraries/FBLazyVector`)
   - hermes-engine (from `../../../node_modules/react-native/sdks/hermes-engine/hermes-engine.podspec`)
   - PasskeyPrf (from `../modules/passkey-prf/ios`)
@@ -2197,6 +2200,8 @@ EXTERNAL SOURCES:
     :path: "../../../node_modules/expo-secure-store/ios"
   ExpoTaskManager:
     :path: "../../../node_modules/expo-task-manager/ios"
+  ExpoVideo:
+    :path: "../../../node_modules/expo-video/ios"
   FBLazyVector:
     :path: "../../../node_modules/react-native/Libraries/FBLazyVector"
   hermes-engine:
@@ -2380,6 +2385,7 @@ SPEC CHECKSUMS:
   ExpoModulesJSI: 1bf2fab061d2c9635ff63b6fcc26747a68af9f12
   ExpoSecureStore: 422f8e24d8ba1693600bc3720f0a71a17ddcbea0
   ExpoTaskManager: 30a8729c6f6fc1872d96589bffc4ad8d5384b8d9
+  ExpoVideo: d060cc8f61ef6ad74b078969478b7242fc121b13
   FBLazyVector: b88945378388c6651d3725b0e8c2624fbb37ec64
   hermes-engine: a2a9fc7160af80292783f30b771f14a477f29712
   libwebp: af5937a13536ef73f3784d69cc342b98961acf33

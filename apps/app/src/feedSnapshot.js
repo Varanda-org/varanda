@@ -25,8 +25,8 @@
 
 import rpc from '@varanda/rpc'
 import { avatarOf } from './media/avatar.js'
-import { validDescriptor } from './media/fetch.js'
-import { MAX_MEDIA_PER_POST } from './media/plan.js'
+import { validDescriptor, validVideoDescriptor } from './media/fetch.js'
+import { MAX_MEDIA_PER_POST, videoPair } from './media/plan.js'
 
 const { FEED_LIMIT_DEFAULT, MAX_NAME, MAX_TEXT, MAX_CARD_TITLE, MAX_CARD_DESC, MAX_CARD_IMAGE_BYTES, cardTextLength, cardUrlHost, utf8ByteLength } = rpc
 
@@ -104,8 +104,14 @@ function mediaOf (v, strict) {
   if (v === null || v === undefined) return v === null || !strict ? { ok: true, value: null } : { ok: false }
   if (!Array.isArray(v) || v.length > MAX_MEDIA_PER_POST) return { ok: false }
   if (v.length === 0) return strict ? { ok: false } : { ok: true, value: null }
-  if (!v.every(validDescriptor)) return { ok: false }
+  if (!v.every(validDescriptor) && !validPair(v)) return { ok: false }
   return { ok: true, value: v.map((d) => ({ ...d })) }
+}
+
+// A video post's media, as records.js validPostMedia: [JPEG poster, video].
+function validPair (v) {
+  const pair = videoPair(v)
+  return pair !== null && validDescriptor(pair.poster) && validVideoDescriptor(pair.video)
 }
 
 function cardImageOf (v) {

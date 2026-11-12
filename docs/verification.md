@@ -8096,3 +8096,65 @@ Ordem: Android, iOS, depois web e PWA, num ambiente de teste local.
 - [ ] Simular perda de conexão depois do envio e confirmar a indicação de resultado incerto, sem repetição automática; reler o diário antes de publicar de novo. Conferir que o custo de até 129 selos por momento e as esperas de ritmo da seção 13 não são apresentados como uma falha antes de o envio terminar. Com a carteira vazia, `putPublicMedia` força o abastecimento até 300 selos, dentro da cota diária de 1024; uma compra completa em um único link soma `(300 - 28) × 270 ms = 73,44 s` de esperas deliberadas. O envio dos 129 pedaços soma `(129 - 28) × 135 ms = 13,635 s`, além da rede e das gravações.
 - [ ] Denunciar uma publicação com vídeo e outra com foto ou GIF: ambas ficam para uma pessoa, sem inferência sobre a mídia. No ambiente local, aplicar um bloqueio de teste e conferir a indisponibilidade dos núcleos de mídia do diário. Conferir separadamente que o blob do momento ainda abre com um descritor guardado até a retenção expirar e que a interface esconde o momento após 24 horas.
 - [ ] Ler o mesmo diário com um leitor e semeador anteriores: o post ou momento em vídeo inteiro é omitido; os blocos continuam servidos pelo semeador antigo, mas o post não entra nos índices nem nas contagens de posts vivos. Atualizar semeadores e serviço de conta antes do app publicador, como manda o CHANGELOG.
+
+## 182. Reprodução de vídeos curtos em publicações e momentos
+
+A Rua, o mosaico da citação e o mural mostram a capa JPEG de uma publicação com vídeo, com a marca de play e a duração. O rótulo é "vídeo de N segundos", no singular "1 segundo". O azulejo do mural diz "vídeo". Nada do vídeo é baixado até a pessoa tocar. Uma capa que não carrega ainda abre o vídeo.
+
+O toque abre um visualizador em tela cheia. Ele baixa o vídeo, confere o sha256 e a checagem estrita de MP4, com lados e duração iguais aos do descritor, e só então monta um endereço local `file://` ou `blob:`. A reprodução tem controles e som. Fechar interrompe o download (abort), solta o player e apaga o arquivo local. Há um player por vez. Uma carga que falha mostra "vídeo indisponível" e um "Tentar de novo", sem repetição automática. Se o navegador recusa começar sem um gesto, o player permanece e mostra "Toque no play para assistir". Se começa mudo, mostra "Ativar som".
+
+No visualizador de momentos, um momento em vídeo usa o cronômetro único que já existe. A duração do segmento é a do vídeo. Uma foto continua em 5 s. O cronômetro começa quando o player está pronto, ou 2 s depois de o arquivo ter carregado. Segurar, o menu, arrastar, a confirmação de apagar e o app oculto pausam. Há um avanço por item. Com reduzir movimento não há reprodução automática ("Reproduzir") nem avanço automático. O som fica ligado, com "Ativar som" quando o navegador começa mudo. Um início bloqueado mostra "Reproduzir". Sair solta o player e apaga o arquivo local. "Reproduzir" e "Ativar som" agem dentro do próprio toque, para o navegador que exige um gesto.
+
+No Android e no iOS o app usa expo-video 55.0.21. A web usa um elemento `video` comum: expo-video não entra no pacote da web.
+
+Cobertura automatizada:
+
+- `apps/app/test/videoPlayback.test.js`: regra do endereço local, um player por vez, estado do player, tipos de recusa e ligação do player pela origem.
+- `apps/app/test/mediaFetch.test.js`: `fetchVideo` confere hash, redirecionamento, tamanho, checagem estrita, lados, duração e abort.
+- `apps/app/test/mediaPlan.test.js`: `videoPair`, `durationLabel` e o vídeo nunca vai ao codificador de foto.
+- `apps/app/test/mediaDisplay.test.js`: arquivos mp4 só dentro da pasta de mídia do app.
+- `apps/app/test/moments.test.js`: duração do segmento.
+- `apps/app/test/feedSnapshot.test.js` e `apps/app/test/screenSnapshot.test.js`: uma linha de vídeo sobrevive a reabrir, e um par malformado é recusado.
+- `apps/app/test/backgroundRefresh.test.js`: em segundo plano fica só a capa.
+- `apps/app/test/feedRender.test.js` e `apps/app/test/muralGrid.test.js`: um azulejo de capa, rótulos e ligação do visualizador.
+- `apps/app/test/momentosScreen.test.js`: tempo, segurar, reduzir movimento, início bloqueado e toques.
+- `apps/app/test/hardening.test.js` e `apps/app/test/podsLock.test.js`: sem o plugin de configuração do expo-video, e o lock dos pods.
+
+Os testes usam bytes sintéticos. Não abrem aparelho, não usam a DHT pública e não guardam arquivo binário de mídia.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `node apps/app/test/videoPlayback.test.js`
+- `node apps/app/test/mediaFetch.test.js`
+- `node apps/app/test/mediaPlan.test.js`
+- `node apps/app/test/mediaDisplay.test.js`
+- `node apps/app/test/moments.test.js`
+- `node apps/app/test/feedSnapshot.test.js`
+- `node apps/app/test/screenSnapshot.test.js`
+- `node apps/app/test/backgroundRefresh.test.js`
+- `node apps/app/test/feedRender.test.js`
+- `node apps/app/test/muralGrid.test.js`
+- `node apps/app/test/momentosScreen.test.js`
+- `node apps/app/test/hardening.test.js`
+- `node apps/app/test/podsLock.test.js`
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Todos os itens estão em aberto.
+
+Ordem: Android, iOS, depois web e PWA, num ambiente de teste local. Registrar aparelho, sistema e navegador.
+
+- [ ] Em A Rua, na citação (mosaico) e no mural, a publicação com vídeo mostra a capa JPEG, a marca de play e a duração. O rótulo é "vídeo de N segundos" (no singular, "1 segundo"). O azulejo do mural diz "vídeo".
+- [ ] Rolar não baixa o vídeo. No painel de rede, nada do arquivo de vídeo sai antes do toque.
+- [ ] O toque reproduz com som.
+- [ ] Fechar apaga o arquivo local e interrompe um download em curso.
+- [ ] Sem rede, aparece "vídeo indisponível" e um só "Tentar de novo". Não há repetição automática.
+- [ ] No Safari, ou no PWA do iOS com Modo de Baixa Energia, o visualizador de A Rua mostra "Toque no play para assistir" e o vídeo toca depois de um toque; um momento em vídeo mostra "Reproduzir" e toca depois do toque.
+- [ ] Quando o navegador começa o vídeo sem som, aparece "Ativar som" (em A Rua e nos momentos), e um toque liga o som.
+- [ ] Um momento de 15 s toca até o fim e avança.
+- [ ] Segurar pausa a imagem e a barra.
+- [ ] Um momento de foto continua em 5 s.
+- [ ] Com reduzir movimento, aparece "Reproduzir" e o momento não avança sozinho.
+- [ ] Um blob expirado mostra "vídeo indisponível".
+- [ ] O som para ao sair.

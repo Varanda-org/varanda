@@ -1,9 +1,11 @@
 // Module hooks for test/workletId.test.js: src/client/native.js with the
 // native modules and the generated worklet bundle replaced by stubs (and
-// @varanda/rpc re-exported by name, see stub-rpc.mjs).
+// @varanda/rpc re-exported by name, see stub-rpc.mjs). expo-video is stubbed
+// too (stub-video.mjs), so a module that imports it loads in Node.
 const stubs = {
   'react-native-bare-kit': './stub-bare-kit.mjs',
   'expo-file-system': './stub-file-system.mjs',
+  'expo-video': './stub-video.mjs',
   '@varanda/rpc': './stub-rpc.mjs'
 }
 
