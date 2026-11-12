@@ -47,6 +47,19 @@ export function counterText (index, count) {
   return (index + 1) + ' de ' + count
 }
 
+export function counterShown ({ many, measured, idleMs, hold = 1600 }) {
+  return Boolean(many && measured && idleMs < hold)
+}
+
+// The end is exclusive, so the window can be passed straight to slice.
+export function dotWindow (index, count, max = 5) {
+  if (!Number.isInteger(count) || count < 1 || !Number.isInteger(max) || max < 1) return { start: 0, end: 0 }
+  const size = Math.min(count, max)
+  const current = Number.isFinite(index) ? Math.min(count - 1, Math.max(0, Math.round(index))) : 0
+  const start = Math.min(count - size, Math.max(0, current - Math.floor(size / 2)))
+  return { start, end: start + size }
+}
+
 // The accessibility name the grid builds today, for example 'foto 2 de 4'.
 export function slideLabel (index, count) {
   return 'foto ' + (index + 1) + ' de ' + count

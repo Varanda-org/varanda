@@ -9,6 +9,7 @@
 //   with photos may have no text). `media` (descriptors or null) goes to
 //   ./MediaGrid with `persist={persistMedia}` (false for authors this device
 //   does not follow: their photos are never kept).
+// - expanded: shows the full caption without a clamp control (default false).
 // - preview: null | a stored link card (the post's `preview`), drawn by
 //   ./LinkCard from that data only, its thumbnail read like a post photo.
 // - quote: null | { author, name, username, at, text, media, missing, onOpen }
@@ -57,6 +58,7 @@ import { shareNav } from '../shareNav'
 import { whoOf } from '../who'
 import { ActionsSheet } from './ActionsSheet'
 import { Avatar } from './Avatar'
+import { ClampControl, useClamp } from './ClampText'
 import { Icon } from './Icon'
 import { LinkCard } from './LinkCard'
 import { MediaGrid } from './MediaGrid'
@@ -141,7 +143,7 @@ function Action ({ label, onPress, disabled, on, count, split, children }) {
 
 function PostRowView ({
   author, name, username, avatar, at, text, replyToName, media, preview, persistMedia = true, now,
-  quote, repostedBy, counts, liked, reposted, pending,
+  quote, repostedBy, counts, liked, reposted, pending, expanded = false,
   onOpen, onOpenAuthor, onOpenParent, onOpenReposter, onFollowReposter, onOpenMention,
   onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onBlock, onDelete, link, onNotice,
   seq, onMessage
@@ -154,6 +156,17 @@ function PostRowView ({
   const hasText = typeof text === 'string' && text !== ''
   // The body label, the plain text and the label without the text all use it.
   const shownText = useMemo(() => (hasText ? displayText(text, { multiline: true }) : null), [hasText, text])
+  const [captionWidth, setCaptionWidth] = useState(undefined)
+  const { numberOfLines, control, onTextLayout, toggle } = useClamp({
+    text: shownText,
+    hasMedia,
+    width: captionWidth,
+    forceExpanded: expanded
+  })
+  const measureCaption = (event) => {
+    const width = event.nativeEvent.layout.width
+    setCaptionWidth(Number.isFinite(width) && width > 0 ? width : undefined)
+  }
   const time = relativeTime(at, now) ?? displayText(at)
   const who = whoOf({ name, username })
   const title = displayText(who.title)
@@ -318,7 +331,7 @@ function PostRowView ({
   const bodyLabel = bodyParts.join('. ')
   const openMention = otherPress(onOpenMention)
   const quoteOn = quote && typeof quote === 'object'
-  const textOut = hasText && (hasLink(text) || (!!openMention && hasMention(text)))
+  const textOut = hasText && numberOfLines === 0 && (hasLink(text) || (!!openMention && hasMention(text)))
   // The screen gives a quote its own handler carrying the quoted author.
   const quoteMention = (quoteOn && otherPress(quote.onOpenMention)) || openMention
   const quoteOut = quoteOn && typeof quote.text === 'string' && !!quoteMention && hasMention(quote.text)
@@ -326,7 +339,7 @@ function PostRowView ({
   const label = textOut ? bodyParts.filter((part) => part !== shownText).join('. ') : bodyLabel
   const textNode = hasText
     ? textOut
-      ? <MentionText text={text} onOpenMention={openMention} onOpenPlain={openTap} style={styles.text} />
+      ? <MentionText text={text} onOpenMention={openMention} onOpenPlain={openTap} onTextLayout={onTextLayout} style={styles.text} />
       : (
         <Pressable
           accessibilityRole={open ? 'link' : 'text'}
@@ -335,7 +348,7 @@ function PostRowView ({
           onPress={openTap}
           {...a11yOpen}
         >
-          <Text style={styles.text}>{shownText}</Text>
+          <Text style={styles.text} numberOfLines={numberOfLines} onTextLayout={onTextLayout}>{shownText}</Text>
         </Pressable>
         )
     : null
@@ -393,7 +406,7 @@ function PostRowView ({
             readers read in the order: avatar → post content → actions.
             All visual children are hidden from accessibility; sighted users
             interact with them directly (name, reply-to and text tap targets). */}
-        <View style={styles.body}>
+        <View style={styles.body} onLayout={measureCaption}>
           <Pressable
             onPress={openTap}
             disabled={!open}
@@ -454,18 +467,17 @@ function PostRowView ({
                   </Pressable>
                   )
                 : null}
+              {mediaNode}
               {textOut ? null : textNode}
-              {textOut ? null : mediaNode}
-              {quoteOut || textOut ? null : quoteNode}
             </View>
           </Pressable>
           {textOut ? textNode : null}
-          {textOut && (mediaNode || (quoteNode && !quoteOut))
+          <ClampControl control={control} onPress={otherPress(toggle)} />
+          {quoteNode && !quoteOut
             ? (
               <Pressable accessible={false} tabIndex={-1} onPress={openTap} disabled={!open}>
                 <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
-                  {mediaNode}
-                  {quoteOut ? null : quoteNode}
+                  {quoteNode}
                 </View>
               </Pressable>
               )

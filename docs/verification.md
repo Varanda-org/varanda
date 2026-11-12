@@ -7847,3 +7847,52 @@ Situação, em 2026-11-12 (Vitrine, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1`). 
 - [ ] iOS, simulador iPhone 16e (parcial): pílula centrada em A Rua no claro e no escuro; Diário sem pílula e com o anel; texto grande (`accessibility-large`) com a barra intacta; folha do "..." igual a antes (escuro). Não verificado: VoiceOver, Reduzir Movimento, o botão de publicar apertado (a captura durante o toque não foi possível) e a folha de mensagem.
 - [ ] Chrome, 390 px (parcial): pílula centrada em A Rua e Conversas, sem pílula no Diário, claro e escuro; árvore de acessibilidade com os nomes das abas ("Conversas, novidades"); botão de publicar apertado fica com opacidade 0,85 e escala 0,97; folha do "..." igual a antes. Não verificado: texto grande, Reduzir movimento e a folha de mensagem. A pílula deste alvo foi vista antes da correção do `TabBar.js` (a web já estava centrada) e não foi revista depois.
 - [ ] Chrome, 1280 px (parcial): só A Rua no claro, coluna central com a barra e a pílula como no 390 px (antes da correção). Passos de texto grande, Reduzir movimento e folhas não percorridos.
+
+## 179. Fotos primeiro e legenda recolhida (PR feat/post-captions)
+
+Segundo PR da revisão visual do app. A linha de publicação mostra as fotos primeiro e a legenda embaixo delas, recolhe a legenda longa e limpa o cromo do carrossel.
+
+- Ordem (`apps/app/src/ui/PostRow.js`): fotos, legenda, citação, barra de ações. Antes, a legenda vinha antes das fotos.
+- Recolhimento (`apps/app/src/postClamp.js`, `apps/app/src/ui/ClampText.js`): 3 linhas com fotos, 9 só com texto. O recolhimento só começa quando a estimativa passa do limite por 2 linhas ou mais. O botão embaixo diz "mais" (com fotos), "ver mais" (só texto) e, aberto, "menos". Os leitores de tela ouvem "mais, ver texto completo", "ver mais, texto completo" e "menos, recolher texto", com o estado aberto ou fechado. O rótulo da publicação continua com a legenda inteira. Tocar na legenda recolhida ainda abre a Conversa.
+- Links e menções: enquanto recolhida, a legenda é texto simples; links e @menções só funcionam depois de aberta.
+- Carrossel (`apps/app/src/ui/MediaCarousel.js`, `apps/app/src/carousel.js`): o contador "1/5" aparece quando o carrossel surge ou a página muda, fica 1,6 s (`motion.hold`) e some em 250 ms (`motion.normal`); com Reduzir movimento, some de uma vez depois da espera. No máximo 5 pontos, acompanhando a página atual. As setas só aparecem com o mouse em cima ou o foco do teclado no carrossel (web); um toque, um clique ou fechar a tela cheia com um toque nunca as deixa na tela.
+- Limites conhecidos: o nativo mede as linhas reais depois do desenho e, se a legenda couber, mostra tudo sem botão; a web não mede e decide só pela estimativa pela largura, então uma legenda de exatamente 3 ou 9 linhas pode manter o botão até ser aberta uma vez. Recolhida, a legenda não tem links nem menções tocáveis. A estimativa para de crescer na escala de fonte 1,3 do sistema, de propósito: com texto maior que isso, uma legenda longa pode ficar aberta sem botão, nunca cortada sem botão.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `cd apps/app && node ../../scripts/run-tests.js test/postClamp.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/postLayout.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/carousel.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js`
+
+Os testes cobrem a decisão do recolhimento (limites, margem de 2 linhas, medição nativa que só levanta o recolhimento), a ordem fotos, legenda e citação, e a janela de pontos e o fade do contador. Não cobrem como isso parece na tela: isso é o que a verificação manual confere.
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) mostra as telas hospedadas com dados de exemplo e dispensa conta. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e), Chrome em 390 e em 1280 px. Em cada alvo: claro e escuro, texto grande, leitor de tela e Reduzir movimento. Capturas ficam fora do git.
+
+1. Numa publicação com fotos e legenda curta (uma ou duas linhas), olhe a linha. Esperado: as fotos vêm primeiro, a legenda embaixo delas, e não há botão "mais".
+2. Numa publicação com fotos e legenda de mais de 5 linhas, olhe a linha. Esperado: a legenda mostra 3 linhas, termina em reticências e o botão "mais" aparece embaixo, com cerca de 44 pt de altura e 12 pt de espaço próprio acima. Esse espaço lê como parte da legenda (alinhado ao texto), não solto.
+3. Toque em "mais". Esperado: a legenda abre no lugar, sem abrir a Conversa; o botão vira "menos"; toque em "menos" e ela volta a 3 linhas.
+4. Numa publicação só de texto com mais de 11 linhas, olhe a linha. Esperado: 9 linhas e o botão "ver mais"; aberta, "menos".
+5. Numa legenda com uma linha ou duas acima do limite. Esperado: fica aberta, sem botão (a margem de 2 linhas).
+6. Com a legenda recolhida, toque num link ou numa @menção dentro dela. Esperado: não são links (texto simples); tocar na legenda abre a Conversa. Abra a legenda e toque no link de uma última linha que começa com ele. Esperado: o link abre e a legenda continua aberta.
+7. Num carrossel de 2 fotos com legenda longa, vá para a foto 2, abra e feche a legenda. Esperado: o carrossel continua na foto 2.
+8. Contador: ao surgir o carrossel ou trocar de foto, "N de M" aparece, fica 1,6 s e some em 250 ms. Com Reduzir movimento, some de uma vez depois dos 1,6 s.
+9. Num carrossel de 7 fotos. Esperado: no máximo 5 pontos, a janela acompanha a foto atual (na foto 6, o ponto ativo é o quarto de cinco).
+10. Web a 1280 px: com o mouse sobre o carrossel, as setas aparecem; ao tirar o mouse somem; depois de clicar numa seta, de um toque (390 px) ou de fechar a tela cheia, nunca ficam na tela.
+11. Web a 1280 px, só com o teclado: Tab até a foto (as setas aparecem), Tab até uma seta, Enter até a última ou a primeira foto. Esperado: o foco passa à outra seta e nunca cai na página.
+12. Leitor de tela: o rótulo da publicação traz a legenda inteira, mesmo recolhida; o botão é lido como "mais, ver texto completo", "ver mais, texto completo" ou "menos, recolher texto", com o estado aberto ou fechado.
+13. Repita no tema escuro e com texto grande. Esperado: nada cortado, o botão mantém o alvo de 44 pt.
+
+Limites desta passada: a Vitrine não traz legenda longa, então as publicações de teste foram feitas no compositor da própria Vitrine (as fotos de uma publicação nova aparecem como quadro neutro ou "foto indisponível", só o desenho da legenda e do carrossel vale). O arrastar com o mouse abre a tela cheia em vez de deslizar, então o passo 7 não foi feito por deslizar.
+
+Situação, em 2026-11-12 (Vitrine, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1`). Nenhum alvo foi percorrido por inteiro, então nenhuma caixa está marcada. Capturas fora do git, em `v2-shots/` da pasta de trabalho da sessão.
+
+- [ ] Android, AVD `varanda-api36` (parcial, 2026-11-12, build de debug existente ligado ao Metro da Vitrine, com legendas longas temporárias): claro e escuro. Passo 2 (fotos primeiro, legenda em 3 linhas com reticências e "mais" embaixo), passo 3 ("mais" abre no lugar sem abrir a Conversa, "menos" fecha), passo 6 (o link da última linha abre o Chrome, ao voltar a legenda continua aberta), passo 7 (na foto 2, abrir e fechar a legenda não mexe no carrossel), passo 8 ("1 de 2" aparece ao trocar de foto e some depois de cerca de 2 s; com a escala de animação em 0 some de uma vez, sem quadro intermediário), passo 13 em escuro com fonte 1,3 (3 linhas, "mais" legível, espaço do botão sem parecer solto). Não verificado: o toque na @menção não abriu o perfil (a tela não mudou, ver o defeito abaixo), passos 1, 4, 5 e 9, texto só com mais de 11 linhas (a publicação de teste de 14 linhas tinha foto), TalkBack.
+- [ ] iOS, simulador iPhone 17 Pro (parcial; o iPhone 16e não liga aqui), 2026-11-12, build de debug existente: passo 2 (fotos primeiro, 3 linhas e "mais"), passo 3 (abre no lugar, volta da Conversa com a legenda ainda aberta), passo 6 (o link abre o Safari; voltar ao app recarregou a lista e a legenda voltou recolhida), passo 7 (foto 2 mantida ao abrir a legenda), passo 13 em escuro com texto extra extra grande (legenda aberta legível, nada cortado). Não verificado: o toque na @menção não abriu o perfil, passos 1, 4, 5, 8 e 9, Reduzir Movimento, VoiceOver, texto só.
+- Observações do nativo, sem defeito do PR: com a legenda aberta, tocar na @menção `@joao_nascimento` não mudou de tela na Vitrine (capturas `n-ios-d-mention4.png` e `n-android-d-mention.png`). O toque chega a `openMention` (`apps/app/App.js:1900-1918`), que resolve o @nome pelo diretório de contas, e a Vitrine não responde a essa busca; o caminho é o mesmo de antes deste PR. Confirmar com uma conta real. Na Conversa, a publicação principal ainda aparece recolhida em 3 linhas com "mais" (`n-ios-d-link.png`): o PR seguinte (feat/thread-conversation) passa `expanded` a ela.
+- [ ] Chrome, 390 px (parcial): claro e escuro. Passos 1 a 3 e 6 (legenda com fotos recolhida em 3 linhas com "mais", aberta no lugar, link e @menção só ativos depois de aberta, o link de uma última linha abre e a legenda continua aberta), passo 4 (texto só: 9 linhas e "ver mais"), passo 12 (rótulo da publicação com os 543 caracteres da legenda; botão "ver mais, texto completo" com `aria-expanded`), botão de 44 pt de altura medido. Fechar a tela cheia não deixou setas na tela. Não verificado: passos 5, 7 a 9 (o contador e a janela foram vistos só a 1280 px), texto grande, Reduzir movimento, deslizar de verdade.
+- [ ] Chrome, 1280 px (parcial): passos 8 (contador "1 de 7" some depois da espera e volta a cada troca de foto), 9 (5 pontos, ativo o quarto na foto 6), 10 e 11 (setas com mouse e com o foco; foco passa de "foto anterior" para "próxima foto" e de volta, nunca cai na página). Não verificado: Reduzir movimento, texto grande, legenda longa neste tamanho (a 1280 px a coluna é a mesma, e a legenda de 6 linhas coube aberta sem botão).
