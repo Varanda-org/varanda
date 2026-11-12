@@ -305,6 +305,19 @@ test('liveMediaRefs: a surviving post keeps its link preview thumbnail live', (t
   t.alike(shownMedia(null), [])
 })
 
+test('liveMediaRefs: a video post keeps its poster and its video live', (t) => {
+  const poster = desc(K2, 1, 1, 'image/jpeg')
+  const video = { core: K2, mime: 'video/mp4', start: 2, blocks: 40, bytes: 40 * 32768, sha256: 'f'.repeat(64), width: 1080, height: 1920, ms: 30000 }
+  const entries = [genesis, post(1, { text: '', media: [poster, video] }), post(2, { media: [desc(K2, 50, 1)] }), del(3, 2)]
+  t.is(validateRecord(entries[1].record, 1), null, 'the fixture is a valid video post')
+  t.alike(liveMediaRefs(entries), [{ core: K2, start: 1, blocks: 1 }, { core: K2, start: 2, blocks: 40 }])
+  t.alike(liveMediaRefs(entries, [1]), [], 'not once its post is excepted')
+  t.alike(deletedRanges([...entries, del(4, 1, [{ core: K2, start: 1, blocks: 1 }, { core: K2, start: 2, blocks: 40 }])], [K2]), [
+    { core: K2, start: 1, blocks: 1 },
+    { core: K2, start: 2, blocks: 40 }
+  ], 'its tombstone frees both ranges')
+})
+
 test('deletedRanges: a tombstone never frees a live preview thumbnail', (t) => {
   const range = { core: K2, start: 7, blocks: 1 }
   const entries = [genesis, post(1, { preview: card(desc(K2, 7, 1, 'image/jpeg')) }), post(2, { media: [desc(K2, 7, 1)] }), del(3, 2, [range])]

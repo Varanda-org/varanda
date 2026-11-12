@@ -877,6 +877,24 @@ test('putMomentMedia hands the photo to momentPutMedia with only the image field
   t.is(closing.code, 'LOCKED')
 })
 
+test('a video upload and a video momento carry mime, sides, duration and kind to the session', async (t) => {
+  const seen = []
+  const session = {
+    mediaUpload: (args) => { seen.push(['upload', { ...args, bytes: undefined }, Object.keys(args)]); return Promise.resolve({ ok: true }) },
+    momentPutMedia: (args) => { seen.push(['moment', { ...args, bytes: undefined }, Object.keys(args)]); return Promise.resolve({ id: 'm' }) },
+    dmPutMedia: (args) => { seen.push(['dm', { ...args, bytes: undefined }, Object.keys(args)]); return Promise.resolve({ id: 'd' }) }
+  }
+  const io = { read: async () => ({ file: '/cache/v.bin', bytes: new Uint8Array(4) }), session, unlink: () => {}, isClosing: () => false }
+  await uploadMedia(io, { mime: 'video/mp4', width: 360, height: 640, ms: 12000, kind: 'video', sealed: false })
+  await putMomentMedia(io, { mime: 'video/mp4', width: 720, height: 1280, ms: 9000, kind: 'video', sealed: true, to: 'ef'.repeat(32) })
+  await putDmMedia(io, { mime: 'video/mp4', width: 360, height: 640, ms: 12000, kind: 'video', to: 'ef'.repeat(32) })
+  t.alike(seen[0][2], ['bytes', 'mime', 'width', 'height', 'ms', 'kind'])
+  t.alike({ mime: seen[0][1].mime, width: seen[0][1].width, height: seen[0][1].height, ms: seen[0][1].ms, kind: seen[0][1].kind }, { mime: 'video/mp4', width: 360, height: 640, ms: 12000, kind: 'video' })
+  t.alike(seen[1][2], ['bytes', 'mime', 'width', 'height', 'ms', 'kind'], 'a video momento: no destination or sealed field')
+  t.alike({ mime: seen[1][1].mime, width: seen[1][1].width, height: seen[1][1].height, ms: seen[1][1].ms, kind: seen[1][1].kind }, { mime: 'video/mp4', width: 720, height: 1280, ms: 9000, kind: 'video' })
+  t.alike(seen[2][2], ['bytes', 'mime', 'width', 'height', 'to'], 'a DM carries voice fields only, never a video kind')
+})
+
 test('writeReadFile creates the file exclusively with mode 0600; clearReadDir removes read files only', async (t) => {
   const { root } = mediaDirs(t)
   const dir = path.join(root, 'media-read')
@@ -1010,4 +1028,98 @@ test('readMediaToFile checks a voice note as audio: a sound-only MPEG-4 passes, 
   const err = await readMediaToFile(io, { kind: 'group', diary: 'd', item: { x: 1 } }).then(() => null, (e) => e)
   t.ok(err !== null && err.code === 'USAGE', 'a container with a video track is refused')
   t.is(written.length, 1, 'nothing written for the refused one')
+})
+
+// A synthetic H.264 MP4 with no binary fixture, as
+// packages/rpc/test/video-bounds.test.js builds it: one video track of 90
+// samples of 100 ticks at 3000 a second (3 s), coded 640x360, turned 90
+// degrees when `turn`.
+function mp4Video ({ turn = false, moovExtra = [] } = {}) {
+  const be16 = (v) => [(v >>> 8) & 0xff, v & 0xff]
+  const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
+  const ascii = (str) => Array.from(str, (c) => c.charCodeAt(0))
+  const zeros = (n) => new Array(n).fill(0)
+  const box = (type, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(type), ...body] }
+  const ONE = 0x10000
+  const matrix = turn ? [0, ONE, 0, -ONE, 0, 0, 0, 0, 0x40000000] : [ONE, 0, 0, 0, ONE, 0, 0, 0, 0x40000000]
+  const tkhd = box('tkhd', [0, 0, 0, 7], be32(7), be32(9), be32(1), be32(0), be32(3000), zeros(16), ...matrix.map((v) => be32(v >>> 0)), be32(640 * ONE), be32(360 * ONE))
+  const avcC = box('avcC', [1, 100, 0, 40, 0xff, 0xe1], be16(6), [0x67, 100, 0, 40, 0xac, 0xd9], [1], be16(4), [0x68, 0xeb, 0xe3, 0xcb])
+  const avc1 = box('avc1', zeros(6), be16(1), zeros(16), be16(640), be16(360), be32(0x480000), be32(0x480000), be32(0), be16(1), [4, ...ascii('x264'), ...zeros(27)], be16(0x18), be16(0xffff), avcC)
+  const moovAt = (offset) => box('moov',
+    box('mvhd', [0, 0, 0, 0], be32(7), be32(9), be32(1000), be32(3000), zeros(16), ...[ONE, 0, 0, 0, ONE, 0, 0, 0, 0x40000000].map(be32), zeros(28)),
+    box('trak', tkhd, box('mdia',
+      box('mdhd', [0, 0, 0, 0], be32(7), be32(9), be32(3000), be32(9000), [0x55, 0xc4, 0, 0]),
+      box('hdlr', [0, 0, 0, 0], be32(0), ascii('vide'), zeros(12), ascii('VideoHandler'), [0]),
+      box('minf', box('vmhd', [0, 0, 0, 1], zeros(8)), box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))),
+        box('stbl', box('stsd', [0, 0, 0, 0], be32(1), avc1), box('stts', [0, 0, 0, 0], be32(1), be32(90), be32(100)),
+          box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(90), be32(1)), box('stsz', [0, 0, 0, 0], be32(0), be32(90), ...new Array(90).fill(be32(10))),
+          box('stco', [0, 0, 0, 0], be32(1), be32(offset)))))),
+    ...moovExtra)
+  const ftyp = box('ftyp', ascii('isom'), be32(0x200), ascii('isom'), ascii('avc1'))
+  const offset = ftyp.length + moovAt(0).length + 8
+  return new Uint8Array([...ftyp, ...moovAt(offset), ...box('mdat', new Array(900).fill(1))])
+}
+
+test('readMediaToFile measures a video strictly: duration and display size from the bytes', async (t) => {
+  const written = []
+  // The session's ms, w and h are claims: the answer carries the container's.
+  const session = {
+    momentReadMedia: async () => ({ bytes: mp4Video({ turn: true }), mime: 'video/mp4', w: 1, h: 1, ms: 1 }),
+    groupReadMedia: async () => ({ bytes: mp4Video(), mime: 'video/mp4' })
+  }
+  const io = {
+    session,
+    write: async (bytes) => { written.push(new Uint8Array(bytes)); return MEDIA_NAME },
+    unlink: () => {},
+    generation: () => 0,
+    isClosing: () => false
+  }
+  t.alike(await readMediaToFile(io, { kind: 'moment', author: 'k', seq: 2 }), { name: MEDIA_NAME, mime: 'video/mp4', w: 360, h: 640, ms: 3000 }, 'a turned video answers its display size')
+  t.alike(written[0], mp4Video({ turn: true }), 'the bytes are written as they came')
+  t.alike(await readMediaToFile(io, { kind: 'group', diary: 'd', item: { x: 1 } }), { name: MEDIA_NAME, mime: 'video/mp4', w: 640, h: 360, ms: 3000 })
+})
+
+test('readMediaToFile refuses a video the strict check rejects: nothing written, plaintext zeroed', async (t) => {
+  const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
+  // A camera's place box: only the sender's own file may carry metadata.
+  const udta = [...be32(16), 0x75, 0x64, 0x74, 0x61, ...be32(8), 0x66, 0x72, 0x65, 0x65]
+  const png = new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAAAAAC4HznGAAAAC0lEQVR4nGNggAAAAAgAAbdYc5UAAAAASUVORK5CYII=', 'base64'))
+  const answers = [
+    { bytes: mp4Video({ moovExtra: [udta] }), mime: 'video/mp4', w: 640, h: 360, ms: 3000 },
+    { bytes: mp4Video().slice(0, 300), mime: 'video/mp4', w: 640, h: 360, ms: 3000 },
+    { bytes: png, mime: 'video/mp4', w: 3, h: 2, ms: 3000 },
+    { bytes: new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]), mime: 'video/mp4' }
+  ]
+  const written = []
+  for (const answer of answers) {
+    const io = {
+      session: { momentReadMedia: async () => answer },
+      write: async (bytes) => { written.push(bytes); return MEDIA_NAME },
+      unlink: () => {},
+      generation: () => 0,
+      isClosing: () => false
+    }
+    const err = await readMediaToFile(io, { kind: 'moment', author: 'k', seq: 2 }).catch((e) => e)
+    t.is(err.code, 'USAGE')
+    t.is(err.message, 'mídia indisponível')
+  }
+  t.is(written.length, 0, 'no plaintext file is written')
+  t.ok(answers.every((a) => a.bytes.every((x) => x === 0)), 'the refused plaintext is zeroed')
+})
+
+test('a video file named with a path is refused before any read', async (t) => {
+  const { cacheDir: cache } = mediaDirs(t)
+  fs.writeFileSync(path.join(cache, 'clip.mp4'), mp4Video())
+  const sent = []
+  const session = { mediaUpload: (args) => { sent.push(args); return Promise.resolve({ ok: true }) }, momentPutMedia: (args) => { sent.push(args); return Promise.resolve({ ok: true }) } }
+  for (const name of ['clip.mp4', '../' + MEDIA_NAME, 'sub/' + MEDIA_NAME, path.join(cache, MEDIA_NAME)]) {
+    const read = () => readMediaFile({ fs: fs.promises, join: path.join, cacheDir: cache, name, max: 1 << 23, flags: fs.constants.O_RDONLY })
+    const io = { read, session, unlink: () => {}, isClosing: () => false }
+    const up = await uploadMedia(io, { mime: 'video/mp4', width: 640, height: 360, ms: 3000, kind: 'video' }).catch((e) => e)
+    t.is(up.code, 'USAGE', 'upload ' + name)
+    t.is(up.message, 'arquivo de mídia inválido')
+    const mo = await putMomentMedia(io, { mime: 'video/mp4', width: 640, height: 360, ms: 3000, kind: 'video' }).catch((e) => e)
+    t.is(mo.code, 'USAGE', 'momento ' + name)
+  }
+  t.is(sent.length, 0, 'nothing reached the session')
 })

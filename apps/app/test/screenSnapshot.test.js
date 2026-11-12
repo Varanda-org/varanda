@@ -114,6 +114,44 @@ test('diario keeps only post and repost records and own or followed originals', 
   t.is(s.buildScreenSnapshot('diario', { ...KINDS.diario(), log: { ...diaryLog(), key: FOLLOW } }), null, 'another diary is refused')
 })
 
+const poster = { core: '12'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 1000, sha256: '34'.repeat(32), width: 640, height: 360 }
+const clip = { core: '9a'.repeat(32), mime: 'video/mp4', start: 2, blocks: 30, bytes: 30 * 32768 - 5, sha256: 'bc'.repeat(32), width: 640, height: 360, ms: 12000 }
+const badPairs = () => [
+  [clip, poster],
+  [clip],
+  [poster, clip, poster],
+  [{ ...poster, mime: 'image/png' }, clip],
+  [poster, { ...clip, ms: 0 }],
+  [poster, { ...clip, ms: 30001 }],
+  [poster, { ...clip, width: 1920, height: 1920 }],
+  [poster, { ...clip, extra: 1 }],
+  [poster, { ...clip, mime: 'image/jpeg' }]
+]
+
+test('a video row round-trips in diario and membro; a malformed pair never parses', async (t) => {
+  const s = await load()
+  const log = diaryLog()
+  log.entries[0] = { ...log.entries[0], seq: 10 }
+  log.entries.splice(1, 0, { seq: 9, record: { type: 'post', text: 'vídeo', at: at(9), replyTo: null, media: [poster, clip] } })
+  const diario = s.buildScreenSnapshot('diario', { ...KINDS.diario(), log })
+  t.alike(diario.body.rows.map((r) => r.seq), [10, 9, 8, 4], 'the video row and every older row are kept')
+  const back = s.parseScreenSnapshot(JSON.stringify(diario), 'diario', bind())
+  t.alike(back, diario, 'diario round trip')
+  t.alike(back.body.rows[1].record.media, [poster, clip])
+
+  const member = s.buildScreenSnapshot('membro', { ...KINDS.membro(), items: [post(FOLLOW, 6, { media: [poster, clip] }), ...memberInput(FOLLOW).items] })
+  t.ok(member, 'membro builds')
+  const parsed = s.parseScreenSnapshot(JSON.stringify(member), 'membro', bind())
+  t.alike(parsed, member, 'membro round trip')
+  t.ok(JSON.stringify(parsed.body).includes(clip.sha256), 'the video row is in membro')
+
+  for (const media of badPairs()) {
+    const tampered = JSON.parse(JSON.stringify(diario))
+    tampered.body.rows[1].record.media = JSON.parse(JSON.stringify(media))
+    t.is(s.parseScreenSnapshot(JSON.stringify(tampered), 'diario', bind()), null, 'diario: ' + JSON.stringify(media.map((d) => d.mime)))
+  }
+})
+
 test('perfil keeps the four fields of the own profile only', async (t) => {
   const s = await load()
   t.alike(roundTrip(t, s, 'perfil').body, { name: 'Eu', username: 'eu_mesmo', bio: 'minha bio', avatar })

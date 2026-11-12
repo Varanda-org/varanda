@@ -3,28 +3,27 @@
 // Each tile shows media[0] through MediaView (descriptors untouched, MediaView
 // validates them); persist goes to every tile: false for authors the device
 // does not follow. No counts of likes or views. More photos load only by the
-// explicit 'Ver mais' button, never on scroll.
+// explicit 'Ver mais' button, never on scroll. A video pair is still that
+// poster: the several-photos badge becomes a play mark and the duration, and
+// the label says 'vídeo'.
 
-import { FlatList, Pressable, StyleSheet, View } from 'react-native'
-import { relativeTime } from '../format'
+import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native'
+import { durationLabel, videoPair } from '../media/plan'
 import { Icon } from './Icon'
 import { MediaView } from './MediaView'
+import { tileLabel } from './muralLabel'
 import { Pill } from './Pill'
 import { Soft } from './index'
 import { EmptyState } from './States'
 import { useStyles, useTheme } from './ThemeProvider'
 import { space } from './theme'
 
+export { tileLabel }
+
 function toRows (tiles, columns) {
   const rows = []
   for (let i = 0; i < tiles.length; i += columns) rows.push({ key: 'r' + i, items: tiles.slice(i, i + columns) })
   return rows
-}
-
-function tileLabel (tile) {
-  const n = Array.isArray(tile.media) ? tile.media.length : 0
-  const when = relativeTime(tile.at)
-  return (n > 1 ? n + ' fotos' : 'foto') + (when ? ', ' + when : '')
 }
 
 // One grid row, for a host list that renders rows itself (the profile screens
@@ -36,41 +35,51 @@ export function MuralRow ({ item, onOpen, persist, columns = 3 }) {
   // and the first one 2 pt above, off the tab underline.
   return (
     <View style={[styles.row, item.key === 'r0' && styles.first]}>
-      {item.items.map((tile, i) => (
+      {item.items.map((tile, i) => {
+        const pair = videoPair(tile.media)
         // The whole tile opens the post, even when the cover failed to load:
         // MediaView would turn a failed cover into its own retry button (a
         // second focus stop on the web), so it gets no touches and no retry
         // button here (the post view retries its photos).
-        <Pressable
-          key={tile.ref || i}
-          style={({ pressed, hovered }) => [styles.tile, (pressed || hovered) && styles.pressed]}
-          accessibilityRole='button'
-          accessibilityLabel={tileLabel(tile)}
-          onPress={() => onOpen && onOpen(tile)}
-        >
-          {/* The tile button already says what the photo is: the image inside
-              stays out of the accessibility tree, or each tile reads twice. */}
-          <View
-            style={styles.fill}
-            pointerEvents='none'
-            accessibilityElementsHidden
-            importantForAccessibility='no-hide-descendants'
-            aria-hidden
+        return (
+          <Pressable
+            key={tile.ref || i}
+            style={({ pressed, hovered }) => [styles.tile, (pressed || hovered) && styles.pressed]}
+            accessibilityRole='button'
+            accessibilityLabel={tileLabel(tile)}
+            onPress={() => onOpen && onOpen(tile)}
           >
-            <MediaView
-              author={tile.author}
-              descriptor={tile.media && tile.media[0]}
-              persist={persist}
-              label={tileLabel(tile)}
+            {/* The tile button already says what the photo is: the image inside
+                stays out of the accessibility tree, or each tile reads twice. */}
+            <View
               style={styles.fill}
-              tapRetry={false}
-            />
-          </View>
-          {Array.isArray(tile.media) && tile.media.length > 1
-            ? <View style={styles.badge} pointerEvents='none'><Icon name='copiar' size={14} color='#ffffff' /></View>
-            : null}
-        </Pressable>
-      ))}
+              pointerEvents='none'
+              accessibilityElementsHidden
+              importantForAccessibility='no-hide-descendants'
+              aria-hidden
+            >
+              <MediaView
+                author={tile.author}
+                descriptor={tile.media && tile.media[0]}
+                persist={persist}
+                label={tileLabel(tile)}
+                style={styles.fill}
+                tapRetry={false}
+              />
+            </View>
+            {pair
+              ? (
+                <View pointerEvents='none' style={styles.videoBadge} accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>
+                  <Icon name='tocar' size={14} color='#ffffff' />
+                  <Text style={styles.videoTime}>{durationLabel(pair.video.ms)}</Text>
+                </View>
+                )
+              : Array.isArray(tile.media) && tile.media.length > 1
+                ? <View style={styles.badge} pointerEvents='none'><Icon name='copiar' size={14} color='#ffffff' /></View>
+                : null}
+          </Pressable>
+        )
+      })}
       {item.items.length < cols ? Array.from({ length: cols - item.items.length }, (_, i) => <View key={'pad' + i} style={styles.pad} />) : null}
     </View>
   )
@@ -139,5 +148,18 @@ const makeStyles = (colors) => StyleSheet.create({
   pressed: { opacity: 0.85 },
   // A fixed scrim, not a theme colour: it sits on a photo, whatever the theme.
   badge: { position: 'absolute', top: space.xs, right: space.xs, padding: 4, borderRadius: 999, backgroundColor: 'rgba(0,0,0,0.45)' },
+  videoBadge: {
+    position: 'absolute',
+    top: space.xs,
+    right: space.xs,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 4,
+    paddingHorizontal: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(0,0,0,0.45)'
+  },
+  videoTime: { color: '#ffffff', fontSize: 12, lineHeight: 14, fontWeight: '700' },
   foot: { alignItems: 'center', gap: space.sm, paddingVertical: space.lg }
 })
