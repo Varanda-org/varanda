@@ -129,6 +129,9 @@ function mp4 (width, height) {
     b.writeUInt32BE(3000, 16)
     return b
   }
+  const mvhd = time(100)
+  for (const offset of [36, 52]) mvhd.writeUInt32BE(0x10000, offset)
+  mvhd.writeUInt32BE(0x40000000, 68)
   const tkhd = Buffer.alloc(84)
   tkhd.writeUInt32BE(7, 0)
   tkhd.writeUInt32BE(1, 12)
@@ -141,6 +144,8 @@ function mp4 (width, height) {
   entry.writeUInt16BE(1, 6)
   entry.writeUInt16BE(width, 24)
   entry.writeUInt16BE(height, 26)
+  entry.writeUInt16BE(0x18, 74)
+  entry.writeUInt16BE(0xffff, 76)
   const avcC = box('avcC', Buffer.from([1, 100, 0, 40, 255, 225, 0, 4, 103, 100, 0, 40, 1, 0, 1, 104]))
   const ftyp = box('ftyp', Buffer.from('isom'), u32(0), Buffer.from('isommp41'))
   const stbl = box('stbl',
@@ -154,7 +159,7 @@ function mp4 (width, height) {
   const mdia = box('mdia', box('mdhd', time(24)),
     box('hdlr', Buffer.alloc(8), Buffer.from('vide'), Buffer.alloc(13)), minf)
   return Buffer.concat([ftyp, box('mdat', Buffer.alloc(10, 1)),
-    box('moov', box('mvhd', time(100)), box('trak', box('tkhd', tkhd), mdia))])
+    box('moov', box('mvhd', mvhd), box('trak', box('tkhd', tkhd), mdia))])
 }
 
 function sha (bytes) {

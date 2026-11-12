@@ -310,7 +310,7 @@ function mp4 ({ ms = 3000, width = 640, height = 360, type = 'avc1', udta = fals
   const entry = box(type, zeros(6), be16(1), zeros(16), be16(width), be16(height), be32(0x480000), be32(0x480000), be32(0), be16(1),
     [4, ...ascii('x264'), ...zeros(27)], be16(0x18), be16(0xffff), type === 'avc1' ? avcC : box('hvcC', zeros(23)), box('pasp', be32(1), be32(1)))
   const moovOf = (offset) => box('moov',
-    full('mvhd', be32(0), be32(0), be32(1000), be32(ms), zeros(80)),
+    full('mvhd', be32(0), be32(0), be32(1000), be32(ms), zeros(16), ...[one, 0, 0, 0, one, 0, 0, 0, 0x40000000].map(be32), zeros(28)),
     box('trak',
       box('tkhd', [0, 0, 0, 7], be32(0), be32(0), be32(1), be32(0), be32(ms), zeros(16),
         ...[one, 0, 0, 0, one, 0, 0, 0, 0x40000000].map(be32), be32(width * one), be32(height * one)),
