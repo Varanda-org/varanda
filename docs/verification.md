@@ -8103,7 +8103,7 @@ A Rua, o mosaico da citação e o mural mostram a capa JPEG de uma publicação 
 
 O toque abre um visualizador em tela cheia. Ele baixa o vídeo, confere o sha256 e a checagem estrita de MP4, com lados e duração iguais aos do descritor, e só então monta um endereço local `file://` ou `blob:`. A reprodução tem controles e som. Fechar interrompe o download (abort), solta o player e apaga o arquivo local. Há um player por vez. Uma carga que falha mostra "vídeo indisponível" e um "Tentar de novo", sem repetição automática. Se o navegador recusa começar sem um gesto, o player permanece e mostra "Toque no play para assistir". Se começa mudo, mostra "Ativar som".
 
-No visualizador de momentos, um momento em vídeo usa o cronômetro único que já existe. A duração do segmento é a do vídeo. Uma foto continua em 5 s. O cronômetro começa quando o player está pronto, ou 2 s depois de o arquivo ter carregado. Segurar, o menu, arrastar, a confirmação de apagar e o app oculto pausam. Há um avanço por item. Com reduzir movimento não há reprodução automática ("Reproduzir") nem avanço automático. O som fica ligado, com "Ativar som" quando o navegador começa mudo. Um início bloqueado mostra "Reproduzir". Sair solta o player e apaga o arquivo local. "Reproduzir" e "Ativar som" agem dentro do próprio toque, para o navegador que exige um gesto.
+No visualizador de momentos, um momento em vídeo usa o cronômetro único que já existe. A duração do segmento é a do vídeo. Uma foto continua em 5 s. O cronômetro começa quando o player está pronto, ou 2 s depois de o arquivo ter carregado. Se o player ainda diz que está tocando quando o cronômetro acaba, o momento espera o fim do vídeo por até 1,5 s. Segurar, o menu, arrastar, a confirmação de apagar e o app oculto pausam. Há um avanço por item. Com reduzir movimento não há reprodução automática ("Reproduzir") nem avanço automático. O som fica ligado, com "Ativar som" quando o navegador começa mudo. Um início bloqueado mostra "Reproduzir". Sair solta o player e apaga o arquivo local. "Reproduzir" e "Ativar som" agem dentro do próprio toque, para o navegador que exige um gesto.
 
 No Android e no iOS o app usa expo-video 55.0.21. A web usa um elemento `video` comum: expo-video não entra no pacote da web.
 
@@ -8210,6 +8210,7 @@ Nenhuma caixa foi marcada. Ordem: build de debug do Android, simulador ou aparel
 | O arquivo publicado não tem `udta`, `meta`, `uuid` nem localização (hexadecimal) | [ ] | [ ] | [ ] | [ ] |
 | Reprodução com som, a partir da capa, e um só player | [ ] | [ ] | [ ] | [ ] |
 | Tempo do momento: a duração do vídeo; uma foto continua em 5 s | [ ] | [ ] | [ ] | [ ] |
+| O fim do vídeo não é cortado | [ ] | [ ] | [ ] | [ ] |
 | Reduzir movimento: sem reprodução automática e sem avanço automático | [ ] | [ ] | [ ] | [ ] |
 | Apagar a publicação tira capa e vídeo; apagar o momento tira o item | [ ] | [ ] | [ ] | [ ] |
 | Núcleo cheio: "Este aparelho não tem mais espaço para fotos e vídeos.", sem núcleo novo | [ ] | [ ] | [ ] | [ ] |

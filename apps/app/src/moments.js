@@ -7,6 +7,8 @@ import { MAX_MOMENT_VIDEO_MS, VIDEO_MIME } from './media/plan.js'
 export const MOMENT_MS = 24 * 60 * 60 * 1000
 export const AUTO_ADVANCE_MS = 5000
 export const MUSIC_HOLD_MS = 15000
+// Covers the 1 s container tolerance plus the player's start lag after the clock.
+export const VIDEO_END_GRACE_MS = 1500
 const MIN_VIDEO_SEGMENT_MS = 1000
 
 const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
