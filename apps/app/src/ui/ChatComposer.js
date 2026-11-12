@@ -4,6 +4,8 @@
 // grows with the text up to six lines, and a round send button that only
 // appears once there is something to send. The emoji panel opens under the
 // field and inserts at the caret within `max` characters.
+// The Aa formatting row keeps selected text in place so edits can continue.
+// Paste cleaning keeps TAB and CR out of drafts without shifting the caret.
 //
 // @ suggestions follow Publicar's rules: only on a hosted node that is
 // online, only while the caret (not a range) is inside an @token of
@@ -56,6 +58,7 @@ import { ActivityIndicator, AppState, Image, Keyboard, PanResponder, Platform, P
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { MAX_TEXT, activeMention } from '@varanda/rpc'
 import { countAfterInsert, insertAt } from '../emoji'
+import { cleanPaste, insertCodeBlock, wrapSelection } from '../formatInsert'
 import { canRecordMp4, cancelRecording, startRecording, stopRecording } from '../media/audio'
 import { durationLabel, recordPlan, slideToCancel } from '../media/voice'
 import { countChars } from '../format'
@@ -416,6 +419,7 @@ export function ChatComposer ({
     if (text === '') setHeight(MIN_HEIGHT)
   }, [text])
   const [emojiOpen, setEmojiOpen] = useState(false)
+  const [formatOpen, setFormatOpen] = useState(false)
   const [focused, setFocused] = useState(false)
   const [note, setNote] = useState('')
   // selRef follows the field's selection; forcedSel places the caret once
@@ -519,6 +523,69 @@ export function ChatComposer ({
     setForcedSel(next.selection)
   }
 
+  const changeText = (next) => {
+    if (!/[\t\r]/.test(next)) {
+      change(next)
+      return
+    }
+    const before = selRef.current
+    let rawCaret
+    if (before && Number.isInteger(before.start) && Number.isInteger(before.end) &&
+      before.start >= 0 && before.end >= before.start && before.end <= text.length &&
+      next.length >= before.start + text.length - before.end &&
+      next.startsWith(text.slice(0, before.start)) && next.endsWith(text.slice(before.end))) {
+      rawCaret = next.length - (text.length - before.end)
+    } else {
+      let prefix = 0
+      while (prefix < text.length && prefix < next.length && text[prefix] === next[prefix]) prefix++
+      let suffix = 0
+      while (suffix < text.length - prefix && suffix < next.length - prefix && text[text.length - suffix - 1] === next[next.length - suffix - 1]) suffix++
+      rawCaret = next.length - suffix
+    }
+    let start = cleanPaste(next.slice(0, rawCaret)).length
+    if (next[rawCaret - 1] === '\r' && next[rawCaret] === '\n') start--
+    const selection = { start, end: start }
+    change(cleanPaste(next))
+    selRef.current = selection
+    setCaret(start)
+    setCollapsed(true)
+    setForcedSel(selection)
+    setTimeout(() => {
+      const input = inputRef.current
+      if (!input) return
+      try {
+        if (typeof input.focus === 'function') input.focus()
+        if (typeof input.setSelectionRange === 'function') input.setSelectionRange(selection.start, selection.end)
+      } catch {}
+    }, 0)
+  }
+
+  const pickFormat = (marker) => {
+    if (!editable) return
+    const next = marker === null
+      ? insertCodeBlock(text, selRef.current)
+      : wrapSelection(text, selRef.current, marker)
+    if (next.text.length > text.length && !countAfterInsert(next.text, '', max).allowed) {
+      setNote('limite de ' + max + ' caracteres')
+      tap('warn')
+      return
+    }
+    setNote('')
+    change(next.text)
+    selRef.current = next.selection
+    setCaret(next.selection.start)
+    setCollapsed(next.selection.start === next.selection.end)
+    setForcedSel(next.selection)
+    setTimeout(() => {
+      const input = inputRef.current
+      if (!input) return
+      try {
+        if (typeof input.focus === 'function') input.focus()
+        if (typeof input.setSelectionRange === 'function') input.setSelectionRange(next.selection.start, next.selection.end)
+      } catch {}
+    }, 0)
+  }
+
   const pickMention = (hit) => {
     if (!editable) return
     // The rows were computed for this token: refuse the pick if the text or
@@ -565,6 +632,33 @@ export function ChatComposer ({
         ? <Thumbs items={staged} onRemove={onRemoveAttachment} onCancel={onCancelAttachments} locked={sending} />
         : null}
       <MentionSuggest rows={suggestions} loading={mentionQuery !== '' && search.phase === 'loading'} onPick={pickMention} />
+      {formatOpen && editable && !recording
+        ? (
+          <View>
+            <ScrollView horizontal keyboardShouldPersistTaps='always' contentContainerStyle={styles.formatRow}>
+              {[
+                ['Negrito', '*'],
+                ['Itálico', '_'],
+                ['Riscado', '~'],
+                ['Código', '`'],
+                ['Bloco de código', null],
+                ['Spoiler', '||']
+              ].map(([label, marker]) => (
+                <Pressable
+                  key={label}
+                  accessibilityRole='button'
+                  accessibilityLabel={label}
+                  onPress={() => pickFormat(marker)}
+                  style={({ pressed }) => [styles.formatButton, pressed && styles.pressed]}
+                >
+                  <Text style={styles.formatLabel}>{label}</Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+            <Text style={styles.soft}>Você também pode digitar *negrito*, _itálico_ e `código`</Text>
+          </View>
+          )
+        : null}
       <View style={styles.row}>
         {recording
           ? (
@@ -593,13 +687,24 @@ export function ChatComposer ({
           >
             <Icon name='sorriso' size={22} color={emojiOpen ? colors.accent : colors.soft} />
           </Pressable>
+          <Pressable
+            accessibilityRole='button'
+            accessibilityLabel='formatação'
+            accessibilityState={{ expanded: formatOpen, disabled: !editable }}
+            disabled={!editable}
+            onPress={() => setFormatOpen((v) => !v)}
+            hitSlop={(layout.hit - SEND) / 2}
+            style={({ pressed }) => [styles.tool, pressed && styles.pressed]}
+          >
+            <Text style={{ color: formatOpen ? colors.accent : colors.soft }}>Aa</Text>
+          </Pressable>
           <TextInput
             ref={inputRef}
             style={[styles.input, webInputReset, { height }]}
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}
             value={text}
-            onChangeText={change}
+            onChangeText={changeText}
             editable={editable}
             selection={forcedSel || undefined}
             onSelectionChange={(event) => {
@@ -734,6 +839,9 @@ const makeStyles = (colors) => StyleSheet.create({
   fieldFocused: { borderColor: colors.accent },
   fieldOff: { backgroundColor: colors.inputOff },
   tool: { width: SEND, height: SEND, alignItems: 'center', justifyContent: 'center' },
+  formatRow: { gap: space.xs },
+  formatButton: { minWidth: layout.hit, minHeight: layout.hit, paddingHorizontal: space.sm, justifyContent: 'center' },
+  formatLabel: { fontSize: 14, color: colors.accent },
   input: {
     flex: 1,
     minWidth: 0,

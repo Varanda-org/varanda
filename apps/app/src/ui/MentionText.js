@@ -22,7 +22,6 @@ export function hasMention (text) {
 }
 
 export function MentionText ({ text, onOpenMention, onOpenPlain, onLongPress, numberOfLines, onTextLayout, style, selectable }) {
-  const styles = useStyles(makeStyles)
   const segments = textSegments(text, { mentions: typeof onOpenMention === 'function' })
   // A clamp can hide part of a URL, so the visible prefix would open another site.
   const links = typeof numberOfLines !== 'number'
@@ -32,63 +31,68 @@ export function MentionText ({ text, onOpenMention, onOpenPlain, onLongPress, nu
   }
   return (
     <Text style={style} numberOfLines={numberOfLines} onTextLayout={onTextLayout} selectable={selectable}>
-      {segments.map((segment, i) => {
-        if (segment.username !== null) {
-          return (
-            <Text
-              key={i}
-              style={styles.mention}
-              accessible
-              accessibilityRole='link'
-              accessibilityLabel={'abrir o perfil de @' + segment.username}
-              onLongPress={onLongPress}
-              onPress={(e) => {
-                if (e && e.stopPropagation) e.stopPropagation()
-                onOpenMention(segment.username)
-              }}
-              onKeyDown={(e) => {
-                // react-native-web Text maps onPress to click only.
-                if ((e.key !== 'Enter' && e.key !== ' ') || e.ctrlKey || e.metaKey || e.altKey) return
-                if (e.preventDefault) e.preventDefault()
-                if (e.stopPropagation) e.stopPropagation()
-                onOpenMention(segment.username)
-              }}
-            >
-              {displayText(segment.text)}
-            </Text>
-          )
-        }
-        if (!links || segment.href === null || !isHttpUrl(segment.href)) {
-          return <Text key={i} onPress={plain} onLongPress={onLongPress}>{displayText(segment.text, { multiline: true })}</Text>
-        }
-        const href = segment.href
-        const link = linkProps(href)
-        return (
-          <Text
-            key={i}
-            style={styles.link}
-            accessible
-            accessibilityRole='link'
-            accessibilityLabel={'abrir ' + href}
-            accessibilityHint='abre no navegador'
-            href={link.href}
-            hrefAttrs={link.hrefAttrs}
-            onLongPress={onLongPress}
-            onPress={(e) => {
-              // On web the anchor navigates by itself, so opening here too
-              // would open the page twice.
-              if (e && e.stopPropagation) e.stopPropagation()
-              if (typeof link.onPress === 'function') link.onPress()
-            }}
-            onKeyDown={(e) => {
-              // The anchor activates on Enter natively; a parent must not react too.
-              if (e.key === 'Enter' && e.stopPropagation) e.stopPropagation()
-            }}
-          >
-            {displayText(segment.text)}
-          </Text>
-        )
-      })}
+      {segments.map((segment, i) => <SegmentSpan key={i} segment={segment} onOpenMention={onOpenMention} onOpenPlain={plain} onLongPress={onLongPress} links={links} />)}
+    </Text>
+  )
+}
+
+// One precomputed textSegments entry, drawn exactly as MentionText draws it.
+// The segment must come from textSegments on the raw text: RichText passes
+// its atoms here so a styled substring is never segmented again.
+export function SegmentSpan ({ segment, onOpenMention, onOpenPlain, onLongPress, links = true }) {
+  const styles = useStyles(makeStyles)
+  const plain = typeof onOpenPlain === 'function' ? onOpenPlain : undefined
+  if (segment.username !== null && typeof onOpenMention === 'function') {
+    return (
+      <Text
+        style={styles.mention}
+        accessible
+        accessibilityRole='link'
+        accessibilityLabel={'abrir o perfil de @' + segment.username}
+        onLongPress={onLongPress}
+        onPress={(e) => {
+          if (e && e.stopPropagation) e.stopPropagation()
+          onOpenMention(segment.username)
+        }}
+        onKeyDown={(e) => {
+          // react-native-web Text maps onPress to click only.
+          if ((e.key !== 'Enter' && e.key !== ' ') || e.ctrlKey || e.metaKey || e.altKey) return
+          if (e.preventDefault) e.preventDefault()
+          if (e.stopPropagation) e.stopPropagation()
+          onOpenMention(segment.username)
+        }}
+      >
+        {displayText(segment.text)}
+      </Text>
+    )
+  }
+  if (!links || segment.href === null || !isHttpUrl(segment.href)) {
+    return <Text onPress={plain} onLongPress={onLongPress}>{displayText(segment.text, { multiline: true })}</Text>
+  }
+  const href = segment.href
+  const link = linkProps(href)
+  return (
+    <Text
+      style={styles.link}
+      accessible
+      accessibilityRole='link'
+      accessibilityLabel={'abrir ' + href}
+      accessibilityHint='abre no navegador'
+      href={link.href}
+      hrefAttrs={link.hrefAttrs}
+      onLongPress={onLongPress}
+      onPress={(e) => {
+        // On web the anchor navigates by itself, so opening here too
+        // would open the page twice.
+        if (e && e.stopPropagation) e.stopPropagation()
+        if (typeof link.onPress === 'function') link.onPress()
+      }}
+      onKeyDown={(e) => {
+        // The anchor activates on Enter natively; a parent must not react too.
+        if (e.key === 'Enter' && e.stopPropagation) e.stopPropagation()
+      }}
+    >
+      {displayText(segment.text)}
     </Text>
   )
 }

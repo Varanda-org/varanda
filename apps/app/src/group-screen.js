@@ -2,6 +2,7 @@ import rpc from '@varanda/rpc'
 import { bubbleShape, withDayMarks } from './dm-screen.js'
 import { HIDDEN_LABEL, rowsOf } from './groups.js'
 import { whoOf } from './who.js'
+import { plainOf } from './richText.js'
 
 const { displayText } = rpc
 
@@ -32,7 +33,7 @@ export function replyPreview (item, byRef) {
   const target = key && byRef ? byRef.get(key) : null
   if (!target) return null
   if (target.hidden === true) return { name: '', text: HIDDEN_LABEL }
-  const text = typeof target.text === 'string' ? target.text.replace(/[\r\n\u2028\u2029]+/g, ' ') : ''
+  const text = plainOf(target.text).replace(/[\r\n\u2028\u2029]+/g, ' ')
   return {
     name: displayText(whoOf(target).title),
     text: Array.from(displayText(text)).slice(0, 90).join('')
