@@ -681,6 +681,13 @@ test('gifSearch: a 401 renews the session once; refusals map to messages', async
   t.is(a.toError('limite-gif').message, 'Limite de buscas de GIF por hoje')
 })
 
+test('toError: the music daily limit keeps its token', async (t) => {
+  const a = await load()
+  t.is(a.toError('limite-musica').code, 'limite-musica')
+  t.is(a.toError('limite-musica').message, 'Limite de músicas por hoje.')
+  t.is(a.toError('feature-off').code, 'indisponivel', 'the feature off is plain unavailable')
+})
+
 test('gifSearch: a bad session answer or signer refuses; an expired cache renews', async (t) => {
   const a = await load()
   a.forgetGifSession()

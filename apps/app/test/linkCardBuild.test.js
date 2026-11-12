@@ -370,11 +370,112 @@ test('fallbackCard: a music link passes the card rules, and only Publicar passes
   t.ok(composer.includes("dispatch(data ? { type: 'built', url: target, data } : { type: 'failed', url: target })"), 'anything else still fails as before')
 
   const publicar = fs.readFileSync(path.join(SRC, 'screens/Publicar.js'), 'utf8')
-  t.ok(publicar.includes("import { fallbackCard } from '../musicEmbed'"), 'named import')
+  t.ok(publicar.includes("import { fallbackCard, isAudiusLink } from '../musicEmbed'"), 'named import')
   t.absent(/import\s+fallbackCard\s+from\s+'\.\.\/musicEmbed'/.test(publicar), 'no default import')
   const passers = filesUnder(SRC).filter((file) => {
     const src = fs.readFileSync(file, 'utf8')
-    return /useLinkDraft\(\{[^)]*\bfallback\b/.test(src)
+    return /useLinkDraft\(\{[^\n]*\bfallback\b/.test(src)
   }).map((file) => path.relative(SRC, file))
   t.alike(passers.sort(), [path.join('screens', 'Publicar.js')], 'only Publicar passes fallback')
+})
+
+test('music snapshots respect the 300 character card URL boundary without an image', async (t) => {
+  const { musicSnapshot } = await import('../src/musicDraft.js')
+  const { MAX_CARD_URL } = require('@varanda/rpc')
+  const { validLinkCard } = require('@varanda/core/lib/link-card')
+  const { cardForSend } = await card()
+  const prefix = 'https://audius.co/artist/'
+  const item = { id: 'a'.repeat(32), title: 'Canção', artist: 'Artista', duration: 7200, url: prefix + 'x'.repeat(240 - prefix.length) }
+  const ref = { kind: 'snippet', id: item.id, start: 7185 }
+  const snapshot = musicSnapshot({ ref, item })
+  const sent = await cardForSend(snapshot)
+  t.is(MAX_CARD_URL, 300)
+  t.is(snapshot.url.length, 295, 'the server caps the page at 240, leaving room for the longest fragment')
+  t.is(sent.image, null)
+  t.ok(validLinkCard(sent))
+  // A card can reach 300, but the service refuses a page over 240.
+  const boundary = { ...snapshot, url: snapshot.url.replace('#', 'xxxxx#') }
+  t.is(boundary.url.length, 300)
+  t.ok(validLinkCard(await cardForSend(boundary)))
+  t.is(await cardForSend({ ...boundary, url: boundary.url + 'x' }), null)
+  t.is(musicSnapshot({ ref, item: { ...item, url: item.url + 'xxxxx' } }), null)
+})
+
+test('Publicar holds the ordinary Audius build while availability is unknown or true, then builds when false', async (t) => {
+  const src = fs.readFileSync(path.join(SRC, 'screens/Publicar.js'), 'utf8')
+  t.ok(src.includes('useMusicAvailable(node, member, open)'), 'opening the composer refreshes music availability')
+  t.ok(src.includes('musicAvailable === true && node.online !== false && previewsEnabled(previewPrefStore())'), 'resolution requires confirmed music and online previews')
+  t.ok(src.includes('{musicAvailable === true && asPage === null'), 'the music button requires confirmed availability')
+  t.ok(src.includes('asPage === null && musicAvailable === true && musicPickerOpen'), 'the picker requires confirmed availability')
+
+  const slots = []
+  const effects = []
+  const timers = new Set()
+  const fetched = []
+  let cursor = 0
+  const { buildPreview } = await native()
+  const deps = {
+    ...await card(),
+    ...await import('../src/preview.js'),
+    ...await import('../src/previewPref.js'),
+    useNode: () => ({ online: true }),
+    gifOriginOf: () => undefined,
+    previewPrefStore: () => ({ getItem: () => null }),
+    useState: (initial) => {
+      const at = cursor++
+      if (!(at in slots)) slots[at] = typeof initial === 'function' ? initial() : initial
+      return [slots[at], (value) => { slots[at] = value }]
+    },
+    useRef: (initial) => {
+      const at = cursor++
+      if (!(at in slots)) slots[at] = { current: initial }
+      return slots[at]
+    },
+    useEffect: (fn, values) => {
+      const at = cursor++
+      const previous = slots[at]
+      if (previous && values.every((value, i) => Object.is(value, previous.values[i]))) return
+      effects.push(() => {
+        if (previous?.cleanup) previous.cleanup()
+        slots[at] = { values, cleanup: fn() }
+      })
+    },
+    setTimeout: (fn) => { timers.add(fn); return fn },
+    clearTimeout: (fn) => timers.delete(fn),
+    AbortController,
+    buildPreview: (url, opts) => buildPreview(url, {
+      ...opts,
+      fetch: async (url) => { fetched.push(url); return response(200, 'text/html', enc('<title>Faixa</title>'), url) }
+    }),
+    encodeThumbnail: () => { throw new Error('no image') }
+  }
+  // Execute the real hook and Publicar call with a manual clock and native fetch stub.
+  const composer = fs.readFileSync(path.join(SRC, 'ui/ChatComposer.js'), 'utf8')
+  const hook = composer.slice(composer.indexOf('export function useLinkDraft'), composer.indexOf('// The draft card above')).replace('export ', '')
+  // eslint-disable-next-line no-new-func
+  const useLinkDraft = new Function(...Object.keys(deps), hook + '\nreturn useLinkDraft')(...Object.values(deps))
+  const ctx = {
+    ...await import('../src/musicEmbed.js'),
+    ...await import('../src/preview.js'),
+    useLinkDraft,
+    text: 'https://audius.co/artist/song',
+    open: true,
+    asPage: null,
+    musicDraft: null,
+    hasMedia: false,
+    self: { publicKey: MEMBER },
+    musicAvailable: null
+  }
+  const call = src.match(/^ {2}const linkDraft = useLinkDraft\([^\n]+/m)[0]
+  for (const available of [null, true, false]) {
+    ctx.musicAvailable = available
+    cursor = 0
+    // eslint-disable-next-line no-new-func
+    new Function(...Object.keys(ctx), call)(...Object.values(ctx))
+    for (const effect of effects.splice(0)) effect()
+    for (const timer of [...timers]) { timers.delete(timer); timer() }
+    await new Promise((resolve) => setImmediate(resolve))
+    t.alike(fetched, available === false ? [ctx.text] : [], 'native page fetches with availability ' + available)
+  }
+  for (const slot of slots) { if (slot?.cleanup) slot.cleanup() }
 })
