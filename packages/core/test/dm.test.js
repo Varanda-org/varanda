@@ -947,3 +947,111 @@ test('inner v3: buildInner never writes v3, and v1/v2 vectors are unchanged', (t
   t.is(openInner(buildInner({ kind: 'ctl', op: 'blocked', peer: bia.hex, at: AT }, ana), ana.hex).v, 1)
   t.is(openInner(buildInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: ana.cert, v: 3 }, ana), bia.hex, O).v, 1, 'a v field is ignored')
 })
+
+const HEART = '❤️'
+
+function reactBody (over = {}) {
+  return { v: 4, kind: 'react', id: 'a'.repeat(32), from: ana.hex, to: bia.hex, target: { from: bia.hex, id: 'b'.repeat(32) }, emoji: HEART, rev: 1, at: AT, cert: ana.cert, ...over }
+}
+
+function react (over = {}, from = ana) {
+  return buildInner({ kind: 'react', to: bia.hex, target: { from: bia.hex, id: 'b'.repeat(32) }, emoji: HEART, rev: 1, at: AT, cert: from.cert, ...over }, from)
+}
+
+function frameParts (inner) {
+  const len = (inner[0] << 8) | inner[1]
+  return { json: b4a.from(inner.subarray(2, 2 + len)), sig: b4a.from(inner.subarray(2 + len, 2 + len + 64)) }
+}
+
+// The v1 to v3 dispatch of a reader from before v4: anything else falls to
+// its final else.
+function oldValidBody (b) {
+  if (b === null || typeof b !== 'object') return false
+  if (b.v === 1 || b.v === 2 || b.v === 3) return dm.validBody(b)
+  return false
+}
+
+test('inner v4: constants, exact key set and round trip', (t) => {
+  t.is(dm.DM_SIG_PREFIX_V4, 'varanda-dm-v4\n')
+  t.is(dm.DM_REACT_REV_MAX, 1000000)
+  t.alike(dm.INNER_KEYS_V4, ['v', 'kind', 'id', 'from', 'to', 'target', 'emoji', 'rev', 'at', 'cert'])
+  const inner = react()
+  t.is(inner.byteLength, DM_INNER_BYTES)
+  const { json } = frameParts(inner)
+  t.alike(Object.keys(JSON.parse(b4a.toString(json))), dm.INNER_KEYS_V4)
+  const got = openInner(react(), bia.hex, O)
+  t.is(got.v, 4)
+  t.is(got.kind, 'react')
+  t.alike(got.target, { from: bia.hex, id: 'b'.repeat(32) })
+  t.is(got.emoji, HEART)
+  t.is(got.rev, 1)
+  t.is(got.mine, false)
+  t.is(openInner(react(), ana.hex, O).mine, true, 'the self copy')
+  t.is(openInner(react(), caio.hex, O), null, 'a third party opens nothing')
+  t.is(openInner(react({ target: { from: ana.hex, id: 'c'.repeat(32) } }), bia.hex, O).target.from, ana.hex, 'a reaction to an own message')
+  t.is(openInner(react({ emoji: '' }), bia.hex, O).emoji, '', 'the empty emoji removes')
+  t.is(openInner(react({ rev: 1000000 }), bia.hex, O).rev, 1000000)
+  t.is(openInner(react({ cert: null }), bia.hex, O), null, 'a reaction needs a certificate like a msg')
+  t.is(openInner(react(), bia.hex, {}), null)
+})
+
+test('inner v4: shape rules', (t) => {
+  t.ok(dm.validBody(reactBody()))
+  t.ok(dm.validBody(reactBody({ emoji: '' })))
+  t.ok(dm.validBody(reactBody({ cert: null })))
+  const { target, ...noTarget } = reactBody()
+  t.absent(dm.validBody(noTarget), 'a missing key')
+  t.absent(dm.validBody(reactBody({ text: 'oi' })), 'an extra key')
+  t.absent(dm.validBody(reactBody({ kind: 'msg' })))
+  t.absent(dm.validBody(reactBody({ kind: 'ctl' })))
+  t.absent(dm.validBody(reactBody({ to: ana.hex })), 'to oneself')
+  t.absent(dm.validBody(reactBody({ id: 'A'.repeat(32) })))
+  t.absent(dm.validBody(reactBody({ at: '2026-11-03' })))
+  t.absent(dm.validBody(reactBody({ cert: bia.cert })), 'a certificate of someone else')
+  for (const bad of [null, 'x', [], { from: bia.hex }, { id: 'b'.repeat(32) }, { from: bia.hex, id: 'b'.repeat(32), x: 1 }, { from: caio.hex, id: 'b'.repeat(32) }, { from: bia.hex, id: 'b'.repeat(31) }]) {
+    t.absent(dm.validBody(reactBody({ target: bad })), 'bad target ' + JSON.stringify(bad))
+  }
+  for (const bad of ['a', ':)', HEART + HEART, '\u{1F600} ', ' ', '\u{1F468}‍', 1, null, '\u{1F468}'.repeat(11)]) {
+    t.absent(dm.validBody(reactBody({ emoji: bad })), 'bad emoji ' + JSON.stringify(bad))
+  }
+  for (const bad of [0, -1, 1.5, 1000001, '1', null, NaN, Infinity, true]) {
+    t.absent(dm.validBody(reactBody({ rev: bad })), 'bad rev ' + String(bad))
+  }
+  t.exception.all(() => react({ emoji: 'a' }), /mensagem inválida/)
+  t.exception.all(() => react({ rev: 0 }), /mensagem inválida/)
+  t.exception.all(() => react({ target: { from: caio.hex, id: 'b'.repeat(32) } }), /mensagem inválida/)
+})
+
+test('inner v4: its own signature domain', (t) => {
+  const { json, sig } = frameParts(react())
+  const key = ana.publicKey
+  t.ok(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V4), json]), sig, key))
+  t.absent(hcrypto.verify(b4a.concat([b4a.from(DM_SIG_PREFIX), json]), sig, key), 'not under v1')
+  t.absent(hcrypto.verify(b4a.concat([b4a.from(DM_SIG_PREFIX_V2), json]), sig, key), 'not under v2')
+  const digest = b4a.alloc(32)
+  sodium.crypto_hash_sha256(digest, json)
+  t.absent(hcrypto.verify(b4a.concat([b4a.from(dm.DM_V3_PREFIX), digest, u64(EXP)]), sig, key), 'not under v3')
+
+  // A v4 body signed under another domain never opens, nor does a message
+  // signed under the v4 domain.
+  t.is(openInner(forge(reactBody(), ana, DM_SIG_PREFIX), bia.hex, O), null)
+  t.is(openInner(forge(reactBody(), ana, DM_SIG_PREFIX_V2), bia.hex, O), null)
+  t.is(openInner(forge(reactBody(), ana, dm.DM_V3_PREFIX), bia.hex, O), null)
+  t.ok(openInner(forge(reactBody(), ana, dm.DM_SIG_PREFIX_V4), bia.hex, O), 'the forge helper builds an openable v4')
+  const v1 = JSON.parse(b4a.toString(frameParts(msg()).json))
+  const v2 = JSON.parse(b4a.toString(frameParts(msg({ fwd: 1 })).json))
+  t.ok(openInner(forge(v1, ana, DM_SIG_PREFIX), bia.hex, O))
+  t.is(openInner(forge(v1, ana, dm.DM_SIG_PREFIX_V4), bia.hex, O), null, 'a v1 under the v4 domain')
+  t.is(openInner(forge(v2, ana, dm.DM_SIG_PREFIX_V4), bia.hex, O), null, 'a v2 under the v4 domain')
+  const v3 = pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert })
+  const v3Sig = frameParts(v3.inner).sig
+  t.absent(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V4), v3.json]), v3Sig, page.publicKey), 'a v3 signature under the v4 domain')
+})
+
+test('inner v4: a reader that knows only v1 to v3 drops it', (t) => {
+  const body = openInner(react(), bia.hex, O)
+  const { mine, ...wire } = body
+  t.ok(dm.validBody(wire))
+  t.absent(oldValidBody(wire), 'v 4 falls to the final else')
+  for (const v of [1, 2, 3]) t.absent(dm.validBody({ ...wire, v }), 'relabelled v' + v + ' is no message')
+})

@@ -488,3 +488,41 @@ test('cards survive storage and reopen, legacy rows read null and malformed card
   t.is(reopened.snapshot().messages[1].card, null)
   await reopened.close()
 })
+
+test('reaction rows: stored apart from messages, survive a reopen, never count as a message, and malformed ones fail', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await s.unlock(key(7))
+  const target = { from: PEER, id: ID }
+  const rx = (rev, emoji, filedAt) => ({ t: 'rx', id: (rev + 10).toString(16).padStart(2, '0').repeat(16), peer: PEER, from: OWN, to: PEER, target, emoji, rev, at: '2026-11-03T10:00:02.000Z', mine: true, filedAt })
+  await s.append([rx(1, '\u{1f44d}', s.nextFiled()), rx(2, '', s.nextFiled())])
+  t.is(s.snapshot().messages.length, 0, 'not a message')
+  t.is(s.snapshot().reactions.length, 2)
+  t.absent(s.hasMessage(OWN, rx(1).id), 'a reaction id never takes a message slot')
+  t.ok(s.hasReaction(OWN, rx(1).id))
+  t.absent(s.hasReaction(PEER, rx(1).id))
+  t.is(s.reactionRev(PEER, target, OWN), 2)
+  t.is(s.reactionRev(PEER, target, PEER), 0, 'per reactor')
+  t.is(s.reactionRev(PEER, { from: PEER, id: '99'.repeat(16) }, OWN), 0, 'per target')
+  const peerRx = { ...rx(5, '❤️', s.nextFiled()), from: PEER, to: OWN, mine: false }
+  await s.append([peerRx])
+  t.is(s.reactionRev(PEER, target, PEER), 5)
+  s.lock()
+
+  const again = createDmStore({ storage })
+  await again.unlock(key(7))
+  const snap = again.snapshot()
+  t.alike(snap.reactions.map((r) => [r.from, r.emoji, r.rev, r.mine]), [[OWN, '\u{1f44d}', 1, true], [OWN, '', 2, true], [PEER, '❤️', 5, false]])
+  t.alike(snap.reactions[0].target, target)
+  t.is(snap.messages.length, 0)
+
+  const base = rx(3, '\u{1f44d}', again.nextFiled())
+  for (const [bad, why] of [
+    [{ ...base, emoji: 'oi' }, 'not an emoji'],
+    [{ ...base, rev: 0 }, 'rev 0'],
+    [{ ...base, rev: 1000001 }, 'rev past the max'],
+    [{ ...base, target: { from: '11'.repeat(32), id: ID } }, 'target by a third key'],
+    [{ ...base, peer: OWN }, 'peer not the other person'],
+    [{ ...base, to: OWN }, 'to itself']
+  ]) await t.exception.all(again.append([bad]), /linha inválida/, why)
+})

@@ -9,7 +9,10 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const Hypercore = require('hypercore')
 const { WebSocket } = require('ws')
-const { createCert, createModeratorCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
+const { createCert, createModeratorCert, createIssuerCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
+const { signRoster, issuerCountersign } = require('@varanda/core/lib/page')
+const { createMember } = require('../lib/member')
+const { memoryStorage } = require('../lib/storage')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const dmCore = require('@varanda/core/lib/dm')
 const { verifyDmReport } = require('@varanda/core/lib/report')
@@ -1281,4 +1284,222 @@ test('DM cards bind their thumbnail to the recipient and survive ingestion, reop
   t.is((await errorOf(s.engine.readMedia(s.own, { from: s.own, id: sent.id, index: 'card' }))).message, 'mídia indisponível')
   other.lock()
   t.is((await errorOf(other.readMedia(s.own, { from: s.own, id: sent.id, index: 'card' }))).message, LOCKED)
+})
+
+test('dm.react: two stamps and two puts as one dm.send; a no-op sends nothing; a missing target or no stamps refuses', async (t) => {
+  const { engine, storage, calls, own, kp, peer, recipientBox, send } = await sendingEngine(t, { stamps: 6 })
+  const puts = () => calls.filter((c) => c[0] === 'put').length
+  const sent = await send()
+  t.is(puts(), 2)
+  t.is(await wallet(storage), 4, 'one text message: two stamps')
+  const target = { from: own, id: sent.id }
+  const react = (emoji, tg = target) => engine.react(own, kp, { to: peer, target: tg, emoji }, recipientBox)
+
+  t.alike(await react('\u{1f44d}'), { ok: true })
+  t.is(puts(), 4, 'the same two drops as a message: peer copy and self copy')
+  t.is(await wallet(storage), 2, 'the same two stamps as a message')
+  let row = (await engine.thread(own, { peer })).messages[0]
+  t.alike(row.reactions, [{ emoji: '\u{1f44d}', mine: true }])
+  t.alike(Object.keys(row).sort(), ['at', 'card', 'from', 'fwd', 'id', 'media', 'mine', 'reactions', 'replyTo', 'text'])
+
+  t.alike(await react('\u{1f44d}'), { ok: true }, 'the same emoji again')
+  t.is(puts(), 4, 'a no-op puts nothing')
+  t.is(await wallet(storage), 2, 'a no-op spends nothing')
+
+  t.is((await errorOf(react('\u{1f44d}', { from: own, id: '00'.repeat(16) }))).message, 'mensagem não encontrada')
+  t.is((await errorOf(react('\u{1f44d}', { from: peer, id: sent.id }))).message, 'mensagem não encontrada', 'by sender and id')
+
+  t.alike(await react(''), { ok: true }, 'a removal is sent')
+  t.is(puts(), 6)
+  t.is(await wallet(storage), 0)
+  row = (await engine.thread(own, { peer })).messages[0]
+  t.absent('reactions' in row, 'no key when empty')
+  t.alike(await react(''), { ok: true }, 'removing nothing is a no-op')
+  t.is(puts(), 6)
+
+  const err = await errorOf(react('❤️'))
+  t.is(err && err.message, 'o limite de envio de hoje acabou', 'the dm.send refusal')
+  t.absent(err && err.uncertain, 'nothing went out')
+  t.is(puts(), 6)
+  const sendErr = await errorOf(send())
+  t.is(sendErr && sendErr.message, err.message, 'one daily allowance for both')
+})
+
+test('dm.react: the self copy fails after the peer copy; a second call resumes it without new stamps', async (t) => {
+  const { engine, storage, link, own, kp, peer, recipientBox, send } = await sendingEngine(t, { stamps: 4 })
+  const sent = await send()
+  const target = { from: own, id: sent.id }
+  const react = (emoji) => engine.react(own, kp, { to: peer, target, emoji }, recipientBox)
+  const put = link.put
+  const putBytes = []
+  link.put = async (bytes) => {
+    putBytes.push(bytes)
+    if (putBytes.length === 2) throw new Error('lost ack')
+    return put(bytes)
+  }
+  const err = await errorOf(react('\u{1f44d}'))
+  t.is(err && err.message, 'não deu para confirmar o envio', 'the dm.send answer')
+  t.is(err && err.uncertain, true)
+  t.is(await wallet(storage), 0, 'two stamps spent')
+  t.alike((await engine.thread(own, { peer })).messages[0].reactions, [{ emoji: '\u{1f44d}', mine: true }], 'filed once the peer copy was acked')
+  await engine.idle()
+  t.is(putBytes.length, 2, 'never put again on its own')
+
+  t.alike(await react('\u{1f44d}'), { ok: true }, 'the pending entry beats the no-op rule')
+  t.is(putBytes.length, 3, 'only the self copy is put')
+  t.ok(b4a.equals(putBytes[1], putBytes[2]), 'the same bytes')
+  t.is(await wallet(storage), 0, 'no new stamps (none left to spend)')
+  t.alike(await react('\u{1f44d}'), { ok: true })
+  t.is(putBytes.length, 3, 'delivered: a no-op from then on')
+  t.is((await engine.thread(own, { peer })).messages[0].reactions.length, 1)
+})
+
+test('dm.react between two nodes: one pull files a reaction and a message, peers converge on replace and remove, the second device shows its own', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url)
+  const B = await memberNode(t, assoc, seeder.url)
+  await copyDiary(A, B)
+  await copyDiary(B, A)
+  const first = await B.web.request('dm.send', { to: A.key, text: 'primeira' })
+  t.is((await A.web.request('dm.pull')).added, 1)
+  await A.web.request('dm.seen', { peer: B.key })
+  const target = { from: B.key, id: first.id }
+  const listOf = async (n) => (await n.web.request('dm.list', { folder: 'request' })).conversations.concat((await n.web.request('dm.list', {})).conversations)
+  const before = await listOf(A)
+
+  // A reaction and a message in one pull page: both filed, the cursor moves.
+  const puts = seeder.puts.length
+  t.alike(await B.web.request('dm.react', { to: A.key, target, emoji: '\u{1f44d}' }), { ok: true })
+  t.is(seeder.puts.length, puts + 2, 'peer copy and self copy')
+  const second = await B.web.request('dm.send', { to: A.key, text: 'segunda' })
+  const cursor = await store.readDmCursor(A.storage)
+  t.is((await A.web.request('dm.pull')).added, 1, 'the message counts, the reaction does not')
+  t.not(await store.readDmCursor(A.storage), cursor, 'the cursor moved past both')
+  t.is((await A.web.request('dm.pull')).added, 0, 'a second pull is clean')
+  let rows = (await A.web.request('dm.thread', { peer: B.key })).messages
+  t.alike(rows.map((m) => m.id), [first.id, second.id])
+  t.alike(rows[0].reactions, [{ emoji: '\u{1f44d}', mine: false }])
+  t.absent('reactions' in rows[1])
+  await A.web.request('dm.seen', { peer: B.key })
+
+  // A reacts too, then B replaces and removes; both sides agree each time.
+  t.alike(await A.web.request('dm.react', { to: B.key, target, emoji: '\u2764\ufe0f' }), { ok: true })
+  await B.web.request('dm.pull')
+  t.alike((await B.web.request('dm.thread', { peer: A.key })).messages[0].reactions, [{ emoji: '\u2764\ufe0f', mine: false }, { emoji: '\u{1f44d}', mine: true }])
+  await B.web.request('dm.react', { to: A.key, target, emoji: '\u{1f602}' })
+  await A.web.request('dm.pull')
+  t.alike((await A.web.request('dm.thread', { peer: B.key })).messages[0].reactions, [{ emoji: '\u{1f602}', mine: false }, { emoji: '\u2764\ufe0f', mine: true }], 'replaced')
+  await B.web.request('dm.react', { to: A.key, target, emoji: '' })
+  await A.web.request('dm.pull')
+  rows = (await A.web.request('dm.thread', { peer: B.key })).messages
+  t.alike(rows[0].reactions, [{ emoji: '\u2764\ufe0f', mine: true }], 'removed')
+  t.alike((await B.web.request('dm.thread', { peer: A.key })).messages[0].reactions, [{ emoji: '\u2764\ufe0f', mine: false }], 'the same on both sides')
+
+  // Unread and the list preview never move for a reaction.
+  const after = await listOf(A)
+  t.alike(after.map((c) => [c.peer, c.preview, c.unread]), [[B.key, 'segunda', false]])
+  t.is(before[0].unread, false)
+
+  // B's second device: its own reaction arrives through the self copy.
+  const B2 = await memberNode(t, assoc, seeder.url, { keyPair: B.keyPair, prf: B.prf, enable: false })
+  await B2.web.request('dm.pull')
+  t.alike((await B2.web.request('dm.thread', { peer: A.key })).messages[0].reactions, [{ emoji: '\u2764\ufe0f', mine: false }])
+  await B.web.request('dm.react', { to: A.key, target, emoji: '\u{1f525}' })
+  await B2.web.request('dm.pull')
+  t.alike((await B2.web.request('dm.thread', { peer: A.key })).messages[0].reactions, [{ emoji: '\u2764\ufe0f', mine: false }, { emoji: '\u{1f525}', mine: true }], 'own reaction on the other device')
+})
+
+const PAGE_AT = '2026-11-03T12:00:00.000Z'
+const PAGE_NONCE = 'r'.repeat(43)
+
+test('a reaction drop to a Página is dropped, never filed, and the pull goes on past it', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const issuerKp = crypto.keyPair()
+  const issuerCert = createIssuerCert({ issuer: hex(issuerKp.publicKey) }, assoc)
+  const seeder = await dmSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url)
+  const C = await memberNode(t, assoc, seeder.url)
+  const pageKp = crypto.keyPair()
+  const P = hex(pageKp.publicKey)
+  const pageCert = createCert({ member: P }, assoc)
+  const made = await A.web.request('dm.pageGenerate', { page: P, gen: 1, recipients: [{ member: A.key, box: hex((await dmBoxKeyPairFromPrf(A.prf, 1)).publicKey) }] })
+  const m = await createMember({ storage: memoryStorage(), association: hex(assoc.publicKey), keyPair: pageKp })
+  t.teardown(() => m.close(), { force: true })
+  await m.setCert(pageCert)
+  const fields = { page: P, gen: 1, owner: A.key, admins: [], prev: null, at: PAGE_AT, nonce: PAGE_NONCE, association: hex(assoc.publicKey) }
+  await m.core.append(issuerCountersign({ type: 'page-roster', ...fields, signature: signRoster(fields, A.keyPair) }, issuerKp, issuerCert))
+  await m.core.append({ type: 'dm-key', box: made.box, gen: 1, at: PAGE_AT })
+  for (const n of [A, C]) await holdCore(m.core, n.storage)
+  const self = made.shares[0]
+  await A.web.request('dm.pageSecrets', { page: P, gen: 1, sealed: self.sealed, by: A.key, sig: self.sig, box: made.box, groupBox: made.groupBox, cert: pageCert })
+  await copyDiary(C, A)
+
+  const draft = await A.web.request('dm.pageDraft', { page: P, kind: 'msg', to: C.key, text: 'da página' })
+  const expiresAt = Date.now() + dmCore.DM_V3_TTL_MS
+  await A.web.request('dm.pageSend', { page: P, id: draft.id, signature: dmCore.signDigest(draft.digest, pageKp.secretKey, expiresAt), expiresAt })
+  await C.web.request('dm.pull')
+  t.alike((await C.web.request('dm.thread', { peer: P })).messages.map((x) => x.text), ['da página'])
+
+  // The node does not know a Página key: the app hides reactions there.
+  t.alike(await C.web.request('dm.react', { to: P, target: { from: P, id: draft.id }, emoji: '\u{1f44d}' }), { ok: true })
+  await C.web.request('dm.send', { to: P, text: 'depois da reação' })
+  await A.web.request('dm.pull')
+  const rows = (await A.web.request('dm.thread', { page: P, peer: C.key })).messages
+  t.alike(rows.map((x) => x.text), ['da página', 'depois da reação'], 'the message after it is filed')
+  t.absent(rows.some((x) => 'reactions' in x), 'no reaction in a Página conversation')
+  t.is((await A.web.request('dm.pull')).added, 0, 'a second pull is clean')
+})
+
+async function holdCore (core, storage) {
+  const dst = await store.openReplica(storage, b4a.toString(core.key, 'hex'))
+  const a = core.replicate(true, { keepAlive: false })
+  const b = dst.replicate(false, { keepAlive: false })
+  a.pipe(b).pipe(a)
+  try {
+    await dst.update({ wait: true })
+    await dst.download({ start: 0, end: core.length }).done()
+  } finally {
+    a.destroy()
+    b.destroy()
+    await dst.close()
+  }
+}
+
+test('dm.react: a removal after a lost peer ack is sent, never taken as a no-op', async (t) => {
+  const { engine, storage, link, own, kp, peer, recipientBox, send } = await sendingEngine(t, { stamps: 6 })
+  const sent = await send()
+  const target = { from: own, id: sent.id }
+  const react = (emoji) => engine.react(own, kp, { to: peer, target, emoji }, recipientBox)
+  link.failPut = true
+  const err = await errorOf(react('\u{1f44d}'))
+  t.is(err && err.uncertain, true, 'the peer may hold it')
+  t.absent('reactions' in (await engine.thread(own, { peer })).messages[0], 'nothing filed here')
+  link.failPut = false
+  const before = await wallet(storage)
+  t.alike(await react(''), { ok: true })
+  t.is(await wallet(storage), before - 2, 'a removal went out')
+  t.absent('reactions' in (await engine.thread(own, { peer })).messages[0])
+})
+
+test('dm.react: going back to an emoji whose op is still pending makes a newer op', async (t) => {
+  const { engine, storage, link, own, kp, peer, recipientBox, send } = await sendingEngine(t, { stamps: 8 })
+  const sent = await send()
+  const target = { from: own, id: sent.id }
+  const react = (emoji) => engine.react(own, kp, { to: peer, target, emoji }, recipientBox)
+  const put = link.put
+  let n = 0
+  link.put = async (bytes) => {
+    if (++n === 2) throw new Error('lost ack')
+    return put(bytes)
+  }
+  t.is((await errorOf(react('\u{1f44d}'))).uncertain, true, 'self copy unacked')
+  t.alike(await react('\u2764\ufe0f'), { ok: true })
+  t.alike((await engine.thread(own, { peer })).messages[0].reactions, [{ emoji: '\u2764\ufe0f', mine: true }])
+  const before = await wallet(storage)
+  t.alike(await react('\u{1f44d}'), { ok: true })
+  t.is(await wallet(storage), before - 2, 'a new op, not the old one resumed')
+  t.alike((await engine.thread(own, { peer })).messages[0].reactions, [{ emoji: '\u{1f44d}', mine: true }], 'the newest rev wins')
 })

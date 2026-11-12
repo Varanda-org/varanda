@@ -299,3 +299,173 @@ test('fold preserves cards and gives old messages a null card', (t) => {
   t.not(r.inbox[0].messages[0].card, card)
   t.is(r.inbox[0].messages[1].card, null)
 })
+
+const HEART = '❤️'
+const THUMBS = '\u{1F44D}'
+const FIRE = '\u{1F525}'
+
+function rid (n) {
+  return 'f' + n.toString(16).padStart(31, '0')
+}
+
+// A reaction by `who` (ME or the peer) to row m of the conversation with peer.
+function reaction (who, peer, m, emoji, rev, filedMin = 30, over = {}) {
+  return { id: rid(rev), from: who, to: who === ME ? peer : ME, target: { from: m.from, id: m.id }, emoji, rev, at: T(filedMin), filedAt: F(filedMin), ...over }
+}
+
+function rowOf (r, m) {
+  const threads = [...r.inbox, ...r.requests]
+  for (const th of threads) {
+    const row = th.messages.find(x => x.id === m.id && x.from === m.from)
+    if (row) return row
+  }
+  return undefined
+}
+
+function runR (opts, reactions) {
+  return fold({ self: ME, followSet: new Set(opts.follows || []), messages: opts.messages || [], ops: opts.ops || [], seen: new Set(opts.seen || []), reactions })
+}
+
+test('reactions: either person reacts, rows carry { emoji, mine } only when non-empty', (t) => {
+  const a = from(ANA, 1)
+  const b = to(ANA, 2)
+  const c = from(ANA, 3)
+  const r = runR({ messages: [a, b, c], follows: [ANA] }, [reaction(ANA, ANA, a, HEART, 1), reaction(ME, ANA, a, THUMBS, 1), reaction(ANA, ANA, b, FIRE, 1)])
+  t.alike(rowOf(r, a).reactions, [{ emoji: HEART, mine: false }, { emoji: THUMBS, mine: true }])
+  t.alike(rowOf(r, b).reactions, [{ emoji: FIRE, mine: false }], 'a reaction to my own message')
+  t.absent('reactions' in rowOf(r, c), 'no key without a reaction')
+  t.alike(Object.keys(rowOf(r, a)), ['id', 'from', 'to', 'text', 'replyTo', 'fwd', 'media', 'card', 'at', 'sentAt', 'mine', 'peer', 'reactions'])
+})
+
+test('reactions: the highest rev wins whatever the arrival order, ties by the higher id', (t) => {
+  const a = from(ANA, 1)
+  const low = reaction(ANA, ANA, a, HEART, 2, 50)
+  const high = reaction(ANA, ANA, a, THUMBS, 3, 10, { at: T(1) })
+  for (const list of [[low, high], [high, low]]) {
+    t.alike(rowOf(runR({ messages: [a], follows: [ANA] }, list), a).reactions, [{ emoji: THUMBS, mine: false }], 'never the sender at nor the filing time')
+  }
+  const tieLow = reaction(ANA, ANA, a, HEART, 4, 30, { id: 'e'.repeat(32) })
+  const tieHigh = reaction(ANA, ANA, a, FIRE, 4, 20, { id: 'f'.repeat(32) })
+  for (const list of [[tieLow, tieHigh], [tieHigh, tieLow]]) {
+    t.alike(rowOf(runR({ messages: [a], follows: [ANA] }, list), a).reactions, [{ emoji: FIRE, mine: false }])
+  }
+  const sameId = [reaction(ANA, ANA, a, HEART, 5), reaction(ANA, ANA, a, FIRE, 5)]
+  t.alike(rowOf(runR({ messages: [a], follows: [ANA] }, sameId), a).reactions, rowOf(runR({ messages: [a], follows: [ANA] }, sameId.slice().reverse()), a).reactions, 'one id signed twice: order never decides')
+})
+
+test('reactions: the empty emoji removes', (t) => {
+  const a = from(ANA, 1)
+  const on = reaction(ME, ANA, a, HEART, 1)
+  const off = reaction(ME, ANA, a, '', 2)
+  t.absent('reactions' in rowOf(runR({ messages: [a], follows: [ANA] }, [off, on]), a))
+  t.alike(rowOf(runR({ messages: [a], follows: [ANA] }, [off, on, reaction(ME, ANA, a, FIRE, 3)]), a).reactions, [{ emoji: FIRE, mine: true }], 'a later rev adds it back')
+})
+
+test('reactions: an unknown, cut or other-thread target is ignored; a stored early reaction counts once its target is present', (t) => {
+  const a = from(ANA, 5)
+  const early = reaction(ANA, ANA, a, HEART, 1, 1)
+  t.is(runR({ messages: [], follows: [ANA] }, [early]).inbox.length, 0, 'a reaction alone opens no thread')
+  t.alike(rowOf(runR({ messages: [a], follows: [ANA] }, [early]), a).reactions, [{ emoji: HEART, mine: false }], 'filed before its target')
+  const unknown = { ...reaction(ANA, ANA, a, HEART, 1), target: { from: ANA, id: 'c'.repeat(32) } }
+  t.absent('reactions' in rowOf(runR({ messages: [a], follows: [ANA] }, [unknown]), a))
+  const wrongSender = { ...reaction(ANA, ANA, a, HEART, 1), target: { from: ME, id: a.id } }
+  t.absent('reactions' in rowOf(runR({ messages: [a], follows: [ANA] }, [wrongSender]), a), 'ids are unique per sender')
+  const b = from(BIA, 6)
+  const crossed = reaction(ANA, ANA, b, HEART, 1)
+  t.absent('reactions' in rowOf(runR({ messages: [a, b], follows: [ANA, BIA] }, [crossed]), b), 'another conversation')
+  t.absent('reactions' in rowOf(runR({ messages: [a, b], follows: [ANA, BIA] }, [{ ...crossed, to: CAIO }]), b), 'not to me')
+
+  const old = from(ANA, 1)
+  const fresh = from(ANA, 20)
+  const cut = runR({ messages: [old, fresh], ops: [op('deleted', ANA, 10)], follows: [ANA] }, [reaction(ANA, ANA, old, HEART, 1, 25)])
+  t.is(rowOf(cut, old), undefined)
+  t.absent('reactions' in rowOf(cut, fresh), 'a target behind a cutoff')
+  const before = runR({ messages: [fresh], ops: [op('deleted', ANA, 10)], follows: [ANA] }, [reaction(ANA, ANA, fresh, HEART, 1, 5)])
+  t.absent('reactions' in rowOf(before, fresh), 'a reaction filed before a cutoff')
+  const declined = runR({ messages: [fresh], ops: [op('declined', ANA, 10)] }, [reaction(ANA, ANA, fresh, HEART, 1, 5)])
+  t.absent('reactions' in rowOf(declined, fresh), 'a request: the peer reaction filed before a decline')
+  const blocked = runR({ messages: [fresh], ops: [op('blocked', ANA, 10), op('unblocked', ANA, 11)], follows: [ANA] }, [reaction(ANA, ANA, fresh, HEART, 1, 5)])
+  t.absent('reactions' in rowOf(blocked, fresh), 'filed before a block')
+  t.absent('reactions' in rowOf(runR({ messages: [a], follows: [ANA] }, [reaction(ANA, ANA, a, HEART, 1, 30, { filedAt: NaN })]), a), 'no valid filedAt')
+
+  const many = []
+  for (let i = 0; i < DM_MESSAGES_PER_PEER + 1; i++) many.push(from(ANA, i))
+  const r = runR({ messages: many, follows: [ANA] }, [reaction(ANA, ANA, many[0], HEART, 1)])
+  t.is(r.inbox[0].messages.length, DM_MESSAGES_PER_PEER)
+  t.is(rowOf(r, many[0]), undefined, 'a target past the cap')
+  t.absent(r.inbox[0].messages.some(m => m.reactions), 'it lands on no other row')
+})
+
+test('reactions: unread and preview unchanged', (t) => {
+  const a = from(ANA, 1)
+  const b = to(ANA, 2)
+  const plain = runR({ messages: [a, b], follows: [ANA], seen: [seenKey(ANA, a.id)] })
+  const reacted = runR({ messages: [a, b], follows: [ANA], seen: [seenKey(ANA, a.id)] }, [reaction(ANA, ANA, b, HEART, 1, 59)])
+  t.is(plain.inbox[0].unread, false)
+  t.is(reacted.inbox[0].unread, false, 'a peer reaction is not unread')
+  t.is(reacted.inbox[0].at, plain.inbox[0].at, 'nor newer')
+  const last = reacted.inbox[0].messages[reacted.inbox[0].messages.length - 1]
+  t.is(last.id, b.id, 'the newest message stays the newest')
+  t.is(previewText(last), 'oi')
+  t.ok(last.reactions)
+})
+
+// A small seeded PRNG (mulberry32), so a failing seed reproduces.
+function rng (seed) {
+  let s = seed >>> 0
+  return () => {
+    s = (s + 0x6d2b79f5) >>> 0
+    let x = s
+    x = Math.imul(x ^ (x >>> 15), x | 1)
+    x ^= x + Math.imul(x ^ (x >>> 7), x | 61)
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+function withoutReactions (r) {
+  const strip = (th) => ({ ...th, messages: th.messages.map(({ reactions, ...m }) => m) })
+  return JSON.stringify({ inbox: r.inbox.map(strip), requests: r.requests.map(strip) })
+}
+
+test('reactions take no part in the fold of any other record (generated logs)', (t) => {
+  const peers = [ANA, BIA, CAIO]
+  const emojis = [HEART, THUMBS, FIRE, '']
+  let counted = 0
+  for (let seed = 1; seed <= 40; seed++) {
+    const rand = rng(seed)
+    const pick = (xs) => xs[Math.floor(rand() * xs.length)]
+    const messages = []
+    for (let i = 0, n = 5 + Math.floor(rand() * 40); i < n; i++) {
+      const peer = pick(peers)
+      const min = Math.floor(rand() * 50)
+      const m = rand() < 0.5 ? from(peer, min) : to(peer, min)
+      if (rand() < 0.1) m.at = FUTURE
+      if (rand() < 0.05) m.filedAt = NaN
+      messages.push(m)
+    }
+    const ops = []
+    for (let i = 0, n = Math.floor(rand() * 4); i < n; i++) ops.push(op(pick(['accepted', 'declined', 'blocked', 'unblocked', 'deleted']), pick(peers), Math.floor(rand() * 50)))
+    const follows = peers.filter(() => rand() < 0.5)
+    const seen = messages.filter(m => m.from !== ME && rand() < 0.5).map(m => seenKey(m.from, m.id))
+    const reactions = []
+    for (let i = 0, n = Math.floor(rand() * 30); i < n; i++) {
+      const target = rand() < 0.85 ? pick(messages) : { id: id(), from: pick(peers), to: ME }
+      const peer = target.from === ME ? target.to : target.from
+      const who = rand() < 0.5 ? ME : peer
+      reactions.push(reaction(who, peer, target, pick(emojis), 1 + Math.floor(rand() * 5), Math.floor(rand() * 60), { id: rid(Math.floor(rand() * 1e6)) }))
+    }
+    const opts = { messages, ops, follows, seen }
+    const plain = runR(opts)
+    const reacted = runR(opts, reactions)
+    t.is(withoutReactions(reacted), withoutReactions(plain), 'seed ' + seed + ': only reactions differ')
+    t.is(JSON.stringify(runR(opts, reactions.slice().reverse())), JSON.stringify(reacted), 'seed ' + seed + ': reaction order never decides')
+    for (const th of [...reacted.inbox, ...reacted.requests]) {
+      for (const m of th.messages) {
+        if (!m.reactions) continue
+        t.ok(m.reactions.length >= 1 && m.reactions.length <= 2 && m.reactions.every(x => x.emoji !== ''), 'seed ' + seed + ': at most one per person, never empty')
+        counted++
+      }
+    }
+  }
+  t.ok(counted > 0, 'some reactions count')
+})

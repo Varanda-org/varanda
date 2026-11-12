@@ -116,6 +116,7 @@ const resultKeys = {
   'dm.thread': ['messages', 'next', 'folder', 'blocked'],
   'dm.seen': ['ok'],
   'dm.send': ['id', 'at'],
+  'dm.react': ['ok'],
   'dm.lookup': ['box', 'gen'],
   'group.list': ['groups', 'total'],
   'group.read': ['items', 'next', 'hidden', 'incomplete', 'sealed', 'epoch', 'state'],
@@ -232,7 +233,7 @@ test('all vitrine methods match the documented result and row keys', async (t) =
     t.is(typeof row.unread, 'boolean')
   }
   const thread = await answer(t, request, 'dm.thread', { peer })
-  for (const row of thread.messages) keys(t, row, ['id', 'from', 'text', 'replyTo', 'at', 'mine', 'media', ...(row.card ? ['card'] : [])])
+  for (const row of thread.messages) keys(t, row, ['id', 'from', 'text', 'replyTo', 'at', 'mine', 'media', ...(row.card ? ['card'] : []), ...(row.reactions ? ['reactions'] : [])])
   t.alike(await answer(t, request, 'dm.seen', { peer }), { ok: true })
   const sent = await answer(t, request, 'dm.send', { to: peer, text: 'Combinado!' })
   t.ok(/^[0-9a-f]{32}$/.test(sent.id))
@@ -645,6 +646,7 @@ function samples (f) {
     'dm.seen': { peer: member },
     'dm.set': { peer: member, state: 'accepted' },
     'dm.send': { to: member, text: 'Olá!' },
+    'dm.react': { to: f.conversations[0].peer, target: { from: f.conversations[0].messages[0].from, id: f.conversations[0].messages[0].id }, emoji: '👍' },
     'group.create': { name: 'Encontro na praça', join: 'open', community },
     'group.list': {},
     'group.info': { group },
@@ -1402,4 +1404,67 @@ test('group reactions replace, remove and hide without leaking reactor keys in r
   t.alike((await createVitrineRequest(f)('group.read', { group })).items.find((p) => p.writer === target.writer).reactions, item.reactions, 'instances are isolated')
   await request('group.leave', { group })
   await refused(t, request, 'group.react', { group, target, emoji: '👍' }, 'USAGE')
+})
+
+test('DM reactions replace and remove only mine without changing inbox previews or unread', async (t) => {
+  const { fixtures: f, request } = await load()
+  const { pageReadKind } = await import('../src/pageNotice.js')
+  const peer = f.conversations[0].peer
+  const first = f.conversations[0].messages[0]
+  const target = { from: first.from, id: first.id }
+  const inbox = await answer(t, request, 'dm.list')
+  const read = () => answer(t, request, 'dm.thread', { peer })
+  t.alike((await read()).messages[0].reactions, [{ emoji: '❤️', mine: true }, { emoji: '❤️', mine: false }])
+  const react = (emoji) => answer(t, request, 'dm.react', { to: peer, target, emoji })
+  t.alike(await react('👍'), { ok: true })
+  t.alike((await read()).messages[0].reactions, [{ emoji: '❤️', mine: false }, { emoji: '👍', mine: true }])
+  const replaced = await read()
+  await react('👍')
+  t.alike(await read(), replaced, 'same choice is a no-op')
+  await react('')
+  t.alike((await read()).messages[0].reactions, [{ emoji: '❤️', mine: false }])
+  await react('❤️')
+  t.alike((await read()).messages[0].reactions, [{ emoji: '❤️', mine: false }, { emoji: '❤️', mine: true }])
+  t.alike(await answer(t, request, 'dm.list'), inbox, 'preview, ordering and unread are unchanged')
+  const { dmReactionGate } = await import('../src/dm-screen.js')
+  const readPeer = await answer(t, request, 'page.read', { key: peer })
+  t.is(readPeer.complete, false)
+  t.alike(dmReactionGate({ read: readPeer, peer, peerKind: pageReadKind(readPeer, peer), hosted: true, unlocked: true, online: true, isTop: true, folder: 'inbox' }), { hidden: false, disabled: false })
+  const completePeer = f.members[2].author
+  t.is(pageReadKind(await answer(t, request, 'page.read', { key: completePeer }), completePeer), 'person')
+  const page = f.pages[0].author
+  t.is(pageReadKind(await answer(t, request, 'page.read', { key: page }), page), 'page')
+  const clean = f.conversations[0].messages[1]
+  const ownTarget = { from: clean.from, id: clean.id }
+  await answer(t, request, 'dm.react', { to: peer, target: ownTarget, emoji: '👍' })
+  await answer(t, request, 'dm.react', { to: peer, target: ownTarget, emoji: '' })
+  t.absent((await read()).messages[1].reactions, 'empty reactions are omitted')
+})
+
+test('DM reaction refusals preserve the thread and identify both sender and id', async (t) => {
+  const { fixtures: f, request } = await load()
+  const peer = f.conversations[0].peer
+  const target = { from: f.conversations[0].messages[0].from, id: f.conversations[0].messages[0].id }
+  const before = await answer(t, request, 'dm.thread', { peer })
+  await refused(t, request, 'dm.react', { to: peer, target: { ...target, from: f.own }, emoji: '👍' }, 'USAGE', 'mensagem não encontrada')
+  await refused(t, request, 'dm.react', { to: unknown, target, emoji: '👍' }, 'USAGE', 'mensagem não encontrada')
+  await refused(t, request, 'dm.react', { to: peer, target, emoji: 'not an emoji' }, 'USAGE')
+  t.alike(await answer(t, request, 'dm.thread', { peer }), before)
+  await answer(t, request, 'dm.set', { peer, state: 'blocked' })
+  await refused(t, request, 'dm.react', { to: peer, target, emoji: '👍' }, 'USAGE', 'você bloqueou esta pessoa')
+  t.alike((await answer(t, request, 'dm.thread', { peer })).messages, before.messages)
+})
+
+test('a conversation without a profile has an unknown diary with no roster evidence', async (t) => {
+  const { fixtures: f, request } = await load()
+  const { pageReadKind } = await import('../src/pageNotice.js')
+  const { dmReactionGate } = await import('../src/dm-screen.js')
+  const peers = f.conversations.filter((c) => !f.members.some((p) => p.author === c.peer) && !f.pages.some((p) => p.author === c.peer))
+  t.ok(peers.length > 0)
+  for (const { peer } of peers) {
+    const read = await answer(t, request, 'page.read', { key: peer })
+    t.alike({ complete: read.complete, gen: read.gen, owner: read.owner }, { complete: false, gen: null, owner: null })
+    t.is(pageReadKind(read, peer), 'unknown')
+    t.alike(dmReactionGate({ read, peer, peerKind: pageReadKind(read, peer), hosted: true, unlocked: true, online: true, isTop: true, folder: 'inbox' }), { hidden: false, disabled: false })
+  }
 })

@@ -71,6 +71,8 @@ export const members = [
   ['Tomás Ferreira', 'tomas_ferreira', 'Música para compartilhar.']
 ].map(([name, username, bio], i) => ({ author: fixtureKeys[i]?.publicKey || key(i + 1), name, username, bio, avatar: null }))
 
+export const incompleteDiaries = [members[1].author]
+
 export const own = members[0].author
 export const association = key(900)
 
@@ -108,6 +110,7 @@ export const conversations = exchanges.map((texts, i) => {
       replyTo: j === 2 ? id(100 + i * 10 + 1) : null,
       at: at(j < 2 ? 4 : 5, 10 + i % 4, j * 5),
       mine,
+      ...(i === 0 && j === 0 ? { reactions: [{ emoji: '❤️', mine: true }, { emoji: '❤️', mine: false }] } : {}),
       media: null
     }
   })
@@ -457,4 +460,4 @@ const momentRows = [
 
 export const momentRecords = momentRows.map(([author, seq, text, when, p], i) => ({ author, seq, record: { type: 'moment', text, at: when, media: momentPhoto(i, p) } }))
 
-export const fixtures = { now, own, association, members, applicants, pages, follows, conversations, uncertainSends, communities, groups, feed, noticePosts, notices, diaryRecords: [...diaryRecords, ...testimonialRecords, ...momentRecords], sealed, listings, rates }
+export const fixtures = { now, own, association, members, incompleteDiaries, applicants, pages, follows, conversations, uncertainSends, communities, groups, feed, noticePosts, notices, diaryRecords: [...diaryRecords, ...testimonialRecords, ...momentRecords], sealed, listings, rates }

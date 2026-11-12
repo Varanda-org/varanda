@@ -18,6 +18,10 @@ const DM_INNER_KEYS = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'replyTo',
 const DM_INNER_KEYS_V2 = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'replyTo', 'text', 'media', 'card', 'fwd', 'op', 'peer', 'at', 'cert'])
 // v3 (a Página's digest-signed inner) writes the v2 keys; only its signature differs.
 const DM_INNER_KEYS_V3 = DM_INNER_KEYS_V2
+// v4 is a reaction (kind 'react'), signed under its own domain.
+const DM_INNER_KEYS_V4 = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'target', 'emoji', 'rev', 'at', 'cert'])
+// A reaction's target: the message's sender and id (ids are unique per sender).
+const DM_TARGET_KEYS = Object.freeze(['from', 'id'])
 const DM_MEDIA_KEYS = Object.freeze(['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms'])
 // A link card (core lib/link-card.js CARD_KEYS); its image is a media item.
 const DM_CARD_KEYS = Object.freeze(['url', 'host', 'title', 'desc', 'image'])
@@ -76,13 +80,24 @@ function innerVersion (b) {
 // body has every key of its version; media items (and a card's image) are
 // written in DM_MEDIA_KEYS order and a card in DM_CARD_KEYS order whatever
 // order the caller built them in.
+function canonicalTarget (t) {
+  if (!isObject(t)) return t
+  const o = {}
+  for (const k of DM_TARGET_KEYS) o[k] = t[k]
+  return o
+}
+
 function canonicalInnerJson (body) {
-  const keys = body.v === 2 || body.v === 3 ? DM_INNER_KEYS_V2 : DM_INNER_KEYS
+  const keys = body.v === 4
+    ? DM_INNER_KEYS_V4
+    : body.v === 2 || body.v === 3 ? DM_INNER_KEYS_V2 : DM_INNER_KEYS
   const o = {}
   for (const k of keys) {
     o[k] = k === 'media' && Array.isArray(body.media)
       ? body.media.map(canonicalMediaItem)
-      : k === 'card' ? canonicalCard(body.card) : body[k]
+      : k === 'card'
+        ? canonicalCard(body.card)
+        : k === 'target' ? canonicalTarget(body.target) : body[k]
   }
   return JSON.stringify(o)
 }
@@ -127,6 +142,8 @@ module.exports = {
   DM_INNER_KEYS,
   DM_INNER_KEYS_V2,
   DM_INNER_KEYS_V3,
+  DM_INNER_KEYS_V4,
+  DM_TARGET_KEYS,
   DM_MEDIA_KEYS,
   DM_CARD_KEYS,
   innerVersion,

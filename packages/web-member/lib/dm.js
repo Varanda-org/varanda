@@ -100,6 +100,8 @@ const BLOCKED = 'você bloqueou esta pessoa'
 const NO_BOX = 'esta pessoa ainda não recebe mensagens'
 const NO_STAMPS = 'o limite de envio de hoje acabou'
 const BAD_REPLY = 'responda uma mensagem desta conversa'
+const NO_TARGET = 'mensagem não encontrada'
+const REACT_MAX = 'limite de reações para esta mensagem atingido'
 const TOO_LONG = 'mensagem longa demais'
 const BAD_TEXT = 'mensagem inválida'
 const PULL_BUSY = 'mensagens já em andamento'
@@ -567,7 +569,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (hit !== undefined && lc.unlocked() && hit.version === lc.version() && hit.own === own && hit.follows === followsText && hit.seen === seenText) return hit.result
     const version = lc.version()
     const stored = new Set(storedIds)
-    const { messages, ops } = lc.snapshot()
+    const { messages, ops, reactions } = lc.snapshot()
     const seen = []
     for (const m of messages) {
       if (m.mine) continue
@@ -579,7 +581,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       followSet: follows,
       seen,
       ops,
-      messages: messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : own, text: m.text, replyTo: m.replyTo, fwd: m.fwd, media: m.media, card: m.card, at: m.at, filedAt: m.filedAt }))
+      messages: messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : own, text: m.text, replyTo: m.replyTo, fwd: m.fwd, media: m.media, card: m.card, at: m.at, filedAt: m.filedAt })),
+      reactions: (reactions || []).map((r) => ({ id: r.id, from: r.from, to: r.to, target: { from: r.target.from, id: r.target.id }, emoji: r.emoji, rev: r.rev, filedAt: r.filedAt }))
     })
     // A store locked (or relocked) since is never remembered.
     const current = ctx === personal || pageStores.get(ctx.page) === ctx
@@ -722,10 +725,17 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     // of theirs is fetched until a tap or an accept.
     const auto = c.folder !== 'request'
     return {
-      messages: rows.map((m) => ({ id: m.id, from: m.from, text: m.text, replyTo: m.replyTo, fwd: m.fwd, at: m.at, mine: m.mine, media: mediaView(m, auto, ctx), card: m.card ? copyLinkCard(m.card, mediaItem) : null })),
+      messages: rows.map((m) => threadRow(m, mediaView(m, auto, ctx))),
       next: start > 0 && rows.length > 0 ? rows[0].id : null,
       ...state
     }
+  }
+
+  // `reactions` only when the fold gave the row one.
+  function threadRow (m, media) {
+    const row = { id: m.id, from: m.from, text: m.text, replyTo: m.replyTo, fwd: m.fwd, at: m.at, mine: m.mine, media, card: m.card ? copyLinkCard(m.card, mediaItem) : null }
+    if (Array.isArray(m.reactions) && m.reactions.length > 0) row.reactions = m.reactions.map((r) => ({ emoji: r.emoji, mine: r.mine }))
+    return row
   }
 
   // ---- media ----
@@ -1278,7 +1288,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   async function fileSent (entry) {
     if (entry.row === null || !entry.acked[0]) return
     const lc = entry.local || local
-    if (!lc.hasMessage(entry.row.from, entry.row.id)) await lc.append([{ ...entry.row, filedAt: lc.nextFiled() }])
+    const filed = entry.row.t === 'rx' ? lc.hasReaction(entry.row.from, entry.row.id) : lc.hasMessage(entry.row.from, entry.row.id)
+    if (!filed) await lc.append([{ ...entry.row, filedAt: lc.nextFiled() }])
     const row = entry.row
     entry.row = null
     // The sender's own photos are cached from the bytes it put, so its
@@ -1430,6 +1441,86 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       row: { t: 'msg', id, peer: to, from: own, text, replyTo, fwd, media: items, card, at, mine: true },
       blobs: sealedBlobs,
       plains
+    }
+  }
+
+  // A reaction (inner v4) to a message of the held thread with `to`: sealed
+  // to the peer and to the own box and stamped as one dm.send (two stamps),
+  // filed here once the peer's drop is acked. At most one pending op per
+  // (to, target): the same emoji only puts what was not acked; another one
+  // is a new op. With none pending, a call whose emoji is already the own
+  // reaction ('' with none) sends nothing. -> { ok: true }
+  async function react (own, keyPair, { to, target, emoji }, recipientBox) {
+    checkSend(own, to)
+    await whenLoaded()
+    const key = 'rx\n' + to + '\n' + target.from + '\n' + target.id
+    let entry = pending.get(key)
+    if (entry === undefined || entry.rx.emoji !== emoji) {
+      const c = await threadOf(own, to)
+      const row = c === null ? undefined : c.messages.find((m) => m.from === target.from && m.id === target.id)
+      if (row === undefined) throw new UsageError(NO_TARGET)
+      const prior = pending.get(key)
+      if (prior === undefined) {
+        const mine = Array.isArray(row.reactions) ? row.reactions.find((r) => r.mine) : undefined
+        if ((mine === undefined ? '' : mine.emoji) === emoji) return { ok: true }
+      }
+      // A different emoji replaces the pending op: its unacked drops are
+      // abandoned, and the higher rev wins wherever both arrive.
+      entry = await newReaction(own, keyPair, { to, target, emoji, key }, recipientBox, prior === undefined ? 0 : prior.rx.rev)
+      if (pending.get(key) !== undefined) {
+        dropEntry(pending.get(key))
+        pending.delete(key)
+      } else if (pending.size >= PENDING_MAX) {
+        const oldest = pending.keys().next().value
+        dropEntry(pending.get(oldest))
+        pending.delete(oldest)
+      }
+      pending.set(key, entry)
+    }
+    await deliver(entry)
+    if (pending.get(key) === entry) pending.delete(key)
+    return { ok: true }
+  }
+
+  // rev: one past the highest the store or the pending op (pendingRev)
+  // holds for (to, target, own), so an unacked op never ties with the next.
+  async function newReaction (own, keyPair, { to, target, emoji, key }, recipientBox, pendingRev) {
+    if (recipientBox === null) throw new UsageError(NO_BOX)
+    const id = dm.newMessageId()
+    const at = nowIso()
+    const cert = await certOf(own)
+    // Read after the await: a pull may have filed a newer op of another
+    // device of this passkey meanwhile, and a stale rev would lose to it.
+    const rev = Math.max(local.reactionRev(to, target, own), pendingRev) + 1
+    if (rev > dm.DM_REACT_REV_MAX) throw new UsageError(REACT_MAX)
+    const t = { from: target.from, id: target.id }
+    let inner
+    try {
+      inner = dm.buildInner({ kind: 'react', id, at, to, target: t, emoji, rev, cert }, keyPair)
+    } catch {
+      throw new UsageError(BAD_TEXT)
+    }
+    let sealedTo, sealedSelf
+    try {
+      sealedTo = dm.sealInner(inner, recipientBox)
+      sealedSelf = dm.sealInner(inner, b4a.toString(box.publicKey, 'hex'))
+    } catch {
+      throw new UsageError(NO_BOX)
+    } finally {
+      inner.fill(0)
+    }
+    const stamps = await takeStamps(2)
+    if (stamps === null) throw new UsageError(NO_STAMPS)
+    return {
+      key,
+      id,
+      at,
+      drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])],
+      acked: [false, false],
+      row: { t: 'rx', id, peer: to, from: own, to, target: t, emoji, rev, at, mine: true },
+      rx: { emoji, rev },
+      blobs: [],
+      plains: null
     }
   }
 
@@ -1675,6 +1766,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       // A page message put after its signature's expiry is a replay of a
       // stockpiled signature (core dm.js pageInnerStale): never filed.
       if (body === null || dm.pageInnerStale(body, Date.now())) return null
+      // A Página conversation has no reactions: a v4 body is never filed.
+      if (body.kind === 'react') return null
       // A drop to the key a carried legacy box belonged to is filed for this
       // page, as the bundle's rows are.
       if (key !== p.page) {
@@ -1688,7 +1781,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   }
 
   function rowOf (own, body, ops, batch, blocked, lc) {
-    if (body.kind === 'msg' && !body.mine && blocked.has(body.from)) return null
+    if ((body.kind === 'msg' || body.kind === 'react') && !body.mine && blocked.has(body.from)) return null
+    if (body.kind === 'react') return reactionRowOf(own, body, ops, batch, lc)
     if (body.kind === 'ctl') {
       if (lc.hasOp(body.id) || batch.some((r) => r.t === 'ctl' && r.id === body.id)) return null
       return { t: 'ctl', id: body.id, op: body.op, peer: body.peer, at: body.at }
@@ -1698,6 +1792,15 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     // A blocked sender's messages are dropped once they open.
     if (!body.mine && !dmFold.canSend({ self: own, peer, ops })) return null
     return { t: 'msg', id: body.id, peer, from: body.from, text: body.text, replyTo: body.replyTo, fwd: body.fwd === 1 ? 1 : 0, media: Array.isArray(body.media) ? body.media.map(mediaItem) : null, card: body.card ? copyLinkCard(body.card, mediaItem) : null, at: body.at, mine: body.mine }
+  }
+
+  // Kept even while its target is not stored: the fold applies it once the
+  // target is. Never a message row, so it takes no (from, id) message slot.
+  function reactionRowOf (own, body, ops, batch, lc) {
+    if (lc.hasReaction(body.from, body.id) || batch.some((r) => r.t === 'rx' && r.from === body.from && r.id === body.id)) return null
+    const peer = body.mine ? body.to : body.from
+    if (!body.mine && !dmFold.canSend({ self: own, peer, ops })) return null
+    return { t: 'rx', id: body.id, peer, from: body.from, to: body.to, target: { from: body.target.from, id: body.target.id }, emoji: body.emoji, rev: body.rev, at: body.at, mine: body.mine }
   }
 
   // ---- Páginas (docs/rpc.md 5.114) ----
@@ -2229,6 +2332,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     thread,
     seen: tracked(seen),
     send: tracked(send),
+    react: tracked(react),
     putMedia: tracked(putMedia),
     readMedia: tracked(readMedia),
     putPublicMedia: tracked(putPublicMedia),

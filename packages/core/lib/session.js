@@ -666,6 +666,7 @@ function createSession ({
     'dm.enable': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.lookup': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.send': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.react': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.pull': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.list': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.thread': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),

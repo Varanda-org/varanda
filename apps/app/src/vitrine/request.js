@@ -591,7 +591,10 @@ export function createVitrineRequest (fixtures, options) {
       return { items, next: candidates.length > limit ? { round: last.round, at: last.at, author: last.author, seq: last.seq } : null, diaries: new Set(rows.map((r) => r.author)).size, skipped: 0, incomplete: false }
     },
     'page.read': ({ key }) => {
-      if (!data.pages.some((p) => p.author === key)) refuse('NOT_FOUND', 'sem dados locais para este diário')
+      if (!data.pages.some((p) => p.author === key)) {
+        if (!profileOf(key) && !conversationOf(key)) refuse('NOT_FOUND', 'sem dados locais para este diário')
+        return { page: key, owner: null, admins: [], gen: null, seq: null, isOwner: false, isAdmin: false, complete: !!profileOf(key) && !data.incompleteDiaries.includes(key), follows: [], followsCount: 0, followsTruncated: false, closed: false, movedTo: null, movedFrom: null, links: [] }
+      }
       const follows = data.members.filter((p) => p.author !== data.own).map((p, i) => ({ key: p.author, seq: 30 + i })).reverse()
       return { page: key, owner: data.own, admins: [data.members[1].author], gen: 1, seq: 1, isOwner: true, isAdmin: false, complete: true, follows, followsCount: follows.length, followsTruncated: false, closed: false, movedTo: null, movedFrom: null, links: [] }
     },
@@ -774,6 +777,19 @@ export function createVitrineRequest (fixtures, options) {
       c.messages.push({ id, from: data.own, text, replyTo: replyTo || null, at, mine: true, media: media || null, ...(card ? { card } : {}) })
       c.folder = 'inbox'
       return { id, at }
+    },
+    'dm.react': ({ to, target, emoji }) => {
+      const c = conversationOf(to)
+      if (c && c.blocked) refuse('USAGE', 'você bloqueou esta pessoa')
+      const item = c?.messages.find((m) => m.from === target.from && m.id === target.id && !m.deleted)
+      if (!item) refuse('USAGE', 'mensagem não encontrada')
+      const rows = item.reactions || []
+      if ((rows.find((r) => r.mine)?.emoji || '') === emoji) return { ok: true }
+      const next = rows.filter((r) => !r.mine)
+      if (emoji !== '') next.push({ emoji, mine: true })
+      if (next.length > 0) item.reactions = next
+      else delete item.reactions
+      return { ok: true }
     },
     'dm.lookup': ({ member }) => ({ box: profileOf(member) || conversationOf(member) ? member : null, gen: profileOf(member) || conversationOf(member) ? 1 : null }),
     'group.list': ({ offset, limit }) => {
