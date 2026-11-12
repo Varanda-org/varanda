@@ -25,6 +25,8 @@
 // the upload or the post then failed, closing the composer leaves those
 // blocks unused but public in the own media core. Media is never queued in
 // the outbox (it is text-only): offline, attaching is disabled.
+// A share (`shared`) uses the same local encode and may attach while
+// offline: nothing is uploaded until the person presses Publicar.
 // @ suggestions (hosted web, online only): while the caret is inside an
 // @token of 2+ characters the member search (../useMemberSearch) lists up to
 // 5 verified members under the compose box; tapping one replaces the token
@@ -69,6 +71,7 @@ import { validDescriptor } from '../media/fetch'
 import { pickImages } from '../media/attach'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { encodeFile } from '../media/encode'
+import { mergeDraft, shareNote } from '../sharedIntent'
 import { moveById } from '../photoOrder'
 import { Btn, ErrorText, Soft, errorText, useAction } from '../ui'
 import { Avatar } from '../ui/Avatar'
@@ -507,7 +510,10 @@ function Ring ({ progress, tone }) {
 // `quote` takes precedence over `reply` (the shell keeps them exclusive);
 // `onClearQuote` (optional) adds 'cancelar citação'. onPublished(kind, ref)
 // with kind 'post' | 'reply' | 'quote' | 'queued-post' | 'queued-reply'.
-export default function Publicar ({ open, reply: replyProp, quote = null, momentRequest = 0, me, onClose, onClearReply, onClearQuote, onPublished }) {
+// `shared` (optional) prefills this post once per id. `onSharedDone(id)`
+// releases the shell's copy of the files. A lock unmounts this screen, so
+// done is skipped then and the shell hands the same share back after unlock.
+export default function Publicar ({ open, reply: replyProp, quote = null, momentRequest = 0, me, onClose, onClearReply, onClearQuote, onPublished, shared = null, onSharedDone = () => {}, onSharedTaken = () => {} }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const reply = quote ? null : replyProp
@@ -818,18 +824,11 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     return gen === genRef.current ? out : null
   }
 
-  const attach = async () => {
-    if (!canAttach || !mediaOnline || busy || frozen) return
-    setNote('')
-    let files
-    try {
-      files = await pickImages()
-    } catch {
-      return
-    }
-    if (!Array.isArray(files) || files.length === 0) return
+  // Reported before the encode: a full draft returns here, and the note still
+  // has to say the new files did not fit.
+  const addFiles = async (files, onRoom) => {
     const room = Math.max(0, MAX_MEDIA_PER_POST - liveRef.current.size)
-    if (files.length > room) setNote('até ' + MAX_MEDIA_PER_POST + ' fotos por publicação')
+    onRoom(Math.max(0, files.length - room))
     const chosen = files.slice(0, room).map((file) => ({ id: nextItemId(), file }))
     if (chosen.length === 0) return
     const gen = genRef.current
@@ -856,6 +855,63 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       patch(id, { status: 'ready', encoded, thumb })
     }
   }
+
+  const attach = async () => {
+    if (!canAttach || !mediaOnline || busy || frozen) return
+    setNote('')
+    let files
+    try {
+      files = await pickImages()
+    } catch {
+      return
+    }
+    if (!Array.isArray(files) || files.length === 0) return
+    await addFiles(files, (n) => {
+      if (n > 0) setNote('até ' + MAX_MEDIA_PER_POST + ' fotos por publicação')
+    })
+  }
+
+  // Done after unmount would drop the shell's files: a lock unmounts Publicar
+  // and hands the same share back once the screen is mounted again.
+  const mountedRef = useRef(false)
+  const appliedShareRef = useRef(null)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+  useEffect(() => {
+    if (!(open && shared && shared.id !== appliedShareRef.current && !frozen && !busy && !moment.pending)) return
+    appliedShareRef.current = shared.id
+    onSharedTaken(shared.id)
+    setMode('post')
+    const merged = mergeDraft(text, shared.text, MAX_TEXT)
+    if (merged.text !== text) setText(merged.text)
+    if (shared.files.length === 0 || !canAttach) {
+      setNote(shareNote({
+        canAttach,
+        hadFiles: shared.files.length > 0,
+        noRoom: 0,
+        dropped: shared.dropped,
+        failed: shared.failed || 0,
+        kept: merged.kept,
+        clipped: shared.clipped
+      }))
+      onSharedDone(shared.id)
+      return
+    }
+    const done = () => {
+      if (mountedRef.current) onSharedDone(shared.id)
+    }
+    addFiles(shared.files, (n) => setNote(shareNote({
+      canAttach: true,
+      hadFiles: true,
+      noRoom: n,
+      dropped: shared.dropped,
+      failed: shared.failed || 0,
+      kept: merged.kept,
+      clipped: shared.clipped
+    }))).then(done, done)
+  }, [open, shared && shared.id, frozen, busy, moment.pending])
 
   const pickEmoji = (emoji) => {
     if (frozen) return
