@@ -763,7 +763,7 @@ test('sourceFor cachedOnly: a hit answers, a miss reads nothing', async (t) => {
 
 test('the photo viewer stops bound playback, and the App tells the cards when the tab bar is hidden', (t) => {
   const grid = fs.readFileSync(path.join(__dirname, '../src/ui/MediaGrid.js'), 'utf8')
-  t.ok(grid.includes("import { stopBoundPlayback } from '../media/chatMedia'"), 'imported from chatMedia')
+  t.ok(/import \{[^}]*\bstopBoundPlayback\b[^}]*\} from '\.\.\/media\/chatMedia'/.test(grid), 'imported from chatMedia')
   t.ok(/useEffect\(\(\) => \{ if \(open\) stopBoundPlayback\(\) \}, \[open\]\)/.test(grid), 'called in an effect keyed on open')
   const app = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
   t.ok(app.includes('<TabBarShown.Provider value={!barsHidden}>'), 'App wraps screens in TabBarShown.Provider')

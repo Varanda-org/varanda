@@ -42,10 +42,10 @@ import { useStyles, useTheme } from './ThemeProvider'
 import { layout, radius, space } from './theme'
 
 const THUMB = 64
-const VISIBILITY_MS = 500
+export const VISIBILITY_MS = 500
 // A just-tapped player may still be scrolling into view, so it is not closed
 // in its first 2 s.
-const OPEN_GRACE_MS = 2000
+export const OPEN_GRACE_MS = 2000
 // A tall player stays while a meaningful part of it shows.
 const SEEN_ENOUGH = 120
 

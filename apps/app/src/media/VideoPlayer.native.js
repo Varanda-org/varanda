@@ -3,11 +3,13 @@
 // no picture-in-picture, no AirPlay or cast, no background playback and no
 // lock-screen controls. One video plays at a time (videoPlayers). The web
 // sibling is VideoPlayer.web.js, with the same props:
-// { uri, playing, muted, controls, fit, onReady, onEnd, onError,
+// { uri, playing, muted, controls, fit, style, startMs, inline, onReady, onEnd, onError,
 //   onSoundRefused, onProgress }. onProgress gets { ms, durationMs, playing,
 // ended } about every 250 ms while playing and once on a pause. control, a
-// ref, holds { play, unmute } while the player of this uri is live, the
+// ref, holds { play, unmute, progress } while the player of this uri is live, the
 // contract the web sibling needs for a press; expo-video needs no gesture.
+// startMs resumes once ready; inline clips the tile. progress() reads the live
+// { ms, durationMs, playing, ended }, or null after release, without playing.
 
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createVideoPlayer, VideoView } from 'expo-video'
@@ -18,6 +20,7 @@ import {
   progressFromSeconds,
   reduceVideo,
   refusedSourceError,
+  resumeSeconds,
   videoEffects,
   videoPlayers,
   videoState
@@ -25,12 +28,14 @@ import {
 
 const FITS = new Set(['contain', 'cover', 'fill'])
 
-export default function VideoPlayer ({ uri, playing = false, muted = false, controls = false, fit = 'contain', style, onReady, onEnd, onError, onSoundRefused, onProgress, control }) {
+export default function VideoPlayer ({ uri, playing = false, muted = false, controls = false, fit = 'contain', style, startMs = 0, inline = false, onReady, onEnd, onError, onSoundRefused, onProgress, control }) {
   const [current, setCurrent] = useState(null)
   const callbacks = useRef({})
   callbacks.current = { onReady, onEnd, onError, onSoundRefused, onProgress }
   const mutedRef = useRef(muted === true)
   mutedRef.current = muted === true
+  const startRef = useRef(0)
+  startRef.current = startMs
   const state = useRef(videoState(null))
 
   // A layout effect: its cleanup runs in the commit itself, before the
@@ -46,6 +51,7 @@ export default function VideoPlayer ({ uri, playing = false, muted = false, cont
     }
     const token = {}
     let p = createVideoPlayer({ uri })
+    let seeked = false
     const apply = (event) => {
       if (p === null) return
       const prev = state.current
@@ -65,8 +71,16 @@ export default function VideoPlayer ({ uri, playing = false, muted = false, cont
     })
     const subs = [
       p.addListener('statusChange', ({ status }) => {
-        if (status === 'readyToPlay') apply({ type: 'ready', durationMs: position().durationMs })
-        else if (status === 'error') apply({ type: 'error' })
+        if (status === 'readyToPlay') {
+          if (!seeked) {
+            seeked = true
+            const seconds = resumeSeconds(startRef.current, position().durationMs)
+            if (seconds !== null) {
+              try { p.currentTime = seconds } catch {}
+            }
+          }
+          apply({ type: 'ready', durationMs: position().durationMs })
+        } else if (status === 'error') apply({ type: 'error' })
       }),
       p.addListener('playingChange', ({ isPlaying }) => {
         // A change queued before another video claimed and paused this one
@@ -130,6 +144,10 @@ export default function VideoPlayer ({ uri, playing = false, muted = false, cont
       },
       unmute: () => {
         if (!live.released) configure(live.player, { muted: false })
+      },
+      progress: () => {
+        if (live.released) return null
+        return progressFromSeconds({ currentTime: live.player.currentTime, duration: live.player.duration, playing: live.player.playing, ended: state.current.status === 'ended' })
       }
     }
     control.current = handle
@@ -139,10 +157,14 @@ export default function VideoPlayer ({ uri, playing = false, muted = false, cont
   }, [live, control])
 
   if (live === null) return null
+  // A SurfaceView cannot clip to rounded tile corners in a scrolling list.
+  // expo-video 55's surfaceType is Android only and cannot change on a live
+  // view; each mount passes a constant inline value.
   return (
     <VideoView
       player={live.player}
       style={style}
+      surfaceType={inline === true ? 'textureView' : undefined}
       nativeControls={controls === true}
       contentFit={FITS.has(fit) ? fit : 'contain'}
       fullscreenOptions={{ enable: false }}

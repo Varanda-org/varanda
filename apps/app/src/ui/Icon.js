@@ -49,6 +49,7 @@ const GLYPHS = {
   tocar: 'play',
   pausar: 'pause',
   parar: 'square',
+  expandir: 'maximize-2',
   sorriso: 'smile',
   clipe: 'paperclip',
   mensagem: 'mail',
