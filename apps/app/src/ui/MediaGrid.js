@@ -219,6 +219,10 @@ function VideoViewer ({ author, video, onClose }) {
 
   useEffect(() => {
     let alive = true
+    // This attempt owns the URL it made: an unmount between setUri and its
+    // commit drops the state update, and then only this cleanup can release
+    // it. revokeUrl is idempotent, so the [uri] cleanup may release it too.
+    let made = null
     const descriptor = videoRef.current
     if (hosted !== true) {
       setUri(null)
@@ -244,6 +248,7 @@ function VideoViewer ({ author, video, onClose }) {
         setPhase('error')
         return
       }
+      made = got
       setUri(got)
       setPhase('ready')
     }, () => {
@@ -254,6 +259,7 @@ function VideoViewer ({ author, video, onClose }) {
     return () => {
       alive = false
       if (ctrl !== null) ctrl.abort()
+      if (made !== null) revokeUrl(made)
     }
   }, [author, id, attempt])
 
