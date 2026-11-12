@@ -150,6 +150,14 @@ Cantos arredondados, botões em pílula, entrelinha generosa, nomes em negrito.
 - **Publicar em Momento**: no topo de Publicar, o `Segmented` "Publicação | Momento". Em Momento, uma foto só, numa prévia de 160 x 200 pt com cantos de 12 pt, a pílula **Escolher foto** (depois **Trocar foto**), o campo de até 200 caracteres com o contador "N/200" (âmbar a partir de 180), a linha suave "Fica 24 horas para quem segue você. Responder abre uma conversa privada." e, com um rascunho de publicação, "Seu rascunho da publicação continua guardado."; ele volta em Publicação.
 - **Momentos no Diário**: abaixo do topo do perfil, nunca uma quarta aba, linhas de largura inteira e 44 pt: "Seus momentos (24 h)" com o ícone de câmera, o número e a seta, e "Momentos anteriores (N)", recolhida, que abre a lista dos que passaram das 24 h, cada um com a data, até duas linhas do texto e **Apagar** no botão de mais.
 
+### Feira
+
+Na cidade, de cima para baixo: o campo de palavras; uma linha com o chip da cidade (ícone de mapa e "Cidade, UF", que abre a folha de localização) e o botão Filtros (com um ponto de destaque quando ordem ou faixa estão ativas); a fileira rolável de tiles de categoria (ícone sobre o rótulo, alvo de 44 pt, o selecionado em `accentSoft` com o ícone e o texto em `accent`); "Salvar busca" e a grade. Sem cidade, uma vitrine com o título, os estados, o campo Cidade e "Como funciona" em quatro passos com ícone.
+
+O tile de anúncio é um cartão (`card`, cantos `radius.md`) com a foto quadrada em cima (ou o ícone da categoria sobre `skeleton`), depois o preço em destaque, o título em até duas linhas, o lugar e, se houver, o selo em `accentSoft`. A grade tem 1 coluna abaixo de 360 pt ou com texto grande, 2 abaixo de 600, 3 abaixo de 900; a casca do app limita o conteúdo a 640 pt, então o máximo é 3.
+
+As folhas de Filtros da Feira (Ordenar por, Faixa de preço De e Até, Tipo de anúncio, a nota de parcial, Aplicar e Limpar) e de Localização (estados e cidade, Ver anúncios) usam a folha de ações padrão.
+
 ## Navegação
 
 Quatro abas (cinco na versão hospedada) + o botão de publicar + os ajustes. Onde ficam as telas:
