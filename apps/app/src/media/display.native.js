@@ -11,8 +11,11 @@
 import { Directory, File, Paths } from 'expo-file-system'
 
 const DIR = 'varanda-media'
-const EXT = Object.freeze({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' })
-const NAME = /^[0-9a-f]{32}\.(jpg|png|webp|gif)$/
+const EXT = Object.freeze({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif', 'video/mp4': 'mp4' })
+const NAME = /^[0-9a-f]{32}\.(jpg|png|webp|gif|mp4)$/
+// media.readFile output (../client/webnode.native.js readFileUri): the
+// worklet names every file it writes there <32 hex>.bin.
+const READ_NAME = /^[0-9a-f]{32}\.bin$/
 
 let swept = false
 
@@ -63,4 +66,27 @@ export function revokeUrl (url) {
     if (file.uri !== url) return
     if (file.exists) file.delete()
   } catch {}
+}
+
+function readDirUri () {
+  const base = Paths.document.uri.endsWith('/') ? Paths.document.uri : Paths.document.uri + '/'
+  return base + 'varanda/media-read/'
+}
+
+// Moves a video media.readFile wrote (the worklet measured it strictly
+// first) into the swept media directory as <32 hex>.mp4 and returns its
+// file:// URI, so revokeUrl and the start sweep own it like any shown
+// photo. Only a .bin directly under the read directory is taken; anything
+// else throws and nothing moves.
+export function adoptVideoFile (uri) {
+  const base = readDirUri()
+  if (typeof uri !== 'string' || !uri.startsWith(base) || !READ_NAME.test(uri.slice(base.length))) {
+    throw new Error('vídeo inválido')
+  }
+  if (!swept) sweepMediaCache()
+  const d = dir()
+  d.create({ intermediates: true, idempotent: true })
+  const target = new File(d, randomHex() + '.mp4')
+  new File(uri).move(target)
+  return target.uri
 }
