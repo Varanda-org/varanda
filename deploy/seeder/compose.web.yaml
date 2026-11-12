@@ -203,7 +203,7 @@ services:
       # Música do Audius: a chave liga, vazia desliga. A chave é segredo, vai
       # só para o Audius e nunca é impressa; as outras quatro são opcionais e
       # exigem a chave. O áudio passa pelo serviço e usa a banda dele. Nunca
-      # defina a chave com Termos abaixo da versão 38; momentos só com o "sim"
+      # defina a chave com Termos abaixo da versão 39; momentos só com o "sim"
       # por escrito do Audius.
       VARANDA_AUDIUS_API_KEY: "${VARANDA_AUDIUS_API_KEY:-}"
       VARANDA_AUDIUS_API_URL: "${VARANDA_AUDIUS_API_URL:-}"

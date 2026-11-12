@@ -25,12 +25,13 @@ test('music snapshots are frozen, sanitized and have no thumbnail', async (t) =>
   t.is(playlist.thumb, null)
 })
 
-test('music blocks photos, pages, empty text and offline sends', async (t) => {
-  const { musicBlocks, MUSIC_PHOTOS_TEXT } = await rules()
+test('music blocks photos, a video, pages, empty text and offline sends', async (t) => {
+  const { musicBlocks, MUSIC_PHOTOS_TEXT, MUSIC_VIDEO_TEXT } = await rules()
   const { MUSIC_NEEDS_TEXT } = await import('../src/music.js')
   const valid = { hasMedia: false, asPage: null, online: true, textLength: 1 }
   t.is(musicBlocks(valid), '')
   t.is(musicBlocks({ ...valid, hasMedia: true }), MUSIC_PHOTOS_TEXT)
+  t.is(musicBlocks({ ...valid, hasMedia: true, hasVideo: true }), MUSIC_VIDEO_TEXT)
   t.is(musicBlocks({ ...valid, asPage: 'page' }), 'A música não vai em publicações de página')
   t.is(musicBlocks({ ...valid, textLength: 0 }), MUSIC_NEEDS_TEXT)
   t.is(musicBlocks({ ...valid, online: false }), 'Sem conexão: a música precisa de conexão')
@@ -85,6 +86,7 @@ async function resolution (overrides = {}) {
     musicTried: { current: new Set() },
     playbackEpoch: () => epoch,
     liveRef: { current: new Set() },
+    video: { draft: { state: { phase: 'empty' }, clear: () => {} } },
     musicDraftRef: { current: null },
     member: 'a'.repeat(64),
     musicOrigin: 'https://account.example',
@@ -167,11 +169,12 @@ test('resolve runs once, carries the session and abort signal, and keeps a full 
   t.is(r.timer, null, 'dismissing never resolves that URL again')
 })
 
-test('late resolutions are dropped on cancellation, leaving, a photo or a picked music', async (t) => {
+test('late resolutions are dropped on cancellation, leaving, a photo, a video or a picked music', async (t) => {
   for (const change of [
     (r) => r.cancel(),
     (r) => r.leave(),
     (r) => r.ctx.liveRef.current.add('photo'),
+    (r) => { r.ctx.video.draft.state = { phase: 'preparing' } },
     (r) => { r.ctx.musicDraftRef.current = draft }
   ]) {
     const r = await resolution()
@@ -251,6 +254,8 @@ async function sender (overrides = {}) {
     text: 'Ouça esta música',
     musicDraft: draft,
     hasMedia: false,
+    hasVideo: false,
+    video: { draft: { state: { phase: 'empty', file: null } } },
     asPage: null,
     len: 16,
     reply: null,
@@ -357,7 +362,7 @@ function composerFunction (start, end, name, ctx) {
 }
 
 test('switching to a page clears music even while closed or waiting for a page retry', (t) => {
-  const end = source.indexOf('  }, [asPage])') + '  }, [asPage])'.length
+  const end = source.indexOf('  }, [asPage, video.draft])') + '  }, [asPage, video.draft])'.length
   const start = source.lastIndexOf('  useEffect(() => {', end)
   const effect = source.slice(start, end)
   for (const open of [true, false]) {
@@ -371,6 +376,7 @@ test('switching to a page clears music even while closed or waiting for a page r
         genRef: { current: 0 },
         liveRef: { current: new Set() },
         removeItems: () => {},
+        video: { draft: { clear: () => {} } },
         setMusicDraft: (value) => { music = value },
         useEffect: (fn) => fn()
       }
@@ -388,9 +394,10 @@ test('switching to a page clears music even while closed or waiting for a page r
   }
 })
 
-test('picking music refuses staged photos and accepts a valid snippet', async (t) => {
-  const { musicSnapshot, MUSIC_PHOTOS_TEXT } = await rules()
+test('picking music refuses staged photos or a video and accepts a valid snippet', async (t) => {
+  const { musicSnapshot, MUSIC_PHOTOS_TEXT, MUSIC_VIDEO_TEXT } = await rules()
   const liveRef = { current: new Set(['photo']) }
+  const video = { draft: { state: { phase: 'empty' } } }
   let note = ''
   let picked = null
   const pick = composerFunction('  const pickMusic = (draft) => {', '\n  const cardRef', 'pickMusic', {
@@ -398,8 +405,10 @@ test('picking music refuses staged photos and accepts a valid snippet', async (t
     frozen: false,
     asPage: null,
     liveRef,
+    video,
     musicSnapshot,
     MUSIC_PHOTOS_TEXT,
+    MUSIC_VIDEO_TEXT,
     setNote: (value) => { note = value },
     setMusicDraft: (value) => { picked = value }
   })
@@ -407,10 +416,40 @@ test('picking music refuses staged photos and accepts a valid snippet', async (t
   t.is(picked, null)
   t.is(note, MUSIC_PHOTOS_TEXT)
   liveRef.current.clear()
+  for (const phase of ['preparing', 'ready']) {
+    video.draft.state = { phase }
+    note = ''
+    pick(draft)
+    t.is(picked, null, phase)
+    t.is(note, MUSIC_VIDEO_TEXT, phase)
+  }
+  video.draft.state = { phase: 'empty' }
   const snippet = { ...draft, ref: { ...draft.ref, kind: 'snippet', start: 75 } }
   pick(snippet)
   t.is(picked, snippet)
   t.is(note, '')
+})
+
+test('a video waits for the music card to go, like a link preview', async (t) => {
+  for (const music of [draft, null]) {
+    let note = 'old'
+    let seen = null
+    const attach = composerFunction('  const attachVideo = async () => {', '\n\n  // Done after unmount', 'attachVideo', {
+      canVideo: true,
+      busy: false,
+      frozen: false,
+      setNote: (value) => { note = value },
+      video: { draft: { pick: async (selection) => { seen = selection; if (selection.preview) throw new Error('preview') } } },
+      pickVideo: () => {},
+      prepareVideo: () => {},
+      liveRef: { current: new Set() },
+      linkDraft: { view: null },
+      musicDraftRef: { current: music }
+    })
+    await attach()
+    t.is(seen.preview, music !== null)
+    t.is(note, music !== null ? 'preview' : '')
+  }
 })
 
 test('attaching a photo removes music only after files were picked', async (t) => {
@@ -425,6 +464,7 @@ test('attaching a photo removes music only after files were picked', async (t) =
       frozen: false,
       pickImages: async () => files,
       liveRef: { current: new Set() },
+      video: { draft: { state: { phase: 'empty' } } },
       MAX_MEDIA_PER_POST: 4,
       nextItemId: () => 'photo',
       musicDraftRef,
@@ -453,6 +493,7 @@ test('publishing clears the music draft for posts, replies and quotes', (t) => {
       setMusicDraft: (value) => { music = value },
       musicTried: { current: new Set([track.url]) },
       setText: () => {},
+      video: { draft: { state: { phase: 'empty', file: null } } },
       onPublished: () => {}
     })
     published('text', target, [], quote)

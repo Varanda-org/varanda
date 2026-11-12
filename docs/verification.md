@@ -1204,7 +1204,7 @@ None of these was performed for this change.
 
 ### Residual risks
 
-- No illegal-media hash check: `docs/design.md` promises a comparison with lists of hashes of known illegal material before showing or relaying; it is not implemented. This PR therefore ships images only, no video. A blocked diary's media cores are purged with it.
+- No illegal-media hash check: `docs/design.md` promises a comparison with lists of hashes of known illegal material before showing or relaying; it is not implemented. This PR therefore ships images only, no video (short videos: section 181; the hash-list comparison is still absent). A blocked diary's media cores are purged with it.
 - A same-origin script can use the stored session: the `CryptoKey` is not exportable, but any script on the origin can call decrypt and act as the member (an XSS was already a full compromise while unlocked); anyone holding the unlocked device or profile can post until 'Sair' or the 30-day idle expiry.
 - The wrapping AES key lives in the same browser profile as the sealed PRF output: a copy of the profile yields the identity until 'Sair' or 30 days idle. The sealing only keeps the PRF output out of plain storage and stops the record alone from opening elsewhere.
 - Follows stored on a device before the update are not published automatically: the person confirms them in the Seguindo card 'Pessoas que você seguia neste aparelho'. Until the person decides, that device keeps its old list locally and does not receive follow changes from other devices. A confirmed follow cannot be taken back from the diary (append-only; only a later `on: false` record undoes it).
@@ -8036,7 +8036,224 @@ Na PWA instalada a partir da origem hospedada, no Chrome do Android, com o worke
 - Na web, uma foto acima de 16384 px num lado ou de 100 megapixels é recusada com "foto grande demais". Um PNG ou WebP animado com mais de 300 quadros não é lido e é recusado com "não foi possível abrir a foto". Um GIF passa pelos mesmos limites de mídia de uma imagem recebida (cada quadro, o número de quadros e o total de pixels), também no Android e no iOS; acima deles, "imagem grande demais".
 - No Android e no iOS, Sair e Recomeçar não apagam um compartilhamento marcado com um horário à frente do relógio do aparelho, a não ser o mais novo, nem um que esteja sendo gravado naquele milissegundo.
 
-## 181. Players de música em publicações, ao toque, Termos 37 (PR feat/music-link-embeds)
+## 181. Vídeos curtos em publicações e momentos
+
+Uma publicação, resposta ou citação aceita exatamente o par `[capa JPEG, vídeo MP4]`, com um vídeo de até 30 segundos e 8 MiB, sem fotos adicionais nem prévia de link. Um momento aceita uma foto, um GIF ou um vídeo de até 15 segundos e 4 MiB, sem par de capa; continua visível por 24 horas e o blob expira em 7 dias. Os dois formatos de vídeo limitam cada lado a 1920 e a área a 2073600 pixels. Não mudam os tetos de páginas, a retenção, os limites de conversas nem a regra de nunca repetir automaticamente um pedido que altera estado.
+
+Não há comparação de fotos, GIFs ou vídeos com listas de hashes de material ilegal conhecido antes de exibir ou repassar.
+
+Os controles são os limites, denúncia e bloqueio, com toda publicação denunciada que contém mídia destinada a uma pessoa. A IA não vê imagens nem vídeos. O bloqueio purga os núcleos de mídia do diário, mas não os blobs de momentos; quem reteve o descritor público pode abri-los até expirarem. Os riscos residuais estão em `protocol.md`, seção 8: núcleo de 256 MiB sem rotação, vídeo de até 8 MiB mais capa, H.264 não inspecionado, SEI não apagado, contêineres não percorridos e decodificador da plataforma recebendo bytes de pares.
+
+Cobertura automatizada:
+
+- `packages/core/test/records.test.js` e `packages/rpc/test/methods.test.js`: constantes e paridade dos validadores; chaves exatas; ordem e comprimento do par; JPEG obrigatório na capa; ausência de vídeo solto, mistura com fotos ou prévia; limites de duração, bytes, lados e área; ramo de vídeo do momento com 129 pedaços; recusa de vídeo nas mensagens diretas.
+- `packages/rpc/test/video-bounds.test.js`: MP4 sintético, H.264 com ou sem AAC, rotação, perfis e níveis, referências locais, durações de amostras e cabeçalhos, edições e B-frames, pedaços dentro de `mdat`, truncamentos, cifragem e fragmentação recusadas, remoção de metadados de contêiner e esquemas de codificadores. Os casos de AVAssetWriter são sintéticos: não comprovam compatibilidade com um arquivo de câmera real.
+- `packages/rpc/test/sizes.test.js`: o par máximo é menor que dez descritores de imagem; os máximos de páginas permanecem.
+- `packages/core/test/moments.test.js`: leitura e cópia de duração de momento em vídeo, além das regras existentes de expiração.
+- `packages/core/test/deletion.test.js`: capa e vídeo continuam referenciados enquanto o post está vivo.
+- `packages/web-member/test/session-media.test.js`: envio só da cópia sem metadados, recusa de vídeo inválido antes de gravar e `MEDIA_FULL` sem repetição do append.
+- `packages/web-member/test/media-ops.test.js`: descritor com duração, par em publicação, resposta e citação, recusa de pares invertidos ou forjados e de vídeo na Feira; paridade dos limites entre registros, RPC e contêiner.
+- `packages/web-member/test/e2e-media.test.js`: par recebido por outro nó, exclusão dos dois intervalos de mídia e recusa de pares forjados.
+- `packages/web-member/test/moments-e2e.test.js`: envio, criação e leitura de momento em vídeo com duração, remoção de metadados, limites de bytes e duração e indisponibilidade de blobs com conteúdo ou duração diferentes do descritor.
+- `packages/web-member/test/dm.test.js`: recusa de vídeo em mensagens diretas, inclusive de faixa de vídeo numa nota de voz.
+- `apps/app/test/identityInstall.test.js`: envio de tipo e duração ao nó, leitura estrita de dimensões e duração dos bytes, recusa de vídeo inválido sem gravar arquivo e recusa de nome com caminho.
+- `apps/app/test/webnodeHandle.test.js`: transporte de tipo e duração no IPC, capacidade de vídeo e leitura na web sem medir o vídeo como imagem.
+- `packages/core/test/group-media.test.js`: recusa de descritor de vídeo e do par de publicação em grupos.
+- `apps/cli/test/commands.test.js`: marcador `[vídeo]` em `feed` e `log`, com o par preservado em JSON.
+- `apps/cli/test/panel.test.js`: aviso de fotos ou vídeo no painel de moderação.
+- `apps/cli/test/pages-writer.test.js` e `apps/cli/test/account-pages.test.js`: recusa de vídeo em Páginas, inclusive de MP4 válido e de imagem com MIME de vídeo, sem gravar registro nem item de mídia.
+- `apps/cli/test/ai-triage.test.js`: mídia, inclusive vídeo, fica para decisão humana.
+- `apps/cli/test/ai-read-post.test.js`: par de vídeo reconhecido como mídia, com ou sem legenda, e denúncia mantida aberta para uma pessoa.
+
+Os testes usam mídia sintética e DHT local em `127.0.0.1`, sem baixar mídia, usar a DHT pública ou guardar arquivos binários de mídia como fixtures.
+
+Conferência das constantes e dos conjuntos de chaves:
+
+```sh
+rg -n 'VIDEO_MIME|MAX_VIDEO_MS|MAX_VIDEO_DIMENSION|MAX_VIDEO_PIXELS|MAX_MOMENT_VIDEO_MS|MAX_MOMENT_VIDEO_BYTES|VIDEO_DESCRIPTOR_KEYS|DESCRIPTOR_KEYS|MOMENT_MEDIA_KEYS|MOMENT_KEYS|MEDIA_BLOCK_BYTES|MAX_MEDIA_BLOCKS|MAX_MEDIA_ITEM_BLOCKS' packages/core/lib/records.js packages/rpc/lib/limits.js
+rg -n 'isVideoDescriptor|isPostMedia|isMomentVideoItem|isMomentMediaItem|mediaUploadFileCross|momentPutCross|DM_MEDIA_KEYS|AUDIO_DESCRIPTOR_KEYS|media.uploadFile|moment.putMedia|moment.create|media.readFile' packages/rpc/lib/methods.js
+```
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `node apps/cli/test/readme-help.test.js`
+- `npm test -w packages/rpc`
+- `npm test -w packages/core`
+- `npm test -w packages/web-member`
+- `node apps/app/test/identityInstall.test.js`
+- `node apps/app/test/webnodeHandle.test.js`
+- `npm test -w apps/cli`
+
+### Verificação manual
+
+Ordem: Android, iOS, depois web e PWA, num ambiente de teste local.
+
+- [ ] Em aparelhos Android e iOS, publicar um MP4 real de câmera H.264 com AAC e outro sem som, em retrato e paisagem, como post, resposta, citação e momento. Registrar aparelho, sistema e resultado; conferir capa, rotação, duração e reprodução. Um arquivo HEVC, fragmentado ou com faixa de metadados temporizados deve ser recusado; não afrouxar o validador para fazê-lo passar.
+- [ ] Com um arquivo real de câmera de celular contendo uma tag de localização, passar os bytes por `stripVideoMetadata` e conferir que a tag foi removida e que a saída passa em `videoBounds` estrito, sem `metadata: true`; conferir também a reprodução.
+- [ ] Na web e no PWA, repetir a publicação, resposta, citação e momento com os arquivos de câmera, conferindo capa, rotação, duração e reprodução.
+- [ ] Conferir os limites de 30 s/8 MiB e 15 s/4 MiB e suas recusas acima do teto, lados e área; conferir que o app não mistura vídeo com fotos nem prévia e que não oferece vídeo em publicações de Páginas, conversas, grupos, Feira, avatar ou prévia. Conferir a limpeza dos arquivos temporários ao trancar, sair e mandar o app para o fundo, sem nomes ou bytes em logs.
+- [ ] Simular perda de conexão depois do envio e confirmar a indicação de resultado incerto, sem repetição automática; reler o diário antes de publicar de novo. Conferir que o custo de até 129 selos por momento e as esperas de ritmo da seção 13 não são apresentados como uma falha antes de o envio terminar. Com a carteira vazia, `putPublicMedia` força o abastecimento até 300 selos, dentro da cota diária de 1024; uma compra completa em um único link soma `(300 - 28) × 270 ms = 73,44 s` de esperas deliberadas. O envio dos 129 pedaços soma `(129 - 28) × 135 ms = 13,635 s`, além da rede e das gravações.
+- [ ] Denunciar uma publicação com vídeo e outra com foto ou GIF: ambas ficam para uma pessoa, sem inferência sobre a mídia. No ambiente local, aplicar um bloqueio de teste e conferir a indisponibilidade dos núcleos de mídia do diário. Conferir separadamente que o blob do momento ainda abre com um descritor guardado até a retenção expirar e que a interface esconde o momento após 24 horas.
+- [ ] Ler o mesmo diário com um leitor e semeador anteriores: o post ou momento em vídeo inteiro é omitido; os blocos continuam servidos pelo semeador antigo, mas o post não entra nos índices nem nas contagens de posts vivos. Atualizar semeadores e serviço de conta antes do app publicador, como manda o CHANGELOG.
+
+## 182. Reprodução de vídeos curtos em publicações e momentos
+
+A Rua, o mosaico da citação e o mural mostram a capa JPEG de uma publicação com vídeo, com a marca de play e a duração. O rótulo é "vídeo de N segundos", no singular "1 segundo". O azulejo do mural diz "vídeo". Nada do vídeo é baixado até a pessoa tocar. Uma capa que não carrega ainda abre o vídeo.
+
+O toque abre um visualizador em tela cheia. Ele baixa o vídeo, confere o sha256 e a checagem estrita de MP4, com lados e duração iguais aos do descritor, e só então monta um endereço local `file://` ou `blob:`. A reprodução tem controles e som. Fechar interrompe o download (abort), solta o player e apaga o arquivo local. Há um player por vez. Uma carga que falha mostra "vídeo indisponível" e um "Tentar de novo", sem repetição automática. Se o navegador recusa começar sem um gesto, o player permanece e mostra "Toque no play para assistir". Se começa mudo, mostra "Ativar som".
+
+No visualizador de momentos, um momento em vídeo usa o cronômetro único que já existe. A duração do segmento é a do vídeo. Uma foto continua em 5 s. O cronômetro começa quando o player está pronto, ou 2 s depois de o arquivo ter carregado. Segurar, o menu, arrastar, a confirmação de apagar e o app oculto pausam. Há um avanço por item. Com reduzir movimento não há reprodução automática ("Reproduzir") nem avanço automático. O som fica ligado, com "Ativar som" quando o navegador começa mudo. Um início bloqueado mostra "Reproduzir". Sair solta o player e apaga o arquivo local. "Reproduzir" e "Ativar som" agem dentro do próprio toque, para o navegador que exige um gesto.
+
+No Android e no iOS o app usa expo-video 55.0.21. A web usa um elemento `video` comum: expo-video não entra no pacote da web.
+
+Cobertura automatizada:
+
+- `apps/app/test/videoPlayback.test.js`: regra do endereço local, um player por vez, estado do player, tipos de recusa e ligação do player pela origem.
+- `apps/app/test/mediaFetch.test.js`: `fetchVideo` confere hash, redirecionamento, tamanho, checagem estrita, lados, duração e abort.
+- `apps/app/test/mediaPlan.test.js`: `videoPair`, `durationLabel` e o vídeo nunca vai ao codificador de foto.
+- `apps/app/test/mediaDisplay.test.js`: arquivos mp4 só dentro da pasta de mídia do app.
+- `apps/app/test/moments.test.js`: duração do segmento.
+- `apps/app/test/feedSnapshot.test.js` e `apps/app/test/screenSnapshot.test.js`: uma linha de vídeo sobrevive a reabrir, e um par malformado é recusado.
+- `apps/app/test/backgroundRefresh.test.js`: em segundo plano fica só a capa.
+- `apps/app/test/feedRender.test.js` e `apps/app/test/muralGrid.test.js`: um azulejo de capa, rótulos e ligação do visualizador.
+- `apps/app/test/momentosScreen.test.js`: tempo, segurar, reduzir movimento, início bloqueado e toques.
+- `apps/app/test/hardening.test.js` e `apps/app/test/podsLock.test.js`: sem o plugin de configuração do expo-video, e o lock dos pods.
+
+Os testes usam bytes sintéticos. Não abrem aparelho, não usam a DHT pública e não guardam arquivo binário de mídia.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `node apps/app/test/videoPlayback.test.js`
+- `node apps/app/test/mediaFetch.test.js`
+- `node apps/app/test/mediaPlan.test.js`
+- `node apps/app/test/mediaDisplay.test.js`
+- `node apps/app/test/moments.test.js`
+- `node apps/app/test/feedSnapshot.test.js`
+- `node apps/app/test/screenSnapshot.test.js`
+- `node apps/app/test/backgroundRefresh.test.js`
+- `node apps/app/test/feedRender.test.js`
+- `node apps/app/test/muralGrid.test.js`
+- `node apps/app/test/momentosScreen.test.js`
+- `node apps/app/test/hardening.test.js`
+- `node apps/app/test/podsLock.test.js`
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Todos os itens estão em aberto.
+
+Ordem: Android, iOS, depois web e PWA, num ambiente de teste local. Registrar aparelho, sistema e navegador.
+
+- [ ] Em A Rua, na citação (mosaico) e no mural, a publicação com vídeo mostra a capa JPEG, a marca de play e a duração. O rótulo é "vídeo de N segundos" (no singular, "1 segundo"). O azulejo do mural diz "vídeo".
+- [ ] Rolar não baixa o vídeo. No painel de rede, nada do arquivo de vídeo sai antes do toque.
+- [ ] O toque reproduz com som.
+- [ ] Fechar apaga o arquivo local e interrompe um download em curso.
+- [ ] Sem rede, aparece "vídeo indisponível" e um só "Tentar de novo". Não há repetição automática.
+- [ ] No Safari, ou no PWA do iOS com Modo de Baixa Energia, o visualizador de A Rua mostra "Toque no play para assistir" e o vídeo toca depois de um toque; um momento em vídeo mostra "Reproduzir" e toca depois do toque.
+- [ ] Quando o navegador começa o vídeo sem som, aparece "Ativar som" (em A Rua e nos momentos), e um toque liga o som.
+- [ ] Um momento de 15 s toca até o fim e avança.
+- [ ] Segurar pausa a imagem e a barra.
+- [ ] Um momento de foto continua em 5 s.
+- [ ] Com reduzir movimento, aparece "Reproduzir" e o momento não avança sozinho.
+- [ ] Um blob expirado mostra "vídeo indisponível".
+- [ ] O som para ao sair.
+
+## 183. Preparar e publicar um vídeo curto
+
+Uma publicação, resposta ou citação leva exatamente o par `[capa JPEG, vídeo MP4]`: até 30 segundos e 8 MiB (`MAX_VIDEO_MS`, `MAX_VIDEO_BYTES` em `apps/app/src/media/plan.js`). Um momento leva uma foto, um GIF ou um vídeo de até 15 segundos e 4 MiB, sem par de capa, visível por 24 horas. Os dois formatos limitam cada lado a 1920 e a área a 2073600 pixels. Não há segunda mídia na mesma publicação, nem vídeo em Página, conversa, grupo, Feira, avatar ou prévia de link. A comparação com listas de hashes continua ausente (seção 181).
+
+`pickVideo()` (`apps/app/src/media/attach`) devolve um arquivo, ou `null` se a pessoa cancelar. O app não usa o tamanho nem a duração que o seletor informa. `prepareVideo(picked, { maxMs, maxBytes, signal })` (`videoPrep.native.js` e `videoPrep.web.js`, o mesmo contrato) devolve `{ bytes, mime: 'video/mp4', width, height, ms, poster }` ou `null` se o `signal` foi abortado (troca de modo, remoção ou desmonte: nada é mostrado). O texto de erro já está em pt-BR. Largura, altura e duração saem dos bytes depois de `stripVideoMetadata`. Uma preparação por vez: a ação Vídeo e o envio ficam indisponíveis enquanto ela corre. `node.media.video === true` só num handle real conectado (`apps/app/src/node.js`); a fachada da Vitrine não tem essa capacidade.
+
+No celular, `apps/app/modules/video-prep` reencoda (H.264 e AAC, lado maior até 960). No navegador não há reencodificação: só entra um arquivo que já cabe, e um arquivo acima de `maxBytes` é recusado antes da leitura. A capa sobe pelo caminho de imagem que já existe; o vídeo, por `node.media.upload({ kind: 'video' })`. `putMoment` apaga o buffer que recebe, então o momento envia uma cópia. Os Termos e a Política estão na versão 37 (`LEGAL_VERSION` e `TERMS_VERSION`).
+
+### Cobertura automatizada
+
+As conferências em simulador e emulador estão em "Conferido em 2026-11-12" abaixo; nenhuma com conta, em aparelho físico ou no navegador. O que os testes já cobrem, com MP4 sintético e sem fixture binária:
+
+- `apps/app/test/videoPrep.test.js`: preparação nativa e web; bytes e medidas depois da limpeza; capa pelo codificador de foto (nativo) ou desenhada dos bytes limpos (web); arquivo acima do teto recusado antes da leitura no navegador; duração acima do teto; saída que não passa na checagem; cancelamento devolve `null` e apaga os temporários; a cópia que o seletor deixa em `<cache>/ImagePicker/` é apagada em toda saída, e nada fora dessa pasta; `pickVideo` de um só arquivo, ou `null` ao cancelar.
+- `apps/app/test/videoPrepModule.test.js`: a entrada JavaScript do módulo, com um módulo nativo falso: argumentos inválidos recusados antes do nativo, os padrões 960 e 1,4 Mbit/s, `TOO_LONG` repassado, códigos desconhecidos viram `FAILED` com texto fixo, resposta malformada recusada e cortada aos campos do contrato.
+- `apps/app/test/videoCompose.test.js`: o compositor. Capacidade explícita (conectado, pessoal, com as duas funções); vídeo exclusivo com fotos e com prévia de link, sem descartar nada; os dois tetos; nada sobe antes de Publicar; a capa sobe antes do vídeo; um envio que falha deixa a publicação sem sair e mostra o núcleo cheio; respostas inválidas não publicam; uma criação incerta segura o rascunho sem reenviar; troca de modo, remoção e desmonte descartam o resultado atrasado; um rascunho limpo com o seletor aberto ainda entrega o vídeo escolhido a `prepareVideo`, com o sinal abortado, para a cópia ser apagada; o momento envia uma cópia e não sobe capa; uma citação continua precisando de texto; publicação e momento com foto mantêm o envio de antes.
+- `apps/app/test/eas-preview.test.js`: `media3-transformer`, `media3-effect` e `media3-common` em 1.8.0, a versão que o `expo-video` 55.0.21 declara.
+- `apps/app/test/hardening.test.js`: o podspec `VideoPrep` na lista dos módulos locais.
+- `apps/app/test/podsLock.test.js`: o comparador `apps/app/scripts/check-pods-lock.js` (as duas somas que dependem do caminho e a versão do CocoaPods ficam de fora). Ele não roda o `pod install`: a comparação do lock commitado com o gerado roda no job iOS de `.github/workflows/native.yml`, e localmente como em `docs/development.md`.
+- `apps/app/test/legal.test.js` e `apps/app/test/terms-version.test.js`: versão 37, o texto de vídeos curtos e o par `LEGAL_VERSION` / `TERMS_VERSION`.
+- Seção 181: par, tetos, núcleo cheio, exclusão, Página, conversa, grupo, Feira, app antigo que pula a publicação, e a limpeza sintética de `udta`.
+- Seção 182: reprodução, tempo do momento e reduzir movimento, em teste, sem aparelho.
+
+A conferência em hexadecimal de um arquivo publicado (sem caixa `udta`, `meta` ou `uuid`, e sem localização) não foi feita. O teste de preparação só vê um `udta` sintético; os bytes preparados em simulador e emulador estão abaixo.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `node apps/cli/test/readme-help.test.js`
+- `node apps/app/test/videoPrep.test.js`
+- `node apps/app/test/videoPrepModule.test.js`
+- `node apps/app/test/videoCompose.test.js`
+- `node apps/app/test/hardening.test.js`
+- `node apps/app/test/eas-preview.test.js`
+- `node apps/app/test/podsLock.test.js`
+- `node apps/app/test/legal.test.js`
+- `node apps/app/test/terms-version.test.js`
+
+As baterias das seções 181 e 182 continuam valendo. Nada disso foi repetido nesta seção.
+
+### Matriz de aparelhos
+
+Nenhuma caixa foi marcada. Ordem: build de debug do Android, simulador ou aparelho iOS, depois a web e o PWA, num ambiente de teste local. Registrar aparelho, sistema e navegador. A Vitrine não oferece vídeo.
+
+| Conferência | Android | iOS | Web | PWA |
+|---|---|---|---|---|
+| Preparar e publicar: uma publicação (capa e vídeo) e um momento | [ ] | [ ] | [ ] | [ ] |
+| Recusa acima da duração (30 s na publicação, 15 s no momento), sem cortar o arquivo | [ ] | [ ] | [ ] | [ ] |
+| Tetos de bytes, lado e área; uma preparação por vez | [ ] | [ ] | [ ] | [ ] |
+| O arquivo publicado não tem `udta`, `meta`, `uuid` nem localização (hexadecimal) | [ ] | [ ] | [ ] | [ ] |
+| Reprodução com som, a partir da capa, e um só player | [ ] | [ ] | [ ] | [ ] |
+| Tempo do momento: a duração do vídeo; uma foto continua em 5 s | [ ] | [ ] | [ ] | [ ] |
+| Reduzir movimento: sem reprodução automática e sem avanço automático | [ ] | [ ] | [ ] | [ ] |
+| Apagar a publicação tira capa e vídeo; apagar o momento tira o item | [ ] | [ ] | [ ] | [ ] |
+| Núcleo cheio: "Este aparelho não tem mais espaço para fotos e vídeos.", sem núcleo novo | [ ] | [ ] | [ ] | [ ] |
+| Um app ou uma página anterior pula a publicação com vídeo inteira | [ ] | [ ] | [ ] | [ ] |
+| Página e conversa sem vídeo (também grupo, Feira, avatar e prévia) | [ ] | [ ] | [ ] | [ ] |
+| Portão dos Termos e da Política na versão 37, com novo aceite | [ ] | [ ] | [ ] | [ ] |
+
+### Conferido em 2026-11-12: simulador iOS e emulador Android, sem conta
+
+Builds de debug desta branch, sem conta e sem publicar. O módulo `video-prep`, `pickVideo` e `prepareVideo` foram chamados direto no runtime do app, pelo inspetor do Metro. Nada abaixo passou pela tela do compositor, por um nó conectado ou por um segundo aparelho, por isso nenhuma caixa da matriz acima foi marcada.
+
+- iOS: simulador iPhone 17 Pro, iOS 26.2. Android: emulador API 36 (`sdk_gphone64_arm64`), com o codificador H.264 de software do Android. Nenhum aparelho físico.
+- Clipes: padrões de teste gerados no Mac, não arquivos de câmera de celular. H.264 1080p de 20 s; HEVC 60 fps de 10 s; retrato 1080x1920 de 12 s com uma caixa de localização `loci` em `udta`; 24 fps de 8 s; um de 60 s; HEVC 60 fps com muito detalhe, de 30 s e de 15 s; H.264 60 fps de baixa qualidade, 30 s; granulação, 30 s.
+
+| Clipe (teto) | iOS: lados, bytes | Android: lados, bytes |
+|---|---|---|
+| H.264 1080p, 20 s (publicação) | 960x540, 3563052 | 960x540, 3974424 |
+| HEVC 60 fps, 10 s (publicação) | 960x540, 3780718 | 960x540, 1320559 |
+| Retrato, 12 s (publicação e momento) | 540x960, 2164975 | 540x960, 2531812 |
+| 24 fps, 8 s (publicação) | 960x540, 1474599 | 960x540, 1751333 |
+| 60 s (publicação) | `TOO_LONG` antes de codificar | `TOO_LONG` antes de codificar |
+| H.264 de 20 s (momento, 15 s) | `TOO_LONG` antes de codificar | `TOO_LONG` antes de codificar |
+| HEVC 60 fps com muito detalhe, 30 s (publicação) | 768x432, 5338482, segunda passagem | 960x540, 3265215 |
+| HEVC 60 fps com muito detalhe, 15 s (momento, 4 MiB) | 766x430, 2717546, segunda passagem | 960x540, 1799449 |
+| H.264 60 fps de baixa qualidade, 30 s (publicação) | 960x540, 7456226 | 960x540, 3265196 |
+| Granulação, 30 s (publicação) | 960x540, 5217674 | 960x540, 5890519 |
+
+- Toda saída tem no máximo 30 quadros por segundo, H.264 com AAC, e passa por `videoBounds` com `metadata: true`, por `stripVideoMetadata` e por `videoBounds` estrito. No Android, a duração que o módulo informa passa da duração dos bytes em cerca de 64 ms (20064 contra 20000); o app usa só a dos bytes. Árvore de caixas no Android, igual nos nove arquivos: `ftyp moov free mdat`, com `co64`. No iOS: `ftyp moov mdat`, com `edts`/`elst`, `sdtp` e `sgpd`/`sbgp` (`roll`) na faixa de som. `colr` é `nclx` nas duas plataformas; `nclc` não apareceu.
+- No simulador, a primeira passagem a 960 de um clipe de 60 fps com muito detalhe passa do teto, qualquer que seja a taxa pedida; a segunda passagem, com os lados reduzidos, cabe. Um codificador de iPhone real não foi medido.
+- Capas: em pé nos dois sistemas, para retrato e paisagem, comparadas com o primeiro quadro do original já girado.
+- Uma preparação por vez: com uma em curso, a segunda chamada responde `BUSY` em poucos milissegundos (iOS e Android).
+- Seletor real, com o código atual: o retrato de 12 s escolhido no seletor de fotos do sistema volta como uma cópia em `<cache>/ImagePicker/` (1080x1920). `prepareVideo` devolve 540x960, 12067 ms, com capa 540x960, e depois disso `ImagePicker` e `video-prep` ficam vazios (iOS e Android). O seletor do iOS 26 avisa "Location Is Included".
+- Bytes que `prepareVideo` devolveu (o que o compositor enviaria), procurados byte a byte: nenhum `udta`, `meta`, `uuid`, `loci`, `©xyz`, `ilst` nem coordenada ISO 6709, nos dois sistemas. O clipe de origem tem `udta(meta(hdlr ilst) loci)`. Isso não substitui a conferência de um arquivo publicado.
+
+### Conferências de aparelho ainda por fazer
+
+- [ ] Safari no iOS (web e PWA): a capa é desenhada num elemento `video` que não entra no documento. Quando os metadados chegam, o app pede a posição inicial (`currentTime`), para o Safari decodificar um quadro e disparar `seeked`. Se nem `loadeddata` nem `seeked` chegarem, o prazo de 10 s (`FRAME_TIMEOUT_MS` em `videoPrep.web.js`) recusa o arquivo. Registrar se a capa sai ou se o arquivo é recusado.
+- [ ] Android e iOS: uma capa nativa cuja proporção difere do tamanho de exibição do vídeo seria esticada pelo codificador de foto (`encodeFile` em `videoPrep.native.js`). Conferir a capa publicada lado a lado com o primeiro quadro.
+- [ ] Um arquivo real de câmera de celular, com localização, publicado por Android, iOS, web e PWA. Nos bytes publicados, em hexadecimal, não há `udta`, `meta`, `uuid` nem localização, e a reprodução segue.
+- [ ] Variantes `colr` `nclc` e `nclx`, e caixas `sgpd`, vindas de codificadores reais (não do MP4 sintético dos testes). Registrar se a limpeza mais `videoBounds` estrito aceita o arquivo ou qual recusa aparece. Em 2026-11-12, `nclx` (iOS e Android) e `sgpd` `roll` (iOS) foram aceitos; `nclc` ainda não apareceu.
+- [x] Android e iOS, codificação (T13 e T14): um clipe 1080p e um clipe HEVC passam pela limpeza e por `videoBounds` estrito; um clipe de 60 s é recusado antes de codificar; as capas saem em pé. Feito em 2026-11-12 no simulador iOS e no emulador Android (acima); falta um iPhone e um Android físicos. Não afrouxar o validador para um arquivo real passar.
+- [ ] iPhone e Android físicos: os mesmos clipes, com o codificador do aparelho; registrar se a segunda passagem do iOS acontece fora do simulador.
+
+## 184. Players de música em publicações, ao toque, Termos 38 (PR feat/music-link-embeds)
 
 Publicações com cartão de YouTube, SoundCloud, Spotify ou Apple Music oferecem **Tocar aqui**. O cartão fechado mostra só os dados guardados na publicação, sem pedido ao provedor. O aviso explica que o toque carrega o player do serviço e entrega a ele o endereço de internet do aparelho. Só esse toque monta o player dentro da publicação. O link continua podendo abrir fora, e músicas completas dependem do serviço. Não há mudança no registro: um leitor antigo continua mostrando o cartão comum, e um link de `audius.co` não ganha frame do provedor.
 
@@ -8044,7 +8261,7 @@ Publicações com cartão de YouTube, SoundCloud, Spotify ou Apple Music oferece
 
 Só um player toca por vez. Tocar em outro cartão fecha o primeiro; trocar de tela, trocar de aba, abrir uma foto em tela cheia ou mandar o app para segundo plano fecha o player. Com o player aberto, a cada meio segundo o app compara a área dele com a parte visível da lista (abaixo da barra de cima e acima da barra de abas, quando a tela tem uma) e o fecha se menos da metade da largura estiver visível, se a altura visível for menor que a metade da altura do player (no máximo 120 pt, nos players altos) ou se não for possível medi-lo. Nos 2 primeiros segundos depois do toque essa conferência não o fecha, para dar tempo de rolar até ele. A reprodução vem do cartão guardado, nunca de uma busca de links no texto. Se a página não puder ser lida ao compor uma publicação, um link reconhecido ainda pode gerar um cartão com o nome do provedor e sem imagem.
 
-Termos e Política de Privacidade passam à versão 37, com novo aceite. Os Termos descrevem o toque opcional, o endereço de internet do aparelho recebido pelo provedor, seus cookies e outros dados guardados no aparelho e seus termos. A Política descreve, além disso, as informações do navegador ou app (user agent), o provedor como controlador e o referrer (o endereço do site ou, no app, um endereço fixo do app Varanda). O provedor é o controlador desses dados e pode tratá-los fora do Brasil. A associação não guarda esses dados nem histórico de reprodução. A base legal proposta para carregar o player solicitado e a transferência internacional continuam sujeitas a parecer jurídico. As páginas do site são renderizadas de `apps/app/src/legal.js`; a tabela LGPD está em `docs/design.md` e o comportamento do leitor em "Link cards" de `docs/protocol.md`.
+Termos e Política de Privacidade passam à versão 38, com novo aceite. Os Termos descrevem o toque opcional, o endereço de internet do aparelho recebido pelo provedor, seus cookies e outros dados guardados no aparelho e seus termos. A Política descreve, além disso, as informações do navegador ou app (user agent), o provedor como controlador e o referrer (o endereço do site ou, no app, um endereço fixo do app Varanda). O provedor é o controlador desses dados e pode tratá-los fora do Brasil. A associação não guarda esses dados nem histórico de reprodução. A base legal proposta para carregar o player solicitado e a transferência internacional continuam sujeitas a parecer jurídico. As páginas do site são renderizadas de `apps/app/src/legal.js`; a tabela LGPD está em `docs/design.md` e o comportamento do leitor em "Link cards" de `docs/protocol.md`.
 
 Como verificar, a partir da raiz, com Node 20.19 ou mais novo no PATH:
 
@@ -8089,11 +8306,11 @@ Nenhuma verificação manual foi feita. Todos os itens estão em aberto. Ordem: 
 - [ ] Numa tela empilhada (perfil de outra pessoa), o player no fim da tela não fecha sozinho.
 - [ ] Android: abrir um vídeo do YouTube em tela cheia e girar o aparelho; o vídeo continua tocando depois de 2 s e, ao sair da tela cheia, o player volta ao cartão.
 - [ ] Nenhum navegador abre e nenhum download começa a partir de um player.
-- [ ] Uma conta que aceitou a versão 36 recebe os Termos 37 para novo aceite; os textos no app e nas páginas do site coincidem.
+- [ ] Uma conta que aceitou a versão 37 recebe os Termos 38 para novo aceite; os textos no app e nas páginas do site coincidem.
 
-## 182. Música do Audius no serviço de conta (PR feat/audius-proxy)
+## 185. Música do Audius no serviço de conta (PR feat/audius-proxy)
 
-O serviço de conta pode buscar e repassar áudio do Audius, para o aparelho do membro nunca falar com o provedor. Fica desligado sem `VARANDA_AUDIUS_API_KEY`, que não pode ser definida numa instalação com Termos abaixo da versão 38 (a versão 38 e o app estão descritos na seção 183). Com a chave, as rotas `/account/audius/*` respondem. `GET /account/audius/policy` responde `{ enabled, moments }` também desligado (aí `{ enabled: false, moments: false }`, e qualquer outra rota `/account/audius/*` responde 404 `feature-off`). `moments` só é verdadeiro com a música ligada e `VARANDA_AUDIUS_MOMENTS=1`.
+O serviço de conta pode buscar e repassar áudio do Audius, para o aparelho do membro nunca falar com o provedor. Fica desligado sem `VARANDA_AUDIUS_API_KEY`, que não pode ser definida numa instalação com Termos abaixo da versão 39 (a versão 39 e o app estão descritos na seção 186). Com a chave, as rotas `/account/audius/*` respondem. `GET /account/audius/policy` responde `{ enabled, moments }` também desligado (aí `{ enabled: false, moments: false }`, e qualquer outra rota `/account/audius/*` responde 404 `feature-off`). `moments` só é verdadeiro com a música ligada e `VARANDA_AUDIUS_MOMENTS=1`.
 
 A sessão é a mesma da busca de GIFs (`member-session.js`, prefixo `audius`), com domínio MAC próprio. Busca, item, resolve e play exigem `Authorization: Bearer`. O áudio é `GET /account/audius/audio/<ticket>`: o ticket vai no caminho porque um elemento de mídia não envia `Authorization`. O ticket não nomeia faixa, dura `TICKET_TTL_MS` (30 minutos), e a cada `RECHECK_MS` o serviço confere de novo se o membro continua vinculado e fora da lista de bloqueio. Quem falha perde o ticket. Enquanto o áudio é repassado, a conferência se repete a cada `RECHECK_MS`, com um temporizador por relé: quem falha perde o ticket e o relé é cortado, sem fechar o corpo, com a cobrança do que foi enviado, então quem é bloqueado ou desvinculado no meio da música perde o áudio em até um `RECHECK_MS`. Se o armazenamento não consegue responder a essa conferência, o relé também é cortado, mas o ticket fica. O `/play` também confere isso logo antes de criar o ticket, sem reaproveitar a conferência da sessão: quem falha recebe 404 `nao-encontrado`, nenhum ticket, e o uso de play não volta.
 
@@ -8101,7 +8318,7 @@ Por membro e por dia: `SEARCHES_PER_DAY` (200), `ITEMS_PER_DAY` (600), `RESOLVES
 
 Um 4xx do provedor que não seja 401, 403, 408 ou 429 é a resposta dele sobre o que foi pedido: em item, resolve e play vira 404 `nao-encontrado` (400, 404 e 410 igualmente) e o uso não volta; na busca vira 503 `indisponivel` e a busca não volta. Um 401 ou 403 (a chave do operador), um 408 ou 429 (carga), um 5xx, um prazo esgotado ou uma resposta que não é JSON utilizável vira 503 `indisponivel` e o uso da rota volta, mas a chamada de `PROVIDER_CALLS_PER_DAY` não. No áudio, um pedido com `Range` responde 206 com `Content-Range`. Se o nó de armazenamento ignora `Range` e manda `Content-Length`, o serviço corta a fatia pedida e responde 206; sem `Content-Length`, a resposta é 200 com o corpo inteiro desde o byte 0, e a busca de ponto não funciona. Um 206 que passa do fim pedido é cortado nesse fim, no `Content-Range`, no `Content-Length` e na cobrança. Um 416 de cima é repassado como 416, sem corpo. `Content-Range` (`bytes */N`) só quando está bem formado. Nada de byte é cobrado. Os cabeçalhos do áudio são `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox` e `Referrer-Policy: no-referrer`. Um corte de cota deixa o corpo visivelmente incompleto. Um nó que fecha, aborta ou dá erro no meio do corpo também é um corte: o que já foi escrito chega ao cliente (dentro de `STALL_MS`) e só então a conexão fecha, sem fechar o corpo. Depois do fim ou do corte a resposta fica aberta no máximo `STALL_MS` para o cliente ler o resto, nunca além de `TOTAL_MS`, e a vaga de stream fica presa até lá. O `TOTAL_MS` (15 minutos) conta desde o início do relé: toda resposta de áudio é cortada, sem fechar o corpo, `TOTAL_MS` depois dos cabeçalhos, mesmo com bytes ainda andando, e o cliente pede o resto com `Range`. Só `bytes=<início>-` e `bytes=<início>-<fim>` valem como `Range`; qualquer outra forma é ignorada e a resposta é 200 com o corpo inteiro. Se o nó ignora `Range` e o trecho a pular é maior ou igual ao espaço que sobra (do ticket ou do dia), a resposta é 429 `limite-musica`: o ticket fica, a abertura e a ficha do orçamento já foram gastas e nada é cobrado.
 
-A primeira ida fica presa ao host da API. Um redirecionamento de JSON também. O redirecionamento do áudio só vai a um host https público, na porta 443, pela consulta guardada. A chave vai no cabeçalho `x-api-key` só nessa primeira ida, nunca para um nó de armazenamento e nunca numa URL. O redirecionamento do resolve não leva a chave. Cursores de busca seguem `CURSOR_RE` e `MAX_CURSOR`. O item de playlist lista no máximo `MAX_PLAYLIST_TRACKS` faixas. O resolve de playlist não lista as faixas. Nada é gravado em disco: nenhum byte de áudio fica depois da resposta, e os metadados ficam na memória com validade de 10 minutos. Validade não é remoção: a linha dos metadados só sai quando é lida depois de vencer ou quando outras a empurram para fora de `MAX_CACHED`, e a linha de um ticket vencido sai no próximo uso dele ou no próximo `play` de qualquer membro, então ambas podem ficar na memória além do prazo, até um uso seguinte ou um reinício. O app passa a chamar essas rotas com a música nas publicações e os textos legais da versão 38 (seção 183). A chave nunca pode ser definida numa instalação abaixo dos Termos 38.
+A primeira ida fica presa ao host da API. Um redirecionamento de JSON também. O redirecionamento do áudio só vai a um host https público, na porta 443, pela consulta guardada. A chave vai no cabeçalho `x-api-key` só nessa primeira ida, nunca para um nó de armazenamento e nunca numa URL. O redirecionamento do resolve não leva a chave. Cursores de busca seguem `CURSOR_RE` e `MAX_CURSOR`. O item de playlist lista no máximo `MAX_PLAYLIST_TRACKS` faixas. O resolve de playlist não lista as faixas. Nada é gravado em disco: nenhum byte de áudio fica depois da resposta, e os metadados ficam na memória com validade de 10 minutos. Validade não é remoção: a linha dos metadados só sai quando é lida depois de vencer ou quando outras a empurram para fora de `MAX_CACHED`, e a linha de um ticket vencido sai no próximo uso dele ou no próximo `play` de qualquer membro, então ambas podem ficar na memória além do prazo, até um uso seguinte ou um reinício. O app passa a chamar essas rotas com a música nas publicações e os textos legais da versão 39 (seção 186). A chave nunca pode ser definida numa instalação abaixo dos Termos 39.
 
 Como verificar, a partir da raiz:
 
@@ -8121,7 +8338,7 @@ Os testes usam `127.0.0.1`, diretório temporário e provedor substituto. Não a
 
 ### Verificação manual
 
-Nenhuma verificação manual foi feita neste PR. O roteiro de busca e player do Audius no app (Android, iOS, web e PWA) está na seção 183. Um link de `audius.co` nunca carrega um frame do provedor.
+Nenhuma verificação manual foi feita neste PR. O roteiro de busca e player do Audius no app (Android, iOS, web e PWA) está na seção 186. Um link de `audius.co` nunca carrega um frame do provedor.
 
 ### Conferências do operador
 
@@ -8136,9 +8353,9 @@ Nenhuma conferência de operador foi feita. Todos os itens estão em aberto. As 
 - [ ] `VARANDA_AUDIUS_MOMENTS` permanece fora de `1` até o Audius confirmar por escrito que a música pode entrar nos momentos. Essa confirmação não foi obtida.
 - [ ] Respostas por escrito de api@audius.co. Perguntas: se repassar o áudio sem guardá-lo é permitido; se isso conta como tornar a API disponível a terceiros; se trechos de 15 s podem ser tocados; se um trecho pode tocar sobre uma foto; se o título, o artista e o link podem ficar guardados numa publicação; como é marcada uma faixa que saiu da licença. Também a colocação da chave, o caminho de resolve, o campo `permalink`, o redirecionamento do stream, o suporte a `Range`, o `Content-Type` do áudio e as formas de `access`, gated e unlisted. Não há resposta arquivada neste PR.
 
-## 183. Música do Audius em publicações, Termos 38 (PR feat/audius-posts)
+## 186. Música do Audius em publicações, Termos 39 (PR feat/audius-posts)
 
-Na publicação do diário, **Música** abre a busca do catálogo Audius quando a música está ligada na associação e a conta vinculada pode usá-la. O botão não aparece ao publicar como página. Escolher uma página descarta o rascunho de música, e voltar a publicar como pessoa não o recupera. Um rascunho de música não pode ser enviado como página. O seletor oferece **Faixas** e **Playlists**, sem capas. Uma faixa pode entrar inteira ou como trecho de 15 segundos, com controle acessível do início e prévia; uma playlist entra como fila. O cartão mostra artista, título, fonte Audius e link para a página do item. Exige texto de ao menos um caractere e não vai junto com fotos. Uma publicação com música não entra na fila de saída de texto sem rede.
+Na publicação do diário, **Música** abre a busca do catálogo Audius quando a música está ligada na associação e a conta vinculada pode usá-la. O botão não aparece ao publicar como página. Escolher uma página descarta o rascunho de música, e voltar a publicar como pessoa não o recupera. Um rascunho de música não pode ser enviado como página. O seletor oferece **Faixas** e **Playlists**, sem capas. Uma faixa pode entrar inteira ou como trecho de 15 segundos, com controle acessível do início e prévia; uma playlist entra como fila. O cartão mostra artista, título, fonte Audius e link para a página do item. Exige texto de ao menos um caractere e não vai junto com fotos nem com vídeo: com um vídeo no rascunho, **Música** mostra "A música vai só com texto: remova o vídeo", e com a música no rascunho **Vídeo** pede para remover a prévia. Uma publicação com música não entra na fila de saída de texto sem rede.
 
 Um link de `audius.co` colado pode virar o mesmo cartão quando a música está disponível. A montagem respeita a preferência de prévias e o descarte do cartão. O compositor tenta resolver o link pelo serviço de conta, sem a busca comum de prévia que no app nativo acessaria diretamente o provedor. Digitar em outra parte do texto não cancela nem repete o pedido; remover o link durante o pedido cancela, e recolocá-lo inicia uma nova tentativa. Só uma tentativa concluída, com cartão mostrado ou falha, não se repete no mesmo uso do compositor. Depois de publicar ou fechar o compositor, qualquer link pode ser tentado de novo. Se a resolução falhar, o link fica como texto, sem cartão no compositor do diário. Quando a música não está disponível, o link segue o tratamento comum de prévias, assim como nas conversas e nos grupos. A conferência de um envio com resultado incerto usa o `preview.url` que foi enviado, com o fragmento da música; o app não repete a publicação por conta própria.
 
@@ -8146,9 +8363,9 @@ O cartão usa o formato de link existente, sem chave nova no registro: página p
 
 O trecho só toca depois de confirmar o ponto inicial e para ao fim dos 15 segundos ou no fim da faixa, se vier antes. Falha de busca do ponto não toca desde zero. A faixa inteira tem controle de posição; a playlist tem próxima e anterior, e informa quando só parte dela está disponível no player, mantendo o link para a lista inteira. Só um player toca por vez; sair da tela para o áudio e descarta também respostas de pedidos ainda pendentes. Uma autorização vencida é renovada num novo toque. Uma falha de reprodução mostra **Música indisponível agora**; o teto diário, **Limite de músicas por hoje**.
 
-Termos e Política de Privacidade na versão 38 exigem novo aceite e descrevem a busca, o link colado, a escolha e a reprodução pelo serviço de conta. O Audius recebe texto da busca, posição e tamanho da página de resultados, id de faixa ou playlist ou permalink e o endereço da associação, nunca o endereço, a chave ou o token do membro. O serviço não guarda buscas nem áudio, e seus registros não levam texto, link, id nem ticket. Metadados e tickets ficam só em memória e somem ao reiniciar; seus prazos são de validade, não de remoção. Título, artista e link ficam na publicação. Base legal proposta e transferência internacional continuam sujeitas a parecer jurídico. Os textos não fixam cotas nem prazos que o serviço pode mudar. A frase sobre momentos é condicional à ativação pela associação; este PR não entrega a interface de música em momentos. As páginas do site são geradas de `apps/app/src/legal.js`. A tabela LGPD e a nota aos mantenedores sobre triagem sem mudança da lista "sempre humano" estão em `docs/design.md`.
+Termos e Política de Privacidade na versão 39 exigem novo aceite e descrevem a busca, o link colado, a escolha e a reprodução pelo serviço de conta. O Audius recebe texto da busca, posição e tamanho da página de resultados, id de faixa ou playlist ou permalink e o endereço da associação, nunca o endereço, a chave ou o token do membro. O serviço não guarda buscas nem áudio, e seus registros não levam texto, link, id nem ticket. Metadados e tickets ficam só em memória e somem ao reiniciar; seus prazos são de validade, não de remoção. Título, artista e link ficam na publicação. Base legal proposta e transferência internacional continuam sujeitas a parecer jurídico. Os textos não fixam cotas nem prazos que o serviço pode mudar. A frase sobre momentos é condicional à ativação pela associação; este PR não entrega a interface de música em momentos. As páginas do site são geradas de `apps/app/src/legal.js`. A tabela LGPD e a nota aos mantenedores sobre triagem sem mudança da lista "sempre humano" estão em `docs/design.md`.
 
-Nunca definir `VARANDA_AUDIUS_API_KEY` numa instalação com Termos abaixo da versão 38. As conferências do operador sobre API real, licença, áudio sobre foto e `Range` continuam abertas na seção 182; esta seção não as dá por feitas.
+Nunca definir `VARANDA_AUDIUS_API_KEY` numa instalação com Termos abaixo da versão 39. As conferências do operador sobre API real, licença, áudio sobre foto e `Range` continuam abertas na seção 185; esta seção não as dá por feitas.
 
 Como verificar, a partir da raiz, com Node 20.19 ou mais novo no PATH:
 
@@ -8174,7 +8391,7 @@ Os testes automatizados usam substitutos, sem Audius real nem rede pública; a d
 
 ### Verificação manual
 
-Nenhuma verificação manual foi feita. Todos os itens estão em aberto, nesta ordem: Android debug, simulador iOS, web e PWA. Usar uma instalação de teste com música ligada, Termos 38 aceitos, conta vinculada e faixas e playlists conhecidas. O build de debug Android não entra com passkey de produção; o iOS depende do domínio associado da conta Apple Developer (veja `docs/development.md`). Não usar a DHT pública.
+Nenhuma verificação manual foi feita. Todos os itens estão em aberto, nesta ordem: Android debug, simulador iOS, web e PWA. Usar uma instalação de teste com música ligada, Termos 39 aceitos, conta vinculada e faixas e playlists conhecidas. O build de debug Android não entra com passkey de produção; o iOS depende do domínio associado da conta Apple Developer (veja `docs/development.md`). Não usar a DHT pública.
 
 Em cada plataforma, buscar faixa e playlist, escolher e ouvir um trecho com início diferente de zero, publicar e ouvir uma faixa inteira mudando a posição, avançar e voltar na playlist, colar um permalink e conferir o cartão e o link. Conferir que não há pedido pelo cartão antes do toque, que sair da tela para o áudio (também com pedido ainda pendente) e que, com a música desligada ou a conferência de disponibilidade falhando, o cartão inicial ainda mostra **Ouvir** e **Abrir no Audius** e só vira cartão comum após o primeiro toque em **Ouvir**. Conferir também que a configuração manual e o `varanda-serve`, sem instalação, mostram o cartão comum de imediato. Mostrar artista, título, fonte e link em todos os modos.
 
@@ -8184,4 +8401,4 @@ No compositor, conferir que **Música** não aparece ao publicar como página, q
 - [ ] iOS, simulador: cumprir o mesmo roteiro, incluindo áudio remoto, seek confirmado e saída da tela antes de chegar a autorização de reprodução.
 - [ ] Web: cumprir o mesmo roteiro; conferir no painel de rede que os pedidos de busca e áudio vão só à instalação e que não há frame do Audius.
 - [ ] PWA instalado: cumprir o mesmo roteiro; conferir parada ao sair da tela e, com música desligada, cartão inicial com **Ouvir** e **Abrir no Audius**, que vira cartão comum só após o primeiro toque em **Ouvir**.
-- [ ] Uma conta que aceitou a versão 37 recebe os Termos 38 para novo aceite; os textos no app e nas páginas do site coincidem.
+- [ ] Uma conta que aceitou a versão 38 recebe os Termos 39 para novo aceite; os textos no app e nas páginas do site coincidem.

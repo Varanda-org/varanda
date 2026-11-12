@@ -2,7 +2,7 @@
 // The pure parts of worklet/web-node.js, apart so the Node tests reach them
 // (web-node.js itself loads bare-fs, bare-crypto and bare-ws).
 
-const { RpcError, mediaBounds, audioBounds } = require('@varanda/rpc')
+const { RpcError, mediaBounds, audioBounds, videoBounds } = require('@varanda/rpc')
 
 const CLOSED_MESSAGE = 'sessão encerrada'
 const BAD_MEDIA = 'mídia inválida'
@@ -159,7 +159,7 @@ function uploadMedia ({ read, session, unlink, isClosing }, { mime, width, heigh
     read,
     unlink,
     isClosing,
-    put: (bytes) => session.mediaUpload({ bytes, mime, width, height, ...voiceOf({ ms, kind }), ...(sealed === true ? { sealed } : {}) })
+    put: (bytes) => session.mediaUpload({ bytes, mime, width, height, ...timedOf({ ms, kind }), ...(sealed === true ? { sealed } : {}) })
   })
 }
 
@@ -167,6 +167,16 @@ function uploadMedia ({ read, session, unlink, isClosing }, { mime, width, heigh
 // (an image keeps its exact keys).
 function voiceOf ({ ms, kind }) {
   return kind === 'voice' ? { ms, kind } : {}
+}
+
+// The same for a short video.
+function videoOf ({ ms, kind }) {
+  return kind === 'video' ? { ms, kind } : {}
+}
+
+// A post's media may be a voice note or a video (docs/rpc.md 5.56).
+function timedOf ({ ms, kind }) {
+  return kind === 'voice' ? voiceOf({ ms, kind }) : videoOf({ ms, kind })
 }
 
 // dm.putMedia after the read (docs/rpc.md 5.88): the same file rules, the
@@ -178,9 +188,10 @@ function putDmMedia ({ read, session, unlink, isClosing }, { mime, width, height
 
 // moment.putMedia after the read (docs/rpc.md 5.113): a momento's photo, a
 // fresh blob sealed and put on the blob channel by the session. Never a
-// voice note, so only the four image fields reach it.
-function putMomentMedia ({ read, session, unlink, isClosing }, { mime, width, height }) {
-  return sendFile({ read, unlink, isClosing, put: (bytes) => session.momentPutMedia({ bytes, mime, width, height }) })
+// voice note: a photo sends its four image fields alone, a video adds its
+// duration and kind.
+function putMomentMedia ({ read, session, unlink, isClosing }, { mime, width, height, ms, kind }) {
+  return sendFile({ read, unlink, isClosing, put: (bytes) => session.momentPutMedia({ bytes, mime, width, height, ...videoOf({ ms, kind }) }) })
 }
 
 // Removes every read file (a media name) directly under `dir` and makes
@@ -237,7 +248,7 @@ async function writeReadFile ({ fs, join, dir, name, bytes, flags }) {
 // 'card', resolved by the session with the same checks as a media item. `generation()` changes
 // on every lock: an image opened before a lock never stays on disk after it.
 // -> { name, mime, w, h } (w, h measured from the bytes), plus ms for a voice
-// note (the container's duration, not the item's claim). The plaintext copy
+// note or a video (the container's duration, not the item's claim). The plaintext copy
 // is zeroed once written, or refused (USAGE 'mídia indisponível').
 async function readMediaToFile ({ session, write, unlink, generation, isClosing }, params) {
   const at = generation()
@@ -270,6 +281,16 @@ async function readMediaToFile ({ session, write, unlink, generation, isClosing 
       w = 0
       h = 0
       ms = a.ms
+    } else if (got.mime === 'video/mp4') {
+      // Strict: a video from a peer carries no metadata box and its headers
+      // agree with its samples (docs/protocol.md section 2). w, h are the
+      // display size, after the track's rotation.
+      let v = null
+      try { v = videoBounds(bytes) } catch {}
+      if (v === null) throw new RpcError('USAGE', MEDIA_UNAVAILABLE)
+      w = v.width
+      h = v.height
+      ms = v.ms
     } else {
       let b = null
       try { b = mediaBounds(bytes, got.mime) } catch {}
