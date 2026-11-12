@@ -8036,7 +8036,7 @@ Na PWA instalada a partir da origem hospedada, no Chrome do Android, com o worke
 - Na web, uma foto acima de 16384 px num lado ou de 100 megapixels é recusada com "foto grande demais". Um PNG ou WebP animado com mais de 300 quadros não é lido e é recusado com "não foi possível abrir a foto". Um GIF passa pelos mesmos limites de mídia de uma imagem recebida (cada quadro, o número de quadros e o total de pixels), também no Android e no iOS; acima deles, "imagem grande demais".
 - No Android e no iOS, Sair e Recomeçar não apagam um compartilhamento marcado com um horário à frente do relógio do aparelho, a não ser o mais novo, nem um que esteja sendo gravado naquele milissegundo.
 
-## 178. Vídeos curtos em publicações e momentos
+## 181. Vídeos curtos em publicações e momentos
 
 Uma publicação, resposta ou citação aceita exatamente o par `[capa JPEG, vídeo MP4]`, com um vídeo de até 30 segundos e 8 MiB, sem fotos adicionais nem prévia de link. Um momento aceita uma foto, um GIF ou um vídeo de até 15 segundos e 4 MiB, sem par de capa; continua visível por 24 horas e o blob expira em 7 dias. Os dois formatos de vídeo limitam cada lado a 1920 e a área a 2073600 pixels. Não mudam os tetos de páginas, a retenção, os limites de conversas nem a regra de nunca repetir automaticamente um pedido que altera estado.
 
