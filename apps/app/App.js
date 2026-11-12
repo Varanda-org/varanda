@@ -119,6 +119,7 @@ import { InviteDropNote } from './src/ui/InviteDropNote'
 import { InviteArrival } from './src/ui/InviteArrival'
 import { InviteCardOpen } from './src/ui/InviteCardOpen'
 import { useInviteDrop } from './src/useInviteDrop'
+import { useSharedIntent } from './src/useSharedIntent'
 import { UpdateNote } from './src/ui/UpdateNote'
 import { useInstall } from './src/install'
 import { readPush, usePush } from './src/usePush'
@@ -2715,6 +2716,22 @@ function Member () {
   }
   const bootElapsed = atShell && bootCoverAt.current !== null ? Date.now() - bootCoverAt.current : 0
   const coveringBoot = atShell && holdBootCover({ cover, elapsedMs: bootElapsed, settled: bootSettled.current, step })
+  // A share is bound to the account stored on this device, which is known
+  // while it is locked and right after a restart (ownKey is not), so Sair or
+  // Recomeçar followed by a restart cannot hand it to the next account. An
+  // unlocked account owns it even while its sign-out marker is still up (a
+  // failed session save lifts it only on the next save).
+  const shareOwner = passkey === null
+    ? (typeof ownKey === 'string' ? ownKey.toLowerCase() : null)
+    : (pkStatus !== null && pkStatus.exists === true && (pkStatus.signedOut !== true || pkStatus.unlocked === true) && typeof pkStatus.publicKey === 'string' ? pkStatus.publicKey.toLowerCase() : null)
+  const share = useSharedIntent({
+    ready: atTabs && atShell && !coveringBoot && !(deletedState !== null && member !== null && passkey !== null),
+    locked,
+    ownKey: shareOwner,
+    gone: passkey !== null && pkStatus !== null && shareOwner === null,
+    onOpen: () => setComposer((c) => ({ ...c, open: true })),
+    onToast: showToast
+  })
   useEffect(() => {
     if (!coveringBoot) return
     const remaining = Math.max(0, bootPatienceMs(step) - (Date.now() - bootCoverAt.current))
@@ -3516,11 +3533,15 @@ function Member () {
           reply={composer.reply}
           quote={composer.quote}
           momentRequest={composer.moment || 0}
+          shared={share.shared}
+          onSharedDone={(id) => share.done(id)}
+          onSharedTaken={(id) => share.taken(id)}
           me={me}
           onClose={() => setComposer((c) => ({ ...c, open: false }))}
           onClearReply={() => setComposer((c) => ({ ...c, reply: null }))}
           onClearQuote={() => setComposer((c) => ({ ...c, quote: null }))}
           onPublished={(kind, sentRef) => {
+            share.requeue()
             // A momento touches no post state: Publicar already told the
             // Momentos readers (momentsChanged).
             if (kind === 'moment') {

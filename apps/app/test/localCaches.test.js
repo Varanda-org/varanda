@@ -87,6 +87,11 @@ test('source: node.js wipes the caches on identity and installation changes', as
   const dispatchAt = op.indexOf('conn.identity[op](')
   t.ok(wipeAt > 0, 'lock, signOut and reset wipe')
   t.ok(dispatchAt > 0 && wipeAt < dispatchAt, 'before the identity op is dispatched')
+  t.ok(/import \* as shareIntake from '\.\/shareIntake'/.test(src), 'imports the share intake facade')
+  const clearAt = op.indexOf("if (name === 'signOut' || name === 'reset') shareIntake.clear()")
+  t.ok(clearAt > 0 && clearAt < dispatchAt, 'Sair and Recomeçar remove a pending share before the dispatch')
+  t.is(op.slice(0, dispatchAt).split('shareIntake.clear()').length - 1, 1, 'only there, so a lock keeps it')
+  t.absent(/await shareIntake\.clear/.test(src), 'never awaited')
 
   const forget = src.slice(src.indexOf('const forgetConfig = useCallback(async () => {'))
   const firstStatement = forget.split('\n').slice(1).find((l) => l.trim() !== '' && !l.trim().startsWith('//'))

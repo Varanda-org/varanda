@@ -144,6 +144,7 @@ import { createMarks, devHookRequest, perfEnabled } from './perfMarks'
 import { recoveryFetch } from './account'
 import { NOT_FOUND_TEXT, SERVICE_DOWN_TEXT } from './recovery'
 import { wipeLocalCaches } from './localCaches'
+import * as shareIntake from './shareIntake'
 import { cancelBackgroundRefresh, noteForegroundUse, unregisterBackgroundRefresh, whenActive, whenForeground } from './backgroundTask'
 
 const { loadConfig, saveConfig, clearConfig, discoverConfig, hostedPage, canConfigure } = configStore
@@ -1122,6 +1123,9 @@ function LiveNodeProvider ({ children }) {
     // Before the dispatch, so a crash in between leaves no other person's
     // content behind for whoever opens the app next.
     if (name === 'lock' || name === 'signOut' || name === 'reset') wipeLocalCaches()
+    // A share waiting in storage was meant for this account; a lock keeps it.
+    // Not awaited: the operation below must still go out synchronously.
+    if (name === 'signOut' || name === 'reset') shareIntake.clear()
     let pending
     try {
       // A node script without signOut (an older build) locks instead.
