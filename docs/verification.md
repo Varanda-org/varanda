@@ -7802,3 +7802,86 @@ Ordem: build de debug do Android, simulador do iOS, depois a web e o PWA. O buil
 - [ ] Painel de moderação, num serviço `account` com e-mails de moderador e o cliente Google (o laboratório não sobe o painel): o login ainda abre o Google e a volta é `/account/mod/callback`. Uma conta de moderador que já está no diretório entra. O vínculo de membro novo continua só por celular.
 - [ ] Serviço `account` sem `VARANDA_PHONE_KEY` (o id e o segredo do cliente Google continuam obrigatórios): entre as linhas de arranque, `cadastro de novas contas desligado: verificação de celular não configurada`. Com `--json`, `{"event":"cadastro"}`.
 - [ ] Ordem de deploy: este PR só sobe depois que o app do PR `feat/phone-only-signup-app` está nas lojas e os builds antigos passaram por um ciclo de revisão da loja. Até lá, o servidor do PR `feat/phone-only-signup-server` continua no ar e atende o vínculo pelo Google e o finish de celular.
+
+## 178. Receber compartilhamentos no Android (PR feat/share-to-varanda-android)
+
+No Android, a Varanda entra na folha de compartilhar do sistema. Outro app pode mandar uma foto, várias fotos, um GIF, um texto selecionado ou um link. Vídeo não entra: o protocolo de publicação não tem registro de vídeo, e o receptor não declara filtro de vídeo. O que chega abre o Publicar já preenchido, quando o app está pronto. A pessoa ainda toca em Publicar: nada é publicado e nenhuma foto é enviada antes disso. Um link no texto monta o cartão de link, como quando a pessoa cola um link. Mandar o compartilhamento para uma conversa não faz parte deste PR. A folha de compartilhar do iOS e a PWA instalada ficam para PRs seguintes.
+
+O alvo é uma activity à parte, `ShareReceiverActivity` (`apps/app/modules/share-intake/android`), exportada, com o tema `Theme.Translucent.NoTitleBar`, `noHistory`, `excludeFromRecents` e `taskAffinity` vazio. Ela não entra na pilha de quem enviou nem nos recentes. `MainActivity` continua sem a ação `SEND`, então os App Links dela não mudam e ela nunca vê o Uri nem o texto de outro app. Os filtros são `SEND` `image/*`, `SEND` `text/plain` e `SEND_MULTIPLE` `image/*`. Não há filtro de vídeo, de áudio nem de `*/*`.
+
+A activity copia os arquivos para o cache do app, em `cacheDir/varanda-share/<id>/`, e só então abre a Varanda pelo intent de lançamento, sem extras. O JavaScript nunca lê um Uri de outro app (`apps/app/modules/share-intake/index.js` só aceita um `file://` dentro desse diretório). Cada arquivo tem no máximo 50 MiB. Só entram Uris `content` que não são de um provedor do próprio app. A orientação EXIF de JPEG, HEIC, HEIF e WebP troca largura e altura quando a foto está de lado, para o caminho de foto que já existe não achatar o retrato. Quando o leitor de EXIF do Android não consegue abrir um arquivo num formato que carrega EXIF, só aquele arquivo é descartado. Um GIF é copiado como está. O manifesto (`manifest.json`) é gravado por último, com sync, então um diretório sem manifesto ainda está sendo escrito. No máximo 10 arquivos são copiados. Se vieram mais, o total fica no manifesto e o Publicar avisa "só as 10 primeiras fotos foram anexadas".
+
+Um arquivo que não entrega byte por cerca de 30 s (uma foto de galeria na nuvem que ainda não está no aparelho, com a rede desligada) é pulado, e o resto do compartilhamento segue. Voltar durante a cópia cancela o descritor aberto e apaga o diretório incompleto. Girar o aparelho não recria a activity (`configChanges` inclui orientação e tamanho de tela), então a cópia em andamento continua. Se nada pôde ser lido e não há texto, a activity mostra "Não deu para receber esse conteúdo." e não abre o Publicar.
+
+O estado fica em `apps/app/src/sharedIntent.js` e `apps/app/src/useSharedIntent.js`. O Publicar só abre com as abas na tela, sem folha por cima e fora da tela de conta excluída (`App.js`: `ready` exige `atTabs`, e `atTabs` é falso com o Publicar, Ajustes, Denunciar ou a ajuda abertos). Enquanto a pessoa está em Entrar, no meio da configuração ou com a sessão travada, o conteúdo fica no cache. O app fechado, em segundo plano ou já na frente chega no mesmo lugar: a leitura seguinte acha o manifesto. Matar o processo no meio da configuração, depois que a cópia terminou, não perde o compartilhamento. Ele vale 1 hora (`SHARE_TTL_MS`). Passado esse prazo, o app solta os arquivos e mostra "o compartilhamento expirou". O dono é a conta guardada no aparelho, que o app conhece também com a sessão travada e logo depois de reiniciar. Se o compartilhamento já tinha dono, entrar com outra conta, Sair ou Recomeçar também o soltam, sem aviso, mesmo com o app reiniciado no meio. Um compartilhamento feito sem sessão só abre o Publicar depois de Entrar, quando o app chega às abas.
+
+No Publicar, o texto compartilhado entra no rascunho. Se já havia texto, ele fica e o texto novo vai na linha de baixo. Se não cabe, o rascunho fica como estava e a nota diz "o texto compartilhado não coube no rascunho". Um texto maior que 1000 caracteres é cortado, com a nota "o texto compartilhado foi cortado em 1000 caracteres". Um link http ou https preenche o texto, e o cartão de link que o Publicar já monta aparece. As fotos passam pelo mesmo `encodeFile` da galeria (`apps/app/src/media/encode.native.js`): JPEG, PNG, WebP e HEIC são regravados sem EXIF nem GPS, e o GIF segue animado, sem redesenho. Uma foto que o app não abre (por exemplo um EXIF ilegível) sai da leva e as outras ficam, com a nota "algumas fotos não puderam ser abertas". Enquanto as fotos do primeiro compartilhamento ainda carregam, um segundo fica na fila e não tira as que já estão no Publicar. Ele abre depois que o primeiro é publicado ou o Publicar é fechado. Um Momento em publicação também segura o compartilhamento até essa publicação acabar. Com a tela de conta excluída na frente, o Publicar não abre.
+
+Quando as fotos terminam de carregar no Publicar, o app apaga o diretório daquele compartilhamento. `cacheDir/varanda-share` fica vazio. Reabrir pelos recentes não importa de novo: a activity de recepção não fica nos recentes, o lançamento não carrega o que foi compartilhado, e um id já entregue não é aplicado outra vez.
+
+Na web este módulo não recebe nada (`apps/app/src/shareIntake.web.js` devolve vazio). No iOS o módulo nativo não está ligado, então a folha de compartilhar do sistema ainda não oferece a Varanda. O Publicar pela galeria continua igual.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `node apps/app/test/sharedIntent.test.js`
+- `node apps/app/test/shareIntakeModule.test.js`
+- `node apps/app/test/shareTargetAndroid.test.js`
+
+Os testes conferem o texto composto, o prazo de 1 hora, a troca de conta, a nota das 10 fotos, os filtros do manifesto e a ausência de filtro de vídeo. Não abrem aparelho. A CI de pouso desta leva roda a suíte inteira. Esta seção não marca esses comandos como executados aqui.
+
+### Já conferido nesta branch (2026-11-12)
+
+Conferido nesta branch em 2026-11-12. Não é caminhada no aparelho.
+
+- [x] `npm run prepare:native -w apps/app -- android` na raiz e, em seguida, `./gradlew assembleDebug` dentro de `apps/app/android`: BUILD SUCCESSFUL. Conferido em 2026-11-12.
+- [x] O manifesto mesclado mostra `ShareReceiverActivity` exportada, translúcida, `noHistory`, `excludeFromRecents`, `taskAffinity` vazio, `configChanges` com as 12 mudanças, `requireContentUriPermissionFromCaller="read"`, com os filtros `SEND` `image/*`, `SEND` `text/plain` e `SEND_MULTIPLE` `image/*`, e sem filtro de vídeo. Conferido em 2026-11-12.
+- [x] `npx expo export --platform android` dentro de `apps/app` gera o bundle. Conferido em 2026-11-12.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Todos os itens estão em aberto.
+
+O APK de debug (emulador ou aparelho, depois de `npm run prepare:native -w apps/app`) serve para a folha de compartilhar e para o Publicar sem conta. O que precisa de Entrar usa o APK de preview do EAS: o build de debug não entra com uma passkey de produção (veja `docs/development.md`).
+
+- [ ] Uma foto. A Varanda aparece na folha de compartilhar. O Publicar abre com essa foto.
+- [ ] Várias fotos. A Varanda aparece. As fotos entram no Publicar.
+- [ ] Um GIF. A Varanda aparece. No Publicar o GIF continua animado.
+- [ ] Um texto selecionado. A Varanda aparece. O texto preenche o Publicar.
+- [ ] Um link do navegador. A Varanda aparece. O link preenche o texto e o cartão de link aparece.
+- [ ] Um vídeo. A Varanda não aparece na folha.
+- [ ] Uma seleção com foto e vídeo. A Varanda não aparece.
+- [ ] 12 fotos. O Publicar fica com 10 e mostra "só as 10 primeiras fotos foram anexadas".
+- [ ] Um JPEG de câmera em retrato e um HEIC. Os dois mantêm a proporção. Obrigatório.
+- [ ] Um WebP girado (orientação EXIF 90). Mantém a proporção.
+- [ ] Uma leva em que uma foto não abre (por exemplo um arquivo que diz ser JPEG e não é imagem). As outras ficam e a nota diz "algumas fotos não puderam ser abertas".
+- [ ] Um arquivo que o app não consegue ler, sozinho. Aparece "Não deu para receber esse conteúdo." O Publicar não abre com esse conteúdo.
+- [ ] App fechado, app em segundo plano e app já na frente. Nos três, o compartilhamento chega ao Publicar quando o app está pronto.
+- [ ] Compartilhar sem sessão. O Publicar não abre na tela Entrar. Ele abre depois de Entrar, quando o app chega às abas.
+- [ ] Compartilhar no meio da configuração da conta, depois que a cópia terminou. Matar o app e abrir de novo: o compartilhamento continua e abre o Publicar quando a configuração termina.
+- [ ] Publicar já com um rascunho de texto. O rascunho fica e o texto compartilhado entra na linha de baixo.
+- [ ] Compartilhar com o Publicar aberto, ou com Ajustes aberto. O conteúdo espera a folha fechar e só então abre o Publicar.
+- [ ] Compartilhar enquanto um Momento está sendo publicado. O Publicar do compartilhamento espera essa publicação terminar.
+- [ ] Compartilhar com a tela de conta excluída na frente. O Publicar não abre.
+- [ ] Com um compartilhamento já associado a uma conta, entrar com outra conta. Ele é descartado e o Publicar não abre com ele.
+- [ ] Com um compartilhamento já associado a uma conta, tocar em Sair (ou em Recomeçar), matar o app e entrar com outra conta. O compartilhamento foi descartado e o Publicar não abre com ele.
+- [ ] Com o app fechado e uma conta guardada que não destrava sozinha, compartilhar uma foto, deixar o app abrir travado, tocar em Recomeçar com outra passkey e entrar com ela. O compartilhamento foi descartado e o Publicar não abre com ele.
+- [ ] Deixar passar 1 hora. O compartilhamento é descartado e aparece "o compartilhamento expirou".
+- [ ] Antes de tocar em Publicar, nada é publicado e nenhuma foto é enviada.
+- [ ] A foto publicada não tem EXIF nem GPS.
+- [ ] Depois que as fotos terminam de carregar no Publicar, `cacheDir/varanda-share` fica vazio.
+- [ ] Reabrir o app pelos recentes não importa o mesmo compartilhamento de novo.
+- [ ] Um segundo compartilhamento enquanto as fotos do primeiro ainda carregam no Publicar. As fotos do primeiro não saem. O segundo abre depois que o primeiro é publicado ou o Publicar é fechado.
+- [ ] Uma foto de uma galeria na nuvem que ainda não está no aparelho, com a rede desligada. Depois de cerca de 30 s a Varanda pula esse arquivo e fica com o resto. Voltar durante a cópia não deixa nada para trás.
+- [ ] Girar o aparelho enquanto a Varanda está recebendo. O compartilhamento não se perde.
+- [ ] iOS, simulador: o app abre e o Publicar funciona (escolher uma foto da galeria e fechar). A folha de compartilhar do iOS não faz parte deste PR.
+
+### Limites conhecidos
+
+- Fechar o Publicar, ou mudar "Publicar como", enquanto as fotos compartilhadas ainda carregam, descarta essas fotos, como acontece com as fotos escolhidas na galeria.
+- Uma resposta ou uma citação deixada num rascunho anterior continua presa ao Publicar. Dá para tirá-la no próprio Publicar.
+- No Android o link chega dentro do texto. Um texto com link que passa de 1000 caracteres é cortado como qualquer texto, e o link pode ficar quebrado.
+- Se outra tela tomar o lugar do Publicar enquanto as fotos compartilhadas carregam (conta excluída, novo aceite dos Termos), o compartilhamento fica parado até o Publicar voltar, a sessão travar ou o app reiniciar.
+- Uma foto compartilhada que falha ao carregar no Publicar não pode ser tentada de novo: o arquivo original já foi solto.
+- Um EXIF corrompido que o leitor do Android ainda aceita conta como orientação normal: uma foto de lado pode chegar achatada ou deitada.
+- Vídeo não é aceito.
