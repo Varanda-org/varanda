@@ -380,3 +380,38 @@ test('shareNote covers every branch in priority order', async (t) => {
   t.is(shareNote({ hadFiles: false, canAttach: true, noRoom: 0, dropped: 0, failed: 1, kept: true, clipped: false }), 'algumas fotos não puderam ser abertas')
   t.is(shareNote({ hadFiles: false, canAttach: true, noRoom: 0, dropped: 0, kept: true, clipped: false }), '')
 })
+
+test('sharedLinkHold holds a link the share brought, and only that', async (t) => {
+  const { sharedLinkHold } = await load()
+  t.is(sharedLinkHold('', 'olha https://example.com/a'), 'olha https://example.com/a', 'a shared link on an empty draft is held')
+  t.is(sharedLinkHold('oi', 'oi\nhttps://example.com/a'), 'oi\nhttps://example.com/a', 'a shared link after the draft is held')
+  t.is(sharedLinkHold('', 'só texto'), null, 'a share without a link changes nothing')
+  t.is(sharedLinkHold('veja https://example.org/x', 'veja https://example.org/x\nhttps://example.com/a'), null, 'the draft link still comes first')
+  t.is(sharedLinkHold('rascunho', 'rascunho'), null, 'a share that did not fit leaves the draft alone')
+  t.is(sharedLinkHold('', 'http://example.com/a'), null, 'no preview target, nothing to hold')
+  t.is(sharedLinkHold(null, 'https://example.com/a'), null)
+})
+
+test('sharedLinkHold keeps a hold across a later share', async (t) => {
+  const { linkHeld, sharedLinkHold } = await load()
+  const first = 'olha https://example.com/a'
+  const hold = sharedLinkHold('', first)
+  t.is(sharedLinkHold(first, first, hold), first, 'a share that did not fit keeps the hold')
+  const more = first + '\nmais texto'
+  t.is(sharedLinkHold(first, more, hold), more, 'a share without a link moves the hold to the new text')
+  t.is(linkHeld(sharedLinkHold(first, more, hold), more), true, 'still no automatic preview')
+  t.is(sharedLinkHold(first, more, null), null, 'released before by the tap: the preview goes on as usual')
+  t.is(sharedLinkHold(first, more, 'outro texto'), null, 'a hold the text no longer matches is gone')
+  t.is(sharedLinkHold(first, 'só texto', hold), null, 'no preview target, nothing to hold')
+})
+
+test('linkHeld keeps the hold only while the text is exactly the shared one', async (t) => {
+  const { linkHeld, sharedLinkHold } = await load()
+  const merged = 'olha https://example.com/a'
+  const hold = sharedLinkHold('', merged)
+  t.is(linkHeld(hold, merged), true, 'no automatic preview for the shared text')
+  t.is(linkHeld(hold, merged + ' '), false, 'any edit releases it')
+  t.is(linkHeld(hold, 'olha https://example.com/b'), false)
+  t.is(linkHeld(null, merged), false, 'the tap releases it')
+  t.is(linkHeld('só texto', 'só texto'), false, 'no preview target, nothing held')
+})

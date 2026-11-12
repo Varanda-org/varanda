@@ -91,6 +91,8 @@ function fakeCaches () {
     }
 
     async delete (k) { return this.map.delete(keyOf(k)) }
+    // Like Cache Storage, keys() answers Request-like objects, not strings.
+    async keys () { return [...this.map.keys()].map((url) => ({ url })) }
   }
   return {
     stores,
@@ -1362,4 +1364,321 @@ test('dm wake: member notices still show while muted or with a focused window', 
   const fallback = await push(w, pushData({ v: 1, kind: 'dm-wake', x: 1 }))
   t.is(fallback.options.body, FALLBACK, 'invalid payload still falls back')
   t.alike(win.messages, [], 'no wake message for notices')
+})
+
+const SHARE = ORIGIN + '/compartilhar'
+const SHARE_PREFIX = ORIGIN + '/__varanda-share/'
+const SHARE_META_KEYS = ['at', 'files', 'id', 'text', 'title', 'total', 'url', 'v']
+
+const photo = (name, type = 'image/jpeg', bytes = [1, 2, 3]) => new File([Uint8Array.from(bytes)], name, { type })
+
+function shareForm ({ title, text, url, fotos = [] } = {}) {
+  const form = new FormData()
+  if (title !== undefined) form.append('title', title)
+  if (text !== undefined) form.append('text', text)
+  if (url !== undefined) form.append('url', url)
+  for (const f of fotos) form.append('fotos', f)
+  return form
+}
+
+// `form` may be an Error, thrown by formData() as on a malformed body.
+async function share (w, form, { url = SHARE, method = 'POST' } = {}) {
+  let responded = null
+  const formData = async () => {
+    if (form instanceof Error) throw form
+    return form
+  }
+  w.handlers.fetch({
+    request: { url, method, mode: 'navigate', formData },
+    respondWith: (p) => { responded = Promise.resolve(p) },
+    waitUntil: () => {}
+  })
+  const res = responded && await responded
+  return { responded: responded !== null, res }
+}
+
+async function storedShare (w) {
+  const cache = w.caches.stores.get('varanda-share')
+  const keys = cache ? [...cache.map.keys()].sort() : []
+  const metaKey = keys.find((k) => k.endsWith('/meta'))
+  const meta = metaKey ? JSON.parse(await (await cache.match(metaKey)).text()) : null
+  return { cache, keys, meta }
+}
+
+function redirectsHome (t, res, label) {
+  t.is(res.status, 303, label + ': 303')
+  t.is(res.headers.get('location'), ORIGIN + '/', label + ': to /')
+}
+
+test('share target: a share with text and one photo is stored, then redirects to /', async (t) => {
+  const w = renderedWorker()
+  w.now = 1700000000123
+  const { responded, res } = await share(w, shareForm({ text: 'olha isso', fotos: [photo('a.jpg', 'image/jpeg', [9, 8, 7])] }))
+  t.ok(responded, 'answered')
+  redirectsHome(t, res, 'share')
+  t.alike(w.calls, [], 'no network fetch')
+  const { cache, keys, meta } = await storedShare(w)
+  t.alike(Object.keys(meta).sort(), SHARE_META_KEYS, 'meta keys')
+  t.ok(/^[0-9]{13}-[0-9a-f]{32}$/.test(meta.id), 'id is 13 digit ms and 32 hex')
+  t.is(meta.id.slice(0, 14), '1700000000123-', 'id starts with the worker clock')
+  t.is(meta.v, 1)
+  t.is(meta.at, 1700000000123)
+  t.is(meta.title, '')
+  t.is(meta.text, 'olha isso')
+  t.is(meta.url, '')
+  t.is(meta.total, 1)
+  t.alike(meta.files, [{ n: 0, mime: 'image/jpeg' }])
+  t.alike(keys, [SHARE_PREFIX + meta.id + '/0', SHARE_PREFIX + meta.id + '/meta'])
+  const file = await cache.match(SHARE_PREFIX + meta.id + '/0')
+  t.is(file.headers.get('content-type'), 'image/jpeg')
+  t.alike([...new Uint8Array(await file.arrayBuffer())], [9, 8, 7], 'photo bytes')
+  const metaRes = await cache.match(SHARE_PREFIX + meta.id + '/meta')
+  t.is(metaRes.headers.get('content-type'), 'application/json')
+  t.alike([...w.caches.stores.keys()], ['varanda-share'], 'nothing else stored')
+})
+
+test('share target: a second share replaces the first', async (t) => {
+  const w = renderedWorker()
+  w.now = 1700000000000
+  await share(w, shareForm({ text: 'primeiro', fotos: [photo('a.png', 'image/png'), photo('b.gif', 'image/gif')] }))
+  const first = (await storedShare(w)).meta
+  w.now += 1
+  const { res } = await share(w, shareForm({ text: 'segundo' }))
+  redirectsHome(t, res, 'second')
+  const { keys, meta } = await storedShare(w)
+  t.not(meta.id, first.id, 'a new id')
+  t.is(meta.text, 'segundo')
+  t.alike(meta.files, [])
+  t.alike(keys, [SHARE_PREFIX + meta.id + '/meta'], 'the older files are gone')
+})
+
+test('share target: 11 photos keep the first 10, total 11', async (t) => {
+  const w = renderedWorker()
+  const fotos = Array.from({ length: 11 }, (_, i) => photo('f' + i + '.webp', 'image/webp', [i]))
+  await share(w, shareForm({ fotos }))
+  const { cache, keys, meta } = await storedShare(w)
+  t.is(meta.total, 11)
+  t.alike(meta.files, Array.from({ length: 10 }, (_, n) => ({ n, mime: 'image/webp' })))
+  t.is(keys.length, 11, '10 photos and the meta')
+  t.alike([...new Uint8Array(await (await cache.match(SHARE_PREFIX + meta.id + '/9')).arrayBuffer())], [9], 'the tenth is the tenth offered')
+  t.absent(keys.includes(SHARE_PREFIX + meta.id + '/10'))
+})
+
+test('share target: video, HEIC and oversized files are skipped but counted, text entries are not files', async (t) => {
+  const w = renderedWorker()
+  const form = shareForm({ fotos: [photo('v.mp4', 'video/mp4'), photo('h.heic', 'image/heic'), photo('ok.png', 'image/png', [5]), 'nao sou foto'] })
+  await share(w, form)
+  const { keys, meta } = await storedShare(w)
+  t.is(meta.total, 3, 'three file entries offered')
+  t.alike(meta.files, [{ n: 0, mime: 'image/png' }], 'only the png, numbered from 0')
+  t.alike(keys, [SHARE_PREFIX + meta.id + '/0', SHARE_PREFIX + meta.id + '/meta'])
+
+  const big = renderedWorker()
+  const huge = { type: 'image/png', size: 50 * 1024 * 1024 + 1 }
+  const exact = photo('ok.gif', 'image/gif', [1])
+  const fake = { get: () => null, getAll: (name) => name === 'fotos' ? [huge, exact] : [] }
+  await share(big, fake)
+  const stored = await storedShare(big)
+  t.is(stored.meta.total, 2)
+  t.alike(stored.meta.files, [{ n: 0, mime: 'image/gif' }], 'over 50 MiB skipped')
+
+  const none = renderedWorker()
+  const { res } = await share(none, shareForm({ text: '   ', fotos: [photo('v.mp4', 'video/mp4')] }))
+  redirectsHome(t, res, 'nothing kept')
+  t.alike((await storedShare(none)).keys, [], 'blank text and no kept photo store nothing')
+})
+
+test('share target: title, text and url are stored separately and cut to 4000 units', async (t) => {
+  const w = renderedWorker()
+  await share(w, shareForm({ title: 'Um título', text: 'a'.repeat(5000), url: 'https://exemplo.test/x' }))
+  const { meta } = await storedShare(w)
+  t.is(meta.title, 'Um título')
+  t.is(meta.text, 'a'.repeat(4000))
+  t.is(meta.url, 'https://exemplo.test/x')
+  t.is(meta.total, 0)
+
+  const link = renderedWorker()
+  await share(link, shareForm({ url: 'https://exemplo.test/y' }))
+  t.is((await storedShare(link)).meta.url, 'https://exemplo.test/y', 'a link alone is kept')
+
+  const titled = renderedWorker()
+  await share(titled, shareForm({ title: 'só título' }))
+  t.is((await storedShare(titled)).meta.title, 'só título', 'a title alone is kept, as on Android and iOS')
+
+  const blank = renderedWorker()
+  await share(blank, shareForm({ title: ' ', text: '\n', url: '' }))
+  t.alike((await storedShare(blank)).keys, [], 'only blank fields store nothing')
+})
+
+test('share target: a failing formData still redirects and stores nothing', async (t) => {
+  const w = renderedWorker()
+  const { responded, res } = await share(w, new TypeError('bad multipart'))
+  t.ok(responded)
+  redirectsHome(t, res, 'failure')
+  t.alike((await storedShare(w)).keys, [])
+})
+
+test('share target: a store failing half way leaves nothing and still redirects', async (t) => {
+  const w = renderedWorker()
+  const open = w.caches.open
+  w.caches.open = async (name) => {
+    const cache = await open(name)
+    if (name === 'varanda-share') {
+      const put = cache.put.bind(cache)
+      cache.put = async (k, r) => {
+        if (k.endsWith('/1')) throw new Error('QuotaExceededError')
+        return put(k, r)
+      }
+    }
+    return cache
+  }
+  const { res } = await share(w, shareForm({ fotos: [photo('a.jpg'), photo('b.jpg')] }))
+  redirectsHome(t, res, 'quota')
+  t.alike((await storedShare(w)).keys, [], 'the first photo is dropped')
+})
+
+test('share target: other POSTs are never answered', async (t) => {
+  const w = renderedWorker()
+  for (const url of [ORIGIN + '/account/x', ORIGIN + '/other', ORIGIN + '/seeder/x', ORIGIN + '/f/x', ORIGIN + '/compartilhar/', 'https://other.test/compartilhar']) {
+    t.absent((await share(w, shareForm({ text: 'x' }), { url })).responded, url)
+  }
+  t.absent((await share(w, shareForm({ text: 'x' }), { method: 'PUT' })).responded, 'PUT /compartilhar')
+  t.ok((await share(w, shareForm({ text: 'x' }), { url: SHARE + '?x=1' })).responded, 'a query string is the same path')
+})
+
+test('share target: the share survives an activate', async (t) => {
+  const { w } = await installed()
+  await share(w, shareForm({ text: 'guardado' }))
+  await w.caches.open('varanda-shell-old')
+  await lifecycle(w, 'activate')
+  t.ok(w.caches.stores.has('varanda-share'), 'activate keeps the share cache')
+  t.is((await storedShare(w)).meta.text, 'guardado')
+})
+
+// Wraps the share cache so a test can fail a put or watch the deletes.
+function watchShareCache (w, { failPut = () => false, failDelete = () => false } = {}) {
+  const deleted = []
+  const open = w.caches.open
+  w.caches.open = async (name) => {
+    const cache = await open(name)
+    if (name === 'varanda-share' && !cache.watched) {
+      cache.watched = true
+      const put = cache.put.bind(cache)
+      const del = cache.delete.bind(cache)
+      cache.put = async (k, r) => {
+        if (failPut(k)) throw new Error('QuotaExceededError')
+        return put(k, r)
+      }
+      cache.delete = async (k) => {
+        const url = typeof k === 'string' ? k : k.url
+        deleted.push(url)
+        if (failDelete(url)) throw new Error('delete failed')
+        return del(k)
+      }
+    }
+    return cache
+  }
+  return deleted
+}
+
+test('share target: a replacement that fails keeps the saved share whole', async (t) => {
+  const w = renderedWorker()
+  w.now = 1700000000000
+  await share(w, shareForm({ text: 'primeiro', fotos: [photo('a.png', 'image/png', [4])] }))
+  const before = await storedShare(w)
+  let failing = false
+  watchShareCache(w, { failPut: (k) => failing && k.endsWith('/1') })
+  failing = true
+  w.now += 1
+  const { res } = await share(w, shareForm({ text: 'segundo', fotos: [photo('b.png', 'image/png'), photo('c.png', 'image/png')] }))
+  redirectsHome(t, res, 'failed replacement')
+  const after = await storedShare(w)
+  t.alike(after.keys, before.keys, 'only the first share is left')
+  t.alike(after.meta, before.meta, 'its meta is unchanged')
+  const file = await after.cache.match(SHARE_PREFIX + before.meta.id + '/0')
+  t.alike([...new Uint8Array(await file.arrayBuffer())], [4], 'its photo is still readable')
+})
+
+test('share target: cleanup drops the older meta before its files, and junk keys', async (t) => {
+  const w = renderedWorker()
+  w.now = 1700000000000
+  await share(w, shareForm({ text: 'primeiro', fotos: [photo('a.png', 'image/png'), photo('b.png', 'image/png')] }))
+  const first = (await storedShare(w)).meta
+  const junk = ORIGIN + '/__varanda-share/lixo'
+  await (await w.caches.open('varanda-share')).put(junk, new Response('x'))
+  const deleted = watchShareCache(w)
+  w.now += 1
+  await share(w, shareForm({ text: 'segundo' }))
+  const { keys, meta } = await storedShare(w)
+  t.is(meta.text, 'segundo')
+  t.alike(keys, [SHARE_PREFIX + meta.id + '/meta'], 'only the new share is left')
+  const old = SHARE_PREFIX + first.id
+  t.alike(deleted.filter((k) => k.startsWith(old)), [old + '/meta', old + '/0', old + '/1'], 'the older meta goes before its files')
+  t.ok(deleted.includes(junk), 'the junk key is deleted')
+})
+
+test('share target: an earlier request that parses last never replaces a newer share', async (t) => {
+  const w = renderedWorker()
+  let release
+  const slowForm = new Promise((resolve) => { release = resolve })
+  const answers = []
+  const fire = (formData) => {
+    w.handlers.fetch({
+      request: { url: SHARE, method: 'POST', mode: 'navigate', formData },
+      respondWith: (p) => { answers.push(Promise.resolve(p)) },
+      waitUntil: () => {}
+    })
+  }
+  w.now = 1700000000000
+  fire(() => slowForm)
+  w.now = 1700000000500
+  fire(async () => shareForm({ text: 'mais nova' }))
+  redirectsHome(t, await answers[1], 'newer')
+  release(shareForm({ text: 'mais velha', fotos: [photo('a.jpg')] }))
+  redirectsHome(t, await answers[0], 'older')
+  const { keys, meta } = await storedShare(w)
+  t.is(meta.text, 'mais nova', 'the newer share is the one stored')
+  t.is(meta.at, 1700000000500)
+  t.alike(keys, [SHARE_PREFIX + meta.id + '/meta'], 'nothing of the older one')
+})
+
+test('share target: an older share whose meta cannot be deleted keeps its photos', async (t) => {
+  const w = renderedWorker()
+  w.now = 1700000000000
+  await share(w, shareForm({ text: 'primeiro', fotos: [photo('a.png', 'image/png', [6])] }))
+  const first = (await storedShare(w)).meta
+  const old = SHARE_PREFIX + first.id
+  watchShareCache(w, { failDelete: (k) => k === old + '/meta' })
+  w.now += 1
+  const { res } = await share(w, shareForm({ text: 'segundo' }))
+  redirectsHome(t, res, 'stuck cleanup')
+  const { cache, keys } = await storedShare(w)
+  t.ok(keys.includes(old + '/meta'), 'the older meta is still there')
+  const file = await cache.match(old + '/0')
+  t.ok(file, 'so its photo is kept too')
+  t.alike(file ? [...new Uint8Array(await file.arrayBuffer())] : [], [6], 'and readable')
+})
+
+test('share target: an earlier request never lands after a newer share was stored and released', async (t) => {
+  const w = renderedWorker()
+  let release
+  const slowForm = new Promise((resolve) => { release = resolve })
+  const answers = []
+  const fire = (formData) => {
+    w.handlers.fetch({
+      request: { url: SHARE, method: 'POST', mode: 'navigate', formData },
+      respondWith: (p) => { answers.push(Promise.resolve(p)) },
+      waitUntil: () => {}
+    })
+  }
+  w.now = 1700000000000
+  fire(() => slowForm)
+  w.now = 1700000000500
+  fire(async () => shareForm({ text: 'mais nova' }))
+  redirectsHome(t, await answers[1], 'newer')
+  const cache = await w.caches.open('varanda-share')
+  for (const key of [...cache.map.keys()]) await cache.delete(key)
+  release(shareForm({ text: 'mais velha', fotos: [photo('a.jpg')] }))
+  redirectsHome(t, await answers[0], 'older')
+  t.alike((await storedShare(w)).keys, [], 'the superseded share is not stored')
 })

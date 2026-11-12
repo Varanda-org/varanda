@@ -7938,3 +7938,100 @@ Ainda não executada. Fazer num build assinado (EAS preview ou TestFlight), em i
 - Uma imagem com mais de 100 megapixels, ou com um lado acima de 16384 pixels, é recusada. Uma foto de 48 MP e um panorama do iPhone entram.
 - Os arquivos compartilhados ficam no armazenamento do App Group, fora do backup do aparelho, até a Varanda ser aberta ou até um compartilhamento novo substituí-los. Os que passaram de 1 hora saem quando o app abre ou quando a extensão recebe outro compartilhamento.
 - Se o app de origem não entregar a foto, a folha desiste depois de 90 segundos e mantém o que já recebeu.
+
+## 180. Alvo de compartilhamento do PWA (PR feat/share-to-varanda-pwa)
+
+Na PWA instalada, no Chrome do Android, a Varanda entra na folha de compartilhar pelo Web Share Target do manifesto (`share_target` em `apps/app/public/manifest.webmanifest`). O alvo envia `POST` multipart para `/compartilhar`, com `title`, `text`, `url` e os arquivos no campo `fotos`. Os tipos aceitos são `image/jpeg`, `image/png`, `image/webp` e `image/gif`. Vídeo fica de fora, e HEIC também: o compositor da web não mostra nem envia esses formatos, e o manifesto não os declara.
+
+O service worker (`apps/app/scripts/sw.js`, `takeShare` e `storeShare`) responde a esse POST quando está no controle. Ele guarda o compartilhamento no Cache Storage, no cache `varanda-share`, e responde com um redirecionamento 303 para `/`. A resposta é esse redirecionamento também com um corpo malformado ou quando a gravação falha no meio, então a pessoa cai no app e não vê uma página de erro do navegador. Com o worker no controle, o corpo multipart não segue para o servidor.
+
+O worker guarda no máximo 10 fotos, só desses quatro tipos, cada uma de até 50 MiB. O que passa disso, ou que é de outro tipo, é pulado e mesmo assim entra na contagem. O Publicar mostra as mesmas notas do Android e do iOS: "só as 10 primeiras fotos foram anexadas" quando vieram mais de 10, e "algumas fotos não puderam ser abertas" quando uma foto foi pulada. `title`, `text` e `url` são cortados em 4000 caracteres no worker. O Publicar ainda corta o texto em 1000. Um compartilhamento só com link, só com texto ou só com título é guardado. Quando o texto veio vazio, o título entra no texto, como no Android e no iOS. Um compartilhamento sem título, texto, link e foto aproveitáveis não é guardado, e a página abre mesmo assim. Só o mais novo fica: um compartilhamento novo substitui outro que ainda não foi aberto, como no iOS. O anterior só sai depois que o novo está gravado por inteiro, e um pedido que chegou antes nunca toma o lugar de um que chegou depois.
+
+O nome `varanda-share` não começa com `varanda-shell-`, então a ativação do worker não apaga esse cache (seção 11). O app lê o cache ao abrir a página (`apps/app/src/shareIntake.web.js`) e, quando chega às abas, abre o Publicar preenchido, pelo mesmo caminho do Android e do iOS. A leitura não apaga o cache. Ele esvazia quando as fotos terminam de carregar no Publicar, quando passa 1 hora, ou quando um compartilhamento novo toma o lugar. Nada é publicado e nenhuma foto é enviada antes do toque em Publicar. A foto passa pelo `encodeFile` que já existe, sem EXIF nem GPS, e o GIF segue animado.
+
+Um link que chega num compartilhamento não monta a prévia sozinho. No lugar do cartão de link, o Publicar mostra "Mostrar prévia do link". A prévia só é montada depois desse toque ou de qualquer edição no texto. Publicar sem tocar publica sem cartão de link. Um segundo compartilhamento, com ou sem link, ou que não coube no texto, mantém a espera. Um compartilhamento sem link não muda nada, e um link que já estava no rascunho continua com a prévia de sempre. O Publicar é o mesmo no Android e no iOS, então lá vale o mesmo.
+
+Sair e Recomeçar apagam um compartilhamento que ainda está guardado, lido ou não por esta página. Isso vale também para um compartilhamento que chegou em outra janela da PWA. Travar a sessão mantém o compartilhamento. No Android e no iOS, Sair e Recomeçar apagam o compartilhamento que o app ofereceria e os anteriores.
+
+Na web, uma foto que declara mais de 16384 px num lado ou mais de 100 megapixels é recusada antes de ser aberta, com "foto grande demais". Uma foto cujo cabeçalho não dá para ler é recusada com "não foi possível abrir a foto". São os mesmos limites da extensão do iOS. Fotos de câmera de 48 MP passam.
+
+O alvo abre uma página nova. O compartilhamento fica no cache durante o desbloqueio com a passkey dessa página e durante uma recarga no meio da configuração da conta. O Publicar abre quando o app chega às abas.
+
+O Safari do iOS não tem Web Share Target. A folha de compartilhar do iPhone continua só pela extensão da seção 179. Uma aba do navegador que não instalou a PWA nunca aparece na folha. Sem um service worker no controle, o POST chega ao servidor e recebe 405. O compartilhamento se perde e a pessoa precisa repetir. O servidor não guarda o corpo.
+
+Depois de um deploy novo da web vale a mesma regra da seção 11: não há `skipWaiting` nem `clients.claim`, e o worker novo só assume quando todas as janelas da versão anterior fecham. Até lá, o primeiro compartilhamento pode chegar ao worker antigo. Se esse worker não trata `/compartilhar`, o POST segue para o servidor, recebe 405, e o compartilhamento se perde.
+
+### Automatizado
+
+Ainda não executado nesta seção. A CI de pouso desta leva roda a suíte inteira. Esta seção não marca esses comandos como executados aqui.
+
+- `node apps/app/test/pwa.test.js`
+- `node apps/app/test/sw.test.js`
+- `node apps/app/test/shareIntakeWeb.test.js`
+- `node apps/app/test/shareIntakeModule.test.js`
+- `node apps/app/test/sharedIntent.test.js`
+- `node apps/app/test/shareShell.test.js`
+- `node apps/app/test/localCaches.test.js`
+- `node apps/app/test/encodePhotoCap.test.js`
+- `node packages/rpc/test/media-bounds.test.js`
+- `node apps/cli/test/serve.test.js`
+
+Os testes conferem o alvo do manifesto (os quatro tipos de imagem, sem vídeo e sem `image/*`), o que o worker guarda e o redirecionamento para `/`, a leitura do cache `varanda-share` sem consumi-lo, a recusa 405 de `POST /compartilhar` no servidor quando o pedido chega lá, a prévia de link retida até o toque ou a edição, a limpeza do compartilhamento em Sair e Recomeçar (e não ao travar) e a recusa de foto grande antes de abrir. Não abrem o Chrome.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Todos os itens estão em aberto.
+
+Na PWA instalada a partir da origem hospedada, no Chrome do Android, com o worker desta versão no controle. Feche as janelas antigas para o worker novo ativar. Uma PWA instalada antes desta versão talvez só entre na folha depois que o Chrome atualizar o app instalado com o manifesto novo, o que não é imediato. Se a Varanda não aparecer, reinstale a PWA e anote aqui o que foi preciso.
+
+- [ ] Uma foto JPEG. A Varanda aparece na folha. O Publicar abre com essa foto.
+- [ ] Uma foto PNG. A Varanda aparece. A foto entra no Publicar.
+- [ ] Uma foto WebP. A Varanda aparece. A foto entra no Publicar.
+- [ ] Um GIF. A Varanda aparece. No Publicar o GIF continua animado.
+- [ ] Um texto selecionado. A Varanda aparece. O texto preenche o Publicar.
+- [ ] Um link. A Varanda aparece. O link preenche o texto e, no lugar do cartão de link, aparece "Mostrar prévia do link". Tocar nele monta o cartão.
+- [ ] Um link, sem tocar em "Mostrar prévia do link": editar o texto (uma letra basta) monta o cartão. Publicar sem tocar nem editar publica sem cartão de link.
+- [ ] No APK de debug do Android, compartilhar um link pela folha do sistema: o Publicar mostra "Mostrar prévia do link" e só monta o cartão depois do toque ou de uma edição.
+- [ ] Um link, sem tocar, e depois um segundo compartilhamento só com texto: o texto entra e "Mostrar prévia do link" continua no lugar do cartão.
+- [ ] Compartilhar uma foto, não abrir o Publicar e tocar em Sair. Entrar de novo: o Publicar não abre com o compartilhamento. Repetir com Recomeçar.
+- [ ] Com duas janelas da PWA: o compartilhamento chega numa janela que fica travada e é fechada. Na outra, tocar em Sair. Abrir a PWA de novo e entrar: o Publicar não abre com o compartilhamento.
+- [ ] Compartilhar uma foto com a sessão aberta e travar. Depois do desbloqueio, o Publicar abre com a foto.
+- [ ] Compartilhar uma imagem acima de 16384 px num lado ou de 100 megapixels. O Publicar mostra "foto grande demais" e a aba não trava. Uma foto de 48 MP de câmera entra normalmente.
+- [ ] Compartilhar um GIF cuja tela ou algum quadro passa dos limites de mídia (por exemplo 16384 x 16384). O Publicar mostra "imagem grande demais" e a aba não trava. Um GIF animado comum entra normalmente.
+- [ ] Um vídeo. A Varanda não aparece na folha.
+- [ ] Um HEIC. A Varanda não aparece na folha.
+- [ ] Compartilhar com a sessão travada. A página nova abre. Depois do desbloqueio com a passkey, o Publicar abre com o conteúdo.
+- [ ] Compartilhar no meio da configuração da conta e recarregar a página. O compartilhamento continua. O Publicar abre quando a configuração termina e o app chega às abas.
+- [ ] 12 fotos. O Publicar fica com 10 e mostra "só as 10 primeiras fotos foram anexadas".
+- [ ] 3 fotos, uma delas acima de 50 MiB. O Publicar fica com 2 e mostra "algumas fotos não puderam ser abertas".
+- [ ] Na origem hospedada, sem worker no controle (worker removido nas ferramentas do Chrome), um `POST /compartilhar` recebe uma recusa do servidor e nada é guardado. Anotar aqui o código que o Caddy responde (o `varanda-serve` responde 405, coberto por `serve.test.js`).
+- [ ] Deixar passar 1 hora. O compartilhamento é descartado e aparece "o compartilhamento expirou".
+- [ ] Depois que as fotos terminam de carregar no Publicar, o cache `varanda-share` fica vazio.
+- [ ] Com o worker no controle, o corpo multipart de `POST /compartilhar` não chega ao servidor.
+- [ ] Anotar aqui o valor de `Sec-Fetch-Site` que o Chrome envia na navegação do compartilhamento.
+- [ ] Depois de um deploy novo da web, com uma janela antiga ainda aberta: o primeiro compartilhamento pode chegar ao worker antigo. Fechar todas as janelas antigas e compartilhar de novo: o worker novo recebe e o Publicar abre.
+- [ ] Antes de tocar em Publicar, nada é publicado e nenhuma foto é enviada.
+- [ ] Um app que manda só o assunto (só título). O Publicar abre com o título no texto.
+- [ ] Compartilhar com a PWA já aberta e um texto sendo digitado no Publicar. Anotar aqui se a janela recarrega e o que acontece com esse texto (no app nativo o texto compartilhado é juntado ao rascunho).
+- [ ] O compartilhamento funciona com a política de conteúdo do site, que tem `form-action 'none'`: o Publicar abre. A navegação do compartilhamento vem da folha do sistema, não de um formulário da página.
+- [ ] Um compartilhamento que não cabe no espaço do navegador. A página abre sem rascunho e sem aviso. Um compartilhamento anterior ainda não aberto continua lá e abre no Publicar.
+- [ ] As verificações manuais da seção 178 continuam passando no Android.
+- [ ] As verificações manuais da seção 179 continuam passando no iOS.
+
+### Limites conhecidos
+
+- O Safari do iOS não tem Web Share Target. No iPhone a folha continua a da seção 179.
+- Uma aba que não instalou a PWA nunca aparece na folha de compartilhar.
+- Sem um service worker no controle, o POST chega ao servidor, recebe 405, o compartilhamento se perde e a pessoa precisa repetir.
+- Depois de um deploy, o primeiro compartilhamento pode chegar ao worker antigo até que as janelas antigas sejam fechadas (seção 11). Se esse worker não trata `/compartilhar`, o POST recebe 405 e o compartilhamento se perde.
+- Nesta folha entram JPEG, PNG, WebP e GIF. HEIC fica de fora. O app Android e a extensão do iOS aceitam HEIC (seções 178 e 179).
+- Vídeo fica de fora.
+- No máximo 10 fotos, cada uma de até 50 MiB. O worker corta título, texto e link em 4000 caracteres. O Publicar corta o texto em 1000.
+- Um compartilhamento novo substitui outro que ainda não foi aberto.
+- Um compartilhamento sem título, texto, link e foto aproveitáveis não é guardado. A página abre mesmo assim.
+- Se o cache não couber o compartilhamento, o worker apaga o que gravou dele pela metade, um anterior ainda não aberto continua, e a página abre sem o novo. A pessoa não vê aviso de que o novo se perdeu.
+- Compartilhar com a PWA aberta abre uma página nova. Um texto que estava sendo digitado e não foi publicado pode se perder (a verificar no aparelho).
+- Nada é publicado sem o toque em Publicar.
+- Um link compartilhado só ganha prévia depois do toque em "Mostrar prévia do link" ou de uma edição no texto.
+- Na web, uma foto acima de 16384 px num lado ou de 100 megapixels é recusada com "foto grande demais". Um PNG ou WebP animado com mais de 300 quadros não é lido e é recusado com "não foi possível abrir a foto". Um GIF passa pelos mesmos limites de mídia de uma imagem recebida (cada quadro, o número de quadros e o total de pixels), também no Android e no iOS; acima deles, "imagem grande demais".
+- No Android e no iOS, Sair e Recomeçar não apagam um compartilhamento marcado com um horário à frente do relógio do aparelho, a não ser o mais novo, nem um que esteja sendo gravado naquele milissegundo.

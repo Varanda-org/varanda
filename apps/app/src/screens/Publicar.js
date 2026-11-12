@@ -71,7 +71,7 @@ import { validDescriptor } from '../media/fetch'
 import { pickImages } from '../media/attach'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { encodeFile } from '../media/encode'
-import { mergeDraft, shareNote } from '../sharedIntent'
+import { linkHeld, mergeDraft, shareNote, sharedLinkHold } from '../sharedIntent'
 import { moveById } from '../photoOrder'
 import { Btn, ErrorText, Soft, errorText, useAction } from '../ui'
 import { Avatar } from '../ui/Avatar'
@@ -79,6 +79,8 @@ import { EmojiPicker } from '../ui/EmojiPicker'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { LinkDraftCard, useLinkDraft } from '../ui/ChatComposer'
+import { previewsEnabled } from '../previewPref'
+import { previewPrefStore } from '../previewBuild'
 import { cardForSend, withCardFallback } from '../linkCard'
 import { withPreview } from '../attach-plan'
 import { refusalOf } from '../wordCheck'
@@ -717,7 +719,14 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // The draft link card (not as a page: its posts are signed statements).
   // cardRef keeps the card a Publicar already built from a snapshot, so a
   // new press after a failure never uploads its thumbnail again.
-  const linkDraft = useLinkDraft({ text, enabled: open === true && asPage === null, photos: hasMedia, member: self.publicKey })
+  // linkHold: the text a share left in the field while its link waits for
+  // "Mostrar prévia do link"; any edit drops it.
+  const [linkHold, setLinkHold] = useState(null)
+  const shareLinkHeld = linkHeld(linkHold, text)
+  useEffect(() => {
+    if (linkHold !== null && linkHold !== text) setLinkHold(null)
+  }, [linkHold, text])
+  const linkDraft = useLinkDraft({ text, enabled: open === true && asPage === null && !shareLinkHeld, photos: hasMedia, member: self.publicKey })
   const cardRef = useRef(null)
   // A page never queues: it needs the service.
   const pageOffline = asPage !== null && node.online === false
@@ -886,6 +895,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     setMode('post')
     const merged = mergeDraft(text, shared.text, MAX_TEXT)
     if (merged.text !== text) setText(merged.text)
+    setLinkHold((hold) => sharedLinkHold(text, merged.text, hold))
     if (shared.files.length === 0 || !canAttach) {
       setNote(shareNote({
         canAttach,
@@ -1503,7 +1513,21 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                 ))}
               </View>
               )
-            : <LinkDraftCard draft={linkDraft} />}
+            : shareLinkHeld && open === true && asPage === null && previewsEnabled(previewPrefStore())
+              ? (
+                <Pressable
+                  accessibilityRole='button'
+                  accessibilityLabel='Mostrar prévia do link'
+                  accessibilityState={{ disabled: frozen }}
+                  disabled={frozen}
+                  onPress={() => setLinkHold(null)}
+                  hitSlop={6}
+                  style={({ pressed }) => [styles.linkAsk, pressed && styles.toolPressed]}
+                >
+                  <Text style={styles.linkAskText}>Mostrar prévia do link</Text>
+                </Pressable>
+                )
+              : <LinkDraftCard draft={linkDraft} />}
           <MentionSuggest rows={frozen ? [] : suggestions} loading={!frozen && mentionQuery !== '' && search.phase === 'loading'} onPick={pickMention} />
           <View ref={postView.tailRef} style={styles.counterRow} onLayout={postView.handleTailLayout}>
             <View style={styles.tools}>
@@ -1768,6 +1792,8 @@ const makeStyles = (colors) => StyleSheet.create({
   momentInput: { ...type.compose, alignSelf: 'stretch', color: colors.ink, minHeight: MOMENT_MIN_HEIGHT, maxHeight: MOMENT_MAX_HEIGHT, borderWidth: 1, borderColor: colors.line, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, backgroundColor: colors.card },
   momentCounter: { alignSelf: 'flex-end', marginTop: -4 },
   tools: { flexDirection: 'row', alignItems: 'center', gap: 4, flex: 1 },
+  linkAsk: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center', marginLeft: 60, paddingHorizontal: 8, borderRadius: 22 },
+  linkAskText: { ...type.replyMark, color: colors.accent, fontWeight: '600' },
   tool: { flexDirection: 'row', alignItems: 'center', gap: 5, minHeight: 44, minWidth: 44, paddingHorizontal: 8, borderRadius: 22, justifyContent: 'center' },
   toolOff: { opacity: 0.45 },
   toolPressed: { backgroundColor: colors.accentSoft },
