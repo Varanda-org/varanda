@@ -2044,6 +2044,8 @@ PODS:
   - SDWebImageWebPCoder (0.15.0):
     - libwebp (~> 1.0)
     - SDWebImage/Core (~> 5.17)
+  - ShareIntake (0.1.0):
+    - ExpoModulesCore
   - UMAppLoader (55.0.5)
   - Yoga (0.0.0)
 
@@ -2147,6 +2149,7 @@ DEPENDENCIES:
   - ReactCodegen (from `build/generated/ios/ReactCodegen`)
   - ReactCommon/turbomodule/core (from `../../../node_modules/react-native/ReactCommon`)
   - ReactNativeDependencies (from `../../../node_modules/react-native/third-party-podspecs/ReactNativeDependencies.podspec`)
+  - ShareIntake (from `../modules/share-intake/ios`)
   - UMAppLoader (from `../../../node_modules/unimodules-app-loader/ios`)
   - Yoga (from `../../../node_modules/react-native/ReactCommon/yoga`)
 
@@ -2354,6 +2357,8 @@ EXTERNAL SOURCES:
     :path: "../../../node_modules/react-native/ReactCommon"
   ReactNativeDependencies:
     :podspec: "../../../node_modules/react-native/third-party-podspecs/ReactNativeDependencies.podspec"
+  ShareIntake:
+    :path: "../modules/share-intake/ios"
   UMAppLoader:
     :path: "../../../node_modules/unimodules-app-loader/ios"
   Yoga:
@@ -2461,6 +2466,7 @@ SPEC CHECKSUMS:
   ReactNativeDependencies: 6e8598ca6525f2c38334c1daaec4d77ae55fff9b
   SDWebImage: e9fc87c1aab89a8ab1bbd74eba378c6f53be8abf
   SDWebImageWebPCoder: 0e06e365080397465cc73a7a9b472d8a3bd0f377
+  ShareIntake: ed8445713adfb691c24a941ad8827f33c2054083
   UMAppLoader: 045699ef1cc6afda399a5c78bde728f23bcce213
   Yoga: 3a3ee5afb97f3a990839cfae6092b0540c7441a4
 
