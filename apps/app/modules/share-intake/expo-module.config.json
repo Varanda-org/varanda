@@ -1,5 +1,8 @@
 {
-  "platforms": ["android"],
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["ShareIntakeModule"]
+  },
   "android": {
     "modules": ["app.varanda.shareintake.ShareIntakeModule"]
   }

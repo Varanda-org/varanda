@@ -7819,7 +7819,7 @@ No Publicar, o texto compartilhado entra no rascunho. Se já havia texto, ele fi
 
 Quando as fotos terminam de carregar no Publicar, o app apaga o diretório daquele compartilhamento. `cacheDir/varanda-share` fica vazio. Reabrir pelos recentes não importa de novo: a activity de recepção não fica nos recentes, o lançamento não carrega o que foi compartilhado, e um id já entregue não é aplicado outra vez.
 
-Na web este módulo não recebe nada (`apps/app/src/shareIntake.web.js` devolve vazio). No iOS o módulo nativo não está ligado, então a folha de compartilhar do sistema ainda não oferece a Varanda. O Publicar pela galeria continua igual.
+Na web este módulo não recebe nada (`apps/app/src/shareIntake.web.js` devolve vazio). No iOS o módulo nativo não está ligado, então a folha de compartilhar do sistema ainda não oferece a Varanda (o iOS entra na seção 179). O Publicar pela galeria continua igual.
 
 Como verificar, a partir da raiz:
 
@@ -7885,3 +7885,56 @@ O APK de debug (emulador ou aparelho, depois de `npm run prepare:native -w apps/
 - Uma foto compartilhada que falha ao carregar no Publicar não pode ser tentada de novo: o arquivo original já foi solto.
 - Um EXIF corrompido que o leitor do Android ainda aceita conta como orientação normal: uma foto de lado pode chegar achatada ou deitada.
 - Vídeo não é aceito.
+
+## 179. Folha de compartilhar no iOS (PR feat/share-to-varanda-ios)
+
+### Pré-requisitos de quem opera
+
+Na conta Apple Developer:
+
+- Registrar o App Group `group.app.varanda`.
+- Ativar App Groups no App ID `app.varanda` e atribuir o grupo.
+- Registrar o App ID `app.varanda.share` e atribuir o mesmo grupo.
+- Manter Associated Domains no App ID `app.varanda`.
+
+Depois, em `apps/app`, rodar `eas credentials -p ios` para os perfis de produção e preview: atualizar o perfil do app mantendo Associated Domains e criar o perfil de `app.varanda.share` com o App Group.
+
+No iOS, a Varanda aparece na folha de compartilhar por uma Share Extension. Ela salva o conteúdo e pede que a pessoa abra o app; quando o app estiver pronto, Publicar abre preenchido. Nada é publicado sem tocar em Publicar. Vídeo não é aceito.
+
+### Automatizado
+
+Já executado em 2026-11-12:
+
+- [x] `node apps/app/test/shareTargetIos.test.js`.
+- [x] `node apps/app/test/hardening.test.js`, incluindo a comparação com um prebuild real.
+- [x] `node apps/app/test/shareIntakeModule.test.js`.
+- [x] `npm run prepare:native -w apps/app -- ios` e, em `apps/app/ios`, `xcodebuild -workspace Varanda.xcworkspace -scheme Varanda -configuration Debug -sdk iphonesimulator CODE_SIGNING_ALLOWED=NO build`: terminou em `BUILD SUCCEEDED`, e `Varanda.app/PlugIns/VarandaShare.appex` foi gerado.
+- [x] `PlistBuddy` confirmou que `CFBundleShortVersionString` e `CFBundleVersion` da extensão são iguais aos do app. A conferência também passou depois de uma alteração temporária em `CFBundleVersion` do app: a fase de build "Sync version with Varanda" copia os dois valores para a extensão em cada build.
+
+### Verificação manual
+
+Ainda não executada. Fazer num build assinado (EAS preview ou TestFlight), em iPhone com iOS 18 ou mais novo:
+
+- [ ] A Varanda aparece na folha de compartilhar do Fotos para uma foto, várias fotos e um GIF; no Safari para um link; e para texto selecionado em outro app.
+- [ ] A Varanda não aparece para vídeo, para uma seleção de foto com vídeo nem para PDF vindo de Arquivos. Se algum caso falhar, relatar: a regra de ativação precisa ser revista.
+- [ ] Depois de escolher Varanda, a folha mostra "Pronto. Abra o app Varanda para publicar." e fecha ao tocar em OK. A extensão não abre o app sozinha.
+- [ ] Abrir a Varanda com o app fechado ou em segundo plano, ou compartilhar, abrir o app e entrar se necessário: quando o app estiver pronto, Publicar abre com o conteúdo. Nada é publicado sem tocar em Publicar.
+- [ ] Compartilhar 12 fotos: Publicar mantém 10 e mostra "só as 10 primeiras fotos foram anexadas".
+- [ ] Uma foto HEIC e uma foto em retrato tirada pela câmera mantêm suas proporções; o GIF continua animado.
+- [ ] Compartilhar uma foto ProRAW (DNG) do Fotos e relatar se chega ao Publicar como JPEG ou HEIC ou se é recusada.
+- [ ] Compartilhar um link do Safari e um texto selecionado em outro app e relatar o texto que chega ao Publicar. Quando não há texto anexado, entra o texto que o app de origem pôs no próprio item.
+- [ ] Fazer um segundo compartilhamento antes de abrir o app: só o mais recente abre.
+- [ ] Depois de publicar ou fechar Publicar, o inbox do grupo (`Library/Caches/share-inbox`) e `Caches/varanda-share` do app estão vazios. Conferir pelo download do container do aparelho no Xcode ou relatar que não foi conferido.
+- [ ] Deixar um compartilhamento sem abrir por mais de 1 hora: aparece "o compartilhamento expirou" e Publicar não abre.
+- [ ] As verificações manuais da seção 178 continuam passando no Android.
+
+### Limites conhecidos
+
+- A pessoa precisa abrir a Varanda depois de compartilhar; a extensão não abre o app.
+- Um novo compartilhamento substitui outro que ainda não foi aberto.
+- Só o primeiro link de um compartilhamento é mantido. A extensão guarda até 4000 caracteres de texto, e o Publicar corta em 1000, como no Android.
+- Vídeo não é aceito.
+- Só entram JPEG, PNG, GIF, WebP, HEIC, HEIF e AVIF, os formatos que o Android também decodifica. Quando o app de origem oferece vários formatos, a extensão escolhe um desses; uma foto só em RAW, TIFF ou PSD é recusada quando o app importa o compartilhamento.
+- Uma imagem com mais de 100 megapixels, ou com um lado acima de 16384 pixels, é recusada. Uma foto de 48 MP e um panorama do iPhone entram.
+- Os arquivos compartilhados ficam no armazenamento do App Group, fora do backup do aparelho, até a Varanda ser aberta ou até um compartilhamento novo substituí-los. Os que passaram de 1 hora saem quando o app abre ou quando a extensão recebe outro compartilhamento.
+- Se o app de origem não entregar a foto, a folha desiste depois de 90 segundos e mantém o que já recebeu.
