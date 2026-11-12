@@ -119,7 +119,7 @@ function hooks () {
   }
 }
 
-async function momentHarness ({ file = null, request = async () => ({}), putMoment, prepareVideo = async () => clip() } = {}) {
+async function momentHarness ({ file = null, request = async () => ({}), putMoment, pickVideo = async () => ({}), prepareVideo = async () => clip(), gate = { open: true } } = {}) {
   const mod = await load()
   const h = hooks()
   const photo = {
@@ -133,8 +133,11 @@ async function momentHarness ({ file = null, request = async () => ({}), putMome
   const deps = {
     ...h.api,
     ...mod,
+    ...(await import('../src/musicDraft.js')),
+    ...(await import('../src/moments.js')),
+    useMomentMusicAvailable: () => gate.open,
     useChatAttachments: () => photo,
-    pickVideo: async () => ({}),
+    pickVideo,
     prepareVideo,
     urlFromBytes: () => 'test:poster',
     revokeUrl: () => {},
@@ -153,7 +156,7 @@ async function momentHarness ({ file = null, request = async () => ({}), putMome
   // Destructuring is part of the real functions' signatures.
   deps.momentValid = evaluate('export function momentValid', 'function ({ files, ready, text, video = null, preparing = false })', deps)
   deps.useVideoDraft = evaluate('function useVideoDraft', 'function ({ active, moment = false })', deps)
-  const useMomentDraft = evaluate('function useMomentDraft', 'function ({ node, open, active })', deps)
+  const useMomentDraft = evaluate('function useMomentDraft', 'function ({ node, member, open, active })', deps)
   const calls = []
   const node = {
     online: true,
@@ -606,4 +609,68 @@ test('a quote cannot send a video without text', async (t) => {
   await h.send()
   t.alike(h.calls, [])
   t.absent(h.published)
+})
+
+test('momento music is unavailable while video is preparing or staged and returns after removal', async (t) => {
+  const wait = deferred()
+  const h = await momentHarness({ prepareVideo: () => wait.promise })
+  t.teardown(h.unmount)
+  t.ok(h.render().musicAvailable)
+  const preparing = h.render().pickClip()
+  await Promise.resolve()
+  t.is(h.render().video.state.phase, 'preparing')
+  t.absent(h.render().musicAvailable, 'hides Música during preparation')
+  wait.resolve(clip())
+  await preparing
+  t.absent(h.render().musicAvailable, 'hides Música with a staged video')
+  h.render().pickMusic({ ref: { kind: 'snippet', id: 'abc', start: 30 } })
+  t.is(h.render().music, null, 'a late music choice cannot attach to video')
+  h.render().removeVideo()
+  t.ok(h.render().musicAvailable)
+})
+
+test('momento with music refuses video before opening the picker and explains removal', async (t) => {
+  let picks = 0
+  const h = await momentHarness({ pickVideo: async () => { picks++; return {} } })
+  t.teardown(h.unmount)
+  h.render().pickMusic({ ref: { kind: 'snippet', id: 'abc', start: 30 } })
+  await h.render().pickClip()
+  t.is(picks, 0)
+  t.is(h.render().note, 'A música vai só com foto: remova a música')
+  t.is(h.render().video.state.phase, 'empty')
+  h.render().removeMusic()
+  t.is(h.render().note, '', 'removing the music clears its note')
+  await h.render().pickClip()
+  t.is(picks, 1, 'removal allows the explicit video pick')
+  t.is(h.render().note, '')
+})
+
+test('a hidden momento music choice never blocks a video', async (t) => {
+  let picks = 0
+  const gate = { open: true }
+  const h = await momentHarness({ gate, pickVideo: async () => { picks++; return {} } })
+  t.teardown(h.unmount)
+  h.render().pickMusic({ ref: { kind: 'snippet', id: 'abc', start: 30 } })
+  t.ok(h.render().music)
+  gate.open = false
+  t.absent(h.render().musicAvailable, 'chip and Música hidden while the gate is closed')
+  await h.render().pickClip()
+  t.is(picks, 1, 'the video picker opens')
+  t.is(h.render().note, '')
+  t.is(h.render().video.state.phase, 'ready')
+  t.ok(await h.render().send())
+  t.alike(h.calls[1], ['moment.create', { text: '', media: { id: 1 } }], 'the video goes without music')
+})
+
+test('a video send drops music even from an older photo send closure', async (t) => {
+  const h = await momentHarness({ file: clip().poster })
+  t.teardown(h.unmount)
+  h.render().pickMusic({ ref: { kind: 'snippet', id: 'abc', start: 30 } })
+  const photoSend = h.render().send
+  h.render().setMusic(null)
+  h.render().removePhoto(1)
+  await h.render().pickClip()
+  t.ok(await photoSend(), 'the send reads the live video draft')
+  t.is(h.calls[0][1].kind, 'video')
+  t.alike(h.calls[1], ['moment.create', { text: '', media: { id: 1 } }], 'no music from the stale closure')
 })

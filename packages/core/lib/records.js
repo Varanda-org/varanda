@@ -14,7 +14,7 @@
 
 const b4a = require('b4a')
 const { validLinkCard, validCardImageBytes, copyLinkCard, CARD_IMAGE_MIME } = require('./link-card')
-const { feira } = require('@varanda/rpc')
+const { feira, isMomentMusic, MOMENT_MUSIC_KEYS } = require('@varanda/rpc')
 
 const MAX_NAME = 80
 const MAX_BIO = 280
@@ -114,6 +114,12 @@ const MAX_TESTIMONIAL = 400
 // hours. The media item has the DM media item shape (packages/rpc
 // isDmMediaItem), an image or a video, never a voice note.
 const MOMENT_KEYS = ['type', 'text', 'at', 'media']
+// A momento with music (packages/rpc lib/music.js) is the one other key set.
+// There is no compatibility pair: a reader from before it skips such a
+// moment as malformed (its photo is hidden for its 24 h, the diary is not
+// rejected), so seeders, the hosted web, then the apps update before the
+// operator turns music in momentos on.
+const MOMENT_MUSIC_RECORD_KEYS = ['type', 'text', 'at', 'media', 'music']
 const MOMENT_MEDIA_KEYS = ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms']
 const MOMENT_BLOB_KEYS = ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256']
 const MAX_MOMENT_TEXT = 200
@@ -582,9 +588,11 @@ function check (record, seq) {
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   if (type === 'moment') {
-    if (!hasExactKeys(record, MOMENT_KEYS)) return 'malformed'
+    const withMusic = hasExactKeys(record, MOMENT_MUSIC_RECORD_KEYS)
+    if (!withMusic && !hasExactKeys(record, MOMENT_KEYS)) return 'malformed'
     if (!validMomentText(record.text)) return 'text-length'
     if (!validMomentMedia(record.media)) return 'media-invalid'
+    if (withMusic && !isMomentMusic(record.music)) return 'music-invalid'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   // The creator binds the group root itself: writer may equal group.
@@ -732,15 +740,22 @@ function testimonialShowRecord ({ from, seq, text, nonce, at = nowIso() } = {}) 
   return build({ type: 'testimonial-show', from, seq, text, nonce, at }, 1)
 }
 
-// `media` is copied with exactly the item keys (anything else is passed
-// through for validation to reject).
-function momentRecord ({ text = '', media, at = nowIso() } = {}) {
+// `media` and `music` are copied with exactly their keys (anything else is
+// passed through for validation to reject). Without music (absent or null)
+// the record is the 4-key one.
+function momentRecord ({ text = '', media, music = null, at = nowIso() } = {}) {
   let item = media
   if (isPlainObject(media)) {
     item = {}
     for (const k of MOMENT_MEDIA_KEYS) item[k] = media[k]
   }
-  return build({ type: 'moment', text, at, media: item }, 1)
+  if (music === null) return build({ type: 'moment', text, at, media: item }, 1)
+  let tune = music
+  if (isPlainObject(music)) {
+    tune = {}
+    for (const k of MOMENT_MUSIC_KEYS) tune[k] = music[k]
+  }
+  return build({ type: 'moment', text, at, media: item, music: tune }, 1)
 }
 
 function mediaCoreRecord ({ key, at = nowIso() } = {}) {
@@ -981,6 +996,7 @@ module.exports = {
   MAX_TESTIMONIAL_SEALED,
   MAX_TESTIMONIAL_BOX,
   MOMENT_KEYS,
+  MOMENT_MUSIC_RECORD_KEYS,
   MOMENT_MEDIA_KEYS,
   MAX_MOMENT_TEXT,
   AVATAR_SIDE,

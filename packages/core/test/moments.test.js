@@ -37,8 +37,8 @@ test('foldMoments: shape, order and the record copy', async (t) => {
     authors: [{
       author: K1,
       items: [
-        { seq: 3, ref: formatRef({ author: K1, seq: 3 }), text: 'depois', at: iso(NOW - 1000), media: media() },
-        { seq: 1, ref: formatRef({ author: K1, seq: 1 }), text: 'antes', at: iso(NOW - 3000), media: media() }
+        { seq: 3, ref: formatRef({ author: K1, seq: 3 }), text: 'depois', at: iso(NOW - 1000), media: media(), music: null },
+        { seq: 1, ref: formatRef({ author: K1, seq: 1 }), text: 'antes', at: iso(NOW - 3000), media: media(), music: null }
       ]
     }]
   })
@@ -49,6 +49,19 @@ test('foldMoments: shape, order and the record copy', async (t) => {
   t.alike(two.authors.map((a) => a.author), [K2, K1])
   t.alike(foldMoments({ logs: [], now: NOW }), { authors: [] })
   t.alike(foldMoments({ logs: [log(K1, [postRecord({ text: 'oi', at: iso(NOW) })])], now: NOW }), { authors: [] }, 'an author with no moment is left out')
+})
+
+test('foldMoments: items carry a copy of the music, or null', async (t) => {
+  const music = { p: 'audius', id: 'D7KyD', start: 45 }
+  const recs = [moment(2000, 'sem'), momentRecord({ text: 'com', media: media(), music, at: iso(NOW - 1000) })]
+  const items = foldMoments({ logs: [log(K1, recs)], now: NOW }).authors[0].items
+  t.alike(items.map((i) => [i.text, i.music]), [['com', music], ['sem', null]])
+  items[0].music.start = 0
+  t.is(recs[1].music.start, 45, 'the caller record is never shared')
+  t.alike(showingMoment(log(K1, recs), 2, NOW), media(), 'showingMoment still answers the photo only')
+  t.alike(Object.keys(ownPast(log(K1, recs), NOW + MOMENT_TTL_MS + 2000)[0]), ['seq', 'ref', 'text', 'at'], 'past rows carry no music')
+  const bad = { ...recs[1], music: { ...music, start: -1 } }
+  t.alike(foldMoments({ logs: [log(K1, [bad])], now: NOW }), { authors: [] }, 'invalid music skips the record')
 })
 
 test('foldMoments: expiry boundary and future moments', async (t) => {

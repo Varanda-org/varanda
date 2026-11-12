@@ -84,8 +84,8 @@ import { LinkDraftCard, useLinkDraft } from '../ui/ChatComposer'
 import { LINK_DRAFT_DELAY_MS, cardForSend, withCardFallback } from '../linkCard'
 import { fallbackCard, isAudiusLink } from '../musicEmbed'
 import { musicOriginOf } from '../music'
-import { MUSIC_PHOTOS_TEXT, MUSIC_VIDEO_TEXT, musicBlocks, musicSnapshot, resolveTarget, useLine } from '../musicDraft'
-import { audiusResolve } from '../account'
+import { MUSIC_PHOTOS_TEXT, MUSIC_VIDEO_TEXT, MUSIC_MOMENT_VIDEO_TEXT, musicBlocks, musicSnapshot, resolveTarget, useLine } from '../musicDraft'
+import { audiusPolicy, audiusReady, audiusResolve } from '../account'
 import { playbackEpoch } from '../media/chatMedia'
 import { previewTarget } from '../preview'
 import { previewsEnabled } from '../previewPref'
@@ -104,6 +104,7 @@ import { pagesOn } from '../pageGate'
 import { Segmented } from '../ui/Segmented'
 import { useChatAttachments } from '../ui/AttachSheet'
 import { canPublishMoment } from '../momentSeen'
+import { momentMusicOf } from '../moments'
 import { momentsChanged } from './Momentos'
 
 export const MOMENT_TEXT_MAX = 200
@@ -126,6 +127,41 @@ export function momentValid ({ files, ready, text, video = null, preparing = fal
   if (preparing || momentLength(text) > MOMENT_TEXT_MAX) return false
   if (video !== null) return Array.isArray(files) && videoMomentValid({ file: video, text, photos: files.length, preparing })
   return ready === true && Array.isArray(files) && files.length === 1
+}
+
+function useMomentMusicAvailable (node, member, active) {
+  const origin = musicOriginOf(node)
+  const { epoch, request, hosted } = node
+  const capability = useRef(null)
+  const [result, setResult] = useState(null)
+  useEffect(() => {
+    let live = true
+    setResult(null)
+    if (!active || hosted !== true || origin === null) return undefined
+    const load = async () => {
+      try {
+        const policy = await audiusPolicy({ origin })
+        if (!live || policy.moments !== true) return
+        // Keep failures too: opening the sheet again must not repeat the probe.
+        if (capability.current === null || capability.current.epoch !== epoch) {
+          const probe = async () => {
+            try {
+              const info = await node.request('node.info', {})
+              return info?.momentMusic === true
+            } catch { return false }
+          }
+          capability.current = { epoch, answer: probe() }
+        }
+        const supported = await capability.current.answer
+        if (!live || !supported) return
+        const ready = await audiusReady({ member, origin })
+        if (live) setResult({ epoch, request, member, origin, ok: ready === true })
+      } catch {}
+    }
+    load()
+    return () => { live = false }
+  }, [active, hosted, epoch, request, member, origin])
+  return active && hosted === true && origin !== null && result?.epoch === epoch && result?.request === request && result?.member === member && result?.origin === origin && result?.ok === true
 }
 
 function useVideoDraft ({ active, moment = false }) {
@@ -152,9 +188,13 @@ function useVideoDraft ({ active, moment = false }) {
 // The Momento draft: one staged item, the text, the put item kept for a new
 // press after a failure, and the uncertain hold. send() is one explicit
 // attempt; nothing here ever repeats a request.
-function useMomentDraft ({ node, open, active }) {
+function useMomentDraft ({ node, member, open, active }) {
   const photo = useChatAttachments()
   const video = useVideoDraft({ active, moment: true })
+  const musicAllowed = useMomentMusicAvailable(node, member, active)
+  const musicAvailable = musicAllowed && video.state.phase === 'empty'
+  const [music, setMusic] = useState(null)
+  const [musicPickerOpen, setMusicPickerOpen] = useState(false)
   const [text, setText] = useState('')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
@@ -205,6 +245,9 @@ function useMomentDraft ({ node, open, active }) {
   }, [held, items, pickPhoto, video.draft])
   const pickClip = async () => {
     if (busyRef.current || held || !canComposeVideo({ node, pickVideo, prepareVideo })) return
+    // Same gate as the chip and the send: a choice that is hidden and would
+    // not be sent never blocks a video.
+    if (musicAvailable && music !== null) { setNote(MUSIC_MOMENT_VIDEO_TEXT); return }
     setError('')
     setNote('')
     try {
@@ -227,11 +270,25 @@ function useMomentDraft ({ node, open, active }) {
     clearPhoto()
     video.draft.clear()
     setText('')
+    setMusic(null)
+    setMusicPickerOpen(false)
     setError('')
     setNote('')
     setHeld(false)
   }, [clearPhoto, video.draft])
   useEffect(() => { if (!open) setError('') }, [open])
+  useEffect(() => {
+    if (!active || !musicAvailable) setMusicPickerOpen(false)
+  }, [active, musicAvailable])
+  const pickMusic = (choice) => {
+    if (busyRef.current || held || !musicAvailable || choice?.ref?.kind !== 'snippet') return
+    const ref = momentMusicOf({ music: { p: 'audius', id: choice.ref.id, start: choice.ref.start } })
+    if (ref !== null) setMusic({ ref, item: choice.item })
+  }
+  const removeMusic = () => {
+    setMusic(null)
+    setNote((current) => current === MUSIC_MOMENT_VIDEO_TEXT ? '' : current)
+  }
   // A published moment empties the form on the next opening, not at once:
   // the sheet keeps its photo and text while it slides away.
   const publishedRef = useRef(false)
@@ -273,7 +330,8 @@ function useMomentDraft ({ node, open, active }) {
           : await node.media.putMoment({ bytes: file.bytes.slice(), mime: file.mime, width: file.width, height: file.height })
       }
       if (gen !== genRef.current) return false
-      await node.request('moment.create', { text, media: itemRef.current })
+      const chosen = !clip && musicAvailable && music !== null ? { music: { p: 'audius', id: music.ref.id, start: music.ref.start } } : {}
+      await node.request('moment.create', { text, media: itemRef.current, ...chosen })
       itemRef.current = null
       momentsChanged()
       publishedRef.current = true
@@ -303,7 +361,7 @@ function useMomentDraft ({ node, open, active }) {
       setPending(false)
     }
   }
-  return { photo, video, pickClip, removeVideo, removePhoto, text, setText, pending, error, note, held, valid, unlocked, pick, send, reset }
+  return { photo, video, pickClip, removeVideo, removePhoto, text, setText, pending, error, note, held, valid, unlocked, pick, send, reset, music, setMusic, removeMusic, musicAvailable, musicPickerOpen, setMusicPickerOpen, pickMusic }
 }
 
 // The Momento text box: about five lines before its text scrolls inside it,
@@ -675,7 +733,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const momentOn = canPublishMoment(node) && !replyProp && !quote && asPage === null
   const [mode, setMode] = useState('post')
   const momentMode = momentOn && mode === 'moment'
-  const moment = useMomentDraft({ node, open, active: open === true && momentMode })
+  const moment = useMomentDraft({ node, member: me?.publicKey, open, active: open === true && momentMode })
   const video = useVideoDraft({ active: open === true && !momentMode && asPage === null })
   const canVideo = canComposeVideo({ node, asPage, pickVideo, prepareVideo })
   // Only an increase is a request: the shell resets the counter to 0 when a
@@ -1518,6 +1576,17 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
               {staged ? <Pill label='Remover foto' onPress={() => moment.removePhoto(staged.id)} disabled={moment.pending || moment.held} /> : null}
               {canVideo ? <Pill label='Vídeo' onPress={handlePickMomentVideo} disabled={moment.pending || moment.held || moment.video.state.phase !== 'empty' || moment.photo.busy} /> : null}
               {canVideo ? <Soft>{MOMENT_ONE_MEDIA}</Soft> : null}
+              {moment.musicAvailable
+                ? <Pill label='Música' onPress={() => moment.setMusicPickerOpen(true)} disabled={moment.pending || moment.held || node.online === false} />
+                : null}
+              {moment.musicAvailable && moment.music !== null
+                ? (
+                  <View style={styles.momentMusicChip}>
+                    <Text style={[styles.counter, styles.flex]} numberOfLines={2}>{displayText(moment.music.item.title)}, {displayText(moment.music.item.artist)} · Audius</Text>
+                    <Pill icon='fechar' accessibilityLabel='Remover música' onPress={() => moment.removeMusic()} disabled={moment.pending || moment.held} />
+                  </View>
+                  )
+                : null}
               <TextInput
                 ref={momentView.fieldRef}
                 style={[styles.momentInput, GROW_BY_CONTENT && { height: momentHeight }]}
@@ -1558,6 +1627,15 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                 : null}
             </View>
           </ScrollView>
+          <MusicPicker
+            open={open === true && moment.musicAvailable && moment.musicPickerOpen && !moment.pending && !moment.held}
+            onClose={() => moment.setMusicPickerOpen(false)}
+            onPick={(choice) => moment.pickMusic(choice)}
+            member={me?.publicKey}
+            origin={musicOriginOf(node)}
+            request={nodeRequest}
+            modes={['snippet']}
+          />
         </SheetKeyboard>
       </Sheet>
     )
@@ -2015,6 +2093,7 @@ const makeStyles = (colors) => StyleSheet.create({
   thumbError: { fontSize: 12, lineHeight: 15, color: colors.danger },
   momentBody: { gap: 12, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 16, alignItems: 'flex-start' },
   momentPhoto: { width: 160, height: 200, borderRadius: 12, overflow: 'hidden', backgroundColor: colors.skeleton },
+  momentMusicChip: { alignSelf: 'stretch', flexDirection: 'row', alignItems: 'center', gap: 8, paddingLeft: 12, borderRadius: 22, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.card },
   momentInput: { ...type.compose, alignSelf: 'stretch', color: colors.ink, minHeight: MOMENT_MIN_HEIGHT, maxHeight: MOMENT_MAX_HEIGHT, borderWidth: 1, borderColor: colors.line, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, backgroundColor: colors.card },
   momentCounter: { alignSelf: 'flex-end', marginTop: -4 },
   tools: { flexDirection: 'row', alignItems: 'center', gap: 4, flex: 1 },

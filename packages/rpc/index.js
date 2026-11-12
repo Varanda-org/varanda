@@ -15,6 +15,7 @@ const audioBounds = require('./lib/audio-bounds')
 const videoBounds = require('./lib/video-bounds')
 const dmBudget = require('./lib/dm-budget')
 const linkCard = require('./lib/link-card')
+const music = require('./lib/music')
 const ogParse = require('./lib/og-parse')
 const feira = require('./lib/feira')
 const inviteCard = require('./lib/invite-card')
@@ -81,6 +82,9 @@ module.exports = {
   cardTextLength: linkCard.cardTextLength,
   cardText: linkCard.cardText,
   cardUrlHost: linkCard.cardUrlHost,
+  MOMENT_MUSIC_KEYS: music.MOMENT_MUSIC_KEYS,
+  MOMENT_SNIPPET_S: music.MOMENT_SNIPPET_S,
+  isMomentMusic: music.isMomentMusic,
   MAX_OG_HTML: ogParse.MAX_OG_HTML,
   parseOg: ogParse.parseOg,
   ogText: ogParse.ogText,

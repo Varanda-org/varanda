@@ -206,6 +206,29 @@ test('moment.putMedia: image upload bounds and cache name', (t) => {
   bad(t, 'moment.putMedia', { ...MOMENT_UPLOAD, mime: 'audio/mp4', width: 0, height: 0, kind: 'voice', ms: 1000 })
 })
 
+const MOMENT_MUSIC = { p: 'audius', id: 'A'.repeat(32), start: 7200 }
+
+test('moment.create: music is optional, exactly { p, id, start }, never null', (t) => {
+  ok(t, 'moment.create', { text: '', media: MOMENT_MEDIA }, { text: '', media: MOMENT_MEDIA })
+  ok(t, 'moment.create', { text: 'oi', media: MOMENT_MEDIA, music: MOMENT_MUSIC }, { text: 'oi', media: MOMENT_MEDIA, music: MOMENT_MUSIC })
+  ok(t, 'moment.create', { text: '', media: MOMENT_MEDIA, music: { p: 'audius', id: 'a', start: 0 } })
+  for (const music of [
+    null, undefined, false, 0, 'audius', [], {},
+    { p: 'audius', id: 'a' },
+    { p: 'audius', start: 0 },
+    { id: 'a', start: 0 },
+    { ...MOMENT_MUSIC, title: 'x' },
+    { ...MOMENT_MUSIC, p: 'spotify' },
+    { ...MOMENT_MUSIC, id: '' },
+    { ...MOMENT_MUSIC, id: 'A'.repeat(33) },
+    { ...MOMENT_MUSIC, id: 'a-b' },
+    { ...MOMENT_MUSIC, start: -1 },
+    { ...MOMENT_MUSIC, start: 7201 },
+    { ...MOMENT_MUSIC, start: 1.5 },
+    { ...MOMENT_MUSIC, start: '0' }
+  ]) bad(t, 'moment.create', { text: '', media: MOMENT_MEDIA, music }, 'music ' + JSON.stringify(music))
+})
+
 test('moment.create: text is 0..200 code points and media is one image item', (t) => {
   for (const text of ['', 'a'.repeat(200), '😀'.repeat(200)]) {
     ok(t, 'moment.create', { text, media: MOMENT_MEDIA })
@@ -252,11 +275,11 @@ test('moment results survive RPC response validation', async (t) => {
   const seq = Number.MAX_SAFE_INTEGER
   const ref = KEY + ':' + seq
   const past = { seq, ref, text: '😀'.repeat(200), at: '+275760-09-13T00:00:00.000Z' }
-  const row = { ...past, media: MOMENT_MEDIA }
+  const row = { ...past, media: MOMENT_MEDIA, music: MOMENT_MUSIC }
   const results = {
     'moment.putMedia': MOMENT_MEDIA,
     'moment.create': { seq, ref },
-    'moments.read': { authors: [{ author: 'cd'.repeat(32), items: [{ ...row, ref: 'cd'.repeat(32) + ':' + seq }] }], own: [row], past: [past] },
+    'moments.read': { authors: [{ author: 'cd'.repeat(32), items: [{ ...row, ref: 'cd'.repeat(32) + ':' + seq }, { ...row, music: null }] }], own: [row], past: [past] },
     'moment.delete': { seq, deleted: [1] }
   }
   for (const [method, params] of MOMENT_PARAMS) {
@@ -278,11 +301,11 @@ test('moment results survive RPC response validation', async (t) => {
 
 test('moments.read: the worst case under the caps fits MAX_MESSAGE', async (t) => {
   // 32 authors x 4 items, 4 own items and 16 past records (docs/rpc.md 5.113),
-  // every field at its longest.
+  // every field at its longest, music on every live item.
   const seq = Number.MAX_SAFE_INTEGER
   const past = { seq, ref: KEY + ':' + seq, text: '😀'.repeat(200), at: '+275760-09-13T00:00:00.000Z' }
   const media = { ...MOMENT_MEDIA, chunks: 257, bytes: 257 * 32768, w: 16384, h: 16384 }
-  const live = (author, j) => ({ ...past, seq: seq - j, ref: author + ':' + (seq - j), media })
+  const live = (author, j) => ({ ...past, seq: seq - j, ref: author + ':' + (seq - j), media, music: MOMENT_MUSIC })
   const result = {
     authors: Array.from({ length: 32 }, (_, i) => {
       const author = (i + 1).toString(16).padStart(64, '0')
@@ -292,7 +315,8 @@ test('moments.read: the worst case under the caps fits MAX_MESSAGE', async (t) =
     past: Array.from({ length: 16 }, (_, i) => ({ ...past, seq: seq - i, ref: KEY + ':' + (seq - i) }))
   }
   const bytes = utf8ByteLength(JSON.stringify({ v: 1, id: MAX_ID, ok: true, result }))
-  t.ok(bytes <= MAX_MESSAGE, 'maximal texts, descriptors, refs, seqs, dates and envelope fit (' + bytes + ' bytes)')
+  t.ok(bytes <= MAX_MESSAGE, 'maximal texts, descriptors, music, refs, seqs, dates and envelope fit (' + bytes + ' bytes)')
+  t.is(bytes, 203313, 'the size docs/rpc.md states')
   let receive
   const response = new Promise((resolve) => { receive = resolve })
   const dispatcher = createServerDispatcher({

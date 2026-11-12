@@ -4,6 +4,7 @@ import { findLinks } from './links.js'
 
 export const MUSIC_PHOTOS_TEXT = 'A música vai só com texto: remova as fotos'
 export const MUSIC_VIDEO_TEXT = 'A música vai só com texto: remova o vídeo'
+export const MUSIC_MOMENT_VIDEO_TEXT = 'A música vai só com foto: remova a música'
 
 export function musicSnapshot (draft) {
   if (!draft) return null

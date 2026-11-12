@@ -119,6 +119,7 @@ export function createStreamPlayer (url, { origin } = {}) {
   return {
     async play () {
       if (player === null) return
+      failed = false
       const seq = ++playSeq
       playWanted = true
       kickWatch()

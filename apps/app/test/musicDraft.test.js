@@ -560,3 +560,8 @@ test('publishing or closing lets the same URL resolve in the next draft', async 
     r.cancel()
   }
 })
+
+test('photo-only momento music has its own video refusal note', async (t) => {
+  const { MUSIC_MOMENT_VIDEO_TEXT } = await rules()
+  t.is(MUSIC_MOMENT_VIDEO_TEXT, 'A música vai só com foto: remova a música')
+})

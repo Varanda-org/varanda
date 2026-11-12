@@ -490,9 +490,9 @@ const MOMENT_MEDIA_STALE = 'prepare a mídia de novo'
 // owned(item): whether the dm engine's putPublicMedia answered exactly this
 // item in this unlock; anything else (an item from another unlock, another
 // node or a DM) is refused before a record is built.
-async function momentCreate (ctx, { text, media, owned }) {
+async function momentCreate (ctx, { text, media, music, owned }) {
   if (typeof owned !== 'function' || owned(media) !== true) throw new UsageError(MOMENT_MEDIA_STALE)
-  return publish(ctx, buildRecord(() => momentRecord({ text, media })))
+  return publish(ctx, buildRecord(() => momentRecord({ text, media, music })))
 }
 
 // Tombstones the caller's own moment `to` (parsed ref) -> recordDelete's
