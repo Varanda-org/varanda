@@ -80,6 +80,7 @@ async function resolution (overrides = {}) {
     busy: false,
     frozen: false,
     musicPickerOpen: false,
+    shareLinkHeld: false,
     text: track.url,
     musicTried: { current: new Set() },
     playbackEpoch: () => epoch,
@@ -134,7 +135,8 @@ test('compose-time resolution honors the preview preference and online gate', as
     { hasMedia: true },
     { musicDraft: draft },
     { busy: true },
-    { musicPickerOpen: true }
+    { musicPickerOpen: true },
+    { shareLinkHeld: true }
   ]) {
     const r = await resolution(overrides)
     t.is(r.timer, null)
@@ -416,7 +418,7 @@ test('attaching a photo removes music only after files were picked', async (t) =
   for (const files of [[], [{}]]) {
     const musicDraftRef = { current: draft }
     let note = ''
-    const attach = composerFunction('  const attach = async () => {', '\n  const pickEmoji', 'attach', {
+    const attach = composerFunction('  const addFiles = async (files, onRoom) => {', '\n  // Done after unmount', 'attach', {
       canAttach: true,
       mediaOnline: true,
       busy: false,
@@ -433,7 +435,9 @@ test('attaching a photo removes music only after files were picked', async (t) =
       setItems: () => {},
       encodeFile: async () => { throw new Error('invalid photo') },
       patch: () => {},
-      errorText: (err) => err.message
+      errorText: (err) => err.message,
+      thumbsRef: { current: new Map() },
+      urlFromBytes: () => null
     })
     await attach()
     t.is(musicDraftRef.current, files.length ? null : draft)
