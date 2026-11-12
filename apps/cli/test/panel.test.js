@@ -831,6 +831,8 @@ test('pure AI helpers: comma decimal, closed reason map, fallback', async (t) =>
   t.is(panel.formatSimilarity('0.9'), '')
   t.is(panel.formatSimilarity(NaN), '')
   t.is(panel.aiReasonLabel('humano-revisou'), 'esta conta tem uma mudança pendente ou uma pessoa já desfez um bloqueio dela')
+  t.is(panel.aiReasonLabel('midia'), 'a publicação tem fotos ou vídeo, que a IA não vê')
+  t.is(panel.TEXT.verifiedMedia, 'A publicação tem fotos ou vídeo; a IA não vê imagens nem vídeo.')
   t.is(panel.aiReasonLabel('__proto__'), 'sem precedente suficiente')
   t.is(panel.aiReasonLabel('nao-existe'), 'sem precedente suficiente')
   for (const tok of ['frio', 'sem-exemplo', 'margem', 'divergente', 'conta', 'ilegal', 'contexto', 'midia', 'citacao', 'recurso', 'truncado', 'curto', 'sem-vetor', 'teto-bloquear', 'teto-descartar', 'ja-bloqueado', 'sombra', 'erro', 'timeout', 'ausente', 'recusado', 'certificado', 'config', 'humano-revisou', 'ja-decidida', 'lotado', 'exato', 'motivo', 'modelo', 'falha-ia']) {
@@ -891,7 +893,7 @@ test('the verified post renders as text with its notes; a bad shape is ignored',
   t.ok(q, 'the post is one textContent value')
   t.is(q.className, 'untrusted')
   t.is(q.children.length, 0)
-  t.ok(c1.textContent.includes('A publicação tem fotos; a IA não vê imagens.'))
+  t.ok(c1.textContent.includes('A publicação tem fotos ou vídeo; a IA não vê imagens nem vídeo.'))
   t.ok(c1.textContent.includes('A publicação cita outra; confira no app.'))
   t.absent(doc.created.some((n) => n.tagName === 'B'))
   t.absent(c2.textContent.includes('Publicação lida no semeador'), 'over 1000 code points is ignored')

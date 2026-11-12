@@ -20,6 +20,7 @@
 import rpc from '@varanda/rpc'
 import { buildSnapshot, SNAPSHOT_VERSION } from './feedSnapshot.js'
 import { loadKept as realLoadKept } from './media/keptLoad.js'
+import { videoPair } from './media/plan.js'
 import { cursorOf, resetWith } from './paging.js'
 
 const { FEED_LIMIT_DEFAULT } = rpc
@@ -99,7 +100,9 @@ export function keepPlan (snapshot, max = BG_MAX_KEPT, maxBytes = BG_MAX_KEPT_BY
     const name = snapshot.names[row.author]
     if (name && name.avatar) add('avatars', row.author, name.avatar)
     if (row.kind === 'post' && Array.isArray(row.media)) {
-      for (const d of row.media) add('posts', row.author, d)
+      // A video is never kept (fetchVideo is always transient): its poster only.
+      const pair = videoPair(row.media)
+      for (const d of pair === null ? row.media : [pair.poster]) add('posts', row.author, d)
     }
   }
   return out

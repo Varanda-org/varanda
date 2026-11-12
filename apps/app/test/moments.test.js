@@ -138,3 +138,39 @@ test('momentMusicOf refuses malformed references and holdMsOf extends only actua
     for (const playing of [false, undefined, null, 1, 'true']) t.is(holdMsOf({ music }, playing), AUTO_ADVANCE_MS)
   }
 })
+
+test('segmentMs: a photo auto-advances, a video lasts its clamped duration', async (t) => {
+  const { segmentMs, AUTO_ADVANCE_MS } = await load()
+  const photo = { ...item(1), media: { mime: 'image/jpeg', w: 10, h: 10 } }
+  const video = (ms) => ({ ...item(2), media: { mime: 'video/mp4', w: 640, h: 360, ms } })
+  t.is(segmentMs(photo), AUTO_ADVANCE_MS)
+  t.is(segmentMs(photo, 12000), AUTO_ADVANCE_MS, 'a measured time never stretches a photo')
+  t.is(segmentMs(item(3)), AUTO_ADVANCE_MS, 'no mime is a photo')
+  t.is(segmentMs(null), AUTO_ADVANCE_MS)
+  t.is(segmentMs({}), AUTO_ADVANCE_MS)
+  t.is(segmentMs(video(8000), 7400), 7400, 'the measured duration')
+  t.is(segmentMs(video(8000)), 8000, 'the declared one before the player measured')
+  t.is(segmentMs(video(8000), NaN), 8000)
+  t.is(segmentMs(video(8000), 0), 8000)
+  t.is(segmentMs(video(8000), 7400.6), 7401)
+  t.is(segmentMs(video(8000), 200), 1000, 'at least one second')
+  t.is(segmentMs(video(8000), 60000), 15000, 'at most MAX_MOMENT_VIDEO_MS')
+  t.is(segmentMs(video(8000), Infinity), 8000)
+  t.is(segmentMs(video(99999)), 15000)
+  t.is(segmentMs(video(undefined)), 15000, 'nothing known: the cap')
+})
+
+test('moment music is photo only, including GIF, even when a video record carries music', async (t) => {
+  const { momentMusicOf, holdMsOf, segmentMs, MUSIC_HOLD_MS } = await load()
+  for (const music of [{ p: 'audius', id: 'Ab12', start: 30 }, { id: 'Ab12', start: 30 }]) {
+    for (const mime of ['image/jpeg', 'image/png', 'image/webp', 'image/gif']) {
+      const photo = { media: { mime }, music }
+      t.alike(momentMusicOf(photo), { id: 'Ab12', start: 30 })
+      t.is(holdMsOf(photo, true), MUSIC_HOLD_MS)
+    }
+    const video = { media: { mime: 'video/mp4', ms: 8000 }, music }
+    t.is(momentMusicOf(video), null)
+    t.is(segmentMs(video, 7400), 7400, 'music cannot extend the video segment')
+    t.alike(video.music, music, 'ignoring music does not change the record')
+  }
+})

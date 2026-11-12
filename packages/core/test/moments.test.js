@@ -200,3 +200,16 @@ test('a verified page-close or page-moved ends the moments of a page, as in the 
     t.alike(other.authors[0].items.map((i) => i.text), ['depois', 'antes'], what + ': another association cuts nothing')
   }
 })
+
+test('foldMoments and showingMoment carry a video moment with its duration', async (t) => {
+  const video = media({ mime: 'video/mp4', w: 1080, h: 1920, ms: 15000, bytes: 4194304 + 16, chunks: 129 })
+  const recs = [momentRecord({ text: 'vídeo', media: video, at: iso(NOW - 2000) }), moment(1000)]
+  const l = log(K1, recs)
+  const out = foldMoments({ logs: [l], now: NOW })
+  t.alike(out.authors[0].items.map((i) => i.media), [media(), video], 'newest first, the video keeps ms')
+  t.alike(showingMoment(l, 1, NOW), video)
+  // A peer's video over the momento bounds is never shown.
+  const long = { type: 'moment', text: '', at: iso(NOW - 1000), media: { ...video, ms: 15001 } }
+  t.alike(foldMoments({ logs: [log(K1, [long])], now: NOW }), { authors: [] })
+  t.is(showingMoment(log(K1, [long]), 1, NOW), null)
+})

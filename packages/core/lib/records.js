@@ -38,6 +38,16 @@ const MAX_MEDIA_DIMENSION = 16384
 const AUDIO_MIME = 'audio/mp4'
 const MAX_AUDIO_MS = 120000
 const MAX_AUDIO_BYTES = 1572864
+// Short videos: one MPEG-4 item. A post carries it only as the pair [JPEG
+// poster, video] (validPostMedia) and MEDIA_MIMES stays still images, so
+// listings, groups, avatars and previews never take one. A momento video is
+// a blob item (validMomentMedia).
+const VIDEO_MIME = 'video/mp4'
+const MAX_VIDEO_MS = 30000
+const MAX_VIDEO_DIMENSION = 1920
+const MAX_VIDEO_PIXELS = 2073600 // 1920 x 1080, either orientation
+const MAX_MOMENT_VIDEO_MS = 15000
+const MAX_MOMENT_VIDEO_BYTES = 4194304
 // Groups (lib/group.js): a diary binds a group writer core with `group-join`.
 const MAX_GROUP_WRITERS = 512
 const MAX_GROUPS_PER_DIARY = 64
@@ -68,6 +78,7 @@ const ENGAGEMENT_KEYS = ['type', 'to', 'on', 'at']
 const TARGET_KEYS = ['author', 'seq']
 const DESCRIPTOR_KEYS = Object.freeze(['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height'])
 const AUDIO_DESCRIPTOR_KEYS = Object.freeze(['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height', 'ms'])
+const VIDEO_DESCRIPTOR_KEYS = Object.freeze([...DESCRIPTOR_KEYS, 'ms'])
 const MEDIA_CORE_KEYS = ['type', 'key', 'at']
 const FOLLOW_KEYS = ['type', 'key', 'on', 'at']
 // A key advertisement only (docs/protocol.md section 11): one per identity,
@@ -98,9 +109,10 @@ const DELETE_RANGE_KEYS = ['core', 'start', 'blocks']
 const TESTIMONIAL_KEYS = ['type', 'to', 'gen', 'hash', 'box', 'at']
 const TESTIMONIAL_SHOW_KEYS = ['type', 'from', 'seq', 'text', 'nonce', 'at']
 const MAX_TESTIMONIAL = 400
-// Momentos (docs/protocol.md): one photo in the anonymous blob pool, its key
-// and nonce public in the record, shown by readers for 24 hours. The media
-// item has the DM media item shape (packages/rpc isDmMediaItem), images only.
+// Momentos (docs/protocol.md): one photo or short video in the anonymous
+// blob pool, its key and nonce public in the record, shown by readers for 24
+// hours. The media item has the DM media item shape (packages/rpc
+// isDmMediaItem), an image or a video, never a voice note.
 const MOMENT_KEYS = ['type', 'text', 'at', 'media']
 // A momento with music (packages/rpc lib/music.js) is the one other key set.
 // There is no compatibility pair: a reader from before it skips such a
@@ -231,7 +243,13 @@ function validMomentMedia (m) {
   if (!isPlainObject(m) || !hasExactKeys(m, MOMENT_MEDIA_KEYS)) return false
   const blob = {}
   for (const k of MOMENT_BLOB_KEYS) blob[k] = m[k]
-  if (!require('./blob').validateBlobDescriptor(blob)) return false
+  const { validateBlobDescriptor, BLOB_MAC_BYTES } = require('./blob')
+  if (!validateBlobDescriptor(blob)) return false
+  // blob.bytes, the value just validated, not a second read of m.bytes.
+  if (m.mime === VIDEO_MIME) {
+    return validVideoSize(m.w, m.h) && isIntIn(m.ms, 1, MAX_MOMENT_VIDEO_MS) &&
+      blob.bytes <= MAX_MOMENT_VIDEO_BYTES + BLOB_MAC_BYTES
+  }
   return MEDIA_MIMES.includes(m.mime) && isIntIn(m.w, 1, MAX_MEDIA_DIMENSION) &&
     isIntIn(m.h, 1, MAX_MEDIA_DIMENSION) && m.ms === 0
 }
@@ -351,6 +369,47 @@ function validAudioDescriptor (d) {
       width === 0 &&
       height === 0 &&
       isIntIn(ms, 1, MAX_AUDIO_MS)
+  } catch {
+    return false
+  }
+}
+
+function validVideoSize (width, height) {
+  return isIntIn(width, 1, MAX_VIDEO_DIMENSION) && isIntIn(height, 1, MAX_VIDEO_DIMENSION) &&
+    width * height <= MAX_VIDEO_PIXELS
+}
+
+// A video descriptor (exact keys): a post descriptor plus its duration.
+// Only the second item of a video post's media (validPostMedia); never
+// accepted by validDescriptor. Never throws.
+function validVideoDescriptor (d) {
+  try {
+    if (!isPlainObject(d) || !hasExactKeys(d, VIDEO_DESCRIPTOR_KEYS)) return false
+    const { core, mime, start, blocks, bytes, sha256, width, height, ms } = d
+    return isHex64(core) &&
+      mime === VIDEO_MIME &&
+      isIntIn(start, 1, MAX_MEDIA_BLOCKS - 1) &&
+      isIntIn(blocks, 1, MAX_MEDIA_ITEM_BLOCKS) &&
+      start + blocks <= MAX_MEDIA_BLOCKS &&
+      Number.isSafeInteger(bytes) &&
+      bytes > (blocks - 1) * MEDIA_BLOCK_BYTES &&
+      bytes <= blocks * MEDIA_BLOCK_BYTES &&
+      isHex64(sha256) &&
+      validVideoSize(width, height) &&
+      isIntIn(ms, 1, MAX_VIDEO_MS)
+  } catch {
+    return false
+  }
+}
+
+// A video post's media: exactly [JPEG poster, video], read by index once
+// each (a sparse hole is undefined and invalid). Never throws.
+function validPostMedia (media) {
+  try {
+    if (!Array.isArray(media) || media.length !== 2) return false
+    const poster = media[0]
+    const video = media[1]
+    return validDescriptor(poster) && poster.mime === 'image/jpeg' && validVideoDescriptor(video)
   } catch {
     return false
   }
@@ -579,7 +638,7 @@ function check (record, seq) {
   const isQuote = hasExactKeys(record, QUOTE_KEYS) || hasExactKeys(record, QUOTE_MEDIA_KEYS) || hasExactKeys(record, QUOTE_PREVIEW_KEYS)
   const withMedia = hasExactKeys(record, POST_MEDIA_KEYS) || hasExactKeys(record, QUOTE_MEDIA_KEYS)
   if (!isQuote && !withMedia && !withPreview && !hasExactKeys(record, POST_KEYS)) return 'malformed'
-  if (withMedia && !validMediaList(record.media)) return 'media-invalid'
+  if (withMedia && !validMediaList(record.media) && !validPostMedia(record.media)) return 'media-invalid'
   if (withPreview && !validPreview(record.preview)) return 'preview-invalid'
   const { text, at, replyTo } = record
   // A post with media may have an empty text (a photo-only post); a quote
@@ -639,6 +698,15 @@ function copyDescriptor (d) {
   return out
 }
 
+// A post media item: a video keeps its duration, anything else is copied
+// as a still descriptor (and passed through for validation to reject).
+function copyPostMediaItem (d) {
+  if (!isPlainObject(d) || d.mime !== VIDEO_MIME) return copyDescriptor(d)
+  const out = {}
+  for (const k of VIDEO_DESCRIPTOR_KEYS) out[k] = d[k]
+  return out
+}
+
 // A copy with exactly the target keys (anything else is passed through for
 // validation to reject).
 function copyTarget (r) {
@@ -651,7 +719,7 @@ function copyTarget (r) {
 function postRecord ({ text, replyTo = null, at = nowIso(), media, quote, preview } = {}) {
   const record = { type: 'post', text, at, replyTo }
   if (quote !== undefined) record.quote = copyTarget(quote)
-  if (media !== undefined) record.media = Array.isArray(media) ? media.map(copyDescriptor) : media
+  if (media !== undefined) record.media = Array.isArray(media) ? media.map(copyPostMediaItem) : media
   if (preview !== undefined && preview !== null) record.preview = copyLinkCard(preview, copyDescriptor)
   return build(record, 1)
 }
@@ -901,6 +969,13 @@ module.exports = {
   MAX_AUDIO_BYTES,
   DESCRIPTOR_KEYS,
   AUDIO_DESCRIPTOR_KEYS,
+  VIDEO_MIME,
+  MAX_VIDEO_MS,
+  MAX_VIDEO_DIMENSION,
+  MAX_VIDEO_PIXELS,
+  MAX_MOMENT_VIDEO_MS,
+  MAX_MOMENT_VIDEO_BYTES,
+  VIDEO_DESCRIPTOR_KEYS,
   MAX_GROUP_WRITERS,
   MAX_GROUPS_PER_DIARY,
   MAX_GROUPS_PER_COMMUNITY,
@@ -973,6 +1048,8 @@ module.exports = {
   listingRateRecord,
   validDescriptor,
   validAudioDescriptor,
+  validVideoDescriptor,
+  validPostMedia,
   validAvatar,
   validPreview,
   validPreviewImage,

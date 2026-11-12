@@ -2,15 +2,18 @@
 // the node already read. Pure: no React, no react-native, no Node built-ins.
 
 import rpc from '@varanda/rpc'
+import { MAX_MOMENT_VIDEO_MS, VIDEO_MIME } from './media/plan.js'
 
 export const MOMENT_MS = 24 * 60 * 60 * 1000
 export const AUTO_ADVANCE_MS = 5000
 export const MUSIC_HOLD_MS = 15000
+const MIN_VIDEO_SEGMENT_MS = 1000
 
 const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
 
 export function momentMusicOf (item) {
   try {
+    if (item?.media?.mime === VIDEO_MIME) return null
     const music = item?.music
     if (!isObject(music)) return null
     const proto = Object.getPrototypeOf(music)
@@ -97,4 +100,16 @@ export function progressOf (index, length) {
   const out = []
   for (let n = 0; n < length; n++) out.push(n < index ? 1 : 0)
   return out
+}
+
+// How long the viewer stays on a momento: AUTO_ADVANCE_MS for a photo; for a
+// video, the duration the player measured (else the declared one), kept
+// between one second and MAX_MOMENT_VIDEO_MS, so a lying file can neither
+// flash past nor hold the strip.
+export function segmentMs (item, measuredMs) {
+  const media = isObject(item) && isObject(item.media) ? item.media : null
+  if (media === null || media.mime !== VIDEO_MIME) return AUTO_ADVANCE_MS
+  const pick = (n) => Number.isFinite(n) && n > 0 ? n : null
+  const ms = pick(measuredMs) ?? pick(media.ms) ?? MAX_MOMENT_VIDEO_MS
+  return Math.min(MAX_MOMENT_VIDEO_MS, Math.max(MIN_VIDEO_SEGMENT_MS, Math.round(ms)))
 }

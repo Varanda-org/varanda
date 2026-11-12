@@ -313,6 +313,16 @@ test('keepPlan caps count and bytes', async (t) => {
   t.alike(plan.map((p) => p.d.start), [1, 200], '8 MiB in all: the small one past the cap is left')
 })
 
+test('keepPlan queues only the poster of a video post', async (t) => {
+  const { keepPlan } = await load()
+  const poster = { ...photo(5), width: 640, height: 360 }
+  const clip = { core: '9a'.repeat(32), mime: 'video/mp4', start: 6, blocks: 30, bytes: 30 * 32768 - 5, sha256: 'bc'.repeat(32), width: 640, height: 360, ms: 12000 }
+  const items = [post(FOLLOW, 2, { media: [poster, clip] }), post(FOLLOW, 1, { media: [photo(9)] })]
+  const plan = keepPlan({ items, names: {} })
+  t.alike(plan.map((p) => p.d), [poster, photo(9)], 'the poster and the next photo, never the video')
+  t.absent(plan.some((p) => p.d.mime === 'video/mp4'))
+})
+
 test('originals, names and hearts carry over only for refs still shown, under the rules now', async (t) => {
   const { runRefresh } = await load()
   const { buildSnapshot, parseSnapshot } = await loadSnap()

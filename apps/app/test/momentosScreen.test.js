@@ -53,13 +53,14 @@ test('the viewer: text through displayText, reply through canReply and openMessa
   t.ok(src.includes('canReply(node)'), 'reply bar gated by canReply')
   t.ok(src.includes('onMessage(author, { context: replyContext(item, author) })'), 'openMessage with the reply context')
   t.ok(src.includes("<Pill label='Responder' icon='mensagem' onPress={reply} />"), 'one Responder pill with the mensagem icon')
-  t.ok(src.includes("export const OWN_NOTE = 'A foto sai dos servidores em até 7 dias.'"), 'own note')
+  t.ok(src.includes("export const OWN_NOTE = 'O momento sai dos servidores em até 7 dias.'"), 'own note covers photos and videos')
   t.ok(src.includes("export const DELETE_TITLE = 'Apagar momento?'"), 'delete confirmation title')
   t.ok(src.includes("request('moment.delete', { to: target.ref })"), 'moment.delete')
   t.ok(src.includes('<ConfirmStack'), 'ConfirmStack pattern')
   t.ok(src.includes("export const PHOTO_UNAVAILABLE = 'Foto indisponível'"), 'unavailable photo text')
   t.ok(src.includes("media.read({ kind: 'moment', author, seq })"), 'photo through node.media.read')
   t.ok(src.includes('holdMsOf(item, musicStarted)') && src.includes('progressOf(') && src.includes('ringOrder('), 'pure module helpers used')
+  t.ok(src.includes('segmentMs(item, photo.ms)') && src.includes('progressOf(') && src.includes('ringOrder('), 'pure module helpers used')
   t.ok(src.includes('mark(itemKey)'), 'each viewed item marked seen')
   t.ok(src.includes("backgroundColor: '#000000'"), 'black background')
 })
@@ -70,6 +71,7 @@ test('auto-advance respects reduced motion and pauses', (t) => {
   t.ok(src.includes("addEventListener('reduceMotionChanged'"), 'follows changes')
   t.ok(src.includes('export function autoAdvanceOn (reduce) {\n  return reduce === false\n}'), 'only when known not reduced')
   t.ok(src.includes("const paused = !isTop || node.visible === false || item === null || photo.phase === 'loading' || held || dragging || menuOpen || deleting !== null || musicClosed"), 'paused while hidden, pressed, dragged, in a menu or deleting')
+  t.ok(src.includes('active: isTop && node.visible !== false && item !== null && !held && !dragging && !menuOpen && deleting === null') && src.includes('const running = active && loaded && autoOn'), 'paused while hidden, pressed, dragged, in a menu or deleting')
   t.ok(src.includes('onPressIn={handleTapPressIn}') && src.includes('    setHeld(true)\n  }') && src.includes('onPressOut={() => setHeld(false)}'), 'press holds')
 })
 
@@ -204,7 +206,8 @@ test('review 1: the viewer runs, marks seen and closes only on top', (t) => {
   const src = read('src/screens/Momentos.js')
   t.ok(src.includes('function Viewer ({ entry, ownKey, isTop = true,'), 'isTop prop')
   t.ok(src.includes("if (itemKey !== '' && isTop && photo.phase !== 'loading') mark(itemKey)"), 'seen only on top')
-  t.ok(src.includes('const running = autoOn && !paused && !musicWaiting'), 'auto-advance only when unpaused and audio is not starting')
+  t.ok(src.includes('const running = active && loaded && autoOn') && src.includes('&& !musicWaiting,'), 'auto-advance only when unpaused and audio is not starting')
+  t.ok(src.includes('active: isTop && node.visible !== false') && src.includes('const running = active && loaded && autoOn'), 'auto-advance only on top and visible')
   t.ok(src.includes("if (closingRef.current || !isTopRef.current || typeof onBack !== 'function') return"), 'goBack only on top')
   t.ok(read('App.js').includes('<Momentos entry={entry} ownKey={ownKey} isTop={i === stack.length - 1}'), 'App passes the top flag')
 })
@@ -498,7 +501,7 @@ test('visual 1, 9 to 11: Momento box height, Diário rows, past delete body', (t
   t.ok(strip.includes('<Text style={styles.rowText} numberOfLines={1} maxFontSizeMultiplier={ROW_CAP}>{OWN_LIVE_TITLE}</Text>') && strip.includes('<Text style={styles.rowText} numberOfLines={1} maxFontSizeMultiplier={ROW_CAP}>{PAST_TITLE}</Text>'), 'row titles capped on one line')
   t.ok(strip.includes('<Text style={styles.meta} maxFontSizeMultiplier={ROW_CAP}>{String(past.length)}</Text>'), 'the count apart, never cut')
   const src = read('src/screens/Momentos.js')
-  t.ok(src.includes("export const DELETE_BODY_PAST = 'O momento sai do seu diário. A foto já não aparece para ninguém.'"), 'past body')
+  t.ok(src.includes("export const DELETE_BODY_PAST = 'O momento sai do seu diário. Já não aparece para ninguém.'"), 'past body covers photos and videos')
   t.ok(src.includes('{target && expiresIn(target.at) === 0 ? DELETE_BODY_PAST : DELETE_BODY}'), 'chosen by the 24-hour end')
 })
 
@@ -654,7 +657,7 @@ test('visual 4 (iOS XXXL): the caption cap leaves the header and the bar free', 
   t.is(captionCap({ height: 800, topEnd: 100, barHeight: 60, bottomPad: 40 }), 320, 'room to spare: still 40%')
   t.is(captionCap({ height: 800, topEnd: 300, barHeight: 160, bottomPad: 40 }), 276, 'largest text: only the room between the header and the bar')
   t.is(captionCap({ height: 600, topEnd: 400, barHeight: 160, bottomPad: 40 }), 72, 'never below about three lines')
-  t.ok(src.includes('const captionMax = captionCap({ height: win.height, topEnd, barHeight, bottomPad: insets.bottom + 12 })'), 'the viewer uses it')
+  t.ok(src.includes('const captionMax = captionCap({ height: win.height, topEnd, barHeight: barHeight + (playbackControls ? playbackHeight + 12 : 0), bottomPad: insets.bottom + 12 })'), 'the viewer uses it')
 })
 
 test('visual 4 (Android): a drag down on a scrolling caption at its top closes', (t) => {
@@ -694,7 +697,7 @@ test('visual 6 (web): a quick drag is not a tap; the viewer root mounts fresh to
 
 test('visual 6 (iOS): a caption tap that steps never leaves the next moment held', (t) => {
   const src = readFileSync(join(__dirname, '../src/screens/Momentos.js'), 'utf8')
-  const effect = src.slice(src.indexOf('captionOffsetRef.current = 0\n'), src.indexOf('}, [itemKey, progress])'))
+  const effect = src.slice(src.indexOf('captionOffsetRef.current = 0\n'), src.indexOf('}, [itemKey])'))
   t.ok(effect.includes('setHeld(false)'), 'the hold is cleared whenever the moment changes')
 })
 
@@ -877,7 +880,7 @@ test('momento music gates are policy and capability based, with no viewer probe 
     t.ok(src.includes('musicOriginOf(node)'), 'capability origin')
   }
   t.ok(viewer.includes('momentMusicOf(item)'), 'only a valid music item plays')
-  t.absent(viewer.includes('AUTO_ADVANCE_MS'), 'every hold comes from holdMsOf')
+  t.absent(viewer.includes('AUTO_ADVANCE_MS'), 'durations come from the pure photo/music and video helpers')
   t.ok(composer.includes("modes={['snippet']}"), 'moment picker only offers snippets')
   t.ok(composer.includes('displayText(moment.music.item.title)') && composer.includes('displayText(moment.music.item.artist)'), 'provider text is sanitized')
   t.absent(/audius|MusicPicker|MomentMusic/.test(code('src/ui/MomentosStrip.js')), 'the strip never asks the catalog')
@@ -953,14 +956,14 @@ test('a policy response after closing the composer never probes the node', async
   t.is(probes, 0)
 })
 
-async function viewerHost ({ music = true, policy = true, ready = true, reduce = false, photo = 'ok' } = {}) {
+async function viewerHost ({ music = true, policy = true, ready = true, reduce = false, photo = 'ok', media = null } = {}) {
   const moments = await import('../src/moments.js')
   const seen = await import('../src/momentSeen.js')
   const { musicOriginOf } = await import('../src/music.js')
   const timers = clock()
   const animations = []
   const node = { hosted: true, epoch: 1, request: () => { throw new Error('unexpected viewer request') } }
-  const item = (seq) => ({ seq, ref: A + ':' + seq, at: new Date().toISOString(), text: '', ...(music ? { music: { id: 'abc', start: 30 } } : {}) })
+  const item = (seq) => ({ seq, ref: A + ':' + seq, at: new Date().toISOString(), text: '', media, ...(music ? { music: { id: 'abc', start: 30 } } : {}) })
   const data = { phase: 'ready', authors: [], own: [item(2), item(1)] }
   const seenState = { loaded: true, seen: [], mark () {} }
   const env = { node, reduce, photo, back: 0, policyCalls: 0, opened: [] }
@@ -970,7 +973,7 @@ async function viewerHost ({ music = true, policy = true, ready = true, reduce =
     stopAnimation (fn) { fn(this.value) }
     interpolate () { return this.value }
   }
-  const elements = ['ActivityIndicator', 'Image', 'Pressable', 'ScrollView', 'Text', 'View', 'ActionsSheet', 'Avatar', 'Icon', 'Pill', 'Scrim', 'IconAction', 'MomentMusic', 'Soft']
+  const elements = ['ActivityIndicator', 'Image', 'Pressable', 'ScrollView', 'Text', 'View', 'ActionsSheet', 'Avatar', 'Icon', 'Pill', 'Scrim', 'IconAction', 'MomentMusic', 'Soft', 'VideoPlayer']
   const deps = {
     ...moments,
     ...seen,
@@ -1141,6 +1144,10 @@ test('momento sends only a chosen music reference, checks author text and never 
     momentMusicOf,
     useMomentMusicAvailable: () => available,
     useChatAttachments: () => photo,
+    useVideoDraft: () => ({ state: { phase: 'empty', file: null }, draft: { state: { phase: 'empty', file: null }, clear () {} } }),
+    ...(await import('../src/videoCompose.js')),
+    pickVideo: null,
+    prepareVideo: null,
     refusalOf: (text) => { checked.push(text); return '' },
     momentsChanged () {},
     LOCKED_MESSAGE: 'locked',
@@ -1188,7 +1195,7 @@ test('T22 fix 1: a saved music chip and its remove button follow the send gate',
   t.absent(closed.some((n) => n.type === 'View'), 'saved choice hidden while the gate is closed')
   t.absent(closed.some((n) => n.props.accessibilityLabel === 'Remover música'), 'remove button hidden too')
   let removed = false
-  const opened = treeNodes(h.render({ moment: { music, musicAvailable: true, setMusic: (value) => { removed = value === null } } }))
+  const opened = treeNodes(h.render({ moment: { music, musicAvailable: true, removeMusic: () => { removed = true } } }))
   t.ok(opened.some((n) => n.type === 'Text'), 'chip returns when the gate opens')
   opened.find((n) => n.props.accessibilityLabel === 'Remover música').props.onPress()
   t.ok(removed)
@@ -1443,4 +1450,616 @@ test('T22 fix 7: an ignored close pauses the same snippet and resumes the remain
   t.is(h.music()?.props.key, key, 'ignored close resumes without remount')
   t.absent(h.music()?.props.paused)
   t.is(h.animation()?.duration, 9000, 'same remaining bar, with no new onStart')
+})
+
+function momentHook (name, signature, deps = {}) {
+  const slots = []
+  let cursor = 0
+  let pending = []
+  let dirty = false
+  let args
+  let result
+  const same = (a, b) => a && b && a.length === b.length && a.every((v, i) => Object.is(v, b[i]))
+  const hooks = {
+    useRef (value) {
+      const i = cursor++
+      if (!slots[i]) slots[i] = { current: value }
+      return slots[i]
+    },
+    useState (value) {
+      const i = cursor++
+      if (!slots[i]) slots[i] = { value }
+      return [slots[i].value, (next) => {
+        const value = typeof next === 'function' ? next(slots[i].value) : next
+        if (!Object.is(value, slots[i].value)) { slots[i].value = value; dirty = true }
+      }]
+    },
+    useMemo (fn, dependencies) {
+      const i = cursor++
+      if (!slots[i] || !same(slots[i].deps, dependencies)) slots[i] = { value: fn(), deps: dependencies }
+      return slots[i].value
+    },
+    useEffect (fn, dependencies) {
+      const i = cursor++
+      if (!slots[i] || !same(slots[i].deps, dependencies)) {
+        pending.push({ i, fn, cleanup: slots[i]?.cleanup })
+        slots[i] = { deps: dependencies }
+      }
+    }
+  }
+  hooks.useCallback = (fn, dependencies) => hooks.useMemo(() => fn, dependencies)
+  const scope = { ...hooks, ...deps }
+  const body = fnBody(read('src/screens/Momentos.js'), 'function ' + name)
+  const hook = new Function(...Object.keys(scope), 'return function (' + signature + ') ' + body)(...Object.values(scope)) // eslint-disable-line no-new-func
+  const render = (...next) => {
+    if (next.length) args = next
+    do {
+      dirty = false
+      cursor = 0
+      result = hook(...args)
+      const effects = pending
+      pending = []
+      for (const effect of effects) effect.cleanup?.()
+      for (const effect of effects) slots[effect.i].cleanup = effect.fn()
+    } while (dirty)
+    return result
+  }
+  return {
+    render,
+    get value () { return result },
+    unmount () { for (const slot of slots) slot.cleanup?.() }
+  }
+}
+
+function playbackHarness (overrides = {}) {
+  let now = 0
+  let serial = 0
+  const timers = new Map()
+  const animations = []
+  const steps = []
+  const later = (fn, ms) => { const id = ++serial; timers.set(id, { at: now + ms, fn }); return id }
+  const cancel = (id) => timers.delete(id)
+  const Animated = {
+    Value: class {
+      constructor (value) { this.value = value }
+      setValue (value) { this.value = value }
+      stopAnimation (cb) { cb(this.value) }
+    },
+    timing (value, config) {
+      const from = value.value
+      const start = now
+      let timer
+      let onComplete
+      const anim = {
+        duration: config.duration,
+        start (onFinish) {
+          onComplete = onFinish
+          timer = later(() => { value.setValue(1); onFinish({ finished: true }) }, config.duration)
+        },
+        stop () {
+          cancel(timer)
+          value.setValue(from + (1 - from) * Math.min(1, (now - start) / config.duration))
+          onComplete({ finished: false })
+        },
+        finishLate () { onComplete({ finished: true }) }
+      }
+      animations.push(anim)
+      return anim
+    }
+  }
+  const h = momentHook('useMomentPlayback', '{ itemKey, ms, video, loaded, active, autoOn, step, control }', { Animated, Easing: { linear: 'linear' }, setTimeout: later, clearTimeout: cancel })
+  let props = { itemKey: A + ':1', ms: 15000, video: true, loaded: true, active: true, autoOn: true, step: (dir) => steps.push(dir), ...overrides }
+  h.render(props)
+  return {
+    ...h,
+    get value () { return h.value },
+    animations,
+    steps,
+    render (patch = {}) { props = { ...props, ...patch }; return h.render(props) },
+    tick (ms) {
+      const until = now + ms
+      while (true) {
+        const due = [...timers].filter(([, timer]) => timer.at <= until).sort((a, b) => a[1].at - b[1].at)[0]
+        if (!due) break
+        now = due[1].at
+        timers.delete(due[0])
+        due[1].fn()
+        h.render(props)
+      }
+      now = until
+    }
+  }
+}
+
+test('video moments use the item duration and the existing Animated clock', async (t) => {
+  const { segmentMs } = await import('../src/moments.js')
+  const video = { media: { mime: 'video/mp4', ms: 15000 } }
+  t.is(segmentMs(video, 8000), 8000, 'the read duration wins')
+  const h = playbackHarness({ ms: segmentMs(video) })
+  t.teardown(h.unmount)
+  t.absent(h.value.playing, 'waits for ready')
+  t.is(h.animations.length, 0)
+  h.value.handleReady({ durationMs: 15000 })
+  h.render()
+  t.ok(h.value.playing)
+  t.is(h.animations[0].duration, 15000)
+  h.tick(14999)
+  t.is(h.steps.length, 0)
+  h.tick(1)
+  t.alike(h.steps, ['next'])
+  h.value.handleEnd()
+  h.value.handleEnd()
+  t.is(h.steps.length, 1, 'timer and repeated player ends advance once')
+  h.render({ itemKey: A + ':2', video: false, ms: segmentMs({ media: { mime: 'image/jpeg' } }, 12000) })
+  t.is(h.animations.at(-1).duration, 5000, 'photos keep five seconds')
+  h.tick(5000)
+  t.is(h.steps.length, 2)
+})
+
+test('video hold resumes from the last player position; photos keep elapsed time', (t) => {
+  const h = playbackHarness()
+  t.teardown(h.unmount)
+  h.value.handleReady({ durationMs: 15000 })
+  h.render()
+  h.tick(3000)
+  h.value.handleProgress({ ms: 2750, playing: true })
+  h.render({ active: false })
+  t.absent(h.value.playing, 'hold pauses the picture')
+  t.ok(Math.abs(h.value.progress.value - 2750 / 15000) < 1e-12, 'bar follows last reported position on hold')
+  h.value.handleProgress({ ms: 2900, playing: false })
+  h.tick(20000)
+  t.is(h.steps.length, 0)
+  h.render({ active: true })
+  t.ok(h.value.playing)
+  t.is(h.animations.at(-1).duration, 12100, 'pause event refines the remaining time')
+  h.tick(12100)
+  t.is(h.steps.length, 1)
+  h.render({ itemKey: A + ':2', ms: 5000, video: false })
+  h.tick(2000)
+  h.render({ active: false })
+  h.tick(10000)
+  h.render({ active: true })
+  t.is(h.animations.at(-1).duration, 3000, 'photo resumes its remaining three seconds')
+})
+
+test('late video callbacks cannot affect the next visit, even to the same item', (t) => {
+  const h = playbackHarness()
+  t.teardown(h.unmount)
+  const old = h.value
+  old.handleReady({ durationMs: 15000 })
+  h.render()
+  const animation = h.animations[0]
+  old.handleEnd()
+  t.is(h.steps.length, 1, 'player end can advance first')
+  animation.finishLate()
+  t.is(h.steps.length, 1, 'timer cannot advance it again')
+  h.render({ itemKey: B + ':1' })
+  h.render({ itemKey: A + ':1' })
+  old.handleReady({ durationMs: 15000 })
+  old.handleEnd()
+  old.handleProgress({ ms: 15000, playing: false })
+  old.handleSoundRefused()
+  old.handlePlayBlocked()
+  animation.finishLate()
+  h.render()
+  t.is(h.steps.length, 1, 'late end is ignored')
+  t.absent(h.value.playing, 'old ready does not start the new visit')
+  t.absent(h.value.muted, 'old sound refusal is ignored')
+  t.absent(h.value.blocked, 'old playback block is ignored')
+  t.is(h.value.progress.value, 0, 'old progress is ignored')
+  h.render({ autoOn: false })
+  old.handleEnd()
+  h.render()
+  t.is(h.value.progress.value, 0, 'late end cannot fill the reduced-motion bar')
+  h.value.handlePlayBlocked()
+  h.render()
+  old.handlePlayBlocked()
+  h.render()
+  t.ok(h.value.blocked, 'old block cannot overwrite the current block')
+  old.handlePlay()
+  h.render()
+  t.ok(h.value.blocked, 'old play cannot clear the current block')
+})
+
+test('a never-ready video advances two seconds after loading plus its duration', (t) => {
+  const h = playbackHarness({ loaded: false })
+  t.teardown(h.unmount)
+  h.tick(10000)
+  t.is(h.animations.length, 0, 'no clock before the file arrives')
+  h.render({ loaded: true })
+  h.tick(1999)
+  t.is(h.animations.length, 0)
+  h.tick(1)
+  t.ok(h.value.playing, 'ready timeout allows playback and the clock')
+  t.is(h.animations[0].duration, 15000)
+  h.tick(14999)
+  t.is(h.steps.length, 0)
+  h.tick(1)
+  t.is(h.steps.length, 1)
+})
+
+test('reduced motion requires Reproduzir and never starts the auto-advance timer', (t) => {
+  const h = playbackHarness({ autoOn: false })
+  t.teardown(h.unmount)
+  h.value.handleReady({ durationMs: 15000 })
+  h.tick(20000)
+  t.absent(h.value.playing)
+  t.is(h.animations.length, 0)
+  h.value.handlePlay()
+  h.render()
+  t.ok(h.value.playing, 'explicit play starts the picture')
+  t.is(h.animations.length, 0, 'explicit play does not start the clock')
+  h.value.handleProgress({ ms: 6000, playing: true })
+  t.is(h.value.progress.value, 0.4, 'progress drives the bar')
+  h.render({ active: false })
+  t.absent(h.value.playing, 'hold also pauses manual playback')
+  h.render({ active: true })
+  t.ok(h.value.playing)
+  h.value.handleEnd()
+  h.render()
+  t.absent(h.value.playing)
+  t.ok(h.value.ended, 'end offers the next button')
+  t.is(h.value.progress.value, 1)
+  h.tick(30000)
+  t.is(h.steps.length, 0, 'end and elapsed time never advance')
+  h.render({ itemKey: A + ':2' })
+  t.absent(h.value.playing, 'the next item needs its own press')
+})
+
+test('video sound falls back to muted and a new item starts with sound', (t) => {
+  const h = playbackHarness()
+  t.teardown(h.unmount)
+  t.absent(h.value.muted)
+  h.value.handleSoundRefused()
+  h.render()
+  t.ok(h.value.muted)
+  h.value.handleUnmute()
+  h.render()
+  t.absent(h.value.muted, 'Ativar som enables sound')
+  h.value.handleSoundRefused()
+  h.render({ itemKey: A + ':2' })
+  t.absent(h.value.muted)
+  const src = read('src/screens/Momentos.js')
+  t.ok(src.includes("controls={false} fit='contain'"), 'inline player without controls')
+  t.ok(src.includes("<Pill label='Reproduzir' onPress={playback.handlePlay}"))
+  t.ok(src.includes("<Pill label='Ativar som' onPress={playback.handleUnmute}"))
+  t.ok(src.includes("<Pill label='Próximo momento' onPress={() => step('next')}"))
+  t.ok(src.includes('video ? VIDEO_UNAVAILABLE : PHOTO_UNAVAILABLE'), 'unavailable text follows the media type')
+})
+
+// The player's control stands in for the browser: what each press did to it
+// is logged next to the state the press had rendered by then.
+function controlHarness (overrides = {}) {
+  const log = []
+  const control = { current: null }
+  const h = playbackHarness({ control, ...overrides })
+  control.current = {
+    play: () => log.push(['play', h.value.playing]),
+    unmute: () => log.push(['unmute', h.value.muted])
+  }
+  return { h, log, control }
+}
+
+test('Reproduzir starts the player inside the press, before the state changes', (t) => {
+  const { h, log } = controlHarness({ autoOn: false })
+  t.teardown(h.unmount)
+  h.value.handlePlay()
+  t.alike(log, [['play', false]], 'play() ran synchronously, before playing was rendered')
+  h.render()
+  t.ok(h.value.playing, 'the state still follows')
+  h.render({ active: false })
+  h.value.handlePlay()
+  t.is(log.length, 1, 'no start while a hold keeps the props paused')
+  h.render({ active: true, itemKey: A + ':2' })
+  const old = h.value
+  h.render({ itemKey: A + ':3' })
+  old.handlePlay()
+  t.is(log.length, 1, 'a press from a previous visit does nothing')
+})
+
+test('Reproduzir after a blocked start plays inside the press', (t) => {
+  const { h, log } = controlHarness()
+  t.teardown(h.unmount)
+  h.value.handleReady({ durationMs: 15000 })
+  h.render()
+  h.value.handlePlayBlocked()
+  h.render()
+  t.ok(h.value.blocked)
+  t.absent(h.value.playing)
+  h.value.handlePlay()
+  t.alike(log, [['play', false]], 'play() ran before the block was cleared')
+  h.render()
+  t.ok(h.value.playing)
+  t.absent(h.value.blocked)
+})
+
+test('Ativar som unmutes the player inside the press, before the state changes', (t) => {
+  const { h, log } = controlHarness()
+  t.teardown(h.unmount)
+  h.value.handleSoundRefused()
+  h.render()
+  h.value.handleUnmute()
+  t.alike(log, [['unmute', true]], 'unmute() ran synchronously, while muted was still rendered')
+  h.render()
+  t.absent(h.value.muted)
+  h.value.handleSoundRefused()
+  h.render()
+  const old = h.value
+  h.render({ itemKey: A + ':2' })
+  old.handleUnmute()
+  t.is(log.length, 1, 'a press from a previous visit unmutes nothing')
+  const bare = playbackHarness()
+  t.teardown(bare.unmount)
+  bare.value.handlePlay()
+  bare.value.handleUnmute()
+  t.pass('no control is fine')
+})
+
+test('the viewer passes one control to the hook and to the player', (t) => {
+  const src = read('src/screens/Momentos.js')
+  t.ok(src.includes('const videoControl = useRef(null)'), 'the viewer owns the control')
+  t.ok(/step,\s*control: videoControl\s*\}\)/.test(src), 'the hook gets it')
+  t.ok(src.includes('onPlayBlocked={playback.handlePlayBlocked} control={videoControl} />'), 'the player gets it')
+  const hook = src.slice(src.indexOf('function useMomentPlayback'), src.indexOf('// The rings the viewer plays'))
+  t.ok(/handlePlay: \(\) => \{\s*if \(current\.current\.visit !== visit\) return\s*if \(current\.current\.canPlay\) control\?\.current\?\.play\(\)\s*setBlocked\(null\)\s*setManual\(visit\)/.test(hook), 'play() comes before the state updates')
+  t.ok(/handleUnmute: \(\) => \{\s*if \(current\.current\.visit === visit\) control\?\.current\?\.unmute\(\)\s*setMuted\(null\)/.test(hook), 'unmute() comes before the state update')
+})
+
+function mediaHarness (answer, { adoptFails = false, urlFails = false, expected = { mime: answer.mime, ms: 15000 } } = {}) {
+  const forgotten = []
+  const revoked = []
+  const adopted = []
+  const urls = []
+  let answerReady
+  const media = {
+    read: () => new Promise((resolve) => { answerReady = resolve }),
+    forgetReadFile: (name) => forgotten.push(name)
+  }
+  const h = momentHook('useMomentPhoto', 'author, seq, expected', {
+    useNode: () => ({ media }),
+    isObject: (value) => value !== null && typeof value === 'object',
+    IMAGE_MIMES: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'],
+    wipe: (bytes) => { if (bytes instanceof Uint8Array) bytes.fill(0) },
+    adoptVideoFile: (uri) => { adopted.push(uri); if (adoptFails) throw new Error('move failed'); return 'file:///cache/video.mp4' },
+    urlFromBytes: (bytes, mime) => { urls.push({ bytes: bytes.slice(), mime }); if (urlFails) throw new Error('blob failed'); return 'blob:video' },
+    revokeUrl: (uri) => revoked.push(uri)
+  })
+  h.render(A, 1, expected)
+  return {
+    ...h,
+    get value () { return h.value },
+    forgotten,
+    revoked,
+    adopted,
+    urls,
+    async settle () { answerReady(answer); await Promise.resolve(); return h.render() }
+  }
+}
+
+test('native video reads are adopted, forgotten and deleted on exit or item change', async (t) => {
+  const uri = 'file:///documents/varanda/media-read/' + 'ab'.repeat(16) + '.bin'
+  const h = mediaHarness({ uri, mime: 'video/mp4', w: 640, h: 480, ms: 15000 })
+  await h.settle()
+  t.is(h.value.phase, 'ok')
+  t.is(h.value.ms, 15000)
+  t.alike(h.adopted, [uri])
+  t.alike(h.forgotten, ['ab'.repeat(16) + '.bin'])
+  h.render(A, 2, { mime: 'video/mp4', ms: 15000 })
+  t.alike(h.revoked, ['file:///cache/video.mp4'], 'changing item deletes its adopted file')
+  h.unmount()
+  t.is(h.revoked.length, 1)
+  const photo = mediaHarness({ uri, mime: 'image/jpeg' })
+  await photo.settle()
+  t.is(photo.value.uri, uri, 'photo path is unchanged')
+  t.is(photo.adopted.length, 0)
+  t.is(photo.forgotten.length, 0, 'photo read file stays until exit')
+  photo.unmount()
+  t.is(photo.forgotten.length, 1)
+})
+
+test('refused, incomplete, failed and late media answers always forget the read file', async (t) => {
+  const uri = 'file:///documents/varanda/media-read/' + 'ab'.repeat(16) + '.bin'
+  for (const answer of [
+    { uri, mime: 'application/octet-stream' },
+    { uri, mime: 'video/mp4', w: 640, h: 480 },
+    { uri, mime: 'video/mp4', w: 640, ms: 15000 },
+    { uri, mime: 'video/mp4', h: 480, ms: 15000 },
+    { uri, mime: 'video/mp4', w: 640, h: 480, ms: 0 }
+  ]) {
+    const h = mediaHarness(answer)
+    await h.settle()
+    t.is(h.value.phase, 'off')
+    t.is(h.forgotten.length, 1)
+    t.is(h.adopted.length, 0)
+    h.unmount()
+  }
+  const answer = { uri, mime: 'video/mp4', w: 640, h: 480, ms: 15000 }
+  const failed = mediaHarness(answer, { adoptFails: true })
+  await failed.settle()
+  t.is(failed.value.phase, 'off')
+  t.is(failed.forgotten.length, 1, 'failed adoption still forgets')
+  failed.unmount()
+  const late = mediaHarness(answer)
+  late.unmount()
+  await late.settle()
+  t.is(late.adopted.length, 0, 'does not adopt after exit')
+  t.is(late.forgotten.length, 1, 'late native answer is deleted')
+})
+
+test('web video answers use a typed blob and wipe bytes on every path', async (t) => {
+  // The node already checked the MP4; the UI owns only its transient copy.
+  const bytes = Uint8Array.from([0, 0, 0, 16, 102, 116, 121, 112, 105, 115, 111, 109, 0, 0, 0, 0])
+  const answer = () => ({ bytes: bytes.slice(), mime: 'video/mp4', w: 640, h: 480, ms: 15000 })
+  const got = answer()
+  const h = mediaHarness(got)
+  await h.settle()
+  t.is(h.value.phase, 'ok')
+  t.is(h.urls[0].mime, 'video/mp4')
+  t.alike(h.urls[0].bytes, bytes, 'URL receives the bytes before wiping')
+  t.ok(got.bytes.every((n) => n === 0))
+  h.unmount()
+  t.alike(h.revoked, ['blob:video'])
+  for (const mode of ['failed', 'refused', 'late']) {
+    const got = answer()
+    if (mode === 'refused') got.mime = 'video/other'
+    const h = mediaHarness(got, { urlFails: mode === 'failed' })
+    if (mode === 'late') h.unmount()
+    await h.settle()
+    t.ok(got.bytes.every((n) => n === 0), mode + ': bytes wiped')
+    if (mode !== 'late') t.is(h.value.phase, 'off')
+    h.unmount()
+  }
+})
+
+function playOffered (playback, reduce) {
+  const src = read('src/screens/Momentos.js')
+  const expression = src.match(/const showPlay = ([^\n]+)/)[1]
+  return new Function('playback', 'reduce', 'return ' + expression)(playback, reduce) // eslint-disable-line no-new-func
+}
+
+test('blocked playback holds the clock and Reproduzir resumes the same visit', (t) => {
+  for (const autoOn of [true, false]) {
+    const h = playbackHarness({ autoOn })
+    t.teardown(h.unmount)
+    h.value.handleReady()
+    if (!autoOn) h.value.handlePlay()
+    h.render()
+    t.ok(h.value.playing, 'player initially plays')
+    h.tick(3000)
+    h.value.handleProgress({ ms: 2500, playing: true })
+    h.value.handlePlayBlocked()
+    h.render()
+    t.ok(h.value.blocked)
+    t.absent(h.value.playing, 'block changes the playing prop to false')
+    t.ok(playOffered(h.value, !autoOn), 'block offers Reproduzir even after manual play')
+    h.tick(30000)
+    t.is(h.steps.length, 0, 'block holds the clock')
+    h.value.handlePlay()
+    h.render()
+    t.absent(h.value.blocked)
+    t.ok(h.value.playing, 'press changes the playing prop back to true')
+    t.absent(playOffered(h.value, !autoOn), 'press hides Reproduzir')
+    if (autoOn) t.is(h.animations.at(-1).duration, 12500, 'resumes from player position')
+    else t.is(h.animations.length, 0, 'reduced motion still has no clock')
+    h.tick(12500)
+    h.value.handleEnd()
+    t.is(h.steps.length, autoOn ? 1 : 0, 'only autoplay advances, once')
+  }
+  const src = read('src/screens/Momentos.js')
+  t.ok(src.includes("{showPlay ? <Pill label='Reproduzir' onPress={playback.handlePlay} /> : null}"), 'Viewer uses the offered play action')
+  t.ok(src.includes("const playbackControls = video && photo.phase === 'ok' && (playback.muted || showPlay || (reduce === true && playback.ended))"), 'play action makes the control bar visible')
+})
+
+test('a photo close ignored during a slide may advance again after hold and release', (t) => {
+  const h = playbackHarness({ video: false, ms: 5000 })
+  t.teardown(h.unmount)
+  h.tick(5000)
+  const oldAnimation = h.animations[0]
+  oldAnimation.finishLate()
+  t.is(h.steps.length, 1, 'one advance for the first end')
+  h.render({ active: false })
+  h.tick(1000)
+  h.render({ active: true })
+  t.is(h.animations.at(-1).duration, 0, 'same photo resumes with no time left')
+  oldAnimation.finishLate()
+  t.is(h.steps.length, 1, 'old completion remains cancelled after resume')
+  h.tick(0)
+  t.is(h.steps.length, 2, 'resuming allows another close attempt')
+  h.animations.at(-1).finishLate()
+  t.is(h.steps.length, 2, 'the resumed end is also guarded')
+})
+
+test('media MIME and video duration must match the item before becoming playable', async (t) => {
+  const { segmentMs } = await import('../src/moments.js')
+  for (const [expected, mime, ms] of [
+    [{ mime: 'image/jpeg' }, 'video/mp4', 15000],
+    [{ mime: 'video/mp4', ms: 15000 }, 'image/jpeg', undefined],
+    [{ mime: 'image/jpeg' }, 'image/png', undefined],
+    [{ mime: 'video/mp4', ms: 15000 }, 'video/mp4', 8000]
+  ]) {
+    const answer = { mime, ms, w: 640, h: 480, uri: 'file:///cache/read.bin', bytes: Uint8Array.from([1, 2, 3]) }
+    const h = mediaHarness(answer, { expected })
+    const item = { media: expected }
+    const before = segmentMs(item, h.value.ms)
+    await h.settle()
+    t.is(h.value.phase, 'off', 'mismatch is unavailable')
+    t.is(h.value.uri, null)
+    t.is(segmentMs(item, h.value.ms), before, 'read never changes segment duration')
+    t.is(h.adopted.length + h.urls.length, 0, 'mismatch is never displayed')
+    t.alike(h.forgotten, ['read.bin'], 'read file is deleted')
+    t.ok(answer.bytes.every((n) => n === 0), 'bytes are wiped')
+    h.unmount()
+  }
+  const src = read('src/screens/Momentos.js')
+  t.ok(src.includes('useMomentPhoto(author, item ? item.seq : null, item?.media)'), 'Viewer passes the expected media')
+  t.ok(src.includes('video ? VIDEO_UNAVAILABLE : PHOTO_UNAVAILABLE'), 'unavailable text uses the item kind')
+})
+
+test('video has the same accessible name as the photo it replaces', (t) => {
+  const src = read('src/screens/Momentos.js')
+  t.ok(/<View style=\{styles.photo\} accessible accessibilityLabel=\{'momento de ' \+ name\}>\s*<VideoPlayer\b[^>]+\/>\s*<\/View>/.test(src), 'accessible labeled wrapper around VideoPlayer')
+})
+
+test('reduced motion fills the current segment until a video is playable', (t) => {
+  const src = read('src/screens/Momentos.js')
+  const expression = src.match(/<Animated.View style=\{\[styles.segmentFill, \{ width: ([^\n]+?) \}\]\}/)[1]
+  const width = new Function('autoOn', 'video', 'photo', 'fill', 'return ' + expression) // eslint-disable-line no-new-func
+  for (const phase of ['loading', 'off', 'ok']) {
+    t.is(width(false, false, { phase }, 'progress'), '100%', 'photo stays full: ' + phase)
+    t.is(width(false, true, { phase }, 'progress'), phase === 'ok' ? 'progress' : '100%', 'video: ' + phase)
+    t.is(width(true, true, { phase }, 'progress'), 'progress', 'autoplay unchanged: ' + phase)
+  }
+})
+
+test('Reproduzir waits for known reduced motion unless playback was blocked', (t) => {
+  for (const reduce of [null, false, true]) {
+    t.is(playOffered({ blocked: false, started: false, ended: false }, reduce), reduce === true, 'initial play offer: ' + reduce)
+    t.ok(playOffered({ blocked: true, started: false, ended: false }, reduce), 'block always offers play: ' + reduce)
+  }
+  t.absent(playOffered({ blocked: false, started: true, ended: false }, true), 'manual playback hides the button')
+  t.absent(playOffered({ blocked: false, started: true, ended: true }, true), 'finished video offers next instead')
+})
+
+test('Viewer wires every player event and keys the player by item and restart', (t) => {
+  const player = read('src/screens/Momentos.js').match(/<VideoPlayer\b[^>]+\/>/)[0]
+  for (const prop of [
+    'playing={playback.playing}',
+    'onReady={playback.handleReady}',
+    'onProgress={playback.handleProgress}',
+    'onEnd={playback.handleEnd}',
+    'onError={handlePhotoError}',
+    'onSoundRefused={playback.handleSoundRefused}',
+    'onPlayBlocked={playback.handlePlayBlocked}',
+    "key={itemKey + ':' + playback.restartTick}"
+  ]) t.ok(player.includes(prop), prop)
+})
+
+test('viewer ignores music on video, keeps its own sound and uses the video segment clock', async (t) => {
+  const h = await viewerHost({ media: { mime: 'video/mp4', ms: 8000 } })
+  t.teardown(h.unmount)
+  t.absent(h.music(), 'no music player for a video record')
+  t.is(h.env.policyCalls, 0, 'no music policy request')
+  t.absent(h.timers.has(3000), 'no music start wait')
+  const player = () => treeNodes(h.render()).find((n) => n.type === 'VideoPlayer')
+  t.absent(player().props.muted, 'video starts with its own sound')
+  player().props.onReady()
+  h.render()
+  t.ok(player().props.playing)
+  t.is(h.animation().duration, 8000)
+  player().props.onSoundRefused()
+  h.render()
+  t.ok(h.button('Ativar som'), 'main sound control stays available')
+  t.is(h.animations.length, 1, 'only one segment clock')
+})
+
+test('momento music button follows the draft availability gate', (t) => {
+  const src = read('src/screens/Publicar.js')
+  const start = src.indexOf('              {moment.musicAvailable\n')
+  const jsx = src.slice(start, src.indexOf('              {moment.musicAvailable &&', start))
+  const h = hookHost('function Button ({ moment, node }) { return <>' + jsx + '</> }', 'Button', { Pill: 'Pill' })
+  t.teardown(h.unmount)
+  for (const musicAvailable of [true, false]) {
+    const tree = h.render({ moment: { musicAvailable }, node: { online: true } })
+    t.is(treeNodes(tree).some((n) => n.props.label === 'Música'), musicAvailable)
+  }
 })

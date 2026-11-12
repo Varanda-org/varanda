@@ -12,8 +12,9 @@
 // through displayText.
 //
 // Tap the right half: next; the left half: previous; hold: pause; swipe down
-// or the close button: close. Every item advances by itself after
-// its photo or music hold, paused while pressed or a menu is open, and never
+// or the close button: close. Photos advance after five seconds (15 with
+// music, counted from audio start), videos after their duration, paused
+// while pressed or in a menu, and never
 // when the system asks for reduced motion. Past the last item of an author
 // the next author in ringOrder plays, then the viewer closes.
 //
@@ -33,14 +34,15 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
-import { holdMsOf, momentMusicOf, canReply, expiresIn, firstUnseenIndex, nextIndex, progressOf, replyContext, ringOrder } from '../moments'
+import { holdMsOf, momentMusicOf, canReply, expiresIn, firstUnseenIndex, nextIndex, progressOf, replyContext, ringOrder, segmentMs } from '../moments'
 import { audiusPolicy, audiusReady } from '../account'
 import { musicOriginOf } from '../music'
 import { openExternal } from '../openExternal'
 import { MomentMusic } from '../ui/MomentMusic'
 import { liveAuthors, liveItems, momentsOf } from '../momentSeen'
 import { loadMomentSeen, markMomentSeen, onMomentSeen } from '../momentSeenStore'
-import { revokeUrl, urlFromBytes } from '../media/display'
+import { adoptVideoFile, revokeUrl, urlFromBytes } from '../media/display'
+import VideoPlayer from '../media/VideoPlayer'
 import { relativeTime } from '../format'
 import { whoOf } from '../who'
 import { ConfirmStack, ErrorText, Soft, UNCERTAIN, errorText, useNow } from '../ui'
@@ -57,11 +59,12 @@ import { paletteFor } from '../appearance.js'
 import { STACK_MS } from '../stackMotion'
 
 export const PHOTO_UNAVAILABLE = 'Foto indisponível'
-export const OWN_NOTE = 'A foto sai dos servidores em até 7 dias.'
+export const VIDEO_UNAVAILABLE = 'vídeo indisponível'
+export const OWN_NOTE = 'O momento sai dos servidores em até 7 dias.'
 export const DELETE_TITLE = 'Apagar momento?'
 export const DELETE_BODY = 'O momento deixa de aparecer para quem segue você. Cópias que outras pessoas fizeram não voltam.'
 // A moment past its 24 hours is already shown to nobody.
-export const DELETE_BODY_PAST = 'O momento sai do seu diário. A foto já não aparece para ninguém.'
+export const DELETE_BODY_PAST = 'O momento sai do seu diário. Já não aparece para ninguém.'
 export const NONE_TEXT = 'Nenhum momento agora.'
 const OFF_TEXT = 'Momentos disponíveis no app hospedado.'
 const IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif']
@@ -229,11 +232,13 @@ function wipe (bytes) {
   try { if (bytes instanceof Uint8Array) bytes.fill(0) } catch {}
 }
 
-// The photo of author:seq -> { phase: 'loading' | 'ok' | 'off', uri }. The
+// The media of author:seq -> { phase: 'loading' | 'ok' | 'off', uri }. The
 // URL is released when the item changes or the viewer closes.
-function useMomentPhoto (author, seq) {
+function useMomentPhoto (author, seq, expected) {
   const node = useNode()
   const media = node.media && typeof node.media.read === 'function' ? node.media : null
+  const mime = expected?.mime
+  const ms = expected?.ms
   const key = author + ':' + seq
   const [state, setState] = useState({ key: null, phase: 'loading', uri: null })
   useEffect(() => {
@@ -245,37 +250,52 @@ function useMomentPhoto (author, seq) {
     let release = null
     setState({ key, phase: 'loading', uri: null })
     media.read({ kind: 'moment', author, seq }).then((got) => {
-      if (!isObject(got) || !IMAGE_MIMES.includes(got.mime)) {
+      const forget = () => {
+        if (!isObject(got) || typeof got.uri !== 'string') return
+        const name = got.uri.slice(got.uri.lastIndexOf('/') + 1)
+        try { if (typeof media.forgetReadFile === 'function') media.forgetReadFile(name) } catch {}
+      }
+      const video = isObject(got) && got.mime === 'video/mp4'
+      const valid = isObject(got) && got.mime === mime && (video
+        ? got.ms === ms && [got.w, got.h, got.ms].every((n) => Number.isSafeInteger(n) && n > 0)
+        : IMAGE_MIMES.includes(got.mime))
+      if (!alive || !valid) {
+        forget()
         if (isObject(got)) wipe(got.bytes)
         if (alive) setState({ key, phase: 'off', uri: null })
         return
       }
       let uri = null
-      if (got.bytes instanceof Uint8Array) {
-        try {
+      try {
+        if (got.bytes instanceof Uint8Array) {
           uri = urlFromBytes(got.bytes, got.mime)
-        } catch {
-          uri = null
-        } finally {
-          wipe(got.bytes)
+          forget()
+        } else if (typeof got.uri === 'string' && got.uri.startsWith('file://')) {
+          if (video) {
+            uri = adoptVideoFile(got.uri)
+            forget()
+          } else {
+            uri = got.uri
+            release = forget
+          }
+        } else {
+          forget()
         }
-        if (typeof uri === 'string' && uri !== '') {
-          const shown = uri
-          release = () => revokeUrl(shown)
-        }
-      } else if (typeof got.uri === 'string' && got.uri.startsWith('file://')) {
-        uri = got.uri
-        const name = uri.slice(uri.lastIndexOf('/') + 1)
-        release = () => {
-          try { if (typeof media.forgetReadFile === 'function') media.forgetReadFile(name) } catch {}
-        }
+      } catch {
+        forget()
+      } finally {
+        wipe(got.bytes)
+      }
+      if (typeof uri === 'string' && uri !== '' && release === null) {
+        const shown = uri
+        release = () => revokeUrl(shown)
       }
       if (!alive) {
         if (release) release()
         release = null
         return
       }
-      setState({ key, phase: typeof uri === 'string' && uri !== '' ? 'ok' : 'off', uri })
+      setState({ key, phase: typeof uri === 'string' && uri !== '' ? 'ok' : 'off', uri, ms: got.ms })
     }, () => {
       // NOT_FOUND 'foto indisponível': the blob is gone or the moment ended.
       if (alive) setState({ key, phase: 'off', uri: null })
@@ -285,12 +305,100 @@ function useMomentPhoto (author, seq) {
       if (release) release()
       release = null
     }
-  }, [key, author, seq, media])
+  }, [key, author, seq, media, mime, ms])
   // Bytes that pass every check but do not decode: 'Foto indisponível', not a
   // blank moment (the Image's onError).
   const fail = useCallback(() => setState((s) => (s.key === key ? { key, phase: 'off', uri: null } : s)), [key])
   const shown = state.key === key ? state : { key, phase: 'loading', uri: null }
   return { ...shown, fail }
+}
+
+// Each visit has its own token: a queued player event or animation completion
+// from an earlier visit must never advance the current item. control is the
+// player's { play, unmute }: a press calls it in its own handler, because a
+// browser that wants a gesture may not count the player's later effect.
+function useMomentPlayback ({ itemKey, ms, video, loaded, active, autoOn, step, control }) {
+  const progress = useRef(new Animated.Value(0)).current
+  const [restartTick, setRestartTick] = useState(0)
+  const visit = useMemo(() => ({ remaining: ms, position: null, advanced: false }), [itemKey, ms, restartTick])
+  const [ready, setReady] = useState(null)
+  const [manual, setManual] = useState(null)
+  const [ended, setEnded] = useState(null)
+  const [muted, setMuted] = useState(null)
+  const [blocked, setBlocked] = useState(null)
+  const running = active && loaded && autoOn && blocked !== visit && (!video || ready === visit)
+  const playing = video && active && loaded && blocked !== visit && ended !== visit && (running || (!autoOn && manual === visit))
+  // What playing becomes once a press clears the block and sets manual: the
+  // player is started only when the props will agree.
+  const canPlay = video && active && loaded && ended !== visit && (!autoOn || ready === visit)
+  const current = useRef(null)
+  current.current = { visit, running, autoOn, step, canPlay }
+  useEffect(() => {
+    progress.setValue(0)
+  }, [visit, progress])
+  useEffect(() => {
+    if (!video || !loaded) return undefined
+    const timer = setTimeout(() => setReady(visit), 2000)
+    return () => clearTimeout(timer)
+  }, [video, loaded, visit])
+  const advance = () => {
+    if (current.current.visit !== visit || !current.current.running || visit.advanced) return
+    visit.advanced = true
+    current.current.step('next')
+  }
+  useEffect(() => {
+    if (!running) return undefined
+    // A close ignored during a stack slide may run again after a hold.
+    visit.advanced = false
+    let live = true
+    const anim = Animated.timing(progress, { toValue: 1, duration: Math.max(0, visit.remaining), easing: Easing.linear, useNativeDriver: false })
+    anim.start(({ finished }) => { if (live && finished) advance() })
+    return () => {
+      live = false
+      anim.stop()
+      progress.stopAnimation((value) => {
+        if (current.current.visit !== visit) return
+        visit.remaining = Math.max(0, video && visit.position !== null ? ms - visit.position : (1 - value) * ms)
+        progress.setValue(1 - visit.remaining / ms)
+      })
+    }
+  }, [running, visit, progress, ms, video])
+  const handleProgress = ({ ms: position, playing: moving }) => {
+    if (current.current.visit !== visit || !Number.isFinite(position)) return
+    visit.position = Math.max(0, Math.min(ms, position))
+    if (!current.current.running || moving === false) visit.remaining = ms - visit.position
+    if (!current.current.running) progress.setValue(visit.position / ms)
+  }
+  return {
+    progress,
+    playing,
+    blocked: blocked === visit,
+    muted: muted === visit,
+    ended: ended === visit,
+    started: manual === visit,
+    restartTick,
+    restart: () => setRestartTick((n) => n + 1),
+    handlePlay: () => {
+      if (current.current.visit !== visit) return
+      if (current.current.canPlay) control?.current?.play()
+      setBlocked(null)
+      setManual(visit)
+    },
+    handleUnmute: () => {
+      if (current.current.visit === visit) control?.current?.unmute()
+      setMuted(null)
+    },
+    handleReady: () => { if (current.current.visit === visit) setReady(visit) },
+    handleSoundRefused: () => { if (current.current.visit === visit) setMuted(visit) },
+    handlePlayBlocked: () => { if (current.current.visit === visit) setBlocked(visit) },
+    handleProgress,
+    handleEnd: () => {
+      if (current.current.visit !== visit) return
+      setEnded(visit)
+      if (current.current.autoOn) advance()
+      else progress.setValue(1)
+    }
+  }
 }
 
 // The rings the viewer plays, fixed when it opens so marking items seen does
@@ -464,7 +572,7 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
   // so the avatar below may persist.
   const author = ring ? ring.author : null
   const mine = author !== null && author === own
-  const photo = useMomentPhoto(author, item ? item.seq : null)
+  const photo = useMomentPhoto(author, item ? item.seq : null, item?.media)
   const handlePhotoError = photo.fail
   const itemKey = item ? item.ref : ''
   const music = momentMusicOf(item)
@@ -473,7 +581,6 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
   const [musicState, setMusicState] = useState(null)
   const musicStarted = musicOn === true && musicState?.key === itemKey && musicState.phase === 'playing'
   const musicWaiting = music !== null && musicOn !== false && (musicState?.key !== itemKey || musicState.phase === 'waiting')
-  const duration = holdMsOf(item, musicStarted)
   const [musicClosed, setMusicClosed] = useState(false)
   useEffect(() => { setMusicState(null) }, [itemKey, node.epoch])
 
@@ -539,8 +646,7 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
     return Math.abs(e.nativeEvent.pageX - start.x) > TAP_SLOP || Math.abs(e.nativeEvent.pageY - start.y) > TAP_SLOP
   }
 
-  // Auto-advance: the current segment fills over its hold; a pause
-  // keeps what is left. Off under reduced motion (the segment shows full).
+  // Holding pauses both the player and the segment's single clock.
   const [held, setHeld] = useState(false)
   const [linkHeld, setLinkHeld] = useState(false)
   const linkHidden = useRef(false)
@@ -549,7 +655,6 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
     setLinkHeld(true)
     openExternal(url)
   }
-  useEffect(() => { setLinkHeld(false) }, [itemKey])
   useEffect(() => {
     if (!linkHeld) return undefined
     if (node.visible === false) {
@@ -587,16 +692,7 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
     menuTimer.current = setTimeout(() => setMenuOpen(false), MENU_SETTLE_MS)
   }
   const [deleting, setDeleting] = useState(null)
-  const progress = useRef(new Animated.Value(0)).current
-  const remaining = useRef(duration)
-  const [restartTick, setRestartTick] = useState(0)
   const restart = useRef(() => {})
-  restart.current = () => {
-    setMusicState(null)
-    progress.setValue(0)
-    remaining.current = duration
-    setRestartTick((n) => n + 1)
-  }
   // Next / previous item; past the end of an author, the next author in
   // ringOrder from its first unseen item, and past the last author, close.
   const step = useCallback((dir) => {
@@ -617,27 +713,26 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
     setPos({ ring: pos.ring, item: 0 })
     restart.current()
   }, [rings, pos, close])
-  const stepRef = useRef(step)
-  stepRef.current = step
-
-  useEffect(() => {
-    // A new moment's caption starts at its top (the ScrollView is keyed too).
-    captionOffsetRef.current = 0
-    captionTouchRef.current = false
-    // A caption tap that stepped unmounted its keyed Pressable before the
-    // delayed press-out ran: never carry its hold into the new moment.
-    setHeld(false)
-  }, [itemKey, progress])
-  useEffect(() => {
-    progress.setValue(0)
-    remaining.current = duration
-  }, [itemKey, duration, restartTick, progress])
-  // node.visible: a hidden tab or a backgrounded app holds playback, so the
-  // animation cannot finish unseen and skip the moment on return.
+  const video = item !== null && item.media?.mime === 'video/mp4'
+  const videoControl = useRef(null)
+  const playback = useMomentPlayback({
+    itemKey,
+    ms: video ? segmentMs(item, photo.ms) : holdMsOf(item, musicStarted),
+    video: video && photo.phase === 'ok',
+    loaded: photo.phase !== 'loading',
+    active: isTop && node.visible !== false && item !== null && !held && !dragging && !menuOpen && deleting === null && !musicClosed && !linkHeld && !musicWaiting,
+    autoOn,
+    step,
+    control: videoControl
+  })
+  const { progress } = playback
+  restart.current = () => {
+    setMusicState(null)
+    playback.restart()
+  }
   const paused = !isTop || node.visible === false || item === null || photo.phase === 'loading' || held || dragging || menuOpen || deleting !== null || musicClosed || linkHeld
-  const running = autoOn && !paused && !musicWaiting
   const musicWaitRemaining = useRef(MUSIC_START_WAIT_MS)
-  useEffect(() => { musicWaitRemaining.current = MUSIC_START_WAIT_MS }, [itemKey, restartTick, node.epoch])
+  useEffect(() => { musicWaitRemaining.current = MUSIC_START_WAIT_MS }, [itemKey, playback.restartTick, node.epoch])
   useEffect(() => {
     if (!musicWaiting || paused) return undefined
     // Policy and audio share one budget, spent only while playback can run.
@@ -647,19 +742,17 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
       clearTimeout(timer)
       musicWaitRemaining.current = Math.max(0, musicWaitRemaining.current - (Date.now() - started))
     }
-  }, [musicWaiting, paused, itemKey, restartTick])
-  useEffect(() => {
-    if (!running) return undefined
-    const anim = Animated.timing(progress, { toValue: 1, duration: Math.max(0, remaining.current), easing: Easing.linear, useNativeDriver: false })
-    anim.start(({ finished }) => { if (finished) stepRef.current('next') })
-    return () => {
-      anim.stop()
-      progress.stopAnimation((value) => {
-        remaining.current = Math.max(0, (1 - value) * duration)
-      })
-    }
-  }, [running, itemKey, restartTick, duration, progress])
+  }, [musicWaiting, paused, itemKey, playback.restartTick, node.epoch])
 
+  useEffect(() => {
+    // A new moment's caption starts at its top (the ScrollView is keyed too).
+    setLinkHeld(false)
+    captionOffsetRef.current = 0
+    captionTouchRef.current = false
+    // A caption tap that stepped unmounted its keyed Pressable before the
+    // delayed press-out ran: never carry its hold into the new moment.
+    setHeld(false)
+  }, [itemKey])
   // A caption scrolled away from its top keeps a downward drag that starts
   // on it (it scrolls back); otherwise a drag down closes, as everywhere.
   const captionTouchRef = useRef(false)
@@ -727,9 +820,12 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
   const [bottomHeight, setBottomHeight] = useState(NaN)
   const bottomStart = frameHeight - bottomHeight
   const [barHeight, setBarHeight] = useState(0)
+  const [playbackHeight, setPlaybackHeight] = useState(0)
+  const showPlay = playback.blocked || (reduce === true && !playback.started && !playback.ended)
+  const playbackControls = video && photo.phase === 'ok' && (playback.muted || showPlay || (reduce === true && playback.ended))
   const measureBar = (e) => setBarHeight(e.nativeEvent.layout.height)
   // The caption box: scrolls only when its text overflows the cap.
-  const captionMax = captionCap({ height: win.height, topEnd, barHeight, bottomPad: insets.bottom + 12 })
+  const captionMax = captionCap({ height: win.height, topEnd, barHeight: barHeight + (playbackControls ? playbackHeight + 12 : 0), bottomPad: insets.bottom + 12 })
   const [captionHeight, setCaptionHeight] = useState(0)
   const captionScrolls = captionHeight > captionMax
   const meet = scrimsMeet(topEnd, bottomStart)
@@ -828,13 +924,19 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
       <Animated.View style={[styles.flex, { transform: [{ translateY: drag }] }]} {...pan.panHandlers}>
         <View style={styles.stage}>
           {photo.phase === 'ok'
-            ? <Image source={{ uri: photo.uri }} style={styles.photo} resizeMode='contain' onError={handlePhotoError} accessibilityIgnoresInvertColors accessible accessibilityRole='image' accessibilityLabel={'momento de ' + name} />
+            ? video
+              ? (
+                <View style={styles.photo} accessible accessibilityLabel={'momento de ' + name}>
+                  <VideoPlayer key={itemKey + ':' + playback.restartTick} uri={photo.uri} playing={playback.playing} muted={playback.muted} controls={false} fit='contain' style={styles.photo} onReady={playback.handleReady} onProgress={playback.handleProgress} onEnd={playback.handleEnd} onError={handlePhotoError} onSoundRefused={playback.handleSoundRefused} onPlayBlocked={playback.handlePlayBlocked} control={videoControl} />
+                </View>
+                )
+              : <Image source={{ uri: photo.uri }} style={styles.photo} resizeMode='contain' onError={handlePhotoError} accessibilityIgnoresInvertColors accessible accessibilityRole='image' accessibilityLabel={'momento de ' + name} />
             : photo.phase === 'loading'
-              ? <View style={styles.center}><ActivityIndicator color='#ffffff' accessibilityLabel='carregando a foto' /></View>
+              ? <View style={styles.center}><ActivityIndicator color='#ffffff' accessibilityLabel={video ? 'carregando o vídeo' : 'carregando a foto'} /></View>
               : (
                 <View style={styles.center}>
                   <Icon name='imagem' size={28} color={colors.soft} />
-                  <Text style={styles.unavailable}>{PHOTO_UNAVAILABLE}</Text>
+                  <Text style={styles.unavailable}>{video ? VIDEO_UNAVAILABLE : PHOTO_UNAVAILABLE}</Text>
                 </View>
                 )}
         </View>
@@ -870,7 +972,7 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
             {segments.map((done, n) => (
               <View key={n} style={styles.segment}>
                 {n === pos.item
-                  ? <Animated.View style={[styles.segmentFill, { width: autoOn ? fill : '100%' }]} />
+                  ? <Animated.View style={[styles.segmentFill, { width: autoOn || (video && photo.phase === 'ok') ? fill : '100%' }]} />
                   : <View style={[styles.segmentFill, { width: done === 1 ? '100%' : '0%' }]} />}
               </View>
             ))}
@@ -906,7 +1008,7 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
           {musicOn
             ? (
               <MomentMusic
-                key={itemKey + ':' + restartTick}
+                key={itemKey + ':' + playback.restartTick}
                 music={music}
                 member={own}
                 origin={musicOrigin}
@@ -916,6 +1018,15 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
                 onUnavailable={() => setMusicState({ key: itemKey, phase: 'fallback' })}
                 onOpenExternal={openMusicLink}
               />
+              )
+            : null}
+          {playbackControls
+            ? (
+              <View style={styles.bar} onLayout={(e) => setPlaybackHeight(e.nativeEvent.layout.height)}>
+                {showPlay ? <Pill label='Reproduzir' onPress={playback.handlePlay} /> : null}
+                {!autoOn && playback.ended ? <Pill label='Próximo momento' onPress={() => step('next')} /> : null}
+                {playback.muted ? <Pill label='Ativar som' onPress={playback.handleUnmute} /> : null}
+              </View>
               )
             : null}
           {text !== ''
