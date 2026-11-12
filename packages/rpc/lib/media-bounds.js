@@ -5,7 +5,8 @@
 // decoder that would allocate width x height x frames of pixels. Pixels are
 // never decoded. Anything truncated, malformed, over a bound, or whose bytes
 // do not match the given mime is null. Never throws. Works on Uint8Array
-// only, with no Node built-ins, so the app bundle can use it.
+// only, with no Node built-ins, so the app bundle can use it. mediaSize reads
+// the same headers without the size bounds, for a caller with its own.
 
 const { MAX_MEDIA_DIMENSION } = require('./limits')
 
@@ -20,6 +21,10 @@ const MAX_PARTS = 1024
 // An APNG is walked to IEND, through every fcTL, fdAT and split IDAT. Each
 // chunk is at least 12 bytes, so this also bounds the walk on a large file.
 const MAX_PNG_CHUNKS = 65536
+
+// The frame cap stays in both: the walks stop on it.
+const STRICT = { dimension: MAX_MEDIA_DIMENSION, pixels: MAX_MEDIA_PIXELS, total: MAX_MEDIA_TOTAL_PIXELS }
+const LOOSE = { dimension: Infinity, pixels: Infinity, total: Infinity }
 
 function be16 (b, p) {
   return (b[p] << 8) | b[p + 1]
@@ -45,13 +50,13 @@ function fourcc (b, p) {
   return String.fromCharCode(b[p], b[p + 1], b[p + 2], b[p + 3])
 }
 
-function bounded (width, height, frames) {
+function bounded (width, height, frames, cap) {
   if (!Number.isInteger(width) || !Number.isInteger(height) || !Number.isInteger(frames)) return null
   if (width < 1 || height < 1 || frames < 1) return null
-  if (width > MAX_MEDIA_DIMENSION || height > MAX_MEDIA_DIMENSION) return null
-  if (width * height > MAX_MEDIA_PIXELS) return null
+  if (width > cap.dimension || height > cap.dimension) return null
+  if (width * height > cap.pixels) return null
   if (frames > MAX_MEDIA_FRAMES) return null
-  if (width * height * frames > MAX_MEDIA_TOTAL_PIXELS) return null
+  if (width * height * frames > cap.total) return null
   return { width, height, frames }
 }
 
@@ -59,7 +64,15 @@ function isSof (m) {
   return m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc
 }
 
-function jpegBounds (b) {
+// Before the frame header a decoder skips only these by their length: APPn,
+// COM, DQT, DHT, DAC, DRI, DNL. On any other marker (FF 00 above all) libjpeg
+// rescans byte by byte and may find a frame header inside the bytes this walk
+// would have skipped, so the size read here would not be the one decoded.
+function skippedByLength (m) {
+  return (m >= 0xe0 && m <= 0xef) || m === 0xfe || m === 0xdb || m === 0xc4 || m === 0xcc || m === 0xdd || m === 0xdc
+}
+
+function jpegBounds (b, cap) {
   const n = b.length
   if (n < 3 || b[0] !== 0xff || b[1] !== 0xd8 || b[2] !== 0xff) return null
   let p = 2
@@ -74,6 +87,7 @@ function jpegBounds (b) {
     }
     // Scan data or the end before any frame header: no size to trust.
     if (marker === 0xda || marker === 0xd9) return null
+    if (!isSof(marker) && !skippedByLength(marker)) return null
     if (p + 4 > n) return null
     const len = be16(b, p + 2)
     if (len < 2 || p + 2 + len > n) return null
@@ -81,7 +95,7 @@ function jpegBounds (b) {
       if (len < 11) return null
       const nf = b[p + 9]
       if (nf < 1 || nf > 4 || len !== 8 + 3 * nf) return null
-      return bounded(be16(b, p + 7), be16(b, p + 5), 1)
+      return bounded(be16(b, p + 7), be16(b, p + 5), 1, cap)
     }
     p += 2 + len
   }
@@ -94,14 +108,14 @@ const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
 // frame count in an acTL chunk that must come before it. An APNG is walked to
 // IEND so every fcTL frame rectangle is checked against the canvas and the
 // frames are counted, never only the count acTL declares.
-function pngBounds (b) {
+function pngBounds (b, cap) {
   const n = b.length
   if (n < 33) return null
   for (let i = 0; i < 8; i++) if (b[i] !== PNG_SIG[i]) return null
   if (be32(b, 8) !== 13 || fourcc(b, 12) !== 'IHDR') return null
   const width = be32(b, 16)
   const height = be32(b, 20)
-  if (width < 1 || height < 1 || width > MAX_MEDIA_DIMENSION || height > MAX_MEDIA_DIMENSION) return null
+  if (width < 1 || height < 1 || width > cap.dimension || height > cap.dimension) return null
   let frames = 1
   let seenActl = false
   let seenIdat = false
@@ -115,13 +129,13 @@ function pngBounds (b) {
     if (len > n - p - 12) return null
     const at = p + 8
     if (id === 'IDAT') {
-      if (!seenActl) return bounded(width, height, frames)
+      if (!seenActl) return bounded(width, height, frames, cap)
       seenIdat = true
     } else if (id === 'IHDR') {
       return null
     } else if (id === 'IEND') {
       if (!seenActl || !seenIdat || len !== 0) return null
-      return bounded(width, height, frames)
+      return bounded(width, height, frames, cap)
     } else if (id === 'acTL') {
       if (seenActl || seenIdat || len !== 8) return null
       seenActl = true
@@ -181,7 +195,7 @@ function anmfBitstreamSize (b, at, end) {
 
 // The whole RIFF body is walked so every ANMF frame is counted, never only
 // the canvas the VP8X chunk declares.
-function webpBounds (b) {
+function webpBounds (b, cap) {
   const n = b.length
   if (n < 12 || fourcc(b, 0) !== 'RIFF' || fourcc(b, 8) !== 'WEBP') return null
   const riffSize = le32(b, 4)
@@ -202,7 +216,7 @@ function webpBounds (b) {
       if (canvas !== null || still !== null || frames > 0 || len < 10) return null
       animated = (b[at] & 0x02) !== 0
       canvas = { width: 1 + le24(b, at + 4), height: 1 + le24(b, at + 7) }
-      if (canvas.width > MAX_MEDIA_DIMENSION || canvas.height > MAX_MEDIA_DIMENSION) return null
+      if (canvas.width > cap.dimension || canvas.height > cap.dimension) return null
     } else if (id === 'ANMF') {
       if (!animated || len < 16) return null
       if (++frames > MAX_MEDIA_FRAMES) return null
@@ -226,10 +240,10 @@ function webpBounds (b) {
     p = at + len + (len & 1)
   }
   if (p !== end) return null
-  if (animated) return bounded(canvas.width, canvas.height, frames)
+  if (animated) return bounded(canvas.width, canvas.height, frames, cap)
   if (still === null) return null
   if (canvas !== null && (canvas.width !== still.width || canvas.height !== still.height)) return null
-  return bounded(still.width, still.height, 1)
+  return bounded(still.width, still.height, 1, cap)
 }
 
 // Skips a run of GIF data sub-blocks and returns the offset after the zero
@@ -249,7 +263,7 @@ function skipSubBlocks (b, p) {
 // stopping as soon as the count passes the cap. Some decoders grow the canvas
 // to fit a frame that overflows the logical screen, so the bounds apply to
 // the union of the screen and every frame rectangle.
-function gifBounds (b) {
+function gifBounds (b, cap) {
   const n = b.length
   if (n < 13) return null
   const sig = String.fromCharCode(b[0], b[1], b[2], b[3], b[4], b[5])
@@ -285,7 +299,7 @@ function gifBounds (b) {
       return null
     }
   }
-  return bounded(width, height, frames)
+  return bounded(width, height, frames, cap)
 }
 
 const PARSERS = {
@@ -303,17 +317,27 @@ function sniff (b) {
   return null
 }
 
-// mime is optional; when given, the bytes must be that format.
-function mediaBounds (bytes, mime) {
+function read (bytes, mime, cap) {
   try {
     if (!(bytes instanceof Uint8Array)) return null
     const kind = sniff(bytes)
     if (kind === null) return null
     if (mime !== undefined && mime !== kind) return null
-    return PARSERS[kind](bytes)
+    return PARSERS[kind](bytes, cap)
   } catch {
     return null
   }
 }
 
-module.exports = { mediaBounds, MAX_MEDIA_PIXELS, MAX_MEDIA_FRAMES, MAX_MEDIA_TOTAL_PIXELS }
+// mime is optional; when given, the bytes must be that format.
+function mediaBounds (bytes, mime) {
+  return read(bytes, mime, STRICT)
+}
+
+// The header's { width, height, frames } with no dimension or pixel bound
+// (frames still stop at MAX_MEDIA_FRAMES), or null like mediaBounds.
+function mediaSize (bytes, mime) {
+  return read(bytes, mime, LOOSE)
+}
+
+module.exports = { mediaBounds, mediaSize, MAX_MEDIA_PIXELS, MAX_MEDIA_FRAMES, MAX_MEDIA_TOTAL_PIXELS }
