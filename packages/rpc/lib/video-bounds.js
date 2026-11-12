@@ -383,7 +383,13 @@ function inMdat (mdats, start, end) {
 // The stbl boxes the walk lists but reads nothing from hold their own fields:
 // sdtp one byte per sample, cslg its version's five fields, sbgp whole
 // entries covering no more than the samples, sgpd its header and, in version
-// 1, whole entries.
+// 1, whole entries. Versions 0 and 2 size each sgpd entry by its grouping
+// type, which the walk does not read, so there only an empty table passes.
+// Editions of the format disagree on the version 2 header: older ones put
+// entry_count after the default index (16 bytes), newer ones add a 32-bit
+// default_length first (20 bytes). Either passes only when every reading of
+// the bytes finds no entry, so the 20-byte form also needs a zero default
+// index, which an empty table cannot point to anyway.
 function sideTablesFit (b, inStbl, samples) {
   for (const x of inStbl) {
     const n = x.end - x.body
@@ -405,10 +411,20 @@ function sideTablesFit (b, inStbl, samples) {
     } else if (x.type === 'sgpd') {
       const head = version === 0 ? 12 : version === 1 || version === 2 ? 16 : 0
       if (head === 0 || n < head) return false
-      if (version === 1 && !groupEntriesFit(b, x, head)) return false
+      if (version === 1) {
+        if (!groupEntriesFit(b, x, head)) return false
+      } else if (!emptyGroupTable(b, x, version, n)) {
+        return false
+      }
     }
   }
   return true
+}
+
+function emptyGroupTable (b, sgpd, version, n) {
+  if (version === 0) return n === 12 && be32(b, sgpd.body + 8) === 0
+  if (n === 16) return be32(b, sgpd.body + 12) === 0
+  return n === 20 && be32(b, sgpd.body + 12) === 0 && be32(b, sgpd.body + 16) === 0
 }
 
 // A version 1 sgpd: entry_count entries of default_length bytes each, or,
