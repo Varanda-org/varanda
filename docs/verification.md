@@ -8097,7 +8097,7 @@ Ordem: Android, iOS, depois web e PWA, num ambiente de teste local.
 - [ ] Denunciar uma publicação com vídeo e outra com foto ou GIF: ambas ficam para uma pessoa, sem inferência sobre a mídia. No ambiente local, aplicar um bloqueio de teste e conferir a indisponibilidade dos núcleos de mídia do diário. Conferir separadamente que o blob do momento ainda abre com um descritor guardado até a retenção expirar e que a interface esconde o momento após 24 horas.
 - [ ] Ler o mesmo diário com um leitor e semeador anteriores: o post ou momento em vídeo inteiro é omitido; os blocos continuam servidos pelo semeador antigo, mas o post não entra nos índices nem nas contagens de posts vivos. Atualizar semeadores e serviço de conta antes do app publicador, como manda o CHANGELOG.
 
-## 179. Reprodução de vídeos curtos em publicações e momentos
+## 182. Reprodução de vídeos curtos em publicações e momentos
 
 A Rua, o mosaico da citação e o mural mostram a capa JPEG de uma publicação com vídeo, com a marca de play e a duração. O rótulo é "vídeo de N segundos", no singular "1 segundo". O azulejo do mural diz "vídeo". Nada do vídeo é baixado até a pessoa tocar. Uma capa que não carrega ainda abre o vídeo.
 
