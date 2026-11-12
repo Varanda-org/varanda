@@ -27,6 +27,15 @@ const INFO_PLIST = 'ios/Varanda/Info.plist'
 const ENTITLEMENTS = 'ios/Varanda/Varanda.entitlements'
 const PBXPROJ = 'ios/Varanda.xcodeproj/project.pbxproj'
 const PODFILE_PROPERTIES = 'ios/Podfile.properties.json'
+const SHARE_ENTITLEMENTS = 'ios/VarandaShare/VarandaShare.entitlements'
+const SHARE_INFO_PLIST = 'ios/VarandaShare/Info.plist'
+const SHARE_PRIVACY_MANIFEST = 'ios/VarandaShare/PrivacyInfo.xcprivacy'
+const SHARE_CONTROLLER = 'ios/VarandaShare/ShareViewController.swift'
+const SHARE_INTAKE_SWIFT = 'modules/share-intake/ios/ShareIntakeModule.swift'
+const SHARE_BUNDLE_ID = 'app.varanda.share'
+const APP_GROUP = 'group.app.varanda'
+const ASSOCIATED_DOMAINS_KEY = 'com.apple.developer.associated-domains'
+const APP_GROUPS_KEY = 'com.apple.security.application-groups'
 const IOS_MINIMUM = '18.0'
 const DEPLOYMENT_TARGET_LINE = 'IPHONEOS_DEPLOYMENT_TARGET = ' + IOS_MINIMUM + ';'
 const ANDROID_MANIFEST = 'android/app/src/main/AndroidManifest.xml'
@@ -55,13 +64,20 @@ const COLLECTED_DATA_TYPES = [
 const RECORD_AUDIO_LINE = '<uses-permission android:name="android.permission.RECORD_AUDIO"/>'
 const CAMERA_REMOVED = '<uses-permission android:name="android.permission.CAMERA" tools:node="remove"/>'
 
-// The keys and the associated domains of an entitlements plist, comments dropped.
+// The keys (sorted), the associated domains and the app groups of an
+// entitlements plist, comments dropped.
 function entitlements (xml) {
   const body = compact(xml.replace(/<!--[\s\S]*?-->/g, ''))
-  const list = body.match(/<key>com\.apple\.developer\.associated-domains<\/key><array>([\s\S]*?)<\/array>/)
+  const strings = (key) => {
+    const at = body.indexOf('<key>' + key + '</key><array>')
+    if (at === -1) return []
+    const list = body.slice(at).match(/<array>([\s\S]*?)<\/array>/)[1]
+    return [...list.matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1])
+  }
   return {
-    keys: [...body.matchAll(/<key>([^<]*)<\/key>/g)].map((m) => m[1]),
-    domains: list ? [...list[1].matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1]) : []
+    keys: [...body.matchAll(/<key>([^<]*)<\/key>/g)].map((m) => m[1]).sort(),
+    domains: strings(ASSOCIATED_DOMAINS_KEY),
+    groups: strings(APP_GROUPS_KEY)
   }
 }
 
@@ -169,7 +185,7 @@ test('the plugin restores the microphone and the camera removal', (t) => {
 test('the iOS entitlement, the passkey flag and the deploy name the same app and host', (t) => {
   const app = JSON.parse(read('app.json')).expo
   const committed = entitlements(read(ENTITLEMENTS))
-  t.alike(committed.keys, ['com.apple.developer.associated-domains'], 'only Associated Domains for EAS to sync')
+  t.alike(committed.keys, [ASSOCIATED_DOMAINS_KEY, APP_GROUPS_KEY], 'only Associated Domains and App Groups for EAS to sync')
   t.alike(committed.domains, ['webcredentials:bora.varanda.app', 'applinks:bora.varanda.app'], ENTITLEMENTS)
   t.alike(app.ios.associatedDomains, committed.domains, 'app.json repeats the entitlement for prebuild')
   t.ok(compact(read(INFO_PLIST)).includes(WEB_CREDENTIALS_PLIST), INFO_PLIST + ' turns the passkey modules on')
@@ -178,8 +194,12 @@ test('the iOS entitlement, the passkey flag and the deploy name the same app and
   t.alike(committed.domains, hosts.flatMap((h) => ['webcredentials:' + h, 'applinks:' + h]), 'the host of the Android App Links')
 
   const pbxproj = read(PBXPROJ)
-  t.alike(pbxproj.match(/CODE_SIGN_ENTITLEMENTS = [^;]*;/g), Array(2).fill('CODE_SIGN_ENTITLEMENTS = Varanda/Varanda.entitlements;'), 'Debug and Release sign with it')
-  t.alike([...new Set(pbxproj.match(/PRODUCT_BUNDLE_IDENTIFIER = [^;]*;/g))], ['PRODUCT_BUNDLE_IDENTIFIER = ' + app.ios.bundleIdentifier + ';'])
+  t.alike(pbxproj.match(/CODE_SIGN_ENTITLEMENTS = [^;]*;/g), [
+    ...Array(2).fill('CODE_SIGN_ENTITLEMENTS = Varanda/Varanda.entitlements;'),
+    ...Array(2).fill('CODE_SIGN_ENTITLEMENTS = VarandaShare/VarandaShare.entitlements;')
+  ], 'Debug and Release of the app and of the share extension sign with their own file')
+  t.alike([...new Set([...pbxproj.matchAll(/PRODUCT_BUNDLE_IDENTIFIER = ([^;]*);/g)].map((m) => m[1]))].sort(), [app.ios.bundleIdentifier, SHARE_BUNDLE_ID], 'the app and its share extension')
+  t.ok(SHARE_BUNDLE_ID.startsWith(app.ios.bundleIdentifier + '.'), 'the extension id is under the app id')
 
   const wellKnown = read(WELL_KNOWN)
   const appId = app.ios.bundleIdentifier.replace(/\./g, '\\.')
@@ -196,10 +216,195 @@ test('the iOS minimum is 18.0 everywhere it is set', (t) => {
   t.is(buildProperties.ios.deploymentTarget, IOS_MINIMUM, 'app.json repeats it for prebuild')
   t.is(JSON.parse(read(PODFILE_PROPERTIES))['ios.deploymentTarget'], IOS_MINIMUM, PODFILE_PROPERTIES)
   t.ok(read('ios/Podfile').includes("podfile_properties['ios.deploymentTarget'] || '" + IOS_MINIMUM + "'"), 'the Podfile fallback')
-  t.alike(read(PBXPROJ).match(/IPHONEOS_DEPLOYMENT_TARGET = [^;]*;/g), Array(4).fill(DEPLOYMENT_TARGET_LINE), 'project and app, Debug and Release')
-  for (const file of ['modules/passkey-prf/ios/PasskeyPrf.podspec', 'modules/auth-session/ios/AuthSession.podspec']) {
+  t.alike(read(PBXPROJ).match(/IPHONEOS_DEPLOYMENT_TARGET = [^;]*;/g), Array(6).fill(DEPLOYMENT_TARGET_LINE), 'project, app and share extension, Debug and Release')
+  for (const file of ['modules/passkey-prf/ios/PasskeyPrf.podspec', 'modules/auth-session/ios/AuthSession.podspec', 'modules/share-intake/ios/ShareIntake.podspec']) {
     t.ok(read(file).includes(":ios => '" + IOS_MINIMUM + "'"), file + ' can drop its availability checks')
   }
+})
+
+// The share extension (ios/VarandaShare) writes into the app group container
+// and ShareIntakeModule.swift reads it there: a group missing from either
+// entitlements file, or spelled differently, makes every share vanish.
+test('the app, the share extension and the share module use one app group', (t) => {
+  const app = entitlements(read(ENTITLEMENTS))
+  const share = entitlements(read(SHARE_ENTITLEMENTS))
+  t.alike(app.groups, [APP_GROUP], ENTITLEMENTS)
+  t.alike(share.keys, [APP_GROUPS_KEY], SHARE_ENTITLEMENTS + ' has the app group only')
+  t.alike(share.groups, [APP_GROUP], SHARE_ENTITLEMENTS)
+  t.alike(JSON.parse(read('app.json')).expo.ios.entitlements, { [APP_GROUPS_KEY]: [APP_GROUP] }, 'app.json repeats it for prebuild')
+  t.ok(read(SHARE_INTAKE_SWIFT).includes('static let appGroup = "' + APP_GROUP + '"'), SHARE_INTAKE_SWIFT + ' reads that group')
+  t.ok(read(SHARE_CONTROLLER).includes('static let appGroup = "' + APP_GROUP + '"'), SHARE_CONTROLLER + ' writes that group')
+  for (const file of [SHARE_INTAKE_SWIFT, SHARE_CONTROLLER]) {
+    t.ok(read(file).includes('static let inboxPath = "Library/Caches/share-inbox"'), file + ' uses the one inbox path')
+    t.ok(read(file).includes('static let manifestName = "manifest.json"'), file + ' uses the one manifest name')
+  }
+})
+
+// The extension cannot run the app's cleanup, so its inbox stays out of
+// device backups and it drops what is past SHARE_TTL_MS itself.
+test('the share extension keeps its inbox out of backups and drops expired shares', (t) => {
+  const source = read(SHARE_CONTROLLER)
+  const prepare = source.slice(source.indexOf('private func prepareEntry('), source.indexOf('private func complete('))
+  t.ok(prepare.includes('values.isExcludedFromBackup = true'), 'excluded from backup')
+  t.ok(prepare.includes('try? inbox.setResourceValues(values)'), 'set on the inbox')
+  const ttl = /SHARE_TTL_MS = (\d+)/.exec(read('src/sharedIntent.js'))
+  t.ok(ttl && Number(ttl[1]) === 60 * 60 * 1000, 'SHARE_TTL_MS is 1 hour')
+  t.ok(source.includes('private static let ttlMs: Int64 = 60 * 60 * 1000'), 'the extension uses the same lifetime')
+})
+
+// A format the app refuses would reach Publicar as nothing, so the extension
+// picks an admitted one first when the source app offers several.
+test('the share extension prefers the formats the app imports', (t) => {
+  const source = read(SHARE_CONTROLLER)
+  const list = /static let allowedTypes: \[UTType\] = ([^\n]+\n[^\n]+)/
+  const ext = list.exec(source)
+  const mod = list.exec(read(SHARE_INTAKE_SWIFT))
+  t.ok(ext && mod && ext[1] === mod[1], 'one format list in the extension and the module')
+  const pick = source.slice(source.indexOf('private static func imageType('), source.indexOf('private static func fileExtension('))
+  const allowed = pick.indexOf('allowedTypes.contains(where: { type.conforms(to: $0) })')
+  t.ok(allowed > 0 && allowed < pick.indexOf('type.conforms(to: .image)'), 'an admitted format comes before any other image type')
+})
+
+// The body of the pbxproj object whose header ends with `head`.
+function pbxObject (pbxproj, head) {
+  const at = pbxproj.indexOf(head)
+  if (at === -1) return ''
+  const end = pbxproj.indexOf('\n\t\t};\n', at)
+  return end === -1 ? '' : pbxproj.slice(at, end)
+}
+
+// The quoted or bare entries of a parenthesized pbxproj list.
+function pbxList (object, key) {
+  const list = object.match(new RegExp('\\b' + key + ' = \\(([\\s\\S]*?)\\);'))
+  return list ? list[1].split(',\n').map((item) => item.trim()).filter(Boolean) : []
+}
+
+// An Xcode build setting reference as a script phase writes it.
+const buildVar = (name) => '$' + '{' + name + '}'
+const HOST_PLIST_PATH = buildVar('SRCROOT') + '/Varanda/Info.plist'
+const BUILT_PLIST_PATH = buildVar('TARGET_BUILD_DIR') + '/' + buildVar('INFOPLIST_PATH')
+
+const phaseNames = (target) => pbxList(target, 'buildPhases').map((item) => item.replace(/^\w{24} \/\* (.*) \*\/$/, '$1'))
+
+// The extension is built by the Varanda target's dependency and copied into
+// Varanda.app/PlugIns before the React Native and Pods script phases (after
+// them Xcode can report a build cycle). Apple rejects an extension whose
+// versions differ from the app's, and EAS rewrites only the app's Info.plist,
+// so the extension's last phase copies the app's versions into its own.
+test('the share extension target is built, embedded and versioned like the app', (t) => {
+  const pbxproj = read(PBXPROJ)
+  const shareHeader = /(\w{24}) \/\* VarandaShare \*\/ = \{\n\t\t\tisa = PBXNativeTarget;/.exec(pbxproj)
+  t.ok(shareHeader, 'a VarandaShare native target')
+  const share = pbxObject(pbxproj, '/* VarandaShare */ = {\n\t\t\tisa = PBXNativeTarget;')
+  t.ok(share.includes('productType = "com.apple.product-type.app-extension";'), 'an app extension')
+  t.ok(share.includes('/* VarandaShare.appex */;'), 'that makes VarandaShare.appex')
+  t.alike(phaseNames(share), ['Sources', 'Frameworks', 'Resources', 'Sync version with Varanda'], 'its phases, the version sync last')
+  t.alike(pbxList(share, 'dependencies'), [], 'no pods and no other target')
+
+  const app = pbxObject(pbxproj, '/* Varanda */ = {\n\t\t\tisa = PBXNativeTarget;')
+  const appPhases = phaseNames(app)
+  const embedAt = appPhases.indexOf('Embed Foundation Extensions')
+  t.ok(embedAt !== -1, 'the app embeds extensions')
+  t.ok(embedAt < appPhases.indexOf('Bundle React Native code and images'), 'before the React Native bundle')
+  t.ok(embedAt < appPhases.indexOf('[CP] Embed Pods Frameworks'), 'before the Pods frameworks')
+  t.is(pbxList(app, 'dependencies').length, 1, 'the app depends on one target')
+  t.ok(pbxproj.includes('target = ' + (shareHeader && shareHeader[1]) + ' /* VarandaShare */;'), 'and it is VarandaShare')
+
+  const embed = pbxObject(pbxproj, '/* Embed Foundation Extensions */ = {\n\t\t\tisa = PBXCopyFilesBuildPhase;')
+  t.ok(embed.includes('dstSubfolderSpec = 13;'), 'copied into PlugIns')
+  t.alike(pbxList(embed, 'files').map((item) => item.replace(/^\w{24} /, '')), ['/* VarandaShare.appex in Embed Foundation Extensions */'], 'the appex only')
+
+  const sync = pbxObject(pbxproj, '/* Sync version with Varanda */ = {\n\t\t\tisa = PBXShellScriptBuildPhase;')
+  t.alike(pbxList(sync, 'inputPaths'), ['"' + HOST_PLIST_PATH + '"', '"' + BUILT_PLIST_PATH + '"'], 'reads the app plist after the extension plist is processed')
+  // Xcode's own Info.plist task produces the processed plist; a second
+  // producer of one file fails the build ("Multiple commands produce").
+  t.alike(pbxList(sync, 'outputPaths'), ['"' + buildVar('DERIVED_FILE_DIR') + '/VarandaShare-version-sync.stamp"'], 'declares a stamp, not the plist it edits')
+  t.ok(sync.includes('shellPath = /bin/bash;'), 'bash')
+  const script = (sync.match(/shellScript = "((?:[^"\\]|\\.)*)";/) || [])[1] || ''
+  t.ok(script.startsWith('set -euo pipefail\\n'), 'fails on any error')
+  for (const key of ['CFBundleShortVersionString', 'CFBundleVersion']) {
+    t.ok(script.includes('/usr/libexec/PlistBuddy -c \\"Print :' + key + '\\" \\"$host\\"'), 'reads ' + key + ' from the app')
+    t.ok(script.includes('/usr/libexec/PlistBuddy -c \\"Set :' + key + ' $'), 'sets ' + key + ' in the extension')
+  }
+  t.ok(script.includes('host=\\"' + HOST_PLIST_PATH + '\\"'), 'the app plist')
+  t.ok(script.includes('plist=\\"' + BUILT_PLIST_PATH + '\\"'), 'the built extension plist')
+
+  for (const setting of ['INFOPLIST_FILE = VarandaShare/Info.plist;', 'APPLICATION_EXTENSION_API_ONLY = YES;', 'SKIP_INSTALL = YES;', 'MARKETING_VERSION = 0.1.0;', 'CURRENT_PROJECT_VERSION = 1;']) {
+    t.is(pbxproj.split(setting).length - 1, setting.startsWith('MARKETING') || setting.startsWith('CURRENT') ? 4 : 2, setting)
+  }
+  t.absent(/SWIFT_OBJC_BRIDGING_HEADER = "?VarandaShare/.test(pbxproj), 'no bridging header')
+
+  const privacy = /(\w{24}) \/\* PrivacyInfo\.xcprivacy \*\/ = \{isa = PBXFileReference; lastKnownFileType = text\.xml; path = PrivacyInfo\.xcprivacy;/.exec(pbxproj)
+  const privacyFile = privacy && new RegExp('(\\w{24}) /\\* PrivacyInfo\\.xcprivacy in Resources \\*/ = \\{isa = PBXBuildFile; fileRef = ' + privacy[1]).exec(pbxproj)
+  const resources = pbxList(share, 'buildPhases').find((item) => item.endsWith('/* Resources */')) || ''
+  t.ok(privacyFile && pbxObject(pbxproj, resources + ' = {').includes(privacyFile[1]), 'the extension ships its own privacy manifest')
+})
+
+const plistValue = (xml, key) => (compact(xml).match(new RegExp('<key>' + key + '</key><string>([^<]*)</string>')) || [])[1]
+
+test('the share extension accepts photos, text and one link, with the app\'s versions', (t) => {
+  const xml = read(SHARE_INFO_PLIST)
+  const plist = compact(xml)
+  const rule = '<key>NSExtensionActivationSupportsImageWithMaxCount</key><integer>100</integer>' +
+    '<key>NSExtensionActivationSupportsText</key><true/>' +
+    '<key>NSExtensionActivationSupportsWebURLWithMaxCount</key><integer>1</integer>'
+  t.ok(plist.includes('<key>NSExtension</key><dict>' +
+    '<key>NSExtensionAttributes</key><dict><key>NSExtensionActivationRule</key><dict>' + rule + '</dict></dict>' +
+    '<key>NSExtensionPointIdentifier</key><string>com.apple.share-services</string>' +
+    '<key>NSExtensionPrincipalClass</key><string>$(PRODUCT_MODULE_NAME).ShareViewController</string>' +
+    '</dict>'), 'NSExtension holds the rule inside NSExtensionAttributes')
+  t.absent(/Movie|NSExtensionActivationSupportsFile|Attachment/.test(plist), 'no movie or file activation key')
+  t.absent(/SUBQUERY|<key>NSExtensionActivationRule<\/key><string>/.test(plist), 'no predicate string')
+  t.is(plistValue(xml, 'CFBundleDisplayName'), 'Varanda')
+  for (const key of ['CFBundleShortVersionString', 'CFBundleVersion']) {
+    t.is(plistValue(xml, key), plistValue(read(INFO_PLIST), key), key + ' literal, the same as the app\'s')
+  }
+  t.is(compact(read(SHARE_PRIVACY_MANIFEST)), '<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict>' +
+    '<key>NSPrivacyAccessedAPITypes</key><array/><key>NSPrivacyCollectedDataTypes</key><array/><key>NSPrivacyTracking</key><false/>' +
+    '</dict></plist>', SHARE_PRIVACY_MANIFEST + ': no tracking, no data, no required reason API')
+})
+
+// The extension only stores what was shared: it never opens the app (no
+// responder chain walk, no extensionContext open) and never decodes an image.
+test('the share extension never opens the app', (t) => {
+  const source = read(SHARE_CONTROLLER)
+  t.absent(source.includes('UIApplication'), 'no UIApplication')
+  t.absent(source.includes('openURL'), 'no openURL')
+  t.absent(/extensionContext\??\.open\b|\.next\b/.test(source), 'no extensionContext open, no responder chain')
+  t.absent(/\bUIImage\s*\(|CGImageSource/.test(source), 'no image decode')
+  t.absent(/\b(print|NSLog|debugPrint|os_log)\s*\(/.test(source), 'nothing logged')
+  t.ok(source.includes('"Pronto. Abra o app Varanda para publicar."'), 'the done message')
+  t.ok(source.includes('completeRequest(returningItems: [], completionHandler: nil)'), 'completes the request')
+})
+
+test('the share extension keeps the earlier share until its own is complete', (t) => {
+  const source = read(SHARE_CONTROLLER)
+  const prepare = source.slice(source.indexOf('private func prepareEntry('), source.indexOf('private func complete('))
+  t.ok(prepare.length > 0, 'prepareEntry before complete')
+  t.absent(prepare.includes('removeItem') || prepare.includes('dropOlder'), 'no share is dropped for being older before the new one loads')
+  t.ok(prepare.includes('let expired = Self.prefixMs(id) - Self.ttlMs'), 'expiry is measured from the new id')
+  t.ok(/if let at = Int64\(name\.prefix\(13\)\), name\.count > 13, at < expired \{\s*Self\.drop\(/.test(prepare), 'only expired entries go before the new share loads')
+  t.is((prepare.match(/Self\.drop\(/g) || []).length, 1, 'and nothing else is dropped there')
+  const complete = source.slice(source.indexOf('private func complete('), source.indexOf('private func dropOlder('))
+  const rename = complete.indexOf('try fm.moveItem(at: tmp, to: entry.appendingPathComponent(Self.manifestName')
+  t.ok(rename > 0 && complete.indexOf('dropOlder(than: id') > rename, 'older entries go after the manifest rename')
+  t.ok(source.includes('where name < id'), 'only older entries go')
+})
+
+test('the share extension keeps words put on the item itself as the title', (t) => {
+  const source = read(SHARE_CONTROLLER)
+  t.ok(source.includes('$0.attributedContentText?.string'), 'reads the item text')
+  t.ok(source.includes('guard !kinds.isEmpty || !title.isEmpty,'), 'a share with only that text is kept')
+  t.ok(source.includes('"title": title,'), 'written as the title')
+})
+
+test('a file the source app hands over is copied or skipped, never read into memory', (t) => {
+  const source = read(SHARE_CONTROLLER)
+  const load = source.slice(source.indexOf('private func loadImage('), source.indexOf('private func loadURL('))
+  const fallback = load.indexOf('provider.loadDataRepresentation')
+  const handed = load.slice(load.indexOf('if let url = url {'), fallback)
+  t.ok(fallback > 0 && handed.includes('self.copyFile(url, to: target)'), 'a handed file is copied')
+  t.ok(/done\(\)\s*return\s*}\s*\/\/ Some apps only offer the bytes/.test(handed), 'and the bytes fallback is not reached')
 })
 
 // The Vitrine (src/vitrine/enabled.js) swaps the node for fixtures. A release
@@ -249,7 +454,9 @@ test('prebuild --clean plus the plugin reproduces the committed files', (t) => {
   t.ok(plist.includes(MIC_PLIST), INFO_PLIST + ' declares the microphone')
   t.ok(plist.includes(WEB_CREDENTIALS_PLIST), INFO_PLIST + ' turns the passkey modules on')
   t.ok(plist.includes(EXPORT_COMPLIANCE_PLIST), INFO_PLIST + ' declares the export compliance answer')
-  t.alike(entitlements(fs.readFileSync(path.join(dir, ENTITLEMENTS), 'utf8')), entitlements(read(ENTITLEMENTS)), ENTITLEMENTS)
+  const generatedEntitlements = entitlements(fs.readFileSync(path.join(dir, ENTITLEMENTS), 'utf8'))
+  t.alike(generatedEntitlements, entitlements(read(ENTITLEMENTS)), ENTITLEMENTS)
+  t.alike(generatedEntitlements.groups, [APP_GROUP], ENTITLEMENTS + ' carries the app group from app.json')
   t.is(JSON.parse(fs.readFileSync(path.join(dir, PODFILE_PROPERTIES), 'utf8'))['ios.deploymentTarget'], IOS_MINIMUM, PODFILE_PROPERTIES)
   // The plugin sets the app target only, which overrides the project's value.
   const generatedTargets = fs.readFileSync(path.join(dir, PBXPROJ), 'utf8').match(/IPHONEOS_DEPLOYMENT_TARGET = [^;]*;/g)
