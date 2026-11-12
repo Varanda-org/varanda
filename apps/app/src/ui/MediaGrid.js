@@ -22,6 +22,7 @@ import { Modal, Platform, Pressable, StyleSheet, Text, View } from 'react-native
 import { useEscapeLayer } from './escapeLayer'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { MAX_MEDIA_PER_POST, gridLayout, mosaicLayout } from '../media/plan'
+import { stopBoundPlayback } from '../media/chatMedia'
 import { Icon } from './Icon'
 import { MediaCarousel } from './MediaCarousel'
 import { MediaView } from './MediaView'
@@ -49,6 +50,9 @@ function Viewer ({ author, media, index, onIndex, onClose, persist }) {
   goRef.current = go
   const closeRef = useRef(onClose)
   closeRef.current = onClose
+
+  // The full-screen viewer hides a playing music player without a screen change the App could see.
+  useEffect(() => { if (open) stopBoundPlayback() }, [open])
 
   // Escape closes only the viewer, even over a sheet (src/ui/escapeLayer.js).
   useEscapeLayer(!!open, () => closeRef.current(), 'viewer')

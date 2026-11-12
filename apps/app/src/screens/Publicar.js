@@ -77,6 +77,7 @@ import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { LinkDraftCard, useLinkDraft } from '../ui/ChatComposer'
 import { cardForSend, withCardFallback } from '../linkCard'
+import { fallbackCard } from '../musicEmbed'
 import { withPreview } from '../attach-plan'
 import { refusalOf } from '../wordCheck'
 import { Sheet, TEXT_CAP } from '../ui/Sheet'
@@ -711,7 +712,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // The draft link card (not as a page: its posts are signed statements).
   // cardRef keeps the card a Publicar already built from a snapshot, so a
   // new press after a failure never uploads its thumbnail again.
-  const linkDraft = useLinkDraft({ text, enabled: open === true && asPage === null, photos: hasMedia, member: self.publicKey })
+  const linkDraft = useLinkDraft({ text, enabled: open === true && asPage === null, photos: hasMedia, member: self.publicKey, fallback: fallbackCard })
   const cardRef = useRef(null)
   // A page never queues: it needs the service.
   const pageOffline = asPage !== null && node.online === false

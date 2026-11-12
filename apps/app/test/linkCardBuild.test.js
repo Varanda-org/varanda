@@ -339,3 +339,42 @@ test('native buildPreview: a redirected page gives no card and a redirected imag
   t.is(imageMoved.imageBytes, null, 'a redirected image is dropped')
   t.is(imageMoved.url, URL1, 'the card names the link asked')
 })
+
+function filesUnder (dir) {
+  const out = []
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const file = path.join(dir, entry.name)
+    if (entry.isDirectory()) out.push(...filesUnder(file))
+    else if (entry.name.endsWith('.js')) out.push(file)
+  }
+  return out
+}
+
+test('fallbackCard: a music link passes the card rules, and only Publicar passes fallback', async (t) => {
+  const { cardFields, cardForSend } = await card()
+  const { fallbackCard } = await import('../src/musicEmbed.js')
+  const { validLinkCard } = require('@varanda/core/lib/link-card')
+  const id = 'abcdefghijk'
+  const raw = fallbackCard('https://youtu.be/' + id)
+  t.alike(cardFields(raw), { url: 'https://www.youtube.com/watch?v=' + id, host: 'www.youtube.com', title: 'YouTube', desc: '' })
+  const sent = await cardForSend({ ...raw, thumb: null })
+  t.is(sent.image, null, 'no thumbnail to upload')
+  t.ok(validLinkCard(sent), 'core accepts the card with image null')
+  t.is(fallbackCard('https://example.com/a'), null, 'a non-music URL')
+  t.is(fallbackCard('https://audius.co/artist/track-name-123'), null, 'audius.co has no provider card')
+
+  const composer = fs.readFileSync(path.join(SRC, 'ui/ChatComposer.js'), 'utf8')
+  t.ok(/export function useLinkDraft \(\{ text, enabled = true, photos = false, member = null, fallback \}/.test(composer), 'fallback defaults to undefined')
+  t.ok(/if \(data === null && typeof fallback === 'function'\) \{\s*try \{\s*const card = fallback\(target\)/.test(composer), 'an empty build asks the caller, inside try')
+  t.ok(composer.includes("dispatch({ type: 'built', url: target, data: { ...card, thumb: null } })"), 'a returned object is the card, with no thumbnail')
+  t.ok(composer.includes("dispatch(data ? { type: 'built', url: target, data } : { type: 'failed', url: target })"), 'anything else still fails as before')
+
+  const publicar = fs.readFileSync(path.join(SRC, 'screens/Publicar.js'), 'utf8')
+  t.ok(publicar.includes("import { fallbackCard } from '../musicEmbed'"), 'named import')
+  t.absent(/import\s+fallbackCard\s+from\s+'\.\.\/musicEmbed'/.test(publicar), 'no default import')
+  const passers = filesUnder(SRC).filter((file) => {
+    const src = fs.readFileSync(file, 'utf8')
+    return /useLinkDraft\(\{[^)]*\bfallback\b/.test(src)
+  }).map((file) => path.relative(SRC, file))
+  t.alike(passers.sort(), [path.join('screens', 'Publicar.js')], 'only Publicar passes fallback')
+})

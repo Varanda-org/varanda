@@ -10,7 +10,9 @@
 //   ./MediaGrid with `persist={persistMedia}` (false for authors this device
 //   does not follow: their photos are never kept).
 // - preview: null | a stored link card (the post's `preview`), drawn by
-//   ./LinkCard from that data only, its thumbnail read like a post photo.
+//   ./LinkCard from that data only, its thumbnail read like a post photo. A
+//   card whose own URL is an allowlisted music link (embedOf) is drawn by
+//   ./MusicEmbedCard instead; a link only in the text never gets a player.
 // - quote: null | { author, name, username, at, text, media, missing, onOpen }
 //   rendered by ./QuoteCard (one level only).
 // - repostedBy: null | { author, name, username }: a top line 'Nome
@@ -49,6 +51,7 @@ import { displayText } from '@varanda/rpc'
 import { pendingOpen, tapKind } from '../doubleTap'
 import { relativeTime } from '../format'
 import { hasLink } from '../links'
+import { embedOf } from '../musicEmbed'
 import { moreActions, repostActions, shareLink } from '../postActions'
 import { useBlocks } from '../blocksProvider'
 import { blockedRowView } from '../memberBlocks'
@@ -59,6 +62,7 @@ import { ActionsSheet } from './ActionsSheet'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
 import { LinkCard } from './LinkCard'
+import { MusicEmbedCard } from './MusicEmbedCard'
 import { MediaGrid } from './MediaGrid'
 import { tap } from './haptics'
 import { hasMention, MentionText } from './MentionText'
@@ -342,8 +346,11 @@ function PostRowView ({
   const mediaNode = hasMedia ? <MediaGrid author={author} media={media} persist={persistMedia !== false} /> : null
   const quoteNode = quoteOn ? <QuoteCard quote={quoteProp} now={now} /> : null
   // Outside the row's open area: a tap on the card opens the link, never the conversation.
+  const embed = preview && typeof preview === 'object' ? embedOf(preview.url) : null
   const previewNode = !hasMedia && preview && typeof preview === 'object'
-    ? <LinkCard card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />
+    ? embed !== null
+      ? <MusicEmbedCard embed={embed} card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />
+      : <LinkCard card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />
     : null
   return (
     <View style={styles.row} onTouchStart={Platform.OS !== 'web' ? startTouch : undefined}>
