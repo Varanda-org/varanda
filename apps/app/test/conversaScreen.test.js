@@ -296,7 +296,7 @@ test('Conversa quick send uses a quiet read only without pending pages', async (
 
 async function localReplies (registerLocalCache = () => {}) {
   const { withOwnReply } = await import('../src/threadRows.js')
-  return handler(src.replace('export function branchView', 'function branchView'), 'const ownReplyCache =', 'const INITIAL =', '{ branchView, ownFor, cacheOwnReply, ownReplyCache, dropOwnReplies, pruneOwnReplies }', {
+  return handler(src.replace('export function branchView', 'function branchView'), 'const ownReplyCache =', 'const INITIAL =', '{ branchView, ownFor, cacheOwnReply, ownReplyCache, ownReplyCopies, forgetOwnReplies, dropOwnReplies, pruneOwnReplies }', {
     withOwnReply,
     registerLocalCache,
     refOf: (author, seq) => author + ':' + seq
@@ -733,4 +733,32 @@ test('the refresh reset and the focal reset retire branch pages in flight', (t) 
   t.is(src.split('branchGen.current += 1').length - 1, 2)
   t.ok(src.includes('childRequests.current.clear()\n        branchGen.current += 1'))
   t.ok(src.includes('const alive = () => mine === genRef.current && branch === branchGen.current'))
+})
+
+test('a deletion anywhere drops the reply from every mounted Conversa copy', async (t) => {
+  for (const result of [{ ok: true }, { uncertain: true }, { ok: false }]) {
+    const own = await localReplies()
+    const reply = item(8)
+    own.cacheOwnReply(focal, reply)
+    // Another Conversa, still mounted under the one that deletes.
+    const other = { current: new Map([[focal, [reply]]]) }
+    own.ownReplyCopies.add(other)
+    const context = {
+      ...own,
+      useAction: () => ({ run: async () => result }),
+      useRef: (value) => ({ current: value }),
+      useState: (value) => [value === null ? { ref: A + ':8' } : value, () => {}],
+      actingPageKey: () => null,
+      isPageRef: () => false,
+      UNCERTAIN: 'Confira a conversa'
+    }
+    const useDelete = handler(src.replace('export function useDelete', 'function useDelete'), 'function useDelete', 'export function DeletePrompt', 'useDelete', context)
+    let seen = null
+    const del = useDelete({ request: async () => {}, onUncertain: () => {}, onDeleted: async () => { seen = own.ownFor(focal, other.current).map((row) => row.seq) }, recheck: async () => {} })
+    await del.confirm()
+    if (result.ok) t.alike(seen, [8], 'the deleting screen still finds the parent to lower its count')
+    const gone = result.ok || result.uncertain
+    t.alike(own.ownFor(focal, other.current).map((row) => row.seq), gone ? [] : [8])
+  }
+  t.ok(src.includes('ownReplyCopies.add(ownReplies)\n    return () => { ownReplyCopies.delete(ownReplies) }'), 'each screen registers its copy while mounted')
 })

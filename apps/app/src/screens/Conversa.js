@@ -342,17 +342,25 @@ export function useDelete ({ request, node, onToast, onDeleted, recheck, onUncer
       const member = await memberKeyOf(source.request, source)
       return actAs(source, { member, action: 'delete', page, op: { to: target.ref } })
     })
-    if (r.ok || r.uncertain) dropOwnReplies(ownReplyCache, new Set([target.ref]))
+    const refs = new Set([target.ref])
+    if (r.ok || r.uncertain) dropOwnReplies(ownReplyCache, refs)
     if (r.ok) {
       setTarget(null)
       notify('publicação apagada')
-      await onDeleted(target)
+      // onDeleted finds the parent in the screen's own copy to lower its
+      // count, so the copies are dropped only after it.
+      try {
+        await onDeleted(target)
+      } finally {
+        forgetOwnReplies(refs)
+      }
     } else if (r.uncertain) {
       setTarget(null)
       setRechecking(true)
       notify(UNCERTAIN)
       try {
         if (onUncertain) onUncertain(target)
+        forgetOwnReplies(refs)
         await recheck()
       } catch {} finally {
         setRechecking(false)
@@ -653,6 +661,16 @@ function dropOwnReplies (cache, refs) {
   }
 }
 
+// Each mounted Conversa keeps its own copy of the replies it sent; a deletion
+// anywhere (Diário, A Rua, another Conversa) must reach every copy, or a
+// refresh merges the deleted reply back.
+const ownReplyCopies = new Set()
+
+function forgetOwnReplies (refs) {
+  dropOwnReplies(ownReplyCache, refs)
+  for (const own of ownReplyCopies) dropOwnReplies(own.current, refs)
+}
+
 function pruneOwnReplies (refs, own) {
   const listed = new Set(refs)
   dropOwnReplies(ownReplyCache, listed)
@@ -738,6 +756,10 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
   const childrenRef = useRef(children)
   childrenRef.current = children
   const ownReplies = useRef(new Map())
+  useEffect(() => {
+    ownReplyCopies.add(ownReplies)
+    return () => { ownReplyCopies.delete(ownReplies) }
+  }, [])
   const openRef = useRef(open)
   openRef.current = open
   const loadChildrenRef = useRef(null)
