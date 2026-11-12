@@ -195,6 +195,7 @@ async function postHarness ({ request = async () => ({ seq: 1 }), upload, photo 
     mediaReady: true,
     mediaOnline: true,
     canVideo: true,
+    musicDraft: null,
     items,
     media: { upload: async (arg) => { calls.push(['upload', arg]); return upload ? upload(arg) : descriptor(arg, calls.length) } },
     setUploading: () => {},
@@ -592,7 +593,7 @@ test('a late post success clears only the video that was sent', async (t) => {
   draft.clear()
   const next = await stage(draft)
   const published = evaluate('const published = (sent,', 'function (sent, sentReply, sentIds = [], sentQuote = null)', {
-    video: { draft }, tap: () => {}, setText: () => {}, removeItems: () => {}, onPublished: () => {}
+    video: { draft }, tap: () => {}, setMusicDraft: () => {}, musicTried: { current: new Set() }, setText: () => {}, removeItems: () => {}, onPublished: () => {}
   })
   published('', null, [sent])
   t.is(draft.state.file, next)

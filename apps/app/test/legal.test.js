@@ -7,9 +7,57 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 38)
+  t.is(LEGAL_VERSION, 39)
   t.is(LEGAL_DATE, '12/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 38, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 39, sujeita a revisão jurídica. Não é parecer jurídico.')
+})
+
+test('legal: version 39 describes music through the account service', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const required of [
+    'Quando a associação liga a música, você pode buscar no catálogo do Audius, de artistas independentes',
+    'anexar um trecho de 15 segundos, uma faixa inteira ou uma playlist a uma publicação',
+    'Se a associação também ligar a música nos momentos, você poderá anexar um trecho de 15 segundos a um momento',
+    'Um link do Audius que você cola numa publicação também pode virar um cartão de música',
+    'Há limites diários de uso',
+    'Todo cartão de música mostra o artista, o título, a fonte Audius e um link para a página da faixa ou da playlist',
+    'A publicação guarda o título, o artista e esse link, como qualquer cartão de link',
+    'A música vem do Audius, sob a licença própria do serviço, e pode deixar de estar disponível',
+    'Uma faixa que infringe direitos deve ser denunciada ao Audius'
+  ]) t.ok(text(TERMS).includes(required), required)
+  for (const doc of [TERMS, PRIVACY]) {
+    for (const required of [
+      'o texto da busca, a posição e o tamanho da página de resultados, o identificador da faixa ou da playlist ou o link colado',
+      'a partir do endereço da associação',
+      'nunca o endereço de internet do seu aparelho, a sua chave ou o seu token de acesso',
+      'O áudio passa pelo serviço de conta da associação, que não guarda uma cópia',
+      'Os cartões de música do Audius nas publicações do diário passam pelo serviço de conta, como descrito em Música do Audius, também no app nativo',
+      'Nas conversas, nos grupos ou quando a música não está disponível ao compor uma publicação, um link do Audius é tratado como qualquer outro link',
+      'Nesses casos, no app nativo, a prévia é buscada pelo aparelho de quem envia, diretamente no site',
+      'O app nunca carrega um quadro do Audius'
+    ]) t.ok(text(doc).includes(required), doc.title + ': ' + required)
+  }
+  const section = (heading) => (PRIVACY.sections.find((s) => s.heading === heading)?.paragraphs || []).join(' ')
+  for (const required of [
+    'O serviço vê o texto da busca, a posição da página de resultados, o link colado, o identificador da faixa ou da playlist e o áudio em trânsito',
+    'Os registros do serviço de conta não levam texto de busca, link, identificador de faixa ou playlist nem ticket',
+    'Só mostrar um cartão não faz pedido ao Audius nem ao serviço de conta',
+    'O app nunca carrega um quadro do Audius'
+  ]) t.ok(section('Música do Audius').includes(required), required)
+  t.ok(section('Finalidades e bases legais propostas').includes('Música do Audius: para buscar, anexar e ouvir a música que você escolhe, a base legal proposta é execução de contrato, Art. 7º, V, ainda sujeita a parecer jurídico'))
+  for (const required of [
+    'Na música do Audius, o serviço de conta não guarda a busca nem o áudio',
+    'Os metadados dos itens e os tickets ficam só na memória e desaparecem ao reiniciar o serviço',
+    'Seus prazos são de validade, não de remoção',
+    'um item vencido pode continuar na memória até um uso posterior, uma substituição ou um reinício',
+    'O título, o artista e o link ficam na publicação e seguem a retenção dela'
+  ]) t.ok(section('Por quanto tempo').includes(required), required)
+  for (const required of [
+    'Na música do Audius, podem sair do Brasil o texto da busca, a posição e o tamanho da página de resultados, o identificador da faixa ou da playlist ou o link colado e o endereço da associação',
+    'O Audius pode tratar esses dados fora do Brasil',
+    'O mecanismo dessa transferência internacional, conforme a Resolução CD/ANPD nº 19/2024, ainda será confirmado por parecer jurídico'
+  ]) t.ok(section('Compartilhamento e cópias fora do Brasil').includes(required), required)
 })
 
 test('legal: version 38 describes music players on tap', async (t) => {
@@ -39,7 +87,7 @@ test('legal: version 38 describes music players on tap', async (t) => {
   ]) t.ok(thirdParties.includes(required), required)
   t.ok(section('Finalidades e bases legais propostas').includes('Players de música de terceiros, ao toque: para carregar o player que você pediu, a base legal proposta é execução de contrato, Art. 7º, V, ainda sujeita a parecer jurídico'))
   const retention = section('Por quanto tempo')
-  t.ok(retention.includes('A associação não guarda os dados enviados ao provedor pelo player de música nem um histórico do que você ouve'))
+  t.ok(retention.includes('Nos players de YouTube, SoundCloud, Spotify e Apple Music, a associação não guarda os dados enviados ao provedor pelo player de música nem um histórico do que você ouve'))
   t.ok(retention.includes('A retenção pelo provedor segue a política dele'))
 })
 
@@ -122,7 +170,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '6a93ed5730893596dcfd1d000c97bf57ad100cbebbcf789f64370d57c1964df5', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '9f9445d5ca39c016cfc837853fc7e67da27b051735ab8e707aa1ada322959757', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 19 describes extra passkeys and the recovery code for the same account', async (t) => {

@@ -81,10 +81,18 @@ import { EmojiPicker } from '../ui/EmojiPicker'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { LinkDraftCard, useLinkDraft } from '../ui/ChatComposer'
+import { LINK_DRAFT_DELAY_MS, cardForSend, withCardFallback } from '../linkCard'
+import { fallbackCard, isAudiusLink } from '../musicEmbed'
+import { musicOriginOf } from '../music'
+import { MUSIC_PHOTOS_TEXT, MUSIC_VIDEO_TEXT, musicBlocks, musicSnapshot, resolveTarget, useLine } from '../musicDraft'
+import { audiusResolve } from '../account'
+import { playbackEpoch } from '../media/chatMedia'
+import { previewTarget } from '../preview'
 import { previewsEnabled } from '../previewPref'
 import { previewPrefStore } from '../previewBuild'
-import { cardForSend, withCardFallback } from '../linkCard'
-import { fallbackCard } from '../musicEmbed'
+import { MusicPicker } from '../ui/MusicPicker'
+import { useMusicAvailable } from '../ui/MusicPlayerCard'
+import { LinkCard } from '../ui/LinkCard'
 import { withPreview } from '../attach-plan'
 import { refusalOf } from '../wordCheck'
 import { Sheet, TEXT_CAP } from '../ui/Sheet'
@@ -763,6 +771,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // being sent or waiting for its retry keeps its photos: they are in the
   // signed bytes.
   useEffect(() => {
+    if (asPage !== null) setMusicDraft(null)
     if (pageRetryRef.current !== null || pageSendingRef.current) return
     genRef.current++
     removeItems(Array.from(liveRef.current))
@@ -809,7 +818,56 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   useEffect(() => {
     if (linkHold !== null && linkHold !== text) setLinkHold(null)
   }, [linkHold, text])
-  const linkDraft = useLinkDraft({ text, enabled: open === true && asPage === null && !shareLinkHeld, photos: hasMedia, member: self.publicKey, fallback: fallbackCard })
+  const member = self.publicKey
+  const musicAvailable = useMusicAvailable(node, member, open)
+  const musicOrigin = node.accountOrigin || musicOriginOf(node)
+  const [musicDraft, setMusicDraftState] = useState(null)
+  const musicDraftRef = useRef(null)
+  const setMusicDraft = (draft) => {
+    musicDraftRef.current = draft
+    setMusicDraftState(draft)
+  }
+  const [musicPickerOpen, setMusicPickerOpen] = useState(false)
+  const musicTried = useRef(new Set())
+  const musicResolveOn = musicAvailable === true && node.online !== false && previewsEnabled(previewPrefStore())
+  const musicResolveTarget = resolveTarget(text, musicTried.current)
+  // Wait for the music policy before allowing an Audius page fetch on the device.
+  const linkDraft = useLinkDraft({ text, enabled: open === true && asPage === null && !shareLinkHeld && !musicDraft && !(musicAvailable !== false && isAudiusLink(previewTarget(text))), photos: hasMedia, member: self.publicKey, fallback: fallbackCard })
+  useEffect(() => {
+    if (!open || momentMode || asPage !== null || hasMedia || musicDraft || busy || frozen || musicPickerOpen || shareLinkHeld || !musicResolveOn) return undefined
+    const url = musicResolveTarget
+    if (url === null) return undefined
+    const controller = new AbortController()
+    const epoch = playbackEpoch()
+    const timer = setTimeout(async () => {
+      if (epoch !== playbackEpoch()) return
+      try {
+        const { kind, item } = await audiusResolve(url, { member, origin: musicOrigin, request: nodeRequest, signal: controller.signal })
+        if (controller.signal.aborted || epoch !== playbackEpoch() || liveRef.current.size > 0 || video.draft.state.phase !== 'empty' || musicDraftRef.current !== null) return
+        const draft = { ref: { kind, id: item.id, start: null }, item }
+        if (musicSnapshot(draft) !== null) setMusicDraft(draft)
+      } catch {
+        // A failed resolve keeps the text and any other link's ordinary card.
+      } finally {
+        if (!controller.signal.aborted) musicTried.current.add(url)
+      }
+    }, LINK_DRAFT_DELAY_MS)
+    return () => {
+      clearTimeout(timer)
+      controller.abort()
+    }
+  }, [musicResolveTarget, open, momentMode, asPage, hasMedia, musicDraft, busy, frozen, musicPickerOpen, shareLinkHeld, musicResolveOn, member, musicOrigin, nodeRequest])
+  useEffect(() => {
+    if (!open || momentMode || asPage !== null) setMusicPickerOpen(false)
+  }, [open, momentMode, asPage])
+  const pickMusic = (draft) => {
+    if (busy || frozen || asPage !== null) return
+    if (liveRef.current.size > 0) { setNote(MUSIC_PHOTOS_TEXT); return }
+    if (video.draft.state.phase !== 'empty') { setNote(MUSIC_VIDEO_TEXT); return }
+    if (musicSnapshot(draft) === null) return
+    setNote('')
+    setMusicDraft(draft)
+  }
   const cardRef = useRef(null)
   // A page never queues: it needs the service.
   const pageOffline = asPage !== null && node.online === false
@@ -849,6 +907,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       return
     }
     if (pageRetryRef.current !== null || pageSendingRef.current) return
+    setMusicDraft(null)
+    musicTried.current.clear()
     genRef.current++
     removeItems(Array.from(liveRef.current))
     video.draft.clear()
@@ -926,6 +986,10 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     onRoom(Math.max(0, files.length - room))
     const chosen = files.slice(0, room).map((file) => ({ id: nextItemId(), file }))
     if (chosen.length === 0) return
+    if (musicDraftRef.current !== null) {
+      setMusicDraft(null)
+      setNote(MUSIC_PHOTOS_TEXT)
+    }
     const gen = genRef.current
     for (const { id } of chosen) liveRef.current.add(id)
     setItems((list) => [...list, ...chosen.map(({ id }) => ({
@@ -974,7 +1038,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     if (!canVideo || busy || frozen) return
     setNote('')
     try {
-      await video.draft.pick({ pickVideo, prepareVideo, photos: liveRef.current.size, preview: !!linkDraft.view })
+      await video.draft.pick({ pickVideo, prepareVideo, photos: liveRef.current.size, preview: !!linkDraft.view || musicDraftRef.current !== null })
     } catch (err) { setNote(err.message) }
   }
 
@@ -1078,6 +1142,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // matches.
   const published = (sent, sentReply, sentIds = [], sentQuote = null) => {
     tap('success')
+    setMusicDraft(null)
+    musicTried.current.clear()
     setText((current) => (current === sent ? '' : current))
     if (video.draft.state.file && sentIds.includes(video.draft.state.file)) video.draft.clear()
     if (sentIds.length > 0) removeItems(sentIds)
@@ -1194,6 +1260,11 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       setCheckError(refused)
       return
     }
+    const sentMusic = musicDraft
+    if (sentMusic !== null) {
+      const blocked = musicBlocks({ hasMedia, hasVideo, asPage, online: node.online, textLength: len })
+      if (blocked !== '') { setCheckError(blocked); return }
+    }
     // Never a new signature while a signed post waits for its retry.
     if (pageRetryRef.current !== null || asPage !== null) return sendAsPage()
     const sent = text
@@ -1216,7 +1287,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
         setUploading(false)
       }
       if (sentMedia === null) return
-    } else if (offlineQueue && !sentQuote) {
+    } else if (offlineQueue && !sentQuote && sentMusic === null) {
       queue(sent, sentReply)
       return
     }
@@ -1228,7 +1299,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     // A link card goes with text only; its thumbnail joins the public media
     // core like a post photo, uploaded once per snapshot.
     let card = null
-    const snapshot = sentMedia === null ? linkDraft.take(sent) : null
+    const snapshot = sentMedia === null ? (musicSnapshot(sentMusic) ?? linkDraft.take(sent)) : null
     if (snapshot !== null) {
       const prev = cardRef.current
       if (prev && prev.url === snapshot.url && prev.thumb === (snapshot.thumb ? snapshot.thumb.bytes : null)) {
@@ -1253,6 +1324,10 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       }
     }
     const built = withCardFallback((c) => (c ? withPreview(method, { ...to, ...base }, c) : { ...to, ...base }), card)
+    if (sentMusic !== null && built.card === null) {
+      setCheckError('A música não coube: encurte o texto')
+      return
+    }
     const params = built.op
     // The draft is kept on any failure; a request is never resent.
     let raw = null
@@ -1268,7 +1343,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     // The write gate could not reach the seeder: nothing was written, so the
     // post waits in the outbox (text only: a post with photos or a quote
     // stays here).
-    if (sentMedia === null && !sentQuote && canQueue && raw && raw.uncertain !== true && raw.message === GATE_MESSAGE) {
+    if (sentMusic === null && sentMedia === null && !sentQuote && canQueue && raw && raw.uncertain !== true && raw.message === GATE_MESSAGE) {
       if (queue(sent, sentReply)) action.clearError()
       return
     }
@@ -1292,6 +1367,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
           : !isQuoteRecord(record)
         return record && record.type === 'post' && record.text === sent && quoteOk &&
           sameRef(refOf(record.replyTo), wanted) && sameMedia(record.media, sentMedia) &&
+          (sentMusic === null || (record.preview && typeof record.preview === 'object' && !Array.isArray(record.preview) && record.preview.url === built.card.url)) &&
           Date.parse(record.at) >= startedAt - MATCH_SLACK_MS &&
           (floor === null || (Number.isInteger(entry.seq) && entry.seq > floor))
       })
@@ -1315,7 +1391,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // Locked: the draft is what was signed and waits for its retry. Frozen
   // also covers a page send in flight.
   const held = busy || frozen
-  let pillLabel = offlineQueue && !hasMedia ? 'Guardar' : 'Publicar'
+  let pillLabel = offlineQueue && !hasMedia && musicDraft === null ? 'Guardar' : 'Publicar'
   if (locked) pillLabel = 'Tentar de novo'
 
   const sendMoment = async () => {
@@ -1628,7 +1704,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                 ))}
               </View>
               )
-            : hasMedia
+            : hasMedia || musicDraft !== null
               ? null
               : shareLinkHeld && open === true && asPage === null && previewsEnabled(previewPrefStore())
                 ? (
@@ -1645,6 +1721,14 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                   </Pressable>
                   )
                 : <LinkDraftCard draft={linkDraft} />}
+          {musicDraft !== null && items.length === 0
+            ? (
+              <View style={styles.errors}>
+                <LinkCard draft={musicSnapshot(musicDraft)} onDismiss={held ? undefined : () => setMusicDraft(null)} />
+                <Soft>{useLine(musicDraft.ref)}</Soft>
+              </View>
+              )
+            : null}
           <MentionSuggest rows={frozen ? [] : suggestions} loading={!frozen && mentionQuery !== '' && search.phase === 'loading'} onPick={pickMention} />
           <View ref={postView.tailRef} style={styles.counterRow} onLayout={postView.handleTailLayout}>
             <View style={styles.tools}>
@@ -1678,6 +1762,21 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                   </Pressable>
                   )
                 : null}
+              {musicAvailable === true && asPage === null
+                ? (
+                  <Pressable
+                    accessibilityRole='button'
+                    accessibilityLabel='Música'
+                    accessibilityState={{ disabled: held }}
+                    disabled={held}
+                    onPress={() => setMusicPickerOpen(true)}
+                    hitSlop={6}
+                    style={({ pressed }) => [styles.tool, pressed && styles.toolPressed]}
+                  >
+                    <Text style={styles.counter}>Música</Text>
+                  </Pressable>
+                  )
+                : null}
             </View>
             <View style={styles.count}>
               <Ring progress={ring.progress} tone={ring.tone} />
@@ -1686,6 +1785,15 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
               </Text>
             </View>
           </View>
+          <MusicPicker
+            open={open === true && !momentMode && asPage === null && musicAvailable === true && musicPickerOpen && !held}
+            onClose={() => setMusicPickerOpen(false)}
+            onPick={pickMusic}
+            member={member}
+            origin={musicOrigin}
+            request={nodeRequest}
+            modes={['snippet', 'track', 'playlist']}
+          />
           <EmojiPicker open={emojiOpen && !frozen} onPick={pickEmoji} />
           {quoteOffline
             ? <View style={styles.errors}><Soft>Citações precisam de internet</Soft></View>
@@ -1697,7 +1805,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
             ? <View style={styles.errors}><Soft>Fotos precisam de internet</Soft></View>
             : null}
           {note ? <View style={styles.errors}><Soft>{note}</Soft></View> : null}
-          {offlineQueue && !hasMedia
+          {offlineQueue && !hasMedia && musicDraft === null
             ? <View style={styles.errors}><Soft>Sem rede: a publicação fica aguardando envio e sai sozinha quando a conexão voltar.</Soft></View>
             : null}
           {rosterFailed && roster.length > 0
