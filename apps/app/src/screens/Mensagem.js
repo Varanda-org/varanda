@@ -208,12 +208,20 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const inFlightRef = useRef(null)
   contextRef.current = context
   const usedIntents = useRef(new Set())
+  const [intentListing, setIntentListing] = useState(null)
+  const [offerOpen, setOfferOpen] = useState(false)
   // Only the conversation on top takes an intent: one buried under another
   // screen never shows nor uses it, and keeps its own chip and draft.
   useEffect(() => {
     if (!isTop || !intent || typeof intent.id !== 'string' || usedIntents.current.has(intent.id)) return
     usedIntents.current.add(intent.id)
-    if (String(intent.peer).toLowerCase() === String(peer).toLowerCase() && intent.context) setContext(intent.context)
+    if (String(intent.peer).toLowerCase() === String(peer).toLowerCase()) {
+      if (intent.context) setContext(intent.context)
+      if (intent.offer) {
+        setIntentListing(intent.offer)
+        setOfferOpen(true)
+      }
+    }
     if (typeof onIntentUsed === 'function') onIntentUsed(intent.id)
   }, [isTop, intent, peer, onIntentUsed])
   const [hold, setHold] = useState(null)
@@ -227,7 +235,6 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   // waits to confirm ({ offer, listing }), and offerHold { op, retry } after
   // an uncertain offer, aceite or recusa (resent only on a tap).
   const offerAct = useAction()
-  const [offerOpen, setOfferOpen] = useState(false)
   const [offerValue, setOfferValue] = useState('')
   const [offerNote, setOfferNote] = useState('')
   const [confirming, setConfirming] = useState(null)
@@ -688,6 +695,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   }
 
   const sendOffer = (listing) => {
+    if (folder !== 'inbox' || blockNote !== null) return
     setOfferNote('')
     const cents = parsePriceText(offerValue)
     if (!validCents(cents)) {
@@ -832,7 +840,11 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const me = pageKey !== null ? pageKey : ownKey
   const offerMsgs = rows.map((r) => ({ id: r.id, from: r.from, mine: r.mine, text: r.rawText, card: cardOf.get(r.key), replyTo: replyIdOf.get(r.key), at: r.at, deleted: r.deleted }))
   const linkOfMsg = (m) => listingLinkOf(m.text, origin) || listingLinkOf(m.card, origin)
-  const offerListing = peer !== me ? offerTarget(offerMsgs, peer, origin, linkOfMsg) : null
+  // The listing chosen on its own screen stays this conversation's target, so
+  // Cancelar leaves the Fazer oferta pill for it even in a thread with no link.
+  const offerListing = intentListing !== null
+    ? intentListing
+    : peer !== me ? offerTarget(offerMsgs, peer, origin, linkOfMsg) : null
   const offerStates = new Map()
   const offerOfRow = (index) => {
     const m = offerMsgs[index]
@@ -1120,14 +1132,14 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         refs={forwarding ? forwarding.refs : []}
         identity={ownKey}
       />
-      <Sheet open={offerOpen && offerListing !== null} onClose={() => { if (!offerAct.pending) setOfferOpen(false) }} title='Fazer oferta'>
+      <Sheet open={isTop && offerOpen && offerListing !== null && folder === 'inbox' && blockNote === null} onClose={() => { if (!offerAct.pending) setOfferOpen(false) }} title='Fazer oferta'>
         <View style={styles.sheet}>
           <Soft>{offerListing !== null && offerListing.title !== '' ? displayText(offerListing.title) : 'Anúncio na Feira'}</Soft>
           <Field label='Valor (R$)' value={offerValue} onChangeText={(t) => { setOfferValue(t); setOfferNote('') }} placeholder='80,00' maxLength={16} editable={!offerAct.pending} />
           <Soft>A oferta vai como mensagem nesta conversa. Não é um pagamento: vocês combinam o resto por aqui.</Soft>
           <ErrorText>{offerNote || offerAct.error}</ErrorText>
-          <Btn label='Enviar oferta' onPress={() => sendOffer(offerListing)} pending={offerAct.pending} disabled={node.online === false || offerValue.trim() === ''} />
-          <Btn label='Cancelar' secondary onPress={() => setOfferOpen(false)} disabled={offerAct.pending} />
+          <Btn block label='Enviar oferta' onPress={() => sendOffer(offerListing)} pending={offerAct.pending} disabled={node.online === false || offerValue.trim() === ''} />
+          <Btn block label='Cancelar' secondary onPress={() => setOfferOpen(false)} disabled={offerAct.pending} />
         </View>
       </Sheet>
       <Sheet open={confirming !== null} onClose={() => { if (!offerAct.pending) setConfirming(null) }} title='Aceitar oferta'>
@@ -1135,8 +1147,8 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
           <Soft>{confirming !== null ? 'Oferta de ' + centsLabel(confirming.offer.cents) + '.' : ''}</Soft>
           <Soft>{CONSENT_NOTE}</Soft>
           <ErrorText>{offerAct.error}</ErrorText>
-          <Btn label='Aceitar e assinar' onPress={() => acceptOffer(confirming)} pending={offerAct.pending} disabled={node.online === false} />
-          <Btn label='Cancelar' secondary onPress={() => setConfirming(null)} disabled={offerAct.pending} />
+          <Btn block label='Aceitar e assinar' onPress={() => acceptOffer(confirming)} pending={offerAct.pending} disabled={node.online === false} />
+          <Btn block label='Cancelar' secondary onPress={() => setConfirming(null)} disabled={offerAct.pending} />
         </View>
       </Sheet>
       {/* Two actions: the compact menu, and the delete confirmation as its own
@@ -1169,6 +1181,8 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
 
 const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
+  // The offer and accept sheets' body, with the side margins of the other sheets.
+  sheet: { padding: 16, gap: 12 },
   pad: { padding: 12, alignItems: 'center', gap: 6 },
   inline: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
   // Accept and decline split the row evenly, like the request bars of other messengers.

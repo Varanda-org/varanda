@@ -156,6 +156,10 @@ Na cidade, de cima para baixo: o campo de palavras; uma linha com o chip da cida
 
 O tile de anúncio é um cartão (`card`, cantos `radius.md`) com a foto quadrada em cima (ou o ícone da categoria sobre `skeleton`), depois o preço em destaque, o título em até duas linhas, o lugar e, se houver, o selo em `accentSoft`. A grade tem 1 coluna abaixo de 360 pt ou com texto grande, 2 abaixo de 600, 3 abaixo de 900; a casca do app limita o conteúdo a 640 pt, então o máximo é 3.
 
+O detalhe do anúncio (Anúncio) empilha, de cima para baixo: o carrossel de fotos, o preço em destaque, o título, os botões Compartilhar e Salvar em pílulas, a descrição (com o título "Descrição" só quando há texto) e o cartão de quem anunciou (`SellerCard`: avatar, nome e, no nó hospedado, o link "Ver todos os anúncios" em `accent`). As ações principais ficam numa barra fixa embaixo (`StickyBar`, fundo `card`, filete em cima): Conversar (primária) e Fazer oferta (secundária), ou só Editar para o dono; as mensagens de ação entram na barra, acima dos botões. Com texto grande os botões se empilham, e o conteúdo ganha espaço no fim para a barra nunca cobrir o último item.
+
+O formulário Anunciar usa o `Stepper` com quatro passos (Fotos, O que é, Preço e lugar, Revisão): Continuar (primário) e Voltar (secundário) embaixo, cada passo com os próprios erros em texto de erro, e a Revisão com um `ListingTile` de prévia, a caixa de confirmação "Público na web e em buscadores" e "Publicar anúncio". Descartar pede a folha "Descartar anúncio?" (Descartar em perigo, Continuar editando em secundário).
+
 As folhas de Filtros da Feira (Ordenar por, Faixa de preço De e Até, Tipo de anúncio, a nota de parcial, Aplicar e Limpar) e de Localização (estados e cidade, Ver anúncios) usam a folha de ações padrão.
 
 ## Navegação

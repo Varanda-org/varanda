@@ -7998,3 +7998,50 @@ Situação, em 2026-11-12 (Vitrine, Metro na porta 8090). Cada caixa só é marc
 - [ ] iOS, iPhone 17 Pro (o iPhone 16e não liga aqui): não percorrido (sem turnos restantes).
 - [ ] Chrome, 390 px (painel de navegador embutido, não o Chrome em si; parcial): passos 1 a 3 (vitrine, chip e folha de localização recarregando a lista), 4 (tiles), 5 (1 coluna em 340 px, 2 em 390), 6 (ordem e ponto do Filtros; a nota de parcial não aparece porque a Vitrine tem uma página só), 7 (busca salva e Buscas sem esqueletos), 8 (Meus, Salvos e a grade de "Anúncios" do perfil de uma Página, sem vitrine nem filtros), 9 (cidade sem anúncios: "Limpar filtros" e "Trocar cidade"), escuro e claro; o rótulo "Trocar cidade, agora Campinas, SP" apareceu na árvore de acessibilidade. Não percorrido: texto grande, offline, Reduzir movimento, leitor de tela de verdade.
 - [ ] Chrome, 1280 px (painel de navegador embutido; parcial): a grade tem 3 colunas dentro da coluna de 640 px (limite conhecido), tile abre o anúncio, Buscas, Meus e Salvos. Não percorrido: o resto dos passos.
+
+## 182. Feira: anúncio, criação em passos e oferta (PR feat/feira-listing-flow)
+
+Quinto PR da revisão visual do app. A tela Anúncio ganha um cartão de quem anunciou e uma barra fixa embaixo com as ações; Anunciar passa a ser feito em quatro passos; "Fazer oferta" no anúncio abre a conversa com quem anunciou e a folha da oferta para aquele anúncio.
+
+- Detalhe (`apps/app/src/screens/Anuncio.js`, `apps/app/src/anuncioView.js`): fotos, preço, título, "Compartilhar" e "Salvar" logo abaixo do título e a descrição (o título "Descrição" só aparece quando há texto).
+- Cartão de quem anunciou (`apps/app/src/ui/SellerCard.js`): avatar, nome e, no nó hospedado, "Ver todos os anúncios", que abre a grade de anúncios de quem anunciou.
+- Barra fixa (`apps/app/src/ui/StickyBar.js`): para quem vê, "Conversar" e, só em produto ou serviço com preço, "Fazer oferta"; para o dono, só "Editar". As mensagens de ação ("Link copiado.", erro ao salvar, "Não deu para continuar agora. Tente de novo.") aparecem dentro da barra enquanto ela está na tela. Com texto grande, os botões da barra ficam empilhados. O fim do conteúdo nunca fica atrás da barra. Num anúncio de Página, a nota da Página aparece uma vez antes de Conversar ou Fazer oferta.
+- Anunciar em passos (`apps/app/src/screens/Anunciar.js`, `apps/app/src/anunciarSteps.js`): quatro passos (Fotos, O que é, Preço e lugar, Revisão) com "Continuar" e "Voltar"; na Revisão, uma prévia em tile e "Publicar anúncio". Cada passo mostra só os próprios erros. A confirmação "Público na web e em buscadores" fica na Revisão. O botão voltar do Android e o Escape na web voltam um passo; no primeiro passo, com conteúdo, perguntam "Descartar anúncio?" ("Descartar" e "Continuar editando").
+- Oferta (`apps/app/src/App.js`, `apps/app/src/privateReply.js`, `apps/app/src/screens/Mensagem.js`): "Fazer oferta" no anúncio abre a conversa com quem anunciou e a folha "Fazer oferta" para ESTE anúncio, mesmo que a conversa já tenha o link de outro anúncio. Nada é enviado até "Enviar oferta"; fechar a folha não envia nada; voltar e abrir a mesma conversa não reabre a folha.
+- Limites conhecidos: o gesto de borda do iOS e o histórico do navegador saem de Anunciar na hora, sem a pergunta "Descartar anúncio?" (decidido, não é defeito); "Editar anúncio" (`AnuncioEditar`) continua com o formulário único de antes; a nota da Página só vale se a Vitrine tiver um anúncio de Página.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `(cd apps/app && node ../../scripts/run-tests.js test/anunciarSteps.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/anuncioView.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/privateReply.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/feiraCompose.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/feiraOffer.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js)`
+
+Os testes cobrem as ações da barra por papel, o resumo de quem anunciou, os erros de cada passo e o rascunho da oferta. Não cobrem como isso parece na tela nem o botão voltar: isso é o que a verificação manual confere.
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é um nó hospedado com dados de exemplo e dispensa conta. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e, que não liga neste Mac; usa-se o iPhone 17 Pro), Chrome em 390 e em 1280 px. Capturas ficam fora do git.
+
+1. Abra um anúncio alto de outra pessoa. Esperado: fotos, preço, título, Compartilhar e Salvar, descrição, cartão de quem anunciou; rolando até o fim, a barra fixa não cobre o último conteúdo.
+2. Toque em "Compartilhar". Esperado: "Link copiado." aparece dentro da barra.
+3. Toque no cartão em "Ver todos os anúncios". Esperado: abre a grade de quem anunciou.
+4. Toque em "Conversar". Esperado: a conversa abre com o rascunho e o cartão do anúncio no campo de escrita; nada é enviado.
+5. Volte e toque em "Fazer oferta". Esperado: a conversa abre com a folha "Fazer oferta" para este anúncio (também numa conversa que já liga outro anúncio); fechar a folha não envia nada; sair e voltar à conversa não reabre a folha; só "Enviar oferta" envia.
+6. Abra um anúncio seu. Esperado: a barra tem só "Editar", que abre "Editar anúncio" com o formulário único.
+7. Abra um anúncio de Página, se houver. Esperado: a nota da Página aparece uma vez antes de Conversar ou Fazer oferta.
+8. Anunciar, passo a passo. Esperado: Continuar sem os campos do passo mostra só o erro daquele passo; Voltar mantém o que foi escrito; a Revisão mostra o tile e a confirmação "Público na web e em buscadores"; sem ela, o erro "Confirme que o anúncio fica público na web e em buscadores."; "Publicar anúncio" abre o anúncio.
+9. Voltar em Anunciar. Esperado: em passo adiante, o botão voltar do Android e o Escape na web voltam um passo; no primeiro passo com conteúdo, perguntam "Descartar anúncio?".
+10. Texto grande, escuro, leitor de tela e Reduzir movimento. Esperado: com texto grande os botões da barra ficam empilhados; nada cortado, contraste legível; a barra e os passos têm rótulos.
+
+Situação, em 2026-11-12 (Vitrine, Metro na porta 8090). Cada caixa só é marcada quando o alvo foi percorrido por inteiro; nenhuma foi, por falta de turnos.
+
+- [ ] Android, AVD `varanda-api36` (parcial, `v5-shots/a*.png`, `b*.png`, `d*.png`): passo 1 passou no anúncio de Página ("Livros da biblioteca": o AVD vem com texto 1,3, e a barra empilhou "Conversar" e "Fazer oferta"; o cartão mostrou "Ver todos os anúncios", que abriu a grade de quem anunciou, também no escuro); passo 2 só em parte (no Android "Compartilhar" abre a folha de compartilhar do sistema, não a mensagem na barra); passo 4 não percorrido; passo 5 passou para um anúncio de Página (a nota "Conversar com a página" apareceu, "Continuar" abriu a conversa com a folha "Fazer oferta" para "Livros da biblioteca", "Cancelar" fechou a folha, a conversa ficou vazia ("Nenhuma mensagem") e voltar ao anúncio não reabriu a folha); passo 7 passou (nota da Página); passo 8 passou até o passo 2 (Fotos, "O que é", "Escreva um título." só do passo 2, "Voltar" no fim da tela com rolagem); passo 9 passou (voltar do passo 2 vai ao passo 1, e no passo 1 com título digitado pergunta "Descartar anúncio?" com "Descartar" e "Continuar editando"); passo 10 (parcial): escuro e texto grande conferidos. Não percorrido: passos 3 e 4 com conversa que já liga outro anúncio, 6, Preço e lugar, Revisão e "Publicar anúncio", leitor de tela e Reduzir movimento. O AVD voltou ao tema claro.
+- [ ] iOS, iPhone 17 Pro (o iPhone 16e não liga aqui): não percorrido (sem turnos restantes).
+- [ ] Chrome, 390 px (painel de navegador embutido, não o Chrome em si; parcial): passos 1, 2 e 6 num anúncio seu (fotos com pontos, preço, título, "Compartilhar", descrição, cartão com "Ver todos os anúncios", avaliações; a barra tem só "Editar", o fim do conteúdo (Reservado, Vendido, Apagar) fica acima da barra e o endereço do link aparece dentro da barra ao tocar em "Compartilhar", porque o painel não copia). Não percorrido: o resto dos passos, inclusive Anunciar e o Escape.
+- [ ] Chrome, 1280 px: não percorrido.
+- Defeitos: nenhum visto no que foi percorrido. Observação para a equipe: na folha "Fazer oferta" com texto grande no Android, o conteúdo fica colado nas bordas da tela (sem margem lateral) e os botões "Enviar oferta" e "Cancelar" ficam à esquerda com largura do texto (`apps/app/src/screens/Mensagem.js` por volta das linhas 1135 a 1141, ver `v5-shots/a10.png`); a folha "Conversar com a página" e "Descartar anúncio?" têm margem normal.
