@@ -732,7 +732,7 @@ test('voice: one recording object per gesture, a move only updates the slide off
 
 test('voice: lock and background stop playback; lock sweeps the recorder cache', (t) => {
   const app = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
-  t.ok(app.includes("import { clearChatMedia, onAppStateChange, stopPlayback } from './src/media/chatMedia'"))
+  t.ok(app.includes("import { clearChatMedia, onAppStateChange, screenWatcher, stopBoundPlayback, stopPlayback } from './src/media/chatMedia'"))
   t.ok(app.includes("import { sweepVoiceCache } from './src/media/audio'"))
   t.ok(/useEffect\(\(\) => \{\n {4}stopPlayback\(\)\n {4}clearChatMedia\(\)\n {4}sweepVoiceCache\(\)\n {2}\}, \[generation, locked\]\)/.test(app), 'the lock effect')
   t.ok(app.includes("if (state === 'background') stopPlayback()\n      onAppStateChange(state, { canClear: true })"), 'background')

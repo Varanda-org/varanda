@@ -437,6 +437,7 @@ test('static UI: index, SPA fallback, traversal and dotfiles, headers', async (t
   t.ok(index.body.includes('varanda'))
   const csp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; " +
     "font-src 'self' data:; connect-src 'self' ws://127.0.0.1:" + s.port + ' ws://localhost:' + s.port +
+    '; frame-src https://www.youtube-nocookie.com https://w.soundcloud.com https://open.spotify.com https://embed.music.apple.com' +
     "; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
   t.is(index.headers['content-security-policy'], csp, 'CSP')
   t.is(index.headers['x-content-type-options'], 'nosniff')

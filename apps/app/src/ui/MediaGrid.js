@@ -32,6 +32,7 @@ import { counterText, frameRatio, slideLabel } from '../carousel'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { fetchVideo } from '../media/fetch'
 import { durationLabel, MAX_MEDIA_PER_POST, gridLayout, mosaicLayout, videoPair } from '../media/plan'
+import { stopBoundPlayback } from '../media/chatMedia'
 import VideoPlayer from '../media/VideoPlayer'
 import { useHosted } from '../node'
 import { Icon } from './Icon'
@@ -75,6 +76,9 @@ function Viewer ({ author, media, index, onIndex, onClose, persist }) {
   goRef.current = go
   const closeRef = useRef(onClose)
   closeRef.current = onClose
+
+  // The full-screen viewer hides a playing music player without a screen change the App could see.
+  useEffect(() => { if (open) stopBoundPlayback() }, [open])
 
   // Escape closes only the viewer, even over a sheet (src/ui/escapeLayer.js).
   useEscapeLayer(!!open, () => closeRef.current(), 'viewer')

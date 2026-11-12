@@ -8252,3 +8252,58 @@ Builds de debug desta branch, sem conta e sem publicar. O módulo `video-prep`, 
 - [ ] Variantes `colr` `nclc` e `nclx`, e caixas `sgpd`, vindas de codificadores reais (não do MP4 sintético dos testes). Registrar se a limpeza mais `videoBounds` estrito aceita o arquivo ou qual recusa aparece. Em 2026-11-12, `nclx` (iOS e Android) e `sgpd` `roll` (iOS) foram aceitos; `nclc` ainda não apareceu.
 - [x] Android e iOS, codificação (T13 e T14): um clipe 1080p e um clipe HEVC passam pela limpeza e por `videoBounds` estrito; um clipe de 60 s é recusado antes de codificar; as capas saem em pé. Feito em 2026-11-12 no simulador iOS e no emulador Android (acima); falta um iPhone e um Android físicos. Não afrouxar o validador para um arquivo real passar.
 - [ ] iPhone e Android físicos: os mesmos clipes, com o codificador do aparelho; registrar se a segunda passagem do iOS acontece fora do simulador.
+
+## 184. Players de música em publicações, ao toque, Termos 38 (PR feat/music-link-embeds)
+
+Publicações com cartão de YouTube, SoundCloud, Spotify ou Apple Music oferecem **Tocar aqui**. O cartão fechado mostra só os dados guardados na publicação, sem pedido ao provedor. O aviso explica que o toque carrega o player do serviço e entrega a ele o endereço de internet do aparelho. Só esse toque monta o player dentro da publicação. O link continua podendo abrir fora, e músicas completas dependem do serviço. Não há mudança no registro: um leitor antigo continua mostrando o cartão comum, e um link de `audius.co` não ganha frame do provedor.
+
+`apps/app/src/musicEmbed.js` aceita nove hosts e constrói os endereços dos players só com identificadores e componentes validados. O app usa `react-native-webview` 13.16.0 no celular, sem ponte JavaScript para o app e com navegação do quadro principal limitada. O modo anônimo não apaga tudo o que o player guarda. No Android, o `incognito` do 13.16.0 remove os cookies anteriores e desliga o cache quando o quadro monta, e cookies de terceiros são recusados (`thirdPartyCookiesEnabled` falso), mas o `localStorage` e o IndexedDB do provedor ficam nos dados do WebView do app. No iOS, o armazenamento de dados é não persistente. Em todas as plataformas o quadro do provedor tem sandbox (`EMBED_SANDBOX`: `allow-scripts allow-same-origin allow-presentation`, sem popups, navegação do topo, formulários nem downloads), uma lista `allow` sem recurso de captura e `referrerPolicy` fixo. A CSP permite em `frame-src` apenas `https://www.youtube-nocookie.com`, `https://w.soundcloud.com`, `https://open.spotify.com` e `https://embed.music.apple.com`. O build web deve ser implantado junto com o `deploy/seeder/Caddyfile` atualizado; o servidor local usa a mesma lista.
+
+Só um player toca por vez. Tocar em outro cartão fecha o primeiro; trocar de tela, trocar de aba, abrir uma foto em tela cheia ou mandar o app para segundo plano fecha o player. Com o player aberto, a cada meio segundo o app compara a área dele com a parte visível da lista (abaixo da barra de cima e acima da barra de abas, quando a tela tem uma) e o fecha se menos da metade da largura estiver visível, se a altura visível for menor que a metade da altura do player (no máximo 120 pt, nos players altos) ou se não for possível medi-lo. Nos 2 primeiros segundos depois do toque essa conferência não o fecha, para dar tempo de rolar até ele. A reprodução vem do cartão guardado, nunca de uma busca de links no texto. Se a página não puder ser lida ao compor uma publicação, um link reconhecido ainda pode gerar um cartão com o nome do provedor e sem imagem.
+
+Termos e Política de Privacidade passam à versão 38, com novo aceite. Os Termos descrevem o toque opcional, o endereço de internet do aparelho recebido pelo provedor, seus cookies e outros dados guardados no aparelho e seus termos. A Política descreve, além disso, as informações do navegador ou app (user agent), o provedor como controlador e o referrer (o endereço do site ou, no app, um endereço fixo do app Varanda). O provedor é o controlador desses dados e pode tratá-los fora do Brasil. A associação não guarda esses dados nem histórico de reprodução. A base legal proposta para carregar o player solicitado e a transferência internacional continuam sujeitas a parecer jurídico. As páginas do site são renderizadas de `apps/app/src/legal.js`; a tabela LGPD está em `docs/design.md` e o comportamento do leitor em "Link cards" de `docs/protocol.md`.
+
+Como verificar, a partir da raiz, com Node 20.19 ou mais novo no PATH:
+
+- `npm run lint`
+- `node apps/app/test/musicEmbed.test.js`
+- `node apps/app/test/embedFrame.test.js`
+- `node apps/app/test/musicEmbedCard.test.js`
+- `node apps/app/test/linkPreview.test.js`
+- `node apps/app/test/linkCardBuild.test.js`
+- `node apps/app/test/chatMedia.test.js`
+- `node apps/app/test/legal.test.js`
+- `node apps/app/test/terms-version.test.js`
+- `node packages/core/test/terms.test.js`
+- `VARANDA_TEST_CONCURRENCY=1 node apps/cli/test/account-terms.test.js`
+- `npm test -w apps/site`
+- `node apps/site/scripts/render-legal.js --check`
+- `node apps/cli/test/caddyfile.test.js`
+- `VARANDA_TEST_CONCURRENCY=1 node apps/cli/test/deploy.test.js`
+- `VARANDA_TEST_CONCURRENCY=1 node apps/cli/test/serve.test.js`
+
+Os testes de música conferem a lista de hosts, URLs recusadas, endereços construídos sem copiar parâmetros não conferidos, ausência de frame Audius e cartão com o nome do provedor. Os testes de frame conferem a versão da dependência, a ausência de ponte, os limites de navegação, o sandbox e a política de referrer. Os testes de cartão e prévia conferem a integração com as publicações e a montagem do player só após o toque; `linkCardBuild` confere o cartão alternativo quando a prévia falha. `chatMedia` confere a troca de reprodução e o encerramento ao sair da tela, ao abrir uma foto em tela cheia ou ao ir para segundo plano. Os testes legais conferem os avisos, o digest, a versão comum ao app e ao core, o aceite no serviço e a igualdade das páginas renderizadas. Os testes da CLI conferem a CSP no Caddy, no deploy e no servidor local. Os testes automatizados usam substitutos dos provedores e servidores locais, sem rede pública; não comprovam a reprodução real nos quatro serviços nem substituem as verificações abaixo.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Todos os itens estão em aberto. Ordem: Android debug, simulador iOS, depois web e PWA. O build de debug não entra com passkey de produção; use uma instalação de teste compatível. No iOS, a passkey depende do domínio associado da conta Apple Developer (veja `docs/development.md`). Em cada plataforma, repetir os cenários abaixo com uma publicação por provedor, usando links válidos de YouTube, SoundCloud, Spotify e Apple Music.
+
+- [ ] Android, build de debug no emulador ou aparelho, após `npm run prepare:native -w apps/app`: conferir os quatro cartões e os cenários abaixo.
+- [ ] iOS, simulador: conferir os quatro cartões e os mesmos cenários.
+- [ ] Web: conferir os quatro cartões e os mesmos cenários, com o build e o Caddyfile atualizados juntos.
+- [ ] PWA instalado: conferir os quatro cartões e os mesmos cenários.
+- [ ] Ao abrir a tela e rolar pelos cartões, não há pedido ao provedor antes de tocar em **Tocar aqui**, conferido no inspetor de rede da plataforma.
+- [ ] Em cada provedor, o toque abre o player na publicação; os controles funcionam e o link ainda abre fora. Conferir o comportamento quando o serviço oferece só uma prévia da música.
+- [ ] Tocar em um segundo cartão fecha o primeiro player; não ficam dois tocando.
+- [ ] Sair da tela, trocar de aba, mandar o app para segundo plano e rolar até ficar visível menos da metade da largura ou menos que a metade da altura do player (até 120 pt) fecham o player; abrir uma foto em tela cheia também.
+- [ ] Um link de Audius continua como cartão comum, sem frame do provedor. Um link reconhecido cuja página não forneça prévia pode ser publicado com o nome do provedor e sem imagem.
+- [ ] Cada um dos quatro players toca dentro do sandbox, no Android, no iOS e na web.
+- [ ] No Android, cada player carrega e toca depois de tocar em "Tocar aqui": a guarda recusa toda navegação de topo que não seja o documento do cartão, e a carga do subquadro do provedor não passa por ela. Se o player não carregar, a guarda está errada para este WebView.
+- [ ] Links curtos `on.soundcloud.com` tocam.
+- [ ] Numa tela de 360 dp de largura (Android), o player do Spotify cabe no cartão sem cortar os controles.
+- [ ] Abrir uma foto em tela cheia para o player de música.
+- [ ] Um player alto (álbum do Apple Music) aberto perto do fim da tela continua tocando enquanto parte dele aparece.
+- [ ] Numa tela empilhada (perfil de outra pessoa), o player no fim da tela não fecha sozinho.
+- [ ] Android: abrir um vídeo do YouTube em tela cheia e girar o aparelho; o vídeo continua tocando depois de 2 s e, ao sair da tela cheia, o player volta ao cartão.
+- [ ] Nenhum navegador abre e nenhum download começa a partir de um player.
+- [ ] Uma conta que aceitou a versão 37 recebe os Termos 38 para novo aceite; os textos no app e nas páginas do site coincidem.

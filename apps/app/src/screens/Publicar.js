@@ -84,6 +84,7 @@ import { LinkDraftCard, useLinkDraft } from '../ui/ChatComposer'
 import { previewsEnabled } from '../previewPref'
 import { previewPrefStore } from '../previewBuild'
 import { cardForSend, withCardFallback } from '../linkCard'
+import { fallbackCard } from '../musicEmbed'
 import { withPreview } from '../attach-plan'
 import { refusalOf } from '../wordCheck'
 import { Sheet, TEXT_CAP } from '../ui/Sheet'
@@ -808,7 +809,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   useEffect(() => {
     if (linkHold !== null && linkHold !== text) setLinkHold(null)
   }, [linkHold, text])
-  const linkDraft = useLinkDraft({ text, enabled: open === true && asPage === null && !shareLinkHeld, photos: hasMedia, member: self.publicKey })
+  const linkDraft = useLinkDraft({ text, enabled: open === true && asPage === null && !shareLinkHeld, photos: hasMedia, member: self.publicKey, fallback: fallbackCard })
   const cardRef = useRef(null)
   // A page never queues: it needs the service.
   const pageOffline = asPage !== null && node.online === false

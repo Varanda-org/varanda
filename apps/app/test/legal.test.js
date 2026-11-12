@@ -7,9 +7,40 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 37)
+  t.is(LEGAL_VERSION, 38)
   t.is(LEGAL_DATE, '12/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 37, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 38, sujeita a revisão jurídica. Não é parecer jurídico.')
+})
+
+test('legal: version 38 describes music players on tap', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const doc of [TERMS, PRIVACY]) {
+    for (const required of [
+      'YouTube, SoundCloud, Spotify ou Apple Music',
+      'numa publicação pode aparecer como um cartão',
+      'Mostrar esse cartão não faz nenhum pedido a esses serviços',
+      'Só quando você toca em "Tocar aqui" o player do próprio serviço carrega dentro da publicação',
+      'recebe o endereço de internet do seu aparelho',
+      'pode usar cookies e outros dados que o serviço guarda no aparelho',
+      'Ouvir músicas completas depende do serviço',
+      'Tocar é opcional',
+      'o link continua podendo abrir fora do Varanda',
+      'Sair da tela fecha o player'
+    ]) t.ok(text(doc).includes(required), doc.title + ': ' + required)
+  }
+  const section = (heading) => PRIVACY.sections.find((s) => s.heading === heading).paragraphs.join(' ')
+  const thirdParties = section('Compartilhamento e cópias fora do Brasil')
+  for (const required of [
+    'informações do navegador ou app (user agent)',
+    'Também recebe, como referência (referrer), o endereço do site ou, no app, um endereço fixo do app Varanda',
+    'O provedor é o controlador desses dados',
+    'podem ser tratados fora do Brasil por YouTube, SoundCloud, Spotify ou Apple Music'
+  ]) t.ok(thirdParties.includes(required), required)
+  t.ok(section('Finalidades e bases legais propostas').includes('Players de música de terceiros, ao toque: para carregar o player que você pediu, a base legal proposta é execução de contrato, Art. 7º, V, ainda sujeita a parecer jurídico'))
+  const retention = section('Por quanto tempo')
+  t.ok(retention.includes('A associação não guarda os dados enviados ao provedor pelo player de música nem um histórico do que você ouve'))
+  t.ok(retention.includes('A retenção pelo provedor segue a política dele'))
 })
 
 test('legal: version 29 has no tolerance for abuse, a real contact, a content license and the age check on the app', async (t) => {
@@ -91,7 +122,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '8ccc36f0d00adf0323ab9fa99c43070c5b9cfbda5e8af8e3cd4d2f4ddd760570', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '6a93ed5730893596dcfd1d000c97bf57ad100cbebbcf789f64370d57c1964df5', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 19 describes extra passkeys and the recovery code for the same account', async (t) => {
