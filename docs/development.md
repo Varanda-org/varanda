@@ -291,12 +291,13 @@ eas credentials -p android
 
 O segundo alvo iOS, `VarandaShare`, usa o bundle id `app.varanda.share`. O App Group `group.app.varanda` está em `apps/app/ios/Varanda/Varanda.entitlements`, `apps/app/ios/VarandaShare/VarandaShare.entitlements` e `ios.entitlements` no `apps/app/app.json`. A extensão salva o conteúdo recebido; a pessoa abre a Varanda para que Publicar apareça preenchido.
 
-Antes de `feat/share-to-varanda-ios` chegar à `main`, a pessoa que opera precisa preparar os perfis com `eas credentials -p ios`, tanto para produção quanto para preview: atualizar o perfil do app mantendo Associated Domains e criar o perfil `app.varanda.share` com o App Group. O fluxo `.github/workflows/ios-release.yml` usa `--non-interactive`; esse build não sincroniza capacidades. A ordem obrigatória é:
+Antes do primeiro build de loja com a extensão, a pessoa que opera precisa ligar o App Group na conta Apple e preparar os perfis com `eas credentials -p ios`, tanto para produção quanto para preview: atualizar o perfil do app mantendo Associated Domains e criar o perfil `app.varanda.share` com o App Group. O fluxo `.github/workflows/ios-release.yml` roda com `EXPO_NO_CAPABILITY_SYNC=1` e nunca muda capacidades na conta Apple. Sem essa variável, o build com `--non-interactive` tentou ligar sozinho o App Group do alvo novo, a Apple recusou o pedido e o build parou antes de compilar (2026-11-12). A ordem obrigatória é:
 
-1. Definir a variável do repositório `VARANDA_IOS_RELEASE` com qualquer valor diferente de `true` antes do merge. O fluxo só roda quando ela é exatamente `true`.
-2. Rodar `eas credentials -p ios` e preparar os perfis descritos acima.
-3. Rodar manualmente, em `apps/app`, `eas build -p ios --profile production --auto-submit` (sem `--auto-submit` o build não chega ao TestFlight) e confirmar no TestFlight que a extensão tem a mesma versão e o mesmo número de build do app e que as passkeys continuam funcionando.
-4. Só então definir `VARANDA_IOS_RELEASE` novamente como `true`.
+1. Definir a variável do repositório `VARANDA_IOS_RELEASE` com qualquer valor diferente de `true`. O fluxo só roda quando ela é exatamente `true`.
+2. No Apple Developer (Certificates, Identifiers & Profiles), criar o App Group `group.app.varanda`, se ainda não existir, e ligar App Groups com esse grupo nos identificadores `app.varanda` e `app.varanda.share`. O `app.varanda` mantém Associated Domains.
+3. Rodar `eas credentials -p ios` e preparar os perfis descritos acima. Se ele ou o build do passo 4 mostrar o mesmo erro da Apple ao sincronizar capacidades, rode o comando com `EXPO_NO_CAPABILITY_SYNC=1`.
+4. Rodar manualmente, em `apps/app`, `eas build -p ios --profile production --auto-submit` (sem `--auto-submit` o build não chega ao TestFlight) e confirmar no TestFlight que a extensão tem a mesma versão e o mesmo número de build do app e que as passkeys continuam funcionando.
+5. Só então definir `VARANDA_IOS_RELEASE` novamente como `true`.
 
 Os dois alvos precisam levar a mesma versão e o mesmo número de build. A fase "Sync version with Varanda" do alvo `VarandaShare` copia os valores de `Varanda/Info.plist` para a extensão em cada build. Para build local, rode primeiro `npm run prepare:native -w apps/app -- ios` (inclui `pod install`). Nunca rode `expo prebuild`, pois `ios/` é mantido à mão.
 
@@ -320,6 +321,7 @@ eas build -p ios --profile production --auto-submit
 - Conformidade de exportação: `ITSAppUsesNonExemptEncryption` é `false` no `Info.plist` (mantido à mão) e em `ios.config.usesNonExemptEncryption` do `app.json` (para um `expo prebuild` gerar o mesmo), e `test/hardening.test.js` confere os dois. Assim o App Store Connect não pergunta a cada build, e o build da CI vai direto ao TestFlight. Vem das respostas dadas no App Store Connect em 2026-11-06: algoritmos padrão além dos do sistema (libsodium e o protocolo Noise) e sem distribuição na França; com elas, o próprio App Store Connect disse que não precisa de documentação e sugeriu declarar no `Info.plist`. A resposta só vale enquanto a França ficar fora da disponibilidade (Pricing and Availability) e a criptografia do app não mudar. Se a França entrar, a Apple pede a declaração francesa, e a chave e as respostas precisam ser revistas.
 - Para ligar o fluxo: crie um token de acesso da Expo para a conta `varanda-org`; em Settings > Environments, crie o ambiente `app-store`, com deployment branches só `main` e o segredo `EXPO_TOKEN`; em Settings > Secrets and variables > Actions > Variables, crie `VARANDA_IOS_RELEASE` com o valor `true`. Qualquer outro valor pausa os envios, inclusive pelo Run workflow.
 - O fluxo instala o `eas-cli` 27.2.0 com `--ignore-scripts`, a versão do primeiro build e envio deste perfil. Antes de trocar a versão, rode um build local com a nova.
+- O fluxo define `EXPO_NO_CAPABILITY_SYNC=1`: o build da CI não liga nem desliga capacidades na conta Apple. Uma capacidade nova (em um `*.entitlements` ou em `ios.entitlements` do `app.json`) se liga à mão no Apple Developer e entra num perfil novo com `eas credentials -p ios` antes do push que a leva à `main` (veja "Extensão de compartilhamento do iOS").
 - Cada push em `main` que mexe no app gasta um build iOS da EAS. `apps/cli/test/ios-release.test.js` fixa a forma do fluxo e os perfis do `eas.json`.
 
 ## Ficha da App Store (EAS Metadata)
