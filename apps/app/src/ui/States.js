@@ -9,12 +9,12 @@ import { Icon } from './Icon'
 import { loopTiming } from './loopMotion'
 import { Pill } from './Pill'
 import { useStyles, useTheme } from './ThemeProvider'
-import { layout, motion, type } from './theme'
+import { layout, motion, radius, space, type } from './theme'
 
 const native = Platform.OS !== 'web'
 
 // Post-shaped placeholders that pulse while the first page loads.
-export function Skeleton ({ rows = 3 }) {
+export function Skeleton ({ rows = 3, children }) {
   const styles = useStyles(makeStyles)
   const pulse = useRef(new Animated.Value(0.5)).current
   useEffect(() => {
@@ -26,7 +26,8 @@ export function Skeleton ({ rows = 3 }) {
     return () => loop.stop()
   }, [pulse])
   const items = []
-  for (let i = 0; i < rows; i++) {
+  const count = children === undefined ? rows : 0
+  for (let i = 0; i < count; i++) {
     items.push(
       <View key={i} style={styles.skRow}>
         <View style={styles.skAvatar} />
@@ -39,12 +40,38 @@ export function Skeleton ({ rows = 3 }) {
   }
   return (
     <Animated.View style={{ opacity: pulse }} accessible={false} importantForAccessibility='no-hide-descendants'>
-      {items}
+      {children === undefined ? items : children}
     </Animated.View>
   )
 }
 
-export function EmptyState ({ icon, title, body, actionLabel, onAction }) {
+export function SkeletonRow () {
+  return <Skeleton rows={1} />
+}
+
+export function SkeletonTile () {
+  const styles = useStyles(makeStyles)
+  return (
+    <Skeleton>
+      <View style={styles.skTile}>
+        <View style={styles.skImage} />
+        <View style={[styles.skBar, { width: '80%' }]} />
+        <View style={[styles.skBar, { width: '45%' }]} />
+      </View>
+    </Skeleton>
+  )
+}
+
+export function SkeletonBubble () {
+  const styles = useStyles(makeStyles)
+  return (
+    <Skeleton>
+      <View style={styles.skBubble} />
+    </Skeleton>
+  )
+}
+
+export function EmptyState ({ icon, title, body, actionLabel, onAction, secondaryLabel, onSecondary }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   return (
@@ -53,6 +80,7 @@ export function EmptyState ({ icon, title, body, actionLabel, onAction }) {
       <Text style={styles.emptyTitle} accessibilityRole='header'>{title}</Text>
       {body ? <Soft style={styles.emptyBody}>{body}</Soft> : null}
       {actionLabel && onAction ? <Pill label={actionLabel} onPress={onAction} filled /> : null}
+      {secondaryLabel && onSecondary ? <Pill label={secondaryLabel} onPress={onSecondary} /> : null}
     </View>
   )
 }
@@ -121,6 +149,9 @@ const makeStyles = (colors) => StyleSheet.create({
   skAvatar: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.skeleton },
   skLines: { flex: 1, gap: 10, justifyContent: 'center' },
   skBar: { height: 12, borderRadius: 6, backgroundColor: colors.skeleton },
+  skTile: { gap: space.md, padding: space.lg },
+  skImage: { width: '100%', aspectRatio: 1, borderRadius: radius.md, backgroundColor: colors.skeleton },
+  skBubble: { width: '65%', height: 56, margin: space.lg, borderRadius: radius.bubble, backgroundColor: colors.skeleton },
   empty: { alignItems: 'center', gap: 12, paddingVertical: 32, paddingHorizontal: 16 },
   emptyTitle: { ...type.emptyTitle, color: colors.ink, textAlign: 'center' },
   emptyBody: { textAlign: 'center' },

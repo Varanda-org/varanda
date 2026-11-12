@@ -1,8 +1,9 @@
 // The floating "publicar" button above the tab bar.
 
-import { Pressable, StyleSheet } from 'react-native'
+import { StyleSheet } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Icon } from './Icon'
+import { PressScale } from './PressScale'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout } from './theme'
 
@@ -11,18 +12,14 @@ export function Fab ({ onPress }) {
   const { colors } = useTheme()
   const insets = useSafeAreaInsets()
   return (
-    <Pressable
+    <PressScale
       accessibilityRole='button'
       accessibilityLabel='publicar'
       onPress={onPress}
-      style={({ pressed }) => [
-        styles.fab,
-        { bottom: insets.bottom + layout.tabBar + layout.fabAboveTabs },
-        pressed && styles.pressed
-      ]}
+      style={({ pressed }) => [styles.fab, { bottom: insets.bottom + layout.tabBar + layout.fabAboveTabs }, pressed && styles.pressed]}
     >
       <Icon name='lapis' size={26} color={colors.accentInk} />
-    </Pressable>
+    </PressScale>
   )
 }
 

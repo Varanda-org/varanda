@@ -5,6 +5,8 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ## [Não lançado]
 
+- Base visual do app (PR `feat/ui-foundations`): a aba ativa da barra de baixo ganha uma pílula suave, o botão de publicar encolhe e escurece ao ser apertado (só escurece com Reduzir movimento), e a folha de ações ganha um espaço opcional de cabeçalho, sem mudar nenhuma tela existente. Chegam também tokens de movimento e de texto, esqueletos de carregamento e ícones de categoria para os próximos PRs. Verificação na seção 178 de `docs/verification.md`.
+
 ### Segurança
 
 - Publicações de Página em grupos privados agora são cifradas de ponta a ponta nos aparelhos do dono e dos administradores. O serviço guarda apenas a chave de escrita, acrescenta blocos já selados e não lê o texto. Ao trocar a caixa ou remover um administrador, os grupos privados aguardam a admissão do escritor novo e uma época nova. Termos e Política de Privacidade na versão 34, com novo aceite.
