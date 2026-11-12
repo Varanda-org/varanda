@@ -1204,7 +1204,7 @@ None of these was performed for this change.
 
 ### Residual risks
 
-- No illegal-media hash check: `docs/design.md` promises a comparison with lists of hashes of known illegal material before showing or relaying; it is not implemented. This PR therefore ships images only, no video. A blocked diary's media cores are purged with it.
+- No illegal-media hash check: `docs/design.md` promises a comparison with lists of hashes of known illegal material before showing or relaying; it is not implemented. This PR therefore ships images only, no video (short videos: section 178; the hash-list comparison is still absent). A blocked diary's media cores are purged with it.
 - A same-origin script can use the stored session: the `CryptoKey` is not exportable, but any script on the origin can call decrypt and act as the member (an XSS was already a full compromise while unlocked); anyone holding the unlocked device or profile can post until 'Sair' or the 30-day idle expiry.
 - The wrapping AES key lives in the same browser profile as the sealed PRF output: a copy of the profile yields the identity until 'Sair' or 30 days idle. The sealing only keeps the PRF output out of plain storage and stops the record alone from opening elsewhere.
 - Follows stored on a device before the update are not published automatically: the person confirms them in the Seguindo card 'Pessoas que você seguia neste aparelho'. Until the person decides, that device keeps its old list locally and does not receive follow changes from other devices. A confirmed follow cannot be taken back from the diary (append-only; only a later `on: false` record undoes it).
@@ -7925,3 +7925,97 @@ Ordem: Android, iOS, depois web e PWA, num ambiente de teste local. Registrar ap
 - [ ] Com reduzir movimento, aparece "Reproduzir" e o momento não avança sozinho.
 - [ ] Um blob expirado mostra "vídeo indisponível".
 - [ ] O som para ao sair.
+
+## 180. Preparar e publicar um vídeo curto
+
+Uma publicação, resposta ou citação leva exatamente o par `[capa JPEG, vídeo MP4]`: até 30 segundos e 8 MiB (`MAX_VIDEO_MS`, `MAX_VIDEO_BYTES` em `apps/app/src/media/plan.js`). Um momento leva uma foto, um GIF ou um vídeo de até 15 segundos e 4 MiB, sem par de capa, visível por 24 horas. Os dois formatos limitam cada lado a 1920 e a área a 2073600 pixels. Não há segunda mídia na mesma publicação, nem vídeo em Página, conversa, grupo, Feira, avatar ou prévia de link. A comparação com listas de hashes continua ausente (seção 178).
+
+`pickVideo()` (`apps/app/src/media/attach`) devolve um arquivo, ou `null` se a pessoa cancelar. O app não usa o tamanho nem a duração que o seletor informa. `prepareVideo(picked, { maxMs, maxBytes, signal })` (`videoPrep.native.js` e `videoPrep.web.js`, o mesmo contrato) devolve `{ bytes, mime: 'video/mp4', width, height, ms, poster }` ou `null` se o `signal` foi abortado (troca de modo, remoção ou desmonte: nada é mostrado). O texto de erro já está em pt-BR. Largura, altura e duração saem dos bytes depois de `stripVideoMetadata`. Uma preparação por vez: a ação Vídeo e o envio ficam indisponíveis enquanto ela corre. `node.media.video === true` só num handle real conectado (`apps/app/src/node.js`); a fachada da Vitrine não tem essa capacidade.
+
+No celular, `apps/app/modules/video-prep` reencoda (H.264 e AAC, lado maior até 960). No navegador não há reencodificação: só entra um arquivo que já cabe, e um arquivo acima de `maxBytes` é recusado antes da leitura. A capa sobe pelo caminho de imagem que já existe; o vídeo, por `node.media.upload({ kind: 'video' })`. `putMoment` apaga o buffer que recebe, então o momento envia uma cópia. Os Termos e a Política estão na versão 37 (`LEGAL_VERSION` e `TERMS_VERSION`).
+
+### Cobertura automatizada
+
+As conferências em simulador e emulador estão em "Conferido em 2026-11-12" abaixo; nenhuma com conta, em aparelho físico ou no navegador. O que os testes já cobrem, com MP4 sintético e sem fixture binária:
+
+- `apps/app/test/videoPrep.test.js`: preparação nativa e web; bytes e medidas depois da limpeza; capa pelo codificador de foto (nativo) ou desenhada dos bytes limpos (web); arquivo acima do teto recusado antes da leitura no navegador; duração acima do teto; saída que não passa na checagem; cancelamento devolve `null` e apaga os temporários; a cópia que o seletor deixa em `<cache>/ImagePicker/` é apagada em toda saída, e nada fora dessa pasta; `pickVideo` de um só arquivo, ou `null` ao cancelar.
+- `apps/app/test/videoPrepModule.test.js`: a entrada JavaScript do módulo, com um módulo nativo falso: argumentos inválidos recusados antes do nativo, os padrões 960 e 1,4 Mbit/s, `TOO_LONG` repassado, códigos desconhecidos viram `FAILED` com texto fixo, resposta malformada recusada e cortada aos campos do contrato.
+- `apps/app/test/videoCompose.test.js`: o compositor. Capacidade explícita (conectado, pessoal, com as duas funções); vídeo exclusivo com fotos e com prévia de link, sem descartar nada; os dois tetos; nada sobe antes de Publicar; a capa sobe antes do vídeo; um envio que falha deixa a publicação sem sair e mostra o núcleo cheio; respostas inválidas não publicam; uma criação incerta segura o rascunho sem reenviar; troca de modo, remoção e desmonte descartam o resultado atrasado; um rascunho limpo com o seletor aberto ainda entrega o vídeo escolhido a `prepareVideo`, com o sinal abortado, para a cópia ser apagada; o momento envia uma cópia e não sobe capa; uma citação continua precisando de texto; publicação e momento com foto mantêm o envio de antes.
+- `apps/app/test/eas-preview.test.js`: `media3-transformer`, `media3-effect` e `media3-common` em 1.8.0, a versão que o `expo-video` 55.0.21 declara.
+- `apps/app/test/hardening.test.js`: o podspec `VideoPrep` na lista dos módulos locais.
+- `apps/app/test/podsLock.test.js`: o comparador `apps/app/scripts/check-pods-lock.js` (as duas somas que dependem do caminho e a versão do CocoaPods ficam de fora). Ele não roda o `pod install`: a comparação do lock commitado com o gerado roda no job iOS de `.github/workflows/native.yml`, e localmente como em `docs/development.md`.
+- `apps/app/test/legal.test.js` e `apps/app/test/terms-version.test.js`: versão 37, o texto de vídeos curtos e o par `LEGAL_VERSION` / `TERMS_VERSION`.
+- Seção 178: par, tetos, núcleo cheio, exclusão, Página, conversa, grupo, Feira, app antigo que pula a publicação, e a limpeza sintética de `udta`.
+- Seção 179: reprodução, tempo do momento e reduzir movimento, em teste, sem aparelho.
+
+A conferência em hexadecimal de um arquivo publicado (sem caixa `udta`, `meta` ou `uuid`, e sem localização) não foi feita. O teste de preparação só vê um `udta` sintético; os bytes preparados em simulador e emulador estão abaixo.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `node apps/cli/test/readme-help.test.js`
+- `node apps/app/test/videoPrep.test.js`
+- `node apps/app/test/videoPrepModule.test.js`
+- `node apps/app/test/videoCompose.test.js`
+- `node apps/app/test/hardening.test.js`
+- `node apps/app/test/eas-preview.test.js`
+- `node apps/app/test/podsLock.test.js`
+- `node apps/app/test/legal.test.js`
+- `node apps/app/test/terms-version.test.js`
+
+As baterias das seções 178 e 179 continuam valendo. Nada disso foi repetido nesta seção.
+
+### Matriz de aparelhos
+
+Nenhuma caixa foi marcada. Ordem: build de debug do Android, simulador ou aparelho iOS, depois a web e o PWA, num ambiente de teste local. Registrar aparelho, sistema e navegador. A Vitrine não oferece vídeo.
+
+| Conferência | Android | iOS | Web | PWA |
+|---|---|---|---|---|
+| Preparar e publicar: uma publicação (capa e vídeo) e um momento | [ ] | [ ] | [ ] | [ ] |
+| Recusa acima da duração (30 s na publicação, 15 s no momento), sem cortar o arquivo | [ ] | [ ] | [ ] | [ ] |
+| Tetos de bytes, lado e área; uma preparação por vez | [ ] | [ ] | [ ] | [ ] |
+| O arquivo publicado não tem `udta`, `meta`, `uuid` nem localização (hexadecimal) | [ ] | [ ] | [ ] | [ ] |
+| Reprodução com som, a partir da capa, e um só player | [ ] | [ ] | [ ] | [ ] |
+| Tempo do momento: a duração do vídeo; uma foto continua em 5 s | [ ] | [ ] | [ ] | [ ] |
+| Reduzir movimento: sem reprodução automática e sem avanço automático | [ ] | [ ] | [ ] | [ ] |
+| Apagar a publicação tira capa e vídeo; apagar o momento tira o item | [ ] | [ ] | [ ] | [ ] |
+| Núcleo cheio: "Este aparelho não tem mais espaço para fotos e vídeos.", sem núcleo novo | [ ] | [ ] | [ ] | [ ] |
+| Um app ou uma página anterior pula a publicação com vídeo inteira | [ ] | [ ] | [ ] | [ ] |
+| Página e conversa sem vídeo (também grupo, Feira, avatar e prévia) | [ ] | [ ] | [ ] | [ ] |
+| Portão dos Termos e da Política na versão 37, com novo aceite | [ ] | [ ] | [ ] | [ ] |
+
+### Conferido em 2026-11-12: simulador iOS e emulador Android, sem conta
+
+Builds de debug desta branch, sem conta e sem publicar. O módulo `video-prep`, `pickVideo` e `prepareVideo` foram chamados direto no runtime do app, pelo inspetor do Metro. Nada abaixo passou pela tela do compositor, por um nó conectado ou por um segundo aparelho, por isso nenhuma caixa da matriz acima foi marcada.
+
+- iOS: simulador iPhone 17 Pro, iOS 26.2. Android: emulador API 36 (`sdk_gphone64_arm64`), com o codificador H.264 de software do Android. Nenhum aparelho físico.
+- Clipes: padrões de teste gerados no Mac, não arquivos de câmera de celular. H.264 1080p de 20 s; HEVC 60 fps de 10 s; retrato 1080x1920 de 12 s com uma caixa de localização `loci` em `udta`; 24 fps de 8 s; um de 60 s; HEVC 60 fps com muito detalhe, de 30 s e de 15 s; H.264 60 fps de baixa qualidade, 30 s; granulação, 30 s.
+
+| Clipe (teto) | iOS: lados, bytes | Android: lados, bytes |
+|---|---|---|
+| H.264 1080p, 20 s (publicação) | 960x540, 3563052 | 960x540, 3974424 |
+| HEVC 60 fps, 10 s (publicação) | 960x540, 3780718 | 960x540, 1320559 |
+| Retrato, 12 s (publicação e momento) | 540x960, 2164975 | 540x960, 2531812 |
+| 24 fps, 8 s (publicação) | 960x540, 1474599 | 960x540, 1751333 |
+| 60 s (publicação) | `TOO_LONG` antes de codificar | `TOO_LONG` antes de codificar |
+| H.264 de 20 s (momento, 15 s) | `TOO_LONG` antes de codificar | `TOO_LONG` antes de codificar |
+| HEVC 60 fps com muito detalhe, 30 s (publicação) | 768x432, 5338482, segunda passagem | 960x540, 3265215 |
+| HEVC 60 fps com muito detalhe, 15 s (momento, 4 MiB) | 766x430, 2717546, segunda passagem | 960x540, 1799449 |
+| H.264 60 fps de baixa qualidade, 30 s (publicação) | 960x540, 7456226 | 960x540, 3265196 |
+| Granulação, 30 s (publicação) | 960x540, 5217674 | 960x540, 5890519 |
+
+- Toda saída tem no máximo 30 quadros por segundo, H.264 com AAC, e passa por `videoBounds` com `metadata: true`, por `stripVideoMetadata` e por `videoBounds` estrito. No Android, a duração que o módulo informa passa da duração dos bytes em cerca de 64 ms (20064 contra 20000); o app usa só a dos bytes. Árvore de caixas no Android, igual nos nove arquivos: `ftyp moov free mdat`, com `co64`. No iOS: `ftyp moov mdat`, com `edts`/`elst`, `sdtp` e `sgpd`/`sbgp` (`roll`) na faixa de som. `colr` é `nclx` nas duas plataformas; `nclc` não apareceu.
+- No simulador, a primeira passagem a 960 de um clipe de 60 fps com muito detalhe passa do teto, qualquer que seja a taxa pedida; a segunda passagem, com os lados reduzidos, cabe. Um codificador de iPhone real não foi medido.
+- Capas: em pé nos dois sistemas, para retrato e paisagem, comparadas com o primeiro quadro do original já girado.
+- Uma preparação por vez: com uma em curso, a segunda chamada responde `BUSY` em poucos milissegundos (iOS e Android).
+- Seletor real, com o código atual: o retrato de 12 s escolhido no seletor de fotos do sistema volta como uma cópia em `<cache>/ImagePicker/` (1080x1920). `prepareVideo` devolve 540x960, 12067 ms, com capa 540x960, e depois disso `ImagePicker` e `video-prep` ficam vazios (iOS e Android). O seletor do iOS 26 avisa "Location Is Included".
+- Bytes que `prepareVideo` devolveu (o que o compositor enviaria), procurados byte a byte: nenhum `udta`, `meta`, `uuid`, `loci`, `©xyz`, `ilst` nem coordenada ISO 6709, nos dois sistemas. O clipe de origem tem `udta(meta(hdlr ilst) loci)`. Isso não substitui a conferência de um arquivo publicado.
+
+### Conferências de aparelho ainda por fazer
+
+- [ ] Safari no iOS (web e PWA): a capa é desenhada num elemento `video` que não entra no documento. Quando os metadados chegam, o app pede a posição inicial (`currentTime`), para o Safari decodificar um quadro e disparar `seeked`. Se nem `loadeddata` nem `seeked` chegarem, o prazo de 10 s (`FRAME_TIMEOUT_MS` em `videoPrep.web.js`) recusa o arquivo. Registrar se a capa sai ou se o arquivo é recusado.
+- [ ] Android e iOS: uma capa nativa cuja proporção difere do tamanho de exibição do vídeo seria esticada pelo codificador de foto (`encodeFile` em `videoPrep.native.js`). Conferir a capa publicada lado a lado com o primeiro quadro.
+- [ ] Um arquivo real de câmera de celular, com localização, publicado por Android, iOS, web e PWA. Nos bytes publicados, em hexadecimal, não há `udta`, `meta`, `uuid` nem localização, e a reprodução segue.
+- [ ] Variantes `colr` `nclc` e `nclx`, e caixas `sgpd`, vindas de codificadores reais (não do MP4 sintético dos testes). Registrar se a limpeza mais `videoBounds` estrito aceita o arquivo ou qual recusa aparece. Em 2026-11-12, `nclx` (iOS e Android) e `sgpd` `roll` (iOS) foram aceitos; `nclc` ainda não apareceu.
+- [x] Android e iOS, codificação (T13 e T14): um clipe 1080p e um clipe HEVC passam pela limpeza e por `videoBounds` estrito; um clipe de 60 s é recusado antes de codificar; as capas saem em pé. Feito em 2026-11-12 no simulador iOS e no emulador Android (acima); falta um iPhone e um Android físicos. Não afrouxar o validador para um arquivo real passar.
+- [ ] iPhone e Android físicos: os mesmos clipes, com o codificador do aparelho; registrar se a segunda passagem do iOS acontece fora do simulador.

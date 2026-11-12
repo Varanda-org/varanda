@@ -33,7 +33,7 @@
 // Momento (docs/rpc.md 5.113, hosted only, when the node offers
 // media.putMoment and nothing is being replied to, quoted or posted as a
 // page): a Segmented 'Publicação | Momento' at the top. A momento is exactly
-// one photo (the chat photo path, ../ui/AttachSheet useChatAttachments) and
+// one photo (../ui/AttachSheet useChatAttachments) or one video and
 // 0..200 code points of text. The post draft stays as it is while Momento is
 // shown and comes back on 'Publicação'. Publicar puts the photo
 // (media.putMoment, a fresh anonymous blob; it wipes the buffer it is given,
@@ -64,9 +64,11 @@ import { countChars } from '../format'
 import { whoOf } from '../who'
 import { ringState } from '../composeRing'
 import { countAfterInsert, insertAt } from '../emoji'
-import { MAX_MEDIA_PER_POST } from '../media/plan'
+import { MAX_MEDIA_PER_POST, durationLabel } from '../media/plan'
 import { validDescriptor } from '../media/fetch'
-import { pickImages } from '../media/attach'
+import { pickImages, pickVideo } from '../media/attach'
+import { prepareVideo } from '../media/videoPrep'
+import { canComposeVideo, createVideoDraft, videoMomentValid, videoPostValid, VIDEO_OR_PHOTOS, MOMENT_ONE_MEDIA, mediaComposeError } from '../videoCompose'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { encodeFile } from '../media/encode'
 import { moveById } from '../photoOrder'
@@ -105,16 +107,40 @@ const MEDIA_STALE = 'prepare a mídia de novo'
 const momentLength = (text) => (typeof text === 'string' ? [...text].length : 0)
 const isLocked = (err) => !!err && (err.code === 'LOCKED' || err.message === LOCKED_MESSAGE)
 
-// A momento is valid with exactly one ready photo and at most 200 code points.
-export function momentValid ({ files, ready, text }) {
-  return ready === true && Array.isArray(files) && files.length === 1 && momentLength(text) <= MOMENT_TEXT_MAX
+// A momento carries one ready photo or video and at most 200 code points.
+export function momentValid ({ files, ready, text, video = null, preparing = false }) {
+  if (preparing || momentLength(text) > MOMENT_TEXT_MAX) return false
+  if (video !== null) return Array.isArray(files) && videoMomentValid({ file: video, text, photos: files.length, preparing })
+  return ready === true && Array.isArray(files) && files.length === 1
 }
 
-// The Momento draft: one staged photo, the text, the put item kept for a new
+function useVideoDraft ({ active, moment = false }) {
+  const [state, setState] = useState({ phase: 'empty', file: null })
+  const draftRef = useRef(null)
+  if (draftRef.current === null) draftRef.current = createVideoDraft({ changed: setState, moment })
+  const draft = draftRef.current
+  const [thumb, setThumb] = useState(null)
+  useEffect(() => {
+    if (!active) draft.cancelPreparation()
+  }, [active, draft])
+  useEffect(() => () => draft.clear(), [draft])
+  useEffect(() => {
+    let uri = null
+    if (state.file) {
+      try { uri = urlFromBytes(state.file.poster.bytes, state.file.poster.mime) } catch {}
+    }
+    setThumb(uri)
+    return () => { if (uri !== null) revokeUrl(uri) }
+  }, [state.file])
+  return { draft, state, thumb }
+}
+
+// The Momento draft: one staged item, the text, the put item kept for a new
 // press after a failure, and the uncertain hold. send() is one explicit
 // attempt; nothing here ever repeats a request.
 function useMomentDraft ({ node, open, active }) {
   const photo = useChatAttachments()
+  const video = useVideoDraft({ active, moment: true })
   const [text, setText] = useState('')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
@@ -128,7 +154,18 @@ function useMomentDraft ({ node, open, active }) {
   // several keeps the first new one.
   const [note, setNote] = useState('')
   const replacingRef = useRef(null)
+  const oneNote = canComposeVideo({ node, pickVideo, prepareVideo }) ? MOMENT_ONE_MEDIA : MOMENT_ONE_PHOTO
+  const videoPhase = video.state.phase
   useEffect(() => {
+    // No pick is ever blocked while another is open, because a browser may
+    // leave a picker pending forever. So a photo that arrives once a video is
+    // staged is dropped here, with the note: a momento never carries both.
+    if (videoPhase !== 'empty' && items.length > 0) {
+      replacingRef.current = null
+      for (const it of items) remove(it.id)
+      setNote(MOMENT_ONE_MEDIA)
+      return
+    }
     const before = replacingRef.current
     const fresh = before === null ? items.slice(1) : items.filter((it) => !before.includes(it.id))
     if (before !== null && fresh.length > 0) {
@@ -136,29 +173,50 @@ function useMomentDraft ({ node, open, active }) {
       itemRef.current = null
       for (const old of items.filter((it) => before.includes(it.id))) remove(old.id)
       for (const extra of fresh.slice(1)) remove(extra.id)
-      if (fresh.length > 1) setNote(MOMENT_ONE_PHOTO)
+      if (fresh.length > 1) setNote(oneNote)
       return
     }
     if (before === null && items.length > 1) {
       for (const extra of items.slice(1)) remove(extra.id)
-      setNote(MOMENT_ONE_PHOTO)
+      setNote(oneNote)
     }
-  }, [items, remove])
+  }, [items, remove, videoPhase, oneNote])
   const pick = useCallback(async () => {
     if (busyRef.current || held) return
+    if (video.draft.state.phase !== 'empty') { setNote(MOMENT_ONE_MEDIA); return }
     setNote('')
     setError('')
     replacingRef.current = items.length > 0 ? items.map((it) => it.id) : null
     await pickPhoto()
-  }, [held, items, pickPhoto])
+  }, [held, items, pickPhoto, video.draft])
+  const pickClip = async () => {
+    if (busyRef.current || held || !canComposeVideo({ node, pickVideo, prepareVideo })) return
+    setError('')
+    setNote('')
+    try {
+      await video.draft.pick({ pickVideo, prepareVideo, photos: items.length })
+    } catch (err) { setError(err.message) }
+  }
+  const removePhoto = (id) => {
+    if (busyRef.current || held) return
+    itemRef.current = null
+    remove(id)
+  }
+  const removeVideo = () => {
+    if (busyRef.current || held) return
+    itemRef.current = null
+    video.draft.clear()
+    setError('')
+  }
   const reset = useCallback(() => {
     itemRef.current = null
     clearPhoto()
+    video.draft.clear()
     setText('')
     setError('')
     setNote('')
     setHeld(false)
-  }, [clearPhoto])
+  }, [clearPhoto, video.draft])
   useEffect(() => { if (!open) setError('') }, [open])
   // A published moment empties the form on the next opening, not at once:
   // the sheet keeps its photo and text while it slides away.
@@ -179,12 +237,16 @@ function useMomentDraft ({ node, open, active }) {
     if (!active) genRef.current++
   }, [active])
   const unlocked = !!(node.passkey && node.passkey.status && node.passkey.status.unlocked === true)
-  const valid = !held && unlocked && node.online !== false && momentValid({ files: photo.files, ready: photo.ready, text })
+  const valid = !held && unlocked && node.online !== false &&
+    (!video.state.file || canComposeVideo({ node, pickVideo, prepareVideo })) && momentValid({ files: photo.files, ready: photo.ready, text, video: video.state.file, preparing: video.state.phase === 'preparing' })
   const send = async () => {
     if (busyRef.current || !valid) return false
+    if (video.draft.state.phase === 'preparing') return false
     const refused = refusalOf(text)
     if (refused !== '') { setError(refused); return false }
-    const file = photo.files[0]
+    const clip = video.draft.state.file
+    if (clip && !canComposeVideo({ node, pickVideo, prepareVideo })) return false
+    const file = clip || photo.files[0]
     const gen = genRef.current
     busyRef.current = true
     setPending(true)
@@ -192,7 +254,9 @@ function useMomentDraft ({ node, open, active }) {
     try {
       if (itemRef.current === null) {
         // putMoment wipes the buffer it gets: the staged bytes stay for a retry.
-        itemRef.current = await node.media.putMoment({ bytes: file.bytes.slice(), mime: file.mime, width: file.width, height: file.height })
+        itemRef.current = clip
+          ? await node.media.putMoment({ bytes: file.bytes.slice(), mime: file.mime, width: file.width, height: file.height, ms: file.ms, kind: 'video' })
+          : await node.media.putMoment({ bytes: file.bytes.slice(), mime: file.mime, width: file.width, height: file.height })
       }
       if (gen !== genRef.current) return false
       await node.request('moment.create', { text, media: itemRef.current })
@@ -215,7 +279,7 @@ function useMomentDraft ({ node, open, active }) {
         }
       } else if (err && typeof err.message === 'string' && err.message.includes(MEDIA_STALE)) {
         itemRef.current = null
-        setError(MOMENT_STALE)
+        setError(clip ? 'O vídeo precisa ser preparado de novo. Toque em Publicar para enviar.' : MOMENT_STALE)
       } else {
         setError(errorText(err))
       }
@@ -225,7 +289,7 @@ function useMomentDraft ({ node, open, active }) {
       setPending(false)
     }
   }
-  return { photo, text, setText, pending, error, note, held, valid, unlocked, pick, send, reset }
+  return { photo, video, pickClip, removeVideo, removePhoto, text, setText, pending, error, note, held, valid, unlocked, pick, send, reset }
 }
 
 // The Momento text box: about five lines before its text scrolls inside it,
@@ -473,9 +537,20 @@ const hexOf = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0'
 let lastItemId = 0
 const nextItemId = () => ++lastItemId
 
-// Progress ring: a grey track and a toned arc drawn with two half masks.
-// Each half (10x20, overflow hidden) holds a 20x20 circle whose top and right
-// borders take the tone colour; rotating the circle slides its half-circle arc into view.
+function VideoDraft ({ video, sending = false, disabled = false, onRemove }) {
+  const styles = useStyles(makeStyles)
+  const { phase, file } = video.state
+  if (phase === 'empty') return null
+  return (
+    <View style={styles.errors}>
+      {video.thumb ? <Image source={{ uri: video.thumb }} style={styles.momentPhoto} resizeMode='contain' accessibilityLabel='capa do vídeo' /> : null}
+      <Soft>{phase === 'preparing' ? 'Preparando vídeo...' : sending || phase === 'uploading' ? 'Enviando vídeo...' : 'Vídeo pronto · ' + durationLabel(file.ms)}</Soft>
+      <Pill label='Remover vídeo' onPress={onRemove} disabled={disabled} />
+    </View>
+  )
+}
+
+// Progress ring: two half masks draw the arc without a platform drawing API.
 function Ring ({ progress, tone }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
@@ -584,6 +659,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const [mode, setMode] = useState('post')
   const momentMode = momentOn && mode === 'moment'
   const moment = useMomentDraft({ node, open, active: open === true && momentMode })
+  const video = useVideoDraft({ active: open === true && !momentMode && asPage === null })
+  const canVideo = canComposeVideo({ node, asPage, pickVideo, prepareVideo })
   // Only an increase is a request: the shell resets the counter to 0 when a
   // post is published, and that must not reopen the composer in Momento.
   const lastMomentRequest = useRef(momentRequest)
@@ -680,7 +757,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     if (pageRetryRef.current !== null || pageSendingRef.current) return
     genRef.current++
     removeItems(Array.from(liveRef.current))
-  }, [asPage])
+    video.draft.clear()
+  }, [asPage, video.draft])
   // Drops the post waiting for its retry and unlocks the draft. Its photos
   // stay only for the page they were uploaded for.
   const discardRetry = () => {
@@ -695,9 +773,13 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   }
 
   const len = countChars(text)
-  const hasMedia = items.length > 0
+  const hasVideo = video.state.phase !== 'empty'
+  const preparingVideo = video.state.phase === 'preparing'
+  const hasMedia = items.length > 0 || hasVideo
   // Every item encoded (or already uploaded by an earlier Publicar).
-  const mediaReady = hasMedia && items.every((item) => item.descriptor || (item.encoded && item.status !== 'uploading'))
+  const mediaReady = hasVideo
+    ? video.state.phase === 'ready' && videoPostValid({ file: video.state.file, text, quote: !!quote, photos: items.length })
+    : hasMedia && items.every((item) => item.descriptor || (item.encoded && item.status !== 'uploading'))
   const busy = action.pending || checking || uploading
   const self = me || { publicKey: null, name: null }
   // Natively only the installation's node needs the queue: the manual (core)
@@ -721,7 +803,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const valid = locked
     ? node.online !== false
     : len <= MAX_TEXT && !quoteOffline && !pageOffline && (quote ? len >= 1 : true) &&
-      (hasMedia ? mediaReady && mediaOnline && (media !== null || asPage !== null) : len >= 1)
+      (hasMedia ? mediaReady && mediaOnline && (hasVideo ? canVideo : (media !== null || asPage !== null)) : len >= 1)
 
   const patch = (id, fields) => {
     setItems((list) => list.map((item) => (item.id === id ? { ...item, ...fields } : item)))
@@ -753,7 +835,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     if (pageRetryRef.current !== null || pageSendingRef.current) return
     genRef.current++
     removeItems(Array.from(liveRef.current))
-  }, [open])
+    video.draft.clear()
+  }, [open, video.draft])
 
   useEffect(() => () => {
     genRef.current++
@@ -804,7 +887,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       } catch (err) {
         // After an unknown outcome the next try resends the same signed upload.
         const retry = err && err.uncertain === true && typeof err.retry === 'function' ? err.retry : null
-        if (live()) patch(id, { status: 'failed', progress: 0, error: errorText(err), retry })
+        if (live()) patch(id, { status: 'failed', progress: 0, error: mediaComposeError(err) || errorText(err), retry })
         return null
       }
       if (!live()) return null
@@ -820,6 +903,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
 
   const attach = async () => {
     if (!canAttach || !mediaOnline || busy || frozen) return
+    if (video.draft.state.phase !== 'empty') { setNote(VIDEO_OR_PHOTOS); return }
     setNote('')
     let files
     try {
@@ -828,6 +912,9 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       return
     }
     if (!Array.isArray(files) || files.length === 0) return
+    // Nothing blocks a pick while another is open (a browser may never settle
+    // one), so photos that arrive once a video is staged are not added.
+    if (video.draft.state.phase !== 'empty') { setNote(VIDEO_OR_PHOTOS); return }
     const room = Math.max(0, MAX_MEDIA_PER_POST - liveRef.current.size)
     if (files.length > room) setNote('até ' + MAX_MEDIA_PER_POST + ' fotos por publicação')
     const chosen = files.slice(0, room).map((file) => ({ id: nextItemId(), file }))
@@ -855,6 +942,14 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       } catch {}
       patch(id, { status: 'ready', encoded, thumb })
     }
+  }
+
+  const attachVideo = async () => {
+    if (!canVideo || busy || frozen) return
+    setNote('')
+    try {
+      await video.draft.pick({ pickVideo, prepareVideo, photos: liveRef.current.size, preview: !!linkDraft.view })
+    } catch (err) { setNote(err.message) }
   }
 
   const pickEmoji = (emoji) => {
@@ -915,6 +1010,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const published = (sent, sentReply, sentIds = [], sentQuote = null) => {
     tap('success')
     setText((current) => (current === sent ? '' : current))
+    if (video.draft.state.file && sentIds.includes(video.draft.state.file)) video.draft.clear()
     if (sentIds.length > 0) removeItems(sentIds)
     if (sentQuote) return onPublished('quote', sentQuote.ref)
     onPublished(sentReply ? 'reply' : 'post', sentReply ? sentReply.ref : null)
@@ -1019,7 +1115,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   }
 
   const send = async () => {
-    if (busy || uploadingRef.current) return
+    if (busy || uploadingRef.current || video.draft.state.phase === 'preparing') return
     setCheckError('')
     // Before every path below (photos, the outbox, a page's signature). The
     // draft is kept, so the person can edit it. A signed post waiting for its
@@ -1035,14 +1131,17 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     const sentReply = reply
     const sentQuote = quote
     if (sentQuote && (node.online === false || countChars(sent) < 1)) return
-    const sentIds = items.map((item) => item.id)
+    const sentIds = hasVideo ? [video.draft.state.file] : items.map((item) => item.id)
     let sentMedia = null
     if (hasMedia) {
-      if (!mediaReady || !mediaOnline || media === null) return
+      if (!mediaReady || !mediaOnline || media === null || (hasVideo && !canVideo)) return
       uploadingRef.current = true
       setUploading(true)
       try {
-        sentMedia = await uploadAll(items)
+        sentMedia = hasVideo ? await video.draft.upload((file) => media.upload(file)) : await uploadAll(items)
+      } catch (err) {
+        setCheckError(mediaComposeError(err) || errorText(err))
+        return
       } finally {
         uploadingRef.current = false
         setUploading(false)
@@ -1160,9 +1259,11 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     }
   }
   const handlePickMoment = moment.pick
+  const handlePickMomentVideo = moment.pickClip
+  const handleRemoveMomentVideo = moment.removeVideo
   const handleMomentText = moment.setText
   const handleDiscardMoment = moment.reset
-  const postDraft = text !== '' || items.length > 0
+  const postDraft = text !== '' || hasMedia
   const momentCount = momentLength(moment.text)
   // While a text box has focus it stays in view with its counter (see
   // keepInView): every keystroke, also at the six-line maximum where the
@@ -1227,8 +1328,14 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
         if (size) setMomentHeight(momentFieldHeight(size.height))
       }
     : undefined
+  const handleMode = (id) => {
+    if (busy || moment.pending) return
+    video.draft.cancelPreparation()
+    moment.video.draft.cancelPreparation()
+    setMode(id)
+  }
   const modeSwitch = momentOn
-    ? <Segmented options={MODES} selected={momentMode ? 'moment' : 'post'} onSelect={(id) => { if (!busy && !moment.pending) setMode(id) }} />
+    ? <Segmented options={MODES} selected={momentMode ? 'moment' : 'post'} onSelect={handleMode} />
     : null
 
   if (momentMode) {
@@ -1261,7 +1368,11 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                 : null}
               {/* Under the tile, never clipped by its rounded corner. */}
               {staged && staged.status === 'invalid' ? <ErrorText>{staged.error || 'não foi possível abrir a foto'}</ErrorText> : null}
-              <Pill label={staged ? 'Trocar foto' : 'Escolher foto'} icon='imagem' onPress={handlePickMoment} disabled={moment.pending || moment.held} />
+              <VideoDraft video={moment.video} sending={moment.pending} disabled={moment.pending || moment.held} onRemove={handleRemoveMomentVideo} />
+              <Pill label={staged ? 'Trocar foto' : 'Escolher foto'} icon='imagem' onPress={handlePickMoment} disabled={moment.pending || moment.held || moment.video.state.phase === 'preparing'} />
+              {staged ? <Pill label='Remover foto' onPress={() => moment.removePhoto(staged.id)} disabled={moment.pending || moment.held} /> : null}
+              {canVideo ? <Pill label='Vídeo' onPress={handlePickMomentVideo} disabled={moment.pending || moment.held || moment.video.state.phase !== 'empty' || moment.photo.busy} /> : null}
+              {canVideo ? <Soft>{MOMENT_ONE_MEDIA}</Soft> : null}
               <TextInput
                 ref={momentView.fieldRef}
                 style={[styles.momentInput, GROW_BY_CONTENT && { height: momentHeight }]}
@@ -1429,7 +1540,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
               />
             </View>
           </View>
-          {hasMedia
+          <VideoDraft video={video} disabled={held} onRemove={() => { video.draft.clear(); setNote('') }} />
+          {hasMedia && items.length > 0
             ? (
               <View style={styles.thumbs}>
                 {items.map((item, i) => (
@@ -1447,10 +1559,11 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                 ))}
               </View>
               )
-            : <LinkDraftCard draft={linkDraft} />}
+            : hasMedia ? null : <LinkDraftCard draft={linkDraft} />}
           <MentionSuggest rows={frozen ? [] : suggestions} loading={!frozen && mentionQuery !== '' && search.phase === 'loading'} onPick={pickMention} />
           <View ref={postView.tailRef} style={styles.counterRow} onLayout={postView.handleTailLayout}>
             <View style={styles.tools}>
+              {canVideo ? <Pill label='Vídeo' onPress={attachVideo} disabled={held || hasVideo || items.some((item) => item.status === 'encoding')} /> : null}
               <Pressable
                 accessibilityRole='button'
                 accessibilityLabel={emojiOpen ? 'fechar emojis' : 'emojis'}
@@ -1467,8 +1580,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                   <Pressable
                     accessibilityRole='button'
                     accessibilityLabel='Foto'
-                    accessibilityState={{ disabled: attachOff || held }}
-                    disabled={attachOff || held}
+                    accessibilityState={{ disabled: attachOff || held || preparingVideo }}
+                    disabled={attachOff || held || preparingVideo}
                     onPress={() => {
                       if (items.length >= MAX_MEDIA_PER_POST) setNote('até ' + MAX_MEDIA_PER_POST + ' fotos por publicação')
                       else attach()

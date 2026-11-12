@@ -197,7 +197,7 @@ test('the iOS minimum is 18.0 everywhere it is set', (t) => {
   t.is(JSON.parse(read(PODFILE_PROPERTIES))['ios.deploymentTarget'], IOS_MINIMUM, PODFILE_PROPERTIES)
   t.ok(read('ios/Podfile').includes("podfile_properties['ios.deploymentTarget'] || '" + IOS_MINIMUM + "'"), 'the Podfile fallback')
   t.alike(read(PBXPROJ).match(/IPHONEOS_DEPLOYMENT_TARGET = [^;]*;/g), Array(4).fill(DEPLOYMENT_TARGET_LINE), 'project and app, Debug and Release')
-  for (const file of ['modules/passkey-prf/ios/PasskeyPrf.podspec', 'modules/auth-session/ios/AuthSession.podspec']) {
+  for (const file of ['modules/passkey-prf/ios/PasskeyPrf.podspec', 'modules/auth-session/ios/AuthSession.podspec', 'modules/video-prep/ios/VideoPrep.podspec']) {
     t.ok(read(file).includes(":ios => '" + IOS_MINIMUM + "'"), file + ' can drop its availability checks')
   }
 })
@@ -211,6 +211,120 @@ test('app.json does not list the expo-video config plugin', (t) => {
   t.ok(names.length > 0, 'the plugin list is read')
   t.absent(names.some((name) => typeof name === 'string' && name.startsWith('expo-video')), 'no expo-video plugin')
   t.absent(read('app.json').includes('expo-video'), 'expo-video is not configured anywhere in app.json')
+})
+
+// The video-prep encoders cannot run here, so their size and crash guards are
+// checked in the source, and each check is shown to catch its own mutation.
+const VIDEO_PREP_IOS = 'modules/video-prep/ios/VideoPrepModule.swift'
+const VIDEO_PREP_ANDROID = 'modules/video-prep/android/src/main/java/app/varanda/videoprep/VideoPrepModule.kt'
+const CAN_APPLY = 'guard writer.canApply(outputSettings: settings, forMediaType: .video) else { throw VideoPrepError.failed }'
+const VIDEO_INPUT = 'AVAssetWriterInput(mediaType: .video, outputSettings: settings)'
+const FINAL_SIZE = 'guard bytes > 0, bytes <= limits.maxBytes else { throw VideoPrepError.failed }'
+const ANDROID_FINAL_SIZE = 'if (bytes <= 0 || bytes > limits.maxBytes) return fail("FAILED")'
+const RETRY = [
+  'if bytes > limits.maxBytes {',
+  'let f = max(0.5, min(0.8, (0.85 * Double(limits.maxBytes) / Double(bytes)).squareRoot()))',
+  'width = max(2, Int(Double(firstWidth) * f / 2) * 2)',
+  'height = max(2, Int(Double(firstHeight) * f / 2) * 2)',
+  'bytes = try await encode(width, height)'
+]
+const ANDROID_WATCH = 'watch(SystemClock.uptimeMillis() + maxOf(MIN_DEADLINE_MS, DEADLINE_PER_SOURCE_MS * input.ms))'
+
+// The text of a block from its header to the first closing brace at the
+// header's own indent.
+function block (src, header) {
+  const at = src.indexOf(header)
+  if (at === -1) return ''
+  const indent = src.slice(src.lastIndexOf('\n', at) + 1, at)
+  const end = src.indexOf('\n' + indent + '}\n', at)
+  return end === -1 ? '' : src.slice(at, end)
+}
+
+function iosEncoderProblems (swift) {
+  const problems = []
+  // Settings the writer cannot apply crash in AVAssetWriterInput's initializer.
+  const guard = swift.indexOf(CAN_APPLY)
+  const input = swift.indexOf(VIDEO_INPUT)
+  if (guard === -1 || input === -1 || guard > input) problems.push('canApply before the video input')
+  if (swift.split('AVVideoCompressionPropertiesKey').length !== 2 ||
+    !/let settings: \[String: Any\] = \[[^]*?AVVideoCompressionPropertiesKey: \[\s*AVVideoAverageBitRateKey: videoBitrate,/.test(swift)) {
+    problems.push('the average bitrate reaches the settings')
+  }
+  if (swift.includes('DataRateLimits')) problems.push('no DataRateLimits')
+  const passes = swift.split('await encode(').length - 1
+  const last = swift.lastIndexOf('await encode(')
+  const final = swift.indexOf(FINAL_SIZE, last)
+  if (passes !== 2) problems.push('exactly two encode calls')
+  if (final === -1) problems.push('the size check after the last pass')
+  const encodeBody = block(swift, 'func encode(')
+  if (encodeBody === '' || encodeBody.includes('encode(', 'func encode('.length)) problems.push('encode does not call itself')
+  // Comments are dropped first: their prose may say "while".
+  const prepare = block(swift, 'private func prepare()').replace(encodeBody, '').replace(/\/\/.*$/gm, '')
+  if (prepare === '' || /\b(while|repeat)\b|\bfor\s+\w+\s+in\b/.test(prepare)) problems.push('no loop in prepare outside encode')
+  if (!prepare.includes('var width = firstWidth\n    var height = firstHeight\n    var bytes = try await encode(width, height)\n')) problems.push('the first pass at the first size')
+  const retry = block(swift, RETRY[0])
+  let at = 0
+  for (const line of RETRY) {
+    at = retry.indexOf(line, at)
+    if (at === -1) { problems.push('the retry scales both sides by f: ' + line); break }
+  }
+  return problems
+}
+
+function androidWatchdogProblems (kt) {
+  const problems = []
+  if (!kt.includes('private fun growthCeiling(): Long = limits.maxBytes + maxOf(limits.maxBytes / 4, 2_000_000L)')) problems.push('ceiling above maxBytes')
+  if (!kt.includes('out.length() > growthCeiling()') || kt.includes('out.length() > limits.maxBytes')) problems.push('the watchdog uses the ceiling')
+  if (!kt.includes(ANDROID_FINAL_SIZE)) problems.push('the finished file is held to maxBytes')
+  const start = block(kt, 'fun start()')
+  const begun = start.indexOf('t.start(composition(input), out.absolutePath)')
+  if (begun === -1 || start.indexOf(ANDROID_WATCH, begun) === -1) problems.push('the watchdog starts after t.start')
+  const stop = block(kt, 'private fun stop()')
+  const failed = stop.indexOf('fail("FAILED")')
+  const cancelled = stop.indexOf('.cancel()')
+  if (failed === -1 || cancelled === -1 || failed > cancelled) problems.push('stop settles before the cancel')
+  return problems
+}
+
+test('the iOS video encoder: average bitrate, canApply before the input, two passes at most, size checked after the last', (t) => {
+  const swift = read(VIDEO_PREP_IOS)
+  t.alike(iosEncoderProblems(swift), [], 'the committed source passes')
+  const mutations = [
+    ['canApply guard removed', CAN_APPLY, ''],
+    ['empty compression properties', /AVVideoCompressionPropertiesKey: \[[^\]]*\]/, 'AVVideoCompressionPropertiesKey: [:]'],
+    ['final size check removed', FINAL_SIZE, ''],
+    ['retry turned into a loop', 'if bytes > limits.maxBytes {', 'while bytes > limits.maxBytes {'],
+    ['a third pass', FINAL_SIZE, 'bytes = try await encode(width, height)\n    ' + FINAL_SIZE],
+    ['retry at the first size', '      ' + RETRY[4] + '\n    }', '      bytes = try await encode(firstWidth, firstHeight)\n    }'],
+    ['retry width not scaled', RETRY[2], 'width = max(2, Int(Double(firstWidth) / 2) * 2)'],
+    ['retry height not scaled', RETRY[3], 'height = firstHeight'],
+    ['both passes in a for loop', 'var width = firstWidth', 'for _ in 0..<3 {\n    var width = firstWidth'],
+    ['both passes in a while loop', 'var width = firstWidth', 'while true {\n    var width = firstWidth'],
+    ['both passes in a repeat loop', 'var width = firstWidth', 'repeat {\n    var width = firstWidth'],
+    ['a loop before encode is declared', '    // Readers and writers are single use', '    for pass in 1...3 {\n    // Readers and writers are single use'],
+    ['DataRateLimits back', 'AVVideoAllowFrameReorderingKey: false', 'AVVideoAllowFrameReorderingKey: false,\n          kVTCompressionPropertyKey_DataRateLimits as String: [1, 1]']
+  ]
+  for (const [name, from, to] of mutations) {
+    const mutated = swift.replace(from, to)
+    t.not(mutated, swift, name + ' applies')
+    t.ok(iosEncoderProblems(mutated).length > 0, name + ' is caught')
+  }
+})
+
+test('the Android video watchdog leaves room for the muxer, the finished file is held to maxBytes', (t) => {
+  const kt = read(VIDEO_PREP_ANDROID)
+  t.alike(androidWatchdogProblems(kt), [], 'the committed source passes')
+  const mutations = [
+    ['watchdog at maxBytes', 'out.length() > growthCeiling()', 'out.length() > limits.maxBytes'],
+    ['final size check removed', ANDROID_FINAL_SIZE, ''],
+    ['initial watch removed', ANDROID_WATCH, ''],
+    ['cancel before fail', 'val t = transformer\n      fail("FAILED")\n      try {\n        t?.cancel()\n      } catch (e: Exception) {\n        // Already finished.\n      }', 'try {\n        transformer?.cancel()\n      } catch (e: Exception) {\n        // Already finished.\n      }\n      fail("FAILED")']
+  ]
+  for (const [name, from, to] of mutations) {
+    const mutated = kt.replace(from, to)
+    t.not(mutated, kt, name + ' applies')
+    t.ok(androidWatchdogProblems(mutated).length > 0, name + ' is caught')
+  }
 })
 
 // The Vitrine (src/vitrine/enabled.js) swaps the node for fixtures. A release
