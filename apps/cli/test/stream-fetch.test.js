@@ -709,14 +709,23 @@ test('pipeCapped: an upstream destroyed while writes are pending delivers every 
   })
   const served = await serving
   const sent = []
-  for (let i = 0; i < 512 && !served.writableNeedDrain; i++) {
-    const chunk = Buffer.alloc(64 * 1024, i % 251)
+  const feed = () => {
+    const chunk = Buffer.alloc(64 * 1024, sent.length % 251)
     sent.push(chunk)
     up.write(chunk)
+  }
+  feed()
+  const response = await responded
+  // A loopback send buffer grows as ACKs come back (Linux), so a first
+  // backpressure can drain by itself: feed until bytes still wait after a pause.
+  while (sent.length < 512) {
+    if (served.writableNeedDrain) {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      if (served.writableLength > 0) break
+    }
+    feed()
     await new Promise((resolve) => setImmediate(resolve))
   }
-  await new Promise((resolve) => setTimeout(resolve, 50))
-  const response = await responded
   t.ok(served.writableLength > 0, 'writes are pending when the upstream goes')
   up.destroy()
 
