@@ -8101,7 +8101,7 @@ Ordem: Android, iOS, depois web e PWA, num ambiente de teste local.
 
 A Rua, o mosaico da citação e o mural mostram a capa JPEG de uma publicação com vídeo, com a marca de play e a duração. O rótulo é "vídeo de N segundos", no singular "1 segundo". O azulejo do mural diz "vídeo". Nada do vídeo é baixado até a pessoa tocar. Uma capa que não carrega ainda abre o vídeo.
 
-O toque abre um visualizador em tela cheia. Ele baixa o vídeo, confere o sha256 e a checagem estrita de MP4, com lados e duração iguais aos do descritor, e só então monta um endereço local `file://` ou `blob:`. A reprodução tem controles e som. Fechar interrompe o download (abort), solta o player e apaga o arquivo local. Há um player por vez. Uma carga que falha mostra "vídeo indisponível" e um "Tentar de novo", sem repetição automática. Se o navegador recusa começar sem um gesto, o player permanece e mostra "Toque no play para assistir". Se começa mudo, mostra "Ativar som".
+Em A Rua e no cartão da citação, o toque reproduz o vídeo dentro do post. O botão "ver em tela cheia" abre o visualizador com o mesmo arquivo (seção 188). O app baixa o vídeo, confere o sha256 e a checagem estrita de MP4, com lados e duração iguais aos do descritor, e só então monta um endereço local `file://` ou `blob:`. A reprodução tem controles e som. Encerrar a reprodução interrompe o download (abort), solta o player e apaga o arquivo local. Há um player por vez. Uma carga que falha mostra "vídeo indisponível" e um "Tentar de novo", sem repetição automática. Se o navegador recusa começar sem um gesto, o player permanece e mostra "Toque no play para assistir". Se começa mudo, mostra "Ativar som".
 
 No visualizador de momentos, um momento em vídeo usa o cronômetro único que já existe. A duração do segmento é a do vídeo. Uma foto continua em 5 s. O cronômetro começa quando o player está pronto, ou 2 s depois de o arquivo ter carregado. Se o player ainda diz que está tocando quando o cronômetro acaba, o momento espera o fim do vídeo por até 1,5 s. Segurar, o menu, arrastar, a confirmação de apagar e o app oculto pausam. Há um avanço por item. Com reduzir movimento não há reprodução automática ("Reproduzir") nem avanço automático. O som fica ligado, com "Ativar som" quando o navegador começa mudo. Um início bloqueado mostra "Reproduzir". Sair solta o player e apaga o arquivo local. "Reproduzir" e "Ativar som" agem dentro do próprio toque, para o navegador que exige um gesto.
 
@@ -8147,10 +8147,10 @@ Ordem: Android, iOS, depois web e PWA, num ambiente de teste local. Registrar ap
 
 - [ ] Em A Rua, na citação (mosaico) e no mural, a publicação com vídeo mostra a capa JPEG, a marca de play e a duração. O rótulo é "vídeo de N segundos" (no singular, "1 segundo"). O azulejo do mural diz "vídeo".
 - [ ] Rolar não baixa o vídeo. No painel de rede, nada do arquivo de vídeo sai antes do toque.
-- [ ] O toque reproduz com som.
-- [ ] Fechar apaga o arquivo local e interrompe um download em curso.
+- [ ] Em A Rua e na citação, o toque reproduz dentro do post com som (seção 188).
+- [ ] Encerrar a reprodução apaga o arquivo local e interrompe um download em curso; fechar a tela cheia volta ao player dentro do post (seção 188).
 - [ ] Sem rede, aparece "vídeo indisponível" e um só "Tentar de novo". Não há repetição automática.
-- [ ] No Safari, ou no PWA do iOS com Modo de Baixa Energia, o visualizador de A Rua mostra "Toque no play para assistir" e o vídeo toca depois de um toque; um momento em vídeo mostra "Reproduzir" e toca depois do toque.
+- [ ] No Safari, ou no PWA do iOS com Modo de Baixa Energia, o player dentro do post em A Rua mostra "Toque no play para assistir" e o vídeo toca depois de um toque (seção 188); um momento em vídeo mostra "Reproduzir" e toca depois do toque.
 - [ ] Quando o navegador começa o vídeo sem som, aparece "Ativar som" (em A Rua e nos momentos), e um toque liga o som.
 - [ ] Um momento de 15 s toca até o fim e avança.
 - [ ] Segurar pausa a imagem e a barra.
@@ -8464,3 +8464,60 @@ Ordem: build de debug do Android, simulador do iOS, depois a web e o PWA. Em cad
 - [ ] Tocar à esquerda quando já está no primeiro momento: a música também reinicia, com nova espera pelo áudio e barra em zero.
 - [ ] Tentar fechar durante uma transição entre telas em que o app ignora o fechamento: a música só pausa e retoma do mesmo ponto, sem novo pedido de áudio. A barra retoma o tempo restante.
 - [ ] Momento com vídeo: sem botão Música; com música escolhida, Vídeo mostra a nota; um momento de vídeo com música no registro toca só o vídeo.
+
+## 188. Vídeo da publicação toca dentro do post (PR feat/inline-feed-video)
+
+Em A Rua e no cartão da citação, tocar na capa reproduz o clipe dentro do post, com som e os controles da plataforma. Nada do vídeo baixa antes do toque e nada toca sozinho. O download e a validação continuam os da seção 182: sha256 e checagem estrita de MP4, com lados e duração iguais aos do descritor, antes de montar o arquivo local.
+
+Durante a carga, a capa fica sob uma camada escura com um indicador de espera. Uma falha mostra "vídeo indisponível" e um só "Tentar de novo". Não há repetição automática. Se a plataforma começa sem som, aparece "Ativar som". Se recusa começar sem um gesto, o player permanece com "Toque no play para assistir".
+
+Só um player toca por vez, junto com os players de música. Tocar outro vídeo ou um player de música fecha o primeiro. Trocar de tela, trocar de aba, abrir uma folha de denúncia ou ajuda, abrir uma foto em tela cheia ou mandar o app para segundo plano também encerra a reprodução. O post volta à capa, o player é solto e o arquivo local é apagado. Um toque posterior baixa o vídeo de novo. Um download em curso é interrompido ao encerrar.
+
+Enquanto o vídeo está aberto dentro do post, a cada 500 ms o app mede o quadro na parte visível da lista. Essa área fica abaixo da barra de cima e acima da barra de abas, quando ela está à mostra, descontadas as margens do sistema. A largura visível fica entre as bordas da janela. O player fecha se menos da metade de sua largura estiver visível ou se a altura visível for menor que a metade da altura do quadro, limitada a 120 pt. Também fecha se a medida falha, não é finita ou tem largura ou altura inválida. Nos 2 primeiros segundos dessa conferência ele não fecha, para dar tempo de a linha se acomodar. A conferência fica suspensa em tela cheia e ganha os mesmos 2 s ao voltar ao post.
+
+Quando o clipe está pronto, "ver em tela cheia" aparece num botão redondo no canto superior esquerdo. Ele abre o visualizador com o mesmo arquivo e a posição atual, sem novo download. Fechar a tela cheia volta ao post na posição e no estado de reprodução ou pausa do player. Nas duas passagens, se faltam 0,5 s ou menos para o fim, o clipe começa de zero. No Android, o vídeo dentro do post usa `surfaceType: textureView` para respeitar os cantos arredondados na lista.
+
+Um toque, dois toques ou Enter/Espaço sobre o player com foco na web não abrem a publicação nem curtem o post. O quadro impede que o clique e as teclas Enter e Espaço cheguem ao post e recebe o toque. As outras teclas seguem para o app: Escape com o player em foco continua voltando para a tela anterior.
+
+O mural continua mostrando a capa que abre a publicação. Momentos não mudam e anúncios da Feira continuam sem vídeo. Leitores de tela ficam fora desta verificação. A imagem da capa e suas marcas já ficam ocultas para eles, mas o botão da capa mantém o rótulo "vídeo de N segundos". O código não oculta explicitamente os controles do player dentro do post.
+
+Como verificar, a partir da raiz:
+
+```sh
+node apps/app/test/feedRender.test.js
+node apps/app/test/postActions.test.js
+node apps/app/test/videoPlayback.test.js
+node apps/app/test/momentosScreen.test.js
+node apps/app/test/escapeLayer.test.js
+node apps/app/test/musicEmbedCard.test.js
+node apps/app/test/platformGate.test.js
+```
+
+Esses testes conferem módulos puros e o texto do código: montagem só ao toque, carga, falha e nova tentativa, passagem para tela cheia, posição e estado do player, bloqueio dos toques no post, encerramento e regra de visibilidade. Também conferem os momentos, Escape e a separação das APIs de plataforma. Não montam a interface num renderizador, não usam aparelho nem rede pública. Não comprovam os controles reais da plataforma. A lista é um roteiro de verificação, não um registro de execução.
+
+Conferido em 2026-11-12 no emulador Android (Android 16, build de depuração), numa tela de teste temporária, fora do app e não incluída no PR, que monta o mesmo quadro do post (os mesmos manipuladores de clique, tecla e toque) dentro de um Pressable que abre a publicação, numa lista rolável, com um clipe MP4 local de 12 s. O clipe toca dentro do quadro com cantos arredondados. Pausar mantém o quadro; arrastar a barra de tempo muda a posição; um arrasto vertical começando no vídeo rola a lista. Um toque e dois toques no vídeo não abrem o post. Não foram conferidos ali o app real com conta, a passagem por "ver em tela cheia", iOS, web nem PWA.
+
+Conferido em 2026-11-12 na web, num Chromium com janela de 375 px, no build de desenvolvimento com os dados de demonstração (Vitrine) e uma publicação temporária, fora do PR, com um clipe MP4 de 12 s e uma citação dela. As telas eram as reais: A Rua, a linha do post e a citação. Antes do toque não havia elemento de vídeo na página. O toque no pôster tocou o clipe dentro do post, com som e controles, sem abrir a publicação. A pausa se manteve. "ver em tela cheia" com o vídeo pausado e com o vídeo tocando abriu o mesmo arquivo, na mesma posição e no mesmo estado. Fechar a tela cheia no meio do clipe continuou no post com o mesmo arquivo; fechar depois do fim voltou ao começo, pausado. Escape com o foco no vídeo fechou a tela cheia sem sair de A Rua. Tocar o vídeo da citação fechou o primeiro e liberou o arquivo dele. Rolar o vídeo para fora da tela, trocar de aba e abrir em tela cheia a foto de outra publicação fecharam o vídeo e liberaram o arquivo. Nenhuma curtida mudou. As teclas foram simuladas por script, e Enter ou Espaço sobre o player com foco não puderam ser conferidos assim: o mesmo script também não abre uma publicação comum com Enter. Essa conferência foi feita antes de dois ajustes pequenos, cobertos pelos testes: o quadro agora barra só Enter e Espaço, e uma medida ainda em andamento não fecha mais o vídeo quando a tela cheia abre. Não foram conferidos: o app com conta, Safari, o PWA instalado e o simulador iOS (a build de depuração foi instalada e abriu, mas não foi possível tocar nela).
+
+### Verificação manual
+
+Os casos no app real continuam em aberto. Usar uma instalação de teste local, sem DHT pública. Ordem: build de debug do Android, simulador iOS, web e PWA instalado. Repetir os casos abaixo em A Rua e no cartão da citação. O build de debug não entra com passkey de produção; no iOS, a passkey depende do domínio associado da conta Apple Developer (veja `docs/development.md`).
+
+- [ ] Android, build de debug no emulador ou aparelho, depois de `npm run prepare:native -w apps/app`: conferir os casos abaixo e registrar aparelho e sistema.
+- [ ] iOS, simulador: conferir os mesmos casos e registrar sistema.
+- [ ] Web, Chrome e Safari: conferir os mesmos casos e registrar navegador e versão.
+- [ ] PWA instalado: conferir os mesmos casos e registrar sistema e navegador de instalação.
+- [ ] Tocar na capa reproduz dentro do post, com som. Abrir a tela e rolar não inicia reprodução. Na web, conferir no painel de rede que nada do vídeo baixa antes do toque.
+- [ ] Pausar mantém o quadro; arrastar a barra de tempo muda a posição; um arrasto vertical começando no vídeo rola a lista.
+- [ ] Um toque e dois toques sobre o vídeo não abrem a publicação nem curtem o post.
+- [ ] "ver em tela cheia" continua na mesma posição, sem novo download. Fechar volta ao post na mesma posição e no mesmo estado de reprodução ou pausa. Repetir pausado e tocando; nos últimos 0,5 s, conferir o reinício de zero.
+- [ ] O botão "ver em tela cheia" não cobre os controles da plataforma, especialmente no iOS.
+- [ ] Tocar outro vídeo ou um player de música fecha o primeiro e devolve sua capa. Tocar nessa capa de novo baixa o vídeo outra vez.
+- [ ] Rolar até ficar visível menos da metade da largura ou menos que a metade da altura do quadro, limitada a 120 pt, fecha o player na medida seguinte, em até meio segundo. Nos 2 primeiros segundos depois do toque, ou da volta da tela cheia, ele não fecha.
+- [ ] Trocar de aba, trocar de tela, abrir uma folha que cobre parte da tela (denúncia ou ajuda), abrir uma foto de outro post em tela cheia e mandar o app para segundo plano encerram a reprodução e devolvem a capa.
+- [ ] Android: voltar do segundo plano não retoma por conta própria com som. Registrar o que o aparelho faz.
+- [ ] Sem rede: aparece "vídeo indisponível" e um só "Tentar de novo", legíveis nos temas claro e escuro. Não há repetição automática.
+- [ ] Web: Enter ou Espaço sobre o player com foco não abre a publicação.
+- [ ] Web: começar o gesto de puxar para atualizar sobre o vídeo e registrar o que acontece.
+- [ ] Safari ou PWA do iOS com Modo de Baixa Energia: aparece "Toque no play para assistir" e o vídeo toca depois de um toque.
+- [ ] Um início sem som mostra "Ativar som"; tocar nele liga o som.

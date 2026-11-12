@@ -163,6 +163,24 @@ test('progressFromSeconds: seconds to whole milliseconds', async (t) => {
   t.alike(progressFromSeconds(), { ms: 0, durationMs: 0, playing: false, ended: false })
 })
 
+test('resumeSeconds: continue the clip unless it is near the end', async (t) => {
+  const { resumeSeconds } = await load()
+  for (const startMs of [0, -1, NaN, undefined, Infinity, -Infinity, '2000', null]) {
+    t.is(resumeSeconds(startMs, 10000), null, 'refuses ' + String(startMs))
+  }
+  t.is(resumeSeconds(2500, undefined), 2.5, 'an unknown duration allows resuming')
+  t.is(resumeSeconds(2500, NaN), 2.5)
+  t.is(resumeSeconds(2500, Infinity), 2.5)
+  t.is(resumeSeconds(2500, 0), 2.5)
+  t.is(resumeSeconds(2500, -1), 2.5)
+  t.is(resumeSeconds(5000, 10000), 5, 'the middle of the clip')
+  t.is(resumeSeconds(9499, 10000), 9.499, 'just outside the end margin')
+  t.is(resumeSeconds(9500, 10000), null, 'exactly 500 ms from the end restarts')
+  t.is(resumeSeconds(9750, 10000), null, 'within the last 500 ms restarts')
+  t.is(resumeSeconds(10000, 10000), null, 'at the end restarts')
+  t.is(resumeSeconds(11000, 10000), null, 'after the end restarts')
+})
+
 test('createPlaybackRegistry: one player at a time', async (t) => {
   const { createPlaybackRegistry, videoPlayers } = await load()
   const r = createPlaybackRegistry()
@@ -205,6 +223,52 @@ test('playRefusal: an abort is ignored, sound refused retries muted once, refuse
 })
 
 const src = (name) => fs.readFileSync(path.join(__dirname, '../src/media', name), 'utf8')
+
+test('the siblings: resume once when ready without recreating the player', (t) => {
+  const native = src('VideoPlayer.native.js')
+  const web = src('VideoPlayer.web.js')
+  for (const [name, code] of [['native', native], ['web', web]]) {
+    t.ok(code.includes('style, startMs = 0, inline = false, onReady'), name + ' accepts the inline props')
+    t.ok(/const startRef = useRef\(0\)\s*startRef.current = startMs/.test(code), name + ' keeps the latest start during render')
+    t.ok(code.includes('let seeked = false'), name + ' tracks the first ready event per uri')
+    const uriEffect = code.slice(code.indexOf('useLayoutEffect(() => {'), code.indexOf('}, [uri])'))
+    t.ok(uriEffect.includes('let seeked = false'), name + ' resets seeking for each uri')
+    t.ok(code.includes('}, [uri])'), name + ' keeps the uri effect dependency')
+    for (const [, deps] of code.matchAll(/\}, \[([^\]]*)\]\)/g)) {
+      t.absent(/\b(startMs|inline)\b/.test(deps), name + ' does not recreate effects for inline props')
+    }
+  }
+  const ready = native.slice(native.indexOf("if (status === 'readyToPlay')"), native.indexOf("else if (status === 'error')"))
+  t.ok(/if \(!seeked\) \{\s*seeked = true\s*const seconds = resumeSeconds\(startRef.current, position\(\).durationMs\)\s*if \(seconds !== null\) \{\s*try \{ p.currentTime = seconds \} catch \{\}/.test(ready), 'native seeks only on the first readyToPlay')
+  t.is((native.match(/p\.currentTime\s*=/g) || []).length, 1, 'native has no other currentTime assignment')
+  t.ok(ready.indexOf('p.currentTime = seconds') < ready.indexOf("apply({ type: 'ready'"), 'native seeks before ready is reported')
+  const metadata = web.slice(web.indexOf("on('loadedmetadata', () => {"), web.indexOf("on('playing',"))
+  t.ok(/if \(!seeked\) \{\s*seeked = true\s*const seconds = resumeSeconds\(startRef.current, el.duration \* 1000\)\s*if \(seconds !== null\) \{\s*try \{ el.currentTime = seconds \} catch \{\}/.test(metadata), 'web seeks only on the first loadedmetadata')
+  t.is((web.match(/el\.currentTime\s*=/g) || []).length, 1, 'web has no other currentTime assignment')
+  t.ok(metadata.indexOf('el.currentTime = seconds') < metadata.indexOf("apply({ type: 'ready'"), 'web seeks before ready is reported')
+  t.ok(native.includes("surfaceType={inline === true ? 'textureView' : undefined}"), 'native clips inline video to the rounded frame')
+  t.ok(native.includes('onSoundRefused, onProgress, control }) {'), 'native keeps the signature tail')
+  t.ok(web.includes('onProgress, onPlayBlocked, control }) {'), 'web keeps the signature tail')
+})
+
+test('the siblings: control reads live progress without starting playback', (t) => {
+  for (const name of ['native', 'web']) {
+    const code = src('VideoPlayer.' + name + '.js')
+    const handle = code.slice(code.indexOf('const handle = {'), code.indexOf(name === 'native' ? 'control.current = handle' : 'if (ctl) ctl.current = handle'))
+    const progress = /progress: \(\) => \{([\s\S]*?)\n {6}\}/.exec(handle)?.[1] || ''
+    t.ok(progress.length > 0, name + ' exposes progress() after unmute')
+    t.ok(handle.indexOf('progress:') > handle.indexOf('unmute:'), name + ' appends progress after unmute')
+    t.absent(/play\(/.test(progress), name + ' progress never plays')
+    t.absent(/claim\(/.test(progress), name + ' progress never claims the registry')
+    if (name === 'native') {
+      t.ok(progress.includes('if (live.released) return null'), 'native returns null once released')
+      t.ok(progress.includes("return progressFromSeconds({ currentTime: live.player.currentTime, duration: live.player.duration, playing: live.player.playing, ended: state.current.status === 'ended' })"), 'native reads the live player, ended included')
+    } else {
+      t.ok(progress.includes('if (!active || !ref.current) return null'), 'web returns null once released or missing')
+      t.ok(progress.includes('return progressFromSeconds({ currentTime: el.currentTime, duration: el.duration, playing: !el.paused, ended: el.ended })'), 'web reads the live element, ended included')
+    }
+  }
+})
 
 test('the siblings: expo-video on the phone only, local sources only', (t) => {
   const web = src('VideoPlayer.web.js')

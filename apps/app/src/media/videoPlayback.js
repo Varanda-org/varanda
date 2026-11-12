@@ -68,6 +68,13 @@ export function progressFromSeconds ({ currentTime, duration, playing, ended } =
   }
 }
 
+// The full-screen viewer and tile continue the same clip; near the end it starts over.
+export function resumeSeconds (startMs, durationMs) {
+  if (!Number.isFinite(startMs) || startMs <= 0) return null
+  if (Number.isFinite(durationMs) && durationMs > 0 && startMs >= durationMs - 500) return null
+  return startMs / 1000
+}
+
 function withPosition (state, event) {
   const durationMs = whole(event.durationMs) || state.durationMs
   let ms = 'ms' in event ? whole(event.ms) : state.ms

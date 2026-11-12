@@ -2,16 +2,18 @@
 // file: URI only. expo-video is never imported here, so it stays out of the
 // web bundle. Inline playback, no download, fullscreen, picture-in-picture or
 // remote playback. One video plays at a time (videoPlayers). Same props as
-// VideoPlayer.native.js: { uri, playing, muted, controls, fit, onReady,
+// VideoPlayer.native.js: { uri, playing, muted, controls, fit, style, startMs, inline, onReady,
 // onEnd, onError, onSoundRefused, onProgress } plus onPlayBlocked, which only
 // this one calls. When the browser refuses to play with sound, the video
 // starts muted and onSoundRefused is called. When it refuses even muted (it
 // wants a gesture), onPlayBlocked is called once per play attempt, never
 // onError: the element keeps its source and its own controls, and a later
-// play() plays normally. control, a ref, holds { play, unmute } while the
+// play() plays normally. control, a ref, holds { play, unmute, progress } while the
 // player of this uri is live: a press calls them in its own handler, because
 // a browser that wants a gesture may not count the effect that applies the
 // new props later.
+// startMs resumes once metadata is ready; inline is ignored here. progress()
+// reads the live { ms, durationMs, playing, ended }, or null once gone.
 
 import React, { useEffect, useLayoutEffect, useRef } from 'react'
 import { View } from 'react-native'
@@ -23,6 +25,7 @@ import {
   progressFromSeconds,
   reduceVideo,
   refusedSourceError,
+  resumeSeconds,
   videoEffects,
   videoPlayers,
   videoState
@@ -33,7 +36,7 @@ const FILL = { width: '100%', height: '100%', display: 'block' }
 // timeupdate may fire every frame in some browsers: keep about 250 ms.
 const TICK_MS = VIDEO_PROGRESS_MS * 0.8
 
-export default function VideoPlayer ({ uri, playing = false, muted = false, controls = false, fit = 'contain', style, onReady, onEnd, onError, onSoundRefused, onProgress, onPlayBlocked, control }) {
+export default function VideoPlayer ({ uri, playing = false, muted = false, controls = false, fit = 'contain', style, startMs = 0, inline = false, onReady, onEnd, onError, onSoundRefused, onProgress, onPlayBlocked, control }) {
   const ref = useRef(null)
   const live = useRef(null)
   const controlRef = useRef(control)
@@ -42,6 +45,8 @@ export default function VideoPlayer ({ uri, playing = false, muted = false, cont
   callbacks.current = { onReady, onEnd, onError, onSoundRefused, onProgress, onPlayBlocked }
   const mutedRef = useRef(muted === true)
   mutedRef.current = muted === true
+  const startRef = useRef(0)
+  startRef.current = startMs
   const playingRef = useRef(playing === true)
   playingRef.current = playing === true
   const state = useRef(videoState(null))
@@ -60,6 +65,7 @@ export default function VideoPlayer ({ uri, playing = false, muted = false, cont
     if (!el) return undefined
     const token = {}
     let active = true
+    let seeked = false
     let lastTick = 0
     const apply = (event) => {
       if (!active) return
@@ -121,7 +127,16 @@ export default function VideoPlayer ({ uri, playing = false, muted = false, cont
       el.addEventListener(type, fn)
       offs.push(() => el.removeEventListener(type, fn))
     }
-    on('loadedmetadata', () => apply({ type: 'ready', durationMs: position().durationMs }))
+    on('loadedmetadata', () => {
+      if (!seeked) {
+        seeked = true
+        const seconds = resumeSeconds(startRef.current, el.duration * 1000)
+        if (seconds !== null) {
+          try { el.currentTime = seconds } catch {}
+        }
+      }
+      apply({ type: 'ready', durationMs: position().durationMs })
+    })
     on('playing', () => {
       // A 'playing' queued before another video claimed and paused this one
       // must not take the registry back from it.
@@ -162,6 +177,10 @@ export default function VideoPlayer ({ uri, playing = false, muted = false, cont
       },
       unmute: () => {
         if (active) el.muted = false
+      },
+      progress: () => {
+        if (!active || !ref.current) return null
+        return progressFromSeconds({ currentTime: el.currentTime, duration: el.duration, playing: !el.paused, ended: el.ended })
       }
     }
     if (ctl) ctl.current = handle
