@@ -34,7 +34,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
-import { holdMsOf, momentMusicOf, canReply, expiresIn, firstUnseenIndex, nextIndex, progressOf, replyContext, ringOrder, segmentMs } from '../moments'
+import { holdMsOf, momentMusicOf, canReply, expiresIn, firstUnseenIndex, nextIndex, progressOf, replyContext, ringOrder, segmentMs, VIDEO_END_GRACE_MS } from '../moments'
 import { audiusPolicy, audiusReady } from '../account'
 import { musicOriginOf } from '../music'
 import { openExternal } from '../openExternal'
@@ -320,7 +320,7 @@ function useMomentPhoto (author, seq, expected) {
 function useMomentPlayback ({ itemKey, ms, video, loaded, active, autoOn, step, control }) {
   const progress = useRef(new Animated.Value(0)).current
   const [restartTick, setRestartTick] = useState(0)
-  const visit = useMemo(() => ({ remaining: ms, position: null, advanced: false }), [itemKey, ms, restartTick])
+  const visit = useMemo(() => ({ remaining: ms, position: null, moving: false, advanced: false }), [itemKey, ms, restartTick])
   const [ready, setReady] = useState(null)
   const [manual, setManual] = useState(null)
   const [ended, setEnded] = useState(null)
@@ -351,10 +351,18 @@ function useMomentPlayback ({ itemKey, ms, video, loaded, active, autoOn, step, 
     // A close ignored during a stack slide may run again after a hold.
     visit.advanced = false
     let live = true
+    let grace = null
     const anim = Animated.timing(progress, { toValue: 1, duration: Math.max(0, visit.remaining), easing: Easing.linear, useNativeDriver: false })
-    anim.start(({ finished }) => { if (live && finished) advance() })
+    anim.start(({ finished }) => {
+      if (!live || !finished) return
+      // The player can trail the clock or run past the clamped segment: onEnd
+      // advances, and the timer bounds the wait.
+      if (video && visit.moving) grace = setTimeout(advance, VIDEO_END_GRACE_MS)
+      else advance()
+    })
     return () => {
       live = false
+      clearTimeout(grace)
       anim.stop()
       progress.stopAnimation((value) => {
         if (current.current.visit !== visit) return
@@ -366,6 +374,8 @@ function useMomentPlayback ({ itemKey, ms, video, loaded, active, autoOn, step, 
   const handleProgress = ({ ms: position, playing: moving }) => {
     if (current.current.visit !== visit || !Number.isFinite(position)) return
     visit.position = Math.max(0, Math.min(ms, position))
+    // The pause a hold causes says nothing about the player once released.
+    if (current.current.running) visit.moving = moving === true
     if (!current.current.running || moving === false) visit.remaining = ms - visit.position
     if (!current.current.running) progress.setValue(visit.position / ms)
   }
@@ -385,7 +395,8 @@ function useMomentPlayback ({ itemKey, ms, video, loaded, active, autoOn, step, 
       setManual(visit)
     },
     handleUnmute: () => {
-      if (current.current.visit === visit) control?.current?.unmute()
+      if (current.current.visit !== visit) return
+      control?.current?.unmute()
       setMuted(null)
     },
     handleReady: () => { if (current.current.visit === visit) setReady(visit) },
@@ -394,6 +405,7 @@ function useMomentPlayback ({ itemKey, ms, video, loaded, active, autoOn, step, 
     handleProgress,
     handleEnd: () => {
       if (current.current.visit !== visit) return
+      visit.moving = false
       setEnded(visit)
       if (current.current.autoOn) advance()
       else progress.setValue(1)
