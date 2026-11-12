@@ -10,7 +10,7 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { avatarColorOf } from '../format'
-import { plainOf } from '../richText'
+import { quoteText } from '../chatPreview'
 import { Icon } from './Icon'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, radius, space, type } from './theme'
@@ -33,7 +33,7 @@ export function ReplyPreview ({ name, handle, text, senderKey, mine, onPress, on
   const { colors, scheme } = useTheme()
   const tint = mine || typeof senderKey !== 'string' ? colors.accent : senderColor(senderKey, scheme)
   const shownName = typeof name === 'string' ? displayText(name).trim() : ''
-  const shownText = typeof text === 'string' ? displayText(plainOf(text), { multiline: true }) : ''
+  const shownText = quoteText(text)
   const body = (
     <View style={styles.body}>
       {shownName

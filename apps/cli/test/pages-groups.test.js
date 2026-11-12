@@ -230,7 +230,24 @@ test('pages-groups: cached v1 and v2 posts paginate without a seeder connection'
   const pg = createPagesGroups({ dir, writer, pagesStore, keys, association, fetchTimeoutMs: 10 })
   t.teardown(() => pg.close(), { force: true })
   await pg.ready()
-  const first = await pg.groupRead(page.key, group, { limit: 2 })
+  // 500 reactors on the visible post, the page among them: the read sends
+  // the compact summary and never the fold's `by` list.
+  const reactors = [...Array.from({ length: 499 }, (_, i) => i.toString(16).padStart(64, '0')), page.key]
+  const build = groupLib.buildGroup
+  groupLib.buildGroup = (...args) => {
+    const view = build(...args)
+    for (const p of view.posts) if (p.seq === visible.seq) p.reactions = [{ emoji: '\u{1f44d}', count: reactors.length, by: reactors }]
+    return view
+  }
+  let first
+  try {
+    first = await pg.groupRead(page.key, group, { limit: 2 })
+  } finally {
+    groupLib.buildGroup = build
+  }
+  t.alike(first.items[1].reactions, [{ emoji: '\u{1f44d}', count: 500, mine: true }], 'compact reactions, no reactor keys')
+  t.absent('reactions' in first.items[0], 'absent when empty')
+  t.ok(JSON.stringify(first).length < 20000)
   t.alike(first.items.map((p) => p.seq), [hidden.seq, visible.seq])
   t.is(first.items[0].media, null, 'hidden media is omitted')
   t.is(first.items[0].text, '')

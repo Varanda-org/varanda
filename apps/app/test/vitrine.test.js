@@ -81,6 +81,8 @@ const resultKeys = {
   'group.join': ['state'],
   'group.leave': ['state'],
   'group.hide': ['ok'],
+  'group.react': ['ok'],
+  'group.reactors': ['reactions'],
   'group.rekey': ['group', 'epoch'],
   'group.members': ['members', 'total'],
   'group.requests': ['requests', 'total'],
@@ -242,7 +244,7 @@ test('all vitrine methods match the documented result and row keys', async (t) =
   t.is(listed.total, 5)
   for (const row of listed.groups) keys(t, row, ['group', 'name', 'join', 'role', 'members', 'community'])
   const read = await answer(t, request, 'group.read', { group })
-  for (const row of read.items) keys(t, row, ['writer', 'diary', 'seq', 'at', 'text', 'replyTo', 'hidden', 'media', 'name', 'username'])
+  for (const row of read.items) keys(t, row, ['writer', 'diary', 'seq', 'at', 'text', 'replyTo', 'hidden', 'media', 'name', 'username', ...(row.reactions ? ['reactions'] : [])])
   t.alike([read.hidden, read.incomplete, read.sealed, read.epoch, read.state], [0, false, 0, null, 'ok'])
   const groupInfo = await answer(t, request, 'group.info', { group })
   t.is(groupInfo.canWrite, true)
@@ -653,6 +655,8 @@ function samples (f) {
     'group.post': { group, text: 'Vamos nos encontrar!' },
     'group.seen': { group },
     'group.hide': { group, target: { writer: f.groups[3].items[0].writer, seq: 2 }, on: true },
+    'group.react': { group, target: { writer: f.groups[3].items[0].writer, seq: 2 }, emoji: '👍' },
+    'group.reactors': { group, target: { writer: f.groups[3].items[0].writer, seq: 2 } },
     'group.rekey': { group },
     'community.create': { name: 'Amigos da praça', join: 'open' },
     'community.list': {},
@@ -1367,4 +1371,35 @@ test('momentos: putMoment, moment.create, the photo read and moment.delete', asy
   t.absent(after.own.some((i) => i.seq === 48))
   t.alike(after.past.map((i) => i.seq), [46], 'a past moment can be deleted too')
   t.alike((await call('diary.peek', { author: f.own, seqs: [48] })).missing, [48])
+})
+
+test('group reactions replace, remove and hide without leaking reactor keys in reads', async (t) => {
+  const { fixtures: f, request, createVitrineRequest } = await load()
+  const group = f.groups[0].group
+  const item = f.groups[0].items[0]
+  const target = { writer: item.writer, seq: item.seq }
+  const read = async () => (await request('group.read', { group })).items.find((p) => p.writer === target.writer && p.seq === target.seq)
+  const react = (emoji) => answer(t, request, 'group.react', { group, target, emoji })
+  t.alike((await read()).reactions, item.reactions)
+  await react('❤️')
+  t.alike((await read()).reactions, item.reactions, 'same emoji is a no-op')
+  await react('😂')
+  t.alike((await read()).reactions.find((r) => r.emoji === '❤️'), { emoji: '❤️', count: 1, mine: false })
+  t.alike((await read()).reactions.find((r) => r.mine), { emoji: '😂', count: 1, mine: true })
+  const who = await answer(t, request, 'group.reactors', { group, target })
+  t.alike(who.reactions.find((r) => r.emoji === '😂').by, [f.own])
+  t.ok((await read()).reactions.every((r) => !Object.hasOwn(r, 'by')))
+  await react('')
+  t.absent((await read()).reactions.some((r) => r.mine || r.emoji === '😂'))
+  await react('👍')
+  t.alike((await read()).reactions.find((r) => r.mine), { emoji: '👍', count: 2, mine: true })
+  await request('group.hide', { group, target, on: true })
+  t.absent(Object.hasOwn(await read(), 'reactions'))
+  await refused(t, request, 'group.react', { group, target, emoji: '👍' }, 'USAGE')
+  await refused(t, request, 'group.reactors', { group, target }, 'USAGE')
+  await request('group.hide', { group, target, on: false })
+  t.ok((await read()).reactions.some((r) => r.mine))
+  t.alike((await createVitrineRequest(f)('group.read', { group })).items.find((p) => p.writer === target.writer).reactions, item.reactions, 'instances are isolated')
+  await request('group.leave', { group })
+  await refused(t, request, 'group.react', { group, target, emoji: '👍' }, 'USAGE')
 })

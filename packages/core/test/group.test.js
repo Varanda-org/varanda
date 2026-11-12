@@ -7,7 +7,7 @@ const {
   groupHeader, writerHeader, groupPost, groupHide, groupAdmit, groupBan, groupMeta, groupAdmin, groupLeave,
   groupCreateRecord, communityAdmit, communityBan, communityHide, groupInvites,
   groupJoins, groupJoinHistory, diaryGroupKeys, orderKey, compareOrder, isFuture, buildGroup, buildCommunity,
-  GROUP_POST_V2_KEYS, groupKey, groupSealed, sealedInner
+  GROUP_POST_V2_KEYS, groupKey, groupSealed, sealedInner, groupReact
 } = require('../lib/group')
 const { groupJoinRecord } = require('../lib/records')
 const { K, BASE, AT, NOW, community: communityOf, groupIn } = require('./helpers/groups')
@@ -184,7 +184,7 @@ test('header shapes', async (t) => {
 })
 
 test('record shapes', async (t) => {
-  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed', 'group-invites'])
+  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed', 'group-invites', 'group-react'])
   const p = groupPost({ text: 'oi', replyTo: { writer: wA, seq: 1, extra: 1 }, seen: { writer: wB, seq: 2 }, at: AT(1) })
   t.alike(p, { type: 'group-post', text: 'oi', replyTo: { writer: wA, seq: 1 }, seen: { writer: wB, seq: 2 }, at: AT(1) })
   t.is(validateGroupRecord(p, 1), null)
@@ -2449,4 +2449,338 @@ test('group-post v2: the worst card fits the sealed inner', (t) => {
   const pub = groupPost({ text, replyTo: ref, card: worstCard({ ...THUMB(8191, K(0xfff)), width: 16384, height: 16384 }), fwd: 1, seen: ref, at: AT(2) })
   t.comment('worst public group card post: ' + b4a.byteLength(JSON.stringify(pub)) + ' bytes')
   t.ok(b4a.byteLength(JSON.stringify(pub)) <= 16384, 'a public card post fits one block')
+})
+
+// Reactions (group-react, docs/protocol.md section 10).
+const THUMBS = '\u{1f44d}'
+const HEART = '\u2764\ufe0f'
+const react = (w, key, target, emoji, s, extra = {}) => w.push(key, groupReact({ target, emoji, at: AT(s), ...extra }))
+const reactionsOf = (g, ref) => g.posts.find((p) => p.writer === ref.writer && p.seq === ref.seq).reactions
+
+test('group-react record shapes', async (t) => {
+  const r = groupReact({ target: { writer: wA, seq: 1, x: 1 }, emoji: THUMBS, seen: { writer: wB, seq: 2 }, at: AT(1) })
+  t.alike(r, { type: 'group-react', target: { writer: wA, seq: 1 }, emoji: THUMBS, seen: { writer: wB, seq: 2 }, at: AT(1) })
+  t.alike(Object.keys(r), ['type', 'target', 'emoji', 'seen', 'at'])
+  t.is(validateGroupRecord(r, 1), null)
+  t.is(validateGroupRecord({ ...r, emoji: '' }, 1), null, 'empty emoji removes')
+  for (const emoji of ['a', ' ', THUMBS + THUMBS, THUMBS + ' ', '\u{1f3fd}', null, 1, undefined]) {
+    t.is(validateGroupRecord({ ...r, emoji }, 1), 'emoji-invalid', JSON.stringify(String(emoji)))
+  }
+  t.is(validateGroupRecord({ ...r, target: { writer: wA, seq: 0 } }, 1), 'malformed', 'target is a block, not a header')
+  t.is(validateGroupRecord({ ...r, target: { writer: 'x', seq: 1 } }, 1), 'malformed')
+  t.is(validateGroupRecord({ ...r, target: { writer: wA, seq: 1.5 } }, 1), 'malformed')
+  t.is(validateGroupRecord({ ...r, target: null }, 1), 'malformed')
+  t.is(validateGroupRecord({ ...r, extra: 1 }, 1), 'malformed')
+  const { seen, ...noSeen } = r
+  t.is(validateGroupRecord(noSeen, 1), 'malformed', 'seen is required')
+  t.is(validateGroupRecord({ ...r, seen: { writer: wB } }, 1), 'seen-invalid')
+  t.is(validateGroupRecord({ ...r, at: 'x' }, 1), 'date-invalid')
+  t.is(validateGroupRecord(r, 1, { community: true }), 'group-only')
+  t.is(validateGroupRecord(r, 1, { private: true }), 'sealed-only')
+  t.is(validateGroupRecord(r, 1, { sealed: true }), null, 'an envelope may carry it')
+  await t.exception.all(async () => groupReact({ target: { writer: wA, seq: 1 }, emoji: 'ok', at: AT(1) }), /emoji-invalid/)
+})
+
+test('a reaction is replaced by the same diary and removed by an empty emoji', (t) => {
+  const w = world().add(X, wX).add(X, wX2).add(Y, wY)
+  const p = post(w, wY, 1)
+  react(w, wX, p, THUMBS, 2)
+  react(w, wY, p, THUMBS, 3)
+  t.alike(reactionsOf(buildGroup(w.input()), p), [{ emoji: THUMBS, count: 2, by: [X, Y] }])
+  // Another device of the same diary replaces it: one reaction per diary.
+  react(w, wX2, p, HEART, 4)
+  t.alike(reactionsOf(buildGroup(w.input()), p), [{ emoji: HEART, count: 1, by: [X] }, { emoji: THUMBS, count: 1, by: [Y] }])
+  react(w, wX, p, '', 5)
+  react(w, wY, p, '', 6)
+  const g = buildGroup(w.input())
+  t.is(reactionsOf(g, p), undefined, 'no reactions key when empty')
+  t.absent('reactions' in g.posts[0])
+})
+
+test('reactions sort by count then emoji, and by lists diaries in reaction order', (t) => {
+  const w = world().add(A, wA).add(X, wX).add(Y, wY)
+  const p = post(w, G, 1)
+  react(w, wY, p, HEART, 2)
+  react(w, wX, p, THUMBS, 3)
+  react(w, wA, p, THUMBS, 4)
+  react(w, G, p, '\u{1f600}', 5)
+  t.alike(reactionsOf(buildGroup(w.input()), p), [
+    { emoji: THUMBS, count: 2, by: [X, A] },
+    { emoji: HEART, count: 1, by: [Y] },
+    { emoji: '\u{1f600}', count: 1, by: [C] }
+  ].sort((a, b) => b.count - a.count || (a.emoji < b.emoji ? -1 : a.emoji > b.emoji ? 1 : 0)))
+  const r = reactionsOf(buildGroup(w.input()), p)
+  t.is(r[0].emoji, THUMBS)
+  t.ok(r[1].emoji < r[2].emoji, 'ties by emoji')
+})
+
+test('reactions by non-members, banned or departed diaries are ignored', (t) => {
+  const w = world({ join: 'approval' }).add(X, wX).add(Y, wY).add(A, wA)
+  w.push(G, groupAdmit({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(1) }))
+  w.push(G, groupAdmit({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(1) }))
+  const p = post(w, G, 2)
+  react(w, wX, p, THUMBS, 3) // never admitted
+  react(w, wY, p, THUMBS, 4)
+  react(w, wA, p, HEART, 5)
+  t.alike(reactionsOf(buildGroup(w.input()), p), [{ emoji: HEART, count: 1, by: [A] }, { emoji: THUMBS, count: 1, by: [Y] }])
+  w.push(G, groupBan({ member: Y, on: true, cuts: [{ writer: wY, seq: w.len(wY) }], at: AT(6) }))
+  w.push(wA, groupLeave({ cuts: [{ writer: wA, seq: w.len(wA) }], at: AT(7) }))
+  const g = buildGroup(w.input())
+  t.is(g.members.get(Y), 'banned')
+  t.is(g.members.get(A), 'left')
+  t.is(reactionsOf(g, p), undefined)
+})
+
+test('reactions to hidden, unknown or future targets are ignored', (t) => {
+  const w = world().add(X, wX).add(Y, wY)
+  const p1 = post(w, wY, 1)
+  const p2 = post(w, wY, 2)
+  w.push(wY, groupHide({ target: p1, on: true, at: AT(3) }))
+  react(w, wX, p1, THUMBS, 4)
+  react(w, wX, { writer: wY, seq: 99 }, THUMBS, 5)
+  react(w, wX, { writer: K(0x999), seq: 1 }, THUMBS, 6)
+  const hidden = w.push(wX, groupReact({ target: p2, emoji: THUMBS, at: new Date(NOW + 2 * 86400000).toISOString() }))
+  const g = buildGroup(w.input())
+  t.is(reactionsOf(g, p1), undefined)
+  t.is(reactionsOf(g, p2), undefined, 'a future reaction is ignored')
+  t.ok(hidden)
+  // A reaction can never target another reaction or a hide.
+  react(w, wY, { writer: wX, seq: 1 }, HEART, 7)
+  t.alike(buildGroup(w.input()).posts.map((p) => p.reactions), [undefined, undefined])
+})
+
+test('at most GROUP_REACTIONS_MAX distinct emojis per message, later ones ignored', (t) => {
+  const { GROUP_REACTIONS_MAX } = require('@varanda/rpc')
+  t.is(GROUP_REACTIONS_MAX, 12)
+  const w = world()
+  const p = post(w, G, 1)
+  const emojis = []
+  for (let i = 0; i < 14; i++) {
+    const d = K(0x20 + i)
+    const wk = K(0x600 + i)
+    w.add(d, wk)
+    emojis.push(String.fromCodePoint(0x1f600 + i))
+    react(w, wk, p, emojis[i], 2 + i)
+  }
+  // A 15th diary repeating a kept emoji still counts.
+  w.add(K(0x40), K(0x640))
+  react(w, K(0x640), p, emojis[0], 30)
+  const r = reactionsOf(buildGroup(w.input()), p)
+  t.is(r.length, 12)
+  t.alike(r.map((x) => x.emoji).sort(), emojis.slice(0, 12).sort())
+  t.alike(r[0], { emoji: emojis[0], count: 2, by: [K(0x20), K(0x40)] })
+  // A diary that clears its reaction frees a slot for the next emoji in order.
+  react(w, K(0x605), p, '', 31)
+  const r2 = reactionsOf(buildGroup(w.input()), p)
+  t.is(r2.length, 12)
+  t.ok(r2.some((x) => x.emoji === emojis[12]))
+  t.absent(r2.some((x) => x.emoji === emojis[13]))
+})
+
+test('concurrent reactions converge on two replicas', (t) => {
+  const w = world().add(X, wX).add(X, wX2).add(Y, wY)
+  const p = post(w, G, 1)
+  // Concurrent: nothing seen between them; X's two devices disagree.
+  react(w, wX, p, THUMBS, 5, { seen: p })
+  react(w, wX2, p, HEART, 5, { seen: p })
+  react(w, wY, p, HEART, 5, { seen: p })
+  const one = buildGroup(w.input())
+  const other = w.input()
+  other.writers = other.writers.slice().reverse().map((l) => ({ ...l, entries: l.entries.slice().reverse() }))
+  const two = buildGroup(other)
+  t.alike(reactionsOf(two, p), reactionsOf(one, p))
+  t.is(reactionsOf(one, p).reduce((n, r) => n + r.count, 0), 2, 'one per diary')
+  // A later reaction (by `at`, across X's cores) wins on every replica.
+  react(w, wX, p, '\u{1f525}', 6, { seen: { writer: wX2, seq: 1 } })
+  const three = buildGroup(w.input())
+  t.alike(reactionsOf(three, p), [{ emoji: HEART, count: 1, by: [Y] }, { emoji: '\u{1f525}', count: 1, by: [X] }])
+})
+
+test('an old reader skips group-react and still reads later posts', (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const Module = require('module')
+  const file = require.resolve('../lib/group')
+  const src = fs.readFileSync(file, 'utf8')
+  const oldSrc = src.replace(/,\n {2}'group-react': \[[^\]]*\]/, '')
+  t.not(oldSrc, src, 'the type is gone from RECORD_KEYS')
+  const m = new Module(file, module)
+  m.filename = file
+  m.paths = Module._nodeModulePaths(path.dirname(file))
+  m._compile(oldSrc, file)
+  const old = m.exports
+  t.absent(old.GROUP_TYPES.includes('group-react'))
+  const w = world().add(X, wX).add(Y, wY)
+  const p = post(w, wY, 1)
+  const r = react(w, wX, p, THUMBS, 2)
+  post(w, wX, 3, { seen: r })
+  post(w, wY, 4, { seen: r })
+  const g = old.buildGroup(w.input())
+  t.is(old.validateGroupRecord(w.logs.get(wX).entries[1].record, 1), 'malformed')
+  t.alike(visible(g), [wY + ':1', wX + ':2', wY + ':2'])
+  t.is(g.posts[0].reactions, undefined)
+  t.alike(visible(buildGroup(w.input())), visible(g), 'the new reader shows the same posts')
+})
+
+test('a fold over many reactions stays linear', (t) => {
+  const run = (n) => {
+    const w = world()
+    const targets = []
+    for (let i = 0; i < 20; i++) targets.push(post(w, G, i + 1))
+    const diaries = 50
+    for (let i = 0; i < diaries; i++) w.add(K(0x2000 + i), K(0x3000 + i))
+    for (let i = 0; i < n; i++) {
+      const wk = K(0x3000 + (i % diaries))
+      react(w, wk, targets[i % targets.length], String.fromCodePoint(0x1f600 + (i % 16)), 100 + i)
+    }
+    const input = w.input()
+    let best = Infinity
+    for (let k = 0; k < 3; k++) {
+      const t0 = process.hrtime.bigint()
+      buildGroup(input)
+      best = Math.min(best, Number(process.hrtime.bigint() - t0))
+    }
+    return best
+  }
+  run(500)
+  const small = run(2000)
+  const large = run(8000)
+  t.comment('2000 reactions: ' + (small / 1e6).toFixed(1) + ' ms, 8000: ' + (large / 1e6).toFixed(1) + ' ms')
+  t.ok(large < small * 10, 'four times the reactions under ten times the time (quadratic would be sixteen)')
+})
+
+// The same blocks as a reader from before group-react reads them: each
+// reaction an unknown type, which that reader drops as malformed.
+function asOldReader (input) {
+  const swap = (core) => ({ ...core, entries: core.entries.map((e) => e.record && e.record.type === 'group-react' ? { ...e, record: { ...e.record, type: 'group-unknown' } } : e) })
+  return { ...input, root: swap(input.root), writers: input.writers.map(swap) }
+}
+const withoutReactions = (g) => stableText(normalize({ ...g, posts: g.posts.map(({ reactions, ...p }) => p) }))
+const isReactRef = (input, ref) => [input.root, ...input.writers].some((c) => c.key === ref.writer && c.entries.some((e) => e.seq === ref.seq && e.record.type === 'group-react'))
+
+test('a reaction never moves a hide: old and new readers agree', (t) => {
+  for (const hideFirst of [true, false]) {
+    const w = world().add(A, wA).add(X, wX).add(Y, wY)
+    w.push(G, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 0 }], at: AT(1) }))
+    const p1 = post(w, wY, 2)
+    const p2 = post(w, wY, 3)
+    // The admin's hide at 10; a reaction at 5 that saw it; the owner's unhide
+    // at 6 that saw the reaction. Through the reaction the unhide would
+    // follow the hide; without it, the unhide sorts first.
+    const hide = w.push(wA, groupHide({ target: p1, on: true, at: AT(10) }))
+    const r = react(w, wX, p2, THUMBS, 5, { seen: hideFirst ? hide : null })
+    w.push(G, groupHide({ target: p1, on: false, seen: r, at: AT(6) }))
+    const input = w.input()
+    const g = buildGroup(input)
+    const old = buildGroup(asOldReader(input))
+    t.is(g.posts.find((p) => p.seq === p1.seq && p.writer === wY).hidden, old.posts.find((p) => p.seq === p1.seq && p.writer === wY).hidden, 'same hide state')
+    t.is(g.posts.find((p) => p.seq === p1.seq && p.writer === wY).hidden, true, 'the hide at 10 is the latest')
+    t.is(withoutReactions(g), withoutReactions(old))
+    t.alike(reactionsOf(g, p2), [{ emoji: THUMBS, count: 1, by: [X] }])
+  }
+})
+
+// A small deterministic generator (mulberry32).
+function rng (seed) {
+  return () => {
+    seed = (seed + 0x6d2b79f5) | 0
+    let x = Math.imul(seed ^ (seed >>> 15), 1 | seed)
+    x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+// Posts, hides and unhides, admits, bans and unbans, leaves and rejoins, and
+// reactions whose `seen` and writer chains run into all of them, at skewed
+// times.
+function randomWorld (seed) {
+  const rand = rng(seed)
+  const pick = (a) => a[Math.floor(rand() * a.length)]
+  const w = world({ join: rand() < 0.5 ? 'open' : 'approval' }).add(A, wA).add(X, wX).add(Y, wY)
+  const all = [w.push(G, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 0 }], at: AT(1 + Math.floor(rand() * 20)) }))]
+  const targets = []
+  let cores = [G, wA, wX, wY]
+  let yCore = wY
+  let ban = null
+  let leave = null
+  let rejoins = 0
+  for (let i = 0; i < 48; i++) {
+    const at = AT(1 + Math.floor(rand() * 40))
+    const seen = rand() < 0.75 ? pick(all) : null
+    const k = rand()
+    let ref
+    if (k < 0.25 || targets.length === 0) {
+      ref = w.push(pick(cores), groupPost({ text: 'p' + i, seen, at }))
+      targets.push(ref)
+    } else if (k < 0.55) {
+      ref = w.push(pick(cores), groupReact({ target: pick(targets), emoji: pick([THUMBS, HEART, '\u{1f525}', '']), seen, at }))
+    } else if (k < 0.68) {
+      ref = w.push(pick(cores), groupHide({ target: pick(targets), on: rand() < 0.6, seen, at }))
+    } else if (k < 0.78) {
+      const m = pick([X, Y])
+      const mw = m === X ? wX : yCore
+      ref = w.push(pick([G, wA]), groupAdmit({ member: m, on: rand() < 0.8, cuts: [{ writer: mw, seq: w.len(mw) }], seen, at }))
+    } else if (k < 0.86) {
+      ref = ban === null
+        ? (ban = w.push(G, groupBan({ member: X, on: true, cuts: [{ writer: wX, seq: w.len(wX) }], seen, at })))
+        : w.push(G, groupBan({ member: X, on: false, cuts: [{ writer: wX, seq: w.len(wX) }], lifts: ban, seen, at }))
+      if (ref !== ban) ban = null
+    } else if (leave === null) {
+      ref = leave = w.push(yCore, groupLeave({ cuts: [{ writer: yCore, seq: w.len(yCore) }], seen, at }))
+      cores = cores.filter((c) => c !== yCore)
+    } else if (rejoins < 2) {
+      yCore = K(0x501 + rejoins++)
+      w.add(Y, yCore, { rejoin: leave, at })
+      cores.push(yCore)
+      ref = { writer: yCore, seq: 0 }
+      leave = null
+    } else {
+      ref = w.push(pick(cores), groupPost({ text: 'q' + i, seen, at }))
+      targets.push(ref)
+    }
+    all.push(ref)
+  }
+  return w
+}
+
+test('reactions take no part in the fold of any other record (generated logs)', (t) => {
+  let reactions = 0
+  for (let seed = 1; seed <= 40; seed++) {
+    const input = randomWorld(seed).input()
+    const g = buildGroup(input)
+    const old = buildGroup(asOldReader(input))
+    if (withoutReactions(g) !== withoutReactions(old)) {
+      t.fail('seed ' + seed + ': the fold differs from an old reader\'s')
+      continue
+    }
+    t.ok(g.last === null || !isReactRef(input, g.last), 'seed ' + seed + ': last names no reaction')
+    reactions += g.posts.reduce((n, p) => n + (p.reactions || []).length, 0)
+  }
+  t.ok(reactions > 0, 'some reactions count')
+})
+
+test('a later reaction of the same diary replaces it, within a core and across cores', (t) => {
+  const w = world().add(X, wX).add(X, wX2).add(Y, wY)
+  const p = post(w, wY, 1)
+  // One core: the higher seq wins whatever its `at` says.
+  react(w, wX, p, THUMBS, 5)
+  const heart = react(w, wX, p, HEART, 3)
+  t.alike(reactionsOf(buildGroup(w.input()), p), [{ emoji: HEART, count: 1, by: [X] }])
+  // Across cores: the later `at` wins, even over one that saw it.
+  react(w, wX2, p, '\u{1f525}', 2, { seen: heart })
+  t.alike(reactionsOf(buildGroup(w.input()), p), [{ emoji: HEART, count: 1, by: [X] }])
+  react(w, wX2, p, '\u{1f525}', 4)
+  t.alike(reactionsOf(buildGroup(w.input()), p), [{ emoji: '\u{1f525}', count: 1, by: [X] }])
+  // The same `at` on two cores: the greater writer key wins.
+  react(w, wX, p, THUMBS, 4)
+  t.alike(reactionsOf(buildGroup(w.input()), p), [{ emoji: wX2 > wX ? '\u{1f525}' : THUMBS, count: 1, by: [X] }])
+})
+
+test('last never names a reaction', (t) => {
+  const w = world().add(X, wX).add(Y, wY)
+  const p = post(w, wY, 1)
+  react(w, wX, p, THUMBS, 9)
+  const g = buildGroup(w.input())
+  t.alike(g.last, p)
+  t.ok(reactionsOf(g, p))
 })

@@ -93,7 +93,7 @@ const { sealOffer, commitment } = require('@varanda/core/lib/testimonials')
 const grp = require('@varanda/core/lib/group')
 const gc = require('@varanda/core/lib/group-crypto')
 const { validPrivateItem, copyGroupMedia, PRIVATE_ITEM_KEYS, MAX_GROUP_MEDIA } = require('@varanda/core/lib/group-media')
-const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, COMMUNITY_LIST_MAX, feira } = require('@varanda/rpc')
+const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX, COMMUNITY_LIST_MAX, feira } = require('@varanda/rpc')
 const listing = require('@varanda/core/lib/listing')
 const { stillImageSize } = require('@varanda/core/lib/still-image')
 const store = require('./node-store')
@@ -3067,6 +3067,52 @@ async function groupHide (ctx, { group, target, on }) {
   })
 }
 
+const GROUP_POST_MISSING = 'mensagem não encontrada'
+
+// A visible post of fold g at `target`: hidden posts and posts of diaries
+// left out of the fold's readers take no reactions and list no reactors.
+function visiblePost (g, target) {
+  const post = g.built.posts.find((p) => p.writer === target.writer && p.seq === target.seq)
+  if (post === undefined || post.hidden || !g.diaries.get(post.diary)) throw new UsageError(GROUP_POST_MISSING)
+  return post
+}
+
+// group.read's compact summary: never the `by` lists, whose size the page
+// maximum does not cover (docs/rpc.md section 2). Absent when empty.
+function reactionSummary (post, ownHex) {
+  if (!Array.isArray(post.reactions) || post.reactions.length === 0) return {}
+  return { reactions: post.reactions.map((r) => ({ emoji: r.emoji, count: r.count, mine: r.by.includes(ownHex) })) }
+}
+
+// Who may post may react (docs/rpc.md 5.117): a current member with a live
+// writer, on any visible post. Re-sending the reaction the fold already
+// counts writes nothing.
+async function groupReact (ctx, { group, target, emoji }) {
+  return withGroup(ctx, group, true, async ({ ownHex, g }) => {
+    const own = liveOwnWriter(g, ownHex)
+    if (own === null || statusOf(g, ownHex) !== 'member') throw new UsageError(GROUP_FORBIDDEN)
+    const post = visiblePost(g, target)
+    // The fold cuts the list at GROUP_REACTIONS_MAX emojis, so a full list
+    // may hide the caller's reaction: only a list with room proves none.
+    const list = Array.isArray(post.reactions) ? post.reactions : []
+    const current = list.find((r) => r.by.includes(ownHex))
+    if (current !== undefined ? current.emoji === emoji : emoji === '' && list.length < GROUP_REACTIONS_MAX) return { ok: true }
+    requireCounted(g, own.key)
+    let record = buildRecord(() => grp.groupReact({ target, emoji, seen: g.built.last }))
+    if (g.private) record = sealForGroup(ctx, g, own.key, record)
+    await appendToOwnGroupCore(ctx, own, record, g.private)
+    return { ok: true }
+  })
+}
+
+async function groupReactors (ctx, { group, target }) {
+  return withGroup(ctx, group, false, async ({ g }) => {
+    const post = visiblePost(g, target)
+    const reactions = Array.isArray(post.reactions) ? post.reactions : []
+    return { reactions: reactions.map((r) => ({ emoji: r.emoji, count: r.count, by: r.by.slice(0, GROUP_REACTORS_MAX) })) }
+  })
+}
+
 // The creator and current admins (community admins included) are never
 // targets of an admit or a ban; the caller's authority is moderatorOf's.
 function checkTarget (g, ownHex, member) {
@@ -3245,6 +3291,7 @@ function readFold (base, g, { limit, before }) {
     media: p.hidden || !Array.isArray(p.media) ? null : copyGroupMedia(p.media, typeof p.media[0].key === 'string'),
     card: p.hidden || !p.card ? null : copyLinkCard(p.card, (d) => ({ ...d })),
     hidden: p.hidden,
+    ...reactionSummary(p, base.ownHex),
     ...authorOf(g, p.diary, base.association, base.mod)
   }))
   const oldest = items.length > 0 ? items[items.length - 1] : null
@@ -5333,6 +5380,8 @@ module.exports = {
   groupLeave,
   groupPost,
   groupHide,
+  groupReact,
+  groupReactors,
   groupBan,
   groupAdmit,
   groupAdmin,

@@ -7,6 +7,7 @@ const { cardUrlHost, cardTextLength, MAX_CARD_TITLE, MAX_CARD_DESC, MAX_CARD_IMA
 const { MAX_AUDIO_MS } = require('./audio-bounds')
 const F = require('./feira')
 const IC = require('./invite-card')
+const { isReaction } = require('./reaction')
 
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):(0|[1-9][0-9]*)$/
@@ -1163,6 +1164,11 @@ const SPECS = {
   // Private groups (docs/rpc.md 5.61): a new epoch key for the group, never returned.
   'group.rekey': { fields: { group: req(isKey) }, mutating: true },
   'group.hide': { fields: { group: req(isKey), target: req(isGroupRef), on: req(isBool) }, mutating: true },
+  // A reaction to a visible group-post (docs/rpc.md 5.117); '' removes it.
+  'group.react': { fields: { group: req(isKey), target: req(isGroupRef), emoji: req((v) => v === '' || isReaction(v)) }, mutating: true },
+  // Who reacted to a group-post: { reactions: [{ emoji, count, by }] }, by up
+  // to GROUP_REACTORS_MAX diary keys per emoji in causal order (5.118).
+  'group.reactors': { fields: { group: req(isKey), target: req(isGroupRef) } },
   // Communities (docs/rpc.md 5.57 to 5.70): hold the groups, named by their root key.
   // community.link was removed in protocol v2 (docs/rpc.md 5.58): an unknown method.
   'community.create': { fields: { name: req(str(1, L.MAX_GROUP_NAME)), join: req(isGroupJoin) }, mutating: true },

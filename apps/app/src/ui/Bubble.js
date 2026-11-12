@@ -83,7 +83,7 @@ export function bubbleMeta ({ at, mine, status }) {
 // The photos sit this close to the bubble's edge.
 const MEDIA_INSET = 4
 
-export function Bubble ({ item, mine = false, shape = 'single', name, handle, senderKey, avatar, quote, status, actions, actionsTitle, onOpenMention, below, media, forwarded, cardThumb }) {
+export function Bubble ({ item, mine = false, shape = 'single', name, handle, senderKey, avatar, quote, status, actions, actionsTitle, actionsHeader, onOpenMention, below, media, forwarded, cardThumb }) {
   const styles = useStyles(makeStyles)
   const { colors, scheme } = useTheme()
   const { width: screen } = useWindowDimensions()
@@ -243,7 +243,7 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
         </View>
       </View>
       {rows.length > 0
-        ? <ActionsSheet open={open} onClose={() => setOpen(false)} title={actionsTitle} actions={rows} />
+        ? <ActionsSheet open={open} onClose={() => setOpen(false)} title={actionsTitle} actions={rows} header={actionsHeader} />
         : null}
     </View>
   )

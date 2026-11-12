@@ -977,6 +977,14 @@ function createSession ({
       return r
     }),
 
+    'group.react': serial(async (params, epoch) => {
+      const r = await withStore((c) => member.groupReact(c, params))
+      send('groups.changed', { group: params.group }, epoch)
+      return r
+    }),
+
+    'group.reactors': serial((params) => withStore((c) => member.groupReactors(c, params))),
+
     'group.meta': serial(async (params, epoch) => {
       const r = await withStore((c) => member.groupMeta(c, params))
       send('groups.changed', { group: params.group }, epoch)

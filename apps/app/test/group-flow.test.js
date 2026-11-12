@@ -504,7 +504,7 @@ test('Grupo marks the group seen from one place, never from load, loadOlder or r
   t.absent(load.includes('markSeen') || load.includes('group.seen'), 'a reload never marks by itself')
   t.ok(load.indexOf('paintedRef.current = mine') > load.indexOf('await readNewest()'), 'load records the read that painted')
   const olderAt = src.indexOf('const loadOlder = useCallback(')
-  const older = src.slice(olderAt, src.indexOf('}, [readGroup, loadingMore, readNewest])', olderAt))
+  const older = src.slice(olderAt, src.indexOf('}, [readGroup, loadingMore, readNewest, commitRead])', olderAt))
   t.ok(older.length > 0, 'loadOlder found')
   t.absent(older.includes('group.seen') || older.includes('markSeen'), 'not from loadOlder')
   const newestAt = src.indexOf('const readNewest = useCallback(')

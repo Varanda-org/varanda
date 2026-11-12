@@ -3939,6 +3939,8 @@ function createBrowserSession ({
     'group.ban': groupWrite(member.groupBan, GROUP_AND_COMMUNITY),
     'group.admin': groupWrite(member.groupAdmin),
     'group.hide': groupWrite(member.groupHide, GROUP_AND_COMMUNITY),
+    'group.react': groupWrite(member.groupReact),
+    'group.reactors': serial((params) => withCores((c) => member.groupReactors(c, params))),
     'group.meta': groupWrite(member.groupMeta),
     // Through the caller's CW when it acts for the community, as group.admit.
     'group.invitePolicy': groupWrite(member.groupInvitePolicy, GROUP_AND_COMMUNITY),

@@ -4,7 +4,7 @@ import { sealedTestimonial, signVitrineConsent, testimonialHash, verifyVitrineCo
 import { largeFeed } from './large.js'
 import { testimonialPointers, useTestimonialSource } from './testimonialIndex.js'
 
-const { validateParams, RpcError, feira } = rpc
+const { validateParams, RpcError, feira, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX } = rpc
 let currentFeira = null
 let currentLive = null
 
@@ -70,6 +70,21 @@ export function createVitrineRequest (fixtures, options) {
   const conversationOf = (peer) => data.conversations.find((c) => c.peer === peer)
   const groupOf = (key) => data.groups.find((g) => g.group === key) || refuse('NOT_FOUND', 'grupo não encontrado')
   const communityOf = (key) => data.communities.find((c) => c.community === key) || refuse('NOT_FOUND', 'comunidade não encontrada')
+  const groupReactors = new Map()
+  const reactionKey = (group, target) => group + ':' + target.writer + ':' + target.seq
+  for (const g of data.groups) {
+    for (const item of g.items) {
+      const others = data.members.filter((m) => m.author !== data.own).map((m) => m.author)
+      groupReactors.set(reactionKey(g.group, item), (item.reactions || []).map(({ emoji, count, mine }) => ({
+        emoji, count, by: [...(mine ? [data.own] : []), ...others.splice(0, count - (mine ? 1 : 0))]
+      })))
+    }
+  }
+  const reactionPost = (group, target) => {
+    const item = groupOf(group).items.find((p) => p.writer === target.writer && p.seq === target.seq)
+    if (!item || item.hidden) refuse('USAGE', 'mensagem não encontrada')
+    return item
+  }
   const orderedItems = (g) => [...g.items].sort((a, b) => comparePosition(a, b, 'writer'))
 
   function usernameRecord (p) {
@@ -624,6 +639,35 @@ export function createVitrineRequest (fixtures, options) {
       item.hidden = on
       return { ok: true }
     },
+    'group.react': ({ group, target, emoji }) => {
+      const g = groupOf(group)
+      if (!active(g) || !active(communityOf(g.community)) || communityOf(g.community).dropped.includes(group)) refuse('USAGE', 'sem permissão no grupo')
+      const item = reactionPost(group, target)
+      const key = reactionKey(group, target)
+      const rows = groupReactors.get(key) || []
+      if ((rows.find((r) => r.by.includes(data.own))?.emoji || '') === emoji) return { ok: true }
+      for (const row of rows) {
+        if (row.by.includes(data.own)) {
+          row.by = row.by.filter((key) => key !== data.own)
+          row.count--
+        }
+      }
+      if (emoji !== '') {
+        let row = rows.find((r) => r.emoji === emoji)
+        if (!row) { row = { emoji, count: 0, by: [] }; rows.push(row) }
+        row.by.push(data.own)
+        row.count++
+      }
+      const next = rows.filter((r) => r.count > 0).sort((a, b) => b.count - a.count || compareText(a.emoji, b.emoji)).slice(0, GROUP_REACTIONS_MAX)
+      groupReactors.set(key, next)
+      if (next.length) item.reactions = next.map(({ emoji, count, by }) => ({ emoji, count, mine: by.includes(data.own) }))
+      else delete item.reactions
+      return { ok: true }
+    },
+    'group.reactors': ({ group, target }) => {
+      reactionPost(group, target)
+      return { reactions: (groupReactors.get(reactionKey(group, target)) || []).map(({ emoji, count, by }) => ({ emoji, count, by: by.slice(0, GROUP_REACTORS_MAX) })) }
+    },
     'group.rekey': ({ group }) => {
       const g = groupOf(group)
       if (g.visibility !== 'private') refuse('USAGE', 'grupo público não usa chave')
@@ -739,7 +783,11 @@ export function createVitrineRequest (fixtures, options) {
     'group.read': ({ group, limit, before }) => {
       const g = groupOf(group)
       const candidates = orderedItems(g).reverse().filter((item) => !before || comparePosition(item, before, 'writer') < 0)
-      const items = candidates.slice(0, limit).map((item) => item.hidden ? { ...item, text: '', media: null } : item)
+      const items = candidates.slice(0, limit).map((item) => {
+        if (!item.hidden) return item
+        const { reactions, ...hidden } = item
+        return { ...hidden, text: '', media: null, card: null }
+      })
       return {
         items,
         next: candidates.length > limit ? groupCursor(items[items.length - 1]) : null,

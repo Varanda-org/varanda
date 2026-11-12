@@ -31,6 +31,7 @@ const {
 const { openRecord, wipe, keyTag, keyCommit, MAX_KEY_RECIPIENTS, MAX_SEALED_INNER_BYTES } = require('./group-crypto')
 const { validGroupMedia, copyGroupMedia, copyGroupItem, validPrivateItem } = require('./group-media')
 const { validLinkCard, validCardImageBytes, copyLinkCard, CARD_IMAGE_MIME } = require('./link-card')
+const { isReaction, GROUP_REACTIONS_MAX } = require('@varanda/rpc')
 
 // Same rule as lib/feed.js (not imported, to keep this module pure).
 const MAX_FUTURE_MS = 86400000
@@ -50,7 +51,8 @@ const RECORD_KEYS = {
   'group-drop': ['type', 'group', 'on', 'seen', 'at'],
   'group-key': ['type', 'kid', 'basis', 'keys', 'auth', 'at'],
   'group-sealed': ['type', 'kid', 'nonce', 'box', 'at'],
-  'group-invites': ['type', 'on', 'seen', 'at']
+  'group-invites': ['type', 'on', 'seen', 'at'],
+  'group-react': ['type', 'target', 'emoji', 'seen', 'at']
 }
 // A post with media, a link card or a forward (docs/protocol.md section 10):
 // the one other key set of group-post. A card goes with text only (media
@@ -76,10 +78,10 @@ const CW_ADMIN_KEYS = ['type', 'group', 'member', 'on', 'cuts', 'seen', 'at']
 // powers: the community's name and join (`group: null`), and dropping a
 // group from the catalogue (`group-drop`, CW only).
 const CW_META_KEYS = ['type', 'group', 'name', 'join', 'seen', 'at']
-const GROUP_ONLY = new Set(['group-post', 'group-key', 'group-sealed'])
+const GROUP_ONLY = new Set(['group-post', 'group-key', 'group-sealed', 'group-react'])
 const COMMUNITY_ONLY = new Set(['group-create', 'group-drop'])
 // A private group carries these sealed, and only there.
-const SEALED_TYPES = new Set(['group-post', 'group-hide', 'group-meta'])
+const SEALED_TYPES = new Set(['group-post', 'group-hide', 'group-meta', 'group-react'])
 const PRIVATE_TYPES = new Set(['group-key', 'group-sealed'])
 const MAX_KEY_BASIS = 16
 const KEY_ENTRY_KEYS = ['writer', 'sealed']
@@ -285,6 +287,10 @@ function checkRecord (record, seq, root, community, priv, sealed) {
     if (typeof text !== 'string' || charLength(text) < minText || charLength(text) > MAX_TEXT) return 'text-length'
     if (hasControlChars(text, true)) return 'control-chars'
     if (record.replyTo !== null && !validRef(record.replyTo, 1)) return 'reply-invalid'
+  } else if (type === 'group-react') {
+    // One emoji, or the empty string that takes the reaction back.
+    if (!validRef(record.target, 1)) return 'malformed'
+    if (record.emoji !== '' && !isReaction(record.emoji)) return 'emoji-invalid'
   } else if (type === 'group-leave') {
     // The leaving diary's own writers at their observed lengths.
     if (!validCuts(record.cuts, MAX_GROUP_WRITERS_PER_DIARY)) return 'cuts-invalid'
@@ -406,6 +412,11 @@ function groupPost ({ text, replyTo = null, media = null, card = null, fwd = 0, 
 
 function groupHide ({ target, on, seen = null, at = nowIso() } = {}) {
   return build({ type: 'group-hide', target: copyRef(target), on, seen: copyRef(seen), at }, 1, false)
+}
+
+// A reaction to the group-post `target`; emoji '' removes it.
+function groupReact ({ target, emoji, seen = null, at = nowIso() } = {}) {
+  return build({ type: 'group-react', target: copyRef(target), emoji, seen: copyRef(seen), at }, 1, false)
 }
 
 function groupAdmit ({ member, on, cuts = [], seen = null, at = nowIso() } = {}) {
@@ -757,6 +768,15 @@ function readLog (entries, root, fallback = null, priv = false, asCommunity = fa
   return { header, records, raw }
 }
 
+// A reader from before group-react drops such a block as malformed, and a
+// ref naming it resolves to the nearest lower record of its writer. So that
+// every other record orders and folds exactly as there, reactions travel
+// beside a core's records and never become nodes of the causal order.
+function splitReacts (records) {
+  const reacts = records.filter((x) => x.record.type === 'group-react')
+  return { records: reacts.length === 0 ? records : records.filter((x) => x.record.type !== 'group-react'), reacts }
+}
+
 // A stable text of a plain value, so copies compare whatever their key order.
 // Iterative, so a deeply nested block from a peer cannot overflow the stack;
 // a cycle throws.
@@ -933,7 +953,7 @@ function referencesOf (record, root) {
     if (record.replyTo) refs.push(record.replyTo)
   } else if (t === 'group-rejoin') {
     refs.push(record.rejoin)
-  } else if (t === 'group-hide') {
+  } else if (t === 'group-hide' || t === 'group-react') {
     refs.push(record.target)
   } else if (t === 'group-leave') {
     for (const c of record.cuts) if (c.seq >= 1 && c.writer === root) refs.push({ writer: c.writer, seq: c.seq - 1 })
@@ -1335,14 +1355,14 @@ function bindCores (input, asCommunity) {
     }
     // A CW's generation counts its header's rejoin only when the diary's
     // earliest on-join of it names the same leave (dropStaleLeaves).
-    const c = { key, diary: h.diary, member: h.member, rejoin: h.rejoin, at: h.at, records: log.records }
+    const c = { key, diary: h.diary, member: h.member, rejoin: h.rejoin, at: h.at, ...splitReacts(log.records) }
     if (asCommunity) c.joinRejoin = joinRejoin.get(h.diary + ':' + key) || null
     candidates.set(key, c)
   }
   // A root its creator's diary never bound carries no authority and no
   // posts: anyone can name any diary in a header. Only the header is read.
   const rootRecords = rootBound ? rootLog.records : []
-  const rootEntry = { key: G, diary: creator, rejoin: null, at: header.at, records: rootRecords }
+  const rootEntry = { key: G, diary: creator, rejoin: null, at: header.at, ...splitReacts(rootRecords) }
   const { valid, rejected } = checkRejoins(candidates, rootEntry)
   for (const w of named) {
     if (w !== G && !valid.has(w) && !rejected.has(w) && !invalid.has(w)) incomplete = true
@@ -1892,6 +1912,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
   const leaves = new Map()
   const hides = new Map()
   const postNodes = []
+  const reactNodes = []
   let name = header.name
   let join = header.join
   // C only: the latest gated CW meta in causal order, and per group the
@@ -2065,7 +2086,32 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
   // The newest node in causal order, a rejoin's block 0 included: a new post
   // names it as `seen`, so a post sent after a rejoin never sorts before it.
   let last = null
+  // A reaction is judged at an anchor taken from the reaction-free order:
+  // its own envelope in the opened pass of a private group (it stays the
+  // sealed node an older reader sees), else the node before it on its own
+  // core, as if it were a post right there. Its own edges place nothing.
+  const reactsAt = new Map()
+  if (!isC) {
+    const byWriter = new Map()
+    for (const n of order) if (!n.virtual) pushTo(byWriter, n.writer, n)
+    for (const log of logs) {
+      for (const x of log.reacts || []) {
+        const list = byWriter.get(log.key) || []
+        const j = firstAbove(list, x.seq - 1, (m) => m.seq)
+        const own = x.envelope === true
+        if (own && (j === list.length || list[j].seq !== x.seq)) continue
+        const anchor = own ? list[j] : j > 0 ? list[j - 1] : null
+        const p = { writer: log.key, diary: log.diary, seq: x.seq, record: x.record, kid: null, virtual: false, pos: anchor === null ? -0.5 : own ? anchor.pos : anchor.pos + 0.5 }
+        pushTo(reactsAt, anchor, p)
+      }
+    }
+  }
+  const judgeReacts = (anchor) => {
+    for (const p of reactsAt.get(anchor) || []) reactNodes.push({ n: p, withdrawn: outOf(p), gen: genOf(p) })
+  }
+  judgeReacts(null)
   for (let i = 0; i < order.length; i++) {
+    if (i > 0) judgeReacts(order[i - 1])
     const n = order[i]
     const r = n.record
     if ((n.seq >= 1 && r.type !== 'community-leave') || r.type === 'group-rejoin') last = { writer: n.writer, seq: n.seq }
@@ -2169,6 +2215,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
         break
     }
   }
+  if (order.length > 0) judgeReacts(order[order.length - 1])
   // A CW meta of the returning creator overrides the root's metas: the root
   // lost its powers, and its counted metas came before them ending.
   if (cwMeta !== null) {
@@ -2252,6 +2299,65 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
     if (status === 'requested' || (status === 'member' && d !== owner && join === 'approval' &&
       !adminNow(d) && !adminC(d) && uncovered(d))) requests.push(d)
   }
+  // Reactions: one per member diary per target and an empty emoji clears
+  // it. A reaction counts only where a post at its anchor would (not
+  // withdrawn, banned or unadmitted), from a diary that is a member now, on
+  // a post that is shown. A later reaction of the diary replaces an earlier
+  // one: on one writer core the higher seq, across its cores the later
+  // `at`, then writer, then seq. No causal position takes part.
+  // In the opened pass membership is the plaintext pass's: leaves and
+  // rejoins placed by decrypted edges must not decide it.
+  const memberNow = auth ? auth.members : members
+  const postById = new Map()
+  for (const p of posts) postById.set(p.writer + ':' + p.seq, p)
+  const latestOn = new Map()
+  for (const { n, withdrawn: out, gen } of reactNodes) {
+    const r = n.record
+    const d = n.diary
+    if (out || isFuture(r.at, now) || memberNow.get(d) !== 'member') continue
+    if (d !== owner && (layerAt(bans.get(d), n.writer, n.seq) ||
+      (join === 'approval' && !admittedAt(d, gen, n.writer, n.seq) && !adminOf(n) && !adminC(d)))) continue
+    const id = r.target.writer + ':' + r.target.seq
+    const post = postById.get(id)
+    if (post === undefined || post.hidden) continue
+    const k = id + ':' + n.writer
+    const had = latestOn.get(k)
+    if (had === undefined || had.seq < n.seq) latestOn.set(k, { id, d, writer: n.writer, seq: n.seq, emoji: r.emoji, key: orderKey(r.at, n.writer, n.seq) })
+  }
+  const winners = new Map()
+  for (const x of latestOn.values()) {
+    const k = x.id + ':' + x.d
+    const had = winners.get(k)
+    if (had === undefined || compareOrder(had.key, x.key) < 0) winners.set(k, x)
+  }
+  const reactions = new Map()
+  for (const x of [...winners.values()].sort((a, b) => compareOrder(a.key, b.key))) {
+    if (x.emoji === '') continue
+    let byDiary = reactions.get(x.id)
+    if (!byDiary) {
+      byDiary = new Map()
+      reactions.set(x.id, byDiary)
+    }
+    byDiary.set(x.d, x.emoji)
+  }
+  for (const [id, byDiary] of reactions) {
+    // Beyond the cap the emojis later in (at, writer, seq) order are
+    // ignored, the same on every replica.
+    const groups = new Map()
+    for (const [d, emoji] of byDiary) {
+      let g = groups.get(emoji)
+      if (!g) {
+        if (groups.size >= GROUP_REACTIONS_MAX) continue
+        g = { emoji, count: 0, by: [] }
+        groups.set(emoji, g)
+      }
+      g.count++
+      g.by.push(d)
+    }
+    if (groups.size === 0) continue
+    postById.get(id).reactions = [...groups.values()].sort((a, b) => b.count - a.count || cmp(a.emoji, b.emoji))
+  }
+
   // C's creator is an admin of C (and so of every group of C) only while
   // it is a member of C: no authority after leaving.
   const admins = new Set(owner !== null && rootLive && (!isC || members.get(owner) === 'member') ? [owner] : [])
@@ -2529,7 +2635,9 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
     counted,
     retired,
     withdrawn,
-    auth: { rootAdmin, bans, admits, sealedAuth, sealedOut, sealedGen, sealedAdmin }
+    auth: { rootAdmin, bans, admits, sealedAuth, sealedOut, sealedGen, sealedAdmin, members },
+    // For a private group's `last`, once its envelopes are opened.
+    order
   }
 
   if (isC) {
@@ -2791,8 +2899,12 @@ function foldPrivate (ctx, kept, keys) {
       }
     }
     let sealed = 0
+    // A reaction's envelope stays the sealed node an older reader keeps, so
+    // its inner edges never move a record; the reaction rides beside it.
+    const reactIds = new Set()
     const open = (log) => {
       let changed = false
+      const reacts = []
       const records = log.records.map((x) => {
         if (x.record.type !== 'group-sealed') return x
         const inner = openEnvelope(x.record, log.key, x.seq, ctx.G, held)
@@ -2800,13 +2912,30 @@ function foldPrivate (ctx, kept, keys) {
           sealed++
           return x
         }
+        if (inner.type === 'group-react') {
+          reacts.push({ seq: x.seq, record: inner, envelope: true })
+          reactIds.add(log.key + ':' + x.seq)
+          return x
+        }
         changed = true
         return { seq: x.seq, record: inner, kid: x.record.kid }
       })
-      return changed ? { ...log, records } : log
+      return changed || reacts.length > 0 ? { ...log, records, reacts } : log
     }
     const rootEntry = open(ctx.rootEntry)
     const content = foldCore({ ...ctx, rootEntry }, kept.map(open), plain.state.auth).result
+    // `last` (the `seen` a new record writes) never names a reaction, so no
+    // record ever depends on one.
+    let last = plain.result.last
+    if (last !== null && reactIds.has(refId(last))) {
+      last = null
+      const order = plain.state.order
+      for (let i = order.length - 1; i >= 0 && last === null; i--) {
+        const n = order[i]
+        if (reactIds.has(refId(n))) continue
+        if ((n.seq >= 1 && n.record.type !== 'community-leave') || n.record.type === 'group-rejoin') last = { writer: n.writer, seq: n.seq }
+      }
+    }
     // Without a parent community (missing, pending or orphan) nothing is
     // eligible: a loss of power with no record ("Eligibility" 4).
     const pick = ctx.C === null ? { epoch: null, rekeyPending: held.size > 0 } : chooseEpoch(plain.state, epochs, held, mine)
@@ -2816,6 +2945,7 @@ function foldPrivate (ctx, kept, keys) {
       name: content.name,
       posts: content.posts,
       future: content.future,
+      last,
       sealed,
       epoch: pick.epoch,
       rekeyPending: pick.rekeyPending,
@@ -2905,7 +3035,7 @@ function tryUnseal (unseal, sealed, G, kid, commit) {
 
 // An envelope's inner record, or null when it stays sealed: decrypted, copied
 // on the safe path, bound to this writer, group, kid and `at`, then validated
-// as a group-post, group-hide or (root only) group-meta.
+// as a group-post, group-hide, group-react or (root only) group-meta.
 function openEnvelope (env, writer, seq, G, held) {
   const key = held.get(refId(env.kid))
   if (!key) return null
@@ -3111,6 +3241,7 @@ module.exports = {
   writerHeader,
   groupPost,
   groupHide,
+  groupReact,
   groupAdmit,
   groupBan,
   groupMeta,

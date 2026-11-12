@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 36)
-  t.is(LEGAL_DATE, '11/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 36, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(LEGAL_VERSION, 37)
+  t.is(LEGAL_DATE, '12/11/2026')
+  t.is(REVIEW_NOTE, 'Versão 37, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: version 29 has no tolerance for abuse, a real contact, a content license and the age check on the app', async (t) => {
@@ -90,7 +90,24 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'c655185dee955dc4b0909c63c89f0e853dec7bd65b8123f5246b614f05d72601', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '5897002695d4c8778bb7c11da0436677cbc68db51df341340414dddc2976f104', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+})
+
+test('legal: version 37 describes group reactions and chat formatting, not conversation reactions', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const doc of [TERMS, PRIVACY]) {
+    t.ok(text(doc).includes('o emoji, a mensagem a que se refere, a hora e a sua conta como autora'), doc.title + ': what a reaction carries')
+    t.ok(text(doc).includes('Num grupo privado, o emoji e a mensagem a que ele se refere são cifrados como as mensagens'), doc.title + ': private group reactions are sealed')
+    t.ok(text(doc).includes('ainda vê qual conta escreveu o registro e quando'), doc.title + ': private group author and time stay visible')
+    t.ok(text(doc).includes('cópias que outras pessoas já receberam podem continuar existindo'), doc.title + ': removal leaves copies')
+    t.ok(text(doc).includes('As mensagens diretas ainda não têm reações'), doc.title + ': no conversation reactions yet')
+    t.ok(text(doc).includes('sem indicação de leitura, de entrega ou de que alguém está digitando'), doc.title + ': no read, delivery or typing indicator')
+    t.ok(text(doc).includes('é só apresentação'), doc.title + ': formatting is presentation only')
+    t.absent(/rea(?:ç\p{L}*|g\p{L}*) (?:a|em|nas?|às?) (?:uma |as )?mensage(?:m|ns) diretas?/iu.test(text(doc)), doc.title + ': no reacting in direct messages')
+  }
+  t.ok(text(PRIVACY).includes('As reações são guardadas e removidas como as mensagens do grupo em que foram publicadas'), 'retention of reactions')
+  t.ok(text(PRIVACY).includes('as reações nos grupos'), 'legal basis of reactions')
 })
 
 test('legal: version 19 describes extra passkeys and the recovery code for the same account', async (t) => {
