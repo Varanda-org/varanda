@@ -77,10 +77,18 @@ const MAX_AVC_LEVEL = 42
 // sample location) is there because AVFoundation's AVAssetWriter writes it
 // into every H.264 MP4 it makes, next to fiel.
 const AVC_EXTRAS = Object.freeze(['pasp', 'colr', 'btrt', 'clap', 'fiel', 'chrm', 'free', 'skip'])
+// Sample-entry children of a fixed size, by body bytes. A longer body would
+// carry bytes the walk never reads and stripVideoMetadata never blanks.
+const LEAF_BYTES = new Map([['pasp', 8], ['btrt', 12], ['clap', 32], ['fiel', 2], ['chrm', 2]])
+// CENC's sample group. The walk refuses protected files, so a group that
+// describes encryption is refused with them.
+const ENCRYPTION_GROUP = 'seig'
 const AAC_OBJECT_TYPES = Object.freeze([0x40, 0x66, 0x67, 0x68])
-// The AudioSpecificConfig's audio object type: AAC-LC, SBR (HE-AAC) and PS
-// (HE-AAC v2). 31 is the escape to a wider type, never one of these.
-const AAC_AUDIO_TYPES = Object.freeze([2, 5, 29])
+// The AudioSpecificConfig's audio object types: AAC-LC, and SBR (HE-AAC) and
+// PS (HE-AAC v2), which name the core's own type further on.
+const AAC_LC = 2
+const SBR = 5
+const PS = 29
 // The only colr an avc1 entry may carry: 'nclx' with its three 16-bit codes
 // and the full-range byte. An ICC profile is refused.
 const COLR_NCLX_BYTES = 11
@@ -92,6 +100,14 @@ const ONE = 0x10000
 // AudioSampleEntry's.
 const VISUAL_ENTRY = 78
 const AUDIO_ENTRY = 28
+// The VisualSampleEntry's depth and pre_defined fields, which every ISO file
+// sets to 0x0018 and -1. A reader that follows QuickTime takes some other
+// values as a colour table stored before the child boxes, and so finds the
+// children somewhere else than this walk does.
+const DEPTH_AT = 74
+const ISO_DEPTH = 0x0018
+const ISO_COLOUR_TABLE = 0xffff
+const IDENTITY = Object.freeze([ONE, 0, 0, 0, ONE, 0, 0, 0, 0x40000000])
 
 function be16 (b, p) {
   return (b[p] << 8) | b[p + 1]
@@ -383,11 +399,18 @@ function inMdat (mdats, start, end) {
 // The stbl boxes the walk lists but reads nothing from hold their own fields:
 // sdtp one byte per sample, cslg its version's five fields, sbgp whole
 // entries covering no more than the samples, sgpd its header and, in version
-// 1, whole entries.
+// 1, whole entries. Versions 0 and 2 size each sgpd entry by its grouping
+// type, which the walk does not read, so there only an empty table passes.
+// Editions of the format disagree on the version 2 header: older ones put
+// entry_count after the default index (16 bytes), newer ones add a 32-bit
+// default_length first (20 bytes). Either passes only when every reading of
+// the bytes finds no entry, so the 20-byte form also needs a zero default
+// index, which an empty table cannot point to anyway.
 function sideTablesFit (b, inStbl, samples) {
   for (const x of inStbl) {
     const n = x.end - x.body
     const version = n >= 4 ? b[x.body] : -1
+    if ((x.type === 'sbgp' || x.type === 'sgpd') && n >= 8 && fourcc(b, x.body + 4) === ENCRYPTION_GROUP) return false
     if (x.type === 'sdtp') {
       if (version !== 0 || n - 4 !== samples) return false
     } else if (x.type === 'cslg') {
@@ -405,10 +428,20 @@ function sideTablesFit (b, inStbl, samples) {
     } else if (x.type === 'sgpd') {
       const head = version === 0 ? 12 : version === 1 || version === 2 ? 16 : 0
       if (head === 0 || n < head) return false
-      if (version === 1 && !groupEntriesFit(b, x, head)) return false
+      if (version === 1) {
+        if (!groupEntriesFit(b, x, head)) return false
+      } else if (!emptyGroupTable(b, x, version, n)) {
+        return false
+      }
     }
   }
   return true
+}
+
+function emptyGroupTable (b, sgpd, version, n) {
+  if (version === 0) return n === 12 && be32(b, sgpd.body + 8) === 0
+  if (n === 16) return be32(b, sgpd.body + 12) === 0
+  return n === 20 && be32(b, sgpd.body + 12) === 0 && be32(b, sgpd.body + 16) === 0
 }
 
 // A version 1 sgpd: entry_count entries of default_length bytes each, or,
@@ -487,16 +520,18 @@ function avcConfig (b, avcC) {
 function avcEntry (b, entry, budget) {
   if (entry.type !== 'avc1' || entry.end - entry.body < VISUAL_ENTRY) return false
   if (be16(b, entry.body + 6) !== 1) return false
+  if (be16(b, entry.body + DEPTH_AT) !== ISO_DEPTH || be16(b, entry.body + DEPTH_AT + 2) !== ISO_COLOUR_TABLE) return false
   const w = be16(b, entry.body + 24)
   const h = be16(b, entry.body + 26)
   if (!sizeFits(w, h)) return false
   const list = listed(b, entry.body + VISUAL_ENTRY, entry.end, budget)
   if (!list || list.some((x) => x.type !== 'avcC' && !AVC_EXTRAS.includes(x.type))) return false
   for (const type of ['pasp', 'colr', 'btrt', 'clap', 'fiel', 'chrm']) if (!atMostOne(list, type)) return false
+  if (!leavesFit(list)) return false
   const pasp = list.find((x) => x.type === 'pasp')
-  if (pasp && (pasp.end - pasp.body < 8 || be32(b, pasp.body) < 1 || be32(b, pasp.body) !== be32(b, pasp.body + 4))) return false
+  if (pasp && (be32(b, pasp.body) < 1 || be32(b, pasp.body) !== be32(b, pasp.body + 4))) return false
   const clap = list.find((x) => x.type === 'clap')
-  if (clap && (clap.end - clap.body < 32 || !apertureFits(b, clap.body, w) || !apertureFits(b, clap.body + 8, h))) return false
+  if (clap && (!apertureFits(b, clap.body, w) || !apertureFits(b, clap.body + 8, h))) return false
   const colr = list.find((x) => x.type === 'colr')
   if (colr && (colr.end - colr.body !== COLR_NCLX_BYTES || fourcc(b, colr.body) !== 'nclx')) return false
   const avcC = only(list, 'avcC')
@@ -535,7 +570,7 @@ function descriptor (b, p, limit) {
 
 // esds -> its ES_Descriptor's DecoderConfigDescriptor names an AAC object
 // type in an audio stream, with a small DecoderSpecificInfo inside it whose
-// AudioSpecificConfig names AAC-LC, SBR or PS (its first five bits).
+// AudioSpecificConfig names AAC-LC, or SBR or PS over an AAC-LC core.
 function aacConfig (b, esds) {
   if (esds.end - esds.body < 5 || b[esds.body + 4] !== 0x03) return false
   const es = descriptor(b, esds.body + 5, esds.end)
@@ -554,7 +589,32 @@ function aacConfig (b, esds) {
   if (q >= dc.end || b[q] !== 0x05) return false
   const dsi = descriptor(b, q + 1, dc.end)
   if (!dsi || dsi.end - dsi.at < 2 || dsi.end - dsi.at > MAX_DECODER_CONFIG) return false
-  return AAC_AUDIO_TYPES.includes(b[dsi.at] >> 3)
+  return aacLcCore(b, dsi.at, dsi.end)
+}
+
+// An AudioSpecificConfig at b[at, end) -> true when its object type is
+// AAC-LC, or SBR or PS whose core, named after the sampling rate, the
+// channel configuration and the extension sampling rate, is AAC-LC. A rate
+// index of 15 is followed by the rate itself in 24 bits.
+function aacLcCore (b, at, end) {
+  let bit = at * 8
+  let short = false
+  const read = (n) => {
+    if (bit + n > end * 8) {
+      short = true
+      return 0
+    }
+    let v = 0
+    for (let i = 0; i < n; i++, bit++) v = v * 2 + ((b[bit >> 3] >> (7 - (bit & 7))) & 1)
+    return v
+  }
+  const type = read(5)
+  if (type === AAC_LC) return true
+  if (type !== SBR && type !== PS) return false
+  if (read(4) === 15) read(24)
+  read(4)
+  if (read(4) === 15) read(24)
+  return read(5) === AAC_LC && !short
 }
 
 // An mp4a AudioSampleEntry (version 0) with exactly one AAC esds and only
@@ -563,8 +623,13 @@ function aacEntry (b, entry, budget) {
   if (entry.type !== 'mp4a' || entry.end - entry.body < AUDIO_ENTRY) return false
   if (be16(b, entry.body + 6) !== 1 || b[entry.body + 8] !== 0 || b[entry.body + 9] !== 0) return false
   const list = listed(b, entry.body + AUDIO_ENTRY, entry.end, budget, CHILDREN.mp4a)
-  const esds = list && only(list, 'esds')
+  const esds = list && leavesFit(list) && only(list, 'esds')
   return Boolean(esds) && aacConfig(b, esds)
+}
+
+// Sample-entry children -> every one LEAF_BYTES sizes has exactly that body.
+function leavesFit (list) {
+  return list.every((x) => !LEAF_BYTES.has(x.type) || x.end - x.body === LEAF_BYTES.get(x.type))
 }
 
 // tkhd (versions 0 and 1) -> duration in the movie timescale, UNKNOWN for
@@ -582,6 +647,15 @@ function tkhdDuration (b, tkhd) {
   if (allOnes64(b, tkhd.body + 28)) return UNKNOWN
   const d = be64(b, tkhd.body + 28)
   return d < 0 ? null : d
+}
+
+// mvhd (versions 0 and 1, as mediaTime read it) -> its matrix is the
+// identity. Some readers compose it with every track's, so any other one
+// would turn or scale the picture past the rule displaySize keeps.
+function plainMovie (b, mvhd) {
+  const m = mvhd.body + (b[mvhd.body] === 0 ? 36 : 48)
+  if (mvhd.end - m < 36) return false
+  return IDENTITY.every((v, i) => s32(b, m + 4 * i) === v)
 }
 
 // tkhd -> the display { width, height }: its size turned by its matrix,
@@ -801,7 +875,7 @@ function parse (bytes, metadata, maxMs, strip = false) {
   const inMoov = moov && inside(bytes, moov, budget, CHILDREN.moov)
   const mvhd = inMoov && only(inMoov, 'mvhd')
   const movie = mvhd && mediaTime(bytes, mvhd)
-  if (!movie) return null
+  if (!movie || !plainMovie(bytes, mvhd)) return null
   const traks = inMoov.filter((x) => x.type === 'trak')
   if (traks.length < 1 || traks.length > 2) return null
   const parts = traks.map((trak) => trackParts(bytes, trak, budget))

@@ -17,8 +17,11 @@ function box (type, ...parts) {
 }
 
 const ftyp = (major = 'isom', compatible = ['isom', 'iso2', 'avc1', 'mp41']) => box('ftyp', ascii(major), be32(0x200), ...compatible.map(ascii))
-const mvhd0 = (timescale, duration) => box('mvhd', [0, 0, 0, 0], be32(7), be32(9), be32(timescale), be32(duration), zeros(80))
-const mvhd1 = (timescale, duration) => box('mvhd', [1, 0, 0, 0], be32(0), be32(7), be32(0), be32(9), be32(timescale), be32(0), be32(duration), zeros(80))
+// After the duration: rate 1.0, volume 1.0, reserved, the matrix,
+// pre_defined and next_track_ID, as every encoder writes them.
+const movieTail = (matrix) => [...be32(ONE), ...be16(0x100), ...zeros(10), ...matrix.flatMap((v) => be32(v >>> 0)), ...zeros(24), ...be32(3)]
+const mvhd0 = (timescale, duration, matrix = IDENTITY) => box('mvhd', [0, 0, 0, 0], be32(7), be32(9), be32(timescale), be32(duration), movieTail(matrix))
+const mvhd1 = (timescale, duration, matrix = IDENTITY) => box('mvhd', [1, 0, 0, 0], be32(0), be32(7), be32(0), be32(9), be32(timescale), be32(0), be32(duration), movieTail(matrix))
 const ONE = 0x10000
 const IDENTITY = [ONE, 0, 0, 0, ONE, 0, 0, 0, 0x40000000]
 const TURN_90 = [0, ONE, 0, -ONE, 0, 0, 0, 0, 0x40000000]
@@ -63,13 +66,13 @@ const btrt = () => box('btrt', be32(0), be32(800000), be32(600000))
 const colr = () => box('colr', ascii('nclx'), be16(1), be16(1), be16(1), [0])
 // [widthN, widthD, heightN, heightD, horizOffN, horizOffD, vertOffN, vertOffD]; full frame by default.
 const clap = (v = [640, 1, 360, 1, 0, 1, 0, 1]) => box('clap', ...v.map((x) => be32(x >>> 0)))
-function avc1 ({ type = 'avc1', width = 640, height = 360, name = 'x264', kids = [avcC(), pasp(), btrt()] } = {}) {
+function avc1 ({ type = 'avc1', width = 640, height = 360, name = 'x264', kids = [avcC(), pasp(), btrt()], depth = 0x18, colourTable = 0xffff } = {}) {
   const compressor = [name.length, ...ascii(name), ...zeros(31 - name.length)]
-  return box(type, zeros(6), be16(1), zeros(16), be16(width), be16(height), be32(0x480000), be32(0x480000), be32(0), be16(1), compressor, be16(0x18), be16(0xffff), ...kids)
+  return box(type, zeros(6), be16(1), zeros(16), be16(width), be16(height), be32(0x480000), be32(0x480000), be32(0), be16(1), compressor, be16(depth), be16(colourTable), ...kids)
 }
-// dsi: the two-byte AudioSpecificConfig; its first five bits are the audio
-// object type (2, AAC-LC, by default).
-const esds = (oti = 0x40, dsi = [0x12, 0x10]) => box('esds', [0, 0, 0, 0], [0x03, 0x19, 0, 1, 0, 0x04, 0x11, oti, (5 << 2) | 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x05, 0x02, ...dsi, 0x06, 0x01, 0x02])
+// dsi: the AudioSpecificConfig (at most 64 bytes); its first five bits are
+// the audio object type (2, AAC-LC, by default).
+const esds = (oti = 0x40, dsi = [0x12, 0x10]) => box('esds', [0, 0, 0, 0], [0x03, 23 + dsi.length, 0, 1, 0, 0x04, 15 + dsi.length, oti, (5 << 2) | 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x05, dsi.length, ...dsi, 0x06, 0x01, 0x02])
 const mp4a = (...kids) => box('mp4a', zeros(6), be16(1), zeros(20), ...(kids.length ? kids : [esds(), btrt()]))
 const opus = () => box('Opus', zeros(6), be16(1), zeros(20), box('dOps', [0, 2, 0x01, 0x38, ...be32(48000), 0, 0, 0]))
 
@@ -260,6 +263,9 @@ test('videoBounds: only H.264 avc1 with a valid avcC', (t) => {
   t.ok(one(avc1({ kids: [avcC({ tail: highTail() })] })), 'a High profile tail: 4:2:0, 8 bits, no SPS-ext')
   t.ok(one(avc1({ kids: [avcC({ tail: [1, 0, 0, 0] })] })), 'a High profile tail with its reserved bits clear')
   t.ok(one(avc1({ kids: [avcC()] })), 'High profile without a tail')
+  t.is(one(avc1({ depth: 8, colourTable: 0 })), null, 'a palette depth with colour table 0')
+  t.is(one(avc1({ colourTable: 0 })), null, 'colour table 0')
+  t.is(one(avc1({ depth: 0x20 })), null, 'depth 32')
   t.is(one(avc1({ kids: [avcC({ tail: highTail({ chroma: 3 }) })] })), null, 'a 4:4:4 tail')
   t.is(one(avc1({ kids: [avcC({ tail: highTail({ luma: 2 }) })] })), null, 'a 10-bit luma tail')
   t.is(one(avc1({ kids: [avcC({ tail: highTail({ chromaDepth: 2 }) })] })), null, 'a 10-bit chroma tail')
@@ -799,27 +805,79 @@ test('videoBounds: stbl tables the walk does not read hold their own fields', (t
   t.ok(stbl(roll(), group(10, 1)), 'an sbgp version 1 over some samples')
   t.ok(stbl(box('sgpd', [1, 0, 0, 0], ascii('roll'), be32(0), be32(1), be32(2), [0xff, 0xff])), 'an sgpd entry after its own length')
   t.ok(stbl(box('sgpd', [2, 0, 0, 0], ascii('roll'), be32(1), be32(0))), 'an sgpd version 2 header')
+  t.ok(stbl(box('sgpd', [0, 0, 0, 0], ascii('roll'), be32(0))), 'an empty sgpd version 0')
+  t.ok(stbl(box('sgpd', [2, 0, 0, 0], ascii('roll'), be32(2), be32(0), be32(0))), 'an empty sgpd version 2 with a default length')
   t.is(stbl(group(91)), null, 'an sbgp over more samples than the track has')
   t.is(stbl(box('sbgp', [0, 0, 0, 0], ascii('roll'), be32(2), be32(90), be32(1))), null, 'an sbgp claiming more entries than it holds')
   t.is(stbl(box('sbgp', [2, 0, 0, 0], ascii('roll'), be32(0))), null, 'an sbgp version 2')
   t.is(stbl(box('sgpd', [1, 0, 0, 0], ascii('roll'), be32(2), be32(2), [0xff, 0xff])), null, 'an sgpd one entry short')
   t.is(stbl(box('sgpd', [1, 0, 0, 0], ascii('roll'), be32(0), be32(1), be32(9), [0xff])), null, 'an sgpd entry past its box')
   t.is(stbl(box('sgpd', [3, 0, 0, 0], ascii('roll'), be32(0), be32(0))), null, 'an sgpd version 3')
+  t.is(stbl(box('sgpd', [0, 0, 0, 0], ascii('roll'), be32(0xffffffff))), null, 'an sgpd version 0 declaring entries it does not hold')
+  t.is(stbl(box('sgpd', [0, 0, 0, 0], ascii('roll'), be32(1), [0xff, 0xff])), null, 'an sgpd version 0 entry the walk cannot size')
+  t.is(stbl(box('sgpd', [2, 0, 0, 0], ascii('roll'), be32(1), be32(0xffffffff))), null, 'an sgpd version 2 declaring entries it does not hold')
+  t.is(stbl(box('sgpd', [2, 0, 0, 0], ascii('roll'), be32(1), be32(1), [0xff, 0xff])), null, 'an sgpd version 2 entry the walk cannot size')
+  t.is(stbl(box('sgpd', [2, 0, 0, 0], ascii('roll'), be32(1), be32(0), [0xff])), null, 'an sgpd version 2 with bytes after its header')
+  t.is(stbl(box('sgpd', [2, 0, 0, 0], ascii('roll'), be32(2), be32(0), be32(1))), null, 'an sgpd version 2 with a default length declaring an entry it does not hold')
+  t.is(stbl(box('sgpd', [2, 0, 0, 0], ascii('roll'), be32(2), be32(1), be32(0))), null, 'an empty sgpd version 2 pointing to a default entry')
+  t.is(stbl(box('sgpd', [2, 0, 0, 0], ascii('roll'), be32(2), be32(0), be32(1), [0xff, 0xff])), null, 'an sgpd version 2 with a default length and an entry')
   for (const type of ['sdtp', 'cslg', 'sgpd', 'sbgp']) t.is(stbl(box(type, [1, 2, 3, 4])), null, 'a bare ' + type)
+  t.is(stbl(box('sgpd', [1, 0, 0, 0], ascii('seig'), be32(20), be32(1), zeros(20))), null, 'a CENC seig group description')
+  t.is(stbl(box('sbgp', [0, 0, 0, 0], ascii('seig'), be32(1), be32(90), be32(1))), null, 'samples mapped to a CENC seig group')
 })
 
-test('videoBounds: the AAC config names AAC-LC, SBR or PS', (t) => {
+test('videoBounds: the AAC config names AAC-LC, or SBR or PS over AAC-LC', (t) => {
   // The first five bits of the AudioSpecificConfig; 31 escapes to 32 + the
-  // next six bits.
+  // next six bits. SBR (5) and PS (29) name the core's type after the
+  // sampling rate, the channels and the extension sampling rate.
   const typed = (dsi) => videoBounds(file({ tracks: [videoSpec(), soundSpec({ entries: [mp4a(esds(0x40, dsi), btrt())] })] }))
+  // [value, bits] fields, most significant bit first, zero padded.
+  const pack = (...fields) => {
+    const bits = fields.flatMap(([v, n]) => Array.from({ length: n }, (_, i) => (v >>> (n - 1 - i)) & 1))
+    while (bits.length % 8) bits.push(0)
+    return Array.from({ length: bits.length / 8 }, (_, i) => bits.slice(i * 8, i * 8 + 8).reduce((a, x) => a * 2 + x, 0))
+  }
   t.ok(typed([0x12, 0x10]), 'type 2, AAC-LC')
-  t.ok(typed([0x2b, 0x92]), 'type 5, SBR')
-  t.ok(typed([0xeb, 0x92]), 'type 29, PS')
+  t.alike(pack([5, 5], [7, 4], [2, 4], [4, 4], [2, 5]), [0x2b, 0x92, 0x08], 'the packer writes a known HE-AAC config')
+  t.ok(typed(pack([5, 5], [7, 4], [2, 4], [4, 4], [2, 5])), 'type 5, SBR over AAC-LC')
+  t.ok(typed(pack([29, 5], [7, 4], [1, 4], [4, 4], [2, 5])), 'type 29, PS over AAC-LC')
+  t.ok(typed(pack([5, 5], [15, 4], [22050, 24], [2, 4], [15, 4], [44100, 24], [2, 5])), 'SBR with both rates written out')
+  t.is(typed(pack([5, 5], [7, 4], [2, 4], [4, 4], [1, 5])), null, 'SBR over AAC main')
+  t.is(typed(pack([29, 5], [7, 4], [1, 4], [4, 4], [4, 5])), null, 'PS over AAC LTP')
+  t.is(typed(pack([5, 5], [7, 4], [2, 4], [4, 4], [5, 5])), null, 'SBR over SBR')
+  t.is(typed(pack([5, 5], [7, 4], [2, 4], [4, 4], [31, 5], [2, 6])), null, 'SBR over an escaped core')
+  t.is(typed([0x2b, 0x92]), null, 'an SBR config cut before its core')
+  t.is(typed(pack([5, 5], [15, 4], [22050, 24], [2, 4])), null, 'an SBR config with a written rate cut before its core')
   t.is(typed([0x0a, 0x10]), null, 'type 1, AAC main')
   t.is(typed([0x1a, 0x10]), null, 'type 3, AAC SSR')
   t.is(typed([0xf8, 0x10]), null, 'type 31, the escape')
   t.is(typed([0xf8, 0x50]), null, 'type 34 through the escape')
   t.is(typed([0x00, 0x10]), null, 'type 0')
+})
+
+test('videoBounds: fixed-size entry boxes hold only their fields', (t) => {
+  const one = (kids) => videoBounds(file({ tracks: [videoSpec({ entries: [avc1({ kids: [avcC(), ...kids] })] })] }))
+  const sound = (...kids) => videoBounds(file({ tracks: [videoSpec(), soundSpec({ entries: [mp4a(esds(), ...kids)] })] }))
+  t.ok(one([pasp(), btrt(), clap(), box('fiel', [1, 0]), box('chrm', zeros(2))]), 'each at its size')
+  t.is(one([box('pasp', be32(1), be32(1), be32(0))]), null, 'a pasp with bytes after its spacings')
+  t.is(one([box('pasp', be32(1))]), null, 'a short pasp')
+  t.is(one([box('btrt', be32(0), be32(800000), be32(600000), be32(0))]), null, 'a btrt with bytes after its rates')
+  t.is(one([box('clap', ...[640, 1, 360, 1, 0, 1, 0, 1, 0].map(be32))]), null, 'a clap with bytes after its values')
+  t.is(one([box('fiel', [1, 0, 0])]), null, 'a fiel past two bytes')
+  t.is(one([box('chrm', zeros(4))]), null, 'a chrm past two bytes')
+  t.ok(sound(btrt()), 'an mp4a btrt at its size')
+  t.is(sound(box('btrt', be32(0), be32(128000), be32(128000), be32(0))), null, 'an mp4a btrt with bytes after its rates')
+  t.is(stripVideoMetadata(file({ tracks: [videoSpec({ entries: [avc1({ kids: [avcC(), box('btrt', zeros(16))] })] })] })), null, 'nothing to strip')
+})
+
+test('videoBounds: the movie matrix is the identity', (t) => {
+  t.ok(videoBounds(file({ mvhd: mvhd1(1000, 3000) })), 'the identity in version 1')
+  t.is(videoBounds(file({ mvhd: mvhd0(1000, 3000, TURN_90) })), null, 'a movie turned by 90 degrees')
+  t.is(videoBounds(file({ mvhd: mvhd1(1000, 3000, [2 * ONE, 0, 0, 0, 2 * ONE, 0, 0, 0, 0x40000000]) })), null, 'a movie scaled twice, version 1')
+  t.is(videoBounds(file({ mvhd: mvhd0(1000, 3000, [ONE, 0, 0, 0, ONE, 0, 5 * ONE, 0, 0x40000000]) })), null, 'a moved movie')
+  t.is(videoBounds(file({ mvhd: box('mvhd', [0, 0, 0, 0], be32(7), be32(9), be32(1000), be32(3000), zeros(20)) })), null, 'an mvhd cut before its matrix ends')
+  t.is(videoBounds(file({ mvhd: mvhd0(1000, 3000, TURN_90) }), { metadata: true }), null, 'the sender check too')
+  t.is(stripVideoMetadata(file({ mvhd: mvhd0(1000, 3000, TURN_90) })), null, 'nothing to strip')
 })
 
 test('videoBounds: the QuickTime brand is refused', (t) => {
