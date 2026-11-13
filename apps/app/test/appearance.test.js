@@ -41,16 +41,20 @@ test('light palette keeps the strings the app shipped with', async (t) => {
 test('tab bar is opaque in both palettes so content does not show through', async (t) => {
   const { light, dark } = await load()
   t.is(light.tabBar, 'rgba(251,248,243,1)')
-  t.is(dark.tabBar, 'rgba(28,38,34,1)')
+  t.is(dark.tabBar, 'rgba(16,16,16,1)')
 })
 
-test('dark palette shares the keys and is warm green ink, not black', async (t) => {
+test('dark palette shares the keys and is near-neutral, not pure black', async (t) => {
   const { light, dark, paletteFor } = await load()
   t.alike(Object.keys(dark).sort(), Object.keys(light).sort())
   t.ok(Object.isFrozen(dark))
   t.not(dark.bg, '#000000')
   const [r, g, b] = [1, 3, 5].map((i) => parseInt(dark.bg.slice(i, i + 2), 16))
-  t.ok(g > r && g > b)
+  t.ok(Math.max(r, g, b) - Math.min(r, g, b) <= 6)
+  t.is(dark.bg, '#101010')
+  t.is(dark.card, '#1c1c1c')
+  t.is(dark.ink, '#f5f5f5')
+  t.is(dark.soft, '#c8c8c8')
   t.is(light.shadow, 'rgba(31,42,36,0.28)')
   t.is(dark.shadow, 'rgba(0,0,0,0.45)')
   t.is(paletteFor('dark'), dark)
@@ -151,7 +155,7 @@ test('web store round-trips and ignores corrupt data', async (t) => {
     t.is(web.loadAppearanceRecord(), null)
     mem.set(STORAGE_KEY, JSON.stringify({ v: 1, mode: 'dark', x: 1 }))
     t.is(web.loadAppearanceRecord(), null)
-    t.execution(() => web.applySchemeToDocument('dark', { bg: '#1c2622', themeColor: '#1c2622' }))
+    t.execution(() => web.applySchemeToDocument('dark', { bg: '#101010', themeColor: '#101010' }))
   } finally {
     if (prev) Object.defineProperty(globalThis, 'localStorage', prev)
     else delete globalThis.localStorage

@@ -25,7 +25,7 @@ test('manifest has the members an installable app needs', (t) => {
   t.ok(manifest.theme_color)
   // The installed app's system navigation bar takes this one colour; on the
   // web the tab bar above it is the same opaque dark bg in both schemes.
-  t.is(manifest.theme_color, '#1c2622', 'theme_color is the dark bg')
+  t.is(manifest.theme_color, '#101010', 'theme_color is the dark bg')
   const tabBar = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'TabBar.js'), 'utf8')
   t.ok(tabBar.includes("const alwaysDark = Platform.OS === 'web'"), 'the tab bar is always dark on the web')
   t.ok(tabBar.includes('makeStyles({ ...DARK, tabBar: DARK.bg })'), 'the web tab bar is opaque dark bg, not the translucent tabBar')
@@ -95,15 +95,15 @@ test('index.html paints the brand before the bundle runs', (t) => {
   t.ok(block.includes(spans), 'Varanda letter spans in order')
   t.ok(html.includes('<meta name="color-scheme" content="light dark" />'), 'color-scheme meta')
   t.ok(html.includes('<meta name="theme-color" content="#fbf8f3" />'), 'light theme-color meta')
-  t.ok(html.includes('<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#1c2622" />'), 'dark theme-color meta')
+  t.ok(html.includes('<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#101010" />'), 'dark theme-color meta')
   // Browsers take the first matching theme-color: the unscoped light one
   // would always win if it came first.
-  t.ok(html.indexOf('media="(prefers-color-scheme: dark)" content="#1c2622"') < html.indexOf('<meta name="theme-color" content="#fbf8f3" />'), 'dark theme-color comes first')
+  t.ok(html.indexOf('media="(prefers-color-scheme: dark)" content="#101010"') < html.indexOf('<meta name="theme-color" content="#fbf8f3" />'), 'dark theme-color comes first')
   t.ok(html.includes('html[data-scheme=light] #varanda-pre-splash { background: #fbf8f3; }'), 'manual Claro repaints the overlay')
-  t.ok(html.includes('html[data-scheme=dark] #varanda-pre-splash { background: #1c2622; }'), 'manual Escuro repaints the overlay')
+  t.ok(html.includes('html[data-scheme=dark] #varanda-pre-splash { background: #101010; }'), 'manual Escuro repaints the overlay')
   const dark = /@media \(prefers-color-scheme: dark\) \{([\s\S]*?)\n {6}\}/.exec(html)
   t.ok(dark, 'dark media query exists')
-  t.ok(dark && dark[1].includes('#varanda-pre-splash { background: #1c2622; }'), 'dark pre-splash background')
+  t.ok(dark && dark[1].includes('#varanda-pre-splash { background: #101010; }'), 'dark pre-splash background')
   t.ok(dark && /\.chair \{[^}]*background: #fbf8f3/.test(dark[1]), 'chair keeps a cream pad in dark')
   t.ok(html.includes('prefers-reduced-motion: no-preference'), 'motion lives in the no-preference query')
   t.ok(html.includes('pointer-events: none'), 'splash does not eat taps')
