@@ -5,7 +5,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ## [Não lançado]
 
-- Base visual do app (PR `feat/ui-foundations`): a aba ativa da barra de baixo ganha uma pílula suave, o botão de publicar encolhe e escurece ao ser apertado (só escurece com Reduzir movimento), e a folha de ações ganha um espaço opcional de cabeçalho, sem mudar nenhuma tela existente. Os tokens de movimento novos já servem a pílula e o botão; chegam também estilos de texto, esqueletos de carregamento e ícones de categoria para os próximos PRs. Verificação na seção 178 de `docs/verification.md`.
+- Base visual do app (PR `feat/ui-foundations`): a aba ativa da barra de baixo ganha uma pílula suave, o botão de publicar encolhe e escurece ao ser apertado (só escurece com Reduzir movimento), e a folha de ações ganha um espaço opcional de cabeçalho, sem mudar nenhuma tela existente. Os tokens de movimento novos já servem a pílula e o botão; chegam também estilos de texto, esqueletos de carregamento e ícones de categoria para os próximos PRs. Verificação na seção 189 de `docs/verification.md`.
 
 ### Segurança
 

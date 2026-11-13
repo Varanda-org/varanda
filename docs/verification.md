@@ -7803,7 +7803,7 @@ Ordem: build de debug do Android, simulador do iOS, depois a web e o PWA. O buil
 - [ ] Serviço `account` sem `VARANDA_PHONE_KEY` (o id e o segredo do cliente Google continuam obrigatórios): entre as linhas de arranque, `cadastro de novas contas desligado: verificação de celular não configurada`. Com `--json`, `{"event":"cadastro"}`.
 - [ ] Ordem de deploy: este PR só sobe depois que o app do PR `feat/phone-only-signup-app` está nas lojas e os builds antigos passaram por um ciclo de revisão da loja. Até lá, o servidor do PR `feat/phone-only-signup-server` continua no ar e atende o vínculo pelo Google e o finish de celular.
 
-## 178. Base visual: movimento, esqueletos e barra (PR feat/ui-foundations)
+## 189. Base visual: movimento, esqueletos e barra (PR feat/ui-foundations)
 
 Primeiro PR da revisão visual do app. Muda duas coisas que a pessoa vê e acrescenta peças que nenhuma tela usa ainda.
 
