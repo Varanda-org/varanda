@@ -4,7 +4,6 @@
 // No platform imports, so Node tests load it directly. The rule text
 // mirrors PEEK_RULE in packages/core/lib/peek.js (the app cannot import it).
 
-export const PEEK_WEB_ONLY_MESSAGE = 'Nesta versão, a Espiadinha só funciona na versão web no site da associação.'
 export const PEEK_OFFLINE_MESSAGE = 'Confira sua internet.'
 export const PEEK_RULE_TEXT = 'A Espiadinha mostra a publicação mais recente de cada diário que você não segue, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos.'
 export const PEEK_SHORT_TEXT = 'Até três publicações de cada diário que você não segue.'

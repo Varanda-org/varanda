@@ -47,7 +47,7 @@ import { Pill } from '../ui/Pill'
 import { Scrim, scrimColor } from '../ui/Scrim'
 import { Sheet } from '../ui/Sheet'
 import { IconAction } from '../ui/TopActions'
-import { type } from '../ui/theme'
+import { layout, space, type } from '../ui/theme'
 import { ThemeContext, useStyles, useTheme } from '../ui/ThemeProvider'
 import { paletteFor } from '../appearance.js'
 import { STACK_MS } from '../stackMotion'
@@ -331,6 +331,13 @@ export function captionCap ({ height, topEnd, barHeight = 0, bottomPad = 0 }) {
   const room = Math.round(height - topEnd - barHeight - bottomPad - CAPTION_CLEAR)
   return Math.max(CAPTION_MIN, Math.min(share, room))
 }
+export function captionLayout ({ max, fontScale, lineHeight, hit, height }) {
+  const collapsedHeight = lineHeight * fontScale * 3
+  if (max < collapsedHeight + hit || height <= collapsedHeight) {
+    return { collapsedHeight: max, expandedHeight: max, long: false }
+  }
+  return { collapsedHeight, expandedHeight: max - hit, long: true }
+}
 // A close the stack ignored (goBack during a slide) frees the latch after
 // the slide's time, so the next close works.
 const CLOSE_RELEASE_MS = STACK_MS + 150
@@ -490,6 +497,14 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
   // Auto-advance: the current segment fills over AUTO_ADVANCE_MS; a pause
   // keeps what is left. Off under reduced motion (the segment shows full).
   const [held, setHeld] = useState(false)
+  const [captionExpanded, setCaptionExpanded] = useState(false)
+  const captionScrollRef = useRef(null)
+  useEffect(() => {
+    if (!captionExpanded) {
+      captionOffsetRef.current = 0
+      if (captionScrollRef.current) captionScrollRef.current.scrollTo({ y: 0, animated: false })
+    }
+  }, [captionExpanded])
   // menuShown is the sheet; menuOpen holds playback from the menu's opening
   // until its action ran (ActionsSheet runs it up to 700 ms after closing) or
   // MENU_SETTLE_MS after a close without one, so 'Apagar' always finds the
@@ -525,6 +540,7 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
   // Next / previous item; past the end of an author, the next author in
   // ringOrder from its first unseen item, and past the last author, close.
   const step = useCallback((dir) => {
+    setCaptionExpanded(false)
     if (rings === null || pos.ring < 0) return
     const current = rings[pos.ring]
     const to = nextIndex(pos.item, current.items.length, dir)
@@ -548,6 +564,7 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
   useEffect(() => {
     progress.setValue(0)
     remaining.current = AUTO_ADVANCE_MS
+    setCaptionExpanded(false)
     // A new moment's caption starts at its top (the ScrollView is keyed too).
     captionOffsetRef.current = 0
     captionTouchRef.current = false
@@ -557,7 +574,7 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
   }, [itemKey, progress])
   // node.visible: a hidden tab or a backgrounded app holds playback, so the
   // animation cannot finish unseen and skip the moment on return.
-  const running = isTop && node.visible !== false && autoOn && item !== null && photo.phase !== 'loading' && !held && !dragging && !menuOpen && deleting === null
+  const running = isTop && node.visible !== false && autoOn && item !== null && photo.phase !== 'loading' && !held && !dragging && !menuOpen && deleting === null && !captionExpanded
   useEffect(() => {
     if (!running) return undefined
     const anim = Animated.timing(progress, { toValue: 1, duration: Math.max(0, remaining.current), easing: Easing.linear, useNativeDriver: false })
@@ -641,7 +658,8 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
   // The caption box: scrolls only when its text overflows the cap.
   const captionMax = captionCap({ height: win.height, topEnd, barHeight, bottomPad: insets.bottom + 12 })
   const [captionHeight, setCaptionHeight] = useState(0)
-  const captionScrolls = captionHeight > captionMax
+  const { collapsedHeight: captionCollapsedHeight, expandedHeight: captionExpandedHeight, long: captionLong } = captionLayout({ max: captionMax, fontScale: win.fontScale, lineHeight: type.postText.lineHeight, hit: layout.hit, height: captionHeight })
+  const captionScrolls = captionHeight > captionMax - (captionLong ? layout.hit : 0) && (!captionLong || captionExpanded)
   const meet = scrimsMeet(topEnd, bottomStart)
 
   const profile = author !== null && names ? names.profileOf(author) : null
@@ -700,7 +718,7 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
       <View style={[styles.root, { paddingTop: insets.top }]}>
         <View style={styles.headRow}><View style={styles.flex} />{closeButton}</View>
         <View style={styles.center}>
-          {data.phase === 'error' ? <ErrorText>{data.error}</ErrorText> : <ActivityIndicator color='#ffffff' />}
+          {data.phase === 'error' ? <ErrorText>{data.error}</ErrorText> : <ActivityIndicator color={colors.ink} />}
         </View>
       </View>
     )
@@ -730,6 +748,27 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
       }]
     : []
 
+  const frameCaption = (content) => content === null
+    ? null
+    : (
+      <>
+        <View style={{ maxHeight: captionExpanded ? captionExpandedHeight : captionCollapsedHeight, overflow: 'hidden' }}>{content}</View>
+        {captionLong
+          ? (
+            <Pressable
+              accessibilityRole='button'
+              accessibilityLabel={captionExpanded ? 'recolher a legenda' : 'mostrar a legenda inteira'}
+              accessibilityState={{ expanded: captionExpanded }}
+              onPress={() => setCaptionExpanded((value) => !value)}
+              style={({ pressed }) => [styles.captionToggle, pressed && styles.pressed]}
+            >
+              <Text style={styles.text}>{captionExpanded ? 'menos' : 'mais'}</Text>
+            </Pressable>
+            )
+          : null}
+      </>
+      )
+
   return (
     // key: a fresh element, so react-native-web observes its size (the root
     // of the loading branch above had no onLayout, and the browser only
@@ -740,7 +779,7 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
           {photo.phase === 'ok'
             ? <Image source={{ uri: photo.uri }} style={styles.photo} resizeMode='contain' onError={handlePhotoError} accessibilityIgnoresInvertColors accessible accessibilityRole='image' accessibilityLabel={'momento de ' + name} />
             : photo.phase === 'loading'
-              ? <View style={styles.center}><ActivityIndicator color='#ffffff' accessibilityLabel='carregando a foto' /></View>
+              ? <View style={styles.center}><ActivityIndicator color={colors.ink} accessibilityLabel='carregando a foto' /></View>
               : (
                 <View style={styles.center}>
                   <Icon name='imagem' size={28} color={colors.soft} />
@@ -813,10 +852,11 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
         </View>
         <View style={[styles.bottom, { paddingBottom: insets.bottom + 12 }]} pointerEvents='box-none' onLayout={(e) => setBottomHeight(e.nativeEvent.layout.height)}>
           {meet ? null : <Scrim edge='bottom' alpha={BOTTOM_SCRIM.alpha} fade={BOTTOM_SCRIM.fade} style={styles.bottomScrim} />}
-          {text !== ''
+          {frameCaption(text !== ''
             ? (
               <ScrollView
                 key={itemKey}
+                ref={captionScrollRef}
                 style={[styles.caption, { maxHeight: captionMax }]}
                 scrollEnabled={captionScrolls}
                 showsVerticalScrollIndicator={captionScrolls}
@@ -845,7 +885,7 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
                 </Pressable>
               </ScrollView>
               )
-            : null}
+            : null)}
           {mine
             ? (
               <View style={styles.bar} onLayout={measureBar}>
@@ -893,6 +933,7 @@ const makeStyles = (colors) => StyleSheet.create({
   bottomScrim: { position: 'absolute', top: -BOTTOM_SCRIM.fade, left: 0, right: 0, bottom: 0 },
   fullScrim: { ...StyleSheet.absoluteFillObject },
   caption: { flexGrow: 0 },
+  captionToggle: { minHeight: layout.hit, alignSelf: 'flex-start', justifyContent: 'center', paddingHorizontal: space.sm },
   text: { ...type.postText, color: '#ffffff', ...TEXT_SHADOW },
   bar: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 12 },
   note: { flex: 1, minWidth: 160, color: 'rgba(255,255,255,0.8)', ...TEXT_SHADOW },

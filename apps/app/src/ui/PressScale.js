@@ -10,7 +10,7 @@ const NATIVE_DRIVER = Platform.OS !== 'web'
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable)
 
-export function PressScale ({ children, onPress, onLongPress, disabled, style, hitSlop, accessibilityLabel, accessibilityRole = 'button', accessibilityState }) {
+export function PressScale ({ children, onPress, onLongPress, disabled, style, hitSlop, accessibilityLabel, accessibilityHint, accessibilityRole = 'button', accessibilityState }) {
   const reduceMotion = useReduceMotion()
   const [pressed, setPressed] = useState(false)
   const scale = useRef(new Animated.Value(1)).current
@@ -41,6 +41,7 @@ export function PressScale ({ children, onPress, onLongPress, disabled, style, h
       disabled={disabled}
       hitSlop={hitSlop}
       accessibilityLabel={accessibilityLabel}
+      accessibilityHint={accessibilityHint}
       accessibilityRole={accessibilityRole}
       accessibilityState={{ ...accessibilityState, disabled: !!disabled }}
       style={[resolved, { transform: callerTransform ? [...callerTransform, { scale }] : [{ scale }] }]}

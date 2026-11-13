@@ -46,7 +46,7 @@
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
+import { AccessibilityInfo, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { MAX_TEXT, activeMention, displayText } from '@varanda/rpc'
 import { MENTION_MIN_QUERY, insertMention } from '../mentions'
 import { mergeSuggestions } from '../mentionTargets'
@@ -83,7 +83,8 @@ import { refusalOf } from '../wordCheck'
 import { Sheet, TEXT_CAP } from '../ui/Sheet'
 import { tap } from '../ui/haptics'
 import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
-import { type } from '../ui/theme'
+import { space, type } from '../ui/theme'
+import { PressScale } from '../ui/PressScale'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { pagesOn } from '../pageGate'
 import { Segmented } from '../ui/Segmented'
@@ -275,6 +276,31 @@ export function keepInView ({ fieldY, fieldHeight, contentHeight, viewHeight, at
   return top
 }
 
+export function counterAnnouncement (previous, count, limit) {
+  if (previous < limit && count >= limit) return 'Limite de caracteres atingido'
+  if (previous < limit - 20 && count >= limit - 20 && count < limit) return 'Restam ' + (limit - count) + ' caracteres'
+  return ''
+}
+
+function useCounterAnnouncement (active, count, limit) {
+  const previous = useRef(count)
+  const [announcement, setAnnouncement] = useState('')
+  useEffect(() => {
+    const message = counterAnnouncement(previous.current, count, limit)
+    if (!active || !message) setAnnouncement('')
+    previous.current = count
+    if (!active || !message) return
+    // The native announcement API is absent on react-native-web, which uses
+    // the live region instead. Only one announcement channel is active.
+    if (typeof AccessibilityInfo.announceForAccessibilityWithOptions === 'function') {
+      AccessibilityInfo.announceForAccessibilityWithOptions(message, { queue: true })
+    } else {
+      setAnnouncement(message)
+    }
+  }, [active, count, limit])
+  return announcement
+}
+
 const layoutOf = (e) => (e && e.nativeEvent && e.nativeEvent.layout) || null
 const keyboardHeight = (e) => {
   const h = e && e.endCoordinates ? e.endCoordinates.height : 0
@@ -383,7 +409,8 @@ function useKeepInView (on, caretAtEnd = null, givenFieldRef = null) {
   const handleTailLayout = useCallback((e, parent = null) => {
     const l = layoutOf(e)
     if (l) m.current.tailBottom = l.y + l.height + (m.current.parts[parent] || 0)
-  }, [])
+    defer()
+  }, [defer])
   const handleLayout = useCallback((e) => {
     const l = layoutOf(e)
     if (l) m.current.view = l.height
@@ -393,7 +420,7 @@ function useKeepInView (on, caretAtEnd = null, givenFieldRef = null) {
     if (Number.isFinite(h)) m.current.content = h
     keep()
   }, [keep])
-  const handleFocus = useCallback(() => { focusRef.current = true }, [])
+  const handleFocus = useCallback(() => { focusRef.current = true; defer() }, [defer])
   const handleBlur = useCallback(() => { focusRef.current = false }, [])
   return { scrollRef, fieldRef, tailRef, reveal, defer, at, handleTailLayout, handleLayout, handleContentSizeChange, handleFocus, handleBlur }
 }
@@ -1162,6 +1189,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const handleDiscardMoment = moment.reset
   const postDraft = text !== '' || items.length > 0
   const momentCount = momentLength(moment.text)
+  const momentAnnouncement = useCounterAnnouncement(open && momentMode, momentCount, MOMENT_TEXT_MAX)
+  const postAnnouncement = useCounterAnnouncement(open && !momentMode, len, MAX_TEXT)
   // While a text box has focus it stays in view with its counter (see
   // keepInView): every keystroke, also at the six-line maximum where the
   // body's content size no longer changes, and the keyboard opening.
@@ -1261,6 +1290,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
         right={<Pill label='Publicar' filled onPress={sendMoment} pending={moment.pending} disabled={!moment.valid} maxFontSizeMultiplier={TEXT_CAP} />}
       >
         <SheetKeyboard>
+          <Text style={styles.counterAnnouncement} accessibilityLiveRegion='polite' aria-live='polite'>{momentAnnouncement}</Text>
           <ScrollView
             key='moment'
             ref={momentView.scrollRef}
@@ -1305,6 +1335,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                 onLayout={(e) => momentView.handleTailLayout(e, 'body')}
                 style={[styles.counter, styles.momentCounter, momentCount >= MOMENT_COUNTER_WARN && styles.counterWarn, momentCount > MOMENT_TEXT_MAX && styles.counterFull]}
                 accessibilityLabel={momentCount + ' de ' + MOMENT_TEXT_MAX + ' caracteres'}
+                accessibilityLiveRegion='none'
               >
                 {momentCount + '/' + MOMENT_TEXT_MAX}
               </Text>
@@ -1336,6 +1367,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       right={<Pill label={pillLabel} filled onPress={send} pending={busy} disabled={!valid} maxFontSizeMultiplier={TEXT_CAP} />}
     >
       <SheetKeyboard>
+        <Text style={styles.counterAnnouncement} accessibilityLiveRegion='polite' aria-live='polite'>{postAnnouncement}</Text>
         <ScrollView
           key='post'
           ref={postView.scrollRef}
@@ -1472,7 +1504,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
           <MentionSuggest rows={frozen ? [] : suggestions} loading={!frozen && mentionQuery !== '' && search.phase === 'loading'} onPick={pickMention} />
           <View ref={postView.tailRef} style={styles.counterRow} onLayout={postView.handleTailLayout}>
             <View style={styles.tools}>
-              <Pressable
+              <PressScale
                 accessibilityRole='button'
                 accessibilityLabel={emojiOpen ? 'fechar emojis' : 'emojis'}
                 accessibilityState={{ expanded: emojiOpen, disabled: frozen }}
@@ -1482,12 +1514,12 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                 style={({ pressed }) => [styles.tool, pressed && styles.toolPressed]}
               >
                 <Icon name='smile' size={21} color={emojiOpen ? colors.accent : colors.soft} />
-              </Pressable>
+              </PressScale>
               {canAttach
                 ? (
-                  <Pressable
+                  <PressScale
                     accessibilityRole='button'
-                    accessibilityLabel='Foto'
+                    accessibilityLabel='Adicionar foto'
                     accessibilityState={{ disabled: attachOff || held }}
                     disabled={attachOff || held}
                     onPress={() => {
@@ -1498,13 +1530,13 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     style={({ pressed }) => [styles.tool, attachOff && styles.toolOff, pressed && styles.toolPressed]}
                   >
                     <Icon name='image' size={21} color={colors.soft} />
-                  </Pressable>
+                  </PressScale>
                   )
                 : null}
             </View>
             <View style={styles.count}>
               <Ring progress={ring.progress} tone={ring.tone} />
-              <Text style={[styles.counter, ring.tone === 'warn' && styles.counterWarn, ring.tone === 'danger' && styles.counterFull]}>
+              <Text accessibilityLabel={len + ' de ' + MAX_TEXT + ' caracteres'} accessibilityLiveRegion='none' style={[styles.counter, ring.tone === 'warn' && styles.counterWarn, ring.tone === 'danger' && styles.counterFull]}>
                 {ring.remaining === null ? len + '/' + MAX_TEXT : String(ring.remaining)}
               </Text>
             </View>
@@ -1730,7 +1762,7 @@ const makeStyles = (colors) => StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.6)'
   },
   thumbError: { fontSize: 12, lineHeight: 15, color: colors.danger },
-  momentBody: { gap: 12, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 16, alignItems: 'flex-start' },
+  momentBody: { gap: space.md, paddingHorizontal: space.lg, paddingTop: space.md, paddingBottom: space.lg, alignItems: 'flex-start' },
   momentPhoto: { width: 160, height: 200, borderRadius: 12, overflow: 'hidden', backgroundColor: colors.skeleton },
   momentInput: { ...type.compose, alignSelf: 'stretch', color: colors.ink, minHeight: MOMENT_MIN_HEIGHT, maxHeight: MOMENT_MAX_HEIGHT, borderWidth: 1, borderColor: colors.line, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, backgroundColor: colors.card },
   momentCounter: { alignSelf: 'flex-end', marginTop: -4 },
@@ -1791,11 +1823,12 @@ const makeStyles = (colors) => StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     gap: 7,
-    paddingVertical: 8,
+    paddingVertical: space.sm,
     // The tools pad their own 8, so icons and counter both sit 16 from the edges.
-    paddingLeft: 8,
-    paddingRight: 16
+    paddingLeft: space.sm,
+    paddingRight: space.lg
   },
+  counterAnnouncement: { position: 'absolute', width: 1, height: 1, opacity: 0 },
   counter: { ...type.counter, color: colors.soft },
   counterWarn: { color: colors.warn },
   counterFull: { color: colors.danger },
