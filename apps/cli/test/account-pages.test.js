@@ -9,6 +9,7 @@
 const http = require('node:http')
 const nodeCrypto = require('node:crypto')
 const test = require('brittle')
+const { videoBounds } = require('@varanda/rpc')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const Corestore = require('corestore')
@@ -67,6 +68,57 @@ function jpeg (width, height, size) {
   out[size - 2] = 0xff
   out[size - 1] = 0xd9
   return out
+}
+
+// One video sample with complete container tables, so refusal cannot be
+// explained by an invalid MPEG-4 container.
+function mp4 (width, height) {
+  const u32 = (n) => {
+    const b = Buffer.alloc(4)
+    b.writeUInt32BE(n)
+    return b
+  }
+  const box = (type, ...parts) => {
+    const body = Buffer.concat(parts)
+    return Buffer.concat([u32(body.length + 8), Buffer.from(type), body])
+  }
+  const time = (size) => {
+    const b = Buffer.alloc(size)
+    b.writeUInt32BE(1000, 12)
+    b.writeUInt32BE(3000, 16)
+    return b
+  }
+  const mvhd = time(100)
+  for (const offset of [36, 52]) mvhd.writeUInt32BE(0x10000, offset)
+  mvhd.writeUInt32BE(0x40000000, 68)
+  const tkhd = Buffer.alloc(84)
+  tkhd.writeUInt32BE(7, 0)
+  tkhd.writeUInt32BE(1, 12)
+  tkhd.writeUInt32BE(3000, 20)
+  for (const offset of [40, 56]) tkhd.writeUInt32BE(0x10000, offset)
+  tkhd.writeUInt32BE(0x40000000, 72)
+  tkhd.writeUInt32BE(width * 0x10000, 76)
+  tkhd.writeUInt32BE(height * 0x10000, 80)
+  const entry = Buffer.alloc(78)
+  entry.writeUInt16BE(1, 6)
+  entry.writeUInt16BE(width, 24)
+  entry.writeUInt16BE(height, 26)
+  entry.writeUInt16BE(0x18, 74)
+  entry.writeUInt16BE(0xffff, 76)
+  const avcC = box('avcC', Buffer.from([1, 100, 0, 40, 255, 225, 0, 4, 103, 100, 0, 40, 1, 0, 1, 104]))
+  const ftyp = box('ftyp', Buffer.from('isom'), u32(0), Buffer.from('isommp41'))
+  const stbl = box('stbl',
+    box('stsd', u32(0), u32(1), box('avc1', entry, avcC)),
+    box('stts', u32(0), u32(1), u32(1), u32(3000)),
+    box('stsz', u32(0), u32(10), u32(1)),
+    box('stsc', u32(0), u32(1), u32(1), u32(1), u32(1)),
+    box('stco', u32(0), u32(1), u32(ftyp.length + 8)))
+  const minf = box('minf', box('vmhd', u32(1), Buffer.alloc(8)),
+    box('dinf', box('dref', u32(0), u32(1), box('url ', u32(1)))), stbl)
+  const mdia = box('mdia', box('mdhd', time(24)),
+    box('hdlr', Buffer.alloc(8), Buffer.from('vide'), Buffer.alloc(13)), minf)
+  return Buffer.concat([ftyp, box('mdat', Buffer.alloc(10, 1)),
+    box('moov', box('mvhd', mvhd), box('trak', box('tkhd', tkhd), mdia))])
 }
 
 function sha (bytes) {
@@ -482,6 +534,17 @@ test('account pages: create, admins, transfer, follows, media, replay and the AC
   t.is(up.status, 200, JSON.stringify(up.body))
   const d = up.body.descriptor
   t.is(d.sha256, op.sha256)
+  const video = mp4(640, 480)
+  t.alike(videoBounds(video), { width: 640, height: 480, ms: 3000, audio: false }, 'a valid short video container')
+  const beforeVideo = ctx.writer.info(K).length
+  const beforeItems = ctx.writer.items(K)
+  for (const bytes of [video, img]) {
+    const refused = await s.upload(bia, K, bytes, { ...op, mime: 'video/mp4', bytes: bytes.length, sha256: sha(bytes) })
+    t.is(refused.status, 400, 'an authenticated admin cannot upload video')
+    t.is(refused.body.error, 'midia-invalida')
+  }
+  t.is(ctx.writer.info(K).length, beforeVideo, 'a refused video appends no record')
+  t.alike(ctx.writer.items(K), beforeItems, 'a refused video stores no media item')
   t.is((await s.upload(bia, K, img, { ...op, sha256: 'ab'.repeat(32) })).body.error, 'midia-invalida', 'the body must hash to the op')
   t.is((await s.upload(dani, K, img, op)).body.error, 'nao-vinculado')
   const foreign = { ...d, core: F }

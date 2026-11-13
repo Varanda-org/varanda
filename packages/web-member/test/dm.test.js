@@ -1041,6 +1041,11 @@ test('a voice note for dm.send: audio only, no sides, its duration; checked befo
     t.exception.all(() => A.node.dmPutMedia({ ...voice, ...over }), /mídia inválida/, name)
   }
   t.exception.all(() => A.node.dmPutMedia({ bytes: png(100), mime: 'image/png', width: 0, height: 0, to: 'ab'.repeat(32) }), /mídia inválida/, 'a photo still needs its sides')
+  // A chat takes no video: refused at once whatever the label.
+  const to = 'ab'.repeat(32)
+  const clip = m4a({ handlers: ['vide'] })
+  t.exception.all(() => A.node.dmPutMedia({ bytes: clip, mime: 'video/mp4', width: 640, height: 360, ms: 3000, kind: 'video', to }), /mídia inválida/, 'a video')
+  t.exception.all(() => A.node.dmPutMedia({ bytes: clip, mime: 'video/mp4', width: 640, height: 360, to }), /mídia inválida/, 'a video without kind')
 })
 
 test('the dm engine opens a voice note only when its bytes are audio only', async (t) => {
@@ -1063,6 +1068,7 @@ test('the dm engine opens a voice note only when its bytes are audio only', asyn
   t.is(await putErr({ bytes: m4a({ ms: 120000 }), mime: 'audio/mp4', width: 0, height: 0, ms: 1 }), 'mídia inválida', 'two minutes claiming 1 ms')
   t.is(await putErr({ bytes: m4a(), mime: 'audio/mp4', width: 0, height: 0, ms: 4001 }), 'mídia inválida', 'past the tolerance')
   t.not(await putErr({ bytes: m4a(), mime: 'audio/mp4', width: 0, height: 0 }), 'mídia inválida', 'no ms: the container decides')
+  t.is(await putErr({ bytes: m4a({ handlers: ['vide'] }), mime: 'video/mp4', width: 640, height: 360, ms: 3000 }), 'mídia inválida', 'the engine refuses a video for a chat')
 })
 
 // A dm engine whose blob channel is a stand-in that acks every frame at once

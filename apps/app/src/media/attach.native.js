@@ -2,7 +2,9 @@
 // photo library prompt on iOS). Assets come back as plain
 // { uri, mimeType, width, height }; EXIF is not requested, and encode.native.js
 // re-encodes the pixels anyway. pickImages resolves [] when cancelled and
-// pickImage null.
+// pickImage null. pickVideo offers videos only, one at a time, and resolves
+// null when cancelled; ./videoPrep re-encodes what it picks, so its size and
+// length are never taken from here.
 
 import * as ImagePicker from 'expo-image-picker'
 import { MAX_MEDIA_PER_POST } from './plan.js'
@@ -31,5 +33,10 @@ export function pickImages (limit = MAX_MEDIA_PER_POST) {
 
 export async function pickImage () {
   const assets = await launch({ allowsMultipleSelection: false })
+  return assets[0] || null
+}
+
+export async function pickVideo () {
+  const assets = await launch({ mediaTypes: ['videos'], allowsMultipleSelection: false })
   return assets[0] || null
 }

@@ -123,12 +123,13 @@ test('the service worker is a template outside public/', (t) => {
   for (const s of ['skipWaiting', 'clients.claim', 'cache.addAll', 'importScripts', 'eval(', 'RUNTIME_PREFIXES']) {
     t.absent(sw.includes(s), 'no ' + s)
   }
-  // Besides the shell, the only cache entries are the DM wake mute record and
-  // the block list: values the worker writes itself, never a network response,
-  // never served.
-  t.is(sw.split('cache.put(').length - 1, 3, 'three cache.put: precache, the DM mute record and the block list (no runtime caching)')
+  // Besides the shell, the only cache entries are the DM wake mute record, the
+  // block list and a received share: values the worker writes itself, never a
+  // network response, never served.
+  t.is(sw.split('cache.put(').length - 1, 5, 'five cache.put: precache, the DM mute record, the block list and a share (files, then meta) (no runtime caching)')
   t.is(sw.split('cache.put(DM_STATE_KEY, ').length - 1, 1, 'the second writes only the DM mute record')
   t.is(sw.split('cache.put(BLOCK_STATE_KEY, ').length - 1, 1, 'the third writes only the block list')
+  t.is(sw.split('cache.put(abs(SHARE_KEY_PREFIX + share.id + ').length - 1, 2, 'the last two write only the shared files and their meta')
   t.ok(sw.includes('async function verifiedMatch ('), 'cached responses are re-verified')
   t.is(sw.split('.match(').length - 1, 3, 'three cache reads: verifiedMatch, the DM mute record and the block list')
   t.is(sw.split('cache.match(DM_STATE_KEY)').length - 1, 1, 'the second reads only the DM mute record')
@@ -140,4 +141,37 @@ test('the service worker is a template outside public/', (t) => {
 test('round 8: html and body never pan or bounce after a screen push', (t) => {
   t.ok(/html,\s*body \{\s*overflow: hidden;/.test(html), 'html is clipped too')
   t.ok(/html,\s*body \{\s*overscroll-behavior: none;/.test(html), 'no overscroll on either axis')
+})
+
+// The installed PWA joins the Android share sheet through this target.
+// encodeFile refuses every other type before decoding, and the web picker
+// offers the same four, so a video type or image/* would list Varanda for a
+// share it cannot post.
+test('manifest share_target receives photos, GIFs, text and links', (t) => {
+  const share = manifest.share_target
+  t.alike(share, {
+    action: '/compartilhar',
+    method: 'POST',
+    enctype: 'multipart/form-data',
+    params: {
+      title: 'title',
+      text: 'text',
+      url: 'url',
+      files: [
+        { name: 'fotos', accept: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'] }
+      ]
+    }
+  })
+  const files = share && share.params && Array.isArray(share.params.files) ? share.params.files : []
+  const accepted = []
+  for (const file of files) {
+    const accept = file && file.accept
+    if (Array.isArray(accept)) accepted.push(...accept)
+    else if (accept != null) accepted.push(accept)
+  }
+  t.ok(accepted.length > 0, 'at least one accepted file type')
+  for (const mime of accepted) {
+    t.absent(String(mime).startsWith('video/'), mime)
+    t.absent(mime === 'image/*', mime)
+  }
 })

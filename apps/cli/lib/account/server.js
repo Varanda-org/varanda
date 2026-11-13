@@ -25,6 +25,7 @@ const { LINK_HEADER, APP_RETURN_PATH, isAppRequest, isAppProof, proofOf, safeEqu
 const { createPagesRoutes } = require('./pages-routes')
 const { createGifRoutes } = require('./gif-routes')
 const { createPreviewRoutes } = require('./preview-routes')
+const { createAudiusRoutes } = require('./audius-routes')
 const { createFeiraRoutes } = require('./feira-routes')
 const { createOgRoutes } = require('./og-routes')
 
@@ -189,7 +190,10 @@ const ERROR_STATUS = Object.freeze({
   'feature-off': 404,
   'limite-gif': 429,
   // Link previews (./preview-routes.js): the member spent its daily previews.
-  'limite-previa': 429
+  'limite-previa': 429,
+  // Music (./audius-routes.js): the member spent its daily plays, searches or
+  // audio bytes.
+  'limite-musica': 429
 })
 
 const BASE_HEADERS = Object.freeze({
@@ -688,6 +692,12 @@ function checkRawPost (req, origin) {
 // policy { enabled: false } and 404 'feature-off' elsewhere.
 // `previewTransport` ({ request, lookup, allowAddress, deadlineMs }) is for
 // tests only, to reach a loopback fixture.
+// `audius` (null: off, the policy answers { enabled: false, moments: false }
+// and every other /account/audius/* route 404 'feature-off') is a
+// parseAudiusConfig result of ./audius-provider.js; `audiusTransport`
+// ({ request, lookup, allowAddress, caps }) is for tests only, to reach
+// loopback fixtures. Every audio request, a seek included, also spends one
+// token of the global bucket like any other request.
 // `recovery` is an openRecoveryStore (./recovery-store.js), or null: the
 // recovery routes (./recovery-routes.js) then answer 503 'indisponivel' and
 // everything else stays up.
@@ -738,6 +748,8 @@ function createAccountServer ({
   gifTransport = {},
   preview = true,
   previewTransport = {},
+  audius = null,
+  audiusTransport = {},
   recovery = null,
   drops = null,
   passkeys = null,
@@ -1010,6 +1022,19 @@ function createAccountServer ({
   const previewRoutes = createPreviewRoutes({
     ...previewTransport,
     enabled: preview === true,
+    store,
+    terms,
+    blocklist: pages && pages.blocklist ? pages.blocklist : moderationBlocklist(moderation),
+    association,
+    log,
+    now,
+    http: { send, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, keyedWindow }
+  })
+
+  // Always mounted, so /account/audius/policy answers even when music is off.
+  const audiusRoutes = createAudiusRoutes({
+    ...audiusTransport,
+    config: audius,
     store,
     terms,
     blocklist: pages && pages.blocklist ? pages.blocklist : moderationBlocklist(moderation),
@@ -1626,6 +1651,9 @@ function createAccountServer ({
     if (pagesRoutes.owns(pathname)) return pagesRoutes.handle(req, res, url)
     if (gifRoutes.owns(pathname)) return gifRoutes.handle(req, res, url)
     if (previewRoutes.owns(pathname)) return previewRoutes.handle(req, res, url)
+    // The audio relay writes its own headers and keeps streaming after
+    // handle() resolves; a failure past its headers destroys the socket below.
+    if (audiusRoutes.owns(pathname)) return audiusRoutes.handle(req, res, url)
     if (feiraRoutes.owns(pathname)) return feiraRoutes.handle(req, res, url)
     if (ogRoutes.owns(pathname)) return ogRoutes.handle(req, res, url)
     if (req.method === 'GET') {
@@ -1722,7 +1750,7 @@ function createAccountServer ({
     return pushRoutes === null ? 0 : pushRoutes.room()
   }
 
-  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), phoneStats: () => phoneRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), deleteStats: () => deleteRoutes.stats(), passkeyStats: () => passkeyRoutes.stats(), deletionSweep: () => deletion.sweep(), startDeletionSweep: (ms) => deletion.start(ms), pagesStats: () => pagesRoutes.stats(), pagesReboxSweep: () => pagesRoutes.reboxSweep(), gifStats: () => gifRoutes.stats(), previewStats: () => previewRoutes.stats(), appStats: () => ({ rows: apps.size }) }
+  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), phoneStats: () => phoneRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), deleteStats: () => deleteRoutes.stats(), passkeyStats: () => passkeyRoutes.stats(), deletionSweep: () => deletion.sweep(), startDeletionSweep: (ms) => deletion.start(ms), pagesStats: () => pagesRoutes.stats(), pagesReboxSweep: () => pagesRoutes.reboxSweep(), gifStats: () => gifRoutes.stats(), previewStats: () => previewRoutes.stats(), audiusStats: () => audiusRoutes.stats(), appStats: () => ({ rows: apps.size }) }
 }
 
 module.exports = {

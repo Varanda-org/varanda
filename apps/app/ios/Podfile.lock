@@ -90,6 +90,8 @@ PODS:
   - ExpoTaskManager (55.0.20):
     - ExpoModulesCore
     - UMAppLoader
+  - ExpoVideo (55.0.21):
+    - ExpoModulesCore
   - FBLazyVector (0.83.10)
   - hermes-engine (0.14.1):
     - hermes-engine/Pre-built (= 0.14.1)
@@ -1654,6 +1656,28 @@ PODS:
     - ReactCommon/turbomodule/core
     - ReactNativeDependencies
     - Yoga
+  - react-native-webview (13.16.0):
+    - hermes-engine
+    - RCTRequired
+    - RCTTypeSafety
+    - React-Core
+    - React-Core-prebuilt
+    - React-debug
+    - React-Fabric
+    - React-featureflags
+    - React-graphics
+    - React-ImageManager
+    - React-jsi
+    - React-NativeModulesApple
+    - React-RCTFabric
+    - React-renderercss
+    - React-rendererdebug
+    - React-utils
+    - ReactCodegen
+    - ReactCommon/turbomodule/bridging
+    - ReactCommon/turbomodule/core
+    - ReactNativeDependencies
+    - Yoga
   - React-NativeModulesApple (0.83.10):
     - hermes-engine
     - React-callinvoker
@@ -2042,7 +2066,11 @@ PODS:
   - SDWebImageWebPCoder (0.15.0):
     - libwebp (~> 1.0)
     - SDWebImage/Core (~> 5.17)
+  - ShareIntake (0.1.0):
+    - ExpoModulesCore
   - UMAppLoader (55.0.5)
+  - VideoPrep (0.1.0):
+    - ExpoModulesCore
   - Yoga (0.0.0)
 
 DEPENDENCIES:
@@ -2066,6 +2094,7 @@ DEPENDENCIES:
   - ExpoModulesJSI (from `../../../node_modules/expo-modules-core`)
   - ExpoSecureStore (from `../../../node_modules/expo-secure-store/ios`)
   - ExpoTaskManager (from `../../../node_modules/expo-task-manager/ios`)
+  - ExpoVideo (from `../../../node_modules/expo-video/ios`)
   - FBLazyVector (from `../../../node_modules/react-native/Libraries/FBLazyVector`)
   - hermes-engine (from `../../../node_modules/react-native/sdks/hermes-engine/hermes-engine.podspec`)
   - PasskeyPrf (from `../modules/passkey-prf/ios`)
@@ -2110,6 +2139,7 @@ DEPENDENCIES:
   - react-native-bare-kit (from `../../../node_modules/react-native-bare-kit`)
   - "react-native-netinfo (from `../../../node_modules/@react-native-community/netinfo`)"
   - react-native-safe-area-context (from `../../../node_modules/react-native-safe-area-context`)
+  - react-native-webview (from `../../../node_modules/react-native-webview`)
   - React-NativeModulesApple (from `../../../node_modules/react-native/ReactCommon/react/nativemodule/core/platform/ios`)
   - React-networking (from `../../../node_modules/react-native/ReactCommon/react/networking`)
   - React-oscompat (from `../../../node_modules/react-native/ReactCommon/oscompat`)
@@ -2144,7 +2174,9 @@ DEPENDENCIES:
   - ReactCodegen (from `build/generated/ios/ReactCodegen`)
   - ReactCommon/turbomodule/core (from `../../../node_modules/react-native/ReactCommon`)
   - ReactNativeDependencies (from `../../../node_modules/react-native/third-party-podspecs/ReactNativeDependencies.podspec`)
+  - ShareIntake (from `../modules/share-intake/ios`)
   - UMAppLoader (from `../../../node_modules/unimodules-app-loader/ios`)
+  - VideoPrep (from `../modules/video-prep/ios`)
   - Yoga (from `../../../node_modules/react-native/ReactCommon/yoga`)
 
 SPEC REPOS:
@@ -2194,6 +2226,8 @@ EXTERNAL SOURCES:
     :path: "../../../node_modules/expo-secure-store/ios"
   ExpoTaskManager:
     :path: "../../../node_modules/expo-task-manager/ios"
+  ExpoVideo:
+    :path: "../../../node_modules/expo-video/ios"
   FBLazyVector:
     :path: "../../../node_modules/react-native/Libraries/FBLazyVector"
   hermes-engine:
@@ -2281,6 +2315,8 @@ EXTERNAL SOURCES:
     :path: "../../../node_modules/@react-native-community/netinfo"
   react-native-safe-area-context:
     :path: "../../../node_modules/react-native-safe-area-context"
+  react-native-webview:
+    :path: "../../../node_modules/react-native-webview"
   React-NativeModulesApple:
     :path: "../../../node_modules/react-native/ReactCommon/react/nativemodule/core/platform/ios"
   React-networking:
@@ -2349,8 +2385,12 @@ EXTERNAL SOURCES:
     :path: "../../../node_modules/react-native/ReactCommon"
   ReactNativeDependencies:
     :podspec: "../../../node_modules/react-native/third-party-podspecs/ReactNativeDependencies.podspec"
+  ShareIntake:
+    :path: "../modules/share-intake/ios"
   UMAppLoader:
     :path: "../../../node_modules/unimodules-app-loader/ios"
+  VideoPrep:
+    :path: "../modules/video-prep/ios"
   Yoga:
     :path: "../../../node_modules/react-native/ReactCommon/yoga"
 
@@ -2375,6 +2415,7 @@ SPEC CHECKSUMS:
   ExpoModulesJSI: 1bf2fab061d2c9635ff63b6fcc26747a68af9f12
   ExpoSecureStore: 422f8e24d8ba1693600bc3720f0a71a17ddcbea0
   ExpoTaskManager: 30a8729c6f6fc1872d96589bffc4ad8d5384b8d9
+  ExpoVideo: d060cc8f61ef6ad74b078969478b7242fc121b13
   FBLazyVector: b88945378388c6651d3725b0e8c2624fbb37ec64
   hermes-engine: a2a9fc7160af80292783f30b771f14a477f29712
   libwebp: af5937a13536ef73f3784d69cc342b98961acf33
@@ -2419,6 +2460,7 @@ SPEC CHECKSUMS:
   react-native-bare-kit: 766fb2dc9b0d607eb29f36962eb64cfecc0eec0e
   react-native-netinfo: f852c868bf5175e46165c7e4db48a204a95c3800
   react-native-safe-area-context: 37e680fc4cace3c0030ee46e8987d24f5d3bdab2
+  react-native-webview: 3e303e80cadb5f17118c8c1502aa398e9287e415
   React-NativeModulesApple: a50c33c8ccc50f034f595703c00635e750b1b9d2
   React-networking: af7a535a9bd9c0ab32d17a2489b7bdd4a8fa7fb9
   React-oscompat: 6688642587ec8cc9772b9bbc19763bc0b8bcecf2
@@ -2455,7 +2497,9 @@ SPEC CHECKSUMS:
   ReactNativeDependencies: 6e8598ca6525f2c38334c1daaec4d77ae55fff9b
   SDWebImage: e9fc87c1aab89a8ab1bbd74eba378c6f53be8abf
   SDWebImageWebPCoder: 0e06e365080397465cc73a7a9b472d8a3bd0f377
+  ShareIntake: ed8445713adfb691c24a941ad8827f33c2054083
   UMAppLoader: 045699ef1cc6afda399a5c78bde728f23bcce213
+  VideoPrep: d697316a7a76115ea3b6e263e529b42722d4fa2f
   Yoga: 3a3ee5afb97f3a990839cfae6092b0540c7441a4
 
 PODFILE CHECKSUM: 73745575230cae285b00c249a33da52d7ce8c04c

@@ -13,6 +13,7 @@ const { memberCertRecord, postRecord, profileRecord } = require('@varanda/core/l
 const { digest } = require('@varanda/core/lib/report')
 const { startSeedWs } = require('../lib/seed-ws')
 const { createPostReader, MAX_BODY } = require('../lib/account/ai/read-post')
+const { judge } = require('../lib/account/ai/triage')
 
 const TOKEN = 'c3'.repeat(32)
 const AT = '2026-03-01T12:00:00.000Z'
@@ -91,6 +92,15 @@ test('read: a verified post, media, quote, and the request it sends', async (t) 
   fx.handler = serveJson(body(b0, block(postRecord({ text: '', at: AT, media: [DESC] }))))
   const photo = await reader.read({ diaryKey: key, seq: 2 })
   t.alike([photo.ok, photo.text, photo.textCp, photo.hasMedia, photo.contentHash], [true, '', 0, true, digest('')], 'a photo-only post')
+
+  const poster = { ...DESC, mime: 'image/jpeg' }
+  const video = { ...DESC, mime: 'video/mp4', start: 2, ms: 3000 }
+  for (const text of ['com vídeo', '']) {
+    fx.handler = serveJson(body(b0, block(postRecord({ text, at: AT, media: [poster, video] }))))
+    const v = await reader.read({ diaryKey: key, seq: 2 })
+    t.alike(v, { ok: true, text, hasMedia: true, hasQuote: false, textCp: Array.from(text).length, contentHash: digest(text), seq: 2 }, 'a video pair is media, with or without a caption')
+    t.alike(judge({ ...v, kind: 'post', reason: 'spam', priorAi: false, truncated: false }), { action: 'aberta', code: 'midia', note: '', nearest: null }, 'the verified video post stays open for a person')
+  }
 
   fx.handler = serveJson(body(b0, block(postRecord({ text: 'citando', at: AT, quote: { author: randomKey(), seq: 4 } }))))
   const q = await reader.read({ diaryKey: key, seq: 2 })

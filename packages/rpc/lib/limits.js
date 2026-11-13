@@ -32,6 +32,14 @@ const AVATAR_SIDE = 512
 const MAX_AVATAR_BLOCKS = 8
 const MAX_AVATAR_BYTES = 262144
 const AVATAR_MIMES = Object.freeze(['image/jpeg', 'image/webp'])
+// Short videos, same values as records.js: a post's [JPEG poster, video]
+// pair and a momento video (its blob bytes add the DM_MEDIA_MAC_BYTES MAC).
+const VIDEO_MIME = 'video/mp4'
+const MAX_VIDEO_MS = 30000
+const MAX_VIDEO_DIMENSION = 1920
+const MAX_VIDEO_PIXELS = 2073600
+const MAX_MOMENT_VIDEO_MS = 15000
+const MAX_MOMENT_VIDEO_BYTES = 4194304
 // DM media items: blob descriptors of packages/core/lib/blob.js
 // (BLOB_CHUNK_BYTES, BLOB_MAX_CHUNKS, BLOB_MAC_BYTES; not imported: zero deps)
 // plus mime, w, h and ms (docs/protocol.md section 11).
@@ -190,6 +198,12 @@ module.exports = {
   MAX_AVATAR_BLOCKS,
   MAX_AVATAR_BYTES,
   AVATAR_MIMES,
+  VIDEO_MIME,
+  MAX_VIDEO_MS,
+  MAX_VIDEO_DIMENSION,
+  MAX_VIDEO_PIXELS,
+  MAX_MOMENT_VIDEO_MS,
+  MAX_MOMENT_VIDEO_BYTES,
   MAX_DM_MEDIA,
   MAX_GROUP_MEDIA,
   DM_MEDIA_CHUNK_BYTES,
