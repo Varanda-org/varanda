@@ -129,6 +129,50 @@ test('build stops at a malformed row, keeping a contiguous top', async (t) => {
   t.alike(s.cursor, { at: at(50), author: OWN, seq: 50 })
 })
 
+const poster = { ...photo, width: 640, height: 360 }
+const clip = { core: '9a'.repeat(32), mime: 'video/mp4', start: 2, blocks: 30, bytes: 30 * 32768 - 5, sha256: 'bc'.repeat(32), width: 640, height: 360, ms: 12000 }
+
+test('a video row in the middle survives build and parse, with every older row', async (t) => {
+  const { buildSnapshot, parseSnapshot } = await load()
+  const f = fixture()
+  f.items = [f.items[0], post(FOLLOW, 49, { media: [poster, clip] }), f.items[6], f.items[7]]
+  const s = buildSnapshot(f)
+  t.alike(s.items.map((i) => i.seq), [50, 49, 44, 43], 'the video row and the older ones are kept')
+  t.alike(s.items[1].media, [poster, clip])
+  t.not(s.items[1].media[1], clip, 'a copy')
+  t.alike(s.cursor, { at: at(43), author: OWN, seq: 43 })
+  t.alike(parseSnapshot(JSON.stringify(s), ctx), s, 'round trip')
+  const newest = buildSnapshot({ ...fixture(), items: [post(OWN, 60, { media: [poster, clip] })], cursor: { at: at(60), author: OWN, seq: 60 } })
+  t.alike(newest.items[0].media, [poster, clip], 'a video as the newest row')
+})
+
+test('a malformed video pair is refused like any bad media', async (t) => {
+  const { buildSnapshot, parseSnapshot } = await load()
+  const bad = [
+    [clip, poster],
+    [clip],
+    [poster, clip, photo],
+    [{ ...poster, mime: 'image/png' }, clip],
+    [poster, { ...clip, ms: 0 }],
+    [poster, { ...clip, ms: 30001 }],
+    [poster, { ...clip, width: 1920, height: 1920 }],
+    [poster, { ...clip, extra: 1 }],
+    [poster, { ...clip, mime: 'image/jpeg' }],
+    [photo, { ...clip, ms: undefined }]
+  ]
+  for (const media of bad) {
+    const f = fixture()
+    f.items = [f.items[0], post(FOLLOW, 49, { media }), f.items[1]]
+    t.alike(buildSnapshot(f).items.map((i) => i.seq), [50], JSON.stringify(media.map((d) => d.mime)))
+  }
+  const good = buildSnapshot({ ...fixture(), items: [post(OWN, 60, { media: [poster, clip] })], cursor: { at: at(60), author: OWN, seq: 60 } })
+  for (const media of bad) {
+    const tampered = JSON.parse(JSON.stringify(good))
+    tampered.items[0].media = JSON.parse(JSON.stringify(media))
+    t.is(parseSnapshot(JSON.stringify(tampered), ctx), null)
+  }
+})
+
 test('build keeps only the first FEED_LIMIT_DEFAULT rows', async (t) => {
   const { buildSnapshot } = await load()
   const items = Array.from({ length: 40 }, (_, i) => post(FOLLOW, 100 - i))

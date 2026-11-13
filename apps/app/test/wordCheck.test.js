@@ -163,6 +163,9 @@ test('the composers check before they send', (t) => {
   const momentStart = publicar.indexOf('const send = async () => {')
   const moment = publicar.slice(momentStart, publicar.indexOf('putMoment(', momentStart))
   t.ok(/const refused = refusalOf\(text\)\s*if \(refused !== ''\) \{ setError\(refused\); return false \}/.test(moment), 'Momento: a refusal stops the send before the upload')
+  const momentDraft = publicar.slice(publicar.indexOf('function useMomentDraft'), publicar.indexOf('export const MOMENT_MIN_HEIGHT'))
+  t.alike([...momentDraft.matchAll(/refusalOf\(([^)]*)\)/g)].map((m) => m[1]), ['text'], 'Momento: only the author text is checked, never the provider title or artist')
+  t.ok(momentDraft.includes("music: { p: 'audius', id: music.ref.id, start: music.ref.start }"), 'music is sent as a reference, without provider text')
 
   const depo = screen('Depoimentos.js')
   const sheetAt = depo.indexOf('export function WriteTestimonialSheet')
