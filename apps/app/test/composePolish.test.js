@@ -178,6 +178,7 @@ test('composer web announcement effect clears stale thresholds', (t) => {
       limit,
       previous,
       counterAnnouncement,
+      announcement,
       AccessibilityInfo: {},
       setAnnouncement: (text) => { announcement = text }
     })
@@ -194,4 +195,47 @@ test('composer web announcement effect clears stale thresholds', (t) => {
     update(limit, false)
     t.is(announcement, '', 'closing the composer clears the region')
   }
+})
+
+// Each keystroke commits, then runs these effects. A setter call there queues
+// one more render even with the value it already has, so fast typing (the
+// simulator's typing tool, about 100 characters a second) kept a render
+// pending after every commit and React threw "Maximum update depth exceeded"
+// from typePost after 50 of them.
+test('composer keystroke effects call a setter only to change its value', (t) => {
+  const src = read('screens/Publicar.js')
+  const helper = src.match(/export function counterAnnouncement \([^]*?\n\}/)
+  const counter = src.slice(src.indexOf('function useCounterAnnouncement')).match(/useEffect\(\(\) => \{([^]*?)\}, \[active, count, limit\]\)/)
+  const checkClear = src.match(/useEffect\(\(\) => \{ ([^\n]*setCheckError[^\n]*) \}, \[text\]\)/)
+  t.ok(helper && counter && checkClear, 'real counter effect and check message effect are available')
+  if (!helper || !counter || !checkClear) return
+  const counterAnnouncement = evaluate(helper[0].replace('export ', '') + '\nreturn counterAnnouncement')
+
+  const native = { announceForAccessibilityWithOptions: () => {} }
+  for (const [platform, AccessibilityInfo] of [['native', native], ['web', {}]]) {
+    for (const limit of [200, 1000]) {
+      let announcement = ''
+      let unchanged = 0
+      let changed = 0
+      const previous = { current: 0 }
+      const setAnnouncement = (text) => {
+        if (text === announcement) unchanged++
+        else changed++
+        announcement = text
+      }
+      for (let count = 1; count <= 3000; count++) {
+        evaluate(counter[1], { active: true, count, limit, previous, counterAnnouncement, announcement, AccessibilityInfo, setAnnouncement })
+      }
+      evaluate(counter[1], { active: false, count: 3000, limit, previous, counterAnnouncement, announcement, AccessibilityInfo, setAnnouncement })
+      t.is(unchanged, 0, platform + ' ' + limit + ': typing 3000 characters never sets the same announcement')
+      t.is(changed, platform === 'web' ? 4 : 0, platform + ' ' + limit + ': only the two thresholds and their clearing set it')
+    }
+  }
+
+  const calls = []
+  const clear = (checkError) => evaluate(checkClear[1], { checkError, setCheckError: (value) => calls.push(value) })
+  clear('')
+  t.alike(calls, [], 'no message: a keystroke leaves it alone')
+  clear('erro')
+  t.alike(calls, [''], 'a message about the old text is cleared')
 })

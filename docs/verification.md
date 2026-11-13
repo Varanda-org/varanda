@@ -9283,3 +9283,34 @@ Nenhuma verificação manual foi feita. Os itens abaixo continuam em aberto, na 
 - [ ] Uma conta com aceite anterior precisa aceitar a versão 42 antes de continuar.
 - [ ] A tela de aceite e Ajustes, Termos e privacidade, mostram a versão 42, a data 13/11/2026 e os parágrafos sobre capas.
 - [ ] As páginas de Termos e Privacidade do site apresentam o mesmo texto do app.
+
+## 202. Publicar sem "Maximum update depth exceeded" ao digitar rápido (PR fix/composer-paste-update-loop)
+
+Corrige a observação 2 do §198. Não muda protocolo, semeador nem RPC.
+
+Causa: dois efeitos do campo de Publicar rodam a cada tecla e chamavam o setter mesmo com o valor que já tinham (`setAnnouncement('')` em `useCounterAnnouncement` e `setCheckError('')`). No React 19, essa chamada logo depois de um commit ainda agenda uma renderização. Na digitação do simulador (de 90 a 150 caracteres por segundo), a tecla seguinte chegava antes dessa renderização, e depois de 50 commits seguidos com trabalho pendente o React lançou o erro a partir de `typePost`. Na web, teclas disparadas em sequência reproduzem o mesmo erro, por volta da tecla 52. Não depende de tocar **Cancelar**.
+
+Regras que os passos conferem:
+
+- Os dois efeitos só chamam o setter quando o valor muda: o aviso do contador só é limpo se havia aviso, e a mensagem da conferência do texto só é limpa se havia mensagem.
+- O resto não muda: passado o limite, o contador fica vermelho e negativo e **Publicar** fica desligado. O campo não corta o texto no limite.
+- Os avisos do contador para leitor de tela continuam os mesmos: "Restam N caracteres" a 20 do limite e "Limite de caracteres atingido" ao chegar nele, uma vez cada.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/composePolish.test.js`: `composer keystroke effects call a setter only to change its value` digita 3000 caracteres pelo efeito real do contador, no celular e na web, com limites de 200 e 1000, e confere que nenhum setter recebe o valor que já tinha. Sem a correção, o teste falha.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA:
+
+- [ ] Simulador iOS: abrir Publicar e digitar cerca de 3 mil caracteres com a ferramenta de digitação do simulador. Não aparece a caixa vermelha, o contador acompanha o texto e, depois do limite, fica vermelho e negativo, com **Publicar** desligado.
+- [ ] Depois disso, tocar **Cancelar**: o campo fecha sem erro.
+- [ ] Android: colar um texto de cerca de 3 mil caracteres e digitar rápido em seguida, sem erro.
+- [ ] Web e PWA: colar um texto longo e segurar uma tecla: sem erro no console, e o contador acompanha.
+- [ ] Com VoiceOver ou TalkBack: os avisos de "Restam" e de limite atingido ainda são lidos, uma vez cada.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+- Durante o desenvolvimento, o erro foi reproduzido no simulador iOS e na web com o código anterior. Com a correção, 3190 caracteres digitados no simulador iOS e 3000 teclas na web passaram sem erro, e **Cancelar** fechou o campo. O Android não foi conferido.
+- O teste lê o corpo dos dois efeitos do código-fonte: se a forma deles mudar, o teste falha na primeira asserção e precisa acompanhar.
