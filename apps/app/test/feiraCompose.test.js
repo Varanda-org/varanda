@@ -3,6 +3,9 @@
 // The Feira composer and listing detail decisions (src/feiraCompose.js). ES
 // modules loaded through import().
 const test = require('brittle')
+const fs = require('fs')
+const path = require('path')
+const vm = require('vm')
 const { validateParams } = require('@varanda/rpc')
 
 const load = () => import('../src/feiraCompose.js')
@@ -10,6 +13,114 @@ const loadFeira = () => import('../src/feira.js')
 const A = 'ab'.repeat(32)
 const PAGE = 'cd'.repeat(32)
 const ME = 'ef'.repeat(32)
+
+const source = (file) => fs.readFileSync(path.join(__dirname, '..', file), 'utf8')
+
+test('feiraCompose: stepped creation keeps the fields, preview and publication controls', (t) => {
+  const src = source('src/screens/Anunciar.js')
+  const step = (name, next) => src.slice(src.indexOf("{STEPS[index] === '" + name + "'"), next ? src.indexOf("{STEPS[index] === '" + next + "'") : src.indexOf("{error !== '' ?"))
+  t.ok(/<Stepper\s+index=\{index\}\s+total=\{STEPS.length\}\s+title=\{STEP_TITLES\[index\]\}/.test(src))
+  t.ok(src.includes("<Btn label='Continuar' block onPress={advance}"))
+  t.ok(src.includes("<Btn label='Voltar' block secondary onPress={goBack}"))
+  t.ok(src.includes("<Btn label='Publicar anúncio' block onPress={publish}"))
+  t.ok(step('fotos', 'detalhes').includes('Fotos só podem ser publicadas na versão web.'))
+  t.ok(src.includes("throw new Error('mídia disponível só na versão web')"))
+  t.ok(step('detalhes', 'preco').includes("<Field label='Descrição'"))
+  t.ok(step('detalhes', 'preco').includes('<Label>Categoria</Label>'))
+  t.ok(step('preco', 'revisao').includes("<Field label='Cidade'"))
+  t.ok(step('preco', 'revisao').includes('priceFieldLabel(form.kind)'))
+  t.ok(step('revisao').includes("<ListingTile listing={previewListing(form)} width='100%' />"))
+  t.ok(step('revisao').includes("accessibilityRole='checkbox'") && step('revisao').includes('{ACK_TEXT}'))
+  t.ok(src.includes('Público na web e em buscadores'))
+  t.ok(src.includes("<Sheet open={confirmLeave} onClose={() => setConfirmLeave(false)} title='Descartar anúncio?'>"))
+  t.ok(src.includes("<Soft>{pending !== null ? UNKNOWN_PUBLICATION : 'O que você preencheu será perdido.'}</Soft>"), 'leaving an uncertain publication warns to check existing listings')
+  t.ok(src.includes("<Btn label='Descartar' block danger onPress={onBack} />"))
+  t.ok(src.includes("<Btn label='Continuar editando' block secondary onPress={() => setConfirmLeave(false)} />"))
+})
+
+test('feiraCompose: failed advance keeps errors visible beside the actions and at the field', (t) => {
+  const src = source('src/screens/Anunciar.js')
+  const advance = src.slice(src.indexOf('const advance = () => {'), src.indexOf('// Descriptors are valid'))
+  const failure = advance.match(/if \(problem\) \{([\s\S]*?)\n {4}\}/)
+  t.ok(failure, 'advance handles a step error')
+  if (!failure) return
+  t.absent(failure[1].includes('scrollTo'), 'a refusal keeps the current scroll position')
+  t.ok(failure[1].includes('setField(problem.field)') && failure[1].includes('setError(problem.error)'))
+  t.ok(src.includes("{error !== '' ? <ErrorText>{error}</ErrorText> : null}"), 'every error is repeated beside the actions')
+  t.ok(src.includes("field === name && error !== '' ? <ErrorText>{error}</ErrorText> : null"), 'the field keeps its inline error')
+  t.ok(advance.includes('move(index + 1)'), 'success moves to the next step')
+  const move = src.slice(src.indexOf('const move = (next) => {'), src.indexOf('const back = () => {'))
+  t.ok(move.includes('scrollRef.current?.scrollTo({ y: 0, animated: false })'), 'a new step starts at the top')
+})
+
+test('feiraCompose: review preview is labeled and uses a noninteractive tile', (t) => {
+  const src = source('src/screens/Anunciar.js')
+  t.ok(/<Label>Prévia<\/Label>\s+<ListingTile listing=\{previewListing\(form\)\} width='100%' \/>/.test(src))
+  const tile = source('src/ui/ListingTile.js')
+  t.ok(/if \(typeof onPress !== 'function'\) \{\s+return <View style=\{\[styles.tile, \{ width \}\]\}>\{content\}<\/View>\s+\}/.test(tile), 'without a press handler the tile is a plain View with the same style and content')
+  const content = tile.slice(tile.indexOf('const content = ('), tile.indexOf("if (typeof onPress !== 'function')"))
+  t.ok(content.includes('<Text style={styles.title}'), 'the plain preview includes its title')
+  t.absent(/accessibilityRole|focusable|aria-hidden|accessibilityElementsHidden|no-hide-descendants|PressScale/.test(content), 'preview content remains readable without a button or focus target')
+  t.ok(/<PressScale\s+accessibilityRole='button'[\s\S]*?onPress=\{onPress\}/.test(tile), 'interactive tiles keep their button and handler')
+})
+
+test('feiraCompose: back guard steps back and protects a draft at the first step', (t) => {
+  const src = source('src/screens/Anunciar.js')
+  const match = src.match(/const back = \(\) => \{([\s\S]*?)\n {2}\}\n {2}const backRef/)
+  t.ok(match, 'the screen registers its own back decision')
+  if (!match) return
+  const run = (patch = {}) => {
+    const state = { sendingRef: { current: false }, encoding: false, confirmLeave: false, pending: null, index: 0, ack: false, photos: [], initialForm: { current: { title: '', city: 'Santos' } }, form: { title: '', city: 'Santos' }, ...patch }
+    const calls = []
+    const args = { ...state, move: (index) => calls.push(index), setConfirmLeave: (open) => calls.push(open) }
+    const consumed = vm.runInNewContext('(() => {' + match[1] + '})()', args)
+    return { consumed, calls }
+  }
+  t.alike(run(), { consumed: false, calls: [] }, 'initial location alone does not mark a draft')
+  for (const index of [1, 2, 3]) t.alike(run({ index }), { consumed: true, calls: [index - 1] })
+  for (const index of [0, 1, 2, 3]) {
+    for (const pending of [{ retry: null }, { retry: () => {} }]) {
+      t.alike(run({ index, pending }), { consumed: true, calls: [true] }, 'an uncertain publication opens the sheet without changing step')
+    }
+  }
+  for (const patch of [{ ack: true }, { photos: [{}] }, { form: { title: 'Mesa', city: 'Santos' } }, { form: { title: '', city: 'Recife' } }]) {
+    t.alike(run(patch), { consumed: true, calls: [true] }, 'a draft asks before leaving')
+  }
+  for (const patch of [{ sendingRef: { current: true } }, { encoding: true }]) {
+    for (const index of [0, 1, 2, 3]) {
+      t.alike(run({ ...patch, index, ack: true, pending: { retry: null } }), { consumed: false, calls: [] }, 'sending or encoding permits leaving without a step change or sheet')
+    }
+  }
+  t.alike(run({ confirmLeave: true }), { consumed: true, calls: [] }, 'an open confirmation consumes back')
+  t.ok(src.includes('if (!back()) onBack()'), 'toolbar and button use the same decision')
+  t.ok(src.includes('backRef.current = back'), 'the registered function reads the latest draft')
+  t.ok(src.includes('return registerBackGuard(() => backRef.current())'), 'effect returns the registration cleanup')
+})
+
+test('feiraCompose: App routes hardware back and Escape through the active guard', (t) => {
+  const src = source('App.js')
+  t.ok(src.includes('const backGuardRef = useRef(null)'))
+  const hardwareStart = src.indexOf("BackHandler.addEventListener('hardwareBackPress'")
+  const hardware = src.slice(hardwareStart, src.indexOf('return () => sub.remove()', hardwareStart))
+  t.ok(/if \(helpOpenRef.current \|\| sheetOpenRef.current\) return false\s+if \(backGuardRef.current\?\.\(\) === true\) return true/.test(hardware))
+  const escape = src.slice(src.indexOf('const onKey = (event) =>'), src.indexOf("globalThis.addEventListener('keydown', onKey)"))
+  t.ok(/sheetOpenRef.current\) return\s+if \(backGuardRef.current\?\.\(\) === true\) \{\s+event.preventDefault\(\)\s+return/.test(escape))
+  t.ok(src.includes('registerBackGuard={(fn) => registerBackGuard(() => stackRef.current[stackRef.current.length - 1] === entry && fn())}'), 'hidden and departing screens cannot consume back')
+  const match = src.match(/const registerBackGuard = useCallback\(\(fn\) => \{([\s\S]*?)\n {2}\}, \[\]\)/)
+  t.ok(match, 'registration returns an owned cleanup')
+  if (!match) return
+  const ref = { current: null }
+  const register = vm.runInNewContext('(fn) => {' + match[1] + '}', { backGuardRef: ref })
+  const first = () => true
+  const second = () => false
+  const clearFirst = register(first)
+  t.is(ref.current, first)
+  const clearSecond = register(second)
+  clearFirst()
+  t.is(ref.current, second, 'an old unmount preserves the newer guard')
+  clearSecond()
+  t.is(ref.current, null, 'unmount clears its own guard')
+})
 
 const form = (extra = {}) => ({
   kind: 'produto',

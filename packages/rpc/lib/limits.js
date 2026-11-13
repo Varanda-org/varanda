@@ -74,19 +74,27 @@ const PROFILE_LIMIT_MAX = 100
 const ENGAGEMENT_LIMIT_MAX = 62
 const PEEK_SEQS_MAX = 29
 // The largest page whose worst case includes a maximal private link card
-// per post and still fits MAX_MESSAGE (docs/rpc.md section 2, test/sizes.test.js).
-const GROUP_LIMIT_DEFAULT = 29
-const GROUP_LIMIT_MAX = 29
+// and GROUP_REACTIONS_MAX maximal reaction summaries per post and still fits
+// MAX_MESSAGE (docs/rpc.md section 2, test/sizes.test.js).
+const GROUP_LIMIT_DEFAULT = 26
+const GROUP_LIMIT_MAX = 26
 const GROUP_MEMBERS_LIMIT_MAX = 100
+// Distinct emojis folded per group message (group-react, docs/protocol.md
+// section 10); a group.read item carries at most this many summaries.
+const GROUP_REACTIONS_MAX = 12
+// Diary keys per emoji in the who-reacted answer: the largest list whose
+// worst case (GROUP_REACTIONS_MAX emojis, each with this many keys) fits
+// MAX_MESSAGE (test/sizes.test.js).
+const GROUP_REACTORS_MAX = 324
 const MAX_GROUP_NAME = 80 // same value as records.js
 const MAX_GROUP_CUTS = 16
 const MAX_GROUPS_PER_COMMUNITY = 32
 const COMMUNITY_LIST_MAX = 64
-// dm.thread: the largest page whose worst case (MAX_TEXT 4-byte characters
-// and a maximal link card in every message) fits MAX_MESSAGE
-// (docs/rpc.md 5.78, test/sizes.test.js).
+// dm.thread: the largest page whose worst case (MAX_TEXT 4-byte characters,
+// a maximal link card and two reactions at the emoji cap in every message)
+// fits MAX_MESSAGE (docs/rpc.md 5.78, test/sizes.test.js).
 const DM_THREAD_LIMIT_DEFAULT = 30
-const DM_THREAD_LIMIT_MAX = 42
+const DM_THREAD_LIMIT_MAX = 41
 const PEEK_TIMEOUT_MS = 8000
 const FOLLOW_LIMIT_DEFAULT = 100
 const FOLLOW_LIMIT_MAX = 500
@@ -216,6 +224,8 @@ module.exports = {
   GROUP_LIMIT_DEFAULT,
   GROUP_LIMIT_MAX,
   GROUP_MEMBERS_LIMIT_MAX,
+  GROUP_REACTIONS_MAX,
+  GROUP_REACTORS_MAX,
   MAX_GROUP_NAME,
   MAX_GROUP_CUTS,
   MAX_GROUPS_PER_COMMUNITY,

@@ -373,6 +373,7 @@ test('a failed resolve leaves the ordinary draft alone and does not retry', asyn
 async function sender (overrides = {}) {
   const state = { errors: [], requests: [], queued: [], published: [], checked: [] }
   const { refusalOf } = await import('../src/wordCheck.js')
+  const { sentMatcher } = await import('../src/replySend.js')
   const ctx = {
     ...await rules(),
     ...await import('../src/linkCard.js'),
@@ -406,6 +407,7 @@ async function sender (overrides = {}) {
     GATE_MESSAGE: 'gate',
     setChecking: () => {},
     lastSeqRef: { current: null },
+    sentMatcher,
     isQuoteRecord: (r) => !!r?.quote,
     sameRef: (a, b) => JSON.stringify(a) === JSON.stringify(b),
     refOf: (ref) => ref || null,

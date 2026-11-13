@@ -8,6 +8,7 @@ const { MAX_AUDIO_MS } = require('./audio-bounds')
 const F = require('./feira')
 const IC = require('./invite-card')
 const { isMomentMusic } = require('./music')
+const { isReaction } = require('./reaction')
 
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):(0|[1-9][0-9]*)$/
@@ -572,6 +573,8 @@ const DM_LIST_LIMIT_MAX = 50
 const isDmId = (v) => typeof v === 'string' && DM_ID_RE.test(v)
 const isDmState = (v) => typeof v === 'string' && DM_STATES.includes(v)
 const isDmFolder = (v) => v === 'inbox' || v === 'request'
+// dm.react `target`: exactly { from, id }, a message of the conversation.
+const isDmTarget = (v) => isPlainObject(v) && Object.keys(v).length === 2 && hasOwn(v, 'from') && hasOwn(v, 'id') && isKey(v.from) && isDmId(v.id)
 const PAGE_RECIPIENTS_MAX = 17
 // The page-secrets header carries gen as uint32be.
 const PAGE_GEN_MAX = 0xffffffff
@@ -1241,6 +1244,11 @@ const SPECS = {
   // Private groups (docs/rpc.md 5.61): a new epoch key for the group, never returned.
   'group.rekey': { fields: { group: req(isKey) }, mutating: true },
   'group.hide': { fields: { group: req(isKey), target: req(isGroupRef), on: req(isBool) }, mutating: true },
+  // A reaction to a visible group-post (docs/rpc.md 5.117); '' removes it.
+  'group.react': { fields: { group: req(isKey), target: req(isGroupRef), emoji: req((v) => v === '' || isReaction(v)) }, mutating: true },
+  // Who reacted to a group-post: { reactions: [{ emoji, count, by }] }, by up
+  // to GROUP_REACTORS_MAX diary keys per emoji in causal order (5.118).
+  'group.reactors': { fields: { group: req(isKey), target: req(isGroupRef) } },
   // Communities (docs/rpc.md 5.57 to 5.70): hold the groups, named by their root key.
   // community.link was removed in protocol v2 (docs/rpc.md 5.58): an unknown method.
   'community.create': { fields: { name: req(str(1, L.MAX_GROUP_NAME)), join: req(isGroupJoin) }, mutating: true },
@@ -1310,6 +1318,9 @@ const SPECS = {
     mutating: true,
     cross: postCross
   },
+  // A reaction to a message of the conversation (docs/rpc.md 5.119): one
+  // emoji, or '' to remove. Spends the stamps of one dm.send.
+  'dm.react': { fields: { to: req(isKey), target: req(isDmTarget), emoji: req((v) => v === '' || isReaction(v)) }, mutating: true },
   'dm.pull': { fields: none },
   'dm.list': {
     fields: {

@@ -230,10 +230,31 @@ test('pages-groups: cached v1 and v2 posts paginate without a seeder connection'
   const pg = createPagesGroups({ dir, writer, pagesStore, keys, association, fetchTimeoutMs: 10 })
   t.teardown(() => pg.close(), { force: true })
   await pg.ready()
-  const first = await pg.groupRead(page.key, group, { limit: 2 })
+  // 500 reactors on the visible post, the page among them: the read sends
+  // the compact summary and never the fold's `by` list.
+  const reactors = [...Array.from({ length: 499 }, (_, i) => i.toString(16).padStart(64, '0')), page.key]
+  const build = groupLib.buildGroup
+  groupLib.buildGroup = (...args) => {
+    const view = build(...args)
+    for (const p of view.posts) if (p.seq === visible.seq) p.reactions = [{ emoji: '\u{1f44d}', count: reactors.length, by: reactors }]
+    // The fold keeps a hidden post's card; the read must not pass it on.
+    for (const p of view.posts) if (p.seq === hidden.seq) p.card = { url: 'https://exemplo.com.br/', host: 'exemplo.com.br', title: 'oculto', desc: '', image: null }
+    return view
+  }
+  let first
+  try {
+    first = await pg.groupRead(page.key, group, { limit: 2 })
+  } finally {
+    groupLib.buildGroup = build
+  }
+  t.alike(first.items[1].reactions, [{ emoji: '\u{1f44d}', count: 500, mine: true }], 'compact reactions, no reactor keys')
+  t.absent('reactions' in first.items[0], 'absent when empty')
+  t.ok(JSON.stringify(first).length < 20000)
   t.alike(first.items.map((p) => p.seq), [hidden.seq, visible.seq])
   t.is(first.items[0].media, null, 'hidden media is omitted')
   t.is(first.items[0].text, '')
+  t.is(first.items[0].card, null, 'a hidden post carries no card')
+  t.is(first.items[1].card, null, 'no card is null')
   t.alike(first.items[1].media, media, 'v2 descriptors survive the cached fold')
   t.is(first.items[1].text, '')
   t.is(first.incomplete, true, 'the missing writer listing stays explicit')

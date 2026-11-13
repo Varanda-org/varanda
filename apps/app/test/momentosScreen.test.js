@@ -207,7 +207,7 @@ test('review 1: the viewer runs, marks seen and closes only on top', (t) => {
   const src = read('src/screens/Momentos.js')
   t.ok(src.includes('function Viewer ({ entry, ownKey, isTop = true,'), 'isTop prop')
   t.ok(src.includes("if (itemKey !== '' && isTop && photo.phase !== 'loading') mark(itemKey)"), 'seen only on top')
-  t.ok(src.includes('const running = active && loaded && autoOn') && src.includes('&& !musicWaiting,'), 'auto-advance only when unpaused and audio is not starting')
+  t.ok(src.includes('const running = active && loaded && autoOn') && src.includes('&& !musicWaiting && !captionExpanded,'), 'auto-advance only when unpaused and audio is not starting')
   t.ok(src.includes('active: isTop && node.visible !== false') && src.includes('const running = active && loaded && autoOn'), 'auto-advance only on top and visible')
   t.ok(src.includes("if (closingRef.current || !isTopRef.current || typeof onBack !== 'function') return"), 'goBack only on top')
   t.ok(read('App.js').includes('<Momentos entry={entry} ownKey={ownKey} isTop={i === stack.length - 1}'), 'App passes the top flag')
@@ -992,7 +992,9 @@ async function viewerHost ({ music = true, policy = true, ready = true, reduce =
     useTheme: () => ({ colors: {} }),
     useNames: () => null,
     useSafeAreaInsets: () => ({ top: 0, bottom: 0 }),
-    useWindowDimensions: () => ({ height: 800, width: 400 }),
+    useWindowDimensions: () => ({ height: 800, width: 400, fontScale: 1 }),
+    type: { postText: { lineHeight: 21 } },
+    layout: { hit: 44 },
     useNow: () => Date.now(),
     mocked: { data, seenState, env },
     Animated: {

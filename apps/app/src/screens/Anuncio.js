@@ -14,20 +14,22 @@
 // through the author route; me (own key); actingPage (page key or null);
 // trust ({ certDate, verifiedName, mutuals }); name; onBack;
 // onConversar({ peer, draft, card }); onDenunciar(target); onOpenAuthor(key);
-// onDeleted(listing); onEditar(listing); onAvaliar(listing).
+// onDeleted(listing); onEditar(listing); onAvaliar(listing);
+// onOffer(listing); onOpenListings(author).
 //
 // Every peer string reaching the screen already went through displayText
 // (../feira listingView); the seller's name is passed through it again.
 
 import { useEffect, useRef, useState } from 'react'
 import { fetch as expoFetch } from 'expo/fetch'
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { ScrollView, StyleSheet, Text, View } from 'react-native'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { actAs } from '../pages'
 import { memberKeyOf } from './Conversa'
 import { byAuthor, ratingRefs, ratings } from '../feiraClient'
-import { trustLines } from '../feira'
+import { detailChips, sellerSummary, stickyActions } from '../anuncioView'
 import { draftText, listingCard } from '../feiraChat'
 import { shareUrlOf } from '../feiraLink'
 import { isSaved, toggleSaved } from '../feiraSavedStore'
@@ -43,13 +45,16 @@ import { fetchMedia, validDescriptor } from '../media/fetch'
 import { encodeThumbnail } from '../media/encode'
 import { canShare, copyText, shareUrl } from '../share'
 import { shareNav } from '../shareNav'
-import { Btn, ErrorText, Soft, Spinner, errorText, useAction } from '../ui'
+import { ErrorText, Soft, Spinner, errorText, useAction } from '../ui'
 import { MediaGrid } from '../ui/MediaGrid'
+import { Avatar } from '../ui/Avatar'
+import { SellerCard } from '../ui/SellerCard'
+import { StickyBar } from '../ui/StickyBar'
 import { PageNoticeSheet } from '../ui/PageNoticeSheet'
 import { TopBar } from '../ui/TopBar'
 import { Pill } from '../ui/Pill'
 import { ErrorState } from '../ui/States'
-import { type } from '../ui/theme'
+import { layout, space, type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
 
 // The author route is paged; a listing further back than this is not
@@ -92,9 +97,10 @@ async function ownStatus (request, seq) {
 
 export default function Anuncio ({
   listing: given = null, author = null, seq = null, me = null, actingPage = null, trust = null, name = '',
-  refresh = 0, onBack, onConversar, onDenunciar, onOpenAuthor, onDeleted, onEditar, onAvaliar
+  refresh = 0, onBack, onConversar, onDenunciar, onOpenAuthor, onDeleted, onEditar, onAvaliar, onOffer, onOpenListings
 }) {
   const styles = useStyles(makeStyles)
+  const insets = useSafeAreaInsets()
   const node = useNode()
   const nodeRef = useRef(node)
   nodeRef.current = node
@@ -105,7 +111,9 @@ export default function Anuncio ({
   const [note, setNote] = useState('')
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [loadTick, setLoadTick] = useState(0)
-  const [pageNotice, setPageNotice] = useState(false)
+  const [pageNotice, setPageNotice] = useState(null)
+  const contactAction = useRef(null)
+  const [barHeight, setBarHeight] = useState(layout.hit + space.md * 2 + insets.bottom + 1)
   const [rated, setRated] = useState(null)
   const alive = useRef(true)
   useEffect(() => {
@@ -209,8 +217,17 @@ export default function Anuncio ({
   const acts = detailActions(listing, { owner, online })
   const url = shareUrlOf(origin, listing.author, listing.seq)
   const badge = statusBadge(listing)
-  const lines = trustLines(trust || {})
-  const seller = displayText(typeof name === 'string' && name !== '' ? name : (listing.name || ''))
+  const seller = sellerSummary({ name: name || listing.name, since: trust?.certDate, trust })
+  const sellerLines = listing.username
+    ? [{ key: 'username', text: '@' + displayText(listing.username) }, ...seller.lines]
+    : seller.lines
+  const actions = stickyActions(listing, {
+    owner,
+    canTalk: acts.conversar && typeof onConversar === 'function',
+    canOffer: acts.conversar && typeof onOffer === 'function'
+  })
+  const barActions = actions.filter((item) => item.id !== 'editar' || (typeof onEditar === 'function' && online))
+    .map((item) => ({ ...item, disabled: action.pending, pending: item.id === contactAction.current && action.pending }))
 
   // Runs a request as the member (node) or as the page (pages.js).
   const send = async (req) => {
@@ -219,16 +236,32 @@ export default function Anuncio ({
     return actAs(nodeRef.current, { member, action: req.action, page: req.page, op: req.op })
   }
 
-  // The same one-time note as the page's profile comes before the first
-  // message to a Página.
-  const conversar = async () => {
-    if (typeof onConversar !== 'function') return
-    if (listing.page === true && !pageNoticeSeen(pageNoticeStore(), listing.author)) {
-      setPageNotice(true)
+  const continueContact = async (id) => {
+    if (action.pending || contactAction.current !== null) return
+    if (!barActions.some((item) => item.id === id)) {
+      setNote('Não deu para continuar agora. Tente de novo.')
       return
     }
-    await startConversation()
+    contactAction.current = id
+    setNote('')
+    try {
+      if (id === 'oferta') await action.run(() => onOffer(listing))
+      else if (id === 'conversar') await startConversation()
+    } finally {
+      contactAction.current = null
+    }
   }
+  // Both ways of contacting a Página share its one-time notice.
+  const contactSeller = async (id) => {
+    if (action.pending || !barActions.some((item) => item.id === id)) return
+    if (listing.page === true && !pageNoticeSeen(pageNoticeStore(), listing.author)) {
+      setPageNotice(id)
+      return
+    }
+    await continueContact(id)
+  }
+  const conversar = () => contactSeller('conversar')
+  const fazerOferta = () => contactSeller('oferta')
   const startConversation = async () => {
     await action.run(async () => {
       const first = listing.media.find(validDescriptor) || null
@@ -275,28 +308,40 @@ export default function Anuncio ({
   return (
     <View style={styles.flex}>
       <TopBar title={listing.kind === 'procura' ? 'Procura-se' : 'Anúncio'} onBack={onBack} />
-      <ScrollView contentContainerStyle={styles.body}>
-        {listing.kind === 'procura' ? <Text style={styles.kicker}>Procura-se</Text> : null}
+      <ScrollView contentContainerStyle={[styles.body, { paddingBottom: barActions.length > 0 ? Math.max(space.lg, barHeight) : space.lg }]}>
         {listing.media.length > 0 ? <MediaGrid author={listing.author} media={listing.media} persist={false} /> : null}
-        <Text style={styles.title}>{listing.title}</Text>
         <View style={styles.row}>
           <Text style={styles.price}>{listing.priceLabel}</Text>
           {badge !== '' ? <Text style={styles.badge}>{badge}</Text> : null}
         </View>
-        {listing.place && listing.place.label ? <Soft>{listing.place.label}</Soft> : null}
-        {listing.catLabel ? <Soft>{listing.catLabel}</Soft> : null}
-        {listing.text ? <Text style={styles.text}>{listing.text}</Text> : null}
-
-        <Pressable
-          accessibilityRole='button'
-          disabled={typeof onOpenAuthor !== 'function'}
-          onPress={() => onOpenAuthor(listing.author)}
-          style={styles.seller}
-        >
-          <Text style={styles.sellerName}>{seller !== '' ? seller : 'Quem anunciou'}</Text>
-          {listing.username ? <Soft>{'@' + displayText(listing.username)}</Soft> : null}
-          {lines.map((l) => <Soft key={l.key}>{l.text}</Soft>)}
-        </Pressable>
+        <Text style={styles.title}>{listing.title}</Text>
+        <View style={styles.secondaryActions}>
+          {acts.compartilhar && url !== null ? <Pill label='Compartilhar' onPress={compartilhar} /> : null}
+          {acts.salvar ? <Pill label={saved ? 'Salvo' : 'Salvar'} filled={saved} onPress={salvar} /> : null}
+          {acts.denunciar && typeof onDenunciar === 'function'
+            ? <Pill label='Denunciar' onPress={() => onDenunciar(reportTarget(listing))} />
+            : null}
+          {typeof onAvaliar === 'function' && owner === null ? <Pill label='Avaliar' onPress={() => onAvaliar(listing)} /> : null}
+        </View>
+        <View style={styles.pills}>
+          {detailChips(listing).map((chip) => <Text key={chip.id} style={styles.badge}>{chip.label}</Text>)}
+        </View>
+        {listing.place?.bairro ? <Soft>{displayText(listing.place.bairro)}</Soft> : null}
+        {listing.text
+          ? (
+            <>
+              <Text style={styles.section}>Descrição</Text>
+              <Text style={styles.text}>{listing.text}</Text>
+            </>
+            )
+          : null}
+        <SellerCard
+          avatar={<Avatar name={seller.avatarName} publicKey={listing.author} />}
+          name={seller.name}
+          lines={sellerLines}
+          onOpenAuthor={typeof onOpenAuthor === 'function' ? () => onOpenAuthor(listing.author) : undefined}
+          onOpenListings={typeof onOpenListings === 'function' ? () => onOpenListings(listing.author) : undefined}
+        />
 
         {rated && rated.summary.count > 0
           ? (
@@ -313,25 +358,13 @@ export default function Anuncio ({
             )
           : null}
 
-        <View style={styles.actions}>
-          {acts.conversar && typeof onConversar === 'function'
-            ? <Btn label='Conversar' onPress={conversar} pending={action.pending} />
-            : null}
-          <View style={styles.pills}>
-            {acts.compartilhar && url !== null ? <Pill label='Compartilhar' onPress={compartilhar} /> : null}
-            {acts.salvar ? <Pill label={saved ? 'Salvo' : 'Salvar'} filled={saved} onPress={salvar} /> : null}
-            {acts.denunciar && typeof onDenunciar === 'function'
-              ? <Pill label='Denunciar' onPress={() => onDenunciar(reportTarget(listing))} />
-              : null}
-            {typeof onAvaliar === 'function' && owner === null ? <Pill label='Avaliar' onPress={() => onAvaliar(listing)} /> : null}
-          </View>
+        <View style={styles.ownerActions}>
           {owner !== null
             ? (
               <View style={styles.pills}>
                 {acts.statuses.map((b) => (
                   <Pill key={b.status} label={b.label} disabled={action.pending} onPress={() => setStatus(b.status)} />
                 ))}
-                {typeof onEditar === 'function' && online ? <Pill label='Editar' onPress={() => onEditar(listing)} /> : null}
                 {acts.apagar
                   ? <Pill label={confirmDelete ? 'Confirmar: apagar' : 'Apagar'} danger disabled={action.pending} onPress={apagar} />
                   : null}
@@ -339,17 +372,27 @@ export default function Anuncio ({
               )
             : null}
           {owner !== null && !online ? <Soft>Sem conexão. Para mudar o anúncio, conecte-se.</Soft> : null}
-          {note !== '' ? <Soft>{note}</Soft> : null}
-          {action.error !== '' ? <ErrorText>{action.error}</ErrorText> : null}
+          {barActions.length === 0 && note !== '' ? <Soft>{note}</Soft> : null}
+          {barActions.length === 0 && action.error !== '' ? <ErrorText>{action.error}</ErrorText> : null}
         </View>
       </ScrollView>
+      <StickyBar
+        actions={barActions}
+        message={barActions.length > 0 ? { text: note, error: action.error } : undefined}
+        onHeightChange={setBarHeight}
+        onAction={(id) => {
+          if (id === 'editar') onEditar(listing)
+          else if (id === 'conversar') conversar()
+          else if (id === 'oferta') fazerOferta()
+        }}
+      />
       <PageNoticeSheet
-        open={pageNotice}
+        open={pageNotice !== null}
         page={listing.author}
-        onClose={() => setPageNotice(false)}
+        onClose={() => setPageNotice(null)}
         onContinue={() => {
-          setPageNotice(false)
-          startConversation()
+          setPageNotice(null)
+          continueContact(pageNotice)
         }}
       />
     </View>
@@ -359,16 +402,16 @@ export default function Anuncio ({
 const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  body: { padding: 16, gap: 10 },
-  kicker: { ...type.section, color: colors.accent },
+  body: { padding: space.lg, gap: 10 },
+  section: { ...type.section, color: colors.ink },
   title: { ...type.profileName, color: colors.ink },
   row: { flexDirection: 'row', alignItems: 'center', gap: 10, flexWrap: 'wrap' },
-  price: { ...type.postName, color: colors.ink },
+  price: { ...type.price, color: colors.ink },
   badge: { ...type.chip, color: colors.ink, borderColor: colors.outline, borderWidth: 1, borderRadius: 10, paddingHorizontal: 8, paddingVertical: 3 },
   text: { ...type.postText, color: colors.ink },
-  seller: { paddingVertical: 10, gap: 2 },
   sellerName: { ...type.postName, color: colors.ink },
-  actions: { gap: 10 },
+  ownerActions: { gap: 10 },
+  secondaryActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   ratings: { gap: 6, paddingVertical: 6 },
   rating: { gap: 2 },
   stars: { ...type.postName, color: colors.accent },

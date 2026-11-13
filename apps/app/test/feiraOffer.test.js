@@ -3,6 +3,8 @@
 // Offers in a private conversation (src/feiraOffer.js): cards, texts,
 // parsing and the state folded from the thread. ES module through import().
 const test = require('brittle')
+const { readFileSync } = require('node:fs')
+const { join } = require('node:path')
 const { validateParams, MAX_CARD_URL, MAX_CARD_TITLE, MAX_CARD_DESC, cardTextLength, displayText, feira } = require('@varanda/rpc')
 
 const load = () => import('../src/feiraOffer.js')
@@ -16,6 +18,41 @@ const CONSENT = '9'.repeat(128)
 const id = (n) => String(n).padStart(32, '0')
 
 const sendOk = (card, text = card.url) => validateParams('dm.send', { to: BUYER, text, card }).ok
+
+test('the listing opens an offer intent and forwards the shared listings capability', (t) => {
+  const src = readFileSync(join(__dirname, '../App.js'), 'utf8')
+  const mount = src.slice(src.indexOf("if (entry.screen === 'anuncio')"), src.indexOf("if (entry.screen === 'editar-anuncio'"))
+  t.ok(mount.includes('const author = entry.key.slice(0, at)'))
+  t.ok(mount.includes('author={author}'))
+  t.ok(mount.includes('onOffer={(listing) => openMessage(author, { offer: listing })}'))
+  t.ok(mount.includes('onOpenListings={screenProps.onOpenListings}'))
+  const open = src.slice(src.indexOf('const openMessage = useCallback('), src.indexOf('const intentUsed'))
+  t.ok(open.includes('options.context || options.offer'), 'either payload creates an intent')
+  t.ok(/makeIntent\(\{[^\n]*offer: options\.offer/.test(open), 'the listing goes through makeIntent')
+  t.ok(/if \(!\(options && options.context && typeof key === 'string'\)\) \{\s*pageDmGen.current\+\+\s*pageDmPending.current = null\s*return open\(\)/.test(open), 'offers go straight to open, without a page lookup')
+})
+
+test('the offer intent opens the sheet once and never sends from an effect', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  const effects = [...src.matchAll(/useEffect\([\s\S]*?\}, \[[^\]]*\]\)/g)].map((match) => match[0])
+  const effect = effects.find((effect) => effect.includes('usedIntents.current.add(intent.id)')) || ''
+  t.ok(effect.includes('usedIntents.current.has(intent.id)'), 'one use per intent id')
+  t.ok(effect.includes('if (!isTop'), 'only the top conversation consumes the intent')
+  t.ok(effect.includes('String(intent.peer).toLowerCase() === String(peer).toLowerCase()'))
+  t.ok(effect.includes('setIntentListing(intent.offer)'))
+  t.ok(effect.includes('setOfferOpen(true)'))
+  t.ok(effect.includes('onIntentUsed(intent.id)'), 'consumed intents are dropped before returning later')
+  t.absent(effects.some((effect) => /\bsendOffer\s*\(/.test(effect)), 'only a press can send an offer')
+  t.ok(/const offerListing = intentListing !== null\s*\? intentListing\s*:\s*peer !== me \? offerTarget\(/.test(src), 'the chosen listing wins over another link in the thread, open or not')
+  t.absent(/setIntentListing\(null\)/.test(src), 'closing the sheet keeps the chosen listing, so the pill can reopen it')
+  t.ok(src.includes("open={isTop && offerOpen && offerListing !== null && folder === 'inbox' && blockNote === null}"), 'the offer sheet waits for an inbox thread with no composer block, on the top screen')
+  t.ok(src.includes("label='Enviar oferta' onPress={() => sendOffer(offerListing)}"))
+})
+
+test('sendOffer returns before any work outside an inbox thread or with a composer block', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(/const sendOffer = \(listing\) => \{\s*if \(folder !== 'inbox' \|\| blockNote !== null\) return/.test(src), 'sending requires the same gates as the offer sheet')
+})
 
 test('offerCard: exact card shape within the caps, valid for dm.send', async (t) => {
   const o = await load()
@@ -201,4 +238,13 @@ test('a proposta counts only in the shape the seller node can sign', async (t) =
   const carded = { ...inSentence, id: id(3), card }
   t.ok(o.proposalOfMessage(carded, ORIGIN), 'the card carries it')
   t.is(o.offerState([inSentence, carded], SELLER, LISTING, ORIGIN).id, id(3))
+})
+
+test('every style Mensagem uses is defined, so the offer sheets keep their margins', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  const sheet = src.slice(src.indexOf('const makeStyles = (colors) => StyleSheet.create({'))
+  const defined = new Set([...sheet.matchAll(/^ {2}([A-Za-z]\w*):/gm)].map((m) => m[1]))
+  const used = new Set([...src.matchAll(/\bstyles\.([A-Za-z]\w*)/g)].map((m) => m[1]))
+  for (const key of used) t.ok(defined.has(key), 'styles.' + key + ' is defined')
+  t.ok(/title='Fazer oferta'>\s*<View style=\{styles\.sheet\}>/.test(src), 'the offer sheet body uses styles.sheet')
 })

@@ -1492,3 +1492,146 @@ test('group reads preserve cards and hide them with their post', async (t) => {
   await ops.groupHide(a.ctx, { group, target: { writer: group, seq: sent.seq }, on: true })
   t.is((await ops.groupRead(a.ctx, { group })).items.find(p => p.seq === sent.seq).card, null)
 })
+
+const THUMBS = '\u{1f44d}'
+const HEART = '❤️'
+
+test('group.react: react, replace, toggle off and an equal reaction writes nothing', async (t) => {
+  const { a, b } = await pair()
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  const { seq } = await ops.groupPost(a.ctx, { group, text: 'bem-vindas' })
+  const target = { writer: group, seq }
+  t.absent('reactions' in (await ops.groupRead(a.ctx, { group })).items[0], 'absent when empty')
+  t.alike(await ops.groupReact(a.ctx, { group, target, emoji: THUMBS }), { ok: true })
+  const first = await lastRecord(a, group)
+  t.alike([first.type, first.emoji, first.target, first.seen], ['group-react', THUMBS, target, target], 'seen from the own fold')
+  t.alike((await ops.groupRead(a.ctx, { group })).items[0].reactions, [{ emoji: THUMBS, count: 1, mine: true }])
+  t.alike(await ops.groupReact(a.ctx, { group, target, emoji: THUMBS }), { ok: true })
+  t.alike(await lastRecord(a, group), first, 'the same emoji again writes nothing')
+  await ops.groupReact(a.ctx, { group, target, emoji: HEART })
+  t.alike((await ops.groupRead(a.ctx, { group })).items[0].reactions, [{ emoji: HEART, count: 1, mine: true }], 'replaced')
+
+  await shareGroupCore(a, b, group)
+  await shareDiary(a, b)
+  await ops.groupJoin(b.ctx, { group })
+  t.alike((await ops.groupRead(b.ctx, { group })).items[0].reactions, [{ emoji: HEART, count: 1, mine: false }])
+  await ops.groupReact(b.ctx, { group, target, emoji: HEART })
+  const w = (await store.readGroupWriters(b.storage))[0].key
+  t.alike((await ops.groupRead(b.ctx, { group })).items[0].reactions, [{ emoji: HEART, count: 2, mine: true }])
+  await shareGroupCore(b, a, w)
+  await shareDiary(b, a)
+  t.alike(await ops.groupReactors(a.ctx, { group, target }), { reactions: [{ emoji: HEART, count: 2, by: [a.ownHex, b.ownHex] }] })
+  await ops.groupReact(a.ctx, { group, target, emoji: '' })
+  const off = await lastRecord(a, group)
+  t.is(off.emoji, '')
+  t.alike((await ops.groupRead(a.ctx, { group })).items[0].reactions, [{ emoji: HEART, count: 1, mine: false }], 'toggled off')
+  await ops.groupReact(a.ctx, { group, target, emoji: '' })
+  t.alike(await lastRecord(a, group), off, 'removing an absent reaction writes nothing')
+  t.alike(await ops.groupReactors(a.ctx, { group, target }), { reactions: [{ emoji: HEART, count: 1, by: [b.ownHex] }] })
+})
+
+test('group.react: removing a reaction the full list cuts still writes', async (t) => {
+  const { GROUP_REACTIONS_MAX } = require('@varanda/rpc')
+  const { a, b } = await pair()
+  const emoji = (i) => String.fromCodePoint(0x1f600 + i)
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  const { seq } = await ops.groupPost(a.ctx, { group, text: 'vote' })
+  const target = { writer: group, seq }
+  const others = [b]
+  for (let i = 1; i < GROUP_REACTIONS_MAX; i++) others.push(await member(a.assocKp, 'P' + i))
+  const writers = []
+  for (let i = 0; i < others.length; i++) {
+    const m = others[i]
+    await shareGroupCore(a, m, group)
+    await shareDiary(a, m)
+    await ops.groupJoin(m.ctx, { group })
+    await ops.groupReact(m.ctx, { group, target, emoji: emoji(i) })
+    writers.push((await store.readGroupWriters(m.storage))[0].key)
+    await shareGroupCore(m, a, writers[i])
+    await shareDiary(m, a)
+  }
+  await ops.groupReact(a.ctx, { group, target, emoji: emoji(GROUP_REACTIONS_MAX) })
+  const cut = (await ops.groupRead(a.ctx, { group })).items[0].reactions
+  t.is(cut.length, GROUP_REACTIONS_MAX)
+  t.absent(cut.some((r) => r.mine), 'the own reaction is beyond the cap')
+  const before = await lastRecord(a, group)
+  await ops.groupReact(a.ctx, { group, target, emoji: '' })
+  t.is(before.emoji, emoji(GROUP_REACTIONS_MAX))
+  const removal = await lastRecord(a, group)
+  t.alike([removal.type, removal.emoji], ['group-react', ''], 'the removal is written')
+  await ops.groupReact(b.ctx, { group, target, emoji: '' })
+  await shareGroupCore(b, a, writers[0])
+  const left = (await ops.groupRead(a.ctx, { group })).items[0].reactions
+  t.is(left.length, GROUP_REACTIONS_MAX - 1)
+  t.absent(left.some((r) => r.mine), 'the removed reaction does not come back')
+})
+
+test('group.react refusals: a missing or hidden post, a non-member', async (t) => {
+  const { a, b } = await pair()
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'approval' })
+  const { seq } = await ops.groupPost(a.ctx, { group, text: 'oi' })
+  const target = { writer: group, seq }
+  await t.exception(() => ops.groupReact(a.ctx, { group, target: { writer: group, seq: seq + 5 }, emoji: THUMBS }), /mensagem não encontrada/)
+  await t.exception(() => ops.groupReactors(a.ctx, { group, target: { writer: group, seq: seq + 5 } }), /mensagem não encontrada/)
+  await shareGroupCore(a, b, group)
+  await shareDiary(a, b)
+  t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'requested' })
+  const w = (await store.readGroupWriters(b.storage))[0].key
+  const before = await lastRecord(b, w)
+  await t.exception(() => ops.groupReact(b.ctx, { group, target, emoji: THUMBS }), /sem permissão no grupo/, 'a request is no member')
+  t.alike(await lastRecord(b, w), before, 'nothing appended')
+  await ops.groupHide(a.ctx, { group, target, on: true })
+  const root = await lastRecord(a, group)
+  await t.exception(() => ops.groupReact(a.ctx, { group, target, emoji: THUMBS }), /mensagem não encontrada/, 'a hidden post')
+  await t.exception(() => ops.groupReactors(a.ctx, { group, target }), /mensagem não encontrada/)
+  t.alike(await lastRecord(a, group), root, 'nothing appended')
+  // A blocked own diary binds its community root no more: the parent is unbound.
+  const modKp = crypto.keyPair()
+  const modCert = createModeratorCert({ moderator: hex(modKp.publicKey) }, a.assocKp)
+  await store.writeBlocklist(a.storage, createSnapshot({ seq: 1, blocked: [a.ownHex] }, modKp, modCert))
+  await t.exception(() => ops.groupReact(a.ctx, { group, target, emoji: THUMBS }), /aguarde a sincronização da comunidade/)
+  t.alike(await lastRecord(a, group), root, 'nothing appended')
+})
+
+test('group.react in a private group is sealed', async (t) => {
+  const { a } = await pair()
+  a.ctx.groupKeys = createGroupKeys()
+  await a.ctx.groupKeys.unlock(a.storage, new Uint8Array(a.prf))
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Segredo', join: 'approval', visibility: 'private' })
+  const { seq } = await ops.groupPost(a.ctx, { group, text: 'segredo' })
+  await ops.groupReact(a.ctx, { group, target: { writer: group, seq }, emoji: THUMBS })
+  const stored = await lastRecord(a, group)
+  t.is(stored.type, 'group-sealed')
+  t.absent(JSON.stringify(stored).includes(THUMBS), 'the emoji never travels in the clear')
+  t.alike((await ops.groupRead(a.ctx, { group })).items[0].reactions, [{ emoji: THUMBS, count: 1, mine: true }])
+})
+
+test('group.read sends the compact reaction summary, never the reactor lists', async (t) => {
+  const { MAX_MESSAGE, utf8ByteLength, GROUP_LIMIT_MAX } = require('@varanda/rpc')
+  // member-ops binds buildGroup when it loads: a fresh copy over a wrapper
+  // gives every post 200 reactors, whose `by` lists would not fit a message.
+  const by = Array.from({ length: 200 }, (_, i) => i.toString(16).padStart(64, '0'))
+  const real = grp.buildGroup
+  const path = require.resolve('../lib/member-ops')
+  const cached = require.cache[path]
+  let fresh
+  grp.buildGroup = (...args) => {
+    const view = real(...args)
+    for (const p of view.posts) p.reactions = [{ emoji: THUMBS, count: by.length, by }]
+    return view
+  }
+  try {
+    delete require.cache[path]
+    fresh = require('../lib/member-ops')
+  } finally {
+    grp.buildGroup = real
+    require.cache[path] = cached
+  }
+  const { a } = await pair()
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  for (let i = 0; i < GROUP_LIMIT_MAX; i++) await ops.groupPost(a.ctx, { group, text: 'post ' + i })
+  const read = await fresh.groupRead(a.ctx, { group, limit: GROUP_LIMIT_MAX })
+  t.is(read.items.length, GROUP_LIMIT_MAX)
+  t.ok(read.items.every((p) => p.reactions.length === 1 && p.reactions[0].count === 200 && p.reactions[0].mine === false && !('by' in p.reactions[0])))
+  t.ok(utf8ByteLength(JSON.stringify(read)) <= MAX_MESSAGE, 'fits one message')
+})

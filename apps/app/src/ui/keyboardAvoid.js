@@ -18,3 +18,16 @@ export function useKeyboardAvoidEnabled () {
   }, [android])
   return !android || shown
 }
+
+// Whether the soft keyboard is up. iOS announces it before it moves (Will),
+// Android only after (Did): the event names differ.
+export function useKeyboardOpen () {
+  const [open, setOpen] = useState(false)
+  useEffect(() => {
+    const ios = Platform.OS === 'ios'
+    const show = Keyboard.addListener(ios ? 'keyboardWillShow' : 'keyboardDidShow', () => setOpen(true))
+    const hide = Keyboard.addListener(ios ? 'keyboardWillHide' : 'keyboardDidHide', () => setOpen(false))
+    return () => { show.remove(); hide.remove() }
+  }, [])
+  return open
+}

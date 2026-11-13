@@ -6,7 +6,9 @@
 // renders what the RPC returns. Pure: no sodium, no I/O.
 //
 // Nothing here produces a read, delivered or typing state for the other
-// side: unread is local and never leaves the device.
+// side: unread is local and never leaves the device. A reaction (inner v4)
+// only adds `reactions` to the row it names: it never changes unread, the
+// preview, the thread order, a cutoff or the DM_MESSAGES_PER_PEER cap.
 
 const { copyLinkCard } = require('./link-card')
 const { DM_REQUESTS_MAX, DM_MESSAGES_PER_PEER } = require('./dm')
@@ -81,21 +83,88 @@ function byNewest (a, b) {
   return b.t - a.t || (a.peer < b.peer ? -1 : a.peer > b.peer ? 1 : 0)
 }
 
-// fold({ self, followSet, messages, ops, seen }) -> { inbox, requests },
+// The verified reactions of one conversation, by peer, as { r, f }.
+// reactions: { id, from, to, target: { from, id, digest }, emoji, rev, filedAt }.
+// The reactor is the signed `from`, one of the two people; the target names
+// a message of the same conversation by sender and id, and by the hex64
+// digest of its opened inner body (core dm.js bodyDigest).
+function reactionsByPeer (self, reactions) {
+  const out = new Map()
+  for (const r of Array.isArray(reactions) ? reactions : []) {
+    if (r === null || typeof r !== 'object' || typeof r.id !== 'string' || !HEX32.test(r.id)) continue
+    if (!isHex64(r.from) || !isHex64(r.to) || r.from === r.to) continue
+    const peer = r.from === self ? r.to : r.to === self ? r.from : null
+    if (peer === null) continue
+    const tg = r.target
+    if (tg === null || typeof tg !== 'object' || typeof tg.id !== 'string' || !HEX32.test(tg.id)) continue
+    if (tg.from !== self && tg.from !== peer) continue
+    if (!isHex64(tg.digest)) continue
+    if (typeof r.emoji !== 'string' || !Number.isInteger(r.rev) || r.rev < 1) continue
+    const f = filed(r.filedAt)
+    if (!Number.isFinite(f)) continue
+    if (!out.has(peer)) out.set(peer, [])
+    out.get(peer).push({ r, f })
+  }
+  return out
+}
+
+// Per (target, reactor) the op with the highest `rev` wins, ties by the
+// higher `id`; '' as the winner removes. Never the sender's `at` nor the
+// local filing time. One id signed twice with one rev falls to the higher
+// emoji, so the input order never decides.
+function beats (a, b) {
+  if (a.rev !== b.rev) return a.rev > b.rev
+  if (a.id !== b.id) return a.id > b.id
+  return a.emoji > b.emoji
+}
+
+// Sets `reactions` on the kept rows that a reaction names. A target that is
+// absent, cut off or past the cap has no row here, so its reactions count
+// once it is present (the fold runs over everything stored). A reaction
+// applies only to the row whose digest it names: another message filed
+// under the same sender and id is not the one it was made for, and a row
+// stored without a digest (an earlier build) takes none.
+function applyReactions (self, kept, list) {
+  if (list === undefined || list.length === 0) return
+  const rows = new Map()
+  for (const row of kept) rows.set(row.from + ':' + row.id, row)
+  const winners = new Map()
+  for (const r of list) {
+    const target = r.target.from + ':' + r.target.id
+    const row = rows.get(target)
+    if (row === undefined || row.digest === '' || row.digest !== r.target.digest) continue
+    const key = target + ':' + r.from
+    const best = winners.get(key)
+    if (best === undefined || beats(r, best)) winners.set(key, r)
+  }
+  for (const [key, r] of winners) {
+    if (r.emoji === '') continue
+    const row = rows.get(key.slice(0, key.lastIndexOf(':')))
+    if (!row.reactions) row.reactions = []
+    row.reactions.push({ emoji: r.emoji, mine: r.from === self })
+  }
+  // The other person's first, then mine: the same on every device.
+  for (const row of kept) if (row.reactions) row.reactions.sort((a, b) => Number(a.mine) - Number(b.mine))
+}
+
+// fold({ self, followSet, messages, ops, seen, reactions }) -> { inbox, requests },
 // each a list of { peer, folder, messages, at, unread } newest first.
 // seen: Set of seenKey(from, id) strings.
 // messages: verified bodies { id, from, to, text, replyTo, media?, fwd?, at,
-// filedAt } (media null or absent for a v1 body);
-// ops: { op, peer, at, filedAt }. filedAt is the LOCAL time in ms at which
+// filedAt, digest? } (media null or absent for a v1 body; digest the hex64
+// of the canonical inner JSON, absent for a row stored without one);
+// ops: { op, peer, at, filedAt }; reactions: see reactionsByPeer, under
+// the same filing cutoffs as the rows. filedAt is the LOCAL time in ms at which
 // this device stored the row (monotonic, assigned by the node; the send
 // time for own messages, the filing or creation time for own ctl ops). A
 // row without a valid filedAt is ignored. Cutoffs compare filedAt only;
 // ordering uses min(at, filedAt), so a future `at` cannot pin a thread.
-function fold ({ self, followSet, messages, ops, seen } = {}) {
+function fold ({ self, followSet, messages, ops, seen, reactions } = {}) {
   if (!isHex64(self)) return { inbox: [], requests: [] }
   const follows = toSet(followSet)
   const seenKeys = toSet(seen)
   const state = opState(ops)
+  const reacts = reactionsByPeer(self, reactions)
 
   const candidates = []
   const input = Array.isArray(messages) ? messages : []
@@ -129,7 +198,7 @@ function fold ({ self, followSet, messages, ops, seen } = {}) {
     ids.add(key)
     const mine = m.from === self
     const media = Array.isArray(m.media) && m.media.length > 0 ? m.media : null
-    const row = { id: m.id, from: m.from, to: m.to, text: m.text, replyTo: m.replyTo === undefined ? null : m.replyTo, fwd: m.fwd === 1 ? 1 : 0, media, card: media || !m.card ? null : copyLinkCard(m.card, (d) => ({ ...d })), at: new Date(t).toISOString(), sentAt: m.at, mine, peer, t, f }
+    const row = { id: m.id, from: m.from, to: m.to, text: m.text, replyTo: m.replyTo === undefined ? null : m.replyTo, fwd: m.fwd === 1 ? 1 : 0, media, card: media || !m.card ? null : copyLinkCard(m.card, (d) => ({ ...d })), at: new Date(t).toISOString(), sentAt: m.at, mine, peer, t, f, digest: isHex64(m.digest) ? m.digest : '' }
     if (!byPeer.has(peer)) byPeer.set(peer, [])
     byPeer.get(peer).push(row)
   }
@@ -141,17 +210,22 @@ function fold ({ self, followSet, messages, ops, seen } = {}) {
     // A block hides everything while it lasts.
     if (isBlocked(s)) continue
     let kept = rows.filter(r => s === undefined || (r.f > s.lastBlocked && r.f > s.deleted))
+    let peerReacts = (reacts.get(peer) || []).filter(x => s === undefined || (x.f > s.lastBlocked && x.f > s.deleted))
     const accepted = s !== undefined && s.folder !== null && s.folder.op === 'accepted'
     let folder = 'inbox'
     if (!follows.has(peer) && !accepted) {
       // Only the peer's side: an own reply from another device may predate
       // a decline, and only `deleted` removes own messages.
-      if (s !== undefined) kept = kept.filter(r => r.mine || r.f > s.lastDeclined)
+      if (s !== undefined) {
+        kept = kept.filter(r => r.mine || r.f > s.lastDeclined)
+        peerReacts = peerReacts.filter(x => x.r.from === self || x.f > s.lastDeclined)
+      }
       if (!kept.some(r => r.mine)) folder = 'request'
     }
     if (kept.length === 0) continue
     kept.sort(byTime)
     if (kept.length > DM_MESSAGES_PER_PEER) kept = kept.slice(kept.length - DM_MESSAGES_PER_PEER)
+    applyReactions(self, kept, peerReacts.map(x => x.r))
     const last = kept[kept.length - 1]
     const thread = {
       peer,
@@ -171,9 +245,14 @@ function fold ({ self, followSet, messages, ops, seen } = {}) {
 
 // `at` is the effective time min(sender at, filedAt) in canonical ISO: what
 // every reader orders and pages by. `sentAt` is the sender's claim, shown
-// only as information.
+// only as information. `reactions` ([{ emoji, mine }], at most one per
+// person) only when there is one. `digest` only when the row has one: what
+// a new reaction to it names (callers never hand it out in dm.thread).
 function publicRow (r) {
-  return { id: r.id, from: r.from, to: r.to, text: r.text, replyTo: r.replyTo, fwd: r.fwd, media: r.media, card: r.card, at: r.at, sentAt: r.sentAt, mine: r.mine, peer: r.peer }
+  const row = { id: r.id, from: r.from, to: r.to, text: r.text, replyTo: r.replyTo, fwd: r.fwd, media: r.media, card: r.card, at: r.at, sentAt: r.sentAt, mine: r.mine, peer: r.peer }
+  if (r.digest !== '') row.digest = r.digest
+  if (r.reactions) row.reactions = r.reactions
+  return row
 }
 
 // What a conversation list shows for a message: its text, or a fixed label

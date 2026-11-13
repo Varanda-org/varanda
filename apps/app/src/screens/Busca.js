@@ -46,7 +46,7 @@ import { Soft, errorText, useBottomPad, useNow } from '../ui'
 import { PostRow } from '../ui/PostRow'
 import { HelpNote } from '../ui/Help'
 import { RefreshableList } from '../ui/RefreshableList'
-import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
+import { EmptyState, ErrorState, ListFooter, SkeletonRow } from '../ui/States'
 
 // Never the names cache: undefined lets a reply mark wait for its parent.
 const noProfile = () => undefined
@@ -68,7 +68,7 @@ function pageNeeds (items) {
   return { local, shown, need, authors: [] }
 }
 
-export default function Busca ({ query, header, ownKey, avatarOf, active, scrollToTop, refresh, onReply, onReport, onQuote, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onFollowsChanged, onFollowed, onSocialChanged, onToast }) {
+export default function Busca ({ query, header, ownKey, avatarOf, active, scrollToTop, refresh, onReply, onReport, onQuote, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onFollowsChanged, onFollowed, onSocialChanged, onToast, onClear }) {
   const node = useNode()
   const { request } = node
   const social = useSocial({ ownKey, onToast })
@@ -255,16 +255,16 @@ export default function Busca ({ query, header, ownKey, avatarOf, active, scroll
   const gone = unavailable > 0
     ? String(unavailable) + (unavailable === 1 ? ' publicação indisponível' : ' publicações indisponíveis')
     : null
+  const searchNotes = [flags.indexing && SEARCH_INDEXING_NOTE, !flags.complete && SEARCH_INCOMPLETE_NOTE, gone].filter(Boolean)
+  const statusNote = loading ? 'Buscando publicações…' : searchNotes[0] || SHORT.search
+  const searchHelp = { ...HELP.busca, paragraphs: [...HELP.busca.paragraphs, ...searchNotes] }
   const top = (
     <View>
       {header}
       {notice === null
         ? (
           <View style={styles.notes}>
-            <HelpNote doc={HELP.busca}><Soft>{SHORT.search}</Soft></HelpNote>
-            {flags.indexing ? <Soft>{SEARCH_INDEXING_NOTE}</Soft> : null}
-            {!flags.complete ? <Soft>{SEARCH_INCOMPLETE_NOTE}</Soft> : null}
-            {gone ? <Soft>{gone}</Soft> : null}
+            <HelpNote doc={searchHelp}><Soft>{statusNote}</Soft></HelpNote>
             <CountsNote social={social} />
           </View>
           )
@@ -286,17 +286,17 @@ export default function Busca ({ query, header, ownKey, avatarOf, active, scroll
 
   let empty
   if (notice === 'offline') {
-    empty = <EmptyState icon='olho' title='Sem conexão' body={SEARCH_OFFLINE_MESSAGE} actionLabel='tentar de novo' onAction={loadFirst} />
+    empty = <EmptyState icon='olho' title='Sem conexão' body={SEARCH_OFFLINE_MESSAGE} actionLabel='Tentar de novo' onAction={loadFirst} secondaryLabel='Limpar' onSecondary={onClear} />
   } else if (loadError) {
-    empty = <ErrorState message={loadError} onRetry={loadFirst} pending={loading || refreshing} />
+    empty = <EmptyState icon='olho' title='Não foi possível buscar' body={loadError} actionLabel='Tentar de novo' onAction={loadFirst} secondaryLabel='Limpar' onSecondary={onClear} />
   } else if (loadedAt === null) {
-    empty = <Skeleton />
+    empty = <View accessible accessibilityLabel='Buscando publicações' accessibilityLiveRegion='polite'>{[0, 1, 2].map(row => <SkeletonRow key={row} />)}</View>
   } else if (atEnd) {
-    empty = <EmptyState icon='olho' title={SEARCH_EMPTY_TITLE} body={SEARCH_EMPTY_BODY} />
+    empty = <EmptyState icon='olho' title={SEARCH_EMPTY_TITLE} body={SEARCH_EMPTY_BODY} actionLabel='Limpar' onAction={onClear} secondaryLabel='Tentar de novo' onSecondary={loadFirst} />
   } else {
     // A page with nothing verified yet but a moving cursor: the seeder's
     // candidate budget. No automatic continuation; the person decides.
-    empty = <EmptyState icon='olho' title={SEARCH_EMPTY_TITLE} body={SEARCH_CONTINUE_BODY} actionLabel={SEARCH_CONTINUE} onAction={loadMore} />
+    empty = <EmptyState icon='olho' title={SEARCH_EMPTY_TITLE} body={SEARCH_CONTINUE_BODY} actionLabel={SEARCH_CONTINUE} onAction={loadMore} secondaryLabel='Limpar' onSecondary={onClear} />
   }
 
   const reportable = (item) => hosted && typeof onReport === 'function' && typeof ownKey === 'string' && item.author !== ownKey
