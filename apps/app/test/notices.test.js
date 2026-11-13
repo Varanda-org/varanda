@@ -8,7 +8,6 @@ test('the fixed texts are the approved Portuguese', async (t) => {
   const {
     EMPTY_TITLE,
     EMPTY_TEXT,
-    NOTICES_WEB_ONLY_MESSAGE,
     NOTICES_OFFLINE_MESSAGE,
     NOTICES_UNSUPPORTED_MESSAGE,
     ACTIVITY_QUIET_TEXT,
@@ -20,7 +19,6 @@ test('the fixed texts are the approved Portuguese', async (t) => {
   } = await load()
   t.is(EMPTY_TITLE, 'Ninguém novo por aqui')
   t.is(EMPTY_TEXT, 'Quando alguém começar a seguir você, responder, citar, mencionar você, curtir ou republicar uma publicação sua, aparece aqui.')
-  t.is(NOTICES_WEB_ONLY_MESSAGE, 'Nesta versão, os Avisos só funcionam na versão web no site da associação.')
   t.is(NOTICES_OFFLINE_MESSAGE, 'Confira sua internet.')
   t.is(NOTICES_UNSUPPORTED_MESSAGE, 'Os Avisos ainda não estão disponíveis nesta associação.')
   t.is(ACTIVITY_QUIET_TEXT, 'O semeador desta associação ainda só envia avisos de quem seguiu você.')

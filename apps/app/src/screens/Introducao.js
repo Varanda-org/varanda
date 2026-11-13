@@ -11,7 +11,7 @@ import { Icon } from '../ui/Icon'
 import { statusBarStyle } from '../appearance'
 import { Body, Btn } from '../ui'
 import { StepLink } from '../ui/Stepper'
-import { fonts, layout, type } from '../ui/theme'
+import { fonts, layout, space, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 
 const SKIP_LABEL = 'Pular'
@@ -160,8 +160,10 @@ export default function Introducao ({ onDone, sidePad = 0, edges }) {
             ))}
           </View>
           <View style={styles.actions}>
-            <Btn label={index === last ? START_LABEL : NEXT_LABEL} onPress={index === last ? finish : () => goTo(index + 1)} block large />
-            {index > 0 ? <StepLink label={BACK_LABEL} onPress={() => goTo(index - 1)} /> : <View style={styles.backSpace} />}
+            <Btn block large label={index === last ? START_LABEL : NEXT_LABEL} onPress={index === last ? finish : () => goTo(index + 1)} />
+            {index > 0
+              ? <StepLink label={BACK_LABEL} onPress={() => goTo(index - 1)} />
+              : <View style={styles.backSpace} />}
           </View>
         </View>
       </View>
@@ -173,22 +175,22 @@ export default function Introducao ({ onDone, sidePad = 0, edges }) {
 const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   flex: { flex: 1 },
-  top: { minHeight: 48, alignItems: 'flex-end', justifyContent: 'center', paddingHorizontal: 16 },
-  skip: { paddingVertical: 8, paddingHorizontal: 8, minHeight: 40, justifyContent: 'center' },
+  top: { minHeight: 48, alignItems: 'flex-end', justifyContent: 'center', paddingHorizontal: space.lg },
+  skip: { paddingVertical: 8, paddingHorizontal: 8, minHeight: layout.hit, minWidth: layout.hit, justifyContent: 'center' },
   skipText: { fontSize: 15, fontWeight: '700', color: colors.soft },
   pressed: { opacity: 0.7 },
-  pageContent: { flexGrow: 1, justifyContent: 'center', padding: 24 },
-  column: { width: '100%', maxWidth: layout.column, alignSelf: 'center', alignItems: 'center', gap: 16 },
+  pageContent: { flexGrow: 1, justifyContent: 'center', padding: space.xl },
+  column: { width: '100%', maxWidth: layout.column, alignSelf: 'center', alignItems: 'center', gap: space.lg },
   circle: { width: 112, height: 112, borderRadius: 56, backgroundColor: colors.accentSoft, alignItems: 'center', justifyContent: 'center' },
   body: { textAlign: 'center' },
   hidden: { position: 'absolute', width: 1, height: 1, opacity: 0 },
-  footer: { width: '100%', maxWidth: layout.column, alignSelf: 'center', paddingHorizontal: 24, paddingBottom: 24, gap: 20 },
-  dots: { flexDirection: 'row', gap: 8, justifyContent: 'center' },
+  footer: { width: '100%', maxWidth: layout.column, alignSelf: 'center', paddingHorizontal: space.xl, paddingBottom: space.xl, gap: 20 },
+  dots: { flexDirection: 'row', gap: space.sm, justifyContent: 'center' },
   dot: { width: 8, height: 8, borderRadius: 4 },
   dotActive: { backgroundColor: colors.accent },
   dotDone: { backgroundColor: colors.accent, opacity: 0.5 },
   dotPending: { backgroundColor: colors.line },
   title: { ...type.heroTitle, fontFamily: fonts.title, color: colors.ink, textAlign: 'center' },
-  actions: { gap: 8 },
+  actions: { gap: space.sm },
   backSpace: { height: layout.hit }
 })

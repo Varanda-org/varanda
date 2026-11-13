@@ -9,13 +9,13 @@
 // viewer opts its pages into one (claimTouch, below).
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
-import { counterText, offsetOf, pageAt, shouldMount, slideLabel, stepIndex } from '../carousel'
+import { Animated, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { counterShown, counterText, dotWindow, offsetOf, pageAt, shouldMount, slideLabel, stepIndex } from '../carousel'
 import { Icon } from './Icon'
 import { MediaView } from './MediaView'
 import { useReduceMotion } from './StackLayer'
 import { useStyles } from './ThemeProvider'
-import { layout, radius, space } from './theme'
+import { layout, motion, radius, space } from './theme'
 
 // Pages are whole. A fractional or inverted index would land in a gap and the
 // next settle would fight the prop, so it is rounded and then clamped.
@@ -50,6 +50,15 @@ function pointerTypeOf (event) {
   return (native && native.pointerType) || (event && event.pointerType) || ''
 }
 
+// A tap, a click and the focus a pointer close hands back to the photo do not
+// match :focus-visible, so they must not open the chevrons. matches is a
+// browser capability: without it (native) this is not a keyboard focus.
+function keyboardFocus (event) {
+  const target = event && event.target
+  if (!target || typeof target.matches !== 'function') return false
+  return target.matches(':focus-visible') === true
+}
+
 export function MediaCarousel ({
   author,
   media,
@@ -74,6 +83,12 @@ export function MediaCarousel ({
   const page = clampIndex(index, count)
   const [width, setWidth] = useState(0)
   const [hovered, setHovered] = useState(false)
+  const [focused, setFocused] = useState(false)
+  const prevArrow = useRef(null)
+  const nextArrow = useRef(null)
+  // The chevron to focus once the page changes: 'prev', 'next' or null.
+  const refocus = useRef(null)
+  const counterOpacity = useRef(new Animated.Value(1)).current
   // Stays false until the first jump has been asked for, so a viewer that
   // opens past the first photo does not paint page 0.
   const [ready, setReady] = useState(false)
@@ -93,6 +108,7 @@ export function MediaCarousel ({
   const hint = useRef(null)
   const measured = Number.isFinite(width) && width > 0
   const many = count > 1
+  const dots = dotWindow(page, count)
 
   widthRef.current = width
   countRef.current = count
@@ -102,12 +118,38 @@ export function MediaCarousel ({
 
   useEffect(() => () => clearTimeout(targetTimer.current), [])
 
+  useLayoutEffect(() => {
+    const shown = showCounter && counterShown({ many, measured, idleMs: 0, hold: motion.hold })
+    counterOpacity.setValue(shown ? 1 : 0)
+    if (!shown) return
+    let fade = null
+    const timer = setTimeout(() => {
+      if (reduce) {
+        counterOpacity.setValue(0)
+      } else {
+        fade = Animated.timing(counterOpacity, {
+          toValue: 0,
+          duration: motion.normal,
+          useNativeDriver: false,
+          isInteraction: false
+        })
+        fade.start()
+      }
+    }, motion.hold)
+    return () => {
+      clearTimeout(timer)
+      if (fade) fade.stop()
+    }
+  }, [page, many, measured, showCounter, reduce, counterOpacity])
+
   // On the web a closing viewer hands focus back to the photo that opened it,
   // which may no longer be the one on screen; Enter would reopen it. Focus
   // moves to the visible photo, only when it is already inside this strip and
-  // without scrolling, which would cut the move short. Fabric nodes have
-  // ownerDocument and contains too, but no querySelector nor activeElement
-  // (contains(undefined) throws), so both are probed first.
+  // without scrolling, which would cut the move short. The shell judges that
+  // focus with :focus-visible: a pointer close does not open the chevrons, and
+  // a keyboard close (Escape) may. Fabric nodes have ownerDocument and contains
+  // too, but no querySelector nor activeElement (contains(undefined) throws),
+  // so both are probed first.
   useEffect(() => {
     if (!focusRequest) return
     const strip = scroller.current
@@ -186,8 +228,27 @@ export function MediaCarousel ({
 
   function go (delta) {
     if (typeof onIndex !== 'function') return
-    onIndex(stepIndex(page, delta, count))
+    const next = stepIndex(page, delta, count)
+    refocus.current = null
+    // The pressed chevron unmounts at either end of the strip, and focus
+    // would fall to the document. A keyboard user keeps focus on the other
+    // chevron; otherwise focus is cleared, since React delivers no blur for
+    // an unmounted node.
+    if (next !== page && (next === 0 || next === count - 1)) {
+      if (focused) refocus.current = next === 0 ? 'next' : 'prev'
+      else setFocused(false)
+    }
+    onIndex(next)
   }
+
+  useEffect(() => {
+    const side = refocus.current
+    refocus.current = null
+    if (!side) return
+    const node = side === 'prev' ? prevArrow.current : nextArrow.current
+    if (node && typeof node.focus === 'function') node.focus({ preventScroll: true })
+    else setFocused(false)
+  }, [page])
 
   const conceal = many && page !== 0 && ready === false
   let strip = null
@@ -273,24 +334,25 @@ export function MediaCarousel ({
 
   const counterNode = showCounter && many && measured
     ? (
-      <View
+      <Animated.View
         pointerEvents='none'
-        style={styles.counter}
+        style={[styles.counter, { opacity: counterOpacity }]}
         accessibilityElementsHidden
         importantForAccessibility='no-hide-descendants'
         aria-hidden
       >
         <Text style={styles.counterText}>{counterText(page, count)}</Text>
-      </View>
+      </Animated.View>
       )
     : null
 
-  const chevronNode = showArrows && hovered && many && measured
+  const chevronNode = showArrows && (hovered || focused) && many && measured
     ? (
       <>
         {page > 0
           ? (
             <Pressable
+              ref={prevArrow}
               accessibilityRole='button'
               accessibilityLabel='foto anterior'
               onPress={() => go(-1)}
@@ -303,6 +365,7 @@ export function MediaCarousel ({
         {page < count - 1
           ? (
             <Pressable
+              ref={nextArrow}
               accessibilityRole='button'
               accessibilityLabel='próxima foto'
               onPress={() => go(1)}
@@ -341,21 +404,31 @@ export function MediaCarousel ({
         importantForAccessibility='no-hide-descendants'
         aria-hidden
       >
-        {items.map((_, i) => (
-          <View key={i} style={[styles.dot, dotLook(styles, dark, i === page)]} />
+        {items.slice(dots.start, dots.end).map((_, i) => (
+          <View key={dots.start + i} style={[styles.dot, dotLook(styles, dark, dots.start + i === page)]} />
         ))}
       </View>
       )
     : null
 
-  // A mouse can hover but cannot drag a paging ScrollView, so the chevrons
-  // exist only while the pointer is over the frame. Plain pointer events, not
-  // a Pressable's hover: each slide is a Pressable, and on the web entering
+  // A mouse can hover but cannot drag a paging ScrollView. Keyboard focus
+  // reveals the chevrons too, judged by :focus-visible on the event target
+  // (a tap, a click, or button.focus() after a pointer close do not match).
+  // The shell is not focusable: that would add a tab stop per post, and on
+  // Android tabIndex becomes focusable. Plain pointer events, not a
+  // Pressable's hover: each slide is a Pressable, and on the web entering
   // one ends the hover of every Pressable around it.
   const framed = showArrows && many
     ? (
       <View
         style={styles.shell}
+        onFocus={(event) => setFocused(keyboardFocus(event))}
+        onBlur={(event) => {
+          const next = event.relatedTarget || (event.nativeEvent && event.nativeEvent.relatedTarget)
+          const shell = event.currentTarget
+          if (next && shell && typeof shell.contains === 'function' && shell.contains(next)) return
+          setFocused(false)
+        }}
         onPointerEnter={(event) => { if (pointerTypeOf(event) !== 'touch') setHovered(true) }}
         onPointerLeave={() => setHovered(false)}
       >

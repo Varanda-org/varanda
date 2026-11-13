@@ -4,7 +4,9 @@
 // prefetch, no frame, no player. The title, description and host are peer
 // text and go through displayText. The host shown is the one the URL really
 // opens (cardUrlHost), so a card cannot name one site and open another; a
-// card whose URL fails that rule is not drawn at all.
+// card whose URL fails that rule is not drawn at all. An allowlisted music
+// link is drawn by ./MusicEmbedCard instead, which loads the provider's player
+// while the card is visible (docs/protocol.md, Music links).
 //
 // The thumbnail comes only from the stored image descriptor, through the
 // same device-local paths photos use, and never from the URL:

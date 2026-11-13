@@ -1,6 +1,6 @@
 import rpc from '@varanda/rpc'
 import { bubbleShape, withDayMarks } from './dm-screen.js'
-import { HIDDEN_LABEL, rowsOf } from './groups.js'
+import { HIDDEN_LABEL, mergePages, rowsOf } from './groups.js'
 import { whoOf } from './who.js'
 
 const { displayText } = rpc
@@ -8,11 +8,14 @@ const { displayText } = rpc
 // group.read supplies newest first. Keep rowsOf's text escaping and reply
 // references while adapting the writer identity to the shared bubble rules.
 export function groupRows (items, ownKey, now = Date.now()) {
+  const byRef = new Map(mergePages([items]).map((item) => [item.writer + ':' + item.seq, item]))
   const rows = withDayMarks(rowsOf(items).map((row) => {
     const mine = typeof ownKey === 'string' && row.diary === ownKey
     // A run is one person (diary), not one device core: two devices of the
     // same member within the time limit read as one run, as in WhatsApp.
-    return { ...row, key: row.id, from: row.diary || row.writer, mine, side: mine ? 'mine' : 'theirs' }
+    const reactions = !row.hidden && byRef.get(row.id)?.reactions
+    const summary = Array.isArray(reactions) ? { reactions: reactions.filter((r) => r && typeof r === 'object').map(({ emoji, count, mine }) => ({ emoji, count, mine })) } : {}
+    return { ...row, ...summary, key: row.id, from: row.diary || row.writer, mine, side: mine ? 'mine' : 'theirs' }
   }), now)
   return rows.map((row, i) => {
     const shape = bubbleShape(rows, i)
@@ -32,9 +35,8 @@ export function replyPreview (item, byRef) {
   const target = key && byRef ? byRef.get(key) : null
   if (!target) return null
   if (target.hidden === true) return { name: '', text: HIDDEN_LABEL }
-  const text = typeof target.text === 'string' ? target.text.replace(/[\r\n\u2028\u2029]+/g, ' ') : ''
   return {
     name: displayText(whoOf(target).title),
-    text: Array.from(displayText(text)).slice(0, 90).join('')
+    text: typeof target.text === 'string' ? target.text : ''
   }
 }

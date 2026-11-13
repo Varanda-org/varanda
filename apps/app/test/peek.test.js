@@ -81,8 +81,7 @@ test('the notice is web-only first, then offline, else none', async (t) => {
 })
 
 test('the fixed texts are the approved Portuguese', async (t) => {
-  const { PEEK_WEB_ONLY_MESSAGE, PEEK_OFFLINE_MESSAGE, PEEK_RULE_TEXT, PEEK_SHORT_TEXT } = await load()
-  t.is(PEEK_WEB_ONLY_MESSAGE, 'Nesta versão, a Espiadinha só funciona na versão web no site da associação.')
+  const { PEEK_OFFLINE_MESSAGE, PEEK_RULE_TEXT, PEEK_SHORT_TEXT } = await load()
   t.is(PEEK_OFFLINE_MESSAGE, 'Confira sua internet.')
   t.is(PEEK_RULE_TEXT, PEEK_RULE, 'the rule is the node\'s, word for word')
   t.ok(!PEEK_RULE_TEXT.includes('o seu incluído'))

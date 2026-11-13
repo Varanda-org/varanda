@@ -291,9 +291,15 @@ export function revokeMedia (ranges) {
   }
 }
 
+// A post's photos or its link card thumbnail, as shownMedia in
+// packages/core/lib/deletion.js counts them.
 function descriptorRanges (record) {
   if (!record || typeof record !== 'object') return []
   if (record.type === 'post' && Array.isArray(record.media)) return record.media
+  if (record.type === 'post') {
+    const image = record.preview !== null && typeof record.preview === 'object' ? record.preview.image : null
+    return image !== null && typeof image === 'object' ? [image] : []
+  }
   if (record.type === 'profile' && record.avatar !== null && typeof record.avatar === 'object') return [record.avatar]
   return []
 }

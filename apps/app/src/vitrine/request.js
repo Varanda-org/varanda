@@ -4,7 +4,7 @@ import { sealedTestimonial, signVitrineConsent, testimonialHash, verifyVitrineCo
 import { largeFeed } from './large.js'
 import { testimonialPointers, useTestimonialSource } from './testimonialIndex.js'
 
-const { validateParams, RpcError, feira } = rpc
+const { validateParams, RpcError, feira, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX } = rpc
 let currentFeira = null
 let currentLive = null
 
@@ -35,6 +35,9 @@ const active = (entity) => ['creator', 'admin', 'member'].includes(entity.role)
 const preview = (text, media) => text === '' && Array.isArray(media) && media.length > 0
   ? media.some((m) => (m.plainMime || m.mime) === 'audio/mp4') ? 'Áudio' : media.every((m) => (m.plainMime || m.mime) === 'image/gif') ? 'GIF' : 'Foto'
   : [...text].slice(0, 140).join('')
+// The node's list label for a momento reaction (PREVIEW_MOMENT in
+// packages/core/lib/dm-fold.js), so the demo list reads the same.
+const MOMENT_PREVIEW = 'Reagiu a um momento'
 
 function refuse (code, message) {
   throw new RpcError(code, message, { uncertain: false })
@@ -70,6 +73,24 @@ export function createVitrineRequest (fixtures, options) {
   const conversationOf = (peer) => data.conversations.find((c) => c.peer === peer)
   const groupOf = (key) => data.groups.find((g) => g.group === key) || refuse('NOT_FOUND', 'grupo não encontrado')
   const communityOf = (key) => data.communities.find((c) => c.community === key) || refuse('NOT_FOUND', 'comunidade não encontrada')
+  const groupReactors = new Map()
+  const reactionKey = (group, target) => group + ':' + target.writer + ':' + target.seq
+  // As the core fold: every member's reaction is kept, and only the 12
+  // emojis with the most reactors (ties by emoji) are shown.
+  const shownReactions = (rows) => rows.slice().sort((a, b) => b.count - a.count || compareText(a.emoji, b.emoji)).slice(0, GROUP_REACTIONS_MAX)
+  for (const g of data.groups) {
+    for (const item of g.items) {
+      const others = data.members.filter((m) => m.author !== data.own).map((m) => m.author)
+      groupReactors.set(reactionKey(g.group, item), (item.reactions || []).map(({ emoji, count, mine }) => ({
+        emoji, count, by: [...(mine ? [data.own] : []), ...others.splice(0, count - (mine ? 1 : 0))]
+      })))
+    }
+  }
+  const reactionPost = (group, target) => {
+    const item = groupOf(group).items.find((p) => p.writer === target.writer && p.seq === target.seq)
+    if (!item || item.hidden) refuse('USAGE', 'mensagem não encontrada')
+    return item
+  }
   const orderedItems = (g) => [...g.items].sort((a, b) => comparePosition(a, b, 'writer'))
 
   function usernameRecord (p) {
@@ -151,7 +172,7 @@ export function createVitrineRequest (fixtures, options) {
     const now = demoNow()
     return t - now <= MOMENT_SKEW_MS && t + MOMENT_TTL_MS > now
   }
-  const momentRow = (author, { seq, record }) => ({ seq, ref: `${author}:${seq}`, text: record.text, at: shown(record.at), media: record.media })
+  const momentRow = (author, { seq, record }) => ({ seq, ref: `${author}:${seq}`, text: record.text, at: shown(record.at), media: record.media, music: record.music || null })
   data.momentMedia = (author, seq) => {
     const entry = typeof author === 'string' && Number.isSafeInteger(seq) ? momentsOf(author).find((e) => e.seq === seq) : null
     return entry && showing(entry.record) ? entry.record.media : null
@@ -225,10 +246,10 @@ export function createVitrineRequest (fixtures, options) {
   }
 
   function publish (params, kind) {
-    const record = { type: 'post', text: params.text, at: stamp(), replyTo: kind === 'reply' ? targetOf(params.to) : null, ...(kind === 'quote' ? { quote: targetOf(params.to) } : {}), ...(params.media ? { media: params.media } : {}) }
+    const record = { type: 'post', text: params.text, at: stamp(), replyTo: kind === 'reply' ? targetOf(params.to) : null, ...(kind === 'quote' ? { quote: targetOf(params.to) } : {}), ...(params.media ? { media: params.media } : {}), ...(params.preview ? { preview: params.preview } : {}) }
     const result = append(record)
     const p = profileOf(data.own)
-    data.feed.push({ kind: 'post', author: data.own, name: p.name, username: p.username, seq: result.seq, at: record.at, text: record.text, replyTo: record.replyTo, quote: record.quote || null, media: record.media || null })
+    data.feed.push({ kind: 'post', author: data.own, name: p.name, username: p.username, seq: result.seq, at: record.at, text: record.text, replyTo: record.replyTo, quote: record.quote || null, media: record.media || null, preview: record.preview || null })
     return kind === 'quote' ? { seq: result.seq } : result
   }
 
@@ -576,7 +597,10 @@ export function createVitrineRequest (fixtures, options) {
       return { items, next: candidates.length > limit ? { round: last.round, at: last.at, author: last.author, seq: last.seq } : null, diaries: new Set(rows.map((r) => r.author)).size, skipped: 0, incomplete: false }
     },
     'page.read': ({ key }) => {
-      if (!data.pages.some((p) => p.author === key)) refuse('NOT_FOUND', 'sem dados locais para este diário')
+      if (!data.pages.some((p) => p.author === key)) {
+        if (!profileOf(key) && !conversationOf(key)) refuse('NOT_FOUND', 'sem dados locais para este diário')
+        return { page: key, owner: null, admins: [], gen: null, seq: null, isOwner: false, isAdmin: false, complete: !!profileOf(key) && !data.incompleteDiaries.includes(key), follows: [], followsCount: 0, followsTruncated: false, closed: false, movedTo: null, movedFrom: null, links: [] }
+      }
       const follows = data.members.filter((p) => p.author !== data.own).map((p, i) => ({ key: p.author, seq: 30 + i })).reverse()
       return { page: key, owner: data.own, admins: [data.members[1].author], gen: 1, seq: 1, isOwner: true, isAdmin: false, complete: true, follows, followsCount: follows.length, followsTruncated: false, closed: false, movedTo: null, movedFrom: null, links: [] }
     },
@@ -623,6 +647,36 @@ export function createVitrineRequest (fixtures, options) {
       if (!item) refuse('NOT_FOUND', 'mensagem não encontrada')
       item.hidden = on
       return { ok: true }
+    },
+    'group.react': ({ group, target, emoji }) => {
+      const g = groupOf(group)
+      if (!active(g) || !active(communityOf(g.community)) || communityOf(g.community).dropped.includes(group)) refuse('USAGE', 'sem permissão no grupo')
+      const item = reactionPost(group, target)
+      const key = reactionKey(group, target)
+      const rows = groupReactors.get(key) || []
+      if ((rows.find((r) => r.by.includes(data.own))?.emoji || '') === emoji) return { ok: true }
+      for (const row of rows) {
+        if (row.by.includes(data.own)) {
+          row.by = row.by.filter((key) => key !== data.own)
+          row.count--
+        }
+      }
+      if (emoji !== '') {
+        let row = rows.find((r) => r.emoji === emoji)
+        if (!row) { row = { emoji, count: 0, by: [] }; rows.push(row) }
+        row.by.push(data.own)
+        row.count++
+      }
+      const next = rows.filter((r) => r.count > 0)
+      groupReactors.set(key, next)
+      const shown = shownReactions(next)
+      if (shown.length) item.reactions = shown.map(({ emoji, count, by }) => ({ emoji, count, mine: by.includes(data.own) }))
+      else delete item.reactions
+      return { ok: true }
+    },
+    'group.reactors': ({ group, target }) => {
+      reactionPost(group, target)
+      return { reactions: shownReactions(groupReactors.get(reactionKey(group, target)) || []).map(({ emoji, count, by }) => ({ emoji, count, by: by.slice(0, GROUP_REACTORS_MAX) })) }
     },
     'group.rekey': ({ group }) => {
       const g = groupOf(group)
@@ -686,7 +740,7 @@ export function createVitrineRequest (fixtures, options) {
     'dm.list': ({ folder, limit, before }) => {
       const rows = data.conversations.filter((c) => !c.blocked && c.messages.length > 0).map((c) => {
         const last = c.messages[c.messages.length - 1]
-        return { peer: c.peer, folder: c.folder, preview: preview(last.text, last.media), at: last.at, unread: c.unread, mine: last.mine }
+        return { peer: c.peer, folder: c.folder, preview: Number.isSafeInteger(last.moment) && last.moment >= 1 ? MOMENT_PREVIEW + ' ' + last.text : preview(last.text, last.media), at: last.at, unread: c.unread, mine: last.mine }
       })
       const candidates = rows.filter((c) => c.folder === folder && (!before || compareDm(c, before) > 0)).sort(compareDm)
       const conversations = candidates.slice(0, limit)
@@ -715,21 +769,37 @@ export function createVitrineRequest (fixtures, options) {
       if (c) c.unread = false
       return { ok: true }
     },
-    'dm.send': ({ to, text, replyTo, media, card }) => {
+    'dm.send': ({ to, text, replyTo, media, card, moment }) => {
       if (to === data.own) refuse('USAGE', 'não é possível enviar para si')
       let c = conversationOf(to)
       if (c && c.blocked) refuse('USAGE', 'você bloqueou esta pessoa')
       if (!c && !profileOf(to)) refuse('USAGE', 'esta pessoa ainda não recebe mensagens')
       if (replyTo && (!c || !c.messages.some((m) => m.id === replyTo))) refuse('USAGE', 'responda uma mensagem desta conversa')
+      // Like the node: a reaction only names a momento of `to` that is showing.
+      if (moment !== undefined && moment !== null && data.momentMedia(to, moment) === null) refuse('USAGE', 'momento não encontrado')
       if (!c) {
         c = { peer: to, folder: 'inbox', unread: false, blocked: false, messages: [] }
         data.conversations.push(c)
       }
       const id = (++messageId).toString(16).padStart(32, '0')
       const at = stamp()
-      c.messages.push({ id, from: data.own, text, replyTo: replyTo || null, at, mine: true, media: media || null, ...(card ? { card } : {}) })
+      c.messages.push({ id, from: data.own, text, replyTo: replyTo || null, at, mine: true, media: media || null, ...(card ? { card } : {}), ...(Number.isSafeInteger(moment) && moment >= 1 ? { moment } : {}) })
       c.folder = 'inbox'
       return { id, at }
+    },
+    'dm.react': ({ to, target, emoji }) => {
+      const c = conversationOf(to)
+      if (c && c.blocked) refuse('USAGE', 'você bloqueou esta pessoa')
+      const item = c?.messages.find((m) => m.from === target.from && m.id === target.id && !m.deleted)
+      if (!item) refuse('USAGE', 'mensagem não encontrada')
+      if (item.reactable === false) refuse('USAGE', 'esta mensagem não aceita reações')
+      const rows = item.reactions || []
+      if ((rows.find((r) => r.mine)?.emoji || '') === emoji) return { ok: true }
+      const next = rows.filter((r) => !r.mine)
+      if (emoji !== '') next.push({ emoji, mine: true })
+      if (next.length > 0) item.reactions = next
+      else delete item.reactions
+      return { ok: true }
     },
     'dm.lookup': ({ member }) => ({ box: profileOf(member) || conversationOf(member) ? member : null, gen: profileOf(member) || conversationOf(member) ? 1 : null }),
     'group.list': ({ offset, limit }) => {
@@ -739,7 +809,11 @@ export function createVitrineRequest (fixtures, options) {
     'group.read': ({ group, limit, before }) => {
       const g = groupOf(group)
       const candidates = orderedItems(g).reverse().filter((item) => !before || comparePosition(item, before, 'writer') < 0)
-      const items = candidates.slice(0, limit).map((item) => item.hidden ? { ...item, text: '', media: null } : item)
+      const items = candidates.slice(0, limit).map((item) => {
+        if (!item.hidden) return item
+        const { reactions, ...hidden } = item
+        return { ...hidden, text: '', media: null, card: null }
+      })
       return {
         items,
         next: candidates.length > limit ? groupCursor(items[items.length - 1]) : null,
@@ -872,12 +946,12 @@ export function createVitrineRequest (fixtures, options) {
     },
     // Only an item the Vitrine media handle's putMoment answered and no
     // moment published yet, as the web node's entry check.
-    'moment.create': ({ text, media }) => {
+    'moment.create': ({ text, media, music }) => {
       const prepared = data.momentUploads ? data.momentUploads.get(media.id) : null
       if (!prepared || JSON.stringify(prepared) !== JSON.stringify(media)) refuse('USAGE', 'prepare a mídia de novo')
       if (badText(text)) refuse('USAGE', 'registro inválido: malformed')
       data.momentUploads.delete(media.id)
-      return append({ type: 'moment', text, at: stamp(), media })
+      return append({ type: 'moment', text, at: stamp(), media, ...(music ? { music } : {}) })
     },
     'moments.read': () => {
       const authors = data.follows.filter((author) => author !== data.own).flatMap((author) => {
@@ -890,6 +964,12 @@ export function createVitrineRequest (fixtures, options) {
         own: ownMoments.filter((e) => showing(e.record)).slice(0, 4).map((e) => momentRow(data.own, e)),
         past: ownMoments.filter((e) => Date.parse(e.record.at) + MOMENT_TTL_MS <= demoNow()).slice(0, 16).map((e) => ({ seq: e.seq, ref: `${data.own}:${e.seq}`, text: e.record.text, at: shown(e.record.at) }))
       }
+    },
+    'moment.lookup': ({ author, seq }) => {
+      const entry = momentsOf(author).find((e) => e.seq === seq)
+      if (!entry || !showing(entry.record)) refuse('NOT_FOUND', 'foto indisponível')
+      const { mime, w, h } = entry.record.media
+      return { mime, w, h, ms: 0, at: shown(entry.record.at) }
     },
     'moment.delete': ({ to }) => {
       const target = targetOf(to)

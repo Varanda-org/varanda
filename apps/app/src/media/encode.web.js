@@ -1,12 +1,13 @@
 /* global Blob, createImageBitmap, document, Image, URL */
 
 // Web: turns a chosen file into the bytes that are uploaded.
-// - Photos (jpeg, png, webp) are decoded (createImageBitmap, or an <img> when
-//   it is missing or fails), drawn on a canvas at fitWithin(w, h,
-//   MAX_IMAGE_SIDE) and re-encoded as image/webp (quality 0.85) when the
-//   browser really produces webp, else image/jpeg (0.85, on white, since jpeg
-//   has no transparency). The re-encode STRIPS all metadata: EXIF, GPS
-//   position, camera data. The orientation is applied while decoding.
+// - Photos (jpeg, png, webp) whose header size passes photoProblem are
+//   decoded (createImageBitmap, or an <img> when it is missing or fails),
+//   drawn on a canvas at fitWithin(w, h, MAX_IMAGE_SIDE) and re-encoded as
+//   image/webp (quality 0.85) when the browser really produces webp, else
+//   image/jpeg (0.85, on white, since jpeg has no transparency). The
+//   re-encode STRIPS all metadata: EXIF, GPS position, camera data. The
+//   orientation is applied while decoding.
 // - GIFs pass through UNCHANGED (the animation is kept), at most
 //   MAX_GIF_BYTES; their size comes from the header (logical screen width and
 //   height, bytes 6-9, little-endian). A GIF carries no EXIF; its own
@@ -17,12 +18,16 @@
 // message for the person.
 
 import rpc from '@varanda/rpc'
-import { gifSize } from './gif.js'
+import { gifProblem, gifSize } from './gif.js'
 import { MAX_GIF_BYTES, MAX_IMAGE_SIDE, checkFile, fitWithin, kindOf } from './plan.js'
 
 const QUALITY = 0.85
 // Larger source files are refused before decoding (memory).
 const MAX_SOURCE_BYTES = 50 * 1024 * 1024
+// A decode allocates width x height pixels, so the header size is checked
+// first. Same limits as the iOS share import: 48 MP photos and panoramas fit.
+export const MAX_PHOTO_SIDE = 16384
+export const MAX_PHOTO_PIXELS = 100000000
 
 function fail (message) {
   return new Error(message)
@@ -39,6 +44,8 @@ async function encodeGif (file) {
   if (!size) throw fail('formato não aceito')
   const problem = checkFile({ mime: 'image/gif', bytes: bytes.byteLength, ...size })
   if (problem) throw fail(problem)
+  const refused = gifProblem(bytes)
+  if (refused) throw fail(refused)
   return { bytes, mime: 'image/gif', ...size }
 }
 
@@ -85,8 +92,26 @@ function toBlob (canvas, mime) {
   })
 }
 
+// The message for a photo that must not reach the decoder, or null. The
+// decoder sniffs the bytes, not the declared type, so the header is read the
+// same way.
+export function photoProblem (bytes) {
+  const size = rpc.mediaSize(bytes)
+  if (size === null) return 'não foi possível abrir a foto'
+  if (size.width > MAX_PHOTO_SIDE || size.height > MAX_PHOTO_SIDE || size.width * size.height > MAX_PHOTO_PIXELS) return 'foto grande demais'
+  return null
+}
+
 async function encodePhoto (file) {
   if (file.size > MAX_SOURCE_BYTES) throw fail('arquivo grande demais')
+  let source
+  try {
+    source = await bytesOf(file)
+  } catch {
+    throw fail('não foi possível abrir a foto')
+  }
+  const refused = photoProblem(source)
+  if (refused) throw fail(refused)
   const decoded = await decode(file)
   const canvas = document.createElement('canvas')
   try {

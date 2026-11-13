@@ -130,7 +130,7 @@ test('group-writer v2 shapes', (t) => {
 })
 
 test('record types and community-core shapes', async (t) => {
-  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed', 'group-invites'])
+  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed', 'group-invites', 'group-react'])
   const CW = { community: true }
   const CR = { root: true, community: true }
   const create = groupCreateRecord({ group: G1, at: AT(1) })

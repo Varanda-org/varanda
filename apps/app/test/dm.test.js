@@ -9,7 +9,7 @@ const load = () => import('../src/dm.js')
 test('dm.js exports the list helpers, the thread and the labels', async (t) => {
   const dm = await load()
   t.alike(Object.keys(dm).sort(), [
-    'LABELS', 'UNSURE_SEND', 'requestsDot', 'sortConversations', 'splitFolders', 'tabDot', 'threadOf'
+    'LABELS', 'UNSURE_SEND', 'quoteIndex', 'quoteOf', 'requestsDot', 'sortConversations', 'splitFolders', 'tabDot', 'threadOf'
   ].sort())
   const imports = readFileSync(join(__dirname, '../src/dm.js'), 'utf8')
     .split('\n')
@@ -43,6 +43,7 @@ test('LABELS are the approved Portuguese', async (t) => {
     uncertain: 'Não deu para confirmar o envio. Tentar de novo manda a mesma mensagem.',
     deletedQuote: 'respondendo a uma mensagem apagada neste aparelho',
     olderQuote: 'respondendo a uma mensagem anterior',
+    missingQuote: 'respondendo a uma mensagem que não está neste aparelho',
     reportNote: 'Só esta mensagem e a conta de quem enviou vão para a moderação. Nada mais da conversa.'
   })
 })
@@ -175,6 +176,34 @@ test('threadOf is oldest first and resolves replyTo to the quoted text or null',
     { id: 'r', from: small, at: '2026-05-03T00:00:00.000Z', text: 'resposta', replyTo: 'x', mine: true }
   ])
   t.is(otherDevice[2].replyTo, 'da chave menor', 'the same quote on the other device, whatever the order')
+})
+
+test('a bound reply quotes only the message of its sender, or says it is not here', async (t) => {
+  const { threadOf, quoteIndex, quoteOf, LABELS } = await load()
+  const small = 'a'.repeat(64)
+  const big = 'b'.repeat(64)
+  const x = { id: 'x', from: big, at: '2026-05-01T00:00:00.000Z', text: 'da chave maior', replyTo: null }
+  const y = { id: 'x', from: small, at: '2026-05-02T00:00:00.000Z', text: 'da chave menor', replyTo: null }
+  // replyFrom names the sender, so the larger key's message is quoted even
+  // where a bare id would take the smaller one.
+  const bound = { id: 'r', from: small, at: '2026-05-03T00:00:00.000Z', text: 'resposta', replyTo: 'x', replyFrom: big }
+  const missing = { id: 's', from: small, at: '2026-05-04T00:00:00.000Z', text: 'outra', replyTo: 'x', replyMissing: true }
+  const away = { id: 'u', from: big, at: '2026-05-05T00:00:00.000Z', text: 'longe', replyTo: 'z', replyFrom: small }
+  const legacy = { id: 'v', from: big, at: '2026-05-06T00:00:00.000Z', text: 'antiga', replyTo: 'x' }
+  const rows = threadOf([x, y, bound, missing, away, legacy])
+  t.is(rows[2].replyTo, 'da chave maior', 'a bound reply quotes the sender it names')
+  t.is(rows[3].replyTo, LABELS.missingQuote, 'never another message under the same id')
+  t.is(rows[4].replyTo, LABELS.olderQuote, 'a bound reply outside the loaded rows is neutral')
+  t.is(rows[5].replyTo, 'da chave menor', 'a bare id keeps the smaller sender key')
+  const index = quoteIndex([x, y, null, { id: '' }])
+  t.is(quoteOf(bound, index).target, x)
+  t.alike(quoteOf(missing, index), { missing: true, target: null })
+  t.alike(quoteOf(away, index), { missing: false, target: null })
+  t.is(quoteOf(legacy, index).target, y)
+  t.is(quoteOf(x, index), null, 'no reply quotes nothing')
+  t.is(quoteOf({ ...x, replyMissing: true }, index), null, 'replyMissing without a reply quotes nothing')
+  t.is(quoteOf(null, index), null)
+  t.is(quoteOf({ ...bound, replyFrom: small }, index).target, y, 'the sender is matched exactly')
 })
 
 test('dm.js has no read, delivery or typing words and no em dash', async (t) => {
@@ -393,6 +422,57 @@ test('Bubble keeps a quote clear of the hover chevron only when there are action
   t.ok(bubble.includes("accessibilityLabel='ações da mensagem'"), 'the chevron keeps its label')
 })
 
+test('Bubble holds a text bubble to its column so a long link wraps', (t) => {
+  const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
+  t.ok(/<View style=\{\[styles\.column, mine && styles\.columnMine\]\}>\s*(\{\/\*[\s\S]*?\*\/\}\s*)?<View style=\{hug \? null : styles\.stack\}>\s*<Pressable/.test(bubble), 'the wrapper inside the column takes the cap unless the bubble hugs a width')
+  t.ok(bubble.includes("stack: { maxWidth: '100%' }"), 'the cap is the column width')
+  t.ok(bubble.includes("column: { maxWidth: '80%'"), 'the column keeps its 80% cap')
+})
+
+test('Bubble loads a provider player only from the stored card', (t) => {
+  const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
+  t.ok(bubble.includes("import { MusicEmbedCard } from './MusicEmbedCard'"), 'imports the player card')
+  t.is(bubble.split('embedOf(').length, 2, 'exactly one embedOf call')
+  t.ok(bubble.includes('const embed = card !== null && plainCard !== true ? embedOf(card.url) : null'), 'it reads the stored card url, never a link in the text, and never in a plain card')
+  t.ok(bubble.includes('<MusicEmbedCard embed={embed} card={card} thumb={cardThumb}'), 'the player card gets the stored card and its thumb')
+  t.ok(bubble.includes('<LinkCard card={card} thumb={cardThumb}'), 'any other card stays a LinkCard')
+  t.absent(bubble.includes('musicRefOf'), 'no Audius ref lookup in a bubble')
+  t.absent(bubble.includes('MusicPlayerCard'), 'no Audius player in a bubble')
+  t.ok(/: body !== null \|\| spacer !== null\s*\? \(\s*<Text style=\{styles\.text\}>/.test(bubble), 'a message that was only its link draws no empty text line')
+  t.ok(bubble.includes('const body = (withMedia || embed !== null) && shownEmpty'), 'a player card with no other text drops the body')
+  t.ok(bubble.includes("const shownEmpty = rich ? shown === '' : empty"), 'emptiness is read from the shown text')
+})
+
+test('a message request never loads a provider player', (t) => {
+  const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
+  t.ok(bubble.includes('forwarded, cardThumb, plainCard }) {'), 'Bubble takes plainCard')
+  t.ok(bubble.includes('card !== null && plainCard !== true ? embedOf(card.url) : null'), 'plainCard forces the plain LinkCard and keeps the link in the text')
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes("plainCard={folder === 'request'}"), 'Mensagem passes plainCard in a request')
+  t.ok(src.includes("deferred={folder === 'request'}"), 'the same row defers its photos')
+  t.ok(/extraData=\{\{[^}]*\bfolder\b/.test(src), 'rows redraw when the request is accepted')
+})
+
+test('chat screens end the player band at the composer', (t) => {
+  for (const file of ['../src/screens/Mensagem.js', '../src/screens/Grupo.js']) {
+    const src = readFileSync(join(__dirname, file), 'utf8')
+    t.ok(src.includes("import { EmbedBandBottom } from '../ui/screenVisible'"), file + ': imports the band context')
+    t.ok(src.includes('<EmbedBandBottom.Provider value={composer ? band : null}>'), file + ': the list gets the band')
+    const opens = src.indexOf('<EmbedBandBottom.Provider')
+    const list = src.indexOf('<RefreshableList')
+    const closes = src.indexOf('</EmbedBandBottom.Provider>')
+    t.ok(opens !== -1 && opens < list && list < closes, file + ': the list sits inside the band provider')
+    t.ok(src.includes('{composer ? <View ref={composerBox} collapsable={false}>{composer}</View> : null}'), file + ': the composer sits in a measured wrapper')
+    t.ok(src.includes('const composerBox = useRef(null)'), file + ': the wrapper ref')
+    const start = src.indexOf('const band = useMemo(')
+    const memo = start === -1 ? '' : src.slice(start, src.indexOf('}), [])', start))
+    t.ok(memo.includes('const node = composerBox.current'), file + ': band.measure reads the wrapper')
+    t.ok(memo.includes("if (node === null || typeof node.measureInWindow !== 'function') { done(null); return }"), file + ': no wrapper answers null')
+    t.ok(memo.includes('node.measureInWindow('), file + ': band.measure measures the composer on every check')
+    t.absent(/<View ref=\{composerBox\}[^>]*onLayout/.test(src), file + ': no onLayout on the wrapper')
+  }
+})
+
 test('Mensagem shows a removable post context chip and sends it only as composed text', (t) => {
   const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
   t.ok(src.includes("<IconAction icon='fechar' label='remover contexto' onPress={() => setContext(null)} />"), 'the chip is removable')
@@ -469,9 +549,17 @@ function screenHelper (file, name, deps = {}) {
   return new Function(...Object.keys(deps), match[0].replace(/^export /, '') + '\nreturn ' + name)(...Object.values(deps))
 }
 
-test('Mensagem listing pill recognizes text, stored cards and fragments only on this installation', async (t) => {
+async function listingHelpers () {
   const { listingLinkOf } = await import('../src/feiraChat.js')
-  const listingLinkForRow = screenHelper('Mensagem', 'listingLinkForRow', { listingLinkOf })
+  const { parseRich, plainOf } = await import('../src/richText.js')
+  const cardBesideSpoilers = screenHelper('../ui/RichText', 'cardBesideSpoilers')
+  const visibleListingLink = screenHelper('Mensagem', 'visibleListingLink', { listingLinkOf, plainOf, parseRich, cardBesideSpoilers })
+  const listingLinkForRow = screenHelper('Mensagem', 'listingLinkForRow', { visibleListingLink })
+  return { visibleListingLink, listingLinkForRow }
+}
+
+test('Mensagem listing pill recognizes text, stored cards and fragments only on this installation', async (t) => {
+  const { listingLinkForRow } = await listingHelpers()
   const origin = 'https://bora.varanda.app'
   const url = origin + '/f/' + HEX('a') + '/7'
   const ref = { author: HEX('a'), seq: 7 }
@@ -489,6 +577,29 @@ test('Mensagem listing pill recognizes text, stored cards and fragments only on 
   t.ok(src.includes('row.listingLink = listingLinkForRow({ ...row, card: cardOf.get(row.key) }, origin)'), 'stored card URL reaches the same rule')
   t.ok(src.includes('showListingReplies(rows, pageKey !== null ? pageKey : ownKey) && !hold'), 'quick replies use the listing author rule')
   t.ok(src.includes('quickReplies().map((text) => <Pill'), 'chips use the shared replies')
+})
+
+test('a listing link covered by a spoiler gives no pill and no offer target', async (t) => {
+  const { visibleListingLink, listingLinkForRow } = await listingHelpers()
+  const { offerTarget } = await import('../src/feiraOffer.js')
+  const origin = 'https://bora.varanda.app'
+  const url = origin + '/f/' + HEX('a') + '/7'
+  const ref = { author: HEX('a'), seq: 7 }
+  const card = { url, title: 'Bike' }
+  t.is(listingLinkForRow({ rawText: 'oi ||veja ' + url + ' aqui||' }, origin), null, 'a link only inside a spoiler: no pill')
+  t.is(listingLinkForRow({ rawText: 'oi ||veja ' + url + ' aqui||', card }, origin), null, 'nor through the card the bubble hides')
+  t.is(listingLinkForRow({ rawText: 'oi ||segredo||', card }, origin), null, 'a card beside a spoiler and no visible link: hidden, no pill')
+  t.alike(listingLinkForRow({ rawText: 'veja ' + url + ' ||segredo||', card }, origin), ref, 'the visible link keeps its pill')
+  t.alike(listingLinkForRow({ rawText: '```\na\n' + url + '\n```' }, origin), ref, 'a later code line counts as the bubble shows it')
+  const seller = HEX('a')
+  const msgs = [
+    { id: 'm1', from: seller, text: 'veja ' + url, card: null },
+    { id: 'm2', from: seller, text: '||outro ' + origin + '/f/' + HEX('a') + '/9 aqui||', card: { url: origin + '/f/' + HEX('a') + '/9', title: 'Oculto' } }
+  ]
+  t.alike(offerTarget(msgs, seller, origin, (m) => visibleListingLink(m.text, m.card, origin)), { author: seller, seq: 7, title: '' }, 'the offer goes to the newest visible listing, not the covered one')
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes('const linkOfMsg = (m) => visibleListingLink(m.text, m.card, origin)'), 'the offer input reads the same rule')
+  t.ok(src.includes('return visibleListingLink(row.rawText, row.card, origin)'), 'the pill reads the same rule')
 })
 
 test('Mensagem quick replies show to whoever did not author the newest listing link', (t) => {
@@ -721,4 +832,310 @@ test('pageNotActivated reads the page\'s published dm-key', async (t) => {
   t.is(pageNotActivated({ box: 'a'.repeat(64), gen: 1 }), false, 'a gen 1 key may be a new activated page')
   t.is(pageNotActivated({ box: 'a'.repeat(64), gen: 2 }), false)
   t.is(pageNotActivated(null), false, 'an unknown read shows nothing extra')
+})
+
+test('threadRows preserves only the source moment, including duplicate message ids', async (t) => {
+  const { threadRows } = await import('../src/dm-screen.js')
+  const rows = threadRows([
+    { id: 'same', from: 'a'.repeat(64), text: '❤️', moment: 7, at: 1 },
+    { id: 'same', from: 'b'.repeat(64), text: 'hello', at: 2 },
+    { id: 'third', text: '🔥', moment: 'untrusted', at: 3 }
+  ])
+  t.is(rows[0].moment, 7)
+  t.absent(Object.hasOwn(rows[1], 'moment'))
+  t.is(rows[2].moment, 'untrusted', 'the row preserves the node answer without coercion')
+})
+
+// Runs the real JSX and effects with a controlled clock and platform boundaries.
+async function momentUI (file, options = {}) {
+  const { transformSync } = require('@babel/core')
+  const { runInNewContext } = require('node:vm')
+  const reaction = await import('../src/momentReaction.js')
+  const previews = await import('../src/momentPreviews.js')
+  const rpc = require('@varanda/rpc')
+  let now = Date.parse('2026-11-13T12:00:00.000Z')
+  let cursor = 0
+  let dirty = false
+  const slots = []
+  const effects = []
+  const timers = new Map()
+  let nextTimer = 0
+  const calls = { lookup: [], read: [], revoke: [], forget: [], display: [] }
+  const element = (type, props) => ({ type, props: props || {} })
+  const hooks = {
+    useState (initial) {
+      const i = cursor++
+      if (!slots[i]) slots[i] = { value: typeof initial === 'function' ? initial() : initial }
+      return [slots[i].value, (value) => { slots[i].value = value; dirty = true }]
+    },
+    useEffect (fn, deps) {
+      const i = cursor++
+      if (!slots[i] || deps.some((dep, j) => !Object.is(dep, slots[i].deps[j]))) {
+        const prior = slots[i]
+        slots[i] = { deps }
+        effects.push(() => { prior?.cleanup?.(); slots[i].cleanup = fn() })
+      }
+    },
+    useMemo: (fn) => fn(),
+    isValidElement: (value) => !!value?.type,
+    cloneElement: (value, props) => element(value.type, { ...value.props, ...props })
+  }
+  const lookup = { mime: 'image/jpeg', w: 160, h: 320, ms: 0, at: new Date(now).toISOString() }
+  const node = options.node || {
+    request: async (method, params) => {
+      calls.lookup.push({ method, params: { ...params } })
+      return options.lookup ? options.lookup() : lookup
+    },
+    media: {
+      read: async (ref) => {
+        calls.read.push({ ...ref })
+        return options.read ? options.read() : { mime: 'image/jpeg', bytes: new Uint8Array([1, 2]) }
+      },
+      forgetReadFile: (name) => calls.forget.push(name)
+    }
+  }
+  const modules = {
+    react: hooks,
+    'react/jsx-runtime': { jsx: element, jsxs: element },
+    'react-native': { View: 'View', Text: 'Text', Image: 'Image', Pressable: 'Pressable', StyleSheet: { create: (x) => x, hairlineWidth: 1 }, useWindowDimensions: () => ({ width: 400 }) },
+    '@varanda/rpc': { ...rpc, displayText: (text, opts) => { calls.display.push(text); return rpc.displayText(text, opts) } },
+    '../momentReaction': reaction,
+    '../momentPreviews': previews,
+    '../node': { useNode: () => node },
+    '../media/display': { urlFromBytes: () => 'blob:moment', revokeUrl: (uri) => calls.revoke.push(uri) },
+    '../ui': { Soft: 'Soft' },
+    './ThemeProvider': { useStyles: (fn) => fn({}), useTheme: () => ({ colors: {}, scheme: 'light' }) },
+    './theme': { radius: { sm: 8 }, space: { xs: 4, md: 12, sm: 8 }, type: { caption: {}, heroTitle: { fontSize: 28 } }, layout: { hit: 44 } },
+    './Icon': { Icon: 'Icon' },
+    './MomentReactionPreview': { MomentReactionPreview: 'MomentReactionPreview' },
+    '../dm': { LABELS: {} },
+    '../forward': {},
+    '../links': {},
+    '../musicEmbed': {},
+    '../richText': { hasRich: () => false },
+    './ActionsSheet': { ActionsSheet: 'ActionsSheet', usableActions: (actions) => actions || [] },
+    './ChatMedia': {},
+    './LinkCard': {},
+    './MentionText': { MentionText: 'MentionText' },
+    './MusicEmbedCard': {},
+    './ReplyPreview': {},
+    './RichText': {}
+  }
+  const { code } = transformSync(readFileSync(join(__dirname, '../src/ui/' + file + '.js'), 'utf8'), {
+    babelrc: false,
+    configFile: false,
+    plugins: [[require.resolve('@babel/plugin-transform-react-jsx'), { runtime: 'automatic' }], require.resolve('@babel/plugin-transform-modules-commonjs')]
+  })
+  const exported = {}
+  runInNewContext(code, {
+    exports: exported,
+    require: (name) => {
+      if (!Object.hasOwn(modules, name)) throw new Error('Unexpected import: ' + name)
+      return modules[name]
+    },
+    Uint8Array,
+    Date: class extends Date { static now () { return now } },
+    setTimeout: (fn, ms) => { const id = ++nextTimer; timers.set(id, { fn, at: now + ms }); return id },
+    clearTimeout: (id) => timers.delete(id)
+  })
+  let props = { author: 'a'.repeat(64), seq: 7, identity: 'b'.repeat(64), folder: 'inbox', ...options.props }
+  let tree
+  const render = () => {
+    cursor = 0
+    dirty = false
+    tree = exported[file](props)
+    while (effects.length) effects.shift()()
+    return tree
+  }
+  const flush = async () => {
+    for (let i = 0; i < 12; i++) { await Promise.resolve(); if (dirty) render() }
+    return tree
+  }
+  render()
+  await flush()
+  return {
+    calls,
+    lookup,
+    node,
+    tree: () => tree,
+    flush,
+    timers,
+    update: async (next) => { props = { ...props, ...next }; render(); return flush() },
+    advance: async (ms) => {
+      now += ms
+      for (const [id, timer] of [...timers]) {
+        if (timer.at <= now && timers.delete(id)) timer.fn()
+      }
+      return flush()
+    },
+    unmount: () => { for (const slot of slots) slot?.cleanup?.() }
+  }
+}
+
+function momentNodes (tree) {
+  if (tree == null || typeof tree !== 'object') return []
+  if (Array.isArray(tree)) return tree.flatMap(momentNodes)
+  return [tree, ...momentNodes(tree.props?.children)]
+}
+
+test('moment bubbles render both labels and the emoji through displayText', async (t) => {
+  for (const mine of [false, true]) {
+    const h = await momentUI('Bubble', { props: { item: { rawText: '❤️', text: '❤️' }, mine, moment: { seq: 7, author: 'a'.repeat(64) } } })
+    const nodes = momentNodes(h.tree())
+    t.ok(nodes.some((n) => n.props.children === (mine ? 'Você reagiu a um momento' : 'Reagiu ao seu momento')))
+    t.ok(nodes.some((n) => n.props.children === '❤️' && n.props.style.fontSize === 28))
+    t.ok(h.calls.display.includes('❤️'))
+    t.is(nodes.filter((n) => n.type === 'MomentReactionPreview').length, 1)
+  }
+})
+
+test('hostile moment text and an ordinary emoji stay on the ordinary message path', async (t) => {
+  for (const [rawText, moment] of [['<script>🔥\u202e', { seq: 7 }], ['🔥', undefined]]) {
+    const h = await momentUI('Bubble', { props: { item: { rawText, text: rawText }, moment } })
+    const nodes = momentNodes(h.tree())
+    t.absent(nodes.some((n) => n.type === 'MomentReactionPreview'))
+    t.ok(nodes.some((n) => n.type === 'MentionText' && n.props.text === rawText))
+  }
+})
+
+test('moment image reads once across polls, fits 72 pt and releases on unmount', async (t) => {
+  const h = await momentUI('MomentReactionPreview')
+  t.alike(h.calls.lookup[0], { method: 'moment.lookup', params: { author: 'a'.repeat(64), seq: 7 } })
+  t.alike(h.calls.read, [{ kind: 'moment', author: 'a'.repeat(64), seq: 7 }])
+  t.is(h.tree().type, 'Image')
+  t.alike({ ...h.tree().props.style[1] }, { width: 36, height: 72 })
+  await h.advance(15000)
+  t.is(h.calls.lookup.length, 2)
+  t.is(h.calls.read.length, 1)
+  h.unmount()
+  t.alike(h.calls.revoke, ['blob:moment'])
+  t.is(h.timers.size, 0)
+})
+
+test('bubbles of one momento share one lookup and one read', async (t) => {
+  const a = await momentUI('MomentReactionPreview')
+  const b = await momentUI('MomentReactionPreview', { node: a.node })
+  await a.flush()
+  t.is(a.calls.lookup.length, 1)
+  t.is(a.calls.read.length, 1)
+  t.is(a.tree().type, 'Image')
+  t.is(b.tree().type, 'Image')
+  t.is(a.tree().props.source.uri, b.tree().props.source.uri)
+  await a.advance(15000)
+  t.is(a.calls.lookup.length, 2)
+  t.is(a.calls.read.length, 1)
+  a.unmount()
+  t.alike(a.calls.revoke, [])
+  b.unmount()
+  t.alike(a.calls.revoke, ['blob:moment'])
+  t.is(a.timers.size, 0)
+})
+
+test('video previews use a static tile without reading media', async (t) => {
+  const h = await momentUI('MomentReactionPreview', { lookup: () => ({ mime: 'video/mp4', w: 320, h: 180, ms: 5000, at: '2026-11-13T12:00:00.000Z' }) })
+  t.alike(h.calls.read, [])
+  t.is(h.tree().type, 'View')
+  t.is(h.tree().props.children.type, 'Icon')
+  t.is(h.tree().props.children.props.name, 'tocar')
+  h.unmount()
+})
+
+test('requests and missing or invalid authors never look up or read a moment', async (t) => {
+  for (const props of [{ folder: 'request' }, { author: null }, { author: 'invalid' }]) {
+    const h = await momentUI('MomentReactionPreview', { props })
+    t.alike(h.calls.lookup, [])
+    t.alike(h.calls.read, [])
+    t.is(h.tree(), null)
+    h.unmount()
+  }
+})
+
+test('failed lookup and failed media read show the unavailable label', async (t) => {
+  for (const options of [{ lookup: () => { throw new Error('gone') } }, { read: () => { throw new Error('gone') } }]) {
+    const h = await momentUI('MomentReactionPreview', options)
+    t.is(h.tree().type, 'Soft')
+    t.is(h.tree().props.children, 'Momento indisponível')
+    h.unmount()
+  }
+})
+
+test('a mounted preview expires at its deadline and drops the image', async (t) => {
+  const h = await momentUI('MomentReactionPreview', { lookup: () => ({ mime: 'image/jpeg', w: 80, h: 80, ms: 0, at: '2026-11-12T12:00:05.000Z' }) })
+  t.is(h.tree().type, 'Image')
+  await h.advance(5000)
+  t.is(h.tree().props.children, 'Momento indisponível')
+  t.alike(h.calls.revoke, ['blob:moment'])
+  t.is(h.calls.lookup.length, 1, 'no lookup is sent at the deadline')
+  t.is(h.calls.read.length, 1)
+  h.unmount()
+  t.is(h.timers.size, 0)
+})
+
+test('a mounted preview discovers deletion on its next poll', async (t) => {
+  let found = { mime: 'image/jpeg', w: 80, h: 80, ms: 0, at: '2026-11-13T12:00:00.000Z' }
+  const h = await momentUI('MomentReactionPreview', { lookup: () => found })
+  found = null
+  await h.advance(15000)
+  t.is(h.tree().props.children, 'Momento indisponível')
+  t.alike(h.calls.revoke, ['blob:moment'])
+  t.is(h.calls.read.length, 1)
+  h.unmount()
+})
+
+test('identity changes release native read files and late reads cannot restore a thumb', async (t) => {
+  const h = await momentUI('MomentReactionPreview', { read: () => ({ mime: 'image/jpeg', uri: 'file:///cache/first.bin' }) })
+  await h.update({ identity: 'c'.repeat(64) })
+  t.alike(h.calls.forget, ['first.bin'])
+  t.is(h.calls.read.length, 2)
+  h.unmount()
+  t.alike(h.calls.forget, ['first.bin', 'first.bin'])
+  let finish
+  const late = await momentUI('MomentReactionPreview', { read: () => new Promise((resolve) => { finish = resolve }) })
+  late.unmount()
+  const bytes = new Uint8Array([1])
+  finish({ mime: 'image/jpeg', bytes, uri: 'file:///cache/late.bin' })
+  await late.flush()
+  t.alike(late.calls.forget, ['late.bin'])
+  t.is(bytes[0], 0)
+  t.is(late.tree(), null)
+})
+
+test('Mensagem supplies moment context only for private reaction rows', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes('moment={pageKey === null && !item.deleted && isMomentReaction(item)'))
+  t.ok(src.includes('author: momentAuthor(item, { peer, ownKey }), seq: item.moment, identity: ownKey, folder'))
+  t.ok(/extraData=\{\{[^}]*\bownKey\b/.test(src), 'identity arrival redraws the row')
+  const preview = readFileSync(join(__dirname, '../src/ui/MomentReactionPreview.js'), 'utf8')
+  t.absent(/VideoPlayer|MusicEmbed|onPress=/.test(preview))
+})
+
+test('expiry drops the mounted image even while a lookup is pending', async (t) => {
+  let calls = 0
+  const h = await momentUI('MomentReactionPreview', {
+    lookup: () => ++calls === 1
+      ? { mime: 'image/jpeg', w: 80, h: 80, ms: 0, at: '2026-11-12T12:00:20.000Z' }
+      : new Promise(() => {})
+  })
+  await h.advance(15000)
+  t.is(h.tree().type, 'Image')
+  await h.advance(5000)
+  t.is(h.tree().props.children, 'Momento indisponível')
+  t.alike(h.calls.revoke, ['blob:moment'])
+  t.is(calls, 2, 'the deadline drop does not wait for the pending poll')
+  h.unmount()
+  t.is(h.timers.size, 0)
+})
+
+test('request acceptance loads the preview and returning to requests releases it', async (t) => {
+  const h = await momentUI('MomentReactionPreview', { props: { folder: 'request' } })
+  t.is(h.calls.lookup.length, 0)
+  await h.update({ folder: 'inbox' })
+  t.is(h.tree().type, 'Image')
+  await h.update({ folder: 'request' })
+  t.is(h.tree(), null)
+  t.alike(h.calls.revoke, ['blob:moment'])
+  await h.advance(15000)
+  t.is(h.calls.lookup.length, 1)
+  t.is(h.calls.read.length, 1)
+  h.unmount()
 })

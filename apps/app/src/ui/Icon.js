@@ -42,6 +42,12 @@ const GLYPHS = {
   compartilhar: 'share',
   link: 'link',
   microfone: 'mic',
+  musica: 'music',
+  anterior: 'skip-back',
+  proxima: 'skip-forward',
+  som: 'volume-2',
+  mudo: 'volume-x',
+  externo: 'external-link',
   camera: 'camera',
   imagem: 'image',
   encaminhar: 'corner-up-right',
@@ -49,6 +55,7 @@ const GLYPHS = {
   tocar: 'play',
   pausar: 'pause',
   parar: 'square',
+  expandir: 'maximize-2',
   sorriso: 'smile',
   clipe: 'paperclip',
   mensagem: 'mail',
@@ -57,7 +64,31 @@ const GLYPHS = {
   baixo: 'arrow-down',
   escolher: 'chevron-down',
   info: 'info',
+  codigo: 'code',
+  filtro: 'filter',
+  grade: 'grid',
+  lista: 'list',
+  mapa: 'map',
+  estrela: 'star',
+  cat_casa: 'home',
+  cat_eletronicos: 'smartphone',
+  cat_infantil: 'smile',
+  cat_esporte: 'activity',
+  cat_veiculos: 'truck',
+  cat_comida: 'coffee',
+  cat_aulas: 'book-open',
+  cat_beleza: 'scissors',
+  cat_reparos: 'tool',
+  cat_outros: 'package',
   sair: 'log-out'
+}
+
+// The Feira tab already uses Feather's bag, and Feather's archive reads as a
+// storage box. Clothing and furniture use Ionicons outlines (the set already
+// loaded for the filled heart).
+const ION_GLYPHS = {
+  cat_roupa: 'shirt-outline',
+  cat_moveis: 'bed-outline'
 }
 
 // lineHeight = size: the glyph's box is exactly `size` tall (on the web the
@@ -101,6 +132,9 @@ export function Icon ({ name, size = 24, color, style, filled }) {
   // Feather has outline glyphs only: a liked heart is the solid Ionicons one.
   if (name === 'coracao' && filled) {
     return <Ionicons name='heart' size={size} color={tint} style={[{ lineHeight: size }, style]} />
+  }
+  if (ION_GLYPHS[name]) {
+    return <Ionicons name={ION_GLYPHS[name]} size={size} color={tint} style={[{ lineHeight: size }, style]} />
   }
   return <Feather name={GLYPHS[name] || name} size={size} color={tint} style={[{ lineHeight: size }, style]} />
 }

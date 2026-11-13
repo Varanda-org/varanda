@@ -57,7 +57,8 @@ import { buildProfileUrl } from '../profileLink'
 import { installationOrigin } from '../installation'
 import { pageNoticeStore } from '../pageNoticeStore'
 import { pageNoticeKey, pageReadKind } from '../pageNotice'
-import { ProfileHeader } from '../ui/ProfileHeader'
+import { PressScale } from '../ui/PressScale'
+import { ProfileHeader, ProfileStatus } from '../ui/ProfileHeader'
 import { ProfileBar, useProfileBar } from '../ui/ProfileBar'
 import { LABELS } from '../dm'
 import { COUNTS_INCOMPLETE_NOTE } from '../pessoas'
@@ -68,8 +69,8 @@ import { MuralFooter, MuralRow, muralGridRows } from '../ui/MuralGrid'
 import { Segmented } from '../ui/Segmented'
 import { CommunitiesBox } from '../ui/CommunitiesBox'
 import { commonCommunities, communitiesOf, MAX_COMMON_LOOKUPS } from '../communitiesBox'
-import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
-import { LARGE_TEXT, type } from '../ui/theme'
+import { EmptyState, ErrorState, ListFooter, SkeletonRow } from '../ui/States'
+import { LARGE_TEXT, space, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { pagesOn } from '../pageGate'
 import { ConfirmTestimonialSheet, RETRACT_TITLE, TESTIMONIALS_TAB, WRITE_UNCERTAIN, WriteTestimonialSheet, ownBlockRef, retractBody, useTestimonialTab, useTestimonials } from './Depoimentos'
@@ -281,6 +282,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     verified: false
   }))
   const headerRef = useRef(header)
+  const [profilePending, setProfilePending] = useState(true)
   const [posts, setPosts] = useState(INITIAL_POSTS)
   const postsRef = useRef(posts)
   const peekedRef = useRef(new Map())
@@ -565,6 +567,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     commit(refreshing ? { refreshing: true, error: '' } : { ...INITIAL_POSTS })
     // Every load verifies the header again (the fields stay shown meanwhile).
     commitHeader({ ...headerRef.current, verified: false })
+    if (!refreshing) setProfilePending(true)
     // follow.list goes first (it was read later in this same load): its
     // answer is what lets a followed author's snapshot be painted while
     // profile.read and the index are still on their way.
@@ -574,6 +577,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     }
     const held = await readProfile()
     if (!alive()) return
+    setProfilePending(false)
     if (blockedHere) {
       // The name alone, so the block can be undone by a person the screen
       // names. The node refuses this author's posts anyway.
@@ -904,17 +908,17 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   )
   const listingsRow = node.hosted === true && !(isPage && lifecycle.moved) && typeof onOpenListings === 'function'
     ? (
-      <Pressable accessibilityRole='link' accessibilityLabel='Anúncios' onPress={() => onOpenListings(author)} style={({ pressed }) => [styles.linkRow, pressed && styles.pressed]}>
+      <PressScale accessibilityRole='link' accessibilityLabel='Anúncios' onPress={() => onOpenListings(author)} style={({ pressed }) => [styles.linkRow, pressed && styles.pressed]}>
         <Icon name='feira' size={20} color={colors.accent} />
         <Text style={styles.linkText}>Anúncios</Text>
         <Icon name='seta' size={20} color={colors.soft} />
-      </Pressable>
+      </PressScale>
       )
     : null
   const ratingsRow = ratingsHosted && !(isPage && lifecycle.moved) && rated && rated.summary.count > 0
     ? (
-      <View accessibilityLabel='Avaliações' style={styles.listings}>
-        <Text style={styles.rosterName}>Avaliações</Text>
+      <View style={styles.listings}>
+        <Text accessibilityRole='header' style={styles.rosterName}>Avaliações</Text>
         <Soft>{summaryLabel(rated.summary)}</Soft>
         <Soft>{RATINGS_NOTE}</Soft>
       </View>
@@ -1038,6 +1042,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   const head = (
     <>
       <ProfileHeader
+        loading={full && profilePending && !header.name && !header.username}
         bandHeight={insets.top + BAND}
         topInset={insets.top}
         onBack={full && bar.interactive ? undefined : onBack}
@@ -1163,23 +1168,25 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   const cut = movedView !== null ? movedView.cut : null
   const shownItems = cut === null ? items : items.filter((i) => shownUnderCut(cut, i.seq))
   const notes = []
-  if (phase === 'ready' && indexing) notes.push('Ainda montando a lista completa…')
-  else if (phase === 'ready' && complete === false) notes.push('Algumas publicações podem faltar.')
+  if (phase === 'ready' && !indexing && complete === false) notes.push('Algumas publicações podem faltar.')
   if (unavailable > 0) notes.push(unavailable === 1 ? '1 publicação indisponível' : String(unavailable) + ' publicações indisponíveis')
 
   const listHeader = (
     <View>
       {head}
       <OfflineNote />
+      {phase === 'ready' && indexing
+        ? <View style={styles.note}><ProfileStatus icon='sinc' label='Ainda montando a lista completa…' /></View>
+        : null}
       {notes.length > 0 ? <View style={styles.note}>{notes.map((n) => <Soft key={n}>{n}</Soft>)}</View> : null}
     </View>
   )
 
   let empty = null
   if (blockedHere && phase !== 'loading') empty = <EmptyState icon='bloquear' title={BLOCK_TEXTS.profileTitle} body={BLOCK_TEXTS.profileBody} />
-  else if (phase === 'loading') empty = <Skeleton />
+  else if (phase === 'loading') empty = <><SkeletonRow /><SkeletonRow /><SkeletonRow /></>
   else if (phase === 'error') empty = <ErrorState message={displayText(error)} onRetry={() => { setTick((n) => n + 1); load(false) }} pending={refreshing} />
-  else if (unavailable === 0) empty = <EmptyState icon='lapis' title='Nenhuma publicação ainda' />
+  else if (unavailable === 0 && atEnd && !indexing && complete !== false) empty = <EmptyState icon='lapis' title='Nenhuma publicação ainda' body={isPage ? 'As publicações desta Página aparecem aqui.' : 'As publicações desta pessoa aparecem aqui.'} />
 
   const muralCols = fontScale >= LARGE_TEXT ? 2 : 3
   const muralRows = muralGridRows(muralTiles, muralCols)
@@ -1264,7 +1271,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
 
 const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
-  note: { paddingHorizontal: 16, paddingVertical: 12, gap: 4 },
+  note: { paddingHorizontal: space.lg, paddingVertical: space.md, gap: space.xs },
   listings: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.line },
   linkRow: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 44, paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.line },
   linkText: { ...type.postName, color: colors.ink, flex: 1 },
@@ -1279,6 +1286,6 @@ const makeStyles = (colors) => StyleSheet.create({
   rosterName: { ...type.postName, color: colors.ink },
   rosterSoft: { ...type.postMeta, color: colors.soft },
   pressed: { opacity: 0.6 },
-  countsNote: { marginTop: 4 },
+  countsNote: { marginTop: space.xs },
   shareBody: { padding: 16, gap: 12 }
 })

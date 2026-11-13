@@ -4,12 +4,17 @@
 // sheet or a confirmation never stacks on this one. A light haptic marks the
 // opening, which is what tells a long press it worked.
 //
-// Props: { open, onClose, title, actions: [{ icon, label, danger, disabled, pending, selected, description, onPress }] }
+// Props: { open, onClose, title, actions: [{ icon, label, danger, disabled, pending, selected, description, onPress }], header }
 // Rows without a label or an onPress function are skipped. A disabled or
 // pending row is shown but does not run; `description` is a Soft line under the label.
 // `selected` marks the current choice of a picker with a check at the end, at
 // full strength even when it is also disabled. The title is a small caption
-// over a divider, so it never reads as one more row.
+// over a divider, so it never reads as one more row. `header` is optional: a
+// node, or ({ closeThen }) => node, drawn above the title and the rows. It is
+// never a row. closeThen(fn) closes, then runs fn on the same pending path as
+// a row, so a control there that opens another sheet waits until this one is gone.
+// A function header is a render prop and must not call hooks.
+// closeThen must be called from a press while the sheet is up.
 
 import { useEffect, useRef } from 'react'
 import { displayText } from '@varanda/rpc'
@@ -22,6 +27,7 @@ import { Icon } from './Icon'
 import { escapeLayerCount, useEscapeLayer } from './escapeLayer'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, radius, space, type } from './theme'
+import { holdEmbeds } from '../embedLive'
 
 // Open menus, so a parent layer with its own key handling can leave Escape
 // to the menu on top of it.
@@ -34,7 +40,7 @@ export function usableActions (actions) {
     .filter((a) => a && typeof a.label === 'string' && a.label !== '' && typeof a.onPress === 'function')
 }
 
-export function ActionsSheet ({ open, onClose, title, actions }) {
+export function ActionsSheet ({ open, onClose, title, actions, header }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const insets = useSafeAreaInsets()
@@ -44,6 +50,9 @@ export function ActionsSheet ({ open, onClose, title, actions }) {
   useEffect(() => {
     if (shown) tap()
   }, [shown])
+  // A sheet covers the screen, so provider frames stay unloaded while one is
+  // open.
+  useEffect(() => (shown ? holdEmbeds() : undefined), [shown])
   // Web: Escape closes only this menu, never the sheet or screen under it.
   useEscapeLayer(shown, onClose, 'actions')
   // A row's action runs only once the sheet is gone: the iOS page sheet
@@ -53,13 +62,22 @@ export function ActionsSheet ({ open, onClose, title, actions }) {
   // tick after `open` turns false. The ref makes it run once, and unmounting
   // drops it.
   const pending = useRef(null)
+  const gone = useRef(false)
+  // iOS can report a dismissal after the sheet was opened again during its
+  // slide; marking that late flush as gone would leave the new opening dead.
+  const shownNow = useRef(shown)
+  shownNow.current = shown
   const flush = () => {
     const fn = pending.current
     pending.current = null
+    if (!shownNow.current) gone.current = true
     if (typeof fn === 'function') fn()
   }
   useEffect(() => {
-    if (shown) return undefined
+    if (shown) {
+      gone.current = false
+      return undefined
+    }
     // Modal reports its dismissal on iOS and on the web (where the closing
     // animation still holds focus), so the action waits for onDismiss there and
     // the timer only covers a dismiss that never reports. Android's Modal has
@@ -69,12 +87,18 @@ export function ActionsSheet ({ open, onClose, title, actions }) {
     return () => clearTimeout(t)
   }, [shown])
   useEffect(() => () => { pending.current = null }, [])
-  const run = (fn) => () => {
-    if (pending.current !== null) return
+  const closeThen = (fn) => {
+    if (gone.current || pending.current !== null) return
     pending.current = fn
     if (typeof onClose === 'function') onClose()
     else flush()
   }
+  const run = (fn) => () => closeThen(fn)
+  // The function header is called only while the sheet is shown (its target
+  // may be gone once closed); the last header stays drawn through the slide
+  // out, so the panel does not snap shorter as it leaves.
+  const lastHeader = useRef(null)
+  if (shown) lastHeader.current = typeof header === 'function' ? header({ closeThen }) : header
   return (
     // A compact bottom panel as tall as its rows, as the message menus of the
     // chat apps are: a full-height sheet for three actions reads as a new page.
@@ -85,6 +109,7 @@ export function ActionsSheet ({ open, onClose, title, actions }) {
             large text can make a menu taller than a small phone. */}
         <View style={[styles.panel, { paddingBottom: Math.max(space.md, insets.bottom), maxHeight: Math.round(height * 0.85) }]} {...scrollerFocusProps}>
           <View style={styles.grabber} />
+          {lastHeader.current}
           {typeof title === 'string' && title !== ''
             ? <View style={styles.titleBox}><Text style={styles.title} numberOfLines={1} accessibilityRole='header'>{displayText(title)}</Text></View>
             : null}

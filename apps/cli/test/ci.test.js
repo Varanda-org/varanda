@@ -23,14 +23,16 @@ function block (startRe, endRe) {
 
 const job = (id) => block(new RegExp('^ {2}' + id + ':\\s*$'), /^ {2}\S/)
 
-// The legs table: the same six workers per Node version. The skip list of
-// `others` is not listed here: it is derived from the other five below.
+// The legs table: the same eight workers per Node version. The skip list of
+// `others` is not listed here: it is derived from the other seven below.
 const LEGS = {
   'core-1': { WORKSPACE: 'packages/core', VARANDA_TEST_SHARD: '1/2' },
   'core-2': { WORKSPACE: 'packages/core', VARANDA_TEST_SHARD: '2/2' },
   'cli-1': { WORKSPACE: 'apps/cli', VARANDA_TEST_SHARD: '1/2' },
   'cli-2': { WORKSPACE: 'apps/cli', VARANDA_TEST_SHARD: '2/2' },
-  'web-member': { WORKSPACE: 'packages/web-member' },
+  'web-member-1': { WORKSPACE: 'packages/web-member', VARANDA_TEST_SHARD: '1/3' },
+  'web-member-2': { WORKSPACE: 'packages/web-member', VARANDA_TEST_SHARD: '2/3' },
+  'web-member-3': { WORKSPACE: 'packages/web-member', VARANDA_TEST_SHARD: '3/3' },
   others: {}
 }
 const NODES = ['20', '24']
@@ -85,9 +87,9 @@ test('ci.yml: install, permissions, concurrency and triggers', (t) => {
   t.absent(/paths(-ignore)?:/.test(on), 'no path filters')
 })
 
-test('ci.yml: the twelve workers have the expected shape', (t) => {
+test('ci.yml: the sixteen workers have the expected shape', (t) => {
   t.is((code.match(/&test-steps/g) || []).length, 1, 'one &test-steps anchor')
-  t.is((code.match(/\*test-steps/g) || []).length, 11, 'eleven *test-steps aliases')
+  t.is((code.match(/\*test-steps/g) || []).length, 15, 'fifteen *test-steps aliases')
   let anchors = 0
   for (const id of WORKERS) {
     const text = job(id)
@@ -119,7 +121,7 @@ test('ci.yml: worker env matches the legs table', (t) => {
   }
 })
 
-test('ci.yml: the skip list of others equals the workspaces of the other five', (t) => {
+test('ci.yml: the skip list of others equals the workspaces of the other seven', (t) => {
   for (const node of NODES) {
     const covered = new Set(workerIds(node).filter((id) => !id.startsWith('others-')).map((id) => env(job(id)).WORKSPACE))
     const e = env(job('others-' + node))
@@ -156,12 +158,12 @@ test('ci.yml: the gates', (t) => {
     const needs = text.match(/^ {4}needs:\s*\[([^\]]*)\]\s*$/m)
     t.ok(needs, id + ' has a needs list')
     const list = needs ? needs[1].split(',').map((s) => s.trim()) : []
-    t.is(list.length, 6, id + ' needs six jobs')
-    t.alike(list.slice().sort(), workerIds(node).sort(), id + ' needs exactly its six workers')
+    t.is(list.length, 8, id + ' needs eight jobs')
+    t.alike(list.slice().sort(), workerIds(node).sort(), id + ' needs exactly its eight workers')
     t.absent(/\buses:/.test(text), id + ' has no uses:')
     t.ok(/^ {4}runs-on:\s*ubuntu-24\.04\s*$/m.test(text), id + ' runs-on ubuntu-24.04')
     t.ok(/RESULTS:\s*\$\{\{ join\(needs\.\*\.result, ' '\) \}\}/.test(text), id + ' reads every result through env')
-    t.ok(text.includes('[ "$#" -eq 6 ] || exit 1'), id + ' checks the count')
+    t.ok(text.includes('[ "$#" -eq 8 ] || exit 1'), id + ' checks the count')
     t.ok(text.includes('for r in "$@"; do [ "$r" = success ] || exit 1; done'), id + ' requires success from each')
   }
 })

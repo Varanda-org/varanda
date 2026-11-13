@@ -33,7 +33,7 @@ import { FilterChips } from '../ui/FilterChips'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
-import { EmptyState, Skeleton } from '../ui/States'
+import { EmptyState as ListEmptyState, SkeletonRow } from '../ui/States'
 import { layout, radius, space, type, webInputReset } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { NovaComunidade, memberSnapshotBinding, readGroupSnapshot, sameSnapshotBinding, saveGroupSnapshot } from './Comunidades'
@@ -444,6 +444,16 @@ export function Conversas ({
   const closeCompose = useCallback(() => {
     if (typeof onComposing === 'function') onComposing(false)
   }, [onComposing])
+  const EmptyState = useCallback((props) => (
+    <ListEmptyState
+      actionLabel='Todas'
+      onAction={() => setFilter('todas')}
+      secondaryLabel='Nova conversa'
+      onSecondary={typeof onComposing === 'function' ? () => onComposing(true) : undefined}
+      {...props}
+    />
+  ), [onComposing])
+
   const sheets = (
     <>
       <NovaConversa
@@ -467,7 +477,7 @@ export function Conversas ({
     </>
   )
 
-  if (!hosted) return <View style={styles.root}><Skeleton /></View>
+  if (!hosted) return <View style={styles.root}><View>{[0, 1, 2].map((key) => <SkeletonRow key={key} />)}</View></View>
 
   const items = data.filter((row) => row.kind === 'dm' || row.kind === 'group')
   const dmLoaded = !ready || inbox.loaded
@@ -520,7 +530,7 @@ export function Conversas ({
   // A failed older page comes first: under a chip that leaves no loaded row,
   // the older (maybe unread) conversations are only reachable through it.
   let footer = null
-  if (!loaded) footer = <Skeleton />
+  if (!loaded) footer = <View>{[0, 1, 2].map((key) => <SkeletonRow key={key} />)}</View>
   else if (inbox.pageError) {
     footer = (
       <View style={styles.pad}>
@@ -530,9 +540,9 @@ export function Conversas ({
       </View>
     )
   } else if (items.length === 0 && !partial && (ready || needle !== '' || filter === 'grupos')) {
-    if (needle !== '') footer = <View style={styles.pad}><Soft>Nenhuma conversa encontrada.</Soft></View>
-    else if (filter === 'todas') footer = <EmptyState icon='conversas' title={EMPTY_TEXT} body={EMPTY_BODY} />
-    else if (filter === 'grupos') footer = <EmptyState icon='gente' title='Nenhum grupo ainda' body='Os grupos das suas comunidades aparecem aqui.' />
+    if (needle !== '') footer = <EmptyState icon='conversas' title='Nenhuma conversa encontrada.' actionLabel='Limpar busca' onAction={() => setQuery('')} />
+    else if (filter === 'todas') footer = <EmptyState icon='conversas' title={EMPTY_TEXT} body={EMPTY_BODY} actionLabel={typeof onComposing === 'function' ? 'Nova conversa' : undefined} onAction={typeof onComposing === 'function' ? () => onComposing(true) : undefined} secondaryLabel='Nova comunidade' onSecondary={pageKey === null ? () => setCreating(true) : undefined} />
+    else if (filter === 'grupos') footer = <EmptyState icon='gente' title='Nenhum grupo ainda' body='Os grupos das suas comunidades aparecem aqui.' actionLabel='Comunidades' onAction={onOpenCommunities} secondaryLabel='Nova comunidade' onSecondary={pageKey === null ? () => setCreating(true) : undefined} />
     else if (!inbox.requests) footer = <EmptyState icon='conversas' title='Nada novo por aqui' />
   }
 

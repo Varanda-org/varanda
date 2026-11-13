@@ -1189,6 +1189,13 @@ export function fetchMember (author, before = null, deps = {}) {
   return p.then(copyResult)
 }
 
+// An explicit refresh must reach the index: a cached page can carry seq hints
+// (or a visible author) that no longer hold.
+export function refetchMember (author, deps = {}) {
+  invalidateMember(author)
+  return fetchMember(author, null, deps)
+}
+
 export function fetchTopic (path, cursor = null, deps = {}) {
   return run(topicUrl(path, cursor), validTopic, deps)
 }

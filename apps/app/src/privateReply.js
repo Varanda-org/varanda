@@ -12,7 +12,7 @@ const isMoment = (context) => isObject(context) && context.kind === MOMENT
 const isKey = (value) => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
 
 // The caller supplies context only after verifying the public post.
-export function makeIntent ({ id, peer, from, context = null } = {}) {
+export function makeIntent ({ id, peer, from, context = null, offer = null } = {}) {
   return {
     id,
     peer,
@@ -26,13 +26,23 @@ export function makeIntent ({ id, peer, from, context = null } = {}) {
           text: Array.from(typeof context.text === 'string' ? context.text : '').slice(0, 140).join(''),
           hasMedia: Boolean(context.hasMedia),
           ...(context.kind === MOMENT ? { kind: MOMENT } : {})
+        },
+    offer: isObject(offer)
+      ? {
+          author: offer.author,
+          seq: offer.seq,
+          title: Array.from(typeof offer.title === 'string' ? offer.title : '').slice(0, 140).join('')
         }
+      : offer
   }
 }
 
 export function validIntent (intent, ownKey) {
   if (!isObject(intent) || !intent.id || !isKey(intent.peer) || intent.peer === ownKey) return false
   const context = intent.context
+  const { offer = null } = intent
+  if (offer !== null && (context !== null || !isObject(offer) || !isKey(offer.author) || offer.author !== intent.peer ||
+    !Number.isSafeInteger(offer.seq) || offer.seq <= 0 || typeof offer.title !== 'string')) return false
   return context === null || (isObject(context) && isKey(context.author) && Number.isSafeInteger(context.seq) && context.seq > 0 &&
     (context.kind === undefined || context.kind === MOMENT))
 }

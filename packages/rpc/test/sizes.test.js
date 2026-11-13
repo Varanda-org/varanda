@@ -41,6 +41,9 @@ const {
   GROUP_LIMIT_DEFAULT,
   GROUP_LIMIT_MAX,
   GROUP_MEMBERS_LIMIT_MAX,
+  GROUP_REACTIONS_MAX,
+  GROUP_REACTORS_MAX,
+  REACTION_MAX_BYTES,
   MAX_GROUP_NAME,
   MAX_GROUPS_PER_COMMUNITY,
   COMMUNITY_LIST_MAX,
@@ -349,8 +352,16 @@ test('follow.list: FOLLOW_LIMIT_MAX keys fit with a wide margin', (t) => {
   t.ok(s * 4 < MAX_MESSAGE)
 })
 
-function groupReadResult (n, ch, media, card = null) {
-  const item = { writer: HEX, diary: HEX, seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { writer: HEX, seq: SEQ }, fwd: 1, media, card, hidden: false, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20) }
+// The widest reaction on the wire: isReaction caps it at REACTION_MAX_BYTES
+// of UTF-8 and JSON escapes none of its code points, so an ASCII stand-in of
+// that length weighs the same. A count is at most a safe integer.
+const WORST_EMOJI = 'e'.repeat(REACTION_MAX_BYTES)
+const WORST_REACTIONS = Array(GROUP_REACTIONS_MAX).fill({ emoji: WORST_EMOJI, count: SEQ, mine: false })
+
+// Every item carries the compact reaction summary, GROUP_REACTIONS_MAX of the
+// widest ones (`reactions` null leaves it out).
+function groupReadResult (n, ch, media, card = null, reactions = WORST_REACTIONS) {
+  const item = { writer: HEX, diary: HEX, seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { writer: HEX, seq: SEQ }, fwd: 1, media, card, hidden: false, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), ...(reactions === null ? {} : { reactions }) }
   return { items: Array(n).fill(item), next: { at: AT, writer: HEX, seq: SEQ }, hidden: SEQ, incomplete: true, sealed: SEQ, epoch: { writer: HEX, seq: SEQ }, state: 'rekey-pending' }
 }
 
@@ -383,8 +394,8 @@ test('group.read: GROUP_LIMIT_MAX with private media fits, one more does not', (
   const worst = size(groupReadResult(GROUP_LIMIT_MAX, '\ud800', media))
   const overflow = size(groupReadResult(GROUP_LIMIT_MAX + 1, '\ud800', media))
   t.ok(worst < size(groupReadResult(GROUP_LIMIT_MAX, '\ud800', null, PRIVATE_CARD)))
-  t.is(worst, 257717)
-  t.is(overflow, 266590)
+  t.is(worst, 259854)
+  t.is(overflow, 269833)
   t.comment('group.read worst private item: ' + utf8ByteLength(JSON.stringify(item)) + ' bytes')
   t.comment('group.read worst case at ' + GROUP_LIMIT_MAX + ' items: ' + worst + ' bytes')
   t.comment('group.read worst case at ' + (GROUP_LIMIT_MAX + 1) + ' items: ' + overflow + ' bytes')
@@ -435,11 +446,18 @@ const DM_MEDIA_ITEM = {
 
 const DM_CARD = { ...CARD, image: { ...DM_MEDIA_ITEM, mime: 'image/jpeg', chunks: 1, bytes: MAX_CARD_IMAGE_BYTES } }
 
-// Every message at MAX_TEXT code points and a maximal card, which the
-// sealed frame (DM_INNER_BYTES) cannot even carry together: a bound, not a
-// message that exists.
+// A reaction emoji at the REACTION_MAX_BYTES cap (isReaction itself accepts
+// at most 30 UTF-8 bytes, and JSON escapes none of them): a bound.
+const DM_REACTION_BOUND = '\u{1f600}'.repeat(REACTION_MAX_BYTES / 4)
+
+// Every message at MAX_TEXT code points, a maximal card and both people's
+// reactions at the emoji cap, which the sealed frame (DM_INNER_BYTES) cannot
+// even carry together: a bound, not a message that exists.
 function dmThreadResult (n, ch, card = true) {
-  const message = { id: 'f'.repeat(32), from: HEX, text: ch.repeat(MAX_TEXT), replyTo: 'f'.repeat(32), fwd: 1, at: AT, mine: false, media: card ? null : widestDmMedia(MAX_DM_MEDIA), card: card ? DM_CARD : null }
+  const reactions = [{ emoji: DM_REACTION_BOUND, mine: false }, { emoji: DM_REACTION_BOUND, mine: true }]
+  // A bound reply whose message is kept carries replyFrom, wider than
+  // replyMissing: true, and a row never carries both.
+  const message = { id: 'f'.repeat(32), from: HEX, text: ch.repeat(MAX_TEXT), replyTo: 'f'.repeat(32), replyFrom: HEX, fwd: 1, at: AT, mine: false, media: card ? null : widestDmMedia(MAX_DM_MEDIA), card: card ? DM_CARD : null, reactions }
   return { messages: Array(n).fill(message), next: 'f'.repeat(32), folder: 'request', blocked: false }
 }
 
@@ -458,17 +476,59 @@ test('the widest DM media item is a valid dm.send item', (t) => {
 })
 
 test('dm.thread: DM_THREAD_LIMIT_MAX fits, one more does not', (t) => {
-  t.is(DM_THREAD_LIMIT_MAX, 42)
+  t.is(DM_THREAD_LIMIT_MAX, 41)
   t.ok(validateParams('dm.thread', { peer: HEX, limit: DM_THREAD_LIMIT_MAX }).ok)
   t.absent(validateParams('dm.thread', { peer: HEX, limit: DM_THREAD_LIMIT_MAX + 1 }).ok)
   for (const ch of DM_WORST) t.ok(size(dmThreadResult(DM_THREAD_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
   const worst = size(dmThreadResult(DM_THREAD_LIMIT_MAX, '\u{1f600}'))
   t.comment('dm.thread worst case at ' + DM_THREAD_LIMIT_MAX + ' messages: ' + worst + ' bytes')
   const overflow = size(dmThreadResult(DM_THREAD_LIMIT_MAX + 1, '\u{1f600}'))
-  t.is(worst, 259022)
-  t.is(overflow, 265186)
+  t.is(worst, 262042)
+  t.is(overflow, 268430)
   t.comment('dm.thread worst case at ' + (DM_THREAD_LIMIT_MAX + 1) + ' messages: ' + overflow + ' bytes')
   t.ok(overflow > MAX_MESSAGE, 'largest that fits')
+})
+
+test('dm.thread: a reactable:false row (no reactions) is never larger than the worst reactable row', (t) => {
+  for (const ch of DM_WORST) {
+    for (const card of [true, false]) {
+      const worst = dmThreadResult(1, ch, card).messages[0]
+      const { reactions, ...rest } = worst
+      const unreactable = { ...rest, reactable: false }
+      t.ok(utf8ByteLength(JSON.stringify(unreactable)) < utf8ByteLength(JSON.stringify(worst)), JSON.stringify(ch) + (card ? ' card' : ' media'))
+    }
+  }
+  const page = dmThreadResult(DM_THREAD_LIMIT_MAX, '\u{1f600}')
+  const { reactions, ...rest } = page.messages[0]
+  t.ok(size({ ...page, messages: Array(DM_THREAD_LIMIT_MAX).fill({ ...rest, reactable: false }) }) < size(page), 'so the pinned page maximum holds')
+})
+
+test('dm.thread: a replyMissing or bare-id row is never larger than the worst bound row', (t) => {
+  for (const ch of DM_WORST) {
+    for (const card of [true, false]) {
+      const worst = dmThreadResult(1, ch, card).messages[0]
+      const { replyFrom, ...bare } = worst
+      const missing = { ...bare, replyMissing: true }
+      t.ok(utf8ByteLength(JSON.stringify(missing)) < utf8ByteLength(JSON.stringify(worst)), JSON.stringify(ch) + (card ? ' card' : ' media'))
+      t.ok(utf8ByteLength(JSON.stringify(bare)) < utf8ByteLength(JSON.stringify(missing)))
+    }
+  }
+})
+
+// A reaction to a momento (inner v5) carries `moment` but one emoji of text,
+// no reply, media, card or forward: the pinned page maximum still holds.
+test('dm.thread: a momento reaction row is never larger than the worst row', (t) => {
+  for (const card of [true, false]) {
+    const worst = dmThreadResult(1, '\u{1f600}', card).messages[0]
+    const { replyFrom, ...rest } = worst
+    const reaction = { ...rest, text: DM_REACTION_BOUND, replyTo: null, fwd: 0, media: null, card: null, moment: Number.MAX_SAFE_INTEGER }
+    t.ok(utf8ByteLength(JSON.stringify(reaction)) < utf8ByteLength(JSON.stringify(worst)), card ? 'card' : 'media')
+  }
+  const page = dmThreadResult(DM_THREAD_LIMIT_MAX, '\u{1f600}')
+  const { replyFrom, ...rest } = page.messages[0]
+  const reaction = { ...rest, text: DM_REACTION_BOUND, replyTo: null, fwd: 0, media: null, card: null, moment: Number.MAX_SAFE_INTEGER }
+  t.ok(size({ ...page, messages: Array(DM_THREAD_LIMIT_MAX).fill(reaction) }) < size(page))
+  t.is(size(page), 262042, 'the pinned worst case is unchanged')
 })
 
 test('the dispatcher sends the worst-case feed page unchanged', async (t) => {
@@ -521,8 +581,9 @@ test('ten public descriptors outweigh a maximal card; four do not', (t) => {
   t.ok(size(groupReadResult(1, '\ud800', GROUP_MEDIA, null)) < size(groupReadResult(1, '\ud800', null, CARD)), 'a card exceeds four group media items')
 })
 
-test('group.read: maximal private cards fit, one more does not', (t) => {
-  t.is(GROUP_LIMIT_MAX, 29)
+test('group.read: maximal private cards and reaction summaries fit, one more does not', (t) => {
+  t.is(GROUP_LIMIT_MAX, 26)
+  t.is(GROUP_REACTIONS_MAX, 12)
   for (const ch of WORST) {
     const worst = groupReadResult(GROUP_LIMIT_MAX, ch, null, PRIVATE_CARD)
     t.ok(size(worst) <= MAX_MESSAGE)
@@ -530,9 +591,30 @@ test('group.read: maximal private cards fit, one more does not', (t) => {
   }
   const worst = size(groupReadResult(GROUP_LIMIT_MAX, '\ud800', null, PRIVATE_CARD))
   const overflow = size(groupReadResult(GROUP_LIMIT_MAX + 1, '\ud800', null, PRIVATE_CARD))
-  t.is(worst, 259979)
-  t.is(overflow, 268930)
+  t.is(worst, 261882)
+  t.is(overflow, 271939)
   t.ok(overflow > MAX_MESSAGE)
+  t.is(utf8ByteLength(JSON.stringify(WORST_REACTIONS)), 1093, 'twelve maximal summaries')
+  // Without reactions the page would still hold 29 items, as before.
+  t.ok(size(groupReadResult(29, '\ud800', null, PRIVATE_CARD, null)) <= MAX_MESSAGE)
+  t.comment('group.read worst case with reactions at ' + GROUP_LIMIT_MAX + ' items: ' + worst + ' bytes, ' + (GROUP_LIMIT_MAX + 1) + ': ' + overflow)
+})
+
+// The who-reacted answer for one message: every emoji it may carry, each
+// with GROUP_REACTORS_MAX diary keys.
+function whoReactedResult (k) {
+  return { reactions: Array(GROUP_REACTIONS_MAX).fill({ emoji: WORST_EMOJI, count: SEQ, by: Array(k).fill(HEX) }) }
+}
+
+test('who reacted: GROUP_REACTORS_MAX keys per emoji fit, one more does not', (t) => {
+  t.is(GROUP_REACTORS_MAX, 324)
+  const worst = size(whoReactedResult(GROUP_REACTORS_MAX))
+  const overflow = size(whoReactedResult(GROUP_REACTORS_MAX + 1))
+  t.is(worst, 261574)
+  t.is(overflow, 262378)
+  t.ok(worst <= MAX_MESSAGE)
+  t.ok(overflow > MAX_MESSAGE, 'largest that fits')
+  t.comment('who reacted worst case at ' + GROUP_REACTORS_MAX + ' keys per emoji: ' + worst + ' bytes')
 })
 
 test('page.feed: maximal media lists fit the shared feed limit', (t) => {
@@ -579,4 +661,32 @@ test('listing.create, listing.edit and listing.mine: maximal sizes fit', (t) => 
   t.is(limit, 20)
   const page = { items: Array(limit).fill(item), next: SEQ }
   t.ok(size(page) <= MAX_MESSAGE, 'listing.mine page ' + size(page))
+})
+
+test('a maximal video pair is smaller than ten maximal descriptors: page maxima unchanged', (t) => {
+  const { VIDEO_MIME, MAX_VIDEO_MS, MAX_VIDEO_DIMENSION, MAX_VIDEO_PIXELS } = require('..')
+  const side = Math.floor(MAX_VIDEO_PIXELS / MAX_VIDEO_DIMENSION)
+  const poster = { ...DESCRIPTOR, mime: 'image/jpeg' }
+  const video = { ...DESCRIPTOR, mime: VIDEO_MIME, width: MAX_VIDEO_DIMENSION, height: side, ms: MAX_VIDEO_MS }
+  const pair = [poster, video]
+  t.ok(validateParams('post.create', { text: 'x', media: pair }).ok, 'a valid rpc pair')
+  t.is(validateRecord({ type: 'post', text: 'x', at: AT, replyTo: null, media: pair }, 1), null, 'a valid core pair')
+  t.ok(utf8ByteLength(JSON.stringify(pair)) < utf8ByteLength(JSON.stringify(MEDIA)), 'the pair is smaller than ten descriptors')
+  const withPair = (result) => (n, ch) => {
+    const out = result(n, ch, false)
+    for (const e of out.items || out.entries) {
+      if (e.record) e.record = { ...e.record, media: pair }
+      else e.media = pair
+    }
+    return out
+  }
+  for (const ch of WORST) {
+    for (const result of [feedResult, peekResult, logResult]) {
+      t.ok(size(withPair(result)(1, ch)) < size(result(1, ch, false)), 'a pair item is smaller than a ten-photo item')
+    }
+  }
+  t.is(FEED_LIMIT_MAX, 26)
+  t.is(LOG_LIMIT_MAX, 30)
+  t.is(GROUP_LIMIT_MAX, 26)
+  t.is(PEEK_SEQS_MAX, 29)
 })

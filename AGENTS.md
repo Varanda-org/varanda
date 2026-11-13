@@ -46,6 +46,8 @@ Rede social ponto a ponto (Holepunch: Hypercore, Hyperswarm, HyperDHT). Cada pes
 
 Princípios que não mudam sem decisão dos mantenedores: tudo que vem de um par é não confiável; o cliente nunca reenvia um pedido por conta própria (falha em método que altera estado vem com `uncertain: true`); nenhum comando imprime chave secreta. Não acrescente coleta de dados, rastreio ou telemetria: o tratamento de dados pessoais segue a seção LGPD de `docs/design.md` (hipóteses de desenho que ainda dependem de parecer jurídico).
 
+Exceção limitada, descrita nos Termos versão 47 e na seção LGPD de `docs/design.md`: os players incorporados de YouTube, SoundCloud, Spotify e Apple Music carregam sem toque quando o cartão fica visível, numa publicação, numa citação, numa conversa privada, num grupo e na prévia enquanto a pessoa escreve, e o provedor recebe o endereço de internet (IP) de quem vê. Um player já carregado continua carregado enquanto a pessoa rola a mesma tela. Um toque num link dentro dele abre, no aplicativo, só páginas https do próprio provedor; no navegador, abre outra aba, que continua no sandbox e cujo endereço o app não filtra. Numa conversa cifrada, o provedor fica sabendo que o aparelho mostrou aquele item, sem receber as mensagens. Essa exceção se limita a esses quatro players e não autoriza nenhuma outra chamada a serviços de terceiros.
+
 ## Comandos
 
 Node.js 20 ou mais novo e npm, a partir da raiz:
@@ -56,10 +58,11 @@ npm run lint                # standard
 npm test                    # todos os workspaces (brittle)
 npm run demo                # deve terminar com "DEMO OK"
 npm test -w packages/core   # um workspace
+npm test -- --affected=origin/main   # só os workspaces que a mudança alcança (local)
 node apps/cli/test/serve.test.js   # um arquivo
 ```
 
-A CI roda `npm ci --ignore-scripts`, lint, test e demo no Node 20 e no 24, divididos em jobs paralelos e reunidos por `test (20)` e `test (24)`. Rode os quatro passos antes de abrir o PR. Depois de qualquer `npm install` ou `npm ci`, o build nativo do app precisa de `npm run prepare:native -w apps/app` de novo. Os testes de `packages/web-member` exigem Node 20.19 ou mais novo.
+A CI roda `npm ci --ignore-scripts`, lint, test e demo no Node 20 e no 24, divididos em jobs paralelos e reunidos por `test (20)` e `test (24)`. Rode os quatro passos antes de abrir o PR. Localmente, `npm test -- --affected=origin/main` vale pelo `npm test`, porque a CI roda todos os workspaces em cada PR. Depois de qualquer `npm install` ou `npm ci`, o build nativo do app precisa de `npm run prepare:native -w apps/app` de novo. Os testes de `packages/web-member` exigem Node 20.19 ou mais novo.
 
 ## Armadilhas
 
@@ -95,7 +98,7 @@ A CI roda `npm ci --ignore-scripts`, lint, test e demo no Node 20 e no 24, divid
 
 ## Antes de dizer que terminou
 
-- `npm run lint`, `npm test` e `npm run demo` passam, ou você relatou exatamente o que falhou.
+- `npm run lint`, `npm test` (ou `npm test -- --affected=origin/main`) e `npm run demo` passam, ou você relatou exatamente o que falhou.
 - Os critérios de aceite da issue estão cobertos por teste ou por verificação descrita no PR.
 - O diff não tem segredo, dado pessoal, arquivo gerado nem texto com travessão.
 - Documentos normativos, README e `HELP` estão em dia com o código.

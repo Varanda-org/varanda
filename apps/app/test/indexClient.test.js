@@ -52,7 +52,7 @@ function fakeClock (start = Date.parse('2026-10-26T12:00:00Z')) {
 
 // Fresh module state per test (no cache, pacer or cooldown leaks between
 // cases); the fetch* functions run on the fake clock.
-const DEPS_AT = { fetchPost: 2, fetchCounts: 1, fetchMember: 2, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1, fetchTestimonials: 1, fetchFeira: 1, fetchFeiraAuthor: 2, fetchFeiraRatings: 2 }
+const DEPS_AT = { fetchPost: 2, fetchCounts: 1, fetchMember: 2, refetchMember: 1, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1, fetchTestimonials: 1, fetchFeira: 1, fetchFeiraAuthor: 2, fetchFeiraRatings: 2 }
 async function load () {
   const m = await import('../src/indexClient.js')
   m.resetIndexClient()
@@ -402,6 +402,20 @@ test('member cache: in-flight dedupe and invalidateMember', async (t) => {
   await m.fetchMember(A, null, { fetch })
   t.is(calls.length, 4, 'a request out during invalidation does not refill the cache')
   m.invalidateMember('nope')
+})
+
+test('member cache: refetchMember goes to the index past a fresh cached page', async (t) => {
+  const { fetchMember, refetchMember, clock } = await load()
+  const { calls, fetch } = recorder(clock, () => response(JSON.stringify(complete())))
+  t.alike(await fetchMember(A, null, { fetch }), { ok: true, value: complete() })
+  await fetchMember(A, null, { fetch })
+  t.is(calls.length, 1, 'fetchMember serves the complete page from the cache')
+  t.alike(await refetchMember(A.toUpperCase(), { fetch }), { ok: true, value: complete() })
+  t.is(calls.length, 2, 'refetchMember makes a new request')
+  await fetchMember(A, null, { fetch })
+  t.is(calls.length, 2, 'the refetched page is cached again')
+  t.alike(await refetchMember('nope', { fetch }), { ok: false, reason: 'invalid-input' })
+  t.is(calls.length, 2)
 })
 
 test('429 with delta-seconds: shared cooldown, no network until it ends, then retry', async (t) => {
