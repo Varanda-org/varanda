@@ -149,7 +149,8 @@ test('poisoned text is one plain paragraph', async (t) => {
 
 test('U+FFFD and astral characters parse without breaking', async (t) => {
   const { parseRich } = await load()
-  t.alike(brief(parseRich('� *a* �')), [[['� ', ''], ['a', 'bold'], [' �', '']]])
+  // displayText writes U+FFFD for a code point poisoned() refuses, so it takes the same plain path.
+  t.alike(brief(parseRich('� *a* �')), [[['� *a* �', '']]])
   t.alike(brief(parseRich('😀*a*😀')), [[['😀', ''], ['a', 'bold'], ['😀', '']]])
 })
 
@@ -245,9 +246,10 @@ test('plainOf', async (t) => {
   t.is(plainOf('abc ||segr'), 'abc ||segr', 'unclosed stays literal when not clipped')
   t.is(plainOf('*abc* ||segr'), 'abc ||segr')
   t.is(plainOf('*abc* ||segr', { clipped: true }), 'abc spoiler')
-  t.is(plainOf('a ||b|| c ||d e', { clipped: true }), 'a spoiler c spoiler')
+  t.is(plainOf('a ||b|| c ||d e', { clipped: true }), 'a spoiler', 'a clipped text shows nothing after its first ||')
   t.is(plainOf('a\nb ||c\nd\n```\nx\n```', { clipped: true }), 'a\nb spoiler', 'the tail hides later blocks too')
-  t.is(plainOf('a || b', { clipped: true }), 'a || b', 'a || that cannot open hides nothing')
+  t.is(plainOf('a || b'), 'a || b', 'a || that cannot open hides nothing')
+  t.is(plainOf('a || b', { clipped: true }), 'a spoiler', 'clipped, even that || ends the preview')
   t.absent(plainOf('||s|| '.repeat(100)).includes('s '), 'no cap: every spoiler stays hidden')
   t.is(plainOf('https://a.com/_x_ _y_'), 'https://a.com/_x_ y')
 })
@@ -320,7 +322,7 @@ test('a spoiler in poisoned text is still hidden', async (t) => {
 test('a clipped text never closes against its cut end', async (t) => {
   const { plainOf } = await load()
   t.is(plainOf('`a ||segredo|| b`c'), '`a spoiler b`c', 'the whole text keeps the spoiler hidden')
-  t.is(plainOf('`a ||segredo|| b`', { clipped: true }), '`a spoiler b`', 'inline code does not close at the cut')
+  t.is(plainOf('`a ||segredo|| b`', { clipped: true }), '`a spoiler', 'nothing after the first || shows, whatever follows the cut')
   t.is(plainOf('```\n||segredo||\n```js'), '```\nspoiler\n```js')
   t.is(plainOf('```\n||segredo||\n```', { clipped: true }), 'spoiler', 'the last line does not close a fence')
   t.is(plainOf('```\nx\n```\nfim', { clipped: true }), 'x\nfim', 'an earlier line still closes')
@@ -339,7 +341,15 @@ test('no prefix of a text uncovers a spoiler the whole text hides', async (t) =>
     'https://a.com/x ||Q|| @ana_b *y*', '||@ana Q https://a.com||', '*https://a.com* ||Q|| @ana',
     '||Q \ud83d\udc69\u200d\ud83d\udcbb|| \ud83d\udc4d\ud83c\udffd a', '\ud83d\udc69\u200d\ud83d\udcbb||Q||', '1\ufe0f\u20e3 ||Q|| \ud83c\udff3\ufe0f\u200d\ud83c\udf08',
     '```js\nconst a = 1\n||Q||\nconst b = 2\n```\nfim', '```js\nconst a = ||x||\nb = `||Q||`\n```',
-    '||a\n```\nQ||', 'x ||a ||b\n```\nQ|| c', '```\n||Q|| a\nb', '```js\n' + 'linha\n'.repeat(30) + '||Q||\n```'
+    '||a\n```\nQ||', 'x ||a ||b\n```\nQ|| c', '```\n||Q|| a\nb', '```js\n' + 'linha\n'.repeat(30) + '||Q||\n```',
+    // Inline code holding || inside a spoiler: a cut inside the code, at its
+    // closing tick or past a fence-like line leaves the opener literal.
+    '||a `b||"Q"` c||', '||a `(b)||(Q)` c||', '||a `(b)||(c)\n```\nQ` Q|| z',
+    '||o resultado do jogo foi 3 a 1 e a senha do wifi novo e `const senha = lida||"Qvaranda-2026-casa-da-vo-maria-rua-das-flores-numero-quarenta-e-dois-fundos"` pronto||',
+    // The code point the whole text is poisoned by sits after the cut.
+    'oi||Q ' + 'lorem '.repeat(30) + '\u200b fim',
+    // A cut at a mention after inline code holding || changes how its closing tick reads.
+    '`||Q||`@abcdefgh', '`||Q||`@ana_b fim'
   ]
   let checked = 0
   let slowest = 0
@@ -368,4 +378,79 @@ test('a clipped preview drops the fence line of a cut code block', async (t) => 
   t.is(plainOf('a\n```js\nx ||segredo|| y\nz', { clipped: true }), 'a\nx spoiler', 'its line hides from the first ||')
   t.is(plainOf('```js', { clipped: true }), '', 'a fence with nothing after it')
   t.is(plainOf(cut), cut, 'not clipped, an unclosed fence stays literal')
+})
+
+test('a quote of display-cleaned text hides what the bubble hides', async (t) => {
+  const { parseRich, plainOf } = await load()
+  const { displayText } = require('@varanda/rpc')
+  const { threadOf } = await import('../src/dm.js')
+  const shown = (blocks) => blocks.map((b) => b.kind === 'code' ? b.text : b.spans.filter((s) => !s.spoiler).map((s) => s.text).join('')).join('\n')
+  for (const [raw, secret] of [['oi||segredo \u200f fim', 'segredo'], ['\u200e `||SECRET||`', 'SECRET']]) {
+    t.absent(shown(parseRich(raw)).includes(secret), 'the bubble hides it: ' + JSON.stringify(raw))
+    const cleaned = displayText(raw, { multiline: true })
+    t.ok(cleaned.includes('\ufffd'), 'displayText marks the code point')
+    t.absent(shown(parseRich(cleaned)).includes(secret), 'parseRich of the cleaned text hides it')
+    t.absent(plainOf(cleaned).includes(secret), 'plainOf of the cleaned text hides it')
+    const thread = threadOf([
+      { id: 'm1', at: '2026-05-01T00:00:00.000Z', text: raw, replyTo: null },
+      { id: 'm2', at: '2026-05-02T00:00:00.000Z', text: 'resposta', replyTo: 'm1' }
+    ])
+    const quote = thread.find((m) => m.id === 'm2').replyTo
+    t.is(typeof quote, 'string')
+    t.absent(plainOf(quote).includes(secret), 'the reply quote hides it')
+  }
+  t.alike(brief(parseRich('oi *a* ||b||')), [[['oi ', ''], ['a', 'bold'], [' ', ''], ['b', 'spoiler']]], 'without U+FFFD the text still formats')
+  t.is(plainOf('oi *a* ||b||'), 'oi a spoiler')
+})
+
+test('one message draws at most CODE_MAX code blocks', async (t) => {
+  const { parseRich, plainOf, CODE_MAX } = await load()
+  t.is(CODE_MAX, 8)
+  const codes = (blocks) => blocks.filter((b) => b.kind === 'code').length
+  const many = '```\n```\n'.repeat(125)
+  t.is(Array.from(many).length, 1000)
+  const blocks = parseRich(many)
+  t.is(codes(blocks), CODE_MAX, 'the 125-block message stops at the cap')
+  t.ok(blocks.length <= CODE_MAX + 1, blocks.length + ' blocks')
+  const at = Array.from({ length: CODE_MAX }, (_, i) => '```\nx' + i + '\n```').join('\n')
+  t.alike(brief(parseRich(at)), Array.from({ length: CODE_MAX }, (_, i) => ({ code: 'x' + i, lang: null })), 'a message at the cap draws every block')
+  const past = at + '\nfim *a*\n```\n||Q||\n```\n||R|| e ||S||'
+  const out = parseRich(past)
+  t.is(codes(out), CODE_MAX)
+  const tail = out[out.length - 1]
+  t.is(tail.kind, 'para')
+  t.alike(brief([out[out.length - 2]]), [[['fim ', ''], ['a', 'bold']]], 'the paragraph before the next block still formats')
+  t.alike(brief([tail]), [[['```\n', ''], ['||Q||\n```\n||R|| e ||S||', 'spoiler']]], 'from the next block on the text is plain, hidden from its first ||')
+  t.absent(plainOf(past).includes('R'), 'plainOf still hides the spoilers past the cap')
+})
+
+test('plainOf hides what the bubble hides past CODE_MAX', async (t) => {
+  const { parseRich, plainOf } = await load()
+  const text = '```\n```\n'.repeat(8) + '```\n||Q||\n```\nR ||S|| fim'
+  const covered = parseRich(text).flatMap((b) => b.kind === 'code' ? [] : b.spans.filter((s) => s.spoiler).map((s) => s.text)).join('')
+  t.ok(covered.includes('Q') && covered.includes('S'), 'the bubble covers them')
+  for (const opts of [{}, { full: true }]) {
+    const out = plainOf(text, opts)
+    t.absent(/[QRS]/.test(out), JSON.stringify(opts) + ' ' + JSON.stringify(out))
+    t.ok(out.endsWith('```\nspoiler'), 'the tail reads up to its first || and then spoiler')
+  }
+})
+
+test('plainOf full keeps every line of a code block', async (t) => {
+  const { plainOf } = await load()
+  const text = 'veja\n```js\nl1\nl2 ||x||\nl3\n```\n||s|| fim'
+  t.is(plainOf(text), 'veja\nl1\nspoiler fim')
+  t.is(plainOf(text, { full: true }), 'veja\nl1\nl2 ||x||\nl3\nspoiler fim', 'the code shows as the bubble shows it, the spoiler stays covered')
+  t.is(plainOf('a \u200b ||s||', { full: true }), 'a \u200b spoiler', 'poisoned text keeps the fallback')
+})
+
+test('a clipped preview closes styles at its first || and keeps a line break before it', async (t) => {
+  const { plainOf } = await load()
+  t.is(plainOf('*título*||segredo||' + ' x'.repeat(80), { clipped: true }), 'títulospoiler', 'a closer flush against || closes')
+  t.is(plainOf('`código`||segredo||', { clipped: true }), 'códigospoiler')
+  t.is(plainOf('*aberto ||segredo||', { clipped: true }), '*aberto spoiler', 'an opener with no closer stays literal')
+  t.is(plainOf('*abc', { clipped: true }), '*abc', 'without || the cut end still closes nothing')
+  t.is(plainOf('```\nx\n```\n||Q||', { clipped: true }), 'x\nspoiler', 'a || on the line after a fence starts its own line')
+  t.is(plainOf('a\n||Q||', { clipped: true }), 'a\nspoiler')
+  t.is(plainOf('||Q||', { clipped: true }), 'spoiler')
 })
