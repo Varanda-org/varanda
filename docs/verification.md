@@ -7897,7 +7897,7 @@ Situação, em 2026-11-12 (Vitrine, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1`). 
 - [ ] Chrome, 390 px (parcial): claro e escuro. Passos 1 a 3 e 6 (legenda com fotos recolhida em 3 linhas com "mais", aberta no lugar, link e @menção só ativos depois de aberta, o link de uma última linha abre e a legenda continua aberta), passo 4 (texto só: 9 linhas e "ver mais"), passo 12 (rótulo da publicação com os 543 caracteres da legenda; botão "ver mais, texto completo" com `aria-expanded`), botão de 44 pt de altura medido. Fechar a tela cheia não deixou setas na tela. Não verificado: passos 5, 7 a 9 (o contador e a janela foram vistos só a 1280 px), texto grande, Reduzir movimento, deslizar de verdade.
 - [ ] Chrome, 1280 px (parcial): passos 8 (contador "1 de 7" some depois da espera e volta a cada troca de foto), 9 (5 pontos, ativo o quarto na foto 6), 10 e 11 (setas com mouse e com o foco; foco passa de "foto anterior" para "próxima foto" e de volta, nunca cai na página). Não verificado: Reduzir movimento, texto grande, legenda longa neste tamanho (a 1280 px a coluna é a mesma, e a legenda de 6 linhas coube aberta sem botão).
 
-## 180. Conversa: respostas aninhadas e barra de resposta (PR feat/thread-conversation)
+## 191. Conversa: respostas aninhadas e barra de resposta (PR feat/thread-conversation)
 
 Terceiro PR da revisão visual do app. A Conversa mostra as respostas com um nível de aninhamento, ganha uma barra de resposta fixa embaixo e a linha de publicação ganha o chip "Respondendo a Nome" e o bloco "Respostas".
 
