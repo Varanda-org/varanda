@@ -14,7 +14,7 @@ const intent = (extra = {}) => ({ id: 'caller-id', peer: PEER, from: 'mural', co
 test('makeIntent preserves the caller id, peer and origin', async (t) => {
   const { makeIntent } = await load()
   const input = Object.freeze(intent())
-  t.alike(makeIntent(input), input)
+  t.alike(makeIntent(input), { ...input, offer: null })
   t.alike(makeIntent(input), makeIntent(input), 'no randomness')
 })
 
@@ -237,6 +237,54 @@ test('composeText includes the prefix within the total cap', async (t) => {
 test('makeIntent tolerates no argument', async (t) => {
   const { makeIntent, validIntent } = await load()
   t.is(validIntent(makeIntent(), 'a'.repeat(64)), false)
+})
+
+test('an offer intent keeps only the listing reference and title', async (t) => {
+  const { makeIntent, validIntent } = await load()
+  const offer = Object.freeze({ author: PEER, seq: 7, title: 'Bicicleta', text: 'Unused', photos: ['unused'] })
+  const result = makeIntent(intent({ offer }))
+  t.alike(result.offer, { author: PEER, seq: 7, title: 'Bicicleta' })
+  t.not(result.offer, offer)
+  t.ok(validIntent(result, OWN))
+  t.ok(validIntent(makeIntent(intent({ offer: { ...offer, seq: Number.MAX_SAFE_INTEGER } })), OWN))
+  t.is(result.context, null)
+})
+
+test('offer titles are capped in code points and default to empty', async (t) => {
+  const { makeIntent, validIntent } = await load()
+  const offer = { author: PEER, seq: 7 }
+  const title = 'a'.repeat(139) + '🌿'
+  t.is(makeIntent(intent({ offer: { ...offer, title: title + 'z' } })).offer?.title, title)
+  t.is(makeIntent(intent({ offer: { ...offer, title: '🌿'.repeat(140) } })).offer?.title, '🌿'.repeat(140))
+  for (const title of [undefined, null, 42]) {
+    const result = makeIntent(intent({ offer: { ...offer, title } }))
+    t.is(result.offer?.title, '')
+    t.ok(validIntent(result, OWN))
+  }
+})
+
+test('an offer intent rejects another seller and malformed references', async (t) => {
+  const { makeIntent, validIntent } = await load()
+  const offer = { author: PEER, seq: 7, title: 'Bicicleta' }
+  const bad = [false, 42, 'listing', Object.assign([], offer)]
+  for (const author of [AUTHOR, OWN, PEER.toUpperCase(), 'g'.repeat(64), PEER.slice(1), null, undefined]) bad.push({ ...offer, author })
+  for (const seq of [0, -1, 1.5, '7', NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, null, undefined]) bad.push({ ...offer, seq })
+  for (const value of bad) {
+    t.absent(validIntent(intent({ offer: value }), OWN))
+    t.absent(validIntent(makeIntent(intent({ offer: value })), OWN))
+  }
+  for (const title of [undefined, null, 42, []]) t.absent(validIntent(intent({ offer: { ...offer, title } }), OWN))
+  t.absent(validIntent(intent({ context: context(), offer }), OWN), 'context and offer cannot travel together')
+  t.absent(validIntent(makeIntent(intent({ context: context(), offer })), OWN))
+})
+
+test('old intents without an offer remain valid', async (t) => {
+  const { makeIntent, validIntent } = await load()
+  t.absent(Object.hasOwn(intent(), 'offer'))
+  t.ok(validIntent(intent(), OWN))
+  t.ok(validIntent(intent({ context: context() }), OWN))
+  t.ok(validIntent(intent({ offer: null }), OWN))
+  t.is(makeIntent(intent()).offer, null)
 })
 
 test('sendAttempt keeps the held composed text for the same draft and chip', async (t) => {

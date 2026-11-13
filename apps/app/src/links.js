@@ -152,7 +152,7 @@ function emojiJoiner (cps, i) {
 
 const JOINERS = new Set([0xfe0e, 0xfe0f, 0x20e3, 0x200d])
 
-function poisoned (token) {
+export function poisoned (token) {
   if (displayText(token, { multiline: true }) !== token) return true
   const cps = Array.from(token, (ch) => ch.codePointAt(0))
   for (let i = 0; i < cps.length; i++) {

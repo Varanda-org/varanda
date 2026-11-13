@@ -19,6 +19,7 @@ const music = require('./lib/music')
 const ogParse = require('./lib/og-parse')
 const feira = require('./lib/feira')
 const inviteCard = require('./lib/invite-card')
+const reaction = require('./lib/reaction')
 const { tokensEqual } = require('./lib/token')
 const { createServerDispatcher } = require('./lib/server')
 const { createClient } = require('./lib/client')
@@ -67,6 +68,8 @@ module.exports = {
   clipText: text.clipText,
   DM_INNER_KEYS: dmBudget.DM_INNER_KEYS,
   DM_INNER_KEYS_V2: dmBudget.DM_INNER_KEYS_V2,
+  DM_INNER_KEYS_V4: dmBudget.DM_INNER_KEYS_V4,
+  DM_TARGET_KEYS: dmBudget.DM_TARGET_KEYS,
   DM_MEDIA_KEYS: dmBudget.DM_MEDIA_KEYS,
   DM_CARD_KEYS: dmBudget.DM_CARD_KEYS,
   dmInnerVersion: dmBudget.innerVersion,
@@ -91,6 +94,9 @@ module.exports = {
   ogImageUrl: ogParse.ogImageUrl,
   feira,
   ...inviteCard,
+  isReaction: reaction.isReaction,
+  REACTION_MAX_POINTS: reaction.REACTION_MAX_POINTS,
+  REACTION_MAX_BYTES: reaction.REACTION_MAX_BYTES,
   tokensEqual,
   createServerDispatcher,
   createClient

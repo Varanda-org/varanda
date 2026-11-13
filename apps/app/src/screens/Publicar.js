@@ -48,7 +48,7 @@
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
+import { AccessibilityInfo, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { MAX_TEXT, activeMention, displayText } from '@varanda/rpc'
 import { MENTION_MIN_QUERY, insertMention } from '../mentions'
 import { mergeSuggestions } from '../mentionTargets'
@@ -61,8 +61,9 @@ import * as actingStore from '../actingAs'
 import { actAs, pagesMedia, pagesOrigin, pagesStart } from '../pages'
 import { memberKeyOf, useActing } from './Conversa'
 import { useOutbox } from '../outboxProvider'
-import { GATE_MESSAGE, LOCKED_MESSAGE, isQuoteRecord } from '../outbox'
+import { GATE_MESSAGE, LOCKED_MESSAGE } from '../outbox'
 import { countChars } from '../format'
+import { sentMatcher } from '../replySend'
 import { whoOf } from '../who'
 import { ringState } from '../composeRing'
 import { countAfterInsert, insertAt } from '../emoji'
@@ -98,7 +99,8 @@ import { refusalOf } from '../wordCheck'
 import { Sheet, TEXT_CAP } from '../ui/Sheet'
 import { tap } from '../ui/haptics'
 import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
-import { type } from '../ui/theme'
+import { space, type } from '../ui/theme'
+import { PressScale } from '../ui/PressScale'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { pagesOn } from '../pageGate'
 import { Segmented } from '../ui/Segmented'
@@ -410,6 +412,31 @@ export function keepInView ({ fieldY, fieldHeight, contentHeight, viewHeight, at
   return top
 }
 
+export function counterAnnouncement (previous, count, limit) {
+  if (previous < limit && count >= limit) return 'Limite de caracteres atingido'
+  if (previous < limit - 20 && count >= limit - 20 && count < limit) return 'Restam ' + (limit - count) + ' caracteres'
+  return ''
+}
+
+function useCounterAnnouncement (active, count, limit) {
+  const previous = useRef(count)
+  const [announcement, setAnnouncement] = useState('')
+  useEffect(() => {
+    const message = counterAnnouncement(previous.current, count, limit)
+    if (!active || !message) setAnnouncement('')
+    previous.current = count
+    if (!active || !message) return
+    // The native announcement API is absent on react-native-web, which uses
+    // the live region instead. Only one announcement channel is active.
+    if (typeof AccessibilityInfo.announceForAccessibilityWithOptions === 'function') {
+      AccessibilityInfo.announceForAccessibilityWithOptions(message, { queue: true })
+    } else {
+      setAnnouncement(message)
+    }
+  }, [active, count, limit])
+  return announcement
+}
+
 const layoutOf = (e) => (e && e.nativeEvent && e.nativeEvent.layout) || null
 const keyboardHeight = (e) => {
   const h = e && e.endCoordinates ? e.endCoordinates.height : 0
@@ -518,7 +545,8 @@ function useKeepInView (on, caretAtEnd = null, givenFieldRef = null) {
   const handleTailLayout = useCallback((e, parent = null) => {
     const l = layoutOf(e)
     if (l) m.current.tailBottom = l.y + l.height + (m.current.parts[parent] || 0)
-  }, [])
+    defer()
+  }, [defer])
   const handleLayout = useCallback((e) => {
     const l = layoutOf(e)
     if (l) m.current.view = l.height
@@ -528,7 +556,7 @@ function useKeepInView (on, caretAtEnd = null, givenFieldRef = null) {
     if (Number.isFinite(h)) m.current.content = h
     keep()
   }, [keep])
-  const handleFocus = useCallback(() => { focusRef.current = true }, [])
+  const handleFocus = useCallback(() => { focusRef.current = true; defer() }, [defer])
   const handleBlur = useCallback(() => { focusRef.current = false }, [])
   return { scrollRef, fieldRef, tailRef, reveal, defer, at, handleTailLayout, handleLayout, handleContentSizeChange, handleFocus, handleBlur }
 }
@@ -569,25 +597,6 @@ const MATCH_SLACK_MS = 2000
 // The seq of a post.create / post.reply result, or null.
 function seqOf (value) {
   return value && Number.isInteger(value.seq) ? value.seq : null
-}
-
-// A reply reference as 'author:seq' (lowercase author), or null.
-function refOf (replyTo) {
-  if (!replyTo || typeof replyTo.author !== 'string') return null
-  return replyTo.author.toLowerCase() + ':' + String(replyTo.seq)
-}
-
-function sameRef (a, b) {
-  if (a === null || b === null) return a === b
-  return String(a).toLowerCase() === String(b).toLowerCase()
-}
-
-// True when a record's media is the list that was sent (null: none).
-function sameMedia (recorded, sent) {
-  const list = Array.isArray(recorded) && recorded.length > 0 ? recorded : null
-  if (list === null || sent === null) return list === sent
-  const id = (d) => d && d.core + ':' + d.start + ':' + d.blocks + ':' + d.sha256
-  return list.length === sent.length && list.every((d, i) => id(d) === id(sent[i]))
 }
 
 // An upload progress report as a fraction 0..1: a number, or an object with
@@ -654,16 +663,30 @@ function Ring ({ progress, tone }) {
 // `quote` takes precedence over `reply` (the shell keeps them exclusive);
 // `onClearQuote` (optional) adds 'cancelar citação'. onPublished(kind, ref)
 // with kind 'post' | 'reply' | 'quote' | 'queued-post' | 'queued-reply'.
+// onReplyDraft(accepted) settles the caller's onExpand promise.
 // `shared` (optional) prefills this post once per id. `onSharedDone(id)`
 // releases the shell's copy of the files. A lock unmounts this screen, so
 // done is skipped then and the shell hands the same share back after unlock.
-export default function Publicar ({ open, reply: replyProp, quote = null, momentRequest = 0, me, onClose, onClearReply, onClearQuote, onPublished, shared = null, onSharedDone = () => {}, onSharedTaken = () => {} }) {
+export default function Publicar ({ open, reply: replyProp, quote = null, momentRequest = 0, me, onClose, onClearReply, onClearQuote, onPublished, onReplyDraft, shared = null, onSharedDone = () => {}, onSharedTaken = () => {} }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const reply = quote ? null : replyProp
   const node = useNode()
   const outbox = useOutbox()
   const [text, setText] = useState('')
+  const [replyDrafts, setReplyDrafts] = useState(new Set())
+  const replyDraftsRef = useRef(replyDrafts)
+  const hasReplyDraft = reply && typeof reply.draft === 'string'
+  const replyDraftPending = open && hasReplyDraft && !replyDrafts.has(reply.handoff)
+  const settleReplyDraft = (accepted) => {
+    const prior = replyDraftsRef.current
+    if (prior.has(reply.handoff)) return
+    const next = new Set(prior).add(reply.handoff)
+    replyDraftsRef.current = next
+    setReplyDrafts(next)
+    if (onReplyDraft) onReplyDraft(accepted)
+  }
+
   // True while the own diary is re-read after an uncertain publish.
   const [checking, setChecking] = useState(false)
   const [checkError, setCheckError] = useState('')
@@ -1416,19 +1439,14 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     setChecking(true)
     try {
       const res = await node.request('log.read', {})
-      const wanted = sentReply ? sentReply.ref : null
-      const floor = lastSeqRef.current
-      const found = (res.entries || []).find((entry) => {
-        const record = entry && entry.record
-        const quoteOk = sentQuote
-          ? isQuoteRecord(record) && sameRef(refOf(record.quote), sentQuote.ref)
-          : !isQuoteRecord(record)
-        return record && record.type === 'post' && record.text === sent && quoteOk &&
-          sameRef(refOf(record.replyTo), wanted) && sameMedia(record.media, sentMedia) &&
-          (sentMusic === null || (record.preview && typeof record.preview === 'object' && !Array.isArray(record.preview) && record.preview.url === built.card.url)) &&
-          Date.parse(record.at) >= startedAt - MATCH_SLACK_MS &&
-          (floor === null || (Number.isInteger(entry.seq) && entry.seq > floor))
-      })
+      const matches = sentMatcher({
+        text: sent,
+        replyTo: sentReply ? sentReply.ref : null,
+        quote: sentQuote ? sentQuote.ref : null,
+        media: sentMedia
+      }, { startedAt, slackMs: MATCH_SLACK_MS, seqFloor: lastSeqRef.current })
+      const found = (res.entries || []).find((entry) => matches(entry) &&
+        (sentMusic === null || (entry.record.preview && typeof entry.record.preview === 'object' && !Array.isArray(entry.record.preview) && entry.record.preview.url === built.card.url)))
       if (found) {
         confirm(Number.isInteger(found.seq) ? found.seq : null)
         action.clearError()
@@ -1449,6 +1467,14 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // Locked: the draft is what was signed and waits for its retry. Frozen
   // also covers a page send in flight.
   const held = busy || frozen
+  const replyDraftConflict = replyDraftPending && (held || hasMedia || (text !== '' && text !== reply.draft))
+  useEffect(() => {
+    if (!replyDraftPending) return
+    if (held) return settleReplyDraft(false)
+    if (replyDraftConflict) return
+    setText(reply.draft)
+    settleReplyDraft(true)
+  }, [replyDraftPending, replyDraftConflict, held, reply, onReplyDraft])
   let pillLabel = offlineQueue && !hasMedia && musicDraft === null ? 'Guardar' : 'Publicar'
   if (locked) pillLabel = 'Tentar de novo'
 
@@ -1468,6 +1494,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const handleDiscardMoment = moment.reset
   const postDraft = text !== '' || hasMedia
   const momentCount = momentLength(moment.text)
+  const momentAnnouncement = useCounterAnnouncement(open && momentMode, momentCount, MOMENT_TEXT_MAX)
+  const postAnnouncement = useCounterAnnouncement(open && !momentMode, len, MAX_TEXT)
   // While a text box has focus it stays in view with its counter (see
   // keepInView): every keystroke, also at the six-line maximum where the
   // body's content size no longer changes, and the keyboard opening.
@@ -1541,6 +1569,29 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     ? <Segmented options={MODES} selected={momentMode ? 'moment' : 'post'} onSelect={handleMode} />
     : null
 
+  if (replyDraftConflict) {
+    const keepDraft = () => {
+      settleReplyDraft(false)
+      return false
+    }
+    const useReplyDraft = () => {
+      if (held) return
+      genRef.current++
+      removeItems(Array.from(liveRef.current))
+      setText(reply.draft)
+      settleReplyDraft(true)
+    }
+    return (
+      <Sheet open={open} onClose={keepDraft} grabber>
+        <View style={styles.draftConflict}>
+          <Text style={styles.draftConflictText} maxFontSizeMultiplier={TEXT_CAP}>Você tem um rascunho não publicado.</Text>
+          <Pill label='Usar a resposta' onPress={useReplyDraft} disabled={held} maxFontSizeMultiplier={TEXT_CAP} />
+          <Pill label='Manter o rascunho' onPress={keepDraft} maxFontSizeMultiplier={TEXT_CAP} />
+        </View>
+      </Sheet>
+    )
+  }
+
   if (momentMode) {
     return (
       <Sheet
@@ -1550,6 +1601,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
         right={<Pill label='Publicar' filled onPress={sendMoment} pending={moment.pending} disabled={!moment.valid} maxFontSizeMultiplier={TEXT_CAP} />}
       >
         <SheetKeyboard>
+          <Text style={styles.counterAnnouncement} accessibilityLiveRegion='polite' aria-live='polite'>{momentAnnouncement}</Text>
           <ScrollView
             key='moment'
             ref={momentView.scrollRef}
@@ -1606,6 +1658,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                 onLayout={(e) => momentView.handleTailLayout(e, 'body')}
                 style={[styles.counter, styles.momentCounter, momentCount >= MOMENT_COUNTER_WARN && styles.counterWarn, momentCount > MOMENT_TEXT_MAX && styles.counterFull]}
                 accessibilityLabel={momentCount + ' de ' + MOMENT_TEXT_MAX + ' caracteres'}
+                accessibilityLiveRegion='none'
               >
                 {momentCount + '/' + MOMENT_TEXT_MAX}
               </Text>
@@ -1647,6 +1700,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       right={<Pill label={pillLabel} filled onPress={send} pending={busy} disabled={!valid} maxFontSizeMultiplier={TEXT_CAP} />}
     >
       <SheetKeyboard>
+        <Text style={styles.counterAnnouncement} accessibilityLiveRegion='polite' aria-live='polite'>{postAnnouncement}</Text>
         <ScrollView
           key='post'
           ref={postView.scrollRef}
@@ -1808,7 +1862,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
           <View ref={postView.tailRef} style={styles.counterRow} onLayout={postView.handleTailLayout}>
             <View style={styles.tools}>
               {canVideo ? <Pill label='Vídeo' onPress={attachVideo} disabled={held || hasVideo || items.some((item) => item.status === 'encoding')} /> : null}
-              <Pressable
+              <PressScale
                 accessibilityRole='button'
                 accessibilityLabel={emojiOpen ? 'fechar emojis' : 'emojis'}
                 accessibilityState={{ expanded: emojiOpen, disabled: frozen }}
@@ -1818,12 +1872,12 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                 style={({ pressed }) => [styles.tool, pressed && styles.toolPressed]}
               >
                 <Icon name='smile' size={21} color={emojiOpen ? colors.accent : colors.soft} />
-              </Pressable>
+              </PressScale>
               {canAttach
                 ? (
-                  <Pressable
+                  <PressScale
                     accessibilityRole='button'
-                    accessibilityLabel='Foto'
+                    accessibilityLabel='Adicionar foto'
                     accessibilityState={{ disabled: attachOff || held || preparingVideo }}
                     disabled={attachOff || held || preparingVideo}
                     onPress={() => {
@@ -1834,7 +1888,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     style={({ pressed }) => [styles.tool, attachOff && styles.toolOff, pressed && styles.toolPressed]}
                   >
                     <Icon name='image' size={21} color={colors.soft} />
-                  </Pressable>
+                  </PressScale>
                   )
                 : null}
               {musicAvailable === true && asPage === null
@@ -1855,7 +1909,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
             </View>
             <View style={styles.count}>
               <Ring progress={ring.progress} tone={ring.tone} />
-              <Text style={[styles.counter, ring.tone === 'warn' && styles.counterWarn, ring.tone === 'danger' && styles.counterFull]}>
+              <Text accessibilityLabel={len + ' de ' + MAX_TEXT + ' caracteres'} accessibilityLiveRegion='none' style={[styles.counter, ring.tone === 'warn' && styles.counterWarn, ring.tone === 'danger' && styles.counterFull]}>
                 {ring.remaining === null ? len + '/' + MAX_TEXT : String(ring.remaining)}
               </Text>
             </View>
@@ -2051,6 +2105,8 @@ function Thumb ({ item, index, count, busy, onRemove, onRetry, onMoveBefore, onM
 }
 
 const makeStyles = (colors) => StyleSheet.create({
+  draftConflict: { padding: 24, gap: 16 },
+  draftConflictText: { ...type.postText, color: colors.ink },
   flex: { flex: 1 },
   thumbs: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, paddingTop: 10, paddingLeft: 68, paddingRight: 16 },
   thumbWrap: { width: 80, gap: 4 },
@@ -2089,7 +2145,7 @@ const makeStyles = (colors) => StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.6)'
   },
   thumbError: { fontSize: 12, lineHeight: 15, color: colors.danger },
-  momentBody: { gap: 12, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 16, alignItems: 'flex-start' },
+  momentBody: { gap: space.md, paddingHorizontal: space.lg, paddingTop: space.md, paddingBottom: space.lg, alignItems: 'flex-start' },
   momentPhoto: { width: 160, height: 200, borderRadius: 12, overflow: 'hidden', backgroundColor: colors.skeleton },
   momentInput: { ...type.compose, alignSelf: 'stretch', color: colors.ink, minHeight: MOMENT_MIN_HEIGHT, maxHeight: MOMENT_MAX_HEIGHT, borderWidth: 1, borderColor: colors.line, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, backgroundColor: colors.card },
   momentCounter: { alignSelf: 'flex-end', marginTop: -4 },
@@ -2152,11 +2208,12 @@ const makeStyles = (colors) => StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     gap: 7,
-    paddingVertical: 8,
+    paddingVertical: space.sm,
     // The tools pad their own 8, so icons and counter both sit 16 from the edges.
-    paddingLeft: 8,
-    paddingRight: 16
+    paddingLeft: space.sm,
+    paddingRight: space.lg
   },
+  counterAnnouncement: { position: 'absolute', width: 1, height: 1, opacity: 0 },
   counter: { ...type.counter, color: colors.soft },
   counterWarn: { color: colors.warn },
   counterFull: { color: colors.danger },

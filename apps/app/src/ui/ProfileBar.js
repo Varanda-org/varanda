@@ -7,11 +7,12 @@
 // header's own buttons have left the screen. With reduce motion it snaps.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AccessibilityInfo, Animated, Pressable, StyleSheet, Text, View } from 'react-native'
+import { AccessibilityInfo, Animated, StyleSheet, Text, View } from 'react-native'
 import { profileBarState } from '../profileBar'
 import { Icon } from './Icon'
 import { SunsetBand } from './SunsetBand'
-import { type } from './theme'
+import { PressScale } from './PressScale'
+import { space, type } from './theme'
 import { useStyles } from './ThemeProvider'
 
 export const BAR = 44
@@ -83,7 +84,7 @@ export function ProfileBar ({ bar, topInset = 0, title, onBack, children }) {
               and a mounted Pressable stays focusable at opacity 0. */}
           {on && typeof onBack === 'function'
             ? (
-              <Pressable
+              <PressScale
                 accessibilityRole='button'
                 accessibilityLabel='voltar'
                 hitSlop={8}
@@ -91,7 +92,7 @@ export function ProfileBar ({ bar, topInset = 0, title, onBack, children }) {
                 style={styles.back}
               >
                 <Icon name='voltar' size={22} color='#ffffff' />
-              </Pressable>
+              </PressScale>
               )
             : null}
           <View style={styles.name} pointerEvents='none'>
@@ -111,10 +112,10 @@ const makeStyles = (colors) => StyleSheet.create({
     left: 0,
     right: 0,
     height: BAR,
-    paddingHorizontal: 16,
+    paddingHorizontal: space.lg,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8
+    gap: space.sm
   },
   back: {
     width: 34,
@@ -126,5 +127,5 @@ const makeStyles = (colors) => StyleSheet.create({
   },
   name: { flex: 1 },
   title: { ...type.sheetTitle, color: '#ffffff' },
-  controls: { flexDirection: 'row', alignItems: 'center', gap: 8 }
+  controls: { flexDirection: 'row', alignItems: 'center', gap: space.sm }
 })

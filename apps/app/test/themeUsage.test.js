@@ -158,3 +158,18 @@ test('theme usage: rounded fields drop the browser focus ring and show focus on 
   t.ok(composer.includes('style={[styles.input, webInputReset, { height }]}'))
   t.ok(composer.includes('fieldFocused: { borderColor: colors.accent }'))
 })
+
+test('theme usage: every colors.<key> names a key of both palettes', async (t) => {
+  const { light, paletteFor } = await import('../src/appearance.js')
+  const dark = paletteFor('dark')
+  const unknown = []
+  for (const file of sources(path.join(APP, 'src'))) {
+    if (SKIP.includes(file)) continue
+    for (const m of withoutComments(fs.readFileSync(file, 'utf8')).matchAll(/\bcolors\.(\w+)/g)) {
+      // inviteCardArt.js keeps an array named colors.
+      if (m[1] === 'length') continue
+      if (!(m[1] in light) || !(m[1] in dark)) unknown.push(path.relative(APP, file) + ': colors.' + m[1])
+    }
+  }
+  t.alike([...new Set(unknown)], [], 'an unknown key renders with no colour')
+})

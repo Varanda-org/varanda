@@ -17,6 +17,114 @@ const avatar = read('ui/Avatar.js')
 const states = read('ui/States.js')
 const row = read('ui/ConversationRow.js')
 
+function glyphTable (source, constName) {
+  const match = source.match(new RegExp('const ' + constName + ' = \\{([^}]+)\\}'))
+  if (!match) return null
+  const table = {}
+  for (const line of match[1].matchAll(/^\s+(\w+):\s+'([^']+)'/gm)) table[line[1]] = line[2]
+  return table
+}
+
+test('new icon aliases resolve to glyphs in the set they render from', (t) => {
+  // @expo/vector-icons is pinned exactly, so these maps are the fonts Icon draws.
+  const iconsRoot = path.dirname(require.resolve('@expo/vector-icons/package.json'))
+  const glyphMap = (set) => JSON.parse(fs.readFileSync(path.join(iconsRoot, 'build/vendor/react-native-vector-icons/glyphmaps', set + '.json'), 'utf8'))
+  const maps = { Feather: glyphMap('Feather'), Ionicons: glyphMap('Ionicons') }
+  const feather = glyphTable(icons, 'GLYPHS')
+  const ion = glyphTable(icons, 'ION_GLYPHS')
+  t.ok(feather && ion, 'both glyph tables parse')
+  const body = icons.slice(icons.indexOf('export function Icon'), icons.indexOf('export async function loadIcons'))
+  const ionGate = body.indexOf('if (ION_GLYPHS[name]) {')
+  const ionReturn = body.indexOf('return <Ionicons name={ION_GLYPHS[name]}')
+  const featherReturn = body.lastIndexOf('return <Feather name={GLYPHS[name] || name}')
+  t.ok(ionGate >= 0 && ionReturn > ionGate && featherReturn > ionReturn, 'Ionicons aliases render before the Feather fallback')
+  t.absent(body.slice(ionGate, ionReturn).includes('filled'), 'category icons are not gated on filled')
+  t.is(feather.feira, 'shopping-bag', 'the Feira tab keeps its bag')
+  const aliases = {
+    codigo: ['Feather', 'code'],
+    filtro: ['Feather', 'filter'],
+    grade: ['Feather', 'grid'],
+    lista: ['Feather', 'list'],
+    mapa: ['Feather', 'map'],
+    estrela: ['Feather', 'star'],
+    cat_casa: ['Feather', 'home'],
+    cat_roupa: ['Ionicons', 'shirt-outline'],
+    cat_eletronicos: ['Feather', 'smartphone'],
+    cat_moveis: ['Ionicons', 'bed-outline'],
+    cat_infantil: ['Feather', 'smile'],
+    cat_esporte: ['Feather', 'activity'],
+    cat_veiculos: ['Feather', 'truck'],
+    cat_comida: ['Feather', 'coffee'],
+    cat_aulas: ['Feather', 'book-open'],
+    cat_beleza: ['Feather', 'scissors'],
+    cat_reparos: ['Feather', 'tool'],
+    cat_outros: ['Feather', 'package']
+  }
+  for (const [name, [set, glyph]] of Object.entries(aliases)) {
+    const table = set === 'Ionicons' ? ion : feather
+    const other = set === 'Ionicons' ? feather : ion
+    t.is(table[name], glyph, name + ' renders from ' + set)
+    t.absent(other[name], name + ' is not also a ' + (set === 'Ionicons' ? 'Feather' : 'Ionicons') + ' alias')
+    t.ok(Object.hasOwn(maps[set], glyph), name + ' exists in ' + set)
+  }
+  t.ok(ion.cat_roupa !== feather.feira, 'clothing is not the Feira bag')
+  t.ok(ion.cat_moveis !== 'archive', 'furniture is not a storage box')
+})
+
+test('EmptyState renders an optional quiet secondary action', (t) => {
+  const empty = states.slice(states.indexOf('export function EmptyState'), states.indexOf('export function ErrorState'))
+  t.ok(empty.includes('secondaryLabel, onSecondary'), 'secondary props')
+  t.ok(empty.includes('{actionLabel && onAction ? <Pill label={actionLabel} onPress={onAction} filled /> : null}'), 'primary action stays filled')
+  t.ok(empty.includes('{secondaryLabel && onSecondary ? <Pill label={secondaryLabel} onPress={onSecondary} /> : null}'), 'quiet second button needs a label and a handler')
+})
+
+test('skeleton variants reuse Skeleton and its themed placeholders', (t) => {
+  for (const name of ['SkeletonRow', 'SkeletonTile', 'SkeletonBubble']) {
+    t.ok(states.includes('export function ' + name + ' ('), name + ' exported')
+  }
+  const rowFn = states.slice(states.indexOf('export function SkeletonRow'), states.indexOf('export function SkeletonTile'))
+  const tile = states.slice(states.indexOf('export function SkeletonTile'), states.indexOf('export function SkeletonBubble'))
+  const bubble = states.slice(states.indexOf('export function SkeletonBubble'), states.indexOf('export function EmptyState'))
+  t.ok(rowFn.includes('return <Skeleton rows={1} />'), 'SkeletonRow is one row of Skeleton')
+  t.ok(tile.includes('<Skeleton>') && tile.includes('styles.skTile') && tile.includes('styles.skImage'), 'SkeletonTile shares Skeleton')
+  t.ok(bubble.includes('<Skeleton>') && bubble.includes('styles.skBubble'), 'SkeletonBubble shares Skeleton')
+  t.ok(states.includes('skImage: { width: \'100%\', aspectRatio: 1, borderRadius: radius.md, backgroundColor: colors.skeleton }'), 'tile image uses the skeleton token')
+  t.ok(states.includes('skBubble: { width: \'65%\', height: 56, margin: space.lg, borderRadius: radius.bubble, backgroundColor: colors.skeleton }'), 'bubble uses the skeleton token')
+  t.ok(/export function Skeleton \(\{ rows = 3, children \}/.test(states), 'the default skeleton still takes rows')
+})
+
+test('motion and type tokens extend the existing scale', async (t) => {
+  const src = read('ui/theme.js').replace("import { Platform } from 'react-native'", 'const Platform = { select: (options) => options.default }')
+  const { motion, type, fonts } = await import('data:text/javascript,' + encodeURIComponent(src))
+  t.alike(motion, { fast: 150, normal: 250, press: 90, hold: 1600 })
+  for (const name of ['caption', 'more', 'price', 'tileTitle', 'code']) {
+    t.ok(type[name].fontSize > 0, name + ' has a font size')
+    t.ok(type[name].lineHeight >= type[name].fontSize, name + ' has room for its text')
+  }
+  t.is(type.code.fontFamily, fonts.mono)
+})
+
+test('PressScale resolves a function style, keeps a caller transform and skips the native driver on the web', (t) => {
+  const src = read('ui/PressScale.js')
+  t.absent(src.includes('\u2014'), 'no em dash')
+  t.ok(src.includes("const resolved = typeof style === 'function' ? style({ pressed: pressed && !disabled }) : style"), 'a function style receives { pressed } and its result is kept')
+  t.ok(src.includes('StyleSheet.flatten(resolved)'), 'flatten sees the resolved style, not the function')
+  t.ok(src.includes('const callerTransform = flat && Array.isArray(flat.transform) ? flat.transform : null'), 'a caller transform is taken from the resolved style')
+  t.ok(src.includes('style={[resolved, { transform: callerTransform ? [...callerTransform, { scale }] : [{ scale }] }]}'), 'a caller transform survives ahead of the scale')
+  t.absent(src.includes('style={[style,'), 'the raw style prop is not passed through')
+  t.ok(src.includes("const NATIVE_DRIVER = Platform.OS !== 'web'"), 'web has no native driver')
+  t.ok(src.includes('useNativeDriver: NATIVE_DRIVER'), 'timing uses NATIVE_DRIVER')
+  t.absent(/useNativeDriver:\s*true/.test(src), 'the driver is not unconditional')
+  t.ok(src.includes('react-native-web does not have'), 'the Platform.OS check names the missing API')
+  t.ok(src.includes('pressScale({ pressed: pressed && !disabled, reduceMotion })'), 'scale follows press and reduced motion')
+  t.ok(src.includes('pressTiming(reduceMotion, motion.press)'), 'duration comes from the caller')
+  t.ok(src.includes('if (duration === 0)') && src.includes('scale.setValue(toValue)'), 'reduced motion sets the value and starts nothing')
+  t.ok(src.includes('return () => run.stop()'), 'a new run stops the previous animation')
+  t.ok(src.includes('if (disabled) setPressed(false)'), 'disabled clears a held press')
+  t.ok(src.includes("accessibilityRole = 'button'"), 'button by default')
+  t.ok(src.includes('accessibilityState={{ ...accessibilityState, disabled: !!disabled }}'), 'disabled reaches the accessibility state')
+})
+
 test('welcome building blocks', (t) => {
   const theme = read('ui/theme.js')
   const welcome = read('ui/Welcome.js')

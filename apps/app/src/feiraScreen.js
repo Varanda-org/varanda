@@ -64,6 +64,42 @@ export function savedSearch (filters) {
   return query === null ? null : { ...query }
 }
 
+// Sort and a price bound narrow rows already loaded. They stay out of
+// searchQuery, so the index and a saved search keep the city query only.
+const VIEW_SORTS = new Set(['recentes', 'menor', 'maior'])
+const centsOf = (value) => (Number.isSafeInteger(value) && value >= 0 ? value : null)
+
+export function viewFilters (value) {
+  const v = value && typeof value === 'object' ? value : {}
+  return {
+    sort: VIEW_SORTS.has(v.sort) ? v.sort : 'recentes',
+    min: typeof v.min === 'string' ? v.min : '',
+    max: typeof v.max === 'string' ? v.max : '',
+    minCents: centsOf(v.minCents),
+    maxCents: centsOf(v.maxCents)
+  }
+}
+
+export function viewFiltersActive (view) {
+  const v = viewFilters(view)
+  return v.sort !== 'recentes' || v.minCents !== null || v.maxCents !== null
+}
+
+// Kind is chosen in the Filtros sheet. Category stays on its own row.
+export function filtersDot (view, kind) {
+  return viewFiltersActive(view) || feira.isKind(kind)
+}
+
+// The note is only true while another page can still change the view.
+export function partialNoteVisible (view, more) {
+  return more === true && viewFiltersActive(view)
+}
+
+export function placeMissing (filters) {
+  const f = filterState(filters)
+  return !f.uf || !feira.cityKey(f.city.trim())
+}
+
 // Whether this installation has the Feira on: its seeder answers the Feira
 // index routes (a 404 means off). The account service's /account/feira/policy
 // only says whether a listing link may open a sign-up, so it never gates

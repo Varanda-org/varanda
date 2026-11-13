@@ -77,7 +77,7 @@ const { signPage, canonicalOp, opHash: pageOpHash, ACTIONS: PAGE_STATEMENTS } = 
 const { signTerms } = require('./terms')
 const groupCrypto = require('./group-crypto')
 const { recordBoundRoot } = require('./sync')
-const { COMMUNITY_LIST_MAX, feira } = require('@varanda/rpc')
+const { COMMUNITY_LIST_MAX, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX, feira } = require('@varanda/rpc')
 
 const HEX64 = /^[0-9a-fA-F]{64}$/
 const GENESIS_REQUIRED = 'grave o certificado de membro antes de publicar'
@@ -2623,6 +2623,57 @@ async function groupHide (ctx, { group, target, on }) {
   }, { secrets: true })
 }
 
+// A visible post of the fold at `target`, or USAGE: hidden posts and posts
+// of blocked diaries take no reactions and list no reactors.
+function visiblePost (loaded, target) {
+  const post = loaded.view.posts.find((p) => p.writer === target.writer && p.seq === target.seq)
+  if (post === undefined || post.hidden || !loaded.profiles.has(post.diary)) throw new UsageError('mensagem não encontrada')
+  return post
+}
+
+// Whether re-sending `emoji` for `diary` would change nothing. The fold
+// cuts the list at GROUP_REACTIONS_MAX emojis, so a full list may hide the
+// caller's reaction: only a list with room proves there is none.
+function sameReaction (post, diary, emoji) {
+  const list = Array.isArray(post.reactions) ? post.reactions : []
+  const r = list.find((x) => x.by.includes(diary))
+  if (r !== undefined) return r.emoji === emoji
+  return emoji === '' && list.length < GROUP_REACTIONS_MAX
+}
+
+// group.read's compact summary: never the `by` lists, whose size the page
+// maximum does not cover (docs/rpc.md section 2).
+function reactionSummary (post, ownHex) {
+  if (!Array.isArray(post.reactions) || post.reactions.length === 0) return {}
+  return { reactions: post.reactions.map((r) => ({ emoji: r.emoji, count: r.count, mine: r.by.includes(ownHex) })) }
+}
+
+// Who may post may react (docs/rpc.md 5.117): a current member with a live
+// writer, on any visible post. Re-sending the reaction the fold already
+// counts writes nothing.
+async function groupReact (ctx, { group, target, emoji }) {
+  return withGroup(ctx, group, async (loaded, identity) => {
+    requireParent(loaded)
+    const own = liveOwnWriter(loaded, identity.ownHex)
+    if (!own || loaded.view.members.get(identity.ownHex) !== 'member') throw groupPermission()
+    const post = visiblePost(loaded, target)
+    if (sameReaction(post, identity.ownHex, emoji)) return { ok: true }
+    requireCounted(loaded, own.writer)
+    const writer = await ownGroupWriter(loaded, identity)
+    const record = buildRecord(() => groups.groupReact({ target, emoji, seen: loaded.view.last }))
+    await appendGroupRecord(writer, group, groupRecordFor(loaded, writer, record), loaded.private)
+    return { ok: true }
+  }, { secrets: true })
+}
+
+async function groupReactors (ctx, { group, target }) {
+  return withGroup(ctx, group, async (loaded) => {
+    const post = visiblePost(loaded, target)
+    const reactions = Array.isArray(post.reactions) ? post.reactions : []
+    return { reactions: reactions.map((r) => ({ emoji: r.emoji, count: r.count, by: r.by.slice(0, GROUP_REACTORS_MAX) })) }
+  })
+}
+
 async function groupMeta (ctx, { group, name, join }) {
   return withGroup(ctx, group, async (loaded, identity) => {
     requireParent(loaded)
@@ -2684,13 +2735,14 @@ function groupOlder (posts, before) {
 }
 
 async function groupRead (ctx, { group, limit = 30, before = null }) {
-  return withGroupOrPending(ctx, group, async (loaded) => {
+  return withGroupOrPending(ctx, group, async (loaded, { ownHex }) => {
     const posts = groupOlder(loaded.view.posts.filter((p) => loaded.profiles.has(p.diary)), before)
     const start = Math.max(0, posts.length - limit)
     // A hidden post shows neither its text nor its media: a private item
     // carries its key, which must not reach the reader of a hidden post.
-    const items = posts.slice(start).reverse().map(({ media, ...p }) => ({
+    const items = posts.slice(start).reverse().map(({ media, reactions, ...p }) => ({
       ...p,
+      ...reactionSummary({ reactions }, ownHex),
       text: p.hidden ? '' : p.text,
       media: !p.hidden && Array.isArray(media) ? media.map((d) => ({ ...d })) : null,
       card: p.hidden || !p.card ? null : copyLinkCard(p.card, (d) => ({ ...d })),
@@ -3904,6 +3956,8 @@ module.exports = {
   groupBan,
   groupAdmin,
   groupHide,
+  groupReact,
+  groupReactors,
   groupMeta,
   groupInvitePolicy,
   groupRekey,

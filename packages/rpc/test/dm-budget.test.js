@@ -141,3 +141,50 @@ test('dm-budget: v3 writes the v2 keys and matches core innerDigest', (t) => {
   t.ok(dm.innerDigest({ ...full, text: textOfBytes(free) }), 'text at the v3 budget fits')
   t.exception.all(() => dm.innerDigest({ ...full, text: textOfBytes(free + 1) }), /mensagem longa demais/, 'one byte more throws')
 })
+
+// The longest reaction isReaction accepts in UTF-8: eight code points, three
+// pictographs with skin tones joined by two ZWJ (4+4+3+4+4+3+4+4 bytes).
+const LONGEST_EMOJI = '\u{1F468}\u{1F3FB}‍\u{1F468}\u{1F3FB}‍\u{1F468}\u{1F3FB}'
+
+test('dm-budget: v4 is a reaction with its own exact key set', (t) => {
+  t.alike(rpc.DM_INNER_KEYS_V4, ['v', 'kind', 'id', 'from', 'to', 'target', 'emoji', 'rev', 'at', 'cert'])
+  t.is(rpc.DM_INNER_KEYS_V4, budget.DM_INNER_KEYS_V4)
+  t.is(rpc.DM_INNER_KEYS_V4, dm.INNER_KEYS_V4)
+  t.alike(rpc.DM_TARGET_KEYS, ['from', 'id', 'digest'], 'the target names the message by sender, id and digest')
+  t.is(rpc.DM_TARGET_KEYS, dm.DM_TARGET_KEYS)
+  t.ok(Object.isFrozen(rpc.DM_INNER_KEYS_V4) && Object.isFrozen(rpc.DM_TARGET_KEYS))
+  const body = { v: 4, kind: 'react', id: 'a'.repeat(32), from: bia.hex, to: plain.hex, target: { digest: 'c'.repeat(64), id: 'b'.repeat(32), from: plain.hex, extra: 1 }, emoji: '❤️', rev: 1, at: AT, cert: null }
+  const json = budget.canonicalInnerJson(Object.fromEntries(Object.entries(body).reverse()))
+  const parsed = JSON.parse(json)
+  t.alike(Object.keys(parsed), rpc.DM_INNER_KEYS_V4, 'wire order whatever the caller built')
+  t.alike(Object.keys(parsed.target), ['from', 'id', 'digest'], 'target in its canonical order, nothing else')
+})
+
+test('dm-budget: the largest v4 inner fits the fixed frame', (t) => {
+  t.ok(rpc.isReaction(LONGEST_EMOJI))
+  t.is(b4a.byteLength(LONGEST_EMOJI), 30)
+  t.ok(rpc.REACTION_MAX_BYTES >= 30)
+  const body = {
+    v: 4,
+    kind: 'react',
+    id: 'f'.repeat(32),
+    from: 'f'.repeat(64),
+    to: 'e'.repeat(64),
+    target: { from: 'e'.repeat(64), id: 'd'.repeat(32), digest: 'c'.repeat(64) },
+    emoji: LONGEST_EMOJI,
+    rev: 1000000,
+    at: AT,
+    cert: budget.MEMBER_CERT_STANDIN
+  }
+  const bytes = b4a.byteLength(budget.canonicalInnerJson(body))
+  t.ok(bytes + budget.DM_INNER_FRAMING_BYTES <= budget.DM_INNER_BYTES, 'v4 frame ' + (bytes + 66) + ' of ' + budget.DM_INNER_BYTES)
+  // Even an emoji at the byte cap, all of it escaped as \uXXXX (6 bytes per
+  // 1 to 3 bytes), leaves room.
+  const bound = bytes - 30 + rpc.REACTION_MAX_BYTES * 6
+  t.ok(bound + budget.DM_INNER_FRAMING_BYTES <= budget.DM_INNER_BYTES)
+
+  const real = dm.buildInner({ kind: 'react', to: bia.hex, target: { from: bia.hex, id: 'd'.repeat(32), digest: 'c'.repeat(64) }, emoji: LONGEST_EMOJI, rev: 1000000, at: AT, cert: issued.cert }, issued)
+  const realJson = b4a.toString(real.subarray(2, 2 + innerLength(real)))
+  t.alike(Object.keys(JSON.parse(realJson)), rpc.DM_INNER_KEYS_V4)
+  t.is(realJson, budget.canonicalInnerJson(JSON.parse(realJson)), 'core signs the canonical bytes')
+})

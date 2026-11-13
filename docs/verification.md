@@ -5165,7 +5165,7 @@ Regras que os passos conferem:
 - Grupo público: os itens são descritores de publicação comuns, e os bytes ficam no núcleo de mídia do autor, servidos em `/media` como as fotos do diário.
 - Grupo privado: cada foto é selada no aparelho (secretbox, chave e nonce novos, preenchida até blocos inteiros de 32 KiB), e só o cifrado vai ao núcleo de mídia do autor. A chave viaja só dentro da publicação selada pelo grupo. O semeador guarda e serve só o cifrado.
 - `group.read` devolve `media` em cada item (`null` em registro v1 e em publicação oculta); a mídia de uma publicação oculta não sai.
-- `GROUP_LIMIT_MAX` e `GROUP_LIMIT_DEFAULT` valem 29: a página mais pesada de `group.read` (quatro itens privados por publicação) cabe em `MAX_MESSAGE`.
+- `GROUP_LIMIT_MAX` e `GROUP_LIMIT_DEFAULT` valem 29 (26 desde a §195, com as reações): a página mais pesada de `group.read` (quatro itens privados por publicação) cabe em `MAX_MESSAGE`.
 - A CLI (nó core) recusa mídia em `group.post` com `mídia disponível só na versão web`. No navegador, mídia cifrada só vai a grupo privado (`mídia cifrada só em grupo privado`), e grupo privado exige mídia cifrada (`grupo privado exige mídia cifrada`).
 - Na lista de comunidades, a última publicação só com foto aparece como `Foto` (ou `GIF`).
 - `media.readGroup` busca o cifrado na origem do semeador do próprio nó (rota `/media`, `no-store`, sem cookies e sem redirecionamentos) e abre a imagem; qualquer falha vira `mídia indisponível`, e um bloqueio durante o download é recusado.
@@ -8522,7 +8522,624 @@ Os casos no app real continuam em aberto. Usar uma instalação de teste local, 
 - [ ] Safari ou PWA do iOS com Modo de Baixa Energia: aparece "Toque no play para assistir" e o vídeo toca depois de um toque.
 - [ ] Um início sem som mostra "Ativar som"; tocar nele liga o som.
 
-## 189. Música com cara de Instagram (PR feat/music-instagram-ui)
+## 189. Base visual: movimento, esqueletos e barra (PR feat/ui-foundations)
+
+Primeiro PR da revisão visual do app. Muda duas coisas que a pessoa vê e acrescenta peças que nenhuma tela usa ainda.
+
+- Barra de abas (`apps/app/src/ui/TabBar.js`): uma pílula suave (`accentSoft`, 48 por 32 pt, cantos `radius.pill`) fica atrás do ícone da aba ativa e aparece em `motion.fast` (150 ms). Com Reduzir movimento ligado, aparece de uma vez. A aba Diário com a própria pessoa (foto, iniciais ou o ícone de pessoa) não desenha pílula: o anel verde já a marca. A barra continua só com ícones e com 49 pt (83 pt com a área segura). Os leitores de tela leem o nome de cada aba ("<nome>, novidades" quando há ponto de novidade).
+- Botão de publicar (`apps/app/src/ui/Fab.js`, `apps/app/src/ui/PressScale.js`, `apps/app/src/pressMotion.js`): enquanto está apertado, encolhe a 0,97 e escurece a 0,85 de opacidade. Com Reduzir movimento, só escurece.
+- Folha de ações (`apps/app/src/ui/ActionsSheet.js`): ganha um espaço opcional `header`. Nenhuma tela o usa neste PR, então toda folha existente fica igual: a linha escolhida só roda depois que a folha fechou.
+- Peças sem uso em tela: os estilos de texto novos (`caption`, `more`, `price`, `tileTitle`, `code` em `theme.js`), `SkeletonRow`, `SkeletonTile` e `SkeletonBubble` e a segunda ação de `EmptyState` (`States.js`), apelidos de ícones de categoria (`Icon.js`). Nenhuma tela mudou por causa delas. Os tokens de movimento novos já estão em uso: `motion.fast` no fade da pílula e `motion.press` no toque do botão de publicar.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `cd apps/app && node ../../scripts/run-tests.js test/pressMotion.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/uiKit.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/shellChrome.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/appearance.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js`
+
+Os testes cobrem a escala e a opacidade do toque (com e sem Reduzir movimento), a pílula da aba ativa e a ausência dela no Diário com a própria pessoa, o `header` opcional da folha, os esqueletos novos e a regra de que cores só vêm de tokens e de que a paleta não ganha chaves. Não cobrem como o movimento parece na tela: isso é o que a verificação manual confere.
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) mostra as telas hospedadas com dados de exemplo e dispensa conta. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e), Chrome em 390 e em 1280 px. Em cada alvo: claro e escuro, texto grande, leitor de tela e Reduzir movimento. Capturas ficam fora do git.
+
+1. Abra a Vitrine em A Rua, no tema claro. Esperado: a aba A Rua tem a pílula suave atrás do ícone, centrada e sem cortar; as demais abas não têm pílula; a barra segue só com ícones e 49 pt.
+2. Toque, uma a uma, em Espiadinha, Conversas, Feira e Busca. Esperado: a pílula some da aba anterior e aparece na nova com um fade curto (150 ms); nunca há duas pílulas.
+3. Toque em Diário (foto ou iniciais da própria pessoa). Esperado: o anel verde marca a aba e não há pílula. Em seguida, volte a A Rua: a pílula reaparece.
+4. Repita os passos 1 a 3 no tema escuro. Esperado: a pílula continua visível (contraste do `accentSoft` do tema escuro) e o ícone ativo continua legível por cima dela.
+5. Ligue Reduzir movimento (Android: remover animações; iOS: Reduzir Movimento; web: `prefers-reduced-motion: reduce`) e repita o passo 2. Esperado: a pílula aparece de uma vez, sem fade.
+6. Ligue o texto grande (maior tamanho de fonte do sistema) e repita o passo 2. Esperado: a barra mantém 49 pt, os ícones não mudam de tamanho e nada é cortado.
+7. Com o leitor de tela (TalkBack, VoiceOver, ou a árvore de acessibilidade na web), percorra a barra. Esperado: cada aba é lida pelo nome e como selecionada ou não; "<nome>, novidades" quando há ponto de novidade; a pílula não é lida.
+8. Aperte e segure o botão "publicar" (A Rua), sem soltar. Esperado: o botão encolhe um pouco e escurece. Ao soltar, volta ao normal e a folha de Publicar abre como antes. Um toque rápido ainda abre a folha.
+9. Com Reduzir movimento ligado, repita o passo 8. Esperado: o botão só escurece, sem encolher.
+10. Abra o "..." de uma publicação. Esperado: a folha de ações tem o mesmo desenho de antes (sem espaço de cabeçalho vazio), as mesmas linhas, e cada linha só roda depois que a folha fechou.
+11. Numa conversa, segure uma mensagem. Esperado: a folha abre igual a antes e a ação escolhida roda depois do fechamento.
+12. Rode os passos 1 a 11 em cada alvo, no tema escuro e com texto grande. Esperado: nenhuma tela existente mudou além da barra e do botão de publicar.
+
+Situação, em 2026-11-12 (Vitrine, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1`). Uma primeira passada achou a pílula deslocada para a direita do ícone no Android e no iOS (`TabBar.js`, `left: '50%'` com margem negativa). Foi corrigida com deslocamentos numéricos a partir do ícone de 27 pt. Na segunda passada a pílula ficou centrada nos dois, e uma terceira olhada nada mudou. Nenhum alvo foi percorrido por inteiro, então nenhuma caixa está marcada: cada linha diz o que rodou e o que falta. As capturas ficam fora do git e o caminho de cada uma vai no corpo do PR.
+
+- [ ] Android, AVD `varanda-api36`, build de debug (parcial): pílula centrada atrás do ícone em A Rua, Conversas e Busca, claro e escuro; sem pílula no Diário (o anel marca a aba); texto grande 1,6 sem corte e a barra com 49 pt; com as escalas de animação do sistema em 0, a pílula aparece já no lugar. Nomes lidos de `uiautomator dump` (não foi ligado o TalkBack): "A Rua", "Espiadinha", "Conversas, novidades", "Feira", "Busca", "Diário", com `selected` só na aba ativa. Botão de publicar apertado por 3 s: escurece e encolhe (captura). A folha do "..." de uma publicação e a folha da mensagem (Responder, Copiar, Encaminhar, Denunciar) abrem com o desenho de antes, e "Responder" só mostra a citação depois que a folha fechou. Não verificado: o fade de 150 ms em si (as capturas só mostram o estado final) e o TalkBack de verdade.
+- [ ] iOS, simulador iPhone 16e (parcial): pílula centrada em A Rua no claro e no escuro; Diário sem pílula e com o anel; texto grande (`accessibility-large`) com a barra intacta; folha do "..." igual a antes (escuro). Não verificado: VoiceOver, Reduzir Movimento, o botão de publicar apertado (a captura durante o toque não foi possível) e a folha de mensagem.
+- [ ] Chrome, 390 px (parcial): pílula centrada em A Rua e Conversas, sem pílula no Diário, claro e escuro; árvore de acessibilidade com os nomes das abas ("Conversas, novidades"); botão de publicar apertado fica com opacidade 0,85 e escala 0,97; folha do "..." igual a antes. Não verificado: texto grande, Reduzir movimento e a folha de mensagem. A pílula deste alvo foi vista antes da correção do `TabBar.js` (a web já estava centrada) e não foi revista depois.
+- [ ] Chrome, 1280 px (parcial): só A Rua no claro, coluna central com a barra e a pílula como no 390 px (antes da correção). Passos de texto grande, Reduzir movimento e folhas não percorridos.
+
+## 190. Fotos primeiro e legenda recolhida (PR feat/post-captions)
+
+Segundo PR da revisão visual do app. A linha de publicação mostra as fotos primeiro e a legenda embaixo delas, recolhe a legenda longa e limpa o cromo do carrossel.
+
+- Ordem (`apps/app/src/ui/PostRow.js`): fotos, legenda, citação, barra de ações. Antes, a legenda vinha antes das fotos.
+- Recolhimento (`apps/app/src/postClamp.js`, `apps/app/src/ui/ClampText.js`): 3 linhas com fotos, 9 só com texto. O recolhimento só começa quando a estimativa passa do limite por 2 linhas ou mais. O botão embaixo diz "mais" (com fotos), "ver mais" (só texto) e, aberto, "menos". Os leitores de tela ouvem "mais, ver texto completo", "ver mais, texto completo" e "menos, recolher texto", com o estado aberto ou fechado. O rótulo da publicação continua com a legenda inteira. Tocar na legenda recolhida ainda abre a Conversa.
+- Links e menções: enquanto recolhida, a legenda é texto simples; links e @menções só funcionam depois de aberta.
+- Carrossel (`apps/app/src/ui/MediaCarousel.js`, `apps/app/src/carousel.js`): o contador "1/5" aparece quando o carrossel surge ou a página muda, fica 1,6 s (`motion.hold`) e some em 250 ms (`motion.normal`); com Reduzir movimento, some de uma vez depois da espera. No máximo 5 pontos, acompanhando a página atual. As setas só aparecem com o mouse em cima ou o foco do teclado no carrossel (web); um toque, um clique ou fechar a tela cheia com um toque nunca as deixa na tela.
+- Limites conhecidos: o nativo mede as linhas reais depois do desenho e, se a legenda couber, mostra tudo sem botão; a web não mede e decide só pela estimativa pela largura, então uma legenda de exatamente 3 ou 9 linhas pode manter o botão até ser aberta uma vez. Recolhida, a legenda não tem links nem menções tocáveis. A estimativa para de crescer na escala de fonte 1,3 do sistema, de propósito: com texto maior que isso, uma legenda longa pode ficar aberta sem botão, nunca cortada sem botão.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `cd apps/app && node ../../scripts/run-tests.js test/postClamp.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/postLayout.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/carousel.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js`
+
+Os testes cobrem a decisão do recolhimento (limites, margem de 2 linhas, medição nativa que só levanta o recolhimento), a ordem fotos, legenda e citação, e a janela de pontos e o fade do contador. Não cobrem como isso parece na tela: isso é o que a verificação manual confere.
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) mostra as telas hospedadas com dados de exemplo e dispensa conta. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e), Chrome em 390 e em 1280 px. Em cada alvo: claro e escuro, texto grande, leitor de tela e Reduzir movimento. Capturas ficam fora do git.
+
+1. Numa publicação com fotos e legenda curta (uma ou duas linhas), olhe a linha. Esperado: as fotos vêm primeiro, a legenda embaixo delas, e não há botão "mais".
+2. Numa publicação com fotos e legenda de mais de 5 linhas, olhe a linha. Esperado: a legenda mostra 3 linhas, termina em reticências e o botão "mais" aparece embaixo, com cerca de 44 pt de altura e 12 pt de espaço próprio acima. Esse espaço lê como parte da legenda (alinhado ao texto), não solto.
+3. Toque em "mais". Esperado: a legenda abre no lugar, sem abrir a Conversa; o botão vira "menos"; toque em "menos" e ela volta a 3 linhas.
+4. Numa publicação só de texto com mais de 11 linhas, olhe a linha. Esperado: 9 linhas e o botão "ver mais"; aberta, "menos".
+5. Numa legenda com uma linha ou duas acima do limite. Esperado: fica aberta, sem botão (a margem de 2 linhas).
+6. Com a legenda recolhida, toque num link ou numa @menção dentro dela. Esperado: não são links (texto simples); tocar na legenda abre a Conversa. Abra a legenda e toque no link de uma última linha que começa com ele. Esperado: o link abre e a legenda continua aberta.
+7. Num carrossel de 2 fotos com legenda longa, vá para a foto 2, abra e feche a legenda. Esperado: o carrossel continua na foto 2.
+8. Contador: ao surgir o carrossel ou trocar de foto, "N de M" aparece, fica 1,6 s e some em 250 ms. Com Reduzir movimento, some de uma vez depois dos 1,6 s.
+9. Num carrossel de 7 fotos. Esperado: no máximo 5 pontos, a janela acompanha a foto atual (na foto 6, o ponto ativo é o quarto de cinco).
+10. Web a 1280 px: com o mouse sobre o carrossel, as setas aparecem; ao tirar o mouse somem; depois de clicar numa seta, de um toque (390 px) ou de fechar a tela cheia, nunca ficam na tela.
+11. Web a 1280 px, só com o teclado: Tab até a foto (as setas aparecem), Tab até uma seta, Enter até a última ou a primeira foto. Esperado: o foco passa à outra seta e nunca cai na página.
+12. Leitor de tela: o rótulo da publicação traz a legenda inteira, mesmo recolhida; o botão é lido como "mais, ver texto completo", "ver mais, texto completo" ou "menos, recolher texto", com o estado aberto ou fechado.
+13. Repita no tema escuro e com texto grande. Esperado: nada cortado, o botão mantém o alvo de 44 pt.
+
+Limites desta passada: a Vitrine não traz legenda longa, então as publicações de teste foram feitas no compositor da própria Vitrine (as fotos de uma publicação nova aparecem como quadro neutro ou "foto indisponível", só o desenho da legenda e do carrossel vale). O arrastar com o mouse abre a tela cheia em vez de deslizar, então o passo 7 não foi feito por deslizar.
+
+Situação, em 2026-11-12 (Vitrine, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1`). Nenhum alvo foi percorrido por inteiro, então nenhuma caixa está marcada. Capturas fora do git, em `v2-shots/` da pasta de trabalho da sessão.
+
+- [ ] Android, AVD `varanda-api36` (parcial, 2026-11-12, build de debug existente ligado ao Metro da Vitrine, com legendas longas temporárias): claro e escuro. Passo 2 (fotos primeiro, legenda em 3 linhas com reticências e "mais" embaixo), passo 3 ("mais" abre no lugar sem abrir a Conversa, "menos" fecha), passo 6 (o link da última linha abre o Chrome, ao voltar a legenda continua aberta), passo 7 (na foto 2, abrir e fechar a legenda não mexe no carrossel), passo 8 ("1 de 2" aparece ao trocar de foto e some depois de cerca de 2 s; com a escala de animação em 0 some de uma vez, sem quadro intermediário), passo 13 em escuro com fonte 1,3 (3 linhas, "mais" legível, espaço do botão sem parecer solto). Não verificado: o toque na @menção não abriu o perfil (a tela não mudou, ver o defeito abaixo), passos 1, 4, 5 e 9, texto só com mais de 11 linhas (a publicação de teste de 14 linhas tinha foto), TalkBack.
+- [ ] iOS, simulador iPhone 17 Pro (parcial; o iPhone 16e não liga aqui), 2026-11-12, build de debug existente: passo 2 (fotos primeiro, 3 linhas e "mais"), passo 3 (abre no lugar, volta da Conversa com a legenda ainda aberta), passo 6 (o link abre o Safari; voltar ao app recarregou a lista e a legenda voltou recolhida), passo 7 (foto 2 mantida ao abrir a legenda), passo 13 em escuro com texto extra extra grande (legenda aberta legível, nada cortado). Não verificado: o toque na @menção não abriu o perfil, passos 1, 4, 5, 8 e 9, Reduzir Movimento, VoiceOver, texto só.
+- Observações do nativo, sem defeito do PR: com a legenda aberta, tocar na @menção `@joao_nascimento` não mudou de tela na Vitrine (capturas `n-ios-d-mention4.png` e `n-android-d-mention.png`). O toque chega a `openMention` (`apps/app/App.js:1900-1918`), que resolve o @nome pelo diretório de contas, e a Vitrine não responde a essa busca; o caminho é o mesmo de antes deste PR. Confirmar com uma conta real. Na Conversa, a publicação principal ainda aparece recolhida em 3 linhas com "mais" (`n-ios-d-link.png`): o PR seguinte (feat/thread-conversation) passa `expanded` a ela.
+- [ ] Chrome, 390 px (parcial): claro e escuro. Passos 1 a 3 e 6 (legenda com fotos recolhida em 3 linhas com "mais", aberta no lugar, link e @menção só ativos depois de aberta, o link de uma última linha abre e a legenda continua aberta), passo 4 (texto só: 9 linhas e "ver mais"), passo 12 (rótulo da publicação com os 543 caracteres da legenda; botão "ver mais, texto completo" com `aria-expanded`), botão de 44 pt de altura medido. Fechar a tela cheia não deixou setas na tela. Não verificado: passos 5, 7 a 9 (o contador e a janela foram vistos só a 1280 px), texto grande, Reduzir movimento, deslizar de verdade.
+- [ ] Chrome, 1280 px (parcial): passos 8 (contador "1 de 7" some depois da espera e volta a cada troca de foto), 9 (5 pontos, ativo o quarto na foto 6), 10 e 11 (setas com mouse e com o foco; foco passa de "foto anterior" para "próxima foto" e de volta, nunca cai na página). Não verificado: Reduzir movimento, texto grande, legenda longa neste tamanho (a 1280 px a coluna é a mesma, e a legenda de 6 linhas coube aberta sem botão).
+
+## 191. Conversa: respostas aninhadas e barra de resposta (PR feat/thread-conversation)
+
+Terceiro PR da revisão visual do app. A Conversa mostra as respostas com um nível de aninhamento, ganha uma barra de resposta fixa embaixo e a linha de publicação ganha o chip "Respondendo a Nome" e o bloco "Respostas".
+
+- Aninhamento (`apps/app/src/screens/Conversa.js`, `apps/app/src/threadRows.js`): sob a publicação em destaque, uma resposta que tem respostas próprias ganha uma linha de expansão ("Ver 1 resposta", "Ver N respostas", "Ver respostas" quando a contagem é desconhecida e "Ocultar respostas" aberta). Abrir carrega os filhos pela mesma leitura conferida da conversa. Só um nível: os filhos ficam recuados com um fio fino e nunca mostram netos. Um ramo longo termina em "Ver mais respostas". Um filho que tem respostas mostra "Ver conversa", que abre aquele filho como conversa própria.
+- Legenda: a publicação em destaque mostra a legenda inteira, sem "mais" (o recolhimento do PR anterior não vale ali).
+- Barra de resposta (`apps/app/src/ui/ReplyBar.js`, `apps/app/src/replySend.js`): só com o nó cheio (hospedado e com internet). Fica fixa embaixo da Conversa com "Escreva uma resposta", "Responder" e um botão que abre o editor completo. Tocar no ícone de responder de uma linha mira nela ("Respondendo a @nome" com "cancelar resposta", que volta a mira para a publicação em destaque). Um texto curto é enviado da barra e aparece na hora, uma vez e na ordem. Texto com link, resposta como Página, texto com mais de 1000 caracteres e resposta recusada pelo portão da fila abrem a Publicar com o rascunho. Texto com termo bloqueado mostra a recusa embaixo da barra. Envio incerto diz que pode ter sido enviado, guarda o texto e nunca tenta de novo sozinho. Sem o nó cheio (sem internet, não hospedado) não há barra e o ícone de responder abre a folha Publicar como antes. O botão de publicar não aparece na Conversa.
+- Rascunho (`apps/app/src/screens/Publicar.js`): quando a barra entrega um rascunho e a Publicar já guarda outra publicação não terminada (texto ou fotos), ela pergunta "Você tem um rascunho não publicado." com "Usar a resposta" e "Manter o rascunho". Compositor vazio recebe o rascunho sem perguntar. Enquanto uma publicação está sendo enviada, manter o rascunho antigo nunca o perde. Recusar a resposta ("Manter o rascunho", Cancelar, fundo) mantém o rascunho antigo com o alvo de resposta ou citação dele.
+- Falhas: a primeira leitura que falha mostra a tela de erro de sempre; puxar para atualizar e falhar mantém a conversa na tela com a nota "Não foi possível atualizar a conversa." e os ramos abertos; uma resposta rápida só atualiza a conversa em silêncio depois de ela ter carregado.
+- Chip e prévias (`apps/app/src/ui/PostRow.js`, `apps/app/src/screens/ARua.js`, `apps/app/App.js`): "respondendo a X" virou o chip "Respondendo a Nome", com alvo de 44 pt, que abre a publicação respondida (texto simples onde a tela não dá abertura). Em A Rua, uma publicação mostra, embaixo da barra de ações, o bloco "Respostas" com até 2 prévias de uma linha, um botão só que abre a conversa. As prévias vêm só de respostas já carregadas mais abaixo na mesma lista (nenhum pedido novo), também para uma publicação mostrada por republicação; resposta só com foto fica de fora. O ícone de responder numa linha da A Rua (e do Diário e das outras listas) abre a Conversa daquela publicação com a barra em foco, quando o nó está cheio e a pessoa não age como Página; senão abre a Publicar.
+- Limites conhecidos: as prévias só existem em A Rua e só a partir das linhas já carregadas (uma resposta que está além da janela carregada não aparece); a barra só existe com o nó cheio; um nível de aninhamento, o resto pelo "Ver conversa"; a Vitrine não responde a envios de verdade, então o texto enviado da barra só prova o desenho e a ordem local.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `cd apps/app && node ../../scripts/run-tests.js test/threadRows.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/replySend.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/replyBar.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/conversaScreen.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/feedPreviews.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/postLayout.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js`
+
+Os testes cobrem os rótulos e a montagem das linhas, a regra de envio da barra (o que envia, o que abre a Publicar, o que recusa), a ordem e a mescla das respostas e as prévias de A Rua. Não cobrem como isso parece na tela nem o teclado: isso é o que a verificação manual confere.
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é um nó hospedado com dados de exemplo e dispensa conta, então a barra aparece. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e, que não liga neste Mac; usa-se o iPhone 17 Pro), Chrome em 390 e em 1280 px. Em cada alvo: claro e escuro, texto grande, leitor de tela e Reduzir movimento. Capturas ficam fora do git.
+
+1. Abra a Conversa de uma publicação cuja resposta tem respostas próprias. Esperado: sob a resposta, a linha "Ver N respostas" (ou "Ver 1 resposta"), com alvo de 44 pt; o leitor de tela lê o rótulo e o estado aberto ou fechado.
+2. Toque na linha. Esperado: os filhos aparecem recuados com um fio fino, a linha vira "Ocultar respostas"; tocar de novo fecha.
+3. Abra um ramo cujo filho também tem respostas. Esperado: só um nível aparece (nunca netos); o filho mostra "Ver conversa". Num ramo longo, o fim traz "Ver mais respostas" e cada toque acrescenta uma página sem duplicar linhas.
+4. Toque em "Ver conversa". Esperado: o filho abre como conversa própria, com as respostas dele.
+5. Toque no chip "Respondendo a Nome" de uma resposta. Esperado: abre a publicação respondida; o alvo tem 44 pt e o leitor de tela lê o chip como botão.
+6. Olhe a publicação em destaque com legenda longa. Esperado: a legenda inteira, sem "mais".
+7. Barra: com o nó cheio, "Escreva uma resposta" e "Responder" ficam fixos embaixo. Toque no ícone de responder de uma resposta. Esperado: "Respondendo a @nome" com "cancelar resposta"; cancelar volta a mira para a publicação em destaque.
+8. Escreva um texto curto e toque em "Responder". Esperado: a resposta aparece na hora, uma vez, na ordem; o campo esvazia.
+9. Escreva um texto com um link e toque em "Responder". Esperado: abre a Publicar com o rascunho (e o alvo de resposta).
+10. Com a Publicar já guardando outra publicação (texto ou fotos), repita o passo 9. Esperado: "Você tem um rascunho não publicado." com "Usar a resposta" e "Manter o rascunho". "Usar a resposta" troca o rascunho; "Manter o rascunho" (ou Cancelar, ou o fundo) mantém o antigo com o próprio alvo. Com a Publicar vazia, o rascunho entra sem perguntar.
+11. Toque no botão que abre o editor completo com texto escrito. Esperado: a Publicar abre com o rascunho da barra.
+12. Teclado: toque no campo da barra. Esperado: o teclado nunca cobre a barra (Android, iOS, web).
+13. Sem internet (ou fora do nó cheio). Esperado: não há barra e o ícone de responder abre a folha Publicar; o botão de publicar não aparece na Conversa.
+14. Em A Rua, toque no ícone de responder de uma linha. Esperado: abre a Conversa daquela publicação com o teclado aberto e a barra em foco. Como Página, abre a Publicar.
+15. Em A Rua, uma publicação com respostas já carregadas mais abaixo mostra "Respostas" com até 2 linhas. Esperado: o bloco é um botão que abre a conversa; a rolagem continua suave; resposta só com foto não aparece nas prévias.
+16. Falha: com a rede cortada, puxe para atualizar a Conversa. Esperado: a conversa fica na tela com "Não foi possível atualizar a conversa." e os ramos abertos continuam abertos.
+17. Leitor de tela: o chip, a linha de expansão, a barra (campo, "Responder", "cancelar resposta") e o bloco "Respostas" têm rótulos que fazem sentido.
+18. Repita no tema escuro, com texto grande e com Reduzir movimento. Esperado: nada cortado, alvos de 44 pt, a barra visível.
+
+Situação, em 2026-11-12 (Vitrine, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1` na porta 8090, porque a 8081 estava com o Metro de outra pasta de trabalho). Nenhum alvo foi percorrido por inteiro, então nenhuma caixa está marcada. Para andar pelos casos que a Vitrine não traz, a passada usou linhas temporárias em `fixtures.js` (uma resposta com ramo, um neto com resposta, um ramo de 55 filhos), depois desfeitas byte a byte. As capturas vieram do painel do navegador embutido e ficam fora do git.
+
+- [ ] Chrome, 390 px, tema claro (parcial; no painel de navegador embutido do app, não no Chrome em si, que não estava conectado): passos 1 e 2 ("Ver 1 resposta" abre e vira "Ocultar respostas", filho recuado com fio fino), passo 3 (parcial: só um nível, e "Ver conversa" só no filho que tem resposta), passo 4 ("Ver conversa" abre o filho como conversa própria), passo 7 (barra com "Respondendo a @nome" e "cancelar resposta"), passo 8 (resposta curta apareceu na hora, uma vez e na ordem), passo 9 (o texto com link abriu a Publicar com o rascunho e o alvo), passo 10 (parcial: "Você tem um rascunho não publicado." com as duas opções apareceu; "Manter o rascunho" manteve o antigo com o alvo dele; "Usar a resposta" não foi percorrido), passo 13 (só a parte "o botão de publicar não aparece na Conversa"), passo 14 (o ícone de responder de uma linha de A Rua abriu a Conversa com a barra em foco). Não verificado: o "Ver mais respostas" do passo 3 (nenhum ramo aberto passou da primeira página), passo 5 (o chip foi só visto, não tocado), 6, 11, 12, 15 (as prévias de "Respostas": a publicação-raiz ficou fora da janela carregada de A Rua e nenhum bloco apareceu), 16, 17, sem internet, texto grande, Reduzir movimento, leitor de tela.
+- [ ] Chrome, 1280 px, tema escuro (parcial): a Conversa abre na mesma coluna estreita, com a barra fixa embaixo. Defeito: a linha "Respondendo a @nome" da barra sai em preto sobre o fundo escuro (`colors.muted` não existe na paleta, ver `apps/app/src/ui/ReplyBar.js:104`). Corrigido depois: a barra usa só chaves da paleta e `apps/app/test/themeUsage.test.js` agora recusa uma chave que não existe; não reconferido no navegador. Não verificado: o resto dos passos.
+- [ ] Android, AVD `varanda-api36` (parcial, passada de teclado de 2026-11-12, Metro na porta 8090 com o app apontado por `debug_http_host`): passo 1 FALHOU. Com o teclado aberto, a barra fica acima dele mas há uma faixa em branco de cerca de 20 dp entre o fundo da barra e o teclado (captura `v3-shots/and-1-keyboard.png`, repete-se em `and-4-dark-reply.png`). Causa: a margem da área segura de baixo continuava com o teclado aberto. Corrigido e repassado no mesmo dia: a faixa de 20 dp sumiu (`and-1-keyboard-fixed.png`); restou uma tira de cerca de 5 dp na cor da página, que é o respiro de 8 dp sob a barra. Esse respiro passou a ter a cor da barra; essa última mudança não foi reconferida no aparelho. Com o teclado fechado, a barra fica logo acima da área de gestos, sem faixa a mais (`and-2-closed-fixed.png`). Passo 2 passou: ao fechar o teclado a barra volta ao fundo, acima da área segura, sem faixa a mais. Passo 3 passou (7 e 8): "Oi teste" apareceu uma vez no bloco "1 resposta". Passo 4 passou (7 e 18): "Respondendo a @lia_oliveira" e o espaço reservado legíveis no tema escuro. Não verificado: os demais passos, texto grande, leitor de tela, Reduzir movimento.
+- [ ] iOS, simulador iPhone 17 Pro (o iPhone 16e não liga aqui) (parcial, passada de teclado de 2026-11-12, Metro na porta 8090 com `RCT_jsLocation`): passo 1 passou: a barra fica rente ao teclado, inteira, sem faixa em branco nem folga acima (`v3-shots/ios-1-keyboard.png`). Passo 2 (parcial): o teclado de software sumiu ao digitar pelo teclado do Mac e a barra voltou ao fundo acima da área segura (`ios-2-after-send.png`); o fechamento pelo próprio teclado não foi tocado. Passo 3 passou: a resposta apareceu uma vez no bloco "1 resposta" (o texto saiu corrigido para "Ok, teste" pelo autocorretor). Passo 4 passou: "Respondendo a @lia_oliveira" e o espaço reservado legíveis no tema escuro (`ios-3-dark-reply.png`); o escuro veio pela opção Escuro de Ajustes > Aparência, porque com Sistema o app ficou claro com o aparelho em escuro (a conferir). Não verificado: os demais passos, texto grande, leitor de tela, Reduzir movimento.
+
+## 192. Feira: vitrine, categorias e filtros (PR feat/feira-browse)
+
+Quarto PR da revisão visual do app. A aba Feira, em Na cidade, ganha um cabeçalho (busca, chip de cidade, botão Filtros e tiles de categoria), uma grade de tiles de anúncio e, sem cidade escolhida, uma vitrine com "Como funciona".
+
+- Vitrine sem cidade (`apps/app/src/screens/Feira.js`): sem estado e cidade lembrados, Na cidade mostra o título "Onde você quer comprar e vender?", os estados (UF), o campo Cidade, o botão "Ver anúncios" e "Como funciona" com quatro passos (Anuncie, Converse, Combine, Avalie).
+- Cidade (`apps/app/src/ui/PlaceSheet.js`): com cidade, o cabeçalho mostra o campo Palavras e um chip com a cidade ("São Paulo, SP"); o leitor de tela lê "Trocar cidade, agora São Paulo, SP". O chip abre a folha "Localização" (27 UFs e Cidade, botão "Ver anúncios"). Escolher outra cidade recarrega a lista. Sem estado ou cidade, a folha diz "Escolha o estado e escreva a cidade.". Não existe busca no país inteiro: UF e cidade são sempre exigidas.
+- Categorias (`apps/app/src/ui/CategoryTiles.js`): fileira rolável de tiles, "Todas" e as categorias da Feira, cada um com ícone, alvo de 44 pt e estado selecionado lido pelo leitor de tela. Categoria e tipo são filtros do servidor: refazem a busca.
+- Grade (`apps/app/src/ui/ListingTile.js`, `apps/app/src/feiraBrowse.js`): os anúncios aparecem em tiles com foto (ou o ícone da categoria), preço (ou "A combinar", "Grátis", "Até R$ x" numa procura), título, lugar e, se houver, o selo (Reservado, Vendido, Procura, "Situação desconhecida"). Colunas por largura: 1 abaixo de 360 px ou com texto grande (escala de fonte a partir de 1,29), 2 abaixo de 600, 3 abaixo de 900. Tocar num tile abre o anúncio. Enquanto carrega, aparecem tiles de esqueleto (nunca em Buscas).
+- Filtros (`apps/app/src/ui/FeiraFilters.js`): a folha "Filtros da Feira" tem "Ordenar por" (Recentes, Menor preço, Maior preço), "Faixa de preço" com "De" e "Até" (preço com vírgula, por exemplo 10,50) e "Tipo de anúncio". Preço fora do formato mostra "Confira os preços. Use, por exemplo, 10,50."; início maior que o fim mostra "O preço de início deve ser menor ou igual ao preço final.". "Aplicar" fecha a folha e "Limpar" zera. Com ordem ou faixa ativas o botão Filtros ganha um ponto. Ordem e faixa só reordenam e filtram os anúncios já carregados; quando ainda há mais páginas, a nota "Ordem e faixa de preço valem para os anúncios já carregados" aparece embaixo da grade (a folha mostra a mesma nota sempre).
+- Buscas salvas: "Salvar busca" continua à mão enquanto há uma busca por cidade; a nota "Busca salva neste aparelho." confirma. Em Buscas aparece a busca ("São Paulo/SP · Todos · Todas as categorias", "N novos", "Remover busca") e nunca há esqueletos.
+- Meus e Salvos usam os mesmos tiles. Os anúncios de uma pessoa ou Página (linha "Anúncios" do perfil) aparecem na grade, sem vitrine nem filtros.
+- Vazio e offline: sem resultado, "Nenhum anúncio por aqui ainda." com "Limpar filtros" e "Trocar cidade"; sem rede, "Conecte-se para consultar a Feira."; índice incompleto, "Alguns anúncios podem faltar. Puxe para atualizar.".
+- Limites conhecidos: ordem e faixa de preço só valem para os anúncios já carregados (a nota diz isso); a casca do app limita o conteúdo a 640 px, então a grade tem no máximo 3 colunas (a quarta, de 900 px, não aparece no app); não há busca nacional (UF e cidade são obrigatórias); a Vitrine só tem 6 anúncios e uma página, então a nota de parcial no rodapé não aparece nela.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `(cd apps/app && node ../../scripts/run-tests.js test/feiraBrowse.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/feiraScreen.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js)`
+
+Os testes cobrem ordem, faixa, colunas, rótulos e as regras da tela. Não cobrem como isso parece na tela: isso é o que a verificação manual confere.
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é um nó hospedado com dados de exemplo e dispensa conta. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e, que não liga neste Mac; usa-se o iPhone 17 Pro), Chrome em 390 e em 1280 px. Capturas ficam fora do git.
+
+1. Abra a Feira sem cidade. Esperado: título, estados, Cidade, "Ver anúncios" e "Como funciona" com os quatro passos.
+2. Escolha SP e "São Paulo". Esperado: o cabeçalho com chip, Filtros e tiles; a grade.
+3. Toque no chip. Esperado: a folha "Localização"; mudar a cidade recarrega; "Cidade" sem nada pede "Escolha o estado e escreva a cidade.".
+4. Toque num tile de categoria. Esperado: ele fica selecionado, a lista é refeita; alvos de 44 pt.
+5. Largura e texto grande. Esperado: 1 coluna em 340 px ou com texto grande, 2 em 390, 3 em 1280 (limite de 640 px).
+6. Filtros: Menor preço, De "10,50". Esperado: grade reordenada e filtrada, ponto no botão; a nota de parcial só com mais páginas.
+7. "Salvar busca" e Buscas. Esperado: a busca aparece, sem esqueletos.
+8. Meus, Salvos e a grade de um perfil. Esperado: tiles, sem vitrine nem filtros no perfil.
+9. Cidade sem anúncios, offline. Esperado: os textos de vazio e de sem rede.
+10. Escuro, texto grande, leitor de tela e Reduzir movimento. Esperado: nada cortado, contraste legível.
+
+Situação, em 2026-11-12 (Vitrine, Metro na porta 8090). Cada caixa só é marcada quando o alvo foi percorrido por inteiro.
+
+- [ ] Android, AVD `varanda-api36` (parcial, Metro na porta 8090, `v4-shots/and-*.png`): passo 1 passou (vitrine com os quatro passos, claro); passo 2 passou ("Sao Paulo" casou com "São Paulo"; chip, Filtros, tiles e "Salvar busca"); passo 4 passou (Casa fica selecionada, sem anúncios mostra "Nenhum anúncio por aqui ainda." com "Limpar filtros" e "Trocar cidade"); passo 5 passou (o AVD vem com texto 1,3: 1 coluna; com texto 1,0: 2 colunas); passo 6 passou (Menor preço e De "10,50": grade reordenada, ponto no Filtros, nota na folha); passo 10 (parcial): escuro conferido na tela de vazio, contraste legível. Não percorrido: passo 3 (folha de localização), 7, 8, sem rede, leitor de tela e Reduzir movimento. O AVD voltou a texto 1,3 e ao tema claro.
+- [ ] iOS, iPhone 17 Pro (o iPhone 16e não liga aqui): não percorrido (sem turnos restantes).
+- [ ] Chrome, 390 px (painel de navegador embutido, não o Chrome em si; parcial): passos 1 a 3 (vitrine, chip e folha de localização recarregando a lista), 4 (tiles), 5 (1 coluna em 340 px, 2 em 390), 6 (ordem e ponto do Filtros; a nota de parcial não aparece porque a Vitrine tem uma página só), 7 (busca salva e Buscas sem esqueletos), 8 (Meus, Salvos e a grade de "Anúncios" do perfil de uma Página, sem vitrine nem filtros), 9 (cidade sem anúncios: "Limpar filtros" e "Trocar cidade"), escuro e claro; o rótulo "Trocar cidade, agora Campinas, SP" apareceu na árvore de acessibilidade. Não percorrido: texto grande, offline, Reduzir movimento, leitor de tela de verdade.
+- [ ] Chrome, 1280 px (painel de navegador embutido; parcial): a grade tem 3 colunas dentro da coluna de 640 px (limite conhecido), tile abre o anúncio, Buscas, Meus e Salvos. Não percorrido: o resto dos passos.
+
+## 193. Feira: anúncio, criação em passos e oferta (PR feat/feira-listing-flow)
+
+Quinto PR da revisão visual do app. A tela Anúncio ganha um cartão de quem anunciou e uma barra fixa embaixo com as ações; Anunciar passa a ser feito em quatro passos; "Fazer oferta" no anúncio abre a conversa com quem anunciou e a folha da oferta para aquele anúncio.
+
+- Detalhe (`apps/app/src/screens/Anuncio.js`, `apps/app/src/anuncioView.js`): fotos, preço, título, "Compartilhar" e "Salvar" logo abaixo do título e a descrição (o título "Descrição" só aparece quando há texto).
+- Cartão de quem anunciou (`apps/app/src/ui/SellerCard.js`): avatar, nome e, no nó hospedado, "Ver todos os anúncios", que abre a grade de anúncios de quem anunciou.
+- Barra fixa (`apps/app/src/ui/StickyBar.js`): para quem vê, "Conversar" e, só em produto ou serviço com preço, "Fazer oferta"; para o dono, só "Editar". As mensagens de ação ("Link copiado.", erro ao salvar, "Não deu para continuar agora. Tente de novo.") aparecem dentro da barra enquanto ela está na tela. Com texto grande, os botões da barra ficam empilhados. O fim do conteúdo nunca fica atrás da barra. Num anúncio de Página, a nota da Página aparece uma vez antes de Conversar ou Fazer oferta.
+- Anunciar em passos (`apps/app/src/screens/Anunciar.js`, `apps/app/src/anunciarSteps.js`): quatro passos (Fotos, O que é, Preço e lugar, Revisão) com "Continuar" e "Voltar"; na Revisão, uma prévia em tile e "Publicar anúncio". Cada passo mostra só os próprios erros. A confirmação "Público na web e em buscadores" fica na Revisão. O botão voltar do Android e o Escape na web voltam um passo; no primeiro passo, com conteúdo, perguntam "Descartar anúncio?" ("Descartar" e "Continuar editando").
+- Oferta (`apps/app/src/App.js`, `apps/app/src/privateReply.js`, `apps/app/src/screens/Mensagem.js`): "Fazer oferta" no anúncio abre a conversa com quem anunciou e a folha "Fazer oferta" para ESTE anúncio, mesmo que a conversa já tenha o link de outro anúncio. Nada é enviado até "Enviar oferta"; fechar a folha não envia nada; voltar e abrir a mesma conversa não reabre a folha.
+- Limites conhecidos: o gesto de borda do iOS e o histórico do navegador saem de Anunciar na hora, sem a pergunta "Descartar anúncio?" (decidido, não é defeito); "Editar anúncio" (`AnuncioEditar`) continua com o formulário único de antes; a nota da Página só vale se a Vitrine tiver um anúncio de Página.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `(cd apps/app && node ../../scripts/run-tests.js test/anunciarSteps.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/anuncioView.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/privateReply.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/feiraCompose.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/feiraOffer.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js)`
+
+Os testes cobrem as ações da barra por papel, o resumo de quem anunciou, os erros de cada passo e o rascunho da oferta. Não cobrem como isso parece na tela nem o botão voltar: isso é o que a verificação manual confere.
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é um nó hospedado com dados de exemplo e dispensa conta. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e, que não liga neste Mac; usa-se o iPhone 17 Pro), Chrome em 390 e em 1280 px. Capturas ficam fora do git.
+
+1. Abra um anúncio alto de outra pessoa. Esperado: fotos, preço, título, Compartilhar e Salvar, descrição, cartão de quem anunciou; rolando até o fim, a barra fixa não cobre o último conteúdo.
+2. Toque em "Compartilhar". Esperado: "Link copiado." aparece dentro da barra.
+3. Toque no cartão em "Ver todos os anúncios". Esperado: abre a grade de quem anunciou.
+4. Toque em "Conversar". Esperado: a conversa abre com o rascunho e o cartão do anúncio no campo de escrita; nada é enviado.
+5. Volte e toque em "Fazer oferta". Esperado: a conversa abre com a folha "Fazer oferta" para este anúncio (também numa conversa que já liga outro anúncio); fechar a folha não envia nada; sair e voltar à conversa não reabre a folha; só "Enviar oferta" envia.
+6. Abra um anúncio seu. Esperado: a barra tem só "Editar", que abre "Editar anúncio" com o formulário único.
+7. Abra um anúncio de Página, se houver. Esperado: a nota da Página aparece uma vez antes de Conversar ou Fazer oferta.
+8. Anunciar, passo a passo. Esperado: Continuar sem os campos do passo mostra só o erro daquele passo; Voltar mantém o que foi escrito; a Revisão mostra o tile e a confirmação "Público na web e em buscadores"; sem ela, o erro "Confirme que o anúncio fica público na web e em buscadores."; "Publicar anúncio" abre o anúncio.
+9. Voltar em Anunciar. Esperado: em passo adiante, o botão voltar do Android e o Escape na web voltam um passo; no primeiro passo com conteúdo, perguntam "Descartar anúncio?".
+10. Texto grande, escuro, leitor de tela e Reduzir movimento. Esperado: com texto grande os botões da barra ficam empilhados; nada cortado, contraste legível; a barra e os passos têm rótulos.
+
+Situação, em 2026-11-12 (Vitrine, Metro na porta 8090). Cada caixa só é marcada quando o alvo foi percorrido por inteiro; nenhuma foi, por falta de turnos.
+
+- [ ] Android, AVD `varanda-api36` (parcial, `v5-shots/a*.png`, `b*.png`, `d*.png`): passo 1 passou no anúncio de Página ("Livros da biblioteca": o AVD vem com texto 1,3, e a barra empilhou "Conversar" e "Fazer oferta"; o cartão mostrou "Ver todos os anúncios", que abriu a grade de quem anunciou, também no escuro); passo 2 só em parte (no Android "Compartilhar" abre a folha de compartilhar do sistema, não a mensagem na barra); passo 4 não percorrido; passo 5 passou para um anúncio de Página (a nota "Conversar com a página" apareceu, "Continuar" abriu a conversa com a folha "Fazer oferta" para "Livros da biblioteca", "Cancelar" fechou a folha, a conversa ficou vazia ("Nenhuma mensagem") e voltar ao anúncio não reabriu a folha); passo 7 passou (nota da Página); passo 8 passou até o passo 2 (Fotos, "O que é", "Escreva um título." só do passo 2, "Voltar" no fim da tela com rolagem); passo 9 passou (voltar do passo 2 vai ao passo 1, e no passo 1 com título digitado pergunta "Descartar anúncio?" com "Descartar" e "Continuar editando"); passo 10 (parcial): escuro e texto grande conferidos. Não percorrido: passos 3 e 4 com conversa que já liga outro anúncio, 6, Preço e lugar, Revisão e "Publicar anúncio", leitor de tela e Reduzir movimento. O AVD voltou ao tema claro.
+- [ ] iOS, iPhone 17 Pro (o iPhone 16e não liga aqui): não percorrido (sem turnos restantes).
+- [ ] Chrome, 390 px (painel de navegador embutido, não o Chrome em si; parcial): passos 1, 2 e 6 num anúncio seu (fotos com pontos, preço, título, "Compartilhar", descrição, cartão com "Ver todos os anúncios", avaliações; a barra tem só "Editar", o fim do conteúdo (Reservado, Vendido, Apagar) fica acima da barra e o endereço do link aparece dentro da barra ao tocar em "Compartilhar", porque o painel não copia). Não percorrido: o resto dos passos, inclusive Anunciar e o Escape.
+- [ ] Chrome, 1280 px: não percorrido.
+- Defeitos: nenhum visto no que foi percorrido. Na folha "Fazer oferta" com texto grande no Android, o conteúdo ficava colado nas bordas da tela (sem margem lateral) e os botões "Enviar oferta" e "Cancelar" ficavam à esquerda com a largura do texto (`v5-shots/a10.png`); corrigido neste PR (margens da folha, `styles.sheet` em `apps/app/src/screens/Mensagem.js`), não reconferido no aparelho.
+
+## 194. Conversas: formatação, blocos de código e spoilers (PR feat/chat-formatting)
+
+Sexto PR da revisão visual do app. Nas mensagens diretas, nos grupos e nas conversas de comunidade, o texto pode ter *negrito*, _itálico_, ~riscado~, `código`, blocos de código e ||spoiler||. O marcador viaja como texto simples: quem tem um build mais antigo vê os marcadores crus.
+
+- Leitor (`apps/app/src/richText.js`, puro): `*negrito*` (também `**`), `_itálico_` (também `__`), `~riscado~`, `` `código` ``, `||spoiler||` e bloco de código (uma linha de três ou mais crases, com a linguagem depois delas se houver, fechada por uma linha só de crases do mesmo tamanho). Os marcadores só abrem e fecham na borda de uma palavra: `2*3*4` e `snake_case` ficam literais. Um link ou um @nome mantém o destino exato, a formatação nunca muda para onde ele aponta, e texto simples nunca vira link. Uma mensagem com caractere de controle invisível mostra o texto sem estilos (os spoilers continuam cobertos).
+- Balão (`apps/app/src/ui/RichText.js`, `apps/app/src/ui/Bubble.js`): trechos estilizados. O bloco de código é uma caixa com o nome da linguagem, "Copiar código" (depois "Copiado" ou "Não deu para copiar" por 2 s), rolagem na horizontal e, passando de 12 linhas, o botão "ver tudo". O spoiler fica coberto (tinta sobre tinta); um toque mostra todos os spoilers daquela mensagem; o rótulo para leitor de tela é "spoiler, toque para mostrar" (no iOS o VoiceOver pode ler só a palavra "spoiler", por desenho). O cartão de prévia de um link não é desenhado quando o link só aparece dentro de um spoiler. Mensagem sem marcadores aparece exatamente como antes.
+- Campo de escrever (`apps/app/src/ui/ChatComposer.js`, `apps/app/src/formatInsert.js`): o botão "Aa" (rótulo "formatação") abre uma fileira com Negrito, Itálico, Riscado, Código, Bloco de código e Spoiler, e a dica "Você também pode digitar *negrito*, _itálico_ e `código`". Um botão envolve a seleção (uma seleção no meio de uma palavra cresce até a palavra toda); tocar de novo numa seleção já envolvida tira os marcadores; Bloco de código envolve a seleção numa cerca. Texto colado com TAB ou CR é limpo (os registros os recusam).
+- Prévias (`apps/app/src/chatPreview.js`, `apps/app/src/conversas.js`, `apps/app/src/groups.js`, `apps/app/src/ui/ReplyPreview.js`): as linhas das caixas (Conversas, Mensagens), a última linha da lista de grupos, a citação de uma resposta no balão, a barra de resposta acima do campo, as prévias de encaminhar e as linhas de comunidade mostram texto simples, sem os marcadores, e cada spoiler vira a palavra "spoiler". Uma prévia de 140 pontos de código ou mais pode ter sido cortada pelo nó, então nada depois do primeiro `||` aparece nela: a linha mostra o texto até ali e a palavra "spoiler" (mesmo quando esse `||` é código, como `a || b`). A citação e a barra de resposta recebem o texto já limpo para a tela, em que um caractere de controle invisível vira U+FFFD; um U+FFFD conta como esse caractere, então elas cobrem o mesmo trecho que a bolha. Uma mensagem com o botão Abrir convite mostra todas as linhas dos blocos de código, cada spoiler como a palavra "spoiler", e não mostra o cartão de um link dentro de um spoiler; um link de convite ou de anúncio só dentro de um spoiler não dá Abrir convite, Ver anúncio nem Fazer oferta. Uma mensagem desenha no máximo 8 blocos de código (`CODE_MAX`); do nono em diante o resto aparece como texto simples, coberto a partir do primeiro `||`, também nas prévias.
+- Limites conhecidos: a formatação vale só nas conversas (não em publicações, legendas nem anúncios); o VoiceOver do iOS lê a cobertura do spoiler como "spoiler"; quem envia ainda monta o cartão de prévia de um link dentro de um spoiler (quem recebe o esconde; o lado de quem envia é corrigido junto com as reações: nos grupos na seção 195, nas conversas diretas na seção 196, corrigido lá); um build mais antigo mostra os marcadores crus; o cartão de prévia de um link também some quando o endereço só aparece dentro de um bloco de código de uma mensagem com spoiler (erra para o lado de esconder).
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `(cd apps/app && node ../../scripts/run-tests.js test/richText.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/formatInsert.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/richTextView.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/chatFormat.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js)`
+
+Os testes cobrem o leitor (bordas de palavra, links e menções intactos, entrada hostil), as inserções do botão de formatação, a leitura do bloco e do spoiler no balão e as prévias em texto simples. Não cobrem como isso parece na tela, o toque, a rolagem nem o leitor de tela: isso é o que a verificação manual confere.
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é um nó hospedado com dados de exemplo e dispensa conta. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e, que não liga neste Mac; usa-se o iPhone 17 Pro), Chrome em 390 e em 1280 px. Capturas ficam fora do git. Se a Vitrine não tiver mensagem com formatação, digite as mensagens abaixo numa conversa e num grupo.
+
+1. Escreva `*negrito* _itálico_ ~riscado~ `código`` numa conversa. Esperado: cada trecho aparece com o seu estilo, sem os marcadores, na bolha própria e na da outra pessoa, e igual num grupo.
+2. Escreva `2*3*4`, `snake_case_nome` e `*aberto sem fechar`. Esperado: tudo literal, nenhum estilo.
+3. Escreva um bloco de código com uma linguagem e mais de 12 linhas, e uma linha comprida dentro dele. Esperado: caixa com o nome da linguagem, 12 linhas e "ver tudo"; "ver tudo" mostra o resto; a linha comprida rola na horizontal sem sair da bolha; "Copiar código" muda para "Copiado" por 2 s; pressionar e segurar no bloco ainda abre as ações da mensagem.
+4. Escreva `||segredo||`. Esperado: o texto fica coberto, sem nada do segredo visível antes do toque; um toque mostra todos os spoilers daquela mensagem; pressionar e segurar ainda abre as ações; no escuro o contraste da cobertura e do código continua legível; o leitor de tela diz "spoiler, toque para mostrar".
+5. Escreva `https://example.com ||segredo||` e depois `||https://example.com||`. Esperado: a primeira mostra o cartão de prévia (quando o nó de quem envia o montou); a segunda não mostra cartão e o link só funciona depois de mostrar o spoiler.
+6. Escreva um link com sublinhado e um @nome, como `https://example.com/a_b_c` e `@maria_silva`. Esperado: o link abre o endereço inteiro e o @nome abre o perfil, sem itálico no meio.
+7. Abra o "Aa" no campo de escrever. Esperado: a fileira Negrito, Itálico, Riscado, Código, Bloco de código e Spoiler e a dica; com uma palavra selecionada, cada botão a envolve; tocar de novo tira os marcadores; Bloco de código envolve a seleção numa cerca.
+8. Cole um texto com TAB. Esperado: o texto fica sem TAB (e sem CR) e envia.
+9. Volte à caixa de Conversas e Mensagens, à lista de grupos e responda a uma mensagem com spoiler. Esperado: a prévia da linha, a citação no balão e a barra de resposta mostram texto simples com a palavra "spoiler" no lugar do segredo, sem marcadores. Com uma mensagem de mais de 140 caracteres e um `||` no começo, a linha da caixa para no primeiro `||` e mostra "spoiler".
+10. Texto grande, escuro, leitor de tela e Reduzir movimento. Esperado: nada cortado; contraste legível no código e no spoiler; os botões do "Aa", "Copiar código", "ver tudo" e a cobertura do spoiler têm rótulos.
+11. Um build mais antigo. Esperado: a mesma mensagem aparece com os marcadores crus (`*negrito*`, `||segredo||`); nada quebra.
+
+Situação, em 2026-11-12 (Vitrine, Metro na porta 8090, com mensagens de exemplo digitadas à mão numa cópia temporária das fixtures, já restaurada; segunda passagem, depois das correções). Cada caixa só é marcada quando o alvo foi percorrido por inteiro; nenhuma foi. Capturas em `v6r-shots/` (fora do git).
+
+- [ ] Android, AVD `varanda-api36` (parcial, `v6r-shots/a01.png` a `a28.png`): passou a lista de Conversas (a última mensagem de um grupo com bloco de código aparece como texto simples, sem cerca: "const longa = ..."; `Bom dia *pessoal*` aparece como "Bom dia pess..." sem asteriscos, `a03.png`); no grupo "Geral" a bolha da citação com bloco de 16 linhas cabe no conteúdo, sem sobreposição e sem vão, e "ver tudo" mostra as 16 linhas (`a04.png`, `a05.png`); a linha de 200 caracteres rola na horizontal dentro da caixa (`a07c.png`); passo 2 (`2*3*4`, `snake_case_nome` e `*aberto sem fechar` ficam literais, `a14.png`); passo 7 (Aa com a palavra "mundo" selecionada: Negrito envolve, tocar de novo tira os marcadores, `a11c.png`, `a12c.png`); mensagem direta com formatação (negrito, spoiler coberto, código, `a26.png`); toque longo no bloco de código e no spoiler abre as ações (`a15.png`, `a17s.png`); modo escuro na conversa e na lista (`a27-28.png`). Não percorrido: passo 8 (colar um TAB: o `adb` não cola, e digitar TAB só move o foco), o spoiler de 150 caracteres na linha do grupo "Horta Comunitária" (a linha corta antes do spoiler, então não prova a cobertura), texto grande, leitor de tela e Reduzir movimento.
+- [ ] iOS, iPhone 17 Pro (o iPhone 16e não liga aqui; parcial, `v6r-shots/i02s.png`, `i03s.png`): passaram o passo 1 (estilos no grupo "Geral"), o passo 3 (bloco com 12 linhas, "ver tudo", "Copiar código", linha comprida cortada dentro da caixa, bolha da citação com o bloco sem sobreposição), o passo 9 (a linha do grupo com bloco de código mostra texto simples) e o spoiler coberto. Não percorrido: o rótulo do VoiceOver no spoiler (o VoiceOver não foi ligado), o toque que revela o spoiler, os passos 2, 5 a 8 e 10.
+- [ ] Chrome, 390 px (painel de navegador embutido, não o Chrome em si, que já estava no tema escuro; parcial): as prévias da lista são texto simples ("Bom dia pessoal", "...neste grupo: spoiler", código sem cerca); a bolha da linha comprida mede 293 px, fica dentro da coluna, a página não rola na horizontal (`scrollWidth` 390) e "Copiar código" fica visível. Não percorrido: passos 7 e 8 (sem seleção nem colagem no painel) e os demais.
+- [ ] Chrome, 1280 px (parcial): a bolha da linha comprida mede 491 px, "Copiar código" fica dentro da tela e as prévias da lista seguem em texto simples. Não percorrido: o resto dos passos.
+- Defeitos da primeira passagem: (1) corrigido: a lista de Conversas e a de grupos mostravam a cerca crua na última linha de um grupo com bloco de código; agora `plainPreview` (`apps/app/src/chatPreview.js`) só trata a prévia como possivelmente cortada a partir de 140 pontos de código, e conferiu-se no Android, no iOS e na web que a linha sai em texto simples. (2) corrigido: no Android a bolha com bloco de código e citação tomava a altura da célula da lista e cobria a mensagem anterior; a caixa do código tem `flexGrow: 0` (`apps/app/src/ui/RichText.js`), e conferiu-se no Android (`a04.png`, `a05.png`) que a bolha cabe no conteúdo. (3) achado e corrigido: na web uma linha de 200 caracteres num bloco alargava a bolha além da tela em 390 px; o invólucro entre a coluna e a bolha agora tem `maxWidth: '100%'` (`apps/app/src/ui/Bubble.js`, `styles.stack`), e conferiu-se que a bolha mede 293 px em 390 e 491 px em 1280. Defeito novo nesta passagem: nenhum.
+
+## 195. Reações em grupos (PR feat/group-reactions)
+
+Sétimo PR da revisão visual do app. Nos grupos, públicos e privados, cada pessoa reage a uma mensagem com um emoji. As reações aparecem como fichas embaixo do balão. O registro novo é `group-react` (`docs/protocol.md`, "Reactions"); o RPC ganha `group.react` e `group.reactors` (`docs/rpc.md` 5.117 e 5.118) e `group.read` devolve `reactions` em cada item (5.40). Termos e Privacidade 40.
+
+Regras que os passos conferem:
+
+- Uma reação por conta em cada mensagem; o texto vazio remove. No máximo 12 emojis diferentes por mensagem (`GROUP_REACTIONS_MAX`): ficam os 12 escolhidos por mais pessoas, e o empate se decide pela ordem do emoji, nunca pela hora da reação. Uma reação cujo emoji fica de fora não aparece em nenhuma ficha nem em "Quem reagiu".
+- As reações são dobradas à parte e nunca mudam a ordem nem o resultado de nenhum outro registro: um leitor antigo calcula os mesmos membros, banimentos, ocultações e mensagens.
+- Grupo privado: o emoji, a mensagem a que a reação se refere e o `seen` vão cifrados; a conta de quem escreveu, a hora e o tamanho do registro continuam visíveis, e o tamanho pode indicar que é uma reação e qual emoji ela leva. A reação aberta não entra na conta de "mensagens cifradas".
+- Uma reação de quem saiu do grupo ou foi banido deixa de contar. Uma mensagem oculta não recebe reação.
+- `group.read` devolve `reactions: [{ emoji, count, mine }]`; `GROUP_LIMIT_DEFAULT` e `GROUP_LIMIT_MAX` passam de 29 para 26 para a página mais pesada caber em `MAX_MESSAGE`.
+- App (`apps/app/src/screens/Grupo.js`, `ui/Reactions.js`, `ui/ReactionPicker.js`, `reactions.js`): fichas embaixo do balão; reações rápidas no alto das ações da mensagem; o "+" abre o seletor; toque longo numa ficha ou "Ver quem reagiu" abre "Quem reagiu" (nomes resolvidos, "e mais N"). As fichas ficam visíveis e desligadas offline, com o grupo trancado, com a chave pendente ou agindo como Página. Uma reação que falha tira a ficha, mostra a recusa e lê de novo; nunca reenvia.
+- As citações (grupos e mensagens diretas) são uma linha de texto simples, cortada em 90 pontos de código (`quoteText` em `apps/app/src/chatPreview.js`). Um link dentro de um spoiler não monta cartão de prévia no envio em grupo.
+- Texto de quem reage nunca vai cru para a tela: os nomes passam por `displayText`.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `node packages/core/test/group.test.js`
+- `node packages/core/test/group-private.test.js`
+- `node packages/core/test/group-member.test.js`
+- `node packages/core/test/session-groups.test.js`
+- `node packages/rpc/test/reaction.test.js`
+- `node packages/rpc/test/methods.test.js`
+- `node packages/rpc/test/sizes.test.js`
+- `node packages/web-member/test/group-ops.test.js`
+- `node packages/web-member/test/session-groups.test.js`
+- `node packages/core/test/terms.test.js`
+- `(cd apps/app && node ../../scripts/run-tests.js test/reactions.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/groupReactions.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/groupScreen.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/chatFormat.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/legal.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js)`
+
+Leitor antigo, pelos testes de propriedade: `an old reader skips group-react and still reads later posts` e `reactions take no part in the fold of any other record (generated logs)` em `packages/core/test/group.test.js`, e `sealed reactions take no part in the fold of any other record (generated logs)` em `packages/core/test/group-private.test.js`. Eles não cobrem como um app antigo desenha o grupo: isso é o passo 14.
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é um nó hospedado com dados de exemplo e dispensa conta; "Nosso Bairro" > "Geral" já traz fichas de exemplo. Ordem: Android (AVD `varanda-api36`), iOS, Chrome em 390 e em 1280 px, claro e escuro, texto grande e leitor de tela; a rodada para quando duas seguidas não mudam nada. Para os passos com dois membros reais (6 a 14), use dois nós web, um em cada navegador. Capturas ficam fora do git.
+
+1. Abra "Nosso Bairro" > "Geral". Esperado: algumas mensagens têm fichas embaixo do balão (emoji e contagem), a ficha de uma reação sua vem marcada.
+2. Toque e segure uma mensagem sem reação. Esperado: o alto das ações traz as reações rápidas e um "+"; tocar numa reação rápida fecha a folha e a ficha aparece embaixo do balão com contagem 1 e marcada.
+3. Troque: abra as ações da mesma mensagem e escolha outro emoji (ou toque no "+" e escolha um no seletor). Esperado: a ficha do primeiro emoji some (ou perde a sua contagem) e a do novo aparece marcada; continua uma reação sua por mensagem.
+4. Tire: toque na sua ficha. Esperado: a ficha some (ou perde a sua contagem) e deixa de vir marcada.
+5. "Quem reagiu": toque e segure uma ficha, e depois abra "Ver quem reagiu" nas ações. Esperado: uma folha com o emoji e os nomes resolvidos (o toque longo numa ficha mostra só o bloco daquele emoji; "Ver quem reagiu" mostra um bloco por emoji), com todos os nomes que vieram (a folha rola) e "e mais N" só quando a contagem é maior do que a lista que veio (no máximo 324 nomes por emoji); um nome com caractere de controle aparece limpo.
+6. Dois membros: o membro A reage, o B vê a ficha depois da próxima leitura, e B reage com o mesmo emoji. Esperado: contagem 2, marcada só em B; "Quem reagiu" lista os dois.
+7. Doze emojis: com 12 emojis diferentes na mesma mensagem, cada um de uma pessoa, uma 13ª pessoa escolhe um 13º emoji. Esperado: a ficha otimista do 13º aparece e, na leitura seguinte, fica só se o emoji vier antes de algum dos 12 na ordem dos emojis (e então sai o último deles); quando uma 14ª pessoa escolhe o mesmo 13º emoji, ele aparece com contagem 2 e sai um dos emojis de uma pessoa só. Nenhuma reação é reenviada.
+8. Grupo privado: repita 2 a 6 num grupo privado. Esperado: as fichas e os nomes aparecem para os membros; nos núcleos (e para um seguidor sem a chave) só existem registros cifrados, com a conta de quem escreveu, a hora e o tamanho visíveis, e o emoji, a mensagem e o `seen` ilegíveis.
+9. Membro removido: o membro A reage e depois é removido do grupo (ou sai). Esperado: a reação de A deixa de contar para os outros, a contagem cai e A some de "Quem reagiu".
+10. Mensagem oculta: um admin oculta uma mensagem que tem fichas. Esperado: a mensagem mostra só o rótulo de oculta, sem fichas, e as ações não oferecem reações nem "Ver quem reagiu".
+11. Offline e chave pendente: com o nó offline, e depois num grupo privado com a chave de uma época nova ainda pendente. Esperado: as fichas continuam visíveis e desligadas (sem resposta ao toque), "Ver quem reagiu" fica desligado e a fileira de reações rápidas some das ações, sem erro; a leitura volta ao normal quando o nó volta.
+12. Página: aja como uma Página num grupo. Esperado: as fichas ficam desligadas e as ações não trazem a fileira de reações rápidas nem o "+" (a Página não reage).
+13. Termos 40: com uma conta que aceitou o 36, abra o app. Esperado: o aviso de aceite aparece antes de qualquer tela; o texto de "Reações" diz que a reação leva o emoji, a mensagem, a hora e a conta, que num grupo privado o emoji e a mensagem vão cifrados e que as mensagens diretas ainda não têm reações; recusar mantém o app trancado como nas versões anteriores.
+14. Build antigo como segundo membro: com um app de antes deste PR (PR6) na outra conta, o membro novo reage em um grupo público e em um privado. Esperado: no público, o build antigo não mostra a reação e continua lendo as mensagens seguintes; no privado, o build antigo mostra uma "mensagem cifrada" a mais por reação, e as mensagens seguintes seguem normais.
+15. Citações: responda a uma mensagem de várias linhas (um grupo e uma conversa direta). Esperado: a citação no balão e a barra de resposta mostram uma só linha de texto simples, cortada em 90 pontos de código, sem marcadores de formatação.
+16. Link em spoiler: envie `||https://example.com||` num grupo. Esperado: nenhum cartão de prévia é montado no envio.
+17. Fichas em balão comprido, texto grande, escuro, leitor de tela e Reduzir movimento. Esperado: as fichas quebram de linha sob o balão sem cortar; o alvo de toque é de 44 pt; cada ficha diz o emoji, a contagem e se é a sua ("..., 2 reações, sua reação"); a folha "Quem reagiu" rola; o contraste da ficha marcada é legível no escuro.
+
+Rollout, nesta ordem: primeiro os semeadores (precisam guardar e servir o registro `group-react` e o novo limite de página), depois o pacote web (o nó do navegador escreve e lê reações) e por último o app. Um app mais novo que o semeador funciona, mas as reações não aparecem para os outros até os semeadores serem atualizados.
+
+Situação, em 2026-11-12 (Vitrine, Metro na porta 8090, sem alterar as fixtures; o método de `docs/design-review.md` não chegou às duas rodadas sem mudança em todos os alvos). Cada caixa só é marcada quando o alvo foi percorrido por inteiro; nenhuma foi. Capturas do Android em `v7-shots/a01.png` a `a18-large-who.png` (fora do git); as do iOS e do painel de navegador ficam só nos resultados da sessão.
+
+- [ ] Android, AVD `varanda-api36` (parcial): passaram, em "Nosso Bairro" > "Geral", as fichas de exemplo (`a03.png`), a fileira de reações rápidas e o "+" no alto das ações (`a04.png`), reagir (😂 na mensagem de Cecília, ficha marcada, `a05.png`), trocar (👍 no lugar, `a08.png`), tirar (toque na ficha própria, `a09.png`), "Quem reagiu" por toque longo numa ficha, com os nomes (`a10.png`), "Ver quem reagiu" nas ações (aparece só quando já há reação, `a07.png`), o seletor do "+" no escuro com busca e categorias (`a14-dark-picker.png`), o escuro nas ações (`a13-dark-sheet.png`) e texto grande 1.3 no escuro: as fichas ficam inteiras, o nome longo é cortado com reticências no balão e a folha mostra os nomes (`a17-large.png`, `a18-large-who.png`). Não percorrido: grupo privado, membro removido, mensagem oculta, offline e chave pendente, Página, aviso dos Termos 40 (a Vitrine não tem esses estados), "e mais N", fichas quebrando de linha sob um balão longo, leitor de tela, Reduzir movimento, seletor no claro, escolha de um emoji do seletor (a escolha feita no escuro foi seguida de uma reinicialização do app pela mudança do texto grande, então a ficha não foi vista).
+- [ ] iOS, iPhone 17 Pro (o iPhone 16e não liga neste Mac; parcial): passaram reagir (😂), trocar (👍 no lugar) e "Quem reagiu" por toque longo na ficha de coração, com a lista de nomes, no claro. Na segunda rodada, tirar passou: o toque na ficha própria de ❤️ baixou a contagem de 2 para 1 e a ficha deixou de vir marcada (a tela mostra a contagem antiga por uma fração de segundo e atualiza na leitura seguinte). No escuro passaram as fichas legíveis e a folha de ações com a fileira de reações rápidas e o "+". Não percorrido: "Quem reagiu" no escuro (o toque longo na ficha, logo depois de fechar a folha de ações, não abriu a folha), texto grande, VoiceOver (não foi ligado) e o resto dos passos. Capturas só nos resultados da sessão (a ferramenta do simulador não grava em arquivo).
+- [ ] Chrome, 390 px (painel de navegador embutido; parcial): no escuro (rodada anterior) passaram reagir, trocar e tirar, confirmados pelos rótulos de leitor de tela ("coração vermelho, 2 reações, sua reação"); a ficha tem 44 px de altura, a página não rola na horizontal e o foco do teclado mostra um anel na ficha. No claro (segunda rodada): as ações da mensagem abrem com toque longo do mouse (pressionar 700 ms no balão; o clique de botão direito não abre nada e o clique simples não abre as ações), com reações rápidas, "+" e, quando há reação, "Ver quem reagiu"; passaram reagir com uma reação rápida (😂), o "+" e a escolha de um emoji do seletor (a ficha passou a 😁 e a 😂 saiu: continua uma reação por mensagem), "Quem reagiu" por toque longo na ficha (❤️: "Lia Oliveira" e "João Nascimento") e "Ver quem reagiu" nas ações (😁: "Lia Oliveira"), sem rolagem horizontal (`scrollWidth` 390). A folha "Quem reagiu" abre em tela cheia, com a lista curta no alto e o resto vazio. Não percorrido: fichas quebrando de linha sob um balão longo (a Vitrine não tem), o seletor aberto visto em captura (só se viu a escolha), o claro com a ficha de dois membros além do exemplo.
+- [ ] Chrome, 1280 px (parcial): passaram reagir (👍 numa mensagem de Cecília, a ficha 😁 foi trocada por 👍 marcada) e "Quem reagiu" por toque longo na ficha (👍: "Lia Oliveira"), esta como folha centrada de 400 px de largura. Não percorrido: "Ver quem reagiu" nas ações a 1280 px (a tentativa fechou a folha em vez de abri-la), o "+" e o seletor, o escuro.
+- Leitor antigo: `node packages/core/test/group.test.js` deu `# tests = 129/129 pass`, `# asserts = 827/827 pass`, `# ok`; `node packages/core/test/group-private.test.js` deu `# tests = 112/112 pass`, `# asserts = 745/745 pass`, `# ok`. Além disso, o teste `an old reader skips group-react and still reads later posts` rodou também contra o código real do PR6 (`git show 273d6aad:packages/core/lib/group.js` e módulos vizinhos, fora do repositório): o `validateGroupRecord` antigo devolve `malformed` para o registro novo, e as mensagens seguintes, a ordem e os resultados são os mesmos. Os testes de propriedade com logs gerados usam o `group.js` atual com o tipo retirado do `RECORD_KEYS`, e não o código do PR6. Um build antigo de verdade do app não foi percorrido (passo 14).
+- Defeitos: nenhum de código achado. Observações: (1) iOS: o toque longo numa mensagem de texto marca o texto (realce cinza) além de abrir as ações; não foi comparado com o PR anterior. (2) "Quem reagiu" abre em tela quase cheia e a lista de poucos nomes deixa a folha quase vazia (`a10.png`). (3) "Quem reagiu" por toque longo mostra o nome da própria conta ("Lia Oliveira" na Vitrine), não "Você". (4) O texto dos Termos 40 confere com o que o app faz nos trechos percorridos (a reação leva emoji, mensagem, hora e conta; as mensagens diretas não têm reações; os nomes são vistos por quem lê o grupo); a parte do grupo privado e o aviso de aceite não foram percorridos.
+- Limites conhecidos: uma recarga de versão, quando alguém publica ou reage, traz a lista de volta para a página mais nova; as mensagens diretas ainda não têm reações; um 13º emoji otimista só fica na leitura seguinte se entrar entre os 12 (os mais escolhidos, com empate pela ordem do emoji).
+
+## 196. Reações em conversas (PR feat/dm-reactions)
+
+Oitavo PR da revisão visual do app. Nas conversas diretas, cada pessoa reage a uma mensagem com um emoji, como nos grupos. A reação viaja como uma mensagem: é o registro interno v4 `react` (`docs/protocol.md`, "Inner v4: a reaction"), selado como as mensagens. O RPC ganha `dm.react` (`docs/rpc.md` 5.119) e `dm.thread` devolve `reactions: [{ emoji, mine }]` em cada mensagem (5.78); `DM_THREAD_LIMIT_MAX` passa de 42 para 41. Termos e Privacidade 41.
+
+Regras que os passos conferem:
+
+- Uma reação por pessoa em cada mensagem. Vale a operação de maior `rev`, e o empate vai para o `id` maior da operação; o texto vazio remove. O nó escolhe o `rev`; o cliente não manda.
+- Uma reação nunca muda o não lido, a prévia da lista de conversas, a ordem, o `dm.seen` nem o teto de mensagens por pessoa. Um app antigo descarta o quadro v4: não mostra nada e não conta nada.
+- Não há "Quem reagiu" nas conversas diretas: são duas pessoas, e a ficha já diz de quem é (a sua vem marcada).
+- Cada reação, troca ou remoção gasta dois selos do limite diário de 200 (`DM_STAMPS_PER_DAY`), como uma mensagem. Sem selo, o nó recusa com "o limite de envio de hoje acabou" e nada é enviado.
+- Toques rápidos: espera de 600 ms e só a última escolha é enviada; voltar à escolha inicial não envia nada nem gasta selo.
+- Uma recusa desfaz a ficha e mostra o texto do nó. Uma resposta sem confirmação ("não deu para confirmar o envio") mantém a ficha, com a nota "Não deu para confirmar a reação."; o app nunca reenvia sozinho.
+- Fichas escondidas: agindo como Página e numa conversa com uma Página (o nó confirmou, pela leitura da outra conta, que ela é Página). Fichas visíveis e controles desligados: enquanto essa leitura não respondeu, offline, com a identidade trancada, com a pessoa bloqueada e num pedido de mensagem (Pedidos). Uma mensagem apagada não tem fichas.
+- A reação vale só para a mensagem exata em que foi feita: leva o resumo SHA-256 da mensagem (`target.digest`), e outra mensagem guardada com o mesmo remetente e o mesmo id não a mostra. Uma mensagem guardada antes deste build não tem resumo e não aceita reação: `dm.thread` a marca com `reactable: false`, o app esconde nela fichas, reações rápidas e "+", e o nó recusa `dm.react` com "esta mensagem não aceita reações" sem gastar selo (a tela desfaz a ficha e mostra o texto, sem reenviar). Uma reação feita num aparelho que guardou a mensagem com resumo gasta dois selos e aparece ali, mas não aparece num aparelho (da outra pessoa ou seu) que guardou a mesma mensagem antes deste build.
+- Um link dentro de um spoiler também não monta cartão de prévia no envio de uma conversa direta (fecha o limite da seção 194).
+- O texto do emoji vem do par: passa por `displayText` antes de ir para a tela.
+- App: `apps/app/src/screens/Mensagem.js`, `apps/app/src/dm-screen.js` (`dmReactionGate`, `reactDebounce`, `dmReactions`), `ui/Reactions.js`, `ui/ReactionPicker.js`, `reactions.js`.
+
+Custo de uma reação (Pergunta 11 do plano). Pelos testes de `packages/web-member/test/dm.test.js` (`dm.react: two stamps and two puts as one dm.send...` e `dm.react: the self copy fails after the peer copy...`):
+
+- Uma reação, uma troca de emoji e uma remoção custam o mesmo: dois envelopes selados (um para a outra pessoa e uma cópia para si, para os outros aparelhos da mesma passkey) e dois selos do limite diário de 200. Repetir a mesma escolha enquanto nada está pendente não envia nem gasta nada.
+- Cada envelope ocupa uma vaga do conjunto comum do semeador (`DM_POOL_MAX` 20000, `packages/core/lib/dm.js:33`) por até sete dias (`DM_RETENTION_MS`). Para o semeador uma reação é igual a uma mensagem.
+- Qualquer envelope guardado pode acionar o aviso anônimo de mensagem nova do semeador: um aviso "Pode haver uma mensagem nova na Varanda" para todas as inscrições de push, no máximo uma vez a cada 15 minutos por processo (`apps/cli/lib/push-relay.js` `sendDmWake`, `apps/cli/lib/account/push-routes.js`, `packages/core/lib/dm-wake.js`). Uma reação acorda o outro aparelho como uma mensagem acordaria; ela não envia aviso nem push próprio.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `node packages/core/test/dm.test.js`
+- `node packages/core/test/dm-fold.test.js`
+- `node packages/core/test/dm-session-refuse.test.js`
+- `node packages/core/test/terms.test.js`
+- `node packages/rpc/test/dm-budget.test.js`
+- `node packages/rpc/test/methods.test.js`
+- `node packages/rpc/test/sizes.test.js`
+- `node packages/web-member/test/dm-store.test.js`
+- `node packages/web-member/test/dm.test.js`
+- `node packages/web-member/test/dm-e2e.test.js`
+- `(cd apps/app && node ../../scripts/run-tests.js test/dmReactions.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/legal.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/vitrine.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js)`
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é um nó hospedado com dados de exemplo e dispensa conta; a conversa de exemplo já traz reações das duas pessoas (`apps/app/src/vitrine/fixtures.js`). Ordem: Android (AVD `varanda-api36`), iOS, Chrome em 390 e em 1280 px, claro e escuro, texto grande e leitor de tela; a rodada para quando duas seguidas não mudam nada. Os passos com duas contas reais (8 e 12) pedem dois nós web, um em cada navegador. Capturas ficam fora do git.
+
+1. Abra a conversa de exemplo. Esperado: algumas mensagens têm fichas embaixo do balão (emoji e contagem, 1 ou 2), a ficha de uma reação sua vem marcada e a da outra pessoa não.
+2. Reaja: toque e segure uma mensagem sem reação sua. Esperado: o alto das ações traz as reações rápidas e um "+"; tocar numa reação rápida fecha a folha e a ficha aparece marcada.
+3. Troque: escolha outro emoji nas ações (ou no "+" e no seletor). Esperado: a ficha do primeiro emoji sai e a do novo aparece marcada; continua uma reação sua por mensagem.
+4. Tire: toque na sua ficha. Esperado: a ficha some.
+5. Toques rápidos: toque na reação rápida e, em menos de 600 ms, escolha outra. Esperado: sai um só envio, com a última escolha. Reaja e tire em menos de 600 ms: nenhum envio.
+6. Selos: com o limite diário quase no fim (um nó de teste), reaja. Esperado: a recusa "o limite de envio de hoje acabou", a ficha volta ao que era e nada é enviado.
+7. Não lido e prévia: reaja e troque numa mensagem da outra pessoa e volte à lista de conversas. Esperado: a prévia, a ordem e a bolinha de não lido não mudam. Do outro lado, a reação recebida também não acende o não lido nem muda a prévia.
+8. Duas contas: a conta A reage, a B vê a ficha na próxima leitura, e B reage na mesma mensagem com outro emoji. Esperado: cada uma vê as duas fichas, a sua marcada; a reação não vira mensagem nem aviso no app.
+9. Segundo aparelho da mesma pessoa: entre com a mesma passkey em outro aparelho (ou navegador) e reaja no primeiro. Esperado: o segundo mostra a mesma reação como sua (marcada) depois da próxima leitura.
+10. Página: abra a conversa com uma Página e depois aja como uma Página. Esperado: nenhuma ficha, nenhuma fileira de reações rápidas e nenhum "+" nas ações.
+11. Offline e pedido de mensagem: com o nó offline, e depois numa conversa em Pedidos. Esperado: as fichas continuam visíveis e desligadas (sem resposta ao toque), as ações não trazem a fileira de reações rápidas, sem erro; tudo volta ao normal com o nó de volta.
+12. Sem confirmação: com um nó de teste que perde a confirmação do semeador, reaja. Esperado: a ficha fica, aparece "Não deu para confirmar a reação." e nada é reenviado sozinho.
+13. Termos 41: com uma conta que aceitou o 37, abra o app. Esperado: o aviso de aceite aparece antes de qualquer tela; o texto de "Reações" diz que, nas conversas diretas, a reação leva o emoji, a mensagem, a hora e a conta, vai cifrada de ponta a ponta num envelope lacrado do mesmo tamanho que os semeadores guardam por até sete dias, e gasta selos como uma mensagem; recusar mantém o app trancado como nas versões anteriores.
+14. Build antigo como outra pessoa: com um app de antes deste PR (PR7) na outra conta, o build novo reage numa conversa direta. Esperado: o build antigo não mostra a reação, não conta nada (não lido, prévia e ordem iguais) e continua lendo as mensagens seguintes.
+15. Fichas em balão comprido, texto grande, escuro, leitor de tela e Reduzir movimento. Esperado: as fichas quebram de linha sob o balão sem cortar; o alvo de toque é de 44 pt; cada ficha diz o emoji e se é a sua; o contraste da ficha marcada é legível no escuro.
+16. Link em spoiler: envie `||https://example.com||` numa conversa direta. Esperado: nenhum cartão de prévia é montado no envio.
+17. Mensagem antiga: na Vitrine, a primeira mensagem da conversa com "Cecília Ramos" vem com `reactable: false`. Esperado: segurar a mensagem não traz a fileira de reações rápidas nem o "+", e ela não tem fichas; as outras mensagens reagem normalmente.
+
+Rollout, nesta ordem: os semeadores não precisam de mudança (os envelopes são opacos e do mesmo tamanho), depois o pacote web (o nó do navegador escreve e lê reações) e por último o app. Um app mais novo que o pacote web não mostra reações nas conversas; um app antigo ignora as reações que chegam.
+
+Situação, em 2026-11-12 (Vitrine, Metro na porta 8090, sem alterar as fixtures). Cada caixa só é marcada quando o alvo foi percorrido por inteiro; nenhuma foi. Capturas em `v8-shots/` fora do git.
+
+- [ ] Android, AVD `varanda-api36`, conversa com "João Nascimento" (parcial, claro e escuro). Passaram em claro e em escuro: reação rápida 😂 (ficha "😂 1" marcada, capturas `a-light-4-react`, `a-dark-2-react`), troca por 👍 (`a-light-5-replace`, `a-dark-3-replace`), o "+" abre o seletor "Reações" e escolher 😍 funciona (`a-light-6-picker`, `a-light-7-picked`, `a-dark-4-picker`), tirar tocando na ficha própria (`a-light-8-removed`, `a-dark-5-removed`). Lista de Conversas depois de reagir e trocar: prévia "Aceite", ordem e bolinhas de não lido iguais às de antes (`a-light-1-conversas` contra `a-light-10-list-after`). Pedidos de mensagem: a conversa de um pedido abre e a folha de ações não traz a fileira de reações rápidas nem o "+" (`a-light-12-request`, `a-light-13-request-sheet`); as fixtures não trazem reações em pedidos, então as fichas visíveis com controles desligados não foram vistas. Texto grande (font_scale 1.3, escuro): a folha com as reações rápidas e a ficha ❤️ 1 ao lado de "Ver anúncio" ficam legíveis, sem corte (`a-dark-9-font13-sheet`, `a-dark-10-font13-chip`); font_scale voltou a 1.0. Não percorrido: fichas quebrando sob um balão comprido (a ficha ficou ao lado do botão "Ver anúncio", sem balão longo com várias fichas), texto grande em claro, Página (as fixtures de `conversations` só têm pares de pessoas, nenhuma conversa com uma Página, então esta tela não se alcança na Vitrine), a ficha de exemplo ❤️ 2 da primeira mensagem (fora da tela inicial da conversa, não rolada).
+- [ ] iOS (UDID 8802DF5C-6A82-406C-8D4D-29618AEEA2BC), conversa com "João Nascimento", rodada 3, parcial. Claro, passaram: a folha de ações com as reações rápidas e o "+" (`i3-2-sheet`, `i-light-1-sheet`), reação rápida 😂 (ficha "😂 1" marcada, `i3-3-react`), troca por 👍 (a 😂 saiu, o 👍 vem destacado na folha, `i3-4-sheet2`, `i3-5-replace`), o "+" abre o seletor "Reações" e escolher 😍 funciona (`i3-6-picker`, `i3-7-picked`), tirar tocando na própria ficha (`i3-8-removed`). Escuro, passaram: reagir com 👍 (`i3-10-dark-sheet`, `i3-11-dark-react`, ficha marcada legível) e tirar pela ficha (`i3-12-dark-removed`); `i3-9-dark-thread` é a conversa antes. Aparência voltou a claro. Não percorrido no iOS: o seletor no escuro, texto grande, VoiceOver, balão comprido com várias fichas, Pedidos e Página.
+- [ ] Chrome, 390 px, claro (painel de navegador embutido; rodada 1, parcial), conversa com "João Nascimento" na Vitrine: passaram a ficha de exemplo (❤️ 2, com o rótulo de leitor de tela "coração vermelho, 2 reações, sua reação, e da outra pessoa"), as ações da mensagem com as reações rápidas e o "+" (aberta pelo botão "ações da mensagem" que aparece ao passar o mouse; o arrasto curto do mouse só o mostra), reagir com 😂 (ficha "😂 1" marcada), trocar por 👍 (a 😂 saiu, rótulo "positivo, 1 reação, sua reação") e tirar tocando na ficha própria (a ficha sumiu). Rodada 3 (1280x900 claro, painel embutido, sem captura salva): a folha de ações abriu pelo botão "ações da mensagem", reagir com 👍 deu a ficha "positivo, 1 reação, sua reação", e tocar na ficha própria a removeu. Os cliques por coordenada no painel caíram fora do alvo (o quadro de captura é 800x562 e o clique usa a janela de 1280x900), então os passos finais foram feitos por clique em referência e por `click()` no DOM; por isso a troca de emoji no desktop, o seletor do "+" e a reação rápida 😂 não foram conferidos de forma limpa. Não percorrido: 390x844 escuro, foco do teclado numa ficha (Tab, Enter e Espaço).
+- Observação da Vitrine: a reação enviada pela Vitrine é guardada só na memória do nó de exemplo; não houve teste de selos nem de recusa. O leitor de tela (VoiceOver e TalkBack) não foi ligado.
+- Dois nós web trocando reações: não percorrido neste passe. A convergência (maior `rev`, empate pelo `id`, uma reação por pessoa, a cópia para si, uma Página que descarta a reação) é coberta pelos testes de dois nós em `packages/web-member/test/dm.test.js`, no semeador local em loopback. Uma conferência com dois aparelhos reais está pendente (passos 8, 9 e 14).
+- Termos 41: o texto de `apps/app/src/legal.js` descreve o que o código faz (a reação leva emoji, mensagem, hora e conta; é cifrada de ponta a ponta como as mensagens; os semeadores guardam o envelope por até sete dias; gasta selos como uma mensagem). O aviso de aceite na primeira abertura não foi percorrido (a Vitrine não tem esse estado).
+- Defeitos: nenhum de código achado nos trechos percorridos. Toque na reação rápida enquanto a folha ainda anima: não reproduzido no Android. Com `adb input swipe` de 700 ms seguido de `input tap` na linha das reações (cerca de 100 ms depois do início da folha), a reação foi aplicada ao alvo certo (😂 1, campo de mensagem vazio, `a-light-9-tapthrough`); o atraso do adb pode ser maior que a animação, então isto não exclui uma janela mais curta. No iOS não foi tentado. A observação da rodada 1 (o toque cair no botão "Ainda está disponível?" atrás da folha) segue só do painel de navegador; com a folha já aberta o toque funciona.
+- Limites conhecidos: as operações pendentes ficam só na memória (`docs/rpc.md` 5.119): uma tranca ou uma recarga esquece uma reação sem confirmação, e se o envelope da outra pessoa tinha chegado, ela vê a reação sem que este aparelho a mostre; as reações da outra pessoa em mensagens de páginas antigas já carregadas só se atualizam ao reabrir a conversa (a releitura de páginas antigas só acontece para mensagens com reação pendente); um toque depois de uma remoção não confirmada vale como nova reação, não como nova tentativa da remoção (o `docs/rpc.md` 5.119 dá a saída); se a consulta que confirma que a outra conta é uma pessoa falha, as reações ficam desligadas até a próxima tentativa (voltar à tela, reconectar ou puxar para atualizar); a regra da Página depende da tela: o nó não recusa `dm.react` para a chave de uma Página, e uma Página cujo roteiro o semeador não serviu pode receber os controles de reação (o envio gasta os selos e a Página descarta a reação); cada reação conta no conjunto comum do semeador e pode acordar o outro aparelho como uma mensagem; a convergência de dois nós é coberta por teste, não por uma conferência real de dois aparelhos.
+
+## 197. Conversas e gestos do chat (PR feat/chat-surfaces)
+
+Nono PR da revisão visual do app. Só interface: nenhum método do RPC, formato de protocolo, texto dos Termos nem fixture muda. Dois grupos de mudança, nas duas telas de conversa (Mensagem e Grupo) e nas listas que levam a elas.
+
+Caixas e listas (Conversas, Mensagens, Comunidades, Comunidade, `ui/ConversationRow.js`, `ui/CommunitiesBox.js`): linhas com feedback ao toque e hora alinhada; cada linha de conversa tem um só nome de acessibilidade (nome, prévia, hora e contagem de novas), e um par cujo nome é "Você" não é lido como a sua própria linha; esqueletos enquanto carrega; estados vazios com uma ação por filtro e para a busca; "Nova conversa" só onde dá para escrever; em Mensagens, nenhuma nova tentativa numa lista que carregou bem; em Comunidades, a busca mostra um só aviso (ainda indexando, pode estar incompleta ou nenhum grupo achado) e o vazio explica o limite de grupos e oferece criar; os nomes na faixa de comunidades quebram em duas linhas.
+
+Gestos do chat (`ui/SwipeReply.js`, `chatGestures.js`, `ui/JumpToEnd.js`, em Mensagem e Grupo): deslizar uma mensagem para a direita responde (só toque, nunca mouse; o deslize precisa começar a mais de 24 pt da borda esquerda, para o gesto de voltar do sistema continuar valendo; cerca de 56 pt de curso respondem; um movimento quase vertical rola a lista; com Reduzir movimento o balão fica parado e só o ícone de resposta aparece). O botão "ir para o fim" com o selo "N novas" aparece quando a pessoa está longe do fim (mais de 1,5 tela) e chegam mensagens; uma chegada com a pessoa lendo mensagens antigas não mexe na lista; o seu próprio envio leva ao fim. Tocar numa citação rola até a mensagem e a destaca; uma citada fora do trecho carregado mostra "Mensagem fora do trecho carregado" (também anunciada ao leitor de tela). Uma conversa vazia oferece "Oi" e "Tudo bem?", que só preenchem o campo (acrescentam numa nova linha ao texto já escrito) e nunca enviam. Grupo num nó que não é hospedado diz "Comunidades indisponíveis" (decidido por `node.hosted`, nunca pela plataforma).
+
+Regras que os passos conferem:
+
+- Responder por deslize só com toque. Mouse não responde e a seleção de texto continua funcionando.
+- Deslize que começa a menos de 24 pt da borda esquerda não responde (o gesto de voltar do sistema vence); mais de 8 pt à direita e pelo menos o dobro na horizontal que na vertical contam como deslize; 56 pt ou mais respondem; menos que isso a bolha volta ao lugar.
+- Rolar na vertical com um leve desvio para a direita rola a lista e não responde. Um bloco de código que rola de lado continua rolando de lado.
+- Toque longo e reações da mensagem seguem como antes.
+- "ir para o fim" só aparece longe do fim; o selo conta as mensagens que chegaram desde que a pessoa se afastou; uma chegada não move a lista de quem lê mensagens antigas; enviar a sua volta ao fim.
+- Citação fora do trecho carregado: nenhuma rolagem, só o aviso. Citação carregada: rola e destaca por um instante.
+- As sugestões da conversa vazia não enviam nada, não apagam o que foi digitado e não se repetem com texto no campo.
+- Nome de acessibilidade de uma linha de conversa: um só, com nome, prévia, hora e a contagem de novas; texto de um par passa por `displayText` antes de ir para a tela.
+- Decisão por capacidade (`node.hosted`, `node.online`), nunca por `Platform.OS` (`platformGate.test.js`).
+- App: `apps/app/src/ui/SwipeReply.js`, `apps/app/src/chatGestures.js`, `apps/app/src/ui/JumpToEnd.js`, `screens/Mensagem.js`, `screens/Grupo.js`, `screens/Conversas.js`, `screens/Mensagens.js`, `screens/Comunidades.js`, `screens/Comunidade.js`, `ui/ConversationRow.js`, `ui/CommunitiesBox.js`.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `(cd apps/app && node ../../scripts/run-tests.js test/chatGestures.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/chatSurfaces.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/vitrine.test.js)`
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é um nó hospedado com dados de exemplo e dispensa conta. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e), Chrome em 390 e em 1280 px, claro e escuro, texto grande, leitor de tela e Reduzir movimento; a rodada para quando duas seguidas não mudam nada. Capturas ficam fora do git.
+
+1. Carregando: abra a aba Conversas com o nó ainda lendo. Esperado: linhas de esqueleto no lugar da lista, sem o vazio "Nenhuma conversa ainda" enquanto carrega.
+2. Vazios por filtro: em Não lidas e em Grupos sem linhas, e com uma busca sem resultado. Esperado: um estado vazio por filtro com a sua ação, e outro para a busca; "Nova conversa" só aparece onde dá para escrever.
+3. Linhas e não lidas: a lista de exemplo com linhas não lidas. Esperado: toque com feedback, hora alinhada à direita, a contagem de novas, e no leitor de tela um só nome por linha (nome, prévia, hora e quantas novas); uma conversa com um par chamado "Você" não é lida como a sua própria linha.
+4. Mensagens, Comunidade e caixa de comunidades: abra Mensagens, uma comunidade e a faixa de comunidades. Esperado: títulos lidos como cabeçalhos, esqueletos ao carregar, estados vazios, linhas alinhadas às de Conversas, nomes compridos em duas linhas, e nenhum "tentar de novo" numa lista que carregou bem.
+5. Comunidades, busca: busque um termo. Esperado: um só aviso por vez (ainda indexando, pode estar incompleta ou nenhum grupo achado). Sem comunidades, o vazio explica o limite de grupos e oferece criar.
+6. Deslizar para responder, no meio da tela: abra a conversa de exemplo e arraste uma mensagem da esquerda para a direita, mais de 56 pt. Esperado: a bolha acompanha o dedo, o ícone de resposta aparece, ao soltar a barra de resposta cita a mensagem e a bolha volta ao lugar. Menos de 56 pt: volta sem responder.
+7. Borda esquerda: comece o deslize a menos de 24 pt da borda (no Android, com o gesto de voltar do sistema ligado; no iOS, o gesto de borda). Esperado: o sistema volta uma tela e nada é respondido.
+8. Rolagem com desvio: arraste a lista para cima com um leve desvio para a direita. Esperado: a lista rola e nada é respondido.
+9. Bloco de código: deslize sobre um bloco de código que rola de lado. Esperado: o bloco rola de lado; um deslize que começa fora do bloco responde.
+10. Toque longo e reações: toque e segure uma mensagem. Esperado: as ações e as reações rápidas abrem como antes e a bolha não se mexe.
+11. Grupo: repita 6 a 10 num grupo (sem hospedagem, o aviso "Comunidades indisponíveis" com "Comunidades disponíveis no site da associação ou no app ligado à instalação.").
+12. "ir para o fim": numa conversa comprida, role para cima mais de uma tela. Esperado: o botão "ir para o fim" aparece; com uma mensagem chegando, ganha o selo "N novas" e a lista não se move; tocar leva ao fim e o botão some.
+13. Envio na rolagem: com o botão visível, envie uma mensagem sua. Esperado: a lista volta ao fim.
+14. Citação: toque numa citação de mensagem carregada. Esperado: a lista rola até a mensagem original, que fica destacada por um instante.
+15. Citação fora do trecho: toque numa citação de mensagem não carregada. Esperado: nenhuma rolagem, aparece "Mensagem fora do trecho carregado" por um instante (lida pelo leitor de tela).
+16. Sugestões: abra uma conversa vazia. Esperado: os chips "Oi" e "Tudo bem?". Toque num: o campo recebe o texto, nada é enviado. Com texto já digitado, o chip acrescenta numa nova linha sem apagar o que estava lá.
+17. Reduzir movimento: ligue no sistema e repita 6. Esperado: a bolha não se move; o ícone de resposta só aparece (com fade) e a resposta funciona.
+18. Chrome, mouse: arraste o mouse sobre uma bolha. Esperado: nada é respondido e o texto é selecionado. Responda pelas ações da mensagem.
+19. Texto grande, escuro e leitor de tela: escala de fonte 1,3 e tema escuro nas telas acima. Esperado: nada cortado ou sobreposto, o botão "ir para o fim" e o selo legíveis e fora da caixa de escrever, os alvos de toque de 44 pt, e o leitor de tela diz "ir para o fim" (com "N novas" na dica).
+
+Situação, em 2026-11-12 (Vitrine, Metro na porta 8090, sem alterar as fixtures). Cada caixa só é marcada quando o alvo foi percorrido por inteiro; nenhuma foi. Capturas em `v9-shots/` fora do git.
+
+- [ ] Android, AVD `varanda-api36` (parcial, uma rodada). Claro, passaram: lista de Conversas com linhas não lidas, contadores e hora alinhada (`a-light-1-conversas`); deslizar uma mensagem recebida para a direita a partir do meio da tela abre a barra de resposta com a mensagem citada (`a-light-3-swipe-reply`); um deslize que começa na borda esquerda (x = 8 px) volta ao Conversas sem criar resposta (`a-light-4-edge`, `a-light-5-after-edge`); rolar a lista com leve desvio para a direita rola e não responde (`a-light-6-drift`); toque longo abre as ações com as reações rápidas e Responder (`a-light-7-longpress`); longe do fim aparece o botão "ir para o fim" (`a-light-8-away`) e tocá-lo leva à última mensagem (`a-light-10-jump`); tocar numa citação carregada destaca a mensagem original por um instante (`a-light-9-quote`). Escuro: deslizar numa mensagem de grupo ("Passeios de bicicleta") abre a barra de resposta legível (`a-dark-1-group-swipe`). Não percorridos no Android: carregamento com esqueleto, filtro sem linhas, busca de Comunidades, selo "N novas" (a Vitrine não faz chegar mensagem), envio com o botão visível, toast de citação fora do trecho, chips "Oi" e "Tudo bem?" (a conversa de exemplo traz as sugestões de anúncio, não uma conversa vazia), Reduzir movimento, texto grande 1,3 e TalkBack.
+- [ ] iOS (UDID 8802DF5C-6A82-406C-8D4D-29618AEEA2BC, que é um iPhone 17 Pro, não o 16e do método; parcial, claro, duas rodadas). Passaram: a lista de Conversas; na conversa com "João Nascimento", um deslize de 140 pt para a direita sobre a mensagem "Aceite" mostra o ícone de resposta e, ao soltar, a barra de resposta diz "João Nascimento @joao_nascimento / Aceite" (a primeira captura sai com a bolha ainda deslocada e a segunda já mostra a barra); um deslize que começa a 2 pt da borda esquerda faz o gesto de voltar do iOS (a lista aparece por baixo) e a barra de resposta que eu já tinha fechado não reaparece na parte visível. Não percorridos no iOS: o deslize de cerca de 80 pt (usei 140 pt), conferir de novo a conversa depois de voltar por inteiro, "ir para o fim", salto de citação, toast, chips, escuro, texto grande e VoiceOver.
+- [ ] Chrome (painel de navegador embutido), rodada 2, 390 px claro (parcial). Passaram: Conversas com Não lidas e Pedidos; busca sem resultado mostra "Nenhuma conversa encontrada." com **Limpar busca** e **Nova conversa**, e Limpar busca devolve a lista; um arrasto do mouse para a direita sobre uma bolha ("Sim, reservei a tarde de domingo.") não abre a barra de resposta. Falhou ou ficou em aberto: a seleção de texto com o mouse numa bolha (clique triplo e arrasto sobre "Vamos conversar no encontro?") devolveu seleção vazia, enquanto a mesma ação no cabeçalho selecionou texto e o estilo `user-select` do texto é `auto`; não conferi se isso já era assim antes do PR9 (PR8), então fica como suspeita, não como defeito confirmado. Não percorridos no Chrome: 1280 px, escuro, "ir para o fim", salto de citação (meu clique caiu no avatar e abriu o perfil), estado vazio de um filtro (Não lidas e Grupos têm linhas na Vitrine), busca de Comunidades, chips (a Vitrine não tem conversa vazia), e o toque emulado: o preset móvel não foi usado, então o deslize com toque na bolha e o deslize horizontal dentro de um bloco de código não foram tentados (a Vitrine também não traz bloco de código).
+- Observação: a Vitrine não faz chegar mensagens nem tem conversa vazia, então o selo "N novas" e os chips "Oi" e "Tudo bem?" só são cobertos pelos testes (`chatGestures.test.js`, `chatSurfaces.test.js`), não por captura.
+
+Defeitos: nenhum confirmado. Suspeita aberta para quem corrige (T28): no Chrome a seleção de texto com o mouse numa bolha de `Mensagem` não selecionou nada (`ui/SwipeReply.js`, ou o `Pressable` da bolha, ao redor das linhas 38 a 45, que tratam o mouse); falta comparar com o PR8 para saber se o PR9 mudou isso. Nada foi corrigido neste PR de documentação.
+
+Limites conhecidos: Comunidades e Comunidade ainda mostram "Só na versão web" num nó que não é hospedado, o que nunca acontece num celular com a instalação (esse celular é hospedado). Quem usa mouse não tem deslize e responde pelas ações da mensagem. O que não foi percorrido está listado na Situação.
+
+## 198. Acabamento das telas (PR feat/screens-polish)
+
+Décimo e último PR da revisão visual do app. Só interface: nenhum método do RPC, formato de protocolo, texto dos Termos nem fixture muda. Ele fecha os achados UX-44 a UX-66 de `docs/ux-audit.md`, em três grupos: feeds e busca, perfil e avisos, e publicar, Momentos, introdução e ajustes.
+
+Feeds e busca (`ARua.js`, `App.js`, `Espiadinha.js`, `Busca.js`, `BuscaGlobal.js`, `ui/MomentosStrip.js`): em A Rua, o feed de membro que falha ao carregar mostra a mesma faixa de erro no topo, com ou sem lista, e mantém a lista já carregada. O feed de Página mantém a regra antiga (uma leitura que falha limpa as linhas). A primeira carga mostra linhas de esqueleto. O toast da casca tem área de toque de 44 pt na ação e, com ação, fica mais tempo quando a escala de fonte é de pelo menos `LARGE_TEXT` (1,29). A Espiadinha tem uma só nota de estado no alto, e a folha de ajuda diz o mesmo que ela; o aviso de expiração e o "atualizar" ficam no rodapé da lista, onde a falha aparece, e as notas continuam ao lado da faixa de erro enquanto há linhas. Indisponível lê "Espiadinha indisponível" com o motivo, e "Saiba mais" só aparece quando o nó não é hospedado. A Busca tem uma só nota (o resto foi para a folha de ajuda), distingue "nada digitado", "buscando" e "sem resultado" e oferece "Limpar"; a região de carga tem rótulo de acessibilidade. A Busca global tem os mesmos três estados, o botão lê "Digitar código" num nó que não é hospedado (ele só põe o foco no campo), e a nota "buscando" mantém a margem de 16 pt. Os anéis da faixa de Momentos respondem ao toque com `PressScale` e o leitor de tela lê o nome inteiro.
+
+Perfil e avisos (`Diario.js`, `Membro.js`, `ui/ProfileHeader.js`, `ui/ProfileBar.js`, `Avisos.js`): Diário e Membro mostram cabeçalho e linhas de esqueleto na primeira carga; em Membro o esqueleto do cabeçalho só aparece enquanto `profile.read` está pendente, então Seguir, Conversar e o menu surgem quando ele responde. Um diário vazio mostra `EmptyState`: no próprio perfil oferece publicar, no de outra pessoa não tem ação, e numa Página lê "As publicações desta Página aparecem aqui.". As ações do cabeçalho seguem como `Pill`. O estado do envio vira um selo com ícone, "Ajustes" ganha maiúscula, a região de avaliações é acessível, a linha "Anúncios" continua sem contagem nem prévia de capa, o estado "montando a lista" tem tratamento próprio, as contagens quebram com texto grande e o avatar tem 88 pt abaixo de 640 pt de largura e 72 pt a partir daí. Avisos num nó que não é hospedado lê "Avisos indisponíveis", com o corpo "Disponível no site da associação ou no app ligado à instalação." e "Saiba mais" abrindo `HELP.avisos`; num nó hospedado sem passkey lê "Os Avisos não estão disponíveis nesta conexão.", sem "Saiba mais"; as linhas respondem ao toque com `PressScale` e mantêm as dicas de acessibilidade; há esqueleto na carga e nenhum título de data (a forma documentada).
+
+Publicar, Momentos, introdução e ajustes (`Publicar.js`, `Momentos.js`, `Introducao.js`, `Ajustes.js`): o contador de caracteres diz a contagem atual quando recebe o foco, só os limiares (restam 20, restam 0) são anunciados sozinhos e a região viva da web é esvaziada quando a contagem sai de um limiar. O botão de foto lê "Adicionar foto". Ao focar o campo, e quando a linha do contador se move, a tela rola para manter o campo e a barra de fotos e emojis à vista (UX-59). Em Momentos, uma legenda cortada ganha "mais" e "menos" (lidos como "mostrar a legenda inteira" e "recolher a legenda"); abrir pausa o tempo, e "menos" ou um passo o retoma; a legenda aberta nunca é menor que a recolhida; quando não cabem três linhas e o botão (texto grande), não há "mais": a legenda usa a altura toda e rola, como antes; o indicador de carga usa um token do tema. Em Introdução, "Pular" continua no canto superior direito, com área de toque de 44 por 44 pt, e os botões seguem sendo `Btn` e `StepLink`; Welcome não muda. Em Ajustes, as linhas ficam em "Perfil e conta", "Privacidade e segurança" e "Aparência e avisos", com "Avançado" como último grupo; cada nota fica dentro do seu grupo, com título. O rodapé de versão tem três itens (app, servidor e nota) e copiar é anunciado. Sair e Excluir conta continuam onde estavam, antes de "Avançado"; nenhuma linha foi removida nem religada.
+
+Regras que os passos conferem:
+
+- Falha ao carregar A Rua: a mesma faixa no topo, com ou sem lista; a lista já carregada fica intacta. A Página limpa as linhas, como antes.
+- O toast com ação tem alvo de 44 pt e dura o dobro com texto a partir de 1,29.
+- Espiadinha: uma nota de estado; a folha de ajuda não contradiz a nota; "Saiba mais" só num nó que não é hospedado; o rodapé leva a expiração e o "atualizar".
+- Busca e Busca global: uma só nota por vez, três estados distintos, "Limpar" onde há texto; "Digitar código" só num nó que não é hospedado.
+- Diário e Membro: esqueleto só na primeira carga; em Membro, Seguir, Conversar e o menu não ficam escondidos depois que `profile.read` responde.
+- Diário vazio: com ação só no próprio perfil. Avisos num nó que não é hospedado: "Avisos indisponíveis" e "Saiba mais" abre a ajuda de Avisos. Sem título de data nas linhas de Avisos.
+- Publicar: o contador só é anunciado sozinho nos limiares; com foco, diz a contagem inteira.
+- Momentos: expandir a legenda pausa o tempo, e também o vídeo curto e a música do momento; "menos" ou um passo retoma; Reduzir movimento continua sem avanço automático.
+- Ajustes: nenhuma linha some e nenhuma muda de destino; Sair e Excluir conta antes de "Avançado".
+- Decisão por capacidade (`node.hosted`, `node.online`), nunca por `Platform.OS` (`platformGate.test.js`). Texto de um par passa por `displayText`.
+- App: `apps/app/App.js`, `screens/ARua.js`, `Espiadinha.js`, `Busca.js`, `BuscaGlobal.js`, `Diario.js`, `Membro.js`, `Avisos.js`, `Publicar.js`, `Momentos.js`, `Introducao.js`, `Ajustes.js`, `ui/MomentosStrip.js`, `ui/PressScale.js`, `ui/ProfileBar.js`, `ui/ProfileHeader.js`; `src/peek.js` e `src/notices.js` perdem a frase "só na versão web", que nenhuma tela usa mais.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `(cd apps/app && node ../../scripts/run-tests.js test/screensPolish.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/profilePolish.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/composePolish.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/versionFooter.test.js)`
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é um nó hospedado com dados de exemplo e dispensa conta. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e), Chrome em 390 e em 1280 px, claro e escuro, texto grande, leitor de tela e Reduzir movimento; a rodada para quando duas seguidas não mudam nada. Capturas ficam fora do git.
+
+1. A Rua com falha de carga. Na Vitrine, cortar a rede não faz `feed.read` falhar (o nó de exemplo responde com dados locais), então aqui só se confere a primeira carga. Esperado: linhas de esqueleto. A faixa no topo (a mesma com ou sem lista, e a lista já carregada intacta) fica coberta por `apps/app/test/screensPolish.test.js`; no aparelho, só com um nó real cuja leitura falhe.
+2. Toast com ação: provoque um toast que traga uma ação. Esperado: a ação tem 44 pt de alto e, com texto grande (1,3), o toast fica mais tempo.
+3. Espiadinha: abra com linhas, depois com a lista vencida ou incompleta. Esperado: uma só nota no alto; a expiração e o "atualizar" no rodapé; a folha de ajuda diz o mesmo que a nota. Num nó que não é hospedado: "Espiadinha indisponível", o motivo e "Saiba mais".
+4. Busca: abra sem digitar, digite, e busque algo sem resultado. Esperado: uma só nota por vez, "Limpar" nos estados com texto, região de carga com nome para o leitor de tela; o que sobrou das notas antigas está na folha de ajuda.
+5. Busca global: os mesmos três estados; num nó que não é hospedado o botão lê "Digitar código" e põe o foco no campo. Esperado: a nota "buscando" com margem de 16 pt.
+6. Faixa de Momentos: toque num anel e use o leitor de tela. Esperado: o anel responde ao toque (`PressScale`) e o leitor diz o nome inteiro.
+7. Diário e Membro, carregando: abra o próprio Diário e o de outra pessoa com o nó ainda lendo. Esperado: esqueleto do cabeçalho e das linhas. Em Membro, Seguir, Conversar e o menu aparecem quando `profile.read` responde, sem esperar as linhas.
+8. Diário vazio: no próprio perfil, no de outra pessoa e numa Página. Esperado: `EmptyState` com "publicar" só no próprio perfil; na Página, "As publicações desta Página aparecem aqui.".
+9. Selo de envio, "Ajustes" e avaliações: publique offline e olhe o Diário e o Membro; olhe o botão de ajustes; percorra a região de avaliações com o leitor de tela. Esperado: selo com ícone, "Ajustes" com maiúscula, a região lida.
+10. Anúncios, lista em montagem e contagens: a linha "Anúncios" segue sem contagem nem capa; o estado "montando a lista" aparece distinto do vazio; com texto grande, as contagens de seguidores quebram sem estourar o cabeçalho.
+11. Avatar: abra um perfil em 390 e em 1280 px. Esperado: 88 pt em 390 e 72 pt em 1280, cabeçalho sem ficar estreito e alto.
+12. Avisos: num nó que não é hospedado, "Avisos indisponíveis" com o corpo "Disponível no site da associação ou no app ligado à instalação." e "Saiba mais" abrindo a ajuda. Hospedado sem passkey: "Os Avisos não estão disponíveis nesta conexão." e nenhum "Saiba mais". Hospedado: esqueleto ao carregar, linhas com toque suave, dicas lidas pelo leitor de tela e nenhum título de data (Avisos mantém a forma documentada).
+13. Publicar, contador: escreva até restarem 20 caracteres e até 0, com o leitor de tela. Esperado: só os dois limiares são anunciados sozinhos; com o foco no contador, ele diz a contagem inteira. Na web, a região viva esvazia quando a contagem sai de um limiar.
+14. Publicar, foto e teclado: o botão de foto lê "Adicionar foto". Com o teclado aberto, a barra de fotos e emojis continua alcançável (UX-59: ao focar o campo, e quando a linha do contador se move, a tela rola para manter o campo e a barra à vista; confira se a barra fica acima do teclado).
+15. Momentos, legenda longa: abra um momento com legenda cortada. Esperado: "mais" abre a legenda e pausa o tempo (num momento com vídeo ou música, também o vídeo e a música); "menos" ou avançar um passo retoma; a legenda aberta não é menor que a recolhida. Com texto grande e pouco espaço, sem "mais": a legenda usa a altura toda e rola; o indicador de carga acompanha o tema.
+16. Introdução: "Pular" no canto superior direito, com 44 por 44 pt de toque; os botões seguem iguais; Welcome igual a antes.
+17. Ajustes, grupos: abra Ajustes. Esperado: "Perfil e conta", "Privacidade e segurança" e "Aparência e avisos", com "Avançado" por último; cada nota dentro do seu grupo, com título; nenhuma linha sumiu nem mudou de destino; Sair e Excluir conta antes de "Avançado", como antes.
+18. Rodapé de versão: percorra com o leitor de tela e toque para copiar. Esperado: três itens (app, servidor e nota) e a cópia é anunciada.
+19. Reduzir movimento: ligue no sistema e repita os passos 2, 6 e 15. Esperado: sem animação nova; o tempo do momento segue sem avanço automático.
+20. Texto grande (1,3), escuro e leitor de tela: percorra todas as telas acima. Esperado: nada cortado ou sobreposto, alvos de 44 pt, e um nome de leitor de tela por controle (anéis de Momentos, linhas de Avisos, contador, "mostrar a legenda inteira", "Adicionar foto", itens do rodapé de versão).
+21. Erro lido pelo leitor de tela: provoque um erro de carga numa tela que agora usa `EmptyState`. Esperado: o texto do erro é lido; o papel "alerta" não existe mais (ver Limites conhecidos).
+
+Situação, em 2026-11-12 (Vitrine, Metro na porta 8090, sem alterar as fixtures; duas rodadas). Cada caixa só é marcada quando o alvo foi percorrido por inteiro; nenhuma destas cinco foi. Capturas do Android e do iOS em `v10-shots/` fora do git; o painel de navegador embutido não salva capturas.
+
+- [ ] Android, AVD `varanda-api36` (parcial, duas rodadas, `v10-shots/android/`): passaram os passos 13 (contagem até 0 de 1000), 14 (a barra de fotos e emojis fica acima do teclado, então o UX-59 já valia no Android), 17 (grupos, com Sair e Excluir conta antes de "Avançado") e 20 (texto grande e escuro em perfil, Avisos e Ajustes); em parte, 3, 4, 5, 6, 10, 12 (sem títulos de data) e 18 (as duas linhas do rodapé). Os outros passos e o TalkBack não foram percorridos.
+- [ ] iOS, simulador UDID 8802DF5C-6A82-406C-8D4D-29618AEEA2BC, que é um iPhone 17 Pro, não o 16e do método (parcial, duas rodadas, `v10-shots/ios/`): passaram os passos 3 (uma nota e a ajuda), 4, 10 (contagens numa linha com texto extra extra grande), 14, 17 (grupos, com Sair e Excluir conta antes de "Avançado") e 20 (escuro em Ajustes e Diário); em parte, 11 (cerca de 88 pt com 402 de largura) e 18 (as duas linhas do rodapé). Os outros passos e o VoiceOver não foram percorridos.
+- [ ] Chrome 390 px, claro e escuro (parcial, painel de navegador embutido, sem capturas): passaram os passos 4 (uma nota por vez e "Limpar"), 12 (sem títulos de data), 13 ("Restam 20" em 980, "Limite de caracteres atingido" em 1000, nada anunciado em 500 e 990, e o rótulo "N de 1000 caracteres"), 14 ("Adicionar foto"), 17 (grupos, com Sair e Excluir conta antes de "Avançado") e 20 no escuro; em parte, 3 e 18 (as duas linhas do rodapé). Os outros passos, o texto grande e o leitor de tela não foram percorridos.
+- [ ] Chrome 1280 px, claro e escuro (parcial): só uma passada curta na primeira rodada, sem passo conferido por inteiro.
+- [ ] Texto grande, Reduzir movimento e leitor de tela (TalkBack, VoiceOver) (parcial): texto grande passou no Android (1,3) em perfil, Avisos e Ajustes e no iOS (extra extra grande) no Diário, com a observação abaixo; Reduzir movimento (passo 19), TalkBack e VoiceOver não foram percorridos.
+
+Defeitos: nenhum confirmado. Observações para a equipe: (1) no iOS, mudar o tamanho do texto com o app aberto cortou rótulos até o app ser reaberto (`v10-shots/ios/`, capturas 08 e 09 contra 11); não foi comparado com a `main`. (2) No iOS, despejar cerca de 3 mil caracteres de uma vez no campo de Publicar com a ferramenta de digitação do simulador (de 90 a 150 caracteres por segundo, bem acima de quem digita) mostrou o erro "Maximum update depth exceeded" em `typePost` (`setText`). O mesmo erro aparece, duas vezes em duas, com o `Publicar.js` do PR anterior da pilha, e as outras mudanças da pilha nesse arquivo só agem quando há um rascunho de resposta pendente, o que não era o caso; então não vem deste PR. Não foi conferido na `main`; fica para investigar à parte. (3) Na folha "Fazer oferta", o campo Valor mostra "80,00" como exemplo fixo, que já existia antes desta série (`apps/app/src/screens/Mensagem.js`); usar o preço do anúncio fica como ideia para depois.
+
+Limites conhecidos: nas telas desta seção, `ErrorState` virou `EmptyState`, então o erro perde o papel "alerta" do leitor de tela (o pedido era esse; confira com o leitor de tela, passo 21). O "Saiba mais" de Avisos e a ajuda da Espiadinha não foram percorridos num celular. A linha "Anúncios" do perfil segue sem contagem e sem prévia de capa (UX-55 só em parte). O que não foi percorrido fica listado na Situação. A Vitrine se comporta como um nó hospedado com passkey, então os estados de nó não hospedado e de nó hospedado sem passkey não foram percorridos no aparelho; ficam cobertos por `screensPolish.test.js` e `profilePolish.test.js`.
+
+### Passada da pilha inteira
+
+Depois dos PRs 1 a 10 juntos, percorra de novo os passos de cabeça de cada seção. Percorrida em 2026-11-12, na segunda rodada (Vitrine, Metro na porta 8090); no Chrome, só 390 px no claro. Uma caixa só é marcada quando todos os passos da linha passaram.
+
+- [x] Android, seção 189: pílula da barra de abas (passo 2) e o botão de publicar ao apertar (passo 8). Passaram na segunda rodada; o botão encolher ao segurar só se vê por um deslocamento de cerca de 3 px na captura (`r2-178-fab-held.png`).
+- [ ] iOS, seção 189: pílula da barra de abas (passo 2) e o botão de publicar ao apertar (passo 8). Em parte, na segunda rodada.
+- [ ] Chrome 390, seção 189: pílula da barra de abas (passo 2) e o botão de publicar ao apertar (passo 8). O passo 2 passou (uma pílula só); o passo 8 não foi percorrido.
+- [ ] Chrome 1280, seção 189: pílula da barra de abas (passo 2) e o botão de publicar ao apertar (passo 8). Não percorrido.
+- [ ] Android, seção 190: fotos antes da legenda e "mais" e "menos" (passos 1 a 3) e o contador do carrossel (passo 8). Não percorrido.
+- [ ] iOS, seção 190: fotos antes da legenda e "mais" e "menos" (passos 1 a 3) e o contador do carrossel (passo 8). Não percorrido.
+- [ ] Chrome 390, seção 190: fotos antes da legenda e "mais" e "menos" (passos 1 a 3) e o contador do carrossel (passo 8). Não percorrido.
+- [ ] Chrome 1280, seção 190: fotos antes da legenda e "mais" e "menos" (passos 1 a 3) e o contador do carrossel (passo 8). Não percorrido.
+- [ ] Android, seção 191: "Ver N respostas" (passos 1 e 2) e a barra de resposta (passos 7 e 8). Não percorrido.
+- [ ] iOS, seção 191: "Ver N respostas" (passos 1 e 2) e a barra de resposta (passos 7 e 8). Não percorrido.
+- [ ] Chrome 390, seção 191: "Ver N respostas" (passos 1 e 2) e a barra de resposta (passos 7 e 8). Não percorrido.
+- [ ] Chrome 1280, seção 191: "Ver N respostas" (passos 1 e 2) e a barra de resposta (passos 7 e 8). Não percorrido.
+- [ ] Android, seção 192: cidade, chip e tiles (passos 2 a 4) e as colunas por largura (passo 5). Em parte.
+- [ ] iOS, seção 192: cidade, chip e tiles (passos 2 a 4) e as colunas por largura (passo 5). Não percorrido.
+- [ ] Chrome 390, seção 192: cidade, chip e tiles (passos 2 a 4) e as colunas por largura (passo 5). Os passos 2, 4 e 5 passaram; o passo 3 não foi percorrido.
+- [ ] Chrome 1280, seção 192: cidade, chip e tiles (passos 2 a 4) e as colunas por largura (passo 5). Não percorrido.
+- [ ] Android, seção 193: barra do anúncio com Conversar e Fazer oferta (passos 4 e 5) e Anunciar em passos (passos 8 e 9). Não percorrido.
+- [ ] iOS, seção 193: barra do anúncio com Conversar e Fazer oferta (passos 4 e 5) e Anunciar em passos (passos 8 e 9). Não percorrido.
+- [ ] Chrome 390, seção 193: barra do anúncio com Conversar e Fazer oferta (passos 4 e 5) e Anunciar em passos (passos 8 e 9). Os passos 4 e 5 passaram, também a folha de oferta num anúncio de Página; Anunciar em passos (8 e 9) não foi percorrido.
+- [ ] Chrome 1280, seção 193: barra do anúncio com Conversar e Fazer oferta (passos 4 e 5) e Anunciar em passos (passos 8 e 9). Não percorrido.
+- [ ] Android, seção 194: negrito, itálico e bloco de código (passos 1 e 3) e o spoiler (passo 4). Os passos 1, 2 e 4 passaram; o bloco de código (passo 3) não foi percorrido.
+- [ ] iOS, seção 194: negrito, itálico e bloco de código (passos 1 e 3) e o spoiler (passo 4). Não percorrido.
+- [ ] Chrome 390, seção 194: negrito, itálico e bloco de código (passos 1 e 3) e o spoiler (passo 4). Não percorrido.
+- [ ] Chrome 1280, seção 194: negrito, itálico e bloco de código (passos 1 e 3) e o spoiler (passo 4). Não percorrido.
+- [ ] Android, seção 195: reagir, trocar e tirar (passos 2 a 4) e "Quem reagiu" (passo 5). Os passos 1, 2 e 5 passaram num grupo público (chips sob a mensagem, "Quem reagiu" com os nomes); trocar e tirar (3 e 4) não foram percorridos.
+- [ ] iOS, seção 195: reagir, trocar e tirar (passos 2 a 4) e "Quem reagiu" (passo 5). Em parte: reagir passou; a troca de emoji não foi feita; tirar funcionou no segundo toque (o primeiro pareceu não fazer nada); "Quem reagiu" só pela folha de ações, não pelo toque longo no chip.
+- [ ] Chrome 390, seção 195: reagir, trocar e tirar (passos 2 a 4) e "Quem reagiu" (passo 5). Os passos 2 a 4 passaram; "Quem reagiu" (passo 5) não foi percorrido.
+- [ ] Chrome 1280, seção 195: reagir, trocar e tirar (passos 2 a 4) e "Quem reagiu" (passo 5). Não percorrido.
+- [ ] Android, seção 196: reagir, trocar e tirar (passos 2 a 4) e os toques rápidos (passo 5). Os passos 2 a 4 passaram; os toques rápidos (passo 5) não foram percorridos.
+- [ ] iOS, seção 196: reagir, trocar e tirar (passos 2 a 4) e os toques rápidos (passo 5). Não percorrido.
+- [ ] Chrome 390, seção 196: reagir, trocar e tirar (passos 2 a 4) e os toques rápidos (passo 5). Não percorrido.
+- [ ] Chrome 1280, seção 196: reagir, trocar e tirar (passos 2 a 4) e os toques rápidos (passo 5). Não percorrido.
+- [ ] Android, seção 197: deslizar para responder e a borda esquerda (passos 6 e 7) e "ir para o fim" (passo 12). Os passos 6 e 7 passaram; "ir para o fim" (passo 12) não foi percorrido.
+- [ ] iOS, seção 197: deslizar para responder e a borda esquerda (passos 6 e 7) e "ir para o fim" (passo 12). Os passos 6 e 7 passaram; "ir para o fim" (passo 12) não foi percorrido.
+- [ ] Chrome 390, seção 197: deslizar para responder e a borda esquerda (passos 6 e 7) e "ir para o fim" (passo 12). Em parte: deslizar não dá para fazer com o mouse; o passo 12 não foi percorrido.
+- [ ] Chrome 1280, seção 197: deslizar para responder e a borda esquerda (passos 6 e 7) e "ir para o fim" (passo 12). Não percorrido.
+
+## 199. Música com cara de Instagram (PR feat/music-instagram-ui)
 
 A música do Audius ganha a interface do seletor, do editor de 15 s, do adesivo do compositor, do cartão compacto e do adesivo do momento. Não há registro, rota nem regra de leitura novos: `docs/protocol.md` não entra neste PR. As regras de disponibilidade, de ticket e de trecho das seções 185, 186 e 187 continuam.
 
@@ -8574,4 +9191,3 @@ Usar uma instalação de teste, sem DHT pública, com Termos 39 aceitos, conta v
 - [ ] Contar os pedidos de áudio (o play e o corpo do áudio) enquanto um trecho do editor repete, até a prévia pausar, em cada plataforma: Android, iOS, web e PWA. Registrar a contagem. O editor reutiliza um único ticket entre as voltas e os arrastos, e a busca do ponto ao soltar não pede ticket novo.
 - [ ] No visualizador do momento, no lugar do chip de atribuição e do chip separado de silenciar da seção 187: o adesivo mostra a capa gerada, o título e o artista. Um toque alterna **Silenciar música** e **Ativar música**, pausa o trecho sem novo pedido de áudio, e não abre a página. O equalizador pequeno se move enquanto toca e dá lugar ao ícone de mudo ao silenciar.
 - [ ] O link **Audius** (nome acessível **Abrir no Audius**), separado do adesivo, abre a página da faixa e pausa o visualizador até a pessoa voltar. Se o link abrir sem ocultar o visualizador, a pausa termina após 1 s.
-

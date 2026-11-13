@@ -19,9 +19,9 @@ const bad = (t, method, params, label) => {
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
     'account.sign', 'age.proof', 'age.sign', 'appeal.sign', 'block.list', 'block.set', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'diary.peek',
-    'dm.enable', 'dm.list', 'dm.lookup', 'dm.pageDraft', 'dm.pageForget', 'dm.pageGenerate', 'dm.pageLegacyBlocks', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.pageShare', 'dm.pull', 'dm.putMedia', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
+    'dm.enable', 'dm.list', 'dm.lookup', 'dm.pageDraft', 'dm.pageForget', 'dm.pageGenerate', 'dm.pageLegacyBlocks', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.pageShare', 'dm.pull', 'dm.putMedia', 'dm.react', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
-    'group.meta', 'group.post', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen',
+    'group.meta', 'group.post', 'group.react', 'group.reactors', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
     'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'moments.read', 'node.close', 'node.info', 'notices.list',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read', 'phone.proof', 'phone.sign',
@@ -29,8 +29,8 @@ test('method list and mutating set', (t) => {
     'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
-    'block.set', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
-    'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
+    'block.set', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.react', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
+    'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.react', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
     'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'listing.create', 'listing.delete', 'listing.edit', 'listing.rate', 'listing.status', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'node.close', 'page.register', 'post.create', 'post.delete',
     'post.quote', 'post.reply',
     'profile.delete', 'profile.set', 'repost.set', 'sync.start', 'sync.stop', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'username.add'
@@ -1583,6 +1583,36 @@ test('group.hide', (t) => {
   bad(t, 'group.hide', { group: KEY, target, on: 'yes' })
 })
 
+test('group.react', (t) => {
+  t.ok(isMutating('group.react'))
+  const target = { writer: KEY, seq: 2 }
+  ok(t, 'group.react', { group: KEY, target, emoji: '\u{1f44d}' }, { group: KEY, target, emoji: '\u{1f44d}' })
+  ok(t, 'group.react', { group: KEY, target, emoji: '\u2764\ufe0f' })
+  ok(t, 'group.react', { group: KEY, target, emoji: '' }, { group: KEY, target, emoji: '' })
+  bad(t, 'group.react', { group: KEY, target })
+  bad(t, 'group.react', { group: KEY, emoji: '\u{1f44d}' })
+  bad(t, 'group.react', { target, emoji: '\u{1f44d}' })
+  bad(t, 'group.react', { group: KEY, target: KEY, emoji: '\u{1f44d}' })
+  bad(t, 'group.react', { group: KEY, target: { writer: KEY, seq: 0 }, emoji: '\u{1f44d}' })
+  bad(t, 'group.react', { group: KEY, target: { writer: KEY }, emoji: '\u{1f44d}' })
+  bad(t, 'group.react', { group: KEY, target: { writer: KEY, seq: 2, page: KEY }, emoji: '\u{1f44d}' })
+  bad(t, 'group.react', { group: KEY, target, emoji: 'a' })
+  bad(t, 'group.react', { group: KEY, target, emoji: '\u{1f44d}\u{1f44d}' })
+  bad(t, 'group.react', { group: KEY, target, emoji: null })
+  bad(t, 'group.react', { group: KEY, target, emoji: '\u{1f44d}', page: KEY })
+  bad(t, 'group.react', { group: 'zz', target, emoji: '\u{1f44d}' })
+})
+
+test('group.reactors', (t) => {
+  t.absent(isMutating('group.reactors'))
+  const target = { writer: KEY, seq: 2 }
+  ok(t, 'group.reactors', { group: KEY, target }, { group: KEY, target })
+  bad(t, 'group.reactors', { group: KEY })
+  bad(t, 'group.reactors', { target })
+  bad(t, 'group.reactors', { group: KEY, target: { writer: KEY, seq: 0 } })
+  bad(t, 'group.reactors', { group: KEY, target, emoji: '\u{1f44d}' })
+})
+
 test('group.meta', (t) => {
   t.ok(isMutating('group.meta'))
   ok(t, 'group.meta', { group: KEY, name: 'Novo' }, { group: KEY, name: 'Novo' })
@@ -2143,8 +2173,23 @@ test('dm.* (Conversas)', (t) => {
   ok(t, 'dm.putMedia', { ...put, mime: 'audio/mp4', width: 0, height: 0, kind: 'voice', ms: 2500 }, { ...put, mime: 'audio/mp4', width: 0, height: 0, kind: 'voice', ms: 2500 })
   for (const to of ['ab', KEY.toUpperCase(), KEY + '0', KEY.slice(1), 1, null, true, [KEY], { key: KEY }]) bad(t, 'dm.putMedia', { ...put, to }, 'to ' + JSON.stringify(to))
 
+  t.ok(isMutating('dm.react'))
+  const target = { from: KEY, id: ID }
+  ok(t, 'dm.react', { to: KEY, target, emoji: '\u{1f44d}' }, { to: KEY, target, emoji: '\u{1f44d}' })
+  ok(t, 'dm.react', { to: KEY, target, emoji: '\u2764\ufe0f' })
+  ok(t, 'dm.react', { to: KEY, target, emoji: '' }, { to: KEY, target, emoji: '' })
+  bad(t, 'dm.react', { target, emoji: '\u{1f44d}' }, 'no to')
+  bad(t, 'dm.react', { to: KEY, emoji: '\u{1f44d}' }, 'no target')
+  bad(t, 'dm.react', { to: KEY, target }, 'no emoji')
+  for (const emoji of ['a', 'oi', '\u{1f44d}'.repeat(9), null, 1]) bad(t, 'dm.react', { to: KEY, target, emoji }, 'emoji ' + JSON.stringify(emoji))
+  for (const tg of [null, ID, [KEY, ID], { from: KEY }, { id: ID }, { from: KEY, id: 'x' }, { from: KEY.toUpperCase(), id: ID }, { from: KEY, id: ID, seq: 1 }, { writer: KEY, seq: 1 }]) {
+    bad(t, 'dm.react', { to: KEY, target: tg, emoji: '\u{1f44d}' }, 'target ' + JSON.stringify(tg))
+  }
+  bad(t, 'dm.react', { to: KEY, target, emoji: '\u{1f44d}', page: KEY }, 'no Página path')
+  bad(t, 'dm.react', { to: KEY, target, emoji: '\u{1f44d}', rev: 2 }, 'rev is the node\'s')
+
   t.absent(isMutating('dm.thread'))
-  t.is(DM_THREAD_LIMIT_MAX, 42)
+  t.is(DM_THREAD_LIMIT_MAX, 41)
   ok(t, 'dm.thread', { peer: KEY }, { peer: KEY, limit: 30 })
   ok(t, 'dm.thread', { peer: KEY, before: ID, limit: DM_THREAD_LIMIT_MAX }, { peer: KEY, before: ID, limit: DM_THREAD_LIMIT_MAX })
   ok(t, 'dm.thread', { peer: KEY, limit: 1 })
