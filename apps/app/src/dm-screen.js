@@ -4,6 +4,7 @@
 import { threadOf } from './dm.js'
 import { dayHeading } from './format.js'
 import { sendPlan as attachmentSendPlan } from './attach-plan.js'
+import { plainPreview } from './chatPreview.js'
 
 // A message id is unique only per sender (docs/rpc.md 5.78): a row is keyed
 // by sender and id together.
@@ -167,7 +168,7 @@ export function pinToEnd (state, event) {
 
 // One line for a conversation preview: a line break would show as U+FFFD.
 export function previewLine (value) {
-  return typeof value === 'string' ? value.replace(/\r?\n/g, ' ') : ''
+  return plainPreview(value).replace(/\r?\n/g, ' ')
 }
 
 // Enviar while a send is held as uncertain: the same text and quote re-put

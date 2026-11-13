@@ -78,6 +78,8 @@ import { chatMediaRefs, followAutocorrect, retryChatSend, runChatSend, stagedOf 
 import { Btn, ErrorText, Field, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles } from '../ui/ThemeProvider'
 import { Bubble } from '../ui/Bubble'
+import { cardBesideSpoilers } from '../ui/RichText'
+import { parseRich, plainOf } from '../richText'
 import { ChatComposer, useLinkDraft } from '../ui/ChatComposer'
 import { ChatMedia } from '../ui/ChatMedia'
 import { useChatAttachments } from '../ui/AttachSheet'
@@ -108,9 +110,18 @@ export function initialMessage (initial) {
   return { draft, card }
 }
 
+// The listing a message links outside every spoiler: in the text the bubble
+// shows, or in a stored card the bubble draws.
+export function visibleListingLink (text, card, origin) {
+  const raw = typeof text === 'string' ? text : ''
+  const shown = listingLinkOf(plainOf(raw, { full: true }), origin)
+  if (shown !== null) return shown
+  return card && typeof card === 'object' && cardBesideSpoilers(parseRich(raw), card) !== null ? listingLinkOf(card, origin) : null
+}
+
 export function listingLinkForRow (row, origin) {
   if (!row || row.deleted === true) return null
-  return listingLinkOf(row.rawText, origin) || listingLinkOf(row.card, origin)
+  return visibleListingLink(row.rawText, row.card, origin)
 }
 
 // The quick replies are a buyer's questions: they show while the newest
@@ -806,9 +817,11 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const cardOf = new Map(raw.map((m) => [messageKey(m), m.card]))
   const rows = withDayMarks(threadRows(raw), now)
   for (const row of rows) {
+    // Only an invite link outside every spoiler turns the row into the
+    // Abrir convite form, read in the same text that form shows.
     row.inviteLink = row.deleted === true || typeof onOpenInvite !== 'function'
       ? null
-      : inviteLinkOf(row.rawText, origin)
+      : inviteLinkOf(plainOf(row.rawText, { full: true }), origin)
     row.listingLink = listingLinkForRow({ ...row, card: cardOf.get(row.key) }, origin)
   }
 
@@ -839,7 +852,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   // The thread as offer input: every row with its card, reply id and sender.
   const me = pageKey !== null ? pageKey : ownKey
   const offerMsgs = rows.map((r) => ({ id: r.id, from: r.from, mine: r.mine, text: r.rawText, card: cardOf.get(r.key), replyTo: replyIdOf.get(r.key), at: r.at, deleted: r.deleted }))
-  const linkOfMsg = (m) => listingLinkOf(m.text, origin) || listingLinkOf(m.card, origin)
+  const linkOfMsg = (m) => visibleListingLink(m.text, m.card, origin)
   // The listing chosen on its own screen stays this conversation's target, so
   // Cancelar leaves the Fazer oferta pill for it even in a thread with no link.
   const offerListing = intentListing !== null
@@ -1080,13 +1093,16 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
           if (!mine && !item.deleted && typeof onReport === 'function') {
             actions.push({ icon: 'bandeira', label: LABELS.report, danger: true, onPress: () => onReport({ dm: true, id: item.id, text: item.rawText, author: item.from, ...(Array.isArray(mediaOf.get(item.key)) ? { media: mediaOf.get(item.key) } : {}) }) })
           }
+          // Beside Abrir convite the bubble draws plain text and parses nothing,
+          // so its spoilers and its link card are settled here.
+          const stored = !item.deleted && cardOf.get(item.key) ? cardOf.get(item.key) : null
           const quoted = item.replyTo !== null && item.replyTo !== undefined
             ? { name: quoteAuthor(item), handle: quoteMine(item) ? undefined : quoteHandle, text: item.replyTo, mine: quoteMine(item), senderKey: quoteMine(item) ? undefined : peer }
             : null
           return (
             <Bubble
               media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} deferred={folder === 'request'} /> : null}
-              item={{ key: item.key, text: item.text, rawText: link ? undefined : item.rawText, at: item.at, deleted: item.deleted, dayMark: item.dayMark, card: !item.deleted && cardOf.get(item.key) ? cardOf.get(item.key) : null }}
+              item={{ key: item.key, text: link ? plainOf(item.rawText, { full: true }) : item.text, rawText: link ? undefined : item.rawText, at: item.at, deleted: item.deleted, dayMark: item.dayMark, card: link && stored ? cardBesideSpoilers(parseRich(item.rawText), stored) : stored }}
               mine={mine}
               cardThumb={item.deleted || pageKey !== null ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey }}
               shape={bubbleShape(rows, index)}

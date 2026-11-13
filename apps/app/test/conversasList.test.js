@@ -209,7 +209,7 @@ test('the pure model has no receipt or typing fields, prohibited words or em das
   }
   t.absent(source.includes('\u2014'))
   const imports = source.match(/^import .*$/gm) || []
-  t.alike(imports, ["import { whoOf, UNNAMED } from './who.js'"], 'only who.js')
+  t.alike(imports, ["import { whoOf, UNNAMED } from './who.js'", "import { plainPreview } from './chatPreview.js'"], 'only who.js and the pure preview helper')
   t.absent(/\brequire\s*\(/.test(source), 'no runtime dependencies')
   const rows = mergeRows({
     dmConversations: [{ peer: 'a', read: true, delivered: true, typing: true }],
