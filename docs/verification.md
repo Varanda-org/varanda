@@ -9674,3 +9674,26 @@ Nenhuma conferência em aparelho nem com o provedor real foi feita nesta tarefa.
 - [ ] Os quatro players incorporados e a regra de leitor de tela para início automático continuam como antes.
 - [ ] Fechar e reabrir o app, ou recarregar a página na web, restaura o som. A escolha não aparece em outro aparelho, e **Tocar música sozinha** mantém o valor guardado.
 - [ ] Uma conta que aceitou a versão 46 recebe os Termos de Uso e a Política de Privacidade 47 para novo aceite.
+
+## 209. Reload completo do JS no gate do Android (issue #14, 2026-11-07)
+
+### O que mudou
+
+- `apps/app/scripts/gate-server.js` ganhou `--reload` e o passo `j`; `apps/app/src/gate/harness.js` ganhou a fase `reloaded`. Depois do passo `i`, o app inicia uma sincronização contínua e chama `DevSettings.reload()` (reload completo, não Fast Refresh). O novo contexto inicia o nó com o `recover: true` padrão e confere `node.info`, o post no `log.read` e uma sincronização contínua até `sync ready`. No Android, o driver conta as threads `bare-worklet` do processo antes do reload e depois da resposta do novo nó, e exige o mesmo número (1).
+- Uma falha antes do reload (sem `DevSettings.reload`, ou o `sync.start` que o precede) é reportada como falha do passo `j`, e o gate para na hora em vez de esperar o limite de tempo.
+- Sem `--reload` o gate é o mesmo de antes (passos `a` a `i`).
+- O driver espera o relato do passo `j` terminar (a nova contagem de worklets, até 5 s) antes de aceitar o `done`, para que a pontuação não rode sem o `j`. No Android, uma contagem que o `adb` não devolveu (`pidof` ou `ps` falhou) reprova o passo `j`; no iOS, que não conta worklets, segue como "não medido". O `sync ready` esperado antes do reload é o da nova partida, não um evento velho do passo `f`.
+
+### Executado
+
+Emulador `LembraApi36` (Android 16, API 36, google_apis x86_64), build de debug `app.varanda.debug` (JDK 21, `./gradlew assembleDebug -PreactNativeArchitectures=x86_64`), Metro iniciado sem `CI=1` (em modo CI o Metro não vigia arquivos e serve o código antigo), `npm run gate -- --platform android --host <ip da máquina> --reload`:
+
+- Passos `a` a `i`: PASS, como na seção 30.
+- Passo `j`: PASS. Reload com a sincronização contínua rodando, o novo worklet abriu o armazenamento (`recover true`, sem `LOCKED`), `node.info` e o post presentes, sincronização contínua pronta. Threads `bare-worklet`: 1 antes do reload, 1 depois.
+- Controle: com o worklet criado sem id (`id: null` em `native.js`, revertido depois), o passo `j` também passou, com 1 e 1. No Android, o worklet anterior já sai sem o registro por id (o reload destrói a instância React antiga e o worklet vai junto); o id fixo fica como segunda camada. O teste não distingue as duas.
+
+### Não executado
+
+- [ ] iOS (simulador ou aparelho): o driver não conta worklets no iOS, então o passo `j` só confere que o novo nó abre sem `LOCKED`.
+- [ ] Aparelho Android real e arm64-v8a.
+- [ ] Reload pelo menu de desenvolvedor ou pela tecla `r` do Metro, em vez de `DevSettings.reload()`.
