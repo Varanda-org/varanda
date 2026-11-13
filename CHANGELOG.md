@@ -5,6 +5,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ## [Não lançado]
 
+- Fotos primeiro e legenda recolhida (PR `feat/post-captions`): na linha de publicação as fotos vêm antes da legenda; uma legenda longa fica em 3 linhas (com fotos) ou 9 (só texto), com "mais" / "ver mais" e "menos", e o contador "N de M" do carrossel some depois de 1,6 s, os pontos passam a ser no máximo 5 e as setas da web só aparecem com o mouse em cima ou o foco do teclado. Verificação na seção 190 de `docs/verification.md`.
 - Base visual do app (PR `feat/ui-foundations`): a aba ativa da barra de baixo ganha uma pílula suave, o botão de publicar encolhe e escurece ao ser apertado (só escurece com Reduzir movimento), e a folha de ações ganha um espaço opcional de cabeçalho, sem mudar nenhuma tela existente. Os tokens de movimento novos já servem a pílula e o botão; chegam também estilos de texto, esqueletos de carregamento e ícones de categoria para os próximos PRs. Verificação na seção 189 de `docs/verification.md`.
 
 ### Segurança

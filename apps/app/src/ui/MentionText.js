@@ -21,17 +21,17 @@ export function hasMention (text) {
   return textSegments(text, { mentions: true }).some((segment) => segment.username !== null)
 }
 
-export function MentionText ({ text, onOpenMention, onOpenPlain, onLongPress, numberOfLines, style, selectable }) {
+export function MentionText ({ text, onOpenMention, onOpenPlain, onLongPress, numberOfLines, onTextLayout, style, selectable }) {
   const styles = useStyles(makeStyles)
   const segments = textSegments(text, { mentions: typeof onOpenMention === 'function' })
   // A clamp can hide part of a URL, so the visible prefix would open another site.
   const links = typeof numberOfLines !== 'number'
   const plain = typeof onOpenPlain === 'function' ? onOpenPlain : undefined
   if (!segments.some((segment) => segment.username !== null || (links && segment.href !== null))) {
-    return <Text style={style} numberOfLines={numberOfLines} selectable={selectable} onPress={plain} onLongPress={onLongPress}>{displayText(text, { multiline: true })}</Text>
+    return <Text style={style} numberOfLines={numberOfLines} onTextLayout={onTextLayout} selectable={selectable} onPress={plain} onLongPress={onLongPress}>{displayText(text, { multiline: true })}</Text>
   }
   return (
-    <Text style={style} numberOfLines={numberOfLines} selectable={selectable}>
+    <Text style={style} numberOfLines={numberOfLines} onTextLayout={onTextLayout} selectable={selectable}>
       {segments.map((segment, i) => {
         if (segment.username !== null) {
           return (
