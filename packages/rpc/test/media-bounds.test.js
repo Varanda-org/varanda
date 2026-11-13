@@ -8,7 +8,7 @@ function bytes (...parts) {
   for (const part of parts) {
     if (typeof part === 'string') for (const c of part) out.push(c.charCodeAt(0))
     else if (typeof part === 'number') out.push(part)
-    else out.push(...part)
+    else for (const b of part) out.push(b)
   }
   return new Uint8Array(out)
 }
