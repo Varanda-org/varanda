@@ -560,6 +560,37 @@ test('digests: a msg row keeps its digest and a reaction row its target.digest a
   await again.close()
 })
 
+test('a bound reply keeps replyFrom and replyDigest beside the bare replyTo across a reopen; a bare reply has neither', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await s.unlock(key(7))
+  const D = 'ef'.repeat(32)
+  const bound = { ...msg(s.nextFiled()), id: '34'.repeat(16), replyTo: ID, replyFrom: PEER, replyDigest: D }
+  const bare = { ...msg(s.nextFiled()), id: '56'.repeat(16), replyTo: ID }
+  await s.append([msg(s.nextFiled()), bound, bare])
+  s.lock()
+
+  const again = createDmStore({ storage })
+  await again.unlock(key(7))
+  const rows = again.snapshot().messages
+  const b = rows.find((m) => m.id === bound.id)
+  t.alike([b.replyTo, b.replyFrom, b.replyDigest], [ID, PEER, D], 'the stored replyTo stays the bare id')
+  const plain = rows.find((m) => m.id === bare.id)
+  t.is(plain.replyTo, ID)
+  t.absent('replyFrom' in plain || 'replyDigest' in plain, 'a bare reply has no binding')
+
+  const base = { ...msg(again.nextFiled()), id: '78'.repeat(16), replyTo: ID }
+  for (const [bad, why] of [
+    [{ ...base, replyFrom: PEER }, 'replyFrom without replyDigest'],
+    [{ ...base, replyDigest: D }, 'replyDigest without replyFrom'],
+    [{ ...base, replyTo: null, replyFrom: PEER, replyDigest: D }, 'a binding with no replyTo'],
+    [{ ...base, replyFrom: 'AB'.repeat(32), replyDigest: D }, 'replyFrom not lowercase hex'],
+    [{ ...base, replyFrom: PEER, replyDigest: 'ef'.repeat(31) }, 'replyDigest too short'],
+    [{ ...base, replyFrom: PEER, replyDigest: 1 }, 'replyDigest not a string']
+  ]) await t.exception.all(again.append([bad]), /linha inválida/, why)
+  await again.close()
+})
+
 test('a reaction row stored without a target digest is skipped on load and the store still opens', async (t) => {
   const storage = memoryNodeStorage()
   const s = createDmStore({ storage })

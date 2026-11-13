@@ -1501,6 +1501,115 @@ test('dm.react between two nodes: the reaction names the message digest both sid
   t.alike((await A.web.request('dm.thread', { peer: B.key })).messages[0].reactions, [{ emoji: '\u{1f44d}', mine: true }], 'the device with the history keeps it on the original')
 })
 
+test('dm.send: a reply to a row with a digest signs and stores { from, id, digest }; a row without one is quoted by its bare id; a stored binding to another digest reads replyMissing', async (t) => {
+  let local = null
+  const { engine, prf, link, own, association, kp, peer, recipientBox, send } = await sendingEngine(t, {
+    stamps: 6,
+    options: { createStore: (o) => (local = createDmStore(o)) }
+  })
+  const put = link.put
+  const putBytes = []
+  link.put = async (bytes) => {
+    putBytes.push(bytes)
+    return put(bytes)
+  }
+  const ownBox = await dmBoxKeyPairFromPrf(prf, 1)
+  const selfCopy = () => dmCore.openInner(dmCore.openSealed(dmCore.decodeDrop(putBytes[putBytes.length - 1]).sealed, ownBox), own, { association })
+  const storedRow = (id) => local.snapshot().messages.find((m) => m.id === id)
+
+  const sent = await send()
+  const digest = storedRow(sent.id).digest
+  t.ok(/^[0-9a-f]{64}$/.test(digest), 'the quoted row has a digest')
+  const reply = await engine.send(own, kp, { to: peer, text: 'resposta', replyTo: sent.id }, recipientBox)
+  const inner = selfCopy()
+  t.is(inner.v, 2, 'a bound reply is an inner v2')
+  t.alike(inner.replyTo, { from: own, id: sent.id, digest }, 'signed bound to the quoted sender, id and digest')
+  const stored = storedRow(reply.id)
+  t.alike([stored.replyTo, stored.replyFrom, stored.replyDigest], [sent.id, own, digest], 'stored as the bare id beside the binding')
+
+  // The shape a build without digests filed: quoted by its bare id, as before.
+  const old = { t: 'msg', id: '77'.repeat(16), peer, from: peer, text: 'de antes', replyTo: null, at: '2026-11-03T09:00:00.000Z', mine: false, filedAt: local.nextFiled() }
+  await local.append([old])
+  const bare = await engine.send(own, kp, { to: peer, text: 'sobre aquela', replyTo: old.id }, recipientBox)
+  t.is(selfCopy().v, 1, 'a bare reply to a text keeps inner v1')
+  t.is(selfCopy().replyTo, old.id)
+  t.absent('replyFrom' in storedRow(bare.id) || 'replyDigest' in storedRow(bare.id))
+
+  // A binding that names another digest under the same sender and id.
+  const other = { t: 'msg', id: '88'.repeat(16), peer, from: peer, text: 'outra', replyTo: sent.id, replyFrom: own, replyDigest: 'e0'.repeat(32), at: '2026-11-03T09:30:00.000Z', mine: false, filedAt: local.nextFiled() }
+  await local.append([other])
+
+  const rows = (await engine.thread(own, { peer })).messages
+  const row = (id) => rows.find((m) => m.id === id)
+  t.is(row(reply.id).replyTo, sent.id)
+  t.is(row(reply.id).replyFrom, own, 'the quoted row is kept here')
+  t.absent('replyMissing' in row(reply.id))
+  t.absent('replyDigest' in row(reply.id) || 'digest' in row(reply.id), 'dm.thread hands out no digest')
+  t.is(row(bare.id).replyTo, old.id)
+  t.absent('replyFrom' in row(bare.id) || 'replyMissing' in row(bare.id), 'a bare reply carries neither')
+  t.is(row(other.id).replyTo, sent.id)
+  t.is(row(other.id).replyMissing, true, 'another digest: the message it quoted is not on this device')
+  t.absent('replyFrom' in row(other.id))
+})
+
+test('dm.send between two nodes: a bound reply quotes the message both sides store; a message reusing the id on a device without the history leaves the reply without a quote', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url)
+  const B = await memberNode(t, assoc, seeder.url)
+  await copyDiary(A, B)
+  await copyDiary(B, A)
+  const boxA = await dmBoxKeyPairFromPrf(A.prf, 1)
+  const boxB = await dmBoxKeyPairFromPrf(B.prf, 1)
+  const open = (bytes, pair, self) => dmCore.openInner(dmCore.openSealed(dmCore.decodeDrop(bytes).sealed, pair), self, { association: hex(assoc.publicKey) })
+
+  const before = seeder.pool.entries.length
+  const first = await B.web.request('dm.send', { to: A.key, text: 'primeira' })
+  const msgEntries = seeder.pool.entries.slice(before)
+  const sent = dmCore.bodyDigest(open(msgEntries[0].bytes, boxA, A.key))
+  t.is((await A.web.request('dm.pull')).added, 1)
+
+  const replyAt = seeder.pool.entries.length
+  const reply = await A.web.request('dm.send', { to: B.key, text: 'respondendo', replyTo: first.id })
+  const replyEntries = seeder.pool.entries.slice(replyAt)
+  t.is(replyEntries.length, 2, 'peer copy and self copy')
+  const rx = open(replyEntries[0].bytes, boxB, B.key)
+  t.is(rx.v, 2)
+  t.alike(rx.replyTo, { from: B.key, id: first.id, digest: sent }, 'the reply names the digest the sender signed')
+  t.alike(open(replyEntries[1].bytes, boxA, A.key).replyTo, rx.replyTo, 'the self copy names the same')
+
+  await B.web.request('dm.pull')
+  const onB = (await B.web.request('dm.thread', { peer: A.key })).messages
+  t.alike(onB.map((m) => [m.id, m.replyTo, m.replyFrom, m.replyMissing]), [[first.id, null, undefined, undefined], [reply.id, first.id, B.key, undefined]], 'the sender shows the quote')
+  const onA = (await A.web.request('dm.thread', { peer: B.key })).messages
+  t.is(onA[1].replyFrom, B.key)
+
+  // B, with a modified client, signs another message under the same id. The
+  // original drops are gone from the pool (past retention), so A's new
+  // device files the new message and A's own signed reply.
+  const key = await dmLocalKeyFromPrf(B.prf)
+  const w = await store.readDmStamps(B.storage)
+  const stamp = { kid: w.items[0].kid, ...gc.openRecord({ nonce: w.items[0].nonce, box: w.items[0].box }, key) }
+  await store.writeDmStamps(B.storage, { items: w.items.slice(1), kids: w.kids })
+  const reused = dmCore.buildInner({ kind: 'msg', id: first.id, to: A.key, text: 'trocada', cert: createCert({ member: B.key }, assoc) }, B.keyPair)
+  const drop = dmCore.encodeDrop({ dropId: dmCore.newDropId(), kid: b4a.from(stamp.kid, 'hex'), rsaSig: b4a.from(stamp.sig, 'base64'), token: b4a.from(stamp.token, 'hex'), sealed: dmCore.sealInner(reused, hex(boxA.publicKey)) })
+  t.ok(seeder.pool.submit(drop), 'the pool takes the drop')
+  for (const e of msgEntries) seeder.pool.entries.splice(seeder.pool.entries.indexOf(e), 1)
+
+  const A2 = await memberNode(t, assoc, seeder.url, { keyPair: A.keyPair, prf: A.prf, enable: false })
+  await A2.web.request('dm.pull')
+  const rows = (await A2.web.request('dm.thread', { peer: B.key })).messages
+  const quoted = rows.find((m) => m.id === first.id)
+  t.is(quoted && quoted.text, 'trocada', 'the new device files the message under the reused id')
+  const r2 = rows.find((m) => m.id === reply.id)
+  t.ok(r2, 'the reply is filed')
+  t.is(r2.replyTo, first.id)
+  t.is(r2.replyMissing, true, 'the reply is not shown quoting the other message')
+  t.absent('replyFrom' in r2)
+  t.is((await A.web.request('dm.thread', { peer: B.key })).messages[1].replyFrom, B.key, 'the device with the history keeps the quote')
+})
+
 const PAGE_AT = '2026-11-03T12:00:00.000Z'
 const PAGE_NONCE = 'r'.repeat(43)
 

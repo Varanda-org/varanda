@@ -127,6 +127,29 @@ test('thread rows pair each message with its own source in time order', async (t
   t.is(rows[1].replyTo, 'antes')
 })
 
+test('quote targets: a bound reply names its row, author and text from one message', async (t) => {
+  const { threadRows, quoteTargets } = await screen()
+  const at = (m) => '2026-11-01T10:0' + m + ':00.000Z'
+  const raw = [
+    { id: ID, from: B, text: 'deles', at: at(0), mine: false, replyTo: null },
+    { id: ID, from: A, text: 'minha', at: at(1), mine: true, replyTo: null },
+    { id: '2'.repeat(32), from: B, text: 'resposta', at: at(2), mine: false, replyTo: ID, replyFrom: B },
+    { id: '3'.repeat(32), from: B, text: 'sem alvo', at: at(3), mine: false, replyTo: ID, replyMissing: true },
+    { id: '4'.repeat(32), from: B, text: 'antiga', at: at(4), mine: false, replyTo: ID }
+  ]
+  const rows = threadRows(raw)
+  const quotes = quoteTargets(raw, rows)
+  const bound = quotes.get(B + ':' + '2'.repeat(32))
+  t.is(bound.target.key, B + ':' + ID, 'the sender it names, not the smaller key')
+  t.is(bound.target.mine, false)
+  t.is(rows[2].replyTo, 'deles', 'the text comes from the same message')
+  t.alike(quotes.get(B + ':' + '3'.repeat(32)), { missing: true, target: null })
+  t.is(rows[3].replyTo, 'respondendo a uma mensagem que não está neste aparelho')
+  t.is(quotes.get(B + ':' + '4'.repeat(32)).target.key, A + ':' + ID, 'a bare id keeps the smaller sender key')
+  t.is(rows[4].replyTo, 'minha')
+  t.absent(quotes.has(A + ':' + ID), 'no reply, no entry')
+})
+
 test('an older thread page is prepended and the held copy wins', async (t) => {
   const { mergeMessages } = await screen()
   const old = { id: '3'.repeat(32), from: A, text: 'velha', at: '2026-10-01T10:00:00.000Z' }
@@ -211,7 +234,7 @@ test('an uncertain send stays held until a different text is confirmed', async (
 test('dm-screen stays pure', async (t) => {
   const source = readFileSync(join(__dirname, '../src/dm-screen.js'), 'utf8')
   const imports = source.split('\n').filter((line) => line.startsWith('import '))
-  t.alike(imports, ["import { threadOf } from './dm.js'", "import { dayHeading } from './format.js'", "import { sendPlan as attachmentSendPlan } from './attach-plan.js'", "import { plainPreview } from './chatPreview.js'"])
+  t.alike(imports, ["import { threadOf, quoteIndex, quoteOf } from './dm.js'", "import { dayHeading } from './format.js'", "import { sendPlan as attachmentSendPlan } from './attach-plan.js'", "import { plainPreview } from './chatPreview.js'"])
   t.absent(source.includes(String.fromCharCode(0x2014)))
 })
 
@@ -435,7 +458,9 @@ test('a quote of an unloaded message names no author yet', (t) => {
 
 test('private chat: quote author, personal retry and one character counter', (t) => {
   const screen = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
-  t.ok(screen.includes('if (held === undefined || String(r.from) < String(held.from)) rowById.set(r.id, r)'), 'a shared id resolves like threadOf')
+  t.ok(screen.includes('const quotes = quoteTargets(raw, rows)'), 'a quote resolves like threadOf')
+  t.ok(screen.includes('onPress: quoteMissing(item) ? undefined : () => scrollToKey(quoteTarget(item)?.key)'), 'a quote that is not here jumps nowhere')
+  t.ok(screen.includes('replyTo: quotes.get(r.key)?.target?.id ?? null'), 'an offer answer counts only through the quoted row')
   t.ok(screen.includes("onPress={typeof hold.retry === 'function' ? retryHeld : () => send(hold.text, hold.quoteId, hold.card || null)}"), 'Tentar de novo resends on a personal account')
   t.ok(screen.includes("{typeof hold.retry === 'function' || pageKey === null"), 'a page never signs a second message from this button')
   t.absent(screen.includes('caracteres restantes'), 'the composer draws the counter once')

@@ -33,6 +33,7 @@ export const LABELS = Object.freeze({
   uncertain: 'Não deu para confirmar o envio. Tentar de novo manda a mesma mensagem.',
   deletedQuote: 'respondendo a uma mensagem apagada neste aparelho',
   olderQuote: 'respondendo a uma mensagem anterior',
+  missingQuote: 'respondendo a uma mensagem que não está neste aparelho',
   reportNote: 'Só esta mensagem e a conta de quem enviou vão para a moderação. Nada mais da conversa.'
 })
 
@@ -108,7 +109,8 @@ export function requestsDot (requests) {
 // Oldest first, so the newest line sits at the bottom. A replyTo id becomes
 // that message's text. A message marked deleted quotes LABELS.deletedQuote
 // instead of its text. No quote stays null; an id that is not among the loaded rows quotes
-// LABELS.olderQuote.
+// LABELS.olderQuote, and a bound reply whose message this device does not
+// hold quotes LABELS.missingQuote.
 function compareMessages (a, b) {
   const ta = timeOf(a)
   const tb = timeOf(b)
@@ -124,9 +126,42 @@ function shownText (value) {
   return typeof value === 'string' ? displayText(value, { multiline: true }) : ''
 }
 
-function quoteOf (ref, byId) {
+// The loaded rows a quote can point at: by sender and id, and by id alone
+// for a bare-id reply. dm.thread rows have one id per thread (@varanda/core
+// lib/dm-fold.js); should two rows share one, the smaller sender key wins,
+// as replyTarget does.
+export function quoteIndex (messages) {
+  const byKey = new Map()
+  const byId = new Map()
+  for (const message of Array.isArray(messages) ? messages : []) {
+    if (!isMessage(message)) continue
+    byKey.set(String(message.from) + ':' + message.id, message)
+    const held = byId.get(message.id)
+    if (held === undefined || String(message.from) < String(held.from)) byId.set(message.id, message)
+  }
+  return { byKey, byId }
+}
+
+// What a message quotes: null for no reply, else { missing, target }. A
+// bound reply (rpc 5.78) carries `replyFrom` when this device holds the
+// message it was made for, found here by sender and id, and
+// `replyMissing` when it does not: then there is no target, never another
+// message under that id. A bare id from an earlier build is found by id.
+// target null with missing false: not among the loaded rows.
+export function quoteOf (message, index) {
+  const ref = message && typeof message === 'object' ? message.replyTo : null
   if (typeof ref !== 'string' || ref.length === 0) return null
-  const target = byId.get(ref)
+  if (message.replyMissing === true) return { missing: true, target: null }
+  const target = typeof message.replyFrom === 'string'
+    ? index.byKey.get(message.replyFrom + ':' + ref)
+    : index.byId.get(ref)
+  return { missing: false, target: target || null }
+}
+
+function quoteText (quote) {
+  if (quote === null) return null
+  if (quote.missing) return LABELS.missingQuote
+  const target = quote.target
   if (!target) return LABELS.olderQuote
   if (target.deleted === true) return LABELS.deletedQuote
   return typeof target.text === 'string' ? displayText(target.text, { multiline: true }) : null
@@ -140,14 +175,7 @@ function isMessage (message) {
 export function threadOf (messages) {
   const list = Array.isArray(messages) ? messages.filter(isMessage) : []
   const ordered = list.sort(compareMessages)
-  // dm.thread rows have one id per thread (@varanda/core lib/dm-fold.js);
-  // should two rows share one, the smaller sender key wins, as replyTarget
-  // does.
-  const byId = new Map()
-  for (const message of ordered) {
-    const held = byId.get(message.id)
-    if (held === undefined || String(message.from) < String(held.from)) byId.set(message.id, message)
-  }
+  const index = quoteIndex(ordered)
   return ordered.map((message) => {
     const deleted = message.deleted === true
     return {
@@ -155,7 +183,7 @@ export function threadOf (messages) {
       at: typeof message.at === 'string' ? message.at : null,
       text: deleted ? '' : shownText(message.text),
       deleted,
-      replyTo: quoteOf(message.replyTo, byId)
+      replyTo: quoteText(quoteOf(message, index))
     }
   })
 }

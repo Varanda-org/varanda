@@ -9,6 +9,7 @@
 // side: unread is local and never leaves the device. A reaction (inner v4)
 // only adds `reactions` to the row it names: it never changes unread, the
 // preview, the thread order, a cutoff or the DM_MESSAGES_PER_PEER cap.
+// A bound reply quotes only the kept row with its sender, id and digest.
 
 const { copyLinkCard } = require('./link-card')
 const { DM_REQUESTS_MAX, DM_MESSAGES_PER_PEER } = require('./dm')
@@ -147,11 +148,36 @@ function applyReactions (self, kept, list) {
   for (const row of kept) if (row.reactions) row.reactions.sort((a, b) => Number(a.mine) - Number(b.mine))
 }
 
+// A reply as a row keeps it: `replyTo` the bare id (null for none) and
+// `bind` { from, digest } for a bound reply (inner v2 or v3), else null. A
+// bare id is what earlier builds wrote; a malformed bound one is no reply.
+function replyOf (r) {
+  if (r === undefined || r === null) return { replyTo: null, bind: null }
+  if (typeof r === 'string') return { replyTo: r, bind: null }
+  if (typeof r !== 'object' || typeof r.id !== 'string' || !HEX32.test(r.id) || !isHex64(r.from) || !isHex64(r.digest)) return { replyTo: null, bind: null }
+  return { replyTo: r.id, bind: { from: r.from, digest: r.digest } }
+}
+
+// Marks each bound reply of the kept rows: `quoted` is true only when the
+// row it names by sender and id is kept here with the digest it names. A
+// row without a digest, another message filed under that sender and id, or
+// one cut off or past the cap is not the message the reply was made for.
+function bindReplies (kept) {
+  const rows = new Map()
+  for (const row of kept) rows.set(row.from + ':' + row.id, row)
+  for (const row of kept) {
+    if (row.bind === null) continue
+    const target = rows.get(row.bind.from + ':' + row.replyTo)
+    row.quoted = target !== undefined && target.digest !== '' && target.digest === row.bind.digest
+  }
+}
+
 // fold({ self, followSet, messages, ops, seen, reactions }) -> { inbox, requests },
 // each a list of { peer, folder, messages, at, unread } newest first.
 // seen: Set of seenKey(from, id) strings.
 // messages: verified bodies { id, from, to, text, replyTo, media?, fwd?, at,
-// filedAt, digest? } (media null or absent for a v1 body; digest the hex64
+// filedAt, digest? } (media null or absent for a v1 body; replyTo null, a
+// bare id or a bound { from, id, digest }; digest the hex64
 // of the canonical inner JSON, absent for a row stored without one);
 // ops: { op, peer, at, filedAt }; reactions: see reactionsByPeer, under
 // the same filing cutoffs as the rows. filedAt is the LOCAL time in ms at which
@@ -198,7 +224,7 @@ function fold ({ self, followSet, messages, ops, seen, reactions } = {}) {
     ids.add(key)
     const mine = m.from === self
     const media = Array.isArray(m.media) && m.media.length > 0 ? m.media : null
-    const row = { id: m.id, from: m.from, to: m.to, text: m.text, replyTo: m.replyTo === undefined ? null : m.replyTo, fwd: m.fwd === 1 ? 1 : 0, media, card: media || !m.card ? null : copyLinkCard(m.card, (d) => ({ ...d })), at: new Date(t).toISOString(), sentAt: m.at, mine, peer, t, f, digest: isHex64(m.digest) ? m.digest : '' }
+    const row = { id: m.id, from: m.from, to: m.to, text: m.text, ...replyOf(m.replyTo), fwd: m.fwd === 1 ? 1 : 0, media, card: media || !m.card ? null : copyLinkCard(m.card, (d) => ({ ...d })), at: new Date(t).toISOString(), sentAt: m.at, mine, peer, t, f, digest: isHex64(m.digest) ? m.digest : '' }
     if (!byPeer.has(peer)) byPeer.set(peer, [])
     byPeer.get(peer).push(row)
   }
@@ -226,6 +252,7 @@ function fold ({ self, followSet, messages, ops, seen, reactions } = {}) {
     kept.sort(byTime)
     if (kept.length > DM_MESSAGES_PER_PEER) kept = kept.slice(kept.length - DM_MESSAGES_PER_PEER)
     applyReactions(self, kept, peerReacts.map(x => x.r))
+    bindReplies(kept)
     const last = kept[kept.length - 1]
     const thread = {
       peer,
@@ -247,9 +274,16 @@ function fold ({ self, followSet, messages, ops, seen, reactions } = {}) {
 // every reader orders and pages by. `sentAt` is the sender's claim, shown
 // only as information. `reactions` ([{ emoji, mine }], at most one per
 // person) only when there is one. `digest` only when the row has one: what
-// a new reaction to it names (callers never hand it out in dm.thread).
+// a new reaction or a bound reply to it names (callers never hand it out in
+// dm.thread). `replyTo` is always the bare id; a bound reply adds
+// `replyFrom`, the quoted sender, when the message it names is kept here,
+// and `replyMissing: true` when it is not.
 function publicRow (r) {
   const row = { id: r.id, from: r.from, to: r.to, text: r.text, replyTo: r.replyTo, fwd: r.fwd, media: r.media, card: r.card, at: r.at, sentAt: r.sentAt, mine: r.mine, peer: r.peer }
+  if (r.bind !== null) {
+    if (r.quoted) row.replyFrom = r.bind.from
+    else row.replyMissing = true
+  }
   if (r.digest !== '') row.digest = r.digest
   if (r.reactions) row.reactions = r.reactions
   return row
@@ -290,6 +324,7 @@ function tabDot (threads) {
 // The message a reply points at, only inside one peer's thread. fold keeps
 // one row per id per thread; rows sharing an id only reach here from other
 // input, and then the smaller sender key wins, the same on every device.
+// A new reply binds to the row found here when it has a digest.
 function replyTarget (messages, id) {
   if (!Array.isArray(messages) || typeof id !== 'string' || !HEX32.test(id)) return null
   if (!messages.every(m => m !== null && typeof m === 'object')) return null

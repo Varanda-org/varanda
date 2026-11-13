@@ -9,7 +9,7 @@ const load = () => import('../src/dm.js')
 test('dm.js exports the list helpers, the thread and the labels', async (t) => {
   const dm = await load()
   t.alike(Object.keys(dm).sort(), [
-    'LABELS', 'UNSURE_SEND', 'requestsDot', 'sortConversations', 'splitFolders', 'tabDot', 'threadOf'
+    'LABELS', 'UNSURE_SEND', 'quoteIndex', 'quoteOf', 'requestsDot', 'sortConversations', 'splitFolders', 'tabDot', 'threadOf'
   ].sort())
   const imports = readFileSync(join(__dirname, '../src/dm.js'), 'utf8')
     .split('\n')
@@ -43,6 +43,7 @@ test('LABELS are the approved Portuguese', async (t) => {
     uncertain: 'Não deu para confirmar o envio. Tentar de novo manda a mesma mensagem.',
     deletedQuote: 'respondendo a uma mensagem apagada neste aparelho',
     olderQuote: 'respondendo a uma mensagem anterior',
+    missingQuote: 'respondendo a uma mensagem que não está neste aparelho',
     reportNote: 'Só esta mensagem e a conta de quem enviou vão para a moderação. Nada mais da conversa.'
   })
 })
@@ -175,6 +176,34 @@ test('threadOf is oldest first and resolves replyTo to the quoted text or null',
     { id: 'r', from: small, at: '2026-05-03T00:00:00.000Z', text: 'resposta', replyTo: 'x', mine: true }
   ])
   t.is(otherDevice[2].replyTo, 'da chave menor', 'the same quote on the other device, whatever the order')
+})
+
+test('a bound reply quotes only the message of its sender, or says it is not here', async (t) => {
+  const { threadOf, quoteIndex, quoteOf, LABELS } = await load()
+  const small = 'a'.repeat(64)
+  const big = 'b'.repeat(64)
+  const x = { id: 'x', from: big, at: '2026-05-01T00:00:00.000Z', text: 'da chave maior', replyTo: null }
+  const y = { id: 'x', from: small, at: '2026-05-02T00:00:00.000Z', text: 'da chave menor', replyTo: null }
+  // replyFrom names the sender, so the larger key's message is quoted even
+  // where a bare id would take the smaller one.
+  const bound = { id: 'r', from: small, at: '2026-05-03T00:00:00.000Z', text: 'resposta', replyTo: 'x', replyFrom: big }
+  const missing = { id: 's', from: small, at: '2026-05-04T00:00:00.000Z', text: 'outra', replyTo: 'x', replyMissing: true }
+  const away = { id: 'u', from: big, at: '2026-05-05T00:00:00.000Z', text: 'longe', replyTo: 'z', replyFrom: small }
+  const legacy = { id: 'v', from: big, at: '2026-05-06T00:00:00.000Z', text: 'antiga', replyTo: 'x' }
+  const rows = threadOf([x, y, bound, missing, away, legacy])
+  t.is(rows[2].replyTo, 'da chave maior', 'a bound reply quotes the sender it names')
+  t.is(rows[3].replyTo, LABELS.missingQuote, 'never another message under the same id')
+  t.is(rows[4].replyTo, LABELS.olderQuote, 'a bound reply outside the loaded rows is neutral')
+  t.is(rows[5].replyTo, 'da chave menor', 'a bare id keeps the smaller sender key')
+  const index = quoteIndex([x, y, null, { id: '' }])
+  t.is(quoteOf(bound, index).target, x)
+  t.alike(quoteOf(missing, index), { missing: true, target: null })
+  t.alike(quoteOf(away, index), { missing: false, target: null })
+  t.is(quoteOf(legacy, index).target, y)
+  t.is(quoteOf(x, index), null, 'no reply quotes nothing')
+  t.is(quoteOf({ ...x, replyMissing: true }, index), null, 'replyMissing without a reply quotes nothing')
+  t.is(quoteOf(null, index), null)
+  t.is(quoteOf({ ...bound, replyFrom: small }, index).target, y, 'the sender is matched exactly')
 })
 
 test('dm.js has no read, delivery or typing words and no em dash', async (t) => {

@@ -455,7 +455,9 @@ const DM_REACTION_BOUND = '\u{1f600}'.repeat(REACTION_MAX_BYTES / 4)
 // even carry together: a bound, not a message that exists.
 function dmThreadResult (n, ch, card = true) {
   const reactions = [{ emoji: DM_REACTION_BOUND, mine: false }, { emoji: DM_REACTION_BOUND, mine: true }]
-  const message = { id: 'f'.repeat(32), from: HEX, text: ch.repeat(MAX_TEXT), replyTo: 'f'.repeat(32), fwd: 1, at: AT, mine: false, media: card ? null : widestDmMedia(MAX_DM_MEDIA), card: card ? DM_CARD : null, reactions }
+  // A bound reply whose message is kept carries replyFrom, wider than
+  // replyMissing: true, and a row never carries both.
+  const message = { id: 'f'.repeat(32), from: HEX, text: ch.repeat(MAX_TEXT), replyTo: 'f'.repeat(32), replyFrom: HEX, fwd: 1, at: AT, mine: false, media: card ? null : widestDmMedia(MAX_DM_MEDIA), card: card ? DM_CARD : null, reactions }
   return { messages: Array(n).fill(message), next: 'f'.repeat(32), folder: 'request', blocked: false }
 }
 
@@ -481,8 +483,8 @@ test('dm.thread: DM_THREAD_LIMIT_MAX fits, one more does not', (t) => {
   const worst = size(dmThreadResult(DM_THREAD_LIMIT_MAX, '\u{1f600}'))
   t.comment('dm.thread worst case at ' + DM_THREAD_LIMIT_MAX + ' messages: ' + worst + ' bytes')
   const overflow = size(dmThreadResult(DM_THREAD_LIMIT_MAX + 1, '\u{1f600}'))
-  t.is(worst, 258803)
-  t.is(overflow, 265112)
+  t.is(worst, 262042)
+  t.is(overflow, 268430)
   t.comment('dm.thread worst case at ' + (DM_THREAD_LIMIT_MAX + 1) + ' messages: ' + overflow + ' bytes')
   t.ok(overflow > MAX_MESSAGE, 'largest that fits')
 })
@@ -499,6 +501,18 @@ test('dm.thread: a reactable:false row (no reactions) is never larger than the w
   const page = dmThreadResult(DM_THREAD_LIMIT_MAX, '\u{1f600}')
   const { reactions, ...rest } = page.messages[0]
   t.ok(size({ ...page, messages: Array(DM_THREAD_LIMIT_MAX).fill({ ...rest, reactable: false }) }) < size(page), 'so the pinned page maximum holds')
+})
+
+test('dm.thread: a replyMissing or bare-id row is never larger than the worst bound row', (t) => {
+  for (const ch of DM_WORST) {
+    for (const card of [true, false]) {
+      const worst = dmThreadResult(1, ch, card).messages[0]
+      const { replyFrom, ...bare } = worst
+      const missing = { ...bare, replyMissing: true }
+      t.ok(utf8ByteLength(JSON.stringify(missing)) < utf8ByteLength(JSON.stringify(worst)), JSON.stringify(ch) + (card ? ' card' : ' media'))
+      t.ok(utf8ByteLength(JSON.stringify(bare)) < utf8ByteLength(JSON.stringify(missing)))
+    }
+  }
 })
 
 test('the dispatcher sends the worst-case feed page unchanged', async (t) => {

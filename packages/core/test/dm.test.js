@@ -1091,3 +1091,111 @@ test('bodyDigest: the sender and the receiver name a message by the same digest'
   t.exception.all(() => dm.bodyDigest(null), /mensagem inválida/)
   t.exception.all(() => dm.frameDigest(b4a.alloc(10)), /mensagem inválida/)
 })
+
+// A bound reply's replyTo: the quoted message's sender, id and digest.
+function boundTo (over = {}) {
+  return { from: bia.hex, id: 'b'.repeat(32), digest: TD, ...over }
+}
+
+function wireOf (inner) {
+  return JSON.parse(b4a.toString(frameParts(inner).json))
+}
+
+test('bound reply: written as v2, opened with its target, a bare id unchanged', (t) => {
+  const inner = msg({ replyTo: boundTo() })
+  const wire = wireOf(inner)
+  t.is(wire.v, 2, 'a text-only bound reply is v2')
+  t.is(wire.media, null)
+  t.is(wire.card, null)
+  t.is(wire.fwd, 0)
+  t.alike(Object.keys(wire.replyTo), ['from', 'id', 'digest'])
+  const got = openInner(b4a.from(inner), bia.hex, O)
+  t.alike(got.replyTo, boundTo())
+  t.is(got.text, 'oi')
+  t.is(openInner(b4a.from(inner), ana.hex, O).mine, true, 'the self copy')
+  t.is(openInner(b4a.from(inner), caio.hex, O), null, 'a third party opens nothing')
+  t.is(dm.bodyDigest(got), dm.frameDigest(inner), 'the digest covers the bound reply')
+  t.is(openInner(msg({ replyTo: boundTo({ from: ana.hex }) }), bia.hex, O).replyTo.from, ana.hex, 'a reply to an own message')
+  const given = msg({ replyTo: { digest: TD, id: 'b'.repeat(32), from: bia.hex } })
+  t.alike(Object.keys(wireOf(given).replyTo), ['from', 'id', 'digest'], 'written in DM_TARGET_KEYS order whatever the caller gave')
+  const bare = msg({ replyTo: 'b'.repeat(32) })
+  t.is(wireOf(bare).v, 1, 'a bare id stays v1')
+  t.is(openInner(bare, bia.hex, O).replyTo, 'b'.repeat(32))
+  t.alike(openInner(msg({ text: 'foto', media: [blobItem(1)], replyTo: boundTo() }), bia.hex, O).replyTo, boundTo(), 'with media')
+  t.alike(openInner(msg({ fwd: 1, replyTo: boundTo() }), bia.hex, O).replyTo, boundTo(), 'with fwd')
+  t.alike(openInner(msg({ card: dmCard(), text: 'veja https://example.com/a', replyTo: boundTo() }), bia.hex, O).replyTo, boundTo(), 'with a card')
+})
+
+test('bound reply: shape rules', (t) => {
+  const body = (replyTo, over = {}) => v2Body({ media: null, text: 'oi', replyTo, ...over })
+  t.ok(dm.validBody(body(boundTo())))
+  t.ok(dm.validBody(body('b'.repeat(32), { fwd: 1 })), 'a bare id still reads in v2')
+  t.absent(dm.validBody(body('b'.repeat(32))), 'a bare-id text-only body does not need v2')
+  t.absent(dm.validBody(body(null)), 'nor does one without a reply')
+  const bad = {
+    'a string that is no id': 'x',
+    'an array': [],
+    'from only': { from: bia.hex },
+    'no digest': { from: bia.hex, id: 'b'.repeat(32) },
+    'an extra key': boundTo({ x: 1 }),
+    'a third party': boundTo({ from: caio.hex }),
+    'a short id': boundTo({ id: 'b'.repeat(31) }),
+    'an uppercase id': boundTo({ id: 'B'.repeat(32) }),
+    'an empty digest': boundTo({ digest: '' }),
+    'an uppercase digest': boundTo({ digest: 'D'.repeat(64) }),
+    'a short digest': boundTo({ digest: 'd'.repeat(63) }),
+    'a numeric digest': boundTo({ digest: 0 })
+  }
+  for (const [name, replyTo] of Object.entries(bad)) {
+    t.absent(dm.validBody(body(replyTo)), name)
+    t.absent(dm.validBody(body(replyTo, { fwd: 1 })), name + ' (forward)')
+  }
+  const v1Body = { v: 1, kind: 'msg', id: 'a'.repeat(32), from: ana.hex, to: bia.hex, replyTo: boundTo(), text: 'oi', op: null, peer: null, at: AT, cert: ana.cert }
+  t.absent(dm.validBody(v1Body), 'v1 keeps the bare id')
+  t.is(openInner(forge(v1Body, ana), bia.hex, O), null, 'a signed v1 with a bound reply')
+  t.absent(dm.validBody(v2Body({ kind: 'ctl', to: ana.hex, text: '', op: 'blocked', peer: bia.hex, media: null, replyTo: boundTo({ from: ana.hex }) })), 'a ctl has no reply')
+  t.ok(openInner(forge(body(boundTo()), ana, DM_SIG_PREFIX_V2), bia.hex, O), 'the forge helper builds an openable bound reply')
+  const reordered = body({ digest: TD, id: 'b'.repeat(32), from: bia.hex })
+  t.ok(dm.validBody(reordered), 'the key set alone is right')
+  t.is(openInner(forge(reordered, ana, DM_SIG_PREFIX_V2), bia.hex, O), null, 'a reordered replyTo is refused even when signed')
+  t.exception.all(() => msg({ replyTo: boundTo({ from: caio.hex }) }), /mensagem inválida/, 'buildInner refuses a third party')
+  t.exception.all(() => msg({ replyTo: { from: bia.hex, id: 'b'.repeat(32) } }), /mensagem inválida/, 'buildInner needs the digest')
+  t.exception.all(() => msg({ kind: 'ctl', to: undefined, text: '', op: 'blocked', peer: bia.hex, replyTo: boundTo({ from: ana.hex }) }), /mensagem inválida/)
+})
+
+test('bound reply: a Página binds in v3', (t) => {
+  const { inner, body, digest } = pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert, replyTo: boundTo() })
+  t.is(body.v, 3)
+  t.alike(body.replyTo, boundTo())
+  const got = openInner(b4a.from(inner), bia.hex, O)
+  t.alike(got.replyTo, boundTo())
+  t.is(dm.bodyDigest(got), digest)
+  t.alike(pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert, replyTo: boundTo({ from: page.hex }) }).body.replyTo.from, page.hex, 'its own message')
+  t.is(pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert, replyTo: 'b'.repeat(32) }).body.replyTo, 'b'.repeat(32), 'a bare id stays as it was')
+  t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'msg', to: bia.hex, text: 'oi', at: AT, replyTo: boundTo({ from: caio.hex }) }), /mensagem inválida/)
+})
+
+test('bound reply: the text budget counts the bound form', (t) => {
+  const who = largestV2Sender()
+  const fields = { kind: 'msg', to: bia.hex, at: AT, cert: who.cert }
+  const bare = textBudget({ ...fields, replyTo: 'b'.repeat(32) })
+  const bound = textBudget({ ...fields, replyTo: boundTo() })
+  t.is(bound, dmTextBudget({ ...fields, replyTo: boundTo() }))
+  t.is(bare - bound, 190, 'the object (157 bytes) and the v2 keys (33)')
+  t.is(Math.floor(bound / 4), 973, 'four-byte characters that fit')
+  const text = textOfBytes(bound)
+  t.ok(openInner(buildInner({ ...fields, text, replyTo: boundTo() }, who), bia.hex, O), 'the budget fits')
+  t.exception.all(() => buildInner({ ...fields, text: text + 'x', replyTo: boundTo() }, who), /mensagem longa demais/, 'one byte more does not')
+  const page3 = dmTextBudget({ v: 3, ...fields, replyTo: 'b'.repeat(32) }) - dmTextBudget({ v: 3, ...fields, replyTo: boundTo() })
+  t.is(page3, 157, 'a page is v3 already: only the object counts')
+})
+
+test('bound reply: a reader from before bound replies drops it', (t) => {
+  // The reply check of earlier builds: null or a hex32 id.
+  const oldReply = (b) => b.replyTo === null || (typeof b.replyTo === 'string' && /^[0-9a-f]{32}$/.test(b.replyTo))
+  const { mine, ...wire } = openInner(msg({ replyTo: boundTo() }), bia.hex, O)
+  t.ok(dm.validBody(wire))
+  t.absent(oldReply(wire), 'its replyTo is no bare id')
+  const { mine: m2, ...bare } = openInner(msg({ replyTo: 'b'.repeat(32) }), bia.hex, O)
+  t.ok(oldReply(bare), 'a bare-id reply still reads there')
+})

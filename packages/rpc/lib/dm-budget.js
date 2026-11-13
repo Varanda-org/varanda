@@ -20,9 +20,10 @@ const DM_INNER_KEYS_V2 = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'replyT
 const DM_INNER_KEYS_V3 = DM_INNER_KEYS_V2
 // v4 is a reaction (kind 'react'), signed under its own domain.
 const DM_INNER_KEYS_V4 = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'target', 'emoji', 'rev', 'at', 'cert'])
-// A reaction's target: the message's sender and id, and the hex64 sha256 of
-// the canonical JSON of that message's opened inner body, so a reaction
-// applies only to the message it was made for.
+// A reaction's target, and a bound reply's replyTo (v2 and v3): the
+// message's sender and id, and the hex64 sha256 of the canonical JSON of
+// that message's opened inner body, so it names only the message it was
+// made for.
 const DM_TARGET_KEYS = Object.freeze(['from', 'id', 'digest'])
 const DM_MEDIA_KEYS = Object.freeze(['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms'])
 // A link card (core lib/link-card.js CARD_KEYS); its image is a media item.
@@ -74,9 +75,10 @@ function canonicalCard (c) {
 }
 
 // The v2 key set only when something needs it: a text-only message stays v1
-// so readers without v2 still open it. Never 3: only a Página asks for v3.
+// so readers without v2 still open it. A bound reply (replyTo an object)
+// needs v2: v1 keeps the bare id. Never 3: only a Página asks for v3.
 function innerVersion (b) {
-  return b.media !== null || b.card !== null || b.fwd !== 0 ? 2 : 1
+  return b.media !== null || b.card !== null || b.fwd !== 0 || isObject(b.replyTo) ? 2 : 1
 }
 
 // body has every key of its version; media items (and a card's image) are
@@ -99,7 +101,7 @@ function canonicalInnerJson (body) {
       ? body.media.map(canonicalMediaItem)
       : k === 'card'
         ? canonicalCard(body.card)
-        : k === 'target' ? canonicalTarget(body.target) : body[k]
+        : k === 'target' || k === 'replyTo' ? canonicalTarget(body[k]) : body[k]
   }
   return JSON.stringify(o)
 }
@@ -111,7 +113,8 @@ function dmTextBytes (text) {
 }
 
 // fields: { v?, kind?, id?, from?, to?, replyTo?, media?, card?, fwd?, op?,
-// peer?, at?, cert? }; text is ignored. v 3 measures a Página's inner,
+// peer?, at?, cert? }; text is ignored. replyTo is measured as given: a
+// bare id, or a bound { from, id, digest }. v 3 measures a Página's inner,
 // which always carries the v2 keys. Returns the dmTextBytes still free
 // under DM_INNER_BYTES; below zero nothing fits, not even empty text.
 function dmTextBudget (fields = {}) {

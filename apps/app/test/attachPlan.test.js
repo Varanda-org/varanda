@@ -84,13 +84,17 @@ test('each target allows four images and refuses a fifth before uploads', async 
   }
 })
 
-test('DM budget includes media, certificate, quote, UTF-8 and JSON escaping', async (t) => {
+test('DM budget includes media, certificate, bound quote, UTF-8 and JSON escaping', async (t) => {
   const { composePlan } = await load()
   const attachments = [1, 2, 3, 4].map(n => attachment(n))
   const media = [1, 2, 3, 4].map(n => widest(n))
   const cert = { fixture: 'a'.repeat(700) }
   const target = { ...dm, replyTo: ID, cert }
-  const budget = rpc.dmTextBudget({ to: KEY, replyTo: ID, cert, media })
+  // The node may bind the reply to the quoted sender and digest: measured
+  // that way, so the bare id the request carries never decides.
+  const bound = { from: '0'.repeat(64), id: ID, digest: '0'.repeat(64) }
+  const budget = rpc.dmTextBudget({ to: KEY, replyTo: bound, cert, media })
+  t.ok(budget < rpc.dmTextBudget({ to: KEY, replyTo: ID, cert, media }), 'a bound reply leaves less room')
   const prefix = 'á\n"\\'
   const remaining = budget - rpc.dmTextBytes(prefix)
   const text = prefix + '😀'.repeat(Math.floor(remaining / 4)) + 'x'.repeat(remaining % 4)
@@ -247,6 +251,23 @@ test('fwd 1 rides in the request and counts in the DM budget', async (t) => {
 })
 
 const CARD = { url: 'https://example.com/a', host: 'example.com', title: 'Título', desc: '', image: null }
+
+test('a DM reply is measured bound, with or without a card, and still sends the bare id', async (t) => {
+  const { composePlan, cardFits } = await load()
+  const cert = rpc.MEMBER_CERT_STANDIN
+  const bound = { from: '0'.repeat(64), id: ID, digest: '0'.repeat(64) }
+  const target = { ...dm, replyTo: ID }
+  // Four-byte characters, so the byte budget decides before MAX_TEXT.
+  const fill = (bytes) => '😀'.repeat(Math.floor(bytes / 4)) + 'x'.repeat(bytes % 4)
+  const bare = rpc.dmTextBudget({ to: KEY, replyTo: ID, cert })
+  const tight = rpc.dmTextBudget({ to: KEY, replyTo: bound, cert })
+  t.ok(tight < bare)
+  t.is(composePlan({ text: fill(tight), target }).send().params.replyTo, ID, 'the request keeps the bare id')
+  t.exception(() => composePlan({ text: fill(tight) + 'x', target }), /mensagem longa demais/)
+  const withCard = rpc.dmTextBudget({ to: KEY, replyTo: bound, cert, card: CARD })
+  t.ok(cardFits({ text: fill(withCard), target, card: CARD }))
+  t.absent(cardFits({ text: fill(withCard) + 'x', target, card: CARD }), 'the card fit counts the bound reply')
+})
 
 test('a link card rides with text only, checked and counted in the DM budget', async (t) => {
   const { composePlan, cardFits, withPreview } = await load()

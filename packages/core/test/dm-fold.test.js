@@ -507,3 +507,77 @@ test('reactions take no part in the fold of any other record (generated logs)', 
   }
   t.ok(counted > 0, 'some reactions count')
 })
+
+test('bound replies: quote only the kept message with the sender, id and digest they name', (t) => {
+  const D1 = '1'.repeat(64)
+  const D2 = '2'.repeat(64)
+  const bind = (m, digest = m.digest) => ({ from: m.from, id: m.id, digest })
+  const a = { ...from(ANA, 1, 'pergunta'), digest: D1 }
+  const mine = { ...to(ANA, 2, 'minha'), digest: D2 }
+  const r1 = { ...to(ANA, 3, 'resposta'), replyTo: bind(a) }
+  const r2 = { ...from(ANA, 4, 'de volta'), replyTo: bind(mine) }
+  const ok = run({ messages: [a, mine, r1, r2], follows: [ANA] })
+  t.is(rowOf(ok, r1).replyTo, a.id, 'replyTo stays the bare id')
+  t.is(rowOf(ok, r1).replyFrom, ANA, 'replyFrom names the quoted sender')
+  t.absent('replyMissing' in rowOf(ok, r1))
+  t.is(rowOf(ok, r2).replyFrom, ME, 'a reply to my own message')
+  t.alike(Object.keys(rowOf(ok, r1)), ['id', 'from', 'to', 'text', 'replyTo', 'fwd', 'media', 'card', 'at', 'sentAt', 'mine', 'peer', 'replyFrom'])
+  t.is(replyTarget(ok.inbox[0].messages, a.id).digest, D1, 'replyTarget hands out the digest a new reply binds to')
+
+  const missing = (replyTo, messages, ops = []) => {
+    const reply = { ...from(ANA, 9, 'citando'), replyTo }
+    const row = rowOf(run({ messages: [...messages, reply], ops, follows: [ANA] }), reply)
+    t.is(row.replyTo, replyTo.id)
+    t.absent('replyFrom' in row)
+    return row.replyMissing
+  }
+  t.is(missing(bind(a, D2), [a]), true, 'another digest')
+  t.is(missing(bind(a), []), true, 'not stored here')
+  t.is(missing({ from: ME, id: a.id, digest: D1 }, [a]), true, 'another sender under the same id')
+  t.is(missing(bind({ ...a, digest: D1 }), [{ ...a, digest: undefined }]), true, 'a row stored without a digest')
+  // Same sender and id, another text: a device without the history files the
+  // new message, and the reply made for the old one does not quote it.
+  const reused = { ...from(ANA, 5, 'outra'), id: a.id, digest: D2 }
+  t.is(missing(bind(a), [reused]), true, 'a reused id with other content')
+  t.is(missing(bind(a), [a], [op('deleted', ANA, 6)]), true, 'behind a cutoff')
+  const kept = { ...from(ANA, 9, 'citando'), replyTo: bind(a) }
+  t.is(rowOf(run({ messages: [a, kept], ops: [op('deleted', ANA, 0)], follows: [ANA] }), kept).replyFrom, ANA, 'a cutoff before it keeps it')
+
+  const many = []
+  for (let i = 0; i < DM_MESSAGES_PER_PEER; i++) many.push({ ...from(ANA, 0), at: new Date(Date.UTC(2026, 10, 3, 0, 0, i)).toISOString(), digest: D1 })
+  const old = { ...many[0] }
+  const late = { ...from(ANA, 59, 'tarde'), replyTo: bind(old) }
+  const capped = run({ messages: [...many, late], follows: [ANA] })
+  t.is(rowOf(capped, late).replyMissing, true, 'past the DM_MESSAGES_PER_PEER cap')
+})
+
+test('bound replies: a bare id from an earlier build keeps its rule, a malformed bound one is no reply', (t) => {
+  const a = { ...from(ANA, 1), digest: '1'.repeat(64) }
+  const bare = { ...from(ANA, 2), replyTo: a.id }
+  const none = { ...from(ANA, 3) }
+  const bad = { ...from(ANA, 4), replyTo: { from: ANA, id: a.id } }
+  const r = run({ messages: [a, bare, none, bad], follows: [ANA] })
+  const row = rowOf(r, bare)
+  t.is(row.replyTo, a.id)
+  t.absent('replyFrom' in row)
+  t.absent('replyMissing' in row)
+  t.is(rowOf(r, none).replyTo, null)
+  t.is(rowOf(r, bad).replyTo, null, 'a bound reply without a digest quotes nothing')
+  t.absent('replyMissing' in rowOf(r, bad))
+  for (const replyTo of [{ from: ANA, id: 'x', digest: '1'.repeat(64) }, { from: 'x', id: a.id, digest: '1'.repeat(64) }, 7, []]) {
+    const m = { ...from(ANA, 5), replyTo }
+    t.is(rowOf(run({ messages: [a, m], follows: [ANA] }), m).replyTo, null, JSON.stringify(replyTo))
+  }
+})
+
+test('bound replies: unread, preview and order unchanged', (t) => {
+  const a = { ...from(ANA, 1), digest: '1'.repeat(64) }
+  const bound = { ...from(ANA, 2, 'citou'), replyTo: { from: ANA, id: a.id, digest: '1'.repeat(64) } }
+  const plain = { ...from(ANA, 2, 'citou'), id: bound.id, replyTo: a.id }
+  const x = run({ messages: [a, bound], follows: [ANA] }).inbox[0]
+  const y = run({ messages: [a, plain], follows: [ANA] }).inbox[0]
+  t.is(x.unread, y.unread)
+  t.is(x.at, y.at)
+  t.alike(x.messages.map(m => m.id), y.messages.map(m => m.id))
+  t.is(previewText(x.messages[1]), previewText(y.messages[1]))
+})

@@ -6,11 +6,16 @@
 // crypto_secretbox (@varanda/core lib/group-crypto.js sealRecord) of one
 // compact JSON row under the key derived from the passkey PRF
 // (passkey.js dmLocalKeyFromPrf). A row is a message
-// { t: 'msg', id, peer, from, text, replyTo, media, at, mine, filedAt, digest? }
+// { t: 'msg', id, peer, from, text, replyTo, replyFrom?, replyDigest?, media,
+// at, mine, filedAt, digest? }
 // (media: null or the message's media items, blob descriptors with their
 // key, exactly as the inner carries them; a row from before media reads as
-// null; digest: the hex64 sha256 of the inner's canonical JSON, @varanda/core
-// dm.js bodyDigest, absent on a row filed by an earlier build) or an op
+// null; replyTo: null or the quoted message's bare id, and for a bound
+// reply (inner v2 or v3 replyTo { from, id, digest }) replyFrom and
+// replyDigest beside it, both or neither, so an earlier build still reads
+// the bare id; digest: the hex64 sha256 of the inner's canonical JSON,
+// @varanda/core dm.js bodyDigest, absent on a row filed by an earlier
+// build) or an op
 // { t: 'ctl', id, op, peer, at, filedAt } (id: the ctl envelope's, so a
 // device that pulls its own ctl back does not file it twice) or a reaction
 // { t: 'rx', id, peer, from, to, target: { from, id, digest }, emoji, rev, at,
@@ -129,6 +134,8 @@ function validRow (r) {
   if (r.t !== 'msg') return false
   if (r.legacy !== undefined && r.legacy !== true) return false
   if (r.digest !== undefined && !HEX64.test(r.digest)) return false
+  if ((r.replyFrom === undefined) !== (r.replyDigest === undefined)) return false
+  if (r.replyFrom !== undefined && (r.replyTo === null || !HEX64.test(r.replyFrom) || !HEX64.test(r.replyDigest))) return false
   return HEX32.test(r.id) && HEX64.test(r.from) && typeof r.text === 'string' &&
     (r.replyTo === null || HEX32.test(r.replyTo)) && typeof r.mine === 'boolean' &&
     (r.fwd === undefined || r.fwd === 0 || r.fwd === 1) &&
@@ -152,6 +159,10 @@ function plainRow (r) {
     return { t: 'rx', id: r.id, peer: r.peer, from: r.from, to: r.to, target: { from: r.target.from, id: r.target.id, digest: r.target.digest }, emoji: r.emoji, rev: r.rev, at: r.at, mine: r.mine, filedAt: r.filedAt }
   }
   const out = { t: 'msg', id: r.id, peer: r.peer, from: r.from, text: r.text, replyTo: r.replyTo, fwd: r.fwd === 1 ? 1 : 0, media: plainMedia(r.media), card: r.card == null ? null : copyLinkCard(r.card, (d) => plainMedia([d])[0]), at: r.at, mine: r.mine, filedAt: r.filedAt }
+  if (r.replyFrom !== undefined) {
+    out.replyFrom = r.replyFrom
+    out.replyDigest = r.replyDigest
+  }
   if (typeof r.digest === 'string' && HEX64.test(r.digest)) out.digest = r.digest
   if (r.legacy === true) out.legacy = true
   return out
