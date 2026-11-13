@@ -144,7 +144,7 @@ Arquivos: `apps/app/src/screens/Publicar.js`, `apps/app/src/screens/Momentos.js`
 
 | Id | Onde | Hoje | Mudança proposta | Dono |
 |---|---|---|---|---|
-| UX-59 | `Publicar.js:1426` | O campo de texto abre com `autoFocus`; em celular, o teclado cobre a barra de fotos e emojis ao entrar. | Manter o foco, mas deixar a barra acima do teclado. A confirmar na verificação com `keyboardAvoid`. | feito (PR10): ao focar o campo, e quando a linha do contador se move, a tela rola para manter o campo e a barra de fotos e emojis à vista; a barra fica acima do teclado no Android e no iOS (seção 187, passo 14) |
+| UX-59 | `Publicar.js:1426` | O campo de texto abre com `autoFocus`; em celular, o teclado cobre a barra de fotos e emojis ao entrar. | Manter o foco, mas deixar a barra acima do teclado. A confirmar na verificação com `keyboardAvoid`. | feito (PR10): ao focar o campo, e quando a linha do contador se move, a tela rola para manter o campo e a barra de fotos e emojis à vista; a barra fica acima do teclado no Android e no iOS (seção 198, passo 14) |
 | UX-60 | `Publicar.js:1286` | O contador "n de 200 caracteres" é rótulo de acessibilidade que muda a cada letra. | Anunciar só nos limiares (restam 20, restam 0). A confirmar o ruído no leitor. | feito (PR10) |
 | UX-61 | `Publicar.js:1469` | O botão de foto tem rótulo `Foto`, sem dizer a ação. | "Adicionar foto". | feito (PR10) |
 | UX-62 | `Momentos.js:703` | O indicador de carga usa a cor literal `#ffffff`. | Token do tema. A confirmar se o teste de tema isenta o arquivo. | feito (PR10) |

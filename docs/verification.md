@@ -8307,7 +8307,7 @@ Defeitos: nenhum confirmado. Suspeita aberta para quem corrige (T28): no Chrome 
 
 Limites conhecidos: Comunidades e Comunidade ainda mostram "Só na versão web" num nó que não é hospedado, o que nunca acontece num celular com a instalação (esse celular é hospedado). Quem usa mouse não tem deslize e responde pelas ações da mensagem. O que não foi percorrido está listado na Situação.
 
-## 187. Acabamento das telas (PR feat/screens-polish)
+## 198. Acabamento das telas (PR feat/screens-polish)
 
 Décimo e último PR da revisão visual do app. Só interface: nenhum método do RPC, formato de protocolo, texto dos Termos nem fixture muda. Ele fecha os achados UX-44 a UX-66 de `docs/ux-audit.md`, em três grupos: feeds e busca, perfil e avisos, e publicar, Momentos, introdução e ajustes.
 
@@ -8383,39 +8383,39 @@ Limites conhecidos: nas telas desta seção, `ErrorState` virou `EmptyState`, en
 
 Depois dos PRs 1 a 10 juntos, percorra de novo os passos de cabeça de cada seção. Percorrida em 2026-11-12, na segunda rodada (Vitrine, Metro na porta 8090); no Chrome, só 390 px no claro. Uma caixa só é marcada quando todos os passos da linha passaram.
 
-- [x] Android, seção 178: pílula da barra de abas (passo 2) e o botão de publicar ao apertar (passo 8). Passaram na segunda rodada; o botão encolher ao segurar só se vê por um deslocamento de cerca de 3 px na captura (`r2-178-fab-held.png`).
-- [ ] iOS, seção 178: pílula da barra de abas (passo 2) e o botão de publicar ao apertar (passo 8). Em parte, na segunda rodada.
-- [ ] Chrome 390, seção 178: pílula da barra de abas (passo 2) e o botão de publicar ao apertar (passo 8). O passo 2 passou (uma pílula só); o passo 8 não foi percorrido.
-- [ ] Chrome 1280, seção 178: pílula da barra de abas (passo 2) e o botão de publicar ao apertar (passo 8). Não percorrido.
-- [ ] Android, seção 179: fotos antes da legenda e "mais" e "menos" (passos 1 a 3) e o contador do carrossel (passo 8). Não percorrido.
-- [ ] iOS, seção 179: fotos antes da legenda e "mais" e "menos" (passos 1 a 3) e o contador do carrossel (passo 8). Não percorrido.
-- [ ] Chrome 390, seção 179: fotos antes da legenda e "mais" e "menos" (passos 1 a 3) e o contador do carrossel (passo 8). Não percorrido.
-- [ ] Chrome 1280, seção 179: fotos antes da legenda e "mais" e "menos" (passos 1 a 3) e o contador do carrossel (passo 8). Não percorrido.
-- [ ] Android, seção 180: "Ver N respostas" (passos 1 e 2) e a barra de resposta (passos 7 e 8). Não percorrido.
-- [ ] iOS, seção 180: "Ver N respostas" (passos 1 e 2) e a barra de resposta (passos 7 e 8). Não percorrido.
-- [ ] Chrome 390, seção 180: "Ver N respostas" (passos 1 e 2) e a barra de resposta (passos 7 e 8). Não percorrido.
-- [ ] Chrome 1280, seção 180: "Ver N respostas" (passos 1 e 2) e a barra de resposta (passos 7 e 8). Não percorrido.
-- [ ] Android, seção 181: cidade, chip e tiles (passos 2 a 4) e as colunas por largura (passo 5). Em parte.
-- [ ] iOS, seção 181: cidade, chip e tiles (passos 2 a 4) e as colunas por largura (passo 5). Não percorrido.
-- [ ] Chrome 390, seção 181: cidade, chip e tiles (passos 2 a 4) e as colunas por largura (passo 5). Os passos 2, 4 e 5 passaram; o passo 3 não foi percorrido.
-- [ ] Chrome 1280, seção 181: cidade, chip e tiles (passos 2 a 4) e as colunas por largura (passo 5). Não percorrido.
-- [ ] Android, seção 182: barra do anúncio com Conversar e Fazer oferta (passos 4 e 5) e Anunciar em passos (passos 8 e 9). Não percorrido.
-- [ ] iOS, seção 182: barra do anúncio com Conversar e Fazer oferta (passos 4 e 5) e Anunciar em passos (passos 8 e 9). Não percorrido.
-- [ ] Chrome 390, seção 182: barra do anúncio com Conversar e Fazer oferta (passos 4 e 5) e Anunciar em passos (passos 8 e 9). Os passos 4 e 5 passaram, também a folha de oferta num anúncio de Página; Anunciar em passos (8 e 9) não foi percorrido.
-- [ ] Chrome 1280, seção 182: barra do anúncio com Conversar e Fazer oferta (passos 4 e 5) e Anunciar em passos (passos 8 e 9). Não percorrido.
-- [ ] Android, seção 183: negrito, itálico e bloco de código (passos 1 e 3) e o spoiler (passo 4). Os passos 1, 2 e 4 passaram; o bloco de código (passo 3) não foi percorrido.
-- [ ] iOS, seção 183: negrito, itálico e bloco de código (passos 1 e 3) e o spoiler (passo 4). Não percorrido.
-- [ ] Chrome 390, seção 183: negrito, itálico e bloco de código (passos 1 e 3) e o spoiler (passo 4). Não percorrido.
-- [ ] Chrome 1280, seção 183: negrito, itálico e bloco de código (passos 1 e 3) e o spoiler (passo 4). Não percorrido.
-- [ ] Android, seção 184: reagir, trocar e tirar (passos 2 a 4) e "Quem reagiu" (passo 5). Os passos 1, 2 e 5 passaram num grupo público (chips sob a mensagem, "Quem reagiu" com os nomes); trocar e tirar (3 e 4) não foram percorridos.
-- [ ] iOS, seção 184: reagir, trocar e tirar (passos 2 a 4) e "Quem reagiu" (passo 5). Em parte: reagir passou; a troca de emoji não foi feita; tirar funcionou no segundo toque (o primeiro pareceu não fazer nada); "Quem reagiu" só pela folha de ações, não pelo toque longo no chip.
-- [ ] Chrome 390, seção 184: reagir, trocar e tirar (passos 2 a 4) e "Quem reagiu" (passo 5). Os passos 2 a 4 passaram; "Quem reagiu" (passo 5) não foi percorrido.
-- [ ] Chrome 1280, seção 184: reagir, trocar e tirar (passos 2 a 4) e "Quem reagiu" (passo 5). Não percorrido.
-- [ ] Android, seção 185: reagir, trocar e tirar (passos 2 a 4) e os toques rápidos (passo 5). Os passos 2 a 4 passaram; os toques rápidos (passo 5) não foram percorridos.
-- [ ] iOS, seção 185: reagir, trocar e tirar (passos 2 a 4) e os toques rápidos (passo 5). Não percorrido.
-- [ ] Chrome 390, seção 185: reagir, trocar e tirar (passos 2 a 4) e os toques rápidos (passo 5). Não percorrido.
-- [ ] Chrome 1280, seção 185: reagir, trocar e tirar (passos 2 a 4) e os toques rápidos (passo 5). Não percorrido.
-- [ ] Android, seção 186: deslizar para responder e a borda esquerda (passos 6 e 7) e "ir para o fim" (passo 12). Os passos 6 e 7 passaram; "ir para o fim" (passo 12) não foi percorrido.
-- [ ] iOS, seção 186: deslizar para responder e a borda esquerda (passos 6 e 7) e "ir para o fim" (passo 12). Os passos 6 e 7 passaram; "ir para o fim" (passo 12) não foi percorrido.
-- [ ] Chrome 390, seção 186: deslizar para responder e a borda esquerda (passos 6 e 7) e "ir para o fim" (passo 12). Em parte: deslizar não dá para fazer com o mouse; o passo 12 não foi percorrido.
-- [ ] Chrome 1280, seção 186: deslizar para responder e a borda esquerda (passos 6 e 7) e "ir para o fim" (passo 12). Não percorrido.
+- [x] Android, seção 189: pílula da barra de abas (passo 2) e o botão de publicar ao apertar (passo 8). Passaram na segunda rodada; o botão encolher ao segurar só se vê por um deslocamento de cerca de 3 px na captura (`r2-178-fab-held.png`).
+- [ ] iOS, seção 189: pílula da barra de abas (passo 2) e o botão de publicar ao apertar (passo 8). Em parte, na segunda rodada.
+- [ ] Chrome 390, seção 189: pílula da barra de abas (passo 2) e o botão de publicar ao apertar (passo 8). O passo 2 passou (uma pílula só); o passo 8 não foi percorrido.
+- [ ] Chrome 1280, seção 189: pílula da barra de abas (passo 2) e o botão de publicar ao apertar (passo 8). Não percorrido.
+- [ ] Android, seção 190: fotos antes da legenda e "mais" e "menos" (passos 1 a 3) e o contador do carrossel (passo 8). Não percorrido.
+- [ ] iOS, seção 190: fotos antes da legenda e "mais" e "menos" (passos 1 a 3) e o contador do carrossel (passo 8). Não percorrido.
+- [ ] Chrome 390, seção 190: fotos antes da legenda e "mais" e "menos" (passos 1 a 3) e o contador do carrossel (passo 8). Não percorrido.
+- [ ] Chrome 1280, seção 190: fotos antes da legenda e "mais" e "menos" (passos 1 a 3) e o contador do carrossel (passo 8). Não percorrido.
+- [ ] Android, seção 191: "Ver N respostas" (passos 1 e 2) e a barra de resposta (passos 7 e 8). Não percorrido.
+- [ ] iOS, seção 191: "Ver N respostas" (passos 1 e 2) e a barra de resposta (passos 7 e 8). Não percorrido.
+- [ ] Chrome 390, seção 191: "Ver N respostas" (passos 1 e 2) e a barra de resposta (passos 7 e 8). Não percorrido.
+- [ ] Chrome 1280, seção 191: "Ver N respostas" (passos 1 e 2) e a barra de resposta (passos 7 e 8). Não percorrido.
+- [ ] Android, seção 192: cidade, chip e tiles (passos 2 a 4) e as colunas por largura (passo 5). Em parte.
+- [ ] iOS, seção 192: cidade, chip e tiles (passos 2 a 4) e as colunas por largura (passo 5). Não percorrido.
+- [ ] Chrome 390, seção 192: cidade, chip e tiles (passos 2 a 4) e as colunas por largura (passo 5). Os passos 2, 4 e 5 passaram; o passo 3 não foi percorrido.
+- [ ] Chrome 1280, seção 192: cidade, chip e tiles (passos 2 a 4) e as colunas por largura (passo 5). Não percorrido.
+- [ ] Android, seção 193: barra do anúncio com Conversar e Fazer oferta (passos 4 e 5) e Anunciar em passos (passos 8 e 9). Não percorrido.
+- [ ] iOS, seção 193: barra do anúncio com Conversar e Fazer oferta (passos 4 e 5) e Anunciar em passos (passos 8 e 9). Não percorrido.
+- [ ] Chrome 390, seção 193: barra do anúncio com Conversar e Fazer oferta (passos 4 e 5) e Anunciar em passos (passos 8 e 9). Os passos 4 e 5 passaram, também a folha de oferta num anúncio de Página; Anunciar em passos (8 e 9) não foi percorrido.
+- [ ] Chrome 1280, seção 193: barra do anúncio com Conversar e Fazer oferta (passos 4 e 5) e Anunciar em passos (passos 8 e 9). Não percorrido.
+- [ ] Android, seção 194: negrito, itálico e bloco de código (passos 1 e 3) e o spoiler (passo 4). Os passos 1, 2 e 4 passaram; o bloco de código (passo 3) não foi percorrido.
+- [ ] iOS, seção 194: negrito, itálico e bloco de código (passos 1 e 3) e o spoiler (passo 4). Não percorrido.
+- [ ] Chrome 390, seção 194: negrito, itálico e bloco de código (passos 1 e 3) e o spoiler (passo 4). Não percorrido.
+- [ ] Chrome 1280, seção 194: negrito, itálico e bloco de código (passos 1 e 3) e o spoiler (passo 4). Não percorrido.
+- [ ] Android, seção 195: reagir, trocar e tirar (passos 2 a 4) e "Quem reagiu" (passo 5). Os passos 1, 2 e 5 passaram num grupo público (chips sob a mensagem, "Quem reagiu" com os nomes); trocar e tirar (3 e 4) não foram percorridos.
+- [ ] iOS, seção 195: reagir, trocar e tirar (passos 2 a 4) e "Quem reagiu" (passo 5). Em parte: reagir passou; a troca de emoji não foi feita; tirar funcionou no segundo toque (o primeiro pareceu não fazer nada); "Quem reagiu" só pela folha de ações, não pelo toque longo no chip.
+- [ ] Chrome 390, seção 195: reagir, trocar e tirar (passos 2 a 4) e "Quem reagiu" (passo 5). Os passos 2 a 4 passaram; "Quem reagiu" (passo 5) não foi percorrido.
+- [ ] Chrome 1280, seção 195: reagir, trocar e tirar (passos 2 a 4) e "Quem reagiu" (passo 5). Não percorrido.
+- [ ] Android, seção 196: reagir, trocar e tirar (passos 2 a 4) e os toques rápidos (passo 5). Os passos 2 a 4 passaram; os toques rápidos (passo 5) não foram percorridos.
+- [ ] iOS, seção 196: reagir, trocar e tirar (passos 2 a 4) e os toques rápidos (passo 5). Não percorrido.
+- [ ] Chrome 390, seção 196: reagir, trocar e tirar (passos 2 a 4) e os toques rápidos (passo 5). Não percorrido.
+- [ ] Chrome 1280, seção 196: reagir, trocar e tirar (passos 2 a 4) e os toques rápidos (passo 5). Não percorrido.
+- [ ] Android, seção 197: deslizar para responder e a borda esquerda (passos 6 e 7) e "ir para o fim" (passo 12). Os passos 6 e 7 passaram; "ir para o fim" (passo 12) não foi percorrido.
+- [ ] iOS, seção 197: deslizar para responder e a borda esquerda (passos 6 e 7) e "ir para o fim" (passo 12). Os passos 6 e 7 passaram; "ir para o fim" (passo 12) não foi percorrido.
+- [ ] Chrome 390, seção 197: deslizar para responder e a borda esquerda (passos 6 e 7) e "ir para o fim" (passo 12). Em parte: deslizar não dá para fazer com o mouse; o passo 12 não foi percorrido.
+- [ ] Chrome 1280, seção 197: deslizar para responder e a borda esquerda (passos 6 e 7) e "ir para o fim" (passo 12). Não percorrido.
