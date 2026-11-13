@@ -48,7 +48,7 @@ import { namesQuiet } from './autoSyncPolicy'
 import { absentSeeds, applySeed, fieldsOf, forgottenEntry, isPeekedKey, missingEntry, peekReplaces, peekedEntry, stableView } from './namesCache'
 import { fetchMember } from './indexClient'
 import { diaryPeekSlots } from './engagement'
-import { createNamePeeker, foldRead, unnamed, withPeek } from './namesPeek'
+import { createNamePeeker, foldRead, peekApply } from './namesPeek'
 
 // The seeder's page hint rides with the name (only a hint: Membro verifies
 // with page.read). profile.read never says it, so it is carried over.
@@ -364,10 +364,11 @@ export function NamesProvider ({ children }) {
       const done = await peeker.next()
       if (scope !== scopeRef.current || done === null || done.fields === null) return
       const known = cacheRef.current.get(done.key)
-      if (!unnamed(known)) return
+      const filled = peekApply(known, done.fields)
+      if (filled === null) return
       const next = new Map(cacheRef.current)
-      next.set(done.key, withPeek(known || null, done.fields))
-      peekerRef.current.remember(done.key, known || null)
+      next.set(done.key, filled)
+      peekerRef.current.remember(done.key, known)
       commit(next)
     } finally {
       peekBusyRef.current = false

@@ -105,7 +105,7 @@ test('a key is tried a few times at most: a passing failure is asked again only 
   t.not(a.off, 'a plain failure keeps the other keys going')
 
   let ready = false
-  const late = harness({ lookup: async () => (ready ? { ok: true, value: { profileSeq: 7, usernameSeq: null } } : { ok: false }) })
+  const late = harness({ lookup: async () => (ready ? { ok: true, value: { profileSeq: 7, usernameSeq: null } } : { ok: false, reason: 'network' }) })
   const c = createNamePeeker(late.deps)
   c.enqueue([KEY])
   t.alike(await c.next(), { key: KEY, fields: null }, 'the index is not ready yet')
@@ -113,6 +113,21 @@ test('a key is tried a few times at most: a passing failure is asked again only 
   t.is(c.enqueue([KEY]), 1, 'a not ready index gets another turn')
   t.is((await c.next()).fields.name, 'Ana')
   t.is(c.enqueue([KEY]), 0, 'a hit is not asked again')
+
+  for (const reason of ['not-found', 'malformed', 'invalid-input']) {
+    const final = harness({ lookup: async () => ({ ok: false, reason }) })
+    const e = createNamePeeker(final.deps)
+    e.enqueue([KEY])
+    await e.next()
+    t.is(e.enqueue([KEY]), 0, 'an index answer of ' + reason + ' is final')
+  }
+  for (const reason of ['network', 'timeout', 'rate-limited', 'status']) {
+    const passing = harness({ lookup: async () => ({ ok: false, reason }) })
+    const e = createNamePeeker(passing.deps)
+    e.enqueue([KEY])
+    await e.next()
+    t.is(e.enqueue([KEY]), 1, 'an index failure of ' + reason + ' gets another turn')
+  }
 
   const none = harness({ lookup: async () => ({ ok: true, value: {} }) })
   const d = createNamePeeker(none.deps)
@@ -199,6 +214,30 @@ test('foldRead: a key in missing stores null even after a successful peek, and i
   t.is(out.entries.get(KEY), null, 'missing stores null')
   t.alike(out.lonely, [], 'and the key is not queued for a peek')
   t.ok(withPeek(null, done.fields), 'the fields themselves are still there')
+})
+
+test('a key queued for the peek and then answered missing is dropped, and a peek in flight does not land', async (t) => {
+  const { createNamePeeker, foldRead, peekApply } = await load()
+  const { calls, deps } = harness()
+  const peeker = createNamePeeker(deps)
+  const unnamed = { name: null, username: null, bio: null, avatar: null, loaded: true }
+
+  t.is(peeker.enqueue([KEY]), 1, 'a profile.read left the key without a name')
+  const out = foldRead({ profiles: [], missing: [KEY] }, peeker)
+  t.is(out.entries.get(KEY), null, 'the next profile.read says missing')
+  t.is(peeker.size, 0, 'the key left the queue')
+  t.is(await peeker.next(), null, 'next asks nothing')
+  t.is(calls.lookup.length + calls.peek.length, 0)
+
+  peeker.enqueue([KEY2])
+  const flight = peeker.next()
+  foldRead({ profiles: [], missing: [KEY2] }, peeker)
+  const done = await flight
+  t.ok(done.fields, 'the read was already under way')
+  t.is(peekApply(null, done.fields), null, 'but a key stored as missing is not named')
+  t.is(peekApply(undefined, done.fields), null, 'nor one with no entry at all')
+  t.is(peekApply({ ...unnamed, name: 'Bia' }, done.fields), null, 'nor one that shows a name')
+  t.is(peekApply(unnamed, done.fields).name, 'Ana', 'an entry still without a name gets it')
 })
 
 test('foldRead: the peeked fields come back only while the local copy has not moved since the peek', async (t) => {

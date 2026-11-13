@@ -5,9 +5,10 @@
 // and @nome blocks are, and diary.peek (docs/rpc.md 5.27) reads and verifies
 // them. Pure: no React, so the rules load in tests (./names.js wires it).
 //
-// One key at a time, each key tried once per scope (a failed read is asked
-// again only when profile.read lists the key anew, at most 3 times), and nothing is asked of a node that answers USAGE 'leitura sob
-// demanda só na versão web' (the core node) after the first answer.
+// One key at a time, each key tried once per scope (a passing failure is
+// asked again only when profile.read lists the key anew, at most 3 times),
+// and nothing is asked of a node that answers USAGE 'leitura sob demanda só
+// na versão web' (the core node) after the first answer.
 
 import rpc from '@varanda/rpc'
 import { applySeed, authoritative } from './namesCache.js'
@@ -15,6 +16,8 @@ import { applySeed, authoritative } from './namesCache.js'
 const { USAGE } = rpc
 const WEB_ONLY = 'leitura sob demanda só na versão web'
 const MAX_ATTEMPTS = 3
+// Index failures worth another turn; not-found and malformed are answers.
+const PASSING = new Set(['network', 'timeout', 'rate-limited', 'status'])
 
 const validSeq = (n) => Number.isSafeInteger(n) && n >= 1
 
@@ -92,9 +95,17 @@ export function withPeek (entry, fields, base) {
   return { ...(known || {}), ...merged, loaded: true }
 }
 
+// The entry once a peek of `fields` lands on `known`, or null when it must not
+// land: the key has no entry (a `missing` answer stored null, or nothing was
+// read yet) or it already shows a name or an @nome.
+export function peekApply (known, fields) {
+  if (!known || !unnamed(known)) return null
+  return withPeek(known, fields)
+}
+
 // What one profile.read answer says, key -> entry (null for a key in
 // `missing`: nothing to show, so a name the peek found earlier does not stay
-// and the key is not peeked), plus the keys left without a name or @nome that
+// and the key leaves the peek queue), plus the keys left without a name or @nome that
 // the peek may try. A key the peek already filled gets its fields back only
 // while the local copy still reads as it did then (see withPeek).
 export function foldRead (res, peeker) {
@@ -110,7 +121,10 @@ export function foldRead (res, peeker) {
     entries.set(key, entry)
   }
   for (const rawKey of (res && res.missing) || []) {
-    if (typeof rawKey === 'string') entries.set(rawKey.toLowerCase(), null)
+    if (typeof rawKey !== 'string') continue
+    const key = rawKey.toLowerCase()
+    if (peeker) peeker.drop(key)
+    entries.set(key, null)
   }
   return { entries, lonely }
 }
@@ -136,6 +150,10 @@ export function createNamePeeker ({ enabled, lookup, peek }) {
       }
       return queue.size
     },
+    // A key that is no longer worth asking about (profile.read says `missing`).
+    drop (key) {
+      queue.delete(key)
+    },
     // What the last successful read of `key` said, { fields, base }, or null.
     // base is the entry the peek filled (see remember), null until then.
     foundFor (key) {
@@ -159,7 +177,7 @@ export function createNamePeeker ({ enabled, lookup, peek }) {
         const member = await lookup(key)
         const params = member && member.ok ? peekParams(key, member.value) : null
         if (params !== null) fields = peekFields(await peek(params))
-        else transient = !member || !member.ok
+        else transient = !member || (!member.ok && PASSING.has(member.reason))
       } catch (err) {
         if (err && err.code === USAGE && err.message === WEB_ONLY) {
           off = true
