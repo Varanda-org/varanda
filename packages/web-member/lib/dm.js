@@ -78,14 +78,14 @@ const hcrypto = require('hypercore-crypto')
 const dm = require('@varanda/core/lib/dm')
 const dmFold = require('@varanda/core/lib/dm-fold')
 const postage = require('@varanda/core/lib/dm-postage')
-const { nowIso, MAX_AUDIO_BYTES } = require('@varanda/core/lib/records')
+const { nowIso, MAX_AUDIO_BYTES, VIDEO_MIME, MAX_MOMENT_VIDEO_MS, MAX_MOMENT_VIDEO_BYTES } = require('@varanda/core/lib/records')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { certForKey } = require('@varanda/core/lib/cert')
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
 const { blockedKeys } = require('@varanda/core/lib/member-block')
 const { copyLinkCard } = require('@varanda/core/lib/link-card')
 const { openOffer } = require('@varanda/core/lib/testimonials')
-const { mediaBounds, audioBounds, dmTextBytes, DM_MEDIA_KEYS, AUDIO_MS_TOLERANCE } = require('@varanda/rpc')
+const { mediaBounds, audioBounds, videoBounds, dmTextBytes, DM_MEDIA_KEYS, AUDIO_MS_TOLERANCE } = require('@varanda/rpc')
 const { sealBlob, createBlobClient, fetchBlob } = require('./blob')
 const sodium = require('./sodium-browser')
 const { dmBoxKeyPairFromPrf, dmLocalKeyFromPrf } = require('./passkey')
@@ -1024,12 +1024,24 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // key and nonce go public in the moment record, so a blob shared with a
   // DM (or another moment) would open that one for every reader of the
   // diary. The upload takes stamps as putMedia does. -> the item, ms 0.
-  async function putPublicMedia (own, keyPair, { bytes, mime, width, height }) {
+  // A short video (mime video/mp4, the caller's stripped copy) must pass the
+  // strict check a reader makes with exactly the given sides and ms: the
+  // item's sides and duration are the container's. DM media never takes one.
+  async function putPublicMedia (own, keyPair, { bytes, mime, width, height, ms = 0 }) {
     requireUnlocked()
     const gen = generation
-    const ok = bytes instanceof Uint8Array && mime !== dm.DM_AUDIO_MIME && dm.DM_MEDIA_MIMES.includes(mime) &&
-      Number.isInteger(width) && width >= 1 && Number.isInteger(height) && height >= 1 &&
-      mediaBounds(bytes, mime) !== null
+    let ok
+    if (mime === VIDEO_MIME) {
+      const video = bytes instanceof Uint8Array && bytes.byteLength >= 1 && bytes.byteLength <= MAX_MOMENT_VIDEO_BYTES
+        ? videoBounds(bytes, { maxMs: MAX_MOMENT_VIDEO_MS })
+        : null
+      ok = video !== null && video.width === width && video.height === height && video.ms === ms
+    } else {
+      ok = bytes instanceof Uint8Array && mime !== dm.DM_AUDIO_MIME && dm.DM_MEDIA_MIMES.includes(mime) &&
+        Number.isInteger(width) && width >= 1 && Number.isInteger(height) && height >= 1 &&
+        mediaBounds(bytes, mime) !== null
+      ms = 0
+    }
     if (!ok) {
       if (bytes instanceof Uint8Array) wipe(bytes)
       throw new UsageError(BAD_MEDIA)
@@ -1046,7 +1058,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (gen !== generation) throw new UsageError(LOCKED)
     await upload(entry, keyPair)
     if (gen !== generation) throw new UsageError(LOCKED)
-    const item = mediaItem({ ...sealed.descriptor, mime, w: width, h: height, ms: 0 })
+    const item = mediaItem({ ...sealed.descriptor, mime, w: width, h: height, ms })
     publicItems.set(item.id, item)
     while (publicItems.size > BLOBS_MAX) publicItems.delete(publicItems.keys().next().value)
     return mediaItem(item)
@@ -1068,10 +1080,15 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // caller owns). The key and nonce are the record's own (public), so no
   // unlock is needed: the blob is fetched over plain HTTP GETs from the
   // seeder's origin. Gone, refused or not verifying (size, sha256, an image
-  // of that mime) all answer MOMENT_PHOTO_GONE.
+  // of that mime) all answer MOMENT_PHOTO_GONE. A video answers its ms too:
+  // fetchBlob checks images only, so its bytes must pass the strict video
+  // check with exactly the item's sides and duration.
   async function readPublicMedia (item) {
     const d = item
-    if (d === null || typeof d !== 'object' || d.ms !== 0 || d.mime === dm.DM_AUDIO_MIME || !dm.DM_MEDIA_MIMES.includes(d.mime)) {
+    const video = d !== null && typeof d === 'object' && d.mime === VIDEO_MIME
+    if (d === null || typeof d !== 'object' || (video
+      ? !(Number.isInteger(d.ms) && d.ms >= 1 && d.ms <= MAX_MOMENT_VIDEO_MS)
+      : d.ms !== 0 || d.mime === dm.DM_AUDIO_MIME || !dm.DM_MEDIA_MIMES.includes(d.mime))) {
       throw new Error(MOMENT_PHOTO_GONE)
     }
     if (blobOrigin === null) throw new Error(MOMENT_PHOTO_GONE)
@@ -1082,6 +1099,14 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       const msg = err && err.message
       if (msg === MEDIA_GONE || msg === BAD_MEDIA) throw new Error(MOMENT_PHOTO_GONE)
       throw err
+    }
+    if (video) {
+      const v = videoBounds(r.bytes, { maxMs: MAX_MOMENT_VIDEO_MS })
+      if (v === null || v.width !== d.w || v.height !== d.h || v.ms !== d.ms) {
+        wipe(r.bytes)
+        throw new Error(MOMENT_PHOTO_GONE)
+      }
+      return { bytes: r.bytes, mime: d.mime, w: d.w, h: d.h, ms: d.ms }
     }
     return { bytes: r.bytes, mime: d.mime, w: d.w, h: d.h }
   }

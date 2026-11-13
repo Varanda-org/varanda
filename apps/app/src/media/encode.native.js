@@ -15,7 +15,7 @@ import rpc from '@varanda/rpc'
 import { File } from 'expo-file-system'
 import { SaveFormat, manipulateAsync } from 'expo-image-manipulator'
 import { revokeUrl, urlFromBytes } from './display'
-import { gifSize } from './gif.js'
+import { gifProblem, gifSize } from './gif.js'
 import { acceptedSource, canHaveAlpha, gifOverCap } from './source.js'
 import { MAX_GIF_BYTES, MAX_IMAGE_SIDE, MAX_MEDIA_DIMENSION, checkFile, fitWithin } from './plan.js'
 
@@ -36,6 +36,8 @@ async function encodeGif (source, bytes) {
   if (!size) throw fail('formato não aceito')
   const problem = checkFile({ mime: 'image/gif', bytes: bytes.byteLength, ...size })
   if (problem) throw fail(problem)
+  const refused = gifProblem(bytes)
+  if (refused) throw fail(refused)
   return { bytes, mime: 'image/gif', ...size }
 }
 

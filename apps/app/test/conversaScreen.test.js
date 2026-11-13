@@ -356,7 +356,8 @@ test('App quick replies refresh feeds without touching a parked composer', (t) =
     setComposer: (update) => { state.composer = update(state.composer) },
     setVersion: (update) => { state.version = update(state.version) },
     setPeekVersion: (update) => { state.peekVersion = update(state.peekVersion) },
-    showToast: (text) => { state.toast = text }
+    showToast: (text) => { state.toast = text },
+    share: { requeue: () => {} }
   })
   published('quick-reply', focal)
   t.is(state.composer, composer)

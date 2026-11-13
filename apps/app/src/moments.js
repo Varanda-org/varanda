@@ -1,10 +1,36 @@
 // Momentos: strip order, viewer navigation and the reply context, from what
 // the node already read. Pure: no React, no react-native, no Node built-ins.
 
+import rpc from '@varanda/rpc'
+import { MAX_MOMENT_VIDEO_MS, VIDEO_MIME } from './media/plan.js'
+
 export const MOMENT_MS = 24 * 60 * 60 * 1000
 export const AUTO_ADVANCE_MS = 5000
+export const MUSIC_HOLD_MS = 15000
+// Covers the 1 s container tolerance plus the player's start lag after the clock.
+export const VIDEO_END_GRACE_MS = 1500
+const MIN_VIDEO_SEGMENT_MS = 1000
 
 const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
+
+export function momentMusicOf (item) {
+  try {
+    if (item?.media?.mime === VIDEO_MIME) return null
+    const music = item?.music
+    if (!isObject(music)) return null
+    const proto = Object.getPrototypeOf(music)
+    if (proto !== Object.prototype && proto !== null) return null
+    // momentsOf has already removed the provider from a validated reference.
+    const ref = Object.hasOwn(music, 'p') ? music : { p: 'audius', ...music }
+    return rpc.isMomentMusic(ref) ? { id: ref.id, start: ref.start } : null
+  } catch {
+    return null
+  }
+}
+
+export function holdMsOf (item, musicPlays) {
+  return musicPlays === true && momentMusicOf(item) !== null ? MUSIC_HOLD_MS : AUTO_ADVANCE_MS
+}
 
 export function seenKey (ref) {
   return typeof ref === 'string' ? ref : ''
@@ -76,4 +102,16 @@ export function progressOf (index, length) {
   const out = []
   for (let n = 0; n < length; n++) out.push(n < index ? 1 : 0)
   return out
+}
+
+// How long the viewer stays on a momento: AUTO_ADVANCE_MS for a photo; for a
+// video, the duration the player measured (else the declared one), kept
+// between one second and MAX_MOMENT_VIDEO_MS, so a lying file can neither
+// flash past nor hold the strip.
+export function segmentMs (item, measuredMs) {
+  const media = isObject(item) && isObject(item.media) ? item.media : null
+  if (media === null || media.mime !== VIDEO_MIME) return AUTO_ADVANCE_MS
+  const pick = (n) => Number.isFinite(n) && n > 0 ? n : null
+  const ms = pick(measuredMs) ?? pick(media.ms) ?? MAX_MOMENT_VIDEO_MS
+  return Math.min(MAX_MOMENT_VIDEO_MS, Math.max(MIN_VIDEO_SEGMENT_MS, Math.round(ms)))
 }

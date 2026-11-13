@@ -160,7 +160,8 @@ test('definite errors and failed or malformed reads keep the draft uncertain', a
 test('Publicar shares the matcher and resolves both draft choices before the editor', (t) => {
   const src = fs.readFileSync(path.join(__dirname, '../src/screens/Publicar.js'), 'utf8')
   t.ok(src.includes("import { sentMatcher } from '../replySend'"))
-  t.ok(src.includes('(res.entries || []).find(sentMatcher({'))
+  t.ok(src.includes('const matches = sentMatcher({'))
+  t.ok(src.includes('(res.entries || []).find((entry) => matches(entry) &&'))
   t.ok(src.includes('seqFloor: lastSeqRef.current'))
   for (const label of ['Você tem um rascunho não publicado.', 'Usar a resposta', 'Manter o rascunho']) t.ok(src.includes(label))
   t.ok(src.includes("typeof reply.draft === 'string'"))

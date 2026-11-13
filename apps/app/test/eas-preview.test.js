@@ -38,6 +38,18 @@ test('the auth-session module declares androidx.activity', (t) => {
   t.ok(/implementation "androidx\.activity:activity(-ktx)?:\d+\.\d+\.\d+"/.test(gradle))
 })
 
+// One media3 stack: video-prep pins the version expo-video declares, or Gradle
+// resolves a newer one for every media3 module the app ships.
+test('the video-prep module pins media3 1.8.0, as expo-video does', (t) => {
+  const gradle = read('modules/video-prep/android/build.gradle')
+  for (const name of ['transformer', 'effect', 'common']) {
+    const lines = gradle.split('\n').filter((l) => l.includes('androidx.media3:media3-' + name + ':'))
+    t.alike(lines.map((l) => l.trim()), ['implementation "androidx.media3:media3-' + name + ':1.8.0"'], name)
+  }
+  const expoVideo = fs.readFileSync(require.resolve('expo-video/android/build.gradle', { paths: [root] }), 'utf8')
+  t.ok(expoVideo.includes('def androidxMedia3Version = "1.8.0"'), 'expo-video still declares 1.8.0')
+})
+
 test('the post install hook runs prepare-native.sh', (t) => {
   const script = read('scripts/eas-post-install.sh')
   t.ok(script.includes('prepare-native.sh'))

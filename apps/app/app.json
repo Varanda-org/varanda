@@ -19,6 +19,11 @@
         "webcredentials:bora.varanda.app",
         "applinks:bora.varanda.app"
       ],
+      "entitlements": {
+        "com.apple.security.application-groups": [
+          "group.app.varanda"
+        ]
+      },
       "config": {
         "usesNonExemptEncryption": false
       },
