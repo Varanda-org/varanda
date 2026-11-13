@@ -237,6 +237,8 @@ test('pages-groups: cached v1 and v2 posts paginate without a seeder connection'
   groupLib.buildGroup = (...args) => {
     const view = build(...args)
     for (const p of view.posts) if (p.seq === visible.seq) p.reactions = [{ emoji: '\u{1f44d}', count: reactors.length, by: reactors }]
+    // The fold keeps a hidden post's card; the read must not pass it on.
+    for (const p of view.posts) if (p.seq === hidden.seq) p.card = { url: 'https://exemplo.com.br/', host: 'exemplo.com.br', title: 'oculto', desc: '', image: null }
     return view
   }
   let first
@@ -251,6 +253,8 @@ test('pages-groups: cached v1 and v2 posts paginate without a seeder connection'
   t.alike(first.items.map((p) => p.seq), [hidden.seq, visible.seq])
   t.is(first.items[0].media, null, 'hidden media is omitted')
   t.is(first.items[0].text, '')
+  t.is(first.items[0].card, null, 'a hidden post carries no card')
+  t.is(first.items[1].card, null, 'no card is null')
   t.alike(first.items[1].media, media, 'v2 descriptors survive the cached fold')
   t.is(first.items[1].text, '')
   t.is(first.incomplete, true, 'the missing writer listing stays explicit')

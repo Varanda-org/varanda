@@ -1442,6 +1442,7 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
         ...(Array.isArray(reactions) && reactions.length > 0 ? { reactions: reactions.map((r) => ({ emoji: r.emoji, count: r.count, mine: r.by.includes(page) })) } : {}),
         text: x.hidden ? '' : x.text,
         media: x.hidden || !x.media ? null : x.media.map((media) => ({ ...media })),
+        card: x.hidden || !x.card ? null : x.card,
         ...loaded.profiles.get(x.diary)
       }))
       const last = items[items.length - 1]
