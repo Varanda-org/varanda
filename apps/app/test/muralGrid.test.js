@@ -68,6 +68,31 @@ test('Segmented labels shrink to fit instead of being cut', (t) => {
   t.ok(segmented.includes('adjustsFontSizeToFit minimumFontScale={0.7}'), 'three tabs at large text keep whole labels')
 })
 
+test('tileLabel: a pair is vídeo, photos keep foto and the count', async (t) => {
+  const { tileLabel } = await import('../src/ui/muralLabel.js')
+  const photo = { mime: 'image/jpeg' }
+  const video = { mime: 'video/mp4' }
+  t.is(tileLabel({ media: [photo, video] }), 'vídeo', 'a pair is one video, not 2 fotos')
+  t.is(tileLabel({ media: [photo] }), 'foto')
+  t.is(tileLabel({ media: [photo, photo, photo] }), '3 fotos')
+  t.is(tileLabel({ media: [photo, photo] }), '2 fotos', 'two photos are still photos')
+  t.is(tileLabel({ media: [video, photo] }), '2 fotos', 'only a poster then a clip is a pair')
+  const now = Date.parse('2026-11-12T12:00:00Z')
+  t.is(tileLabel({ media: [photo, video], at: new Date(now - 5 * 60000).toISOString() }, now), 'vídeo, 5 min', 'the time follows')
+  t.is(tileLabel({}), 'foto', 'no media still reads foto')
+  t.ok(/import \{ tileLabel \} from '\.\/muralLabel'/.test(grid) && grid.includes('export { tileLabel }'), 'MuralGrid uses and exports it')
+  t.ok(grid.includes('accessibilityLabel={tileLabel(tile)}'), 'the tile is announced with it')
+})
+
+test('a video pair shows a play mark and duration, not a photo count', (t) => {
+  t.ok(grid.includes("name='tocar'"), 'play mark')
+  t.ok(grid.includes('durationLabel(pair.video.ms)'), 'duration on the tile')
+  t.ok(grid.includes("name='copiar'"), 'several photos keep the badge')
+  t.ok(grid.indexOf("name='tocar'") < grid.indexOf("name='copiar'"), 'the play mark is the video branch')
+  t.ok(grid.includes('tile.media[0]'), 'the tile still shows the poster')
+  t.ok(grid.includes('onPress={() => onOpen && onOpen(tile)}'), 'a tap still opens the post')
+})
+
 test('Segmented: three tabs share one text size, two keep theirs', (t) => {
   t.ok(segmented.includes('export const SEGMENTED_CAP_TWO = 1.5'), 'two tabs keep the 1.5 cap')
   t.ok(segmented.includes('export const SEGMENTED_CAP_MANY = 1.2'), 'three or more cap at 1.2')

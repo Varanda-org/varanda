@@ -210,6 +210,8 @@ test('touch targets: the photo viewer stops clicks and post actions are 44 pt', 
   const modal = grid.slice(grid.indexOf('<Modal'), grid.indexOf('styles.viewerTop'))
   t.ok(modal.includes('onClick={stopClick}'), 'viewer root stops clicks bubbling through the portal')
   t.ok(modal.includes('onStartShouldSetResponder={() => true}'), 'viewer root claims the responder')
+  t.is(grid.split('onClick={stopClick}').length - 1, 3, 'both viewers and the inline frame stop clicks')
+  t.is(grid.split('onStartShouldSetResponder={() => true}').length - 1, 3, 'both viewers and the inline frame claim the responder')
   t.ok(grid.includes("from './MediaCarousel'"), 'the grid uses the carousel')
   t.absent(grid.includes('onTouchEnd'), 'no hand-rolled swipe in the viewer')
   t.ok(grid.includes('mosaicLayout(items.length)'), 'the quote mosaic counts every photo')

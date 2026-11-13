@@ -28,6 +28,7 @@ const { createDidit } = require('../account/didit')
 const { createPhoneClient } = require('../account/phone-client')
 const { openPhoneStore, FILE: PHONE_FILE } = require('../account/phone-store')
 const { parseGifConfig } = require('../account/gif-routes')
+const { parseAudiusConfig } = require('../account/audius-provider')
 const { removeWalletFiles } = require('../account/wallet-cleanup')
 const { generateVapidKeys } = require('../account/web-push')
 const { openModerationStore, FILE: MODERATION_FILE } = require('../account/moderation-store')
@@ -540,7 +541,7 @@ function readEnv (env, dataDir) {
     if (limits.invitesPerWeek === undefined) throw new UsageError('VARANDA_FEIRA_INVITES_PER_WEEK exige VARANDA_INVITES_PER_WEEK')
     if (groupToken === null) throw new UsageError('VARANDA_FEIRA_INVITES_PER_WEEK exige VARANDA_TRIAGE_TOKEN')
   }
-  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage, didit, ageSince: readAgeSinceEnv(env, didit), phone: readPhoneEnv(env, didit), gif: readGifEnv(env), preview: readPreviewEnv(env), androidCertSha256: readAndroidCertEnv(env) }
+  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage, didit, ageSince: readAgeSinceEnv(env, didit), phone: readPhoneEnv(env, didit), gif: readGifEnv(env), audius: readAudiusEnv(env), preview: readPreviewEnv(env), androidCertSha256: readAndroidCertEnv(env) }
 }
 
 // VARANDA_ANDROID_CERT_SHA256: the Android app's signing certificate, the
@@ -630,6 +631,48 @@ function readGifEnv (env) {
   const mediaHosts = rawHosts === undefined || rawHosts.trim() === '' ? [] : rawHosts.split(',').map((h) => h.trim().toLowerCase())
   const config = parseGifConfig({ apiUrl, apiKey, mediaHosts })
   if (config === null) throw new UsageError('VARANDA_GIF_MEDIA_HOSTS inválido: use nomes de host separados por vírgula')
+  return config
+}
+
+// Audius music (../account/audius-routes.js): VARANDA_AUDIUS_API_KEY unset
+// or '' is off, set is on. The other four are optional, and one set while
+// the key is empty is a mistake the operator must see. Momentos stay off
+// unless VARANDA_AUDIUS_MOMENTS is exactly '1'. No value is ever echoed: the
+// key is a secret, and parseAudiusConfig answers null without saying why.
+const AUDIUS_OPTIONAL = ['VARANDA_AUDIUS_API_URL', 'VARANDA_AUDIUS_APP_NAME', 'VARANDA_AUDIUS_MOMENTS', 'VARANDA_AUDIUS_STREAMS']
+function readAudiusEnv (env) {
+  const apiKey = env.VARANDA_AUDIUS_API_KEY
+  if (apiKey === undefined || apiKey === '') {
+    for (const name of AUDIUS_OPTIONAL) {
+      if (env[name] !== undefined && env[name] !== '') throw new UsageError('VARANDA_AUDIUS_API_KEY ausente')
+    }
+    return null
+  }
+  const options = { apiKey: 'k' }
+  const rawUrl = env.VARANDA_AUDIUS_API_URL
+  if (rawUrl !== undefined && rawUrl !== '') {
+    if (parseAudiusConfig({ ...options, apiUrl: rawUrl }) === null) throw new UsageError('VARANDA_AUDIUS_API_URL inválido: use uma URL https sem usuário, consulta nem endereço IP')
+    options.apiUrl = rawUrl
+  }
+  const rawApp = env.VARANDA_AUDIUS_APP_NAME
+  if (rawApp !== undefined && rawApp !== '') {
+    if (parseAudiusConfig({ ...options, appName: rawApp }) === null) throw new UsageError('VARANDA_AUDIUS_APP_NAME inválido: use letras minúsculas, números e hífen, até 32')
+    options.appName = rawApp
+  }
+  const rawMoments = env.VARANDA_AUDIUS_MOMENTS
+  if (rawMoments !== undefined && rawMoments !== '' && rawMoments !== '0' && rawMoments !== '1') {
+    throw new UsageError('VARANDA_AUDIUS_MOMENTS inválido: use 0 ou 1')
+  }
+  options.moments = rawMoments === '1'
+  const rawStreams = env.VARANDA_AUDIUS_STREAMS
+  const streamsText = typeof rawStreams === 'string' ? rawStreams.trim() : null
+  if (rawStreams !== undefined && streamsText !== '') {
+    const value = streamsText !== null && CANONICAL_INT_RE.test(streamsText) ? Number(streamsText) : NaN
+    if (!(value >= 1 && value <= 32)) throw new UsageError('VARANDA_AUDIUS_STREAMS inválido: use um número inteiro de 1 a 32')
+    options.streams = value
+  }
+  const config = parseAudiusConfig({ ...options, apiKey })
+  if (config === null) throw new UsageError('VARANDA_AUDIUS_API_KEY inválido')
   return config
 }
 
@@ -754,7 +797,7 @@ async function serve (flags, env) {
   if (host === '0.0.0.0' || host === '::') throw new UsageError('account-host inválido')
   const port = flags.accountPort === null ? DEFAULT_PORT : flags.accountPort
   const pagesConfig = readPagesEnv(env)
-  const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage: triageConfig, didit: diditConfig, ageSince, phone: phoneConfig, gif, preview, androidCertSha256 } = readEnv(env, flags.dataDir)
+  const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage: triageConfig, didit: diditConfig, ageSince, phone: phoneConfig, gif, audius, preview, androidCertSha256 } = readEnv(env, flags.dataDir)
   const { maxMembers = null, invitesPerWeek = null, inviteDrops = null, feiraInvitesPerWeek = null, maxPending, maxConnections, ratePerSecond, burst } = limits
   const association = ensureConfig(flags.dataDir, flags.association)
   const log = (event) => {
@@ -935,6 +978,7 @@ async function serve (flags, env) {
     log({ event: 'telefone', reason: phoneClient !== null ? 'ligada' : 'desligada' })
     if (phoneClient === null) log({ event: 'cadastro' })
     log({ event: 'gif', reason: gif !== null ? 'ligada' : 'desligada' })
+    log({ event: 'audius', reason: audius !== null ? 'ligada' : 'desligada' })
     log({ event: 'preview', reason: preview ? 'ligada' : 'desligada' })
     // On every start, on or off, so an off period always moves the since
     // floor (age-check.json). An off start that cannot record it stops the
@@ -1001,7 +1045,7 @@ async function serve (flags, env) {
       const listingReader = groupToken === null
         ? null
         : createListingReader({ baseUrl: seederHttp, token: groupToken, association, revokedIssuers: () => revokedIssuerSet(moderation.pending().published.snapshot) })
-      const server = createAccountServer({ association, origin, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, recovery, passkeys, androidCertSha256, invites, feiraInvites, listingReader, drops, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, phoneClient, phones, phoneDailyLimit: phoneConfig === null ? undefined : phoneConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, preview, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
+      const server = createAccountServer({ association, origin, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, recovery, passkeys, androidCertSha256, invites, feiraInvites, listingReader, drops, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, phoneClient, phones, phoneDailyLimit: phoneConfig === null ? undefined : phoneConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, audius, preview, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {
