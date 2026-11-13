@@ -2,6 +2,9 @@
 // can load them without React. An entry is { name, username, bio, avatar,
 // loaded }; avatar is undefined while unknown (only seeds without an avatar
 // were seen), null when the profile has none, else a fresh descriptor copy.
+// A verified diary.peek is kept as an entry (peekedEntry) that outlives a
+// `missing` answer of profile.read (missingEntry) and replaces a seed
+// (peekReplaces), until the diary is gone (forgottenEntry).
 
 import { avatarOf, sameAvatar } from './media/avatar.js'
 
@@ -49,6 +52,48 @@ export function applySeed (known, value) {
 // and an omitted avatar (an older node) reads as none.
 export function authoritative (p) {
   return { name: str(p.name), username: str(p.username), bio: str(p.bio), avatar: avatarOf(p.avatar), loaded: true }
+}
+
+// A node-verified diary.peek answer as an entry: built from the value alone
+// (never merged with a known entry), null when it names nothing.
+export function peekedEntry (value) {
+  const f = fieldsOf(value)
+  const entry = { name: str(f.name), username: str(f.username), bio: str(f.bio), avatar: avatarOf(f.avatar), loaded: true }
+  return entry.name === null && entry.username === null && !entry.avatar ? null : entry
+}
+
+// What profile.read's `missing` answer leaves in the cache: the verified peek
+// kept for that key, or null (no showable diary).
+export function missingEntry (peeked) {
+  return peeked ? { ...peeked } : null
+}
+
+// Whether a verified peek may replace `known`: a profile.read answer wins, a seed does not.
+export function peekReplaces (known, had, unsupported) {
+  if (had || known === null) return true
+  if (known === undefined) return unsupported === true
+  return typeof known === 'object' && known.loaded !== true
+}
+
+// Whether `key` shows a kept peek: peeked and not since answered with a
+// profile by profile.read (`held` wins).
+export function isPeekedKey (peeked, held, key) {
+  if (typeof key !== 'string') return false
+  const k = key.toLowerCase()
+  return peeked.has(k) && !held.has(k)
+}
+
+// What a forgotten peek (the diary is gone) leaves for a key profile.read
+// does not hold: the `missing` answer without a peek, with the page hint
+// (`hint`, null or { page, closed, moved }) on an unnamed entry. It only
+// takes away. -> the next entry, or undefined when nothing changes (an
+// unknown key stays unknown).
+export function forgottenEntry (known, hint) {
+  if (known === undefined) return undefined
+  const next = hint === null ? missingEntry(undefined) : { name: null, username: null, bio: null, avatar: null, loaded: true, ...hint }
+  if (next === null) return known === null ? undefined : null
+  const same = sameEntry(known, next) && known.page === next.page && known.closed === next.closed && known.moved === next.moved
+  return same ? undefined : next
 }
 
 export function viewOf (entry) {

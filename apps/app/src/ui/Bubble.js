@@ -126,7 +126,7 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
           ? <View style={styles.avatar}>{tail ? avatar : null}</View>
           : null}
         <View style={[styles.column, mine && styles.columnMine]}>
-          <View>
+          <View style={hug ? null : styles.fit}>
             <Pressable
               accessibilityRole={rows.length > 0 ? 'button' : undefined}
               accessibilityHint={rows.length > 0 ? 'toque longo para ações' : undefined}
@@ -249,6 +249,10 @@ const makeStyles = (colors) => StyleSheet.create({
   avatar: { width: AVATAR, alignSelf: 'flex-end' },
   column: { maxWidth: '80%', alignItems: 'flex-start', gap: space.xs },
   columnMine: { alignItems: 'flex-end' },
+  // On the web a content-sized box grows to its longest unbroken word, so a long link pushed the
+  // bubble past the column and off the screen. Holding the wrapper to the column makes the text wrap.
+  // Photo and voice bubbles keep their own width (hug).
+  fit: { maxWidth: '100%' },
   bubble: {
     borderRadius: radius.bubble,
     paddingHorizontal: space.md,
