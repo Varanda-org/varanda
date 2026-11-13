@@ -487,6 +487,20 @@ test('dm.thread: DM_THREAD_LIMIT_MAX fits, one more does not', (t) => {
   t.ok(overflow > MAX_MESSAGE, 'largest that fits')
 })
 
+test('dm.thread: a reactable:false row (no reactions) is never larger than the worst reactable row', (t) => {
+  for (const ch of DM_WORST) {
+    for (const card of [true, false]) {
+      const worst = dmThreadResult(1, ch, card).messages[0]
+      const { reactions, ...rest } = worst
+      const unreactable = { ...rest, reactable: false }
+      t.ok(utf8ByteLength(JSON.stringify(unreactable)) < utf8ByteLength(JSON.stringify(worst)), JSON.stringify(ch) + (card ? ' card' : ' media'))
+    }
+  }
+  const page = dmThreadResult(DM_THREAD_LIMIT_MAX, '\u{1f600}')
+  const { reactions, ...rest } = page.messages[0]
+  t.ok(size({ ...page, messages: Array(DM_THREAD_LIMIT_MAX).fill({ ...rest, reactable: false }) }) < size(page), 'so the pinned page maximum holds')
+})
+
 test('the dispatcher sends the worst-case feed page unchanged', async (t) => {
   const sent = []
   const d = createServerDispatcher({

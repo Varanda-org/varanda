@@ -85,7 +85,7 @@ test('reaction debounce spends nothing on net no-ops and flushes on teardown', a
 
 // Execute the screen's handlers themselves, with only their I/O and hook setters supplied.
 async function screenReactions (request, reactions = []) {
-  const { dmReactions, reactDebounce, messageKey } = await load()
+  const { dmReactions, reactDebounce, messageKey, dmReactable, withFreshReactions } = await load()
   const { applyOptimistic, toggleOf } = await import('../src/reactions.js')
   const clock = fakeClock()
   const item = { from: 'peer', id: 'one', reactions }
@@ -98,6 +98,8 @@ async function screenReactions (request, reactions = []) {
     reactionViewRef: { current: { disabled: false, dispatchDisabled: false, rawById: new Map([[key, item]]) } },
     reactionOverrides: new Map(),
     dmReactions,
+    dmReactable,
+    withFreshReactions,
     applyOptimistic,
     toggleOf,
     messageKey,
@@ -623,4 +625,88 @@ test('a dead older cursor drops its keys and reactions when the node returns the
   t.absent(h.state.painted.has(key), 'optimistic chip is removed')
   await read()
   t.alike(calls, ['newest', 'dead', 'newest'], 'the dead cursor is not read again')
+})
+
+test('a row marked reactable: false shows no reaction UI and sends nothing', async (t) => {
+  const { dmReactable } = await load()
+  t.ok(dmReactable({ from: 'peer', id: 'one' }))
+  t.absent(dmReactable({ from: 'peer', id: 'one', reactable: false }))
+  t.absent(dmReactable({ from: 'peer', id: 'one', deleted: true }))
+  t.absent(dmReactable(null))
+  const sent = []
+  const h = await screenReactions((...args) => { sent.push(args) })
+  h.item.reactable = false
+  t.absent(h.canReact(h.key), 'no quick strip, picker or chip tap')
+  h.toggleReaction(h.key, '👍')
+  h.clock.tick(600)
+  t.alike(sent, [])
+  t.absent(h.state.painted.has(h.key))
+  const src = screen()
+  t.ok(src.includes('const reactionRowReady = (item) => dmReactable(item)'), 'chips, quick strip and picker share the check')
+  t.ok(src.includes('!reactionsHidden && reactionRowReady('), 'chips hidden on such a row')
+})
+
+test('a USAGE refusal from a stale screen restores the row, shows the message and is never retried', async (t) => {
+  const sent = []
+  const h = await screenReactions(() => {
+    sent.push(1)
+    return Promise.reject(Object.assign(new Error('esta mensagem não aceita reações'), { code: 'USAGE' }))
+  }, [{ emoji: '❤️', mine: true }])
+  h.toggleReaction(h.key, '👍')
+  t.is(h.state.painted.get(h.key)[0].emoji, '👍')
+  h.clock.tick(600)
+  await settled()
+  t.alike(h.state.painted.get(h.key), [{ emoji: '❤️', count: 1, mine: true }], 'optimistic choice reverted')
+  t.is(h.state.errors.at(-1), 'esta mensagem não aceita reações')
+  t.is(h.context.unsure.size, 0, 'not uncertain')
+  t.is(h.state.reads, 1, 'one reread, which brings reactable: false')
+  h.clock.tick(6000)
+  await settled()
+  t.is(sent.length, 1, 'no resend')
+})
+
+test('an older-page reread carries reactable: false, so the reaction controls go away', async (t) => {
+  const { refreshThread, newestOf, messageKey, dmReactable } = await load()
+  const rows = ['old', 'new'].map((id, i) => ({ from: 'peer', id, at: `2026-11-0${i + 1}T10:00:00Z`, text: id }))
+  const h = await screenReactions(async () => ({}))
+  const oldKey = messageKey(rows[0])
+  const pend = () => {
+    h.context.pages = new Map([['old', new Set([oldKey])]])
+    h.context.overrides.set(oldKey, [{ emoji: '👍', count: 1, mine: true }])
+  }
+  pend()
+  let mark = true
+  const rawRef = { current: rows.slice() }
+  const env = {
+    ...h.env,
+    refreshThread,
+    newestOf,
+    messageKey,
+    commitRead: h.commitRead,
+    rawRef,
+    olderRef: { current: true },
+    genRef: { current: 0 },
+    dm: async (method, params) => {
+      const row = params.before ? rows[0] : rows[1]
+      return { messages: [{ ...row, ...(params.before && mark ? { reactable: false } : {}) }], next: 'new-cursor' }
+    },
+    setRaw: (next) => { rawRef.current = next },
+    setNext: () => {},
+    setLoadError: () => {},
+    setNewest: () => {},
+    setFolder: () => {},
+    setBlocked: () => {},
+    setLoaded: () => {},
+    useCallback: (fn) => fn
+  }
+  const src = screen()
+  const read = runInNewContext(src.slice(src.indexOf('  const readThread ='), src.indexOf('  const reactionGate =')) + '\n;readThread', env)
+  t.ok(dmReactable(rawRef.current[0]))
+  await read()
+  t.is(rawRef.current[0].reactable, false, 'the held row takes the mark of the reread')
+  t.absent(dmReactable(rawRef.current[0]), 'chips, quick strip and picker go away')
+  mark = false
+  pend()
+  await read()
+  t.absent('reactable' in rawRef.current[0], 'a fresh row without the mark drops it')
 })

@@ -2549,7 +2549,7 @@ test('reactions to hidden, unknown or future targets are ignored', (t) => {
   t.alike(buildGroup(w.input()).posts.map((p) => p.reactions), [undefined, undefined])
 })
 
-test('at most GROUP_REACTIONS_MAX distinct emojis per message, later ones ignored', (t) => {
+test('at most GROUP_REACTIONS_MAX distinct emojis per message, the most chosen kept', (t) => {
   const { GROUP_REACTIONS_MAX } = require('@varanda/rpc')
   t.is(GROUP_REACTIONS_MAX, 12)
   const w = world()
@@ -2569,12 +2569,41 @@ test('at most GROUP_REACTIONS_MAX distinct emojis per message, later ones ignore
   t.is(r.length, 12)
   t.alike(r.map((x) => x.emoji).sort(), emojis.slice(0, 12).sort())
   t.alike(r[0], { emoji: emojis[0], count: 2, by: [K(0x20), K(0x40)] })
-  // A diary that clears its reaction frees a slot for the next emoji in order.
+  // A diary that clears its reaction frees a slot for the next emoji in emoji order.
   react(w, K(0x605), p, '', 31)
   const r2 = reactionsOf(buildGroup(w.input()), p)
   t.is(r2.length, 12)
   t.ok(r2.some((x) => x.emoji === emojis[12]))
   t.absent(r2.some((x) => x.emoji === emojis[13]))
+})
+
+test('the reaction cap counts members per emoji, never the order of `at`', (t) => {
+  const w = world()
+  const p = post(w, G, 1)
+  // Twelve diaries, each with its own emoji, all with an earlier `at`.
+  const early = []
+  for (let i = 0; i < 12; i++) {
+    const d = K(0x20 + i)
+    const wk = K(0x600 + i)
+    w.add(d, wk)
+    early.push(String.fromCodePoint(0x1f600 + i))
+    react(w, wk, p, early[i], 2 + i)
+  }
+  // Two later diaries share one emoji that sorts after all twelve.
+  const shared = '\u{1f680}'
+  w.add(K(0x40), K(0x640)).add(K(0x41), K(0x641))
+  react(w, K(0x640), p, shared, 40)
+  react(w, K(0x641), p, shared, 41)
+  const r = reactionsOf(buildGroup(w.input()), p)
+  t.is(r.length, 12)
+  t.alike(r[0], { emoji: shared, count: 2, by: [K(0x40), K(0x41)] }, 'the emoji two members chose is kept, first')
+  // Ties at one member go by emoji: the last of the twelve is the one cut.
+  t.alike(r.slice(1).map((x) => x.emoji), early.slice(0, 11))
+  t.absent(r.some((x) => x.emoji === early[11]))
+  // The same twelve whatever order the cores are read in.
+  const other = w.input()
+  other.writers = other.writers.slice().reverse()
+  t.alike(reactionsOf(buildGroup(other), p), r)
 })
 
 test('concurrent reactions converge on two replicas', (t) => {

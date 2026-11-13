@@ -140,6 +140,49 @@ test('a link card is not drawn for a link hidden in a spoiler', async (t) => {
   t.ok(bubble.includes('<LinkCard card={card}'), 'the checked card is the one drawn')
 })
 
+test('a message with Abrir convite keeps its spoilers and a spoiler link card covered', async (t) => {
+  const screen = withoutComments(readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8'))
+  const richImport = screen.match(/^import \{([^}]*)\} from '\.\.\/richText'$/m)
+  t.ok(richImport && /\bparseRich\b/.test(richImport[1]) && /\bplainOf\b/.test(richImport[1]), 'parseRich and plainOf come from the pure module')
+  t.ok(screen.includes("import { cardBesideSpoilers } from '../ui/RichText'"))
+  t.ok(screen.includes('text: link ? plainOf(item.rawText, { full: true }) : item.text, rawText: link ? undefined : item.rawText'), 'the plain path beside the invite gets every code line, with its spoilers replaced')
+  t.ok(screen.includes('card: link && stored ? cardBesideSpoilers(parseRich(item.rawText), stored) : stored'), 'the card beside the invite goes through the spoiler check')
+  const cardBesideSpoilers = fnOf(ui('RichText.js'), 'cardBesideSpoilers')
+  const { parseRich, plainOf } = await import('../src/richText.js')
+  const { inviteLinkOf } = await import('../src/inviteMessage.js')
+  const origin = 'https://bora.varanda.app'
+  const link = origin + '/c/' + 'a'.repeat(64)
+  const raw = 'Convite: ' + link + ' ||veja https://example.com/final||'
+  t.ok(inviteLinkOf(raw, origin), 'the text holds an invite link')
+  const text = plainOf(raw)
+  t.absent(text.includes('example.com'), 'the spoiler stays covered: ' + text)
+  t.absent(text.includes('||'), 'no raw markers')
+  const card = { url: 'https://example.com/final', host: 'example.com', title: 'Final' }
+  t.is(cardBesideSpoilers(parseRich(raw), card), null, 'no card for a link inside the spoiler')
+  const shown = { url: link, host: 'bora.varanda.app', title: 'Convite' }
+  t.is(cardBesideSpoilers(parseRich('Convite: ' + link + ' *ok*'), shown), shown, 'without a spoiler the card stays')
+})
+
+test('an invite link inside a spoiler does not offer Abrir convite', async (t) => {
+  const screen = withoutComments(readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8'))
+  t.ok(screen.includes(': inviteLinkOf(plainOf(row.rawText, { full: true }), origin)'), 'the row looks for an invite in the same text the invite form shows')
+  t.absent(screen.includes('inviteLinkOf(row.rawText'), 'never in the raw text')
+  const { plainOf } = await import('../src/richText.js')
+  const { inviteLinkOf } = await import('../src/inviteMessage.js')
+  const origin = 'https://bora.varanda.app'
+  const link = origin + '/c/' + 'a'.repeat(64)
+  t.ok(inviteLinkOf('oi ||veja ' + link + ' aqui||', origin), 'the raw text holds the link')
+  t.is(inviteLinkOf(plainOf('oi ||veja ' + link + ' aqui||'), origin), null, 'only inside a spoiler: no invite')
+  t.ok(inviteLinkOf(plainOf('Convite: ' + link + ' ||segredo||'), origin), 'outside the spoiler: the invite stays')
+  t.ok(inviteLinkOf(plainOf('Convite: *' + link + '*'), origin), 'a styled link stays whole')
+  const fenced = (lines) => '```\n' + lines.join('\n') + '\n```'
+  t.ok(inviteLinkOf(plainOf(fenced([link, 'b']), { full: true }), origin), 'on the first line of a code block')
+  t.ok(inviteLinkOf(plainOf(fenced(['a', link]), { full: true }), origin), 'on a later line, the same')
+  t.is(inviteLinkOf(plainOf('```\n```\n'.repeat(8) + 'oi ||veja ' + link + ' aqui||', { full: true }), origin), null, 'past CODE_MAX a covered link still does not count')
+  const shown = plainOf('Convite: ' + link + '\n```\nl1\nl2\nl3\n```\n||segredo||', { full: true })
+  t.is(shown, 'Convite: ' + link + '\nl1\nl2\nl3\nspoiler', 'the invite form keeps every code line and covers the spoiler')
+})
+
 test('the spoiler cover reads spoiler and never the hidden text', (t) => {
   const cover = fnOf(ui('RichText.js'), 'cover')
   for (const hidden of ['segredo', 'a b', 'o final do filme\ne triste', ' x', 'https://example.com/final', 'spoilerzinho']) {

@@ -6,15 +6,17 @@
 // crypto_secretbox (@varanda/core lib/group-crypto.js sealRecord) of one
 // compact JSON row under the key derived from the passkey PRF
 // (passkey.js dmLocalKeyFromPrf). A row is a message
-// { t: 'msg', id, peer, from, text, replyTo, media, at, mine, filedAt }
+// { t: 'msg', id, peer, from, text, replyTo, media, at, mine, filedAt, digest? }
 // (media: null or the message's media items, blob descriptors with their
 // key, exactly as the inner carries them; a row from before media reads as
-// null) or an op
+// null; digest: the hex64 sha256 of the inner's canonical JSON, @varanda/core
+// dm.js bodyDigest, absent on a row filed by an earlier build) or an op
 // { t: 'ctl', id, op, peer, at, filedAt } (id: the ctl envelope's, so a
 // device that pulls its own ctl back does not file it twice) or a reaction
-// { t: 'rx', id, peer, from, to, target: { from, id }, emoji, rev, at,
+// { t: 'rx', id, peer, from, to, target: { from, id, digest }, emoji, rev, at,
 // filedAt } (an inner v4 op, kept even while its target is not stored; the
-// fold applies it once the target is). Before sealing,
+// fold applies it once the target is, and only to the msg row with its
+// target.digest; a row without a hex64 target.digest is skipped on load). Before sealing,
 // a row gets a `pad` of spaces so its JSON is a multiple of ROW_BUCKET bytes:
 // the block length says neither the text length (within a bucket) nor msg
 // from ctl. The core's own signing pair derives
@@ -126,6 +128,7 @@ function validRow (r) {
   if (r.t === 'rx') return validReactionRow(r)
   if (r.t !== 'msg') return false
   if (r.legacy !== undefined && r.legacy !== true) return false
+  if (r.digest !== undefined && !HEX64.test(r.digest)) return false
   return HEX32.test(r.id) && HEX64.test(r.from) && typeof r.text === 'string' &&
     (r.replyTo === null || HEX32.test(r.replyTo)) && typeof r.mine === 'boolean' &&
     (r.fwd === undefined || r.fwd === 0 || r.fwd === 1) &&
@@ -138,14 +141,18 @@ function validReactionRow (r) {
   if (r.peer !== (r.mine ? r.to : r.from) || typeof r.mine !== 'boolean') return false
   const t = r.target
   if (t === null || typeof t !== 'object' || !HEX32.test(t.id) || (t.from !== r.from && t.from !== r.to)) return false
+  if (typeof t.digest !== 'string' || !HEX64.test(t.digest)) return false
   if (r.emoji !== '' && !isReaction(r.emoji)) return false
   return Number.isSafeInteger(r.rev) && r.rev >= 1 && r.rev <= DM_REACT_REV_MAX
 }
 
 function plainRow (r) {
   if (r.t === 'ctl') return { t: 'ctl', id: r.id, op: r.op, peer: r.peer, at: r.at, filedAt: r.filedAt }
-  if (r.t === 'rx') return { t: 'rx', id: r.id, peer: r.peer, from: r.from, to: r.to, target: { from: r.target.from, id: r.target.id }, emoji: r.emoji, rev: r.rev, at: r.at, mine: r.mine, filedAt: r.filedAt }
+  if (r.t === 'rx') {
+    return { t: 'rx', id: r.id, peer: r.peer, from: r.from, to: r.to, target: { from: r.target.from, id: r.target.id, digest: r.target.digest }, emoji: r.emoji, rev: r.rev, at: r.at, mine: r.mine, filedAt: r.filedAt }
+  }
   const out = { t: 'msg', id: r.id, peer: r.peer, from: r.from, text: r.text, replyTo: r.replyTo, fwd: r.fwd === 1 ? 1 : 0, media: plainMedia(r.media), card: r.card == null ? null : copyLinkCard(r.card, (d) => plainMedia([d])[0]), at: r.at, mine: r.mine, filedAt: r.filedAt }
+  if (typeof r.digest === 'string' && HEX64.test(r.digest)) out.digest = r.digest
   if (r.legacy === true) out.legacy = true
   return out
 }
@@ -549,7 +556,7 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
     if (rows === null) throw new Error(LOCKED)
     let rev = 0
     for (const r of rows) {
-      if (r.t === 'rx' && r.peer === peer && r.from === from && r.target.from === target.from && r.target.id === target.id && r.rev > rev) rev = r.rev
+      if (r.t === 'rx' && r.peer === peer && r.from === from && r.target.from === target.from && r.target.id === target.id && r.target.digest === target.digest && r.rev > rev) rev = r.rev
     }
     return rev
   }

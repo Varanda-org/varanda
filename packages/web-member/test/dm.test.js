@@ -1325,6 +1325,34 @@ test('dm.react: two stamps and two puts as one dm.send; a no-op sends nothing; a
   t.is(sendErr && sendErr.message, err.message, 'one daily allowance for both')
 })
 
+test('dm.react: a row stored without a digest takes no reaction, spends nothing, and dm.thread marks it reactable: false', async (t) => {
+  let local = null
+  const { engine, storage, calls, own, kp, peer, recipientBox, send } = await sendingEngine(t, {
+    stamps: 4,
+    options: { createStore: (o) => (local = createDmStore(o)) }
+  })
+  const puts = () => calls.filter((c) => c[0] === 'put').length
+  const sent = await send()
+  // The shape a build without digests filed: a message with no digest.
+  const old = { t: 'msg', id: '77'.repeat(16), peer, from: peer, text: 'de antes', replyTo: null, at: '2026-11-03T09:00:00.000Z', mine: false, filedAt: local.nextFiled() }
+  await local.append([old])
+  t.is(puts(), 2)
+  t.is(await wallet(storage), 2)
+
+  const err = await errorOf(engine.react(own, kp, { to: peer, target: { from: peer, id: old.id }, emoji: '\u{1f44d}' }, recipientBox))
+  t.is(err && err.code, 'USAGE')
+  t.is(err && err.message, 'esta mensagem não aceita reações')
+  t.absent(err && err.uncertain, 'nothing went out')
+  t.is(puts(), 2, 'no put')
+  t.is(await wallet(storage), 2, 'no stamp')
+
+  const rows = (await engine.thread(own, { peer })).messages
+  const oldRow = rows.find((m) => m.id === old.id)
+  t.is(oldRow.reactable, false)
+  t.absent('reactions' in oldRow)
+  t.absent('reactable' in rows.find((m) => m.id === sent.id), 'absent on a row that takes reactions')
+})
+
 test('dm.react: the self copy fails after the peer copy; a second call resumes it without new stamps', async (t) => {
   const { engine, storage, link, own, kp, peer, recipientBox, send } = await sendingEngine(t, { stamps: 4 })
   const sent = await send()
@@ -1409,6 +1437,62 @@ test('dm.react between two nodes: one pull files a reaction and a message, peers
   await B.web.request('dm.react', { to: A.key, target, emoji: '\u{1f525}' })
   await B2.web.request('dm.pull')
   t.alike((await B2.web.request('dm.thread', { peer: A.key })).messages[0].reactions, [{ emoji: '\u2764\ufe0f', mine: false }, { emoji: '\u{1f525}', mine: true }], 'own reaction on the other device')
+})
+
+test('dm.react between two nodes: the reaction names the message digest both sides store; a message reusing the id on a device without the history does not show it', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url)
+  const B = await memberNode(t, assoc, seeder.url)
+  await copyDiary(A, B)
+  await copyDiary(B, A)
+  const boxA = await dmBoxKeyPairFromPrf(A.prf, 1)
+  const boxB = await dmBoxKeyPairFromPrf(B.prf, 1)
+  const open = (bytes, pair, self) => dmCore.openInner(dmCore.openSealed(dmCore.decodeDrop(bytes).sealed, pair), self, { association: hex(assoc.publicKey) })
+
+  const before = seeder.pool.entries.length
+  const first = await B.web.request('dm.send', { to: A.key, text: 'primeira' })
+  const msgEntries = seeder.pool.entries.slice(before)
+  t.is(msgEntries.length, 2, 'peer copy and self copy')
+  const received = open(msgEntries[0].bytes, boxA, A.key)
+  t.is(received.text, 'primeira')
+  const sent = dmCore.bodyDigest(received)
+  t.ok(/^[0-9a-f]{64}$/.test(sent))
+  t.is(dmCore.bodyDigest(open(msgEntries[1].bytes, boxB, B.key)), sent, 'the self copy names the same digest')
+  t.is((await A.web.request('dm.pull')).added, 1)
+  await A.web.request('dm.seen', { peer: B.key })
+
+  const target = { from: B.key, id: first.id }
+  const rxAt = seeder.pool.entries.length
+  t.alike(await A.web.request('dm.react', { to: B.key, target, emoji: '\u{1f44d}' }), { ok: true })
+  const rxEntries = seeder.pool.entries.slice(rxAt)
+  const rx = open(rxEntries[0].bytes, boxB, B.key)
+  t.is(rx.kind, 'react')
+  t.alike(rx.target, { from: B.key, id: first.id, digest: sent }, 'the receiver stored the digest the sender signed, and the reaction names it')
+  t.absent('digest' in (await A.web.request('dm.thread', { peer: B.key })).messages[0], 'dm.thread does not return the digest')
+  await B.web.request('dm.pull')
+  t.alike((await B.web.request('dm.thread', { peer: A.key })).messages[0].reactions, [{ emoji: '\u{1f44d}', mine: false }], 'shown on the sender, whose row has the same digest')
+  t.alike((await A.web.request('dm.thread', { peer: B.key })).messages[0].reactions, [{ emoji: '\u{1f44d}', mine: true }])
+
+  // B, with a modified client, signs another message under the same id. The
+  // original drops are gone from the pool (past retention), so A's new
+  // device files the new message and A's own signed reaction.
+  const key = await dmLocalKeyFromPrf(B.prf)
+  const w = await store.readDmStamps(B.storage)
+  const stamp = { kid: w.items[0].kid, ...gc.openRecord({ nonce: w.items[0].nonce, box: w.items[0].box }, key) }
+  await store.writeDmStamps(B.storage, { items: w.items.slice(1), kids: w.kids })
+  const reused = dmCore.buildInner({ kind: 'msg', id: first.id, to: A.key, text: 'trocada', cert: createCert({ member: B.key }, assoc) }, B.keyPair)
+  const drop = dmCore.encodeDrop({ dropId: dmCore.newDropId(), kid: b4a.from(stamp.kid, 'hex'), rsaSig: b4a.from(stamp.sig, 'base64'), token: b4a.from(stamp.token, 'hex'), sealed: dmCore.sealInner(reused, hex(boxA.publicKey)) })
+  t.ok(seeder.pool.submit(drop), 'the pool takes the drop')
+  for (const e of msgEntries) seeder.pool.entries.splice(seeder.pool.entries.indexOf(e), 1)
+
+  const A2 = await memberNode(t, assoc, seeder.url, { keyPair: A.keyPair, prf: A.prf, enable: false })
+  await A2.web.request('dm.pull')
+  const rows = (await A2.web.request('dm.thread', { peer: B.key })).messages
+  t.alike(rows.map((m) => [m.id, m.text]), [[first.id, 'trocada']], 'the new device files the message under the reused id')
+  t.absent('reactions' in rows[0], 'the reaction made for the other message is not shown on it')
+  t.alike((await A.web.request('dm.thread', { peer: B.key })).messages[0].reactions, [{ emoji: '\u{1f44d}', mine: true }], 'the device with the history keeps it on the original')
 })
 
 const PAGE_AT = '2026-11-03T12:00:00.000Z'

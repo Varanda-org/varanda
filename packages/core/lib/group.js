@@ -2341,13 +2341,12 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
     byDiary.set(x.d, x.emoji)
   }
   for (const [id, byDiary] of reactions) {
-    // Beyond the cap the emojis later in (at, writer, seq) order are
-    // ignored, the same on every replica.
+    // The cap keeps the emojis most members chose, ties by emoji: never by
+    // `at`, which each writer picks for itself.
     const groups = new Map()
     for (const [d, emoji] of byDiary) {
       let g = groups.get(emoji)
       if (!g) {
-        if (groups.size >= GROUP_REACTIONS_MAX) continue
         g = { emoji, count: 0, by: [] }
         groups.set(emoji, g)
       }
@@ -2355,7 +2354,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
       g.by.push(d)
     }
     if (groups.size === 0) continue
-    postById.get(id).reactions = [...groups.values()].sort((a, b) => b.count - a.count || cmp(a.emoji, b.emoji))
+    postById.get(id).reactions = [...groups.values()].sort((a, b) => b.count - a.count || cmp(a.emoji, b.emoji)).slice(0, GROUP_REACTIONS_MAX)
   }
 
   // C's creator is an admin of C (and so of every group of C) only while
