@@ -202,6 +202,28 @@ function mediaItem (d) {
   return o
 }
 
+// A stored row keeps a bound reply's replyTo { from, id, digest } as the
+// bare id plus replyFrom and replyDigest (dm-store.js), so the stored
+// replyTo stays the hex32 an earlier build reads.
+function replyRow (replyTo) {
+  if (replyTo !== null && typeof replyTo === 'object') return { replyTo: replyTo.id, replyFrom: replyTo.from, replyDigest: replyTo.digest }
+  return { replyTo }
+}
+
+// A stored row's reply as the inner carried it, for the fold.
+function replyOfRow (m) {
+  return typeof m.replyFrom === 'string' ? { from: m.replyFrom, id: m.replyTo, digest: m.replyDigest } : m.replyTo
+}
+
+// The replyTo a new reply signs: bound to the quoted row's sender, id and
+// digest when the row has one; a row stored without a digest (an earlier
+// build, a Página's legacy history) is quoted by its bare id, as before.
+function boundReply (target) {
+  return typeof target.digest === 'string' && DIGEST_RE.test(target.digest)
+    ? { from: target.from, id: target.id, digest: target.digest }
+    : target.id
+}
+
 function zeroPair (pair) {
   if (pair === null) return
   pair.publicKey.fill(0)
@@ -583,7 +605,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       followSet: follows,
       seen,
       ops,
-      messages: messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : own, text: m.text, replyTo: m.replyTo, fwd: m.fwd, media: m.media, card: m.card, at: m.at, filedAt: m.filedAt, digest: m.digest })),
+      messages: messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : own, text: m.text, replyTo: replyOfRow(m), fwd: m.fwd, media: m.media, card: m.card, at: m.at, filedAt: m.filedAt, digest: m.digest })),
       reactions: (reactions || []).map((r) => ({ id: r.id, from: r.from, to: r.to, target: { from: r.target.from, id: r.target.id, digest: r.target.digest }, emoji: r.emoji, rev: r.rev, filedAt: r.filedAt }))
     })
     // A store locked (or relocked) since is never remembered.
@@ -734,9 +756,13 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   }
 
   // `reactions` only when the fold gave the row one; `reactable: false` only
-  // on a row stored without a digest, which never has reactions.
+  // on a row stored without a digest, which never has reactions. A bound
+  // reply carries `replyFrom` when the fold kept the message it names, and
+  // `replyMissing: true` when it did not; a bare-id reply carries neither.
   function threadRow (m, media) {
     const row = { id: m.id, from: m.from, text: m.text, replyTo: m.replyTo, fwd: m.fwd, at: m.at, mine: m.mine, media, card: m.card ? copyLinkCard(m.card, mediaItem) : null }
+    if (typeof m.replyFrom === 'string') row.replyFrom = m.replyFrom
+    if (m.replyMissing === true) row.replyMissing = true
     if (typeof m.digest !== 'string' || !DIGEST_RE.test(m.digest)) row.reactable = false
     if (Array.isArray(m.reactions) && m.reactions.length > 0) row.reactions = m.reactions.map((r) => ({ emoji: r.emoji, mine: r.mine }))
     return row
@@ -1428,11 +1454,14 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   }
 
   // A new pending send: checked, its blobs acked, sealed and stamped.
-  async function newEntry (own, keyPair, { to, text, replyTo, fwd, items, card, key }, recipientBox, sealedBlobs, plains) {
+  async function newEntry (own, keyPair, { to, text, replyTo: replyId, fwd, items, card, key }, recipientBox, sealedBlobs, plains) {
     if (recipientBox === null) throw new UsageError(NO_BOX)
-    if (replyTo !== null) {
+    let replyTo = null
+    if (replyId !== null) {
       const c = await threadOf(own, to)
-      if (c === null || dmFold.replyTarget(c.messages, replyTo) === null) throw new UsageError(BAD_REPLY)
+      const target = c === null ? null : dmFold.replyTarget(c.messages, replyId)
+      if (target === null) throw new UsageError(BAD_REPLY)
+      replyTo = boundReply(target)
     }
     const id = dm.newMessageId()
     const at = nowIso()
@@ -1468,7 +1497,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       at,
       drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])],
       acked: [false, false],
-      row: { t: 'msg', id, peer: to, from: own, text, replyTo, fwd, media: items, card, at, mine: true, digest },
+      row: { t: 'msg', id, peer: to, from: own, text, ...replyRow(replyTo), fwd, media: items, card, at, mine: true, digest },
       blobs: sealedBlobs,
       plains
     }
@@ -1830,7 +1859,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (lc.hasMessage(body.from, body.id) || batch.some((r) => r.t === 'msg' && r.from === body.from && r.id === body.id)) return null
     // A blocked sender's messages are dropped once they open.
     if (!body.mine && !dmFold.canSend({ self: own, peer, ops })) return null
-    return { t: 'msg', id: body.id, peer, from: body.from, text: body.text, replyTo: body.replyTo, fwd: body.fwd === 1 ? 1 : 0, media: Array.isArray(body.media) ? body.media.map(mediaItem) : null, card: body.card ? copyLinkCard(body.card, mediaItem) : null, at: body.at, mine: body.mine, digest }
+    return { t: 'msg', id: body.id, peer, from: body.from, text: body.text, ...replyRow(body.replyTo), fwd: body.fwd === 1 ? 1 : 0, media: Array.isArray(body.media) ? body.media.map(mediaItem) : null, card: body.card ? copyLinkCard(body.card, mediaItem) : null, at: body.at, mine: body.mine, digest }
   }
 
   // Kept even while its target is not stored: the fold applies it once the
@@ -1880,10 +1909,12 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       if (to === page) throw new UsageError(SELF_SEND)
       if (!dmFold.canSend({ self: page, peer: to, ops: ctx.local.ops() })) throw new UsageError(BLOCKED)
       if (typeof recipientBox !== 'string') throw new UsageError(NO_BOX)
-      const reply = replyTo === undefined ? null : replyTo
-      if (reply !== null) {
+      let reply = null
+      if (replyTo !== undefined && replyTo !== null) {
         const c = await threadOf(page, to, ctx)
-        if (c === null || dmFold.replyTarget(c.messages, reply) === null) throw new UsageError(BAD_REPLY)
+        const target = c === null ? null : dmFold.replyTarget(c.messages, replyTo)
+        if (target === null) throw new UsageError(BAD_REPLY)
+        reply = boundReply(target)
       }
       fields = { kind: 'msg', from: page, to, text, replyTo: reply, fwd: fwd === 1 ? 1 : 0, cert: e.cert }
     } else {
@@ -1979,7 +2010,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         at: b.at,
         drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])],
         acked: [false, false],
-        row: { t: 'msg', id: b.id, peer: b.to, from: page, text: b.text, replyTo: b.replyTo, fwd: b.fwd, media: null, card: null, at: b.at, mine: true, digest: dm.bodyDigest(b) },
+        row: { t: 'msg', id: b.id, peer: b.to, from: page, text: b.text, ...replyRow(b.replyTo), fwd: b.fwd, media: null, card: null, at: b.at, mine: true, digest: dm.bodyDigest(b) },
         blobs: [],
         plains: [],
         local: ctx.local
@@ -2002,6 +2033,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (keys.length !== IMPORT_ROW_KEYS.length || !IMPORT_ROW_KEYS.every((k) => keys.includes(k))) return false
     if (typeof r.id !== 'string' || !/^[0-9a-f]{32}$/.test(r.id) || !Number.isSafeInteger(r.n) || r.n < 0) return false
     if (r.fwd !== 0 && r.fwd !== 1) return false
+    // Never signed, so never bound: a legacy row quotes by bare id only.
+    if (r.replyTo !== null && (typeof r.replyTo !== 'string' || !/^[0-9a-f]{32}$/.test(r.replyTo))) return false
     if (typeof r.from !== 'string' || typeof r.to !== 'string' || r.from === r.to || (r.from !== page && r.to !== page)) return false
     try {
       dm.innerDigest({ kind: 'msg', id: r.id, from: r.from, to: r.to, text: r.text, replyTo: r.replyTo, media: r.media, card: r.card, fwd: r.fwd, at: r.at, cert: null })

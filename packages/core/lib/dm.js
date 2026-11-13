@@ -214,6 +214,10 @@ function validDmCard (card) {
 // for a ctl, which carries no media, card or forward. v4 is a reaction
 // (kind 'react') to a message of the same conversation, sent by either of
 // the two people; its emoji is one isReaction emoji, or '' to remove.
+// A reply's replyTo is the bare id of the quoted message (v1, and v2 or v3
+// as earlier builds wrote them) or, in v2 and v3, the bound form
+// { from, id, digest } that names that message's content too; a bound
+// reply needs v2, so v1 keeps the bare id only.
 function validBody (b) {
   if (!isPlainObject(b)) return false
   if (b.v === 4) return validReaction(b)
@@ -224,8 +228,8 @@ function validBody (b) {
     // A boolean is another JSON type, so it must not count as forwarded.
     if (b.fwd !== 0 && b.fwd !== 1) return false
     if (b.card !== null && (b.media !== null || !validDmCard(b.card))) return false
-    // Null media is a card or the text forward. Neither of the three is a v1 message.
-    if (b.media === null ? b.fwd !== 1 && b.card === null : !validMedia(b.media)) return false
+    // Null media is a card, the text forward or a bound reply. None of them is a v1 message.
+    if (b.media === null ? b.fwd !== 1 && b.card === null && !isPlainObject(b.replyTo) : !validMedia(b.media)) return false
   } else if (b.v === 3) {
     if (!hasExactKeys(b, INNER_KEYS_V3)) return false
     if (b.fwd !== 0 && b.fwd !== 1) return false
@@ -243,7 +247,7 @@ function validBody (b) {
   if (b.cert !== null && (validateCertShape(b.cert) !== null || b.cert.member !== b.from)) return false
   if (b.kind === 'msg') {
     if (b.op !== null || b.peer !== null || b.from === b.to) return false
-    if (b.replyTo !== null && !isHex32(b.replyTo)) return false
+    if (b.replyTo !== null && !isHex32(b.replyTo) && (b.v === 1 || !validTarget(b.replyTo, b))) return false
     // Empty text is a photo with no caption, not a text-only forward.
     return validText(b.text, b.v !== 1 && b.media !== null)
   }
@@ -251,14 +255,20 @@ function validBody (b) {
   return DM_OPS.includes(b.op) && isHex64(b.peer) && b.peer !== b.from
 }
 
+// A message named by sender, id and the digest of its opened inner body
+// (bodyDigest): a reaction's target or a bound reply's replyTo. The sender
+// is one of the two people of the conversation.
+function validTarget (t, b) {
+  if (!isPlainObject(t) || !hasExactKeys(t, DM_TARGET_KEYS) || !isHex32(t.id)) return false
+  if (typeof t.digest !== 'string' || !HEX64_DIGEST.test(t.digest)) return false
+  return t.from === b.from || t.from === b.to
+}
+
 function validReaction (b) {
   if (!hasExactKeys(b, INNER_KEYS_V4) || b.kind !== 'react') return false
   if (!isHex32(b.id) || !isHex64(b.from) || !isHex64(b.to) || b.from === b.to || !isCanonicalIso(b.at)) return false
   if (b.cert !== null && (validateCertShape(b.cert) !== null || b.cert.member !== b.from)) return false
-  const t = b.target
-  if (!isPlainObject(t) || !hasExactKeys(t, DM_TARGET_KEYS) || !isHex32(t.id)) return false
-  if (typeof t.digest !== 'string' || !HEX64_DIGEST.test(t.digest)) return false
-  if (t.from !== b.from && t.from !== b.to) return false
+  if (!validTarget(b.target, b)) return false
   if (b.emoji !== '' && !rpc.isReaction(b.emoji)) return false
   return Number.isInteger(b.rev) && b.rev >= 1 && b.rev <= DM_REACT_REV_MAX
 }
@@ -347,7 +357,8 @@ function textBudget (fields) {
 // fields: { kind, to, text?, replyTo?, media?, card?, fwd?, op?, peer?, id?,
 // at?, cert? }, or for a reaction { kind: 'react', to, target, emoji, rev,
 // id?, at?, cert? }; from is the signing key; cert is the sender's membership
-// certificate (a msg without one is built but never opens). A body that
+// certificate (a msg without one is built but never opens). replyTo is null,
+// a bare id or a bound { from, id, digest } (written as v2). A body that
 // needs nothing of v2 is written as v1. Returns DM_INNER_BYTES bytes the
 // caller owns (wipe after sealing).
 function buildInner (fields, signKeyPair) {
@@ -362,14 +373,15 @@ function buildInner (fields, signKeyPair) {
   const media = fields.media === undefined ? null : fields.media
   const card = fields.card === undefined ? null : fields.card
   const fwd = fields.fwd === undefined ? 0 : fields.fwd
-  const v = rpc.dmInnerVersion({ media, card, fwd })
+  const replyTo = replyField(fields.replyTo)
+  const v = rpc.dmInnerVersion({ media, card, fwd, replyTo })
   const body = {
     v,
     kind,
     id: fields.id === undefined ? newMessageId() : fields.id,
     from,
     to: kind === 'ctl' && fields.to === undefined ? from : fields.to,
-    replyTo: fields.replyTo === undefined ? null : fields.replyTo,
+    replyTo,
     text: fields.text === undefined && kind === 'ctl' ? '' : fields.text,
     op: fields.op === undefined ? null : fields.op,
     peer: fields.peer === undefined ? null : fields.peer,
@@ -384,6 +396,16 @@ function buildInner (fields, signKeyPair) {
   return signInner(body, signKeyPair)
 }
 
+// A caller's target as a plain { from, id, digest } in DM_TARGET_KEYS order
+// (any other value as given, for validBody to refuse).
+function targetField (t) {
+  return isPlainObject(t) ? { from: t.from, id: t.id, digest: t.digest } : t
+}
+
+function replyField (r) {
+  return r === undefined ? null : targetField(r)
+}
+
 function reactionBody (fields, from) {
   return {
     v: 4,
@@ -391,7 +413,7 @@ function reactionBody (fields, from) {
     id: fields.id === undefined ? newMessageId() : fields.id,
     from,
     to: fields.to,
-    target: isPlainObject(fields.target) ? { from: fields.target.from, id: fields.target.id, digest: fields.target.digest } : fields.target,
+    target: targetField(fields.target),
     emoji: fields.emoji,
     rev: fields.rev,
     at: fields.at === undefined ? nowIso() : fields.at,
@@ -423,7 +445,7 @@ function innerDigest (fields) {
     id: fields.id === undefined ? newMessageId() : fields.id,
     from,
     to: kind === 'ctl' && fields.to === undefined ? from : fields.to,
-    replyTo: fields.replyTo === undefined ? null : fields.replyTo,
+    replyTo: replyField(fields.replyTo),
     text: fields.text === undefined && kind === 'ctl' ? '' : fields.text,
     media: fields.media === undefined ? null : fields.media,
     card: fields.card === undefined ? null : fields.card,

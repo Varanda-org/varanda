@@ -82,6 +82,15 @@ function checked (method, params) {
   return { method, params: value }
 }
 
+// A DM reply is measured in the form the node may send it: bound to the
+// quoted message's sender and digest (docs/rpc.md 5.75), wider than the bare
+// id the request carries, so the node never refuses as too long what fit here.
+const HEX64_STANDIN = '0'.repeat(64)
+function measured (fields) {
+  if (typeof fields.replyTo !== 'string') return fields
+  return { ...fields, replyTo: { from: HEX64_STANDIN, id: fields.replyTo, digest: HEX64_STANDIN } }
+}
+
 // target is { kind: 'dm', to, replyTo?, cert?, fwd? } or
 // { kind: 'group', group, visibility: 'public' | 'private', replyTo?, fwd? }.
 // fwd: 1 marks a forwarded message (forward.js); it rides in the request and
@@ -123,7 +132,7 @@ export function composePlan ({ text = '', attachments = [], target, card = null 
     if (sealed) params.sealed = true
     return checked(dm ? 'dm.putMedia' : 'media.uploadFile', params)
   })
-  if (dm && count > 0 && dmTextBytes(text) > textBudget({ ...base, media: Array(count).fill(voice ? WIDEST_DM_VOICE : WIDEST_DM_ITEM), cert })) {
+  if (dm && count > 0 && dmTextBytes(text) > textBudget(measured({ ...base, media: Array(count).fill(voice ? WIDEST_DM_VOICE : WIDEST_DM_ITEM), cert }))) {
     throw new Error('texto longo demais com anexo')
   }
 
@@ -136,7 +145,7 @@ export function composePlan ({ text = '', attachments = [], target, card = null 
       params.media = media.map(item => ({ ...item }))
       if (sealed) params.sealed = true
     }
-    if (dm && dmTextBytes(text) > textBudget({ ...params, cert })) {
+    if (dm && dmTextBytes(text) > textBudget(measured({ ...params, cert }))) {
       throw new Error(count > 0 ? 'texto longo demais com anexo' : 'mensagem longa demais')
     }
     return checked(method, params)
@@ -164,7 +173,7 @@ export function cardFits ({ text = '', target, card }) {
     if (target.replyTo != null) fields.replyTo = target.replyTo
     if (target.fwd === 1) fields.fwd = 1
     const cert = target.cert == null ? MEMBER_CERT_STANDIN : target.cert
-    return dmTextBytes(text) <= textBudget({ ...fields, cert })
+    return dmTextBytes(text) <= textBudget(measured({ ...fields, cert }))
   } catch {
     return false
   }

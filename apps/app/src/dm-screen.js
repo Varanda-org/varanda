@@ -1,7 +1,7 @@
 // Pure helpers for the Conversas screens (Mensagens, Mensagem). No platform
 // imports, so they run in the tests.
 
-import { threadOf } from './dm.js'
+import { threadOf, quoteIndex, quoteOf } from './dm.js'
 import { dayHeading } from './format.js'
 import { sendPlan as attachmentSendPlan } from './attach-plan.js'
 import { plainPreview } from './chatPreview.js'
@@ -116,6 +116,20 @@ export function threadRows (messages) {
       rawText: typeof source.text === 'string' ? source.text : ''
     }
   })
+}
+
+// What each message quotes among the loaded rows, by the message's key: the
+// { missing, target } of dm.js quoteOf, target a row of `rows`. The same
+// rule threadOf gives the quoted text, so a quote's author, text and scroll
+// target always name one message.
+export function quoteTargets (messages, rows) {
+  const index = quoteIndex(rows)
+  const out = new Map()
+  for (const m of Array.isArray(messages) ? messages : []) {
+    const quote = quoteOf(m, index)
+    if (quote !== null) out.set(messageKey(m), quote)
+  }
+  return out
 }
 
 // Maximum duration of a bubble group, measured from its first message.

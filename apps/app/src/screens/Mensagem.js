@@ -71,7 +71,7 @@ import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
 import { listingLinkOf } from '../feiraChat'
 import { parsePriceText, quickReplies } from '../feira'
 import { CONSENT_NOTE, acceptCard, acceptText, buttonState, centsLabel, consentParams, declineCard, declineText, offerCard, offerOfMessage, offerState, offerTarget, proposalText, validCents } from '../feiraOffer'
-import { mergeMessages, newestOf, pageDmClient, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey, dmReactions, reactDebounce, dmReactionGate, dmReactable, withFreshReactions } from '../dm-screen'
+import { mergeMessages, newestOf, pageDmClient, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey, quoteTargets, dmReactions, reactDebounce, dmReactionGate, dmReactable, withFreshReactions } from '../dm-screen'
 import { pageReadKind } from '../pageNotice'
 import { applyOptimistic, reactionChips, toggleOf } from '../reactions'
 import { hasRich, parseRich, plainOf } from '../richText'
@@ -1101,17 +1101,13 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   }
 
   // The author of a quoted message: the row it points to, found through the
-  // raw message's reply id (the row only carries the quote's text).
-  // Ids are unique only per sender: when two rows share one, the smaller
-  // sender key wins, the same rule threadOf uses for the quoted text, so the
-  // author and the text of a quote always come from the same message.
-  const rowById = new Map()
-  for (const r of rows) {
-    const held = rowById.get(r.id)
-    if (held === undefined || String(r.from) < String(held.from)) rowById.set(r.id, r)
-  }
-  const replyIdOf = new Map(raw.map((m) => [messageKey(m), m.replyTo]))
-  const quoteTarget = (item) => rowById.get(replyIdOf.get(item.key))
+  // raw message's reply (the row only carries the quote's text), by the
+  // same rule threadOf uses for the quoted text (dm-screen quoteTargets), so
+  // the author and the text of a quote always come from the same message.
+  // A bound reply whose message this device does not hold has no target.
+  const quotes = quoteTargets(raw, rows)
+  const quoteTarget = (item) => quotes.get(item.key)?.target || undefined
+  const quoteMissing = (item) => quotes.get(item.key)?.missing === true
   const quoteMine = (item) => {
     const target = quoteTarget(item)
     return !!target && target.mine === true
@@ -1173,9 +1169,11 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     }, 120)
   }
 
-  // The thread as offer input: every row with its card, reply id and sender.
+  // The thread as offer input: every row with its card, sender and the id of
+  // the loaded row its quote resolves to (null for none, so a bound reply
+  // whose message is not held here answers no offer).
   const me = pageKey !== null ? pageKey : ownKey
-  const offerMsgs = rows.map((r) => ({ id: r.id, from: r.from, mine: r.mine, text: r.rawText, card: cardOf.get(r.key), replyTo: replyIdOf.get(r.key), at: r.at, deleted: r.deleted }))
+  const offerMsgs = rows.map((r) => ({ id: r.id, from: r.from, mine: r.mine, text: r.rawText, card: cardOf.get(r.key), replyTo: quotes.get(r.key)?.target?.id ?? null, at: r.at, deleted: r.deleted }))
   const linkOfMsg = (m) => visibleListingLink(m.text, m.card, origin)
   // The listing chosen on its own screen stays this conversation's target, so
   // Cancelar leaves the Fazer oferta pill for it even in a thread with no link.
@@ -1423,7 +1421,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
           // so its spoilers and its link card are settled here.
           const stored = !item.deleted && cardOf.get(item.key) ? cardOf.get(item.key) : null
           const quoted = item.replyTo != null
-            ? { name: quoteAuthor(item), handle: quoteMine(item) ? undefined : quoteHandle, text: item.replyTo, mine: quoteMine(item), senderKey: quoteMine(item) ? undefined : peer, onPress: () => scrollToKey(quoteTarget(item)?.key) }
+            ? { name: quoteAuthor(item), handle: quoteMine(item) ? undefined : quoteHandle, text: item.replyTo, mine: quoteMine(item), senderKey: quoteMine(item) ? undefined : peer, onPress: quoteMissing(item) ? undefined : () => scrollToKey(quoteTarget(item)?.key) }
             : null
           const reply = actions.find((action) => action.label === 'Responder')
           return (
