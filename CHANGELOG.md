@@ -327,6 +327,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Corrigido
 
+- Busca: uma publicação com cartão de link aparece com o cartão nos resultados, como em A Rua, em vez de só o endereço.
 - Conversa privada com quem você não segue: o topo da conversa mostra o nome, o @nome e a foto públicos da pessoa, lidos pelo nó hospedado a cada vez que a conversa aparece na tela ou é atualizada e conferidos por ele, em vez de "Pessoa". Se a moderação da rede bloquear a pessoa depois, o nome e a foto saem na próxima leitura. A linha em Conversas mostra o nome depois que a conversa é aberta. A lista não lê ninguém sozinha, para o semeador não ficar sabendo com quem você conversa. Com configuração manual ou num nó do núcleo, continua "Pessoa". Na web, um link longo, como o de um convite de comunidade, agora quebra dentro do balão em vez de passar da borda da tela.
 - Momentos: o aviso da barra (por exemplo, "A foto sai dos servidores em até 7 dias") não aparece mais por cima do visualizador de momentos. Ele fica escondido enquanto o visualizador está aberto ou fechando, e abrir o visualizador descarta um aviso pendente, então ele não reaparece ao fechar. Detalhes em `docs/verification.md` seção 144.
 - Momentos: ao escolher uma foto no compositor, a tela rola até o campo de texto e o contador, sem abrir o teclado. Detalhes em `docs/verification.md` seção 144.
