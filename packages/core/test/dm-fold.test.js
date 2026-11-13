@@ -2,7 +2,7 @@
 
 // The direct message folders (lib/dm-fold.js). No network.
 const test = require('brittle')
-const { fold, seenKey, tabDot, replyTarget, canSend, previewText, PREVIEW_PHOTO, PREVIEW_GIF, PREVIEW_AUDIO } = require('../lib/dm-fold')
+const { fold, seenKey, tabDot, replyTarget, canSend, previewText, PREVIEW_PHOTO, PREVIEW_GIF, PREVIEW_AUDIO, PREVIEW_MOMENT } = require('../lib/dm-fold')
 const { DM_REQUESTS_MAX, DM_MESSAGES_PER_PEER } = require('../lib/dm')
 
 function k (i) {
@@ -580,4 +580,59 @@ test('bound replies: unread, preview and order unchanged', (t) => {
   t.is(x.at, y.at)
   t.alike(x.messages.map(m => m.id), y.messages.map(m => m.id))
   t.is(previewText(x.messages[1]), previewText(y.messages[1]))
+})
+
+test('a moment reaction is an ordinary message with a fixed preview', (t) => {
+  const older = from(ANA, 1, 'antes')
+  const later = from(BIA, 2, 'depois')
+  const heart = { ...from(ANA, 3, HEART), moment: 1 }
+  const r = run({ messages: [older, heart, later], follows: [ANA, BIA], seen: [seenKey(older.from, older.id)] })
+  const ana = r.inbox.find(x => x.peer === ANA)
+  t.is(ana.unread, true, 'a received moment is unread')
+  t.alike(r.inbox.map(x => x.peer), [ANA, BIA], 'the moment sorts the thread like any message')
+  t.alike(ana.messages.map(m => [m.text, m.mine]), [['antes', false], [HEART, false]])
+  t.is(ana.messages[1].moment, 1)
+  t.is(PREVIEW_MOMENT, 'Reagiu a um momento')
+  t.is(previewText(ana.messages[1]), 'Reagiu a um momento ❤️')
+
+  const stranger = run({ messages: [{ ...from(BIA, 4, HEART), moment: 3 }] })
+  t.is(stranger.inbox.length, 0)
+  t.is(stranger.requests.length, 1)
+  t.is(stranger.requests[0].folder, 'request', 'a non-followed, non-accepted peer stays a request')
+  t.is(stranger.requests[0].unread, true)
+  t.is(stranger.requests[0].messages[0].moment, 3)
+
+  const own = run({ messages: [{ ...to(CAIO, 5, HEART), moment: 9 }] })
+  t.is(own.requests.length, 0)
+  t.is(own.inbox.length, 1, 'an own moment puts the thread in the inbox')
+  t.is(own.inbox[0].folder, 'inbox')
+  t.is(own.inbox[0].peer, CAIO)
+  t.is(own.inbox[0].unread, false)
+  t.is(own.inbox[0].messages[0].moment, 9)
+  t.is(own.inbox[0].messages[0].mine, true)
+  t.is(previewText(own.inbox[0].messages[0]), PREVIEW_MOMENT + ' ' + HEART)
+
+  for (const bad of [0, 'x', 1.5, true]) {
+    const m = { ...from(ANA, 6, 'oi'), moment: bad }
+    const row = run({ messages: [m], follows: [ANA] }).inbox[0].messages[0]
+    t.absent('moment' in row, JSON.stringify(bad))
+    t.is(previewText(row), 'oi')
+    t.is(previewText(m), 'oi')
+  }
+
+  const jpeg = { id: 'a'.repeat(64), mime: 'image/jpeg' }
+  const gif = { id: 'b'.repeat(64), mime: 'image/gif' }
+  const audio = { id: 'c'.repeat(64), mime: 'audio/mp4', w: 0, h: 0, ms: 1500 }
+  t.is(previewText({ text: '', media: [jpeg] }), PREVIEW_PHOTO)
+  t.is(previewText({ text: '', media: [gif] }), PREVIEW_GIF)
+  t.is(previewText({ text: '', media: [audio] }), PREVIEW_AUDIO)
+  t.is(previewText({ text: 'ouve', media: [audio] }), 'ouve')
+
+  const digested = { ...from(ANA, 8, HEART), moment: 2, digest: 'd'.repeat(64) }
+  const reacted = runR({ messages: [digested], follows: [ANA] }, [reaction(ME, ANA, digested, THUMBS, 1)])
+  const row = rowOf(reacted, digested)
+  t.is(row.moment, 2)
+  t.is(row.digest, 'd'.repeat(64))
+  t.alike(row.reactions, [{ emoji: THUMBS, mine: true }], 'a v4 reaction still applies to a moment row')
+  t.is(previewText(row), 'Reagiu a um momento ❤️')
 })

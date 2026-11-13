@@ -3,6 +3,7 @@
 
 const test = require('brittle')
 const load = () => import('../src/moments.js')
+const loadReaction = () => import('../src/momentReaction.js')
 
 const OWN = 'aa'.repeat(32)
 const A = 'bb'.repeat(32)
@@ -173,4 +174,108 @@ test('moment music is photo only, including GIF, even when a video record carrie
     t.is(segmentMs(video, 7400), 7400, 'music cannot extend the video segment')
     t.alike(video.music, music, 'ignoring music does not change the record')
   }
+})
+
+test('canReact requires hosted, online and an unlocked passkey', async (t) => {
+  const { canReact } = await loadReaction()
+  const node = { hosted: true, online: true, passkey: { status: { unlocked: true } } }
+  t.is(canReact(node), true)
+  for (const value of [false, undefined, null, 1, 'true']) {
+    t.is(canReact({ ...node, hosted: value }), false)
+    t.is(canReact({ ...node, online: value }), false)
+    t.is(canReact({ ...node, passkey: { status: { unlocked: value } } }), false)
+  }
+  for (const value of [null, undefined, {}, { ...node, passkey: null }, { ...node, passkey: {} }]) {
+    t.is(canReact(value), false)
+  }
+})
+
+test('reactionParams copies only the recipient, emoji and safe moment sequence', async (t) => {
+  const { reactionParams } = await loadReaction()
+  for (const emoji of ['❤️', '😂', '😮', '😢', '🔥', '👏']) {
+    t.alike(reactionParams(item(7), A, emoji), { to: A, text: emoji, moment: 7 })
+  }
+  t.alike(reactionParams({ seq: Number.MAX_SAFE_INTEGER }, A, '🔥'), { to: A, text: '🔥', moment: Number.MAX_SAFE_INTEGER })
+  for (const emoji of ['oi', '', '🔥🔥', '🔥\u202e', null, undefined]) t.is(reactionParams(item(7), A, emoji), null)
+  for (const seq of [0, -1, 1.5, '7', NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, null, undefined]) {
+    t.is(reactionParams({ seq }, A, '🔥'), null)
+  }
+  for (const author of ['', 'a'.repeat(63), 'g'.repeat(64), A.toUpperCase(), null, 7]) {
+    t.is(reactionParams(item(7), author, '🔥'), null)
+  }
+  t.is(reactionParams(null, A, '🔥'), null)
+})
+
+test('isMomentReaction requires a safe sequence and raw emoji text', async (t) => {
+  const { isMomentReaction } = await loadReaction()
+  t.is(isMomentReaction({ moment: 1, rawText: '🔥' }), true)
+  t.is(isMomentReaction({ moment: Number.MAX_SAFE_INTEGER, rawText: '❤️' }), true)
+  for (const row of [null, undefined, {}, { rawText: '🔥' }, { moment: 1, text: '🔥' },
+    { moment: 1, rawText: 'oi' }, { moment: 1, rawText: '' }, { moment: 1, rawText: '🔥\u202e' }]) {
+    t.is(isMomentReaction(row), false)
+  }
+  for (const moment of [0, -1, 1.5, '1', Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    t.is(isMomentReaction({ moment, rawText: '🔥' }), false)
+  }
+})
+
+test('moment reaction authors and labels follow the message direction', async (t) => {
+  const { momentAuthor, reactionLabel, REACTION_SENT, REACTION_UNSURE, MOMENT_GONE } = await loadReaction()
+  t.is(momentAuthor({ mine: true }, { peer: A, ownKey: OWN }), A)
+  t.is(momentAuthor({ mine: false }, { peer: A, ownKey: OWN }), OWN)
+  t.is(reactionLabel(true), 'Você reagiu a um momento')
+  t.is(reactionLabel(false), 'Reagiu ao seu momento')
+  t.is(REACTION_SENT, 'Reação enviada.')
+  t.is(REACTION_UNSURE, 'Não deu para confirmar o envio. Confira a conversa antes de tentar de novo.')
+  t.is(MOMENT_GONE, 'Momento indisponível')
+})
+
+test('unsure recognizes both uncertain send signals', async (t) => {
+  const { unsure } = await loadReaction()
+  const { UNSURE_SEND } = await import('../src/dm.js')
+  t.is(unsure({ uncertain: true }), true)
+  t.is(unsure(new Error(UNSURE_SEND)), true)
+  t.is(unsure({ uncertain: false, message: UNSURE_SEND }), true)
+  for (const err of [new Error('falhou'), { uncertain: 'true' }, { uncertain: 1 }, {}, null, undefined]) {
+    t.is(unsure(err), false)
+  }
+})
+
+test('previewPlan separates supported images from MP4 video', async (t) => {
+  const { previewPlan } = await loadReaction()
+  const lookup = { w: 640, h: 360, ms: 0, at: '2026-11-07T10:00:00.000Z' }
+  for (const mime of ['image/jpeg', 'image/png', 'image/webp', 'image/gif']) {
+    t.alike(previewPlan({ ...lookup, mime }), { kind: 'image' })
+  }
+  t.alike(previewPlan({ ...lookup, mime: 'video/mp4', ms: 8000 }), { kind: 'video' })
+})
+
+test('previewPlan drops failed, unsupported and malformed lookups', async (t) => {
+  const { previewPlan } = await loadReaction()
+  const lookup = { mime: 'image/jpeg', w: 640, h: 360, ms: 0, at: '2026-11-07T10:00:00.000Z' }
+  for (const value of [null, undefined, false, [], {}, new Error('gone'), { mime: 'image/jpeg' },
+    { ...lookup, mime: 'image/svg+xml' }, { ...lookup, mime: 'video/webm' },
+    { ...lookup, mime: 7 }, { ...lookup, w: 0 }, { ...lookup, h: '360' },
+    { ...lookup, w: 1.5 }, { ...lookup, at: 'soon' }, { ...lookup, at: NaN }, { ...lookup, at: 1794045600000 },
+    { ...lookup, ms: 1 }, { ...lookup, mime: 'video/mp4', ms: 0 },
+    { ...lookup, mime: 'video/mp4', ms: Infinity }]) {
+    t.alike(previewPlan(value), { kind: 'gone' })
+  }
+  for (const field of ['mime', 'w', 'h', 'ms', 'at']) {
+    const missing = { ...lookup }
+    delete missing[field]
+    t.alike(previewPlan(missing), { kind: 'gone' })
+  }
+})
+
+test('previewUntil expires exactly 24 hours after a safe lookup timestamp', async (t) => {
+  const { previewUntil } = await loadReaction()
+  const { MOMENT_MS } = await load()
+  const at = '2026-11-13T12:00:00.000Z'
+  t.is(previewUntil({ at }), Date.parse(at) + MOMENT_MS)
+  for (const at of [1794045600000, 0, 'soon', '', null, undefined, NaN, Infinity]) {
+    t.is(previewUntil({ at }), null)
+  }
+  t.is(previewUntil(null), null)
+  t.is(previewUntil(undefined), null)
 })

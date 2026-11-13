@@ -605,7 +605,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       followSet: follows,
       seen,
       ops,
-      messages: messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : own, text: m.text, replyTo: replyOfRow(m), fwd: m.fwd, media: m.media, card: m.card, at: m.at, filedAt: m.filedAt, digest: m.digest })),
+      messages: messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : own, text: m.text, replyTo: replyOfRow(m), fwd: m.fwd, media: m.media, card: m.card, moment: m.moment, at: m.at, filedAt: m.filedAt, digest: m.digest })),
       reactions: (reactions || []).map((r) => ({ id: r.id, from: r.from, to: r.to, target: { from: r.target.from, id: r.target.id, digest: r.target.digest }, emoji: r.emoji, rev: r.rev, filedAt: r.filedAt }))
     })
     // A store locked (or relocked) since is never remembered.
@@ -763,6 +763,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     const row = { id: m.id, from: m.from, text: m.text, replyTo: m.replyTo, fwd: m.fwd, at: m.at, mine: m.mine, media, card: m.card ? copyLinkCard(m.card, mediaItem) : null }
     if (typeof m.replyFrom === 'string') row.replyFrom = m.replyFrom
     if (m.replyMissing === true) row.replyMissing = true
+    if (m.moment !== undefined) row.moment = m.moment
     if (typeof m.digest !== 'string' || !DIGEST_RE.test(m.digest)) row.reactable = false
     if (Array.isArray(m.reactions) && m.reactions.length > 0) row.reactions = m.reactions.map((r) => ({ emoji: r.emoji, mine: r.mine }))
     return row
@@ -1423,18 +1424,37 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // to: hex64; recipientBox: hex64 | null (dm.lookup). keyPair: identity.
   // media: null or dm.send items (docs/rpc.md 5.75), each answered by
   // putMedia in this unlock.
-  async function send (own, keyPair, { to, text, replyTo = null, media = null, card = null, fwd = 0 }, recipientBox) {
-    checkSend(own, to)
+  function sendKeyOf ({ to, text, replyTo = null, media = null, card = null, fwd = 0, moment = null }) {
     const items = Array.isArray(media) && media.length > 0 ? media.map(mediaItem) : null
-    card = card === null ? null : copyLinkCard(card, mediaItem)
-    const key = to + '\n' + (replyTo || '') + '\n' + text + '\n' + fwd + '\n' + (items === null ? '' : JSON.stringify(items)) + '\n' + JSON.stringify(card)
+    const copy = card === null ? null : copyLinkCard(card, mediaItem)
+    const key = to + '\n' + (replyTo || '') + '\n' + text + '\n' + fwd + '\n' + (items === null ? '' : JSON.stringify(items)) + '\n' + JSON.stringify(copy) + '\n' + (moment === null ? '' : moment)
+    return { items, card: copy, key }
+  }
+
+  // Whether a send with these dm.send params waits for the user's retry.
+  function sendPending (fields) {
+    return pending.has(sendKeyOf(fields).key)
+  }
+
+  // moment: null or the seq of a showing momento of `to`: an inner v5
+  // reaction to that momento. beforeNew: the caller's last check (it throws
+  // to refuse), run only when nothing is pending for these params, so a
+  // retry re-puts its stamped drops even if the momento is gone since.
+  async function send (own, keyPair, { to, text, replyTo = null, media = null, card = null, fwd = 0, moment = null }, recipientBox, { beforeNew = null } = {}) {
+    checkSend(own, to)
+    const { items, card: c, key } = sendKeyOf({ to, text, replyTo, media, card, fwd, moment })
+    card = c
     let entry = pending.get(key)
+    if (entry === undefined && beforeNew !== null) {
+      await beforeNew()
+      entry = pending.get(key)
+    }
     if (entry === undefined) {
       const sealedBlobs = messageItems({ media: items, card }).map((item) => entryOfItem(item, to))
       // Copied before any await: an overlapping send of the same blob may
       // forget (and wipe) the shared entry meanwhile.
       const plains = sealedBlobs.map((b) => new Uint8Array(b.plain))
-      entry = await newEntry(own, keyPair, { to, text, replyTo, fwd, items, card, key }, recipientBox, sealedBlobs, plains).catch((err) => {
+      entry = await newEntry(own, keyPair, { to, text, replyTo, fwd, items, card, moment, key }, recipientBox, sealedBlobs, plains).catch((err) => {
         plains.forEach(wipe)
         throw err
       })
@@ -1454,7 +1474,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   }
 
   // A new pending send: checked, its blobs acked, sealed and stamped.
-  async function newEntry (own, keyPair, { to, text, replyTo: replyId, fwd, items, card, key }, recipientBox, sealedBlobs, plains) {
+  async function newEntry (own, keyPair, { to, text, replyTo: replyId, fwd, items, card, moment = null, key }, recipientBox, sealedBlobs, plains) {
     if (recipientBox === null) throw new UsageError(NO_BOX)
     let replyTo = null
     if (replyId !== null) {
@@ -1475,7 +1495,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (gen !== generation) throw new UsageError(LOCKED)
     let inner
     try {
-      inner = dm.buildInner({ kind: 'msg', id, at, to, text, replyTo, fwd, cert, card, ...(items === null ? {} : { media: items }) }, keyPair)
+      inner = dm.buildInner({ kind: 'msg', id, at, to, text, replyTo, fwd, cert, card, ...(items === null ? {} : { media: items }), ...(moment === null ? {} : { moment }) }, keyPair)
     } catch (err) {
       throw new UsageError(err && err.message === TOO_LONG ? TOO_LONG : BAD_TEXT)
     }
@@ -1497,7 +1517,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       at,
       drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])],
       acked: [false, false],
-      row: { t: 'msg', id, peer: to, from: own, text, ...replyRow(replyTo), fwd, media: items, card, at, mine: true, digest },
+      row: { t: 'msg', id, peer: to, from: own, text, ...replyRow(replyTo), fwd, media: items, card, at, mine: true, digest, ...(moment === null ? {} : { moment }) },
       blobs: sealedBlobs,
       plains
     }
@@ -1833,6 +1853,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       if (body === null || dm.pageInnerStale(body, Date.now())) return null
       // A Página conversation has no reactions: a v4 body is never filed.
       if (body.kind === 'react') return null
+      // Nor a reaction to a momento (v5): a page sends no momento reactions.
+      if (body.v === 5) return null
       // Of the body as signed, before a carried legacy key is renamed.
       const digest = dm.bodyDigest(body)
       // A drop to the key a carried legacy box belonged to is filed for this
@@ -1859,7 +1881,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (lc.hasMessage(body.from, body.id) || batch.some((r) => r.t === 'msg' && r.from === body.from && r.id === body.id)) return null
     // A blocked sender's messages are dropped once they open.
     if (!body.mine && !dmFold.canSend({ self: own, peer, ops })) return null
-    return { t: 'msg', id: body.id, peer, from: body.from, text: body.text, ...replyRow(body.replyTo), fwd: body.fwd === 1 ? 1 : 0, media: Array.isArray(body.media) ? body.media.map(mediaItem) : null, card: body.card ? copyLinkCard(body.card, mediaItem) : null, at: body.at, mine: body.mine, digest }
+    return { t: 'msg', id: body.id, peer, from: body.from, text: body.text, ...replyRow(body.replyTo), fwd: body.fwd === 1 ? 1 : 0, media: Array.isArray(body.media) ? body.media.map(mediaItem) : null, card: body.card ? copyLinkCard(body.card, mediaItem) : null, at: body.at, mine: body.mine, digest, ...(body.v === 5 && Number.isSafeInteger(body.moment) && body.moment >= 1 ? { moment: body.moment } : {}) }
   }
 
   // Kept even while its target is not stored: the fold applies it once the
@@ -2404,6 +2426,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     thread,
     seen: tracked(seen),
     send: tracked(send),
+    sendPending,
     react: tracked(react),
     putMedia: tracked(putMedia),
     readMedia: tracked(readMedia),

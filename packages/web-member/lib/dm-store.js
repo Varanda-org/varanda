@@ -136,11 +136,18 @@ function validRow (r) {
   if (r.digest !== undefined && !HEX64.test(r.digest)) return false
   if ((r.replyFrom === undefined) !== (r.replyDigest === undefined)) return false
   if (r.replyFrom !== undefined && (r.replyTo === null || !HEX64.test(r.replyFrom) || !HEX64.test(r.replyDigest))) return false
+  if (r.moment !== undefined && !validMomentRow(r)) return false
   return HEX32.test(r.id) && HEX64.test(r.from) && typeof r.text === 'string' &&
     (r.replyTo === null || HEX32.test(r.replyTo)) && typeof r.mine === 'boolean' &&
     (r.fwd === undefined || r.fwd === 0 || r.fwd === 1) &&
     validMedia(r.media === undefined ? null : r.media) &&
     (r.card === undefined || r.card === null || (r.media == null && validDmCard(r.card)))
+}
+
+// A reaction to a momento (inner v5): one emoji and the seq, nothing else.
+function validMomentRow (r) {
+  return Number.isSafeInteger(r.moment) && r.moment >= 1 && isReaction(r.text) && r.replyTo === null &&
+    r.media == null && r.card == null && (r.fwd === undefined || r.fwd === 0)
 }
 
 function validReactionRow (r) {
@@ -165,6 +172,7 @@ function plainRow (r) {
   }
   if (typeof r.digest === 'string' && HEX64.test(r.digest)) out.digest = r.digest
   if (r.legacy === true) out.legacy = true
+  if (r.moment !== undefined && validMomentRow(r)) out.moment = r.moment
   return out
 }
 

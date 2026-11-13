@@ -21,7 +21,7 @@ const { Seeder } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const dmCore = require('@varanda/core/lib/dm')
 const postage = require('@varanda/core/lib/dm-postage')
-const { MOMENT_TTL_MS } = require('@varanda/core/lib/moments')
+const { MOMENT_TTL_MS, MOMENT_SKEW_MS } = require('@varanda/core/lib/moments')
 const { createBrowserNode } = require('../lib/node')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const store = require('../lib/node-store')
@@ -410,4 +410,55 @@ test('momento video: put, create, read with ms; bounds refused; a blob that is n
   const pic = await A.node.momentReadMedia({ author: A.key, seq: created2.seq })
   t.alike(Object.keys(pic), ['bytes', 'mime', 'w', 'h'], 'a photo reads without ms')
   t.alike([pic.mime, pic.w, pic.h], ['image/png', 64, 48])
+})
+
+test('moment.lookup: the showing momento a reaction names, a fifth one included, never once gone', async (t) => {
+  t.timeout(170000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const assoc = { kp, hex: hex(kp.publicKey) }
+  const host = await seederHost(t, bootstrap, assoc)
+  const A = await memberNode(t, assoc, host)
+  const B = await memberNode(t, assoc, host, { enable: false })
+
+  const made = []
+  for (let i = 0; i < 5; i++) {
+    const item = await A.node.momentPutMedia({ bytes: png(1000), mime: 'image/png', width: 64, height: 48 })
+    made.push(await A.web.request('moment.create', { text: 'm' + i, media: item }))
+  }
+  const post = await A.web.request('post.create', { text: 'publicação' })
+  const own = (await A.web.request('moments.read', {})).own
+  t.absent(own.some((m) => m.seq === made[0].seq), 'the first of five is off the strip')
+  const entries = (await A.web.request('log.read', {})).entries
+  const atOf = (seq) => entries.find((e) => e.seq === seq).record.at
+
+  const first = await A.web.request('moment.lookup', { author: A.key, seq: made[0].seq })
+  t.alike(Object.keys(first), ['mime', 'w', 'h', 'ms', 'at'], 'never its text, key or bytes')
+  t.alike(first, { mime: 'image/png', w: 64, h: 48, ms: 0, at: atOf(made[0].seq) }, 'the fifth moment still answers inside its 24 h')
+  t.is(typeof first.at, 'string', 'at is the record\'s own ISO string')
+
+  // A follower answers from its replica, locked as well.
+  await B.web.request('follow.add', { key: A.key })
+  await copyDiary(A, B)
+  t.alike(await B.web.request('moment.lookup', { author: A.key, seq: made[4].seq }), { mime: 'image/png', w: 64, h: 48, ms: 0, at: atOf(made[4].seq) })
+  await B.node.clearKeyPair()
+  t.alike(await B.web.request('moment.lookup', { author: A.key, seq: made[4].seq }), { mime: 'image/png', w: 64, h: 48, ms: 0, at: atOf(made[4].seq) }, 'works locked')
+
+  t.alike(await failure(A.web.request('moment.lookup', { author: A.key, seq: post.seq })), GONE, 'a post is not a moment')
+  t.alike(await failure(A.web.request('moment.lookup', { author: A.key, seq: post.seq + 50 })), GONE, 'a seq not stored')
+  t.alike(await failure(A.web.request('moment.lookup', { author: hex(crypto.randomBytes(32)), seq: 1 })), GONE, 'an unknown author')
+  t.alike(await failure(A.web.request('moment.lookup', { author: 'x', seq: 1 })), { code: 'USAGE', message: 'parâmetro inválido: author' })
+
+  // Ahead of the reader's clock beyond the skew, and past its 24 h.
+  await later(-(MOMENT_SKEW_MS + 60000), async () => {
+    t.alike(await failure(A.web.request('moment.lookup', { author: A.key, seq: made[4].seq })), GONE, 'too far in the future')
+  })
+  await later(MOMENT_TTL_MS + 1000, async () => {
+    t.alike(await failure(A.web.request('moment.lookup', { author: A.key, seq: made[0].seq })), GONE, 'expired')
+    t.alike(await failure(A.node.momentReadMedia({ author: A.key, seq: made[0].seq })), GONE, 'and its photo stays unreadable')
+  })
+
+  await A.web.request('moment.delete', { to: made[1].ref })
+  t.alike(await failure(A.web.request('moment.lookup', { author: A.key, seq: made[1].seq })), GONE, 'a tombstoned moment')
+  t.ok(await A.web.request('moment.lookup', { author: A.key, seq: made[2].seq }), 'the others still answer')
 })

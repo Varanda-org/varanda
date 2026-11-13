@@ -1199,3 +1199,173 @@ test('bound reply: a reader from before bound replies drops it', (t) => {
   const { mine: m2, ...bare } = openInner(msg({ replyTo: 'b'.repeat(32) }), bia.hex, O)
   t.ok(oldReply(bare), 'a bare-id reply still reads there')
 })
+
+// Inner v5: a reaction to a momento of `to` (docs/protocol.md section 11).
+// The longest reaction isReaction accepts in UTF-8: eight code points, three
+// pictographs with skin tones joined by two ZWJ (4+4+3+4+4+3+4+4 bytes).
+const LONGEST_EMOJI = '\u{1F468}\u{1F3FB}‍\u{1F468}\u{1F3FB}‍\u{1F468}\u{1F3FB}'
+const MID = 'a'.repeat(32)
+
+function momentBody (over = {}) {
+  return { v: 5, kind: 'msg', id: MID, from: ana.hex, to: bia.hex, replyTo: null, text: HEART, moment: 7, op: null, peer: null, at: AT, cert: ana.cert, ...over }
+}
+
+function momentReact (over = {}, from = ana) {
+  return buildInner({ kind: 'msg', to: bia.hex, text: HEART, moment: 7, at: AT, cert: from.cert, ...over }, from)
+}
+
+test('inner v5: constants, exact key set and round trip', (t) => {
+  t.is(dm.DM_SIG_PREFIX_V5, 'varanda-dm-v5\n')
+  t.alike(dm.INNER_KEYS_V5, ['v', 'kind', 'id', 'from', 'to', 'replyTo', 'text', 'moment', 'op', 'peer', 'at', 'cert'])
+  t.alike(dm.DM_KINDS, ['msg', 'ctl'], 'no new kind')
+  const inner = momentReact()
+  t.is(inner.byteLength, DM_INNER_BYTES)
+  t.alike(Object.keys(wireOf(inner)), dm.INNER_KEYS_V5)
+  t.is(wireOf(inner).v, 5)
+  const got = openInner(momentReact(), bia.hex, O)
+  t.is(got.v, 5)
+  t.is(got.kind, 'msg')
+  t.is(got.moment, 7)
+  t.is(got.text, HEART)
+  t.is(got.replyTo, null)
+  t.is(got.mine, false, 'the recipient')
+  t.is(openInner(momentReact(), ana.hex, O).mine, true, 'the self copy')
+  t.is(openInner(momentReact(), caio.hex, O), null, 'a third party opens nothing')
+  t.is(openInner(momentReact({ moment: Number.MAX_SAFE_INTEGER }), bia.hex, O).moment, Number.MAX_SAFE_INTEGER)
+  t.is(openInner(momentReact({ text: '\u{1F525}' }), bia.hex, O).text, '\u{1F525}')
+  t.is(openInner(momentReact({ cert: null }), bia.hex, O), null, 'a missing certificate never opens')
+  t.is(openInner(momentReact(), bia.hex, {}), null, 'nor without the association')
+  const one = momentReact()
+  t.is(dm.bodyDigest(openInner(b4a.from(one), bia.hex, O)), dm.frameDigest(one), 'the digest covers the moment')
+})
+
+test('inner v5: shape rules', (t) => {
+  t.ok(dm.validBody(momentBody()))
+  t.ok(dm.validBody(momentBody({ moment: 1 })))
+  t.ok(dm.validBody(momentBody({ text: LONGEST_EMOJI })))
+  const { moment, ...noMoment } = momentBody()
+  t.absent(dm.validBody(noMoment), 'a missing key')
+  for (const extra of [{ media: null }, { card: null }, { fwd: 0 }, { author: bia.hex }, { digest: TD }, { x: 1 }]) {
+    t.absent(dm.validBody(momentBody(extra)), 'an extra key ' + Object.keys(extra)[0])
+  }
+  for (const text of ['', 'oi', HEART + HEART, HEART + ' ', ' ', ':)', 1, null]) {
+    t.absent(dm.validBody(momentBody({ text })), 'text ' + JSON.stringify(text))
+  }
+  for (const m of [0, -1, 1.5, '7', null, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, true, [7]]) {
+    t.absent(dm.validBody(momentBody({ moment: m })), 'moment ' + String(m))
+  }
+  t.absent(dm.validBody(momentBody({ replyTo: 'b'.repeat(32) })), 'a bare reply')
+  t.absent(dm.validBody(momentBody({ replyTo: boundTo() })), 'a bound reply')
+  t.absent(dm.validBody(momentBody({ kind: 'ctl' })))
+  t.absent(dm.validBody(momentBody({ kind: 'react' })))
+  t.absent(dm.validBody(momentBody({ to: ana.hex })), 'to oneself')
+  t.absent(dm.validBody(momentBody({ op: 'accepted' })))
+  t.absent(dm.validBody(momentBody({ peer: bia.hex })))
+  t.absent(dm.validBody(momentBody({ cert: bia.cert })), 'a certificate of someone else')
+  t.absent(dm.validBody(momentBody({ id: 'A'.repeat(32) })))
+  t.absent(dm.validBody(momentBody({ at: '2026-11-03' })))
+
+  // Reordered keys are refused on open: the exact canonical bytes are signed.
+  const reordered = { v: 5, kind: 'msg', id: MID, from: ana.hex, to: bia.hex, replyTo: null, moment: 7, text: HEART, op: null, peer: null, at: AT, cert: ana.cert }
+  t.ok(dm.validBody(reordered), 'the same key set')
+  t.ok(openInner(forge(momentBody(), ana, dm.DM_SIG_PREFIX_V5), bia.hex, O), 'the forge helper builds an openable v5')
+  t.is(openInner(forge(reordered, ana, dm.DM_SIG_PREFIX_V5), bia.hex, O), null, 'reordered keys')
+  t.is(openInner(forge(momentBody({ x: 1 }), ana, dm.DM_SIG_PREFIX_V5), bia.hex, O), null, 'an extra key')
+  t.is(openInner(forge(momentBody({ text: 'oi' }), ana, dm.DM_SIG_PREFIX_V5), bia.hex, O), null, 'text no emoji')
+  t.is(openInner(forge(momentBody({ text: '' }), ana, dm.DM_SIG_PREFIX_V5), bia.hex, O), null, 'empty text')
+  t.is(openInner(forge(momentBody({ moment: 0 }), ana, dm.DM_SIG_PREFIX_V5), bia.hex, O), null, 'moment 0')
+  t.is(openInner(forge(momentBody({ replyTo: 'b'.repeat(32) }), ana, dm.DM_SIG_PREFIX_V5), bia.hex, O), null, 'a reply')
+  t.is(openInner(forge(momentBody({ cert: null }), ana, dm.DM_SIG_PREFIX_V5), bia.hex, O), null, 'no certificate')
+  const self = momentBody({ to: ana.hex })
+  t.is(openInner(forge(self, ana, dm.DM_SIG_PREFIX_V5), ana.hex, O), null, 'from === to')
+
+  // buildInner refuses rather than sends the reaction as something else.
+  for (const [label, over] of [
+    ['replyTo', { replyTo: 'b'.repeat(32) }], ['bound replyTo', { replyTo: boundTo() }], ['media', { media: [blobItem(1)] }],
+    ['card', { card: dmCard() }], ['fwd 1', { fwd: 1 }], ['text', { text: 'oi' }], ['empty text', { text: '' }], ['two emojis', { text: HEART + HEART }],
+    ['moment 0', { moment: 0 }], ['moment 1.5', { moment: 1.5 }], ['moment string', { moment: '7' }], ['to oneself', { to: ana.hex }], ['ctl', { kind: 'ctl', op: 'blocked', peer: bia.hex }]
+  ]) {
+    t.exception.all(() => momentReact(over), /mensagem inválida/, label)
+  }
+  t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'msg', to: bia.hex, text: HEART, moment: 7, at: AT, cert: page.cert }), /mensagem inválida/, 'a Página writes no moment')
+})
+
+test('inner v5: a null or absent moment builds the exact bytes of today', (t) => {
+  const ID = 'c'.repeat(32)
+  for (const [label, fields] of [
+    ['text', { text: 'oi' }],
+    ['media', { text: '', media: [blobItem(1)] }],
+    ['card', { text: 'veja', card: dmCard() }],
+    ['bound reply', { text: 'oi', replyTo: boundTo() }],
+    ['forward', { text: 'oi', fwd: 1 }]
+  ]) {
+    const base = msg({ id: ID, ...fields })
+    t.ok(b4a.equals(msg({ id: ID, ...fields, moment: null }), base), label + ' with moment null')
+    t.ok(b4a.equals(msg({ id: ID, ...fields, moment: undefined }), base), label + ' with moment undefined')
+    t.not(wireOf(base).v, 5)
+  }
+  t.is(wireOf(msg({ text: 'oi', moment: null })).v, 1)
+})
+
+test('inner v5: its own signature domain', (t) => {
+  const { json, sig } = frameParts(momentReact())
+  const key = ana.publicKey
+  t.ok(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V5), json]), sig, key))
+  for (const [name, prefix] of [['v1', DM_SIG_PREFIX], ['v2', DM_SIG_PREFIX_V2], ['v4', dm.DM_SIG_PREFIX_V4]]) {
+    t.absent(hcrypto.verify(b4a.concat([b4a.from(prefix), json]), sig, key), 'not under ' + name)
+    t.is(openInner(forge(momentBody(), ana, prefix), bia.hex, O), null, 'a v5 body signed under ' + name)
+  }
+  const digest = b4a.alloc(32)
+  sodium.crypto_hash_sha256(digest, json)
+  t.absent(hcrypto.verify(b4a.concat([b4a.from(dm.DM_V3_PREFIX), digest, u64(EXP)]), sig, key), 'not under v3')
+
+  // No message or reaction signature verifies under the v5 domain.
+  for (const [name, inner] of [['v1', msg()], ['v2', msg({ fwd: 1 })], ['v4', react()]]) {
+    const p = frameParts(inner)
+    t.absent(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V5), p.json]), p.sig, key), name + ' signature under the v5 domain')
+    t.is(openInner(forge(wireOf(inner), ana, dm.DM_SIG_PREFIX_V5), bia.hex, O), null, 'a ' + name + ' body signed under the v5 domain')
+  }
+  const v3 = pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert })
+  t.absent(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V5), v3.json]), frameParts(v3.inner).sig, page.publicKey), 'a v3 signature under the v5 domain')
+})
+
+test('inner v5: relabelled it never opens, and a reader without v5 drops it', (t) => {
+  const { mine, ...wire } = openInner(momentReact(), bia.hex, O)
+  t.ok(dm.validBody(wire))
+  t.absent(oldValidBody(wire), 'v 5 falls to the final else of a v1 to v3 reader')
+  const v4Reader = (b) => b !== null && typeof b === 'object' && [1, 2, 3, 4].includes(b.v) && dm.validBody(b)
+  t.absent(v4Reader(wire), 'and of a v1 to v4 reader')
+  const prefixes = [DM_SIG_PREFIX, DM_SIG_PREFIX_V2, dm.DM_V3_PREFIX, dm.DM_SIG_PREFIX_V4, dm.DM_SIG_PREFIX_V5]
+  for (const v of [1, 2, 3, 4]) {
+    t.absent(dm.validBody({ ...wire, v }), 'relabelled v' + v + ' is no valid body')
+    for (const prefix of prefixes) {
+      t.is(openInner(forge({ ...wire, v }, ana, prefix), bia.hex, O), null, 'relabelled v' + v + ' under ' + JSON.stringify(prefix))
+    }
+  }
+  // The real frame, its v byte changed in place: the signature no longer matches.
+  const inner = momentReact()
+  const len = (inner[0] << 8) | inner[1]
+  const at = b4a.toString(inner.subarray(2, 2 + len)).indexOf('"v":5') + 2 + 4
+  for (const v of ['1', '2', '3', '4']) {
+    const copy = b4a.from(inner)
+    copy[at] = v.charCodeAt(0)
+    t.is(openInner(copy, bia.hex, O), null, 'frame relabelled ' + v)
+  }
+})
+
+test('inner v5: the largest certificate and the longest reaction fit', (t) => {
+  t.ok(require('@varanda/rpc').isReaction(LONGEST_EMOJI))
+  t.is(b4a.byteLength(LONGEST_EMOJI), 30)
+  const v1 = signPair()
+  v1.cert = createCert({ member: v1.hex, ageBand: 'a'.repeat(32), method: 'b'.repeat(32), date: AT }, assoc)
+  let largest = 0
+  for (const who of [v1, largestV2Sender()]) {
+    const worst = momentReact({ text: LONGEST_EMOJI, moment: Number.MAX_SAFE_INTEGER, cert: who.cert }, who)
+    const len = (worst[0] << 8) | worst[1]
+    largest = Math.max(largest, len + 66)
+    t.is(openInner(worst, bia.hex, O).text, LONGEST_EMOJI)
+  }
+  // docs/protocol.md section 11 states this size.
+  t.is(largest, 1061, 'the largest v5 frame')
+  t.ok(largest <= DM_INNER_BYTES)
+})

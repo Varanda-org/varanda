@@ -20,6 +20,9 @@ const DM_INNER_KEYS_V2 = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'replyT
 const DM_INNER_KEYS_V3 = DM_INNER_KEYS_V2
 // v4 is a reaction (kind 'react'), signed under its own domain.
 const DM_INNER_KEYS_V4 = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'target', 'emoji', 'rev', 'at', 'cert'])
+// v5 is a reaction to a momento of `to`: a msg with the v1 keys plus the
+// moment's seq, signed under its own domain.
+const DM_INNER_KEYS_V5 = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'replyTo', 'text', 'moment', 'op', 'peer', 'at', 'cert'])
 // A reaction's target, and a bound reply's replyTo (v2 and v3): the
 // message's sender and id, and the hex64 sha256 of the canonical JSON of
 // that message's opened inner body, so it names only the message it was
@@ -94,7 +97,9 @@ function canonicalTarget (t) {
 function canonicalInnerJson (body) {
   const keys = body.v === 4
     ? DM_INNER_KEYS_V4
-    : body.v === 2 || body.v === 3 ? DM_INNER_KEYS_V2 : DM_INNER_KEYS
+    : body.v === 5
+      ? DM_INNER_KEYS_V5
+      : body.v === 2 || body.v === 3 ? DM_INNER_KEYS_V2 : DM_INNER_KEYS
   const o = {}
   for (const k of keys) {
     o[k] = k === 'media' && Array.isArray(body.media)
@@ -148,6 +153,7 @@ module.exports = {
   DM_INNER_KEYS_V2,
   DM_INNER_KEYS_V3,
   DM_INNER_KEYS_V4,
+  DM_INNER_KEYS_V5,
   DM_TARGET_KEYS,
   DM_MEDIA_KEYS,
   DM_CARD_KEYS,
