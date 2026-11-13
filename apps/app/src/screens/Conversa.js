@@ -37,6 +37,7 @@ import { OfflineNote } from '../ui/OfflineNote'
 import { PostRow } from '../ui/PostRow'
 import { ReplyBar } from '../ui/ReplyBar'
 import { useKeyboardAvoidEnabled, useKeyboardOpen } from '../ui/keyboardAvoid'
+import { EmbedBandBottom } from '../ui/screenVisible'
 import { RefreshableList } from '../ui/RefreshableList'
 import { Sheet } from '../ui/Sheet'
 import { ErrorState, ListFooter, Skeleton } from '../ui/States'
@@ -730,6 +731,17 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
   const insets = useSafeAreaInsets()
   const avoidKeyboard = useKeyboardAvoidEnabled()
   const keyboardOpen = useKeyboardOpen()
+  // A row under the reply bar is not seen, and measureInWindow reports
+  // clipped rows unclipped, so the list tells its cards where the bar
+  // starts. Measured on every check: the keyboard moves the bar.
+  const barBox = useRef(null)
+  const band = useMemo(() => ({
+    measure: (done) => {
+      const node = barBox.current
+      if (node === null || typeof node.measureInWindow !== 'function') { done(null); return }
+      node.measureInWindow((x, y, w, h) => done(Number.isFinite(y) && y > 0 && h > 0 ? y : null))
+    }
+  }), [])
   const focal = entry.key
   const seed = useMemo(() => seedItem(entry.params ? entry.params.seed : null, focal), [entry, focal])
   const full = !!node.hosted && node.online !== false
@@ -1221,33 +1233,35 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
       <DeletePrompt del={del} />
       <OfflineNote />
       <View style={styles.flex}>
-        <RefreshableList
-          data={phase === 'ready' ? rows : []}
-          keyExtractor={(row) => row.key}
-          renderItem={({ item: row }) => renderThreadRow(row)}
-          extraData={{ eng, follows, now, childBusy, childErrors, profileOf: names.profileOf }}
-          ListHeaderComponent={header}
-          ListEmptyComponent={phase === 'loading' ? <Skeleton /> : null}
-          ListFooterComponent={phase === 'ready'
-            ? (
-              <ListFooter
-                loading={loadingMore}
-                atEnd={next === null && replies.length > 0}
-                endText='Isso é tudo nesta conversa.'
-                error={moreError}
-                onRetry={loadMore}
-                pending={loadingMore}
-              />
-              )
-            : null}
-          contentContainerStyle={{ paddingBottom: bottomPad }}
-          onRefresh={() => load(true)}
-          refreshing={refreshing}
-          onLoadMore={phase === 'ready' && next !== null && !moreError ? loadMore : undefined}
-          loadingMore={loadingMore}
-          loadMoreError={!!moreError}
-          atEnd={next === null}
-        />
+        <EmbedBandBottom.Provider value={full || sending ? band : null}>
+          <RefreshableList
+            data={phase === 'ready' ? rows : []}
+            keyExtractor={(row) => row.key}
+            renderItem={({ item: row }) => renderThreadRow(row)}
+            extraData={{ eng, follows, now, childBusy, childErrors, profileOf: names.profileOf }}
+            ListHeaderComponent={header}
+            ListEmptyComponent={phase === 'loading' ? <Skeleton /> : null}
+            ListFooterComponent={phase === 'ready'
+              ? (
+                <ListFooter
+                  loading={loadingMore}
+                  atEnd={next === null && replies.length > 0}
+                  endText='Isso é tudo nesta conversa.'
+                  error={moreError}
+                  onRetry={loadMore}
+                  pending={loadingMore}
+                />
+                )
+              : null}
+            contentContainerStyle={{ paddingBottom: bottomPad }}
+            onRefresh={() => load(true)}
+            refreshing={refreshing}
+            onLoadMore={phase === 'ready' && next !== null && !moreError ? loadMore : undefined}
+            loadingMore={loadingMore}
+            loadMoreError={!!moreError}
+            atEnd={next === null}
+          />
+        </EmbedBandBottom.Provider>
       </View>
       {/* Kept through a send that outlives the connection, so its own
           success clears the text instead of a remounted copy. */}
@@ -1256,7 +1270,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
           // The open keyboard already covers the gesture bar: its inset would
           // leave a band between the bar and the keyboard. The padding takes the
           // bar's colour so no strip of page shows under it.
-          <View style={[styles.barWrap, { paddingBottom: keyboardOpen ? 8 : Math.max(8, insets.bottom) }]}>
+          <View ref={barBox} collapsable={false} style={[styles.barWrap, { paddingBottom: keyboardOpen ? 8 : Math.max(8, insets.bottom) }]}>
             <ReplyBar
               key={focal}
               target={target}

@@ -27,6 +27,7 @@ import { Icon } from './Icon'
 import { escapeLayerCount, useEscapeLayer } from './escapeLayer'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, radius, space, type } from './theme'
+import { holdEmbeds } from '../embedLive'
 
 // Open menus, so a parent layer with its own key handling can leave Escape
 // to the menu on top of it.
@@ -49,6 +50,9 @@ export function ActionsSheet ({ open, onClose, title, actions, header }) {
   useEffect(() => {
     if (shown) tap()
   }, [shown])
+  // A sheet covers the screen, so provider frames stay unloaded while one is
+  // open.
+  useEffect(() => (shown ? holdEmbeds() : undefined), [shown])
   // Web: Escape closes only this menu, never the sheet or screen under it.
   useEscapeLayer(shown, onClose, 'actions')
   // A row's action runs only once the sheet is gone: the iOS page sheet

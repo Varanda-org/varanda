@@ -88,6 +88,7 @@ import { MoreButton } from '../ui/MoreButton'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
+import { EmbedBandBottom } from '../ui/screenVisible'
 import { EmptyState, ErrorState, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
 import { ForwardSheet } from '../ui/ForwardSheet'
@@ -127,6 +128,17 @@ const JOINABLE = [null, 'left', 'pending']
 export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage, onOpenMention, onReport, onSeen, isTop = true }) {
   const styles = useStyles(makeStyles)
   const avoidKeyboard = useKeyboardAvoidEnabled()
+  // A list row under the composer is not seen, and measureInWindow reports
+  // clipped rows unclipped, so the list tells its cards where the composer
+  // starts. Measured on every check: the keyboard moves the composer.
+  const composerBox = useRef(null)
+  const band = useMemo(() => ({
+    measure: (done) => {
+      const node = composerBox.current
+      if (node === null || typeof node.measureInWindow !== 'function') { done(null); return }
+      node.measureInWindow((x, y, w, h) => done(Number.isFinite(y) && y > 0 && h > 0 ? y : null))
+    }
+  }), [])
   const { colors } = useTheme()
   const node = useNode()
   const hosted = node.hosted === true
@@ -1575,38 +1587,40 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
           )
         : null}
       <OfflineNote />
-      <RefreshableList
-        listRef={listRef}
-        data={reader ? rows : []}
-        keyExtractor={(row) => row.key}
-        renderItem={renderItem}
-        extraData={{ role, rawById, names, canPost, replyKey, flashKey, reactionOverrides, reactionsDisabled }}
-        contentContainerStyle={styles.thread}
-        ListHeaderComponent={stateNotes}
-        ListEmptyComponent={
-          <View>
-            {empty}
-            {loadedAt !== null && !loadError && canPost && node.online && node.passkey?.status?.unlocked === true && !post.pending && !pagePending && postHold === null && check === null && mediaHold === null && !sendingMedia
-              ? <View style={[styles.note, styles.inline]}>{['Oi', 'Tudo bem?'].map((text) => <Pill key={text} label={text} onPress={() => setDraft((d) => d.trim() ? d + '\n' + text : text)} />)}</View>
-              : null}
-          </View>
-        }
-        ListFooterComponent={<View>{reactionError ? <View style={styles.note}><ErrorText>{reactionError}</ErrorText></View> : null}{act.error ? <View style={styles.note}><ErrorText>{act.error}</ErrorText></View> : null}{banNote}{checkNote}</View>}
-        onRefresh={() => { setLookupTick((n) => n + 1); load(true) }}
-        refreshing={refreshing}
-        keepVisiblePosition
-        onScrollFrame={trackBottom}
-        onContentSizeChange={(width, height) => {
-          const { y, layoutHeight } = scrollFrame.current
-          scrollFrame.current.contentHeight = height
-          setShowJump(jumpVisible({ distanceFromEnd: height - y - layoutHeight, viewport: layoutHeight }))
-          followEnd()
-        }}
-        onUserScroll={releaseEnd}
-      />
+      <EmbedBandBottom.Provider value={composer ? band : null}>
+        <RefreshableList
+          listRef={listRef}
+          data={reader ? rows : []}
+          keyExtractor={(row) => row.key}
+          renderItem={renderItem}
+          extraData={{ role, rawById, names, canPost, replyKey, flashKey, reactionOverrides, reactionsDisabled }}
+          contentContainerStyle={styles.thread}
+          ListHeaderComponent={stateNotes}
+          ListEmptyComponent={
+            <View>
+              {empty}
+              {loadedAt !== null && !loadError && canPost && node.online && node.passkey?.status?.unlocked === true && !post.pending && !pagePending && postHold === null && check === null && mediaHold === null && !sendingMedia
+                ? <View style={[styles.note, styles.inline]}>{['Oi', 'Tudo bem?'].map((text) => <Pill key={text} label={text} onPress={() => setDraft((d) => d.trim() ? d + '\n' + text : text)} />)}</View>
+                : null}
+            </View>
+          }
+          ListFooterComponent={<View>{reactionError ? <View style={styles.note}><ErrorText>{reactionError}</ErrorText></View> : null}{act.error ? <View style={styles.note}><ErrorText>{act.error}</ErrorText></View> : null}{banNote}{checkNote}</View>}
+          onRefresh={() => { setLookupTick((n) => n + 1); load(true) }}
+          refreshing={refreshing}
+          keepVisiblePosition
+          onScrollFrame={trackBottom}
+          onContentSizeChange={(width, height) => {
+            const { y, layoutHeight } = scrollFrame.current
+            scrollFrame.current.contentHeight = height
+            setShowJump(jumpVisible({ distanceFromEnd: height - y - layoutHeight, viewport: layoutHeight }))
+            followEnd()
+          }}
+          onUserScroll={releaseEnd}
+        />
+      </EmbedBandBottom.Provider>
       {quoteToast ? <View pointerEvents='none' style={styles.quoteToast}><Text accessibilityLiveRegion='polite' style={styles.quoteToastText}>Mensagem fora do trecho carregado</Text></View> : null}
       {showJump || (away.current && awayCount(rows, lastSeenKey) > 0) ? <JumpToEnd count={awayCount(rows, lastSeenKey)} onPress={scrollToEnd} /> : null}
-      {composer}
+      {composer ? <View ref={composerBox} collapsable={false}>{composer}</View> : null}
       <ReactionPicker
         open={reactionPicker !== null && !reactionsDisabled && !reactionContext.sending.has(reactionPicker) && !reactionContext.unsure.has(reactionPicker)}
         onClose={() => setReactionPicker(null)}

@@ -5,7 +5,7 @@
 // colours the body down to the bottom edge (home indicator included); it
 // defaults to the card colour.
 
-import { useState } from 'react'
+import { useContext, useEffect, useState } from 'react'
 import { Modal, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Backdrop } from './Backdrop'
@@ -14,6 +14,8 @@ import { useStyles, useTheme } from './ThemeProvider'
 import { layout, type } from './theme'
 import { sideInset } from './sideInset'
 import { useEscapeLayer } from './escapeLayer'
+import { holdEmbeds } from '../embedLive'
+import { ScreenVisible, SheetDepth } from './screenVisible'
 
 export const TEXT_CAP = 1.3
 // The row's 16 pt edge plus 8 pt of air between a side control and the title.
@@ -112,6 +114,12 @@ export function Sheet ({ open, onClose, onBack, title, left, right, background, 
   // Web: Escape closes this sheet only, not the screen behind it, and leaves
   // the key to a menu opened on top.
   useEscapeLayer(!!open, onClose, 'sheet')
+  // An open sheet covers what is under it, so the players there unload, while
+  // a card inside the sheet (the composer's preview) sees the sheet as its
+  // screen.
+  const depth = useContext(SheetDepth)
+  useEffect(() => (open ? holdEmbeds() : undefined), [open])
+  const body = <SheetDepth.Provider value={depth + 1}><ScreenVisible.Provider value={!!open}>{children}</ScreenVisible.Provider></SheetDepth.Provider>
   if (Platform.OS === 'ios') {
     return (
       <Modal
@@ -124,7 +132,7 @@ export function Sheet ({ open, onClose, onBack, title, left, right, background, 
         allowSwipeDismissal={dismissable}
       >
         <SafeAreaProvider>
-          <IosContent onClose={onClose} title={title} left={left} right={right} background={bodyBackground} grabber={grabber}>{children}</IosContent>
+          <IosContent onClose={onClose} title={title} left={left} right={right} background={bodyBackground} grabber={grabber}>{body}</IosContent>
         </SafeAreaProvider>
       </Modal>
     )
@@ -149,7 +157,7 @@ export function Sheet ({ open, onClose, onBack, title, left, right, background, 
         <View style={{ paddingLeft: padL, paddingRight: padR }}>
           <TopRow onClose={onClose} title={title} left={left} right={right} />
         </View>
-        <View style={[styles.children, { paddingBottom: insets.bottom, paddingLeft: padL, paddingRight: padR, backgroundColor: bodyBackground }]}>{children}</View>
+        <View style={[styles.children, { paddingBottom: insets.bottom, paddingLeft: padL, paddingRight: padR, backgroundColor: bodyBackground }]}>{body}</View>
       </View>
     </Modal>
   )

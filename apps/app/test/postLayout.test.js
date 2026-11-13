@@ -27,7 +27,7 @@ test('PostRow measures the caption column and forwards the expanded override', (
 test('a clamped caption is plain sanitized Text and expansion restores interaction', (t) => {
   t.ok(post.includes('const textOut = hasText && numberOfLines === 0 &&'), 'links and mentions leave the body only when uncapped')
   t.ok(/<Text style=\{styles.text\} numberOfLines=\{numberOfLines\} onTextLayout=\{onTextLayout\}>\{shownText\}<\/Text>/.test(post), 'native layout refines the clamped caption')
-  t.ok(post.includes('<MentionText text={text} onOpenMention={openMention} onOpenPlain={openTap} onTextLayout={onTextLayout} style={styles.text} />'), 'uncapped text keeps full interactive links and mentions')
+  t.ok(post.includes('<MentionText text={body} onOpenMention={openMention} onOpenPlain={openTap} onTextLayout={onTextLayout} style={styles.text} />'), 'uncapped text keeps full interactive links and mentions')
   t.ok(post.includes('onTextLayout={onTextLayout} style={styles.text} />'), 'the expanded caption with links or mentions is measured too, so collapsing can drop a control it does not need')
   const mention = read('MentionText.js')
   t.is(mention.split('onTextLayout={onTextLayout}').length - 1, 2, 'MentionText hands onTextLayout to both of its root Text branches')

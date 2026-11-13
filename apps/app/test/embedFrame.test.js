@@ -51,8 +51,10 @@ test('native: the WebView is locked down', (t) => {
     /source=\{\{ html, baseUrl \}\}/,
     /onShouldStartLoadWithRequest=\{onShouldStartLoadWithRequest\}/,
     /onOpenWindow=\{onOpenWindow\}/,
-    /accessibilityLabel=\{title\}/
+    /accessibilityLabel=\{title\}/,
+    /onStartShouldSetResponder=\{\(\) => true\}/
   ]) t.ok(prop.test(nativeSrc), String(prop))
+  t.absent(/onResponderGrant/.test(nativeSrc), 'no responder grant that would block native responders')
   t.absent(/allowFileAccess=\{true\}|allowUniversalAccessFromFileURLs|allowFileAccessFromFileURLs/.test(nativeSrc), 'no file access')
   t.ok(/originWhitelist=\{\['\*'\]\}/.test(nativeSrc), 'every scheme reaches the handler, none is opened by the library')
   t.absent(/setSupportMultipleWindows=/.test(nativeRaw), 'multiple windows stay on, so an Android popup never replaces the top frame')
@@ -195,6 +197,19 @@ test('web: renders the iframe with the embed URL and nothing from the native pro
   t.alike(Object.keys(el.props).sort(), ['allow', 'allowFullScreen', 'height', 'referrerPolicy', 'sandbox', 'src', 'style', 'title', 'width'])
   t.is(EmbedFrame({ embedUrl: 'http://w.soundcloud.com/player/', height: 166, title: 'x' }), null, 'http is not framed')
   t.is(EmbedFrame({ embedUrl: 'javascript:alert(1)', height: 166, title: 'x' }), null, 'javascript: is not framed')
+})
+
+test('embedFrame: playback needs a touch inside the player', async (t) => {
+  t.ok(/\bmediaPlaybackRequiresUserAction\b/.test(nativeSrc), 'native sets mediaPlaybackRequiresUserAction')
+  t.absent(/mediaPlaybackRequiresUserAction=\{false\}/.test(nativeSrc), 'native never turns it off')
+  t.ok(/\n\s+mediaPlaybackRequiresUserAction\n/.test(nativeSrc), 'native sets the bare prop')
+  const allow = (/allow: '([^']*)'/.exec(webSrc) || [])[1]
+  t.is(allow, 'clipboard-write; encrypted-media; fullscreen; picture-in-picture', 'web allow list')
+  t.absent(/autoplay/i.test(webSrc), 'web names no autoplay')
+  const { embedOf, embedHtml } = await import('../src/musicEmbed.js')
+  const html = embedHtml(embedOf('https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC'))
+  t.ok(html.includes('<iframe'), 'Spotify track framed')
+  t.absent(/autoplay/i.test(html), 'native wrapper names no autoplay')
 })
 
 test('react-native-webview is pinned exactly to 13.16.0', (t) => {

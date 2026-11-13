@@ -50,15 +50,14 @@ export const EMBED_BASE_URL = 'https://app.varanda'
 // "Abrir no ..." link is the way out to the provider.
 export const EMBED_SANDBOX = 'allow-scripts allow-same-origin allow-presentation'
 
-export const EMBED_PLAY = 'Tocar aqui'
-export const EMBED_CLOSE = 'Fechar player'
-
 // Printable ASCII a URL may hold, as rpc's cardUrlHost checks, without its
 // length cap.
 const EMBED_URL_CHARS = /^[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+$/
 const YT_ID = /^[A-Za-z0-9_-]{11}$/
 const YT_LIST = /^[A-Za-z0-9_-]{10,64}$/
 const YT_START = /^(\d{1,5})s?$/
+// The share form 1h2m3s: each part optional, in this order, bounded digits.
+const YT_HMS = /^(?:(\d{1,2})h)?(?:(\d{1,4})m)?(?:(\d{1,5})s)?$/
 const YT_MAX_START = 86400
 const YT_MIN_HEIGHT = 200
 const YT_MIN_WIDTH = 200
@@ -115,13 +114,30 @@ function parts (url) {
   return { host, segments, query }
 }
 
+// Seconds for a YouTube t or start value, or null when the value is not a
+// time or is past YT_MAX_START.
+function startSeconds (value) {
+  if (typeof value !== 'string' || value === '') return null
+  let n = NaN
+  const plain = YT_START.exec(value)
+  if (plain) {
+    n = Number(plain[1])
+  } else {
+    const hms = YT_HMS.exec(value)
+    if (hms) n = Number(hms[1] || 0) * 3600 + Number(hms[2] || 0) * 60 + Number(hms[3] || 0)
+  }
+  return Number.isFinite(n) && n <= YT_MAX_START ? n : null
+}
+
+export function youtubeStartSeconds (value) {
+  const n = startSeconds(value)
+  return n === null ? 0 : n
+}
+
 function youtubeStart (query) {
   for (const key of ['t', 'start']) {
-    const m = YT_START.exec(query.get(key) || '')
-    if (m) {
-      const n = Number(m[1])
-      if (n <= YT_MAX_START) return n
-    }
+    const n = startSeconds(query.get(key) || '')
+    if (n !== null) return n
   }
   return 0
 }
@@ -144,8 +160,9 @@ function youtube ({ host, segments, query }) {
   }
   if (id === null || !YT_ID.test(id)) return null
   const start = youtubeStart(query)
+  // The frame loads without a tap, so this address must never ask to start.
   return freeze('youtube', 'video',
-    'https://www.youtube-nocookie.com/embed/' + id + '?playsinline=1&autoplay=1&rel=0' + (start > 0 ? '&start=' + start : ''),
+    'https://www.youtube-nocookie.com/embed/' + id + '?playsinline=1&rel=0' + (start > 0 ? '&start=' + start : ''),
     page + '/watch?v=' + id + (start > 0 ? '&t=' + start + 's' : ''), YT_MIN_HEIGHT, YT_MIN_WIDTH)
 }
 
@@ -167,7 +184,7 @@ function soundcloud ({ host, segments }) {
     return null
   }
   return freeze('soundcloud', kind,
-    'https://w.soundcloud.com/player/?url=' + encodeURIComponent(page) + '&auto_play=true&visual=false&show_comments=false&show_teaser=false',
+    'https://w.soundcloud.com/player/?url=' + encodeURIComponent(page) + '&auto_play=false&visual=false&show_comments=false&show_teaser=false',
     page, kind === 'set' ? 352 : 166, 0)
 }
 
@@ -243,6 +260,18 @@ export function embedHeight (embed, width) {
   return Math.max(YT_MIN_HEIGHT, Math.round(width * 9 / 16))
 }
 
+// Whether two links name the same player item. pageUrl keeps a YouTube start,
+// so the same video at another time is a different item.
+export function sameMusicPage (url, cardUrl) {
+  try {
+    const a = embedOf(url)
+    const b = embedOf(cardUrl)
+    return a !== null && b !== null && typeof a.pageUrl === 'string' && a.pageUrl === b.pageUrl
+  } catch {
+    return false
+  }
+}
+
 export function isAudiusLink (url) {
   return cardUrlHost(url) === 'audius.co'
 }
@@ -280,7 +309,7 @@ export function embedHtml (embed) {
       '<style>html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:transparent}iframe{display:block;border:0;width:100%;height:100%}</style>' +
       '</head><body>' +
       '<iframe src="' + escapeAttr(embed.embedUrl) + '" title="' + escapeAttr(title) + '" width="100%" height="100%"' +
-      ' allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"' +
+      ' allow="clipboard-write; encrypted-media; fullscreen; picture-in-picture"' +
       ' referrerpolicy="strict-origin-when-cross-origin" sandbox="' + EMBED_SANDBOX + '" allowfullscreen></iframe>' +
       '</body></html>'
   } catch {
@@ -292,10 +321,4 @@ export function embedHtml (embed) {
 // itself. Anything else would replace the player with a provider page.
 export function topNavigationAllowed (url) {
   return url === EMBED_BASE_URL || url === EMBED_BASE_URL + '/' || url === 'about:blank'
-}
-
-export function embedNotice (provider) {
-  if (!Object.prototype.hasOwnProperty.call(EMBED_PROVIDER_NAMES, provider)) return ''
-  const name = EMBED_PROVIDER_NAMES[provider]
-  return 'Ao tocar, o player do ' + name + ' carrega aqui e o ' + name + ' recebe o endereço de internet deste aparelho.'
 }

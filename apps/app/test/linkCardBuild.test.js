@@ -379,6 +379,19 @@ test('fallbackCard: a music link passes the card rules, and only Publicar passes
   t.alike(passers.sort(), [path.join('screens', 'Publicar.js')], 'only Publicar passes fallback')
 })
 
+test('LinkDraftCard draws a provider player for a music draft', (t) => {
+  const composer = fs.readFileSync(path.join(SRC, 'ui/ChatComposer.js'), 'utf8')
+  const start = composer.indexOf('export function LinkDraftCard (')
+  const end = composer.indexOf('\n}\n', start)
+  t.ok(start !== -1 && end !== -1, 'the draft card exists')
+  const body = composer.slice(start, end)
+  t.ok(composer.includes("import { MusicEmbedCard } from './MusicEmbedCard'"), 'imports the player card')
+  t.ok(body.includes('const embed = embedOf(draft.view.url)'), 'only the draft card url picks a player')
+  t.ok(body.includes('<MusicEmbedCard embed={embed} draft={draft.view} imageUri={draft.imageUri || undefined} onDismiss={() => draft.dismiss()} />'), 'the player draft keeps its image and remove button')
+  t.ok(body.includes('<LinkCard draft={draft.view} imageUri={draft.imageUri || undefined} onDismiss={() => draft.dismiss()} />'), 'any other link keeps the LinkCard draft')
+  t.ok(body.indexOf('if (!draft || !draft.view) return null') < body.indexOf('embedOf('), 'no lookup without a draft')
+})
+
 test('music snapshots respect the 300 character card URL boundary without an image', async (t) => {
   const { musicSnapshot } = await import('../src/musicDraft.js')
   const { MAX_CARD_URL } = require('@varanda/rpc')

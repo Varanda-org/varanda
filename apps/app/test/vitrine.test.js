@@ -730,6 +730,23 @@ test('the own likes and reposts in the fixtures start active and toggle off', as
   }
 })
 
+test('a published link card reaches the diary and A Rua', async (t) => {
+  const { fixtures: f, request } = await load()
+  const call = (method, params) => answer(t, request, method, params)
+  const own = async (seq) => (await call('feed.read')).items.find((p) => p.author === f.own && p.seq === seq)
+  const card = { url: 'https://example.com/a', host: 'example.com', title: 'Título', desc: '', image: null }
+  for (const method of ['post.create', 'post.reply', 'post.quote']) {
+    const target = method === 'post.create' ? {} : { to: (await call('post.create', { text: 'alvo' })).ref }
+    const { seq } = await call(method, { ...target, text: 'com cartão ' + method, preview: card })
+    const log = await call('log.read', { limit: 1 })
+    t.alike(log.entries[0].record.preview, card, method + ' keeps the card in the diary')
+    t.alike((await own(seq)).preview, card, method + ' keeps the card in A Rua')
+  }
+  const { seq } = await call('post.create', { text: 'sem cartão' })
+  t.absent('preview' in (await call('log.read', { limit: 1 })).entries[0].record)
+  t.is((await own(seq)).preview, null)
+})
+
 test('diary writes, tombstones, reactions, follows and profile changes are visible locally', async (t) => {
   const { fixtures: f, request, createVitrineRequest } = await load()
   const call = (method, params) => answer(t, request, method, params)

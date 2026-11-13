@@ -67,13 +67,105 @@ test('Bubble and PostRow draw the stored card', (t) => {
 test('PostRow draws a music player only from the stored card', (t) => {
   const row = withoutComments(read('ui', 'PostRow.js'))
   t.ok(row.includes("import { MusicEmbedCard } from './MusicEmbedCard'"))
-  t.ok(row.includes("import { embedOf } from '../musicEmbed'"))
+  t.ok(row.includes("import { embedOf, sameMusicPage } from '../musicEmbed'"))
   t.ok(row.includes("const embed = preview && typeof preview === 'object' ? embedOf(preview.url) : null"), 'the player comes from the stored card URL')
   t.is([...row.matchAll(/embedOf\(/g)].length, 1, 'never from a link in the text')
   t.ok(/embed !== null\s*\? <MusicEmbedCard embed=\{embed\} card=\{preview\} thumb=\{\{ kind: 'post', author/.test(row), 'MusicEmbedCard for a music link')
   t.ok(/: <LinkCard card=\{preview\}/.test(row), 'LinkCard for any other link')
   const quote = withoutComments(read('ui', 'QuoteCard.js'))
-  t.absent(/MusicEmbedCard|embedOf/.test(quote), 'a quoted post keeps the static card')
+  t.ok(quote.includes("import { MusicEmbedCard } from './MusicEmbedCard'"))
+  t.is([...quote.matchAll(/embedOf\(/g)].length, 1, 'only the stored quote URL is inspected')
+  t.ok(quote.includes("return !missing && !hasMedia && q.preview && typeof q.preview === 'object' && typeof q.author === 'string' ? embedOf(q.preview.url) : null"))
+  t.ok(quote.includes('const embed = quotePlayerOf(q)'), 'QuoteCard uses the shared player rule')
+  t.ok(/embed !== null\s*\? <MusicEmbedCard embed=\{embed\} card=\{q\.preview\} thumb=\{\{ kind: 'post', author: q\.author, persist: q\.persist === true \}\}/.test(quote))
+  t.ok(quote.includes('<LinkCard card={q.preview}'), 'other quoted links keep the static card')
+})
+
+test('quotePlayerOf matches the stored player eligibility rule', async (t) => {
+  const { embedOf } = await import('../src/musicEmbed.js')
+  const src = withoutComments(read('ui', 'QuoteCard.js'))
+  const helper = src.match(/export function quotePlayerOf \(quote\) \{([\s\S]*?)\n\}/)
+  t.ok(helper, 'the pure helper is exported')
+  const quotePlayerOf = new Function('embedOf', 'quote', helper[1]).bind(null, embedOf) // eslint-disable-line no-new-func
+  const quote = { author: 'a'.repeat(64), preview: { url: 'https://youtu.be/dQw4w9WgXcQ' } }
+  t.alike(quotePlayerOf(quote), embedOf(quote.preview.url), 'a stored YouTube card gets its player')
+  t.ok(quotePlayerOf(quote) !== null)
+  t.ok(quotePlayerOf({ ...quote, media: [], missing: false }) !== null)
+  for (const other of [
+    null, undefined, {},
+    { ...quote, media: [{}] },
+    { ...quote, missing: true },
+    { ...quote, author: undefined },
+    { ...quote, author: 1 },
+    { ...quote, preview: null },
+    { ...quote, preview: { url: 'https://example.com' } }
+  ]) t.is(quotePlayerOf(other), null, 'no player for ' + JSON.stringify(other))
+})
+
+test('quoted players stay outside the quote and row press areas', (t) => {
+  const row = withoutComments(read('ui', 'PostRow.js'))
+  t.ok(row.includes("import { QuoteCard, quotePlayerOf } from './QuoteCard'"), 'the row shares the card rule')
+  t.ok(row.includes("const quoteOut = quoteOn && ((typeof quote.text === 'string' && !!quoteMention && hasMention(quote.text)) || quotePlayerOf(quote) !== null)"), 'players and handled mentions leave the hidden wrapper')
+  t.ok(/\{quoteNode && !quoteOut\s*\? \(\s*<Pressable[^>]*>\s*<View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>\s*\{quoteNode\}/.test(row), 'only other quotes enter the hidden press area')
+  t.ok(/<\/Pressable>\s*\)\s*: null\}\s*\{previewNode\}\s*\{quoteOut \? quoteNode : null\}/.test(row), 'the lifted quote is outside that Pressable')
+  const quote = withoutComments(read('ui', 'QuoteCard.js'))
+  const start = quote.indexOf('if (embed !== null || mentioned) {')
+  t.ok(start >= 0, 'every player takes the split layout before the default Pressable')
+  const end = quote.indexOf('\n  return (\n    <Pressable', start)
+  t.ok(end > start, 'the default grouped layout follows the split branch')
+  const split = quote.slice(start, end)
+  t.ok(/<Pressable\s+accessibilityRole=\{open \? 'link' : 'text'\}\s+accessibilityLabel=\{label\}/.test(split), 'the head keeps its labelled link')
+  t.ok(split.includes('onPress={open}'), 'the head opens the quoted post')
+  const headEnd = split.indexOf('</Pressable>')
+  const player = split.indexOf('{preview}')
+  t.ok(headEnd > 0 && player > headEnd && player < split.indexOf('<Pressable', headEnd), 'the player follows the closed head, before any other Pressable')
+  t.ok(quote.includes('? <MusicEmbedCard embed={embed} card={q.preview}'), 'preview contains the stored player')
+  t.ok(split.includes('<Text onPress={open} style={styles.text} numberOfLines={6}>{displayText(shownText, { multiline: true })}</Text>'), 'plain shown text opens the quote separately')
+  t.ok(split.includes('<MentionText text={shownText} onOpenMention={openMention} onOpenPlain={open}'), 'mentions keep separate profile and quote taps')
+  t.ok(split.includes("{hasText && shownText !== ''"), 'an empty shown text has no line')
+  t.ok(split.includes('{loading ? <View style={styles.skeleton} accessible={false} /> : null}'), 'loading still uses the raw text rule')
+})
+
+test('PostRow hides only the music card\'s own link from the shown text', async (t) => {
+  const row = withoutComments(read('ui', 'PostRow.js'))
+  t.ok(row.includes("import { hasLink, textWithoutHrefs } from '../links'"))
+  t.ok(/^ {2}const ownLink = !hasMedia && music === null && embed !== null$/m.test(row))
+  t.ok(row.includes("const body = useMemo(() => (ownLink && typeof text === 'string' ? textWithoutHrefs(text, (href) => sameMusicPage(href, preview.url)) : text), [ownLink, text, preview])"))
+  t.ok(row.includes('<MentionText text={body}'))
+  t.absent(row.includes('<MentionText text={text}'))
+  t.ok(row.includes("const hasText = typeof body === 'string' && body !== ''"))
+  t.ok(row.includes('const shownText = useMemo(() => (hasText ? displayText(body, { multiline: true }) : null), [hasText, body])'))
+  t.ok(row.includes('const textOut = hasText && numberOfLines === 0 && (hasLink(body) || (!!openMention && hasMention(body)))'))
+  t.ok(row.includes('const textNode = hasText'), 'an empty shown body draws no text node')
+  t.ok(row.includes('onMessage(author, { context: { author, seq, at, text, hasMedia } })'), 'message context keeps the raw text')
+  for (const file of ['MentionText.js']) {
+    t.absent(/textWithoutHrefs|sameMusicPage/.test(withoutComments(read('ui', file))), file + ' keeps its text')
+  }
+  t.ok(read('screens', 'Mensagem.js').includes('copyText(shareNav(), displayText(item.rawText, { multiline: true }))') && read('screens', 'Grupo.js').includes('copyText(shareNav(), displayText(row.rawText, { multiline: true }))'), 'chat copy keeps the raw text a bubble may shorten')
+  const { textWithoutHrefs } = await import('../src/links.js')
+  const { sameMusicPage } = await import('../src/musicEmbed.js')
+  const card = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
+  const text = 'ouça https://youtu.be/dQw4w9WgXcQ agora @ana https://example.com'
+  t.is(textWithoutHrefs(text, (h) => sameMusicPage(h, card)), 'ouça agora @ana https://example.com')
+  const timed = text.replace('dQw4w9WgXcQ', 'dQw4w9WgXcQ?t=42')
+  t.is(textWithoutHrefs(timed, (h) => sameMusicPage(h, card)), timed, 'a different playback position stays visible')
+  t.is(textWithoutHrefs('https://youtu.be/dQw4w9WgXcQ', (h) => sameMusicPage(h, card)), '')
+})
+
+test('a quote hides only its own music link', (t) => {
+  const quote = withoutComments(read('ui', 'QuoteCard.js'))
+  t.ok(quote.includes("import { embedOf, sameMusicPage } from '../musicEmbed'"))
+  t.ok(quote.includes("import { textWithoutHrefs } from '../links'"))
+  t.ok(quote.includes('const shownText = embed !== null && hasText ? textWithoutHrefs(q.text, (href) => sameMusicPage(href, q.preview.url)) : q.text'))
+  t.ok(quote.includes("const hasText = typeof q.text === 'string' && q.text !== ''"))
+  t.ok(quote.includes('const loading = !missing && !hasText && !hasMedia'), 'hiding a URL-only caption does not turn the quote into a loading card')
+  t.ok(quote.includes("const mentioned = !missing && openMention && hasText && shownText !== '' && hasMention(shownText)"))
+  t.ok(quote.includes('if (embed !== null || mentioned) {'))
+  t.ok(quote.includes('<MentionText text={shownText}'))
+  t.ok(quote.includes("{hasText && shownText !== ''"), 'an empty shown caption draws no plain text node')
+  t.ok(quote.includes('displayText(shownText, { multiline: true })'))
+  t.absent(quote.includes('displayText(q.text'))
+  t.absent(quote.includes('<MentionText text={q.text}'))
 })
 
 test('Audius fragments take precedence without subscribing PostRow to the node', (t) => {
@@ -88,7 +180,7 @@ test('Audius fragments take precedence without subscribing PostRow to the node',
   t.absent(/MusicPlayerCard|musicRefOf/.test(withoutComments(read('ui', 'QuoteCard.js'))), 'quotes remain static')
 })
 
-test('MusicEmbedCard draws stored data until a tap', (t) => {
+test('MusicEmbedCard draws stored data until it is on screen', (t) => {
   const src = withoutComments(read('ui', 'MusicEmbedCard.js'))
   t.absent(/\bfetch\s*\(/.test(src), 'no fetch call')
   t.absent(/['"`]https?:\/\//i.test(src), 'no http(s) literal')
@@ -96,14 +188,14 @@ test('MusicEmbedCard draws stored data until a tap', (t) => {
   t.absent(/source=\{\{[^}]*\b(url|embedUrl|pageUrl)\b/.test(src), 'no Image source built from a url')
   t.absent(/\bImage\b/.test(src), 'no Image of its own')
   t.absent(/favicon|apple-touch-icon|prefetch|iframe|WebView|<Video/i.test(src), 'no site icon, prefetch or frame of its own')
-  t.ok(src.includes('displayText('), 'peer text goes through displayText')
   t.ok(src.includes('cardUrlHost('), 'the host shown is the one the URL opens')
-  t.ok(src.includes('<MediaView author={thumb.author} descriptor={stored} persist={thumb.persist !== false} label=\'prévia do link\' style={styles.fill} tapRetry={false} />'), 'the thumbnail uses the post photo path')
+  t.ok(/<LinkCard\b[^>]*\bstill \/>/.test(src), 'the stored data is drawn by a still LinkCard')
+  t.absent(src.includes('MediaView'), 'no MediaView of its own')
+  const card = withoutComments(read('ui', 'LinkCard.js'))
+  t.ok(card.includes('const open = still === true ? undefined : () => openExternal(url)'), 'a still LinkCard opens nothing on a tap')
   const frames = [...src.matchAll(/<EmbedFrame\b/g)]
   t.is(frames.length, 1, 'one EmbedFrame')
-  const openAt = src.indexOf('if (open) {')
-  const closedReturn = src.indexOf('return (', src.indexOf('let picture = null'))
-  t.ok(openAt !== -1 && frames[0].index > openAt && frames[0].index < closedReturn, 'EmbedFrame only in the open state')
+  t.ok(src.slice(Math.max(0, frames[0].index - 80), frames[0].index).includes('state.live && active'), 'EmbedFrame only for a live state on the visible screen')
 })
 
 test('Ajustes: Prévia de links switch uses previewPref', (t) => {

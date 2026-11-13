@@ -39,18 +39,26 @@
 //     its thumbnail is read ({ kind: 'group', diary, identity }, or
 //     { kind: 'dm', from, id, identity }, read as index 'card'). When the text
 //     has a spoiler, the card shows only for a link outside every spoiler.
+//     A YouTube, SoundCloud, Spotify or Apple Music card shows the provider
+//     player while visible (./MusicEmbedCard), and the shown text hides only
+//     that card's own link; copy, forward, reply and quote keep the raw text.
+//   plainCard: true in a message request, where nothing downloads by
+//     itself: the card stays a plain LinkCard and the text keeps its link.
 
 import { cloneElement, isValidElement, useMemo, useState } from 'react'
 import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { LABELS } from '../dm'
 import { FORWARDED_LABEL } from '../forward'
+import { textWithoutHrefs } from '../links'
+import { embedOf, sameMusicPage } from '../musicEmbed'
 import { hasRich, parseRich } from '../richText'
 import { ActionsSheet, usableActions } from './ActionsSheet'
 import { chatMediaBlock } from './ChatMedia'
 import { Icon } from './Icon'
 import { LinkCard } from './LinkCard'
 import { MentionText } from './MentionText'
+import { MusicEmbedCard } from './MusicEmbedCard'
 import { ReplyPreview, senderColor } from './ReplyPreview'
 import { RichText, cardBesideSpoilers } from './RichText'
 import { useStyles, useTheme } from './ThemeProvider'
@@ -83,7 +91,7 @@ export function bubbleMeta ({ at, mine, status }) {
 // The photos sit this close to the bubble's edge.
 const MEDIA_INSET = 4
 
-export function Bubble ({ item, mine = false, shape = 'single', name, handle, senderKey, avatar, quote, status, actions, actionsTitle, actionsHeader, onOpenMention, below, media, forwarded, cardThumb }) {
+export function Bubble ({ item, mine = false, shape = 'single', name, handle, senderKey, avatar, quote, status, actions, actionsTitle, actionsHeader, onOpenMention, below, media, forwarded, cardThumb, plainCard }) {
   const styles = useStyles(makeStyles)
   const { colors, scheme } = useTheme()
   const { width: screen } = useWindowDimensions()
@@ -115,17 +123,23 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
   const block = withMedia && isValidElement(media) ? chatMediaBlock(media.props.refs, screen) : null
   const hug = block ? { width: block.width + 2 * MEDIA_INSET + (mine ? 0 : 2 * StyleSheet.hairlineWidth) } : null
   const empty = rich ? item.rawText === '' : typeof item.text !== 'string' || item.text === ''
-  const body = withMedia && empty
-    ? null
-    : rich
-      ? <MentionText text={item.rawText} onOpenMention={onOpenMention} onLongPress={rows.length > 0 ? () => setOpen(true) : undefined} style={styles.text} />
-      : <Text style={[styles.text, muted && styles.muted]}>{displayText(typeof item.text === 'string' ? item.text : '', { multiline: true })}</Text>
   // Markers in the raw text: RichText draws it, with its code blocks as Views
   // beside its paragraphs, since a View cannot sit inside a Text.
   const styled = rich && !empty && hasRich(item.rawText)
   // Parsed once here, for the card check and for RichText.
   const blocks = useMemo(() => (styled ? parseRich(item.rawText) : null), [styled, item.rawText])
   const card = !muted && item.card && typeof item.card === 'object' ? cardBesideSpoilers(blocks, item.card) : null
+  // Only the stored card's link picks a player, never a link in the text.
+  const embed = card !== null && plainCard !== true ? embedOf(card.url) : null
+  // The player stands for its own link, so the text drops that link; a
+  // styled message keeps its text as RichText draws it.
+  const shown = rich && !styled && embed !== null ? textWithoutHrefs(item.rawText, (href) => sameMusicPage(href, card.url)) : item.rawText
+  const shownEmpty = rich ? shown === '' : empty
+  const body = (withMedia || embed !== null) && shownEmpty
+    ? null
+    : rich
+      ? <MentionText text={shown} onOpenMention={onOpenMention} onLongPress={rows.length > 0 ? () => setOpen(true) : undefined} style={styles.text} />
+      : <Text style={[styles.text, muted && styles.muted]}>{displayText(typeof item.text === 'string' ? item.text : '', { multiline: true })}</Text>
   const spacer = meta && !card ? <Text style={[styles.metaSpace, { color: fill }]}>{'   ' + meta}</Text> : null
   return (
     <View>
@@ -192,16 +206,20 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
                   color on a nested Text and would draw the time twice. */}
               {styled
                 ? <RichText text={item.rawText} onOpenMention={onOpenMention} onLongPress={rows.length > 0 ? () => setOpen(true) : undefined} style={styles.text} trailer={spacer} blocks={blocks} />
-                : (
-                  <Text style={styles.text}>
-                    {body}
-                    {spacer}
-                  </Text>
-                  )}
+                : body !== null || spacer !== null
+                  ? (
+                    <Text style={styles.text}>
+                      {body}
+                      {spacer}
+                    </Text>
+                    )
+                  : null}
               {card
                 ? (
                   <View style={[styles.cardBox, meta && styles.cardWithMeta]}>
-                    <LinkCard card={card} thumb={cardThumb} onLongPress={rows.length > 0 ? () => setOpen(true) : undefined} />
+                    {embed !== null
+                      ? <MusicEmbedCard embed={embed} card={card} thumb={cardThumb} onLongPress={rows.length > 0 ? () => setOpen(true) : undefined} />
+                      : <LinkCard card={card} thumb={cardThumb} onLongPress={rows.length > 0 ? () => setOpen(true) : undefined} />}
                   </View>
                   )
                 : null}

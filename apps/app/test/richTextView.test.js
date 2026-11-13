@@ -32,8 +32,8 @@ test('Bubble draws styled text through RichText and keeps the plain path', (t) =
   t.ok(bubble.includes("import { RichText, cardBesideSpoilers } from './RichText'"))
   t.ok(bubble.includes('const styled = rich && !empty && hasRich(item.rawText)'), 'only raw text with markers takes the rich path')
   t.ok(bubble.includes('{styled\n                ? <RichText text={item.rawText} onOpenMention={onOpenMention} onLongPress={rows.length > 0 ? () => setOpen(true) : undefined} style={styles.text} trailer={spacer} blocks={blocks} />'), 'RichText gets the raw text, its parse, the long press and the time spacer')
-  t.ok(bubble.includes('<MentionText text={item.rawText} onOpenMention={onOpenMention} onLongPress={rows.length > 0 ? () => setOpen(true) : undefined} style={styles.text} />'), 'the plain path still draws MentionText')
-  t.ok(bubble.includes('<Text style={styles.text}>\n                    {body}\n                    {spacer}\n                  </Text>'), 'the plain path keeps the time spacer in the same Text')
+  t.ok(bubble.includes('<MentionText text={shown} onOpenMention={onOpenMention} onLongPress={rows.length > 0 ? () => setOpen(true) : undefined} style={styles.text} />'), 'the plain path still draws MentionText')
+  t.ok(bubble.includes(': body !== null || spacer !== null\n                  ? (\n                    <Text style={styles.text}>\n                      {body}\n                      {spacer}\n                    </Text>\n                    )\n                  : null}'), 'the plain path keeps the time spacer in the same Text')
   t.is(bubble.split('<RichText').length - 1, 1, 'one RichText')
 })
 

@@ -287,6 +287,21 @@ test('tombstoneRanges keeps a range a surviving record shows', async (t) => {
   t.alike(tombstoneRanges(pair, [1, 2]).map((r) => r.start).sort(), [1, 3], 'both halves of a pair')
 })
 
+test('tombstoneRanges keeps a link card thumbnail a surviving post shows', async (t) => {
+  const { tombstoneRanges } = await load()
+  const core = hex('8')
+  const at = '2026-10-29T00:00:00.000Z'
+  const thumb = { core, start: 7, blocks: 1 }
+  const card = (image) => ({ url: 'https://example.com/a', host: 'example.com', title: 'Título', desc: '', image })
+  const gone = { seq: 2, record: { type: 'post', text: 'gone', at, replyTo: null, preview: card(thumb) } }
+  const tomb = { seq: 5, record: { type: 'delete', seq: 2, at, media: [thumb] } }
+  t.alike(tombstoneRanges([gone, tomb], [2]), [thumb], 'the deleted card thumbnail goes')
+  const live = { seq: 4, record: { type: 'post', text: 'live', at, replyTo: null, preview: card(thumb) } }
+  t.alike(tombstoneRanges([gone, live, tomb], [2]), [], 'the live card thumbnail stays')
+  const bare = { seq: 4, record: { type: 'post', text: 'live', at, replyTo: null, preview: card(null) } }
+  t.alike(tombstoneRanges([gone, bare, tomb], [2]), [thumb], 'a card without an image keeps nothing')
+})
+
 test('revokeMedia releases the same range in every live cache', async (t) => {
   const { createMediaCache, mediaKey, revokeMedia } = await load()
   const revoked = []

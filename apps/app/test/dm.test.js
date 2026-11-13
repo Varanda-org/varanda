@@ -429,6 +429,50 @@ test('Bubble holds a text bubble to its column so a long link wraps', (t) => {
   t.ok(bubble.includes("column: { maxWidth: '80%'"), 'the column keeps its 80% cap')
 })
 
+test('Bubble loads a provider player only from the stored card', (t) => {
+  const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
+  t.ok(bubble.includes("import { MusicEmbedCard } from './MusicEmbedCard'"), 'imports the player card')
+  t.is(bubble.split('embedOf(').length, 2, 'exactly one embedOf call')
+  t.ok(bubble.includes('const embed = card !== null && plainCard !== true ? embedOf(card.url) : null'), 'it reads the stored card url, never a link in the text, and never in a plain card')
+  t.ok(bubble.includes('<MusicEmbedCard embed={embed} card={card} thumb={cardThumb}'), 'the player card gets the stored card and its thumb')
+  t.ok(bubble.includes('<LinkCard card={card} thumb={cardThumb}'), 'any other card stays a LinkCard')
+  t.absent(bubble.includes('musicRefOf'), 'no Audius ref lookup in a bubble')
+  t.absent(bubble.includes('MusicPlayerCard'), 'no Audius player in a bubble')
+  t.ok(/: body !== null \|\| spacer !== null\s*\? \(\s*<Text style=\{styles\.text\}>/.test(bubble), 'a message that was only its link draws no empty text line')
+  t.ok(bubble.includes('const body = (withMedia || embed !== null) && shownEmpty'), 'a player card with no other text drops the body')
+  t.ok(bubble.includes("const shownEmpty = rich ? shown === '' : empty"), 'emptiness is read from the shown text')
+})
+
+test('a message request never loads a provider player', (t) => {
+  const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
+  t.ok(bubble.includes('forwarded, cardThumb, plainCard }) {'), 'Bubble takes plainCard')
+  t.ok(bubble.includes('card !== null && plainCard !== true ? embedOf(card.url) : null'), 'plainCard forces the plain LinkCard and keeps the link in the text')
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes("plainCard={folder === 'request'}"), 'Mensagem passes plainCard in a request')
+  t.ok(src.includes("deferred={folder === 'request'}"), 'the same row defers its photos')
+  t.ok(/extraData=\{\{[^}]*\bfolder\b/.test(src), 'rows redraw when the request is accepted')
+})
+
+test('chat screens end the player band at the composer', (t) => {
+  for (const file of ['../src/screens/Mensagem.js', '../src/screens/Grupo.js']) {
+    const src = readFileSync(join(__dirname, file), 'utf8')
+    t.ok(src.includes("import { EmbedBandBottom } from '../ui/screenVisible'"), file + ': imports the band context')
+    t.ok(src.includes('<EmbedBandBottom.Provider value={composer ? band : null}>'), file + ': the list gets the band')
+    const opens = src.indexOf('<EmbedBandBottom.Provider')
+    const list = src.indexOf('<RefreshableList')
+    const closes = src.indexOf('</EmbedBandBottom.Provider>')
+    t.ok(opens !== -1 && opens < list && list < closes, file + ': the list sits inside the band provider')
+    t.ok(src.includes('{composer ? <View ref={composerBox} collapsable={false}>{composer}</View> : null}'), file + ': the composer sits in a measured wrapper')
+    t.ok(src.includes('const composerBox = useRef(null)'), file + ': the wrapper ref')
+    const start = src.indexOf('const band = useMemo(')
+    const memo = start === -1 ? '' : src.slice(start, src.indexOf('}), [])', start))
+    t.ok(memo.includes('const node = composerBox.current'), file + ': band.measure reads the wrapper')
+    t.ok(memo.includes("if (node === null || typeof node.measureInWindow !== 'function') { done(null); return }"), file + ': no wrapper answers null')
+    t.ok(memo.includes('node.measureInWindow('), file + ': band.measure measures the composer on every check')
+    t.absent(/<View ref=\{composerBox\}[^>]*onLayout/.test(src), file + ': no onLayout on the wrapper')
+  }
+})
+
 test('Mensagem shows a removable post context chip and sends it only as composed text', (t) => {
   const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
   t.ok(src.includes("<IconAction icon='fechar' label='remover contexto' onPress={() => setContext(null)} />"), 'the chip is removable')
