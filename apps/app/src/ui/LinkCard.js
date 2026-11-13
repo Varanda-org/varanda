@@ -28,8 +28,6 @@
 //   draft: { url, host, title, desc } the composer's draft, with imageUri (a
 //     local URI the composer passes) and onDismiss (the remove button).
 //   thumb: see above. onLongPress: handed to the card (a bubble's actions).
-//   still: true draws the card without opening the URL on a tap (the stand-in
-//     ./MusicEmbedCard draws where its player loads, which has its own link).
 
 import { useEffect, useState } from 'react'
 import { fetch as expoFetch } from 'expo/fetch'
@@ -84,7 +82,7 @@ function useChatThumb (thumb, image) {
   return uri
 }
 
-export function LinkCard ({ card, draft, imageUri, onDismiss, thumb, onLongPress, still }) {
+export function LinkCard ({ card, draft, imageUri, onDismiss, thumb, onLongPress }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const data = draft || card
@@ -96,8 +94,8 @@ export function LinkCard ({ card, draft, imageUri, onDismiss, thumb, onLongPress
   const title = textOf(data.title)
   const desc = textOf(data.desc)
   const shownHost = displayText(host)
-  const open = still === true ? undefined : () => openExternal(url)
-  const label = (still === true ? '' : LINK_CARD_OPEN + ': ') + (title ? title + ', ' : '') + shownHost
+  const open = () => openExternal(url)
+  const label = LINK_CARD_OPEN + ': ' + (title ? title + ', ' : '') + shownHost
 
   let picture = null
   if (draft) {
@@ -111,7 +109,7 @@ export function LinkCard ({ card, draft, imageUri, onDismiss, thumb, onLongPress
   return (
     <View style={styles.card}>
       <Pressable
-        accessibilityRole={still === true ? undefined : 'link'}
+        accessibilityRole='link'
         accessibilityLabel={label}
         onPress={open}
         onLongPress={typeof onLongPress === 'function' ? onLongPress : undefined}

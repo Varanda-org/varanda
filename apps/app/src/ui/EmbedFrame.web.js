@@ -1,15 +1,15 @@
 // A third-party player in the browser: the provider's own embed URL in a
 // sandboxed iframe, with the same sandbox as the native wrapper. It keeps
-// scripts and the provider's own origin (players need both) but grants no
-// popups: a popup that escapes the sandbox has the frame as opener and can
-// move this tab through opener.top (the site sends no
-// Cross-Origin-Opener-Policy). The card's own "Abrir no ..." link is the way
-// out to the provider. The page itself sends Referrer-Policy: no-referrer,
-// and the video player refuses to play without a Referer, so this frame
-// alone sends the origin.
+// scripts and the provider's own origin (players need both). A link in the
+// player opens a new tab that keeps the sandbox, so it cannot move this tab
+// through opener.top; the escape token stays out because the site sends no
+// Cross-Origin-Opener-Policy, and an escaped tab could. The app cannot see or
+// filter that tab's address: the browser alone decides where it goes. The
+// page itself sends Referrer-Policy: no-referrer, and the video player
+// refuses to play without a Referer, so this frame alone sends the origin.
 //
-// Props: embedUrl, height, title. html, baseUrl and allowTop belong to the
-// native WebView and are ignored here.
+// Props: embedUrl, height, title. html, baseUrl, allowTop and onOpen belong
+// to the native WebView and are ignored here.
 
 import { createElement } from 'react'
 import { EMBED_SANDBOX } from '../musicEmbed.js'

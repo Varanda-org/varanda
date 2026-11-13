@@ -95,13 +95,16 @@ async function savedInstallation () {
   }
 }
 
+// Builds without an installation still connect to the host used by the app's associated domains and App Links.
+const DEFAULT_INSTALLATION = 'https://bora.varanda.app'
+
 // The saved installation, else the build-time one (Metro inlines
-// EXPO_PUBLIC_VARANDA_INSTALLATION into the bundle). Either is used only once
-// setInstallation accepts it. -> the origin or null.
+// EXPO_PUBLIC_VARANDA_INSTALLATION into the bundle), else the default.
+// Each is used only once setInstallation accepts it. -> the origin or null.
 export async function loadInstallation () {
   const saved = await savedInstallation()
   const built = process.env.EXPO_PUBLIC_VARANDA_INSTALLATION
-  for (const value of [saved, built]) {
+  for (const value of [saved, built, DEFAULT_INSTALLATION]) {
     if (typeof value === 'string' && value !== '' && setInstallation(value)) {
       setAppClient(true)
       return installationOrigin()
@@ -110,9 +113,9 @@ export async function loadInstallation () {
   return null
 }
 
-// null forgets the saved choice (the build-time one applies again, as on the
-// next launch). -> true, or false for an invalid origin, which changes
-// nothing in memory or on disk.
+// null forgets the saved choice (the build-time one or the default applies
+// again, as on the next launch). -> true, or false for an invalid origin,
+// which changes nothing in memory or on disk.
 export async function saveInstallation (origin) {
   if (origin === null) {
     const f = installationFile()

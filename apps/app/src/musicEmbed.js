@@ -43,12 +43,25 @@ export const EMBED_PROVIDER_NAMES = Object.freeze({
 // host: it only gives the document an https origin for the providers.
 export const EMBED_BASE_URL = 'https://app.varanda'
 
-// The provider frame's sandbox, the same on native and web. No popups, top
-// navigation, forms, downloads or modals: on Android the WebView's top-frame
-// guard fails open after 250 ms and never sees a POST, so only the sandbox
-// keeps a player from replacing the wrapper or saving a file. The card's own
-// "Abrir no ..." link is the way out to the provider.
-export const EMBED_SANDBOX = 'allow-scripts allow-same-origin allow-presentation'
+// The provider frame's sandbox, the same on native and web. Popups come
+// without the escape token, so a window the player opens inherits the
+// sandbox and cannot navigate the window that holds the app (the site sends
+// no Cross-Origin-Opener-Policy, deploy/seeder/Caddyfile). Top navigation,
+// forms, downloads and modals stay refused: Android's top-frame guard fails
+// open after 250 ms and never sees a POST, so only the sandbox keeps a player
+// from replacing the wrapper or saving a file. allow-popups also lets the
+// frame ask for a non-http(s) address to be handed to another program: the
+// browser decides that on the web, and navDecision refuses it on native.
+export const EMBED_SANDBOX = 'allow-scripts allow-same-origin allow-presentation allow-popups'
+
+// A popup's address comes from the player with no sign of a tap, so it may
+// leave the app only on its own provider's domains (embedExitUrl).
+export const EMBED_PROVIDER_DOMAINS = Object.freeze({
+  youtube: Object.freeze(['youtube.com', 'youtu.be']),
+  soundcloud: Object.freeze(['soundcloud.com']),
+  spotify: Object.freeze(['spotify.com', 'spotify.link']),
+  apple: Object.freeze(['apple.com'])
+})
 
 // Printable ASCII a URL may hold, as rpc's cardUrlHost checks, without its
 // length cap.
@@ -243,6 +256,57 @@ function originOf (url) {
   const end = url.slice('https://'.length).search(/[/?#]/)
   const origin = end === -1 ? url : url.slice(0, 'https://'.length + end)
   return EMBED_FRAME_ORIGINS.includes(origin) ? origin : null
+}
+
+// Bare lowercase labels only: a host a browser would rewrite (case, a
+// trailing dot) or read as credentials or a port fails here instead of being
+// normalized into a different host.
+const EXIT_HOST = /^[a-z0-9-]+(\.[a-z0-9-]+)+$/
+const EXIT_MAX = 2048
+
+// `url` when a player of `embed` may send the person there: an https page on
+// one of that provider's domains. null otherwise; never throws.
+export function embedExitUrl (embed, url) {
+  try {
+    if (!embed || typeof embed !== 'object') return null
+    const provider = embed.provider
+    if (typeof provider !== 'string' || !Object.prototype.hasOwnProperty.call(EMBED_PROVIDER_DOMAINS, provider)) return null
+    if (typeof url !== 'string' || url.length > EXIT_MAX || !EMBED_URL_CHARS.test(url) || !url.startsWith('https://')) return null
+    const rest = url.slice('https://'.length)
+    const end = rest.search(/[/?#]/)
+    const host = end === -1 ? rest : rest.slice(0, end)
+    if (!EXIT_HOST.test(host)) return null
+    const ok = EMBED_PROVIDER_DOMAINS[provider].some((d) => host === d || host.endsWith('.' + d))
+    if (!ok) return null
+    if (provider === 'youtube' && youtubeRedirect(end === -1 ? '' : rest.slice(end))) return null
+    return url
+  } catch {
+    return null
+  }
+}
+
+// YouTube's /redirect page sends the person on to any address, and
+// /attribution_link forwards to it; the Terms promise only the service's own
+// pages. The path is read the way YouTube's server routes it: escapes
+// decoded, ';' parameters and empty segments dropped, dot segments resolved,
+// in any case.
+const YT_FORWARDERS = new Set(['redirect', 'attribution_link'])
+
+function youtubeRedirect (tail) {
+  if (!tail.startsWith('/')) return false
+  const q = tail.search(/[?#]/)
+  const path = q === -1 ? tail : tail.slice(0, q)
+  const out = []
+  for (const raw of path.split('/')) {
+    let seg = raw
+    try { seg = decodeURIComponent(raw) } catch {}
+    for (const part of seg.split('/')) {
+      const name = part.split(';')[0]
+      if (name === '..') out.pop()
+      else if (name !== '' && name !== '.') out.push(name)
+    }
+  }
+  return out.length > 0 && YT_FORWARDERS.has(out[0].toLowerCase())
 }
 
 // The listed frame origin of a player address, or null. Exported so tests can

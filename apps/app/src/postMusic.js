@@ -102,6 +102,9 @@ export function ambientStep (state, sample) {
     if (!state || typeof state !== 'object' || typeof state.live !== 'boolean' || !Number.isFinite(state.seen) || !sample || typeof sample !== 'object') {
       return Object.freeze({ state: EMBED_IDLE, action: wasLive ? 'stop' : null })
     }
+    // embedStep keeps a hidden provider frame loaded so scrolling back finds
+    // it; post music has no frame to keep and stops as soon as it is hidden.
+    if (wasLive && sample.hidden === true) return Object.freeze({ state: EMBED_IDLE, action: 'stop' })
     const next = embedStep(state, {
       hidden: sample.hidden,
       allowed: true,
