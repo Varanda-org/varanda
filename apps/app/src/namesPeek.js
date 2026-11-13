@@ -5,15 +5,16 @@
 // and @nome blocks are, and diary.peek (docs/rpc.md 5.27) reads and verifies
 // them. Pure: no React, so the rules load in tests (./names.js wires it).
 //
-// One key at a time, each key tried once per scope (a failure is never
-// repeated), and nothing is asked of a node that answers USAGE 'leitura sob
+// One key at a time, each key tried once per scope (a failed read is asked
+// again only when profile.read lists the key anew, at most 3 times), and nothing is asked of a node that answers USAGE 'leitura sob
 // demanda só na versão web' (the core node) after the first answer.
 
 import rpc from '@varanda/rpc'
-import { applySeed } from './namesCache.js'
+import { applySeed, authoritative } from './namesCache.js'
 
 const { USAGE } = rpc
 const WEB_ONLY = 'leitura sob demanda só na versão web'
+const MAX_ATTEMPTS = 3
 
 const validSeq = (n) => Number.isSafeInteger(n) && n >= 1
 
@@ -57,20 +58,61 @@ export function partial (entry) {
   return entry === null || entry === undefined || entry.name === null || entry.username === null
 }
 
+// Whether `entry` still says what `base` said, for the fields of one group.
+// profile.read cannot tell "block not downloaded yet" from "field removed"
+// (docs/rpc.md 5.21), so a peeked value is reapplied only while the local
+// copy has not moved since the peek: once a group changes, profile.read is
+// authoritative for it again.
+const sameGroup = (entry, base, fields) => fields.every((field) => {
+  const a = entry === null || entry === undefined ? null : entry[field]
+  const b = base === null || base === undefined ? null : base[field]
+  if (field === 'avatar') return JSON.stringify(a || null) === JSON.stringify(b || null)
+  return (a ?? null) === (b ?? null)
+})
+
 // The entry once the peeked fields fill what profile.read left empty: a
 // field profile.read already brought is never replaced, so a name never
 // drops out while an older block downloads. It counts as loaded: the node was
 // asked and the answer stands until the diary grows (the freshness path marks
-// it stale again).
-export function withPeek (entry, fields) {
+// it stale again). With `base` (the entry the peek filled), the profile group
+// (name, bio, avatar) and the @nome are each filled only while they still
+// read as they did then.
+export function withPeek (entry, fields, base) {
   const known = entry || null
   const gap = (field) => known === null || known[field] === null || known[field] === undefined
+  const reapply = base !== undefined
   const seed = {}
-  for (const field of ['name', 'username', 'bio']) if (gap(field)) seed[field] = fields[field]
-  if (known === null || !known.avatar) seed.avatar = fields.avatar
+  if (!reapply || sameGroup(known, base, ['name', 'bio', 'avatar'])) {
+    for (const field of ['name', 'bio']) if (gap(field)) seed[field] = fields[field]
+    if (known === null || !known.avatar) seed.avatar = fields.avatar
+  }
+  if ((!reapply || sameGroup(known, base, ['username'])) && gap('username')) seed.username = fields.username
   const merged = applySeed(known, seed)
   if (merged === null) return known === null ? null : { ...known, loaded: true }
   return { ...(known || {}), ...merged, loaded: true }
+}
+
+// What one profile.read answer says, key -> entry (null for a key in
+// `missing`: nothing to show, so a name the peek found earlier does not stay
+// and the key is not peeked), plus the keys left without a name or @nome that
+// the peek may try. A key the peek already filled gets its fields back only
+// while the local copy still reads as it did then (see withPeek).
+export function foldRead (res, peeker) {
+  const entries = new Map()
+  const lonely = []
+  for (const p of (res && res.profiles) || []) {
+    if (!p || typeof p.author !== 'string') continue
+    const key = p.author.toLowerCase()
+    let entry = authoritative(p)
+    const peeked = peeker ? peeker.foundFor(key) : null
+    if (partial(entry) && peeked !== null && peeked.base !== null) entry = withPeek(entry, peeked.fields, peeked.base)
+    if (unnamed(entry)) lonely.push(key)
+    entries.set(key, entry)
+  }
+  for (const rawKey of (res && res.missing) || []) {
+    if (typeof rawKey === 'string') entries.set(rawKey.toLowerCase(), null)
+  }
+  return { entries, lonely }
 }
 
 // lookup(key) -> { ok, value: { profileSeq, usernameSeq, ... } } (fetchMember);
@@ -78,6 +120,7 @@ export function withPeek (entry, fields) {
 export function createNamePeeker ({ enabled, lookup, peek }) {
   const queue = new Set()
   const tried = new Set()
+  const attempts = new Map()
   const found = new Map()
   let off = enabled !== true
 
@@ -93,9 +136,15 @@ export function createNamePeeker ({ enabled, lookup, peek }) {
       }
       return queue.size
     },
-    // What the last successful read of `key` said, or null.
+    // What the last successful read of `key` said, { fields, base }, or null.
+    // base is the entry the peek filled (see remember), null until then.
     foundFor (key) {
       return found.get(key) || null
+    },
+    // Records the entry `key` had when its peeked fields were applied.
+    remember (key, base) {
+      const hit = found.get(key)
+      if (hit) hit.base = base
     },
     // Reads the next queued key. -> { key, fields } (fields null when the
     // index or the node had nothing) or null with an empty queue.
@@ -105,18 +154,29 @@ export function createNamePeeker ({ enabled, lookup, peek }) {
       queue.delete(key)
       tried.add(key)
       let fields = null
+      let transient = false
       try {
         const member = await lookup(key)
         const params = member && member.ok ? peekParams(key, member.value) : null
         if (params !== null) fields = peekFields(await peek(params))
+        else transient = !member || !member.ok
       } catch (err) {
         if (err && err.code === USAGE && err.message === WEB_ONLY) {
           off = true
           queue.clear()
+        } else {
+          transient = true
         }
         fields = null
       }
-      if (fields !== null) found.set(key, fields)
+      // A passing failure (index not ready, seeder down right at start) gets
+      // another turn the next time profile.read lists the key, up to a cap.
+      if (transient && !off) {
+        const n = (attempts.get(key) || 0) + 1
+        attempts.set(key, n)
+        if (n < MAX_ATTEMPTS) tried.delete(key)
+      }
+      if (fields !== null) found.set(key, { fields, base: null })
       return { key, fields }
     }
   }

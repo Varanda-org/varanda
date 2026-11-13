@@ -32,7 +32,7 @@ test('a key without a name gets the verified profile named by the index', async 
   t.alike(calls.lookup, [KEY], 'the index is asked for the key')
   t.alike(calls.peek, [{ author: KEY, seqs: [3, 7], profileSeq: 7, usernameSeq: 3 }], 'diary.peek reads the blocks the index names')
   t.alike(done, { key: KEY, fields: { name: 'Ana', username: 'ana', bio: 'oi', avatar: null } })
-  t.alike(peeker.foundFor(KEY), done.fields, 'remembered for the next profile.read')
+  t.alike(peeker.foundFor(KEY), { fields: done.fields, base: null }, 'remembered for the next profile.read')
 })
 
 test('params: sorted distinct seqs, hints only when valid, null when the index names none', async (t) => {
@@ -86,17 +86,39 @@ test('no new request when the index has nothing, the node is the core node or th
   t.is(core.calls.lookup.length, 1, 'one index read in all')
 })
 
-test('a key is tried once: a failure is never repeated, a hit is not asked again', async (t) => {
+test('a key is tried a few times at most: a passing failure is asked again only when listed anew, a hit never', async (t) => {
   const { createNamePeeker } = await load()
   let n = 0
   const flaky = harness({ peek: async () => { n++; throw Object.assign(new Error('semeador indisponível'), { code: 'NOT_FOUND' }) } })
   const a = createNamePeeker(flaky.deps)
   a.enqueue([KEY])
   t.alike(await a.next(), { key: KEY, fields: null })
-  t.is(a.enqueue([KEY]), 0, 'the failed key is not queued again')
+  t.is(a.size, 0, 'nothing is retried by itself')
   t.is(await a.next(), null)
   t.is(n, 1)
+  t.is(a.enqueue([KEY]), 1, 'listed anew: one more turn')
+  await a.next()
+  t.is(a.enqueue([KEY]), 1, 'and a third')
+  await a.next()
+  t.is(a.enqueue([KEY]), 0, 'then given up for the scope')
+  t.is(n, 3)
   t.not(a.off, 'a plain failure keeps the other keys going')
+
+  let ready = false
+  const late = harness({ lookup: async () => (ready ? { ok: true, value: { profileSeq: 7, usernameSeq: null } } : { ok: false }) })
+  const c = createNamePeeker(late.deps)
+  c.enqueue([KEY])
+  t.alike(await c.next(), { key: KEY, fields: null }, 'the index is not ready yet')
+  ready = true
+  t.is(c.enqueue([KEY]), 1, 'a not ready index gets another turn')
+  t.is((await c.next()).fields.name, 'Ana')
+  t.is(c.enqueue([KEY]), 0, 'a hit is not asked again')
+
+  const none = harness({ lookup: async () => ({ ok: true, value: {} }) })
+  const d = createNamePeeker(none.deps)
+  d.enqueue([KEY])
+  await d.next()
+  t.is(d.enqueue([KEY]), 0, 'an index that names no block is a final answer')
 
   const ok = harness()
   const b = createNamePeeker(ok.deps)
@@ -165,12 +187,36 @@ test('withPeek never replaces what profile.read already brought', async (t) => {
   )
 })
 
-test('a missing key drops the name a peek found earlier', async (t) => {
-  const fs = require('fs')
-  const path = require('path')
-  const src = fs.readFileSync(path.join(__dirname, '../src/names.js'), 'utf8')
-  const body = src.slice(src.indexOf('for (const rawKey of (res && res.missing)'))
-  const block = body.slice(0, body.indexOf('commit(next)'))
-  t.ok(block.includes('next.set(key, null)'), 'missing stores null')
-  t.absent(block.includes('withPeek'), 'and never the peeked name')
+test('foldRead: a key in missing stores null even after a successful peek, and is not peeked', async (t) => {
+  const { createNamePeeker, foldRead, withPeek } = await load()
+  const { deps } = harness()
+  const peeker = createNamePeeker(deps)
+  peeker.enqueue([KEY])
+  const done = await peeker.next()
+  peeker.remember(KEY, null)
+  t.ok(done.fields, 'the peek named the key')
+  const out = foldRead({ profiles: [], missing: [KEY.toUpperCase()] }, peeker)
+  t.is(out.entries.get(KEY), null, 'missing stores null')
+  t.alike(out.lonely, [], 'and the key is not queued for a peek')
+  t.ok(withPeek(null, done.fields), 'the fields themselves are still there')
+})
+
+test('foldRead: the peeked fields come back only while the local copy has not moved since the peek', async (t) => {
+  const { createNamePeeker, foldRead } = await load()
+  const { deps } = harness()
+  const peeker = createNamePeeker(deps)
+  peeker.enqueue([KEY])
+  await peeker.next()
+  const base = { name: null, username: null, bio: null, avatar: null, loaded: true }
+  peeker.remember(KEY, base)
+  const read = (p) => foldRead({ profiles: [{ author: KEY, name: null, username: null, bio: null, avatar: null, ...p }], missing: [] }, peeker).entries.get(KEY)
+
+  t.is(read({}).name, 'Ana', 'nothing new downloaded: the peeked name stays')
+  t.is(read({}).username, 'ana')
+  t.is(read({ username: 'ana2' }).username, 'ana2', 'a newer @nome wins')
+  t.is(read({ username: 'ana2' }).name, 'Ana', 'and the name does not blink out meanwhile')
+  const empty = read({ name: 'Bia', bio: null })
+  t.is(empty.name, 'Bia', 'a newer profile record wins')
+  t.is(empty.bio, null, 'its removed bio is not brought back')
+  t.is(empty.username, 'ana', 'the untouched @nome still fills')
 })

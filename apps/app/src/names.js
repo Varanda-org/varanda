@@ -36,10 +36,10 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { isKey, PROFILE_LIMIT_MAX, USAGE } from '@varanda/rpc'
 import { useNode, useSyncSignals } from './node'
 import { namesQuiet } from './autoSyncPolicy'
-import { applySeed, authoritative, fieldsOf, stableView } from './namesCache'
+import { applySeed, fieldsOf, stableView } from './namesCache'
 import { fetchMember } from './indexClient'
 import { diaryPeekSlots } from './engagement'
-import { createNamePeeker, partial, unnamed, withPeek } from './namesPeek'
+import { createNamePeeker, foldRead, unnamed, withPeek } from './namesPeek'
 
 // The seeder's page hint rides with the name (only a hint: Membro verifies
 // with page.read). profile.read never says it, so it is carried over.
@@ -190,27 +190,12 @@ export function NamesProvider ({ children }) {
       if (scope !== scopeRef.current) return
       const next = new Map(cacheRef.current)
       const peeker = peekerRef.current
-      const lonely = []
-      for (const p of (res && res.profiles) || []) {
-        if (!p || typeof p.author !== 'string') continue
-        const key = p.author.toLowerCase()
+      const { entries, lonely } = foldRead(res, peeker)
+      for (const [key, entry] of entries) {
         // Authoritative: a null removes what a seed said (username included).
         const old = next.get(key)
-        let entry = authoritative(p)
-        const peeked = peeker ? peeker.foundFor(key) : null
-        if (partial(entry) && peeked !== null) entry = withPeek(entry, peeked)
-        if (unnamed(entry)) lonely.push(key)
-        if (old && old.page === true) Object.assign(entry, { page: true, closed: old.closed === true, moved: old.moved === true })
+        if (entry !== null && old && old.page === true) Object.assign(entry, { page: true, closed: old.closed === true, moved: old.moved === true })
         next.set(key, entry)
-        retryRef.current.delete(key)
-      }
-      for (const rawKey of (res && res.missing) || []) {
-        if (typeof rawKey !== 'string') continue
-        const key = rawKey.toLowerCase()
-        // missing means nothing to show (no replica, a block, a fork), so a
-        // name the peek found earlier must not stay on screen.
-        next.set(key, null)
-        lonely.push(key)
         retryRef.current.delete(key)
       }
       commit(next)
@@ -265,6 +250,7 @@ export function NamesProvider ({ children }) {
       if (!unnamed(known)) return
       const next = new Map(cacheRef.current)
       next.set(done.key, withPeek(known || null, done.fields))
+      peekerRef.current.remember(done.key, known || null)
       commit(next)
     } finally {
       peekBusyRef.current = false
