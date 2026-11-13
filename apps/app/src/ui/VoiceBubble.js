@@ -137,6 +137,8 @@ export function VoiceBubble ({ state, uri, retry, show, durationMs = 0, mine = f
     if (playing) {
       clearBackstop()
       player.pause()
+      releaseClaim.current()
+      releaseClaim.current = () => {}
       return
     }
     // The pause of the previous note comes from claimPlayback; its own

@@ -46,7 +46,7 @@ Rede social ponto a ponto (Holepunch: Hypercore, Hyperswarm, HyperDHT). Cada pes
 
 Princípios que não mudam sem decisão dos mantenedores: tudo que vem de um par é não confiável; o cliente nunca reenvia um pedido por conta própria (falha em método que altera estado vem com `uncertain: true`); nenhum comando imprime chave secreta. Não acrescente coleta de dados, rastreio ou telemetria: o tratamento de dados pessoais segue a seção LGPD de `docs/design.md` (hipóteses de desenho que ainda dependem de parecer jurídico).
 
-Exceção limitada, descrita nos Termos versão 43 e na seção LGPD de `docs/design.md`: os players incorporados de YouTube, SoundCloud, Spotify e Apple Music carregam sem toque quando o cartão fica visível, numa publicação, numa citação, numa conversa privada, num grupo e na prévia enquanto a pessoa escreve, e o provedor recebe o endereço de internet (IP) de quem vê. Numa conversa cifrada, o provedor fica sabendo que o aparelho mostrou aquele item, sem receber as mensagens. Essa exceção se limita a esses quatro players e não autoriza nenhuma outra chamada a serviços de terceiros.
+Exceção limitada, descrita nos Termos versão 44 e na seção LGPD de `docs/design.md`: os players incorporados de YouTube, SoundCloud, Spotify e Apple Music carregam sem toque quando o cartão fica visível, numa publicação, numa citação, numa conversa privada, num grupo e na prévia enquanto a pessoa escreve, e o provedor recebe o endereço de internet (IP) de quem vê. Numa conversa cifrada, o provedor fica sabendo que o aparelho mostrou aquele item, sem receber as mensagens. Essa exceção se limita a esses quatro players e não autoriza nenhuma outra chamada a serviços de terceiros.
 
 ## Comandos
 

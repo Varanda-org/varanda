@@ -794,3 +794,37 @@ test('playbackClaimCount rises on an accepted claim only', async (t) => {
   stopBoundPlayback()
   t.is(playbackClaimCount(), start + 1, 'refused releases and another leave do not increment the count')
 })
+
+test('playbackBusy is true only while a claim is current', async (t) => {
+  const { claimPlayback, playbackBusy, stopPlayback } = await load()
+  t.is(playbackBusy(), false, 'false at rest')
+  const player = { pause () {} }
+  const releaseBound = claimPlayback(player, { bound: true })
+  t.is(playbackBusy(), true, 'true after a bound claim')
+  releaseBound()
+  t.is(playbackBusy(), false, 'false after the returned release')
+  const releaseUnbound = claimPlayback(player)
+  t.is(playbackBusy(), true, 'true after an unbound claim')
+  releaseUnbound()
+  t.is(playbackBusy(), false, 'false after the unbound release')
+  claimPlayback(player)
+  stopPlayback()
+  t.is(playbackBusy(), false, 'false after stopPlayback')
+  const first = { pause () {} }
+  const second = { pause () {} }
+  const releaseFirst = claimPlayback(first)
+  const releaseSecond = claimPlayback(second)
+  releaseFirst()
+  t.is(playbackBusy(), true, 'still true when a second player takes the claim and the first release runs late')
+  releaseSecond()
+  t.is(playbackBusy(), false)
+})
+
+test('source: a paused voice note lets go of playback', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/ui/VoiceBubble.js'), 'utf8')
+  const toggle = src.slice(src.indexOf('const toggle = () =>'), src.indexOf('const seek = (event) =>'))
+  const pauseAt = toggle.indexOf('player.pause()')
+  const releaseAt = toggle.indexOf('releaseClaim.current()', pauseAt)
+  const returnAt = toggle.indexOf('return', releaseAt)
+  t.ok(pauseAt >= 0 && releaseAt > pauseAt && returnAt > releaseAt, 'the branch that calls player.pause() calls releaseClaim.current() before it returns')
+})

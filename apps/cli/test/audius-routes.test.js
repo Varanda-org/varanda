@@ -33,7 +33,8 @@ const {
   ART_MAX_BYTES,
   MAX_ART_CACHED,
   MAX_ART_INFLIGHT,
-  ART_PER_MEMBER
+  ART_PER_MEMBER,
+  ART_ANSWER_MS
 } = require('../lib/account/audius-routes')
 
 const KEY = 'chave-sentinela-audius-42'
@@ -162,7 +163,18 @@ const ERRORS = { Err500: 500, Err503: 503, Err429: 429, Err403: 403, Err400: 400
 
 function fakeApi (state) {
   // state.artwork[id], when set, replaces that item's artwork (undefined: none).
-  const withArt = (item) => (Object.hasOwn(state.artwork, item.id) ? { ...item, artwork: state.artwork[item.id] } : item)
+  // state.large adds a 480x480 artwork beside any other item's 150x150, and
+  // state.info a genre and a release date to every item; state.fields[id]
+  // adds its own fields to that item.
+  const withArt = (item) => {
+    if (item === null || typeof item !== 'object') return item
+    let out = item
+    if (Object.hasOwn(state.artwork, item.id)) out = { ...out, artwork: state.artwork[item.id] }
+    else if (state.large && out.artwork && typeof out.artwork['150x150'] === 'string') out = { ...out, artwork: { ...out.artwork, '480x480': out.artwork['150x150'] + 'L' } }
+    if (state.info) out = { genre: 'Samba', release_date: '2001-02-03', ...out }
+    if (Object.hasOwn(state.fields, item.id)) out = { ...out, ...state.fields[item.id] }
+    return out
+  }
   const json = (res, status, body) => {
     if (status === 200 && body && body.data !== undefined) body = { ...body, data: Array.isArray(body.data) ? body.data.map(withArt) : withArt(body.data) }
     jsonAnswer(res, status, body)
@@ -340,6 +352,8 @@ function fakeArt () {
     }
     if (name === 'ArtSlow1') return setTimeout(() => image('image/jpeg', JPEG), 200)
     if (name === 'ArtSlowErr1') return setTimeout(() => json(res, 500, {}), 200)
+    if (name === 'ArtSlowGone1') return setTimeout(() => json(res, 404, {}), 250)
+    if (name === 'ArtSlowGone2') return setTimeout(() => json(res, 404, {}), 1000)
     if (/^ArtHang\d+$/.test(name)) return hold(res)
     if (name === 'ArtStall1') {
       res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': JPEG.length })
@@ -355,7 +369,7 @@ function fakeArt () {
 async function setup (t, { audius = true, moments = false, covers = false, streams = 16, caps = {}, accepted = true, timers = null } = {}) {
   const clock = { offset: 0 }
   const now = () => Date.now() + clock.offset
-  const state = { mode: 'ok', slow: [], artwork: {} }
+  const state = { mode: 'ok', slow: [], artwork: {}, fields: {}, large: false, info: false }
   const api = fakeApi(state)
   const node = fakeNode()
   const art = fakeArt()
@@ -1861,4 +1875,343 @@ test('audius: a full cover cache evicts the oldest and clears its timer', async 
   t.is(s.art.seen.length, before, 'a recent cover is still held')
   t.is((await s.post(token, 'art', { kind: 'track', id: 'Many0' })).status, 200)
   t.is(s.art.seen.length, before + 1, 'the evicted one is fetched again')
+})
+
+// --- the 480 cover and song info ---------------------------------------------
+
+const INFO_KEYS = [...TRACK_KEYS, 'genre', 'year'].sort()
+const SMALL_LARGE = (small, large) => ({ '150x150': 'https://' + ART + '/' + small, '480x480': 'https://' + ART + '/' + large })
+
+test('audius: art without the size query is unchanged, and size=480 fetches the 480 href cached apart', async (t) => {
+  const s = await setup(t, { covers: true, caps: { arts: 10 } })
+  const { token } = await s.login()
+  s.state.artwork.Fill5 = SMALL_LARGE('Fill5', 'ArtPng1')
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Fill5' }), 'image/jpeg', JPEG)
+  t.alike(artPaths(s), ['/Fill5'], 'no query: the 150x150 href only')
+  artOk(t, await s.post(token, 'art?size=480', { kind: 'track', id: 'Fill5' }), 'image/png', PNG)
+  t.alike(artPaths(s), ['/Fill5', '/ArtPng1'], 'size=480: the 480x480 href')
+  artOk(t, await s.post(token, 'art?size=480', { kind: 'track', id: 'Fill5' }), 'image/png', PNG)
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Fill5' }), 'image/jpeg', JPEG)
+  t.is(s.art.seen.length, 2, 'each size is held under its own key')
+  t.is(s.routes.stats().covers, 2)
+  for (const q of ['?size=48', '?size=0', '?size=480x480', '?size=4800', '?size=', '?Size=480']) {
+    artOk(t, await s.post(token, 'art' + q, { kind: 'track', id: 'Fill5' }), 'image/jpeg', JPEG)
+  }
+  t.is(s.art.seen.length, 2, 'any other size is the small path')
+  t.is((await s.post(token, 'art?size=480', { kind: 'track', id: 'Fill5' })).status, 429, 'each request spent one art use, the large ones included')
+
+  // A fresh service: the first size=48 asks the small href only.
+  const f = await setup(t, { covers: true })
+  const m = await f.login()
+  f.state.artwork.Fill6 = SMALL_LARGE('Fill6', 'ArtPng1')
+  artOk(t, await f.post(m.token, 'art?size=48', { kind: 'track', id: 'Fill6' }), 'image/jpeg', JPEG)
+  artOk(t, await f.post(m.token, 'art?size=0', { kind: 'track', id: 'Fill6' }), 'image/jpeg', JPEG)
+  t.alike(artPaths(f), ['/Fill6'])
+  // A playlist has a large cover too, and the large path finds its row by id.
+  f.state.artwork.Pl7 = SMALL_LARGE('Pl7', 'ArtWebp1')
+  artOk(t, await f.post(m.token, 'art?size=480', { kind: 'playlist', id: 'Pl7' }), 'image/webp', WEBP)
+  t.alike(artPaths(f), ['/Fill6', '/ArtWebp1'], 'the lookup by id fed the large href')
+  t.ok(f.api.seen.some((r) => r.path === '/v1/playlists/Pl7'))
+  noKeyAnywhere(t, s)
+  onlyLoopback(t, s)
+})
+
+test('audius: a 480 miss answers the small cover in the same art use, and both failing is 404', async (t) => {
+  const s = await setup(t, { covers: true, caps: { arts: 7 } })
+  const { token } = await s.login()
+  s.state.artwork.Big480 = SMALL_LARGE('Small1', 'ArtBig1')
+  s.state.artwork.Gif480 = SMALL_LARGE('Small2', 'ArtGif1')
+  s.state.artwork.Gone480 = SMALL_LARGE('Small3', 'ArtGone1')
+  s.state.artwork.Both480 = SMALL_LARGE('ArtHtml1', 'ArtWave1')
+  // Only150 has its fixture's 150x150 artwork and no 480x480.
+  artOk(t, await s.post(token, 'art?size=480', { kind: 'track', id: 'Only150' }), 'image/jpeg', JPEG)
+  t.alike(artPaths(s), ['/Only150'], 'no 480: the small path')
+  artOk(t, await s.post(token, 'art?size=480', { kind: 'track', id: 'Big480' }), 'image/jpeg', JPEG)
+  artOk(t, await s.post(token, 'art?size=480', { kind: 'track', id: 'Gif480' }), 'image/jpeg', JPEG)
+  artOk(t, await s.post(token, 'art?size=480', { kind: 'track', id: 'Gone480' }), 'image/jpeg', JPEG)
+  t.alike(artPaths(s), ['/Only150', '/ArtBig1', '/Small1', '/ArtGif1', '/Small2', '/ArtGone1', '/Small3'], 'the 480 first, then the small one')
+  artOk(t, await s.post(token, 'art?size=480', { kind: 'track', id: 'Big480' }), 'image/jpeg', JPEG)
+  t.is(s.art.seen.length, 7, 'a remembered 480 miss and the held small cover: no host contact')
+  const both = await s.post(token, 'art?size=480', { kind: 'track', id: 'Both480' })
+  t.is(both.status, 404)
+  t.alike(both.json, { error: 'nao-encontrado' })
+  t.alike(artPaths(s).slice(7), ['/ArtWave1', '/ArtHtml1'])
+  t.is((await s.post(token, 'art?size=480', { kind: 'track', id: 'Both480' })).status, 404, 'both misses are remembered')
+  t.is(s.art.seen.length, 9)
+  t.is((await s.post(token, 'art', { kind: 'track', id: 'Only150' })).status, 429, 'one art use per request, the fallbacks included')
+  t.absent(s.responses.some((r) => r.raw.length > ART_MAX_BYTES), 'nothing of an oversize body is relayed')
+
+  // The same href at both sizes: no second try of what just missed.
+  const d = await setup(t, { covers: true })
+  const m = await d.login()
+  d.state.artwork.Same480 = SMALL_LARGE('ArtBig1', 'ArtBig1')
+  t.is((await d.post(m.token, 'art?size=480', { kind: 'track', id: 'Same480' })).status, 404)
+  t.alike(artPaths(d), ['/ArtBig1'])
+})
+
+test('audius: the sizes never answer each other', async (t) => {
+  const s = await setup(t, { covers: true })
+  const { token } = await s.login()
+  s.state.artwork.Fill5 = SMALL_LARGE('ArtGif1', 'ArtPng1')
+  t.is((await s.post(token, 'art', { kind: 'track', id: 'Fill5' })).status, 404, 'a small miss')
+  artOk(t, await s.post(token, 'art?size=480', { kind: 'track', id: 'Fill5' }), 'image/png', PNG)
+  t.is((await s.post(token, 'art', { kind: 'track', id: 'Fill5' })).status, 404, 'the large cover never answers the small request')
+  s.state.artwork.Fill6 = SMALL_LARGE('Fill6', 'ArtPng1')
+  artOk(t, await s.post(token, 'art?size=480', { kind: 'track', id: 'Fill6' }), 'image/png', PNG)
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Fill6' }), 'image/jpeg', JPEG)
+  t.alike(artPaths(s), ['/ArtGif1', '/ArtPng1', '/ArtPng1', '/Fill6'], 'the pending and cached keys are per item and size')
+
+  // A new 480 href replaces the held large cover; a row without one drops it.
+  s.state.artwork.Fill6 = SMALL_LARGE('Fill6', 'ArtWebp1')
+  t.is((await s.post(token, 'search', { q: QUERY, kind: 'track' })).status, 200)
+  artOk(t, await s.post(token, 'art?size=480', { kind: 'track', id: 'Fill6' }), 'image/webp', WEBP)
+  s.state.artwork.Fill6 = { '150x150': 'https://' + ART + '/Fill6' }
+  t.is((await s.post(token, 'search', { q: QUERY, kind: 'track' })).status, 200)
+  const before = s.art.seen.length
+  artOk(t, await s.post(token, 'art?size=480', { kind: 'track', id: 'Fill6' }), 'image/jpeg', JPEG)
+  t.is(s.art.seen.length, before, 'the held small cover, not the dropped large one')
+  t.is(s.routes.stats().covers, 3, 'the stale large row was dropped')
+})
+
+test('audius: every cached row keeps the 480 href, so the large cover needs no lookup', async (t) => {
+  const s = await setup(t, { covers: true })
+  s.state.large = true
+  const { token } = await s.login()
+  const lookups = () => s.api.seen.length
+  t.is((await s.post(token, 'resolve', { url: 'https://audius.co/artista/musica' })).status, 200)
+  let before = lookups()
+  artOk(t, await s.post(token, 'art?size=480', { kind: 'track', id: 'Ranged1' }), 'image/jpeg', JPEG)
+  t.is(lookups(), before, 'a resolved track row')
+  t.is((await s.post(token, 'resolve', { url: 'https://audius.co/artista/playlist/lista' })).status, 200)
+  before = lookups()
+  artOk(t, await s.post(token, 'art?size=480', { kind: 'playlist', id: 'Pl1' }), 'image/jpeg', JPEG)
+  t.is(lookups(), before, 'a resolved playlist row')
+  t.is((await s.post(token, 'item', { kind: 'playlist', id: 'Pl2' })).status, 200)
+  before = lookups()
+  artOk(t, await s.post(token, 'art?size=480', { kind: 'playlist', id: 'Pl2' }), 'image/jpeg', JPEG)
+  artOk(t, await s.post(token, 'art?size=480', { kind: 'track', id: 'Pt1' }), 'image/jpeg', JPEG)
+  t.is(lookups(), before, 'a full playlist row and its tracks')
+  t.alike(artPaths(s), ['/Ranged1L', '/Pl1L', '/Pl2L', '/Pt1L'], 'each the 480 href')
+
+  // A kept full playlist row takes the newer 480 href of a search.
+  s.state.artwork.Pl1 = SMALL_LARGE('Pl1', 'ArtPng1')
+  t.is((await s.post(token, 'item', { kind: 'playlist', id: 'Pl1' })).status, 200)
+  s.state.artwork.Pl1 = SMALL_LARGE('Pl1', 'ArtWebp1')
+  t.is((await s.post(token, 'search', { q: QUERY, kind: 'playlist' })).status, 200)
+  artOk(t, await s.post(token, 'art?size=480', { kind: 'playlist', id: 'Pl1' }), 'image/webp', WEBP)
+  const full = await s.post(token, 'item', { kind: 'playlist', id: 'Pl1' })
+  t.ok(full.json.tracks.length > 0, 'and kept its tracks')
+})
+
+test('audius: the small fallback fetch starts only while a whole art fetch fits in the answer deadline', async (t) => {
+  // answerMs 500 and artMs 300: no fallback fetch starts past 200 ms, and the
+  // 480 miss alone takes 250 ms.
+  const s = await setup(t, { covers: true, caps: { artMs: 300, answerMs: 500, arts: 3 } })
+  const { token } = await s.login()
+  s.state.artwork.Late480 = SMALL_LARGE('Small1', 'ArtSlowGone1')
+  const late = await s.post(token, 'art?size=480', { kind: 'track', id: 'Late480' })
+  t.is(late.status, 404, 'too late for another fetch: a miss')
+  t.alike(late.json, { error: 'nao-encontrado' })
+  t.alike(artPaths(s), ['/ArtSlowGone1'], 'the small cover is not fetched')
+  artOk(t, await s.post(token, 'art?size=480', { kind: 'track', id: 'Late480' }), 'image/jpeg', JPEG)
+  t.alike(artPaths(s), ['/ArtSlowGone1', '/Small1'], 'the remembered miss leaves time for the small fetch')
+  artOk(t, await s.post(token, 'art?size=480', { kind: 'track', id: 'Late480' }), 'image/jpeg', JPEG)
+  t.is((await s.post(token, 'art?size=480', { kind: 'track', id: 'Late480' })).status, 429, 'the late 404 kept its use')
+
+  // A held small cover answers whatever the time.
+  const h = await setup(t, { covers: true, caps: { artMs: 300, answerMs: 500 } })
+  const m = await h.login()
+  h.state.artwork.Late480 = SMALL_LARGE('Small1', 'ArtSlowGone1')
+  artOk(t, await h.post(m.token, 'art', { kind: 'track', id: 'Late480' }), 'image/jpeg', JPEG)
+  artOk(t, await h.post(m.token, 'art?size=480', { kind: 'track', id: 'Late480' }), 'image/jpeg', JPEG)
+  t.alike(artPaths(h), ['/Small1', '/ArtSlowGone1'])
+
+  // With room left, the same slow miss falls back to a fetch.
+  const r = await setup(t, { covers: true, caps: { artMs: 300, answerMs: 5000 } })
+  const n = await r.login()
+  r.state.artwork.Late480 = SMALL_LARGE('Small1', 'ArtSlowGone1')
+  artOk(t, await r.post(n.token, 'art?size=480', { kind: 'track', id: 'Late480' }), 'image/jpeg', JPEG)
+  t.alike(artPaths(r), ['/ArtSlowGone1', '/Small1'])
+  t.is(ART_ANSWER_MS, 20000, 'under the app timeout of 25 s')
+})
+
+test('audius: the fallback never joins a small fetch that started past its deadline', async (t) => {
+  t.timeout(30 * 1000)
+  // artMs 1500 and answerMs 1800: the fallback joins no fetch started more
+  // than 300 ms into the request. The 480 miss takes 1000 ms; another
+  // member starts the small fetch, held by the host, at 700 ms.
+  const s = await setup(t, { covers: true, caps: { artMs: 1500, answerMs: 1800 } })
+  const a = await s.login()
+  const b = await s.login(s.other)
+  s.state.artwork.Join480 = SMALL_LARGE('ArtHang9', 'ArtSlowGone2')
+  t.is((await s.post(a.token, 'item', { kind: 'track', id: 'Join480' })).status, 200)
+  const started = Date.now()
+  const large = s.post(a.token, 'art?size=480', { kind: 'track', id: 'Join480' }).then((res) => ({ res, at: Date.now() - started }))
+  await new Promise((resolve) => setTimeout(resolve, 700))
+  const small = s.post(b.token, 'art', { kind: 'track', id: 'Join480' }).then((res) => ({ res, at: Date.now() - started }))
+  t.ok(await s.until(() => artPaths(s).includes('/ArtHang9')), 'the late small fetch is running')
+  const late = await large
+  t.is(late.res.status, 404, 'not joined: a miss')
+  t.alike(late.res.json, { error: 'nao-encontrado' })
+  t.ok(late.at < 1800, 'answered within the deadline: ' + late.at + ' ms')
+  t.is((await small).res.status, 503, 'the held fetch fails on its own')
+  t.is(artPaths(s).filter((p) => p === '/ArtHang9').length, 1, 'one small fetch, started by the other member')
+})
+
+test('audius: a remembered 480 miss with an expired item row is the small request, from the cache', async (t) => {
+  const s = await setup(t, { covers: true })
+  const { token } = await s.login()
+  s.state.artwork.Big480 = SMALL_LARGE('Small1', 'ArtBig1')
+  t.is((await s.post(token, 'item', { kind: 'track', id: 'Big480' })).status, 200)
+  // The covers are stored later than the row, so they outlive it.
+  s.clock.offset += CACHE_TTL_MS / 2
+  artOk(t, await s.post(token, 'art?size=480', { kind: 'track', id: 'Big480' }), 'image/jpeg', JPEG)
+  t.alike(artPaths(s), ['/ArtBig1', '/Small1'])
+  s.clock.offset += CACHE_TTL_MS / 2 + 1000
+  s.state.mode = 'garbage'
+  const asked = s.api.seen.length
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Big480' }), 'image/jpeg', JPEG)
+  artOk(t, await s.post(token, 'art?size=480', { kind: 'track', id: 'Big480' }), 'image/jpeg', JPEG)
+  t.is(s.api.seen.length, asked, 'no lookup: the provider is not asked')
+  t.alike(artPaths(s), ['/ArtBig1', '/Small1'], 'nor the art host')
+  t.is((await s.post(token, 'item', { kind: 'track', id: 'Big480' })).status, 503, 'the item row is gone and the provider is down')
+})
+
+test('audius: a failed 480 fetch answers as is, with no fallback', async (t) => {
+  const s = await setup(t, { covers: true, caps: { artMs: 1000, arts: 10 } })
+  const { token } = await s.login()
+  for (const [id, large] of [['Err480', 'ArtErr1'], ['Busy480', 'ArtBusy1'], ['Loop480', 'ArtLoop1'], ['Part480', 'ArtPartial1']]) {
+    s.state.artwork[id] = SMALL_LARGE('Small' + id, large)
+    const res = await s.post(token, 'art?size=480', { kind: 'track', id })
+    t.is(res.status, 503, id)
+    t.alike(res.json, { error: 'indisponivel' })
+    t.absent(artPaths(s).includes('/Small' + id), id + ': the small cover is not tried')
+  }
+  t.is(s.routes.stats().covers, 0, 'no failure is cached')
+
+  // The 480 contact spent the last budget token: the fallback finds the
+  // budget spent, answers 503 and keeps the use, as the host was contacted.
+  const b = await setup(t, { covers: true, caps: { budget: 2, arts: 1 } })
+  const m = await b.login()
+  b.state.artwork.Big480 = SMALL_LARGE('Small1', 'ArtBig1')
+  const spent = await b.post(m.token, 'art?size=480', { kind: 'track', id: 'Big480' })
+  t.is(spent.status, 503)
+  t.alike(spent.json, { error: 'indisponivel' })
+  t.alike(artPaths(b), ['/ArtBig1'])
+  t.is((await b.post(m.token, 'art?size=480', { kind: 'track', id: 'Big480' })).status, 429, 'the use is kept')
+
+  // A remembered 480 miss contacts no host: then a fallback refused before
+  // any contact gives the use back.
+  const r = await setup(t, { covers: true, caps: { budget: 2, arts: 2 } })
+  const n = await r.login()
+  r.state.artwork.Big480 = SMALL_LARGE('Small1', 'ArtBig1')
+  t.is((await r.post(n.token, 'item', { kind: 'track', id: 'Big480' })).status, 200)
+  t.is((await r.post(n.token, 'art?size=480', { kind: 'track', id: 'Big480' })).status, 503, 'budget 2: the item, the 480, then none for the small one')
+  const o = await r.login(r.other)
+  for (let i = 0; i < 3; i++) t.is((await r.post(o.token, 'art?size=480', { kind: 'track', id: 'Big480' })).status, 503, 'remembered miss, then no budget: 503, not 429')
+  t.alike(artPaths(r), ['/ArtBig1'])
+})
+
+test('audius: no answer ever carries art, artLarge or an artwork URL, and answers are byte-identical with a 480 cover and song info', async (t) => {
+  const plain = await setup(t, { covers: true })
+  const rich = await setup(t, { covers: true })
+  rich.state.large = true
+  rich.state.info = true
+  const a = await plain.login()
+  const b = await rich.login()
+  const bodies = [
+    ['search', { q: QUERY, kind: 'track' }],
+    ['search', { q: QUERY, kind: 'playlist' }],
+    ['item', { kind: 'track', id: 'Plain1' }],
+    ['item', { kind: 'playlist', id: 'Pl1' }],
+    ['resolve', { url: 'https://audius.co/artista/musica' }],
+    ['resolve', { url: 'https://audius.co/artista/playlist/lista' }]
+  ]
+  for (const q of ['', '?covers=1', '?covers=1&size=480', '?info=0']) {
+    for (const [name, body] of bodies) {
+      const today = await plain.post(a.token, name + q, body)
+      const now = await rich.post(b.token, name + q, body)
+      t.is(now.status, 200, name + q)
+      t.alike(now.raw, today.raw, name + q + ': unchanged, byte for byte')
+    }
+  }
+  artOk(t, await rich.post(b.token, 'art?size=480', { kind: 'track', id: 'Plain1' }), 'image/jpeg', JPEG)
+  artOk(t, await rich.post(b.token, 'art?size=480', { kind: 'playlist', id: 'Pl1' }), 'image/jpeg', JPEG)
+  t.ok(artPaths(rich).includes('/Plain1L'), 'the 480 href was fetched')
+  for (const q of ['?info=1', '?covers=1&info=1']) {
+    for (const [name, body] of bodies) t.is((await rich.post(b.token, name + q, body)).status, 200)
+  }
+  t.ok(rich.responses.length >= 30)
+  for (const r of rich.responses) {
+    const text = r.raw.toString('latin1')
+    t.absent(text.includes(ART), 'no art host in a body')
+    t.absent(text.includes('artwork'), 'no artwork key')
+    t.absent(text.includes('"art"'), 'no art key')
+    t.absent(text.includes('artLarge'), 'no artLarge key')
+    t.absent(text.includes('release_date'), 'no provider date')
+    const urls = text.match(/https?:\/\/[^"]*/g) || []
+    t.ok(urls.every((u) => u.startsWith('https://audius.co/')), 'no URL but the audius.co page')
+    t.absent(JSON.stringify(r.headers).includes(ART), 'no art host in a header')
+  }
+  t.absent(JSON.stringify(rich.logs).includes(ART), 'no art URL in a log line')
+  t.absent(JSON.stringify(rich.logs).includes('Samba'), 'no song info in a log line')
+  noKeyAnywhere(t, rich)
+})
+
+test('audius: info=1 adds a track genre and year, never to a playlist, and combines with covers', async (t) => {
+  const s = await setup(t, { covers: true })
+  s.state.info = true
+  const { token } = await s.login()
+  const tracks = await s.post(token, 'search?info=1', { q: QUERY, kind: 'track' })
+  t.is(tracks.status, 200)
+  t.ok(tracks.json.items.length > 0)
+  for (const it of tracks.json.items) {
+    t.alike(Object.keys(it).sort(), INFO_KEYS)
+    t.is(it.genre, 'Samba')
+    t.is(it.year, 2001)
+  }
+  const lists = await s.post(token, 'search?info=1', { q: QUERY, kind: 'playlist' })
+  for (const it of lists.json.items) t.alike(Object.keys(it).sort(), PLAYLIST_KEYS, 'a playlist never carries song info')
+  const one = await s.post(token, 'item?info=1', { kind: 'track', id: 'Plain1' })
+  t.alike(one.json, { id: 'Plain1', title: 'Musica Plain1', artist: 'Artista', duration: 180, url: 'https://audius.co/artista/musica-plain1', genre: 'Samba', year: 2001 })
+  const pl = await s.post(token, 'item?info=1', { kind: 'playlist', id: 'Pl1' })
+  t.alike(Object.keys(pl.json).sort(), [...PLAYLIST_KEYS, 'tracks'].sort())
+  t.ok(pl.json.tracks.length > 0)
+  for (const it of pl.json.tracks) t.alike(Object.keys(it).sort(), INFO_KEYS, 'its tracks do')
+  const resolved = await s.post(token, 'resolve?info=1', { url: 'https://audius.co/artista/musica' })
+  t.alike(resolved.json.item, { id: 'Ranged1', title: 'Musica Ranged1', artist: 'Artista', duration: 180, url: 'https://audius.co/artista/musica-ranged1', genre: 'Samba', year: 2001 })
+  const resolvedList = await s.post(token, 'resolve?info=1', { url: 'https://audius.co/artista/playlist/lista' })
+  t.alike(Object.keys(resolvedList.json.item).sort(), PLAYLIST_KEYS)
+
+  const both = await s.post(token, 'item?covers=1&info=1', { kind: 'track', id: 'Plain1' })
+  t.alike(both.json, { id: 'Plain1', title: 'Musica Plain1', artist: 'Artista', duration: 180, url: 'https://audius.co/artista/musica-plain1', cover: true, genre: 'Samba', year: 2001 })
+  const bothList = await s.post(token, 'item?info=1&covers=1', { kind: 'playlist', id: 'Pl1' })
+  t.alike(Object.keys(bothList.json).sort(), [...PLAYLIST_KEYS, 'cover', 'tracks'].sort())
+  for (const it of bothList.json.tracks) t.alike(Object.keys(it).sort(), [...INFO_KEYS, 'cover'].sort())
+
+  for (const q of ['', '?info=0', '?info=true', '?covers=1']) {
+    const plainOne = await s.post(token, 'item' + q, { kind: 'track', id: 'Plain1' })
+    t.absent(Object.hasOwn(plainOne.json, 'genre') || Object.hasOwn(plainOne.json, 'year'), 'no song info with ' + JSON.stringify(q))
+    const plainList = await s.post(token, 'search' + q, { q: QUERY, kind: 'track' })
+    t.absent(plainList.raw.toString('utf8').includes('genre'), 'no genre key with ' + JSON.stringify(q))
+  }
+
+  // Each key only when the provider had a usable value.
+  s.state.fields.Fill5 = { genre: '  ', release_date: '2001-02-03' }
+  s.state.fields.Fill6 = { genre: 'Forró', release_date: 'em breve' }
+  s.state.fields.Fill7 = { genre: 7, release_date: '1850-01-01' }
+  const mixed = await s.post(token, 'search?info=1', { q: QUERY, kind: 'track' })
+  const by = (id) => mixed.json.items.find((x) => x.id === id)
+  t.alike(by('Fill5'), { id: 'Fill5', title: 'Musica Fill5', artist: 'Artista', duration: 180, url: 'https://audius.co/artista/musica-fill5', year: 2001 })
+  t.alike(by('Fill6'), { id: 'Fill6', title: 'Musica Fill6', artist: 'Artista', duration: 180, url: 'https://audius.co/artista/musica-fill6', genre: 'Forró' })
+  t.alike(Object.keys(by('Fill7')).sort(), TRACK_KEYS)
+  const cached = await s.post(token, 'item?info=1', { kind: 'track', id: 'Fill6' })
+  t.is(cached.json.genre, 'Forró', 'the cached row keeps the song info')
+
+  // Without covers on, info still works and adds no cover.
+  const off = await setup(t)
+  off.state.info = true
+  const m = await off.login()
+  const noCovers = await off.post(m.token, 'item?covers=1&info=1', { kind: 'track', id: 'Plain1' })
+  t.alike(Object.keys(noCovers.json).sort(), INFO_KEYS)
 })

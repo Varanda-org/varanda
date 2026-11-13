@@ -350,6 +350,67 @@ test('parsers accept today\'s item or one more boolean cover and nothing else', 
   t.alike(Object.keys(card).sort(), ['desc', 'host', 'title', 'url'], 'a cover never reaches a card')
 })
 
+test('a track may carry genre and year, each checked; a playlist never does', async (t) => {
+  const { parseSearch, parseItem, parseResolve, musicCardFields } = await load()
+  const info = { ...track, cover: true, genre: 'Samba', year: 2020 }
+  t.alike(parseItem(info, 'track'), info)
+  t.alike(parseItem({ ...track, genre: 'Samba' }, 'track'), { ...track, genre: 'Samba' }, 'genre alone')
+  t.alike(parseItem({ ...track, year: 1900 }, 'track'), { ...track, year: 1900 }, 'year alone')
+  t.alike(parseItem({ ...track, year: 2100 }, 'track'), { ...track, year: 2100 })
+  t.alike(parseItem({ ...track, genre: 'x'.repeat(40) }, 'track'), { ...track, genre: 'x'.repeat(40) }, '40 code points')
+  t.alike(parseItem({ ...track, genre: '\u{1F3B5}'.repeat(40) }, 'track'), { ...track, genre: '\u{1F3B5}'.repeat(40) }, 'counted in code points')
+  t.alike(parseSearch({ items: [info, track], next: null }, 'track'), { items: [info, track], next: null })
+  t.alike(parseItem({ ...playlist, tracks: [info] }, 'playlist'), { ...playlist, tracks: [info] })
+  t.alike(parseResolve({ kind: 'track', item: info }), { kind: 'track', item: info })
+  const plain = parseItem(track, 'track')
+  t.absent(Object.hasOwn(plain, 'genre') || Object.hasOwn(plain, 'year'), 'no key, no field')
+  const inherited = Object.assign(Object.create({ genre: 'Samba', year: 2020 }), track)
+  const own = parseItem(inherited, 'track')
+  t.absent(Object.hasOwn(own, 'genre') || Object.hasOwn(own, 'year'), 'only own keys count')
+  for (const [item, why] of [
+    [{ ...track, genre: '' }, 'an empty genre'],
+    [{ ...track, genre: 'x'.repeat(41) }, 'a genre of 41 code points'],
+    [{ ...track, genre: 'Sam\u0000ba' }, 'a control character'],
+    [{ ...track, genre: 'Samba\n' }, 'a newline'],
+    [{ ...track, genre: 5 }, 'a number genre'],
+    [{ ...track, genre: null }, 'a null genre'],
+    [{ ...track, year: 1899 }, 'year 1899'],
+    [{ ...track, year: 2101 }, 'year 2101'],
+    [{ ...track, year: '2020' }, 'a string year'],
+    [{ ...track, year: 2020.5 }, 'a fractional year'],
+    [{ ...track, year: null }, 'a null year'],
+    [{ ...track, genre: 'Samba', year: 2020, mood: 'calm' }, 'an unknown extra key'],
+    [{ ...track, genre: 'Samba', artwork: 'https://evil.example/a.jpg' }, 'an artwork beside genre']
+  ]) {
+    t.is(parseItem(item, 'track'), null, 'item: ' + why)
+    t.is(parseSearch({ items: [track, item], next: null }, 'track'), null, 'search: ' + why)
+    t.is(parseItem({ ...playlist, tracks: [track, item] }, 'playlist'), null, 'nested track: ' + why)
+    t.is(parseResolve({ kind: 'track', item }), null, 'resolve: ' + why)
+  }
+  for (const [extra, why] of [[{ genre: 'Samba' }, 'genre'], [{ year: 2020 }, 'year'], [{ cover: true, genre: 'Samba', year: 2020 }, 'cover, genre and year']]) {
+    t.is(parseSearch({ items: [{ ...playlist, ...extra }], next: null }, 'playlist'), null, 'playlist search: ' + why)
+    t.is(parseItem({ ...playlist, ...extra, tracks: [] }, 'playlist'), null, 'playlist item: ' + why)
+    t.is(parseResolve({ kind: 'playlist', item: { ...playlist, ...extra } }), null, 'playlist resolve: ' + why)
+  }
+  const card = musicCardFields(info, { kind: 'track', id: info.id, start: null })
+  t.alike(Object.keys(card).sort(), ['desc', 'host', 'title', 'url'], 'song info never reaches a card')
+  t.is(card.desc, 'Artista')
+})
+
+test('musicInfoLine: artist, genre and year, only the parts present', async (t) => {
+  const { musicInfoLine, musicRowLine } = await load()
+  t.is(musicInfoLine({ ...track, genre: 'Samba', year: 2020 }), 'Artista · Samba · 2020')
+  t.is(musicInfoLine({ ...track, genre: 'Samba' }), 'Artista · Samba')
+  t.is(musicInfoLine({ ...track, year: 2020 }), 'Artista · 2020')
+  t.is(musicInfoLine(track), 'Artista', 'no duration')
+  t.is(musicInfoLine(playlist), 'Artista')
+  t.is(musicInfoLine({ genre: 'Samba', year: 2020 }), 'Samba · 2020')
+  t.is(musicInfoLine({ artist: 'A\u0000B', genre: 'Samba' }), 'A\u0000B · Samba', 'raw provider text')
+  t.is(musicInfoLine({}), '')
+  for (const v of [null, undefined, 'track', 5]) t.is(musicInfoLine(v), '', String(v))
+  t.is(musicRowLine({ ...track, genre: 'Samba', year: 2020 }), 'Artista · 3:20', 'the row line is unchanged')
+})
+
 test('artMime knows JPEG, PNG and WebP and nothing else', async (t) => {
   const { artMime, MUSIC_ART_MAX_BYTES } = await load()
   t.is(MUSIC_ART_MAX_BYTES, 131072)

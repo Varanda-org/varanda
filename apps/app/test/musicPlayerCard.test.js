@@ -14,7 +14,7 @@ async function helpers (stubs = {}) {
   const deps = { ...music, ...playback, ...stubs }
   const body = source.slice(source.indexOf('export const musicPlayerIdle'), source.indexOf('export function useMusicAvailable')).replace(/\bexport /g, '')
   // eslint-disable-next-line no-new-func
-  return new Function(...Object.keys(deps), body + '\nreturn { musicPlayerIdle, musicPlayerTime, createMusicPlayback }')(...Object.values(deps))
+  return new Function(...Object.keys(deps), body + '\nreturn { musicPlayerIdle, AUTO_SEEK_MS, musicPlayerTime, createMusicPlayback }')(...Object.values(deps))
 }
 
 const track = (id = 'abc', duration = 90) => ({ id, title: 'Faixa ' + id, artist: 'Artista', duration, url: 'https://audius.co/artist/' + id })
@@ -69,7 +69,9 @@ async function fixture (t, options = {}) {
       return player
     },
     setTimeout: (fn, ms) => { timers.set(++serial, { fn, ms }); return serial },
-    clearTimeout: (id) => timers.delete(id)
+    clearTimeout: (id) => timers.delete(id),
+    // Records each claim and its release in order with the player calls.
+    ...(options.trackClaims ? { claimPlayback: (player, opts) => { calls.push(['claim', opts]); return () => calls.push(['unclaim']) } } : {})
   })
   const playback = h.createMusicPlayback({ ...session, ...options.session }, music, (state) => states.push(state))
   t.teardown(() => playback.release())
@@ -809,6 +811,322 @@ test('service and stream failures use fixed texts, report once and never reconne
     t.is(f.tickets.length, 1)
     await f.playback.press()
     t.is(f.tickets.length, 2)
+  }
+})
+
+const refusal = (direct = false) => direct
+  ? Object.assign(new Error('gesture'), { name: 'NotAllowedError' })
+  : Object.assign(new Error('falha no áudio'), { code: 'play', cause: Object.assign(new Error('gesture'), { name: 'NotAllowedError' }) })
+const claims = (calls) => calls.filter((c) => c[0] === 'claim' || c[0] === 'unclaim').map((c) => c[0])
+
+test('stop while loading aborts the request, lets go of the claim and never plays', async (t) => {
+  const { claimPlayback } = await import('../src/media/chatMedia.js')
+  const ticket = deferred()
+  const entered = deferred()
+  const f = await fixture(t, { ticket: () => { entered.resolve(); return ticket.promise } })
+  const running = f.playback.press()
+  await entered.promise
+  t.is(f.states.at(-1).phase, 'loading')
+  f.playback.stop()
+  t.ok(f.tickets[0].opts.signal.aborted)
+  t.is(f.states.at(-1).phase, 'idle')
+  t.is(f.states.at(-1).blocked, false)
+  const updates = f.states.length
+  const releaseOther = claimPlayback({ pause () {} })
+  t.is(f.states.length, updates, 'another claim no longer reaches this controller')
+  ticket.resolve(answer)
+  await running
+  t.is(f.states.length, updates, 'the late ticket has no UI update')
+  t.alike(f.calls, [])
+  releaseOther()
+})
+
+test('stop on a paused track lets go of the claim and the next press reuses the valid ticket', async (t) => {
+  const { claimPlayback } = await import('../src/media/chatMedia.js')
+  const f = await fixture(t, { music: { kind: 'track', id: 'abc', start: null } })
+  await f.playback.press()
+  f.players[0].progress({ ms: 12000, playing: true })
+  await f.playback.press()
+  t.is(f.states.at(-1).phase, 'paused')
+  f.playback.stop()
+  t.is(f.states.at(-1).phase, 'idle')
+  t.is(f.states.at(-1).blocked, false)
+  t.ok(f.calls.some((c) => c[0] === 'release'), 'the paused player is released')
+  const updates = f.states.length
+  const releaseOther = claimPlayback({ pause () {} })
+  t.is(f.states.length, updates, 'another claim does not call this controller')
+  releaseOther()
+  await f.playback.press()
+  t.is(f.tickets.length, 1, 'no second ticket while it is valid')
+  t.is(f.players.length, 2)
+  t.alike(f.calls.filter((c) => c[0] === 'seek'), [['seek', 12000]], 'the position is kept')
+  t.is(f.calls.filter((c) => c[0] === 'play').length, 2)
+  t.is(f.states.at(-1).phase, 'playing')
+})
+
+test('an autoplay refusal pauses with blocked, keeps the player and the tap plays it', async (t) => {
+  const { claimPlayback } = await import('../src/media/chatMedia.js')
+  for (const [music, direct] of [
+    [{ kind: 'track', id: 'abc', start: null }, false],
+    [{ kind: 'snippet', id: 'abc', start: 30 }, false],
+    [{ kind: 'track', id: 'abc', start: null }, true]
+  ]) {
+    const label = music.kind + (direct ? ' direct' : ' cause')
+    const f = await fixture(t, { music })
+    await f.playback.press()
+    t.is(f.states.at(-1).phase, 'playing', label)
+    f.players[0].progress({ ms: 31000, playing: true })
+    f.players[0].error(refusal(direct))
+    const blocked = f.states.at(-1)
+    t.is(blocked.phase, 'paused', label)
+    t.is(blocked.blocked, true, label)
+    t.is(blocked.error, '', label)
+    t.is(f.calls.at(-1)[0], 'pause', label)
+    t.absent(f.calls.some((c) => c[0] === 'release'), label + ': the player stays')
+    t.is(f.players[0].errors.size, 1, label + ': still subscribed')
+    t.is(f.timers.size, 0, label + ': no snippet timer while blocked')
+    const updates = f.states.length
+    const releaseOther = claimPlayback({ pause () {} })
+    t.is(f.states.length, updates, label + ': a blocked card holds no claim')
+    t.absent(f.calls.some((c) => c[0] === 'release'), label)
+    releaseOther()
+    await f.playback.press()
+    t.is(f.players.length, 1, label + ': the same player plays')
+    t.is(f.tickets.length, 1, label + ': no new ticket')
+    t.is(f.calls.filter((c) => c[0] === 'play').length, 2, label)
+    t.is(f.states.at(-1).phase, 'playing', label)
+    t.is(f.states.at(-1).blocked, false, label)
+  }
+})
+
+test('other stream errors keep blocked false and still clear the ticket', async (t) => {
+  const { MUSIC_UNAVAILABLE_TEXT } = await import('../src/music.js')
+  const other = Object.assign(new Error('falha no áudio'), { code: 'play', cause: Object.assign(new Error('format'), { name: 'NotSupportedError' }) })
+  for (const err of [{ code: 'media' }, other]) {
+    const f = await fixture(t, { music: { kind: 'track', id: 'abc', start: null } })
+    await f.playback.press()
+    f.players[0].error(err)
+    t.is(f.states.at(-1).phase, 'idle')
+    t.is(f.states.at(-1).blocked, false)
+    t.is(f.states.at(-1).error, MUSIC_UNAVAILABLE_TEXT)
+    t.ok(f.calls.some((c) => c[0] === 'release'))
+    await f.playback.press()
+    t.is(f.tickets.length, 2, 'the ticket was cleared')
+  }
+  const seek = deferred()
+  const entered = deferred()
+  const f = await fixture(t, { seek: () => { entered.resolve(); return seek.promise } })
+  const running = f.playback.press()
+  await entered.promise
+  f.players[0].error(refusal())
+  t.is(f.states.at(-1).blocked, false, 'a refusal outside playing is an ordinary error')
+  t.is(f.states.at(-1).error, MUSIC_UNAVAILABLE_TEXT)
+  seek.resolve()
+  await running
+  t.absent(f.calls.some((c) => c[0] === 'play'))
+})
+
+test('pausing a full track lets go of the claim and resuming claims again before play', async (t) => {
+  const { playbackEpoch } = await import('../src/media/chatMedia.js')
+  const f = await fixture(t, { music: { kind: 'track', id: 'abc', start: null }, trackClaims: true })
+  await f.playback.press()
+  t.alike(claims(f.calls), ['claim'])
+  await f.playback.press()
+  t.is(f.states.at(-1).phase, 'paused')
+  t.alike(f.calls.slice(-2), [['pause'], ['unclaim']])
+  const mark = f.calls.length
+  await f.playback.press()
+  t.alike(f.calls.slice(mark), [['claim', { bound: true, epoch: playbackEpoch() }], ['play']], 'claim before play')
+  t.is(f.players.length, 1)
+  t.is(f.tickets.length, 1)
+  await f.playback.press()
+  f.playback.stop()
+  t.alike(claims(f.calls), ['claim', 'unclaim', 'claim', 'unclaim'], 'a paused job is disposed without a second release')
+  t.ok(f.calls.some((c) => c[0] === 'release'))
+})
+
+test('after an autoplay refusal the claim is released and the tap claims again', async (t) => {
+  const f = await fixture(t, { music: { kind: 'track', id: 'abc', start: null }, trackClaims: true })
+  await f.playback.press()
+  f.players[0].error(refusal())
+  t.alike(claims(f.calls), ['claim', 'unclaim'])
+  const mark = f.calls.length
+  await f.playback.press()
+  t.alike(f.calls.slice(mark).map((c) => c[0]), ['claim', 'play'])
+  t.is(f.players.length, 1)
+  t.is(f.states.at(-1).blocked, false)
+})
+
+test('stop clears blocked after an autoplay refusal', async (t) => {
+  const f = await fixture(t, { music: { kind: 'track', id: 'abc', start: null } })
+  await f.playback.press()
+  f.players[0].error(refusal())
+  t.is(f.states.at(-1).blocked, true)
+  f.playback.stop()
+  t.is(f.states.at(-1).phase, 'idle')
+  t.is(f.states.at(-1).blocked, false)
+  t.ok(f.calls.some((c) => c[0] === 'release'))
+})
+
+test('a paused track left behind by a screen change starts again on the next press', async (t) => {
+  const { stopBoundPlayback } = await import('../src/media/chatMedia.js')
+  const f = await fixture(t, { music: { kind: 'track', id: 'abc', start: null } })
+  await f.playback.press()
+  f.players[0].progress({ ms: 12000, playing: true })
+  await f.playback.press()
+  t.is(f.states.at(-1).phase, 'paused')
+  stopBoundPlayback()
+  await f.playback.press()
+  t.ok(f.calls.some((c) => c[0] === 'release'), 'the old job is disposed')
+  t.is(f.players.length, 2)
+  t.is(f.tickets.length, 1)
+  t.alike(f.calls.filter((c) => c[0] === 'seek'), [['seek', 12000]])
+  t.is(f.states.at(-1).phase, 'playing')
+})
+
+test('an automatic seek that never settles blocks after AUTO_SEEK_MS and the tap reuses the ticket', async (t) => {
+  const { AUTO_SEEK_MS } = await helpers()
+  t.is(AUTO_SEEK_MS, 5000)
+  let hang = true
+  const entered = deferred()
+  const f = await fixture(t, { seek: () => { if (hang) { entered.resolve(); return new Promise(() => {}) } } })
+  const running = f.playback.press(undefined, { auto: true })
+  await entered.promise
+  const limit = [...f.timers.values()].find((timer) => timer.ms === AUTO_SEEK_MS)
+  t.ok(limit, 'the automatic seek races a timer')
+  t.is(f.states.at(-1).phase, 'loading')
+  limit.fn()
+  await running
+  t.is(f.states.at(-1).phase, 'idle')
+  t.is(f.states.at(-1).blocked, true)
+  t.is(f.states.at(-1).error, '')
+  t.ok(f.calls.some((c) => c[0] === 'release'), 'the player is released')
+  t.absent(f.calls.some((c) => c[0] === 'play'))
+  t.is(f.timers.size, 0)
+  hang = false
+  await f.playback.press()
+  t.is(f.tickets.length, 1, 'no new ticket while it is valid')
+  t.is(f.items.length, 1, 'the item is kept')
+  t.is(f.players.length, 2)
+  t.is(f.states.at(-1).phase, 'playing')
+  t.is(f.states.at(-1).blocked, false)
+})
+
+test('an automatic seek timeout reported by the player blocks, and a manual seek keeps its error', async (t) => {
+  const { MUSIC_SEEK_TEXT } = await import('../src/music.js')
+  const reported = await fixture(t, {
+    seek: (ms, player) => {
+      const err = Object.assign(new Error('falha no áudio'), { code: 'seek-timeout' })
+      player.error(err)
+      throw err
+    }
+  })
+  await reported.playback.press(undefined, { auto: true })
+  t.is(reported.states.at(-1).phase, 'idle')
+  t.is(reported.states.at(-1).blocked, true)
+  t.is(reported.states.at(-1).error, '')
+  t.absent(reported.calls.some((c) => c[0] === 'play'))
+  const seek = deferred()
+  const entered = deferred()
+  const f = await fixture(t, { seek: () => { entered.resolve(); return seek.promise } })
+  const running = f.playback.press()
+  await entered.promise
+  t.alike([...f.timers.values()], [], 'a manual seek has no early limit')
+  seek.reject(Object.assign(new Error('falha no áudio'), { code: 'seek-timeout' }))
+  await running
+  t.is(f.states.at(-1).error, MUSIC_SEEK_TEXT)
+  t.is(f.states.at(-1).blocked, false)
+})
+
+test('an automatic seek rejection without onError fails quietly and never blocks', async (t) => {
+  const { MUSIC_SEEK_TEXT } = await import('../src/music.js')
+  for (const code of ['seek-range', 'seek', 'seek-timeout']) {
+    const f = await fixture(t, { trackClaims: true, seek: () => { throw Object.assign(new Error('falha'), { code }) } })
+    await f.playback.press(undefined, { auto: true })
+    t.is(f.states.at(-1).phase, 'idle', code)
+    t.is(f.states.at(-1).error, MUSIC_SEEK_TEXT, code)
+    t.not(f.states.at(-1).blocked, true, code)
+    t.absent(f.calls.some((c) => c[0] === 'play'), code)
+    t.ok(f.calls.some((c) => c[0] === 'release'), code + ': the player is released')
+    t.is(f.calls.filter((c) => c[0] === 'claim').length, f.calls.filter((c) => c[0] === 'unclaim').length, code + ': the claim is released')
+    t.is(f.timers.size, 0, code)
+  }
+})
+
+test('an automatic seek that is superseded or released stops silently', async (t) => {
+  for (const code of ['superseded', 'released']) {
+    const f = await fixture(t, { seek: () => { throw Object.assign(new Error(), { code }) } })
+    await f.playback.press(undefined, { auto: true })
+    t.is(f.states.at(-1).phase, 'idle', code)
+    t.is(f.states.at(-1).error, '', code)
+    t.not(f.states.at(-1).blocked, true, code)
+    t.absent(f.calls.some((c) => c[0] === 'play'), code)
+  }
+})
+
+test('a seek that rejects after the automatic limit changes nothing', async (t) => {
+  const { AUTO_SEEK_MS } = await helpers()
+  const unhandled = []
+  const onUnhandled = (err) => unhandled.push(err)
+  process.on('unhandledRejection', onUnhandled)
+  t.teardown(() => process.off('unhandledRejection', onUnhandled))
+  const seek = deferred()
+  const entered = deferred()
+  const f = await fixture(t, { seek: () => { entered.resolve(); return seek.promise } })
+  const running = f.playback.press(undefined, { auto: true })
+  await entered.promise
+  ;[...f.timers.values()].find((timer) => timer.ms === AUTO_SEEK_MS).fn()
+  await running
+  t.is(f.states.at(-1).blocked, true)
+  const count = f.states.length
+  seek.reject(Object.assign(new Error('falha'), { code: 'seek-range' }))
+  await flush()
+  await flush()
+  t.is(f.states.length, count, 'no state after the late rejection')
+  t.is(f.states.at(-1).blocked, true)
+  t.is(f.states.at(-1).error, '')
+  t.alike(unhandled, [])
+})
+
+test('a retry after an unavailable check clears fallback', async (t) => {
+  let available = false
+  const f = await fixture(t, { ready: () => available })
+  await f.playback.press()
+  t.is(f.states.at(-1).fallback, true)
+  t.is(f.states.at(-1).phase, 'idle')
+  available = true
+  const mark = f.states.length
+  await f.playback.press()
+  const loading = f.states.slice(mark).find((s) => s.phase === 'loading')
+  t.ok(loading, 'the retry publishes a loading state')
+  t.is(loading.fallback, false, 'loading already drops fallback')
+  t.is(f.states.at(-1).phase, 'playing')
+  t.is(f.states.at(-1).fallback, false)
+})
+
+test('an automatic seek that settles in time plays and drops its timer', async (t) => {
+  const f = await fixture(t)
+  await f.playback.press(undefined, { auto: true })
+  t.is(f.states.at(-1).phase, 'playing')
+  t.is(f.timers.size, 0)
+  t.is(f.calls.filter((c) => c[0] === 'play').length, 1)
+})
+
+test('a blocked tap with an expired ticket starts again and a second refusal blocks again', async (t) => {
+  for (const music of [{ kind: 'track', id: 'abc', start: null }, { kind: 'snippet', id: 'abc', start: 30 }]) {
+    const f = await fixture(t, { music, ticket: () => ({ ...answer, expiresAt: '2000-01-01T00:00:00Z' }), play: (player) => player.error(refusal()) })
+    await f.playback.press(undefined, { auto: true })
+    t.is(f.states.at(-1).phase, 'paused', music.kind)
+    t.is(f.states.at(-1).blocked, true, music.kind)
+    const mark = f.states.length
+    await f.playback.press()
+    t.is(f.tickets.length, 2, music.kind + ': the expired ticket is renewed through start')
+    t.is(f.players.length, 2, music.kind)
+    t.ok(f.calls.some((c) => c[0] === 'release'), music.kind + ': the old player is released')
+    t.ok(f.states.slice(mark).some((s) => s.phase === 'loading' && s.blocked === false), music.kind + ': start clears blocked')
+    t.is(f.states.at(-1).phase, 'paused', music.kind)
+    t.is(f.states.at(-1).blocked, true, music.kind)
+    t.is(f.states.at(-1).error, '', music.kind)
   }
 })
 

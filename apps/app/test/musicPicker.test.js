@@ -552,7 +552,7 @@ test('rows and the editor ask a cover only through useMusicCover', async (t) => 
   const props = { item, start: 0, modes: ['snippet', 'track', 'playlist'], session, stopRef: { current: null } }
   for (const kind of ['snippet', 'track', 'playlist']) {
     const tree = h.render(h.MusicEditor, { ...props, kind })
-    t.alike(calls.at(-1), [kind === 'playlist' ? 'playlist' : 'track', item, session])
+    t.alike(calls.at(-1), [kind === 'playlist' ? 'playlist' : 'track', item, session, true, true])
     t.alike(flatten(tree).find((n) => n.type === 'MusicCover').props, { size: 160, uri })
   }
   cover = null

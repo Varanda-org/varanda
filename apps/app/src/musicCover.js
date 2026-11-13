@@ -12,10 +12,12 @@ const COVER_MIMES = ['image/jpeg', 'image/png', 'image/webp']
 const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/
 
 // The key carries the session's origin and member: one person's covers are
-// never answered to another, or from another installation.
+// never answered to another, or from another installation. The large cover
+// has its own key, so the two sizes never answer each other.
 export function coverKey (kind, id, session) {
   const s = session || {}
-  return [s.origin ?? '', s.member ?? '', kind, id].join('|')
+  const key = [s.origin ?? '', s.member ?? '', kind, id].join('|')
+  return s.large === true ? key + '|480' : key
 }
 
 export function coverUri (mime, base64) {
@@ -129,5 +131,13 @@ export function createCoverCache ({ load, max = 48, parallel = 3 } = {}) {
     }
   }
 
-  return { get, clear }
+  // A settled cover only, or null: never loads, queues or waits. For a sticker
+  // that may show a cover already paid for but must not ask for one.
+  function peek (kind, id, session) {
+    if (!session || typeof session !== 'object') return null
+    const key = coverKey(kind, id, session)
+    return entries.has(key) ? entries.get(key) : null
+  }
+
+  return { get, peek, clear }
 }
