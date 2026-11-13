@@ -8046,7 +8046,7 @@ Situação, em 2026-11-12 (Vitrine, Metro na porta 8090). Cada caixa só é marc
 - [ ] Chrome, 1280 px: não percorrido.
 - Defeitos: nenhum visto no que foi percorrido. Na folha "Fazer oferta" com texto grande no Android, o conteúdo ficava colado nas bordas da tela (sem margem lateral) e os botões "Enviar oferta" e "Cancelar" ficavam à esquerda com a largura do texto (`v5-shots/a10.png`); corrigido neste PR (margens da folha, `styles.sheet` em `apps/app/src/screens/Mensagem.js`), não reconferido no aparelho.
 
-## 183. Conversas: formatação, blocos de código e spoilers (PR feat/chat-formatting)
+## 194. Conversas: formatação, blocos de código e spoilers (PR feat/chat-formatting)
 
 Sexto PR da revisão visual do app. Nas mensagens diretas, nos grupos e nas conversas de comunidade, o texto pode ter *negrito*, _itálico_, ~riscado~, `código`, blocos de código e ||spoiler||. O marcador viaja como texto simples: quem tem um build mais antigo vê os marcadores crus.
 
