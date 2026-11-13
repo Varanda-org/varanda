@@ -8628,7 +8628,7 @@ Usar uma instalação de teste, sem DHT pública, com a música do Audius ligada
 - [ ] Capas desligadas (`VARANDA_AUDIUS_COVERS` ausente, vazio ou `0`): seletor, editor, adesivo do compositor, cartão da publicação e visualizador do momento mostram o azulejo gerado, e nenhum pedido vai a `/account/audius/art`.
 - [ ] Capas ligadas (`VARANDA_AUDIUS_COVERS=1`) contra uma chave de teste: o seletor, o editor e o adesivo do compositor mostram a capa.
 - [ ] Uma publicação vista por uma segunda conta: nenhum pedido de capa antes do toque; depois do toque em **Ouvir**, **Ouvir trecho** ou **Ouvir playlist**, a capa aparece enquanto o cartão está ativo.
-- [ ] No visualizador do momento, a capa só aparece enquanto a música daquele momento toca.
+- [ ] No visualizador do momento, a capa só aparece depois que a música daquele momento começa a tocar e continua ao silenciar.
 - [ ] Nenhum arquivo de capa no diretório de cache do app.
 - [ ] Uma capa que falha uma vez mostra o azulejo na hora e pode aparecer numa vista seguinte. Não há nova tentativa automática.
 - [ ] Uma linha de busca que sai da tela antes de a capa começar a carregar não dispara o pedido.
