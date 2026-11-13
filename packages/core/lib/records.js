@@ -548,7 +548,7 @@ function check (record, seq) {
     if (withMedia && !validDeleteRanges(record.media)) return 'media-invalid'
     return null
   }
-  // The author's consent to the public page (docs/protocol.md section 2, "Public share"):
+  // The author's consent to the public page (docs/protocol.md section 2, "Public share", and section 16):
   // whether block `seq` is a live post of this diary is the fold's check,
   // this module sees one record.
   if (type === 'post-share') {
