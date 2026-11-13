@@ -4,6 +4,66 @@
 import { threadOf } from './dm.js'
 import { dayHeading } from './format.js'
 import { sendPlan as attachmentSendPlan } from './attach-plan.js'
+import { plainPreview } from './chatPreview.js'
+
+export function dmReactions (reactions) {
+  return (Array.isArray(reactions) ? reactions : [])
+    .filter((row) => row && typeof row.emoji === 'string' && row.emoji !== '')
+    .map((row) => ({ emoji: row.emoji, count: 1, mine: row.mine === true }))
+}
+
+// dm.thread marks a row that takes no reaction (stored before message
+// digests) with reactable: false; the node refuses dm.react on it.
+export function dmReactable (message) {
+  return !!message && !message.deleted && message.reactable !== false
+}
+
+// A held older row takes only the reaction state of a fresh read: its
+// reactions and its reactable mark.
+export function withFreshReactions (row, fresh) {
+  const { reactable, ...rest } = row
+  return { ...rest, reactions: fresh.reactions, ...(fresh.reactable === false ? { reactable: false } : {}) }
+}
+
+// An incomplete answer can identify a person; an index hint cannot hide chips.
+export function dmReactionGate ({ read, peer, peerKind, pageKey = null, hosted, unlocked, online, isTop, blocked, folder }) {
+  const hidden = pageKey !== null || peerKind === 'page'
+  const disabled = hidden || read?.page !== peer || !hosted || !unlocked || !online || !isTop || blocked || folder !== 'inbox'
+  return { hidden, disabled }
+}
+
+// Keep the first choice across the whole burst: returning to it costs no stamps.
+export function reactDebounce (ms = 600, clock = globalThis) {
+  const pending = new Map()
+  const cancel = (key) => {
+    const entry = pending.get(key)
+    if (!entry) return
+    clock.clearTimeout(entry.timer)
+    pending.delete(key)
+    entry.onCancel()
+  }
+  const dispatch = (key, flushing = false) => {
+    const entry = pending.get(key)
+    if (!entry) return
+    clock.clearTimeout(entry.timer)
+    pending.delete(key)
+    if (entry.emoji === entry.starting && !entry.retry) entry.onCancel()
+    else entry.send(entry.emoji, flushing)
+  }
+  return {
+    has: (key) => pending.has(key),
+    flush: () => { for (const key of pending.keys()) dispatch(key, true) },
+    cancel,
+    clear: () => { for (const key of pending.keys()) cancel(key) },
+    schedule (key, starting, emoji, send, onCancel = () => {}, retry = false) {
+      const previous = pending.get(key)
+      if (previous) clock.clearTimeout(previous.timer)
+      const entry = { starting: previous ? previous.starting : starting, emoji, send, onCancel, retry }
+      entry.timer = clock.setTimeout(() => dispatch(key), ms)
+      pending.set(key, entry)
+    }
+  }
+}
 
 // A message id is unique only per sender (docs/rpc.md 5.78): a row is keyed
 // by sender and id together.
@@ -51,6 +111,7 @@ export function threadRows (messages) {
       ...row,
       key: messageKey(source),
       mine: source.mine === true,
+      reactions: dmReactions(source.reactions),
       from: typeof source.from === 'string' ? source.from : null,
       rawText: typeof source.text === 'string' ? source.text : ''
     }
@@ -167,7 +228,7 @@ export function pinToEnd (state, event) {
 
 // One line for a conversation preview: a line break would show as U+FFFD.
 export function previewLine (value) {
-  return typeof value === 'string' ? value.replace(/\r?\n/g, ' ') : ''
+  return plainPreview(value).replace(/\r?\n/g, ' ')
 }
 
 // Enviar while a send is held as uncertain: the same text and quote re-put

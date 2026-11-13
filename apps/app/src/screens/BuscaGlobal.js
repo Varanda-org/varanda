@@ -39,7 +39,7 @@ import { HelpNote } from '../ui/Help'
 import { Icon } from '../ui/Icon'
 import { MemberRow } from '../ui/MemberRow'
 import { Pill } from '../ui/Pill'
-import { EmptyState, Skeleton } from '../ui/States'
+import { EmptyState, SkeletonRow } from '../ui/States'
 import { layout, radius, space, type, webInputReset } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { useMemberSearch } from '../useMemberSearch'
@@ -49,7 +49,7 @@ import { useFollowSet } from './Conversa'
 const NO_DRAFTS = Object.freeze({ contas: '', publicacoes: '' })
 
 // The rounded field of the Conversas search: lupa, system font, clear X.
-function SearchField ({ label, placeholder, value, onChangeText, maxLength, onSubmitEditing }) {
+function SearchField ({ label, placeholder, value, onChangeText, maxLength, onSubmitEditing, inputRef }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   // Both panes: a keyboard that rewrites the query before the typing pause
@@ -60,6 +60,7 @@ function SearchField ({ label, placeholder, value, onChangeText, maxLength, onSu
     <View style={[styles.search, focused && styles.searchFocused]}>
       <Icon name='lupa' size={20} color={colors.soft} />
       <TextInput
+        ref={inputRef}
         style={[styles.input, webInputReset]}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
@@ -95,6 +96,7 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
   const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
   const names = useNames()
   const bottomPad = useBottomPad()
+  const inputRef = useRef(null)
   const [category, setCategory] = useState('contas')
   const [drafts, setDrafts] = useState(NO_DRAFTS)
   const draft = drafts[category]
@@ -265,17 +267,16 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
       {handle !== null && !hits.some((h) => typeof h.username === 'string' && h.username.toLowerCase() === handle)
         ? <View style={styles.addRow}><Pill label='Seguir' accessibilityLabel={'seguir @' + handle} filled onPress={doAdd} pending={add.pending} disabled={changing || offline || !followsReady} /></View>
         : null}
-      {searchable && (offline || search.phase === 'offline') ? <Soft>A busca precisa de internet.</Soft> : null}
+      {searchable && (offline || search.phase === 'offline') ? <EmptyState icon='lupa' title='Sem conexão' body='A busca precisa de internet.' actionLabel='Tentar de novo' onAction={handleRetry} secondaryLabel='Limpar' onSecondary={() => onChangeText('')} /> : null}
       {searchable && search.phase === 'short' ? <Soft>Digite pelo menos 2 letras.</Soft> : null}
       {searchable && search.phase === 'error'
         ? (
-          <>
-            <ErrorText>{search.error}</ErrorText>
-            <View style={styles.addRow}><Pill label='Tentar de novo' onPress={handleRetry} /></View>
-          </>
+          <EmptyState icon='lupa' title='Não foi possível buscar' body={search.error} actionLabel='Tentar de novo' onAction={handleRetry} secondaryLabel='Limpar' onSecondary={() => onChangeText('')} />
           )
         : null}
-      {search.phase === 'loading' && hits.length === 0 ? <View style={styles.bleed}><Skeleton rows={2} /></View> : null}
+      {search.phase === 'loading' && hits.length === 0
+        ? <View accessibilityLiveRegion='polite'><Soft>Buscando pessoas…</Soft><View style={styles.bleed}><SkeletonRow /><SkeletonRow /></View></View>
+        : null}
       {hits.length > 0
         ? (
           <View style={styles.bleed}>
@@ -296,13 +297,10 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
           </View>
           )
         : null}
-      {ready && hits.length === 0 && search.unchecked === 0 ? <Soft>Ninguém encontrado com esse nome.</Soft> : null}
+      {ready && hits.length === 0 && search.unchecked === 0 ? <EmptyState icon='gente' title='Ninguém encontrado com esse nome.' actionLabel='Limpar' onAction={() => onChangeText('')} secondaryLabel='Tentar de novo' onSecondary={handleRetry} /> : null}
       {ready && hits.length === 0 && search.unchecked > 0
         ? (
-          <>
-            <Soft>Não deu para conferir todo mundo agora.</Soft>
-            <View style={styles.addRow}><Pill label='Tentar de novo' onPress={handleRetry} /></View>
-          </>
+          <EmptyState icon='gente' title='Não deu para conferir todo mundo agora.' actionLabel='Tentar de novo' onAction={handleRetry} secondaryLabel='Limpar' onSecondary={() => onChangeText('')} />
           )
         : null}
       {ready && hits.length > 0 && search.unchecked > 0 ? <Soft>Algumas pessoas não puderam ser conferidas agora.</Soft> : null}
@@ -337,7 +335,7 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
       <ErrorText>{follow.error || remove.error}</ErrorText>
       <Notice>{done}</Notice>
       {cls.kind === 'empty' && hits.length === 0
-        ? <EmptyState icon='gente' title={CATEGORY_LABEL.contas} body={hosted ? BUSCA_EMPTY.contas : BUSCA_EMPTY_CODE} />
+        ? <EmptyState icon='gente' title={CATEGORY_LABEL.contas} body={hosted ? BUSCA_EMPTY.contas : BUSCA_EMPTY_CODE} actionLabel={hosted ? BUSCA_LABEL.contas : 'Digitar código'} onAction={() => inputRef.current?.focus()} secondaryLabel={hosted ? CATEGORY_LABEL.publicacoes : undefined} onSecondary={() => setCategory('publicacoes')} />
         : null}
     </ScrollView>
   )
@@ -425,11 +423,17 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
 
   let postsPane
   if (postsGate === 'not-hosted') {
-    postsPane = <EmptyState icon='lupa' title={BUSCA_NOT_HOSTED_TITLE} body={BUSCA_NOT_HOSTED} />
+    postsPane = <EmptyState icon='lupa' title={BUSCA_NOT_HOSTED_TITLE} body={BUSCA_NOT_HOSTED} actionLabel={CATEGORY_LABEL.contas} onAction={() => setCategory('contas')} />
   } else if (query === null) {
     postsPane = (
       <ScrollView ref={postsScroll} keyboardShouldPersistTaps='handled' contentContainerStyle={[styles.pane, { paddingBottom: bottomPad }]}>
-        <EmptyState icon='lupa' title={CATEGORY_LABEL.publicacoes} body={BUSCA_EMPTY.publicacoes} />
+        {drafts.publicacoes.trim() === ''
+          ? <EmptyState icon='lupa' title={CATEGORY_LABEL.publicacoes} body={BUSCA_EMPTY.publicacoes} actionLabel={BUSCA_LABEL.publicacoes} onAction={() => inputRef.current?.focus()} secondaryLabel={CATEGORY_LABEL.contas} onSecondary={() => setCategory('contas')} />
+          : plan('publicacoes', drafts.publicacoes).query === null
+            ? <EmptyState icon='lupa' title={SEARCH_INVALID} actionLabel='Editar busca' onAction={() => inputRef.current?.focus()} secondaryLabel='Limpar' onSecondary={() => onChangeText('')} />
+            : postsTimer.current !== null
+              ? <View accessibilityLiveRegion='polite'><Soft>Buscando publicações…</Soft><SkeletonRow /><SkeletonRow /><SkeletonRow /></View>
+              : <EmptyState icon='lupa' title={CATEGORY_LABEL.publicacoes} body={BUSCA_EMPTY.publicacoes} actionLabel='Editar busca' onAction={() => inputRef.current?.focus()} secondaryLabel='Limpar' onSecondary={() => onChangeText('')} />}
         <HelpNote doc={HELP.busca}><Soft>{SHORT.search}</Soft></HelpNote>
       </ScrollView>
     )
@@ -452,6 +456,7 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
         onOpenEngagers={onOpenEngagers}
         onFollowsChanged={onFollowsChanged}
         onToast={onToast}
+        onClear={() => onChangeText('')}
       />
     )
   }
@@ -471,6 +476,7 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
         {showField
           ? (
             <SearchField
+              inputRef={inputRef}
               label={category === 'contas' && !hosted ? CODE_FIELD_LABEL : BUSCA_LABEL[category]}
               placeholder={category === 'contas' && !hosted ? 'código da pessoa (64 letras e números)' : BUSCA_PLACEHOLDER[category]}
               value={draft}
@@ -520,7 +526,7 @@ const makeStyles = (colors) => StyleSheet.create({
   },
   searchFocused: { borderColor: colors.accent, backgroundColor: colors.card },
   input: { ...type.postText, flex: 1, minWidth: 0, minHeight: layout.hit - 3, paddingVertical: 0, color: colors.ink },
-  clear: { minWidth: space.xl, minHeight: space.xl, alignItems: 'center', justifyContent: 'center' },
+  clear: { minWidth: layout.hit, minHeight: layout.hit, alignItems: 'center', justifyContent: 'center' },
   pane: { paddingVertical: 12, paddingHorizontal: 16, gap: 8 },
   bleed: { marginHorizontal: -16 },
   addRow: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8 },

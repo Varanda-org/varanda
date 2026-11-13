@@ -11,11 +11,13 @@
 // A long press opens the ActionsSheet with `actions`; so does the chevron that
 // shows on hover or keyboard focus (web); screen readers get the same actions
 // as accessibility actions. A tap does nothing by surprise: only
-// a link (or, with onOpenMention, an @nome) in the text reacts.
+// a link (or, with onOpenMention, an @nome) in the text reacts, plus a
+// spoiler and a code block's own buttons.
 //
 // Props:
 //   item: { key, text, rawText, at, hidden, deleted, dayMark }. rawText (the
-//     sender's own text) goes through MentionText, which escapes it; without
+//     sender's own text) goes through MentionText, which escapes it, or
+//     through RichText when it has style markers (../richText.js); without
 //     a rawText string, or when hidden or deleted, `text` is drawn plain
 //     (italic and soft when hidden or deleted). Both go through displayText.
 //   mine, shape = 'single', now = Date.now()
@@ -35,19 +37,22 @@
 //   item.card: a stored link card (dm.thread / group.read `card`), drawn by
 //     ./LinkCard under the text from that data only; cardThumb says where
 //     its thumbnail is read ({ kind: 'group', diary, identity }, or
-//     { kind: 'dm', from, id, identity }, read as index 'card').
+//     { kind: 'dm', from, id, identity }, read as index 'card'). When the text
+//     has a spoiler, the card shows only for a link outside every spoiler.
 
-import { cloneElement, isValidElement, useState } from 'react'
+import { cloneElement, isValidElement, useMemo, useState } from 'react'
 import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { LABELS } from '../dm'
 import { FORWARDED_LABEL } from '../forward'
+import { hasRich, parseRich } from '../richText'
 import { ActionsSheet, usableActions } from './ActionsSheet'
 import { chatMediaBlock } from './ChatMedia'
 import { Icon } from './Icon'
 import { LinkCard } from './LinkCard'
 import { MentionText } from './MentionText'
 import { ReplyPreview, senderColor } from './ReplyPreview'
+import { RichText, cardBesideSpoilers } from './RichText'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, radius, space, type } from './theme'
 
@@ -78,7 +83,7 @@ export function bubbleMeta ({ at, mine, status }) {
 // The photos sit this close to the bubble's edge.
 const MEDIA_INSET = 4
 
-export function Bubble ({ item, mine = false, shape = 'single', name, handle, senderKey, avatar, quote, status, actions, actionsTitle, onOpenMention, below, media, forwarded, cardThumb }) {
+export function Bubble ({ item, mine = false, shape = 'single', name, handle, senderKey, avatar, quote, status, actions, actionsTitle, actionsHeader, onOpenMention, below, media, forwarded, cardThumb }) {
   const styles = useStyles(makeStyles)
   const { colors, scheme } = useTheme()
   const { width: screen } = useWindowDimensions()
@@ -109,13 +114,19 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
   // caption wraps under the photos.
   const block = withMedia && isValidElement(media) ? chatMediaBlock(media.props.refs, screen) : null
   const hug = block ? { width: block.width + 2 * MEDIA_INSET + (mine ? 0 : 2 * StyleSheet.hairlineWidth) } : null
-  const card = !muted && item.card && typeof item.card === 'object' ? item.card : null
   const empty = rich ? item.rawText === '' : typeof item.text !== 'string' || item.text === ''
   const body = withMedia && empty
     ? null
     : rich
       ? <MentionText text={item.rawText} onOpenMention={onOpenMention} onLongPress={rows.length > 0 ? () => setOpen(true) : undefined} style={styles.text} />
       : <Text style={[styles.text, muted && styles.muted]}>{displayText(typeof item.text === 'string' ? item.text : '', { multiline: true })}</Text>
+  // Markers in the raw text: RichText draws it, with its code blocks as Views
+  // beside its paragraphs, since a View cannot sit inside a Text.
+  const styled = rich && !empty && hasRich(item.rawText)
+  // Parsed once here, for the card check and for RichText.
+  const blocks = useMemo(() => (styled ? parseRich(item.rawText) : null), [styled, item.rawText])
+  const card = !muted && item.card && typeof item.card === 'object' ? cardBesideSpoilers(blocks, item.card) : null
+  const spacer = meta && !card ? <Text style={[styles.metaSpace, { color: fill }]}>{'   ' + meta}</Text> : null
   return (
     <View>
       {item.dayMark
@@ -126,7 +137,11 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
           ? <View style={styles.avatar}>{tail ? avatar : null}</View>
           : null}
         <View style={[styles.column, mine && styles.columnMine]}>
-          <View style={hug ? null : styles.fit}>
+          {/* On the web the column's children size to their content, and a
+              code block's sideways scroll or a long link counts its longest
+              line there, so without this cap the bubble ran past the column
+              and the screen. Photo and voice bubbles keep their own width. */}
+          <View style={hug ? null : styles.stack}>
             <Pressable
               accessibilityRole={rows.length > 0 ? 'button' : undefined}
               accessibilityHint={rows.length > 0 ? 'toque longo para ações' : undefined}
@@ -175,10 +190,14 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
                   real one, which floats at the bottom right as in WhatsApp. It is
                   painted in the bubble's own fill: Android ignores a transparent
                   color on a nested Text and would draw the time twice. */}
-              <Text style={styles.text}>
-                {body}
-                {meta && !card ? <Text style={[styles.metaSpace, { color: fill }]}>{'   ' + meta}</Text> : null}
-              </Text>
+              {styled
+                ? <RichText text={item.rawText} onOpenMention={onOpenMention} onLongPress={rows.length > 0 ? () => setOpen(true) : undefined} style={styles.text} trailer={spacer} blocks={blocks} />
+                : (
+                  <Text style={styles.text}>
+                    {body}
+                    {spacer}
+                  </Text>
+                  )}
               {card
                 ? (
                   <View style={[styles.cardBox, meta && styles.cardWithMeta]}>
@@ -225,7 +244,7 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
         </View>
       </View>
       {rows.length > 0
-        ? <ActionsSheet open={open} onClose={() => setOpen(false)} title={actionsTitle} actions={rows} />
+        ? <ActionsSheet open={open} onClose={() => setOpen(false)} title={actionsTitle} actions={rows} header={actionsHeader} />
         : null}
     </View>
   )
@@ -249,10 +268,7 @@ const makeStyles = (colors) => StyleSheet.create({
   avatar: { width: AVATAR, alignSelf: 'flex-end' },
   column: { maxWidth: '80%', alignItems: 'flex-start', gap: space.xs },
   columnMine: { alignItems: 'flex-end' },
-  // On the web a content-sized box grows to its longest unbroken word, so a long link pushed the
-  // bubble past the column and off the screen. Holding the wrapper to the column makes the text wrap.
-  // Photo and voice bubbles keep their own width (hug).
-  fit: { maxWidth: '100%' },
+  stack: { maxWidth: '100%' },
   bubble: {
     borderRadius: radius.bubble,
     paddingHorizontal: space.md,

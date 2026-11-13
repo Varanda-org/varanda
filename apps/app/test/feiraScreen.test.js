@@ -352,3 +352,107 @@ test('Feira source pins: large-text Anunciar, chip padding and keyboard dismisse
   t.ok(/import \{[^}]*\bKeyboard\b[^}]*\} from 'react-native'/.test(screen), 'Keyboard comes from react-native')
   t.ok(/row: \{[^}]*paddingVertical: space\.sm/.test(chips), 'filter chips have vertical padding')
 })
+
+test('view filters stay local: the dot, the partial note and a missing place', async (t) => {
+  const { viewFilters, viewFiltersActive, filtersDot, partialNoteVisible, placeMissing, screenState } = await load()
+  t.alike(viewFilters(), { sort: 'recentes', min: '', max: '', minCents: null, maxCents: null })
+  t.alike(viewFilters(null), viewFilters())
+  t.alike(viewFilters({ sort: 'nope', min: 1, max: null, minCents: -1, maxCents: 1.5 }), viewFilters())
+  t.alike(viewFilters({ sort: 'menor', min: '1,00', max: '9', minCents: 0, maxCents: 900 }), {
+    sort: 'menor', min: '1,00', max: '9', minCents: 0, maxCents: 900
+  })
+  t.alike(viewFilters({ sort: 'maior', minCents: 100, maxCents: 200 }), {
+    sort: 'maior', min: '', max: '', minCents: 100, maxCents: 200
+  })
+  t.absent(viewFiltersActive(viewFilters()))
+  t.ok(viewFiltersActive({ sort: 'menor' }))
+  t.ok(viewFiltersActive({ sort: 'maior' }))
+  t.ok(viewFiltersActive({ minCents: 0 }))
+  t.ok(viewFiltersActive({ maxCents: 0 }))
+  t.absent(viewFiltersActive({ min: '10', max: '20' }))
+  t.absent(filtersDot(viewFilters(), 'todos'))
+  t.absent(filtersDot(viewFilters(), ''))
+  t.ok(filtersDot(viewFilters(), 'produto'))
+  t.ok(filtersDot(viewFilters(), 'servico'))
+  t.ok(filtersDot(viewFilters(), 'procura'))
+  t.ok(filtersDot({ sort: 'menor' }, 'todos'))
+  t.ok(filtersDot({ maxCents: 50 }, 'todos'))
+  t.absent(partialNoteVisible(viewFilters(), true))
+  t.absent(partialNoteVisible({ sort: 'menor' }, false))
+  t.absent(partialNoteVisible({ sort: 'menor' }, null))
+  t.absent(partialNoteVisible({ sort: 'menor' }, 1))
+  t.ok(partialNoteVisible({ sort: 'menor' }, true))
+  t.ok(partialNoteVisible({ sort: 'maior' }, true))
+  t.ok(partialNoteVisible({ minCents: 0 }, true))
+  t.ok(partialNoteVisible({ maxCents: 10 }, true))
+  t.absent(partialNoteVisible({ sort: 'recentes', minCents: null, maxCents: null }, true))
+  const samples = [
+    {},
+    { uf: 'SP' },
+    { uf: 'SP', city: '  ' },
+    { uf: 'ZZ', city: 'Recife' },
+    filters,
+    { ...filters, city: 'Campinas' },
+    { ...filters, words: '!' }
+  ]
+  for (const sample of samples) {
+    const kind = screenState({ node, filters: sample, result: page() }).kind
+    t.is(placeMissing(sample), kind === 'location', 'place gate matches kind ' + kind)
+  }
+})
+
+test('Feira home source: hero, grid, place sheet and filters', (t) => {
+  const screen = readFileSync(join(__dirname, '../src/screens/Feira.js'), 'utf8')
+  const start = screen.indexOf('{filtering')
+  const end = screen.indexOf('{storageFailed')
+  const gated = start >= 0 && end > start ? screen.slice(start, end) : ''
+  t.ok(gated.includes('Onde você quer comprar e vender?'), 'hero is inside the header byAuthor skips')
+  t.ok(gated.includes('Como funciona'))
+  t.ok(gated.includes('<PlaceSheet'))
+  t.ok(gated.includes('<FeiraFilters'))
+  t.ok(gated.includes('<CategoryTiles'))
+  t.ok(gated.includes("label='Palavras'"))
+  t.ok(gated.includes("accessibilityLabel={'Trocar cidade, agora ' + placeLabel({ city: applied.city, uf: applied.uf })}"), 'the screen reader hears the current city')
+  t.ok(screen.includes("const showSkeletons = segment !== 'buscas' &&"), 'no listing skeletons under the saved searches')
+  t.ok(gated.includes("name='filtro'"))
+  t.ok(screen.indexOf('Onde você quer comprar e vender?') < screen.indexOf('Como funciona'))
+  t.ok(screen.indexOf('Como funciona') < screen.indexOf('Anuncie'))
+  t.ok(screen.indexOf('Anuncie') < screen.indexOf('Converse'))
+  t.ok(screen.indexOf('Converse') < screen.indexOf('Combine'))
+  t.ok(screen.indexOf('Combine') < screen.indexOf('Avalie'))
+  t.ok(screen.includes("label='Ver anúncios'"))
+  t.ok(screen.includes('placeLabel({ city: applied.city, uf: applied.uf })'))
+  t.ok(screen.includes("accessibilityLabel='Filtros'"))
+  t.ok(screen.includes('>Filtros<'))
+  t.ok(screen.includes('filtersDot(view, applied.kind)'))
+  t.ok(screen.includes('onPick={(place) => applyFilters({ ...filters, uf: place.uf, city: place.city })}'))
+  t.ok(screen.includes('setView(viewFilters(next))'))
+  t.ok(screen.includes('applyFilters({ ...filters, kind: next.kind })'))
+  t.ok(screen.includes('onChange={(cat) => applyFilters({ ...filters, cat })}'))
+  t.ok(screen.includes('const showHero = filtering && segment === \'cidade\' && locationReady && placeMissing(applied)'))
+  t.ok(screen.includes('const columns = columnsFor(width, fontScale >= LARGE_TEXT)'))
+  t.ok(screen.includes('const browsed = browseListings(rows, cityBrowse ? view : viewFilters())'))
+  t.ok(screen.includes('const grid = gridRows(controls && !showHero ? browsed : [], columns)'))
+  t.ok(screen.includes('data={grid}'))
+  t.ok(screen.includes('<ListingTile'))
+  t.ok(screen.includes('width={tileWidth}'))
+  t.ok(screen.includes('const note = cityBrowse && partialNoteVisible(view, !!(result && result.next !== null))'))
+  t.ok(screen.includes('const pagePending = active && cityBrowse && !result && state.kind === \'empty\''))
+  t.ok(screen.includes('const showEmpty = cityBrowse && browsed.length === 0 && result !== null && (state.kind === \'empty\' || state.kind === \'ready\')'))
+  t.ok(screen.includes('const showSkeletons = segment !== \'buscas\' && browsed.length === 0 && !showHero && (state.kind === \'loading\' || pagePending)'))
+  t.ok(screen.includes('fieldText(event, filters.words)'))
+  t.ok(screen.includes('city: fieldText(event, filters.city)'))
+  const applyBody = screen.slice(screen.indexOf('function applyFilters'), screen.indexOf('async function saveSearch'))
+  t.ok(applyBody.includes("setPlaceError('')"), 'a new search clears the hero place error')
+  t.ok(screen.includes('{PARTIAL_NOTE}'))
+  t.ok(screen.includes('<SkeletonTile'))
+  t.ok(screen.includes('<EmptyState'))
+  t.ok(screen.includes("actionLabel='Limpar filtros'"))
+  t.ok(screen.includes("secondaryLabel='Trocar cidade'"))
+  t.ok(screen.includes('useWindowDimensions'))
+  t.ok(screen.includes('onLayout={(event) =>'))
+  t.ok(screen.includes('event.nativeEvent.layout.width'))
+  t.ok(/import \{[^}]*\bLARGE_TEXT\b[^}]*\} from '\.\.\/ui\/theme'/.test(screen))
+  t.absent(screen.includes('<ListingCard'))
+  t.absent(screen.includes("label='Palavras (opcional)'"))
+})

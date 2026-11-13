@@ -18,12 +18,13 @@
 // Comunidades tab.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native'
 import rpc from '@varanda/rpc'
 import { useNode } from '../node'
 import { shareCommunity } from '../communityShare'
 import { fetchCommunity } from '../indexClient'
 import { relativeTime } from '../format'
+import { readsAs } from '../who'
 import {
   AS_PAGE_LABEL, COMMUNITY_JOIN_LABELS, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_RESERVE_TEXT, DEVICE_WAIT_TEXT, GENERAL_LABEL, OWN_LABEL, PAGE_JOIN_LABEL, PAGE_LEAVE_LABEL, PRIVATE_LABEL,
   can, communityReserveReached, lastIsOwn, needsReserveConfirm, lastLine, membersLabel, needsDeviceJoin, pageCommunities, pageErrorText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, showNewGroup, unreadLabel, visibilityLabel
@@ -35,8 +36,9 @@ import { Body, Btn, Card, ErrorText, SectionHeader, Soft, Title, UNCERTAIN, erro
 import { ChatHeader } from '../ui/ChatHeader'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
+import { PressScale } from '../ui/PressScale'
 import { TopBar } from '../ui/TopBar'
-import { EmptyState, ErrorState, Skeleton } from '../ui/States'
+import { EmptyState, ErrorState, SkeletonRow } from '../ui/States'
 import { radius, space, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { shouldOpenQueued } from '../groupRedirect'
@@ -88,18 +90,19 @@ function JoinCard ({ title, header, join, showJoin, onJoin, pending, offline, er
 function GroupRow ({ title, detail, own, time, unread, onPress }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
+  const preview = displayText(detail || '')
+  const spokenPreview = !own && readsAs(preview.split(':')[0], OWN_LABEL) ? preview.replace(/^[^:]+:/, 'Pessoa:') : preview
   return (
-    <Pressable
+    <PressScale
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}
       accessibilityRole='button'
-      accessibilityLabel={unread ? title + ', ' + (unread === '1' ? '1 mensagem nova' : unread === '99+' ? '99 ou mais mensagens novas' : unread + ' mensagens novas') : title}
-      accessibilityHint='abre o grupo'
+      accessibilityLabel={[title, own ? OWN_LABEL + ': ' + spokenPreview : spokenPreview, time, unread ? (unread === '1' ? '1 mensagem nova' : unread === '99+' ? '99 ou mais mensagens novas' : unread + ' mensagens novas') : '', 'abre o grupo'].filter(Boolean).join(', ')}
       onPress={onPress}
     >
       <View style={styles.icon}><Icon name='cadeira' size={24} color={colors.ink} /></View>
       <View style={styles.hitText}>
         <View style={styles.line}>
-          <Text style={styles.name} numberOfLines={1}>{title}</Text>
+          <Text style={[styles.name, unread && styles.nameUnread]} numberOfLines={1}>{title}</Text>
           {time ? <Text style={[styles.time, unread && styles.timeUnread]}>{time}</Text> : null}
         </View>
         {detail || unread
@@ -107,14 +110,14 @@ function GroupRow ({ title, detail, own, time, unread, onPress }) {
             <View style={styles.line}>
               <Text style={[styles.handle, styles.grow]} numberOfLines={1}>
                 {own ? <Text style={styles.own}>{OWN_LABEL + ': '}</Text> : null}
-                {detail}
+                {displayText(detail || '')}
               </Text>
               {unread ? <View style={styles.badge}><Text style={styles.badgeText} maxFontSizeMultiplier={1.5}>{unread}</Text></View> : null}
             </View>
             )
           : null}
       </View>
-    </Pressable>
+    </PressScale>
   )
 }
 
@@ -487,7 +490,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
         </View>
         <SectionHeader>Grupos</SectionHeader>
         {idx.groups.length === 0
-          ? <View style={styles.block}><Soft>Nenhum grupo ainda.</Soft></View>
+          ? <EmptyState icon='gente' title='Nenhum grupo ainda.' actionLabel='Voltar' onAction={onBack} />
           : idx.groups.map((g) => (
             <GroupRow
               key={g.group}
@@ -499,11 +502,11 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
       </View>
     )
   } else if (info === null && loadError && idx.status === 'loading') {
-    body = <Skeleton />
+    body = <View>{[0, 1, 2].map((key) => <SkeletonRow key={key} />)}</View>
   } else if (info === null && loadError) {
     body = <ErrorState message={idx.status === 'error' ? idx.error : loadError} onRetry={() => { load(); loadIndex() }} pending={loading} />
   } else if (info === null) {
-    body = <Skeleton />
+    body = <View>{[0, 1, 2].map((key) => <SkeletonRow key={key} />)}</View>
   } else {
     // Role 'pending' on a held root: the account is in by another device and
     // its writers are still arriving here, so no newcomer join is offered.
@@ -550,7 +553,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
           : null}
         <SectionHeader>Grupos</SectionHeader>
         {ordered.length === 0
-          ? <View style={styles.block}><Soft>Nenhum grupo ainda.</Soft></View>
+          ? <EmptyState icon='gente' title='Nenhum grupo ainda.' actionLabel={canCreate && !offline ? 'Novo grupo' : 'Tentar de novo'} onAction={canCreate && !offline ? () => setNewGroup(true) : load} secondaryLabel='Voltar' onSecondary={onBack} />
           : ordered.map((g) => {
             const name = typeof g.name === 'string' && g.name !== '' ? displayText(g.name) : (g.general === true ? GENERAL_LABEL : PRIVATE_LABEL)
             // As the page: no personal role, last line or unread count.
@@ -647,24 +650,24 @@ const makeStyles = (colors) => StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: space.md,
-    paddingVertical: space.md,
-    paddingHorizontal: space.lg,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.line
+    minHeight: 72,
+    paddingVertical: 10,
+    paddingHorizontal: space.lg
   },
-  pressed: { opacity: 0.6 },
-  icon: { width: 44, height: 44, borderRadius: radius.pill, backgroundColor: colors.line, alignItems: 'center', justifyContent: 'center' },
+  pressed: { backgroundColor: colors.line },
+  icon: { width: 48, height: 48, borderRadius: radius.md, backgroundColor: colors.line, alignItems: 'center', justifyContent: 'center' },
   line: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
-  name: { ...type.postName, color: colors.ink, flex: 1 },
-  handle: { ...type.postMeta, color: colors.soft },
+  name: { ...type.postName, fontSize: 16, lineHeight: 21, fontWeight: '600', color: colors.ink, flex: 1, minWidth: 0 },
+  nameUnread: { fontWeight: '700' },
+  handle: { ...type.postMeta, fontSize: 14, lineHeight: 19, color: colors.soft },
   own: { color: colors.accent, fontWeight: '600' },
-  time: { fontSize: 12, color: colors.soft },
+  time: { ...type.replyMark, color: colors.soft, flexShrink: 0, textAlign: 'right' },
   // As in Conversas (ui/ConversationRow): an unread row's date takes the accent.
   timeUnread: { color: colors.accent, fontWeight: '600' },
-  grow: { flex: 1 },
+  grow: { flex: 1, minWidth: 0 },
   // minHeight and a font cap, as in ConversationRow: a fixed height clipped the
   // digits at large text.
   badge: { minWidth: 22, minHeight: 22, borderRadius: radius.pill, paddingHorizontal: space.sm, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
   badgeText: { fontSize: 12, fontWeight: '600', color: colors.accentInk },
-  hitText: { flex: 1 }
+  hitText: { flex: 1, minWidth: 0, gap: 2 }
 })

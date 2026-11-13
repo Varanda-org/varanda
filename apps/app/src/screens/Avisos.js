@@ -24,7 +24,7 @@
 // Names come from the item, never from a key. Rules: docs/app.md.
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { StyleSheet, Text, View } from 'react-native'
 import { NOTICES_LIMIT_DEFAULT, displayText } from '@varanda/rpc'
 import { get as actingGet, subscribe as actingSubscribe } from '../actingAs'
 import { relativeTime } from '../format'
@@ -36,7 +36,7 @@ import { fetchMember, invalidateMember } from '../indexClient'
 import { avatarOf, pickAvatar } from '../media/avatar'
 import {
   ACTIVITY_QUIET_TEXT, EMPTY_TEXT, EMPTY_TITLE, NOTICES_FIRST_READ_QUIET_MS, NOTICES_INCOMPLETE_TEXT, NOTICES_OFFLINE_MESSAGE, NOTICES_POLL_MS,
-  NOTICES_UNSUPPORTED_MESSAGE, NOTICES_WEB_ONLY_MESSAGE, PAGE_EMPTY_TEXT, PAGE_EMPTY_TITLE, PAGE_NOTICES_READ_LINE, PAGE_NOTICES_UNAVAILABLE_TITLE, SEEN_MAX,
+  NOTICES_UNSUPPORTED_MESSAGE, PAGE_EMPTY_TEXT, PAGE_EMPTY_TITLE, PAGE_NOTICES_READ_LINE, PAGE_NOTICES_UNAVAILABLE_TITLE, SEEN_MAX,
   compareNotices, hasNew, hasPageSeenNamespaces, isLastNoticesPage, isPageNoticesUnavailable, isPageSeenNamespace, isWebOnlyError, markSeenPadded, mergePage, mergeRemoteSeen, noticeIcon, noticeId, noticeKind, noticeLine, noticeParts, noticeRef, noticesNotice,
   needsAvatar, padSeen, pageNoticesHeader, pageSeenNamespace, parseSeenNamespace, readNotices, remoteFoldPlan, resolveRowAvatars, rowAvatarSource, seenOnScreen, seenUnion, shouldPoll, shouldStartNoticesFirstRead, snippetOf, writeSeenNamespace
 } from '../notices'
@@ -52,8 +52,12 @@ import { Soft, errorText, useBottomPad, useNow } from '../ui'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
+import { PressScale } from '../ui/PressScale'
+import { NOT_HOSTED } from '../pessoas'
+import { HELP } from '../help'
+import { HelpSheet } from '../ui/Help'
 import { RefreshableList } from '../ui/RefreshableList'
-import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
+import { EmptyState, ErrorState, ListFooter, SkeletonRow } from '../ui/States'
 import { space, type } from '../ui/theme'
 import { peekAll, postAt } from './Conversa'
 
@@ -388,7 +392,7 @@ function NoticeRow ({ item, now, unread, postText, picture, onOpenMember, onOpen
     const ref = noticeRef(item)
     const open = ref !== null && typeof onOpenThread === 'function' ? () => onOpenThread({ ref }) : undefined
     return (
-      <Pressable
+      <PressScale
         style={({ pressed }) => [styles.row, pressed && open && styles.pressed]}
         accessibilityRole='link'
         accessibilityLabel={ref === null ? spoken : spoken + ', abrir publicação'}
@@ -398,14 +402,14 @@ function NoticeRow ({ item, now, unread, postText, picture, onOpenMember, onOpen
       >
         {face}
         {whoBlock}
-      </Pressable>
+      </PressScale>
     )
   }
   const open = typeof onOpenMember === 'function'
     ? () => onOpenMember(item.key, { name: item.name, username: item.username, avatar: picture || null })
     : undefined
   return (
-    <Pressable
+    <PressScale
       style={({ pressed }) => [styles.row, pressed && open && styles.pressed]}
       accessibilityRole='link'
       accessibilityLabel={spoken + ', ver perfil'}
@@ -415,7 +419,7 @@ function NoticeRow ({ item, now, unread, postText, picture, onOpenMember, onOpen
     >
       {face}
       {whoBlock}
-    </Pressable>
+    </PressScale>
   )
 }
 
@@ -432,6 +436,7 @@ function remoteFor (remoteSeen, namespace) {
 
 export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollowsChanged, onToast, onBadge, onSeenState, remoteSeen, onOpenThread, onOpenMember }) {
   const styles = useStyles(makeStyles)
+  const [helpOpen, setHelpOpen] = useState(false)
   const node = useNode()
   const blocks = useBlocks()
   const { profileOf, resolveMany } = useNames()
@@ -997,18 +1002,20 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   )
 
   let empty
-  if (notice === 'web-only') {
-    empty = <EmptyState icon='sino' title='Só na versão web' body={NOTICES_WEB_ONLY_MESSAGE} />
+  if (notice === 'web-only' && node.hosted !== true) {
+    empty = <EmptyState icon='sino' title='Avisos indisponíveis' body={NOT_HOSTED} actionLabel='Saiba mais' onAction={() => setHelpOpen(true)} />
+  } else if (notice === 'web-only') {
+    empty = <EmptyState icon='sino' title='Avisos indisponíveis' body='Os Avisos não estão disponíveis nesta conexão.' />
   } else if (notice === 'unsupported') {
     empty = <EmptyState icon='sino' title='Sem avisos por aqui' body={NOTICES_UNSUPPORTED_MESSAGE} />
   } else if (notice === 'offline') {
-    empty = <EmptyState icon='sino' title='Sem conexão' body={NOTICES_OFFLINE_MESSAGE} actionLabel='tentar de novo' onAction={loadFirst} />
+    empty = <EmptyState icon='sino' title='Sem conexão' body={NOTICES_OFFLINE_MESSAGE} actionLabel='Tentar de novo' onAction={loadFirst} />
   } else if (pageUnavailable && pageKey) {
-    empty = <EmptyState icon='sino' title={PAGE_NOTICES_UNAVAILABLE_TITLE} body='' />
+    empty = <EmptyState icon='sino' title={PAGE_NOTICES_UNAVAILABLE_TITLE} body='A instalação ainda não oferece avisos para páginas. Tente de novo mais tarde.' actionLabel='Tentar de novo' onAction={loadFirst} />
   } else if (loadError) {
     empty = <ErrorState message={loadError} onRetry={locked ? () => { commit({ locked: false, loadError: '' }); loadFirst() } : loadFirst} pending={loading || refreshing} />
   } else if (loadedAt === null) {
-    empty = <Skeleton />
+    empty = <><SkeletonRow /><SkeletonRow /><SkeletonRow /></>
   } else {
     empty = pageKey
       ? <EmptyState icon='sino' title={PAGE_EMPTY_TITLE} body={PAGE_EMPTY_TEXT} />
@@ -1077,23 +1084,26 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   const avatars = useRowAvatars(shownItems, profileOf, node.request, active && hosted && notice === null, avatarCycle)
   const snippets = useSnippets(shownItems, node.request, active && hosted && notice === null, loadedAt)
   return (
-    <RefreshableList
-      data={shownOnceRef.current ? shownItems : EMPTY_ROWS}
-      keyExtractor={noticeId}
-      renderItem={renderItem}
-      extraData={{ now, onOpenMember, onOpenThread, unread, snippets, avatars, profileOf }}
-      ListHeaderComponent={header}
-      ListEmptyComponent={empty}
-      ListFooterComponent={notice === null ? footer : null}
-      contentContainerStyle={{ paddingBottom: bottomPad }}
-      onRefresh={hosted && !unsupported && !locked ? loadFirst : undefined}
-      refreshing={refreshing}
-      onLoadMore={active && hosted && !moreError && !loading && state.next !== null ? loadMore : undefined}
-      loadingMore={loadingMore}
-      loadMoreError={!!moreError}
-      atEnd={atEnd}
-      scrollToTopSignal={scrollToTop}
-    />
+    <>
+      <RefreshableList
+        data={shownOnceRef.current ? shownItems : EMPTY_ROWS}
+        keyExtractor={noticeId}
+        renderItem={renderItem}
+        extraData={{ now, onOpenMember, onOpenThread, unread, snippets, avatars, profileOf }}
+        ListHeaderComponent={header}
+        ListEmptyComponent={empty}
+        ListFooterComponent={notice === null ? footer : null}
+        contentContainerStyle={{ paddingBottom: bottomPad }}
+        onRefresh={hosted && !unsupported && !locked ? loadFirst : undefined}
+        refreshing={refreshing}
+        onLoadMore={active && hosted && !moreError && !loading && state.next !== null ? loadMore : undefined}
+        loadingMore={loadingMore}
+        loadMoreError={!!moreError}
+        atEnd={atEnd}
+        scrollToTopSignal={scrollToTop}
+      />
+      <HelpSheet open={helpOpen} onClose={() => setHelpOpen(false)} doc={HELP.avisos} />
+    </>
   )
 }
 

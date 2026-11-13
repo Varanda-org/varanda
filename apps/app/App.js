@@ -136,7 +136,7 @@ import { StackLayer, stackBusy, useStackMotion } from './src/ui/StackLayer'
 import { stackEntries } from './src/stackEntries'
 import { HelpButton, closeHelp, useHelpOpen } from './src/ui/Help'
 import { HELP } from './src/help'
-import { layout, space, type } from './src/ui/theme'
+import { LARGE_TEXT, layout, space, type } from './src/ui/theme'
 import { paletteFor, statusBarStyle } from './src/appearance.js'
 import { applyBandMeta } from './src/appearanceStore'
 import Avisos from './src/screens/Avisos'
@@ -328,7 +328,7 @@ function Member () {
   const node = useNode()
   const names = useNames()
   const insets = useSafeAreaInsets()
-  const { width } = useWindowDimensions()
+  const { width, fontScale } = useWindowDimensions()
   const install = useInstall()
   const push = usePush()
   const bootAt = useRef(Date.now()).current
@@ -1712,7 +1712,7 @@ function Member () {
     if (!t || !t.text) return setToast(null)
     const withAction = typeof t.onAction === 'function' && t.actionLabel
     setToast(withAction ? t : { text: t.text })
-    toastTimer.current = setTimeout(() => setToast(null), withAction ? TOAST_ACTION_MS : TOAST_MS)
+    toastTimer.current = setTimeout(() => setToast(null), withAction ? TOAST_ACTION_MS * (fontScale >= LARGE_TEXT ? 2 : 1) : TOAST_MS)
   }
 
   // The outbox (browser node) is sent only while a publish could go out
@@ -1753,7 +1753,64 @@ function Member () {
   }, [followsVersion, followsChanged])
   const followCount = typeof node.followCount === 'number' ? node.followCount : (info ? info.followCount : null)
 
-  const startReply = (r) => setComposer({ open: true, reply: r, quote: null })
+  const [composeSignal, setComposeSignal] = useState(null)
+  const replyDraftResolve = useRef(null)
+  const replyDraftStash = useRef(null)
+  const replyHandoffSerial = useRef(0)
+  const settleReplyDraft = useCallback((accepted, restore = true) => {
+    const resolve = replyDraftResolve.current
+    const saved = replyDraftStash.current
+    replyDraftResolve.current = null
+    replyDraftStash.current = null
+    if (saved && accepted !== true && restore) setComposer((c) => ({ ...c, ...saved }))
+    if (resolve) resolve(accepted === true)
+  }, [])
+  useEffect(() => {
+    if (!composer.open || !composer.reply || locked) settleReplyDraft(false, !locked)
+  }, [composer.open, composer.reply, locked, settleReplyDraft])
+  useEffect(() => () => {
+    if (replyDraftResolve.current) replyDraftResolve.current(false)
+  }, [])
+  const startReply = (r) => {
+    const saved = replyDraftStash.current || { reply: composer.reply, quote: composer.quote }
+    settleReplyDraft(false)
+    if (node.hosted && node.online !== false && actingAs.get().kind !== 'page' && r.draft === undefined) {
+      pushScreen({ screen: 'conversa', key: r.ref })
+      setComposeSignal((previous) => ({ target: r, n: previous ? previous.n + 1 : 1 }))
+      return
+    }
+    if (typeof r.draft === 'string') {
+      return new Promise((resolve) => {
+        replyDraftResolve.current = resolve
+        replyDraftStash.current = saved
+        setComposer({ open: true, reply: { ...r, handoff: ++replyHandoffSerial.current }, quote: null })
+      })
+    }
+    setComposer({ open: true, reply: r, quote: null })
+  }
+  const onPublished = (kind, sentRef) => {
+    share.requeue()
+    // A momento touches no post state: Publicar already told the
+    // Momentos readers (momentsChanged).
+    if (kind === 'moment') {
+      setComposer((c) => ({ ...c, open: false }))
+      return showToast('momento publicado')
+    }
+    // The reply context is dropped only if it is still the one sent; a
+    // sent quote always drops the quote context.
+    if (kind !== 'quick-reply') {
+      setComposer((c) => ({
+        open: false,
+        reply: c.reply && c.reply.ref === sentRef ? null : c.reply,
+        quote: kind === 'quote' || (c.quote && c.quote.ref === sentRef) ? null : c.quote
+      }))
+    }
+    // Kept in the outbox: nothing new in the diary yet.
+    if (kind === 'queued-post' || kind === 'queued-reply') return showToast('Vai sair quando a conexão voltar.')
+    setVersion((v) => v + 1)
+    setPeekVersion((v) => v + 1)
+    showToast(kind === 'reply' || kind === 'quick-reply' ? 'resposta publicada' : 'publicado')
+  }
   const startQuote = (q) => setComposer({ open: true, reply: null, quote: q })
 
   // --- the screen stack ---
@@ -1840,6 +1897,7 @@ function Member () {
     }
   }, [commitStack])
   const openThread = useCallback(({ ref, seed } = {}) => {
+    setComposeSignal(null)
     pushScreen({ screen: 'conversa', key: ref, params: { seed: seed || null } })
   }, [pushScreen])
   const openEngagers = useCallback(({ ref, kind } = {}) => {
@@ -1936,6 +1994,13 @@ function Member () {
   const helpOpen = useHelpOpen()
   const helpOpenRef = useRef(helpOpen)
   helpOpenRef.current = helpOpen
+  const backGuardRef = useRef(null)
+  const registerBackGuard = useCallback((fn) => {
+    backGuardRef.current = fn
+    return () => {
+      if (backGuardRef.current === fn) backGuardRef.current = null
+    }
+  }, [])
   // Help opened inside Ajustes or Denunciar keeps sheetOpen true, so it stays.
   const stackDepth = nav.depth(stack)
   useEffect(() => { closeHelp() }, [stackDepth, sheetOpen])
@@ -2260,10 +2325,10 @@ function Member () {
   const openMessage = useCallback((peer, options) => {
     const key = typeof peer === 'string' ? peer.toLowerCase() : peer
     const open = () => {
-      if (options && options.context && typeof key === 'string') {
+      if (options && (options.context || options.offer) && typeof key === 'string') {
         intentCount.current += 1
         const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
-        const intent = makeIntent({ id: intentCount.current + ':' + Date.now(), peer: key, from: own, context: options.context })
+        const intent = makeIntent({ id: intentCount.current + ':' + Date.now(), peer: key, from: own, context: options.context, offer: options.offer })
         if (validIntent(intent, own)) {
           intentsRef.current.set(key, intent)
           setIntentTick((n) => n + 1)
@@ -2650,6 +2715,7 @@ function Member () {
     if (Platform.OS === 'android') {
       const sub = BackHandler.addEventListener('hardwareBackPress', () => {
         if (helpOpenRef.current || sheetOpenRef.current) return false
+        if (backGuardRef.current?.() === true) return true
         if (nav.depth(stackRef.current) === 0) {
           if (tabRef.current !== 'avisos') return false
           closeAvisos()
@@ -2664,6 +2730,10 @@ function Member () {
     if (Platform.OS !== 'web' || typeof globalThis.addEventListener !== 'function') return
     const onKey = (event) => {
       if (event.key !== 'Escape' || event.defaultPrevented || helpOpenRef.current || sheetOpenRef.current) return
+      if (backGuardRef.current?.() === true) {
+        event.preventDefault()
+        return
+      }
       if (nav.depth(stackRef.current) > 0) goBack()
       else if (tabRef.current === 'avisos') closeAvisos()
     }
@@ -3185,16 +3255,20 @@ function Member () {
       // Página remounts them, so a late answer never lands on the other one.
       if (entry.screen === 'anuncio') {
         const at = entry.key.lastIndexOf(':')
+        const author = entry.key.slice(0, at)
         const actingPage = pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && acting.kind === 'page' ? acting.key : null
         return (
           <StackLayer key={i + ':anuncio:' + entry.key + ':' + actingIdentity + ':' + (actingPage || '') + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
             <Anuncio
-              author={entry.key.slice(0, at)}
+              author={author}
               seq={Number(entry.key.slice(at + 1))}
               me={ownKey}
               actingPage={actingPage}
               onBack={goBack}
               onConversar={({ peer, draft, card }) => openMessage(peer, { draft, card })}
+              onOffer={(listing) => openMessage(author, { offer: listing })}
+              // eslint-disable-next-line react/jsx-handler-names -- Forward the shared capability callback unchanged.
+              onOpenListings={screenProps.onOpenListings}
               onDenunciar={setReport}
               onOpenAuthor={openMember}
               onDeleted={goBack}
@@ -3238,7 +3312,12 @@ function Member () {
       if (entry.screen === 'anunciar') {
         return (
           <StackLayer key={i + ':anunciar:' + actingIdentity} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
-            <Anunciar initialPlace={feiraPlaceRef.current} onBack={goBack} onPublished={showPublished} />
+            <Anunciar
+              initialPlace={feiraPlaceRef.current}
+              onBack={goBack}
+              onPublished={showPublished}
+              registerBackGuard={(fn) => registerBackGuard(() => stackRef.current[stackRef.current.length - 1] === entry && fn())}
+            />
           </StackLayer>
         )
       }
@@ -3296,7 +3375,7 @@ function Member () {
       const Screen = entry.screen === 'conversa' ? Conversa : entry.screen === 'curtidas' ? Curtidas : Membro
       return (
         <StackLayer key={i + ':' + entry.screen + ':' + entry.key + (entry.screen === 'conversa' && entry.key === threadReload.ref ? ':' + threadReload.n : '')} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
-          <Screen entry={entry} {...screenProps} onTabChange={entry.screen === 'membro' ? (id) => reportProfileTab(i + ':' + entry.key, id) : undefined} />
+          <Screen entry={entry} {...screenProps} onComposeSeen={() => setComposeSignal(null)} composeSignal={entry.screen === 'conversa' && i === stack.length - 1 ? composeSignal : null} onPublished={onPublished} onTabChange={entry.screen === 'membro' ? (id) => reportProfileTab(i + ':' + entry.key, id) : undefined} />
         </StackLayer>
       )
     }
@@ -3509,7 +3588,6 @@ function Member () {
                     onPress={() => { clearTimeout(toastTimer.current); setToast(null); toast.onAction() }}
                     accessibilityRole='button'
                     accessibilityLabel={toast.actionLabel}
-                    hitSlop={8}
                     style={styles.toastAction}
                   >
                     <Text style={styles.toastActionText}>{toast.actionLabel}</Text>
@@ -3574,27 +3652,8 @@ function Member () {
           onClose={() => setComposer((c) => ({ ...c, open: false }))}
           onClearReply={() => setComposer((c) => ({ ...c, reply: null }))}
           onClearQuote={() => setComposer((c) => ({ ...c, quote: null }))}
-          onPublished={(kind, sentRef) => {
-            share.requeue()
-            // A momento touches no post state: Publicar already told the
-            // Momentos readers (momentsChanged).
-            if (kind === 'moment') {
-              setComposer((c) => ({ ...c, open: false }))
-              return showToast('momento publicado')
-            }
-            // The reply context is dropped only if it is still the one sent; a
-            // sent quote always drops the quote context.
-            setComposer((c) => ({
-              open: false,
-              reply: c.reply && c.reply.ref === sentRef ? null : c.reply,
-              quote: kind === 'quote' || (c.quote && c.quote.ref === sentRef) ? null : c.quote
-            }))
-            // Kept in the outbox: nothing new in the diary yet.
-            if (kind === 'queued-post' || kind === 'queued-reply') return showToast('Vai sair quando a conexão voltar.')
-            setVersion((v) => v + 1)
-            setPeekVersion((v) => v + 1)
-            showToast(kind === 'reply' ? 'resposta publicada' : 'publicado')
-          }}
+          onReplyDraft={settleReplyDraft}
+          onPublished={onPublished}
         />
       )}
       <BlockSheet onToast={showToast} />
@@ -3676,6 +3735,6 @@ const makeStyles = (colors) => StyleSheet.create({
   },
   toastLabel: { flexShrink: 1 },
   toastText: { ...type.counter, color: colors.toastInk },
-  toastAction: { marginLeft: 8 },
+  toastAction: { marginLeft: 8, minHeight: 44, minWidth: 44, justifyContent: 'center', alignItems: 'center' },
   toastActionText: { ...type.counter, color: colors.toastInk, fontWeight: '800' }
 })

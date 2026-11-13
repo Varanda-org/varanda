@@ -48,7 +48,7 @@
 // and an uncertain offer, aceite or recusa is resent only by "Tentar de novo".
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Keyboard, KeyboardAvoidingView, StyleSheet, Text, View } from 'react-native'
+import { AccessibilityInfo, Keyboard, KeyboardAvoidingView, StyleSheet, Text, View } from 'react-native'
 import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { MAX_TEXT, displayText } from '@varanda/rpc'
@@ -71,7 +71,14 @@ import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
 import { listingLinkOf } from '../feiraChat'
 import { parsePriceText, quickReplies } from '../feira'
 import { CONSENT_NOTE, acceptCard, acceptText, buttonState, centsLabel, consentParams, declineCard, declineText, offerCard, offerOfMessage, offerState, offerTarget, proposalText, validCents } from '../feiraOffer'
-import { mergeMessages, newestOf, pageDmClient, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey } from '../dm-screen'
+import { mergeMessages, newestOf, pageDmClient, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey, dmReactions, reactDebounce, dmReactionGate, dmReactable, withFreshReactions } from '../dm-screen'
+import { pageReadKind } from '../pageNotice'
+import { applyOptimistic, reactionChips, toggleOf } from '../reactions'
+import { hasRich, parseRich, plainOf } from '../richText'
+import { cardBesideSpoilers } from '../ui/RichText'
+import { ReactionChips, QuickReactions } from '../ui/Reactions'
+import { ReactionPicker } from '../ui/ReactionPicker'
+import { PressScale } from '../ui/PressScale'
 import { actAs, pagesDm } from '../pages'
 import { pageKeyText } from '../pageSecrets'
 import { pagesOn } from '../pageGate'
@@ -83,6 +90,9 @@ import { chatMediaRefs, followAutocorrect, retryChatSend, runChatSend, stagedOf 
 import { Btn, ErrorText, Field, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles } from '../ui/ThemeProvider'
 import { Bubble } from '../ui/Bubble'
+import { SwipeReply } from '../ui/SwipeReply'
+import { JumpToEnd } from '../ui/JumpToEnd'
+import { awayCount, jumpVisible } from '../chatGestures'
 import { ChatComposer, useLinkDraft } from '../ui/ChatComposer'
 import { ChatMedia } from '../ui/ChatMedia'
 import { useChatAttachments } from '../ui/AttachSheet'
@@ -113,9 +123,18 @@ export function initialMessage (initial) {
   return { draft, card }
 }
 
+// The listing a message links outside every spoiler: in the text the bubble
+// shows, or in a stored card the bubble draws.
+export function visibleListingLink (text, card, origin) {
+  const raw = typeof text === 'string' ? text : ''
+  const shown = listingLinkOf(plainOf(raw, { full: true }), origin)
+  if (shown !== null) return shown
+  return card && typeof card === 'object' && cardBesideSpoilers(parseRich(raw), card) !== null ? listingLinkOf(card, origin) : null
+}
+
 export function listingLinkForRow (row, origin) {
   if (!row || row.deleted === true) return null
-  return listingLinkOf(row.rawText, origin) || listingLinkOf(row.card, origin)
+  return visibleListingLink(row.rawText, row.card, origin)
 }
 
 // The quick replies are a buyer's questions: they show while the newest
@@ -188,6 +207,53 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const quoteName = readsAs(nameText, OWN_LABEL) ? (peerWho.subtitle || 'Pessoa') : nameText
   const quoteHandle = peerWho.subtitle || undefined
 
+  const [peerRead, setPeerRead] = useState(null)
+  const peerReadContext = useMemo(() => ({ live: true, pending: false, trailing: false, answer: null }), [request, peer])
+  useEffect(() => {
+    peerReadContext.live = true
+    return () => { peerReadContext.live = false }
+  }, [peerReadContext])
+  const readPeer = useCallback(async () => {
+    if (!hosted || !unlocked || !node.online || pageKey !== null) return
+    if (peerReadContext.pending) { peerReadContext.trailing = true; return }
+    peerReadContext.pending = true
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        peerReadContext.trailing = false
+        let answered = false
+        try {
+          const read = await request('page.read', { key: peer })
+          answered = read?.page === peer
+          if (peerReadContext.live && answered && (pageReadKind(peerReadContext.answer, peer) !== 'page' || pageReadKind(read, peer) === 'page')) {
+            peerReadContext.answer = read
+            setPeerRead(read)
+          }
+        } catch {}
+        if (answered || !peerReadContext.trailing || !peerReadContext.live) break
+      }
+    } finally {
+      peerReadContext.pending = false
+      peerReadContext.trailing = false
+    }
+  }, [request, peer, peerReadContext, hosted, unlocked, node.online, pageKey])
+  useEffect(() => {
+    if (isTop && node.visible !== false && peerReadContext.answer === null) readPeer()
+  }, [isTop, node.visible, peerReadContext, readPeer])
+
+  const [reactionOverrides, setReactionOverrides] = useState(new Map())
+  const [reactionError, setReactionError] = useState('')
+  const [reactionPicker, setReactionPicker] = useState(null)
+  const reactionContext = useMemo(() => ({ live: true, sending: new Set(), unsure: new Map(), settled: new Map(), bases: new Map(), overrides: new Map(), pages: new Map(), read: 0, debounce: reactDebounce() }), [peer, ownKey, pageKey, request])
+  const reactionContextRef = useRef(reactionContext)
+  reactionContextRef.current = reactionContext
+  useEffect(() => {
+    reactionContext.live = true
+    setReactionOverrides(new Map())
+    setReactionError('')
+    setReactionPicker(null)
+    return () => { reactionContext.live = false; reactionContext.debounce.flush() }
+  }, [reactionContext])
+
   const [raw, setRaw] = useState([])
   const [next, setNext] = useState(null)
   const [loaded, setLoaded] = useState(false)
@@ -213,12 +279,20 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const inFlightRef = useRef(null)
   contextRef.current = context
   const usedIntents = useRef(new Set())
+  const [intentListing, setIntentListing] = useState(null)
+  const [offerOpen, setOfferOpen] = useState(false)
   // Only the conversation on top takes an intent: one buried under another
   // screen never shows nor uses it, and keeps its own chip and draft.
   useEffect(() => {
     if (!isTop || !intent || typeof intent.id !== 'string' || usedIntents.current.has(intent.id)) return
     usedIntents.current.add(intent.id)
-    if (String(intent.peer).toLowerCase() === String(peer).toLowerCase() && intent.context) setContext(intent.context)
+    if (String(intent.peer).toLowerCase() === String(peer).toLowerCase()) {
+      if (intent.context) setContext(intent.context)
+      if (intent.offer) {
+        setIntentListing(intent.offer)
+        setOfferOpen(true)
+      }
+    }
     if (typeof onIntentUsed === 'function') onIntentUsed(intent.id)
   }, [isTop, intent, peer, onIntentUsed])
   const [hold, setHold] = useState(null)
@@ -232,7 +306,6 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   // waits to confirm ({ offer, listing }), and offerHold { op, retry } after
   // an uncertain offer, aceite or recusa (resent only on a tap).
   const offerAct = useAction()
-  const [offerOpen, setOfferOpen] = useState(false)
   const [offerValue, setOfferValue] = useState('')
   const [offerNote, setOfferNote] = useState('')
   const [confirming, setConfirming] = useState(null)
@@ -290,14 +363,30 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const bumpDm = node.bumpDm
   const reread = useCallback(() => { if (typeof bumpDm === 'function') bumpDm() }, [bumpDm])
 
+  const commitRead = useCallback((page, started, context) => {
+    if (!context.live || context !== reactionContextRef.current) return
+    for (const item of page) {
+      const key = messageKey(item)
+      if (context.sending.has(key) || context.debounce.has(key) || started <= (context.settled.get(key) || 0)) continue
+      context.unsure.delete(key)
+      context.overrides.delete(key)
+    }
+    setReactionOverrides(new Map(context.overrides))
+  }, [])
+
   const readThread = useCallback(async () => {
+    const context = reactionContextRef.current
+    const started = ++context.read
     const gen = ++genRef.current
     try {
       const r = await dm('dm.thread', { peer })
-      if (gen !== genRef.current) return
+      if (gen !== genRef.current || !context.live || context !== reactionContextRef.current) return
       const page = Array.isArray(r.messages) ? r.messages : []
+      const covered = new Set(page.map(messageKey))
+      const failed = new Set()
+      commitRead(page, started, context)
       const held = refreshThread(rawRef.current, page)
-      if (!held.keepOlder) olderRef.current = false
+      if (!held.keepOlder) { olderRef.current = false; context.pages.clear() }
       rawRef.current = held.messages
       setRaw(held.messages)
       setNewest(newestOf(page))
@@ -305,11 +394,125 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       setFolder(r.folder === 'request' ? 'request' : 'inbox')
       setBlocked(r.blocked === true)
       setLoadError('')
+      // Only reactions change on held older rows; the cursor and scroll order stay.
+      for (const [before, keys] of context.pages) {
+        if (![...keys].some((key) => context.overrides.has(key) || context.debounce.has(key) || context.unsure.has(key))) continue
+        const started = ++context.read
+        try {
+          const older = await dm('dm.thread', { peer, before })
+          if (gen !== genRef.current || !context.live || context !== reactionContextRef.current) return
+          const page = Array.isArray(older.messages) ? older.messages : []
+          for (const item of page) covered.add(messageKey(item))
+          commitRead(page, started, context)
+          const byKey = new Map(page.map((m) => [messageKey(m), m]))
+          if (![...keys].some((key) => byKey.has(key))) context.pages.delete(before)
+          const merged = rawRef.current.map((m) => byKey.has(messageKey(m)) ? withFreshReactions(m, byKey.get(messageKey(m))) : m)
+          rawRef.current = merged
+          setRaw(merged)
+        } catch {
+          if (gen !== genRef.current || !context.live || context !== reactionContextRef.current) return
+          for (const key of keys) failed.add(key)
+        }
+      }
+      for (const key of new Set([...context.unsure.keys(), ...context.overrides.keys()])) {
+        if (context.sending.has(key) || context.debounce.has(key) || started <= (context.settled.get(key) || 0) || covered.has(key) || failed.has(key)) continue
+        context.unsure.delete(key)
+        context.overrides.delete(key)
+      }
+      setReactionOverrides(new Map(context.overrides))
     } catch (err) {
-      if (gen === genRef.current) setLoadError(errorText(err))
+      if (gen === genRef.current && context.live && context === reactionContextRef.current) setLoadError(errorText(err))
     }
-    if (gen === genRef.current) setLoaded(true)
-  }, [dm, peer])
+    if (gen === genRef.current && context.live && context === reactionContextRef.current) setLoaded(true)
+  }, [dm, peer, commitRead])
+
+  const reactionGate = dmReactionGate({ read: peerRead, peer, peerKind: pageReadKind(peerRead, peer), pageKey, hosted, unlocked, online: node.online, isTop: true, blocked: blocked || blocks.has(peer), folder })
+  const reactionsHidden = reactionGate.hidden
+  const reactionsDisabled = reactionGate.disabled || !isTop
+  const reactionViewRef = useRef(null)
+  reactionViewRef.current = { disabled: reactionsDisabled, dispatchDisabled: reactionGate.disabled, rawById: new Map(raw.map((m) => [messageKey(m), m])) }
+  reactionContext.view = reactionViewRef.current
+  useEffect(() => {
+    if (!isTop) reactionContext.debounce.flush()
+    if (!reactionsDisabled) return
+    setReactionPicker(null)
+    reactionContext.debounce.clear()
+  }, [isTop, reactionsDisabled, reactionContext])
+
+  const reactionRowReady = (item) => dmReactable(item)
+  const canReact = (key) => !reactionViewRef.current.disabled && reactionRowReady(reactionViewRef.current.rawById.get(key)) && !reactionContext.sending.has(key)
+  const reactionsFor = (row) => reactionOverrides.get(row.key) || row.reactions || []
+  const paintReactions = (context) => {
+    if (context.live && context === reactionContextRef.current) setReactionOverrides(new Map(context.overrides))
+  }
+  const cancelReaction = (context, key) => {
+    if (!context.bases.has(key)) return
+    const starting = context.bases.get(key).find((r) => r.mine)?.emoji || ''
+    const item = context.view.rawById.get(key)
+    context.overrides.set(key, applyOptimistic(dmReactions(item?.reactions), starting))
+    context.bases.delete(key)
+    paintReactions(context)
+  }
+  // A row that left the newest page is in no later read, so the confirmed
+  // choice is held on the row itself before its override is dropped.
+  const holdSent = (key, emoji) => {
+    const rows = rawRef.current.map((m) => {
+      if (messageKey(m) !== key) return m
+      const others = (Array.isArray(m.reactions) ? m.reactions : []).filter((r) => r?.mine !== true)
+      return { ...m, reactions: emoji === '' ? others : [...others, { emoji, mine: true }] }
+    })
+    rawRef.current = rows
+    setRaw(rows)
+  }
+
+  async function sendReaction (context, key, emoji, flushing = false) {
+    const item = context.view.rawById.get(key)
+    if (context.view.dispatchDisabled || !reactionRowReady(item) || context.sending.has(key) || (!flushing && (!context.live || context !== reactionContextRef.current || !canReact(key)))) {
+      cancelReaction(context, key)
+      return
+    }
+    const target = { from: item.from, id: item.id }
+    context.unsure.delete(key)
+    context.sending.add(key)
+    paintReactions(context)
+    try {
+      await request('dm.react', { to: peer, target, emoji })
+      if (context.live && context === reactionContextRef.current) holdSent(key, emoji)
+    } catch (err) {
+      if (!context.live || context !== reactionContextRef.current) return
+      if (unsureSend(err)) {
+        context.unsure.set(key, emoji)
+      } else {
+        cancelReaction(context, key)
+        setReactionError(errorText(err))
+      }
+    } finally {
+      context.settled.set(key, context.read)
+      context.bases.delete(key)
+      context.sending.delete(key)
+      paintReactions(context)
+      if (context.live && context === reactionContextRef.current) await readThread()
+    }
+  }
+
+  function toggleReaction (key, picked) {
+    const context = reactionContext
+    if (!context.live || context !== reactionContextRef.current || !canReact(key)) return
+    const item = reactionViewRef.current.rawById.get(key)
+    const reactions = context.overrides.get(key) || dmReactions(item.reactions)
+    if (!context.bases.has(key)) context.bases.set(key, reactions)
+    const starting = context.bases.get(key).find((r) => r.mine)?.emoji || ''
+    const retry = context.unsure.has(key) && context.unsure.get(key) === picked
+    const emoji = retry ? picked : toggleOf(reactions, picked)
+    context.overrides.set(key, applyOptimistic(reactions, emoji))
+    setReactionError('')
+    paintReactions(context)
+    context.debounce.schedule(key, starting, emoji, (choice, flushing) => sendReaction(context, key, choice, flushing), () => cancelReaction(context, key), retry)
+  }
+
+  function openReactionPicker (key) {
+    if (canReact(key)) setReactionPicker(key)
+  }
 
   const ready = hosted && unlocked
 
@@ -414,6 +617,33 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   // `opened` turns true once a newer line arrives after the first one shown:
   // the open itself, with its later batches, jumps without animation.
   const opened = useRef(false)
+  const gestureRows = useMemo(() => threadRows(raw), [raw])
+  const away = useRef(false)
+  const latestKey = gestureRows.length > 0 ? gestureRows[gestureRows.length - 1].key : null
+  const latestKeyRef = useRef(null)
+  latestKeyRef.current = latestKey
+  const [lastSeenKey, setLastSeenKey] = useState(null)
+  const [showJump, setShowJump] = useState(false)
+  const scrollFrame = useRef({ y: 0, contentHeight: 0, layoutHeight: 0 })
+  const [flashKey, setFlashKey] = useState(null)
+  const [quoteToast, setQuoteToast] = useState(false)
+  const quoteTimer = useRef(null)
+  const jumpTimer = useRef(null)
+  useEffect(() => {
+    away.current = false
+    setLastSeenKey(null)
+    setShowJump(false)
+    setFlashKey(null)
+    setQuoteToast(false)
+    return () => {
+      clearTimeout(quoteTimer.current)
+      clearTimeout(jumpTimer.current)
+    }
+  }, [peer, pageKey, ownKey])
+  useEffect(() => {
+    if (!away.current) setLastSeenKey(latestKey)
+  }, [latestKey])
+
   const endPin = useRef({ pinned: true, newest: '', lastY: null })
   // On the web the content size can change before FlatList measured the new
   // row, so the first scroll uses an estimate and stops short: one more,
@@ -421,25 +651,34 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const settleTimer = useRef(null)
   useEffect(() => () => clearTimeout(settleTimer.current), [])
   const followEnd = useCallback(() => {
+    if (away.current) return
     if (!endPin.current.pinned) return
     const list = listRef.current
     if (!list || typeof list.scrollToEnd !== 'function') return
     list.scrollToEnd({ animated: opened.current })
     clearTimeout(settleTimer.current)
     settleTimer.current = setTimeout(() => {
+      if (away.current) return
       const now = listRef.current
       if (endPin.current.pinned && now && typeof now.scrollToEnd === 'function') now.scrollToEnd({ animated: false })
     }, 50)
   }, [])
   const releaseEnd = useCallback(() => {
+    clearTimeout(jumpTimer.current)
     endPin.current = pinToEnd(endPin.current, { kind: 'user' })
   }, [])
   useEffect(() => {
     if (!loaded || newest === '' || newest === endPin.current.newest) return
     opened.current = endPin.current.newest !== ''
+    if (gestureRows.some((row) => row.key === newest && row.mine)) {
+      clearTimeout(jumpTimer.current)
+      away.current = false
+      setLastSeenKey(latestKeyRef.current)
+      setShowJump(false)
+    }
     endPin.current = pinToEnd(endPin.current, { kind: 'newest', newest })
     followEnd()
-  }, [loaded, newest, followEnd])
+  }, [loaded, newest, gestureRows, followEnd])
 
   // The keyboard shrinks the list: when the person was reading the newest
   // line, keep it above the composer instead of behind it.
@@ -449,6 +688,8 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const atBottom = useRef(true)
   const lastY = useRef(null)
   const trackBottom = useCallback(({ y, contentHeight, layoutHeight }) => {
+    scrollFrame.current = { y, contentHeight, layoutHeight }
+    setShowJump(jumpVisible({ distanceFromEnd: contentHeight - y - layoutHeight, viewport: layoutHeight }))
     // A frame only updates the pin. Following the end happens on content
     // growth (onContentSizeChange): calling scrollToEnd from every frame of an
     // animated scroll restarts the animation on Android and turns it into a crawl.
@@ -458,6 +699,8 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     lastY.current = y
     if (resized && !bottom) return
     atBottom.current = bottom
+    if (bottom || away.current || !endPin.current.pinned) away.current = !bottom
+    if (bottom) setLastSeenKey(latestKeyRef.current)
   }, [])
   useEffect(() => {
     let timers = []
@@ -503,7 +746,9 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     lastErr.current = null
     // Armed only when the composer shows the text being sent: a held message's retry may run after the draft changed.
     inFlightRef.current = typed === draft ? { text: typed, at: Date.now(), followed: false } : null
-    const snapshot = heldCard === undefined && pageKey === null ? linkDraft.take(text) : null
+    let snapshot = heldCard === undefined && pageKey === null ? linkDraft.take(text) : null
+    const richBlocks = hasRich(text) ? parseRich(text) : null
+    if (snapshot && cardBesideSpoilers(richBlocks, { url: snapshot.url }) === null) snapshot = null
     let card = heldCard === undefined ? null : heldCard
     const r = await post.run(async () => {
       try {
@@ -730,6 +975,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   }
 
   const sendOffer = (listing) => {
+    if (folder !== 'inbox' || blockNote !== null) return
     setOfferNote('')
     const cents = parsePriceText(offerValue)
     if (!validCents(cents)) {
@@ -788,6 +1034,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     try { await dm('dm.pull', {}) } catch {}
     reread()
     readLookup()
+    readPeer()
     if (wantsPeek(peerProfile) || isPeeked(peer)) setPeekTick((n) => n + 1)
     setRefreshing(false)
   }
@@ -801,9 +1048,11 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     // a pinned list would follow the older page out of view.
     endPin.current = pinToEnd(endPin.current, { kind: 'user' })
     setLoadingMore(true)
+    const context = reactionContextRef.current
     try {
       const r = await dm('dm.thread', { peer, before: cursor })
-      if (cursor === nextRef.current) {
+      if (cursor === nextRef.current && context.live && context === reactionContextRef.current) {
+        context.pages.set(cursor, new Set((r.messages || []).map(messageKey)))
         olderRef.current = true
         const merged = mergeMessages(Array.isArray(r.messages) ? r.messages : [], rawRef.current)
         rawRef.current = merged
@@ -839,11 +1088,15 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   }
 
   const cardOf = new Map(raw.map((m) => [messageKey(m), m.card]))
-  const rows = withDayMarks(threadRows(raw), now)
+  const rows = withDayMarks(gestureRows, now)
+  const rowsRef = useRef(rows)
+  rowsRef.current = rows
   for (const row of rows) {
+    // Only an invite link outside every spoiler turns the row into the
+    // Abrir convite form, read in the same text that form shows.
     row.inviteLink = row.deleted === true || typeof onOpenInvite !== 'function'
       ? null
-      : inviteLinkOf(row.rawText, origin)
+      : inviteLinkOf(plainOf(row.rawText, { full: true }), origin)
     row.listingLink = listingLinkForRow({ ...row, card: cardOf.get(row.key) }, origin)
   }
 
@@ -871,11 +1124,64 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     return target.mine === true ? OWN_LABEL : quoteName
   }
 
+  const scrollToEnd = () => {
+    clearTimeout(jumpTimer.current)
+    away.current = false
+    setLastSeenKey(latestKeyRef.current)
+    setShowJump(false)
+    endPin.current = { ...endPin.current, pinned: true }
+    followEnd()
+  }
+  const scrollToKey = (key) => {
+    clearTimeout(jumpTimer.current)
+    clearTimeout(quoteTimer.current)
+    setFlashKey(null)
+    setQuoteToast(false)
+    const missing = () => {
+      setQuoteToast(true)
+      AccessibilityInfo.announceForAccessibility('Mensagem fora do trecho carregado')
+      quoteTimer.current = setTimeout(() => setQuoteToast(false), 3000)
+    }
+    const index = rows.findIndex((row) => row.key === key)
+    const list = listRef.current
+    if (index < 0 || !list || typeof list.scrollToIndex !== 'function') return missing()
+    // Released before the scroll so no follow-up frame pulls the list back
+    // to the end; a scroll that throws never moved, so it is put back.
+    const before = { away: away.current, pin: endPin.current }
+    away.current = true
+    endPin.current = pinToEnd(endPin.current, { kind: 'user' })
+    try {
+      list.scrollToIndex({ index, animated: false, viewPosition: 0.5 })
+    } catch {
+      away.current = before.away
+      endPin.current = before.pin
+      return missing()
+    }
+    // The first offset can be an estimate even when scrollToIndex succeeds.
+    jumpTimer.current = setTimeout(() => {
+      if (listRef.current !== list) return
+      // An older page can land in between and shift the index.
+      const at = rowsRef.current.findIndex((row) => row.key === key)
+      if (at < 0) return missing()
+      try {
+        list.scrollToIndex({ index: at, animated: false, viewPosition: 0.5 })
+        setFlashKey(key)
+        quoteTimer.current = setTimeout(() => setFlashKey(null), 900)
+      } catch {
+        missing()
+      }
+    }, 120)
+  }
+
   // The thread as offer input: every row with its card, reply id and sender.
   const me = pageKey !== null ? pageKey : ownKey
   const offerMsgs = rows.map((r) => ({ id: r.id, from: r.from, mine: r.mine, text: r.rawText, card: cardOf.get(r.key), replyTo: replyIdOf.get(r.key), at: r.at, deleted: r.deleted }))
-  const linkOfMsg = (m) => listingLinkOf(m.text, origin) || listingLinkOf(m.card, origin)
-  const offerListing = peer !== me ? offerTarget(offerMsgs, peer, origin, linkOfMsg) : null
+  const linkOfMsg = (m) => visibleListingLink(m.text, m.card, origin)
+  // The listing chosen on its own screen stays this conversation's target, so
+  // Cancelar leaves the Fazer oferta pill for it even in a thread with no link.
+  const offerListing = intentListing !== null
+    ? intentListing
+    : peer !== me ? offerTarget(offerMsgs, peer, origin, linkOfMsg) : null
   const offerStates = new Map()
   const offerOfRow = (index) => {
     const m = offerMsgs[index]
@@ -1094,6 +1400,8 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         keyExtractor={(row) => row.key}
         renderItem={({ item, index }) => {
           const mine = item.mine === true
+          const chips = !reactionsHidden && reactionRowReady(reactionViewRef.current.rawById.get(item.key)) ? reactionChips(reactionsFor(item)) : []
+          const reactionOff = !canReact(item.key)
           const link = item.inviteLink || null
           const listing = item.listingLink
           const offerRow = item.deleted ? null : offerOfRow(index)
@@ -1111,51 +1419,96 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
           if (!mine && !item.deleted && typeof onReport === 'function') {
             actions.push({ icon: 'bandeira', label: LABELS.report, danger: true, onPress: () => onReport({ dm: true, id: item.id, text: item.rawText, author: item.from, ...(Array.isArray(mediaOf.get(item.key)) ? { media: mediaOf.get(item.key) } : {}) }) })
           }
-          const quoted = item.replyTo !== null && item.replyTo !== undefined
-            ? { name: quoteAuthor(item), handle: quoteMine(item) ? undefined : quoteHandle, text: item.replyTo, mine: quoteMine(item), senderKey: quoteMine(item) ? undefined : peer }
+          // Beside Abrir convite the bubble draws plain text and parses nothing,
+          // so its spoilers and its link card are settled here.
+          const stored = !item.deleted && cardOf.get(item.key) ? cardOf.get(item.key) : null
+          const quoted = item.replyTo != null
+            ? { name: quoteAuthor(item), handle: quoteMine(item) ? undefined : quoteHandle, text: item.replyTo, mine: quoteMine(item), senderKey: quoteMine(item) ? undefined : peer, onPress: () => scrollToKey(quoteTarget(item)?.key) }
             : null
+          const reply = actions.find((action) => action.label === 'Responder')
           return (
-            <Bubble
-              media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} deferred={folder === 'request'} /> : null}
-              item={{ key: item.key, text: item.text, rawText: link ? undefined : item.rawText, at: item.at, deleted: item.deleted, dayMark: item.dayMark, card: !item.deleted && cardOf.get(item.key) ? cardOf.get(item.key) : null }}
-              mine={mine}
-              cardThumb={item.deleted || pageKey !== null ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey }}
-              shape={bubbleShape(rows, index)}
-              forwarded={!item.deleted && fwdOf.get(item.key) === 1}
-              quote={quoted}
-              actions={actions}
-              onOpenMention={mentionTap}
-              below={link !== null || offerRow !== null || (listing !== null && typeof onOpenListing === 'function')
-                ? (
-                  <View style={styles.inline}>
-                    {link !== null ? <Pill label={OPEN_INVITE} accessibilityLabel={OPEN_INVITE + (link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade')} onPress={() => onOpenInvite(link)} /> : null}
-                    {listing !== null && typeof onOpenListing === 'function' ? <Pill label='Ver anúncio' onPress={() => onOpenListing(listing.author, listing.seq)} /> : null}
-                    {offerRow !== null && offerRow.answer && canAnswer
-                      ? <Pill label='Aceitar' filled onPress={() => { offerAct.clearError(); setConfirming({ offer: offerRow.offer, listing: offerRow.listing }) }} />
-                      : null}
-                    {offerRow !== null && offerRow.answer && canAnswer
-                      ? <Pill label='Recusar' onPress={() => declineOffer({ offer: offerRow.offer, listing: offerRow.listing })} />
-                      : null}
-                    {offerRow !== null && offerRow.rate
-                      ? <Pill label='Avaliar' onPress={() => onAvaliar({ author: offerRow.listing.author, seq: offerRow.listing.seq, offer: offerRow.offer.id })} />
-                      : null}
-                  </View>
-                  )
-                : null}
-            />
+            <SwipeReply disabled={!reply} onReply={reply?.onPress}>
+              <View style={flashKey === item.key ? styles.quoteFlash : undefined}>
+                <Bubble
+                  media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} deferred={folder === 'request'} /> : null}
+                  item={{ key: item.key, text: link ? plainOf(item.rawText, { full: true }) : item.text, rawText: link ? undefined : item.rawText, at: item.at, deleted: item.deleted, dayMark: item.dayMark, card: link && stored ? cardBesideSpoilers(parseRich(item.rawText), stored) : stored }}
+                  mine={mine}
+                  cardThumb={item.deleted || pageKey !== null ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey }}
+                  shape={bubbleShape(rows, index)}
+                  forwarded={!item.deleted && fwdOf.get(item.key) === 1}
+                  quote={quoted}
+                  actions={actions}
+                  actionsHeader={!reactionOff
+                    ? ({ closeThen }) => <QuickReactions mine={reactionsFor(item).find((r) => r.mine)?.emoji} onPick={(emoji) => closeThen(() => toggleReaction(item.key, emoji))} onMore={() => closeThen(() => openReactionPicker(item.key))} />
+                    : null}
+                  onOpenMention={mentionTap}
+                  below={chips.length > 0 || link !== null || offerRow !== null || (listing !== null && typeof onOpenListing === 'function')
+                    ? (
+                      <View style={styles.inline}>
+                        {chips.map((chip) => (
+                          <PressScale
+                            key={chip.emoji}
+                            disabled={reactionOff}
+                            accessibilityLabel={displayText(chip.label + (chip.mine ? (chip.count > 1 ? ', e da outra pessoa' : '') : ', da outra pessoa'))}
+                            accessibilityState={{ selected: chip.mine }}
+                            onPress={() => toggleReaction(item.key, chip.emoji)}
+                          >
+                            {/* The outer control adds ownership without a separate people sheet. */}
+                            <View pointerEvents='none' accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden inert>
+                              <ReactionChips reactions={[chip]} disabled={reactionOff} />
+                            </View>
+                          </PressScale>
+                        ))}
+                        {link !== null ? <Pill label={OPEN_INVITE} accessibilityLabel={OPEN_INVITE + (link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade')} onPress={() => onOpenInvite(link)} /> : null}
+                        {listing !== null && typeof onOpenListing === 'function' ? <Pill label='Ver anúncio' onPress={() => onOpenListing(listing.author, listing.seq)} /> : null}
+                        {offerRow !== null && offerRow.answer && canAnswer
+                          ? <Pill label='Aceitar' filled onPress={() => { offerAct.clearError(); setConfirming({ offer: offerRow.offer, listing: offerRow.listing }) }} />
+                          : null}
+                        {offerRow !== null && offerRow.answer && canAnswer
+                          ? <Pill label='Recusar' onPress={() => declineOffer({ offer: offerRow.offer, listing: offerRow.listing })} />
+                          : null}
+                        {offerRow !== null && offerRow.rate
+                          ? <Pill label='Avaliar' onPress={() => onAvaliar({ author: offerRow.listing.author, seq: offerRow.listing.seq, offer: offerRow.offer.id })} />
+                          : null}
+                      </View>
+                      )
+                    : null}
+                />
+              </View>
+            </SwipeReply>
           )
         }}
-        extraData={{ now, nameText, folder }}
+        extraData={{ now, nameText, folder, reactionOverrides, reactionsDisabled, flashKey }}
+        ListFooterComponent={reactionError || reactionContext.unsure.size > 0 ? <View style={styles.pad}><ErrorText>{reactionError}</ErrorText>{reactionContext.unsure.size > 0 ? <Soft>Não deu para confirmar a reação.</Soft> : null}</View> : null}
         ListHeaderComponent={next ? <View style={styles.pad}><Pill label='mensagens anteriores' onPress={loadOlder} pending={loadingMore} /></View> : null}
-        ListEmptyComponent={empty}
+        ListEmptyComponent={
+          <View>
+            {empty}
+            {loaded && !loadError && folder === 'inbox' && blockNote === null && !blocks.has(peer) && node.online !== false && !post.pending && !hold && mediaHold === null && !sendingMedia
+              ? <View style={[styles.pad, styles.inline]}>{['Oi', 'Tudo bem?'].map((text) => <Pill key={text} label={text} onPress={() => setDraft((d) => d.trim() ? d + '\n' + text : text)} />)}</View>
+              : null}
+          </View>
+        }
         onRefresh={refreshAll}
         refreshing={refreshing}
         keepVisiblePosition
         onScrollFrame={trackBottom}
-        onContentSizeChange={followEnd}
+        onContentSizeChange={(width, height) => {
+          const { y, layoutHeight } = scrollFrame.current
+          scrollFrame.current.contentHeight = height
+          setShowJump(jumpVisible({ distanceFromEnd: height - y - layoutHeight, viewport: layoutHeight }))
+          followEnd()
+        }}
         onUserScroll={releaseEnd}
       />
+      {quoteToast ? <View pointerEvents='none' style={styles.quoteToast}><Text accessibilityLiveRegion='polite' style={styles.quoteToastText}>Mensagem fora do trecho carregado</Text></View> : null}
+      {showJump || (away.current && awayCount(rows, lastSeenKey) > 0) ? <JumpToEnd count={awayCount(rows, lastSeenKey)} onPress={scrollToEnd} /> : null}
       {composer}
+      <ReactionPicker
+        open={reactionPicker !== null && !reactionsDisabled}
+        onClose={() => setReactionPicker(null)}
+        onPick={(emoji) => { const key = reactionPicker; setReactionPicker(null); if (key !== null) toggleReaction(key, emoji) }}
+      />
       <ForwardSheet
         open={forwarding !== null}
         onClose={() => setForwarding(null)}
@@ -1163,14 +1516,14 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         refs={forwarding ? forwarding.refs : []}
         identity={ownKey}
       />
-      <Sheet open={offerOpen && offerListing !== null} onClose={() => { if (!offerAct.pending) setOfferOpen(false) }} title='Fazer oferta'>
+      <Sheet open={isTop && offerOpen && offerListing !== null && folder === 'inbox' && blockNote === null} onClose={() => { if (!offerAct.pending) setOfferOpen(false) }} title='Fazer oferta'>
         <View style={styles.sheet}>
           <Soft>{offerListing !== null && offerListing.title !== '' ? displayText(offerListing.title) : 'Anúncio na Feira'}</Soft>
           <Field label='Valor (R$)' value={offerValue} onChangeText={(t) => { setOfferValue(t); setOfferNote('') }} placeholder='80,00' maxLength={16} editable={!offerAct.pending} />
           <Soft>A oferta vai como mensagem nesta conversa. Não é um pagamento: vocês combinam o resto por aqui.</Soft>
           <ErrorText>{offerNote || offerAct.error}</ErrorText>
-          <Btn label='Enviar oferta' onPress={() => sendOffer(offerListing)} pending={offerAct.pending} disabled={node.online === false || offerValue.trim() === ''} />
-          <Btn label='Cancelar' secondary onPress={() => setOfferOpen(false)} disabled={offerAct.pending} />
+          <Btn block label='Enviar oferta' onPress={() => sendOffer(offerListing)} pending={offerAct.pending} disabled={node.online === false || offerValue.trim() === ''} />
+          <Btn block label='Cancelar' secondary onPress={() => setOfferOpen(false)} disabled={offerAct.pending} />
         </View>
       </Sheet>
       <Sheet open={confirming !== null} onClose={() => { if (!offerAct.pending) setConfirming(null) }} title='Aceitar oferta'>
@@ -1178,8 +1531,8 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
           <Soft>{confirming !== null ? 'Oferta de ' + centsLabel(confirming.offer.cents) + '.' : ''}</Soft>
           <Soft>{CONSENT_NOTE}</Soft>
           <ErrorText>{offerAct.error}</ErrorText>
-          <Btn label='Aceitar e assinar' onPress={() => acceptOffer(confirming)} pending={offerAct.pending} disabled={node.online === false} />
-          <Btn label='Cancelar' secondary onPress={() => setConfirming(null)} disabled={offerAct.pending} />
+          <Btn block label='Aceitar e assinar' onPress={() => acceptOffer(confirming)} pending={offerAct.pending} disabled={node.online === false} />
+          <Btn block label='Cancelar' secondary onPress={() => setConfirming(null)} disabled={offerAct.pending} />
         </View>
       </Sheet>
       {/* Two actions: the compact menu, and the delete confirmation as its own
@@ -1212,6 +1565,11 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
 
 const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
+  quoteFlash: { backgroundColor: colors.line },
+  quoteToast: { padding: 12, borderRadius: 12, marginHorizontal: 16, backgroundColor: colors.ink },
+  quoteToastText: { color: colors.bg, textAlign: 'center' },
+  // The offer and accept sheets' body, with the side margins of the other sheets.
+  sheet: { padding: 16, gap: 12 },
   pad: { padding: 12, alignItems: 'center', gap: 6 },
   inline: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
   // Accept and decline split the row evenly, like the request bars of other messengers.
