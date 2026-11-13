@@ -209,6 +209,7 @@ services:
       VARANDA_AUDIUS_API_URL: "${VARANDA_AUDIUS_API_URL:-}"
       VARANDA_AUDIUS_APP_NAME: "${VARANDA_AUDIUS_APP_NAME:-}"
       VARANDA_AUDIUS_MOMENTS: "${VARANDA_AUDIUS_MOMENTS:-}"
+      VARANDA_AUDIUS_COVERS: "${VARANDA_AUDIUS_COVERS:-}"
       VARANDA_AUDIUS_STREAMS: "${VARANDA_AUDIUS_STREAMS:-}"
       # Excluir conta: o mesmo certificado do assetlinks.json; a conta aceita
       # a passkey do app Android (origem android:apk-key-hash). Vazio: só a

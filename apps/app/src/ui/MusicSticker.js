@@ -3,13 +3,16 @@ import rpc from '@varanda/rpc'
 import { musicStickerLine } from '../music'
 import { MusicCover } from './MusicCover'
 import { Pill } from './Pill'
+import { useMusicCover } from './useMusicCover'
 import { useStyles } from './ThemeProvider'
 import { layout, radius, space } from './theme'
 
 const { displayText } = rpc
 
-export function MusicSticker ({ choice, onPress, onRemove, disabled }) {
+export function MusicSticker ({ choice, onPress, onRemove, disabled, session }) {
   const styles = useStyles(makeStyles)
+  // The cover is only drawn here, in memory: the stored card keeps image null.
+  const uri = useMusicCover(choice.ref.kind === 'playlist' ? 'playlist' : 'track', choice.item, session ?? {})
   const off = !!disabled || typeof onPress !== 'function'
   return (
     <View style={styles.card}>
@@ -22,7 +25,7 @@ export function MusicSticker ({ choice, onPress, onRemove, disabled }) {
         onPress={off ? undefined : onPress}
         style={({ pressed }) => [styles.main, off && styles.off, pressed && styles.pressed]}
       >
-        <MusicCover size={44} />
+        <MusicCover size={44} uri={uri} />
         <View style={styles.words}>
           <Text style={styles.title} numberOfLines={1}>{displayText(choice.item.title)}</Text>
           <Text style={styles.line} numberOfLines={1}>{displayText(musicStickerLine(choice.ref, choice.item))}</Text>

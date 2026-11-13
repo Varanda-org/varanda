@@ -112,6 +112,7 @@ async function ui (stubs = {}) {
     Pressable: 'Pressable',
     LinkCard: 'LinkCard',
     MusicCover: 'MusicCover',
+    useMusicCover: () => null,
     Icon: 'Icon',
     ActivityIndicator: 'ActivityIndicator',
     useTheme: () => ({ colors: { accent: 'accent', accentInk: 'accentInk', bg: 'bg', soft: 'soft' } }),
@@ -255,7 +256,7 @@ test('the idle card still names Audius and draws no cover request', async (t) =>
   const row = tree.children[0]
   t.is(row.props.style.flexDirection, 'row')
   t.is(row.children[0].type, 'MusicCover')
-  t.alike(row.children[0].props, { size: 56 })
+  t.alike(row.children[0].props, { size: 56, uri: undefined })
   const title = row.children[1]
   t.is(title.children[0].props.numberOfLines, 1)
   t.is(title.children[0].props.style.fontWeight, '700')
@@ -435,6 +436,83 @@ test('the tap reads the own lowercase key and unmount aborts the active request'
   item.resolve(track())
   await flush()
   t.alike(calls, [['track', 'abc']])
+})
+
+test('the idle card asks no cover and shows the tile', async (t) => {
+  const covers = []
+  const h = await ui({ useHosted: () => true, useMusicCover: (...args) => { covers.push(args); return null } })
+  const card = { title: 'Stored', desc: 'Peer', url: track().url }
+  const entry = h.MusicPlayerEntry({ card, music: { kind: 'track', id: 'abc' } })
+  t.is(entry.type, h.MusicCardView)
+  const view = h.MusicCardView(entry.props)
+  t.alike(covers, [], 'nothing asked before a press')
+  const tile = flatten(view).find((n) => n.type === 'MusicCover')
+  t.is(tile.props.uri, undefined, 'the generated tile stays')
+})
+
+test('after the tap the card asks the cover for the answered item only', async (t) => {
+  const item = deferred()
+  const covers = []
+  const session = { hosted: true, accountOrigin: 'account-origin', request: 'signer', passkey: { status: { publicKey: 'AB'.repeat(32) } } }
+  const h = await ui({
+    useNode: () => session,
+    useMusicCover: (...args) => { covers.push(args); return args[1] && args[1].cover === true ? 'data:image/png;base64,AAAA' : null },
+    audiusReady: async () => true,
+    audiusItem: async () => item.promise,
+    audiusPlay: () => new Promise(() => {})
+  })
+  const card = { title: 'Stored', desc: 'Peer', url: track().url }
+  const first = h.ActiveMusicPlayer({ card, music: { kind: 'playlist', id: 'abc' }, epoch: (await import('../src/media/chatMedia.js')).playbackEpoch() })
+  t.is(covers.length, 1)
+  t.is(covers[0][0], 'playlist')
+  t.is(covers[0][1], null, 'null until the item arrives')
+  t.alike(covers[0][2], { member: 'ab'.repeat(32), origin: 'account-origin', request: 'signer' })
+  t.is(first.props.coverUri, null)
+  const unmount = h.effects[0]()
+  await flush()
+  item.resolve({ ...track(), cover: true, tracks: [track()] })
+  await flush()
+  h.reset()
+  h.effects.length = 0
+  const second = h.ActiveMusicPlayer({ card, music: { kind: 'playlist', id: 'abc' }, epoch: (await import('../src/media/chatMedia.js')).playbackEpoch() })
+  t.is(covers.at(-1)[1].cover, true, 'asked with the answered item')
+  t.is(second.props.coverUri, 'data:image/png;base64,AAAA')
+  t.is(flatten(h.MusicCardView(second.props)).find((n) => n.type === 'MusicCover').props.uri, 'data:image/png;base64,AAAA')
+  unmount()
+})
+
+test('an account change never asks a cover for the new member', async (t) => {
+  const pending = deferred()
+  const covers = []
+  let publicKey = 'AB'.repeat(32)
+  const h = await ui({
+    useNode: () => ({ hosted: true, accountOrigin: 'account-origin', request: 'signer', passkey: { status: { publicKey } } }),
+    useMusicCover: (...args) => { covers.push(args); return null },
+    audiusReady: async () => true,
+    audiusItem: async () => pending.promise,
+    audiusPlay: () => new Promise(() => {})
+  })
+  const card = { title: 'Stored', desc: 'Peer', url: track().url }
+  const music = { kind: 'track', id: 'abc' }
+  const epoch = (await import('../src/media/chatMedia.js')).playbackEpoch()
+  h.ActiveMusicPlayer({ card, music, epoch })
+  const release = h.effects[0]()
+  t.teardown(() => release())
+  await flush()
+  pending.resolve({ ...track(), cover: true })
+  await flush()
+  h.reset()
+  h.effects.length = 0
+  h.ActiveMusicPlayer({ card, music, epoch })
+  t.is(covers.at(-1)[1].cover, true, 'the active card has played with a cover item')
+  t.is(covers.at(-1)[2].member, 'ab'.repeat(32))
+  publicKey = 'CD'.repeat(32)
+  h.reset()
+  h.effects.length = 0
+  h.ActiveMusicPlayer({ card, music, epoch })
+  t.is(covers.at(-1)[2].member, 'cd'.repeat(32))
+  t.is(covers.at(-1)[1], null, 'switching the member asks no cover before a tap')
+  t.absent(covers.some((args) => args[2] && args[2].member === 'cd'.repeat(32) && args[1] && args[1].cover === true))
 })
 
 test('the controller makes no request until press and checks readiness before the item', async (t) => {
@@ -893,6 +971,8 @@ test('shared player source keeps IO behind the tap and all provider text escaped
   t.ok(source.includes('job.player.pause(); job.player.release()'))
   t.ok(source.includes('signal: job.controller.signal'))
   t.ok(source.includes('job.controller.abort()'))
+  t.is([...source.matchAll(/useMusicCover\(/g)].length, 1, 'one cover request, inside the active player')
+  t.ok(source.indexOf('useMusicCover(') > source.indexOf('function ActiveMusicPlayer'))
   t.is([...source.matchAll(/useNode\(\)/g)].length, 1)
   t.ok(source.indexOf('useNode()') > source.indexOf('function ActiveMusicPlayer'))
   t.ok(source.includes('if (!queue.done) start(epoch, true)'), 'automatic start only on queue ended')

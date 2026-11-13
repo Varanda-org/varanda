@@ -635,11 +635,12 @@ function readGifEnv (env) {
 }
 
 // Audius music (../account/audius-routes.js): VARANDA_AUDIUS_API_KEY unset
-// or '' is off, set is on. The other four are optional, and one set while
-// the key is empty is a mistake the operator must see. Momentos stay off
-// unless VARANDA_AUDIUS_MOMENTS is exactly '1'. No value is ever echoed: the
+// or '' is off, set is on. The other five are optional, and one set while
+// the key is empty is a mistake the operator must see. Momentos and covers
+// stay off unless VARANDA_AUDIUS_MOMENTS or VARANDA_AUDIUS_COVERS is exactly
+// '1'. No value is ever echoed: the
 // key is a secret, and parseAudiusConfig answers null without saying why.
-const AUDIUS_OPTIONAL = ['VARANDA_AUDIUS_API_URL', 'VARANDA_AUDIUS_APP_NAME', 'VARANDA_AUDIUS_MOMENTS', 'VARANDA_AUDIUS_STREAMS']
+const AUDIUS_OPTIONAL = ['VARANDA_AUDIUS_API_URL', 'VARANDA_AUDIUS_APP_NAME', 'VARANDA_AUDIUS_MOMENTS', 'VARANDA_AUDIUS_COVERS', 'VARANDA_AUDIUS_STREAMS']
 function readAudiusEnv (env) {
   const apiKey = env.VARANDA_AUDIUS_API_KEY
   if (apiKey === undefined || apiKey === '') {
@@ -664,6 +665,11 @@ function readAudiusEnv (env) {
     throw new UsageError('VARANDA_AUDIUS_MOMENTS inválido: use 0 ou 1')
   }
   options.moments = rawMoments === '1'
+  const rawCovers = env.VARANDA_AUDIUS_COVERS
+  if (rawCovers !== undefined && rawCovers !== '' && rawCovers !== '0' && rawCovers !== '1') {
+    throw new UsageError('VARANDA_AUDIUS_COVERS inválido: use 0 ou 1')
+  }
+  options.covers = rawCovers === '1'
   const rawStreams = env.VARANDA_AUDIUS_STREAMS
   const streamsText = typeof rawStreams === 'string' ? rawStreams.trim() : null
   if (rawStreams !== undefined && streamsText !== '') {

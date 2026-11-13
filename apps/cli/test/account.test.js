@@ -1670,6 +1670,7 @@ test('readEnv: Audius on with the key, optional values checked, values never in 
     VARANDA_AUDIUS_API_URL: '',
     VARANDA_AUDIUS_APP_NAME: '',
     VARANDA_AUDIUS_MOMENTS: '',
+    VARANDA_AUDIUS_COVERS: '',
     VARANDA_AUDIUS_STREAMS: ''
   }).audius, null, 'all empty, as compose passes them: off')
 
@@ -1679,15 +1680,21 @@ test('readEnv: Audius on with the key, optional values checked, values never in 
     apiKey: KEY,
     appName: 'varanda',
     moments: false,
+    covers: false,
     streams: 16
-  }, 'the key alone: defaults, momentos off')
+  }, 'the key alone: defaults, momentos and covers off')
   t.is(readEnv({ ...env, VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_MOMENTS: '0' }).audius.moments, false)
+  t.is(readEnv({ ...env, VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_COVERS: '0' }).audius.covers, false, 'covers 0: off')
+  t.is(readEnv({ ...env, VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_COVERS: '' }).audius.covers, false, 'covers empty: off')
+  t.is(readEnv({ ...env, VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_COVERS: '1' }).audius.covers, true, 'covers 1: on')
+  t.is(readEnv({ ...env, VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_COVERS: '1' }).audius.moments, false, 'covers do not turn momentos on')
   t.alike(readEnv({
     ...env,
     VARANDA_AUDIUS_API_KEY: KEY,
     VARANDA_AUDIUS_API_URL: 'https://Audius-Sentinela.example/v1/',
     VARANDA_AUDIUS_APP_NAME: 'varanda-teste',
     VARANDA_AUDIUS_MOMENTS: '1',
+    VARANDA_AUDIUS_COVERS: '1',
     VARANDA_AUDIUS_STREAMS: ' 32 '
   }).audius, {
     base: 'https://audius-sentinela.example/v1',
@@ -1695,6 +1702,7 @@ test('readEnv: Audius on with the key, optional values checked, values never in 
     apiKey: KEY,
     appName: 'varanda-teste',
     moments: true,
+    covers: true,
     streams: 32
   }, 'every optional value set')
 
@@ -1702,6 +1710,8 @@ test('readEnv: Audius on with the key, optional values checked, values never in 
     [{ VARANDA_AUDIUS_API_URL: 'https://audius-sentinela.example/v1' }, 'VARANDA_AUDIUS_API_KEY ausente'],
     [{ VARANDA_AUDIUS_APP_NAME: 'sentinela' }, 'VARANDA_AUDIUS_API_KEY ausente'],
     [{ VARANDA_AUDIUS_MOMENTS: '1' }, 'VARANDA_AUDIUS_API_KEY ausente'],
+    [{ VARANDA_AUDIUS_COVERS: '1' }, 'VARANDA_AUDIUS_API_KEY ausente'],
+    [{ VARANDA_AUDIUS_COVERS: '0', VARANDA_AUDIUS_API_KEY: '' }, 'VARANDA_AUDIUS_API_KEY ausente'],
     [{ VARANDA_AUDIUS_STREAMS: '8', VARANDA_AUDIUS_API_KEY: '' }, 'VARANDA_AUDIUS_API_KEY ausente'],
     [{ VARANDA_AUDIUS_API_KEY: 'chave sentinela' }, 'VARANDA_AUDIUS_API_KEY inválido'],
     [{ VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_API_URL: 'http://audius-sentinela.example' }, 'VARANDA_AUDIUS_API_URL inválido: use uma URL https sem usuário, consulta nem endereço IP'],
@@ -1709,6 +1719,8 @@ test('readEnv: Audius on with the key, optional values checked, values never in 
     [{ VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_API_URL: 'https://audius-sentinela.example/v1?api_key=sentinela' }, 'VARANDA_AUDIUS_API_URL inválido: use uma URL https sem usuário, consulta nem endereço IP'],
     [{ VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_APP_NAME: 'Sentinela_App' }, 'VARANDA_AUDIUS_APP_NAME inválido: use letras minúsculas, números e hífen, até 32'],
     [{ VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_MOMENTS: 'sim-sentinela' }, 'VARANDA_AUDIUS_MOMENTS inválido: use 0 ou 1'],
+    [{ VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_COVERS: 'sim-sentinela' }, 'VARANDA_AUDIUS_COVERS inválido: use 0 ou 1'],
+    [{ VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_COVERS: 'true' }, 'VARANDA_AUDIUS_COVERS inválido: use 0 ou 1'],
     [{ VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_STREAMS: '33' }, 'VARANDA_AUDIUS_STREAMS inválido: use um número inteiro de 1 a 32'],
     [{ VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_STREAMS: '0' }, 'VARANDA_AUDIUS_STREAMS inválido: use um número inteiro de 1 a 32'],
     [{ VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_STREAMS: '08' }, 'VARANDA_AUDIUS_STREAMS inválido: use um número inteiro de 1 a 32'],

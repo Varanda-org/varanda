@@ -308,6 +308,76 @@ test('parseResolve: { kind, item } with no tracks', async (t) => {
   ]) t.is(parseResolve(b), null, JSON.stringify(b))
 })
 
+test('parsers accept today\'s item or one more boolean cover and nothing else', async (t) => {
+  const { parseSearch, parseItem, parseResolve, musicCardFields } = await load()
+  const lit = { ...track, cover: true }
+  const dark = { ...track, id: 'T2abc', cover: false }
+  const list = { ...playlist, cover: true }
+  t.alike(parseSearch({ items: [lit, dark, track], next: null }, 'track'), { items: [lit, dark, track], next: null })
+  t.alike(parseSearch({ items: [list, playlist], next: null }, 'playlist'), { items: [list, playlist], next: null })
+  t.alike(parseItem(lit, 'track'), lit)
+  t.alike(parseItem({ ...list, tracks: [lit, dark, track] }, 'playlist'), { ...list, tracks: [lit, dark, track] })
+  t.alike(parseItem({ ...playlist, tracks: [lit] }, 'playlist'), { ...playlist, tracks: [lit] })
+  t.alike(parseResolve({ kind: 'track', item: dark }), { kind: 'track', item: dark })
+  t.alike(parseResolve({ kind: 'playlist', item: list }), { kind: 'playlist', item: list })
+  t.absent(Object.hasOwn(parseItem(track, 'track'), 'cover'), 'no key, no cover field')
+  t.absent(Object.hasOwn(parseResolve({ kind: 'playlist', item: playlist }).item, 'cover'))
+  t.absent(Object.hasOwn(parseSearch({ items: [track], next: null }, 'track').items[0], 'cover'))
+  const inherited = Object.assign(Object.create({ cover: true }), track)
+  t.absent(Object.hasOwn(parseItem(inherited, 'track'), 'cover'), 'only an own cover counts')
+  for (const [item, why] of [
+    [{ ...track, cover: 'true' }, 'a string cover'],
+    [{ ...track, cover: 1 }, 'a number cover'],
+    [{ ...track, cover: null }, 'a null cover'],
+    [{ ...track, cover: { url: 'https://evil.example/a.jpg' } }, 'an object cover'],
+    [{ ...track, cover: true, artwork: 'https://evil.example/a.jpg' }, 'a cover and an artwork'],
+    [{ ...track, artwork: 'https://evil.example/a.jpg' }, 'an artwork string'],
+    [{ ...track, cover: true, x: 1 }, 'a cover and another key']
+  ]) {
+    t.is(parseSearch({ items: [track, item], next: null }, 'track'), null, 'search: ' + why)
+    t.is(parseItem(item, 'track'), null, 'item: ' + why)
+    t.is(parseItem({ ...playlist, tracks: [track, item] }, 'playlist'), null, 'nested track: ' + why)
+    t.is(parseResolve({ kind: 'track', item }), null, 'resolve: ' + why)
+  }
+  for (const [extra, why] of [[{ cover: 'yes' }, 'a string cover'], [{ artwork: 'https://evil.example/a.jpg' }, 'an artwork'], [{ cover: false, x: 1 }, 'a cover and another key']]) {
+    t.is(parseSearch({ items: [{ ...playlist, ...extra }], next: null }, 'playlist'), null, 'playlist search: ' + why)
+    t.is(parseItem({ ...playlist, ...extra, tracks: [] }, 'playlist'), null, 'playlist item: ' + why)
+    t.is(parseResolve({ kind: 'playlist', item: { ...playlist, ...extra } }), null, 'playlist resolve: ' + why)
+  }
+  t.is(parseSearch({ items: [], next: null, cover: true }, 'track'), null, 'a page has no cover')
+  t.is(parseResolve({ kind: 'track', item: track, cover: true }), null, 'a resolve answer has no cover of its own')
+  const card = musicCardFields(lit, { kind: 'track', id: lit.id, start: null })
+  t.alike(Object.keys(card).sort(), ['desc', 'host', 'title', 'url'], 'a cover never reaches a card')
+})
+
+test('artMime knows JPEG, PNG and WebP and nothing else', async (t) => {
+  const { artMime, MUSIC_ART_MAX_BYTES } = await load()
+  t.is(MUSIC_ART_MAX_BYTES, 131072)
+  const u = (bytes) => Uint8Array.from(bytes)
+  t.is(artMime(u([0xff, 0xd8, 0xff])), 'image/jpeg')
+  t.is(artMime(u([0xff, 0xd8, 0xff, 0xe0, 0, 16])), 'image/jpeg')
+  t.is(artMime(u([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0])), 'image/png')
+  t.is(artMime(u([0x52, 0x49, 0x46, 0x46, 1, 2, 3, 4, 0x57, 0x45, 0x42, 0x50])), 'image/webp')
+  t.is(artMime(Buffer.from('RIFF\u0000\u0000\u0000\u0000WEBPVP8 ')), 'image/webp', 'a Buffer is a Uint8Array')
+  for (const [bytes, why] of [
+    [u([]), 'empty'],
+    [u([0xff, 0xd8]), 'a cut JPEG mark'],
+    [u([0xff, 0xd8, 0xfe]), 'not a JPEG'],
+    [u([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a]), 'a cut PNG mark'],
+    [u([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0b]), 'a wrong PNG mark'],
+    [u([0x52, 0x49, 0x46, 0x46, 1, 2, 3, 4, 0x57, 0x41, 0x56, 0x45]), 'a RIFF WAVE'],
+    [u([0x52, 0x49, 0x46, 0x46, 1, 2, 3, 4, 0x57, 0x45, 0x42]), 'a cut WebP'],
+    [u([0, 0, 0, 0, 1, 2, 3, 4, 0x57, 0x45, 0x42, 0x50]), 'WEBP without RIFF'],
+    [Buffer.from('GIF89a\u0001\u0000'), 'GIF89a'],
+    [Buffer.from('GIF87a\u0001\u0000'), 'GIF87a'],
+    [Buffer.from('<svg xmlns="x"/>'), 'SVG'],
+    [Buffer.from('BM\u0000\u0000'), 'BMP']
+  ]) t.is(artMime(bytes), null, why)
+  for (const v of [null, undefined, 'ÿØÿ', [0xff, 0xd8, 0xff], { 0: 0xff, 1: 0xd8, 2: 0xff, length: 3 }, new ArrayBuffer(3)]) {
+    t.is(artMime(v), null, 'not bytes: ' + Object.prototype.toString.call(v))
+  }
+})
+
 test('parsePlay: a 43-character base64url ticket and an ISO expiry', async (t) => {
   const { parsePlay } = await load()
   const at = new Date(Date.now() + 30 * 60 * 1000).toISOString()

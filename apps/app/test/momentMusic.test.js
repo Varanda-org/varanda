@@ -22,8 +22,59 @@ test('cover tile and equalizer stay local and themed', (t) => {
   }
   t.ok(cover.includes("name='musica'"))
   t.ok(cover.includes('colors.skeleton'))
+  // The Image branch draws only a cover the session cache holds.
+  t.ok(cover.includes('/^data:image\\/(jpeg|png|webp);base64,/'))
+  t.ok(cover.includes('source={{ uri }}'))
+  t.ok(cover.includes("accessibilityRole='image'"))
+  t.ok(cover.includes('accessibilityIgnoresInvertColors'))
+  t.ok(cover.includes('onError={'))
+  t.absent(/urlFromBytes|AsyncStorage|indexedDB/.test(cover))
   t.ok(equalizer.includes('loopTiming('))
   t.ok(equalizer.includes('isReduceMotionEnabled'))
+})
+
+// The real MusicCover, with React Native replaced by plain element objects.
+function musicCover (src) {
+  const { transformSync } = require('@babel/core')
+  const deps = {
+    React: { createElement: (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity) }) },
+    useState: (initial) => [initial, () => {}],
+    Image: 'Image',
+    View: 'View',
+    StyleSheet: { create: (styles) => styles },
+    displayText,
+    Icon: 'Icon',
+    useStyles: () => ({}),
+    useTheme: () => ({ colors: { soft: '#4a554e' } }),
+    radius: {}
+  }
+  const input = src.replace(/^import .+\n/gm, '').replace(/\bexport /g, '')
+  const { code } = transformSync(input, { configFile: false, babelrc: false, plugins: ['@babel/plugin-transform-react-jsx'] })
+  // eslint-disable-next-line no-new-func
+  return new Function(...Object.keys(deps), code + '\nreturn MusicCover')(...Object.values(deps))
+}
+
+test('only a base64 JPEG, PNG or WebP cover is drawn, never an SVG', (t) => {
+  const MusicCover = musicCover(fs.readFileSync(path.join(__dirname, '../src/ui/MusicCover.js'), 'utf8'))
+  const drawn = (uri) => nodes(MusicCover({ uri })).some((n) => n.type === 'Image')
+  const tile = (uri) => nodes(MusicCover({ uri })).some((n) => n.type === 'Icon' && n.props.name === 'musica')
+  for (const mime of ['jpeg', 'png', 'webp']) {
+    const uri = 'data:image/' + mime + ';base64,AAAA'
+    t.ok(drawn(uri), mime + ' is drawn')
+    t.is(nodes(MusicCover({ uri })).find((n) => n.type === 'Image').props.source.uri, uri)
+  }
+  for (const [uri, why] of [
+    ['data:image/svg+xml;base64,PHN2Zy8+', 'an SVG'],
+    ['data:image/svg+xml,<svg onload="x()"/>', 'a plain SVG'],
+    ['data:image/gif;base64,R0lGODlh', 'a GIF'],
+    ['data:image/png,AAAA', 'a PNG without ;base64,'],
+    ['data:image/PNG;base64,AAAA', 'another spelling'],
+    ['https://evil.example/a.png', 'a URL'],
+    [null, 'no uri']
+  ]) {
+    t.absent(drawn(uri), why + ' is not drawn')
+    t.ok(tile(uri), why + ' shows the tile')
+  }
 })
 
 function deferred () {
@@ -490,6 +541,7 @@ async function ui (stubs) {
     useStyles: () => ({}),
     useTheme: () => ({ colors: { ink: '#111111', card: '#ffffff', soft: '#4a554e' } }),
     MusicCover: 'MusicCover',
+    useMusicCover: () => null,
     MusicEqualizer: 'MusicEqualizer',
     Icon: 'Icon',
     layout: { hit: 44 },
@@ -517,6 +569,171 @@ function textOf (tree) {
   if (typeof tree === 'string') return tree
   return tree && typeof tree === 'object' ? tree.children.map(textOf).join(' ') : ''
 }
+
+test('the momento sticker asks no cover before playback starts', async (t) => {
+  const item = { ...track, cover: true }
+  const loading = deferred()
+  const seeking = deferred()
+  const covers = []
+  const uri = 'data:image/jpeg;base64,Y292ZXI='
+  let emit
+  let refuse = true
+  const h = await ui({
+    audiusItem: () => loading.promise,
+    audiusPlay: async () => ticket,
+    createStreamPlayer: () => ({
+      seek: () => seeking.promise,
+      play: async () => { if (refuse) throw Object.assign(new Error('gesture'), { name: 'NotAllowedError' }) },
+      pause () {},
+      release () {},
+      onProgress: (fn) => { emit = fn; return () => {} },
+      onError: () => () => {}
+    }),
+    useMusicCover: (...args) => { covers.push(args); return args[3] ? uri : null },
+    setTimeout: () => 1,
+    clearTimeout () {}
+  })
+  t.teardown(() => h.unmount())
+  const session = { member: 'b'.repeat(64), origin: 'node-origin', request () {} }
+  const props = { ...session, music: { id: 'abc', start: 30 }, paused: true }
+  h.render(props)
+  t.alike(covers.at(-1), ['track', null, session, false], 'mounting cannot request a cover')
+  h.mount()
+  h.render(props)
+  t.is(covers.at(-1)[3], false, 'loading is disabled')
+  loading.resolve(item)
+  await flush()
+  h.render(props)
+  t.alike(covers.at(-1), ['track', item, session, false], 'seeking is disabled even with cover metadata')
+  seeking.resolve()
+  await flush()
+  h.render(props)
+  t.is(covers.at(-1)[3], false, 'paused before the first start is disabled')
+  props.paused = false
+  h.render(props)
+  h.mount()
+  await flush()
+  const gesture = nodes(h.render(props)).find((n) => n.type === 'Pressable' && textOf(n).includes('Tocar música'))
+  t.ok(gesture)
+  t.is(covers.at(-1)[3], false, 'an autoplay refusal keeps covers disabled')
+  refuse = false
+  await gesture.props.onPress()
+  h.render(props)
+  t.is(covers.at(-1)[3], false, 'play resolving is not playback progress')
+  for (const update of [{ playing: true, buffering: true }, { playing: false, buffering: false }]) {
+    emit({ ms: 30000, ...update })
+    h.render(props)
+    t.is(covers.at(-1)[3], false, 'buffering and stopped progress cannot enable a cover')
+  }
+  emit({ ms: 30000, playing: true, buffering: false })
+  const playing = h.render(props)
+  t.alike(covers.at(-1), ['track', item, session, true], 'audible playback enables the cover')
+  t.alike(nodes(playing).find((n) => n.type === 'MusicCover').props, { size: 36, uri })
+  props.paused = true
+  h.render(props)
+  h.mount()
+  h.render(props)
+  t.is(covers.at(-1)[3], true, 'the latch survives a later pause')
+  const { stopBoundPlayback } = await dependencies()
+  stopBoundPlayback()
+  h.render(props)
+  t.is(covers.at(-1)[3], true, 'the latch survives a later gesture')
+  h.render({ ...props, music: { id: 'def', start: 0 } })
+  h.mount()
+  h.render({ ...props, music: { id: 'def', start: 0 } })
+  t.is(covers.at(-1)[3], false, 'a different momento needs its own playback')
+})
+
+test('an account change resets the cover latch', async (t) => {
+  const item = { ...track, cover: true }
+  const covers = []
+  let emit
+  const request = () => {}
+  const h = await ui({
+    audiusItem: async () => item,
+    audiusPlay: async () => ticket,
+    createStreamPlayer: () => ({
+      seek: async () => {},
+      play: async () => {},
+      pause () {},
+      release () {},
+      onProgress: (fn) => { emit = fn; return () => {} },
+      onError: () => () => {}
+    }),
+    useMusicCover: (...args) => { covers.push(args); return null },
+    setTimeout: () => 1,
+    clearTimeout () {}
+  })
+  t.teardown(() => h.unmount())
+  const memberA = 'a'.repeat(64)
+  const memberB = 'b'.repeat(64)
+  const music = { id: 'abc', start: 30 }
+  const propsA = { member: memberA, origin: 'node-origin', request, music }
+  h.render(propsA)
+  h.mount()
+  await flush()
+  emit({ ms: 30000, playing: true, buffering: false })
+  const sessionA = { member: memberA, origin: 'node-origin', request }
+  h.render(propsA)
+  t.alike(covers.at(-1), ['track', item, sessionA, true], 'playback as A enables the cover')
+  const propsB = { member: memberB, origin: 'node-origin', request, music }
+  const sessionB = { member: memberB, origin: 'node-origin', request }
+  h.render(propsB)
+  t.alike(covers.at(-1), ['track', null, sessionB, false], 'switching to B asks no cover before B plays')
+  h.mount()
+  await flush()
+  h.render(propsB)
+  t.alike(covers.at(-1), ['track', item, sessionB, false], 'B stays dark until its own playback is playing')
+  emit({ ms: 30000, playing: true, buffering: false })
+  h.render(propsB)
+  t.alike(covers.at(-1), ['track', item, sessionB, true], 'playing as B may ask')
+})
+
+test('a failed cover leaves the tile and reports nothing', async (t) => {
+  const timers = new Map()
+  const unavailable = []
+  const covers = []
+  let emit
+  let starts = 0
+  let serial = 0
+  let timerChanges = 0
+  const h = await ui({
+    audiusItem: async () => ({ ...track, cover: true }),
+    audiusPlay: async () => ticket,
+    createStreamPlayer: () => ({
+      seek: async () => {},
+      play: async () => {},
+      pause () {},
+      release () {},
+      onProgress: (fn) => { emit = fn; return () => {} },
+      onError: () => () => {}
+    }),
+    useMusicCover: (...args) => { covers.push(args); return null },
+    setTimeout: (fn, ms) => { timerChanges++; timers.set(++serial, { fn, ms }); return serial },
+    clearTimeout: (id) => { timerChanges++; timers.delete(id) }
+  })
+  t.teardown(() => h.unmount())
+  const props = { music: { id: 'abc', start: 30 }, onStart: () => { starts++ }, onUnavailable: (error) => unavailable.push(error) }
+  h.render(props)
+  h.mount()
+  await flush()
+  emit({ ms: 30000, playing: true, buffering: false })
+  const before = [...timers]
+  const changes = timerChanges
+  for (let i = 0; i < 2; i++) {
+    const tree = h.render(props)
+    h.mount()
+    t.is(covers.at(-1)[3], true)
+    t.alike(nodes(tree).find((n) => n.type === 'MusicCover').props, { size: 36, uri: null }, 'a failed hook result keeps the generated tile')
+  }
+  t.is(starts, 1, 'the viewer start is unchanged')
+  t.alike(unavailable, [], 'cover failure never reports unavailable')
+  t.is(before.length, 1)
+  t.is(before[0][1].ms, 15000)
+  t.alike([...timers], before, 'cover failure preserves the playback timer')
+  t.is(timerChanges, changes, 'cover rendering never resets a timer')
+  t.absent(/\bfetch\b|\bURL\b|https?:\/\/|\bImage\b|\baudiusArt\b/.test(source))
+})
 
 test('mounted UI offers another gesture after a second refusal and releases on a later media failure', async (t) => {
   const { createStreamPlayer } = await import('../src/media/stream.web.js')

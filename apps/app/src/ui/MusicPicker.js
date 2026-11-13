@@ -9,6 +9,7 @@ import { Btn } from './index'
 import { tap } from './haptics'
 import { Icon } from './Icon'
 import { MusicCover } from './MusicCover'
+import { useMusicCover } from './useMusicCover'
 import { MusicEditor } from './MusicEditor'
 import { Pill } from './Pill'
 import { Segmented } from './Segmented'
@@ -299,7 +300,7 @@ function MusicSearch ({ member, origin, request, modes, onSelect, onStop, onTogg
         onEndReached={() => dispatch({ type: 'more' })}
         ListFooterComponent={phase === 'more' ? <ActivityIndicator style={styles.spinner} color={colors.soft} /> : null}
         renderItem={({ item }) => (
-          <MusicRow item={item} kind={kind} onOpen={onSelect} onToggle={onToggle} phase={active === item.id ? previewPhase : 'idle'} />
+          <MusicRow item={item} kind={kind} member={member} origin={origin} request={request} onOpen={onSelect} onToggle={onToggle} phase={active === item.id ? previewPhase : 'idle'} />
         )}
       />
     </View>
@@ -307,14 +308,15 @@ function MusicSearch ({ member, origin, request, modes, onSelect, onStop, onTogg
 }
 
 // Sibling Pressables: a nested button inside the row would swallow or double the tap.
-function MusicRow ({ item, kind, onOpen, onToggle, phase }) {
+function MusicRow ({ item, kind, member, origin, request, onOpen, onToggle, phase }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
+  const uri = useMusicCover(kind, item, { member, origin, request })
   const playing = phase === 'playing'
   return (
     <View style={styles.row}>
       <Pressable accessibilityRole='button' onPress={() => onOpen(item, kind)} style={({ pressed }) => [styles.main, pressed && styles.pressed]}>
-        <MusicCover size={48} />
+        <MusicCover size={48} uri={uri} />
         <View style={styles.words}>
           <Text style={styles.title} numberOfLines={1}>{displayText(item.title)}</Text>
           <Text style={styles.artist} numberOfLines={1}>{displayText(musicRowLine(item))}</Text>

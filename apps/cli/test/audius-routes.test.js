@@ -5,7 +5,9 @@
 // fake Audius API and a storage node the stream redirects to. Both are plain
 // HTTP on 127.0.0.1, reached through an injected request (each name mapped
 // to its fixture's port), lookup and address allowlist: no socket leaves
-// loopback, and every connection made is recorded and checked.
+// loopback, and every connection made is recorded and checked. The request
+// also records what the guarded lookup let through and refuses any address
+// but 127.0.0.1 itself, so a broken guard fails a test without a real dial.
 
 const test = require('brittle')
 const http = require('node:http')
@@ -24,7 +26,14 @@ const {
   SEARCHES_PER_DAY,
   OPENS_PER_TICKET,
   TICKET_TTL_MS,
-  TICKETS_PER_MEMBER
+  TICKETS_PER_MEMBER,
+  PROVIDER_PER_DAY,
+  PROVIDER_CALLS_PER_DAY,
+  ARTS_PER_DAY,
+  ART_MAX_BYTES,
+  MAX_ART_CACHED,
+  MAX_ART_INFLIGHT,
+  ART_PER_MEMBER
 } = require('../lib/account/audius-routes')
 
 const KEY = 'chave-sentinela-audius-42'
@@ -32,6 +41,12 @@ const QUERY = 'samba-sentinela'
 const API = 'api.audius.test'
 const NODE = 'node.audius.test'
 const PRIVATE = 'private.audius.test'
+const ART = 'art.audius.test'
+const CACHE_TTL_MS = 10 * 60 * 1000
+const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(60, 1)])
+const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(40, 2)])
+const WEBP = Buffer.concat([Buffer.from('RIFF'), Buffer.from([0x20, 0, 0, 0]), Buffer.from('WEBPVP8 '), Buffer.alloc(20, 3)])
+const ART_HEADERS = ['host', 'connection', 'user-agent', 'accept']
 const AUDIO = Buffer.from(Array.from({ length: 100 }, (_, i) => i))
 const BIG = Buffer.alloc(300, 7)
 const PROVIDER_HEADERS = ['host', 'connection', 'user-agent', 'accept', 'range', 'x-api-key']
@@ -97,7 +112,7 @@ function track (id, extra = {}) {
     duration: 180,
     permalink: '/artista/musica-' + id.toLowerCase(),
     user: { name: 'Artista', id: 'u1' },
-    artwork: { '150x150': 'https://art.example/' + id + '.jpg' },
+    artwork: { '150x150': 'https://' + ART + '/' + id },
     is_streamable: true,
     is_stream_gated: false,
     access: { stream: true },
@@ -113,6 +128,7 @@ function playlist (id, extra = {}) {
     user: { name: 'Artista' },
     track_count: 60,
     access: { stream: true },
+    artwork: { '150x150': 'https://' + ART + '/' + id },
     ...extra
   }
 }
@@ -139,11 +155,18 @@ function json (res, status, body) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' })
   res.end(JSON.stringify(body))
 }
+const jsonAnswer = json
 
 // Track ids the fake API answers with an error status.
 const ERRORS = { Err500: 500, Err503: 503, Err429: 429, Err403: 403, Err400: 400, Gone410: 410 }
 
 function fakeApi (state) {
+  // state.artwork[id], when set, replaces that item's artwork (undefined: none).
+  const withArt = (item) => (Object.hasOwn(state.artwork, item.id) ? { ...item, artwork: state.artwork[item.id] } : item)
+  const json = (res, status, body) => {
+    if (status === 200 && body && body.data !== undefined) body = { ...body, data: Array.isArray(body.data) ? body.data.map(withArt) : withArt(body.data) }
+    jsonAnswer(res, status, body)
+  }
   return fixture(API, (url, req, res) => {
     const p = url.pathname
     if (state.mode === 'garbage') {
@@ -151,6 +174,7 @@ function fakeApi (state) {
       return res.end('<html></html>')
     }
     if (p === '/v1/tracks/search') {
+      if (url.searchParams.get('query') === 'faixas') return json(res, 200, { data: [track('Pt0')] })
       const code = url.searchParams.get('query').match(/^erro(\d{3})$/)
       if (code) return json(res, Number(code[1]), {})
       const offset = Number(url.searchParams.get('offset'))
@@ -197,6 +221,9 @@ function fakeApi (state) {
       if (Object.hasOwn(ERRORS, id)) return json(res, ERRORS[id], { error: 'erro' })
       if (id === 'Gated1') return json(res, 200, { data: track(id, { is_stream_gated: true }) })
       if (id === 'Swap1') return json(res, 200, { data: track('Other1') })
+      if (id === 'NoArt1') return json(res, 200, { data: track(id, { artwork: undefined }) })
+      if (id === 'BadArt1') return json(res, 200, { data: track(id, { artwork: { '150x150': 'http://' + ART + '/ArtJpg1' } }) })
+      if (id === 'PrivArt1') return json(res, 200, { data: track(id, { artwork: { '150x150': 'https://' + PRIVATE + '/x' } }) })
       return json(res, 200, { data: track(id) })
     }
     m = p.match(/^\/v1\/playlists\/([A-Za-z0-9]+)\/tracks$/)
@@ -273,26 +300,104 @@ function fakeNode () {
   return node
 }
 
-async function setup (t, { audius = true, moments = false, streams = 16, caps = {}, accepted = true } = {}) {
+// The art host: a JPEG for any path but the names below.
+function fakeArt () {
+  const held = new Set()
+  const hold = (res) => {
+    held.add(res)
+    res.on('close', () => held.delete(res))
+  }
+  const art = fixture(ART, (url, req, res) => {
+    const name = url.pathname.slice(1)
+    const image = (type, body) => {
+      res.writeHead(200, { 'Content-Type': type, 'Content-Length': body.length, 'Set-Cookie': 'art=1' })
+      res.end(body)
+    }
+    const redirect = (location) => {
+      res.writeHead(302, { Location: location })
+      res.end()
+    }
+    if (name === 'ArtPng1') return image('text/plain', PNG)
+    if (name === 'ArtWebp1') return image('image/webp', WEBP)
+    if (name === 'ArtGif1') return image('image/gif', Buffer.from('GIF89a' + 'x'.repeat(20)))
+    if (name === 'ArtHtml1') return image('image/jpeg', Buffer.from('<svg onload=alert(1)>'))
+    if (name === 'ArtWave1') return image('image/webp', Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WAVEfmt '), Buffer.alloc(8)]))
+    if (name === 'ArtEmpty1') return image('image/jpeg', Buffer.alloc(0))
+    if (name === 'ArtExact1') return image('image/jpeg', Buffer.concat([JPEG.subarray(0, 4), Buffer.alloc(ART_MAX_BYTES - 4, 9)]))
+    if (name === 'ArtBig1') return image('image/jpeg', Buffer.concat([JPEG.subarray(0, 4), Buffer.alloc(ART_MAX_BYTES - 3, 9)]))
+    if (name === 'ArtGone1') return json(res, 404, {})
+    if (name === 'ArtBusy1') return json(res, 429, {})
+    if (name === 'ArtErr1') return json(res, 500, {})
+    if (name === 'ArtHop1') return redirect('https://' + ART + '/ArtJpg1')
+    if (name === 'ArtHop2') return redirect('/ArtHop1')
+    if (name === 'ArtLoop1') return redirect('/ArtLoop1')
+    if (name === 'ArtPrivate1') return redirect('https://' + PRIVATE + '/x.jpg')
+    if (name === 'ArtHttp1') return redirect('http://' + ART + '/ArtJpg1')
+    if (name === 'ArtPort1') return redirect('https://' + ART + ':8443/ArtJpg1')
+    if (name === 'ArtPartial1') {
+      res.writeHead(206, { 'Content-Type': 'image/jpeg', 'Content-Range': 'bytes 0-63/64', 'Content-Length': JPEG.length })
+      return res.end(JPEG)
+    }
+    if (name === 'ArtSlow1') return setTimeout(() => image('image/jpeg', JPEG), 200)
+    if (name === 'ArtSlowErr1') return setTimeout(() => json(res, 500, {}), 200)
+    if (/^ArtHang\d+$/.test(name)) return hold(res)
+    if (name === 'ArtStall1') {
+      res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': JPEG.length })
+      res.write(JPEG.subarray(0, 4))
+      return hold(res)
+    }
+    image('image/jpeg', JPEG)
+  })
+  art.held = held
+  return art
+}
+
+async function setup (t, { audius = true, moments = false, covers = false, streams = 16, caps = {}, accepted = true, timers = null } = {}) {
   const clock = { offset: 0 }
   const now = () => Date.now() + clock.offset
-  const state = { mode: 'ok', slow: [] }
+  const state = { mode: 'ok', slow: [], artwork: {} }
   const api = fakeApi(state)
   const node = fakeNode()
+  const art = fakeArt()
   await api.listen()
   await node.listen()
-  const ports = { [API]: api.port, [NODE]: node.port }
+  await art.listen()
+  const ports = { [API]: api.port, [NODE]: node.port, [ART]: art.port }
   const looked = []
   const connected = []
+  // { host, addresses } for what the guarded lookup let through, or
+  // { host, refused } with its error code.
+  const dials = []
   const transport = {
     request: (opts) => {
-      const req = http.request({ ...opts, port: ports[opts.hostname] })
+      const guarded = opts.lookup
+      const lookup = (host, o, cb) => {
+        if (typeof o === 'function') {
+          cb = o
+          o = {}
+        }
+        guarded(host, o, (err, address, family) => {
+          if (err) {
+            dials.push({ host, refused: err.code })
+            return cb(err)
+          }
+          const addresses = Array.isArray(address) ? address.map((a) => a.address) : [address]
+          dials.push({ host, addresses })
+          if (addresses.some((a) => a !== '127.0.0.1')) {
+            const refused = new Error('ETEST')
+            refused.code = 'ETEST'
+            return cb(refused)
+          }
+          cb(null, address, family)
+        })
+      }
+      const req = http.request({ ...opts, lookup, port: ports[opts.hostname] })
       req.on('socket', (s) => s.once('connect', () => connected.push(s.remoteAddress)))
       return req
     },
     lookup: (host, opts, cb) => {
       looked.push(host)
-      if (host === API || host === NODE) return cb(null, [{ address: '127.0.0.1', family: 4 }])
+      if (host === API || host === NODE || host === ART) return cb(null, [{ address: '127.0.0.1', family: 4 }])
       if (host === PRIVATE) return cb(null, [{ address: '10.0.0.7', family: 4 }])
       const err = new Error('ENOTFOUND')
       err.code = 'ENOTFOUND'
@@ -312,8 +417,9 @@ async function setup (t, { audius = true, moments = false, streams = 16, caps = 
   const terms = { available: () => true, list: (m) => (accepted ? [{ version: TERMS_VERSION }] : []) }
   const blocklist = { has: (k) => blocked.has(k) }
   const logs = []
-  const config = audius ? parseAudiusConfig({ apiKey: KEY, apiUrl: 'https://' + API + '/v1', moments, streams }) : null
-  const routes = createAudiusRoutes({ ...transport, config, store, terms, blocklist, association, log: (e) => logs.push(e), now, caps, http: harness })
+  const config = audius ? parseAudiusConfig({ apiKey: KEY, apiUrl: 'https://' + API + '/v1', moments, covers, streams }) : null
+  const timerFns = timers === null ? {} : { setTimer: timers.set, clearTimer: timers.clear }
+  const routes = createAudiusRoutes({ ...transport, ...timerFns, config, store, terms, blocklist, association, log: (e) => logs.push(e), now, caps, http: harness })
 
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://localhost')
@@ -329,10 +435,12 @@ async function setup (t, { audius = true, moments = false, streams = 16, caps = 
   const port = server.address().port
   t.teardown(async () => {
     for (const r of node.held) r.destroy()
+    for (const r of art.held) r.destroy()
     server.closeAllConnections()
     await new Promise((resolve) => server.close(resolve))
     await api.close()
     await node.close()
+    await art.close()
   })
 
   const responses = []
@@ -407,7 +515,7 @@ async function setup (t, { audius = true, moments = false, streams = 16, caps = 
     return cond()
   }
 
-  return { routes, call, post, audio, hold, login, ticketFor, until, api, node, state, logs, responses, looked, connected, clock, linked, blocked, member, other, memberHex, otherHex }
+  return { routes, call, post, audio, hold, login, ticketFor, until, api, node, art, state, logs, responses, looked, connected, dials, clock, linked, blocked, member, other, memberHex, otherHex }
 }
 
 function noKeyAnywhere (t, { logs, responses }) {
@@ -1120,4 +1228,637 @@ test('audius: a member blocked while audio is relayed is cut within a re-check a
   t.is(g.routes.stats().tickets, 1)
   open.close()
   t.ok(await g.until(() => g.routes.stats().streams === 0))
+})
+
+// --- covers ------------------------------------------------------------------
+
+const TRACK_KEYS = ['artist', 'duration', 'id', 'title', 'url']
+const PLAYLIST_KEYS = ['artist', 'count', 'id', 'title', 'url']
+
+function artOk (t, res, mime, bytes) {
+  t.is(res.status, 200)
+  t.alike(Object.keys(res.json).sort(), ['bytes', 'mime'])
+  t.is(res.json.mime, mime)
+  t.alike(Buffer.from(res.json.bytes, 'base64'), bytes)
+  t.is(Buffer.from(res.json.bytes, 'base64').toString('base64'), res.json.bytes, 'canonical base64')
+}
+
+function artPaths (s) {
+  return s.art.seen.map((r) => r.path)
+}
+
+function fakeTimers () {
+  const live = new Map()
+  let n = 0
+  return {
+    live,
+    cleared: [],
+    set (fn, ms) {
+      const handle = { id: ++n, ms, unrefed: false, unref () { this.unrefed = true } }
+      live.set(handle.id, { fn, handle })
+      return handle
+    },
+    clear (handle) {
+      if (handle === null || handle === undefined) return
+      this.cleared.push(handle.id)
+      live.delete(handle.id)
+    },
+    fireAll () {
+      for (const [id, { fn }] of [...live]) {
+        live.delete(id)
+        fn()
+      }
+    }
+  }
+}
+// clear() reads `this.cleared`; the routes call it unbound.
+function boundTimers () {
+  const tm = fakeTimers()
+  tm.clear = tm.clear.bind(tm)
+  return tm
+}
+
+test('audius: answers are unchanged without the covers query and when the switch is off', async (t) => {
+  const off = await setup(t)
+  const on = await setup(t, { covers: true })
+  const a = await off.login()
+  const b = await on.login()
+  const bodies = [
+    ['search', { q: QUERY, kind: 'track' }],
+    ['search', { q: QUERY, kind: 'playlist' }],
+    ['item', { kind: 'track', id: 'Plain1' }],
+    ['item', { kind: 'playlist', id: 'Pl1' }],
+    ['resolve', { url: 'https://audius.co/artista/musica' }],
+    ['resolve', { url: 'https://audius.co/artista/playlist/lista' }]
+  ]
+  for (const [name, body] of bodies) {
+    const today = await on.post(b.token, name, body)
+    const asked = await off.post(a.token, name + '?covers=1', body)
+    const zero = await on.post(b.token, name + '?covers=0', body)
+    t.is(today.status, 200, name)
+    t.alike(asked.raw, today.raw, name + ': the switch off ignores the query, byte for byte')
+    t.alike(zero.raw, today.raw, name + ': covers=0 is not covers=1')
+    t.absent(today.raw.toString('utf8').includes('"cover"'), name + ': no cover key')
+  }
+  const one = await on.post(b.token, 'item', { kind: 'track', id: 'Plain1' })
+  t.alike(Object.keys(one.json).sort(), TRACK_KEYS)
+  const pl = await on.post(b.token, 'item', { kind: 'playlist', id: 'Pl1' })
+  t.alike(Object.keys(pl.json).sort(), [...PLAYLIST_KEYS, 'tracks'].sort())
+  for (const it of pl.json.tracks) t.alike(Object.keys(it).sort(), TRACK_KEYS)
+})
+
+test('audius: answers carry a cover boolean with the query and the switch on', async (t) => {
+  const s = await setup(t, { covers: true })
+  const { token } = await s.login()
+  const tracks = await s.post(token, 'search?covers=1', { q: QUERY, kind: 'track' })
+  t.is(tracks.status, 200)
+  for (const it of tracks.json.items) {
+    t.alike(Object.keys(it).sort(), [...TRACK_KEYS, 'cover'].sort())
+    t.is(it.cover, true)
+  }
+  const lists = await s.post(token, 'search?covers=1', { q: QUERY, kind: 'playlist' })
+  t.alike(lists.json.items[0], { id: 'Pl1', title: 'Lista Pl1', artist: 'Artista', count: 60, url: 'https://audius.co/artista/playlist/lista-pl1', cover: true })
+  const none = await s.post(token, 'item?covers=1', { kind: 'track', id: 'NoArt1' })
+  t.is(none.json.cover, false, 'no artwork: false')
+  const bad = await s.post(token, 'item?covers=1', { kind: 'track', id: 'BadArt1' })
+  t.is(bad.status, 200, 'a bad artwork URL keeps the track')
+  t.is(bad.json.cover, false, 'a bad artwork URL: false')
+  const cached = await s.post(token, 'item?covers=1', { kind: 'track', id: 'Ranged1' })
+  t.is(cached.json.cover, true, 'a cached track still knows its cover')
+  const pl = await s.post(token, 'item?covers=1', { kind: 'playlist', id: 'Pl1' })
+  t.is(pl.json.cover, true)
+  t.ok(pl.json.tracks.length > 0)
+  for (const it of pl.json.tracks) {
+    t.alike(Object.keys(it).sort(), [...TRACK_KEYS, 'cover'].sort())
+    t.is(it.cover, true)
+  }
+  const resolved = await s.post(token, 'resolve?covers=1', { url: 'https://audius.co/artista/musica' })
+  t.alike(resolved.json, { kind: 'track', item: { id: 'Ranged1', title: 'Musica Ranged1', artist: 'Artista', duration: 180, url: 'https://audius.co/artista/musica-ranged1', cover: true } })
+  const resolvedList = await s.post(token, 'resolve?covers=1', { url: 'https://audius.co/artista/playlist/lista' })
+  t.is(resolvedList.json.item.cover, true)
+  t.is(s.art.seen.length, 0, 'answering cover flags never contacts the art host')
+})
+
+test('audius: no answer ever carries an artwork URL', async (t) => {
+  const s = await setup(t, { covers: true })
+  const { token } = await s.login()
+  for (const q of ['', '?covers=1']) {
+    await s.post(token, 'search' + q, { q: QUERY, kind: 'track' })
+    await s.post(token, 'search' + q, { q: QUERY, kind: 'playlist' })
+    await s.post(token, 'item' + q, { kind: 'track', id: 'Plain1' })
+    await s.post(token, 'item' + q, { kind: 'playlist', id: 'Pl1' })
+    await s.post(token, 'resolve' + q, { url: 'https://audius.co/artista/musica' })
+  }
+  await s.post(token, 'art', { kind: 'track', id: 'Plain1' })
+  await s.post(token, 'art', { kind: 'playlist', id: 'Pl1' })
+  t.ok(s.responses.length >= 12)
+  for (const r of s.responses) {
+    const text = r.raw.toString('latin1')
+    t.absent(text.includes(ART), 'no art host in a body')
+    t.absent(text.includes('artwork'), 'no artwork key')
+    t.absent(text.includes('"art"'), 'no art key')
+    t.absent(JSON.stringify(r.headers).includes(ART), 'no art host in a header')
+  }
+  t.absent(JSON.stringify(s.logs).includes(ART), 'no art URL in a log line')
+  t.absent(JSON.stringify(s.logs).includes('Plain1'), 'no id in a log line')
+  noKeyAnywhere(t, s)
+})
+
+test('audius: the policy answer keeps exactly enabled and moments', async (t) => {
+  for (const [opts, expected] of [[{ covers: true }, { enabled: true, moments: false }], [{ covers: true, moments: true }, { enabled: true, moments: true }], [{ covers: false }, { enabled: true, moments: false }]]) {
+    const s = await setup(t, opts)
+    const policy = await s.call('GET', '/account/audius/policy?covers=1')
+    t.is(policy.status, 200)
+    t.alike(Object.keys(policy.json).sort(), ['enabled', 'moments'])
+    t.alike(policy.json, expected)
+  }
+})
+
+test('audius: art answers validated bytes with nosniff and no-store', async (t) => {
+  const s = await setup(t, { covers: true })
+  const { token } = await s.login()
+  const jpeg = await s.post(token, 'art', { kind: 'track', id: 'Plain1' })
+  artOk(t, jpeg, 'image/jpeg', JPEG)
+  t.is(jpeg.headers['x-content-type-options'], 'nosniff')
+  t.is(jpeg.headers['cache-control'], 'no-store')
+  t.is(jpeg.headers['content-type'], 'application/json; charset=utf-8', 'the bytes ride in JSON, never as an image response')
+  t.absent(jpeg.headers['set-cookie'], 'nothing of the art host is relayed')
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'ArtPng1' }), 'image/png', PNG)
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'ArtWebp1' }), 'image/webp', WEBP)
+  artOk(t, await s.post(token, 'art', { kind: 'playlist', id: 'Pl1' }), 'image/jpeg', JPEG)
+  t.alike(artPaths(s), ['/Plain1', '/ArtPng1', '/ArtWebp1', '/Pl1'])
+  t.ok(s.logs.some((e) => e.reason === 'capa'), 'logged as capa')
+  t.is(s.routes.stats().covers, 4, 'stats count the cached covers')
+  t.is(s.routes.stats().inflight, 0)
+  const bad = [
+    { kind: 'track' },
+    { id: 'Plain1' },
+    { kind: 'album', id: 'Plain1' },
+    { kind: 'track', id: 'bad id' },
+    { kind: 'track', id: 'Plain1', size: '480x480' },
+    { kind: 'track', id: 'Plain1', url: 'https://' + ART + '/x' }
+  ]
+  for (const body of bad) {
+    const res = await s.post(token, 'art', body)
+    t.is(res.status, 400, JSON.stringify(body))
+    t.alike(res.json, { error: 'pedido-invalido' })
+  }
+  t.is((await s.post(null, 'art', { kind: 'track', id: 'Plain1' })).status, 401, 'a session is needed')
+  noKeyAnywhere(t, s)
+  onlyLoopback(t, s)
+})
+
+test('audius: art is feature-off before any counter unless covers are on', async (t) => {
+  const s = await setup(t, { covers: false, caps: { arts: 1 } })
+  const { token } = await s.login()
+  for (let i = 0; i < 5; i++) {
+    const res = await s.post(token, 'art', { kind: 'track', id: 'Plain1' })
+    t.is(res.status, 404)
+    t.alike(res.json, { error: 'feature-off' })
+  }
+  t.is((await s.post(token, 'art', { kind: 'track', id: 'bad id' })).status, 400, 'the shape is checked first')
+  t.is(s.api.seen.length, 0, 'the provider was never asked')
+  t.is(s.art.seen.length, 0, 'the art host was never asked')
+
+  const off = await setup(t, { audius: false })
+  const res = await off.post(null, 'art', { kind: 'track', id: 'Plain1' })
+  t.is(res.status, 404)
+  t.alike(res.json, { error: 'feature-off' })
+
+  const on = await setup(t, { covers: true, caps: { arts: 1 } })
+  const b = await on.login()
+  for (let i = 0; i < 5; i++) t.is((await on.post(b.token, 'art', { kind: 'track', id: 'bad id' })).status, 400)
+  artOk(t, await on.post(b.token, 'art', { kind: 'track', id: 'Plain1' }), 'image/jpeg', JPEG)
+  const over = await on.post(b.token, 'art', { kind: 'track', id: 'Plain1' })
+  t.is(over.status, 429, 'the member cap counts once covers are on')
+  t.alike(over.json, { error: 'limite-musica' })
+})
+
+test('audius: art refuses bytes that are not JPEG, PNG or WebP by magic', async (t) => {
+  const s = await setup(t, { covers: true, caps: { arts: 10 } })
+  const { token } = await s.login()
+  const ids = ['ArtGif1', 'ArtHtml1', 'ArtWave1', 'ArtEmpty1', 'ArtGone1']
+  for (const id of ids) {
+    const res = await s.post(token, 'art', { kind: 'track', id })
+    t.is(res.status, 404, id)
+    t.alike(res.json, { error: 'nao-encontrado' })
+  }
+  const contacts = s.art.seen.length
+  t.is(contacts, ids.length)
+  for (const id of ids) t.is((await s.post(token, 'art', { kind: 'track', id })).status, 404, id + ' again')
+  t.is(s.art.seen.length, contacts, 'a miss is remembered: the host is not asked again')
+  t.is((await s.post(token, 'art', { kind: 'track', id: 'Plain1' })).status, 429, 'every refusal kept its use')
+  t.absent(s.responses.some((r) => r.raw.toString('latin1').includes('GIF89a') || r.raw.toString('latin1').includes('svg')), 'nothing of a refused body is relayed')
+})
+
+test('audius: art stops at the size cap', async (t) => {
+  t.is(ART_MAX_BYTES, 131072)
+  const s = await setup(t, { covers: true, caps: { arts: 2 } })
+  const { token } = await s.login()
+  const exact = await s.post(token, 'art', { kind: 'track', id: 'ArtExact1' })
+  t.is(exact.status, 200, 'exactly the cap passes')
+  t.is(Buffer.from(exact.json.bytes, 'base64').length, ART_MAX_BYTES)
+  const big = await s.post(token, 'art', { kind: 'track', id: 'ArtBig1' })
+  t.is(big.status, 404, 'one byte over is refused')
+  t.alike(big.json, { error: 'nao-encontrado' })
+  t.is(s.routes.stats().covers, 2, 'the cover and the oversize miss')
+  t.is((await s.post(token, 'art', { kind: 'track', id: 'Plain1' })).status, 429, 'the oversize answer kept its use')
+})
+
+test('audius: an oversize cover is remembered as a miss', async (t) => {
+  const s = await setup(t, { covers: true, caps: { arts: 10 } })
+  const { token } = await s.login()
+  for (let i = 0; i < 3; i++) {
+    const big = await s.post(token, 'art', { kind: 'track', id: 'ArtBig1' })
+    t.is(big.status, 404, 'round ' + i)
+    t.alike(big.json, { error: 'nao-encontrado' })
+  }
+  t.is(artPaths(s).filter((p) => p === '/ArtBig1').length, 1, 'the host is asked once')
+  t.absent(s.responses.some((r) => r.raw.length > ART_MAX_BYTES), 'nothing of the body is relayed')
+})
+
+test('audius: art never sends the API key or member headers to the art host', async (t) => {
+  const s = await setup(t, { covers: true })
+  const { token } = await s.login()
+  const headers = { Authorization: 'Bearer ' + token, Cookie: 'sessao=sentinela', 'X-Forwarded-For': '203.0.113.5', Referer: 'https://varanda.test/' }
+  for (const id of ['Plain1', 'ArtHop1']) {
+    const res = await s.call('POST', '/account/audius/art', { body: { kind: 'track', id }, headers })
+    t.is(res.status, 200, id)
+  }
+  t.is(s.art.seen.length, 3, 'the first hop and the redirect hop')
+  for (const r of s.art.seen) {
+    t.ok(Object.keys(r.headers).every((h) => ART_HEADERS.includes(h)), 'User-Agent and Accept only: ' + Object.keys(r.headers).join(','))
+    t.is(r.headers['user-agent'], USER_AGENT)
+    t.is(r.headers.accept, 'image/jpeg, image/png, image/webp')
+    t.alike(r.query, {}, 'no app name or key in the URL')
+    const text = JSON.stringify(r)
+    t.absent(text.includes(KEY), 'never the key')
+    t.absent(text.includes(token), 'never the token')
+    t.absent(text.includes(s.memberHex), 'never the member')
+    t.absent(text.includes('sentinela'), 'never the member cookie')
+    t.absent(text.includes('203.0.113.5'), 'never the member address')
+  }
+  noKeyAnywhere(t, s)
+  onlyLoopback(t, s)
+})
+
+test('audius: art host must be public https and redirects are re-checked', async (t) => {
+  const s = await setup(t, { covers: true, caps: { artMs: 1000 } })
+  const { token } = await s.login()
+  for (const id of ['ArtPrivate1', 'ArtHttp1', 'ArtPort1', 'ArtLoop1', 'PrivArt1']) {
+    const res = await s.post(token, 'art', { kind: 'track', id })
+    t.is(res.status, 503, id)
+    t.alike(res.json, { error: 'indisponivel' })
+  }
+  t.ok(s.looked.includes(PRIVATE), 'the private name was looked up')
+  t.absent(s.connected.includes('10.0.0.7'), 'and never dialled')
+  const privateDials = s.dials.filter((d) => d.host === PRIVATE)
+  t.is(privateDials.length, 2, 'ArtPrivate1 and PrivArt1 each reached the lookup once')
+  t.ok(privateDials.every((d) => d.refused === 'EBLOCKED'), 'the guard refused the private address before any dial')
+  t.is(artPaths(s).filter((p) => p === '/ArtLoop1').length, 4, 'at most 3 redirects')
+  const before = s.art.seen.length
+  const bad = await s.post(token, 'art', { kind: 'track', id: 'BadArt1' })
+  t.is(bad.status, 404, 'an http artwork URL is no cover at all')
+  t.alike(bad.json, { error: 'nao-encontrado' })
+  t.is(s.art.seen.length, before, 'and the host is not asked')
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'ArtHop2' }), 'image/jpeg', JPEG)
+  onlyLoopback(t, s)
+})
+
+test('audius: art charges the member cap and one budget token per host contact, not provider calls; a cache hit spends no budget', async (t) => {
+  t.is(PROVIDER_CALLS_PER_DAY, 1760)
+  t.is(PROVIDER_PER_DAY, 12000)
+  t.is(ARTS_PER_DAY, 600)
+  // Budget 3: the search, then two art host contacts.
+  const s = await setup(t, { covers: true, caps: { budget: 3, calls: 1, arts: 10 } })
+  const { token } = await s.login()
+  t.is((await s.post(token, 'search?covers=1', { q: QUERY, kind: 'track' })).status, 200)
+  t.is((await s.post(token, 'search', { q: 'outra', kind: 'track' })).status, 429, 'the member spent its one provider call')
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Fill5' }), 'image/jpeg', JPEG)
+  for (let i = 0; i < 4; i++) artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Fill5' }), 'image/jpeg', JPEG)
+  t.is(s.art.seen.length, 1, 'a cache hit contacts no host')
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Fill6' }), 'image/jpeg', JPEG)
+  const spent = await s.post(token, 'art', { kind: 'track', id: 'Fill7' })
+  t.is(spent.status, 503, 'the budget is spent')
+  t.alike(spent.json, { error: 'indisponivel' })
+  t.ok(s.logs.some((e) => e.reason === 'orcamento'))
+  t.is(s.art.seen.length, 2)
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Fill5' }), 'image/jpeg', JPEG)
+
+  const c = await setup(t, { covers: true, caps: { arts: 2 } })
+  const m = await c.login()
+  await c.post(m.token, 'search', { q: QUERY, kind: 'track' })
+  t.is((await c.post(m.token, 'art', { kind: 'track', id: 'Fill5' })).status, 200)
+  t.is((await c.post(m.token, 'art', { kind: 'track', id: 'Fill5' })).status, 200, 'a cache hit spends the member use')
+  const over = await c.post(m.token, 'art', { kind: 'track', id: 'Fill6' })
+  t.is(over.status, 429)
+  t.alike(over.json, { error: 'limite-musica' })
+  t.is(c.art.seen.length, 1)
+  const other = await c.login(c.other)
+  t.is((await c.post(other.token, 'art', { kind: 'track', id: 'Fill6' })).status, 200, 'another member has its own cap')
+})
+
+test('audius: each redirect hop spends one budget token, and a spent budget answers 503 and gives the use back only before any host contact', async (t) => {
+  // ArtHop2 is three host contacts after one provider call: four tokens.
+  const enough = await setup(t, { covers: true, caps: { budget: 4 } })
+  const a = await enough.login()
+  artOk(t, await enough.post(a.token, 'art', { kind: 'track', id: 'ArtHop2' }), 'image/jpeg', JPEG)
+  t.alike(artPaths(enough), ['/ArtHop2', '/ArtHop1', '/ArtJpg1'])
+  t.is((await enough.post(a.token, 'art', { kind: 'track', id: 'Plain1' })).status, 503, 'nothing is left')
+
+  const short = await setup(t, { covers: true, caps: { budget: 3, arts: 1 } })
+  const b = await short.login()
+  const res = await short.post(b.token, 'art', { kind: 'track', id: 'ArtHop2' })
+  t.is(res.status, 503)
+  t.alike(res.json, { error: 'indisponivel' })
+  t.alike(artPaths(short), ['/ArtHop2', '/ArtHop1'], 'the third hop is never sent')
+  t.ok(short.logs.some((e) => e.reason === 'orcamento'), 'logged as orcamento')
+  const again = await short.post(b.token, 'art', { kind: 'track', id: 'ArtHop2' })
+  t.is(again.status, 429, 'the host was contacted: the use is kept')
+  t.alike(again.json, { error: 'limite-musica' })
+  const c = await short.login(short.other)
+  for (let i = 0; i < 3; i++) {
+    const before = await short.post(c.token, 'art', { kind: 'track', id: 'ArtHop2' })
+    t.is(before.status, 503, 'spent before the first hop: 503 again, not 429')
+    t.alike(before.json, { error: 'indisponivel' })
+  }
+  t.is(short.art.seen.length, 2, 'and no host was contacted')
+  t.is(short.routes.stats().artInflight, 0)
+  t.is(short.routes.stats().covers, 0)
+})
+
+test('audius: art releases inflight on failure and timeout', async (t) => {
+  t.timeout(30 * 1000)
+  const ids = ['ArtHang1', 'ArtStall1', 'ArtErr1', 'ArtBusy1', 'ArtPartial1']
+  const s = await setup(t, { covers: true, caps: { artMs: 300, arts: ids.length + 1 } })
+  const { token } = await s.login()
+  for (const id of ids) {
+    const started = Date.now()
+    const res = await s.post(token, 'art', { kind: 'track', id })
+    t.is(res.status, 503, id)
+    t.alike(res.json, { error: 'indisponivel' })
+    t.ok(Date.now() - started < 5000, id + ' ends within the deadline')
+    t.is(s.routes.stats().artInflight, 0, id + ' released inflight')
+  }
+  t.is(s.routes.stats().covers, 0, 'no failure is cached')
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Plain1' }), 'image/jpeg', JPEG)
+
+  // Held fetches of two members fill the cover slots: the next, from a third
+  // member, is busy and keeps its use.
+  const h = await setup(t, { covers: true, caps: { artMs: 1500 } })
+  const m = await h.login()
+  const n = await h.login(h.other)
+  const third = crypto.keyPair()
+  h.linked.add(b4a.toString(third.publicKey, 'hex'))
+  const o = await h.login(third)
+  for (let i = 1; i <= MAX_ART_INFLIGHT; i++) t.is((await h.post(m.token, 'item', { kind: 'track', id: 'ArtHang' + i })).status, 200)
+  t.is((await h.post(m.token, 'item', { kind: 'track', id: 'Plain1' })).status, 200)
+  const held = []
+  for (let i = 1; i <= MAX_ART_INFLIGHT; i++) held.push(h.post(i % 2 === 0 ? m.token : n.token, 'art', { kind: 'track', id: 'ArtHang' + i }))
+  t.ok(await h.until(() => h.routes.stats().artInflight === MAX_ART_INFLIGHT), 'every cover slot in flight')
+  const busy = await h.post(o.token, 'art', { kind: 'track', id: 'Plain1' })
+  t.is(busy.status, 503)
+  t.is(busy.headers['retry-after'], '5')
+  t.is(h.art.seen.filter((r) => r.path === '/Plain1').length, 0, 'a busy refusal contacts no host')
+  for (const res of await Promise.all(held)) t.is(res.status, 503)
+  t.is(h.routes.stats().artInflight, 0, 'every slot came back')
+  artOk(t, await h.post(m.token, 'art', { kind: 'track', id: 'Plain1' }), 'image/jpeg', JPEG)
+})
+
+test('audius: a failing art host keeps the art use and cannot drain the shared budget', async (t) => {
+  const s = await setup(t, { covers: true, caps: { arts: 2, calls: 5, budget: 50 } })
+  const { token } = await s.login()
+  let over = null
+  for (let i = 0; i < 40 && over === null; i++) {
+    const res = await s.post(token, 'art', { kind: 'track', id: i % 2 === 0 ? 'ArtLoop1' : 'ArtErr1' })
+    if (res.status === 429) over = res
+    else if (res.status !== 503) t.fail('round ' + i + ': ' + res.status)
+  }
+  t.ok(over !== null, 'the member reaches its art cap')
+  t.alike(over && over.json, { error: 'limite-musica' })
+  t.ok(s.art.seen.length <= 2 * (1 + 3), 'art host contacts stay within arts x (1 + max redirects): ' + s.art.seen.length)
+  const other = await s.login(s.other)
+  const search = await s.post(other.token, 'search', { q: QUERY, kind: 'track' })
+  t.is(search.status, 200, 'another member still searches')
+})
+
+test('audius: covers have their own slot pool', async (t) => {
+  t.is(MAX_ART_INFLIGHT, 6)
+  const s = await setup(t, { covers: true, caps: { artMs: 2000, arts: MAX_ART_INFLIGHT + 1 } })
+  const { token } = await s.login()
+  const other = await s.login(s.other)
+  const third = crypto.keyPair()
+  s.linked.add(b4a.toString(third.publicKey, 'hex'))
+  const last = await s.login(third)
+  const held = []
+  for (let i = 1; i <= MAX_ART_INFLIGHT; i++) held.push(s.post(i % 2 === 0 ? token : other.token, 'art', { kind: 'track', id: 'ArtHang' + i }))
+  t.ok(await s.until(() => s.routes.stats().artInflight === MAX_ART_INFLIGHT && s.art.held.size === MAX_ART_INFLIGHT), 'the cover slots are full')
+  t.is(s.routes.stats().inflight, 0, 'covers hold no provider slot')
+  t.is((await s.post(token, 'search', { q: QUERY, kind: 'track' })).status, 200, 'search still answers')
+  const busy = await s.post(last.token, 'art', { kind: 'track', id: 'Plain1' })
+  t.is(busy.status, 503, 'one more cover is lotado')
+  t.alike(busy.json, { error: 'indisponivel' })
+  t.is(busy.headers['retry-after'], '5')
+  t.is(artPaths(s).filter((p) => p === '/Plain1').length, 0, 'a busy refusal contacts no host')
+  for (const res of await Promise.all(held)) t.is(res.status, 503)
+  t.is(s.routes.stats().artInflight, 0)
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Plain1' }), 'image/jpeg', JPEG)
+})
+
+test('audius: one member cannot hold every cover slot', async (t) => {
+  t.is(ART_PER_MEMBER, 3)
+  const s = await setup(t, { covers: true, caps: { artMs: 1500, arts: ART_PER_MEMBER + 2 } })
+  const a = await s.login()
+  const b = await s.login(s.other)
+  for (let i = 1; i <= ART_PER_MEMBER + 1; i++) t.is((await s.post(a.token, 'item', { kind: 'track', id: 'ArtHang' + i })).status, 200)
+  const held = []
+  for (let i = 1; i <= ART_PER_MEMBER; i++) held.push(s.post(a.token, 'art', { kind: 'track', id: 'ArtHang' + i }))
+  t.ok(await s.until(() => s.art.held.size === ART_PER_MEMBER), 'the member waits on its fetches')
+  const next = 'ArtHang' + (ART_PER_MEMBER + 1)
+  const busy = await s.post(a.token, 'art', { kind: 'track', id: next })
+  t.is(busy.status, 503, 'one more cover of the same member is busy')
+  t.alike(busy.json, { error: 'indisponivel' })
+  t.is(busy.headers['retry-after'], '5')
+  t.is(artPaths(s).filter((p) => p === '/' + next).length, 0, 'a busy refusal contacts no host')
+  const joined = await s.post(a.token, 'art', { kind: 'track', id: 'ArtHang1' })
+  t.is(joined.status, 503, 'joining a shared fetch counts too')
+  t.is(joined.headers['retry-after'], '5')
+  t.is(artPaths(s).filter((p) => p === '/ArtHang1').length, 1)
+
+  const own = s.post(b.token, 'art', { kind: 'track', id: next })
+  t.ok(await s.until(() => artPaths(s).includes('/' + next)), 'another member still starts a fetch')
+  const shared = s.post(b.token, 'art', { kind: 'track', id: 'ArtHang1' })
+  for (const res of await Promise.all([...held, own, shared])) t.is(res.status, 503)
+  t.is(artPaths(s).filter((p) => p === '/ArtHang1').length, 1, 'and joins the shared fetch')
+  t.is(s.routes.stats().artInflight, 0)
+  artOk(t, await s.post(a.token, 'art', { kind: 'track', id: 'Plain1' }), 'image/jpeg', JPEG)
+  artOk(t, await s.post(a.token, 'art', { kind: 'track', id: 'Plain2' }), 'image/jpeg', JPEG)
+  t.is((await s.post(a.token, 'art', { kind: 'track', id: 'Plain3' })).status, 429, 'the busy answers gave the use back, and only those')
+})
+
+test('audius: the cover flag lives in the item row', async (t) => {
+  const s = await setup(t, { covers: true })
+  const { token } = await s.login()
+  const tracks = await s.post(token, 'search?covers=1', { q: QUERY, kind: 'track' })
+  t.is(tracks.status, 200)
+  t.ok(tracks.json.items.length > 0)
+  t.is(s.routes.stats().cached, tracks.json.items.length, 'one row per track')
+  const lists = await s.post(token, 'search?covers=1', { q: QUERY, kind: 'playlist' })
+  t.ok(lists.json.items.length > 0)
+  t.is(s.routes.stats().cached, tracks.json.items.length + lists.json.items.length, 'one row per playlist')
+  const asked = s.api.seen.length
+  const cached = await s.post(token, 'item?covers=1', { kind: 'track', id: tracks.json.items[0].id })
+  t.is(cached.json.cover, true, 'a cached track keeps its cover')
+  artOk(t, await s.post(token, 'art', { kind: 'playlist', id: lists.json.items[0].id }), 'image/jpeg', JPEG)
+  t.is(s.api.seen.length, asked, 'both answered from the item rows')
+  const full = await s.post(token, 'item?covers=1', { kind: 'playlist', id: lists.json.items[0].id })
+  t.is(full.status, 200)
+  t.ok(full.json.tracks.length > 0, 'a playlist seen in a search still gets its tracks')
+  t.is(full.json.cover, true)
+})
+
+test('audius: a cover flag always matches what the art route serves', async (t) => {
+  // A playlist opened without a cover, then found by a search with one.
+  const s = await setup(t, { covers: true })
+  const { token } = await s.login()
+  s.state.artwork.Pl1 = undefined
+  const opened = await s.post(token, 'item?covers=1', { kind: 'playlist', id: 'Pl1' })
+  t.is(opened.status, 200)
+  t.is(opened.json.cover, false)
+  delete s.state.artwork.Pl1
+  const found = await s.post(token, 'search?covers=1', { q: QUERY, kind: 'playlist' })
+  t.is(found.json.items.find((x) => x.id === 'Pl1').cover, true)
+  artOk(t, await s.post(token, 'art', { kind: 'playlist', id: 'Pl1' }), 'image/jpeg', JPEG)
+  t.alike(artPaths(s), ['/Pl1'], 'the art route fetches what the search promised')
+  const again = await s.post(token, 'item?covers=1', { kind: 'playlist', id: 'Pl1' })
+  t.is(again.json.cover, true, 'the full row took the newest art')
+  t.ok(again.json.tracks.length > 0, 'and kept its tracks')
+
+  // The reverse: a playlist opened with a cover, then found without one.
+  const r = await setup(t, { covers: true })
+  const m = await r.login()
+  t.is((await r.post(m.token, 'item?covers=1', { kind: 'playlist', id: 'Pl1' })).json.cover, true)
+  r.state.artwork.Pl1 = undefined
+  const bare = await r.post(m.token, 'search?covers=1', { q: QUERY, kind: 'playlist' })
+  t.is(bare.json.items.find((x) => x.id === 'Pl1').cover, false)
+  const miss = await r.post(m.token, 'art', { kind: 'playlist', id: 'Pl1' })
+  t.is(miss.status, 404)
+  t.alike(miss.json, { error: 'nao-encontrado' })
+  t.is(r.art.seen.length, 0, 'no host contact for a cover the answer denied')
+
+  // A track listed in a cached playlist answer: its flag is its own row's.
+  r.state.artwork.Pt0 = undefined
+  const tracks = await r.post(m.token, 'search?covers=1', { q: 'faixas', kind: 'track' })
+  t.alike(tracks.json.items.map((x) => [x.id, x.cover]), [['Pt0', false]])
+  const listed = await r.post(m.token, 'item?covers=1', { kind: 'playlist', id: 'Pl1' })
+  t.is(listed.json.tracks.find((x) => x.id === 'Pt0').cover, false, 'the newer track row wins')
+  t.is(listed.json.tracks.find((x) => x.id === 'Pt1').cover, true)
+  const plain = await r.post(m.token, 'item', { kind: 'playlist', id: 'Pl1' })
+  t.ok(plain.json.tracks.every((x) => !Object.hasOwn(x, 'cover')), 'no flag without the query')
+  const none = await r.post(m.token, 'art', { kind: 'track', id: 'Pt0' })
+  t.is(none.status, 404)
+  t.is(r.art.seen.length, 0)
+})
+
+test('audius: a new artwork url replaces a remembered cover', async (t) => {
+  const s = await setup(t, { covers: true })
+  const { token } = await s.login()
+  s.state.artwork.Fill5 = { '150x150': 'https://' + ART + '/ArtGif1' }
+  t.is((await s.post(token, 'item', { kind: 'track', id: 'Fill5' })).status, 200)
+  t.is((await s.post(token, 'art', { kind: 'track', id: 'Fill5' })).status, 404)
+  t.is((await s.post(token, 'art', { kind: 'track', id: 'Fill5' })).status, 404)
+  t.alike(artPaths(s), ['/ArtGif1'], 'a remembered miss')
+  delete s.state.artwork.Fill5
+  const found = await s.post(token, 'search?covers=1', { q: QUERY, kind: 'track' })
+  t.is(found.json.items.find((x) => x.id === 'Fill5').cover, true)
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Fill5' }), 'image/jpeg', JPEG)
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Fill5' }), 'image/jpeg', JPEG)
+  t.alike(artPaths(s), ['/ArtGif1', '/Fill5'], 'the new url is fetched once, then held')
+
+  s.state.artwork.Fill5 = undefined
+  const bare = await s.post(token, 'search?covers=1', { q: QUERY, kind: 'track' })
+  t.is(bare.json.items.find((x) => x.id === 'Fill5').cover, false)
+  const gone = await s.post(token, 'art', { kind: 'track', id: 'Fill5' })
+  t.is(gone.status, 404, 'a served cover whose row now says null is not served')
+  t.alike(gone.json, { error: 'nao-encontrado' })
+  t.is(s.art.seen.length, 2, 'and no host is contacted')
+})
+
+test('audius: concurrent loads of one cover contact the host once', async (t) => {
+  // Four uses each: three waiters and one more for a, one waiter and three
+  // failing waiters for b.
+  const s = await setup(t, { covers: true, caps: { arts: 4 } })
+  const a = await s.login()
+  const b = await s.login(s.other)
+  t.is((await s.post(a.token, 'item', { kind: 'track', id: 'ArtSlow1' })).status, 200)
+  t.is((await s.post(a.token, 'item', { kind: 'track', id: 'ArtSlowErr1' })).status, 200)
+  const loads = []
+  for (let i = 0; i < 3; i++) loads.push(s.post(a.token, 'art', { kind: 'track', id: 'ArtSlow1' }))
+  loads.push(s.post(b.token, 'art', { kind: 'track', id: 'ArtSlow1' }))
+  for (const res of await Promise.all(loads)) artOk(t, res, 'image/jpeg', JPEG)
+  t.is(artPaths(s).filter((p) => p === '/ArtSlow1').length, 1, 'one host contact')
+
+  const fails = []
+  for (let i = 0; i < 3; i++) fails.push(s.post(b.token, 'art', { kind: 'track', id: 'ArtSlowErr1' }))
+  for (const res of await Promise.all(fails)) {
+    t.is(res.status, 503, 'every waiter gets the same failure')
+    t.alike(res.json, { error: 'indisponivel' })
+  }
+  t.is(artPaths(s).filter((p) => p === '/ArtSlowErr1').length, 1, 'one host contact for the failure too')
+
+  artOk(t, await s.post(a.token, 'art', { kind: 'track', id: 'ArtSlow1' }), 'image/jpeg', JPEG)
+  t.is((await s.post(a.token, 'art', { kind: 'track', id: 'ArtSlow1' })).status, 429, 'each waiter spent its own member use')
+  t.is((await s.post(b.token, 'art', { kind: 'track', id: 'ArtSlow1' })).status, 429, 'the waiters of a failure kept theirs')
+})
+
+test('audius: an expired cover is not served', async (t) => {
+  const timers = boundTimers()
+  const s = await setup(t, { covers: true, timers })
+  const { token } = await s.login()
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Plain1' }), 'image/jpeg', JPEG)
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Plain1' }), 'image/jpeg', JPEG)
+  t.is(s.art.seen.length, 1, 'served from memory inside the TTL')
+  s.clock.offset += CACHE_TTL_MS
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Plain1' }), 'image/jpeg', JPEG)
+  t.is(s.art.seen.length, 2, 'past the TTL the host is asked again, even with the timer not fired')
+  s.clock.offset -= 2 * CACHE_TTL_MS
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Plain1' }), 'image/jpeg', JPEG)
+  t.is(s.art.seen.length, 3, 'a row from the future is dropped too')
+})
+
+test('audius: an expired cover is removed without another request', async (t) => {
+  const timers = boundTimers()
+  const s = await setup(t, { covers: true, timers })
+  const { token } = await s.login()
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Plain1' }), 'image/jpeg', JPEG)
+  t.is((await s.post(token, 'art', { kind: 'track', id: 'ArtGif1' })).status, 404)
+  t.is(s.routes.stats().covers, 2, 'a cover and a miss are held')
+  t.is(timers.live.size, 2, 'each with its own timer')
+  for (const { handle } of timers.live.values()) {
+    t.is(handle.ms, CACHE_TTL_MS)
+    t.ok(handle.unrefed, 'the timer does not hold the process open')
+  }
+  timers.fireAll()
+  t.is(s.routes.stats().covers, 0, 'gone after the TTL with no request')
+  t.is(s.art.seen.length, 2)
+})
+
+test('audius: a full cover cache evicts the oldest and clears its timer', async (t) => {
+  t.timeout(60 * 1000)
+  t.is(MAX_ART_CACHED, 128)
+  const timers = boundTimers()
+  const s = await setup(t, { covers: true, timers })
+  const { token } = await s.login()
+  for (let i = 0; i <= MAX_ART_CACHED; i++) {
+    const res = await s.post(token, 'art', { kind: 'track', id: 'Many' + i })
+    if (res.status !== 200) t.fail('Many' + i + ' ' + res.status)
+  }
+  t.is(s.routes.stats().covers, MAX_ART_CACHED, 'never more than MAX_ART_CACHED')
+  t.is(timers.live.size, MAX_ART_CACHED, 'the evicted row lost its timer')
+  t.alike(timers.cleared, [1], 'the oldest was the one cleared')
+  const before = s.art.seen.length
+  t.is((await s.post(token, 'art', { kind: 'track', id: 'Many1' })).status, 200)
+  t.is(s.art.seen.length, before, 'a recent cover is still held')
+  t.is((await s.post(token, 'art', { kind: 'track', id: 'Many0' })).status, 200)
+  t.is(s.art.seen.length, before + 1, 'the evicted one is fetched again')
 })

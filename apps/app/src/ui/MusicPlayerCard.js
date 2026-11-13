@@ -13,6 +13,7 @@ import { MusicCover } from './MusicCover'
 import { tap } from './haptics'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, radius, space } from './theme'
+import { useMusicCover } from './useMusicCover'
 
 // Keyboard events and tab order are DOM APIs; native uses accessibility actions.
 const WEB = Platform.OS === 'web'
@@ -263,18 +264,31 @@ function ActiveMusicPlayer ({ card, music, onLongPress, epoch }) {
   const request = node.request
   const [state, setState] = useState(musicPlayerIdle)
   const initialTap = useRef(true)
-  const playback = useMemo(() => createMusicPlayback({ member, origin, request, enabled }, music, setState), [member, origin, request, enabled, music.kind, music.id, music.start])
+  const playback = useMemo(() => {
+    // The reset effect below lands on the next render. Stamp the playback
+    // that produced this state so the render that first sees a new account
+    // does not ask for the previous item.
+    const coverOf = { member, origin, kind: music.kind, id: music.id, start: music.start }
+    return createMusicPlayback({ member, origin, request, enabled }, music, (next) => setState({ ...next, coverOf }))
+  }, [member, origin, request, enabled, music.kind, music.id, music.start])
   useEffect(() => {
     setState(musicPlayerIdle)
     // Mounting consumes the tap once; changing account never starts playback.
     if (initialTap.current) { initialTap.current = false; playback.press(epoch) }
     return () => playback.release()
   }, [playback, epoch])
+  // Protocol rule: nothing before the tap. After it the card may ask the
+  // association for the cover and shows it while it is active; the cover is
+  // never stored. The item is the answer to the tap's request, and only when
+  // it belongs to this member, origin and music.
+  const owned = state.coverOf
+  const samePlayback = owned && owned.member === member && owned.origin === origin && owned.kind === music.kind && owned.id === music.id && owned.start === music.start
+  const cover = useMusicCover(music.kind === 'playlist' ? 'playlist' : 'track', samePlayback ? state.item : null, { member, origin, request })
   if (!enabled || state.fallback) return <LinkCard card={card} onLongPress={onLongPress} />
-  return <MusicCardView card={card} music={music} onLongPress={onLongPress} state={state} onPress={() => playback.press()} onStep={(type) => playback.pressStep(type)} onSeek={(ms) => playback.pressSeek(ms)} />
+  return <MusicCardView card={card} music={music} onLongPress={onLongPress} coverUri={cover} state={state} onPress={() => playback.press()} onStep={(type) => playback.pressStep(type)} onSeek={(ms) => playback.pressSeek(ms)} />
 }
 
-function MusicCardView ({ card, music, onLongPress, state = musicPlayerIdle, onPress, onStep, onSeek }) {
+function MusicCardView ({ card, music, onLongPress, coverUri, state = musicPlayerIdle, onPress, onStep, onSeek }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const [expanded, setExpanded] = useState(false)
@@ -292,7 +306,7 @@ function MusicCardView ({ card, music, onLongPress, state = musicPlayerIdle, onP
   return (
     <View style={styles.card}>
       <View style={styles.row}>
-        <MusicCover size={56} />
+        <MusicCover size={56} uri={coverUri} />
         <Title style={styles.details} {...(typeof onLongPress === 'function' ? { onLongPress, delayLongPress: 350 } : null)}>
           <Text style={styles.title} numberOfLines={1}>{item ? displayText(item.title) : displayText(card.title)}</Text>
           <Text style={styles.text} numberOfLines={1}>{item ? displayText(item.artist) : displayText(card.desc)}</Text>

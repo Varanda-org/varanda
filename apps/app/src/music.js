@@ -179,22 +179,32 @@ export function searchBody (q, kind, cursor) {
 // empty.
 const isText = (v) => typeof v === 'string' && v !== '' && cardText(v, MAX_CARD_TITLE) === v
 
+// Today's keys, or today's keys plus an own boolean `cover`: a service that
+// knows covers says whether it has art for the item. Nothing else is added,
+// so an artwork URL from a confused service still refuses the item.
+function itemKeys (json, keys) {
+  if (exactKeys(json, keys)) return true
+  return exactKeys(json, [...keys, 'cover']) && typeof json.cover === 'boolean'
+}
+
+const withCover = (out, json) => (Object.hasOwn(json, 'cover') ? { ...out, cover: json.cover } : out)
+
 function trackItem (json) {
-  if (!exactKeys(json, ['id', 'title', 'artist', 'duration', 'url'])) return null
+  if (!itemKeys(json, ['id', 'title', 'artist', 'duration', 'url'])) return null
   const { id, title, artist, duration, url } = json
   if (!isId(id) || !isText(title) || !isText(artist) || !isDuration(duration) || !isAudiusPage(url)) return null
-  return { id, title, artist, duration, url }
+  return withCover({ id, title, artist, duration, url }, json)
 }
 
 function playlistFields (json) {
   const { id, title, artist, count, url } = json
   if (!isId(id) || !isText(title) || !isText(artist) || !isAudiusPage(url)) return null
   if (!Number.isInteger(count) || count < 1 || count > MAX_PLAYLIST) return null
-  return { id, title, artist, count, url }
+  return withCover({ id, title, artist, count, url }, json)
 }
 
 function playlistItem (json) {
-  return exactKeys(json, ['id', 'title', 'artist', 'count', 'url']) ? playlistFields(json) : null
+  return itemKeys(json, ['id', 'title', 'artist', 'count', 'url']) ? playlistFields(json) : null
 }
 
 // { items, next } or null. Strict: any extra key, bad item or cursor out of
@@ -217,7 +227,7 @@ export function parseSearch (json, kind) {
 // MAX_PLAYLIST_TRACKS), or null.
 export function parseItem (json, kind) {
   if (kind === 'track') return trackItem(json)
-  if (kind !== 'playlist' || !exactKeys(json, ['id', 'title', 'artist', 'count', 'url', 'tracks'])) return null
+  if (kind !== 'playlist' || !itemKeys(json, ['id', 'title', 'artist', 'count', 'url', 'tracks'])) return null
   const playlist = playlistFields(json)
   if (playlist === null || !Array.isArray(json.tracks) || json.tracks.length > MAX_PLAYLIST_TRACKS) return null
   const tracks = []
@@ -240,6 +250,26 @@ export function parseResolve (json) {
     const item = playlistItem(json.item)
     return item && { kind: 'playlist', item }
   }
+  return null
+}
+
+// The service's bound on a cover's decoded bytes.
+export const MUSIC_ART_MAX_BYTES = 131072
+
+const startsWith = (bytes, sig, at = 0) => bytes.length >= at + sig.length && sig.every((b, i) => bytes[at + i] === b)
+const JPEG_SIG = [0xff, 0xd8, 0xff]
+const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+const RIFF_SIG = [0x52, 0x49, 0x46, 0x46]
+const WEBP_SIG = [0x57, 0x45, 0x42, 0x50]
+
+// The image type the bytes themselves say, or null. The service's mime is
+// only believed when it agrees: a cover is never drawn under a type its bytes
+// do not have. GIF is not a cover type.
+export function artMime (bytes) {
+  if (!(bytes instanceof Uint8Array)) return null
+  if (startsWith(bytes, JPEG_SIG)) return 'image/jpeg'
+  if (startsWith(bytes, PNG_SIG)) return 'image/png'
+  if (startsWith(bytes, RIFF_SIG) && startsWith(bytes, WEBP_SIG, 8)) return 'image/webp'
   return null
 }
 

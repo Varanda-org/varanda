@@ -11,8 +11,10 @@ const { cardText, cardUrlHost } = require('@varanda/rpc')
 // dropped otherwise, one by one: a gated, unlisted, deleted, private or
 // unavailable item, or one with an access shape this file does not know, is
 // never offered, so the member never meets a track the proxy cannot play.
-// No artwork, user id or provider stream URL is copied: those would make the
-// member's device fetch from Audius directly.
+// No user id or provider stream URL is copied: those would make the member's
+// device fetch from Audius directly. The artwork URL is kept as `art` for the
+// service alone: the routes strip it from every answer, and a member reaches a
+// cover only as bytes the service fetched and checked.
 
 const DEFAULT_API_URL = 'https://api.audius.co/v1'
 const ID_RE = /^[A-Za-z0-9]{1,32}$/
@@ -28,17 +30,19 @@ const MAX_PLAYLIST = 500
 const MAX_LIST = 50
 const MAX_QUERY = 256
 const MAX_OFFSET = 4999
+const MAX_ART_URL = 512
 const CURSOR_RE = /^(0|[1-9][0-9]{0,3})$/
 
-// -> { base, apiHost, apiKey, appName, moments, streams } or null. Returns
+// -> { base, apiHost, apiKey, appName, moments, covers, streams } or null. Returns
 // null on any bad value and never throws, so no caller can put a value (the
 // key above all) into an error message or a log line.
 function parseAudiusConfig (options) {
   if (!isObject(options)) return null
-  const { apiKey, apiUrl = DEFAULT_API_URL, appName = 'varanda', moments = false, streams = 16 } = options
+  const { apiKey, apiUrl = DEFAULT_API_URL, appName = 'varanda', moments = false, covers = false, streams = 16 } = options
   if (typeof apiKey !== 'string' || !KEY_RE.test(apiKey)) return null
   if (typeof appName !== 'string' || !APP_RE.test(appName)) return null
   if (typeof moments !== 'boolean') return null
+  if (typeof covers !== 'boolean') return null
   if (!Number.isInteger(streams) || streams < 1 || streams > 32) return null
   if (typeof apiUrl !== 'string' || apiUrl.length > 512) return null
   let url
@@ -52,7 +56,7 @@ function parseAudiusConfig (options) {
   // literal, which isHostname refuses like any other IP literal.
   const apiHost = url.hostname.toLowerCase()
   if (!isHostname(apiHost)) return null
-  return { base: url.origin + url.pathname.replace(/\/+$/, ''), apiHost, apiKey, appName, moments, streams }
+  return { base: url.origin + url.pathname.replace(/\/+$/, ''), apiHost, apiKey, appName, moments, covers, streams }
 }
 
 // Where the key travels: a header, never the URL, because URLs reach logs
@@ -167,6 +171,26 @@ function pageUrl (permalink) {
   return isAudiusPermalink(url) ? url : null
 }
 
+// The 150x150 artwork URL of an item, or null. Only a plain https URL on a
+// named public host: no credentials, port or fragment, so the art fetch has
+// nothing to carry and the host passes the same rule as the API host. A bad
+// value never drops the item, it only leaves it without a cover.
+function artOf (json) {
+  try {
+    if (!isObject(json) || !isObject(json.artwork)) return null
+    const raw = json.artwork['150x150']
+    if (typeof raw !== 'string' || raw.length > MAX_ART_URL) return null
+    const url = new URL(raw)
+    if (url.protocol !== 'https:' || url.username !== '' || url.password !== '' || url.port !== '' || url.hash !== '') return null
+    if (raw.includes('#')) return null
+    const host = url.hostname.toLowerCase()
+    if (!host.includes('.') || !isHostname(host)) return null
+    return url.href
+  } catch {
+    return null
+  }
+}
+
 function fromTrack (json) {
   if (!isObject(json)) return null
   const { id, duration } = json
@@ -182,7 +206,7 @@ function fromTrack (json) {
   if (title === '' || artist === '') return null
   const url = pageUrl(json.permalink)
   if (url === null) return null
-  return { id, title, artist, duration, url }
+  return { id, title, artist, duration, url, art: artOf(json) }
 }
 
 function fromPlaylist (json) {
@@ -200,7 +224,7 @@ function fromPlaylist (json) {
   if (title === '' || artist === '') return null
   const url = pageUrl(json.permalink)
   if (url === null) return null
-  return { id, title, artist, count, url }
+  return { id, title, artist, count, url, art: artOf(json) }
 }
 
 // The answer of a resolve request, which ends at the track endpoint (data
@@ -249,6 +273,7 @@ module.exports = {
   keyParams,
   requestFor,
   isAudiusPermalink,
+  artOf,
   fromTrack,
   fromPlaylist,
   fromResolve,

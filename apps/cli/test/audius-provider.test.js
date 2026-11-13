@@ -14,6 +14,7 @@ const {
   keyParams,
   requestFor,
   isAudiusPermalink,
+  artOf,
   fromTrack,
   fromPlaylist,
   fromResolve,
@@ -77,11 +78,13 @@ function playlist (extra = {}) {
   }
 }
 
-const EXPECTED_TRACK = { id: 'D7KyD', title: 'Samba de Teste', artist: 'Artista', duration: 215, url: 'https://audius.co/artista/samba-de-teste' }
+const ART = 'https://creatornode.example/art.jpg'
+const EXPECTED_TRACK = { id: 'D7KyD', title: 'Samba de Teste', artist: 'Artista', duration: 215, url: 'https://audius.co/artista/samba-de-teste', art: ART }
+const NO_ART_TRACK = { ...EXPECTED_TRACK, art: null }
 
 test('parseAudiusConfig: defaults and accepted values', (t) => {
   const c = config()
-  t.alike(c, { base: 'https://api.audius.co/v1', apiHost: 'api.audius.co', apiKey: KEY, appName: 'varanda', moments: false, streams: 16 })
+  t.alike(c, { base: 'https://api.audius.co/v1', apiHost: 'api.audius.co', apiKey: KEY, appName: 'varanda', moments: false, covers: false, streams: 16 })
   t.is(DEFAULT_API_URL, 'https://api.audius.co/v1')
   const d = config({ apiUrl: 'https://Audius.Test:8443/api/v1/', appName: 'varanda-dev', moments: true, streams: 32 })
   t.is(d.base, 'https://audius.test:8443/api/v1')
@@ -221,12 +224,15 @@ test('isAudiusPermalink', (t) => {
 
 test('fromTrack: snake_case and camelCase', (t) => {
   t.alike(fromTrack(track()), EXPECTED_TRACK)
-  t.alike(fromTrack(camelTrack()), EXPECTED_TRACK)
-  t.alike(fromTrack(camelTrack({ access: { stream: true } })), EXPECTED_TRACK)
-  // Absent flags keep the item; nothing but the five fields is copied.
+  t.alike(fromTrack(camelTrack()), NO_ART_TRACK)
+  t.alike(fromTrack(camelTrack({ access: { stream: true } })), NO_ART_TRACK)
+  // Absent flags keep the item; nothing but the six fields is copied.
   const minimal = fromTrack({ id: 'D7KyD', title: 'Samba de Teste', duration: 215, permalink: '/artista/samba-de-teste', user: { name: 'Artista' } })
-  t.alike(minimal, EXPECTED_TRACK)
-  t.alike(Object.keys(fromTrack(track())).sort(), ['artist', 'duration', 'id', 'title', 'url'])
+  t.alike(minimal, NO_ART_TRACK)
+  t.alike(Object.keys(fromTrack(track())).sort(), ['art', 'artist', 'duration', 'id', 'title', 'url'])
+  // A bad cover never drops the item.
+  t.alike(fromTrack(track({ artwork: { '150x150': 'http://creatornode.example/art.jpg' } })), NO_ART_TRACK)
+  t.alike(fromTrack(track({ artwork: 'https://creatornode.example/art.jpg' })), NO_ART_TRACK)
 })
 
 test('fromTrack: each exclusion rule drops the item', (t) => {
@@ -298,9 +304,10 @@ test('fromTrack: hostile text is cleaned and cut', (t) => {
 })
 
 test('fromPlaylist: both casings and each exclusion rule', (t) => {
-  const expected = { id: 'pL4yA', title: 'Roda de Choro', artist: 'Artista', count: 12, url: 'https://audius.co/artista/playlist/roda-de-choro' }
+  const expected = { id: 'pL4yA', title: 'Roda de Choro', artist: 'Artista', count: 12, url: 'https://audius.co/artista/playlist/roda-de-choro', art: ART }
   t.alike(fromPlaylist(playlist()), expected)
-  t.alike(fromPlaylist({ id: 'pL4yA', playlistName: 'Roda de Choro', trackCount: 12, permalink: '/artista/playlist/roda-de-choro', user: { name: 'Artista' }, isPrivate: false, isDelete: false }), expected)
+  t.alike(fromPlaylist({ id: 'pL4yA', playlistName: 'Roda de Choro', trackCount: 12, permalink: '/artista/playlist/roda-de-choro', user: { name: 'Artista' }, isPrivate: false, isDelete: false }), { ...expected, art: null })
+  t.alike(fromPlaylist(playlist({ artwork: { '150x150': 'https://10.0.0.1/a.jpg' } })), { ...expected, art: null }, 'a bad cover keeps the playlist')
   t.alike(fromPlaylist(playlist({ track_count: 500 })).count, 500)
   const drops = {
     'private snake': playlist({ is_private: true }),
@@ -324,6 +331,43 @@ test('fromPlaylist: both casings and each exclusion rule', (t) => {
     'not an object': 7
   }
   for (const [name, item] of Object.entries(drops)) t.is(fromPlaylist(item), null, name)
+})
+
+test('artOf keeps only a plain https hostname URL', (t) => {
+  const of = (href) => artOf({ artwork: { '150x150': href } })
+  t.is(of(ART), ART)
+  t.is(of('https://Creatornode.Example/a/b.jpg?x=1'), 'https://creatornode.example/a/b.jpg?x=1')
+  const long = 'https://creatornode.example/' + 'a'.repeat(512 - 'https://creatornode.example/'.length)
+  t.is(long.length, 512)
+  t.is(of(long), long, '512 characters pass')
+  const bad = {
+    http: 'http://creatornode.example/art.jpg',
+    'ipv4 literal': 'https://203.0.113.9/art.jpg',
+    'ipv4 folded': 'https://0x7f.1/art.jpg',
+    'ipv6 literal': 'https://[2001:db8::1]/art.jpg',
+    'single label': 'https://localhost/art.jpg',
+    port: 'https://creatornode.example:8443/art.jpg',
+    'default port spelled': 'https://creatornode.example:443x/art.jpg',
+    username: 'https://user@creatornode.example/art.jpg',
+    password: 'https://user:pass@creatornode.example/art.jpg',
+    fragment: 'https://creatornode.example/art.jpg#x',
+    'empty fragment': 'https://creatornode.example/art.jpg#',
+    'over 512': long + 'a',
+    'not a url': 'nao e url',
+    'data url': 'data:image/png;base64,AAAA',
+    'javascript url': 'javascript:alert(1)'
+  }
+  for (const [name, href] of Object.entries(bad)) t.is(of(href), null, name)
+  for (const v of [42, null, undefined, {}, ['https://creatornode.example/a.jpg'], { toString: () => ART }]) t.is(of(v), null, 'non-string ' + typeof v)
+  t.is(artOf({ artwork: { '480x480': ART, '1000x1000': ART } }), null, 'only 480x480 and larger')
+  t.is(artOf({ artwork: [ART] }), null, 'artwork an array')
+  t.is(artOf({ artwork: ART }), null, 'artwork a string')
+  t.is(artOf({}), null)
+  t.is(artOf(null), null)
+  t.is(artOf('x'), null)
+  const hostile = { artwork: {} }
+  Object.defineProperty(hostile.artwork, '150x150', { get () { throw new Error('boom') } })
+  t.is(artOf(hostile), null, 'never throws')
 })
 
 test('fromResolve: track, playlist, anything else', (t) => {
