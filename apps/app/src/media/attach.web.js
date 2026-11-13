@@ -4,10 +4,12 @@
 // <input type=file> is created on demand for each pick and removed when the
 // pick ends (change or cancel); no global listener is ever kept. pickImages
 // resolves with the chosen File objects ([] when cancelled); pickImage with
-// one File (null when cancelled). If the browser fires neither event, the
-// next pick removes the stale input first.
+// one File (null when cancelled); pickVideo with one video/mp4 File (null
+// when cancelled), which ./videoPrep checks before anything uses it. If the
+// browser fires neither event, the next pick removes the stale input first.
 
 const ACCEPT = 'image/jpeg,image/png,image/webp,image/gif'
+const VIDEO_ACCEPT = 'video/mp4'
 
 let current = null
 
@@ -16,12 +18,12 @@ function drop (input) {
   if (current === input) current = null
 }
 
-function pick (multiple) {
+function pick (multiple, accept = ACCEPT) {
   if (current) drop(current)
   return new Promise((resolve) => {
     const input = document.createElement('input')
     input.type = 'file'
-    input.accept = ACCEPT
+    input.accept = accept
     input.multiple = multiple
     input.style.display = 'none'
     input.setAttribute('aria-hidden', 'true')
@@ -51,5 +53,10 @@ export function pickImages () {
 
 export async function pickImage () {
   const files = await pick(false)
+  return files[0] || null
+}
+
+export async function pickVideo () {
+  const files = await pick(false, VIDEO_ACCEPT)
   return files[0] || null
 }

@@ -249,7 +249,7 @@ function createMemberSession ({
     return { sessions: sessions.size, spent: spent.size }
   }
 
-  return { start, finish, member, stats }
+  return { start, finish, member, standing, stats }
 }
 
 module.exports = {

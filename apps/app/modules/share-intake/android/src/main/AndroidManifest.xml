@@ -1,0 +1,39 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <application>
+    <!-- A separate receiver, so MainActivity (singleTask, App Links) keeps
+         its intent filters and never sees the shared Uris. An empty
+         taskAffinity and noHistory keep it out of the sender's task and of
+         the back stack. configChanges keeps a rotation or a theme switch from
+         recreating it, which would cancel the copy in progress.
+         Varanda reads a shared Uri as itself, so from Android 15 the system
+         refuses a start whose sender cannot read every shared Uri; older
+         versions ignore the attribute. -->
+    <activity
+      android:name="app.varanda.shareintake.ShareReceiverActivity"
+      android:exported="true"
+      android:requireContentUriPermissionFromCaller="read"
+      android:excludeFromRecents="true"
+      android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|uiMode|keyboard|keyboardHidden|navigation|fontScale|density|locale|layoutDirection"
+      android:noHistory="true"
+      android:taskAffinity=""
+      android:theme="@android:style/Theme.Translucent.NoTitleBar">
+      <!-- No video: the post protocol has no video record, so Varanda must
+           not offer to receive one. -->
+      <intent-filter>
+        <action android:name="android.intent.action.SEND" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data android:mimeType="image/*" />
+      </intent-filter>
+      <intent-filter>
+        <action android:name="android.intent.action.SEND" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data android:mimeType="text/plain" />
+      </intent-filter>
+      <intent-filter>
+        <action android:name="android.intent.action.SEND_MULTIPLE" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data android:mimeType="image/*" />
+      </intent-filter>
+    </activity>
+  </application>
+</manifest>

@@ -133,9 +133,12 @@ async function followsRun (flags) {
 
 // ---- log ----
 
-// "[foto]" / "[N fotos]" for a post's media descriptors, '' when it has none.
+// "[foto]" / "[N fotos]" for a post's media descriptors, "[vídeo]" for the
+// poster and mp4 pair, '' when it has none. The mime is only compared:
+// the tag is a fixed string, never a peer field.
 function mediaTag (media) {
   if (!Array.isArray(media) || media.length === 0) return ''
+  if (media.length === 2 && media[1] && media[1].mime === 'video/mp4') return '[vídeo]'
   return media.length === 1 ? '[foto]' : '[' + media.length + ' fotos]'
 }
 

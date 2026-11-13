@@ -8,24 +8,56 @@
 
 /* Begin PBXBuildFile section */
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
+		335665D70F2E6C16B71B5747 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = D2322F65AB98F94135C59DEA /* PrivacyInfo.xcprivacy */; };
 		3E461D99554A48A4959DE609 /* SplashScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */; };
+		41FD6DC60C9B5E217A2F6445 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F113B5E10271B9D3E4C14AD /* ShareViewController.swift */; };
 		470215A8249458A2970C4E73 /* libPods-Varanda.a in Frameworks */ = {isa = PBXBuildFile; fileRef = FC837A477C4045EE19E53120 /* libPods-Varanda.a */; };
 		805570CF4EBF1E4539D8BBD7 /* ExpoModulesProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E2A6923B636966C9089C047 /* ExpoModulesProvider.swift */; };
 		82FDC73A2ED7A6278191B3C1 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 19F512B67CCB4B74BB95F57D /* PrivacyInfo.xcprivacy */; };
+		93D4C31E2699AD67CBE57E78 /* VarandaShare.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 99713602D04FEE67B1241BBC /* VarandaShare.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		BB2F792D24A3F905000567C9 /* Expo.plist in Resources */ = {isa = PBXBuildFile; fileRef = BB2F792C24A3F905000567C9 /* Expo.plist */; };
 		F11748422D0307B40044C1D9 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = F11748412D0307B40044C1D9 /* AppDelegate.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		474C2AD5826C922EF6725B0B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 83CBB9F71A601CBA00E9B192 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AE328DFA78EDEAD4BABB833F;
+			remoteInfo = VarandaShare;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		656759E7379B29BDD94FCA57 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				93D4C31E2699AD67CBE57E78 /* VarandaShare.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		13B07F961A680F5B00A75B9A /* Varanda.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Varanda.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		13B07FB51A68108700A75B9A /* Images.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Images.xcassets; path = Varanda/Images.xcassets; sourceTree = "<group>"; };
 		13B07FB61A68108700A75B9A /* Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = Info.plist; path = Varanda/Info.plist; sourceTree = "<group>"; };
 		19F512B67CCB4B74BB95F57D /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; name = PrivacyInfo.xcprivacy; path = Varanda/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		1F113B5E10271B9D3E4C14AD /* ShareViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
+		482C5A7A7B4BE38A23E14B36 /* Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		4E2A6923B636966C9089C047 /* ExpoModulesProvider.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ExpoModulesProvider.swift; path = "Pods/Target Support Files/Pods-Varanda/ExpoModulesProvider.swift"; sourceTree = "<group>"; };
+		99713602D04FEE67B1241BBC /* VarandaShare.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = VarandaShare.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		A974A67E7CD14D752A523C4C /* Pods-Varanda.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Varanda.debug.xcconfig"; path = "Target Support Files/Pods-Varanda/Pods-Varanda.debug.xcconfig"; sourceTree = "<group>"; };
 		AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = SplashScreen.storyboard; path = Varanda/SplashScreen.storyboard; sourceTree = "<group>"; };
 		BB2F792C24A3F905000567C9 /* Expo.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; path = Expo.plist; sourceTree = "<group>"; };
 		BD7E1EB60F872494E88EDFC6 /* Pods-Varanda.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Varanda.release.xcconfig"; path = "Target Support Files/Pods-Varanda/Pods-Varanda.release.xcconfig"; sourceTree = "<group>"; };
+		D2322F65AB98F94135C59DEA /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		D3C6911B1E3F135F00A02E56 /* VarandaShare.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = VarandaShare.entitlements; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 		F11748412D0307B40044C1D9 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = Varanda/AppDelegate.swift; sourceTree = "<group>"; };
 		F11748442D0722820044C1D9 /* Varanda-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = "Varanda-Bridging-Header.h"; path = "Varanda/Varanda-Bridging-Header.h"; sourceTree = "<group>"; };
@@ -38,6 +70,13 @@
 			buildActionMask = 2147483647;
 			files = (
 				470215A8249458A2970C4E73 /* libPods-Varanda.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		F6F831B954D022A46D770B44 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -85,6 +124,17 @@
 			name = Frameworks;
 			sourceTree = "<group>";
 		};
+		4CD0C934C9FAA6194E09C4AD /* VarandaShare */ = {
+			isa = PBXGroup;
+			children = (
+				1F113B5E10271B9D3E4C14AD /* ShareViewController.swift */,
+				482C5A7A7B4BE38A23E14B36 /* Info.plist */,
+				D3C6911B1E3F135F00A02E56 /* VarandaShare.entitlements */,
+				D2322F65AB98F94135C59DEA /* PrivacyInfo.xcprivacy */,
+			);
+			path = VarandaShare;
+			sourceTree = "<group>";
+		};
 		832341AE1AAA6A7D00B99B32 /* Libraries */ = {
 			isa = PBXGroup;
 			children = (
@@ -96,6 +146,7 @@
 			isa = PBXGroup;
 			children = (
 				13B07FAE1A68108700A75B9A /* Varanda */,
+				4CD0C934C9FAA6194E09C4AD /* VarandaShare */,
 				832341AE1AAA6A7D00B99B32 /* Libraries */,
 				83CBBA001A601CBA00E9B192 /* Products */,
 				2D16E6871FA4F8E400B85C8A /* Frameworks */,
@@ -111,6 +162,7 @@
 			isa = PBXGroup;
 			children = (
 				13B07F961A680F5B00A75B9A /* Varanda.app */,
+				99713602D04FEE67B1241BBC /* VarandaShare.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -144,6 +196,7 @@
 				13B07F871A680F5B00A75B9A /* Sources */,
 				13B07F8C1A680F5B00A75B9A /* Frameworks */,
 				13B07F8E1A680F5B00A75B9A /* Resources */,
+				656759E7379B29BDD94FCA57 /* Embed Foundation Extensions */,
 				00DD1BFF1BD5951E006B06BC /* Bundle React Native code and images */,
 				800E24972A6A228C8D4807E9 /* [CP] Copy Pods Resources */,
 				8D99D71F00CCA6950CFD7134 /* [CP] Embed Pods Frameworks */,
@@ -151,11 +204,30 @@
 			buildRules = (
 			);
 			dependencies = (
+				C36A5F6EB35A4376AAF08999 /* PBXTargetDependency */,
 			);
 			name = Varanda;
 			productName = Varanda;
 			productReference = 13B07F961A680F5B00A75B9A /* Varanda.app */;
 			productType = "com.apple.product-type.application";
+		};
+		AE328DFA78EDEAD4BABB833F /* VarandaShare */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 78D72FDD7500C60DF2EEFEB5 /* Build configuration list for PBXNativeTarget "VarandaShare" */;
+			buildPhases = (
+				ACE5A871DB34D5729BC5B189 /* Sources */,
+				F6F831B954D022A46D770B44 /* Frameworks */,
+				6E5C0B38DDB4A781FB3D9E22 /* Resources */,
+				21B4CFE86520B97406F51562 /* Sync version with Varanda */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = VarandaShare;
+			productName = VarandaShare;
+			productReference = 99713602D04FEE67B1241BBC /* VarandaShare.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -167,6 +239,9 @@
 				TargetAttributes = {
 					13B07F861A680F5B00A75B9A = {
 						LastSwiftMigration = 1250;
+					};
+					AE328DFA78EDEAD4BABB833F = {
+						CreatedOnToolsVersion = 16.0;
 					};
 				};
 			};
@@ -184,6 +259,7 @@
 			projectRoot = "";
 			targets = (
 				13B07F861A680F5B00A75B9A /* Varanda */,
+				AE328DFA78EDEAD4BABB833F /* VarandaShare */,
 			);
 		};
 /* End PBXProject section */
@@ -197,6 +273,14 @@
 				13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */,
 				3E461D99554A48A4959DE609 /* SplashScreen.storyboard in Resources */,
 				82FDC73A2ED7A6278191B3C1 /* PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		6E5C0B38DDB4A781FB3D9E22 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				335665D70F2E6C16B71B5747 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -240,6 +324,29 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			showEnvVarsInLog = 0;
+		};
+		21B4CFE86520B97406F51562 /* Sync version with Varanda */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${SRCROOT}/Varanda/Info.plist",
+				"${TARGET_BUILD_DIR}/${INFOPLIST_PATH}",
+			);
+			name = "Sync version with Varanda";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"${DERIVED_FILE_DIR}/VarandaShare-version-sync.stamp",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "set -euo pipefail\n# EAS remote versioning rewrites the app's Info.plist before the build, and\n# Apple rejects an extension whose versions differ from its app's. The\n# literals in VarandaShare/Info.plist are only the fallback. The processed\n# plist is an input, not an output: Xcode's own Info.plist task produces it,\n# and two producers of one file fail the build.\nhost=\"${SRCROOT}/Varanda/Info.plist\"\nplist=\"${TARGET_BUILD_DIR}/${INFOPLIST_PATH}\"\nshort=$(/usr/libexec/PlistBuddy -c \"Print :CFBundleShortVersionString\" \"$host\")\nbuild=$(/usr/libexec/PlistBuddy -c \"Print :CFBundleVersion\" \"$host\")\nif [[ -z \"$short\" || -z \"$build\" || \"$short$build\" == *'$('* ]]; then\n  echo \"error: Varanda/Info.plist must hold literal versions\" >&2\n  exit 1\nfi\n/usr/libexec/PlistBuddy -c \"Set :CFBundleShortVersionString $short\" \"$plist\"\n/usr/libexec/PlistBuddy -c \"Set :CFBundleVersion $build\" \"$plist\"\nmkdir -p \"${DERIVED_FILE_DIR}\"\ntouch \"${DERIVED_FILE_DIR}/VarandaShare-version-sync.stamp\"\n";
 			showEnvVarsInLog = 0;
 		};
 		800E24972A6A228C8D4807E9 /* [CP] Copy Pods Resources */ = {
@@ -380,7 +487,23 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		ACE5A871DB34D5729BC5B189 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				41FD6DC60C9B5E217A2F6445 /* ShareViewController.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		C36A5F6EB35A4376AAF08999 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = AE328DFA78EDEAD4BABB833F /* VarandaShare */;
+			targetProxy = 474C2AD5826C922EF6725B0B /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		13B07F941A680F5B00A75B9A /* Debug */ = {
@@ -448,6 +571,32 @@
 				VERSIONING_SYSTEM = "apple-generic";
 			};
 			name = Release;
+		};
+		14D9BF738BE2886C287F898D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = VarandaShare/VarandaShare.entitlements;
+				CURRENT_PROJECT_VERSION = 1;
+				INFOPLIST_FILE = VarandaShare/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				OTHER_SWIFT_FLAGS = "$(inherited) -D EXPO_CONFIGURATION_DEBUG";
+				PRODUCT_BUNDLE_IDENTIFIER = app.varanda.share;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = Debug;
 		};
 		83CBBA201A601CBA00E9B192 /* Debug */ = {
 			isa = XCBuildConfiguration;
@@ -571,6 +720,31 @@
 			};
 			name = Release;
 		};
+		958E4EAAE899BF493C4FFDE1 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = VarandaShare/VarandaShare.entitlements;
+				CURRENT_PROJECT_VERSION = 1;
+				INFOPLIST_FILE = VarandaShare/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				OTHER_SWIFT_FLAGS = "$(inherited) -D EXPO_CONFIGURATION_RELEASE";
+				PRODUCT_BUNDLE_IDENTIFIER = app.varanda.share;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -579,6 +753,15 @@
 			buildConfigurations = (
 				13B07F941A680F5B00A75B9A /* Debug */,
 				13B07F951A680F5B00A75B9A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		78D72FDD7500C60DF2EEFEB5 /* Build configuration list for PBXNativeTarget "VarandaShare" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				14D9BF738BE2886C287F898D /* Debug */,
+				958E4EAAE899BF493C4FFDE1 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

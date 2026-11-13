@@ -7,13 +7,19 @@
      <TeamID>.app.varanda (VARANDA_IOS_APP_ID in deploy/seeder/.env) and the
      provisioning profile carries Associated Domains. applinks opens only /anuncio/ in the app (the AASA components list it). Info.plist
      VarandaWebCredentials says the build has this entry; app.json
-     ios.associatedDomains repeats it for prebuild. -->
+     ios.associatedDomains repeats it for prebuild. The app group is the
+     container the share extension (VarandaShare) writes into; app.json
+     ios.entitlements repeats it. -->
 <plist version="1.0">
   <dict>
     <key>com.apple.developer.associated-domains</key>
     <array>
       <string>webcredentials:bora.varanda.app</string>
       <string>applinks:bora.varanda.app</string>
+    </array>
+    <key>com.apple.security.application-groups</key>
+    <array>
+      <string>group.app.varanda</string>
     </array>
   </dict>
 </plist>

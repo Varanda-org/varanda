@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The share extension writes into the app group container that the app
+     reads (modules/share-intake/ios/ShareIntakeModule.swift). The group is
+     the same in ../Varanda/Varanda.entitlements and in app.json
+     ios.entitlements; the provisioning profiles of app.varanda and
+     app.varanda.share must both carry it. -->
+<plist version="1.0">
+  <dict>
+    <key>com.apple.security.application-groups</key>
+    <array>
+      <string>group.app.varanda</string>
+    </array>
+  </dict>
+</plist>

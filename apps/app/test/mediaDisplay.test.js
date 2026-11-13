@@ -24,8 +24,24 @@ export class Directory {
   }
 }
 export class File {
-  constructor (dir, name) { this.dir = dir.uri; this.uri = dir.uri + name }
+  constructor (dir, name) {
+    if (typeof dir === 'string') {
+      this.uri = dir
+      this.dir = dir.slice(0, dir.lastIndexOf('/') + 1)
+    } else {
+      this.dir = dir.uri
+      this.uri = dir.uri + name
+    }
+  }
   get exists () { return files.has(this.uri) }
+  move (dest) {
+    if (!files.has(this.uri)) throw new Error('missing')
+    if (!dirs.has(dest.dir)) throw new Error('no directory')
+    if (files.has(dest.uri)) throw new Error('exists')
+    files.set(dest.uri, files.get(this.uri))
+    files.delete(this.uri)
+    this.uri = dest.uri
+  }
   create () {
     if (!dirs.has(this.dir)) throw new Error('no directory')
     if (files.has(this.uri)) throw new Error('exists')
@@ -126,6 +142,69 @@ test('display.native: writes under the cache, returns file://, deletes and sweep
   t.pass('sweeping again is a no-op')
   const again = display.urlFromBytes(bytes, 'image/png')
   t.ok(files().has(again), 'the directory is recreated on demand')
+})
+
+test('display.native: a video is an mp4 inside the media directory, adopted only from the read directory', async (t) => {
+  const display = await import('../src/media/display.native.js')
+  const bytes = new Uint8Array([0, 0, 0, 8, 0x66, 0x74, 0x79, 0x70])
+  const made = display.urlFromBytes(bytes, 'video/mp4')
+  t.ok(/^file:\/\/\/stub\/Caches\/varanda-media\/[0-9a-f]{32}\.mp4$/.test(made), 'random .mp4 name in the media directory')
+  t.alike(files().get(made), bytes)
+  display.revokeUrl(made)
+  t.absent(files().has(made), 'an mp4 is revoked like a photo')
+
+  const READ = 'file:///stub/Documents/varanda/media-read/'
+  dirs().add(READ)
+  const name = 'ef'.repeat(16) + '.bin'
+  files().set(READ + name, bytes)
+  const adopted = display.adoptVideoFile(READ + name)
+  t.ok(/^file:\/\/\/stub\/Caches\/varanda-media\/[0-9a-f]{32}\.mp4$/.test(adopted), 'moved into the media directory as .mp4')
+  t.not(adopted.slice(DIR.length, DIR.length + 32), 'ef'.repeat(16), 'a fresh random name, not the worklet one')
+  t.absent(files().has(READ + name), 'the read file is gone')
+  t.alike(files().get(adopted), bytes, 'the same bytes')
+  display.revokeUrl(adopted)
+  t.absent(files().has(adopted), 'revokeUrl deletes an adopted video')
+
+  const other = 'file:///stub/Documents/' + 'ab'.repeat(16) + '.bin'
+  files().set(other, bytes)
+  const sub = READ + 'x/' + 'ab'.repeat(16) + '.bin'
+  files().set(sub, bytes)
+  const mp4 = READ + 'ab'.repeat(16) + '.mp4'
+  files().set(mp4, bytes)
+  const before = files().size
+  for (const uri of [
+    other,
+    sub,
+    mp4,
+    READ + '../' + 'ab'.repeat(16) + '.bin',
+    READ + 'AB'.repeat(16) + '.bin',
+    READ,
+    'blob:x',
+    null,
+    undefined
+  ]) t.exception(() => display.adoptVideoFile(uri), /inválido/, String(uri))
+  t.is(files().size, before, 'nothing moved or deleted')
+  t.ok(files().has(other) && files().has(sub) && files().has(mp4))
+
+  t.exception(() => display.adoptVideoFile(READ + 'cd'.repeat(16) + '.bin'), /missing/, 'a missing read file throws')
+  t.absent([...files().keys()].some((k) => k.startsWith(DIR) && !files().get(k)), 'and leaves no empty file')
+
+  const later = READ + '12'.repeat(16) + '.bin'
+  files().set(later, bytes)
+  const kept = display.adoptVideoFile(later)
+  display.sweepMediaCache()
+  t.absent(files().has(kept), 'the sweep removes an adopted video')
+})
+
+test('display.web: a video is a blob typed video/mp4 and nothing is adopted', async (t) => {
+  const display = await import('../src/media/display.web.js')
+  const made = []
+  const create = URL.createObjectURL
+  URL.createObjectURL = (blob) => { made.push(blob); return 'blob:test/v' }
+  t.teardown(() => { URL.createObjectURL = create })
+  t.is(display.urlFromBytes(new Uint8Array([1, 2, 3]), 'video/mp4'), 'blob:test/v')
+  t.is(made[0].type, 'video/mp4')
+  t.is(display.adoptVideoFile('file:///anything.bin'), null)
 })
 
 test('display.web: blob URL typed with the mime, revoked with revokeObjectURL', async (t) => {
