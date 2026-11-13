@@ -222,6 +222,7 @@ function postOf (author, seq, record) {
     text: record.text,
     replyTo: record.replyTo || null,
     quote: record.quote || null,
+    preview: record.preview || null,
     media: Array.isArray(record.media) && record.media.length > 0 ? record.media : null,
     name: null,
     username: null
