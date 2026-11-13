@@ -10,14 +10,17 @@
 //     app, so it cannot call anything here;
 //   - no file access, geolocation, camera or microphone, no link previews;
 //   - the provider frame is sandboxed (embedHtml) with no top navigation,
-//     popups, forms or downloads. navDecision also guards the top frame, but
+//     forms or downloads. navDecision also guards the top frame, but
 //     Android allows a load when the answer takes over 250 ms and never asks
-//     about a POST, so the sandbox, not this callback, is the boundary.
+//     about a POST, so the sandbox, not this callback, is the boundary;
+//   - a popup (a link in the player) is cancelled by the library and only its
+//     address is reported to onOpen. This frame opens nothing itself: the
+//     report carries no sign of a tap, so the caller's allowlist decides
+//     whether that address may leave the app.
 //
 // Props: html, baseUrl, allowTop(url) -> boolean, height, title (accessibility
-// label); embedUrl is for the web frame, which loads it directly. Nothing the
-// player asks for leaves the app: the only way out is the card's own
-// "Abrir no ..." link, which opens the checked card URL on a real tap.
+// label), onOpen(url) (optional); embedUrl is for the web frame, which loads
+// it directly.
 
 import { View } from 'react-native'
 import { WebView } from 'react-native-webview'
@@ -43,21 +46,41 @@ export function navDecision (request, allowTop) {
   return allowed ? 'allow' : 'refuse'
 }
 
-// Setting this makes the library cancel a popup's navigation instead of
-// loading it into this WebView; nothing is handed out. On Android this holds
-// only because multiple windows are on (the library default): a popup gets a
-// detached WebView whose navigation the library cancels. Never set
-// setSupportMultipleWindows to false, or the popup replaces the top frame.
-function onOpenWindow () {}
+// The address a popup event reports, or ''. The event comes from the player
+// page, so nothing about its shape is trusted.
+export function popupTarget (event) {
+  try {
+    const url = event && event.nativeEvent ? event.nativeEvent.targetUrl : undefined
+    return typeof url === 'string' ? url : ''
+  } catch {
+    return ''
+  }
+}
 
 // The library's default error view is English text; a failed player just
-// stays an empty slot, and the caller's "Abrir no..." link still works.
+// stays an empty slot.
 const blank = () => <View />
 
-export function EmbedFrame ({ html, baseUrl, allowTop, height, title }) {
+export function EmbedFrame ({ html, baseUrl, allowTop, height, title, onOpen }) {
   if (typeof html !== 'string' || typeof baseUrl !== 'string') return null
 
   const onShouldStartLoadWithRequest = (request) => navDecision(request, allowTop) === 'allow'
+
+  // Passed even without onOpen: having a handler is what makes the library
+  // cancel a popup instead of loading it here. On iOS, with no handler, the
+  // popup request loads into this WebView; with one, a navigation with no
+  // target frame is cancelled and only reported. On Android the handler gives
+  // the popup a detached WebView, built with default settings rather than
+  // this frame's props, that cancels each navigation it is asked about and
+  // reports every address it is sent to, not just the first; each report
+  // still goes through the caller's allowlist. This holds only while multiple
+  // windows stay on (the library default): turning them off would let the
+  // popup replace the top frame.
+  const onOpenWindow = (event) => {
+    const url = popupTarget(event)
+    if (url === '' || typeof onOpen !== 'function') return
+    try { onOpen(url) } catch {}
+  }
 
   return (
     <View style={{ height, width: '100%' }}>

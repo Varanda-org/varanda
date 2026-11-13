@@ -314,8 +314,8 @@ test('musicEmbed: embedFrameOrigin answers only an exact listed origin', async (
 
 test('musicEmbed: the provider frame is sandboxed with no way out of the wrapper', async (t) => {
   const { embedOf, embedHtml, EMBED_SANDBOX } = await load()
-  t.alike(EMBED_SANDBOX.split(' ').sort(), ['allow-presentation', 'allow-same-origin', 'allow-scripts'])
-  const forbidden = ['allow-popups', 'allow-popups-to-escape-sandbox', 'allow-top-navigation', 'allow-top-navigation-by-user-activation', 'allow-top-navigation-to-custom-protocols', 'allow-forms', 'allow-downloads', 'allow-modals']
+  t.alike(EMBED_SANDBOX.split(' ').sort(), ['allow-popups', 'allow-presentation', 'allow-same-origin', 'allow-scripts'])
+  const forbidden = ['allow-popups-to-escape-sandbox', 'allow-top-navigation', 'allow-top-navigation-by-user-activation', 'allow-top-navigation-to-custom-protocols', 'allow-forms', 'allow-downloads', 'allow-modals']
   const capture = ['microphone', 'camera', 'geolocation', 'display-capture', 'speaker-selection', 'screen-wake-lock', 'usb', 'serial', 'bluetooth', 'hid', 'midi']
   for (const url of ACCEPTED.map(([u]) => u)) {
     const html = embedHtml(embedOf(url))
@@ -331,6 +331,135 @@ test('musicEmbed: the provider frame is sandboxed with no way out of the wrapper
     t.absent(/<script/i.test(html), url + ': the wrapper runs no script')
     t.absent(/script-src/.test(html), url + ': the CSP grants no script')
   }
+})
+
+test('musicEmbed: embedExitUrl lets out only https pages on the same provider\'s hosts', async (t) => {
+  const { embedExitUrl, EMBED_HOSTS, EMBED_PROVIDER_DOMAINS } = await load()
+  const yt = { provider: 'youtube' }
+  const sc = { provider: 'soundcloud' }
+  const sp = { provider: 'spotify' }
+  const ap = { provider: 'apple' }
+  for (const [embed, url] of [
+    [yt, 'https://www.youtube.com/watch?v=' + YT + '&t=42s#comments'],
+    [sc, 'https://soundcloud.com/artist/track?in=x&si=1#t=0:10'],
+    [sp, 'https://open.spotify.com/track/' + SP + '?si=abc#x'],
+    [ap, 'https://music.apple.com/br/album/x/1?i=2&ls#top'],
+    [yt, 'https://youtu.be/x'],
+    [sc, 'https://on.soundcloud.com/x'],
+    [sp, 'https://spotify.link/x'],
+    [ap, 'https://geo.music.apple.com/x']
+  ]) t.is(embedExitUrl(embed, url), url, embed.provider + ' ' + url)
+
+  const refused = [
+    [sp, 'https://www.youtube.com/watch?v=' + YT],
+    [yt, 'https://open.spotify.com/x'],
+    [sc, 'https://music.apple.com/x'],
+    [ap, 'https://soundcloud.com/x'],
+    [sp, 'https://open.spotify.com.evil.example/x'],
+    [sp, 'https://evilspotify.com/x'],
+    [sp, 'https://open.spotify.com./x'],
+    [sp, 'https://.spotify.com/x'],
+    [sp, 'https://a..spotify.com/x'],
+    [sp, 'https://open.spotify.com@evil.example/x'],
+    [sp, 'https://evil.example@open.spotify.com/x'],
+    [sp, 'https://open.spotify.com:443/x'],
+    [sp, 'http://open.spotify.com/x'],
+    [sp, 'HTTPS://open.spotify.com/x'],
+    [sp, 'https://OPEN.spotify.com/x'],
+    [yt, 'https://www.youtube-nocookie.com/embed/x'],
+    [sp, 'intent://x#Intent;scheme=https;end'],
+    [sp, 'spotify:track:x'],
+    [sp, 'javascript:alert(1)'],
+    [sp, 'data:text/html,x'],
+    [sp, 'about:blank'],
+    [sp, 'https://open.spotify.com\\@evil.example/x'],
+    [sp, 'https://open.spotify.com/x\ty'],
+    [sp, 'https://open.spotify.com/' + 'a'.repeat(2049 - 'https://open.spotify.com/'.length)],
+    [sp, ''],
+    [sp, null],
+    [sp, undefined],
+    [sp, 42],
+    [sp, { toString: () => 'https://open.spotify.com/x' }],
+    [null, 'https://open.spotify.com/x'],
+    [undefined, 'https://open.spotify.com/x'],
+    ['spotify', 'https://open.spotify.com/x'],
+    [{}, 'https://open.spotify.com/x'],
+    [{ provider: '__proto__' }, 'https://open.spotify.com/x'],
+    [{ provider: 'toString' }, 'https://open.spotify.com/x'],
+    [{ provider: 'audius' }, 'https://audius.co/x']
+  ]
+  for (const [embed, url] of refused) {
+    t.is(embedExitUrl(embed, url), null, JSON.stringify(embed) + ' ' + (typeof url === 'string' ? url.slice(0, 60) : String(url)))
+  }
+  t.is(('https://open.spotify.com/' + 'a'.repeat(2049 - 'https://open.spotify.com/'.length)).length, 2049, 'the long case is 2049 characters')
+  const atCap = 'https://open.spotify.com/' + 'a'.repeat(2048 - 'https://open.spotify.com/'.length)
+  t.is(embedExitUrl(sp, atCap), atCap, '2048 characters still pass')
+  const hostile = { get provider () { throw new Error('x') } }
+  t.is(embedExitUrl(hostile, 'https://open.spotify.com/x'), null, 'a throwing getter is refused')
+
+  for (const host of EMBED_HOSTS) {
+    const providers = Object.keys(EMBED_PROVIDER_DOMAINS).filter((provider) => embedExitUrl({ provider }, 'https://' + host + '/x') !== null)
+    t.is(providers.length, 1, host + ' belongs to exactly one provider')
+  }
+  t.ok(Object.isFrozen(EMBED_PROVIDER_DOMAINS), 'domains frozen')
+  for (const domains of Object.values(EMBED_PROVIDER_DOMAINS)) t.ok(Object.isFrozen(domains), 'inner list frozen')
+})
+
+test('musicEmbed: embedExitUrl never lets out YouTube\'s redirector', async (t) => {
+  const { embedExitUrl } = await load()
+  const yt = { provider: 'youtube' }
+  const refused = []
+  for (const host of ['www.youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtube.com', 'youtu.be']) {
+    for (const path of [
+      '/redirect',
+      '/redirect?q=https://evil.example/',
+      '/redirect?event=video_description&q=https%3A%2F%2Fevil.example%2F',
+      '/redirect#x',
+      '/redirect/',
+      '/redirect/x?q=https://evil.example/',
+      '/Redirect?q=https://evil.example/',
+      '/REDIRECT?q=https://evil.example/',
+      '/redir%65ct?q=https://evil.example/',
+      '/x/../redirect?q=https://evil.example/',
+      '/./redirect?q=https://evil.example/',
+      '/x/%2e%2e/redirect?q=https://evil.example/',
+      '//redirect?q=https://evil.example/',
+      '///redirect?q=https://evil.example/',
+      '/redirect;x?q=https://evil.example/',
+      '/redirect;?q=https://evil.example/',
+      '/redirect%3Bx?q=https://evil.example/',
+      '/.;/redirect?q=https://evil.example/',
+      '/..;/redirect?q=https://evil.example/',
+      '/a;/..;/redirect?q=https://evil.example/',
+      '/%2e/redirect;a=b?q=https://evil.example/',
+      '/%2Fredirect?q=https://evil.example/',
+      '/attribution_link?u=%2Fredirect%3Fq%3Dhttps%253A%252F%252Fevil.example%252F',
+      '/Attribution_Link;x?u=%2Fredirect',
+      '//attribution_link?u=%2Fredirect'
+    ]) refused.push('https://' + host + path)
+  }
+  for (const url of refused) t.is(embedExitUrl(yt, url), null, url)
+  for (const url of [
+    'https://www.youtube.com/watch?v=' + YT,
+    'https://www.youtube.com/watch?v=' + YT + '&q=https://evil.example/',
+    'https://www.youtube.com/redirection',
+    'https://www.youtube.com/redirects?q=x',
+    'https://www.youtube.com/channel/x/redirect',
+    'https://m.youtube.com/channel/x/redirect?q=https://evil.example/',
+    'https://music.youtube.com/watch?v=' + YT,
+    'https://www.youtube.com/',
+    'https://www.youtube.com',
+    'https://www.youtube.com?q=x',
+    'https://www.youtube.com/x/redirect/../watch?v=' + YT,
+    'https://www.youtube.com/%E0',
+    'https://www.youtube.com/watch;x?v=' + YT,
+    'https://www.youtube.com//watch?v=' + YT,
+    'https://www.youtube.com/attribution_links',
+    'https://www.youtube.com/channel/x/attribution_link?u=%2Fredirect'
+  ]) t.is(embedExitUrl(yt, url), url, url)
+  t.is(embedExitUrl({ provider: 'soundcloud' }, 'https://soundcloud.com/redirect?q=x'), 'https://soundcloud.com/redirect?q=x', 'soundcloud is decided by its host')
+  t.is(embedExitUrl({ provider: 'spotify' }, 'https://open.spotify.com/redirect?q=x'), 'https://open.spotify.com/redirect?q=x', 'spotify is decided by its host')
+  t.is(embedExitUrl({ provider: 'spotify' }, 'https://www.youtube.com/redirect?q=x'), null, 'a YouTube address still needs the YouTube player')
 })
 
 test('musicEmbed: top navigation stays on the player document', async (t) => {
