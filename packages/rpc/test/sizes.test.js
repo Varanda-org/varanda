@@ -613,3 +613,31 @@ test('listing.create, listing.edit and listing.mine: maximal sizes fit', (t) => 
   const page = { items: Array(limit).fill(item), next: SEQ }
   t.ok(size(page) <= MAX_MESSAGE, 'listing.mine page ' + size(page))
 })
+
+test('a maximal video pair is smaller than ten maximal descriptors: page maxima unchanged', (t) => {
+  const { VIDEO_MIME, MAX_VIDEO_MS, MAX_VIDEO_DIMENSION, MAX_VIDEO_PIXELS } = require('..')
+  const side = Math.floor(MAX_VIDEO_PIXELS / MAX_VIDEO_DIMENSION)
+  const poster = { ...DESCRIPTOR, mime: 'image/jpeg' }
+  const video = { ...DESCRIPTOR, mime: VIDEO_MIME, width: MAX_VIDEO_DIMENSION, height: side, ms: MAX_VIDEO_MS }
+  const pair = [poster, video]
+  t.ok(validateParams('post.create', { text: 'x', media: pair }).ok, 'a valid rpc pair')
+  t.is(validateRecord({ type: 'post', text: 'x', at: AT, replyTo: null, media: pair }, 1), null, 'a valid core pair')
+  t.ok(utf8ByteLength(JSON.stringify(pair)) < utf8ByteLength(JSON.stringify(MEDIA)), 'the pair is smaller than ten descriptors')
+  const withPair = (result) => (n, ch) => {
+    const out = result(n, ch, false)
+    for (const e of out.items || out.entries) {
+      if (e.record) e.record = { ...e.record, media: pair }
+      else e.media = pair
+    }
+    return out
+  }
+  for (const ch of WORST) {
+    for (const result of [feedResult, peekResult, logResult]) {
+      t.ok(size(withPair(result)(1, ch)) < size(result(1, ch, false)), 'a pair item is smaller than a ten-photo item')
+    }
+  }
+  t.is(FEED_LIMIT_MAX, 26)
+  t.is(LOG_LIMIT_MAX, 30)
+  t.is(GROUP_LIMIT_MAX, 26)
+  t.is(PEEK_SEQS_MAX, 29)
+})

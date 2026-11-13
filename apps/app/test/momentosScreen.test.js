@@ -9,6 +9,7 @@ const { join } = require('node:path')
 
 const APP = join(__dirname, '..')
 const read = (rel) => readFileSync(join(APP, rel), 'utf8')
+const VIDEO_END_GRACE_MS = Number(/export const VIDEO_END_GRACE_MS = (\d+)/.exec(read('src/moments.js'))[1])
 const code = (rel) => read(rel).replace(/("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`)|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g, (m, str) => str || ' ')
 const loadSeen = () => import('../src/momentSeen.js')
 const loadTabs = () => import('../src/tabs.js')
@@ -53,13 +54,14 @@ test('the viewer: text through displayText, reply through canReply and openMessa
   t.ok(src.includes('canReply(node)'), 'reply bar gated by canReply')
   t.ok(src.includes('onMessage(author, { context: replyContext(item, author) })'), 'openMessage with the reply context')
   t.ok(src.includes("<Pill label='Responder' icon='mensagem' onPress={reply} />"), 'one Responder pill with the mensagem icon')
-  t.ok(src.includes("export const OWN_NOTE = 'A foto sai dos servidores em até 7 dias.'"), 'own note')
+  t.ok(src.includes("export const OWN_NOTE = 'O momento sai dos servidores em até 7 dias.'"), 'own note covers photos and videos')
   t.ok(src.includes("export const DELETE_TITLE = 'Apagar momento?'"), 'delete confirmation title')
   t.ok(src.includes("request('moment.delete', { to: target.ref })"), 'moment.delete')
   t.ok(src.includes('<ConfirmStack'), 'ConfirmStack pattern')
   t.ok(src.includes("export const PHOTO_UNAVAILABLE = 'Foto indisponível'"), 'unavailable photo text')
   t.ok(src.includes("media.read({ kind: 'moment', author, seq })"), 'photo through node.media.read')
-  t.ok(src.includes('AUTO_ADVANCE_MS') && src.includes('progressOf(') && src.includes('ringOrder('), 'pure module helpers used')
+  t.ok(src.includes('holdMsOf(item, musicStarted)') && src.includes('progressOf(') && src.includes('ringOrder('), 'pure module helpers used')
+  t.ok(src.includes('segmentMs(item, photo.ms)') && src.includes('progressOf(') && src.includes('ringOrder('), 'pure module helpers used')
   t.ok(src.includes('mark(itemKey)'), 'each viewed item marked seen')
   t.ok(src.includes("backgroundColor: '#000000'"), 'black background')
 })
@@ -69,7 +71,8 @@ test('auto-advance respects reduced motion and pauses', (t) => {
   t.ok(src.includes('AccessibilityInfo.isReduceMotionEnabled()'), 'reads the system setting')
   t.ok(src.includes("addEventListener('reduceMotionChanged'"), 'follows changes')
   t.ok(src.includes('export function autoAdvanceOn (reduce) {\n  return reduce === false\n}'), 'only when known not reduced')
-  t.ok(src.includes('const running = isTop && node.visible !== false && autoOn && item !== null && photo.phase !== \'loading\' && !held && !dragging && !menuOpen && deleting === null'), 'paused while hidden, pressed, dragged, in a menu or deleting')
+  t.ok(src.includes("const paused = !isTop || node.visible === false || item === null || photo.phase === 'loading' || held || dragging || menuOpen || deleting !== null || musicClosed"), 'paused while hidden, pressed, dragged, in a menu or deleting')
+  t.ok(src.includes('active: isTop && node.visible !== false && item !== null && !held && !dragging && !menuOpen && deleting === null') && src.includes('const running = active && loaded && autoOn'), 'paused while hidden, pressed, dragged, in a menu or deleting')
   t.ok(src.includes('onPressIn={handleTapPressIn}') && src.includes('    setHeld(true)\n  }') && src.includes('onPressOut={() => setHeld(false)}'), 'press holds')
 })
 
@@ -93,7 +96,7 @@ test('Publicar: Momento mode is one photo, putMoment then moment.create', (t) =>
   const send = fnBody(src, 'const send = async () => {\n    if (busyRef.current || !valid)')
   t.ok(send !== null, 'moment send found')
   const put = send.indexOf('node.media.putMoment(')
-  const create = send.indexOf("node.request('moment.create', { text, media: itemRef.current })")
+  const create = send.indexOf("node.request('moment.create', { text, media: itemRef.current, ...chosen })")
   t.ok(put > 0 && create > put, 'putMoment then moment.create')
   t.ok(send.includes('refusalOf(text)') && send.indexOf('refusalOf(text)') < put, 'the word check runs before putMoment')
   t.ok(send.includes('bytes: file.bytes.slice()'), 'putMoment gets a copy (it wipes its buffer)')
@@ -204,7 +207,8 @@ test('review 1: the viewer runs, marks seen and closes only on top', (t) => {
   const src = read('src/screens/Momentos.js')
   t.ok(src.includes('function Viewer ({ entry, ownKey, isTop = true,'), 'isTop prop')
   t.ok(src.includes("if (itemKey !== '' && isTop && photo.phase !== 'loading') mark(itemKey)"), 'seen only on top')
-  t.ok(src.includes('const running = isTop && node.visible !== false && autoOn'), 'auto-advance only on top and visible')
+  t.ok(src.includes('const running = active && loaded && autoOn') && src.includes('&& !musicWaiting,'), 'auto-advance only when unpaused and audio is not starting')
+  t.ok(src.includes('active: isTop && node.visible !== false') && src.includes('const running = active && loaded && autoOn'), 'auto-advance only on top and visible')
   t.ok(src.includes("if (closingRef.current || !isTopRef.current || typeof onBack !== 'function') return"), 'goBack only on top')
   t.ok(read('App.js').includes('<Momentos entry={entry} ownKey={ownKey} isTop={i === stack.length - 1}'), 'App passes the top flag')
 })
@@ -263,7 +267,7 @@ test('review 6: only an increase of the request counter selects Momento', (t) =>
 
 test('round 3, 1: a close during the upload cancels moment.create', (t) => {
   const src = read('src/screens/Publicar.js')
-  t.ok(src.includes('const moment = useMomentDraft({ node, open, active: open === true && momentMode })'), 'the draft knows when it is shown')
+  t.ok(src.includes('const moment = useMomentDraft({ node, member: me?.publicKey, open, active: open === true && momentMode })'), 'the draft knows when it is shown')
   t.ok(src.includes('if (!active) genRef.current++'), 'a close or mode switch moves the generation')
   const send = fnBody(src, 'const send = async () => {\n    if (busyRef.current || !valid)')
   const check = send.indexOf('if (gen !== genRef.current) return false')
@@ -498,7 +502,7 @@ test('visual 1, 9 to 11: Momento box height, Diário rows, past delete body', (t
   t.ok(strip.includes('<Text style={styles.rowText} numberOfLines={1} maxFontSizeMultiplier={ROW_CAP}>{OWN_LIVE_TITLE}</Text>') && strip.includes('<Text style={styles.rowText} numberOfLines={1} maxFontSizeMultiplier={ROW_CAP}>{PAST_TITLE}</Text>'), 'row titles capped on one line')
   t.ok(strip.includes('<Text style={styles.meta} maxFontSizeMultiplier={ROW_CAP}>{String(past.length)}</Text>'), 'the count apart, never cut')
   const src = read('src/screens/Momentos.js')
-  t.ok(src.includes("export const DELETE_BODY_PAST = 'O momento sai do seu diário. A foto já não aparece para ninguém.'"), 'past body')
+  t.ok(src.includes("export const DELETE_BODY_PAST = 'O momento sai do seu diário. Já não aparece para ninguém.'"), 'past body covers photos and videos')
   t.ok(src.includes('{target && expiresIn(target.at) === 0 ? DELETE_BODY_PAST : DELETE_BODY}'), 'chosen by the 24-hour end')
 })
 
@@ -577,7 +581,7 @@ test('visual 2, 7 and 8: the Momento field grows on the web, the past row says e
 test('visual 3, 1: a close the stack ignored never stays latched on top', (t) => {
   const src = read('src/screens/Momentos.js')
   t.ok(src.includes('const CLOSE_RELEASE_MS = STACK_MS + 150') && src.includes("import { STACK_MS } from '../stackMotion'"), 'released after the stack slide time')
-  t.ok(src.includes('useEffect(() => { if (isTop) closingRef.current = false }, [isTop])'), 'released when the viewer is on top again')
+  t.ok(src.includes('if (isTop) {\n      closingRef.current = false\n      setMusicClosed(false)\n    }\n  }, [isTop])'), 'close and music released when the viewer is on top again')
   const close = fnBody(src, 'const close = useCallback(() =>')
   t.ok(close.indexOf('closingRef.current = true') < close.indexOf('setTimeout(') && close.indexOf('setTimeout(') < close.indexOf('onBack()'), 'the release timer starts with the close')
   const timer = close.slice(close.indexOf('setTimeout('))
@@ -654,7 +658,7 @@ test('visual 4 (iOS XXXL): the caption cap leaves the header and the bar free', 
   t.is(captionCap({ height: 800, topEnd: 100, barHeight: 60, bottomPad: 40 }), 320, 'room to spare: still 40%')
   t.is(captionCap({ height: 800, topEnd: 300, barHeight: 160, bottomPad: 40 }), 276, 'largest text: only the room between the header and the bar')
   t.is(captionCap({ height: 600, topEnd: 400, barHeight: 160, bottomPad: 40 }), 72, 'never below about three lines')
-  t.ok(src.includes('const captionMax = captionCap({ height: win.height, topEnd, barHeight, bottomPad: insets.bottom + 12 })'), 'the viewer uses it')
+  t.ok(src.includes('const captionMax = captionCap({ height: win.height, topEnd, barHeight: barHeight + (playbackControls ? playbackHeight + 12 : 0), bottomPad: insets.bottom + 12 })'), 'the viewer uses it')
 })
 
 test('visual 4 (Android): a drag down on a scrolling caption at its top closes', (t) => {
@@ -694,7 +698,7 @@ test('visual 6 (web): a quick drag is not a tap; the viewer root mounts fresh to
 
 test('visual 6 (iOS): a caption tap that steps never leaves the next moment held', (t) => {
   const src = readFileSync(join(__dirname, '../src/screens/Momentos.js'), 'utf8')
-  const effect = src.slice(src.indexOf('captionOffsetRef.current = 0\n'), src.indexOf('}, [itemKey, progress])'))
+  const effect = src.slice(src.indexOf('captionOffsetRef.current = 0\n'), src.indexOf('}, [itemKey])'))
   t.ok(effect.includes('setHeld(false)'), 'the hold is cleared whenever the moment changes')
 })
 
@@ -747,4 +751,1408 @@ test('visual 10 (web): a long draft shows its caret line; closing freezes the vi
   t.ok(pub.includes('setForcedSel({ start: end, end })\n        // A long draft: show the caret line, not the top of the text.\n        node.scrollTop = node.scrollHeight'), 'the field scrolls to the caret at the end')
   const src = readFileSync(join(__dirname, '../src/screens/Momentos.js'), 'utf8')
   t.ok(src.includes('if (rings === null || closingRef.current) return'), 'no prune while the viewer closes')
+})
+
+test('momentsOf keeps valid music through repeated cleaning and drops malformed music', async (t) => {
+  const { momentsOf } = await loadSeen()
+  const { holdMsOf, MUSIC_HOLD_MS } = await import('../src/moments.js')
+  const plain = { seq: 1, ref: A + ':1', text: 't', at: '2026-11-07T10:00:00.000Z', media: {} }
+  for (const music of [undefined, null, { p: 'audius', id: 'abc', start: -1 }, { p: 'other', id: 'abc', start: 0 }, { p: 'audius', id: 'abc', start: 30 }]) {
+    const item = music === undefined ? plain : { ...plain, music }
+    const answer = { authors: [{ author: A, items: [item] }], own: [item], past: [item] }
+    const cleaned = momentsOf(answer, B)
+    const valid = music?.p === 'audius' && music.start === 30
+    const expected = valid ? { ...plain, music: { id: 'abc', start: 30 } } : plain
+    t.alike(cleaned, { authors: [{ author: A, items: [expected] }], own: [expected], past: [expected] })
+    t.alike(momentsOf(cleaned, B), cleaned)
+    if (valid) t.is(holdMsOf(cleaned.authors[0].items[0], true), MUSIC_HOLD_MS)
+    else t.absent(Object.hasOwn(cleaned.own[0], 'music'))
+  }
+})
+
+// The real hooks and JSX, with local host elements and deterministic effects.
+// Cleanups run before the next effects, as they do on a React commit.
+function hookHost (source, name, deps, setup = '') {
+  const { transformSync } = require('@babel/core')
+  const slots = []
+  let cursor, dirty, output, props
+  let pending = []
+  const changed = (old, values) => !old || values.some((v, i) => !Object.is(v, old.values[i]))
+  const memo = (fn, values) => {
+    const at = cursor++
+    if (changed(slots[at], values)) slots[at] = { values, value: fn() }
+    return slots[at].value
+  }
+  const bindings = {
+    React: { createElement: (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity) }) },
+    useState: (initial) => {
+      const at = cursor++
+      if (!(at in slots)) slots[at] = { value: typeof initial === 'function' ? initial() : initial }
+      return [slots[at].value, (value) => {
+        const next = typeof value === 'function' ? value(slots[at].value) : value
+        if (!Object.is(slots[at].value, next)) { slots[at].value = next; dirty = true }
+      }]
+    },
+    useRef: (initial) => {
+      const at = cursor++
+      if (!(at in slots)) slots[at] = { current: initial }
+      return slots[at]
+    },
+    useMemo: memo,
+    useCallback: (fn, values) => memo(() => fn, values),
+    useEffect: (fn, values) => {
+      const at = cursor++
+      if (changed(slots[at], values)) pending.push({ at, fn, values })
+    },
+    ...deps
+  }
+  const input = source.replace(/^import .+\n/gm, '').replace(/export default /g, '').replace(/\bexport /g, '')
+  const compiled = transformSync(input, { configFile: false, babelrc: false, plugins: ['@babel/plugin-transform-react-jsx'] }).code
+  // eslint-disable-next-line no-new-func
+  const component = new Function(...Object.keys(bindings), compiled + '\n' + setup + '\nreturn ' + name)(...Object.values(bindings))
+  const render = (next = props) => {
+    props = next
+    let turns = 0
+    do {
+      if (++turns > 30) throw new Error('render loop')
+      dirty = false
+      cursor = 0
+      pending = []
+      output = component(props)
+      for (const effect of pending) slots[effect.at]?.cleanup?.()
+      for (const { at, fn, values } of pending) slots[at] = { values, cleanup: fn() }
+    } while (dirty)
+    return output
+  }
+  return {
+    render,
+    flush: async () => {
+      for (let i = 0; i < 20; i++) { await Promise.resolve(); render() }
+      return output
+    },
+    unmount: () => { for (const slot of slots) slot?.cleanup?.() }
+  }
+}
+
+function functionSource (source, name) {
+  const start = source.indexOf('function ' + name + ' (')
+  const body = fnBody(source, 'function ' + name + ' (')
+  return source.slice(start, source.indexOf(body, start)) + body
+}
+
+function treeNodes (tree) {
+  return tree && typeof tree === 'object' ? [tree, ...tree.children.flatMap(treeNodes)] : []
+}
+
+function clock () {
+  let id = 0
+  let now = Date.now()
+  const jobs = new Map()
+  return {
+    now: () => now,
+    setTimeout: (fn, ms) => { jobs.set(++id, { fn, ms, at: now + ms }); return id },
+    clearTimeout: (key) => jobs.delete(key),
+    fire: (ms) => { for (const [key, job] of [...jobs]) if (job.ms === ms) { jobs.delete(key); job.fn() } },
+    has: (ms) => [...jobs.values()].some((job) => job.ms === ms),
+    advance: (ms) => {
+      const end = now + ms
+      for (;;) {
+        const next = [...jobs].filter(([, job]) => job.at <= end).sort((a, b) => a[1].at - b[1].at)[0]
+        if (!next) break
+        const [key, job] = next
+        now = job.at
+        jobs.delete(key)
+        job.fn()
+      }
+      now = end
+    }
+  }
+}
+
+test('momento music gates are policy and capability based, with no viewer probe or strip catalog', (t) => {
+  const composer = code('src/screens/Publicar.js')
+  const viewer = code('src/screens/Momentos.js')
+  t.is((composer.match(/node\.request\('node\.info', \{\}\)/g) || []).length, 1, 'one probe site in the composer')
+  t.absent(viewer.includes('node.info'), 'the viewer trusts the parsed music record, without probing')
+  t.ok(composer.includes('info?.momentMusic === true'), 'capability must explicitly answer true')
+  for (const src of [composer, viewer]) {
+    t.ok(src.includes('policy.moments !== true'), 'separate operator switch')
+    t.ok(src.includes('await audiusReady({ member, origin })'), 'linked member readiness')
+    t.ok(src.includes('musicOriginOf(node)'), 'capability origin')
+  }
+  t.ok(viewer.includes('momentMusicOf(item)'), 'only a valid music item plays')
+  t.absent(viewer.includes('AUTO_ADVANCE_MS'), 'durations come from the pure photo/music and video helpers')
+  t.ok(composer.includes("modes={['snippet']}"), 'moment picker only offers snippets')
+  t.ok(composer.includes('displayText(moment.music.item.title)') && composer.includes('displayText(moment.music.item.artist)'), 'provider text is sanitized')
+  t.absent(/audius|MusicPicker|MomentMusic/.test(code('src/ui/MomentosStrip.js')), 'the strip never asks the catalog')
+})
+
+test('composer probes once per epoch only after opening a hosted momento with policy on', async (t) => {
+  const source = read('src/screens/Publicar.js')
+  const { musicOriginOf } = await import('../src/music.js')
+  const calls = []
+  let policy = { moments: false }
+  let ready = true
+  let answer = { momentMusic: true }
+  const node = { epoch: 1, hosted: true, request: async (method, args) => { calls.push([method, args]); if (answer instanceof Error) throw answer; return answer } }
+  let policies = 0
+  const host = hookHost(functionSource(source, 'useMomentMusicAvailable'), 'run', {
+    musicOriginOf,
+    audiusPolicy: async () => { policies++; return policy },
+    audiusReady: async () => ready
+  }, 'function run ({ node, active }) { return useMomentMusicAvailable(node, "member", active) }')
+  t.teardown(host.unmount)
+  host.render({ node, active: false })
+  t.absent(await host.flush())
+  t.is(policies, 0, 'no policy or capability request during boot')
+  host.render({ node, active: true })
+  t.absent(await host.flush(), 'policy off')
+  t.alike(calls, [], 'policy off never probes')
+  policy = { moments: true }
+  host.render({ node, active: false })
+  host.render({ node, active: true })
+  t.ok(await host.flush())
+  t.alike(calls, [['node.info', {}]])
+  host.render({ node, active: false })
+  host.render({ node, active: true })
+  t.ok(await host.flush())
+  t.is(calls.length, 1, 'reopening reuses the capability')
+  host.render({ node: { ...node, request: async () => { throw new Error('must reuse the epoch') } }, active: true })
+  t.ok(await host.flush(), 'a new callback in the same epoch reuses the probe')
+  answer = new Error('offline')
+  host.render({ node: { ...node, epoch: 2 }, active: true })
+  t.absent(await host.flush(), 'failed probe hides music')
+  host.render({ node: { ...node, epoch: 2 }, active: false })
+  host.render({ node: { ...node, epoch: 2 }, active: true })
+  t.absent(await host.flush())
+  t.is(calls.length, 2, 'failed probe is also cached')
+  answer = {}
+  host.render({ node: { ...node, epoch: 3 }, active: true })
+  t.absent(await host.flush(), 'missing capability is off')
+  answer = { momentMusic: true }
+  ready = false
+  host.render({ node: { ...node, epoch: 4 }, active: true })
+  t.absent(await host.flush(), 'readiness is required')
+  host.render({ node: { ...node, epoch: 5, hosted: false }, active: true })
+  t.absent(await host.flush(), 'non-hosted node is off')
+  t.is(calls.length, 4, 'non-hosted node never probes')
+})
+
+test('a policy response after closing the composer never probes the node', async (t) => {
+  const source = read('src/screens/Publicar.js')
+  const { musicOriginOf } = await import('../src/music.js')
+  let resolvePolicy
+  let probes = 0
+  const node = { hosted: true, epoch: 1, request: () => { probes++; return { momentMusic: true } } }
+  const host = hookHost(functionSource(source, 'useMomentMusicAvailable'), 'run', {
+    musicOriginOf,
+    audiusPolicy: () => new Promise((resolve) => { resolvePolicy = resolve }),
+    audiusReady: async () => true
+  }, 'function run ({ node, active }) { return useMomentMusicAvailable(node, "member", active) }')
+  t.teardown(host.unmount)
+  host.render({ node, active: true })
+  host.render({ node, active: false })
+  resolvePolicy({ moments: true })
+  t.absent(await host.flush())
+  t.is(probes, 0)
+})
+
+async function viewerHost ({ music = true, policy = true, ready = true, reduce = false, photo = 'ok', media = null } = {}) {
+  const moments = await import('../src/moments.js')
+  const seen = await import('../src/momentSeen.js')
+  const { musicOriginOf } = await import('../src/music.js')
+  const timers = clock()
+  const animations = []
+  const node = { hosted: true, epoch: 1, request: () => { throw new Error('unexpected viewer request') } }
+  const item = (seq) => ({ seq, ref: A + ':' + seq, at: new Date().toISOString(), text: '', media, ...(music ? { music: { id: 'abc', start: 30 } } : {}) })
+  const data = { phase: 'ready', authors: [], own: [item(2), item(1)] }
+  const seenState = { loaded: true, seen: [], mark () {} }
+  const env = { node, reduce, photo, back: 0, policyCalls: 0, opened: [] }
+  class Value {
+    constructor (value) { this.value = value }
+    setValue (value) { this.value = value }
+    stopAnimation (fn) { fn(this.value) }
+    interpolate () { return this.value }
+  }
+  const elements = ['ActivityIndicator', 'Image', 'Pressable', 'ScrollView', 'Text', 'View', 'ActionsSheet', 'Avatar', 'Icon', 'Pill', 'Scrim', 'IconAction', 'MomentMusic', 'Soft', 'VideoPlayer']
+  const deps = {
+    ...moments,
+    ...seen,
+    ...timers,
+    Date: class extends Date { static now () { return timers.now() } },
+    displayText: require('@varanda/rpc').displayText,
+    whoOf: (await import('../src/who.js')).whoOf,
+    ...Object.fromEntries(elements.map((name) => [name, name])),
+    musicOriginOf,
+    audiusPolicy: async () => { env.policyCalls++; return typeof policy === 'function' ? policy() : { moments: policy } },
+    audiusReady: async () => typeof ready === 'function' ? ready() : ready,
+    useNode: () => node,
+    useStyles: () => ({}),
+    useTheme: () => ({ colors: {} }),
+    useNames: () => null,
+    useSafeAreaInsets: () => ({ top: 0, bottom: 0 }),
+    useWindowDimensions: () => ({ height: 800, width: 400 }),
+    useNow: () => Date.now(),
+    mocked: { data, seenState, env },
+    Animated: {
+      Value,
+      View: 'Animated.View',
+      timing: (value, opts) => {
+        const animation = { value, duration: opts.duration, active: false, start (fn) { this.active = true; this.finish = fn }, stop () { this.active = false } }
+        animations.push(animation)
+        return animation
+      }
+    },
+    Easing: { linear: 'linear' },
+    PanResponder: { create: () => ({ panHandlers: {} }) },
+    STACK_MS: 200,
+    scrimColor: () => '#000000',
+    relativeTime: () => '',
+    openExternal: (url) => env.opened.push(url)
+  }
+  const setup = 'useMoments = () => mocked.data; useMomentSeen = () => mocked.seenState; useMotionReduced = () => mocked.env.reduce; useMomentPhoto = () => ({ phase: mocked.env.photo })'
+  const host = hookHost(read('src/screens/Momentos.js'), 'Viewer', deps, setup)
+  host.render({ entry: { key: A }, ownKey: A, onBack: () => { env.back++ } })
+  await host.flush()
+  return {
+    ...host,
+    ...env,
+    timers,
+    animations,
+    env,
+    music: () => treeNodes(host.render()).find((n) => n.type === 'MomentMusic'),
+    button: (label) => treeNodes(host.render()).find((n) => n.props.accessibilityLabel === label || n.props.label === label),
+    animation: () => animations.findLast((a) => a.active)
+  }
+}
+
+test('viewer starts its 15 s hold with audio and resumes the remaining hold after a press or menu', async (t) => {
+  const h = await viewerHost()
+  t.teardown(h.unmount)
+  t.ok(h.music(), 'music mounted')
+  t.is(h.music().props.member, A)
+  t.is(h.music().props.origin, undefined, 'installation origin')
+  t.absent(h.animation(), 'waiting for audio, no segment yet')
+  t.ok(h.timers.has(3000))
+  h.music().props.onStart()
+  h.render()
+  t.is(h.animation().duration, 15000)
+  t.absent(h.timers.has(3000), 'start cancels fallback timer')
+  h.animation().value.setValue(0.4)
+  h.button('próximo momento').props.onPressIn({ nativeEvent: { pageX: 300, pageY: 50 } })
+  h.render()
+  t.ok(h.music().props.paused, 'press pauses audio')
+  t.absent(h.animation())
+  h.button('próximo momento').props.onPressOut()
+  h.render()
+  t.absent(h.music().props.paused)
+  t.is(h.animation().duration, 9000, '60% of 15 s remains')
+  h.animation().value.setValue(0.6)
+  h.button('mais ações').props.onPress()
+  h.render()
+  t.ok(h.music().props.paused, 'menu pauses audio')
+  treeNodes(h.render()).find((n) => n.type === 'ActionsSheet').props.onClose()
+  h.timers.fire(1000)
+  h.render()
+  t.is(h.animation().duration, 6000, '40% of 15 s remains after the menu')
+  h.music().props.onOpenExternal('https://audius.co/track')
+  h.render()
+  t.ok(h.music().props.paused, 'attribution pauses viewer and audio')
+  t.alike(h.env.opened, ['https://audius.co/track'])
+})
+
+test('viewer replaces the keyed music on item change and pauses it immediately on close', async (t) => {
+  const h = await viewerHost()
+  t.teardown(h.unmount)
+  const first = h.music()
+  h.music().props.onStart()
+  h.render()
+  h.button('próximo momento').props.onPress({ nativeEvent: {} })
+  h.render()
+  t.not(h.music().props.key, first.props.key, 'a different React key unmounts the previous player')
+  t.absent(h.animation(), 'next item waits for its own onStart')
+  t.ok(h.timers.has(3000))
+  h.button('momento anterior').props.onPress({ nativeEvent: {} })
+  h.render()
+  t.is(h.music().props.key, first.props.key)
+  t.absent(h.animation(), 'returning to a previous item also waits for its new player')
+  h.button('fechar momentos').props.onPress()
+  h.render()
+  t.ok(h.music()?.props.paused, 'paused before the closing slide')
+  t.is(h.music()?.props.key, first.props.key, 'closing does not remount the player')
+  t.absent(h.animation())
+  t.absent(h.timers.has(3000), 'closing cancels the fallback')
+  t.is(h.env.back, 1)
+})
+
+test('viewer falls back to 5 s on unavailable or a 3 s wait, and restarts at zero on a late start', async (t) => {
+  const h = await viewerHost()
+  t.teardown(h.unmount)
+  h.timers.fire(3000)
+  h.render()
+  t.is(h.animation().duration, 5000)
+  h.animation().value.setValue(0.5)
+  h.music().props.onStart()
+  h.render()
+  t.is(h.animation().duration, 15000)
+  t.is(h.animation().value.value, 0, 'late start gets a full segment')
+  h.music().props.onUnavailable()
+  h.render()
+  t.is(h.animation().duration, 5000, 'audio failure restores a plain segment')
+  t.is(h.animation().value.value, 0)
+})
+
+test('viewer keeps plain moments and disabled music silent at AUTO_ADVANCE_MS', async (t) => {
+  const { AUTO_ADVANCE_MS } = await import('../src/moments.js')
+  for (const options of [{ music: false }, { policy: false }, { ready: false }]) {
+    const h = await viewerHost(options)
+    t.absent(h.music(), JSON.stringify(options))
+    t.is(h.animation().duration, AUTO_ADVANCE_MS)
+    if (options.music === false) t.is(h.env.policyCalls, 0, 'plain photo makes no music request')
+    h.unmount()
+  }
+})
+
+test('reduced motion allows one mounted snippet without any auto-advance', async (t) => {
+  const h = await viewerHost({ reduce: true })
+  t.teardown(h.unmount)
+  const key = h.music().props.key
+  t.absent(h.music().props.paused, 'reduced motion does not mute audio')
+  h.music().props.onStart()
+  h.render()
+  t.absent(h.animation())
+  t.is(h.music().props.key, key, 'no remount to replay the snippet')
+  t.absent(h.timers.has(3000))
+  t.is(h.env.back, 0)
+})
+
+test('momento sends only a chosen music reference, checks author text and never resends an uncertain create', async (t) => {
+  const source = read('src/screens/Publicar.js')
+  const { momentMusicOf } = await import('../src/moments.js')
+  const calls = []
+  const checked = []
+  let available = true
+  let uncertain = false
+  const photo = { files: [{ bytes: new Uint8Array([1]), mime: 'image/jpeg', width: 1, height: 1 }], ready: true, items: [], clear () {}, remove () {} }
+  const node = {
+    online: true,
+    passkey: { status: { unlocked: true } },
+    media: { putMoment: async () => { calls.push('put'); return { id: 'photo' } } },
+    request: async (method, body) => { calls.push({ method, body }); if (uncertain) throw Object.assign(new Error('offline'), { uncertain: true }) }
+  }
+  const input = source.slice(source.indexOf('export const MOMENT_TEXT_MAX'), source.indexOf('function useMomentMusicAvailable')) + functionSource(source, 'useMomentDraft')
+  const h = hookHost(input, 'useMomentDraft', {
+    momentMusicOf,
+    useMomentMusicAvailable: () => available,
+    useChatAttachments: () => photo,
+    useVideoDraft: () => ({ state: { phase: 'empty', file: null }, draft: { state: { phase: 'empty', file: null }, clear () {} } }),
+    ...(await import('../src/videoCompose.js')),
+    pickVideo: null,
+    prepareVideo: null,
+    refusalOf: (text) => { checked.push(text); return '' },
+    momentsChanged () {},
+    LOCKED_MESSAGE: 'locked',
+    errorText: () => 'erro'
+  })
+  t.teardown(h.unmount)
+  const props = { node, member: A, open: true, active: true }
+  h.render(props)
+  t.ok(await h.render().send())
+  t.absent(Object.hasOwn(calls.at(-1).body, 'music'), 'no choice omits music, never null')
+  const choice = { ref: { kind: 'snippet', id: 'abc', start: 30 }, item: { title: 'provider title', artist: 'provider artist' } }
+  h.render().pickMusic(choice)
+  h.render().setText('author caption')
+  t.ok(await h.render().send())
+  t.alike(calls.at(-1), { method: 'moment.create', body: { text: 'author caption', media: { id: 'photo' }, music: { p: 'audius', id: 'abc', start: 30 } } })
+  t.alike(checked, ['', 'author caption'], 'provider metadata never goes to refusalOf')
+  available = false
+  t.ok(await h.render().send())
+  t.absent(Object.hasOwn(calls.at(-1).body, 'music'), 'a closed gate omits the saved choice')
+  available = true
+  h.render().setMusic(null)
+  t.ok(await h.render().send())
+  t.absent(Object.hasOwn(calls.at(-1).body, 'music'), 'removed choice is omitted')
+  h.render().pickMusic(choice)
+  uncertain = true
+  t.absent(await h.render().send())
+  t.ok(h.render().held)
+  const count = calls.length
+  t.absent(await h.render().send())
+  t.is(calls.length, count, 'uncertain create is never repeated')
+  h.render().reset()
+  t.is(h.render().music, null, 'discard clears the music draft')
+})
+
+test('T22 fix 1: a saved music chip and its remove button follow the send gate', (t) => {
+  const src = read('src/screens/Publicar.js')
+  const chip = src.indexOf('<View style={styles.momentMusicChip}>')
+  const jsx = src.slice(src.lastIndexOf('\n              {', chip), src.indexOf('\n              <TextInput', chip))
+  const h = hookHost('function Chip ({ moment }) { return <>' + jsx + '</> }', 'Chip', {
+    View: 'View', Text: 'Text', Pill: 'Pill', styles: {}, displayText: (s) => s
+  })
+  t.teardown(h.unmount)
+  const music = { item: { title: 'Faixa', artist: 'Artista' } }
+  const closed = treeNodes(h.render({ moment: { music, musicAvailable: false } }))
+  t.absent(closed.some((n) => n.type === 'View'), 'saved choice hidden while the gate is closed')
+  t.absent(closed.some((n) => n.props.accessibilityLabel === 'Remover música'), 'remove button hidden too')
+  let removed = false
+  const opened = treeNodes(h.render({ moment: { music, musicAvailable: true, removeMusic: () => { removed = true } } }))
+  t.ok(opened.some((n) => n.type === 'Text'), 'chip returns when the gate opens')
+  opened.find((n) => n.props.accessibilityLabel === 'Remover música').props.onPress()
+  t.ok(removed)
+})
+
+test('T22 fix 2: the attribution hold releases on visibility return or the popup grace', async (t) => {
+  const h = await viewerHost()
+  t.teardown(h.unmount)
+  h.music().props.onStart()
+  h.render()
+  h.animation().value.setValue(0.4)
+  h.music().props.onOpenExternal('https://audius.co/track')
+  h.render()
+  t.ok(h.music().props.paused)
+  t.absent(h.animation(), 'link holds the segment')
+  h.node.visible = false
+  h.render()
+  h.timers.advance(5000)
+  h.render()
+  t.ok(h.music().props.paused, 'no grace release while away')
+  h.node.visible = true
+  h.render()
+  t.absent(h.music().props.paused, 'return releases the link hold')
+  t.is(h.animation()?.duration, 9000, 'the remaining segment resumes')
+  h.music().props.onOpenExternal('https://audius.co/track')
+  h.render()
+  h.timers.advance(999)
+  h.render()
+  t.ok(h.music().props.paused, 'popup grace holds for 1000 ms')
+  h.timers.advance(1)
+  h.render()
+  t.absent(h.music().props.paused, 'a popup or blocked open cannot latch the hold')
+  t.is(h.animation()?.duration, 9000)
+})
+
+function deferred () {
+  let resolve, reject
+  const promise = new Promise((_resolve, _reject) => { resolve = _resolve; reject = _reject })
+  return { promise, resolve, reject }
+}
+
+test('T22 fix 3: pending policy holds zero and an off answer starts the photo segment once', async (t) => {
+  const policy = deferred()
+  const h = await viewerHost({ policy: () => policy.promise })
+  t.teardown(h.unmount)
+  t.absent(h.music())
+  t.is(h.animations.length, 0, 'no bar starts before policy answers')
+  h.timers.advance(700)
+  h.render()
+  t.absent(h.animation(), 'still at zero')
+  policy.resolve({ moments: false })
+  await h.flush()
+  t.is(h.animation()?.duration, 5000)
+  t.is(h.animation()?.value.value, 0)
+  t.is(h.animations.length, 1, 'off starts the segment exactly once')
+  h.timers.advance(8000)
+  h.render()
+  t.is(h.animations.length, 1, 'no delayed fallback restarts the segment')
+})
+
+test('T22 fix 3: late policy or readiness never restarts a fallback; only onStart does', async (t) => {
+  for (const stage of ['policy', 'ready']) {
+    const answer = deferred()
+    const h = await viewerHost({ [stage]: () => answer.promise })
+    t.is(h.animations.length, 0, stage + ': pending holds zero')
+    h.timers.advance(3000)
+    h.render()
+    t.is(h.animation()?.duration, 5000, stage + ': bounded wait')
+    t.is(h.animations.length, 1)
+    const segment = h.animation()
+    if (segment) segment.value.setValue(0.4)
+    answer.resolve(stage === 'policy' ? { moments: true } : true)
+    await h.flush()
+    t.ok(h.music(), stage + ': ready mounts audio')
+    t.is(h.animation(), segment, stage + ': late answer preserves the running segment')
+    t.is(h.animation()?.value.value, 0.4)
+    t.is(h.animations.length, 1)
+    h.music().props.onStart()
+    h.render()
+    t.is(h.animation()?.duration, 15000, 'actual audio starts a new full hold')
+    t.is(h.animation()?.value.value, 0)
+    h.unmount()
+  }
+})
+
+test('T22 fix 3: policy and readiness failures end the pending wait', async (t) => {
+  for (const stage of ['policy', 'ready']) {
+    const answer = deferred()
+    const h = await viewerHost({ [stage]: () => answer.promise })
+    t.is(h.animations.length, 0)
+    answer.reject(new Error('offline'))
+    await h.flush()
+    t.absent(h.music())
+    t.is(h.animation()?.duration, 5000, stage + ': failure starts the plain segment')
+    t.absent(h.timers.has(3000))
+    h.unmount()
+  }
+})
+
+test('T22 fix 4: restarting the first music item remounts it and waits for its new start', async (t) => {
+  const h = await viewerHost()
+  t.teardown(h.unmount)
+  const key = h.music().props.key
+  h.timers.advance(1000)
+  h.music().props.onStart()
+  h.render()
+  h.animation().value.setValue(0.4)
+  h.button('momento anterior').props.onPress({ nativeEvent: {} })
+  h.render()
+  t.not(h.music().props.key, key, 'restart gets a fresh snippet mount')
+  t.absent(h.animation(), 'restart waits for the new onStart')
+  t.ok(h.timers.has(3000), 'fresh start budget')
+  h.music().props.onStart()
+  h.render()
+  t.is(h.animation()?.duration, 15000)
+  t.is(h.animation()?.value.value, 0)
+})
+
+test('T22 round 2: a node epoch change waits for the remounted audio with a fresh budget', async (t) => {
+  let policy = { moments: true }
+  const h = await viewerHost({ policy: () => policy })
+  t.teardown(h.unmount)
+  h.timers.advance(1000)
+  h.music().props.onStart()
+  h.render()
+  const first = h.animation()
+  t.is(first.duration, 15000)
+  first.value.setValue(0.4)
+  const answer = deferred()
+  policy = answer.promise
+  h.node.epoch++
+  h.render()
+  t.absent(h.music(), 'pending policy unmounts the previous snippet')
+  t.absent(h.animation(), 'reconnect waits instead of running a photo segment')
+  t.is(first.value.value, 0, 'waiting resets the bar to zero')
+  t.ok(h.timers.has(3000), 'reconnect replenishes the start wait budget')
+  h.timers.advance(2200)
+  h.render()
+  t.absent(h.animation(), 'the previous mount spent none of the new budget')
+  answer.resolve({ moments: true })
+  await h.flush()
+  t.is(h.env.policyCalls, 2)
+  t.ok(h.music(), 'policy answer mounts a fresh snippet')
+  t.absent(h.animation(), 'positive policy alone cannot start the 15 s hold')
+  t.is(first.value.value, 0)
+  h.timers.advance(799)
+  h.render()
+  t.absent(h.animation(), 'the fresh budget covers policy and audio')
+  h.music().props.onStart()
+  h.render()
+  t.is(h.animation()?.duration, 15000, 'the remounted audio starts its own full hold')
+  t.is(h.animation()?.value.value, 0)
+  h.timers.advance(1)
+  h.render()
+  t.is(h.animation()?.duration, 15000, 'onStart cancels the new wait timer')
+})
+
+test('T22 fix 5: returning on top releases a close ignored before a profile push', async (t) => {
+  const h = await viewerHost()
+  t.teardown(h.unmount)
+  h.music().props.onStart()
+  h.render()
+  h.button('fechar momentos').props.onPress()
+  const props = { entry: { key: A }, ownKey: A, onBack: () => { h.env.back++ } }
+  h.render({ ...props, isTop: false })
+  h.timers.advance(350)
+  h.render()
+  t.ok(h.music()?.props.paused)
+  h.render({ ...props, isTop: true })
+  t.ok(h.music())
+  t.absent(h.music()?.props.paused, 'top clears musicClosed even after the timer returned')
+  t.ok(h.animation(), 'the bar resumes')
+})
+
+test('T22 fix 6: slow photos spend no music wait budget and presses keep the remainder', async (t) => {
+  const h = await viewerHost({ photo: 'loading' })
+  t.teardown(h.unmount)
+  t.ok(h.music().props.paused)
+  h.timers.advance(8000)
+  h.render()
+  t.absent(h.animation())
+  h.env.photo = 'ok'
+  h.render()
+  t.absent(h.animation(), 'loaded photo still waits for audio')
+  t.ok(h.timers.has(3000), 'photo loading spent none of the budget')
+  h.timers.advance(800)
+  h.button('próximo momento').props.onPressIn({ nativeEvent: { pageX: 300, pageY: 50 } })
+  h.render()
+  h.timers.advance(6000)
+  h.button('próximo momento').props.onPressOut()
+  h.render()
+  t.absent(h.animation(), 'a long press does not expire the wait')
+  t.ok(h.timers.has(2200), 'only the 800 unpaused ms were spent')
+  h.timers.advance(2199)
+  h.render()
+  t.absent(h.animation())
+  h.timers.advance(1)
+  h.render()
+  t.is(h.animation()?.duration, 5000, 'unpaused exhaustion falls back')
+  t.is(h.animations.length, 1, 'the photo segment starts once')
+})
+
+test('T22 fix 6: pending policy and audio share a budget across hidden, menu and stack pauses', async (t) => {
+  const answer = deferred()
+  const h = await viewerHost({ policy: () => answer.promise })
+  t.teardown(h.unmount)
+  h.timers.advance(600)
+  h.node.visible = false
+  h.render()
+  h.timers.advance(4000)
+  h.node.visible = true
+  h.render()
+  t.ok(h.timers.has(2400), 'background preserves the pending policy budget')
+  answer.resolve({ moments: true })
+  await h.flush()
+  t.ok(h.music())
+  t.ok(h.timers.has(2400), 'policy answer does not replenish the budget')
+  h.timers.advance(400)
+  h.button('mais ações').props.onPress()
+  h.render()
+  h.timers.advance(4000)
+  treeNodes(h.render()).find((n) => n.type === 'ActionsSheet').props.onClose()
+  h.timers.advance(1000)
+  h.render()
+  t.ok(h.timers.has(2000), 'menu and its settling time spend none')
+  const props = { entry: { key: A }, ownKey: A }
+  h.render({ ...props, isTop: false })
+  h.timers.advance(4000)
+  h.render({ ...props, isTop: true })
+  t.ok(h.timers.has(2000), 'covered viewer preserves the remainder')
+  h.timers.advance(2000)
+  h.render()
+  t.is(h.animation()?.duration, 5000)
+  t.is(h.animations.length, 1)
+})
+
+test('T22 fix 7: an ignored close pauses the same snippet and resumes the remaining bar', async (t) => {
+  const h = await viewerHost()
+  t.teardown(h.unmount)
+  const key = h.music().props.key
+  h.music().props.onStart()
+  h.render()
+  h.animation().value.setValue(0.4)
+  h.button('fechar momentos').props.onPress()
+  h.render()
+  t.ok(h.music(), 'music stays mounted through musicClosed')
+  t.is(h.music()?.props.key, key)
+  t.ok(h.music()?.props.paused, 'closing pauses the existing snippet')
+  t.absent(h.animation())
+  h.timers.advance(350)
+  h.render()
+  t.is(h.music()?.props.key, key, 'ignored close resumes without remount')
+  t.absent(h.music()?.props.paused)
+  t.is(h.animation()?.duration, 9000, 'same remaining bar, with no new onStart')
+})
+
+function momentHook (name, signature, deps = {}) {
+  const slots = []
+  let cursor = 0
+  let pending = []
+  let dirty = false
+  let args
+  let result
+  const same = (a, b) => a && b && a.length === b.length && a.every((v, i) => Object.is(v, b[i]))
+  const hooks = {
+    useRef (value) {
+      const i = cursor++
+      if (!slots[i]) slots[i] = { current: value }
+      return slots[i]
+    },
+    useState (value) {
+      const i = cursor++
+      if (!slots[i]) slots[i] = { value }
+      return [slots[i].value, (next) => {
+        const value = typeof next === 'function' ? next(slots[i].value) : next
+        if (!Object.is(value, slots[i].value)) { slots[i].value = value; dirty = true }
+      }]
+    },
+    useMemo (fn, dependencies) {
+      const i = cursor++
+      if (!slots[i] || !same(slots[i].deps, dependencies)) slots[i] = { value: fn(), deps: dependencies }
+      return slots[i].value
+    },
+    useEffect (fn, dependencies) {
+      const i = cursor++
+      if (!slots[i] || !same(slots[i].deps, dependencies)) {
+        pending.push({ i, fn, cleanup: slots[i]?.cleanup })
+        slots[i] = { deps: dependencies }
+      }
+    }
+  }
+  hooks.useCallback = (fn, dependencies) => hooks.useMemo(() => fn, dependencies)
+  const scope = { ...hooks, ...deps }
+  const body = fnBody(read('src/screens/Momentos.js'), 'function ' + name)
+  const hook = new Function(...Object.keys(scope), 'return function (' + signature + ') ' + body)(...Object.values(scope)) // eslint-disable-line no-new-func
+  const render = (...next) => {
+    if (next.length) args = next
+    do {
+      dirty = false
+      cursor = 0
+      result = hook(...args)
+      const effects = pending
+      pending = []
+      for (const effect of effects) effect.cleanup?.()
+      for (const effect of effects) slots[effect.i].cleanup = effect.fn()
+    } while (dirty)
+    return result
+  }
+  return {
+    render,
+    get value () { return result },
+    unmount () { for (const slot of slots) slot.cleanup?.() }
+  }
+}
+
+function playbackHarness (overrides = {}) {
+  let now = 0
+  let serial = 0
+  const timers = new Map()
+  const animations = []
+  const steps = []
+  const later = (fn, ms) => { const id = ++serial; timers.set(id, { at: now + ms, fn }); return id }
+  const cancel = (id) => timers.delete(id)
+  const Animated = {
+    Value: class {
+      constructor (value) { this.value = value }
+      setValue (value) { this.value = value }
+      stopAnimation (cb) { cb(this.value) }
+    },
+    timing (value, config) {
+      const from = value.value
+      const start = now
+      let timer
+      let onComplete
+      const anim = {
+        duration: config.duration,
+        start (onFinish) {
+          onComplete = onFinish
+          timer = later(() => { value.setValue(1); onFinish({ finished: true }) }, config.duration)
+        },
+        stop () {
+          cancel(timer)
+          value.setValue(from + (1 - from) * Math.min(1, (now - start) / config.duration))
+          onComplete({ finished: false })
+        },
+        finishLate () { onComplete({ finished: true }) }
+      }
+      animations.push(anim)
+      return anim
+    }
+  }
+  const h = momentHook('useMomentPlayback', '{ itemKey, ms, video, loaded, active, autoOn, step, control }', { Animated, Easing: { linear: 'linear' }, setTimeout: later, clearTimeout: cancel, VIDEO_END_GRACE_MS })
+  let props = { itemKey: A + ':1', ms: 15000, video: true, loaded: true, active: true, autoOn: true, step: (dir) => steps.push(dir), ...overrides }
+  h.render(props)
+  return {
+    ...h,
+    get value () { return h.value },
+    animations,
+    steps,
+    render (patch = {}) { props = { ...props, ...patch }; return h.render(props) },
+    tick (ms) {
+      const until = now + ms
+      while (true) {
+        const due = [...timers].filter(([, timer]) => timer.at <= until).sort((a, b) => a[1].at - b[1].at)[0]
+        if (!due) break
+        now = due[1].at
+        timers.delete(due[0])
+        due[1].fn()
+        h.render(props)
+      }
+      now = until
+    }
+  }
+}
+
+test('video moments use the item duration and the existing Animated clock', async (t) => {
+  const { segmentMs } = await import('../src/moments.js')
+  const video = { media: { mime: 'video/mp4', ms: 15000 } }
+  t.is(segmentMs(video, 8000), 8000, 'the read duration wins')
+  const h = playbackHarness({ ms: segmentMs(video) })
+  t.teardown(h.unmount)
+  t.absent(h.value.playing, 'waits for ready')
+  t.is(h.animations.length, 0)
+  h.value.handleReady({ durationMs: 15000 })
+  h.render()
+  t.ok(h.value.playing)
+  t.is(h.animations[0].duration, 15000)
+  h.tick(14999)
+  t.is(h.steps.length, 0)
+  h.tick(1)
+  t.alike(h.steps, ['next'])
+  h.value.handleEnd()
+  h.value.handleEnd()
+  t.is(h.steps.length, 1, 'timer and repeated player ends advance once')
+  h.render({ itemKey: A + ':2', video: false, ms: segmentMs({ media: { mime: 'image/jpeg' } }, 12000) })
+  t.is(h.animations.at(-1).duration, 5000, 'photos keep five seconds')
+  h.tick(5000)
+  t.is(h.steps.length, 2)
+})
+
+test('video hold resumes from the last player position; photos keep elapsed time', (t) => {
+  const h = playbackHarness()
+  t.teardown(h.unmount)
+  h.value.handleReady({ durationMs: 15000 })
+  h.render()
+  h.tick(3000)
+  h.value.handleProgress({ ms: 2750, playing: true })
+  h.render({ active: false })
+  t.absent(h.value.playing, 'hold pauses the picture')
+  t.ok(Math.abs(h.value.progress.value - 2750 / 15000) < 1e-12, 'bar follows last reported position on hold')
+  h.value.handleProgress({ ms: 2900, playing: false })
+  h.tick(20000)
+  t.is(h.steps.length, 0)
+  h.render({ active: true })
+  t.ok(h.value.playing)
+  t.is(h.animations.at(-1).duration, 12100, 'pause event refines the remaining time')
+  h.tick(12100)
+  t.is(h.steps.length, 0, 'the resumed player is still playing when the clock ends')
+  h.value.handleEnd()
+  t.is(h.steps.length, 1)
+  h.render({ itemKey: A + ':2', ms: 5000, video: false })
+  h.tick(2000)
+  h.render({ active: false })
+  h.tick(10000)
+  h.render({ active: true })
+  t.is(h.animations.at(-1).duration, 3000, 'photo resumes its remaining three seconds')
+})
+
+test('a video still playing when the clock ends waits for its end, within a bound', async (t) => {
+  const h = playbackHarness()
+  t.teardown(h.unmount)
+  h.value.handleReady({ durationMs: 15000 })
+  h.render()
+  h.tick(14000)
+  h.value.handleProgress({ ms: 13700, playing: true })
+  h.tick(1000)
+  t.is(h.steps.length, 0, 'the clock does not cut a playing video')
+  h.value.handleEnd()
+  t.alike(h.steps, ['next'])
+  h.tick(VIDEO_END_GRACE_MS + 1)
+  t.is(h.steps.length, 1, 'the grace timer cannot advance again after onEnd')
+
+  h.render({ itemKey: B + ':1' })
+  h.value.handleReady({ durationMs: 15000 })
+  h.render()
+  h.tick(14000)
+  h.value.handleProgress({ ms: 13800, playing: true })
+  h.tick(1000)
+  t.is(h.steps.length, 1, 'the clock waits for the player end')
+  h.tick(VIDEO_END_GRACE_MS - 1)
+  t.is(h.steps.length, 1, 'the wait lasts until the grace deadline')
+  h.tick(1)
+  t.is(h.steps.length, 2, 'the grace deadline advances without onEnd')
+
+  h.render({ itemKey: A + ':3' })
+  h.value.handleReady({ durationMs: 15000 })
+  h.render()
+  h.tick(14000)
+  h.value.handleProgress({ ms: 13900, playing: true })
+  h.tick(1000)
+  t.is(h.steps.length, 2, 'the next video also waits for its end')
+  h.render({ active: false })
+  h.value.handleProgress({ ms: 13900, playing: false })
+  h.tick(20000)
+  t.is(h.steps.length, 2, 'a hold cancels the pending grace timer')
+  h.render({ active: true })
+  t.is(h.animations.at(-1).duration, 15000 - 13900, 'resume uses the last player position')
+  h.tick(15000 - 13900)
+  t.is(h.steps.length, 2, 'the pause a hold causes does not skip the wait after release')
+  h.tick(VIDEO_END_GRACE_MS)
+  t.is(h.steps.length, 3)
+
+  h.render({ itemKey: A + ':4' })
+  h.value.handleReady({ durationMs: 15000 })
+  h.render()
+  h.tick(14000)
+  h.value.handleProgress({ ms: 15400, playing: true })
+  h.tick(1000)
+  t.is(h.steps.length, 3, 'a player past the clamped segment still gets its end')
+  h.value.handleEnd()
+  t.is(h.steps.length, 4)
+
+  h.render({ itemKey: B + ':2' })
+  h.value.handleReady({ durationMs: 15000 })
+  h.render()
+  h.value.handleProgress({ ms: 5000, playing: false })
+  const duration = h.animations.at(-1).duration
+  h.tick(duration - 1)
+  t.is(h.steps.length, 4, 'a paused last report still waits for the clock')
+  h.tick(1)
+  t.is(h.steps.length, 5, 'a paused last report advances on the clock without grace')
+
+  h.render({ itemKey: B + ':3' })
+  h.value.handleReady({ durationMs: 15000 })
+  h.render()
+  h.tick(14000)
+  h.value.handleProgress({ ms: 14900, playing: true })
+  h.render({ active: false })
+  h.value.handleProgress({ ms: 15000, playing: false })
+  h.value.handleEnd()
+  h.render()
+  t.is(h.steps.length, 5, 'an end during a hold does not advance yet')
+  h.render({ active: true })
+  h.tick(0)
+  t.is(h.steps.length, 6, 'release after the end advances without the grace')
+
+  const { VIDEO_END_GRACE_MS: grace } = await import('../src/moments.js')
+  const { VIDEO_MS_TOLERANCE } = require('@varanda/rpc')
+  t.ok(grace > VIDEO_MS_TOLERANCE, 'the grace covers container tolerance and player start lag')
+  t.is(grace, VIDEO_END_GRACE_MS, 'the harness uses the exported grace')
+})
+
+test('late video callbacks cannot affect the next visit, even to the same item', (t) => {
+  const h = playbackHarness()
+  t.teardown(h.unmount)
+  const old = h.value
+  old.handleReady({ durationMs: 15000 })
+  h.render()
+  const animation = h.animations[0]
+  old.handleEnd()
+  t.is(h.steps.length, 1, 'player end can advance first')
+  animation.finishLate()
+  t.is(h.steps.length, 1, 'timer cannot advance it again')
+  h.render({ itemKey: B + ':1' })
+  h.render({ itemKey: A + ':1' })
+  old.handleReady({ durationMs: 15000 })
+  old.handleEnd()
+  old.handleProgress({ ms: 15000, playing: false })
+  old.handleSoundRefused()
+  old.handlePlayBlocked()
+  animation.finishLate()
+  h.render()
+  t.is(h.steps.length, 1, 'late end is ignored')
+  t.absent(h.value.playing, 'old ready does not start the new visit')
+  t.absent(h.value.muted, 'old sound refusal is ignored')
+  t.absent(h.value.blocked, 'old playback block is ignored')
+  t.is(h.value.progress.value, 0, 'old progress is ignored')
+  h.render({ autoOn: false })
+  old.handleEnd()
+  h.render()
+  t.is(h.value.progress.value, 0, 'late end cannot fill the reduced-motion bar')
+  h.value.handlePlayBlocked()
+  h.render()
+  old.handlePlayBlocked()
+  h.render()
+  t.ok(h.value.blocked, 'old block cannot overwrite the current block')
+  old.handlePlay()
+  h.render()
+  t.ok(h.value.blocked, 'old play cannot clear the current block')
+})
+
+test('a never-ready video advances two seconds after loading plus its duration', (t) => {
+  const h = playbackHarness({ loaded: false })
+  t.teardown(h.unmount)
+  h.tick(10000)
+  t.is(h.animations.length, 0, 'no clock before the file arrives')
+  h.render({ loaded: true })
+  h.tick(1999)
+  t.is(h.animations.length, 0)
+  h.tick(1)
+  t.ok(h.value.playing, 'ready timeout allows playback and the clock')
+  t.is(h.animations[0].duration, 15000)
+  h.tick(14999)
+  t.is(h.steps.length, 0)
+  h.tick(1)
+  t.is(h.steps.length, 1)
+})
+
+test('reduced motion requires Reproduzir and never starts the auto-advance timer', (t) => {
+  const h = playbackHarness({ autoOn: false })
+  t.teardown(h.unmount)
+  h.value.handleReady({ durationMs: 15000 })
+  h.tick(20000)
+  t.absent(h.value.playing)
+  t.is(h.animations.length, 0)
+  h.value.handlePlay()
+  h.render()
+  t.ok(h.value.playing, 'explicit play starts the picture')
+  t.is(h.animations.length, 0, 'explicit play does not start the clock')
+  h.value.handleProgress({ ms: 6000, playing: true })
+  t.is(h.value.progress.value, 0.4, 'progress drives the bar')
+  h.render({ active: false })
+  t.absent(h.value.playing, 'hold also pauses manual playback')
+  h.render({ active: true })
+  t.ok(h.value.playing)
+  h.value.handleEnd()
+  h.render()
+  t.absent(h.value.playing)
+  t.ok(h.value.ended, 'end offers the next button')
+  t.is(h.value.progress.value, 1)
+  h.tick(30000)
+  t.is(h.steps.length, 0, 'end and elapsed time never advance')
+  h.render({ itemKey: A + ':2' })
+  t.absent(h.value.playing, 'the next item needs its own press')
+})
+
+test('video sound falls back to muted and a new item starts with sound', (t) => {
+  const h = playbackHarness()
+  t.teardown(h.unmount)
+  t.absent(h.value.muted)
+  h.value.handleSoundRefused()
+  h.render()
+  t.ok(h.value.muted)
+  h.value.handleUnmute()
+  h.render()
+  t.absent(h.value.muted, 'Ativar som enables sound')
+  h.value.handleSoundRefused()
+  h.render({ itemKey: A + ':2' })
+  t.absent(h.value.muted)
+  const src = read('src/screens/Momentos.js')
+  t.ok(src.includes("controls={false} fit='contain'"), 'inline player without controls')
+  t.ok(src.includes("<Pill label='Reproduzir' onPress={playback.handlePlay}"))
+  t.ok(src.includes("<Pill label='Ativar som' onPress={playback.handleUnmute}"))
+  t.ok(src.includes("<Pill label='Próximo momento' onPress={() => step('next')}"))
+  t.ok(src.includes('video ? VIDEO_UNAVAILABLE : PHOTO_UNAVAILABLE'), 'unavailable text follows the media type')
+})
+
+// The player's control stands in for the browser: what each press did to it
+// is logged next to the state the press had rendered by then.
+function controlHarness (overrides = {}) {
+  const log = []
+  const control = { current: null }
+  const h = playbackHarness({ control, ...overrides })
+  control.current = {
+    play: () => log.push(['play', h.value.playing]),
+    unmute: () => log.push(['unmute', h.value.muted])
+  }
+  return { h, log, control }
+}
+
+test('Reproduzir starts the player inside the press, before the state changes', (t) => {
+  const { h, log } = controlHarness({ autoOn: false })
+  t.teardown(h.unmount)
+  h.value.handlePlay()
+  t.alike(log, [['play', false]], 'play() ran synchronously, before playing was rendered')
+  h.render()
+  t.ok(h.value.playing, 'the state still follows')
+  h.render({ active: false })
+  h.value.handlePlay()
+  t.is(log.length, 1, 'no start while a hold keeps the props paused')
+  h.render({ active: true, itemKey: A + ':2' })
+  const old = h.value
+  h.render({ itemKey: A + ':3' })
+  old.handlePlay()
+  t.is(log.length, 1, 'a press from a previous visit does nothing')
+})
+
+test('Reproduzir after a blocked start plays inside the press', (t) => {
+  const { h, log } = controlHarness()
+  t.teardown(h.unmount)
+  h.value.handleReady({ durationMs: 15000 })
+  h.render()
+  h.value.handlePlayBlocked()
+  h.render()
+  t.ok(h.value.blocked)
+  t.absent(h.value.playing)
+  h.value.handlePlay()
+  t.alike(log, [['play', false]], 'play() ran before the block was cleared')
+  h.render()
+  t.ok(h.value.playing)
+  t.absent(h.value.blocked)
+})
+
+test('Ativar som unmutes the player inside the press, before the state changes', (t) => {
+  const { h, log } = controlHarness()
+  t.teardown(h.unmount)
+  h.value.handleSoundRefused()
+  h.render()
+  h.value.handleUnmute()
+  t.alike(log, [['unmute', true]], 'unmute() ran synchronously, while muted was still rendered')
+  h.render()
+  t.absent(h.value.muted)
+  h.value.handleSoundRefused()
+  h.render()
+  const old = h.value
+  h.render({ itemKey: A + ':2' })
+  old.handleUnmute()
+  t.is(log.length, 1, 'a press from a previous visit unmutes nothing')
+  h.value.handleSoundRefused()
+  h.render()
+  old.handleUnmute()
+  h.render()
+  t.ok(h.value.muted, 'a press from a previous visit leaves the current visit muted')
+  t.is(log.length, 1)
+  const bare = playbackHarness()
+  t.teardown(bare.unmount)
+  bare.value.handlePlay()
+  bare.value.handleUnmute()
+  t.pass('no control is fine')
+})
+
+test('the viewer passes one control to the hook and to the player', (t) => {
+  const src = read('src/screens/Momentos.js')
+  t.ok(src.includes('const videoControl = useRef(null)'), 'the viewer owns the control')
+  t.ok(/step,\s*control: videoControl\s*\}\)/.test(src), 'the hook gets it')
+  t.ok(src.includes('onPlayBlocked={playback.handlePlayBlocked} control={videoControl} />'), 'the player gets it')
+  const hook = src.slice(src.indexOf('function useMomentPlayback'), src.indexOf('// The rings the viewer plays'))
+  t.ok(/handlePlay: \(\) => \{\s*if \(current\.current\.visit !== visit\) return\s*if \(current\.current\.canPlay\) control\?\.current\?\.play\(\)\s*setBlocked\(null\)\s*setManual\(visit\)/.test(hook), 'play() comes before the state updates')
+  t.ok(/handleUnmute: \(\) => \{\s*if \(current\.current\.visit !== visit\) return\s*control\?\.current\?\.unmute\(\)\s*setMuted\(null\)/.test(hook), 'unmute() comes before the state update')
+})
+
+function mediaHarness (answer, { adoptFails = false, urlFails = false, expected = { mime: answer.mime, ms: 15000 } } = {}) {
+  const forgotten = []
+  const revoked = []
+  const adopted = []
+  const urls = []
+  let answerReady
+  const media = {
+    read: () => new Promise((resolve) => { answerReady = resolve }),
+    forgetReadFile: (name) => forgotten.push(name)
+  }
+  const h = momentHook('useMomentPhoto', 'author, seq, expected', {
+    useNode: () => ({ media }),
+    isObject: (value) => value !== null && typeof value === 'object',
+    IMAGE_MIMES: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'],
+    wipe: (bytes) => { if (bytes instanceof Uint8Array) bytes.fill(0) },
+    adoptVideoFile: (uri) => { adopted.push(uri); if (adoptFails) throw new Error('move failed'); return 'file:///cache/video.mp4' },
+    urlFromBytes: (bytes, mime) => { urls.push({ bytes: bytes.slice(), mime }); if (urlFails) throw new Error('blob failed'); return 'blob:video' },
+    revokeUrl: (uri) => revoked.push(uri)
+  })
+  h.render(A, 1, expected)
+  return {
+    ...h,
+    get value () { return h.value },
+    forgotten,
+    revoked,
+    adopted,
+    urls,
+    async settle () { answerReady(answer); await Promise.resolve(); return h.render() }
+  }
+}
+
+test('native video reads are adopted, forgotten and deleted on exit or item change', async (t) => {
+  const uri = 'file:///documents/varanda/media-read/' + 'ab'.repeat(16) + '.bin'
+  const h = mediaHarness({ uri, mime: 'video/mp4', w: 640, h: 480, ms: 15000 })
+  await h.settle()
+  t.is(h.value.phase, 'ok')
+  t.is(h.value.ms, 15000)
+  t.alike(h.adopted, [uri])
+  t.alike(h.forgotten, ['ab'.repeat(16) + '.bin'])
+  h.render(A, 2, { mime: 'video/mp4', ms: 15000 })
+  t.alike(h.revoked, ['file:///cache/video.mp4'], 'changing item deletes its adopted file')
+  h.unmount()
+  t.is(h.revoked.length, 1)
+  const photo = mediaHarness({ uri, mime: 'image/jpeg' })
+  await photo.settle()
+  t.is(photo.value.uri, uri, 'photo path is unchanged')
+  t.is(photo.adopted.length, 0)
+  t.is(photo.forgotten.length, 0, 'photo read file stays until exit')
+  photo.unmount()
+  t.is(photo.forgotten.length, 1)
+})
+
+test('refused, incomplete, failed and late media answers always forget the read file', async (t) => {
+  const uri = 'file:///documents/varanda/media-read/' + 'ab'.repeat(16) + '.bin'
+  for (const answer of [
+    { uri, mime: 'application/octet-stream' },
+    { uri, mime: 'video/mp4', w: 640, h: 480 },
+    { uri, mime: 'video/mp4', w: 640, ms: 15000 },
+    { uri, mime: 'video/mp4', h: 480, ms: 15000 },
+    { uri, mime: 'video/mp4', w: 640, h: 480, ms: 0 }
+  ]) {
+    const h = mediaHarness(answer)
+    await h.settle()
+    t.is(h.value.phase, 'off')
+    t.is(h.forgotten.length, 1)
+    t.is(h.adopted.length, 0)
+    h.unmount()
+  }
+  const answer = { uri, mime: 'video/mp4', w: 640, h: 480, ms: 15000 }
+  const failed = mediaHarness(answer, { adoptFails: true })
+  await failed.settle()
+  t.is(failed.value.phase, 'off')
+  t.is(failed.forgotten.length, 1, 'failed adoption still forgets')
+  failed.unmount()
+  const late = mediaHarness(answer)
+  late.unmount()
+  await late.settle()
+  t.is(late.adopted.length, 0, 'does not adopt after exit')
+  t.is(late.forgotten.length, 1, 'late native answer is deleted')
+})
+
+test('web video answers use a typed blob and wipe bytes on every path', async (t) => {
+  // The node already checked the MP4; the UI owns only its transient copy.
+  const bytes = Uint8Array.from([0, 0, 0, 16, 102, 116, 121, 112, 105, 115, 111, 109, 0, 0, 0, 0])
+  const answer = () => ({ bytes: bytes.slice(), mime: 'video/mp4', w: 640, h: 480, ms: 15000 })
+  const got = answer()
+  const h = mediaHarness(got)
+  await h.settle()
+  t.is(h.value.phase, 'ok')
+  t.is(h.urls[0].mime, 'video/mp4')
+  t.alike(h.urls[0].bytes, bytes, 'URL receives the bytes before wiping')
+  t.ok(got.bytes.every((n) => n === 0))
+  h.unmount()
+  t.alike(h.revoked, ['blob:video'])
+  for (const mode of ['failed', 'refused', 'late']) {
+    const got = answer()
+    if (mode === 'refused') got.mime = 'video/other'
+    const h = mediaHarness(got, { urlFails: mode === 'failed' })
+    if (mode === 'late') h.unmount()
+    await h.settle()
+    t.ok(got.bytes.every((n) => n === 0), mode + ': bytes wiped')
+    if (mode !== 'late') t.is(h.value.phase, 'off')
+    h.unmount()
+  }
+})
+
+function playOffered (playback, reduce) {
+  const src = read('src/screens/Momentos.js')
+  const expression = src.match(/const showPlay = ([^\n]+)/)[1]
+  return new Function('playback', 'reduce', 'return ' + expression)(playback, reduce) // eslint-disable-line no-new-func
+}
+
+test('blocked playback holds the clock and Reproduzir resumes the same visit', (t) => {
+  for (const autoOn of [true, false]) {
+    const h = playbackHarness({ autoOn })
+    t.teardown(h.unmount)
+    h.value.handleReady()
+    if (!autoOn) h.value.handlePlay()
+    h.render()
+    t.ok(h.value.playing, 'player initially plays')
+    h.tick(3000)
+    h.value.handleProgress({ ms: 2500, playing: true })
+    h.value.handlePlayBlocked()
+    h.render()
+    t.ok(h.value.blocked)
+    t.absent(h.value.playing, 'block changes the playing prop to false')
+    t.ok(playOffered(h.value, !autoOn), 'block offers Reproduzir even after manual play')
+    h.tick(30000)
+    t.is(h.steps.length, 0, 'block holds the clock')
+    h.value.handlePlay()
+    h.render()
+    t.absent(h.value.blocked)
+    t.ok(h.value.playing, 'press changes the playing prop back to true')
+    t.absent(playOffered(h.value, !autoOn), 'press hides Reproduzir')
+    if (autoOn) t.is(h.animations.at(-1).duration, 12500, 'resumes from player position')
+    else t.is(h.animations.length, 0, 'reduced motion still has no clock')
+    h.tick(12500)
+    h.value.handleEnd()
+    t.is(h.steps.length, autoOn ? 1 : 0, 'only autoplay advances, once')
+  }
+  const src = read('src/screens/Momentos.js')
+  t.ok(src.includes("{showPlay ? <Pill label='Reproduzir' onPress={playback.handlePlay} /> : null}"), 'Viewer uses the offered play action')
+  t.ok(src.includes("const playbackControls = video && photo.phase === 'ok' && (playback.muted || showPlay || (reduce === true && playback.ended))"), 'play action makes the control bar visible')
+})
+
+test('a photo close ignored during a slide may advance again after hold and release', (t) => {
+  const h = playbackHarness({ video: false, ms: 5000 })
+  t.teardown(h.unmount)
+  h.tick(5000)
+  const oldAnimation = h.animations[0]
+  oldAnimation.finishLate()
+  t.is(h.steps.length, 1, 'one advance for the first end')
+  h.render({ active: false })
+  h.tick(1000)
+  h.render({ active: true })
+  t.is(h.animations.at(-1).duration, 0, 'same photo resumes with no time left')
+  oldAnimation.finishLate()
+  t.is(h.steps.length, 1, 'old completion remains cancelled after resume')
+  h.tick(0)
+  t.is(h.steps.length, 2, 'resuming allows another close attempt')
+  h.animations.at(-1).finishLate()
+  t.is(h.steps.length, 2, 'the resumed end is also guarded')
+})
+
+test('media MIME and video duration must match the item before becoming playable', async (t) => {
+  const { segmentMs } = await import('../src/moments.js')
+  for (const [expected, mime, ms] of [
+    [{ mime: 'image/jpeg' }, 'video/mp4', 15000],
+    [{ mime: 'video/mp4', ms: 15000 }, 'image/jpeg', undefined],
+    [{ mime: 'image/jpeg' }, 'image/png', undefined],
+    [{ mime: 'video/mp4', ms: 15000 }, 'video/mp4', 8000]
+  ]) {
+    const answer = { mime, ms, w: 640, h: 480, uri: 'file:///cache/read.bin', bytes: Uint8Array.from([1, 2, 3]) }
+    const h = mediaHarness(answer, { expected })
+    const item = { media: expected }
+    const before = segmentMs(item, h.value.ms)
+    await h.settle()
+    t.is(h.value.phase, 'off', 'mismatch is unavailable')
+    t.is(h.value.uri, null)
+    t.is(segmentMs(item, h.value.ms), before, 'read never changes segment duration')
+    t.is(h.adopted.length + h.urls.length, 0, 'mismatch is never displayed')
+    t.alike(h.forgotten, ['read.bin'], 'read file is deleted')
+    t.ok(answer.bytes.every((n) => n === 0), 'bytes are wiped')
+    h.unmount()
+  }
+  const src = read('src/screens/Momentos.js')
+  t.ok(src.includes('useMomentPhoto(author, item ? item.seq : null, item?.media)'), 'Viewer passes the expected media')
+  t.ok(src.includes('video ? VIDEO_UNAVAILABLE : PHOTO_UNAVAILABLE'), 'unavailable text uses the item kind')
+})
+
+test('video has the same accessible name as the photo it replaces', (t) => {
+  const src = read('src/screens/Momentos.js')
+  t.ok(/<View style=\{styles.photo\} accessible accessibilityLabel=\{'momento de ' \+ name\}>\s*<VideoPlayer\b[^>]+\/>\s*<\/View>/.test(src), 'accessible labeled wrapper around VideoPlayer')
+})
+
+test('reduced motion fills the current segment until a video is playable', (t) => {
+  const src = read('src/screens/Momentos.js')
+  const expression = src.match(/<Animated.View style=\{\[styles.segmentFill, \{ width: ([^\n]+?) \}\]\}/)[1]
+  const width = new Function('autoOn', 'video', 'photo', 'fill', 'return ' + expression) // eslint-disable-line no-new-func
+  for (const phase of ['loading', 'off', 'ok']) {
+    t.is(width(false, false, { phase }, 'progress'), '100%', 'photo stays full: ' + phase)
+    t.is(width(false, true, { phase }, 'progress'), phase === 'ok' ? 'progress' : '100%', 'video: ' + phase)
+    t.is(width(true, true, { phase }, 'progress'), 'progress', 'autoplay unchanged: ' + phase)
+  }
+})
+
+test('Reproduzir waits for known reduced motion unless playback was blocked', (t) => {
+  for (const reduce of [null, false, true]) {
+    t.is(playOffered({ blocked: false, started: false, ended: false }, reduce), reduce === true, 'initial play offer: ' + reduce)
+    t.ok(playOffered({ blocked: true, started: false, ended: false }, reduce), 'block always offers play: ' + reduce)
+  }
+  t.absent(playOffered({ blocked: false, started: true, ended: false }, true), 'manual playback hides the button')
+  t.absent(playOffered({ blocked: false, started: true, ended: true }, true), 'finished video offers next instead')
+})
+
+test('Viewer wires every player event and keys the player by item and restart', (t) => {
+  const player = read('src/screens/Momentos.js').match(/<VideoPlayer\b[^>]+\/>/)[0]
+  for (const prop of [
+    'playing={playback.playing}',
+    'onReady={playback.handleReady}',
+    'onProgress={playback.handleProgress}',
+    'onEnd={playback.handleEnd}',
+    'onError={handlePhotoError}',
+    'onSoundRefused={playback.handleSoundRefused}',
+    'onPlayBlocked={playback.handlePlayBlocked}',
+    "key={itemKey + ':' + playback.restartTick}"
+  ]) t.ok(player.includes(prop), prop)
+})
+
+test('viewer ignores music on video, keeps its own sound and uses the video segment clock', async (t) => {
+  const h = await viewerHost({ media: { mime: 'video/mp4', ms: 8000 } })
+  t.teardown(h.unmount)
+  t.absent(h.music(), 'no music player for a video record')
+  t.is(h.env.policyCalls, 0, 'no music policy request')
+  t.absent(h.timers.has(3000), 'no music start wait')
+  const player = () => treeNodes(h.render()).find((n) => n.type === 'VideoPlayer')
+  t.absent(player().props.muted, 'video starts with its own sound')
+  player().props.onReady()
+  h.render()
+  t.ok(player().props.playing)
+  t.is(h.animation().duration, 8000)
+  player().props.onSoundRefused()
+  h.render()
+  t.ok(h.button('Ativar som'), 'main sound control stays available')
+  t.is(h.animations.length, 1, 'only one segment clock')
+})
+
+test('momento music button follows the draft availability gate', (t) => {
+  const src = read('src/screens/Publicar.js')
+  const start = src.indexOf('              {moment.musicAvailable\n')
+  const jsx = src.slice(start, src.indexOf('              {moment.musicAvailable &&', start))
+  const h = hookHost('function Button ({ moment, node }) { return <>' + jsx + '</> }', 'Button', { Pill: 'Pill' })
+  t.teardown(h.unmount)
+  for (const musicAvailable of [true, false]) {
+    const tree = h.render({ moment: { musicAvailable }, node: { online: true } })
+    t.is(treeNodes(tree).some((n) => n.props.label === 'Música'), musicAvailable)
+  }
 })

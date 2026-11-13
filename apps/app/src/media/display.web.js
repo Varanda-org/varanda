@@ -11,5 +11,11 @@ export function revokeUrl (url) {
   try { URL.revokeObjectURL(url) } catch {}
 }
 
+// The browser node hands a video as bytes (urlFromBytes makes a blob typed
+// video/mp4), never as a file to adopt.
+export function adoptVideoFile () {
+  return null
+}
+
 // Blob URLs die with the page: nothing to sweep.
 export function sweepMediaCache () {}

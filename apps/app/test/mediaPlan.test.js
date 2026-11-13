@@ -111,3 +111,54 @@ test('toHex, gridLayout and mosaicLayout', async (t) => {
   t.alike(mosaicLayout(10), { kind: 'four', more: 6 })
   for (const n of [0, 11, 1.5, '3']) t.is(mosaicLayout(n), null)
 })
+
+test('video constants match the record contract and kindOf stays images only', async (t) => {
+  const plan = await load()
+  const rpc = require('@varanda/rpc')
+  t.is(plan.VIDEO_MIME, rpc.VIDEO_MIME)
+  t.is(plan.MAX_VIDEO_MS, rpc.MAX_VIDEO_MS)
+  t.is(plan.MAX_VIDEO_DIMENSION, rpc.MAX_VIDEO_DIMENSION)
+  t.is(plan.MAX_VIDEO_PIXELS, rpc.MAX_VIDEO_PIXELS)
+  t.is(plan.MAX_MOMENT_VIDEO_MS, rpc.MAX_MOMENT_VIDEO_MS)
+  t.is(plan.MAX_MOMENT_VIDEO_BYTES, rpc.MAX_MOMENT_VIDEO_BYTES)
+  t.is(plan.MAX_VIDEO_BYTES, plan.MAX_MEDIA_ITEM_BLOCKS * plan.MEDIA_BLOCK_BYTES)
+  t.is(plan.kindOf(plan.VIDEO_MIME), null)
+  t.is(plan.checkFile({ mime: 'video/mp4', bytes: 1000, width: 640, height: 360 }), 'formato não aceito')
+})
+
+test('videoPair accepts only a JPEG poster followed by a video', async (t) => {
+  const { videoPair } = await load()
+  const poster = { mime: 'image/jpeg' }
+  const video = { mime: 'video/mp4' }
+  t.alike(videoPair([poster, video]), { poster, video })
+  t.is(videoPair([poster, video]).poster, poster)
+  for (const media of [
+    [video, poster],
+    [poster],
+    [video],
+    [poster, video, poster],
+    [{ mime: 'image/png' }, video],
+    [poster, { mime: 'image/jpeg' }],
+    [poster, null],
+    [null, video],
+    [poster, video].slice(0, 1).concat([undefined]),
+    'nope',
+    null,
+    undefined,
+    {}
+  ]) {
+    t.is(videoPair(media), null)
+  }
+  // eslint-disable-next-line no-sparse-arrays
+  t.is(videoPair([, video]), null, 'a hole is not a poster')
+})
+
+test('durationLabel rounds up to whole seconds', async (t) => {
+  const { durationLabel } = await load()
+  t.is(durationLabel(1), '0:01')
+  t.is(durationLabel(1000), '0:01')
+  t.is(durationLabel(7400), '0:08')
+  t.is(durationLabel(30000), '0:30')
+  t.is(durationLabel(90000), '1:30')
+  for (const bad of [0, -5, NaN, Infinity, null, undefined, '7']) t.is(durationLabel(bad), '0:00')
+})

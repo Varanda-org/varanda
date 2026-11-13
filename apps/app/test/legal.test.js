@@ -9,7 +9,86 @@ test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
   t.is(LEGAL_VERSION, 40)
   t.is(LEGAL_DATE, '12/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 37, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 40, sujeita a revisão jurídica. Não é parecer jurídico.')
+})
+
+test('legal: version 39 describes music through the account service', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const required of [
+    'Quando a associação liga a música, você pode buscar no catálogo do Audius, de artistas independentes',
+    'anexar um trecho de 15 segundos, uma faixa inteira ou uma playlist a uma publicação',
+    'Se a associação também ligar a música nos momentos, você poderá anexar um trecho de 15 segundos a um momento',
+    'Um link do Audius que você cola numa publicação também pode virar um cartão de música',
+    'Há limites diários de uso',
+    'Todo cartão de música mostra o artista, o título, a fonte Audius e um link para a página da faixa ou da playlist',
+    'A publicação guarda o título, o artista e esse link, como qualquer cartão de link',
+    'A música vem do Audius, sob a licença própria do serviço, e pode deixar de estar disponível',
+    'Uma faixa que infringe direitos deve ser denunciada ao Audius'
+  ]) t.ok(text(TERMS).includes(required), required)
+  for (const doc of [TERMS, PRIVACY]) {
+    for (const required of [
+      'o texto da busca, a posição e o tamanho da página de resultados, o identificador da faixa ou da playlist ou o link colado',
+      'a partir do endereço da associação',
+      'nunca o endereço de internet do seu aparelho, a sua chave ou o seu token de acesso',
+      'O áudio passa pelo serviço de conta da associação, que não guarda uma cópia',
+      'Os cartões de música do Audius nas publicações do diário passam pelo serviço de conta, como descrito em Música do Audius, também no app nativo',
+      'Nas conversas, nos grupos ou quando a música não está disponível ao compor uma publicação, um link do Audius é tratado como qualquer outro link',
+      'Nesses casos, no app nativo, a prévia é buscada pelo aparelho de quem envia, diretamente no site',
+      'O app nunca carrega um quadro do Audius'
+    ]) t.ok(text(doc).includes(required), doc.title + ': ' + required)
+  }
+  const section = (heading) => (PRIVACY.sections.find((s) => s.heading === heading)?.paragraphs || []).join(' ')
+  for (const required of [
+    'O serviço vê o texto da busca, a posição da página de resultados, o link colado, o identificador da faixa ou da playlist e o áudio em trânsito',
+    'Os registros do serviço de conta não levam texto de busca, link, identificador de faixa ou playlist nem ticket',
+    'Só mostrar um cartão não faz pedido ao Audius nem ao serviço de conta',
+    'O app nunca carrega um quadro do Audius'
+  ]) t.ok(section('Música do Audius').includes(required), required)
+  t.ok(section('Finalidades e bases legais propostas').includes('Música do Audius: para buscar, anexar e ouvir a música que você escolhe, a base legal proposta é execução de contrato, Art. 7º, V, ainda sujeita a parecer jurídico'))
+  for (const required of [
+    'Na música do Audius, o serviço de conta não guarda a busca nem o áudio',
+    'Os metadados dos itens e os tickets ficam só na memória e desaparecem ao reiniciar o serviço',
+    'Seus prazos são de validade, não de remoção',
+    'um item vencido pode continuar na memória até um uso posterior, uma substituição ou um reinício',
+    'O título, o artista e o link ficam na publicação e seguem a retenção dela'
+  ]) t.ok(section('Por quanto tempo').includes(required), required)
+  for (const required of [
+    'Na música do Audius, podem sair do Brasil o texto da busca, a posição e o tamanho da página de resultados, o identificador da faixa ou da playlist ou o link colado e o endereço da associação',
+    'O Audius pode tratar esses dados fora do Brasil',
+    'O mecanismo dessa transferência internacional, conforme a Resolução CD/ANPD nº 19/2024, ainda será confirmado por parecer jurídico'
+  ]) t.ok(section('Compartilhamento e cópias fora do Brasil').includes(required), required)
+})
+
+test('legal: version 38 describes music players on tap', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const doc of [TERMS, PRIVACY]) {
+    for (const required of [
+      'YouTube, SoundCloud, Spotify ou Apple Music',
+      'numa publicação pode aparecer como um cartão',
+      'Mostrar esse cartão não faz nenhum pedido a esses serviços',
+      'Só quando você toca em "Tocar aqui" o player do próprio serviço carrega dentro da publicação',
+      'recebe o endereço de internet do seu aparelho',
+      'pode usar cookies e outros dados que o serviço guarda no aparelho',
+      'Ouvir músicas completas depende do serviço',
+      'Tocar é opcional',
+      'o link continua podendo abrir fora do Varanda',
+      'Sair da tela fecha o player'
+    ]) t.ok(text(doc).includes(required), doc.title + ': ' + required)
+  }
+  const section = (heading) => PRIVACY.sections.find((s) => s.heading === heading).paragraphs.join(' ')
+  const thirdParties = section('Compartilhamento e cópias fora do Brasil')
+  for (const required of [
+    'informações do navegador ou app (user agent)',
+    'Também recebe, como referência (referrer), o endereço do site ou, no app, um endereço fixo do app Varanda',
+    'O provedor é o controlador desses dados',
+    'podem ser tratados fora do Brasil por YouTube, SoundCloud, Spotify ou Apple Music'
+  ]) t.ok(thirdParties.includes(required), required)
+  t.ok(section('Finalidades e bases legais propostas').includes('Players de música de terceiros, ao toque: para carregar o player que você pediu, a base legal proposta é execução de contrato, Art. 7º, V, ainda sujeita a parecer jurídico'))
+  const retention = section('Por quanto tempo')
+  t.ok(retention.includes('Nos players de YouTube, SoundCloud, Spotify e Apple Music, a associação não guarda os dados enviados ao provedor pelo player de música nem um histórico do que você ouve'))
+  t.ok(retention.includes('A retenção pelo provedor segue a política dele'))
 })
 
 test('legal: version 29 has no tolerance for abuse, a real contact, a content license and the age check on the app', async (t) => {
@@ -54,6 +133,7 @@ test('legal: complete documents with plain, visible text and project URLs', asyn
     // Case-sensitive: "todo" is an ordinary Portuguese word.
     t.absent(/\b(?:TODO|XXX|[Ll]orem)\b|\[/.test(value), 'no placeholders')
     t.absent(/[<>`*]/.test(value), 'no markup')
+    t.absent(value.includes('\u2014'), 'no em dash')
     for (const match of value.matchAll(/https:\/\/\S+/g)) {
       t.ok(match[0].startsWith('https://github.com/Varanda-org/varanda/'), 'project URL: ' + match[0])
     }
@@ -90,7 +170,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '9165655f34c650fc10a0105794b7d082b4141e742f9fb7df6cf65025d34be79f', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'ed0faba80934602a0cbc01b59a79bf3fa52e63ac3a63f7adf6af7d792358afc7', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 40 describes group reactions and chat formatting, not conversation reactions', async (t) => {
@@ -224,7 +304,7 @@ test('legal: version 18 describes voice notes in chats and the report audio', as
   t.ok(text(TERMS).includes('só pede acesso ao microfone quando você começa a gravar'))
   t.ok(text(TERMS).includes('o botão de gravar não aparece'))
   t.ok(text(TERMS).includes('só os aparelhos dos membros conseguem ouvi-la'))
-  t.ok(text(TERMS).includes('Vídeos não são aceitos'))
+  t.ok(text(TERMS).includes('Conversas, grupos, Feira, Páginas e a foto do perfil não aceitam vídeo'))
   t.ok(text(PRIVACY).includes('As conversas não aceitam vídeo'))
   t.ok(text(PRIVACY).includes('o áudio vai junto com a denúncia, aberto'))
   t.ok(text(PRIVACY).includes('se tiver até 700 KB'))
@@ -325,19 +405,19 @@ test('legal: version 28 describes sealed depoimentos shown only by the recipient
   t.ok(text(PRIVACY).includes('perfil, seguidos, depoimentos, momentos, fotos'))
 })
 
-test('legal: version 29 describes momentos that disappear but are not erased', async (t) => {
+test('legal: version 37 describes momentos that disappear but are not erased', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
-  t.ok(text(TERMS).includes('uma foto e até 200 caracteres de texto, que quem segue você vê por 24 horas'))
+  t.ok(text(TERMS).includes('uma foto ou um vídeo curto e até 200 caracteres de texto, que quem segue você vê por 24 horas'))
   t.ok(text(TERMS).includes('Depois de 24 horas, o momento deixa de aparecer no app'))
-  t.ok(text(TERMS).includes('A foto é removida dos servidores da Varanda em até 7 dias'))
+  t.ok(text(TERMS).includes('A foto ou o vídeo é removido dos servidores da Varanda em até 7 dias'))
   t.ok(text(TERMS).includes('O texto fica no seu diário até você apagar o momento'))
   t.ok(text(TERMS).includes('Sumir não é apagar: cópias que outras pessoas fizeram'))
   t.ok(text(TERMS).includes('não podem ser recolhidas'))
-  t.ok(text(PRIVACY).includes('a chave para abri-la fica no próprio registro, de propósito'))
-  t.ok(text(PRIVACY).includes('A foto é removida dos servidores da Varanda em até 7 dias'))
+  t.ok(text(PRIVACY).includes('a chave para abrir essa mídia fica no próprio registro, de propósito'))
+  t.ok(text(PRIVACY).includes('A foto ou o vídeo é removido dos servidores da Varanda em até 7 dias'))
   t.ok(text(PRIVACY).includes('sumir não é apagar'))
-  t.ok(text(PRIVACY).includes('A foto de um momento fica no semeador por até 7 dias, sem renovação'))
+  t.ok(text(PRIVACY).includes('A foto ou o vídeo curto de um momento fica no semeador por até 7 dias, sem renovação'))
   t.ok(text(PRIVACY).includes('perfil, seguidos, depoimentos, momentos, fotos'))
 })
 
@@ -360,4 +440,31 @@ test('legal: version 36 says what stays after deleting the account, number inclu
   t.ok(privacy.includes('só são entregues mediante ordem judicial ou a seu próprio pedido'))
   t.ok(privacy.includes('o app não o grava no aparelho'), 'o número passa pelo app quando digitado')
   t.absent(privacy.includes('nem no navegador'), 'o número é digitado no navegador na web')
+})
+
+test('legal: version 37 discloses video scope, preparation and its limits', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const { MAX_VIDEO_MS, MAX_MOMENT_VIDEO_MS } = await import('../src/media/plan.js')
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes(`Vídeos curtos são aceitos nas publicações (até ${MAX_VIDEO_MS / 1000} segundos) e nos momentos (até ${MAX_MOMENT_VIDEO_MS / 1000} segundos), um por publicação ou momento.`))
+  t.ok(text(TERMS).includes('A comparação de imagens e vídeos com listas de hashes de mídia ilegal é planejada e ainda não existe.'))
+  t.ok(text(TERMS).includes('denúncias e bloqueio da conta são os meios de moderação dessas imagens e vídeos'))
+  t.ok(text(TERMS).includes('publicações com fotos ou vídeos também ficam para pessoas'))
+  t.ok(text(TERMS).includes('A IA não vê imagens nem vídeos.'))
+  t.ok(text(TERMS).includes('O bloqueio não apaga antes do prazo a foto ou o vídeo de um momento'))
+  t.ok(text(PRIVACY).includes('A triagem não vê imagens nem vídeos;'))
+  t.ok(text(PRIVACY).includes('fotos (inclusive as das mensagens diretas e dos grupos), vídeos, mensagens de voz'))
+  for (const required of [
+    'Um vídeo em uma publicação ou momento é público como uma foto e leva junto o som que tiver.',
+    'No app instalado (Android e iOS), o vídeo é gravado de novo, com resolução limitada e sem dados de localização ou do aparelho.',
+    'Na versão web, inclusive instalada na tela inicial, o vídeo não é gravado de novo: o app remove esses dados do arquivo e só o envia se ele já estiver dentro dos limites aceitos.',
+    'Isso remove metadados técnicos, não o que a imagem ou o som em si revela.',
+    'a referência de uma foto ou um vídeo curto',
+    'O texto do momento, com a referência da foto ou do vídeo, fica no diário até a pessoa apagar o momento.'
+  ]) t.ok(text(PRIVACY).includes(required), required)
+  for (const doc of [TERMS, PRIVACY]) {
+    t.ok(text(doc).includes('Deixar de aparecer no app não apaga todas as cópias.'), doc.title + ': copies survive disappearance')
+    t.ok(text(doc).includes('fotos ou vídeos salvos'), doc.title + ': saved videos survive')
+    t.absent(text(doc).includes('Vídeos não são aceitos'), doc.title + ': no blanket video ban')
+  }
 })
