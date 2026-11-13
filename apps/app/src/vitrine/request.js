@@ -243,10 +243,10 @@ export function createVitrineRequest (fixtures, options) {
   }
 
   function publish (params, kind) {
-    const record = { type: 'post', text: params.text, at: stamp(), replyTo: kind === 'reply' ? targetOf(params.to) : null, ...(kind === 'quote' ? { quote: targetOf(params.to) } : {}), ...(params.media ? { media: params.media } : {}) }
+    const record = { type: 'post', text: params.text, at: stamp(), replyTo: kind === 'reply' ? targetOf(params.to) : null, ...(kind === 'quote' ? { quote: targetOf(params.to) } : {}), ...(params.media ? { media: params.media } : {}), ...(params.preview ? { preview: params.preview } : {}) }
     const result = append(record)
     const p = profileOf(data.own)
-    data.feed.push({ kind: 'post', author: data.own, name: p.name, username: p.username, seq: result.seq, at: record.at, text: record.text, replyTo: record.replyTo, quote: record.quote || null, media: record.media || null })
+    data.feed.push({ kind: 'post', author: data.own, name: p.name, username: p.username, seq: result.seq, at: record.at, text: record.text, replyTo: record.replyTo, quote: record.quote || null, media: record.media || null, preview: record.preview || null })
     return kind === 'quote' ? { seq: result.seq } : result
   }
 
