@@ -1,6 +1,8 @@
 // One line of a timeline (no card). It receives the RAW peer strings (author
-// key, name, username, at, text, replyToName, the quote's and the reposter's
-// names) and applies displayText itself, so callers must not pre-escape them.
+// key, name, username, at, text, replyToName, each reply preview's name and
+// text, the quote's and the reposter's names) and applies displayText itself
+// (the parent chip through replyChip, which escapes on its own), so callers
+// must not pre-escape them.
 // Naming follows whoOf (src/who.js): never a key-derived handle.
 //
 // Props (the shared contract):
@@ -15,6 +17,10 @@
 //   card whose URL carries an Audius music ref uses ./MusicPlayerCard;
 //   other allowlisted music links (embedOf) use ./MusicEmbedCard. A link
 //   only in the text never gets a player.
+// - replyPreviews: optional [{ key, name, text }], not the link card above.
+//   Under the action bar, 'Respostas' and one line per preview ('Nome:
+//   texto'), at most two with text. Absent or empty renders nothing. Raw
+//   peer strings go through displayText here.
 // - quote: null | { author, name, username, at, text, media, missing, onOpen }
 //   rendered by ./QuoteCard (one level only).
 // - repostedBy: null | { author, name, username }: a top line 'Nome
@@ -27,8 +33,10 @@
 //   button is disabled while its request runs).
 // - onOpen (the text, the time ('abrir conversa') and the empty body area;
 //   the photos keep their own viewer taps),
-//   onOpenAuthor (avatar and name), onOpenParent ('respondendo a X'),
-//   onOpenReposter, and the action bar: onReply, onRepost, onQuote, onLike,
+//   onOpenAuthor (avatar and name), onOpenParent (the reply chip; plain text
+//   when absent), onOpenPreviews (one button for replyPreviews; plain text
+//   when absent), onOpenReposter, and the action bar: onReply, onRepost,
+//   onQuote, onLike,
 //   onFollow ('seguir', disabled while followPending), onReport, onDelete.
 //   The bar is reply, repost, like, share and 'mais'. The repost button opens
 //   a small sheet (Republicar, and Citar with onQuote); report and delete live
@@ -60,6 +68,7 @@ import { useBlocks } from '../blocksProvider'
 import { blockedRowView } from '../memberBlocks'
 import { canShare, copyText, shareUrl } from '../share'
 import { shareNav } from '../shareNav'
+import { replyChip } from '../threadRows'
 import { whoOf } from '../who'
 import { ActionsSheet } from './ActionsSheet'
 import { Avatar } from './Avatar'
@@ -73,7 +82,7 @@ import { tap } from './haptics'
 import { hasMention, MentionText } from './MentionText'
 import { useHosted } from '../node'
 import { QuoteCard } from './QuoteCard'
-import { LARGE_TEXT, layout, type } from './theme'
+import { LARGE_TEXT, layout, radius, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
 
 const ICON = 18
@@ -89,6 +98,33 @@ function countOf (counts, field) {
   if (!counts || typeof counts !== 'object') return null
   const n = counts[field]
   return Number.isSafeInteger(n) && n > 0 ? n : null
+}
+
+// multiline so a line break stays a space after the collapse, not U+FFFD.
+function oneLine (value) {
+  if (typeof value !== 'string') return ''
+  return displayText(value, { multiline: true }).replace(/\s+/g, ' ').trim()
+}
+
+// Peer text stays escaped. A bad entry is not a preview.
+function replyPreviewLines (replyPreviews) {
+  if (!Array.isArray(replyPreviews)) return []
+  const lines = []
+  for (const entry of replyPreviews) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+    const text = oneLine(entry.text)
+    if (text === '') continue
+    lines.push({
+      key: typeof entry.key === 'string' && entry.key !== '' ? entry.key : 'p' + lines.length,
+      name: oneLine(entry.name),
+      text
+    })
+  }
+  return lines.slice(0, 2)
+}
+
+function previewLineText (line) {
+  return line.name !== '' ? line.name + ': ' + line.text : line.text
 }
 
 const NATIVE_DRIVER = Platform.OS !== 'web'
@@ -149,9 +185,9 @@ function Action ({ label, onPress, disabled, on, count, split, children }) {
 }
 
 function PostRowView ({
-  author, name, username, avatar, at, text, replyToName, media, preview, persistMedia = true, now,
+  author, name, username, avatar, at, text, replyToName, replyPreviews, media, preview, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending, expanded = false,
-  onOpen, onOpenAuthor, onOpenParent, onOpenReposter, onFollowReposter, onOpenMention,
+  onOpen, onOpenAuthor, onOpenParent, onOpenPreviews, onOpenReposter, onFollowReposter, onOpenMention,
   onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onBlock, onDelete, link, onNotice,
   seq, onMessage
 }) {
@@ -320,6 +356,7 @@ function PostRowView ({
     : null
   const openAuthor = otherPress(onOpenAuthor)
   const openParent = otherPress(onOpenParent)
+  const openPreviews = otherPress(onOpenPreviews)
   const reposter = repostedBy && typeof repostedBy === 'object' ? repostedBy : null
   const reposterName = reposter ? displayText(whoOf({ name: reposter.name, username: reposter.username }).title) : ''
   const openReposter = otherPress(onOpenReposter)
@@ -336,6 +373,9 @@ function PostRowView ({
     time
   ].filter(Boolean)
   const bodyLabel = bodyParts.join('. ')
+  const replyLabel = replyToName ? replyChip({ name: replyToName }) : ''
+  const previewLines = replyPreviewLines(replyPreviews)
+  const previewsLabel = 'Respostas. ' + previewLines.map(previewLineText).join('. ')
   const openMention = otherPress(onOpenMention)
   const quoteOn = quote && typeof quote === 'object'
   const textOut = hasText && numberOfLines === 0 && (hasLink(text) || (!!openMention && hasMention(text)))
@@ -371,6 +411,16 @@ function PostRowView ({
         ? <MusicEmbedCard embed={embed} card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />
         : <LinkCard card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />
     : null
+  const previewsBody = previewLines.length === 0
+    ? null
+    : (
+      <>
+        <Text style={styles.previewsLabel}>Respostas</Text>
+        {previewLines.map((line, index) => (
+          <Text key={index + ':' + line.key} style={styles.previewLine} numberOfLines={1}>{previewLineText(line)}</Text>
+        ))}
+      </>
+      )
   return (
     <View style={styles.row} onTouchStart={Platform.OS !== 'web' ? startTouch : undefined}>
       {reposter
@@ -466,19 +516,18 @@ function PostRowView ({
                 </Pressable>
               </View>
               {replyToName
-                ? (
-                  <Pressable
-                    accessibilityRole={openParent ? 'link' : 'text'}
-                    disabled={!openParent}
-                    onPress={openParent}
-                    hitSlop={4}
-                    style={({ pressed }) => pressed && openParent && styles.pressed}
-                  >
-                    <Text style={styles.reply}>
-                      respondendo a <Text style={styles.replyName}>{displayText(replyToName)}</Text>
-                    </Text>
-                  </Pressable>
-                  )
+                ? openParent
+                  ? (
+                    <Pressable
+                      accessibilityRole='link'
+                      accessibilityLabel={replyLabel}
+                      onPress={openParent}
+                      style={({ pressed }) => [styles.replyChip, pressed && styles.pressed]}
+                    >
+                      <Text style={styles.replyChipText} numberOfLines={1}>{replyLabel}</Text>
+                    </Pressable>
+                    )
+                  : <Text style={styles.replyChipText} numberOfLines={1}>{replyLabel}</Text>
                 : null}
               {mediaNode}
               {textOut ? null : textNode}
@@ -614,6 +663,23 @@ function PostRowView ({
               </View>
               )
             : null}
+          {previewLines.length > 0
+            ? openPreviews
+              ? (
+                <Pressable
+                  accessibilityRole='button'
+                  accessibilityLabel={previewsLabel}
+                  onPress={openPreviews}
+                  style={({ pressed }) => [styles.previews, pressed && styles.pressed]}
+                >
+                  {/* The label already names every preview, so the lines are not their own controls. */}
+                  <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
+                    {previewsBody}
+                  </View>
+                </Pressable>
+                )
+              : <View style={styles.previews}>{previewsBody}</View>
+            : null}
           <ActionsSheet open={sheet === 'repost'} onClose={() => setSheet(null)} actions={repostSheet} />
           <ActionsSheet open={sheet === 'more'} onClose={() => setSheet(null)} actions={moreSheet} />
           {burstOn
@@ -690,8 +756,22 @@ const makeStyles = (colors) => StyleSheet.create({
   timeBox: { flexShrink: 0 },
   handle: { ...type.postMeta, color: colors.soft, flexShrink: 1 },
   time: { ...type.postMeta, color: colors.soft, flexShrink: 0 },
-  reply: { ...type.replyMark, color: colors.soft, marginTop: 1 },
-  replyName: { color: colors.accent, fontWeight: '600' },
+  // Web ignores hitSlop, so the box itself is the 44 pt target.
+  replyChip: {
+    alignSelf: 'flex-start',
+    maxWidth: '100%',
+    minHeight: layout.hit,
+    minWidth: layout.hit,
+    justifyContent: 'center',
+    marginTop: 2,
+    paddingHorizontal: 12,
+    borderRadius: radius.pill,
+    backgroundColor: colors.accentSoft
+  },
+  replyChipText: { ...type.chip, color: colors.accent, flexShrink: 1 },
+  previews: { marginTop: 8, minHeight: layout.hit, justifyContent: 'center' },
+  previewsLabel: { ...type.replyMark, color: colors.soft, fontWeight: '700' },
+  previewLine: { ...type.replyMark, color: colors.ink },
   text: { ...type.postText, color: colors.ink, marginTop: 3 },
   bar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 0, marginBottom: -4, marginLeft: -8, maxWidth: 360 },
   action: { flexDirection: 'row', alignItems: 'center', gap: 5, minHeight: layout.hit, minWidth: 44, paddingHorizontal: 8 },
