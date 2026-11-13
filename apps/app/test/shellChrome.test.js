@@ -1,7 +1,8 @@
 'use strict'
 
-// Shell chrome: the active-tab pill, the actions sheet header slot and the
-// publish button's press. Source pins, so removing any of the three fails here.
+// Shell chrome: the active-tab pill, the actions sheet header slot, the
+// publish button's press and the raised shadow. Source pins, so removing
+// any of them fails here.
 
 const test = require('brittle')
 const { readFileSync } = require('node:fs')
@@ -86,4 +87,17 @@ test('Fab uses PressScale', (t) => {
   t.ok(src.includes('bottom: insets.bottom + layout.tabBar + layout.fabAboveTabs'), 'it still clears the tab bar')
   t.ok(src.includes('style={({ pressed }) => [styles.fab, { bottom: insets.bottom + layout.tabBar + layout.fabAboveTabs }, pressed && styles.pressed]}'), 'the function style keeps pressed feedback with reduced motion')
   t.ok(src.includes('pressed: { opacity: 0.85 }'), 'pressed opacity does not depend on animation')
+})
+
+test('Fab and the new-items pill use the raised shadow', (t) => {
+  const shadow = 'boxShadow: `$' + '{elevation.raised} $' + '{colors.shadow}`'
+  const fab = read('Fab.js')
+  const states = read('States.js')
+  t.absent(fab.includes('\u2014') || states.includes('\u2014'), 'no em dash')
+  t.ok(fab.includes("import { elevation, layout } from './theme'"), 'Fab reads elevation from the shared tokens')
+  t.ok(states.includes("import { elevation, layout, motion, radius, space, type } from './theme'"), 'States reads elevation from the shared tokens')
+  t.ok(fab.includes(shadow), 'Fab shadow is elevation.raised plus the scheme shadow')
+  t.ok(states.includes(shadow), 'the new-items pill uses the same raised shadow')
+  t.absent(fab.includes('rgba(29,107,79,0.35)'), 'Fab drops the green shadow')
+  t.absent(states.includes('rgba(29,107,79,0.35)'), 'the pill drops the green shadow')
 })

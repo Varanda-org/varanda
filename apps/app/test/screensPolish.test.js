@@ -126,8 +126,9 @@ test('search distinguishes untouched, searching and no result with clear actions
   t.ok(posts.includes("body={SEARCH_EMPTY_BODY} actionLabel='Limpar' onAction={onClear}"), 'no post results can be cleared')
   t.ok(posts.includes("body={loadError} actionLabel='Tentar de novo' onAction={loadFirst} secondaryLabel='Limpar'"), 'post errors offer retry and clear')
   t.ok(global.includes("onClear={() => onChangeText('')}"), 'post clear uses the field edit path')
-  t.ok(global.includes('ref={inputRef}') && global.includes('inputRef={inputRef}'), 'focus reaches the actual input')
-  t.ok(global.includes('clear: { minWidth: layout.hit, minHeight: layout.hit'), 'clear has a full touch target')
+  const field = read('ui/SearchField.js')
+  t.ok(global.includes('inputRef={inputRef}') && field.includes('ref={inputRef}'), 'SearchField forwards inputRef to its TextInput')
+  t.ok(field.includes('clear: { minWidth: layout.hit, minHeight: layout.hit'), 'SearchField keeps a layout.hit clear target')
 })
 
 test('Momentos rings animate presses and grow with text while announcing the full name', (t) => {

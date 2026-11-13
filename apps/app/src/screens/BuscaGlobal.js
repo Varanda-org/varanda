@@ -20,7 +20,7 @@
 // both panes stay mounted and only the selected one is visible.
 
 import { useContext, useEffect, useRef, useState } from 'react'
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { displayText, isKey } from '@varanda/rpc'
 import { useNode, useNotice } from '../node'
 import { useNames } from '../names'
@@ -29,62 +29,25 @@ import { isUsername, lookupUsername, usernameMatches } from '../account'
 import { whoOf } from '../who'
 import { HELP, SHORT } from '../help'
 import { PARTIAL_KEY_TEXT } from '../followInput'
-import { SEARCH_CLEAR, SEARCH_INPUT_MAX, SEARCH_INVALID, SEARCH_TRUNCATED } from '../topics'
+import { SEARCH_INPUT_MAX, SEARCH_INVALID, SEARCH_TRUNCATED } from '../topics'
 import {
   BUSCA_EMPTY, BUSCA_EMPTY_CODE, BUSCA_LABEL, BUSCA_NOT_HOSTED, BUSCA_NOT_HOSTED_TITLE, BUSCA_PLACEHOLDER, CATEGORIES, CATEGORY_LABEL,
   CODE_FIELD_LABEL, buscaNotice, debouncePlan, plan, staleGuard
 } from '../buscaGlobal'
 import { ErrorText, Notice, Soft, useAction, useBottomPad } from '../ui'
 import { HelpNote } from '../ui/Help'
-import { Icon } from '../ui/Icon'
 import { MemberRow } from '../ui/MemberRow'
 import { Pill } from '../ui/Pill'
 import { ScreenVisible } from '../ui/screenVisible'
+import { SearchField } from '../ui/SearchField'
 import { EmptyState, SkeletonRow } from '../ui/States'
-import { layout, radius, space, type, webInputReset } from '../ui/theme'
-import { useStyles, useTheme } from '../ui/ThemeProvider'
+import { type } from '../ui/theme'
+import { useStyles } from '../ui/ThemeProvider'
 import { useMemberSearch } from '../useMemberSearch'
 import Busca from './Busca'
 import { useFollowSet } from './Conversa'
 
 const NO_DRAFTS = Object.freeze({ contas: '', publicacoes: '' })
-
-// The rounded field of the Conversas search: lupa, system font, clear X.
-function SearchField ({ label, placeholder, value, onChangeText, maxLength, onSubmitEditing, inputRef }) {
-  const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
-  // Both panes: a keyboard that rewrites the query before the typing pause
-  // ends would search for words nobody typed.
-  const raw = { autoCapitalize: 'none', autoCorrect: false, spellCheck: false }
-  const [focused, setFocused] = useState(false)
-  return (
-    <View style={[styles.search, focused && styles.searchFocused]}>
-      <Icon name='lupa' size={20} color={colors.soft} />
-      <TextInput
-        ref={inputRef}
-        style={[styles.input, webInputReset]}
-        onFocus={() => setFocused(true)}
-        onBlur={() => setFocused(false)}
-        value={value}
-        onChangeText={onChangeText}
-        placeholder={placeholder}
-        placeholderTextColor={colors.placeholder}
-        accessibilityLabel={label}
-        maxLength={maxLength}
-        returnKeyType='search'
-        onSubmitEditing={onSubmitEditing}
-        {...raw}
-      />
-      {value !== ''
-        ? (
-          <Pressable accessibilityRole='button' accessibilityLabel={SEARCH_CLEAR} hitSlop={space.md} onPress={() => onChangeText('')} style={styles.clear}>
-            <Icon name='fechar' size={18} color={colors.soft} />
-          </Pressable>
-          )
-        : null}
-    </View>
-  )
-}
 
 // `paneRequest` (number): every change, and the mount, shows Contas.
 // `onFollowsChanged` (optional): called after a follow or unfollow that
@@ -519,20 +482,6 @@ const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
   hidden: { display: 'none' },
   top: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 8, gap: 8 },
-  search: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: space.sm,
-    paddingHorizontal: space.md,
-    minHeight: layout.hit,
-    borderRadius: radius.md,
-    borderWidth: 1.5,
-    borderColor: 'transparent',
-    backgroundColor: colors.inputOff
-  },
-  searchFocused: { borderColor: colors.accent, backgroundColor: colors.card },
-  input: { ...type.postText, flex: 1, minWidth: 0, minHeight: layout.hit - 3, paddingVertical: 0, color: colors.ink },
-  clear: { minWidth: layout.hit, minHeight: layout.hit, alignItems: 'center', justifyContent: 'center' },
   pane: { paddingVertical: 12, paddingHorizontal: 16, gap: 8 },
   bleed: { marginHorizontal: -16 },
   addRow: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8 },

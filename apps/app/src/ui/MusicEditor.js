@@ -6,7 +6,6 @@ import { musicRowLine, snippetEndMs, snippetProgress } from '../music'
 import { createSnippetLoop, loopIdle } from '../musicLoop'
 import { claimPlayback, playbackEpoch } from '../media/chatMedia'
 import { createStreamPlayer } from '../media/stream'
-import { tap } from './haptics'
 import { Icon } from './Icon'
 import { MusicCover } from './MusicCover'
 import { useMusicCover } from './useMusicCover'
@@ -40,7 +39,6 @@ export function MusicEditor ({ item, kind, start, modes, session, onKind, onStar
   const choose = modes.includes('snippet') && modes.includes('track') && kind !== 'playlist'
   const select = (next) => {
     if (next === kind) return
-    tap('select')
     onKind(next)
   }
   const playing = state.phase === 'playing'

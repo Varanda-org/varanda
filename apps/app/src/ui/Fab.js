@@ -5,7 +5,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Icon } from './Icon'
 import { PressScale } from './PressScale'
 import { useStyles, useTheme } from './ThemeProvider'
-import { layout } from './theme'
+import { elevation, layout } from './theme'
 
 export function Fab ({ onPress }) {
   const styles = useStyles(makeStyles)
@@ -35,7 +35,7 @@ const makeStyles = (colors) => StyleSheet.create({
     justifyContent: 'center',
     // react-native 0.83 (new architecture) accepts the CSS string;
     // react-native-web maps it to CSS box-shadow.
-    boxShadow: '0px 6px 16px rgba(29,107,79,0.35)'
+    boxShadow: `${elevation.raised} ${colors.shadow}`
   },
   pressed: { opacity: 0.85 }
 })

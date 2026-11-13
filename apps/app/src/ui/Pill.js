@@ -1,20 +1,43 @@
 // A pill-shaped button: filled (accent) or outlined (ink or danger). `icon`
-// sits left of the label; with no label it is a 40 pt round icon-only pill
-// (give it an accessibilityLabel). `iconEnd` sits right of the label: the
-// chevron of a pill that opens a list of choices. `maxFontSizeMultiplier` caps
-// the label, for a pill in a Sheet header whose other controls are capped.
+// sits left of the label; with no label it is a round icon-only pill, 40 pt,
+// or 32 pt when `small` (give it an accessibilityLabel). `iconEnd` sits right
+// of the label: the chevron of a pill that opens a list of choices.
+// `maxFontSizeMultiplier` caps the label, for a pill in a Sheet header whose
+// other controls are capped.
 
-import { Pressable, StyleSheet, Text } from 'react-native'
+import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { PRESSED_OPACITY } from '../pressMotion'
 import { Icon } from './Icon'
 import { useStyles, useTheme } from './ThemeProvider'
-import { type } from './theme'
+import { layout, type } from './theme'
 
-export function Pill ({ label, icon, iconEnd, onPress, filled, danger, disabled, pending, accessibilityLabel, maxFontSizeMultiplier }) {
+export function Pill ({ label, icon, iconEnd, onPress, filled, danger, disabled, pending, accessibilityLabel, maxFontSizeMultiplier, small }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const iconOnly = typeof label !== 'string' || label === ''
   const tint = filled ? colors.accentInk : danger ? colors.danger : colors.ink
   const off = disabled === true || pending === true
+  const face = [
+    styles.pill,
+    filled ? styles.filled : styles.outline,
+    !filled && danger && styles.outlineDanger,
+    iconOnly && styles.round,
+    small && styles.small,
+    small && iconOnly && styles.smallRound
+  ]
+  const content = (
+    <>
+      {typeof icon === 'string' ? <Icon name={icon} size={18} color={tint} /> : null}
+      {iconOnly
+        ? null
+        : (
+          <Text style={[styles.text, small && styles.textSmall, filled ? styles.textFilled : danger ? styles.textDanger : styles.textInk]} maxFontSizeMultiplier={maxFontSizeMultiplier}>
+            {pending ? label + '…' : label}
+          </Text>
+          )}
+      {typeof iconEnd === 'string' && !iconOnly ? <Icon name={iconEnd} size={18} color={tint} /> : null}
+    </>
+  )
   return (
     <Pressable
       accessibilityRole='button'
@@ -24,25 +47,14 @@ export function Pill ({ label, icon, iconEnd, onPress, filled, danger, disabled,
       accessibilityLabel={accessibilityLabel || (iconOnly ? undefined : label)}
       disabled={off}
       onPress={onPress}
-      hitSlop={4}
+      hitSlop={small ? undefined : 4}
       style={({ pressed }) => [
-        styles.pill,
-        filled ? styles.filled : styles.outline,
-        !filled && danger && styles.outlineDanger,
-        iconOnly && styles.round,
+        small ? styles.smallHit : face,
         off && styles.off,
         pressed && styles.pressed
       ]}
     >
-      {typeof icon === 'string' ? <Icon name={icon} size={18} color={tint} /> : null}
-      {iconOnly
-        ? null
-        : (
-          <Text style={[styles.text, filled ? styles.textFilled : danger ? styles.textDanger : styles.textInk]} maxFontSizeMultiplier={maxFontSizeMultiplier}>
-            {pending ? label + '…' : label}
-          </Text>
-          )}
-      {typeof iconEnd === 'string' && !iconOnly ? <Icon name={iconEnd} size={18} color={tint} /> : null}
+      {small ? <View style={face}>{content}</View> : content}
     </Pressable>
   )
 }
@@ -54,11 +66,17 @@ const makeStyles = (colors) => StyleSheet.create({
   filled: { backgroundColor: colors.accent, paddingVertical: 9.5, paddingHorizontal: 17 },
   outline: { borderWidth: 1.5, borderColor: colors.outline, paddingVertical: 8, paddingHorizontal: 15 },
   outlineDanger: { borderColor: colors.danger },
+  small: { minHeight: 32, paddingVertical: 0, paddingHorizontal: 12 },
+  smallRound: { width: 32, height: 32, minHeight: 32, paddingVertical: 0, paddingHorizontal: 0 },
+  // The pressable is layout.hit because the web ignores hitSlop, so a 32 pt
+  // face cannot grow to the 44 pt target that way.
+  smallHit: { minWidth: layout.hit, minHeight: layout.hit, alignItems: 'center', justifyContent: 'center' },
   off: { opacity: 0.45 },
-  pressed: { opacity: 0.65 },
+  pressed: { opacity: PRESSED_OPACITY },
   // 1 pt sides: Android rounds the exact-fit label inside the 1.5 pt outline and would
   // wrap its last word out of sight (seen on Btn's "Trocar passkey").
   text: { ...type.pill, flexShrink: 1, textAlign: 'center', paddingHorizontal: 1 },
+  textSmall: { fontSize: 13, lineHeight: 16 },
   textFilled: { color: colors.accentInk },
   textInk: { color: colors.ink },
   textDanger: { color: colors.danger }

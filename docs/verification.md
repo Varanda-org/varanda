@@ -9671,3 +9671,51 @@ Nenhuma conferência em aparelho nem com o provedor real foi feita nesta tarefa.
 - [ ] Os quatro players incorporados e a regra de leitor de tela para início automático continuam como antes.
 - [ ] Fechar e reabrir o app, ou recarregar a página na web, restaura o som. A escolha não aparece em outro aparelho, e **Tocar música sozinha** mantém o valor guardado.
 - [ ] Uma conta que aceitou a versão 46 recebe os Termos de Uso e a Política de Privacidade 47 para novo aceite.
+
+## 209. Base visual do app: botões pequenos, busca, barras de aviso, alça das folhas (PR feat/ui-kit-foundations)
+
+Esta seção confere a base visual que as telas usam em comum (`apps/app/src/ui`). Nada disso muda protocolo, RPC, Termos ou o que a pessoa pode fazer: muda a aparência, o alvo de toque e o retorno sensorial. As frases das notas são as mesmas de antes.
+
+Os botões pequenos (`Btn` e `Pill` com a opção `small`) desenham um rosto de 32 pt, mas o alvo de toque continua com 44 pt. Ao serem apertados, `Btn`, `Pill` e `PressScale` usam a mesma opacidade, 0,7, e nenhum outro valor. Nesta mudança nenhuma tela usa a opção `small` ainda. A busca compartilhada (`SearchField`) aparece em Buscar, em Conversas e em Nova conversa: lupa à esquerda, botão de limpar com pelo menos 44 pt que só aparece quando há texto. O campo ganha borda de destaque enquanto tem o foco.
+
+As notas de aviso (`NoteBar`) de instalação, push, atualização, convite, offline e exclusão viram uma barra baixa, com as mesmas frases de antes. Com um botão, a barra tem 44 pt de altura: o alvo de toque de 44 pt ocupa o espaçamento interno da barra em vez de somar a ele, e não há área de toque além da barra. Um texto que não cabe quebra em mais linhas, e o convite mostra o título e o corpo em linhas separadas. A ação mostra, enquanto roda, o texto de pendência exato que a nota já mostrava.
+
+As folhas (`Sheet`) mostram uma alça no topo por padrão. No Android e na web, arrastar o cabeçalho ou a alça para baixo fecha a folha quando ela passa de 30% da altura do painel ou quando é solta com um arrasto rápido; senão ela desliza de volta ao lugar. Ao fechar por arrasto, a folha sai de onde foi solta, sem voltar ao topo antes. Se a tela recusa o fechamento (por exemplo, um rascunho que pergunta se deve ser guardado), a folha desliza de volta. Na web, soltar o arrasto em cima de um botão do cabeçalho não aperta esse botão. Uma folha que não pode ser fechada naquele momento (por exemplo, com um envio em andamento) não se move com o arrasto e não fecha. Um toque na parte vazia do cabeçalho não fecha a folha, e os botões do cabeçalho continuam recebendo o toque. No iOS, a folha de página mantém o gesto nativo de deslizar.
+
+O toque de seleção (háptico) dispara uma vez a cada mudança na barra de abas, nos chips de filtro e nas abas segmentadas, e não dispara ao tocar na aba que já está selecionada. Um chip de filtro selecionado é preenchido com a cor de tinta e o rótulo usa a cor de fundo.
+
+As fotos aparecem com um fade curto, na duração de movimento curta, quando carregam; a cor de carregamento some junto com a aparição, então uma foto em tela cheia não mostra moldura colorida. Os esqueletos usam um só pulso compartilhado. O botão flutuante e a pílula de novos itens usam a mesma sombra elevada.
+
+Com Reduzir movimento, os esqueletos ficam parados, as fotos aparecem na hora, as folhas abrem e fecham sem deslizar (no iOS também) e uma folha arrastada não anima ao voltar.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Os itens abaixo estão em aberto. Onde a linha diz "pendente", a checagem no aparelho ainda não foi feita.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA. Registrar aparelho, sistema e, na web, o navegador.
+
+- [ ] Botões pequenos: nenhuma tela usa `small` nesta mudança, então o desenho de 32 pt com toque de 44 pt se confere no PR que adotar a opção. Ao apertar, `Btn`, `Pill` e `PressScale` ficam a 0,7 de opacidade. Android, iOS, web e PWA: pendente.
+- [ ] Busca: em Buscar, Conversas e Nova conversa, a lupa aparece no campo. Digitar mostra o botão de limpar, com pelo menos 44 pt; o botão some com o campo vazio. Tocar em limpar esvazia o campo. Com o campo em foco, a borda fica na cor de destaque. Android, iOS e web: pendente.
+- [ ] Barras de aviso: instalação, push, atualização, convite, offline e exclusão aparecem como uma barra baixa, com as mesmas frases de antes; com botão, a barra tem 44 pt de altura e um toque logo acima ou abaixo dela não aciona o botão; um texto longo quebra a linha e o convite mostra título e corpo em duas linhas. A ação mostra o texto de pendência exato enquanto roda. Android, iOS e web: pendente.
+- [ ] Alça da folha: toda folha mostra a alça no topo. Arrastar o cabeçalho ou a alça para baixo fecha a folha quando passa de 30% da altura do painel, ou com um arrasto rápido; um arrasto curto desliza de volta. Ao fechar, a folha sai de onde foi solta, sem pular para o topo. Na web, com o mouse, arrastar a partir de Publicar ou Enviar no cabeçalho e soltar não aperta o botão. Emulador Android (Android 16, build de debug, folha de ajuda da entrada): conferido em 13/11/2026; arrasto curto volta, arrasto longo fecha, toque na parte vazia do cabeçalho não fecha, Fechar fecha e um arrasto curto que começa em Fechar não fecha. Simulador iOS (iPhone 17 Pro, iOS 26.2): conferido em 13/11/2026; a alça aparece e o deslizar nativo fecha. Web: pendente.
+- [ ] Folha que não fecha: durante um envio, arrastar o cabeçalho não move a folha nem a fecha, no Android e na web. Emulador Android: pendente. Simulador iOS: pendente (a folha segue o gesto nativo).
+- [ ] Toque de seleção: trocar de aba na barra de baixo, trocar um chip de filtro ou uma aba segmentada vibra uma vez. Tocar na aba já selecionada não vibra. Android e iOS: pendente. Web: sem háptico, conferir que nada quebra.
+- [ ] Chip selecionado: fundo na cor de tinta e rótulo na cor de fundo, no tema claro e no escuro. Android, iOS, web e PWA: pendente.
+- [ ] Fotos: uma foto que carrega aparece com fade curto; enquanto carrega, o fundo tem a cor de carregamento, que some quando a foto aparece. Uma foto em tela cheia não mostra moldura colorida. Android, iOS, web e PWA: pendente.
+- [ ] Esqueletos e sombra: os esqueletos das telas pulsam juntos, com um só pulso. O botão flutuante e a pílula de novos itens têm a mesma sombra elevada, no tema claro e no escuro. Android, iOS, web e PWA: pendente.
+- [ ] Reduzir movimento: esqueletos ficam parados, fotos aparecem na hora, as folhas abrem e fecham sem deslizar (no iOS também) e uma folha arrastada e solta sem fechar volta sem animação. Android, iOS e web: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código e os componentes, não montam a interface num aparelho. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/app/test/uiKit.test.js
+node apps/app/test/sheetDrag.test.js
+node apps/app/test/noteBar.test.js
+node apps/app/test/searchField.test.js
+node apps/app/test/switchRow.test.js
+node apps/app/test/hapticsUse.test.js
+node apps/app/test/mediaFade.test.js
+node apps/app/test/pressMotion.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Animated, Platform, Pressable, StyleSheet } from 'react-native'
-import { pressScale, pressTiming } from '../pressMotion'
+import { PRESSED_OPACITY, pressScale, pressTiming } from '../pressMotion'
 import { useReduceMotion } from './StackLayer'
 import { motion } from './theme'
 
@@ -32,6 +32,7 @@ export function PressScale ({ children, onPress, onLongPress, disabled, style, h
   const resolved = typeof style === 'function' ? style({ pressed: pressed && !disabled }) : style
   const flat = resolved === null || resolved === undefined || resolved === false ? null : StyleSheet.flatten(resolved)
   const callerTransform = flat && Array.isArray(flat.transform) ? flat.transform : null
+  // Opacity is not motion, so the press still reads when the scale is skipped.
   return (
     <AnimatedPressable
       onPress={onPress}
@@ -44,7 +45,7 @@ export function PressScale ({ children, onPress, onLongPress, disabled, style, h
       accessibilityHint={accessibilityHint}
       accessibilityRole={accessibilityRole}
       accessibilityState={{ ...accessibilityState, disabled: !!disabled }}
-      style={[resolved, { transform: callerTransform ? [...callerTransform, { scale }] : [{ scale }] }]}
+      style={[resolved, pressed && !disabled ? { opacity: PRESSED_OPACITY } : null, { transform: callerTransform ? [...callerTransform, { scale }] : [{ scale }] }]}
     >
       {children}
     </AnimatedPressable>

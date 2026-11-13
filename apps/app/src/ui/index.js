@@ -7,6 +7,7 @@ import { cloneElement, isValidElement, useCallback, useEffect, useRef, useState 
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
+import { PRESSED_OPACITY } from '../pressMotion'
 import { Icon } from './Icon'
 import { fonts, layout, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
@@ -193,11 +194,30 @@ export function Row ({ children }) {
   return <View style={styles.row}>{children}</View>
 }
 
-export function Btn ({ label, icon, onPress, disabled, pending, secondary, danger, accessibilityLabel, block, expanded, large }) {
+export function Btn ({ label, icon, onPress, disabled, pending, secondary, danger, accessibilityLabel, block, small, expanded, large }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const off = disabled === true || pending === true
   const outline = secondary || danger
+  const face = [
+    styles.btn,
+    large && !small && styles.btnLarge,
+    typeof icon === 'string' && styles.btnRow,
+    outline && styles.btnOutline,
+    outline && large && !small && styles.btnOutlineLarge,
+    small && styles.btnSmall,
+    danger && styles.btnDanger,
+    block && styles.btnBlock,
+    small && !block && styles.btnSmallCenter
+  ]
+  const content = (
+    <>
+      {typeof icon === 'string' ? <Icon name={icon} size={18} color={danger ? colors.danger : outline ? colors.ink : colors.accentInk} /> : null}
+      <Text style={[styles.btnText, small && styles.btnTextSmall, outline && styles.btnTextOutline, danger && styles.btnTextDanger]}>
+        {pending ? label + '…' : label}
+      </Text>
+    </>
+  )
   return (
     <Pressable
       accessibilityRole='button'
@@ -208,21 +228,13 @@ export function Btn ({ label, icon, onPress, disabled, pending, secondary, dange
       disabled={off}
       onPress={onPress}
       style={({ pressed }) => [
-        styles.btn,
-        large && styles.btnLarge,
-        typeof icon === 'string' && styles.btnRow,
-        block && styles.btnBlock,
-        outline && styles.btnOutline,
-        outline && large && styles.btnOutlineLarge,
-        danger && styles.btnDanger,
+        small ? styles.btnSmallHit : face,
+        small && block && styles.btnBlock,
         off && styles.btnOff,
         pressed && styles.btnPressed
       ]}
     >
-      {typeof icon === 'string' ? <Icon name={icon} size={18} color={danger ? colors.danger : outline ? colors.ink : colors.accentInk} /> : null}
-      <Text style={[styles.btnText, outline && styles.btnTextOutline, danger && styles.btnTextDanger]}>
-        {pending ? label + '…' : label}
-      </Text>
+      {small ? <View style={face}>{content}</View> : content}
     </Pressable>
   )
 }
@@ -317,12 +329,18 @@ const makeStyles = (colors) => StyleSheet.create({
   btnBlock: { alignSelf: 'stretch' },
   btnOutline: { backgroundColor: 'transparent', borderWidth: 1.5, borderColor: colors.outline, paddingVertical: 8, paddingHorizontal: 15 },
   btnOutlineLarge: { paddingVertical: 14 },
+  btnSmall: { minHeight: 32, paddingVertical: 0, paddingHorizontal: 12 },
+  btnSmallCenter: { alignSelf: 'center' },
+  // The pressable is layout.hit because the web ignores hitSlop, so a 32 pt
+  // face cannot grow to the 44 pt target that way.
+  btnSmallHit: { minWidth: layout.hit, minHeight: layout.hit, alignItems: 'center', justifyContent: 'center', alignSelf: 'flex-start' },
   btnDanger: { borderColor: colors.danger },
   btnOff: { opacity: 0.45 },
-  btnPressed: { opacity: 0.8 },
+  btnPressed: { opacity: PRESSED_OPACITY },
   // The 1 pt sides absorb Android's rounding with the 1.5 pt outline: the label got its
   // exact width, lost a pixel and wrapped its last word out of sight ("Trocar passkey").
   btnText: { ...type.pill, color: colors.accentInk, textAlign: 'center', paddingHorizontal: 1 },
+  btnTextSmall: { fontSize: 13, lineHeight: 16 },
   btnTextOutline: { color: colors.ink },
   btnTextDanger: { color: colors.danger },
   field: { gap: 4 },

@@ -195,19 +195,21 @@ test('BuscaGlobal: Enter always searches again, a hidden pane never searches, th
   const run = src.slice(src.indexOf('const runPosts'), src.indexOf('const submit'))
   t.ok(run.includes('if (typing && r.query.path === shownPath.current) return'), 'only typing keeps the shown path')
   t.ok(/if \(category === 'publicacoes'\) return\n\s*postsSeq\.current \+= 1\n\s*stopPostsTimer\(\)\n\s*\}, \[category\]\)/.test(src), 'leaving Publicações stops the pause timer')
-  t.ok(src.includes("const raw = { autoCapitalize: 'none', autoCorrect: false, spellCheck: false }"), 'both panes turn off autocorrect')
+  const field = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'SearchField.js'), 'utf8')
+  t.ok(src.includes('<SearchField') && field.includes("autoCapitalize='none'") && field.includes('autoCorrect={false}') && field.includes('spellCheck={false}'), 'both panes turn off autocorrect')
   t.absent(src.includes('mono='), 'no per-pane switch left')
 })
 
 test('Publicações submits from the keyboard search key, without a worded Pesquisar button', (t) => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', 'BuscaGlobal.js'), 'utf8')
   t.absent(src.includes('SEARCH_BUTTON'), 'no Pesquisar button between the field and the tabs')
-  t.ok(src.includes("returnKeyType='search'"), 'the keyboard key reads as search')
+  const field = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'SearchField.js'), 'utf8')
+  t.ok(src.includes('<SearchField') && field.includes("returnKeyType='search'"), 'the keyboard key reads as search')
   t.ok(src.includes("onSubmitEditing={category === 'contas' ? (hosted ? handleSearch : undefined) : submit}"), 'and submits')
 })
 
 test('the search field grows with large text instead of clipping its placeholder', (t) => {
-  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'BuscaGlobal.js'), 'utf8')
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'ui', 'SearchField.js'), 'utf8')
   t.ok(src.includes('minHeight: layout.hit,') && src.includes('minHeight: layout.hit - 3'))
   t.absent(/\bheight: layout\.hit/.test(src.replace(/minHeight/g, '')), 'no fixed height left')
 })

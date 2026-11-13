@@ -144,12 +144,15 @@ test('theme usage: space, radius and the hit target are frozen', async (t) => {
   t.ok(Object.isFrozen(theme.space))
   t.ok(Object.isFrozen(theme.radius))
   t.ok(Object.isFrozen(theme.layout))
+  t.alike(theme.type.replyMark, { fontSize: 13, fontWeight: '400', lineHeight: 18 })
+  t.alike(theme.type.meta, { fontSize: 13, fontWeight: '400', lineHeight: 18 })
+  t.alike(theme.elevation, { raised: '0px 6px 16px' })
 })
 
 test('theme usage: rounded fields drop the browser focus ring and show focus on the pill', (t) => {
   const read = (rel) => fs.readFileSync(path.join(__dirname, '..', 'src', rel), 'utf8')
   t.ok(read('ui/theme.js').includes("export const webInputReset = Platform.OS === 'web' ? { outlineStyle: 'none' } : {}"))
-  for (const rel of ['screens/BuscaGlobal.js', 'screens/Conversas.js', 'screens/NovaConversa.js']) {
+  for (const rel of ['ui/SearchField.js']) {
     const src = read(rel)
     t.ok(src.includes('style={[styles.input, webInputReset]}'), rel + ': ring reset on the input')
     t.ok(/searchFocused: \{ borderColor: colors\.accent/.test(src), rel + ': focus shown on the pill')
