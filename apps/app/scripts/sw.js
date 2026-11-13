@@ -12,8 +12,10 @@
 // open pages), so an open page never sees its caches change mid-session.
 // Online, navigations and /varanda-node.js always run what the server
 // delivers; the cache only answers when the network does not (offline, or a
-// 404/5xx while a deploy replaces the files). Nothing is ever stored outside
-// the verified precache of this release.
+// 404/5xx while a deploy replaces the files). Besides the verified precache of
+// this release, the worker stores only values it builds itself (the DM mute
+// record, the block list, a received share), never a network response, and
+// never serves them.
 //
 // Every cached response is re-verified before it is returned (verifiedMatch):
 // the Cache API is writable by any same-origin script (window.caches), so a
@@ -82,6 +84,17 @@ const DM_STATE_KEY = self.location.origin + '/__varanda-dm-state'
 const BLOCK_STATE_CACHE = 'varanda-block-state'
 const BLOCK_STATE_KEY = self.location.origin + '/__varanda-blocks'
 const BLOCKS_MAX = 500
+// Web Share Target (manifest share_target, POST multipart): the share waits
+// here until the app reads it (src/shareIntake.web.js). Same cache rules as
+// above, so it is never served and dropOldCaches leaves it alone.
+const SHARE_PATH = '/compartilhar'
+const SHARE_CACHE = 'varanda-share'
+const SHARE_KEY_PREFIX = '/__varanda-share/'
+const SHARE_MAX_FILES = 10
+const SHARE_MAX_BYTES = 50 * 1024 * 1024
+const SHARE_MAX_TEXT = 4000
+// No video, and no HEIC: the post composer cannot show or send them.
+const SHARE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 
 const abs = (p) => new URL(p, self.location.origin).href
 const RELEASE_META = '<meta name="varanda-release" content="' + VERSION + '">'
@@ -276,6 +289,118 @@ async function cacheFirst (request) {
   return res
 }
 
+function shareId (at) {
+  const bytes = new Uint8Array(16)
+  crypto.getRandomValues(bytes)
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+  return String(at).padStart(13, '0') + '-' + hex
+}
+
+const SHARE_ID = /^[0-9]{13}-[0-9a-f]{32}$/
+
+// The share id a stored key belongs to, or null for any other key.
+function shareIdOf (key) {
+  try {
+    const pathname = new URL(typeof key === 'string' ? key : key.url).pathname
+    if (!pathname.startsWith(SHARE_KEY_PREFIX)) return null
+    const id = pathname.slice(SHARE_KEY_PREFIX.length).split('/')[0]
+    return SHARE_ID.test(id) ? id : null
+  } catch {
+    return null
+  }
+}
+
+function shareText (form, name) {
+  const v = form.get(name)
+  return typeof v === 'string' ? v.slice(0, SHARE_MAX_TEXT) : ''
+}
+
+// Writes are chained so two shares never interleave their puts and deletes.
+let shareWrite = Promise.resolve()
+// Arrival time of the newest share this worker stored. The app may already
+// have read and released it, so the cache alone cannot tell that a slower,
+// earlier request is stale; the worker stays alive while that request's
+// respondWith is pending.
+let newestShareAt = 0
+
+async function storeShare (share, files) {
+  const cache = await caches.open(SHARE_CACHE)
+  // Ids start with the zero-padded arrival time: a request that arrived
+  // earlier but finished parsing later must not replace a newer share.
+  if (share.at < newestShareAt) return
+  const at = share.id.slice(0, 13)
+  if ((await cache.keys()).some((k) => { const id = shareIdOf(k); return id !== null && id.slice(0, 13) > at })) return
+  try {
+    for (let n = 0; n < files.length; n++) {
+      await cache.put(abs(SHARE_KEY_PREFIX + share.id + '/' + n), new Response(files[n], { headers: { 'content-type': share.files[n].mime } }))
+    }
+    // Last, so the app never sees a meta whose files are not all stored yet.
+    await cache.put(abs(SHARE_KEY_PREFIX + share.id + '/meta'), new Response(JSON.stringify(share), { headers: { 'content-type': 'application/json' } }))
+  } catch (err) {
+    // Only this share's own keys: a failed replacement (e.g. out of quota)
+    // keeps the share already saved.
+    for (const key of await cache.keys().catch(() => [])) {
+      if (shareIdOf(key) === share.id) await cache.delete(key).catch(() => {})
+    }
+    throw err
+  }
+  newestShareAt = Math.max(newestShareAt, share.at)
+  // Only the newest share is kept, and only once it is complete. Each older
+  // share loses its meta first, and its files only when that delete worked:
+  // a meta left behind must never point at files that are gone.
+  const older = new Map()
+  for (const key of await cache.keys()) {
+    const id = shareIdOf(key)
+    if (id === share.id) continue
+    if (id === null) {
+      await cache.delete(key).catch(() => {})
+      continue
+    }
+    if (!older.has(id)) older.set(id, [])
+    if (!new URL(typeof key === 'string' ? key : key.url).pathname.endsWith('/meta')) older.get(id).push(key)
+  }
+  for (const [id, bodies] of older) {
+    try {
+      await cache.delete(abs(SHARE_KEY_PREFIX + id + '/meta'))
+    } catch {
+      continue
+    }
+    for (const key of bodies) await cache.delete(key).catch(() => {})
+  }
+}
+
+// The answer is always the redirect, also on a malformed or failed share:
+// the person lands in the app either way, never on a browser error page.
+async function takeShare (request) {
+  // Taken on arrival, before the body is parsed: arrival order decides which
+  // share is the newest.
+  const at = Date.now()
+  try {
+    const form = await request.formData()
+    const title = shareText(form, 'title')
+    const text = shareText(form, 'text')
+    const url = shareText(form, 'url')
+    const kept = []
+    let total = 0
+    for (const v of form.getAll('fotos')) {
+      if (typeof v === 'string' || !v) continue
+      total++
+      const mime = typeof v.type === 'string' ? v.type.toLowerCase() : ''
+      if (kept.length < SHARE_MAX_FILES && SHARE_TYPES.has(mime) && typeof v.size === 'number' && v.size <= SHARE_MAX_BYTES) {
+        kept.push({ file: v, mime })
+      }
+    }
+    if (kept.length > 0 || title.trim() !== '' || text.trim() !== '' || url.trim() !== '') {
+      const id = shareId(at)
+      const share = { v: 1, id, at, title, text, url, total, files: kept.map((k, n) => ({ n, mime: k.mime })) }
+      const files = kept.map((k) => k.file)
+      shareWrite = shareWrite.catch(() => {}).then(() => storeShare(share, files))
+      await shareWrite
+    }
+  } catch {}
+  return Response.redirect(abs('/'), 303)
+}
+
 self.addEventListener('install', (event) => {
   event.waitUntil(precache())
 })
@@ -286,6 +411,11 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   const request = event.request
+  if (request.method === 'POST') {
+    const target = new URL(request.url)
+    if (target.origin === self.location.origin && target.pathname === SHARE_PATH) event.respondWith(takeShare(request))
+    return
+  }
   if (request.method !== 'GET') return
   const url = new URL(request.url)
   if (url.origin !== self.location.origin) return

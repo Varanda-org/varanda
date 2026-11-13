@@ -7,11 +7,12 @@
 
 import { applicationServerKey } from './push-state.js'
 import { AGE_STATES } from './age.js'
-import { resolveUrl } from './installation.js'
+import { installationOrigin, resolveUrl } from './installation.js'
 import { accountOriginOf } from './pageGate.js'
 import { isAppClient } from './appClient.js'
 import { vitrineEnabled } from './vitrine/enabled.js'
 import { MAX_BYTES as GIF_MAX_BYTES, imageUrl, parseSearch, searchBody } from './gif.js'
+import { MUSIC_ID_RE, audioPath, isAudiusPage, parseItem, parsePlay, parseResolve, parseSearch as parseMusicSearch, searchBody as musicSearchBody } from './music.js'
 
 const USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/
 const HEX6_RE = /^[0-9a-f]{6}$/ // would collide with the default handle (@e905a4)
@@ -57,6 +58,7 @@ const ERROR_MESSAGES = {
   'limite-gif': 'Limite de buscas de GIF por hoje',
   'nao-autorizado': 'a sessão de busca de GIF expirou',
   'limite-previa': 'Limite de prévias de links por hoje',
+  'limite-musica': 'Limite de músicas por hoje.',
   'limite-recuperacao': 'você já tem o máximo de passkeys e códigos cadastrados; remova um antes',
   // A seen write or delete lost the compare-and-swap: nothing was written.
   conflito: 'Outro aparelho gravou antes.'
@@ -678,24 +680,27 @@ function serviceOriginKey (origin) {
 }
 
 // A feature's policy (GET /account/<prefix>/policy): a definite answer (200
-// with { enabled }) is kept for the session. Any failure answers false, so
-// the feature stays hidden rather than offering something that cannot work,
-// and is asked again on a later call once retryMs have passed.
-function servicePolicy (prefix, retryMs) {
+// with a body `read` accepts, { enabled } by default) is kept for the
+// session. Any failure answers `off` (false by default), so the feature stays
+// hidden rather than offering something that cannot work, and is asked again
+// on a later call once retryMs have passed.
+const enabledOf = (data) => (exactKeys(data, ['enabled']) && typeof data.enabled === 'boolean' ? data.enabled : null)
+
+function servicePolicy (prefix, retryMs, { read = enabledOf, off = false } = {}) {
   const policies = new Map()
   return ({ origin, now = Date.now } = {}) => {
-    if (VITRINE) return Promise.resolve(false)
+    if (VITRINE) return Promise.resolve(off)
     const key = serviceOriginKey(origin)
     const cached = policies.get(key)
     if (cached && cached.retryAt > now()) return cached.answer
     const entry = { retryAt: Infinity }
     entry.answer = (async () => {
       try {
-        const data = await call('GET', '/account/' + prefix + '/policy', undefined, { origin })
-        if (exactKeys(data, ['enabled']) && typeof data.enabled === 'boolean') return data.enabled
+        const answer = read(await call('GET', '/account/' + prefix + '/policy', undefined, { origin }))
+        if (answer !== null) return answer
       } catch {}
       entry.retryAt = now() + retryMs
-      return false
+      return off
     })()
     policies.set(key, entry)
     return entry.answer
@@ -960,6 +965,106 @@ export const previewFetch = async (url, { origin, member, request, signal } = {}
     const answer = previewAnswer(data)
     if (answer === null) throw toError('indisponivel')
     return answer
+  })
+}
+
+// Music through the account service (/account/audius, docs/protocol.md
+// "Service answers: music (Audius)"). Its own member session under 'audius',
+// its own policy and readiness cache. Every answer is checked by src/music.js;
+// a refusal maps to a fixed sentence (musicErrorText), and while the feature
+// is off the service's 404 'feature-off' is plain 'indisponivel'. Only a 401
+// is retried, once, through withSession: the service refuses it before it
+// charges a daily use.
+export const AUDIUS_POLICY_RETRY_MS = 30 * 1000
+const AUDIUS_OFF = Object.freeze({ enabled: false, moments: false })
+// moments only counts while the feature is on, as the service answers it.
+const audiusPolicyOf = (data) => (exactKeys(data, ['enabled', 'moments']) && typeof data.enabled === 'boolean' && typeof data.moments === 'boolean'
+  ? Object.freeze({ enabled: data.enabled, moments: data.enabled && data.moments })
+  : null)
+export const audiusPolicy = servicePolicy('audius', AUDIUS_POLICY_RETRY_MS, { read: audiusPolicyOf, off: AUDIUS_OFF })
+
+const AUDIUS_READY_TTL_MS = 5 * 60 * 1000
+const audiusLinked = new Map()
+const audius = memberSessions('audius', {
+  onUnauthorized: (key) => audiusLinked.delete(key),
+  onForget: (key) => { if (key === null) audiusLinked.clear(); else audiusLinked.delete(key) }
+})
+export const forgetAudiusSession = audius.forget
+// A page of fifty items (or a playlist with fifty tracks) of 80-code-point
+// titles and artists, with room for the JSON.
+const AUDIUS_LIST_BODY = 65536
+// The service bounds each provider call at 10 s; a playlist item makes two.
+const AUDIUS_TIMEOUT_MS = 15000
+const AUDIUS_ITEM_TIMEOUT_MS = 25000
+const AUDIUS_KINDS = ['track', 'playlist']
+
+// Whether this member may use music: the policy is on and the member is
+// linked, kept as gifReady keeps it.
+export const audiusReady = async ({ member, origin, now = Date.now } = {}) => {
+  if (typeof member !== 'string' || !HEX64_RE.test(member)) return false
+  if (!(await audiusPolicy({ origin, now })).enabled) return false
+  const key = audius.keyOf(member, origin)
+  const cached = audiusLinked.get(key)
+  if (cached && now() - cached.at < AUDIUS_READY_TTL_MS) return true
+  audiusLinked.delete(key)
+  try {
+    const status = await accountStatus(member, { origin })
+    const linked = status !== null && typeof status === 'object' && status.linked === true
+    if (linked) audiusLinked.set(key, { at: now() })
+    return linked
+  } catch {
+    return false
+  }
+}
+
+// opts: { member, origin, request } (the session) plus kind, cursor and an
+// optional signal. -> { items, next }
+export const audiusSearch = async (q, { kind, cursor, origin, member, request, signal } = {}) => {
+  const body = musicSearchBody(q, kind, cursor)
+  if (body === null) throw toError('pedido-invalido')
+  return audius.withSession({ member, origin, request }, async (sessionToken) => {
+    const parsed = parseMusicSearch(await call('POST', '/account/audius/search', body, { origin, sessionToken, signal, maxBody: AUDIUS_LIST_BODY, timeoutMs: AUDIUS_TIMEOUT_MS }), kind)
+    if (parsed === null) throw toError('indisponivel')
+    return parsed
+  })
+}
+
+// -> the track, or the playlist plus its first tracks.
+export const audiusItem = async (kind, id, { origin, member, request, signal } = {}) => {
+  if (!AUDIUS_KINDS.includes(kind) || typeof id !== 'string' || !MUSIC_ID_RE.test(id)) throw toError('pedido-invalido')
+  return audius.withSession({ member, origin, request }, async (sessionToken) => {
+    const parsed = parseItem(await call('POST', '/account/audius/item', { kind, id }, { origin, sessionToken, signal, maxBody: AUDIUS_LIST_BODY, timeoutMs: AUDIUS_ITEM_TIMEOUT_MS }), kind)
+    if (parsed === null || parsed.id !== id) throw toError('indisponivel')
+    return parsed
+  })
+}
+
+// A pasted audius.co page -> { kind, item }.
+export const audiusResolve = async (url, { origin, member, request, signal } = {}) => {
+  if (!isAudiusPage(url)) throw toError('pedido-invalido')
+  return audius.withSession({ member, origin, request }, async (sessionToken) => {
+    const parsed = parseResolve(await call('POST', '/account/audius/resolve', { url }, { origin, sessionToken, signal, timeoutMs: AUDIUS_TIMEOUT_MS }))
+    if (parsed === null) throw toError('indisponivel')
+    return parsed
+  })
+}
+
+// A ticket for one track -> { url, base, expiresAt }. `url` goes where the
+// play request went, as call() resolves it: the node's https account origin,
+// else the installation's (the installed app), else the page's own (the web,
+// a relative url and base null). The player accepts audio only from `base`.
+export const audiusPlay = async (id, { origin, member, request, signal } = {}) => {
+  if (typeof id !== 'string' || !MUSIC_ID_RE.test(id)) throw toError('pedido-invalido')
+  return audius.withSession({ member, origin, request }, async (sessionToken) => {
+    // Read before the await: the ticket belongs to the installation call()
+    // resolved now, even if the person switches installations meanwhile.
+    const installed = installationOrigin()
+    const parsed = parsePlay(await call('POST', '/account/audius/play', { id }, { origin, sessionToken, signal, timeoutMs: AUDIUS_TIMEOUT_MS }))
+    if (parsed === null) throw toError('indisponivel')
+    const path = audioPath(parsed.ticket)
+    const node = accountOriginOf(origin)
+    const base = typeof node === 'string' ? node : typeof installed === 'string' ? installed : null
+    return { url: base === null ? path : base + path, base, expiresAt: parsed.expiresAt }
   })
 }
 

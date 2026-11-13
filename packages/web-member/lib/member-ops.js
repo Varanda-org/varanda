@@ -76,7 +76,10 @@ const {
   MAX_MEDIA_PER_POST,
   MAX_MEDIA_ITEM_BLOCKS,
   AUDIO_MIME,
-  validAudioDescriptor
+  validAudioDescriptor,
+  VIDEO_MIME,
+  validVideoDescriptor,
+  validPostMedia
 } = require('@varanda/core/lib/records')
 const { validateDescriptor, validateMediaHeader, latestMediaCores, followSet, hasFollowRecords } = require('@varanda/core/lib/media')
 const { latestUsername, heldUsernames } = require('@varanda/core/lib/username')
@@ -93,7 +96,7 @@ const { sealOffer, commitment } = require('@varanda/core/lib/testimonials')
 const grp = require('@varanda/core/lib/group')
 const gc = require('@varanda/core/lib/group-crypto')
 const { validPrivateItem, copyGroupMedia, PRIVATE_ITEM_KEYS, MAX_GROUP_MEDIA } = require('@varanda/core/lib/group-media')
-const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, COMMUNITY_LIST_MAX, feira } = require('@varanda/rpc')
+const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, COMMUNITY_LIST_MAX, feira, mediaBounds, videoBounds } = require('@varanda/rpc')
 const listing = require('@varanda/core/lib/listing')
 const { stillImageSize } = require('@varanda/core/lib/still-image')
 const store = require('./node-store')
@@ -438,8 +441,27 @@ function hasMedia (media) {
   return media !== undefined && media !== null
 }
 
+// A post's media: photos, or the [JPEG poster, video] pair, whose bytes
+// decide too: the poster must be a JPEG of its descriptor's sides, and the
+// video pass the strict check a reader makes with exactly its descriptor's
+// sides and duration. Listings and group posts keep their own checks.
+function verifyPostMedia (ctx, media) {
+  if (!validPostMedia(media)) return verifyMedia(ctx, media)
+  const [poster, video] = media
+  const valid = (d) => d === poster ? validateDescriptor(d) === null && d.mime === 'image/jpeg' : d === video && validVideoDescriptor(d)
+  const inspect = (d, bytes) => {
+    if (d === video) {
+      const v = videoBounds(bytes)
+      return v !== null && v.width === d.width && v.height === d.height && v.ms === d.ms
+    }
+    const b = mediaBounds(bytes, 'image/jpeg')
+    return b !== null && b.width === d.width && b.height === d.height
+  }
+  return verifyMedia(ctx, media, inspect, valid, 2)
+}
+
 async function postCreate (ctx, { text, media, preview }) {
-  if (hasMedia(media)) await verifyMedia(ctx, media)
+  if (hasMedia(media)) await verifyPostMedia(ctx, media)
   if (preview && preview.image !== null) await verifyMedia(ctx, [preview.image])
   return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, media, preview } : { text, preview })))
 }
@@ -447,7 +469,7 @@ async function postCreate (ctx, { text, media, preview }) {
 // to is the parsed { author, seq } reference.
 async function postReply (ctx, { to, text, media, preview }) {
   if (!(to.seq >= 1)) throw new UsageError('referência inválida')
-  if (hasMedia(media)) await verifyMedia(ctx, media)
+  if (hasMedia(media)) await verifyPostMedia(ctx, media)
   if (preview && preview.image !== null) await verifyMedia(ctx, [preview.image])
   return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, replyTo: to, media, preview } : { text, replyTo: to, preview })))
 }
@@ -456,7 +478,7 @@ async function postReply (ctx, { to, text, media, preview }) {
 // for a reply.
 async function postQuote (ctx, { to, text, media, preview }) {
   if (!(to.seq >= 1)) throw new UsageError('referência inválida')
-  if (hasMedia(media)) await verifyMedia(ctx, media)
+  if (hasMedia(media)) await verifyPostMedia(ctx, media)
   if (preview && preview.image !== null) await verifyMedia(ctx, [preview.image])
   return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, quote: to, media, preview } : { text, quote: to, preview })))
 }
@@ -468,9 +490,9 @@ const MOMENT_MEDIA_STALE = 'prepare a mídia de novo'
 // owned(item): whether the dm engine's putPublicMedia answered exactly this
 // item in this unlock; anything else (an item from another unlock, another
 // node or a DM) is refused before a record is built.
-async function momentCreate (ctx, { text, media, owned }) {
+async function momentCreate (ctx, { text, media, music, owned }) {
   if (typeof owned !== 'function' || owned(media) !== true) throw new UsageError(MOMENT_MEDIA_STALE)
-  return publish(ctx, buildRecord(() => momentRecord({ text, media })))
+  return publish(ctx, buildRecord(() => momentRecord({ text, media, music })))
 }
 
 // Tombstones the caller's own moment `to` (parsed ref) -> recordDelete's
@@ -1310,6 +1332,32 @@ async function mediaCommitAudio (ctx, { blocks, sha256, ms } = {}) {
     const start = await store.appendMediaBlocks(core, blocks)
     const descriptor = { core: coreHex, mime: AUDIO_MIME, start, blocks: blocks.length, bytes, sha256, width: 0, height: 0, ms }
     if (!validAudioDescriptor(descriptor)) throw badMedia()
+    return descriptor
+  })
+}
+
+// The short video counterpart of mediaCommit (a post's [poster, video]
+// pair): the same blocks, stored as a video descriptor with its duration.
+// mediaCommit cannot carry ms. The caller (session mediaUpload) has checked
+// the bytes with videoBounds, and width, height and ms are the container's.
+async function mediaCommitVideo (ctx, { blocks, sha256, width, height, ms } = {}) {
+  if (keyPairOf(ctx) === null || mediaKeyPairOf(ctx) === null) throw new UsageError(store.LOCKED)
+  if (!Array.isArray(blocks) || blocks.length < 1 || blocks.length > MAX_MEDIA_ITEM_BLOCKS) throw badMedia()
+  let bytes = 0
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i]
+    if (!(block instanceof Uint8Array)) throw badMedia()
+    const n = block.byteLength
+    if (i < blocks.length - 1 ? n !== MEDIA_BLOCK_BYTES : (n < 1 || n > MEDIA_BLOCK_BYTES)) throw badMedia()
+    bytes += n
+  }
+  if (typeof sha256 !== 'string' || !isHex64(sha256) || (await sha256Hex(blocks)) !== sha256) throw badMedia()
+  const shape = { core: '0'.repeat(64), mime: VIDEO_MIME, start: 1, blocks: blocks.length, bytes, sha256, width, height, ms }
+  if (!validVideoDescriptor(shape)) throw badMedia()
+  return withOwnMediaCore(ctx, async ({ core, coreHex }) => {
+    const start = await store.appendMediaBlocks(core, blocks)
+    const descriptor = { core: coreHex, mime: VIDEO_MIME, start, blocks: blocks.length, bytes, sha256, width, height, ms }
+    if (!validVideoDescriptor(descriptor)) throw badMedia()
     return descriptor
   })
 }
@@ -5320,6 +5368,7 @@ module.exports = {
   mediaPrepare,
   mediaCommit,
   mediaCommitAudio,
+  mediaCommitVideo,
   mediaCommitSealed,
   declareMediaCore,
   verifyMedia,

@@ -95,6 +95,11 @@ function voiceOf ({ ms, kind }) {
   return kind === 'voice' ? { ms, kind } : {}
 }
 
+// The same for a short video (docs/rpc.md 5.56, 5.113).
+function videoOf ({ ms, kind }) {
+  return kind === 'video' ? { ms, kind } : {}
+}
+
 export function webNodeHandle (request) {
   sweepReadDir()
   sweepVoiceCache()
@@ -151,20 +156,21 @@ export function webNodeHandle (request) {
   // The answers come the other way through a file too: an opened photo is
   // far above MAX_MESSAGE (docs/rpc.md 5.89). ref: { kind: 'dm', from, id,
   // index }, { kind: 'group', diary, item } or { kind: 'moment', author,
-  // seq } (5.113) -> { uri, mime, w, h }.
+  // seq } (5.113) -> { uri, mime, w, h }, plus ms for a voice note or a video.
   const media = {
-    // A voice note also carries its duration and kind (docs/rpc.md 5.56, 5.88).
+    // A voice note or a video also carries its duration and kind (docs/rpc.md
+    // 5.56, 5.88).
     upload: ({ bytes, mime, width, height, sealed, ms, kind, onProgress } = {}) =>
-      sendFile(bytes, 'media.uploadFile', { mime, width, height, ...voiceOf({ ms, kind }), ...(sealed === true ? { sealed } : {}) }, onProgress),
+      sendFile(bytes, 'media.uploadFile', { mime, width, height, ...voiceOf({ ms, kind }), ...videoOf({ ms, kind }), ...(sealed === true ? { sealed } : {}) }, onProgress),
     // `to`, the destination, is required: it keys the sealed blob to one
     // conversation (5.97).
     putDm: async ({ bytes, mime, width, height, ms, kind, to } = {}) => {
       if (typeof to !== 'string' || !/^[0-9a-f]{64}$/.test(to)) throw new TypeError('mídia inválida')
       return sendFile(bytes, 'dm.putMedia', { to, mime, width, height, ...voiceOf({ ms, kind }) })
     },
-    // A momento's photo: a fresh blob of its own (5.113), image only.
-    putMoment: ({ bytes, mime, width, height } = {}) =>
-      sendFile(bytes, 'moment.putMedia', { mime, width, height }),
+    // A momento's photo or video: a fresh blob of its own (5.113).
+    putMoment: ({ bytes, mime, width, height, ms, kind } = {}) =>
+      sendFile(bytes, 'moment.putMedia', { mime, width, height, ...videoOf({ ms, kind }) }),
     read: async (ref) => {
       if (ref === null || typeof ref !== 'object') throw new TypeError('mídia inválida')
       let params
@@ -178,7 +184,9 @@ export function webNodeHandle (request) {
       return { uri: readFileUri(name), mime: got.mime, w: got.w, h: got.h, ...(Number.isSafeInteger(got.ms) ? { ms: got.ms } : {}) }
     },
     forgetReadFile,
-    clearReadFiles
+    clearReadFiles,
+    // This worklet measures a video strictly before writing it (media.readFile).
+    video: true
   }
 
   // The in-app web node starts on fresh storage, so it never kept follows

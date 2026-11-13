@@ -5,7 +5,7 @@
 // items of a list and whether the strip shows at all. Pure: the storage is
 // injected (momentSeenStore.native.js / .web.js); no React, no react-native.
 
-import { expiresIn } from './moments.js'
+import { expiresIn, momentMusicOf } from './moments.js'
 
 export const STORAGE_KEY = 'varanda-moments-seen'
 export const FILE_NAME = 'varanda-moments-seen.json'
@@ -84,12 +84,14 @@ const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
 
 function cleanItem (item) {
   if (!isObject(item) || !Number.isSafeInteger(item.seq) || item.seq < 1 || !isSeenId(item.ref)) return null
+  const music = momentMusicOf(item)
   return {
     seq: item.seq,
     ref: item.ref,
     text: typeof item.text === 'string' ? item.text : '',
     at: typeof item.at === 'string' ? item.at : '',
-    media: isObject(item.media) ? item.media : null
+    media: isObject(item.media) ? item.media : null,
+    ...(music === null ? {} : { music })
   }
 }
 

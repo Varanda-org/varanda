@@ -541,3 +541,122 @@ test('avatar: profile.set pair -> real seeder: /media bytes, /index/member and /
   await web.request('sync.stop')
   t.alike(internal, [], 'no internal error')
 })
+
+// A synthetic short video (the shape of packages/rpc/test/video-bounds.test.js
+// builders): ftyp, moov (mvhd, one H.264 avc1 track), mdat. `ms` is the
+// samples' duration at timescale 1000, in 30 samples of 10 bytes. type
+// 'hvc1' gives an HEVC entry; udta adds the place tag a camera writes.
+function mp4 ({ ms = 3000, width = 640, height = 360, type = 'avc1', udta = false } = {}) {
+  const be16 = (v) => [(v >>> 8) & 0xff, v & 0xff]
+  const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
+  const ascii = (str) => Array.from(str, (c) => c.charCodeAt(0))
+  const zeros = (n) => new Array(n).fill(0)
+  const box = (kind, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(kind), ...body] }
+  const full = (kind, ...parts) => box(kind, [0, 0, 0, 0], ...parts)
+  const n = 30
+  const q = Math.floor(ms / n)
+  const runs = [[n - 1, q], [1, ms - (n - 1) * q]]
+  const one = 0x10000
+  const avcC = box('avcC', [1, 100, 0, 40, 0xff, 0xe1], be16(6), [0x67, 100, 0, 40, 0xac, 0xd9], [1], be16(4), [0x68, 0xeb, 0xe3, 0xcb])
+  const entry = box(type, zeros(6), be16(1), zeros(16), be16(width), be16(height), be32(0x480000), be32(0x480000), be32(0), be16(1),
+    [4, ...ascii('x264'), ...zeros(27)], be16(0x18), be16(0xffff), type === 'avc1' ? avcC : box('hvcC', zeros(23)), box('pasp', be32(1), be32(1)))
+  const moovOf = (offset) => box('moov',
+    full('mvhd', be32(0), be32(0), be32(1000), be32(ms), zeros(16), ...[one, 0, 0, 0, one, 0, 0, 0, 0x40000000].map(be32), zeros(28)),
+    box('trak',
+      box('tkhd', [0, 0, 0, 7], be32(0), be32(0), be32(1), be32(0), be32(ms), zeros(16),
+        ...[one, 0, 0, 0, one, 0, 0, 0, 0x40000000].map(be32), be32(width * one), be32(height * one)),
+      box('mdia',
+        full('mdhd', be32(0), be32(0), be32(1000), be32(ms), [0x55, 0xc4, 0, 0]),
+        full('hdlr', be32(0), ascii('vide'), zeros(12), [0]),
+        box('minf', box('vmhd', [0, 0, 0, 1], zeros(8)), box('dinf', full('dref', be32(1), box('url ', [0, 0, 0, 1]))),
+          box('stbl', full('stsd', be32(1), entry), full('stts', be32(runs.length), ...runs.map(([c, d]) => [...be32(c), ...be32(d)])),
+            full('stsc', be32(1), be32(1), be32(n), be32(1)), full('stsz', be32(0), be32(n), ...new Array(n).fill(be32(10))),
+            full('stco', be32(1), be32(offset)))))),
+    ...(udta ? [box('udta', box('©xyz', be16(18), be16(0x15c7), ascii('+12.3456-045.6789/')))] : []))
+  const head = box('ftyp', ascii('isom'), be32(0x200), ascii('isom'), ascii('avc1'))
+  const offset = head.length + moovOf(0).length + 8
+  return new Uint8Array([...head, ...moovOf(offset), ...box('mdat', new Array(n * 10).fill(1))])
+}
+
+// A baseline JPEG header of w x h (SOF0, three components), then the scan.
+function jpeg (w, h) {
+  return b4a.from([0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, h >> 8, h & 0xff, w >> 8, w & 0xff, 3, 1, 0x11, 0, 2, 0x11, 1, 3, 0x11, 1, 0xff, 0xda, 0, 2, 0xff, 0xd9])
+}
+
+// A minimal audio-only MPEG-4 file (dm.test.js m4a): a voice note.
+function m4a (ms = 3000) {
+  const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
+  const ascii = (str) => Array.from(str, (c) => c.charCodeAt(0))
+  const box = (type, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(type), ...body] }
+  const trak = box('trak', box('mdia', box('mdhd', new Array(12).fill(0), be32(1000), be32(0), [0, 0, 0, 0]), box('hdlr', [0, 0, 0, 0], be32(0), ascii('soun'), be32(0), be32(0), be32(0), [0]), box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 25, 0, 1, 0, 4, 17, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 2, 18, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(1), be32(ms)), box('stsz', [0, 0, 0, 0], be32(1), be32(1)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(1), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))))
+  return b4a.from([
+    ...box('ftyp', ascii('M4A '), be32(0), ascii('isom')),
+    ...box('moov', box('mvhd', [0, 0, 0, 0], be32(0), be32(0), be32(1000), be32(ms), new Array(80).fill(0)), trak),
+    ...box('mdat', [9])
+  ])
+}
+
+const VIDEO_ERR = 'mídia inválida'
+
+test('video post: [poster, video] reaches a second node, delete tombstones both ranges, forged pairs refused', async (t) => {
+  t.timeout(240000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { url } = await seederStack(t, bootstrap, assoc)
+  const internal = []
+  const node = browserNode(t, { storage: memoryNodeStorage(), association: assoc.hex, seederUrl: url, internal })
+  await node.setKeyPair(crypto.keyPair(), { media: crypto.keyPair(), prf: randomBytes(32) })
+  const web = await connectClient(node, { timeoutMs: 60000 })
+  const { publicKey: key } = await web.request('identity.create')
+  await web.request('cert.add', { cert: createCert({ member: key }, assoc.kp) })
+
+  const poster = await node.mediaUpload({ bytes: jpeg(640, 360), mime: 'image/jpeg', width: 640, height: 360 })
+  const video = await node.mediaUpload({ bytes: mp4({ udta: true }), mime: 'video/mp4', width: 640, height: 360, ms: 3000, kind: 'video' })
+  const voice = await node.mediaUpload({ bytes: m4a(), mime: 'audio/mp4', width: 0, height: 0, ms: 3000, kind: 'voice' })
+
+  const failure = async (method, params) => {
+    const err = await web.request(method, params).then(() => null, (e) => e)
+    return err && err.message
+  }
+  for (const [label, media] of [
+    ['the pair reversed', [video, poster]],
+    ['a video range holding an image', [poster, { ...poster, mime: 'video/mp4', ms: 3000 }]],
+    ['a video range holding a voice note', [poster, { ...voice, mime: 'video/mp4', width: 640, height: 360 }]],
+    ['a forged ms', [poster, { ...video, ms: 3001 }]]
+  ]) {
+    t.ok(await failure('post.create', { text: '', media }), 'refused: ' + label)
+  }
+  t.is(await failure('post.create', { text: '', media: [poster, { ...video, ms: 3001 }] }), VIDEO_ERR, 'a forged ms is refused by the bytes')
+  t.is(await failure('post.create', { text: '', media: [poster, { ...poster, mime: 'video/mp4', ms: 3000 }] }), VIDEO_ERR, 'an image range is not a video')
+  const { group } = await web.request('community.create', { name: 'Bairro', join: 'open' })
+  t.ok(await failure('group.post', { group, text: '', media: [poster, video] }), 'group.post refuses the pair')
+  const listing = { kind: 'produto', title: 'Bicicleta aro 26', text: 'Pouco usada', price: 25000, unit: null, cat: 'esporte', place: { uf: 'SP', city: 'São Paulo', bairro: null } }
+  t.ok(await failure('listing.create', { ...listing, media: [poster, video] }), 'listing.create refuses the pair')
+  const log = await web.request('log.read', {})
+  t.is(log.entries.filter((e) => e.record.type === 'post').length, 0, 'no post appended by a refused pair')
+
+  const post = await web.request('post.create', { text: 'vídeo', media: [poster, video] })
+  await once(t, web, 'A pushes the video post')
+
+  const reader = browserNode(t, { storage: memoryNodeStorage(), association: assoc.hex, seederUrl: url, internal })
+  await reader.setKeyPair(crypto.keyPair(), { media: crypto.keyPair() })
+  const rweb = await connectClient(reader, { timeoutMs: 60000 })
+  const { publicKey: rkey } = await rweb.request('identity.create')
+  await rweb.request('cert.add', { cert: createCert({ member: rkey }, assoc.kp) })
+  await rweb.request('follow.add', { key })
+  const item = await until(async () => {
+    await once(t, rweb, 'the reader syncs')
+    const feed = await rweb.request('feed.read', { limit: FEED_LIMIT_MAX })
+    return feed.items.find((i) => i.author === key && i.seq === post.seq) || null
+  }, { name: 'the video post in the reader feed', timeoutMs: 90000 })
+  t.alike(item.media, [poster, video], 'the pair intact in the second node\'s feed')
+
+  const del = await web.request('post.delete', { to: post.ref })
+  t.alike(del.deleted, [post.seq])
+  const tomb = (await web.request('log.read', {})).entries.find((e) => e.seq === del.seq).record
+  t.alike(tomb.media, [
+    { core: poster.core, start: poster.start, blocks: poster.blocks },
+    { core: video.core, start: video.start, blocks: video.blocks }
+  ], 'both ranges on one tombstone')
+  t.alike(internal, [], 'no internal error')
+})

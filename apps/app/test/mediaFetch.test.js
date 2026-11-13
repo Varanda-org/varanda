@@ -395,3 +395,189 @@ test('fetchMedia: a voice note only for chat items, checked by its bytes', async
   const img = new Uint8Array(200).fill(3)
   t.is((await fetchMedia(AUTHOR, descriptor(img), { chat: true, fetch: async () => response([img]), subtle: webcrypto.subtle })).byteLength, 200, 'chat photos still pass')
 })
+
+// A synthetic H.264 MP4 with no binary fixture, as
+// packages/rpc/test/video-bounds.test.js builds it: one video track of 90
+// samples of 100 ticks at 3000 a second (3 s), coded 640x360, turned 90
+// degrees when `turn`.
+function mp4Video ({ turn = false, moovExtra = [] } = {}) {
+  const be16 = (v) => [(v >>> 8) & 0xff, v & 0xff]
+  const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
+  const ascii = (str) => Array.from(str, (c) => c.charCodeAt(0))
+  const zeros = (n) => new Array(n).fill(0)
+  const box = (type, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(type), ...body] }
+  const ONE = 0x10000
+  const matrix = turn ? [0, ONE, 0, -ONE, 0, 0, 0, 0, 0x40000000] : [ONE, 0, 0, 0, ONE, 0, 0, 0, 0x40000000]
+  const tkhd = box('tkhd', [0, 0, 0, 7], be32(7), be32(9), be32(1), be32(0), be32(3000), zeros(16), ...matrix.map((v) => be32(v >>> 0)), be32(640 * ONE), be32(360 * ONE))
+  const avcC = box('avcC', [1, 100, 0, 40, 0xff, 0xe1], be16(6), [0x67, 100, 0, 40, 0xac, 0xd9], [1], be16(4), [0x68, 0xeb, 0xe3, 0xcb])
+  const avc1 = box('avc1', zeros(6), be16(1), zeros(16), be16(640), be16(360), be32(0x480000), be32(0x480000), be32(0), be16(1), [4, ...ascii('x264'), ...zeros(27)], be16(0x18), be16(0xffff), avcC)
+  const moovAt = (offset) => box('moov',
+    box('mvhd', [0, 0, 0, 0], be32(7), be32(9), be32(1000), be32(3000), zeros(16), ...[0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000].map(be32), zeros(28)),
+    box('trak', tkhd, box('mdia',
+      box('mdhd', [0, 0, 0, 0], be32(7), be32(9), be32(3000), be32(9000), [0x55, 0xc4, 0, 0]),
+      box('hdlr', [0, 0, 0, 0], be32(0), ascii('vide'), zeros(12), ascii('VideoHandler'), [0]),
+      box('minf', box('vmhd', [0, 0, 0, 1], zeros(8)), box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))),
+        box('stbl', box('stsd', [0, 0, 0, 0], be32(1), avc1), box('stts', [0, 0, 0, 0], be32(1), be32(90), be32(100)),
+          box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(90), be32(1)), box('stsz', [0, 0, 0, 0], be32(0), be32(90), ...new Array(90).fill(be32(10))),
+          box('stco', [0, 0, 0, 0], be32(1), be32(offset)))))),
+    ...moovExtra)
+  const ftyp = box('ftyp', ascii('isom'), be32(0x200), ascii('isom'), ascii('avc1'))
+  const offset = ftyp.length + moovAt(0).length + 8
+  return new Uint8Array([...ftyp, ...moovAt(offset), ...box('mdat', new Array(900).fill(1))])
+}
+
+const videoDescriptor = (bytes, over = {}) => descriptor(bytes, { mime: 'video/mp4', width: 640, height: 360, ms: 3000, ...over })
+
+test('validVideoDescriptor: the records.js video rules; validDescriptor stays images', async (t) => {
+  const { validVideoDescriptor, validDescriptor } = await load()
+  const bytes = mp4Video()
+  const d = videoDescriptor(bytes)
+  t.ok(validVideoDescriptor(d))
+  t.absent(validDescriptor(d), 'validDescriptor refuses a video')
+  t.absent(validVideoDescriptor(descriptor(bytes)), 'an image descriptor is not a video')
+  t.ok(validVideoDescriptor(videoDescriptor(bytes, { width: 1080, height: 1920 })), 'portrait 1080p')
+  for (const over of [
+    { ms: 0 },
+    { ms: 30001 },
+    { ms: 1.5 },
+    { width: 1921 },
+    { height: 0 },
+    { width: 1920, height: 1920 },
+    { mime: 'video/quicktime' },
+    { mime: 'audio/mp4' },
+    { core: 'CD'.repeat(32) },
+    { blocks: 257 },
+    { extra: 1 }
+  ]) t.absent(validVideoDescriptor(videoDescriptor(bytes, over)), JSON.stringify(over))
+  const noMs = { ...d }
+  delete noMs.ms
+  t.absent(validVideoDescriptor(noMs), 'no ms')
+  for (const bad of [null, undefined, [], 'x', 1]) t.absent(validVideoDescriptor(bad))
+})
+
+test('fetchVideo: verified, strict bytes become a video/mp4 URL, always no-store', async (t) => {
+  const { fetchVideo } = await load()
+  for (const turn of [false, true]) {
+    const bytes = mp4Video({ turn })
+    const d = turn ? videoDescriptor(bytes, { width: 360, height: 640 }) : videoDescriptor(bytes)
+    const calls = []
+    const made = []
+    const deps = {
+      persist: true,
+      fetch: async (url, opts) => { calls.push({ url, opts }); return response([bytes.subarray(0, 500), bytes.subarray(500)]) },
+      subtle: webcrypto.subtle,
+      urlFromBytes: (b, mime) => { made.push({ b, mime }); return 'blob:v' }
+    }
+    t.is(await fetchVideo(AUTHOR, d, deps), 'blob:v')
+    t.is(calls[0].url, '/media/' + AUTHOR + '/' + d.core + '/1/1')
+    t.is(calls[0].opts.cache, 'no-store', 'never persisted, even when persist is asked')
+    t.is(calls[0].opts.credentials, 'omit')
+    t.is(calls[0].opts.redirect, 'error')
+    t.is(made.length, 1)
+    t.is(made[0].mime, 'video/mp4')
+    t.alike(made[0].b, bytes)
+  }
+})
+
+test('fetchVideo: no URL for a bad hash, a redirect, excess bytes, a bad container, other sides or ms', async (t) => {
+  const { fetchVideo } = await load()
+  const bytes = mp4Video()
+  const d = videoDescriptor(bytes)
+  const made = []
+  const deps = (res, over = {}) => ({ fetch: async () => res, subtle: webcrypto.subtle, urlFromBytes: () => { made.push(1); return 'blob:v' }, ...over })
+  const withHeaders = (res, h) => Object.assign(res, { headers: { get: (k) => (k === 'content-length' ? h : null) } })
+
+  await t.exception(() => fetchVideo(AUTHOR, { ...d, sha256: 'ee'.repeat(32) }, deps(response([bytes]))), /não confere/, 'bad hash')
+  await t.exception(() => fetchVideo(AUTHOR, d, deps({ ...response([bytes]), redirected: true })), /indisponível/, 'redirect')
+  await t.exception(() => fetchVideo(AUTHOR, d, deps(response([bytes, new Uint8Array(1)]))), /grande demais/, 'excess bytes')
+  await t.exception(() => fetchVideo(AUTHOR, d, deps(withHeaders(response([bytes]), String(bytes.length + 1)))), /grande demais/, 'Content-Length above the descriptor')
+  await t.exception(() => fetchVideo(AUTHOR, d, deps(response([bytes.subarray(1)]))), /incompleto/, 'short body')
+
+  const udta = [0, 0, 0, 8, 0x75, 0x64, 0x74, 0x61]
+  const tagged = mp4Video({ moovExtra: [udta] })
+  await t.exception(() => fetchVideo(AUTHOR, videoDescriptor(tagged), deps(response([tagged]))), /não confere/, 'a metadata box fails the strict check')
+  const notMp4 = new Uint8Array(bytes.length).fill(7)
+  await t.exception(() => fetchVideo(AUTHOR, videoDescriptor(notMp4), deps(response([notMp4]))), /não confere/, 'not a container')
+
+  await t.exception(() => fetchVideo(AUTHOR, videoDescriptor(bytes, { width: 360, height: 640 }), deps(response([bytes]))), /não confere/, 'sides differ')
+  await t.exception(() => fetchVideo(AUTHOR, videoDescriptor(bytes, { width: 641 }), deps(response([bytes]))), /não confere/, 'width differs')
+  await t.exception(() => fetchVideo(AUTHOR, videoDescriptor(bytes, { ms: 2999 }), deps(response([bytes]))), /não confere/, 'ms differs')
+  await t.exception(() => fetchVideo(AUTHOR, videoDescriptor(bytes, { ms: 3001 }), deps(response([bytes]))), /não confere/, 'ms differs, within the tolerance')
+
+  t.is(made.length, 0, 'urlFromBytes never called')
+  await t.exception(() => fetchVideo(AUTHOR, d, deps(response([bytes]), { urlFromBytes: undefined })), /sem exibição/)
+})
+
+test('fetchVideo and fetchMedia: each refuses the other kind before any request', async (t) => {
+  const { fetchVideo, fetchMedia, loadMediaUrl, mediaUrl } = await load()
+  const bytes = mp4Video()
+  const d = videoDescriptor(bytes)
+  let fetched = 0
+  const deps = { fetch: async () => { fetched++; return response([bytes]) }, subtle: webcrypto.subtle, urlFromBytes: () => 'blob:x' }
+  t.is(mediaUrl(AUTHOR, d), null)
+  t.is(mediaUrl(AUTHOR, d, { chat: true }), null)
+  await t.exception(() => fetchMedia(AUTHOR, d, deps), /inválida/)
+  await t.exception(() => fetchMedia(AUTHOR, d, { ...deps, chat: true }), /inválida/)
+  await t.exception(() => loadMediaUrl(AUTHOR, d, deps), /inválida/)
+  await t.exception(() => fetchVideo(AUTHOR, descriptor(bytes), deps), /inválido/, 'an image descriptor')
+  await t.exception(() => fetchVideo('nope', d, deps), /inválido/, 'a bad author')
+  await t.exception(() => fetchVideo(AUTHOR, { ...d, extra: 1 }, deps), /inválido/)
+  t.is(fetched, 0, 'no request')
+})
+
+test('fetchVideo: the caller signal cancels the download and no URL is made', async (t) => {
+  const { fetchVideo } = await load()
+  const { setAppClient } = await import('../src/appClient.js')
+  t.teardown(() => setAppClient(false))
+  const bytes = mp4Video()
+  const d = videoDescriptor(bytes)
+  const made = []
+  const base = { subtle: webcrypto.subtle, urlFromBytes: () => { made.push(1); return 'blob:v' } }
+  const cancelled = async (fn) => {
+    try {
+      await fn()
+    } catch (err) {
+      return err
+    }
+    return null
+  }
+
+  const before = new AbortController()
+  before.abort()
+  let fetched = 0
+  const early = await cancelled(() => fetchVideo(AUTHOR, d, { ...base, signal: before.signal, fetch: async () => { fetched++; return response([bytes]) } }))
+  t.ok(early && /cancelado/.test(early.message), 'an aborted signal fails')
+  t.absent(early && early.retryable, 'not retryable')
+  t.is(fetched, 0, 'no request with an already aborted signal')
+
+  for (const app of [false, true]) {
+    setAppClient(app)
+    const during = new AbortController()
+    const seen = []
+    const err = await cancelled(() => fetchVideo(AUTHOR, d, {
+      ...base,
+      signal: during.signal,
+      fetch: (url, init) => {
+        seen.push(init)
+        return new Promise((resolve, reject) => {
+          init.signal.addEventListener('abort', () => reject(new Error('AbortError')))
+          during.abort()
+        })
+      }
+    }))
+    t.ok(err && /cancelado/.test(err.message), (app ? 'app: ' : 'web: ') + 'an abort mid-request fails as cancelled')
+    t.absent(err && err.retryable, 'not retryable')
+    t.ok(seen[0].signal.aborted, 'the request sees its signal aborted')
+  }
+  setAppClient(false)
+
+  // Bytes that already arrived when the person closed the viewer: still no URL.
+  const late = new AbortController()
+  const lateErr = await cancelled(() => fetchVideo(AUTHOR, d, { ...base, signal: late.signal, fetch: async () => { late.abort(); return response([bytes]) } }))
+  t.ok(lateErr && /cancelado/.test(lateErr.message), 'an abort after the body fails too')
+  t.is(made.length, 0, 'urlFromBytes never called')
+
+  const web = []
+  t.is(await fetchVideo(AUTHOR, d, { ...base, fetch: async (url, init) => { web.push(init); return response([bytes]) } }), 'blob:v')
+  t.alike(Object.keys(web[0]).sort(), ['cache', 'credentials', 'method', 'redirect'], 'without a signal the web init is unchanged')
+})

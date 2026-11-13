@@ -69,3 +69,34 @@ export function mosaicLayout (n) {
   if (!Number.isInteger(n) || n < 1 || n > MAX_MEDIA_PER_POST) return null
   return { kind: gridLayout(Math.min(n, 4)), more: Math.max(0, n - 4) }
 }
+
+// Short videos, same values as packages/core/lib/records.js. kindOf stays
+// images only: checkFile and the web encoder would otherwise send a video
+// into the image path shared by chat, the Feira and avatars.
+export const VIDEO_MIME = 'video/mp4'
+export const MAX_VIDEO_MS = 30000
+export const MAX_VIDEO_BYTES = 8388608
+export const MAX_VIDEO_DIMENSION = 1920
+export const MAX_VIDEO_PIXELS = 2073600
+export const MAX_MOMENT_VIDEO_MS = 15000
+export const MAX_MOMENT_VIDEO_BYTES = 4194304
+
+// A video post's media is exactly [JPEG poster, video]: { poster, video },
+// else null. Shape only; fetch.js checks each descriptor before any URL.
+export function videoPair (media) {
+  if (!Array.isArray(media) || media.length !== 2) return null
+  const poster = media[0]
+  const video = media[1]
+  if (!poster || typeof poster !== 'object' || poster.mime !== 'image/jpeg') return null
+  if (!video || typeof video !== 'object' || video.mime !== VIDEO_MIME) return null
+  return { poster, video }
+}
+
+// "0:07", "1:30": whole seconds, rounded up so a clip never reads 0:00.
+export function durationLabel (ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return '0:00'
+  const total = Math.ceil(ms / 1000)
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return m + ':' + String(s).padStart(2, '0')
+}
