@@ -7848,7 +7848,7 @@ Situação, em 2026-11-12 (Vitrine, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1`). 
 - [ ] Chrome, 390 px (parcial): pílula centrada em A Rua e Conversas, sem pílula no Diário, claro e escuro; árvore de acessibilidade com os nomes das abas ("Conversas, novidades"); botão de publicar apertado fica com opacidade 0,85 e escala 0,97; folha do "..." igual a antes. Não verificado: texto grande, Reduzir movimento e a folha de mensagem. A pílula deste alvo foi vista antes da correção do `TabBar.js` (a web já estava centrada) e não foi revista depois.
 - [ ] Chrome, 1280 px (parcial): só A Rua no claro, coluna central com a barra e a pílula como no 390 px (antes da correção). Passos de texto grande, Reduzir movimento e folhas não percorridos.
 
-## 179. Fotos primeiro e legenda recolhida (PR feat/post-captions)
+## 190. Fotos primeiro e legenda recolhida (PR feat/post-captions)
 
 Segundo PR da revisão visual do app. A linha de publicação mostra as fotos primeiro e a legenda embaixo delas, recolhe a legenda longa e limpa o cromo do carrossel.
 
