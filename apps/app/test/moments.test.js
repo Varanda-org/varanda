@@ -279,3 +279,16 @@ test('previewUntil expires exactly 24 hours after a safe lookup timestamp', asyn
   t.is(previewUntil(null), null)
   t.is(previewUntil(undefined), null)
 })
+
+test('nextMomentOf: one next step, including the next ring start', async (t) => {
+  const { nextMomentOf } = await load()
+  const rings = [
+    { items: [{ ref: A + ':1' }, { ref: A + ':2' }], start: 0 },
+    { items: [{ ref: B + ':1' }, { ref: B + ':2' }], start: 1 }
+  ]
+  t.is(nextMomentOf(rings, { ring: 0, item: 0 }), rings[0].items[1], 'same ring')
+  t.is(nextMomentOf(rings, { ring: 0, item: 1 }), rings[1].items[1], 'first unseen, not index zero')
+  t.is(nextMomentOf(rings, { ring: 1, item: 1 }), null, 'end')
+  t.is(nextMomentOf(null, { ring: 0, item: 0 }), null, 'not loaded')
+  t.is(nextMomentOf(rings, { ring: -1, item: 0 }), null, 'no selected ring')
+})
