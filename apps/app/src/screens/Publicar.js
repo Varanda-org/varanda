@@ -421,9 +421,12 @@ export function counterAnnouncement (previous, count, limit) {
 function useCounterAnnouncement (active, count, limit) {
   const previous = useRef(count)
   const [announcement, setAnnouncement] = useState('')
+  // This runs on every keystroke. A setter call queues a render even with
+  // the same value, and fast typing then passes React's nested update limit
+  // ("Maximum update depth exceeded" in typePost): only real changes set.
   useEffect(() => {
     const message = counterAnnouncement(previous.current, count, limit)
-    if (!active || !message) setAnnouncement('')
+    if ((!active || !message) && announcement !== '') setAnnouncement('')
     previous.current = count
     if (!active || !message) return
     // The native announcement API is absent on react-native-web, which uses
@@ -690,8 +693,9 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // True while the own diary is re-read after an uncertain publish.
   const [checking, setChecking] = useState(false)
   const [checkError, setCheckError] = useState('')
-  // A message about the text ends when the text changes.
-  useEffect(() => { setCheckError('') }, [text])
+  // A message about the text ends when the text changes. Set only when there
+  // is one, as in useCounterAnnouncement.
+  useEffect(() => { if (checkError !== '') setCheckError('') }, [text])
   const action = useAction()
   // Highest own seq this composer confirmed in this session (a successful
   // publish, or a reconciliation that found it), or null.
