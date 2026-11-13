@@ -111,10 +111,15 @@ async function ui (stubs = {}) {
     Text: 'Text',
     Pressable: 'Pressable',
     LinkCard: 'LinkCard',
+    MusicCover: 'MusicCover',
+    Icon: 'Icon',
+    ActivityIndicator: 'ActivityIndicator',
+    useTheme: () => ({ colors: { accent: 'accent', accentInk: 'accentInk', bg: 'bg', soft: 'soft' } }),
+    tap: () => {},
     StyleSheet: { create: (value) => value, hairlineWidth: 1 },
-    useStyles: () => ({}),
+    useStyles: (makeStyles) => makeStyles({ accent: 'accent', accentInk: 'accentInk', bg: 'bg', soft: 'soft' }),
     layout: { hit: 44 },
-    radius: {},
+    radius: { sm: 8 },
     space: {},
     ...stubs
   }
@@ -165,6 +170,107 @@ test('idle cards use stored safe text, make no requests and mount the node reade
   t.is(active.type, h.ActiveMusicPlayer)
   t.is(active.props.epoch, (await import('../src/media/chatMedia.js')).playbackEpoch())
   t.alike(calls, [], 'the tap mounts the reader before any node access')
+})
+
+test('a snippet card shows the 15 s badge and a track card does not', async (t) => {
+  const { SNIPPET_BADGE } = await import('../src/music.js')
+  const h = await ui()
+  for (const kind of ['snippet', 'track', 'playlist']) {
+    h.clear()
+    const tree = h.MusicCardView({ card: { title: 'Faixa', desc: 'Artista' }, music: { kind, start: 0 } })
+    const badge = flatten(tree).find((n) => n.type === 'Text' && textOf(n) === SNIPPET_BADGE)
+    t.is(!!badge, kind === 'snippet', kind)
+    if (badge) {
+      t.is(badge.props.style.borderRadius, 8)
+      t.is(badge.props.style.backgroundColor, 'bg')
+      t.is(badge.props.style.color, 'soft')
+    }
+  }
+})
+
+test('the badge shows the real window on a short track', async (t) => {
+  const { musicPlayerIdle } = await helpers()
+  const { SNIPPET_BADGE } = await import('../src/music.js')
+  const h = await ui()
+  const idle = h.MusicCardView({ card: { title: 'Faixa', desc: 'Artista' }, music: { kind: 'snippet', start: 30 } })
+  t.is(textOf(flatten(idle).find((n) => n.type === 'Text' && n.props.style && n.props.style.backgroundColor === 'bg')), SNIPPET_BADGE)
+  h.clear()
+  const tree = h.MusicCardView({ card: {}, music: { kind: 'snippet', start: 0 }, state: { ...musicPlayerIdle, item: track('abc', 7) } })
+  const badge = flatten(tree).find((n) => n.type === 'Text' && n.props.style && n.props.style.backgroundColor === 'bg')
+  t.is(textOf(badge), '7 s')
+})
+
+test('the round button keeps every accessible name', async (t) => {
+  const { musicPlayerIdle } = await helpers()
+  const calls = []
+  const h = await ui({ tap: (kind) => calls.push(kind) })
+  for (const [kind, phase, error, label, icon] of [
+    ['track', 'loading', '', 'Cancelar', null],
+    ['snippet', 'playing', '', 'Parar trecho', 'parar'],
+    ['track', 'playing', '', 'Pausar', 'pausar'],
+    ['playlist', 'playing', '', 'Pausar', 'pausar'],
+    ['track', 'idle', 'Falhou', 'Tentar de novo', 'tocar'],
+    ['snippet', 'idle', '', 'Ouvir trecho', 'tocar'],
+    ['playlist', 'idle', '', 'Ouvir playlist', 'tocar'],
+    ['track', 'idle', '', 'Ouvir', 'tocar'],
+    ['track', 'paused', '', 'Ouvir', 'tocar']
+  ]) {
+    h.clear()
+    const tree = h.MusicCardView({ card: {}, music: { kind, start: 0 }, state: { ...musicPlayerIdle, phase, error }, onPress: () => calls.push('press') })
+    const main = flatten(tree).find((n) => n.type === h.MusicButton && n.props.round)
+    t.is(main.props.label, label)
+    const button = h.MusicButton(main.props)
+    t.is(button.props.accessibilityLabel, label)
+    t.is(button.props.accessibilityRole, 'button')
+    const circle = button.props.style.find((style) => style?.width === 44)
+    t.is(circle.height, 44)
+    t.is(circle.borderRadius, 22)
+    t.is(circle.backgroundColor, 'accent')
+    const glyph = button.children[0]
+    t.is(glyph.type, phase === 'loading' ? 'ActivityIndicator' : 'Icon')
+    if (icon) t.is(glyph.props.name, icon)
+    t.is(glyph.props.color, 'accentInk')
+    calls.length = 0
+    button.props.onPress()
+    t.alike(calls, ['select', 'press'])
+    if (error) t.is(flatten(tree).find((n) => textOf(n) === error).props.accessibilityLiveRegion, 'polite')
+  }
+  h.clear()
+  const playlistTree = h.MusicCardView({ card: {}, music: { kind: 'playlist' }, state: { ...musicPlayerIdle, item: playlist() } })
+  for (const label of ['Anterior', 'Próxima']) {
+    const control = flatten(playlistTree).find((n) => n.type === h.MusicButton && n.props.label === label)
+    const button = h.MusicButton(control.props)
+    t.is(button.props.style.find((style) => style && style.minWidth === 44).minWidth, 44, label)
+  }
+  const show = h.MusicButton(flatten(playlistTree).find((n) => n.props.label === 'Mostrar faixas').props)
+  t.absent(show.props.style.some((style) => style && style.minWidth === 44))
+})
+
+test('the idle card still names Audius and draws no cover request', async (t) => {
+  const calls = []
+  const unexpected = () => { calls.push('request'); throw new Error('idle request') }
+  const h = await ui({ useNode: unexpected, audiusReady: unexpected, audiusItem: unexpected, audiusPlay: unexpected, createStreamPlayer: unexpected })
+  const card = { title: 'Título\u202e', desc: 'Artista\u0007' }
+  const tree = h.MusicCardView({ card, music: { kind: 'track' } })
+  const row = tree.children[0]
+  t.is(row.props.style.flexDirection, 'row')
+  t.is(row.children[0].type, 'MusicCover')
+  t.alike(row.children[0].props, { size: 56 })
+  const title = row.children[1]
+  t.is(title.children[0].props.numberOfLines, 1)
+  t.is(title.children[0].props.style.fontWeight, '700')
+  t.is(title.children[1].props.numberOfLines, 1)
+  t.is(textOf(title.children[0]), displayText(card.title))
+  t.is(textOf(title.children[1]), displayText(card.desc))
+  t.ok(textOf(title).includes('Audius'))
+  t.absent(flatten(tree).some((n) => n.type === h.MusicProgress))
+  const link = flatten(tree).find((n) => n.props.accessibilityRole === 'link')
+  t.is(link.props.style.minHeight, 44)
+  t.is(link.children[0].props.name, 'externo')
+  t.is(link.children[0].props.size, 14)
+  t.is(link.children[1].props.style.fontSize, 13)
+  t.alike(calls, [])
+  t.alike(h.effects, [])
 })
 
 test('unhosted cards fall back unchanged and pending availability is scoped to the member', async (t) => {
@@ -744,14 +850,14 @@ test('the title is interactive only when it has a long press action', async (t) 
   const props = { card: { title: 'Faixa', desc: 'Artista' }, music: { kind: 'track' } }
   for (const onLongPress of [undefined, null, false]) {
     h.clear()
-    const title = h.MusicCardView({ ...props, onLongPress }).children[0]
+    const title = h.MusicCardView({ ...props, onLongPress }).children[0].children[1]
     t.is(title.type, 'View')
     t.is(title.props.onLongPress, undefined)
     t.is(title.props.delayLongPress, undefined)
   }
   let calls = 0
   h.clear()
-  const title = h.MusicCardView({ ...props, onLongPress: () => { calls++ } }).children[0]
+  const title = h.MusicCardView({ ...props, onLongPress: () => { calls++ } }).children[0].children[1]
   t.is(title.type, 'Pressable')
   t.is(title.props.delayLongPress, 350)
   title.props.onLongPress()

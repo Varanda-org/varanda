@@ -1,20 +1,22 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from 'react'
-import { ActivityIndicator, FlatList, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
+import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
 import rpc from '@varanda/rpc'
 import { audiusPlay, audiusSearch } from '../account'
-import { MUSIC_DEBOUNCE_MS, MUSIC_EMPTY_TEXT, MUSIC_SEEK_TEXT, SNIPPET_S, clampStart, maxStart, musicErrorText, musicQuery, snippetTick } from '../music'
+import { MUSIC_DEBOUNCE_MS, MUSIC_EMPTY_TEXT, MUSIC_SEEK_TEXT, SNIPPET_S, clampStart, musicErrorText, musicQuery, musicRowLine, snippetTick } from '../music'
 import { claimPlayback, playbackEpoch } from '../media/chatMedia'
 import { createStreamPlayer } from '../media/stream'
 import { Btn } from './index'
+import { tap } from './haptics'
 import { Icon } from './Icon'
+import { MusicCover } from './MusicCover'
+import { MusicEditor } from './MusicEditor'
+import { Pill } from './Pill'
 import { Segmented } from './Segmented'
 import { Sheet } from './Sheet'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, radius, space, webInputReset } from './theme'
 
 const { displayText } = rpc
-// Keyboard events and tab order are DOM APIs; native uses accessibility actions.
-const WEB = Platform.OS === 'web'
 const DEFAULT_MODES = ['snippet', 'track', 'playlist']
 const SEARCH_KINDS = [{ id: 'track', label: 'Faixas' }, { id: 'playlist', label: 'Playlists' }]
 
@@ -51,19 +53,9 @@ export function musicSearchStep (state, action) {
   }
 }
 
-export function musicTime (seconds) {
-  const s = Math.max(0, Math.floor(seconds))
-  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0')
-}
-
-export function musicStartAt (x, width, duration) {
-  return width > 0 ? clampStart(Math.round(x / width * maxStart(duration)), duration) : 0
-}
-
 export function musicPickStep (kind, modes) {
-  if (kind === 'playlist') return modes.includes('playlist') ? 'playlist' : null
-  if (modes.includes('snippet')) return modes.includes('track') ? 'choose' : 'snippet'
-  return modes.includes('track') ? 'track' : null
+  if (kind === 'playlist') return modes.includes('playlist') ? 'edit' : null
+  return modes.includes('snippet') || modes.includes('track') ? 'edit' : null
 }
 
 // The ticket survives start adjustments, but never the picker or its session.
@@ -150,97 +142,106 @@ export function createSnippetPreview (session, notify) {
   return { play, stop, release }
 }
 
-export function MusicPicker ({ open, onClose, onPick, member, origin, request, modes = DEFAULT_MODES }) {
+export function MusicPicker ({ open, onClose, onPick, member, origin, request, modes = DEFAULT_MODES, initial = null }) {
   const stopRef = useRef(null)
+  const editRef = useRef(null)
+  const [edit, setEdit] = useState(() => open ? initialEdit(initial, modes) : null)
+  const [prevOpen, setPrevOpen] = useState(open)
+  // Focus the search only when this opening shows it. A later back must not
+  // focus the field the editor is hiding.
+  const [searchFocus, setSearchFocus] = useState(() => open && initialEdit(initial, modes) === null)
+  // Read on opening only: a later initial from the caller never moves an open editor.
+  if (open !== prevOpen) {
+    const next = open ? initialEdit(initial, modes) : null
+    setPrevOpen(open)
+    setEdit(next)
+    if (open) setSearchFocus(next === null)
+  }
   const close = () => { stopRef.current?.(); onClose() }
+  const back = () => { editRef.current?.(); setEdit(null) }
+  const done = () => {
+    if (!edit) return
+    tap('select')
+    stopRef.current?.()
+    const { item, kind, start } = edit
+    onPick({ ref: { kind, id: item.id, start: kind === 'snippet' ? clampStart(start, item.duration) : null }, item })
+    onClose()
+  }
+  const editing = edit !== null
   return (
-    <Sheet open={open} onClose={close} title='Música'>
-      {open ? <MusicContent onClose={close} onPick={onPick} member={member} origin={origin} request={request} modes={modes} stopRef={stopRef} /> : null}
+    <Sheet
+      open={open}
+      onClose={close}
+      title='Música'
+      left={editing ? <Pill label='Voltar' icon='voltar' onPress={back} /> : undefined}
+      right={editing ? <Pill label='Concluído' filled onPress={done} /> : undefined}
+      onBack={editing ? back : undefined}
+    >
+      {open
+        ? (
+          <MusicContent
+            onEdit={setEdit}
+            edit={edit}
+            onKind={(kind) => setEdit({ ...edit, kind })}
+            onStart={(start) => setEdit({ ...edit, start: clampStart(start, edit.item.duration) })}
+            member={member}
+            origin={origin}
+            request={request}
+            modes={modes}
+            stopRef={stopRef}
+            editRef={editRef}
+            autoFocus={searchFocus}
+          />
+          )
+        : null}
     </Sheet>
   )
 }
 
-function MusicContent ({ onClose, onPick, member, origin, request, modes, stopRef }) {
+function initialEdit (initial, modes) {
+  const ref = initial?.ref
+  const item = initial?.item
+  if (!ref || !item || item.id !== ref.id || !modes.includes(ref.kind)) return null
+  if (ref.kind !== 'playlist' && ref.kind !== 'snippet' && ref.kind !== 'track') return null
+  return { item, kind: ref.kind, start: ref.kind === 'snippet' ? clampStart(ref.start ?? 0, item.duration) : 0 }
+}
+
+function MusicContent ({ onEdit, edit, onKind, onStart, member, origin, request, modes, stopRef, editRef, autoFocus }) {
   const styles = useStyles(makeStyles)
-  const [selected, setSelected] = useState(null)
-  const [step, setStep] = useState('search')
-  const [start, setStart] = useState(0)
   const [status, setStatus] = useState({ phase: 'idle', error: '' })
-  const preview = useMemo(() => createSnippetPreview({ member, origin, request }, setStatus), [member, origin, request])
+  const [active, setActive] = useState(null)
+  const session = useMemo(() => ({ member, origin, request }), [member, origin, request])
+  const preview = useMemo(() => createSnippetPreview(session, setStatus), [session])
   useEffect(() => {
-    stopRef.current = preview.release
-    setSelected(null)
-    setStep('search')
+    stopRef.current = () => { preview.release(); editRef.current?.() }
+    setActive(null)
     setStatus({ phase: 'idle', error: '' })
     return () => { preview.release(); stopRef.current = null }
   }, [preview, stopRef])
 
-  const pick = (kind, item = selected) => {
-    preview.release()
-    onPick({ ref: { kind, id: item.id, start: kind === 'snippet' ? clampStart(start, item.duration) : null }, item })
-    onClose()
-  }
+  const stopPreview = () => { preview.release(); setActive(null); setStatus({ phase: 'idle', error: '' }) }
   const select = (item, kind) => {
-    const next = musicPickStep(kind, modes)
-    if (next === null) return
-    preview.release()
-    setStatus({ phase: 'idle', error: '' })
-    if (next === 'playlist' || next === 'track') return pick(next, item)
-    setSelected(item)
-    setStart(0)
-    setStep(next)
+    if (musicPickStep(kind, modes) === null) return
+    stopPreview()
+    onEdit({ item, kind: kind === 'playlist' ? 'playlist' : modes.includes('snippet') ? 'snippet' : 'track', start: 0 })
   }
-  const changeStart = (value) => { preview.stop(); setStart(clampStart(value, selected.duration)) }
-  const back = () => { preview.release(); setSelected(null); setStep('search') }
+  const toggle = (item) => {
+    if (active === item.id && status.phase !== 'idle') return preview.stop()
+    setActive(item.id)
+    preview.play(item, 0)
+  }
   return (
     <View style={styles.root}>
-      <View style={step === 'search' ? styles.search : styles.hidden}>
-        <MusicSearch member={member} origin={origin} request={request} modes={modes} onSelect={select} />
+      <View style={edit ? styles.hidden : styles.search}>
+        <MusicSearch member={member} origin={origin} request={request} modes={modes} onSelect={select} onStop={stopPreview} onToggle={toggle} active={status.phase === 'idle' ? null : active} phase={status.phase} previewError={status.error} autoFocus={autoFocus} />
       </View>
-      {step !== 'search'
-        ? (
-          <ScrollView contentContainerStyle={styles.detail} keyboardShouldPersistTaps='handled'>
-            <Btn label='Voltar à busca' secondary onPress={back} />
-            <MusicLabel item={selected} />
-            {step === 'choose'
-              ? (
-                <View style={styles.actions}>
-                  <Btn label='Trecho de 15 s' onPress={() => setStep('snippet')} />
-                  <Btn label='Faixa inteira' secondary onPress={() => pick('track')} />
-                </View>
-                )
-              : (
-                <View style={styles.actions}>
-                  <StartPicker duration={selected.duration} start={start} onChange={changeStart} />
-                  {status.error ? <Text style={styles.notice} accessibilityLiveRegion='polite'>{status.error}</Text> : null}
-                  <Btn label={status.phase === 'idle' ? 'Ouvir trecho' : 'Parar trecho'} secondary onPress={() => status.phase === 'idle' ? preview.play(selected, start) : preview.stop()} />
-                  <Btn label='Usar este trecho' onPress={() => pick('snippet')} />
-                </View>
-                )}
-          </ScrollView>
-          )
-        : null}
+      {edit ? <MusicEditor item={edit.item} kind={edit.kind} start={edit.start} modes={modes} session={session} onKind={onKind} onStart={onStart} stopRef={editRef} /> : null}
       <Text style={styles.footer}>Músicas do Audius</Text>
     </View>
   )
 }
 
-function MusicLabel ({ item }) {
-  const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
-  return (
-    <View style={styles.label}>
-      <Icon name='music' color={colors.soft} />
-      <View style={styles.words}>
-        <Text style={styles.title}>{displayText(item.title)}</Text>
-        <Text style={styles.artist}>{displayText(item.artist)}</Text>
-        <Text style={styles.artist}>{item.duration !== undefined ? musicTime(item.duration) : item.count + (item.count === 1 ? ' faixa' : ' faixas')}</Text>
-      </View>
-    </View>
-  )
-}
-
-function MusicSearch ({ member, origin, request, modes, onSelect }) {
+function MusicSearch ({ member, origin, request, modes, onSelect, onStop, onToggle, active, phase: previewPhase, previewError, autoFocus }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const track = modes.includes('snippet') || modes.includes('track')
@@ -263,25 +264,29 @@ function MusicSearch ({ member, origin, request, modes, onSelect }) {
     return () => { live = false; clearTimeout(timer); controller.abort() }
     // A generation starts at the keystroke, before the debounce can finish.
   }, [gen, member, origin, request])
-  const notice = state.error || (phase === 'ready' && state.items.length === 0 ? MUSIC_EMPTY_TEXT : '')
+  const search = (text, kind) => {
+    if (text !== state.text || kind !== state.kind) onStop()
+    dispatch({ type: 'query', text, kind })
+  }
+  const notice = state.error || previewError || (phase === 'ready' && state.items.length === 0 ? MUSIC_EMPTY_TEXT : '')
   return (
     <View style={styles.search}>
       <View style={styles.searchRow}>
         <Icon name='lupa' size={18} color={colors.soft} />
         <TextInput
           value={state.text}
-          onChangeText={(text) => dispatch({ type: 'query', text, kind })}
+          onChangeText={(text) => search(text, kind)}
           style={[styles.input, webInputReset]}
           placeholder='Buscar música'
           placeholderTextColor={colors.placeholder}
           accessibilityLabel='Buscar música'
           autoCapitalize='none'
           autoCorrect={false}
-          autoFocus
+          autoFocus={autoFocus}
           returnKeyType='search'
         />
       </View>
-      {playlist ? <Segmented options={track ? SEARCH_KINDS : SEARCH_KINDS.slice(1)} selected={kind} onSelect={(kind) => dispatch({ type: 'query', text: state.text, kind })} /> : null}
+      {playlist ? <Segmented options={track ? SEARCH_KINDS : SEARCH_KINDS.slice(1)} selected={kind} onSelect={(kind) => search(state.text, kind)} /> : null}
       {notice ? <Text style={styles.notice} accessibilityLiveRegion='polite'>{notice}</Text> : null}
       {phase === 'error' ? <Btn label='Tentar de novo' secondary onPress={() => dispatch({ type: 'retry' })} /> : null}
       {phase === 'loading' ? <ActivityIndicator style={styles.spinner} color={colors.soft} /> : null}
@@ -294,70 +299,39 @@ function MusicSearch ({ member, origin, request, modes, onSelect }) {
         onEndReached={() => dispatch({ type: 'more' })}
         ListFooterComponent={phase === 'more' ? <ActivityIndicator style={styles.spinner} color={colors.soft} /> : null}
         renderItem={({ item }) => (
-          <Pressable accessibilityRole='button' onPress={() => onSelect(item, kind)} style={({ pressed }) => [styles.row, pressed && styles.pressed]}>
-            <MusicLabel item={item} />
-          </Pressable>
+          <MusicRow item={item} kind={kind} onOpen={onSelect} onToggle={onToggle} phase={active === item.id ? previewPhase : 'idle'} />
         )}
       />
     </View>
   )
 }
 
-function StartPicker ({ duration, start, onChange }) {
+// Sibling Pressables: a nested button inside the row would swallow or double the tap.
+function MusicRow ({ item, kind, onOpen, onToggle, phase }) {
   const styles = useStyles(makeStyles)
-  const width = useRef(0)
-  const anchor = useRef(0)
-  const latest = useRef(null)
-  const responder = useRef(null)
-  latest.current = { duration, onChange }
-  const max = maxStart(duration)
-  const end = Math.min(start + SNIPPET_S, duration)
-  const windowText = musicTime(start) + ' - ' + musicTime(end)
-  const onKeyDown = (event) => {
-    const key = event.nativeEvent ? event.nativeEvent.key : event.key
-    const targets = { ArrowLeft: start - 1, ArrowDown: start - 1, ArrowRight: start + 1, ArrowUp: start + 1, Home: 0, End: max }
-    if (!Object.hasOwn(targets, key)) return
-    try { event.preventDefault() } catch {}
-    try { event.stopPropagation() } catch {}
-    onChange(clampStart(targets[key], duration))
-  }
-  if (responder.current === null) {
-    const move = (x) => latest.current.onChange(musicStartAt(x, width.current, latest.current.duration))
-    responder.current = PanResponder.create({
-      onStartShouldSetPanResponder: () => maxStart(latest.current.duration) > 0,
-      onMoveShouldSetPanResponder: () => maxStart(latest.current.duration) > 0,
-      onPanResponderGrant: (event) => {
-        anchor.current = event.nativeEvent.locationX
-        move(anchor.current)
-      },
-      onPanResponderMove: (event, gesture) => move(anchor.current + gesture.dx)
-    })
-  }
+  const { colors } = useTheme()
+  const playing = phase === 'playing'
   return (
-    <View>
-      <Text style={styles.notice}>{windowText}</Text>
-      <View
-        {...responder.current.panHandlers}
-        accessible
-        accessibilityRole='adjustable'
-        accessibilityLabel='Início do trecho'
-        accessibilityValue={{ min: 0, max, now: start, text: windowText }}
-        aria-valuemin={0}
-        aria-valuemax={max}
-        aria-valuenow={start}
-        aria-valuetext={windowText}
-        {...(WEB ? { tabIndex: 0, onKeyDown } : null)}
-        accessibilityActions={[{ name: 'increment', label: 'Avançar um segundo' }, { name: 'decrement', label: 'Voltar um segundo' }]}
-        onAccessibilityAction={(event) => {
-          const action = event.nativeEvent.actionName
-          if (action === 'increment' || action === 'decrement') onChange(clampStart(start + (action === 'increment' ? 1 : -1), duration))
-        }}
-        onLayout={(event) => { width.current = event.nativeEvent.layout.width }}
-        style={styles.slider}
-      >
-        <View pointerEvents='none' style={styles.rail} />
-        <View pointerEvents='none' style={[styles.thumb, { left: (max > 0 ? start / max * 100 : 0) + '%' }]} />
-      </View>
+    <View style={styles.row}>
+      <Pressable accessibilityRole='button' onPress={() => onOpen(item, kind)} style={({ pressed }) => [styles.main, pressed && styles.pressed]}>
+        <MusicCover size={48} />
+        <View style={styles.words}>
+          <Text style={styles.title} numberOfLines={1}>{displayText(item.title)}</Text>
+          <Text style={styles.artist} numberOfLines={1}>{displayText(musicRowLine(item))}</Text>
+        </View>
+      </Pressable>
+      {kind === 'track'
+        ? (
+          <Pressable
+            accessibilityRole='button'
+            accessibilityLabel={phase === 'idle' ? 'Ouvir prévia' : 'Parar prévia'}
+            onPress={() => onToggle(item)}
+            style={({ pressed }) => [styles.play, pressed && styles.pressed]}
+          >
+            {phase === 'loading' ? <ActivityIndicator color={colors.ink} /> : <Icon name={playing ? 'parar' : 'tocar'} color={colors.ink} />}
+          </Pressable>
+          )
+        : null}
     </View>
   )
 }
@@ -369,18 +343,14 @@ const makeStyles = (colors) => StyleSheet.create({
   searchRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm, minHeight: layout.hit, paddingHorizontal: space.md, borderRadius: radius.lg, backgroundColor: colors.bg },
   input: { flex: 1, minWidth: 0, fontSize: 16, paddingVertical: space.sm, color: colors.ink },
   list: { paddingVertical: space.sm },
-  row: { minHeight: layout.hit, paddingVertical: space.md, borderBottomWidth: 1, borderBottomColor: colors.line },
-  label: { flexDirection: 'row', alignItems: 'center', gap: space.md },
+  row: { flexDirection: 'row', alignItems: 'center', gap: space.sm, borderBottomWidth: 1, borderBottomColor: colors.line },
+  main: { flex: 1, minWidth: 0, minHeight: layout.hit, flexDirection: 'row', alignItems: 'center', gap: space.md, paddingVertical: space.md },
+  play: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.bg },
   words: { flex: 1, minWidth: 0 },
   title: { fontSize: 16, color: colors.ink, fontWeight: '600' },
   artist: { fontSize: 14, color: colors.soft },
   notice: { fontSize: 15, color: colors.soft, textAlign: 'center', paddingVertical: space.md },
   footer: { fontSize: 13, color: colors.soft, textAlign: 'center', paddingVertical: space.md },
   spinner: { paddingVertical: space.md },
-  detail: { gap: space.lg, paddingVertical: space.md },
-  actions: { gap: space.md },
-  slider: { minHeight: layout.hit, justifyContent: 'center', marginHorizontal: space.md },
-  rail: { height: 4, borderRadius: 2, backgroundColor: colors.line },
-  thumb: { position: 'absolute', width: 24, height: 24, marginLeft: -12, borderRadius: 12, backgroundColor: colors.accent },
   pressed: { opacity: 0.7 }
 })

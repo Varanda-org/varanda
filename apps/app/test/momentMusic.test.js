@@ -9,6 +9,23 @@ const flush = () => new Promise((resolve) => setImmediate(resolve))
 const track = { id: 'abc', title: 'Faixa\u202e', artist: 'Artista\u0007', duration: 90, url: 'https://audius.co/artist/abc' }
 const ticket = { url: '/account/audius/audio/' + 'a'.repeat(43), base: 'https://installation.test', expiresAt: '2099-01-01T00:00:00Z' }
 
+test('cover tile and equalizer stay local and themed', (t) => {
+  const cover = fs.readFileSync(path.join(__dirname, '../src/ui/MusicCover.js'), 'utf8')
+  const equalizer = fs.readFileSync(path.join(__dirname, '../src/ui/MusicEqualizer.js'), 'utf8')
+  for (const src of [cover, equalizer]) {
+    t.absent(/\bfetch\s*\(|https?:\/\/|Platform\.OS|\u2014/.test(src))
+    t.ok(src.includes('useStyles(makeStyles)'))
+    t.ok(src.includes('useTheme()'))
+    t.ok(src.includes('accessibilityElementsHidden'))
+    t.ok(src.includes("importantForAccessibility='no-hide-descendants'"))
+    t.ok(src.includes('aria-hidden'))
+  }
+  t.ok(cover.includes("name='musica'"))
+  t.ok(cover.includes('colors.skeleton'))
+  t.ok(equalizer.includes('loopTiming('))
+  t.ok(equalizer.includes('isReduceMotionEnabled'))
+})
+
 function deferred () {
   let resolve, reject
   const promise = new Promise((_resolve, _reject) => { resolve = _resolve; reject = _reject })
@@ -471,6 +488,10 @@ async function ui (stubs) {
     Pressable: 'Pressable',
     StyleSheet: { create: (styles) => styles },
     useStyles: () => ({}),
+    useTheme: () => ({ colors: { ink: '#111111', card: '#ffffff', soft: '#4a554e' } }),
+    MusicCover: 'MusicCover',
+    MusicEqualizer: 'MusicEqualizer',
+    Icon: 'Icon',
     layout: { hit: 44 },
     radius: {},
     space: {},
@@ -615,4 +636,71 @@ test('mounted UI sanitizes attribution, opens its URL, exposes the gesture and m
   t.is(calls.filter((c) => c === 'item').length, 1, 'pause and rerenders do not reload')
   h.unmount()
   t.is(calls.filter((c) => c === 'release').length, 1)
+})
+
+test('the sticker toggles mute and the attribution opens the page', async (t) => {
+  t.is(source.split('accessibilityLabel={muteLabel}').length - 1, 1, 'one mute control stays mounted while the item loads')
+  let emit
+  const h = await ui({
+    audiusItem: async () => track,
+    audiusPlay: async () => ticket,
+    createStreamPlayer: () => ({
+      seek: async () => {},
+      play: async () => {},
+      pause: () => {},
+      release: () => {},
+      onProgress: (fn) => { emit = fn; return () => {} },
+      onError: () => () => {}
+    })
+  })
+  t.teardown(() => h.unmount())
+  const opened = []
+  const props = { music: { id: 'abc', start: 30 }, onOpenExternal: (url) => opened.push(url) }
+  const waiting = h.render(props)
+  const pending = nodes(waiting).find((n) => n.props.accessibilityLabel === 'Silenciar música')
+  t.is(waiting.children[0], pending, 'the mute control is the first child before loading')
+  t.is(pending.type, 'Pressable')
+  t.is(pending.props.accessibilityHint, undefined)
+  t.is(pending.props.accessibilityRole, 'button')
+  t.is(pending.props.accessibilityState.selected, false)
+  t.ok(nodes(pending).some((n) => n.type === 'Icon' && n.props.name === 'som'))
+  t.absent(nodes(waiting).some((n) => n.props.accessibilityRole === 'link'))
+  h.mount()
+  await flush()
+  emit({ ms: 30000, playing: true, buffering: false, ended: false })
+  const tree = h.render(props)
+  const sticker = nodes(tree).find((n) => n.props.accessibilityLabel === 'Silenciar música')
+  t.is(tree.children[0], sticker, 'the mute control is the first child after loading')
+  t.is(sticker.type, 'Pressable')
+  t.is(sticker.props.accessibilityRole, 'button')
+  t.is(sticker.props.accessibilityHint, displayText(track.title) + ', ' + displayText(track.artist), 'the hint carries the sanitized title and artist')
+  t.is(sticker.props.accessibilityState.selected, false)
+  t.ok(nodes(sticker).some((n) => n.type === 'MusicCover' && n.props.size === 36))
+  t.ok(textOf(sticker).includes(displayText(track.title)))
+  t.ok(textOf(sticker).includes(displayText(track.artist)))
+  t.absent(textOf(sticker).includes('\u202e') || textOf(sticker).includes('\u0007'))
+  const lines = nodes(sticker).filter((n) => n.type === 'Text')
+  t.is(lines.length, 2)
+  t.ok(lines.every((n) => n.props.numberOfLines === 1))
+  t.ok(nodes(sticker).some((n) => n.type === 'MusicEqualizer' && n.props.playing === true))
+  sticker.props.onPress()
+  const mutedTree = h.render(props)
+  const mutedSticker = nodes(mutedTree).find((n) => n.props.accessibilityLabel === 'Ativar música')
+  t.ok(mutedSticker, 'pressing the sticker flips the label')
+  t.is(mutedSticker.props.accessibilityState.selected, true)
+  t.ok(nodes(mutedSticker).some((n) => n.type === 'Icon' && n.props.name === 'mudo' && n.props.size === 16))
+  t.absent(nodes(mutedSticker).some((n) => n.type === 'MusicEqualizer'))
+  const link = nodes(mutedTree).find((n) => n.props.accessibilityRole === 'link')
+  t.is(link.props.accessibilityLabel, 'Abrir no Audius')
+  t.ok(textOf(link).includes('Audius'))
+  t.ok(nodes(link).some((n) => n.type === 'Icon' && n.props.name === 'externo'))
+  t.absent(nodes(mutedSticker).includes(link))
+  t.absent(nodes(link).includes(mutedSticker))
+  link.props.onPress()
+  t.alike(opened, [track.url])
+  const after = h.render(props)
+  const still = nodes(after).find((n) => n.props.accessibilityLabel === 'Ativar música')
+  t.ok(still, 'opening the page does not change mute')
+  t.is(still.props.accessibilityState.selected, true)
+  t.absent(nodes(after).find((n) => n.props.accessibilityLabel === 'Silenciar música'))
 })

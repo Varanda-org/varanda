@@ -9,6 +9,81 @@ const track = { id: 'abc', title: 'Canção', artist: 'Artista', duration: 180, 
 const draft = { ref: { kind: 'track', id: track.id, start: null }, item: track }
 const target = { ref: 'b'.repeat(64) + ':1' }
 
+test('the sticker names the choice, edits on tap and removes separately', async (t) => {
+  const { transformSync } = require('@babel/core')
+  const stickerSource = fs.readFileSync(path.join(__dirname, '../src/ui/MusicSticker.js'), 'utf8')
+  const colors = { line: 'line', card: 'card', ink: 'ink', soft: 'soft' }
+  const deps = {
+    rpc: require('@varanda/rpc'),
+    ...await import('../src/music.js'),
+    React: { createElement: (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity) }) },
+    ...Object.fromEntries(['View', 'Text', 'Pressable', 'MusicCover', 'Pill'].map((name) => [name, name])),
+    StyleSheet: { create: (styles) => styles },
+    useStyles: (make) => make(colors),
+    useTheme: () => ({ colors }),
+    layout: { hit: 44 },
+    radius: { lg: 16 },
+    space: { sm: 8 }
+  }
+  const input = stickerSource.replace(/^import .+\n/gm, '').replace(/\bexport /g, '')
+  const { code } = transformSync(input, { configFile: false, babelrc: false, plugins: ['@babel/plugin-transform-react-jsx'] })
+  // eslint-disable-next-line no-new-func
+  const MusicSticker = new Function(...Object.keys(deps), code + '\nreturn MusicSticker')(...Object.values(deps))
+  let edits = 0
+  let removals = 0
+  const props = { onPress: () => { edits++ }, onRemove: () => { removals++ } }
+  const choice = { ref: { kind: 'snippet', id: track.id, start: 72 }, item: { ...track, title: 'Can\u0000ção', artist: 'RIXX' } }
+  const tree = MusicSticker({ ...props, choice })
+  const [main, remove] = tree.children
+  const [cover, words] = main.children
+  t.is(tree.type, 'View')
+  t.is(main.type, 'Pressable')
+  t.is(main.props.accessibilityRole, 'button')
+  t.is(main.props.accessibilityLabel, 'Editar música')
+  t.is(main.props.accessibilityHint, deps.rpc.displayText(choice.item.title) + ', ' + 'RIXX · 1:12', 'the hint carries the title and the line')
+  t.alike(main.props.accessibilityState, { disabled: false })
+  t.is(main.props.disabled, false)
+  t.is(cover.type, 'MusicCover')
+  t.is(cover.props.size, 44)
+  t.is(words.children[0].children[0], deps.rpc.displayText(choice.item.title))
+  t.is(words.children[1].children[0], 'RIXX · 1:12')
+  t.is(words.children[0].props.numberOfLines, 1)
+  t.is(words.children[1].props.numberOfLines, 1)
+  t.is(words.children[0].props.style.fontWeight, '700')
+  t.is(words.children[1].props.style.color, colors.soft)
+  t.alike(tree.props.style, { alignSelf: 'stretch', flexDirection: 'row', alignItems: 'center', borderRadius: 16, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.card, minHeight: 44, gap: 8, padding: 8 })
+  t.is(remove.type, 'Pill', 'remove is a sibling of the edit control')
+  t.is(remove.props.icon, 'fechar')
+  t.is(remove.props.accessibilityLabel, 'Remover música')
+  remove.props.onPress()
+  t.is(removals, 1)
+  t.is(edits, 0, 'removing does not edit')
+  main.props.onPress()
+  t.is(edits, 1)
+  for (const [kind, expected] of [['track', 'RIXX · Faixa inteira'], ['playlist', 'Playlist · 3 faixas']]) {
+    const card = MusicSticker({ ...props, choice: { ref: { ...choice.ref, kind, start: null }, item: { ...choice.item, count: 3 } } })
+    t.is(card.children[0].children[1].children[1].children[0], expected)
+  }
+  const unsafe = MusicSticker({ ...props, choice: { ...choice, item: { ...choice.item, artist: 'RI\u202eXX' } } })
+  t.is(unsafe.children[0].children[1].children[1].children[0], deps.rpc.displayText('RI\u202eXX · 1:12'))
+  for (const onRemove of [undefined, null, true]) {
+    const card = MusicSticker({ ...props, choice, onRemove })
+    t.is(card.children[1], null, 'no remove control without a function')
+  }
+  for (const overrides of [{ disabled: true }, { onPress: undefined }, { onPress: null }, { onPress: true }]) {
+    const card = MusicSticker({ ...props, choice, ...overrides })
+    const edit = card.children[0]
+    t.is(edit.props.disabled, true)
+    t.alike(edit.props.accessibilityState, { disabled: true })
+    t.is(edit.props.onPress, undefined)
+    t.is(card.children[1].props.disabled, overrides.disabled)
+  }
+  t.ok(stickerSource.includes('displayText(choice.item.title)'))
+  t.ok(stickerSource.includes('displayText(musicStickerLine('))
+  t.ok(/card: \{ alignSelf: 'stretch',/.test(stickerSource), 'the sticker fills the width even under a flex-start parent')
+  t.absent(stickerSource.includes('\u2014'))
+})
+
 test('music snapshots are frozen, sanitized and have no thumbnail', async (t) => {
   const { musicSnapshot } = await rules()
   const snapshot = musicSnapshot(draft)
@@ -37,13 +112,25 @@ test('music blocks photos, a video, pages, empty text and offline sends', async 
   t.is(musicBlocks({ ...valid, online: false }), 'Sem conexão: a música precisa de conexão')
 })
 
-test('music use lines show snippets, tracks and playlists', async (t) => {
-  const { useLine } = await rules()
-  t.is(useLine({ kind: 'snippet', start: 0 }), 'Trecho de 15 s a partir de 0:00')
-  t.is(useLine({ kind: 'snippet', start: 75 }), 'Trecho de 15 s a partir de 1:15')
-  t.is(useLine({ kind: 'snippet', start: 7200 }), 'Trecho de 15 s a partir de 120:00')
-  t.is(useLine(draft.ref), 'Faixa inteira')
-  t.is(useLine({ kind: 'playlist' }), 'Playlist')
+test('the composer shows a music sticker that reopens the editor and can be removed', (t) => {
+  t.ok(source.includes('<MusicSticker choice={musicDraft} onPress={held || musicAvailable !== true ? undefined : () => setMusicPickerOpen(true)} onRemove={held ? undefined : () => setMusicDraft(null)} />'))
+  t.ok(source.includes('<MusicSticker choice={momentChoiceOf(moment.music)} onPress={node.online === false ? undefined : () => moment.setMusicPickerOpen(true)} onRemove={() => moment.removeMusic()} disabled={moment.pending || moment.held} />'))
+  t.ok(source.includes('initial={musicDraft}'))
+  t.ok(source.includes('initial={momentChoiceOf(moment.music)}'))
+  t.ok(source.includes("accessibilityLabel='Música'"))
+  t.ok(source.includes("<Icon name='musica' size={21} color={colors.soft} />"))
+  t.ok(source.includes("<Pill label='Música' icon='musica'"))
+  t.absent(source.includes('useLine('))
+})
+
+test('moment choices adapt the saved reference to a snippet without changing the draft', async (t) => {
+  const { momentChoiceOf } = await rules()
+  t.is(momentChoiceOf(null), null)
+  const music = Object.freeze({ ref: Object.freeze({ id: 'a1', start: 12 }), item: track })
+  const choice = momentChoiceOf(music)
+  t.alike(choice, { ref: { kind: 'snippet', id: 'a1', start: 12 }, item: track })
+  t.is(choice.item, track)
+  t.alike(music.ref, { id: 'a1', start: 12 })
 })
 
 test('resolve targets skip fragments, lookalike hosts and tried URLs', async (t) => {

@@ -85,7 +85,7 @@ import { LinkDraftCard, useLinkDraft } from '../ui/ChatComposer'
 import { LINK_DRAFT_DELAY_MS, cardForSend, withCardFallback } from '../linkCard'
 import { fallbackCard, isAudiusLink } from '../musicEmbed'
 import { musicOriginOf } from '../music'
-import { MUSIC_PHOTOS_TEXT, MUSIC_VIDEO_TEXT, MUSIC_MOMENT_VIDEO_TEXT, musicBlocks, musicSnapshot, resolveTarget, useLine } from '../musicDraft'
+import { MUSIC_PHOTOS_TEXT, MUSIC_VIDEO_TEXT, MUSIC_MOMENT_VIDEO_TEXT, musicBlocks, musicSnapshot, resolveTarget, momentChoiceOf } from '../musicDraft'
 import { audiusPolicy, audiusReady, audiusResolve } from '../account'
 import { playbackEpoch } from '../media/chatMedia'
 import { previewTarget } from '../preview'
@@ -93,7 +93,7 @@ import { previewsEnabled } from '../previewPref'
 import { previewPrefStore } from '../previewBuild'
 import { MusicPicker } from '../ui/MusicPicker'
 import { useMusicAvailable } from '../ui/MusicPlayerCard'
-import { LinkCard } from '../ui/LinkCard'
+import { MusicSticker } from '../ui/MusicSticker'
 import { withPreview } from '../attach-plan'
 import { refusalOf } from '../wordCheck'
 import { Sheet, TEXT_CAP } from '../ui/Sheet'
@@ -1629,14 +1629,11 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
               {canVideo ? <Pill label='Vídeo' onPress={handlePickMomentVideo} disabled={moment.pending || moment.held || moment.video.state.phase !== 'empty' || moment.photo.busy} /> : null}
               {canVideo ? <Soft>{MOMENT_ONE_MEDIA}</Soft> : null}
               {moment.musicAvailable
-                ? <Pill label='Música' onPress={() => moment.setMusicPickerOpen(true)} disabled={moment.pending || moment.held || node.online === false} />
+                ? <Pill label='Música' icon='musica' onPress={() => moment.setMusicPickerOpen(true)} disabled={moment.pending || moment.held || node.online === false} />
                 : null}
               {moment.musicAvailable && moment.music !== null
                 ? (
-                  <View style={styles.momentMusicChip}>
-                    <Text style={[styles.counter, styles.flex]} numberOfLines={2}>{displayText(moment.music.item.title)}, {displayText(moment.music.item.artist)} · Audius</Text>
-                    <Pill icon='fechar' accessibilityLabel='Remover música' onPress={() => moment.removeMusic()} disabled={moment.pending || moment.held} />
-                  </View>
+                  <MusicSticker choice={momentChoiceOf(moment.music)} onPress={node.online === false ? undefined : () => moment.setMusicPickerOpen(true)} onRemove={() => moment.removeMusic()} disabled={moment.pending || moment.held} />
                   )
                 : null}
               <TextInput
@@ -1684,6 +1681,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
             open={open === true && moment.musicAvailable && moment.musicPickerOpen && !moment.pending && !moment.held}
             onClose={() => moment.setMusicPickerOpen(false)}
             onPick={(choice) => moment.pickMusic(choice)}
+            initial={momentChoiceOf(moment.music)}
             member={me?.publicKey}
             origin={musicOriginOf(node)}
             request={nodeRequest}
@@ -1856,8 +1854,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
           {musicDraft !== null && items.length === 0
             ? (
               <View style={styles.errors}>
-                <LinkCard draft={musicSnapshot(musicDraft)} onDismiss={held ? undefined : () => setMusicDraft(null)} />
-                <Soft>{useLine(musicDraft.ref)}</Soft>
+                <MusicSticker choice={musicDraft} onPress={held || musicAvailable !== true ? undefined : () => setMusicPickerOpen(true)} onRemove={held ? undefined : () => setMusicDraft(null)} />
               </View>
               )
             : null}
@@ -1905,7 +1902,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     hitSlop={6}
                     style={({ pressed }) => [styles.tool, pressed && styles.toolPressed]}
                   >
-                    <Text style={styles.counter}>Música</Text>
+                    <Icon name='musica' size={21} color={colors.soft} />
                   </Pressable>
                   )
                 : null}
@@ -1921,6 +1918,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
             open={open === true && !momentMode && asPage === null && musicAvailable === true && musicPickerOpen && !held}
             onClose={() => setMusicPickerOpen(false)}
             onPick={pickMusic}
+            initial={musicDraft}
             member={member}
             origin={musicOrigin}
             request={nodeRequest}
@@ -2149,7 +2147,6 @@ const makeStyles = (colors) => StyleSheet.create({
   thumbError: { fontSize: 12, lineHeight: 15, color: colors.danger },
   momentBody: { gap: space.md, paddingHorizontal: space.lg, paddingTop: space.md, paddingBottom: space.lg, alignItems: 'flex-start' },
   momentPhoto: { width: 160, height: 200, borderRadius: 12, overflow: 'hidden', backgroundColor: colors.skeleton },
-  momentMusicChip: { alignSelf: 'stretch', flexDirection: 'row', alignItems: 'center', gap: 8, paddingLeft: 12, borderRadius: 22, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.card },
   momentInput: { ...type.compose, alignSelf: 'stretch', color: colors.ink, minHeight: MOMENT_MIN_HEIGHT, maxHeight: MOMENT_MAX_HEIGHT, borderWidth: 1, borderColor: colors.line, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, backgroundColor: colors.card },
   momentCounter: { alignSelf: 'flex-end', marginTop: -4 },
   tools: { flexDirection: 'row', alignItems: 'center', gap: 4, flex: 1 },

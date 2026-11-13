@@ -883,7 +883,8 @@ test('momento music gates are policy and capability based, with no viewer probe 
   t.ok(viewer.includes('momentMusicOf(item)'), 'only a valid music item plays')
   t.absent(viewer.includes('AUTO_ADVANCE_MS'), 'durations come from the pure photo/music and video helpers')
   t.ok(composer.includes("modes={['snippet']}"), 'moment picker only offers snippets')
-  t.ok(composer.includes('displayText(moment.music.item.title)') && composer.includes('displayText(moment.music.item.artist)'), 'provider text is sanitized')
+  t.ok(composer.includes('<MusicSticker choice={momentChoiceOf(moment.music)}'), 'the sticker receives the adapted momento choice')
+  t.ok(composer.includes('initial={momentChoiceOf(moment.music)}'), 'the picker reopens the saved snippet')
   t.absent(/audius|MusicPicker|MomentMusic/.test(code('src/ui/MomentosStrip.js')), 'the strip never asks the catalog')
 })
 
@@ -1185,23 +1186,47 @@ test('momento sends only a chosen music reference, checks author text and never 
   t.is(h.render().music, null, 'discard clears the music draft')
 })
 
-test('T22 fix 1: a saved music chip and its remove button follow the send gate', (t) => {
+test('T22 fix 1: a saved music chip and its remove button follow the send gate', async (t) => {
   const src = read('src/screens/Publicar.js')
-  const chip = src.indexOf('<View style={styles.momentMusicChip}>')
+  const { momentChoiceOf } = await import('../src/musicDraft.js')
+  const chip = src.indexOf('<MusicSticker choice={momentChoiceOf(moment.music)}')
   const jsx = src.slice(src.lastIndexOf('\n              {', chip), src.indexOf('\n              <TextInput', chip))
-  const h = hookHost('function Chip ({ moment }) { return <>' + jsx + '</> }', 'Chip', {
-    View: 'View', Text: 'Text', Pill: 'Pill', styles: {}, displayText: (s) => s
+  const h = hookHost('function Chip ({ moment, node }) { return <>' + jsx + '</> }', 'Chip', {
+    momentChoiceOf,
+    React: { createElement: (type, props, ...children) => typeof type === 'function' ? type(props) : { type, props: props || {}, children: children.flat(Infinity) } },
+    MusicSticker: ({ choice, onPress, onRemove, disabled }) => ({
+      type: 'MusicSticker',
+      props: { choice, onPress, disabled },
+      children: [{ type: 'Pill', props: { accessibilityLabel: 'Remover música', onPress: onRemove, disabled }, children: [] }]
+    })
   })
   t.teardown(h.unmount)
-  const music = { item: { title: 'Faixa', artist: 'Artista' } }
-  const closed = treeNodes(h.render({ moment: { music, musicAvailable: false } }))
-  t.absent(closed.some((n) => n.type === 'View'), 'saved choice hidden while the gate is closed')
+  const music = { ref: { id: 'a1', start: 12 }, item: { title: 'Faixa', artist: 'Artista' } }
+  const closed = treeNodes(h.render({ moment: { music, musicAvailable: false }, node: { online: true } }))
+  t.absent(closed.some((n) => n.type === 'MusicSticker'), 'saved choice hidden while the gate is closed')
   t.absent(closed.some((n) => n.props.accessibilityLabel === 'Remover música'), 'remove button hidden too')
   let removed = false
-  const opened = treeNodes(h.render({ moment: { music, musicAvailable: true, removeMusic: () => { removed = true } } }))
-  t.ok(opened.some((n) => n.type === 'Text'), 'chip returns when the gate opens')
+  let openedPicker = false
+  const opened = treeNodes(h.render({
+    moment: { music, musicAvailable: true, removeMusic: () => { removed = true }, setMusicPickerOpen: (value) => { openedPicker = value } },
+    node: { online: true }
+  }))
+  t.ok(opened.some((n) => n.type === 'MusicSticker'), 'sticker returns when the gate opens')
+  t.alike(opened.find((n) => n.type === 'MusicSticker').props.choice, { ref: { kind: 'snippet', id: 'a1', start: 12 }, item: music.item })
+  const edit = opened.find((n) => n.type === 'MusicSticker').props.onPress
+  t.is(typeof edit, 'function')
+  edit()
+  t.is(openedPicker, true)
   opened.find((n) => n.props.accessibilityLabel === 'Remover música').props.onPress()
   t.ok(removed)
+  let removedOffline = false
+  const offline = treeNodes(h.render({
+    moment: { music, musicAvailable: true, removeMusic: () => { removedOffline = true } },
+    node: { online: false }
+  }))
+  t.is(offline.find((n) => n.type === 'MusicSticker').props.onPress, undefined)
+  offline.find((n) => n.props.accessibilityLabel === 'Remover música').props.onPress()
+  t.ok(removedOffline)
 })
 
 test('T22 fix 2: the attribution hold releases on visibility return or the popup grace', async (t) => {
