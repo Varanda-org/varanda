@@ -1,4 +1,5 @@
 import { embedStep, EMBED_IDLE } from './embedLive.js'
+import { onSoundMute, soundMuted } from './soundMute.js'
 
 export const MUSIC_AUTO_PREF_LABEL = 'Tocar música sozinha'
 export const MUSIC_AUTO_PREF_NOTE = 'Ligada, a música de uma publicação toca quando aparece na tela, e o app pede a faixa ao serviço de conta. Desligada, só toca quando você toca no cartão.'
@@ -6,6 +7,7 @@ export const MUSIC_AUTO_PREF_NOTE = 'Ligada, a música de uma publicação toca 
 const KEY = 'varanda-musica-sozinha'
 const listeners = new Set()
 let held = false
+let lastHeld = false
 const holdListeners = new Set()
 const autoFailed = new Set()
 const AUTO_FAILED_MAX = 500
@@ -55,13 +57,14 @@ export function autoplayRefused (err) {
   return err?.name === 'NotAllowedError' || err?.cause?.name === 'NotAllowedError'
 }
 
-// A refusal, manual silence or daily limit must also stop other rows spending requests.
+// A refusal or daily limit must stop other rows spending requests;
+// the person's own silence lives in soundMute.js.
 export function holdMusicAuto () {
   setHeld(true)
 }
 
 export function musicAutoHeld () {
-  return held
+  return held || soundMuted()
 }
 
 export function clearMusicAutoHold () {
@@ -78,10 +81,19 @@ export function onMusicAutoHold (fn) {
 function setHeld (value) {
   if (held === value) return
   held = value
+  announce()
+}
+
+function announce () {
+  const value = held || soundMuted()
+  if (value === lastHeld) return
+  lastHeld = value
   for (const fn of [...holdListeners]) {
     try { fn() } catch {}
   }
 }
+
+onSoundMute(announce)
 
 // A row scrolled far away unmounts: the session, not the row, remembers that
 // an automatic attempt failed, so coming back does not spend another request.

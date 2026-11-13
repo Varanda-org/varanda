@@ -42,7 +42,9 @@ async function harness (options = {}) {
   const postMusic = await import('../src/postMusic.js')
   const embedLive = await import('../src/embedLive.js')
   const music = await import('../src/music.js')
+  const mute = await import('../src/soundMute.js')
   postMusic.clearMusicAutoHold()
+  mute.setSoundMuted(false)
   const env = { visible: true, held: false, online: true, busy: false, readerOn: false, readerKnown: true, at: VISIBLE, hosted: true, ...options }
   const member = options.member || (++members).toString(16).padStart(64, 'a')
   const calls = []
@@ -82,6 +84,7 @@ async function harness (options = {}) {
   const deps = {
     ...postMusic,
     ...music,
+    ...mute,
     ...hooks,
     EMBED_IDLE: embedLive.EMBED_IDLE,
     EMBED_LIVE: embedLive.EMBED_LIVE,
@@ -188,7 +191,7 @@ async function harness (options = {}) {
   const presses = () => calls.filter((c) => c[0] === 'press')
   const stops = () => calls.filter((c) => c[0] === 'stop').length
   const hold = (on) => { env.held = on; for (const fn of [...holds]) fn() }
-  return { hold, env, calls, covers, opened, store, render, tick, unmount, find, text, sticker, presses, stops, PostMusic, AmbientMusic, card, ref, postMusic, embedLive, get controller () { return controller } }
+  return { hold, env, calls, covers, opened, store, render, tick, unmount, find, text, sticker, presses, stops, PostMusic, AmbientMusic, card, ref, postMusic, embedLive, mute, get controller () { return controller } }
 }
 
 test('PostMusic: playlists, the switch off and a node that is not hosted keep the old cards', async (t) => {
@@ -320,6 +323,109 @@ test('a tap on a playing sticker silences every post until the next tap', async 
   t.alike(h.presses().at(-1), ['press', 7])
   h.unmount()
   other.unmount()
+})
+
+const speaker = (h) => h.find((n) => n.type === 'Pressable' && (n.props.accessibilityLabel === 'Silenciar som' || n.props.accessibilityLabel === 'Ativar som'))[0]
+
+test('the speaker mutes a playing row and covers read memory only', async (t) => {
+  const h = await harness()
+  h.render()
+  const s = speaker(h)
+  t.is(s.props.accessibilityLabel, 'Silenciar som')
+  t.is(s.props.accessibilityHint, undefined, 'no hint, so it is not the song sticker')
+  t.is(h.find((n) => n.type === 'Icon' && n.props.name === 'som').length, 1)
+  h.tick()
+  h.tick()
+  h.controller.publish({ phase: 'playing', item: { id: 'abc', title: 'F', artist: 'A', duration: 200, url: 'https://audius.co/a/f', cover: true } })
+  h.render()
+  speaker(h).props.onPress()
+  t.ok(h.mute.soundMuted())
+  t.is(h.stops(), 1, 'the mute listener stops the controller')
+  h.render()
+  for (let i = 0; i < 4; i++) h.tick()
+  t.is(h.presses().length, 1, 'no press on later ticks')
+  t.is(h.covers.at(-1).enabled, 'cached')
+  t.is(speaker(h).props.accessibilityLabel, 'Ativar som')
+  h.unmount()
+})
+
+test('a mute from outside stops a live row at once; a hold does not', async (t) => {
+  const h = await harness()
+  h.render()
+  h.tick()
+  h.tick()
+  h.controller.publish({ phase: 'playing' })
+  h.render()
+  h.postMusic.holdMusicAuto()
+  t.is(h.stops(), 0, 'a hold from outside leaves the row playing')
+  h.mute.setSoundMuted(true)
+  t.is(h.stops(), 1, 'a mute stops it in the same call')
+  h.unmount()
+})
+
+test('the speaker while muted unmutes through one manual press, only on an active row', async (t) => {
+  const h = await harness()
+  h.render()
+  h.mute.setSoundMuted(true)
+  h.postMusic.holdMusicAuto()
+  h.render()
+  t.is(speaker(h).props.accessibilityLabel, 'Ativar som')
+  speaker(h).props.onPress()
+  t.absent(h.mute.soundMuted())
+  t.absent(h.postMusic.musicAutoHeld())
+  t.alike(h.presses(), [['press', 7]])
+  h.unmount()
+
+  const away = await harness({ visible: false })
+  away.render()
+  away.mute.setSoundMuted(true)
+  away.render()
+  speaker(away).props.onPress()
+  t.absent(away.mute.soundMuted(), 'inactive: state is cleared')
+  t.is(away.presses().length, 0, 'nothing plays')
+  away.unmount()
+})
+
+test('after a refusal the speaker offers sound and plays the kept player', async (t) => {
+  const h = await harness()
+  h.render()
+  h.tick()
+  h.tick()
+  h.controller.publish({ phase: 'paused', blocked: true })
+  h.render()
+  t.is(speaker(h).props.accessibilityLabel, 'Ativar som')
+  t.is(h.find((n) => n.type === 'Icon' && n.props.name === 'mudo').length, 1)
+  speaker(h).props.onPress()
+  t.alike(h.presses().at(-1), ['press', 7])
+  h.unmount()
+})
+
+test('a sticker tap mute lets the row start again once sound returns', async (t) => {
+  const h = await harness()
+  h.render()
+  h.tick()
+  h.tick()
+  h.controller.publish({ phase: 'playing' })
+  h.render()
+  h.sticker().props.onPress()
+  h.mute.setSoundMuted(false)
+  h.tick()
+  h.tick()
+  t.is(h.presses().length, 2, 'one automatic press after the first')
+  t.alike(h.presses().at(-1), ['press', 7, { auto: true }])
+  h.unmount()
+})
+
+test('a tap on a sounding sticker mutes sound', async (t) => {
+  const h = await harness()
+  h.render()
+  h.tick()
+  h.tick()
+  h.controller.publish({ phase: 'playing' })
+  h.render()
+  h.sticker().props.onPress()
+  t.ok(h.mute.soundMuted())
+  h.unmount()
 })
 
 test('a refused sound shows Tocar música, and its tap plays the kept player', async (t) => {
@@ -533,10 +639,13 @@ test('PostMusic source rules', (t) => {
   t.ok(start.includes('controller.current.press(playbackEpoch(), { auto: true })'), 'the automatic press reads the epoch there')
   t.is([...code.matchAll(/\{ auto: true \}/g)].length, 1, 'only the start branch marks a press automatic')
   const tap = between(code, 'const onTap = () => {', '\n  }\n')
-  t.ok(/if \(phaseRef\.current === 'playing' \|\| phaseRef\.current === 'loading'\) \{\s*playback\.stop\(\)\s*holdMusicAuto\(\)\s*return/.test(tap), 'a tap on a sounding sticker stops it and holds')
+  t.ok(/if \(phaseRef\.current === 'playing' \|\| phaseRef\.current === 'loading'\) \{\s*stepRef\.current = EMBED_IDLE\s*playback\.stop\(\)\s*setSoundMuted\(true\)\s*return/.test(tap), 'a tap on a sounding sticker stops it and mutes')
+  t.absent(tap.includes('holdMusicAuto()'), 'the tap leaves the refusal hold alone')
   const clear = tap.indexOf('clearMusicAutoHold()')
   const press = tap.indexOf('playback.press(playbackEpoch())')
   t.ok(clear > 0 && press > clear, 'a tap clears the hold before it presses')
+  const unmute = tap.indexOf('setSoundMuted(false)')
+  t.ok(unmute > clear && press > unmute, 'a tap unmutes right after the hold and before it presses')
   t.ok(tap.includes('stepRef.current = EMBED_LIVE'), 'a tapped song is supervised')
   const active = tap.indexOf('if (!active) return')
   t.ok(active > 0 && tap.indexOf('setRefused(false)') > active, 'a tap that cannot start keeps the refusal chip')

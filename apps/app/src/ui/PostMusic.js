@@ -11,18 +11,21 @@
 // other player holds playback and no provider frame is loaded: claiming
 // playback would pause the one and drop the other. Nothing starts by itself
 // while a screen reader runs or before its answer (./screenReader), after a
-// refusal of sound, a tap that silenced a post or the daily limit
-// (holdMusicAuto, for every post until the next tap on a sticker), or after an
-// automatic failure of this song, which shows no error and is remembered for
+// refusal of sound or the daily limit (holdMusicAuto, for every post until the
+// next tap on a sticker), while sound is muted, or after an automatic failure
+// of this song, which shows no error and is remembered for
 // the session even once the row unmounts (an automatic fallback keeps the
 // sticker, so a tap can still try). Every playback of the
 // row, tapped or not, stops when the sticker leaves the band, a sheet or
 // another screen covers it, the node goes offline or the app goes to the
 // background.
 //
+// A tap on a sounding sticker or the speaker mutes sound for the session,
+// shared with feed video and momentos (../soundMute).
+//
 // The cover is asked only after this row's item was answered, for the same
 // member, origin and music, and only while the row is seen. While music is
-// silenced, a row the person did not tap shows only a cover already in memory.
+// silenced or muted, a row the person did not tap shows only a cover already in memory.
 // A refused sound keeps a 'Tocar música' chip until a tap here or playback.
 //
 // Every music card keeps the artist, the title, the Audius source and the page
@@ -40,6 +43,7 @@ import { MUSIC_LIMIT_TEXT, MUSIC_SOURCE, SNIPPET_BADGE, musicInfoLine, musicOrig
 import { musicAutoStore } from '../musicAutoStore'
 import { useHosted, useNode } from '../node'
 import { openExternal } from '../openExternal'
+import { SOUND_MUTE_LABEL, SOUND_UNMUTE_LABEL, onSoundMute, setSoundMuted, soundMuted } from '../soundMute'
 import { ambientKind, ambientStep, clearMusicAutoHold, holdMusicAuto, markMusicAutoFailed, musicAutoEnabled, musicAutoFailed, musicAutoHeld, onMusicAutoChange, onMusicAutoHold } from '../postMusic'
 import { Icon } from './Icon'
 import { LinkCard } from './LinkCard'
@@ -147,6 +151,14 @@ function AmbientMusic ({ card, music }) {
     failedRef.current = false
     return () => playback.release()
   }, [playback])
+  // A live row is never stopped by ambientStep, so a mute set elsewhere stops it
+  // here. Not onMusicAutoHold: a refusal must keep its player for the chip.
+  useEffect(() => onSoundMute(() => {
+    if (soundMuted() && phaseRef.current !== 'idle') {
+      stepRef.current = EMBED_IDLE
+      controller.current.stop()
+    }
+  }), [])
 
   const active = visible && !held && node.online !== false
 
@@ -266,18 +278,34 @@ function AmbientMusic ({ card, music }) {
   const sounding = phase === 'playing' || phase === 'loading'
   const onTap = () => {
     if (phaseRef.current === 'playing' || phaseRef.current === 'loading') {
+      // Not live any more: once sound returns, the checks may start this row again.
+      stepRef.current = EMBED_IDLE
       playback.stop()
-      holdMusicAuto()
+      setSoundMuted(true)
       return
     }
     // Only the visibility checks stop a song when the row leaves: none run now.
     if (!active) return
     setRefused(false)
     clearMusicAutoHold()
+    setSoundMuted(false)
     attemptRef.current = 'manual'
     // Live, so the checks stop a tapped song when the row leaves the screen.
     stepRef.current = EMBED_LIVE
     playback.press(playbackEpoch())
+  }
+  const off = silenced || musicAutoHeld()
+  const onSound = () => {
+    if (!off) {
+      setSoundMuted(true)
+      return
+    }
+    if (!active || phaseRef.current === 'playing' || phaseRef.current === 'loading') {
+      clearMusicAutoHold()
+      setSoundMuted(false)
+      return
+    }
+    onTap()
   }
   const title = displayText(item ? item.title : card.title)
   const line = displayText(item ? (musicInfoLine(item) || musicRowLine(item)) : card.desc)
@@ -313,6 +341,15 @@ function AmbientMusic ({ card, music }) {
           <Icon name='externo' size={16} color={colors.ink} />
           <Text style={styles.text}>{MUSIC_SOURCE}</Text>
         </Pressable>
+        <Pressable
+          accessibilityRole='button'
+          accessibilityLabel={off ? SOUND_UNMUTE_LABEL : SOUND_MUTE_LABEL}
+          accessibilityState={{ selected: off }}
+          onPress={onSound}
+          style={({ pressed }) => [styles.mute, pressed && styles.pressed]}
+        >
+          <Icon name={off ? 'mudo' : 'som'} size={16} color={colors.ink} />
+        </Pressable>
         {(state.blocked || refused) && !sounding
           ? (
             <Pressable accessibilityRole='button' onPress={onTap} style={({ pressed }) => [styles.chip, pressed && styles.pressed]}>
@@ -327,7 +364,7 @@ function AmbientMusic ({ card, music }) {
 }
 
 const makeStyles = (colors) => StyleSheet.create({
-  row: { marginTop: space.sm, minHeight: layout.hit, flexDirection: 'row', alignItems: 'center', gap: space.xs },
+  row: { marginTop: space.sm, minHeight: layout.hit, flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: space.xs },
   sticker: {
     flexShrink: 1,
     minHeight: layout.hit,
@@ -354,6 +391,7 @@ const makeStyles = (colors) => StyleSheet.create({
     borderRadius: radius.lg,
     backgroundColor: colors.card
   },
+  mute: { width: layout.hit, height: layout.hit, alignItems: 'center', justifyContent: 'center', borderRadius: radius.lg, backgroundColor: colors.card },
   chip: { minHeight: layout.hit, justifyContent: 'center', paddingHorizontal: space.sm, borderRadius: radius.md, backgroundColor: colors.card },
   pressed: { opacity: 0.7 },
   text: { fontSize: 13, lineHeight: 18, color: colors.ink },

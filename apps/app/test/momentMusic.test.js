@@ -508,6 +508,9 @@ test('shared source escapes provider text, uses a bound claim and releases on un
 // Render the real component with hook storage and local host elements.
 async function ui (stubs) {
   const { transformSync } = require('@babel/core')
+  const { onSoundMute, setSoundMuted, soundMuted } = await import('../src/soundMute.js')
+  // Shared mute outlives the component, so each harness starts and ends unmuted.
+  setSoundMuted(false)
   const slots = []
   const pending = []
   let cursor = 0
@@ -548,7 +551,10 @@ async function ui (stubs) {
     radius: {},
     space: {},
     displayText,
-    ...stubs
+    ...stubs,
+    onSoundMute,
+    setSoundMuted,
+    soundMuted
   }
   const input = source.replace(/^import .+\n/gm, '').replace(/\bexport /g, '')
   const { code } = transformSync(input, { configFile: false, babelrc: false, plugins: ['@babel/plugin-transform-react-jsx'] })
@@ -557,7 +563,13 @@ async function ui (stubs) {
   return {
     render: (props) => { cursor = 0; return Component(props) },
     mount: () => { for (const fn of pending.splice(0)) fn() },
-    unmount: () => { for (const slot of slots) slot?.cleanup?.() }
+    unmount: () => {
+      try {
+        for (const slot of slots) slot?.cleanup?.()
+      } finally {
+        setSoundMuted(false)
+      }
+    }
   }
 }
 
@@ -920,4 +932,200 @@ test('the sticker toggles mute and the attribution opens the page', async (t) =>
   t.ok(still, 'opening the page does not change mute')
   t.is(still.props.accessibilityState.selected, true)
   t.absent(nodes(after).find((n) => n.props.accessibilityLabel === 'Silenciar música'))
+})
+
+function uiPlayer (calls, options = {}) {
+  let emit = () => {}
+  const stubs = {
+    audiusItem: () => {
+      calls.push('item')
+      return options.item ? options.item() : track
+    },
+    audiusPlay: async () => {
+      calls.push('ticket')
+      return ticket
+    },
+    createStreamPlayer: () => ({
+      seek: async () => calls.push('seek'),
+      play: async () => calls.push('play'),
+      pause: () => calls.push('pause'),
+      release: () => calls.push('release'),
+      onProgress: (fn) => { emit = fn; return () => {} },
+      onError: () => () => {}
+    })
+  }
+  return { stubs, emit: (update) => emit(update) }
+}
+
+test('a muted momento asks nothing until sound returns', async (t) => {
+  const { setSoundMuted } = await import('../src/soundMute.js')
+  const { playbackClaimCount } = await dependencies()
+  const calls = []
+  const { stubs } = uiPlayer(calls)
+  const h = await ui(stubs)
+  t.teardown(() => h.unmount())
+  setSoundMuted(true)
+  let starts = 0
+  const unavailable = []
+  const props = {
+    music: { id: 'abc', start: 30 },
+    onStart: () => { starts++ },
+    onUnavailable: (error) => unavailable.push(error)
+  }
+  const claims = playbackClaimCount()
+  h.render(props)
+  h.mount()
+  await flush()
+  const tree = h.render(props)
+  const buttons = nodes(tree).filter((n) => n.props.accessibilityRole === 'button')
+  t.is(buttons.length, 1)
+  t.is(buttons[0].props.accessibilityLabel, 'Ativar música')
+  t.is(buttons[0].props.accessibilityState.selected, true)
+  t.ok(nodes(buttons[0]).some((n) => n.type === 'Icon' && n.props.name === 'mudo' && n.props.size === 16))
+  t.absent(nodes(tree).some((n) => n.props.accessibilityRole === 'link'))
+  t.absent(textOf(tree).includes('Tocar música'))
+  t.alike(calls, [])
+  t.is(playbackClaimCount(), claims)
+  t.is(starts, 0)
+  t.alike(unavailable, [])
+  setSoundMuted(false)
+  h.render(props)
+  h.mount()
+  await flush()
+  t.alike(calls, ['item', 'ticket', 'seek', 'play'])
+  t.is(playbackClaimCount(), claims + 1)
+})
+
+test('muting mid playback pauses and unmuting resumes without another ticket', async (t) => {
+  const { soundMuted } = await import('../src/soundMute.js')
+  const calls = []
+  const { stubs, emit } = uiPlayer(calls)
+  const h = await ui(stubs)
+  t.teardown(() => h.unmount())
+  const props = { music: { id: 'abc', start: 30 } }
+  h.render(props)
+  h.mount()
+  await flush()
+  emit({ ms: 30000, playing: true, buffering: false })
+  t.alike(calls, ['item', 'ticket', 'seek', 'play'])
+  nodes(h.render(props)).find((n) => n.props.accessibilityLabel === 'Silenciar música').props.onPress()
+  t.is(soundMuted(), true)
+  h.render(props)
+  h.mount()
+  t.is(calls.at(-1), 'pause')
+  nodes(h.render(props)).find((n) => n.props.accessibilityLabel === 'Ativar música').props.onPress()
+  t.is(soundMuted(), false)
+  h.render(props)
+  h.mount()
+  t.is(calls.at(-1), 'play')
+  t.alike(calls.filter((name) => name === 'item'), ['item'])
+  t.alike(calls.filter((name) => name === 'ticket'), ['ticket'])
+  t.alike(calls.filter((name) => name === 'seek'), ['seek'])
+})
+
+test('the sticker sets the shared mute and another momento reads it', async (t) => {
+  const { soundMuted } = await import('../src/soundMute.js')
+  const firstPlayer = uiPlayer([])
+  const secondPlayer = uiPlayer([])
+  const first = await ui(firstPlayer.stubs)
+  const second = await ui(secondPlayer.stubs)
+  t.teardown(() => { first.unmount(); second.unmount() })
+  const props = { music: { id: 'abc', start: 30 } }
+  first.render(props)
+  first.mount()
+  second.render(props)
+  second.mount()
+  await flush()
+  t.is(soundMuted(), false)
+  t.ok(nodes(second.render(props)).some((n) => n.props.accessibilityLabel === 'Silenciar música'))
+  nodes(first.render(props)).find((n) => n.props.accessibilityLabel === 'Silenciar música').props.onPress()
+  t.is(soundMuted(), true)
+  const seen = second.render(props)
+  const sticker = nodes(seen).find((n) => n.props.accessibilityLabel === 'Ativar música')
+  t.ok(sticker, 'a mounted momento reads the shared mute')
+  t.is(sticker.props.accessibilityState.selected, true)
+  t.ok(nodes(sticker).some((n) => n.type === 'Icon' && n.props.name === 'mudo'))
+  t.absent(nodes(seen).some((n) => n.props.accessibilityLabel === 'Silenciar música'))
+})
+
+test('a mute during loading leaves the player silent when the ticket arrives', async (t) => {
+  const { setSoundMuted } = await import('../src/soundMute.js')
+  const gate = deferred()
+  const calls = []
+  const { stubs } = uiPlayer(calls, { item: () => gate.promise })
+  const h = await ui(stubs)
+  t.teardown(() => h.unmount())
+  const props = { music: { id: 'abc', start: 30 } }
+  h.render(props)
+  h.mount()
+  t.alike(calls, ['item'])
+  setSoundMuted(true)
+  h.render(props)
+  h.mount()
+  gate.resolve(track)
+  await flush()
+  t.alike(calls, ['item', 'ticket', 'seek'])
+  const sticker = nodes(h.render(props)).find((n) => n.props.accessibilityLabel === 'Ativar música')
+  t.ok(sticker)
+  t.ok(nodes(sticker).some((n) => n.type === 'Icon' && n.props.name === 'mudo'))
+  t.absent(nodes(sticker).some((n) => n.type === 'MusicEqualizer'))
+})
+
+test('a mute change after unmount calls nothing', async (t) => {
+  const { setSoundMuted } = await import('../src/soundMute.js')
+  const { playbackClaimCount } = await dependencies()
+  const calls = []
+  const { stubs, emit } = uiPlayer(calls)
+  const h = await ui(stubs)
+  t.teardown(() => h.unmount())
+  let starts = 0
+  const unavailable = []
+  const props = {
+    music: { id: 'abc', start: 30 },
+    onStart: () => { starts++ },
+    onUnavailable: (error) => unavailable.push(error)
+  }
+  h.render(props)
+  h.mount()
+  await flush()
+  emit({ ms: 30000, playing: true, buffering: false })
+  t.is(starts, 1)
+  h.unmount()
+  const seen = calls.slice()
+  const claims = playbackClaimCount()
+  setSoundMuted(true)
+  setSoundMuted(false)
+  await flush()
+  t.alike(calls, seen)
+  t.is(starts, 1)
+  t.alike(unavailable, [])
+  t.is(playbackClaimCount(), claims)
+})
+
+test('unmuting a paused momento spends nothing until it is visible', async (t) => {
+  const { setSoundMuted } = await import('../src/soundMute.js')
+  const { playbackClaimCount } = await dependencies()
+  const calls = []
+  const { stubs } = uiPlayer(calls)
+  const h = await ui(stubs)
+  t.teardown(() => h.unmount())
+  setSoundMuted(true)
+  const props = { music: { id: 'abc', start: 30 }, paused: true }
+  const claims = playbackClaimCount()
+  h.render(props)
+  h.mount()
+  await flush()
+  t.alike(calls, [])
+  t.is(playbackClaimCount(), claims)
+  setSoundMuted(false)
+  h.render(props)
+  h.mount()
+  await flush()
+  t.alike(calls, [], 'unmuting under a pushed screen makes no request')
+  t.is(playbackClaimCount(), claims, 'and claims no playback')
+  h.render({ ...props, paused: false })
+  h.mount()
+  await flush()
+  t.alike(calls, ['item', 'ticket', 'seek', 'play'])
+  t.is(playbackClaimCount(), claims + 1)
 })

@@ -790,7 +790,11 @@ function hookHost (source, name, deps, setup = '') {
       if (!(at in slots)) slots[at] = { value: typeof initial === 'function' ? initial() : initial }
       return [slots[at].value, (value) => {
         const next = typeof value === 'function' ? value(slots[at].value) : value
-        if (!Object.is(slots[at].value, next)) { slots[at].value = next; dirty = true }
+        if (!Object.is(slots[at].value, next)) {
+          deps.onStateChange?.()
+          slots[at].value = next
+          dirty = true
+        }
       }]
     },
     useRef: (initial) => {
@@ -958,9 +962,12 @@ test('a policy response after closing the composer never probes the node', async
   t.is(probes, 0)
 })
 
-async function viewerHost ({ music = true, policy = true, ready = true, reduce = false, photo = 'ok', media = null, author = A, hosted = true, online = true, unlocked = true, send } = {}) {
+async function viewerHost ({ music = true, policy = true, ready = true, reduce = false, photo = 'ok', media = null, author = A, hosted = true, online = true, unlocked = true, send, muted = false, onStateChange } = {}) {
   const moments = await import('../src/moments.js')
   const seen = await import('../src/momentSeen.js')
+  const soundMute = await import('../src/soundMute.js')
+  soundMute.setSoundMuted(false)
+  if (muted) soundMute.setSoundMuted(true)
   const { musicOriginOf } = await import('../src/music.js')
   const timers = clock()
   const animations = []
@@ -979,7 +986,7 @@ async function viewerHost ({ music = true, policy = true, ready = true, reduce =
   const item = (seq, key = A) => ({ seq, ref: key + ':' + seq, at: new Date().toISOString(), text: '', media, ...(music ? { music: { id: 'abc', start: 30 } } : {}) })
   const data = { phase: 'ready', authors: [{ author: B, items: [item(2, B), item(1, B)] }], own: [item(2), item(1)] }
   const seenState = { loaded: true, seen: [], mark () {} }
-  const env = { node, reduce, photo, back: 0, policyCalls: 0, opened: [], messages: [], calls }
+  const env = { node, reduce, photo, back: 0, policyCalls: 0, opened: [], messages: [], calls, steps: [] }
   class Value {
     constructor (value) { this.value = value }
     setValue (value) { this.value = value }
@@ -993,6 +1000,9 @@ async function viewerHost ({ music = true, policy = true, ready = true, reduce =
     ...(await import('../src/reactions.js')),
     ...(await import('../src/momentReaction.js')),
     ...timers,
+    ...soundMute,
+    onStateChange,
+    nextIndex: (...args) => { env.steps.push(args[2]); return moments.nextIndex(...args) },
     Date: class extends Date { static now () { return timers.now() } },
     displayText: require('@varanda/rpc').displayText,
     errorText: (err) => 'erro: ' + err.message,
@@ -1036,6 +1046,7 @@ async function viewerHost ({ music = true, policy = true, ready = true, reduce =
   return {
     ...host,
     ...env,
+    unmount: () => { host.unmount(); soundMute.setSoundMuted(false) },
     timers,
     animations,
     env,
@@ -1196,6 +1207,131 @@ test('viewer reaction settles after unmount without allowing a stale button to s
     await press?.(event)
     t.is(h.calls.length, 1, 'an unmounted viewer never starts another send')
     t.absent(h.animation(), 'completion never resumes an unmounted viewer')
+  }
+})
+
+test('viewer header mutes a video without pausing or stepping and keeps the next video muted', async (t) => {
+  const { soundMuted } = await import('../src/soundMute.js')
+  const h = await viewerHost({ media: { mime: 'video/mp4', ms: 8000 } })
+  t.teardown(h.unmount)
+  const player = () => treeNodes(h.render()).find((n) => n.type === 'VideoPlayer')
+  player().props.onReady()
+  h.render()
+  const first = player()
+  const animation = h.animation()
+  animation.value.setValue(0.25)
+  const button = h.button('Silenciar som')
+  t.is(button.type, 'IconAction')
+  t.is(button.props.icon, 'som')
+  t.is(button.props.color, '#ffffff')
+  t.absent(button.props.onPressIn, 'header does not hold playback')
+  t.ok(first.props.playing)
+  button.props.onPress()
+  h.render()
+  t.ok(soundMuted())
+  t.ok(player().props.muted)
+  t.ok(player().props.playing, 'muting keeps playback running')
+  t.is(player().props.key, first.props.key, 'same player, no restart')
+  t.is(h.animation(), animation, 'same segment animation')
+  t.is(animation.value.value, 0.25, 'progress is preserved')
+  t.alike(h.env.steps, [], 'sound press never steps')
+  t.is(h.env.back, 0)
+  t.is(h.button('Ativar som').props.icon, 'mudo')
+  h.button('próximo momento').props.onPress({ nativeEvent: {} })
+  h.render()
+  t.alike(h.env.steps, ['next'])
+  t.not(player().props.key, first.props.key, 'next item mounts a new player')
+  t.ok(player().props.muted, 'shared mute carries to the next video')
+  player().props.onReady()
+  t.ok(player().props.playing)
+})
+
+for (const type of ['IconAction', 'Pill']) {
+  test('viewer ' + type + ' unmutes before state changes and clears shared mute and sound refusal', async (t) => {
+    const { soundMuted, setSoundMuted, onSoundMute } = await import('../src/soundMute.js')
+    const log = []
+    const h = await viewerHost({ media: { mime: 'video/mp4', ms: 8000 }, onStateChange: () => log.push('state') })
+    t.teardown(h.unmount)
+    const player = () => treeNodes(h.render()).find((n) => n.type === 'VideoPlayer')
+    player().props.onReady()
+    player().props.onSoundRefused()
+    setSoundMuted(true)
+    h.render()
+    const before = player()
+    const animation = h.animation()
+    const pill = () => treeNodes(h.render()).find((n) => n.type === 'Pill' && n.props.label === 'Ativar som')
+    t.ok(pill(), 'browser refusal offers the Pill')
+    t.is(h.button('Ativar som').type, 'IconAction', 'header precedes the Pill')
+    t.ok(before.props.muted)
+    before.props.control.current = { unmute: () => log.push(['unmute', soundMuted(), before.props.muted]) }
+    const button = type === 'Pill' ? pill() : h.button('Ativar som')
+    t.teardown(onSoundMute(() => log.push(['shared', soundMuted()])))
+    log.length = 0
+    button.props.onPress()
+    t.alike(log, [['unmute', true, true], 'state', 'state', ['shared', false]], 'player unmutes synchronously before either state changes')
+    h.render()
+    t.absent(soundMuted())
+    t.absent(player().props.muted)
+    t.absent(pill(), 'browser refusal is cleared')
+    t.is(h.button('Silenciar som').props.icon, 'som')
+    t.ok(player().props.playing)
+    t.is(player().props.key, before.props.key)
+    t.is(h.animation(), animation)
+    t.alike(h.env.steps, [])
+  })
+}
+
+test('viewer only offers sound on photos with enabled music', async (t) => {
+  const { soundMuted } = await import('../src/soundMute.js')
+  for (const options of [{ music: false }, { policy: false }, { ready: false }, {}]) {
+    const h = await viewerHost(options)
+    try {
+      const button = h.button('Silenciar som')
+      const enabled = Object.keys(options).length === 0
+      t.is(!!button, enabled, JSON.stringify(options))
+      t.absent(h.button('Ativar som'))
+      if (enabled) {
+        t.is(button.type, 'IconAction')
+        t.absent(button.props.onPressIn)
+        button.props.onPress()
+        t.ok(soundMuted(), 'safe to toggle without a video control')
+        h.button('Ativar som').props.onPress()
+        t.absent(soundMuted())
+      }
+    } finally {
+      h.unmount()
+    }
+  }
+})
+
+test('viewer skips the music wait when opened muted and starts a full music hold after unmuting', async (t) => {
+  const { setSoundMuted } = await import('../src/soundMute.js')
+  const { AUTO_ADVANCE_MS } = await import('../src/moments.js')
+  const h = await viewerHost({ muted: true })
+  t.teardown(h.unmount)
+  const key = h.music().props.key
+  t.is(h.button('Ativar som').props.icon, 'mudo')
+  t.absent(h.timers.has(3000), 'muted music does not hold the clock')
+  t.is(h.animation().duration, AUTO_ADVANCE_MS)
+  h.animation().value.setValue(0.4)
+  setSoundMuted(false)
+  h.render()
+  t.ok(h.timers.has(3000), 'unmuting waits for the first audio start')
+  t.absent(h.animation(), 'clock waits for audio')
+  h.music().props.onStart()
+  h.render()
+  t.absent(h.timers.has(3000))
+  t.is(h.animation().duration, 15000)
+  t.is(h.animation().value.value, 0, 'first audio start gets a full segment')
+  const animation = h.animation()
+  animation.value.setValue(0.3)
+  for (const muted of [true, false]) {
+    setSoundMuted(muted)
+    h.render()
+    t.absent(h.timers.has(3000), 'started music never waits again')
+    t.is(h.animation(), animation, 'started music keeps its 15 s clock')
+    t.is(animation.value.value, 0.3)
+    t.is(h.music().props.key, key, 'mute changes never remount music')
   }
 })
 
@@ -2007,7 +2143,7 @@ test('video sound falls back to muted and a new item starts with sound', (t) => 
   const src = read('src/screens/Momentos.js')
   t.ok(src.includes("controls={false} fit='contain'"), 'inline player without controls')
   t.ok(src.includes("<Pill label='Reproduzir' onPress={playback.handlePlay}"))
-  t.ok(src.includes("<Pill label='Ativar som' onPress={playback.handleUnmute}"))
+  t.ok(src.includes("<Pill label='Ativar som' onPress={toggleSound}"))
   t.ok(src.includes("<Pill label='Próximo momento' onPress={() => step('next')}"))
   t.ok(src.includes('video ? VIDEO_UNAVAILABLE : PHOTO_UNAVAILABLE'), 'unavailable text follows the media type')
 })
