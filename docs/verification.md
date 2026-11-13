@@ -8671,3 +8671,49 @@ Situação, em 2026-11-12 (Vitrine, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1` na
 - [ ] Chrome, 1280 px, tema escuro (parcial): a Conversa abre na mesma coluna estreita, com a barra fixa embaixo. Defeito: a linha "Respondendo a @nome" da barra sai em preto sobre o fundo escuro (`colors.muted` não existe na paleta, ver `apps/app/src/ui/ReplyBar.js:104`). Corrigido depois: a barra usa só chaves da paleta e `apps/app/test/themeUsage.test.js` agora recusa uma chave que não existe; não reconferido no navegador. Não verificado: o resto dos passos.
 - [ ] Android, AVD `varanda-api36` (parcial, passada de teclado de 2026-11-12, Metro na porta 8090 com o app apontado por `debug_http_host`): passo 1 FALHOU. Com o teclado aberto, a barra fica acima dele mas há uma faixa em branco de cerca de 20 dp entre o fundo da barra e o teclado (captura `v3-shots/and-1-keyboard.png`, repete-se em `and-4-dark-reply.png`). Causa: a margem da área segura de baixo continuava com o teclado aberto. Corrigido e repassado no mesmo dia: a faixa de 20 dp sumiu (`and-1-keyboard-fixed.png`); restou uma tira de cerca de 5 dp na cor da página, que é o respiro de 8 dp sob a barra. Esse respiro passou a ter a cor da barra; essa última mudança não foi reconferida no aparelho. Com o teclado fechado, a barra fica logo acima da área de gestos, sem faixa a mais (`and-2-closed-fixed.png`). Passo 2 passou: ao fechar o teclado a barra volta ao fundo, acima da área segura, sem faixa a mais. Passo 3 passou (7 e 8): "Oi teste" apareceu uma vez no bloco "1 resposta". Passo 4 passou (7 e 18): "Respondendo a @lia_oliveira" e o espaço reservado legíveis no tema escuro. Não verificado: os demais passos, texto grande, leitor de tela, Reduzir movimento.
 - [ ] iOS, simulador iPhone 17 Pro (o iPhone 16e não liga aqui) (parcial, passada de teclado de 2026-11-12, Metro na porta 8090 com `RCT_jsLocation`): passo 1 passou: a barra fica rente ao teclado, inteira, sem faixa em branco nem folga acima (`v3-shots/ios-1-keyboard.png`). Passo 2 (parcial): o teclado de software sumiu ao digitar pelo teclado do Mac e a barra voltou ao fundo acima da área segura (`ios-2-after-send.png`); o fechamento pelo próprio teclado não foi tocado. Passo 3 passou: a resposta apareceu uma vez no bloco "1 resposta" (o texto saiu corrigido para "Ok, teste" pelo autocorretor). Passo 4 passou: "Respondendo a @lia_oliveira" e o espaço reservado legíveis no tema escuro (`ios-3-dark-reply.png`); o escuro veio pela opção Escuro de Ajustes > Aparência, porque com Sistema o app ficou claro com o aparelho em escuro (a conferir). Não verificado: os demais passos, texto grande, leitor de tela, Reduzir movimento.
+
+## 192. Feira: vitrine, categorias e filtros (PR feat/feira-browse)
+
+Quarto PR da revisão visual do app. A aba Feira, em Na cidade, ganha um cabeçalho (busca, chip de cidade, botão Filtros e tiles de categoria), uma grade de tiles de anúncio e, sem cidade escolhida, uma vitrine com "Como funciona".
+
+- Vitrine sem cidade (`apps/app/src/screens/Feira.js`): sem estado e cidade lembrados, Na cidade mostra o título "Onde você quer comprar e vender?", os estados (UF), o campo Cidade, o botão "Ver anúncios" e "Como funciona" com quatro passos (Anuncie, Converse, Combine, Avalie).
+- Cidade (`apps/app/src/ui/PlaceSheet.js`): com cidade, o cabeçalho mostra o campo Palavras e um chip com a cidade ("São Paulo, SP"); o leitor de tela lê "Trocar cidade, agora São Paulo, SP". O chip abre a folha "Localização" (27 UFs e Cidade, botão "Ver anúncios"). Escolher outra cidade recarrega a lista. Sem estado ou cidade, a folha diz "Escolha o estado e escreva a cidade.". Não existe busca no país inteiro: UF e cidade são sempre exigidas.
+- Categorias (`apps/app/src/ui/CategoryTiles.js`): fileira rolável de tiles, "Todas" e as categorias da Feira, cada um com ícone, alvo de 44 pt e estado selecionado lido pelo leitor de tela. Categoria e tipo são filtros do servidor: refazem a busca.
+- Grade (`apps/app/src/ui/ListingTile.js`, `apps/app/src/feiraBrowse.js`): os anúncios aparecem em tiles com foto (ou o ícone da categoria), preço (ou "A combinar", "Grátis", "Até R$ x" numa procura), título, lugar e, se houver, o selo (Reservado, Vendido, Procura, "Situação desconhecida"). Colunas por largura: 1 abaixo de 360 px ou com texto grande (escala de fonte a partir de 1,29), 2 abaixo de 600, 3 abaixo de 900. Tocar num tile abre o anúncio. Enquanto carrega, aparecem tiles de esqueleto (nunca em Buscas).
+- Filtros (`apps/app/src/ui/FeiraFilters.js`): a folha "Filtros da Feira" tem "Ordenar por" (Recentes, Menor preço, Maior preço), "Faixa de preço" com "De" e "Até" (preço com vírgula, por exemplo 10,50) e "Tipo de anúncio". Preço fora do formato mostra "Confira os preços. Use, por exemplo, 10,50."; início maior que o fim mostra "O preço de início deve ser menor ou igual ao preço final.". "Aplicar" fecha a folha e "Limpar" zera. Com ordem ou faixa ativas o botão Filtros ganha um ponto. Ordem e faixa só reordenam e filtram os anúncios já carregados; quando ainda há mais páginas, a nota "Ordem e faixa de preço valem para os anúncios já carregados" aparece embaixo da grade (a folha mostra a mesma nota sempre).
+- Buscas salvas: "Salvar busca" continua à mão enquanto há uma busca por cidade; a nota "Busca salva neste aparelho." confirma. Em Buscas aparece a busca ("São Paulo/SP · Todos · Todas as categorias", "N novos", "Remover busca") e nunca há esqueletos.
+- Meus e Salvos usam os mesmos tiles. Os anúncios de uma pessoa ou Página (linha "Anúncios" do perfil) aparecem na grade, sem vitrine nem filtros.
+- Vazio e offline: sem resultado, "Nenhum anúncio por aqui ainda." com "Limpar filtros" e "Trocar cidade"; sem rede, "Conecte-se para consultar a Feira."; índice incompleto, "Alguns anúncios podem faltar. Puxe para atualizar.".
+- Limites conhecidos: ordem e faixa de preço só valem para os anúncios já carregados (a nota diz isso); a casca do app limita o conteúdo a 640 px, então a grade tem no máximo 3 colunas (a quarta, de 900 px, não aparece no app); não há busca nacional (UF e cidade são obrigatórias); a Vitrine só tem 6 anúncios e uma página, então a nota de parcial no rodapé não aparece nela.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `(cd apps/app && node ../../scripts/run-tests.js test/feiraBrowse.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/feiraScreen.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js)`
+
+Os testes cobrem ordem, faixa, colunas, rótulos e as regras da tela. Não cobrem como isso parece na tela: isso é o que a verificação manual confere.
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é um nó hospedado com dados de exemplo e dispensa conta. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e, que não liga neste Mac; usa-se o iPhone 17 Pro), Chrome em 390 e em 1280 px. Capturas ficam fora do git.
+
+1. Abra a Feira sem cidade. Esperado: título, estados, Cidade, "Ver anúncios" e "Como funciona" com os quatro passos.
+2. Escolha SP e "São Paulo". Esperado: o cabeçalho com chip, Filtros e tiles; a grade.
+3. Toque no chip. Esperado: a folha "Localização"; mudar a cidade recarrega; "Cidade" sem nada pede "Escolha o estado e escreva a cidade.".
+4. Toque num tile de categoria. Esperado: ele fica selecionado, a lista é refeita; alvos de 44 pt.
+5. Largura e texto grande. Esperado: 1 coluna em 340 px ou com texto grande, 2 em 390, 3 em 1280 (limite de 640 px).
+6. Filtros: Menor preço, De "10,50". Esperado: grade reordenada e filtrada, ponto no botão; a nota de parcial só com mais páginas.
+7. "Salvar busca" e Buscas. Esperado: a busca aparece, sem esqueletos.
+8. Meus, Salvos e a grade de um perfil. Esperado: tiles, sem vitrine nem filtros no perfil.
+9. Cidade sem anúncios, offline. Esperado: os textos de vazio e de sem rede.
+10. Escuro, texto grande, leitor de tela e Reduzir movimento. Esperado: nada cortado, contraste legível.
+
+Situação, em 2026-11-12 (Vitrine, Metro na porta 8090). Cada caixa só é marcada quando o alvo foi percorrido por inteiro.
+
+- [ ] Android, AVD `varanda-api36` (parcial, Metro na porta 8090, `v4-shots/and-*.png`): passo 1 passou (vitrine com os quatro passos, claro); passo 2 passou ("Sao Paulo" casou com "São Paulo"; chip, Filtros, tiles e "Salvar busca"); passo 4 passou (Casa fica selecionada, sem anúncios mostra "Nenhum anúncio por aqui ainda." com "Limpar filtros" e "Trocar cidade"); passo 5 passou (o AVD vem com texto 1,3: 1 coluna; com texto 1,0: 2 colunas); passo 6 passou (Menor preço e De "10,50": grade reordenada, ponto no Filtros, nota na folha); passo 10 (parcial): escuro conferido na tela de vazio, contraste legível. Não percorrido: passo 3 (folha de localização), 7, 8, sem rede, leitor de tela e Reduzir movimento. O AVD voltou a texto 1,3 e ao tema claro.
+- [ ] iOS, iPhone 17 Pro (o iPhone 16e não liga aqui): não percorrido (sem turnos restantes).
+- [ ] Chrome, 390 px (painel de navegador embutido, não o Chrome em si; parcial): passos 1 a 3 (vitrine, chip e folha de localização recarregando a lista), 4 (tiles), 5 (1 coluna em 340 px, 2 em 390), 6 (ordem e ponto do Filtros; a nota de parcial não aparece porque a Vitrine tem uma página só), 7 (busca salva e Buscas sem esqueletos), 8 (Meus, Salvos e a grade de "Anúncios" do perfil de uma Página, sem vitrine nem filtros), 9 (cidade sem anúncios: "Limpar filtros" e "Trocar cidade"), escuro e claro; o rótulo "Trocar cidade, agora Campinas, SP" apareceu na árvore de acessibilidade. Não percorrido: texto grande, offline, Reduzir movimento, leitor de tela de verdade.
+- [ ] Chrome, 1280 px (painel de navegador embutido; parcial): a grade tem 3 colunas dentro da coluna de 640 px (limite conhecido), tile abre o anúncio, Buscas, Meus e Salvos. Não percorrido: o resto dos passos.
