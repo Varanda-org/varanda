@@ -33,6 +33,7 @@ import { actAs } from '../pages'
 import { pagesCore } from '../pageGate'
 import { coreActor } from '../pageCore'
 import { Btn, ErrorText, Row, Soft, UNCERTAIN, errorText, useAction, useBottomPad, useNow } from '../ui'
+import { BranchLink } from '../ui/BranchLink'
 import { OfflineNote } from '../ui/OfflineNote'
 import { PostRow } from '../ui/PostRow'
 import { ReplyBar } from '../ui/ReplyBar'
@@ -1151,15 +1152,15 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
   const renderThreadRow = (row) => {
     if (row.kind === 'expander') {
       const key = refOf(row.parent.author, row.parent.seq)
-      return <View style={styles.branchAction}><Btn label={childLabel(row.count, row.open)} expanded={row.open} onPress={() => toggleChildren(row)} pending={childBusy.has(key)} /></View>
+      return <View style={styles.branchAction}><BranchLink label={childLabel(row.count, row.open)} expanded={row.open} onPress={() => toggleChildren(row)} pending={childBusy.has(key)} /></View>
     }
     if (row.kind === 'more') {
       const key = refOf(row.parent.author, row.parent.seq)
       return (
-        <View style={styles.branchAction}>
+        <View style={[styles.child, styles.branchAction, childErrors.has(key) && styles.branchError]}>
           {childErrors.has(key)
-            ? <><ErrorText>{displayText(childErrors.get(key))}</ErrorText><Btn label='Tentar de novo' onPress={() => loadChildren(key)} pending={childBusy.has(key)} /></>
-            : <Btn label='Ver mais respostas' onPress={() => loadChildren(key, childNext.get(key))} pending={childBusy.has(key)} />}
+            ? <><ErrorText>{displayText(childErrors.get(key))}</ErrorText><BranchLink label='Tentar de novo' onPress={() => loadChildren(key)} pending={childBusy.has(key)} /></>
+            : <BranchLink label='Ver mais respostas' onPress={() => loadChildren(key, childNext.get(key))} pending={childBusy.has(key)} />}
         </View>
       )
     }
@@ -1167,7 +1168,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
       <View style={row.depth === 1 ? styles.child : undefined}>
         <PostRow {...props(row.item, row.depth === 0 ? { replyToName: null, onOpenParent: undefined } : undefined)} />
         {row.depth === 1 && row.deeper !== 0
-          ? <View style={styles.branchAction}><Btn label='Ver conversa' onPress={() => onOpenThread({ ref: refOf(row.item.author, row.item.seq), seed: row.item })} /></View>
+          ? <View style={styles.branchAction}><BranchLink label='Ver conversa' onPress={() => onOpenThread({ ref: refOf(row.item.author, row.item.seq), seed: row.item })} /></View>
           : null}
       </View>
     )
@@ -1297,7 +1298,9 @@ const makeStyles = (colors) => StyleSheet.create({
   note: { paddingHorizontal: 16, paddingVertical: 12 },
   prompt: { paddingHorizontal: 16, paddingVertical: 12, gap: 8 },
   child: { marginLeft: space.xl, borderLeftWidth: 1, borderLeftColor: colors.line },
-  branchAction: { paddingHorizontal: space.lg, paddingVertical: space.sm, alignItems: 'flex-start' },
+  // 72 is the post text column (PostRow padding 16 + avatar 44 + gap 12). No vertical padding: the 44 pt box of the link is the row.
+  branchAction: { paddingLeft: 72, paddingRight: space.lg, alignItems: 'flex-start' },
+  branchError: { paddingTop: space.sm },
   header: { position: 'relative' },
   parent: { opacity: 0.72 },
   focal: { position: 'relative' },
