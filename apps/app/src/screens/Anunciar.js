@@ -6,7 +6,7 @@
 //
 // Photos follow Publicar: picked (../media/attach), encoded at once
 // (../media/encode, which strips EXIF/GPS) and kept only in this screen;
-// nothing is uploaded before Anunciar is pressed. Acting as a page, each
+// nothing is uploaded before Publicar anúncio is pressed. Acting as a page, each
 // photo is its own page statement (media) and the listing is the page's
 // 'listing' action; otherwise the node uploads and listing.create writes.
 // A change of identity during the uploads cancels the press, and the
@@ -15,7 +15,7 @@
 // No automatic retry: an unknown outcome locks the form with its bytes and
 // offers 'Tentar de novo' (the same signed request) and 'Descartar'.
 //
-// Props: initialPlace ({ uf, city }), onBack, onPublished({ answer, dest }).
+// Props: initialPlace ({ uf, city }), onBack, registerBackGuard, onPublished({ answer, dest }).
 
 import { useEffect, useRef, useState } from 'react'
 import { Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
@@ -26,6 +26,7 @@ import { actAs, pagesMedia, pagesOrigin, pagesStart } from '../pages'
 import { pagesOn } from '../pageGate'
 import { memberKeyOf, useActing } from './Conversa'
 import { CAT_LABELS, UNIT_LABELS } from '../feira'
+import { STEPS, STEP_TITLES, previewListing, stepErrors } from '../anunciarSteps'
 import {
   ACK_TEXT, MAX_PHOTOS, UNKNOWN_PUBLICATION, destinationOf, emptyForm, holdsPublication, identityOf, kindChoices, photoRoom,
   photosFor, priceFieldLabel, priceModeChoices, retryUsable, submitListing, unitChoices, updateForm
@@ -38,6 +39,9 @@ import { Btn, ErrorText, Field, Label, Soft, errorText } from '../ui'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { TopBar } from '../ui/TopBar'
+import { Stepper } from '../ui/Stepper'
+import { ListingTile } from '../ui/ListingTile'
+import { Sheet } from '../ui/Sheet'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 
 const { feira, MAX_TEXT } = rpc
@@ -58,7 +62,7 @@ function Chips ({ options, value, onPick, disabled }) {
   )
 }
 
-export default function Anunciar ({ initialPlace = null, onBack, onPublished }) {
+export default function Anunciar ({ initialPlace = null, onBack, registerBackGuard, onPublished }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const node = useNode()
@@ -72,6 +76,10 @@ export default function Anunciar ({ initialPlace = null, onBack, onPublished }) 
   identityRef.current = identity
 
   const [form, setForm] = useState(() => emptyForm(initialPlace || {}))
+  const initialForm = useRef(form)
+  const [index, setIndex] = useState(0)
+  const [confirmLeave, setConfirmLeave] = useState(false)
+  const scrollRef = useRef(null)
   const [ack, setAck] = useState(false)
   const [photos, setPhotos] = useState([])
   const photosRef = useRef(photos)
@@ -94,6 +102,49 @@ export default function Anunciar ({ initialPlace = null, onBack, onPublished }) 
   const online = node.online !== false
   const canAttach = typeof pickImages === 'function' && (media !== null || asPage !== null) && online
   const locked = pending !== null || sending
+
+  const move = (next) => {
+    setIndex(next)
+    setError('')
+    setField('')
+    scrollRef.current?.scrollTo({ y: 0, animated: false })
+  }
+  const back = () => {
+    if (sendingRef.current || encoding) return false
+    if (confirmLeave) return true
+    if (pending !== null) {
+      setConfirmLeave(true)
+      return true
+    }
+    if (index > 0) {
+      move(index - 1)
+      return true
+    }
+    if (ack || photos.length > 0 || Object.keys(initialForm.current).some((key) => form[key] !== initialForm.current[key])) {
+      setConfirmLeave(true)
+      return true
+    }
+    return false
+  }
+  const backRef = useRef(back)
+  backRef.current = back
+  useEffect(() => {
+    if (typeof registerBackGuard !== 'function') return
+    return registerBackGuard(() => backRef.current())
+  }, [registerBackGuard])
+  const goBack = () => {
+    if (!back()) onBack()
+  }
+  const advance = () => {
+    if (sendingRef.current || encoding) return
+    const [problem] = stepErrors(form, STEPS[index], ack)
+    if (problem) {
+      setField(problem.field)
+      setError(problem.error)
+      return
+    }
+    move(index + 1)
+  }
 
   // Descriptors are valid only for the identity that uploaded them; a
   // pending retry only for the identity that signed it.
@@ -210,7 +261,11 @@ export default function Anunciar ({ initialPlace = null, onBack, onPublished }) 
       })
       setPhotos(r.photos.map((p) => ({ ...p, thumb: thumbsRef.current.get(p.id) || null })))
       if (r.ok) { settle(r.answer, to); return }
-      if (r.field) setField(r.field)
+      if (r.field) {
+        const owner = STEPS.findIndex((step) => stepErrors(form, step, ack).some((problem) => problem.field === r.field))
+        if (owner >= 0) move(owner)
+        setField(r.field)
+      }
       setError(typeof r.error === 'string' ? r.error : errorText(r.error))
       // An identity switch during the send already ran the effect above: the
       // old identity's unknown outcome must not lock the new identity's form.
@@ -250,89 +305,133 @@ export default function Anunciar ({ initialPlace = null, onBack, onPublished }) 
 
   return (
     <View style={styles.flex}>
-      <TopBar title={asPage !== null ? 'Anunciar como página' : 'Anunciar'} onBack={onBack} />
-      <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps='handled'>
-        <Label>Tipo</Label>
-        <Chips options={kindChoices().map((k) => ({ value: k.kind, label: k.label }))} value={form.kind} onPick={(kind) => set({ kind })} disabled={locked} />
-        {fieldError('kind')}
-
-        <Field label={procura ? 'O que você procura' : 'Título'} value={form.title} onChangeText={(title) => set({ title })} maxLength={feira.MAX_LISTING_TITLE} editable={!locked} />
-        {fieldError('title')}
-        <Field label='Descrição' value={form.text} onChangeText={(text) => set({ text })} multiline maxLength={MAX_TEXT} editable={!locked} />
-        {fieldError('text')}
-
-        <Label>{priceFieldLabel(form.kind)}</Label>
-        <Chips options={priceModeChoices(form.kind).map((m) => ({ value: m.mode, label: m.label }))} value={form.priceMode} onPick={(priceMode) => set({ priceMode })} disabled={locked} />
-        {form.priceMode === 'valor'
-          ? <Field label={procura ? 'Até (R$)' : 'Valor (R$)'} value={form.priceText} onChangeText={(priceText) => set({ priceText })} placeholder='25,00' editable={!locked} />
-          : null}
-        {fieldError('price')}
-        {units.length > 1
-          ? (
+      <TopBar title={asPage !== null ? 'Anunciar como página' : 'Anunciar'} onBack={goBack} />
+      <ScrollView ref={scrollRef} contentContainerStyle={styles.body} keyboardShouldPersistTaps='handled'>
+        <Stepper
+          index={index}
+          total={STEPS.length}
+          title={STEP_TITLES[index]}
+          actions={
             <>
-              <Label>Unidade</Label>
-              <Chips options={units.map((u) => ({ value: u, label: u === null ? 'Sem unidade' : UNIT_LABELS[u] }))} value={form.unit} onPick={(unit) => set({ unit })} disabled={locked} />
+              {pending !== null
+                ? (
+                  <View style={styles.actions}>
+                    {typeof pending.retry === 'function' ? <Btn block label='Tentar de novo' onPress={retry} pending={sending} disabled={!online} /> : null}
+                    <Btn block label='Descartar' secondary onPress={discard} disabled={sending} />
+                  </View>
+                  )
+                : index === STEPS.length - 1
+                  ? <Btn label='Publicar anúncio' block onPress={publish} pending={sending} disabled={!online || encoding} />
+                  : <Btn label='Continuar' block onPress={advance} disabled={sending || encoding} />}
+              <Btn label='Voltar' block secondary onPress={goBack} disabled={sending || encoding} />
             </>
-            )
-          : null}
-        {fieldError('unit')}
-
-        <Label>Categoria</Label>
-        <Chips options={feira.CATS.map((c) => ({ value: c, label: CAT_LABELS[c] || c }))} value={form.cat} onPick={(cat) => set({ cat })} disabled={locked} />
-        {fieldError('cat')}
-
-        <Field label='Estado (UF)' value={form.uf} onChangeText={(uf) => set({ uf: uf.toUpperCase().slice(0, 2) })} placeholder='SP' editable={!locked} />
-        {fieldError('uf')}
-        <Field label='Cidade' value={form.city} onChangeText={(city) => set({ city })} maxLength={feira.MAX_PLACE} editable={!locked} />
-        {fieldError('city')}
-        <Field label='Bairro (opcional)' value={form.bairro} onChangeText={(bairro) => set({ bairro })} maxLength={feira.MAX_PLACE} editable={!locked} />
-        {fieldError('bairro')}
-
-        <Label>Fotos</Label>
-        <View style={styles.photos}>
-          {photos.map((p) => (
-            <Pressable key={p.id} accessibilityRole='button' accessibilityLabel='Remover foto' disabled={locked} onPress={() => removePhoto(p.id)} style={styles.photo}>
-              {p.thumb ? <Image source={{ uri: p.thumb }} style={styles.photoImg} /> : null}
-              {!locked ? <View style={styles.photoX}><Icon name='fechar' size={14} color={colors.ink} /></View> : null}
-            </Pressable>
-          ))}
-          {photos.length < MAX_PHOTOS && canAttach
+          }
+        >
+          {STEPS[index] === 'fotos'
             ? (
-              <Pressable accessibilityRole='button' accessibilityLabel='Adicionar foto' disabled={locked || encoding} onPress={attach} style={[styles.photo, styles.photoAdd]}>
-                <Icon name='imagem' size={22} color={colors.soft} />
-              </Pressable>
+              <>
+                <Label>Fotos</Label>
+                <View style={styles.photos}>
+                  {photos.map((p) => (
+                    <Pressable key={p.id} accessibilityRole='button' accessibilityLabel='Remover foto' disabled={locked} onPress={() => removePhoto(p.id)} style={styles.photo}>
+                      {p.thumb ? <Image source={{ uri: p.thumb }} style={styles.photoImg} /> : null}
+                      {!locked ? <View style={styles.photoX}><Icon name='fechar' size={14} color={colors.ink} /></View> : null}
+                    </Pressable>
+                  ))}
+                  {photos.length < MAX_PHOTOS && canAttach
+                    ? (
+                      <Pressable accessibilityRole='button' accessibilityLabel='Adicionar foto' disabled={locked || encoding} onPress={attach} style={[styles.photo, styles.photoAdd]}>
+                        <Icon name='imagem' size={22} color={colors.soft} />
+                      </Pressable>
+                      )
+                    : null}
+                </View>
+                {!canAttach && online && media === null && asPage === null ? <Soft>Fotos só podem ser publicadas na versão web.</Soft> : null}
+                {note !== '' ? <Soft>{note}</Soft> : null}
+              </>
               )
             : null}
-        </View>
-        {!canAttach && online && media === null && asPage === null ? <Soft>Fotos só podem ser publicadas na versão web.</Soft> : null}
-        {note !== '' ? <Soft>{note}</Soft> : null}
+          {STEPS[index] === 'detalhes'
+            ? (
+              <>
+                <Label>Tipo</Label>
+                <Chips options={kindChoices().map((k) => ({ value: k.kind, label: k.label }))} value={form.kind} onPick={(kind) => set({ kind })} disabled={locked} />
+                {fieldError('kind')}
 
-        <Pressable accessibilityRole='checkbox' accessibilityState={{ checked: ack }} disabled={locked} onPress={() => { setAck((v) => !v); setField('') }} style={styles.ack}>
-          <View style={[styles.box, ack && styles.boxOn]}>{ack ? <Icon name='ok' size={14} color={colors.accentInk} /> : null}</View>
-          <Text style={styles.ackText}>{ACK_TEXT}</Text>
-        </Pressable>
-        <Soft>Qualquer pessoa pode ver este anúncio pelo link, mesmo sem conta.</Soft>
-        {fieldError('ack')}
+                <Field label={procura ? 'O que você procura' : 'Título'} value={form.title} onChangeText={(title) => set({ title })} maxLength={feira.MAX_LISTING_TITLE} editable={!locked} />
+                {fieldError('title')}
+                <Field label='Descrição' value={form.text} onChangeText={(text) => set({ text })} multiline maxLength={MAX_TEXT} editable={!locked} />
+                {fieldError('text')}
 
-        {error !== '' && field === '' ? <ErrorText>{error}</ErrorText> : null}
-        {!online ? <Soft>Sem conexão. Anúncios precisam de internet.</Soft> : null}
-        {pending !== null && typeof pending.retry !== 'function' ? <Soft>{UNKNOWN_PUBLICATION}</Soft> : null}
-        {pending !== null
-          ? (
-            <View style={styles.chips}>
-              {typeof pending.retry === 'function' ? <Btn label='Tentar de novo' onPress={retry} pending={sending} disabled={!online} /> : null}
-              <Btn label='Descartar' secondary onPress={discard} disabled={sending} />
-            </View>
-            )
-          : <Btn label='Anunciar' onPress={publish} pending={sending} disabled={!online || encoding} />}
+                <Label>Categoria</Label>
+                <Chips options={feira.CATS.map((c) => ({ value: c, label: CAT_LABELS[c] || c }))} value={form.cat} onPick={(cat) => set({ cat })} disabled={locked} />
+                {fieldError('cat')}
+              </>
+              )
+            : null}
+          {STEPS[index] === 'preco'
+            ? (
+              <>
+                <Label>{priceFieldLabel(form.kind)}</Label>
+                <Chips options={priceModeChoices(form.kind).map((m) => ({ value: m.mode, label: m.label }))} value={form.priceMode} onPick={(priceMode) => set({ priceMode })} disabled={locked} />
+                {form.priceMode === 'valor'
+                  ? <Field label={procura ? 'Até (R$)' : 'Valor (R$)'} value={form.priceText} onChangeText={(priceText) => set({ priceText })} placeholder='25,00' editable={!locked} />
+                  : null}
+                {fieldError('price')}
+                {units.length > 1
+                  ? (
+                    <>
+                      <Label>Unidade</Label>
+                      <Chips options={units.map((u) => ({ value: u, label: u === null ? 'Sem unidade' : UNIT_LABELS[u] }))} value={form.unit} onPick={(unit) => set({ unit })} disabled={locked} />
+                    </>
+                    )
+                  : null}
+                {fieldError('unit')}
+
+                <Field label='Estado (UF)' value={form.uf} onChangeText={(uf) => set({ uf: uf.toUpperCase().slice(0, 2) })} placeholder='SP' editable={!locked} />
+                {fieldError('uf')}
+                <Field label='Cidade' value={form.city} onChangeText={(city) => set({ city })} maxLength={feira.MAX_PLACE} editable={!locked} />
+                {fieldError('city')}
+                <Field label='Bairro (opcional)' value={form.bairro} onChangeText={(bairro) => set({ bairro })} maxLength={feira.MAX_PLACE} editable={!locked} />
+                {fieldError('bairro')}
+              </>
+              )
+            : null}
+          {STEPS[index] === 'revisao'
+            ? (
+              <>
+                <Label>Prévia</Label>
+                <ListingTile listing={previewListing(form)} width='100%' />
+                <Pressable accessibilityRole='checkbox' accessibilityState={{ checked: ack }} disabled={locked} onPress={() => { setAck((v) => !v); setField('') }} style={styles.ack}>
+                  <View style={[styles.box, ack && styles.boxOn]}>{ack ? <Icon name='ok' size={14} color={colors.accentInk} /> : null}</View>
+                  <Text style={styles.ackText}>{ACK_TEXT}</Text>
+                </Pressable>
+                <Soft>Qualquer pessoa pode ver este anúncio pelo link, mesmo sem conta.</Soft>
+                {fieldError('ack')}
+              </>
+              )
+            : null}
+          {error !== '' ? <ErrorText>{error}</ErrorText> : null}
+          {!online ? <Soft>Sem conexão. Anúncios precisam de internet.</Soft> : null}
+          {pending !== null && typeof pending.retry !== 'function' ? <Soft>{UNKNOWN_PUBLICATION}</Soft> : null}
+        </Stepper>
       </ScrollView>
+      <Sheet open={confirmLeave} onClose={() => setConfirmLeave(false)} title='Descartar anúncio?'>
+        <ScrollView contentContainerStyle={styles.confirm}>
+          <Soft>{pending !== null ? UNKNOWN_PUBLICATION : 'O que você preencheu será perdido.'}</Soft>
+          <Btn label='Descartar' block danger onPress={onBack} />
+          <Btn label='Continuar editando' block secondary onPress={() => setConfirmLeave(false)} />
+        </ScrollView>
+      </Sheet>
     </View>
   )
 }
 
 const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
-  body: { padding: 16, gap: 10 },
+  body: { flexGrow: 1, paddingBottom: 24 },
+  actions: { gap: 8 },
+  confirm: { padding: 16, gap: 12 },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   photos: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   photo: { width: 72, height: 72, borderRadius: 10, overflow: 'hidden', borderWidth: 1, borderColor: colors.outline },

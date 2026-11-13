@@ -630,3 +630,48 @@ test('dm media failures: a failed put keeps the photo for its retry, a short rea
   await locking
   t.is(await B.storage.readJson('dmMediaIndex'), null, 'and the lock wiped the cache')
 })
+
+test('dm reaction end to end: shown on both sides, naming the digest sender and receiver store for the message', async (t) => {
+  t.timeout(170000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const assoc = { kp, hex: hex(kp.publicKey) }
+  const host = await seederHost(t, bootstrap, assoc)
+  const A = await memberNode(t, assoc, host)
+  const B = await memberNode(t, assoc, host)
+  await copyDiary(B, A)
+  await copyDiary(A, B)
+  const boxA = await dmBoxKeyPairFromPrf(A.prf, 1)
+  const boxB = await dmBoxKeyPairFromPrf(B.prf, 1)
+  const ch = await rawDm(t, host.url)
+  const opened = async (pair, self) => {
+    const out = []
+    let after = 0
+    for (;;) {
+      const page = await ch.requestPage({ after })
+      for (const it of page.items) {
+        const inner = dmCore.openSealed(dmCore.decodeDrop(it.bytes).sealed, pair)
+        const body = inner === null ? null : dmCore.openInner(inner, self, { association: assoc.hex })
+        if (body !== null) out.push(body)
+      }
+      if (page.next === null || page.items.length === 0) return out
+      after = page.items[page.items.length - 1].seq
+    }
+  }
+
+  const sent = await A.web.request('dm.send', { to: B.key, text: 'oi' })
+  t.is((await B.web.request('dm.pull')).added, 1)
+  await B.web.request('dm.set', { peer: A.key, state: 'accepted' })
+  t.alike(await B.web.request('dm.react', { to: A.key, target: { from: A.key, id: sent.id }, emoji: '❤️' }), { ok: true })
+  t.is((await A.web.request('dm.pull')).added, 0, 'a reaction is not a message')
+  t.alike((await A.web.request('dm.thread', { peer: B.key })).messages[0].reactions, [{ emoji: '❤️', mine: false }], 'shown on the sender')
+  t.alike((await B.web.request('dm.thread', { peer: A.key })).messages[0].reactions, [{ emoji: '❤️', mine: true }], 'shown on the receiver')
+
+  const atA = await opened(boxA, A.key)
+  const msgSelf = atA.find((b) => b.kind === 'msg' && b.id === sent.id)
+  const rx = atA.find((b) => b.kind === 'react')
+  const msgAtB = (await opened(boxB, B.key)).find((b) => b.kind === 'msg' && b.id === sent.id)
+  t.ok(HEX64.test(rx.target.digest))
+  t.is(dmCore.bodyDigest(msgAtB), rx.target.digest, 'the receiver named the digest of the message it holds')
+  t.is(dmCore.bodyDigest(msgSelf), rx.target.digest, 'the sender holds the same digest')
+})

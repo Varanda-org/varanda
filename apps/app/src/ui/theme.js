@@ -5,7 +5,7 @@
 import { Platform } from 'react-native'
 
 // Animation durations in milliseconds.
-export const motion = { fast: 150, normal: 250 }
+export const motion = { fast: 150, normal: 250, press: 90, hold: 1600 }
 
 // Avatar colors by the first key byte mod 5: azul, laranja, amarelo,
 // vermelho, verde.
@@ -47,6 +47,11 @@ export const type = {
   postMeta: { fontSize: 15, fontWeight: '400', lineHeight: 20 },
   postText: { fontSize: 15.5, fontWeight: '400', lineHeight: 21 },
   replyMark: { fontSize: 13, fontWeight: '400', lineHeight: 18 },
+  caption: { fontSize: 12, fontWeight: '400', lineHeight: 16 },
+  more: { fontSize: 14, fontWeight: '600', lineHeight: 20 },
+  price: { fontSize: 20, fontWeight: '800', lineHeight: 26 },
+  tileTitle: { fontSize: 15, fontWeight: '700', lineHeight: 20 },
+  code: { fontSize: 14, fontWeight: '400', lineHeight: 20, fontFamily: fonts.mono },
   compose: { fontSize: 18, fontWeight: '400', lineHeight: 24 },
   pill: { fontSize: 15, fontWeight: '700', lineHeight: 18 },
   chip: { fontSize: 12, fontWeight: '600', lineHeight: 14 },

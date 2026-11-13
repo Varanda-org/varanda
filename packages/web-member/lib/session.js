@@ -3944,6 +3944,8 @@ function createBrowserSession ({
     'group.ban': groupWrite(member.groupBan, GROUP_AND_COMMUNITY),
     'group.admin': groupWrite(member.groupAdmin),
     'group.hide': groupWrite(member.groupHide, GROUP_AND_COMMUNITY),
+    'group.react': groupWrite(member.groupReact),
+    'group.reactors': serial((params) => withCores((c) => member.groupReactors(c, params))),
     'group.meta': groupWrite(member.groupMeta),
     // Through the caller's CW when it acts for the community, as group.admit.
     'group.invitePolicy': groupWrite(member.groupInvitePolicy, GROUP_AND_COMMUNITY),
@@ -4018,6 +4020,28 @@ function createBrowserSession ({
         const own = await requireDm()
         if ((await store.readDmKey(storage)) === null) await dmEnable(epoch)
         return dmEngine.send(own, keyPair, { to, text, fwd, card, replyTo: replyTo === undefined ? null : replyTo, media: media === undefined ? null : media }, recipient.box)
+      })({}, ident)
+    },
+
+    // A reaction travels as a message does (docs/rpc.md 5.119): the same
+    // refusals, lookup and stamps as dm.send.
+    'dm.react': async ({ to, target, emoji }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const ident = identityTarget
+      await serialDm(async () => {
+        dmEngine.checkSend(await requireDm(), to)
+        if ((await member.memberBlocks(storage)).has(to)) throw new UsageError(DM_BLOCKED)
+      })({}, ident)
+      let recipient
+      try {
+        recipient = await dmLookupOf(to)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+      return serialDm(async (_, epoch) => {
+        const own = await requireDm()
+        if ((await store.readDmKey(storage)) === null) await dmEnable(epoch)
+        return dmEngine.react(own, keyPair, { to, target, emoji }, recipient.box)
       })({}, ident)
     },
 

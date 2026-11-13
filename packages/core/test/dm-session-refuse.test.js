@@ -20,6 +20,7 @@ const CALLS = [
   ['dm.enable', {}, DM_NO],
   ['dm.lookup', { member: KEY }, DM_NO],
   ['dm.send', { to: KEY, text: 'oi', replyTo: ID }, DM_NO],
+  ['dm.react', { to: KEY, target: { from: KEY, id: ID }, emoji: '\u{1f44d}' }, DM_NO],
   ['dm.pull', {}, DM_NO],
   ['dm.list', {}, DM_NO],
   ['dm.thread', { peer: KEY, before: ID, limit: 10 }, DM_NO],
