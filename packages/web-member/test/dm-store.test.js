@@ -631,3 +631,62 @@ test('reactionRev counts per message digest: a rev at the max on one digest leav
   t.is(s.reactionRev(PEER, other, OWN), 0, 'another digest under the same sender and id starts at 0')
   await s.close()
 })
+
+test('a momento reaction row keeps its moment across a reopen; moment with media, a card, a reply, a forward or non-emoji text is invalid', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await s.unlock(key(7))
+  const row = { ...msg(s.nextFiled()), text: '❤️', moment: 7 }
+  await s.append([row, { ...msg(s.nextFiled()), id: '34'.repeat(16) }])
+  t.is(s.snapshot().messages[0].moment, 7)
+  t.absent('moment' in s.snapshot().messages[1], 'a plain row has no moment key')
+  const image = { id: PEER, key: OWN, nonce: 'ef'.repeat(24), chunks: 1, bytes: 100, sha256: PEER, mime: 'image/jpeg', w: 4, h: 4, ms: 0 }
+  const card = { url: 'https://example.org/post', host: 'example.org', title: 'Título', desc: 'Descrição', image: null }
+  const bad = [
+    { ...row, moment: 0 },
+    { ...row, moment: 1.5 },
+    { ...row, moment: '7' },
+    { ...row, moment: null },
+    { ...row, moment: Number.MAX_SAFE_INTEGER + 1 },
+    { ...row, text: 'oi' },
+    { ...row, text: '' },
+    { ...row, media: [image] },
+    { ...row, card },
+    { ...row, replyTo: ID },
+    { ...row, fwd: 1 }
+  ]
+  for (const r of bad) await t.exception.all(s.append([r]), /linha inválida/)
+  await s.close()
+
+  const again = createDmStore({ storage })
+  await again.unlock(key(7))
+  const snap = again.snapshot().messages
+  t.is(snap[0].moment, 7, 'the moment survives a reopen')
+  t.is(snap[0].text, '❤️')
+  t.absent('moment' in snap[1])
+  again.lock()
+
+  // A sealed row with a moment and a photo, as a broken build might have
+  // filed it, is skipped on load.
+  const storage2 = memoryNodeStorage()
+  const s2 = createDmStore({ storage: storage2 })
+  await s2.unlock(key(7))
+  const broken = { ...row, id: '56'.repeat(16), media: [image], filedAt: s2.nextFiled() }
+  const orig = nodeStore.openDmLocal
+  nodeStore.openDmLocal = async (...args) => {
+    nodeStore.openDmLocal = orig
+    const core = await orig(...args)
+    await core.append([{ v: 1, ...gc.sealRecord(broken, key(7)) }])
+    return core
+  }
+  try {
+    await s2.append([msg(s2.nextFiled())])
+  } finally {
+    nodeStore.openDmLocal = orig
+  }
+  s2.lock()
+  const s3 = createDmStore({ storage: storage2 })
+  await s3.unlock(key(7))
+  t.alike(s3.snapshot().messages.map((m) => m.id), [ID], 'the moment row with media is skipped')
+  await s3.close()
+})

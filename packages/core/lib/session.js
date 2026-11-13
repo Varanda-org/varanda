@@ -843,6 +843,9 @@ function createSession ({
     'moments.read': serial(async () => {
       throw new UsageError(MEDIA_WEB_ONLY)
     }),
+    'moment.lookup': serial(async () => {
+      throw new UsageError(MEDIA_WEB_ONLY)
+    }),
     'moment.delete': serial(async () => {
       throw new UsageError(MEDIA_WEB_ONLY)
     }),

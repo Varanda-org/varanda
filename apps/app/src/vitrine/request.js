@@ -35,6 +35,9 @@ const active = (entity) => ['creator', 'admin', 'member'].includes(entity.role)
 const preview = (text, media) => text === '' && Array.isArray(media) && media.length > 0
   ? media.some((m) => (m.plainMime || m.mime) === 'audio/mp4') ? 'Áudio' : media.every((m) => (m.plainMime || m.mime) === 'image/gif') ? 'GIF' : 'Foto'
   : [...text].slice(0, 140).join('')
+// The node's list label for a momento reaction (PREVIEW_MOMENT in
+// packages/core/lib/dm-fold.js), so the demo list reads the same.
+const MOMENT_PREVIEW = 'Reagiu a um momento'
 
 function refuse (code, message) {
   throw new RpcError(code, message, { uncertain: false })
@@ -737,7 +740,7 @@ export function createVitrineRequest (fixtures, options) {
     'dm.list': ({ folder, limit, before }) => {
       const rows = data.conversations.filter((c) => !c.blocked && c.messages.length > 0).map((c) => {
         const last = c.messages[c.messages.length - 1]
-        return { peer: c.peer, folder: c.folder, preview: preview(last.text, last.media), at: last.at, unread: c.unread, mine: last.mine }
+        return { peer: c.peer, folder: c.folder, preview: Number.isSafeInteger(last.moment) && last.moment >= 1 ? MOMENT_PREVIEW + ' ' + last.text : preview(last.text, last.media), at: last.at, unread: c.unread, mine: last.mine }
       })
       const candidates = rows.filter((c) => c.folder === folder && (!before || compareDm(c, before) > 0)).sort(compareDm)
       const conversations = candidates.slice(0, limit)
@@ -766,19 +769,21 @@ export function createVitrineRequest (fixtures, options) {
       if (c) c.unread = false
       return { ok: true }
     },
-    'dm.send': ({ to, text, replyTo, media, card }) => {
+    'dm.send': ({ to, text, replyTo, media, card, moment }) => {
       if (to === data.own) refuse('USAGE', 'não é possível enviar para si')
       let c = conversationOf(to)
       if (c && c.blocked) refuse('USAGE', 'você bloqueou esta pessoa')
       if (!c && !profileOf(to)) refuse('USAGE', 'esta pessoa ainda não recebe mensagens')
       if (replyTo && (!c || !c.messages.some((m) => m.id === replyTo))) refuse('USAGE', 'responda uma mensagem desta conversa')
+      // Like the node: a reaction only names a momento of `to` that is showing.
+      if (moment !== undefined && moment !== null && data.momentMedia(to, moment) === null) refuse('USAGE', 'momento não encontrado')
       if (!c) {
         c = { peer: to, folder: 'inbox', unread: false, blocked: false, messages: [] }
         data.conversations.push(c)
       }
       const id = (++messageId).toString(16).padStart(32, '0')
       const at = stamp()
-      c.messages.push({ id, from: data.own, text, replyTo: replyTo || null, at, mine: true, media: media || null, ...(card ? { card } : {}) })
+      c.messages.push({ id, from: data.own, text, replyTo: replyTo || null, at, mine: true, media: media || null, ...(card ? { card } : {}), ...(Number.isSafeInteger(moment) && moment >= 1 ? { moment } : {}) })
       c.folder = 'inbox'
       return { id, at }
     },
@@ -959,6 +964,12 @@ export function createVitrineRequest (fixtures, options) {
         own: ownMoments.filter((e) => showing(e.record)).slice(0, 4).map((e) => momentRow(data.own, e)),
         past: ownMoments.filter((e) => Date.parse(e.record.at) + MOMENT_TTL_MS <= demoNow()).slice(0, 16).map((e) => ({ seq: e.seq, ref: `${data.own}:${e.seq}`, text: e.record.text, at: shown(e.record.at) }))
       }
+    },
+    'moment.lookup': ({ author, seq }) => {
+      const entry = momentsOf(author).find((e) => e.seq === seq)
+      if (!entry || !showing(entry.record)) refuse('NOT_FOUND', 'foto indisponível')
+      const { mime, w, h } = entry.record.media
+      return { mime, w, h, ms: 0, at: shown(entry.record.at) }
     },
     'moment.delete': ({ to }) => {
       const target = targetOf(to)

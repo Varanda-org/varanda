@@ -207,7 +207,7 @@ test('review 1: the viewer runs, marks seen and closes only on top', (t) => {
   const src = read('src/screens/Momentos.js')
   t.ok(src.includes('function Viewer ({ entry, ownKey, isTop = true,'), 'isTop prop')
   t.ok(src.includes("if (itemKey !== '' && isTop && photo.phase !== 'loading') mark(itemKey)"), 'seen only on top')
-  t.ok(src.includes('const running = active && loaded && autoOn') && src.includes('&& !musicWaiting && !captionExpanded,'), 'auto-advance only when unpaused and audio is not starting')
+  t.ok(src.includes('const running = active && loaded && autoOn') && src.includes('&& !reacting && !musicWaiting && !captionExpanded,') && src.includes('|| linkHeld || reacting || captionExpanded\n'), 'auto-advance only when unpaused and audio is not starting')
   t.ok(src.includes('active: isTop && node.visible !== false') && src.includes('const running = active && loaded && autoOn'), 'auto-advance only on top and visible')
   t.ok(src.includes("if (closingRef.current || !isTopRef.current || typeof onBack !== 'function') return"), 'goBack only on top')
   t.ok(read('App.js').includes('<Momentos entry={entry} ownKey={ownKey} isTop={i === stack.length - 1}'), 'App passes the top flag')
@@ -958,17 +958,28 @@ test('a policy response after closing the composer never probes the node', async
   t.is(probes, 0)
 })
 
-async function viewerHost ({ music = true, policy = true, ready = true, reduce = false, photo = 'ok', media = null } = {}) {
+async function viewerHost ({ music = true, policy = true, ready = true, reduce = false, photo = 'ok', media = null, author = A, hosted = true, online = true, unlocked = true, send } = {}) {
   const moments = await import('../src/moments.js')
   const seen = await import('../src/momentSeen.js')
   const { musicOriginOf } = await import('../src/music.js')
   const timers = clock()
   const animations = []
-  const node = { hosted: true, epoch: 1, request: () => { throw new Error('unexpected viewer request') } }
-  const item = (seq) => ({ seq, ref: A + ':' + seq, at: new Date().toISOString(), text: '', media, ...(music ? { music: { id: 'abc', start: 30 } } : {}) })
-  const data = { phase: 'ready', authors: [], own: [item(2), item(1)] }
+  const calls = []
+  const node = {
+    hosted,
+    online,
+    passkey: { status: { unlocked } },
+    epoch: 1,
+    request: (method, params) => {
+      calls.push([method, params])
+      if (method === 'dm.send' && send) return send(params)
+      throw new Error('unexpected viewer request')
+    }
+  }
+  const item = (seq, key = A) => ({ seq, ref: key + ':' + seq, at: new Date().toISOString(), text: '', media, ...(music ? { music: { id: 'abc', start: 30 } } : {}) })
+  const data = { phase: 'ready', authors: [{ author: B, items: [item(2, B), item(1, B)] }], own: [item(2), item(1)] }
   const seenState = { loaded: true, seen: [], mark () {} }
-  const env = { node, reduce, photo, back: 0, policyCalls: 0, opened: [] }
+  const env = { node, reduce, photo, back: 0, policyCalls: 0, opened: [], messages: [], calls }
   class Value {
     constructor (value) { this.value = value }
     setValue (value) { this.value = value }
@@ -979,22 +990,27 @@ async function viewerHost ({ music = true, policy = true, ready = true, reduce =
   const deps = {
     ...moments,
     ...seen,
+    ...(await import('../src/reactions.js')),
+    ...(await import('../src/momentReaction.js')),
     ...timers,
     Date: class extends Date { static now () { return timers.now() } },
     displayText: require('@varanda/rpc').displayText,
+    errorText: (err) => 'erro: ' + err.message,
     whoOf: (await import('../src/who.js')).whoOf,
     ...Object.fromEntries(elements.map((name) => [name, name])),
     musicOriginOf,
     audiusPolicy: async () => { env.policyCalls++; return typeof policy === 'function' ? policy() : { moments: policy } },
     audiusReady: async () => typeof ready === 'function' ? ready() : ready,
     useNode: () => node,
-    useStyles: () => ({}),
+    useStyles: (make) => make({}),
     useTheme: () => ({ colors: {} }),
     useNames: () => null,
     useSafeAreaInsets: () => ({ top: 0, bottom: 0 }),
     useWindowDimensions: () => ({ height: 800, width: 400, fontScale: 1 }),
     type: { postText: { lineHeight: 21 } },
     layout: { hit: 44 },
+    space: { xs: 4, sm: 8 },
+    StyleSheet: { create: (styles) => styles, absoluteFillObject: {} },
     useNow: () => Date.now(),
     mocked: { data, seenState, env },
     Animated: {
@@ -1015,7 +1031,7 @@ async function viewerHost ({ music = true, policy = true, ready = true, reduce =
   }
   const setup = 'useMoments = () => mocked.data; useMomentSeen = () => mocked.seenState; useMotionReduced = () => mocked.env.reduce; useMomentPhoto = () => ({ phase: mocked.env.photo })'
   const host = hookHost(read('src/screens/Momentos.js'), 'Viewer', deps, setup)
-  host.render({ entry: { key: A }, ownKey: A, onBack: () => { env.back++ } })
+  host.render({ entry: { key: author }, ownKey: A, onBack: () => { env.back++ }, onMessage: (...args) => env.messages.push(args) })
   await host.flush()
   return {
     ...host,
@@ -1028,6 +1044,160 @@ async function viewerHost ({ music = true, policy = true, ready = true, reduce =
     animation: () => animations.findLast((a) => a.active)
   }
 }
+
+function reactionButtons (h) {
+  return treeNodes(h.render()).filter((n) => n.props.accessibilityLabel?.startsWith('Reagir com '))
+}
+
+function viewerNote (h, text) {
+  return treeNodes(h.render()).find((n) => n.type === 'Text' && n.children.includes(text))
+}
+
+test('viewer offers six private reactions above Responder only on an eligible peer moment', async (t) => {
+  const { QUICK, reactionName } = await import('../src/reactions.js')
+  for (const options of [{ author: B }, { author: A }, { author: B, hosted: false }, { author: B, online: false }, { author: B, unlocked: false }]) {
+    const h = await viewerHost(options)
+    const eligible = options.author === B && options.hosted !== false && options.online !== false && options.unlocked !== false
+    const buttons = reactionButtons(h)
+    t.alike(buttons.map((n) => n.props.accessibilityLabel), eligible ? QUICK.map((emoji) => 'Reagir com ' + reactionName(emoji)) : [])
+    t.is(!!h.button('Responder'), options.author === B && options.hosted !== false, 'reply keeps its own gate')
+    if (eligible) {
+      t.ok(buttons.every((n) => n.type === 'Pressable' && n.props.accessibilityRole === 'button'), 'accessible buttons')
+      t.ok(buttons.every((n) => {
+        const style = Object.assign({}, ...n.props.style({ pressed: false }))
+        return style.minHeight >= 44 && style.minWidth >= 44
+      }), 'each emoji has the full touch target')
+      t.ok(buttons.every((n) => !n.props.accessibilityState?.selected), 'no selected reaction')
+      const bar = treeNodes(h.render()).find((n) => n.props.onLayout?.name === 'measureBar' && treeNodes(n).some((child) => child.props.label === 'Responder'))
+      t.is(treeNodes(bar).filter((n) => n.props.accessibilityLabel?.startsWith('Reagir com ')).length, 6, 'same measured bar as Responder')
+      t.ok(bar && treeNodes(bar).findIndex((n) => n.props.accessibilityLabel === buttons[0]?.props.accessibilityLabel) < treeNodes(bar).findIndex((n) => n.props.label === 'Responder'), 'reaction row precedes reply')
+      const block = bar?.children.find((n) => n?.props?.style?.width === '100%')
+      t.ok(block && treeNodes(block).filter((n) => n.props.accessibilityLabel?.startsWith('Reagir com ')).length === 6, 'reactions occupy their own full-width line')
+      t.absent(treeNodes(bar).some((n) => ['momento anterior', 'próximo momento'].includes(n.props.accessibilityLabel)), 'tap zones are outside the bar')
+    }
+    h.unmount()
+  }
+})
+
+test('viewer reaction sends once while pending, pauses playback, then keeps the row after success', async (t) => {
+  const { QUICK } = await import('../src/reactions.js')
+  const answer = deferred()
+  const h = await viewerHost({ author: B, send: () => answer.promise })
+  t.teardown(h.unmount)
+  h.music().props.onStart()
+  h.render()
+  h.animation().value.setValue(0.4)
+  const press = reactionButtons(h)[0]?.props.onPress
+  t.is(typeof press, 'function')
+  let stopped = 0
+  const event = { stopPropagation: () => { stopped++ } }
+  const pending = press?.(event)
+  press?.(event)
+  t.is(stopped, 2, 'both taps stop before the navigation zones')
+  t.alike(h.calls, [['dm.send', { to: B, text: QUICK[0], moment: 1 }]])
+  h.render()
+  t.ok(h.music().props.paused, 'audio paused during send')
+  t.absent(h.animation(), 'segment paused during send')
+  answer.resolve({})
+  await pending
+  h.render()
+  t.absent(h.music().props.paused, 'audio resumes')
+  t.is(h.animation()?.duration, 9000, 'remaining segment resumes')
+  t.is(viewerNote(h, 'Reação enviada.')?.props.accessibilityLiveRegion, 'polite')
+  t.is(reactionButtons(h).length, 6)
+  t.ok(reactionButtons(h).every((n) => !n.props.disabled), 'success leaves buttons enabled')
+  await reactionButtons(h)[1]?.props.onPress(event)
+  t.alike(h.calls[1], ['dm.send', { to: B, text: QUICK[1], moment: 1 }], 'a new deliberate tap can send again')
+})
+
+test('viewer uncertain reactions stay blocked by ref, open the conversation without context and never retry', async (t) => {
+  const { REACTION_UNSURE } = await import('../src/momentReaction.js')
+  const { UNSURE_SEND } = await import('../src/dm.js')
+  for (const err of [Object.assign(new Error('offline'), { uncertain: true }), new Error(UNSURE_SEND)]) {
+    const h = await viewerHost({ author: B, music: false, send: async () => { throw err } })
+    const event = { stopPropagation () {} }
+    const press = reactionButtons(h)[0]?.props.onPress
+    await press?.(event)
+    await press?.(event)
+    t.is(h.calls.length, 1, 'even a stale handler cannot repeat an uncertain send')
+    t.is(reactionButtons(h).length, 0)
+    t.ok(viewerNote(h, REACTION_UNSURE))
+    t.ok(h.button('Responder'), 'reply remains available')
+    h.button('Ver conversa')?.props.onPress(event)
+    t.alike(h.env.messages, [[B]], 'no reply context')
+    h.timers.advance(60000)
+    await h.flush()
+    t.is(h.calls.length, 1, 'timers never resend')
+    h.button('próximo momento').props.onPress({ nativeEvent: {} })
+    h.render()
+    t.is(reactionButtons(h).length, 6, 'another ref is still eligible')
+    t.absent(viewerNote(h, REACTION_UNSURE))
+    h.button('momento anterior').props.onPress({ nativeEvent: {} })
+    h.render()
+    t.is(reactionButtons(h).length, 0, 'returning preserves the uncertain result')
+    t.ok(viewerNote(h, REACTION_UNSURE))
+    t.is(h.calls.length, 1)
+    h.unmount()
+  }
+})
+
+test('viewer keeps the uncertain note and Ver conversa offline without emoji buttons', async (t) => {
+  const { REACTION_UNSURE } = await import('../src/momentReaction.js')
+  const h = await viewerHost({ author: B, music: false, send: async () => { throw Object.assign(new Error('offline'), { uncertain: true }) } })
+  t.teardown(h.unmount)
+  await reactionButtons(h)[0]?.props.onPress({ stopPropagation () {} })
+  h.env.node.online = false
+  h.render()
+  t.ok(viewerNote(h, REACTION_UNSURE))
+  t.ok(h.button('Ver conversa'))
+  t.is(reactionButtons(h).length, 0)
+})
+
+test('viewer plain reaction errors use errorText and keep the row available', async (t) => {
+  const h = await viewerHost({ author: B, music: false, send: async () => { throw new Error('offline') } })
+  t.teardown(h.unmount)
+  await reactionButtons(h)[0]?.props.onPress({ stopPropagation () {} })
+  t.is(h.calls.length, 1)
+  t.ok(viewerNote(h, 'erro: offline'))
+  t.is(reactionButtons(h).length, 6)
+  t.ok(reactionButtons(h).every((n) => !n.props.disabled))
+  t.ok(h.animation(), 'failure releases playback')
+  t.absent(h.button('Ver conversa'))
+})
+
+test('viewer reaction completion belongs to the captured moment after navigation', async (t) => {
+  const { QUICK } = await import('../src/reactions.js')
+  const answer = deferred()
+  const h = await viewerHost({ author: B, music: false, send: () => answer.promise })
+  t.teardown(h.unmount)
+  const pending = reactionButtons(h)[0]?.props.onPress({ stopPropagation () {} })
+  h.button('próximo momento').props.onPress({ nativeEvent: {} })
+  h.render()
+  answer.resolve({})
+  await pending
+  t.absent(viewerNote(h, 'Reação enviada.'), 'completion is not attached to the next item')
+  t.alike(h.calls, [['dm.send', { to: B, text: QUICK[0], moment: 1 }]])
+  h.button('momento anterior').props.onPress({ nativeEvent: {} })
+  h.render()
+  t.ok(viewerNote(h, 'Reação enviada.'), 'the original ref retains its result')
+})
+
+test('viewer reaction settles after unmount without allowing a stale button to send', async (t) => {
+  for (const uncertain of [false, true]) {
+    const answer = deferred()
+    const h = await viewerHost({ author: B, music: false, send: () => answer.promise })
+    const press = reactionButtons(h)[0]?.props.onPress
+    const event = { stopPropagation () {} }
+    const pending = press?.(event)
+    h.unmount()
+    if (uncertain && pending) answer.reject(Object.assign(new Error('offline'), { uncertain: true }))
+    else answer.resolve({})
+    await pending
+    await press?.(event)
+    t.is(h.calls.length, 1, 'an unmounted viewer never starts another send')
+    t.absent(h.animation(), 'completion never resumes an unmounted viewer')
+  }
+})
 
 test('viewer starts its 15 s hold with audio and resumes the remaining hold after a press or menu', async (t) => {
   const h = await viewerHost()

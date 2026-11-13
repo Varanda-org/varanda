@@ -525,9 +525,9 @@ async function momentsRead (ctx, { now = Date.now() } = {}) {
   }
 }
 
-// The media item of the showing moment author:seq from local data (the own
-// diary or a stored replica, logRead's admission), or null.
-async function momentMedia (ctx, { author, seq, now = Date.now() }) {
+// The showing moment author:seq from local data (the own diary or a stored
+// replica, logRead's admission) as { media, entries }, or null.
+async function showingEntry (ctx, { author, seq, now = Date.now() }) {
   const key = String(author).toLowerCase()
   if (!HEX64.test(key) || !Number.isSafeInteger(seq) || seq < 1) return null
   let log
@@ -541,7 +541,24 @@ async function momentMedia (ctx, { author, seq, now = Date.now() }) {
   // 24 h keeps its photo after newer ones fill the strip.
   const association = await trustRoot(ctx)
   const { revokedIssuers } = await moderation(ctx.storage, association)
-  return showingMoment({ key, entries: log.entries }, seq, now, { association, revokedIssuers })
+  const media = showingMoment({ key, entries: log.entries }, seq, now, { association, revokedIssuers })
+  return media === null ? null : { media, entries: log.entries }
+}
+
+// The media item of the showing moment author:seq, or null.
+async function momentMedia (ctx, args) {
+  const shown = await showingEntry(ctx, args)
+  return shown === null ? null : shown.media
+}
+
+// moment.lookup (docs/rpc.md 5.120): the media item and the record's at, or
+// null. Each reaction preview polls it, so it reads the diary once.
+async function momentLookup (ctx, args) {
+  const shown = await showingEntry(ctx, args)
+  if (shown === null) return null
+  const e = shown.entries.find((x) => x !== null && typeof x === 'object' && x.seq === args.seq)
+  if (e === undefined || e.record === null || typeof e.record !== 'object' || typeof e.record.at !== 'string') return null
+  return { media: shown.media, at: e.record.at }
 }
 
 // ---- feira (docs/protocol.md, "Feira") ----
@@ -5397,6 +5414,7 @@ module.exports = {
   momentDelete,
   momentsRead,
   momentMedia,
+  momentLookup,
   usernameAdd,
   ownEntries,
   ownNoticeContext,

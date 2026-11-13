@@ -35,6 +35,8 @@ import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
 import { holdMsOf, momentMusicOf, canReply, expiresIn, firstUnseenIndex, nextIndex, progressOf, replyContext, ringOrder, segmentMs, VIDEO_END_GRACE_MS } from '../moments'
+import { canReact, reactionParams, unsure, REACTION_SENT, REACTION_UNSURE } from '../momentReaction'
+import { QUICK, reactionName } from '../reactions'
 import { audiusPolicy, audiusReady } from '../account'
 import { musicOriginOf } from '../music'
 import { openExternal } from '../openExternal'
@@ -563,6 +565,7 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const node = useNode()
+  const { request } = node
   const names = useNames()
   const insets = useSafeAreaInsets()
   const win = useWindowDimensions()
@@ -594,6 +597,36 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
   const photo = useMomentPhoto(author, item ? item.seq : null, item?.media)
   const handlePhotoError = photo.fail
   const itemKey = item ? item.ref : ''
+  const [reactionStates, setReactionStates] = useState({})
+  const [reacting, setReacting] = useState(false)
+  const reactionBusy = useRef(false)
+  const reactionUncertain = useRef(new Set())
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
+  const reactionAvailable = !mine && canReact(node) && item !== null
+  const reactionVisible = !mine && item !== null
+  const reaction = reactionStates[itemKey]
+  const react = async (emoji) => {
+    if (!mounted.current || reactionBusy.current || !reactionAvailable || reactionUncertain.current.has(item.ref)) return
+    const ref = item.ref
+    reactionBusy.current = true
+    setReacting(true)
+    setReactionStates((states) => ({ ...states, [ref]: null }))
+    try {
+      await request('dm.send', reactionParams(item, author, emoji))
+      if (mounted.current) setReactionStates((states) => ({ ...states, [ref]: { text: REACTION_SENT } }))
+    } catch (err) {
+      const uncertain = unsure(err)
+      if (uncertain) reactionUncertain.current.add(ref)
+      if (mounted.current) setReactionStates((states) => ({ ...states, [ref]: { uncertain, text: uncertain ? REACTION_UNSURE : errorText(err) } }))
+    } finally {
+      reactionBusy.current = false
+      if (mounted.current) setReacting(false)
+    }
+  }
   const music = momentMusicOf(item)
   const musicOrigin = musicOriginOf(node)
   const musicOn = useMomentMusicPolicy(node, own, music !== null)
@@ -748,7 +781,7 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
     ms: video ? segmentMs(item, photo.ms) : holdMsOf(item, musicStarted),
     video: video && photo.phase === 'ok',
     loaded: photo.phase !== 'loading',
-    active: isTop && node.visible !== false && item !== null && !held && !dragging && !menuOpen && deleting === null && !musicClosed && !linkHeld && !musicWaiting && !captionExpanded,
+    active: isTop && node.visible !== false && item !== null && !held && !dragging && !menuOpen && deleting === null && !musicClosed && !linkHeld && !reacting && !musicWaiting && !captionExpanded,
     autoOn,
     step,
     control: videoControl
@@ -758,7 +791,7 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
     setMusicState(null)
     playback.restart()
   }
-  const paused = !isTop || node.visible === false || item === null || photo.phase === 'loading' || held || dragging || menuOpen || deleting !== null || musicClosed || linkHeld || captionExpanded
+  const paused = !isTop || node.visible === false || item === null || photo.phase === 'loading' || held || dragging || menuOpen || deleting !== null || musicClosed || linkHeld || reacting || captionExpanded
   const musicWaitRemaining = useRef(MUSIC_START_WAIT_MS)
   useEffect(() => { musicWaitRemaining.current = MUSIC_START_WAIT_MS }, [itemKey, playback.restartTick, node.epoch])
   useEffect(() => {
@@ -1124,6 +1157,44 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
             : reply !== null
               ? (
                 <View style={styles.bar} onLayout={measureBar}>
+                  {reactionVisible
+                    ? (
+                      <View style={styles.reactionBlock} onStartShouldSetResponder={() => true}>
+                        {reaction?.uncertain || !reactionAvailable
+                          ? null
+                          : (
+                            <View style={styles.reactionRow}>
+                              {QUICK.map((emoji) => (
+                                <Pressable
+                                  key={emoji}
+                                  accessibilityRole='button'
+                                  accessibilityLabel={'Reagir com ' + reactionName(emoji)}
+                                  accessibilityState={{ disabled: reacting }}
+                                  disabled={reacting}
+                                  onPress={(e) => { e.stopPropagation(); return react(emoji) }}
+                                  style={({ pressed }) => [styles.reactionHit, pressed && styles.pressed]}
+                                >
+                                  <Text style={styles.reactionEmoji}>{emoji}</Text>
+                                </Pressable>
+                              ))}
+                            </View>
+                            )}
+                        {reaction ? <Text style={styles.reactionNote} accessibilityLiveRegion='polite'>{reaction.text}</Text> : null}
+                        {reaction?.uncertain && typeof onMessage === 'function'
+                          ? (
+                            <Pressable
+                              accessibilityRole='button'
+                              accessibilityLabel='Ver conversa'
+                              onPress={(e) => { e.stopPropagation(); onMessage(author) }}
+                              style={({ pressed }) => [styles.reactionHit, pressed && styles.pressed]}
+                            >
+                              <Text style={styles.text}>Ver conversa</Text>
+                            </Pressable>
+                            )
+                          : null}
+                      </View>
+                      )
+                    : null}
                   <Pill label='Responder' icon='mensagem' onPress={reply} />
                 </View>
                 )
@@ -1164,6 +1235,11 @@ const makeStyles = (colors) => StyleSheet.create({
   captionToggle: { minHeight: layout.hit, alignSelf: 'flex-start', justifyContent: 'center', paddingHorizontal: space.sm },
   text: { ...type.postText, color: '#ffffff', ...TEXT_SHADOW },
   bar: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 12 },
+  reactionBlock: { width: '100%', gap: space.xs },
+  reactionRow: { flexDirection: 'row', justifyContent: 'space-between' },
+  reactionHit: { minWidth: layout.hit, minHeight: layout.hit, alignItems: 'center', justifyContent: 'center' },
+  reactionEmoji: { fontSize: 24, color: '#ffffff' },
+  reactionNote: { ...type.postMeta, color: '#ffffff', ...TEXT_SHADOW },
   note: { flex: 1, minWidth: 160, color: 'rgba(255,255,255,0.8)', ...TEXT_SHADOW },
   sheetBody: { gap: 12, paddingHorizontal: 16, paddingBottom: 16 }
 })

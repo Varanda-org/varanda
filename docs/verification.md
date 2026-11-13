@@ -9485,3 +9485,104 @@ Nenhuma conferência em aparelho nem com os provedores reais foi feita. Os itens
 - [ ] Um player estacionado que foi pedido para ceder o lugar, e cuja medição responde tarde (aparelho lento, volta rápida da rolagem), mantém o lugar quando o cartão já está de novo na vista.
 - [ ] YouTube: tocar um link de saída na descrição ou na tela final do vídeo, dentro do player. No Android e no iOS, um link que passa pela página de redirecionamento do YouTube não abre nada. Na web, registrar onde ele abre (a página de redirecionamento do próprio YouTube e o aviso dela).
 - [ ] Limitação conhecida, só registrar, sem correção neste PR: no iPad e numa janela web redimensionada para o outro lado do quadrado, enquanto a janela permanece virada, os players carregados não cedem, então um terceiro cartão visível espera até as linhas deles saírem da lista.
+
+## 206. Reações em momentos (PR feat/moment-reactions)
+
+Num momento de outra pessoa, um toque em um de seis emojis rápidos envia uma mensagem privada só para quem o publicou. Não há curtida, contagem, lista de quem reagiu nem registro no diário. Nada fica público, nem no momento, nem em A Rua, nem no perfil. O momento da própria pessoa não ganha a linha.
+
+Os seis são os de `QUICK` (`apps/app/src/reactions.js`): coração vermelho, positivo, chorando de rir, surpreso, triste e gratidão. O nome acessível é "Reagir com " mais esse nome. Cada botão tem alvo de pelo menos 44 pt e fica na linha de cima de **Responder**, na mesma barra medida. A linha só aparece no nó hospedado, com `node.online === true` e a passkey desbloqueada (`canReact`). Sem uma dessas condições ela some. A decisão é por capacidade, nunca por `Platform.OS`. **Responder** continua só com `node.hosted`. O toque pausa o relógio do visualizador, chama `dm.send` uma vez com `{ to, text, moment }` (`to` a chave de quem publicou, `text` o emoji, `moment` o `seq`) e não repete o pedido sozinho.
+
+O inner é v5 (protocolo, seção 11, "Inner v5"): as chaves da v1, com `moment` logo depois de `text`, `v` 5, `kind` `'msg'`, `replyTo` nulo, `op` e `peer` nulos. `text` é um emoji que passa em `isReaction`, nunca vazio e nunca dois. `moment` é um inteiro seguro `>= 1`: o `seq` de um registro `moment` no diário de `to`. Não leva autor, digest, mídia, cartão nem encaminhamento. A assinatura é Ed25519 de `from` sobre `utf8('varanda-dm-v5\n')` mais os bytes exatos do JSON. O domínio é próprio: uma assinatura v5 não abre como v1, v2, v3 ou v4, e nenhuma dessas abre como v5. Um corpo sem `moment`, ou com `moment` nulo, sai byte a byte como antes. `dmInnerVersion` nunca responde 5, e `innerDigest` recusa `moment`: uma Página escreve só v3. A caixa de uma Página descarta a v5 ao arquivar, como descarta a v4, e o pull segue para a mensagem seguinte. O maior quadro, com o certificado maior, o emoji mais longo que `isReaction` aceita (30 bytes UTF-8) e `moment` `Number.MAX_SAFE_INTEGER`, ocupa 1061 dos 5120 bytes.
+
+`dm.send` (`docs/rpc.md` 5.75) ganha `moment` opcional. Com ele, `replyTo`, `media` e `card` ficam ausentes e `fwd` é `0`, senão `'parâmetro inválido: moment'`. Texto que não é um emoji só dá `'parâmetro inválido: text'`. O nó envia só quando esse momento de `to` está no ar na réplica local (guardado, registro `moment`, não apagado, dentro das 24 h e no máximo `MOMENT_SKEW_MS` à frente do relógio). Senão, `USAGE` `'momento não encontrado'`, e nada é assinado, enviado ou cobrado. Custa e confirma como qualquer `dm.send`: dois selos, um por envelope (o da outra pessoa e a cópia para si). Resposta perdida é incerta (`uncertain: true`, ou a mensagem `'não deu para confirmar o envio'`). O nó não reenvia sozinho. Enquanto essa tentativa incerta continua pendente na memória do nó, uma tentativa nova da pessoa, com os mesmos `to`, `text` e `moment`, recoloca os mesmos envelopes e não gasta selo de novo, mesmo que o momento já tenha saído do ar. Bloquear a identidade, recarregar o app ou concluir o envio apaga essa pendência, e o nó guarda no máximo 32 pendências (a mais antiga sai). Depois disso, repetir o pedido é um envio novo: cria outra mensagem e gasta dois selos se o momento continua no ar, ou é recusado se ele já saiu. Outro emoji, ou outro `seq`, é outra mensagem. Envio para si, pessoa bloqueada e falta de chave de mensagens continuam as recusas de sempre. A faixa mostra no máximo quatro momentos por pessoa (`MAX_MOMENTS_PER_AUTHOR`). O quinto, o mais antigo, sai da faixa e continua no ar: `moment.lookup` responde, e um envio para esse `seq` é aceito enquanto as 24 h não passam. A lista usa o teto; a leitura de um `seq` usa o registro.
+
+Quem lê trata `moment` só como referência. O inner não leva foto, texto nem chave do momento, então quem envia não faz a outra pessoa ver outra coisa senão o momento de `to` naquele `seq`. A conversa resolve com `moment.lookup` (`docs/rpc.md` 5.120) `{ author, seq }`, no diário de `to` (o próprio, numa recebida; o da outra pessoa, numa enviada). Enquanto o momento está no ar, a resposta é `{ mime, w, h, ms, at }`: `ms` é 0 numa imagem e a duração num vídeo, `at` é o ISO do registro. Nunca o texto, a música, o descritor, a chave nem os bytes. A miniatura, quando há, sai de `media.read` com `kind: 'moment'`. Fora do ar (não guardado, não é momento, apagado, passado das 24 h, data adiantada demais) a resposta é `NOT_FOUND` `'foto indisponível'`. O método é só leitura, local, não abre rede e funciona com a identidade bloqueada. O nó do core, a CLI e o `varanda-serve` respondem `USAGE` `'mídia disponível só na versão web'` e não abrem diário. Um nó antigo responde `'método desconhecido'`.
+
+Na conversa, a bolha mostra o rótulo fixo "Você reagiu a um momento" (a enviada) ou "Reagiu ao seu momento" (a recebida), o emoji passado por `displayText` e, só enquanto o momento aparece, uma miniatura de no máximo 72 pt. Um vídeo vira um azulejo com o ícone de tocar e o nome "Vídeo do momento", sem player e sem baixar o arquivo. Um GIF é imagem e ganha miniatura. A consulta se repete a cada 15 s e de novo na hora em que as 24 h fecham. No fim das 24 h, se o momento foi apagado, ou se a consulta ou a leitura falha, a miniatura sai e fica "Momento indisponível". O emoji continua. Texto que não é um emoji, ou um `seq` que não é inteiro seguro, segue o balão comum: o texto do par nunca vai cru para a tela. A prévia da lista é "Reagiu a um momento" mais o emoji, nunca uma chave, um id ou um nome de arquivo. A reação conta como não lida e ordena a conversa como qualquer mensagem. Uma mensagem apagada ou oculta não vira bolha de reação. Conversa de Página não monta a bolha.
+
+Em Pedidos de mensagem (quem recebe não segue quem enviou, e ainda não aceitou), a bolha não chama `moment.lookup` nem lê a mídia. Aceitar carrega a miniatura. Voltar o estado para pedidos solta a miniatura e não consulta de novo. A prévia da lista já mostra "Reagiu a um momento" e o emoji antes de aceitar.
+
+Se o envio não se confirma, o visualizador mostra "Não deu para confirmar o envio. Confira a conversa antes de tentar de novo.", esconde os seis emojis daquele momento e oferece **Ver conversa**, que abre a conversa sem o chip de contexto do momento. Nenhum timer reenvia. Uma falha comum (não incerta) mostra o texto do erro, devolve os botões e não abre a conversa. "Reação enviada." não trava os botões: outro toque deliberado envia de novo. Fechar o visualizador no meio não dispara um segundo envio.
+
+Um app, uma CLI ou um nó de antes da v5 vê um `v` desconhecido, `openInner` devolve nulo e o drop é pulado. O cursor do pull passa por ele. Não há mensagem de reserva, não entra na conta de não lidas e, depois de atualizar, essa reação não volta.
+
+Termos de Uso e Política de Privacidade passam à versão 46, de 13/11/2026, com novo aceite. Dizem que o toque num dos seis emojis envia uma mensagem privada, sem contagem pública, lista de quem reagiu ou registro no diário. A Política diz que a reação leva o emoji, o número do registro no diário de quem publicou, a hora e a conta de quem envia, cifrados como qualquer mensagem direta, sem copiar a foto ou o vídeo. A conversa mostra uma prévia pequena só enquanto o app ainda mostra o momento. A reação gasta selos como uma mensagem e não pode ser removida. Um app que não foi atualizado não a mostra, e as conversas das páginas não a guardam.
+
+As seções 123, 187 e 199 continuam para o resto dos momentos. O texto delas não foi editado.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o contrato, o nó e o texto do código. Não montam a interface num aparelho e não usam a DHT pública. A lista é um roteiro, não um registro de execução.
+
+```sh
+node packages/core/test/dm.test.js
+node packages/core/test/dm-fold.test.js
+node packages/core/test/moments.test.js
+node packages/core/test/engagement-session.test.js
+node packages/core/test/terms.test.js
+node packages/rpc/test/dm-budget.test.js
+node packages/rpc/test/methods.test.js
+node packages/rpc/test/sizes.test.js
+node packages/web-member/test/dm-store.test.js
+node packages/web-member/test/dm-e2e.test.js
+node packages/web-member/test/dm-moment-e2e.test.js
+node packages/web-member/test/moments-e2e.test.js
+node apps/app/test/moments.test.js
+node apps/app/test/momentosScreen.test.js
+node apps/app/test/dm.test.js
+node apps/app/test/vitrine.test.js
+node apps/app/test/legal.test.js
+node apps/app/test/terms-version.test.js
+node apps/site/test/legal.test.js
+```
+
+`packages/core/test/dm.test.js`: `inner v5: constants, exact key set and round trip`; `inner v5: shape rules`; `inner v5: a null or absent moment builds the exact bytes of today`; `inner v5: its own signature domain`; `inner v5: relabelled it never opens, and a reader without v5 drops it`; `inner v5: the largest certificate and the longest reaction fit` (1061 bytes).
+
+`packages/rpc/test/dm-budget.test.js`: `dm-budget: v5 is a reaction to a momento with the v1 keys plus moment` (a ordem das chaves, e `innerVersion` não escolhe a v5); `dm-budget: the largest v5 inner fits the fixed frame and core signs the canonical bytes`.
+
+`packages/rpc/test/methods.test.js`: `dm.send: a reaction to a momento is one emoji and nothing else` (emoji único, `moment` inteiro seguro, e `replyTo`, `media`, `card` ou `fwd` 1 recusam o `moment`; uma chamada sem `moment` não muda); `moment.lookup: an author and a seq, read only` (não é mutante; autor hex64 e `seq` `>= 1`; campo extra é `'parâmetro desconhecido'`).
+
+`packages/rpc/test/sizes.test.js`: `dm.thread: a momento reaction row is never larger than the worst row` (a página máxima pinada continua 262042 bytes).
+
+`packages/core/test/dm-fold.test.js`: `a moment reaction is an ordinary message with a fixed preview` (não lida, ordem da conversa, pasta de pedidos quando quem recebe não segue, caixa de entrada quando a mensagem é própria, prévia `Reagiu a um momento` mais o emoji, `moment` inválido some da linha, uma reação v4 ainda se aplica à linha).
+
+`packages/core/test/moments.test.js`: `showingMoment: one moment by seq, without the list caps` (o mais antigo de mais de quatro continua com a foto dentro das 24 h, e sai se expirou, se a data está adiantada demais, se foi apagado ou se o registro não é momento).
+
+`packages/core/test/engagement-session.test.js`: `the momento methods are refused on the node session, nothing written` (`moment.lookup` responde `'mídia disponível só na versão web'`, não abre diário, e `seq` 0 ou campo extra seguem a regra de parâmetro).
+
+`packages/core/test/terms.test.js`: `constants` (`TERMS_VERSION` 46).
+
+`packages/web-member/test/dm-store.test.js`: `a momento reaction row keeps its moment across a reopen; moment with media, a card, a reply, a forward or non-emoji text is invalid` (o `seq` sobrevive a reabrir; uma linha quebrada com momento e foto é pulada ao carregar).
+
+`packages/web-member/test/dm-moment-e2e.test.js`: `dm moment reaction end to end: sent only to a showing momento, filed with its seq, previewed, retried with the same drops` (recusa apagado, publicação, `seq` desconhecido, expirado e data adiantada, sem selo e sem put; envio no ar gasta dois selos; quem não segue recebe em pedidos, com prévia e não lida; as duas pontas guardam o `seq`; outro momento é outra mensagem; a tentativa incerta recoloca os mesmos envelopes; a tentativa pendente ainda sai depois que o momento é apagado, e um envio novo para ele não; bloqueio e falta de chave de mensagens continuam as recusas de `dm.send`); `a moment reaction sealed to a Página box is never filed, and the pull goes on past it`.
+
+`packages/web-member/test/moments-e2e.test.js`: `moment.lookup: the showing momento a reaction names, a fifth one included, never once gone` (o quinto, fora da faixa, responde `{ mime, w, h, ms, at }` sem texto, chave ou bytes; quem segue responde da réplica, também com a identidade bloqueada; publicação, `seq` ausente, autor desconhecido, data adiantada, expirado e apagado dão `'foto indisponível'`; os outros momentos continuam).
+
+`apps/app/test/moments.test.js`: `canReact requires hosted, online and an unlocked passkey`; `reactionParams copies only the recipient, emoji and safe moment sequence`; `isMomentReaction requires a safe sequence and raw emoji text`; `moment reaction authors and labels follow the message direction`; `unsure recognizes both uncertain send signals`; `previewPlan separates supported images from MP4 video`; `previewPlan drops failed, unsupported and malformed lookups`; `previewUntil expires exactly 24 hours after a safe lookup timestamp`.
+
+`apps/app/test/momentosScreen.test.js`: `viewer offers six private reactions above Responder only on an eligible peer moment`; `viewer reaction sends once while pending, pauses playback, then keeps the row after success`; `viewer uncertain reactions stay blocked by ref, open the conversation without context and never retry`; `viewer plain reaction errors use errorText and keep the row available`; `viewer reaction completion belongs to the captured moment after navigation`; `viewer reaction settles after unmount without allowing a stale button to send`; `viewer keeps the uncertain note and Ver conversa offline without emoji buttons`.
+
+`apps/app/test/dm.test.js`: `threadRows preserves only the source moment, including duplicate message ids`; `moment bubbles render both labels and the emoji through displayText`; `hostile moment text and an ordinary emoji stay on the ordinary message path`; `moment image reads once across polls, fits 72 pt and releases on unmount`; `video previews use a static tile without reading media`; `requests and missing or invalid authors never look up or read a moment`; `failed lookup and failed media read show the unavailable label`; `a mounted preview expires at its deadline and drops the image`; `a mounted preview discovers deletion on its next poll`; `identity changes release native read files and late reads cannot restore a thumb`; `Mensagem supplies moment context only for private reaction rows`; `expiry drops the mounted image even while a lookup is pending`; `request acceptance loads the preview and returning to requests releases it`.
+
+`apps/app/test/vitrine.test.js`: `momentos: a reaction keeps its moment seq on dm.thread` (a reação guarda o `seq`; uma mensagem comum não ganha a chave `moment`). A lista de chaves de `moment.lookup` em `all vitrine methods match the documented result and row keys` é `mime`, `w`, `h`, `ms`, `at`.
+
+`apps/app/test/legal.test.js`: `legal: version, date and review note` (versão 46, data 13/11/2026, nota de revisão); `legal: version 46 sends a momento reaction as a private message` (as frases da reação nos Termos e na Privacidade); `legal: published text is pinned to its acceptance version` (o digest prende os dois documentos, inclusive os parágrafos da reação a um momento). `apps/app/test/terms-version.test.js`: `LEGAL_VERSION matches the core TERMS_VERSION`. `apps/site/test/legal.test.js`: `legal pages: the files on disk are the render of apps/app/src/legal.js` e `legal pages: title, version, review note and every section of legal.js, in order` (as páginas de Termos e Privacidade são o render desse texto, versão 44).
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Todos os itens estão em aberto.
+
+Usar duas contas de teste, A quem reage e B quem publicou o momento, sem DHT pública, com os Termos 46 aceitos e a chave de mensagens desbloqueada, salvo no item da identidade bloqueada. O build de debug não entra com passkey de produção. No iOS, a passkey depende do domínio associado da conta Apple Developer (veja `docs/development.md`). Ordem: build de debug do Android, simulador do iOS, depois a web e o PWA. Registrar aparelho, sistema e, na web, o navegador.
+
+- [ ] Duas contas, envio: em A, abrir um momento de B (nunca o próprio). Acima de **Responder** há seis botões, coração vermelho, positivo, chorando de rir, surpreso, triste e gratidão, cada um com alvo de 44 pt. No momento da própria pessoa a linha não aparece. Um toque envia uma vez e mostra "Reação enviada.". O momento de B não ganha curtida, contagem nem registro novo no diário. Nada disso aparece em A Rua nem no perfil.
+- [ ] Recebimento: em B, a conversa com A mostra a bolha "Reagiu ao seu momento", o emoji e uma miniatura de até 72 pt enquanto o momento está no ar. Em A, a mesma conversa mostra "Você reagiu a um momento" e a mesma miniatura. A lista mostra "Reagiu a um momento" e o emoji. A miniatura vem de `moment.lookup` e de `media.read` com `kind: 'moment'`, não dos bytes da mensagem. Tocar na miniatura não abre o momento nem toca vídeo.
+- [ ] Pedidos de mensagem: B não segue A. A reação chega em Pedidos de mensagem, não lida, com a prévia, e a bolha não pede `moment.lookup` nem a mídia (conferir que não há miniatura). **Aceitar** leva a conversa para a caixa de entrada e a miniatura aparece.
+- [ ] Identidade bloqueada: com a passkey bloqueada, os seis emojis não aparecem e nenhum envio sai. `moment.lookup` continua só de leitura: não grava e não abre rede.
+- [ ] Sem rede: com o nó offline, os seis emojis não aparecem. Quando a rede volta, nada é enviado sozinho.
+- [ ] Envio incerto: perder a confirmação no meio do envio. O visualizador mostra "Não deu para confirmar o envio. Confira a conversa antes de tentar de novo.", esconde os seis emojis daquele momento e não reenvia. **Ver conversa** abre a conversa sem o chip de contexto do momento. Na conta B, a mensagem chegou no máximo uma vez. Só então decidir se envia de novo, com um toque novo.
+- [ ] Momento expirado: depois de 24 h, a bolha fica com o emoji e "Momento indisponível", sem miniatura. Um envio novo daquele `seq` é recusado com "momento não encontrado" e não gasta selo.
+- [ ] Momento apagado: B apaga o momento. A miniatura some na consulta seguinte (até 15 s) e fica "Momento indisponível". Um envio novo é recusado do mesmo jeito. Os outros momentos de B continuam no ar, com miniatura nas reações deles.
+- [ ] Quinto momento em 24 h: B publica cinco momentos seguidos. A faixa mostra quatro. O mais antigo não entra na faixa nem no visualizador. Enquanto não passam 24 h, `moment.lookup` desse `seq` ainda responde, e uma reação que o nomeia mostra a miniatura na conversa.
+- [ ] Momento de vídeo: a bolha mostra um azulejo com o ícone de tocar e o nome "Vídeo do momento". Não há player, não há pedido do arquivo de vídeo e nada toca. Um GIF continua com miniatura de imagem.
+- [ ] Leitor antigo: um app ou nó de antes desta versão não mostra a reação, não conta como não lida e não deixa texto no lugar. Depois de atualizar, a reação que esse leitor já passou não volta.
+- [ ] Android, depois iOS, depois a web e o PWA, no tema claro e no escuro: envio, recebimento e pedidos de mensagem. Com TalkBack e VoiceOver, cada emoji é "Reagir com " mais o nome, e a miniatura anuncia "Foto do momento" ou "Vídeo do momento".

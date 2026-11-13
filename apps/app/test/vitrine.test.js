@@ -136,6 +136,7 @@ const resultKeys = {
   'moment.putMedia': ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms'],
   'moment.create': ['seq', 'ref'],
   'moments.read': ['authors', 'own', 'past'],
+  'moment.lookup': ['mime', 'w', 'h', 'ms', 'at'],
   'moment.delete': ['seq', 'deleted']
 }
 
@@ -602,6 +603,7 @@ function samples (f) {
     'moment.putMedia': { name: '0'.repeat(32) + '.bin', mime: 'image/jpeg', width: 512, height: 512 },
     'moment.create': { text: 'Bom dia, praça!', media: f.diaryRecords.find((e) => e.record.type === 'moment').record.media },
     'moments.read': {},
+    'moment.lookup': { author: f.follows.find((a) => f.diaryRecords.some((e) => e.author === a && e.record.type === 'moment')), seq: Math.max(...f.diaryRecords.filter((e) => e.record.type === 'moment' && e.author === f.follows.find((a) => f.diaryRecords.some((x) => x.author === a && x.record.type === 'moment'))).map((e) => e.seq)) },
     'moment.delete': { to: `${f.own}:48` },
     'account.sign': { phase: 'reserve', nonce, username: 'lia_praca', sub: '' },
     'age.sign': { action: 'result', nonce },
@@ -1282,6 +1284,24 @@ test('depoimentos: fixtures validate, pending is shown, removed and revoked', as
   t.alike(joaoPeek.entries, [])
   await refused(t, request, 'testimonial.delete', { to: `${f.own}:3` }, 'USAGE', 'referência inválida')
   await refused(t, request, 'testimonial.delete', { to: `${joao}:61` }, 'USAGE', 'referência inválida')
+})
+
+test('momentos: a reaction keeps its moment seq on dm.thread', async (t) => {
+  const { fixtures: f, request } = await load()
+  const peer = f.follows.find((a) => f.diaryRecords.some((e) => e.author === a && e.record.type === 'moment'))
+  const seq = Math.max(...f.diaryRecords.filter((e) => e.record.type === 'moment' && e.author === peer).map((e) => e.seq))
+  await answer(t, request, 'moment.lookup', { author: peer, seq })
+  const gone = await request('dm.send', { to: peer, text: '❤️', moment: 999999 }).then(() => null, (err) => err)
+  t.is(gone && gone.message, 'momento não encontrado', 'a seq that is not showing is refused, like the node')
+  t.absent((await answer(t, request, 'dm.thread', { peer })).messages.some((m) => m.moment === 999999), 'the refused reaction is not stored')
+  const listed = async () => (await answer(t, request, 'dm.list', { folder: 'inbox' })).conversations.find((c) => c.peer === peer).preview
+  const withMoment = await answer(t, request, 'dm.send', { to: peer, text: '❤️', moment: seq })
+  t.is(await listed(), 'Reagiu a um momento ❤️', 'the list shows the node label, never the seq')
+  const plain = await answer(t, request, 'dm.send', { to: peer, text: 'Oi' })
+  t.is(await listed(), 'Oi', 'a plain message after it previews its text')
+  const rows = (await answer(t, request, 'dm.thread', { peer })).messages
+  t.is(rows.find((m) => m.id === withMoment.id).moment, seq, 'the reaction carries the moment')
+  t.absent('moment' in rows.find((m) => m.id === plain.id), 'a plain message stores no moment key')
 })
 
 test('momentos: fixtures validate, moments.read follows the 24 h rule and the caps', async (t) => {

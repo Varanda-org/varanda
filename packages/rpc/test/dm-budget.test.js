@@ -217,3 +217,26 @@ test('dm-budget: the largest v4 inner fits the fixed frame', (t) => {
   t.alike(Object.keys(JSON.parse(realJson)), rpc.DM_INNER_KEYS_V4)
   t.is(realJson, budget.canonicalInnerJson(JSON.parse(realJson)), 'core signs the canonical bytes')
 })
+
+test('dm-budget: v5 is a reaction to a momento with the v1 keys plus moment', (t) => {
+  t.alike(rpc.DM_INNER_KEYS_V5, ['v', 'kind', 'id', 'from', 'to', 'replyTo', 'text', 'moment', 'op', 'peer', 'at', 'cert'])
+  t.is(rpc.DM_INNER_KEYS_V5, budget.DM_INNER_KEYS_V5)
+  t.is(rpc.DM_INNER_KEYS_V5, dm.INNER_KEYS_V5)
+  t.ok(Object.isFrozen(rpc.DM_INNER_KEYS_V5))
+  const body = { v: 5, kind: 'msg', id: 'a'.repeat(32), from: bia.hex, to: plain.hex, replyTo: null, text: '❤️', moment: 7, op: null, peer: null, at: AT, cert: null, media: null }
+  const parsed = JSON.parse(budget.canonicalInnerJson(Object.fromEntries(Object.entries(body).reverse())))
+  t.alike(Object.keys(parsed), rpc.DM_INNER_KEYS_V5, 'wire order whatever the caller built, nothing else')
+  t.is(parsed.moment, 7)
+  // Only a moment field asks for v5: innerVersion never picks it.
+  t.is(budget.innerVersion({ ...body, card: null, fwd: 0 }), 1)
+})
+
+test('dm-budget: the largest v5 inner fits the fixed frame and core signs the canonical bytes', (t) => {
+  const real = dm.buildInner({ kind: 'msg', to: bia.hex, text: LONGEST_EMOJI, moment: Number.MAX_SAFE_INTEGER, at: AT, cert: issued.cert }, issued)
+  const realJson = b4a.toString(real.subarray(2, 2 + innerLength(real)))
+  t.alike(Object.keys(JSON.parse(realJson)), rpc.DM_INNER_KEYS_V5)
+  t.is(realJson, budget.canonicalInnerJson(JSON.parse(realJson)), 'core signs the canonical bytes')
+  const standin = { v: 5, kind: 'msg', id: 'f'.repeat(32), from: 'f'.repeat(64), to: 'e'.repeat(64), replyTo: null, text: LONGEST_EMOJI, moment: Number.MAX_SAFE_INTEGER, op: null, peer: null, at: AT, cert: budget.MEMBER_CERT_STANDIN }
+  const bytes = b4a.byteLength(budget.canonicalInnerJson(standin))
+  t.ok(bytes + budget.DM_INNER_FRAMING_BYTES <= budget.DM_INNER_BYTES, 'v5 frame ' + (bytes + 66) + ' of ' + budget.DM_INNER_BYTES)
+})

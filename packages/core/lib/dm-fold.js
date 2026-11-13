@@ -10,6 +10,10 @@
 // only adds `reactions` to the row it names: it never changes unread, the
 // preview, the thread order, a cutoff or the DM_MESSAGES_PER_PEER cap.
 // A bound reply quotes only the kept row with its sender, id and digest.
+// A moment reaction (inner v5) is an ordinary message that also carries
+// `moment`, the seq in the diary of `to`. It counts for unread, order, the
+// caps, folders, cutoffs, replies and v4 reactions like any other message.
+// Only the list preview changes: a fixed label plus the text.
 
 const { copyLinkCard } = require('./link-card')
 const { DM_REQUESTS_MAX, DM_MESSAGES_PER_PEER } = require('./dm')
@@ -20,6 +24,7 @@ const FOLDER_OPS = ['accepted', 'declined']
 const PREVIEW_PHOTO = 'Foto'
 const PREVIEW_GIF = 'GIF'
 const PREVIEW_AUDIO = 'Áudio'
+const PREVIEW_MOMENT = 'Reagiu a um momento'
 const BLOCK_OPS = ['blocked', 'unblocked']
 
 function isHex64 (s) {
@@ -175,9 +180,11 @@ function bindReplies (kept) {
 // fold({ self, followSet, messages, ops, seen, reactions }) -> { inbox, requests },
 // each a list of { peer, folder, messages, at, unread } newest first.
 // seen: Set of seenKey(from, id) strings.
-// messages: verified bodies { id, from, to, text, replyTo, media?, fwd?, at,
-// filedAt, digest? } (media null or absent for a v1 body; replyTo null, a
-// bare id or a bound { from, id, digest }; digest the hex64
+// messages: verified bodies { id, from, to, text, replyTo, media?, fwd?,
+// moment?, at, filedAt, digest? } (media null or absent for a v1 body;
+// moment a safe integer >= 1, the seq of a moment in the diary of `to`,
+// and absent otherwise, because a peer can put anything there; replyTo
+// null, a bare id or a bound { from, id, digest }; digest the hex64
 // of the canonical inner JSON, absent for a row stored without one);
 // ops: { op, peer, at, filedAt }; reactions: see reactionsByPeer, under
 // the same filing cutoffs as the rows. filedAt is the LOCAL time in ms at which
@@ -225,6 +232,8 @@ function fold ({ self, followSet, messages, ops, seen, reactions } = {}) {
     const mine = m.from === self
     const media = Array.isArray(m.media) && m.media.length > 0 ? m.media : null
     const row = { id: m.id, from: m.from, to: m.to, text: m.text, ...replyOf(m.replyTo), fwd: m.fwd === 1 ? 1 : 0, media, card: media || !m.card ? null : copyLinkCard(m.card, (d) => ({ ...d })), at: new Date(t).toISOString(), sentAt: m.at, mine, peer, t, f, digest: isHex64(m.digest) ? m.digest : '' }
+    // A peer chooses this value. Only a diary seq (safe integer >= 1) is kept.
+    if (Number.isSafeInteger(m.moment) && m.moment >= 1) row.moment = m.moment
     if (!byPeer.has(peer)) byPeer.set(peer, [])
     byPeer.get(peer).push(row)
   }
@@ -277,9 +286,11 @@ function fold ({ self, followSet, messages, ops, seen, reactions } = {}) {
 // a new reaction or a bound reply to it names (callers never hand it out in
 // dm.thread). `replyTo` is always the bare id; a bound reply adds
 // `replyFrom`, the quoted sender, when the message it names is kept here,
-// and `replyMissing: true` when it is not.
+// and `replyMissing: true` when it is not. `moment` only when the row has
+// one (already a safe integer >= 1).
 function publicRow (r) {
   const row = { id: r.id, from: r.from, to: r.to, text: r.text, replyTo: r.replyTo, fwd: r.fwd, media: r.media, card: r.card, at: r.at, sentAt: r.sentAt, mine: r.mine, peer: r.peer }
+  if (r.moment !== undefined) row.moment = r.moment
   if (r.bind !== null) {
     if (r.quoted) row.replyFrom = r.bind.from
     else row.replyMissing = true
@@ -291,10 +302,12 @@ function publicRow (r) {
 
 // What a conversation list shows for a message: its text, or a fixed label
 // when it is only media, so no peer-chosen string stands in for the photo.
-// GIF only when every item is one; a voice note is 'Áudio'.
+// GIF only when every item is one; a voice note is 'Áudio'. A moment
+// reaction keeps its text (the emoji) after a fixed label.
 function previewText (m) {
   if (m === null || typeof m !== 'object') return ''
   const text = typeof m.text === 'string' ? m.text : ''
+  if (Number.isSafeInteger(m.moment) && m.moment >= 1) return PREVIEW_MOMENT + ' ' + text
   if (text !== '' || !Array.isArray(m.media) || m.media.length === 0) return text
   if (m.media.some(d => d !== null && typeof d === 'object' && d.mime === 'audio/mp4')) return PREVIEW_AUDIO
   const gif = m.media.every(d => d !== null && typeof d === 'object' && d.mime === 'image/gif')
@@ -350,5 +363,6 @@ module.exports = Object.freeze({
   previewText,
   PREVIEW_PHOTO,
   PREVIEW_GIF,
-  PREVIEW_AUDIO
+  PREVIEW_AUDIO,
+  PREVIEW_MOMENT
 })

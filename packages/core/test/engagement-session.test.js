@@ -174,9 +174,12 @@ test('the momento methods are refused on the node session, nothing written', asy
   t.alike(await failure(m.call('moment.create', { text: 'agora', media })), NO)
   t.alike(await failure(m.call('moments.read', {})), NO)
   t.alike(await failure(m.call('moment.delete', { to: m.publicKey + ':1' })), NO)
+  t.alike(await failure(m.call('moment.lookup', { author: OTHER, seq: 1 })), NO, 'moment.lookup opens no diary')
   t.alike(await m.call('log.read'), before, 'nothing written')
   t.alike(m.session.internal, [])
   const UNKNOWN = { code: 'USAGE', message: 'parâmetro desconhecido' }
   t.alike(await failure(m.call('moments.read', { extra: 1 })), UNKNOWN)
+  t.alike(await failure(m.call('moment.lookup', { author: OTHER, seq: 1, extra: 1 })), UNKNOWN)
+  t.alike(await failure(m.call('moment.lookup', { author: OTHER, seq: 0 })), { code: 'USAGE', message: 'parâmetro inválido: seq' })
   t.alike(await failure(m.call('moment.create', { text: 'x'.repeat(201), media })), { code: 'USAGE', message: 'parâmetro inválido: text' })
 })

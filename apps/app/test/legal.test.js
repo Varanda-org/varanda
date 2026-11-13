@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 45)
+  t.is(LEGAL_VERSION, 46)
   t.is(LEGAL_DATE, '13/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 45, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 46, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -81,6 +81,23 @@ test('legal: version 39 describes music through the account service', async (t) 
   const terms = TERMS.sections.find((s) => s.heading === 'Música do Audius').paragraphs.join(' ')
   t.ok(terms.includes('Num momento, se a associação ligar a música nos momentos, ver um momento com música, inclusive um seu, já pede o trecho de 15 segundos ao serviço de conta, sem um toque à parte; o trecho toca em seguida, a não ser que o navegador só deixe tocar som depois de um toque. O Audius continua recebendo só o endereço da associação.'), 'terms: momento music starts on view')
   t.ok(section('Música do Audius').includes('Num momento, se a associação ligar a música nos momentos, ver um momento com música, inclusive um seu, já pede o trecho de 15 segundos ao serviço de conta, sem um toque à parte; o trecho toca em seguida, a não ser que o navegador só deixe tocar som depois de um toque.'), 'privacy: momento music starts on view')
+})
+
+test('legal: version 46 sends a momento reaction as a private message', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const terms = TERMS.sections.find((s) => s.heading === 'Fotos, vídeos e recursos planejados').paragraphs.join(' ')
+  for (const required of [
+    'Num momento de outra pessoa, tocar num dos seis emojis rápidos envia uma mensagem privada só para quem o publicou, como as outras mensagens diretas.',
+    'Não há contagem pública, lista de quem reagiu nem registro no diário.'
+  ]) t.ok(terms.includes(required), 'terms: ' + required)
+  const privacy = PRIVACY.sections.find((s) => s.heading === 'Diário, perfil, fotos e vídeos').paragraphs.join(' ')
+  for (const required of [
+    'Uma reação a um momento é enviada como uma mensagem direta a quem o publicou: leva o emoji, o número do registro do momento no diário dessa pessoa, a hora e a sua conta como remetente, cifrados como qualquer mensagem direta.',
+    'Nada da foto ou do vídeo é copiado.',
+    'A conversa mostra uma prévia pequena só enquanto o app ainda mostra o momento.',
+    'A reação gasta selos de envio como uma mensagem e não pode ser removida.',
+    'Um app que não foi atualizado não a mostra, e as conversas das páginas não a guardam.'
+  ]) t.ok(privacy.includes(required), 'privacy: ' + required)
 })
 
 test('legal: version 44 plays post music by itself while the sticker is visible', async (t) => {
@@ -247,7 +264,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '28494f7dc07f3294af8574fc69117938d7226a332d9bf6ee3183bad56ee0e194', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '43df957cea50fe6021d219b655c15bdc2b9f851af8ea4738528fbd2f2e562130', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {

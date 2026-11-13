@@ -65,6 +65,7 @@ import { shareNav } from '../shareNav'
 import { countChars } from '../format'
 import { composeText, contextExcerpt, contextLabel, sendAttempt } from '../privateReply'
 import { LABELS, UNSURE_SEND } from '../dm'
+import { isMomentReaction, momentAuthor } from '../momentReaction'
 import { useBlocks } from '../blocksProvider'
 import { BLOCK_TEXTS } from '../memberBlocks'
 import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
@@ -1441,6 +1442,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
               <SwipeReply disabled={!reply} onReply={reply?.onPress}>
                 <View style={flashKey === item.key ? styles.quoteFlash : undefined}>
                   <Bubble
+                    moment={pageKey === null && !item.deleted && isMomentReaction(item) ? { author: momentAuthor(item, { peer, ownKey }), seq: item.moment, identity: ownKey, folder } : undefined}
                     media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} deferred={folder === 'request'} /> : null}
                     item={{ key: item.key, text: link ? plainOf(item.rawText, { full: true }) : item.text, rawText: link ? undefined : item.rawText, at: item.at, deleted: item.deleted, dayMark: item.dayMark, card: link && stored ? cardBesideSpoilers(parseRich(item.rawText), stored) : stored }}
                     mine={mine}
@@ -1490,7 +1492,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
               </SwipeReply>
             )
           }}
-          extraData={{ now, nameText, folder, reactionOverrides, reactionsDisabled, flashKey }}
+          extraData={{ now, nameText, folder, ownKey, reactionOverrides, reactionsDisabled, flashKey }}
           ListFooterComponent={reactionError || reactionContext.unsure.size > 0 ? <View style={styles.pad}><ErrorText>{reactionError}</ErrorText>{reactionContext.unsure.size > 0 ? <Soft>Não deu para confirmar a reação.</Soft> : null}</View> : null}
           ListHeaderComponent={next ? <View style={styles.pad}><Pill label='mensagens anteriores' onPress={loadOlder} pending={loadingMore} /></View> : null}
           ListEmptyComponent={

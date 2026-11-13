@@ -109,6 +109,7 @@ export function threadRows (messages) {
     const source = list[i]
     return {
       ...row,
+      ...(Object.hasOwn(source, 'moment') ? { moment: source.moment } : {}),
       key: messageKey(source),
       mine: source.mine === true,
       reactions: dmReactions(source.reactions),

@@ -23,7 +23,7 @@ test('method list and mutating set', (t) => {
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.react', 'group.reactors', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
-    'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'moments.read', 'node.close', 'node.info', 'notices.list',
+    'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moments.read', 'node.close', 'node.info', 'notices.list',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read', 'phone.proof', 'phone.sign',
     'post.create', 'post.delete', 'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
     'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'username.add'
@@ -2687,4 +2687,39 @@ test('moment.putMedia and moment.create take a short video', (t) => {
     { bytes: 4194304 + 17 }, { bytes: 130 * 32768, chunks: 130 }, { chunks: 128 }, { ms: 15001 }, { ms: 0 },
     { w: 1921, h: 1 }, { w: 1920, h: 1920 }, { w: 0 }, { mime: 'video/webm' }, { extra: 1 }, { nonce: 'ef'.repeat(23) }
   ]) bad(t, 'moment.create', { text: '', media: { ...video, ...patch } }, 'invalid moment video: ' + JSON.stringify(patch))
+})
+
+test('dm.send: a reaction to a momento is one emoji and nothing else', (t) => {
+  const ID = 'ef'.repeat(16)
+  const HEART = '\u2764\ufe0f'
+  ok(t, 'dm.send', { to: KEY, text: HEART, moment: 7 }, { to: KEY, text: HEART, moment: 7, fwd: 0 })
+  ok(t, 'dm.send', { to: KEY, text: '\u{1f525}', moment: 1 })
+  ok(t, 'dm.send', { to: KEY, text: HEART, moment: Number.MAX_SAFE_INTEGER })
+  ok(t, 'dm.send', { to: KEY, text: HEART, moment: 7, fwd: 0 }, { to: KEY, text: HEART, moment: 7, fwd: 0 })
+  for (const moment of [0, -1, 1.5, '7', null, true, [7], Number.MAX_SAFE_INTEGER + 1, NaN]) {
+    t.is(validateParams('dm.send', { to: KEY, text: HEART, moment }).message, 'parâmetro inválido: moment', 'moment ' + String(moment))
+  }
+  for (const text of ['', 'oi', HEART + HEART, HEART + ' ', ':)', 'a']) {
+    t.is(validateParams('dm.send', { to: KEY, text, moment: 7 }).message, 'parâmetro inválido: text', 'text ' + JSON.stringify(text))
+  }
+  const item = { id: 'a1'.repeat(32), key: 'b2'.repeat(32), nonce: 'c3'.repeat(24), mime: 'image/jpeg', chunks: 2, bytes: 32768 + 17, sha256: 'd4'.repeat(32), w: 1080, h: 1920, ms: 0 }
+  for (const [label, extra] of [['replyTo', { replyTo: ID }], ['media', { media: [item] }], ['card', { card: LINK_CARD }], ['fwd 1', { fwd: 1 }]]) {
+    t.is(validateParams('dm.send', { to: KEY, text: HEART, moment: 7, ...extra }).message, 'parâmetro inválido: moment', 'moment with ' + label)
+    ok(t, 'dm.send', { to: KEY, text: extra.media ? '' : 'oi', ...extra })
+  }
+  bad(t, 'dm.send', { to: KEY, text: HEART, moment: 7, page: KEY }, 'no Página path')
+})
+
+test('moment.lookup: an author and a seq, read only', (t) => {
+  t.absent(isMutating('moment.lookup'))
+  ok(t, 'moment.lookup', { author: KEY, seq: 1 }, { author: KEY, seq: 1 })
+  ok(t, 'moment.lookup', { author: KEY, seq: Number.MAX_SAFE_INTEGER })
+  bad(t, 'moment.lookup', {})
+  bad(t, 'moment.lookup', { author: KEY })
+  bad(t, 'moment.lookup', { seq: 1 })
+  for (const seq of [0, -1, 1.5, '1', null, Number.MAX_SAFE_INTEGER + 1]) bad(t, 'moment.lookup', { author: KEY, seq }, 'seq ' + String(seq))
+  for (const author of [KEY.toUpperCase(), KEY.slice(1), KEY + ':1', null, 1]) bad(t, 'moment.lookup', { author, seq: 1 }, 'author ' + JSON.stringify(author))
+  for (const extra of [{ ref: KEY + ':1' }, { text: 'x' }, { blob: KEY }, { page: KEY }]) {
+    t.is(validateParams('moment.lookup', { author: KEY, seq: 1, ...extra }).message, 'parâmetro desconhecido', 'extra ' + Object.keys(extra)[0])
+  }
 })

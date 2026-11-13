@@ -515,6 +515,22 @@ test('dm.thread: a replyMissing or bare-id row is never larger than the worst bo
   }
 })
 
+// A reaction to a momento (inner v5) carries `moment` but one emoji of text,
+// no reply, media, card or forward: the pinned page maximum still holds.
+test('dm.thread: a momento reaction row is never larger than the worst row', (t) => {
+  for (const card of [true, false]) {
+    const worst = dmThreadResult(1, '\u{1f600}', card).messages[0]
+    const { replyFrom, ...rest } = worst
+    const reaction = { ...rest, text: DM_REACTION_BOUND, replyTo: null, fwd: 0, media: null, card: null, moment: Number.MAX_SAFE_INTEGER }
+    t.ok(utf8ByteLength(JSON.stringify(reaction)) < utf8ByteLength(JSON.stringify(worst)), card ? 'card' : 'media')
+  }
+  const page = dmThreadResult(DM_THREAD_LIMIT_MAX, '\u{1f600}')
+  const { replyFrom, ...rest } = page.messages[0]
+  const reaction = { ...rest, text: DM_REACTION_BOUND, replyTo: null, fwd: 0, media: null, card: null, moment: Number.MAX_SAFE_INTEGER }
+  t.ok(size({ ...page, messages: Array(DM_THREAD_LIMIT_MAX).fill(reaction) }) < size(page))
+  t.is(size(page), 262042, 'the pinned worst case is unchanged')
+})
+
 test('the dispatcher sends the worst-case feed page unchanged', async (t) => {
   const sent = []
   const d = createServerDispatcher({

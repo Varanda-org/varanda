@@ -388,6 +388,8 @@ const PUSH_LINE = 'enviando ao semeador'
 const DRAIN_WARNING = 'aviso: seguidos ainda não enviados'
 const UPKEEP_WARNING = 'aviso: participação automática neste aparelho não concluída'
 const BAD_MEDIA_ARGS = 'mídia inválida'
+// dm.send with a moment that is not showing here (docs/rpc.md 5.75).
+const MOMENT_NOT_FOUND = 'momento não encontrado'
 const GROUP_MEDIA_UNAVAILABLE = 'mídia indisponível'
 const NO_SEEDER = 'sem conexão com o semeador'
 const PEEK_BUSY = 'espiadinha já em andamento'
@@ -3694,6 +3696,17 @@ function createBrowserSession ({
     // Local data only, works locked (as feed.read).
     'moments.read': serial(async () => withCores((c) => member.momentsRead(c, { now: Date.now() }))),
 
+    // The momento a v5 reaction names, while it is showing (docs/rpc.md
+    // 5.120): local data only, works locked. The record alone answers.
+    'moment.lookup': serial(async ({ author, seq }) => withCores(async (c) => {
+      // A read error propagates, so withCores can fall back (NEEDS_EXCLUSIVE)
+      // instead of a live momento reading as gone.
+      const shown = await member.momentLookup(c, { author, seq, now: Date.now() })
+      if (shown === null) throw rpcError('NOT_FOUND', MOMENT_PHOTO_GONE)
+      const { media, at } = shown
+      return { mime: media.mime, w: media.w, h: media.h, ms: Number.isSafeInteger(media.ms) ? media.ms : 0, at }
+    })),
+
     'moment.delete': serial(async ({ to }, epoch) => {
       const ref = parseRef(to)
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
@@ -4002,13 +4015,24 @@ function createBrowserSession ({
     // The recipient's key is looked up first (off the chain), then the send
     // runs on the chain. A send for an identity without a published dm-key
     // runs dm.enable first.
-    'dm.send': async ({ to, text, replyTo, media, card, fwd }) => {
+    'dm.send': async ({ to, text, replyTo, media, card, fwd, moment }) => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
       const ident = identityTarget
-      // Self and a blocked peer are refused before any lookup.
+      const fields = { to, text, fwd, card, replyTo: replyTo === undefined ? null : replyTo, media: media === undefined ? null : media, moment: moment === undefined ? null : moment }
+      const momentShowing = async () => {
+        if (moment !== undefined && (await withCores((c) => member.momentMedia(c, { author: to, seq: moment, now: Date.now() }))) === null) {
+          throw new UsageError(MOMENT_NOT_FOUND)
+        }
+      }
+      // Self and a blocked peer are refused before any lookup, and so is a
+      // reaction to a momento of `to` not showing here: nothing signed or
+      // stamped for it. Checked again on the chain right before a new send,
+      // since the lookup awaits in between; a pending send (the user's
+      // retry) re-puts its stamped drops without it.
       await serialDm(async () => {
         dmEngine.checkSend(await requireDm(), to)
         if ((await member.memberBlocks(storage)).has(to)) throw new UsageError(DM_BLOCKED)
+        if (!dmEngine.sendPending(fields)) await momentShowing()
       })({}, ident)
       let recipient
       try {
@@ -4019,7 +4043,7 @@ function createBrowserSession ({
       return serialDm(async (_, epoch) => {
         const own = await requireDm()
         if ((await store.readDmKey(storage)) === null) await dmEnable(epoch)
-        return dmEngine.send(own, keyPair, { to, text, fwd, card, replyTo: replyTo === undefined ? null : replyTo, media: media === undefined ? null : media }, recipient.box)
+        return dmEngine.send(own, keyPair, fields, recipient.box, { beforeNew: moment === undefined ? null : momentShowing })
       })({}, ident)
     },
 

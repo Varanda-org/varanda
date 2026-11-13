@@ -896,6 +896,9 @@ const SPECS = {
   'testimonial.delete': { fields: { to: req((v) => isRef(v, 1)), about: opt(isKey) }, mutating: true },
   'moment.create': { fields: { text: req(str(0, 200)), media: req(isMomentMediaItem), music: opt(isMomentMusic) }, mutating: true },
   'moments.read': { fields: none },
+  // The momento a v5 reaction names, while it is showing (docs/rpc.md
+  // 5.120): { mime, w, h, ms, at } only, never its text, key or bytes.
+  'moment.lookup': { fields: { author: req(isKey), seq: req(int(1, Number.MAX_SAFE_INTEGER)) } },
   'moment.delete': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
   // Signs the terms-acceptance statement with the identity key; the node
   // fills in member and association itself, so a caller never chooses the
@@ -1312,11 +1315,19 @@ const SPECS = {
   'dm.enable': { fields: none, mutating: true },
   'dm.lookup': { fields: { member: req(isKey) } },
   // With media the text may be empty, as postCross; the sealed frame's own
-  // budget (buildInner, 'mensagem longa demais') is the node's check.
+  // budget (buildInner, 'mensagem longa demais') is the node's check. With
+  // `moment` (the seq of a momento of `to`) it is a reaction to that momento
+  // (docs/rpc.md 5.75): one emoji, nothing else.
   'dm.send': {
-    fields: { to: req(isKey), text: req(str(0, L.MAX_TEXT)), replyTo: opt(isDmId), fwd: opt(int(0, 1), 0), media: opt(isDmMediaList), card: opt(isDmCard) },
+    fields: { to: req(isKey), text: req(str(0, L.MAX_TEXT)), replyTo: opt(isDmId), fwd: opt(int(0, 1), 0), media: opt(isDmMediaList), card: opt(isDmCard), moment: opt(int(1, Number.MAX_SAFE_INTEGER)) },
     mutating: true,
-    cross: postCross
+    cross (given, value) {
+      if (hasOwn(value, 'moment')) {
+        if (!isReaction(value.text)) return 'parâmetro inválido: text'
+        if (hasOwn(value, 'replyTo') || hasOwn(value, 'media') || hasOwn(value, 'card') || value.fwd !== 0) return 'parâmetro inválido: moment'
+      }
+      return postCross(given, value)
+    }
   },
   // A reaction to a message of the conversation (docs/rpc.md 5.119): one
   // emoji, or '' to remove. Spends the stamps of one dm.send.
