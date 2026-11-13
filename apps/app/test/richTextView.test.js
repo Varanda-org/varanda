@@ -142,7 +142,8 @@ test('a link card is not drawn for a link hidden in a spoiler', async (t) => {
 
 test('a message with Abrir convite keeps its spoilers and a spoiler link card covered', async (t) => {
   const screen = withoutComments(readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8'))
-  t.ok(screen.includes("import { parseRich, plainOf } from '../richText'"))
+  const richImport = screen.match(/^import \{([^}]*)\} from '\.\.\/richText'$/m)
+  t.ok(richImport && /\bparseRich\b/.test(richImport[1]) && /\bplainOf\b/.test(richImport[1]), 'parseRich and plainOf come from the pure module')
   t.ok(screen.includes("import { cardBesideSpoilers } from '../ui/RichText'"))
   t.ok(screen.includes('text: link ? plainOf(item.rawText, { full: true }) : item.text, rawText: link ? undefined : item.rawText'), 'the plain path beside the invite gets every code line, with its spoilers replaced')
   t.ok(screen.includes('card: link && stored ? cardBesideSpoilers(parseRich(item.rawText), stored) : stored'), 'the card beside the invite goes through the spoiler check')
