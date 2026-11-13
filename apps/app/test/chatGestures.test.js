@@ -420,12 +420,18 @@ test('DM keeps the original quoted-preview condition and group capability wordin
   const src = source('screens/Mensagem.js')
   const start = src.indexOf('          const quoted =')
   const end = src.indexOf('          const reply =', start)
-  const env = { quoteAuthor: () => '', quoteMine: () => false, quoteHandle: '', peer: 'peer', quoteTarget: () => ({ key: 'one' }), scrollToKey () {} }
+  const env = { quoteAuthor: () => '', quoteMine: () => false, quoteMissing: () => false, quoteHandle: '', peer: 'peer', quoteTarget: () => ({ key: 'one' }), scrollToKey () {} }
   for (const replyTo of [null, undefined, '', 'quote']) {
     const quoted = runInNewContext(src.slice(start, end) + '\nquoted', { ...env, item: { key: 'two', replyTo } })
     if (replyTo == null) t.is(quoted, null)
-    else t.is(quoted.text, replyTo)
+    else {
+      t.is(quoted.text, replyTo)
+      t.is(typeof quoted.onPress, 'function')
+    }
   }
+  const missing = runInNewContext(src.slice(start, end) + '\nquoted', { ...env, quoteMissing: () => true, item: { key: 'two', replyTo: 'quote' } })
+  t.is(missing.text, 'quote')
+  t.is(missing.onPress, undefined)
   t.ok(source('screens/Grupo.js').includes('Comunidades disponíveis no site da associação ou no app ligado à instalação.'))
 })
 
