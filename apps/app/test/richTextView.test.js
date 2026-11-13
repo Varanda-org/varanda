@@ -214,6 +214,6 @@ test('a long code line does not widen its bubble past the column', (t) => {
   const code = withoutComments(ui('Bubble.js'))
   const column = code.indexOf('<View style={[styles.column, mine && styles.columnMine]}>')
   t.ok(column !== -1, 'the column')
-  t.ok(code.slice(column).replace(/\{\s*\}/g, '').replace(/\s+/g, ' ').startsWith('<View style={[styles.column, mine && styles.columnMine]}> <View style={styles.stack}> <Pressable'), 'the bubble sits in the capped stack')
+  t.ok(code.slice(column).replace(/\{\s*\}/g, '').replace(/\s+/g, ' ').startsWith('<View style={[styles.column, mine && styles.columnMine]}> <View style={hug ? null : styles.stack}> <Pressable'), 'the bubble sits in the capped stack')
   t.ok(code.includes("stack: { maxWidth: '100%' }"), 'capped at the column width')
 })

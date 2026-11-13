@@ -4,9 +4,11 @@
 // author }), onOpenInvite(link) }.
 // Oldest message on top, the composer at the bottom, scrolled to the end on
 // open and on new messages. The header (avatar, name, @nome) names the peer
-// from the profile cache, never the raw key; a tap on it opens the profile and
-// one icon opens the conversation options. Rows are shared Bubbles (tails,
-// day chips, five-minute runs); a long press offers Responder, Copiar,
+// from the profile cache, filled by profile.read or, for a peer the node does
+// not hold, by a verified diary.peek on the hosted node (once per open and
+// per refresh; a diary gone since drops the name). A tap on it opens
+// the profile and one icon opens the conversation options. Rows are shared
+// Bubbles (tails, day chips, five-minute runs); a long press offers Responder, Copiar,
 // Encaminhar (ui/ForwardSheet, forward.js; a forwarded message shows
 // "Encaminhada" and never its original author) and
 // Denunciar. An @nome in the text opens its profile. Whether the conversation is a request or blocked
@@ -52,6 +54,9 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { MAX_TEXT, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
+import { fetchMember, refetchMember } from '../indexClient'
+import { diaryPeekSlots } from '../engagement'
+import { PEER_GONE, readPeerEntry, wantsPeek } from '../peerProfile'
 import { installationOrigin } from '../installation'
 import { UNNAMED, readsAs, whoOf } from '../who'
 import { OWN_LABEL } from '../groups'
@@ -188,7 +193,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const unlocked = !!(status && status.unlocked === true)
   const ownKey = status ? status.publicKey : null
   const names = useNames()
-  const { resolveMany } = names
+  const { resolveMany, learnVerified, forgetVerified, isPeeked, peekScope } = names
   useEffect(() => {
     resolveMany([peer])
   }, [peer, resolveMany])
@@ -563,6 +568,43 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   useEffect(() => {
     if (ready && isTop && visible && lookupRef.current === null) readLookup()
   }, [ready, isTop, visible, readLookup])
+
+  const [peekTick, setPeekTick] = useState(0)
+  const peekedFor = useRef('')
+  const peekRun = useRef(0)
+  // Only an open chat peeks: dm.lookup above already reads this diary, while
+  // peeking every inbox row would show the seeder each unfollowed person in it.
+  // A shown peek is read again on each open and refresh, so a diary blocked
+  // or an @nome revoked since then stops naming the header.
+  useEffect(() => {
+    // Hidden or offline clears the mark, so coming back reads once more, and
+    // leaves any read in flight behind.
+    if (!ready || !isTop || !visible || node.online === false) {
+      peekedFor.current = ''
+      peekRun.current++
+      return
+    }
+    if (!(wantsPeek(peerProfile) || isPeeked(peer))) return
+    const mark = peer + ':' + peekScope + ':' + peekTick
+    if (peekedFor.current === mark) return
+    peekedFor.current = mark
+    // A refresh skips the cached member page and its seq hints.
+    const member = peekTick > 0 ? refetchMember : fetchMember
+    // A read left behind (screen hidden or closed, a newer read) neither asks
+    // the node nor lands over a newer answer. Its own run number, not the
+    // mark, decides: coming back rebuilds the same mark.
+    const run = ++peekRun.current
+    const current = () => live.current && peekRun.current === run
+    readPeerEntry(peer, {
+      fetchMember: (key) => member(key),
+      peek: (params) => diaryPeekSlots.run(() => current() ? request('diary.peek', params) : null, { front: true })
+    }).then((entry) => {
+      if (!current()) return
+      if (entry === PEER_GONE) forgetVerified([peer], peekScope)
+      else if (entry !== null) learnVerified([[peer, entry]], peekScope)
+    })
+  }, [ready, isTop, visible, node.online, peerProfile, peer, peekScope, peekTick, request, learnVerified, forgetVerified, isPeeked])
+
   useEffect(() => {
     if (!ready || !loaded || !visible || !isTop || newest === '') return
     // Local mark only; a lost answer may still have marked it, so read again.
@@ -993,6 +1035,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     reread()
     readLookup()
     readPeer()
+    if (wantsPeek(peerProfile) || isPeeked(peer)) setPeekTick((n) => n + 1)
     setRefreshing(false)
   }
 

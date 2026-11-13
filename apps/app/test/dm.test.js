@@ -393,6 +393,13 @@ test('Bubble keeps a quote clear of the hover chevron only when there are action
   t.ok(bubble.includes("accessibilityLabel='ações da mensagem'"), 'the chevron keeps its label')
 })
 
+test('Bubble holds a text bubble to its column so a long link wraps', (t) => {
+  const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
+  t.ok(/<View style=\{\[styles\.column, mine && styles\.columnMine\]\}>\s*(\{\/\*[\s\S]*?\*\/\}\s*)?<View style=\{hug \? null : styles\.stack\}>\s*<Pressable/.test(bubble), 'the wrapper inside the column takes the cap unless the bubble hugs a width')
+  t.ok(bubble.includes("stack: { maxWidth: '100%' }"), 'the cap is the column width')
+  t.ok(bubble.includes("column: { maxWidth: '80%'"), 'the column keeps its 80% cap')
+})
+
 test('Mensagem shows a removable post context chip and sends it only as composed text', (t) => {
   const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
   t.ok(src.includes("<IconAction icon='fechar' label='remover contexto' onPress={() => setContext(null)} />"), 'the chip is removable')

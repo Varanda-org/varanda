@@ -138,9 +138,10 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
           : null}
         <View style={[styles.column, mine && styles.columnMine]}>
           {/* On the web the column's children size to their content, and a
-              code block's sideways scroll counts its longest line there, so
-              without this cap the bubble ran past the column and the screen. */}
-          <View style={styles.stack}>
+              code block's sideways scroll or a long link counts its longest
+              line there, so without this cap the bubble ran past the column
+              and the screen. Photo and voice bubbles keep their own width. */}
+          <View style={hug ? null : styles.stack}>
             <Pressable
               accessibilityRole={rows.length > 0 ? 'button' : undefined}
               accessibilityHint={rows.length > 0 ? 'toque longo para ações' : undefined}
