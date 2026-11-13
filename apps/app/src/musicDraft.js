@@ -21,10 +21,8 @@ export function musicBlocks ({ hasMedia, hasVideo = false, asPage, online, textL
   return ''
 }
 
-export function useLine (ref) {
-  if (ref.kind === 'playlist') return 'Playlist'
-  if (ref.kind === 'track') return 'Faixa inteira'
-  return 'Trecho de 15 s a partir de ' + Math.floor(ref.start / 60) + ':' + String(ref.start % 60).padStart(2, '0')
+export function momentChoiceOf (music) {
+  return music === null ? null : { ref: { kind: 'snippet', id: music.ref.id, start: music.ref.start }, item: music.item }
 }
 
 export function resolveTarget (text, tried) {

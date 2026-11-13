@@ -14,6 +14,8 @@ import rpc from '@varanda/rpc'
 const { cardText, cardUrlHost, MAX_CARD_URL, MAX_CARD_TITLE, MAX_CARD_DESC } = rpc
 
 export const SNIPPET_S = 15
+// The picker badge for that fixed window, not a length measured from the track.
+export const SNIPPET_BADGE = '15 s'
 export const MUSIC_ID_RE = /^[A-Za-z0-9]{1,32}$/
 export const MUSIC_HOST = 'audius.co'
 export const MAX_START = 7200
@@ -324,4 +326,55 @@ export function musicPartialText (item) {
   if (!item || typeof item !== 'object' || !Array.isArray(item.tracks) || !Number.isInteger(item.count)) return ''
   const got = item.tracks.length
   return item.count > got ? 'Tocando ' + got + ' de ' + faixas(item.count) : ''
+}
+
+// 'm:ss', minutes unpadded. A value that is not a finite number is the start
+// of the track, not a thrown clock.
+export function musicClock (seconds) {
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds)) return '0:00'
+  const total = Math.max(0, Math.floor(seconds))
+  const rest = total % 60
+  return Math.floor(total / 60) + ':' + String(rest).padStart(2, '0')
+}
+
+// Raw provider text. The screen wraps the whole line in displayText, so a
+// cut here would drop a character the provider sent.
+export function musicRowLine (item) {
+  if (!item || typeof item !== 'object') return ''
+  if (typeof item.duration === 'number' && Number.isFinite(item.duration) && item.duration >= 1) {
+    return item.artist + ' · ' + musicClock(item.duration)
+  }
+  if (Number.isInteger(item.count) && item.count >= 1 && item.count <= MAX_PLAYLIST) {
+    return item.artist + ' · ' + faixas(item.count)
+  }
+  return ''
+}
+
+// Same raw line. A sticker says where playback starts: the title is already beside it.
+export function musicStickerLine (ref, item) {
+  if (!ref || typeof ref !== 'object' || !item || typeof item !== 'object') return ''
+  if (ref.kind === 'snippet') return item.artist + ' · ' + musicClock(ref.start)
+  if (ref.kind === 'track') return item.artist + ' · Faixa inteira'
+  if (ref.kind === 'playlist' && Number.isInteger(item.count) && item.count >= 1 && item.count <= MAX_PLAYLIST) {
+    return 'Playlist · ' + faixas(item.count)
+  }
+  return ''
+}
+
+// 0 outside a real window, so a seek that has not landed does not fill the bar.
+export function snippetProgress (ms, startMs, endMs) {
+  if (typeof ms !== 'number' || !Number.isFinite(ms)) return 0
+  if (typeof startMs !== 'number' || !Number.isFinite(startMs)) return 0
+  if (typeof endMs !== 'number' || !Number.isFinite(endMs) || endMs <= startMs) return 0
+  const ratio = (ms - startMs) / (endMs - startMs)
+  if (ratio <= 0) return 0
+  if (ratio >= 1) return 1
+  return ratio
+}
+
+// The label follows the start that will actually play, so a finger past the
+// end does not advertise a window the snippet cannot reach.
+export function musicWindowText (start, duration) {
+  const s = clampStart(start, duration)
+  return 'De ' + musicClock(s) + ' a ' + musicClock(snippetEndMs(s, duration) / 1000)
 }

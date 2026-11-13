@@ -6,7 +6,10 @@ import { momentMusicOf } from '../moments'
 import { MUSIC_SEEK_TEXT, MUSIC_SOURCE, clampStart, musicErrorText, seekReached, snippetEndMs, snippetTick } from '../music'
 import { claimPlayback, playbackEpoch } from '../media/chatMedia'
 import { createStreamPlayer } from '../media/stream'
-import { useStyles } from './ThemeProvider'
+import { Icon } from './Icon'
+import { MusicCover } from './MusicCover'
+import { MusicEqualizer } from './MusicEqualizer'
+import { useStyles, useTheme } from './ThemeProvider'
 import { layout, radius, space } from './theme'
 
 export const momentMusicIdle = { item: null, phase: 'idle', error: '' }
@@ -170,6 +173,7 @@ export function createMomentPlayback (session, music, notify, { onStart, onUnava
 
 export function MomentMusic ({ music, member, origin, request, paused, onStart, onUnavailable, onOpenExternal }) {
   const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const [state, setState] = useState(momentMusicIdle)
   const [muted, setMuted] = useState(false)
   const playback = useRef(null)
@@ -190,15 +194,38 @@ export function MomentMusic ({ music, member, origin, request, paused, onStart, 
   }, [id, start, member, origin, request])
   useEffect(() => { playback.current?.setPaused(paused === true || muted) }, [paused, muted])
   const { item, phase, error } = state
+  const muteLabel = muted ? 'Ativar música' : 'Silenciar música'
   return (
     <View style={styles.row}>
+      <Pressable accessibilityRole='button' accessibilityLabel={muteLabel} accessibilityHint={item ? displayText(item.title) + ', ' + displayText(item.artist) : undefined} accessibilityState={{ selected: muted }} onPress={() => setMuted(!muted)} style={item ? styles.sticker : styles.mute}>
+        {item
+          ? (
+            <>
+              <MusicCover size={36} />
+              <View style={styles.meta}>
+                <Text style={styles.title} numberOfLines={1}>{displayText(item.title)}</Text>
+                <Text style={styles.artist} numberOfLines={1}>{displayText(item.artist)}</Text>
+              </View>
+              {muted
+                ? <Icon name='mudo' size={16} color={colors.ink} />
+                : <MusicEqualizer playing={phase === 'playing' && !muted} />}
+            </>
+            )
+          : muted
+            ? <Icon name='mudo' size={16} color={colors.ink} />
+            : <Icon name='som' size={16} color={colors.ink} />}
+      </Pressable>
       {item
-        ? <Pressable accessibilityRole='link' onPress={() => onOpenExternal?.(item.url)} style={styles.chip}><Text style={styles.text}>{displayText(item.title)} · {displayText(item.artist)} · {MUSIC_SOURCE}</Text></Pressable>
+        ? (
+          <Pressable accessibilityRole='link' accessibilityLabel='Abrir no Audius' onPress={() => onOpenExternal?.(item.url)} style={styles.source}>
+            <Icon name='externo' size={16} color={colors.ink} />
+            <Text style={styles.text}>{MUSIC_SOURCE}</Text>
+          </Pressable>
+          )
         : null}
       {phase === 'gesture'
         ? <Pressable accessibilityRole='button' disabled={paused === true || muted} onPress={() => playback.current?.press(playbackEpoch())} style={styles.chip}><Text style={styles.text}>Tocar música</Text></Pressable>
         : null}
-      <Pressable accessibilityRole='button' accessibilityLabel={muted ? 'Ativar música' : 'Silenciar música'} accessibilityState={{ selected: muted }} onPress={() => setMuted(!muted)} style={styles.chip}><Text style={styles.text}>{muted ? 'Ativar música' : 'Silenciar música'}</Text></Pressable>
       {error ? <Text style={styles.text} accessibilityLiveRegion='polite'>{error}</Text> : null}
     </View>
   )
@@ -206,6 +233,38 @@ export function MomentMusic ({ music, member, origin, request, paused, onStart, 
 
 const makeStyles = (colors) => StyleSheet.create({
   row: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: space.xs },
+  sticker: {
+    flexShrink: 1,
+    minHeight: layout.hit,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.sm,
+    paddingHorizontal: space.sm,
+    borderRadius: radius.lg,
+    backgroundColor: colors.card
+  },
+  // minWidth 0 lets a long title ellipsize instead of stretching the row.
+  meta: { flexShrink: 1, minWidth: 0, flexDirection: 'column' },
+  title: { fontSize: 13, lineHeight: 18, fontWeight: '700', color: colors.ink },
+  artist: { fontSize: 12, lineHeight: 16, color: colors.soft },
+  source: {
+    minWidth: layout.hit,
+    minHeight: layout.hit,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.xs,
+    paddingHorizontal: space.sm,
+    borderRadius: radius.lg,
+    backgroundColor: colors.card
+  },
+  mute: {
+    width: layout.hit,
+    height: layout.hit,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: radius.lg,
+    backgroundColor: colors.card
+  },
   chip: { minHeight: layout.hit, justifyContent: 'center', paddingHorizontal: space.sm, borderRadius: radius.md, backgroundColor: colors.card },
   text: { fontSize: 13, lineHeight: 18, color: colors.ink }
 })

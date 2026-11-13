@@ -1,14 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { PanResponder, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
+import { ActivityIndicator, PanResponder, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { audiusItem, audiusPlay, audiusReady } from '../account'
-import { MUSIC_FULL_LIST_TEXT, MUSIC_SEEK_TEXT, MUSIC_SOURCE, clampStart, musicErrorText, musicOriginOf, musicPartialText, queueIdle, queueStep, seekReached, snippetEndMs, snippetTick } from '../music'
+import { MUSIC_FULL_LIST_TEXT, MUSIC_SEEK_TEXT, MUSIC_SOURCE, SNIPPET_BADGE, clampStart, musicErrorText, musicOriginOf, musicPartialText, queueIdle, queueStep, seekReached, snippetEndMs, snippetTick } from '../music'
 import { claimPlayback, playbackEpoch } from '../media/chatMedia'
 import { createStreamPlayer } from '../media/stream'
 import { useHosted, useNode } from '../node'
 import { openExternal } from '../openExternal'
 import { LinkCard } from './LinkCard'
-import { useStyles } from './ThemeProvider'
+import { Icon } from './Icon'
+import { MusicCover } from './MusicCover'
+import { tap } from './haptics'
+import { useStyles, useTheme } from './ThemeProvider'
 import { layout, radius, space } from './theme'
 
 // Keyboard events and tab order are DOM APIs; native uses accessibility actions.
@@ -273,6 +276,7 @@ function ActiveMusicPlayer ({ card, music, onLongPress, epoch }) {
 
 function MusicCardView ({ card, music, onLongPress, state = musicPlayerIdle, onPress, onStep, onSeek }) {
   const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const [expanded, setExpanded] = useState(false)
   const { item, queue, phase, error, ms } = state
   const playlist = music.kind === 'playlist'
@@ -280,19 +284,25 @@ function MusicCardView ({ card, music, onLongPress, state = musicPlayerIdle, onP
   const track = playlist ? queue.tracks[queue.index] : item
   const partial = musicPartialText(item)
   const durationMs = snippet ? snippetEndMs(music.start, track?.duration) - music.start * 1000 : (track?.duration || 0) * 1000
+  // A short track plays less than the stored 15 s, but only after it loads.
+  const badgeText = snippet && item && durationMs < 15000 ? Math.max(1, Math.round(durationMs / 1000)) + ' s' : SNIPPET_BADGE
   const elapsed = snippet ? Math.max(0, ms - music.start * 1000) : ms
   const label = phase === 'loading' ? 'Cancelar' : phase === 'playing' ? (snippet ? 'Parar trecho' : 'Pausar') : error ? 'Tentar de novo' : snippet ? 'Ouvir trecho' : playlist ? 'Ouvir playlist' : 'Ouvir'
   const Title = typeof onLongPress === 'function' ? Pressable : View
   return (
     <View style={styles.card}>
-      <Title {...(typeof onLongPress === 'function' ? { onLongPress, delayLongPress: 350 } : null)}>
-        <Text style={styles.title}>{item ? displayText(item.title) : displayText(card.title)}</Text>
-        <Text style={styles.text}>{item ? displayText(item.artist) : displayText(card.desc)}</Text>
-        <Text style={styles.text}>{MUSIC_SOURCE}</Text>
-      </Title>
-      <Pressable accessibilityRole='link' onPress={() => openExternal(item ? item.url : card.url)} onLongPress={onLongPress} style={styles.button}>
-        <Text style={styles.link}>Abrir no Audius</Text>
-      </Pressable>
+      <View style={styles.row}>
+        <MusicCover size={56} />
+        <Title style={styles.details} {...(typeof onLongPress === 'function' ? { onLongPress, delayLongPress: 350 } : null)}>
+          <Text style={styles.title} numberOfLines={1}>{item ? displayText(item.title) : displayText(card.title)}</Text>
+          <Text style={styles.text} numberOfLines={1}>{item ? displayText(item.artist) : displayText(card.desc)}</Text>
+          <View style={styles.meta}>
+            {snippet ? <Text style={styles.badge}>{badgeText}</Text> : null}
+            <Text style={styles.text}>{MUSIC_SOURCE}</Text>
+          </View>
+        </Title>
+        <MusicButton label={label} round busy={phase === 'loading'} icon={phase === 'playing' ? (snippet ? 'parar' : 'pausar') : 'tocar'} onPress={() => { tap('select'); onPress() }} />
+      </View>
       {playlist && track
         ? <View><Text style={styles.title}>{displayText(track.title)}</Text><Text style={styles.text}>{displayText(track.artist)}</Text></View>
         : null}
@@ -300,11 +310,18 @@ function MusicCardView ({ card, music, onLongPress, state = musicPlayerIdle, onP
         ? <MusicProgress ms={elapsed} durationMs={durationMs} onSeek={snippet ? undefined : onSeek} />
         : null}
       {error ? <Text style={styles.text} accessibilityLiveRegion='polite'>{error}</Text> : null}
-      <View style={styles.actions}>
-        {playlist && item ? <MusicButton label='Anterior' disabled={queue.index <= 0} onPress={() => onStep('prev')} /> : null}
-        <MusicButton label={label} onPress={onPress} />
-        {playlist && item ? <MusicButton label='Próxima' disabled={queue.index < 0 || queue.index >= queue.tracks.length - 1} onPress={() => onStep('next')} /> : null}
-      </View>
+      <Pressable accessibilityRole='link' onPress={() => openExternal(item ? item.url : card.url)} onLongPress={onLongPress} style={styles.external}>
+        <Icon name='externo' size={14} color={colors.accent} />
+        <Text style={styles.externalText}>Abrir no Audius</Text>
+      </Pressable>
+      {playlist && item
+        ? (
+          <View style={styles.actions}>
+            <MusicButton label='Anterior' icon='anterior' disabled={queue.index <= 0} onPress={() => onStep('prev')} />
+            <MusicButton label='Próxima' icon='proxima' disabled={queue.index < 0 || queue.index >= queue.tracks.length - 1} onPress={() => onStep('next')} />
+          </View>
+          )
+        : null}
       {playlist && item
         ? (
           <View>
@@ -320,9 +337,15 @@ function MusicCardView ({ card, music, onLongPress, state = musicPlayerIdle, onP
   )
 }
 
-function MusicButton ({ label, onPress, disabled = false, expanded }) {
+function MusicButton ({ label, onPress, disabled = false, expanded, icon, round = false, busy = false }) {
   const styles = useStyles(makeStyles)
-  return <Pressable accessibilityRole='button' accessibilityState={{ disabled, expanded }} aria-expanded={expanded} disabled={disabled} onPress={onPress} style={[styles.button, disabled && styles.disabled]}><Text style={styles.link}>{label}</Text></Pressable>
+  const { colors } = useTheme()
+  const color = round ? colors.accentInk : colors.accent
+  return (
+    <Pressable accessibilityRole='button' accessibilityLabel={label} accessibilityState={{ disabled, expanded }} aria-expanded={expanded} disabled={disabled} onPress={onPress} style={[styles.button, icon && !round && !busy && styles.iconOnly, round && styles.round, disabled && styles.disabled]}>
+      {busy ? <ActivityIndicator color={color} /> : icon ? <Icon name={icon} size={20} color={color} /> : <Text style={styles.link}>{label}</Text>}
+    </Pressable>
+  )
 }
 
 function MusicProgress ({ ms, durationMs, onSeek }) {
@@ -383,13 +406,21 @@ function MusicProgress ({ ms, durationMs, onSeek }) {
 
 const makeStyles = (colors) => StyleSheet.create({
   card: { marginTop: space.sm, padding: space.md, gap: space.xs, borderRadius: radius.md, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.line, backgroundColor: colors.card },
+  row: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
+  details: { flex: 1, minWidth: 0 },
+  meta: { flexDirection: 'row', alignItems: 'center', gap: space.xs },
+  badge: { fontSize: 11, lineHeight: 16, paddingHorizontal: space.xs, borderRadius: radius.sm, backgroundColor: colors.bg, color: colors.soft },
+  round: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', backgroundColor: colors.accent },
+  external: { flexDirection: 'row', alignItems: 'center', gap: space.xs, minHeight: layout.hit },
+  externalText: { fontSize: 13, color: colors.accent },
   title: { fontSize: 15, lineHeight: 20, fontWeight: '700', color: colors.ink },
   text: { fontSize: 13, lineHeight: 18, color: colors.soft },
   link: { fontSize: 14, color: colors.accent },
   button: { minHeight: layout.hit, justifyContent: 'center', paddingHorizontal: space.sm },
+  iconOnly: { minWidth: layout.hit, alignItems: 'center', justifyContent: 'center' },
   actions: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center' },
   disabled: { opacity: 0.4 },
   slider: { minHeight: layout.hit, justifyContent: 'center' },
-  rail: { height: 4, borderRadius: 2, backgroundColor: colors.line },
-  fill: { height: 4, borderRadius: 2, backgroundColor: colors.accent }
+  rail: { height: 3, borderRadius: 2, backgroundColor: colors.line },
+  fill: { height: 3, borderRadius: 2, backgroundColor: colors.accent }
 })
