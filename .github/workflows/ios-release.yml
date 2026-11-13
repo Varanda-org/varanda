@@ -11,8 +11,12 @@
 # number on every build (appVersionSource remote, autoIncrement).
 #
 # One-time user steps (see docs/development.md, "Envio para a App Store (EAS)"):
+#   - In the Apple Developer account: App Groups with group.app.varanda on
+#     app.varanda and app.varanda.share (this workflow never changes
+#     capabilities, see EXPO_NO_CAPABILITY_SYNC below)
 #   - From apps/app: eas credentials -p ios (distribution certificate,
-#     provisioning profile and the App Store Connect API key for EAS Submit)
+#     provisioning profiles for the app and the VarandaShare extension, and
+#     the App Store Connect API key for EAS Submit)
 #   - An Expo access token for the varanda-org account
 #   - Settings > Environments > app-store: deployment branches main only;
 #     secret EXPO_TOKEN
@@ -68,6 +72,11 @@ jobs:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
           DISABLE_EAS_ANALYTICS: '1'
           EXPO_NO_TELEMETRY: '1'
+          # The build never turns capabilities on or off in the Apple account:
+          # a new one is enabled by hand and reaches the profiles through
+          # eas credentials. Apple refused EAS's own App Groups request for the
+          # share extension (2026-11-12).
+          EXPO_NO_CAPABILITY_SYNC: '1'
         run: |
           if [ -z "$EXPO_TOKEN" ]; then
             echo "::error::EXPO_TOKEN ausente: veja docs/development.md, seção Envio para a App Store (EAS)"

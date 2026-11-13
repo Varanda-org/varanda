@@ -298,7 +298,7 @@ test('web: mediaOf gives the facade the same shape, bytes in the page', async (t
   t.alike(mo, { bytes: gif, mime: 'image/gif', w: 3, h: 5 }, 'the same { bytes, mime, w, h } answer')
 
   const uploadOnly = mediaOf({ upload: facade.upload })
-  t.alike(Object.keys(uploadOnly), ['upload'], 'a missing facade method is an absent capability')
+  t.alike(Object.keys(uploadOnly), ['upload', 'video'], 'a missing facade method is an absent capability')
   const dmOnly = mediaOf({ readDm: facade.readDm })
   await t.exception.all(dmOnly.read({ kind: 'group', diary: 'd', item: {} }), /mídia inválida/)
   await t.exception.all(dmOnly.read({ kind: 'moment', author: 'k', seq: 1 }), /mídia inválida/, 'no readMoment, no moment read')
@@ -321,4 +321,62 @@ test('a voice note keeps its duration and kind across the IPC; an image request 
   t.alike(put.params, { name: put.params.name, to: 'ef'.repeat(32), mime: 'audio/mp4', width: 0, height: 0, ms: 1500, kind: 'voice' })
   t.alike(ups[0].params, { name: ups[0].params.name, mime: 'audio/mp4', width: 0, height: 0, ms: 1500, kind: 'voice', sealed: true })
   t.alike(ups[1].params, { name: ups[1].params.name, mime: 'image/png', width: 2, height: 2 })
+})
+
+test('a video keeps its duration and kind across the IPC for a post and a momento; read answers ms', async (t) => {
+  const { webNodeHandle } = await load()
+  const name = 'e'.repeat(32) + '.bin'
+  const { request, calls } = mockRequest((method) => method === 'media.readFile' ? { name, mime: 'video/mp4', w: 360, h: 640, ms: 3000 } : { ok: true })
+  const { media } = webNodeHandle(request)
+  t.is(media.video, true, 'the native handle reports the video capability')
+  await media.upload({ bytes: new Uint8Array([1]), mime: 'video/mp4', width: 360, height: 640, ms: 12000, kind: 'video', sealed: 'no' })
+  await media.putMoment({ bytes: new Uint8Array([2]), mime: 'video/mp4', width: 720, height: 1280, ms: 9000, kind: 'video', to: 'ef'.repeat(32), sealed: true })
+  await media.putMoment({ bytes: new Uint8Array([3]), mime: 'image/jpeg', width: 3, height: 4, ms: 9, kind: 'voice' })
+  await media.putDm({ bytes: new Uint8Array([4]), mime: 'video/mp4', width: 360, height: 640, ms: 12000, kind: 'video', to: 'ef'.repeat(32) })
+  await media.upload({ bytes: new Uint8Array([5]), mime: 'image/jpeg', width: 4, height: 3 })
+  const up = calls.filter((c) => c.method === 'media.uploadFile')
+  const mo = calls.filter((c) => c.method === 'moment.putMedia')
+  const dm = calls.find((c) => c.method === 'dm.putMedia')
+  t.alike(up[0].params, { name: up[0].params.name, mime: 'video/mp4', width: 360, height: 640, ms: 12000, kind: 'video' })
+  t.alike(mo[0].params, { name: mo[0].params.name, mime: 'video/mp4', width: 720, height: 1280, ms: 9000, kind: 'video' }, 'no destination or sealed on a momento')
+  t.alike(mo[1].params, { name: mo[1].params.name, mime: 'image/jpeg', width: 3, height: 4 }, 'a photo momento keeps its three fields')
+  t.alike(dm.params, { name: dm.params.name, to: 'ef'.repeat(32), mime: 'video/mp4', width: 360, height: 640 }, 'a DM never carries a video kind')
+  t.alike(up[1].params, { name: up[1].params.name, mime: 'image/jpeg', width: 4, height: 3 }, 'an image upload keeps its old keys')
+
+  box().files.set(READS + name, new Uint8Array([7]))
+  const got = await media.read({ kind: 'moment', author: 'ef'.repeat(32), seq: 3 })
+  t.alike(got, { uri: READS + name, mime: 'video/mp4', w: 360, h: 640, ms: 3000 })
+  media.clearReadFiles()
+})
+
+test('web: mediaOf reports video and passes a video read through without measuring it as an image', async (t) => {
+  const { mediaOf } = await import('../src/client/browser.js')
+  const calls = []
+  const clip = new Uint8Array([0, 0, 0, 8, 0x66, 0x74, 0x79, 0x70])
+  // A 3x2 PNG: under a video mime it must not be measured as an image.
+  const png = new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAAAAAC4HznGAAAAC0lEQVR4nGNggAAAAAgAAbdYc5UAAAAASUVORK5CYII=', 'base64'))
+  let answer = { bytes: clip, mime: 'video/mp4', w: 360, h: 640, ms: 9000 }
+  const facade = {
+    upload: async (args) => { calls.push(['upload', args]); return { core: 'd' } },
+    putMoment: async (args) => { calls.push(['putMoment', args]); return { id: 'm' } },
+    readMoment: async () => answer,
+    readGroup: async () => answer
+  }
+  const media = mediaOf(facade)
+  t.is(media.video, true)
+  const bytes = new Uint8Array([1])
+  await media.upload({ bytes, mime: 'video/mp4', width: 360, height: 640, ms: 12000, kind: 'video' })
+  t.alike(calls.at(-1), ['upload', { bytes, mime: 'video/mp4', width: 360, height: 640, ms: 12000, kind: 'video' }])
+  await media.putMoment({ bytes, mime: 'video/mp4', width: 360, height: 640, ms: 9000, kind: 'video' })
+  t.alike(calls.at(-1), ['putMoment', { bytes, mime: 'video/mp4', width: 360, height: 640, ms: 9000, kind: 'video' }])
+
+  t.alike(await media.read({ kind: 'moment', author: 'k', seq: 1 }), { bytes: clip, mime: 'video/mp4', w: 360, h: 640, ms: 9000 })
+  answer = { bytes: png, mime: 'video/mp4', ms: 9000 }
+  t.alike(await media.read({ kind: 'moment', author: 'k', seq: 1 }), { bytes: png, mime: 'video/mp4', w: null, h: null, ms: 9000 }, 'never mediaBounds on a video')
+  answer = { bytes: clip, mime: 'audio/mp4', w: 0, h: 0, ms: 2500 }
+  t.alike(await media.read({ kind: 'group', diary: 'd', item: {} }), { bytes: clip, mime: 'audio/mp4', w: 0, h: 0, ms: 2500 }, 'a voice note keeps its duration')
+  answer = { bytes: png, mime: 'image/png', ms: 'x' }
+  t.alike(await media.read({ kind: 'group', diary: 'd', item: {} }), { bytes: png, mime: 'image/png', w: 3, h: 2 }, 'an image is still measured and has no ms')
+
+  t.absent('video' in mediaOf({ readMoment: facade.readMoment }), 'no upload, no video capability')
 })

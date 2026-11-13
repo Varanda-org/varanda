@@ -6,12 +6,22 @@
 // crypto_secretbox (@varanda/core lib/group-crypto.js sealRecord) of one
 // compact JSON row under the key derived from the passkey PRF
 // (passkey.js dmLocalKeyFromPrf). A row is a message
-// { t: 'msg', id, peer, from, text, replyTo, media, at, mine, filedAt }
+// { t: 'msg', id, peer, from, text, replyTo, replyFrom?, replyDigest?, media,
+// at, mine, filedAt, digest? }
 // (media: null or the message's media items, blob descriptors with their
 // key, exactly as the inner carries them; a row from before media reads as
-// null) or an op
+// null; replyTo: null or the quoted message's bare id, and for a bound
+// reply (inner v2 or v3 replyTo { from, id, digest }) replyFrom and
+// replyDigest beside it, both or neither, so an earlier build still reads
+// the bare id; digest: the hex64 sha256 of the inner's canonical JSON,
+// @varanda/core dm.js bodyDigest, absent on a row filed by an earlier
+// build) or an op
 // { t: 'ctl', id, op, peer, at, filedAt } (id: the ctl envelope's, so a
-// device that pulls its own ctl back does not file it twice). Before sealing,
+// device that pulls its own ctl back does not file it twice) or a reaction
+// { t: 'rx', id, peer, from, to, target: { from, id, digest }, emoji, rev, at,
+// filedAt } (an inner v4 op, kept even while its target is not stored; the
+// fold applies it once the target is, and only to the msg row with its
+// target.digest; a row without a hex64 target.digest is skipped on load). Before sealing,
 // a row gets a `pad` of spaces so its JSON is a multiple of ROW_BUCKET bytes:
 // the block length says neither the text length (within a bucket) nor msg
 // from ctl. The core's own signing pair derives
@@ -58,7 +68,8 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const gc = require('@varanda/core/lib/group-crypto')
 const { copyLinkCard } = require('@varanda/core/lib/link-card')
-const { validDmCard, DM_OPS, DM_AUDIO_MIME, DM_AUDIO_MAX_MS, DM_AUDIO_MAX_BYTES } = require('@varanda/core/lib/dm')
+const { validDmCard, DM_OPS, DM_AUDIO_MIME, DM_AUDIO_MAX_MS, DM_AUDIO_MAX_BYTES, DM_REACT_REV_MAX } = require('@varanda/core/lib/dm')
+const { isReaction } = require('@varanda/rpc')
 const sodium = require('./sodium-browser')
 const store = require('./node-store')
 
@@ -119,8 +130,13 @@ function validRow (r) {
   if (r === null || typeof r !== 'object' || !HEX64.test(r.peer) || typeof r.at !== 'string') return false
   if (!Number.isFinite(r.filedAt)) return false
   if (r.t === 'ctl') return DM_OPS.includes(r.op) && HEX32.test(r.id)
+  if (r.t === 'rx') return validReactionRow(r)
   if (r.t !== 'msg') return false
   if (r.legacy !== undefined && r.legacy !== true) return false
+  if (r.digest !== undefined && !HEX64.test(r.digest)) return false
+  if ((r.replyFrom === undefined) !== (r.replyDigest === undefined)) return false
+  if (r.replyFrom !== undefined && (r.replyTo === null || !HEX64.test(r.replyFrom) || !HEX64.test(r.replyDigest))) return false
+  if (r.moment !== undefined && !validMomentRow(r)) return false
   return HEX32.test(r.id) && HEX64.test(r.from) && typeof r.text === 'string' &&
     (r.replyTo === null || HEX32.test(r.replyTo)) && typeof r.mine === 'boolean' &&
     (r.fwd === undefined || r.fwd === 0 || r.fwd === 1) &&
@@ -128,10 +144,35 @@ function validRow (r) {
     (r.card === undefined || r.card === null || (r.media == null && validDmCard(r.card)))
 }
 
+// A reaction to a momento (inner v5): one emoji and the seq, nothing else.
+function validMomentRow (r) {
+  return Number.isSafeInteger(r.moment) && r.moment >= 1 && isReaction(r.text) && r.replyTo === null &&
+    r.media == null && r.card == null && (r.fwd === undefined || r.fwd === 0)
+}
+
+function validReactionRow (r) {
+  if (!HEX32.test(r.id) || !HEX64.test(r.from) || !HEX64.test(r.to) || r.from === r.to) return false
+  if (r.peer !== (r.mine ? r.to : r.from) || typeof r.mine !== 'boolean') return false
+  const t = r.target
+  if (t === null || typeof t !== 'object' || !HEX32.test(t.id) || (t.from !== r.from && t.from !== r.to)) return false
+  if (typeof t.digest !== 'string' || !HEX64.test(t.digest)) return false
+  if (r.emoji !== '' && !isReaction(r.emoji)) return false
+  return Number.isSafeInteger(r.rev) && r.rev >= 1 && r.rev <= DM_REACT_REV_MAX
+}
+
 function plainRow (r) {
   if (r.t === 'ctl') return { t: 'ctl', id: r.id, op: r.op, peer: r.peer, at: r.at, filedAt: r.filedAt }
+  if (r.t === 'rx') {
+    return { t: 'rx', id: r.id, peer: r.peer, from: r.from, to: r.to, target: { from: r.target.from, id: r.target.id, digest: r.target.digest }, emoji: r.emoji, rev: r.rev, at: r.at, mine: r.mine, filedAt: r.filedAt }
+  }
   const out = { t: 'msg', id: r.id, peer: r.peer, from: r.from, text: r.text, replyTo: r.replyTo, fwd: r.fwd === 1 ? 1 : 0, media: plainMedia(r.media), card: r.card == null ? null : copyLinkCard(r.card, (d) => plainMedia([d])[0]), at: r.at, mine: r.mine, filedAt: r.filedAt }
+  if (r.replyFrom !== undefined) {
+    out.replyFrom = r.replyFrom
+    out.replyDigest = r.replyDigest
+  }
+  if (typeof r.digest === 'string' && HEX64.test(r.digest)) out.digest = r.digest
   if (r.legacy === true) out.legacy = true
+  if (r.moment !== undefined && validMomentRow(r)) out.moment = r.moment
   return out
 }
 
@@ -492,12 +533,13 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
     })
   }
 
-  // -> { messages, ops } as copies; throws while locked.
+  // -> { messages, ops, reactions } as copies; throws while locked.
   function snapshot () {
     if (rows === null) throw new Error(LOCKED)
     return {
       messages: rows.filter((r) => r.t === 'msg').map(plainRow),
-      ops: rows.filter((r) => r.t === 'ctl').map(plainRow)
+      ops: rows.filter((r) => r.t === 'ctl').map(plainRow),
+      reactions: rows.filter((r) => r.t === 'rx').map(plainRow)
     }
   }
 
@@ -519,6 +561,23 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
   function hasMessage (from, id) {
     if (rows === null) return false
     return rows.some((r) => r.t === 'msg' && r.from === from && r.id === id)
+  }
+
+  // A reaction op, by its signer and id.
+  function hasReaction (from, id) {
+    if (rows === null) return false
+    return rows.some((r) => r.t === 'rx' && r.from === from && r.id === id)
+  }
+
+  // The highest stored rev of `from`'s reaction to target in the
+  // conversation with peer, 0 when there is none.
+  function reactionRev (peer, target, from) {
+    if (rows === null) throw new Error(LOCKED)
+    let rev = 0
+    for (const r of rows) {
+      if (r.t === 'rx' && r.peer === peer && r.from === from && r.target.from === target.from && r.target.id === target.id && r.target.digest === target.digest && r.rev > rev) rev = r.rev
+    }
+    return rev
   }
 
   function hasOp (id) {
@@ -750,7 +809,7 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
     return queue
   }
 
-  return { unlock, lock, unlocked, keyReady, keyStage, loaded, summaryFor, saveSummary, nextFiled, append, snapshot, ops, version: currentVersion, hasMessage, hasOp, seenToken, seal, open, sealBytes, openBytes, hasMedia, putMedia, getMedia, wipeCache, idle, close }
+  return { unlock, lock, unlocked, keyReady, keyStage, loaded, summaryFor, saveSummary, nextFiled, append, snapshot, ops, version: currentVersion, hasMessage, hasReaction, reactionRev, hasOp, seenToken, seal, open, sealBytes, openBytes, hasMedia, putMedia, getMedia, wipeCache, idle, close }
 }
 
 module.exports = { createDmStore, SUMMARY_PAGE }

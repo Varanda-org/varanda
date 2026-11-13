@@ -4,12 +4,13 @@
 // the departing screen is kept here, under its old index and key, until its
 // slide ends. Animated and PanResponder only: no extra native modules.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { AccessibilityInfo, Animated, PanResponder, Platform, StyleSheet, View, useWindowDimensions } from 'react-native'
 import { STACK_MS, claimSwipe, popPlan, pushPlan, stackChange, swipeVerdict } from '../stackMotion'
 import { createStackLock } from '../stackLock'
 import { layout } from './theme'
 import { useStyles } from './ThemeProvider'
+import { ScreenCovered, ScreenVisible } from './screenVisible'
 
 // The native driver is a platform API react-native-web does not have (it warns
 // and falls back), so this picks the driver, never the behaviour.
@@ -104,6 +105,9 @@ export function StackLayer ({ motion, index, entry, onPop, children }) {
   const styles = useStyles(makeStyles)
   const role = roleOf(motion, index)
   const enter = role === 'top' && motion.entering === entry
+  // Only the top entry is the screen the person sees; entries under it, and
+  // one leaving, stay mounted but load no provider player.
+  const covered = useContext(ScreenCovered)
   const screen = useWindowDimensions()
   // The layer sits in the shell's column, never wider than layout.column, so
   // the first frames before onLayout already slide by about the right width.
@@ -383,7 +387,9 @@ export function StackLayer ({ motion, index, entry, onPop, children }) {
         style={[styles.layer, (role === 'top' || role === 'leaving') && { transform: [{ translateX }] }]}
         {...(role === 'top' ? responder.panHandlers : null)}
       >
-        {children}
+        <ScreenVisible.Provider value={!covered && role === 'top'}>
+          {children}
+        </ScreenVisible.Provider>
       </Animated.View>
     </View>
   )

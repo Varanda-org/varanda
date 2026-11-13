@@ -4,9 +4,10 @@
 // names are peer text, so they pass through displayText here.
 
 import { useState } from 'react'
-import { Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
+import { ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { Icon } from './Icon'
+import { PressScale } from './PressScale'
 import { Sheet } from './Sheet'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, radius, space, type } from './theme'
@@ -35,7 +36,7 @@ export function CommunitiesBox ({ items, total, title, onOpen, onAll }) {
   const chip = (item) => {
     const name = displayText(item.name)
     return (
-      <Pressable
+      <PressScale
         key={item.community}
         accessibilityRole='button'
         accessibilityLabel={name}
@@ -46,7 +47,7 @@ export function CommunitiesBox ({ items, total, title, onOpen, onAll }) {
           <Icon name='gente' size={18} color={colors.soft} />
           <Text style={styles.chipText} numberOfLines={2}>{name}</Text>
         </View>
-      </Pressable>
+      </PressScale>
     )
   }
   return (
@@ -56,30 +57,32 @@ export function CommunitiesBox ({ items, total, title, onOpen, onAll }) {
         {list.slice(0, STRIP_MAX).map(chip)}
         {count > STRIP_MAX
           ? (
-            <Pressable
+            <PressScale
               accessibilityRole='button'
+              accessibilityLabel={'Ver todas (' + count + ')'}
               onPress={showAll}
               style={({ pressed }) => [styles.hit, pressed && styles.pressed]}
             >
               <View style={styles.chip}>
                 <Text style={styles.allText} numberOfLines={1}>{'Ver todas (' + count + ')'}</Text>
               </View>
-            </Pressable>
+            </PressScale>
             )
           : null}
       </ScrollView>
       <Sheet open={all} onClose={() => setAll(false)} title={title}>
         <ScrollView style={styles.sheetList}>
           {list.map((item) => (
-            <Pressable
+            <PressScale
               key={item.community}
               accessibilityRole='button'
+              accessibilityLabel={displayText(item.name)}
               onPress={() => open(item)}
               style={({ pressed }) => [styles.sheetRow, pressed && styles.pressed]}
             >
               <Icon name='gente' size={22} color={colors.soft} />
-              <Text style={styles.sheetText} numberOfLines={1}>{displayText(item.name)}</Text>
-            </Pressable>
+              <Text style={styles.sheetText} numberOfLines={2}>{displayText(item.name)}</Text>
+            </PressScale>
           ))}
         </ScrollView>
       </Sheet>

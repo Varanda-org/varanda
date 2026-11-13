@@ -78,14 +78,14 @@ const hcrypto = require('hypercore-crypto')
 const dm = require('@varanda/core/lib/dm')
 const dmFold = require('@varanda/core/lib/dm-fold')
 const postage = require('@varanda/core/lib/dm-postage')
-const { nowIso, MAX_AUDIO_BYTES } = require('@varanda/core/lib/records')
+const { nowIso, MAX_AUDIO_BYTES, VIDEO_MIME, MAX_MOMENT_VIDEO_MS, MAX_MOMENT_VIDEO_BYTES } = require('@varanda/core/lib/records')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { certForKey } = require('@varanda/core/lib/cert')
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
 const { blockedKeys } = require('@varanda/core/lib/member-block')
 const { copyLinkCard } = require('@varanda/core/lib/link-card')
 const { openOffer } = require('@varanda/core/lib/testimonials')
-const { mediaBounds, audioBounds, dmTextBytes, DM_MEDIA_KEYS, AUDIO_MS_TOLERANCE } = require('@varanda/rpc')
+const { mediaBounds, audioBounds, videoBounds, dmTextBytes, DM_MEDIA_KEYS, AUDIO_MS_TOLERANCE } = require('@varanda/rpc')
 const { sealBlob, createBlobClient, fetchBlob } = require('./blob')
 const sodium = require('./sodium-browser')
 const { dmBoxKeyPairFromPrf, dmLocalKeyFromPrf } = require('./passkey')
@@ -100,6 +100,10 @@ const BLOCKED = 'você bloqueou esta pessoa'
 const NO_BOX = 'esta pessoa ainda não recebe mensagens'
 const NO_STAMPS = 'o limite de envio de hoje acabou'
 const BAD_REPLY = 'responda uma mensagem desta conversa'
+const NO_TARGET = 'mensagem não encontrada'
+const REACT_MAX = 'limite de reações para esta mensagem atingido'
+const NOT_REACTABLE = 'esta mensagem não aceita reações'
+const DIGEST_RE = /^[0-9a-f]{64}$/
 const TOO_LONG = 'mensagem longa demais'
 const BAD_TEXT = 'mensagem inválida'
 const PULL_BUSY = 'mensagens já em andamento'
@@ -196,6 +200,28 @@ function mediaItem (d) {
   const o = {}
   for (const k of DM_MEDIA_KEYS) o[k] = d[k]
   return o
+}
+
+// A stored row keeps a bound reply's replyTo { from, id, digest } as the
+// bare id plus replyFrom and replyDigest (dm-store.js), so the stored
+// replyTo stays the hex32 an earlier build reads.
+function replyRow (replyTo) {
+  if (replyTo !== null && typeof replyTo === 'object') return { replyTo: replyTo.id, replyFrom: replyTo.from, replyDigest: replyTo.digest }
+  return { replyTo }
+}
+
+// A stored row's reply as the inner carried it, for the fold.
+function replyOfRow (m) {
+  return typeof m.replyFrom === 'string' ? { from: m.replyFrom, id: m.replyTo, digest: m.replyDigest } : m.replyTo
+}
+
+// The replyTo a new reply signs: bound to the quoted row's sender, id and
+// digest when the row has one; a row stored without a digest (an earlier
+// build, a Página's legacy history) is quoted by its bare id, as before.
+function boundReply (target) {
+  return typeof target.digest === 'string' && DIGEST_RE.test(target.digest)
+    ? { from: target.from, id: target.id, digest: target.digest }
+    : target.id
 }
 
 function zeroPair (pair) {
@@ -567,7 +593,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (hit !== undefined && lc.unlocked() && hit.version === lc.version() && hit.own === own && hit.follows === followsText && hit.seen === seenText) return hit.result
     const version = lc.version()
     const stored = new Set(storedIds)
-    const { messages, ops } = lc.snapshot()
+    const { messages, ops, reactions } = lc.snapshot()
     const seen = []
     for (const m of messages) {
       if (m.mine) continue
@@ -579,7 +605,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       followSet: follows,
       seen,
       ops,
-      messages: messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : own, text: m.text, replyTo: m.replyTo, fwd: m.fwd, media: m.media, card: m.card, at: m.at, filedAt: m.filedAt }))
+      messages: messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : own, text: m.text, replyTo: replyOfRow(m), fwd: m.fwd, media: m.media, card: m.card, moment: m.moment, at: m.at, filedAt: m.filedAt, digest: m.digest })),
+      reactions: (reactions || []).map((r) => ({ id: r.id, from: r.from, to: r.to, target: { from: r.target.from, id: r.target.id, digest: r.target.digest }, emoji: r.emoji, rev: r.rev, filedAt: r.filedAt }))
     })
     // A store locked (or relocked) since is never remembered.
     const current = ctx === personal || pageStores.get(ctx.page) === ctx
@@ -722,10 +749,24 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     // of theirs is fetched until a tap or an accept.
     const auto = c.folder !== 'request'
     return {
-      messages: rows.map((m) => ({ id: m.id, from: m.from, text: m.text, replyTo: m.replyTo, fwd: m.fwd, at: m.at, mine: m.mine, media: mediaView(m, auto, ctx), card: m.card ? copyLinkCard(m.card, mediaItem) : null })),
+      messages: rows.map((m) => threadRow(m, mediaView(m, auto, ctx))),
       next: start > 0 && rows.length > 0 ? rows[0].id : null,
       ...state
     }
+  }
+
+  // `reactions` only when the fold gave the row one; `reactable: false` only
+  // on a row stored without a digest, which never has reactions. A bound
+  // reply carries `replyFrom` when the fold kept the message it names, and
+  // `replyMissing: true` when it did not; a bare-id reply carries neither.
+  function threadRow (m, media) {
+    const row = { id: m.id, from: m.from, text: m.text, replyTo: m.replyTo, fwd: m.fwd, at: m.at, mine: m.mine, media, card: m.card ? copyLinkCard(m.card, mediaItem) : null }
+    if (typeof m.replyFrom === 'string') row.replyFrom = m.replyFrom
+    if (m.replyMissing === true) row.replyMissing = true
+    if (m.moment !== undefined) row.moment = m.moment
+    if (typeof m.digest !== 'string' || !DIGEST_RE.test(m.digest)) row.reactable = false
+    if (Array.isArray(m.reactions) && m.reactions.length > 0) row.reactions = m.reactions.map((r) => ({ emoji: r.emoji, mine: r.mine }))
+    return row
   }
 
   // ---- media ----
@@ -1010,12 +1051,24 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // key and nonce go public in the moment record, so a blob shared with a
   // DM (or another moment) would open that one for every reader of the
   // diary. The upload takes stamps as putMedia does. -> the item, ms 0.
-  async function putPublicMedia (own, keyPair, { bytes, mime, width, height }) {
+  // A short video (mime video/mp4, the caller's stripped copy) must pass the
+  // strict check a reader makes with exactly the given sides and ms: the
+  // item's sides and duration are the container's. DM media never takes one.
+  async function putPublicMedia (own, keyPair, { bytes, mime, width, height, ms = 0 }) {
     requireUnlocked()
     const gen = generation
-    const ok = bytes instanceof Uint8Array && mime !== dm.DM_AUDIO_MIME && dm.DM_MEDIA_MIMES.includes(mime) &&
-      Number.isInteger(width) && width >= 1 && Number.isInteger(height) && height >= 1 &&
-      mediaBounds(bytes, mime) !== null
+    let ok
+    if (mime === VIDEO_MIME) {
+      const video = bytes instanceof Uint8Array && bytes.byteLength >= 1 && bytes.byteLength <= MAX_MOMENT_VIDEO_BYTES
+        ? videoBounds(bytes, { maxMs: MAX_MOMENT_VIDEO_MS })
+        : null
+      ok = video !== null && video.width === width && video.height === height && video.ms === ms
+    } else {
+      ok = bytes instanceof Uint8Array && mime !== dm.DM_AUDIO_MIME && dm.DM_MEDIA_MIMES.includes(mime) &&
+        Number.isInteger(width) && width >= 1 && Number.isInteger(height) && height >= 1 &&
+        mediaBounds(bytes, mime) !== null
+      ms = 0
+    }
     if (!ok) {
       if (bytes instanceof Uint8Array) wipe(bytes)
       throw new UsageError(BAD_MEDIA)
@@ -1032,7 +1085,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (gen !== generation) throw new UsageError(LOCKED)
     await upload(entry, keyPair)
     if (gen !== generation) throw new UsageError(LOCKED)
-    const item = mediaItem({ ...sealed.descriptor, mime, w: width, h: height, ms: 0 })
+    const item = mediaItem({ ...sealed.descriptor, mime, w: width, h: height, ms })
     publicItems.set(item.id, item)
     while (publicItems.size > BLOBS_MAX) publicItems.delete(publicItems.keys().next().value)
     return mediaItem(item)
@@ -1054,10 +1107,15 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // caller owns). The key and nonce are the record's own (public), so no
   // unlock is needed: the blob is fetched over plain HTTP GETs from the
   // seeder's origin. Gone, refused or not verifying (size, sha256, an image
-  // of that mime) all answer MOMENT_PHOTO_GONE.
+  // of that mime) all answer MOMENT_PHOTO_GONE. A video answers its ms too:
+  // fetchBlob checks images only, so its bytes must pass the strict video
+  // check with exactly the item's sides and duration.
   async function readPublicMedia (item) {
     const d = item
-    if (d === null || typeof d !== 'object' || d.ms !== 0 || d.mime === dm.DM_AUDIO_MIME || !dm.DM_MEDIA_MIMES.includes(d.mime)) {
+    const video = d !== null && typeof d === 'object' && d.mime === VIDEO_MIME
+    if (d === null || typeof d !== 'object' || (video
+      ? !(Number.isInteger(d.ms) && d.ms >= 1 && d.ms <= MAX_MOMENT_VIDEO_MS)
+      : d.ms !== 0 || d.mime === dm.DM_AUDIO_MIME || !dm.DM_MEDIA_MIMES.includes(d.mime))) {
       throw new Error(MOMENT_PHOTO_GONE)
     }
     if (blobOrigin === null) throw new Error(MOMENT_PHOTO_GONE)
@@ -1068,6 +1126,14 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       const msg = err && err.message
       if (msg === MEDIA_GONE || msg === BAD_MEDIA) throw new Error(MOMENT_PHOTO_GONE)
       throw err
+    }
+    if (video) {
+      const v = videoBounds(r.bytes, { maxMs: MAX_MOMENT_VIDEO_MS })
+      if (v === null || v.width !== d.w || v.height !== d.h || v.ms !== d.ms) {
+        wipe(r.bytes)
+        throw new Error(MOMENT_PHOTO_GONE)
+      }
+      return { bytes: r.bytes, mime: d.mime, w: d.w, h: d.h, ms: d.ms }
     }
     return { bytes: r.bytes, mime: d.mime, w: d.w, h: d.h }
   }
@@ -1278,7 +1344,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   async function fileSent (entry) {
     if (entry.row === null || !entry.acked[0]) return
     const lc = entry.local || local
-    if (!lc.hasMessage(entry.row.from, entry.row.id)) await lc.append([{ ...entry.row, filedAt: lc.nextFiled() }])
+    const filed = entry.row.t === 'rx' ? lc.hasReaction(entry.row.from, entry.row.id) : lc.hasMessage(entry.row.from, entry.row.id)
+    if (!filed) await lc.append([{ ...entry.row, filedAt: lc.nextFiled() }])
     const row = entry.row
     entry.row = null
     // The sender's own photos are cached from the bytes it put, so its
@@ -1357,18 +1424,37 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // to: hex64; recipientBox: hex64 | null (dm.lookup). keyPair: identity.
   // media: null or dm.send items (docs/rpc.md 5.75), each answered by
   // putMedia in this unlock.
-  async function send (own, keyPair, { to, text, replyTo = null, media = null, card = null, fwd = 0 }, recipientBox) {
-    checkSend(own, to)
+  function sendKeyOf ({ to, text, replyTo = null, media = null, card = null, fwd = 0, moment = null }) {
     const items = Array.isArray(media) && media.length > 0 ? media.map(mediaItem) : null
-    card = card === null ? null : copyLinkCard(card, mediaItem)
-    const key = to + '\n' + (replyTo || '') + '\n' + text + '\n' + fwd + '\n' + (items === null ? '' : JSON.stringify(items)) + '\n' + JSON.stringify(card)
+    const copy = card === null ? null : copyLinkCard(card, mediaItem)
+    const key = to + '\n' + (replyTo || '') + '\n' + text + '\n' + fwd + '\n' + (items === null ? '' : JSON.stringify(items)) + '\n' + JSON.stringify(copy) + '\n' + (moment === null ? '' : moment)
+    return { items, card: copy, key }
+  }
+
+  // Whether a send with these dm.send params waits for the user's retry.
+  function sendPending (fields) {
+    return pending.has(sendKeyOf(fields).key)
+  }
+
+  // moment: null or the seq of a showing momento of `to`: an inner v5
+  // reaction to that momento. beforeNew: the caller's last check (it throws
+  // to refuse), run only when nothing is pending for these params, so a
+  // retry re-puts its stamped drops even if the momento is gone since.
+  async function send (own, keyPair, { to, text, replyTo = null, media = null, card = null, fwd = 0, moment = null }, recipientBox, { beforeNew = null } = {}) {
+    checkSend(own, to)
+    const { items, card: c, key } = sendKeyOf({ to, text, replyTo, media, card, fwd, moment })
+    card = c
     let entry = pending.get(key)
+    if (entry === undefined && beforeNew !== null) {
+      await beforeNew()
+      entry = pending.get(key)
+    }
     if (entry === undefined) {
       const sealedBlobs = messageItems({ media: items, card }).map((item) => entryOfItem(item, to))
       // Copied before any await: an overlapping send of the same blob may
       // forget (and wipe) the shared entry meanwhile.
       const plains = sealedBlobs.map((b) => new Uint8Array(b.plain))
-      entry = await newEntry(own, keyPair, { to, text, replyTo, fwd, items, card, key }, recipientBox, sealedBlobs, plains).catch((err) => {
+      entry = await newEntry(own, keyPair, { to, text, replyTo, fwd, items, card, moment, key }, recipientBox, sealedBlobs, plains).catch((err) => {
         plains.forEach(wipe)
         throw err
       })
@@ -1388,11 +1474,14 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   }
 
   // A new pending send: checked, its blobs acked, sealed and stamped.
-  async function newEntry (own, keyPair, { to, text, replyTo, fwd, items, card, key }, recipientBox, sealedBlobs, plains) {
+  async function newEntry (own, keyPair, { to, text, replyTo: replyId, fwd, items, card, moment = null, key }, recipientBox, sealedBlobs, plains) {
     if (recipientBox === null) throw new UsageError(NO_BOX)
-    if (replyTo !== null) {
+    let replyTo = null
+    if (replyId !== null) {
       const c = await threadOf(own, to)
-      if (c === null || dmFold.replyTarget(c.messages, replyTo) === null) throw new UsageError(BAD_REPLY)
+      const target = c === null ? null : dmFold.replyTarget(c.messages, replyId)
+      if (target === null) throw new UsageError(BAD_REPLY)
+      replyTo = boundReply(target)
     }
     const id = dm.newMessageId()
     const at = nowIso()
@@ -1406,9 +1495,95 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (gen !== generation) throw new UsageError(LOCKED)
     let inner
     try {
-      inner = dm.buildInner({ kind: 'msg', id, at, to, text, replyTo, fwd, cert, card, ...(items === null ? {} : { media: items }) }, keyPair)
+      inner = dm.buildInner({ kind: 'msg', id, at, to, text, replyTo, fwd, cert, card, ...(items === null ? {} : { media: items }), ...(moment === null ? {} : { moment }) }, keyPair)
     } catch (err) {
       throw new UsageError(err && err.message === TOO_LONG ? TOO_LONG : BAD_TEXT)
+    }
+    let sealedTo, sealedSelf, digest
+    try {
+      digest = dm.frameDigest(inner)
+      sealedTo = dm.sealInner(inner, recipientBox)
+      sealedSelf = dm.sealInner(inner, b4a.toString(box.publicKey, 'hex'))
+    } catch {
+      throw new UsageError(NO_BOX)
+    } finally {
+      inner.fill(0)
+    }
+    const stamps = await takeStamps(2)
+    if (stamps === null) throw new UsageError(NO_STAMPS)
+    return {
+      key,
+      id,
+      at,
+      drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])],
+      acked: [false, false],
+      row: { t: 'msg', id, peer: to, from: own, text, ...replyRow(replyTo), fwd, media: items, card, at, mine: true, digest, ...(moment === null ? {} : { moment }) },
+      blobs: sealedBlobs,
+      plains
+    }
+  }
+
+  // A reaction (inner v4) to a message of the held thread with `to`: sealed
+  // to the peer and to the own box and stamped as one dm.send (two stamps),
+  // filed here once the peer's drop is acked. At most one pending op per
+  // (to, target): the same emoji only puts what was not acked; another one
+  // is a new op. With none pending, a call whose emoji is already the own
+  // reaction ('' with none) sends nothing. -> { ok: true }
+  async function react (own, keyPair, { to, target, emoji }, recipientBox) {
+    checkSend(own, to)
+    await whenLoaded()
+    const key = 'rx\n' + to + '\n' + target.from + '\n' + target.id
+    let entry = pending.get(key)
+    if (entry === undefined || entry.rx.emoji !== emoji) {
+      const c = await threadOf(own, to)
+      const row = c === null ? undefined : c.messages.find((m) => m.from === target.from && m.id === target.id)
+      if (row === undefined) throw new UsageError(NO_TARGET)
+      // A row stored without a digest (an earlier build, a Página's legacy
+      // history) takes no reaction: nothing would bind the op to its content.
+      if (typeof row.digest !== 'string' || !DIGEST_RE.test(row.digest)) throw new UsageError(NOT_REACTABLE)
+      const prior = pending.get(key)
+      if (prior === undefined) {
+        const mine = Array.isArray(row.reactions) ? row.reactions.find((r) => r.mine) : undefined
+        if ((mine === undefined ? '' : mine.emoji) === emoji) return { ok: true }
+      }
+      // A different emoji replaces the pending op: its unacked drops are
+      // abandoned, and the higher rev wins wherever both arrive.
+      // The target from the stored row, never from the caller: its digest
+      // binds the reaction to this message.
+      const t = { from: row.from, id: row.id, digest: row.digest }
+      entry = await newReaction(own, keyPair, { to, target: t, emoji, key }, recipientBox, prior === undefined || prior.rx.digest !== row.digest ? 0 : prior.rx.rev)
+      if (pending.get(key) !== undefined) {
+        dropEntry(pending.get(key))
+        pending.delete(key)
+      } else if (pending.size >= PENDING_MAX) {
+        const oldest = pending.keys().next().value
+        dropEntry(pending.get(oldest))
+        pending.delete(oldest)
+      }
+      pending.set(key, entry)
+    }
+    await deliver(entry)
+    if (pending.get(key) === entry) pending.delete(key)
+    return { ok: true }
+  }
+
+  // rev: one past the highest the store or the pending op (pendingRev)
+  // holds for (to, target, own), target digest included, so an unacked op never ties with the next.
+  async function newReaction (own, keyPair, { to, target, emoji, key }, recipientBox, pendingRev) {
+    if (recipientBox === null) throw new UsageError(NO_BOX)
+    const id = dm.newMessageId()
+    const at = nowIso()
+    const cert = await certOf(own)
+    // Read after the await: a pull may have filed a newer op of another
+    // device of this passkey meanwhile, and a stale rev would lose to it.
+    const rev = Math.max(local.reactionRev(to, target, own), pendingRev) + 1
+    if (rev > dm.DM_REACT_REV_MAX) throw new UsageError(REACT_MAX)
+    const t = { from: target.from, id: target.id, digest: target.digest }
+    let inner
+    try {
+      inner = dm.buildInner({ kind: 'react', id, at, to, target: t, emoji, rev, cert }, keyPair)
+    } catch {
+      throw new UsageError(BAD_TEXT)
     }
     let sealedTo, sealedSelf
     try {
@@ -1427,9 +1602,10 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       at,
       drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])],
       acked: [false, false],
-      row: { t: 'msg', id, peer: to, from: own, text, replyTo, fwd, media: items, card, at, mine: true },
-      blobs: sealedBlobs,
-      plains
+      row: { t: 'rx', id, peer: to, from: own, to, target: t, emoji, rev, at, mine: true },
+      rx: { emoji, rev, digest: t.digest },
+      blobs: [],
+      plains: null
     }
   }
 
@@ -1660,7 +1836,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (inner === null) return null
     const body = dm.openInner(inner, own, { association, revokedIssuers: mod.revokedIssuers })
     if (body === null || dm.pageInnerStale(body, Date.now())) return null
-    return rowOf(own, body, ops, batch, mod.blocked, local)
+    return rowOf(own, body, ops, batch, mod.blocked, local, dm.bodyDigest(body))
   }
 
   // The same rules with the page as self, opened by the page's boxes; only
@@ -1675,6 +1851,12 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       // A page message put after its signature's expiry is a replay of a
       // stockpiled signature (core dm.js pageInnerStale): never filed.
       if (body === null || dm.pageInnerStale(body, Date.now())) return null
+      // A Página conversation has no reactions: a v4 body is never filed.
+      if (body.kind === 'react') return null
+      // Nor a reaction to a momento (v5): a page sends no momento reactions.
+      if (body.v === 5) return null
+      // Of the body as signed, before a carried legacy key is renamed.
+      const digest = dm.bodyDigest(body)
       // A drop to the key a carried legacy box belonged to is filed for this
       // page, as the bundle's rows are.
       if (key !== p.page) {
@@ -1682,13 +1864,15 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         body = { ...body, from: body.from === key ? p.page : body.from, to: body.to === key ? p.page : body.to }
         if (body.from === body.to) return null
       }
-      return rowOf(p.page, body, ops, batch, mod.association, p.ctx.local)
+      return rowOf(p.page, body, ops, batch, mod.association, p.ctx.local, digest)
     }
     return null
   }
 
-  function rowOf (own, body, ops, batch, blocked, lc) {
-    if (body.kind === 'msg' && !body.mine && blocked.has(body.from)) return null
+  // digest: dm.bodyDigest of the verified body (what a reaction names).
+  function rowOf (own, body, ops, batch, blocked, lc, digest) {
+    if ((body.kind === 'msg' || body.kind === 'react') && !body.mine && blocked.has(body.from)) return null
+    if (body.kind === 'react') return reactionRowOf(own, body, ops, batch, lc)
     if (body.kind === 'ctl') {
       if (lc.hasOp(body.id) || batch.some((r) => r.t === 'ctl' && r.id === body.id)) return null
       return { t: 'ctl', id: body.id, op: body.op, peer: body.peer, at: body.at }
@@ -1697,7 +1881,16 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (lc.hasMessage(body.from, body.id) || batch.some((r) => r.t === 'msg' && r.from === body.from && r.id === body.id)) return null
     // A blocked sender's messages are dropped once they open.
     if (!body.mine && !dmFold.canSend({ self: own, peer, ops })) return null
-    return { t: 'msg', id: body.id, peer, from: body.from, text: body.text, replyTo: body.replyTo, fwd: body.fwd === 1 ? 1 : 0, media: Array.isArray(body.media) ? body.media.map(mediaItem) : null, card: body.card ? copyLinkCard(body.card, mediaItem) : null, at: body.at, mine: body.mine }
+    return { t: 'msg', id: body.id, peer, from: body.from, text: body.text, ...replyRow(body.replyTo), fwd: body.fwd === 1 ? 1 : 0, media: Array.isArray(body.media) ? body.media.map(mediaItem) : null, card: body.card ? copyLinkCard(body.card, mediaItem) : null, at: body.at, mine: body.mine, digest, ...(body.v === 5 && Number.isSafeInteger(body.moment) && body.moment >= 1 ? { moment: body.moment } : {}) }
+  }
+
+  // Kept even while its target is not stored: the fold applies it once the
+  // target is. Never a message row, so it takes no (from, id) message slot.
+  function reactionRowOf (own, body, ops, batch, lc) {
+    if (lc.hasReaction(body.from, body.id) || batch.some((r) => r.t === 'rx' && r.from === body.from && r.id === body.id)) return null
+    const peer = body.mine ? body.to : body.from
+    if (!body.mine && !dmFold.canSend({ self: own, peer, ops })) return null
+    return { t: 'rx', id: body.id, peer, from: body.from, to: body.to, target: { from: body.target.from, id: body.target.id, digest: body.target.digest }, emoji: body.emoji, rev: body.rev, at: body.at, mine: body.mine }
   }
 
   // ---- Páginas (docs/rpc.md 5.114) ----
@@ -1738,10 +1931,12 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       if (to === page) throw new UsageError(SELF_SEND)
       if (!dmFold.canSend({ self: page, peer: to, ops: ctx.local.ops() })) throw new UsageError(BLOCKED)
       if (typeof recipientBox !== 'string') throw new UsageError(NO_BOX)
-      const reply = replyTo === undefined ? null : replyTo
-      if (reply !== null) {
+      let reply = null
+      if (replyTo !== undefined && replyTo !== null) {
         const c = await threadOf(page, to, ctx)
-        if (c === null || dmFold.replyTarget(c.messages, reply) === null) throw new UsageError(BAD_REPLY)
+        const target = c === null ? null : dmFold.replyTarget(c.messages, replyTo)
+        if (target === null) throw new UsageError(BAD_REPLY)
+        reply = boundReply(target)
       }
       fields = { kind: 'msg', from: page, to, text, replyTo: reply, fwd: fwd === 1 ? 1 : 0, cert: e.cert }
     } else {
@@ -1837,7 +2032,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         at: b.at,
         drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])],
         acked: [false, false],
-        row: { t: 'msg', id: b.id, peer: b.to, from: page, text: b.text, replyTo: b.replyTo, fwd: b.fwd, media: null, card: null, at: b.at, mine: true },
+        row: { t: 'msg', id: b.id, peer: b.to, from: page, text: b.text, ...replyRow(b.replyTo), fwd: b.fwd, media: null, card: null, at: b.at, mine: true, digest: dm.bodyDigest(b) },
         blobs: [],
         plains: [],
         local: ctx.local
@@ -1860,6 +2055,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (keys.length !== IMPORT_ROW_KEYS.length || !IMPORT_ROW_KEYS.every((k) => keys.includes(k))) return false
     if (typeof r.id !== 'string' || !/^[0-9a-f]{32}$/.test(r.id) || !Number.isSafeInteger(r.n) || r.n < 0) return false
     if (r.fwd !== 0 && r.fwd !== 1) return false
+    // Never signed, so never bound: a legacy row quotes by bare id only.
+    if (r.replyTo !== null && (typeof r.replyTo !== 'string' || !/^[0-9a-f]{32}$/.test(r.replyTo))) return false
     if (typeof r.from !== 'string' || typeof r.to !== 'string' || r.from === r.to || (r.from !== page && r.to !== page)) return false
     try {
       dm.innerDigest({ kind: 'msg', id: r.id, from: r.from, to: r.to, text: r.text, replyTo: r.replyTo, media: r.media, card: r.card, fwd: r.fwd, at: r.at, cert: null })
@@ -2229,6 +2426,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     thread,
     seen: tracked(seen),
     send: tracked(send),
+    sendPending,
+    react: tracked(react),
     putMedia: tracked(putMedia),
     readMedia: tracked(readMedia),
     putPublicMedia: tracked(putPublicMedia),

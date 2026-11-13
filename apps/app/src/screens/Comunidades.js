@@ -31,7 +31,7 @@ import { Btn, ErrorText, Field, SectionHeader, Soft, UNCERTAIN, errorText, useAc
 import { refusalOf } from '../wordCheck'
 import { Avatar } from '../ui/Avatar'
 import { RefreshableList } from '../ui/RefreshableList'
-import { EmptyState, ErrorState, Skeleton } from '../ui/States'
+import { EmptyState, ErrorState, SkeletonRow } from '../ui/States'
 import { type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
 import { Choice, NAME_MAX, nameLength, useEscapeClose } from './NovoGrupo'
@@ -385,6 +385,31 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
     </View>
   )
 
+  let searchState = null
+  if (search.status === 'loading') {
+    searchState = <View><Soft>Buscando…</Soft>{[0, 1, 2].map((key) => <SkeletonRow key={key} />)}</View>
+  } else if (search.status === 'error') {
+    searchState = (
+      <View>
+        <ErrorText>{search.error}</ErrorText>
+        {!search.unavailable ? <Btn label='Tentar de novo' onPress={() => search.retry()} /> : <Btn label='Limpar busca' onPress={() => setQuery('')} />}
+      </View>
+    )
+  } else if (search.status === 'done') {
+    if (search.groups.length === 0) {
+      if (search.indexing) searchState = <EmptyState icon='gente' title='A busca ainda está sendo atualizada; tente de novo depois.' actionLabel='Tentar de novo' onAction={() => search.retry()} secondaryLabel='Limpar busca' onSecondary={() => setQuery('')} />
+      else if (search.partial) searchState = <EmptyState icon='gente' title='Alguns grupos podem faltar' actionLabel='Limpar busca' onAction={() => setQuery('')} secondaryLabel='Tentar de novo' onSecondary={() => search.retry()} />
+      else searchState = <EmptyState icon='gente' title='Nenhum grupo público encontrado.' actionLabel='Limpar busca' onAction={() => setQuery('')} />
+    } else {
+      searchState = (
+        <View>
+          {search.indexing ? <Soft>A busca ainda está sendo atualizada; tente de novo depois.</Soft> : search.partial ? <Soft>Alguns grupos podem faltar</Soft> : null}
+          {search.more ? <Soft>Há mais resultados: refine a busca.</Soft> : null}
+        </View>
+      )
+    }
+  }
+
   const discover = (
     <View>
       <SectionHeader>Descobrir</SectionHeader>
@@ -398,15 +423,9 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
           plain
         />
         <Soft>O resultado abre um grupo da comunidade</Soft>
-        {search.status === 'loading' ? <Soft>Buscando…</Soft> : null}
-        {search.status === 'error' ? <ErrorText>{search.error}</ErrorText> : null}
-        {search.status === 'error' && !search.unavailable ? <Btn label='Tentar de novo' onPress={() => search.retry()} /> : null}
-        {search.status === 'done' && search.groups.length === 0 ? <Soft>Nenhum grupo público encontrado.</Soft> : null}
-        {search.status === 'done' && search.partial ? <Soft>Alguns grupos podem faltar</Soft> : null}
-        {search.status === 'done' && search.indexing ? <Soft>A busca ainda está sendo atualizada; tente de novo depois.</Soft> : null}
+        {searchState}
       </View>
-      {hits.length > 0 ? <View>{hits}</View> : null}
-      {search.status === 'done' && search.more ? <View style={styles.block}><Soft>Há mais resultados: refine a busca.</Soft></View> : null}
+      {search.status === 'done' && hits.length > 0 ? <View>{hits}</View> : null}
     </View>
   )
 
@@ -422,9 +441,9 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
   if (list.error) {
     empty = <ErrorState message={list.error} onRetry={load} pending={list.loading} />
   } else if (!list.loaded) {
-    empty = <Skeleton />
+    empty = <View>{[0, 1, 2].map((key) => <SkeletonRow key={key} />)}</View>
   } else {
-    empty = <EmptyState icon='cadeira' title='Nenhuma comunidade ainda' body={pageKey !== null ? PAGE_EMPTY_TEXT : 'Crie uma comunidade, busque um grupo público ou abra o link de convite que alguém da comunidade mandou.'} />
+    empty = <EmptyState icon='cadeira' title='Nenhuma comunidade ainda' body={pageKey !== null ? PAGE_EMPTY_TEXT : 'Crie uma comunidade, busque um grupo público ou abra o link de convite que alguém da comunidade mandou. Uma comunidade reúne até 32 grupos sob a mesma moderação.'} actionLabel={pageKey === null ? 'Nova comunidade' : 'Voltar'} onAction={pageKey === null ? () => setCreating(true) : onBack} secondaryLabel={pageKey === null ? 'Voltar' : undefined} onSecondary={onBack} />
   }
 
   const renderItem = ({ item }) => {

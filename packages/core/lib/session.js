@@ -666,6 +666,7 @@ function createSession ({
     'dm.enable': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.lookup': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.send': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.react': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.pull': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.list': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.thread': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
@@ -842,6 +843,9 @@ function createSession ({
     'moments.read': serial(async () => {
       throw new UsageError(MEDIA_WEB_ONLY)
     }),
+    'moment.lookup': serial(async () => {
+      throw new UsageError(MEDIA_WEB_ONLY)
+    }),
     'moment.delete': serial(async () => {
       throw new UsageError(MEDIA_WEB_ONLY)
     }),
@@ -976,6 +980,14 @@ function createSession ({
       send('groups.changed', { group: params.group }, epoch)
       return r
     }),
+
+    'group.react': serial(async (params, epoch) => {
+      const r = await withStore((c) => member.groupReact(c, params))
+      send('groups.changed', { group: params.group }, epoch)
+      return r
+    }),
+
+    'group.reactors': serial((params) => withStore((c) => member.groupReactors(c, params))),
 
     'group.meta': serial(async (params, epoch) => {
       const r = await withStore((c) => member.groupMeta(c, params))

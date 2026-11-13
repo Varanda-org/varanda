@@ -1,6 +1,8 @@
 // One line of a timeline (no card). It receives the RAW peer strings (author
-// key, name, username, at, text, replyToName, the quote's and the reposter's
-// names) and applies displayText itself, so callers must not pre-escape them.
+// key, name, username, at, text, replyToName, each reply preview's name and
+// text, the quote's and the reposter's names) and applies displayText itself
+// (the parent chip through replyChip, which escapes on its own), so callers
+// must not pre-escape them.
 // Naming follows whoOf (src/who.js): never a key-derived handle.
 //
 // Props (the shared contract):
@@ -9,8 +11,18 @@
 //   with photos may have no text). `media` (descriptors or null) goes to
 //   ./MediaGrid with `persist={persistMedia}` (false for authors this device
 //   does not follow: their photos are never kept).
+// - expanded: shows the full caption without a clamp control (default false).
 // - preview: null | a stored link card (the post's `preview`), drawn by
-//   ./LinkCard from that data only, its thumbnail read like a post photo.
+//   ./LinkCard from that data only, its thumbnail read like a post photo. A
+//   card whose URL carries an Audius music ref uses ./PostMusic (a sticker
+//   that plays a track or snippet by itself while seen, or ./MusicPlayerCard
+//   for a playlist or with the Ajustes switch off); other allowlisted music
+//   links (embedOf) use ./MusicEmbedCard. A link only in the text never gets
+//   a player.
+// - replyPreviews: optional [{ key, name, text }], not the link card above.
+//   Under the action bar, 'Respostas' and one line per preview ('Nome:
+//   texto'), at most two with text. Absent or empty renders nothing. Raw
+//   peer strings go through displayText here.
 // - quote: null | { author, name, username, at, text, media, missing, onOpen }
 //   rendered by ./QuoteCard (one level only).
 // - repostedBy: null | { author, name, username }: a top line 'Nome
@@ -23,8 +35,10 @@
 //   button is disabled while its request runs).
 // - onOpen (the text, the time ('abrir conversa') and the empty body area;
 //   the photos keep their own viewer taps),
-//   onOpenAuthor (avatar and name), onOpenParent ('respondendo a X'),
-//   onOpenReposter, and the action bar: onReply, onRepost, onQuote, onLike,
+//   onOpenAuthor (avatar and name), onOpenParent (the reply chip; plain text
+//   when absent), onOpenPreviews (one button for replyPreviews; plain text
+//   when absent), onOpenReposter, and the action bar: onReply, onRepost,
+//   onQuote, onLike,
 //   onFollow ('seguir', disabled while followPending), onReport, onDelete.
 //   The bar is reply, repost, like, share and 'mais'. The repost button opens
 //   a small sheet (Republicar, and Citar with onQuote); report and delete live
@@ -48,22 +62,29 @@ import { AccessibilityInfo, Animated, Platform, Pressable, StyleSheet, Text, Vie
 import { displayText } from '@varanda/rpc'
 import { doubleTapPlan, pendingOpen, tapKind } from '../doubleTap'
 import { relativeTime } from '../format'
-import { hasLink } from '../links'
+import { hasLink, textWithoutHrefs } from '../links'
+import { embedOf, sameMusicPage } from '../musicEmbed'
+import { musicRefOf } from '../music'
 import { moreActions, repostActions, shareLink } from '../postActions'
 import { useBlocks } from '../blocksProvider'
 import { blockedRowView } from '../memberBlocks'
 import { canShare, copyText, shareUrl } from '../share'
 import { shareNav } from '../shareNav'
+import { replyChip } from '../threadRows'
 import { whoOf } from '../who'
 import { ActionsSheet } from './ActionsSheet'
 import { Avatar } from './Avatar'
+import { ClampControl, useClamp } from './ClampText'
 import { Icon } from './Icon'
 import { LinkCard } from './LinkCard'
+import { MusicEmbedCard } from './MusicEmbedCard'
+import PostMusic from './PostMusic'
 import { MediaGrid } from './MediaGrid'
 import { tap } from './haptics'
 import { hasMention, MentionText } from './MentionText'
 import { useHosted } from '../node'
-import { QuoteCard } from './QuoteCard'
+import { QuoteCard, quotePlayerOf } from './QuoteCard'
+import { screenReaderOn } from './screenReader'
 import { LARGE_TEXT, layout, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
 
@@ -82,19 +103,35 @@ function countOf (counts, field) {
   return Number.isSafeInteger(n) && n > 0 ? n : null
 }
 
+// multiline so a line break stays a space after the collapse, not U+FFFD.
+function oneLine (value) {
+  if (typeof value !== 'string') return ''
+  return displayText(value, { multiline: true }).replace(/\s+/g, ' ').trim()
+}
+
+// Peer text stays escaped. A bad entry is not a preview.
+function replyPreviewLines (replyPreviews) {
+  if (!Array.isArray(replyPreviews)) return []
+  const lines = []
+  for (const entry of replyPreviews) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+    const text = oneLine(entry.text)
+    if (text === '') continue
+    lines.push({
+      key: typeof entry.key === 'string' && entry.key !== '' ? entry.key : 'p' + lines.length,
+      name: oneLine(entry.name),
+      text
+    })
+  }
+  return lines.slice(0, 2)
+}
+
+function previewLineText (line) {
+  return line.name !== '' ? line.name + ': ' + line.text : line.text
+}
+
 const NATIVE_DRIVER = Platform.OS !== 'web'
 const BURST_MS = 600
-
-// Read at tap time, not per render: while VoiceOver or TalkBack runs, a tap
-// opens at once and never reaches the double tap. VoiceOver turns its own
-// activation of plain text into a synthetic touch, and two of them would like.
-let screenReaderOn = false
-if (Platform.OS !== 'web') {
-  try {
-    Promise.resolve(AccessibilityInfo.isScreenReaderEnabled()).then((on) => { screenReaderOn = on === true }, () => {})
-    AccessibilityInfo.addEventListener('screenReaderChanged', (on) => { screenReaderOn = on === true })
-  } catch {}
-}
 
 // Read once for the module, not per row mount: a feed mounts many rows and
 // each query is a bridge call. The listener keeps a changed setting current.
@@ -140,9 +177,9 @@ function Action ({ label, onPress, disabled, on, count, split, children }) {
 }
 
 function PostRowView ({
-  author, name, username, avatar, at, text, replyToName, media, preview, persistMedia = true, now,
-  quote, repostedBy, counts, liked, reposted, pending,
-  onOpen, onOpenAuthor, onOpenParent, onOpenReposter, onFollowReposter, onOpenMention,
+  author, name, username, avatar, at, text, replyToName, replyPreviews, media, preview, persistMedia = true, now,
+  quote, repostedBy, counts, liked, reposted, pending, expanded = false,
+  onOpen, onOpenAuthor, onOpenParent, onOpenPreviews, onOpenReposter, onFollowReposter, onOpenMention,
   onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onBlock, onDelete, link, onNotice,
   seq, onMessage
 }) {
@@ -151,9 +188,25 @@ function PostRowView ({
   const likes = countOf(counts, 'likes')
   const reposts = countOf(counts, 'reposts')
   const hasMedia = Array.isArray(media) && media.length > 0
-  const hasText = typeof text === 'string' && text !== ''
+  const embed = preview && typeof preview === 'object' ? embedOf(preview.url) : null
+  const music = preview && typeof preview === 'object' ? musicRefOf(preview.url) : null
+  const ownLink = !hasMedia && music === null && embed !== null
+  // The card already shows this link, so its raw address is hidden from the shown text only.
+  const body = useMemo(() => (ownLink && typeof text === 'string' ? textWithoutHrefs(text, (href) => sameMusicPage(href, preview.url)) : text), [ownLink, text, preview])
+  const hasText = typeof body === 'string' && body !== ''
   // The body label, the plain text and the label without the text all use it.
-  const shownText = useMemo(() => (hasText ? displayText(text, { multiline: true }) : null), [hasText, text])
+  const shownText = useMemo(() => (hasText ? displayText(body, { multiline: true }) : null), [hasText, body])
+  const [captionWidth, setCaptionWidth] = useState(undefined)
+  const { numberOfLines, control, onTextLayout, toggle } = useClamp({
+    text: shownText,
+    hasMedia,
+    width: captionWidth,
+    forceExpanded: expanded
+  })
+  const measureCaption = (event) => {
+    const width = event.nativeEvent.layout.width
+    setCaptionWidth(Number.isFinite(width) && width > 0 ? width : undefined)
+  }
   const time = relativeTime(at, now) ?? displayText(at)
   const who = whoOf({ name, username })
   const title = displayText(who.title)
@@ -268,7 +321,7 @@ function PostRowView ({
         const now = Date.now()
         const kind = tapKind(previousTap.current, now)
         cancelPendingOpen()
-        if (screenReaderOn) {
+        if (screenReaderOn()) {
           open()
           return
         }
@@ -301,6 +354,7 @@ function PostRowView ({
     : null
   const openAuthor = otherPress(onOpenAuthor)
   const openParent = otherPress(onOpenParent)
+  const openPreviews = otherPress(onOpenPreviews)
   const reposter = repostedBy && typeof repostedBy === 'object' ? repostedBy : null
   const reposterName = reposter ? displayText(whoOf({ name: reposter.name, username: reposter.username }).title) : ''
   const openReposter = otherPress(onOpenReposter)
@@ -317,17 +371,20 @@ function PostRowView ({
     time
   ].filter(Boolean)
   const bodyLabel = bodyParts.join('. ')
+  const replyLabel = replyToName ? replyChip({ name: replyToName }) : ''
+  const previewLines = replyPreviewLines(replyPreviews)
+  const previewsLabel = 'Respostas. ' + previewLines.map(previewLineText).join('. ')
   const openMention = otherPress(onOpenMention)
   const quoteOn = quote && typeof quote === 'object'
-  const textOut = hasText && (hasLink(text) || (!!openMention && hasMention(text)))
+  const textOut = hasText && numberOfLines === 0 && (hasLink(body) || (!!openMention && hasMention(body)))
   // The screen gives a quote its own handler carrying the quoted author.
   const quoteMention = (quoteOn && otherPress(quote.onOpenMention)) || openMention
-  const quoteOut = quoteOn && typeof quote.text === 'string' && !!quoteMention && hasMention(quote.text)
+  const quoteOut = quoteOn && ((typeof quote.text === 'string' && !!quoteMention && hasMention(quote.text)) || quotePlayerOf(quote) !== null)
   const quoteProp = quoteOn ? { ...quote, onOpen: otherPress(quote.onOpen), onOpenMention: quoteMention } : quote
   const label = textOut ? bodyParts.filter((part) => part !== shownText).join('. ') : bodyLabel
   const textNode = hasText
     ? textOut
-      ? <MentionText text={text} onOpenMention={openMention} onOpenPlain={openTap} style={styles.text} />
+      ? <MentionText text={body} onOpenMention={openMention} onOpenPlain={openTap} onTextLayout={onTextLayout} style={styles.text} />
       : (
         <Pressable
           accessibilityRole={open ? 'link' : 'text'}
@@ -336,7 +393,7 @@ function PostRowView ({
           onPress={openTap}
           {...a11yOpen}
         >
-          <Text style={styles.text}>{shownText}</Text>
+          <Text style={styles.text} numberOfLines={numberOfLines} onTextLayout={onTextLayout}>{shownText}</Text>
         </Pressable>
         )
     : null
@@ -344,8 +401,22 @@ function PostRowView ({
   const quoteNode = quoteOn ? <QuoteCard quote={quoteProp} now={now} /> : null
   // Outside the row's open area: a tap on the card opens the link, never the conversation.
   const previewNode = !hasMedia && preview && typeof preview === 'object'
-    ? <LinkCard card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />
+    ? music !== null
+      ? <PostMusic card={preview} music={music} />
+      : embed !== null
+        ? <MusicEmbedCard embed={embed} card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />
+        : <LinkCard card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />
     : null
+  const previewsBody = previewLines.length === 0
+    ? null
+    : (
+      <>
+        <Text style={styles.previewsLabel}>Respostas</Text>
+        {previewLines.map((line, index) => (
+          <Text key={index + ':' + line.key} style={styles.previewLine} numberOfLines={1}>{previewLineText(line)}</Text>
+        ))}
+      </>
+      )
   return (
     <View style={styles.row} onTouchStart={Platform.OS !== 'web' ? startTouch : undefined}>
       {reposter
@@ -394,7 +465,7 @@ function PostRowView ({
             readers read in the order: avatar → post content → actions.
             All visual children are hidden from accessibility; sighted users
             interact with them directly (name, reply-to and text tap targets). */}
-        <View style={styles.body}>
+        <View style={styles.body} onLayout={measureCaption}>
           <Pressable
             onPress={openTap}
             disabled={!open}
@@ -441,32 +512,30 @@ function PostRowView ({
                 </Pressable>
               </View>
               {replyToName
-                ? (
-                  <Pressable
-                    accessibilityRole={openParent ? 'link' : 'text'}
-                    disabled={!openParent}
-                    onPress={openParent}
-                    hitSlop={4}
-                    style={({ pressed }) => pressed && openParent && styles.pressed}
-                  >
-                    <Text style={styles.reply}>
-                      respondendo a <Text style={styles.replyName}>{displayText(replyToName)}</Text>
-                    </Text>
-                  </Pressable>
-                  )
+                ? openParent
+                  ? (
+                    <Pressable
+                      accessibilityRole='link'
+                      accessibilityLabel={replyLabel}
+                      onPress={openParent}
+                      style={({ pressed }) => [styles.replyChip, pressed && styles.pressed]}
+                    >
+                      <Text style={styles.replyChipText} numberOfLines={1}>{replyLabel}</Text>
+                    </Pressable>
+                    )
+                  : <Text style={styles.replyChipText} numberOfLines={1}>{replyLabel}</Text>
                 : null}
+              {mediaNode}
               {textOut ? null : textNode}
-              {textOut ? null : mediaNode}
-              {quoteOut || textOut ? null : quoteNode}
             </View>
           </Pressable>
           {textOut ? textNode : null}
-          {textOut && (mediaNode || (quoteNode && !quoteOut))
+          <ClampControl control={control} onPress={otherPress(toggle)} />
+          {quoteNode && !quoteOut
             ? (
               <Pressable accessible={false} tabIndex={-1} onPress={openTap} disabled={!open}>
                 <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
-                  {mediaNode}
-                  {quoteOut ? null : quoteNode}
+                  {quoteNode}
                 </View>
               </Pressable>
               )
@@ -590,6 +659,23 @@ function PostRowView ({
               </View>
               )
             : null}
+          {previewLines.length > 0
+            ? openPreviews
+              ? (
+                <Pressable
+                  accessibilityRole='button'
+                  accessibilityLabel={previewsLabel}
+                  onPress={openPreviews}
+                  style={({ pressed }) => [styles.previews, pressed && styles.pressed]}
+                >
+                  {/* The label already names every preview, so the lines are not their own controls. */}
+                  <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
+                    {previewsBody}
+                  </View>
+                </Pressable>
+                )
+              : <View style={styles.previews}>{previewsBody}</View>
+            : null}
           <ActionsSheet open={sheet === 'repost'} onClose={() => setSheet(null)} actions={repostSheet} />
           <ActionsSheet open={sheet === 'more'} onClose={() => setSheet(null)} actions={moreSheet} />
           {burstOn
@@ -666,8 +752,19 @@ const makeStyles = (colors) => StyleSheet.create({
   timeBox: { flexShrink: 0 },
   handle: { ...type.postMeta, color: colors.soft, flexShrink: 1 },
   time: { ...type.postMeta, color: colors.soft, flexShrink: 0 },
-  reply: { ...type.replyMark, color: colors.soft, marginTop: 1 },
-  replyName: { color: colors.accent, fontWeight: '600' },
+  // Plain coloured text, no box. Web ignores hitSlop, so the invisible box
+  // itself is the 44 pt target.
+  replyChip: {
+    alignSelf: 'flex-start',
+    maxWidth: '100%',
+    minHeight: layout.hit,
+    minWidth: layout.hit,
+    justifyContent: 'center'
+  },
+  replyChipText: { ...type.replyMark, color: colors.accent, flexShrink: 1 },
+  previews: { marginTop: 8, minHeight: layout.hit, justifyContent: 'center' },
+  previewsLabel: { ...type.replyMark, color: colors.soft, fontWeight: '700' },
+  previewLine: { ...type.replyMark, color: colors.ink },
   text: { ...type.postText, color: colors.ink, marginTop: 3 },
   bar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 0, marginBottom: -4, marginLeft: -8, maxWidth: 360 },
   action: { flexDirection: 'row', alignItems: 'center', gap: 5, minHeight: layout.hit, minWidth: 44, paddingHorizontal: 8 },

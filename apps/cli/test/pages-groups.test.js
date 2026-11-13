@@ -83,6 +83,19 @@ function settled (fn, name, timeoutMs = 90000) {
   }, { name, timeoutMs, intervalMs: 500 })
 }
 
+// The seeder's listing of group `G`: rows by writer key and whether it is whole.
+function seederListing (seeder, G) {
+  const rows = new Map()
+  let after = null
+  for (;;) {
+    const { items, next, incomplete } = seeder.groupWriters({ group: G, after })
+    for (const i of items) rows.set(i.key, i)
+    if (incomplete) return { rows, complete: false }
+    if (next === null) return { rows, complete: true }
+    after = next
+  }
+}
+
 function lastJoins (entries, group) {
   const last = new Map()
   for (const j of groupLib.groupJoinHistory(entries, group)) last.set(j.writer, j.on)
@@ -230,10 +243,31 @@ test('pages-groups: cached v1 and v2 posts paginate without a seeder connection'
   const pg = createPagesGroups({ dir, writer, pagesStore, keys, association, fetchTimeoutMs: 10 })
   t.teardown(() => pg.close(), { force: true })
   await pg.ready()
-  const first = await pg.groupRead(page.key, group, { limit: 2 })
+  // 500 reactors on the visible post, the page among them: the read sends
+  // the compact summary and never the fold's `by` list.
+  const reactors = [...Array.from({ length: 499 }, (_, i) => i.toString(16).padStart(64, '0')), page.key]
+  const build = groupLib.buildGroup
+  groupLib.buildGroup = (...args) => {
+    const view = build(...args)
+    for (const p of view.posts) if (p.seq === visible.seq) p.reactions = [{ emoji: '\u{1f44d}', count: reactors.length, by: reactors }]
+    // The fold keeps a hidden post's card; the read must not pass it on.
+    for (const p of view.posts) if (p.seq === hidden.seq) p.card = { url: 'https://exemplo.com.br/', host: 'exemplo.com.br', title: 'oculto', desc: '', image: null }
+    return view
+  }
+  let first
+  try {
+    first = await pg.groupRead(page.key, group, { limit: 2 })
+  } finally {
+    groupLib.buildGroup = build
+  }
+  t.alike(first.items[1].reactions, [{ emoji: '\u{1f44d}', count: 500, mine: true }], 'compact reactions, no reactor keys')
+  t.absent('reactions' in first.items[0], 'absent when empty')
+  t.ok(JSON.stringify(first).length < 20000)
   t.alike(first.items.map((p) => p.seq), [hidden.seq, visible.seq])
   t.is(first.items[0].media, null, 'hidden media is omitted')
   t.is(first.items[0].text, '')
+  t.is(first.items[0].card, null, 'a hidden post carries no card')
+  t.is(first.items[1].card, null, 'no card is null')
   t.alike(first.items[1].media, media, 'v2 descriptors survive the cached fold')
   t.is(first.items[1].text, '')
   t.is(first.incomplete, true, 'the missing writer listing stays explicit')
@@ -625,6 +659,11 @@ test('pages-groups: a page joins, posts, waits for approval, leaves and reads a 
   t.alike(lastJoins(await writer.readEntries(page.key), GP).get(bound), false, 'the old writer join is turned off first')
   t.ok(gpWriter() && gpWriter() !== bound, 'the ACL lists the replacement, not the retired writer')
   t.absent(Object.keys(keys.get(page.key).writers).includes(bound) && pg.writersOf(page.key).some((w) => w.writer === bound), 'the retired writer is not listed')
+  // The seeder admits (and lists) a writer only while its join is on. The
+  // partial step turns this one's join off, and from the restart before the
+  // capped step on only the seeder serves it: GP's later folds need it listed.
+  const replacement = gpWriter()
+  await until(() => seederListing(seeder, GP).rows.has(replacement), { name: 'the seeder lists the replacement', timeoutMs: 30000 })
 
   // A partial fold (no seeder listing): the rebox still leaves the old
   // writer and files the step; the new writer waits for a complete fold.
@@ -640,6 +679,16 @@ test('pages-groups: a page joins, posts, waits for approval, leaves and reads a 
   await restartPg(writer)
   t.alike(await settled(() => pg.groupRebox(page.key), 'rebox after partial'), { groups: [GP], left: [] }, 'a complete fold binds the new writer')
   t.ok(gpWriter() && gpWriter() !== beforePartial)
+  // After the next restart the service no longer opens the retired writer
+  // (its secret is pruned), so only the seeder serves the leave the new
+  // writer's rejoin names. That leave was appended offline: until the seeder
+  // holds it (block 0 and the leave), every later fold of GP stays partial.
+  // The listing is also partial while the seeder still admits the new writer.
+  await until(() => {
+    const { rows, complete } = seederListing(seeder, GP)
+    const retired = rows.get(beforePartial)
+    return complete && retired !== undefined && retired.length >= 2
+  }, { name: 'the seeder holds the retired writer and its leave', timeoutMs: 30000 })
 
   // A writer cap that leaves no room for a new writer: the page leaves the
   // group and lists it, never keeping the old box.

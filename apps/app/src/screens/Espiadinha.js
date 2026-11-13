@@ -20,8 +20,9 @@ import { useNode } from '../node'
 import { useNames } from '../names'
 import { shouldReloadOnShow } from '../paging'
 import { HELP } from '../help'
+import { NOT_HOSTED } from '../pessoas'
 import {
-  PEEK_OFFLINE_MESSAGE, PEEK_SHORT_TEXT, PEEK_WARM_QUIET_MS, PEEK_WEB_ONLY_MESSAGE,
+  PEEK_OFFLINE_MESSAGE, PEEK_SHORT_TEXT, PEEK_WARM_QUIET_MS,
   getPeekWarmState, isExpiredPeekError, isLastPeekPage, isSeederBusyError, isWebOnlyError, mergePage, pageNeeds, peekKey, peekNotice,
   recordFollow, shouldWarmPeek, skippedText, subscribePeekWarm, updatePeekWarmState, withoutFollowed
 } from '../peek'
@@ -29,9 +30,9 @@ import { whoOf } from '../who'
 import { CountsNote, RepostPlaceholder, refOf, socialRowProps, useSocial } from './ARua'
 import { Soft, errorText, useBottomPad, useNow } from '../ui'
 import { PostRow } from '../ui/PostRow'
-import { HelpNote } from '../ui/Help'
+import { HelpNote, HelpSheet } from '../ui/Help'
 import { RefreshableList } from '../ui/RefreshableList'
-import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
+import { EmptyState, ErrorState, ListFooter, SkeletonRow } from '../ui/States'
 import { Pill } from '../ui/Pill'
 
 // follow.list returns at most FOLLOW_LIMIT_MAX keys. An account follows at
@@ -51,6 +52,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   const now = useNow(60000)
   const bottomPad = useBottomPad()
   const hosted = node.hosted === true && node.passkey !== null
+  const [helpOpen, setHelpOpen] = useState(false)
   const [state, setState] = useState({
     items: [],
     next: null,
@@ -436,17 +438,32 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   }
 
   const notice = peekNotice({ supported: !unsupported, hosted, online: node.online, loadedAt })
+  const skipped = skippedText(meta.skipped)
+  const statusNote = expired
+    ? 'A lista expirou; puxe para atualizar.'
+    : meta.incomplete
+      ? 'A lista pode estar incompleta; puxe para atualizar.'
+      : skipped || PEEK_SHORT_TEXT
+  const statusHelp = !expired && !meta.incomplete && skipped ? HELP.ausentes : HELP.espiadinha
 
   const header = (
     <View style={styles.header}>
-      <Soft>{PEEK_SHORT_TEXT}</Soft>
+      {!expired ? <HelpNote doc={statusHelp}><Soft>{statusNote}</Soft></HelpNote> : null}
       <CountsNote social={social} />
+      {items.length > 0 && loadError ? <ErrorState message={loadError} onRetry={loadFirst} pending={refreshing} /> : null}
     </View>
   )
 
-  const skipped = skippedText(meta.skipped)
   const footer = (
     <View>
+      {expired
+        ? (
+          <View style={styles.header}>
+            <HelpNote doc={statusHelp}><Soft>{statusNote}</Soft></HelpNote>
+            <Pill label='atualizar' onPress={loadFirst} pending={loading || refreshing} />
+          </View>
+          )
+        : null}
       <ListFooter
         loading={loadingMore}
         atEnd={loadedAt !== null && atEnd && !expired && items.length > 0}
@@ -455,42 +472,26 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
         onRetry={loadMore}
         pending={loadingMore || refreshing}
       />
-      {expired
-        ? (
-          <View style={styles.footer}>
-            <Soft>A lista expirou; puxe para atualizar.</Soft>
-            <Pill label='atualizar' onPress={loadFirst} pending={loading || refreshing} />
-          </View>
-          )
-        : null}
-      {skipped || meta.incomplete
-        ? (
-          <View style={styles.footer}>
-            {skipped ? <HelpNote doc={HELP.ausentes}><Soft>{skipped}</Soft></HelpNote> : null}
-            {meta.incomplete ? <Soft>A lista pode estar incompleta; puxe para atualizar.</Soft> : null}
-          </View>
-          )
-        : null}
     </View>
   )
 
   let empty
   if (notice === 'web-only' && node.hosted !== true) {
-    empty = <EmptyState icon='olho' title='Só na versão web' body={PEEK_WEB_ONLY_MESSAGE} />
+    empty = <EmptyState icon='olho' title='Espiadinha indisponível' body={NOT_HOSTED} actionLabel='Saiba mais' onAction={() => setHelpOpen(true)} secondaryLabel='publicar' onSecondary={onPublish} />
   } else if (notice === 'web-only') {
     // A hosted node without a passkey identity, or a seeder without peek:
     // telling a native person to use the web would be wrong.
-    empty = <EmptyState icon='olho' title='Espiadinha indisponível' body='A Espiadinha não está disponível nesta conexão.' />
+    empty = <EmptyState icon='olho' title='Espiadinha indisponível' body='A Espiadinha não está disponível nesta conexão.' actionLabel='publicar' onAction={onPublish} />
   } else if (notice === 'offline') {
-    empty = <EmptyState icon='olho' title='Sem conexão' body={PEEK_OFFLINE_MESSAGE} actionLabel='tentar de novo' onAction={loadFirst} />
+    empty = <EmptyState icon='olho' title='Sem conexão' body={PEEK_OFFLINE_MESSAGE} actionLabel='Tentar de novo' onAction={loadFirst} secondaryLabel='publicar' onSecondary={onPublish} />
   } else if (loadError) {
-    empty = <ErrorState message={loadError} onRetry={loadFirst} pending={loading || refreshing} />
+    empty = <EmptyState icon='olho' title='Não foi possível carregar' body={loadError} actionLabel='Tentar de novo' onAction={loadFirst} secondaryLabel='publicar' onSecondary={onPublish} />
   } else if (loadedAt === null) {
-    empty = <Skeleton />
+    empty = <View>{[0, 1, 2].map(row => <SkeletonRow key={row} />)}</View>
   } else if (meta.diaries === 0) {
-    empty = <EmptyState icon='olho' title='Ninguém para espiar ainda' body='Quando mais pessoas publicarem, as publicações delas aparecem aqui.' actionLabel={typeof onPublish === 'function' ? 'publicar' : undefined} onAction={typeof onPublish === 'function' ? onPublish : undefined} />
+    empty = <EmptyState icon='olho' title='Ninguém para espiar ainda' body='Quando mais pessoas publicarem, as publicações delas aparecem aqui.' actionLabel='publicar' onAction={onPublish} secondaryLabel='atualizar' onSecondary={loadFirst} />
   } else {
-    empty = <EmptyState icon='olho' title='Ainda não chegou nada' body='Quando houver publicações de quem você não segue, elas aparecem aqui.' actionLabel='atualizar' onAction={loadFirst} />
+    empty = <EmptyState icon='olho' title='Ainda não chegou nada' body='Quando houver publicações de quem você não segue, elas aparecem aqui.' actionLabel='atualizar' onAction={loadFirst} secondaryLabel='publicar' onSecondary={onPublish} />
   }
 
   const reportable = (item) => hosted && typeof onReport === 'function' && typeof ownKey === 'string' && item.author !== ownKey
@@ -549,27 +550,29 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
 
   const shownItems = notice === null ? items : []
   return (
-    <RefreshableList
-      data={shownItems}
-      keyExtractor={peekKey}
-      renderItem={renderItem}
-      extraData={{ now, following, social: social.social, names: names.profileOf }}
-      ListHeaderComponent={notice === null && items.length > 0 && loadError ? <ErrorState message={loadError} onRetry={loadFirst} pending={refreshing} /> : (notice === null ? header : null)}
-      ListEmptyComponent={empty}
-      ListFooterComponent={notice === null ? footer : null}
-      contentContainerStyle={{ paddingBottom: bottomPad }}
-      onRefresh={hosted && !unsupported ? loadFirst : undefined}
-      refreshing={refreshing}
-      onLoadMore={active && hosted && !moreError && !expired ? loadMore : undefined}
-      loadingMore={loadingMore}
-      loadMoreError={!!moreError}
-      atEnd={atEnd}
-      scrollToTopSignal={scrollToTop}
-    />
+    <>
+      <RefreshableList
+        data={shownItems}
+        keyExtractor={peekKey}
+        renderItem={renderItem}
+        extraData={{ now, following, social: social.social, names: names.profileOf }}
+        ListHeaderComponent={notice === null ? header : null}
+        ListEmptyComponent={empty}
+        ListFooterComponent={notice === null ? footer : null}
+        contentContainerStyle={{ paddingBottom: bottomPad }}
+        onRefresh={hosted && !unsupported ? loadFirst : undefined}
+        refreshing={refreshing}
+        onLoadMore={active && hosted && !moreError && !expired ? loadMore : undefined}
+        loadingMore={loadingMore}
+        loadMoreError={!!moreError}
+        atEnd={atEnd}
+        scrollToTopSignal={scrollToTop}
+      />
+      <HelpSheet open={helpOpen} onClose={() => setHelpOpen(false)} doc={HELP.espiadinha} />
+    </>
   )
 }
 
 const styles = StyleSheet.create({
-  header: { padding: 16, gap: 8 },
-  footer: { padding: 16, gap: 8 }
+  header: { padding: 16, gap: 8 }
 })

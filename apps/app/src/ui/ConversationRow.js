@@ -7,13 +7,14 @@
 // reads as the member.
 
 import { useEffect } from 'react'
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { relativeTime } from '../format'
 import { OWN_LABEL, unreadLabel } from '../groups'
 import { useNames } from '../names'
-import { UNNAMED, whoOf } from '../who'
+import { UNNAMED, readsAs, whoOf } from '../who'
 import { Avatar } from './Avatar'
+import { PressScale } from './PressScale'
 import { useStyles } from './ThemeProvider'
 import { radius, space, type } from './theme'
 
@@ -55,6 +56,7 @@ export function ConversationRow ({ item, now, onPress }) {
   const time = typeof item.at === 'string' ? relativeTime(item.at, now) : null
   const preview = typeof item.preview === 'string' && item.preview !== '' ? displayText(item.preview) : ''
   const own = preview !== '' && item.mine === true
+  const spokenPreview = !person && !own && readsAs(preview.split(':')[0], OWN_LABEL) ? preview.replace(/^[^:]+:/, 'Pessoa:') : preview
   const count = Number.isInteger(item.unread) ? item.unread : 0
   const dot = item.unread === true
   const unread = dot || count > 0
@@ -62,9 +64,9 @@ export function ConversationRow ({ item, now, onPress }) {
   const unreadText = item.unread === true
     ? 'mensagens novas'
     : count === 1 ? '1 mensagem nova' : count >= 99 ? '99 ou mais mensagens novas' : count + ' mensagens novas'
-  const label = title + (unread ? ', ' + unreadText : '')
+  const label = [title, own ? OWN_LABEL + ': ' + spokenPreview : spokenPreview, time, unread ? unreadText : ''].filter(Boolean).join(', ')
   return (
-    <Pressable
+    <PressScale
       accessibilityRole='button'
       accessibilityLabel={label}
       onPress={onPress}
@@ -90,7 +92,7 @@ export function ConversationRow ({ item, now, onPress }) {
             )
           : null}
       </View>
-    </Pressable>
+    </PressScale>
   )
 }
 
@@ -108,7 +110,7 @@ const makeStyles = (colors) => StyleSheet.create({
   line: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
   title: { ...type.postName, fontSize: 16, fontWeight: '600', lineHeight: 21, flex: 1, minWidth: 0, color: colors.ink },
   titleUnread: { fontWeight: '700' },
-  time: { ...type.replyMark, color: colors.soft },
+  time: { ...type.replyMark, color: colors.soft, flexShrink: 0, textAlign: 'right' },
   timeUnread: { color: colors.accent, fontWeight: '600' },
   preview: { ...type.postMeta, fontSize: 14, lineHeight: 19, flex: 1, minWidth: 0, color: colors.soft },
   own: { color: colors.accent, fontWeight: '600' },

@@ -25,6 +25,8 @@
 // the upload or the post then failed, closing the composer leaves those
 // blocks unused but public in the own media core. Media is never queued in
 // the outbox (it is text-only): offline, attaching is disabled.
+// A share (`shared`) uses the same local encode and may attach while
+// offline: nothing is uploaded until the person presses Publicar.
 // @ suggestions (hosted web, online only): while the caret is inside an
 // @token of 2+ characters the member search (../useMemberSearch) lists up to
 // 5 verified members under the compose box; tapping one replaces the token
@@ -33,7 +35,7 @@
 // Momento (docs/rpc.md 5.113, hosted only, when the node offers
 // media.putMoment and nothing is being replied to, quoted or posted as a
 // page): a Segmented 'Publicação | Momento' at the top. A momento is exactly
-// one photo (the chat photo path, ../ui/AttachSheet useChatAttachments) and
+// one photo (../ui/AttachSheet useChatAttachments) or one video and
 // 0..200 code points of text. The post draft stays as it is while Momento is
 // shown and comes back on 'Publicação'. Publicar puts the photo
 // (media.putMoment, a fresh anonymous blob; it wipes the buffer it is given,
@@ -46,7 +48,7 @@
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
+import { AccessibilityInfo, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { MAX_TEXT, activeMention, displayText } from '@varanda/rpc'
 import { MENTION_MIN_QUERY, insertMention } from '../mentions'
 import { mergeSuggestions } from '../mentionTargets'
@@ -59,16 +61,20 @@ import * as actingStore from '../actingAs'
 import { actAs, pagesMedia, pagesOrigin, pagesStart } from '../pages'
 import { memberKeyOf, useActing } from './Conversa'
 import { useOutbox } from '../outboxProvider'
-import { GATE_MESSAGE, LOCKED_MESSAGE, isQuoteRecord } from '../outbox'
+import { GATE_MESSAGE, LOCKED_MESSAGE } from '../outbox'
 import { countChars } from '../format'
+import { sentMatcher } from '../replySend'
 import { whoOf } from '../who'
 import { ringState } from '../composeRing'
 import { countAfterInsert, insertAt } from '../emoji'
-import { MAX_MEDIA_PER_POST } from '../media/plan'
+import { MAX_MEDIA_PER_POST, durationLabel } from '../media/plan'
 import { validDescriptor } from '../media/fetch'
-import { pickImages } from '../media/attach'
+import { pickImages, pickVideo } from '../media/attach'
+import { prepareVideo } from '../media/videoPrep'
+import { canComposeVideo, createVideoDraft, videoMomentValid, videoPostValid, VIDEO_OR_PHOTOS, MOMENT_ONE_MEDIA, mediaComposeError } from '../videoCompose'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { encodeFile } from '../media/encode'
+import { linkHeld, mergeDraft, shareNote, sharedLinkHold } from '../sharedIntent'
 import { moveById } from '../photoOrder'
 import { Btn, ErrorText, Soft, errorText, useAction } from '../ui'
 import { Avatar } from '../ui/Avatar'
@@ -76,18 +82,31 @@ import { EmojiPicker } from '../ui/EmojiPicker'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { LinkDraftCard, useLinkDraft } from '../ui/ChatComposer'
-import { cardForSend, withCardFallback } from '../linkCard'
+import { LINK_DRAFT_DELAY_MS, cardForSend, withCardFallback } from '../linkCard'
+import { fallbackCard, isAudiusLink } from '../musicEmbed'
+import { musicOriginOf } from '../music'
+import { MUSIC_PHOTOS_TEXT, MUSIC_VIDEO_TEXT, MUSIC_MOMENT_VIDEO_TEXT, musicBlocks, musicSnapshot, resolveTarget, momentChoiceOf } from '../musicDraft'
+import { audiusPolicy, audiusReady, audiusResolve } from '../account'
+import { playbackEpoch } from '../media/chatMedia'
+import { previewTarget } from '../preview'
+import { previewsEnabled } from '../previewPref'
+import { previewPrefStore } from '../previewBuild'
+import { MusicPicker } from '../ui/MusicPicker'
+import { useMusicAvailable } from '../ui/MusicPlayerCard'
+import { MusicSticker } from '../ui/MusicSticker'
 import { withPreview } from '../attach-plan'
 import { refusalOf } from '../wordCheck'
 import { Sheet, TEXT_CAP } from '../ui/Sheet'
 import { tap } from '../ui/haptics'
 import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
-import { type } from '../ui/theme'
+import { space, type } from '../ui/theme'
+import { PressScale } from '../ui/PressScale'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { pagesOn } from '../pageGate'
 import { Segmented } from '../ui/Segmented'
 import { useChatAttachments } from '../ui/AttachSheet'
 import { canPublishMoment } from '../momentSeen'
+import { momentMusicOf } from '../moments'
 import { momentsChanged } from './Momentos'
 
 export const MOMENT_TEXT_MAX = 200
@@ -105,16 +124,79 @@ const MEDIA_STALE = 'prepare a mídia de novo'
 const momentLength = (text) => (typeof text === 'string' ? [...text].length : 0)
 const isLocked = (err) => !!err && (err.code === 'LOCKED' || err.message === LOCKED_MESSAGE)
 
-// A momento is valid with exactly one ready photo and at most 200 code points.
-export function momentValid ({ files, ready, text }) {
-  return ready === true && Array.isArray(files) && files.length === 1 && momentLength(text) <= MOMENT_TEXT_MAX
+// A momento carries one ready photo or video and at most 200 code points.
+export function momentValid ({ files, ready, text, video = null, preparing = false }) {
+  if (preparing || momentLength(text) > MOMENT_TEXT_MAX) return false
+  if (video !== null) return Array.isArray(files) && videoMomentValid({ file: video, text, photos: files.length, preparing })
+  return ready === true && Array.isArray(files) && files.length === 1
 }
 
-// The Momento draft: one staged photo, the text, the put item kept for a new
+function useMomentMusicAvailable (node, member, active) {
+  const origin = musicOriginOf(node)
+  const { epoch, request, hosted } = node
+  const capability = useRef(null)
+  const [result, setResult] = useState(null)
+  useEffect(() => {
+    let live = true
+    setResult(null)
+    if (!active || hosted !== true || origin === null) return undefined
+    const load = async () => {
+      try {
+        const policy = await audiusPolicy({ origin })
+        if (!live || policy.moments !== true) return
+        // Keep failures too: opening the sheet again must not repeat the probe.
+        if (capability.current === null || capability.current.epoch !== epoch) {
+          const probe = async () => {
+            try {
+              const info = await node.request('node.info', {})
+              return info?.momentMusic === true
+            } catch { return false }
+          }
+          capability.current = { epoch, answer: probe() }
+        }
+        const supported = await capability.current.answer
+        if (!live || !supported) return
+        const ready = await audiusReady({ member, origin })
+        if (live) setResult({ epoch, request, member, origin, ok: ready === true })
+      } catch {}
+    }
+    load()
+    return () => { live = false }
+  }, [active, hosted, epoch, request, member, origin])
+  return active && hosted === true && origin !== null && result?.epoch === epoch && result?.request === request && result?.member === member && result?.origin === origin && result?.ok === true
+}
+
+function useVideoDraft ({ active, moment = false }) {
+  const [state, setState] = useState({ phase: 'empty', file: null })
+  const draftRef = useRef(null)
+  if (draftRef.current === null) draftRef.current = createVideoDraft({ changed: setState, moment })
+  const draft = draftRef.current
+  const [thumb, setThumb] = useState(null)
+  useEffect(() => {
+    if (!active) draft.cancelPreparation()
+  }, [active, draft])
+  useEffect(() => () => draft.clear(), [draft])
+  useEffect(() => {
+    let uri = null
+    if (state.file) {
+      try { uri = urlFromBytes(state.file.poster.bytes, state.file.poster.mime) } catch {}
+    }
+    setThumb(uri)
+    return () => { if (uri !== null) revokeUrl(uri) }
+  }, [state.file])
+  return { draft, state, thumb }
+}
+
+// The Momento draft: one staged item, the text, the put item kept for a new
 // press after a failure, and the uncertain hold. send() is one explicit
 // attempt; nothing here ever repeats a request.
-function useMomentDraft ({ node, open, active }) {
+function useMomentDraft ({ node, member, open, active }) {
   const photo = useChatAttachments()
+  const video = useVideoDraft({ active, moment: true })
+  const musicAllowed = useMomentMusicAvailable(node, member, active)
+  const musicAvailable = musicAllowed && video.state.phase === 'empty'
+  const [music, setMusic] = useState(null)
+  const [musicPickerOpen, setMusicPickerOpen] = useState(false)
   const [text, setText] = useState('')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
@@ -128,7 +210,18 @@ function useMomentDraft ({ node, open, active }) {
   // several keeps the first new one.
   const [note, setNote] = useState('')
   const replacingRef = useRef(null)
+  const oneNote = canComposeVideo({ node, pickVideo, prepareVideo }) ? MOMENT_ONE_MEDIA : MOMENT_ONE_PHOTO
+  const videoPhase = video.state.phase
   useEffect(() => {
+    // No pick is ever blocked while another is open, because a browser may
+    // leave a picker pending forever. So a photo that arrives once a video is
+    // staged is dropped here, with the note: a momento never carries both.
+    if (videoPhase !== 'empty' && items.length > 0) {
+      replacingRef.current = null
+      for (const it of items) remove(it.id)
+      setNote(MOMENT_ONE_MEDIA)
+      return
+    }
     const before = replacingRef.current
     const fresh = before === null ? items.slice(1) : items.filter((it) => !before.includes(it.id))
     if (before !== null && fresh.length > 0) {
@@ -136,30 +229,68 @@ function useMomentDraft ({ node, open, active }) {
       itemRef.current = null
       for (const old of items.filter((it) => before.includes(it.id))) remove(old.id)
       for (const extra of fresh.slice(1)) remove(extra.id)
-      if (fresh.length > 1) setNote(MOMENT_ONE_PHOTO)
+      if (fresh.length > 1) setNote(oneNote)
       return
     }
     if (before === null && items.length > 1) {
       for (const extra of items.slice(1)) remove(extra.id)
-      setNote(MOMENT_ONE_PHOTO)
+      setNote(oneNote)
     }
-  }, [items, remove])
+  }, [items, remove, videoPhase, oneNote])
   const pick = useCallback(async () => {
     if (busyRef.current || held) return
+    if (video.draft.state.phase !== 'empty') { setNote(MOMENT_ONE_MEDIA); return }
     setNote('')
     setError('')
     replacingRef.current = items.length > 0 ? items.map((it) => it.id) : null
     await pickPhoto()
-  }, [held, items, pickPhoto])
+  }, [held, items, pickPhoto, video.draft])
+  const pickClip = async () => {
+    if (busyRef.current || held || !canComposeVideo({ node, pickVideo, prepareVideo })) return
+    // Same gate as the chip and the send: a choice that is hidden and would
+    // not be sent never blocks a video.
+    if (musicAvailable && music !== null) { setNote(MUSIC_MOMENT_VIDEO_TEXT); return }
+    setError('')
+    setNote('')
+    try {
+      await video.draft.pick({ pickVideo, prepareVideo, photos: items.length })
+    } catch (err) { setError(err.message) }
+  }
+  const removePhoto = (id) => {
+    if (busyRef.current || held) return
+    itemRef.current = null
+    remove(id)
+  }
+  const removeVideo = () => {
+    if (busyRef.current || held) return
+    itemRef.current = null
+    video.draft.clear()
+    setError('')
+  }
   const reset = useCallback(() => {
     itemRef.current = null
     clearPhoto()
+    video.draft.clear()
     setText('')
+    setMusic(null)
+    setMusicPickerOpen(false)
     setError('')
     setNote('')
     setHeld(false)
-  }, [clearPhoto])
+  }, [clearPhoto, video.draft])
   useEffect(() => { if (!open) setError('') }, [open])
+  useEffect(() => {
+    if (!active || !musicAvailable) setMusicPickerOpen(false)
+  }, [active, musicAvailable])
+  const pickMusic = (choice) => {
+    if (busyRef.current || held || !musicAvailable || choice?.ref?.kind !== 'snippet') return
+    const ref = momentMusicOf({ music: { p: 'audius', id: choice.ref.id, start: choice.ref.start } })
+    if (ref !== null) setMusic({ ref, item: choice.item })
+  }
+  const removeMusic = () => {
+    setMusic(null)
+    setNote((current) => current === MUSIC_MOMENT_VIDEO_TEXT ? '' : current)
+  }
   // A published moment empties the form on the next opening, not at once:
   // the sheet keeps its photo and text while it slides away.
   const publishedRef = useRef(false)
@@ -179,12 +310,16 @@ function useMomentDraft ({ node, open, active }) {
     if (!active) genRef.current++
   }, [active])
   const unlocked = !!(node.passkey && node.passkey.status && node.passkey.status.unlocked === true)
-  const valid = !held && unlocked && node.online !== false && momentValid({ files: photo.files, ready: photo.ready, text })
+  const valid = !held && unlocked && node.online !== false &&
+    (!video.state.file || canComposeVideo({ node, pickVideo, prepareVideo })) && momentValid({ files: photo.files, ready: photo.ready, text, video: video.state.file, preparing: video.state.phase === 'preparing' })
   const send = async () => {
     if (busyRef.current || !valid) return false
+    if (video.draft.state.phase === 'preparing') return false
     const refused = refusalOf(text)
     if (refused !== '') { setError(refused); return false }
-    const file = photo.files[0]
+    const clip = video.draft.state.file
+    if (clip && !canComposeVideo({ node, pickVideo, prepareVideo })) return false
+    const file = clip || photo.files[0]
     const gen = genRef.current
     busyRef.current = true
     setPending(true)
@@ -192,10 +327,13 @@ function useMomentDraft ({ node, open, active }) {
     try {
       if (itemRef.current === null) {
         // putMoment wipes the buffer it gets: the staged bytes stay for a retry.
-        itemRef.current = await node.media.putMoment({ bytes: file.bytes.slice(), mime: file.mime, width: file.width, height: file.height })
+        itemRef.current = clip
+          ? await node.media.putMoment({ bytes: file.bytes.slice(), mime: file.mime, width: file.width, height: file.height, ms: file.ms, kind: 'video' })
+          : await node.media.putMoment({ bytes: file.bytes.slice(), mime: file.mime, width: file.width, height: file.height })
       }
       if (gen !== genRef.current) return false
-      await node.request('moment.create', { text, media: itemRef.current })
+      const chosen = !clip && musicAvailable && music !== null ? { music: { p: 'audius', id: music.ref.id, start: music.ref.start } } : {}
+      await node.request('moment.create', { text, media: itemRef.current, ...chosen })
       itemRef.current = null
       momentsChanged()
       publishedRef.current = true
@@ -215,7 +353,7 @@ function useMomentDraft ({ node, open, active }) {
         }
       } else if (err && typeof err.message === 'string' && err.message.includes(MEDIA_STALE)) {
         itemRef.current = null
-        setError(MOMENT_STALE)
+        setError(clip ? 'O vídeo precisa ser preparado de novo. Toque em Publicar para enviar.' : MOMENT_STALE)
       } else {
         setError(errorText(err))
       }
@@ -225,7 +363,7 @@ function useMomentDraft ({ node, open, active }) {
       setPending(false)
     }
   }
-  return { photo, text, setText, pending, error, note, held, valid, unlocked, pick, send, reset }
+  return { photo, video, pickClip, removeVideo, removePhoto, text, setText, pending, error, note, held, valid, unlocked, pick, send, reset, music, setMusic, removeMusic, musicAvailable, musicPickerOpen, setMusicPickerOpen, pickMusic }
 }
 
 // The Momento text box: about five lines before its text scrolls inside it,
@@ -272,6 +410,34 @@ export function keepInView ({ fieldY, fieldHeight, contentHeight, viewHeight, at
     return Math.max(top, Math.min(tailBottom - viewHeight, fieldY + fieldHeight - CARET_LINE))
   }
   return top
+}
+
+export function counterAnnouncement (previous, count, limit) {
+  if (previous < limit && count >= limit) return 'Limite de caracteres atingido'
+  if (previous < limit - 20 && count >= limit - 20 && count < limit) return 'Restam ' + (limit - count) + ' caracteres'
+  return ''
+}
+
+function useCounterAnnouncement (active, count, limit) {
+  const previous = useRef(count)
+  const [announcement, setAnnouncement] = useState('')
+  // This runs on every keystroke. A setter call queues a render even with
+  // the same value, and fast typing then passes React's nested update limit
+  // ("Maximum update depth exceeded" in typePost): only real changes set.
+  useEffect(() => {
+    const message = counterAnnouncement(previous.current, count, limit)
+    if ((!active || !message) && announcement !== '') setAnnouncement('')
+    previous.current = count
+    if (!active || !message) return
+    // The native announcement API is absent on react-native-web, which uses
+    // the live region instead. Only one announcement channel is active.
+    if (typeof AccessibilityInfo.announceForAccessibilityWithOptions === 'function') {
+      AccessibilityInfo.announceForAccessibilityWithOptions(message, { queue: true })
+    } else {
+      setAnnouncement(message)
+    }
+  }, [active, count, limit])
+  return announcement
 }
 
 const layoutOf = (e) => (e && e.nativeEvent && e.nativeEvent.layout) || null
@@ -382,7 +548,8 @@ function useKeepInView (on, caretAtEnd = null, givenFieldRef = null) {
   const handleTailLayout = useCallback((e, parent = null) => {
     const l = layoutOf(e)
     if (l) m.current.tailBottom = l.y + l.height + (m.current.parts[parent] || 0)
-  }, [])
+    defer()
+  }, [defer])
   const handleLayout = useCallback((e) => {
     const l = layoutOf(e)
     if (l) m.current.view = l.height
@@ -392,7 +559,7 @@ function useKeepInView (on, caretAtEnd = null, givenFieldRef = null) {
     if (Number.isFinite(h)) m.current.content = h
     keep()
   }, [keep])
-  const handleFocus = useCallback(() => { focusRef.current = true }, [])
+  const handleFocus = useCallback(() => { focusRef.current = true; defer() }, [defer])
   const handleBlur = useCallback(() => { focusRef.current = false }, [])
   return { scrollRef, fieldRef, tailRef, reveal, defer, at, handleTailLayout, handleLayout, handleContentSizeChange, handleFocus, handleBlur }
 }
@@ -435,25 +602,6 @@ function seqOf (value) {
   return value && Number.isInteger(value.seq) ? value.seq : null
 }
 
-// A reply reference as 'author:seq' (lowercase author), or null.
-function refOf (replyTo) {
-  if (!replyTo || typeof replyTo.author !== 'string') return null
-  return replyTo.author.toLowerCase() + ':' + String(replyTo.seq)
-}
-
-function sameRef (a, b) {
-  if (a === null || b === null) return a === b
-  return String(a).toLowerCase() === String(b).toLowerCase()
-}
-
-// True when a record's media is the list that was sent (null: none).
-function sameMedia (recorded, sent) {
-  const list = Array.isArray(recorded) && recorded.length > 0 ? recorded : null
-  if (list === null || sent === null) return list === sent
-  const id = (d) => d && d.core + ':' + d.start + ':' + d.blocks + ':' + d.sha256
-  return list.length === sent.length && list.every((d, i) => id(d) === id(sent[i]))
-}
-
 // An upload progress report as a fraction 0..1: a number, or an object with
 // done/loaded/uploaded and total.
 function fractionOf (p) {
@@ -473,9 +621,20 @@ const hexOf = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0'
 let lastItemId = 0
 const nextItemId = () => ++lastItemId
 
-// Progress ring: a grey track and a toned arc drawn with two half masks.
-// Each half (10x20, overflow hidden) holds a 20x20 circle whose top and right
-// borders take the tone colour; rotating the circle slides its half-circle arc into view.
+function VideoDraft ({ video, sending = false, disabled = false, onRemove }) {
+  const styles = useStyles(makeStyles)
+  const { phase, file } = video.state
+  if (phase === 'empty') return null
+  return (
+    <View style={styles.errors}>
+      {video.thumb ? <Image source={{ uri: video.thumb }} style={styles.momentPhoto} resizeMode='contain' accessibilityLabel='capa do vídeo' /> : null}
+      <Soft>{phase === 'preparing' ? 'Preparando vídeo...' : sending || phase === 'uploading' ? 'Enviando vídeo...' : 'Vídeo pronto · ' + durationLabel(file.ms)}</Soft>
+      <Pill label='Remover vídeo' onPress={onRemove} disabled={disabled} />
+    </View>
+  )
+}
+
+// Progress ring: two half masks draw the arc without a platform drawing API.
 function Ring ({ progress, tone }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
@@ -507,18 +666,36 @@ function Ring ({ progress, tone }) {
 // `quote` takes precedence over `reply` (the shell keeps them exclusive);
 // `onClearQuote` (optional) adds 'cancelar citação'. onPublished(kind, ref)
 // with kind 'post' | 'reply' | 'quote' | 'queued-post' | 'queued-reply'.
-export default function Publicar ({ open, reply: replyProp, quote = null, momentRequest = 0, me, onClose, onClearReply, onClearQuote, onPublished }) {
+// onReplyDraft(accepted) settles the caller's onExpand promise.
+// `shared` (optional) prefills this post once per id. `onSharedDone(id)`
+// releases the shell's copy of the files. A lock unmounts this screen, so
+// done is skipped then and the shell hands the same share back after unlock.
+export default function Publicar ({ open, reply: replyProp, quote = null, momentRequest = 0, me, onClose, onClearReply, onClearQuote, onPublished, onReplyDraft, shared = null, onSharedDone = () => {}, onSharedTaken = () => {} }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const reply = quote ? null : replyProp
   const node = useNode()
   const outbox = useOutbox()
   const [text, setText] = useState('')
+  const [replyDrafts, setReplyDrafts] = useState(new Set())
+  const replyDraftsRef = useRef(replyDrafts)
+  const hasReplyDraft = reply && typeof reply.draft === 'string'
+  const replyDraftPending = open && hasReplyDraft && !replyDrafts.has(reply.handoff)
+  const settleReplyDraft = (accepted) => {
+    const prior = replyDraftsRef.current
+    if (prior.has(reply.handoff)) return
+    const next = new Set(prior).add(reply.handoff)
+    replyDraftsRef.current = next
+    setReplyDrafts(next)
+    if (onReplyDraft) onReplyDraft(accepted)
+  }
+
   // True while the own diary is re-read after an uncertain publish.
   const [checking, setChecking] = useState(false)
   const [checkError, setCheckError] = useState('')
-  // A message about the text ends when the text changes.
-  useEffect(() => { setCheckError('') }, [text])
+  // A message about the text ends when the text changes. Set only when there
+  // is one, as in useCounterAnnouncement.
+  useEffect(() => { if (checkError !== '') setCheckError('') }, [text])
   const action = useAction()
   // Highest own seq this composer confirmed in this session (a successful
   // publish, or a reconciliation that found it), or null.
@@ -583,7 +760,9 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const momentOn = canPublishMoment(node) && !replyProp && !quote && asPage === null
   const [mode, setMode] = useState('post')
   const momentMode = momentOn && mode === 'moment'
-  const moment = useMomentDraft({ node, open, active: open === true && momentMode })
+  const moment = useMomentDraft({ node, member: me?.publicKey, open, active: open === true && momentMode })
+  const video = useVideoDraft({ active: open === true && !momentMode && asPage === null })
+  const canVideo = canComposeVideo({ node, asPage, pickVideo, prepareVideo })
   // Only an increase is a request: the shell resets the counter to 0 when a
   // post is published, and that must not reopen the composer in Momento.
   const lastMomentRequest = useRef(momentRequest)
@@ -677,10 +856,12 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // being sent or waiting for its retry keeps its photos: they are in the
   // signed bytes.
   useEffect(() => {
+    if (asPage !== null) setMusicDraft(null)
     if (pageRetryRef.current !== null || pageSendingRef.current) return
     genRef.current++
     removeItems(Array.from(liveRef.current))
-  }, [asPage])
+    video.draft.clear()
+  }, [asPage, video.draft])
   // Drops the post waiting for its retry and unlocks the draft. Its photos
   // stay only for the page they were uploaded for.
   const discardRetry = () => {
@@ -695,9 +876,13 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   }
 
   const len = countChars(text)
-  const hasMedia = items.length > 0
+  const hasVideo = video.state.phase !== 'empty'
+  const preparingVideo = video.state.phase === 'preparing'
+  const hasMedia = items.length > 0 || hasVideo
   // Every item encoded (or already uploaded by an earlier Publicar).
-  const mediaReady = hasMedia && items.every((item) => item.descriptor || (item.encoded && item.status !== 'uploading'))
+  const mediaReady = hasVideo
+    ? video.state.phase === 'ready' && videoPostValid({ file: video.state.file, text, quote: !!quote, photos: items.length })
+    : hasMedia && items.every((item) => item.descriptor || (item.encoded && item.status !== 'uploading'))
   const busy = action.pending || checking || uploading
   const self = me || { publicKey: null, name: null }
   // Natively only the installation's node needs the queue: the manual (core)
@@ -711,7 +896,63 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // The draft link card (not as a page: its posts are signed statements).
   // cardRef keeps the card a Publicar already built from a snapshot, so a
   // new press after a failure never uploads its thumbnail again.
-  const linkDraft = useLinkDraft({ text, enabled: open === true && asPage === null, photos: hasMedia, member: self.publicKey })
+  // linkHold: the text a share left in the field while its link waits for
+  // "Mostrar prévia do link"; any edit drops it.
+  const [linkHold, setLinkHold] = useState(null)
+  const shareLinkHeld = linkHeld(linkHold, text)
+  useEffect(() => {
+    if (linkHold !== null && linkHold !== text) setLinkHold(null)
+  }, [linkHold, text])
+  const member = self.publicKey
+  const musicAvailable = useMusicAvailable(node, member, open)
+  const musicOrigin = node.accountOrigin || musicOriginOf(node)
+  const [musicDraft, setMusicDraftState] = useState(null)
+  const musicDraftRef = useRef(null)
+  const setMusicDraft = (draft) => {
+    musicDraftRef.current = draft
+    setMusicDraftState(draft)
+  }
+  const [musicPickerOpen, setMusicPickerOpen] = useState(false)
+  const musicTried = useRef(new Set())
+  const musicResolveOn = musicAvailable === true && node.online !== false && previewsEnabled(previewPrefStore())
+  const musicResolveTarget = resolveTarget(text, musicTried.current)
+  // Wait for the music policy before allowing an Audius page fetch on the device.
+  const linkDraft = useLinkDraft({ text, enabled: open === true && asPage === null && !shareLinkHeld && !musicDraft && !(musicAvailable !== false && isAudiusLink(previewTarget(text))), photos: hasMedia, member: self.publicKey, fallback: fallbackCard })
+  useEffect(() => {
+    if (!open || momentMode || asPage !== null || hasMedia || musicDraft || busy || frozen || musicPickerOpen || shareLinkHeld || !musicResolveOn) return undefined
+    const url = musicResolveTarget
+    if (url === null) return undefined
+    const controller = new AbortController()
+    const epoch = playbackEpoch()
+    const timer = setTimeout(async () => {
+      if (epoch !== playbackEpoch()) return
+      try {
+        const { kind, item } = await audiusResolve(url, { member, origin: musicOrigin, request: nodeRequest, signal: controller.signal })
+        if (controller.signal.aborted || epoch !== playbackEpoch() || liveRef.current.size > 0 || video.draft.state.phase !== 'empty' || musicDraftRef.current !== null) return
+        const draft = { ref: { kind, id: item.id, start: null }, item }
+        if (musicSnapshot(draft) !== null) setMusicDraft(draft)
+      } catch {
+        // A failed resolve keeps the text and any other link's ordinary card.
+      } finally {
+        if (!controller.signal.aborted) musicTried.current.add(url)
+      }
+    }, LINK_DRAFT_DELAY_MS)
+    return () => {
+      clearTimeout(timer)
+      controller.abort()
+    }
+  }, [musicResolveTarget, open, momentMode, asPage, hasMedia, musicDraft, busy, frozen, musicPickerOpen, shareLinkHeld, musicResolveOn, member, musicOrigin, nodeRequest])
+  useEffect(() => {
+    if (!open || momentMode || asPage !== null) setMusicPickerOpen(false)
+  }, [open, momentMode, asPage])
+  const pickMusic = (draft) => {
+    if (busy || frozen || asPage !== null) return
+    if (liveRef.current.size > 0) { setNote(MUSIC_PHOTOS_TEXT); return }
+    if (video.draft.state.phase !== 'empty') { setNote(MUSIC_VIDEO_TEXT); return }
+    if (musicSnapshot(draft) === null) return
+    setNote('')
+    setMusicDraft(draft)
+  }
   const cardRef = useRef(null)
   // A page never queues: it needs the service.
   const pageOffline = asPage !== null && node.online === false
@@ -721,7 +962,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const valid = locked
     ? node.online !== false
     : len <= MAX_TEXT && !quoteOffline && !pageOffline && (quote ? len >= 1 : true) &&
-      (hasMedia ? mediaReady && mediaOnline && (media !== null || asPage !== null) : len >= 1)
+      (hasMedia ? mediaReady && mediaOnline && (hasVideo ? canVideo : (media !== null || asPage !== null)) : len >= 1)
 
   const patch = (id, fields) => {
     setItems((list) => list.map((item) => (item.id === id ? { ...item, ...fields } : item)))
@@ -751,9 +992,12 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       return
     }
     if (pageRetryRef.current !== null || pageSendingRef.current) return
+    setMusicDraft(null)
+    musicTried.current.clear()
     genRef.current++
     removeItems(Array.from(liveRef.current))
-  }, [open])
+    video.draft.clear()
+  }, [open, video.draft])
 
   useEffect(() => () => {
     genRef.current++
@@ -804,7 +1048,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       } catch (err) {
         // After an unknown outcome the next try resends the same signed upload.
         const retry = err && err.uncertain === true && typeof err.retry === 'function' ? err.retry : null
-        if (live()) patch(id, { status: 'failed', progress: 0, error: errorText(err), retry })
+        if (live()) patch(id, { status: 'failed', progress: 0, error: mediaComposeError(err) || errorText(err), retry })
         return null
       }
       if (!live()) return null
@@ -818,20 +1062,19 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     return gen === genRef.current ? out : null
   }
 
-  const attach = async () => {
-    if (!canAttach || !mediaOnline || busy || frozen) return
-    setNote('')
-    let files
-    try {
-      files = await pickImages()
-    } catch {
-      return
-    }
-    if (!Array.isArray(files) || files.length === 0) return
+  // Reported before the encode: a full draft returns here, and the note still
+  // has to say the new files did not fit.
+  const addFiles = async (files, onRoom) => {
+    // Shared photos land here too, and a post holds a video or photos.
+    if (video.draft.state.phase !== 'empty') { setNote(VIDEO_OR_PHOTOS); return }
     const room = Math.max(0, MAX_MEDIA_PER_POST - liveRef.current.size)
-    if (files.length > room) setNote('até ' + MAX_MEDIA_PER_POST + ' fotos por publicação')
+    onRoom(Math.max(0, files.length - room))
     const chosen = files.slice(0, room).map((file) => ({ id: nextItemId(), file }))
     if (chosen.length === 0) return
+    if (musicDraftRef.current !== null) {
+      setMusicDraft(null)
+      setNote(MUSIC_PHOTOS_TEXT)
+    }
     const gen = genRef.current
     for (const { id } of chosen) liveRef.current.add(id)
     setItems((list) => [...list, ...chosen.map(({ id }) => ({
@@ -856,6 +1099,76 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       patch(id, { status: 'ready', encoded, thumb })
     }
   }
+
+  const attach = async () => {
+    if (!canAttach || !mediaOnline || busy || frozen) return
+    if (video.draft.state.phase !== 'empty') { setNote(VIDEO_OR_PHOTOS); return }
+    setNote('')
+    let files
+    try {
+      files = await pickImages()
+    } catch {
+      return
+    }
+    if (!Array.isArray(files) || files.length === 0) return
+    // Nothing blocks a pick while another is open (a browser may never settle
+    // one), so photos that arrive once a video is staged are not added.
+    if (video.draft.state.phase !== 'empty') { setNote(VIDEO_OR_PHOTOS); return }
+    await addFiles(files, (n) => {
+      if (n > 0) setNote('até ' + MAX_MEDIA_PER_POST + ' fotos por publicação')
+    })
+  }
+
+  const attachVideo = async () => {
+    if (!canVideo || busy || frozen) return
+    setNote('')
+    try {
+      await video.draft.pick({ pickVideo, prepareVideo, photos: liveRef.current.size, preview: !!linkDraft.view || musicDraftRef.current !== null })
+    } catch (err) { setNote(err.message) }
+  }
+
+  // Done after unmount would drop the shell's files: a lock unmounts Publicar
+  // and hands the same share back once the screen is mounted again.
+  const mountedRef = useRef(false)
+  const appliedShareRef = useRef(null)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+  useEffect(() => {
+    if (!(open && shared && shared.id !== appliedShareRef.current && !frozen && !busy && !moment.pending)) return
+    appliedShareRef.current = shared.id
+    onSharedTaken(shared.id)
+    setMode('post')
+    const merged = mergeDraft(text, shared.text, MAX_TEXT)
+    if (merged.text !== text) setText(merged.text)
+    setLinkHold((hold) => sharedLinkHold(text, merged.text, hold))
+    if (shared.files.length === 0 || !canAttach) {
+      setNote(shareNote({
+        canAttach,
+        hadFiles: shared.files.length > 0,
+        noRoom: 0,
+        dropped: shared.dropped,
+        failed: shared.failed || 0,
+        kept: merged.kept,
+        clipped: shared.clipped
+      }))
+      onSharedDone(shared.id)
+      return
+    }
+    const done = () => {
+      if (mountedRef.current) onSharedDone(shared.id)
+    }
+    addFiles(shared.files, (n) => setNote(shareNote({
+      canAttach: true,
+      hadFiles: true,
+      noRoom: n,
+      dropped: shared.dropped,
+      failed: shared.failed || 0,
+      kept: merged.kept,
+      clipped: shared.clipped
+    }))).then(done, done)
+  }, [open, shared && shared.id, frozen, busy, moment.pending])
 
   const pickEmoji = (emoji) => {
     if (frozen) return
@@ -914,7 +1227,10 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // matches.
   const published = (sent, sentReply, sentIds = [], sentQuote = null) => {
     tap('success')
+    setMusicDraft(null)
+    musicTried.current.clear()
     setText((current) => (current === sent ? '' : current))
+    if (video.draft.state.file && sentIds.includes(video.draft.state.file)) video.draft.clear()
     if (sentIds.length > 0) removeItems(sentIds)
     if (sentQuote) return onPublished('quote', sentQuote.ref)
     onPublished(sentReply ? 'reply' : 'post', sentReply ? sentReply.ref : null)
@@ -1019,7 +1335,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   }
 
   const send = async () => {
-    if (busy || uploadingRef.current) return
+    if (busy || uploadingRef.current || video.draft.state.phase === 'preparing') return
     setCheckError('')
     // Before every path below (photos, the outbox, a page's signature). The
     // draft is kept, so the person can edit it. A signed post waiting for its
@@ -1029,26 +1345,34 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       setCheckError(refused)
       return
     }
+    const sentMusic = musicDraft
+    if (sentMusic !== null) {
+      const blocked = musicBlocks({ hasMedia, hasVideo, asPage, online: node.online, textLength: len })
+      if (blocked !== '') { setCheckError(blocked); return }
+    }
     // Never a new signature while a signed post waits for its retry.
     if (pageRetryRef.current !== null || asPage !== null) return sendAsPage()
     const sent = text
     const sentReply = reply
     const sentQuote = quote
     if (sentQuote && (node.online === false || countChars(sent) < 1)) return
-    const sentIds = items.map((item) => item.id)
+    const sentIds = hasVideo ? [video.draft.state.file] : items.map((item) => item.id)
     let sentMedia = null
     if (hasMedia) {
-      if (!mediaReady || !mediaOnline || media === null) return
+      if (!mediaReady || !mediaOnline || media === null || (hasVideo && !canVideo)) return
       uploadingRef.current = true
       setUploading(true)
       try {
-        sentMedia = await uploadAll(items)
+        sentMedia = hasVideo ? await video.draft.upload((file) => media.upload(file)) : await uploadAll(items)
+      } catch (err) {
+        setCheckError(mediaComposeError(err) || errorText(err))
+        return
       } finally {
         uploadingRef.current = false
         setUploading(false)
       }
       if (sentMedia === null) return
-    } else if (offlineQueue && !sentQuote) {
+    } else if (offlineQueue && !sentQuote && sentMusic === null) {
       queue(sent, sentReply)
       return
     }
@@ -1060,7 +1384,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     // A link card goes with text only; its thumbnail joins the public media
     // core like a post photo, uploaded once per snapshot.
     let card = null
-    const snapshot = sentMedia === null ? linkDraft.take(sent) : null
+    const snapshot = sentMedia === null ? (musicSnapshot(sentMusic) ?? linkDraft.take(sent)) : null
     if (snapshot !== null) {
       const prev = cardRef.current
       if (prev && prev.url === snapshot.url && prev.thumb === (snapshot.thumb ? snapshot.thumb.bytes : null)) {
@@ -1085,6 +1409,10 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       }
     }
     const built = withCardFallback((c) => (c ? withPreview(method, { ...to, ...base }, c) : { ...to, ...base }), card)
+    if (sentMusic !== null && built.card === null) {
+      setCheckError('A música não coube: encurte o texto')
+      return
+    }
     const params = built.op
     // The draft is kept on any failure; a request is never resent.
     let raw = null
@@ -1100,7 +1428,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     // The write gate could not reach the seeder: nothing was written, so the
     // post waits in the outbox (text only: a post with photos or a quote
     // stays here).
-    if (sentMedia === null && !sentQuote && canQueue && raw && raw.uncertain !== true && raw.message === GATE_MESSAGE) {
+    if (sentMusic === null && sentMedia === null && !sentQuote && canQueue && raw && raw.uncertain !== true && raw.message === GATE_MESSAGE) {
       if (queue(sent, sentReply)) action.clearError()
       return
     }
@@ -1115,18 +1443,14 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     setChecking(true)
     try {
       const res = await node.request('log.read', {})
-      const wanted = sentReply ? sentReply.ref : null
-      const floor = lastSeqRef.current
-      const found = (res.entries || []).find((entry) => {
-        const record = entry && entry.record
-        const quoteOk = sentQuote
-          ? isQuoteRecord(record) && sameRef(refOf(record.quote), sentQuote.ref)
-          : !isQuoteRecord(record)
-        return record && record.type === 'post' && record.text === sent && quoteOk &&
-          sameRef(refOf(record.replyTo), wanted) && sameMedia(record.media, sentMedia) &&
-          Date.parse(record.at) >= startedAt - MATCH_SLACK_MS &&
-          (floor === null || (Number.isInteger(entry.seq) && entry.seq > floor))
-      })
+      const matches = sentMatcher({
+        text: sent,
+        replyTo: sentReply ? sentReply.ref : null,
+        quote: sentQuote ? sentQuote.ref : null,
+        media: sentMedia
+      }, { startedAt, slackMs: MATCH_SLACK_MS, seqFloor: lastSeqRef.current })
+      const found = (res.entries || []).find((entry) => matches(entry) &&
+        (sentMusic === null || (entry.record.preview && typeof entry.record.preview === 'object' && !Array.isArray(entry.record.preview) && entry.record.preview.url === built.card.url)))
       if (found) {
         confirm(Number.isInteger(found.seq) ? found.seq : null)
         action.clearError()
@@ -1147,7 +1471,15 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // Locked: the draft is what was signed and waits for its retry. Frozen
   // also covers a page send in flight.
   const held = busy || frozen
-  let pillLabel = offlineQueue && !hasMedia ? 'Guardar' : 'Publicar'
+  const replyDraftConflict = replyDraftPending && (held || hasMedia || (text !== '' && text !== reply.draft))
+  useEffect(() => {
+    if (!replyDraftPending) return
+    if (held) return settleReplyDraft(false)
+    if (replyDraftConflict) return
+    setText(reply.draft)
+    settleReplyDraft(true)
+  }, [replyDraftPending, replyDraftConflict, held, reply, onReplyDraft])
+  let pillLabel = offlineQueue && !hasMedia && musicDraft === null ? 'Guardar' : 'Publicar'
   if (locked) pillLabel = 'Tentar de novo'
 
   const sendMoment = async () => {
@@ -1160,14 +1492,19 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     }
   }
   const handlePickMoment = moment.pick
+  const handlePickMomentVideo = moment.pickClip
+  const handleRemoveMomentVideo = moment.removeVideo
   const handleMomentText = moment.setText
   const handleDiscardMoment = moment.reset
-  const postDraft = text !== '' || items.length > 0
+  const postDraft = text !== '' || hasMedia
   const momentCount = momentLength(moment.text)
+  const momentAnnouncement = useCounterAnnouncement(open && momentMode, momentCount, MOMENT_TEXT_MAX)
+  const postAnnouncement = useCounterAnnouncement(open && !momentMode, len, MAX_TEXT)
   // While a text box has focus it stays in view with its counter (see
   // keepInView): every keystroke, also at the six-line maximum where the
   // body's content size no longer changes, and the keyboard opening.
   const momentView = useKeepInView(momentMode)
+  const momentMusicSession = { member: me?.publicKey, origin: musicOriginOf(node), request: nodeRequest }
   const staged = moment.photo.items[0] || null
   const revealedMomentPhotoRef = useRef(null)
   useEffect(() => {
@@ -1227,9 +1564,38 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
         if (size) setMomentHeight(momentFieldHeight(size.height))
       }
     : undefined
+  const handleMode = (id) => {
+    if (busy || moment.pending) return
+    video.draft.cancelPreparation()
+    moment.video.draft.cancelPreparation()
+    setMode(id)
+  }
   const modeSwitch = momentOn
-    ? <Segmented options={MODES} selected={momentMode ? 'moment' : 'post'} onSelect={(id) => { if (!busy && !moment.pending) setMode(id) }} />
+    ? <Segmented options={MODES} selected={momentMode ? 'moment' : 'post'} onSelect={handleMode} />
     : null
+
+  if (replyDraftConflict) {
+    const keepDraft = () => {
+      settleReplyDraft(false)
+      return false
+    }
+    const useReplyDraft = () => {
+      if (held) return
+      genRef.current++
+      removeItems(Array.from(liveRef.current))
+      setText(reply.draft)
+      settleReplyDraft(true)
+    }
+    return (
+      <Sheet open={open} onClose={keepDraft} grabber>
+        <View style={styles.draftConflict}>
+          <Text style={styles.draftConflictText} maxFontSizeMultiplier={TEXT_CAP}>Você tem um rascunho não publicado.</Text>
+          <Pill label='Usar a resposta' onPress={useReplyDraft} disabled={held} maxFontSizeMultiplier={TEXT_CAP} />
+          <Pill label='Manter o rascunho' onPress={keepDraft} maxFontSizeMultiplier={TEXT_CAP} />
+        </View>
+      </Sheet>
+    )
+  }
 
   if (momentMode) {
     return (
@@ -1240,6 +1606,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
         right={<Pill label='Publicar' filled onPress={sendMoment} pending={moment.pending} disabled={!moment.valid} maxFontSizeMultiplier={TEXT_CAP} />}
       >
         <SheetKeyboard>
+          <Text style={styles.counterAnnouncement} accessibilityLiveRegion='polite' aria-live='polite'>{momentAnnouncement}</Text>
           <ScrollView
             key='moment'
             ref={momentView.scrollRef}
@@ -1261,7 +1628,19 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                 : null}
               {/* Under the tile, never clipped by its rounded corner. */}
               {staged && staged.status === 'invalid' ? <ErrorText>{staged.error || 'não foi possível abrir a foto'}</ErrorText> : null}
-              <Pill label={staged ? 'Trocar foto' : 'Escolher foto'} icon='imagem' onPress={handlePickMoment} disabled={moment.pending || moment.held} />
+              <VideoDraft video={moment.video} sending={moment.pending} disabled={moment.pending || moment.held} onRemove={handleRemoveMomentVideo} />
+              <Pill label={staged ? 'Trocar foto' : 'Escolher foto'} icon='imagem' onPress={handlePickMoment} disabled={moment.pending || moment.held || moment.video.state.phase === 'preparing'} />
+              {staged ? <Pill label='Remover foto' onPress={() => moment.removePhoto(staged.id)} disabled={moment.pending || moment.held} /> : null}
+              {canVideo ? <Pill label='Vídeo' onPress={handlePickMomentVideo} disabled={moment.pending || moment.held || moment.video.state.phase !== 'empty' || moment.photo.busy} /> : null}
+              {canVideo ? <Soft>{MOMENT_ONE_MEDIA}</Soft> : null}
+              {moment.musicAvailable
+                ? <Pill label='Música' icon='musica' onPress={() => moment.setMusicPickerOpen(true)} disabled={moment.pending || moment.held || node.online === false} />
+                : null}
+              {moment.musicAvailable && moment.music !== null
+                ? (
+                  <MusicSticker choice={momentChoiceOf(moment.music)} session={momentMusicSession} onPress={node.online === false ? undefined : () => moment.setMusicPickerOpen(true)} onRemove={() => moment.removeMusic()} disabled={moment.pending || moment.held} />
+                  )
+                : null}
               <TextInput
                 ref={momentView.fieldRef}
                 style={[styles.momentInput, GROW_BY_CONTENT && { height: momentHeight }]}
@@ -1284,6 +1663,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                 onLayout={(e) => momentView.handleTailLayout(e, 'body')}
                 style={[styles.counter, styles.momentCounter, momentCount >= MOMENT_COUNTER_WARN && styles.counterWarn, momentCount > MOMENT_TEXT_MAX && styles.counterFull]}
                 accessibilityLabel={momentCount + ' de ' + MOMENT_TEXT_MAX + ' caracteres'}
+                accessibilityLiveRegion='none'
               >
                 {momentCount + '/' + MOMENT_TEXT_MAX}
               </Text>
@@ -1302,6 +1682,16 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                 : null}
             </View>
           </ScrollView>
+          <MusicPicker
+            open={open === true && moment.musicAvailable && moment.musicPickerOpen && !moment.pending && !moment.held}
+            onClose={() => moment.setMusicPickerOpen(false)}
+            onPick={(choice) => moment.pickMusic(choice)}
+            initial={momentChoiceOf(moment.music)}
+            member={me?.publicKey}
+            origin={musicOriginOf(node)}
+            request={nodeRequest}
+            modes={['snippet']}
+          />
         </SheetKeyboard>
       </Sheet>
     )
@@ -1315,6 +1705,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       right={<Pill label={pillLabel} filled onPress={send} pending={busy} disabled={!valid} maxFontSizeMultiplier={TEXT_CAP} />}
     >
       <SheetKeyboard>
+        <Text style={styles.counterAnnouncement} accessibilityLiveRegion='polite' aria-live='polite'>{postAnnouncement}</Text>
         <ScrollView
           key='post'
           ref={postView.scrollRef}
@@ -1429,7 +1820,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
               />
             </View>
           </View>
-          {hasMedia
+          <VideoDraft video={video} disabled={held} onRemove={() => { video.draft.clear(); setNote('') }} />
+          {hasMedia && items.length > 0
             ? (
               <View style={styles.thumbs}>
                 {items.map((item, i) => (
@@ -1447,11 +1839,35 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                 ))}
               </View>
               )
-            : <LinkDraftCard draft={linkDraft} />}
+            : hasMedia || musicDraft !== null
+              ? null
+              : shareLinkHeld && open === true && asPage === null && previewsEnabled(previewPrefStore())
+                ? (
+                  <Pressable
+                    accessibilityRole='button'
+                    accessibilityLabel='Mostrar prévia do link'
+                    accessibilityState={{ disabled: frozen }}
+                    disabled={frozen}
+                    onPress={() => setLinkHold(null)}
+                    hitSlop={6}
+                    style={({ pressed }) => [styles.linkAsk, pressed && styles.toolPressed]}
+                  >
+                    <Text style={styles.linkAskText}>Mostrar prévia do link</Text>
+                  </Pressable>
+                  )
+                : <LinkDraftCard draft={linkDraft} />}
+          {musicDraft !== null && items.length === 0
+            ? (
+              <View style={styles.errors}>
+                <MusicSticker choice={musicDraft} session={{ member, origin: musicOrigin, request: nodeRequest }} onPress={held || musicAvailable !== true ? undefined : () => setMusicPickerOpen(true)} onRemove={held ? undefined : () => setMusicDraft(null)} />
+              </View>
+              )
+            : null}
           <MentionSuggest rows={frozen ? [] : suggestions} loading={!frozen && mentionQuery !== '' && search.phase === 'loading'} onPick={pickMention} />
           <View ref={postView.tailRef} style={styles.counterRow} onLayout={postView.handleTailLayout}>
             <View style={styles.tools}>
-              <Pressable
+              {canVideo ? <Pill label='Vídeo' onPress={attachVideo} disabled={held || hasVideo || items.some((item) => item.status === 'encoding')} /> : null}
+              <PressScale
                 accessibilityRole='button'
                 accessibilityLabel={emojiOpen ? 'fechar emojis' : 'emojis'}
                 accessibilityState={{ expanded: emojiOpen, disabled: frozen }}
@@ -1461,14 +1877,14 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                 style={({ pressed }) => [styles.tool, pressed && styles.toolPressed]}
               >
                 <Icon name='smile' size={21} color={emojiOpen ? colors.accent : colors.soft} />
-              </Pressable>
+              </PressScale>
               {canAttach
                 ? (
-                  <Pressable
+                  <PressScale
                     accessibilityRole='button'
-                    accessibilityLabel='Foto'
-                    accessibilityState={{ disabled: attachOff || held }}
-                    disabled={attachOff || held}
+                    accessibilityLabel='Adicionar foto'
+                    accessibilityState={{ disabled: attachOff || held || preparingVideo }}
+                    disabled={attachOff || held || preparingVideo}
                     onPress={() => {
                       if (items.length >= MAX_MEDIA_PER_POST) setNote('até ' + MAX_MEDIA_PER_POST + ' fotos por publicação')
                       else attach()
@@ -1477,17 +1893,42 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     style={({ pressed }) => [styles.tool, attachOff && styles.toolOff, pressed && styles.toolPressed]}
                   >
                     <Icon name='image' size={21} color={colors.soft} />
+                  </PressScale>
+                  )
+                : null}
+              {musicAvailable === true && asPage === null
+                ? (
+                  <Pressable
+                    accessibilityRole='button'
+                    accessibilityLabel='Música'
+                    accessibilityState={{ disabled: held }}
+                    disabled={held}
+                    onPress={() => setMusicPickerOpen(true)}
+                    hitSlop={6}
+                    style={({ pressed }) => [styles.tool, pressed && styles.toolPressed]}
+                  >
+                    <Icon name='musica' size={21} color={colors.soft} />
                   </Pressable>
                   )
                 : null}
             </View>
             <View style={styles.count}>
               <Ring progress={ring.progress} tone={ring.tone} />
-              <Text style={[styles.counter, ring.tone === 'warn' && styles.counterWarn, ring.tone === 'danger' && styles.counterFull]}>
+              <Text accessibilityLabel={len + ' de ' + MAX_TEXT + ' caracteres'} accessibilityLiveRegion='none' style={[styles.counter, ring.tone === 'warn' && styles.counterWarn, ring.tone === 'danger' && styles.counterFull]}>
                 {ring.remaining === null ? len + '/' + MAX_TEXT : String(ring.remaining)}
               </Text>
             </View>
           </View>
+          <MusicPicker
+            open={open === true && !momentMode && asPage === null && musicAvailable === true && musicPickerOpen && !held}
+            onClose={() => setMusicPickerOpen(false)}
+            onPick={pickMusic}
+            initial={musicDraft}
+            member={member}
+            origin={musicOrigin}
+            request={nodeRequest}
+            modes={['snippet', 'track', 'playlist']}
+          />
           <EmojiPicker open={emojiOpen && !frozen} onPick={pickEmoji} />
           {quoteOffline
             ? <View style={styles.errors}><Soft>Citações precisam de internet</Soft></View>
@@ -1499,7 +1940,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
             ? <View style={styles.errors}><Soft>Fotos precisam de internet</Soft></View>
             : null}
           {note ? <View style={styles.errors}><Soft>{note}</Soft></View> : null}
-          {offlineQueue && !hasMedia
+          {offlineQueue && !hasMedia && musicDraft === null
             ? <View style={styles.errors}><Soft>Sem rede: a publicação fica aguardando envio e sai sozinha quando a conexão voltar.</Soft></View>
             : null}
           {rosterFailed && roster.length > 0
@@ -1669,6 +2110,8 @@ function Thumb ({ item, index, count, busy, onRemove, onRetry, onMoveBefore, onM
 }
 
 const makeStyles = (colors) => StyleSheet.create({
+  draftConflict: { padding: 24, gap: 16 },
+  draftConflictText: { ...type.postText, color: colors.ink },
   flex: { flex: 1 },
   thumbs: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, paddingTop: 10, paddingLeft: 68, paddingRight: 16 },
   thumbWrap: { width: 80, gap: 4 },
@@ -1707,11 +2150,13 @@ const makeStyles = (colors) => StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.6)'
   },
   thumbError: { fontSize: 12, lineHeight: 15, color: colors.danger },
-  momentBody: { gap: 12, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 16, alignItems: 'flex-start' },
+  momentBody: { gap: space.md, paddingHorizontal: space.lg, paddingTop: space.md, paddingBottom: space.lg, alignItems: 'flex-start' },
   momentPhoto: { width: 160, height: 200, borderRadius: 12, overflow: 'hidden', backgroundColor: colors.skeleton },
   momentInput: { ...type.compose, alignSelf: 'stretch', color: colors.ink, minHeight: MOMENT_MIN_HEIGHT, maxHeight: MOMENT_MAX_HEIGHT, borderWidth: 1, borderColor: colors.line, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, backgroundColor: colors.card },
   momentCounter: { alignSelf: 'flex-end', marginTop: -4 },
   tools: { flexDirection: 'row', alignItems: 'center', gap: 4, flex: 1 },
+  linkAsk: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center', marginLeft: 60, paddingHorizontal: 8, borderRadius: 22 },
+  linkAskText: { ...type.replyMark, color: colors.accent, fontWeight: '600' },
   tool: { flexDirection: 'row', alignItems: 'center', gap: 5, minHeight: 44, minWidth: 44, paddingHorizontal: 8, borderRadius: 22, justifyContent: 'center' },
   toolOff: { opacity: 0.45 },
   toolPressed: { backgroundColor: colors.accentSoft },
@@ -1768,11 +2213,12 @@ const makeStyles = (colors) => StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     gap: 7,
-    paddingVertical: 8,
+    paddingVertical: space.sm,
     // The tools pad their own 8, so icons and counter both sit 16 from the edges.
-    paddingLeft: 8,
-    paddingRight: 16
+    paddingLeft: space.sm,
+    paddingRight: space.lg
   },
+  counterAnnouncement: { position: 'absolute', width: 1, height: 1, opacity: 0 },
   counter: { ...type.counter, color: colors.soft },
   counterWarn: { color: colors.warn },
   counterFull: { color: colors.danger },

@@ -1,0 +1,461 @@
+'use strict'
+
+// apps/cli/lib/account/audius-provider.js: config parsing, request building
+// and the mapping of provider answers, all pure. No network.
+
+const test = require('brittle')
+const fs = require('node:fs')
+const path = require('node:path')
+const {
+  DEFAULT_API_URL,
+  ID_RE,
+  MAX_OFFSET,
+  parseAudiusConfig,
+  keyParams,
+  requestFor,
+  isAudiusPermalink,
+  artOf,
+  fromTrack,
+  fromPlaylist,
+  fromResolve,
+  listOf,
+  nextCursor
+} = require('../lib/account/audius-provider')
+
+const KEY = 'chave-sentinela-audius-42'
+
+function config (extra = {}) {
+  return parseAudiusConfig({ apiKey: KEY, ...extra })
+}
+
+function track (extra = {}) {
+  return {
+    id: 'D7KyD',
+    title: 'Samba de Teste',
+    duration: 215,
+    permalink: '/artista/samba-de-teste',
+    user: { name: 'Artista', id: 'u123' },
+    artwork: { '150x150': 'https://creatornode.example/art.jpg' },
+    is_streamable: true,
+    is_delete: false,
+    is_unlisted: false,
+    is_available: true,
+    is_stream_gated: false,
+    stream_conditions: null,
+    access: { stream: true, download: false },
+    ...extra
+  }
+}
+
+function camelTrack (extra = {}) {
+  return {
+    id: 'D7KyD',
+    title: 'Samba de Teste',
+    duration: 215,
+    permalink: '/artista/samba-de-teste',
+    user: { name: 'Artista' },
+    isStreamable: true,
+    isDelete: false,
+    isUnlisted: false,
+    isAvailable: true,
+    isStreamGated: false,
+    streamConditions: null,
+    ...extra
+  }
+}
+
+function playlist (extra = {}) {
+  return {
+    id: 'pL4yA',
+    playlist_name: 'Roda de Choro',
+    track_count: 12,
+    permalink: '/artista/playlist/roda-de-choro',
+    user: { name: 'Artista' },
+    is_private: false,
+    is_delete: false,
+    artwork: { '150x150': 'https://creatornode.example/art.jpg' },
+    ...extra
+  }
+}
+
+const ART = 'https://creatornode.example/art.jpg'
+const ART_LARGE = 'https://creatornode.example/art-480.jpg'
+const EXPECTED_TRACK = { id: 'D7KyD', title: 'Samba de Teste', artist: 'Artista', duration: 215, url: 'https://audius.co/artista/samba-de-teste', art: ART, artLarge: null }
+const NO_ART_TRACK = { ...EXPECTED_TRACK, art: null }
+
+test('parseAudiusConfig: defaults and accepted values', (t) => {
+  const c = config()
+  t.alike(c, { base: 'https://api.audius.co/v1', apiHost: 'api.audius.co', apiKey: KEY, appName: 'varanda', moments: false, covers: false, streams: 16 })
+  t.is(DEFAULT_API_URL, 'https://api.audius.co/v1')
+  const d = config({ apiUrl: 'https://Audius.Test:8443/api/v1/', appName: 'varanda-dev', moments: true, streams: 32 })
+  t.is(d.base, 'https://audius.test:8443/api/v1')
+  t.is(d.apiHost, 'audius.test')
+  t.is(d.appName, 'varanda-dev')
+  t.is(d.moments, true)
+  t.is(d.streams, 32)
+  t.ok(config({ streams: 1 }))
+  t.ok(parseAudiusConfig({ apiKey: '!'.repeat(256) }))
+})
+
+test('parseAudiusConfig: refuses bad values and never throws', (t) => {
+  const bad = [
+    undefined,
+    null,
+    'texto',
+    {},
+    { apiKey: '' },
+    { apiKey: 'a'.repeat(257) },
+    { apiKey: 'com espaco' },
+    { apiKey: 'tab\tkey' },
+    { apiKey: 'chaveé' },
+    { apiKey: 42 },
+    { apiKey: KEY, apiUrl: 'http://api.audius.co/v1' },
+    { apiKey: KEY, apiUrl: 'https://user:pass@api.audius.co/v1' },
+    { apiKey: KEY, apiUrl: 'https://api.audius.co/v1?x=1' },
+    { apiKey: KEY, apiUrl: 'https://api.audius.co/v1#x' },
+    { apiKey: KEY, apiUrl: 'https://127.0.0.1/v1' },
+    { apiKey: KEY, apiUrl: 'https://[::1]/v1' },
+    { apiKey: KEY, apiUrl: 'https://0x7f.1/v1' },
+    { apiKey: KEY, apiUrl: 'https://2130706433/v1' },
+    { apiKey: KEY, apiUrl: 'https://' + 'a'.repeat(600) + '.test/' },
+    { apiKey: KEY, apiUrl: 'nao e url' },
+    { apiKey: KEY, apiUrl: 7 },
+    { apiKey: KEY, appName: 'Varanda' },
+    { apiKey: KEY, appName: '' },
+    { apiKey: KEY, appName: 'a'.repeat(33) },
+    { apiKey: KEY, appName: 'app_name' },
+    { apiKey: KEY, moments: 'true' },
+    { apiKey: KEY, moments: 1 },
+    { apiKey: KEY, streams: 0 },
+    { apiKey: KEY, streams: 33 },
+    { apiKey: KEY, streams: 2.5 },
+    { apiKey: KEY, streams: '16' }
+  ]
+  for (const b of bad) {
+    let out
+    try {
+      out = parseAudiusConfig(b)
+    } catch (err) {
+      t.fail('threw: ' + err.message.includes(KEY))
+      continue
+    }
+    t.is(out, null)
+  }
+})
+
+test('keyParams: the key in a header, the app name in the query', (t) => {
+  const kp = keyParams(config())
+  t.alike(kp, { headers: { 'x-api-key': KEY }, query: { app_name: 'varanda' } })
+})
+
+test('requestFor: every kind, the key never in the URL', (t) => {
+  const c = config()
+  const cases = [
+    ['searchTracks', { query: 'samba & choro', limit: 24, offset: 48 }, 'https://api.audius.co/v1/tracks/search?query=samba+%26+choro&limit=24&offset=48&app_name=varanda'],
+    ['searchTracks', { query: 'samba' }, 'https://api.audius.co/v1/tracks/search?query=samba&limit=20&offset=0&app_name=varanda'],
+    ['searchPlaylists', { query: 'roda', limit: 10, offset: 0 }, 'https://api.audius.co/v1/playlists/search?query=roda&limit=10&offset=0&app_name=varanda'],
+    ['track', { id: 'D7KyD' }, 'https://api.audius.co/v1/tracks/D7KyD?app_name=varanda'],
+    ['playlist', { id: 'pL4yA' }, 'https://api.audius.co/v1/playlists/pL4yA?app_name=varanda'],
+    ['playlistTracks', { id: 'pL4yA' }, 'https://api.audius.co/v1/playlists/pL4yA/tracks?app_name=varanda'],
+    ['stream', { id: 'D7KyD' }, 'https://api.audius.co/v1/tracks/D7KyD/stream?app_name=varanda'],
+    ['resolve', { url: 'https://audius.co/artista/samba-de-teste' }, 'https://api.audius.co/v1/resolve?url=https%3A%2F%2Faudius.co%2Fartista%2Fsamba-de-teste&app_name=varanda']
+  ]
+  for (const [kind, params, href] of cases) {
+    const r = requestFor(c, kind, params)
+    t.is(r.href, href, kind)
+    t.alike(r.firstHeaders, { 'x-api-key': KEY }, kind + ' headers')
+    t.absent(r.href.includes(KEY), kind + ' key not in href')
+    t.absent(decodeURIComponent(r.href).includes(KEY), kind + ' key not in decoded href')
+  }
+  const own = requestFor(config({ apiUrl: 'https://audius.test:8443/v1' }), 'track', { id: 'abc' })
+  t.is(own.href, 'https://audius.test:8443/v1/tracks/abc?app_name=varanda')
+})
+
+test('requestFor: refuses unknown kinds and bad parameters', (t) => {
+  const c = config()
+  t.is(requestFor(c, 'user', { id: 'abc' }), null)
+  t.is(requestFor(c, 'track', { id: '../users/abc' }), null)
+  t.is(requestFor(c, 'track', { id: 'a'.repeat(33) }), null)
+  t.is(requestFor(c, 'stream', { id: 'ab?c' }), null)
+  t.is(requestFor(c, 'playlist', {}), null)
+  t.is(requestFor(c, 'searchTracks', { query: '' }), null)
+  t.is(requestFor(c, 'searchTracks', { query: 'x'.repeat(257) }), null)
+  t.is(requestFor(c, 'searchTracks', { query: 7 }), null)
+  t.is(requestFor(c, 'searchTracks', { query: 'x', limit: 0 }), null)
+  t.is(requestFor(c, 'searchTracks', { query: 'x', limit: 51 }), null)
+  t.is(requestFor(c, 'searchTracks', { query: 'x', offset: -1 }), null)
+  t.is(requestFor(c, 'searchTracks', { query: 'x', offset: MAX_OFFSET + 1 }), null)
+  t.is(requestFor(c, 'searchTracks', { query: 'x', offset: '0' }), null)
+  t.is(requestFor(c, 'resolve', { url: 'https://evil.test/a/b' }), null)
+  t.is(requestFor(c, 'resolve', { url: 'https://audius.co/a/b?x=1' }), null)
+  t.is(requestFor(null, 'track', { id: 'abc' }), null)
+  t.is(requestFor(c, 'track', null), null)
+})
+
+test('isAudiusPermalink', (t) => {
+  for (const ok of [
+    'https://audius.co/artista/faixa',
+    'https://audius.co/artista/playlist/roda',
+    'https://audius.co/artista/album/disco-1',
+    'https://audius.co/a/b/c/d'
+  ]) t.ok(isAudiusPermalink(ok), ok)
+  for (const bad of [
+    'https://audius.co/artista',
+    'https://audius.co/a/b/c/d/e',
+    'https://audius.co/a/b?x=1',
+    'https://audius.co/a/b#t',
+    'https://audius.co/a//b',
+    'https://audius.co/a/b/',
+    'https://audius.co/a/..',
+    'https://audius.co:8443/a/b',
+    'https://user@audius.co/a/b',
+    'https://audius.co.evil.test/a/b',
+    'https://evil.test/audius.co/a',
+    'https://www.audius.co/a/b',
+    'http://audius.co/a/b',
+    'https://AUDIUS.co/a/b',
+    'https://audius.co/a\\b/c',
+    'https://audius.co/a b/c',
+    'https://audius.co/‮ab/c',
+    'https://audius.co/' + 'a'.repeat(240) + '/b',
+    null,
+    42
+  ]) t.absent(isAudiusPermalink(bad), String(bad))
+})
+
+test('fromTrack: snake_case and camelCase', (t) => {
+  t.alike(fromTrack(track()), EXPECTED_TRACK)
+  t.alike(fromTrack(camelTrack()), NO_ART_TRACK)
+  t.alike(fromTrack(camelTrack({ access: { stream: true } })), NO_ART_TRACK)
+  // Absent flags keep the item; nothing but the six fields is copied.
+  const minimal = fromTrack({ id: 'D7KyD', title: 'Samba de Teste', duration: 215, permalink: '/artista/samba-de-teste', user: { name: 'Artista' } })
+  t.alike(minimal, NO_ART_TRACK)
+  t.alike(Object.keys(fromTrack(track())).sort(), ['art', 'artLarge', 'artist', 'duration', 'id', 'title', 'url'])
+  const both = fromTrack(track({ artwork: { '150x150': ART, '480x480': ART_LARGE, '1000x1000': 'https://creatornode.example/art-1000.jpg' }, genre: 'Samba', release_date: '1999-04-02' }))
+  t.alike(both, { ...EXPECTED_TRACK, artLarge: ART_LARGE, genre: 'Samba', year: 1999 })
+  t.alike(Object.keys(both).sort(), ['art', 'artLarge', 'artist', 'duration', 'genre', 'id', 'title', 'url', 'year'])
+  t.alike(fromTrack(track({ artwork: { '480x480': ART_LARGE } })), { ...EXPECTED_TRACK, art: null, artLarge: ART_LARGE }, 'a large cover alone')
+  t.alike(fromTrack(track({ artwork: { '150x150': ART, '480x480': 'http://creatornode.example/a.jpg' } })), EXPECTED_TRACK, 'a bad large cover is null')
+  // A bad cover never drops the item.
+  t.alike(fromTrack(track({ artwork: { '150x150': 'http://creatornode.example/art.jpg' } })), NO_ART_TRACK)
+  t.alike(fromTrack(track({ artwork: 'https://creatornode.example/art.jpg' })), NO_ART_TRACK)
+})
+
+test('fromTrack: each exclusion rule drops the item', (t) => {
+  const drops = {
+    'deleted snake': track({ is_delete: true }),
+    'deleted camel': camelTrack({ isDelete: true }),
+    'deleted alt': track({ is_deleted: true }),
+    'unlisted snake': track({ is_unlisted: true }),
+    'unlisted camel': camelTrack({ isUnlisted: true }),
+    'not streamable snake': track({ is_streamable: false }),
+    'not streamable camel': camelTrack({ isStreamable: false }),
+    'unavailable snake': track({ is_available: false }),
+    'unavailable camel': camelTrack({ isAvailable: false }),
+    'stream gated snake': track({ is_stream_gated: true }),
+    'stream gated camel': camelTrack({ isStreamGated: true }),
+    'stream conditions snake': track({ stream_conditions: { usdc_purchase: { price: 100 } } }),
+    'stream conditions camel': camelTrack({ streamConditions: { tipUserId: 1 } }),
+    'stream conditions empty object': track({ stream_conditions: {} }),
+    'access stream false': track({ access: { stream: false, download: false } }),
+    'access stream truthy string': track({ access: { stream: 'true' } }),
+    'access unknown shape': track({ access: { streamable: true } }),
+    'access null': track({ access: null }),
+    'access array': track({ access: [true] }),
+    'access string': track({ access: 'public' }),
+    'casings disagree': track({ isDelete: true }),
+    'flag not boolean': track({ is_delete: 'false' }),
+    'gated not boolean': track({ is_stream_gated: 1 }),
+    'id bad chars': track({ id: 'ab-cd' }),
+    'id too long': track({ id: 'a'.repeat(33) }),
+    'id not string': track({ id: 42 }),
+    'duration zero': track({ duration: 0 }),
+    'duration too long': track({ duration: 7201 }),
+    'duration fraction': track({ duration: 30.5 }),
+    'duration string': track({ duration: '215' }),
+    'no title': track({ title: '' }),
+    'title only controls': track({ title: '\u0000‮⁦' }),
+    'title not string': track({ title: { toString: () => 'x' } }),
+    'title number': track({ title: 7 }),
+    'no user': track({ user: undefined }),
+    'user not object': track({ user: 'Artista' }),
+    'artist not string': track({ user: { name: ['Artista'] } }),
+    'artist blank': track({ user: { name: '   ' } }),
+    'no permalink': track({ permalink: undefined }),
+    'permalink with host': track({ permalink: 'evil.test/a/b' }),
+    'permalink with scheme': track({ permalink: 'https://evil.test/a/b' }),
+    'permalink protocol relative path': track({ permalink: '//evil.test/a' }),
+    'permalink with fragment': track({ permalink: '/a/b#x' }),
+    'permalink with query': track({ permalink: '/a/b?x=1' }),
+    'permalink with backslash': track({ permalink: '/a\\b/c' }),
+    'permalink with bidi': track({ permalink: '/a/‮b' }),
+    'permalink with space': track({ permalink: '/a/b c' }),
+    'permalink one segment': track({ permalink: '/a' }),
+    'permalink over long': track({ permalink: '/a/' + 'b'.repeat(240) }),
+    'not an object': 'D7KyD',
+    'an array': [track()],
+    'a null': null
+  }
+  for (const [name, item] of Object.entries(drops)) t.is(fromTrack(item), null, name)
+})
+
+test('fromTrack: genre and year only when usable', (t) => {
+  const info = (extra) => {
+    const out = fromTrack(track(extra))
+    return { genre: out.genre, year: out.year, has: [Object.hasOwn(out, 'genre'), Object.hasOwn(out, 'year')] }
+  }
+  t.alike(info({ genre: '  Samba  ', release_date: '2024-01-31' }), { genre: 'Samba', year: 2024, has: [true, true] })
+  t.alike(info({ release_date: '2024-01-31T00:00:00Z' }), { genre: undefined, year: 2024, has: [false, true] }, 'a full ISO time keeps the year')
+  t.alike(info({ release_date: '1900-01-01' }).year, 1900)
+  t.alike(info({ release_date: '2100-12-31' }).year, 2100)
+  const long = info({ genre: 'g'.repeat(60) })
+  t.is(Array.from(long.genre).length, 40, 'cut to 40 code points')
+  t.is(info({ genre: 'Fo\u0000rr\u202eó' }).genre, 'Forró', 'controls and bidi are dropped')
+  for (const genre of ['', '   ', '\u202e', 42, null, ['Samba'], { toString: () => 'Samba' }]) {
+    t.alike(info({ genre }).has, [false, false], 'no genre for ' + JSON.stringify(genre))
+  }
+  for (const date of [undefined, null, '', '2024', '24-01-31', '2024/01/31', '1899-12-31', '2101-01-01', '0000-01-01', 'x2024-01-31', 20240131, ['2024-01-31'], '٢٠٢٤-01-31']) {
+    t.alike(info({ release_date: date }).has, [false, false], 'no year for ' + JSON.stringify(date))
+  }
+  t.alike(info({ releaseDate: '2024-01-31', Genre: 'Samba', mood: 'Calmo' }).has, [false, false], 'no other field is read')
+  t.absent(Object.hasOwn(fromPlaylist(playlist({ genre: 'Samba', release_date: '2024-01-31' })), 'genre'), 'a playlist has no genre')
+  t.absent(Object.hasOwn(fromPlaylist(playlist({ genre: 'Samba', release_date: '2024-01-31' })), 'year'), 'a playlist has no year')
+})
+
+test('fromTrack: hostile text is cleaned and cut', (t) => {
+  const out = fromTrack(track({ title: '  Samba‮  de\u0007\nTeste⁦ ', user: { name: 'Art\u0000ista' + 'x'.repeat(200) } }))
+  t.is(out.title, 'Samba de Teste')
+  t.is(Array.from(out.artist).length, 80)
+  t.ok(out.artist.startsWith('Artistax'))
+  // The longest kept URL leaves room for the card fragment.
+  const long = '/a/' + 'b'.repeat(240 - 'https://audius.co/a/'.length)
+  t.is(fromTrack(track({ permalink: long })).url.length, 240)
+})
+
+test('fromPlaylist: both casings and each exclusion rule', (t) => {
+  const expected = { id: 'pL4yA', title: 'Roda de Choro', artist: 'Artista', count: 12, url: 'https://audius.co/artista/playlist/roda-de-choro', art: ART, artLarge: null }
+  t.alike(fromPlaylist(playlist()), expected)
+  t.alike(Object.keys(fromPlaylist(playlist())).sort(), ['art', 'artLarge', 'artist', 'count', 'id', 'title', 'url'])
+  t.alike(fromPlaylist(playlist({ artwork: { '150x150': ART, '480x480': ART_LARGE } })), { ...expected, artLarge: ART_LARGE })
+  t.alike(fromPlaylist({ id: 'pL4yA', playlistName: 'Roda de Choro', trackCount: 12, permalink: '/artista/playlist/roda-de-choro', user: { name: 'Artista' }, isPrivate: false, isDelete: false }), { ...expected, art: null })
+  t.alike(fromPlaylist(playlist({ artwork: { '150x150': 'https://10.0.0.1/a.jpg' } })), { ...expected, art: null }, 'a bad cover keeps the playlist')
+  t.alike(fromPlaylist(playlist({ track_count: 500 })).count, 500)
+  const drops = {
+    'private snake': playlist({ is_private: true }),
+    'private camel': playlist({ isPrivate: true }),
+    'deleted snake': playlist({ is_delete: true }),
+    'deleted camel': playlist({ isDelete: true }),
+    'stream gated': playlist({ is_stream_gated: true }),
+    'stream conditions': playlist({ stream_conditions: { usdc_purchase: {} } }),
+    'access unknown shape': playlist({ access: { stream: 'yes' } }),
+    'count zero': playlist({ track_count: 0 }),
+    'count too big': playlist({ track_count: 501 }),
+    'count missing': playlist({ track_count: undefined }),
+    'count string': playlist({ track_count: '12' }),
+    'name missing': playlist({ playlist_name: undefined }),
+    'name not string': playlist({ playlist_name: 12 }),
+    'casings disagree': playlist({ playlistName: 'Outra' }),
+    'artist missing': playlist({ user: null }),
+    'id bad': playlist({ id: 'p/1' }),
+    'permalink with host': playlist({ permalink: 'evil.test/a/b' }),
+    'permalink with fragment': playlist({ permalink: '/a/playlist/b#x' }),
+    'not an object': 7
+  }
+  for (const [name, item] of Object.entries(drops)) t.is(fromPlaylist(item), null, name)
+})
+
+test('artOf keeps only a plain https hostname URL', (t) => {
+  const of = (href) => artOf({ artwork: { '150x150': href } })
+  t.is(of(ART), ART)
+  t.is(of('https://Creatornode.Example/a/b.jpg?x=1'), 'https://creatornode.example/a/b.jpg?x=1')
+  const long = 'https://creatornode.example/' + 'a'.repeat(512 - 'https://creatornode.example/'.length)
+  t.is(long.length, 512)
+  t.is(of(long), long, '512 characters pass')
+  const bad = {
+    http: 'http://creatornode.example/art.jpg',
+    'ipv4 literal': 'https://203.0.113.9/art.jpg',
+    'ipv4 folded': 'https://0x7f.1/art.jpg',
+    'ipv6 literal': 'https://[2001:db8::1]/art.jpg',
+    'single label': 'https://localhost/art.jpg',
+    port: 'https://creatornode.example:8443/art.jpg',
+    'default port spelled': 'https://creatornode.example:443x/art.jpg',
+    username: 'https://user@creatornode.example/art.jpg',
+    password: 'https://user:pass@creatornode.example/art.jpg',
+    fragment: 'https://creatornode.example/art.jpg#x',
+    'empty fragment': 'https://creatornode.example/art.jpg#',
+    'over 512': long + 'a',
+    'not a url': 'nao e url',
+    'data url': 'data:image/png;base64,AAAA',
+    'javascript url': 'javascript:alert(1)'
+  }
+  for (const [name, href] of Object.entries(bad)) t.is(of(href), null, name)
+  const large = (href) => artOf({ artwork: { '480x480': href } }, '480x480')
+  t.is(large(ART), ART)
+  t.is(large(long), long, '480x480: 512 characters pass')
+  for (const [name, href] of Object.entries(bad)) t.is(large(href), null, '480x480 ' + name)
+  for (const v of [42, null, undefined, {}, [ART], { toString: () => ART }]) t.is(large(v), null, '480x480 non-string ' + typeof v)
+  const hostileLarge = { artwork: {} }
+  Object.defineProperty(hostileLarge.artwork, '480x480', { get () { throw new Error('boom') } })
+  t.is(artOf(hostileLarge, '480x480'), null, '480x480 never throws')
+  t.is(fromTrack(track({ artwork: hostileLarge.artwork })).artLarge, null, 'a throwing artwork keeps the track')
+  for (const v of [42, null, undefined, {}, ['https://creatornode.example/a.jpg'], { toString: () => ART }]) t.is(of(v), null, 'non-string ' + typeof v)
+  t.is(artOf({ artwork: { '480x480': ART, '1000x1000': ART } }), null, 'only 480x480 and larger')
+  t.is(artOf({ artwork: { '480x480': ART, '1000x1000': ART } }, '150x150'), null, 'the default is 150x150')
+  t.is(artOf({ artwork: { '150x150': ART, '1000x1000': ART } }, '480x480'), null, 'no 480x480')
+  t.is(artOf({ artwork: { '150x150': ART, '480x480': ART_LARGE } }, '480x480'), ART_LARGE)
+  t.is(artOf({ artwork: { '1000x1000': ART } }, '1000x1000'), null, '1000x1000 is never read')
+  t.is(artOf({ artwork: { original: ART } }, 'original'), null, 'nor any other size')
+  t.is(artOf({ artwork: [ART] }), null, 'artwork an array')
+  t.is(artOf({ artwork: ART }), null, 'artwork a string')
+  t.is(artOf({}), null)
+  t.is(artOf(null), null)
+  t.is(artOf('x'), null)
+  const hostile = { artwork: {} }
+  Object.defineProperty(hostile.artwork, '150x150', { get () { throw new Error('boom') } })
+  t.is(artOf(hostile), null, 'never throws')
+})
+
+test('fromResolve: track, playlist, anything else', (t) => {
+  t.alike(fromResolve({ data: track() }), { kind: 'track', item: EXPECTED_TRACK })
+  t.alike(fromResolve({ data: [playlist()] }), { kind: 'playlist', item: fromPlaylist(playlist()) })
+  t.alike(fromResolve({ data: playlist() }).kind, 'playlist')
+  t.is(fromResolve({ data: [playlist(), playlist()] }), null)
+  t.is(fromResolve({ data: [] }), null)
+  t.is(fromResolve({ data: track({ is_unlisted: true }) }), null)
+  t.is(fromResolve({ data: playlist({ is_private: true }) }), null)
+  t.is(fromResolve({ data: { handle: 'artista', name: 'Artista' } }), null)
+  t.is(fromResolve({ data: null }), null)
+  t.is(fromResolve(null), null)
+  t.is(fromResolve('x'), null)
+})
+
+test('listOf and nextCursor', (t) => {
+  const many = Array.from({ length: 80 }, (_, i) => ({ i }))
+  t.is(listOf({ data: many }).length, 50)
+  t.alike(listOf({ data: [] }), [])
+  t.is(listOf({ data: 'x' }), null)
+  t.is(listOf({}), null)
+  t.is(listOf(null), null)
+  t.is(listOf([1, 2]), null)
+  t.is(nextCursor(0, 20, 20), '20')
+  t.is(nextCursor(40, 25, 20), '60')
+  t.is(nextCursor(0, 19, 20), null)
+  t.is(nextCursor(MAX_OFFSET - 10, 20, 20), null)
+  t.is(nextCursor(MAX_OFFSET - 20, 20, 20), String(MAX_OFFSET))
+  t.is(nextCursor('0', 20, 20), null)
+  t.is(nextCursor(0, 20, 0), null)
+  t.is(nextCursor(-20, 20, 20), null)
+})
+
+test('ID_RE', (t) => {
+  t.ok(ID_RE.test('D7KyD'))
+  t.absent(ID_RE.test(''))
+  t.absent(ID_RE.test('a-b'))
+  t.absent(ID_RE.test('a'.repeat(33)))
+})
+
+test('the module does no I/O of its own', (t) => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'lib', 'account', 'audius-provider.js'), 'utf8')
+  const required = [...source.matchAll(/require\('([^']+)'\)/g)].map((m) => m[1]).sort()
+  t.alike(required, ['./safe-fetch', '@varanda/rpc'])
+})

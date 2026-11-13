@@ -508,17 +508,64 @@ export function onAppStateChange (state, { canClear, clear = clearChatMedia } = 
   return true
 }
 
-// One voice note plays at a time: claiming playback pauses whatever played
+// One player plays at a time: claiming playback pauses whatever played
 // before. -> release(), which forgets the claim only if it is still current.
 let activePlayer = null
+let activeBound = false
+let currentPlaybackEpoch = 0
+let playbackClaims = 0
 
-export function claimPlayback (player) {
+export function playbackClaimCount () {
+  return playbackClaims
+}
+
+export function playbackBusy () {
+  return activePlayer !== null
+}
+
+// A repeat of the same screen must not expire a claim that already read the epoch.
+export function screenWatcher () {
+  let last = null
+  return (key) => {
+    if (key === last) return false
+    last = key
+    return true
+  }
+}
+
+// Read it at the tap (or after the screen is shown), never in a layout effect.
+export function playbackEpoch () {
+  return currentPlaybackEpoch
+}
+
+export function claimPlayback (player, { bound = false, epoch = currentPlaybackEpoch } = {}) {
   if (!player || typeof player.pause !== 'function') return () => {}
+  if (bound && epoch !== currentPlaybackEpoch) {
+    try { player.pause() } catch {}
+    return () => {}
+  }
   if (activePlayer !== null && activePlayer !== player) {
     try { activePlayer.pause() } catch {}
   }
+  // A provider frame cannot be paused from outside, so its card watches this
+  // count and drops the frame when any other player starts.
+  playbackClaims++
   activePlayer = player
-  return () => { if (activePlayer === player) activePlayer = null }
+  activeBound = bound
+  return () => {
+    if (activePlayer === player) {
+      activePlayer = null
+      // stopPlayback leaves this set, so a claim that let go must clear it
+      // or the next leave still takes the bound path.
+      activeBound = false
+    }
+  }
+}
+
+export function stopBoundPlayback () {
+  // Pending loads must expire even when no player has claimed playback yet.
+  currentPlaybackEpoch++
+  if (activeBound) stopPlayback()
 }
 
 export function stopPlayback () {

@@ -506,3 +506,44 @@ test('core group sessions keep text cards and reject image cards', async (t) => 
     t.alike((await m.call('group.read', { group })).items[0].card, card)
   }
 })
+
+test('group.react and group.reactors through RPC: summary on group.read, announces the group', async (t) => {
+  const m = await person(t)
+  const { group } = await m.call('group.create', { name: 'Horta', join: 'open', community: await communityOf(m) })
+  await m.call('group.post', { group, text: 'um' })
+  const target = { writer: group, seq: 1 }
+  m.events.splice(0)
+  t.alike(await m.call('group.react', { group, target, emoji: '\u{1f44d}' }), { ok: true })
+  t.alike(m.events, [{ event: 'groups.changed', data: { group } }])
+  const page = await m.call('group.read', { group })
+  t.alike(page.items[0].reactions, [{ emoji: '\u{1f44d}', count: 1, mine: true }])
+  t.alike(await m.call('group.reactors', { group, target }), { reactions: [{ emoji: '\u{1f44d}', count: 1, by: [m.publicKey] }] })
+  t.alike(await m.call('group.react', { group, target, emoji: '' }), { ok: true })
+  t.absent('reactions' in (await m.call('group.read', { group })).items[0])
+  t.alike(await m.call('group.reactors', { group, target }), { reactions: [] })
+  t.alike(await failure(m.call('group.react', { group, target: { writer: group, seq: 9 }, emoji: '\u{1f44d}' })), { code: 'USAGE', message: 'mensagem não encontrada' })
+  t.alike(await failure(m.call('group.react', { group, target, emoji: 'x' })), { code: 'USAGE', message: 'parâmetro inválido: emoji' })
+  t.alike(await failure(m.call('group.react', { group, target, emoji: '\u{1f44d}', page: OTHER })), { code: 'USAGE', message: 'parâmetro desconhecido' })
+  t.alike(m.session.internal, [])
+})
+
+test('group.read through RPC fits one message with many reactors on every post', async (t) => {
+  const m = await person(t)
+  const { group } = await m.call('group.create', { name: 'Horta', join: 'open', community: await communityOf(m) })
+  for (let i = 0; i < 26; i++) await m.call('group.post', { group, text: 'post ' + i })
+  // 200 reactors per post: forwarding the `by` lists would not fit MAX_MESSAGE.
+  const by = Array.from({ length: 200 }, (_, i) => i.toString(16).padStart(64, '0'))
+  const build = groups.buildGroup
+  groups.buildGroup = (...args) => {
+    const view = build(...args)
+    for (const p of view.posts) p.reactions = [{ emoji: '\u{1f44d}', count: by.length, by }]
+    return view
+  }
+  try {
+    const page = await m.call('group.read', { group, limit: 26 })
+    t.is(page.items.length, 26)
+    t.ok(page.items.every((p) => p.reactions.length === 1 && p.reactions[0].count === 200 && p.reactions[0].mine === false && !('by' in p.reactions[0])))
+  } finally {
+    groups.buildGroup = build
+  }
+})

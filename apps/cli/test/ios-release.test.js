@@ -89,6 +89,7 @@ test('ios-release.yml: install without scripts and the exact eas command', (t) =
   t.absent(/eas (submit|update|workflow)/.test(code), 'no other eas command')
   t.ok(/^ {8}working-directory:\s*apps\/app\s*$/m.test(job), 'eas runs from apps/app')
   t.ok(/^ {10}DISABLE_EAS_ANALYTICS:\s*'1'\s*$/m.test(job), 'eas analytics off')
+  t.ok(/^ {10}EXPO_NO_CAPABILITY_SYNC:\s*'1'\s*$/m.test(job), 'eas never changes capabilities in the Apple account')
 })
 
 test('ios-release.yml: only EXPO_TOKEN and VARANDA_IOS_RELEASE, only in env: or if:', (t) => {
