@@ -9674,3 +9674,45 @@ Nenhuma conferência em aparelho nem com o provedor real foi feita nesta tarefa.
 - [ ] Os quatro players incorporados e a regra de leitor de tela para início automático continuam como antes.
 - [ ] Fechar e reabrir o app, ou recarregar a página na web, restaura o som. A escolha não aparece em outro aparelho, e **Tocar música sozinha** mantém o valor guardado.
 - [ ] Uma conta que aceitou a versão 46 recebe os Termos de Uso e a Política de Privacidade 47 para novo aceite.
+
+## 209. A abertura espera Momentos e os detalhes da primeira tela
+
+A capa de abertura é o splash. No nativo, com sessão guardada e instantâneo de no máximo 24 h, a prévia das linhas guardadas fica no mesmo lugar. A folga `DETAILS_GRACE_MS`, de 400 ms depois da primeira página, saiu. A capa sai com a primeira tela inteira: nomes, metadados das fotos dos autores, contagens e a faixa de Momentos.
+
+A capa fica até as duas condições abaixo, ou até 5 s (`CONTENT_PATIENCE_MS`) se uma leitura trava. Outra aba, ou uma tela empilhada aberta na partida (um link), aparece na hora: `ruaFeedReady` só espera com A Rua na primeira tela. O mínimo de 1,5 s continua só enquanto o app carrega ou conecta, ou quando a introdução ou os Termos vêm em seguida. Quem volta, com a configuração lembrada, não tem espera fixa.
+
+Detalhes das primeiras linhas, em `apps/app/src/splashGate.js`. `profileAnswered` aceita `null` ou um objeto com `avatar` definido: o metadado da foto chegou, e `null` conta. `feedDetailsReady` espera esse perfil, a resposta da publicação original de cada republicação e as contagens de pelo menos uma linha. `strictProfiles` só vale como `true` literal. A Rua passa `strictProfiles: node.hosted === true`. Num nó hospedado, a semente do feed (nome com `avatar` indefinido) não conta, e a resposta de `profile.read` precisa ter chegado. Num nó sem hospedagem, qualquer resposta de `profileOf` diferente de `undefined` continua valendo. Sem nó hospedado, sem rede, com o índice indexando ou com a resposta de contagens incompleta, as contagens não seguram a capa. Uma primeira leitura do feed que falha encerra página e detalhes.
+
+Faixa de Momentos, em `momentsSettled`. A fase `off` (nó sem hospedagem) ou `error` (a leitura falhou) assenta na hora. Com `moments.read` em `ready` e a faixa fora da tela, também assenta. Com a faixa na tela, a lista de vistos precisa estar carregada e cada autor de anel precisa de `profileAnswered`. Falha ao carregar a lista conta como carregada, com lista vazia. A Rua pede esses perfis com `resolveMany(ringKeys)`, também depois da trava. Quando a trava passa, grava a marca `moments` e chama `onBoot('moments')`. Agindo como Página, `onBoot('page')`, `onBoot('details')` e `onBoot('moments')` saem juntos: não há feed de membro para esperar.
+
+O instantâneo guardado marca `page` e `details` na hora e semeia os nomes. Não marca `moments`. Sozinho, não levanta a capa: ela continua até a faixa assentar, ou até o teto de 5 s.
+
+Em `apps/app/App.js`, `feedBoot` guarda `page`, `details` e `moments`. `feedReady` é `ruaFeedReady(...)`. A marca `splash-end` sai com `feedReady` ou `patience`. `grace` deixou de ser emitida. `bootProgress` vai a 0,8 na página, 0,9 nos detalhes e 1 com detalhes e Momentos. A barra só cresce.
+
+Sem mudança de protocolo, RPC nem Termos.
+
+### Verificação automatizada
+
+A partir da raiz. A lista é um roteiro, não um registro de execução.
+
+- `node apps/app/test/splashGate.test.js`
+- `node apps/app/test/ruaSnapshot.test.js`
+- `npm run lint`
+- `npm test`
+- `npm run demo`
+
+`splashGate.test.js` cobre `profileAnswered`, `momentsSettled`, `ruaFeedReady`, `strictProfiles`, a barra, a ausência de `DETAILS_GRACE_MS`, `resolveMany(ringKeys)` e `onBoot('moments')` ao agir como Página. `ruaSnapshot.test.js` cobre o instantâneo marcando página e detalhes sem marcar Momentos. `npm run lint`, `npm test` e `npm run demo` são os passos da CI.
+
+### Verificação manual
+
+Nenhuma passagem em aparelho foi feita nesta seção. A ordem é o build de debug do Android (emulador ou aparelho) primeiro, depois o simulador iOS, depois a web e o PWA.
+
+- [ ] Abrir já conectado, com a primeira página guardada: A Rua aparece com os anéis de Momentos, nomes, fotos e contagens já no lugar, sem a linha pular.
+- [ ] Abrir já conectado, sem a primeira página guardada: o mesmo.
+- [ ] Com `moments.read` lento, a capa fica até a faixa assentar ou cerca de 5 s.
+- [ ] Um link de conversa ou de perfil aberto na partida mostra a tela na hora.
+- [ ] Num nó sem hospedagem, a capa não espera Momentos.
+- [ ] Travar e destravar não traz a capa de volta.
+
+Limites: os bytes das fotos das publicações, das imagens de avatar e da mídia dos momentos não fazem parte do sinal. A conferência mais estrita do autor roda só num nó hospedado. Nenhuma passagem em aparelho foi feita nesta seção.
+
