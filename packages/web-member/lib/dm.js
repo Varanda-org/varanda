@@ -102,6 +102,8 @@ const NO_STAMPS = 'o limite de envio de hoje acabou'
 const BAD_REPLY = 'responda uma mensagem desta conversa'
 const NO_TARGET = 'mensagem não encontrada'
 const REACT_MAX = 'limite de reações para esta mensagem atingido'
+const NOT_REACTABLE = 'esta mensagem não aceita reações'
+const DIGEST_RE = /^[0-9a-f]{64}$/
 const TOO_LONG = 'mensagem longa demais'
 const BAD_TEXT = 'mensagem inválida'
 const PULL_BUSY = 'mensagens já em andamento'
@@ -581,8 +583,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       followSet: follows,
       seen,
       ops,
-      messages: messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : own, text: m.text, replyTo: m.replyTo, fwd: m.fwd, media: m.media, card: m.card, at: m.at, filedAt: m.filedAt })),
-      reactions: (reactions || []).map((r) => ({ id: r.id, from: r.from, to: r.to, target: { from: r.target.from, id: r.target.id }, emoji: r.emoji, rev: r.rev, filedAt: r.filedAt }))
+      messages: messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : own, text: m.text, replyTo: m.replyTo, fwd: m.fwd, media: m.media, card: m.card, at: m.at, filedAt: m.filedAt, digest: m.digest })),
+      reactions: (reactions || []).map((r) => ({ id: r.id, from: r.from, to: r.to, target: { from: r.target.from, id: r.target.id, digest: r.target.digest }, emoji: r.emoji, rev: r.rev, filedAt: r.filedAt }))
     })
     // A store locked (or relocked) since is never remembered.
     const current = ctx === personal || pageStores.get(ctx.page) === ctx
@@ -731,9 +733,11 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     }
   }
 
-  // `reactions` only when the fold gave the row one.
+  // `reactions` only when the fold gave the row one; `reactable: false` only
+  // on a row stored without a digest, which never has reactions.
   function threadRow (m, media) {
     const row = { id: m.id, from: m.from, text: m.text, replyTo: m.replyTo, fwd: m.fwd, at: m.at, mine: m.mine, media, card: m.card ? copyLinkCard(m.card, mediaItem) : null }
+    if (typeof m.digest !== 'string' || !DIGEST_RE.test(m.digest)) row.reactable = false
     if (Array.isArray(m.reactions) && m.reactions.length > 0) row.reactions = m.reactions.map((r) => ({ emoji: r.emoji, mine: r.mine }))
     return row
   }
@@ -1421,8 +1425,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     } catch (err) {
       throw new UsageError(err && err.message === TOO_LONG ? TOO_LONG : BAD_TEXT)
     }
-    let sealedTo, sealedSelf
+    let sealedTo, sealedSelf, digest
     try {
+      digest = dm.frameDigest(inner)
       sealedTo = dm.sealInner(inner, recipientBox)
       sealedSelf = dm.sealInner(inner, b4a.toString(box.publicKey, 'hex'))
     } catch {
@@ -1438,7 +1443,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       at,
       drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])],
       acked: [false, false],
-      row: { t: 'msg', id, peer: to, from: own, text, replyTo, fwd, media: items, card, at, mine: true },
+      row: { t: 'msg', id, peer: to, from: own, text, replyTo, fwd, media: items, card, at, mine: true, digest },
       blobs: sealedBlobs,
       plains
     }
@@ -1459,6 +1464,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       const c = await threadOf(own, to)
       const row = c === null ? undefined : c.messages.find((m) => m.from === target.from && m.id === target.id)
       if (row === undefined) throw new UsageError(NO_TARGET)
+      // A row stored without a digest (an earlier build, a Página's legacy
+      // history) takes no reaction: nothing would bind the op to its content.
+      if (typeof row.digest !== 'string' || !DIGEST_RE.test(row.digest)) throw new UsageError(NOT_REACTABLE)
       const prior = pending.get(key)
       if (prior === undefined) {
         const mine = Array.isArray(row.reactions) ? row.reactions.find((r) => r.mine) : undefined
@@ -1466,7 +1474,10 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       }
       // A different emoji replaces the pending op: its unacked drops are
       // abandoned, and the higher rev wins wherever both arrive.
-      entry = await newReaction(own, keyPair, { to, target, emoji, key }, recipientBox, prior === undefined ? 0 : prior.rx.rev)
+      // The target from the stored row, never from the caller: its digest
+      // binds the reaction to this message.
+      const t = { from: row.from, id: row.id, digest: row.digest }
+      entry = await newReaction(own, keyPair, { to, target: t, emoji, key }, recipientBox, prior === undefined || prior.rx.digest !== row.digest ? 0 : prior.rx.rev)
       if (pending.get(key) !== undefined) {
         dropEntry(pending.get(key))
         pending.delete(key)
@@ -1483,7 +1494,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   }
 
   // rev: one past the highest the store or the pending op (pendingRev)
-  // holds for (to, target, own), so an unacked op never ties with the next.
+  // holds for (to, target, own), target digest included, so an unacked op never ties with the next.
   async function newReaction (own, keyPair, { to, target, emoji, key }, recipientBox, pendingRev) {
     if (recipientBox === null) throw new UsageError(NO_BOX)
     const id = dm.newMessageId()
@@ -1493,7 +1504,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     // device of this passkey meanwhile, and a stale rev would lose to it.
     const rev = Math.max(local.reactionRev(to, target, own), pendingRev) + 1
     if (rev > dm.DM_REACT_REV_MAX) throw new UsageError(REACT_MAX)
-    const t = { from: target.from, id: target.id }
+    const t = { from: target.from, id: target.id, digest: target.digest }
     let inner
     try {
       inner = dm.buildInner({ kind: 'react', id, at, to, target: t, emoji, rev, cert }, keyPair)
@@ -1518,7 +1529,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])],
       acked: [false, false],
       row: { t: 'rx', id, peer: to, from: own, to, target: t, emoji, rev, at, mine: true },
-      rx: { emoji, rev },
+      rx: { emoji, rev, digest: t.digest },
       blobs: [],
       plains: null
     }
@@ -1751,7 +1762,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (inner === null) return null
     const body = dm.openInner(inner, own, { association, revokedIssuers: mod.revokedIssuers })
     if (body === null || dm.pageInnerStale(body, Date.now())) return null
-    return rowOf(own, body, ops, batch, mod.blocked, local)
+    return rowOf(own, body, ops, batch, mod.blocked, local, dm.bodyDigest(body))
   }
 
   // The same rules with the page as self, opened by the page's boxes; only
@@ -1768,6 +1779,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       if (body === null || dm.pageInnerStale(body, Date.now())) return null
       // A Página conversation has no reactions: a v4 body is never filed.
       if (body.kind === 'react') return null
+      // Of the body as signed, before a carried legacy key is renamed.
+      const digest = dm.bodyDigest(body)
       // A drop to the key a carried legacy box belonged to is filed for this
       // page, as the bundle's rows are.
       if (key !== p.page) {
@@ -1775,12 +1788,13 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         body = { ...body, from: body.from === key ? p.page : body.from, to: body.to === key ? p.page : body.to }
         if (body.from === body.to) return null
       }
-      return rowOf(p.page, body, ops, batch, mod.association, p.ctx.local)
+      return rowOf(p.page, body, ops, batch, mod.association, p.ctx.local, digest)
     }
     return null
   }
 
-  function rowOf (own, body, ops, batch, blocked, lc) {
+  // digest: dm.bodyDigest of the verified body (what a reaction names).
+  function rowOf (own, body, ops, batch, blocked, lc, digest) {
     if ((body.kind === 'msg' || body.kind === 'react') && !body.mine && blocked.has(body.from)) return null
     if (body.kind === 'react') return reactionRowOf(own, body, ops, batch, lc)
     if (body.kind === 'ctl') {
@@ -1791,7 +1805,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (lc.hasMessage(body.from, body.id) || batch.some((r) => r.t === 'msg' && r.from === body.from && r.id === body.id)) return null
     // A blocked sender's messages are dropped once they open.
     if (!body.mine && !dmFold.canSend({ self: own, peer, ops })) return null
-    return { t: 'msg', id: body.id, peer, from: body.from, text: body.text, replyTo: body.replyTo, fwd: body.fwd === 1 ? 1 : 0, media: Array.isArray(body.media) ? body.media.map(mediaItem) : null, card: body.card ? copyLinkCard(body.card, mediaItem) : null, at: body.at, mine: body.mine }
+    return { t: 'msg', id: body.id, peer, from: body.from, text: body.text, replyTo: body.replyTo, fwd: body.fwd === 1 ? 1 : 0, media: Array.isArray(body.media) ? body.media.map(mediaItem) : null, card: body.card ? copyLinkCard(body.card, mediaItem) : null, at: body.at, mine: body.mine, digest }
   }
 
   // Kept even while its target is not stored: the fold applies it once the
@@ -1800,7 +1814,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (lc.hasReaction(body.from, body.id) || batch.some((r) => r.t === 'rx' && r.from === body.from && r.id === body.id)) return null
     const peer = body.mine ? body.to : body.from
     if (!body.mine && !dmFold.canSend({ self: own, peer, ops })) return null
-    return { t: 'rx', id: body.id, peer, from: body.from, to: body.to, target: { from: body.target.from, id: body.target.id }, emoji: body.emoji, rev: body.rev, at: body.at, mine: body.mine }
+    return { t: 'rx', id: body.id, peer, from: body.from, to: body.to, target: { from: body.target.from, id: body.target.id, digest: body.target.digest }, emoji: body.emoji, rev: body.rev, at: body.at, mine: body.mine }
   }
 
   // ---- Páginas (docs/rpc.md 5.114) ----
@@ -1940,7 +1954,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         at: b.at,
         drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])],
         acked: [false, false],
-        row: { t: 'msg', id: b.id, peer: b.to, from: page, text: b.text, replyTo: b.replyTo, fwd: b.fwd, media: null, card: null, at: b.at, mine: true },
+        row: { t: 'msg', id: b.id, peer: b.to, from: page, text: b.text, replyTo: b.replyTo, fwd: b.fwd, media: null, card: null, at: b.at, mine: true, digest: dm.bodyDigest(b) },
         blobs: [],
         plains: [],
         local: ctx.local

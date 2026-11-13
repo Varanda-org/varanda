@@ -12,6 +12,19 @@ export function dmReactions (reactions) {
     .map((row) => ({ emoji: row.emoji, count: 1, mine: row.mine === true }))
 }
 
+// dm.thread marks a row that takes no reaction (stored before message
+// digests) with reactable: false; the node refuses dm.react on it.
+export function dmReactable (message) {
+  return !!message && !message.deleted && message.reactable !== false
+}
+
+// A held older row takes only the reaction state of a fresh read: its
+// reactions and its reactable mark.
+export function withFreshReactions (row, fresh) {
+  const { reactable, ...rest } = row
+  return { ...rest, reactions: fresh.reactions, ...(fresh.reactable === false ? { reactable: false } : {}) }
+}
+
 // An incomplete answer can identify a person; an index hint cannot hide chips.
 export function dmReactionGate ({ read, peer, peerKind, pageKey = null, hosted, unlocked, online, isTop, blocked, folder }) {
   const hidden = pageKey !== null || peerKind === 'page'

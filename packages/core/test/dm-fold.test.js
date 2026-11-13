@@ -309,8 +309,11 @@ function rid (n) {
 }
 
 // A reaction by `who` (ME or the peer) to row m of the conversation with peer.
+// A row takes a reaction only with a digest: m gets one (id twice is hex64)
+// unless the test set it.
 function reaction (who, peer, m, emoji, rev, filedMin = 30, over = {}) {
-  return { id: rid(rev), from: who, to: who === ME ? peer : ME, target: { from: m.from, id: m.id }, emoji, rev, at: T(filedMin), filedAt: F(filedMin), ...over }
+  if (m.digest === undefined) m.digest = m.id + m.id
+  return { id: rid(rev), from: who, to: who === ME ? peer : ME, target: { from: m.from, id: m.id, digest: m.digest }, emoji, rev, at: T(filedMin), filedAt: F(filedMin), ...over }
 }
 
 function rowOf (r, m) {
@@ -334,7 +337,7 @@ test('reactions: either person reacts, rows carry { emoji, mine } only when non-
   t.alike(rowOf(r, a).reactions, [{ emoji: HEART, mine: false }, { emoji: THUMBS, mine: true }])
   t.alike(rowOf(r, b).reactions, [{ emoji: FIRE, mine: false }], 'a reaction to my own message')
   t.absent('reactions' in rowOf(r, c), 'no key without a reaction')
-  t.alike(Object.keys(rowOf(r, a)), ['id', 'from', 'to', 'text', 'replyTo', 'fwd', 'media', 'card', 'at', 'sentAt', 'mine', 'peer', 'reactions'])
+  t.alike(Object.keys(rowOf(r, a)), ['id', 'from', 'to', 'text', 'replyTo', 'fwd', 'media', 'card', 'at', 'sentAt', 'mine', 'peer', 'digest', 'reactions'])
 })
 
 test('reactions: the highest rev wins whatever the arrival order, ties by the higher id', (t) => {
@@ -366,9 +369,10 @@ test('reactions: an unknown, cut or other-thread target is ignored; a stored ear
   const early = reaction(ANA, ANA, a, HEART, 1, 1)
   t.is(runR({ messages: [], follows: [ANA] }, [early]).inbox.length, 0, 'a reaction alone opens no thread')
   t.alike(rowOf(runR({ messages: [a], follows: [ANA] }, [early]), a).reactions, [{ emoji: HEART, mine: false }], 'filed before its target')
-  const unknown = { ...reaction(ANA, ANA, a, HEART, 1), target: { from: ANA, id: 'c'.repeat(32) } }
+  const base = reaction(ANA, ANA, a, HEART, 1)
+  const unknown = { ...base, target: { ...base.target, id: 'c'.repeat(32) } }
   t.absent('reactions' in rowOf(runR({ messages: [a], follows: [ANA] }, [unknown]), a))
-  const wrongSender = { ...reaction(ANA, ANA, a, HEART, 1), target: { from: ME, id: a.id } }
+  const wrongSender = { ...base, target: { ...base.target, from: ME } }
   t.absent('reactions' in rowOf(runR({ messages: [a], follows: [ANA] }, [wrongSender]), a), 'ids are unique per sender')
   const b = from(BIA, 6)
   const crossed = reaction(ANA, ANA, b, HEART, 1)
@@ -394,6 +398,40 @@ test('reactions: an unknown, cut or other-thread target is ignored; a stored ear
   t.is(r.inbox[0].messages.length, DM_MESSAGES_PER_PEER)
   t.is(rowOf(r, many[0]), undefined, 'a target past the cap')
   t.absent(r.inbox[0].messages.some(m => m.reactions), 'it lands on no other row')
+})
+
+test('reactions: a reaction applies only to the stored message whose digest it names', (t) => {
+  const D1 = '1'.repeat(64)
+  const D2 = '2'.repeat(64)
+  const tg = (m, digest) => ({ target: { from: m.from, id: m.id, digest } })
+  const a = { ...from(ANA, 1), digest: D1 }
+  const ok = runR({ messages: [a], follows: [ANA] }, [reaction(ME, ANA, a, HEART, 1, 30, tg(a, D1))])
+  t.alike(rowOf(ok, a).reactions, [{ emoji: HEART, mine: true }], 'the matching digest applies')
+  t.is(rowOf(ok, a).digest, D1, 'the fold row carries the digest a new reaction names')
+  t.absent('reactions' in rowOf(runR({ messages: [a], follows: [ANA] }, [reaction(ME, ANA, a, HEART, 1, 30, tg(a, D2))]), a), 'another digest is not applied')
+  t.absent('reactions' in rowOf(runR({ messages: [a], follows: [ANA] }, [reaction(ME, ANA, a, HEART, 1, 30, tg(a, ''))]), a), "'' is ignored")
+  t.absent('reactions' in rowOf(runR({ messages: [a], follows: [ANA] }, [reaction(ME, ANA, a, HEART, 1, 30, { target: { from: a.from, id: a.id } })]), a), 'an absent digest is ignored')
+  t.absent('reactions' in rowOf(runR({ messages: [a], follows: [ANA] }, [reaction(ME, ANA, a, HEART, 1, 30, tg(a, D1.toUpperCase().replace(/1/g, 'A')))]), a), 'a malformed digest is ignored')
+
+  // Same sender and id, another text: a device without the history files
+  // the new message, and the reaction made for the old one stays off it.
+  const reused = { ...from(ANA, 5, 'outra'), id: a.id, digest: D2 }
+  const other = runR({ messages: [reused], follows: [ANA] }, [reaction(ME, ANA, a, HEART, 1, 30, tg(a, D1))])
+  t.is(rowOf(other, a).text, 'outra')
+  t.absent('reactions' in rowOf(other, a), 'not shown on a message it was not made for')
+
+  // A row stored without a digest (an earlier build) takes no reaction.
+  const b = from(ANA, 2)
+  const plain = (over) => reaction(ANA, ANA, { from: b.from, id: b.id, digest: '' }, FIRE, 1, 30, over)
+  for (const r of [plain(tg(b, '')), plain({ target: { from: b.from, id: b.id } }), plain(tg(b, D1))]) {
+    t.absent('reactions' in rowOf(runR({ messages: [b], follows: [ANA] }, [r]), b), 'no reaction on a row without a digest: ' + JSON.stringify(r.target.digest))
+  }
+  t.absent('digest' in rowOf(runR({ messages: [b], follows: [ANA] }, []), b), 'no digest key on a row without one')
+  t.absent('digest' in b, 'the test row has none')
+
+  // A non-matching op never outranks the matching one.
+  const both = runR({ messages: [a], follows: [ANA] }, [reaction(ME, ANA, a, HEART, 1, 30, tg(a, D1)), reaction(ME, ANA, a, '', 2, 31, tg(a, D2))])
+  t.alike(rowOf(both, a).reactions, [{ emoji: HEART, mine: true }])
 })
 
 test('reactions: unread and preview unchanged', (t) => {

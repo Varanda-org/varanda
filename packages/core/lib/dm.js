@@ -257,6 +257,7 @@ function validReaction (b) {
   if (b.cert !== null && (validateCertShape(b.cert) !== null || b.cert.member !== b.from)) return false
   const t = b.target
   if (!isPlainObject(t) || !hasExactKeys(t, DM_TARGET_KEYS) || !isHex32(t.id)) return false
+  if (typeof t.digest !== 'string' || !HEX64_DIGEST.test(t.digest)) return false
   if (t.from !== b.from && t.from !== b.to) return false
   if (b.emoji !== '' && !rpc.isReaction(b.emoji)) return false
   return Number.isInteger(b.rev) && b.rev >= 1 && b.rev <= DM_REACT_REV_MAX
@@ -274,6 +275,28 @@ function digestBytes (json) {
   const d = b4a.alloc(32)
   sodium.crypto_hash_sha256(d, json)
   return d
+}
+
+// The hex64 sha256 of a body's canonical inner JSON: what a reaction's
+// target.digest names. Only the signed keys of its version count, so the
+// `mine` and `expiresAt` openInner adds never change it. Equal to the digest
+// of the bytes buildInner signed (openInner refuses non-canonical JSON).
+function bodyDigest (body) {
+  if (!isPlainObject(body)) throw new TypeError('mensagem inválida')
+  const json = b4a.from(canonicalJson(body), 'utf8')
+  try {
+    return b4a.toString(digestBytes(json), 'hex')
+  } finally {
+    sodium.sodium_memzero(json)
+  }
+}
+
+// bodyDigest of a framed inner (buildInner's output), read before it is wiped.
+function frameDigest (inner) {
+  if (!isBytes(inner, DM_INNER_BYTES)) throw new TypeError('mensagem inválida')
+  const len = (inner[0] << 8) | inner[1]
+  if (len < 2 || len + LEN_BYTES + SIG_BYTES > DM_INNER_BYTES) throw new TypeError('mensagem inválida')
+  return b4a.toString(digestBytes(inner.subarray(LEN_BYTES, LEN_BYTES + len)), 'hex')
 }
 
 function isExpiresAt (n) {
@@ -368,7 +391,7 @@ function reactionBody (fields, from) {
     id: fields.id === undefined ? newMessageId() : fields.id,
     from,
     to: fields.to,
-    target: isPlainObject(fields.target) ? { from: fields.target.from, id: fields.target.id } : fields.target,
+    target: isPlainObject(fields.target) ? { from: fields.target.from, id: fields.target.id, digest: fields.target.digest } : fields.target,
     emoji: fields.emoji,
     rev: fields.rev,
     at: fields.at === undefined ? nowIso() : fields.at,
@@ -636,6 +659,8 @@ module.exports = Object.freeze({
   textBudget,
   buildInner,
   innerDigest,
+  bodyDigest,
+  frameDigest,
   signDigest,
   assembleInner,
   pageInnerStale,

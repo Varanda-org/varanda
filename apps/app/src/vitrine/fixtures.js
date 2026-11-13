@@ -111,6 +111,8 @@ export const conversations = exchanges.map((texts, i) => {
       at: at(j < 2 ? 4 : 5, 10 + i % 4, j * 5),
       mine,
       ...(i === 0 && j === 0 ? { reactions: [{ emoji: '❤️', mine: true }, { emoji: '❤️', mine: false }] } : {}),
+      // Stored before message digests: it takes no reaction.
+      ...(i === 1 && j === 0 ? { reactable: false } : {}),
       media: null
     }
   })

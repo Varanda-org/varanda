@@ -1447,6 +1447,13 @@ test('DM reaction refusals preserve the thread and identify both sender and id',
   const target = { from: f.conversations[0].messages[0].from, id: f.conversations[0].messages[0].id }
   const before = await answer(t, request, 'dm.thread', { peer })
   await refused(t, request, 'dm.react', { to: peer, target: { ...target, from: f.own }, emoji: '👍' }, 'USAGE', 'mensagem não encontrada')
+  const oldPeer = f.conversations[1].peer
+  const old = f.conversations[1].messages[0]
+  const oldThread = await answer(t, request, 'dm.thread', { peer: oldPeer })
+  t.is(oldThread.messages.find((m) => m.id === old.id).reactable, false, 'an older message takes no reaction')
+  t.ok(oldThread.messages.filter((m) => m.id !== old.id).every((m) => !('reactable' in m)), 'the key is absent elsewhere')
+  await refused(t, request, 'dm.react', { to: oldPeer, target: { from: old.from, id: old.id }, emoji: '👍' }, 'USAGE', 'esta mensagem não aceita reações')
+  t.alike(await answer(t, request, 'dm.thread', { peer: oldPeer }), oldThread)
   await refused(t, request, 'dm.react', { to: unknown, target, emoji: '👍' }, 'USAGE', 'mensagem não encontrada')
   await refused(t, request, 'dm.react', { to: peer, target, emoji: 'not an emoji' }, 'USAGE')
   t.alike(await answer(t, request, 'dm.thread', { peer }), before)
@@ -1467,4 +1474,25 @@ test('a conversation without a profile has an unknown diary with no roster evide
     t.is(pageReadKind(read, peer), 'unknown')
     t.alike(dmReactionGate({ read, peer, peerKind: pageReadKind(read, peer), hosted: true, unlocked: true, online: true, isTop: true, folder: 'inbox' }), { hidden: false, disabled: false })
   }
+})
+
+test('group reactions outside the 12 shown stay counted and come back, as in the core fold', async (t) => {
+  const { fixtures, createVitrineRequest } = await load()
+  const f = clone(fixtures)
+  const item = f.groups[0].items[0]
+  const twelve = Array.from({ length: 12 }, (_, i) => String.fromCodePoint(0x1f601 + i))
+  item.reactions = twelve.map((emoji) => ({ emoji, count: 1, mine: false }))
+  const request = createVitrineRequest(f)
+  const group = f.groups[0].group
+  const target = { writer: item.writer, seq: item.seq }
+  const read = async () => (await request('group.read', { group })).items.find((p) => p.writer === target.writer && p.seq === target.seq)
+  // An emoji that sorts first pushes the last of the twelve out of view.
+  await answer(t, request, 'group.react', { group, target, emoji: '\u{1f600}' })
+  const shown = (await read()).reactions.map((r) => r.emoji)
+  t.alike(shown, ['\u{1f600}', ...twelve.slice(0, 11)])
+  const who = await answer(t, request, 'group.reactors', { group, target })
+  t.alike(who.reactions.map((r) => r.emoji), shown, 'group.reactors lists the same 12')
+  // Taking the reaction back shows the hidden emoji again with its count.
+  await answer(t, request, 'group.react', { group, target, emoji: '' })
+  t.alike((await read()).reactions, twelve.map((emoji) => ({ emoji, count: 1, mine: false })))
 })
