@@ -24,7 +24,7 @@ test('method list and mutating set', (t) => {
     'group.meta', 'group.post', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
     'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'moments.read', 'node.close', 'node.info', 'notices.list',
-    'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read',
+    'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read', 'phone.proof', 'phone.sign',
     'post.create', 'post.delete', 'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
     'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'username.add'
   ])
@@ -590,6 +590,29 @@ test('age.sign', (t) => {
   }
 })
 
+test('phone.sign', (t) => {
+  const base = { action: 'send', nonce: 'n'.repeat(43) }
+  t.absent(isMutating('phone.sign'))
+  ok(t, 'phone.sign', base, base)
+  ok(t, 'phone.sign', { ...base, action: 'check' })
+  ok(t, 'phone.sign', { ...base, action: 'status' })
+  ok(t, 'phone.sign', { ...base, nonce: 'A-_9'.repeat(32) })
+  bad(t, 'phone.sign', {})
+  for (const k of ['action', 'nonce']) {
+    const p = { ...base }
+    delete p[k]
+    bad(t, 'phone.sign', p, 'missing ' + k)
+  }
+  // The caller never chooses the member, the association or the bytes.
+  for (const k of ['member', 'association', 'payload', 'bytes', 'key', 'phone', 'code']) {
+    bad(t, 'phone.sign', { ...base, [k]: 'ab'.repeat(32) }, 'extra ' + k)
+  }
+  for (const action of ['SEND', 'session', '', null, 1]) bad(t, 'phone.sign', { ...base, action }, 'action ' + action)
+  for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 'n'.repeat(42) + '+', 1]) {
+    bad(t, 'phone.sign', { ...base, nonce: n }, 'nonce ' + n)
+  }
+})
+
 test('age.proof', (t) => {
   const proof = { type: 'age-verified', member: KEY, date: '2026-10-30T12:00:00.000Z' }
   const since = { type: 'age-since', since: '2026-10-29T00:00:00.000Z' }
@@ -613,6 +636,32 @@ test('age.proof', (t) => {
   ok(t, 'age.proof', { verified: { pad: 'x'.repeat(1024 - 10) } })
   bad(t, 'age.proof', { verified: proof, member: KEY }, 'extra key')
   bad(t, 'age.proof', { proof }, 'unknown key')
+})
+
+test('phone.proof', (t) => {
+  const proof = { type: 'phone-verified', member: KEY, date: '2026-10-30T12:00:00.000Z' }
+  const since = { type: 'phone-since', since: '2026-10-29T00:00:00.000Z' }
+  t.absent(isMutating('phone.proof'))
+  ok(t, 'phone.proof', { verified: proof }, { verified: proof })
+  ok(t, 'phone.proof', { since }, { since })
+  ok(t, 'phone.proof', { since: null }, { since: null })
+  // verified: null clears the stored attestation.
+  ok(t, 'phone.proof', { verified: null }, { verified: null })
+  ok(t, 'phone.proof', { verified: proof, since: null }, { verified: proof, since: null })
+  ok(t, 'phone.proof', { verified: proof, since })
+  bad(t, 'phone.proof', {}, 'neither field')
+  t.is(validateParams('phone.proof', {}).message, 'parâmetro obrigatório: verified')
+  for (const v of ['x', 1, [], true]) {
+    bad(t, 'phone.proof', { verified: v }, 'verified ' + JSON.stringify(v))
+    bad(t, 'phone.proof', { since: v }, 'since ' + JSON.stringify(v))
+  }
+  // Size bound only: the node verifies the signature chain.
+  const big = { pad: 'x'.repeat(1024) }
+  bad(t, 'phone.proof', { verified: big }, 'oversize verified')
+  bad(t, 'phone.proof', { since: big }, 'oversize since')
+  ok(t, 'phone.proof', { verified: { pad: 'x'.repeat(1024 - 10) } })
+  bad(t, 'phone.proof', { verified: proof, member: KEY }, 'extra key')
+  bad(t, 'phone.proof', { proof }, 'unknown key')
 })
 
 test('push.sign', (t) => {
@@ -756,6 +805,8 @@ test('listing.*', (t) => {
   const edit = { to, expectedRevision: 0, title: 'Bicicleta', text: 'x', price: 100, unit: 'hora', cat: 'esporte', place, media: null }
   ok(t, 'listing.edit', edit, edit)
   ok(t, 'listing.edit', { ...edit, media: [descriptor] })
+  ok(t, 'listing.edit', { ...edit, media: [descriptor, descriptor, descriptor, descriptor] })
+  bad(t, 'listing.edit', { ...edit, media: [descriptor, descriptor, descriptor, descriptor, descriptor] }, '5th photo')
   const noMedia = { ...edit }
   delete noMedia.media
   bad(t, 'listing.edit', noMedia, 'media is required')
@@ -882,6 +933,10 @@ test('post.create and post.reply with media', (t) => {
   ok(t, 'post.create', { text: 'legenda', media: [d, d, d, d] })
   ok(t, 'post.reply', { to: KEY + ':1', text: '', media: [d] })
   ok(t, 'post.quote', { to: KEY + ':1', text: 'legenda', media: [d, d, d, d] })
+  const ten = new Array(10).fill(d)
+  ok(t, 'post.create', { text: 'legenda', media: ten })
+  ok(t, 'post.reply', { to: KEY + ':1', text: '', media: ten })
+  ok(t, 'post.quote', { to: KEY + ':1', text: 'legenda', media: ten })
   ok(t, 'post.create', { text: 'x', media: [{ ...d, mime: 'image/gif', start: 8192 - 256, blocks: 256, bytes: 256 * 32768, width: 16384, height: 16384 }] })
   ok(t, 'post.create', { text: 'x', media: [{ ...d, blocks: 1, bytes: 1 }] })
   // Without media the text stays 1..MAX_TEXT.
@@ -890,7 +945,7 @@ test('post.create and post.reply with media', (t) => {
   t.is(msg('post.create', { text: 'x'.repeat(MAX_TEXT + 1), media: [d] }), 'parâmetro inválido: text')
   bad(t, 'post.create', { media: [d] }, 'text is required')
   const badMedia = [
-    [], [d, d, d, d, d], null, d, 'x',
+    [], new Array(11).fill(d), null, d, 'x',
     [{ ...d, extra: 1 }],
     [{ ...d, core: KEY.toUpperCase() }],
     [{ ...d, sha256: 'x' }],
@@ -1001,7 +1056,7 @@ test('engagement.read requires distinct refs in a dense bounded array', (t) => {
 })
 
 test('diary.peek requires an author and dense strictly ascending seqs', (t) => {
-  t.is(PEEK_SEQS_MAX, 32)
+  t.is(PEEK_SEQS_MAX, 29)
   t.is(PEEK_TIMEOUT_MS, 8000)
   t.absent(isMutating('diary.peek'))
   const base = { author: KEY, seqs: [1] }
@@ -1556,7 +1611,7 @@ test('log.read', (t) => {
 })
 
 test('feed.read', (t) => {
-  ok(t, 'feed.read', {}, { limit: 27 })
+  ok(t, 'feed.read', {}, { limit: 26 })
   ok(t, 'feed.read', { limit: FEED_LIMIT_MAX }, { limit: FEED_LIMIT_MAX })
   bad(t, 'feed.read', { limit: FEED_LIMIT_MAX + 1 })
   bad(t, 'feed.read', { limit: 0 })
@@ -1567,7 +1622,7 @@ test('feed.read', (t) => {
 test('feed.read before', (t) => {
   const before = { at: '2026-10-24T12:00:00.000Z', author: KEY, seq: 1 }
   ok(t, 'feed.read', { limit: 5, before }, { limit: 5, before })
-  ok(t, 'feed.read', { before }, { limit: 27, before })
+  ok(t, 'feed.read', { before }, { limit: 26, before })
   bad(t, 'feed.read', { before: { ...before, seq: 0 } }, 'seq 0')
   bad(t, 'feed.read', { before: { ...before, seq: 1.5 } }, 'seq 1.5')
   for (const at of ['2026-10-24T12:00:00Z', '2026-10-24', 1, '']) {
@@ -1584,7 +1639,7 @@ test('feed.read before', (t) => {
 
 test('peek.read', (t) => {
   t.absent(isMutating('peek.read'))
-  ok(t, 'peek.read', {}, { limit: 27 })
+  ok(t, 'peek.read', {}, { limit: 26 })
   ok(t, 'peek.read', { limit: PEEK_LIMIT_MAX }, { limit: PEEK_LIMIT_MAX })
   bad(t, 'peek.read', { limit: 0 })
   bad(t, 'peek.read', { limit: PEEK_LIMIT_MAX + 1 })
@@ -1595,7 +1650,7 @@ test('peek.read', (t) => {
 test('peek.read after', (t) => {
   const after = { round: 0, at: '2026-10-24T12:00:00.000Z', author: KEY, seq: 1 }
   ok(t, 'peek.read', { limit: 5, after }, { limit: 5, after })
-  ok(t, 'peek.read', { after }, { limit: 27, after })
+  ok(t, 'peek.read', { after }, { limit: 26, after })
   ok(t, 'peek.read', { after: { ...after, round: 2 } })
   bad(t, 'peek.read', { after: { at: after.at, author: KEY, seq: 1 } }, 'missing round')
   bad(t, 'peek.read', { after: { round: 0, author: KEY, seq: 1 } }, 'missing at')
@@ -2250,7 +2305,7 @@ test('page.* (Páginas)', (t) => {
 
   const keys = []
   for (let i = 0; i < 64; i++) keys.push(i.toString(16).padStart(2, '0').repeat(32))
-  ok(t, 'page.feed', { page: KEY, keys: [KEY] }, { page: KEY, keys: [KEY], limit: 27 })
+  ok(t, 'page.feed', { page: KEY, keys: [KEY] }, { page: KEY, keys: [KEY], limit: 26 })
   ok(t, 'page.feed', { page: KEY, keys, limit: FEED_LIMIT_MAX })
   ok(t, 'page.feed', { page: KEY, keys, limit: 1 })
   bad(t, 'page.feed', { page: KEY, keys: [...keys, 'ff'.repeat(32)] }, '65th feed key')

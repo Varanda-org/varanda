@@ -79,6 +79,8 @@ function createPushRoutes ({
   // A bare hash of actor:seq (both public) would let it map each device to
   // the member a record targets, so the topic is keyed with a process secret.
   topicKey = nodeCrypto.randomBytes(32),
+  // member -> void, throws 'telefone-pendente' (server.js phoneChecked).
+  phoneChecked = () => {},
   log = () => {},
   now = Date.now,
   http
@@ -206,6 +208,8 @@ function createPushRoutes ({
     if (!limits.finish(member)) throw over()
     available(action)
     linked(member)
+    // Only turning push on: turning it off must stay open to everyone.
+    if (action === 'on') phoneChecked(member)
     let result
     if (action === 'on') {
       if (!isAllowedEndpoint(endpoint)) throw refuse('pedido-invalido')

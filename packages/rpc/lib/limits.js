@@ -23,7 +23,7 @@ const MAX_TESTIMONIAL = 400
 const TESTIMONIAL_PENDING_MAX = 64
 const MEDIA_BLOCK_BYTES = 32768
 const MAX_MEDIA_BLOCKS = 8192
-const MAX_MEDIA_PER_POST = 4
+const MAX_MEDIA_PER_POST = 10
 const MAX_MEDIA_ITEM_BLOCKS = 256
 const MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 const MAX_MEDIA_DIMENSION = 16384
@@ -36,23 +36,26 @@ const AVATAR_MIMES = Object.freeze(['image/jpeg', 'image/webp'])
 // (BLOB_CHUNK_BYTES, BLOB_MAX_CHUNKS, BLOB_MAC_BYTES; not imported: zero deps)
 // plus mime, w, h and ms (docs/protocol.md section 11).
 const MAX_DM_MEDIA = 4
+// Group posts keep four media items: the sealed record budget of
+// packages/core/lib/group-media.js was measured for four.
+const MAX_GROUP_MEDIA = 4
 const DM_MEDIA_CHUNK_BYTES = 32768
 const DM_MEDIA_MAX_CHUNKS = 257
 const DM_MEDIA_MAC_BYTES = 16
 
 const LOG_LIMIT_DEFAULT = 20
-// Page maxima: the largest pages whose worst case (every post with
-// a maximal link card or media list) fits MAX_MESSAGE (docs/rpc.md
-// section 2, test/sizes.test.js).
-const LOG_LIMIT_MAX = 32
-const FEED_LIMIT_DEFAULT = 27
-const FEED_LIMIT_MAX = 27
-// Keep the incomplete list bounded beside maximal cards and the other
+// Page maxima: the largest pages whose worst case fits MAX_MESSAGE
+// (docs/rpc.md section 2, test/sizes.test.js). A post's worst item is its
+// MAX_MEDIA_PER_POST media descriptors, which outweigh a maximal link card.
+const LOG_LIMIT_MAX = 30
+const FEED_LIMIT_DEFAULT = 26
+const FEED_LIMIT_MAX = 26
+// Keep the incomplete list bounded beside maximal media lists and the other
 // feed metadata (docs/rpc.md section 2, test/sizes.test.js).
 const FEED_INCOMPLETE_MAX = 16
 // A PeekItem adds round and avatar but omits the feed metadata lists, so
 // the feed maximum also fits (docs/rpc.md section 2, test/sizes.test.js).
-const PEEK_LIMIT_DEFAULT = 27
+const PEEK_LIMIT_DEFAULT = 26
 const PEEK_LIMIT_MAX = FEED_LIMIT_MAX
 // Notices per page: the worst case fits MAX_MESSAGE (test/sizes.test.js).
 const NOTICES_LIMIT_DEFAULT = 30
@@ -61,7 +64,7 @@ const NOTICES_LIMIT_MAX = 64
 // spare (docs/rpc.md section 2, test/sizes.test.js).
 const PROFILE_LIMIT_MAX = 100
 const ENGAGEMENT_LIMIT_MAX = 62
-const PEEK_SEQS_MAX = 32
+const PEEK_SEQS_MAX = 29
 // The largest page whose worst case includes a maximal private link card
 // per post and still fits MAX_MESSAGE (docs/rpc.md section 2, test/sizes.test.js).
 const GROUP_LIMIT_DEFAULT = 29
@@ -180,6 +183,7 @@ module.exports = {
   MAX_AVATAR_BYTES,
   AVATAR_MIMES,
   MAX_DM_MEDIA,
+  MAX_GROUP_MEDIA,
   DM_MEDIA_CHUNK_BYTES,
   DM_MEDIA_MAX_CHUNKS,
   DM_MEDIA_MAC_BYTES,

@@ -20,7 +20,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { pickImages } from '../media/attach'
 import { encodeFile } from '../media/encode'
 import { revokeUrl, urlFromBytes } from '../media/display'
-import { MAX_MEDIA_PER_POST } from '../media/plan'
+import { MAX_MEDIA_PER_MESSAGE } from '../media/plan'
 import { boundedFile } from '../chatSend'
 import { errorText } from './index'
 import { ActionsSheet } from './ActionsSheet'
@@ -101,15 +101,15 @@ export function useChatAttachments () {
       picked = [given]
     } else {
       try {
-        picked = await pickImages()
+        picked = await pickImages(MAX_MEDIA_PER_MESSAGE)
       } catch {
         return
       }
     }
     if (gen !== genRef.current) return
     if (!Array.isArray(picked) || picked.length === 0) return
-    const room = Math.max(0, MAX_MEDIA_PER_POST - liveRef.current.size)
-    if (picked.length > room) setNote('até ' + MAX_MEDIA_PER_POST + ' fotos por mensagem')
+    const room = Math.max(0, MAX_MEDIA_PER_MESSAGE - liveRef.current.size)
+    if (picked.length > room) setNote('até ' + MAX_MEDIA_PER_MESSAGE + ' fotos por mensagem')
     const chosen = picked.slice(0, room).map((source) => ({ id: ++lastId, source }))
     if (chosen.length === 0) return
     for (const { id } of chosen) liveRef.current.add(id)

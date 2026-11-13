@@ -17,7 +17,7 @@ const { MEDIA_MIMES, AVATAR_MIMES, AVATAR_SIDE, MAX_AVATAR_BYTES, MEDIA_BLOCK_BY
 const { validateParams } = require('@varanda/rpc')
 
 const USAGE_TEXT = 'node bin/varanda.js page register|terms|create|list|post|reply|photo|follow|unfollow|notices|close|move|join|leave|group-post'
-const MAX_FILES = 4
+const MAX_FILES = 10
 const MAX_MEDIA_BYTES = MEDIA_BLOCK_BYTES * MAX_MEDIA_ITEM_BLOCKS
 const TIMEOUT_MS = 30000
 const MAX_ANSWER = 1024 * 1024

@@ -7,15 +7,14 @@
 // feira: { holder, origin, hold } (App.js) or null. required: the invite
 // policy's required flag, undefined while unread. blocked: the offer is not
 // for this person (a member already linked). onNote(text): the sentence to
-// show ('' clears it). takeReturnInvite: on the web page load, the refusal a
-// return from Google carried ('' when none), read once.
+// show ('' clears it).
 
 import { useEffect, useRef, useState } from 'react'
 import { feiraPolicy, feiraStart } from './account'
-import { decideEntry, entryOffer, limitRefusal, returnLimit, startEntry, startRetryable } from './feiraEntry'
+import { decideEntry, entryOffer, limitRefusal, startEntry, startRetryable } from './feiraEntry'
 import { dropSignupInvite, loadSignupInvite } from './signupInviteStore'
 
-export function useFeiraEntryStart ({ feira = null, active = false, required, blocked = false, onNote, takeReturnInvite = null } = {}) {
+export function useFeiraEntryStart ({ feira = null, active = false, required, blocked = false, onNote } = {}) {
   const note = (text) => { if (typeof onNote === 'function') onNote(text) }
   const entry = feira !== null && feira.holder ? feira.holder.load(feira.origin) : null
   const [policy, setPolicy] = useState(undefined)
@@ -61,16 +60,6 @@ export function useFeiraEntryStart ({ feira = null, active = false, required, bl
       })
       .finally(() => setBusy(false))
   }
-  // A web return from Google that refused the Feira code: the seller's week
-  // ran out, so no "Pedir entrada" on this load.
-  useEffect(() => {
-    if (typeof takeReturnInvite !== 'function') return
-    const hit = returnLimit({ returnInvite: takeReturnInvite(), entry })
-    if (hit === null) return
-    setLimited(true)
-    feira.holder.forgetCode()
-    note(hit.text)
-  }, [])
   // The held Feira code refused at sign-up: the seller's entries for this
   // week ran out. The code is dropped on every platform, the ref stays, and
   // no new code is offered: the service would refuse it too.

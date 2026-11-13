@@ -1,26 +1,32 @@
 'use strict'
 
-// apps/cli/scripts/hosted-lab.js and apps/cli/scripts/oauth-stub.js: the
-// lab's one origin maps each route to the right backend (fake seeder, fake
-// account service and fake UI, all on 127.0.0.1), the stub hands each lab
-// person a distinct sub behind PKCE, and the lab refuses anything off
-// loopback before it touches the network.
+// apps/cli/scripts/hosted-lab.js: the lab's one origin maps each route to
+// the right backend (fake seeder, fake account service and fake UI, all on
+// 127.0.0.1), and the lab refuses anything off loopback before it touches
+// the network. A running lab requires a phone check to finish sign-up,
+// with no age record.
 
 const test = require('brittle')
 const fs = require('node:fs')
 const http = require('node:http')
 const net = require('node:net')
 const path = require('node:path')
-const nodeCrypto = require('node:crypto')
-const { spawnSync } = require('node:child_process')
+const { spawnSync, spawn } = require('node:child_process')
 const { WebSocketServer, WebSocket } = require('ws')
+const b4a = require('b4a')
+const crypto = require('hypercore-crypto')
+const { certForKey, verifyUsernameRecord } = require('@varanda/core/lib/cert')
+const { signAccountLink } = require('@varanda/core/lib/account-link')
+const { signPhone } = require('@varanda/core/lib/phone')
+const { phoneSub } = require('../lib/account/store')
+const { STUB_CODE } = require('../scripts/phone-stub')
 const { startLabProxy, routeOf, bootstrapFromEnv, labOrigin, allowedHost, parseArgs, LabUsageError } = require('../scripts/hosted-lab')
-const { createOAuthStub, challengeOf } = require('../scripts/oauth-stub')
-const { tmpDir } = require('./helpers/net')
+const { tmpDir, until } = require('./helpers/net')
 
 const LAB = path.join(__dirname, '..', 'scripts', 'hosted-lab.js')
-const STUB = path.join(__dirname, '..', 'scripts', 'oauth-stub.js')
+const STUB = path.join(__dirname, '..', 'scripts', 'phone-stub.js')
 const ASSOC = 'ab'.repeat(32)
+const LAB_PHONE = '+5511987654321'
 
 const cleanEnv = {}
 for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('VARANDA_')) cleanEnv[k] = v
@@ -61,6 +67,7 @@ test('the lab origin maps the five routes and the UI fallback', async (t) => {
     ['/media/' + 'cd'.repeat(32) + '/' + 'ef'.repeat(32) + '/1/1', 'seeder', seederPort],
     ['/index/counts/x', 'seeder', seederPort],
     ['/account/age/policy', 'account', accountPort],
+    ['/account/phone/policy', 'account', accountPort],
     ['/account/start', 'account', accountPort],
     ['/', 'ui', uiPort],
     ['/@nome', 'ui', uiPort],
@@ -211,68 +218,6 @@ test('routeOf', (t) => {
   t.is(routeOf('/x'), 'ui')
 })
 
-test('the stub hands each lab person a distinct sub behind PKCE', async (t) => {
-  const redirectUri = 'http://localhost:8080/account/callback'
-  const stub = createOAuthStub({ redirectUri })
-  const listener = await stub.listen({ host: '127.0.0.1', port: 0 })
-  t.teardown(() => listener.close(), { force: true })
-
-  const verifier = nodeCrypto.randomBytes(32).toString('base64url')
-  const state = nodeCrypto.randomBytes(32).toString('base64url')
-  const url = new URL(stub.authorizeUrl({ state, codeChallenge: challengeOf(verifier) }))
-  t.is(url.origin, listener.url, 'the authorize page is on the stub listener')
-  const page = await (await fetch(url)).text()
-  for (const n of [1, 2, 3]) t.ok(page.includes('Pessoa ' + n), 'offers Pessoa ' + n)
-
-  async function choose (person, challenge = challengeOf(verifier)) {
-    const q = new URLSearchParams({ state, code_challenge: challenge, person: String(person) })
-    const res = await fetch(listener.url + '/choose?' + q, { redirect: 'manual' })
-    t.is(res.status, 302)
-    const to = new URL(res.headers.get('location'))
-    t.is(to.origin + to.pathname, redirectUri, 'back to the account callback')
-    t.is(to.searchParams.get('state'), state)
-    return to.searchParams.get('code')
-  }
-
-  const code2 = await choose(2)
-  t.alike(await stub.exchange({ code: code2, codeVerifier: verifier }), { ok: true, sub: 'lab-2', email: 'lab2@example.test' })
-  t.is((await stub.exchange({ code: code2, codeVerifier: verifier })).ok, false, 'a code is used once')
-
-  const code3 = await choose(3)
-  t.is((await stub.exchange({ code: code3, codeVerifier: 'outro-verificador' })).ok, false, 'a wrong verifier is refused')
-  t.is((await stub.exchange({ code: 'inventado', codeVerifier: verifier })).ok, false, 'an unknown code is refused')
-
-  const code1 = await choose(1)
-  t.is((await stub.exchange({ code: code1, codeVerifier: verifier })).sub, 'lab-1')
-
-  const bad = await fetch(listener.url + '/choose?' + new URLSearchParams({ state, code_challenge: challengeOf(verifier), person: '4' }))
-  t.is(bad.status, 404, 'no fourth person')
-  let refused = null
-  try {
-    stub.listen({ host: '0.0.0.0' })
-  } catch (err) {
-    refused = err
-  }
-  t.ok(refused && /127\.0\.0\.1/.test(refused.message), 'the stub binds loopback only')
-})
-
-test('the stub answers 400 to a request target that cannot parse and keeps serving', async (t) => {
-  const stub = createOAuthStub({ redirectUri: 'http://localhost:8080/account/callback' })
-  const listener = await stub.listen({ host: '127.0.0.1', port: 0 })
-  t.teardown(() => listener.close(), { force: true })
-  const { port } = new URL(listener.url)
-  const raw = await new Promise((resolve, reject) => {
-    const socket = net.connect(port, '127.0.0.1', () => socket.end('GET //[/ HTTP/1.1\r\nHost: 127.0.0.1:' + port + '\r\nConnection: close\r\n\r\n'))
-    let data = ''
-    socket.on('data', (chunk) => { data += chunk })
-    socket.on('end', () => resolve(data))
-    socket.on('error', reject)
-  })
-  t.ok(raw.startsWith('HTTP/1.1 400'), 'a malformed target gets 400')
-  const after = await fetch(listener.url + '/authorize?state=abc&code_challenge=def')
-  t.is(after.status, 200, 'the stub still serves after it')
-})
-
 test('the lab refuses anything off loopback before it starts', (t) => {
   for (const host of ['0.0.0.0', '192.168.1.2', '::']) {
     const r = spawnSync(process.execPath, [LAB, '--host', host], { env: cleanEnv, encoding: 'utf8', timeout: 30000 })
@@ -314,4 +259,130 @@ test('the dataset flags: a seed, a bounded size, rajada only with a dataset', (t
   t.exception(() => parseArgs(['--rajada']), LabUsageError, 'rajada without a dataset')
   t.exception(() => parseArgs(['--dataset-size', '6x20']), LabUsageError, 'a size without a dataset')
   t.is(parseArgs(['--help']).help, true)
+})
+
+function freePort () {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer()
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address()
+      server.close(() => resolve(port))
+    })
+  })
+}
+
+function postJson (url, origin, body, headers = {}) {
+  return fetch(url, {
+    method: 'POST',
+    redirect: 'manual',
+    headers: { origin, 'content-type': 'application/json', ...headers },
+    body: JSON.stringify(body)
+  }).then(async (res) => {
+    const text = await res.text()
+    let parsed = null
+    try { parsed = JSON.parse(text) } catch {}
+    return { status: res.status, headers: res.headers, body: parsed }
+  })
+}
+
+test('the running lab requires a phone check and finishes sign-up without an age record', async (t) => {
+  t.timeout(120000)
+  const port = await freePort()
+  const child = spawn(process.execPath, [LAB, '--host', '127.0.0.1', '--port', String(port)], {
+    env: cleanEnv,
+    stdio: ['ignore', 'pipe', 'pipe']
+  })
+  let stdout = ''
+  let stderr = ''
+  child.stdout.on('data', (d) => { stdout += d })
+  child.stderr.on('data', (d) => { stderr += d })
+  let done = false
+  const exited = new Promise((resolve) => {
+    child.once('error', (err) => { stderr += err.message })
+    child.once('close', (code) => {
+      done = true
+      resolve(code)
+    })
+  })
+  t.teardown(async () => {
+    if (!done) child.kill('SIGINT')
+    await Promise.race([
+      exited,
+      new Promise((resolve) => setTimeout(resolve, 12000))
+    ])
+    if (!done) {
+      child.kill('SIGKILL')
+      await Promise.race([
+        exited,
+        new Promise((resolve) => setTimeout(resolve, 2000))
+      ])
+    }
+  }, { force: true })
+
+  // Ages stay null in the lab, so this send is the age gate being open.
+  await until(() => {
+    if (done) throw new Error('lab exited ' + child.exitCode + ': ' + stderr)
+    return stdout.includes('Laboratório hospedado pronto em http://localhost:' + port) &&
+      stdout.includes('código de SMS do laboratório: 123456')
+  }, { timeoutMs: 90000, name: 'laboratório pronto' })
+
+  const base = 'http://127.0.0.1:' + port
+  const origin = 'http://localhost:' + port
+  const policy = await fetch(base + '/account/phone/policy')
+  t.is(policy.status, 200)
+  t.alike(await policy.json(), { required: true })
+  t.alike(await (await fetch(base + '/account/age/policy')).json(), { required: false })
+
+  const config = await (await fetch(base + '/varanda.json')).json()
+  const kp = crypto.keyPair()
+  const member = b4a.toString(kp.publicKey, 'hex')
+  const started = await postJson(base + '/account/phone/start', origin, { member })
+  t.is(started.status, 200, started.body && started.body.error)
+  t.is(started.body && typeof started.body.nonce, 'string')
+  if (!started.body || typeof started.body.nonce !== 'string') return
+  const signature = signPhone({ action: 'send', nonce: started.body.nonce, member, association: config.association }, kp)
+  const sent = await postJson(base + '/account/phone/send', origin, {
+    member,
+    nonce: started.body.nonce,
+    signature,
+    phone: LAB_PHONE
+  })
+  t.is(sent.status, 200, sent.body && sent.body.error)
+  t.alike(sent.body, { state: 'enviado' })
+
+  const username = 'ana'
+  const link = await postJson(base + '/account/start', origin, { member, username })
+  t.is(link.status, 200)
+  const headers = { cookie: link.headers.get('set-cookie').split(';')[0] }
+  const finishSignature = signAccountLink({ phase: 'finish', nonce: link.body.nonce, member, username, association: config.association, sub: phoneSub(member) }, kp)
+  const early = await postJson(base + '/account/finish', origin, { signature: finishSignature }, headers)
+  t.alike([early.status, early.body], [403, { error: 'telefone-pendente' }], 'sending a code alone cannot link the member')
+
+  const checkStart = await postJson(base + '/account/phone/start', origin, { member })
+  t.is(checkStart.status, 200)
+  const checked = await postJson(base + '/account/phone/check', origin, {
+    member,
+    nonce: checkStart.body.nonce,
+    signature: signPhone({ action: 'check', nonce: checkStart.body.nonce, member, association: config.association }, kp),
+    code: STUB_CODE
+  })
+  t.is(checked.status, 200)
+  t.is(checked.body.state, 'verificado')
+
+  const finish = await postJson(base + '/account/finish', origin, { signature: finishSignature }, headers)
+  t.is(finish.status, 200)
+  t.alike(certForKey(finish.body.cert, member, config.association), { ok: true })
+  t.alike(verifyUsernameRecord(finish.body.usernameRecord, member, config.association), { ok: true })
+  t.is(finish.body.usernameRecord.username, username)
+  const status = await (await fetch(base + '/account/status?member=' + member)).json()
+  t.alike(status, { linked: true, username, ...finish.body }, 'the phone sign-up is stored')
+  t.absent((stdout + stderr).includes(LAB_PHONE), 'the lab output has no phone number')
+
+  child.kill('SIGINT')
+  const code = await Promise.race([
+    exited,
+    new Promise((resolve) => setTimeout(() => resolve('hung'), 12000))
+  ])
+  t.is(code, 0, 'lab exit ' + code)
 })

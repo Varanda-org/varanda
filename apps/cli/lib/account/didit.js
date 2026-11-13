@@ -275,4 +275,4 @@ function createDidit (opts = {}) {
   return { createSession, decision, deleteSession }
 }
 
-module.exports = { createDidit, ageOutcome, DEFAULT_ENDPOINTS, MIN_AGE, ADULT_AGE, FACE_ADULT_MIN }
+module.exports = { createDidit, ageOutcome, DEFAULT_ENDPOINTS, MIN_AGE, ADULT_AGE, FACE_ADULT_MIN, readJson, failure, DiditError }

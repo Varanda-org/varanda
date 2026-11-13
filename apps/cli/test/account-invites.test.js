@@ -2,10 +2,9 @@
 
 // apps/cli/lib/account/server.js with sign-up invites
 // (apps/cli/lib/account/invites-store.js, @varanda/core/lib/invite): the
-// invite gate at start, the in-memory reservation, the refusal before the
-// Google token exchange, strict single use at finish, the policy read and
-// the issue routes. Loopback only: a fake Google on 127.0.0.1 as in
-// account.test.js, random key pairs, a temporary data dir.
+// invite gate at start, the in-memory reservation, phone verification,
+// strict single use at finish, the policy read and the issue routes.
+// Loopback only: fake providers, random key pairs, a temporary data dir.
 
 const test = require('brittle')
 const fs = require('node:fs')
@@ -16,16 +15,20 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { createIssuerCert } = require('@varanda/core/lib/cert')
 const { signAccountLink } = require('@varanda/core/lib/account-link')
+const { signPhone } = require('@varanda/core/lib/phone')
 const { signInvite } = require('@varanda/core/lib/invite')
 const { TERMS_VERSION } = require('@varanda/core/lib/terms')
 const { createGoogle } = require('../lib/account/google')
-const { openAccountStore } = require('../lib/account/store')
+const { openAccountStore, phoneSub } = require('../lib/account/store')
 const { openInvitesStore, inviteId, CODE_RE, FILE } = require('../lib/account/invites-store')
 const { openInviteDrops, KEY_FILE: DROPS_KEY_FILE } = require('../lib/account/invite-drops')
 const { openPushStore } = require('../lib/account/push-store')
 const { generateVapidKeys } = require('../lib/account/web-push')
 const { createAccountServer, COOKIE } = require('../lib/account/server')
 const { tmpDir } = require('./helpers/net')
+const { linkByPhone, phoneServerOptions } = require('./helpers/phone-link')
+const { freePort } = require('./helpers/free-port')
+const { STUB_CODE } = require('../scripts/phone-stub')
 
 const ORIGIN = 'https://varanda.test'
 const CLIENT_ID = 'client-123.apps.googleusercontent.com'
@@ -76,7 +79,7 @@ async function fakeGoogle (t) {
     return globalThis.fetch(url, init)
   }
   const tokenCalls = () => seen.filter((r) => r.path === '/token').length
-  return { account, endpoints, fetch, tokenCalls }
+  return { account, endpoints, fetch, tokenCalls, requestCalls: () => seen.length }
 }
 
 function issuer () {
@@ -107,6 +110,12 @@ async function linkDirect (s, m, username) {
   s.store.reserve(row.id)
   s.store.putGoogle(row.id, { sub: nextSub(), email: EMAIL })
   await s.store.finish(row.id, { signature: 'a'.repeat(128) }, s.iss.keyPair, s.iss.cert, s.iss.association)
+  // Existing inviters also need a verified phone to issue invitations.
+  if (!s.phones.verified(m.hex)) {
+    const phone = '+55119' + String(s.phoneNumbers.length + 1).padStart(8, '0')
+    s.phoneNumbers.push(phone)
+    await s.phones.record({ member: m.hex, phone }, { linked: (key) => s.store.status(key).linked, burnable: () => false, deleted: () => false })
+  }
 }
 
 // `inviting: false` passes invites = null. `badSidecar` plants an invalid
@@ -126,9 +135,22 @@ async function setup (t, { inviting = true, badSidecar = false, storeOpts = {}, 
   const invites = inviting ? openInvitesStore(dir, { now: c.now, perWeek: 2, isUsed: (id) => store.inviteUsed(id), ...invitesOpts({ dir, c, store }) }) : null
   const logs = []
   const texts = []
+  const phoneOptions = phoneServerOptions()
+  const phoneNumbers = []
+  const phoneClient = {
+    ...phoneOptions.phoneClient,
+    send: (args) => {
+      phoneNumbers.push(args.phone)
+      return phoneOptions.phoneClient.send(args)
+    }
+  }
+  const port = await freePort()
+  const origin = 'http://127.0.0.1:' + port
   const server = createAccountServer({
     association: iss.association,
-    origin: ORIGIN,
+    origin,
+    phones: phoneOptions.phones,
+    phoneClient,
     google,
     store,
     issuer: { keyPair: iss.keyPair, cert: iss.cert },
@@ -137,7 +159,7 @@ async function setup (t, { inviting = true, badSidecar = false, storeOpts = {}, 
     now: c.now,
     ...serverOpts
   })
-  const listener = await server.listen({ host: '127.0.0.1', port: 0 })
+  const listener = await server.listen({ host: '127.0.0.1', port })
   t.teardown(() => listener.close(), { force: true })
   const base = 'http://127.0.0.1:' + listener.port
 
@@ -145,7 +167,7 @@ async function setup (t, { inviting = true, badSidecar = false, storeOpts = {}, 
     const init = { method, redirect: 'manual', headers: {} }
     if (cookie) init.headers.cookie = COOKIE + '=' + cookie
     if (body !== undefined) {
-      init.headers.origin = ORIGIN
+      init.headers.origin = origin
       init.headers['content-type'] = 'application/json'
       init.body = JSON.stringify(body)
     }
@@ -157,7 +179,7 @@ async function setup (t, { inviting = true, badSidecar = false, storeOpts = {}, 
     return { status: res.status, headers: res.headers, body: parsed, text }
   }
 
-  return { dir, c, iss, fake, store, invites, server, logs, texts, api }
+  return { dir, c, iss, fake, store, invites, server, logs, texts, api, origin, phones: phoneOptions.phones, phoneNumbers }
 }
 
 function cookieOf (res) {
@@ -187,32 +209,54 @@ function startWith (s, m, username, invite) {
   return s.api('POST', '/account/start', { body })
 }
 
-async function authorize (s, m, username, invite) {
+async function begin (s, m, username, invite) {
   const started = await startWith(s, m, username, invite)
   if (started.status !== 200) return { started }
   const cookie = cookieOf(started).id
-  const auth = await s.api('POST', '/account/authorize', { cookie, body: { signature: sign(s, m, 'reserve', started.body.nonce, username) } })
-  const url = new URL(auth.body.authorizeUrl)
-  return { started, cookie, auth, url, state: url.searchParams.get('state') }
+  return { started, cookie }
 }
 
-function callback (s, cookie, state, extra = 'code=codigo-1') {
-  return s.api('GET', '/account/callback?state=' + state + '&' + extra, { cookie })
+async function phoneStep (s, m, action, extra = {}) {
+  const started = await s.api('POST', '/account/phone/start', { body: { member: m.hex } })
+  if (started.status !== 200) return started
+  const nonce = started.body.nonce
+  const signature = signPhone({ action, nonce, member: m.hex, association: s.iss.association }, m.kp)
+  return s.api('POST', '/account/phone/' + action, { body: { member: m.hex, nonce, signature, ...extra } })
 }
 
-async function finish (s, m, username, cookie) {
-  const pending = await s.api('GET', '/account/pending', { cookie })
-  if (pending.status !== 200) return pending
-  return s.api('POST', '/account/finish', { cookie, body: { signature: sign(s, m, 'finish', pending.body.nonce, username, pending.body.sub) } })
+async function verifyPhone (s, m) {
+  if (s.phones.verified(m.hex)) return phoneStep(s, m, 'status')
+  const phone = '+55119' + String(s.phoneNumbers.length + 1).padStart(8, '0')
+  const sent = await phoneStep(s, m, 'send', { phone })
+  if (sent.status !== 200) return sent
+  return phoneStep(s, m, 'check', { code: STUB_CODE })
 }
 
-// start with the code through finish; -> { a, cb, done }.
+function finishBody (s, m, username, a) {
+  return { signature: sign(s, m, 'finish', a.started.body.nonce, username, phoneSub(m.hex)) }
+}
+
+function finish (s, m, username, a) {
+  return s.api('POST', '/account/finish', { cookie: a.cookie, body: finishBody(s, m, username, a) })
+}
+
 async function linkWith (s, m, username, code) {
-  const a = await authorize(s, m, username, code)
-  s.fake.account.sub = nextSub()
-  const cb = await callback(s, a.cookie, a.state)
-  const done = await finish(s, m, username, a.cookie)
-  return { a, cb, done }
+  const done = await linkByPhone({
+    origin: s.origin,
+    member: m.hex,
+    username,
+    invite: code,
+    sign: (fields) => {
+      const statement = { ...fields, association: s.iss.association }
+      return fields.action ? signPhone(statement, m.kp) : signAccountLink(statement, m.kp)
+    },
+    onResponse: (r) => {
+      if (typeof r.request.phone === 'string') s.phoneNumbers.push(r.request.phone)
+      s.texts.push(r.text, r.headers.get('location') || '', r.headers.get('set-cookie') || '')
+    }
+  })
+  s.texts.push(JSON.stringify(done))
+  return done
 }
 
 // No response body, redirect, cookie or log line carries the code or its id.
@@ -222,6 +266,7 @@ function noLeak (t, s, code) {
   t.absent(responsesOnly.includes(code), 'the code is only in its issue response')
   t.absent(all.includes(inviteId(code)), 'the invite id is never in a response or log line')
   t.absent(s.logs.join('\n').includes(code), 'no log line carries the code')
+  t.absent(s.phoneNumbers.some((phone) => all.includes(phone) || all.includes(phone.slice(3))), 'no phone number in responses or logs')
 }
 
 test('invites off: open sign-up as today, no invite routes', async (t) => {
@@ -334,22 +379,23 @@ test('happy path: the code is held at start, consumed by the first finish, refus
   const id = inviteId(code)
 
   const b = member()
-  const a = await authorize(s, b, 'bia', code)
+  const a = await begin(s, b, 'bia', code)
   t.is(a.started.status, 200, a.started.text)
-  t.absent(a.auth.body.authorizeUrl.includes(code), 'the code is not in the authorize URL')
+  t.absent(a.started.text.includes(code), 'start never echoes the code')
 
   const other = await startWith(s, member(), 'caio', code)
-  t.is(other.status, 404, 'held by another key at Google')
+  t.is(other.status, 404, 'held by another key during phone verification')
   t.alike(other.body, { error: 'convite-invalido' })
   t.is(cookieOf(other), null)
 
-  s.fake.account.sub = nextSub()
-  const cb = await callback(s, a.cookie, a.state)
-  t.is(cb.status, 302)
-  t.is(cb.headers.get('location'), ORIGIN + '/?conta=ok')
-  t.is(s.fake.tokenCalls(), 1)
+  const checked = await verifyPhone(s, b)
+  t.is(checked.status, 200)
+  t.is(checked.body.state, 'verificado')
+  t.is(s.fake.tokenCalls(), 0)
+  t.absent(s.store.inviteUsed(id), 'phone verification alone does not spend the invite')
+  t.is(s.invites.check(id), null, 'the sidecar stays unspent until the link commits')
 
-  const done = await finish(s, b, 'bia', a.cookie)
+  const done = await finish(s, b, 'bia', a)
   t.is(done.status, 200, done.text)
   t.ok(s.store.inviteUsed(id), 'the link records the invite')
   t.is(s.invites.check(id), 'convite-invalido', 'the sidecar is marked')
@@ -388,67 +434,82 @@ test('a bare retry by the same member takes the code over', async (t) => {
   t.is(s.store.get(cookieOf(one).id), null, 'the old row is dropped')
   const stranger = await startWith(s, member(), 'caio', code)
   t.is(stranger.status, 404, 'still held for the new row')
-  const { done } = await linkWith(s, b, 'bia', code)
-  t.is(done.status, 200, 'one more retry by the same member links')
+  const done = await linkWith(s, b, 'bia', code)
+  t.is(done.cert.member, b.hex, 'one more retry by the same member links')
   t.is((await s.api('GET', '/account/pending', { cookie: cookieOf(one).id })).status, 404, 'the first cookie names nothing')
   noLeak(t, s, code)
 })
 
-test('a code used during the Google trip is refused before the exchange', async (t) => {
+test('a code used during phone verification is refused at finish', async (t) => {
   const s = await setup(t)
   const inviter = member()
   await linkDirect(s, inviter, 'ana')
   const { code } = (await issue(s, inviter)).body
   const b = member()
-  const a = await authorize(s, b, 'bia', code)
+  const a = await begin(s, b, 'bia', code)
+  t.is((await verifyPhone(s, b)).body.state, 'verificado')
   await s.invites.consume(inviteId(code))
-  const cb = await callback(s, a.cookie, a.state)
-  t.is(cb.status, 302)
-  t.is(cb.headers.get('location'), ORIGIN + '/?conta=convite-invalido')
-  t.is(cookieOf(cb).maxAge, 0, 'the cookie is cleared')
+  const done = await finish(s, b, 'bia', a)
+  t.is(done.status, 404)
+  t.alike(done.body, { error: 'convite-invalido' })
+  t.is(cookieOf(done).maxAge, 0, 'the cookie is cleared')
   t.is(s.fake.tokenCalls(), 0, 'no token exchange')
   t.is(s.store.get(a.cookie), null, 'the row is dropped')
   t.ok(s.logs.includes(JSON.stringify({ event: 'convite', reason: 'convite-invalido' })))
-  t.absent(cb.headers.get('location').includes(code))
+  t.absent(done.text.includes(code))
+  t.absent(s.store.status(b.hex).linked, 'no link was committed')
   noLeak(t, s, code)
 })
 
-test('a full cap refuses at the callback before the exchange', async (t) => {
+test('a full cap refuses at phone finish without spending the invite', async (t) => {
   const s = await setup(t, { storeOpts: { maxMembers: 2 } })
   const inviter = member()
   await linkDirect(s, inviter, 'ana')
   const { code } = (await issue(s, inviter)).body
-  const a = await authorize(s, member(), 'bia', code)
+  const b = member()
+  const a = await begin(s, b, 'bia', code)
+  t.is((await verifyPhone(s, b)).body.state, 'verificado')
   await linkDirect(s, member(), 'xavier')
-  const cb = await callback(s, a.cookie, a.state)
-  t.is(cb.headers.get('location'), ORIGIN + '/?conta=lista-de-espera')
+  const done = await finish(s, b, 'bia', a)
+  t.is(done.status, 503)
+  t.alike(done.body, { error: 'lista-de-espera' })
   t.is(s.fake.tokenCalls(), 0)
   t.is(s.invites.check(inviteId(code)), null, 'the code stays usable')
+  t.absent(s.store.inviteUsed(inviteId(code)))
   noLeak(t, s, code)
 })
 
-test('a Google cancel releases the code for a later start', async (t) => {
+test('a retired Google callback never exchanges a code or spends the invite', async (t) => {
   const s = await setup(t)
   const inviter = member()
   await linkDirect(s, inviter, 'ana')
   const { code } = (await issue(s, inviter)).body
-  const a = await authorize(s, member(), 'bia', code)
-  const cb = await callback(s, a.cookie, a.state, 'error=access_denied')
-  t.is(cb.headers.get('location'), ORIGIN + '/?conta=cancelado')
-  t.is(s.fake.tokenCalls(), 0)
   const c = member()
+  const a = await begin(s, c, 'bia', code)
+  for (const query of ['code=codigo-1', 'error=access_denied']) {
+    const cb = await s.api('GET', '/account/callback?state=antigo&' + query, { cookie: a.cookie })
+    t.is(cb.status, 302)
+    t.is(cb.headers.get('location'), s.origin + '/?conta=erro')
+    t.is(s.fake.tokenCalls(), 0)
+    t.is(s.fake.requestCalls(), 0, 'no outbound request')
+  }
+  t.absent(s.store.inviteUsed(inviteId(code)))
+  const other = await startWith(s, member(), 'dora', code)
+  t.is(other.status, 404, 'the hold stays: another member is told convite-invalido')
+  t.alike(other.body, { error: 'convite-invalido' })
   const later = await startWith(s, c, 'caio', code)
   t.is(later.status, 200, later.text)
-  const { done } = await linkWith(s, c, 'caio', code)
-  t.is(done.status, 200, 'the later start links')
+  const done = await linkWith(s, c, 'caio', code)
+  t.is(done.cert.member, c.hex, 'the later phone start links')
   noLeak(t, s, code)
 })
 
-// Signs the reserve proof for the row started as `started`; -> { cookie, state }.
-async function authorizeStarted (s, m, username, started) {
-  const cookie = cookieOf(started).id
-  const auth = await s.api('POST', '/account/authorize', { cookie, body: { signature: sign(s, m, 'reserve', started.body.nonce, username) } })
-  return { cookie, auth, state: auth.status === 200 ? new URL(auth.body.authorizeUrl).searchParams.get('state') : null }
+// Pending rows created before retirement still exercise cookie ownership.
+async function legacyRow (s, m, username, code, claimed) {
+  const a = await begin(s, m, username, code)
+  s.store.reserve(a.cookie)
+  if (claimed) s.store.putGoogle(a.cookie, { sub: nextSub(), email: EMAIL })
+  return a
 }
 
 test('a same-member retry that the store refuses keeps the previous row and reservation', async (t) => {
@@ -463,73 +524,73 @@ test('a same-member retry that the store refuses keeps the previous row and rese
   const retry = await startWith(s, b, 'xavier', code)
   t.is(retry.status, 409)
   t.alike(retry.body, { error: 'nome-em-uso' })
-  t.is((await s.api('GET', '/account/pending', { cookie: cookieOf(first).id })).status, 200, 'the bare row survives')
+  t.ok(s.store.get(cookieOf(first).id) !== null, 'the bare row survives')
   t.is((await startWith(s, member(), 'caio', code)).status, 404, 'the code is still held')
-  const a = await authorizeStarted(s, b, 'bia', first)
-  t.is(a.auth.status, 200, a.auth.text)
-  s.fake.account.sub = nextSub()
-  t.is((await callback(s, a.cookie, a.state)).headers.get('location'), ORIGIN + '/?conta=ok')
-  const done = await finish(s, b, 'bia', a.cookie)
+  const a = { started: first, cookie: cookieOf(first).id }
+  const checked = await verifyPhone(s, b)
+  t.is(checked.status, 200)
+  t.is(checked.body.state, 'verificado')
+  const done = await finish(s, b, 'bia', a)
   t.is(done.status, 200, done.text)
   t.ok(s.store.inviteUsed(inviteId(code)))
   noLeak(t, s, code)
 })
 
-test('an unsigned start never replaces a row past authorize', async (t) => {
+test('retired authorize refuses before proof checks and leaves the invite unspent', async (t) => {
   const s = await setup(t)
   const inviter = member()
   await linkDirect(s, inviter, 'ana')
   const { code } = (await issue(s, inviter)).body
   const b = member()
-  const a = await authorize(s, b, 'bia', code)
-  t.is(a.auth.status, 200)
-  const replay = await startWith(s, b, 'bia', code)
-  t.is(replay.status, 404)
-  t.alike(replay.body, { error: 'convite-invalido' })
-  t.is(cookieOf(replay), null, 'no new row')
-  s.fake.account.sub = nextSub()
-  t.is((await callback(s, a.cookie, a.state)).headers.get('location'), ORIGIN + '/?conta=ok', 'the original row still reaches Google')
-  const done = await finish(s, b, 'bia', a.cookie)
+  const a = await begin(s, b, 'bia', code)
+  for (const signature of ['invalid', sign(s, b, 'reserve', a.started.body.nonce, 'bia')]) {
+    const auth = await s.api('POST', '/account/authorize', { cookie: a.cookie, body: { signature } })
+    t.is(auth.status, 410)
+    t.alike(auth.body, { error: 'versao-antiga' })
+    t.is(auth.headers.get('set-cookie'), null, 'no new row')
+  }
+  t.is(s.fake.tokenCalls(), 0)
+  t.is(s.fake.requestCalls(), 0, 'no outbound request')
+  t.is(s.store.get(a.cookie).phase, 'reserve', 'the original row is untouched')
+  t.is(s.invites.check(inviteId(code)), null)
+  t.is((await verifyPhone(s, b)).body.state, 'verificado')
+  const done = await finish(s, b, 'bia', a)
   t.is(done.status, 200, done.text)
   noLeak(t, s, code)
 })
 
-test('an unsigned start never replaces a Google-claimed row', async (t) => {
+test('an unsigned start cannot replace a legacy Google row and its finish is retired', async (t) => {
   const s = await setup(t)
   const inviter = member()
   await linkDirect(s, inviter, 'ana')
   const { code } = (await issue(s, inviter)).body
   const b = member()
-  const a = await authorize(s, b, 'bia', code)
-  s.fake.account.sub = nextSub()
-  t.is((await callback(s, a.cookie, a.state)).headers.get('location'), ORIGIN + '/?conta=ok')
+  const a = await legacyRow(s, b, 'bia', code, true)
+  t.is((await verifyPhone(s, b)).body.state, 'verificado')
   const replay = await startWith(s, b, 'bia', code)
   t.is(replay.status, 404)
   t.alike(replay.body, { error: 'convite-invalido' })
   t.is(cookieOf(replay), null, 'no new row')
-  const done = await finish(s, b, 'bia', a.cookie)
-  t.is(done.status, 200, 'the original finish links')
-  t.ok(s.store.inviteUsed(inviteId(code)))
+  const done = await finish(s, b, 'bia', a)
+  t.is(done.status, 404, 'a legacy Google row cannot finish even with a verified phone')
+  t.alike(done.body, { error: 'expirado' })
+  t.absent(s.store.inviteUsed(inviteId(code)))
   noLeak(t, s, code)
 })
 
-test('overlapping finishes of one member and sub with two codes mark only the recorded one', async (t) => {
+test('overlapping finishes of one member with two codes mark only the recorded one', async (t) => {
   const s = await setup(t)
   const inviter = member()
   await linkDirect(s, inviter, 'ana')
   const codeA = (await issue(s, inviter)).body.code
   const codeB = (await issue(s, inviter)).body.code
   const b = member()
-  const one = await authorize(s, b, 'bia', codeA)
-  const two = await authorize(s, b, 'bia', codeB)
-  s.fake.account.sub = nextSub()
-  t.is((await callback(s, one.cookie, one.state)).headers.get('location'), ORIGIN + '/?conta=ok')
-  t.is((await callback(s, two.cookie, two.state)).headers.get('location'), ORIGIN + '/?conta=ok')
-  const bodyOf = async (cookie) => {
-    const p = await s.api('GET', '/account/pending', { cookie })
-    return { signature: sign(s, b, 'finish', p.body.nonce, 'bia', p.body.sub) }
-  }
-  const [bodyOne, bodyTwo] = [await bodyOf(one.cookie), await bodyOf(two.cookie)]
+  const one = await begin(s, b, 'bia', codeA)
+  const two = await begin(s, b, 'bia', codeB)
+  t.is(one.started.status, 200)
+  t.is(two.started.status, 200)
+  t.is((await verifyPhone(s, b)).body.state, 'verificado')
+  const [bodyOne, bodyTwo] = [finishBody(s, b, 'bia', one), finishBody(s, b, 'bia', two)]
   const both = await Promise.all([
     s.api('POST', '/account/finish', { cookie: one.cookie, body: bodyOne }),
     s.api('POST', '/account/finish', { cookie: two.cookie, body: bodyTwo })
@@ -549,22 +610,21 @@ test('a finish refused with nome-em-uso drops the row and frees the code at once
   const { code } = (await issue(s, inviter)).body
   const id = inviteId(code)
   const b = member()
-  const a = await authorize(s, b, 'bia', code)
+  const a = await begin(s, b, 'bia', code)
   await linkDirect(s, member(), 'bia')
-  s.fake.account.sub = nextSub()
-  const cb = await callback(s, a.cookie, a.state)
-  t.is(cb.headers.get('location'), ORIGIN + '/?conta=ok')
-  const done = await finish(s, b, 'bia', a.cookie)
+  t.is((await verifyPhone(s, b)).body.state, 'verificado')
+  const done = await finish(s, b, 'bia', a)
   t.is(done.status, 409)
   t.alike(done.body, { error: 'nome-em-uso' })
   t.is(cookieOf(done)?.maxAge, 0, 'the cookie is cleared')
   t.is(s.store.get(a.cookie), null, 'the row is dropped')
   t.is(s.invites.check(id), null, 'the sidecar is not marked')
   t.absent(s.store.inviteUsed(id), 'no link holds it')
-  const retry = await finish(s, b, 'bia', a.cookie)
+  const retry = await finish(s, b, 'bia', a)
   t.is(retry.status, 404, 'the old cookie names nothing')
   t.alike(retry.body, { error: 'expirado' })
-  const { done: second } = await linkWith(s, b, 'bia2', code)
+  const restarted = await begin(s, b, 'bia2', code)
+  const second = await finish(s, b, 'bia2', restarted)
   t.is(second.status, 200, 'the same member restarts at once with the same code and another name')
   t.ok(s.store.inviteUsed(id))
   t.is(s.invites.check(id), 'convite-invalido', 'consumed only by the link')
@@ -578,11 +638,10 @@ test('a finish refused with conta-vinculada drops the row and frees the code for
   const { code } = (await issue(s, inviter)).body
   const id = inviteId(code)
   const b = member()
-  const a = await authorize(s, b, 'bia', code)
+  const a = await begin(s, b, 'bia', code)
+  t.is((await verifyPhone(s, b)).body.state, 'verificado')
   await linkDirect(s, b, 'biaantes')
-  s.fake.account.sub = nextSub()
-  t.is((await callback(s, a.cookie, a.state)).headers.get('location'), ORIGIN + '/?conta=ok')
-  const done = await finish(s, b, 'bia', a.cookie)
+  const done = await finish(s, b, 'bia', a)
   t.is(done.status, 409)
   t.alike(done.body, { error: 'conta-vinculada' })
   t.is(cookieOf(done)?.maxAge, 0, 'the cookie is cleared')
@@ -590,8 +649,8 @@ test('a finish refused with conta-vinculada drops the row and frees the code for
   t.is(s.invites.check(id), null, 'the sidecar is not marked')
   t.absent(s.store.inviteUsed(id))
   const c = member()
-  const { done: other } = await linkWith(s, c, 'caio', code)
-  t.is(other.status, 200, 'another key links with the released code')
+  const other = await linkWith(s, c, 'caio', code)
+  t.is(other.cert.member, c.hex, 'another key links with the released code')
   t.ok(s.store.inviteUsed(id))
   noLeak(t, s, code)
 })
@@ -602,11 +661,9 @@ test('two concurrent finishes: one links, the other answers expirado', async (t)
   await linkDirect(s, inviter, 'ana')
   const { code } = (await issue(s, inviter)).body
   const b = member()
-  const a = await authorize(s, b, 'bia', code)
-  s.fake.account.sub = nextSub()
-  await callback(s, a.cookie, a.state)
-  const pending = await s.api('GET', '/account/pending', { cookie: a.cookie })
-  const body = { signature: sign(s, b, 'finish', pending.body.nonce, 'bia', pending.body.sub) }
+  const a = await begin(s, b, 'bia', code)
+  t.is((await verifyPhone(s, b)).body.state, 'verificado')
+  const body = finishBody(s, b, 'bia', a)
   const both = await Promise.all([
     s.api('POST', '/account/finish', { cookie: a.cookie, body }),
     s.api('POST', '/account/finish', { cookie: a.cookie, body })
@@ -622,8 +679,9 @@ test('a failed sidecar mark still answers the committed link; the directory heal
   const inviter = member()
   await linkDirect(s, inviter, 'ana')
   const { code } = (await issue(s, inviter)).body
-  const { done } = await linkWith(s, member(), 'bia', code)
-  t.is(done.status, 200, done.text)
+  const b = member()
+  const done = await linkWith(s, b, 'bia', code)
+  t.is(done.cert.member, b.hex)
   t.ok(s.logs.includes(JSON.stringify({ event: 'convite', reason: 'marca-falhou' })))
   t.is(s.invites.check(inviteId(code)), 'convite-invalido', 'isUsed reports the link')
   const again = await startWith(s, member(), 'caio', code)
@@ -695,48 +753,42 @@ function startCookie (s, m, username, invite, cookie) {
   return s.api('POST', '/account/start', { cookie, body: { member: m.hex, username, invite } })
 }
 
-test('the browser holding a proven row may start over with its cookie', async (t) => {
+test('the browser holding a legacy row may restart with its cookie and link by phone', async (t) => {
   for (const claimed of [false, true]) {
     const s = await setup(t)
     const inviter = member()
     await linkDirect(s, inviter, 'ana')
     const { code } = (await issue(s, inviter)).body
     const b = member()
-    const a = await authorize(s, b, 'bia', code)
-    t.is(a.auth.status, 200)
-    if (claimed) {
-      s.fake.account.sub = nextSub()
-      t.is((await callback(s, a.cookie, a.state)).headers.get('location'), ORIGIN + '/?conta=ok')
-    }
+    const a = await legacyRow(s, b, 'bia', code, claimed)
+    t.is(a.started.status, 200)
+    t.is(s.store.get(a.cookie).phase, 'finish')
     const again = await startCookie(s, b, 'bia2', code, a.cookie)
     t.is(again.status, 200, (claimed ? 'Google-claimed' : 'post-authorize') + ' row taken over by its own cookie')
     if (again.status !== 200) continue
     t.ok(cookieOf(again) !== null && cookieOf(again).id !== a.cookie, 'a new cookie')
     t.is(s.store.get(a.cookie), null, 'the old row is dropped')
     t.is((await startWith(s, member(), 'caio', code)).status, 404, 'the code moved to the new row')
-    const b2 = await authorizeStarted(s, b, 'bia2', again)
-    t.is(b2.auth.status, 200, b2.auth.text)
-    s.fake.account.sub = nextSub()
-    t.is((await callback(s, b2.cookie, b2.state)).headers.get('location'), ORIGIN + '/?conta=ok')
-    const done = await finish(s, b, 'bia2', b2.cookie)
+    const b2 = { started: again, cookie: cookieOf(again).id }
+    const checked = await verifyPhone(s, b)
+    t.is(checked.status, 200)
+    t.is(checked.body.state, 'verificado')
+    const done = await finish(s, b, 'bia2', b2)
     t.is(done.status, 200, 'the new row links')
     t.ok(s.store.inviteUsed(inviteId(code)))
     noLeak(t, s, code)
   }
 })
 
-test('without its cookie, or with another row\'s cookie, a proven row is never replaced', async (t) => {
+test('without its cookie, or with another row\'s cookie, a legacy row is never replaced', async (t) => {
   for (const claimed of [false, true]) {
     const s = await setup(t)
     const inviter = member()
     await linkDirect(s, inviter, 'ana')
     const { code } = (await issue(s, inviter)).body
     const b = member()
-    const a = await authorize(s, b, 'bia', code)
-    if (claimed) {
-      s.fake.account.sub = nextSub()
-      t.is((await callback(s, a.cookie, a.state)).headers.get('location'), ORIGIN + '/?conta=ok')
-    }
+    const a = await legacyRow(s, b, 'bia', code, claimed)
+    t.is(s.store.get(a.cookie).phase, 'finish')
     const bare = await startWith(s, b, 'bia', code)
     t.is(bare.status, 404, 'no cookie: refused')
     t.alike(bare.body, { error: 'convite-invalido' })
@@ -748,13 +800,10 @@ test('without its cookie, or with another row\'s cookie, a proven row is never r
     t.is(foreign.status, 404, 'another row\'s cookie grants nothing')
     t.alike(foreign.body, { error: 'convite-invalido' })
     t.ok(s.store.get(a.cookie) !== null, 'the original row survives')
-    if (!claimed) {
-      s.fake.account.sub = nextSub()
-      t.is((await callback(s, a.cookie, a.state)).headers.get('location'), ORIGIN + '/?conta=ok')
-    }
-    const done = await finish(s, b, 'bia', a.cookie)
-    t.is(done.status, 200, 'the original row still links')
-    t.ok(s.store.inviteUsed(inviteId(code)))
+    const done = await finish(s, b, 'bia', a)
+    t.is(done.status, 404, 'the legacy finish is retired')
+    t.alike(done.body, { error: 'expirado' })
+    t.absent(s.store.inviteUsed(inviteId(code)))
     noLeak(t, s, code)
   }
 })

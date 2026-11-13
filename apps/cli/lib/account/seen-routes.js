@@ -50,6 +50,8 @@ function createSeenRoutes ({
   // { read, write, delete }: keyed windows of server.js, charged per member
   // only after the signature verified.
   limits,
+  // member -> void, throws 'telefone-pendente' (server.js phoneChecked).
+  phoneChecked = () => {},
   log = () => {},
   now = Date.now,
   http
@@ -183,6 +185,8 @@ function createSeenRoutes ({
     spend(nonce, expiresAt)
     available()
     linked(member)
+    // A read and a delete stay open, as with the terms (see the top).
+    if (action === 'write') phoneChecked(member)
     if (action === 'read') return read(res, member, prevHash)
     if (action === 'write') return write(res, member, prevHash, blob)
     return remove(res, member, prevHash)

@@ -221,16 +221,6 @@ export function startRetryable (r) {
   return !!r && r.ok !== true && r.superseded !== true && r.code !== 'nao-encontrado' && r.code !== 'pedido-invalido'
 }
 
-// The web's return from Google refused the held code ('convite-invalido',
-// already dropped by the return reader). When this entry had asked for a
-// Feira code, that was it: the seller's week ran out, and asking again on
-// this load would only mint a code the service refuses. -> { text } | null.
-export function returnLimit ({ returnInvite, entry } = {}) {
-  if (typeof returnInvite !== 'string' || returnInvite === '') return null
-  if (!entry || typeof entry.code !== 'string') return null
-  return { text: LIMIT_TEXT }
-}
-
 export function startErrorText (err) {
   if (err && err.uncertain === true) return START_UNCERTAIN_TEXT
   if (err && err.code === 'nao-encontrado') return START_GONE_TEXT

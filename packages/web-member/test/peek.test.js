@@ -927,7 +927,10 @@ test('regression: an oversized block ends its diary after that block and the bud
   const healthy = []
   for (let i = 0; i < 4; i++) healthy.push(await diary(t, author(assoc, 'H' + i, [now - (i + 10) * 1000])))
   const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [...cores, ...healthy] })
-  const { web, internal } = await webNode(t, assoc, seeder.url)
+  // One block in flight, so what the seeder served shows where the diary
+  // stopped. With 3 in flight blocks 2 and 1 may already be on their way
+  // and are dropped unused: the window pipeline test checks that.
+  const { web, internal } = await webNode(t, assoc, seeder.url, { peek: { windowInflight: 1 } })
   const page = await web.request('peek.read', {})
   t.alike(page.items.map((i) => i.author), healthy.map((c) => hex(c.key)), 'only the healthy diaries')
   t.is(page.diaries, 10)
@@ -1314,11 +1317,272 @@ test('regression: a head tombstone that times out never lets the profile it dele
   // The seeder no longer holds the tombstone: its get times out.
   await A.clear(2)
   const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [A] })
-  const { web, internal } = await webNode(t, assoc, seeder.url, { peek: { fetchTimeoutMs: 1000 } })
-  const page = await web.request('peek.read', { limit: 5 })
-  t.ok(page.items.length >= 1, 'the posts still show')
-  for (const item of page.items) t.is(item.name, null, 'the deleted profile never names the diary')
-  t.is(page.incomplete, true, 'the unread head block leaves the page incomplete')
-  t.absent(seeder.uploads.some((u) => u.seq === 1), 'the block below the unread tombstone is never fetched')
+  for (const inflight of [1, 3]) {
+    const tr = tracer()
+    const { web, internal } = await webNode(t, assoc, seeder.url, { peek: { fetchTimeoutMs: 1000, windowInflight: inflight, trace: tr.trace } })
+    const page = await web.request('peek.read', { limit: 5 })
+    t.ok(page.items.length >= 1, 'the posts still show')
+    for (const item of page.items) t.is(item.name, null, 'the deleted profile never names the diary')
+    t.is(page.incomplete, true, 'the unread head block leaves the page incomplete')
+    t.absent(tr.events.some((e) => e.type === 'accept' && e.seq === 1), 'the block below the unread tombstone is never used')
+    // Serially it is not even asked for; with 3 in flight it may be, and
+    // is then dropped.
+    if (inflight === 1) t.absent(seeder.uploads.some((u) => u.seq === 1), 'the block below the unread tombstone is never fetched')
+    t.alike(internal, [])
+  }
+})
+
+// ---- the window pipeline (several blocks of one diary in flight) ----
+
+// A trace hook for limits.trace: the events in order, and per diary the
+// most gets started and not yet settled at once.
+function tracer () {
+  const events = []
+  const open = new Map()
+  const max = new Map()
+  return {
+    events,
+    max,
+    trace (ev) {
+      events.push(ev)
+      if (ev.type === 'get') {
+        const n = (open.get(ev.key) || 0) + 1
+        open.set(ev.key, n)
+        max.set(ev.key, Math.max(max.get(ev.key) || 0, n))
+      } else if (ev.type === 'settle') {
+        open.set(ev.key, open.get(ev.key) - 1)
+      }
+    }
+  }
+}
+
+test('window pipeline: up to 3 gets of one diary in flight, never more (1 with windowInflight 1)', async (t) => {
+  t.timeout(60000)
+  const assoc = association()
+  const now = Date.now()
+  const A = await diary(t, author(assoc, 'A', Array.from({ length: 12 }, (_, i) => now - (12 - i) * 1000)))
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [A] })
+  for (const [inflight, expected] of [[3, 3], [1, 1]]) {
+    const tr = tracer()
+    const { web, internal } = await webNode(t, assoc, seeder.url, { peek: { windowInflight: inflight, trace: tr.trace } })
+    const page = await web.request('peek.read', {})
+    t.is(page.items.length, 3, 'the three newest posts')
+    t.is(page.incomplete, false)
+    t.is(tr.max.get(hex(A.key)), expected, 'at most ' + expected + ' in flight, and that many reached')
+    const gets = tr.events.filter((e) => e.type === 'get').map((e) => e.seq)
+    t.is(gets[0], 0, 'block 0 first')
+    const settled0 = tr.events.findIndex((e) => e.type === 'settle' && e.seq === 0)
+    t.is(tr.events.findIndex((e) => e.type === 'get' && e.seq !== 0) > settled0, true, 'no other block before block 0 arrived')
+    t.alike(internal, [])
+  }
+})
+
+// cert, profile, t1 (2), t2 (3), a tombstone of 3 (4), t3 (5).
+function tombstoneAuthor (assoc, at) {
+  return [
+    (key) => memberCertRecord(createCert({ member: key }, assoc.kp)),
+    () => profileRecord({ name: 'T', bio: '' }),
+    () => postRecord({ text: 't1', at: iso(at - 3000) }),
+    () => postRecord({ text: 't2', at: iso(at - 2000) }),
+    () => deleteRecord({ seq: 3 }),
+    () => postRecord({ text: 't3', at: iso(at - 1000) })
+  ]
+}
+
+test('window pipeline: pages identical with windowInflight 1 and 3 (tombstone above its target, tail hole, oversized block)', async (t) => {
+  t.timeout(120000)
+  const assoc = association()
+  const now = Date.now()
+  const T = await diary(t, tombstoneAuthor(assoc, now))
+  // A tail hole: the seeder no longer holds the newest block.
+  const H = await diary(t, author(assoc, 'H', [now - 9000, now - 8000, now - 7000, now - 6000]))
+  await H.clear(H.length - 1)
+  const O = await diary(t, oversizedAuthor(assoc, 'O', now - 5000))
+  const G = await diary(t, author(assoc, 'G', [now - 4000, now - 500]))
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [T, H, O, G] })
+  const runs = {}
+  for (const inflight of [1, 3]) {
+    const tr = tracer()
+    const { web, internal } = await webNode(t, assoc, seeder.url, { peek: { windowInflight: inflight, fetchTimeoutMs: 1000, trace: tr.trace } })
+    const pages = await allPages(web, 2)
+    runs[inflight] = { pages, tr }
+    t.alike(internal, [])
+  }
+  const view = (pages) => pages.map((p) => ({
+    items: p.items.map((i) => [i.author, i.seq, i.text, i.round]),
+    next: p.next,
+    diaries: p.diaries,
+    skipped: p.skipped,
+    incomplete: p.incomplete
+  }))
+  t.alike(view(runs[3].pages), view(runs[1].pages), 'the same pages')
+  const texts = runs[3].pages.flatMap((p) => p.items.map((i) => i.text))
+  t.absent(texts.includes('t2'), 'the deleted post never shows')
+  t.ok(texts.includes('t3') && texts.includes('t1'), 'the live posts of T show')
+  t.absent(texts.some((x) => x.startsWith('H ')), 'nothing below the hole')
+
+  const tKey = hex(T.key)
+  const accepted = (tr, key) => tr.events.filter((e) => e.type === 'accept' && e.key === key).map((e) => e.seq)
+  const asked = (tr, key) => tr.events.filter((e) => e.type === 'get' && e.key === key).map((e) => e.seq)
+  t.absent(asked(runs[1].tr, tKey).includes(3), 'serially the deleted block is never asked for')
+  t.ok(asked(runs[3].tr, tKey).includes(3), 'with 3 in flight it was already asked for')
+  t.absent(accepted(runs[3].tr, tKey).includes(3), 'and its result is ignored')
+
+  // The blocks below the hole that arrived are charged, then dropped.
+  const hKey = hex(H.key)
+  const tr3 = runs[3].tr
+  const charged = tr3.events.filter((e) => e.type === 'charge' && e.key === hKey && e.seq > 0).map((e) => e.seq)
+  t.ok(charged.length >= 1, 'a block in flight below the hole arrived and was charged')
+  t.alike(accepted(tr3, hKey).filter((s) => s > 0), [], 'none of them is used')
+  for (const ev of tr3.events.filter((e) => e.type === 'settle' && e.bytes !== null && e.seq > 0 && e.key === hKey)) {
+    t.ok(charged.includes(ev.seq), 'every arrival charged (seq ' + ev.seq + ')')
+  }
+})
+
+test('window pipeline: after the budget cut no get starts', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const now = Date.now()
+  const cores = []
+  for (let i = 0; i < 30; i++) cores.push(await diary(t, author(assoc, 'B' + i, [now - (i + 3) * 1000, now - (i + 2) * 1000, now - (i + 1) * 1000])))
+  const pageMaxBytes = 8000
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores })
+  const tr = tracer()
+  const { web, internal } = await webNode(t, assoc, seeder.url, { peek: { pageMaxBytes, parallel: 4, trace: tr.trace } })
+  const page = await web.request('peek.read', {})
+  t.is(page.incomplete, true, 'the budget cut the page')
+  const cutAt = tr.events.findIndex((e) => e.type === 'charge' && e.budget >= pageMaxBytes)
+  t.ok(cutAt >= 0, 'the budget was reached')
+  t.absent(tr.events.slice(cutAt + 1).some((e) => e.type === 'get'), 'no get after the cut')
+  t.is(Math.max(...tr.max.values()), 1, 'this close to the budget no second get of a window goes out')
   t.alike(internal, [])
+})
+
+test('slow-read line: one local line with the phase times when a page is slow, none when fast', async (t) => {
+  t.timeout(60000)
+  const assoc = association()
+  const now = Date.now()
+  const A = await diary(t, author(assoc, 'A', [now - 2000, now - 1000]))
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [A] })
+  let fake = 0
+  const slow = await webNode(t, assoc, seeder.url, { peek: { now: () => (fake += 400) } })
+  await slow.web.request('peek.read', {})
+  const lines = warningsOf(slow.web).filter((l) => l.startsWith('espiadinha:'))
+  t.is(lines.length, 1, 'one line for the page')
+  t.ok(/^espiadinha: conexão \d+ ms, inventário \d+ ms, blocos \d+ ms, total \d+ ms$/.test(lines[0]), lines[0])
+  t.absent(/[0-9a-f]{64}/.test(lines[0]), 'no key in the line')
+  t.absent(lines[0].includes('\u2014'), 'no em dash')
+  t.alike(slow.internal, [])
+
+  const fast = await webNode(t, assoc, seeder.url, { peek: { now: () => 0 } })
+  await fast.web.request('peek.read', {})
+  t.alike(warningsOf(fast.web).filter((l) => l.startsWith('espiadinha:')), [], 'no line for a fast page')
+})
+
+test('regression: a tombstone consumed while its cleared target is in flight costs no fetch timeout', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const now = Date.now()
+  const A = await diary(t, tombstoneAuthor(assoc, now))
+  // The seeder cleared the deleted block 3: its get would only time out.
+  await A.clear(3)
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [A] })
+  const fetchTimeoutMs = 8000
+  const tr = tracer()
+  const { web, internal } = await webNode(t, assoc, seeder.url, { peek: { fetchTimeoutMs, windowInflight: 3, trace: tr.trace } })
+  const started = Date.now()
+  const page = await web.request('peek.read', {})
+  const elapsed = Date.now() - started
+  t.ok(tr.events.some((e) => e.type === 'get' && e.seq === 3), 'block 3 was in flight when its tombstone was consumed')
+  t.ok(elapsed < fetchTimeoutMs / 2, 'the page did not wait for the cleared block (' + elapsed + ' ms)')
+  t.alike(page.items.map((i) => i.text).sort(), ['t1', 't3'], 'the live posts show, the deleted one does not')
+  t.is(page.incomplete, false)
+  t.is(page.skipped, 0)
+  t.alike(internal, [])
+})
+
+test('regression: alternating tombstones and cleared targets never exceed windowInflight gets and cost no fetch timeout', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const now = Date.now()
+  // 2 p2, 3 p3, then x4, delete 4, x6, delete 6, x8, delete 8, x10, delete 10.
+  const records = [
+    (key) => memberCertRecord(createCert({ member: key }, assoc.kp)),
+    () => profileRecord({ name: 'Z', bio: '' }),
+    () => postRecord({ text: 'p2', at: iso(now - 20000) }),
+    () => postRecord({ text: 'p3', at: iso(now - 19000) })
+  ]
+  for (const seq of [4, 6, 8, 10]) {
+    records.push(() => postRecord({ text: 'x' + seq, at: iso(now - 10000 + seq * 100) }))
+    records.push(() => deleteRecord({ seq }))
+  }
+  const A = await diary(t, records)
+  t.is(A.length, 12)
+  for (const seq of [4, 6, 8, 10]) await A.clear(seq)
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [A] })
+  const fetchTimeoutMs = 8000
+  const tr = tracer()
+  const { web, internal } = await webNode(t, assoc, seeder.url, { peek: { fetchTimeoutMs, windowInflight: 3, trace: tr.trace } })
+  const started = Date.now()
+  const page = await web.request('peek.read', {})
+  const elapsed = Date.now() - started
+  const key = hex(A.key)
+  t.ok(tr.max.get(key) <= 3, 'never more than windowInflight gets outstanding (max ' + tr.max.get(key) + ')')
+  const asked = tr.events.filter((e) => e.type === 'get' && e.key === key).map((e) => e.seq)
+  const cancelled = [4, 6, 8, 10].filter((seq) => asked.includes(seq))
+  t.ok(cancelled.length >= 2, 'cleared targets were in flight when their tombstones were read (' + cancelled + ')')
+  for (const seq of cancelled) {
+    t.ok(tr.events.some((e) => e.type === 'settle' && e.key === key && e.seq === seq && e.bytes === null), 'the get of ' + seq + ' was cancelled and settled')
+  }
+  t.ok(elapsed < fetchTimeoutMs / 2, 'no fetch-timeout stall (' + elapsed + ' ms)')
+  t.alike(page.items.map((i) => i.text).sort(), ['p2', 'p3'], 'only the live posts')
+  t.is(page.incomplete, false)
+  t.alike(internal, [])
+})
+
+test('regression: an abort cancels every window get in flight at once, none waits for its fetch timeout', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const now = Date.now()
+  const A = await diary(t, author(assoc, 'A', Array.from({ length: 10 }, (_, i) => now - (10 - i) * 1000)))
+  t.is(A.length, 12)
+  // The seeder serves block 0 and the head, never the tail.
+  for (let seq = 3; seq < A.length; seq++) await A.clear(seq)
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [A] })
+  const fetchTimeoutMs = 8000
+  const tr = tracer()
+  const peeker = createPeeker({
+    ownKey: async () => '00'.repeat(32),
+    storage: memoryNodeStorage(),
+    association: assoc.hex,
+    seederUrl: seeder.url,
+    createSocket: (u) => {
+      const ws = new WebSocket(u)
+      ws.on('error', () => {})
+      return ws
+    },
+    limits: { fetchTimeoutMs, windowInflight: 3, trace: tr.trace }
+  })
+  t.teardown(() => peeker.close(), { force: true })
+  const key = hex(A.key)
+  const outstanding = () => {
+    const open = new Set()
+    for (const e of tr.events) {
+      if (e.key !== key || e.seq === 0) continue
+      if (e.type === 'get') open.add(e.seq)
+      else if (e.type === 'settle') open.delete(e.seq)
+    }
+    return open
+  }
+  const reading = peeker.read({ limit: 5 }).then(() => null, (err) => err)
+  await until(() => outstanding().size === 3, { timeoutMs: 15000, name: '3 window gets in flight' })
+  const abortedAt = Date.now()
+  peeker.abort()
+  await until(() => outstanding().size === 0, { timeoutMs: fetchTimeoutMs * 2, name: 'every get settled' })
+  const settledIn = Date.now() - abortedAt
+  t.ok(settledIn < fetchTimeoutMs / 4, 'every pending get settled promptly (' + settledIn + ' ms)')
+  const closed = tr.events.filter((e) => e.type === 'closed' && e.key === key)
+  t.ok(closed.some((e) => e.cancelled >= 1), 'the window closed its gets\' sessions before its core')
+  const err = await reading
+  t.is(err && err.message, 'sem conexão com o semeador', 'the aborted read ended')
 })

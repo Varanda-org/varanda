@@ -23,10 +23,11 @@ import { isLegacyPage, legacyBundleOf, nextGen, planShares, secretsParams } from
 
 const { MAX_AVATAR_BYTES } = rpc
 
-// Same values as limits.js (MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS,
-// MAX_MEDIA_PER_POST); duplicated because the app imports no limits module.
+// Same byte cap as limits.js (MEDIA_BLOCK_BYTES * MAX_MEDIA_ITEM_BLOCKS),
+// duplicated because the app imports no limits module. The count is
+// rpc.MAX_MEDIA_PER_POST. A listing uses rpc.feira.MAX_LISTING_MEDIA.
 export const MAX_MEDIA_BYTES = 256 * 32768
-export const MAX_MEDIA_PER_POST = 4
+export const MAX_MEDIA_PER_POST = rpc.MAX_MEDIA_PER_POST
 export { MAX_AVATAR_BYTES }
 
 const KEY_RE = /^[0-9a-f]{64}$/
@@ -50,7 +51,7 @@ export function setDmDropObserver (fn) {
 }
 
 export const TEXTS = Object.freeze({
-  'nao-vinculado': 'Esta conta não tem vínculo com uma conta Google',
+  'nao-vinculado': 'Termine o cadastro em Ajustes → Conta e @nome.',
   'sem-permissao': 'Só o dono pode fazer isso',
   limite: 'Limite atingido',
   'nome-em-uso': 'Esse @nome já está em uso',
@@ -278,7 +279,9 @@ function checkMedia (action, op) {
   if (!['post', 'reply', 'quote', 'listing', 'listing-edit'].includes(action) || !isObject(op) || op.media === undefined) return true
   // listing.edit takes media null to drop every photo (docs/rpc.md 5.107).
   if (action === 'listing-edit' && op.media === null) return true
-  return Array.isArray(op.media) && op.media.length >= 1 && op.media.length <= MAX_MEDIA_PER_POST
+  // A listing is not a diary post: Feira stays at its own cap.
+  const cap = action === 'listing' || action === 'listing-edit' ? rpc.feira.MAX_LISTING_MEDIA : MAX_MEDIA_PER_POST
+  return Array.isArray(op.media) && op.media.length >= 1 && op.media.length <= cap
 }
 
 // `op` may be a function of { nonce, to }: records carry the nonce the service

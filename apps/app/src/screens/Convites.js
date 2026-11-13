@@ -19,7 +19,7 @@ import { HelpNote } from '../ui/Help'
 import { InviteCardButton, InviteCardCompose } from '../ui/InviteCardCompose'
 import { ShareProfile } from '../ui/ShareProfile'
 
-const NOT_LINKED_TEXT = 'Vincule sua conta Google em Conta e @nome para poder convidar.'
+const NOT_LINKED_TEXT = 'Termine o cadastro em Ajustes → Conta e @nome.'
 const UNAVAILABLE_TEXT = 'serviço indisponível'
 const COPY_NOW_TEXT = 'Copie o link agora: ele só aparece nesta tela.'
 const MAYBE_CREATED_TEXT = 'Se o convite foi criado, ele já conta nesta semana.'

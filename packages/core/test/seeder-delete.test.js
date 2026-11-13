@@ -14,7 +14,7 @@ const { tmpDir } = require('./helpers/tmp')
 const { Seeder } = require('../lib/seeder')
 const { createCert, createSeederCert, generateAssociationKeyPair } = require('../lib/cert')
 const { createSwarm, joinAndFlush, topicFor, attachAdmission } = require('../lib/net')
-const { memberCertRecord, postRecord, profileRecord, likeRecord, deleteRecord, mediaCoreRecord, MEDIA_BLOCK_BYTES, MAX_MEDIA_CORES } = require('../lib/records')
+const { memberCertRecord, postRecord, profileRecord, likeRecord, deleteRecord, deleteRecords, mediaCoreRecord, MEDIA_BLOCK_BYTES, MAX_MEDIA_CORES } = require('../lib/records')
 const { mediaHeader } = require('../lib/media')
 
 function hex (buf) {
@@ -421,6 +421,56 @@ test('mediaRead refuses a range listed by a tombstone unless a surviving post sh
   t.ok(await mcore.has(4), 'a block a survivor shows keeps its bytes')
   t.ok(await mcore.has(0), 'the header is never cleared')
   t.is(await seeder.mediaRead(A.key, K, 1, 1), null, 'a cleared block is not served')
+})
+
+test('a post of ten photos deleted by three split tombstones has every range refused, also after a restart', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  // First run with the kill switch: the bytes stay stored, so a refusal
+  // comes from the deletion bookkeeping and not from a missing block.
+  const first = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex, noClear: true })
+
+  const A = await member(t, bootstrap, assoc, {
+    media: 11,
+    records: (key, K) => [
+      mediaCoreRecord({ key: K, at: at(0) }),
+      postRecord({ text: 'dez fotos', media: Array.from({ length: 10 }, (_, i) => descriptor(K, i + 1, 1)), at: at(1) }),
+      postRecord({ text: 'fica', media: [descriptor(K, 11, 1)], at: at(2) })
+    ]
+  })
+  const K = A.mediaKey
+  await admit(A, assoc)
+  await until(() => first.events.find((e) => e.event === 'media-admitted' && e.key === K), { name: 'mídia admitida', timeoutMs: 30000 })
+  await until(() => first.seeder._mediaServed.get(K)?.core.contiguousLength === 12, { name: 'mídia baixada' })
+  await settled(first.seeder, A)
+  for (let b = 1; b <= 10; b++) t.ok(await first.seeder.mediaRead(A.key, K, b, 1), 'range ' + b + ' served before the delete')
+
+  const tombs = deleteRecords({ seq: 2, at: at(3), media: Array.from({ length: 10 }, (_, i) => ({ core: K, start: i + 1, blocks: 1 })) })
+  t.alike(tombs.map((r) => r.media.length), [4, 4, 2], 'three tombstones of 4 + 4 + 2 ranges')
+  await append(A, tombs)
+  await settled(first.seeder, A)
+
+  const check = async (seeder, when) => {
+    const entry = seeder._served.get(A.key)
+    t.absent(entry.mediaIrregular, 'not irregular for media ' + when)
+    t.ok(entry.deleted.has(2), 'the post is deleted ' + when)
+    for (let b = 1; b <= 10; b++) t.is(await seeder.mediaRead(A.key, K, b, 1), null, 'range ' + b + ' refused ' + when)
+    t.is(await seeder.mediaRead(A.key, K, 1, 10), null, 'the whole span refused ' + when)
+    t.ok(await seeder.mediaRead(A.key, K, 11, 1), 'the surviving photo is served ' + when)
+  }
+  const mcore = first.seeder._mediaServed.get(K).core
+  for (let b = 1; b <= 10; b++) t.ok(await mcore.has(b), 'block ' + b + ' kept under the kill switch')
+  await check(first.seeder, 'after the tombstones')
+  await first.seeder.close()
+
+  const second = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  const media = second.seeder._mediaServed.get(K)
+  for (let b = 1; b <= 10; b++) t.absent(await media.core.has(b), 'block ' + b + ' cleared when start() resolves')
+  t.ok(await media.core.has(11), 'the surviving photo keeps its bytes')
+  await settled(second.seeder, A)
+  await check(second.seeder, 'after the restart')
 })
 
 test('deleting the block the engagement cursor paused on resumes the cursor past it', async (t) => {

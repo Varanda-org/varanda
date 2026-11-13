@@ -18,7 +18,12 @@
 // (invite-drops.json), the encrypted seen blob (seen/<member>, removed
 // with the compare-and-swap of ./seen-store.js: a conflict waits for the
 // next sweep) and the passkey public keys with any waiting deletion
-// (passkeys.json, leaving a 30-day tombstone). Each sweep first runs the
+// (passkeys.json, leaving a 30-day tombstone). The verified phone number
+// (phone.json) is not erased: its live row is ended ('excluida'), which frees
+// the number for someone else, but the sealed number stays for the store's
+// RETENTION_MS, because a court order about the deleted key may still follow
+// that pointer; the phone store's own sweep purges it after, and only the
+// moderation rule of ./phone-routes.js burns it. Each sweep first runs the
 // deletions whose date came (`scheduled`, ./delete-routes.js runScheduled),
 // so they are purged in the same pass. What stays is decided elsewhere: the deleted row and
 // the burned names in the directory, the reports and decisions in
@@ -33,10 +38,10 @@ function usable (s) {
 }
 
 // createDeletionSweep({ accounts, terms, ages, pushStore, recovery, invites,
-// drops, seen, passkeys, scheduled, log }) -> { purge(member), sweep(),
+// drops, seen, passkeys, phones, scheduled, log }) -> { purge(member), sweep(),
 // start() -> stop }. Every store but `accounts` may be null (the feature is
 // off: no file to purge). `scheduled` is an async function that never throws.
-function createDeletionSweep ({ accounts, terms = null, ages = null, pushStore = null, recovery = null, invites = null, drops = null, seen = null, passkeys = null, scheduled = null, log = () => {} }) {
+function createDeletionSweep ({ accounts, terms = null, ages = null, pushStore = null, recovery = null, invites = null, drops = null, seen = null, passkeys = null, phones = null, scheduled = null, log = () => {} }) {
   // [name, store, holds(member), forget(member)] for each store that exists.
   const steps = [
     ['terms', terms, (m) => terms.holds(m), (m) => terms.forget(m)],
@@ -46,7 +51,8 @@ function createDeletionSweep ({ accounts, terms = null, ages = null, pushStore =
     ['convites', invites, (m) => invites.holds(m), (m) => invites.forget(m)],
     ['sorteio', drops, (m) => drops.holds(m), (m) => drops.forget(m)],
     ['vistos', seen, (m) => seen.get(m) !== null, forgetSeen],
-    ['passkeys', passkeys, (m) => passkeys.holds(m), (m) => passkeys.forget(m)]
+    ['passkeys', passkeys, (m) => passkeys.holds(m), (m) => passkeys.forget(m)],
+    ['telefone', phones, (m) => phones.live(m) !== null, (m) => phones.end(m, 'excluida')]
   ].filter(([, store]) => store !== null && store !== undefined)
 
   async function forgetSeen (member) {

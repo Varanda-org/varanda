@@ -46,7 +46,6 @@ const PLAIN = {
   'mídia inválida': 'Não foi possível usar esta foto.',
   'áudio inválido': 'Não foi possível enviar este áudio.',
   'mídia disponível só na versão web': 'Fotos só podem ser publicadas na versão web.',
-  'esta conta Google já está vinculada a outra chave': 'Esta conta Google já está em uso por outra conta Varanda.',
   'não foi possível provar a chave': 'Não foi possível confirmar sua conta. Tente de novo.',
   'o nó do navegador não carregou': 'Não foi possível carregar o app. Recarregue a página.',
   'não foi possível carregar o nó do navegador': 'Não foi possível carregar o app. Recarregue a página.',

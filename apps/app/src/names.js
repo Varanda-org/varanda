@@ -18,7 +18,10 @@
 // on screen) go first. BACKGROUND batches (freshness re-fetches and failure
 // retries) wait until the current continuous run has lasted 5 s or entered
 // its idle gap (while no failure backoff is pending), so a native restart
-// gets time to reach the seeder (#66). Lookups never run while a ONCE run
+// gets time to reach the seeder (#66). The freshness re-ask is the profile.read
+// sent with background priority; the debounced resolve of a name on screen
+// keeps the default visible lane, so a tap is not queued behind that re-ask.
+// Lookups never run while a ONCE run
 // is active (a native read would end it for good), while a sync.start is in
 // flight or while the provider reconciles an uncertain start.
 // A failure (connection lost, timeout, no identity) keeps the keys for a retry
@@ -36,7 +39,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { isKey, PROFILE_LIMIT_MAX, USAGE } from '@varanda/rpc'
 import { useNode, useSyncSignals } from './node'
 import { namesQuiet } from './autoSyncPolicy'
-import { applySeed, fieldsOf, stableView } from './namesCache'
+import { absentSeeds, applySeed, fieldsOf, stableView } from './namesCache'
 import { fetchMember } from './indexClient'
 import { diaryPeekSlots } from './engagement'
 import { createNamePeeker, foldRead, unnamed, withPeek } from './namesPeek'
@@ -67,6 +70,8 @@ export function useNames () {
 export function NamesProvider ({ children }) {
   const node = useNode()
   const { phase, sync, request, epoch, hosted } = node
+  const promoteRef = useRef(node.promote)
+  promoteRef.current = node.promote
   // Every fresh key, not only the own one useNode().signals keeps.
   const signals = useSyncSignals()
   const autoSync = node.autoSync || { wanted: false, reconciling: false }
@@ -83,6 +88,11 @@ export function NamesProvider ({ children }) {
   // Queued keys, in insertion order: on-screen first, background after.
   const frontRef = useRef(new Set())
   const backRef = useRef(new Set())
+  // Keys whose re-ask is a freshness pass. A failure retry has no entry, so
+  // its batch stays on the visible lane, as it did before.
+  const backLaneRef = useRef(new Map())
+  // The token of the background batch in progress, or null.
+  const backTokenRef = useRef(null)
   // Oldest to newest screen ask, including loaded and in-flight keys.
   const recentRef = useRef(new Set())
   // key -> time of the failed lookup.
@@ -146,6 +156,8 @@ export function NamesProvider ({ children }) {
 
   const learn = useCallback((key, fields) => apply([[key, fields]]), [apply])
   const learnMany = useCallback((entries) => apply(entries), [apply])
+  // Seeds for keys not in the cache yet only (namesCache.absentSeeds).
+  const seedMany = useCallback((entries) => apply(absentSeeds(cacheRef.current, entries)), [apply])
 
   const quietOk = (now) => namesQuiet({ ...quietRef.current, now, quietMs: QUIET_MS })
 
@@ -181,12 +193,25 @@ export function NamesProvider ({ children }) {
       return
     }
     const authors = order.slice(0, PROFILE_LIMIT_MAX)
-    for (const key of authors) { front.delete(key); back.delete(key) }
+    // On-screen keys (front) and failure retries stay visible. Only a batch
+    // that is entirely a freshness re-ask yields the lane.
+    const freshOnly = authors.length > 0 && authors.every((key) => {
+      return !front.has(key) && backLaneRef.current.get(key) === 'background'
+    })
+    // A background batch carries a token: a name asked for the screen while
+    // it still waits in the queue promotes it (only one batch runs at once).
+    const lane = freshOnly ? { priority: 'background', token: Symbol('names-fresh') } : undefined
+    backTokenRef.current = lane ? lane.token : null
+    for (const key of authors) {
+      front.delete(key)
+      back.delete(key)
+      backLaneRef.current.delete(key)
+    }
     busyRef.current = true
     lastBatchRef.current = now
     const scope = scopeRef.current
     try {
-      const res = await request('profile.read', { authors })
+      const res = await request('profile.read', { authors }, lane)
       if (scope !== scopeRef.current) return
       const next = new Map(cacheRef.current)
       const peeker = peekerRef.current
@@ -208,6 +233,7 @@ export function NamesProvider ({ children }) {
         setUnsupported(true)
         frontRef.current.clear()
         backRef.current.clear()
+        backLaneRef.current.clear()
         retryRef.current.clear()
         return
       }
@@ -217,6 +243,7 @@ export function NamesProvider ({ children }) {
       for (const key of authors) retryRef.current.set(key, at)
     } finally {
       busyRef.current = false
+      backTokenRef.current = null
       if (mountedRef.current && (frontRef.current.size > 0 || backRef.current.size > 0)) schedule(MIN_GAP_MS)
     }
   }
@@ -296,6 +323,7 @@ export function NamesProvider ({ children }) {
     frontRef.current = new Set(retained)
     recentRef.current = new Set(retained)
     backRef.current.clear()
+    backLaneRef.current.clear()
     retryRef.current.clear()
     freshPendingRef.current.clear()
     freshSeenRef.current.clear()
@@ -325,20 +353,25 @@ export function NamesProvider ({ children }) {
       }
       if (frontRef.current.has(key)) continue
       backRef.current.delete(key)
+      backLaneRef.current.delete(key)
       frontRef.current.add(key)
       queued = true
     }
+    if (queued && backTokenRef.current !== null && typeof promoteRef.current === 'function') promoteRef.current(backTokenRef.current)
     if (queued) schedule()
   }, [schedule])
 
   const resolve = useCallback((key) => askFront([key]), [askFront])
   const resolveMany = useCallback((keys) => askFront(Array.isArray(keys) ? keys : []), [askFront])
 
-  const queueBack = useCallback((keys) => {
+  // `priority` is set only by the freshness re-ask. Other callers pass none,
+  // so a failure retry is still sent on the visible lane.
+  const queueBack = useCallback((keys, priority) => {
     let queued = false
     for (const key of keys) {
       if (frontRef.current.has(key) || backRef.current.has(key)) continue
       backRef.current.add(key)
+      if (priority === 'background') backLaneRef.current.set(key, priority)
       queued = true
     }
     if (queued) schedule()
@@ -415,7 +448,7 @@ export function NamesProvider ({ children }) {
         if (known) next.set(key, { ...known, loaded: false })
       }
       commit(next)
-      queueBack(keys)
+      queueBack(keys, 'background')
     }, FRESH_DEBOUNCE_MS)
   }, [fresh, commit, queueBack])
 
@@ -441,7 +474,7 @@ export function NamesProvider ({ children }) {
     return p === null ? null : p.name
   }, [profileOf])
 
-  const value = useMemo(() => ({ profileOf, nameOf, learn, learnMany, resolve, resolveMany, invalidate, unsupported }), [profileOf, nameOf, learn, learnMany, resolve, resolveMany, invalidate, unsupported])
+  const value = useMemo(() => ({ profileOf, nameOf, learn, learnMany, seedMany, resolve, resolveMany, invalidate, unsupported }), [profileOf, nameOf, learn, learnMany, seedMany, resolve, resolveMany, invalidate, unsupported])
 
   return <NamesContext.Provider value={value}>{children}</NamesContext.Provider>
 }

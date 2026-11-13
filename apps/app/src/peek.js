@@ -1,7 +1,7 @@
 // The Espiadinha screen's building blocks: row keys, page merging, the notice
 // shown in place of the list, useSocial's needs for a page, the error tests and
-// the fixed texts. Pure:
-// no imports and no globals, so Node tests load it directly. The rule text
+// the fixed texts, plus the in-memory warm state shared with Avisos.
+// No platform imports, so Node tests load it directly. The rule text
 // mirrors PEEK_RULE in packages/core/lib/peek.js (the app cannot import it).
 
 export const PEEK_WEB_ONLY_MESSAGE = 'Nesta versão, a Espiadinha só funciona na versão web no site da associação.'
@@ -36,8 +36,11 @@ export function mergePage (currentItems, pageItems) {
   return { items, added }
 }
 
+// An incomplete page with a cursor is not the end even when empty: a node
+// that pages candidates in batches may finish a read before any of them had
+// a row to show, and only a read with that cursor goes on from there.
 export function isLastPeekPage (page) {
-  return page.next === null || page.items.length === 0
+  return page.next === null || (page.items.length === 0 && page.incomplete !== true)
 }
 
 export function withoutAuthor (items, author) {
@@ -64,17 +67,45 @@ export function peekNotice ({ supported, hosted, online, loadedAt }) {
   return null
 }
 
-// The hidden tab reads its first page once the seeder link is verified, the
-// sync run is ready and the app has made no node request for this long (the
-// boot reads only start at 'sync ready'; on a phone the browser node shares
-// the main thread with A Rua), so opening Espiadinha does not wait on a new
-// socket. One try per epoch (`attempted`).
-export const PEEK_WARM_QUIET_MS = 3000
+// These reads use short links, independent of sync. The seeder accepts 32
+// external sockets by default: serialize them so an opening phone does not
+// hold three at once (sync, Espiadinha and Avisos). The warm read starts only
+// after this long with no node request in flight.
+export const PEEK_WARM_QUIET_MS = 500
 
-export function shouldWarmPeek ({ hosted, online, phase, seederVerified, syncReady, visible, active, loadedAt, loading, refreshing, unsupported, attempted }) {
+export function shouldWarmPeek ({ hosted, online, phase, seederVerified, visible, active, loadedAt, loading, refreshing, unsupported, attempted, busy }) {
   return hosted === true && online !== false && phase === 'ready' && seederVerified === true &&
-    syncReady === true && visible !== false && active === false && loadedAt === null && !loading && !refreshing &&
-    !unsupported && attempted !== true
+    visible !== false && active === false && loadedAt === null && !loading && !refreshing &&
+    !unsupported && attempted !== true && busy !== true
+}
+
+let warmState = null
+const warmListeners = new Set()
+
+export function getPeekWarmState () {
+  return warmState
+}
+
+export function subscribePeekWarm (listener) {
+  warmListeners.add(listener)
+  return () => warmListeners.delete(listener)
+}
+
+export function updatePeekWarmState (epoch, patch) {
+  // A late completion must neither release nor refuse a newer epoch's read.
+  if (warmState !== null && epoch < warmState.epoch) return
+  const current = warmState !== null && warmState.epoch === epoch
+    ? warmState
+    : { epoch, eligible: false, pending: false, attempted: false, busy: false }
+  const next = { ...current, ...patch }
+  if (warmState === current && Object.keys(next).every((key) => next[key] === current[key])) return
+  warmState = next
+  for (const listener of warmListeners) listener()
+}
+
+export function isSeederBusyError (err) {
+  // Both short-link readers translate a 1013 / lotado close to this RPC error.
+  return Boolean(err && err.code === 'USAGE' && err.message === 'Semeador ocupado; tente novamente em instantes.')
 }
 
 export function isWebOnlyError (err) {

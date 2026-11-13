@@ -8,7 +8,7 @@ test('help keys match the supported tabs and setup steps', async (t) => {
   const { HELP } = await load()
   t.alike(Object.keys(HELP).sort(), [
     'rua', 'espiadinha', 'seguindo', 'avisos', 'diario', 'conversas', 'entrar', 'vinculo',
-    'idade', 'identidade', 'certificado', 'perfil', 'busca', 'ausentes', 'bloqueio',
+    'idade', 'telefone', 'identidade', 'certificado', 'perfil', 'busca', 'ausentes', 'bloqueio',
     'instalar', 'denuncia', 'termosAparelho', 'convites', 'feira'
   ].sort())
 })
@@ -67,20 +67,27 @@ test('sign-in help explains synced recovery and phone QR while preserving passke
 test('link help keeps the account and privacy disclosures', async (t) => {
   const { HELP, SHORT } = await load()
   const text = HELP.vinculo.paragraphs.join(' ')
+  t.is(HELP.vinculo.title, 'Por que confirmar o celular')
   for (const fact of [
-    'confirme uma conta Google e escolha seu @nome',
-    'vínculo entre a conta Google e a sua conta Varanda',
-    'liberar sua conta e seu @nome', 'ordem judicial', 'bloquear a conta',
-    'e-mail nunca', 'seu diário', 'seu perfil', 'este navegador',
-    'idade não é verificada', 'Política de Privacidade', 'Ajustes → Termos e privacidade',
-    'pedir sua passkey de novo', '3 a 20 letras minúsculas, números ou _, começando por letra',
+    'confirme um celular brasileiro e escolha seu @nome',
+    'número lacrado', 'liberar sua conta e seu @nome', 'ordem judicial', 'bloquear a conta',
+    'Cada número fica em uma conta só', 'Enquanto durar um bloqueio, o mesmo número não pode ser usado em outra conta.',
+    'nunca vai para o seu diário', 'seu perfil', 'não fica guardado neste aparelho',
+    'não serve para recuperar a conta', 'Política de Privacidade', 'Ajustes → Termos e privacidade',
+    '3 a 20 letras minúsculas, números ou _, começando por letra',
     'Você pode trocá-lo depois', '7 dias'
   ]) {
     t.ok(text.includes(fact), fact)
   }
-  for (const fact of ['associação', 'Google', 'e-mail nunca']) {
+  t.absent(text.includes('Google'), 'the phone sheet does not name Google')
+  for (const fact of ['associação', 'celular', 'número nunca']) {
     t.ok(SHORT.link.includes(fact), fact)
   }
+  t.absent(SHORT.link.includes('Google'))
+  const device = HELP.termosAparelho.paragraphs.join(' ')
+  t.ok(device.includes('Esta conta ainda não terminou o cadastro'))
+  t.ok(device.includes('Termine o cadastro em Ajustes → Conta e @nome'))
+  t.absent(device.includes('Google'))
 })
 
 test('age and profile help carry the explanations that left the screens', async (t) => {
@@ -91,6 +98,8 @@ test('age and profile help carry the explanations that left the screens', async 
   for (const fact of ['Didit', 'faixa de idade', 'Política de Privacidade']) {
     t.ok(age.includes(fact), fact)
   }
+  t.is(HELP.telefone.title, 'Como funciona a confirmação do celular')
+  t.ok(HELP.telefone.paragraphs.join(' ').includes('Política de Privacidade'))
   t.ok(HELP.perfil.paragraphs.join(' ').includes('sem dados de localização'))
   for (const paragraph of HELP.idade.paragraphs) {
     t.absent(paragraph.includes('\u2014'), 'no em dash in the age help')

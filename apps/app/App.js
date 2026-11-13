@@ -59,10 +59,15 @@ import { StatusBar } from 'expo-status-bar'
 import { AppState, BackHandler, Linking, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { NodeProvider, perfMarks, useNode } from './src/node'
-import { hostedPage } from './src/configStore'
+import { hostedPage, rememberedConfig } from './src/configStore'
 import { pagesOn, setCoreReach } from './src/pageGate'
 import { CROSS_ORIGIN_PAGES } from './src/pageReach'
-import { installationOrigin } from './src/installation'
+import { installationOrigin, rpIdOf } from './src/installation'
+import { parseSnapshot } from './src/feedSnapshot'
+import { clearSnapshot, loadSnapshotText, previewCapable } from './src/feedSnapshotStore'
+import { sessionStore } from './src/sessionStore'
+import { cacheGeneration, wipeLocalCaches } from './src/localCaches'
+import { registerBackgroundRefresh, unregisterBackgroundRefresh } from './src/backgroundTask'
 import { makeIntent, validIntent } from './src/privateReply'
 import { NamesProvider, useNames } from './src/names'
 import { BlocksProvider, useBlocks } from './src/blocksProvider'
@@ -71,7 +76,7 @@ import { PageNoticeSheet } from './src/ui/PageNoticeSheet'
 import { fetchMember } from './src/indexClient'
 import { pageDmPlan, pageReadKind, pageNoticeSeen } from './src/pageNotice'
 import { pageNoticeStore } from './src/pageNoticeStore'
-import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, passkeyAdd, passkeyStart, seenFinish, seenStart, termsFinish, termsStart } from './src/account'
+import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, passkeyAdd, passkeyStart, seenFinish, seenStart, termsFinish, termsStart } from './src/account'
 import { NOTICES_POLL_MS } from './src/notices'
 import { ackCaughtUp, cleanAvisos, createSeenScheduler, dropSent, rememberSent, reportAvisosSeen, runSeenPass, snapshotBefore } from './src/seenSync'
 import { deletedOf, newReceipt, scheduledOf } from './src/accountDeletion'
@@ -79,6 +84,8 @@ import { enrolWith } from './src/passkeyEnrol'
 import { loadDeletionReceipt, saveDeletionReceipt } from './src/deletionReceiptStore'
 import { ageBlocking, ageErrorText, ageGate, ageReadAllowed, parseReturnAge } from './src/age'
 import { ageAnswerOutcome, ageStateShown, nodeVouches } from './src/ageMemory.js'
+import { phoneBlocking, phoneErrorText } from './src/phone.js'
+import { usePhoneGate } from './src/usePhoneGate'
 import * as nav from './src/nav'
 import { bindHistory } from './src/history'
 import { STEP_HINTS, STEP_TITLES, onboardingStep } from './src/onboarding'
@@ -97,7 +104,7 @@ import { useTerms } from './src/useTerms'
 import { useAgeMemory } from './src/useAgeMemory'
 import { INTRO_VERSION, introDecision } from './src/intro'
 import { useIntro } from './src/useIntro'
-import { CONNECT_PATIENCE_MS, SPLASH_MIN_MS, bootPatienceMs, bootProgress, coverBoot, coverConnecting, holdBootCover, holdSplash } from './src/splashGate'
+import { CONNECT_PATIENCE_MS, DETAILS_GRACE_MS, SPLASH_MIN_MS, bootPatienceMs, bootProgress, coverBoot, coverConnecting, detailsGraceOver, holdBootCover, holdSplash, previewAllowed } from './src/splashGate'
 import { Btn, ErrorText, Page, errorText } from './src/ui'
 import { Stepper } from './src/ui/Stepper'
 import { ThemeProvider, useStyles, useTheme } from './src/ui/ThemeProvider'
@@ -118,6 +125,7 @@ import { readPush, usePush } from './src/usePush'
 import { watchRelease } from './src/pwa'
 import { captureLaunch, listenLaunch } from './src/pushClient'
 import { nextLaunch } from './src/push-state'
+import { launchDue } from './src/launchDue'
 import { loadIcons } from './src/ui/Icon'
 import { TabBar } from './src/ui/TabBar'
 import { TopBar } from './src/ui/TopBar'
@@ -140,7 +148,7 @@ import { onDmOpen, onDmWake, requestDmOpen } from './src/dm-open'
 import { Comunidade } from './src/screens/Comunidade'
 import { ComunidadeInfo } from './src/screens/ComunidadeInfo'
 import Ajustes from './src/screens/Ajustes'
-import ARua from './src/screens/ARua'
+import ARua, { ARuaPreview, liveBinding, noteDeleted, previewBinding } from './src/screens/ARua'
 import Conexao from './src/screens/Conexao'
 import Conversa, { useActing } from './src/screens/Conversa'
 import Curtidas from './src/screens/Curtidas'
@@ -150,7 +158,10 @@ import Espiadinha from './src/screens/Espiadinha'
 import Introducao from './src/screens/Introducao'
 import Identidade from './src/screens/Identidade'
 import Idade, { AGE_APP_NOTE } from './src/screens/Idade'
-import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, linkReturnTaker, parseAppLink, parseAppReturn, waitsForInstallation } from './src/linkReturn'
+import Telefone from './src/screens/Telefone'
+import TelefoneAviso from './src/screens/TelefoneAviso'
+import { showExplainer } from './src/phoneExplainer'
+import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, parseAppLink, parseAppReturn, waitsForInstallation } from './src/linkReturn'
 import Membro, { canConverseWithPage } from './src/screens/Membro'
 import Depoimentos from './src/screens/Depoimentos'
 import Momentos from './src/screens/Momentos'
@@ -204,20 +215,9 @@ const agePolicyDelay = (n) => (n === 0 ? 5000 : n === 1 ? 15000 : 60000)
 const ageInfoDelay = (n) => (n === 0 ? 2000 : n === 1 ? 5000 : n === 2 ? 15000 : 30000)
 const AGE_REDIRECT_TEXT = 'Vamos abrir a verificação. Na volta, confirme de novo com o rosto, a digital ou o bloqueio de tela.'
 
-// The steps the setup branch (Identidade, Idade) renders; the others belong
-// to the shell (spinner, Perfil, the tabs).
-const SETUP_STEPS = new Set(['entrar', 'recuperando', 'idade', 'vinculo', 'identidade', 'certificado'])
-
-// True when this page load is the return from the Google step of the account
-// link (?conta=…). Read at import, before any screen renders; only read here:
-// Identidade's LinkCard is the one that removes the query. Native has no
-// location: its Google step returns through the auth session (Identidade).
-const LINK_RETURN = (() => {
-  try {
-    const search = globalThis.location?.search
-    return parseReturn(search) !== null || parseReturnWaitlist(search) !== '' || parseReturnInvite(search) !== ''
-  } catch { return false }
-})()
+// The steps the setup branch (Identidade, Idade, Telefone) renders; the
+// others belong to the shell (spinner, Perfil, the tabs).
+const SETUP_STEPS = new Set(['entrar', 'recuperando', 'idade', 'telefone', 'vinculo', 'identidade', 'certificado'])
 
 // True when this page load is the return from the age verification
 // (?idade=volta). Only skips the intro cards: the result is always asked of
@@ -291,6 +291,31 @@ function cardPastExpires (card, now) {
   return !!card && typeof card.expires === 'number' && now >= cardExpiredAt(card.expires)
 }
 
+// The keychain is never read before this process was in the foreground
+// once: a launch in the background (the refresh task, a push on a locked
+// phone) must not touch it, since a failed read deletes the stored session
+// (src/sessionStore.native.js). A one-way latch for the process, the same
+// rule as the boot's (src/foregroundGate.js).
+let activeSeen = false
+function noteAppState (state) {
+  if (state === 'active') activeSeen = true
+  return activeSeen
+}
+
+// A Rua writes its snapshot a few seconds after the first live page.
+const REFRESH_CHECK_MS = 15000
+
+// Whether the store holds a snapshot the background refresh may renew: of
+// this binding and owner, with at least one row. Read-only. Never throws.
+function refreshSnapshotOk (binding, owner) {
+  try {
+    const snapshot = parseSnapshot(loadSnapshotText(), { ...binding, owner, now: Date.now() })
+    return snapshot !== null && snapshot.items.length > 0
+  } catch {
+    return false
+  }
+}
+
 function setupComplete (info) {
   return info !== null && info.publicKey !== null && info.memberCert === true
 }
@@ -316,10 +341,14 @@ function Member () {
   const bootCoverAt = useRef(null)
   const bootStepRef = useRef(null)
   const bootSettled = useRef(false)
-  // A Rua's first page and the names and counts of its first rows: the
-  // splash covers 'pronto' until both are in (at most CONTENT_PATIENCE_MS).
+  // Names and counts get a short grace after A Rua's first page so slow
+  // detail reads cannot keep a usable feed covered.
   const [feedBoot, setFeedBoot] = useState({ page: false, details: false })
-  const onFeedBoot = useCallback((stage) => setFeedBoot((b) => (b[stage] ? b : { ...b, [stage]: true })), [])
+  const feedPageAt = useRef(null)
+  const onFeedBoot = useCallback((stage) => {
+    if (stage === 'page' && feedPageAt.current === null) feedPageAt.current = Date.now()
+    setFeedBoot((b) => (b[stage] ? b : { ...b, [stage]: true }))
+  }, [])
   const barRef = useRef(0)
   const [, bumpSplash] = useState(0)
   // A timer can fire a few ms before Date.now() reaches the threshold; the
@@ -377,7 +406,14 @@ function Member () {
     setVersion((v) => v + 1)
     setFollowsSignal((v) => v + 1)
   }, [])
+  // Every screen's delete goes through here: A Rua's stored first page may
+  // hold the deleted post, and it must not show again at the next launch
+  // even if A Rua is not visited before the app closes. A Rua may still hold
+  // it in memory: noteDeleted drops an armed write (cache generation) and
+  // none is made until a first page read that starts after this delete.
   const deletedPost = useCallback(() => {
+    noteDeleted()
+    clearSnapshot()
     setVersion((v) => v + 1)
     setPeekVersion((v) => v + 1)
   }, [])
@@ -446,6 +482,145 @@ function Member () {
   const locked = passkey !== null && (pkStatus === null || pkStatus.unlocked !== true)
   const generation = passkey !== null ? passkey.generation : 0
   const generationRef = useRef(generation)
+
+  // --- the cold-start preview (src/splashGate.js previewAllowed) ---
+  // A Rua's saved rows instead of the splash while the node boots, on the
+  // phone only (previewCapable). Read once, and only once the app was active:
+  // the snapshot must parse for this installation and association, and the
+  // session store must hold a live record for exactly its owner on this
+  // rp.id, the record the resume will use. Any doubt or error: the splash.
+  const [appActive, setAppActive] = useState(() => noteAppState(AppState.currentState))
+  useEffect(() => {
+    if (appActive) return
+    const sub = AppState.addEventListener('change', (state) => { if (noteAppState(state)) setAppActive(true) })
+    return () => sub.remove()
+  }, [appActive])
+  const [previewSeed, setPreviewSeed] = useState(null)
+  const previewAsked = useRef(false)
+  // Bumped when a preview attempt was given back (a prune dropped the seed,
+  // or the app left the foreground during a read): the read below runs
+  // again, since neither changes the phase or the configuration it watches.
+  const [previewRetry, setPreviewRetry] = useState(0)
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active' && !previewAsked.current) setPreviewRetry((n) => n + 1)
+    })
+    return () => sub.remove()
+  }, [])
+  // Latched by a mismatch: the preview never comes back in this mount.
+  const previewDropped = useRef(false)
+  // The association comes from the remembered /varanda.json (disk only),
+  // which is there before the node connects; node.config (a saved manual
+  // configuration) when nothing is remembered. The phase is a dependency
+  // because the installation is loaded by node.js's start: a read that found
+  // no installation yet is tried again on the next phase.
+  const previewConfig = node.config
+  const previewPhase = node.phase
+  // A seed holds the cache generation and the binding it was read under. A
+  // purge since (node.js wipes on a changed installation or association, a
+  // block drops authors) or another binding now makes it stale: it is dropped
+  // and only a fresh read for the binding in force may show a preview again.
+  const previewStale = previewSeed !== null && (
+    previewSeed.gen !== cacheGeneration() ||
+    installationOrigin() !== previewSeed.origin ||
+    (previewConfig !== null && typeof previewConfig === 'object' && previewConfig.association !== previewSeed.association)
+  )
+  // Declared before the read below, so a drop gives the latch back first.
+  useEffect(() => {
+    if (!previewStale) return
+    setPreviewSeed(null)
+    previewAsked.current = false
+    setPreviewRetry((n) => n + 1)
+  }, [previewStale])
+  useEffect(() => {
+    if (!previewCapable || !appActive || previewAsked.current) return
+    let alive = true
+    const gen = cacheGeneration()
+    // At most one attempt in flight: the latch is taken now, and given back
+    // when this attempt is discarded (a phase or configuration change), so
+    // the next run tries again instead of hiding a good snapshot all boot.
+    previewAsked.current = true
+    let settled = false
+    const stillActive = () => AppState.currentState === 'active'
+    rememberedConfig().then((remembered) => {
+      if (!alive) return
+      const binding = previewBinding(remembered || previewConfig)
+      if (binding === null) {
+        settled = true
+        previewAsked.current = false
+        return
+      }
+      let snapshot = null
+      let rpId = null
+      try {
+        snapshot = parseSnapshot(loadSnapshotText(), { ...binding, now: Date.now() })
+        rpId = rpIdOf(installationOrigin())
+      } catch {
+        settled = true
+        return
+      }
+      // The phone may have locked while the configuration was read: the
+      // keychain is only probed in the foreground, and only read-only.
+      settled = true
+      if (snapshot === null || snapshot.items.length === 0) return
+      if (!stillActive()) {
+        // Back in the foreground, the next phase or configuration tries again.
+        previewAsked.current = false
+        return
+      }
+      settled = false
+      return sessionStore.hasLive({ rpId, publicKey: snapshot.owner }).then((live) => {
+        if (!alive) return
+        settled = true
+        if (live !== true) return
+        if (!stillActive()) {
+          // Back in the foreground, the listener above tries again.
+          previewAsked.current = false
+          return
+        }
+        // A purge during the reads: this snapshot may be what it removed.
+        if (cacheGeneration() !== gen) {
+          previewAsked.current = false
+          return
+        }
+        setPreviewSeed({ snapshot, sessionLive: true, gen, origin: binding.origin, association: binding.association })
+      })
+    }).catch(() => { settled = true })
+    return () => {
+      alive = false
+      if (!settled) previewAsked.current = false
+    }
+  }, [appActive, previewConfig, previewPhase, previewRetry])
+
+  // The background refresh (src/backgroundTask.native.js): registered only
+  // while a connected, unlocked hosted session has a valid A Rua snapshot of
+  // its own binding and owner on disk (read from the store, since A Rua
+  // writes it after a debounce: checked again when the app leaves the
+  // foreground and a little after the first page), and unregistered as soon
+  // as that stops holding (a core configuration, no passkey, locked, signed
+  // out). Every wipe of the local caches unregisters it too. A no-op on the
+  // web.
+  const refreshHosted = previewConfig !== null && typeof previewConfig === 'object' && previewConfig.kind === 'hosted'
+  const refreshOwner = !locked && pkStatus !== null && pkStatus.signedOut !== true && typeof pkStatus.publicKey === 'string' ? pkStatus.publicKey.toLowerCase() : null
+  const refreshAssociation = refreshHosted ? previewConfig.association : null
+  useEffect(() => {
+    if (previewPhase !== 'ready') return
+    const binding = refreshHosted ? previewBinding(previewConfig) : null
+    if (binding === null || passkey === null || refreshOwner === null) {
+      unregisterBackgroundRefresh()
+      return
+    }
+    const check = () => {
+      if (refreshSnapshotOk(binding, refreshOwner)) registerBackgroundRefresh()
+    }
+    check()
+    const timer = setTimeout(check, REFRESH_CHECK_MS)
+    const sub = AppState.addEventListener('change', (state) => { if (state !== 'active') check() })
+    return () => {
+      clearTimeout(timer)
+      sub.remove()
+    }
+  }, [refreshHosted, refreshAssociation, passkey, refreshOwner, previewPhase, feedBoot.page])
   generationRef.current = generation
 
   const readInfo = useCallback(async () => {
@@ -979,12 +1154,59 @@ function Member () {
     setAgeSinceTick((n) => n + 1)
   }, [node.online, ageSinceNow, generation, ageOrigin])
 
+  // --- the phone gate (src/phone.js, src/usePhoneGate.js; a hosted node) ---
+  // Same origin rule as the age gate. Nothing in device storage is an input:
+  // the service's answer and the proofs node.info reports decide.
+  const phone = usePhoneGate({
+    node,
+    info,
+    hosted: ageHosted,
+    ready,
+    termsOk,
+    locked,
+    member,
+    origin: ageOrigin,
+    generation,
+    afterProof: ageInfoAfterProof,
+    // The age step reads node.info itself; a recovery or once sync holds it.
+    readInfo,
+    infoFree: ageClear && !recovering && !onceSync
+  })
+  const { recheck: recheckPhone, markVerified: markPhoneVerified } = phone
+  const phoneClear = !phoneBlocking(phone.gate)
+  const phoneErrorShown = phone.error ? (phoneErrorText(phone.error) || errorText(phone.error)) : ''
+  // A member linked before the phone check meets TelefoneAviso before the
+  // Telefone step (src/phoneExplainer.js). The acknowledgement is held for
+  // this launch and this member only, never in device storage. node.hosted,
+  // not ageHosted: the explainer's delete button needs Ajustes > Excluir
+  // conta, which only a hosted node mounts.
+  const [phoneAckFor, setPhoneAckFor] = useState(null)
+  const phoneAviso = showExplainer({
+    hosted: node.hosted === true,
+    linked: member !== null && info !== null && info.publicKey === member && info.memberCert === true,
+    gate: phone.gate,
+    acknowledged: member !== null && phoneAckFor === member
+  })
+  // Excluir conta opened from the explainer: every way out of it (back,
+  // Escape, close) returns to the explainer, never to the Ajustes list.
+  const [deleteFromAviso, setDeleteFromAviso] = useState(false)
+  useEffect(() => { if (ajustes === null) setDeleteFromAviso(false) }, [ajustes])
+  const openAvisoDelete = useCallback(() => {
+    setDeleteFromAviso(true)
+    setAjustes('excluir')
+  }, [])
+  const navigateAjustes = useCallback((screen) => {
+    setAjustes(deleteFromAviso && screen !== 'excluir' ? null : screen)
+  }, [deleteFromAviso])
+
   // The gates: `confirmed` can latch setupDone for a member already linked,
   // so setupDone alone never opens the tabs, autosync, the outbox, the terms
   // sync or the profile invite; ageClear is required everywhere too. Not
   // gated by age (documented, as for the terms): the post-unlock recovery of
-  // the member's own diary, which runs before the age check.
-  const setupStep = locked || (!setupDone && !confirmed) || !ageClear
+  // the member's own diary, which runs before the age check. phoneClear holds
+  // the same places except the terms sync: the service records the terms
+  // without the phone check, and the acceptance must reach it.
+  const setupStep = locked || (!setupDone && !confirmed) || !ageClear || !phoneClear
 
   // The acceptance sent to the account service (hosted, linked members): one
   // start, one signature by the node, one finish, per member and version and
@@ -1128,25 +1350,14 @@ function Member () {
   // clears. The provider does the rest.
   const { setAutoSync } = node
   useEffect(() => {
-    setAutoSync(ready && !locked && setupDone && !recovering && termsOk && ageClear)
-  }, [ready, locked, setupDone, recovering, termsOk, ageClear, setAutoSync])
-
-  // Back from the Google step, the return is decided by linkReturnTaker next to
-  // the signup signal below (it needs step and certMissing, computed there).
-  // The setup's LinkCard also drops it when it lands the certificate (onLinked),
-  // since during the recovery the shell may not have seen info without one.
-  const linkReturnRef = useRef(LINK_RETURN)
-  const dropLinkReturn = useCallback(() => { linkReturnRef.current = false }, [])
-  // Native has no ?conta= load: an auth session's result lands in the
-  // Identidade card that opened it, which is still mounted (the native
-  // install card is always 'none', so the signup offer needs no signal).
-  const linkReturned = LINK_RETURN
+    setAutoSync(ready && !locked && setupDone && !recovering && termsOk && ageClear && phoneClear)
+  }, [ready, locked, setupDone, recovering, termsOk, ageClear, phoneClear, setAutoSync])
 
   // Native: the URLs the app is opened with (Linking's initial URL and its
   // 'url' events), all untrusted. varanda://idade feeds the same path as the
   // web's ?idade= load, and the outcome is always asked of the service again;
   // invite and profile links go to their stores. varanda://conta is not a
-  // return (the Google step comes back only through the auth session). A
+  // return (any app can claim or forge it). A
   // link is never consent to follow or to join.
   // A state, not a ref: a group or community link that arrives while the tabs
   // already show must run the effect that opens it. It carries the
@@ -1244,8 +1455,23 @@ function Member () {
   // The own profile (one profile.read through the profiles cache): the
   // onboarding's name step, the Publicar avatar and the own rows.
   const ownKey = info ? info.publicKey : null
-  const { resolve } = names
-  useEffect(() => { if (setupDone && ownKey) resolve(ownKey) }, [setupDone, ownKey, resolve])
+  const { seedMany, resolve } = names
+  // A Rua's snapshot (src/feedSnapshot.js) holds the own name: seeded first,
+  // so the name step does not wait for profile.read, which still answers
+  // for it (a seed is never loaded, and never replaces a known entry).
+  // Bound by A Rua's own rule (liveBinding); the Vitrine has no
+  // configuration, so it never reads the device's real snapshot.
+  const snapshotConfig = node.config
+  useEffect(() => {
+    if (!setupDone || !ownKey) return
+    const binding = liveBinding(ownKey, snapshotConfig)
+    if (binding !== null) {
+      const snapshot = parseSnapshot(loadSnapshotText(), { ...binding, now: Date.now() })
+      const own = snapshot !== null && Object.prototype.hasOwnProperty.call(snapshot.names, binding.owner) ? snapshot.names[binding.owner] : null
+      if (own !== null) seedMany([[ownKey, own]])
+    }
+    resolve(ownKey)
+  }, [setupDone, ownKey, snapshotConfig, seedMany, resolve])
 
   // The onboarding step (src/onboarding.js). A failed lookup is not evidence
   // that the profile is absent: profileKnown is true only once the cache
@@ -1264,18 +1490,21 @@ function Member () {
     // keeps the screen, with its error and retry, since the age check needs the
     // key. Nothing is released: setupStep still holds while the age gate does,
     // and the service refuses the link without the check.
-    ageVerified: ageClear || member === null
+    ageVerified: ageClear || member === null,
+    phoneVerified: phoneClear || member === null
   })
   // The latched setupDone rule above decides between the setup branch and the
   // shell's steps; the step machine only names the step within each.
   let { step, index, total } = onboarding
-  if (setupStep && mode !== 'hosted' && !ageClear && member !== null && !locked && !recovering) {
+  if (setupStep && mode !== 'hosted' && (!ageClear || !phoneClear) && member !== null && !locked && !recovering) {
     // A hand-typed configuration on the hosted page: the native steps do not
-    // know the age check, so it takes the screen here.
-    step = 'idade'
+    // know the age or phone check, so it takes the screen here.
+    step = !ageClear ? 'idade' : 'telefone'
     index = 1
   } else if (setupStep && !SETUP_STEPS.has(step)) {
-    step = mode === 'hosted' ? (ageClear || member === null ? 'vinculo' : 'idade') : 'certificado'
+    step = mode === 'hosted'
+      ? (!ageClear && member !== null ? 'idade' : !phoneClear && member !== null ? 'telefone' : 'vinculo')
+      : 'certificado'
     index = 1
   } else if (!setupStep && SETUP_STEPS.has(step)) {
     step = 'pronto'
@@ -1308,7 +1537,7 @@ function Member () {
   if (cardKey !== null && ownPublicKey !== null && info.memberCert !== true) eligibleCardRef.current = { card: cardKey, key: ownPublicKey }
   const arrivalEligible = cardKey !== null && eligibleCardRef.current !== null &&
     eligibleCardRef.current.card === cardKey && eligibleCardRef.current.key === ownPublicKey
-  const cardWanted = cardKey !== null && ((cardStage === 'arrival' && arrivalEligible) || (introState === 'show' && !LINK_RETURN && !AGE_RETURN))
+  const cardWanted = cardKey !== null && ((cardStage === 'arrival' && arrivalEligible) || (introState === 'show' && !AGE_RETURN))
   const [cardView, setCardView] = useState(null)
   const cardSeq = useRef(0)
   const resolveCard = useCallback((stage) => {
@@ -1424,26 +1653,19 @@ function Member () {
   useEffect(() => { if (pushMember !== null && node.online !== false) readPush(pushMember) }, [pushMember, node.online])
   useEffect(() => { if (locked) readPush(null) }, [locked])
 
-  // Offered once, right after a signup on this page load. LINK_RETURN alone
-  // also covers an existing member linking Google from Ajustes > Conta, so the
-  // signup signal is 'vinculo' with a node.info that has been read and holds no
-  // certificate: while info is still null the step machine shows 'vinculo' for
-  // that member too. Dismissing also quiets the top-bar note for 30 days.
+  // Offered once, right after a signup on this page load: the setup's
+  // LinkCard calls onLinked only when it lands a new certificate, which a
+  // member who already held one never does. Dismissing also quiets the
+  // top-bar note for 30 days.
   const signupRef = useRef(false)
-  const certMissing = info !== null && info.memberCert !== true
-  // A newcomer's return is finished by the setup's LinkCard, so it is dropped
-  // on the commit the signup signal fires, before setupStep turns false, and
-  // the tabs come up on A Rua with no sheet. Only a member who already held a
-  // certificate (linking from Ajustes > Conta) gets that sheet, once, after
-  // the unlock.
-  useEffect(() => {
-    const taker = linkReturnTaker({ held: linkReturnRef.current, termsOk, setupStep, step, certMissing })
-    if (taker === 'none' || taker === 'wait') return
-    linkReturnRef.current = false
-    if (taker === 'conta') setAjustes('conta')
-  }, [termsOk, setupStep, step, certMissing])
-  useEffect(() => { if (linkReturned && step === 'vinculo' && certMissing) signupRef.current = true }, [linkReturned, step, certMissing])
+  const takeLinked = useCallback(() => { signupRef.current = true }, [])
   const [installCardOpen, setInstallCardOpen] = useState(false)
+  // A lock ends the session: the next account never inherits this offer.
+  useEffect(() => {
+    if (!locked) return
+    signupRef.current = false
+    setInstallCardOpen(false)
+  }, [locked])
   useEffect(() => {
     if (signupRef.current && !setupStep && step === 'pronto' && install.card !== 'none') {
       signupRef.current = false
@@ -1492,7 +1714,7 @@ function Member () {
   // outbox (src/outboxProvider.js) is untouched.
   const outbox = useOutbox()
   useOutboxDrain({
-    enabled: ready && !locked && setupDone && termsOk && ageClear && !(passkey && passkey.recovering) &&
+    enabled: ready && !locked && setupDone && termsOk && ageClear && phoneClear && !(passkey && passkey.recovering) &&
       node.online !== false && node.visible !== false && !(node.sync.active && node.sync.active.once) && node.sync.starting !== true &&
       outbox.available,
     author: ownKey,
@@ -2231,9 +2453,7 @@ function Member () {
   useEffect(() => {
     const intent = launchRef.current
     if (intent === null || typeof launchKey !== 'string') return
-    // Ajustes is a sheet, so atTabs is false while it is open: a convite must
-    // still refresh an open Convites now, or a lock before closing drops it.
-    if (!atTabs && !(intent.kind === 'convite' && ajustes !== null)) return
+    if (!launchDue({ kind: intent.kind, atTabs, sheetOpen: ajustes !== null, phoneClear, deleteFromAviso })) return
     launchRef.current = null
     // A DM wake names nobody: Conversas opens for whoever is unlocked.
     if (intent.kind === 'dm') {
@@ -2258,7 +2478,7 @@ function Member () {
         openThread({ ref: intent.ref })
       }
     }
-  }, [launchSeq, atTabs, ajustes, launchKey, clearStack, openThread, enterAvisos, openInvites])
+  }, [launchSeq, atTabs, ajustes, launchKey, clearStack, openThread, enterAvisos, openInvites, phoneClear, deleteFromAviso])
   // The record is untrusted and may have changed in another render: every
   // step re-reads it (from tab storage, or memory when storage refused it).
   // The memory copy keeps the stored record's 1 h limit (readInvite applies
@@ -2382,7 +2602,7 @@ function Member () {
       }
       if (!inviteLinks.isCurrent(link)) return
       openMember(key)
-      // The newcomer back from Google: the profile is open, Seguir is one tap.
+      // The newcomer who just signed up: the profile is open, Seguir is one tap.
       if (action === 'confirm') showToast(confirmText({ username: rec.username }))
     }
     attempt().catch(() => {}).finally(() => {
@@ -2442,8 +2662,8 @@ function Member () {
   barRef.current = bootBar
   const splash = <Splash edges={sideEdges} progress={bootBar} />
   // The intro cards come first, once per device (src/intro.js): presentation
-  // only, so autosync, the outbox and the invite keep waiting for termsOk. A
-  // Google return skips them for that page load without marking them seen.
+  // only, so autosync, the outbox and the invite keep waiting for termsOk. An
+  // age return skips them for that page load without marking them seen.
   // The terms gate, before everything else: Conexao, Entrar (so before
   // Google) while this device has no record of the current version, and the
   // tabs. Once it has one, an account that unlocks without its own entry
@@ -2451,7 +2671,7 @@ function Member () {
   // autosync, the outbox and the invite wait for termsOk. Not gated
   // (documented): the provider's boot, the session resume and the one
   // recovery sync of a diary without its certificate (src/node.js).
-  const gateNext = (introState === 'show' && !LINK_RETURN && !AGE_RETURN) || decision === 'needed' || decision === 'updated' || decision === 'account'
+  const gateNext = (introState === 'show' && !AGE_RETURN) || decision === 'needed' || decision === 'updated' || decision === 'account'
   // The 10 s patience counts only while the splash is what covers the
   // connect, never while the intro cards or the terms are on screen.
   const coveringConnect = !ready && !seen && node.phase === 'connecting' && decision !== 'loading' && introState !== 'loading' && !gateNext
@@ -2464,8 +2684,11 @@ function Member () {
     return () => clearTimeout(t)
   }, [coveringConnect, node.canConfigure])
   const loadingGate = decision === 'loading' || introState === 'loading'
-  const holding = holdSplash({ phase: node.phase, elapsedMs: Date.now() - bootAt, released: released.current, gateNext })
-  const showIntro = introState === 'show' && !LINK_RETURN && !AGE_RETURN
+  // Once the node was seen ready the shell may already be up (no fixed
+  // minimum for 'ready'), so a reconnect inside the first 1.5 s must not
+  // bring the splash back and unmount the tree.
+  const holding = holdSplash({ phase: ready || seen ? 'ready' : node.phase, elapsedMs: Date.now() - bootAt, released: released.current, gateNext })
+  const showIntro = introState === 'show' && !AGE_RETURN
   const showTerms = decision === 'needed' || decision === 'updated' || decision === 'account'
   const connectingSplash = !ready && !seen && coverConnecting({ phase: node.phase, canConfigure: node.canConfigure, elapsedMs: connectingAt.current === null ? 0 : Date.now() - connectingAt.current, released: released.current })
   const showConexao = !ready && !seen && !connectingSplash
@@ -2477,8 +2700,15 @@ function Member () {
   // Render-time ref writes, as with released.current = true.
   // Only A Rua as the first screen waits for its rows; a stacked screen (a
   // link opened at boot) or another tab shows at once.
-  const feedReady = feedBoot.details || tab !== 'rua' || topEntry !== null
-  const cover = coverBoot({ step, passkeyKnown: passkey === null || pkStatus !== null || !!passkey.error, age: ageNeeded, ageError, infoKnown: info !== null || infoError !== '', profileSlow: slow, feedReady })
+  const feedGrace = !feedBoot.details && tab === 'rua' && topEntry === null && detailsGraceOver({ page: feedBoot.page, pageAtMs: feedPageAt.current, nowMs: Date.now() })
+  const feedReady = feedBoot.details || tab !== 'rua' || topEntry !== null || feedGrace
+  useEffect(() => {
+    if (!feedBoot.page || feedBoot.details) return
+    const remaining = Math.max(0, DETAILS_GRACE_MS - (Date.now() - feedPageAt.current))
+    const t = setTimeout(() => bumpSplash((n) => n + 1), remaining + 50)
+    return () => clearTimeout(t)
+  }, [feedBoot.page, feedBoot.details])
+  const cover = coverBoot({ step, passkeyKnown: passkey === null || pkStatus !== null || !!passkey.error, age: ageNeeded, ageError, phone: phone.gate, phoneError: phoneErrorShown, infoKnown: info !== null || infoError !== '', profileSlow: slow, feedReady })
   if (atShell && cover && !bootSettled.current && bootStepRef.current !== step) {
     bootStepRef.current = step
     bootCoverAt.current = Date.now()
@@ -2496,8 +2726,8 @@ function Member () {
   useEffect(() => {
     if (!atShell || coveringBoot || splashEndMarked.current) return
     splashEndMarked.current = true
-    perfMarks().mark('splash-end', feedReady ? 'feedReady' : 'patience')
-  }, [atShell, coveringBoot, feedReady])
+    perfMarks().mark('splash-end', feedGrace ? 'grace' : feedReady ? 'feedReady' : 'patience')
+  }, [atShell, coveringBoot, feedReady, feedGrace])
   const markedTab = useRef(tab)
   useEffect(() => {
     if (markedTab.current === tab) return
@@ -2536,7 +2766,6 @@ function Member () {
   if (introDue && openWaitAt.current === null) openWaitAt.current = Date.now()
   let opening = openingGate({
     introShow: introDue,
-    linkReturn: LINK_RETURN,
     ageReturn: AGE_RETURN,
     card: cardKey !== null,
     verified: openVerified,
@@ -2549,11 +2778,41 @@ function Member () {
     const t = setTimeout(() => bumpSplash((n) => n + 1), Math.max(0, OPEN_WAIT_MS - (Date.now() - openWaitAt.current)) + 50)
     return () => clearTimeout(t)
   }, [opening])
+  // The preview stands only where the splash would. In the render in which
+  // identity.status names another owner, a locked or signed-out identity, or
+  // Entrar is the real screen, it goes and the local caches of other
+  // people's content are wiped (once). Before the first real screen only: a
+  // later lock is node.js's to handle.
+  const previewKnown = passkey === null || pkStatus !== null || !!passkey.error
+  const previewOwner = previewSeed !== null && !previewStale && !bootSettled.current && !previewDropped.current ? previewSeed.snapshot.owner : null
+  const previewMismatch = previewOwner !== null && (
+    (pkStatus !== null && (pkStatus.unlocked !== true || pkStatus.signedOut === true || typeof pkStatus.publicKey !== 'string' || pkStatus.publicKey.toLowerCase() !== previewOwner)) ||
+    (step === 'entrar' && previewKnown)
+  )
+  if (previewMismatch) {
+    previewDropped.current = true
+    wipeLocalCaches()
+  }
+  // A step whose screen is still covered (coverBoot) is a boot placeholder,
+  // not yet the step; a recovery is always its own step.
+  const previewStep = recovering ? 'recuperando' : (cover ? null : step)
+  const previewOn = previewOwner !== null && !previewMismatch && previewAllowed({
+    snapshot: previewSeed.snapshot,
+    previewCapable,
+    // Not known yet whether a gate comes next counts as one.
+    gateNext: gateNext || loadingGate || opening === 'wait',
+    showConexao,
+    step: previewStep,
+    locked: pkStatus !== null && pkStatus.unlocked !== true,
+    sessionLive: previewSeed.sessionLive,
+    nowMs: Date.now()
+  })
+  const bootCover = previewOn ? <ARuaPreview snapshot={previewSeed.snapshot} progress={bootBar} /> : splash
   // The same root View with the Splash at child 0 is what React preserves
   // across these returns and the final one, so the chair animation does not
   // replay and, on the web, the Splash unmount that removes
   // #varanda-pre-splash happens only when the real screen is ready.
-  if (loadingGate || holding || opening === 'wait') return <View style={[styles.root, SPLASH_WRAP, { paddingHorizontal: sidePad }]}>{splash}</View>
+  if (loadingGate || holding || opening === 'wait') return <View style={[styles.root, SPLASH_WRAP, { paddingHorizontal: sidePad }]}>{bootCover}</View>
   if (opening === 'card' && openResult !== null) {
     // Como funciona: the intro cards, then back to the card; only Entrar
     // marks them seen.
@@ -2603,7 +2862,7 @@ function Member () {
     // The splash covers loading and connecting, also on the hosted page.
     // A failure or 10 s connecting on a configurable node reveals Conectar;
     // later retries stay there so its local state survives.
-    if (connectingSplash) return <View style={[styles.root, SPLASH_WRAP, { paddingHorizontal: sidePad }]}>{splash}</View>
+    if (connectingSplash) return <View style={[styles.root, SPLASH_WRAP, { paddingHorizontal: sidePad }]}>{bootCover}</View>
     released.current = true
     return (
       <SafeAreaView style={[styles.flex, { paddingHorizontal: sidePad }]} edges={sideEdges}>
@@ -2662,6 +2921,29 @@ function Member () {
           total={total}
         />
       )
+    } else if (step === 'telefone' && phoneAviso) {
+      body = <TelefoneAviso onContinue={() => setPhoneAckFor(member)} onDelete={openAvisoDelete} />
+    } else if (step === 'telefone') {
+      // As Idade: the first wait for the status stays under the splash
+      // (coverBoot); the busy state remains for a recheck or a patience reveal.
+      body = (
+        <Telefone
+          mode='setup'
+          member={member}
+          gateKey={phone.key}
+          checking={phone.gate === 'loading'}
+          checkError={phoneErrorShown}
+          onRecheck={recheckPhone}
+          onUncertain={recheckPhone}
+          onDropped={recheckPhone}
+          onVerified={markPhoneVerified}
+          statusBusy={phone.pending}
+          statusVerified={phone.state === 'verificado' && !phone.error}
+          offline={node.online === false}
+          index={index}
+          total={total}
+        />
+      )
     } else if (passkey !== null || info !== null) {
       // embedded: the step frame (or the Ajustes page) carries the title
       // The invite card shows on Entrar only (never in the Ajustes Identidade).
@@ -2684,7 +2966,7 @@ function Member () {
             onDismiss: () => { dropEntryLink(); setPendingLink(null) }
           }
         : null
-      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} onLinked={dropLinkReturn} onInviteChanged={reloadCard} invite={inviteProp || entryProp} feira={{ holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode }} />
+      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} onLinked={takeLinked} onInviteChanged={reloadCard} onPhoneRecheck={recheckPhone} invite={inviteProp || entryProp} feira={{ holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode }} />
     } else if (infoError) {
       body = (
         <Page flush grow padBottom={16}>
@@ -3219,7 +3501,7 @@ function Member () {
   // permanent: a conditional one would remount Identidade at the reveal.
   return (
     <View style={[styles.root, coveringBoot && SPLASH_WRAP, { paddingHorizontal: sidePad }]}>
-      {coveringBoot ? splash : null}
+      {coveringBoot ? bootCover : null}
       <View style={coveringBoot ? styles.hidden : styles.flex}>{content}</View>
       {/* The terms gate used to unmount these sheets on a hosted lock as a
           side effect, and a current terms record no longer brings it up. So
@@ -3270,10 +3552,10 @@ function Member () {
           showToast(text)
         }}
       />
-      <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={setAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} scheduledDeletion={scheduledDeletion} onDeletionChanged={refreshAccount} inviteNudge={inviteNudge} onOpenPaginas={pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? () => pushScreen({ screen: 'paginas' }) : undefined} />
+      <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={navigateAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} scheduledDeletion={scheduledDeletion} onDeletionChanged={refreshAccount} inviteNudge={inviteNudge} onOpenPaginas={!deleteFromAviso && pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? () => pushScreen({ screen: 'paginas' }) : undefined} node={node} member={member} phoneGate={phone.gate} phoneKey={phone.key} phoneChecking={phone.pending} phoneVerified={phone.state === 'verificado' && !phone.error} markVerified={markPhoneVerified} recheckPhone={recheckPhone} />
       {/* Mounted after the splash, so it wins: while the boot cover shows it
           follows the splash, which stays cream on native (Splash.js). */}
-      <StatusBar style={coveringBoot ? statusBarStyle(Platform.OS === 'web' ? scheme : 'light') : statusBarStyle(scheme, { overBand: light || viewerOnTop })} />
+      <StatusBar style={coveringBoot ? statusBarStyle(Platform.OS === 'web' || previewOn ? scheme : 'light') : statusBarStyle(scheme, { overBand: light || viewerOnTop })} />
     </View>
   )
 }

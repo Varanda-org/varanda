@@ -600,8 +600,18 @@ function createSession ({
       throw new UsageError('assinatura disponível só no navegador')
     }),
 
+    // And for the phone-verification request (docs/rpc.md 5.115).
+    'phone.sign': serial(async () => {
+      throw new UsageError('assinatura disponível só no navegador')
+    }),
+
     // The age attestations are kept only by the browser node (docs/rpc.md 5.83).
     'age.proof': serial(async () => {
+      throw new UsageError('disponível só no navegador')
+    }),
+
+    // The phone attestations are kept only by the browser node (docs/rpc.md 5.116).
+    'phone.proof': serial(async () => {
       throw new UsageError('disponível só no navegador')
     }),
 

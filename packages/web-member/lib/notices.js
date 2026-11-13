@@ -4,7 +4,10 @@
 // 'Notices link'): `notices.list` answers "who started following me and
 // whom I do not follow yet, who replied to, quoted or mentioned me, and who
 // liked or reposted my posts" HERE, in the browser. One short-lived seeder
-// link per read: the node proves on 'varanda/notices/3' (or, when the seeder
+// link per read, or per scroll: a read that ends with a cursor leaves its
+// link open NOTICES_LINGER_MS for the chained page of the SAME own key,
+// which reuses its channel and proof; a first page, another own key, a lost
+// link, abort(), close() or the timer closes it. The node proves on 'varanda/notices/3' (or, when the seeder
 // rejects it or leaves it unanswered, 'varanda/notices/2', no likes or
 // reposts, or then 'varanda/notices/1', follows only: activity false) that it
 // owns its diary key (@varanda/core lib/notices-net.js, member role), reads
@@ -40,7 +43,8 @@
 // verified (role 'seeder' and seederCertForKey on the Noise key, as
 // ./sync.js). The stored follows, blocklist and revoked issuers are
 // re-applied on every read, cached evidence included.
-// PRIVACY: ephemeral Noise key, empty inventory, no announce. The proof
+// PRIVACY: ephemeral Noise key, empty inventory (and none asked for:
+// CAP_NO_INVENTORY), no announce. The proof
 // reveals to the seeder only what it already knows: this node's diary key,
 // which the sync link advertises on the same IP. Nothing is stored anywhere.
 // DATA FLOWS: browser memory only: no kv entry, no replica, nothing written;
@@ -51,20 +55,28 @@
 // the verdict and the kind with the current revoked issuers, own context
 // and clock (never a cached name, kind or verdict). A v2 or v3 read also
 // reads the own diary once (the session's ownContext, cached on its length).
-// COST: one WebSocket + Noise + hello + proof + at most NOTICES_MAX_SEEDER_PAGES
-// pages, then per unverified row one memory core and at most
-// NOTICES_MAX_BLOCKS_PER_ROW block requests (block 0, `seq`, blocks 1..2 and
-// the last PEEK_TAIL_BLOCKS), NOTICES_PARALLEL rows in flight, under one read
-// deadline and one byte budget charged per block as it arrives and checked
-// before every request. A block over MAX_BLOCK_BYTES ends its row. One read
-// at a time.
+// COST: one WebSocket + Noise + hello + proof per scroll (a seeder offering
+// discovery sends a lean hello with no inventory), and per read at most
+// NOTICES_MAX_SEEDER_PAGES pages, then per unverified row one memory core and at most
+// NOTICES_MAX_BLOCKS_PER_ROW block requests (block 0 alone and first, then
+// `seq` alone, then blocks 1..2 and the last PEEK_TAIL_BLOCKS with up to
+// NOTICES_WINDOW_INFLIGHT (4) in flight through ./block-window.js, consumed
+// strictly highest seq first), NOTICES_PARALLEL rows in flight, under one
+// read deadline and one byte budget charged per block as it arrives, in
+// flight or already abandoned, and checked before every request. A row's
+// first get may always go out, a further one only while every get in flight
+// on the link fits under the budget, so in-flight data is bounded by
+// NOTICES_PARALLEL x 4 blocks and the overshoot past the budget stays at one
+// block per row. A block over MAX_BLOCK_BYTES ends its row. A read over
+// NOTICES_SLOW_READ_MS writes one local timing line (connection, support and
+// proof, rows). One read at a time.
 const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const crypto = require('hypercore-crypto')
 const b4a = require('b4a')
 const { decodeBlock, validRecordCopy, isHex64, isCanonicalIso, MAX_LOG_BLOCKS, MAX_LOG_BYTES, MAX_BLOCK_BYTES } = require('@varanda/core/lib/records')
 const { seederCertForKey } = require('@varanda/core/lib/cert')
-const { attachAdmission } = require('@varanda/core/lib/admission')
+const { attachAdmission, CAP_NO_INVENTORY } = require('@varanda/core/lib/admission')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { PEEK_CONNECT_TIMEOUT_MS, PEEK_TAIL_BLOCKS, diaryPeek, retainRecords } = require('@varanda/core/lib/peek')
 const { NOTICES_LIMIT_MAX } = require('@varanda/core/lib/notices')
@@ -72,6 +84,7 @@ const { attachNotices, attachNoticesV2, attachNoticesV3, NOTICES_REQUEST_TIMEOUT
 const { MAX_FUTURE_MS } = require('@varanda/core/lib/feed')
 const { mentionTokens } = require('@varanda/rpc')
 const { memoryStorage } = require('./storage')
+const { pipeline } = require('./block-window')
 const { guardedWsStream } = require('./ws-stream')
 const { readerModeration } = require('./member-ops')
 const { PEEK_CORE_PAGE_SIZE, PEEK_MAX_FRAME, SEEDER_BUSY } = require('./peek')
@@ -85,8 +98,17 @@ const NOTICES_MAX_BLOCKS_PER_ROW = 16
 const NOTICES_MAX_SEEDER_PAGES = 8
 const NOTICES_CACHE_TTL_MS = 300000
 const NOTICES_CACHE_MAX = 512
+// Evidence blocks of one row in flight at once after block 0 and `seq`:
+// about one round trip per 4 blocks instead of one per block. 8 rows x 4 x
+// 16384 bytes stays under PEEK_MAX_FRAME.
+const NOTICES_WINDOW_INFLIGHT = 4
+// A read slower than this writes one local timing line (never sent).
+const NOTICES_SLOW_READ_MS = 1000
 // No request starts with less than this left on the read deadline (peek.js).
 const MIN_FETCH_MS = 250
+// A link that ended a read with a next cursor stays open this long for the
+// chained page of the same identity (a scroll), then closes.
+const NOTICES_LINGER_MS = 2000
 const NO_SEEDER = 'sem conexão com o semeador'
 const BUSY = 'avisos já em andamento'
 const UNSUPPORTED = 'aviso: o semeador ainda não envia avisos'
@@ -181,7 +203,10 @@ function isEngagement (type) {
 // read. Computed for the returned rows only, at return time (never cached).
 // log(text): warnings. limits: test-only overrides (connectTimeoutMs,
 // deadlineMs, budgetBytes, parallel, blockTimeoutMs, maxBlocksPerRow,
-// maxSeederPages, cacheTtlMs, cacheMax, requestTimeoutMs, maxFrame).
+// maxSeederPages, cacheTtlMs, cacheMax, requestTimeoutMs, windowInflight,
+// maxFrame, lingerMs) and test hooks (now: the slow-read clock;
+// trace(event): every block get, its outcome, its charge, every accepted
+// block and every admission message the seeder sent).
 function createNoticer ({ storage, association, seederUrl, createSocket, ownKey, sign, seenToken, log = noop, limits = {} } = {}) {
   if (typeof createSocket !== 'function') throw new TypeError('createSocket required')
   if (typeof ownKey !== 'function') throw new TypeError('ownKey required')
@@ -201,6 +226,10 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     // The link carries bounded notices pages and a few blocks: the peek
     // link's frame bound (./peek.js PEEK_MAX_FRAME) fits it with margin.
     maxFrame: PEEK_MAX_FRAME,
+    windowInflight: NOTICES_WINDOW_INFLIGHT,
+    lingerMs: NOTICES_LINGER_MS,
+    now: Date.now,
+    trace: noop,
     ...(limits || {})
   }
 
@@ -208,11 +237,29 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
   // (facts: what block `seq` signed, never a kind derived from it).
   const cache = new Map()
   let current = null // the running read: { link, cores, aborted, lost, ... }
+  // The link a read left open for its chained page: { link, own, handle, v2,
+  // v3, timer }, or null. Its proof was signed for `own` only.
+  let idle = null
   let closed = false
   let warnedUnsupported = false
 
   function warn (text) {
     try { log(text) } catch {}
+  }
+
+  // Test hook only: every block get, its outcome and every charge.
+  function trace (ev) {
+    try { L.trace(ev) } catch {}
+  }
+
+  // The clock of the slow-read line only (deadlines use Date.now).
+  function clock () {
+    try {
+      const t = L.now()
+      return Number.isFinite(t) ? t : Date.now()
+    } catch {
+      return Date.now()
+    }
   }
 
   // The read's checkpoints: an aborted read, or one whose link was LOST (the
@@ -226,12 +273,16 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
   // ---- the notices link (mirrors peek.js openLink) ----
 
   // Dials the seeder with an ephemeral Noise key, attaches the muxer, the
-  // admission channel with an EMPTY inventory and every notices channel (on
+  // admission channel with an EMPTY inventory, asking for none
+  // (CAP_NO_INVENTORY: a seeder offering discovery sends a lean hello, an
+  // older one ignores the bit and its inventory is ignored here), and every
+  // notices channel (on
   // the muxer before the hello, so protomux pairs the seeder's open), and
   // resolves once the hello verified exactly as ./sync.js does. The proof is
   // never signed before that: the admission channel opens first, so an
   // honest seeder's hello precedes its challenge. -> the link
-  // { noise, peer, notices, noticesV2, noticesV3, verified }; rejects Error('sem conexão com o semeador'),
+  // { noise, peer, notices, noticesV2, noticesV3, verified, owner }, owner
+  // being the read that uses it (null while idle); rejects Error('sem conexão com o semeador'),
   // or UsageError(SEEDER_BUSY) when the socket closed with 1013 (a fixed
   // text, never the seeder's). The link runs behind a frame guard
   // (./ws-stream.js guardedWsStream): a frame over maxFrame is cut at its
@@ -255,7 +306,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       })
       noise = new NoiseSecretStream(true, stream, { keyPair: crypto.keyPair() })
       noise.on('error', noop)
-      const link = { noise, peer: null, notices: null, noticesV2: null, noticesV3: null, verified: false }
+      const link = { noise, peer: null, notices: null, noticesV2: null, noticesV3: null, verified: false, owner: run }
       run.link = link
       let settled = false
       const finish = (err) => {
@@ -271,11 +322,16 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       }
       const timer = setTimeout(() => finish(new Error(NO_SEEDER)), L.connectTimeoutMs)
       noise.once('close', () => {
-        // A link lost under the read (not closed by its budget cut, its
-        // abort or its end): the fetches in flight end now (their cores are
-        // closed) and the read fails at its next checkpoint.
-        if (run.link === link && !run.aborted && !run.overBudget) run.lost = true
-        for (const q of run.cores) q.close().catch(noop)
+        // A link lost under the read using it now, this one or a chained
+        // one (not closed by its budget cut, its abort or its end): the
+        // fetches in flight end now (their cores are closed) and the read
+        // fails at its next checkpoint. An idle link lost is just forgotten.
+        const owner = link.owner
+        if (owner !== null) {
+          if (owner.link === link && !owner.aborted && !owner.overBudget) owner.lost = true
+          for (const c of owner.cores) c.close().catch(noop)
+        }
+        if (idle !== null && idle.link === link) dropIdle()
         finish(ws.closeCode === 1013 ? new UsageError(SEEDER_BUSY) : new Error(NO_SEEDER))
       })
       noise.once('connect', () => {
@@ -289,7 +345,9 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
           link.peer = attachAdmission(noise, {
             role: 'member',
             have: [],
+            caps: CAP_NO_INVENTORY,
             onmessage: (msg, peer) => {
+              trace({ type: 'admission', msg: msg.type, count: msg.type === 'hello' ? msg.count : null })
               if (msg.type !== 'hello') return
               link.verified = msg.role === 'seeder' &&
                 peer.peerKey !== null &&
@@ -332,15 +390,38 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     return run.lost || run.aborted || run.overBudget === true || link === null || link.noise.destroyed
   }
 
+  function destroyLink (link) {
+    if (link === null) return
+    try { if (link.notices !== null) link.notices.close() } catch {}
+    try { if (link.noticesV2 !== null) link.noticesV2.close() } catch {}
+    try { if (link.noticesV3 !== null) link.noticesV3.close() } catch {}
+    link.noise.destroy()
+  }
+
   function closeLink (run) {
     const link = run.link
     run.link = null
-    if (link !== null) {
-      try { if (link.notices !== null) link.notices.close() } catch {}
-      try { if (link.noticesV2 !== null) link.noticesV2.close() } catch {}
-      try { if (link.noticesV3 !== null) link.noticesV3.close() } catch {}
-      link.noise.destroy()
-    }
+    destroyLink(link)
+  }
+
+  // Forgets the idle link and closes it: its timer, abort(), close(), a
+  // first page, another identity, or its own loss.
+  function dropIdle () {
+    const parked = idle
+    if (parked === null) return
+    idle = null
+    clearTimeout(parked.timer)
+    destroyLink(parked.link)
+  }
+
+  // Takes the idle link out of the idle slot (its timer stopped) for a read
+  // that may adopt it once its own key is known. -> the parked entry or null.
+  function claimIdle () {
+    const parked = idle
+    if (parked === null) return null
+    idle = null
+    clearTimeout(parked.timer)
+    return parked
   }
 
   // Charges a received block to the read's budget (peek.js charge): over it,
@@ -398,11 +479,61 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     }
   }
 
+  // One raw get on the read's link, counted in run.pending while in flight
+  // and charged to the budget on ARRIVAL, exactly once, whether or not the
+  // row later uses the block (peek.js getBlock). -> { raw, ok (not
+  // oversized), t } or { raw: null, t } when it failed (t: the timeout it
+  // was given).
+  function getBlock (run, q, key, seq, t) {
+    run.pending++
+    trace({ type: 'get', key, seq })
+    let asked
+    try {
+      asked = q.get(seq, { raw: true, timeout: t })
+    } catch (err) {
+      asked = Promise.reject(err)
+    }
+    return asked.then((raw) => {
+      run.pending--
+      if (raw === null || raw === undefined) {
+        trace({ type: 'settle', key, seq, bytes: null })
+        return { raw: null, t }
+      }
+      trace({ type: 'settle', key, seq, bytes: raw.byteLength })
+      const ok = charge(run, raw)
+      trace({ type: 'charge', key, seq, bytes: raw.byteLength, budget: run.budget })
+      return { raw, ok, t }
+    }, () => {
+      run.pending--
+      trace({ type: 'settle', key, seq, bytes: null })
+      return { raw: null, t }
+    })
+  }
+
   async function fetchOne (run, item, ctx) {
     const link = run.link
     if (link === null || ctx.cut()) return { state: 'pending' }
     const q = new Hypercore(memoryStorage({ pageSize: PEEK_CORE_PAGE_SIZE }), b4a.from(item.key, 'hex'), { valueEncoding: 'binary' })
-    run.cores.add(q)
+    const sessions = new Map() // seq -> the session of its window get in flight
+    let win = null
+    let closing = null
+    // What run.cores holds for this row: every path that ends it (its own
+    // end, abort, a lost link, the budget cut) closes through here. Closing
+    // q does NOT close its sessions (hypercore 10), so the window gets, each
+    // on its own session, are cancelled first, then q. Idempotent.
+    const closer = {
+      close () {
+        if (closing === null) {
+          if (win !== null) win.stop()
+          const open = [...sessions.values()]
+          sessions.clear()
+          trace({ type: 'closed', key: item.key, cancelled: open.length })
+          closing = Promise.allSettled(open.map((s) => s.close())).then(() => q.close())
+        }
+        return closing
+      }
+    }
+    run.cores.add(closer)
     const timeout = () => Math.max(1, Math.min(L.blockTimeoutMs, ctx.deadline - Date.now()))
     const PENDING = { state: 'pending' }
     const DROPPED = { state: 'dropped' }
@@ -410,25 +541,24 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       run.incomplete = true
       return DROPPED
     }
-    // -> raw block | PENDING | DROPPED (missing or oversized) | ABSENT
-    // (missing, when the caller allows it: a head block).
+    // A got block -> raw block | PENDING | DROPPED (missing or oversized) |
+    // ABSENT (missing, when the caller allows it: a head block).
     const ABSENT = { state: 'absent' }
-    const get = async (seq, allowAbsent = false) => {
-      if (ctx.cut()) return PENDING
-      const t = timeout()
-      let raw = null
-      try {
-        raw = await q.get(seq, { raw: true, timeout: t })
-      } catch {}
-      if (raw === null) {
+    const verdict = (got, allowAbsent = false) => {
+      if (got === undefined || got.raw === null) {
         // Ended by the budget cut, a lost link, an abort or the read
         // deadline (a timeout shorter than the block timeout): no verdict.
-        if (cutLink(run, link) || t < L.blockTimeoutMs) return PENDING
+        if (got === undefined || cutLink(run, link) || got.t < L.blockTimeoutMs) return PENDING
         if (allowAbsent) return ABSENT
         return failed()
       }
-      if (!charge(run, raw)) return failed()
-      return raw
+      if (!got.ok) return failed()
+      return got.raw
+    }
+    // Block 0 and `seq`: alone, one after the other, on q itself.
+    const get = async (seq) => {
+      if (ctx.cut()) return PENDING
+      return verdict(await getBlock(run, q, item.key, seq, timeout()))
     }
     try {
       await q.ready()
@@ -468,38 +598,91 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       for (let s = length - 1; s >= Math.max(1, length - PEEK_TAIL_BLOCKS); s--) wanted.add(s)
       for (let s = 1; s <= 2 && s < length; s++) wanted.add(s)
       const rest = [...wanted].filter((s) => !seqs.has(s)).sort((a, b) => b - a).slice(0, Math.max(0, L.maxBlocksPerRow - seqs.size))
-      // Read highest first, so a tombstone comes before its target: a block
-      // it deleted is never asked for (seeders clear it) and counts as
-      // fetched, absent. A head block that did not arrive is not known to
-      // be deleted (it may be a live profile or the tombstone of the block
-      // below it): it is never counted as fetched, nothing below it is
-      // read, the row stands without it, the read is incomplete and the
-      // evidence is not cached, so a later read asks again.
+      // Up to L.windowInflight blocks of this row in flight, consumed
+      // strictly highest seq first, so a tombstone comes before its target:
+      // a block it deleted is never asked for once it is read (seeders clear
+      // it), and one already in flight is not waited for and its get is
+      // cancelled; either way it counts as fetched, absent. A head block
+      // that did not arrive is not known to be deleted (it may be a live
+      // profile or the tombstone of the block below it): it is never
+      // counted as fetched, nothing below it is used, the row stands without
+      // it, the read is incomplete and the evidence is not cached, so a
+      // later read asks again. The row's first window get may always go
+      // out; a further one only while every get in flight on the link still
+      // fits under the byte budget (peek.js).
       const gone = new Set()
       let partial = false
-      for (const seq of rest) {
-        if (gone.has(seq)) {
+      let mine = 0
+      let consumed = 0
+      const GONE = { gone: true }
+      win = pipeline({
+        seqs: rest,
+        inflight: L.windowInflight,
+        canStart: () => !ctx.cut() && run.overBudget !== true &&
+          (mine === 0 || run.budget + (run.pending + 1) * MAX_BLOCK_BYTES < L.budgetBytes),
+        start: (seq) => {
+          if (gone.has(seq)) return GONE
+          // A row already closed starts nothing (q takes no new session).
+          if (closing !== null) return { raw: null, t: 0 }
+          mine++
+          // Each get on its own session of the memory core: closing that
+          // session cancels the get and drops its block request, the only
+          // per-request cancel hypercore offers.
+          const s = q.session()
+          sessions.set(seq, s)
+          return getBlock(run, s, item.key, seq, timeout()).finally(() => {
+            mine--
+            sessions.delete(seq)
+            s.close().catch(noop)
+          })
+        },
+        skip: (seq) => gone.has(seq),
+        cancel: (seq) => {
+          const s = sessions.get(seq)
+          if (s !== undefined) s.close().catch(noop)
+        }
+      })
+      try {
+        for await (const { seq, result, error } of win) {
+          consumed++
+          if (error !== undefined) return cutLink(run, link) ? PENDING : failed()
+          if (gone.has(seq) || result === GONE) {
+            seqs.add(seq)
+            continue
+          }
+          const raw = verdict(result, seq <= 2)
+          if (raw === ABSENT) {
+            run.incomplete = true
+            partial = true
+            break
+          }
+          if (!(raw instanceof Uint8Array)) return raw
           seqs.add(seq)
-          continue
+          const record = decodeBlock(raw)
+          entries.push({ seq, record })
+          trace({ type: 'accept', key: item.key, seq })
+          const copy = validRecordCopy(record, seq)
+          if (copy !== null && copy.type === 'delete' && copy.seq >= 1 && copy.seq < length) gone.add(copy.seq)
+          if (copy !== null && seq > item.seq) {
+            // A later signed unfollow of this node: the seeder's edge is stale.
+            if (facts.type === 'follow' && copy.type === 'follow' && copy.key === ctx.own && copy.on === false) return DROPPED
+            // A later toggle of the same target: an unlike ends the row, and a
+            // later like is the row that stands for it.
+            if (copy.type === facts.type && isEngagement(copy.type) && copy.to.author === facts.to.author && copy.to.seq === facts.to.seq) return DROPPED
+          }
         }
-        const raw = await get(seq, seq <= 2)
-        if (raw === ABSENT) {
-          run.incomplete = true
-          partial = true
-          break
-        }
-        if (!(raw instanceof Uint8Array)) return raw
-        seqs.add(seq)
-        const record = decodeBlock(raw)
-        entries.push({ seq, record })
-        const copy = validRecordCopy(record, seq)
-        if (copy !== null && copy.type === 'delete' && copy.seq >= 1 && copy.seq < length) gone.add(copy.seq)
-        if (copy !== null && seq > item.seq) {
-          // A later signed unfollow of this node: the seeder's edge is stale.
-          if (facts.type === 'follow' && copy.type === 'follow' && copy.key === ctx.own && copy.on === false) return DROPPED
-          // A later toggle of the same target: an unlike ends the row, and a
-          // later like is the row that stands for it.
-          if (copy.type === facts.type && isEngagement(copy.type) && copy.to.author === facts.to.author && copy.to.seq === facts.to.seq) return DROPPED
+      } finally {
+        // The gets still in flight are cancelled when the row closes below.
+        win.stop()
+      }
+      if (!partial && consumed < rest.length) {
+        // The window stopped starting gets: the cut (deadline, budget, lost
+        // link, abort). The blocks left that a tombstone already deleted
+        // count as fetched, as a serial read skips them without asking; any
+        // other one leaves the row without a verdict.
+        for (const seq of rest.slice(consumed)) {
+          if (!gone.has(seq)) return PENDING
+          seqs.add(seq)
         }
       }
       // The signed length and byteLength advance on upgrade (peek.js).
@@ -512,8 +695,8 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     } catch {
       return cutLink(run, link) ? PENDING : failed()
     } finally {
-      run.cores.delete(q)
-      await q.close().catch(noop)
+      run.cores.delete(closer)
+      await closer.close().catch(noop)
     }
   }
 
@@ -598,6 +781,62 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     return t
   }
 
+  // Dials a new link for `own` and picks its channel and proves on it.
+  // -> { handle, v2, v3 } or { result } (a read that ends here).
+  async function establish (run, own, left) {
+    const dialAt = clock()
+    let link
+    try {
+      link = await openLink(run, own)
+    } finally {
+      run.times.connect += clock() - dialAt
+    }
+    checkAborted(run)
+    run.proofAt = clock()
+    // v3 first, then v2: each carries every older kind. A rejected open
+    // settles false at once, so only a channel the seeder leaves unanswered
+    // is waited for. v1 is consulted when the seeder took neither, and the
+    // channels not used are closed.
+    const supportedV3 = await within(link.noticesV3.supported, Math.min(L.requestTimeoutMs, left()))
+    checkAborted(run)
+    const v3 = supportedV3 === true
+    let supportedV2 = true
+    if (!v3) supportedV2 = await within(link.noticesV2.supported, Math.min(L.requestTimeoutMs, left()))
+    checkAborted(run)
+    // v2 here means the v2 shape (seq cursor, activity), which v3 shares.
+    const v2 = supportedV2 === true
+    let supported = true
+    if (!v2) supported = await within(link.notices.supported, Math.max(1, Math.min(L.requestTimeoutMs, left())))
+    checkAborted(run)
+    // v3 or v2 unanswered and v1 not taken: nothing known yet, the seeder
+    // may answer later.
+    if ((supportedV3 === TIMEOUT || supportedV2 === TIMEOUT) && supported !== true) return { result: { notices: [], next: null, incomplete: true, supported: true, activity: true } }
+    if (supported === TIMEOUT) return { result: { notices: [], next: null, incomplete: true, supported: true, activity: true } }
+    if (supported !== true) {
+      if (!warnedUnsupported) {
+        warnedUnsupported = true
+        warn(UNSUPPORTED)
+      }
+      return { result: { notices: [], next: null, incomplete: false, supported: false, activity: true } }
+    }
+    const handle = v3 ? link.noticesV3 : v2 ? link.noticesV2 : link.notices
+    for (const unused of [link.notices, link.noticesV2, link.noticesV3]) {
+      if (unused !== handle) try { unused.close() } catch {}
+    }
+    let proved
+    try {
+      proved = await within(handle.proved, Math.min(L.requestTimeoutMs, left()))
+    } catch (err) {
+      checkAborted(run)
+      throw err // the identity is locked, or another diary's pair
+    }
+    checkAborted(run)
+    // A proof not sent on a live link within the request timeout: nothing
+    // was read, the seeder may answer later.
+    if (proved !== true) return { result: { notices: [], next: null, incomplete: true, supported: true, activity: true } }
+    return { handle, v2, v3 }
+  }
+
   // ownContext: () => Promise<{ names: Map username -> issuer, posts: Set of
   // seqs }>, the own diary's verified names and post blocks; called only on
   // a v2 or v3 read, so a follows-only read opens no storage core.
@@ -617,50 +856,24 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     // channels and stays neutral (true, no "follows only" banner).
     if (mod.blocked.has(own)) return { notices: [], next: null, incomplete: false, supported: true, activity: true }
 
-    const link = await openLink(run, own)
-    checkAborted(run)
     const left = () => deadline - Date.now()
-    // v3 first, then v2: each carries every older kind. A rejected open
-    // settles false at once, so only a channel the seeder leaves unanswered
-    // is waited for. v1 is consulted when the seeder took neither, and the
-    // channels not used are closed.
-    const supportedV3 = await within(link.noticesV3.supported, Math.min(L.requestTimeoutMs, left()))
-    checkAborted(run)
-    const v3 = supportedV3 === true
-    let supportedV2 = true
-    if (!v3) supportedV2 = await within(link.noticesV2.supported, Math.min(L.requestTimeoutMs, left()))
-    checkAborted(run)
-    // v2 here means the v2 shape (seq cursor, activity), which v3 shares.
-    const v2 = supportedV2 === true
-    let supported = true
-    if (!v2) supported = await within(link.notices.supported, Math.max(1, Math.min(L.requestTimeoutMs, left())))
-    checkAborted(run)
-    // v3 or v2 unanswered and v1 not taken: nothing known yet, the seeder
-    // may answer later.
-    if ((supportedV3 === TIMEOUT || supportedV2 === TIMEOUT) && supported !== true) return { notices: [], next: null, incomplete: true, supported: true, activity: true }
-    if (supported === TIMEOUT) return { notices: [], next: null, incomplete: true, supported: true, activity: true }
-    if (supported !== true) {
-      if (!warnedUnsupported) {
-        warnedUnsupported = true
-        warn(UNSUPPORTED)
-      }
-      return { notices: [], next: null, incomplete: false, supported: false, activity: true }
+    const parked = run.adopting
+    run.adopting = null
+    let chan
+    if (parked !== null && parked.own === own && !parked.link.noise.destroyed) {
+      // The chained page of the same identity on the link the read before
+      // it left open: its channel and its proof, no new socket. A link
+      // proved for another identity is never adopted.
+      parked.link.owner = run
+      run.link = parked.link
+      run.proofAt = clock()
+      chan = parked
+    } else {
+      if (parked !== null) destroyLink(parked.link)
+      chan = await establish(run, own, left)
+      if (chan.result !== undefined) return chan.result
     }
-    const handle = v3 ? link.noticesV3 : v2 ? link.noticesV2 : link.notices
-    for (const unused of [link.notices, link.noticesV2, link.noticesV3]) {
-      if (unused !== handle) try { unused.close() } catch {}
-    }
-    let proved
-    try {
-      proved = await within(handle.proved, Math.min(L.requestTimeoutMs, left()))
-    } catch (err) {
-      checkAborted(run)
-      throw err // the identity is locked, or another diary's pair
-    }
-    checkAborted(run)
-    // A proof not sent on a live link within the request timeout: nothing
-    // was read, the seeder may answer later.
-    if (proved !== true) return { notices: [], next: null, incomplete: true, supported: true, activity: true }
+    const { handle, v2, v3 } = chan
 
     // The names are filtered with the CURRENT revoked issuers on every read
     // (the own context may be cached across reads).
@@ -674,6 +887,9 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       }
       posts = oc.posts
     }
+    run.times.proof += clock() - run.proofAt
+    run.proofAt = null
+    run.rowsAt = clock()
 
     const cut = () => Date.now() >= deadline - MIN_FETCH_MS || run.budget >= L.budgetBytes || run.lost || run.aborted || run.link === null
     const ctx = { own, follows, mod, deadline, cut, v2, v3, names, posts, claimed: new Set(), claimedSeqs: new Set(), claimedEngagements: new Map() }
@@ -699,6 +915,9 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       }
       checkAborted(run) // unless the link itself was lost: NO_SEEDER
       if (page === TIMEOUT) {
+        // A page left unanswered: the channel may still owe it, so the link
+        // is not kept for a chained page.
+        run.stale = true
         more = true
         run.incomplete = true
         break
@@ -748,6 +967,8 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       if (e.state === 'pending') break
       prefix.push(e)
     }
+    run.times.rows = clock() - run.rowsAt
+    run.rowsAt = null
     const rows = prefix.filter((e) => e.state === 'accepted').map((e) => e.row).sort(compareRows)
     // The `seen` token of each returned row, after verification and at
     // return time (a lock mid-read throws here, like a locked sign).
@@ -762,7 +983,25 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       const edge = prefix[prefix.length - 1].item
       next = cursorOf(last !== null && compareRows(edge, last) < 0 ? last : edge, v2)
     }
+    // A read that ends with a cursor offers its link to the chained page.
+    if (next !== null) run.chain = { own, handle, v2, v3 }
     return { notices, next, incomplete: run.incomplete, supported: true, activity: v2 }
+  }
+
+  // A read over NOTICES_SLOW_READ_MS writes ONE local line saying where the
+  // time went (the Sincronização screen; it never leaves the device). Only
+  // durations: no key, no address, nothing the seeder sent.
+  function slowRead (run, startedAt) {
+    const endAt = clock()
+    const total = endAt - startedAt
+    if (run.aborted || !(total > NOTICES_SLOW_READ_MS)) return
+    // A read that failed among its rows (a lost link) counts them up to now;
+    // one that ended during support or proof counts that phase up to now.
+    if (run.rowsAt !== null) run.times.rows = endAt - run.rowsAt
+    else if (run.proofAt !== null) run.times.proof += endAt - run.proofAt
+    const ms = (n) => Math.max(0, Math.round(n)) + ' ms'
+    warn('avisos: conexão ' + ms(run.times.connect) + ', suporte e prova ' + ms(run.times.proof) +
+      ', linhas ' + ms(run.times.rows) + ', total ' + ms(total))
   }
 
   // -> { notices, next, incomplete, supported, activity } (docs/rpc.md
@@ -778,29 +1017,73 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > NOTICES_LIMIT_MAX) throw new UsageError('limit inválido')
     const first = after === undefined || after === null
     if (!first && !isCursor(after)) throw new UsageError('after inválido')
-    const run = { link: null, cores: new Set(), keyLocks: new Map(), aborted: false, lost: false, budget: 0, overBudget: false, incomplete: false }
+    // cores: what closes each row in flight (its window gets' sessions,
+    // then its memory core). pending: block gets in flight on the link
+    // (getBlock). times: ms spent dialling up to the verified hello, on the
+    // channel support, the proof and the own context, and on the seeder
+    // pages and their rows, for the slow-read line.
+    // adopting: the idle link claimed for a chained page until readWith
+    // adopts it (same own key) or closes it. chain: set when the read ends
+    // with a cursor ({ own, handle, v2, v3 }); stale: a page went unanswered.
+    // The budget and the deadline are this read's, whatever link it uses.
+    const run = { link: null, adopting: null, chain: null, stale: false, cores: new Set(), keyLocks: new Map(), aborted: false, lost: false, budget: 0, pending: 0, overBudget: false, incomplete: false, rowsAt: null, proofAt: null, times: { connect: 0, proof: 0, rows: 0 } }
     current = run
+    const parked = claimIdle()
+    // A first page always dials: the scroll it starts is a new one.
+    if (first) {
+      if (parked !== null) destroyLink(parked.link)
+    } else {
+      run.adopting = parked
+    }
+    const startedAt = clock()
     try {
       const cursor = first ? null : after.seq === undefined ? { at: after.at, key: after.key } : { at: after.at, key: after.key, seq: after.seq }
       return await readWith(run, { limit, after: cursor }, typeof ownContext === 'function' ? ownContext : async () => ({ names: new Map(), posts: new Set() }))
     } finally {
-      closeLink(run)
-      for (const q of run.cores) q.close().catch(noop)
+      slowRead(run, startedAt)
+      if (run.adopting !== null) destroyLink(run.adopting.link)
+      run.adopting = null
+      if (!park(run)) closeLink(run)
+      for (const c of run.cores) c.close().catch(noop)
       // Guarded by identity: an aborted read never touches a newer one.
       if (current === run) current = null
     }
+  }
+
+  // Keeps the run's link idle for lingerMs when the read ended with a
+  // cursor on a live, healthy link it still owns, with every row core
+  // closed (two memory cores of one key cannot replicate on one link at
+  // once). -> whether it was kept.
+  function park (run) {
+    const link = run.link
+    if (run.chain === null || link === null || closed || current !== run) return false
+    if (run.aborted || run.lost || run.overBudget || run.stale || run.cores.size > 0 || link.noise.destroyed) return false
+    run.link = null
+    link.owner = null
+    const entry = { link, own: run.chain.own, handle: run.chain.handle, v2: run.chain.v2, v3: run.chain.v3, timer: null }
+    entry.timer = setTimeout(() => {
+      if (idle === entry) dropIdle()
+    }, L.lingerMs)
+    dropIdle()
+    idle = entry
+    return true
   }
 
   // Destroys the link and ends the running read, and releases the slot at
   // once (peek.js abort): the aborted read throws at its next checkpoint
   // without touching a newer read's state.
   function abort () {
+    // An idle link goes too: the session aborts on every identity change,
+    // lock and detach, and the link carries the old proof.
+    dropIdle()
     const run = current
     if (run === null) return
     current = null
     run.aborted = true
+    if (run.adopting !== null) destroyLink(run.adopting.link)
+    run.adopting = null
     closeLink(run)
-    for (const q of run.cores) q.close().catch(noop)
+    for (const c of run.cores) c.close().catch(noop)
   }
 
   function close () {
@@ -826,5 +1109,8 @@ module.exports = {
   NOTICES_MAX_BLOCKS_PER_ROW,
   NOTICES_MAX_SEEDER_PAGES,
   NOTICES_CACHE_TTL_MS,
-  NOTICES_CACHE_MAX
+  NOTICES_CACHE_MAX,
+  NOTICES_WINDOW_INFLIGHT,
+  NOTICES_SLOW_READ_MS,
+  NOTICES_LINGER_MS
 }
