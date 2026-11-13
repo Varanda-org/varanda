@@ -82,7 +82,7 @@ import { tap } from './haptics'
 import { hasMention, MentionText } from './MentionText'
 import { useHosted } from '../node'
 import { QuoteCard, quotePlayerOf } from './QuoteCard'
-import { LARGE_TEXT, layout, radius, type } from './theme'
+import { LARGE_TEXT, layout, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
 
 const ICON = 18
@@ -759,19 +759,16 @@ const makeStyles = (colors) => StyleSheet.create({
   timeBox: { flexShrink: 0 },
   handle: { ...type.postMeta, color: colors.soft, flexShrink: 1 },
   time: { ...type.postMeta, color: colors.soft, flexShrink: 0 },
-  // Web ignores hitSlop, so the box itself is the 44 pt target.
+  // Plain coloured text, no box. Web ignores hitSlop, so the invisible box
+  // itself is the 44 pt target.
   replyChip: {
     alignSelf: 'flex-start',
     maxWidth: '100%',
     minHeight: layout.hit,
     minWidth: layout.hit,
-    justifyContent: 'center',
-    marginTop: 2,
-    paddingHorizontal: 12,
-    borderRadius: radius.pill,
-    backgroundColor: colors.accentSoft
+    justifyContent: 'center'
   },
-  replyChipText: { ...type.chip, color: colors.accent, flexShrink: 1 },
+  replyChipText: { ...type.replyMark, color: colors.accent, flexShrink: 1 },
   previews: { marginTop: 8, minHeight: layout.hit, justifyContent: 'center' },
   previewsLabel: { ...type.replyMark, color: colors.soft, fontWeight: '700' },
   previewLine: { ...type.replyMark, color: colors.ink },

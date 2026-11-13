@@ -79,8 +79,9 @@ test('the reply line is a 44 pt replyChip and plain text without onOpenParent', 
     'link labelled with the chip text, no hitSlop'
   )
   t.ok(/replyChip: \{[^}]*minHeight: layout\.hit/.test(post), 'the chip box is at least 44 pt')
-  t.ok(post.includes('...type.chip'), 'chip type token')
-  t.ok(post.includes('backgroundColor: colors.accentSoft'), 'chip colour token')
+  t.ok(post.includes('replyChipText: { ...type.replyMark, color: colors.accent'), 'reply line is accent-coloured text')
+  const chipBox = /replyChip: \{([^}]*)\}/.exec(post)
+  t.ok(chipBox && !/backgroundColor|borderRadius/.test(chipBox[1]), 'no pill behind the reply line')
   const chipAt = post.indexOf('accessibilityLabel={replyLabel}')
   t.ok(chipAt > 0 && chipAt < post.indexOf('{mediaNode}'), 'the chip stays before the photos')
 })
