@@ -40,7 +40,7 @@ const session = (extra) => ({
   ...extra
 })
 const signer = (calls) => async (method, args) => { calls.push({ method, args }); return { signature: 'ab'.repeat(64) } }
-// By pathname, so a call that carries ?covers=1 still matches its route.
+// By pathname, so a call that carries ?covers=1&info=1 still matches its route.
 const reads = (calls, path) => calls.filter((c) => new URL(c.url, 'https://x.example').pathname.endsWith(path))
 async function code (t, p) {
   try { await p } catch (e) { return e.code }
@@ -122,7 +122,7 @@ test('audiusSearch: session, then the token in the header and the text in the bo
   t.is(calls[0].init.body, JSON.stringify({ member: M }))
   t.is(calls[1].url, origin + '/account/audius/session/finish')
   t.is(calls[1].init.body, JSON.stringify({ member: M, nonce: NONCE, signature: 'ab'.repeat(64) }))
-  t.is(calls[2].init.method + ' ' + calls[2].url, 'POST ' + origin + '/account/audius/search?covers=1', 'only the covers query')
+  t.is(calls[2].init.method + ' ' + calls[2].url, 'POST ' + origin + '/account/audius/search?covers=1&info=1', 'only the covers and info query')
   t.is(calls[2].init.body, JSON.stringify({ q: 'samba', kind: 'track' }))
   t.is(calls[2].init.headers.authorization, 'Bearer ' + TOKEN)
   for (const c of calls) t.absent(c.url.includes(TOKEN) || c.url.includes('samba'), 'nothing secret in a URL')
@@ -231,7 +231,7 @@ test('audiusItem: { kind, id } in the body, strict answer', async (t) => {
   const opts = { origin, member: M, request: signer([]) }
   t.alike(await a.audiusItem('track', 'T1abc', opts), track)
   const req = reads(calls, '/account/audius/item')[0]
-  t.is(req.init.method + ' ' + req.url, 'POST ' + origin + '/account/audius/item?covers=1')
+  t.is(req.init.method + ' ' + req.url, 'POST ' + origin + '/account/audius/item?covers=1&info=1')
   t.is(req.init.body, JSON.stringify({ kind: 'track', id: 'T1abc' }))
   t.is(req.init.headers.authorization, 'Bearer ' + TOKEN)
   routes['/account/audius/item'] = json(200, full)
@@ -260,7 +260,7 @@ test('audiusResolve: only an audius.co page leaves the device, to the account or
   const opts = { member: M, request: signer([]) }
   t.alike(await a.audiusResolve(PAGE, opts), { kind: 'track', item: track })
   const req = reads(calls, '/account/audius/resolve')[0]
-  t.is(req.url, '/account/audius/resolve?covers=1', 'the web keeps the page origin')
+  t.is(req.url, '/account/audius/resolve?covers=1&info=1', 'the web keeps the page origin')
   t.is(req.init.body, JSON.stringify({ url: PAGE }))
   routes['/account/audius/resolve'] = json(200, { kind: 'playlist', item: playlist })
   t.alike(await a.audiusResolve(PAGE, opts), { kind: 'playlist', item: playlist })
@@ -385,7 +385,7 @@ test('audiusReady: policy on and the member linked, kept 5 minutes', async (t) =
   t.is(await a.audiusReady({ member: M, origin: 'https://mus-ready-off.example.org', now }), false)
 })
 
-test('search, item and resolve ask covers by query with unchanged bodies', async (t) => {
+test('search, item and resolve ask covers and info by query with unchanged bodies', async (t) => {
   const a = await load()
   a.forgetAudiusSession()
   const origin = 'https://mus-covers.example.org'
@@ -410,7 +410,7 @@ test('search, item and resolve ask covers by query with unchanged bodies', async
   ]) {
     const url = new URL(req.url)
     t.is(url.origin + url.pathname, origin + '/account/audius/' + route)
-    t.is(url.search, '?covers=1', route + ': the covers query and nothing else')
+    t.is(url.search, '?covers=1&info=1', route + ': the covers and info query and nothing else')
     t.is(req.init.body, JSON.stringify(body), route + ': the body is unchanged')
   }
   t.is(calls.length, 5, 'one request each after the session, no fallback')
@@ -522,6 +522,42 @@ test('audiusArt uses only the account session and origin', async (t) => {
   for (const c of web) t.ok(c.url.startsWith('/account/audius/'), 'the web keeps the page origin: ' + c.url)
 })
 
+test('audiusArt with large asks the 480 cover by query, with the same body and checks', async (t) => {
+  const a = await load()
+  a.forgetAudiusSession()
+  const origin = 'https://mus-art-large.example.org'
+  const routes = session({ '/account/audius/art': json(200, { mime: 'image/jpeg', bytes: b64(JPEG) }) })
+  const calls = stub(t, routes)
+  const opts = { origin, member: M, request: signer([]) }
+  t.alike(await a.audiusArt('track', 'T1abc', { ...opts, large: true }), { mime: 'image/jpeg', base64: b64(JPEG) })
+  t.alike(await a.audiusArt('track', 'T1abc', opts), { mime: 'image/jpeg', base64: b64(JPEG) })
+  t.alike(await a.audiusArt('track', 'T1abc', { ...opts, large: 'yes' }), { mime: 'image/jpeg', base64: b64(JPEG) })
+  t.alike(await a.audiusArt('track', 'T1abc', { ...opts, large: false }), { mime: 'image/jpeg', base64: b64(JPEG) })
+  const [big, small, truthy, off] = reads(calls, '/account/audius/art')
+  t.is(big.init.method + ' ' + big.url, 'POST ' + origin + '/account/audius/art?size=480')
+  t.is(small.init.method + ' ' + small.url, 'POST ' + origin + '/account/audius/art', 'without large: the old path')
+  t.is(truthy.url, origin + '/account/audius/art', 'only large === true asks the large cover')
+  t.is(off.url, origin + '/account/audius/art')
+  for (const req of [big, small, truthy, off]) t.is(req.init.body, JSON.stringify({ kind: 'track', id: 'T1abc' }), 'the same body')
+
+  // The same refusals hold for the large cover.
+  routes['/account/audius/art'] = json(200, { mime: 'image/png', bytes: b64(JPEG) })
+  let err = await a.audiusArt('track', 'T1abc', { ...opts, large: true }).catch((e) => e)
+  t.is(err.code, 'indisponivel', 'a mime that does not match the bytes')
+  t.is(err.noCover, true)
+  routes['/account/audius/art'] = json(404, { error: 'nao-encontrado' })
+  err = await a.audiusArt('track', 'T1abc', { ...opts, large: true }).catch((e) => e)
+  t.is(err.noCover, true, 'a 404 is no cover')
+  const { MUSIC_ART_MAX_BYTES } = await import('../src/music.js')
+  const past = Buffer.alloc(MUSIC_ART_MAX_BYTES + 1)
+  JPEG.copy(past)
+  routes['/account/audius/art'] = json(200, { mime: 'image/jpeg', bytes: b64(past) })
+  err = await a.audiusArt('track', 'T1abc', { ...opts, large: true }).catch((e) => e)
+  t.is(err.code, 'indisponivel', 'the same byte cap')
+  t.is(err.noCover, true)
+  for (const req of reads(calls, '/account/audius/art').slice(4)) t.is(req.url, origin + '/account/audius/art?size=480')
+})
+
 test('the cover cache loads once per key, bounds parallel loads, keeps failures, evicts past max and clears', async (t) => {
   const { coverKey, coverUri, createCoverCache } = await import('../src/musicCover.js')
   const s1 = { member: M, origin: 'https://a.example.org', request: () => {} }
@@ -530,6 +566,9 @@ test('the cover cache loads once per key, bounds parallel loads, keeps failures,
   t.is(coverKey('track', 'T1', { member: M }), '|' + M + '|track|T1')
   t.not(coverKey('track', 'T1', s1), coverKey('track', 'T1', s2), 'another member, another key')
   t.not(coverKey('track', 'T1', s1), coverKey('playlist', 'T1', s1))
+  t.is(coverKey('track', 'T1', { ...s1, large: true }), 'https://a.example.org|' + M + '|track|T1|480')
+  t.is(coverKey('track', 'T1', { ...s1, large: false }), coverKey('track', 'T1', s1), 'small is the old key')
+  t.is(coverKey('track', 'T1', { ...s1, large: 'yes' }), coverKey('track', 'T1', s1), 'only large === true')
   t.is(coverUri('image/png', 'AAAA'), 'data:image/png;base64,AAAA')
   t.is(coverUri('image/jpeg', 'AAAA'), 'data:image/jpeg;base64,AAAA')
   t.is(coverUri('image/webp', 'AAAA'), 'data:image/webp;base64,AAAA')
@@ -879,6 +918,78 @@ test('a queued cover nobody waits for is never loaded', async (t) => {
   t.is(await bAgain, null)
 })
 
+test('peek reads a settled cover and never loads', async (t) => {
+  const { createCoverCache } = await import('../src/musicCover.js')
+  const s = { member: 'm', origin: 'o' }
+  const loads = []
+  let finish = null
+  const cache = createCoverCache({ load: (kind, id) => { loads.push(id); return new Promise((resolve) => { finish = resolve }) } })
+  t.is(cache.peek('track', 'T1', s), null, 'nothing in memory')
+  t.is(loads.length, 0, 'a peek loads nothing')
+  const got = cache.get('track', 'T1', s)
+  await new Promise((resolve) => setImmediate(resolve))
+  t.is(cache.peek('track', 'T1', s), null, 'a load in flight is not a cover yet')
+  finish('data:image/png;base64,AAAA')
+  await got
+  t.is(cache.peek('track', 'T1', s), 'data:image/png;base64,AAAA')
+  t.is(cache.peek('track', 'T1', { member: 'other', origin: 'o' }), null, 'never another member')
+  t.is(cache.peek('track', 'T1', { ...s, large: true }), null, 'the large cover is its own')
+  t.is(cache.peek('track', 'T1', null), null)
+  t.is(loads.length, 1)
+})
+
+test('useMusicCover in cached mode shows memory only and starts no load', async (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const source = fs.readFileSync(path.join(__dirname, '../src/ui/useMusicCover.js'), 'utf8')
+  const body = source.replace(/^import .+\n/gm, '').replace(/\bexport /g, '')
+  const gets = []
+  const memory = new Map()
+  const fakeCache = {
+    get: (kind, id, session, opts) => { gets.push(id); return Promise.resolve('data:image/png;base64,BBBB') },
+    peek: (kind, id, session) => memory.get(id) ?? null,
+    clear: () => {}
+  }
+  const slots = []
+  let cursor = 0
+  const hooks = {
+    useState: (initial) => {
+      const at = cursor++
+      if (!(at in slots)) slots[at] = initial
+      return [slots[at], (next) => { slots[at] = next }]
+    },
+    useRef: (initial) => {
+      const at = cursor++
+      if (!(at in slots)) slots[at] = { current: initial }
+      return slots[at]
+    },
+    useEffect: (fn, deps) => {
+      const at = cursor++
+      const before = slots[at]
+      if (before && deps.every((v, i) => Object.is(v, before.deps[i]))) return
+      if (before && typeof before.cleanup === 'function') before.cleanup()
+      slots[at] = { deps, cleanup: fn() }
+    }
+  }
+  // eslint-disable-next-line no-new-func
+  const { useMusicCover } = new Function('useEffect', 'useRef', 'useState', 'audiusArt', 'registerLocalCache', 'coverUri', 'createCoverCache', body + '\nreturn { useMusicCover }')(
+    hooks.useEffect, hooks.useRef, hooks.useState, () => {}, () => {}, () => null, () => fakeCache)
+  const use = (...args) => { cursor = 0; return useMusicCover(...args) }
+  const item = { id: 'T1', cover: true }
+  const session = { member: 'm', origin: 'o' }
+  t.is(use('track', item, session, 'cached'), null, 'nothing in memory, nothing shown')
+  t.is(gets.length, 0, 'cached mode never loads')
+  memory.set('T1', 'data:image/png;base64,AAAA')
+  t.is(use('track', item, session, 'cached'), 'data:image/png;base64,AAAA', 'a cover in memory shows')
+  t.is(gets.length, 0)
+  use('track', item, session, true)
+  t.is(gets.length, 1, 'enabled true loads as before')
+  t.is(use('track', item, session, 'cached'), 'data:image/png;base64,AAAA', 'turning cached keeps the cover on screen')
+  t.is(gets.length, 1)
+  use('track', item, session, false)
+  t.is(gets.length, 1, 'false loads nothing, as before')
+})
+
 test('cover files keep covers in memory only', (t) => {
   const fs = require('fs')
   const path = require('path')
@@ -893,7 +1004,103 @@ test('cover files keep covers in memory only', (t) => {
   t.ok(hook.includes("from '../localCaches'"))
   t.ok(/registerLocalCache\(\{ wipe: \(\) => cache\.clear\(\) \}\)/.test(hook))
   t.ok(hook.includes("from '../account'") && hook.includes('audiusArt('))
-  t.ok(hook.includes('[kind, id, cover, member, origin, enabled]'), 'the effect keys on primitives only')
+  t.ok(hook.includes('}, [kind, id, cover, member, origin, enabled, large])'), 'the effect keys on primitives only')
+  t.ok(hook.includes('const stamp = [kind, id, cover, member, origin, enabled, large]'), 'the uri is stamped with every input')
+  t.ok(hook.includes('setLoaded({ stamp, uri: value })'), 'a loaded uri carries its stamp')
+  t.ok(hook.includes('loaded.stamp.every((v, i) => v === stamp[i]) ? loaded.uri : null'), 'returned only under the matching stamp')
+  t.ok(hook.includes('{ member, origin, request: s && s.request, large }'), 'the cache session carries large')
   t.ok(hook.includes('{ signal: ctl.signal }') && hook.includes('ctl.abort()'), 'an unmounted row leaves its queued load')
   t.ok(hook.includes('if (err && err.noCover === true) return null'), 'only a definite refusal is kept')
+})
+
+test('the cover cache keeps the small and the large cover of one item apart', async (t) => {
+  const { createCoverCache } = await import('../src/musicCover.js')
+  const s1 = { member: M, origin: 'https://a.example.org', request: () => {} }
+  const loads = []
+  const cache = createCoverCache({ load: async (kind, id, session) => { loads.push(session); return session.large === true ? 'data:image/jpeg;base64,LARGE' : 'data:image/jpeg;base64,SMALL' } })
+  t.is(await cache.get('track', 'T1', s1), 'data:image/jpeg;base64,SMALL')
+  t.is(await cache.get('track', 'T1', { ...s1, large: true }), 'data:image/jpeg;base64,LARGE', 'the small cover never answers a large ask')
+  t.is(loads.length, 2)
+  t.is(loads[1].large, true, 'the load gets large in its session')
+  t.is(await cache.get('track', 'T1', s1), 'data:image/jpeg;base64,SMALL', 'nor the large a small one')
+  t.is(await cache.get('track', 'T1', { ...s1, large: true }), 'data:image/jpeg;base64,LARGE')
+  t.is(loads.length, 2, 'each size kept under its own key')
+})
+
+// Runs the hook body with stubbed React hooks and a stubbed cache: React,
+// the account module and the network never load.
+async function coverHook () {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, '../src/ui/useMusicCover.js'), 'utf8')
+  const body = src.slice(src.indexOf('export function useMusicCover')).replace(/\bexport /g, '')
+  const slots = []
+  let cursor = 0
+  let effects = []
+  const useState = (initial) => {
+    const at = cursor++
+    if (!(at in slots)) slots[at] = initial
+    return [slots[at], (next) => { slots[at] = next }]
+  }
+  const useRef = (initial) => {
+    const at = cursor++
+    if (!(at in slots)) slots[at] = { current: initial }
+    return slots[at]
+  }
+  const useEffect = (fn, deps) => {
+    const at = cursor++
+    const prev = slots[at]
+    if (!prev || deps.some((v, i) => v !== prev.deps[i])) effects.push(() => { if (prev && prev.cleanup) prev.cleanup(); slots[at] = { deps, cleanup: fn() } })
+    else effects.push(() => {})
+  }
+  const asks = []
+  const cache = {
+    get: (kind, id, session, opts) => {
+      asks.push({ kind, id, session, opts })
+      return Promise.resolve('data:image/png;base64,' + id + (session.large === true ? 'L' : ''))
+    }
+  }
+  // eslint-disable-next-line no-new-func
+  const useMusicCover = new Function('useState', 'useEffect', 'useRef', 'cache', body + '\nreturn useMusicCover')(useState, useEffect, useRef, cache)
+  const render = (...args) => {
+    cursor = 0
+    effects = []
+    return useMusicCover(...args)
+  }
+  const commit = async () => {
+    for (const run of effects) run()
+    await flushAll()
+  }
+  return { render, commit, asks }
+}
+
+test('useMusicCover never returns the previous item\'s cover', async (t) => {
+  const { render, commit, asks } = await coverHook()
+  const s = { member: M, origin: 'https://a.example.org', request: () => {} }
+  const A = { id: 'TA', cover: true }
+  const B = { id: 'TB', cover: true }
+  t.is(render('track', A, s), null, 'nothing while it loads')
+  await commit()
+  t.is(render('track', A, s), 'data:image/png;base64,TA')
+  t.is(render('track', B, s), null, 'the first render after the item changes is not the previous cover')
+  await commit()
+  t.is(render('track', B, s), 'data:image/png;base64,TB')
+  t.is(render('track', B, { ...s, member: 'cd'.repeat(32) }), null, 'another member')
+  await commit()
+  t.is(render('track', B, s), null, 'back to the first member: the other member\'s uri is not reused')
+  await commit()
+  t.is(render('track', B, s), 'data:image/png;base64,TB')
+  t.is(render('track', B, { ...s, origin: 'https://b.example.org' }), null, 'another origin')
+  await commit()
+  t.is(render('track', B, s, true, true), null, 'the large size is another stamp')
+  await commit()
+  t.is(render('track', B, s, true, true), 'data:image/png;base64,TBL')
+  t.is(asks.at(-1).session.large, true, 'large reaches the cache session')
+  t.is(render('track', B, s, false, true), null, 'disabled')
+  await commit()
+  t.is(render('track', { ...B, cover: false }, s), null, 'no cover')
+  const before = asks.length
+  t.is(render('track', { ...B, cover: false }, { ...s, request: () => {} }), null)
+  await commit()
+  t.is(asks.length, before, 'a new session object with the same primitives loads nothing again')
 })

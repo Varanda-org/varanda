@@ -33,6 +33,7 @@ test('settings group every row and keep the existing advanced toggle last', (t) 
     ['{PUSH_LABEL}', '() => { pushStore.togglePush({ node, member }) }'],
     ["'Guardar dados neste aparelho'", 'doPersist'],
     ["'Instalar o app'", "() => onNavigate('instalar')"],
+    ['{MUSIC_AUTO_PREF_LABEL}', 'toggleMusicAuto'],
     ['{PREVIEW_PREF_LABEL}', 'togglePreviews'],
     ["'Avançado'", '() => setAdvanced((v) => !v)'],
     ["'Conexão'", "() => onNavigate('conexao')"],

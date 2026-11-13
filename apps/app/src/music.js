@@ -41,6 +41,7 @@ const TICKET_RE = /^[A-Za-z0-9_-]{43}$/
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/
 const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/ // eslint-disable-line no-control-regex
 const KINDS = ['track', 'playlist']
+const MAX_GENRE = 40
 
 const isId = (v) => typeof v === 'string' && MUSIC_ID_RE.test(v)
 const isDuration = (v) => Number.isInteger(v) && v >= 1 && v <= MAX_DURATION
@@ -179,21 +180,31 @@ export function searchBody (q, kind, cursor) {
 // empty.
 const isText = (v) => typeof v === 'string' && v !== '' && cardText(v, MAX_CARD_TITLE) === v
 
-// Today's keys, or today's keys plus an own boolean `cover`: a service that
-// knows covers says whether it has art for the item. Nothing else is added,
-// so an artwork URL from a confused service still refuses the item.
-function itemKeys (json, keys) {
-  if (exactKeys(json, keys)) return true
-  return exactKeys(json, [...keys, 'cover']) && typeof json.cover === 'boolean'
+// Today's keys plus any of the optional keys in `extras`, each passing its
+// check: a service that knows covers says whether it has art for the item,
+// and one asked for info adds a track's genre and year. Nothing else is
+// added, so an artwork URL from a confused service still refuses the item.
+const isGenre = (v) => typeof v === 'string' && v !== '' && Array.from(v).length <= MAX_GENRE && !CONTROL_RE.test(v)
+const isYear = (v) => Number.isInteger(v) && v >= 1900 && v <= 2100
+const COVER_ONLY = { cover: (v) => typeof v === 'boolean' }
+const TRACK_EXTRAS = { ...COVER_ONLY, genre: isGenre, year: isYear }
+
+function itemKeys (json, keys, extras = COVER_ONLY) {
+  if (!json || typeof json !== 'object' || Array.isArray(json)) return false
+  if (!keys.every((k) => Object.hasOwn(json, k))) return false
+  return Object.keys(json).every((k) => keys.includes(k) || (Object.hasOwn(extras, k) && extras[k](json[k])))
 }
 
 const withCover = (out, json) => (Object.hasOwn(json, 'cover') ? { ...out, cover: json.cover } : out)
 
 function trackItem (json) {
-  if (!itemKeys(json, ['id', 'title', 'artist', 'duration', 'url'])) return null
+  if (!itemKeys(json, ['id', 'title', 'artist', 'duration', 'url'], TRACK_EXTRAS)) return null
   const { id, title, artist, duration, url } = json
   if (!isId(id) || !isText(title) || !isText(artist) || !isDuration(duration) || !isAudiusPage(url)) return null
-  return withCover({ id, title, artist, duration, url }, json)
+  const out = withCover({ id, title, artist, duration, url }, json)
+  if (Object.hasOwn(json, 'genre')) out.genre = json.genre
+  if (Object.hasOwn(json, 'year')) out.year = json.year
+  return out
 }
 
 function playlistFields (json) {
@@ -378,6 +389,17 @@ export function musicRowLine (item) {
     return item.artist + ' · ' + faixas(item.count)
   }
   return ''
+}
+
+// Raw provider text, 'artist · genre · year' with only the parts the item
+// has. The screen wraps it in displayText.
+export function musicInfoLine (item) {
+  if (!item || typeof item !== 'object') return ''
+  const parts = []
+  if (typeof item.artist === 'string' && item.artist !== '') parts.push(item.artist)
+  if (typeof item.genre === 'string' && item.genre !== '') parts.push(item.genre)
+  if (Number.isInteger(item.year)) parts.push(String(item.year))
+  return parts.join(' · ')
 }
 
 // Same raw line. A sticker says where playback starts: the title is already beside it.

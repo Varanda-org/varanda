@@ -18,7 +18,11 @@ import { useMusicCover } from './useMusicCover'
 // Keyboard events and tab order are DOM APIs; native uses accessibility actions.
 const WEB = Platform.OS === 'web'
 
-export const musicPlayerIdle = { item: null, queue: queueIdle, phase: 'idle', ms: 0, error: '', fallback: false }
+export const musicPlayerIdle = { item: null, queue: queueIdle, phase: 'idle', ms: 0, error: '', fallback: false, blocked: false }
+
+// A browser may load no metadata before a gesture, and the stream's own seek
+// wait is far longer: an automatic attempt gives up early and waits for a tap.
+export const AUTO_SEEK_MS = 5000
 
 export function musicPlayerTime (ms) {
   const seconds = Math.max(0, Math.floor(ms / 1000))
@@ -51,7 +55,7 @@ export function createMusicPlayback (session, music, notify) {
 
   function stop () {
     if (current) dispose(current)
-    publish({ phase: 'idle' })
+    publish({ phase: 'idle', blocked: false })
   }
 
   function stale (job) {
@@ -68,6 +72,22 @@ export function createMusicPlayback (session, music, notify) {
     publish({ phase: 'idle', error })
   }
 
+  // Not a failure: the item and the ticket stay for the tap that follows.
+  function block (job) {
+    if (stale(job)) return
+    dispose(job)
+    publish({ phase: 'idle', blocked: true, error: '' })
+  }
+
+  function seekWithin (job, player, ms) {
+    // Only the time limit means blocked; a real seek failure reaches the caller's
+    // catch, and one arriving after the limit lands on a settled promise.
+    return new Promise((resolve, reject) => {
+      job.timer = setTimeout(() => resolve(false), AUTO_SEEK_MS)
+      player.seek(ms).then(() => resolve(true), reject)
+    }).finally(() => clearTimeout(job.timer))
+  }
+
   function begin (epoch) {
     if (current) dispose(current)
     if (!live || epoch !== playbackEpoch()) return null
@@ -75,11 +95,12 @@ export function createMusicPlayback (session, music, notify) {
     current = job
     const player = { pause: stop }
     job.unclaim = claimPlayback(player, { bound: true, epoch })
-    publish({ phase: 'loading', error: '' })
+    publish({ phase: 'loading', error: '', blocked: false, fallback: false })
     return job
   }
 
-  async function start (epoch, fresh = false) {
+  async function start (epoch, fresh = false, attempt) {
+    const auto = attempt?.auto === true
     const job = begin(epoch)
     if (!job) return
     const opts = { ...session, signal: job.controller.signal }
@@ -109,6 +130,18 @@ export function createMusicPlayback (session, music, notify) {
       const { url, base } = ticket
       const player = job.player = createStreamPlayer(url, { origin: base })
       job.offs.push(player.onError((err) => {
+        if (stale(job)) return
+        // The web stream reports an autoplay refusal here, with the cause. Nothing
+        // sounds, so the claim goes; the player and the ticket wait for a tap.
+        if (job.phase === 'playing' && (err?.name === 'NotAllowedError' || err?.cause?.name === 'NotAllowedError')) {
+          job.phase = 'paused'
+          clearTimeout(job.timer)
+          job.player.pause()
+          if (job.unclaim) { job.unclaim(); job.unclaim = null }
+          publish({ phase: 'paused', blocked: true, error: '' })
+          return
+        }
+        if (auto && job.phase === 'seeking' && err?.code === 'seek-timeout') return block(job)
         const seekError = job.phase === 'seeking' && (err?.code === 'seek' || err?.code === 'seek-timeout')
         fail(job, seekError ? MUSIC_SEEK_TEXT : musicErrorText(err))
       }))
@@ -136,7 +169,8 @@ export function createMusicPlayback (session, music, notify) {
       }))
       if (snippet || startMs > 0) {
         job.phase = 'seeking'
-        await player.seek(startMs)
+        if (!auto) await player.seek(startMs)
+        else if (!await seekWithin(job, player, startMs)) return block(job)
         if (stale(job)) return
         // A resolved seek confirms the target, even without a new progress event.
         if (snippet && snippetTick({ ms: startMs, startMs, endMs }) === 'stop') return fail(job, MUSIC_SEEK_TEXT)
@@ -152,7 +186,7 @@ export function createMusicPlayback (session, music, notify) {
     }
   }
 
-  async function press (epoch = playbackEpoch()) {
+  async function press (epoch = playbackEpoch(), attempt) {
     if (!live || epoch !== playbackEpoch()) return
     if (current && state.phase === 'loading') return stop()
     if (current && state.phase === 'playing') {
@@ -160,20 +194,26 @@ export function createMusicPlayback (session, music, notify) {
       current.phase = 'paused'
       clearTimeout(current.timer)
       current.player.pause()
+      // A paused holder would keep playback busy and hold off music elsewhere.
+      if (current.unclaim) { current.unclaim(); current.unclaim = null }
       publish({ phase: 'paused' })
       return
     }
     if (current && state.phase === 'paused' && Date.parse(ticket.expiresAt) > Date.now()) {
       const job = current
-      if (stale(job)) return
-      job.phase = 'playing'
-      publish({ phase: 'playing' })
-      await job.player.play()
-      stale(job)
-      return
+      // Without a claim, leaving the screen did not stop this job: an old one
+      // stops here and the press starts again, as it did after that stop.
+      if (!stale(job)) {
+        job.unclaim = claimPlayback({ pause: stop }, { bound: true, epoch })
+        job.phase = 'playing'
+        publish({ phase: 'playing', blocked: false })
+        await job.player.play()
+        stale(job)
+        return
+      }
     }
     if (playlist && state.queue.done) publish({ queue: queueStep(state.queue, { type: 'select', index: 0 }), ms: 0 })
-    return start(epoch)
+    return start(epoch, false, attempt)
   }
 
   function pressStep (type) {
@@ -219,7 +259,7 @@ export function createMusicPlayback (session, music, notify) {
     ticket = null
   }
 
-  return { press, pressStep, pressSeek, release }
+  return { press, pressStep, pressSeek, stop, release }
 }
 
 export function useMusicAvailable (node, member, refreshKey) {

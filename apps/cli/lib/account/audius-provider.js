@@ -12,9 +12,9 @@ const { cardText, cardUrlHost } = require('@varanda/rpc')
 // unavailable item, or one with an access shape this file does not know, is
 // never offered, so the member never meets a track the proxy cannot play.
 // No user id or provider stream URL is copied: those would make the member's
-// device fetch from Audius directly. The artwork URL is kept as `art` for the
-// service alone: the routes strip it from every answer, and a member reaches a
-// cover only as bytes the service fetched and checked.
+// device fetch from Audius directly. The artwork URLs are kept as `art` and
+// `artLarge` for the service alone: the routes strip them from every answer,
+// and a member reaches a cover only as bytes the service fetched and checked.
 
 const DEFAULT_API_URL = 'https://api.audius.co/v1'
 const ID_RE = /^[A-Za-z0-9]{1,32}$/
@@ -31,6 +31,8 @@ const MAX_LIST = 50
 const MAX_QUERY = 256
 const MAX_OFFSET = 4999
 const MAX_ART_URL = 512
+const MAX_GENRE = 40
+const RELEASE_RE = /^\d{4}-\d{2}-\d{2}/
 const CURSOR_RE = /^(0|[1-9][0-9]{0,3})$/
 
 // -> { base, apiHost, apiKey, appName, moments, covers, streams } or null. Returns
@@ -171,14 +173,16 @@ function pageUrl (permalink) {
   return isAudiusPermalink(url) ? url : null
 }
 
-// The 150x150 artwork URL of an item, or null. Only a plain https URL on a
-// named public host: no credentials, port or fragment, so the art fetch has
-// nothing to carry and the host passes the same rule as the API host. A bad
-// value never drops the item, it only leaves it without a cover.
-function artOf (json) {
+// The artwork URL of an item at `size` ('150x150' or '480x480'), or null.
+// Only a plain https URL on a named public host: no credentials, port or
+// fragment, so the art fetch has nothing to carry and the host passes the same
+// rule as the API host. A bad value never drops the item, it only leaves it
+// without a cover.
+function artOf (json, size = '150x150') {
   try {
+    if (size !== '150x150' && size !== '480x480') return null
     if (!isObject(json) || !isObject(json.artwork)) return null
-    const raw = json.artwork['150x150']
+    const raw = json.artwork[size]
     if (typeof raw !== 'string' || raw.length > MAX_ART_URL) return null
     const url = new URL(raw)
     if (url.protocol !== 'https:' || url.username !== '' || url.password !== '' || url.port !== '' || url.hash !== '') return null
@@ -189,6 +193,21 @@ function artOf (json) {
   } catch {
     return null
   }
+}
+
+// The song info a track may carry: each key only when the provider value is
+// usable, so a missing one never drops the track. The genre goes through
+// cardText like the title, as it reaches the screen.
+function infoOf (json) {
+  const out = {}
+  const genre = cardText(json.genre, MAX_GENRE)
+  if (genre !== '') out.genre = genre
+  const date = json.release_date
+  if (typeof date === 'string' && RELEASE_RE.test(date)) {
+    const year = Number(date.slice(0, 4))
+    if (year >= 1900 && year <= 2100) out.year = year
+  }
+  return out
 }
 
 function fromTrack (json) {
@@ -206,7 +225,7 @@ function fromTrack (json) {
   if (title === '' || artist === '') return null
   const url = pageUrl(json.permalink)
   if (url === null) return null
-  return { id, title, artist, duration, url, art: artOf(json) }
+  return { id, title, artist, duration, url, art: artOf(json), artLarge: artOf(json, '480x480'), ...infoOf(json) }
 }
 
 function fromPlaylist (json) {
@@ -224,7 +243,7 @@ function fromPlaylist (json) {
   if (title === '' || artist === '') return null
   const url = pageUrl(json.permalink)
   if (url === null) return null
-  return { id, title, artist, count, url, art: artOf(json) }
+  return { id, title, artist, count, url, art: artOf(json), artLarge: artOf(json, '480x480') }
 }
 
 // The answer of a resolve request, which ends at the track endpoint (data

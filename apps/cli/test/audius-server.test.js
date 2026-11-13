@@ -38,7 +38,9 @@ function track (id) {
     duration: 180,
     permalink: '/artista/musica-' + id.toLowerCase(),
     user: { name: 'Artista', id: 'u1' },
-    artwork: { '150x150': 'https://' + ART + '/' + id },
+    artwork: { '150x150': 'https://' + ART + '/' + id, '480x480': 'https://' + ART + '/' + id + 'L' },
+    genre: 'Samba',
+    release_date: '2001-02-03',
     is_streamable: true,
     is_stream_gated: false,
     access: { stream: true }
@@ -117,10 +119,12 @@ function fakeNode () {
 function fakeArt () {
   const art = fixture((req, res) => {
     art.seen.push(req.headers)
+    art.paths.push(new URL(req.url, 'http://' + ART).pathname)
     res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': JPEG.length })
     res.end(JPEG)
   })
   art.seen = []
+  art.paths = []
   return art
 }
 
@@ -361,4 +365,30 @@ test('audius server: art is feature-off while covers are off', async (t) => {
   const covered = await call('POST', '/account/audius/item?covers=1', { body: { kind: 'track', id: 'Plain1' }, headers: { Authorization: 'Bearer ' + token } })
   t.absent('cover' in covered.json, 'no cover key while the switch is off')
   t.is(art.seen.length, 0)
+})
+
+test('audius server: size=480 and info=1 ride the query end to end, and the policy keeps its two keys', async (t) => {
+  const { server, call, login, art } = await setup(t, { covers: true })
+  for (const q of ['?size=480', '?info=1', '?covers=1&info=1&size=480']) {
+    const policy = await call('GET', '/account/audius/policy' + q)
+    t.alike(policy.json, { enabled: true, moments: false }, 'exactly enabled and moments with ' + q)
+  }
+  const token = await login()
+  const auth = { Authorization: 'Bearer ' + token }
+  const plain = await call('POST', '/account/audius/item', { body: { kind: 'track', id: 'Plain1' }, headers: auth })
+  t.alike(Object.keys(plain.json).sort(), ['artist', 'duration', 'id', 'title', 'url'], 'no query: the exact keys of today')
+  const info = await call('POST', '/account/audius/item?info=1&covers=1', { body: { kind: 'track', id: 'Plain1' }, headers: auth })
+  t.alike(info.json, { id: 'Plain1', title: 'Musica Plain1', artist: 'Artista', duration: 180, url: 'https://audius.co/artista/musica-plain1', cover: true, genre: 'Samba', year: 2001 })
+  const small = await call('POST', '/account/audius/art', { body: { kind: 'track', id: 'Plain1' }, headers: auth })
+  t.alike(small.json, { mime: 'image/jpeg', bytes: JPEG.toString('base64') })
+  const large = await call('POST', '/account/audius/art?size=480', { body: { kind: 'track', id: 'Plain1' }, headers: auth })
+  t.is(large.status, 200)
+  t.alike(large.json, { mime: 'image/jpeg', bytes: JPEG.toString('base64') })
+  t.is(headerCount(large.rawHeaders, 'x-content-type-options'), 1, 'nosniff is sent once')
+  t.alike(art.paths, ['/Plain1', '/Plain1L'], 'the 480 href, fetched apart from the small one')
+  t.is(server.audiusStats().covers, 2)
+  for (const res of [plain, info, small, large]) {
+    t.absent(res.raw.toString('latin1').includes(ART), 'no artwork URL in an answer')
+    t.absent(res.raw.toString('latin1').includes('artLarge'), 'no artLarge key')
+  }
 })

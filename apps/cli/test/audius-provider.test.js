@@ -79,7 +79,8 @@ function playlist (extra = {}) {
 }
 
 const ART = 'https://creatornode.example/art.jpg'
-const EXPECTED_TRACK = { id: 'D7KyD', title: 'Samba de Teste', artist: 'Artista', duration: 215, url: 'https://audius.co/artista/samba-de-teste', art: ART }
+const ART_LARGE = 'https://creatornode.example/art-480.jpg'
+const EXPECTED_TRACK = { id: 'D7KyD', title: 'Samba de Teste', artist: 'Artista', duration: 215, url: 'https://audius.co/artista/samba-de-teste', art: ART, artLarge: null }
 const NO_ART_TRACK = { ...EXPECTED_TRACK, art: null }
 
 test('parseAudiusConfig: defaults and accepted values', (t) => {
@@ -229,7 +230,12 @@ test('fromTrack: snake_case and camelCase', (t) => {
   // Absent flags keep the item; nothing but the six fields is copied.
   const minimal = fromTrack({ id: 'D7KyD', title: 'Samba de Teste', duration: 215, permalink: '/artista/samba-de-teste', user: { name: 'Artista' } })
   t.alike(minimal, NO_ART_TRACK)
-  t.alike(Object.keys(fromTrack(track())).sort(), ['art', 'artist', 'duration', 'id', 'title', 'url'])
+  t.alike(Object.keys(fromTrack(track())).sort(), ['art', 'artLarge', 'artist', 'duration', 'id', 'title', 'url'])
+  const both = fromTrack(track({ artwork: { '150x150': ART, '480x480': ART_LARGE, '1000x1000': 'https://creatornode.example/art-1000.jpg' }, genre: 'Samba', release_date: '1999-04-02' }))
+  t.alike(both, { ...EXPECTED_TRACK, artLarge: ART_LARGE, genre: 'Samba', year: 1999 })
+  t.alike(Object.keys(both).sort(), ['art', 'artLarge', 'artist', 'duration', 'genre', 'id', 'title', 'url', 'year'])
+  t.alike(fromTrack(track({ artwork: { '480x480': ART_LARGE } })), { ...EXPECTED_TRACK, art: null, artLarge: ART_LARGE }, 'a large cover alone')
+  t.alike(fromTrack(track({ artwork: { '150x150': ART, '480x480': 'http://creatornode.example/a.jpg' } })), EXPECTED_TRACK, 'a bad large cover is null')
   // A bad cover never drops the item.
   t.alike(fromTrack(track({ artwork: { '150x150': 'http://creatornode.example/art.jpg' } })), NO_ART_TRACK)
   t.alike(fromTrack(track({ artwork: 'https://creatornode.example/art.jpg' })), NO_ART_TRACK)
@@ -293,6 +299,29 @@ test('fromTrack: each exclusion rule drops the item', (t) => {
   for (const [name, item] of Object.entries(drops)) t.is(fromTrack(item), null, name)
 })
 
+test('fromTrack: genre and year only when usable', (t) => {
+  const info = (extra) => {
+    const out = fromTrack(track(extra))
+    return { genre: out.genre, year: out.year, has: [Object.hasOwn(out, 'genre'), Object.hasOwn(out, 'year')] }
+  }
+  t.alike(info({ genre: '  Samba  ', release_date: '2024-01-31' }), { genre: 'Samba', year: 2024, has: [true, true] })
+  t.alike(info({ release_date: '2024-01-31T00:00:00Z' }), { genre: undefined, year: 2024, has: [false, true] }, 'a full ISO time keeps the year')
+  t.alike(info({ release_date: '1900-01-01' }).year, 1900)
+  t.alike(info({ release_date: '2100-12-31' }).year, 2100)
+  const long = info({ genre: 'g'.repeat(60) })
+  t.is(Array.from(long.genre).length, 40, 'cut to 40 code points')
+  t.is(info({ genre: 'Fo\u0000rr\u202eó' }).genre, 'Forró', 'controls and bidi are dropped')
+  for (const genre of ['', '   ', '\u202e', 42, null, ['Samba'], { toString: () => 'Samba' }]) {
+    t.alike(info({ genre }).has, [false, false], 'no genre for ' + JSON.stringify(genre))
+  }
+  for (const date of [undefined, null, '', '2024', '24-01-31', '2024/01/31', '1899-12-31', '2101-01-01', '0000-01-01', 'x2024-01-31', 20240131, ['2024-01-31'], '٢٠٢٤-01-31']) {
+    t.alike(info({ release_date: date }).has, [false, false], 'no year for ' + JSON.stringify(date))
+  }
+  t.alike(info({ releaseDate: '2024-01-31', Genre: 'Samba', mood: 'Calmo' }).has, [false, false], 'no other field is read')
+  t.absent(Object.hasOwn(fromPlaylist(playlist({ genre: 'Samba', release_date: '2024-01-31' })), 'genre'), 'a playlist has no genre')
+  t.absent(Object.hasOwn(fromPlaylist(playlist({ genre: 'Samba', release_date: '2024-01-31' })), 'year'), 'a playlist has no year')
+})
+
 test('fromTrack: hostile text is cleaned and cut', (t) => {
   const out = fromTrack(track({ title: '  Samba‮  de\u0007\nTeste⁦ ', user: { name: 'Art\u0000ista' + 'x'.repeat(200) } }))
   t.is(out.title, 'Samba de Teste')
@@ -304,8 +333,10 @@ test('fromTrack: hostile text is cleaned and cut', (t) => {
 })
 
 test('fromPlaylist: both casings and each exclusion rule', (t) => {
-  const expected = { id: 'pL4yA', title: 'Roda de Choro', artist: 'Artista', count: 12, url: 'https://audius.co/artista/playlist/roda-de-choro', art: ART }
+  const expected = { id: 'pL4yA', title: 'Roda de Choro', artist: 'Artista', count: 12, url: 'https://audius.co/artista/playlist/roda-de-choro', art: ART, artLarge: null }
   t.alike(fromPlaylist(playlist()), expected)
+  t.alike(Object.keys(fromPlaylist(playlist())).sort(), ['art', 'artLarge', 'artist', 'count', 'id', 'title', 'url'])
+  t.alike(fromPlaylist(playlist({ artwork: { '150x150': ART, '480x480': ART_LARGE } })), { ...expected, artLarge: ART_LARGE })
   t.alike(fromPlaylist({ id: 'pL4yA', playlistName: 'Roda de Choro', trackCount: 12, permalink: '/artista/playlist/roda-de-choro', user: { name: 'Artista' }, isPrivate: false, isDelete: false }), { ...expected, art: null })
   t.alike(fromPlaylist(playlist({ artwork: { '150x150': 'https://10.0.0.1/a.jpg' } })), { ...expected, art: null }, 'a bad cover keeps the playlist')
   t.alike(fromPlaylist(playlist({ track_count: 500 })).count, 500)
@@ -358,8 +389,22 @@ test('artOf keeps only a plain https hostname URL', (t) => {
     'javascript url': 'javascript:alert(1)'
   }
   for (const [name, href] of Object.entries(bad)) t.is(of(href), null, name)
+  const large = (href) => artOf({ artwork: { '480x480': href } }, '480x480')
+  t.is(large(ART), ART)
+  t.is(large(long), long, '480x480: 512 characters pass')
+  for (const [name, href] of Object.entries(bad)) t.is(large(href), null, '480x480 ' + name)
+  for (const v of [42, null, undefined, {}, [ART], { toString: () => ART }]) t.is(large(v), null, '480x480 non-string ' + typeof v)
+  const hostileLarge = { artwork: {} }
+  Object.defineProperty(hostileLarge.artwork, '480x480', { get () { throw new Error('boom') } })
+  t.is(artOf(hostileLarge, '480x480'), null, '480x480 never throws')
+  t.is(fromTrack(track({ artwork: hostileLarge.artwork })).artLarge, null, 'a throwing artwork keeps the track')
   for (const v of [42, null, undefined, {}, ['https://creatornode.example/a.jpg'], { toString: () => ART }]) t.is(of(v), null, 'non-string ' + typeof v)
   t.is(artOf({ artwork: { '480x480': ART, '1000x1000': ART } }), null, 'only 480x480 and larger')
+  t.is(artOf({ artwork: { '480x480': ART, '1000x1000': ART } }, '150x150'), null, 'the default is 150x150')
+  t.is(artOf({ artwork: { '150x150': ART, '1000x1000': ART } }, '480x480'), null, 'no 480x480')
+  t.is(artOf({ artwork: { '150x150': ART, '480x480': ART_LARGE } }, '480x480'), ART_LARGE)
+  t.is(artOf({ artwork: { '1000x1000': ART } }, '1000x1000'), null, '1000x1000 is never read')
+  t.is(artOf({ artwork: { original: ART } }, 'original'), null, 'nor any other size')
   t.is(artOf({ artwork: [ART] }), null, 'artwork an array')
   t.is(artOf({ artwork: ART }), null, 'artwork a string')
   t.is(artOf({}), null)

@@ -9380,3 +9380,60 @@ Nenhuma conferência em aparelho nem com os provedores reais foi feita ainda. Os
 - [ ] Pontuação do link escondido: "Olha <link>, que legal" mostra "Olha, que legal"; " (<link>) " não deixa nada; "pala( <link> )vra" mostra "pala( )vra"; o texto mostrado nunca ganha link, menção ou palavra que o texto guardado não tem, e quando a arrumação mudaria links ou menções aparece o texto original.
 - [ ] Limitação conhecida: aspas em volta do link ("<link>", «<link>», “<link>”), espaços não separáveis e "…" depois do link não são arrumados. Registrar o que aparece.
 - [ ] Limitação conhecida: um cartão que entra na tela durante a rotação de tela cheia nativa pode carregar. Registrar o que acontece.
+
+## 204. Música do Audius toca sozinha na publicação, capas e informações da faixa, Termos 44
+
+Numa publicação de texto, resposta ou citação aberta como publicação própria, um cartão cujo URL leva uma referência Audius de trecho ou faixa vira um adesivo compacto: capa ou azulejo gerado, título, segunda linha com "artista · gênero · ano" (só os campos disponíveis), selo **15 s** no trecho, fonte Audius e link **Abrir no Audius**. Depois do item respondido, a segunda linha usa a duração como alternativa apenas quando nenhum dos campos de informação existe; o selo do adesivo continua **15 s**, mesmo numa faixa menor. O app pede `?covers=1&info=1` na busca, no item e no resolve; `info=1` acrescenta gênero (até 40 pontos de código) e ano (1900 a 2100, de `release_date`) só às faixas. Sem essa consulta, as chaves da resposta não mudam.
+
+Num nó ligado à instalação, com **Tocar música sozinha** ligada (padrão, guardada só no aparelho, imediatamente antes de **Prévia de links** em Ajustes), o adesivo visto em duas conferências com 500 ms de intervalo na tela ativa pede disponibilidade, item, capa quando ligada e áudio ao serviço de conta e toca sem toque. Não começa enquanto outro player carrega ou toca (voz, vídeo ou música), com quadro de YouTube, SoundCloud, Spotify ou Apple Music carregado, sem rede, sob uma folha ou visualizador de fotos, bloqueado ou em segundo plano. Uma mensagem de voz ou um cartão antigo de música pausado pela pessoa libera a reprodução e não bloqueia outro adesivo. No nativo, o leitor de tela precisa estar confirmado como desligado; com TalkBack ou VoiceOver ligado nada começa sozinho, mas um toque toca e rolar para longe interrompe. A web não detecta leitor de tela pelo react-native-web: ali o início automático segue a chave de Ajustes e as demais condições. O áudio para quando a linha fica quase toda fora da faixa visível, ao trocar de tela ou aba, abrir uma folha ou o visualizador de fotos, perder a rede, bloquear ou ir para segundo plano, inclusive depois de um toque. Só uma música toca por vez, sem laço: o trecho toca uma vez enquanto a linha está visível e pode tocar de novo depois de sair e voltar.
+
+Tocar num adesivo que toca ou carrega silencia os inícios automáticos de todas as publicações na sessão, até o próximo toque em qualquer adesivo. Uma recusa do navegador, ou uma busca automática do ponto inicial que não se confirma em 5 s, mostra **Tocar música**, sem erro, e também silencia os inícios automáticos da sessão. Outra falha automática não mostra texto nem se repete automaticamente naquela linha; atingir o limite diário também silencia os inícios automáticos da sessão. Falhas depois de um toque continuam sendo anunciadas. Playlists e todos os cartões com a chave desligada mantêm o player anterior e não pedem nada antes de um toque. O cartão dentro da citação e o balão de conversa continuam cartões comuns, e o rascunho mantém seu adesivo de edição e prévia por toque. Nenhum frame do Audius é carregado. O registro não mudou: `preview` e mídia nunca vão juntos, e música com foto ou vídeo numa publicação continua recusada. A política continua exatamente `{ enabled, moments }`; limites diários e orçamento compartilhado do provedor não mudam. A primeira carga automática consome um uso de item, um de reprodução e os pedidos de áudio, além da capa quando pedida; uma linha que volta pode reutilizar o item respondido e o ticket ainda válido.
+
+A capa do adesivo só é pedida enquanto ele está visível e depois que seu item foi respondido, por início automático ou toque. O editor pede `POST /account/audius/art?size=480`, com cache separado da capa pequena e alternativa pequena quando não há a maior ou quando ela falha como imagem e uma nova busca ainda cabe nos 20 s de resposta, abaixo do prazo de 25 s do app. Um app anterior continua recebendo a pequena sem `size=480`. As capas dependem de `VARANDA_AUDIUS_COVERS=1`, permanecem só em memória e não são ligadas por esta mudança. Termos e Política de Privacidade passam à versão 44, com novo aceite: o serviço de conta pode saber sem toque que a conta do membro pediu a faixa, portanto que o aparelho mostrou aquela publicação; o Audius continua recebendo o endereço da associação, nunca o do membro. A hipótese de desenho depende de parecer jurídico, e se o início automático nas publicações exige confirmação por escrito do Audius fica pendente da decisão de quem é dono do projeto.
+
+Os passos de leitura que exigem toque nas seções 186 e 200 são substituídos aqui para trechos e faixas com a chave ligada. A regra anterior do Audius por toque na seção 203 também é substituída nesses casos; os players dos quatro outros provedores seguem como na seção 203.
+
+Testes automáticos, a partir da raiz, cada arquivo sozinho:
+
+- `node apps/app/test/postMusic.test.js`
+- `node apps/app/test/postMusicCard.test.js`
+- `node apps/app/test/musicPlayerCard.test.js`
+- `node apps/app/test/chatMedia.test.js`
+- `node apps/app/test/linkPreview.test.js`
+- `node apps/app/test/musicClient.test.js`
+- `node apps/app/test/musicPicker.test.js`
+- `node apps/app/test/legal.test.js`
+- `node apps/cli/test/audius-provider.test.js`
+- `node apps/cli/test/audius-routes.test.js`
+- `node apps/cli/test/audius-server.test.js`
+
+Esses testes conferem a lógica, os contratos e o texto do código. Os testes de rotas e servidor usam apenas fixtures HTTP em loopback; nenhum usa a API real do Audius. A lista é um roteiro, não um registro de execução.
+
+### Verificação manual
+
+Nenhuma conferência em aparelho nem com o provedor real foi feita nesta tarefa. Conferir primeiro no build de debug do Android (emulador ou aparelho), depois no simulador iOS, na web e no PWA, em claro e escuro. O que exige conta numa instalação de produção precisa do APK de preview do EAS, pois a passkey de produção não entra no build de debug; no iOS a passkey depende do domínio associado da conta Apple Developer (veja `development.md`).
+
+- [ ] Trecho e faixa começam após cerca de 1 s visíveis numa publicação, resposta e citação aberta como publicação própria; rolar rápido não pede música.
+- [ ] Rolar para longe para a música, inclusive a iniciada por toque; sair da faixa e voltar permite tocar o trecho de novo, uma vez, sem laço.
+- [ ] Trocar de aba, abrir uma publicação, abrir uma folha (inclusive Ajustes), abrir o visualizador de fotos, perder a rede, bloquear a tela e ir para segundo plano param a música e os pedidos pendentes.
+- [ ] Duas publicações de música tocam uma depois da outra ao rolar, nunca juntas.
+- [ ] Uma mensagem de voz ou vídeo carregando ou tocando nunca é interrompido por início automático do feed.
+- [ ] Pausar uma mensagem de voz e ir ao feed: a música começa, sem ficar bloqueada pela voz pausada.
+- [ ] Um cartão de playlist pausado no feed não impede que outro adesivo comece.
+- [ ] Um player do YouTube já carregado nunca é fechado nem interrompido pelo início automático de um adesivo; repetir com SoundCloud, Spotify e Apple Music.
+- [ ] No app nativo, com TalkBack ou VoiceOver ligado, nada começa sozinho; um toque no adesivo toca e rolar para longe para. Na web, registrar que a detecção não existe e conferir a chave de Ajustes desligada para impedir o início automático.
+- [ ] Na primeira carga da web, sem gesto anterior, a recusa do navegador mostra **Tocar música**; tocar inicia o som e libera os outros adesivos, e nenhuma outra linha tenta antes desse toque.
+- [ ] No Safari do iOS e no PWA instalado, um trecho toca ou mostra **Tocar música** em cerca de 5 s na busca do ponto inicial, sem ficar 20 s com o indicador girando; a recusa não mostra erro.
+- [ ] Com a chave de silêncio do iPhone ligada, registrar o que acontece no app nativo, no Safari e no PWA.
+- [ ] Tocar no adesivo tocando silencia todas as publicações da sessão; rolar para outra não começa som; o próximo toque em qualquer adesivo toca e libera o início automático.
+- [ ] Desligar **Tocar música sozinha**, fechar e abrir o app mantém a escolha só neste aparelho e restaura o cartão antigo: nada é pedido antes do toque em **Ouvir** ou **Ouvir trecho**.
+- [ ] Uma playlist continua no cartão antigo, com **Ouvir playlist**, próxima e anterior, sem pedido antes de um toque, com a chave ligada ou desligada.
+- [ ] O cartão dentro da citação, o balão privado e o de grupo ficam comuns, sem áudio automático; a prévia do compositor continua por toque.
+- [ ] Uma publicação com foto ou vídeo continua sem poder receber música; `preview` e mídia não entram juntos no registro.
+- [ ] No limite diário, a tentativa automática não mostra erro e nenhuma outra linha tenta; só depois de tocar aparece **Limite de músicas por hoje**.
+- [ ] Uma falha automática comum não mostra erro nem se repete automaticamente para a mesma linha, inclusive depois de sair e voltar; um toque permite tentar e anuncia a falha.
+- [ ] Com capas ligadas, o adesivo mostra a capa apenas depois do item respondido e enquanto visível; o editor tem capa nítida de 480 px e usa a pequena quando a maior não pode ser respondida no prazo.
+- [ ] Com capas desligadas, todas as superfícies mantêm o azulejo gerado e nenhum pedido chega a `/account/audius/art`.
+- [ ] Com item carregado, artista, gênero e ano aparecem quando o Audius os fornece; sem nenhum desses campos, a segunda linha usa a duração. O adesivo de trecho mantém **15 s**; o cartão antigo mostra a duração real no selo de faixa menor.
+- [ ] Um app anterior a esta mudança ainda recebe a capa pequena do serviço novo, sem `size=480`.
+- [ ] Uma conta que aceitou a versão 43 recebe os Termos e a Política de Privacidade 44 para novo aceite.

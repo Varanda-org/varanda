@@ -1031,7 +1031,7 @@ export const audiusSearch = async (q, { kind, cursor, origin, member, request, s
   const body = musicSearchBody(q, kind, cursor)
   if (body === null) throw toError('pedido-invalido')
   return audius.withSession({ member, origin, request }, async (sessionToken) => {
-    const parsed = parseMusicSearch(await call('POST', '/account/audius/search?covers=1', body, { origin, sessionToken, signal, maxBody: AUDIUS_LIST_BODY, timeoutMs: AUDIUS_TIMEOUT_MS }), kind)
+    const parsed = parseMusicSearch(await call('POST', '/account/audius/search?covers=1&info=1', body, { origin, sessionToken, signal, maxBody: AUDIUS_LIST_BODY, timeoutMs: AUDIUS_TIMEOUT_MS }), kind)
     if (parsed === null) throw toError('indisponivel')
     return parsed
   })
@@ -1041,7 +1041,7 @@ export const audiusSearch = async (q, { kind, cursor, origin, member, request, s
 export const audiusItem = async (kind, id, { origin, member, request, signal } = {}) => {
   if (!AUDIUS_KINDS.includes(kind) || typeof id !== 'string' || !MUSIC_ID_RE.test(id)) throw toError('pedido-invalido')
   return audius.withSession({ member, origin, request }, async (sessionToken) => {
-    const parsed = parseItem(await call('POST', '/account/audius/item?covers=1', { kind, id }, { origin, sessionToken, signal, maxBody: AUDIUS_LIST_BODY, timeoutMs: AUDIUS_ITEM_TIMEOUT_MS }), kind)
+    const parsed = parseItem(await call('POST', '/account/audius/item?covers=1&info=1', { kind, id }, { origin, sessionToken, signal, maxBody: AUDIUS_LIST_BODY, timeoutMs: AUDIUS_ITEM_TIMEOUT_MS }), kind)
     if (parsed === null || parsed.id !== id) throw toError('indisponivel')
     return parsed
   })
@@ -1051,7 +1051,7 @@ export const audiusItem = async (kind, id, { origin, member, request, signal } =
 export const audiusResolve = async (url, { origin, member, request, signal } = {}) => {
   if (!isAudiusPage(url)) throw toError('pedido-invalido')
   return audius.withSession({ member, origin, request }, async (sessionToken) => {
-    const parsed = parseResolve(await call('POST', '/account/audius/resolve?covers=1', { url }, { origin, sessionToken, signal, timeoutMs: AUDIUS_TIMEOUT_MS }))
+    const parsed = parseResolve(await call('POST', '/account/audius/resolve?covers=1&info=1', { url }, { origin, sessionToken, signal, timeoutMs: AUDIUS_TIMEOUT_MS }))
     if (parsed === null) throw toError('indisponivel')
     return parsed
   })
@@ -1062,17 +1062,19 @@ export const audiusResolve = async (url, { origin, member, request, signal } = {
 // A refusal that will not change this session (the service's 404
 // 'nao-encontrado', the member's day used up, bytes this client refuses)
 // carries noCover, so src/musicCover.js keeps it; any other failure (a
-// timeout, a 503) is not kept and a later screen may ask again.
+// timeout, a 503) is not kept and a later screen may ask again. large asks
+// the 480 px cover by query; an older service ignores the query and answers
+// the small one, under the same byte bound.
 const AUDIUS_ART_BODY = Math.ceil(MUSIC_ART_MAX_BYTES / 3) * 4 + 512
 const noCover = (err) => { err.noCover = true; return err }
-export const audiusArt = async (kind, id, { origin, member, request, signal } = {}) => {
+export const audiusArt = async (kind, id, { origin, member, request, signal, large } = {}) => {
   if (!AUDIUS_KINDS.includes(kind) || typeof id !== 'string' || !MUSIC_ID_RE.test(id)) throw toError('pedido-invalido')
   // A session start refused with 'limite-musica' (its finish throttle) is a
   // transient failure here: only the art route's own answer is the day used up.
   return audius.withSession({ member, origin, request }, async (sessionToken) => {
     let data
     try {
-      data = await call('POST', '/account/audius/art', { kind, id }, { origin, sessionToken, signal, errorBody: true, maxBody: AUDIUS_ART_BODY, timeoutMs: AUDIUS_ART_TIMEOUT_MS })
+      data = await call('POST', large === true ? '/account/audius/art?size=480' : '/account/audius/art', { kind, id }, { origin, sessionToken, signal, errorBody: true, maxBody: AUDIUS_ART_BODY, timeoutMs: AUDIUS_ART_TIMEOUT_MS })
     } catch (err) {
       if (err.body && err.body.error === 'nao-encontrado') throw noCover(toError('indisponivel'))
       if (err.body && err.body.error === 'limite-musica') throw noCover(toError('limite-musica'))
