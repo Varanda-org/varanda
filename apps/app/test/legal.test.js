@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 44)
+  t.is(LEGAL_VERSION, 45)
   t.is(LEGAL_DATE, '13/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 44, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 45, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -118,11 +118,13 @@ test('legal: version 44 plays post music by itself while the sticker is visible'
   ]) t.absent(privacy.includes(gone), 'privacy: no ' + gone)
 })
 
-test('legal: version 43 loads music players when the card is visible', async (t) => {
+test('legal: version 45 loads music players when the card is visible', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   t.ok(text(TERMS).includes('Ao carregar, o serviço recebe o endereço de internet do seu aparelho'), 'terms: player sends the device address')
   t.ok(text(PRIVACY).includes('Ao carregar, o provedor recebe o endereço de internet do seu aparelho'), 'privacy: player sends the device address')
+  t.ok(text(TERMS).includes('o som que você iniciou pode continuar, e o serviço continua em contato com o seu aparelho'), 'terms: an offscreen player keeps contact')
+  t.ok(text(PRIVACY).includes('o som que você iniciou pode continuar, e o provedor continua em contato com o seu aparelho'), 'privacy: an offscreen player keeps contact')
   for (const doc of [TERMS, PRIVACY]) {
     for (const required of [
       'Um link de YouTube, SoundCloud, Spotify ou Apple Music pode aparecer como um cartão com o player do próprio serviço',
@@ -133,14 +135,23 @@ test('legal: version 43 loads music players when the card is visible', async (t)
       'pode usar cookies e outros dados que o serviço guarda no aparelho',
       'O player não começa com som: o som só sai quando você toca o play dentro do player',
       'Ouvir músicas completas depende do serviço',
-      'que só abre quando você toca nele',
-      'fecha o player'
+      'Um toque num link dentro do player abre, fora do Varanda, o endereço indicado pelo player',
+      'no app instalado (Android e iOS), só endereços do próprio serviço são abertos',
+      'na versão web, inclusive instalada na tela inicial, o link abre em outra aba, e o Varanda não confere o endereço',
+      'um toque no cartão abre o link',
+      'continua aberto enquanto você rola a mesma tela',
+      'no máximo dois ficam carregados ao mesmo tempo',
+      'O player fecha quando'
     ]) t.ok(text(doc).includes(required), doc.title + ': ' + required)
     for (const gone of [
       'Tocar aqui',
       'não faz nenhum pedido a esses serviços',
       'A partir desse toque',
-      'Tocar é opcional'
+      'Tocar é opcional',
+      'O cartão traz um link',
+      'Rolar o cartão para fora da tela',
+      'no aplicativo, só endereços do próprio serviço',
+      'abre a página do serviço fora do Varanda'
     ]) t.absent(text(doc).includes(gone), doc.title + ': no ' + gone)
   }
   const section = (heading) => PRIVACY.sections.find((s) => s.heading === heading).paragraphs.join(' ')
@@ -236,7 +247,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'aae9f64be21c2ae358809db42ede6033759ffd74aa417f81e200251f8584d2f8', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '28494f7dc07f3294af8574fc69117938d7226a332d9bf6ee3183bad56ee0e194', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {

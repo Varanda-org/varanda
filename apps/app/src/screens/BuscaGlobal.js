@@ -19,7 +19,7 @@
 // Each category keeps its own draft and results while the other is shown:
 // both panes stay mounted and only the selected one is visible.
 
-import { useEffect, useRef, useState } from 'react'
+import { useContext, useEffect, useRef, useState } from 'react'
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { displayText, isKey } from '@varanda/rpc'
 import { useNode, useNotice } from '../node'
@@ -39,6 +39,7 @@ import { HelpNote } from '../ui/Help'
 import { Icon } from '../ui/Icon'
 import { MemberRow } from '../ui/MemberRow'
 import { Pill } from '../ui/Pill'
+import { ScreenVisible } from '../ui/screenVisible'
 import { EmptyState, SkeletonRow } from '../ui/States'
 import { layout, radius, space, type, webInputReset } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
@@ -98,6 +99,7 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
   const bottomPad = useBottomPad()
   const inputRef = useRef(null)
   const [category, setCategory] = useState('contas')
+  const visible = useContext(ScreenVisible)
   const [drafts, setDrafts] = useState(NO_DRAFTS)
   const draft = drafts[category]
   const setDraft = (text) => setDrafts((d) => ({ ...d, [category]: text }))
@@ -504,7 +506,11 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
         })}
       </View>
       <View style={[styles.flex, category !== 'contas' && styles.hidden]}>{contasPane}</View>
-      <View style={[styles.flex, category !== 'publicacoes' && styles.hidden]}>{postsPane}</View>
+      {/* The hidden pane stays mounted and still measures as on screen, so a
+          music player in it must learn that it left the visible screen. */}
+      <ScreenVisible.Provider value={visible && category === 'publicacoes'}>
+        <View style={[styles.flex, category !== 'publicacoes' && styles.hidden]}>{postsPane}</View>
+      </ScreenVisible.Provider>
     </View>
   )
 }

@@ -4,38 +4,47 @@
 // The player loads once the card has been seen on two checks in a row
 // (../embedLive embedStep, every EMBED_TICK_MS) on the visible screen
 // (./screenVisible: the screen the person is looking at, or the sheet the
-// card sits in), and at most two frames load app-wide (embedSlots, which never
-// evicts a loaded frame). Nothing autoplays: the person starts the player with
-// its own controls, and nothing is drawn over it. Until then, and while the
-// card is held (a sheet or the photo viewer over it, a lock, the background),
-// mostly out of the band or just after another player started in the app, the
-// slot holds a still ./LinkCard drawn from stored data only: nothing contacts
-// the provider. The slot keeps the player's height in every state, so loading
-// or unloading the frame never moves the list. The card never claims
-// playback, so a silent frame never stops a voice note, an Audius card or a
-// momento.
+// card sits in), and at most two frames load app-wide (embedSlots). Nothing
+// autoplays: the person starts the player with its own controls, and nothing
+// is drawn over it. A loaded player stays, playback included, while its card
+// is scrolled out of the band on the same visible screen, so scrolling back
+// finds the same provider page. It unloads at once when the card is held (a
+// sheet, a menu or the photo viewer over it, another tab, a covered screen, a
+// lock, the background), when another player starts in the app, when the
+// list unmounts its row, or when a check finds its card more than three window
+// heights past the band (a list may keep a row mounted for good). A frame
+// found out of the band on two checks in a row is asked to yield to a card
+// that became visible, and yields on its own next check only if that check
+// still finds it out of the band; no card ever changes another card's state.
+// Until a player loads, the slot holds the stored ./LinkCard drawn from stored
+// data only: nothing contacts the provider, and a tap opens the link. The slot
+// keeps the player's height in every state, so loading or unloading the frame
+// never moves the list. The card never claims playback, so a silent frame
+// never stops a voice note, an Audius card or a momento.
 //
-// The frame's sandbox grants no popups or top navigation, so the "Abrir no
-// ..." link under the slot is the only way out to the provider, and it opens
-// only on a tap.
+// The frame's sandbox grants popups but no top navigation. On native a popup
+// is cancelled and its address leaves the app only through embedExitUrl,
+// which keeps it on the provider's own domains; on the web it opens a new tab
+// that keeps the sandbox.
 //
 // Props: embed (embedOf of the link), card (the stored link card) or draft
 // (the composer's draft, with imageUri and onDismiss, its remove button),
 // thumb (as for ./LinkCard), onLongPress.
 
 import { useContext, useEffect, useRef, useState } from 'react'
-import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
+import { Pressable, StyleSheet, View, useWindowDimensions } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { cardUrlHost } from '@varanda/rpc'
 import {
   EMBED_BASE_URL,
   EMBED_PROVIDER_NAMES,
   embedHeight,
+  embedExitUrl,
   embedHtml,
   topNavigationAllowed
 } from '../musicEmbed'
 import { openExternal } from '../openExternal'
-import { EMBED_IDLE, EMBED_TICK_MS, embedSlots, embedStep, embedsHeld, mostlyHidden, onEmbedHold } from '../embedLive'
+import { EMBED_IDLE, EMBED_PARKED, EMBED_TICK_MS, EMBED_WAITING, embedSlots, embedStep, embedsHeld, farFromBand, mostlyHidden, onEmbedHold } from '../embedLive'
 import { playbackClaimCount } from '../media/chatMedia'
 import { EmbedFrame } from './EmbedFrame'
 import { Icon } from './Icon'
@@ -84,21 +93,26 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
   const fits = width > 0 && width >= embed.minWidth
   const active = visible && !held && fits
 
-  const apply = (next) => {
+  // A check whose answer is late passes mayYield false: it still counts
+  // toward parking, but only a fresh answer may give the slot away.
+  const apply = (next, mayYield = true) => {
+    if (mayYield && next === EMBED_PARKED && release.current !== null && embedSlots.yielding(release.current)) next = EMBED_IDLE
     if (next.live && !stateRef.current.live) {
       const done = embedSlots.acquire()
       if (done === null) {
-        next = EMBED_IDLE
+        next = EMBED_WAITING
       } else {
         release.current = done
         base.current = win.width > win.height
       }
     }
+    if (stateRef.current === EMBED_WAITING && next !== EMBED_WAITING && !next.live) embedSlots.withdraw()
     if (!next.live && release.current !== null) {
       const done = release.current
       release.current = null
       done()
     }
+    if (next.live && release.current !== null) embedSlots.park(release.current, next === EMBED_PARKED)
     const changed = next !== stateRef.current
     stateRef.current = next
     if (alive.current && changed) setState(next)
@@ -108,6 +122,7 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
     alive.current = true
     return () => {
       alive.current = false
+      if (stateRef.current === EMBED_WAITING) embedSlots.withdraw()
       stateRef.current = EMBED_IDLE
       const done = release.current
       release.current = null
@@ -152,9 +167,9 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
       // a loaded frame stays while it is turned.
       const turned = (win.width > win.height) !== base.current
       const free = stateRef.current.live || embedSlots.free()
-      const settle = (hidden) => {
+      const settle = (hidden, mayYield = true, far = false) => {
         pending = false
-        apply(embedStep(stateRef.current, { hidden, allowed, turned, free }))
+        apply(embedStep(stateRef.current, { hidden, allowed, turned, free, far }), mayYield)
       }
       const unseen = () => settle(true)
       const view = slot.current
@@ -162,13 +177,13 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
         unseen()
         return
       }
-      if (missed) unseen()
+      if (missed) settle(true, false)
       pending = true
       try {
         view.measureInWindow((x, y, w, h) => {
           if (cancelled || !alive.current || id !== round) return
           if (!band || typeof band.measure !== 'function') {
-            settle(mostlyHidden(x, y, w, h, top, bottom, win.width))
+            settle(mostlyHidden(x, y, w, h, top, bottom, win.width), true, farFromBand(y, h, top, bottom, win.height))
             return
           }
           // A composer under the list lowers the band to its top. A band that
@@ -183,7 +198,8 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
               settle(true)
               return
             }
-            settle(mostlyHidden(x, y, w, h, top, Math.min(bottom, limit), win.width))
+            const lower = Math.min(bottom, limit)
+            settle(mostlyHidden(x, y, w, h, top, lower, win.width), true, farFromBand(y, h, top, lower, win.height))
           }
           try {
             band.measure(withLimit)
@@ -211,43 +227,31 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
     : null
   if (host === null || name === null) return null
 
-  const openLabel = 'Abrir no ' + name
-  const openPage = () => openExternal(url)
-  const longPress = typeof onLongPress === 'function' ? onLongPress : undefined
+  const openFromPlayer = (target) => {
+    const out = embedExitUrl(embed, target)
+    if (out !== null) openExternal(out)
+  }
   const onLayout = (event) => {
     const w = event && event.nativeEvent && event.nativeEvent.layout ? event.nativeEvent.layout.width : NaN
     if (Number.isFinite(w)) setWidth(w)
   }
 
-  const still = <LinkCard card={draft ? undefined : card} draft={draft || undefined} imageUri={imageUri} thumb={thumb} onLongPress={onLongPress} still />
-  const actions = (
-    <View style={styles.actions}>
-      <Pressable
-        accessibilityRole='link'
-        accessibilityLabel={openLabel}
-        onPress={openPage}
-        onLongPress={longPress}
-        delayLongPress={350}
-        hitSlop={4}
-        style={({ pressed }) => [styles.action, pressed && styles.pressed]}
-      >
-        <Text style={styles.link}>{openLabel}</Text>
-      </Pressable>
-      {typeof onDismiss === 'function'
-        ? (
-          <Pressable
-            accessibilityRole='button'
-            accessibilityLabel={LINK_CARD_DISMISS}
-            onPress={onDismiss}
-            hitSlop={4}
-            style={({ pressed }) => [styles.dismiss, pressed && styles.pressed]}
-          >
-            <Icon name='fechar' size={18} color={colors.soft} />
-          </Pressable>
-          )
-        : null}
-    </View>
-  )
+  const plain = <LinkCard card={draft ? undefined : card} draft={draft || undefined} imageUri={imageUri} thumb={thumb} onLongPress={onLongPress} />
+  const actions = typeof onDismiss === 'function'
+    ? (
+      <View style={styles.actions}>
+        <Pressable
+          accessibilityRole='button'
+          accessibilityLabel={LINK_CARD_DISMISS}
+          onPress={onDismiss}
+          hitSlop={4}
+          style={({ pressed }) => [styles.dismiss, pressed && styles.pressed]}
+        >
+          <Icon name='fechar' size={18} color={colors.soft} />
+        </Pressable>
+      </View>
+      )
+    : null
 
   const height = embedHeight(embed, width)
   const tooNarrow = width > 0 && width < embed.minWidth
@@ -259,7 +263,7 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
   if (tooNarrow || tooTall) {
     return (
       <View onLayout={onLayout}>
-        {still}
+        {plain}
         {actions}
       </View>
     )
@@ -286,12 +290,14 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
               allowTop={topNavigationAllowed}
               height={height}
               title={'Player do ' + name}
+              onOpen={openFromPlayer}
             />
             )
           : (
-            // The claim keeps a tap on the stand-in from reaching a quote's or
-            // a bubble's Pressable; the frame is never under this view.
-            <View style={styles.standIn} onStartShouldSetResponder={() => true}>{still}</View>
+            // The responder is negotiated from the touched node upward, so the
+            // card's own Pressable takes a tap on it, and this claim keeps a
+            // tap beside it from reaching a quote's or a bubble's Pressable.
+            <View style={styles.standIn} onStartShouldSetResponder={() => true}>{plain}</View>
             )}
       </View>
       {actions}
@@ -304,8 +310,6 @@ const makeStyles = (colors) => StyleSheet.create({
   slot: { width: '100%', overflow: 'hidden' },
   standIn: { flex: 1, justifyContent: 'center' },
   pressed: { opacity: 0.7 },
-  actions: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: space.sm, paddingHorizontal: space.sm, paddingTop: space.sm },
-  action: { minHeight: layout.hit, flexDirection: 'row', alignItems: 'center', gap: space.xs },
-  dismiss: { width: layout.hit, minHeight: layout.hit, alignItems: 'center', justifyContent: 'center' },
-  link: { fontSize: 14, fontWeight: '600', color: colors.accent }
+  actions: { flexDirection: 'row', justifyContent: 'flex-end', paddingHorizontal: space.sm, paddingTop: space.sm },
+  dismiss: { width: layout.hit, minHeight: layout.hit, alignItems: 'center', justifyContent: 'center' }
 })

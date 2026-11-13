@@ -155,8 +155,34 @@ test('native: navDecision never hands a navigation to the system browser', (t) =
   t.pass('every answer was allow or refuse')
 })
 
-test('native: popups are cancelled and nothing is handed out', (t) => {
-  t.ok(/^function onOpenWindow \(\) \{\}$/m.test(nativeSrc), 'onOpenWindow is a no-op')
+function popupTarget () {
+  const start = nativeRaw.indexOf('export function popupTarget')
+  const end = nativeRaw.indexOf('\n}\n', start)
+  if (start === -1 || end === -1) throw new Error('popupTarget not found in EmbedFrame.native.js')
+  const fn = nativeRaw.slice(start, end + 2).replace('export ', '')
+  return new Function(fn + '\nreturn popupTarget')() // eslint-disable-line no-new-func
+}
+
+test('native: a popup is cancelled and only its address is reported', (t) => {
+  const target = popupTarget()
+  t.is(target({ nativeEvent: { targetUrl: 'https://open.spotify.com/track/x' } }), 'https://open.spotify.com/track/x', 'a string targetUrl')
+  t.is(target(undefined), '', 'no event')
+  t.is(target(null), '', 'null event')
+  t.is(target({}), '', 'no nativeEvent')
+  t.is(target({ nativeEvent: null }), '', 'null nativeEvent')
+  t.is(target({ nativeEvent: {} }), '', 'no targetUrl')
+  for (const targetUrl of [42, null, { toString: () => 'https://x' }, ['https://x']]) {
+    t.is(target({ nativeEvent: { targetUrl } }), '', 'non-string targetUrl ' + JSON.stringify(targetUrl))
+  }
+  const hostile = { get nativeEvent () { throw new Error('x') } }
+  t.is(target(hostile), '', 'a throwing getter gives nothing')
+
+  t.ok(/onOpenWindow=\{onOpenWindow\}/.test(nativeSrc), 'the handler is always passed')
+  const start = nativeSrc.indexOf('const onOpenWindow = (event) => {')
+  t.ok(start !== -1, 'the handler is defined in the component')
+  const body = nativeSrc.slice(start, nativeSrc.indexOf('\n  }\n', start))
+  const calls = (body.match(/\b[A-Za-z_$][\w$]*(?=\s*\()/g) || []).filter((name) => !['if', 'popupTarget'].includes(name))
+  t.alike([...new Set(calls)], ['onOpen'], 'the handler calls only onOpen')
   t.absent(/\bLinking\b/.test(nativeSrc), 'no Linking')
   t.absent(/\bhandOff\b/.test(nativeSrc), 'no handOff')
   t.absent(/onOpenExternal/.test(nativeSrc), 'no onOpenExternal')
@@ -191,8 +217,9 @@ test('web: renders the iframe with the embed URL and nothing from the native pro
   t.is(el.props.referrerPolicy, 'strict-origin-when-cross-origin')
   t.is(el.props.sandbox, EMBED_SANDBOX)
   for (const token of el.props.sandbox.split(' ')) {
-    t.absent(/^allow-(popups|top-navigation|forms|downloads|modals)/.test(token), 'no ' + token)
+    t.absent(/^allow-(top-navigation|forms|downloads|modals|popups-to-escape-sandbox)/.test(token), 'no ' + token)
   }
+  t.ok(el.props.sandbox.split(' ').includes('allow-popups'), 'a link in the player opens a sandboxed tab')
   t.ok(el.props.sandbox.includes('allow-scripts'), 'the player still runs')
   t.alike(Object.keys(el.props).sort(), ['allow', 'allowFullScreen', 'height', 'referrerPolicy', 'sandbox', 'src', 'style', 'title', 'width'])
   t.is(EmbedFrame({ embedUrl: 'http://w.soundcloud.com/player/', height: 166, title: 'x' }), null, 'http is not framed')
