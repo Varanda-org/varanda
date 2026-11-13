@@ -21,7 +21,7 @@ const KINDS = [{ id: 'snippet', label: '15 s' }, { id: 'track', label: 'Faixa in
 export function MusicEditor ({ item, kind, start, modes, session, onKind, onStart, stopRef }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
-  const uri = useMusicCover(kind === 'playlist' ? 'playlist' : 'track', item, session)
+  const uri = useMusicCover(kind === 'playlist' ? 'playlist' : 'track', item, session, true, true)
   const [state, setState] = useState(loopIdle)
   const loop = useMemo(() => createSnippetLoop({ audiusPlay, createStreamPlayer, claimPlayback, playbackEpoch }, session, setState), [item.id, session])
   const opened = useRef(false)

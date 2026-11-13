@@ -519,6 +519,10 @@ export function playbackClaimCount () {
   return playbackClaims
 }
 
+export function playbackBusy () {
+  return activePlayer !== null
+}
+
 // A repeat of the same screen must not expire a claim that already read the epoch.
 export function screenWatcher () {
   let last = null

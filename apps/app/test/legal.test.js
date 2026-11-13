@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 44)
+  t.is(LEGAL_VERSION, 45)
   t.is(LEGAL_DATE, '13/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 44, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 45, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -22,8 +22,8 @@ test('legal: this version describes music covers as never stored', async (t) => 
   }
   const terms = TERMS.sections.find((s) => s.heading === 'Música do Audius').paragraphs.join(' ')
   for (const required of [
-    'Só mostrar o cartão não faz pedidos',
-    'num momento, só depois que o trecho começa a tocar; numa publicação, só depois que você toca para ouvir',
+    'só mostrar o cartão não faz pedidos',
+    'num momento, só depois que o trecho começa a tocar; numa publicação, o adesivo de música pede a capa só enquanto está na tela',
     'Sem capa, o app mostra um quadro com o símbolo de música'
   ]) t.ok(terms.includes(required), required)
   const section = (heading) => PRIVACY.sections.find((s) => s.heading === heading).paragraphs.join(' ')
@@ -62,10 +62,10 @@ test('legal: version 39 describes music through the account service', async (t) 
   for (const required of [
     'O serviço vê o texto da busca, a posição da página de resultados, o link colado, o identificador da faixa ou da playlist e o áudio em trânsito',
     'Os registros do serviço de conta não levam texto de busca, link, identificador de faixa ou playlist nem ticket',
-    'Só mostrar um cartão não faz pedido ao Audius nem ao serviço de conta',
+    'só mostrar o cartão não faz pedido ao Audius nem ao serviço de conta',
     'O app nunca carrega um quadro do Audius'
   ]) t.ok(section('Música do Audius').includes(required), required)
-  t.ok(section('Finalidades e bases legais propostas').includes('Música do Audius: para buscar, anexar e ouvir a música que você escolhe, a base legal proposta é execução de contrato, Art. 7º, V, ainda sujeita a parecer jurídico'))
+  t.ok(section('Finalidades e bases legais propostas').includes('Música do Audius: para buscar, anexar e ouvir a música que você escolhe e, com Tocar música sozinha ligada, para pedir e tocar o trecho ou a faixa de uma publicação, e a capa, enquanto o adesivo está na tela, a base legal proposta é execução de contrato, Art. 7º, V, ainda sujeita a parecer jurídico'))
   for (const required of [
     'Na música do Audius, o serviço de conta não guarda a busca nem o áudio',
     'Os metadados dos itens e os tickets ficam só na memória e desaparecem ao reiniciar o serviço',
@@ -83,7 +83,42 @@ test('legal: version 39 describes music through the account service', async (t) 
   t.ok(section('Música do Audius').includes('Num momento, se a associação ligar a música nos momentos, ver um momento com música, inclusive um seu, já pede o trecho de 15 segundos ao serviço de conta, sem um toque à parte; o trecho toca em seguida, a não ser que o navegador só deixe tocar som depois de um toque.'), 'privacy: momento music starts on view')
 })
 
-test('legal: version 44 loads music players when the card is visible', async (t) => {
+test('legal: version 44 plays post music by itself while the sticker is visible', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const terms = TERMS.sections.find((s) => s.heading === 'Música do Audius').paragraphs.join(' ')
+  for (const required of [
+    'Numa publicação, um trecho de 15 segundos ou uma faixa inteira aparece como um adesivo de música, que mostra também o gênero e o ano, quando o Audius os informa.',
+    'Quando o adesivo fica visível na tela que você está olhando e nenhum outro áudio ou player está ativo, o app pede a música ao serviço de conta sem um toque à parte, e ela toca em seguida, a não ser que o navegador só deixe tocar som depois de um toque.',
+    'No app para Android e iPhone, a música nunca começa sozinha com um leitor de tela ligado.',
+    'A música para quando a publicação sai da tela, quando você muda de tela ou sai do app.',
+    'Tocar no adesivo enquanto a música toca silencia a música das publicações até você tocar num adesivo de novo ou abrir o app outra vez (na web, recarregar a página).',
+    'Você pode desligar isso em Ajustes, em Tocar música sozinha: desligado, só mostrar o cartão não faz pedidos e, para ouvir, você precisa tocar.',
+    'Uma playlist sempre espera o seu toque.',
+    'O Audius continua recebendo só o endereço da associação.',
+    'o serviço de conta busca a capa da faixa ou da playlist',
+    'maior enquanto você escolhe o trecho',
+    'numa publicação, o adesivo de música pede a capa só enquanto está na tela, depois que a música foi pedida, sozinha ou no seu toque, e o cartão que espera um toque, só depois do seu toque.'
+  ]) t.ok(terms.includes(required), 'terms: ' + required)
+  for (const gone of [
+    'para ouvir numa publicação, você precisa tocar',
+    'capa pequena',
+    'só depois que você toca para ouvir'
+  ]) t.absent(terms.includes(gone), 'terms: no ' + gone)
+  const privacy = PRIVACY.sections.find((s) => s.heading === 'Música do Audius').paragraphs.join(' ')
+  for (const required of [
+    'quem compõe uma publicação pode buscar no Audius ou colar um link dele, e quem lê pode ouvir.',
+    'Numa publicação com um trecho ou uma faixa, enquanto Tocar música sozinha estiver ligado em Ajustes, o app pede a música ao serviço de conta quando o adesivo fica visível, sem um toque: o serviço fica sabendo que a sua conta pediu aquela faixa, o que indica que o seu aparelho mostrou aquela publicação.',
+    'Com a opção desligada, com a música silenciada, e sempre numa playlist, só mostrar o cartão não faz pedido ao Audius nem ao serviço de conta.',
+    'o serviço de conta pede a capa ao servidor de imagens indicado pelo Audius'
+  ]) t.ok(privacy.includes(required), 'privacy: ' + required)
+  for (const gone of [
+    'quem lê pode tocar para ouvir',
+    'Só mostrar um cartão não faz pedido',
+    'capa pequena'
+  ]) t.absent(privacy.includes(gone), 'privacy: no ' + gone)
+})
+
+test('legal: version 45 loads music players when the card is visible', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   t.ok(text(TERMS).includes('Ao carregar, o serviço recebe o endereço de internet do seu aparelho'), 'terms: player sends the device address')
@@ -212,7 +247,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'd319e55ac166980baa9d325f4c45ea432e5d3bdb481868c51ae9e4660331d633', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '28494f7dc07f3294af8574fc69117938d7226a332d9bf6ee3183bad56ee0e194', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {

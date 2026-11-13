@@ -14,9 +14,11 @@
 // - expanded: shows the full caption without a clamp control (default false).
 // - preview: null | a stored link card (the post's `preview`), drawn by
 //   ./LinkCard from that data only, its thumbnail read like a post photo. A
-//   card whose URL carries an Audius music ref uses ./MusicPlayerCard;
-//   other allowlisted music links (embedOf) use ./MusicEmbedCard. A link
-//   only in the text never gets a player.
+//   card whose URL carries an Audius music ref uses ./PostMusic (a sticker
+//   that plays a track or snippet by itself while seen, or ./MusicPlayerCard
+//   for a playlist or with the Ajustes switch off); other allowlisted music
+//   links (embedOf) use ./MusicEmbedCard. A link only in the text never gets
+//   a player.
 // - replyPreviews: optional [{ key, name, text }], not the link card above.
 //   Under the action bar, 'Respostas' and one line per preview ('Nome:
 //   texto'), at most two with text. Absent or empty renders nothing. Raw
@@ -76,12 +78,13 @@ import { ClampControl, useClamp } from './ClampText'
 import { Icon } from './Icon'
 import { LinkCard } from './LinkCard'
 import { MusicEmbedCard } from './MusicEmbedCard'
-import { MusicPlayerCard } from './MusicPlayerCard'
+import PostMusic from './PostMusic'
 import { MediaGrid } from './MediaGrid'
 import { tap } from './haptics'
 import { hasMention, MentionText } from './MentionText'
 import { useHosted } from '../node'
 import { QuoteCard, quotePlayerOf } from './QuoteCard'
+import { screenReaderOn } from './screenReader'
 import { LARGE_TEXT, layout, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
 
@@ -129,17 +132,6 @@ function previewLineText (line) {
 
 const NATIVE_DRIVER = Platform.OS !== 'web'
 const BURST_MS = 600
-
-// Read at tap time, not per render: while VoiceOver or TalkBack runs, a tap
-// opens at once and never reaches the double tap. VoiceOver turns its own
-// activation of plain text into a synthetic touch, and two of them would like.
-let screenReaderOn = false
-if (Platform.OS !== 'web') {
-  try {
-    Promise.resolve(AccessibilityInfo.isScreenReaderEnabled()).then((on) => { screenReaderOn = on === true }, () => {})
-    AccessibilityInfo.addEventListener('screenReaderChanged', (on) => { screenReaderOn = on === true })
-  } catch {}
-}
 
 // Read once for the module, not per row mount: a feed mounts many rows and
 // each query is a bridge call. The listener keeps a changed setting current.
@@ -329,7 +321,7 @@ function PostRowView ({
         const now = Date.now()
         const kind = tapKind(previousTap.current, now)
         cancelPendingOpen()
-        if (screenReaderOn) {
+        if (screenReaderOn()) {
           open()
           return
         }
@@ -409,7 +401,7 @@ function PostRowView ({
   // Outside the row's open area: a tap on the card opens the link, never the conversation.
   const previewNode = !hasMedia && preview && typeof preview === 'object'
     ? music !== null
-      ? <MusicPlayerCard card={preview} music={music} />
+      ? <PostMusic card={preview} music={music} />
       : embed !== null
         ? <MusicEmbedCard embed={embed} card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />
         : <LinkCard card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />

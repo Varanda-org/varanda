@@ -170,14 +170,20 @@ test('a quote hides only its own music link', (t) => {
 
 test('Audius fragments take precedence without subscribing PostRow to the node', (t) => {
   const row = withoutComments(read('ui', 'PostRow.js'))
-  t.ok(row.includes("import { MusicPlayerCard } from './MusicPlayerCard'"))
+  t.ok(row.includes("import PostMusic from './PostMusic'"))
+  t.absent(row.includes('MusicPlayerCard'), 'the music card is drawn by PostMusic')
   t.ok(row.includes("import { musicRefOf } from '../music'"))
   t.ok(row.includes("const music = preview && typeof preview === 'object' ? musicRefOf(preview.url) : null"))
   t.is([...row.matchAll(/musicRefOf\(/g)].length, 1, 'only the stored URL is inspected')
-  t.ok(/\? music !== null\s*\? <MusicPlayerCard card=\{preview\} music=\{music\} \/>\s*: embed !== null\s*\? <MusicEmbedCard/.test(row))
+  t.ok(row.includes("const previewNode = !hasMedia && preview && typeof preview === 'object'"), 'music only on a post without media')
+  t.ok(/\? music !== null\s*\? <PostMusic card=\{preview\} music=\{music\} \/>\s*: embed !== null\s*\? <MusicEmbedCard/.test(row))
   t.ok(row.includes('<LinkCard card={preview}'), 'the literal normal link fallback remains')
-  t.absent(/useNode\(|useMusicAvailable\(|audiusReady\(/.test(row), 'availability belongs to the tapped card')
-  t.absent(/MusicPlayerCard|musicRefOf/.test(withoutComments(read('ui', 'QuoteCard.js'))), 'quotes remain static')
+  t.absent(/useNode\(|useMusicAvailable\(|audiusReady\(/.test(row), 'availability belongs to PostMusic')
+  const sticker = withoutComments(read('ui', 'PostMusic.js'))
+  t.ok(sticker.includes("import { MusicPlayerCard, createMusicPlayback, musicPlayerIdle } from './MusicPlayerCard'"))
+  t.absent(/musicRefOf\(/.test(sticker), 'PostMusic takes the ref PostRow read from the stored URL')
+  t.ok(sticker.includes('return <MusicPlayerCard card={card} music={music} />'), 'the old card stays for a playlist and with the switch off')
+  t.absent(/MusicPlayerCard|PostMusic|musicRefOf/.test(withoutComments(read('ui', 'QuoteCard.js'))), 'quotes remain static')
 })
 
 test('MusicEmbedCard draws stored data until it is on screen', (t) => {
