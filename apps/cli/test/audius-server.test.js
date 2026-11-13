@@ -24,6 +24,8 @@ const ORIGIN = 'https://varanda.test'
 const KEY = 'chave-sentinela-audius-42'
 const API = 'api.audius.test'
 const NODE = 'node.audius.test'
+const ART = 'art.audius.test'
+const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(40, 1)])
 const AUDIO = Buffer.from(Array.from({ length: 100 }, (_, i) => i))
 // Longer than the server's REQUEST_TIMEOUT_MS (10 s) plus one check interval.
 const SLOW_CHUNKS = 12
@@ -36,6 +38,7 @@ function track (id) {
     duration: 180,
     permalink: '/artista/musica-' + id.toLowerCase(),
     user: { name: 'Artista', id: 'u1' },
+    artwork: { '150x150': 'https://' + ART + '/' + id },
     is_streamable: true,
     is_stream_gated: false,
     access: { stream: true }
@@ -111,16 +114,28 @@ function fakeNode () {
   return node
 }
 
-async function setup (t, { audius = true, moments = false, caps } = {}) {
+function fakeArt () {
+  const art = fixture((req, res) => {
+    art.seen.push(req.headers)
+    res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': JPEG.length })
+    res.end(JPEG)
+  })
+  art.seen = []
+  return art
+}
+
+async function setup (t, { audius = true, moments = false, covers = false, caps } = {}) {
   const api = fakeApi()
   const node = fakeNode()
+  const art = fakeArt()
   await api.listen()
   await node.listen()
-  const ports = { [API]: api.port, [NODE]: node.port }
+  await art.listen()
+  const ports = { [API]: api.port, [NODE]: node.port, [ART]: art.port }
   const audiusTransport = {
     request: (opts) => http.request({ ...opts, port: ports[opts.hostname] }),
     lookup: (host, opts, cb) => {
-      if (host === API || host === NODE) return cb(null, [{ address: '127.0.0.1', family: 4 }])
+      if (host === API || host === NODE || host === ART) return cb(null, [{ address: '127.0.0.1', family: 4 }])
       const err = new Error('ENOTFOUND')
       err.code = 'ENOTFOUND'
       cb(err)
@@ -142,7 +157,7 @@ async function setup (t, { audius = true, moments = false, caps } = {}) {
   const terms = openTermsStore(dir)
   terms.accept({ member: memberHex, version: TERMS_VERSION, nonce: 'n'.repeat(43), signature: 'b'.repeat(128) })
   const logs = []
-  const config = audius ? parseAudiusConfig({ apiKey: KEY, apiUrl: 'https://' + API + '/v1', moments }) : null
+  const config = audius ? parseAudiusConfig({ apiKey: KEY, apiUrl: 'https://' + API + '/v1', moments, covers }) : null
   const opts = { association, origin: ORIGIN, store, terms, log: (e) => logs.push(e), moderation, ratePerSecond: 10000, burst: 10000 }
   if (config !== null) {
     opts.audius = config
@@ -155,6 +170,7 @@ async function setup (t, { audius = true, moments = false, caps } = {}) {
     await svc.close()
     await api.close()
     await node.close()
+    await art.close()
   })
 
   // Resolves on end or on a cut, with `complete` false for a cut body.
@@ -206,7 +222,7 @@ async function setup (t, { audius = true, moments = false, caps } = {}) {
 
   const audio = (ticket, headers = {}) => call('GET', '/account/audius/audio/' + ticket, { headers })
 
-  return { server, svc, call, login, ticketFor, audio, logs }
+  return { server, svc, call, login, ticketFor, audio, logs, art }
 }
 
 function headerCount (rawHeaders, name) {
@@ -310,4 +326,39 @@ test('audius server: the GIF routes are unaffected', async (t) => {
   const other = await call('GET', '/account/gif/other')
   t.is(other.status, 404)
   t.alike(other.json, { error: 'feature-off' })
+})
+
+test('audius server: covers ride the query, the policy keeps its keys, and art sends nosniff and no-store once', async (t) => {
+  const { server, call, login, art } = await setup(t, { covers: true })
+  const policy = await call('GET', '/account/audius/policy')
+  t.alike(policy.json, { enabled: true, moments: false }, 'installed apps parse the policy with exact keys')
+  const token = await login()
+  const auth = { Authorization: 'Bearer ' + token }
+  const plain = await call('POST', '/account/audius/item', { body: { kind: 'track', id: 'Plain1' }, headers: auth })
+  t.alike(Object.keys(plain.json).sort(), ['artist', 'duration', 'id', 'title', 'url'])
+  const covered = await call('POST', '/account/audius/item?covers=1', { body: { kind: 'track', id: 'Plain1' }, headers: auth })
+  t.is(covered.json.cover, true)
+  t.absent(covered.raw.toString('latin1').includes(ART), 'no artwork URL in the answer')
+  const res = await call('POST', '/account/audius/art', { body: { kind: 'track', id: 'Plain1' }, headers: auth })
+  t.is(res.status, 200)
+  t.alike(res.json, { mime: 'image/jpeg', bytes: JPEG.toString('base64') })
+  t.is(res.headers['x-content-type-options'], 'nosniff')
+  t.is(res.headers['cache-control'], 'no-store')
+  t.is(headerCount(res.rawHeaders, 'x-content-type-options'), 1, 'nosniff is sent once')
+  t.is(headerCount(res.rawHeaders, 'cache-control'), 1, 'Cache-Control is sent once')
+  t.is(art.seen.length, 1)
+  t.absent(JSON.stringify(art.seen).includes(KEY), 'the key never reaches the art host')
+  t.absent(JSON.stringify(art.seen).includes(token), 'nor the member token')
+  t.is(server.audiusStats().covers, 1)
+})
+
+test('audius server: art is feature-off while covers are off', async (t) => {
+  const { call, login, art } = await setup(t)
+  const token = await login()
+  const res = await call('POST', '/account/audius/art', { body: { kind: 'track', id: 'Plain1' }, headers: { Authorization: 'Bearer ' + token } })
+  t.is(res.status, 404)
+  t.alike(res.json, { error: 'feature-off' })
+  const covered = await call('POST', '/account/audius/item?covers=1', { body: { kind: 'track', id: 'Plain1' }, headers: { Authorization: 'Bearer ' + token } })
+  t.absent('cover' in covered.json, 'no cover key while the switch is off')
+  t.is(art.seen.length, 0)
 })

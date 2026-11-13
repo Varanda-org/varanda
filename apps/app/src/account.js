@@ -12,7 +12,7 @@ import { accountOriginOf } from './pageGate.js'
 import { isAppClient } from './appClient.js'
 import { vitrineEnabled } from './vitrine/enabled.js'
 import { MAX_BYTES as GIF_MAX_BYTES, imageUrl, parseSearch, searchBody } from './gif.js'
-import { MUSIC_ID_RE, audioPath, isAudiusPage, parseItem, parsePlay, parseResolve, parseSearch as parseMusicSearch, searchBody as musicSearchBody } from './music.js'
+import { MUSIC_ART_MAX_BYTES, MUSIC_ID_RE, artMime, audioPath, isAudiusPage, parseItem, parsePlay, parseResolve, parseSearch as parseMusicSearch, searchBody as musicSearchBody } from './music.js'
 
 const USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/
 const HEX6_RE = /^[0-9a-f]{6}$/ // would collide with the default handle (@e905a4)
@@ -974,7 +974,12 @@ export const previewFetch = async (url, { origin, member, request, signal } = {}
 // a refusal maps to a fixed sentence (musicErrorText), and while the feature
 // is off the service's 404 'feature-off' is plain 'indisponivel'. Only a 401
 // is retried, once, through withSession: the service refuses it before it
-// charges a daily use.
+// charges a daily use. Search, item and resolve ask for `cover` flags with
+// ?covers=1 and unchanged bodies; an older service ignores the query and its
+// answer parses without them, so there is no second request. A cover itself
+// (audiusArt) is bytes checked against their own magic and handed back only
+// to src/musicCover.js, which keeps it in memory for the session (Audius API
+// Terms): never in a post, a draft or any storage.
 export const AUDIUS_POLICY_RETRY_MS = 30 * 1000
 const AUDIUS_OFF = Object.freeze({ enabled: false, moments: false })
 // moments only counts while the feature is on, as the service answers it.
@@ -996,6 +1001,9 @@ const AUDIUS_LIST_BODY = 65536
 // The service bounds each provider call at 10 s; a playlist item makes two.
 const AUDIUS_TIMEOUT_MS = 15000
 const AUDIUS_ITEM_TIMEOUT_MS = 25000
+// An artwork URL the service no longer holds costs it an item lookup and then
+// the image read, each bounded at 10 s.
+const AUDIUS_ART_TIMEOUT_MS = 25000
 const AUDIUS_KINDS = ['track', 'playlist']
 
 // Whether this member may use music: the policy is on and the member is
@@ -1023,7 +1031,7 @@ export const audiusSearch = async (q, { kind, cursor, origin, member, request, s
   const body = musicSearchBody(q, kind, cursor)
   if (body === null) throw toError('pedido-invalido')
   return audius.withSession({ member, origin, request }, async (sessionToken) => {
-    const parsed = parseMusicSearch(await call('POST', '/account/audius/search', body, { origin, sessionToken, signal, maxBody: AUDIUS_LIST_BODY, timeoutMs: AUDIUS_TIMEOUT_MS }), kind)
+    const parsed = parseMusicSearch(await call('POST', '/account/audius/search?covers=1', body, { origin, sessionToken, signal, maxBody: AUDIUS_LIST_BODY, timeoutMs: AUDIUS_TIMEOUT_MS }), kind)
     if (parsed === null) throw toError('indisponivel')
     return parsed
   })
@@ -1033,7 +1041,7 @@ export const audiusSearch = async (q, { kind, cursor, origin, member, request, s
 export const audiusItem = async (kind, id, { origin, member, request, signal } = {}) => {
   if (!AUDIUS_KINDS.includes(kind) || typeof id !== 'string' || !MUSIC_ID_RE.test(id)) throw toError('pedido-invalido')
   return audius.withSession({ member, origin, request }, async (sessionToken) => {
-    const parsed = parseItem(await call('POST', '/account/audius/item', { kind, id }, { origin, sessionToken, signal, maxBody: AUDIUS_LIST_BODY, timeoutMs: AUDIUS_ITEM_TIMEOUT_MS }), kind)
+    const parsed = parseItem(await call('POST', '/account/audius/item?covers=1', { kind, id }, { origin, sessionToken, signal, maxBody: AUDIUS_LIST_BODY, timeoutMs: AUDIUS_ITEM_TIMEOUT_MS }), kind)
     if (parsed === null || parsed.id !== id) throw toError('indisponivel')
     return parsed
   })
@@ -1043,9 +1051,38 @@ export const audiusItem = async (kind, id, { origin, member, request, signal } =
 export const audiusResolve = async (url, { origin, member, request, signal } = {}) => {
   if (!isAudiusPage(url)) throw toError('pedido-invalido')
   return audius.withSession({ member, origin, request }, async (sessionToken) => {
-    const parsed = parseResolve(await call('POST', '/account/audius/resolve', { url }, { origin, sessionToken, signal, timeoutMs: AUDIUS_TIMEOUT_MS }))
+    const parsed = parseResolve(await call('POST', '/account/audius/resolve?covers=1', { url }, { origin, sessionToken, signal, timeoutMs: AUDIUS_TIMEOUT_MS }))
     if (parsed === null) throw toError('indisponivel')
     return parsed
+  })
+}
+
+// A cover as base64 plus its mime -> { mime, base64 }. The body is bounded by
+// the base64 of MUSIC_ART_MAX_BYTES, and the mime must be what the bytes say.
+// A refusal that will not change this session (the service's 404
+// 'nao-encontrado', the member's day used up, bytes this client refuses)
+// carries noCover, so src/musicCover.js keeps it; any other failure (a
+// timeout, a 503) is not kept and a later screen may ask again.
+const AUDIUS_ART_BODY = Math.ceil(MUSIC_ART_MAX_BYTES / 3) * 4 + 512
+const noCover = (err) => { err.noCover = true; return err }
+export const audiusArt = async (kind, id, { origin, member, request, signal } = {}) => {
+  if (!AUDIUS_KINDS.includes(kind) || typeof id !== 'string' || !MUSIC_ID_RE.test(id)) throw toError('pedido-invalido')
+  // A session start refused with 'limite-musica' (its finish throttle) is a
+  // transient failure here: only the art route's own answer is the day used up.
+  return audius.withSession({ member, origin, request }, async (sessionToken) => {
+    let data
+    try {
+      data = await call('POST', '/account/audius/art', { kind, id }, { origin, sessionToken, signal, errorBody: true, maxBody: AUDIUS_ART_BODY, timeoutMs: AUDIUS_ART_TIMEOUT_MS })
+    } catch (err) {
+      if (err.body && err.body.error === 'nao-encontrado') throw noCover(toError('indisponivel'))
+      if (err.body && err.body.error === 'limite-musica') throw noCover(toError('limite-musica'))
+      delete err.body
+      throw err
+    }
+    if (!exactKeys(data, ['mime', 'bytes']) || typeof data.mime !== 'string') throw noCover(toError('indisponivel'))
+    const bytes = base64Bytes(data.bytes)
+    if (bytes === null || bytes.byteLength < 1 || bytes.byteLength > MUSIC_ART_MAX_BYTES || artMime(bytes) !== data.mime) throw noCover(toError('indisponivel'))
+    return { mime: data.mime, base64: data.bytes }
   })
 }
 

@@ -3,7 +3,7 @@
 const https = require('node:https')
 const dns = require('node:dns')
 const nodeCrypto = require('node:crypto')
-const { publicAddress } = require('./safe-fetch')
+const { publicAddress, httpsTarget } = require('./safe-fetch')
 const { refundableWindow, createMemberSession } = require('./member-session')
 const { createStreamFetch, parseRange, readCapped, pipeCapped } = require('./stream-fetch')
 const { requestFor, fromTrack, fromPlaylist, fromResolve, isAudiusPermalink, listOf, nextCursor, ID_RE } = require('./audius-provider')
@@ -20,8 +20,24 @@ const { requestFor, fromTrack, fromPlaylist, fromResolve, isAudiusPermalink, lis
 //     /resolve { url } and /play { id } need `Authorization: Bearer <token>`.
 //     The member is resolved before any counter is charged, so a request
 //     without a valid session never spends quota. Answers carry only the
-//     fields of fromTrack and fromPlaylist: no artwork, user id or provider
-//     URL reaches the member.
+//     fields of trackItem and playlistItem: no artwork URL, user id or
+//     provider URL reaches the member. With `?covers=1` on the path and the
+//     operator's covers switch on, each item carries one more key, `cover`
+//     (true when the service holds an artwork URL for it); an older service
+//     ignores the query, so a newer app can ask without breaking it.
+//   - POST /account/audius/art { kind, id } (bearer, covers switch on)
+//     answers { mime, bytes } with the item's 150x150 cover: at most
+//     ART_MAX_BYTES, JPEG, PNG or WebP by magic bytes only, ARTS_PER_DAY per
+//     member, one budget unit per contact with the art host (each redirect
+//     hop is one). The art host GET is not a provider call, so covers cannot
+//     starve search and play; the lookup by id that an item row no longer
+//     cached needs is one, and counts in the member's provider calls. The use
+//     is given back only when no art host was contacted (the MAX_ART_INFLIGHT
+//     cover slots, apart from the provider's, were full, the member already
+//     had ART_PER_MEMBER covers waiting, or the budget was spent first);
+//     concurrent loads of one cover share one fetch. Bytes are kept in memory only, at most
+//     MAX_ART_CACHED for CACHE_TTL_MS each, as the Audius terms allow a
+//     session cache and nothing more; nothing is written to disk.
 //   - /play answers a ticket; GET /account/audius/audio/<ticket> relays the
 //     audio. A media element cannot send Authorization, so the ticket is the
 //     credential: 32 random bytes, kept here only by digest, naming no track,
@@ -42,13 +58,17 @@ const { requestFor, fromTrack, fromPlaylist, fromResolve, isAudiusPermalink, lis
 // What reaches the provider: the query text, an id or a permalink, the
 // operator's key (in a header, first hop only) and app name, this service's
 // address and a fixed User-Agent. Never the member's address, key or token.
-// Logs carry { event: 'audius', reason } only, never the key, the query or a
-// ticket.
+// What reaches the art host: a GET from this service's address with
+// User-Agent and Accept only, never the key, a cookie or anything of the
+// member. Logs carry { event: 'audius', reason } only, never the key, the
+// query, a ticket, an art URL or an id.
 //
 // SSRF: every JSON call is pinned to the API host, redirects included. The
 // stream's first hop is pinned to the API host and its redirects (to a
 // storage node) go to any https host on port 443 whose name resolves only to
-// public addresses, checked in the socket's own lookup.
+// public addresses, checked in the socket's own lookup. The art fetch follows
+// the same rule from its first hop: an https host on 443 that resolves only to
+// public addresses, at most 3 redirects, each one checked again.
 
 const FEATURE_OFF = 'feature-off'
 const PAGE_SIZE = 12
@@ -69,10 +89,23 @@ const PLAYS_PER_DAY = 300
 const AUDIO_OPENS_PER_DAY = 1000
 const OPENS_PER_TICKET = 64
 const PROVIDER_PER_DAY = 12000
+const ARTS_PER_DAY = 600
+const ART_MAX_BYTES = 128 * 1024
+// 128 covers of ART_MAX_BYTES: 16 MiB at worst.
+const MAX_ART_CACHED = 128
+// Cover fetches have their own slots: a slow art host must not fill the
+// provider's MAX_INFLIGHT and turn search and play away.
+const MAX_ART_INFLIGHT = 6
+// One member's cover requests waiting on an art host fetch at once: the app
+// loads three at once, and one member cannot hold every cover slot.
+const ART_PER_MEMBER = 3
+const ART_ACCEPT = 'image/jpeg, image/png, image/webp'
 // One member's provider JSON calls a day, never given back once the provider
-// was contacted: the most the route limits allow (a search, a resolve and a
-// play are one call each, a playlist item two), so only a failing provider
-// can bring a member to it, and one member cannot spend the shared budget.
+// was contacted: what the search, item, resolve and play limits allow (a
+// search, a resolve and a play are one call each, a playlist item two), so
+// one member cannot spend the shared budget. The art route adds a lookup by
+// id when the item's row is no longer cached, counted here too, so a member
+// who loads covers of expired rows can reach it sooner.
 const PROVIDER_CALLS_PER_DAY = SEARCHES_PER_DAY + 2 * ITEMS_PER_DAY + RESOLVES_PER_DAY + PLAYS_PER_DAY
 const TICKET_BYTES = 256 * 1024 * 1024
 const DAILY_BYTES = 1024 * 1024 * 1024
@@ -136,10 +169,20 @@ function byteWindow (limit, windowMs, now, max = MAX_BYTE_WINDOWS) {
   }
 }
 
+// The image type of `bytes` by its magic number, or null. GIF is not taken:
+// a cover is a still image, and three formats are all Audius serves.
+function imageType (bytes) {
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg'
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png'
+  if (bytes.length >= 12 && bytes.toString('latin1', 0, 4) === 'RIFF' && bytes.toString('latin1', 8, 12) === 'WEBP') return 'image/webp'
+  return null
+}
+
 // `config` is parseAudiusConfig's result or null (off). `request`, `lookup`
 // and `allowAddress` default to https.request, dns.lookup and publicAddress;
-// `maxSpent` and `caps` ({ budget, calls, opens, ticketBytes, dailyBytes,
-// stallMs, totalMs, recheckMs }) are replaced only by tests.
+// `setTimer` and `clearTimer` (the cover expiry), `maxSpent` and `caps`
+// ({ budget, calls, opens, arts, artMs, ticketBytes, dailyBytes, stallMs,
+// totalMs, recheckMs }) are replaced only by tests.
 function createAudiusRoutes ({
   config = null,
   store,
@@ -148,6 +191,8 @@ function createAudiusRoutes ({
   association,
   log = () => {},
   now = Date.now,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
   request = https.request,
   lookup = dns.lookup,
   allowAddress = publicAddress,
@@ -158,6 +203,8 @@ function createAudiusRoutes ({
   const { send, readJsonBody, checkPost, RouteError, refuse } = http
   const enabled = config !== null
   const moments = enabled && config.moments === true
+  const covers = enabled && config.covers === true
+  const artMs = caps.artMs ?? DEADLINE_MS
   const budgetPerDay = caps.budget ?? PROVIDER_PER_DAY
   const ticketBytes = caps.ticketBytes ?? TICKET_BYTES
   const stallMs = caps.stallMs ?? STALL_MS
@@ -169,19 +216,34 @@ function createAudiusRoutes ({
     item: refundableWindow(ITEMS_PER_DAY, DAY_MS, now),
     resolve: refundableWindow(RESOLVES_PER_DAY, DAY_MS, now),
     play: refundableWindow(PLAYS_PER_DAY, DAY_MS, now),
-    audio: refundableWindow(caps.opens ?? AUDIO_OPENS_PER_DAY, DAY_MS, now)
+    audio: refundableWindow(caps.opens ?? AUDIO_OPENS_PER_DAY, DAY_MS, now),
+    art: refundableWindow(caps.arts ?? ARTS_PER_DAY, DAY_MS, now)
   }
   const budget = refundableWindow(budgetPerDay, DAY_MS, now, 1)
   const providerCalls = refundableWindow(caps.calls ?? PROVIDER_CALLS_PER_DAY, DAY_MS, now)
   const dailyBytes = byteWindow(caps.dailyBytes ?? DAILY_BYTES, DAY_MS, now)
 
-  // kind:id -> { value, expiresAt }: provider metadata, memory only.
+  // kind:id -> { value, expiresAt }: provider metadata, memory only. A row
+  // keeps the item's artwork URL as `art` (a string or null, never bytes),
+  // which both the cover answer and the art route read.
   const cache = new Map()
+  // kind:id -> { mime, bytes, href, expiresAt, timer }: cover bytes, memory
+  // only; `bytes` null records a cover the art host did not serve as an
+  // image, `href` the URL it came from. While the item's row is cached, an
+  // art row of another href (null included) is dropped; once that row is
+  // gone, the art row still answers until its own timer.
+  const arts = new Map()
+  // kind:id and href -> the running fetch of that cover, shared by
+  // concurrent requests.
+  const pendingArt = new Map()
   // sha256(ticket) -> { member, id, expiresAt, checkedAt, bytes, opens }
   const tickets = new Map()
   const memberStreams = new Map()
+  // member -> its art requests waiting on a host fetch, started or joined.
+  const memberArts = new Map()
   let streams = 0
   let inflight = 0
+  let artInflight = 0
 
   const featureOff = () => new RouteError(FEATURE_OFF, 404)
   const overLimit = () => new RouteError('limite-musica', 429)
@@ -301,14 +363,44 @@ function createAudiusRoutes ({
     return { id: p.id, title: p.title, artist: p.artist, count: p.count, url: p.url }
   }
 
-  // With `wanted`, a track under another id is refused before it is cached.
+  function hrefOf (mapped) {
+    return typeof mapped.art === 'string' ? mapped.art : null
+  }
+
+  // -> the cached row of a track: its answer keys plus `art`, which
+  // trackItem strips from every answer. With `wanted`, a track under another
+  // id is refused before it is cached.
   function mappedTrack (json, wanted = null) {
     const track = fromTrack(json)
     if (track === null) return null
     if (wanted !== null && track.id !== wanted) return null
-    const item = trackItem(track)
-    remember('track:' + item.id, item)
-    return item
+    const row = { ...trackItem(track), art: hrefOf(track) }
+    remember('track:' + row.id, row)
+    return row
+  }
+
+  // A playlist seen without its tracks (a search, a resolve, the art route)
+  // is cached with `tracks` null: its cover is known, and lookupPlaylist
+  // still fetches the tracks. A full row is never replaced by such a row, but
+  // takes its `art`: the newest mapping wins, so the cover flag of this answer
+  // is what the art route reads.
+  function rememberPlaylist (playlist) {
+    const row = { ...playlistItem(playlist), art: hrefOf(playlist), tracks: null }
+    const old = recalled('playlist:' + row.id)
+    if (old === null || old.tracks === null) remember('playlist:' + row.id, row)
+    else old.art = row.art
+    return row
+  }
+
+  // The answer form of an item: today's keys, plus `cover` only when the app
+  // asked for it and the operator turned covers on. `row` is the cached row.
+  function shown (item, row, withCovers) {
+    if (!withCovers) return item
+    return { ...item, cover: typeof row.art === 'string' }
+  }
+
+  function wantsCovers (url) {
+    return covers && url !== undefined && url !== null && url.searchParams.get('covers') === '1'
   }
 
   // The provider's single object, as an object or an array of one.
@@ -346,7 +438,7 @@ function createAudiusRoutes ({
     return Number(v)
   }
 
-  async function search (res, member, body) {
+  async function search (res, member, body, url) {
     exactKeys(body, ['q', 'kind'], ['cursor'])
     const q = queryParam(body.q)
     const kind = kindParam(body.kind)
@@ -360,18 +452,20 @@ function createAudiusRoutes ({
     } catch (err) {
       throw failed(err, limits.search, member)
     }
-    const items = []
+    const rows = []
     for (const it of list.slice(0, PAGE_SIZE)) {
       if (kind === 'track') {
         const track = mappedTrack(it)
-        if (track !== null) items.push(track)
+        if (track !== null) rows.push(track)
       } else {
         const playlist = fromPlaylist(it)
-        if (playlist !== null) items.push(playlistItem(playlist))
+        if (playlist !== null) rows.push(rememberPlaylist(playlist))
       }
     }
     const next = nextCursor(offset, list.length, PAGE_SIZE)
     log({ event: 'audius', reason: 'busca' })
+    const withCovers = wantsCovers(url)
+    const items = rows.map((row) => shown(kind === 'track' ? trackItem(row) : playlistItem(row), row, withCovers))
     send(res, 200, { items, next: next !== null && Number(next) <= MAX_CURSOR ? next : null })
   }
 
@@ -387,7 +481,7 @@ function createAudiusRoutes ({
 
   async function lookupPlaylist (id, member) {
     const cached = recalled('playlist:' + id)
-    if (cached !== null) return cached
+    if (cached !== null && cached.tracks !== null) return cached
     const playlist = fromPlaylist(single(await providerJson(requestFor(config, 'playlist', { id }), member)))
     if (playlist === null || playlist.id !== id) return null
     const list = listOf(await providerJson(requestFor(config, 'playlistTracks', { id }), member))
@@ -398,12 +492,12 @@ function createAudiusRoutes ({
       const track = mappedTrack(it)
       if (track !== null) tracks.push(track)
     }
-    const value = { ...playlistItem(playlist), tracks }
+    const value = { ...playlistItem(playlist), art: hrefOf(playlist), tracks }
     remember('playlist:' + id, value)
     return value
   }
 
-  async function item (res, member, body) {
+  async function item (res, member, body, url) {
     exactKeys(body, ['kind', 'id'])
     const kind = kindParam(body.kind)
     const id = idParam(body.id)
@@ -416,10 +510,15 @@ function createAudiusRoutes ({
     }
     if (value === null) throw notFound()
     log({ event: 'audius', reason: 'item' })
-    send(res, 200, kind === 'track' ? trackItem(value) : { ...playlistItem(value), tracks: value.tracks.map(trackItem) })
+    const withCovers = wantsCovers(url)
+    if (kind === 'track') return send(res, 200, shown(trackItem(value), value, withCovers))
+    // A listed track's flag comes from its own row, which a later search may
+    // have replaced: that row is what the art route reads.
+    const own = (x) => (withCovers ? recalled('track:' + x.id) ?? x : x)
+    send(res, 200, { ...shown(playlistItem(value), value, withCovers), tracks: value.tracks.map((x) => shown(trackItem(x), own(x), withCovers)) })
   }
 
-  async function resolve (res, member, body) {
+  async function resolve (res, member, body, url) {
     exactKeys(body, ['url'])
     if (!isAudiusPermalink(body.url)) throw refuse('pedido-invalido')
     if (!limits.resolve(member)) throw overLimit()
@@ -431,12 +530,190 @@ function createAudiusRoutes ({
     }
     if (found === null) throw notFound()
     log({ event: 'audius', reason: 'resolve' })
+    const withCovers = wantsCovers(url)
     if (found.kind === 'track') {
-      const track = trackItem(found.item)
-      remember('track:' + track.id, track)
-      return send(res, 200, { kind: 'track', item: track })
+      const row = { ...trackItem(found.item), art: hrefOf(found.item) }
+      remember('track:' + row.id, row)
+      return send(res, 200, { kind: 'track', item: shown(trackItem(row), row, withCovers) })
     }
-    send(res, 200, { kind: 'playlist', item: playlistItem(found.item) })
+    const row = rememberPlaylist(found.item)
+    send(res, 200, { kind: 'playlist', item: shown(playlistItem(row), row, withCovers) })
+  }
+
+  // Each row expires by its own timer, so a cover nobody asks for again is
+  // gone after CACHE_TTL_MS too, not kept until the next read.
+  function dropArt (key) {
+    const row = arts.get(key)
+    if (row === undefined) return
+    clearTimer(row.timer)
+    arts.delete(key)
+  }
+
+  function storeArt (key, mime, bytes, href) {
+    dropArt(key)
+    const row = { mime, bytes, href, expiresAt: now() + CACHE_TTL_MS, timer: null }
+    row.timer = setTimer(() => {
+      if (arts.get(key) === row) arts.delete(key)
+    }, CACHE_TTL_MS)
+    if (row.timer && typeof row.timer.unref === 'function') row.timer.unref()
+    arts.set(key, row)
+    while (arts.size > MAX_ART_CACHED) dropArt(arts.keys().next().value)
+  }
+
+  function storedArt (key) {
+    const row = arts.get(key)
+    if (row === undefined) return null
+    const t = now()
+    if (row.expiresAt <= t || row.expiresAt - t > CACHE_TTL_MS) {
+      dropArt(key)
+      return null
+    }
+    return row
+  }
+
+  // The art URL of an item: from the item's cached row, or one provider call
+  // by id. Rejects like providerJson.
+  async function artHref (kind, id, member) {
+    const row = recalled(kind + ':' + id)
+    if (row !== null) return row.art
+    const json = single(await providerJson(requestFor(config, kind, { id }), member))
+    if (kind === 'track') {
+      const track = mappedTrack(json, id)
+      return track === null ? null : track.art
+    }
+    const playlist = fromPlaylist(json)
+    if (playlist === null || playlist.id !== id) return null
+    return rememberPlaylist(playlist).art
+  }
+
+  // The request of every art hop, first and redirects alike: each contact
+  // with the art host spends one unit of the shared budget, never given
+  // back, and is counted in `state.contacts`. The stream fetch reports a
+  // throw here as a failed request, so the spent budget is also recorded in
+  // `state`.
+  function budgetedRequest (state) {
+    return (opts) => {
+      try {
+        spendBudget()
+      } catch {
+        state.budgetSpent = true
+        const err = new Error('orcamento')
+        err.budgetSpent = true
+        throw err
+      }
+      state.contacts++
+      return request(opts)
+    }
+  }
+
+  // One fetch of a cover, shared by every request for `key` while it runs.
+  // Never rejects: -> { row } with the bytes, { missing: true } for a cover
+  // the host does not serve as an image, or { contacted } for any other
+  // failure, `contacted` false only when no art host was reached.
+  async function fetchArt (key, href) {
+    const state = { budgetSpent: false, contacts: 0 }
+    const openArt = createStreamFetch({ request: budgetedRequest(state), lookup, allowAddress, firstTarget: httpsTarget, userAgent: USER_AGENT })
+    artInflight++
+    const started = Date.now()
+    let up = null
+    let timer = null
+    let bytes
+    try {
+      up = await openArt(href, { accept: ART_ACCEPT, connectMs: artMs })
+      if (up.status !== 200) throw new Error('status-parcial')
+      timer = setTimeout(() => up.destroy(), Math.max(0, artMs - (Date.now() - started)))
+      bytes = await readCapped(up.stream, ART_MAX_BYTES)
+    } catch (err) {
+      const token = err && err.message
+      const answered = token === 'status' && err.status >= 400 && err.status < 500 && !NOT_AN_ANSWER.has(err.status)
+      // An oversize cover is oversize on every try: asking again would only
+      // spend the budget.
+      if (answered || token === 'grande') {
+        storeArt(key, null, null, href)
+        return { missing: true }
+      }
+      log({ event: 'audius', reason: state.budgetSpent ? 'orcamento' : 'indisponivel' })
+      return { contacted: state.contacts > 0 }
+    } finally {
+      clearTimeout(timer)
+      if (up !== null) up.destroy()
+      artInflight--
+    }
+    const mime = imageType(bytes)
+    if (mime === null) {
+      storeArt(key, null, null, href)
+      return { missing: true }
+    }
+    storeArt(key, mime, bytes, href)
+    return { row: { mime, bytes } }
+  }
+
+  function sendArt (res, row) {
+    log({ event: 'audius', reason: 'capa' })
+    send(res, 200, { mime: row.mime, bytes: row.bytes.toString('base64') }, { 'X-Content-Type-Options': 'nosniff' })
+  }
+
+  async function art (res, member, body) {
+    exactKeys(body, ['kind', 'id'])
+    const kind = kindParam(body.kind)
+    const id = idParam(body.id)
+    if (!covers) throw featureOff()
+    if (!limits.art(member)) throw overLimit()
+    const key = kind + ':' + id
+    const current = recalled(key)
+    let hit = storedArt(key)
+    if (hit !== null && current !== null && hit.href !== current.art) {
+      dropArt(key)
+      hit = null
+    }
+    if (hit !== null) {
+      if (hit.bytes === null) throw notFound()
+      return sendArt(res, hit)
+    }
+    let href
+    try {
+      href = await artHref(kind, id, member)
+    } catch (err) {
+      throw failed(err, limits.art, member, { byId: true })
+    }
+    if (typeof href !== 'string') throw notFound()
+    const pending = key + ' ' + href
+    let fetching = pendingArt.get(pending)
+    if (fetching === undefined) {
+      const done = storedArt(key)
+      if (done !== null && done.href === href) {
+        if (done.bytes === null) throw notFound()
+        return sendArt(res, done)
+      }
+    }
+    const waiting = memberArts.get(member) || 0
+    if (waiting >= ART_PER_MEMBER || (fetching === undefined && artInflight >= MAX_ART_INFLIGHT)) {
+      limits.art.giveBack(member)
+      throw busy()
+    }
+    if (fetching === undefined) {
+      fetching = fetchArt(key, href)
+      pendingArt.set(pending, fetching)
+      const settled = () => {
+        if (pendingArt.get(pending) === fetching) pendingArt.delete(pending)
+      }
+      fetching.then(settled, settled)
+    }
+    memberArts.set(member, waiting + 1)
+    let out
+    try {
+      out = await fetching
+    } finally {
+      const n = memberArts.get(member) - 1
+      if (n > 0) memberArts.set(member, n)
+      else memberArts.delete(member)
+    }
+    if (out.row !== undefined) return sendArt(res, out.row)
+    if (out.missing) throw notFound()
+    // Each failed contact spent the shared budget: keeping the use is what
+    // stops one member looping on a failing cover from spending it for all.
+    if (!out.contacted) limits.art.giveBack(member)
+    throw unavailable()
   }
 
   function digest (ticket) {
@@ -693,7 +970,8 @@ function createAudiusRoutes ({
     '/account/audius/search': search,
     '/account/audius/item': item,
     '/account/audius/resolve': resolve,
-    '/account/audius/play': play
+    '/account/audius/play': play,
+    '/account/audius/art': art
   }
 
   async function handle (req, res, url) {
@@ -716,13 +994,13 @@ function createAudiusRoutes ({
     if (req.method === 'POST' && Object.hasOwn(BEARER, pathname)) {
       checkPost(req)
       const member = auth.member(req)
-      return BEARER[pathname](res, member, await readJsonBody(req))
+      return BEARER[pathname](res, member, await readJsonBody(req), url)
     }
     throw notFound()
   }
 
   function stats () {
-    return { ...auth.stats(), cached: cache.size, inflight, tickets: tickets.size, streams }
+    return { ...auth.stats(), cached: cache.size, covers: arts.size, inflight, artInflight, tickets: tickets.size, streams }
   }
 
   return { owns, handle, stats, enabled: () => enabled }
@@ -740,6 +1018,11 @@ module.exports = {
   OPENS_PER_TICKET,
   PROVIDER_PER_DAY,
   PROVIDER_CALLS_PER_DAY,
+  ARTS_PER_DAY,
+  ART_MAX_BYTES,
+  MAX_ART_CACHED,
+  MAX_ART_INFLIGHT,
+  ART_PER_MEMBER,
   TICKET_TTL_MS,
   TICKETS_PER_MEMBER,
   STREAMS_PER_MEMBER,

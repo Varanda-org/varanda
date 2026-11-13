@@ -8,6 +8,7 @@ import { claimPlayback, playbackEpoch } from '../media/chatMedia'
 import { createStreamPlayer } from '../media/stream'
 import { Icon } from './Icon'
 import { MusicCover } from './MusicCover'
+import { useMusicCover } from './useMusicCover'
 import { MusicEqualizer } from './MusicEqualizer'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, radius, space } from './theme'
@@ -176,6 +177,10 @@ export function MomentMusic ({ music, member, origin, request, paused, onStart, 
   const { colors } = useTheme()
   const [state, setState] = useState(momentMusicIdle)
   const [muted, setMuted] = useState(false)
+  const [played, setPlayed] = useState(false)
+  // Which playback set state and played. The reset effect lands on the next
+  // render, so the render that first sees a new account still holds the old latch.
+  const [coverOf, setCoverOf] = useState(null)
   const playback = useRef(null)
   const latest = useRef(null)
   latest.current = { paused: paused === true || muted, onStart, onUnavailable }
@@ -183,7 +188,14 @@ export function MomentMusic ({ music, member, origin, request, paused, onStart, 
   const start = music?.start
   useEffect(() => {
     setState(momentMusicIdle)
-    const controller = createMomentPlayback({ member, origin, request }, { id, start }, setState, {
+    setPlayed(false)
+    setCoverOf(null)
+    const owner = { member, origin, id, start }
+    const controller = createMomentPlayback({ member, origin, request }, { id, start }, (next) => {
+      setState(next)
+      setCoverOf(owner)
+      if (next.phase === 'playing') setPlayed(true)
+    }, {
       onStart: () => latest.current.onStart?.(),
       onUnavailable: (error) => latest.current.onUnavailable?.(error)
     })
@@ -194,6 +206,12 @@ export function MomentMusic ({ music, member, origin, request, paused, onStart, 
   }, [id, start, member, origin, request])
   useEffect(() => { playback.current?.setPaused(paused === true || muted) }, [paused, muted])
   const { item, phase, error } = state
+  // Mounted only when the operator's moments switch is on; a momento record
+  // carries no image. Covers wait for playback, and a cover failure must never
+  // call onUnavailable or touch the viewer's timers. The latch counts only
+  // for the member, origin and track that set it.
+  const samePlayback = coverOf !== null && coverOf.member === member && coverOf.origin === origin && coverOf.id === id && coverOf.start === start
+  const uri = useMusicCover('track', samePlayback ? item : null, { member, origin, request }, samePlayback && played)
   const muteLabel = muted ? 'Ativar música' : 'Silenciar música'
   return (
     <View style={styles.row}>
@@ -201,7 +219,7 @@ export function MomentMusic ({ music, member, origin, request, paused, onStart, 
         {item
           ? (
             <>
-              <MusicCover size={36} />
+              <MusicCover size={36} uri={uri} />
               <View style={styles.meta}>
                 <Text style={styles.title} numberOfLines={1}>{displayText(item.title)}</Text>
                 <Text style={styles.artist} numberOfLines={1}>{displayText(item.artist)}</Text>

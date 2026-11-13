@@ -1472,6 +1472,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // keepInView): every keystroke, also at the six-line maximum where the
   // body's content size no longer changes, and the keyboard opening.
   const momentView = useKeepInView(momentMode)
+  const momentMusicSession = { member: me?.publicKey, origin: musicOriginOf(node), request: nodeRequest }
   const staged = moment.photo.items[0] || null
   const revealedMomentPhotoRef = useRef(null)
   useEffect(() => {
@@ -1581,7 +1582,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                 : null}
               {moment.musicAvailable && moment.music !== null
                 ? (
-                  <MusicSticker choice={momentChoiceOf(moment.music)} onPress={node.online === false ? undefined : () => moment.setMusicPickerOpen(true)} onRemove={() => moment.removeMusic()} disabled={moment.pending || moment.held} />
+                  <MusicSticker choice={momentChoiceOf(moment.music)} session={momentMusicSession} onPress={node.online === false ? undefined : () => moment.setMusicPickerOpen(true)} onRemove={() => moment.removeMusic()} disabled={moment.pending || moment.held} />
                   )
                 : null}
               <TextInput
@@ -1800,7 +1801,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
           {musicDraft !== null && items.length === 0
             ? (
               <View style={styles.errors}>
-                <MusicSticker choice={musicDraft} onPress={held || musicAvailable !== true ? undefined : () => setMusicPickerOpen(true)} onRemove={held ? undefined : () => setMusicDraft(null)} />
+                <MusicSticker choice={musicDraft} session={{ member, origin: musicOrigin, request: nodeRequest }} onPress={held || musicAvailable !== true ? undefined : () => setMusicPickerOpen(true)} onRemove={held ? undefined : () => setMusicDraft(null)} />
               </View>
               )
             : null}

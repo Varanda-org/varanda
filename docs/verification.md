@@ -8575,3 +8575,64 @@ Usar uma instalação de teste, sem DHT pública, com Termos 39 aceitos, conta v
 - [ ] No visualizador do momento, no lugar do chip de atribuição e do chip separado de silenciar da seção 187: o adesivo mostra a capa gerada, o título e o artista. Um toque alterna **Silenciar música** e **Ativar música**, pausa o trecho sem novo pedido de áudio, e não abre a página. O equalizador pequeno se move enquanto toca e dá lugar ao ícone de mudo ao silenciar.
 - [ ] O link **Audius** (nome acessível **Abrir no Audius**), separado do adesivo, abre a página da faixa e pausa o visualizador até a pessoa voltar. Se o link abrir sem ocultar o visualizador, a pausa termina após 1 s.
 
+## 190. Capas de música pela associação (PR feat/music-covers)
+
+Com `VARANDA_AUDIUS_COVERS` exatamente `1`, e só então, `POST /account/audius/search`, `/item` e `/resolve` com `?covers=1` acrescentam `cover` (booleano) a cada item, faixas da playlist incluídas. `cover: true` quer dizer que o serviço guarda uma URL de arte para aquele item; a URL e os bytes não vêm na resposta. Sem a consulta, ou com o interruptor desligado, a resposta não muda. `covers=0` não é `covers=1`. Um serviço anterior ignora a consulta. `GET /account/audius/policy` continua `{ enabled, moments }`, mesmo com `?covers=1`. `POST /account/audius/art` com exatamente `{ kind, id }` responde `{ mime, bytes }` (base64 canônico; JPEG, PNG ou WebP pelos magic bytes; `ART_MAX_BYTES` 131072). A capa fica só na memória do serviço (no máximo `MAX_ART_CACHED` 128, por `CACHE_TTL_MS`, 10 minutos) e só na memória do aparelho, durante a sessão. Nada é gravado no cartão, no rascunho, no momento nem em disco. Sem capa, ou com o interruptor desligado, o azulejo é gerado no aparelho. A produção permanece em `VARANDA_AUDIUS_COVERS=0` até a versão dos Termos que descreve as capas estar instalada. Nunca definir `VARANDA_AUDIUS_COVERS=1` antes de a versão dos Termos que descreve as capas estar instalada.
+
+Como verificar, a partir da raiz:
+
+```sh
+node apps/cli/test/audius-routes.test.js
+node apps/cli/test/audius-server.test.js
+node apps/cli/test/audius-provider.test.js
+node apps/cli/test/account.test.js
+node apps/cli/test/deploy.test.js
+node apps/app/test/music.test.js
+node apps/app/test/musicClient.test.js
+node apps/app/test/musicDraft.test.js
+node apps/app/test/musicPicker.test.js
+node apps/app/test/musicPlayerCard.test.js
+node apps/app/test/momentMusic.test.js
+```
+
+Esses testes conferem o serviço, o cliente e o texto do código. Não montam a interface num aparelho e não usam a rede pública nem a API real do Audius. A lista é um roteiro, não um registro de execução.
+
+`apps/cli/test/audius-routes.test.js`: `audius: answers are unchanged without the covers query and when the switch is off`; `audius: answers carry a cover boolean with the query and the switch on`; `audius: no answer ever carries an artwork URL`; `audius: the policy answer keeps exactly enabled and moments`; `audius: art answers validated bytes with nosniff and no-store`; `audius: art is feature-off before any counter unless covers are on`; `audius: art refuses bytes that are not JPEG, PNG or WebP by magic`; `audius: art stops at the size cap`; `audius: an oversize cover is remembered as a miss`; `audius: art never sends the API key or member headers to the art host`; `audius: art host must be public https and redirects are re-checked`; `audius: art charges the member cap and one budget token per host contact, not provider calls; a cache hit spends no budget`; `audius: each redirect hop spends one budget token, and a spent budget answers 503 and gives the use back only before any host contact`; `audius: art releases inflight on failure and timeout`; `audius: a failing art host keeps the art use and cannot drain the shared budget`; `audius: covers have their own slot pool`; `audius: the cover flag lives in the item row`; `audius: concurrent loads of one cover contact the host once`; `audius: an expired cover is not served`; `audius: an expired cover is removed without another request`; `audius: a full cover cache evicts the oldest and clears its timer`; `audius: one member cannot hold every cover slot`; `audius: a cover flag always matches what the art route serves`; `audius: a new artwork url replaces a remembered cover`.
+
+`apps/cli/test/audius-server.test.js`: `audius server: covers ride the query, the policy keeps its keys, and art sends nosniff and no-store once`; `audius server: art is feature-off while covers are off`.
+
+`apps/cli/test/audius-provider.test.js`: `parseAudiusConfig: defaults and accepted values` (a configuração padrão inclui `covers: false`); `artOf keeps only a plain https hostname URL`.
+
+`apps/cli/test/account.test.js`: `readEnv: Audius on with the key, optional values checked, values never in the error` (`0` ou vazio desliga, `1` liga, capas não ligam momentos, chave vazia com `VARANDA_AUDIUS_COVERS` é `VARANDA_AUDIUS_API_KEY ausente`, valor ruim é `VARANDA_AUDIUS_COVERS inválido: use 0 ou 1`).
+
+`apps/cli/test/deploy.test.js`: `compose.web.yaml: VARANDA_AUDIUS_COVERS is optional and only on the account service`.
+
+`apps/app/test/music.test.js`: `parsers accept today's item or one more boolean cover and nothing else` (o booleano `cover` só quando é próprio; uma capa nunca chega ao cartão, cujas chaves são `desc`, `host`, `title`, `url`); `artMime knows JPEG, PNG and WebP and nothing else`.
+
+`apps/app/test/musicClient.test.js`: `search, item and resolve ask covers by query with unchanged bodies`; `an older service's answer parses without a cover field`; `audiusArt refuses a mime that does not match the bytes, an oversize body and extra keys`; `audiusArt uses only the account session and origin`; `the cover cache loads once per key, bounds parallel loads, keeps failures, evicts past max and clears`; `a pending cover is never loaded twice`; `a transient cover failure is not remembered`; `a missing cover is remembered`; `audiusArt waits 25 s`; `a queued cover nobody waits for is never loaded`; `a cover loading through a wipe is not loaded twice`; `a session throttle does not hide a cover for the session`; `cover files keep covers in memory only`.
+
+`apps/app/test/musicDraft.test.js`: `the sticker asks its cover through the session and stores nothing`.
+
+`apps/app/test/musicPicker.test.js`: `rows and the editor ask a cover only through useMusicCover`.
+
+`apps/app/test/musicPlayerCard.test.js`: `the idle card asks no cover and shows the tile`; `after the tap the card asks the cover for the answered item only`; `an account change never asks a cover for the new member`.
+
+`apps/app/test/momentMusic.test.js`: `only a base64 JPEG, PNG or WebP cover is drawn, never an SVG`; `the momento sticker asks no cover before playback starts`; `a failed cover leaves the tile and reports nothing`; `an account change resets the cover latch`.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Todos os itens estão em aberto.
+
+Usar uma instalação de teste, sem DHT pública, com a música do Audius ligada. Para as capas ligadas, uma chave de teste (staging), nunca a de produção. O build de debug não entra com passkey de produção. No iOS, a passkey depende do domínio associado da conta Apple Developer (veja `docs/development.md`). Ordem: Android, iOS, depois a web.
+
+- [ ] Capas desligadas (`VARANDA_AUDIUS_COVERS` ausente, vazio ou `0`): seletor, editor, adesivo do compositor, cartão da publicação e visualizador do momento mostram o azulejo gerado, e nenhum pedido vai a `/account/audius/art`.
+- [ ] Capas ligadas (`VARANDA_AUDIUS_COVERS=1`) contra uma chave de teste: o seletor, o editor e o adesivo do compositor mostram a capa.
+- [ ] Uma publicação vista por uma segunda conta: nenhum pedido de capa antes do toque; depois do toque em **Ouvir**, **Ouvir trecho** ou **Ouvir playlist**, a capa aparece enquanto o cartão está ativo.
+- [ ] No visualizador do momento, a capa só aparece enquanto a música daquele momento toca.
+- [ ] Nenhum arquivo de capa no diretório de cache do app.
+- [ ] Uma capa que falha uma vez mostra o azulejo na hora e pode aparecer numa vista seguinte. Não há nova tentativa automática.
+- [ ] Uma linha de busca que sai da tela antes de a capa começar a carregar não dispara o pedido.
+- [ ] Bloquear e desbloquear o app enquanto uma capa carrega: depois de desbloquear, a capa aparece sem um segundo pedido a `/account/audius/art` (conferir no log do serviço).
+- [ ] Trocar de conta com um cartão de música ativo: a nova conta não pede capa antes do próprio toque.
+- [ ] Android, depois iOS, depois a web. Registrar aparelho, sistema e, na web, o navegador.
+

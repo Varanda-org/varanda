@@ -23,7 +23,8 @@ test('the sticker names the choice, edits on tap and removes separately', async 
     useTheme: () => ({ colors }),
     layout: { hit: 44 },
     radius: { lg: 16 },
-    space: { sm: 8 }
+    space: { sm: 8 },
+    useMusicCover: () => null
   }
   const input = stickerSource.replace(/^import .+\n/gm, '').replace(/\bexport /g, '')
   const { code } = transformSync(input, { configFile: false, babelrc: false, plugins: ['@babel/plugin-transform-react-jsx'] })
@@ -84,6 +85,49 @@ test('the sticker names the choice, edits on tap and removes separately', async 
   t.absent(stickerSource.includes('\u2014'))
 })
 
+test('the sticker asks its cover through the session and stores nothing', async (t) => {
+  const { transformSync } = require('@babel/core')
+  const stickerSource = fs.readFileSync(path.join(__dirname, '../src/ui/MusicSticker.js'), 'utf8')
+  const colors = { line: 'line', card: 'card', ink: 'ink', soft: 'soft' }
+  const calls = []
+  const uri = 'data:image/png;base64,AAAA'
+  const deps = {
+    rpc: require('@varanda/rpc'),
+    ...await import('../src/music.js'),
+    React: { createElement: (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity) }) },
+    ...Object.fromEntries(['View', 'Text', 'Pressable', 'MusicCover', 'Pill'].map((name) => [name, name])),
+    StyleSheet: { create: (styles) => styles },
+    useStyles: (make) => make(colors),
+    useTheme: () => ({ colors }),
+    layout: { hit: 44 },
+    radius: { lg: 16 },
+    space: { sm: 8 },
+    useMusicCover: (...args) => { calls.push(args); return uri }
+  }
+  const input = stickerSource.replace(/^import .+\n/gm, '').replace(/\bexport /g, '')
+  const { code } = transformSync(input, { configFile: false, babelrc: false, plugins: ['@babel/plugin-transform-react-jsx'] })
+  // eslint-disable-next-line no-new-func
+  const MusicSticker = new Function(...Object.keys(deps), code + '\nreturn MusicSticker')(...Object.values(deps))
+  const session = { member: 'a'.repeat(64), origin: 'https://bora.varanda.app', request: () => {} }
+  const item = { ...track, cover: true, count: 3 }
+  for (const [kind, asked] of [['snippet', 'track'], ['track', 'track'], ['playlist', 'playlist']]) {
+    calls.length = 0
+    const tree = MusicSticker({ choice: { ref: { kind, id: track.id, start: kind === 'snippet' ? 72 : null }, item }, session, onPress () {}, onRemove () {} })
+    t.is(calls.length, 1, kind + ' asks its cover once')
+    t.is(calls[0][0], asked)
+    t.is(calls[0][1], item)
+    t.is(calls[0][2], session, 'the session reaches the cover hook')
+    t.is(tree.children[0].children[0].props.uri, uri, 'the cover gets the in-memory uri')
+  }
+  calls.length = 0
+  MusicSticker({ choice: { ref: { kind: 'track', id: track.id, start: null }, item }, onPress () {} })
+  t.alike(calls[0][2], {}, 'without a session the hook gets an empty one')
+  const { musicSnapshot } = await rules()
+  t.is(musicSnapshot({ ref: { kind: 'track', id: track.id, start: null }, item }).thumb, null, 'the stored card keeps no image')
+  t.ok(source.includes('session={{ member, origin: musicOrigin, request: nodeRequest }}'))
+  t.ok(source.includes('session={momentMusicSession}'))
+})
+
 test('music snapshots are frozen, sanitized and have no thumbnail', async (t) => {
   const { musicSnapshot } = await rules()
   const snapshot = musicSnapshot(draft)
@@ -113,8 +157,8 @@ test('music blocks photos, a video, pages, empty text and offline sends', async 
 })
 
 test('the composer shows a music sticker that reopens the editor and can be removed', (t) => {
-  t.ok(source.includes('<MusicSticker choice={musicDraft} onPress={held || musicAvailable !== true ? undefined : () => setMusicPickerOpen(true)} onRemove={held ? undefined : () => setMusicDraft(null)} />'))
-  t.ok(source.includes('<MusicSticker choice={momentChoiceOf(moment.music)} onPress={node.online === false ? undefined : () => moment.setMusicPickerOpen(true)} onRemove={() => moment.removeMusic()} disabled={moment.pending || moment.held} />'))
+  t.ok(source.includes('<MusicSticker choice={musicDraft} session={{ member, origin: musicOrigin, request: nodeRequest }} onPress={held || musicAvailable !== true ? undefined : () => setMusicPickerOpen(true)} onRemove={held ? undefined : () => setMusicDraft(null)} />'))
+  t.ok(source.includes('<MusicSticker choice={momentChoiceOf(moment.music)} session={momentMusicSession} onPress={node.online === false ? undefined : () => moment.setMusicPickerOpen(true)} onRemove={() => moment.removeMusic()} disabled={moment.pending || moment.held} />'))
   t.ok(source.includes('initial={musicDraft}'))
   t.ok(source.includes('initial={momentChoiceOf(moment.music)}'))
   t.ok(source.includes("accessibilityLabel='Música'"))

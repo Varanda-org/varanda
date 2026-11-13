@@ -109,6 +109,7 @@ async function ui (stubs = {}, code = source, names = 'MusicContent, MusicPicker
     StyleSheet: { create: (value) => value },
     useStyles: (make) => make({}),
     useTheme: () => ({ colors: {} }),
+    useMusicCover: () => null,
     layout: { hit: 44 },
     radius: {},
     space: {},
@@ -514,6 +515,50 @@ const editorSource = fs.readFileSync(path.join(__dirname, '../src/ui/MusicEditor
 const mainOf = (row) => flatten(row.type(row.props)).find((n) => n.type === 'Pressable' && !n.props.accessibilityLabel)
 const previewOf = (row) => flatten(row.type(row.props)).find((n) => n.type === 'Pressable' && /prévia/.test(n.props.accessibilityLabel || ''))
 const sheetOf = (nodes) => nodes.find((n) => n.type === 'Sheet')
+
+test('rows and the editor ask a cover only through useMusicCover', async (t) => {
+  for (const code of [source, editorSource]) {
+    t.absent(/\bfetch\b|\bURL\b|https?:\/\/|\bImage\b|\baudiusArt\b/.test(code))
+    t.ok(code.includes("import { useMusicCover } from './useMusicCover'"))
+  }
+  const session = { member: 'a'.repeat(64), origin: 'node-origin', request () {} }
+  const item = { ...track(), cover: true }
+  const uri = 'data:image/jpeg;base64,Y292ZXI='
+  for (const kind of ['track', 'playlist']) {
+    const calls = []
+    let cover = uri
+    const h = await ui({
+      useMusicCover: (...args) => { calls.push(args); return cover }
+    }, source, 'MusicSearch, MusicRow')
+    t.teardown(h.unmount)
+    const tree = h.render(h.MusicSearch, { ...session, modes: [kind], onStop () {} })
+    const row = flatten(tree).find((n) => n.type === 'FlatList').props.renderItem({ item })
+    t.is(row.type, h.MusicRow, 'the list mounts a row component for its hook')
+    const rendered = h.render(row.type, row.props)
+    t.alike(calls, [[kind, item, session]], 'the row forwards the search kind and session')
+    t.alike(flatten(rendered).find((n) => n.type === 'MusicCover').props, { size: 48, uri })
+    cover = null
+    const fallback = h.render(row.type, row.props)
+    t.is(flatten(fallback).find((n) => n.type === 'MusicCover').props.uri, null, 'no cover keeps the generated tile')
+  }
+  const calls = []
+  let cover = uri
+  const h = await ui({
+    audiusPlay () {},
+    createStreamPlayer () {},
+    useMusicCover: (...args) => { calls.push(args); return cover }
+  }, editorSource, 'MusicEditor')
+  t.teardown(h.unmount)
+  const props = { item, start: 0, modes: ['snippet', 'track', 'playlist'], session, stopRef: { current: null } }
+  for (const kind of ['snippet', 'track', 'playlist']) {
+    const tree = h.render(h.MusicEditor, { ...props, kind })
+    t.alike(calls.at(-1), [kind === 'playlist' ? 'playlist' : 'track', item, session])
+    t.alike(flatten(tree).find((n) => n.type === 'MusicCover').props, { size: 160, uri })
+  }
+  cover = null
+  const fallback = h.render(h.MusicEditor, { ...props, kind: 'track' })
+  t.is(flatten(fallback).find((n) => n.type === 'MusicCover').props.uri, null, 'the editor also keeps the generated tile')
+})
 
 async function pickerFixture (t, props = {}) {
   const searches = []

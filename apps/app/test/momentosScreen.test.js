@@ -1191,6 +1191,7 @@ test('T22 fix 1: a saved music chip and its remove button follow the send gate',
   const jsx = src.slice(src.lastIndexOf('\n              {', chip), src.indexOf('\n              <TextInput', chip))
   const h = hookHost('function Chip ({ moment, node }) { return <>' + jsx + '</> }', 'Chip', {
     momentChoiceOf,
+    momentMusicSession: {},
     React: { createElement: (type, props, ...children) => typeof type === 'function' ? type(props) : { type, props: props || {}, children: children.flat(Infinity) } },
     MusicSticker: ({ choice, onPress, onRemove, disabled }) => ({
       type: 'MusicSticker',

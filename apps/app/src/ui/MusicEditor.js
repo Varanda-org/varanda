@@ -9,6 +9,7 @@ import { createStreamPlayer } from '../media/stream'
 import { tap } from './haptics'
 import { Icon } from './Icon'
 import { MusicCover } from './MusicCover'
+import { useMusicCover } from './useMusicCover'
 import { MusicStrip } from './MusicStrip'
 import { Segmented } from './Segmented'
 import { useStyles, useTheme } from './ThemeProvider'
@@ -20,6 +21,7 @@ const KINDS = [{ id: 'snippet', label: '15 s' }, { id: 'track', label: 'Faixa in
 export function MusicEditor ({ item, kind, start, modes, session, onKind, onStart, stopRef }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
+  const uri = useMusicCover(kind === 'playlist' ? 'playlist' : 'track', item, session)
   const [state, setState] = useState(loopIdle)
   const loop = useMemo(() => createSnippetLoop({ audiusPlay, createStreamPlayer, claimPlayback, playbackEpoch }, session, setState), [item.id, session])
   const opened = useRef(false)
@@ -44,7 +46,7 @@ export function MusicEditor ({ item, kind, start, modes, session, onKind, onStar
   const playing = state.phase === 'playing'
   return (
     <ScrollView contentContainerStyle={styles.root} keyboardShouldPersistTaps='handled'>
-      <View style={styles.cover}><MusicCover size={160} /></View>
+      <View style={styles.cover}><MusicCover size={160} uri={uri} /></View>
       <Text style={styles.title}>{displayText(item.title)}</Text>
       {kind === 'playlist'
         ? <Text style={styles.artist}>{displayText(musicRowLine(item))}</Text>
