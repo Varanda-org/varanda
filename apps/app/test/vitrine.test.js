@@ -1287,7 +1287,7 @@ test('momentos: fixtures validate, moments.read follows the 24 h rule and the ca
   for (const a of read.authors) {
     keys(t, a, ['author', 'items'])
     for (const item of a.items) {
-      keys(t, item, ['seq', 'ref', 'text', 'at', 'media'])
+      keys(t, item, ['seq', 'ref', 'text', 'at', 'media', 'music'])
       t.is(item.ref, a.author + ':' + item.seq)
       const age = Date.parse(f.now) - Date.parse(item.at)
       t.ok(age >= 0 && age < 86400000, 'inside the 24 h of the demo clock')

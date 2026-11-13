@@ -87,7 +87,7 @@ test('long moment captions expand, pause and resume without changing navigation'
   const src = read('screens/Momentos.js')
   t.ok(src.includes('captionLayout({ max: captionMax, fontScale: win.fontScale, lineHeight: type.postText.lineHeight, hit: layout.hit, height: captionHeight })') && src.includes('{captionLong'), 'control uses measured caption geometry')
   t.ok(src.includes("accessibilityLabel={captionExpanded ? 'recolher a legenda' : 'mostrar a legenda inteira'}") && src.includes('accessibilityState={{ expanded: captionExpanded }}'), 'control exposes its action and state')
-  t.ok(src.includes('onPress={() => setCaptionExpanded((value) => !value)}') && /const running = [^\n]+&& !captionExpanded/.test(src), 'toggle pauses and resumes through caption state alone')
+  t.ok(src.includes('onPress={() => setCaptionExpanded((value) => !value)}') && /\n {4}active: isTop [^\n]+ && !captionExpanded,\n/.test(src) && /\n {2}const paused = [^\n]+ \|\| captionExpanded\n/.test(src), 'toggle pauses and resumes through caption state alone')
   const step = src.slice(src.indexOf('const step = useCallback'), src.indexOf('\n  }, [', src.indexOf('const step = useCallback')))
   t.ok(step.includes('setCaptionExpanded(false)') && !step.includes('setHeld(false)'), 'stepping clears the caption pause without clearing a held press')
   t.ok(src.includes('captionExpanded ? captionExpandedHeight : captionCollapsedHeight'), 'expanded clip uses the available room')

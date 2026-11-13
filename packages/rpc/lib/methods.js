@@ -7,6 +7,7 @@ const { cardUrlHost, cardTextLength, MAX_CARD_TITLE, MAX_CARD_DESC, MAX_CARD_IMA
 const { MAX_AUDIO_MS } = require('./audio-bounds')
 const F = require('./feira')
 const IC = require('./invite-card')
+const { isMomentMusic } = require('./music')
 const { isReaction } = require('./reaction')
 
 const HEX64 = /^[0-9a-f]{64}$/
@@ -134,7 +135,8 @@ const GROUP_JOINS = ['open', 'approval']
 const isGroupJoin = (v) => typeof v === 'string' && GROUP_JOINS.includes(v)
 const isGroupVisibility = (v) => v === 'public' || v === 'private'
 
-// post.create / post.reply / post.quote `media`: 1..MAX_MEDIA_PER_POST descriptors.
+// post.create / post.reply / post.quote `media`: 1..MAX_MEDIA_PER_POST descriptors,
+// or the video pair (isPostMedia).
 // Duplicated from validDescriptor in @varanda/core lib/records.js, which this
 // package cannot import (same rules, exact keys).
 const DESCRIPTOR_KEYS = ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height']
@@ -181,6 +183,27 @@ function isAudioDescriptor (d) {
     width === 0 && height === 0 && int(1, MAX_AUDIO_MS)(ms)
 }
 
+const isVideoSize = (w, h) => int(1, L.MAX_VIDEO_DIMENSION)(w) &&
+  int(1, L.MAX_VIDEO_DIMENSION)(h) && w * h <= L.MAX_VIDEO_PIXELS
+
+// Same rules as validVideoDescriptor in @varanda/core lib/records.js.
+function isVideoDescriptor (d) {
+  if (!isPlainObject(d) || Object.keys(d).length !== AUDIO_DESCRIPTOR_KEYS.length ||
+    !AUDIO_DESCRIPTOR_KEYS.every((k) => hasOwn(d, k))) return false
+  const { core, mime, start, blocks, bytes, sha256, width, height, ms } = d
+  return isKey(core) &&
+    mime === L.VIDEO_MIME &&
+    int(1, L.MAX_MEDIA_BLOCKS - 1)(start) &&
+    int(1, L.MAX_MEDIA_ITEM_BLOCKS)(blocks) &&
+    start + blocks <= L.MAX_MEDIA_BLOCKS &&
+    Number.isSafeInteger(bytes) &&
+    bytes > (blocks - 1) * L.MEDIA_BLOCK_BYTES &&
+    bytes <= blocks * L.MEDIA_BLOCK_BYTES &&
+    isKey(sha256) &&
+    isVideoSize(width, height) &&
+    int(1, L.MAX_VIDEO_MS)(ms)
+}
+
 function isChatMediaKind (mime, w, h, ms) {
   if (mime === AUDIO_MIME) return w === 0 && h === 0 && int(1, MAX_AUDIO_MS)(ms)
   return isMediaMime(mime) && int(1, L.MAX_MEDIA_DIMENSION)(w) &&
@@ -207,6 +230,15 @@ function isMediaList (v, max = L.MAX_MEDIA_PER_POST) {
 }
 
 const isListingMediaList = (v) => isMediaList(v, F.MAX_LISTING_MEDIA)
+
+// post.create / post.reply / post.quote `media`: photos, or exactly
+// [JPEG poster, video] by index (validPostMedia in @varanda/core records.js).
+function isPostMedia (v) {
+  if (isMediaList(v)) return true
+  if (!Array.isArray(v) || v.length !== 2) return false
+  const poster = v[0]
+  return isDescriptor(poster) && poster.mime === 'image/jpeg' && isVideoDescriptor(v[1])
+}
 
 // Private group items: where the ciphertext lives in the writer's media core
 // (a descriptor without the image size, which ciphertext does not have),
@@ -463,6 +495,33 @@ function mediaUploadCross (given, value) {
   return null
 }
 
+// media.uploadFile only: dm.putMedia and moment.putMedia keep their own
+// predicates, since a chat takes no video and a momento video has its own
+// bounds. A video is a post's, never a sealed group item.
+const isFileUploadMime = (v) => isUploadMime(v) || v === L.VIDEO_MIME
+
+function mediaUploadFileCross (given, value) {
+  if (value.mime !== L.VIDEO_MIME) return mediaUploadCross(given, value)
+  if (value.kind !== 'video') return 'parâmetro inválido: kind'
+  if (!hasOwn(value, 'ms')) return 'parâmetro obrigatório: ms'
+  if (value.ms > L.MAX_VIDEO_MS) return 'parâmetro inválido: ms'
+  if (!int(1, L.MAX_VIDEO_DIMENSION)(value.width)) return 'parâmetro inválido: width'
+  if (!isVideoSize(value.width, value.height)) return 'parâmetro inválido: height'
+  if (hasOwn(value, 'sealed')) return 'parâmetro inválido: sealed'
+  return null
+}
+
+const isMomentPutMime = (v) => isMediaMime(v) || v === L.VIDEO_MIME
+
+function momentPutCross (given, value) {
+  if (value.mime !== L.VIDEO_MIME) return mediaUploadCross(given, value)
+  if (value.kind !== 'video') return 'parâmetro inválido: kind'
+  if (!hasOwn(value, 'ms')) return 'parâmetro obrigatório: ms'
+  if (!int(1, L.MAX_VIDEO_DIMENSION)(value.width)) return 'parâmetro inválido: width'
+  if (!isVideoSize(value.width, value.height)) return 'parâmetro inválido: height'
+  return null
+}
+
 // recovery.sign and the identity.recovery* host controls (docs/rpc.md 5.90
 // to 5.94). Duplicated from @varanda/core lib/recovery-proof.js and
 // @varanda/web-member lib/recovery.js, which this package cannot import: a
@@ -551,7 +610,26 @@ function isDmMediaItem (d) {
     isChatMediaKind(mime, w, h, ms)
 }
 
+// A momento video: the isDmMediaItem blob rules, its own mime and bounds
+// (validMomentMedia in @varanda/core records.js).
+function isMomentVideoItem (d) {
+  const own = Object.keys(d)
+  if (own.length !== DM_MEDIA_KEYS.length || !DM_MEDIA_KEYS.every((k) => hasOwn(d, k))) return false
+  const { id, key, nonce, chunks, bytes, sha256, mime, w, h, ms } = d
+  return isKey(id) && isKey(key) && isKey(sha256) &&
+    typeof nonce === 'string' && HEX48.test(nonce) &&
+    int(1, L.DM_MEDIA_MAX_CHUNKS)(chunks) &&
+    Number.isSafeInteger(bytes) &&
+    bytes > L.DM_MEDIA_MAC_BYTES &&
+    bytes <= L.MAX_MOMENT_VIDEO_BYTES + L.DM_MEDIA_MAC_BYTES &&
+    chunks === Math.ceil(bytes / L.DM_MEDIA_CHUNK_BYTES) &&
+    mime === L.VIDEO_MIME &&
+    isVideoSize(w, h) &&
+    int(1, L.MAX_MOMENT_VIDEO_MS)(ms)
+}
+
 function isMomentMediaItem (d) {
+  if (isPlainObject(d) && d.mime === L.VIDEO_MIME) return isMomentVideoItem(d)
   return isDmMediaItem(d) && d.ms === 0 && isMediaMime(d.mime)
 }
 
@@ -816,7 +894,7 @@ const SPECS = {
   'testimonial.pending': { fields: none },
   'testimonial.show': { fields: { from: req(isKey), seq: req(int(1, Number.MAX_SAFE_INTEGER)) }, mutating: true },
   'testimonial.delete': { fields: { to: req((v) => isRef(v, 1)), about: opt(isKey) }, mutating: true },
-  'moment.create': { fields: { text: req(str(0, 200)), media: req(isMomentMediaItem) }, mutating: true },
+  'moment.create': { fields: { text: req(str(0, 200)), media: req(isMomentMediaItem), music: opt(isMomentMusic) }, mutating: true },
   'moments.read': { fields: none },
   'moment.delete': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
   // Signs the terms-acceptance statement with the identity key; the node
@@ -943,17 +1021,17 @@ const SPECS = {
   // it belongs to (docs/rpc.md 5.34).
   'profile.delete': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
   'post.create': {
-    fields: { text: req(str(0, L.MAX_TEXT)), media: opt(isMediaList), preview: opt(isPublicCard) },
+    fields: { text: req(str(0, L.MAX_TEXT)), media: opt(isPostMedia), preview: opt(isPublicCard) },
     mutating: true,
     cross: postCross
   },
   'post.reply': {
-    fields: { to: req((v) => isRef(v, 1)), text: req(str(0, L.MAX_TEXT)), media: opt(isMediaList), preview: opt(isPublicCard) },
+    fields: { to: req((v) => isRef(v, 1)), text: req(str(0, L.MAX_TEXT)), media: opt(isPostMedia), preview: opt(isPublicCard) },
     mutating: true,
     cross: postCross
   },
   'post.quote': {
-    fields: { to: req((v) => isRef(v, 1)), text: req(str(1, L.MAX_TEXT)), media: opt(isMediaList), preview: opt(isPublicCard) },
+    fields: { to: req((v) => isRef(v, 1)), text: req(str(1, L.MAX_TEXT)), media: opt(isPostMedia), preview: opt(isPublicCard) },
     mutating: true,
     cross: postCross
   },
@@ -1451,15 +1529,15 @@ const SPECS = {
   'media.uploadFile': {
     fields: {
       name: req(isMediaName),
-      mime: req(isUploadMime),
+      mime: req(isFileUploadMime),
       width: req(int(0, MEDIA_SIDE_MAX)),
       height: req(int(0, MEDIA_SIDE_MAX)),
-      kind: opt((v) => v === 'voice'),
+      kind: opt((v) => v === 'voice' || v === 'video'),
       ms: opt(int(1, MAX_AUDIO_MS)),
       sealed: opt(isBool)
     },
     mutating: true,
-    cross: mediaUploadCross
+    cross: mediaUploadFileCross
   },
   // IPC only, in-app web-node worklet (docs/rpc.md 5.88): the photo of a
   // chat goes to the anonymous blob channel (protocol section 13) from a
@@ -1486,12 +1564,14 @@ const SPECS = {
   'moment.putMedia': {
     fields: {
       name: req(isMediaName),
-      mime: req(isMediaMime),
+      mime: req(isMomentPutMime),
       width: req(int(1, MEDIA_SIDE_MAX)),
-      height: req(int(1, MEDIA_SIDE_MAX))
+      height: req(int(1, MEDIA_SIDE_MAX)),
+      kind: opt((v) => v === 'video'),
+      ms: opt(int(1, L.MAX_MOMENT_VIDEO_MS))
     },
     mutating: true,
-    cross: mediaUploadCross
+    cross: momentPutCross
   },
   // IPC only, in-app web-node worklet (docs/rpc.md 5.89): the opened image
   // of a chat item is written to a file in the worklet's read directory and

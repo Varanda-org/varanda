@@ -209,9 +209,12 @@ function useVoiceRecorder ({ onVoice, onNote }) {
 // shown from a local URI that is revoked when the card changes or goes. A
 // staged photo (`photos`) drops the card. With "Prévia de links" off
 // (../previewPref.js) or `enabled` false nothing is built and nothing is
-// fetched. take(text) freezes the ready card for a send (or null); the
-// screen keeps that snapshot with its pending send.
-export function useLinkDraft ({ text, enabled = true, photos = false, member = null }) {
+// fetched. `fallback(url)`, when the caller passes one, stands in for a
+// page that yielded no card: a music link has no title of its own. The same
+// preference, dismissal, photo rule and delay apply. take(text) freezes the
+// ready card for a send (or null); the screen keeps that snapshot with its
+// pending send.
+export function useLinkDraft ({ text, enabled = true, photos = false, member = null, fallback }) {
   const node = useNode()
   const request = node !== null ? node.request : undefined
   const origin = gifOriginOf(node)
@@ -249,6 +252,15 @@ export function useLinkDraft ({ text, enabled = true, photos = false, member = n
       const signal = ctl.signal
       buildDraft(target, { signal, buildPreview, encodeThumbnail, member, request, origin }).then((data) => {
         if (signal.aborted) return
+        if (data === null && typeof fallback === 'function') {
+          try {
+            const card = fallback(target)
+            if (card !== null && typeof card === 'object') {
+              dispatch({ type: 'built', url: target, data: { ...card, thumb: null } })
+              return
+            }
+          } catch {}
+        }
         dispatch(data ? { type: 'built', url: target, data } : { type: 'failed', url: target })
       })
     }, LINK_DRAFT_DELAY_MS)
@@ -258,6 +270,7 @@ export function useLinkDraft ({ text, enabled = true, photos = false, member = n
       if (ctl !== null) ctl.abort()
     }
     // request and origin follow the node; a new node drops the draft anyway.
+    // fallback is the caller's stable function: listing it would restart the delay.
   }, [target, member])
 
   // An aborted build leaves 'building' behind: back to idle so it runs again.

@@ -64,6 +64,48 @@ test('Bubble and PostRow draw the stored card', (t) => {
   t.ok(/kind: 'post', author/.test(row), 'the post thumbnail is read for the post author')
 })
 
+test('PostRow draws a music player only from the stored card', (t) => {
+  const row = withoutComments(read('ui', 'PostRow.js'))
+  t.ok(row.includes("import { MusicEmbedCard } from './MusicEmbedCard'"))
+  t.ok(row.includes("import { embedOf } from '../musicEmbed'"))
+  t.ok(row.includes("const embed = preview && typeof preview === 'object' ? embedOf(preview.url) : null"), 'the player comes from the stored card URL')
+  t.is([...row.matchAll(/embedOf\(/g)].length, 1, 'never from a link in the text')
+  t.ok(/embed !== null\s*\? <MusicEmbedCard embed=\{embed\} card=\{preview\} thumb=\{\{ kind: 'post', author/.test(row), 'MusicEmbedCard for a music link')
+  t.ok(/: <LinkCard card=\{preview\}/.test(row), 'LinkCard for any other link')
+  const quote = withoutComments(read('ui', 'QuoteCard.js'))
+  t.absent(/MusicEmbedCard|embedOf/.test(quote), 'a quoted post keeps the static card')
+})
+
+test('Audius fragments take precedence without subscribing PostRow to the node', (t) => {
+  const row = withoutComments(read('ui', 'PostRow.js'))
+  t.ok(row.includes("import { MusicPlayerCard } from './MusicPlayerCard'"))
+  t.ok(row.includes("import { musicRefOf } from '../music'"))
+  t.ok(row.includes("const music = preview && typeof preview === 'object' ? musicRefOf(preview.url) : null"))
+  t.is([...row.matchAll(/musicRefOf\(/g)].length, 1, 'only the stored URL is inspected')
+  t.ok(/\? music !== null\s*\? <MusicPlayerCard card=\{preview\} music=\{music\} \/>\s*: embed !== null\s*\? <MusicEmbedCard/.test(row))
+  t.ok(row.includes('<LinkCard card={preview}'), 'the literal normal link fallback remains')
+  t.absent(/useNode\(|useMusicAvailable\(|audiusReady\(/.test(row), 'availability belongs to the tapped card')
+  t.absent(/MusicPlayerCard|musicRefOf/.test(withoutComments(read('ui', 'QuoteCard.js'))), 'quotes remain static')
+})
+
+test('MusicEmbedCard draws stored data until a tap', (t) => {
+  const src = withoutComments(read('ui', 'MusicEmbedCard.js'))
+  t.absent(/\bfetch\s*\(/.test(src), 'no fetch call')
+  t.absent(/['"`]https?:\/\//i.test(src), 'no http(s) literal')
+  t.absent(/uri\s*:\s*(card|data|embed|props)\s*\.\s*(url|embedUrl|pageUrl)/.test(src), 'no URL is an image source')
+  t.absent(/source=\{\{[^}]*\b(url|embedUrl|pageUrl)\b/.test(src), 'no Image source built from a url')
+  t.absent(/\bImage\b/.test(src), 'no Image of its own')
+  t.absent(/favicon|apple-touch-icon|prefetch|iframe|WebView|<Video/i.test(src), 'no site icon, prefetch or frame of its own')
+  t.ok(src.includes('displayText('), 'peer text goes through displayText')
+  t.ok(src.includes('cardUrlHost('), 'the host shown is the one the URL opens')
+  t.ok(src.includes('<MediaView author={thumb.author} descriptor={stored} persist={thumb.persist !== false} label=\'prévia do link\' style={styles.fill} tapRetry={false} />'), 'the thumbnail uses the post photo path')
+  const frames = [...src.matchAll(/<EmbedFrame\b/g)]
+  t.is(frames.length, 1, 'one EmbedFrame')
+  const openAt = src.indexOf('if (open) {')
+  const closedReturn = src.indexOf('return (', src.indexOf('let picture = null'))
+  t.ok(openAt !== -1 && frames[0].index > openAt && frames[0].index < closedReturn, 'EmbedFrame only in the open state')
+})
+
 test('Ajustes: Prévia de links switch uses previewPref', (t) => {
   const src = withoutComments(read('screens', 'Ajustes.js'))
   t.ok(src.includes("from '../previewPref'"))
@@ -115,7 +157,7 @@ test('a DM card thumbnail is read by the node with index card', (t) => {
 })
 
 test('no em dash in the link card files', (t) => {
-  for (const f of [['ui', 'LinkCard.js'], ['ui', 'Bubble.js'], ['ui', 'PostRow.js'], ['ui', 'QuoteCard.js'], ['screens', 'Ajustes.js'], ['screens', 'Mensagem.js'], ['media', 'chatMedia.js']]) {
+  for (const f of [['ui', 'LinkCard.js'], ['ui', 'Bubble.js'], ['ui', 'PostRow.js'], ['ui', 'QuoteCard.js'], ['ui', 'MusicEmbedCard.js'], ['screens', 'Ajustes.js'], ['screens', 'Mensagem.js'], ['media', 'chatMedia.js']]) {
     t.absent(read(...f).includes('\u2014'), f.join('/'))
   }
 })

@@ -107,7 +107,8 @@ function foldMoments ({ logs, now = Date.now(), association = null, revokedIssue
           ref: formatRef({ author: log.key, seq }),
           text: record.text,
           at: record.at,
-          media: { ...record.media }
+          media: { ...record.media },
+          music: record.music ? { ...record.music } : null
         }))
       })
     }
