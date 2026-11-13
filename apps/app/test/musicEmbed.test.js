@@ -9,7 +9,7 @@ const YT = 'dQw4w9WgXcQ'
 const YT_LIST = 'PLx0sYbCqOb8TBPRdmBHs5Iftvv9TPboYG'
 const SP = '4uLU6hMCjMI75M1A2tKUQC'
 const NOCOOKIE = 'https://www.youtube-nocookie.com/embed/'
-const SC_TAIL = '&auto_play=false&visual=false&show_comments=false&show_teaser=false'
+const SC_TAIL = '&auto_play=false&visual=false&show_comments=false&show_teaser=false&buying=false&sharing=false&download=false'
 
 const ACCEPTED = [
   ['https://youtu.be/' + YT, NOCOOKIE + YT + '?playsinline=1&rel=0'],
@@ -510,6 +510,22 @@ test('musicEmbed: no player address asks to play by itself', async (t) => {
     t.absent(keys.includes('autoplay'), url + ': no autoplay query key')
     t.absent(/autoplay/i.test(embedHtml(e)), url + ': embedHtml never names autoplay')
   }
+})
+
+test('musicEmbed: a SoundCloud player shows no buy, share or download button', async (t) => {
+  const { embedOf } = await load()
+  let seen = 0
+  for (const [url] of ACCEPTED) {
+    const e = embedOf(url)
+    if (!e || e.provider !== 'soundcloud') continue
+    seen++
+    const q = e.embedUrl.indexOf('?')
+    const pairs = e.embedUrl.slice(q + 1).split('&')
+    for (const key of ['buying', 'sharing', 'download']) {
+      t.alike(pairs.filter((pair) => pair.split('=')[0] === key), [key + '=false'], url + ': ' + key + '=false, once')
+    }
+  }
+  t.is(seen, 3, 'every accepted SoundCloud link')
 })
 
 test('musicEmbed: sameMusicPage matches only the same item', async (t) => {

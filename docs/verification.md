@@ -9586,3 +9586,35 @@ Usar duas contas de teste, A quem reage e B quem publicou o momento, sem DHT pú
 - [ ] Momento de vídeo: a bolha mostra um azulejo com o ícone de tocar e o nome "Vídeo do momento". Não há player, não há pedido do arquivo de vídeo e nada toca. Um GIF continua com miniatura de imagem.
 - [ ] Leitor antigo: um app ou nó de antes desta versão não mostra a reação, não conta como não lida e não deixa texto no lugar. Depois de atualizar, a reação que esse leitor já passou não volta.
 - [ ] Android, depois iOS, depois a web e o PWA, no tema claro e no escuro: envio, recebimento e pedidos de mensagem. Com TalkBack e VoiceOver, cada emoji é "Reagir com " mais o nome, e a miniatura anuncia "Foto do momento" ou "Vídeo do momento".
+
+## 207. Player do SoundCloud sem botões de comprar, compartilhar e baixar
+
+Um ajuste no player do SoundCloud da seção 205, sem mudar Termos nem formato de registro.
+
+O endereço do player do SoundCloud ganha `buying=false`, `sharing=false` e `download=false`, que a documentação do widget (developers.soundcloud.com/docs/api/html5-widget) descreve como os parâmetros que mostram ou escondem os botões de comprar, compartilhar e baixar. O link de compra é quem envia a faixa que escolhe e, na web e no PWA, abria numa aba que o app não confere. A origem do quadro (`https://w.soundcloud.com`) e o `frame-src` não mudam. Os outros links dentro do player (título, nome de quem enviou, logo) continuam abrindo como na seção 205. A regra está em `apps/app/src/musicEmbed.js`, em `docs/app.md` ("Música em publicações") e em "Music links" de `docs/protocol.md`.
+
+Esta seção resolve a limitação do PR da seção 205 sobre o link de compra do SoundCloud na web. A limitação conhecida da janela virada (último item da verificação manual da seção 205) continua em aberto.
+
+### Verificação automatizada
+
+Cada arquivo sozinho, a partir da raiz, no Node 24. A CI completa (`npm ci`, lint, `npm test` e demo) é a CI de pouso e não entra aqui.
+
+- `node apps/app/test/musicEmbed.test.js`: 20/20 testes, 1777/1777 asserções
+- `node apps/app/test/musicEmbedCard.test.js`: 41/41 testes, 456/456 asserções
+- `node apps/app/test/embedFrame.test.js`: 13/13 testes, 115/115 asserções
+- `node apps/app/test/linkPreview.test.js`: 17/17 testes, 148/148 asserções
+- `node apps/app/test/linkCardBuild.test.js`: 17/17 testes, 154/154 asserções
+- `node apps/app/test/chatMedia.test.js`: 51/51 testes, 252/252 asserções
+- `node apps/app/test/postMusic.test.js`: 18/18 testes, 263/263 asserções
+- `node apps/app/test/postMusicCard.test.js`: 18/18 testes, 139/139 asserções
+- `node apps/app/test/platformGate.test.js`: 3/3 testes, 52/52 asserções
+- `npx standard` nos arquivos `.js` alterados: limpo
+
+Em `musicEmbed.test.js`, os três endereços do SoundCloud fixados no teste e um teste novo que exige `buying=false`, `sharing=false` e `download=false`, uma vez cada, em todo endereço do SoundCloud aceito. Sem os três parâmetros, 2 testes e 12 asserções falham.
+
+### Verificação manual
+
+Nenhuma conferência em aparelho nem com o provedor real foi feita. Os itens abaixo continuam em aberto. A ordem é o build de debug do Android primeiro, depois o simulador iOS, depois a web e o PWA.
+
+- [ ] SoundCloud, em todas as plataformas: uma faixa e um set com link de compra definido por quem enviou. O player não mostra botão de comprar, de compartilhar nem de baixar. Registrar se o título, o nome de quem enviou e o logo continuam abrindo a página do SoundCloud (no app, fora dele; na web, em outra aba).
+- [ ] SoundCloud: registrar se algum outro link dentro do player ainda leva a um endereço fora do SoundCloud.
