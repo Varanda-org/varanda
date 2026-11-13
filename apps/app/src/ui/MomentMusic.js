@@ -4,6 +4,7 @@ import { displayText } from '@varanda/rpc'
 import { audiusItem, audiusPlay } from '../account'
 import { momentMusicOf } from '../moments'
 import { MUSIC_SEEK_TEXT, MUSIC_SOURCE, clampStart, musicErrorText, seekReached, snippetEndMs, snippetTick } from '../music'
+import { onSoundMute, setSoundMuted, soundMuted } from '../soundMute'
 import { claimPlayback, playbackEpoch } from '../media/chatMedia'
 import { createStreamPlayer } from '../media/stream'
 import { Icon } from './Icon'
@@ -176,7 +177,7 @@ export function MomentMusic ({ music, member, origin, request, paused, onStart, 
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const [state, setState] = useState(momentMusicIdle)
-  const [muted, setMuted] = useState(false)
+  const [muted, setMuted] = useState(soundMuted())
   const [played, setPlayed] = useState(false)
   // Which playback set state and played. The reset effect lands on the next
   // render, so the render that first sees a new account still holds the old latch.
@@ -186,6 +187,11 @@ export function MomentMusic ({ music, member, origin, request, paused, onStart, 
   latest.current = { paused: paused === true || muted, onStart, onUnavailable }
   const id = music?.id
   const start = music?.start
+  useEffect(() => {
+    const sync = () => setMuted(soundMuted())
+    sync()
+    return onSoundMute(sync)
+  }, [])
   useEffect(() => {
     setState(momentMusicIdle)
     setPlayed(false)
@@ -201,10 +207,14 @@ export function MomentMusic ({ music, member, origin, request, paused, onStart, 
     })
     playback.current = controller
     controller.setPaused(latest.current.paused)
-    controller.start()
+    // A muted momento spends no request and no daily play use.
+    if (!soundMuted()) controller.start()
     return () => { controller.release(); playback.current = null }
   }, [id, start, member, origin, request])
-  useEffect(() => { playback.current?.setPaused(paused === true || muted) }, [paused, muted])
+  useEffect(() => {
+    playback.current?.setPaused(paused === true || muted)
+    if (!muted && paused !== true) playback.current?.start()
+  }, [paused, muted])
   const { item, phase, error } = state
   // Mounted only when the operator's moments switch is on; a momento record
   // carries no image. Covers wait for playback, and a cover failure must never
@@ -215,7 +225,7 @@ export function MomentMusic ({ music, member, origin, request, paused, onStart, 
   const muteLabel = muted ? 'Ativar música' : 'Silenciar música'
   return (
     <View style={styles.row}>
-      <Pressable accessibilityRole='button' accessibilityLabel={muteLabel} accessibilityHint={item ? displayText(item.title) + ', ' + displayText(item.artist) : undefined} accessibilityState={{ selected: muted }} onPress={() => setMuted(!muted)} style={item ? styles.sticker : styles.mute}>
+      <Pressable accessibilityRole='button' accessibilityLabel={muteLabel} accessibilityHint={item ? displayText(item.title) + ', ' + displayText(item.artist) : undefined} accessibilityState={{ selected: muted }} onPress={() => setSoundMuted(!muted)} style={item ? styles.sticker : styles.mute}>
         {item
           ? (
             <>

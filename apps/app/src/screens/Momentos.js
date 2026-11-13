@@ -39,6 +39,7 @@ import { canReact, reactionParams, unsure, REACTION_SENT, REACTION_UNSURE } from
 import { QUICK, reactionName } from '../reactions'
 import { audiusPolicy, audiusReady } from '../account'
 import { musicOriginOf } from '../music'
+import { soundMuted, setSoundMuted, onSoundMute, SOUND_MUTE_LABEL, SOUND_UNMUTE_LABEL } from '../soundMute'
 import { openExternal } from '../openExternal'
 import { MomentMusic } from '../ui/MomentMusic'
 import { liveAuthors, liveItems, momentsOf } from '../momentSeen'
@@ -576,6 +577,12 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
   const seenState = useMomentSeen()
   const reduce = useMotionReduced()
   const autoOn = autoAdvanceOn(reduce)
+  const [soundOff, setSoundOff] = useState(soundMuted())
+  useEffect(() => {
+    const sync = () => setSoundOff(soundMuted())
+    sync()
+    return onSoundMute(sync)
+  }, [])
 
   // Fixed on the first answer (see viewerRings); a delete removes its item.
   const [rings, setRings] = useState(null)
@@ -632,7 +639,9 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
   const musicOn = useMomentMusicPolicy(node, own, music !== null)
   const [musicState, setMusicState] = useState(null)
   const musicStarted = musicOn === true && musicState?.key === itemKey && musicState.phase === 'playing'
-  const musicWaiting = music !== null && musicOn !== false && (musicState?.key !== itemKey || musicState.phase === 'waiting')
+  // Opened muted: use photo time until unmuted, then wait up to 3 s for
+  // audio. Its first start restarts the bar at 15 s, even after photo time.
+  const musicWaiting = music !== null && musicOn !== false && (musicState?.key !== itemKey || musicState.phase === 'waiting') && !soundOff
   const [musicClosed, setMusicClosed] = useState(false)
   useEffect(() => { setMusicState(null) }, [itemKey, node.epoch])
 
@@ -787,6 +796,13 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
     control: videoControl
   })
   const { progress } = playback
+  const silent = soundOff || playback.muted
+  const toggleSound = () => {
+    if (silent) {
+      playback.handleUnmute()
+      setSoundMuted(false)
+    } else setSoundMuted(true)
+  }
   restart.current = () => {
     setMusicState(null)
     playback.restart()
@@ -1011,7 +1027,7 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
             ? video
               ? (
                 <View style={styles.photo} accessible accessibilityLabel={'momento de ' + name}>
-                  <VideoPlayer key={itemKey + ':' + playback.restartTick} uri={photo.uri} playing={playback.playing} muted={playback.muted} controls={false} fit='contain' style={styles.photo} onReady={playback.handleReady} onProgress={playback.handleProgress} onEnd={playback.handleEnd} onError={handlePhotoError} onSoundRefused={playback.handleSoundRefused} onPlayBlocked={playback.handlePlayBlocked} control={videoControl} />
+                  <VideoPlayer key={itemKey + ':' + playback.restartTick} uri={photo.uri} playing={playback.playing} muted={playback.muted || soundOff} controls={false} fit='contain' style={styles.photo} onReady={playback.handleReady} onProgress={playback.handleProgress} onEnd={playback.handleEnd} onError={handlePhotoError} onSoundRefused={playback.handleSoundRefused} onPlayBlocked={playback.handlePlayBlocked} control={videoControl} />
                 </View>
                 )
               : <Image source={{ uri: photo.uri }} style={styles.photo} resizeMode='contain' onError={handlePhotoError} accessibilityIgnoresInvertColors accessible accessibilityRole='image' accessibilityLabel={'momento de ' + name} />
@@ -1076,6 +1092,9 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
                 {time ? <Text style={styles.time} numberOfLines={1} selectable={false}>{time}</Text> : null}
               </View>
             </Pressable>
+            {video || musicOn === true
+              ? <IconAction icon={silent ? 'mudo' : 'som'} label={silent ? SOUND_UNMUTE_LABEL : SOUND_MUTE_LABEL} color='#ffffff' onPress={toggleSound} />
+              : null}
             {mine
               ? (
                 <>
@@ -1109,7 +1128,7 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
               <View style={styles.bar} onLayout={(e) => setPlaybackHeight(e.nativeEvent.layout.height)}>
                 {showPlay ? <Pill label='Reproduzir' onPress={playback.handlePlay} /> : null}
                 {!autoOn && playback.ended ? <Pill label='Próximo momento' onPress={() => step('next')} /> : null}
-                {playback.muted ? <Pill label='Ativar som' onPress={playback.handleUnmute} /> : null}
+                {playback.muted ? <Pill label='Ativar som' onPress={toggleSound} /> : null}
               </View>
               )
             : null}

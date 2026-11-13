@@ -5,6 +5,7 @@ const fs = require('fs')
 const path = require('path')
 const load = () => import('../src/postMusic.js')
 const loadEmbed = () => import('../src/embedLive.js')
+const loadSound = () => import('../src/soundMute.js')
 
 function memoryStore (entries = new Map()) {
   return {
@@ -232,6 +233,87 @@ test('music hold tells listeners only when it changes', async (t) => {
     offB()
     clearMusicAutoHold()
   }
+})
+
+test('session mute changes the effective music hold only once', async (t) => {
+  const { musicAutoHeld, clearMusicAutoHold, onMusicAutoHold } = await load()
+  const { setSoundMuted } = await loadSound()
+  t.teardown(() => {
+    setSoundMuted(false)
+    clearMusicAutoHold()
+  })
+  const observed = []
+  t.teardown(onMusicAutoHold(() => { observed.push(musicAutoHeld()) }))
+  setSoundMuted(true)
+  t.is(musicAutoHeld(), true)
+  t.alike(observed, [true])
+  setSoundMuted(true)
+  t.alike(observed, [true])
+  setSoundMuted(false)
+  t.is(musicAutoHeld(), false)
+  t.alike(observed, [true, false])
+})
+
+test('clearing an involuntary music hold preserves the session mute', async (t) => {
+  const { holdMusicAuto, musicAutoHeld, clearMusicAutoHold, onMusicAutoHold } = await load()
+  const { setSoundMuted, soundMuted } = await loadSound()
+  t.teardown(() => {
+    setSoundMuted(false)
+    clearMusicAutoHold()
+  })
+  const observed = []
+  t.teardown(onMusicAutoHold(() => { observed.push(musicAutoHeld()) }))
+  setSoundMuted(true)
+  holdMusicAuto()
+  clearMusicAutoHold()
+  t.is(soundMuted(), true)
+  t.is(musicAutoHeld(), true)
+  t.alike(observed, [true], 'the effective hold has not changed')
+  setSoundMuted(false)
+  t.is(musicAutoHeld(), false, 'the involuntary hold was cleared')
+  t.alike(observed, [true, false])
+})
+
+test('an involuntary music hold masks session mute changes', async (t) => {
+  const { holdMusicAuto, musicAutoHeld, clearMusicAutoHold, onMusicAutoHold } = await load()
+  const { setSoundMuted } = await loadSound()
+  t.teardown(() => {
+    setSoundMuted(false)
+    clearMusicAutoHold()
+  })
+  const observed = []
+  t.teardown(onMusicAutoHold(() => { observed.push(musicAutoHeld()) }))
+  holdMusicAuto()
+  t.alike(observed, [true])
+  setSoundMuted(true)
+  t.is(musicAutoHeld(), true)
+  t.alike(observed, [true])
+  setSoundMuted(false)
+  t.is(musicAutoHeld(), true)
+  t.alike(observed, [true])
+})
+
+test('muted ambient music cannot start and keeps an already live visible row', async (t) => {
+  const { ambientStep, clearMusicAutoHold } = await load()
+  const { EMBED_IDLE, EMBED_LIVE } = await loadEmbed()
+  const { setSoundMuted } = await loadSound()
+  t.teardown(() => {
+    setSoundMuted(false)
+    clearMusicAutoHold()
+  })
+  setSoundMuted(true)
+  let state = EMBED_IDLE
+  for (let i = 0; i < 4; i++) {
+    const next = ambientStep(state, { hidden: false })
+    t.is(next.action, null)
+    t.is(next.state.live, false)
+    state = next.state
+  }
+  const live = ambientStep(EMBED_LIVE, { hidden: false })
+  t.is(live.action, null)
+  t.is(live.state, EMBED_LIVE)
+  setSoundMuted(false)
+  t.is(ambientStep(state, { hidden: false }).action, 'start', 'unmuting permits the accumulated dwell')
 })
 
 test('automatic failures are remembered for the session, at most 500', async (t) => {

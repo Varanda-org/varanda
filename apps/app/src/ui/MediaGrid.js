@@ -38,6 +38,7 @@ import { durationLabel, MAX_MEDIA_PER_POST, gridLayout, mosaicLayout, videoPair 
 import { claimPlayback, stopBoundPlayback } from '../media/chatMedia'
 import VideoPlayer from '../media/VideoPlayer'
 import { useHosted } from '../node'
+import { soundMuted, setSoundMuted, onSoundMute, SOUND_MUTE_LABEL, SOUND_UNMUTE_LABEL } from '../soundMute'
 import { Icon } from './Icon'
 import { MediaCarousel } from './MediaCarousel'
 import { MediaView, mediaHashDeps } from './MediaView'
@@ -252,13 +253,13 @@ function useVideoClip ({ author, video }) {
   return { active: attempt >= 0, phase, uri, start, retry, fail, reset }
 }
 
-function VideoStage ({ uri, full, startMs, playing, muted, setMuted, blocked, setBlocked, control, onProgress, fail }) {
+function VideoStage ({ uri, full, startMs, playing, muted, setMuted, silent, onSound, blocked, setBlocked, control, onProgress, fail }) {
   return (
     <View style={styles.viewerImage}>
       <VideoPlayer
         uri={uri}
         playing={playing}
-        muted={muted}
+        muted={silent}
         controls
         fit='contain'
         inline={!full}
@@ -277,7 +278,7 @@ function VideoStage ({ uri, full, startMs, playing, muted, setMuted, blocked, se
               {blocked ? <Text style={styles.videoHint}>Toque no play para assistir</Text> : null}
               {muted
                 ? (
-                  <Pressable accessibilityRole='button' accessibilityLabel='Ativar som' onPress={() => { control.current?.unmute(); setMuted(false) }} style={styles.retryBtn}>
+                  <Pressable accessibilityRole='button' accessibilityLabel='Ativar som' onPress={onSound} style={styles.retryBtn}>
                     <Text style={styles.retryText}>Ativar som</Text>
                   </Pressable>
                   )
@@ -286,6 +287,9 @@ function VideoStage ({ uri, full, startMs, playing, muted, setMuted, blocked, se
           </View>
           )
         : null}
+      <Pressable accessibilityRole='button' accessibilityLabel={silent ? SOUND_UNMUTE_LABEL : SOUND_MUTE_LABEL} accessibilityState={{ selected: silent }} onPress={onSound} style={[styles.expandBtn, full ? styles.videoSoundFull : styles.videoSound]}>
+        <Icon name={silent ? 'mudo' : 'som'} size={22} color='#ffffff' />
+      </Pressable>
     </View>
   )
 }
@@ -387,12 +391,28 @@ function VideoTile ({ author, poster, video, persist }) {
   const [full, setFull] = useState(false)
   const [playing, setPlaying] = useState(true)
   const [muted, setMuted] = useState(false)
+  const [soundOff, setSoundOff] = useState(soundMuted())
   const [blocked, setBlocked] = useState(false)
   const control = useRef(null)
   const position = useRef(0)
   const frame = useRef(null)
   const release = useRef(null)
   const alive = useRef(true)
+
+  useEffect(() => {
+    const sync = () => setSoundOff(soundMuted())
+    sync()
+    return onSoundMute(sync)
+  }, [])
+
+  const silent = muted || soundOff
+  const toggleSound = () => {
+    if (silent) {
+      control.current?.unmute()
+      setMuted(false)
+      setSoundMuted(false)
+    } else setSoundMuted(true)
+  }
 
   const close = useCallback(() => {
     const done = release.current
@@ -532,6 +552,8 @@ function VideoTile ({ author, poster, video, persist }) {
                 playing={playing}
                 muted={muted}
                 setMuted={setMuted}
+                silent={silent}
+                onSound={toggleSound}
                 blocked={blocked}
                 setBlocked={setBlocked}
                 control={control}
@@ -559,6 +581,8 @@ function VideoTile ({ author, poster, video, persist }) {
                 playing={playing}
                 muted={muted}
                 setMuted={setMuted}
+                silent={silent}
+                onSound={toggleSound}
                 blocked={blocked}
                 setBlocked={setBlocked}
                 control={control}
@@ -737,7 +761,9 @@ const styles = StyleSheet.create({
   videoOverlay: { ...StyleSheet.absoluteFillObject },
   videoLoading: { backgroundColor: 'rgba(0,0,0,0.55)' },
   videoTools: { position: 'absolute', top: 8, left: 8, right: 8, flexDirection: 'row' },
-  videoChipsOverlay: { position: 'absolute', top: 8, left: 60, right: 8, alignItems: 'flex-start' },
+  videoSound: { position: 'absolute', top: 8, left: 60 },
+  videoSoundFull: { position: 'absolute', top: 8, right: 8 },
+  videoChipsOverlay: { position: 'absolute', top: 8, left: 112, right: 8, alignItems: 'flex-start' },
   videoChips: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8, paddingHorizontal: 8, borderRadius: 22, backgroundColor: 'rgba(0,0,0,0.65)' },
   expandBtn: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.65)' },
   playMark: {

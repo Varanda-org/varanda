@@ -200,9 +200,9 @@ test('a video pair keeps one poster and an explicit download lifecycle', (t) => 
   t.ok(clip.includes('revokeUrl('), 'closing revokes the local url')
   t.is(src.split('<VideoPlayer').length - 1, 1, 'one player')
   t.ok(/\n\s+playing=\{playing\}\n/.test(stage), 'it plays because the person pressed play')
-  t.ok(tile.includes('const [muted, setMuted] = useState(false)') && stage.includes('muted={muted}'), 'sound on')
+  t.ok(tile.includes('const [muted, setMuted] = useState(false)') && stage.includes('muted={silent}'), 'sound on')
   t.ok(stage.includes('onSoundRefused={() => setMuted(true)}'), 'a refused sound is shown')
-  t.ok(/accessibilityLabel='Ativar som' onPress=\{\(\) => \{ control\.current\?\.unmute\(\); setMuted\(false\) \}\}/.test(stage), 'Ativar som unmutes the player in the press, then turns the sound on')
+  t.ok(/accessibilityLabel='Ativar som' onPress=\{onSound\}/.test(stage), 'Ativar som uses the shared sound handler')
   t.ok(tile.includes('const control = useRef(null)'), 'the tile owns the player control')
   t.ok(stage.slice(stage.indexOf('<VideoPlayer'), stage.indexOf('/>', stage.indexOf('<VideoPlayer'))).includes('control={control}'), 'the player gets the control')
   t.ok(/\{muted \|\| blocked\s*\?/.test(stage) && /\{muted\s*\?/.test(stage), 'the button shows only while muted')
@@ -225,6 +225,33 @@ test('a video pair keeps one poster and an explicit download lifecycle', (t) => 
   t.absent((clip + stage + poster + viewer + tile).includes('document'), 'no browser API in the video viewer')
   t.absent((clip + stage + poster + viewer + tile).includes('URL.'), 'no browser URL API in the video viewer')
   t.ok(src.includes("useEscapeLayer(!!open, () => closeRef.current(), 'viewer')"), 'the photo viewer stays an escape layer')
+})
+
+test('feed video shares sound mute without changing playback', (t) => {
+  const src = read('ui/MediaGrid.js')
+  const { VideoStage: stage, VideoTile: tile } = videoSlices(src)
+  t.ok(src.includes("import { soundMuted, setSoundMuted, onSoundMute, SOUND_MUTE_LABEL, SOUND_UNMUTE_LABEL } from '../soundMute'"), 'shared mute imports')
+  t.ok(tile.includes('const [soundOff, setSoundOff] = useState(soundMuted())'), 'the tile reads the shared mute initially')
+  t.ok(/useEffect\(\(\) => \{\s*const sync = \(\) => setSoundOff\(soundMuted\(\)\)\s*sync\(\)\s*return onSoundMute\(sync\)\s*\}, \[\]\)/.test(tile), 'the tile synchronizes and unsubscribes on cleanup')
+  t.ok(tile.includes('const silent = muted || soundOff'), 'refusal and shared mute both silence the player')
+  const toggle = tile.match(/const toggleSound = \(\) => \{\s*if \(silent\) \{([\s\S]*?)\} else ([^\n]+)\n {2}\}/)
+  t.ok(toggle, 'the press handler has sound and mute branches')
+  t.is(toggle && toggle[1].trim(), 'control.current?.unmute()\n      setMuted(false)\n      setSoundMuted(false)', 'unmute runs inside the press before clearing refusal and shared mute')
+  t.is(toggle && toggle[2], 'setSoundMuted(true)', 'muting only changes shared sound')
+  const speaker = stage.match(/<Pressable\s+accessibilityRole='button'\s+accessibilityLabel=\{silent \? SOUND_UNMUTE_LABEL : SOUND_MUTE_LABEL\}[^>]*>/g) || []
+  t.is(speaker.length, 1, 'one speaker button')
+  t.ok(speaker.length === 1 && speaker[0].includes('accessibilityState={{ selected: silent }}') && speaker[0].includes('onPress={onSound}') && speaker[0].includes('style={[styles.expandBtn, full ? styles.videoSoundFull : styles.videoSound]}'), 'the speaker announces mute and uses the shared handler on both surfaces')
+  t.ok(stage.includes("<Icon name={silent ? 'mudo' : 'som'} size={22} color='#ffffff' />"), 'the speaker icon follows effective mute')
+  t.ok(/: null\}\s*<Pressable accessibilityRole='button' accessibilityLabel=\{silent \? SOUND_UNMUTE_LABEL : SOUND_MUTE_LABEL\}/.test(stage), 'the speaker stays outside the refusal overlay')
+  const stages = tile.match(/<VideoStage\b[\s\S]*?\/>/g) || []
+  t.is(stages.length, 2, 'inline and full screen stages')
+  t.ok(stages.length === 2 && stages.every((s) => s.includes('silent={silent}') && s.includes('onSound={toggleSound}')), 'both stages receive effective mute and its press handler')
+  for (const name of ['start', 'retry']) {
+    const handler = tile.match(new RegExp('const ' + name + ' = \\(\\) => \\{([\\s\\S]*?)\\n {2}\\}'))
+    t.ok(handler && handler[1].includes('setMuted(false)') && !handler[1].includes('setSoundMuted'), name + ' resets only the playback refusal')
+  }
+  t.ok(src.includes("videoSound: { position: 'absolute', top: 8, left: 60 }") && src.includes("videoSoundFull: { position: 'absolute', top: 8, right: 8 }"), 'the speaker has a position on each surface')
+  t.ok(src.includes("videoChipsOverlay: { position: 'absolute', top: 8, left: 112,"), 'the refusal pill clears both controls')
 })
 
 test('a tap plays the video inside the tile', (t) => {
