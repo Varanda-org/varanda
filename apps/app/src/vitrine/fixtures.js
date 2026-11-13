@@ -168,7 +168,8 @@ export const groups = ['Geral', 'Passeios de bicicleta', 'Geral', 'Organização
       hidden: false,
       media: null,
       name: member.name,
-      username: member.username
+      username: member.username,
+      ...(j === 0 ? { reactions: [{ emoji: '❤️', count: 2, mine: true }, { emoji: '👍', count: 1, mine: false }] } : {})
     }
   })
   const photos = groupPhotos[i] || []

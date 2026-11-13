@@ -73,6 +73,11 @@ import { Btn, ConfirmStack, ErrorText, Notice, Soft, errorText, useAction, useNo
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { Avatar } from '../ui/Avatar'
 import { Bubble } from '../ui/Bubble'
+import { ReactionChips, QuickReactions } from '../ui/Reactions'
+import { ReactionPicker, WhoReacted } from '../ui/ReactionPicker'
+import { toggleOf, applyOptimistic } from '../reactions'
+import { hasRich, parseRich } from '../richText'
+import { cardBesideSpoilers } from '../ui/RichText'
 import { ChatComposer, useLinkDraft } from '../ui/ChatComposer'
 import { cardForSend, withCardFallback } from '../linkCard'
 import { ChatHeader } from '../ui/ChatHeader'
@@ -151,6 +156,21 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   const [settingsOpen, setSettingsOpen] = useState(false)
   // { source, refs } of the message the Encaminhar sheet forwards.
   const [forwarding, setForwarding] = useState(null)
+  const [reactionOverrides, setReactionOverrides] = useState(new Map())
+  const [reactionError, setReactionError] = useState('')
+  const [reactionPicker, setReactionPicker] = useState(null)
+  const [whoReacted, setWhoReacted] = useState(null)
+  const reactionContext = useMemo(() => ({ live: true, sending: new Set(), unsure: new Map(), reading: new Set(), who: 0, read: 0, readStarts: new WeakMap(), settled: new Map() }), [group, ownKey, asPage.key, asPage.page, request])
+  const reactionContextRef = useRef(reactionContext)
+  reactionContextRef.current = reactionContext
+  useEffect(() => {
+    reactionContext.live = true
+    setReactionOverrides(new Map())
+    setReactionError('')
+    setReactionPicker(null)
+    setWhoReacted(null)
+    return () => { reactionContext.live = false }
+  }, [reactionContext])
   // The community of a group this node does not hold yet (from the index),
   // the community's name, and whether a join was refused for lack of one.
   const [indexCommunity, setIndexCommunity] = useState(null)
@@ -244,7 +264,23 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   }, [request, group])
 
   const commitRead = useCallback((read, before) => {
-    setStore((prev) => applyPage(before === null ? EMPTY_PAGES : prev, read, before))
+    const context = reactionContextRef.current
+    setStore((prev) => {
+      const next = applyPage(before === null ? EMPTY_PAGES : prev, read, before)
+      return before !== null && next.stale ? prev : next
+    })
+    const unsure = new Map(context.unsure)
+    setReactionOverrides((prev) => {
+      const next = new Map(prev)
+      for (const item of read.items || []) {
+        const key = item.writer + ':' + item.seq
+        // A read begun before the append cannot replace this device's known state.
+        const recovered = context.readStarts.get(read) > unsure.get(key)
+        if (recovered) context.unsure.delete(key)
+        if ((recovered || !context.sending.has(key)) && context.readStarts.get(read) > context.settled.get(key)) next.delete(key)
+      }
+      return next
+    })
     if (before === null) {
       setMeta({
         sealed: Number.isSafeInteger(read.sealed) ? read.sealed : 0,
@@ -259,8 +295,14 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   // read; a public one, or one the node has not answered for (the service's
   // read gives the role then), from the service's read.
   const readGroup = useCallback(async (before) => {
+    const context = reactionContextRef.current
+    const started = ++context.read
     const op = before ? { group, before } : { group }
-    if (!asPage.page) return request('group.read', op)
+    if (!asPage.page) {
+      const read = await request('group.read', op)
+      context.readStarts.set(read, started)
+      return read
+    }
     const id = asPage.key + ':' + group
     const { read, visibility: seen, noKey, nodeError } = await readAsPage({
       nodeRead: () => request('group.read', { ...op, page: asPage.key }),
@@ -272,6 +314,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     let note = ''
     if (visibility === null) note = seen === 'private' ? PAGE_NO_KEY_TEXT : (nodeError ? pageGroupErrorText(nodeError) : PAGE_GROUP_LOADING_TEXT)
     setPageVisNote(note)
+    context.readStarts.set(read, started)
     return read
   }, [request, group, node, asPage.page, asPage.key])
   const pageVisNow = () => (pageVisRef.current.id === asPage.key + ':' + group ? pageVisRef.current.value : null)
@@ -395,14 +438,14 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
       if (next.stale) {
         await readNewest()
       } else {
-        setStore(next)
+        commitRead(read, before)
       }
     } catch (err) {
       setMoreError(errorText(err))
     } finally {
       setLoadingMore(false)
     }
-  }, [readGroup, loadingMore, readNewest])
+  }, [readGroup, loadingMore, readNewest, commitRead])
 
   const rawItems = useMemo(() => itemsOf(store), [store])
   // The day chips ("hoje", "ontem") follow the clock: the rows are rebuilt
@@ -555,7 +598,9 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     const plain = replyTo ? { group, text, replyTo: { writer: replyTo.writer, seq: replyTo.seq } } : { group, text }
     // Without the group's info its visibility is unknown: no card, so a
     // private group's thumbnail is never uploaded in the clear.
-    const snapshot = heldCard === undefined && info !== null ? linkDraft.take(text) : null
+    let snapshot = heldCard === undefined && info !== null ? linkDraft.take(text) : null
+    const blocks = hasRich(text) ? parseRich(text) : null
+    if (snapshot && cardBesideSpoilers(blocks, { url: snapshot.url }) === null) snapshot = null
     let card = heldCard === undefined ? null : heldCard
     const r = await post.run(async () => {
       const visibility = isPrivate ? 'private' : 'public'
@@ -1055,6 +1100,103 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     }
   }
 
+  const reactionsDisabled = !node.online || node.passkey?.status?.unlocked !== true || meta.state === 'locked' || meta.state === 'rekey-pending' || asPage.page || !reader || orphan || !canWriteHere(info)
+  const reactionViewRef = useRef(null)
+  reactionViewRef.current = { disabled: reactionsDisabled, rawById, overrides: reactionOverrides, picker: reactionPicker, whoOpen: whoReacted !== null }
+  useEffect(() => {
+    if (reactionsDisabled) {
+      reactionContext.who++
+      setReactionPicker(null)
+      setWhoReacted(null)
+    }
+  }, [reactionsDisabled, reactionContext])
+
+  const reactionsFor = (row) => row.hidden ? [] : (reactionOverrides.get(row.key) || row.reactions || [])
+  const whoReactedRows = whoReacted?.map((r) => ({
+    ...r,
+    names: r.by.map((diary) => {
+      const profile = names?.profileOf(diary) || rawItems.find((i) => i.diary === diary && !i.hidden)
+      const title = whoOf(profile).title
+      return displayText(title === UNNAMED ? 'Pessoa' : title)
+    })
+  }))
+
+  function openReactionPicker (key) {
+    if (reactionViewRef.current.disabled || reactionViewRef.current.whoOpen || reactionContext.sending.has(key) || reactionContext.unsure.has(key)) return
+    reactionContext.who++
+    reactionViewRef.current.picker = key
+    setReactionPicker(key)
+  }
+
+  async function toggleReaction (key, picked) {
+    const context = reactionContext
+    const view = reactionViewRef.current
+    const item = view.rawById.get(key)
+    if (!context.live || context !== reactionContextRef.current || view.disabled || !item || item.hidden || context.sending.has(key) || context.unsure.has(key)) return
+    const before = view.overrides.get(key)
+    const reactions = before || item.reactions || []
+    const emoji = toggleOf(reactions, picked)
+    const target = { writer: item.writer, seq: item.seq }
+    context.sending.add(key)
+    context.settled.delete(key)
+    setReactionError('')
+    setReactionOverrides((prev) => new Map(prev).set(key, applyOptimistic(reactions, emoji)))
+    try {
+      try {
+        await request('group.react', { group, target, emoji })
+      } catch (err) {
+        if (context.live && context === reactionContextRef.current) {
+          context.unsure.set(key, context.read)
+          context.settled.set(key, context.read)
+          setReactionOverrides((prev) => {
+            const next = new Map(prev)
+            if (before === undefined) next.delete(key)
+            else next.set(key, before)
+            return next
+          })
+          setReactionError(errorText(err))
+          await readNewest().catch(() => {})
+        }
+        return
+      }
+      if (!context.live || context !== reactionContextRef.current) return
+      context.settled.set(key, context.read)
+    } finally {
+      context.sending.delete(key)
+      // The ref-held flight must repaint so the chips become pressable again.
+      if (context.live && context === reactionContextRef.current) setReactionOverrides((prev) => new Map(prev))
+    }
+  }
+
+  async function showReactors (key, emoji) {
+    const context = reactionContext
+    const view = reactionViewRef.current
+    const item = view.rawById.get(key)
+    if (!context.live || context !== reactionContextRef.current || view.disabled || view.picker !== null || view.whoOpen || !item || item.hidden || context.reading.has(key) || context.sending.has(key) || context.unsure.has(key)) return
+    context.reading.add(key)
+    const ticket = ++context.who
+    setReactionError('')
+    try {
+      const result = await request('group.reactors', { group, target: { writer: item.writer, seq: item.seq } })
+      if (!context.live || context !== reactionContextRef.current || ticket !== context.who || reactionViewRef.current.disabled) return
+      const current = reactionViewRef.current
+      if (current.picker !== null || current.whoOpen || !current.rawById.has(key) || current.rawById.get(key).hidden) return
+      const rows = (result.reactions || []).filter((r) => !emoji || r.emoji === emoji).map((r) => ({
+        emoji: r.emoji,
+        count: r.count,
+        by: r.by || []
+      }))
+      const unknown = [...new Set(rows.flatMap((r) => r.by))].filter((diary) => namesRef.current?.profileOf(diary) === undefined)
+      if (unknown.length > 0) namesRef.current?.resolveMany(unknown)
+      current.whoOpen = true
+      setWhoReacted(rows)
+    } catch (err) {
+      if (context.live && context === reactionContextRef.current && ticket === context.who) setReactionError(errorText(err))
+    } finally {
+      context.reading.delete(key)
+    }
+  }
+
   if (!hosted) {
     return (
       <View style={styles.root}>
@@ -1180,6 +1322,9 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   const actionsOf = (row) => {
     const mine = row.mine === true
     const list = []
+    if (!row.hidden && reactionsFor(row).length > 0) {
+      list.push({ icon: 'gente', label: 'Ver quem reagiu', disabled: reactionsDisabled || reactionContext.sending.has(row.key) || reactionContext.unsure.has(row.key), onPress: () => showReactors(row.key) })
+    }
     if (!asPage.page && canPost && !row.hidden) {
       list.push({ icon: 'responder', label: 'Responder', onPress: () => { setReplyKey(row.key); setReplyQuote(quoteOf(row.key)) } })
     }
@@ -1243,6 +1388,10 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
         quote={quote ? { ...quote, onPress: () => scrollToKey(row.replyTo) } : null}
         actions={actionsOf(row)}
         actionsTitle={mine ? undefined : who.title}
+        below={<ReactionChips reactions={reactionsFor(row)} disabled={reactionsDisabled || reactionContext.sending.has(row.key) || reactionContext.unsure.has(row.key)} onToggle={(emoji) => toggleReaction(row.key, emoji)} onShowWho={(emoji) => showReactors(row.key, emoji)} />}
+        actionsHeader={!row.hidden && !reactionsDisabled && !reactionContext.sending.has(row.key) && !reactionContext.unsure.has(row.key)
+          ? ({ closeThen }) => <QuickReactions mine={reactionsFor(row).find((r) => r.mine)?.emoji} onPick={(emoji) => closeThen(() => toggleReaction(row.key, emoji))} onMore={() => closeThen(() => openReactionPicker(row.key))} />
+          : null}
         onOpenMention={typeof onOpenMention === 'function' ? onOpenMention : undefined}
       />
     )
@@ -1357,11 +1506,11 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
         data={reader ? rows : []}
         keyExtractor={(row) => row.key}
         renderItem={renderItem}
-        extraData={{ role, rawById, names, canPost, replyKey }}
+        extraData={{ role, rawById, names, canPost, replyKey, reactionOverrides, reactionsDisabled }}
         contentContainerStyle={styles.thread}
         ListHeaderComponent={stateNotes}
         ListEmptyComponent={empty}
-        ListFooterComponent={<View>{act.error ? <View style={styles.note}><ErrorText>{act.error}</ErrorText></View> : null}{banNote}{checkNote}</View>}
+        ListFooterComponent={<View>{reactionError ? <View style={styles.note}><ErrorText>{reactionError}</ErrorText></View> : null}{act.error ? <View style={styles.note}><ErrorText>{act.error}</ErrorText></View> : null}{banNote}{checkNote}</View>}
         onRefresh={() => { setLookupTick((n) => n + 1); load(true) }}
         refreshing={refreshing}
         keepVisiblePosition
@@ -1370,6 +1519,12 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
         onUserScroll={releaseEnd}
       />
       {composer}
+      <ReactionPicker
+        open={reactionPicker !== null && !reactionsDisabled && !reactionContext.sending.has(reactionPicker) && !reactionContext.unsure.has(reactionPicker)}
+        onClose={() => setReactionPicker(null)}
+        onPick={(emoji) => { const key = reactionPicker; setReactionPicker(null); if (key !== null) toggleReaction(key, emoji) }}
+      />
+      <WhoReacted open={whoReacted !== null && !reactionsDisabled} onClose={() => { reactionContext.who++; setWhoReacted(null) }} rows={whoReactedRows} />
       {!asPage.page
         ? (
           <ForwardSheet

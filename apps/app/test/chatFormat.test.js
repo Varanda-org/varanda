@@ -4,7 +4,6 @@ const test = require('brittle')
 const { readFileSync } = require('node:fs')
 const { join } = require('node:path')
 const { runInNewContext } = require('node:vm')
-const { displayText } = require('@varanda/rpc')
 
 const read = (file) => readFileSync(join(__dirname, '../src', file), 'utf8')
 
@@ -177,31 +176,38 @@ test('all four node preview sites use plainPreview before flattening', (t) => {
 
 test('group replies strip styles and hide spoilers before the 90 code point cut', async (t) => {
   const { replyPreview } = await import('../src/group-screen.js')
-  const preview = (text) => replyPreview({ replyTo: 'writer:1' }, new Map([['writer:1', { name: 'Ana', text }]])).text
+  const { quoteText } = await import('../src/chatPreview.js')
+  const preview = (text) => quoteText(replyPreview({ replyTo: 'writer:1' }, new Map([['writer:1', { name: 'Ana', text }]])).text)
   t.is(preview('*forte* _leve_ ~risco~ `código` ||segredo||'), 'forte leve risco código spoiler')
   t.is(preview('```js\nconst x = 1\nreturn x\n```'), 'const x = 1')
   t.is(preview('*' + '😀'.repeat(91) + '*'), '😀'.repeat(90), 'strip before clipping, preserve code points')
   t.is(preview('a'.repeat(85) + ' ||' + 'segredo'.repeat(20) + '||'), 'a'.repeat(85) + ' spoi', 'a spoiler crossing the cut stays hidden')
-  const src = read('group-screen.js')
-  t.ok(src.indexOf('plainOf(target.text)') < src.indexOf('.slice(0, 90)'), 'plainOf precedes the app cut')
+  const src = read('chatPreview.js')
+  t.ok(src.indexOf('plainOf(text)') >= 0 && src.indexOf('plainOf(text)') < src.indexOf('.slice(0, 90)'), 'quoteText parses the full text before the app cut')
 })
 
-test('ReplyPreview strips styles and hides quoted spoilers before display and line clipping', async (t) => {
-  const { plainOf } = await import('../src/richText.js')
+test('ReplyPreview uses one plain quote for display and accessibility', async (t) => {
+  const { quoteText } = await import('../src/chatPreview.js')
   const src = read('ui/ReplyPreview.js')
-  t.ok(src.includes("import { plainOf } from '../richText'"))
-  t.ok(src.includes('displayText(plainOf(text), { multiline: true })'))
+  t.ok(src.includes("import { quoteText } from '../chatPreview'"))
+  t.ok(src.includes('const shownText = quoteText(text)'))
   t.ok(src.includes('<Text style={styles.text} numberOfLines={lines}>{shownText}</Text>'))
+  t.ok(src.includes("accessibilityLabel={(shownName ? shownName + ': ' : '') + shownText}"))
   // Execute the component's displayed expression without loading React Native.
   const match = src.match(/const shownText = ([^\n]+)/)
   t.ok(match)
   if (!match) return
-  const preview = runInNewContext('(text) => ' + match[1], { displayText, plainOf })
+  const preview = runInNewContext('(text) => ' + match[1], { quoteText })
   for (const [text, expected] of [
     ['*forte* _leve_ ~risco~ `código` ||segredo||', 'forte leve risco código spoiler'],
     ['```js\nconst x = 1\nreturn x\n```', 'const x = 1'],
     ['oi ||segredo||', 'oi spoiler'],
     ['oi\u202e\ud800', 'oi\ufffd\ufffd'],
-    [null, '']
+    [null, ''],
+    [42, ''],
+    ['Oi\n\nTudo bem?', 'Oi Tudo bem?'],
+    ['um\rdois\u2028três\u2029quatro', 'um dois três quatro'],
+    ['a'.repeat(89) + '\u202e' + 'fim', 'a'.repeat(89) + '\ufffd'],
+    ['😀'.repeat(91), '😀'.repeat(90)]
   ]) t.is(preview(text), expected)
 })

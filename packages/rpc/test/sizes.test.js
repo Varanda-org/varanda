@@ -41,6 +41,9 @@ const {
   GROUP_LIMIT_DEFAULT,
   GROUP_LIMIT_MAX,
   GROUP_MEMBERS_LIMIT_MAX,
+  GROUP_REACTIONS_MAX,
+  GROUP_REACTORS_MAX,
+  REACTION_MAX_BYTES,
   MAX_GROUP_NAME,
   MAX_GROUPS_PER_COMMUNITY,
   COMMUNITY_LIST_MAX,
@@ -349,8 +352,16 @@ test('follow.list: FOLLOW_LIMIT_MAX keys fit with a wide margin', (t) => {
   t.ok(s * 4 < MAX_MESSAGE)
 })
 
-function groupReadResult (n, ch, media, card = null) {
-  const item = { writer: HEX, diary: HEX, seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { writer: HEX, seq: SEQ }, fwd: 1, media, card, hidden: false, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20) }
+// The widest reaction on the wire: isReaction caps it at REACTION_MAX_BYTES
+// of UTF-8 and JSON escapes none of its code points, so an ASCII stand-in of
+// that length weighs the same. A count is at most a safe integer.
+const WORST_EMOJI = 'e'.repeat(REACTION_MAX_BYTES)
+const WORST_REACTIONS = Array(GROUP_REACTIONS_MAX).fill({ emoji: WORST_EMOJI, count: SEQ, mine: false })
+
+// Every item carries the compact reaction summary, GROUP_REACTIONS_MAX of the
+// widest ones (`reactions` null leaves it out).
+function groupReadResult (n, ch, media, card = null, reactions = WORST_REACTIONS) {
+  const item = { writer: HEX, diary: HEX, seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { writer: HEX, seq: SEQ }, fwd: 1, media, card, hidden: false, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), ...(reactions === null ? {} : { reactions }) }
   return { items: Array(n).fill(item), next: { at: AT, writer: HEX, seq: SEQ }, hidden: SEQ, incomplete: true, sealed: SEQ, epoch: { writer: HEX, seq: SEQ }, state: 'rekey-pending' }
 }
 
@@ -383,8 +394,8 @@ test('group.read: GROUP_LIMIT_MAX with private media fits, one more does not', (
   const worst = size(groupReadResult(GROUP_LIMIT_MAX, '\ud800', media))
   const overflow = size(groupReadResult(GROUP_LIMIT_MAX + 1, '\ud800', media))
   t.ok(worst < size(groupReadResult(GROUP_LIMIT_MAX, '\ud800', null, PRIVATE_CARD)))
-  t.is(worst, 257717)
-  t.is(overflow, 266590)
+  t.is(worst, 259854)
+  t.is(overflow, 269833)
   t.comment('group.read worst private item: ' + utf8ByteLength(JSON.stringify(item)) + ' bytes')
   t.comment('group.read worst case at ' + GROUP_LIMIT_MAX + ' items: ' + worst + ' bytes')
   t.comment('group.read worst case at ' + (GROUP_LIMIT_MAX + 1) + ' items: ' + overflow + ' bytes')
@@ -521,8 +532,9 @@ test('ten public descriptors outweigh a maximal card; four do not', (t) => {
   t.ok(size(groupReadResult(1, '\ud800', GROUP_MEDIA, null)) < size(groupReadResult(1, '\ud800', null, CARD)), 'a card exceeds four group media items')
 })
 
-test('group.read: maximal private cards fit, one more does not', (t) => {
-  t.is(GROUP_LIMIT_MAX, 29)
+test('group.read: maximal private cards and reaction summaries fit, one more does not', (t) => {
+  t.is(GROUP_LIMIT_MAX, 26)
+  t.is(GROUP_REACTIONS_MAX, 12)
   for (const ch of WORST) {
     const worst = groupReadResult(GROUP_LIMIT_MAX, ch, null, PRIVATE_CARD)
     t.ok(size(worst) <= MAX_MESSAGE)
@@ -530,9 +542,30 @@ test('group.read: maximal private cards fit, one more does not', (t) => {
   }
   const worst = size(groupReadResult(GROUP_LIMIT_MAX, '\ud800', null, PRIVATE_CARD))
   const overflow = size(groupReadResult(GROUP_LIMIT_MAX + 1, '\ud800', null, PRIVATE_CARD))
-  t.is(worst, 259979)
-  t.is(overflow, 268930)
+  t.is(worst, 261882)
+  t.is(overflow, 271939)
   t.ok(overflow > MAX_MESSAGE)
+  t.is(utf8ByteLength(JSON.stringify(WORST_REACTIONS)), 1093, 'twelve maximal summaries')
+  // Without reactions the page would still hold 29 items, as before.
+  t.ok(size(groupReadResult(29, '\ud800', null, PRIVATE_CARD, null)) <= MAX_MESSAGE)
+  t.comment('group.read worst case with reactions at ' + GROUP_LIMIT_MAX + ' items: ' + worst + ' bytes, ' + (GROUP_LIMIT_MAX + 1) + ': ' + overflow)
+})
+
+// The who-reacted answer for one message: every emoji it may carry, each
+// with GROUP_REACTORS_MAX diary keys.
+function whoReactedResult (k) {
+  return { reactions: Array(GROUP_REACTIONS_MAX).fill({ emoji: WORST_EMOJI, count: SEQ, by: Array(k).fill(HEX) }) }
+}
+
+test('who reacted: GROUP_REACTORS_MAX keys per emoji fit, one more does not', (t) => {
+  t.is(GROUP_REACTORS_MAX, 324)
+  const worst = size(whoReactedResult(GROUP_REACTORS_MAX))
+  const overflow = size(whoReactedResult(GROUP_REACTORS_MAX + 1))
+  t.is(worst, 261574)
+  t.is(overflow, 262378)
+  t.ok(worst <= MAX_MESSAGE)
+  t.ok(overflow > MAX_MESSAGE, 'largest that fits')
+  t.comment('who reacted worst case at ' + GROUP_REACTORS_MAX + ' keys per emoji: ' + worst + ' bytes')
 })
 
 test('page.feed: maximal media lists fit the shared feed limit', (t) => {
@@ -605,6 +638,6 @@ test('a maximal video pair is smaller than ten maximal descriptors: page maxima 
   }
   t.is(FEED_LIMIT_MAX, 26)
   t.is(LOG_LIMIT_MAX, 30)
-  t.is(GROUP_LIMIT_MAX, 29)
+  t.is(GROUP_LIMIT_MAX, 26)
   t.is(PEEK_SEQS_MAX, 29)
 })

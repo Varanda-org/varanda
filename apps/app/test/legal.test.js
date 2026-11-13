@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 39)
+  t.is(LEGAL_VERSION, 40)
   t.is(LEGAL_DATE, '12/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 39, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 40, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: version 39 describes music through the account service', async (t) => {
@@ -170,7 +170,25 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '9f9445d5ca39c016cfc837853fc7e67da27b051735ab8e707aa1ada322959757', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'ed0faba80934602a0cbc01b59a79bf3fa52e63ac3a63f7adf6af7d792358afc7', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+})
+
+test('legal: version 40 describes group reactions and chat formatting, not conversation reactions', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const doc of [TERMS, PRIVACY]) {
+    t.ok(text(doc).includes('o emoji, a mensagem a que se refere, a hora e a sua conta como autora'), doc.title + ': what a reaction carries')
+    t.ok(text(doc).includes('Num grupo privado, o emoji e a mensagem a que ele se refere são cifrados como as mensagens'), doc.title + ': private group reactions are sealed')
+    t.ok(text(doc).includes('ainda vê qual conta escreveu o registro, quando e de que tamanho ele é'), doc.title + ': private group author, time and size stay visible')
+    t.ok(text(doc).includes('o tamanho pode indicar que é uma reação e qual emoji ela leva'), doc.title + ': the size can suggest a reaction')
+    t.ok(text(doc).includes('cópias que outras pessoas já receberam podem continuar existindo'), doc.title + ': removal leaves copies')
+    t.ok(text(doc).includes('As mensagens diretas ainda não têm reações'), doc.title + ': no conversation reactions yet')
+    t.ok(text(doc).includes('sem indicação de leitura, de entrega ou de que alguém está digitando'), doc.title + ': no read, delivery or typing indicator')
+    t.ok(text(doc).includes('é só apresentação'), doc.title + ': formatting is presentation only')
+    t.absent(/rea(?:ç\p{L}*|g\p{L}*) (?:a|em|nas?|às?) (?:uma |as )?mensage(?:m|ns) diretas?/iu.test(text(doc)), doc.title + ': no reacting in direct messages')
+  }
+  t.ok(text(PRIVACY).includes('As reações são guardadas e removidas como as mensagens do grupo em que foram publicadas'), 'retention of reactions')
+  t.ok(text(PRIVACY).includes('as reações nos grupos'), 'legal basis of reactions')
 })
 
 test('legal: version 19 describes extra passkeys and the recovery code for the same account', async (t) => {

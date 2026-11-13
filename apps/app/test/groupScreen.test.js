@@ -102,27 +102,27 @@ test('replyPreview uses only loaded targets and hides both content and name', as
   t.alike(replyPreview(reply, byRef), { name: '', text: HIDDEN_LABEL })
 })
 
-test('replyPreview collapses line breaks and escapes names and lone surrogates', async (t) => {
+test('replyPreview escapes names and preserves raw text for the single UI parse', async (t) => {
   const { replyPreview } = await load()
   const preview = (target) => replyPreview({ replyTo: { writer: A, seq: 1 } }, new Map([[A + ':1', target]]))
   t.alike(preview({ name: 'Ana\u202e', text: 'um\r\n\ndois\rtrês\u2028quatro\u2029cinco\u0000\ud800' }), {
     name: 'Ana\ufffd',
-    text: 'um dois três quatro cinco\ufffd\ufffd'
+    text: 'um\r\n\ndois\rtrês\u2028quatro\u2029cinco\u0000\ud800'
   })
   t.is(preview({ username: 'bia', text: '' }).name, 'bia', 'a known username supplies the name')
   t.is(preview({ name: '@Ana', text: null }).name, 'Ana')
   t.is(preview({}).text, '')
-  t.is(preview({ text: 'a'.repeat(89) + '\ud800' + 'z' }).text, 'a'.repeat(89) + '\ufffd')
-  t.is(preview({ text: 'a'.repeat(89) + '\udc00' + 'z' }).text, 'a'.repeat(89) + '\ufffd')
+  t.is(preview({ text: 'a'.repeat(89) + '\ud800' + 'z' }).text, 'a'.repeat(89) + '\ud800' + 'z')
+  t.is(preview({ text: 'a'.repeat(89) + '\udc00' + 'z' }).text, 'a'.repeat(89) + '\udc00' + 'z')
 })
 
-test('replyPreview clips at 90 code points without splitting an emoji', async (t) => {
+test('replyPreview leaves line clamping to the UI without cutting raw markup', async (t) => {
   const { replyPreview } = await load()
   const preview = (text) => replyPreview({ replyTo: A + ':1' }, new Map([[A + ':1', { name: 'Ana', text }]])).text
-  t.is(preview('a'.repeat(89) + '😀' + 'z'), 'a'.repeat(89) + '😀')
-  t.is(preview('😀'.repeat(91)), '😀'.repeat(90))
+  t.is(preview('a'.repeat(89) + '😀' + 'z'), 'a'.repeat(89) + '😀' + 'z')
+  t.is(preview('😀'.repeat(91)), '😀'.repeat(91))
   t.is(preview('a'.repeat(90)), 'a'.repeat(90))
-  t.is(preview('a'.repeat(89) + '\r\n' + 'z'), 'a'.repeat(89) + ' ', 'line breaks collapse before clipping')
+  t.is(preview('a'.repeat(89) + '\r\n' + 'z'), 'a'.repeat(89) + '\r\n' + 'z', 'line breaks stay for the UI')
 })
 
 test('groupRows takes the clock, so a day change relabels hoje as ontem', async (t) => {
@@ -243,4 +243,29 @@ test('a lying service read never gets a private page post sent in the clear', as
   t.is(visibility, 'public')
   await postAsPage({ visibility, group: G, text: 'oi', seal: async () => { throw new Error('no seal') }, send: async (action, op) => sent.push({ action, op }), plain: async () => sent.push({ action: 'group-post' }) })
   t.alike(sent, [{ action: 'group-post' }])
+})
+
+test('groupRows copies compact reactions only onto visible rows', async (t) => {
+  const { groupRows } = await load()
+  const reactions = Object.freeze([Object.freeze({ emoji: '👍', count: 2, mine: true, by: [A] })])
+  const rows = groupRows([message(A, 2, 1000, { hidden: true, reactions }), message(A, 1, 0, { reactions })], A)
+  t.alike(rows[0].reactions, [{ emoji: '👍', count: 2, mine: true }])
+  t.not(rows[0].reactions, reactions)
+  t.absent(Object.hasOwn(rows[1], 'reactions'))
+  t.absent(Object.hasOwn(groupRows([message(A, 1)], A)[0], 'reactions'))
+})
+
+test('group quotes parse code and spoilers once at the UI boundary', async (t) => {
+  const { replyPreview } = await load()
+  const { plainOf } = await import('../src/richText.js')
+  const preview = (text) => replyPreview({ replyTo: A + ':1' }, new Map([[A + ':1', { text }]])).text
+  t.is(plainOf(preview('`*x*`')), '*x*')
+  t.is(plainOf(preview('a ||segredo|| b')), 'a spoiler b')
+  t.absent(plainOf(preview('a ||segredo|| b')).includes('segredo'))
+})
+
+test('groupRows ignores null and primitive reaction entries', async (t) => {
+  const { groupRows } = await load()
+  const reactions = [null, '👍', { emoji: '👍', count: 2, mine: false }]
+  t.alike(groupRows([message(A, 1, 0, { reactions })], A)[0].reactions, [{ emoji: '👍', count: 2, mine: false }])
 })

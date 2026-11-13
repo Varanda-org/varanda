@@ -1435,10 +1435,14 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
         }
       }
       const start = Math.max(0, posts.length - n)
-      const items = posts.slice(start).reverse().map((x) => ({
+      // rpc.md 5.40's compact summary: the fold's `by` lists would outgrow
+      // a read (500 reactors on 32 posts is over 1 MiB), so never forwarded.
+      const items = posts.slice(start).reverse().map(({ reactions, ...x }) => ({
         ...x,
+        ...(Array.isArray(reactions) && reactions.length > 0 ? { reactions: reactions.map((r) => ({ emoji: r.emoji, count: r.count, mine: r.by.includes(page) })) } : {}),
         text: x.hidden ? '' : x.text,
         media: x.hidden || !x.media ? null : x.media.map((media) => ({ ...media })),
+        card: x.hidden || !x.card ? null : x.card,
         ...loaded.profiles.get(x.diary)
       }))
       const last = items[items.length - 1]

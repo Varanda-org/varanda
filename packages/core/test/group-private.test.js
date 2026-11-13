@@ -8,7 +8,8 @@ const {
   MAX_KEY_RECIPIENTS, MAX_KEY_BASIS,
   validateGroupRecord, validateWriterHeader, validateGroupHeader, isWeakBoxKey,
   groupHeader, writerHeader, groupPost, groupHide, groupMeta, groupAdmit, groupBan, groupAdmin, groupLeave,
-  groupKey, groupSealed, sealedInner, communityAdmit, communityBan, buildGroup, buildCommunity, groupInvites, communityInvites
+  groupKey, groupSealed, sealedInner, communityAdmit, communityBan, buildGroup, buildCommunity, groupInvites, communityInvites,
+  groupReact
 } = require('../lib/group')
 const { community } = require('./helpers/groups')
 const { newBoxKeyPair, newEpochKey, sealEpochKey, openFrom, sealRecord, keyTag, keyCommit } = require('../lib/group-crypto')
@@ -2271,4 +2272,156 @@ test('a sealed text forward keeps its flag through buildGroup', (t) => {
   t.is(post.text, 'encaminhada')
   t.is(post.fwd, 1)
   t.absent(post.media)
+})
+
+test('a sealed reaction round trip: opened, folded and counted as sealed without the key', (t) => {
+  const w = pworld()
+  const p = sealedPost(w, wX, w.E1, 6)
+  const THUMBS = '\u{1f44d}'
+  const HEART = '\u2764\ufe0f'
+  const plain = groupReact({ target: p, emoji: THUMBS, at: AT(7) })
+  t.is(validateGroupRecord(plain, 2, { private: true }), 'sealed-only', 'never in the clear in a private group')
+  w.push(wY, plain)
+  w.seal(wY, w.E1, groupReact({ target: p, emoji: HEART, at: AT(8) }))
+  w.seal(wA, w.E1, groupReact({ target: p, emoji: THUMBS, at: AT(9) }))
+  const g = buildGroup(w.input(w.reader(wX)))
+  t.alike(visible(g), [wX + ':1'])
+  t.alike(g.posts[0].reactions, [{ emoji: HEART, count: 1, by: [Y] }, { emoji: THUMBS, count: 1, by: [A] }])
+  // Taken back under the same epoch.
+  w.seal(wA, w.E1, groupReact({ target: p, emoji: '', at: AT(10) }))
+  t.alike(buildGroup(w.input(w.reader(wY))).posts[0].reactions, [{ emoji: HEART, count: 1, by: [Y] }])
+  const none = buildGroup(w.input())
+  t.alike(none.posts, [])
+  t.is(none.sealed, 5, 'meta, the post and three reactions stay sealed')
+  // A non-member's sealed reaction is ignored.
+  w.add(B, wB)
+  w.seal(wB, w.E1, groupReact({ target: p, emoji: '\u{1f525}', at: AT(11) }))
+  const g2 = buildGroup(w.input(w.reader(wX)))
+  t.is(g2.members.get(B), 'requested')
+  t.alike(g2.posts[0].reactions, [{ emoji: HEART, count: 1, by: [Y] }])
+})
+
+test('a sealed seen that reorders a leave after a rejoin never drops an admitted member reaction', (t) => {
+  const w = pworld()
+  const THUMBS = '\u{1f44d}'
+  const q = sealedPost(w, wX, w.E1, 6)
+  w.add(Y, wY2)
+  w.push(G, groupAdmit({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }, { writer: wY2, seq: 1 }], at: AT(7) }))
+  const l1 = leaveOn(w, wY, 10)
+  w.add(Y, wY3, { rejoin: l1, at: 30 })
+  // P's envelope sorts at its time (25) in the plaintext pass; opened, its
+  // seen puts it after the rejoin, and the concurrent leave naming P with it.
+  const p = w.seal(wX, w.E1, groupPost({ text: 'p', seen: { writer: wY3, seq: 0 }, at: AT(25) }))
+  w.push(wY2, groupLeave({ seen: p, cuts: [{ writer: wY2, seq: w.len(wY2) }], at: AT(26) }))
+  w.push(G, groupAdmit({ member: Y, on: true, cuts: [{ writer: wY3, seq: 1 }, { writer: wY2, seq: w.len(wY2) }], at: AT(40) }))
+  w.seal(wY3, w.E1, groupReact({ target: q, emoji: THUMBS, at: AT(50) }))
+  const blind = buildGroup(w.input())
+  const g = buildGroup(w.input(w.reader(wX)))
+  t.is(blind.members.get(Y), 'member', 'without the key')
+  t.is(g.members.get(Y), 'member', 'with the key')
+  t.alike(g.posts.find((x) => x.writer === q.writer && x.seq === q.seq).reactions, [{ emoji: THUMBS, count: 1, by: [Y] }])
+})
+
+// A reaction sealed so that a reader from before group-react sees, at the
+// same writer and seq, an envelope it cannot open: same kid and `at`, so the
+// same plaintext edges, under a key nobody holds.
+function sealReact (w, olds, writer, kid, record) {
+  const ref = w.seal(writer, kid, record)
+  const { nonce, box } = sealRecord(sealedInner(record, { writer, group: G, kid }), newEpochKey())
+  olds.set(writer + ':' + ref.seq, groupSealed({ kid, nonce, box, at: record.at }))
+  return ref
+}
+function asOldReader (input, olds) {
+  const swap = (core) => ({ ...core, entries: core.entries.map((e) => olds.has(core.key + ':' + e.seq) ? { ...e, record: olds.get(core.key + ':' + e.seq) } : e) })
+  return { ...input, root: swap(input.root), writers: input.writers.map(swap) }
+}
+// Everything but the reactions, the count of envelopes left sealed (an old
+// reader counts each reaction there) and `last` (which skips reactions).
+const withoutReactions = (g) => normalize({ ...g, sealed: null, last: null, posts: g.posts.map(({ reactions, ...p }) => p) })
+const postAt = (g, ref) => g.posts.find((p) => p.writer === ref.writer && p.seq === ref.seq)
+
+// Old and new reader of the same blocks: equal but for reactions, `sealed`
+// short by exactly the reactions that open, and a `last` that is the old
+// reader's unless that names a reaction.
+function sameAsOld (t, w, olds, label) {
+  const input = w.input(w.reader(wX))
+  const g = buildGroup(input)
+  const old = buildGroup(asOldReader(input, olds))
+  t.is(withoutReactions(g), withoutReactions(old), label + ': same fold as an old reader')
+  t.is(old.sealed - g.sealed, olds.size, label + ': only the reactions differ in sealed')
+  t.ok(g.last === null || !olds.has(g.last.writer + ':' + g.last.seq), label + ': last names no reaction')
+  if (old.last === null || !olds.has(old.last.writer + ':' + old.last.seq)) t.alike(g.last, old.last, label + ': same last')
+  return g
+}
+
+test('a sealed reaction never moves a sealed hide: old and new readers agree', (t) => {
+  for (const sawHide of [true, false]) {
+    const w = pworld()
+    const olds = new Map()
+    const p1 = sealedPost(w, wY, w.E1, 6)
+    const p2 = sealedPost(w, wY, w.E1, 7)
+    const hide = w.seal(wA, w.E1, groupHide({ target: p1, on: true, at: AT(20) }))
+    const r = sealReact(w, olds, wX, w.E1, groupReact({ target: p2, emoji: '\u{1f44d}', seen: sawHide ? hide : null, at: AT(15) }))
+    w.seal(G, w.E1, groupHide({ target: p1, on: false, seen: r, at: AT(16) }))
+    const g = sameAsOld(t, w, olds, 'saw the hide: ' + sawHide)
+    t.is(postAt(g, p1).hidden, true, 'the hide at 20 is the latest')
+    t.alike(postAt(g, p2).reactions, [{ emoji: '\u{1f44d}', count: 1, by: [X] }])
+  }
+})
+
+function rng (seed) {
+  return () => {
+    seed = (seed + 0x6d2b79f5) | 0
+    let x = Math.imul(seed ^ (seed >>> 15), 1 | seed)
+    x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+test('sealed reactions take no part in the fold of any other record (generated logs)', (t) => {
+  let counted = 0
+  for (let seed = 1; seed <= 25; seed++) {
+    const rand = rng(seed)
+    const pick = (a) => a[Math.floor(rand() * a.length)]
+    const w = pworld()
+    const olds = new Map()
+    const all = []
+    const targets = [sealedPost(w, wY, w.E1, 6)]
+    let ban = null
+    for (let i = 0; i < 36; i++) {
+      const at = AT(7 + Math.floor(rand() * 40))
+      const seen = all.length > 0 && rand() < 0.75 ? pick(all) : null
+      const by = pick([G, wA, wX, wY])
+      const k = rand()
+      let ref
+      if (k < 0.3) {
+        ref = w.seal(by, w.E1, groupPost({ text: 'p' + i, replyTo: rand() < 0.3 ? pick(targets) : null, seen, at }))
+        targets.push(ref)
+      } else if (k < 0.65) {
+        ref = sealReact(w, olds, by, w.E1, groupReact({ target: pick(targets), emoji: pick(['\u{1f44d}', '❤️', '']), seen, at }))
+      } else if (k < 0.82) {
+        ref = w.seal(pick([G, wA, by]), w.E1, groupHide({ target: pick(targets), on: rand() < 0.6, seen, at }))
+      } else if (k < 0.9) {
+        ref = w.push(pick([G, wA]), groupAdmit({ member: pick([X, Y]), on: rand() < 0.8, cuts: [{ writer: wX, seq: w.len(wX) }], seen, at }))
+      } else {
+        ref = ban === null
+          ? (ban = w.push(G, groupBan({ member: Y, on: true, cuts: [{ writer: wY, seq: w.len(wY) }], seen, at })))
+          : w.push(G, groupBan({ member: Y, on: false, cuts: [{ writer: wY, seq: w.len(wY) }], lifts: ban, seen, at }))
+        if (ref !== ban) ban = null
+      }
+      all.push(ref)
+    }
+    const g = sameAsOld(t, w, olds, 'seed ' + seed)
+    counted += g.posts.reduce((n, p) => n + (p.reactions || []).length, 0)
+  }
+  t.ok(counted > 0, 'some reactions count')
+})
+
+test('last never names a sealed reaction', (t) => {
+  const w = pworld()
+  const p = sealedPost(w, wX, w.E1, 6)
+  w.seal(wY, w.E1, groupReact({ target: p, emoji: '\u{1f44d}', at: AT(9) }))
+  const g = buildGroup(w.input(w.reader(wX)))
+  t.alike(g.last, p)
+  t.alike(g.posts[0].reactions, [{ emoji: '\u{1f44d}', count: 1, by: [Y] }])
 })
