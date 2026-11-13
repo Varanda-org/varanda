@@ -72,6 +72,9 @@ export function createVitrineRequest (fixtures, options) {
   const communityOf = (key) => data.communities.find((c) => c.community === key) || refuse('NOT_FOUND', 'comunidade não encontrada')
   const groupReactors = new Map()
   const reactionKey = (group, target) => group + ':' + target.writer + ':' + target.seq
+  // As the core fold: every member's reaction is kept, and only the 12
+  // emojis with the most reactors (ties by emoji) are shown.
+  const shownReactions = (rows) => rows.slice().sort((a, b) => b.count - a.count || compareText(a.emoji, b.emoji)).slice(0, GROUP_REACTIONS_MAX)
   for (const g of data.groups) {
     for (const item of g.items) {
       const others = data.members.filter((m) => m.author !== data.own).map((m) => m.author)
@@ -661,15 +664,16 @@ export function createVitrineRequest (fixtures, options) {
         row.by.push(data.own)
         row.count++
       }
-      const next = rows.filter((r) => r.count > 0).sort((a, b) => b.count - a.count || compareText(a.emoji, b.emoji)).slice(0, GROUP_REACTIONS_MAX)
+      const next = rows.filter((r) => r.count > 0)
       groupReactors.set(key, next)
-      if (next.length) item.reactions = next.map(({ emoji, count, by }) => ({ emoji, count, mine: by.includes(data.own) }))
+      const shown = shownReactions(next)
+      if (shown.length) item.reactions = shown.map(({ emoji, count, by }) => ({ emoji, count, mine: by.includes(data.own) }))
       else delete item.reactions
       return { ok: true }
     },
     'group.reactors': ({ group, target }) => {
       reactionPost(group, target)
-      return { reactions: (groupReactors.get(reactionKey(group, target)) || []).map(({ emoji, count, by }) => ({ emoji, count, by: by.slice(0, GROUP_REACTORS_MAX) })) }
+      return { reactions: shownReactions(groupReactors.get(reactionKey(group, target)) || []).map(({ emoji, count, by }) => ({ emoji, count, by: by.slice(0, GROUP_REACTORS_MAX) })) }
     },
     'group.rekey': ({ group }) => {
       const g = groupOf(group)

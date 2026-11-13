@@ -1468,3 +1468,24 @@ test('a conversation without a profile has an unknown diary with no roster evide
     t.alike(dmReactionGate({ read, peer, peerKind: pageReadKind(read, peer), hosted: true, unlocked: true, online: true, isTop: true, folder: 'inbox' }), { hidden: false, disabled: false })
   }
 })
+
+test('group reactions outside the 12 shown stay counted and come back, as in the core fold', async (t) => {
+  const { fixtures, createVitrineRequest } = await load()
+  const f = clone(fixtures)
+  const item = f.groups[0].items[0]
+  const twelve = Array.from({ length: 12 }, (_, i) => String.fromCodePoint(0x1f601 + i))
+  item.reactions = twelve.map((emoji) => ({ emoji, count: 1, mine: false }))
+  const request = createVitrineRequest(f)
+  const group = f.groups[0].group
+  const target = { writer: item.writer, seq: item.seq }
+  const read = async () => (await request('group.read', { group })).items.find((p) => p.writer === target.writer && p.seq === target.seq)
+  // An emoji that sorts first pushes the last of the twelve out of view.
+  await answer(t, request, 'group.react', { group, target, emoji: '\u{1f600}' })
+  const shown = (await read()).reactions.map((r) => r.emoji)
+  t.alike(shown, ['\u{1f600}', ...twelve.slice(0, 11)])
+  const who = await answer(t, request, 'group.reactors', { group, target })
+  t.alike(who.reactions.map((r) => r.emoji), shown, 'group.reactors lists the same 12')
+  // Taking the reaction back shows the hidden emoji again with its count.
+  await answer(t, request, 'group.react', { group, target, emoji: '' })
+  t.alike((await read()).reactions, twelve.map((emoji) => ({ emoji, count: 1, mine: false })))
+})
