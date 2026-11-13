@@ -15,7 +15,7 @@ const { WebSocket } = require('ws')
 const { testnet } = require('./helpers/net')
 const { connectClient, errorOf } = require('./helpers/session')
 const { createCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { profileRecord, likeRecord, followRecord, nowIso } = require('@varanda/core/lib/records')
+const { profileRecord, likeRecord, followRecord, nowIso, validateRecord, MAX_DELETE_RANGES } = require('@varanda/core/lib/records')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const store = require('../lib/node-store')
 const member = require('../lib/member-ops')
@@ -207,6 +207,40 @@ test('profile.delete: a range a surviving post still shows is not on the tombsto
   t.alike((await s.web.request('post.delete', { to: s.key + ':4' })).deleted, [4])
   const last = (await s.web.request('log.read', {})).entries.slice(-1)[0].record
   t.alike(last.media, [{ core: avatar.core, start: avatar.start, blocks: avatar.blocks }], 'the last reference goes with the post')
+})
+
+test('post.delete of a 10-photo post: three tombstones of at most 4 ranges in one append', async (t) => {
+  await testnet(t)
+  const s = await certified(t)
+  const photos = []
+  for (let i = 0; i < 14; i++) {
+    const bytes = webp512()
+    bytes[bytes.length - 1] ^= i + 1
+    photos.push(await s.node.mediaUpload({ bytes, mime: 'image/webp', width: 512, height: 512 }))
+  }
+  const ten = photos.slice(0, 10)
+  // 1: media-core declaration
+  t.is((await s.web.request('post.create', { text: 'dez', media: ten })).seq, 2)
+  t.is((await s.web.request('post.create', { text: 'quatro', media: photos.slice(10) })).seq, 3)
+
+  t.alike(await s.web.request('post.delete', { to: s.key + ':2' }), { seq: 6, ref: s.key + ':6', changed: true, deleted: [2] })
+  const log = await s.web.request('log.read', {})
+  const tombs = log.entries.filter((e) => e.seq >= 4)
+  t.alike(tombs.map((e) => e.seq), [4, 5, 6], 'three tombstones')
+  for (const { seq, record } of tombs) {
+    t.alike([record.type, record.seq, record.at], ['delete', 2, tombs[0].record.at], 'same target and at')
+    t.ok(record.media.length <= MAX_DELETE_RANGES, 'at most 4 ranges')
+    t.is(validateRecord(record, seq), null, 'valid at its seq')
+  }
+  t.alike(tombs.flatMap((e) => e.record.media), ten.map((d) => ({ core: d.core, start: d.start, blocks: d.blocks })), 'together the ten ranges')
+
+  t.alike(await s.web.request('post.delete', { to: s.key + ':2' }), { seq: 6, ref: s.key + ':6', changed: false, deleted: [2] }, 'the repeat writes nothing')
+  t.is((await s.web.request('log.read', {})).entries.length, log.entries.length, 'nothing appended')
+
+  t.alike(await s.web.request('post.delete', { to: s.key + ':3' }), { seq: 7, ref: s.key + ':7', changed: true, deleted: [3] }, 'a 4-photo post still gets one tombstone')
+  const last = (await s.web.request('log.read', {})).entries.slice(-1)[0].record
+  t.alike([last.seq, last.media.length], [3, 4])
+  t.alike(s.internal, [], 'no internal error')
 })
 
 test('profile.delete pairs only a plain block with the avatar block after it', async (t) => {

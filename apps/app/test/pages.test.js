@@ -107,6 +107,8 @@ test('pageError maps tokens to pt-BR and everything else to unavailable', async 
   t.is(pageError('troca-bloqueada', '2026-01-02T12:00:00.000Z').code, 'troca-bloqueada')
   t.ok(pageError('troca-bloqueada', '2026-01-02T12:00:00.000Z').message.startsWith('Você poderá trocar de novo em '))
   for (const text of Object.values(TEXTS)) t.absent(text.includes(String.fromCharCode(0x2014)), text)
+  t.is(TEXTS['nao-vinculado'], 'Termine o cadastro em Ajustes → Conta e @nome.')
+  t.absent(TEXTS['nao-vinculado'].includes('Google'))
 })
 
 test('policy: available, off, older service and failure all answer a plain object', async (t) => {
@@ -147,13 +149,20 @@ test('statement: start, page.sign, POST with member, nonce, page, op and signatu
   t.alike(node.signs[0], { method: 'page.sign', params: { action: 'post', nonce: NONCE, page: P, op: { text: 'Abrimos às 7h' } } })
 })
 
-test('post, reply and quote carry 1..4 media descriptors, never more', async (t) => {
-  const { actAs } = await load()
+test('post, reply and quote carry 1..10 media descriptors, never more', async (t) => {
+  const { actAs, MAX_MEDIA_PER_POST } = await load()
+  t.is(MAX_MEDIA_PER_POST, 10)
   const d = { sha256: 'a'.repeat(64), mime: 'image/png', width: 1, height: 1, bytes: 10 }
-  const calls = stub(t, flow(() => json(200, { seq: 1, length: 2, pushed: true })))
+  const ten = Array(10).fill(d)
+  const calls = stub(t, (n, url) => url.endsWith('/start') ? json(200, { nonce: NONCE }) : json(200, { seq: 1, length: 2, pushed: true }))
   await actAs(fakeNode(), { member: M, action: 'reply', page: P, op: { to: M + ':1', text: 'ok', media: [d] } })
   t.alike(body(calls[1]).op.media, [d])
-  for (const media of [[], [d, d, d, d, d], 'x']) {
+  for (const action of ['post', 'reply', 'quote']) {
+    const before = calls.length
+    await actAs(fakeNode(), { member: M, action, page: P, op: { text: 'x', media: ten } })
+    t.is(body(calls[before + 1]).op.media.length, 10, action + ' accepts 10')
+  }
+  for (const media of [[], [...ten, d], 'x']) {
     const before = calls.length
     const err = await caught(t, actAs(fakeNode(), { member: M, action: 'post', page: P, op: { text: 'x', media } }))
     t.is(err.code, 'pedido-invalido')
@@ -190,10 +199,13 @@ test('listing and listing-edit carry 1..4 media descriptors; listing-edit may cl
     const before = calls.length
     await actAs(fakeNode(), { member: M, action, page: P, op: { title: 'x', media: [d, d] } })
     t.alike(body(calls[before + 1]).op.media, [d, d], action + ' sends its media')
+    const fourAt = calls.length
+    await actAs(fakeNode(), { member: M, action, page: P, op: { title: 'x', media: [d, d, d, d] } })
+    t.is(body(calls[fourAt + 1]).op.media.length, 4, action + ' accepts 4')
     for (const media of [[], [d, d, d, d, d], 'x']) {
       const n = calls.length
       const err = await caught(t, actAs(fakeNode(), { member: M, action, page: P, op: { title: 'x', media } }))
-      t.is(err.code, 'pedido-invalido')
+      t.is(err.code, 'pedido-invalido', Array.isArray(media) && media.length === 5 ? '5 photos are refused' : 'nothing valid')
       t.is(calls.length, n, 'nothing is sent')
     }
   }

@@ -62,7 +62,7 @@ import { LinkCard } from './LinkCard'
 import { MediaGrid } from './MediaGrid'
 import { tap } from './haptics'
 import { hasMention, MentionText } from './MentionText'
-import { useNode } from '../node'
+import { useHosted } from '../node'
 import { QuoteCard } from './QuoteCard'
 import { LARGE_TEXT, layout, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
@@ -220,8 +220,9 @@ function PostRowView ({
     const ok = await copyText(nav, href)
     if (fn(onNotice)) onNotice(ok ? 'Link copiado' : 'Não foi possível copiar o link')
   }))
-  const node = useNode()
-  const messageable = fn(onMessage) && node !== null && node.hosted === true && Number.isSafeInteger(seq) && seq > 0
+  // The hosted flag alone: the full node value is rebuilt on every sync flag.
+  const hosted = useHosted()
+  const messageable = fn(onMessage) && hosted === true && Number.isSafeInteger(seq) && seq > 0
   const moreRows = [
     ...(messageable ? [{ id: 'message', icon: 'mensagem', label: 'Mensagem em particular' }] : []),
     ...moreActions(null, { link, onReport: fn(onReport) ? true : null, onBlock: fn(onBlock) ? true : null }),

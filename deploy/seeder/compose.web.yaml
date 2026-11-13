@@ -161,6 +161,14 @@ services:
       VARANDA_DIDIT_WORKFLOW_ID: "${VARANDA_DIDIT_WORKFLOW_ID:-}"
       VARANDA_DIDIT_DAILY_LIMIT: "${VARANDA_DIDIT_DAILY_LIMIT:-}"
       VARANDA_AGE_SINCE: "${VARANDA_AGE_SINCE:-}"
+      # Verificação de celular (Didit, mesma chave da API acima), opcional.
+      # Vazia = desligada. Definida (64 hex minúsculos), exige a verificação
+      # de idade ligada e sela os números no phone.json do volume
+      # account-data. Só defina depois que o app e a versão web com a etapa
+      # do celular estiverem no ar (README, "Verificação de celular"). O teto
+      # diário de envios vazio mantém o padrão do serviço.
+      VARANDA_PHONE_KEY: "${VARANDA_PHONE_KEY:-}"
+      VARANDA_PHONE_DAILY_LIMIT: "${VARANDA_PHONE_DAILY_LIMIT:-}"
       # Limites do serviço account. Vazios mantêm os padrões do serviço.
       VARANDA_ACCOUNT_MAX_CONNECTIONS: "${VARANDA_ACCOUNT_MAX_CONNECTIONS:-}"
       VARANDA_ACCOUNT_RATE: "${VARANDA_ACCOUNT_RATE:-}"

@@ -23,13 +23,16 @@ Comandos:
   seed key|cert add          chave do semeador e seu certificado (--cert-file)
   seed list|status           diários admitidos e estado do semeador
   seed drop <chave>          apaga um diário do semeador parado
-  account                    serviço de vínculo de conta Google (--account-port, --account-host); páginas com VARANDA_PAGE_KEYS e VARANDA_SEEDER_WS, busca de GIF com VARANDA_GIF_API_URL e VARANDA_GIF_API_KEY (desligadas por padrão), prévia de links desligada com VARANDA_PREVIEW=0
+  account                    serviço de contas (celular, @nome, convites, denúncias) (--account-port, --account-host); páginas com VARANDA_PAGE_KEYS e VARANDA_SEEDER_WS, busca de GIF com VARANDA_GIF_API_URL e VARANDA_GIF_API_KEY (desligadas por padrão), prévia de links desligada com VARANDA_PREVIEW=0
   account key                chave do emissor do serviço de conta (imprime só a pública)
   account cert add           grava o certificado do emissor (--cert-file <f>)
   account push-key           chave dos avisos push da versão web (imprime só a pública)
   account status             estado do serviço de conta
   account export             exporta os vínculos de conta do serviço parado
   account reports            exporta as denúncias com os e-mails do vínculo (--member)
+  account phone              mostra o celular verificado de um membro, para pedido judicial (--member)
+  account phone --release    libera o celular de um membro por ordem judicial, com o serviço parado (--member)
+  account phone --username   acha a conta que teve o nome, atual ou passada, e mostra o celular (página: dona, sem número)
   mod init|show              chave da moderação e estado da lista de bloqueio
   mod cert add               grava o certificado da moderação (--cert-file <f>)
   mod block|unblock <chave>  bloqueia ou desbloqueia uma conta e publica a lista
@@ -59,7 +62,7 @@ Comandos:
   page terms                 aceita os Termos para o delegado no serviço de conta
   page create                cria uma página (--username, --name, --bio)
   page list                  páginas que você tem ou administra, convites e ofertas
-  page post|reply            publica ou responde como a página (--page, --text, --to, --file até 4)
+  page post|reply            publica ou responde como a página (--page, --text, --to, --file até 10)
   page photo                 foto da página (--page, --file, --name, --bio)
   page follow|unfollow       a página segue ou deixa de seguir uma chave (--page, --key)
   page notices               avisos da página (--page, --limit)
@@ -78,11 +81,11 @@ Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes
+  --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes --release
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
   --blob-bytes: teto do conjunto de mídia das conversas no seed (bytes, padrão 2147483648).`
 
-const booleanFlags = new Set(['--json', '--once', '--no-publish', '--no-dm', '--new-list', '--yes', '--undo', '--private', '--force', '--help', '-h'])
+const booleanFlags = new Set(['--json', '--once', '--no-publish', '--no-dm', '--new-list', '--yes', '--undo', '--private', '--force', '--release', '--help', '-h'])
 const stringFlags = new Set([
   '--data', '--association', '--timeout-ms', '--member', '--community', '--seeder',
   '--age-band', '--method', '--out', '--cert-file', '--name', '--bio',
@@ -281,6 +284,7 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     undo: get('undo') === true,
     private: get('private') === true,
     force: get('force') === true,
+    release: get('release') === true,
     dataDir: path.resolve(cwd, get('data') || env.VARANDA_DATA || './data'),
     association: key(get('association') || env.VARANDA_ASSOCIATION || null, 'chave da associação inválida'),
     bootstrap: bootstrap.length ? bootstrap : undefined,

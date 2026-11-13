@@ -5,7 +5,7 @@ const { readFileSync, readdirSync, mkdtempSync, rmSync, writeFileSync, mkdirSync
 const { tmpdir } = require('node:os')
 const { spawnSync } = require('node:child_process')
 const { join } = require('node:path')
-const { METHODS, validateResponse, validateParams, FEED_LIMIT_MAX } = require('@varanda/rpc')
+const { METHODS, validateResponse, validateParams, FEED_LIMIT_MAX, LOG_LIMIT_MAX } = require('@varanda/rpc')
 
 const clone = (value) => JSON.parse(JSON.stringify(value))
 const unknown = 'f'.repeat(64)
@@ -33,6 +33,7 @@ const resultKeys = {
   'cert.add': ['seq'],
   'account.sign': ['signature'],
   'age.sign': ['signature'],
+  'phone.sign': ['signature'],
   'invite.sign': ['signature'],
   'inviteCard.sign': ['signature'],
   'inviteCard.verify': ['ok', 'reason'],
@@ -47,6 +48,7 @@ const resultKeys = {
   'page.sign': ['signature'],
   'page.register': ['actor'],
   'age.proof': ['ageVerifiedDate', 'ageSince', 'ageSinceUntil'],
+  'phone.proof': ['phoneVerifiedDate', 'phoneSince'],
   'sync.start': ['runId'],
   'sync.stop': ['stopped'],
   'sync.status': ['state'],
@@ -98,7 +100,7 @@ const resultKeys = {
   'community.admit': ['ok'],
   'community.meta': ['ok'],
   'community.invitePolicy': ['ok'],
-  'node.info': ['publicKey', 'memberCert', 'memberCertDate', 'ageVerifiedDate', 'ageSince', 'ageSinceUntil', 'followCount', 'sync', 'publicDht', 'groups'],
+  'node.info': ['publicKey', 'memberCert', 'memberCertDate', 'ageVerifiedDate', 'ageSince', 'ageSinceUntil', 'phoneVerifiedDate', 'phoneSince', 'followCount', 'sync', 'publicDht', 'groups'],
   'identity.status': ['exists', 'publicKey', 'legacy', 'unlocked', 'synced', 'resumed', 'passkeyKnown', 'credentialId', 'rpId', 'signedOut'],
   'dm.list': ['conversations', 'next', 'requests', 'inboxUnread'],
   'listing.create': ['seq', 'ref'],
@@ -601,6 +603,8 @@ function samples (f) {
     'account.sign': { phase: 'reserve', nonce, username: 'lia_praca', sub: '' },
     'age.sign': { action: 'result', nonce },
     'age.proof': { verified: { date: f.now }, since: null },
+    'phone.sign': { action: 'send', nonce },
+    'phone.proof': { verified: { date: f.now }, since: null },
     'invite.sign': { action: 'issue', nonce },
     'inviteCard.sign': card,
     'inviteCard.verify': { ...card, member: 'ab'.repeat(32), signature: '0'.repeat(128) },
@@ -998,7 +1002,7 @@ test('page signing covers every documented result variant with fake signatures',
   const cancelled = await answer(t, request, 'page.sign', { action: 'offer', nonce, page, op: { ...base, to: null, exp: null } })
   t.is(cancelled.record.to, null)
   t.is(cancelled.record.exp, null)
-  for (const method of ['account.sign', 'age.sign', 'invite.sign', 'inviteCard.sign', 'push.sign', 'report.sign', 'appeal.sign', 'dm.reportSign', 'terms.sign', 'recovery.sign']) {
+  for (const method of ['account.sign', 'age.sign', 'phone.sign', 'invite.sign', 'inviteCard.sign', 'push.sign', 'report.sign', 'appeal.sign', 'dm.reportSign', 'terms.sign', 'recovery.sign']) {
     t.is((await answer(t, request, method, samples(f)[method])).signature, signature)
   }
   // The development build never vouches for a card.
@@ -1124,7 +1128,7 @@ test('the Mural has photo posts to show: own, followed and not followed', async 
   let before
   const pages = []
   for (;;) {
-    const page = await answer(t, request, 'log.read', { limit: 32, ...(before !== undefined ? { before } : {}) })
+    const page = await answer(t, request, 'log.read', { limit: LOG_LIMIT_MAX, ...(before !== undefined ? { before } : {}) })
     if (page.entries.length === 0) break
     pages.push(page.entries)
     rows.push(...page.entries.map((entry) => ({ seq: entry.seq, entry })))

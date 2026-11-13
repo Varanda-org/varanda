@@ -1,5 +1,5 @@
 import rpc from '@varanda/rpc'
-import { MAX_MEDIA_PER_POST } from './media/plan.js'
+import { MAX_MEDIA_PER_MESSAGE } from './media/plan.js'
 
 const { displayText, dmTextBudget: textBudget, dmTextBytes, validateParams, MEMBER_CERT_STANDIN } = rpc
 
@@ -94,7 +94,7 @@ function checked (method, params) {
 // and checked by the rpc rules with the request.
 export function composePlan ({ text = '', attachments = [], target, card = null }) {
   if (!Array.isArray(attachments)) throw new Error('anexos inválidos')
-  if (attachments.length > MAX_MEDIA_PER_POST) throw new Error('no máximo quatro imagens')
+  if (attachments.length > MAX_MEDIA_PER_MESSAGE) throw new Error('no máximo quatro imagens')
   if (!target || !['dm', 'group'].includes(target.kind)) throw new Error('destino inválido')
   const dm = target.kind === 'dm'
   if (!dm && !['public', 'private'].includes(target.visibility)) throw new Error('visibilidade inválida')

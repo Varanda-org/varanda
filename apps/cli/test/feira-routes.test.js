@@ -4,7 +4,7 @@
 // behind apps/cli/lib/account/invites-pair.js, the
 // VARANDA_FEIRA_INVITES_PER_WEEK checks of apps/cli/lib/commands/account.js
 // and the Excluir conta sweep (apps/cli/lib/account/deletion.js). Loopback
-// only: a fake Google and a fake listing reader, random keys, a temporary
+// only: fake Google, phone and listing providers, random keys, a temporary
 // data dir.
 
 const test = require('brittle')
@@ -14,6 +14,7 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { createIssuerCert } = require('@varanda/core/lib/cert')
 const { signAccountLink } = require('@varanda/core/lib/account-link')
+const { signPhone } = require('@varanda/core/lib/phone')
 const { createGoogle } = require('../lib/account/google')
 const { openAccountStore } = require('../lib/account/store')
 const { openInvitesStore, inviteId, CODE_RE } = require('../lib/account/invites-store')
@@ -23,6 +24,8 @@ const { createAccountServer, COOKIE } = require('../lib/account/server')
 const { readEnv } = require('../lib/commands/account')
 const { UsageError } = require('../lib/cli')
 const { tmpDir } = require('./helpers/net')
+const { linkByPhone, phoneServerOptions } = require('./helpers/phone-link')
+const { freePort } = require('./helpers/free-port')
 
 const ORIGIN = 'https://varanda.test'
 const CLIENT_ID = 'client-123.apps.googleusercontent.com'
@@ -93,6 +96,9 @@ async function linkDirect (s, m, username) {
   s.store.reserve(row.id)
   s.store.putGoogle(row.id, { sub: nextSub(), email: EMAIL })
   await s.store.finish(row.id, { signature: 'a'.repeat(128) }, s.iss.keyPair, s.iss.cert, s.iss.association)
+  // Feira resolves only sellers whose linked account has a verified phone.
+  const phone = '+55119' + String(subSeq).padStart(8, '0')
+  await s.phones.record({ member: m.hex, phone }, { linked: (key) => s.store.status(key).linked, burnable: () => false, deleted: () => false })
 }
 
 // `feira: false` passes no Feira store; `reader: false` no listing reader.
@@ -116,9 +122,13 @@ async function setup (t, { feira = true, reader = true, perWeek = 3 } = {}) {
   const pagesStore = { get: (k) => pages.get(k) ?? null, ownedCount: () => 0, listFor: () => [] }
   const logs = []
   const texts = []
+  const port = await freePort()
+  const origin = 'http://127.0.0.1:' + port
+  const phoneOptions = phoneServerOptions()
   const server = createAccountServer({
     association: iss.association,
-    origin: ORIGIN,
+    origin,
+    ...phoneOptions,
     google,
     store,
     issuer: { keyPair: iss.keyPair, cert: iss.cert },
@@ -128,7 +138,7 @@ async function setup (t, { feira = true, reader = true, perWeek = 3 } = {}) {
     pages: { pagesStore },
     log: (e) => logs.push(JSON.stringify(e))
   })
-  const listener = await server.listen({ host: '127.0.0.1', port: 0 })
+  const listener = await server.listen({ host: '127.0.0.1', port })
   t.teardown(() => listener.close(), { force: true })
   const base = 'http://127.0.0.1:' + listener.port
 
@@ -136,7 +146,7 @@ async function setup (t, { feira = true, reader = true, perWeek = 3 } = {}) {
     const init = { method, redirect: 'manual', headers: {} }
     if (cookie) init.headers.cookie = COOKIE + '=' + cookie
     if (body !== undefined) {
-      init.headers.origin = ORIGIN
+      init.headers.origin = origin
       init.headers['content-type'] = 'application/json'
       init.body = JSON.stringify(body)
     }
@@ -154,7 +164,7 @@ async function setup (t, { feira = true, reader = true, perWeek = 3 } = {}) {
       const data = body === undefined ? null : JSON.stringify(body)
       const h = { ...headers }
       if (data !== null) Object.assign(h, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) })
-      if (data !== null && h.origin === undefined && h['x-varanda-client'] === undefined) h.origin = ORIGIN
+      if (data !== null && h.origin === undefined && h['x-varanda-client'] === undefined) h.origin = origin
       const req = http.request({ host: '127.0.0.1', port: listener.port, method, path: target, headers: h }, (res) => {
         let text = ''
         res.setEncoding('utf8')
@@ -170,7 +180,7 @@ async function setup (t, { feira = true, reader = true, perWeek = 3 } = {}) {
     })
   }
 
-  return { dir, iss, fake, store, primary, feiraStore, invites, listings, reads, pages, logs, texts, api, raw }
+  return { dir, iss, fake, store, primary, feiraStore, invites, listings, reads, pages, logs, texts, api, raw, origin, phones: phoneOptions.phones }
 }
 
 function listingOf (author, seq) {
@@ -182,25 +192,21 @@ function cookieOf (res) {
   return m ? m[1] : null
 }
 
-function sign (s, m, phase, nonce, username, sub = '') {
-  return signAccountLink({ phase, nonce, member: m.hex, username, association: s.iss.association, sub }, m.kp)
-}
-
 function startWith (s, m, username, invite) {
   return s.api('POST', '/account/start', { body: { member: m.hex, username, invite } })
 }
 
 async function linkWith (s, m, username, code) {
-  const started = await startWith(s, m, username, code)
-  if (started.status !== 200) return { started }
-  const cookie = cookieOf(started)
-  const auth = await s.api('POST', '/account/authorize', { cookie, body: { signature: sign(s, m, 'reserve', started.body.nonce, username) } })
-  const state = new URL(auth.body.authorizeUrl).searchParams.get('state')
-  s.fake.account.sub = nextSub()
-  await s.api('GET', '/account/callback?state=' + state + '&code=codigo-1', { cookie })
-  const pending = await s.api('GET', '/account/pending', { cookie })
-  const done = await s.api('POST', '/account/finish', { cookie, body: { signature: sign(s, m, 'finish', pending.body.nonce, username, pending.body.sub) } })
-  return { started, done }
+  return linkByPhone({
+    origin: s.origin,
+    member: m.hex,
+    username,
+    invite: code,
+    sign: (fields) => {
+      const statement = { ...fields, association: s.iss.association }
+      return fields.action ? signPhone(statement, m.kp) : signAccountLink(statement, m.kp)
+    }
+  })
 }
 
 function feiraStart (s, author, seq) {
@@ -367,8 +373,8 @@ test('signup: a Feira code passes the invite check and consumes one Feira row, n
   t.is(s.invites.check(inviteId(a)), null, 'the pair accepts a Feira code')
 
   const newcomer = member()
-  const { done } = await linkWith(s, newcomer, 'carla', a)
-  t.is(done.status, 200, done.text)
+  const done = await linkWith(s, newcomer, 'carla', a)
+  t.is(done.cert.member, newcomer.hex, 'the phone link returns the member certificate')
   t.is(s.store.status(newcomer.hex).linked, true)
   t.is(s.feiraStore.count().used, 1, 'one Feira row used')
   t.alike(s.primary.count(), { total: 0, used: 0 }, 'no primary row')

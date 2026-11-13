@@ -622,5 +622,6 @@ function createAgeRoutes ({
 module.exports = {
   FEIRA_AGE_DAILY,
   FEIRA_AGE_PATH,
+  ceiling,
   createAgeRoutes
 }
