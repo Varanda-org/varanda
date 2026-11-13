@@ -32,8 +32,7 @@
 // never queued, never persisted (for a private group that would leak the
 // plaintext). A mutation answered UNCERTAIN is never resent: the screen
 // re-reads, asks groups.js reconcile and only then offers "tentar de novo".
-// Hosted node only: a node that is not hosted sees the "Só na versão web"
-// state, like Avisos.
+// Group access requires the hosted node capability.
 // Photos and GIFs (a member posting as themself, when the node offers
 // media.upload and is online): the clip opens the attach sheet; the photos
 // upload in order (sealed for a private group, so only members open them),
@@ -54,7 +53,7 @@
 // answers, the composer stays closed.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Keyboard, KeyboardAvoidingView, Pressable, StyleSheet, Text, View } from 'react-native'
+import { AccessibilityInfo, Keyboard, KeyboardAvoidingView, Pressable, StyleSheet, Text, View } from 'react-native'
 import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
 import { MAX_TEXT, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
@@ -73,6 +72,9 @@ import { Btn, ConfirmStack, ErrorText, Notice, Soft, errorText, useAction, useNo
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { Avatar } from '../ui/Avatar'
 import { Bubble } from '../ui/Bubble'
+import { SwipeReply } from '../ui/SwipeReply'
+import { JumpToEnd } from '../ui/JumpToEnd'
+import { awayCount, jumpVisible } from '../chatGestures'
 import { ReactionChips, QuickReactions } from '../ui/Reactions'
 import { ReactionPicker, WhoReacted } from '../ui/ReactionPicker'
 import { toggleOf, applyOptimistic } from '../reactions'
@@ -103,7 +105,7 @@ import { chatMediaRefs, followAutocorrect, mediaPostLanded, retryChatSend, runCh
 import { ChatMedia } from '../ui/ChatMedia'
 import { useChatAttachments } from '../ui/AttachSheet'
 
-export const WEB_ONLY_TEXT = 'Comunidades só na versão web'
+export const WEB_ONLY_TEXT = 'Comunidades disponíveis no site da associação ou no app ligado à instalação.'
 const ORPHAN_TEXT = 'Este grupo não pertence a nenhuma comunidade.'
 const NEED_COMMUNITY = 'entre na comunidade primeiro'
 const HEX64 = /^[0-9a-f]{64}$/
@@ -453,6 +455,8 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   const now = useNow(60 * 1000)
   const today = new Date(now).toDateString()
   const rows = useMemo(() => groupRows(rawItems, ownKey, now), [rawItems, ownKey, today])
+  const rowsRef = useRef(rows)
+  rowsRef.current = rows
   const rawById = useMemo(() => {
     const m = new Map()
     for (const i of rawItems) m.set(i.writer + ':' + i.seq, i)
@@ -832,16 +836,44 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   }
 
   const scrollToKey = (key) => {
-    const index = rows.findIndex((r) => r.key === key)
+    clearTimeout(jumpTimer.current)
+    clearTimeout(quoteTimer.current)
+    setFlashKey(null)
+    setQuoteToast(false)
+    const missing = () => {
+      setQuoteToast(true)
+      AccessibilityInfo.announceForAccessibility('Mensagem fora do trecho carregado')
+      quoteTimer.current = setTimeout(() => setQuoteToast(false), 3000)
+    }
+    const index = rows.findIndex((row) => row.key === key)
     const list = listRef.current
-    if (index < 0 || !list || typeof list.scrollToIndex !== 'function') return
-    // A quote jump leaves the end: still pinned, its first animated frame
-    // would scroll back to the end.
+    if (index < 0 || !list || typeof list.scrollToIndex !== 'function') return missing()
+    // Released before the scroll so no follow-up frame pulls the list back
+    // to the end; a scroll that throws never moved, so it is put back.
+    const before = { away: away.current, pin: endPin.current }
+    away.current = true
     endPin.current = pinToEnd(endPin.current, { kind: 'user' })
-    // An unmeasured row far up throws without getItemLayout: stay put then.
     try {
-      list.scrollToIndex({ index, animated: true, viewPosition: 0.5 })
-    } catch {}
+      list.scrollToIndex({ index, animated: false, viewPosition: 0.5 })
+    } catch {
+      away.current = before.away
+      endPin.current = before.pin
+      return missing()
+    }
+    // The first offset can be an estimate even when scrollToIndex succeeds.
+    jumpTimer.current = setTimeout(() => {
+      if (listRef.current !== list) return
+      // An older page can land in between and shift the index.
+      const at = rowsRef.current.findIndex((row) => row.key === key)
+      if (at < 0) return missing()
+      try {
+        list.scrollToIndex({ index: at, animated: false, viewPosition: 0.5 })
+        setFlashKey(key)
+        quoteTimer.current = setTimeout(() => setFlashKey(null), 900)
+      } catch {
+        missing()
+      }
+    }, 120)
   }
 
   const hide = async (row, on) => {
@@ -906,6 +938,32 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     })
   }
 
+  const away = useRef(false)
+  const latestKey = rows.length > 0 ? rows[rows.length - 1].key : null
+  const latestKeyRef = useRef(null)
+  latestKeyRef.current = latestKey
+  const [lastSeenKey, setLastSeenKey] = useState(null)
+  const [showJump, setShowJump] = useState(false)
+  const scrollFrame = useRef({ y: 0, contentHeight: 0, layoutHeight: 0 })
+  const [flashKey, setFlashKey] = useState(null)
+  const [quoteToast, setQuoteToast] = useState(false)
+  const quoteTimer = useRef(null)
+  const jumpTimer = useRef(null)
+  useEffect(() => {
+    away.current = false
+    setLastSeenKey(null)
+    setShowJump(false)
+    setFlashKey(null)
+    setQuoteToast(false)
+    return () => {
+      clearTimeout(quoteTimer.current)
+      clearTimeout(jumpTimer.current)
+    }
+  }, [group, ownKey, asPage.key])
+  useEffect(() => {
+    if (!away.current) setLastSeenKey(latestKey)
+  }, [latestKey])
+
   const endPin = useRef({ pinned: true, newest: null, lastY: null })
   // On the web the content size can change before FlatList measured the new
   // row, so the first scroll uses an estimate and stops short: one more once
@@ -913,20 +971,27 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   const settleTimer = useRef(null)
   useEffect(() => () => clearTimeout(settleTimer.current), [])
   const followEnd = useCallback(() => {
+    if (away.current) return
     if (!endPin.current.pinned) return
     const list = listRef.current
     if (!list || typeof list.scrollToEnd !== 'function') return
     list.scrollToEnd({ animated: false })
     clearTimeout(settleTimer.current)
     settleTimer.current = setTimeout(() => {
+      if (away.current) return
       const now = listRef.current
       if (endPin.current.pinned && now && typeof now.scrollToEnd === 'function') now.scrollToEnd({ animated: false })
     }, 50)
   }, [])
   const releaseEnd = useCallback(() => {
+    clearTimeout(jumpTimer.current)
     endPin.current = pinToEnd(endPin.current, { kind: 'user' })
   }, [])
   const scrollToEnd = () => {
+    clearTimeout(jumpTimer.current)
+    away.current = false
+    setLastSeenKey(latestKeyRef.current)
+    setShowJump(false)
     endPin.current = { ...endPin.current, pinned: true }
     followEnd()
   }
@@ -947,6 +1012,8 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   const atBottom = useRef(true)
   const lastY = useRef(null)
   const trackBottom = useCallback(({ y, contentHeight, layoutHeight }) => {
+    scrollFrame.current = { y, contentHeight, layoutHeight }
+    setShowJump(jumpVisible({ distanceFromEnd: contentHeight - y - layoutHeight, viewport: layoutHeight }))
     // A frame only updates the pin. Following the end happens on content
     // growth (onContentSizeChange): calling scrollToEnd from every frame of an
     // animated scroll restarts the animation on Android and turns it into a crawl.
@@ -956,6 +1023,8 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     lastY.current = y
     if (resized && !bottom) return
     atBottom.current = bottom
+    if (bottom || away.current || !endPin.current.pinned) away.current = !bottom
+    if (bottom) setLastSeenKey(latestKeyRef.current)
   }, [])
   useEffect(() => {
     let timers = []
@@ -1201,7 +1270,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     return (
       <View style={styles.root}>
         <TopBar title='Grupo' onBack={onBack} />
-        <EmptyState icon='cadeira' title='Só na versão web' body={WEB_ONLY_TEXT} />
+        <EmptyState icon='cadeira' title='Comunidades indisponíveis' body={WEB_ONLY_TEXT} />
       </View>
     )
   }
@@ -1373,27 +1442,32 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
         )
     const rawRow = rawById.get(row.key || row.id)
     const refs = row.hidden || !rawRow ? [] : chatMediaRefs('group', { diary: rawRow.diary, media: rawRow.media })
+    const reply = actionsOf(row).find((action) => action.label === 'Responder')
     return (
-      <Bubble
-        media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} /> : null}
-        item={{ key: row.key, text: row.text, rawText: row.hidden ? undefined : row.rawText, at: row.at, hidden: row.hidden, dayMark: row.dayMark, card: !row.hidden && rawRow && rawRow.card ? rawRow.card : null }}
-        cardThumb={rawRow ? { kind: 'group', diary: rawRow.diary, identity: ownKey } : undefined}
-        mine={mine}
-        shape={row.shape}
-        forwarded={!row.hidden && !!rawRow && rawRow.fwd === 1}
-        name={mine ? undefined : who.title}
-        handle={mine ? undefined : who.subtitle}
-        senderKey={row.diary || row.writer}
-        avatar={avatar}
-        quote={quote ? { ...quote, onPress: () => scrollToKey(row.replyTo) } : null}
-        actions={actionsOf(row)}
-        actionsTitle={mine ? undefined : who.title}
-        below={<ReactionChips reactions={reactionsFor(row)} disabled={reactionsDisabled || reactionContext.sending.has(row.key) || reactionContext.unsure.has(row.key)} onToggle={(emoji) => toggleReaction(row.key, emoji)} onShowWho={(emoji) => showReactors(row.key, emoji)} />}
-        actionsHeader={!row.hidden && !reactionsDisabled && !reactionContext.sending.has(row.key) && !reactionContext.unsure.has(row.key)
-          ? ({ closeThen }) => <QuickReactions mine={reactionsFor(row).find((r) => r.mine)?.emoji} onPick={(emoji) => closeThen(() => toggleReaction(row.key, emoji))} onMore={() => closeThen(() => openReactionPicker(row.key))} />
-          : null}
-        onOpenMention={typeof onOpenMention === 'function' ? onOpenMention : undefined}
-      />
+      <SwipeReply disabled={!reply} onReply={reply?.onPress}>
+        <View style={flashKey === row.key ? styles.quoteFlash : undefined}>
+          <Bubble
+            media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} /> : null}
+            item={{ key: row.key, text: row.text, rawText: row.hidden ? undefined : row.rawText, at: row.at, hidden: row.hidden, dayMark: row.dayMark, card: !row.hidden && rawRow && rawRow.card ? rawRow.card : null }}
+            cardThumb={rawRow ? { kind: 'group', diary: rawRow.diary, identity: ownKey } : undefined}
+            mine={mine}
+            shape={row.shape}
+            forwarded={!row.hidden && !!rawRow && rawRow.fwd === 1}
+            name={mine ? undefined : who.title}
+            handle={mine ? undefined : who.subtitle}
+            senderKey={row.diary || row.writer}
+            avatar={avatar}
+            quote={quote ? { ...quote, onPress: () => scrollToKey(row.replyTo) } : null}
+            actions={actionsOf(row)}
+            actionsTitle={mine ? undefined : who.title}
+            below={<ReactionChips reactions={reactionsFor(row)} disabled={reactionsDisabled || reactionContext.sending.has(row.key) || reactionContext.unsure.has(row.key)} onToggle={(emoji) => toggleReaction(row.key, emoji)} onShowWho={(emoji) => showReactors(row.key, emoji)} />}
+            actionsHeader={!row.hidden && !reactionsDisabled && !reactionContext.sending.has(row.key) && !reactionContext.unsure.has(row.key)
+              ? ({ closeThen }) => <QuickReactions mine={reactionsFor(row).find((r) => r.mine)?.emoji} onPick={(emoji) => closeThen(() => toggleReaction(row.key, emoji))} onMore={() => closeThen(() => openReactionPicker(row.key))} />
+              : null}
+            onOpenMention={typeof onOpenMention === 'function' ? onOpenMention : undefined}
+          />
+        </View>
+      </SwipeReply>
     )
   }
 
@@ -1506,18 +1580,32 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
         data={reader ? rows : []}
         keyExtractor={(row) => row.key}
         renderItem={renderItem}
-        extraData={{ role, rawById, names, canPost, replyKey, reactionOverrides, reactionsDisabled }}
+        extraData={{ role, rawById, names, canPost, replyKey, flashKey, reactionOverrides, reactionsDisabled }}
         contentContainerStyle={styles.thread}
         ListHeaderComponent={stateNotes}
-        ListEmptyComponent={empty}
+        ListEmptyComponent={
+          <View>
+            {empty}
+            {loadedAt !== null && !loadError && canPost && node.online && node.passkey?.status?.unlocked === true && !post.pending && !pagePending && postHold === null && check === null && mediaHold === null && !sendingMedia
+              ? <View style={[styles.note, styles.inline]}>{['Oi', 'Tudo bem?'].map((text) => <Pill key={text} label={text} onPress={() => setDraft((d) => d.trim() ? d + '\n' + text : text)} />)}</View>
+              : null}
+          </View>
+        }
         ListFooterComponent={<View>{reactionError ? <View style={styles.note}><ErrorText>{reactionError}</ErrorText></View> : null}{act.error ? <View style={styles.note}><ErrorText>{act.error}</ErrorText></View> : null}{banNote}{checkNote}</View>}
         onRefresh={() => { setLookupTick((n) => n + 1); load(true) }}
         refreshing={refreshing}
         keepVisiblePosition
         onScrollFrame={trackBottom}
-        onContentSizeChange={followEnd}
+        onContentSizeChange={(width, height) => {
+          const { y, layoutHeight } = scrollFrame.current
+          scrollFrame.current.contentHeight = height
+          setShowJump(jumpVisible({ distanceFromEnd: height - y - layoutHeight, viewport: layoutHeight }))
+          followEnd()
+        }}
         onUserScroll={releaseEnd}
       />
+      {quoteToast ? <View pointerEvents='none' style={styles.quoteToast}><Text accessibilityLiveRegion='polite' style={styles.quoteToastText}>Mensagem fora do trecho carregado</Text></View> : null}
+      {showJump || (away.current && awayCount(rows, lastSeenKey) > 0) ? <JumpToEnd count={awayCount(rows, lastSeenKey)} onPress={scrollToEnd} /> : null}
       {composer}
       <ReactionPicker
         open={reactionPicker !== null && !reactionsDisabled && !reactionContext.sending.has(reactionPicker) && !reactionContext.unsure.has(reactionPicker)}
@@ -1552,6 +1640,9 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
 }
 
 const makeStyles = (colors) => StyleSheet.create({
+  quoteFlash: { backgroundColor: colors.line },
+  quoteToast: { padding: 12, borderRadius: 12, marginHorizontal: 16, backgroundColor: colors.ink },
+  quoteToastText: { color: colors.bg, textAlign: 'center' },
   root: { flex: 1, backgroundColor: colors.bg },
   pressed: { opacity: 0.6 },
   community: {
