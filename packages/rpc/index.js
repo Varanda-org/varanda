@@ -12,8 +12,10 @@ const text = require('./lib/text')
 const mentions = require('./lib/mentions')
 const mediaBounds = require('./lib/media-bounds')
 const audioBounds = require('./lib/audio-bounds')
+const videoBounds = require('./lib/video-bounds')
 const dmBudget = require('./lib/dm-budget')
 const linkCard = require('./lib/link-card')
+const music = require('./lib/music')
 const ogParse = require('./lib/og-parse')
 const feira = require('./lib/feira')
 const inviteCard = require('./lib/invite-card')
@@ -46,6 +48,7 @@ module.exports = {
   activeMention: mentions.activeMention,
   MENTION_MAX: mentions.MENTION_MAX,
   mediaBounds: mediaBounds.mediaBounds,
+  mediaSize: mediaBounds.mediaSize,
   MAX_MEDIA_PIXELS: mediaBounds.MAX_MEDIA_PIXELS,
   MAX_MEDIA_FRAMES: mediaBounds.MAX_MEDIA_FRAMES,
   MAX_MEDIA_TOTAL_PIXELS: mediaBounds.MAX_MEDIA_TOTAL_PIXELS,
@@ -53,6 +56,11 @@ module.exports = {
   stripAudioMetadata: audioBounds.stripAudioMetadata,
   MAX_AUDIO_MS: audioBounds.MAX_AUDIO_MS,
   AUDIO_MS_TOLERANCE: audioBounds.AUDIO_MS_TOLERANCE,
+  videoBounds: videoBounds.videoBounds,
+  stripVideoMetadata: videoBounds.stripVideoMetadata,
+  VIDEO_MS_TOLERANCE: videoBounds.VIDEO_MS_TOLERANCE,
+  MAX_VIDEO_SAMPLES: videoBounds.MAX_VIDEO_SAMPLES,
+  VIDEO_BRANDS: videoBounds.VIDEO_BRANDS,
   utf8ByteLength: text.utf8ByteLength,
   utf8Encode: text.utf8Encode,
   utf8Decode: text.utf8Decode,
@@ -74,6 +82,9 @@ module.exports = {
   cardTextLength: linkCard.cardTextLength,
   cardText: linkCard.cardText,
   cardUrlHost: linkCard.cardUrlHost,
+  MOMENT_MUSIC_KEYS: music.MOMENT_MUSIC_KEYS,
+  MOMENT_SNIPPET_S: music.MOMENT_SNIPPET_S,
+  isMomentMusic: music.isMomentMusic,
   MAX_OG_HTML: ogParse.MAX_OG_HTML,
   parseOg: ogParse.parseOg,
   ogText: ogParse.ogText,

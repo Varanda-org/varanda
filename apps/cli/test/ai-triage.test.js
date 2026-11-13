@@ -192,11 +192,13 @@ test('assedio and ilegal never auto, even with matching banks', (t) => {
   }
 })
 
-test('media never auto', (t) => {
-  const bank = warm().concat(nearRows('descartar', 10, 0.99))
-  const r = judge(input({ hasMedia: true, exemplars: bank }))
-  t.is(r.action, 'aberta')
-  t.is(r.code, 'midia')
+test('media, including a video post, never gets an automatic text decision', (t) => {
+  for (const decision of ['bloquear', 'descartar']) {
+    const bank = warm().concat(nearRows(decision, 10, 0.99))
+    t.is(judge(input({ exemplars: bank })).action, decision, 'the caption alone would get an automatic decision')
+    const r = judge(input({ hasMedia: true, exemplars: bank }))
+    t.alike(r, { action: 'aberta', code: 'midia', note: '', nearest: null }, 'the report stays open for a person')
+  }
 })
 
 test('cold start: 19 of one label is frio', (t) => {

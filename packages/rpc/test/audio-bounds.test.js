@@ -665,7 +665,7 @@ test('audioBounds: a received note carries no metadata or uuid boxes', (t) => {
     const stripped = stripAudioMetadata(make(meta()))
     t.ok(stripped !== null && audioBounds(stripped) !== null, 'stripped meta in ' + where + ' passes the strict check')
   }
-  // Nor inside the sample entry (no sender path strips there, so it is refused).
+  // Nor inside the sample entry.
   const inEntry = (x) => file({ tracks: [{ runs: [[3000, 1]], entries: [box('mp4a', [0, 0, 0, 0, 0, 0, 0, 1, 0, 0], new Array(18).fill(0), esds(), x)] }] })
   t.ok(audioBounds(inEntry(box('free', [0]))) !== null, 'a free box in the sample entry passes')
   for (const x of [meta(), udta(), uuid()]) t.is(audioBounds(inEntry(x)), null, 'metadata in the sample entry')
@@ -677,6 +677,116 @@ test('audioBounds: a received note carries no metadata or uuid boxes', (t) => {
   t.is(audioBounds(inMoov(udta()), 3), null, 'options that are not an object keep the strict check')
   t.is(audioBounds(inMoov(udta()), null), null, 'a null options object')
   t.is(audioBounds(inMoov(udta()), { metadata: 1 }), null, 'metadata must be exactly true')
+})
+
+// bytes with x appended to the box at path (each step the first child of
+// that type, [] for the top level), every enclosing size grown to match.
+function put (bytes, path, x) {
+  const b = Array.from(bytes)
+  const size = (p) => ((b[p] << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3]) >>> 0
+  const head = { stsd: 8, mp4a: 28, Opus: 28 }
+  const chain = []
+  let start = 0
+  let end = b.length
+  for (const type of path) {
+    let p = start
+    while (p < end && String.fromCharCode(...b.slice(p + 4, p + 8)) !== type) p += size(p)
+    if (p >= end) throw new Error('no ' + type)
+    chain.push(p)
+    end = p + size(p)
+    start = p + 8 + (head[type] || 0)
+  }
+  b.splice(end, 0, ...x)
+  for (const p of chain) b.splice(p, 4, ...be32(size(p) + x.length))
+  return new Uint8Array(b)
+}
+
+test('audioBounds: a received note holds only the boxes the check reads', (t) => {
+  const plain = file({ tracks: [{ runs: [[3000, 1]], edits: [edts(0, [[3000, 0]])] }] })
+  const withOpus = file({ tracks: [{ runs: [[3000, 1]], entries: [opus()] }] })
+  const frag = fragmented({ mvex: [trex(1, 0)], moofs: [second()] })
+  const stbl = ['moov', 'trak', 'mdia', 'minf', 'stbl']
+  const entry = [...stbl, 'stsd', 'mp4a']
+  const opusEntry = [...stbl, 'stsd', 'Opus']
+  t.alike(audioBounds(plain), { ms: 3000 }, 'the plain note passes')
+  t.alike(audioBounds(withOpus), { ms: 3000 }, 'the Opus note passes')
+  t.alike(audioBounds(frag), { ms: 1000 }, 'the fragmented note passes')
+  // A player may find a trak at any depth, or decode a codec box beside the
+  // checked esds (Media3 takes a dac3's AC-3 format over the esds).
+  const where = [
+    [plain, []],
+    [plain, ['moov']],
+    [plain, ['moov', 'trak']],
+    [plain, ['moov', 'trak', 'edts']],
+    [plain, ['moov', 'trak', 'mdia']],
+    [plain, ['moov', 'trak', 'mdia', 'minf']],
+    [plain, ['moov', 'trak', 'mdia', 'minf', 'dinf']],
+    [plain, stbl],
+    [plain, entry],
+    [withOpus, opusEntry],
+    [frag, ['moov', 'mvex']],
+    [frag, ['moof']],
+    [frag, ['moof', 'traf']]
+  ]
+  const unread = [['a second trak', trak({ handler: 'vide', id: 2 })], ['a dac3', box('dac3', [0x10, 0x3d, 0x40])]]
+  for (const [base, path] of where) {
+    const name = path.length ? path[path.length - 1] : 'the top level'
+    for (const [what, x] of unread) {
+      // moov lists one trak: a second one is a count, below.
+      if (name === 'moov' && what === 'a second trak') continue
+      const bytes = put(base, path, x)
+      t.is(audioBounds(bytes), null, what + ' in ' + name)
+      const out = stripAudioMetadata(bytes)
+      t.ok(out !== null && audioBounds(out) !== null, 'the sender strips ' + what + ' in ' + name)
+    }
+  }
+  for (const type of ['dec3', 'dfLa', 'alac', 'sinf', 'dOps']) {
+    t.is(audioBounds(put(plain, entry, box(type, [0, 0, 0, 0]))), null, 'a ' + type + ' beside the esds')
+  }
+  t.is(audioBounds(put(plain, entry, box('wave', esds()))), null, 'a wave holding another esds')
+  t.is(audioBounds(put(plain, stbl.slice(0, 4), box('nmhd', [0, 0, 0, 0]))), null, 'an nmhd in minf')
+  t.is(audioBounds(put(plain, ['moov', 'trak'], box('tref', box('hint', be32(2))))), null, 'a tref in trak')
+
+  // What recorders write passes.
+  const btrt = () => box('btrt', be32(0), be32(64000), be32(64000))
+  t.alike(audioBounds(put(plain, entry, btrt())), { ms: 3000 }, 'a btrt in mp4a')
+  t.alike(audioBounds(put(plain, entry, box('sbtd', [0, 0, 0, 0], ascii('I16')))), { ms: 3000 }, "Apple's sbtd in mp4a")
+  t.alike(audioBounds(put(withOpus, opusEntry, btrt())), { ms: 3000 }, 'a btrt in Opus')
+
+  // Sample groups in stbl hold their own fields and mark nothing encrypted.
+  const roll = (count = 1) => box('sgpd', [1, 0, 0, 0], ascii('roll'), be32(2), be32(count), [0xff, 0xff])
+  const mapped = (n, type = 'roll') => box('sbgp', [0, 0, 0, 0], ascii(type), be32(1), be32(n), be32(1))
+  t.alike(audioBounds(put(put(plain, stbl, roll()), stbl, mapped(3000))), { ms: 3000 }, 'a roll group over every sample')
+  t.alike(audioBounds(put(plain, stbl, box('sgpd', [0, 0, 0, 0], ascii('roll'), be32(0)))), { ms: 3000 }, 'an empty version 0 sgpd')
+  const groups = [
+    ['an encryption group', box('sgpd', [1, 0, 0, 0], ascii('seig'), be32(20), be32(1), new Array(20).fill(0))],
+    ['samples mapped to an encryption group', mapped(3000, 'seig')],
+    ['an sgpd declaring more entries than it holds', roll(0xffffffff)],
+    ['a version 0 sgpd with entries', box('sgpd', [0, 0, 0, 0], ascii('roll'), be32(1), [0xff, 0xff])],
+    ['a version 2 sgpd with entries', box('sgpd', [2, 0, 0, 0], ascii('roll'), be32(0), be32(1), [0xff, 0xff])],
+    ['an unknown sgpd version', box('sgpd', [3, 0, 0, 0], ascii('roll'), be32(0), be32(0))],
+    ['an sbgp mapping more samples than the track holds', mapped(3001)],
+    ['an sbgp declaring more entries than it holds', box('sbgp', [0, 0, 0, 0], ascii('roll'), be32(2), be32(1), be32(1))],
+    ['a truncated sbgp', box('sbgp', [0, 0, 0, 0], ascii('roll'))]
+  ]
+  for (const [name, x] of groups) {
+    const bytes = put(plain, stbl, x)
+    t.is(audioBounds(bytes), null, name)
+    t.is(audioBounds(bytes, { metadata: true }), null, name + ', even for the sender')
+  }
+
+  // A listed box past its count is refused, even for the sender.
+  const counted = [
+    ['two ftyp', new Uint8Array([...plain, ...ftyp()])],
+    ['two btrt in mp4a', put(put(plain, entry, btrt()), entry, btrt())],
+    ['two sbtd in mp4a', put(put(plain, entry, box('sbtd', [0])), entry, box('sbtd', [0]))],
+    ['two btrt in Opus', put(put(withOpus, opusEntry, btrt()), opusEntry, btrt())],
+    ['two trex', fragmented({ mvex: [trex(1, 0), trex(2, 0)], moofs: [second()] })]
+  ]
+  for (const [name, bytes] of counted) {
+    t.is(audioBounds(bytes), null, name)
+    t.is(audioBounds(bytes, { metadata: true }), null, name + ', even for the sender')
+  }
 })
 
 const tfdt0 = (v) => box('tfdt', [0, 0, 0, 0], be32(v))

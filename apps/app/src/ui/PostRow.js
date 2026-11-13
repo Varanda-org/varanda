@@ -13,7 +13,10 @@
 //   does not follow: their photos are never kept).
 // - expanded: shows the full caption without a clamp control (default false).
 // - preview: null | a stored link card (the post's `preview`), drawn by
-//   ./LinkCard from that data only, its thumbnail read like a post photo.
+//   ./LinkCard from that data only, its thumbnail read like a post photo. A
+//   card whose URL carries an Audius music ref uses ./MusicPlayerCard;
+//   other allowlisted music links (embedOf) use ./MusicEmbedCard. A link
+//   only in the text never gets a player.
 // - replyPreviews: optional [{ key, name, text }], not the link card above.
 //   Under the action bar, 'Respostas' and one line per preview ('Nome:
 //   texto'), at most two with text. Absent or empty renders nothing. Raw
@@ -58,6 +61,8 @@ import { displayText } from '@varanda/rpc'
 import { pendingOpen, tapKind } from '../doubleTap'
 import { relativeTime } from '../format'
 import { hasLink } from '../links'
+import { embedOf } from '../musicEmbed'
+import { musicRefOf } from '../music'
 import { moreActions, repostActions, shareLink } from '../postActions'
 import { useBlocks } from '../blocksProvider'
 import { blockedRowView } from '../memberBlocks'
@@ -70,6 +75,8 @@ import { Avatar } from './Avatar'
 import { ClampControl, useClamp } from './ClampText'
 import { Icon } from './Icon'
 import { LinkCard } from './LinkCard'
+import { MusicEmbedCard } from './MusicEmbedCard'
+import { MusicPlayerCard } from './MusicPlayerCard'
 import { MediaGrid } from './MediaGrid'
 import { tap } from './haptics'
 import { hasMention, MentionText } from './MentionText'
@@ -395,8 +402,14 @@ function PostRowView ({
   const mediaNode = hasMedia ? <MediaGrid author={author} media={media} persist={persistMedia !== false} /> : null
   const quoteNode = quoteOn ? <QuoteCard quote={quoteProp} now={now} /> : null
   // Outside the row's open area: a tap on the card opens the link, never the conversation.
+  const embed = preview && typeof preview === 'object' ? embedOf(preview.url) : null
+  const music = preview && typeof preview === 'object' ? musicRefOf(preview.url) : null
   const previewNode = !hasMedia && preview && typeof preview === 'object'
-    ? <LinkCard card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />
+    ? music !== null
+      ? <MusicPlayerCard card={preview} music={music} />
+      : embed !== null
+        ? <MusicEmbedCard embed={embed} card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />
+        : <LinkCard card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />
     : null
   const previewsBody = previewLines.length === 0
     ? null

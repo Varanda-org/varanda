@@ -1,7 +1,7 @@
 'use strict'
 
 const test = require('brittle')
-const { mediaBounds, MAX_MEDIA_PIXELS, MAX_MEDIA_FRAMES, MAX_MEDIA_TOTAL_PIXELS, MAX_MEDIA_DIMENSION } = require('..')
+const { mediaBounds, mediaSize, MAX_MEDIA_PIXELS, MAX_MEDIA_FRAMES, MAX_MEDIA_TOTAL_PIXELS, MAX_MEDIA_DIMENSION } = require('..')
 
 function bytes (...parts) {
   const out = []
@@ -254,4 +254,58 @@ test('animated WebP frame bitstreams must match the ANMF frame size', (t) => {
   t.is(mediaBounds(webpAnimated(16, 8, 1, [...bytes('VP8L'), ...le32(2), 0x2f, 0]), 'image/webp'), null, 'an unreadable VP8L')
   t.is(mediaBounds(webpAnimated(16, 8, 1, [...bytes('VP8L'), ...le32(99), 0x2f, 0, 0, 0, 0]), 'image/webp'), null,
     'a bitstream longer than the frame')
+})
+
+// A camera JPEG: APP1 (EXIF) and APP2 (ICC) segments of near-maximum length
+// before the frame header, which may be progressive (SOF2).
+function cameraJpeg (w, h, sof = 0xc0) {
+  const app = (marker, fill) => [0xff, marker, ...be16(65533), ...new Array(65531).fill(fill)]
+  return bytes(0xff, 0xd8,
+    app(0xe1, 0x45), app(0xe2, 0x49), app(0xe2, 0x49),
+    0xff, sof, be16(17), 8, be16(h), be16(w), 3, 1, 0x11, 0, 2, 0x11, 1, 3, 0x11, 1,
+    0xff, 0xda, be16(2), 0xff, 0xd9)
+}
+
+test('mediaSize reads the header size with no size bound', (t) => {
+  t.alike(mediaSize(jpeg(8000, 6000), 'image/jpeg'), { width: 8000, height: 6000, frames: 1 }, 'a 48 MP JPEG, past mediaBounds')
+  t.is(mediaBounds(jpeg(8000, 6000), 'image/jpeg'), null, 'mediaBounds still refuses it')
+  t.alike(mediaSize(png(23000, 23000), 'image/png'), { width: 23000, height: 23000, frames: 1 }, 'a huge PNG header is reported, not refused')
+  t.alike(mediaSize(png(0x7fffffff, 1)), { width: 0x7fffffff, height: 1, frames: 1 }, 'no dimension bound either; the mime is optional')
+  t.alike(mediaSize(webpLossless(16384, 16384), 'image/webp'), { width: 16384, height: 16384, frames: 1 })
+  t.alike(mediaSize(gif(65535, 65535, 1), 'image/gif'), { width: 65535, height: 65535, frames: 1 })
+  t.alike(mediaSize(cameraJpeg(8064, 6048), 'image/jpeg'), { width: 8064, height: 6048, frames: 1 }, 'EXIF and ICC before the SOF')
+  t.alike(mediaSize(cameraJpeg(4032, 3024, 0xc2), 'image/jpeg'), { width: 4032, height: 3024, frames: 1 }, 'a progressive JPEG')
+})
+
+test('a JPEG marker a decoder does not skip by length is refused', (t) => {
+  const hidden = [0xff, 0xc0, ...be16(17), 8, ...be16(23000), ...be16(23000), 3, 1, 0x11, 0, 2, 0x11, 1, 3, 0x11, 1]
+  const decoy = [0xff, 0xc0, ...be16(17), 8, ...be16(16), ...be16(16), 3, 1, 0x11, 0, 2, 0x11, 1, 3, 0x11, 1]
+  // FF 00 is a stuffed zero to libjpeg, which then finds the hidden frame header.
+  const wrapped = bytes(0xff, 0xd8, 0xff, 0x00, be16(2 + hidden.length), hidden, decoy, 0xff, 0xd9)
+  t.is(mediaSize(wrapped, 'image/jpeg'), null, 'mediaSize')
+  t.is(mediaBounds(wrapped, 'image/jpeg'), null, 'mediaBounds')
+  for (const marker of [0x02, 0xbf, 0xc8, 0xde, 0xdf, 0xf0, 0xfd]) {
+    t.is(mediaSize(bytes(0xff, 0xd8, 0xff, marker, be16(4), 0, 0, decoy, 0xff, 0xd9), 'image/jpeg'), null, 'marker ' + marker.toString(16))
+  }
+  const tables = [
+    0xff, 0xe0, ...be16(16), ...bytes('JFIF'), 0, 1, 1, 0, 0, 1, 0, 1, 0, 0,
+    0xff, 0xfe, ...be16(5), 0x61, 0x62, 0x63,
+    0xff, 0xdb, ...be16(67), 0, ...new Array(64).fill(1),
+    0xff, 0xc4, ...be16(20), 0, ...new Array(16).fill(0), 0,
+    0xff, 0xcc, ...be16(4), 0, 0,
+    0xff, 0xdd, ...be16(4), 0, 0
+  ]
+  t.alike(mediaSize(bytes(0xff, 0xd8, tables, decoy, 0xff, 0xda, be16(2), 0xff, 0xd9), 'image/jpeg'), { width: 16, height: 16, frames: 1 }, 'APP0, COM, DQT, DHT, DAC and DRI are still skipped')
+})
+
+test('mediaSize keeps the format checks and the walk limits', (t) => {
+  t.is(mediaSize(png(30, 20), 'image/jpeg'), null, 'bytes that are not the given mime')
+  t.is(mediaSize(new Uint8Array([1, 2, 3])), null, 'no known format')
+  t.is(mediaSize('not bytes'), null, 'not a Uint8Array')
+  t.is(mediaSize(jpeg(0, 10), 'image/jpeg'), null, 'a zero side')
+  t.is(mediaSize(png(30, 20).subarray(0, 40), 'image/png'), null, 'truncated')
+  t.is(mediaSize(gif(10, 10, MAX_MEDIA_FRAMES + 1), 'image/gif'), null, 'the frame cap still stops the walk')
+  const segments = []
+  for (let i = 0; i < 1025; i++) segments.push(0xff, 0xfe, ...be16(2))
+  t.is(mediaSize(bytes(0xff, 0xd8, segments, 0xff, 0xc0, be16(17), 8, be16(1), be16(1), 3, 1, 0x11, 0, 2, 0x11, 1, 3, 0x11, 1), 'image/jpeg'), null, 'more segments than the walk allows')
 })
