@@ -7,9 +7,29 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 39)
-  t.is(LEGAL_DATE, '12/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 39, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(LEGAL_VERSION, 40)
+  t.is(LEGAL_DATE, '13/11/2026')
+  t.is(REVIEW_NOTE, 'Versão 40, sujeita a revisão jurídica. Não é parecer jurídico.')
+})
+
+test('legal: this version describes music covers as never stored', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  for (const [doc, prefix] of [[TERMS, 'Quando a associação liga as capas'], [PRIVACY, 'Capas: quando a associação liga as capas']]) {
+    const paragraph = doc.sections.find((s) => s.heading === 'Música do Audius').paragraphs.find((p) => p.startsWith(prefix)) || ''
+    t.ok(/nunca é guardada|não é guardada/.test(paragraph), doc.title + ': covers are never stored')
+    t.ok(paragraph.includes('na publicação nem no momento') || paragraph.includes('na publicação, no momento nem em arquivo'), doc.title + ': no cover in posts or momentos')
+    t.ok(paragraph.includes('enquanto o app está aberto'), doc.title + ': device memory lasts only for the app session')
+  }
+  const terms = TERMS.sections.find((s) => s.heading === 'Música do Audius').paragraphs.join(' ')
+  for (const required of [
+    'Só mostrar o cartão não faz pedidos',
+    'num momento, só depois que o trecho começa a tocar; numa publicação, só depois que você toca para ouvir',
+    'Sem capa, o app mostra um quadro com o símbolo de música'
+  ]) t.ok(terms.includes(required), required)
+  const section = (heading) => PRIVACY.sections.find((s) => s.heading === heading).paragraphs.join(' ')
+  t.ok(section('Música do Audius').includes('mantém a imagem só na memória por até 10 minutos e não a grava em disco nem em registros'))
+  t.ok(section('Por quanto tempo').includes('As capas ficam só na memória do serviço, por até 10 minutos, e a contagem diária de capas por membro também fica só na memória; ambas desaparecem ao reiniciar'))
+  t.ok(section('Compartilhamento e cópias fora do Brasil').includes('Para as capas, o servidor de imagens indicado pelo Audius recebe o endereço da associação e o caminho da imagem'))
 })
 
 test('legal: version 39 describes music through the account service', async (t) => {
@@ -170,7 +190,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '9f9445d5ca39c016cfc837853fc7e67da27b051735ab8e707aa1ada322959757', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '618c973db7ecc8b57e7dcefc179b5f2fc09b4fe44db9b7ba66251f654a18d980', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 19 describes extra passkeys and the recovery code for the same account', async (t) => {

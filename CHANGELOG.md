@@ -7,6 +7,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Segurança
 
+- Termos de Uso e Política de Privacidade na versão 40, com novo aceite, descrevem as capas de música do Audius: só na memória, por até 10 minutos no serviço e enquanto o app está aberto no aparelho, sem guardar na publicação nem no momento. Instalar esta versão antes de ligar `VARANDA_AUDIUS_COVERS=1`. Verificação em `docs/verification.md` §191.
 - Capas de música do Audius: a produção permanece em `VARANDA_AUDIUS_COVERS=0` até a versão dos Termos que descreve as capas estar instalada. O interruptor só aceita `0` ou `1` e, com a chave da API vazia, o serviço recusa subir. A capa passa pelo serviço de conta só na memória, por no máximo 10 minutos. Nenhuma URL de arte vai ao membro, e o pedido ao host da capa não leva a chave da API.
 - Publicações de Página em grupos privados agora são cifradas de ponta a ponta nos aparelhos do dono e dos administradores. O serviço guarda apenas a chave de escrita, acrescenta blocos já selados e não lê o texto. Ao trocar a caixa ou remover um administrador, os grupos privados aguardam a admissão do escritor novo e uma época nova. Termos e Política de Privacidade na versão 34, com novo aceite.
 - Conversas de Página agora são cifradas de ponta a ponta: o serviço não guarda a caixa da Página, não lê mensagens e só assina digests. Termos e Política de Privacidade na versão 33, com novo aceite. A ativação importa e apaga as linhas antigas que o serviço conseguia ler.

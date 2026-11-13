@@ -8636,3 +8636,33 @@ Usar uma instalação de teste, sem DHT pública, com a música do Audius ligada
 - [ ] Trocar de conta com um cartão de música ativo: a nova conta não pede capa antes do próprio toque.
 - [ ] Android, depois iOS, depois a web. Registrar aparelho, sistema e, na web, o navegador.
 
+## 191. Termos 40 para capas de música (PR feat/music-covers-terms)
+
+Termos de Uso e Política de Privacidade na versão 40, de 13/11/2026, com novo aceite. A versão anterior lida na base era 39 nos dois módulos. O serviço de conta busca as capas pelo endereço da associação, sem enviar o endereço do aparelho, a chave, o token ou a conta do membro. A imagem fica só na memória do serviço por até 10 minutos e no aparelho enquanto o app está aberto, sem entrar na publicação, no momento ou em arquivo. As capas e a contagem diária de capas por membro desaparecem ao reiniciar o serviço. O servidor de imagens recebe o endereço da associação e o caminho da imagem.
+
+Instalar esta versão antes de definir `VARANDA_AUDIUS_COVERS=1`. O piso da versão 39 para a música em si permanece.
+
+### Verificação automatizada
+
+Na raiz, com Node 24 e dependências locais, sem rede:
+
+```sh
+npx --no-install standard apps/app/src/legal.js packages/core/lib/terms.js apps/app/test/legal.test.js packages/core/test/terms.test.js apps/site/test/legal.test.js
+node apps/app/test/legal.test.js
+node packages/core/test/terms.test.js
+node apps/site/test/legal.test.js
+node apps/app/test/terms-version.test.js
+node apps/site/scripts/render-legal.js --check
+```
+
+`apps/app/test/legal.test.js`: `legal: this version describes music covers as never stored` confere os parágrafos de capas dos dois documentos, o limite de memória, a contagem diária, a transferência e a reprodução só após o toque. A versão, a data, a nota de revisão e o digest estão fixados. `packages/core/test/terms.test.js` fixa a versão do aceite; `apps/app/test/terms-version.test.js` confere que os módulos concordam. `apps/site/test/legal.test.js` confere a versão e as páginas geradas pelo renderizador, sem edição manual de HTML.
+
+Resultado em Node 24.22.1: app 28/28 testes e 1280/1280 asserções, core 8/8 e 126/126, site 7/7 e 115/115, igualdade de versões 1/1 e 2/2. Standard e renderizador com `--check` passaram. Sem os dois parágrafos novos, o teste de capas falhou; os parágrafos foram restaurados antes da verificação final. Nenhuma dependência foi instalada.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Os itens abaixo continuam em aberto, na ordem Android, iOS e web:
+
+- [ ] Uma conta com aceite anterior precisa aceitar a versão 40 antes de continuar.
+- [ ] A tela de aceite e Ajustes, Termos e privacidade, mostram a versão 40, a data 13/11/2026 e os parágrafos sobre capas.
+- [ ] As páginas de Termos e Privacidade do site apresentam o mesmo texto do app.
