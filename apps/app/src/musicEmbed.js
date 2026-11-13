@@ -196,8 +196,11 @@ function soundcloud ({ host, segments }) {
   } else {
     return null
   }
+  // The widget's buy, share and download buttons lead to addresses the
+  // uploader chooses; on the web a popup opens them in a tab the app cannot
+  // filter, so the player shows none of them.
   return freeze('soundcloud', kind,
-    'https://w.soundcloud.com/player/?url=' + encodeURIComponent(page) + '&auto_play=false&visual=false&show_comments=false&show_teaser=false',
+    'https://w.soundcloud.com/player/?url=' + encodeURIComponent(page) + '&auto_play=false&visual=false&show_comments=false&show_teaser=false&buying=false&sharing=false&download=false',
     page, kind === 'set' ? 352 : 166, 0)
 }
 
