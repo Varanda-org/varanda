@@ -49,7 +49,7 @@ test('legal pages: the files on disk are the render of apps/app/src/legal.js', a
 // rewrites text fails here even when the files match its output.
 test('legal pages: title, version, review note and every section of legal.js, in order', async (t) => {
   const legal = await loadLegal()
-  t.is(legal.LEGAL_VERSION, 42)
+  t.is(legal.LEGAL_VERSION, 43)
   t.is(legal.LEGAL_DATE, '13/11/2026')
   for (const page of PAGES) {
     const doc = legal[page.doc]

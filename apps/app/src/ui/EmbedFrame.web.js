@@ -24,7 +24,7 @@ export function EmbedFrame ({ embedUrl, height, title }) {
     width: '100%',
     height,
     style: { border: 0, display: 'block' },
-    allow: 'autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture',
+    allow: 'clipboard-write; encrypted-media; fullscreen; picture-in-picture',
     allowFullScreen: true,
     referrerPolicy: 'strict-origin-when-cross-origin',
     sandbox: EMBED_SANDBOX

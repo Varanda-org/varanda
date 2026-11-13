@@ -60,8 +60,8 @@ import { AccessibilityInfo, Animated, Platform, Pressable, StyleSheet, Text, Vie
 import { displayText } from '@varanda/rpc'
 import { pendingOpen, tapKind } from '../doubleTap'
 import { relativeTime } from '../format'
-import { hasLink } from '../links'
-import { embedOf } from '../musicEmbed'
+import { hasLink, textWithoutHrefs } from '../links'
+import { embedOf, sameMusicPage } from '../musicEmbed'
 import { musicRefOf } from '../music'
 import { moreActions, repostActions, shareLink } from '../postActions'
 import { useBlocks } from '../blocksProvider'
@@ -81,7 +81,7 @@ import { MediaGrid } from './MediaGrid'
 import { tap } from './haptics'
 import { hasMention, MentionText } from './MentionText'
 import { useHosted } from '../node'
-import { QuoteCard } from './QuoteCard'
+import { QuoteCard, quotePlayerOf } from './QuoteCard'
 import { LARGE_TEXT, layout, radius, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
 
@@ -196,9 +196,14 @@ function PostRowView ({
   const likes = countOf(counts, 'likes')
   const reposts = countOf(counts, 'reposts')
   const hasMedia = Array.isArray(media) && media.length > 0
-  const hasText = typeof text === 'string' && text !== ''
+  const embed = preview && typeof preview === 'object' ? embedOf(preview.url) : null
+  const music = preview && typeof preview === 'object' ? musicRefOf(preview.url) : null
+  const ownLink = !hasMedia && music === null && embed !== null
+  // The card already shows this link, so its raw address is hidden from the shown text only.
+  const body = useMemo(() => (ownLink && typeof text === 'string' ? textWithoutHrefs(text, (href) => sameMusicPage(href, preview.url)) : text), [ownLink, text, preview])
+  const hasText = typeof body === 'string' && body !== ''
   // The body label, the plain text and the label without the text all use it.
-  const shownText = useMemo(() => (hasText ? displayText(text, { multiline: true }) : null), [hasText, text])
+  const shownText = useMemo(() => (hasText ? displayText(body, { multiline: true }) : null), [hasText, body])
   const [captionWidth, setCaptionWidth] = useState(undefined)
   const { numberOfLines, control, onTextLayout, toggle } = useClamp({
     text: shownText,
@@ -378,15 +383,15 @@ function PostRowView ({
   const previewsLabel = 'Respostas. ' + previewLines.map(previewLineText).join('. ')
   const openMention = otherPress(onOpenMention)
   const quoteOn = quote && typeof quote === 'object'
-  const textOut = hasText && numberOfLines === 0 && (hasLink(text) || (!!openMention && hasMention(text)))
+  const textOut = hasText && numberOfLines === 0 && (hasLink(body) || (!!openMention && hasMention(body)))
   // The screen gives a quote its own handler carrying the quoted author.
   const quoteMention = (quoteOn && otherPress(quote.onOpenMention)) || openMention
-  const quoteOut = quoteOn && typeof quote.text === 'string' && !!quoteMention && hasMention(quote.text)
+  const quoteOut = quoteOn && ((typeof quote.text === 'string' && !!quoteMention && hasMention(quote.text)) || quotePlayerOf(quote) !== null)
   const quoteProp = quoteOn ? { ...quote, onOpen: otherPress(quote.onOpen), onOpenMention: quoteMention } : quote
   const label = textOut ? bodyParts.filter((part) => part !== shownText).join('. ') : bodyLabel
   const textNode = hasText
     ? textOut
-      ? <MentionText text={text} onOpenMention={openMention} onOpenPlain={openTap} onTextLayout={onTextLayout} style={styles.text} />
+      ? <MentionText text={body} onOpenMention={openMention} onOpenPlain={openTap} onTextLayout={onTextLayout} style={styles.text} />
       : (
         <Pressable
           accessibilityRole={open ? 'link' : 'text'}
@@ -402,8 +407,6 @@ function PostRowView ({
   const mediaNode = hasMedia ? <MediaGrid author={author} media={media} persist={persistMedia !== false} /> : null
   const quoteNode = quoteOn ? <QuoteCard quote={quoteProp} now={now} /> : null
   // Outside the row's open area: a tap on the card opens the link, never the conversation.
-  const embed = preview && typeof preview === 'object' ? embedOf(preview.url) : null
-  const music = preview && typeof preview === 'object' ? musicRefOf(preview.url) : null
   const previewNode = !hasMedia && preview && typeof preview === 'object'
     ? music !== null
       ? <MusicPlayerCard card={preview} music={music} />

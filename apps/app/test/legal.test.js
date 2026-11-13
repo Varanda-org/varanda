@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 42)
+  t.is(LEGAL_VERSION, 43)
   t.is(LEGAL_DATE, '13/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 42, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 43, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -78,24 +78,35 @@ test('legal: version 39 describes music through the account service', async (t) 
     'O Audius pode tratar esses dados fora do Brasil',
     'O mecanismo dessa transferência internacional, conforme a Resolução CD/ANPD nº 19/2024, ainda será confirmado por parecer jurídico'
   ]) t.ok(section('Compartilhamento e cópias fora do Brasil').includes(required), required)
+  const terms = TERMS.sections.find((s) => s.heading === 'Música do Audius').paragraphs.join(' ')
+  t.ok(terms.includes('Num momento, se a associação ligar a música nos momentos, ver um momento com música, inclusive um seu, já pede o trecho de 15 segundos ao serviço de conta, sem um toque à parte; o trecho toca em seguida, a não ser que o navegador só deixe tocar som depois de um toque. O Audius continua recebendo só o endereço da associação.'), 'terms: momento music starts on view')
+  t.ok(section('Música do Audius').includes('Num momento, se a associação ligar a música nos momentos, ver um momento com música, inclusive um seu, já pede o trecho de 15 segundos ao serviço de conta, sem um toque à parte; o trecho toca em seguida, a não ser que o navegador só deixe tocar som depois de um toque.'), 'privacy: momento music starts on view')
 })
 
-test('legal: version 38 describes music players on tap', async (t) => {
+test('legal: version 43 loads music players when the card is visible', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes('Ao carregar, o serviço recebe o endereço de internet do seu aparelho'), 'terms: player sends the device address')
+  t.ok(text(PRIVACY).includes('Ao carregar, o provedor recebe o endereço de internet do seu aparelho'), 'privacy: player sends the device address')
   for (const doc of [TERMS, PRIVACY]) {
     for (const required of [
-      'YouTube, SoundCloud, Spotify ou Apple Music',
-      'numa publicação pode aparecer como um cartão',
-      'Mostrar esse cartão não faz nenhum pedido a esses serviços',
-      'Só quando você toca em "Tocar aqui" o player do próprio serviço carrega dentro da publicação',
-      'recebe o endereço de internet do seu aparelho',
+      'Um link de YouTube, SoundCloud, Spotify ou Apple Music pode aparecer como um cartão com o player do próprio serviço',
+      'numa publicação, numa citação, numa conversa privada, num grupo e na prévia enquanto você escreve',
+      'mas fica sabendo que o seu aparelho mostrou aquele item, e quando',
+      'Na prévia enquanto você escreve, o player pode carregar assim que a prévia fica pronta, antes de você publicar ou enviar.',
+      'O player carrega sozinho quando o cartão fica visível na tela, sem um toque antes',
       'pode usar cookies e outros dados que o serviço guarda no aparelho',
+      'O player não começa com som: o som só sai quando você toca o play dentro do player',
       'Ouvir músicas completas depende do serviço',
-      'Tocar é opcional',
-      'o link continua podendo abrir fora do Varanda',
-      'Sair da tela fecha o player'
+      'que só abre quando você toca nele',
+      'fecha o player'
     ]) t.ok(text(doc).includes(required), doc.title + ': ' + required)
+    for (const gone of [
+      'Tocar aqui',
+      'não faz nenhum pedido a esses serviços',
+      'A partir desse toque',
+      'Tocar é opcional'
+    ]) t.absent(text(doc).includes(gone), doc.title + ': no ' + gone)
   }
   const section = (heading) => PRIVACY.sections.find((s) => s.heading === heading).paragraphs.join(' ')
   const thirdParties = section('Compartilhamento e cópias fora do Brasil')
@@ -103,12 +114,12 @@ test('legal: version 38 describes music players on tap', async (t) => {
     'informações do navegador ou app (user agent)',
     'Também recebe, como referência (referrer), o endereço do site ou, no app, um endereço fixo do app Varanda',
     'O provedor é o controlador desses dados',
-    'podem ser tratados fora do Brasil por YouTube, SoundCloud, Spotify ou Apple Music'
+    'podem ser tratados fora do Brasil por esse provedor'
   ]) t.ok(thirdParties.includes(required), required)
-  t.ok(section('Finalidades e bases legais propostas').includes('Players de música de terceiros, ao toque: para carregar o player que você pediu, a base legal proposta é execução de contrato, Art. 7º, V, ainda sujeita a parecer jurídico'))
+  t.ok(section('Finalidades e bases legais propostas').includes('Players de música de terceiros, carregados quando o cartão fica visível: para mostrar a publicação, a mensagem ou a prévia com o player do link publicado ou enviado, a base legal proposta é execução de contrato, Art. 7º, V, ainda sujeita a parecer jurídico'))
   const retention = section('Por quanto tempo')
   t.ok(retention.includes('Nos players de YouTube, SoundCloud, Spotify e Apple Music, a associação não guarda os dados enviados ao provedor pelo player de música nem um histórico do que você ouve'))
-  t.ok(retention.includes('A retenção pelo provedor segue a política dele'))
+  t.ok(retention.includes('A retenção pelo provedor segue a política dele; o cartão continua guardado como a publicação ou a mensagem em que ele está.'))
 })
 
 test('legal: version 29 has no tolerance for abuse, a real contact, a content license and the age check on the app', async (t) => {
@@ -190,7 +201,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '67557caa88a88b9b76ce7a3dd4026a7e0fa52d27d6ce03eaa3085a051f6aaf31', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '2e418e203cfb77282a1601eaae6f71b5ec2bd00a45d8238d712306d2ab813920', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -391,6 +402,8 @@ test('legal: version 24 describes link previews built once and never fetched by 
   t.ok(text(PRIVACY).includes('O serviço não guarda o link, o título nem a imagem'))
   t.ok(text(PRIVACY).includes('Quem lê nunca fala com o site'))
   t.ok(text(PRIVACY).includes('A chave Prévia de links, em Ajustes, desliga a montagem'))
+  t.ok(text(TERMS).includes('tocar nele abre o link apenas se a pessoa escolher. O player de YouTube, SoundCloud, Spotify ou Apple Music é a exceção, descrita no parágrafo seguinte.'))
+  t.ok(text(PRIVACY).includes('o link só é aberto quando a pessoa toca no cartão. A exceção é o player de YouTube, SoundCloud, Spotify ou Apple Music, que carrega quando o cartão fica visível, como descrito em Compartilhamento e cópias fora do Brasil.'))
 })
 
 test('legal: version 28 describes the Feira listings, offers and ratings', async (t) => {
