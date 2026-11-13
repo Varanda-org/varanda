@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["VideoPrepModule"]
+  },
+  "android": {
+    "modules": ["app.varanda.videoprep.VideoPrepModule"]
+  }
+}
