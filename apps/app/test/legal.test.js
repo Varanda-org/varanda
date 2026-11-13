@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 40)
+  t.is(LEGAL_VERSION, 41)
   t.is(LEGAL_DATE, '12/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 40, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 41, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: version 39 describes music through the account service', async (t) => {
@@ -170,10 +170,10 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'ed0faba80934602a0cbc01b59a79bf3fa52e63ac3a63f7adf6af7d792358afc7', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '525a014d0d1ad749835cfb8fb4db834325d3b66bccabc17e887f026c5e103523', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
-test('legal: version 40 describes group reactions and chat formatting, not conversation reactions', async (t) => {
+test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   for (const doc of [TERMS, PRIVACY]) {
@@ -182,13 +182,20 @@ test('legal: version 40 describes group reactions and chat formatting, not conve
     t.ok(text(doc).includes('ainda vê qual conta escreveu o registro, quando e de que tamanho ele é'), doc.title + ': private group author, time and size stay visible')
     t.ok(text(doc).includes('o tamanho pode indicar que é uma reação e qual emoji ela leva'), doc.title + ': the size can suggest a reaction')
     t.ok(text(doc).includes('cópias que outras pessoas já receberam podem continuar existindo'), doc.title + ': removal leaves copies')
-    t.ok(text(doc).includes('As mensagens diretas ainda não têm reações'), doc.title + ': no conversation reactions yet')
+    t.ok(/(?:mensage(?:m|ns) diretas?, você também pode reag\p{L}*|rea(?:ç|g)\p{L}* numa mensagem direta)/iu.test(text(doc)), doc.title + ': reacting in direct messages')
+    t.absent(text(doc).includes('As mensagens diretas ainda não têm reações'), doc.title + ': conversation reactions are no longer planned')
+    t.ok(text(doc).includes('só as duas pessoas da conversa'), doc.title + ': a conversation reaction is seen by the two people')
+    t.ok(text(doc).includes('no mesmo limite diário de envio'), doc.title + ': a reaction spends the daily sending allowance')
+    t.ok(text(doc).includes('até ela chegar, a outra pessoa ainda pode ver a reação, e cópias que ela já recebeu podem continuar existindo'), doc.title + ': conversation removal leaves copies')
+    t.ok(/conversas das páginas não têm reações/iu.test(text(doc)), doc.title + ': no reactions in page conversations')
     t.ok(text(doc).includes('sem indicação de leitura, de entrega ou de que alguém está digitando'), doc.title + ': no read, delivery or typing indicator')
     t.ok(text(doc).includes('é só apresentação'), doc.title + ': formatting is presentation only')
-    t.absent(/rea(?:ç\p{L}*|g\p{L}*) (?:a|em|nas?|às?) (?:uma |as )?mensage(?:m|ns) diretas?/iu.test(text(doc)), doc.title + ': no reacting in direct messages')
   }
-  t.ok(text(PRIVACY).includes('As reações são guardadas e removidas como as mensagens do grupo em que foram publicadas'), 'retention of reactions')
-  t.ok(text(PRIVACY).includes('as reações nos grupos'), 'legal basis of reactions')
+  t.ok(text(TERMS).includes('Ela é cifrada de ponta a ponta como as mensagens'), 'conversation reactions are end to end')
+  t.ok(text(PRIVACY).includes('a hora e a sua conta como autora vão cifrados de ponta a ponta'), 'every field of a conversation reaction is sealed')
+  t.ok(text(PRIVACY).includes('As reações nos grupos são guardadas e removidas como as mensagens do grupo em que foram publicadas'), 'retention of group reactions')
+  t.ok(text(PRIVACY).includes('As reações nas mensagens diretas seguem os envelopes das mensagens diretas'), 'retention of conversation reactions')
+  t.ok(text(PRIVACY).includes('as reações nos grupos e nas mensagens diretas'), 'legal basis of reactions')
 })
 
 test('legal: version 19 describes extra passkeys and the recovery code for the same account', async (t) => {

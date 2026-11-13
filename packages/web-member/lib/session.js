@@ -4023,6 +4023,28 @@ function createBrowserSession ({
       })({}, ident)
     },
 
+    // A reaction travels as a message does (docs/rpc.md 5.119): the same
+    // refusals, lookup and stamps as dm.send.
+    'dm.react': async ({ to, target, emoji }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const ident = identityTarget
+      await serialDm(async () => {
+        dmEngine.checkSend(await requireDm(), to)
+        if ((await member.memberBlocks(storage)).has(to)) throw new UsageError(DM_BLOCKED)
+      })({}, ident)
+      let recipient
+      try {
+        recipient = await dmLookupOf(to)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+      return serialDm(async (_, epoch) => {
+        const own = await requireDm()
+        if ((await store.readDmKey(storage)) === null) await dmEnable(epoch)
+        return dmEngine.react(own, keyPair, { to, target, emoji }, recipient.box)
+      })({}, ident)
+    },
+
     // Not on the chain: it reads the pool over its own link and writes only
     // kv and the local store (one pull at a time, in the engine).
     'dm.pull': async () => {

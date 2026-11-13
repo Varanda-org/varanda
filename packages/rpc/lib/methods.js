@@ -573,6 +573,8 @@ const DM_LIST_LIMIT_MAX = 50
 const isDmId = (v) => typeof v === 'string' && DM_ID_RE.test(v)
 const isDmState = (v) => typeof v === 'string' && DM_STATES.includes(v)
 const isDmFolder = (v) => v === 'inbox' || v === 'request'
+// dm.react `target`: exactly { from, id }, a message of the conversation.
+const isDmTarget = (v) => isPlainObject(v) && Object.keys(v).length === 2 && hasOwn(v, 'from') && hasOwn(v, 'id') && isKey(v.from) && isDmId(v.id)
 const PAGE_RECIPIENTS_MAX = 17
 // The page-secrets header carries gen as uint32be.
 const PAGE_GEN_MAX = 0xffffffff
@@ -1316,6 +1318,9 @@ const SPECS = {
     mutating: true,
     cross: postCross
   },
+  // A reaction to a message of the conversation (docs/rpc.md 5.119): one
+  // emoji, or '' to remove. Spends the stamps of one dm.send.
+  'dm.react': { fields: { to: req(isKey), target: req(isDmTarget), emoji: req((v) => v === '' || isReaction(v)) }, mutating: true },
   'dm.pull': { fields: none },
   'dm.list': {
     fields: {

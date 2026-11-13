@@ -90,11 +90,11 @@ const MAX_GROUP_NAME = 80 // same value as records.js
 const MAX_GROUP_CUTS = 16
 const MAX_GROUPS_PER_COMMUNITY = 32
 const COMMUNITY_LIST_MAX = 64
-// dm.thread: the largest page whose worst case (MAX_TEXT 4-byte characters
-// and a maximal link card in every message) fits MAX_MESSAGE
-// (docs/rpc.md 5.78, test/sizes.test.js).
+// dm.thread: the largest page whose worst case (MAX_TEXT 4-byte characters,
+// a maximal link card and two reactions at the emoji cap in every message)
+// fits MAX_MESSAGE (docs/rpc.md 5.78, test/sizes.test.js).
 const DM_THREAD_LIMIT_DEFAULT = 30
-const DM_THREAD_LIMIT_MAX = 42
+const DM_THREAD_LIMIT_MAX = 41
 const PEEK_TIMEOUT_MS = 8000
 const FOLLOW_LIMIT_DEFAULT = 100
 const FOLLOW_LIMIT_MAX = 500

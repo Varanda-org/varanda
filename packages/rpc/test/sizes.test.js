@@ -446,11 +446,16 @@ const DM_MEDIA_ITEM = {
 
 const DM_CARD = { ...CARD, image: { ...DM_MEDIA_ITEM, mime: 'image/jpeg', chunks: 1, bytes: MAX_CARD_IMAGE_BYTES } }
 
-// Every message at MAX_TEXT code points and a maximal card, which the
-// sealed frame (DM_INNER_BYTES) cannot even carry together: a bound, not a
-// message that exists.
+// A reaction emoji at the REACTION_MAX_BYTES cap (isReaction itself accepts
+// at most 30 UTF-8 bytes, and JSON escapes none of them): a bound.
+const DM_REACTION_BOUND = '\u{1f600}'.repeat(REACTION_MAX_BYTES / 4)
+
+// Every message at MAX_TEXT code points, a maximal card and both people's
+// reactions at the emoji cap, which the sealed frame (DM_INNER_BYTES) cannot
+// even carry together: a bound, not a message that exists.
 function dmThreadResult (n, ch, card = true) {
-  const message = { id: 'f'.repeat(32), from: HEX, text: ch.repeat(MAX_TEXT), replyTo: 'f'.repeat(32), fwd: 1, at: AT, mine: false, media: card ? null : widestDmMedia(MAX_DM_MEDIA), card: card ? DM_CARD : null }
+  const reactions = [{ emoji: DM_REACTION_BOUND, mine: false }, { emoji: DM_REACTION_BOUND, mine: true }]
+  const message = { id: 'f'.repeat(32), from: HEX, text: ch.repeat(MAX_TEXT), replyTo: 'f'.repeat(32), fwd: 1, at: AT, mine: false, media: card ? null : widestDmMedia(MAX_DM_MEDIA), card: card ? DM_CARD : null, reactions }
   return { messages: Array(n).fill(message), next: 'f'.repeat(32), folder: 'request', blocked: false }
 }
 
@@ -469,17 +474,31 @@ test('the widest DM media item is a valid dm.send item', (t) => {
 })
 
 test('dm.thread: DM_THREAD_LIMIT_MAX fits, one more does not', (t) => {
-  t.is(DM_THREAD_LIMIT_MAX, 42)
+  t.is(DM_THREAD_LIMIT_MAX, 41)
   t.ok(validateParams('dm.thread', { peer: HEX, limit: DM_THREAD_LIMIT_MAX }).ok)
   t.absent(validateParams('dm.thread', { peer: HEX, limit: DM_THREAD_LIMIT_MAX + 1 }).ok)
   for (const ch of DM_WORST) t.ok(size(dmThreadResult(DM_THREAD_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
   const worst = size(dmThreadResult(DM_THREAD_LIMIT_MAX, '\u{1f600}'))
   t.comment('dm.thread worst case at ' + DM_THREAD_LIMIT_MAX + ' messages: ' + worst + ' bytes')
   const overflow = size(dmThreadResult(DM_THREAD_LIMIT_MAX + 1, '\u{1f600}'))
-  t.is(worst, 259022)
-  t.is(overflow, 265186)
+  t.is(worst, 258803)
+  t.is(overflow, 265112)
   t.comment('dm.thread worst case at ' + (DM_THREAD_LIMIT_MAX + 1) + ' messages: ' + overflow + ' bytes')
   t.ok(overflow > MAX_MESSAGE, 'largest that fits')
+})
+
+test('dm.thread: a reactable:false row (no reactions) is never larger than the worst reactable row', (t) => {
+  for (const ch of DM_WORST) {
+    for (const card of [true, false]) {
+      const worst = dmThreadResult(1, ch, card).messages[0]
+      const { reactions, ...rest } = worst
+      const unreactable = { ...rest, reactable: false }
+      t.ok(utf8ByteLength(JSON.stringify(unreactable)) < utf8ByteLength(JSON.stringify(worst)), JSON.stringify(ch) + (card ? ' card' : ' media'))
+    }
+  }
+  const page = dmThreadResult(DM_THREAD_LIMIT_MAX, '\u{1f600}')
+  const { reactions, ...rest } = page.messages[0]
+  t.ok(size({ ...page, messages: Array(DM_THREAD_LIMIT_MAX).fill({ ...rest, reactable: false }) }) < size(page), 'so the pinned page maximum holds')
 })
 
 test('the dispatcher sends the worst-case feed page unchanged', async (t) => {

@@ -68,6 +68,8 @@ module.exports = {
   clipText: text.clipText,
   DM_INNER_KEYS: dmBudget.DM_INNER_KEYS,
   DM_INNER_KEYS_V2: dmBudget.DM_INNER_KEYS_V2,
+  DM_INNER_KEYS_V4: dmBudget.DM_INNER_KEYS_V4,
+  DM_TARGET_KEYS: dmBudget.DM_TARGET_KEYS,
   DM_MEDIA_KEYS: dmBudget.DM_MEDIA_KEYS,
   DM_CARD_KEYS: dmBudget.DM_CARD_KEYS,
   dmInnerVersion: dmBudget.innerVersion,

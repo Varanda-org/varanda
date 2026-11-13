@@ -66,7 +66,14 @@ import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
 import { listingLinkOf } from '../feiraChat'
 import { parsePriceText, quickReplies } from '../feira'
 import { CONSENT_NOTE, acceptCard, acceptText, buttonState, centsLabel, consentParams, declineCard, declineText, offerCard, offerOfMessage, offerState, offerTarget, proposalText, validCents } from '../feiraOffer'
-import { mergeMessages, newestOf, pageDmClient, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey } from '../dm-screen'
+import { mergeMessages, newestOf, pageDmClient, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey, dmReactions, reactDebounce, dmReactionGate, dmReactable, withFreshReactions } from '../dm-screen'
+import { pageReadKind } from '../pageNotice'
+import { applyOptimistic, reactionChips, toggleOf } from '../reactions'
+import { hasRich, parseRich, plainOf } from '../richText'
+import { cardBesideSpoilers } from '../ui/RichText'
+import { ReactionChips, QuickReactions } from '../ui/Reactions'
+import { ReactionPicker } from '../ui/ReactionPicker'
+import { PressScale } from '../ui/PressScale'
 import { actAs, pagesDm } from '../pages'
 import { pageKeyText } from '../pageSecrets'
 import { pagesOn } from '../pageGate'
@@ -78,8 +85,6 @@ import { chatMediaRefs, followAutocorrect, retryChatSend, runChatSend, stagedOf 
 import { Btn, ErrorText, Field, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles } from '../ui/ThemeProvider'
 import { Bubble } from '../ui/Bubble'
-import { cardBesideSpoilers } from '../ui/RichText'
-import { parseRich, plainOf } from '../richText'
 import { ChatComposer, useLinkDraft } from '../ui/ChatComposer'
 import { ChatMedia } from '../ui/ChatMedia'
 import { useChatAttachments } from '../ui/AttachSheet'
@@ -194,6 +199,53 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const quoteName = readsAs(nameText, OWN_LABEL) ? (peerWho.subtitle || 'Pessoa') : nameText
   const quoteHandle = peerWho.subtitle || undefined
 
+  const [peerRead, setPeerRead] = useState(null)
+  const peerReadContext = useMemo(() => ({ live: true, pending: false, trailing: false, answer: null }), [request, peer])
+  useEffect(() => {
+    peerReadContext.live = true
+    return () => { peerReadContext.live = false }
+  }, [peerReadContext])
+  const readPeer = useCallback(async () => {
+    if (!hosted || !unlocked || !node.online || pageKey !== null) return
+    if (peerReadContext.pending) { peerReadContext.trailing = true; return }
+    peerReadContext.pending = true
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        peerReadContext.trailing = false
+        let answered = false
+        try {
+          const read = await request('page.read', { key: peer })
+          answered = read?.page === peer
+          if (peerReadContext.live && answered && (pageReadKind(peerReadContext.answer, peer) !== 'page' || pageReadKind(read, peer) === 'page')) {
+            peerReadContext.answer = read
+            setPeerRead(read)
+          }
+        } catch {}
+        if (answered || !peerReadContext.trailing || !peerReadContext.live) break
+      }
+    } finally {
+      peerReadContext.pending = false
+      peerReadContext.trailing = false
+    }
+  }, [request, peer, peerReadContext, hosted, unlocked, node.online, pageKey])
+  useEffect(() => {
+    if (isTop && node.visible !== false && peerReadContext.answer === null) readPeer()
+  }, [isTop, node.visible, peerReadContext, readPeer])
+
+  const [reactionOverrides, setReactionOverrides] = useState(new Map())
+  const [reactionError, setReactionError] = useState('')
+  const [reactionPicker, setReactionPicker] = useState(null)
+  const reactionContext = useMemo(() => ({ live: true, sending: new Set(), unsure: new Map(), settled: new Map(), bases: new Map(), overrides: new Map(), pages: new Map(), read: 0, debounce: reactDebounce() }), [peer, ownKey, pageKey, request])
+  const reactionContextRef = useRef(reactionContext)
+  reactionContextRef.current = reactionContext
+  useEffect(() => {
+    reactionContext.live = true
+    setReactionOverrides(new Map())
+    setReactionError('')
+    setReactionPicker(null)
+    return () => { reactionContext.live = false; reactionContext.debounce.flush() }
+  }, [reactionContext])
+
   const [raw, setRaw] = useState([])
   const [next, setNext] = useState(null)
   const [loaded, setLoaded] = useState(false)
@@ -303,14 +355,30 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const bumpDm = node.bumpDm
   const reread = useCallback(() => { if (typeof bumpDm === 'function') bumpDm() }, [bumpDm])
 
+  const commitRead = useCallback((page, started, context) => {
+    if (!context.live || context !== reactionContextRef.current) return
+    for (const item of page) {
+      const key = messageKey(item)
+      if (context.sending.has(key) || context.debounce.has(key) || started <= (context.settled.get(key) || 0)) continue
+      context.unsure.delete(key)
+      context.overrides.delete(key)
+    }
+    setReactionOverrides(new Map(context.overrides))
+  }, [])
+
   const readThread = useCallback(async () => {
+    const context = reactionContextRef.current
+    const started = ++context.read
     const gen = ++genRef.current
     try {
       const r = await dm('dm.thread', { peer })
-      if (gen !== genRef.current) return
+      if (gen !== genRef.current || !context.live || context !== reactionContextRef.current) return
       const page = Array.isArray(r.messages) ? r.messages : []
+      const covered = new Set(page.map(messageKey))
+      const failed = new Set()
+      commitRead(page, started, context)
       const held = refreshThread(rawRef.current, page)
-      if (!held.keepOlder) olderRef.current = false
+      if (!held.keepOlder) { olderRef.current = false; context.pages.clear() }
       rawRef.current = held.messages
       setRaw(held.messages)
       setNewest(newestOf(page))
@@ -318,11 +386,125 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       setFolder(r.folder === 'request' ? 'request' : 'inbox')
       setBlocked(r.blocked === true)
       setLoadError('')
+      // Only reactions change on held older rows; the cursor and scroll order stay.
+      for (const [before, keys] of context.pages) {
+        if (![...keys].some((key) => context.overrides.has(key) || context.debounce.has(key) || context.unsure.has(key))) continue
+        const started = ++context.read
+        try {
+          const older = await dm('dm.thread', { peer, before })
+          if (gen !== genRef.current || !context.live || context !== reactionContextRef.current) return
+          const page = Array.isArray(older.messages) ? older.messages : []
+          for (const item of page) covered.add(messageKey(item))
+          commitRead(page, started, context)
+          const byKey = new Map(page.map((m) => [messageKey(m), m]))
+          if (![...keys].some((key) => byKey.has(key))) context.pages.delete(before)
+          const merged = rawRef.current.map((m) => byKey.has(messageKey(m)) ? withFreshReactions(m, byKey.get(messageKey(m))) : m)
+          rawRef.current = merged
+          setRaw(merged)
+        } catch {
+          if (gen !== genRef.current || !context.live || context !== reactionContextRef.current) return
+          for (const key of keys) failed.add(key)
+        }
+      }
+      for (const key of new Set([...context.unsure.keys(), ...context.overrides.keys()])) {
+        if (context.sending.has(key) || context.debounce.has(key) || started <= (context.settled.get(key) || 0) || covered.has(key) || failed.has(key)) continue
+        context.unsure.delete(key)
+        context.overrides.delete(key)
+      }
+      setReactionOverrides(new Map(context.overrides))
     } catch (err) {
-      if (gen === genRef.current) setLoadError(errorText(err))
+      if (gen === genRef.current && context.live && context === reactionContextRef.current) setLoadError(errorText(err))
     }
-    if (gen === genRef.current) setLoaded(true)
-  }, [dm, peer])
+    if (gen === genRef.current && context.live && context === reactionContextRef.current) setLoaded(true)
+  }, [dm, peer, commitRead])
+
+  const reactionGate = dmReactionGate({ read: peerRead, peer, peerKind: pageReadKind(peerRead, peer), pageKey, hosted, unlocked, online: node.online, isTop: true, blocked: blocked || blocks.has(peer), folder })
+  const reactionsHidden = reactionGate.hidden
+  const reactionsDisabled = reactionGate.disabled || !isTop
+  const reactionViewRef = useRef(null)
+  reactionViewRef.current = { disabled: reactionsDisabled, dispatchDisabled: reactionGate.disabled, rawById: new Map(raw.map((m) => [messageKey(m), m])) }
+  reactionContext.view = reactionViewRef.current
+  useEffect(() => {
+    if (!isTop) reactionContext.debounce.flush()
+    if (!reactionsDisabled) return
+    setReactionPicker(null)
+    reactionContext.debounce.clear()
+  }, [isTop, reactionsDisabled, reactionContext])
+
+  const reactionRowReady = (item) => dmReactable(item)
+  const canReact = (key) => !reactionViewRef.current.disabled && reactionRowReady(reactionViewRef.current.rawById.get(key)) && !reactionContext.sending.has(key)
+  const reactionsFor = (row) => reactionOverrides.get(row.key) || row.reactions || []
+  const paintReactions = (context) => {
+    if (context.live && context === reactionContextRef.current) setReactionOverrides(new Map(context.overrides))
+  }
+  const cancelReaction = (context, key) => {
+    if (!context.bases.has(key)) return
+    const starting = context.bases.get(key).find((r) => r.mine)?.emoji || ''
+    const item = context.view.rawById.get(key)
+    context.overrides.set(key, applyOptimistic(dmReactions(item?.reactions), starting))
+    context.bases.delete(key)
+    paintReactions(context)
+  }
+  // A row that left the newest page is in no later read, so the confirmed
+  // choice is held on the row itself before its override is dropped.
+  const holdSent = (key, emoji) => {
+    const rows = rawRef.current.map((m) => {
+      if (messageKey(m) !== key) return m
+      const others = (Array.isArray(m.reactions) ? m.reactions : []).filter((r) => r?.mine !== true)
+      return { ...m, reactions: emoji === '' ? others : [...others, { emoji, mine: true }] }
+    })
+    rawRef.current = rows
+    setRaw(rows)
+  }
+
+  async function sendReaction (context, key, emoji, flushing = false) {
+    const item = context.view.rawById.get(key)
+    if (context.view.dispatchDisabled || !reactionRowReady(item) || context.sending.has(key) || (!flushing && (!context.live || context !== reactionContextRef.current || !canReact(key)))) {
+      cancelReaction(context, key)
+      return
+    }
+    const target = { from: item.from, id: item.id }
+    context.unsure.delete(key)
+    context.sending.add(key)
+    paintReactions(context)
+    try {
+      await request('dm.react', { to: peer, target, emoji })
+      if (context.live && context === reactionContextRef.current) holdSent(key, emoji)
+    } catch (err) {
+      if (!context.live || context !== reactionContextRef.current) return
+      if (unsureSend(err)) {
+        context.unsure.set(key, emoji)
+      } else {
+        cancelReaction(context, key)
+        setReactionError(errorText(err))
+      }
+    } finally {
+      context.settled.set(key, context.read)
+      context.bases.delete(key)
+      context.sending.delete(key)
+      paintReactions(context)
+      if (context.live && context === reactionContextRef.current) await readThread()
+    }
+  }
+
+  function toggleReaction (key, picked) {
+    const context = reactionContext
+    if (!context.live || context !== reactionContextRef.current || !canReact(key)) return
+    const item = reactionViewRef.current.rawById.get(key)
+    const reactions = context.overrides.get(key) || dmReactions(item.reactions)
+    if (!context.bases.has(key)) context.bases.set(key, reactions)
+    const starting = context.bases.get(key).find((r) => r.mine)?.emoji || ''
+    const retry = context.unsure.has(key) && context.unsure.get(key) === picked
+    const emoji = retry ? picked : toggleOf(reactions, picked)
+    context.overrides.set(key, applyOptimistic(reactions, emoji))
+    setReactionError('')
+    paintReactions(context)
+    context.debounce.schedule(key, starting, emoji, (choice, flushing) => sendReaction(context, key, choice, flushing), () => cancelReaction(context, key), retry)
+  }
+
+  function openReactionPicker (key) {
+    if (canReact(key)) setReactionPicker(key)
+  }
 
   const ready = hosted && unlocked
 
@@ -479,7 +661,9 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     lastErr.current = null
     // Armed only when the composer shows the text being sent: a held message's retry may run after the draft changed.
     inFlightRef.current = typed === draft ? { text: typed, at: Date.now(), followed: false } : null
-    const snapshot = heldCard === undefined && pageKey === null ? linkDraft.take(text) : null
+    let snapshot = heldCard === undefined && pageKey === null ? linkDraft.take(text) : null
+    const richBlocks = hasRich(text) ? parseRich(text) : null
+    if (snapshot && cardBesideSpoilers(richBlocks, { url: snapshot.url }) === null) snapshot = null
     let card = heldCard === undefined ? null : heldCard
     const r = await post.run(async () => {
       try {
@@ -765,6 +949,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     try { await dm('dm.pull', {}) } catch {}
     reread()
     readLookup()
+    readPeer()
     setRefreshing(false)
   }
 
@@ -777,9 +962,11 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     // a pinned list would follow the older page out of view.
     endPin.current = pinToEnd(endPin.current, { kind: 'user' })
     setLoadingMore(true)
+    const context = reactionContextRef.current
     try {
       const r = await dm('dm.thread', { peer, before: cursor })
-      if (cursor === nextRef.current) {
+      if (cursor === nextRef.current && context.live && context === reactionContextRef.current) {
+        context.pages.set(cursor, new Set((r.messages || []).map(messageKey)))
         olderRef.current = true
         const merged = mergeMessages(Array.isArray(r.messages) ? r.messages : [], rawRef.current)
         rawRef.current = merged
@@ -1076,6 +1263,8 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         keyExtractor={(row) => row.key}
         renderItem={({ item, index }) => {
           const mine = item.mine === true
+          const chips = !reactionsHidden && reactionRowReady(reactionViewRef.current.rawById.get(item.key)) ? reactionChips(reactionsFor(item)) : []
+          const reactionOff = !canReact(item.key)
           const link = item.inviteLink || null
           const listing = item.listingLink
           const offerRow = item.deleted ? null : offerOfRow(index)
@@ -1109,10 +1298,27 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
               forwarded={!item.deleted && fwdOf.get(item.key) === 1}
               quote={quoted}
               actions={actions}
+              actionsHeader={!reactionOff
+                ? ({ closeThen }) => <QuickReactions mine={reactionsFor(item).find((r) => r.mine)?.emoji} onPick={(emoji) => closeThen(() => toggleReaction(item.key, emoji))} onMore={() => closeThen(() => openReactionPicker(item.key))} />
+                : null}
               onOpenMention={mentionTap}
-              below={link !== null || offerRow !== null || (listing !== null && typeof onOpenListing === 'function')
+              below={chips.length > 0 || link !== null || offerRow !== null || (listing !== null && typeof onOpenListing === 'function')
                 ? (
                   <View style={styles.inline}>
+                    {chips.map((chip) => (
+                      <PressScale
+                        key={chip.emoji}
+                        disabled={reactionOff}
+                        accessibilityLabel={displayText(chip.label + (chip.mine ? (chip.count > 1 ? ', e da outra pessoa' : '') : ', da outra pessoa'))}
+                        accessibilityState={{ selected: chip.mine }}
+                        onPress={() => toggleReaction(item.key, chip.emoji)}
+                      >
+                        {/* The outer control adds ownership without a separate people sheet. */}
+                        <View pointerEvents='none' accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden inert>
+                          <ReactionChips reactions={[chip]} disabled={reactionOff} />
+                        </View>
+                      </PressScale>
+                    ))}
                     {link !== null ? <Pill label={OPEN_INVITE} accessibilityLabel={OPEN_INVITE + (link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade')} onPress={() => onOpenInvite(link)} /> : null}
                     {listing !== null && typeof onOpenListing === 'function' ? <Pill label='Ver anúncio' onPress={() => onOpenListing(listing.author, listing.seq)} /> : null}
                     {offerRow !== null && offerRow.answer && canAnswer
@@ -1130,7 +1336,8 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
             />
           )
         }}
-        extraData={{ now, nameText, folder }}
+        extraData={{ now, nameText, folder, reactionOverrides, reactionsDisabled }}
+        ListFooterComponent={reactionError || reactionContext.unsure.size > 0 ? <View style={styles.pad}><ErrorText>{reactionError}</ErrorText>{reactionContext.unsure.size > 0 ? <Soft>Não deu para confirmar a reação.</Soft> : null}</View> : null}
         ListHeaderComponent={next ? <View style={styles.pad}><Pill label='mensagens anteriores' onPress={loadOlder} pending={loadingMore} /></View> : null}
         ListEmptyComponent={empty}
         onRefresh={refreshAll}
@@ -1141,6 +1348,11 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         onUserScroll={releaseEnd}
       />
       {composer}
+      <ReactionPicker
+        open={reactionPicker !== null && !reactionsDisabled}
+        onClose={() => setReactionPicker(null)}
+        onPick={(emoji) => { const key = reactionPicker; setReactionPicker(null); if (key !== null) toggleReaction(key, emoji) }}
+      />
       <ForwardSheet
         open={forwarding !== null}
         onClose={() => setForwarding(null)}
