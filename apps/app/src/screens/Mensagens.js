@@ -24,7 +24,7 @@ import { Btn, ErrorText, Notice, Soft, errorText, useAction, useBottomPad, useNo
 import { ConversationRow } from '../ui/ConversationRow'
 import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
-import { EmptyState, Skeleton } from '../ui/States'
+import { EmptyState, SkeletonRow } from '../ui/States'
 import { space, type } from '../ui/theme'
 import { TopBar } from '../ui/TopBar'
 import { label as actingLabel } from '../actingAs'
@@ -260,7 +260,7 @@ export function PageInboxNote ({ pageKey }) {
     const rotate = keys.phase === 'rotate'
     body = (
       <View style={styles.card}>
-        <Text style={styles.name}>{rotate ? PAGE_DM_ROTATE_TITLE : PAGE_DM_ACTIVATE_TITLE}</Text>
+        <Text style={styles.name} accessibilityRole='header'>{rotate ? PAGE_DM_ROTATE_TITLE : PAGE_DM_ACTIVATE_TITLE}</Text>
         <Soft>{rotate ? PAGE_DM_ROTATE_TEXT : PAGE_DM_ACTIVATE_TEXT}</Soft>
         <ErrorText>{keys.act.error}</ErrorText>
         {keys.hold
@@ -283,7 +283,7 @@ export function PageInboxNote ({ pageKey }) {
   }
   return (
     <View style={styles.pad}>
-      <Text style={styles.name}>{pageInboxTitle(actingLabel())}</Text>
+      <Text style={styles.name} accessibilityRole='header'>{pageInboxTitle(actingLabel())}</Text>
       <Soft>{PAGE_DM_CUSTODY}</Soft>
       {body}
       {blocks}
@@ -401,10 +401,10 @@ export function Mensagens ({ onOpenThread, onBack }) {
   )
 
   let empty = null
-  if (!unlocked) empty = <EmptyState icon='conversas' title='Mensagens bloqueadas' body={LOCKED_TEXT} />
-  else if (!loaded) empty = <Skeleton />
+  if (!unlocked) empty = <EmptyState icon='conversas' title='Mensagens bloqueadas' body={LOCKED_TEXT} actionLabel='Voltar' onAction={onBack} />
+  else if (!loaded) empty = <View>{[0, 1, 2].map((key) => <SkeletonRow key={key} />)}</View>
   else if (error) empty = <View style={styles.pad}><ErrorText>{error}</ErrorText><Pill label='tentar de novo' onPress={() => list()} /></View>
-  else empty = <EmptyState icon='conversas' title={LABELS.emptyRequests} />
+  else empty = <EmptyState icon='conversas' title={LABELS.emptyRequests} actionLabel='Voltar' onAction={onBack} />
 
   return (
     <View style={styles.root}>

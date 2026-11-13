@@ -46,7 +46,7 @@
 // and an uncertain offer, aceite or recusa is resent only by "Tentar de novo".
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Keyboard, KeyboardAvoidingView, StyleSheet, Text, View } from 'react-native'
+import { AccessibilityInfo, Keyboard, KeyboardAvoidingView, StyleSheet, Text, View } from 'react-native'
 import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { MAX_TEXT, displayText } from '@varanda/rpc'
@@ -85,6 +85,9 @@ import { chatMediaRefs, followAutocorrect, retryChatSend, runChatSend, stagedOf 
 import { Btn, ErrorText, Field, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles } from '../ui/ThemeProvider'
 import { Bubble } from '../ui/Bubble'
+import { SwipeReply } from '../ui/SwipeReply'
+import { JumpToEnd } from '../ui/JumpToEnd'
+import { awayCount, jumpVisible } from '../chatGestures'
 import { ChatComposer, useLinkDraft } from '../ui/ChatComposer'
 import { ChatMedia } from '../ui/ChatMedia'
 import { useChatAttachments } from '../ui/AttachSheet'
@@ -572,6 +575,33 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   // `opened` turns true once a newer line arrives after the first one shown:
   // the open itself, with its later batches, jumps without animation.
   const opened = useRef(false)
+  const gestureRows = useMemo(() => threadRows(raw), [raw])
+  const away = useRef(false)
+  const latestKey = gestureRows.length > 0 ? gestureRows[gestureRows.length - 1].key : null
+  const latestKeyRef = useRef(null)
+  latestKeyRef.current = latestKey
+  const [lastSeenKey, setLastSeenKey] = useState(null)
+  const [showJump, setShowJump] = useState(false)
+  const scrollFrame = useRef({ y: 0, contentHeight: 0, layoutHeight: 0 })
+  const [flashKey, setFlashKey] = useState(null)
+  const [quoteToast, setQuoteToast] = useState(false)
+  const quoteTimer = useRef(null)
+  const jumpTimer = useRef(null)
+  useEffect(() => {
+    away.current = false
+    setLastSeenKey(null)
+    setShowJump(false)
+    setFlashKey(null)
+    setQuoteToast(false)
+    return () => {
+      clearTimeout(quoteTimer.current)
+      clearTimeout(jumpTimer.current)
+    }
+  }, [peer, pageKey, ownKey])
+  useEffect(() => {
+    if (!away.current) setLastSeenKey(latestKey)
+  }, [latestKey])
+
   const endPin = useRef({ pinned: true, newest: '', lastY: null })
   // On the web the content size can change before FlatList measured the new
   // row, so the first scroll uses an estimate and stops short: one more,
@@ -579,25 +609,34 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const settleTimer = useRef(null)
   useEffect(() => () => clearTimeout(settleTimer.current), [])
   const followEnd = useCallback(() => {
+    if (away.current) return
     if (!endPin.current.pinned) return
     const list = listRef.current
     if (!list || typeof list.scrollToEnd !== 'function') return
     list.scrollToEnd({ animated: opened.current })
     clearTimeout(settleTimer.current)
     settleTimer.current = setTimeout(() => {
+      if (away.current) return
       const now = listRef.current
       if (endPin.current.pinned && now && typeof now.scrollToEnd === 'function') now.scrollToEnd({ animated: false })
     }, 50)
   }, [])
   const releaseEnd = useCallback(() => {
+    clearTimeout(jumpTimer.current)
     endPin.current = pinToEnd(endPin.current, { kind: 'user' })
   }, [])
   useEffect(() => {
     if (!loaded || newest === '' || newest === endPin.current.newest) return
     opened.current = endPin.current.newest !== ''
+    if (gestureRows.some((row) => row.key === newest && row.mine)) {
+      clearTimeout(jumpTimer.current)
+      away.current = false
+      setLastSeenKey(latestKeyRef.current)
+      setShowJump(false)
+    }
     endPin.current = pinToEnd(endPin.current, { kind: 'newest', newest })
     followEnd()
-  }, [loaded, newest, followEnd])
+  }, [loaded, newest, gestureRows, followEnd])
 
   // The keyboard shrinks the list: when the person was reading the newest
   // line, keep it above the composer instead of behind it.
@@ -607,6 +646,8 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const atBottom = useRef(true)
   const lastY = useRef(null)
   const trackBottom = useCallback(({ y, contentHeight, layoutHeight }) => {
+    scrollFrame.current = { y, contentHeight, layoutHeight }
+    setShowJump(jumpVisible({ distanceFromEnd: contentHeight - y - layoutHeight, viewport: layoutHeight }))
     // A frame only updates the pin. Following the end happens on content
     // growth (onContentSizeChange): calling scrollToEnd from every frame of an
     // animated scroll restarts the animation on Android and turns it into a crawl.
@@ -616,6 +657,8 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     lastY.current = y
     if (resized && !bottom) return
     atBottom.current = bottom
+    if (bottom || away.current || !endPin.current.pinned) away.current = !bottom
+    if (bottom) setLastSeenKey(latestKeyRef.current)
   }, [])
   useEffect(() => {
     let timers = []
@@ -1002,7 +1045,9 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   }
 
   const cardOf = new Map(raw.map((m) => [messageKey(m), m.card]))
-  const rows = withDayMarks(threadRows(raw), now)
+  const rows = withDayMarks(gestureRows, now)
+  const rowsRef = useRef(rows)
+  rowsRef.current = rows
   for (const row of rows) {
     // Only an invite link outside every spoiler turns the row into the
     // Abrir convite form, read in the same text that form shows.
@@ -1034,6 +1079,55 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     const target = quoteTarget(item)
     if (!target) return ''
     return target.mine === true ? OWN_LABEL : quoteName
+  }
+
+  const scrollToEnd = () => {
+    clearTimeout(jumpTimer.current)
+    away.current = false
+    setLastSeenKey(latestKeyRef.current)
+    setShowJump(false)
+    endPin.current = { ...endPin.current, pinned: true }
+    followEnd()
+  }
+  const scrollToKey = (key) => {
+    clearTimeout(jumpTimer.current)
+    clearTimeout(quoteTimer.current)
+    setFlashKey(null)
+    setQuoteToast(false)
+    const missing = () => {
+      setQuoteToast(true)
+      AccessibilityInfo.announceForAccessibility('Mensagem fora do trecho carregado')
+      quoteTimer.current = setTimeout(() => setQuoteToast(false), 3000)
+    }
+    const index = rows.findIndex((row) => row.key === key)
+    const list = listRef.current
+    if (index < 0 || !list || typeof list.scrollToIndex !== 'function') return missing()
+    // Released before the scroll so no follow-up frame pulls the list back
+    // to the end; a scroll that throws never moved, so it is put back.
+    const before = { away: away.current, pin: endPin.current }
+    away.current = true
+    endPin.current = pinToEnd(endPin.current, { kind: 'user' })
+    try {
+      list.scrollToIndex({ index, animated: false, viewPosition: 0.5 })
+    } catch {
+      away.current = before.away
+      endPin.current = before.pin
+      return missing()
+    }
+    // The first offset can be an estimate even when scrollToIndex succeeds.
+    jumpTimer.current = setTimeout(() => {
+      if (listRef.current !== list) return
+      // An older page can land in between and shift the index.
+      const at = rowsRef.current.findIndex((row) => row.key === key)
+      if (at < 0) return missing()
+      try {
+        list.scrollToIndex({ index: at, animated: false, viewPosition: 0.5 })
+        setFlashKey(key)
+        quoteTimer.current = setTimeout(() => setFlashKey(null), 900)
+      } catch {
+        missing()
+      }
+    }, 120)
   }
 
   // The thread as offer input: every row with its card, reply id and sender.
@@ -1285,68 +1379,87 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
           // Beside Abrir convite the bubble draws plain text and parses nothing,
           // so its spoilers and its link card are settled here.
           const stored = !item.deleted && cardOf.get(item.key) ? cardOf.get(item.key) : null
-          const quoted = item.replyTo !== null && item.replyTo !== undefined
-            ? { name: quoteAuthor(item), handle: quoteMine(item) ? undefined : quoteHandle, text: item.replyTo, mine: quoteMine(item), senderKey: quoteMine(item) ? undefined : peer }
+          const quoted = item.replyTo != null
+            ? { name: quoteAuthor(item), handle: quoteMine(item) ? undefined : quoteHandle, text: item.replyTo, mine: quoteMine(item), senderKey: quoteMine(item) ? undefined : peer, onPress: () => scrollToKey(quoteTarget(item)?.key) }
             : null
+          const reply = actions.find((action) => action.label === 'Responder')
           return (
-            <Bubble
-              media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} deferred={folder === 'request'} /> : null}
-              item={{ key: item.key, text: link ? plainOf(item.rawText, { full: true }) : item.text, rawText: link ? undefined : item.rawText, at: item.at, deleted: item.deleted, dayMark: item.dayMark, card: link && stored ? cardBesideSpoilers(parseRich(item.rawText), stored) : stored }}
-              mine={mine}
-              cardThumb={item.deleted || pageKey !== null ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey }}
-              shape={bubbleShape(rows, index)}
-              forwarded={!item.deleted && fwdOf.get(item.key) === 1}
-              quote={quoted}
-              actions={actions}
-              actionsHeader={!reactionOff
-                ? ({ closeThen }) => <QuickReactions mine={reactionsFor(item).find((r) => r.mine)?.emoji} onPick={(emoji) => closeThen(() => toggleReaction(item.key, emoji))} onMore={() => closeThen(() => openReactionPicker(item.key))} />
-                : null}
-              onOpenMention={mentionTap}
-              below={chips.length > 0 || link !== null || offerRow !== null || (listing !== null && typeof onOpenListing === 'function')
-                ? (
-                  <View style={styles.inline}>
-                    {chips.map((chip) => (
-                      <PressScale
-                        key={chip.emoji}
-                        disabled={reactionOff}
-                        accessibilityLabel={displayText(chip.label + (chip.mine ? (chip.count > 1 ? ', e da outra pessoa' : '') : ', da outra pessoa'))}
-                        accessibilityState={{ selected: chip.mine }}
-                        onPress={() => toggleReaction(item.key, chip.emoji)}
-                      >
-                        {/* The outer control adds ownership without a separate people sheet. */}
-                        <View pointerEvents='none' accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden inert>
-                          <ReactionChips reactions={[chip]} disabled={reactionOff} />
-                        </View>
-                      </PressScale>
-                    ))}
-                    {link !== null ? <Pill label={OPEN_INVITE} accessibilityLabel={OPEN_INVITE + (link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade')} onPress={() => onOpenInvite(link)} /> : null}
-                    {listing !== null && typeof onOpenListing === 'function' ? <Pill label='Ver anúncio' onPress={() => onOpenListing(listing.author, listing.seq)} /> : null}
-                    {offerRow !== null && offerRow.answer && canAnswer
-                      ? <Pill label='Aceitar' filled onPress={() => { offerAct.clearError(); setConfirming({ offer: offerRow.offer, listing: offerRow.listing }) }} />
-                      : null}
-                    {offerRow !== null && offerRow.answer && canAnswer
-                      ? <Pill label='Recusar' onPress={() => declineOffer({ offer: offerRow.offer, listing: offerRow.listing })} />
-                      : null}
-                    {offerRow !== null && offerRow.rate
-                      ? <Pill label='Avaliar' onPress={() => onAvaliar({ author: offerRow.listing.author, seq: offerRow.listing.seq, offer: offerRow.offer.id })} />
-                      : null}
-                  </View>
-                  )
-                : null}
-            />
+            <SwipeReply disabled={!reply} onReply={reply?.onPress}>
+              <View style={flashKey === item.key ? styles.quoteFlash : undefined}>
+                <Bubble
+                  media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} deferred={folder === 'request'} /> : null}
+                  item={{ key: item.key, text: link ? plainOf(item.rawText, { full: true }) : item.text, rawText: link ? undefined : item.rawText, at: item.at, deleted: item.deleted, dayMark: item.dayMark, card: link && stored ? cardBesideSpoilers(parseRich(item.rawText), stored) : stored }}
+                  mine={mine}
+                  cardThumb={item.deleted || pageKey !== null ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey }}
+                  shape={bubbleShape(rows, index)}
+                  forwarded={!item.deleted && fwdOf.get(item.key) === 1}
+                  quote={quoted}
+                  actions={actions}
+                  actionsHeader={!reactionOff
+                    ? ({ closeThen }) => <QuickReactions mine={reactionsFor(item).find((r) => r.mine)?.emoji} onPick={(emoji) => closeThen(() => toggleReaction(item.key, emoji))} onMore={() => closeThen(() => openReactionPicker(item.key))} />
+                    : null}
+                  onOpenMention={mentionTap}
+                  below={chips.length > 0 || link !== null || offerRow !== null || (listing !== null && typeof onOpenListing === 'function')
+                    ? (
+                      <View style={styles.inline}>
+                        {chips.map((chip) => (
+                          <PressScale
+                            key={chip.emoji}
+                            disabled={reactionOff}
+                            accessibilityLabel={displayText(chip.label + (chip.mine ? (chip.count > 1 ? ', e da outra pessoa' : '') : ', da outra pessoa'))}
+                            accessibilityState={{ selected: chip.mine }}
+                            onPress={() => toggleReaction(item.key, chip.emoji)}
+                          >
+                            {/* The outer control adds ownership without a separate people sheet. */}
+                            <View pointerEvents='none' accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden inert>
+                              <ReactionChips reactions={[chip]} disabled={reactionOff} />
+                            </View>
+                          </PressScale>
+                        ))}
+                        {link !== null ? <Pill label={OPEN_INVITE} accessibilityLabel={OPEN_INVITE + (link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade')} onPress={() => onOpenInvite(link)} /> : null}
+                        {listing !== null && typeof onOpenListing === 'function' ? <Pill label='Ver anúncio' onPress={() => onOpenListing(listing.author, listing.seq)} /> : null}
+                        {offerRow !== null && offerRow.answer && canAnswer
+                          ? <Pill label='Aceitar' filled onPress={() => { offerAct.clearError(); setConfirming({ offer: offerRow.offer, listing: offerRow.listing }) }} />
+                          : null}
+                        {offerRow !== null && offerRow.answer && canAnswer
+                          ? <Pill label='Recusar' onPress={() => declineOffer({ offer: offerRow.offer, listing: offerRow.listing })} />
+                          : null}
+                        {offerRow !== null && offerRow.rate
+                          ? <Pill label='Avaliar' onPress={() => onAvaliar({ author: offerRow.listing.author, seq: offerRow.listing.seq, offer: offerRow.offer.id })} />
+                          : null}
+                      </View>
+                      )
+                    : null}
+                />
+              </View>
+            </SwipeReply>
           )
         }}
-        extraData={{ now, nameText, folder, reactionOverrides, reactionsDisabled }}
+        extraData={{ now, nameText, folder, reactionOverrides, reactionsDisabled, flashKey }}
         ListFooterComponent={reactionError || reactionContext.unsure.size > 0 ? <View style={styles.pad}><ErrorText>{reactionError}</ErrorText>{reactionContext.unsure.size > 0 ? <Soft>Não deu para confirmar a reação.</Soft> : null}</View> : null}
         ListHeaderComponent={next ? <View style={styles.pad}><Pill label='mensagens anteriores' onPress={loadOlder} pending={loadingMore} /></View> : null}
-        ListEmptyComponent={empty}
+        ListEmptyComponent={
+          <View>
+            {empty}
+            {loaded && !loadError && folder === 'inbox' && blockNote === null && !blocks.has(peer) && node.online !== false && !post.pending && !hold && mediaHold === null && !sendingMedia
+              ? <View style={[styles.pad, styles.inline]}>{['Oi', 'Tudo bem?'].map((text) => <Pill key={text} label={text} onPress={() => setDraft((d) => d.trim() ? d + '\n' + text : text)} />)}</View>
+              : null}
+          </View>
+        }
         onRefresh={refreshAll}
         refreshing={refreshing}
         keepVisiblePosition
         onScrollFrame={trackBottom}
-        onContentSizeChange={followEnd}
+        onContentSizeChange={(width, height) => {
+          const { y, layoutHeight } = scrollFrame.current
+          scrollFrame.current.contentHeight = height
+          setShowJump(jumpVisible({ distanceFromEnd: height - y - layoutHeight, viewport: layoutHeight }))
+          followEnd()
+        }}
         onUserScroll={releaseEnd}
       />
+      {quoteToast ? <View pointerEvents='none' style={styles.quoteToast}><Text accessibilityLiveRegion='polite' style={styles.quoteToastText}>Mensagem fora do trecho carregado</Text></View> : null}
+      {showJump || (away.current && awayCount(rows, lastSeenKey) > 0) ? <JumpToEnd count={awayCount(rows, lastSeenKey)} onPress={scrollToEnd} /> : null}
       {composer}
       <ReactionPicker
         open={reactionPicker !== null && !reactionsDisabled}
@@ -1409,6 +1522,9 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
 
 const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
+  quoteFlash: { backgroundColor: colors.line },
+  quoteToast: { padding: 12, borderRadius: 12, marginHorizontal: 16, backgroundColor: colors.ink },
+  quoteToastText: { color: colors.bg, textAlign: 'center' },
   // The offer and accept sheets' body, with the side margins of the other sheets.
   sheet: { padding: 16, gap: 12 },
   pad: { padding: 12, alignItems: 'center', gap: 6 },
