@@ -41,7 +41,7 @@ import { useHosted } from '../node'
 import { Icon } from './Icon'
 import { MediaCarousel } from './MediaCarousel'
 import { MediaView, mediaHashDeps } from './MediaView'
-import { OPEN_GRACE_MS, VISIBILITY_MS, mostlyHidden } from './MusicEmbedCard'
+import { OPEN_GRACE_MS, VISIBILITY_MS, holdEmbeds, mostlyHidden } from '../embedLive'
 import { TabBarShown } from './tabBarShown'
 import { layout } from './theme'
 
@@ -89,7 +89,12 @@ function Viewer ({ author, media, index, onIndex, onClose, persist }) {
   closeRef.current = onClose
 
   // The full-screen viewer hides a playing music player without a screen change the App could see.
-  useEffect(() => { if (open) stopBoundPlayback() }, [open])
+  // Provider frames stay unmounted for as long as the viewer is open.
+  useEffect(() => {
+    if (!open) return undefined
+    stopBoundPlayback()
+    return holdEmbeds()
+  }, [open])
 
   // Escape closes only the viewer, even over a sheet (src/ui/escapeLayer.js).
   useEscapeLayer(!!open, () => closeRef.current(), 'viewer')
@@ -327,6 +332,9 @@ function VideoPoster ({ author, poster, video, persist, onPress }) {
 function VideoViewer ({ clip, stage, onRetry, onClose }) {
   const insets = useSafeAreaInsets()
   useEscapeLayer(true, onClose, 'viewer')
+  // Mounted only while the video is full screen: the cards under it must not
+  // load their players again after the video's claim drops them.
+  useEffect(() => holdEmbeds(), [])
 
   let body
   if (clip.phase === 'ready') {

@@ -513,6 +513,11 @@ export function onAppStateChange (state, { canClear, clear = clearChatMedia } = 
 let activePlayer = null
 let activeBound = false
 let currentPlaybackEpoch = 0
+let playbackClaims = 0
+
+export function playbackClaimCount () {
+  return playbackClaims
+}
 
 // A repeat of the same screen must not expire a claim that already read the epoch.
 export function screenWatcher () {
@@ -538,6 +543,9 @@ export function claimPlayback (player, { bound = false, epoch = currentPlaybackE
   if (activePlayer !== null && activePlayer !== player) {
     try { activePlayer.pause() } catch {}
   }
+  // A provider frame cannot be paused from outside, so its card watches this
+  // count and drops the frame when any other player starts.
+  playbackClaims++
   activePlayer = player
   activeBound = bound
   return () => {

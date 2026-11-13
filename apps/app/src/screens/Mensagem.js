@@ -102,6 +102,7 @@ import { Pill } from '../ui/Pill'
 import { Icon } from '../ui/Icon'
 import { IconAction } from '../ui/TopActions'
 import { RefreshableList } from '../ui/RefreshableList'
+import { EmbedBandBottom } from '../ui/screenVisible'
 import { ActionsSheet } from '../ui/ActionsSheet'
 import { Sheet } from '../ui/Sheet'
 import { EmptyState, Skeleton } from '../ui/States'
@@ -167,6 +168,17 @@ export function Mensagem ({ initial, ...props }) {
 function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, onOpenMention, onReport, onOpenInvite, onOpenListing, onAvaliar, intent, onIntentUsed }) {
   const styles = useStyles(makeStyles)
   const avoidKeyboard = useKeyboardAvoidEnabled()
+  // A list row under the composer is not seen, and measureInWindow reports
+  // clipped rows unclipped, so the list tells its cards where the composer
+  // starts. Measured on every check: the keyboard moves the composer.
+  const composerBox = useRef(null)
+  const band = useMemo(() => ({
+    measure: (done) => {
+      const node = composerBox.current
+      if (node === null || typeof node.measureInWindow !== 'function') { done(null); return }
+      node.measureInWindow((x, y, w, h) => done(Number.isFinite(y) && y > 0 && h > 0 ? y : null))
+    }
+  }), [])
   const insets = useSafeAreaInsets()
   const origin = installationOrigin() || globalThis.location?.origin || ''
   const node = useNode()
@@ -1392,116 +1404,119 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         right={topRight}
       />
       <OfflineNote />
-      <RefreshableList
-        data={rows}
-        listRef={listRef}
-        keyExtractor={(row) => row.key}
-        renderItem={({ item, index }) => {
-          const mine = item.mine === true
-          const chips = !reactionsHidden && reactionRowReady(reactionViewRef.current.rawById.get(item.key)) ? reactionChips(reactionsFor(item)) : []
-          const reactionOff = !canReact(item.key)
-          const link = item.inviteLink || null
-          const listing = item.listingLink
-          const offerRow = item.deleted ? null : offerOfRow(index)
-          const actions = []
-          const refs = item.deleted ? [] : chatMediaRefs('dm', { from: item.from || (mine ? ownKey : null), id: item.id, media: mediaOf.get(item.key) })
-          if (!item.deleted) {
-            actions.push({ icon: 'responder', label: 'Responder', onPress: () => setReplyTo({ id: item.id, text: item.text, mine, name: mine ? OWN_LABEL : quoteName }) })
-            actions.push({ icon: 'copiar', label: 'Copiar', onPress: () => { copyText(shareNav(), displayText(item.rawText, { multiline: true })) } })
+      <EmbedBandBottom.Provider value={composer ? band : null}>
+        <RefreshableList
+          data={rows}
+          listRef={listRef}
+          keyExtractor={(row) => row.key}
+          renderItem={({ item, index }) => {
+            const mine = item.mine === true
+            const chips = !reactionsHidden && reactionRowReady(reactionViewRef.current.rawById.get(item.key)) ? reactionChips(reactionsFor(item)) : []
+            const reactionOff = !canReact(item.key)
+            const link = item.inviteLink || null
+            const listing = item.listingLink
+            const offerRow = item.deleted ? null : offerOfRow(index)
+            const actions = []
+            const refs = item.deleted ? [] : chatMediaRefs('dm', { from: item.from || (mine ? ownKey : null), id: item.id, media: mediaOf.get(item.key) })
+            if (!item.deleted) {
+              actions.push({ icon: 'responder', label: 'Responder', onPress: () => setReplyTo({ id: item.id, text: item.text, mine, name: mine ? OWN_LABEL : quoteName }) })
+              actions.push({ icon: 'copiar', label: 'Copiar', onPress: () => { copyText(shareNav(), displayText(item.rawText, { multiline: true })) } })
+            }
+            // A message with no text whose media expired has nothing to forward.
+            const forwardSource = !item.deleted && canForward ? dmForwardSource(item.rawText, mediaOf.get(item.key)) : null
+            if (forwardSource !== null) {
+              actions.push({ icon: 'encaminhar', label: 'Encaminhar', onPress: () => setForwarding({ source: forwardSource, refs }) })
+            }
+            if (!mine && !item.deleted && typeof onReport === 'function') {
+              actions.push({ icon: 'bandeira', label: LABELS.report, danger: true, onPress: () => onReport({ dm: true, id: item.id, text: item.rawText, author: item.from, ...(Array.isArray(mediaOf.get(item.key)) ? { media: mediaOf.get(item.key) } : {}) }) })
+            }
+            // Beside Abrir convite the bubble draws plain text and parses nothing,
+            // so its spoilers and its link card are settled here.
+            const stored = !item.deleted && cardOf.get(item.key) ? cardOf.get(item.key) : null
+            const quoted = item.replyTo != null
+              ? { name: quoteAuthor(item), handle: quoteMine(item) ? undefined : quoteHandle, text: item.replyTo, mine: quoteMine(item), senderKey: quoteMine(item) ? undefined : peer, onPress: quoteMissing(item) ? undefined : () => scrollToKey(quoteTarget(item)?.key) }
+              : null
+            const reply = actions.find((action) => action.label === 'Responder')
+            return (
+              <SwipeReply disabled={!reply} onReply={reply?.onPress}>
+                <View style={flashKey === item.key ? styles.quoteFlash : undefined}>
+                  <Bubble
+                    media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} deferred={folder === 'request'} /> : null}
+                    item={{ key: item.key, text: link ? plainOf(item.rawText, { full: true }) : item.text, rawText: link ? undefined : item.rawText, at: item.at, deleted: item.deleted, dayMark: item.dayMark, card: link && stored ? cardBesideSpoilers(parseRich(item.rawText), stored) : stored }}
+                    mine={mine}
+                    cardThumb={item.deleted || pageKey !== null ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey }}
+                    plainCard={folder === 'request'}
+                    shape={bubbleShape(rows, index)}
+                    forwarded={!item.deleted && fwdOf.get(item.key) === 1}
+                    quote={quoted}
+                    actions={actions}
+                    actionsHeader={!reactionOff
+                      ? ({ closeThen }) => <QuickReactions mine={reactionsFor(item).find((r) => r.mine)?.emoji} onPick={(emoji) => closeThen(() => toggleReaction(item.key, emoji))} onMore={() => closeThen(() => openReactionPicker(item.key))} />
+                      : null}
+                    onOpenMention={mentionTap}
+                    below={chips.length > 0 || link !== null || offerRow !== null || (listing !== null && typeof onOpenListing === 'function')
+                      ? (
+                        <View style={styles.inline}>
+                          {chips.map((chip) => (
+                            <PressScale
+                              key={chip.emoji}
+                              disabled={reactionOff}
+                              accessibilityLabel={displayText(chip.label + (chip.mine ? (chip.count > 1 ? ', e da outra pessoa' : '') : ', da outra pessoa'))}
+                              accessibilityState={{ selected: chip.mine }}
+                              onPress={() => toggleReaction(item.key, chip.emoji)}
+                            >
+                              {/* The outer control adds ownership without a separate people sheet. */}
+                              <View pointerEvents='none' accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden inert>
+                                <ReactionChips reactions={[chip]} disabled={reactionOff} />
+                              </View>
+                            </PressScale>
+                          ))}
+                          {link !== null ? <Pill label={OPEN_INVITE} accessibilityLabel={OPEN_INVITE + (link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade')} onPress={() => onOpenInvite(link)} /> : null}
+                          {listing !== null && typeof onOpenListing === 'function' ? <Pill label='Ver anúncio' onPress={() => onOpenListing(listing.author, listing.seq)} /> : null}
+                          {offerRow !== null && offerRow.answer && canAnswer
+                            ? <Pill label='Aceitar' filled onPress={() => { offerAct.clearError(); setConfirming({ offer: offerRow.offer, listing: offerRow.listing }) }} />
+                            : null}
+                          {offerRow !== null && offerRow.answer && canAnswer
+                            ? <Pill label='Recusar' onPress={() => declineOffer({ offer: offerRow.offer, listing: offerRow.listing })} />
+                            : null}
+                          {offerRow !== null && offerRow.rate
+                            ? <Pill label='Avaliar' onPress={() => onAvaliar({ author: offerRow.listing.author, seq: offerRow.listing.seq, offer: offerRow.offer.id })} />
+                            : null}
+                        </View>
+                        )
+                      : null}
+                  />
+                </View>
+              </SwipeReply>
+            )
+          }}
+          extraData={{ now, nameText, folder, reactionOverrides, reactionsDisabled, flashKey }}
+          ListFooterComponent={reactionError || reactionContext.unsure.size > 0 ? <View style={styles.pad}><ErrorText>{reactionError}</ErrorText>{reactionContext.unsure.size > 0 ? <Soft>Não deu para confirmar a reação.</Soft> : null}</View> : null}
+          ListHeaderComponent={next ? <View style={styles.pad}><Pill label='mensagens anteriores' onPress={loadOlder} pending={loadingMore} /></View> : null}
+          ListEmptyComponent={
+            <View>
+              {empty}
+              {loaded && !loadError && folder === 'inbox' && blockNote === null && !blocks.has(peer) && node.online !== false && !post.pending && !hold && mediaHold === null && !sendingMedia
+                ? <View style={[styles.pad, styles.inline]}>{['Oi', 'Tudo bem?'].map((text) => <Pill key={text} label={text} onPress={() => setDraft((d) => d.trim() ? d + '\n' + text : text)} />)}</View>
+                : null}
+            </View>
           }
-          // A message with no text whose media expired has nothing to forward.
-          const forwardSource = !item.deleted && canForward ? dmForwardSource(item.rawText, mediaOf.get(item.key)) : null
-          if (forwardSource !== null) {
-            actions.push({ icon: 'encaminhar', label: 'Encaminhar', onPress: () => setForwarding({ source: forwardSource, refs }) })
-          }
-          if (!mine && !item.deleted && typeof onReport === 'function') {
-            actions.push({ icon: 'bandeira', label: LABELS.report, danger: true, onPress: () => onReport({ dm: true, id: item.id, text: item.rawText, author: item.from, ...(Array.isArray(mediaOf.get(item.key)) ? { media: mediaOf.get(item.key) } : {}) }) })
-          }
-          // Beside Abrir convite the bubble draws plain text and parses nothing,
-          // so its spoilers and its link card are settled here.
-          const stored = !item.deleted && cardOf.get(item.key) ? cardOf.get(item.key) : null
-          const quoted = item.replyTo != null
-            ? { name: quoteAuthor(item), handle: quoteMine(item) ? undefined : quoteHandle, text: item.replyTo, mine: quoteMine(item), senderKey: quoteMine(item) ? undefined : peer, onPress: quoteMissing(item) ? undefined : () => scrollToKey(quoteTarget(item)?.key) }
-            : null
-          const reply = actions.find((action) => action.label === 'Responder')
-          return (
-            <SwipeReply disabled={!reply} onReply={reply?.onPress}>
-              <View style={flashKey === item.key ? styles.quoteFlash : undefined}>
-                <Bubble
-                  media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} deferred={folder === 'request'} /> : null}
-                  item={{ key: item.key, text: link ? plainOf(item.rawText, { full: true }) : item.text, rawText: link ? undefined : item.rawText, at: item.at, deleted: item.deleted, dayMark: item.dayMark, card: link && stored ? cardBesideSpoilers(parseRich(item.rawText), stored) : stored }}
-                  mine={mine}
-                  cardThumb={item.deleted || pageKey !== null ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey }}
-                  shape={bubbleShape(rows, index)}
-                  forwarded={!item.deleted && fwdOf.get(item.key) === 1}
-                  quote={quoted}
-                  actions={actions}
-                  actionsHeader={!reactionOff
-                    ? ({ closeThen }) => <QuickReactions mine={reactionsFor(item).find((r) => r.mine)?.emoji} onPick={(emoji) => closeThen(() => toggleReaction(item.key, emoji))} onMore={() => closeThen(() => openReactionPicker(item.key))} />
-                    : null}
-                  onOpenMention={mentionTap}
-                  below={chips.length > 0 || link !== null || offerRow !== null || (listing !== null && typeof onOpenListing === 'function')
-                    ? (
-                      <View style={styles.inline}>
-                        {chips.map((chip) => (
-                          <PressScale
-                            key={chip.emoji}
-                            disabled={reactionOff}
-                            accessibilityLabel={displayText(chip.label + (chip.mine ? (chip.count > 1 ? ', e da outra pessoa' : '') : ', da outra pessoa'))}
-                            accessibilityState={{ selected: chip.mine }}
-                            onPress={() => toggleReaction(item.key, chip.emoji)}
-                          >
-                            {/* The outer control adds ownership without a separate people sheet. */}
-                            <View pointerEvents='none' accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden inert>
-                              <ReactionChips reactions={[chip]} disabled={reactionOff} />
-                            </View>
-                          </PressScale>
-                        ))}
-                        {link !== null ? <Pill label={OPEN_INVITE} accessibilityLabel={OPEN_INVITE + (link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade')} onPress={() => onOpenInvite(link)} /> : null}
-                        {listing !== null && typeof onOpenListing === 'function' ? <Pill label='Ver anúncio' onPress={() => onOpenListing(listing.author, listing.seq)} /> : null}
-                        {offerRow !== null && offerRow.answer && canAnswer
-                          ? <Pill label='Aceitar' filled onPress={() => { offerAct.clearError(); setConfirming({ offer: offerRow.offer, listing: offerRow.listing }) }} />
-                          : null}
-                        {offerRow !== null && offerRow.answer && canAnswer
-                          ? <Pill label='Recusar' onPress={() => declineOffer({ offer: offerRow.offer, listing: offerRow.listing })} />
-                          : null}
-                        {offerRow !== null && offerRow.rate
-                          ? <Pill label='Avaliar' onPress={() => onAvaliar({ author: offerRow.listing.author, seq: offerRow.listing.seq, offer: offerRow.offer.id })} />
-                          : null}
-                      </View>
-                      )
-                    : null}
-                />
-              </View>
-            </SwipeReply>
-          )
-        }}
-        extraData={{ now, nameText, folder, reactionOverrides, reactionsDisabled, flashKey }}
-        ListFooterComponent={reactionError || reactionContext.unsure.size > 0 ? <View style={styles.pad}><ErrorText>{reactionError}</ErrorText>{reactionContext.unsure.size > 0 ? <Soft>Não deu para confirmar a reação.</Soft> : null}</View> : null}
-        ListHeaderComponent={next ? <View style={styles.pad}><Pill label='mensagens anteriores' onPress={loadOlder} pending={loadingMore} /></View> : null}
-        ListEmptyComponent={
-          <View>
-            {empty}
-            {loaded && !loadError && folder === 'inbox' && blockNote === null && !blocks.has(peer) && node.online !== false && !post.pending && !hold && mediaHold === null && !sendingMedia
-              ? <View style={[styles.pad, styles.inline]}>{['Oi', 'Tudo bem?'].map((text) => <Pill key={text} label={text} onPress={() => setDraft((d) => d.trim() ? d + '\n' + text : text)} />)}</View>
-              : null}
-          </View>
-        }
-        onRefresh={refreshAll}
-        refreshing={refreshing}
-        keepVisiblePosition
-        onScrollFrame={trackBottom}
-        onContentSizeChange={(width, height) => {
-          const { y, layoutHeight } = scrollFrame.current
-          scrollFrame.current.contentHeight = height
-          setShowJump(jumpVisible({ distanceFromEnd: height - y - layoutHeight, viewport: layoutHeight }))
-          followEnd()
-        }}
-        onUserScroll={releaseEnd}
-      />
+          onRefresh={refreshAll}
+          refreshing={refreshing}
+          keepVisiblePosition
+          onScrollFrame={trackBottom}
+          onContentSizeChange={(width, height) => {
+            const { y, layoutHeight } = scrollFrame.current
+            scrollFrame.current.contentHeight = height
+            setShowJump(jumpVisible({ distanceFromEnd: height - y - layoutHeight, viewport: layoutHeight }))
+            followEnd()
+          }}
+          onUserScroll={releaseEnd}
+        />
+      </EmbedBandBottom.Provider>
       {quoteToast ? <View pointerEvents='none' style={styles.quoteToast}><Text accessibilityLiveRegion='polite' style={styles.quoteToastText}>Mensagem fora do trecho carregado</Text></View> : null}
       {showJump || (away.current && awayCount(rows, lastSeenKey) > 0) ? <JumpToEnd count={awayCount(rows, lastSeenKey)} onPress={scrollToEnd} /> : null}
-      {composer}
+      {composer ? <View ref={composerBox} collapsable={false}>{composer}</View> : null}
       <ReactionPicker
         open={reactionPicker !== null && !reactionsDisabled}
         onClose={() => setReactionPicker(null)}

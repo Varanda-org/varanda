@@ -276,10 +276,28 @@ test('Conversa reply chips hide the focal parent only at depth zero', (t) => {
 test('Conversa bar respects the safe area and consumes compose intent once', (t) => {
   t.ok(src.includes("import { useSafeAreaInsets } from 'react-native-safe-area-context'"))
   t.ok(src.includes('const insets = useSafeAreaInsets()'))
-  t.ok(/<View style=\{\[styles.barWrap, \{ paddingBottom: keyboardOpen \? 8 : Math.max\(8, insets.bottom\) \}\]\}>\s*<ReplyBar/.test(src), 'the inset is dropped while the keyboard is open')
+  t.ok(/<View ref=\{barBox\} collapsable=\{false\} style=\{\[styles.barWrap, \{ paddingBottom: keyboardOpen \? 8 : Math.max\(8, insets.bottom\) \}\]\}>\s*<ReplyBar/.test(src), 'the inset is dropped while the keyboard is open')
   t.ok(src.includes('barWrap: { backgroundColor: colors.card }'), 'the padding under the bar is the bar colour, not the page')
   t.ok(/targetReply\(composeSignal.target\)\s*if \(typeof onComposeSeen === 'function'\) onComposeSeen\(\)/.test(src))
   t.ok(app.includes('onComposeSeen={() => setComposeSignal(null)}'))
+})
+
+test('Conversa ends the player band at the reply bar', (t) => {
+  t.ok(src.includes("import { EmbedBandBottom } from '../ui/screenVisible'"), 'imports the band context')
+  t.ok(src.includes('const barBox = useRef(null)'), 'the bar wrapper ref')
+  t.ok(src.includes('<View ref={barBox} collapsable={false} style={[styles.barWrap'), 'the bar wrapper is measured')
+  t.ok(src.includes('<EmbedBandBottom.Provider value={full || sending ? band : null}>'), 'the list gets the band while the bar shows')
+  const opens = src.indexOf('<EmbedBandBottom.Provider')
+  const list = src.indexOf('<RefreshableList')
+  const closes = src.indexOf('</EmbedBandBottom.Provider>')
+  t.ok(opens !== -1 && opens < list && list < closes, 'the list sits inside the band provider')
+  t.ok(src.indexOf('const band = useMemo(') !== -1 && src.indexOf('const band = useMemo(') < src.indexOf('if (!full && !sending) {'), 'the band hook runs before the offline early return')
+  const start = src.indexOf('const band = useMemo(')
+  const memo = start === -1 ? '' : src.slice(start, src.indexOf('}), [])', start))
+  t.ok(memo.includes('const node = barBox.current'), 'band.measure reads the bar wrapper')
+  t.ok(memo.includes("if (node === null || typeof node.measureInWindow !== 'function') { done(null); return }"), 'no wrapper answers null')
+  t.ok(memo.includes('node.measureInWindow('), 'band.measure measures the bar on every check')
+  t.absent(/<View ref=\{barBox\}[^>]*onLayout/.test(src), 'no onLayout on the bar wrapper')
 })
 
 test('Conversa quick send uses a quiet read only without pending pages', async (t) => {

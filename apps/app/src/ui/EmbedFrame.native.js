@@ -73,7 +73,8 @@ export function EmbedFrame ({ html, baseUrl, allowTop, height, title }) {
         javaScriptEnabled
         domStorageEnabled
         allowsInlineMediaPlayback
-        mediaPlaybackRequiresUserAction={false}
+        // The frame loads without a tap, so only a touch inside the player may start media.
+        mediaPlaybackRequiresUserAction
         allowsFullscreenVideo
         incognito
         sharedCookiesEnabled={false}
@@ -87,6 +88,10 @@ export function EmbedFrame ({ html, baseUrl, allowTop, height, title }) {
         mediaCapturePermissionGrantType='deny'
         javaScriptCanOpenWindowsAutomatically={false}
         renderError={blank}
+        // Keeps a touch in the player from pressing a quote or a chat bubble
+        // around it. The Android host view is not a ReactViewGroup, so this
+        // claim intercepts nothing and drags stay in the player.
+        onStartShouldSetResponder={() => true}
         accessibilityLabel={title}
         style={{ height, backgroundColor: 'transparent' }}
       />

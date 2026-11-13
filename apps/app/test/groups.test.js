@@ -63,7 +63,8 @@ test('rowsOf keeps line breaks and hands MentionText the raw text', async (t) =>
   const source = readFileSync(join(__dirname, '../src/screens/Grupo.js'), 'utf8')
   t.ok(source.includes('rawText: row.hidden ? undefined : row.rawText'), 'Bubble gets the raw text for MentionText, never for a hidden row')
   const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
-  t.ok(bubble.includes('<MentionText text={item.rawText}'), 'Bubble renders rawText through MentionText')
+  t.ok(bubble.includes('<MentionText text={shown}'), 'Bubble renders the shown text through MentionText')
+  t.ok(bubble.includes('const shown = rich && !styled && embed !== null ? textWithoutHrefs(item.rawText, (href) => sameMusicPage(href, card.url)) : item.rawText'), 'the shown text is rawText minus only the player card\'s own link')
 })
 
 test('roleOf: from info.role, pending state, creator or writers', async (t) => {

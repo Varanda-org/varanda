@@ -65,10 +65,12 @@ import { countChars } from '../format'
 import { MENTION_MIN_QUERY, insertMention } from '../mentions'
 import { mergeSuggestions } from '../mentionTargets'
 import { useNode } from '../node'
+import { embedOf } from '../musicEmbed'
 import { useMemberSearch } from '../useMemberSearch'
 import { AttachSheet } from './AttachSheet'
 import { GifPicker, gifOriginOf, useGifReady } from './GifPicker'
 import { LinkCard } from './LinkCard'
+import { MusicEmbedCard } from './MusicEmbedCard'
 import { LINK_DRAFT_DELAY_MS, buildDraft, draftView, freezeSnapshot, linkDraftIdle, linkDraftStep, needsBuild } from '../linkCard'
 import { previewTarget } from '../preview'
 import { previewsEnabled } from '../previewPref'
@@ -305,9 +307,14 @@ export function useLinkDraft ({ text, enabled = true, photos = false, member = n
 export function LinkDraftCard ({ draft }) {
   const styles = useStyles(makeStyles)
   if (!draft || !draft.view) return null
+  // A provider link's preview loads the player as soon as the draft card is
+  // built, before sending (Terms 43).
+  const embed = embedOf(draft.view.url)
   return (
     <View style={styles.linkDraft}>
-      <LinkCard draft={draft.view} imageUri={draft.imageUri || undefined} onDismiss={() => draft.dismiss()} />
+      {embed !== null
+        ? <MusicEmbedCard embed={embed} draft={draft.view} imageUri={draft.imageUri || undefined} onDismiss={() => draft.dismiss()} />
+        : <LinkCard draft={draft.view} imageUri={draft.imageUri || undefined} onDismiss={() => draft.dismiss()} />}
     </View>
   )
 }

@@ -9,25 +9,25 @@ const YT = 'dQw4w9WgXcQ'
 const YT_LIST = 'PLx0sYbCqOb8TBPRdmBHs5Iftvv9TPboYG'
 const SP = '4uLU6hMCjMI75M1A2tKUQC'
 const NOCOOKIE = 'https://www.youtube-nocookie.com/embed/'
-const SC_TAIL = '&auto_play=true&visual=false&show_comments=false&show_teaser=false'
+const SC_TAIL = '&auto_play=false&visual=false&show_comments=false&show_teaser=false'
 
 const ACCEPTED = [
-  ['https://youtu.be/' + YT, NOCOOKIE + YT + '?playsinline=1&autoplay=1&rel=0'],
-  ['https://youtu.be/' + YT + '/', NOCOOKIE + YT + '?playsinline=1&autoplay=1&rel=0'],
-  ['https://www.youtube.com/watch?v=' + YT, NOCOOKIE + YT + '?playsinline=1&autoplay=1&rel=0'],
-  ['https://youtube.com/watch?v=' + YT, NOCOOKIE + YT + '?playsinline=1&autoplay=1&rel=0'],
-  ['https://m.youtube.com/watch?v=' + YT, NOCOOKIE + YT + '?playsinline=1&autoplay=1&rel=0'],
-  ['https://music.youtube.com/watch?v=' + YT + '&si=abc', NOCOOKIE + YT + '?playsinline=1&autoplay=1&rel=0'],
-  ['https://www.youtube.com/shorts/' + YT, NOCOOKIE + YT + '?playsinline=1&autoplay=1&rel=0'],
-  ['https://www.youtube.com/live/' + YT + '?feature=share', NOCOOKIE + YT + '?playsinline=1&autoplay=1&rel=0'],
-  ['https://www.youtube.com/embed/' + YT, NOCOOKIE + YT + '?playsinline=1&autoplay=1&rel=0'],
-  ['https://www.youtube.com/watch?v=' + YT + '#comments', NOCOOKIE + YT + '?playsinline=1&autoplay=1&rel=0'],
-  ['https://youtu.be/' + YT + '?t=42', NOCOOKIE + YT + '?playsinline=1&autoplay=1&rel=0&start=42'],
-  ['https://youtu.be/' + YT + '?t=42s', NOCOOKIE + YT + '?playsinline=1&autoplay=1&rel=0&start=42'],
-  ['https://www.youtube.com/watch?v=' + YT + '&start=86400', NOCOOKIE + YT + '?playsinline=1&autoplay=1&rel=0&start=86400'],
-  ['https://www.youtube.com/watch?v=' + YT + '&t=86401', NOCOOKIE + YT + '?playsinline=1&autoplay=1&rel=0'],
-  ['https://www.youtube.com/watch?v=' + YT + '&t=1m30s', NOCOOKIE + YT + '?playsinline=1&autoplay=1&rel=0'],
-  ['https://www.youtube.com/watch?v=' + YT + '&t=0', NOCOOKIE + YT + '?playsinline=1&autoplay=1&rel=0'],
+  ['https://youtu.be/' + YT, NOCOOKIE + YT + '?playsinline=1&rel=0'],
+  ['https://youtu.be/' + YT + '/', NOCOOKIE + YT + '?playsinline=1&rel=0'],
+  ['https://www.youtube.com/watch?v=' + YT, NOCOOKIE + YT + '?playsinline=1&rel=0'],
+  ['https://youtube.com/watch?v=' + YT, NOCOOKIE + YT + '?playsinline=1&rel=0'],
+  ['https://m.youtube.com/watch?v=' + YT, NOCOOKIE + YT + '?playsinline=1&rel=0'],
+  ['https://music.youtube.com/watch?v=' + YT + '&si=abc', NOCOOKIE + YT + '?playsinline=1&rel=0'],
+  ['https://www.youtube.com/shorts/' + YT, NOCOOKIE + YT + '?playsinline=1&rel=0'],
+  ['https://www.youtube.com/live/' + YT + '?feature=share', NOCOOKIE + YT + '?playsinline=1&rel=0'],
+  ['https://www.youtube.com/embed/' + YT, NOCOOKIE + YT + '?playsinline=1&rel=0'],
+  ['https://www.youtube.com/watch?v=' + YT + '#comments', NOCOOKIE + YT + '?playsinline=1&rel=0'],
+  ['https://youtu.be/' + YT + '?t=42', NOCOOKIE + YT + '?playsinline=1&rel=0&start=42'],
+  ['https://youtu.be/' + YT + '?t=42s', NOCOOKIE + YT + '?playsinline=1&rel=0&start=42'],
+  ['https://www.youtube.com/watch?v=' + YT + '&start=86400', NOCOOKIE + YT + '?playsinline=1&rel=0&start=86400'],
+  ['https://www.youtube.com/watch?v=' + YT + '&t=86401', NOCOOKIE + YT + '?playsinline=1&rel=0'],
+  ['https://www.youtube.com/watch?v=' + YT + '&t=1m30s', NOCOOKIE + YT + '?playsinline=1&rel=0&start=90'],
+  ['https://www.youtube.com/watch?v=' + YT + '&t=0', NOCOOKIE + YT + '?playsinline=1&rel=0'],
   ['https://www.youtube.com/playlist?list=' + YT_LIST, 'https://www.youtube-nocookie.com/embed?listType=playlist&list=' + YT_LIST + '&playsinline=1'],
   ['https://soundcloud.com/artist-1/song_name', 'https://w.soundcloud.com/player/?url=' + encodeURIComponent('https://soundcloud.com/artist-1/song_name') + SC_TAIL],
   ['https://soundcloud.com/artist-1/sets/album-2/', 'https://w.soundcloud.com/player/?url=' + encodeURIComponent('https://soundcloud.com/artist-1/sets/album-2') + SC_TAIL],
@@ -235,7 +235,7 @@ test('musicEmbed: embedHtml frames only the player origin and escapes the addres
   t.ok(html.includes('<meta name="viewport"'))
   t.ok(html.includes('content="default-src &#39;none&#39;; frame-src https://open.spotify.com; style-src &#39;unsafe-inline&#39;"'))
   t.ok(html.includes('src="https://open.spotify.com/embed/track/' + SP + '"'))
-  t.ok(html.includes('allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"'))
+  t.ok(html.includes('allow="clipboard-write; encrypted-media; fullscreen; picture-in-picture"'))
   t.ok(html.includes('referrerpolicy="strict-origin-when-cross-origin"'))
   t.ok(html.includes(' allowfullscreen'))
   t.ok(html.includes('margin:0'))
@@ -243,7 +243,7 @@ test('musicEmbed: embedHtml frames only the player origin and escapes the addres
   t.absent(html.includes('<script'))
 
   const yt = embedHtml(embedOf('https://youtu.be/' + YT + '?t=5'))
-  t.ok(yt.includes('src="https://www.youtube-nocookie.com/embed/' + YT + '?playsinline=1&amp;autoplay=1&amp;rel=0&amp;start=5"'), 'ampersands escaped')
+  t.ok(yt.includes('src="https://www.youtube-nocookie.com/embed/' + YT + '?playsinline=1&amp;rel=0&amp;start=5"'), 'ampersands escaped')
   t.ok(yt.includes('frame-src https://www.youtube-nocookie.com;'))
 
   const crafted = { provider: 'spotify', embedUrl: 'https://open.spotify.com/embed/track/x"><script>alert(1)</script>' }
@@ -343,12 +343,60 @@ test('musicEmbed: top navigation stays on the player document', async (t) => {
   }
 })
 
-test('musicEmbed: pt-BR texts', async (t) => {
-  const { EMBED_PLAY, EMBED_CLOSE, embedNotice } = await load()
-  t.is(EMBED_PLAY, 'Tocar aqui')
-  t.is(EMBED_CLOSE, 'Fechar player')
-  t.is(embedNotice('spotify'), 'Ao tocar, o player do Spotify carrega aqui e o Spotify recebe o endereço de internet deste aparelho.')
-  t.is(embedNotice('apple'), 'Ao tocar, o player do Apple Music carrega aqui e o Apple Music recebe o endereço de internet deste aparelho.')
-  t.is(embedNotice('audius'), '')
-  t.is(embedNotice('__proto__'), '')
+test('musicEmbed: YouTube start accepts seconds and the 1h2m3s form', async (t) => {
+  const { youtubeStartSeconds, embedOf } = await load()
+  t.is(youtubeStartSeconds('1m30s'), 90)
+  t.is(youtubeStartSeconds('1h2m3s'), 3723)
+  t.is(youtubeStartSeconds('2m'), 120)
+  t.is(youtubeStartSeconds('1h'), 3600)
+  t.is(youtubeStartSeconds('90'), 90)
+  t.is(youtubeStartSeconds('90s'), 90)
+  t.is(youtubeStartSeconds('24h'), 86400, 'exactly the cap')
+  for (const junk of ['1x', 'm', '', '1h2h', '1s2m', 'h', '1m30', '-1m', '1.5m', '123h', '12345m', ' 1m', null, undefined, 90]) {
+    t.is(youtubeStartSeconds(junk), 0, String(junk) + ': no start')
+  }
+  for (const over of ['24h1s', '1440m1s', '86401', '99h']) t.is(youtubeStartSeconds(over), 0, over + ': over the cap')
+  const e = embedOf('https://youtu.be/' + YT + '?t=1h2m3s')
+  t.is(e.embedUrl, NOCOOKIE + YT + '?playsinline=1&rel=0&start=3723', 'the player starts there')
+  t.is(e.pageUrl, 'https://www.youtube.com/watch?v=' + YT + '&t=3723s', 'the page link keeps the time in seconds')
+})
+
+test('musicEmbed: no tap-gate texts remain', async (t) => {
+  const mod = await load()
+  for (const name of ['EMBED_PLAY', 'EMBED_CLOSE', 'embedNotice']) t.absent(name in mod, 'no export ' + name)
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'musicEmbed.js'), 'utf8')
+  for (const text of ['Tocar aqui', 'Fechar player', 'Ao tocar']) t.absent(src.includes(text), 'no ' + text)
+})
+
+test('musicEmbed: no player address asks to play by itself', async (t) => {
+  const { embedOf, embedHtml } = await load()
+  for (const [url] of ACCEPTED) {
+    const e = embedOf(url)
+    t.ok(e, url + ': accepted')
+    if (!e) continue
+    t.absent(e.embedUrl.includes('autoplay=1'), url + ': no autoplay=1')
+    t.absent(e.embedUrl.includes('auto_play=true'), url + ': no auto_play=true')
+    const q = e.embedUrl.indexOf('?')
+    const keys = q === -1 ? [] : e.embedUrl.slice(q + 1).split('&').map((pair) => pair.split('=')[0])
+    t.absent(keys.includes('autoplay'), url + ': no autoplay query key')
+    t.absent(/autoplay/i.test(embedHtml(e)), url + ': embedHtml never names autoplay')
+  }
+})
+
+test('musicEmbed: sameMusicPage matches only the same item', async (t) => {
+  const { sameMusicPage } = await load()
+  const watch = 'https://www.youtube.com/watch?v=' + YT
+  t.ok(sameMusicPage('https://youtu.be/' + YT, watch), 'youtu.be and watch')
+  t.ok(sameMusicPage('https://www.youtube.com/shorts/' + YT, watch), 'shorts and watch')
+  t.ok(sameMusicPage('https://open.spotify.com/track/' + SP + '?si=x', 'https://open.spotify.com/track/' + SP), 'Spotify share link and its page')
+  t.absent(sameMusicPage('https://youtu.be/' + YT + '?t=42', 'https://youtu.be/' + YT), 'another start is another item')
+  t.absent(sameMusicPage('https://youtu.be/' + YT, 'https://youtu.be/aaaaaaaaaaa'), 'another video')
+  t.absent(sameMusicPage('https://open.spotify.com/track/' + SP, watch), 'Spotify track and YouTube video')
+  for (const other of ['https://audius.co/artist/track', null, undefined, '', 'not a url']) {
+    t.execution(() => sameMusicPage(other, watch), String(other) + ': no throw')
+    t.is(sameMusicPage(other, watch), false, String(other) + ' first')
+    t.is(sameMusicPage(watch, other), false, String(other) + ' second')
+  }
+  t.is(sameMusicPage(null, null), false, 'two nulls')
+  t.is(sameMusicPage('https://audius.co/artist/track', 'https://audius.co/artist/track'), false, 'two Audius links')
 })

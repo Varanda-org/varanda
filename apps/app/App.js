@@ -130,6 +130,8 @@ import { launchDue } from './src/launchDue'
 import { loadIcons } from './src/ui/Icon'
 import { TabBar } from './src/ui/TabBar'
 import { TabBarShown } from './src/ui/tabBarShown'
+import { ScreenCovered, ScreenVisible } from './src/ui/screenVisible'
+import { holdAllEmbeds } from './src/embedLive'
 import { TopBar } from './src/ui/TopBar'
 import { TopActions } from './src/ui/TopActions'
 import { StackLayer, stackBusy, useStackMotion } from './src/ui/StackLayer'
@@ -684,6 +686,19 @@ function Member () {
     })
     return () => sub.remove()
   }, [])
+  // Whether the app is in the background, for the players' visible screen.
+  // 'inactive' (Control Center, permission dialogs on iOS) changes nothing:
+  // the person is still looking at the app.
+  const [backgrounded, setBackgrounded] = useState(() => AppState.currentState === 'background')
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'background') setBackgrounded(true)
+      else if (state === 'active') setBackgrounded(false)
+    })
+    return () => sub.remove()
+  }, [])
+  // A lock or the background unloads every player, sheets included.
+  useEffect(() => (locked || backgrounded ? holdAllEmbeds() : undefined), [locked, backgrounded])
   // A lock ends this account's session in the tab: nothing it opened or
   // quoted (the composer's reply or quote, an open Ajustes screen) reaches the
   // next account.
@@ -3150,6 +3165,10 @@ function Member () {
     const on = (id) => tab === id && ready
     const shown = (id) => (tab === id ? styles.flex : styles.hidden)
     const stacked = nav.depth(stack) > 0
+    // The same cover signals as the screen key above: a provider player loads
+    // only on the screen the person is looking at.
+    const covered = composer.open || ajustes !== null || report !== null || helpOpen || pageDmAsk !== null || locked || backgrounded
+    const screenSeen = (id) => !covered && !stacked && tab === id
     // The black Momentos viewer slides out over the tabs on close: the tab bar
     // and the publish button wait for the end of its pop, or they show over
     // the black for the whole slide.
@@ -3420,156 +3439,172 @@ function Member () {
               ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} />
               : push.note === 'offer' && pushMember !== null && push.member === pushMember ? <PushNote text={push.error || undefined} pending={push.pending} onEnable={() => { push.activatePush({ node, member: pushMember }) }} onClose={() => { push.dismissPush() }} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} /> : null}
         <TabBarShown.Provider value={!barsHidden}>
-          <View style={styles.flex}>
-            <View style={shown('rua')}>
-              <ARua
-                onBoot={onFeedBoot}
-                onDeletedPost={deletedPost}
-                active={on('rua')}
-                refresh={version}
-                onReply={startReply}
-                onReport={setReport}
-                onToast={showToast}
-                onOpenThread={openThread}
-                onOpenEngagers={openEngagers}
-                onOpenMember={openMember}
-                onOpenMention={mentionHandler}
-                onQuote={startQuote}
-                onMessage={openMessage}
-                onOpenMomentos={openMomentos}
-                onCreateMoment={openMomentComposer}
-                ownKey={ownKey}
-                scrollToTop={scrollSignal.rua}
-                followCount={followCount}
-                onFollowSomeone={() => {
-                  setTab('busca')
-                  setBuscaPane((n) => n + 1)
-                }}
-              />
-            </View>
-            <View style={shown('espiadinha')}>
-              <Espiadinha
-                active={on('espiadinha')}
-                refresh={peekVersion}
-                followsSignal={followsSignal}
-                onPublish={openComposer}
-                onReply={startReply}
-                onReport={setReport}
-                onOpenThread={openThread}
-                onOpenEngagers={openEngagers}
-                onOpenMember={openMember}
-                onOpenMention={mentionHandler}
-                onQuote={startQuote}
-                ownKey={ownKey}
-                scrollToTop={scrollSignal.espiadinha}
-                onFollowsChanged={followsChanged}
-                onToast={showToast}
-              />
-            </View>
-            <View style={shown('busca')}>
-              <BuscaGlobal
-                active={on('busca')}
-                refresh={version}
-                paneRequest={buscaPane}
-                ownKey={ownKey}
-                scrollToTop={scrollSignal.busca}
-                onOpenMember={openMember}
-                onFollowsChanged={followsChanged}
-                onToast={showToast}
-                onReply={startReply}
-                onReport={setReport}
-                onQuote={startQuote}
-                onOpenThread={openThread}
-                onOpenMention={mentionHandler}
-                onOpenEngagers={openEngagers}
-              />
-            </View>
-            {/* Not a tab: kept mounted so its poll lights the bell's dot. */}
-            <View style={shown('avisos')}>
-              <Avisos
-                active={on('avisos')}
-                refresh={version + avisosReload}
-                ownKey={ownKey}
-                onOpenThread={openThread}
-                onOpenMember={openMember}
-                scrollToTop={scrollSignal.avisos}
-                onFollowsChanged={followsChanged}
-                onToast={showToast}
-                onBadge={setAvisosNew}
-                onSeenState={onAvisosSeen}
-                remoteSeen={remoteSeen}
-              />
-            </View>
-            {mode === 'hosted'
-              ? (
-                <View style={shown('comunidades')}>
-                  <Conversas
-                    key={'g' + nodeEpoch}
-                    active={on('comunidades') && !stacked}
-                    onOpenGroup={openGroup}
-                    onOpenCommunity={openCommunity}
-                    onOpenThread={openMessage}
-                    onOpenCommunities={openCommunities}
-                    onOpenRequests={openRequests}
-                    showInbox={dmOpenCount}
-                    seenTick={seenTick}
-                    composing={convCompose}
-                    onComposing={setConvCompose}
-                  />
-                </View>
-                )
-              : null}
-            {mode === 'hosted'
-              ? (
-                <View style={shown('feira')}>
-                  <Feira
-                    key={'f' + nodeEpoch}
-                    active={on('feira') && !stacked}
+          <ScreenCovered.Provider value={covered}>
+            <View style={styles.flex}>
+              <View style={shown('rua')}>
+                <ScreenVisible.Provider value={screenSeen('rua')}>
+                  <ARua
+                    onBoot={onFeedBoot}
+                    onDeletedPost={deletedPost}
+                    active={on('rua')}
+                    refresh={version}
+                    onReply={startReply}
+                    onReport={setReport}
+                    onToast={showToast}
+                    onOpenThread={openThread}
+                    onOpenEngagers={openEngagers}
+                    onOpenMember={openMember}
+                    onOpenMention={mentionHandler}
+                    onQuote={startQuote}
+                    onMessage={openMessage}
+                    onOpenMomentos={openMomentos}
+                    onCreateMoment={openMomentComposer}
                     ownKey={ownKey}
-                    origin={installationOrigin()}
-                    locationStore={feiraLocation}
-                    onOpenListing={({ author, seq } = {}) => openListing(author, seq)}
-                    onAnnounce={openAnnounce}
-                    scrollToTop={scrollSignal.feira}
+                    scrollToTop={scrollSignal.rua}
+                    followCount={followCount}
+                    onFollowSomeone={() => {
+                      setTab('busca')
+                      setBuscaPane((n) => n + 1)
+                    }}
                   />
+                </ScreenVisible.Provider>
+              </View>
+              <View style={shown('espiadinha')}>
+                <ScreenVisible.Provider value={screenSeen('espiadinha')}>
+                  <Espiadinha
+                    active={on('espiadinha')}
+                    refresh={peekVersion}
+                    followsSignal={followsSignal}
+                    onPublish={openComposer}
+                    onReply={startReply}
+                    onReport={setReport}
+                    onOpenThread={openThread}
+                    onOpenEngagers={openEngagers}
+                    onOpenMember={openMember}
+                    onOpenMention={mentionHandler}
+                    onQuote={startQuote}
+                    ownKey={ownKey}
+                    scrollToTop={scrollSignal.espiadinha}
+                    onFollowsChanged={followsChanged}
+                    onToast={showToast}
+                  />
+                </ScreenVisible.Provider>
+              </View>
+              <View style={shown('busca')}>
+                <ScreenVisible.Provider value={screenSeen('busca')}>
+                  <BuscaGlobal
+                    active={on('busca')}
+                    refresh={version}
+                    paneRequest={buscaPane}
+                    ownKey={ownKey}
+                    scrollToTop={scrollSignal.busca}
+                    onOpenMember={openMember}
+                    onFollowsChanged={followsChanged}
+                    onToast={showToast}
+                    onReply={startReply}
+                    onReport={setReport}
+                    onQuote={startQuote}
+                    onOpenThread={openThread}
+                    onOpenMention={mentionHandler}
+                    onOpenEngagers={openEngagers}
+                  />
+                </ScreenVisible.Provider>
+              </View>
+              {/* Not a tab: kept mounted so its poll lights the bell's dot. */}
+              <View style={shown('avisos')}>
+                <ScreenVisible.Provider value={screenSeen('avisos')}>
+                  <Avisos
+                    active={on('avisos')}
+                    refresh={version + avisosReload}
+                    ownKey={ownKey}
+                    onOpenThread={openThread}
+                    onOpenMember={openMember}
+                    scrollToTop={scrollSignal.avisos}
+                    onFollowsChanged={followsChanged}
+                    onToast={showToast}
+                    onBadge={setAvisosNew}
+                    onSeenState={onAvisosSeen}
+                    remoteSeen={remoteSeen}
+                  />
+                </ScreenVisible.Provider>
+              </View>
+              {mode === 'hosted'
+                ? (
+                  <View style={shown('comunidades')}>
+                    <ScreenVisible.Provider value={screenSeen('comunidades')}>
+                      <Conversas
+                        key={'g' + nodeEpoch}
+                        active={on('comunidades') && !stacked}
+                        onOpenGroup={openGroup}
+                        onOpenCommunity={openCommunity}
+                        onOpenThread={openMessage}
+                        onOpenCommunities={openCommunities}
+                        onOpenRequests={openRequests}
+                        showInbox={dmOpenCount}
+                        seenTick={seenTick}
+                        composing={convCompose}
+                        onComposing={setConvCompose}
+                      />
+                    </ScreenVisible.Provider>
+                  </View>
+                  )
+                : null}
+              {mode === 'hosted'
+                ? (
+                  <View style={shown('feira')}>
+                    <ScreenVisible.Provider value={screenSeen('feira')}>
+                      <Feira
+                        key={'f' + nodeEpoch}
+                        active={on('feira') && !stacked}
+                        ownKey={ownKey}
+                        origin={installationOrigin()}
+                        locationStore={feiraLocation}
+                        onOpenListing={({ author, seq } = {}) => openListing(author, seq)}
+                        onAnnounce={openAnnounce}
+                        scrollToTop={scrollSignal.feira}
+                      />
+                    </ScreenVisible.Provider>
+                  </View>
+                  )
+                : null}
+              <View style={shown('diario')}>
+                <ScreenVisible.Provider value={screenSeen('diario')}>
+                  <Diario
+                    onTabChange={(id) => reportProfileTab('diario', id)}
+                    onDeletedPost={deletedPost}
+                    active={on('diario')}
+                    refresh={version}
+                    onSettings={setAjustes}
+                    onToast={showToast}
+                    onReport={setReport}
+                    onReply={startReply}
+                    onPublish={openComposer}
+                    onMessage={openMessage}
+                    onOpenThread={openThread}
+                    onOpenEngagers={openEngagers}
+                    onOpenMember={openMember}
+                    onOpenMention={mentionHandler}
+                    onQuote={startQuote}
+                    onOpenCommunity={openCommunity}
+                    ownKey={ownKey}
+                    scrollToTop={scrollSignal.diario}
+                    onAvisos={mode === 'hosted' ? openAvisos : undefined}
+                    avisosNew={avisosNew}
+                    onOpenPeople={openPeople}
+                    onOpenTestimonials={openTestimonials}
+                    onOpenMomentos={openMomentos}
+                  />
+                </ScreenVisible.Provider>
+              </View>
+            </View>
+            {stacked || stackMotion.leaving
+              ? (
+                <View style={styles.layer} pointerEvents='box-none'>
+                  {stackEntries(stack, stackMotion.leaving).map(({ entry, index }) => renderStackEntry(entry, index))}
                 </View>
                 )
               : null}
-            <View style={shown('diario')}>
-              <Diario
-                onTabChange={(id) => reportProfileTab('diario', id)}
-                onDeletedPost={deletedPost}
-                active={on('diario')}
-                refresh={version}
-                onSettings={setAjustes}
-                onToast={showToast}
-                onReport={setReport}
-                onReply={startReply}
-                onPublish={openComposer}
-                onMessage={openMessage}
-                onOpenThread={openThread}
-                onOpenEngagers={openEngagers}
-                onOpenMember={openMember}
-                onOpenMention={mentionHandler}
-                onQuote={startQuote}
-                onOpenCommunity={openCommunity}
-                ownKey={ownKey}
-                scrollToTop={scrollSignal.diario}
-                onAvisos={mode === 'hosted' ? openAvisos : undefined}
-                avisosNew={avisosNew}
-                onOpenPeople={openPeople}
-                onOpenTestimonials={openTestimonials}
-                onOpenMomentos={openMomentos}
-              />
-            </View>
-          </View>
-          {stacked || stackMotion.leaving
-            ? (
-              <View style={styles.layer} pointerEvents='box-none'>
-                {stackEntries(stack, stackMotion.leaving).map(({ entry, index }) => renderStackEntry(entry, index))}
-              </View>
-              )
-            : null}
+          </ScreenCovered.Provider>
         </TabBarShown.Provider>
         {fabShown ? <Fab onPress={openComposer} /> : null}
         {/* After the Fab, and above it when it shows: a long toast wraps

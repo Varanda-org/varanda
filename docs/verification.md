@@ -9314,3 +9314,69 @@ Limites desta caminhada:
 - Nenhuma caixa acima foi marcada nesta documentação.
 - Durante o desenvolvimento, o erro foi reproduzido no simulador iOS e na web com o código anterior. Com a correção, 3190 caracteres digitados no simulador iOS e 3000 teclas na web passaram sem erro, e **Cancelar** fechou o campo. O Android não foi conferido.
 - O teste lê o corpo dos dois efeitos do código-fonte: se a forma deles mudar, o teste falha na primeira asserção e precisa acompanhar.
+
+## 203. Players de música em publicações, carregados ao aparecer, Termos 43
+
+Numa publicação (A Rua, Diário, perfil, conversa, Busca, Espiadinha), um cartão de YouTube, SoundCloud, Spotify ou Apple Music mostra o player do próprio provedor sem toque: não há **Tocar aqui**, **Fechar player** nem aviso embaixo do cartão. O quadro só é montado depois que o cartão fica dentro da faixa da lista (pelo menos metade da largura e o menor entre metade da altura e 120 pt, abaixo da barra de cima e acima da barra de abas, quando há uma) em duas conferências com 500 ms de intervalo, na tela que a pessoa está olhando (a aba escolhida sem nada empilhado por cima, ou a tela do topo da pilha), sem compositor, Ajustes, denúncia, ajuda, aviso de página ou bloqueio por cima, com o app em primeiro plano e sem foto em tela cheia. Na conversa de uma publicação (Conversa), a faixa termina no topo da barra de resposta. Uma medição que não responde antes da conferência seguinte conta como cartão escondido. O quadro sai quando qualquer uma dessas condições deixa de valer, quando o cartão sai da faixa e, por uma conferência, quando outro player do app começa (cartão do Audius, mensagem de voz); depois pode voltar, em silêncio. No máximo 2 quadros de provedor ficam carregados no app; um quadro carregado e visível nunca sai para dar lugar a um novo, e um terceiro cartão espera mostrando o cartão guardado. Os endereços não pedem reprodução automática (YouTube sem autoplay, SoundCloud com `auto_play=false`), a lista `allow` do quadro não tem autoplay e o WebView nativo exige um toque para tocar mídia, então nada soa antes do play dentro do player. O sandbox não mudou (`allow-scripts allow-same-origin allow-presentation`: sem popups e sem navegar a janela de cima), então o próprio player não abre o provedor; o cartão mantém um link compacto "Abrir no <Nome>" embaixo do player e embaixo do cartão guardado, que abre a página guardada só num toque. Um cartão mais estreito que o mínimo do provedor (YouTube abaixo de 200 pt) nunca monta quadro e mostra o cartão guardado com esse link. Carregar um quadro não conta como tocar, então não para uma mensagem de voz, um cartão do Audius nem um momento; o app não vê o play dentro do quadro, então apertar o play num player não pausa outro áudio. O texto mostrado esconde só o link que é o próprio item do cartão (mesma página reconstruída por `embedOf`; `youtu.be/ID` e `watch?v=ID` são o mesmo item, outro `t=` é outro item); todo o resto fica, e o registro guardado não muda. Depois de esconder o link, a pontuação em volta se ajeita, sem que o texto mostrado ganhe link, menção ou palavra que o texto guardado não tem: um par de parênteses ou colchetes que ficou vazio só some quando há espaço ou o limite da linha do lado de fora, a pontuação só se junta à palavra anterior quando vem seguida de espaço ou do fim do texto, e se a arrumação ainda mudasse os links ou as menções, o texto original aparece ("Olha <link>, que legal" vira "Olha, que legal", enquanto "pala( <link> )vra" fica "pala( )vra"). Um tempo do YouTube como `t=1m30s` também é aceito. Os cartões do Audius continuam tocando só com um toque, pelo serviço de conta. Os mesmos players (nunca o do Audius) carregam também numa publicação citada (`QuoteCard`, onde o player fica fora da área de toque da citação e fora do invólucro de acessibilidade escondido da linha, `quotePlayerOf` e `quoteOut`: o nome e o horário da citação são o link que abre a publicação citada, e o player é alcançado por VoiceOver, TalkBack e teclado), nas conversas privadas e nos grupos (`Bubble`, em Mensagem e Grupo, onde a faixa da lista termina no topo do compositor) e na prévia do link no compositor (`LinkDraftCard`: Publicar, conversas privadas e grupos) assim que a prévia fica pronta, antes do envio. Na prévia do compositor, um player mais alto que um terço da janela (álbuns, playlists, sets do SoundCloud) dá lugar ao cartão guardado com o link "Abrir no <Nome>", e o botão de remover aparece em todos os estados. Uma folha aberta descarrega os players embaixo dela, enquanto um cartão dentro da folha mantém o seu; bloquear o app ou mandá-lo para segundo plano descarrega todos. Nos balões e nas citações, o texto mostrado esconde o link do próprio cartão do mesmo jeito (numa mensagem com formatação, o texto fica inteiro); copiar, encaminhar e responder usam o texto inteiro. Numa conversa privada ou num grupo, isso conta ao provedor que o aparelho mostrou aquele item, e quando, mas nunca o texto das mensagens. Num pedido de mensagem, o cartão de música fica um cartão comum, com o link no texto, até a pessoa aceitar; depois disso o player carrega como em qualquer conversa. Cartões de link comuns (qualquer outro site) não mudaram. Termos e Política de Privacidade passam à versão 43, com novo aceite; dizem também que, quando a associação liga a música nos momentos, ver um momento com música, inclusive um seu, já pede o trecho de 15 segundos ao serviço de conta, sem toque à parte, e que ele toca em seguida, a não ser que o navegador só deixe tocar som depois de um toque (o código do momento e `VARANDA_AUDIUS_MOMENTS` não mudaram, desligado por padrão até o Audius responder por escrito).
+
+A seção 184 descreve a regra anterior, de carregar o player só ao tocar em **Tocar aqui**; esta seção a substitui nesse ponto. As seções 185 a 202 não mudam.
+
+Testes automáticos, a partir da raiz, cada arquivo sozinho:
+
+- `node apps/app/test/musicEmbed.test.js`
+- `node apps/app/test/musicEmbedCard.test.js`
+- `node apps/app/test/embedFrame.test.js`
+- `node apps/app/test/links.test.js`
+- `node apps/app/test/linkPreview.test.js`
+- `node apps/app/test/chatMedia.test.js`
+- `node apps/app/test/legal.test.js`
+- `node apps/app/test/dm.test.js`
+- `node apps/app/test/groups.test.js`
+- `node apps/app/test/linkCardBuild.test.js`
+- `node apps/app/test/feedRender.test.js`
+- `node apps/app/test/conversaScreen.test.js`
+
+### Verificação manual
+
+Nenhuma conferência em aparelho nem com os provedores reais foi feita ainda. Os itens abaixo continuam em aberto, primeiro no Android, depois no iOS, na web e no PWA, para cada um dos quatro provedores (YouTube, SoundCloud, Spotify e Apple Music):
+
+- [ ] O player aparece sem toque quando o cartão fica visível.
+- [ ] Nada soa antes do play dentro do player.
+- [ ] O PLAY CONTINUA FUNCIONANDO dentro do player de cada provedor, com o toque exigido para mídia e sem delegação de autoplay.
+- [ ] Rolar rápido (fling) não carrega quadro nenhum (conferir no inspetor de rede).
+- [ ] Com três cartões na tela, carregam dois quadros, e o terceiro carrega quando um deles sai.
+- [ ] O quadro some depois de rolar para longe, depois de empilhar uma tela por cima (o feed coberto não carrega nada), em outra aba, embaixo do compositor, de Ajustes, da denúncia e da ajuda, durante uma foto em tela cheia e depois de mandar o app para segundo plano.
+- [ ] Começar um cartão do Audius ou uma mensagem de voz derruba um player que está tocando.
+- [ ] Abrir qualquer folha por cima do feed (menu da publicação, Conversar com a página num perfil, bloquear, encaminhar) derruba um player carregado.
+- [ ] Em Buscar, trocar de Publicações para Contas não deixa player carregado no painel escondido.
+- [ ] A rotação em tela cheia do YouTube mantém o player.
+- [ ] "Abrir no <Nome>" abre a página fora do app, e o próprio player não consegue navegar para fora.
+- [ ] O link do próprio cartão some do texto, enquanto o resto do texto, um segundo link e uma @menção continuam.
+- [ ] Uma publicação só com a URL não mostra linha de texto.
+- [ ] Uma publicação com fotos mantém a URL no texto e não tem player.
+- [ ] Um cartão de YouTube com menos de 200 pt de largura mostra o cartão guardado e nunca um quadro.
+- [ ] Passar rolando por um cartão do Audius não faz pedido nenhum.
+- [ ] Montar um player não para uma mensagem de voz que está tocando.
+- [ ] O aceite de Termos pede a versão 43 a uma conta que aceitou a 42.
+- [ ] Na web, `frame-src` continua com as quatro origens.
+- [ ] Um cartão de provedor numa conversa privada, num grupo e numa citação mostra o player sem toque.
+- [ ] Um toque ou um toque longo dentro do player de uma citação nunca abre a publicação citada, e dentro do player de um balão nunca abre as ações; um toque longo no texto do balão continua abrindo as ações.
+- [ ] Numa publicação, numa citação e num balão de conversa, no Android e no iOS, play, pausa e avanço funcionam dentro do player de cada provedor, e arrastar na vertical começando no player continua rolando a lista (o espaço do player não reivindica o toque; quem o reivindica é o cartão que ocupa o lugar do player e o WebView nativo).
+- [ ] Abrir o menu da mensagem (toque longo) ou o menu de anexo numa conversa descarrega os players dela.
+- [ ] Uma mensagem só com a URL não mostra linha de texto vazia.
+- [ ] Copiar e encaminhar mantêm o texto inteiro.
+- [ ] Um link do Audius numa conversa continua um cartão comum.
+- [ ] Um cartão escondido atrás do compositor da conversa ou do teclado não carrega nada.
+- [ ] A prévia do compositor em Publicar, numa conversa privada e num grupo mostra o player; o botão de remover funciona enquanto ele toca; a prévia de um álbum ou de uma playlist mostra o cartão compacto.
+- [ ] Em Publicar, o player da prévia pode carregar mesmo com o teclado por cima (os Termos dizem que ele pode carregar assim que a prévia fica pronta).
+- [ ] Abrir uma folha por cima de Publicar (GIF, seletor de fotos) descarrega o player da prévia.
+- [ ] Com dois players carregados numa conversa, a prévia do compositor espera um deles sair da tela.
+- [ ] Um pedido de mensagem com um link de música mostra o cartão comum e o texto do link; depois de aceitar, o player carrega.
+- [ ] Na conversa de uma publicação (Conversa), um cartão quase todo atrás da barra de resposta não carrega, e carrega depois de rolar para cima dela.
+- [ ] VoiceOver, TalkBack e o teclado na web alcançam os controles do player de uma citação e o link "Abrir no <Nome>"; um toque no player nunca abre a publicação citada, e o nome e o horário da citação abrem.
+- [ ] No Safari do iOS e no PWA, com o teclado aberto numa conversa, uma linha atrás do teclado não carrega. Ali o teclado pode não mover o compositor, então registrar o que acontece.
+- [ ] Um link do YouTube com `t=1m30s` abre o player em 1:30.
+- [ ] Uma medição que responde depois da conferência seguinte conta como escondida: num aparelho lento, o cartão ainda carrega depois que a rolagem para.
+- [ ] Pontuação do link escondido: "Olha <link>, que legal" mostra "Olha, que legal"; " (<link>) " não deixa nada; "pala( <link> )vra" mostra "pala( )vra"; o texto mostrado nunca ganha link, menção ou palavra que o texto guardado não tem, e quando a arrumação mudaria links ou menções aparece o texto original.
+- [ ] Limitação conhecida: aspas em volta do link ("<link>", «<link>», “<link>”), espaços não separáveis e "…" depois do link não são arrumados. Registrar o que aparece.
+- [ ] Limitação conhecida: um cartão que entra na tela durante a rotação de tela cheia nativa pode carregar. Registrar o que acontece.
