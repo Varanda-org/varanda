@@ -1994,6 +1994,13 @@ function Member () {
   const helpOpen = useHelpOpen()
   const helpOpenRef = useRef(helpOpen)
   helpOpenRef.current = helpOpen
+  const backGuardRef = useRef(null)
+  const registerBackGuard = useCallback((fn) => {
+    backGuardRef.current = fn
+    return () => {
+      if (backGuardRef.current === fn) backGuardRef.current = null
+    }
+  }, [])
   // Help opened inside Ajustes or Denunciar keeps sheetOpen true, so it stays.
   const stackDepth = nav.depth(stack)
   useEffect(() => { closeHelp() }, [stackDepth, sheetOpen])
@@ -2318,10 +2325,10 @@ function Member () {
   const openMessage = useCallback((peer, options) => {
     const key = typeof peer === 'string' ? peer.toLowerCase() : peer
     const open = () => {
-      if (options && options.context && typeof key === 'string') {
+      if (options && (options.context || options.offer) && typeof key === 'string') {
         intentCount.current += 1
         const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
-        const intent = makeIntent({ id: intentCount.current + ':' + Date.now(), peer: key, from: own, context: options.context })
+        const intent = makeIntent({ id: intentCount.current + ':' + Date.now(), peer: key, from: own, context: options.context, offer: options.offer })
         if (validIntent(intent, own)) {
           intentsRef.current.set(key, intent)
           setIntentTick((n) => n + 1)
@@ -2708,6 +2715,7 @@ function Member () {
     if (Platform.OS === 'android') {
       const sub = BackHandler.addEventListener('hardwareBackPress', () => {
         if (helpOpenRef.current || sheetOpenRef.current) return false
+        if (backGuardRef.current?.() === true) return true
         if (nav.depth(stackRef.current) === 0) {
           if (tabRef.current !== 'avisos') return false
           closeAvisos()
@@ -2722,6 +2730,10 @@ function Member () {
     if (Platform.OS !== 'web' || typeof globalThis.addEventListener !== 'function') return
     const onKey = (event) => {
       if (event.key !== 'Escape' || event.defaultPrevented || helpOpenRef.current || sheetOpenRef.current) return
+      if (backGuardRef.current?.() === true) {
+        event.preventDefault()
+        return
+      }
       if (nav.depth(stackRef.current) > 0) goBack()
       else if (tabRef.current === 'avisos') closeAvisos()
     }
@@ -3243,16 +3255,20 @@ function Member () {
       // Página remounts them, so a late answer never lands on the other one.
       if (entry.screen === 'anuncio') {
         const at = entry.key.lastIndexOf(':')
+        const author = entry.key.slice(0, at)
         const actingPage = pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && acting.kind === 'page' ? acting.key : null
         return (
           <StackLayer key={i + ':anuncio:' + entry.key + ':' + actingIdentity + ':' + (actingPage || '') + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
             <Anuncio
-              author={entry.key.slice(0, at)}
+              author={author}
               seq={Number(entry.key.slice(at + 1))}
               me={ownKey}
               actingPage={actingPage}
               onBack={goBack}
               onConversar={({ peer, draft, card }) => openMessage(peer, { draft, card })}
+              onOffer={(listing) => openMessage(author, { offer: listing })}
+              // eslint-disable-next-line react/jsx-handler-names -- Forward the shared capability callback unchanged.
+              onOpenListings={screenProps.onOpenListings}
               onDenunciar={setReport}
               onOpenAuthor={openMember}
               onDeleted={goBack}
@@ -3296,7 +3312,12 @@ function Member () {
       if (entry.screen === 'anunciar') {
         return (
           <StackLayer key={i + ':anunciar:' + actingIdentity} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
-            <Anunciar initialPlace={feiraPlaceRef.current} onBack={goBack} onPublished={showPublished} />
+            <Anunciar
+              initialPlace={feiraPlaceRef.current}
+              onBack={goBack}
+              onPublished={showPublished}
+              registerBackGuard={(fn) => registerBackGuard(() => stackRef.current[stackRef.current.length - 1] === entry && fn())}
+            />
           </StackLayer>
         )
       }

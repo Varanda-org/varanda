@@ -23,6 +23,22 @@ export function ListingTile ({ listing, width, onPress }) {
       : listing.kind === 'procura' ? 'Procura' : ''
   const photo = Array.isArray(listing.media) ? listing.media[0] : null
   const icon = Object.prototype.hasOwnProperty.call(CATEGORY_ICONS, listing.cat) ? CATEGORY_ICONS[listing.cat] : CATEGORY_ICONS.outros
+  const content = (
+    <View>
+      {photo
+        ? <MediaView author={listing.author} descriptor={photo} label={'Foto de ' + title} style={styles.photo} persist={false} tapRetry={false} />
+        : <View style={[styles.photo, styles.placeholder]}><Icon name={icon} size={40} /></View>}
+      <View style={styles.content}>
+        <Text style={styles.price}>{price}</Text>
+        <Text style={styles.title} numberOfLines={2}>{title}</Text>
+        <Text style={styles.city} numberOfLines={1}>{city}</Text>
+        {badge ? <Text style={styles.badge}>{text(badge)}</Text> : null}
+      </View>
+    </View>
+  )
+  if (typeof onPress !== 'function') {
+    return <View style={[styles.tile, { width }]}>{content}</View>
+  }
   return (
     <PressScale
       accessibilityRole='button'
@@ -31,15 +47,7 @@ export function ListingTile ({ listing, width, onPress }) {
       style={[styles.tile, { width }]}
     >
       <View pointerEvents='none' accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>
-        {photo
-          ? <MediaView author={listing.author} descriptor={photo} label={'Foto de ' + title} style={styles.photo} persist={false} tapRetry={false} />
-          : <View style={[styles.photo, styles.placeholder]}><Icon name={icon} size={40} /></View>}
-        <View style={styles.content}>
-          <Text style={styles.price}>{price}</Text>
-          <Text style={styles.title} numberOfLines={2}>{title}</Text>
-          <Text style={styles.city} numberOfLines={1}>{city}</Text>
-          {badge ? <Text style={styles.badge}>{text(badge)}</Text> : null}
-        </View>
+        {content}
       </View>
     </PressScale>
   )
