@@ -252,28 +252,53 @@ test('the onboarding link step is restyled in setup only', async (t) => {
   const fs = require('fs')
   const path = require('path')
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', 'Identidade.js'), 'utf8')
-  const reload = src.split('\n').find((line) => line.startsWith('const RELOAD_TEXT = '))
-  t.ok(reload, 'RELOAD_TEXT is defined')
-  t.absent(reload.includes('passkey'), 'the reload text names no passkey')
+  const label = src.split('\n').find((line) => line.startsWith('const LINK_LABEL = '))
+  t.is(label, "const LINK_LABEL = 'Confirmar meu celular'", 'the link button names the phone')
+  t.absent(/google/i.test(src), 'no Google text or import is left')
   t.ok(src.includes('<InvitePaste onPasted={usePasted} disabled={busy || feiraBusy} setup={setup} />'))
   t.ok(src.includes('{recovering && !setup ? <Notice>Buscando sua conta…</Notice> : null}'))
   t.ok(src.includes('const big = setup ? { block: true, large: true } : {}'))
   const card = src.slice(src.indexOf('function LinkCard ('), src.indexOf('export default function Identidade'))
   for (const kept of [
     '<HelpNote doc={HELP.vinculo}><Body>{SHORT.link}</Body></HelpNote>',
-    "label='Vincular conta Google'",
+    '<Btn label={LINK_LABEL} onPress={doLink} pending={busy} disabled={linkDisabled} />',
     '<Label>conta</Label>',
     '<Card>\n      {setup ? null : <Label>conta</Label>}',
-    "'Conta Google escolhida. Confirme o vínculo com '",
-    "label='Confirmar vínculo'"
+    "<Btn label={LINK_LABEL} secondary onPress={() => { setError(''); setFormOpen(true) }} {...big} />",
+    ': <Body>{CLOSED_TEXT}</Body>'
   ]) {
     t.ok(card.includes(kept), 'Ajustes keeps ' + kept)
   }
   t.ok(src.includes('Sem a liberação da associação'), 'manual setup steps keep the release line')
-  t.ok(src.includes('needsCert && showTech && !(setup && linkMode)'), 'hosted Google step hides it')
+  t.ok(src.includes('needsCert && showTech && !(setup && linkMode)'), 'hosted link step hides it')
   const large = card.split('\n').filter((line) => line.includes('block large'))
   t.ok(large.length > 0)
   for (const line of large) {
-    t.ok(line.includes("label='Confirmar'") || line.includes("label='Continuar com o Google'"), 'block large only on the setup buttons: ' + line.trim())
+    t.ok(line.includes('label={LINK_LABEL} onPress={doLink}'), 'block large only on the setup buttons: ' + line.trim())
   }
+})
+
+test('the phone-only link step: closed without a phone check, recheck on telefone-pendente, reload when already linked', async (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', 'Identidade.js'), 'utf8')
+  const app = fs.readFileSync(path.join(__dirname, '..', 'App.js'), 'utf8')
+  const card = src.slice(src.indexOf('function LinkCard ('), src.indexOf('export default function Identidade'))
+  const press = card.slice(card.indexOf('const doLink = () => {'), card.indexOf('const doRename = () => {'))
+
+  // An installation without the phone check: a definite line, no link button.
+  t.ok(src.includes("const CLOSED_TEXT = 'Esta instalação não está aceitando contas novas agora.'"))
+  t.ok(card.includes('phonePolicy().then(setPhonePol, () => setPhonePol(null))'), 'the card reads the phone policy')
+  const closed = card.indexOf('} else if (phonePol && phonePol.required === false) {')
+  t.ok(closed > 0 && closed < card.indexOf("const waiting = waitlist !== ''"), 'the closed line replaces the link form')
+  t.ok(/const linkDisabled = .*phonePol === undefined/.test(card), 'the button waits for the phone policy')
+
+  // 'telefone-pendente': the shell asks the phone status again.
+  t.ok(press.includes("if (err && err.code === 'telefone-pendente' && typeof onPhoneRecheck === 'function') onPhoneRecheck()"))
+  t.ok(src.includes('onPhoneRecheck={onPhoneRecheck}'), 'Identidade hands it to the card')
+  t.ok(/<Identidade [^\n]*\bsetup\b[^\n]*onPhoneRecheck=\{recheckPhone\}/.test(app), 'the setup passes the phone gate recheck')
+
+  // 'conta-vinculada' (start or finish): the status read that imports the certificate.
+  t.ok(/if \(err && err\.code === 'conta-vinculada'\) \{\s*reload = true\s*return\s*\}/.test(press))
+  t.ok(/if \(finishing \|\| reload\) \{\s*await onChanged\(\)\s*await load\(\)\s*\}/.test(press))
 })

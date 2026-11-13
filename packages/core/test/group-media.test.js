@@ -5,10 +5,10 @@ const crypto = require('node:crypto')
 const b4a = require('b4a')
 const sodium = require('sodium-universal')
 const {
-  SEALED_MEDIA_MIME, MAX_SEALED_MEDIA_PLAIN_BYTES, PRIVATE_ITEM_KEYS,
+  SEALED_MEDIA_MIME, MAX_SEALED_MEDIA_PLAIN_BYTES, PRIVATE_ITEM_KEYS, MAX_GROUP_MEDIA,
   validPublicItem, validPrivateItem, validGroupMedia, copyGroupItem, copyGroupMedia, sealMedia, openMedia
 } = require('../lib/group-media')
-const { MEDIA_BLOCK_BYTES, MAX_MEDIA_BLOCKS, MAX_MEDIA_ITEM_BLOCKS, MAX_MEDIA_PER_POST, MAX_AUDIO_MS, MAX_AUDIO_BYTES, validDescriptor } = require('../lib/records')
+const { MEDIA_BLOCK_BYTES, MAX_MEDIA_BLOCKS, MAX_MEDIA_ITEM_BLOCKS, MAX_AUDIO_MS, MAX_AUDIO_BYTES, validDescriptor } = require('../lib/records')
 
 const MAC = sodium.crypto_secretbox_MACBYTES
 const CORE = 'a'.repeat(64)
@@ -194,7 +194,7 @@ test('validGroupMedia: 1..4 items of one kind at distinct places', (t) => {
   t.ok(validGroupMedia([pub(1)], false))
   t.ok(validGroupMedia([pub(1), pub(4), pub(7), pub(10)], false))
   t.absent(validGroupMedia([pub(1), pub(4), pub(7), pub(10), pub(13)], false), 'five')
-  t.is(MAX_MEDIA_PER_POST, 4)
+  t.is(MAX_GROUP_MEDIA, 4)
   t.absent(validGroupMedia([], false), 'empty')
   t.absent(validGroupMedia(null, false), 'null')
   t.absent(validGroupMedia([pub(1), pub(1)], false), 'one place twice')

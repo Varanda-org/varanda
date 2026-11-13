@@ -34,28 +34,6 @@ test('isUsername normalizes and rejects', async (t) => {
   t.is(isUsername('a'.repeat(20)), 'a'.repeat(20))
 })
 
-test('parseReturn maps the three outcomes', async (t) => {
-  const { parseReturn } = await load()
-  t.is(parseReturn('?conta=ok'), 'conta vinculada')
-  t.is(parseReturn('?conta=erro'), 'não foi possível vincular a conta')
-  t.is(parseReturn('?x=1&conta=cancelado'), 'vínculo cancelado')
-  t.is(parseReturn('?conta=outro'), null)
-  t.is(parseReturn('?conta=toString'), null)
-  t.is(parseReturn(''), null)
-  t.is(parseReturn(undefined), null)
-  t.is(parseReturn('?conta=lista-de-espera'), null, 'the waitlist is not a return notice')
-})
-
-test('parseReturnWaitlist: ?conta=lista-de-espera is the calm waitlist sentence', async (t) => {
-  const { parseReturnWaitlist, toError } = await load()
-  t.is(parseReturnWaitlist('?conta=lista-de-espera'), toError('lista-de-espera').message, 'the same sentence as a 503')
-  t.is(parseReturnWaitlist('?x=1&conta=lista-de-espera'), toError('lista-de-espera').message)
-  t.is(parseReturnWaitlist('?conta=ok'), '')
-  t.is(parseReturnWaitlist('?conta=outro'), '')
-  t.is(parseReturnWaitlist(''), '')
-  t.is(parseReturnWaitlist(undefined), '')
-})
-
 test('usernameMatches', async (t) => {
   const { usernameMatches } = await load()
   t.ok(usernameMatches({ member: M, username: 'ana' }, M, 'ana'))
@@ -77,7 +55,12 @@ test('error mapper uses fixed messages and never a raw body', async (t) => {
   const { toError } = await load()
   t.is(toError('nome-em-uso').message, 'esse nome já está em uso')
   t.is(toError('nome-invalido').message, 'nome inválido')
-  t.is(toError('conta-vinculada').message, 'esta conta Google já está vinculada a outra chave')
+  t.is(toError('conta-vinculada').message, 'Esta chave já tem uma conta Varanda.')
+  t.is(toError('nao-vinculado').message, 'Esta conta ainda não terminou o cadastro.')
+  const old = toError('versao-antiga')
+  t.is(old.message, 'Esta versão do app não cria mais contas. Atualize o Varanda e tente de novo.')
+  t.is(old.code, 'versao-antiga')
+  for (const token of ['conta-vinculada', 'nao-vinculado']) t.absent(/google|celular|telefone/i.test(toError(token).message), token + ' names no Google and no phone')
   t.is(toError('assinatura-invalida').message, 'não foi possível provar a chave')
   t.is(toError('expirado').message, 'o vínculo expirou, comece de novo')
   const waiting = toError('lista-de-espera')
@@ -98,7 +81,6 @@ test('request builders: URL, method, headers, body', async (t) => {
   const calls = stub(t, json(200, { ok: 1 }))
   await a.accountStatus(M)
   await a.startLink({ member: M, username: 'ana' })
-  await a.authorizeLink({ signature: 'ff' })
   await a.finishLink({ signature: 'ff' })
   await a.renameStart({ member: M, username: 'bia' })
   await a.renameFinish({ member: M, nonce: 'n', signature: 'ff' })
@@ -106,7 +88,6 @@ test('request builders: URL, method, headers, body', async (t) => {
   t.alike(calls.map(c => c.init.method + ' ' + c.url), [
     'GET /account/status?member=' + M,
     'POST /account/start',
-    'POST /account/authorize',
     'POST /account/finish',
     'POST /account/rename/start',
     'POST /account/rename/finish',
@@ -120,7 +101,7 @@ test('request builders: URL, method, headers, body', async (t) => {
   t.is(calls[0].init.body, undefined)
   t.is(calls[1].init.headers['content-type'], 'application/json')
   t.alike(JSON.parse(calls[1].init.body), { member: M, username: 'ana' })
-  t.alike(JSON.parse(calls[5].init.body), { member: M, nonce: 'n', signature: 'ff' })
+  t.alike(JSON.parse(calls[4].init.body), { member: M, nonce: 'n', signature: 'ff' })
 })
 
 test('lookupUsername: absolute only with an https account origin', async (t) => {
@@ -138,14 +119,10 @@ test('lookupUsername: absolute only with an https account origin', async (t) => 
   ])
 })
 
-test('404 gives null for pending and lookup, an error elsewhere', async (t) => {
+test('404 gives null for lookup, an error elsewhere', async (t) => {
   const a = await load()
   stub(t, json(404, { error: 'nao-encontrado' }))
-  t.is(await a.readPending(), null)
   t.is(await a.lookupUsername('ana'), null)
-  // The pending route answers "no pending link" with a 404 expirado: still null.
-  stub(t, json(404, { error: 'expirado' }))
-  t.is(await a.readPending(), null)
   await t.exception(a.accountStatus(M))
 })
 
@@ -182,7 +159,7 @@ test('termsStart/termsFinish: nao-vinculado and unexpected bodies', async (t) =>
   stub(t, json(403, { error: 'nao-vinculado' }))
   try { await a.termsStart({ member: M, version: 1 }); t.fail() } catch (e) {
     t.is(e.code, 'nao-vinculado')
-    t.is(e.message, 'esta conta não tem vínculo com uma conta Google')
+    t.is(e.message, 'Esta conta ainda não terminou o cadastro.')
   }
   try { await a.termsFinish({ member: M, nonce: 'n', signature: 'ff' }); t.fail() } catch (e) { t.is(e.code, 'nao-vinculado') }
   stub(t, json(200, { nonce: 5 }))
@@ -293,21 +270,14 @@ test('pushCheck: null on any failure or shape', async (t) => {
 const CODE = 'Q'.repeat(43)
 const ISO = '2026-11-02T03:00:00.000Z'
 
-test('invite error tokens and parseReturnInvite', async (t) => {
-  const { toError, parseReturn, parseReturnInvite } = await load()
+test('invite error tokens', async (t) => {
+  const { toError } = await load()
   t.is(toError('convite-obrigatorio').code, 'convite-obrigatorio')
   t.is(toError('convite-obrigatorio').message, 'Para entrar, abra o link de convite que alguém da rede te enviou. Nada sobre você fica guardado enquanto o convite não for usado.')
   t.is(toError('convite-invalido').message, 'Este convite não vale mais: já foi usado, venceu ou não existe. Peça outro link para quem te convidou.')
   t.is(toError('limite-convites').message, 'Você já criou os convites desta semana. Na segunda-feira volta a contar.')
   t.is(toError('convite-aguardando').code, 'convite-aguardando')
   t.is(toError('convite-aguardando').message, 'Seu convite desta semana ainda não chegou. Ele aparece de surpresa, com um aviso.')
-  t.is(parseReturn('?conta=convite-invalido'), null, 'not a return notice')
-  t.is(parseReturnInvite('?conta=convite-invalido'), toError('convite-invalido').message)
-  t.is(parseReturnInvite('?x=1&conta=convite-invalido'), toError('convite-invalido').message)
-  t.is(parseReturnInvite('?conta=lista-de-espera'), '')
-  t.is(parseReturnInvite('?conta=ok'), '')
-  t.is(parseReturnInvite(''), '')
-  t.is(parseReturnInvite(undefined), '')
 })
 
 test('startLink adds the invite only when it is a well-formed code', async (t) => {
@@ -1087,6 +1057,254 @@ test('ageResult: known states only', async (t) => {
   }
 })
 
+const PHONE_TOKENS = {
+  'telefone-pendente': 'Confirme seu celular antes de continuar.',
+  'telefone-invalido': 'Digite um celular brasileiro com DDD, por exemplo (11) 91234-5678.',
+  'telefone-em-uso': 'Este número já está em outra conta ou não pode ser usado.',
+  'telefone-recusado': 'Use um celular brasileiro comum. Números virtuais e fixos não servem.',
+  'codigo-invalido': 'Código incorreto. Confira e tente de novo.',
+  'codigo-expirado': 'O código venceu. Peça um novo.',
+  'limite-telefone': 'Muitas tentativas agora. Tente de novo mais tarde.'
+}
+const PHONE = '+5511912345678'
+const PHONE_SINCE = { ...SINCE_PROOF, type: 'phone-since' }
+const PHONE_PROOF = { ...VERIFIED_PROOF, type: 'phone-verified' }
+const PHONE_OVERSIZE = { ...PHONE_PROOF, pad: 'x'.repeat(1024) }
+
+test('phone error tokens map to fixed messages', async (t) => {
+  const { toError } = await load()
+  for (const [token, message] of Object.entries(PHONE_TOKENS)) {
+    t.is(toError(token).code, token)
+    t.is(toError(token).message, message)
+    t.absent(message.includes(String.fromCharCode(0x2014)), 'no em dash: ' + token)
+  }
+})
+
+test('phonePolicy: { required } or null on any failure, a 404 included', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(200, { required: true }))
+  t.alike(await a.phonePolicy(), { required: true })
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'GET /account/phone/policy')
+  t.is(calls[0].init.body, undefined)
+  t.is(calls[0].init.cache, 'no-store')
+  stub(t, json(200, { required: false }))
+  t.alike(await a.phonePolicy(), { required: false })
+  const lost = stub(t, json(404, { error: 'nao-encontrado' }))
+  t.is(await a.phonePolicy(), null, '404: unknown, the gate reads the node-held proofs')
+  t.is(lost.length, 1, 'never retried')
+  stub(t, json(503, { error: 'indisponivel' }))
+  t.is(await a.phonePolicy(), null, '503')
+  stub(t, () => { throw new Error('rede') })
+  t.is(await a.phonePolicy(), null, 'network')
+  stub(t, json(200, { required: true }, 'text/html'))
+  t.is(await a.phonePolicy(), null, 'not JSON')
+  for (const body of [{ required: 'true' }, { required: 1 }, { required: true, phone: PHONE }, {}, [], { required: null }]) {
+    stub(t, json(200, body))
+    t.is(await a.phonePolicy(), null, JSON.stringify(body))
+  }
+})
+
+test('phoneSince: a bounded signed object, null, or undefined on any failure', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(200, { since: PHONE_SINCE }))
+  t.alike(await a.phoneSince(), PHONE_SINCE)
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'GET /account/phone/since')
+  t.is(calls[0].init.body, undefined)
+  stub(t, json(200, { since: null }))
+  t.is(await a.phoneSince(), null)
+  const lost = stub(t, () => { throw new Error('rede') })
+  t.is(await a.phoneSince(), undefined, 'network')
+  t.is(lost.length, 1, 'never retried')
+  stub(t, json(404, { error: 'nao-encontrado' }))
+  t.is(await a.phoneSince(), undefined, '404')
+  stub(t, json(503, { error: 'indisponivel' }))
+  t.is(await a.phoneSince(), undefined, '503')
+  stub(t, json(200, { since: PHONE_SINCE }, 'text/html'))
+  t.is(await a.phoneSince(), undefined, 'not JSON')
+  t.is(a.MAX_PHONE_PROOF_BYTES, 1024)
+  const bad = [
+    { since: PHONE_SINCE, x: 1 }, { since: PHONE_SINCE, phone: PHONE }, {}, [], { since: 5 }, { since: 'ontem' },
+    { since: [] }, { since: true }, { since: PHONE_OVERSIZE }, { since: undefined }
+  ]
+  for (const body of bad) {
+    stub(t, json(200, body))
+    t.is(await a.phoneSince(), undefined, JSON.stringify(body).slice(0, 80))
+  }
+})
+
+test('phoneStart: the nonce, refusals', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(200, { nonce: 'n1', phone: PHONE }))
+  t.alike(await a.phoneStart({ member: M }), { nonce: 'n1' }, 'extra fields dropped')
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'POST /account/phone/start')
+  t.alike(JSON.parse(calls[0].init.body), { member: M })
+  t.is(calls[0].init.credentials, 'same-origin')
+  for (const body of [{ nonce: 5 }, {}, { nonce: null }]) {
+    stub(t, json(200, body))
+    try { await a.phoneStart({ member: M }); t.fail(JSON.stringify(body)) } catch (e) { t.is(e.code, 'indisponivel', JSON.stringify(body)) }
+  }
+  stub(t, json(503, { error: 'indisponivel' }))
+  try { await a.phoneStart({ member: M }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+  const lost = stub(t, () => { throw new Error('rede') })
+  try { await a.phoneStart({ member: M }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+  t.is(lost.length, 1, 'never retried')
+})
+
+test('phoneSend: the exact body without a channel, enviado or verificado', async (t) => {
+  const a = await load()
+  const args = { member: M, nonce: 'n1', signature: 'ff', phone: PHONE }
+  const calls = stub(t, json(200, { state: 'enviado', phone: PHONE }))
+  const sent = await a.phoneSend(args)
+  t.alike(sent, { state: 'enviado' })
+  t.absent(JSON.stringify(sent).includes(PHONE), 'the number never comes back')
+  t.is(calls.length, 1)
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'POST /account/phone/send')
+  t.alike(JSON.parse(calls[0].init.body), args, 'exactly member, nonce, signature, phone: no channel')
+  stub(t, json(200, { state: 'enviado', proof: PHONE_PROOF }))
+  t.alike(await a.phoneSend(args), { state: 'enviado' }, 'a proof only with verificado')
+  stub(t, json(200, { state: 'verificado', proof: PHONE_PROOF, phone: PHONE }))
+  t.alike(await a.phoneSend(args), { state: 'verificado', proof: PHONE_PROOF })
+  stub(t, json(200, { state: 'verificado' }))
+  t.alike(await a.phoneSend(args), { state: 'verificado' })
+  for (const body of [{ state: 'nenhum' }, { state: 'Enviado' }, { state: 1 }, {}, { phone: PHONE }, { state: ['enviado'] }]) {
+    stub(t, json(200, body))
+    try { await a.phoneSend(args); t.fail(JSON.stringify(body)) } catch (e) {
+      t.is(e.code, 'indisponivel', JSON.stringify(body))
+      t.is(e.uncertain, true, 'a malformed answer is uncertain: ' + JSON.stringify(body))
+    }
+  }
+})
+
+test('phoneCheck: the exact body, verificado only', async (t) => {
+  const a = await load()
+  const args = { member: M, nonce: 'n1', signature: 'ff', code: '123456' }
+  const calls = stub(t, json(200, { state: 'verificado', phone: PHONE, mask: '(11) 9****-5678' }))
+  const done = await a.phoneCheck(args)
+  t.alike(done, { state: 'verificado' }, 'extra fields dropped')
+  t.absent(JSON.stringify(done).includes('5678'), 'the number never comes back')
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'POST /account/phone/check')
+  t.alike(JSON.parse(calls[0].init.body), args)
+  for (const body of [{ state: 'enviado' }, { state: 'nenhum' }, { state: 'Verificado' }, {}, { ok: true }]) {
+    stub(t, json(200, body))
+    try { await a.phoneCheck(args); t.fail(JSON.stringify(body)) } catch (e) {
+      t.is(e.code, 'indisponivel', JSON.stringify(body))
+      t.is(e.uncertain, true, JSON.stringify(body))
+    }
+  }
+})
+
+test('phoneStatus: verificado or nenhum, nothing else', async (t) => {
+  const a = await load()
+  const args = { member: M, nonce: 'n1', signature: 'ff' }
+  const calls = stub(t, json(200, { state: 'nenhum', phone: PHONE }))
+  t.alike(await a.phoneStatus(args), { state: 'nenhum' })
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'POST /account/phone/status')
+  t.alike(JSON.parse(calls[0].init.body), args)
+  stub(t, json(200, { state: 'nenhum', proof: PHONE_PROOF }))
+  t.alike(await a.phoneStatus(args), { state: 'nenhum' }, 'a proof only with verificado')
+  stub(t, json(200, { state: 'verificado', phone: PHONE }))
+  t.alike(await a.phoneStatus(args), { state: 'verificado' })
+  for (const body of [{ state: 'enviado' }, { state: 'pendente' }, { state: 'Nenhum' }, {}, []]) {
+    stub(t, json(200, body))
+    try { await a.phoneStatus(args); t.fail(JSON.stringify(body)) } catch (e) {
+      t.is(e.code, 'indisponivel', JSON.stringify(body))
+      t.absent(e.uncertain, 'a read: not uncertain ' + JSON.stringify(body))
+    }
+  }
+  const lost = stub(t, () => { throw new Error('rede') })
+  try { await a.phoneStatus(args); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+  t.is(lost.length, 1, 'never retried')
+})
+
+test('phone verificado answers carry a bounded proof object, else none', async (t) => {
+  const a = await load()
+  const base = { member: M, nonce: 'n1', signature: 'ff' }
+  const calls = [
+    [a.phoneSend, { ...base, phone: PHONE }],
+    [a.phoneCheck, { ...base, code: '123456' }],
+    [a.phoneStatus, base]
+  ]
+  for (const [call, args] of calls) {
+    stub(t, json(200, { state: 'verificado', proof: PHONE_PROOF }))
+    t.alike(await call(args), { state: 'verificado', proof: PHONE_PROOF })
+    for (const proof of [undefined, null, 'assinado', 5, [], [PHONE_PROOF], PHONE_OVERSIZE]) {
+      stub(t, json(200, proof === undefined ? { state: 'verificado' } : { state: 'verificado', proof }))
+      t.alike(await call(args), { state: 'verificado' }, 'proof ' + JSON.stringify(proof)?.slice(0, 40))
+    }
+  }
+  const fits = { ...PHONE_PROOF, pad: 'x'.repeat(1024 - JSON.stringify({ ...PHONE_PROOF, pad: '' }).length) }
+  t.is(JSON.stringify(fits).length, 1024)
+  stub(t, json(200, { state: 'verificado', proof: fits }))
+  t.alike(await a.phoneCheck(calls[1][1]), { state: 'verificado', proof: fits }, 'exactly 1024 bytes is accepted')
+  const multi = { ...PHONE_PROOF, pad: 'é'.repeat(Math.ceil((1025 - JSON.stringify({ ...PHONE_PROOF, pad: '' }).length) / 2)) }
+  t.ok(JSON.stringify(multi).length <= 1024, 'fits in characters')
+  stub(t, json(200, { state: 'verificado', proof: multi }))
+  t.alike(await a.phoneCheck(calls[1][1]), { state: 'verificado' }, 'counted in UTF-8 bytes')
+})
+
+test('phone calls: expirado reads as the phone request, conta-excluida keeps its token, both definite', async (t) => {
+  const a = await load()
+  const base = { member: M, nonce: 'n1', signature: 'ff' }
+  for (const [call, args] of [[a.phoneSend, { ...base, phone: PHONE }], [a.phoneCheck, { ...base, code: '123456' }], [a.phoneStatus, base]]) {
+    stub(t, json(404, { error: 'expirado' }))
+    try { await call(args); t.fail() } catch (e) {
+      t.is(e.code, 'expirado')
+      t.is(e.message, 'O pedido venceu. Tente de novo.')
+      t.absent(e.uncertain, 'a spent nonce is definite')
+    }
+    stub(t, json(409, { error: 'conta-excluida' }))
+    try { await call(args); t.fail() } catch (e) {
+      t.is(e.code, 'conta-excluida')
+      t.is(e.message, 'esta conta já foi excluída')
+      t.absent(e.uncertain, 'a deleted account is definite')
+    }
+  }
+  stub(t, json(404, { error: 'expirado' }))
+  try { await a.ageResult(base); t.fail() } catch (e) {
+    t.is(e.code, 'expirado')
+    t.is(e.message, 'o vínculo expirou, comece de novo', 'other callers keep the old sentence')
+  }
+  t.is(a.toError('expirado').message, 'o vínculo expirou, comece de novo')
+})
+
+test('phoneSend / phoneCheck: refusals definite, a 5xx with a phone token definite, no answer uncertain, never retried', async (t) => {
+  const a = await load()
+  const base = { member: M, nonce: 'n1', signature: 'ff' }
+  for (const [call, args] of [[a.phoneSend, { ...base, phone: PHONE }], [a.phoneCheck, { ...base, code: '123456' }]]) {
+    for (const [status, token] of [[400, 'telefone-invalido'], [409, 'telefone-em-uso'], [409, 'telefone-recusado'], [400, 'codigo-invalido'], [410, 'codigo-expirado'], [429, 'limite-telefone'], [403, 'idade-pendente'], [400, 'assinatura-invalida']]) {
+      stub(t, json(status, { error: token }))
+      try { await call(args); t.fail(token) } catch (e) {
+        t.is(e.code, token)
+        t.is(e.message, toMessage(a, token))
+        t.absent(e.uncertain, 'a refusal is definite: ' + token)
+      }
+    }
+    for (const token of Object.keys(PHONE_TOKENS).concat(['indisponivel'])) {
+      stub(t, json(503, { error: token }))
+      try { await call(args); t.fail(token) } catch (e) {
+        t.is(e.code, token)
+        t.absent(e.uncertain, 'a 5xx with a known token is definite: ' + token)
+      }
+    }
+    stub(t, json(503, { error: 'resultado-incerto' }))
+    try { await call(args); t.fail() } catch (e) {
+      t.is(e.uncertain, true, 'the service says it may have been applied')
+    }
+    stub(t, json(502, null, 'text/html'))
+    try { await call(args); t.fail() } catch (e) {
+      t.is(e.code, 'indisponivel')
+      t.is(e.uncertain, true, 'a proxy page is still unknown')
+    }
+    const lost = stub(t, () => { throw new Error('rede') })
+    try { await call(args); t.fail() } catch (e) {
+      t.is(e.code, 'indisponivel')
+      t.is(e.uncertain, true, 'no answer is uncertain')
+    }
+    t.is(lost.length, 1, 'never retried')
+  }
+})
+function toMessage (a, token) { return a.toError(token).message }
+
 test('app client: absolute URLs, header and no credentials only with the flag on', async (t) => {
   const a = await load()
   const { setInstallation } = await import('../src/installation.js')
@@ -1130,32 +1348,27 @@ test('app client: absolute URLs, header and no credentials only with the flag on
   t.is(a.buildRequest('GET', '/account/status?member=' + M).init.credentials, 'same-origin')
 })
 
-test('app link proofs: appProof, x-varanda-link and x-varanda-redeem only from the app', async (t) => {
+test('app link proofs: appProof, x-varanda-link only from the app', async (t) => {
   const a = await load()
   const { setInstallation } = await import('../src/installation.js')
   const { setAppClient } = await import('../src/appClient.js')
   t.teardown(() => { setInstallation(null); setAppClient(false) })
   const V = 'V'.repeat(42) + 'A'
-  const R = 'R'.repeat(42) + 'A'
   const P = 'P'.repeat(42) + 'A'
   const SIG = 'sig'
 
   // The web: no proof ever goes out, even when the caller passes one.
   let calls = stub(t, json(200, { ok: 1 }))
   await a.startLink({ member: M, username: 'ana', appProof: P, linkSecret: V })
-  await a.authorizeLink({ signature: SIG, linkSecret: V })
-  await a.readPending({ linkSecret: V, redeem: R })
-  await a.finishLink({ signature: SIG, linkSecret: V, redeem: R })
-  await a.readPending()
+  await a.finishLink({ signature: SIG, linkSecret: V })
   await a.finishLink({ signature: SIG })
-  t.is(calls.length, 6)
+  t.is(calls.length, 3)
   t.alike(JSON.parse(calls[0].init.body), { member: M, username: 'ana' }, 'no appProof in the web body')
   for (const c of calls) {
     t.ok(c.url.startsWith('/account/'), 'relative URL ' + c.url)
     t.alike(Object.keys(c.init.headers).filter((h) => h.startsWith('x-varanda')), [], 'no app header on the web')
     t.is(c.init.credentials, 'same-origin')
   }
-  t.alike(calls[2].init.headers, { accept: 'application/json' }, 'web pending headers unchanged')
 
   // The app.
   t.ok(setInstallation('https://example.test'))
@@ -1166,39 +1379,29 @@ test('app link proofs: appProof, x-varanda-link and x-varanda-redeem only from t
   t.absent('x-varanda-link' in calls[0].init.headers, 'a first start holds no V')
   await a.startLink({ member: M, username: 'ana', appProof: P, linkSecret: V })
   t.is(calls[1].init.headers['x-varanda-link'], V, 'a restart presents the held V')
-  t.absent('x-varanda-redeem' in calls[1].init.headers)
   await a.startLink({ member: M, username: 'ana', appProof: 'short', linkSecret: 'bad' })
   t.alike(JSON.parse(calls[2].init.body), { member: M, username: 'ana' }, 'a malformed appProof is not sent')
   t.absent('x-varanda-link' in calls[2].init.headers, 'a malformed V is not sent')
-  await a.authorizeLink({ signature: SIG, linkSecret: V })
+  // The phone finish: V binds the row.
+  await a.finishLink({ signature: SIG, linkSecret: V })
+  t.is(calls[3].url, 'https://example.test/account/finish')
+  t.is(calls[3].init.method, 'POST')
   t.is(calls[3].init.headers['x-varanda-link'], V)
-  t.alike(JSON.parse(calls[3].init.body), { signature: SIG })
-  await a.readPending({ linkSecret: V, redeem: R })
-  t.is(calls[4].init.method, 'GET')
-  t.is(calls[4].init.headers['x-varanda-link'], V)
-  t.is(calls[4].init.headers['x-varanda-redeem'], R)
-  await a.finishLink({ signature: SIG, linkSecret: V, redeem: R })
-  t.is(calls[5].url, 'https://example.test/account/finish')
-  t.is(calls[5].init.headers['x-varanda-link'], V)
-  t.is(calls[5].init.headers['x-varanda-redeem'], R)
-  t.is(calls[5].init.headers['x-varanda-client'], 'app')
-  t.alike(JSON.parse(calls[5].init.body), { signature: SIG }, 'the proofs never go in the body')
-  t.is(calls.length, 6)
+  t.is(calls[3].init.headers['x-varanda-client'], 'app')
+  t.alike(JSON.parse(calls[3].init.body), { signature: SIG }, 'the proofs never go in the body')
+  t.is(calls.length, 4)
 
-  // Without both V and R nothing is asked or sent.
-  t.is(await a.readPending(), null)
-  t.is(await a.readPending({ linkSecret: V }), null)
-  t.is(await a.readPending({ redeem: R }), null)
-  for (const opts of [{}, { linkSecret: V }, { redeem: R }, { linkSecret: V, redeem: 'x' }]) {
+  // Without V no finish is sent.
+  for (const opts of [{}, { linkSecret: 'bad' }]) {
     try {
       await a.finishLink({ signature: SIG, ...opts })
-      t.fail('sent without the proofs')
+      t.fail('sent without V')
     } catch (e) {
       t.is(e.code, 'expirado')
       t.absent(e.uncertain, 'nothing was sent, so nothing is uncertain')
     }
   }
-  t.is(calls.length, 6, 'a native finish or pending without V and R is never sent')
+  t.is(calls.length, 4, 'a native finish without V is never sent')
 })
 
 const LOOKUP = 'cd'.repeat(32)

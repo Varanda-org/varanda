@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 34)
-  t.is(LEGAL_DATE, '09/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 34, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(LEGAL_VERSION, 36)
+  t.is(LEGAL_DATE, '11/11/2026')
+  t.is(REVIEW_NOTE, 'Versão 36, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: version 29 has no tolerance for abuse, a real contact, a content license and the age check on the app', async (t) => {
@@ -90,7 +90,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'f17c654975e04bf2fa24b9d1478031734d2693336c1fc43d3d81cc131318f51a', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'c655185dee955dc4b0909c63c89f0e853dec7bd65b8123f5246b614f05d72601', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 19 describes extra passkeys and the recovery code for the same account', async (t) => {
@@ -102,7 +102,7 @@ test('legal: version 19 describes extra passkeys and the recovery code for the s
     t.ok(text(doc).includes('até quatro outras passkeys e um código de recuperação para a mesma conta'), doc.title + ': extra passkeys')
     t.ok(text(doc).includes('criação de uma passkey nova naquele aparelho'), doc.title + ': code ends with a new passkey')
     t.ok(text(doc).includes('Sem nenhuma passkey e sem o código, a conta não pode ser recuperada'), doc.title + ': no recovery without both')
-    t.ok(text(doc).includes('Adicionar uma passkey ou um código de recuperação exige a conta vinculada ao Google'), doc.title + ': extra entries need a Google-linked account')
+    t.ok(text(doc).includes('Adicionar uma passkey ou um código de recuperação exige a conta vinculada'), doc.title + ': extra entries need a linked account')
     // The original passkey is never looked up at the service; an added passkey
     // or the code is fetched from it at every new sign-in ceremony.
     t.ok(text(doc).includes('também sem internet, em qualquer aparelho'), doc.title + ': original passkey works offline')
@@ -240,7 +240,7 @@ test('legal: version 22 describes Excluir conta, what goes, what stays and the 7
   t.ok(text(TERMS).includes('encerrá-la ou transferi-la antes'))
   t.ok(text(TERMS).includes('deixam de existir para todos os participantes'))
   t.ok(text(PRIVACY).includes('Ficam a chave pública, a data da exclusão e os @nomes já usados'))
-  t.ok(text(PRIVACY).includes('A mesma conta Google pode criar uma conta nova'))
+  t.ok(text(PRIVACY).includes('Com outra passkey, dá para criar uma conta nova'))
 })
 
 test('legal: version 23 describes the passkey key the service keeps and the 7-day wait without it', async (t) => {
@@ -321,4 +321,25 @@ test('legal: version 29 describes momentos that disappear but are not erased', a
   t.ok(text(PRIVACY).includes('sumir não é apagar'))
   t.ok(text(PRIVACY).includes('A foto de um momento fica no semeador por até 7 dias, sem renovação'))
   t.ok(text(PRIVACY).includes('perfil, seguidos, depoimentos, momentos, fotos'))
+})
+
+test('legal: version 36 says the phone is not identity proof nor a recovery factor', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  for (const doc of [TERMS, PRIVACY]) {
+    const text = doc.sections.flatMap((sec) => sec.paragraphs).join('\n')
+    t.ok(/não (prova|é usado para recuperar)/.test(text) || /nunca serve para recuperar/.test(text))
+    t.ok(text.includes('recuperar a conta'))
+    t.is(/prova de identidade|comprova (quem|a identidade)/.test(text), false)
+  }
+})
+
+test('legal: version 36 says what stays after deleting the account, number included', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const terms = TERMS.sections.flatMap((sec) => sec.paragraphs).join('\n')
+  const privacy = PRIVACY.sections.flatMap((sec) => sec.paragraphs).join('\n')
+  t.ok(terms.includes('O número do celular fica lacrado por até 180 dias e então é apagado.'))
+  t.ok(privacy.includes('os @nomes que a conta usou e, por até 180 dias, o número lacrado; numa conta bloqueada, o índice com chave do número fica enquanto o bloqueio durar'))
+  t.ok(privacy.includes('só são entregues mediante ordem judicial ou a seu próprio pedido'))
+  t.ok(privacy.includes('o app não o grava no aparelho'), 'o número passa pelo app quando digitado')
+  t.absent(privacy.includes('nem no navegador'), 'o número é digitado no navegador na web')
 })

@@ -105,8 +105,9 @@ function decorate (rows, peeked) {
   })
 }
 
-// The own account on someone's list: no pill.
-function OwnRow ({ row, profile, onOpen }) {
+// The own account on someone's list: no pill. The photo is kept on disk
+// only for the own key (`own`), never for a row this list put here.
+function OwnRow ({ row, own, profile, onOpen }) {
   const styles = useStyles(makeStyles)
   const who = whoOf(profile)
   const title = displayText(who.title)
@@ -120,7 +121,7 @@ function OwnRow ({ row, profile, onOpen }) {
       disabled={!open}
       onPress={open}
     >
-      <Avatar name={who.avatarName} publicKey={row.key} size={44} picture={pickAvatar(profile, row)} persist />
+      <Avatar name={who.avatarName} publicKey={row.key} size={44} picture={pickAvatar(profile, row)} persist={typeof own === 'string' && row.key === own} />
       <View style={styles.who}>
         <Text style={styles.name} numberOfLines={1}>{title}</Text>
         {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
@@ -456,7 +457,7 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
 
   const renderItem = ({ item }) => {
     const profile = personOf(item.key) || { name: null, username: null }
-    if (item.key === own) return <OwnRow row={item} profile={profile} onOpen={onOpenMember} />
+    if (item.key === own) return <OwnRow row={item} own={own} profile={profile} onOpen={onOpenMember} />
     const hit = { author: item.key, name: profile.name || null, username: profile.username || null }
     return (
       <MemberRow

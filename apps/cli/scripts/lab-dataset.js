@@ -208,8 +208,10 @@ async function ownLength (web) {
 // setupFile, ms, startRajada, close }. issuer is { keyPair, cert } (the
 // lab's loadIssuer); heldLength(key), optional, is how many leading blocks
 // of a diary the seeder holds. The first `keep` member sessions stay open for
-// startRajada; close() ends them.
-async function runDataset ({ seederWsUrl, origin, association, issuer, plan, root, log = () => {}, heldLength = null, concurrency = CONCURRENCY, keep = RAJADA_MEMBERS }) {
+// startRajada; close() ends them. exposeClients: true also returns them as
+// `clients` ([{ index, key, node, web }], in member order), for a harness
+// that drives them itself; they stay owned by close().
+async function runDataset ({ seederWsUrl, origin, association, issuer, plan, root, log = () => {}, heldLength = null, concurrency = CONCURRENCY, keep = RAJADA_MEMBERS, exposeClients = false }) {
   if (!issuer || !issuer.keyPair || !issuer.cert) throw new TypeError('issuer must be { keyPair, cert }')
   const started = Date.now()
   fs.mkdirSync(root, { recursive: true })
@@ -400,7 +402,7 @@ async function runDataset ({ seederWsUrl, origin, association, issuer, plan, roo
     }
   }
 
-  return {
+  const result = {
     members: plan.members.map((m) => ({ index: m.index, key: keys[m.index], username: m.username, blocks: m.blocks })),
     communities: communities.map((c) => ({ name: c.name, community: c.community, general: c.general, members: c.joined.length + 1 })),
     followsFile,
@@ -409,6 +411,10 @@ async function runDataset ({ seederWsUrl, origin, association, issuer, plan, roo
     startRajada,
     close: closeKept
   }
+  if (exposeClients === true) {
+    result.clients = [...kept.entries()].sort((a, b) => a[0] - b[0]).map(([m, s]) => ({ index: m, key: keys[m], node: s.node, web: s.web }))
+  }
+  return result
 }
 
 // The console snippet for the signed-in dev page (EXPO_PUBLIC_VARANDA_PERF=1

@@ -31,7 +31,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
-import { useNode } from '../node'
+import { perfMarks, useNode } from '../node'
 import { useNames } from '../names'
 import { readBlockedPeek, useBlocks } from '../blocksProvider'
 import { BLOCK_TEXTS } from '../memberBlocks'
@@ -76,6 +76,10 @@ import { ConfirmTestimonialSheet, RETRACT_TITLE, TESTIMONIALS_TAB, WRITE_UNCERTA
 import { ratingRefs, ratings } from '../feiraClient'
 import { MAX_RATED_LISTINGS, RATINGS_NOTE, collectRatings, summaryLabel } from '../feiraReview'
 import { isSeederDown, knownAuthors, memberKeyOf, learnPeeked, peekAll, planWithHints, postAt, refOf, rowProps, useEngagement, useFollowSet } from './Conversa'
+import { liveBinding } from './ARua'
+import { buildScreenSnapshot, screenWithoutAuthors } from '../screenSnapshot'
+import { clearScreenSnapshot, loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
+import { cacheGeneration } from '../localCaches'
 
 const TABS = [{ id: 'posts', label: 'Publicações' }, { id: 'mural', label: 'Mural' }]
 // Depoimentos is the third tab only on a hosted node (node.hosted === true).
@@ -192,9 +196,51 @@ async function extraPlan (items, peeked, known, alive) {
   return planWithHints(refs, known, alive)
 }
 
-// The post a row shows: the item itself, or a repost's original.
-function shownPost (item, peeked) {
-  return item.kind === 'repost' ? postAt(peeked, refOf(item.to.author, item.to.seq)) : item
+// The post a row shows: the item itself, or a repost's original (from the
+// peeks, else from the snapshot's originals while its rows are shown).
+function shownPost (item, peeked, seeded = null) {
+  if (item.kind !== 'repost') return item
+  const ref = refOf(item.to.author, item.to.seq)
+  const post = postAt(peeked, ref)
+  return post !== null || seeded === null ? post : (seeded.get(ref) || null)
+}
+
+// The 'membro' snapshot (../screenSnapshot.js): a followed author's last
+// header and first page, painted while profile.read and the member index
+// answer, which still run and replace it.
+const SNAPSHOT_SAVE_MS = 2000
+
+// Whether the snapshot may be read or written for `author`: followed per the
+// node's own answer (`follows`, a Set from follow.list or a confirmed
+// follow.add; null while unknown), not blocked, not a page (closed and moved
+// pages are pages too) and only while acting as the member. The own diary is
+// not a 'membro' entry (the rules refuse the owner).
+export function membroSnapshotAllowed ({ author, ownKey, follows, blocked, page, acting }) {
+  return typeof author === 'string' && author !== ownKey && follows instanceof Set && follows.has(author) &&
+    blocked !== true && page !== true && acting !== null && typeof acting === 'object' && acting.kind === 'me'
+}
+
+// Whether the session may write for `owner`: the passkey identity is that
+// owner, unlocked and not signed out (A Rua's rule). A lock or sign-out wipes
+// the snapshots; a write after it would bring one back.
+function sessionAllowsSnapshot (passkey, owner) {
+  if (passkey === null || passkey === undefined) return true
+  const st = passkey.status
+  return st !== null && typeof st === 'object' && st.unlocked === true && st.signedOut !== true &&
+    typeof st.publicKey === 'string' && st.publicKey.toLowerCase() === owner
+}
+
+// The originals a page's reposts and quotes show, ref -> post item.
+function originalsOf (items, peeked) {
+  const out = new Map()
+  for (const item of items) {
+    const target = item.kind === 'repost' ? item.to : item.quote
+    if (!target) continue
+    const ref = refOf(target.author, target.seq)
+    const post = postAt(peeked, ref)
+    if (post !== null) out.set(ref, post)
+  }
+  return out
 }
 
 const INITIAL_POSTS = {
@@ -208,7 +254,9 @@ const INITIAL_POSTS = {
   complete: true,
   loadingMore: false,
   moreError: '',
-  refreshing: false
+  refreshing: false,
+  // Rows from the snapshot: shown, never paged, replaced by the live page.
+  seeded: false
 }
 
 export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenPageSettings, onOpenPeople, onOpenCommunity, onOpenListings, onOpenTestimonials, onToast, onTabChange }) {
@@ -294,6 +342,88 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     postsRef.current = { ...postsRef.current, ...patch }
     setPosts(postsRef.current)
   }, [])
+
+  // ref -> post item of the seeded reposts' originals, while seeded.
+  const seedOriginalsRef = useRef(null)
+  const saveTimerRef = useRef(null)
+  // What the snapshot rules read when a seed or a delayed save runs; set on
+  // every render below.
+  const snapRef = useRef(null)
+
+  // The seed, once follow.list answered for this load: only a followed
+  // author, and only while nothing live replaced the header or the rows.
+  const seedSnapshot = useCallback((followSet, alive) => {
+    const at = snapRef.current
+    if (!alive() || at === null) return
+    const acting = actingAs.get()
+    if (!membroSnapshotAllowed({ author, ownKey, follows: followSet, blocked: at.blocked, page: at.page, acting })) return
+    const binding = liveBinding(ownKey, at.config)
+    if (binding === null) return
+    const snapshot = loadScreenSnapshot('membro', { ...binding, acting })
+    const entry = snapshot !== null && Object.prototype.hasOwnProperty.call(snapshot.body.authors, author) ? snapshot.body.authors[author] : null
+    if (entry === null) return
+    if (!headerRef.current.verified) commitHeader({ ...entry.header, verified: false })
+    if (!at.full || postsRef.current.phase !== 'loading') return
+    // A quote card reads the peeks only: those rows wait for the live page.
+    const items = entry.items.filter((i) => i.quote === null && (i.kind !== 'repost' || !at.blockedKeys.has(i.to.author)))
+    if (items.length === 0) return
+    seedOriginalsRef.current = new Map(Object.entries(entry.originals))
+    commit({ ...INITIAL_POSTS, phase: 'ready', items, before: entry.before, atEnd: entry.atEnd, seeded: true })
+    perfMarks().mark('rows-snapshot:membro')
+  }, [author, ownKey, commit, commitHeader])
+
+  // Armed after a live first page; written SNAPSHOT_SAVE_MS later if the
+  // rules still allow it then. A wipe or prune in between (a block, an
+  // unfollow, a lock) moves cacheGeneration and the store drops the write.
+  const armSnapshotSave = useCallback((page) => {
+    clearTimeout(saveTimerRef.current)
+    const gen = cacheGeneration()
+    saveTimerRef.current = setTimeout(() => {
+      saveTimerRef.current = null
+      const at = snapRef.current
+      if (at === null || !headerRef.current.verified) return
+      const acting = actingAs.get()
+      if (!membroSnapshotAllowed({ author, ownKey, follows: at.follows, blocked: at.blocked, page: at.page, acting })) return
+      if (!sessionAllowsSnapshot(at.passkey, ownKey)) return
+      const binding = liveBinding(ownKey, at.config)
+      if (binding === null) return
+      const id = { ...binding, acting }
+      const h = headerRef.current
+      const snapshot = buildScreenSnapshot('membro', {
+        ...id,
+        previous: loadScreenSnapshot('membro', id),
+        author,
+        header: { name: h.name, username: h.username, bio: h.bio, avatar: h.avatar },
+        items: page.items,
+        before: page.before,
+        atEnd: page.atEnd,
+        originals: page.originals,
+        followed: at.follows,
+        blocked: at.blockedKeys
+      })
+      if (snapshot !== null) saveScreenSnapshot('membro', snapshot, gen)
+    }, SNAPSHOT_SAVE_MS)
+  }, [author, ownKey])
+
+  // An unfollow or a block here removes the author's entry at once. Acting
+  // as a page the member's snapshot cannot be read, so it all goes.
+  const dropSnapshotEntry = useCallback(() => {
+    clearTimeout(saveTimerRef.current)
+    saveTimerRef.current = null
+    const at = snapRef.current
+    const binding = liveBinding(ownKey, at === null ? null : at.config)
+    if (binding === null) return
+    const acting = actingAs.get()
+    if (acting.kind !== 'me') {
+      clearScreenSnapshot('membro')
+      return
+    }
+    const snapshot = loadScreenSnapshot('membro', { ...binding, acting })
+    if (snapshot === null || !Object.prototype.hasOwnProperty.call(snapshot.body.authors, author)) return
+    const next = screenWithoutAuthors(snapshot, [author])
+    if (next === null || Object.keys(next.body.authors).length === 0 || !saveScreenSnapshot('membro', next, cacheGeneration())) clearScreenSnapshot('membro')
+  }, [author, ownKey])
+  useEffect(() => () => clearTimeout(saveTimerRef.current), [])
 
   // The header from profile.read (the node holds the diary); false when the
   // node has no showable diary for this key or the read failed.
@@ -435,6 +565,13 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     commit(refreshing ? { refreshing: true, error: '' } : { ...INITIAL_POSTS })
     // Every load verifies the header again (the fields stay shown meanwhile).
     commitHeader({ ...headerRef.current, verified: false })
+    // follow.list goes first (it was read later in this same load): its
+    // answer is what lets a followed author's snapshot be painted while
+    // profile.read and the index are still on their way.
+    if (!blockedHere) {
+      followsRef.current = loadFollows()
+      if (!refreshing) followsRef.current.then((set) => seedSnapshot(set, alive))
+    }
     const held = await readProfile()
     if (!alive()) return
     if (blockedHere) {
@@ -447,7 +584,6 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
       commit({ ...INITIAL_POSTS, phase: 'ready', atEnd: true })
       return
     }
-    followsRef.current = loadFollows()
     if (pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin })) {
       readPageInfo(alive)
       if (refreshing) loadPageFollowsRef.current()
@@ -481,18 +617,22 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
         indexing: index.indexing,
         complete: index.complete,
         loadingMore: false,
-        moreError: ''
+        moreError: '',
+        seeded: false
       })
+      seedOriginalsRef.current = null
+      perfMarks().mark('rows-live:membro')
       afterPage(items, alive)
+      if (index.page !== true) armSnapshotSave({ items, before: index.posts.length > 0 ? index.posts[index.posts.length - 1] : null, atEnd: index.posts.length < POSTS_MAX, originals: originalsOf(items, peekedRef.current) })
     } catch (err) {
       if (!alive()) return
-      commit({ phase: 'error', refreshing: false, error: isSeederDown(err) ? 'Sem conexão com o servidor agora.' : (err && err.reason ? err.message : errorText(err)) })
+      commit({ phase: 'error', refreshing: false, seeded: false, error: isSeederDown(err) ? 'Sem conexão com o servidor agora.' : (err && err.reason ? err.message : errorText(err)) })
     }
-  }, [commit, commitHeader, readProfile, loadFollows, full, reset, readPage, afterPage, readPageInfo, node.hosted, node.accountOrigin, blockedHere, headerFromPeek, request, author])
+  }, [commit, commitHeader, readProfile, loadFollows, full, reset, readPage, afterPage, readPageInfo, node.hosted, node.accountOrigin, blockedHere, headerFromPeek, request, author, seedSnapshot, armSnapshotSave])
 
   const loadMore = useCallback(async () => {
     const current = postsRef.current
-    if (current.phase !== 'ready' || current.loadingMore || current.refreshing || current.atEnd || current.before === null) return
+    if (current.phase !== 'ready' || current.seeded || current.loadingMore || current.refreshing || current.atEnd || current.before === null) return
     const mine = genRef.current
     const alive = () => mine === genRef.current
     commit({ loadingMore: true, moreError: '' })
@@ -523,7 +663,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   }, [load])
 
   const ownProfile = typeof ownKey === 'string' && author === ownKey
-  const postsReady = posts.phase === 'ready'
+  const postsReady = posts.phase === 'ready' && !posts.seeded
   // Joining or leaving a community anywhere bumps the node's group versions:
   // the box is read again (after a short pause for a burst), keeping what it
   // shows until the new answer, and cleared only for another profile.
@@ -570,6 +710,21 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   }, [node.hosted, ownProfile, postsReady, request, author, tick, groupVersions])
 
   const isPage = !notPage && ((seed && seed.page === true) || (idxHint !== null && idxHint.page === true) || pageRead !== null)
+  const namedPage = names.profileOf(author)
+  snapRef.current = {
+    full,
+    follows,
+    blocked: blockedHere,
+    blockedKeys: blocks.keys instanceof Set ? blocks.keys : new Set(),
+    // Any sign of a page (the seed, the index, page.read, a learned name),
+    // even one page.read later denies: the snapshot is for people only.
+    page: isPage || (seed !== null && seed.page === true) || idxHint !== null || pageRead !== null || (namedPage !== null && typeof namedPage === 'object' && namedPage.page === true),
+    config: node.config,
+    passkey: node.passkey
+  }
+  useEffect(() => {
+    if (blockedHere) dropSnapshotEntry()
+  }, [blockedHere, dropSnapshotEntry])
   const roster = isPage && pageRead !== null ? rosterRows(pageRead) : null
   useEffect(() => {
     if (!roster) return
@@ -651,6 +806,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     try {
       await request(on ? 'follow.add' : 'follow.remove', { key: author })
       mark(author, on)
+      if (!on) dropSnapshotEntry()
       if (typeof onFollowsChanged === 'function') onFollowsChanged()
     } catch (err) {
       if (typeof onToast === 'function') onToast(errorText(err))
@@ -872,7 +1028,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     if (muralFill !== 'more') return
     // A page counts only when a read really starts (loadMore skips otherwise).
     const current = postsRef.current
-    if (current.atEnd || current.before === null) return
+    if (current.seeded || current.atEnd || current.before === null) return
     muralPages.current += 1
     loadMore()
   }, [mural, posts.phase, posts.items, posts.loadingMore, posts.refreshing, posts.moreError, muralFill, loadMore])
@@ -1002,7 +1158,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     )
   }
 
-  const { phase, error, items, unavailable, atEnd, indexing, complete, loadingMore, moreError, refreshing } = posts
+  const { phase, error, items, unavailable, atEnd, indexing, complete, loadingMore, moreError, refreshing, seeded } = posts
   // K1's blocks past its move are what a leaked key appended: never shown.
   const cut = movedView !== null ? movedView.cut : null
   const shownItems = cut === null ? items : items.filter((i) => shownUnderCut(cut, i.seq))
@@ -1028,7 +1184,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   const muralCols = fontScale >= LARGE_TEXT ? 2 : 3
   const muralRows = muralGridRows(muralTiles, muralCols)
   // A failed page shows only the error row with its retry, not Ver mais too.
-  const muralState = atEnd ? 'end' : (loadingMore || posts.refreshing || (muralFill === 'more' && !moreError && posts.before !== null)) ? 'loading' : moreError ? 'error' : 'capped'
+  const muralState = seeded ? 'loading' : atEnd ? 'end' : (loadingMore || posts.refreshing || (muralFill === 'more' && !moreError && posts.before !== null)) ? 'loading' : moreError ? 'error' : 'capped'
   // The post a tile came from, seeded as a Publicações row seeds it, so the
   // thread shows it even when the network cannot be read.
   const muralSeed = (tile) => {
@@ -1053,8 +1209,8 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
         )
       : (
         <ListFooter
-          loading={loadingMore}
-          atEnd={atEnd && shownItems.length > 0}
+          loading={loadingMore || seeded}
+          atEnd={!seeded && atEnd && shownItems.length > 0}
           endText='Isso é tudo por enquanto.'
           error={moreError}
           onRetry={loadMore}
@@ -1066,7 +1222,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   const memberWho = { author, name: header.name, username: header.username }
   const renderItem = ({ item }) => {
     const peeked = peekedRef.current
-    const post = shownPost(item, peeked)
+    const post = shownPost(item, peeked, seeded ? seedOriginalsRef.current : null)
     if (post === null) return null
     const extra = item.kind === 'repost' ? { repostedBy: memberWho } : {}
     // The member's own posts carry the header's identity.
@@ -1092,10 +1248,10 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
           contentContainerStyle={{ paddingBottom: bottomPad, minHeight: windowHeight + insets.top + BAND + 8 }}
           onRefresh={() => { setTick((n) => n + 1); load(true) }}
           refreshing={refreshing}
-          onLoadMore={phase === 'ready' && !mural && !depo && !atEnd && !moreError ? loadMore : undefined}
+          onLoadMore={phase === 'ready' && !seeded && !mural && !depo && !atEnd && !moreError ? loadMore : undefined}
           loadingMore={loadingMore}
           loadMoreError={!!moreError}
-          atEnd={atEnd || mural || depo}
+          atEnd={(atEnd && !seeded) || mural || depo}
           onScrollFrame={bar.handleScrollFrame}
         />
         <ProfileBar bar={bar} topInset={insets.top} title={displayText(who.title)} onBack={onBack} />

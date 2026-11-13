@@ -14,12 +14,14 @@ const { inviteId, CODE_RE } = require('./invites-store')
 const { createPushRoutes } = require('./push-routes')
 const { createSeenRoutes } = require('./seen-routes')
 const { createAgeRoutes } = require('./age-routes')
+const { createPhoneRoutes } = require('./phone-routes')
+const { phoneSub } = require('./store')
 const { createRecoveryRoutes } = require('./recovery-routes')
 const { createDeleteRoutes } = require('./delete-routes')
 const { createDeletionSweep } = require('./deletion')
 const { createPasskeyRoutes } = require('./passkey-routes')
 const { passkeyOrigins } = require('./webauthn')
-const { LINK_HEADER, REDEEM_HEADER, APP_RETURN_PATH, isAppRequest, isAppProof, proofOf, safeEqual, mintRedeem, redeemMatches, accountReturnUrl, appReturnPage, header } = require('./app-return')
+const { LINK_HEADER, APP_RETURN_PATH, isAppRequest, isAppProof, proofOf, safeEqual, header } = require('./app-return')
 const { createPagesRoutes } = require('./pages-routes')
 const { createGifRoutes } = require('./gif-routes')
 const { createPreviewRoutes } = require('./preview-routes')
@@ -27,11 +29,13 @@ const { createFeiraRoutes } = require('./feira-routes')
 const { createOgRoutes } = require('./og-routes')
 
 // The account service's HTTPS surface (behind Caddy, deploy/seeder/Caddyfile
-// `handle /account/*`): the member proves its diary key over a single-use
-// nonce, signs in at Google (server-side code exchange with PKCE,
-// apps/cli/lib/account/google.js), proves the key again over the Google
-// subject and receives the v2 certificate and the first username record
-// from the directory (apps/cli/lib/account/store.js). A linked member may
+// `handle /account/*`): the member starts a link with its key and a chosen
+// name, verifies a Brazilian mobile (./phone-routes.js), proves the key
+// over the start nonce and its phone subject and receives the v2
+// certificate and the first username record from the directory
+// (apps/cli/lib/account/store.js). The member Google sign-in is retired:
+// authorize, callback, pending and the app return only refuse, so an old
+// app build gets a definite answer and nothing is written. A linked member may
 // later rename itself with one more key proof (no cookie: the key is the
 // authority), and record its acceptance of the Termos de Uso and the
 // Política de Privacidade the same way (/account/terms/*, ./terms-store.js).
@@ -53,9 +57,8 @@ const { createOgRoutes } = require('./og-routes')
 // nothing here reads it). Nothing shared is charged before a proof, so an
 // unauthenticated flood cannot spend a quota that members need: the
 // per-member windows are charged only AFTER the member's signature
-// verified (authorize, finish, rename/finish) and keyed on the member it
-// proved; the callback quota is per pending row, charged only after the
-// cookie and the state named the same row; the public reads share one wide
+// verified (finish, rename/finish) and keyed on the member it
+// proved; the public reads share one wide
 // window; the routes that need no proof (start, rename/start) are bounded
 // by their tables (oldest evicted) and by the one global token bucket.
 // Residual: a flood can still drain the global bucket (by default 20/s,
@@ -80,12 +83,7 @@ const RENAME_TTL_MS = 600 * 1000
 const MAX_RENAMES = 1000
 const TERMS_TTL_MS = 600 * 1000
 const MAX_TERMS_NONCES = 1000
-const MAX_APP_STATES = 10000
 const APP_SWEEP_MS = 1000
-// How long R stays redeemable after the callback mints it: enough to confirm
-// in the app, short for an R a browser kept in its history after an auth
-// session that failed (R still needs V, which never leaves the app).
-const APP_REDEEM_TTL_MS = 180 * 1000
 const KEY_FILE = 'issuer-key.json'
 const CERT_FILE = 'issuer-cert.json'
 const LOCK_FILE = '.account-lock'
@@ -102,8 +100,6 @@ const HEX64_RE = /^[0-9a-f]{64}$/
 // A store id, nonce or state: 32 random bytes, base64url (store.js randomToken).
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
 const HEX128_RE = /^[0-9a-f]{128}$/
-// Google authorization codes and error tokens: printable ASCII, bounded.
-const PARAM_RE = /^[\x21-\x7e]{1,512}$/
 
 const ERROR_STATUS = Object.freeze({
   'pedido-invalido': 400,
@@ -115,6 +111,9 @@ const ERROR_STATUS = Object.freeze({
   'nao-encontrado': 404,
   'google-recusado': 502,
   'troca-bloqueada': 409,
+  // The retired member Google sign-in (authorize): an installed old app
+  // build reads a 4xx as a definite refusal, a 503 as an uncertain one.
+  'versao-antiga': 410,
   indisponivel: 503,
   lotado: 503,
   // The member cap is reached (store.js maxMembers): the body is only the
@@ -164,6 +163,15 @@ const ERROR_STATUS = Object.freeze({
   // A Feira code on POST /account/age/session: its paid session opens only
   // through POST /account/feira/idade, which the edge limits per address.
   'use-a-rota-da-feira': 409,
+  // Hosted phone verification (./phone-routes.js): no certificate, rename or
+  // invite for a key without a verified Brazilian mobile on record.
+  'telefone-pendente': 403,
+  'telefone-invalido': 400,
+  'telefone-em-uso': 409,
+  'telefone-recusado': 409,
+  'codigo-invalido': 400,
+  'codigo-expirado': 410,
+  'limite-telefone': 429,
   // The age routes could not tell whether something was applied (the provider
   // timed out after maybe creating a session, a write that may have landed):
   // unlike 'indisponivel', the app must not read this as a plain refusal.
@@ -189,7 +197,6 @@ const BASE_HEADERS = Object.freeze({
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer'
 })
-const APP_RETURN_CSP = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 class RouteError extends Error {
   constructor (token, status, extra) {
@@ -215,10 +222,6 @@ function fromStore (err) {
 
 function base64url (buf) {
   return Buffer.from(buf).toString('base64url')
-}
-
-function codeChallenge (verifier) {
-  return base64url(nodeCrypto.createHash('sha256').update(verifier).digest())
 }
 
 function isPlainObject (o) {
@@ -622,15 +625,14 @@ function checkRawPost (req, origin) {
   if (!/^application\/octet-stream(\s*;.*)?$/.test(type)) throw refuse('pedido-invalido')
 }
 
-// createAccountServer({ association, origin, google, store, issuer, log, now,
+// createAccountServer({ association, origin, store, issuer, log, now,
 // moderation, googleMod, modEmails, triage, statsEmails, usage, panelDir,
 // terms, invites, invitesMode, groupCheck })
 // -> { listen({ host, port }) -> Promise<{ host, port, close }>,
 // notifyInvite, inviteRoom, inviteConsent }.
-// `google` is a createGoogle instance (tests inject a loopback fake),
-// `store` an openAccountStore, `issuer` { keyPair, cert } or null
-// (unconfigured: the link routes answer 503 'indisponivel'). The redirect
-// URI is always origin + '/account/callback', never taken from a request.
+// `store` is an openAccountStore, `issuer` { keyPair, cert } or null
+// (unconfigured: the link routes answer 503 'indisponivel'). A `google`
+// option is ignored: the member Google sign-in is retired.
 // `moderation` (openModerationStore), `googleMod` (a createGoogle whose
 // redirect URI is origin + '/account/mod/callback'), `modEmails` (the
 // moderators' lowercase e-mails; empty disables the panel sign-in), `triage`
@@ -653,7 +655,7 @@ function checkRawPost (req, origin) {
 // openSeenStore (./seen-store.js) or null: the seen routes then answer 503
 // 'indisponivel'. `didit` (a
 // createDidit of ./didit.js) and `ages` (an openAgeStore of ./age-store.js)
-// turn on hosted age verification when both are set: authorize, finish,
+// turn on hosted age verification when both are set: finish,
 // rename/start and invites/start then refuse 'idade-pendente' until the
 // member's band is on record. Either null keeps today's behaviour and the
 // age policy route answers { required: false }. `ageDailyLimit` caps the
@@ -666,6 +668,14 @@ function checkRawPost (req, origin) {
 // `ageDirectoryFloor` (the directoryFloor result of ./age-check-state.js, or
 // null for none) does the same with the latest certificate of an unbanded
 // link.
+// `phoneClient` (a createPhoneClient of ./phone-client.js) and `phones` (an
+// openPhoneStore of ./phone-store.js) turn on hosted phone verification
+// when both are set: finish, rename/finish and invites/finish
+// then refuse 'telefone-pendente' until the member holds a verified number.
+// They are also the only way to link a new member: either null leaves
+// finish answering 'expirado' and the phone policy route answers
+// { required: false }. `phoneDailyLimit` caps the paid code sends per day,
+// for linked and for unlinked keys each.
 // `pages` (null: every page POST answers 404 and the policy { available:
 // false }) is { keys, writer, pagesStore, dir, blocklist? } for
 // ./pages-routes.js; without a blocklist the moderation desk's is used.
@@ -697,7 +707,6 @@ function checkRawPost (req, origin) {
 function createAccountServer ({
   association,
   origin,
-  google,
   store,
   issuer = null,
   log = () => {},
@@ -721,6 +730,9 @@ function createAccountServer ({
   ageSince = null,
   ageCheck = null,
   ageDirectoryFloor = null,
+  phoneClient = null,
+  phones = null,
+  phoneDailyLimit = 200,
   pages = null,
   gif = null,
   gifTransport = {},
@@ -738,7 +750,6 @@ function createAccountServer ({
 } = {}) {
   if (typeof association !== 'string' || !HEX64_RE.test(association)) throw new TypeError('association must be 64 lowercase hex characters')
   if (typeof origin !== 'string' || !(ORIGIN_RE.test(origin) || LOOPBACK_ORIGIN_RE.test(origin))) throw new TypeError('invalid origin')
-  if (!google || typeof google.authorizeUrl !== 'function' || typeof google.exchange !== 'function') throw new TypeError('google ausente')
   if (!store || typeof store.start !== 'function') throw new TypeError('store ausente')
   if (issuer !== null && checkIssuerCert(issuer.cert, issuer.keyPair, association) !== null) {
     throw new TypeError('issuer certificate is for another association or key')
@@ -752,7 +763,6 @@ function createAccountServer ({
   // pending row) the proof named; see the note at the top of the file.
   const limits = {
     global: tokenBucket(ratePerSecond, burst, now),
-    authorize: keyedWindow(5, 600 * 1000, now),
     finish: keyedWindow(10, 600 * 1000, now),
     renameFinish: keyedWindow(5, 600 * 1000, now),
     termsFinish: keyedWindow(5, 600 * 1000, now),
@@ -761,7 +771,6 @@ function createAccountServer ({
     seenRead: keyedWindow(30, 600 * 1000, now),
     seenWrite: keyedWindow(10, 600 * 1000, now),
     seenDelete: keyedWindow(5, 600 * 1000, now),
-    callback: keyedWindow(3, COOKIE_MAX_AGE_S * 1000, now),
     lookup: fixedWindow(1200, 60 * 1000, now)
   }
   const over = () => new RouteError('pedido-invalido', 429)
@@ -791,6 +800,7 @@ function createAccountServer ({
       association,
       accounts: store,
       terms,
+      phoneChecked,
       log,
       now,
       http: { send, sendError, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow }
@@ -804,6 +814,7 @@ function createAccountServer ({
     terms,
     seenStore: seen,
     limits: { read: limits.seenRead, write: limits.seenWrite, delete: limits.seenDelete },
+    phoneChecked,
     log,
     now,
     http: { send, sendError, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow }
@@ -828,6 +839,34 @@ function createAccountServer ({
     http: { send, sendError, redirect, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
   })
 
+  // Always mounted, so /account/phone/policy answers even when the feature
+  // is off. Excluir conta also queues a block with no report id
+  // (moderation-store.js requestDeletion): only a block that is not that one
+  // alone burns the number.
+  // Members with a phone finish in flight -> count. A number another member
+  // records meanwhile must not end the row this finish is about to link.
+  const linking = new Map()
+  const phoneRoutes = createPhoneRoutes({
+    client: phoneClient,
+    phones,
+    association,
+    store,
+    ageVerified: (m) => !ageRoutes.required() || ageRoutes.verified(m),
+    linked: (m) => store.status(m).linked || linking.has(m),
+    deleted: (m) => store.deletedAt(m) !== null,
+    burnable: (m) => {
+      if (moderation === null) return false
+      const b = moderation.blocked().find((x) => x.member === m)
+      return b !== undefined && (b.reportIds.length > 0 || store.deletedAt(m) === null)
+    },
+    blocked: (m) => moderation !== null && moderation.blocked().some((x) => x.member === m),
+    issuer,
+    log,
+    now,
+    dailyLimit: phoneDailyLimit,
+    http: { send, sendError, redirect, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
+  })
+
   // Excluir conta: always mounted. The sweep purges the other stores for
   // every deleted key; serve() runs it at start and then periodically.
   const deletion = createDeletionSweep({
@@ -840,6 +879,7 @@ function createAccountServer ({
     drops,
     seen,
     passkeys,
+    phones,
     // Bound late: deleteRoutes is created below with this sweep's purge.
     scheduled: () => deleteRoutes.runScheduled(),
     log
@@ -860,6 +900,22 @@ function createAccountServer ({
     purge: deletion.purge,
     isBlocked: inPublishedList,
     notify: (member) => { if (pushRoutes !== null) pushRoutes.notifyDeletion({ member }) },
+    // Burns a blocked member's number before the deletion marks the key.
+    beforeDelete: async (member) => {
+      try {
+        await phoneRoutes.sweepNow()
+      } catch {
+        log({ event: 'telefone', reason: 'varredura-exclusao-falhou' })
+        // Once deleted, a block with no report id no longer burns: a blocked
+        // member's deletion waits until the burn is written. Nobody else is
+        // held by a failing phone store.
+        let held = true
+        try {
+          held = moderation !== null && moderation.blocked().some((x) => x.member === member)
+        } catch {}
+        if (held) throw refuse('indisponivel')
+      }
+    },
     rpId: webauthn.rpId,
     origins: webauthn.origins,
     association,
@@ -921,6 +977,7 @@ function createAccountServer ({
     issuerCert: issuer === null ? null : issuer.cert,
     association,
     origin,
+    phoneChecked,
     log,
     now,
     http: {
@@ -969,6 +1026,7 @@ function createAccountServer ({
     reader: listingReader,
     store,
     pagesStore: pages !== null && pages.pagesStore ? pages.pagesStore : null,
+    phoneChecked,
     log,
     now,
     http: { send, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow }
@@ -984,17 +1042,19 @@ function createAccountServer ({
     http: { RouteError, refuse }
   })
 
-  // With age verification on, no key without a band on record gets a Google
-  // sign-in, a certificate, a rename or an invite. Off, it never refuses.
+  // With age verification on, no key without a band on record gets a
+  // phone code, a certificate, a rename or an invite. Off, it never refuses.
   function ageChecked (member) {
     if (ageRoutes.required() && !ageRoutes.verified(member)) throw refuse('idade-pendente')
   }
 
-  // OAuth state -> pending id, written at authorize and deleted at the first
-  // callback that presents it (single-use). One entry per pending row at
-  // most (a row is authorized once), so the table is bounded by the store's
-  // maxPending; expired entries are swept whenever one is added.
-  const states = new Map()
+  // The same with phone verification on: a key without a verified number
+  // gets none of them, nor push on, a seen write, a page or a Feira code
+  // (the route files). Off, it never refuses.
+  function phoneChecked (member) {
+    if (phoneRoutes.required() && !phoneRoutes.verified(member)) throw refuse('telefone-pendente')
+  }
+
   // Pending renames by nonce: { member, username, expiresAt }, in memory
   // only, single-use; at most MAX_RENAMES, the oldest evicted for room
   // (rename/start needs no proof, so it never refuses for a full table).
@@ -1011,28 +1071,12 @@ function createAccountServer ({
   const held = new Map()
   // Pending ids with a finish in progress: never dropped meanwhile.
   const finishing = new Set()
-  // Native app rows (./app-return.js, RFC 8252): the system browser that
-  // runs the Google step shares no cookie jar with the app, so an app row
-  // gets no cookie. Pending id -> { proof, expiresAt, redeem, redeemUntil,
-  // google }: `proof` is base64url(sha256(V)) from start, `redeem` the hash
-  // of the one-time code R minted by the callback (null before it, once
-  // spent and once past `redeemUntil`), `google` the exchange result held
-  // until R is presented. Plus
+  // Native app rows (./app-return.js): an app row gets no cookie; the
+  // secret V it keeps in memory is its bearer proof instead. Pending id ->
+  // { proof, expiresAt }: `proof` is base64url(sha256(V)) from start. Plus
   // appProof -> pending id. Memory only beside the rows, pruned with them.
-  //
-  // Why both secrets: anyone who completes the authorizeUrl at Google sends
-  // the redirect carrying R to THEIR device, so an initiator who shares the
-  // link holds V but never sees R; R returns on our own https origin
-  // (APP_RETURN_PATH), captured only by the auth session the app opened,
-  // and even a holder of R lacks V, which stays in the app's memory.
-  // pending and finish need both.
   const apps = new Map()
   const appByProof = new Map()
-  // OAuth states ever minted for an app row: state -> expiresAt. A callback
-  // for one that is no longer live (its row superseded, taken over, expired
-  // or done) still returns to the app return with conta=erro, never to the
-  // website. Expiring, at most MAX_APP_STATES (the oldest evicted for room).
-  const appStates = new Map()
 
   function sweep (map) {
     const t = now()
@@ -1066,40 +1110,23 @@ function createAccountServer ({
     return proof !== null && entry !== undefined && safeEqual(proof, entry.proof)
   }
 
-  // Also kills the row's live OAuth state, so a Google page opened for a
-  // superseded row can never complete.
   function forgetApp (id) {
     const entry = apps.get(id)
     if (entry === undefined) return
     apps.delete(id)
     if (appByProof.get(entry.proof) === id) appByProof.delete(entry.proof)
-    if (states.get(entry.state)?.id === id) states.delete(entry.state)
-  }
-
-  function rememberAppState (state, expiresAt) {
-    sweep(appStates)
-    while (appStates.size >= MAX_APP_STATES) appStates.delete(appStates.keys().next().value)
-    appStates.set(state, { expiresAt })
   }
 
   // The store expires and evicts rows on its own without telling this file,
-  // so every request (at most once per APP_SWEEP_MS) drops the entries, and
-  // any Google answer they hold, whose row is gone.
+  // so every request (at most once per APP_SWEEP_MS) drops the entries whose
+  // row is gone.
   let appSweptAt = -Infinity
   function sweepApps () {
     const t = now()
     appSweptAt = t
     for (const [id, entry] of apps) {
       if (entry.expiresAt <= t || store.get(id) === null) forgetApp(id)
-      else expireRedeem(entry, t)
     }
-  }
-
-  // R past its window is spent, and the Google answer it guarded goes with it.
-  function expireRedeem (entry, t) {
-    if (entry.redeem === null || entry.redeemUntil > t) return
-    entry.redeem = null
-    entry.google = null
   }
 
   // The map is keyed by sha256(V), whose timing says nothing about V; the
@@ -1114,28 +1141,6 @@ function createAccountServer ({
       throw refuse('expirado')
     }
     return row
-  }
-
-  // An app row past the callback also needs R (x-varanda-redeem); `spend`
-  // (finish) makes it single use whatever the outcome. The Google identity
-  // is bound to the row only here, so a callback completed by someone else
-  // writes nothing under their subject until the code is redeemed.
-  function redeemed (req, row, spend) {
-    const entry = apps.get(row.id)
-    if (entry !== undefined) expireRedeem(entry, now())
-    if (entry === undefined || entry.redeem === null || !redeemMatches(header(req, REDEEM_HEADER), entry.redeem)) throw refuse('expirado')
-    if (spend) entry.redeem = null
-    if (entry.google === null) return row
-    const google = entry.google
-    entry.google = null
-    try {
-      return store.putGoogle(row.id, google)
-    } catch (err) {
-      throw fromStore(err)
-    } finally {
-      // putGoogle may have dropped this subject's other rows for its cap.
-      sweepApps()
-    }
   }
 
   // The cookie clearing of the web flow; an app row never had a cookie.
@@ -1188,12 +1193,10 @@ function createAccountServer ({
       return { id, takeover: null }
     }
     if (old.member !== member || finishing.has(old.id)) throw refuse('convite-invalido')
-    // start is unsigned: without more it may replace only a bare row, never
-    // one past the signed authorize or the Google callback. The link cookie
-    // naming that very row is the bearer proof of owning it (an outsider
-    // with only the code and the public key has no cookie), so its own
-    // browser may start over, for instance with another Google account.
-    // For an app row, V is that bearer proof.
+    // start is unsigned: without more it may replace only a bare row. The
+    // link cookie naming that very row is the bearer proof of owning it (an
+    // outsider with only the code and the public key has no cookie), so its
+    // own browser may start over. For an app row, V is that bearer proof.
     const owner = cookie === old.id || appOwns(old.id, proof)
     if (!owner && (old.phase !== 'reserve' || typeof old.sub === 'string')) throw refuse('convite-invalido')
     return { id, takeover: old.id }
@@ -1203,6 +1206,9 @@ function createAccountServer ({
     configured()
     const member = memberParam(body.member)
     const username = usernameParam(body.username)
+    // start is unsigned and member keys are public, so it must not replace
+    // or evict the row a signed phone finish for this key is about to link.
+    if (linking.has(member)) throw refuse('pedido-invalido')
     const app = isAppRequest(req)
     const proof = app ? linkProof(req) : null
     if (app) {
@@ -1238,8 +1244,6 @@ function createAccountServer ({
       held.set(reserved.id, { pendingId: row.id, expiresAt: row.expiresAt })
     }
     if (superseded !== null) {
-      // Its Google page dies with it (forgetApp drops the state), so a late
-      // completion of the old page cannot bind an identity no V can redeem.
       const old = store.get(superseded)
       if (old !== null && !finishing.has(superseded)) {
         release(old)
@@ -1248,189 +1252,70 @@ function createAccountServer ({
       forgetApp(superseded)
     }
     if (app) {
-      apps.set(row.id, { proof: body.appProof, state: row.state, expiresAt: row.expiresAt, redeem: null, redeemUntil: 0, google: null })
+      apps.set(row.id, { proof: body.appProof, expiresAt: row.expiresAt })
       appByProof.set(body.appProof, row.id)
       return send(res, 200, { nonce: row.nonce })
     }
     send(res, 200, { nonce: row.nonce }, { 'Set-Cookie': cookieHeader(row.id) })
   }
 
-  async function authorize (req, res, body) {
-    configured()
-    const signature = signatureParam(body.signature)
-    const row = pendingRow(req)
-    // The reserve nonce is single-use: a row already reserved is not
-    // authorized again (its state would otherwise be minted twice).
-    if (row.phase !== 'reserve') throw refuse('assinatura-invalida')
-    proof({ phase: 'reserve', nonce: row.nonce, member: row.member, username: row.username, association, sub: '' }, signature)
-    // Before reserve: the row stays in 'reserve', so the same row can be
-    // authorized once the member has verified.
-    ageChecked(row.member)
-    if (!limits.authorize(row.member)) throw over()
-    try {
-      store.reserve(row.id)
-    } catch (err) {
-      throw fromStore(err)
-    }
-    sweep(states)
-    states.set(row.state, { id: row.id, expiresAt: row.expiresAt })
-    if (apps.has(row.id)) rememberAppState(row.state, row.expiresAt + COOKIE_MAX_AGE_S * 1000)
-    const authorizeUrl = google.authorizeUrl({ state: row.state, codeChallenge: codeChallenge(row.verifier) })
-    send(res, 200, { authorizeUrl })
+  // The retired member Google sign-in. Every answer comes before any proof,
+  // store call or outbound request, so an old app build stops for good on a
+  // definite refusal and nothing is held for it.
+  async function authorize () {
+    throw refuse('versao-antiga')
   }
 
-  // The cookie id and the state must name the same live row BEFORE the
-  // token endpoint is called; a mismatch sends the browser back with
-  // ?conta=erro and nothing is exchanged (and charges no quota). Nothing
-  // from Google (code, error, sub, e-mail) is ever put in the redirect.
-  // An app row has no cookie: the single-use state alone names it, every
-  // outcome returns to the app return, and 'ok' carries the redeem code R
-  // instead of binding the Google answer to the row (see `apps`).
-  async function callback (req, res, url) {
-    configured()
-    const state = url.searchParams.get('state')
-    const entry = typeof state === 'string' && TOKEN_RE.test(state) ? states.get(state) : undefined
-    const known = entry !== undefined && apps.has(entry.id)
-    // A dead app state (superseded, taken over, expired, spent) names no row
-    // but still returns to the app, with 'erro' and no code.
-    const app = known || (entry === undefined && typeof state === 'string' && TOKEN_RE.test(state) && appStates.get(state)?.expiresAt > now())
-    const to = (outcome) => (app ? accountReturnUrl(origin, outcome) : origin + '/?conta=' + outcome)
-    const clear = (id) => (app ? {} : { 'Set-Cookie': cookieHeader(id, 0) })
-    const back = (outcome) => {
-      log({ event: 'callback', reason: outcome })
-      redirect(res, to(outcome))
-    }
-    const id = known ? entry.id : app ? null : cookieId(req)
-    if (id === null || entry === undefined || entry.id !== id) return back('erro')
-    states.delete(state)
-    const row = store.get(id)
-    if (row === null || row.state !== state || row.phase !== 'finish') {
-      if (app) forgetApp(id)
-      return back('erro')
-    }
-    // From here every exit short of putGoogle frees the row's invite, so a
-    // fresh start can take the code.
-    const out = (outcome) => {
-      release(row)
-      return back(outcome)
-    }
-    // A top-level navigation: answer with the page, not a JSON 429.
-    if (!limits.callback(id)) return out('erro')
-    const error = url.searchParams.get('error')
-    if (error !== null) return out('cancelado')
-    // Cap reached since start: refuse BEFORE the code is exchanged, so no
-    // Google subject or e-mail is ever held for a link finish() would
-    // refuse. The row goes and the cookie is cleared, as finish() does on
-    // its own waitlist refusal (kept for a cap that fills after this point).
-    // A key that is already linked is never a new member: its callback goes
-    // on to finish(), whose same-account branch the cap does not touch.
-    if (store.isFull() && !store.status(row.member).linked) {
-      release(row)
-      store.dropPending(id)
-      forgetApp(id)
-      log({ event: 'lista-de-espera' })
-      return redirect(res, to('lista-de-espera'), clear(id))
-    }
-    // Invite-only: a new member reaches the token exchange only with a live
-    // reservation on a usable code, so nothing from Google is collected for
-    // a link finish() would refuse.
-    if (inviting && !store.status(row.member).linked) {
-      let why
-      if (row.invite === null) why = 'convite-obrigatorio'
-      else if (held.get(row.invite)?.pendingId !== id) why = 'convite-invalido'
-      else {
-        try {
-          why = inviteRefusal(row.invite)
-        } catch {
-          why = 'indisponivel'
-        }
-      }
-      if (why !== null) {
-        release(row)
-        store.dropPending(id)
-        forgetApp(id)
-        log({ event: 'convite', reason: why })
-        const outcome = why === 'indisponivel' ? 'erro' : 'convite-invalido'
-        return redirect(res, to(outcome), clear(id))
-      }
-    }
-    const code = url.searchParams.get('code')
-    if (typeof code !== 'string' || !PARAM_RE.test(code)) return out('erro')
-    const result = await google.exchange({ code, codeVerifier: row.verifier })
-    if (!result.ok) return out('erro')
-    if (app) {
-      const pendingApp = apps.get(id)
-      // The store may have expired or evicted the row during the exchange (an
-      // app row is unproven until Google answers): a code no V could redeem is
-      // never handed out, and the Google answer is not kept.
-      if (pendingApp === undefined || store.get(id) === null) {
-        forgetApp(id)
-        return out('erro')
-      }
-      const redeem = mintRedeem()
-      pendingApp.google = { sub: result.sub, email: result.email }
-      pendingApp.redeem = redeem.hash
-      pendingApp.redeemUntil = now() + APP_REDEEM_TTL_MS
-      // Keeps a start flood from evicting the row while the person returns
-      // to the app; the sub itself still waits here for R. The subject's
-      // MAX_PER_SUB cap may drop its older rows: their app state goes too.
-      for (const old of store.markAnswered(id, result.sub) || []) forgetApp(old)
-      log({ event: 'callback', reason: 'ok' })
-      return redirect(res, accountReturnUrl(origin, 'ok', redeem.code))
-    }
-    try {
-      store.putGoogle(id, { sub: result.sub, email: result.email })
-    } catch {
-      return out('erro')
-    }
-    back('ok')
+  // A Google page opened before the retirement may still come back here:
+  // nothing in the query is read or exchanged.
+  async function callback (res) {
+    log({ event: 'callback', reason: 'aposentado' })
+    redirect(res, origin + '/?conta=erro')
   }
 
-  // The static page of the app return, for a browser that loaded it instead
-  // of the app's auth session capturing it. No configured() and no window
-  // of its own: it holds no secret of the server and calls nothing paid,
-  // and a refusal would strand the person on an error page. The global
-  // bucket still bounds it. The query (it may carry R) is never read,
-  // echoed or logged.
-  async function appReturn (res) {
-    const text = appReturnPage()
-    res.writeHead(200, {
-      'Content-Type': 'text/html; charset=utf-8',
-      'Content-Length': Buffer.byteLength(text),
-      ...BASE_HEADERS,
-      'Content-Security-Policy': APP_RETURN_CSP
-    })
-    res.end(text)
+  async function appReturn () {
+    throw refuse('expirado')
   }
 
-  async function pending (req, res) {
-    configured()
-    let row = pendingRow(req)
-    if (apps.has(row.id)) row = redeemed(req, row, false)
-    const body = { nonce: row.nonce, member: row.member, username: row.username }
-    if (typeof row.sub === 'string') body.sub = row.sub
-    send(res, 200, body)
+  async function pending () {
+    throw refuse('expirado')
   }
 
+  // The phone check is the one link proof. A row holding a subject came
+  // from the retired Google callback and is never finished.
   async function finish (req, res, body) {
     configured()
     const signature = signatureParam(body.signature)
-    let row = pendingRow(req)
-    if (apps.has(row.id)) row = redeemed(req, row, true)
-    if (typeof row.sub !== 'string') throw refuse('expirado')
-    proof({ phase: 'finish', nonce: row.nonce, member: row.member, username: row.username, association, sub: row.sub }, signature)
+    const row = pendingRow(req)
+    if (!phoneRoutes.required() || row.phase !== 'reserve' || typeof row.sub === 'string') throw refuse('expirado')
+    proof({ phase: 'finish', nonce: row.nonce, member: row.member, username: row.username, association, sub: phoneSub(row.member) }, signature)
     if (!limits.finish(row.member)) throw over()
     ageChecked(row.member)
-    if (!inviting) return finishRow(res, row, signature, false)
-    // The same answer store.finish gives once the first finish removed the row.
-    if (finishing.has(row.id)) throw refuse('expirado')
-    finishing.add(row.id)
+    phoneChecked(row.member)
+    const member = row.member
+    if (inviting) {
+      // The same answer store.finish gives once the first finish removed the row.
+      if (finishing.has(row.id)) throw refuse('expirado')
+      finishing.add(row.id)
+    }
+    linking.set(member, (linking.get(member) ?? 0) + 1)
     try {
-      await finishInvited(res, row, signature)
+      // A record of the same number for another member queued before the
+      // line above may still end this member's row: let it land, then look
+      // again. One queued after it sees the member as linked and refuses.
+      await phoneRoutes.settled(member)
+      phoneChecked(member)
+      if (inviting) await finishInvited(res, row, signature, true)
+      else await finishRow(res, row, signature, false, true)
     } finally {
-      finishing.delete(row.id)
-      // A row that survived the refusal keeps its code, so a retry works.
-      if (store.get(row.id) === null) release(row)
+      const left = linking.get(member) - 1
+      if (left > 0) linking.set(member, left)
+      else linking.delete(member)
+      if (inviting) {
+        finishing.delete(row.id)
+        // A row that survived the refusal keeps its code, so a retry works.
+        if (store.get(row.id) === null) release(row)
+      }
     }
   }
 
@@ -1442,9 +1327,9 @@ function createAccountServer ({
   // after the link is on disk is the sidecar marked. A refusal never marks
   // it, so the invite stays usable. A failed mark does not undo the link:
   // the sidecar heals through isUsed (the directory is the authority).
-  async function finishInvited (res, row, signature) {
+  async function finishInvited (res, row, signature, phone) {
     const holder = store.lookup(row.username)
-    const known = store.memberForSub(row.sub) !== null || store.status(row.member).linked
+    const known = store.memberForSub(row.sub ?? phoneSub(row.member)) !== null || store.status(row.member).linked
     const plain = known || store.isFull() || (holder !== null && holder.member !== row.member)
     if (!plain) {
       const entry = row.invite === null ? undefined : held.get(row.invite)
@@ -1458,18 +1343,18 @@ function createAccountServer ({
         throw err
       }
     }
-    await finishRow(res, row, signature, true)
+    await finishRow(res, row, signature, true, phone)
   }
 
   // `mark`: the sidecar is marked only when the directory recorded this
   // row's invite on a link. The classification above runs outside the store
   // queue, so an overlapping finish may turn this one into an e-mail update
   // that records no invite.
-  async function finishRow (res, row, signature, mark) {
+  async function finishRow (res, row, signature, mark, phone) {
     const clear = clearCookie(row)
     let result
     try {
-      result = await store.finish(row.id, { signature }, issuer.keyPair, issuer.cert, association)
+      result = await store.finish(row.id, { signature, phone }, issuer.keyPair, issuer.cert, association)
     } catch (err) {
       const routeErr = fromStore(err)
       // A row whose name or key is taken can never produce this link, and
@@ -1568,6 +1453,7 @@ function createAccountServer ({
     if (row === undefined || row.member !== member || row.expiresAt <= now()) throw refuse('expirado')
     proof({ phase: 'rename', nonce, member, username: row.username, association, sub: '' }, signature)
     ageChecked(member)
+    phoneChecked(member)
     if (!limits.renameFinish(member)) throw over()
     let result
     try {
@@ -1656,6 +1542,7 @@ function createAccountServer ({
     if (row === undefined || row.member !== member || row.expiresAt <= now()) throw refuse('expirado')
     if (!verifyInvite({ action: 'issue', nonce, member, association }, signature).ok) throw refuse('assinatura-invalida')
     ageChecked(member)
+    phoneChecked(member)
     if (!limits.invitesFinish(member)) throw over()
     invitesAvailable()
     linked(member)
@@ -1732,6 +1619,7 @@ function createAccountServer ({
     if (pushRoutes !== null && pushRoutes.owns(pathname)) return pushRoutes.handle(req, res, url)
     if (seenRoutes.owns(pathname)) return seenRoutes.handle(req, res, url)
     if (ageRoutes.owns(pathname)) return ageRoutes.handle(req, res, url)
+    if (phoneRoutes.owns(pathname)) return phoneRoutes.handle(req, res, url)
     if (recoveryRoutes.owns(pathname)) return recoveryRoutes.handle(req, res, url)
     if (deleteRoutes.owns(pathname)) return deleteRoutes.handle(req, res, url)
     if (passkeyRoutes.owns(pathname)) return passkeyRoutes.handle(req, res, url)
@@ -1741,9 +1629,9 @@ function createAccountServer ({
     if (feiraRoutes.owns(pathname)) return feiraRoutes.handle(req, res, url)
     if (ogRoutes.owns(pathname)) return ogRoutes.handle(req, res, url)
     if (req.method === 'GET') {
-      if (pathname === '/account/callback') return callback(req, res, url)
-      if (pathname === APP_RETURN_PATH) return appReturn(res)
-      if (pathname === '/account/pending') return pending(req, res)
+      if (pathname === '/account/callback') return callback(res)
+      if (pathname === APP_RETURN_PATH) return appReturn()
+      if (pathname === '/account/pending') return pending()
       if (pathname === '/account/status') return status(req, res, url)
       if (pathname === '/account/invites/policy') return invitesPolicy(req, res)
       if (pathname === '/account/admission') return admission(req, res)
@@ -1809,7 +1697,7 @@ function createAccountServer ({
 
   // modStats: table sizes of the moderation desk (counts only, never a
   // nonce), so tests can show that unauthenticated traffic grows nothing.
-  // appStats: counts of app rows and of those holding a Google answer.
+  // appStats: the count of live app rows.
   // notifyInvite, inviteRoom and inviteConsent are for the invite drop loop
   // (./invite-drops.js). The loop asks inviteConsent before it claims a
   // slot, so a member who accepts the current text later in the week still
@@ -1834,7 +1722,7 @@ function createAccountServer ({
     return pushRoutes === null ? 0 : pushRoutes.room()
   }
 
-  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), deleteStats: () => deleteRoutes.stats(), passkeyStats: () => passkeyRoutes.stats(), deletionSweep: () => deletion.sweep(), startDeletionSweep: (ms) => deletion.start(ms), pagesStats: () => pagesRoutes.stats(), pagesReboxSweep: () => pagesRoutes.reboxSweep(), gifStats: () => gifRoutes.stats(), previewStats: () => previewRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
+  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), phoneStats: () => phoneRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), deleteStats: () => deleteRoutes.stats(), passkeyStats: () => passkeyRoutes.stats(), deletionSweep: () => deletion.sweep(), startDeletionSweep: (ms) => deletion.start(ms), pagesStats: () => pagesRoutes.stats(), pagesReboxSweep: () => pagesRoutes.reboxSweep(), gifStats: () => gifRoutes.stats(), previewStats: () => previewRoutes.stats(), appStats: () => ({ rows: apps.size }) }
 }
 
 module.exports = {

@@ -332,7 +332,7 @@ export const diaryRecords = [
   })),
   ...follows.map((key, i) => ({ author: own, seq: 7 + i, record: { type: 'follow', key, on: true, at: now } })),
   // A repost is no tile, and the likes make the own log longer than one
-  // log.read page (32 blocks), so older photos sit on a second page.
+  // log.read page (LOG_LIMIT_MAX, 30 blocks), so older photos sit on a second page.
   { author: own, seq: 19, record: { type: 'repost', to: { author: members[2].author, seq: 3 }, on: true, at: at(5, 11, 0) } },
   ...baseFeed.filter((post) => post.author !== own && post.quote === null).slice(0, 16).map((post, i) => ({ author: own, seq: 20 + i, record: { type: 'like', to: { author: post.author, seq: post.seq }, on: true, at: at(5, 13, i) } })),
   ...pages.flatMap((p) => members.filter((m) => m.author !== own).map((m, i) => ({ author: p.author, seq: 30 + i, record: { type: 'follow', key: m.author, on: true, at: now } })))

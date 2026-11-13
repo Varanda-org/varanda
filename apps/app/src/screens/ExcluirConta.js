@@ -26,12 +26,14 @@ import { DELETE_DAYS, DELETED_TEXT, DONE_TEXT, PASSKEY_TEXT, PENDING_TEXT, WAIT_
 import { clearDeletionReceipt, loadDeletionReceipt, saveDeletionReceipt } from '../deletionReceiptStore'
 import { Body, Btn, ErrorText, Field, Page, Row, Soft, errorText, useAction } from '../ui'
 
-const WHAT_GOES = 'Excluir a conta apaga, no serviço de conta da associação, o vínculo com o Google, o registro de idade, os aceites dos Termos, os avisos no aparelho, as marcações de visto, os convites, as passkeys extras e o código de recuperação. O seu @nome fica reservado e nunca vai para outra pessoa.'
+const WHAT_GOES = 'Excluir a conta apaga, no serviço de conta da associação, o vínculo com a conta Google, se houver, o registro de idade, os aceites dos Termos, os avisos no aparelho, as marcações de visto, os convites, as passkeys extras e o código de recuperação. O número do celular, se houver, fica lacrado por até 180 dias e então é apagado. O seu @nome fica reservado e nunca vai para outra pessoa.'
 const DIARY = 'O diário (publicações, perfil, fotos, quem você segue, curtidas e republicações) sai dos semeadores da associação em até ' + DELETE_DAYS + ' dias. Apps e semeadores modificados, cópias que outras pessoas já baixaram, mensagens já entregues e capturas de tela podem manter o conteúdo.'
 const GROUPS = 'As comunidades e os grupos que você criou deixam de existir para todos os participantes.'
 const KEPT = 'Ficam guardadas as denúncias feitas por você ou contra você e as decisões dos moderadores, para moderação e pedidos legais.'
 const DEVICE = 'Neste aparelho, a conta e os dados são apagados logo depois do pedido. Não dá para desfazer.'
 const PAGES_TEXT = 'Você ainda é dono de uma página. Encerre ou transfira suas páginas antes de excluir a conta.'
+// Without Páginas on screen (the phone check holds the app), the way forward.
+const PAGES_LATER = 'Confirme o seu celular primeiro. Depois, encerre ou transfira a página em Páginas.'
 
 // Ajustes > Excluir conta. `active`: the sub-screen is on screen and the node
 // is ready; `member`: the unlocked key; onDone closes the sheet.
@@ -154,7 +156,7 @@ export default function ExcluirConta ({ active, member, onOpenPaginas, onTermsRe
       <Page>
         {scheduledDeletion !== null ? <CancelarExclusao member={member} scheduled={scheduledDeletion} onCancelled={cancelled} /> : null}
         <Body>{PAGES_TEXT}</Body>
-        {typeof onOpenPaginas === 'function' ? <Btn label='Abrir Páginas' onPress={onOpenPaginas} /> : null}
+        {typeof onOpenPaginas === 'function' ? <Btn label='Abrir Páginas' onPress={onOpenPaginas} /> : <Body>{PAGES_LATER}</Body>}
       </Page>
     )
   }

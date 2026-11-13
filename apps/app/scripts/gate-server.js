@@ -129,6 +129,7 @@ function iosDevice ({ device, bundleId }) {
     background: () => simctl('launch', device, 'com.apple.Preferences'),
     foreground: () => simctl('openurl', device, 'varanda://'),
     // Not measured on iOS: the live worklets cannot be counted from the host.
+    measuresWorklets: false,
     workletCount: () => null,
     lock (runId) {
       const dir = attempt(() => simctl('get_app_container', device, bundleId, 'data'))
@@ -151,6 +152,7 @@ function androidDevice ({ device, bundleId, port }) {
     terminate: () => adb('shell', 'am', 'force-stop', bundleId),
     background: () => adb('shell', 'input', 'keyevent', 'KEYCODE_HOME'),
     foreground: () => adb('shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', 'varanda://', bundleId),
+    measuresWorklets: true,
     // Every Bare worklet runs on one thread named bare-worklet in the app's
     // process, so the count is the number of live worklets.
     workletCount () {
@@ -238,6 +240,8 @@ async function main () {
   let appKey = null
   let finished = false
   let cliCheck = null
+  // Step j's report in progress: the app's `done` follows its 200 at once.
+  let reloadReport = null
 
   log('run ' + runId + ', work dir ' + root)
 
@@ -323,6 +327,9 @@ async function main () {
           after = device.workletCount()
         }
       }
+      if ((before === null || after === null) && device.measuresWorklets) {
+        return record(step, false, 'app: ' + detail + ' | live worklets not measured on ' + device.name + ' (adb pidof or ps failed)')
+      }
       if (before === null || after === null) return record(step, true, 'app: ' + detail + ' | live worklets not measured on ' + device.name)
       if (after !== before) return record(step, false, 'app: ' + detail + ' | live worklets before the reload ' + before + ', after ' + after)
       return record(step, true, 'app: ' + detail + ' | live worklets (bare-worklet threads) before the reload ' + before + ', after ' + after)
@@ -353,6 +360,7 @@ async function main () {
       phase = 'reloaded'
       log('app reloads its JS context (live worklets before: ' + reloadBefore + ')')
     } else if (step === 'done') {
+      if (reloadReport !== null) await reloadReport
       phase = 'done'
       resolveDone()
     }
@@ -379,7 +387,8 @@ async function main () {
         const body = await readBody(req)
         const step = String(body.step)
         reply(200, { ok: true })
-        onReport(step, body.ok === true, String(body.detail)).catch((err) => record(step, false, 'driver: ' + err.message))
+        const handled = onReport(step, body.ok === true, String(body.detail)).catch((err) => record(step, false, 'driver: ' + err.message))
+        if (step === RELOAD_STEP) reloadReport = handled
         return
       }
       reply(404, { error: 'not found' })

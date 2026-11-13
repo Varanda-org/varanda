@@ -37,8 +37,10 @@ const WEB_CREDENTIALS_PLIST = '<key>VarandaWebCredentials</key><true/>'
 // (standard algorithms, not distributed in France): without it every build
 // waits on "Missing Compliance". docs/development.md has the conditions.
 const EXPORT_COMPLIANCE_PLIST = '<key>ITSAppUsesNonExemptEncryption</key><false/>'
-// The App Privacy answers for App Store Connect, confirmed on 2026-11-08: the
-// form, app.json and the manifest change together. docs/development.md.
+// The App Privacy answers for App Store Connect, confirmed on 2026-11-08
+// (NSPrivacyCollectedDataTypePhoneNumber added with the mobile check; the
+// store forms are updated by hand). The form, app.json and the manifest
+// change together. docs/development.md.
 const collected = (name, linked = true, purposes = ['AppFunctionality']) => ({
   NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataType' + name,
   NSPrivacyCollectedDataTypeLinked: linked,
@@ -46,7 +48,7 @@ const collected = (name, linked = true, purposes = ['AppFunctionality']) => ({
   NSPrivacyCollectedDataTypePurposes: purposes.map((purpose) => 'NSPrivacyCollectedDataTypePurpose' + purpose)
 })
 const COLLECTED_DATA_TYPES = [
-  ...['EmailAddress', 'UserID', 'Name', 'PhotosorVideos', 'AudioData', 'OtherUserContent', 'EmailsOrTextMessages', 'OtherDataTypes', 'SensitiveInfo', 'Contacts', 'CoarseLocation'].map((name) => collected(name)),
+  ...['EmailAddress', 'PhoneNumber', 'UserID', 'Name', 'PhotosorVideos', 'AudioData', 'OtherUserContent', 'EmailsOrTextMessages', 'OtherDataTypes', 'SensitiveInfo', 'Contacts', 'CoarseLocation'].map((name) => collected(name)),
   collected('SearchHistory', false),
   collected('ProductInteraction', true, ['AppFunctionality', 'Analytics'])
 ]

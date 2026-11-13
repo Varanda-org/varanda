@@ -1,4 +1,4 @@
-/* global fetch, crypto, URL, AbortController, __DEV__ */
+/* global fetch, crypto, URL, AbortController, __DEV__, performance */
 
 // Verified media fetch for the hosted web app. A photo is fetched from the
 // installation that served the page (same origin: GET
@@ -13,8 +13,9 @@
 // 3. a Content-Length above descriptor.bytes fails before the body is read,
 //    and the body is read with a hard cap of descriptor.bytes: more bytes
 //    stop the read and fail, fewer fail;
-// 4. the SHA-256 of the bytes (WebCrypto, or @noble/hashes where there is no
-//    WebCrypto, as in React Native) equals descriptor.sha256;
+// 4. the SHA-256 of the bytes (deps.subtle: natively expo-crypto from
+//    ./hash.native.js; else WebCrypto, or @noble/hashes where there is
+//    neither) equals descriptor.sha256;
 // Persistence: the device keeps nothing of members it does not follow. With
 // deps.persist === false (authors the device does not follow: the Espiadinha, threads,
 // profiles, reposts, quotes) every attempt uses cache: 'no-store', so not even
@@ -153,13 +154,42 @@ function defaults (deps = {}) {
   return {
     fetch: deps.fetch || ((...args) => fetch(...args)),
     subtle: deps.subtle !== undefined ? deps.subtle : (typeof crypto !== 'undefined' && crypto.subtle) || null,
-    sha256: deps.sha256 || nobleSha256
+    sha256: deps.sha256 || nobleSha256,
+    injected: deps.subtle !== undefined && deps.subtle !== null,
+    marks: deps.marks || null,
+    now: deps.now || (() => (typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now()))
   }
 }
 
-async function digestHex ({ subtle, sha256 }, bytes) {
+async function hashOnce ({ subtle, sha256 }, bytes) {
   if (subtle) return toHex(new Uint8Array(await subtle.digest('SHA-256', bytes)))
   return toHex(sha256(bytes))
+}
+
+// deps.marks (dev builds with EXPO_PUBLIC_VARANDA_PERF only) times the hash
+// and, when a digest other than noble did it, noble too on the same bytes, so
+// one build compares both. The extra hash is timing only: the returned value
+// is always the real path's.
+async function digestHex (hashing, bytes) {
+  if (!hashing.marks) return hashOnce(hashing, bytes)
+  const t0 = hashing.now()
+  const hex = await hashOnce(hashing, bytes)
+  const used = hashing.now() - t0
+  const ms = (v) => v.toFixed(1) + ' ms'
+  let line
+  if (hashing.subtle) {
+    let js = 'falhou'
+    try {
+      const t1 = hashing.now()
+      hashing.sha256(bytes)
+      js = ms(hashing.now() - t1)
+    } catch {}
+    line = (hashing.injected ? 'native ' : 'webcrypto ') + ms(used) + ', js ' + js + ', ' + bytes.byteLength + ' B'
+  } else {
+    line = 'js ' + ms(used) + ', ' + bytes.byteLength + ' B'
+  }
+  try { hashing.marks.mark('media-hash', line) } catch {}
+  return hex
 }
 
 // True when the answer may come from somewhere else than `url`: a followed

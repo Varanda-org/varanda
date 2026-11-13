@@ -1,25 +1,33 @@
 /* global document */
 
-// The photos of a post under its text (1 to 4, gridLayout in
-// ../media/plan.js): one keeps its aspect ratio (clamped 0.5..2), two side
-// by side, three as one big and two stacked, four as 2x2; rounded corners.
-// Each tile is a MediaView; a tap opens the full-screen viewer, which fits the
-// photo, moves between items with swipes, the arrow buttons or the keyboard
-// arrows (web, only while open), closes with its button or Escape, and labels
-// each photo 'foto N de M'. Descriptors are passed through untouched:
-// MediaView validates them before any request. persist (default true) goes to
-// every tile and the viewer: false for authors the device does not follow.
+// The photos of a post under its text (1 to 10, MAX_MEDIA_PER_POST in
+// ../media/plan.js). One keeps its aspect ratio (clamped 0.5..2). Two to ten
+// are a swipeable MediaCarousel with dots and a counter, so each photo gets
+// the full width instead of a thumbnail; quote cards pass mosaic to keep the
+// compact grid (two side by side, one big and two stacked, 2x2), which has no
+// room for dots. Past four, that grid still shows the first four tiles and
+// paints "+N" on the last one. The scrim takes no touches and stays out of
+// assistive tech, so a tap still opens the viewer on photo 4, and the viewer
+// gets every photo. A tap opens the full-screen viewer, which fits the photo,
+// moves with the same carousel, the arrow buttons or the keyboard arrows (web,
+// only while open), closes with its button or Escape, and labels each photo
+// 'foto N de M'. Closing leaves the feed on the last photo seen. Descriptors
+// are passed through untouched: MediaView validates them before any request.
+// persist (default true) goes to every tile and the viewer: false for authors
+// the device does not follow. The rounded clip sits on the photo frame, not
+// the outer view, so the dots row below it is never cut.
 
 import { useEffect, useRef, useState } from 'react'
 import { Modal, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
 import { useEscapeLayer } from './escapeLayer'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { MAX_MEDIA_PER_POST, gridLayout } from '../media/plan'
+import { MAX_MEDIA_PER_POST, gridLayout, mosaicLayout } from '../media/plan'
 import { Icon } from './Icon'
+import { MediaCarousel } from './MediaCarousel'
 import { MediaView } from './MediaView'
+import { counterText, frameRatio, slideLabel } from '../carousel'
 
 const GAP = 2
-const SWIPE_PX = 50
 
 const stopClick = (e) => { if (e && typeof e.stopPropagation === 'function') e.stopPropagation() }
 
@@ -32,7 +40,6 @@ function Viewer ({ author, media, index, onIndex, onClose, persist }) {
   const insets = useSafeAreaInsets()
   const open = index !== null
   const count = media.length
-  const touch = useRef(null)
   const go = (delta) => {
     if (index === null) return
     const next = index + delta
@@ -48,15 +55,17 @@ function Viewer ({ author, media, index, onIndex, onClose, persist }) {
   useEffect(() => {
     if (!open || Platform.OS !== 'web' || typeof document === 'undefined') return
     const onKey = (event) => {
-      if (event.key === 'ArrowLeft') goRef.current(-1)
-      else if (event.key === 'ArrowRight') goRef.current(1)
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+      // Left alone, the browser also scrolls the feed carousel under the
+      // viewer, the last strip that was clicked.
+      event.preventDefault()
+      goRef.current(event.key === 'ArrowLeft' ? -1 : 1)
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
   }, [open])
 
   if (!open) return null
-  const label = 'foto ' + (index + 1) + ' de ' + count
   return (
     <Modal visible animationType='fade' transparent={false} statusBarTranslucent onRequestClose={onClose}>
       <View
@@ -68,32 +77,23 @@ function Viewer ({ author, media, index, onIndex, onClose, persist }) {
           <Pressable accessibilityRole='button' accessibilityLabel='fechar' onPress={onClose} hitSlop={10} style={styles.viewerBtn}>
             <Icon name='x' size={26} color='#ffffff' />
           </Pressable>
-          {count > 1 ? <Text style={styles.viewerCount}>{(index + 1) + ' de ' + count}</Text> : null}
+          {count > 1 ? <Text style={styles.viewerCount}>{counterText(index, count)}</Text> : null}
           <View style={styles.viewerBtn} />
         </View>
-        <View
-          style={styles.viewerBody}
-          onTouchStart={(e) => {
-            const t = e.nativeEvent.touches && e.nativeEvent.touches[0]
-            touch.current = t ? t.pageX : null
-          }}
-          onTouchEnd={(e) => {
-            const t = e.nativeEvent.changedTouches && e.nativeEvent.changedTouches[0]
-            if (touch.current === null || !t) return
-            const dx = t.pageX - touch.current
-            touch.current = null
-            if (dx <= -SWIPE_PX) go(1)
-            else if (dx >= SWIPE_PX) go(-1)
-          }}
-        >
-          <MediaView
-            key={index}
+        <View style={styles.viewerBody}>
+          <MediaCarousel
             author={author}
-            descriptor={media[index]}
-            label={label}
+            media={media}
+            persist={persist}
+            index={index}
+            onIndex={onIndex}
             fit='contain'
             dark
-            persist={persist}
+            showDots
+            showCounter={false}
+            showArrows={false}
+            claimTouch
+            frameStyle={styles.viewerFrame}
             style={styles.viewerImage}
           />
           {index > 0
@@ -116,11 +116,26 @@ function Viewer ({ author, media, index, onIndex, onClose, persist }) {
   )
 }
 
-export function MediaGrid ({ author, media, persist = true }) {
+export function MediaGrid ({ author, media, persist = true, mosaic = false }) {
   const [viewing, setViewing] = useState(null)
+  const [feedIndex, setFeedIndex] = useState(0)
+  const [focusTick, setFocusTick] = useState(0)
+  const lastViewed = useRef(null)
+  // The feed moves to the last photo seen only once the viewer is gone: on
+  // the web the closing modal hands focus back to the photo that opened it,
+  // and that focus cancels a scroll already under way. The carousel then
+  // moves that focus to the photo on screen (focusRequest).
+  useEffect(() => {
+    if (viewing !== null || lastViewed.current === null) return
+    setFeedIndex(lastViewed.current)
+    setFocusTick((n) => n + 1)
+    lastViewed.current = null
+  }, [viewing])
   if (!Array.isArray(media) || media.length === 0) return null
   const items = media.slice(0, MAX_MEDIA_PER_POST)
-  const layout = gridLayout(items.length)
+  const mosaicPlan = mosaic ? mosaicLayout(items.length) : null
+  const layout = mosaic ? (mosaicPlan && mosaicPlan.kind) : gridLayout(items.length)
+  const more = mosaicPlan ? mosaicPlan.more : 0
   const n = items.length
   const tile = (i, style) => (
     <MediaView
@@ -128,14 +143,35 @@ export function MediaGrid ({ author, media, persist = true }) {
       author={author}
       descriptor={items[i]}
       persist={persist}
-      label={'foto ' + (i + 1) + ' de ' + n}
+      label={slideLabel(i, n)}
       style={[styles.cell, style]}
       onPress={() => setViewing(i)}
     />
   )
+  const closeViewer = () => {
+    lastViewed.current = viewing
+    setViewing(null)
+  }
   let body
   if (layout === 'one') {
-    body = tile(0, { width: '100%', aspectRatio: ratioOf(items[0]) })
+    body = tile(0, [styles.clip, { width: '100%', aspectRatio: ratioOf(items[0]) }])
+  } else if (!mosaic) {
+    body = (
+      <MediaCarousel
+        author={author}
+        media={items}
+        persist={persist}
+        index={feedIndex}
+        onIndex={setFeedIndex}
+        fit='cover'
+        showDots
+        showCounter
+        showArrows
+        onPressItem={(i) => setViewing(i)}
+        focusRequest={focusTick}
+        frameStyle={[styles.carouselFrame, { aspectRatio: frameRatio(items) }]}
+      />
+    )
   } else if (layout === 'two') {
     body = <View style={[styles.box, styles.row]}>{tile(0, styles.flex)}{tile(1, styles.flex)}</View>
   } else if (layout === 'three') {
@@ -145,35 +181,71 @@ export function MediaGrid ({ author, media, persist = true }) {
         <View style={[styles.flex, styles.column]}>{tile(1, styles.flex)}{tile(2, styles.flex)}</View>
       </View>
     )
-  } else {
+  } else if (layout === 'four') {
     body = (
       <View style={[styles.box, styles.column]}>
         <View style={[styles.flex, styles.row]}>{tile(0, styles.flex)}{tile(1, styles.flex)}</View>
-        <View style={[styles.flex, styles.row]}>{tile(2, styles.flex)}{tile(3, styles.flex)}</View>
+        <View style={[styles.flex, styles.row]}>
+          {tile(2, styles.flex)}
+          {more > 0
+            ? (
+              <View style={styles.moreCell}>
+                {tile(3, styles.flex)}
+                <View
+                  pointerEvents='none'
+                  style={styles.moreScrim}
+                  accessibilityElementsHidden
+                  importantForAccessibility='no-hide-descendants'
+                  aria-hidden
+                >
+                  <Text style={styles.moreText}>{'+' + more}</Text>
+                </View>
+              </View>
+              )
+            : tile(3, styles.flex)}
+        </View>
       </View>
     )
   }
   return (
     <View style={styles.grid}>
       {body}
-      <Viewer author={author} media={items} index={viewing} onIndex={setViewing} onClose={() => setViewing(null)} persist={persist} />
+      <Viewer
+        author={author}
+        media={items}
+        index={viewing}
+        onIndex={setViewing}
+        onClose={closeViewer}
+        persist={persist}
+      />
     </View>
   )
 }
 
 const styles = StyleSheet.create({
-  grid: { marginTop: 8, borderRadius: 14, overflow: 'hidden' },
-  box: { width: '100%', aspectRatio: 16 / 9, gap: GAP },
+  grid: { marginTop: 8 },
+  clip: { borderRadius: 14, overflow: 'hidden' },
+  carouselFrame: { width: '100%', borderRadius: 14, overflow: 'hidden' },
+  box: { width: '100%', aspectRatio: 16 / 9, gap: GAP, borderRadius: 14, overflow: 'hidden' },
   row: { flexDirection: 'row', gap: GAP },
   column: { flexDirection: 'column', gap: GAP },
   flex: { flex: 1 },
   cell: { position: 'relative' },
+  moreCell: { flex: 1, position: 'relative' },
+  moreScrim: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.55)'
+  },
+  moreText: { color: '#ffffff', fontSize: 20, lineHeight: 24, fontWeight: '700' },
   viewer: { flex: 1, backgroundColor: '#000000' },
   viewerTop: { height: 52, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 12 },
   viewerBtn: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
   viewerCount: { color: '#ffffff', fontSize: 15, fontWeight: '600' },
   viewerBody: { flex: 1, justifyContent: 'center' },
   viewerImage: { flex: 1 },
+  viewerFrame: { flex: 1 },
   arrow: {
     position: 'absolute',
     top: '50%',

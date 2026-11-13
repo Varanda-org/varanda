@@ -233,8 +233,11 @@ export async function runGate (base, show) {
       if (typeof DevSettings.reload !== 'function') throw new Error('sem DevSettings.reload (build de release)')
       // Not Fast Refresh: a full reload makes a new JS context in this same
       // process while the worklet above is still running its continuous sync.
+      // Events of step f's run (also run 1) are still in `events`: look only
+      // at what arrives after this start.
+      const seen = events.length
       const { runId } = await running.client.request('sync.start', { once: false })
-      await waitFor(() => events.find((e) => e.name === 'sync.event' && e.data.runId === runId && e.data.line === 'sync ready'), 30000, 'sync ready')
+      await waitFor(() => events.slice(seen).find((e) => e.name === 'sync.event' && e.data.runId === runId && e.data.line === 'sync ready'), 30000, 'sync ready')
       await report('ready:reload', true, 'continuous sync ' + runId + ' running, reloading the JS context')
       DevSettings.reload()
     } catch (err) {

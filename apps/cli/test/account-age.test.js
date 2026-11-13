@@ -2,7 +2,7 @@
 
 // apps/cli/lib/account/age-routes.js mounted by server.js: hosted age
 // verification with Didit (policy, start, session, result) and the gates
-// that keep a key without a recorded band from a Google sign-in, a
+// that keep a key without a recorded band from a phone send, a
 // certificate, a rename or an invite. Loopback only: the Didit fake of
 // helpers/fake-didit.js, members linked in-process, and a Google stub whose
 // exchange is never reached.
@@ -16,10 +16,11 @@ const crypto = require('hypercore-crypto')
 const { createIssuerCert } = require('@varanda/core/lib/cert')
 const { signAccountLink } = require('@varanda/core/lib/account-link')
 const { signAge } = require('@varanda/core/lib/age')
+const { signPhone } = require('@varanda/core/lib/phone')
 const { verifyAgeVerified, verifyAgeSince } = require('@varanda/core/lib/age-proof')
 const { signTerms, TERMS_VERSION } = require('@varanda/core/lib/terms')
 const { signInvite } = require('@varanda/core/lib/invite')
-const { openAccountStore } = require('../lib/account/store')
+const { openAccountStore, phoneSub } = require('../lib/account/store')
 const { openAgeStore } = require('../lib/account/age-store')
 const { openInvitesStore, inviteId } = require('../lib/account/invites-store')
 const { pairInvites } = require('../lib/account/invites-pair')
@@ -32,6 +33,8 @@ const { readEnv } = require('../lib/commands/account')
 const { UsageError } = require('../lib/cli')
 const { startFakeDidit, loopbackFetch, SESSION_TOKEN } = require('./helpers/fake-didit')
 const { tmpDir } = require('./helpers/net')
+const { linkByPhone, phoneServerOptions } = require('./helpers/phone-link')
+const { freePort } = require('./helpers/free-port')
 
 const ORIGIN = 'https://varanda.test'
 const API_KEY = 'test-key-123'
@@ -42,8 +45,7 @@ const DOB = '2009-03-14'
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
 const GOOGLE_URL = 'https://accounts.google.test/auth?state=x'
 
-// authorizeUrl answers a fixed URL so an allowed authorize is visible; the
-// code exchange is never reached by these tests.
+// Any call to the retired Google authorization is visible to the tests.
 function googleStub () {
   const g = { calls: 0 }
   g.authorizeUrl = () => {
@@ -93,7 +95,7 @@ async function waitFor (fn, ms = 3000) {
 // `feira: { perWeek, named = true }` pairs a Feira store (feira-invites.json)
 // with the member invites; the store names the owner through inviterOf
 // (`named: false` removes it).
-async function setup (t, { age = true, inviting = false, maxMembers = null, dailyLimit, diditTimeoutMs, burst, since, withIssuer = true, ageCheck, floor, feira = null } = {}) {
+async function setup (t, { age = true, phone = false, inviting = false, maxMembers = null, dailyLimit, diditTimeoutMs, burst, since, withIssuer = true, ageCheck, floor, feira = null } = {}) {
   const dir = path.join(tmpDir(t), 'account')
   const c = { offset: 0, guardOk: true }
   c.now = () => Date.now() + c.offset
@@ -115,11 +117,26 @@ async function setup (t, { age = true, inviting = false, maxMembers = null, dail
   }
   const invites = primary !== null && feiraStore !== null ? pairInvites(primary, feiraStore) : primary
   const google = googleStub()
+  const phoneOpts = phone ? phoneServerOptions() : null
+  const numbers = []
+  if (phone) {
+    const number = '+5511987654321'
+    numbers.push(number)
+    await phoneOpts.phones.record({ member: linked.hex, phone: number, verifiedAt: new Date(c.now()).toISOString() }, { linked: (m) => store.status(m).linked, burnable: () => false, deleted: () => false })
+    const send = phoneOpts.phoneClient.send
+    phoneOpts.phoneClient.send = (args) => {
+      numbers.push(args.phone)
+      return send(args)
+    }
+  }
+  const port = phone ? await freePort() : 0
+  let base = phone ? 'http://127.0.0.1:' + port : null
   const logs = []
   const texts = []
   const opts = {
+    ...phoneOpts,
     association: iss.association,
-    origin: ORIGIN,
+    origin: phone ? base : ORIGIN,
     google,
     store,
     issuer: withIssuer ? { keyPair: iss.keyPair, cert: iss.cert } : null,
@@ -128,7 +145,17 @@ async function setup (t, { age = true, inviting = false, maxMembers = null, dail
     now: c.now
   }
   if (age) {
-    opts.didit = didit
+    // A phone link needs a loopback http origin, but Didit only takes an
+    // https callback, as in production: swap the origin on the way out.
+    opts.didit = phone
+      ? {
+          ...didit,
+          createSession: (args) => {
+            if (!args.callback.startsWith(base + '/')) throw new Error('the age callback is not on the service origin')
+            return didit.createSession({ ...args, callback: ORIGIN + args.callback.slice(base.length) })
+          }
+        }
+      : didit
     opts.ages = ages
   }
   if (dailyLimit !== undefined) opts.ageDailyLimit = dailyLimit
@@ -141,9 +168,9 @@ async function setup (t, { age = true, inviting = false, maxMembers = null, dail
     opts.ratePerSecond = burst
   }
   const server = createAccountServer(opts)
-  const listener = await server.listen({ host: '127.0.0.1', port: 0 })
+  const listener = await server.listen({ host: '127.0.0.1', port })
   t.teardown(() => listener.close(), { force: true })
-  const base = 'http://127.0.0.1:' + listener.port
+  if (base === null) base = 'http://127.0.0.1:' + listener.port
 
   // `app`: the native app's request (no Origin, x-varanda-client: app).
   async function api (method, pathname, { body, cookie, app = false } = {}) {
@@ -151,7 +178,7 @@ async function setup (t, { age = true, inviting = false, maxMembers = null, dail
     if (cookie) init.headers.cookie = COOKIE + '=' + cookie
     if (app) init.headers['x-varanda-client'] = 'app'
     if (body !== undefined) {
-      if (!app) init.headers.origin = ORIGIN
+      if (!app) init.headers.origin = phone ? base : ORIGIN
       init.headers['content-type'] = 'application/json'
       init.body = JSON.stringify(body)
     }
@@ -188,7 +215,7 @@ async function setup (t, { age = true, inviting = false, maxMembers = null, dail
       const data = body === undefined ? null : JSON.stringify(body)
       const h = { ...headers }
       if (data !== null) Object.assign(h, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) })
-      if (data !== null && h.origin === undefined && h['x-varanda-client'] === undefined) h.origin = ORIGIN
+      if (data !== null && h.origin === undefined && h['x-varanda-client'] === undefined) h.origin = phone ? base : ORIGIN
       const req = http.request({ host: '127.0.0.1', port: listener.port, method, path: target, headers: h }, (res) => {
         let text = ''
         res.setEncoding('utf8')
@@ -209,7 +236,7 @@ async function setup (t, { age = true, inviting = false, maxMembers = null, dail
   const decisions = () => fake.seen.filter((r) => r.method === 'GET')
   const lastSession = () => [...fake.sessions.keys()].pop()
 
-  return { dir, c, iss, store, ages, invites, feiraStore, fake, google, linked, logs, texts, api, post, signFor, start, step, feiraStep, raw, creates, deletes, decisions, lastSession }
+  return { dir, base, numbers, c, iss, store, ages, invites, feiraStore, fake, google, linked, logs, texts, api, post, signFor, start, step, feiraStep, raw, creates, deletes, decisions, lastSession }
 }
 
 // Opens a session for `who` and scripts its Didit decision.
@@ -229,23 +256,30 @@ function cookieOf (res) {
   return m ? m[1] : null
 }
 
-// `previous`: the link cookie of this browser's earlier row, which lets a
-// restart take over its invite reservation.
-async function authorize (s, m, username, invite, previous) {
-  const body = { member: m.hex, username }
-  if (invite !== undefined) body.invite = invite
-  const started = await s.post('/account/start', body, previous ? { cookie: previous } : {})
-  if (started.status !== 200) return { started, auth: started }
-  const cookie = cookieOf(started)
-  const auth = await s.post('/account/authorize', { signature: sign(s, m, 'reserve', started.body.nonce, username) }, { cookie })
-  return { started, cookie, auth }
+async function phoneStep (s, m, action, extra = {}) {
+  if (typeof extra.phone === 'string') s.numbers.push(extra.phone)
+  const started = await s.post('/account/phone/start', { member: m.hex })
+  const nonce = started.body.nonce
+  const signature = signPhone({ action, nonce, member: m.hex, association: s.iss.association }, m.kp)
+  return s.post('/account/phone/' + action, { member: m.hex, nonce, signature, ...extra })
 }
 
-// Skips the Google round trip: the row gets its subject straight from the store.
-async function finish (s, m, username, cookie) {
-  s.store.putGoogle(cookie, { sub: nextSub(), email: EMAIL })
-  const pending = await s.api('GET', '/account/pending', { cookie })
-  return s.post('/account/finish', { signature: sign(s, m, 'finish', pending.body.nonce, username, pending.body.sub) }, { cookie })
+async function link (s, m, username, invite) {
+  const body = await linkByPhone({
+    origin: s.base,
+    member: m.hex,
+    username,
+    invite,
+    sign: (fields) => fields.action
+      ? signPhone({ ...fields, association: s.iss.association }, m.kp)
+      : signAccountLink({ ...fields, association: s.iss.association }, m.kp),
+    onResponse: (r) => {
+      if (typeof r.request.phone === 'string') s.numbers.push(r.request.phone)
+      s.texts.push(r.text, r.headers.get('location') || '', r.headers.get('set-cookie') || '')
+    }
+  })
+  s.texts.push(JSON.stringify(body))
+  return body
 }
 
 async function renameStart (s, m, username) {
@@ -271,6 +305,7 @@ function noPersonalData (t, s) {
   t.absent(all.includes('session_token'), 'no session_token field')
   t.absent(all.includes('date_of_birth') || all.includes(DOB), 'no birth date')
   t.absent(all.includes(EMAIL), 'no e-mail')
+  t.absent(s.numbers.some((phone) => all.includes(phone) || all.includes(phone.slice(3))), 'no phone number')
   t.absent(all.includes(SUB), 'no sub')
   // The hosted URL (which carries the id) goes only to its own member.
   const withoutUrls = all.replace(/https:\/\/verify\.didit\.test\/session\/[A-Za-z0-9-]+/g, '')
@@ -282,7 +317,7 @@ function noPersonalData (t, s) {
 }
 
 test('age off: policy says not required, the routes answer 503, the gates stay open', async (t) => {
-  const s = await setup(t, { age: false, inviting: true })
+  const s = await setup(t, { age: false, phone: true, inviting: true })
   const policy = await s.api('GET', '/account/age/policy')
   t.is(policy.status, 200)
   t.alike(policy.body, { required: false })
@@ -303,18 +338,18 @@ test('age off: policy says not required, the routes answer 503, the gates stay o
   const inv = await s.post('/account/invites/start', { member: s.linked.hex })
   t.is(inv.status, 200, inv.text)
 
-  // A fresh key with an invite: authorize reaches Google and finish links.
+  // A fresh key with an invite verifies its phone and links without an age check.
   const started = await s.post('/account/invites/start', { member: s.linked.hex })
   const code = (await s.post('/account/invites/finish', {
     member: s.linked.hex,
     nonce: started.body.nonce,
     signature: signInvite({ action: 'issue', nonce: started.body.nonce, member: s.linked.hex, association: s.iss.association }, s.linked.kp)
   })).body.code
-  const a = await authorize(s, m, 'bia', code)
-  t.is(a.auth.status, 200, a.auth.text)
-  t.is(a.auth.body.authorizeUrl, GOOGLE_URL)
-  const done = await finish(s, m, 'bia', a.cookie)
-  t.is(done.status, 200, done.text)
+  const done = await link(s, m, 'bia', code)
+  const status = await phoneStep(s, m, 'status')
+  t.is(status.status, 200)
+  t.is(status.body.state, 'verificado')
+  t.is(done.cert.v, 2)
   t.ok(s.store.status(m.hex).linked)
   t.is(s.creates().length, 0, 'Didit never called')
 })
@@ -1181,8 +1216,8 @@ test('age: disposable keys exhausting the new-key ceiling do not lock out linked
   t.is(s.creates().length, 3)
 })
 
-test('age gates on: authorize, finish, rename and invites refuse an unverified key, then allow it', async (t) => {
-  const s = await setup(t, { inviting: true })
+test('age gates on: phone send, finish, rename and invites refuse an unverified key, then allow it', async (t) => {
+  const s = await setup(t, { phone: true, inviting: true })
 
   // Already linked member, unverified. The unsigned starts answer as for
   // anyone (they must not reveal whether a key passed the age check); the
@@ -1214,31 +1249,31 @@ test('age gates on: authorize, finish, rename and invites refuse an unverified k
     signature: signInvite({ action: 'issue', nonce: st.body.nonce, member: s.linked.hex, association: s.iss.association }, s.linked.kp)
   })).body.code
 
-  // A fresh key: authorize refused with no Google URL, the row kept.
   const m = member()
-  const a = await authorize(s, m, 'bia', code)
-  t.is(a.started.status, 200, a.started.text)
-  t.is(a.auth.status, 403)
-  t.alike(a.auth.body, { error: 'idade-pendente' })
-  t.absent(a.auth.text.includes('google'), 'no Google URL in the answer')
+  const started = await s.post('/account/start', { member: m.hex, username: 'bia', invite: code })
+  const cookie = cookieOf(started)
+  const sent = await phoneStep(s, m, 'send', { phone: '+5521912345678' })
+  t.is(started.status, 200, started.text)
+  t.is(sent.status, 403)
+  t.alike(sent.body, { error: 'idade-pendente' })
+  t.absent('proof' in sent.body, 'no verification proof before the age check')
   t.is(s.google.calls, 0)
 
-  // finish refused too, even with a subject on the row (no certificate).
-  s.store.reserve(a.cookie)
-  const fin = await finish(s, m, 'bia', a.cookie)
+  const fin = await s.post('/account/finish', {
+    signature: sign(s, m, 'finish', started.body.nonce, 'bia', phoneSub(m.hex))
+  }, { cookie })
   t.is(fin.status, 403)
   t.alike(fin.body, { error: 'idade-pendente' })
   t.absent(s.store.status(m.hex).linked, 'no link, no certificate')
   t.absent('cert' in (fin.body || {}))
 
-  // Verified: a new start, authorize and finish go through.
   await opened(s, m, DOC(16), { invite: code })
   t.is((await s.step(m, 'result')).body.state, 'verificado')
-  const b = await authorize(s, m, 'bia', code, a.cookie)
-  t.is(b.auth.status, 200, b.auth.text)
-  t.is(b.auth.body.authorizeUrl, GOOGLE_URL)
-  const done = await finish(s, m, 'bia', b.cookie)
-  t.is(done.status, 200, done.text)
+  const done = await link(s, m, 'bia', code)
+  const phone = await phoneStep(s, m, 'status')
+  t.is(phone.status, 200)
+  t.is(phone.body.state, 'verificado')
+  t.is(done.cert.v, 2)
   t.ok(s.store.status(m.hex).linked)
 
   // /account/status never exposes age state.

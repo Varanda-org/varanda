@@ -91,7 +91,7 @@ function isAssertion (a) {
 // `passkeys` is an openPasskeyStore (null or unavailable: every route answers
 // 503 'indisponivel', since neither a verified nor a scheduled deletion can
 // be recorded). `notify(member)` sends the push notice of a new schedule.
-function createDeleteRoutes ({ accounts, moderation = null, pagesStore = null, passkeys = null, purge = async () => ({ pending: 0 }), isBlocked = () => false, notify = () => {}, rpId, origins = [], association, now = Date.now, log = () => {}, memberLimit, send, refuse, fromStore, checkPost, readJsonBody, over }) {
+function createDeleteRoutes ({ accounts, moderation = null, pagesStore = null, passkeys = null, purge = async () => ({ pending: 0 }), isBlocked = () => false, notify = () => {}, beforeDelete = async () => {}, rpId, origins = [], association, now = Date.now, log = () => {}, memberLimit, send, refuse, fromStore, checkPost, readJsonBody, over }) {
   // nonce -> { member, username, kind, expiresAt }, insertion order = age.
   const nonces = new Map()
 
@@ -184,6 +184,7 @@ function createDeleteRoutes ({ accounts, moderation = null, pagesStore = null, p
 
   // Steps 1 to 3 (see the top of the file). `reason` goes to the log.
   async function run (member, reason) {
+    await beforeDelete(member)
     try {
       await moderation.requestDeletion(member)
     } catch (err) {
