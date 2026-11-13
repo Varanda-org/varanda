@@ -469,9 +469,17 @@ function screenHelper (file, name, deps = {}) {
   return new Function(...Object.keys(deps), match[0].replace(/^export /, '') + '\nreturn ' + name)(...Object.values(deps))
 }
 
-test('Mensagem listing pill recognizes text, stored cards and fragments only on this installation', async (t) => {
+async function listingHelpers () {
   const { listingLinkOf } = await import('../src/feiraChat.js')
-  const listingLinkForRow = screenHelper('Mensagem', 'listingLinkForRow', { listingLinkOf })
+  const { parseRich, plainOf } = await import('../src/richText.js')
+  const cardBesideSpoilers = screenHelper('../ui/RichText', 'cardBesideSpoilers')
+  const visibleListingLink = screenHelper('Mensagem', 'visibleListingLink', { listingLinkOf, plainOf, parseRich, cardBesideSpoilers })
+  const listingLinkForRow = screenHelper('Mensagem', 'listingLinkForRow', { visibleListingLink })
+  return { visibleListingLink, listingLinkForRow }
+}
+
+test('Mensagem listing pill recognizes text, stored cards and fragments only on this installation', async (t) => {
+  const { listingLinkForRow } = await listingHelpers()
   const origin = 'https://bora.varanda.app'
   const url = origin + '/f/' + HEX('a') + '/7'
   const ref = { author: HEX('a'), seq: 7 }
@@ -489,6 +497,29 @@ test('Mensagem listing pill recognizes text, stored cards and fragments only on 
   t.ok(src.includes('row.listingLink = listingLinkForRow({ ...row, card: cardOf.get(row.key) }, origin)'), 'stored card URL reaches the same rule')
   t.ok(src.includes('showListingReplies(rows, pageKey !== null ? pageKey : ownKey) && !hold'), 'quick replies use the listing author rule')
   t.ok(src.includes('quickReplies().map((text) => <Pill'), 'chips use the shared replies')
+})
+
+test('a listing link covered by a spoiler gives no pill and no offer target', async (t) => {
+  const { visibleListingLink, listingLinkForRow } = await listingHelpers()
+  const { offerTarget } = await import('../src/feiraOffer.js')
+  const origin = 'https://bora.varanda.app'
+  const url = origin + '/f/' + HEX('a') + '/7'
+  const ref = { author: HEX('a'), seq: 7 }
+  const card = { url, title: 'Bike' }
+  t.is(listingLinkForRow({ rawText: 'oi ||veja ' + url + ' aqui||' }, origin), null, 'a link only inside a spoiler: no pill')
+  t.is(listingLinkForRow({ rawText: 'oi ||veja ' + url + ' aqui||', card }, origin), null, 'nor through the card the bubble hides')
+  t.is(listingLinkForRow({ rawText: 'oi ||segredo||', card }, origin), null, 'a card beside a spoiler and no visible link: hidden, no pill')
+  t.alike(listingLinkForRow({ rawText: 'veja ' + url + ' ||segredo||', card }, origin), ref, 'the visible link keeps its pill')
+  t.alike(listingLinkForRow({ rawText: '```\na\n' + url + '\n```' }, origin), ref, 'a later code line counts as the bubble shows it')
+  const seller = HEX('a')
+  const msgs = [
+    { id: 'm1', from: seller, text: 'veja ' + url, card: null },
+    { id: 'm2', from: seller, text: '||outro ' + origin + '/f/' + HEX('a') + '/9 aqui||', card: { url: origin + '/f/' + HEX('a') + '/9', title: 'Oculto' } }
+  ]
+  t.alike(offerTarget(msgs, seller, origin, (m) => visibleListingLink(m.text, m.card, origin)), { author: seller, seq: 7, title: '' }, 'the offer goes to the newest visible listing, not the covered one')
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes('const linkOfMsg = (m) => visibleListingLink(m.text, m.card, origin)'), 'the offer input reads the same rule')
+  t.ok(src.includes('return visibleListingLink(row.rawText, row.card, origin)'), 'the pill reads the same rule')
 })
 
 test('Mensagem quick replies show to whoever did not author the newest listing link', (t) => {

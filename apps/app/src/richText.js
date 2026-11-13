@@ -15,6 +15,10 @@ import { poisoned, textSegments } from './links.js'
 
 export const SPAN_MAX = 64
 
+// Code blocks one bubble draws as boxes; the rest of the text from the next
+// one on is one plain paragraph.
+export const CODE_MAX = 8
+
 const LANG_MAX = 16
 
 const SPACE = 0
@@ -146,7 +150,7 @@ function splitBlocks (text, clipped) {
         const k = list[p]
         endPara(i - 1)
         const body = k === i + 1 ? '' : text.slice(lines[i + 1][0], lines[k - 1][1])
-        blocks.push({ kind: 'code', lang: fence.lang === '' ? null : fence.lang, text: body })
+        blocks.push({ kind: 'code', lang: fence.lang === '' ? null : fence.lang, text: body, start: lines[i][0] })
         i = k + 1
         continue
       }
@@ -182,10 +186,11 @@ function findTick (text, from, end) {
 
 // Units of one paragraph: literal text, atoms, inline code (opaque: nothing
 // inside is parsed) and delimiter runs with whether each may open or close.
-// What follows a clipped text is unknown, so its end counts as a word
-// character there: nothing closes against it.
-function tokenize (text, start, end, atoms, cursor, clipped) {
-  const tail = clipped && end === text.length ? WORD : SPACE
+// endClass is what the end of the text counts as. What follows a clipped
+// text is unknown, so there it counts as a word character: nothing closes
+// against it.
+function tokenize (text, start, end, atoms, cursor, endClass) {
+  const tail = end === text.length ? endClass : SPACE
   while (cursor.at < atoms.length && atoms[cursor.at].start < start) {
     if (atoms[cursor.at].end > start) throw new Error('atom crosses a block')
     cursor.at++
@@ -414,17 +419,30 @@ function render (parsed, cap, rawFrom, clipped) {
   return { blocks, overflowAt }
 }
 
-function parse (text, atoms, cap, clipped) {
+// Past codeMax code blocks, the text from the next one on is plain, with its
+// spoilers hidden as for text the parser cannot read.
+function parse (text, atoms, cap, clipped, codeMax = Infinity, endClass = clipped ? WORD : SPACE) {
   const cursor = { at: 0 }
-  const parsed = splitBlocks(text, clipped).map((block) => {
+  let split = splitBlocks(text, clipped)
+  let rest = null
+  let code = 0
+  for (let b = 0; b < split.length; b++) {
+    if (split[b].kind === 'code' && ++code > codeMax) {
+      rest = text.slice(split[b].start)
+      split = split.slice(0, b)
+      break
+    }
+  }
+  const parsed = split.map((block) => {
     if (block.kind === 'code') return block
-    const units = pairUp(tokenize(text, block.start, block.end, atoms, cursor, clipped))
+    const units = pairUp(tokenize(text, block.start, block.end, atoms, cursor, endClass))
     for (let u = 0; u < units.length; u++) units[u].index = u
     return { kind: 'para', units }
   })
   const first = render(parsed, cap, Infinity, clipped)
-  if (first.overflowAt === -1) return first.blocks
-  return render(parsed, cap, first.overflowAt, clipped).blocks
+  const blocks = first.overflowAt === -1 ? first.blocks : render(parsed, cap, first.overflowAt, clipped).blocks
+  if (rest !== null) blocks.push(plainParagraph([{ text: rest }], barsFrom(rest)))
+  return blocks
 }
 
 function plainSpan (text, segment) {
@@ -465,6 +483,13 @@ function plainParagraph (segments, hideFrom) {
   return { kind: 'para', spans }
 }
 
+// displayText turns some of the code points poisoned() looks for into U+FFFD, so a
+// quote or a reply bar fed display-cleaned text still gets the fallback the
+// bubble of the raw text got.
+function unparsable (text) {
+  return poisoned(text) || text.indexOf('\ufffd') !== -1
+}
+
 // Cheap test for any marker character, so plain text skips the parser.
 export function hasRich (text) {
   return typeof text === 'string' && /[*_~|`]/.test(text)
@@ -475,8 +500,8 @@ export function parseRich (text) {
   try {
     const segments = textSegments(text, { mentions: true })
     const atoms = atomsOf(text, segments)
-    if (!hasRich(text) || poisoned(text)) return [plainParagraph(segments, barsFrom(text))]
-    return parse(text, atoms, SPAN_MAX, false)
+    if (!hasRich(text) || unparsable(text)) return [plainParagraph(segments, barsFrom(text))]
+    return parse(text, atoms, SPAN_MAX, false, CODE_MAX)
   } catch {
     const at = barsFrom(text)
     if (at === Infinity) return [{ kind: 'para', spans: [plainSpan(text, null)] }]
@@ -514,20 +539,34 @@ function hideFromBars (text) {
 }
 
 // Text without markers for previews and notifications. No span cap here, so
-// every spoiler stays hidden however many styles precede it. clipped is for a
-// text cut short: a || whose closer was cut off hides the rest. A clipped text
-// can be poisoned (a cut inside an emoji sequence) when the whole is not.
-export function plainOf (text, { clipped = false } = {}) {
+// every spoiler stays hidden however many styles precede it, but the same
+// CODE_MAX as the bubble, so the text past it hides what the bubble hides.
+// A code block gives its first line, or every line with full. clipped is for
+// a text cut short: how the whole reads past the first || depends on what
+// follows the cut (a closing tick, a poisoned code point, a mention), so
+// nothing from there on is shown. Text before the first || never sits inside
+// a spoiler, so it is parsed as usual, its end a boundary since a | follows.
+export function plainOf (text, { clipped = false, full = false } = {}) {
   if (typeof text !== 'string' || text === '') return ''
+  if (clipped !== true) return plainText(text, false, SPACE, full === true)
+  const bars = text.indexOf('||')
+  if (bars === -1) return plainText(text, true, WORD, false)
+  const head = plainText(text.slice(0, bars), true, PUNCT, false)
+  const apart = head !== '' && text.charCodeAt(bars - 1) === 0x0a && !head.endsWith('\n')
+  return head + (apart ? '\n' : '') + 'spoiler'
+}
+
+function plainText (text, clipped, endClass, full) {
+  if (text === '') return ''
   try {
     const segments = textSegments(text, { mentions: true })
     const atoms = atomsOf(text, segments)
     if (!hasRich(text)) return text
-    if (poisoned(text)) return hideFromBars(text)
-    const blocks = parse(text, atoms, Infinity, clipped === true)
+    if (unparsable(text)) return hideFromBars(text)
+    const blocks = parse(text, atoms, Infinity, clipped, clipped ? Infinity : CODE_MAX, endClass)
     // A cut block may not be code in the whole text, where a spoiler could
     // open on its first line, so that line hides from its first ||.
-    const lineOf = (b) => (b.cut ? hideFromBars(firstLine(b.text)) : firstLine(b.text))
+    const lineOf = (b) => (full ? b.text : b.cut ? hideFromBars(firstLine(b.text)) : firstLine(b.text))
     return blocks.map((b) => (b.kind === 'code' ? lineOf(b) : plainSpans(b.spans))).join('\n')
   } catch {
     return hideFromBars(text)
