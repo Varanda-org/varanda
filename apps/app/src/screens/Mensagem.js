@@ -66,10 +66,10 @@ import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
 import { listingLinkOf } from '../feiraChat'
 import { parsePriceText, quickReplies } from '../feira'
 import { CONSENT_NOTE, acceptCard, acceptText, buttonState, centsLabel, consentParams, declineCard, declineText, offerCard, offerOfMessage, offerState, offerTarget, proposalText, validCents } from '../feiraOffer'
-import { mergeMessages, newestOf, pageDmClient, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey, dmReactions, reactDebounce, dmReactionGate } from '../dm-screen'
+import { mergeMessages, newestOf, pageDmClient, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey, dmReactions, reactDebounce, dmReactionGate, dmReactable, withFreshReactions } from '../dm-screen'
 import { pageReadKind } from '../pageNotice'
 import { applyOptimistic, reactionChips, toggleOf } from '../reactions'
-import { hasRich, parseRich } from '../richText'
+import { hasRich, parseRich, plainOf } from '../richText'
 import { cardBesideSpoilers } from '../ui/RichText'
 import { ReactionChips, QuickReactions } from '../ui/Reactions'
 import { ReactionPicker } from '../ui/ReactionPicker'
@@ -85,8 +85,6 @@ import { chatMediaRefs, followAutocorrect, retryChatSend, runChatSend, stagedOf 
 import { Btn, ErrorText, Field, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles } from '../ui/ThemeProvider'
 import { Bubble } from '../ui/Bubble'
-import { cardBesideSpoilers } from '../ui/RichText'
-import { parseRich, plainOf } from '../richText'
 import { ChatComposer, useLinkDraft } from '../ui/ChatComposer'
 import { ChatMedia } from '../ui/ChatMedia'
 import { useChatAttachments } from '../ui/AttachSheet'
@@ -400,7 +398,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
           commitRead(page, started, context)
           const byKey = new Map(page.map((m) => [messageKey(m), m]))
           if (![...keys].some((key) => byKey.has(key))) context.pages.delete(before)
-          const merged = rawRef.current.map((m) => byKey.has(messageKey(m)) ? { ...m, reactions: byKey.get(messageKey(m)).reactions } : m)
+          const merged = rawRef.current.map((m) => byKey.has(messageKey(m)) ? withFreshReactions(m, byKey.get(messageKey(m))) : m)
           rawRef.current = merged
           setRaw(merged)
         } catch {
@@ -433,7 +431,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     reactionContext.debounce.clear()
   }, [isTop, reactionsDisabled, reactionContext])
 
-  const reactionRowReady = (item) => item && !item.deleted
+  const reactionRowReady = (item) => dmReactable(item)
   const canReact = (key) => !reactionViewRef.current.disabled && reactionRowReady(reactionViewRef.current.rawById.get(key)) && !reactionContext.sending.has(key)
   const reactionsFor = (row) => reactionOverrides.get(row.key) || row.reactions || []
   const paintReactions = (context) => {

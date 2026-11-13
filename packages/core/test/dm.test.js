@@ -950,12 +950,15 @@ test('inner v3: buildInner never writes v3, and v1/v2 vectors are unchanged', (t
 
 const HEART = '❤️'
 
+// A target message digest (hex64).
+const TD = 'd'.repeat(64)
+
 function reactBody (over = {}) {
-  return { v: 4, kind: 'react', id: 'a'.repeat(32), from: ana.hex, to: bia.hex, target: { from: bia.hex, id: 'b'.repeat(32) }, emoji: HEART, rev: 1, at: AT, cert: ana.cert, ...over }
+  return { v: 4, kind: 'react', id: 'a'.repeat(32), from: ana.hex, to: bia.hex, target: { from: bia.hex, id: 'b'.repeat(32), digest: TD }, emoji: HEART, rev: 1, at: AT, cert: ana.cert, ...over }
 }
 
 function react (over = {}, from = ana) {
-  return buildInner({ kind: 'react', to: bia.hex, target: { from: bia.hex, id: 'b'.repeat(32) }, emoji: HEART, rev: 1, at: AT, cert: from.cert, ...over }, from)
+  return buildInner({ kind: 'react', to: bia.hex, target: { from: bia.hex, id: 'b'.repeat(32), digest: TD }, emoji: HEART, rev: 1, at: AT, cert: from.cert, ...over }, from)
 }
 
 function frameParts (inner) {
@@ -982,13 +985,13 @@ test('inner v4: constants, exact key set and round trip', (t) => {
   const got = openInner(react(), bia.hex, O)
   t.is(got.v, 4)
   t.is(got.kind, 'react')
-  t.alike(got.target, { from: bia.hex, id: 'b'.repeat(32) })
+  t.alike(got.target, { from: bia.hex, id: 'b'.repeat(32), digest: TD }, 'the target names sender, id and digest')
   t.is(got.emoji, HEART)
   t.is(got.rev, 1)
   t.is(got.mine, false)
   t.is(openInner(react(), ana.hex, O).mine, true, 'the self copy')
   t.is(openInner(react(), caio.hex, O), null, 'a third party opens nothing')
-  t.is(openInner(react({ target: { from: ana.hex, id: 'c'.repeat(32) } }), bia.hex, O).target.from, ana.hex, 'a reaction to an own message')
+  t.is(openInner(react({ target: { from: ana.hex, id: 'c'.repeat(32), digest: TD } }), bia.hex, O).target.from, ana.hex, 'a reaction to an own message')
   t.is(openInner(react({ emoji: '' }), bia.hex, O).emoji, '', 'the empty emoji removes')
   t.is(openInner(react({ rev: 1000000 }), bia.hex, O).rev, 1000000)
   t.is(openInner(react({ cert: null }), bia.hex, O), null, 'a reaction needs a certificate like a msg')
@@ -1008,8 +1011,17 @@ test('inner v4: shape rules', (t) => {
   t.absent(dm.validBody(reactBody({ id: 'A'.repeat(32) })))
   t.absent(dm.validBody(reactBody({ at: '2026-11-03' })))
   t.absent(dm.validBody(reactBody({ cert: bia.cert })), 'a certificate of someone else')
-  for (const bad of [null, 'x', [], { from: bia.hex }, { id: 'b'.repeat(32) }, { from: bia.hex, id: 'b'.repeat(32), x: 1 }, { from: caio.hex, id: 'b'.repeat(32) }, { from: bia.hex, id: 'b'.repeat(31) }]) {
+  for (const bad of [null, 'x', [], { from: bia.hex }, { id: 'b'.repeat(32) }, { from: bia.hex, id: 'b'.repeat(32), digest: TD, x: 1 }, { from: caio.hex, id: 'b'.repeat(32), digest: TD }, { from: bia.hex, id: 'b'.repeat(31), digest: TD }]) {
     t.absent(dm.validBody(reactBody({ target: bad })), 'bad target ' + JSON.stringify(bad))
+  }
+  // The target names the message's digest: lowercase hex64, never ''.
+  const tg = (digest) => ({ from: bia.hex, id: 'b'.repeat(32), digest })
+  t.absent(dm.validBody(reactBody({ target: tg('') })), "digest '' is refused")
+  t.exception.all(() => react({ target: { from: bia.hex, id: 'b'.repeat(32) } }), /mensagem inválida/, 'buildInner needs the digest')
+  t.ok(dm.validBody(reactBody({ target: tg('0123456789abcdef'.repeat(4)) })), 'digest hex64')
+  t.absent(dm.validBody(reactBody({ target: { from: bia.hex, id: 'b'.repeat(32) } })), 'digest missing')
+  for (const bad of ['A'.repeat(64), 'a'.repeat(63), 'a'.repeat(65), 'g'.repeat(64), ' ', null, 0, undefined, ['a'.repeat(64)]]) {
+    t.absent(dm.validBody(reactBody({ target: tg(bad) })), 'bad digest ' + JSON.stringify(bad))
   }
   for (const bad of ['a', ':)', HEART + HEART, '\u{1F600} ', ' ', '\u{1F468}‍', 1, null, '\u{1F468}'.repeat(11)]) {
     t.absent(dm.validBody(reactBody({ emoji: bad })), 'bad emoji ' + JSON.stringify(bad))
@@ -1019,7 +1031,7 @@ test('inner v4: shape rules', (t) => {
   }
   t.exception.all(() => react({ emoji: 'a' }), /mensagem inválida/)
   t.exception.all(() => react({ rev: 0 }), /mensagem inválida/)
-  t.exception.all(() => react({ target: { from: caio.hex, id: 'b'.repeat(32) } }), /mensagem inválida/)
+  t.exception.all(() => react({ target: { from: caio.hex, id: 'b'.repeat(32), digest: TD } }), /mensagem inválida/)
 })
 
 test('inner v4: its own signature domain', (t) => {
@@ -1054,4 +1066,28 @@ test('inner v4: a reader that knows only v1 to v3 drops it', (t) => {
   t.ok(dm.validBody(wire))
   t.absent(oldValidBody(wire), 'v 4 falls to the final else')
   for (const v of [1, 2, 3]) t.absent(dm.validBody({ ...wire, v }), 'relabelled v' + v + ' is no message')
+})
+
+test('bodyDigest: the sender and the receiver name a message by the same digest', (t) => {
+  const sha = (json) => {
+    const d = b4a.alloc(32)
+    sodium.crypto_hash_sha256(d, json)
+    return b4a.toString(d, 'hex')
+  }
+  for (const inner of [msg(), msg({ fwd: 1 }), msg({ media: [blobItem(1)], text: '' }), react()]) {
+    const sent = dm.frameDigest(inner)
+    t.is(sent, sha(frameParts(inner).json), 'sha256 of the signed canonical JSON')
+    const body = openInner(b4a.from(inner), bia.hex, O)
+    t.ok(body.mine === false, 'opened by the receiver')
+    t.is(dm.bodyDigest(body), sent, 'the receiver gets the same digest, whatever open adds')
+    t.is(dm.bodyDigest(openInner(b4a.from(inner), ana.hex, O)), sent, 'and the own copy on another device')
+  }
+  const { inner, digest, body } = pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert })
+  const opened = openInner(b4a.from(inner), bia.hex, O)
+  t.is(opened.expiresAt, EXP)
+  t.is(dm.bodyDigest(opened), digest, 'a v3 body: the digest its key holder signed')
+  t.is(dm.bodyDigest(body), digest)
+  t.not(dm.bodyDigest(openInner(msg({ text: 'outra' }), bia.hex, O)), dm.frameDigest(msg()), 'another text, another digest')
+  t.exception.all(() => dm.bodyDigest(null), /mensagem inválida/)
+  t.exception.all(() => dm.frameDigest(b4a.alloc(10)), /mensagem inválida/)
 })

@@ -8177,6 +8177,7 @@ Regras que os passos conferem:
 - Toques rápidos: espera de 600 ms e só a última escolha é enviada; voltar à escolha inicial não envia nada nem gasta selo.
 - Uma recusa desfaz a ficha e mostra o texto do nó. Uma resposta sem confirmação ("não deu para confirmar o envio") mantém a ficha, com a nota "Não deu para confirmar a reação."; o app nunca reenvia sozinho.
 - Fichas escondidas: agindo como Página e numa conversa com uma Página (o nó confirmou, pela leitura da outra conta, que ela é Página). Fichas visíveis e controles desligados: enquanto essa leitura não respondeu, offline, com a identidade trancada, com a pessoa bloqueada e num pedido de mensagem (Pedidos). Uma mensagem apagada não tem fichas.
+- A reação vale só para a mensagem exata em que foi feita: leva o resumo SHA-256 da mensagem (`target.digest`), e outra mensagem guardada com o mesmo remetente e o mesmo id não a mostra. Uma mensagem guardada antes deste build não tem resumo e não aceita reação: `dm.thread` a marca com `reactable: false`, o app esconde nela fichas, reações rápidas e "+", e o nó recusa `dm.react` com "esta mensagem não aceita reações" sem gastar selo (a tela desfaz a ficha e mostra o texto, sem reenviar). Uma reação feita num aparelho que guardou a mensagem com resumo gasta dois selos e aparece ali, mas não aparece num aparelho (da outra pessoa ou seu) que guardou a mesma mensagem antes deste build.
 - Um link dentro de um spoiler também não monta cartão de prévia no envio de uma conversa direta (fecha o limite da seção 183).
 - O texto do emoji vem do par: passa por `displayText` antes de ir para a tela.
 - App: `apps/app/src/screens/Mensagem.js`, `apps/app/src/dm-screen.js` (`dmReactionGate`, `reactDebounce`, `dmReactions`), `ui/Reactions.js`, `ui/ReactionPicker.js`, `reactions.js`.
@@ -8199,6 +8200,7 @@ Como verificar, a partir da raiz:
 - `node packages/rpc/test/sizes.test.js`
 - `node packages/web-member/test/dm-store.test.js`
 - `node packages/web-member/test/dm.test.js`
+- `node packages/web-member/test/dm-e2e.test.js`
 - `(cd apps/app && node ../../scripts/run-tests.js test/dmReactions.test.js)`
 - `(cd apps/app && node ../../scripts/run-tests.js test/legal.test.js)`
 - `(cd apps/app && node ../../scripts/run-tests.js test/vitrine.test.js)`
@@ -8225,6 +8227,7 @@ Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é
 14. Build antigo como outra pessoa: com um app de antes deste PR (PR7) na outra conta, o build novo reage numa conversa direta. Esperado: o build antigo não mostra a reação, não conta nada (não lido, prévia e ordem iguais) e continua lendo as mensagens seguintes.
 15. Fichas em balão comprido, texto grande, escuro, leitor de tela e Reduzir movimento. Esperado: as fichas quebram de linha sob o balão sem cortar; o alvo de toque é de 44 pt; cada ficha diz o emoji e se é a sua; o contraste da ficha marcada é legível no escuro.
 16. Link em spoiler: envie `||https://example.com||` numa conversa direta. Esperado: nenhum cartão de prévia é montado no envio.
+17. Mensagem antiga: na Vitrine, a primeira mensagem da conversa com "Cecília Ramos" vem com `reactable: false`. Esperado: segurar a mensagem não traz a fileira de reações rápidas nem o "+", e ela não tem fichas; as outras mensagens reagem normalmente.
 
 Rollout, nesta ordem: os semeadores não precisam de mudança (os envelopes são opacos e do mesmo tamanho), depois o pacote web (o nó do navegador escreve e lê reações) e por último o app. Um app mais novo que o pacote web não mostra reações nas conversas; um app antigo ignora as reações que chegam.
 

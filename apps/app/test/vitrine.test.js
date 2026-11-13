@@ -1447,6 +1447,13 @@ test('DM reaction refusals preserve the thread and identify both sender and id',
   const target = { from: f.conversations[0].messages[0].from, id: f.conversations[0].messages[0].id }
   const before = await answer(t, request, 'dm.thread', { peer })
   await refused(t, request, 'dm.react', { to: peer, target: { ...target, from: f.own }, emoji: '👍' }, 'USAGE', 'mensagem não encontrada')
+  const oldPeer = f.conversations[1].peer
+  const old = f.conversations[1].messages[0]
+  const oldThread = await answer(t, request, 'dm.thread', { peer: oldPeer })
+  t.is(oldThread.messages.find((m) => m.id === old.id).reactable, false, 'an older message takes no reaction')
+  t.ok(oldThread.messages.filter((m) => m.id !== old.id).every((m) => !('reactable' in m)), 'the key is absent elsewhere')
+  await refused(t, request, 'dm.react', { to: oldPeer, target: { from: old.from, id: old.id }, emoji: '👍' }, 'USAGE', 'esta mensagem não aceita reações')
+  t.alike(await answer(t, request, 'dm.thread', { peer: oldPeer }), oldThread)
   await refused(t, request, 'dm.react', { to: unknown, target, emoji: '👍' }, 'USAGE', 'mensagem não encontrada')
   await refused(t, request, 'dm.react', { to: peer, target, emoji: 'not an emoji' }, 'USAGE')
   t.alike(await answer(t, request, 'dm.thread', { peer }), before)

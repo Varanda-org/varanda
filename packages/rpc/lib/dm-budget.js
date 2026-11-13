@@ -20,8 +20,10 @@ const DM_INNER_KEYS_V2 = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'replyT
 const DM_INNER_KEYS_V3 = DM_INNER_KEYS_V2
 // v4 is a reaction (kind 'react'), signed under its own domain.
 const DM_INNER_KEYS_V4 = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'target', 'emoji', 'rev', 'at', 'cert'])
-// A reaction's target: the message's sender and id (ids are unique per sender).
-const DM_TARGET_KEYS = Object.freeze(['from', 'id'])
+// A reaction's target: the message's sender and id, and the hex64 sha256 of
+// the canonical JSON of that message's opened inner body, so a reaction
+// applies only to the message it was made for.
+const DM_TARGET_KEYS = Object.freeze(['from', 'id', 'digest'])
 const DM_MEDIA_KEYS = Object.freeze(['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms'])
 // A link card (core lib/link-card.js CARD_KEYS); its image is a media item.
 const DM_CARD_KEYS = Object.freeze(['url', 'host', 'title', 'desc', 'image'])

@@ -787,6 +787,7 @@ export function createVitrineRequest (fixtures, options) {
       if (c && c.blocked) refuse('USAGE', 'você bloqueou esta pessoa')
       const item = c?.messages.find((m) => m.from === target.from && m.id === target.id && !m.deleted)
       if (!item) refuse('USAGE', 'mensagem não encontrada')
+      if (item.reactable === false) refuse('USAGE', 'esta mensagem não aceita reações')
       const rows = item.reactions || []
       if ((rows.find((r) => r.mine)?.emoji || '') === emoji) return { ok: true }
       const next = rows.filter((r) => !r.mine)

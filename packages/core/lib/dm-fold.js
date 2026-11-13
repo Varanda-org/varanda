@@ -84,9 +84,10 @@ function byNewest (a, b) {
 }
 
 // The verified reactions of one conversation, by peer, as { r, f }.
-// reactions: { id, from, to, target: { from, id }, emoji, rev, filedAt }.
+// reactions: { id, from, to, target: { from, id, digest }, emoji, rev, filedAt }.
 // The reactor is the signed `from`, one of the two people; the target names
-// a message of the same conversation by sender and id.
+// a message of the same conversation by sender and id, and by the hex64
+// digest of its opened inner body (core dm.js bodyDigest).
 function reactionsByPeer (self, reactions) {
   const out = new Map()
   for (const r of Array.isArray(reactions) ? reactions : []) {
@@ -97,6 +98,7 @@ function reactionsByPeer (self, reactions) {
     const tg = r.target
     if (tg === null || typeof tg !== 'object' || typeof tg.id !== 'string' || !HEX32.test(tg.id)) continue
     if (tg.from !== self && tg.from !== peer) continue
+    if (!isHex64(tg.digest)) continue
     if (typeof r.emoji !== 'string' || !Number.isInteger(r.rev) || r.rev < 1) continue
     const f = filed(r.filedAt)
     if (!Number.isFinite(f)) continue
@@ -118,7 +120,10 @@ function beats (a, b) {
 
 // Sets `reactions` on the kept rows that a reaction names. A target that is
 // absent, cut off or past the cap has no row here, so its reactions count
-// once it is present (the fold runs over everything stored).
+// once it is present (the fold runs over everything stored). A reaction
+// applies only to the row whose digest it names: another message filed
+// under the same sender and id is not the one it was made for, and a row
+// stored without a digest (an earlier build) takes none.
 function applyReactions (self, kept, list) {
   if (list === undefined || list.length === 0) return
   const rows = new Map()
@@ -126,7 +131,8 @@ function applyReactions (self, kept, list) {
   const winners = new Map()
   for (const r of list) {
     const target = r.target.from + ':' + r.target.id
-    if (!rows.has(target)) continue
+    const row = rows.get(target)
+    if (row === undefined || row.digest === '' || row.digest !== r.target.digest) continue
     const key = target + ':' + r.from
     const best = winners.get(key)
     if (best === undefined || beats(r, best)) winners.set(key, r)
@@ -145,7 +151,8 @@ function applyReactions (self, kept, list) {
 // each a list of { peer, folder, messages, at, unread } newest first.
 // seen: Set of seenKey(from, id) strings.
 // messages: verified bodies { id, from, to, text, replyTo, media?, fwd?, at,
-// filedAt } (media null or absent for a v1 body);
+// filedAt, digest? } (media null or absent for a v1 body; digest the hex64
+// of the canonical inner JSON, absent for a row stored without one);
 // ops: { op, peer, at, filedAt }; reactions: see reactionsByPeer, under
 // the same filing cutoffs as the rows. filedAt is the LOCAL time in ms at which
 // this device stored the row (monotonic, assigned by the node; the send
@@ -191,7 +198,7 @@ function fold ({ self, followSet, messages, ops, seen, reactions } = {}) {
     ids.add(key)
     const mine = m.from === self
     const media = Array.isArray(m.media) && m.media.length > 0 ? m.media : null
-    const row = { id: m.id, from: m.from, to: m.to, text: m.text, replyTo: m.replyTo === undefined ? null : m.replyTo, fwd: m.fwd === 1 ? 1 : 0, media, card: media || !m.card ? null : copyLinkCard(m.card, (d) => ({ ...d })), at: new Date(t).toISOString(), sentAt: m.at, mine, peer, t, f }
+    const row = { id: m.id, from: m.from, to: m.to, text: m.text, replyTo: m.replyTo === undefined ? null : m.replyTo, fwd: m.fwd === 1 ? 1 : 0, media, card: media || !m.card ? null : copyLinkCard(m.card, (d) => ({ ...d })), at: new Date(t).toISOString(), sentAt: m.at, mine, peer, t, f, digest: isHex64(m.digest) ? m.digest : '' }
     if (!byPeer.has(peer)) byPeer.set(peer, [])
     byPeer.get(peer).push(row)
   }
@@ -239,9 +246,11 @@ function fold ({ self, followSet, messages, ops, seen, reactions } = {}) {
 // `at` is the effective time min(sender at, filedAt) in canonical ISO: what
 // every reader orders and pages by. `sentAt` is the sender's claim, shown
 // only as information. `reactions` ([{ emoji, mine }], at most one per
-// person) only when there is one.
+// person) only when there is one. `digest` only when the row has one: what
+// a new reaction to it names (callers never hand it out in dm.thread).
 function publicRow (r) {
   const row = { id: r.id, from: r.from, to: r.to, text: r.text, replyTo: r.replyTo, fwd: r.fwd, media: r.media, card: r.card, at: r.at, sentAt: r.sentAt, mine: r.mine, peer: r.peer }
+  if (r.digest !== '') row.digest = r.digest
   if (r.reactions) row.reactions = r.reactions
   return row
 }
