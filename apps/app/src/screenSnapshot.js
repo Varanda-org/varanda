@@ -72,7 +72,7 @@ const REPOST_KEYS = ['kind', 'author', 'name', 'username', 'seq', 'at', 'to', 't
 const CARD_KEYS = ['url', 'host', 'title', 'desc', 'image']
 const TARGET_KEYS = ['author', 'seq']
 const POST_RECORD_KEYS = ['type', 'text', 'at', 'replyTo']
-const POST_RECORD_EXTRA = ['quote', 'media', 'card']
+const POST_RECORD_EXTRA = ['quote', 'media', 'preview']
 const REPOST_RECORD_KEYS = ['type', 'to', 'on', 'at']
 const PROFILE_KEYS = ['name', 'username', 'bio', 'avatar']
 const MEMBER_KEYS = ['openedAt', 'header', 'items', 'before', 'atEnd', 'originals']
@@ -251,10 +251,10 @@ function recordOf (v, strict) {
     if (!media.ok) return null
     out.media = media.value
   }
-  if (hasOwn(v, 'card')) {
-    const card = cardOf(v.card)
-    if (!card.ok) return null
-    out.card = card.value
+  if (hasOwn(v, 'preview')) {
+    const preview = cardOf(v.preview)
+    if (!preview.ok) return null
+    out.preview = preview.value
   }
   return out
 }

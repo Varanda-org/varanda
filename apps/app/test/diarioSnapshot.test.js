@@ -181,6 +181,67 @@ test('a built diario snapshot seeds rows with the live shape', async (t) => {
   t.is(snap.parseScreenSnapshot(JSON.stringify(built), 'diario', { origin: ORIGIN, association: ASSOC, owner: OWN, acting: { kind: 'page', key: FOLLOW } }), null, 'a page reads nothing')
 })
 
+const SNAPSHOT_BINDING = { origin: ORIGIN, association: ASSOC, owner: OWN, acting: ME, now: Date.UTC(2026, 10, 1) }
+const PREVIEW = {
+  url: 'https://example.com/article',
+  host: 'example.com',
+  title: 'An article',
+  desc: 'An article description',
+  image: { core: '12'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 1000, sha256: '34'.repeat(32), width: 640, height: 360 }
+}
+
+function snapshotWithPost (snap, extra = {}) {
+  return snap.buildScreenSnapshot('diario', {
+    ...SNAPSHOT_BINDING,
+    log: {
+      key: OWN,
+      entries: [
+        { seq: 2, record: { type: 'post', text: PREVIEW.url, at: at(2), replyTo: null, ...extra } },
+        { seq: 1, record: { type: 'post', text: 'before', at: at(1), replyTo: null } }
+      ],
+      entriesTruncated: 0
+    }
+  })
+}
+
+test('diario post previews survive building and strict parsing unchanged', async (t) => {
+  const snap = await import('../src/screenSnapshot.js')
+  for (const preview of [PREVIEW, { ...PREVIEW, image: null }, null]) {
+    const built = snapshotWithPost(snap, { preview })
+    t.alike(built.body.rows.map((r) => r.seq), [2, 1], 'the preview row is kept')
+    t.alike(built.body.rows[0].record.preview, preview, 'the built preview is unchanged')
+    const stored = snapshotWithPost(snap)
+    stored.body.rows[0].record.preview = preview
+    const parsed = snap.parseScreenSnapshot(JSON.stringify(stored), 'diario', SNAPSHOT_BINDING)
+    t.ok(parsed, 'a stored preview parses')
+    t.alike(parsed && parsed.body.rows[0].record.preview, preview, 'the parsed preview is unchanged')
+  }
+})
+
+test('an invalid diario post preview is skipped on build and rejects the stored snapshot', async (t) => {
+  const snap = await import('../src/screenSnapshot.js')
+  for (const preview of [{ ...PREVIEW, extra: true }, { ...PREVIEW, url: 'not a URL' }]) {
+    const built = snapshotWithPost(snap, { preview })
+    t.alike(built.body.rows.map((r) => r.seq), [1], 'only the invalid row is skipped on build')
+    const stored = snapshotWithPost(snap)
+    stored.body.rows[0].record.preview = preview
+    t.is(snap.parseScreenSnapshot(JSON.stringify(stored), 'diario', SNAPSHOT_BINDING), null, 'the whole stored snapshot is refused')
+  }
+})
+
+test('diario post records refuse the card key', async (t) => {
+  const snap = await import('../src/screenSnapshot.js')
+  const built = snapshotWithPost(snap, { card: PREVIEW })
+  t.alike(built.body.rows.map((r) => r.seq), [1], 'the card row is skipped on build')
+  const stored = snapshotWithPost(snap)
+  stored.body.rows[0].record.card = PREVIEW
+  t.is(snap.parseScreenSnapshot(JSON.stringify(stored), 'diario', SNAPSHOT_BINDING), null, 'the card key fails strict parsing')
+})
+
+test('postOf passes the own post preview to the feed item', (t) => {
+  t.ok(fnText(CODE, 'postOf').includes('preview: record.preview || null'))
+})
+
 const ARUA = withoutComments(fs.readFileSync(path.join(APP, 'src/screens/ARua.js'), 'utf8'))
 
 function seededSeqsShown () {
