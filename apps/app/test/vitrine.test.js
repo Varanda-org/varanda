@@ -81,6 +81,8 @@ const resultKeys = {
   'group.join': ['state'],
   'group.leave': ['state'],
   'group.hide': ['ok'],
+  'group.react': ['ok'],
+  'group.reactors': ['reactions'],
   'group.rekey': ['group', 'epoch'],
   'group.members': ['members', 'total'],
   'group.requests': ['requests', 'total'],
@@ -114,6 +116,7 @@ const resultKeys = {
   'dm.thread': ['messages', 'next', 'folder', 'blocked'],
   'dm.seen': ['ok'],
   'dm.send': ['id', 'at'],
+  'dm.react': ['ok'],
   'dm.lookup': ['box', 'gen'],
   'group.list': ['groups', 'total'],
   'group.read': ['items', 'next', 'hidden', 'incomplete', 'sealed', 'epoch', 'state'],
@@ -133,6 +136,7 @@ const resultKeys = {
   'moment.putMedia': ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms'],
   'moment.create': ['seq', 'ref'],
   'moments.read': ['authors', 'own', 'past'],
+  'moment.lookup': ['mime', 'w', 'h', 'ms', 'at'],
   'moment.delete': ['seq', 'deleted']
 }
 
@@ -230,7 +234,7 @@ test('all vitrine methods match the documented result and row keys', async (t) =
     t.is(typeof row.unread, 'boolean')
   }
   const thread = await answer(t, request, 'dm.thread', { peer })
-  for (const row of thread.messages) keys(t, row, ['id', 'from', 'text', 'replyTo', 'at', 'mine', 'media', ...(row.card ? ['card'] : [])])
+  for (const row of thread.messages) keys(t, row, ['id', 'from', 'text', 'replyTo', 'at', 'mine', 'media', ...(row.card ? ['card'] : []), ...(row.reactions ? ['reactions'] : [])])
   t.alike(await answer(t, request, 'dm.seen', { peer }), { ok: true })
   const sent = await answer(t, request, 'dm.send', { to: peer, text: 'Combinado!' })
   t.ok(/^[0-9a-f]{32}$/.test(sent.id))
@@ -242,7 +246,7 @@ test('all vitrine methods match the documented result and row keys', async (t) =
   t.is(listed.total, 5)
   for (const row of listed.groups) keys(t, row, ['group', 'name', 'join', 'role', 'members', 'community'])
   const read = await answer(t, request, 'group.read', { group })
-  for (const row of read.items) keys(t, row, ['writer', 'diary', 'seq', 'at', 'text', 'replyTo', 'hidden', 'media', 'name', 'username'])
+  for (const row of read.items) keys(t, row, ['writer', 'diary', 'seq', 'at', 'text', 'replyTo', 'hidden', 'media', 'name', 'username', ...(row.reactions ? ['reactions'] : [])])
   t.alike([read.hidden, read.incomplete, read.sealed, read.epoch, read.state], [0, false, 0, null, 'ok'])
   const groupInfo = await answer(t, request, 'group.info', { group })
   t.is(groupInfo.canWrite, true)
@@ -599,6 +603,7 @@ function samples (f) {
     'moment.putMedia': { name: '0'.repeat(32) + '.bin', mime: 'image/jpeg', width: 512, height: 512 },
     'moment.create': { text: 'Bom dia, praça!', media: f.diaryRecords.find((e) => e.record.type === 'moment').record.media },
     'moments.read': {},
+    'moment.lookup': { author: f.follows.find((a) => f.diaryRecords.some((e) => e.author === a && e.record.type === 'moment')), seq: Math.max(...f.diaryRecords.filter((e) => e.record.type === 'moment' && e.author === f.follows.find((a) => f.diaryRecords.some((x) => x.author === a && x.record.type === 'moment'))).map((e) => e.seq)) },
     'moment.delete': { to: `${f.own}:48` },
     'account.sign': { phase: 'reserve', nonce, username: 'lia_praca', sub: '' },
     'age.sign': { action: 'result', nonce },
@@ -643,6 +648,7 @@ function samples (f) {
     'dm.seen': { peer: member },
     'dm.set': { peer: member, state: 'accepted' },
     'dm.send': { to: member, text: 'Olá!' },
+    'dm.react': { to: f.conversations[0].peer, target: { from: f.conversations[0].messages[0].from, id: f.conversations[0].messages[0].id }, emoji: '👍' },
     'group.create': { name: 'Encontro na praça', join: 'open', community },
     'group.list': {},
     'group.info': { group },
@@ -653,6 +659,8 @@ function samples (f) {
     'group.post': { group, text: 'Vamos nos encontrar!' },
     'group.seen': { group },
     'group.hide': { group, target: { writer: f.groups[3].items[0].writer, seq: 2 }, on: true },
+    'group.react': { group, target: { writer: f.groups[3].items[0].writer, seq: 2 }, emoji: '👍' },
+    'group.reactors': { group, target: { writer: f.groups[3].items[0].writer, seq: 2 } },
     'group.rekey': { group },
     'community.create': { name: 'Amigos da praça', join: 'open' },
     'community.list': {},
@@ -722,6 +730,23 @@ test('the own likes and reposts in the fixtures start active and toggle off', as
     t.is(off.changed, true)
     t.alike((await call('engagement.read', { refs: [ref] }))[key], [])
   }
+})
+
+test('a published link card reaches the diary and A Rua', async (t) => {
+  const { fixtures: f, request } = await load()
+  const call = (method, params) => answer(t, request, method, params)
+  const own = async (seq) => (await call('feed.read')).items.find((p) => p.author === f.own && p.seq === seq)
+  const card = { url: 'https://example.com/a', host: 'example.com', title: 'Título', desc: '', image: null }
+  for (const method of ['post.create', 'post.reply', 'post.quote']) {
+    const target = method === 'post.create' ? {} : { to: (await call('post.create', { text: 'alvo' })).ref }
+    const { seq } = await call(method, { ...target, text: 'com cartão ' + method, preview: card })
+    const log = await call('log.read', { limit: 1 })
+    t.alike(log.entries[0].record.preview, card, method + ' keeps the card in the diary')
+    t.alike((await own(seq)).preview, card, method + ' keeps the card in A Rua')
+  }
+  const { seq } = await call('post.create', { text: 'sem cartão' })
+  t.absent('preview' in (await call('log.read', { limit: 1 })).entries[0].record)
+  t.is((await own(seq)).preview, null)
 })
 
 test('diary writes, tombstones, reactions, follows and profile changes are visible locally', async (t) => {
@@ -1261,6 +1286,24 @@ test('depoimentos: fixtures validate, pending is shown, removed and revoked', as
   await refused(t, request, 'testimonial.delete', { to: `${joao}:61` }, 'USAGE', 'referência inválida')
 })
 
+test('momentos: a reaction keeps its moment seq on dm.thread', async (t) => {
+  const { fixtures: f, request } = await load()
+  const peer = f.follows.find((a) => f.diaryRecords.some((e) => e.author === a && e.record.type === 'moment'))
+  const seq = Math.max(...f.diaryRecords.filter((e) => e.record.type === 'moment' && e.author === peer).map((e) => e.seq))
+  await answer(t, request, 'moment.lookup', { author: peer, seq })
+  const gone = await request('dm.send', { to: peer, text: '❤️', moment: 999999 }).then(() => null, (err) => err)
+  t.is(gone && gone.message, 'momento não encontrado', 'a seq that is not showing is refused, like the node')
+  t.absent((await answer(t, request, 'dm.thread', { peer })).messages.some((m) => m.moment === 999999), 'the refused reaction is not stored')
+  const listed = async () => (await answer(t, request, 'dm.list', { folder: 'inbox' })).conversations.find((c) => c.peer === peer).preview
+  const withMoment = await answer(t, request, 'dm.send', { to: peer, text: '❤️', moment: seq })
+  t.is(await listed(), 'Reagiu a um momento ❤️', 'the list shows the node label, never the seq')
+  const plain = await answer(t, request, 'dm.send', { to: peer, text: 'Oi' })
+  t.is(await listed(), 'Oi', 'a plain message after it previews its text')
+  const rows = (await answer(t, request, 'dm.thread', { peer })).messages
+  t.is(rows.find((m) => m.id === withMoment.id).moment, seq, 'the reaction carries the moment')
+  t.absent('moment' in rows.find((m) => m.id === plain.id), 'a plain message stores no moment key')
+})
+
 test('momentos: fixtures validate, moments.read follows the 24 h rule and the caps', async (t) => {
   const { fixtures: f, request, createVitrineRequest } = await load()
   const { validateRecord } = require('@varanda/core/lib/records')
@@ -1281,7 +1324,7 @@ test('momentos: fixtures validate, moments.read follows the 24 h rule and the ca
   for (const a of read.authors) {
     keys(t, a, ['author', 'items'])
     for (const item of a.items) {
-      keys(t, item, ['seq', 'ref', 'text', 'at', 'media'])
+      keys(t, item, ['seq', 'ref', 'text', 'at', 'media', 'music'])
       t.is(item.ref, a.author + ':' + item.seq)
       const age = Date.parse(f.now) - Date.parse(item.at)
       t.ok(age >= 0 && age < 86400000, 'inside the 24 h of the demo clock')
@@ -1367,4 +1410,126 @@ test('momentos: putMoment, moment.create, the photo read and moment.delete', asy
   t.absent(after.own.some((i) => i.seq === 48))
   t.alike(after.past.map((i) => i.seq), [46], 'a past moment can be deleted too')
   t.alike((await call('diary.peek', { author: f.own, seqs: [48] })).missing, [48])
+})
+
+test('group reactions replace, remove and hide without leaking reactor keys in reads', async (t) => {
+  const { fixtures: f, request, createVitrineRequest } = await load()
+  const group = f.groups[0].group
+  const item = f.groups[0].items[0]
+  const target = { writer: item.writer, seq: item.seq }
+  const read = async () => (await request('group.read', { group })).items.find((p) => p.writer === target.writer && p.seq === target.seq)
+  const react = (emoji) => answer(t, request, 'group.react', { group, target, emoji })
+  t.alike((await read()).reactions, item.reactions)
+  await react('❤️')
+  t.alike((await read()).reactions, item.reactions, 'same emoji is a no-op')
+  await react('😂')
+  t.alike((await read()).reactions.find((r) => r.emoji === '❤️'), { emoji: '❤️', count: 1, mine: false })
+  t.alike((await read()).reactions.find((r) => r.mine), { emoji: '😂', count: 1, mine: true })
+  const who = await answer(t, request, 'group.reactors', { group, target })
+  t.alike(who.reactions.find((r) => r.emoji === '😂').by, [f.own])
+  t.ok((await read()).reactions.every((r) => !Object.hasOwn(r, 'by')))
+  await react('')
+  t.absent((await read()).reactions.some((r) => r.mine || r.emoji === '😂'))
+  await react('👍')
+  t.alike((await read()).reactions.find((r) => r.mine), { emoji: '👍', count: 2, mine: true })
+  await request('group.hide', { group, target, on: true })
+  t.absent(Object.hasOwn(await read(), 'reactions'))
+  await refused(t, request, 'group.react', { group, target, emoji: '👍' }, 'USAGE')
+  await refused(t, request, 'group.reactors', { group, target }, 'USAGE')
+  await request('group.hide', { group, target, on: false })
+  t.ok((await read()).reactions.some((r) => r.mine))
+  t.alike((await createVitrineRequest(f)('group.read', { group })).items.find((p) => p.writer === target.writer).reactions, item.reactions, 'instances are isolated')
+  await request('group.leave', { group })
+  await refused(t, request, 'group.react', { group, target, emoji: '👍' }, 'USAGE')
+})
+
+test('DM reactions replace and remove only mine without changing inbox previews or unread', async (t) => {
+  const { fixtures: f, request } = await load()
+  const { pageReadKind } = await import('../src/pageNotice.js')
+  const peer = f.conversations[0].peer
+  const first = f.conversations[0].messages[0]
+  const target = { from: first.from, id: first.id }
+  const inbox = await answer(t, request, 'dm.list')
+  const read = () => answer(t, request, 'dm.thread', { peer })
+  t.alike((await read()).messages[0].reactions, [{ emoji: '❤️', mine: true }, { emoji: '❤️', mine: false }])
+  const react = (emoji) => answer(t, request, 'dm.react', { to: peer, target, emoji })
+  t.alike(await react('👍'), { ok: true })
+  t.alike((await read()).messages[0].reactions, [{ emoji: '❤️', mine: false }, { emoji: '👍', mine: true }])
+  const replaced = await read()
+  await react('👍')
+  t.alike(await read(), replaced, 'same choice is a no-op')
+  await react('')
+  t.alike((await read()).messages[0].reactions, [{ emoji: '❤️', mine: false }])
+  await react('❤️')
+  t.alike((await read()).messages[0].reactions, [{ emoji: '❤️', mine: false }, { emoji: '❤️', mine: true }])
+  t.alike(await answer(t, request, 'dm.list'), inbox, 'preview, ordering and unread are unchanged')
+  const { dmReactionGate } = await import('../src/dm-screen.js')
+  const readPeer = await answer(t, request, 'page.read', { key: peer })
+  t.is(readPeer.complete, false)
+  t.alike(dmReactionGate({ read: readPeer, peer, peerKind: pageReadKind(readPeer, peer), hosted: true, unlocked: true, online: true, isTop: true, folder: 'inbox' }), { hidden: false, disabled: false })
+  const completePeer = f.members[2].author
+  t.is(pageReadKind(await answer(t, request, 'page.read', { key: completePeer }), completePeer), 'person')
+  const page = f.pages[0].author
+  t.is(pageReadKind(await answer(t, request, 'page.read', { key: page }), page), 'page')
+  const clean = f.conversations[0].messages[1]
+  const ownTarget = { from: clean.from, id: clean.id }
+  await answer(t, request, 'dm.react', { to: peer, target: ownTarget, emoji: '👍' })
+  await answer(t, request, 'dm.react', { to: peer, target: ownTarget, emoji: '' })
+  t.absent((await read()).messages[1].reactions, 'empty reactions are omitted')
+})
+
+test('DM reaction refusals preserve the thread and identify both sender and id', async (t) => {
+  const { fixtures: f, request } = await load()
+  const peer = f.conversations[0].peer
+  const target = { from: f.conversations[0].messages[0].from, id: f.conversations[0].messages[0].id }
+  const before = await answer(t, request, 'dm.thread', { peer })
+  await refused(t, request, 'dm.react', { to: peer, target: { ...target, from: f.own }, emoji: '👍' }, 'USAGE', 'mensagem não encontrada')
+  const oldPeer = f.conversations[1].peer
+  const old = f.conversations[1].messages[0]
+  const oldThread = await answer(t, request, 'dm.thread', { peer: oldPeer })
+  t.is(oldThread.messages.find((m) => m.id === old.id).reactable, false, 'an older message takes no reaction')
+  t.ok(oldThread.messages.filter((m) => m.id !== old.id).every((m) => !('reactable' in m)), 'the key is absent elsewhere')
+  await refused(t, request, 'dm.react', { to: oldPeer, target: { from: old.from, id: old.id }, emoji: '👍' }, 'USAGE', 'esta mensagem não aceita reações')
+  t.alike(await answer(t, request, 'dm.thread', { peer: oldPeer }), oldThread)
+  await refused(t, request, 'dm.react', { to: unknown, target, emoji: '👍' }, 'USAGE', 'mensagem não encontrada')
+  await refused(t, request, 'dm.react', { to: peer, target, emoji: 'not an emoji' }, 'USAGE')
+  t.alike(await answer(t, request, 'dm.thread', { peer }), before)
+  await answer(t, request, 'dm.set', { peer, state: 'blocked' })
+  await refused(t, request, 'dm.react', { to: peer, target, emoji: '👍' }, 'USAGE', 'você bloqueou esta pessoa')
+  t.alike((await answer(t, request, 'dm.thread', { peer })).messages, before.messages)
+})
+
+test('a conversation without a profile has an unknown diary with no roster evidence', async (t) => {
+  const { fixtures: f, request } = await load()
+  const { pageReadKind } = await import('../src/pageNotice.js')
+  const { dmReactionGate } = await import('../src/dm-screen.js')
+  const peers = f.conversations.filter((c) => !f.members.some((p) => p.author === c.peer) && !f.pages.some((p) => p.author === c.peer))
+  t.ok(peers.length > 0)
+  for (const { peer } of peers) {
+    const read = await answer(t, request, 'page.read', { key: peer })
+    t.alike({ complete: read.complete, gen: read.gen, owner: read.owner }, { complete: false, gen: null, owner: null })
+    t.is(pageReadKind(read, peer), 'unknown')
+    t.alike(dmReactionGate({ read, peer, peerKind: pageReadKind(read, peer), hosted: true, unlocked: true, online: true, isTop: true, folder: 'inbox' }), { hidden: false, disabled: false })
+  }
+})
+
+test('group reactions outside the 12 shown stay counted and come back, as in the core fold', async (t) => {
+  const { fixtures, createVitrineRequest } = await load()
+  const f = clone(fixtures)
+  const item = f.groups[0].items[0]
+  const twelve = Array.from({ length: 12 }, (_, i) => String.fromCodePoint(0x1f601 + i))
+  item.reactions = twelve.map((emoji) => ({ emoji, count: 1, mine: false }))
+  const request = createVitrineRequest(f)
+  const group = f.groups[0].group
+  const target = { writer: item.writer, seq: item.seq }
+  const read = async () => (await request('group.read', { group })).items.find((p) => p.writer === target.writer && p.seq === target.seq)
+  // An emoji that sorts first pushes the last of the twelve out of view.
+  await answer(t, request, 'group.react', { group, target, emoji: '\u{1f600}' })
+  const shown = (await read()).reactions.map((r) => r.emoji)
+  t.alike(shown, ['\u{1f600}', ...twelve.slice(0, 11)])
+  const who = await answer(t, request, 'group.reactors', { group, target })
+  t.alike(who.reactions.map((r) => r.emoji), shown, 'group.reactors lists the same 12')
+  // Taking the reaction back shows the hidden emoji again with its count.
+  await answer(t, request, 'group.react', { group, target, emoji: '' })
+  t.alike((await read()).reactions, twelve.map((emoji) => ({ emoji, count: 1, mine: false })))
 })

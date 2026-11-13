@@ -76,7 +76,10 @@ const {
   MAX_MEDIA_PER_POST,
   MAX_MEDIA_ITEM_BLOCKS,
   AUDIO_MIME,
-  validAudioDescriptor
+  validAudioDescriptor,
+  VIDEO_MIME,
+  validVideoDescriptor,
+  validPostMedia
 } = require('@varanda/core/lib/records')
 const { validateDescriptor, validateMediaHeader, latestMediaCores, followSet, hasFollowRecords } = require('@varanda/core/lib/media')
 const { latestUsername, heldUsernames } = require('@varanda/core/lib/username')
@@ -93,7 +96,7 @@ const { sealOffer, commitment } = require('@varanda/core/lib/testimonials')
 const grp = require('@varanda/core/lib/group')
 const gc = require('@varanda/core/lib/group-crypto')
 const { validPrivateItem, copyGroupMedia, PRIVATE_ITEM_KEYS, MAX_GROUP_MEDIA } = require('@varanda/core/lib/group-media')
-const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, COMMUNITY_LIST_MAX, feira } = require('@varanda/rpc')
+const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX, COMMUNITY_LIST_MAX, feira, mediaBounds, videoBounds } = require('@varanda/rpc')
 const listing = require('@varanda/core/lib/listing')
 const { stillImageSize } = require('@varanda/core/lib/still-image')
 const store = require('./node-store')
@@ -438,8 +441,27 @@ function hasMedia (media) {
   return media !== undefined && media !== null
 }
 
+// A post's media: photos, or the [JPEG poster, video] pair, whose bytes
+// decide too: the poster must be a JPEG of its descriptor's sides, and the
+// video pass the strict check a reader makes with exactly its descriptor's
+// sides and duration. Listings and group posts keep their own checks.
+function verifyPostMedia (ctx, media) {
+  if (!validPostMedia(media)) return verifyMedia(ctx, media)
+  const [poster, video] = media
+  const valid = (d) => d === poster ? validateDescriptor(d) === null && d.mime === 'image/jpeg' : d === video && validVideoDescriptor(d)
+  const inspect = (d, bytes) => {
+    if (d === video) {
+      const v = videoBounds(bytes)
+      return v !== null && v.width === d.width && v.height === d.height && v.ms === d.ms
+    }
+    const b = mediaBounds(bytes, 'image/jpeg')
+    return b !== null && b.width === d.width && b.height === d.height
+  }
+  return verifyMedia(ctx, media, inspect, valid, 2)
+}
+
 async function postCreate (ctx, { text, media, preview }) {
-  if (hasMedia(media)) await verifyMedia(ctx, media)
+  if (hasMedia(media)) await verifyPostMedia(ctx, media)
   if (preview && preview.image !== null) await verifyMedia(ctx, [preview.image])
   return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, media, preview } : { text, preview })))
 }
@@ -447,7 +469,7 @@ async function postCreate (ctx, { text, media, preview }) {
 // to is the parsed { author, seq } reference.
 async function postReply (ctx, { to, text, media, preview }) {
   if (!(to.seq >= 1)) throw new UsageError('referência inválida')
-  if (hasMedia(media)) await verifyMedia(ctx, media)
+  if (hasMedia(media)) await verifyPostMedia(ctx, media)
   if (preview && preview.image !== null) await verifyMedia(ctx, [preview.image])
   return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, replyTo: to, media, preview } : { text, replyTo: to, preview })))
 }
@@ -456,7 +478,7 @@ async function postReply (ctx, { to, text, media, preview }) {
 // for a reply.
 async function postQuote (ctx, { to, text, media, preview }) {
   if (!(to.seq >= 1)) throw new UsageError('referência inválida')
-  if (hasMedia(media)) await verifyMedia(ctx, media)
+  if (hasMedia(media)) await verifyPostMedia(ctx, media)
   if (preview && preview.image !== null) await verifyMedia(ctx, [preview.image])
   return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, quote: to, media, preview } : { text, quote: to, preview })))
 }
@@ -468,9 +490,9 @@ const MOMENT_MEDIA_STALE = 'prepare a mídia de novo'
 // owned(item): whether the dm engine's putPublicMedia answered exactly this
 // item in this unlock; anything else (an item from another unlock, another
 // node or a DM) is refused before a record is built.
-async function momentCreate (ctx, { text, media, owned }) {
+async function momentCreate (ctx, { text, media, music, owned }) {
   if (typeof owned !== 'function' || owned(media) !== true) throw new UsageError(MOMENT_MEDIA_STALE)
-  return publish(ctx, buildRecord(() => momentRecord({ text, media })))
+  return publish(ctx, buildRecord(() => momentRecord({ text, media, music })))
 }
 
 // Tombstones the caller's own moment `to` (parsed ref) -> recordDelete's
@@ -503,9 +525,9 @@ async function momentsRead (ctx, { now = Date.now() } = {}) {
   }
 }
 
-// The media item of the showing moment author:seq from local data (the own
-// diary or a stored replica, logRead's admission), or null.
-async function momentMedia (ctx, { author, seq, now = Date.now() }) {
+// The showing moment author:seq from local data (the own diary or a stored
+// replica, logRead's admission) as { media, entries }, or null.
+async function showingEntry (ctx, { author, seq, now = Date.now() }) {
   const key = String(author).toLowerCase()
   if (!HEX64.test(key) || !Number.isSafeInteger(seq) || seq < 1) return null
   let log
@@ -519,7 +541,24 @@ async function momentMedia (ctx, { author, seq, now = Date.now() }) {
   // 24 h keeps its photo after newer ones fill the strip.
   const association = await trustRoot(ctx)
   const { revokedIssuers } = await moderation(ctx.storage, association)
-  return showingMoment({ key, entries: log.entries }, seq, now, { association, revokedIssuers })
+  const media = showingMoment({ key, entries: log.entries }, seq, now, { association, revokedIssuers })
+  return media === null ? null : { media, entries: log.entries }
+}
+
+// The media item of the showing moment author:seq, or null.
+async function momentMedia (ctx, args) {
+  const shown = await showingEntry(ctx, args)
+  return shown === null ? null : shown.media
+}
+
+// moment.lookup (docs/rpc.md 5.120): the media item and the record's at, or
+// null. Each reaction preview polls it, so it reads the diary once.
+async function momentLookup (ctx, args) {
+  const shown = await showingEntry(ctx, args)
+  if (shown === null) return null
+  const e = shown.entries.find((x) => x !== null && typeof x === 'object' && x.seq === args.seq)
+  if (e === undefined || e.record === null || typeof e.record !== 'object' || typeof e.record.at !== 'string') return null
+  return { media: shown.media, at: e.record.at }
 }
 
 // ---- feira (docs/protocol.md, "Feira") ----
@@ -1310,6 +1349,32 @@ async function mediaCommitAudio (ctx, { blocks, sha256, ms } = {}) {
     const start = await store.appendMediaBlocks(core, blocks)
     const descriptor = { core: coreHex, mime: AUDIO_MIME, start, blocks: blocks.length, bytes, sha256, width: 0, height: 0, ms }
     if (!validAudioDescriptor(descriptor)) throw badMedia()
+    return descriptor
+  })
+}
+
+// The short video counterpart of mediaCommit (a post's [poster, video]
+// pair): the same blocks, stored as a video descriptor with its duration.
+// mediaCommit cannot carry ms. The caller (session mediaUpload) has checked
+// the bytes with videoBounds, and width, height and ms are the container's.
+async function mediaCommitVideo (ctx, { blocks, sha256, width, height, ms } = {}) {
+  if (keyPairOf(ctx) === null || mediaKeyPairOf(ctx) === null) throw new UsageError(store.LOCKED)
+  if (!Array.isArray(blocks) || blocks.length < 1 || blocks.length > MAX_MEDIA_ITEM_BLOCKS) throw badMedia()
+  let bytes = 0
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i]
+    if (!(block instanceof Uint8Array)) throw badMedia()
+    const n = block.byteLength
+    if (i < blocks.length - 1 ? n !== MEDIA_BLOCK_BYTES : (n < 1 || n > MEDIA_BLOCK_BYTES)) throw badMedia()
+    bytes += n
+  }
+  if (typeof sha256 !== 'string' || !isHex64(sha256) || (await sha256Hex(blocks)) !== sha256) throw badMedia()
+  const shape = { core: '0'.repeat(64), mime: VIDEO_MIME, start: 1, blocks: blocks.length, bytes, sha256, width, height, ms }
+  if (!validVideoDescriptor(shape)) throw badMedia()
+  return withOwnMediaCore(ctx, async ({ core, coreHex }) => {
+    const start = await store.appendMediaBlocks(core, blocks)
+    const descriptor = { core: coreHex, mime: VIDEO_MIME, start, blocks: blocks.length, bytes, sha256, width, height, ms }
+    if (!validVideoDescriptor(descriptor)) throw badMedia()
     return descriptor
   })
 }
@@ -3067,6 +3132,52 @@ async function groupHide (ctx, { group, target, on }) {
   })
 }
 
+const GROUP_POST_MISSING = 'mensagem não encontrada'
+
+// A visible post of fold g at `target`: hidden posts and posts of diaries
+// left out of the fold's readers take no reactions and list no reactors.
+function visiblePost (g, target) {
+  const post = g.built.posts.find((p) => p.writer === target.writer && p.seq === target.seq)
+  if (post === undefined || post.hidden || !g.diaries.get(post.diary)) throw new UsageError(GROUP_POST_MISSING)
+  return post
+}
+
+// group.read's compact summary: never the `by` lists, whose size the page
+// maximum does not cover (docs/rpc.md section 2). Absent when empty.
+function reactionSummary (post, ownHex) {
+  if (!Array.isArray(post.reactions) || post.reactions.length === 0) return {}
+  return { reactions: post.reactions.map((r) => ({ emoji: r.emoji, count: r.count, mine: r.by.includes(ownHex) })) }
+}
+
+// Who may post may react (docs/rpc.md 5.117): a current member with a live
+// writer, on any visible post. Re-sending the reaction the fold already
+// counts writes nothing.
+async function groupReact (ctx, { group, target, emoji }) {
+  return withGroup(ctx, group, true, async ({ ownHex, g }) => {
+    const own = liveOwnWriter(g, ownHex)
+    if (own === null || statusOf(g, ownHex) !== 'member') throw new UsageError(GROUP_FORBIDDEN)
+    const post = visiblePost(g, target)
+    // The fold cuts the list at GROUP_REACTIONS_MAX emojis, so a full list
+    // may hide the caller's reaction: only a list with room proves none.
+    const list = Array.isArray(post.reactions) ? post.reactions : []
+    const current = list.find((r) => r.by.includes(ownHex))
+    if (current !== undefined ? current.emoji === emoji : emoji === '' && list.length < GROUP_REACTIONS_MAX) return { ok: true }
+    requireCounted(g, own.key)
+    let record = buildRecord(() => grp.groupReact({ target, emoji, seen: g.built.last }))
+    if (g.private) record = sealForGroup(ctx, g, own.key, record)
+    await appendToOwnGroupCore(ctx, own, record, g.private)
+    return { ok: true }
+  })
+}
+
+async function groupReactors (ctx, { group, target }) {
+  return withGroup(ctx, group, false, async ({ g }) => {
+    const post = visiblePost(g, target)
+    const reactions = Array.isArray(post.reactions) ? post.reactions : []
+    return { reactions: reactions.map((r) => ({ emoji: r.emoji, count: r.count, by: r.by.slice(0, GROUP_REACTORS_MAX) })) }
+  })
+}
+
 // The creator and current admins (community admins included) are never
 // targets of an admit or a ban; the caller's authority is moderatorOf's.
 function checkTarget (g, ownHex, member) {
@@ -3245,6 +3356,7 @@ function readFold (base, g, { limit, before }) {
     media: p.hidden || !Array.isArray(p.media) ? null : copyGroupMedia(p.media, typeof p.media[0].key === 'string'),
     card: p.hidden || !p.card ? null : copyLinkCard(p.card, (d) => ({ ...d })),
     hidden: p.hidden,
+    ...reactionSummary(p, base.ownHex),
     ...authorOf(g, p.diary, base.association, base.mod)
   }))
   const oldest = items.length > 0 ? items[items.length - 1] : null
@@ -5302,6 +5414,7 @@ module.exports = {
   momentDelete,
   momentsRead,
   momentMedia,
+  momentLookup,
   usernameAdd,
   ownEntries,
   ownNoticeContext,
@@ -5320,6 +5433,7 @@ module.exports = {
   mediaPrepare,
   mediaCommit,
   mediaCommitAudio,
+  mediaCommitVideo,
   mediaCommitSealed,
   declareMediaCore,
   verifyMedia,
@@ -5333,6 +5447,8 @@ module.exports = {
   groupLeave,
   groupPost,
   groupHide,
+  groupReact,
+  groupReactors,
   groupBan,
   groupAdmit,
   groupAdmin,

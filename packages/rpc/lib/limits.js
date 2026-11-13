@@ -32,6 +32,14 @@ const AVATAR_SIDE = 512
 const MAX_AVATAR_BLOCKS = 8
 const MAX_AVATAR_BYTES = 262144
 const AVATAR_MIMES = Object.freeze(['image/jpeg', 'image/webp'])
+// Short videos, same values as records.js: a post's [JPEG poster, video]
+// pair and a momento video (its blob bytes add the DM_MEDIA_MAC_BYTES MAC).
+const VIDEO_MIME = 'video/mp4'
+const MAX_VIDEO_MS = 30000
+const MAX_VIDEO_DIMENSION = 1920
+const MAX_VIDEO_PIXELS = 2073600
+const MAX_MOMENT_VIDEO_MS = 15000
+const MAX_MOMENT_VIDEO_BYTES = 4194304
 // DM media items: blob descriptors of packages/core/lib/blob.js
 // (BLOB_CHUNK_BYTES, BLOB_MAX_CHUNKS, BLOB_MAC_BYTES; not imported: zero deps)
 // plus mime, w, h and ms (docs/protocol.md section 11).
@@ -66,19 +74,27 @@ const PROFILE_LIMIT_MAX = 100
 const ENGAGEMENT_LIMIT_MAX = 62
 const PEEK_SEQS_MAX = 29
 // The largest page whose worst case includes a maximal private link card
-// per post and still fits MAX_MESSAGE (docs/rpc.md section 2, test/sizes.test.js).
-const GROUP_LIMIT_DEFAULT = 29
-const GROUP_LIMIT_MAX = 29
+// and GROUP_REACTIONS_MAX maximal reaction summaries per post and still fits
+// MAX_MESSAGE (docs/rpc.md section 2, test/sizes.test.js).
+const GROUP_LIMIT_DEFAULT = 26
+const GROUP_LIMIT_MAX = 26
 const GROUP_MEMBERS_LIMIT_MAX = 100
+// Distinct emojis folded per group message (group-react, docs/protocol.md
+// section 10); a group.read item carries at most this many summaries.
+const GROUP_REACTIONS_MAX = 12
+// Diary keys per emoji in the who-reacted answer: the largest list whose
+// worst case (GROUP_REACTIONS_MAX emojis, each with this many keys) fits
+// MAX_MESSAGE (test/sizes.test.js).
+const GROUP_REACTORS_MAX = 324
 const MAX_GROUP_NAME = 80 // same value as records.js
 const MAX_GROUP_CUTS = 16
 const MAX_GROUPS_PER_COMMUNITY = 32
 const COMMUNITY_LIST_MAX = 64
-// dm.thread: the largest page whose worst case (MAX_TEXT 4-byte characters
-// and a maximal link card in every message) fits MAX_MESSAGE
-// (docs/rpc.md 5.78, test/sizes.test.js).
+// dm.thread: the largest page whose worst case (MAX_TEXT 4-byte characters,
+// a maximal link card and two reactions at the emoji cap in every message)
+// fits MAX_MESSAGE (docs/rpc.md 5.78, test/sizes.test.js).
 const DM_THREAD_LIMIT_DEFAULT = 30
-const DM_THREAD_LIMIT_MAX = 42
+const DM_THREAD_LIMIT_MAX = 41
 const PEEK_TIMEOUT_MS = 8000
 const FOLLOW_LIMIT_DEFAULT = 100
 const FOLLOW_LIMIT_MAX = 500
@@ -182,6 +198,12 @@ module.exports = {
   MAX_AVATAR_BLOCKS,
   MAX_AVATAR_BYTES,
   AVATAR_MIMES,
+  VIDEO_MIME,
+  MAX_VIDEO_MS,
+  MAX_VIDEO_DIMENSION,
+  MAX_VIDEO_PIXELS,
+  MAX_MOMENT_VIDEO_MS,
+  MAX_MOMENT_VIDEO_BYTES,
   MAX_DM_MEDIA,
   MAX_GROUP_MEDIA,
   DM_MEDIA_CHUNK_BYTES,
@@ -202,6 +224,8 @@ module.exports = {
   GROUP_LIMIT_DEFAULT,
   GROUP_LIMIT_MAX,
   GROUP_MEMBERS_LIMIT_MAX,
+  GROUP_REACTIONS_MAX,
+  GROUP_REACTORS_MAX,
   MAX_GROUP_NAME,
   MAX_GROUP_CUTS,
   MAX_GROUPS_PER_COMMUNITY,

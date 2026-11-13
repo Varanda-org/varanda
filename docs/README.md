@@ -14,6 +14,7 @@
 | [site.md](site.md) | pt-BR | O site estático (varanda.app): como ver, atualizar e publicar na GitHub Pages, os passos de domínio e DNS que só o usuário faz, e a verificação depois de publicar. |
 | [performance.md](performance.md) | pt-BR | Desempenho do carregamento de A Rua, Diário, perfis e Conversas: o conjunto de dados D1, as ferramentas de medição (nó, laboratório, Chrome, emulador e simulador), as metas provisórias e o ciclo de medição. |
 | [seeder-capacity.md](seeder-capacity.md) | inglês | Medição em loopback, numa só máquina, de onde o semeador começa a recusar leitores (1, 16, 32 e 64 clientes): os comandos, as tabelas, os custos internos e os limites que o operador pode subir. Não é promessa de capacidade. |
+| [ux-audit.md](ux-audit.md) | pt-BR | Auditoria de UX do app por tela: achados com arquivo e linha, mudança proposta, PR dono, e o checklist VC da verificação visual (método em [design-review.md](design-review.md)). |
 
 O README da raiz ([../README.md](../README.md)) descreve o programa de linha de comando e o `varanda-serve`.
 

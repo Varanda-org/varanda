@@ -29,8 +29,8 @@
 
 import rpc from '@varanda/rpc'
 import { avatarOf } from './media/avatar.js'
-import { validDescriptor } from './media/fetch.js'
-import { MAX_MEDIA_PER_POST } from './media/plan.js'
+import { validDescriptor, validVideoDescriptor } from './media/fetch.js'
+import { MAX_MEDIA_PER_POST, videoPair } from './media/plan.js'
 import { cacheGeneration, registerLocalCache } from './localCaches.js'
 
 const { MAX_NAME, MAX_BIO, MAX_TEXT, MAX_CARD_TITLE, MAX_CARD_DESC, MAX_CARD_IMAGE_BYTES, cardTextLength, cardUrlHost, utf8ByteLength } = rpc
@@ -72,7 +72,7 @@ const REPOST_KEYS = ['kind', 'author', 'name', 'username', 'seq', 'at', 'to', 't
 const CARD_KEYS = ['url', 'host', 'title', 'desc', 'image']
 const TARGET_KEYS = ['author', 'seq']
 const POST_RECORD_KEYS = ['type', 'text', 'at', 'replyTo']
-const POST_RECORD_EXTRA = ['quote', 'media', 'card']
+const POST_RECORD_EXTRA = ['quote', 'media', 'preview']
 const REPOST_RECORD_KEYS = ['type', 'to', 'on', 'at']
 const PROFILE_KEYS = ['name', 'username', 'bio', 'avatar']
 const MEMBER_KEYS = ['openedAt', 'header', 'items', 'before', 'atEnd', 'originals']
@@ -155,8 +155,14 @@ function mediaOf (v, strict) {
   if (v === null || v === undefined) return v === null || !strict ? { ok: true, value: null } : { ok: false }
   if (!Array.isArray(v) || v.length > MAX_MEDIA_PER_POST) return { ok: false }
   if (v.length === 0) return strict ? { ok: false } : { ok: true, value: null }
-  if (!v.every(validDescriptor)) return { ok: false }
+  if (!v.every(validDescriptor) && !validPair(v)) return { ok: false }
   return { ok: true, value: v.map((d) => ({ ...d })) }
+}
+
+// A video post's media, as records.js validPostMedia: [JPEG poster, video].
+function validPair (v) {
+  const pair = videoPair(v)
+  return pair !== null && validDescriptor(pair.poster) && validVideoDescriptor(pair.video)
 }
 
 function cardOf (v) {
@@ -245,10 +251,10 @@ function recordOf (v, strict) {
     if (!media.ok) return null
     out.media = media.value
   }
-  if (hasOwn(v, 'card')) {
-    const card = cardOf(v.card)
-    if (!card.ok) return null
-    out.card = card.value
+  if (hasOwn(v, 'preview')) {
+    const preview = cardOf(v.preview)
+    if (!preview.ok) return null
+    out.preview = preview.value
   }
   return out
 }

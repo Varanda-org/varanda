@@ -19,18 +19,18 @@ const bad = (t, method, params, label) => {
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
     'account.sign', 'age.proof', 'age.sign', 'appeal.sign', 'block.list', 'block.set', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'diary.peek',
-    'dm.enable', 'dm.list', 'dm.lookup', 'dm.pageDraft', 'dm.pageForget', 'dm.pageGenerate', 'dm.pageLegacyBlocks', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.pageShare', 'dm.pull', 'dm.putMedia', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
+    'dm.enable', 'dm.list', 'dm.lookup', 'dm.pageDraft', 'dm.pageForget', 'dm.pageGenerate', 'dm.pageLegacyBlocks', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.pageShare', 'dm.pull', 'dm.putMedia', 'dm.react', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
-    'group.meta', 'group.post', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen',
+    'group.meta', 'group.post', 'group.react', 'group.reactors', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
-    'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'moments.read', 'node.close', 'node.info', 'notices.list',
+    'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moments.read', 'node.close', 'node.info', 'notices.list',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read', 'phone.proof', 'phone.sign',
     'post.create', 'post.delete', 'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
     'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
-    'block.set', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
-    'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
+    'block.set', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.react', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
+    'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.react', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
     'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'listing.create', 'listing.delete', 'listing.edit', 'listing.rate', 'listing.status', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'node.close', 'page.register', 'post.create', 'post.delete',
     'post.quote', 'post.reply',
     'profile.delete', 'profile.set', 'repost.set', 'sync.start', 'sync.stop', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'username.add'
@@ -206,6 +206,29 @@ test('moment.putMedia: image upload bounds and cache name', (t) => {
   bad(t, 'moment.putMedia', { ...MOMENT_UPLOAD, mime: 'audio/mp4', width: 0, height: 0, kind: 'voice', ms: 1000 })
 })
 
+const MOMENT_MUSIC = { p: 'audius', id: 'A'.repeat(32), start: 7200 }
+
+test('moment.create: music is optional, exactly { p, id, start }, never null', (t) => {
+  ok(t, 'moment.create', { text: '', media: MOMENT_MEDIA }, { text: '', media: MOMENT_MEDIA })
+  ok(t, 'moment.create', { text: 'oi', media: MOMENT_MEDIA, music: MOMENT_MUSIC }, { text: 'oi', media: MOMENT_MEDIA, music: MOMENT_MUSIC })
+  ok(t, 'moment.create', { text: '', media: MOMENT_MEDIA, music: { p: 'audius', id: 'a', start: 0 } })
+  for (const music of [
+    null, undefined, false, 0, 'audius', [], {},
+    { p: 'audius', id: 'a' },
+    { p: 'audius', start: 0 },
+    { id: 'a', start: 0 },
+    { ...MOMENT_MUSIC, title: 'x' },
+    { ...MOMENT_MUSIC, p: 'spotify' },
+    { ...MOMENT_MUSIC, id: '' },
+    { ...MOMENT_MUSIC, id: 'A'.repeat(33) },
+    { ...MOMENT_MUSIC, id: 'a-b' },
+    { ...MOMENT_MUSIC, start: -1 },
+    { ...MOMENT_MUSIC, start: 7201 },
+    { ...MOMENT_MUSIC, start: 1.5 },
+    { ...MOMENT_MUSIC, start: '0' }
+  ]) bad(t, 'moment.create', { text: '', media: MOMENT_MEDIA, music }, 'music ' + JSON.stringify(music))
+})
+
 test('moment.create: text is 0..200 code points and media is one image item', (t) => {
   for (const text of ['', 'a'.repeat(200), '😀'.repeat(200)]) {
     ok(t, 'moment.create', { text, media: MOMENT_MEDIA })
@@ -252,11 +275,11 @@ test('moment results survive RPC response validation', async (t) => {
   const seq = Number.MAX_SAFE_INTEGER
   const ref = KEY + ':' + seq
   const past = { seq, ref, text: '😀'.repeat(200), at: '+275760-09-13T00:00:00.000Z' }
-  const row = { ...past, media: MOMENT_MEDIA }
+  const row = { ...past, media: MOMENT_MEDIA, music: MOMENT_MUSIC }
   const results = {
     'moment.putMedia': MOMENT_MEDIA,
     'moment.create': { seq, ref },
-    'moments.read': { authors: [{ author: 'cd'.repeat(32), items: [{ ...row, ref: 'cd'.repeat(32) + ':' + seq }] }], own: [row], past: [past] },
+    'moments.read': { authors: [{ author: 'cd'.repeat(32), items: [{ ...row, ref: 'cd'.repeat(32) + ':' + seq }, { ...row, music: null }] }], own: [row], past: [past] },
     'moment.delete': { seq, deleted: [1] }
   }
   for (const [method, params] of MOMENT_PARAMS) {
@@ -278,11 +301,11 @@ test('moment results survive RPC response validation', async (t) => {
 
 test('moments.read: the worst case under the caps fits MAX_MESSAGE', async (t) => {
   // 32 authors x 4 items, 4 own items and 16 past records (docs/rpc.md 5.113),
-  // every field at its longest.
+  // every field at its longest, music on every live item.
   const seq = Number.MAX_SAFE_INTEGER
   const past = { seq, ref: KEY + ':' + seq, text: '😀'.repeat(200), at: '+275760-09-13T00:00:00.000Z' }
   const media = { ...MOMENT_MEDIA, chunks: 257, bytes: 257 * 32768, w: 16384, h: 16384 }
-  const live = (author, j) => ({ ...past, seq: seq - j, ref: author + ':' + (seq - j), media })
+  const live = (author, j) => ({ ...past, seq: seq - j, ref: author + ':' + (seq - j), media, music: MOMENT_MUSIC })
   const result = {
     authors: Array.from({ length: 32 }, (_, i) => {
       const author = (i + 1).toString(16).padStart(64, '0')
@@ -292,7 +315,8 @@ test('moments.read: the worst case under the caps fits MAX_MESSAGE', async (t) =
     past: Array.from({ length: 16 }, (_, i) => ({ ...past, seq: seq - i, ref: KEY + ':' + (seq - i) }))
   }
   const bytes = utf8ByteLength(JSON.stringify({ v: 1, id: MAX_ID, ok: true, result }))
-  t.ok(bytes <= MAX_MESSAGE, 'maximal texts, descriptors, refs, seqs, dates and envelope fit (' + bytes + ' bytes)')
+  t.ok(bytes <= MAX_MESSAGE, 'maximal texts, descriptors, music, refs, seqs, dates and envelope fit (' + bytes + ' bytes)')
+  t.is(bytes, 203313, 'the size docs/rpc.md states')
   let receive
   const response = new Promise((resolve) => { receive = resolve })
   const dispatcher = createServerDispatcher({
@@ -1559,6 +1583,36 @@ test('group.hide', (t) => {
   bad(t, 'group.hide', { group: KEY, target, on: 'yes' })
 })
 
+test('group.react', (t) => {
+  t.ok(isMutating('group.react'))
+  const target = { writer: KEY, seq: 2 }
+  ok(t, 'group.react', { group: KEY, target, emoji: '\u{1f44d}' }, { group: KEY, target, emoji: '\u{1f44d}' })
+  ok(t, 'group.react', { group: KEY, target, emoji: '\u2764\ufe0f' })
+  ok(t, 'group.react', { group: KEY, target, emoji: '' }, { group: KEY, target, emoji: '' })
+  bad(t, 'group.react', { group: KEY, target })
+  bad(t, 'group.react', { group: KEY, emoji: '\u{1f44d}' })
+  bad(t, 'group.react', { target, emoji: '\u{1f44d}' })
+  bad(t, 'group.react', { group: KEY, target: KEY, emoji: '\u{1f44d}' })
+  bad(t, 'group.react', { group: KEY, target: { writer: KEY, seq: 0 }, emoji: '\u{1f44d}' })
+  bad(t, 'group.react', { group: KEY, target: { writer: KEY }, emoji: '\u{1f44d}' })
+  bad(t, 'group.react', { group: KEY, target: { writer: KEY, seq: 2, page: KEY }, emoji: '\u{1f44d}' })
+  bad(t, 'group.react', { group: KEY, target, emoji: 'a' })
+  bad(t, 'group.react', { group: KEY, target, emoji: '\u{1f44d}\u{1f44d}' })
+  bad(t, 'group.react', { group: KEY, target, emoji: null })
+  bad(t, 'group.react', { group: KEY, target, emoji: '\u{1f44d}', page: KEY })
+  bad(t, 'group.react', { group: 'zz', target, emoji: '\u{1f44d}' })
+})
+
+test('group.reactors', (t) => {
+  t.absent(isMutating('group.reactors'))
+  const target = { writer: KEY, seq: 2 }
+  ok(t, 'group.reactors', { group: KEY, target }, { group: KEY, target })
+  bad(t, 'group.reactors', { group: KEY })
+  bad(t, 'group.reactors', { target })
+  bad(t, 'group.reactors', { group: KEY, target: { writer: KEY, seq: 0 } })
+  bad(t, 'group.reactors', { group: KEY, target, emoji: '\u{1f44d}' })
+})
+
 test('group.meta', (t) => {
   t.ok(isMutating('group.meta'))
   ok(t, 'group.meta', { group: KEY, name: 'Novo' }, { group: KEY, name: 'Novo' })
@@ -2119,8 +2173,23 @@ test('dm.* (Conversas)', (t) => {
   ok(t, 'dm.putMedia', { ...put, mime: 'audio/mp4', width: 0, height: 0, kind: 'voice', ms: 2500 }, { ...put, mime: 'audio/mp4', width: 0, height: 0, kind: 'voice', ms: 2500 })
   for (const to of ['ab', KEY.toUpperCase(), KEY + '0', KEY.slice(1), 1, null, true, [KEY], { key: KEY }]) bad(t, 'dm.putMedia', { ...put, to }, 'to ' + JSON.stringify(to))
 
+  t.ok(isMutating('dm.react'))
+  const target = { from: KEY, id: ID }
+  ok(t, 'dm.react', { to: KEY, target, emoji: '\u{1f44d}' }, { to: KEY, target, emoji: '\u{1f44d}' })
+  ok(t, 'dm.react', { to: KEY, target, emoji: '\u2764\ufe0f' })
+  ok(t, 'dm.react', { to: KEY, target, emoji: '' }, { to: KEY, target, emoji: '' })
+  bad(t, 'dm.react', { target, emoji: '\u{1f44d}' }, 'no to')
+  bad(t, 'dm.react', { to: KEY, emoji: '\u{1f44d}' }, 'no target')
+  bad(t, 'dm.react', { to: KEY, target }, 'no emoji')
+  for (const emoji of ['a', 'oi', '\u{1f44d}'.repeat(9), null, 1]) bad(t, 'dm.react', { to: KEY, target, emoji }, 'emoji ' + JSON.stringify(emoji))
+  for (const tg of [null, ID, [KEY, ID], { from: KEY }, { id: ID }, { from: KEY, id: 'x' }, { from: KEY.toUpperCase(), id: ID }, { from: KEY, id: ID, seq: 1 }, { writer: KEY, seq: 1 }]) {
+    bad(t, 'dm.react', { to: KEY, target: tg, emoji: '\u{1f44d}' }, 'target ' + JSON.stringify(tg))
+  }
+  bad(t, 'dm.react', { to: KEY, target, emoji: '\u{1f44d}', page: KEY }, 'no Página path')
+  bad(t, 'dm.react', { to: KEY, target, emoji: '\u{1f44d}', rev: 2 }, 'rev is the node\'s')
+
   t.absent(isMutating('dm.thread'))
-  t.is(DM_THREAD_LIMIT_MAX, 42)
+  t.is(DM_THREAD_LIMIT_MAX, 41)
   ok(t, 'dm.thread', { peer: KEY }, { peer: KEY, limit: 30 })
   ok(t, 'dm.thread', { peer: KEY, before: ID, limit: DM_THREAD_LIMIT_MAX }, { peer: KEY, before: ID, limit: DM_THREAD_LIMIT_MAX })
   ok(t, 'dm.thread', { peer: KEY, limit: 1 })
@@ -2524,4 +2593,133 @@ test('page end-to-end node methods', (t) => {
   ok(t, 'group.read', { group: KEY, page: PAGE })
   ok(t, 'group.seal', { group: KEY, page: PAGE, text: 'oi' }, { group: KEY, page: PAGE, text: 'oi', fwd: 0 })
   bad(t, 'group.seal', { group: KEY, text: 'oi' }, 'page required')
+})
+
+const POSTER = { core: KEY, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 30000, sha256: 'cd'.repeat(32), width: 1080, height: 1920 }
+const VIDEO = { core: KEY, mime: 'video/mp4', start: 2, blocks: 40, bytes: 40 * 32768, sha256: 'ef'.repeat(32), width: 1080, height: 1920, ms: 30000 }
+
+test('post.create, post.reply and post.quote take one video as [JPEG poster, video]', (t) => {
+  const msg = (method, params) => validateParams(method, params).message
+  const pair = [POSTER, VIDEO]
+  ok(t, 'post.create', { text: '', media: pair }, { text: '', media: pair })
+  ok(t, 'post.reply', { to: KEY + ':1', text: '', media: pair })
+  ok(t, 'post.quote', { to: KEY + ':1', text: 'legenda', media: pair })
+  t.is(msg('post.quote', { to: KEY + ':1', text: '', media: pair }), 'parâmetro inválido: text', 'a quote still needs text')
+  for (const video of [{ ...VIDEO, ms: 1 }, { ...VIDEO, width: 1920, height: 1080 }, { ...VIDEO, width: 1, height: 1, blocks: 1, bytes: 1 }]) {
+    ok(t, 'post.create', { text: '', media: [POSTER, video] })
+  }
+  const { ms, ...noMs } = VIDEO
+  const holed = [POSTER, VIDEO]
+  delete holed[0]
+  for (const media of [
+    [VIDEO, POSTER], [VIDEO], [POSTER, VIDEO, POSTER], [POSTER, POSTER, VIDEO], [VIDEO, VIDEO],
+    [{ ...POSTER, mime: 'image/png' }, VIDEO], [{ ...POSTER, ms: 1 }, VIDEO],
+    [POSTER, { ...VIDEO, ms: 0 }], [POSTER, { ...VIDEO, ms: 30001 }], [POSTER, { ...VIDEO, ms: '1' }],
+    [POSTER, { ...VIDEO, width: 1921, height: 1 }], [POSTER, { ...VIDEO, width: 1920, height: 1920 }],
+    [POSTER, { ...VIDEO, extra: 1 }], [POSTER, noMs], [POSTER, { ...VIDEO, mime: 'video/webm' }],
+    [POSTER, { ...VIDEO, bytes: 40 * 32768 + 1 }], [POSTER, { ...VIDEO, core: KEY.toUpperCase() }],
+    holed, new Array(2)
+  ]) {
+    t.is(msg('post.create', { text: 'x', media }), 'parâmetro inválido: media', JSON.stringify(media))
+    t.is(msg('post.reply', { to: KEY + ':1', text: 'x', media }), 'parâmetro inválido: media')
+    t.is(msg('post.quote', { to: KEY + ':1', text: 'x', media }), 'parâmetro inválido: media')
+  }
+  t.is(msg('post.create', { text: 'x', media: pair, preview: { url: 'https://example.com/a', host: 'example.com', title: 'T', desc: '', image: null } }), 'parâmetro inválido: media', 'never with a preview')
+  // Every other descriptor stays a still image.
+  bad(t, 'group.post', { group: KEY, text: '', media: pair }, 'a group post takes no video')
+  bad(t, 'group.post', { group: KEY, text: '', media: [VIDEO] })
+  bad(t, 'profile.set', { name: 'Ana', avatar: VIDEO })
+  bad(t, 'listing.create', { kind: 'produto', title: 'Bicicleta', text: '', price: 50000, unit: null, cat: 'esporte', place: { uf: 'SP', city: 'São Paulo', bairro: 'Pinheiros' }, media: pair }, 'the pair in a listing')
+  bad(t, 'post.create', { text: 'x', preview: { url: 'https://example.com/a', host: 'example.com', title: 'T', desc: '', image: VIDEO } })
+})
+
+test('media.uploadFile takes a post video; dm.putMedia does not', (t) => {
+  const upload = { name: 'ab'.repeat(16) + '.bin', mime: 'video/mp4', width: 1080, height: 1920, kind: 'video', ms: 30000 }
+  ok(t, 'media.uploadFile', upload, upload)
+  for (const patch of [{ ms: 1 }, { width: 1920, height: 1080 }, { width: 1, height: 1 }]) ok(t, 'media.uploadFile', { ...upload, ...patch })
+  for (const field of ['kind', 'ms', 'width', 'height', 'name', 'mime']) {
+    const missing = { ...upload }
+    delete missing[field]
+    bad(t, 'media.uploadFile', missing, 'video without ' + field)
+  }
+  for (const patch of [
+    { kind: 'voice' }, { kind: 'Video' }, { kind: null }, { ms: 0 }, { ms: 30001 }, { ms: 1.5 }, { ms: '1' },
+    { width: 1921, height: 1 }, { width: 1, height: 1921 }, { width: 1920, height: 1920 }, { width: 0 }, { height: 0 },
+    { sealed: true }, { sealed: false }, { mime: 'video/webm' }
+  ]) bad(t, 'media.uploadFile', { ...upload, ...patch }, 'invalid video upload: ' + JSON.stringify(patch))
+  // Images and voice keep their rules.
+  const image = { name: upload.name, mime: 'image/jpeg', width: 16384, height: 16384 }
+  ok(t, 'media.uploadFile', image)
+  ok(t, 'media.uploadFile', { ...image, sealed: true })
+  for (const patch of [{ kind: 'video' }, { kind: 'video', ms: 1000 }, { ms: 1000 }, { kind: 'voice' }]) {
+    bad(t, 'media.uploadFile', { ...image, ...patch }, 'an image takes no kind or ms: ' + JSON.stringify(patch))
+  }
+  bad(t, 'media.uploadFile', { name: upload.name, mime: 'audio/mp4', width: 0, height: 0, kind: 'video', ms: 1000 }, 'voice needs kind voice')
+  // A chat takes no video.
+  bad(t, 'dm.putMedia', { ...upload, to: KEY })
+  bad(t, 'dm.putMedia', { ...upload, to: KEY, ms: 1000 })
+  bad(t, 'dm.putMedia', { ...image, to: KEY, kind: 'video' })
+  ok(t, 'dm.send', { to: KEY, text: 'oi', media: [MOMENT_MEDIA] })
+  bad(t, 'dm.send', { to: KEY, text: 'oi', media: [{ ...MOMENT_MEDIA, mime: 'video/mp4', w: 1080, h: 1920, ms: 1000 }] })
+})
+
+test('moment.putMedia and moment.create take a short video', (t) => {
+  const upload = { ...MOMENT_UPLOAD, mime: 'video/mp4', width: 1080, height: 1920, kind: 'video', ms: 15000 }
+  ok(t, 'moment.putMedia', upload, upload)
+  for (const patch of [{ ms: 1 }, { width: 1920, height: 1080 }]) ok(t, 'moment.putMedia', { ...upload, ...patch })
+  for (const field of ['kind', 'ms']) {
+    const missing = { ...upload }
+    delete missing[field]
+    bad(t, 'moment.putMedia', missing, 'video without ' + field)
+  }
+  for (const patch of [
+    { ms: 15001 }, { ms: 30000 }, { ms: 0 }, { kind: 'voice' }, { width: 1921, height: 1 },
+    { width: 1920, height: 1920 }, { sealed: false }, { to: KEY }
+  ]) bad(t, 'moment.putMedia', { ...upload, ...patch }, 'invalid moment video upload: ' + JSON.stringify(patch))
+  for (const patch of [{ kind: 'video' }, { ms: 1000 }, { kind: 'video', ms: 1000 }]) {
+    bad(t, 'moment.putMedia', { ...MOMENT_UPLOAD, ...patch }, 'an image takes no kind or ms: ' + JSON.stringify(patch))
+  }
+  ok(t, 'moment.putMedia', MOMENT_UPLOAD, MOMENT_UPLOAD)
+  const video = { ...MOMENT_MEDIA, mime: 'video/mp4', w: 1080, h: 1920, ms: 15000, bytes: 4194304 + 16, chunks: 129 }
+  ok(t, 'moment.create', { text: '', media: video })
+  ok(t, 'moment.create', { text: '', media: { ...video, bytes: 17, chunks: 1, ms: 1 } })
+  for (const patch of [
+    { bytes: 4194304 + 17 }, { bytes: 130 * 32768, chunks: 130 }, { chunks: 128 }, { ms: 15001 }, { ms: 0 },
+    { w: 1921, h: 1 }, { w: 1920, h: 1920 }, { w: 0 }, { mime: 'video/webm' }, { extra: 1 }, { nonce: 'ef'.repeat(23) }
+  ]) bad(t, 'moment.create', { text: '', media: { ...video, ...patch } }, 'invalid moment video: ' + JSON.stringify(patch))
+})
+
+test('dm.send: a reaction to a momento is one emoji and nothing else', (t) => {
+  const ID = 'ef'.repeat(16)
+  const HEART = '\u2764\ufe0f'
+  ok(t, 'dm.send', { to: KEY, text: HEART, moment: 7 }, { to: KEY, text: HEART, moment: 7, fwd: 0 })
+  ok(t, 'dm.send', { to: KEY, text: '\u{1f525}', moment: 1 })
+  ok(t, 'dm.send', { to: KEY, text: HEART, moment: Number.MAX_SAFE_INTEGER })
+  ok(t, 'dm.send', { to: KEY, text: HEART, moment: 7, fwd: 0 }, { to: KEY, text: HEART, moment: 7, fwd: 0 })
+  for (const moment of [0, -1, 1.5, '7', null, true, [7], Number.MAX_SAFE_INTEGER + 1, NaN]) {
+    t.is(validateParams('dm.send', { to: KEY, text: HEART, moment }).message, 'parâmetro inválido: moment', 'moment ' + String(moment))
+  }
+  for (const text of ['', 'oi', HEART + HEART, HEART + ' ', ':)', 'a']) {
+    t.is(validateParams('dm.send', { to: KEY, text, moment: 7 }).message, 'parâmetro inválido: text', 'text ' + JSON.stringify(text))
+  }
+  const item = { id: 'a1'.repeat(32), key: 'b2'.repeat(32), nonce: 'c3'.repeat(24), mime: 'image/jpeg', chunks: 2, bytes: 32768 + 17, sha256: 'd4'.repeat(32), w: 1080, h: 1920, ms: 0 }
+  for (const [label, extra] of [['replyTo', { replyTo: ID }], ['media', { media: [item] }], ['card', { card: LINK_CARD }], ['fwd 1', { fwd: 1 }]]) {
+    t.is(validateParams('dm.send', { to: KEY, text: HEART, moment: 7, ...extra }).message, 'parâmetro inválido: moment', 'moment with ' + label)
+    ok(t, 'dm.send', { to: KEY, text: extra.media ? '' : 'oi', ...extra })
+  }
+  bad(t, 'dm.send', { to: KEY, text: HEART, moment: 7, page: KEY }, 'no Página path')
+})
+
+test('moment.lookup: an author and a seq, read only', (t) => {
+  t.absent(isMutating('moment.lookup'))
+  ok(t, 'moment.lookup', { author: KEY, seq: 1 }, { author: KEY, seq: 1 })
+  ok(t, 'moment.lookup', { author: KEY, seq: Number.MAX_SAFE_INTEGER })
+  bad(t, 'moment.lookup', {})
+  bad(t, 'moment.lookup', { author: KEY })
+  bad(t, 'moment.lookup', { seq: 1 })
+  for (const seq of [0, -1, 1.5, '1', null, Number.MAX_SAFE_INTEGER + 1]) bad(t, 'moment.lookup', { author: KEY, seq }, 'seq ' + String(seq))
+  for (const author of [KEY.toUpperCase(), KEY.slice(1), KEY + ':1', null, 1]) bad(t, 'moment.lookup', { author, seq: 1 }, 'author ' + JSON.stringify(author))
+  for (const extra of [{ ref: KEY + ':1' }, { text: 'x' }, { blob: KEY }, { page: KEY }]) {
+    t.is(validateParams('moment.lookup', { author: KEY, seq: 1, ...extra }).message, 'parâmetro desconhecido', 'extra ' + Object.keys(extra)[0])
+  }
 })

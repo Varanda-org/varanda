@@ -1,6 +1,9 @@
 'use strict'
 
 const test = require('brittle')
+const fs = require('fs')
+const path = require('path')
+const { findMentions } = require('@varanda/rpc')
 const load = () => import('../src/links.js')
 
 const SAMPLES = []
@@ -345,4 +348,143 @@ test('every emoji of the composer picker can touch a link', async (t) => {
     t.is(findLinks(e + 'https://a.com').length, 1, 'before: ' + e)
     t.is(findLinks('https://a.com/x' + e).length, 1, 'after: ' + e)
   }
+})
+
+test('textWithoutHrefs removes only the chosen links', async (t) => {
+  const { textWithoutHrefs } = await load()
+  const U = 'https://youtu.be/dQw4w9WgXcQ'
+  const omit = (h) => h === U
+  const line = 'ouça ' + U + ' agora'
+  t.is(textWithoutHrefs(line, omit), 'ouça agora')
+  t.is(textWithoutHrefs(U, omit), '')
+  t.is(textWithoutHrefs('veja ' + U + ' e https://example.com', omit), 'veja e https://example.com')
+  t.is(textWithoutHrefs('@ana ' + U, omit), '@ana')
+  t.is(textWithoutHrefs('linha um\n' + U + '\nlinha três', omit), 'linha um\nlinha três')
+  t.is(textWithoutHrefs('(' + U + ').', omit), '.')
+  t.is(textWithoutHrefs('Olha ' + U + ', que legal', omit), 'Olha, que legal')
+  t.is(textWithoutHrefs('ouça ' + U + '!', omit), 'ouça!')
+  t.is(textWithoutHrefs('(' + U + ')', omit), '')
+  t.is(textWithoutHrefs('veja (' + U + ').', omit), 'veja.')
+  t.is(textWithoutHrefs('veja [' + U + '] agora', omit), 'veja agora')
+  t.is(textWithoutHrefs('veja: ' + U + '.', omit), 'veja: .')
+  t.is(textWithoutHrefs('(nota ' + U + ')', omit), '(nota)')
+  for (const punctuation of [',', '.', ';', ':', '!', '?']) {
+    t.is(textWithoutHrefs('maçã \t' + U + '\t ' + punctuation, omit), 'maçã' + punctuation)
+    t.is(textWithoutHrefs('123 ' + U + ' ' + punctuation, omit), '123' + punctuation)
+  }
+  t.is(textWithoutHrefs('字 ' + U + '.', omit), '字.')
+  t.is(textWithoutHrefs('😀 ' + U + '.', omit), '😀 .')
+  t.is(textWithoutHrefs(U + ' , texto', omit), ', texto')
+  t.is(textWithoutHrefs('veja { \t' + U + '\t } agora', omit), 'veja agora')
+  t.is(textWithoutHrefs('veja ([' + U + ']) agora', omit), 'veja agora')
+  t.is(textWithoutHrefs('veja (' + U + ' ' + U + ').', omit), 'veja.')
+  t.is(textWithoutHrefs('veja (' + U + '] agora', omit), 'veja (] agora')
+  t.is(textWithoutHrefs('nota  , ()\nveja (' + U + ')\nfim  .', omit), 'nota  , ()\nveja\nfim  .')
+  t.is(textWithoutHrefs('um\r\n[ ' + U + ' ]\r\ndois', omit), 'um\r\ndois')
+  t.is(textWithoutHrefs('a  b ' + U, omit), 'a  b')
+  const plain = 'a  b https://example.com'
+  t.is(textWithoutHrefs(plain, omit), plain, 'no chosen link returns the same string')
+  t.is(textWithoutHrefs('um ' + U + ' e ' + U, omit), 'um e')
+  t.is(textWithoutHrefs(line, () => 'yes'), line, 'only strict true drops')
+  t.is(textWithoutHrefs(line, () => { throw new Error('keep') }), line, 'a throw keeps the link')
+  t.is(textWithoutHrefs(null, omit), '')
+  t.is(textWithoutHrefs(line), line, 'missing omit returns the text')
+})
+
+test('removed links attach only complete punctuation runs after words', async (t) => {
+  const { textWithoutHrefs } = await load()
+  const U = 'https://youtu.be/dQw4w9WgXcQ'
+  const omit = (h) => h === U
+  t.is(textWithoutHrefs('https://good.com ' + U + ' .evil.com', omit), 'https://good.com .evil.com', 'removing a link cannot extend another domain')
+  t.is(textWithoutHrefs('olá ' + U + ', tudo', omit), 'olá, tudo')
+  t.is(textWithoutHrefs('nota 2 ' + U + '.', omit), 'nota 2.')
+  for (const word of ['é', 'ã', 'ç', 'Ω', 'я', '𐐀']) {
+    t.is(textWithoutHrefs(word + ' ' + U + '!', omit), word + '!', 'a full letter code point: ' + word)
+  }
+  t.is(textWithoutHrefs('nota ' + U + '.)]}!?;:, fim', omit), 'nota.)]}!?;:, fim')
+  t.is(textWithoutHrefs('nota ' + U + '!?\nfim', omit), 'nota!?\nfim')
+  t.is(textWithoutHrefs('nota ' + U + ' !?fim', omit), 'nota !?fim')
+})
+
+test('links stays parseable without Unicode property escapes on Hermes', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/links.js'), 'utf8')
+  t.absent(src.includes('\\p{'), 'no Unicode property escape in the module')
+})
+
+test('removed links never join text outside brackets', async (t) => {
+  const { textWithoutHrefs, findLinks } = await load()
+  const U = 'https://youtu.be/dQw4w9WgXcQ'
+  const omit = (h) => h === U
+  const word = textWithoutHrefs('pala( ' + U + ' )vra', omit)
+  t.is(word, 'pala( )vra')
+  t.absent(word.includes('palavra'), 'hiding a link cannot create a word')
+  const mention = textWithoutHrefs('@al( ' + U + ' )ice', omit)
+  t.is(mention, '@al( )ice')
+  t.alike(findMentions(mention), [], 'hiding a link cannot create @alice')
+  const address = textWithoutHrefs('https://evil.exa( ' + U + ' )mple.com/login', omit)
+  t.is(address, 'https://evil.exa( )mple.com/login')
+  t.alike(findLinks(address), [], 'hiding a link cannot create https://evil.example.com/login')
+  const bank = textWithoutHrefs('https://bank.example ' + U + ' .evil.example/login', omit)
+  t.alike(findLinks(bank).map((link) => link.href), ['https://bank.example'])
+  for (const [open, close] of [['(', ')'], ['[', ']'], ['{', '}'], ['([', '])']]) {
+    t.is(textWithoutHrefs('a' + open + ' ' + U + ' ' + close + ' b', omit), 'a' + open + ' ' + close + ' b', 'attached on the left: ' + open)
+    t.is(textWithoutHrefs('a ' + open + ' ' + U + ' ' + close + 'b', omit), 'a ' + open + ' ' + close + 'b', 'attached on the right: ' + close)
+  }
+  t.is(textWithoutHrefs('veja ( ' + U + ' ).evil', omit), 'veja ( ).evil', 'punctuation followed by text is not a boundary')
+})
+
+test('removed links join only at the module separators, not at zero-width or narrow spaces', async (t) => {
+  const { textWithoutHrefs } = await load()
+  const U = 'https://youtu.be/dQw4w9WgXcQ'
+  const omit = (h) => h === U
+  const zw = textWithoutHrefs('www.evil ' + U + ' .\ufeffcom', omit)
+  t.is(zw, 'www.evil .\ufeffcom')
+  t.not(zw, 'www.evil.\ufeffcom', 'U+FEFF after the punctuation is not a separator')
+  for (const narrow of ['\u2006', '\u2008', '\u2009', '\u200a', '\u202f', '\u205f']) {
+    const label = 'U+' + narrow.charCodeAt(0).toString(16)
+    t.is(textWithoutHrefs('www.evil ' + U + ' .' + narrow + 'com', omit), 'www.evil .' + narrow + 'com', 'after the punctuation: ' + label)
+    t.is(textWithoutHrefs('abc' + narrow + '( ' + U + ' )' + narrow + 'def', omit), 'abc' + narrow + '( )' + narrow + 'def', 'around a bracket pair: ' + label)
+  }
+  const pair = textWithoutHrefs('abc\ufeff( ' + U + ' )\ufeffdef', omit)
+  t.is(pair, 'abc\ufeff( )\ufeffdef')
+  t.not(pair, 'abc\ufeff\ufeffdef', 'U+FEFF around brackets is not a separator')
+  t.is(textWithoutHrefs('abc\ufeff( ' + U + ' ) def', omit), 'abc\ufeff( ) def', 'zero-width before the pair')
+  t.is(textWithoutHrefs('abc ( ' + U + ' )\ufeffdef', omit), 'abc ( )\ufeffdef', 'zero-width after the pair')
+  t.is(textWithoutHrefs('abc ( ' + U + ' ),\ufeffdef', omit), 'abc ( ),\ufeffdef', 'zero-width after the punctuation run')
+  t.is(textWithoutHrefs('Olha ' + U + ', que legal', omit), 'Olha, que legal')
+  t.is(textWithoutHrefs('veja ( ' + U + ' )\u00a0agora', omit), 'veja \u00a0agora', 'a no-break space still separates')
+  t.is(textWithoutHrefs('veja ( ' + U + ' ).\u3000agora', omit), 'veja.\u3000agora', 'an ideographic space still separates')
+})
+
+test('tidyLine tests separators with the module ranges, not a regex whitespace class', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/links.js'), 'utf8')
+  const start = src.indexOf('function tidyLine (')
+  const end = src.indexOf('\nfunction ', start + 1)
+  t.ok(start >= 0 && end > start, 'tidyLine found')
+  t.absent(src.slice(start, end).includes('\\s'), 'no \\s in tidyLine')
+})
+
+test('textWithoutHrefs falls back when tidying exposes a link', async (t) => {
+  const { textWithoutHrefs, findLinks } = await load()
+  const U = 'https://youtu.be/dQw4w9WgXcQ'
+  const omit = (h) => h === U
+  const hidden = '\ufeffhttps://evil.example ' + U
+  t.alike(findLinks(hidden).map((link) => link.href), [U])
+  t.is(textWithoutHrefs(hidden, omit), hidden, 'trimming must not expose a previously poisoned link')
+  const changed = 'https://a.com/(x ' + U + ' )'
+  t.is(textWithoutHrefs(changed, omit), changed, 'attaching a closer must not change a remaining href')
+  const mention = '@ana ' + U + ' ,@bob'
+  t.alike(findMentions(mention).map((m) => m.username), ['ana', 'bob'])
+  t.is(textWithoutHrefs(mention, omit), '@ana ,@bob', 'existing mentions remain')
+  const linkedMention = '@ANA ' + U + ' https://a.com/@bob'
+  t.is(textWithoutHrefs(linkedMention, omit), '@ANA https://a.com/@bob', 'kept links and handle text remain intact')
+  t.is(textWithoutHrefs('ouça https://a.com/@bob', () => true), 'ouça', 'mentions within a dropped link go with it')
+  t.is(textWithoutHrefs('https://a.com ' + U + ' https://a.com', omit), 'https://a.com https://a.com', 'repeated targets remain')
+  let calls = 0
+  t.is(textWithoutHrefs(U + ' ' + U, () => ++calls === 1), U, 'a kept occurrence of a dropped href remains')
+  const raw = 'https://a.com ' + U
+  t.is(textWithoutHrefs(raw, (href) => {
+    if (href === U) throw new Error('keep')
+    return true
+  }), raw, 'a throw after choosing another link returns all the original text')
 })

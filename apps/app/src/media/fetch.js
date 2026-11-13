@@ -30,14 +30,16 @@
 // Chat items (deps.chat === true, public group posts only) may also be a
 // voice note: an audio descriptor (validAudioDescriptor), whose verified
 // bytes must still pass audioBounds (audio only, no video track) before they
-// are handed out typed audio/mp4. Diary post descriptors stay images only.
+// are handed out typed audio/mp4. Diary post descriptors stay images only
+// here: a post's video goes through fetchVideo alone (same checks, always
+// transient, then a strict videoBounds), and fetchMedia refuses it.
 
 import rpc from '@varanda/rpc'
 import { sha256 as nobleSha256 } from '@noble/hashes/sha2.js'
 import { isAppClient } from '../appClient.js'
 import { installationOrigin, resolveUrl } from '../installation.js'
 import { vitrineEnabled } from '../vitrine/enabled.js'
-import { MAX_MEDIA_DIMENSION, MAX_MEDIA_ITEM_BLOCKS, MEDIA_BLOCK_BYTES, MEDIA_MIMES, toHex } from './plan.js'
+import { MAX_MEDIA_DIMENSION, MAX_MEDIA_ITEM_BLOCKS, MAX_VIDEO_DIMENSION, MAX_VIDEO_MS, MAX_VIDEO_PIXELS, MEDIA_BLOCK_BYTES, MEDIA_MIMES, VIDEO_MIME, toHex } from './plan.js'
 
 const VITRINE = vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE }, typeof __DEV__ !== 'undefined' && __DEV__)
 let vitrineGet
@@ -51,6 +53,7 @@ export const MAX_MEDIA_BLOCKS = 8192
 const HEX64 = /^[0-9a-f]{64}$/
 const KEYS = ['blocks', 'bytes', 'core', 'height', 'mime', 'sha256', 'start', 'width']
 const AUDIO_KEYS = ['blocks', 'bytes', 'core', 'height', 'mime', 'ms', 'sha256', 'start', 'width']
+const VIDEO_KEYS = AUDIO_KEYS
 // Same values as packages/core/lib/records.js.
 export const AUDIO_MIME = 'audio/mp4'
 export const MAX_AUDIO_MS = 120000
@@ -89,6 +92,27 @@ export function validAudioDescriptor (d) {
   if (!isInt(d.blocks, 1, MAX_MEDIA_ITEM_BLOCKS) || d.start + d.blocks > MAX_MEDIA_BLOCKS) return false
   if (!isInt(d.bytes, (d.blocks - 1) * MEDIA_BLOCK_BYTES + 1, Math.min(d.blocks * MEDIA_BLOCK_BYTES, MAX_AUDIO_BYTES))) return false
   if (d.width !== 0 || d.height !== 0 || !isInt(d.ms, 1, MAX_AUDIO_MS)) return false
+  return true
+}
+
+// A video descriptor, as records.js validVideoDescriptor: the post
+// descriptor keys plus ms, mime video/mp4, sides within MAX_VIDEO_DIMENSION
+// and MAX_VIDEO_PIXELS, ms 1..MAX_VIDEO_MS. Only fetchVideo takes it:
+// validDescriptor stays images, which avatars, chat and the keep queue rely
+// on. Never throws.
+export function validVideoDescriptor (d) {
+  if (!d || typeof d !== 'object' || Array.isArray(d)) return false
+  const keys = Object.keys(d).sort()
+  if (keys.length !== VIDEO_KEYS.length || keys.some((k, i) => k !== VIDEO_KEYS[i])) return false
+  if (typeof d.core !== 'string' || !HEX64.test(d.core)) return false
+  if (typeof d.sha256 !== 'string' || !HEX64.test(d.sha256)) return false
+  if (d.mime !== VIDEO_MIME) return false
+  if (!isInt(d.start, 1, MAX_MEDIA_BLOCKS - 1)) return false
+  if (!isInt(d.blocks, 1, MAX_MEDIA_ITEM_BLOCKS) || d.start + d.blocks > MAX_MEDIA_BLOCKS) return false
+  if (!isInt(d.bytes, (d.blocks - 1) * MEDIA_BLOCK_BYTES + 1, d.blocks * MEDIA_BLOCK_BYTES)) return false
+  if (!isInt(d.width, 1, MAX_VIDEO_DIMENSION) || !isInt(d.height, 1, MAX_VIDEO_DIMENSION)) return false
+  if (d.width * d.height > MAX_VIDEO_PIXELS) return false
+  if (!isInt(d.ms, 1, MAX_VIDEO_MS)) return false
   return true
 }
 
@@ -268,20 +292,57 @@ function retryAfterMs (res) {
 export async function fetchMedia (author, d, deps) {
   const url = mediaUrl(author, d, { chat: deps && deps.chat })
   if (url === null) throw fail('foto inválida')
+  const bytes = await fetchVerified(url, d, deps, deps && deps.persist === false)
+  // The author's hash proves who stored it, not what it is.
+  if (d.mime === AUDIO_MIME && rpc.audioBounds(bytes) === null) throw fail('conteúdo não confere')
+  return bytes
+}
+
+// deps.signal, an AbortSignal of the caller, or null.
+function callerSignal (deps) {
+  const s = deps && deps.signal
+  if (!s || typeof s !== 'object' || typeof s.aborted !== 'boolean' || typeof s.addEventListener !== 'function') return null
+  return s
+}
+
+// The request, redirect, length cap and SHA-256 checks fetchMedia and
+// fetchVideo share. -> the verified bytes of `d` at `url`. deps.signal
+// (optional) cancels the request: an already aborted signal makes no request,
+// and an abort fails with a non-retryable 'cancelado'.
+async function fetchVerified (url, d, deps, transient) {
+  const caller = callerSignal(deps)
+  if (caller !== null && caller.aborted) throw fail('cancelado')
+  let unlink = () => {}
+  try {
+    return await verifiedRequest(url, d, deps, transient, caller, (off) => { unlink = off })
+  } catch (err) {
+    if (caller !== null && caller.aborted) throw fail('cancelado')
+    throw err
+  } finally {
+    unlink()
+  }
+}
+
+async function verifiedRequest (url, d, deps, transient, caller, onLink) {
   const hashing = defaults(deps)
   const get = VITRINE ? vitrineGet : hashing.fetch
-  const transient = deps && deps.persist === false
   const init = { method: 'GET', credentials: 'omit', redirect: 'error' }
   let stop = () => {}
   if (!isAppClient()) {
     init.cache = transient ? 'no-store' : deps && deps.fresh === true ? 'no-cache' : 'force-cache'
-  } else {
-    if (transient) init.headers = { 'Cache-Control': 'no-store' }
-    if (typeof AbortController === 'function') {
-      const ctrl = new AbortController()
-      init.signal = ctrl.signal
-      stop = () => { try { ctrl.abort() } catch {} }
+  } else if (transient) {
+    init.headers = { 'Cache-Control': 'no-store' }
+  }
+  if ((isAppClient() || caller !== null) && typeof AbortController === 'function') {
+    const ctrl = new AbortController()
+    init.signal = ctrl.signal
+    stop = () => { try { ctrl.abort() } catch {} }
+    if (caller !== null) {
+      caller.addEventListener('abort', stop)
+      onLink(() => { try { caller.removeEventListener('abort', stop) } catch {} })
     }
+  } else if (caller !== null) {
+    init.signal = caller
   }
   let res
   try {
@@ -316,9 +377,27 @@ export async function fetchMedia (author, d, deps) {
     throw err
   }
   if (await digestHex(hashing, bytes) !== d.sha256) throw fail('conteúdo não confere')
-  // The author's hash proves who stored it, not what it is.
-  if (d.mime === AUDIO_MIME && rpc.audioBounds(bytes) === null) throw fail('conteúdo não confere')
   return bytes
+}
+
+// -> a displayable URL of a post's video (deps.urlFromBytes, typed
+// video/mp4), only after the bytes passed every fetchMedia check and the
+// strict videoBounds (no metadata box, headers agree with the samples) found
+// the descriptor's display sides and duration exactly. Always transient: a
+// video is never stored in the HTTP cache, whoever the author is, so
+// deps.persist is ignored. deps.signal (optional) cancels the download; a
+// cancelled one makes no URL.
+export async function fetchVideo (author, d, deps = {}) {
+  const a = authorOf(author)
+  if (a === null || !validVideoDescriptor(d)) throw fail('vídeo inválido')
+  const url = resolveUrl('/media/' + a + '/' + d.core + '/' + d.start + '/' + d.blocks)
+  const bytes = await fetchVerified(url, d, deps, true)
+  let v = null
+  try { v = rpc.videoBounds(bytes, { maxMs: MAX_VIDEO_MS }) } catch {}
+  if (v === null || v.width !== d.width || v.height !== d.height || v.ms !== d.ms) throw fail('conteúdo não confere')
+  const caller = callerSignal(deps)
+  if (caller !== null && caller.aborted) throw fail('cancelado')
+  return displayUrl(bytes, VIDEO_MIME, deps)
 }
 
 // The URL deps.urlFromBytes makes of verified bytes typed with `mime`.

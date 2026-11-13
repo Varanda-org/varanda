@@ -1204,7 +1204,7 @@ None of these was performed for this change.
 
 ### Residual risks
 
-- No illegal-media hash check: `docs/design.md` promises a comparison with lists of hashes of known illegal material before showing or relaying; it is not implemented. This PR therefore ships images only, no video. A blocked diary's media cores are purged with it.
+- No illegal-media hash check: `docs/design.md` promises a comparison with lists of hashes of known illegal material before showing or relaying; it is not implemented. This PR therefore ships images only, no video (short videos: section 181; the hash-list comparison is still absent). A blocked diary's media cores are purged with it.
 - A same-origin script can use the stored session: the `CryptoKey` is not exportable, but any script on the origin can call decrypt and act as the member (an XSS was already a full compromise while unlocked); anyone holding the unlocked device or profile can post until 'Sair' or the 30-day idle expiry.
 - The wrapping AES key lives in the same browser profile as the sealed PRF output: a copy of the profile yields the identity until 'Sair' or 30 days idle. The sealing only keeps the PRF output out of plain storage and stops the record alone from opening elsewhere.
 - Follows stored on a device before the update are not published automatically: the person confirms them in the Seguindo card 'Pessoas que você seguia neste aparelho'. Until the person decides, that device keeps its old list locally and does not receive follow changes from other devices. A confirmed follow cannot be taken back from the diary (append-only; only a later `on: false` record undoes it).
@@ -5165,7 +5165,7 @@ Regras que os passos conferem:
 - Grupo público: os itens são descritores de publicação comuns, e os bytes ficam no núcleo de mídia do autor, servidos em `/media` como as fotos do diário.
 - Grupo privado: cada foto é selada no aparelho (secretbox, chave e nonce novos, preenchida até blocos inteiros de 32 KiB), e só o cifrado vai ao núcleo de mídia do autor. A chave viaja só dentro da publicação selada pelo grupo. O semeador guarda e serve só o cifrado.
 - `group.read` devolve `media` em cada item (`null` em registro v1 e em publicação oculta); a mídia de uma publicação oculta não sai.
-- `GROUP_LIMIT_MAX` e `GROUP_LIMIT_DEFAULT` valem 29: a página mais pesada de `group.read` (quatro itens privados por publicação) cabe em `MAX_MESSAGE`.
+- `GROUP_LIMIT_MAX` e `GROUP_LIMIT_DEFAULT` valem 29 (26 desde a §195, com as reações): a página mais pesada de `group.read` (quatro itens privados por publicação) cabe em `MAX_MESSAGE`.
 - A CLI (nó core) recusa mídia em `group.post` com `mídia disponível só na versão web`. No navegador, mídia cifrada só vai a grupo privado (`mídia cifrada só em grupo privado`), e grupo privado exige mídia cifrada (`grupo privado exige mídia cifrada`).
 - Na lista de comunidades, a última publicação só com foto aparece como `Foto` (ou `GIF`).
 - `media.readGroup` busca o cifrado na origem do semeador do próprio nó (rota `/media`, `no-store`, sem cookies e sem redirecionamentos) e abre a imagem; qualquer falha vira `mídia indisponível`, e um bloqueio durante o download é recusado.
@@ -7802,3 +7802,1875 @@ Ordem: build de debug do Android, simulador do iOS, depois a web e o PWA. O buil
 - [ ] Painel de moderação, num serviço `account` com e-mails de moderador e o cliente Google (o laboratório não sobe o painel): o login ainda abre o Google e a volta é `/account/mod/callback`. Uma conta de moderador que já está no diretório entra. O vínculo de membro novo continua só por celular.
 - [ ] Serviço `account` sem `VARANDA_PHONE_KEY` (o id e o segredo do cliente Google continuam obrigatórios): entre as linhas de arranque, `cadastro de novas contas desligado: verificação de celular não configurada`. Com `--json`, `{"event":"cadastro"}`.
 - [ ] Ordem de deploy: este PR só sobe depois que o app do PR `feat/phone-only-signup-app` está nas lojas e os builds antigos passaram por um ciclo de revisão da loja. Até lá, o servidor do PR `feat/phone-only-signup-server` continua no ar e atende o vínculo pelo Google e o finish de celular.
+
+## 178. Receber compartilhamentos no Android (PR feat/share-to-varanda-android)
+
+No Android, a Varanda entra na folha de compartilhar do sistema. Outro app pode mandar uma foto, várias fotos, um GIF, um texto selecionado ou um link. Vídeo não entra: o protocolo de publicação não tem registro de vídeo, e o receptor não declara filtro de vídeo. O que chega abre o Publicar já preenchido, quando o app está pronto. A pessoa ainda toca em Publicar: nada é publicado e nenhuma foto é enviada antes disso. Um link no texto monta o cartão de link, como quando a pessoa cola um link. Mandar o compartilhamento para uma conversa não faz parte deste PR. A folha de compartilhar do iOS e a PWA instalada ficam para PRs seguintes.
+
+O alvo é uma activity à parte, `ShareReceiverActivity` (`apps/app/modules/share-intake/android`), exportada, com o tema `Theme.Translucent.NoTitleBar`, `noHistory`, `excludeFromRecents` e `taskAffinity` vazio. Ela não entra na pilha de quem enviou nem nos recentes. `MainActivity` continua sem a ação `SEND`, então os App Links dela não mudam e ela nunca vê o Uri nem o texto de outro app. Os filtros são `SEND` `image/*`, `SEND` `text/plain` e `SEND_MULTIPLE` `image/*`. Não há filtro de vídeo, de áudio nem de `*/*`.
+
+A activity copia os arquivos para o cache do app, em `cacheDir/varanda-share/<id>/`, e só então abre a Varanda pelo intent de lançamento, sem extras. O JavaScript nunca lê um Uri de outro app (`apps/app/modules/share-intake/index.js` só aceita um `file://` dentro desse diretório). Cada arquivo tem no máximo 50 MiB. Só entram Uris `content` que não são de um provedor do próprio app. A orientação EXIF de JPEG, HEIC, HEIF e WebP troca largura e altura quando a foto está de lado, para o caminho de foto que já existe não achatar o retrato. Quando o leitor de EXIF do Android não consegue abrir um arquivo num formato que carrega EXIF, só aquele arquivo é descartado. Um GIF é copiado como está. O manifesto (`manifest.json`) é gravado por último, com sync, então um diretório sem manifesto ainda está sendo escrito. No máximo 10 arquivos são copiados. Se vieram mais, o total fica no manifesto e o Publicar avisa "só as 10 primeiras fotos foram anexadas".
+
+Um arquivo que não entrega byte por cerca de 30 s (uma foto de galeria na nuvem que ainda não está no aparelho, com a rede desligada) é pulado, e o resto do compartilhamento segue. Voltar durante a cópia cancela o descritor aberto e apaga o diretório incompleto. Girar o aparelho não recria a activity (`configChanges` inclui orientação e tamanho de tela), então a cópia em andamento continua. Se nada pôde ser lido e não há texto, a activity mostra "Não deu para receber esse conteúdo." e não abre o Publicar.
+
+O estado fica em `apps/app/src/sharedIntent.js` e `apps/app/src/useSharedIntent.js`. O Publicar só abre com as abas na tela, sem folha por cima e fora da tela de conta excluída (`App.js`: `ready` exige `atTabs`, e `atTabs` é falso com o Publicar, Ajustes, Denunciar ou a ajuda abertos). Enquanto a pessoa está em Entrar, no meio da configuração ou com a sessão travada, o conteúdo fica no cache. O app fechado, em segundo plano ou já na frente chega no mesmo lugar: a leitura seguinte acha o manifesto. Matar o processo no meio da configuração, depois que a cópia terminou, não perde o compartilhamento. Ele vale 1 hora (`SHARE_TTL_MS`). Passado esse prazo, o app solta os arquivos e mostra "o compartilhamento expirou". O dono é a conta guardada no aparelho, que o app conhece também com a sessão travada e logo depois de reiniciar. Se o compartilhamento já tinha dono, entrar com outra conta, Sair ou Recomeçar também o soltam, sem aviso, mesmo com o app reiniciado no meio. Um compartilhamento feito sem sessão só abre o Publicar depois de Entrar, quando o app chega às abas.
+
+No Publicar, o texto compartilhado entra no rascunho. Se já havia texto, ele fica e o texto novo vai na linha de baixo. Se não cabe, o rascunho fica como estava e a nota diz "o texto compartilhado não coube no rascunho". Um texto maior que 1000 caracteres é cortado, com a nota "o texto compartilhado foi cortado em 1000 caracteres". Um link http ou https preenche o texto, e o cartão de link que o Publicar já monta aparece. As fotos passam pelo mesmo `encodeFile` da galeria (`apps/app/src/media/encode.native.js`): JPEG, PNG, WebP e HEIC são regravados sem EXIF nem GPS, e o GIF segue animado, sem redesenho. Uma foto que o app não abre (por exemplo um EXIF ilegível) sai da leva e as outras ficam, com a nota "algumas fotos não puderam ser abertas". Enquanto as fotos do primeiro compartilhamento ainda carregam, um segundo fica na fila e não tira as que já estão no Publicar. Ele abre depois que o primeiro é publicado ou o Publicar é fechado. Um Momento em publicação também segura o compartilhamento até essa publicação acabar. Com a tela de conta excluída na frente, o Publicar não abre.
+
+Quando as fotos terminam de carregar no Publicar, o app apaga o diretório daquele compartilhamento. `cacheDir/varanda-share` fica vazio. Reabrir pelos recentes não importa de novo: a activity de recepção não fica nos recentes, o lançamento não carrega o que foi compartilhado, e um id já entregue não é aplicado outra vez.
+
+Na web este módulo não recebe nada (`apps/app/src/shareIntake.web.js` devolve vazio). No iOS o módulo nativo não está ligado, então a folha de compartilhar do sistema ainda não oferece a Varanda (o iOS entra na seção 179). O Publicar pela galeria continua igual.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `node apps/app/test/sharedIntent.test.js`
+- `node apps/app/test/shareIntakeModule.test.js`
+- `node apps/app/test/shareTargetAndroid.test.js`
+
+Os testes conferem o texto composto, o prazo de 1 hora, a troca de conta, a nota das 10 fotos, os filtros do manifesto e a ausência de filtro de vídeo. Não abrem aparelho. A CI de pouso desta leva roda a suíte inteira. Esta seção não marca esses comandos como executados aqui.
+
+### Já conferido nesta branch (2026-11-12)
+
+Conferido nesta branch em 2026-11-12. Não é caminhada no aparelho.
+
+- [x] `npm run prepare:native -w apps/app -- android` na raiz e, em seguida, `./gradlew assembleDebug` dentro de `apps/app/android`: BUILD SUCCESSFUL. Conferido em 2026-11-12.
+- [x] O manifesto mesclado mostra `ShareReceiverActivity` exportada, translúcida, `noHistory`, `excludeFromRecents`, `taskAffinity` vazio, `configChanges` com as 12 mudanças, `requireContentUriPermissionFromCaller="read"`, com os filtros `SEND` `image/*`, `SEND` `text/plain` e `SEND_MULTIPLE` `image/*`, e sem filtro de vídeo. Conferido em 2026-11-12.
+- [x] `npx expo export --platform android` dentro de `apps/app` gera o bundle. Conferido em 2026-11-12.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Todos os itens estão em aberto.
+
+O APK de debug (emulador ou aparelho, depois de `npm run prepare:native -w apps/app`) serve para a folha de compartilhar e para o Publicar sem conta. O que precisa de Entrar usa o APK de preview do EAS: o build de debug não entra com uma passkey de produção (veja `docs/development.md`).
+
+- [ ] Uma foto. A Varanda aparece na folha de compartilhar. O Publicar abre com essa foto.
+- [ ] Várias fotos. A Varanda aparece. As fotos entram no Publicar.
+- [ ] Um GIF. A Varanda aparece. No Publicar o GIF continua animado.
+- [ ] Um texto selecionado. A Varanda aparece. O texto preenche o Publicar.
+- [ ] Um link do navegador. A Varanda aparece. O link preenche o texto e o cartão de link aparece.
+- [ ] Um vídeo. A Varanda não aparece na folha.
+- [ ] Uma seleção com foto e vídeo. A Varanda não aparece.
+- [ ] 12 fotos. O Publicar fica com 10 e mostra "só as 10 primeiras fotos foram anexadas".
+- [ ] Um JPEG de câmera em retrato e um HEIC. Os dois mantêm a proporção. Obrigatório.
+- [ ] Um WebP girado (orientação EXIF 90). Mantém a proporção.
+- [ ] Uma leva em que uma foto não abre (por exemplo um arquivo que diz ser JPEG e não é imagem). As outras ficam e a nota diz "algumas fotos não puderam ser abertas".
+- [ ] Um arquivo que o app não consegue ler, sozinho. Aparece "Não deu para receber esse conteúdo." O Publicar não abre com esse conteúdo.
+- [ ] App fechado, app em segundo plano e app já na frente. Nos três, o compartilhamento chega ao Publicar quando o app está pronto.
+- [ ] Compartilhar sem sessão. O Publicar não abre na tela Entrar. Ele abre depois de Entrar, quando o app chega às abas.
+- [ ] Compartilhar no meio da configuração da conta, depois que a cópia terminou. Matar o app e abrir de novo: o compartilhamento continua e abre o Publicar quando a configuração termina.
+- [ ] Publicar já com um rascunho de texto. O rascunho fica e o texto compartilhado entra na linha de baixo.
+- [ ] Compartilhar com o Publicar aberto, ou com Ajustes aberto. O conteúdo espera a folha fechar e só então abre o Publicar.
+- [ ] Compartilhar enquanto um Momento está sendo publicado. O Publicar do compartilhamento espera essa publicação terminar.
+- [ ] Compartilhar com a tela de conta excluída na frente. O Publicar não abre.
+- [ ] Com um compartilhamento já associado a uma conta, entrar com outra conta. Ele é descartado e o Publicar não abre com ele.
+- [ ] Com um compartilhamento já associado a uma conta, tocar em Sair (ou em Recomeçar), matar o app e entrar com outra conta. O compartilhamento foi descartado e o Publicar não abre com ele.
+- [ ] Com o app fechado e uma conta guardada que não destrava sozinha, compartilhar uma foto, deixar o app abrir travado, tocar em Recomeçar com outra passkey e entrar com ela. O compartilhamento foi descartado e o Publicar não abre com ele.
+- [ ] Deixar passar 1 hora. O compartilhamento é descartado e aparece "o compartilhamento expirou".
+- [ ] Antes de tocar em Publicar, nada é publicado e nenhuma foto é enviada.
+- [ ] A foto publicada não tem EXIF nem GPS.
+- [ ] Depois que as fotos terminam de carregar no Publicar, `cacheDir/varanda-share` fica vazio.
+- [ ] Reabrir o app pelos recentes não importa o mesmo compartilhamento de novo.
+- [ ] Um segundo compartilhamento enquanto as fotos do primeiro ainda carregam no Publicar. As fotos do primeiro não saem. O segundo abre depois que o primeiro é publicado ou o Publicar é fechado.
+- [ ] Uma foto de uma galeria na nuvem que ainda não está no aparelho, com a rede desligada. Depois de cerca de 30 s a Varanda pula esse arquivo e fica com o resto. Voltar durante a cópia não deixa nada para trás.
+- [ ] Girar o aparelho enquanto a Varanda está recebendo. O compartilhamento não se perde.
+- [ ] iOS, simulador: o app abre e o Publicar funciona (escolher uma foto da galeria e fechar). A folha de compartilhar do iOS não faz parte deste PR.
+
+### Limites conhecidos
+
+- Fechar o Publicar, ou mudar "Publicar como", enquanto as fotos compartilhadas ainda carregam, descarta essas fotos, como acontece com as fotos escolhidas na galeria.
+- Uma resposta ou uma citação deixada num rascunho anterior continua presa ao Publicar. Dá para tirá-la no próprio Publicar.
+- No Android o link chega dentro do texto. Um texto com link que passa de 1000 caracteres é cortado como qualquer texto, e o link pode ficar quebrado.
+- Se outra tela tomar o lugar do Publicar enquanto as fotos compartilhadas carregam (conta excluída, novo aceite dos Termos), o compartilhamento fica parado até o Publicar voltar, a sessão travar ou o app reiniciar.
+- Uma foto compartilhada que falha ao carregar no Publicar não pode ser tentada de novo: o arquivo original já foi solto.
+- Um EXIF corrompido que o leitor do Android ainda aceita conta como orientação normal: uma foto de lado pode chegar achatada ou deitada.
+- Vídeo não é aceito.
+
+## 179. Folha de compartilhar no iOS (PR feat/share-to-varanda-ios)
+
+### Pré-requisitos de quem opera
+
+Na conta Apple Developer:
+
+- Registrar o App Group `group.app.varanda`.
+- Ativar App Groups no App ID `app.varanda` e atribuir o grupo.
+- Registrar o App ID `app.varanda.share` e atribuir o mesmo grupo.
+- Manter Associated Domains no App ID `app.varanda`.
+
+Depois, em `apps/app`, rodar `eas credentials -p ios` para os perfis de produção e preview: atualizar o perfil do app mantendo Associated Domains e criar o perfil de `app.varanda.share` com o App Group.
+
+No iOS, a Varanda aparece na folha de compartilhar por uma Share Extension. Ela salva o conteúdo e pede que a pessoa abra o app; quando o app estiver pronto, Publicar abre preenchido. Nada é publicado sem tocar em Publicar. Vídeo não é aceito.
+
+### Automatizado
+
+Já executado em 2026-11-12:
+
+- [x] `node apps/app/test/shareTargetIos.test.js`.
+- [x] `node apps/app/test/hardening.test.js`, incluindo a comparação com um prebuild real.
+- [x] `node apps/app/test/shareIntakeModule.test.js`.
+- [x] `npm run prepare:native -w apps/app -- ios` e, em `apps/app/ios`, `xcodebuild -workspace Varanda.xcworkspace -scheme Varanda -configuration Debug -sdk iphonesimulator CODE_SIGNING_ALLOWED=NO build`: terminou em `BUILD SUCCEEDED`, e `Varanda.app/PlugIns/VarandaShare.appex` foi gerado.
+- [x] `PlistBuddy` confirmou que `CFBundleShortVersionString` e `CFBundleVersion` da extensão são iguais aos do app. A conferência também passou depois de uma alteração temporária em `CFBundleVersion` do app: a fase de build "Sync version with Varanda" copia os dois valores para a extensão em cada build.
+
+### Verificação manual
+
+Ainda não executada. Fazer num build assinado (EAS preview ou TestFlight), em iPhone com iOS 18 ou mais novo:
+
+- [ ] A Varanda aparece na folha de compartilhar do Fotos para uma foto, várias fotos e um GIF; no Safari para um link; e para texto selecionado em outro app.
+- [ ] A Varanda não aparece para vídeo, para uma seleção de foto com vídeo nem para PDF vindo de Arquivos. Se algum caso falhar, relatar: a regra de ativação precisa ser revista.
+- [ ] Depois de escolher Varanda, a folha mostra "Pronto. Abra o app Varanda para publicar." e fecha ao tocar em OK. A extensão não abre o app sozinha.
+- [ ] Abrir a Varanda com o app fechado ou em segundo plano, ou compartilhar, abrir o app e entrar se necessário: quando o app estiver pronto, Publicar abre com o conteúdo. Nada é publicado sem tocar em Publicar.
+- [ ] Compartilhar 12 fotos: Publicar mantém 10 e mostra "só as 10 primeiras fotos foram anexadas".
+- [ ] Uma foto HEIC e uma foto em retrato tirada pela câmera mantêm suas proporções; o GIF continua animado.
+- [ ] Compartilhar uma foto ProRAW (DNG) do Fotos e relatar se chega ao Publicar como JPEG ou HEIC ou se é recusada.
+- [ ] Compartilhar um link do Safari e um texto selecionado em outro app e relatar o texto que chega ao Publicar. Quando não há texto anexado, entra o texto que o app de origem pôs no próprio item.
+- [ ] Fazer um segundo compartilhamento antes de abrir o app: só o mais recente abre.
+- [ ] Depois de publicar ou fechar Publicar, o inbox do grupo (`Library/Caches/share-inbox`) e `Caches/varanda-share` do app estão vazios. Conferir pelo download do container do aparelho no Xcode ou relatar que não foi conferido.
+- [ ] Deixar um compartilhamento sem abrir por mais de 1 hora: aparece "o compartilhamento expirou" e Publicar não abre.
+- [ ] As verificações manuais da seção 178 continuam passando no Android.
+
+### Limites conhecidos
+
+- A pessoa precisa abrir a Varanda depois de compartilhar; a extensão não abre o app.
+- Um novo compartilhamento substitui outro que ainda não foi aberto.
+- Só o primeiro link de um compartilhamento é mantido. A extensão guarda até 4000 caracteres de texto, e o Publicar corta em 1000, como no Android.
+- Vídeo não é aceito.
+- Só entram JPEG, PNG, GIF, WebP, HEIC, HEIF e AVIF, os formatos que o Android também decodifica. Quando o app de origem oferece vários formatos, a extensão escolhe um desses; uma foto só em RAW, TIFF ou PSD é recusada quando o app importa o compartilhamento.
+- Uma imagem com mais de 100 megapixels, ou com um lado acima de 16384 pixels, é recusada. Uma foto de 48 MP e um panorama do iPhone entram.
+- Os arquivos compartilhados ficam no armazenamento do App Group, fora do backup do aparelho, até a Varanda ser aberta ou até um compartilhamento novo substituí-los. Os que passaram de 1 hora saem quando o app abre ou quando a extensão recebe outro compartilhamento.
+- Se o app de origem não entregar a foto, a folha desiste depois de 90 segundos e mantém o que já recebeu.
+
+## 180. Alvo de compartilhamento do PWA (PR feat/share-to-varanda-pwa)
+
+Na PWA instalada, no Chrome do Android, a Varanda entra na folha de compartilhar pelo Web Share Target do manifesto (`share_target` em `apps/app/public/manifest.webmanifest`). O alvo envia `POST` multipart para `/compartilhar`, com `title`, `text`, `url` e os arquivos no campo `fotos`. Os tipos aceitos são `image/jpeg`, `image/png`, `image/webp` e `image/gif`. Vídeo fica de fora, e HEIC também: o compositor da web não mostra nem envia esses formatos, e o manifesto não os declara.
+
+O service worker (`apps/app/scripts/sw.js`, `takeShare` e `storeShare`) responde a esse POST quando está no controle. Ele guarda o compartilhamento no Cache Storage, no cache `varanda-share`, e responde com um redirecionamento 303 para `/`. A resposta é esse redirecionamento também com um corpo malformado ou quando a gravação falha no meio, então a pessoa cai no app e não vê uma página de erro do navegador. Com o worker no controle, o corpo multipart não segue para o servidor.
+
+O worker guarda no máximo 10 fotos, só desses quatro tipos, cada uma de até 50 MiB. O que passa disso, ou que é de outro tipo, é pulado e mesmo assim entra na contagem. O Publicar mostra as mesmas notas do Android e do iOS: "só as 10 primeiras fotos foram anexadas" quando vieram mais de 10, e "algumas fotos não puderam ser abertas" quando uma foto foi pulada. `title`, `text` e `url` são cortados em 4000 caracteres no worker. O Publicar ainda corta o texto em 1000. Um compartilhamento só com link, só com texto ou só com título é guardado. Quando o texto veio vazio, o título entra no texto, como no Android e no iOS. Um compartilhamento sem título, texto, link e foto aproveitáveis não é guardado, e a página abre mesmo assim. Só o mais novo fica: um compartilhamento novo substitui outro que ainda não foi aberto, como no iOS. O anterior só sai depois que o novo está gravado por inteiro, e um pedido que chegou antes nunca toma o lugar de um que chegou depois.
+
+O nome `varanda-share` não começa com `varanda-shell-`, então a ativação do worker não apaga esse cache (seção 11). O app lê o cache ao abrir a página (`apps/app/src/shareIntake.web.js`) e, quando chega às abas, abre o Publicar preenchido, pelo mesmo caminho do Android e do iOS. A leitura não apaga o cache. Ele esvazia quando as fotos terminam de carregar no Publicar, quando passa 1 hora, ou quando um compartilhamento novo toma o lugar. Nada é publicado e nenhuma foto é enviada antes do toque em Publicar. A foto passa pelo `encodeFile` que já existe, sem EXIF nem GPS, e o GIF segue animado.
+
+Um link que chega num compartilhamento não monta a prévia sozinho. No lugar do cartão de link, o Publicar mostra "Mostrar prévia do link". A prévia só é montada depois desse toque ou de qualquer edição no texto. Publicar sem tocar publica sem cartão de link. Um segundo compartilhamento, com ou sem link, ou que não coube no texto, mantém a espera. Um compartilhamento sem link não muda nada, e um link que já estava no rascunho continua com a prévia de sempre. O Publicar é o mesmo no Android e no iOS, então lá vale o mesmo.
+
+Sair e Recomeçar apagam um compartilhamento que ainda está guardado, lido ou não por esta página. Isso vale também para um compartilhamento que chegou em outra janela da PWA. Travar a sessão mantém o compartilhamento. No Android e no iOS, Sair e Recomeçar apagam o compartilhamento que o app ofereceria e os anteriores.
+
+Na web, uma foto que declara mais de 16384 px num lado ou mais de 100 megapixels é recusada antes de ser aberta, com "foto grande demais". Uma foto cujo cabeçalho não dá para ler é recusada com "não foi possível abrir a foto". São os mesmos limites da extensão do iOS. Fotos de câmera de 48 MP passam.
+
+O alvo abre uma página nova. O compartilhamento fica no cache durante o desbloqueio com a passkey dessa página e durante uma recarga no meio da configuração da conta. O Publicar abre quando o app chega às abas.
+
+O Safari do iOS não tem Web Share Target. A folha de compartilhar do iPhone continua só pela extensão da seção 179. Uma aba do navegador que não instalou a PWA nunca aparece na folha. Sem um service worker no controle, o POST chega ao servidor e recebe 405. O compartilhamento se perde e a pessoa precisa repetir. O servidor não guarda o corpo.
+
+Depois de um deploy novo da web vale a mesma regra da seção 11: não há `skipWaiting` nem `clients.claim`, e o worker novo só assume quando todas as janelas da versão anterior fecham. Até lá, o primeiro compartilhamento pode chegar ao worker antigo. Se esse worker não trata `/compartilhar`, o POST segue para o servidor, recebe 405, e o compartilhamento se perde.
+
+### Automatizado
+
+Ainda não executado nesta seção. A CI de pouso desta leva roda a suíte inteira. Esta seção não marca esses comandos como executados aqui.
+
+- `node apps/app/test/pwa.test.js`
+- `node apps/app/test/sw.test.js`
+- `node apps/app/test/shareIntakeWeb.test.js`
+- `node apps/app/test/shareIntakeModule.test.js`
+- `node apps/app/test/sharedIntent.test.js`
+- `node apps/app/test/shareShell.test.js`
+- `node apps/app/test/localCaches.test.js`
+- `node apps/app/test/encodePhotoCap.test.js`
+- `node packages/rpc/test/media-bounds.test.js`
+- `node apps/cli/test/serve.test.js`
+
+Os testes conferem o alvo do manifesto (os quatro tipos de imagem, sem vídeo e sem `image/*`), o que o worker guarda e o redirecionamento para `/`, a leitura do cache `varanda-share` sem consumi-lo, a recusa 405 de `POST /compartilhar` no servidor quando o pedido chega lá, a prévia de link retida até o toque ou a edição, a limpeza do compartilhamento em Sair e Recomeçar (e não ao travar) e a recusa de foto grande antes de abrir. Não abrem o Chrome.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Todos os itens estão em aberto.
+
+Na PWA instalada a partir da origem hospedada, no Chrome do Android, com o worker desta versão no controle. Feche as janelas antigas para o worker novo ativar. Uma PWA instalada antes desta versão talvez só entre na folha depois que o Chrome atualizar o app instalado com o manifesto novo, o que não é imediato. Se a Varanda não aparecer, reinstale a PWA e anote aqui o que foi preciso.
+
+- [ ] Uma foto JPEG. A Varanda aparece na folha. O Publicar abre com essa foto.
+- [ ] Uma foto PNG. A Varanda aparece. A foto entra no Publicar.
+- [ ] Uma foto WebP. A Varanda aparece. A foto entra no Publicar.
+- [ ] Um GIF. A Varanda aparece. No Publicar o GIF continua animado.
+- [ ] Um texto selecionado. A Varanda aparece. O texto preenche o Publicar.
+- [ ] Um link. A Varanda aparece. O link preenche o texto e, no lugar do cartão de link, aparece "Mostrar prévia do link". Tocar nele monta o cartão.
+- [ ] Um link, sem tocar em "Mostrar prévia do link": editar o texto (uma letra basta) monta o cartão. Publicar sem tocar nem editar publica sem cartão de link.
+- [ ] No APK de debug do Android, compartilhar um link pela folha do sistema: o Publicar mostra "Mostrar prévia do link" e só monta o cartão depois do toque ou de uma edição.
+- [ ] Um link, sem tocar, e depois um segundo compartilhamento só com texto: o texto entra e "Mostrar prévia do link" continua no lugar do cartão.
+- [ ] Compartilhar uma foto, não abrir o Publicar e tocar em Sair. Entrar de novo: o Publicar não abre com o compartilhamento. Repetir com Recomeçar.
+- [ ] Com duas janelas da PWA: o compartilhamento chega numa janela que fica travada e é fechada. Na outra, tocar em Sair. Abrir a PWA de novo e entrar: o Publicar não abre com o compartilhamento.
+- [ ] Compartilhar uma foto com a sessão aberta e travar. Depois do desbloqueio, o Publicar abre com a foto.
+- [ ] Compartilhar uma imagem acima de 16384 px num lado ou de 100 megapixels. O Publicar mostra "foto grande demais" e a aba não trava. Uma foto de 48 MP de câmera entra normalmente.
+- [ ] Compartilhar um GIF cuja tela ou algum quadro passa dos limites de mídia (por exemplo 16384 x 16384). O Publicar mostra "imagem grande demais" e a aba não trava. Um GIF animado comum entra normalmente.
+- [ ] Um vídeo. A Varanda não aparece na folha.
+- [ ] Um HEIC. A Varanda não aparece na folha.
+- [ ] Compartilhar com a sessão travada. A página nova abre. Depois do desbloqueio com a passkey, o Publicar abre com o conteúdo.
+- [ ] Compartilhar no meio da configuração da conta e recarregar a página. O compartilhamento continua. O Publicar abre quando a configuração termina e o app chega às abas.
+- [ ] 12 fotos. O Publicar fica com 10 e mostra "só as 10 primeiras fotos foram anexadas".
+- [ ] 3 fotos, uma delas acima de 50 MiB. O Publicar fica com 2 e mostra "algumas fotos não puderam ser abertas".
+- [ ] Na origem hospedada, sem worker no controle (worker removido nas ferramentas do Chrome), um `POST /compartilhar` recebe uma recusa do servidor e nada é guardado. Anotar aqui o código que o Caddy responde (o `varanda-serve` responde 405, coberto por `serve.test.js`).
+- [ ] Deixar passar 1 hora. O compartilhamento é descartado e aparece "o compartilhamento expirou".
+- [ ] Depois que as fotos terminam de carregar no Publicar, o cache `varanda-share` fica vazio.
+- [ ] Com o worker no controle, o corpo multipart de `POST /compartilhar` não chega ao servidor.
+- [ ] Anotar aqui o valor de `Sec-Fetch-Site` que o Chrome envia na navegação do compartilhamento.
+- [ ] Depois de um deploy novo da web, com uma janela antiga ainda aberta: o primeiro compartilhamento pode chegar ao worker antigo. Fechar todas as janelas antigas e compartilhar de novo: o worker novo recebe e o Publicar abre.
+- [ ] Antes de tocar em Publicar, nada é publicado e nenhuma foto é enviada.
+- [ ] Um app que manda só o assunto (só título). O Publicar abre com o título no texto.
+- [ ] Compartilhar com a PWA já aberta e um texto sendo digitado no Publicar. Anotar aqui se a janela recarrega e o que acontece com esse texto (no app nativo o texto compartilhado é juntado ao rascunho).
+- [ ] O compartilhamento funciona com a política de conteúdo do site, que tem `form-action 'none'`: o Publicar abre. A navegação do compartilhamento vem da folha do sistema, não de um formulário da página.
+- [ ] Um compartilhamento que não cabe no espaço do navegador. A página abre sem rascunho e sem aviso. Um compartilhamento anterior ainda não aberto continua lá e abre no Publicar.
+- [ ] As verificações manuais da seção 178 continuam passando no Android.
+- [ ] As verificações manuais da seção 179 continuam passando no iOS.
+
+### Limites conhecidos
+
+- O Safari do iOS não tem Web Share Target. No iPhone a folha continua a da seção 179.
+- Uma aba que não instalou a PWA nunca aparece na folha de compartilhar.
+- Sem um service worker no controle, o POST chega ao servidor, recebe 405, o compartilhamento se perde e a pessoa precisa repetir.
+- Depois de um deploy, o primeiro compartilhamento pode chegar ao worker antigo até que as janelas antigas sejam fechadas (seção 11). Se esse worker não trata `/compartilhar`, o POST recebe 405 e o compartilhamento se perde.
+- Nesta folha entram JPEG, PNG, WebP e GIF. HEIC fica de fora. O app Android e a extensão do iOS aceitam HEIC (seções 178 e 179).
+- Vídeo fica de fora.
+- No máximo 10 fotos, cada uma de até 50 MiB. O worker corta título, texto e link em 4000 caracteres. O Publicar corta o texto em 1000.
+- Um compartilhamento novo substitui outro que ainda não foi aberto.
+- Um compartilhamento sem título, texto, link e foto aproveitáveis não é guardado. A página abre mesmo assim.
+- Se o cache não couber o compartilhamento, o worker apaga o que gravou dele pela metade, um anterior ainda não aberto continua, e a página abre sem o novo. A pessoa não vê aviso de que o novo se perdeu.
+- Compartilhar com a PWA aberta abre uma página nova. Um texto que estava sendo digitado e não foi publicado pode se perder (a verificar no aparelho).
+- Nada é publicado sem o toque em Publicar.
+- Um link compartilhado só ganha prévia depois do toque em "Mostrar prévia do link" ou de uma edição no texto.
+- Na web, uma foto acima de 16384 px num lado ou de 100 megapixels é recusada com "foto grande demais". Um PNG ou WebP animado com mais de 300 quadros não é lido e é recusado com "não foi possível abrir a foto". Um GIF passa pelos mesmos limites de mídia de uma imagem recebida (cada quadro, o número de quadros e o total de pixels), também no Android e no iOS; acima deles, "imagem grande demais".
+- No Android e no iOS, Sair e Recomeçar não apagam um compartilhamento marcado com um horário à frente do relógio do aparelho, a não ser o mais novo, nem um que esteja sendo gravado naquele milissegundo.
+
+## 181. Vídeos curtos em publicações e momentos
+
+Uma publicação, resposta ou citação aceita exatamente o par `[capa JPEG, vídeo MP4]`, com um vídeo de até 30 segundos e 8 MiB, sem fotos adicionais nem prévia de link. Um momento aceita uma foto, um GIF ou um vídeo de até 15 segundos e 4 MiB, sem par de capa; continua visível por 24 horas e o blob expira em 7 dias. Os dois formatos de vídeo limitam cada lado a 1920 e a área a 2073600 pixels. Não mudam os tetos de páginas, a retenção, os limites de conversas nem a regra de nunca repetir automaticamente um pedido que altera estado.
+
+Não há comparação de fotos, GIFs ou vídeos com listas de hashes de material ilegal conhecido antes de exibir ou repassar.
+
+Os controles são os limites, denúncia e bloqueio, com toda publicação denunciada que contém mídia destinada a uma pessoa. A IA não vê imagens nem vídeos. O bloqueio purga os núcleos de mídia do diário, mas não os blobs de momentos; quem reteve o descritor público pode abri-los até expirarem. Os riscos residuais estão em `protocol.md`, seção 8: núcleo de 256 MiB sem rotação, vídeo de até 8 MiB mais capa, H.264 não inspecionado, SEI não apagado, contêineres não percorridos e decodificador da plataforma recebendo bytes de pares.
+
+Cobertura automatizada:
+
+- `packages/core/test/records.test.js` e `packages/rpc/test/methods.test.js`: constantes e paridade dos validadores; chaves exatas; ordem e comprimento do par; JPEG obrigatório na capa; ausência de vídeo solto, mistura com fotos ou prévia; limites de duração, bytes, lados e área; ramo de vídeo do momento com 129 pedaços; recusa de vídeo nas mensagens diretas.
+- `packages/rpc/test/video-bounds.test.js`: MP4 sintético, H.264 com ou sem AAC, rotação, perfis e níveis, referências locais, durações de amostras e cabeçalhos, edições e B-frames, pedaços dentro de `mdat`, truncamentos, cifragem e fragmentação recusadas, remoção de metadados de contêiner e esquemas de codificadores. Os casos de AVAssetWriter são sintéticos: não comprovam compatibilidade com um arquivo de câmera real.
+- `packages/rpc/test/sizes.test.js`: o par máximo é menor que dez descritores de imagem; os máximos de páginas permanecem.
+- `packages/core/test/moments.test.js`: leitura e cópia de duração de momento em vídeo, além das regras existentes de expiração.
+- `packages/core/test/deletion.test.js`: capa e vídeo continuam referenciados enquanto o post está vivo.
+- `packages/web-member/test/session-media.test.js`: envio só da cópia sem metadados, recusa de vídeo inválido antes de gravar e `MEDIA_FULL` sem repetição do append.
+- `packages/web-member/test/media-ops.test.js`: descritor com duração, par em publicação, resposta e citação, recusa de pares invertidos ou forjados e de vídeo na Feira; paridade dos limites entre registros, RPC e contêiner.
+- `packages/web-member/test/e2e-media.test.js`: par recebido por outro nó, exclusão dos dois intervalos de mídia e recusa de pares forjados.
+- `packages/web-member/test/moments-e2e.test.js`: envio, criação e leitura de momento em vídeo com duração, remoção de metadados, limites de bytes e duração e indisponibilidade de blobs com conteúdo ou duração diferentes do descritor.
+- `packages/web-member/test/dm.test.js`: recusa de vídeo em mensagens diretas, inclusive de faixa de vídeo numa nota de voz.
+- `apps/app/test/identityInstall.test.js`: envio de tipo e duração ao nó, leitura estrita de dimensões e duração dos bytes, recusa de vídeo inválido sem gravar arquivo e recusa de nome com caminho.
+- `apps/app/test/webnodeHandle.test.js`: transporte de tipo e duração no IPC, capacidade de vídeo e leitura na web sem medir o vídeo como imagem.
+- `packages/core/test/group-media.test.js`: recusa de descritor de vídeo e do par de publicação em grupos.
+- `apps/cli/test/commands.test.js`: marcador `[vídeo]` em `feed` e `log`, com o par preservado em JSON.
+- `apps/cli/test/panel.test.js`: aviso de fotos ou vídeo no painel de moderação.
+- `apps/cli/test/pages-writer.test.js` e `apps/cli/test/account-pages.test.js`: recusa de vídeo em Páginas, inclusive de MP4 válido e de imagem com MIME de vídeo, sem gravar registro nem item de mídia.
+- `apps/cli/test/ai-triage.test.js`: mídia, inclusive vídeo, fica para decisão humana.
+- `apps/cli/test/ai-read-post.test.js`: par de vídeo reconhecido como mídia, com ou sem legenda, e denúncia mantida aberta para uma pessoa.
+
+Os testes usam mídia sintética e DHT local em `127.0.0.1`, sem baixar mídia, usar a DHT pública ou guardar arquivos binários de mídia como fixtures.
+
+Conferência das constantes e dos conjuntos de chaves:
+
+```sh
+rg -n 'VIDEO_MIME|MAX_VIDEO_MS|MAX_VIDEO_DIMENSION|MAX_VIDEO_PIXELS|MAX_MOMENT_VIDEO_MS|MAX_MOMENT_VIDEO_BYTES|VIDEO_DESCRIPTOR_KEYS|DESCRIPTOR_KEYS|MOMENT_MEDIA_KEYS|MOMENT_KEYS|MEDIA_BLOCK_BYTES|MAX_MEDIA_BLOCKS|MAX_MEDIA_ITEM_BLOCKS' packages/core/lib/records.js packages/rpc/lib/limits.js
+rg -n 'isVideoDescriptor|isPostMedia|isMomentVideoItem|isMomentMediaItem|mediaUploadFileCross|momentPutCross|DM_MEDIA_KEYS|AUDIO_DESCRIPTOR_KEYS|media.uploadFile|moment.putMedia|moment.create|media.readFile' packages/rpc/lib/methods.js
+```
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `node apps/cli/test/readme-help.test.js`
+- `npm test -w packages/rpc`
+- `npm test -w packages/core`
+- `npm test -w packages/web-member`
+- `node apps/app/test/identityInstall.test.js`
+- `node apps/app/test/webnodeHandle.test.js`
+- `npm test -w apps/cli`
+
+### Verificação manual
+
+Ordem: Android, iOS, depois web e PWA, num ambiente de teste local.
+
+- [ ] Em aparelhos Android e iOS, publicar um MP4 real de câmera H.264 com AAC e outro sem som, em retrato e paisagem, como post, resposta, citação e momento. Registrar aparelho, sistema e resultado; conferir capa, rotação, duração e reprodução. Um arquivo HEVC, fragmentado ou com faixa de metadados temporizados deve ser recusado; não afrouxar o validador para fazê-lo passar.
+- [ ] Com um arquivo real de câmera de celular contendo uma tag de localização, passar os bytes por `stripVideoMetadata` e conferir que a tag foi removida e que a saída passa em `videoBounds` estrito, sem `metadata: true`; conferir também a reprodução.
+- [ ] Na web e no PWA, repetir a publicação, resposta, citação e momento com os arquivos de câmera, conferindo capa, rotação, duração e reprodução.
+- [ ] Conferir os limites de 30 s/8 MiB e 15 s/4 MiB e suas recusas acima do teto, lados e área; conferir que o app não mistura vídeo com fotos nem prévia e que não oferece vídeo em publicações de Páginas, conversas, grupos, Feira, avatar ou prévia. Conferir a limpeza dos arquivos temporários ao trancar, sair e mandar o app para o fundo, sem nomes ou bytes em logs.
+- [ ] Simular perda de conexão depois do envio e confirmar a indicação de resultado incerto, sem repetição automática; reler o diário antes de publicar de novo. Conferir que o custo de até 129 selos por momento e as esperas de ritmo da seção 13 não são apresentados como uma falha antes de o envio terminar. Com a carteira vazia, `putPublicMedia` força o abastecimento até 300 selos, dentro da cota diária de 1024; uma compra completa em um único link soma `(300 - 28) × 270 ms = 73,44 s` de esperas deliberadas. O envio dos 129 pedaços soma `(129 - 28) × 135 ms = 13,635 s`, além da rede e das gravações.
+- [ ] Denunciar uma publicação com vídeo e outra com foto ou GIF: ambas ficam para uma pessoa, sem inferência sobre a mídia. No ambiente local, aplicar um bloqueio de teste e conferir a indisponibilidade dos núcleos de mídia do diário. Conferir separadamente que o blob do momento ainda abre com um descritor guardado até a retenção expirar e que a interface esconde o momento após 24 horas.
+- [ ] Ler o mesmo diário com um leitor e semeador anteriores: o post ou momento em vídeo inteiro é omitido; os blocos continuam servidos pelo semeador antigo, mas o post não entra nos índices nem nas contagens de posts vivos. Atualizar semeadores e serviço de conta antes do app publicador, como manda o CHANGELOG.
+
+## 182. Reprodução de vídeos curtos em publicações e momentos
+
+A Rua, o mosaico da citação e o mural mostram a capa JPEG de uma publicação com vídeo, com a marca de play e a duração. O rótulo é "vídeo de N segundos", no singular "1 segundo". O azulejo do mural diz "vídeo". Nada do vídeo é baixado até a pessoa tocar. Uma capa que não carrega ainda abre o vídeo.
+
+Em A Rua e no cartão da citação, o toque reproduz o vídeo dentro do post. O botão "ver em tela cheia" abre o visualizador com o mesmo arquivo (seção 188). O app baixa o vídeo, confere o sha256 e a checagem estrita de MP4, com lados e duração iguais aos do descritor, e só então monta um endereço local `file://` ou `blob:`. A reprodução tem controles e som. Encerrar a reprodução interrompe o download (abort), solta o player e apaga o arquivo local. Há um player por vez. Uma carga que falha mostra "vídeo indisponível" e um "Tentar de novo", sem repetição automática. Se o navegador recusa começar sem um gesto, o player permanece e mostra "Toque no play para assistir". Se começa mudo, mostra "Ativar som".
+
+No visualizador de momentos, um momento em vídeo usa o cronômetro único que já existe. A duração do segmento é a do vídeo. Uma foto continua em 5 s. O cronômetro começa quando o player está pronto, ou 2 s depois de o arquivo ter carregado. Se o player ainda diz que está tocando quando o cronômetro acaba, o momento espera o fim do vídeo por até 1,5 s. Segurar, o menu, arrastar, a confirmação de apagar e o app oculto pausam. Há um avanço por item. Com reduzir movimento não há reprodução automática ("Reproduzir") nem avanço automático. O som fica ligado, com "Ativar som" quando o navegador começa mudo. Um início bloqueado mostra "Reproduzir". Sair solta o player e apaga o arquivo local. "Reproduzir" e "Ativar som" agem dentro do próprio toque, para o navegador que exige um gesto.
+
+No Android e no iOS o app usa expo-video 55.0.21. A web usa um elemento `video` comum: expo-video não entra no pacote da web.
+
+Cobertura automatizada:
+
+- `apps/app/test/videoPlayback.test.js`: regra do endereço local, um player por vez, estado do player, tipos de recusa e ligação do player pela origem.
+- `apps/app/test/mediaFetch.test.js`: `fetchVideo` confere hash, redirecionamento, tamanho, checagem estrita, lados, duração e abort.
+- `apps/app/test/mediaPlan.test.js`: `videoPair`, `durationLabel` e o vídeo nunca vai ao codificador de foto.
+- `apps/app/test/mediaDisplay.test.js`: arquivos mp4 só dentro da pasta de mídia do app.
+- `apps/app/test/moments.test.js`: duração do segmento.
+- `apps/app/test/feedSnapshot.test.js` e `apps/app/test/screenSnapshot.test.js`: uma linha de vídeo sobrevive a reabrir, e um par malformado é recusado.
+- `apps/app/test/backgroundRefresh.test.js`: em segundo plano fica só a capa.
+- `apps/app/test/feedRender.test.js` e `apps/app/test/muralGrid.test.js`: um azulejo de capa, rótulos e ligação do visualizador.
+- `apps/app/test/momentosScreen.test.js`: tempo, segurar, reduzir movimento, início bloqueado e toques.
+- `apps/app/test/hardening.test.js` e `apps/app/test/podsLock.test.js`: sem o plugin de configuração do expo-video, e o lock dos pods.
+
+Os testes usam bytes sintéticos. Não abrem aparelho, não usam a DHT pública e não guardam arquivo binário de mídia.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `node apps/app/test/videoPlayback.test.js`
+- `node apps/app/test/mediaFetch.test.js`
+- `node apps/app/test/mediaPlan.test.js`
+- `node apps/app/test/mediaDisplay.test.js`
+- `node apps/app/test/moments.test.js`
+- `node apps/app/test/feedSnapshot.test.js`
+- `node apps/app/test/screenSnapshot.test.js`
+- `node apps/app/test/backgroundRefresh.test.js`
+- `node apps/app/test/feedRender.test.js`
+- `node apps/app/test/muralGrid.test.js`
+- `node apps/app/test/momentosScreen.test.js`
+- `node apps/app/test/hardening.test.js`
+- `node apps/app/test/podsLock.test.js`
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Todos os itens estão em aberto.
+
+Ordem: Android, iOS, depois web e PWA, num ambiente de teste local. Registrar aparelho, sistema e navegador.
+
+- [ ] Em A Rua, na citação (mosaico) e no mural, a publicação com vídeo mostra a capa JPEG, a marca de play e a duração. O rótulo é "vídeo de N segundos" (no singular, "1 segundo"). O azulejo do mural diz "vídeo".
+- [ ] Rolar não baixa o vídeo. No painel de rede, nada do arquivo de vídeo sai antes do toque.
+- [ ] Em A Rua e na citação, o toque reproduz dentro do post com som (seção 188).
+- [ ] Encerrar a reprodução apaga o arquivo local e interrompe um download em curso; fechar a tela cheia volta ao player dentro do post (seção 188).
+- [ ] Sem rede, aparece "vídeo indisponível" e um só "Tentar de novo". Não há repetição automática.
+- [ ] No Safari, ou no PWA do iOS com Modo de Baixa Energia, o player dentro do post em A Rua mostra "Toque no play para assistir" e o vídeo toca depois de um toque (seção 188); um momento em vídeo mostra "Reproduzir" e toca depois do toque.
+- [ ] Quando o navegador começa o vídeo sem som, aparece "Ativar som" (em A Rua e nos momentos), e um toque liga o som.
+- [ ] Um momento de 15 s toca até o fim e avança.
+- [ ] Segurar pausa a imagem e a barra.
+- [ ] Um momento de foto continua em 5 s.
+- [ ] Com reduzir movimento, aparece "Reproduzir" e o momento não avança sozinho.
+- [ ] Um blob expirado mostra "vídeo indisponível".
+- [ ] O som para ao sair.
+
+## 183. Preparar e publicar um vídeo curto
+
+Uma publicação, resposta ou citação leva exatamente o par `[capa JPEG, vídeo MP4]`: até 30 segundos e 8 MiB (`MAX_VIDEO_MS`, `MAX_VIDEO_BYTES` em `apps/app/src/media/plan.js`). Um momento leva uma foto, um GIF ou um vídeo de até 15 segundos e 4 MiB, sem par de capa, visível por 24 horas. Os dois formatos limitam cada lado a 1920 e a área a 2073600 pixels. Não há segunda mídia na mesma publicação, nem vídeo em Página, conversa, grupo, Feira, avatar ou prévia de link. A comparação com listas de hashes continua ausente (seção 181).
+
+`pickVideo()` (`apps/app/src/media/attach`) devolve um arquivo, ou `null` se a pessoa cancelar. O app não usa o tamanho nem a duração que o seletor informa. `prepareVideo(picked, { maxMs, maxBytes, signal })` (`videoPrep.native.js` e `videoPrep.web.js`, o mesmo contrato) devolve `{ bytes, mime: 'video/mp4', width, height, ms, poster }` ou `null` se o `signal` foi abortado (troca de modo, remoção ou desmonte: nada é mostrado). O texto de erro já está em pt-BR. Largura, altura e duração saem dos bytes depois de `stripVideoMetadata`. Uma preparação por vez: a ação Vídeo e o envio ficam indisponíveis enquanto ela corre. `node.media.video === true` só num handle real conectado (`apps/app/src/node.js`); a fachada da Vitrine não tem essa capacidade.
+
+No celular, `apps/app/modules/video-prep` reencoda (H.264 e AAC, lado maior até 960). No navegador não há reencodificação: só entra um arquivo que já cabe, e um arquivo acima de `maxBytes` é recusado antes da leitura. A capa sobe pelo caminho de imagem que já existe; o vídeo, por `node.media.upload({ kind: 'video' })`. `putMoment` apaga o buffer que recebe, então o momento envia uma cópia. Os Termos e a Política estão na versão 37 (`LEGAL_VERSION` e `TERMS_VERSION`).
+
+### Cobertura automatizada
+
+As conferências em simulador e emulador estão em "Conferido em 2026-11-12" abaixo; nenhuma com conta, em aparelho físico ou no navegador. O que os testes já cobrem, com MP4 sintético e sem fixture binária:
+
+- `apps/app/test/videoPrep.test.js`: preparação nativa e web; bytes e medidas depois da limpeza; capa pelo codificador de foto (nativo) ou desenhada dos bytes limpos (web); arquivo acima do teto recusado antes da leitura no navegador; duração acima do teto; saída que não passa na checagem; cancelamento devolve `null` e apaga os temporários; a cópia que o seletor deixa em `<cache>/ImagePicker/` é apagada em toda saída, e nada fora dessa pasta; `pickVideo` de um só arquivo, ou `null` ao cancelar.
+- `apps/app/test/videoPrepModule.test.js`: a entrada JavaScript do módulo, com um módulo nativo falso: argumentos inválidos recusados antes do nativo, os padrões 960 e 1,4 Mbit/s, `TOO_LONG` repassado, códigos desconhecidos viram `FAILED` com texto fixo, resposta malformada recusada e cortada aos campos do contrato.
+- `apps/app/test/videoCompose.test.js`: o compositor. Capacidade explícita (conectado, pessoal, com as duas funções); vídeo exclusivo com fotos e com prévia de link, sem descartar nada; os dois tetos; nada sobe antes de Publicar; a capa sobe antes do vídeo; um envio que falha deixa a publicação sem sair e mostra o núcleo cheio; respostas inválidas não publicam; uma criação incerta segura o rascunho sem reenviar; troca de modo, remoção e desmonte descartam o resultado atrasado; um rascunho limpo com o seletor aberto ainda entrega o vídeo escolhido a `prepareVideo`, com o sinal abortado, para a cópia ser apagada; o momento envia uma cópia e não sobe capa; uma citação continua precisando de texto; publicação e momento com foto mantêm o envio de antes.
+- `apps/app/test/eas-preview.test.js`: `media3-transformer`, `media3-effect` e `media3-common` em 1.8.0, a versão que o `expo-video` 55.0.21 declara.
+- `apps/app/test/hardening.test.js`: o podspec `VideoPrep` na lista dos módulos locais.
+- `apps/app/test/podsLock.test.js`: o comparador `apps/app/scripts/check-pods-lock.js` (as duas somas que dependem do caminho e a versão do CocoaPods ficam de fora). Ele não roda o `pod install`: a comparação do lock commitado com o gerado roda no job iOS de `.github/workflows/native.yml`, e localmente como em `docs/development.md`.
+- `apps/app/test/legal.test.js` e `apps/app/test/terms-version.test.js`: versão 37, o texto de vídeos curtos e o par `LEGAL_VERSION` / `TERMS_VERSION`.
+- Seção 181: par, tetos, núcleo cheio, exclusão, Página, conversa, grupo, Feira, app antigo que pula a publicação, e a limpeza sintética de `udta`.
+- Seção 182: reprodução, tempo do momento e reduzir movimento, em teste, sem aparelho.
+
+A conferência em hexadecimal de um arquivo publicado (sem caixa `udta`, `meta` ou `uuid`, e sem localização) não foi feita. O teste de preparação só vê um `udta` sintético; os bytes preparados em simulador e emulador estão abaixo.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `node apps/cli/test/readme-help.test.js`
+- `node apps/app/test/videoPrep.test.js`
+- `node apps/app/test/videoPrepModule.test.js`
+- `node apps/app/test/videoCompose.test.js`
+- `node apps/app/test/hardening.test.js`
+- `node apps/app/test/eas-preview.test.js`
+- `node apps/app/test/podsLock.test.js`
+- `node apps/app/test/legal.test.js`
+- `node apps/app/test/terms-version.test.js`
+
+As baterias das seções 181 e 182 continuam valendo. Nada disso foi repetido nesta seção.
+
+### Matriz de aparelhos
+
+Nenhuma caixa foi marcada. Ordem: build de debug do Android, simulador ou aparelho iOS, depois a web e o PWA, num ambiente de teste local. Registrar aparelho, sistema e navegador. A Vitrine não oferece vídeo.
+
+| Conferência | Android | iOS | Web | PWA |
+|---|---|---|---|---|
+| Preparar e publicar: uma publicação (capa e vídeo) e um momento | [ ] | [ ] | [ ] | [ ] |
+| Recusa acima da duração (30 s na publicação, 15 s no momento), sem cortar o arquivo | [ ] | [ ] | [ ] | [ ] |
+| Tetos de bytes, lado e área; uma preparação por vez | [ ] | [ ] | [ ] | [ ] |
+| O arquivo publicado não tem `udta`, `meta`, `uuid` nem localização (hexadecimal) | [ ] | [ ] | [ ] | [ ] |
+| Reprodução com som, a partir da capa, e um só player | [ ] | [ ] | [ ] | [ ] |
+| Tempo do momento: a duração do vídeo; uma foto continua em 5 s | [ ] | [ ] | [ ] | [ ] |
+| O fim do vídeo não é cortado | [ ] | [ ] | [ ] | [ ] |
+| Reduzir movimento: sem reprodução automática e sem avanço automático | [ ] | [ ] | [ ] | [ ] |
+| Apagar a publicação tira capa e vídeo; apagar o momento tira o item | [ ] | [ ] | [ ] | [ ] |
+| Núcleo cheio: "Este aparelho não tem mais espaço para fotos e vídeos.", sem núcleo novo | [ ] | [ ] | [ ] | [ ] |
+| Um app ou uma página anterior pula a publicação com vídeo inteira | [ ] | [ ] | [ ] | [ ] |
+| Página e conversa sem vídeo (também grupo, Feira, avatar e prévia) | [ ] | [ ] | [ ] | [ ] |
+| Portão dos Termos e da Política na versão 37, com novo aceite | [ ] | [ ] | [ ] | [ ] |
+
+### Conferido em 2026-11-12: simulador iOS e emulador Android, sem conta
+
+Builds de debug desta branch, sem conta e sem publicar. O módulo `video-prep`, `pickVideo` e `prepareVideo` foram chamados direto no runtime do app, pelo inspetor do Metro. Nada abaixo passou pela tela do compositor, por um nó conectado ou por um segundo aparelho, por isso nenhuma caixa da matriz acima foi marcada.
+
+- iOS: simulador iPhone 17 Pro, iOS 26.2. Android: emulador API 36 (`sdk_gphone64_arm64`), com o codificador H.264 de software do Android. Nenhum aparelho físico.
+- Clipes: padrões de teste gerados no Mac, não arquivos de câmera de celular. H.264 1080p de 20 s; HEVC 60 fps de 10 s; retrato 1080x1920 de 12 s com uma caixa de localização `loci` em `udta`; 24 fps de 8 s; um de 60 s; HEVC 60 fps com muito detalhe, de 30 s e de 15 s; H.264 60 fps de baixa qualidade, 30 s; granulação, 30 s.
+
+| Clipe (teto) | iOS: lados, bytes | Android: lados, bytes |
+|---|---|---|
+| H.264 1080p, 20 s (publicação) | 960x540, 3563052 | 960x540, 3974424 |
+| HEVC 60 fps, 10 s (publicação) | 960x540, 3780718 | 960x540, 1320559 |
+| Retrato, 12 s (publicação e momento) | 540x960, 2164975 | 540x960, 2531812 |
+| 24 fps, 8 s (publicação) | 960x540, 1474599 | 960x540, 1751333 |
+| 60 s (publicação) | `TOO_LONG` antes de codificar | `TOO_LONG` antes de codificar |
+| H.264 de 20 s (momento, 15 s) | `TOO_LONG` antes de codificar | `TOO_LONG` antes de codificar |
+| HEVC 60 fps com muito detalhe, 30 s (publicação) | 768x432, 5338482, segunda passagem | 960x540, 3265215 |
+| HEVC 60 fps com muito detalhe, 15 s (momento, 4 MiB) | 766x430, 2717546, segunda passagem | 960x540, 1799449 |
+| H.264 60 fps de baixa qualidade, 30 s (publicação) | 960x540, 7456226 | 960x540, 3265196 |
+| Granulação, 30 s (publicação) | 960x540, 5217674 | 960x540, 5890519 |
+
+- Toda saída tem no máximo 30 quadros por segundo, H.264 com AAC, e passa por `videoBounds` com `metadata: true`, por `stripVideoMetadata` e por `videoBounds` estrito. No Android, a duração que o módulo informa passa da duração dos bytes em cerca de 64 ms (20064 contra 20000); o app usa só a dos bytes. Árvore de caixas no Android, igual nos nove arquivos: `ftyp moov free mdat`, com `co64`. No iOS: `ftyp moov mdat`, com `edts`/`elst`, `sdtp` e `sgpd`/`sbgp` (`roll`) na faixa de som. `colr` é `nclx` nas duas plataformas; `nclc` não apareceu.
+- No simulador, a primeira passagem a 960 de um clipe de 60 fps com muito detalhe passa do teto, qualquer que seja a taxa pedida; a segunda passagem, com os lados reduzidos, cabe. Um codificador de iPhone real não foi medido.
+- Capas: em pé nos dois sistemas, para retrato e paisagem, comparadas com o primeiro quadro do original já girado.
+- Uma preparação por vez: com uma em curso, a segunda chamada responde `BUSY` em poucos milissegundos (iOS e Android).
+- Seletor real, com o código atual: o retrato de 12 s escolhido no seletor de fotos do sistema volta como uma cópia em `<cache>/ImagePicker/` (1080x1920). `prepareVideo` devolve 540x960, 12067 ms, com capa 540x960, e depois disso `ImagePicker` e `video-prep` ficam vazios (iOS e Android). O seletor do iOS 26 avisa "Location Is Included".
+- Bytes que `prepareVideo` devolveu (o que o compositor enviaria), procurados byte a byte: nenhum `udta`, `meta`, `uuid`, `loci`, `©xyz`, `ilst` nem coordenada ISO 6709, nos dois sistemas. O clipe de origem tem `udta(meta(hdlr ilst) loci)`. Isso não substitui a conferência de um arquivo publicado.
+
+### Conferências de aparelho ainda por fazer
+
+- [ ] Safari no iOS (web e PWA): a capa é desenhada num elemento `video` que não entra no documento. Quando os metadados chegam, o app pede a posição inicial (`currentTime`), para o Safari decodificar um quadro e disparar `seeked`. Se nem `loadeddata` nem `seeked` chegarem, o prazo de 10 s (`FRAME_TIMEOUT_MS` em `videoPrep.web.js`) recusa o arquivo. Registrar se a capa sai ou se o arquivo é recusado.
+- [ ] Android e iOS: uma capa nativa cuja proporção difere do tamanho de exibição do vídeo seria esticada pelo codificador de foto (`encodeFile` em `videoPrep.native.js`). Conferir a capa publicada lado a lado com o primeiro quadro.
+- [ ] Um arquivo real de câmera de celular, com localização, publicado por Android, iOS, web e PWA. Nos bytes publicados, em hexadecimal, não há `udta`, `meta`, `uuid` nem localização, e a reprodução segue.
+- [ ] Variantes `colr` `nclc` e `nclx`, e caixas `sgpd`, vindas de codificadores reais (não do MP4 sintético dos testes). Registrar se a limpeza mais `videoBounds` estrito aceita o arquivo ou qual recusa aparece. Em 2026-11-12, `nclx` (iOS e Android) e `sgpd` `roll` (iOS) foram aceitos; `nclc` ainda não apareceu.
+- [x] Android e iOS, codificação (T13 e T14): um clipe 1080p e um clipe HEVC passam pela limpeza e por `videoBounds` estrito; um clipe de 60 s é recusado antes de codificar; as capas saem em pé. Feito em 2026-11-12 no simulador iOS e no emulador Android (acima); falta um iPhone e um Android físicos. Não afrouxar o validador para um arquivo real passar.
+- [ ] iPhone e Android físicos: os mesmos clipes, com o codificador do aparelho; registrar se a segunda passagem do iOS acontece fora do simulador.
+
+## 184. Players de música em publicações, ao toque, Termos 38 (PR feat/music-link-embeds)
+
+Publicações com cartão de YouTube, SoundCloud, Spotify ou Apple Music oferecem **Tocar aqui**. O cartão fechado mostra só os dados guardados na publicação, sem pedido ao provedor. O aviso explica que o toque carrega o player do serviço e entrega a ele o endereço de internet do aparelho. Só esse toque monta o player dentro da publicação. O link continua podendo abrir fora, e músicas completas dependem do serviço. Não há mudança no registro: um leitor antigo continua mostrando o cartão comum, e um link de `audius.co` não ganha frame do provedor.
+
+`apps/app/src/musicEmbed.js` aceita nove hosts e constrói os endereços dos players só com identificadores e componentes validados. O app usa `react-native-webview` 13.16.0 no celular, sem ponte JavaScript para o app e com navegação do quadro principal limitada. O modo anônimo não apaga tudo o que o player guarda. No Android, o `incognito` do 13.16.0 remove os cookies anteriores e desliga o cache quando o quadro monta, e cookies de terceiros são recusados (`thirdPartyCookiesEnabled` falso), mas o `localStorage` e o IndexedDB do provedor ficam nos dados do WebView do app. No iOS, o armazenamento de dados é não persistente. Em todas as plataformas o quadro do provedor tem sandbox (`EMBED_SANDBOX`: `allow-scripts allow-same-origin allow-presentation`, sem popups, navegação do topo, formulários nem downloads), uma lista `allow` sem recurso de captura e `referrerPolicy` fixo. A CSP permite em `frame-src` apenas `https://www.youtube-nocookie.com`, `https://w.soundcloud.com`, `https://open.spotify.com` e `https://embed.music.apple.com`. O build web deve ser implantado junto com o `deploy/seeder/Caddyfile` atualizado; o servidor local usa a mesma lista.
+
+Só um player toca por vez. Tocar em outro cartão fecha o primeiro; trocar de tela, trocar de aba, abrir uma foto em tela cheia ou mandar o app para segundo plano fecha o player. Com o player aberto, a cada meio segundo o app compara a área dele com a parte visível da lista (abaixo da barra de cima e acima da barra de abas, quando a tela tem uma) e o fecha se menos da metade da largura estiver visível, se a altura visível for menor que a metade da altura do player (no máximo 120 pt, nos players altos) ou se não for possível medi-lo. Nos 2 primeiros segundos depois do toque essa conferência não o fecha, para dar tempo de rolar até ele. A reprodução vem do cartão guardado, nunca de uma busca de links no texto. Se a página não puder ser lida ao compor uma publicação, um link reconhecido ainda pode gerar um cartão com o nome do provedor e sem imagem.
+
+Termos e Política de Privacidade passam à versão 38, com novo aceite. Os Termos descrevem o toque opcional, o endereço de internet do aparelho recebido pelo provedor, seus cookies e outros dados guardados no aparelho e seus termos. A Política descreve, além disso, as informações do navegador ou app (user agent), o provedor como controlador e o referrer (o endereço do site ou, no app, um endereço fixo do app Varanda). O provedor é o controlador desses dados e pode tratá-los fora do Brasil. A associação não guarda esses dados nem histórico de reprodução. A base legal proposta para carregar o player solicitado e a transferência internacional continuam sujeitas a parecer jurídico. As páginas do site são renderizadas de `apps/app/src/legal.js`; a tabela LGPD está em `docs/design.md` e o comportamento do leitor em "Link cards" de `docs/protocol.md`.
+
+Como verificar, a partir da raiz, com Node 20.19 ou mais novo no PATH:
+
+- `npm run lint`
+- `node apps/app/test/musicEmbed.test.js`
+- `node apps/app/test/embedFrame.test.js`
+- `node apps/app/test/musicEmbedCard.test.js`
+- `node apps/app/test/linkPreview.test.js`
+- `node apps/app/test/linkCardBuild.test.js`
+- `node apps/app/test/chatMedia.test.js`
+- `node apps/app/test/legal.test.js`
+- `node apps/app/test/terms-version.test.js`
+- `node packages/core/test/terms.test.js`
+- `VARANDA_TEST_CONCURRENCY=1 node apps/cli/test/account-terms.test.js`
+- `npm test -w apps/site`
+- `node apps/site/scripts/render-legal.js --check`
+- `node apps/cli/test/caddyfile.test.js`
+- `VARANDA_TEST_CONCURRENCY=1 node apps/cli/test/deploy.test.js`
+- `VARANDA_TEST_CONCURRENCY=1 node apps/cli/test/serve.test.js`
+
+Os testes de música conferem a lista de hosts, URLs recusadas, endereços construídos sem copiar parâmetros não conferidos, ausência de frame Audius e cartão com o nome do provedor. Os testes de frame conferem a versão da dependência, a ausência de ponte, os limites de navegação, o sandbox e a política de referrer. Os testes de cartão e prévia conferem a integração com as publicações e a montagem do player só após o toque; `linkCardBuild` confere o cartão alternativo quando a prévia falha. `chatMedia` confere a troca de reprodução e o encerramento ao sair da tela, ao abrir uma foto em tela cheia ou ao ir para segundo plano. Os testes legais conferem os avisos, o digest, a versão comum ao app e ao core, o aceite no serviço e a igualdade das páginas renderizadas. Os testes da CLI conferem a CSP no Caddy, no deploy e no servidor local. Os testes automatizados usam substitutos dos provedores e servidores locais, sem rede pública; não comprovam a reprodução real nos quatro serviços nem substituem as verificações abaixo.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Todos os itens estão em aberto. Ordem: Android debug, simulador iOS, depois web e PWA. O build de debug não entra com passkey de produção; use uma instalação de teste compatível. No iOS, a passkey depende do domínio associado da conta Apple Developer (veja `docs/development.md`). Em cada plataforma, repetir os cenários abaixo com uma publicação por provedor, usando links válidos de YouTube, SoundCloud, Spotify e Apple Music.
+
+- [ ] Android, build de debug no emulador ou aparelho, após `npm run prepare:native -w apps/app`: conferir os quatro cartões e os cenários abaixo.
+- [ ] iOS, simulador: conferir os quatro cartões e os mesmos cenários.
+- [ ] Web: conferir os quatro cartões e os mesmos cenários, com o build e o Caddyfile atualizados juntos.
+- [ ] PWA instalado: conferir os quatro cartões e os mesmos cenários.
+- [ ] Ao abrir a tela e rolar pelos cartões, não há pedido ao provedor antes de tocar em **Tocar aqui**, conferido no inspetor de rede da plataforma.
+- [ ] Em cada provedor, o toque abre o player na publicação; os controles funcionam e o link ainda abre fora. Conferir o comportamento quando o serviço oferece só uma prévia da música.
+- [ ] Tocar em um segundo cartão fecha o primeiro player; não ficam dois tocando.
+- [ ] Sair da tela, trocar de aba, mandar o app para segundo plano e rolar até ficar visível menos da metade da largura ou menos que a metade da altura do player (até 120 pt) fecham o player; abrir uma foto em tela cheia também.
+- [ ] Um link de Audius continua como cartão comum, sem frame do provedor. Um link reconhecido cuja página não forneça prévia pode ser publicado com o nome do provedor e sem imagem.
+- [ ] Cada um dos quatro players toca dentro do sandbox, no Android, no iOS e na web.
+- [ ] No Android, cada player carrega e toca depois de tocar em "Tocar aqui": a guarda recusa toda navegação de topo que não seja o documento do cartão, e a carga do subquadro do provedor não passa por ela. Se o player não carregar, a guarda está errada para este WebView.
+- [ ] Links curtos `on.soundcloud.com` tocam.
+- [ ] Numa tela de 360 dp de largura (Android), o player do Spotify cabe no cartão sem cortar os controles.
+- [ ] Abrir uma foto em tela cheia para o player de música.
+- [ ] Um player alto (álbum do Apple Music) aberto perto do fim da tela continua tocando enquanto parte dele aparece.
+- [ ] Numa tela empilhada (perfil de outra pessoa), o player no fim da tela não fecha sozinho.
+- [ ] Android: abrir um vídeo do YouTube em tela cheia e girar o aparelho; o vídeo continua tocando depois de 2 s e, ao sair da tela cheia, o player volta ao cartão.
+- [ ] Nenhum navegador abre e nenhum download começa a partir de um player.
+- [ ] Uma conta que aceitou a versão 37 recebe os Termos 38 para novo aceite; os textos no app e nas páginas do site coincidem.
+
+## 185. Música do Audius no serviço de conta (PR feat/audius-proxy)
+
+O serviço de conta pode buscar e repassar áudio do Audius, para o aparelho do membro nunca falar com o provedor. Fica desligado sem `VARANDA_AUDIUS_API_KEY`, que não pode ser definida numa instalação com Termos abaixo da versão 39 (a versão 39 e o app estão descritos na seção 186). Com a chave, as rotas `/account/audius/*` respondem. `GET /account/audius/policy` responde `{ enabled, moments }` também desligado (aí `{ enabled: false, moments: false }`, e qualquer outra rota `/account/audius/*` responde 404 `feature-off`). `moments` só é verdadeiro com a música ligada e `VARANDA_AUDIUS_MOMENTS=1`.
+
+A sessão é a mesma da busca de GIFs (`member-session.js`, prefixo `audius`), com domínio MAC próprio. Busca, item, resolve e play exigem `Authorization: Bearer`. O áudio é `GET /account/audius/audio/<ticket>`: o ticket vai no caminho porque um elemento de mídia não envia `Authorization`. O ticket não nomeia faixa, dura `TICKET_TTL_MS` (30 minutos), e a cada `RECHECK_MS` o serviço confere de novo se o membro continua vinculado e fora da lista de bloqueio. Quem falha perde o ticket. Enquanto o áudio é repassado, a conferência se repete a cada `RECHECK_MS`, com um temporizador por relé: quem falha perde o ticket e o relé é cortado, sem fechar o corpo, com a cobrança do que foi enviado, então quem é bloqueado ou desvinculado no meio da música perde o áudio em até um `RECHECK_MS`. Se o armazenamento não consegue responder a essa conferência, o relé também é cortado, mas o ticket fica. O `/play` também confere isso logo antes de criar o ticket, sem reaproveitar a conferência da sessão: quem falha recebe 404 `nao-encontrado`, nenhum ticket, e o uso de play não volta.
+
+Por membro e por dia: `SEARCHES_PER_DAY` (200), `ITEMS_PER_DAY` (600), `RESOLVES_PER_DAY` (60), `PLAYS_PER_DAY` (300), `PROVIDER_CALLS_PER_DAY` (1760), `AUDIO_OPENS_PER_DAY` (1000) e `DAILY_BYTES` (1 GiB). `PROVIDER_CALLS_PER_DAY` conta cada chamada JSON que vai ao provedor, logo antes da ficha do orçamento (um item de playlist faz duas; uma resposta do cache não conta), e é a soma do máximo que os tetos das rotas permitem (200 + 2 × 600 + 60 + 300). Uma vez feito o contato com o provedor, ela não volta, qualquer que seja a resposta; só volta quando a chamada é recusada antes de qualquer contato (`MAX_INFLIGHT` ou orçamento do serviço esgotado). Acima dela, 429 `limite-musica`, sem chamada ao provedor, e o uso da rota volta. Assim um membro não esgota sozinho o orçamento do serviço, nem com um provedor fora do ar. Cada pedido de áudio que toma uma abertura conta, mesmo sem byte de áudio, e a abertura não volta. Acima do teto do dia, 429 `limite-musica`. Por ticket: `TICKET_BYTES` (256 MiB) e `OPENS_PER_TICKET` (64). Passou das aberturas do ticket, o ticket sai e a resposta é 404 `nao-encontrado`. Um ticket novo além de `TICKETS_PER_MEMBER` (8) aposenta o mais antigo daquele membro. O orçamento do provedor, `PROVIDER_PER_DAY` (12000), é de todo o serviço. Cada pedido de áudio, um pedido com `Range` incluído, também gasta uma ficha do balde global do serviço de conta (`server.js`).
+
+Um 4xx do provedor que não seja 401, 403, 408 ou 429 é a resposta dele sobre o que foi pedido: em item, resolve e play vira 404 `nao-encontrado` (400, 404 e 410 igualmente) e o uso não volta; na busca vira 503 `indisponivel` e a busca não volta. Um 401 ou 403 (a chave do operador), um 408 ou 429 (carga), um 5xx, um prazo esgotado ou uma resposta que não é JSON utilizável vira 503 `indisponivel` e o uso da rota volta, mas a chamada de `PROVIDER_CALLS_PER_DAY` não. No áudio, um pedido com `Range` responde 206 com `Content-Range`. Se o nó de armazenamento ignora `Range` e manda `Content-Length`, o serviço corta a fatia pedida e responde 206; sem `Content-Length`, a resposta é 200 com o corpo inteiro desde o byte 0, e a busca de ponto não funciona. Um 206 que passa do fim pedido é cortado nesse fim, no `Content-Range`, no `Content-Length` e na cobrança. Um 416 de cima é repassado como 416, sem corpo. `Content-Range` (`bytes */N`) só quando está bem formado. Nada de byte é cobrado. Os cabeçalhos do áudio são `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox` e `Referrer-Policy: no-referrer`. Um corte de cota deixa o corpo visivelmente incompleto. Um nó que fecha, aborta ou dá erro no meio do corpo também é um corte: o que já foi escrito chega ao cliente (dentro de `STALL_MS`) e só então a conexão fecha, sem fechar o corpo. Depois do fim ou do corte a resposta fica aberta no máximo `STALL_MS` para o cliente ler o resto, nunca além de `TOTAL_MS`, e a vaga de stream fica presa até lá. O `TOTAL_MS` (15 minutos) conta desde o início do relé: toda resposta de áudio é cortada, sem fechar o corpo, `TOTAL_MS` depois dos cabeçalhos, mesmo com bytes ainda andando, e o cliente pede o resto com `Range`. Só `bytes=<início>-` e `bytes=<início>-<fim>` valem como `Range`; qualquer outra forma é ignorada e a resposta é 200 com o corpo inteiro. Se o nó ignora `Range` e o trecho a pular é maior ou igual ao espaço que sobra (do ticket ou do dia), a resposta é 429 `limite-musica`: o ticket fica, a abertura e a ficha do orçamento já foram gastas e nada é cobrado.
+
+A primeira ida fica presa ao host da API. Um redirecionamento de JSON também. O redirecionamento do áudio só vai a um host https público, na porta 443, pela consulta guardada. A chave vai no cabeçalho `x-api-key` só nessa primeira ida, nunca para um nó de armazenamento e nunca numa URL. O redirecionamento do resolve não leva a chave. Cursores de busca seguem `CURSOR_RE` e `MAX_CURSOR`. O item de playlist lista no máximo `MAX_PLAYLIST_TRACKS` faixas. O resolve de playlist não lista as faixas. Nada é gravado em disco: nenhum byte de áudio fica depois da resposta, e os metadados ficam na memória com validade de 10 minutos. Validade não é remoção: a linha dos metadados só sai quando é lida depois de vencer ou quando outras a empurram para fora de `MAX_CACHED`, e a linha de um ticket vencido sai no próximo uso dele ou no próximo `play` de qualquer membro, então ambas podem ficar na memória além do prazo, até um uso seguinte ou um reinício. O app passa a chamar essas rotas com a música nas publicações e os textos legais da versão 39 (seção 186). A chave nunca pode ser definida numa instalação abaixo dos Termos 39.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `node apps/cli/test/stream-fetch.test.js`
+- `node apps/cli/test/audius-provider.test.js`
+- `node apps/cli/test/audius-routes.test.js`
+- `node apps/cli/test/audius-server.test.js`
+- `node apps/cli/test/account.test.js`
+- `node apps/cli/test/readme-help.test.js`
+- `node apps/cli/test/cli.test.js`
+- `node apps/cli/test/deploy.test.js`
+
+`stream-fetch.test.js` cobre o redirecionamento sem o cabeçalho da primeira ida, o `Range`, a recusa de endereço que não é público antes de abrir socket, o teto de redirecionamentos, o 416 com `Content-Range`, e o `pipeCapped`: corte incompleto (corpo em partes sem o bloco final, corpo com tamanho curto), corpo que atinge o tamanho declarado e fica completo, prazo de parada e prazo total, inclusive depois do fim ou do corte, e um nó destruído com escritas pendentes, cujos bytes já repassados chegam todos antes de a conexão fechar sem fim. `audius-provider.test.js` cobre a configuração, a chave no cabeçalho e nunca na URL, cada caminho de pedido, o permalink, o resolve, e o descarte de item gated, unlisted, apagado, privado ou com `access` de outra forma. `audius-routes.test.js` cobre a política, a sessão, os corpos, as respostas sem arte nem URL de stream, o ticket, o 206 montado quando o nó ignora `Range`, o 416, a cobrança do que de fato chegou, os tetos, a devolução do uso no 5xx, no 429 e no 403, a não devolução no 400, no 404 e no 410 (e no 4xx da busca), o teto `PROVIDER_CALLS_PER_DAY` que para um membro em laço com o provedor respondendo 400 ou 503 enquanto outro membro ainda recebe resposta, as duas chamadas de um item de playlist, a chamada recusada por `MAX_INFLIGHT` que não gasta esse teto, e o membro bloqueado no meio do relé, que é cortado em até um `RECHECK_MS` e perde o ticket. `audius-server.test.js` cobre o serviço real: desligado por padrão, 429 `limite-musica`, o corte sem cauda JSON, um 206 com um só `Cache-Control`, e um áudio mais longo que o `requestTimeout` que não é cortado por ele. `account.test.js` cobre as cinco variáveis: desligado sem chave, valores opcionais e erro que não repete o valor. `readme-help.test.js` cobre a linha de ajuda do `account` igual à do `README.md`, que cita `VARANDA_AUDIUS_API_KEY`. `cli.test.js` cobre o `HELP` esperado, com essa mesma linha. `deploy.test.js` cobre que as cinco variáveis (`VARANDA_AUDIUS_API_KEY`, `VARANDA_AUDIUS_API_URL`, `VARANDA_AUDIUS_APP_NAME`, `VARANDA_AUDIUS_MOMENTS`, `VARANDA_AUDIUS_STREAMS`) são opcionais e aparecem uma só vez em `compose.web.yaml`, no serviço `account`.
+
+Os testes usam `127.0.0.1`, diretório temporário e provedor substituto. Não abrem a rede pública. Não provam a API real do Audius, a chave real, o Caddy nem as respostas escritas de api@audius.co. Essas conferências estão em aberto abaixo.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita neste PR. O roteiro de busca e player do Audius no app (Android, iOS, web e PWA) está na seção 186. Um link de `audius.co` nunca carrega um frame do provedor.
+
+### Conferências do operador
+
+Nenhuma conferência de operador foi feita. Todos os itens estão em aberto. As respostas por escrito de api@audius.co não foram obtidas. Nenhum dos itens abaixo foi executado:
+
+- [ ] Colocação da chave real. `VARANDA_AUDIUS_API_KEY` fica só no ambiente do serviço `account`. A chave vai no cabeçalho `x-api-key` da primeira ida ao host da API, nunca na URL, e não aparece em registro, resposta ou mensagem de erro.
+- [ ] Caminho de resolve e campo `permalink`, na API real. O serviço pede `GET <base>/resolve` com o permalink em `url` e `app_name` na consulta, e a chave só no cabeçalho, e monta a página pública a partir do campo `permalink` do item. Confirmar com o Audius que esse caminho e esse campo são os de faixa, playlist e álbum.
+- [ ] Redirecionamento do stream e suporte a `Range` dos nós de armazenamento. `GET <base>/tracks/<id>/stream` redireciona para o nó, sem a chave. Confirmar se o nó honra `Range` ou responde 200. Se o nó responde 200 com `Content-Length`, o serviço corta a fatia pedida e responde 206, baixando o trecho pulado. Se responde 200 sem `Content-Length`, o serviço responde 200 com o corpo inteiro desde o byte 0 e o seek não funciona. Confirmar que o nó honra `Range` ou ao menos manda `Content-Length`.
+- [ ] `Content-Type` do áudio na API real, e se ele é um de `audio/mpeg`, `audio/mp3`, `audio/mp4`, `audio/aac`, `audio/x-m4a`, `audio/ogg`, `audio/wav`, `audio/x-wav`, `audio/flac`. Outro tipo o serviço recusa com 503 `indisponivel`.
+- [ ] Forma de `access` e os campos gated, unlisted e equivalentes. O serviço só oferece item cujo `access`, quando existe, é um objeto com `stream` igual a `true` (chaves a mais, como `download: false`, são aceitas), sem gate, sem condição de stream, faixa não unlisted, não marcada como não streamable nem não available (só para faixas) e playlist não privada. Também descarta faixa com `duration` fora de 1 a 7200 segundos, playlist com contagem de faixas fora de 1 a 500, título ou artista vazios e campo que o provedor escreve nas duas grafias com valores diferentes. Confirmar com o Audius que essa forma é a de uma faixa livre.
+- [ ] O Caddy (`handle /account/*` em `deploy/seeder/Caddyfile`) repassa um áudio 206 sem guardar o corpo inteiro antes de enviar ao cliente.
+- [ ] `VARANDA_AUDIUS_MOMENTS` permanece fora de `1` até o Audius confirmar por escrito que a música pode entrar nos momentos. Essa confirmação não foi obtida.
+- [ ] Respostas por escrito de api@audius.co. Perguntas: se repassar o áudio sem guardá-lo é permitido; se isso conta como tornar a API disponível a terceiros; se trechos de 15 s podem ser tocados; se um trecho pode tocar sobre uma foto; se o título, o artista e o link podem ficar guardados numa publicação; como é marcada uma faixa que saiu da licença. Também a colocação da chave, o caminho de resolve, o campo `permalink`, o redirecionamento do stream, o suporte a `Range`, o `Content-Type` do áudio e as formas de `access`, gated e unlisted. Não há resposta arquivada neste PR.
+
+## 186. Música do Audius em publicações, Termos 39 (PR feat/audius-posts)
+
+Na publicação do diário, **Música** abre a busca do catálogo Audius quando a música está ligada na associação e a conta vinculada pode usá-la. O botão não aparece ao publicar como página. Escolher uma página descarta o rascunho de música, e voltar a publicar como pessoa não o recupera. Um rascunho de música não pode ser enviado como página. O seletor oferece **Faixas** e **Playlists**, sem capas. Uma faixa pode entrar inteira ou como trecho de 15 segundos, com controle acessível do início e prévia; uma playlist entra como fila. O cartão mostra artista, título, fonte Audius e link para a página do item. Exige texto de ao menos um caractere e não vai junto com fotos nem com vídeo: com um vídeo no rascunho, **Música** mostra "A música vai só com texto: remova o vídeo", e com a música no rascunho **Vídeo** pede para remover a prévia. Uma publicação com música não entra na fila de saída de texto sem rede.
+
+Um link de `audius.co` colado pode virar o mesmo cartão quando a música está disponível. A montagem respeita a preferência de prévias e o descarte do cartão. O compositor tenta resolver o link pelo serviço de conta, sem a busca comum de prévia que no app nativo acessaria diretamente o provedor. Digitar em outra parte do texto não cancela nem repete o pedido; remover o link durante o pedido cancela, e recolocá-lo inicia uma nova tentativa. Só uma tentativa concluída, com cartão mostrado ou falha, não se repete no mesmo uso do compositor. Depois de publicar ou fechar o compositor, qualquer link pode ser tentado de novo. Se a resolução falhar, o link fica como texto, sem cartão no compositor do diário. Quando a música não está disponível, o link segue o tratamento comum de prévias, assim como nas conversas e nos grupos. A conferência de um envio com resultado incerto usa o `preview.url` que foi enviado, com o fragmento da música; o app não repete a publicação por conta própria.
+
+O cartão usa o formato de link existente, sem chave nova no registro: página própria do item em `audius.co` com `#varanda-musica=t:<id>`, `s:<id>:<start>` ou `p:<id>`, conforme "Music cards" em `docs/protocol.md`. Título e artista são uma afirmação de quem publicou. Só depois do toque o leitor pede o item pelo id ao serviço de conta e recebe a autorização temporária para ouvir. Nenhuma política, item ou áudio é pedido pelo cartão antes do toque, e nunca carrega um frame do Audius. O áudio vem pela associação, que não guarda cópia. Sem instalação, na configuração manual ou no `varanda-serve`, o leitor mostra de imediato o cartão comum de link. Na web hospedada e no app ligado à instalação, o cartão inicial sempre mostra **Ouvir** e **Abrir no Audius**, sem consultar a disponibilidade. Só depois do primeiro toque em **Ouvir**, se a música estiver desligada ou a conferência de disponibilidade falhar, ele vira um cartão comum.
+
+O trecho só toca depois de confirmar o ponto inicial e para ao fim dos 15 segundos ou no fim da faixa, se vier antes. Falha de busca do ponto não toca desde zero. A faixa inteira tem controle de posição; a playlist tem próxima e anterior, e informa quando só parte dela está disponível no player, mantendo o link para a lista inteira. Só um player toca por vez; sair da tela para o áudio e descarta também respostas de pedidos ainda pendentes. Uma autorização vencida é renovada num novo toque. Uma falha de reprodução mostra **Música indisponível agora**; o teto diário, **Limite de músicas por hoje**.
+
+Termos e Política de Privacidade na versão 39 exigem novo aceite e descrevem a busca, o link colado, a escolha e a reprodução pelo serviço de conta. O Audius recebe texto da busca, posição e tamanho da página de resultados, id de faixa ou playlist ou permalink e o endereço da associação, nunca o endereço, a chave ou o token do membro. O serviço não guarda buscas nem áudio, e seus registros não levam texto, link, id nem ticket. Metadados e tickets ficam só em memória e somem ao reiniciar; seus prazos são de validade, não de remoção. Título, artista e link ficam na publicação. Base legal proposta e transferência internacional continuam sujeitas a parecer jurídico. Os textos não fixam cotas nem prazos que o serviço pode mudar. A frase sobre momentos é condicional à ativação pela associação; este PR não entrega a interface de música em momentos. Ela está na seção 187. As páginas do site são geradas de `apps/app/src/legal.js`. A tabela LGPD e a nota aos mantenedores sobre triagem sem mudança da lista "sempre humano" estão em `docs/design.md`.
+
+Nunca definir `VARANDA_AUDIUS_API_KEY` numa instalação com Termos abaixo da versão 39. As conferências do operador sobre API real, licença, áudio sobre foto e `Range` continuam abertas na seção 185; esta seção não as dá por feitas.
+
+Como verificar, a partir da raiz, com Node 20.19 ou mais novo no PATH:
+
+- `npm run lint`
+- `node apps/app/test/music.test.js`
+- `node apps/app/test/musicClient.test.js`
+- `node apps/app/test/streamPlayer.test.js`
+- `node apps/app/test/musicPicker.test.js`
+- `node apps/app/test/musicPlayerCard.test.js`
+- `node apps/app/test/musicDraft.test.js`
+- `node apps/app/test/linkCardBuild.test.js`
+- `node apps/app/test/wordCheck.test.js`
+- `node apps/app/test/legal.test.js`
+- `node apps/app/test/terms-version.test.js`
+- `node packages/core/test/terms.test.js`
+- `npm test -w apps/site`
+- `node apps/site/scripts/render-legal.js --check`
+- `npm run demo`
+
+`music.test.js` cobre os fragmentos, ids e início válidos, o cartão sem imagem, a janela do trecho, as respostas estritas do serviço e a fila da playlist. `musicClient.test.js` cobre política e sessão próprias, recusa de respostas inválidas, pedidos só à instalação, o endereço base no app instalado e nova sessão apenas no 401. `streamPlayer.test.js` cobre áudio pela origem da instalação, seek confirmado antes de tocar, liberação e erros no player web e no nativo com substitutos. `musicPicker.test.js` cobre busca, descarte de respostas antigas, escolha do início, prévia, falha de seek e cancelamento ao sair. `musicPlayerCard.test.js` verifica ausência de pedidos antes do toque, busca do item, trecho, faixa, fila e parada. `musicDraft.test.js`, `linkCardBuild.test.js` e `wordCheck.test.js` verificam o cartão escolhido ou resolvido, respeito às prévias, exclusividade com mídia, saída sem fila de texto e conferência do texto escrito pela pessoa. `legal.test.js` confere a versão, o digest e as frases do Audius, inclusive a condição dos momentos; `terms-version.test.js` e `terms.test.js` conferem a versão comum e as provas de aceite. Os testes do site e `render-legal.js --check` conferem as páginas contra o texto do app. A demo deve terminar com `DEMO OK`.
+
+Os testes automatizados usam substitutos, sem Audius real nem rede pública; a demo usa DHT local. Não comprovam reprodução e seek no aparelho, o serviço real nem a licença do catálogo. A lista de comandos é o roteiro do PR integrado, não um registro de execução.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Todos os itens estão em aberto, nesta ordem: Android debug, simulador iOS, web e PWA. Usar uma instalação de teste com música ligada, Termos 39 aceitos, conta vinculada e faixas e playlists conhecidas. O build de debug Android não entra com passkey de produção; o iOS depende do domínio associado da conta Apple Developer (veja `docs/development.md`). Não usar a DHT pública.
+
+Em cada plataforma, buscar faixa e playlist, escolher e ouvir um trecho com início diferente de zero, publicar e ouvir uma faixa inteira mudando a posição, avançar e voltar na playlist, colar um permalink e conferir o cartão e o link. Conferir que não há pedido pelo cartão antes do toque, que sair da tela para o áudio (também com pedido ainda pendente) e que, com a música desligada ou a conferência de disponibilidade falhando, o cartão inicial ainda mostra **Ouvir** e **Abrir no Audius** e só vira cartão comum após o primeiro toque em **Ouvir**. Conferir também que a configuração manual e o `varanda-serve`, sem instalação, mostram o cartão comum de imediato. Mostrar artista, título, fonte e link em todos os modos.
+
+No compositor, conferir que **Música** não aparece ao publicar como página, que escolher uma página descarta o rascunho de música e que voltar a publicar como pessoa não o recupera. Ao colar um link, digitar em outra parte do texto durante a resolução não deve cancelar o pedido nem repeti-lo; remover o link durante o pedido deve cancelá-lo, e recolocar o mesmo link no mesmo uso deve iniciar uma nova tentativa. Conferir que só uma tentativa concluída, com cartão mostrado ou falha, não se repete no mesmo uso. Depois de publicar ou fechar e reabrir o compositor, qualquer link pode ser tentado de novo. Simular falha na resolução e conferir que o link fica como texto, sem cartão no compositor do diário.
+
+- [ ] Android, build de debug em emulador ou aparelho: cumprir o roteiro acima, incluindo seek do trecho, controle de posição da faixa inteira e próxima e anterior da playlist.
+- [ ] iOS, simulador: cumprir o mesmo roteiro, incluindo áudio remoto, seek confirmado e saída da tela antes de chegar a autorização de reprodução.
+- [ ] Web: cumprir o mesmo roteiro; conferir no painel de rede que os pedidos de busca e áudio vão só à instalação e que não há frame do Audius.
+- [ ] PWA instalado: cumprir o mesmo roteiro; conferir parada ao sair da tela e, com música desligada, cartão inicial com **Ouvir** e **Abrir no Audius**, que vira cartão comum só após o primeiro toque em **Ouvir**.
+- [ ] Uma conta que aceitou a versão 38 recebe os Termos 39 para novo aceite; os textos no app e nas páginas do site coincidem.
+
+## 187. Música em momentos (PR feat/momento-music)
+
+Um momento pode levar música. O registro passa a aceitar a quinta chave `music`, exatamente `{ p, id, start }` (`isMomentMusic` em `packages/rpc/lib/music.js`): `p` é `audius`, `id` tem de 1 a 32 letras e dígitos, `start` é um inteiro de 0 a 7200. O trecho que quem lê toca dura `MOMENT_SNIPPET_S` = 15 segundos. Sem música, o registro continua com as quatro chaves `type`, `text`, `at` e `media`. `music: null` não é um registro. O diário guarda só esse id e esse início, ao lado da foto pública. Título, artista e URL não entram no registro: o visualizador pede ao serviço da associação quando vai tocar.
+
+Quem lê com um app, uma web, uma CLI ou um semeador de antes desta música conhece só as quatro chaves. Pula o momento com música como `malformed`: a foto e o texto ficam escondidos nas 24 h, e o diário não é rejeitado. Não há par de compatibilidade. A lápide de apagar não muda, então o apagamento continua valendo nesses leitores. A ordem de lançamento é: semeadores, a web hospedada, os apps, e só então o interruptor `VARANDA_AUDIUS_MOMENTS`. Ele fica fora de `1` até o Audius responder por escrito que uma faixa pode tocar sobre uma foto. Tocar a faixa junto com a foto não está claramente coberto pelo texto da licença do provedor. Ausente, vazio ou `0`, a música nos momentos fica desligada. Os Termos e a Política continuam na versão 39: a frase do trecho no momento já é condicional à associação ligar a música (`apps/app/src/legal.js`). Não há aceite novo.
+
+No compositor de Momento, o botão **Música** só aparece no nó hospedado (`node.hosted`), com `momentMusic: true` em `node.info`, `moments: true` em `audiusPolicy` e conta vinculada (`audiusReady`). `useMomentMusicAvailable` só consulta `node.info` ao abrir Momento nesse nó, depois de a política responder que está ligada. Guarda a resposta, inclusive a falha, por `node.epoch`: reabrir o compositor não repete a consulta. O nó core não envia `momentMusic`. `moments` é falso por padrão, e qualquer falha da política lê como desligado. `useMusicAvailable` não lê `moments`: o momento confere a política à parte. O seletor oferece só o trecho de 15 segundos (`modes` com `snippet`), sem faixa inteira e sem playlist. A escolha aparece no chip "título, artista · Audius", com `displayText` e **Remover música**. Chip e botão só aparecem enquanto a música em momentos está disponível. A mesma condição decide o envio: a música mostrada é a que será enviada; uma escolha guardada, mas oculta por falta de disponibilidade, não vai no registro. A música vai só com foto, inclusive GIF. Com vídeo preparado ou em preparação, não aparece o botão Música; com música escolhida, Vídeo mostra "A música vai só com foto: remova a música" antes de abrir o seletor. O envio de vídeo nunca leva `music`.
+
+No visualizador, música em um registro de vídeo é ignorada: toca só o vídeo com seu próprio som e duração (`segmentMs`). Foto, foto com música e vídeo compartilham o único relógio de segmento (`useMomentPlayback`). `useMomentMusicPolicy` exige referência válida, origem disponível, `moments: true` e conta vinculada (`audiusReady`), sem consultar `node.info`. Enquanto espera a política, o vínculo e o áudio começar, a barra fica em zero por até 3 s no total (`MUSIC_START_WAIT_MS`). Esse tempo só conta sem pausa. Foto carregando, dedo segurando, menu aberto, outra tela por cima e app em segundo plano preservam o tempo restante. Se a resposta ou o áudio não chegam nesses 3 s, começa a passagem comum de 5 s da foto. Uma resposta negativa ou falha de disponibilidade (`onUnavailable`), inclusive o bloqueio de áudio sem gesto, inicia os 5 s de imediato. Quando o áudio começa pela primeira vez nesse momento, mesmo atrasado, a barra volta a zero e dura 15 s a partir dali. Uma resposta positiva atrasada, sozinha, não reinicia a barra. Uma reconexão (`node.epoch`) zera a barra e abre nova espera de até 3 s; os 15 s só começam com o áudio do novo player. `holdMsOf` (`apps/app/src/moments.js`) devolve `MUSIC_HOLD_MS` (15000) só com reprodução iniciada e referência válida; nos outros casos, `AUTO_ADVANCE_MS` (5000). "Reduzir movimento" impede a passagem sozinha, sem impedir o trecho de tocar.
+
+O chip **Silenciar música** (que passa a **Ativar música**) pausa o trecho, sem novo pedido de áudio. A atribuição mostra título, artista e Audius (`MUSIC_SOURCE`), com `displayText`, e abre a página da faixa. O link pausa o visualizador até a pessoa voltar; se ele não chegar a ficar oculto, a pausa termina após 1 s (`LINK_HOLD_GRACE_MS`). Com a música desligada, sem referência válida ou sem vínculo da conta, fica a foto de 5 s. Falhas podem mostrar "Não foi possível começar nesse ponto" ou "Música indisponível agora". Um bloqueio de áudio sem gesto oferece **Tocar música** no player já preparado.
+
+Mandar o app para segundo plano ou cobrir o visualizador com denúncia ou ajuda interrompe a música e oferece **Tocar música** ao voltar. O toque busca o trecho de novo e toca desde o início escolhido. Se o áudio já havia começado, a barra mantém seu tempo restante. Se o reinício for bloqueado por falta de gesto, **Tocar música** continua disponível e a barra mantém o tempo restante dos 15 s. O fim normal do trecho não oferece **Tocar música**. Voltar à esquerda no primeiro momento reinicia também sua música: monta outro `MomentMusic`, com nova espera e barra em zero. Trocar de momento desmonta o player anterior. Ao fechar, `musicClosed` pausa o player durante a transição. Se o app ignora esse fechamento, o mesmo player retoma de onde estava, com o tempo restante da barra.
+
+Como verificar, a partir da raiz, com Node 20.19 ou mais novo no PATH (os testes de `packages/web-member` exigem isso):
+
+- `npm run lint`
+- `node packages/rpc/test/music.test.js`
+- `node packages/rpc/test/methods.test.js`
+- `node packages/core/test/records.test.js`
+- `node packages/core/test/moments.test.js`
+- `node packages/web-member/test/moments-e2e.test.js`
+- `node packages/web-member/test/session.test.js`
+- `node apps/app/test/moments.test.js`
+- `node apps/app/test/wordCheck.test.js`
+- `node apps/app/test/momentMusic.test.js`
+- `node apps/app/test/momentosScreen.test.js`
+- `node apps/app/test/musicDraft.test.js`
+- `node apps/app/test/videoCompose.test.js`
+- `npm run demo`
+
+`packages/rpc/test/music.test.js` cobre `isMomentMusic`: aceita exatamente `p`, `id` e `start`, com `MOMENT_SNIPPET_S` = 15, e recusa o resto sem lançar. `packages/rpc/test/methods.test.js` cobre o pior caso de `moments.read` com música em cada item ao vivo: 203313 bytes, abaixo de `MAX_MESSAGE`. `packages/core/test/records.test.js` cobre `music-invalid` e a recusa de música malformada na escrita do registro. `packages/core/test/moments.test.js` cobre a cópia de `music` em `foldMoments` (ou `null`), a ausência de música nas linhas de momentos anteriores e o descarte do registro com música inválida. `packages/web-member/test/moments-e2e.test.js` cobre o registro de quatro chaves sem música, a recusa de `music: null` e de chave a mais, o registro de cinco chaves, a leitura dessa música por quem segue e a foto desse momento. `packages/web-member/test/session.test.js` cobre `momentMusic: true` em `node.info` do nó do navegador. `apps/app/test/moments.test.js` cobre `momentMusicOf` (só `id` e `start`) e `holdMsOf`: 15000 só com reprodução de fato e referência válida, senão 5000. Também cobre a música só com foto, inclusive GIF: `momentMusicOf` devolve `null` para um registro de vídeo que leva música.
+
+`apps/app/test/momentMusic.test.js` cobre o player do trecho: confirma o ponto inicial antes de tocar, para aos 15 s ou no fim da faixa, recusa início forjado e não toca do zero se a busca falhar. Cobre o chip **Tocar música** após bloqueio sem gesto, **Silenciar música** e **Ativar música** sem novo pedido de áudio, e a atribuição com `displayText`. Também cobre interrupção, descarte de respostas atrasadas e reinício por toque com novo pedido de áudio e busca do início escolhido. O fim normal não reinicia por toque. Desmontar cancela pedidos e libera o player.
+
+`apps/app/test/momentosScreen.test.js` cobre as condições de disponibilidade no compositor e no visualizador, inclusive `audiusReady`, e a consulta única a `node.info` por `node.epoch`, só no compositor hospedado. Cobre os 15 s desde o início do áudio e a retomada do tempo restante após pausa. Confere a espera total de 3 s, sua preservação durante pausas, a passagem para os 5 s da foto e o áudio atrasado que reinicia a barra. Cobre a troca e desmontagem do player, "Reduzir movimento", o chip do compositor sob a mesma condição do envio e o envio incerto sem repetição. Também confere a pausa pelo link de atribuição, o reinício do primeiro momento e a retomada após fechamento ignorado, e que um momento de vídeo com música toca só o vídeo, com o relógio do vídeo.
+
+`apps/app/test/videoCompose.test.js` cobre a regra da foto no compositor de Momento: sem **Música** com vídeo em preparação ou preparado, a recusa de Vídeo com música escolhida antes de abrir o seletor, a nota que some ao remover a música, a escolha oculta que não bloqueia um vídeo e o envio de vídeo sem `music`, mesmo a partir de um envio antigo de foto. `apps/app/test/musicDraft.test.js` confere o texto da nota. `npm run demo` termina com `DEMO OK`.
+
+Os testes usam DHT local, diretório temporário e substitutos. Não abrem a rede pública. Não provam o áudio no aparelho, a API real do Audius nem a resposta escrita sobre a licença. A lista de comandos é o roteiro do PR, não um registro de execução.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Todos os itens estão em aberto.
+
+Ordem: build de debug do Android, simulador do iOS, depois a web e o PWA. Em cada um, confira os casos abaixo. O build de debug não entra com passkey de produção. No iOS, a passkey depende do domínio associado da conta Apple Developer (veja `docs/development.md`). Use uma instalação de teste com Termos 39 aceitos, conta vinculada e uma faixa conhecida. Não usar a DHT pública. Com "Reduzir movimento" ligado, o momento não passa sozinho.
+
+- [ ] Android, build de debug no emulador ou aparelho, depois de `npm run prepare:native -w apps/app`: conferir os casos abaixo. Mandar o app para segundo plano durante um momento com música, voltar e confirmar que **Tocar música** reinicia o trecho.
+- [ ] iOS, simulador: conferir os casos abaixo. Mandar o app para segundo plano durante um momento com música, voltar e confirmar que **Tocar música** reinicia o trecho.
+- [ ] Web: conferir os casos abaixo. No painel de rede, os pedidos da faixa e do áudio vão só à instalação, sem frame do Audius. Na web, o player busca o ponto inicial antes de qualquer toque e depende de o navegador carregar os metadados do áudio sem gesto. No Safari do iOS, confirmar que toca o trecho ou oferece **Tocar música**, sem ficar em silêncio pelos 3 s de espera e depois pelos 5 s da foto.
+- [ ] PWA instalado a partir da mesma origem, inclusive no iOS: conferir os casos abaixo e a carga de metadados sem gesto. O momento deve tocar o trecho ou oferecer **Tocar música**, sem ficar em silêncio pelos 3 s de espera e depois pelos 5 s da foto.
+- [ ] Interruptor desligado (`VARANDA_AUDIUS_MOMENTS` ausente, vazio ou `0`): um momento com música mostra a foto silenciosa e passa em 5 s, sem áudio e sem chip de música.
+- [ ] Interruptor ligado (`VARANDA_AUDIUS_MOMENTS=1`, com a música do Audius ligada): o trecho toca 15 s, contados de quando o áudio começa, e o visualizador avança. O chip mostra título, artista e Audius. **Silenciar música** pausa o trecho.
+- [ ] Áudio bloqueado sem um gesto (por exemplo, a web sem toque prévio): aparece **Tocar música** e começam de imediato os 5 s da foto. O toque começa o trecho; quando o áudio começa, a barra volta a zero para os 15 s.
+- [ ] Resposta da política, do vínculo ou áudio demorados: a barra fica em zero por até 3 s no total e depois inicia os 5 s da foto. Foto carregando, dedo segurando, menu, outra tela e segundo plano preservam o que falta dos 3 s. Uma resposta positiva atrasada não reinicia a barra; o áudio que começa atrasado reinicia em zero para 15 s.
+- [ ] Cobrir o visualizador com denúncia ou ajuda: a música para. Ao voltar, **Tocar música** busca o trecho de novo e toca desde o início escolhido. Se já havia tocado, a barra mantém o tempo restante. No fim normal do trecho, não aparece **Tocar música**. **Novo momento** fecha o visualizador e abre o compositor, sem retorno ao visualizador.
+- [ ] Abrir o link de atribuição: o visualizador pausa até a pessoa voltar. Se o link abrir sem ocultar o visualizador, ou a abertura for bloqueada, a pausa termina após 1 s.
+- [ ] Tocar à esquerda quando já está no primeiro momento: a música também reinicia, com nova espera pelo áudio e barra em zero.
+- [ ] Tentar fechar durante uma transição entre telas em que o app ignora o fechamento: a música só pausa e retoma do mesmo ponto, sem novo pedido de áudio. A barra retoma o tempo restante.
+- [ ] Momento com vídeo: sem botão Música; com música escolhida, Vídeo mostra a nota; um momento de vídeo com música no registro toca só o vídeo.
+
+## 188. Vídeo da publicação toca dentro do post (PR feat/inline-feed-video)
+
+Em A Rua e no cartão da citação, tocar na capa reproduz o clipe dentro do post, com som e os controles da plataforma. Nada do vídeo baixa antes do toque e nada toca sozinho. O download e a validação continuam os da seção 182: sha256 e checagem estrita de MP4, com lados e duração iguais aos do descritor, antes de montar o arquivo local.
+
+Durante a carga, a capa fica sob uma camada escura com um indicador de espera. Uma falha mostra "vídeo indisponível" e um só "Tentar de novo". Não há repetição automática. Se a plataforma começa sem som, aparece "Ativar som". Se recusa começar sem um gesto, o player permanece com "Toque no play para assistir".
+
+Só um player toca por vez, junto com os players de música. Tocar outro vídeo ou um player de música fecha o primeiro. Trocar de tela, trocar de aba, abrir uma folha de denúncia ou ajuda, abrir uma foto em tela cheia ou mandar o app para segundo plano também encerra a reprodução. O post volta à capa, o player é solto e o arquivo local é apagado. Um toque posterior baixa o vídeo de novo. Um download em curso é interrompido ao encerrar.
+
+Enquanto o vídeo está aberto dentro do post, a cada 500 ms o app mede o quadro na parte visível da lista. Essa área fica abaixo da barra de cima e acima da barra de abas, quando ela está à mostra, descontadas as margens do sistema. A largura visível fica entre as bordas da janela. O player fecha se menos da metade de sua largura estiver visível ou se a altura visível for menor que a metade da altura do quadro, limitada a 120 pt. Também fecha se a medida falha, não é finita ou tem largura ou altura inválida. Nos 2 primeiros segundos dessa conferência ele não fecha, para dar tempo de a linha se acomodar. A conferência fica suspensa em tela cheia e ganha os mesmos 2 s ao voltar ao post.
+
+Quando o clipe está pronto, "ver em tela cheia" aparece num botão redondo no canto superior esquerdo. Ele abre o visualizador com o mesmo arquivo e a posição atual, sem novo download. Fechar a tela cheia volta ao post na posição e no estado de reprodução ou pausa do player. Nas duas passagens, se faltam 0,5 s ou menos para o fim, o clipe começa de zero. No Android, o vídeo dentro do post usa `surfaceType: textureView` para respeitar os cantos arredondados na lista.
+
+Um toque, dois toques ou Enter/Espaço sobre o player com foco na web não abrem a publicação nem curtem o post. O quadro impede que o clique e as teclas Enter e Espaço cheguem ao post e recebe o toque. As outras teclas seguem para o app: Escape com o player em foco continua voltando para a tela anterior.
+
+O mural continua mostrando a capa que abre a publicação. Momentos não mudam e anúncios da Feira continuam sem vídeo. Leitores de tela ficam fora desta verificação. A imagem da capa e suas marcas já ficam ocultas para eles, mas o botão da capa mantém o rótulo "vídeo de N segundos". O código não oculta explicitamente os controles do player dentro do post.
+
+Como verificar, a partir da raiz:
+
+```sh
+node apps/app/test/feedRender.test.js
+node apps/app/test/postActions.test.js
+node apps/app/test/videoPlayback.test.js
+node apps/app/test/momentosScreen.test.js
+node apps/app/test/escapeLayer.test.js
+node apps/app/test/musicEmbedCard.test.js
+node apps/app/test/platformGate.test.js
+```
+
+Esses testes conferem módulos puros e o texto do código: montagem só ao toque, carga, falha e nova tentativa, passagem para tela cheia, posição e estado do player, bloqueio dos toques no post, encerramento e regra de visibilidade. Também conferem os momentos, Escape e a separação das APIs de plataforma. Não montam a interface num renderizador, não usam aparelho nem rede pública. Não comprovam os controles reais da plataforma. A lista é um roteiro de verificação, não um registro de execução.
+
+Conferido em 2026-11-12 no emulador Android (Android 16, build de depuração), numa tela de teste temporária, fora do app e não incluída no PR, que monta o mesmo quadro do post (os mesmos manipuladores de clique, tecla e toque) dentro de um Pressable que abre a publicação, numa lista rolável, com um clipe MP4 local de 12 s. O clipe toca dentro do quadro com cantos arredondados. Pausar mantém o quadro; arrastar a barra de tempo muda a posição; um arrasto vertical começando no vídeo rola a lista. Um toque e dois toques no vídeo não abrem o post. Não foram conferidos ali o app real com conta, a passagem por "ver em tela cheia", iOS, web nem PWA.
+
+Conferido em 2026-11-12 na web, num Chromium com janela de 375 px, no build de desenvolvimento com os dados de demonstração (Vitrine) e uma publicação temporária, fora do PR, com um clipe MP4 de 12 s e uma citação dela. As telas eram as reais: A Rua, a linha do post e a citação. Antes do toque não havia elemento de vídeo na página. O toque no pôster tocou o clipe dentro do post, com som e controles, sem abrir a publicação. A pausa se manteve. "ver em tela cheia" com o vídeo pausado e com o vídeo tocando abriu o mesmo arquivo, na mesma posição e no mesmo estado. Fechar a tela cheia no meio do clipe continuou no post com o mesmo arquivo; fechar depois do fim voltou ao começo, pausado. Escape com o foco no vídeo fechou a tela cheia sem sair de A Rua. Tocar o vídeo da citação fechou o primeiro e liberou o arquivo dele. Rolar o vídeo para fora da tela, trocar de aba e abrir em tela cheia a foto de outra publicação fecharam o vídeo e liberaram o arquivo. Nenhuma curtida mudou. As teclas foram simuladas por script, e Enter ou Espaço sobre o player com foco não puderam ser conferidos assim: o mesmo script também não abre uma publicação comum com Enter. Essa conferência foi feita antes de dois ajustes pequenos, cobertos pelos testes: o quadro agora barra só Enter e Espaço, e uma medida ainda em andamento não fecha mais o vídeo quando a tela cheia abre. Não foram conferidos: o app com conta, Safari, o PWA instalado e o simulador iOS (a build de depuração foi instalada e abriu, mas não foi possível tocar nela).
+
+### Verificação manual
+
+Os casos no app real continuam em aberto. Usar uma instalação de teste local, sem DHT pública. Ordem: build de debug do Android, simulador iOS, web e PWA instalado. Repetir os casos abaixo em A Rua e no cartão da citação. O build de debug não entra com passkey de produção; no iOS, a passkey depende do domínio associado da conta Apple Developer (veja `docs/development.md`).
+
+- [ ] Android, build de debug no emulador ou aparelho, depois de `npm run prepare:native -w apps/app`: conferir os casos abaixo e registrar aparelho e sistema.
+- [ ] iOS, simulador: conferir os mesmos casos e registrar sistema.
+- [ ] Web, Chrome e Safari: conferir os mesmos casos e registrar navegador e versão.
+- [ ] PWA instalado: conferir os mesmos casos e registrar sistema e navegador de instalação.
+- [ ] Tocar na capa reproduz dentro do post, com som. Abrir a tela e rolar não inicia reprodução. Na web, conferir no painel de rede que nada do vídeo baixa antes do toque.
+- [ ] Pausar mantém o quadro; arrastar a barra de tempo muda a posição; um arrasto vertical começando no vídeo rola a lista.
+- [ ] Um toque e dois toques sobre o vídeo não abrem a publicação nem curtem o post.
+- [ ] "ver em tela cheia" continua na mesma posição, sem novo download. Fechar volta ao post na mesma posição e no mesmo estado de reprodução ou pausa. Repetir pausado e tocando; nos últimos 0,5 s, conferir o reinício de zero.
+- [ ] O botão "ver em tela cheia" não cobre os controles da plataforma, especialmente no iOS.
+- [ ] Tocar outro vídeo ou um player de música fecha o primeiro e devolve sua capa. Tocar nessa capa de novo baixa o vídeo outra vez.
+- [ ] Rolar até ficar visível menos da metade da largura ou menos que a metade da altura do quadro, limitada a 120 pt, fecha o player na medida seguinte, em até meio segundo. Nos 2 primeiros segundos depois do toque, ou da volta da tela cheia, ele não fecha.
+- [ ] Trocar de aba, trocar de tela, abrir uma folha que cobre parte da tela (denúncia ou ajuda), abrir uma foto de outro post em tela cheia e mandar o app para segundo plano encerram a reprodução e devolvem a capa.
+- [ ] Android: voltar do segundo plano não retoma por conta própria com som. Registrar o que o aparelho faz.
+- [ ] Sem rede: aparece "vídeo indisponível" e um só "Tentar de novo", legíveis nos temas claro e escuro. Não há repetição automática.
+- [ ] Web: Enter ou Espaço sobre o player com foco não abre a publicação.
+- [ ] Web: começar o gesto de puxar para atualizar sobre o vídeo e registrar o que acontece.
+- [ ] Safari ou PWA do iOS com Modo de Baixa Energia: aparece "Toque no play para assistir" e o vídeo toca depois de um toque.
+- [ ] Um início sem som mostra "Ativar som"; tocar nele liga o som.
+
+## 189. Base visual: movimento, esqueletos e barra (PR feat/ui-foundations)
+
+Primeiro PR da revisão visual do app. Muda duas coisas que a pessoa vê e acrescenta peças que nenhuma tela usa ainda.
+
+- Barra de abas (`apps/app/src/ui/TabBar.js`): uma pílula suave (`accentSoft`, 48 por 32 pt, cantos `radius.pill`) fica atrás do ícone da aba ativa e aparece em `motion.fast` (150 ms). Com Reduzir movimento ligado, aparece de uma vez. A aba Diário com a própria pessoa (foto, iniciais ou o ícone de pessoa) não desenha pílula: o anel verde já a marca. A barra continua só com ícones e com 49 pt (83 pt com a área segura). Os leitores de tela leem o nome de cada aba ("<nome>, novidades" quando há ponto de novidade).
+- Botão de publicar (`apps/app/src/ui/Fab.js`, `apps/app/src/ui/PressScale.js`, `apps/app/src/pressMotion.js`): enquanto está apertado, encolhe a 0,97 e escurece a 0,85 de opacidade. Com Reduzir movimento, só escurece.
+- Folha de ações (`apps/app/src/ui/ActionsSheet.js`): ganha um espaço opcional `header`. Nenhuma tela o usa neste PR, então toda folha existente fica igual: a linha escolhida só roda depois que a folha fechou.
+- Peças sem uso em tela: os estilos de texto novos (`caption`, `more`, `price`, `tileTitle`, `code` em `theme.js`), `SkeletonRow`, `SkeletonTile` e `SkeletonBubble` e a segunda ação de `EmptyState` (`States.js`), apelidos de ícones de categoria (`Icon.js`). Nenhuma tela mudou por causa delas. Os tokens de movimento novos já estão em uso: `motion.fast` no fade da pílula e `motion.press` no toque do botão de publicar.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `cd apps/app && node ../../scripts/run-tests.js test/pressMotion.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/uiKit.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/shellChrome.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/appearance.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js`
+
+Os testes cobrem a escala e a opacidade do toque (com e sem Reduzir movimento), a pílula da aba ativa e a ausência dela no Diário com a própria pessoa, o `header` opcional da folha, os esqueletos novos e a regra de que cores só vêm de tokens e de que a paleta não ganha chaves. Não cobrem como o movimento parece na tela: isso é o que a verificação manual confere.
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) mostra as telas hospedadas com dados de exemplo e dispensa conta. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e), Chrome em 390 e em 1280 px. Em cada alvo: claro e escuro, texto grande, leitor de tela e Reduzir movimento. Capturas ficam fora do git.
+
+1. Abra a Vitrine em A Rua, no tema claro. Esperado: a aba A Rua tem a pílula suave atrás do ícone, centrada e sem cortar; as demais abas não têm pílula; a barra segue só com ícones e 49 pt.
+2. Toque, uma a uma, em Espiadinha, Conversas, Feira e Busca. Esperado: a pílula some da aba anterior e aparece na nova com um fade curto (150 ms); nunca há duas pílulas.
+3. Toque em Diário (foto ou iniciais da própria pessoa). Esperado: o anel verde marca a aba e não há pílula. Em seguida, volte a A Rua: a pílula reaparece.
+4. Repita os passos 1 a 3 no tema escuro. Esperado: a pílula continua visível (contraste do `accentSoft` do tema escuro) e o ícone ativo continua legível por cima dela.
+5. Ligue Reduzir movimento (Android: remover animações; iOS: Reduzir Movimento; web: `prefers-reduced-motion: reduce`) e repita o passo 2. Esperado: a pílula aparece de uma vez, sem fade.
+6. Ligue o texto grande (maior tamanho de fonte do sistema) e repita o passo 2. Esperado: a barra mantém 49 pt, os ícones não mudam de tamanho e nada é cortado.
+7. Com o leitor de tela (TalkBack, VoiceOver, ou a árvore de acessibilidade na web), percorra a barra. Esperado: cada aba é lida pelo nome e como selecionada ou não; "<nome>, novidades" quando há ponto de novidade; a pílula não é lida.
+8. Aperte e segure o botão "publicar" (A Rua), sem soltar. Esperado: o botão encolhe um pouco e escurece. Ao soltar, volta ao normal e a folha de Publicar abre como antes. Um toque rápido ainda abre a folha.
+9. Com Reduzir movimento ligado, repita o passo 8. Esperado: o botão só escurece, sem encolher.
+10. Abra o "..." de uma publicação. Esperado: a folha de ações tem o mesmo desenho de antes (sem espaço de cabeçalho vazio), as mesmas linhas, e cada linha só roda depois que a folha fechou.
+11. Numa conversa, segure uma mensagem. Esperado: a folha abre igual a antes e a ação escolhida roda depois do fechamento.
+12. Rode os passos 1 a 11 em cada alvo, no tema escuro e com texto grande. Esperado: nenhuma tela existente mudou além da barra e do botão de publicar.
+
+Situação, em 2026-11-12 (Vitrine, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1`). Uma primeira passada achou a pílula deslocada para a direita do ícone no Android e no iOS (`TabBar.js`, `left: '50%'` com margem negativa). Foi corrigida com deslocamentos numéricos a partir do ícone de 27 pt. Na segunda passada a pílula ficou centrada nos dois, e uma terceira olhada nada mudou. Nenhum alvo foi percorrido por inteiro, então nenhuma caixa está marcada: cada linha diz o que rodou e o que falta. As capturas ficam fora do git e o caminho de cada uma vai no corpo do PR.
+
+- [ ] Android, AVD `varanda-api36`, build de debug (parcial): pílula centrada atrás do ícone em A Rua, Conversas e Busca, claro e escuro; sem pílula no Diário (o anel marca a aba); texto grande 1,6 sem corte e a barra com 49 pt; com as escalas de animação do sistema em 0, a pílula aparece já no lugar. Nomes lidos de `uiautomator dump` (não foi ligado o TalkBack): "A Rua", "Espiadinha", "Conversas, novidades", "Feira", "Busca", "Diário", com `selected` só na aba ativa. Botão de publicar apertado por 3 s: escurece e encolhe (captura). A folha do "..." de uma publicação e a folha da mensagem (Responder, Copiar, Encaminhar, Denunciar) abrem com o desenho de antes, e "Responder" só mostra a citação depois que a folha fechou. Não verificado: o fade de 150 ms em si (as capturas só mostram o estado final) e o TalkBack de verdade.
+- [ ] iOS, simulador iPhone 16e (parcial): pílula centrada em A Rua no claro e no escuro; Diário sem pílula e com o anel; texto grande (`accessibility-large`) com a barra intacta; folha do "..." igual a antes (escuro). Não verificado: VoiceOver, Reduzir Movimento, o botão de publicar apertado (a captura durante o toque não foi possível) e a folha de mensagem.
+- [ ] Chrome, 390 px (parcial): pílula centrada em A Rua e Conversas, sem pílula no Diário, claro e escuro; árvore de acessibilidade com os nomes das abas ("Conversas, novidades"); botão de publicar apertado fica com opacidade 0,85 e escala 0,97; folha do "..." igual a antes. Não verificado: texto grande, Reduzir movimento e a folha de mensagem. A pílula deste alvo foi vista antes da correção do `TabBar.js` (a web já estava centrada) e não foi revista depois.
+- [ ] Chrome, 1280 px (parcial): só A Rua no claro, coluna central com a barra e a pílula como no 390 px (antes da correção). Passos de texto grande, Reduzir movimento e folhas não percorridos.
+
+## 190. Fotos primeiro e legenda recolhida (PR feat/post-captions)
+
+Segundo PR da revisão visual do app. A linha de publicação mostra as fotos primeiro e a legenda embaixo delas, recolhe a legenda longa e limpa o cromo do carrossel.
+
+- Ordem (`apps/app/src/ui/PostRow.js`): fotos, legenda, citação, barra de ações. Antes, a legenda vinha antes das fotos.
+- Recolhimento (`apps/app/src/postClamp.js`, `apps/app/src/ui/ClampText.js`): 3 linhas com fotos, 9 só com texto. O recolhimento só começa quando a estimativa passa do limite por 2 linhas ou mais. O botão embaixo diz "mais" (com fotos), "ver mais" (só texto) e, aberto, "menos". Os leitores de tela ouvem "mais, ver texto completo", "ver mais, texto completo" e "menos, recolher texto", com o estado aberto ou fechado. O rótulo da publicação continua com a legenda inteira. Tocar na legenda recolhida ainda abre a Conversa.
+- Links e menções: enquanto recolhida, a legenda é texto simples; links e @menções só funcionam depois de aberta.
+- Carrossel (`apps/app/src/ui/MediaCarousel.js`, `apps/app/src/carousel.js`): o contador "1/5" aparece quando o carrossel surge ou a página muda, fica 1,6 s (`motion.hold`) e some em 250 ms (`motion.normal`); com Reduzir movimento, some de uma vez depois da espera. No máximo 5 pontos, acompanhando a página atual. As setas só aparecem com o mouse em cima ou o foco do teclado no carrossel (web); um toque, um clique ou fechar a tela cheia com um toque nunca as deixa na tela.
+- Limites conhecidos: o nativo mede as linhas reais depois do desenho e, se a legenda couber, mostra tudo sem botão; a web não mede e decide só pela estimativa pela largura, então uma legenda de exatamente 3 ou 9 linhas pode manter o botão até ser aberta uma vez. Recolhida, a legenda não tem links nem menções tocáveis. A estimativa para de crescer na escala de fonte 1,3 do sistema, de propósito: com texto maior que isso, uma legenda longa pode ficar aberta sem botão, nunca cortada sem botão.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `cd apps/app && node ../../scripts/run-tests.js test/postClamp.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/postLayout.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/carousel.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js`
+
+Os testes cobrem a decisão do recolhimento (limites, margem de 2 linhas, medição nativa que só levanta o recolhimento), a ordem fotos, legenda e citação, e a janela de pontos e o fade do contador. Não cobrem como isso parece na tela: isso é o que a verificação manual confere.
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) mostra as telas hospedadas com dados de exemplo e dispensa conta. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e), Chrome em 390 e em 1280 px. Em cada alvo: claro e escuro, texto grande, leitor de tela e Reduzir movimento. Capturas ficam fora do git.
+
+1. Numa publicação com fotos e legenda curta (uma ou duas linhas), olhe a linha. Esperado: as fotos vêm primeiro, a legenda embaixo delas, e não há botão "mais".
+2. Numa publicação com fotos e legenda de mais de 5 linhas, olhe a linha. Esperado: a legenda mostra 3 linhas, termina em reticências e o botão "mais" aparece embaixo, com cerca de 44 pt de altura e 12 pt de espaço próprio acima. Esse espaço lê como parte da legenda (alinhado ao texto), não solto.
+3. Toque em "mais". Esperado: a legenda abre no lugar, sem abrir a Conversa; o botão vira "menos"; toque em "menos" e ela volta a 3 linhas.
+4. Numa publicação só de texto com mais de 11 linhas, olhe a linha. Esperado: 9 linhas e o botão "ver mais"; aberta, "menos".
+5. Numa legenda com uma linha ou duas acima do limite. Esperado: fica aberta, sem botão (a margem de 2 linhas).
+6. Com a legenda recolhida, toque num link ou numa @menção dentro dela. Esperado: não são links (texto simples); tocar na legenda abre a Conversa. Abra a legenda e toque no link de uma última linha que começa com ele. Esperado: o link abre e a legenda continua aberta.
+7. Num carrossel de 2 fotos com legenda longa, vá para a foto 2, abra e feche a legenda. Esperado: o carrossel continua na foto 2.
+8. Contador: ao surgir o carrossel ou trocar de foto, "N de M" aparece, fica 1,6 s e some em 250 ms. Com Reduzir movimento, some de uma vez depois dos 1,6 s.
+9. Num carrossel de 7 fotos. Esperado: no máximo 5 pontos, a janela acompanha a foto atual (na foto 6, o ponto ativo é o quarto de cinco).
+10. Web a 1280 px: com o mouse sobre o carrossel, as setas aparecem; ao tirar o mouse somem; depois de clicar numa seta, de um toque (390 px) ou de fechar a tela cheia, nunca ficam na tela.
+11. Web a 1280 px, só com o teclado: Tab até a foto (as setas aparecem), Tab até uma seta, Enter até a última ou a primeira foto. Esperado: o foco passa à outra seta e nunca cai na página.
+12. Leitor de tela: o rótulo da publicação traz a legenda inteira, mesmo recolhida; o botão é lido como "mais, ver texto completo", "ver mais, texto completo" ou "menos, recolher texto", com o estado aberto ou fechado.
+13. Repita no tema escuro e com texto grande. Esperado: nada cortado, o botão mantém o alvo de 44 pt.
+
+Limites desta passada: a Vitrine não traz legenda longa, então as publicações de teste foram feitas no compositor da própria Vitrine (as fotos de uma publicação nova aparecem como quadro neutro ou "foto indisponível", só o desenho da legenda e do carrossel vale). O arrastar com o mouse abre a tela cheia em vez de deslizar, então o passo 7 não foi feito por deslizar.
+
+Situação, em 2026-11-12 (Vitrine, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1`). Nenhum alvo foi percorrido por inteiro, então nenhuma caixa está marcada. Capturas fora do git, em `v2-shots/` da pasta de trabalho da sessão.
+
+- [ ] Android, AVD `varanda-api36` (parcial, 2026-11-12, build de debug existente ligado ao Metro da Vitrine, com legendas longas temporárias): claro e escuro. Passo 2 (fotos primeiro, legenda em 3 linhas com reticências e "mais" embaixo), passo 3 ("mais" abre no lugar sem abrir a Conversa, "menos" fecha), passo 6 (o link da última linha abre o Chrome, ao voltar a legenda continua aberta), passo 7 (na foto 2, abrir e fechar a legenda não mexe no carrossel), passo 8 ("1 de 2" aparece ao trocar de foto e some depois de cerca de 2 s; com a escala de animação em 0 some de uma vez, sem quadro intermediário), passo 13 em escuro com fonte 1,3 (3 linhas, "mais" legível, espaço do botão sem parecer solto). Não verificado: o toque na @menção não abriu o perfil (a tela não mudou, ver o defeito abaixo), passos 1, 4, 5 e 9, texto só com mais de 11 linhas (a publicação de teste de 14 linhas tinha foto), TalkBack.
+- [ ] iOS, simulador iPhone 17 Pro (parcial; o iPhone 16e não liga aqui), 2026-11-12, build de debug existente: passo 2 (fotos primeiro, 3 linhas e "mais"), passo 3 (abre no lugar, volta da Conversa com a legenda ainda aberta), passo 6 (o link abre o Safari; voltar ao app recarregou a lista e a legenda voltou recolhida), passo 7 (foto 2 mantida ao abrir a legenda), passo 13 em escuro com texto extra extra grande (legenda aberta legível, nada cortado). Não verificado: o toque na @menção não abriu o perfil, passos 1, 4, 5, 8 e 9, Reduzir Movimento, VoiceOver, texto só.
+- Observações do nativo, sem defeito do PR: com a legenda aberta, tocar na @menção `@joao_nascimento` não mudou de tela na Vitrine (capturas `n-ios-d-mention4.png` e `n-android-d-mention.png`). O toque chega a `openMention` (`apps/app/App.js:1900-1918`), que resolve o @nome pelo diretório de contas, e a Vitrine não responde a essa busca; o caminho é o mesmo de antes deste PR. Confirmar com uma conta real. Na Conversa, a publicação principal ainda aparece recolhida em 3 linhas com "mais" (`n-ios-d-link.png`): o PR seguinte (feat/thread-conversation) passa `expanded` a ela.
+- [ ] Chrome, 390 px (parcial): claro e escuro. Passos 1 a 3 e 6 (legenda com fotos recolhida em 3 linhas com "mais", aberta no lugar, link e @menção só ativos depois de aberta, o link de uma última linha abre e a legenda continua aberta), passo 4 (texto só: 9 linhas e "ver mais"), passo 12 (rótulo da publicação com os 543 caracteres da legenda; botão "ver mais, texto completo" com `aria-expanded`), botão de 44 pt de altura medido. Fechar a tela cheia não deixou setas na tela. Não verificado: passos 5, 7 a 9 (o contador e a janela foram vistos só a 1280 px), texto grande, Reduzir movimento, deslizar de verdade.
+- [ ] Chrome, 1280 px (parcial): passos 8 (contador "1 de 7" some depois da espera e volta a cada troca de foto), 9 (5 pontos, ativo o quarto na foto 6), 10 e 11 (setas com mouse e com o foco; foco passa de "foto anterior" para "próxima foto" e de volta, nunca cai na página). Não verificado: Reduzir movimento, texto grande, legenda longa neste tamanho (a 1280 px a coluna é a mesma, e a legenda de 6 linhas coube aberta sem botão).
+
+## 191. Conversa: respostas aninhadas e barra de resposta (PR feat/thread-conversation)
+
+Terceiro PR da revisão visual do app. A Conversa mostra as respostas com um nível de aninhamento, ganha uma barra de resposta fixa embaixo e a linha de publicação ganha o chip "Respondendo a Nome" e o bloco "Respostas".
+
+- Aninhamento (`apps/app/src/screens/Conversa.js`, `apps/app/src/threadRows.js`): sob a publicação em destaque, uma resposta que tem respostas próprias ganha uma linha de expansão ("Ver 1 resposta", "Ver N respostas", "Ver respostas" quando a contagem é desconhecida e "Ocultar respostas" aberta). Abrir carrega os filhos pela mesma leitura conferida da conversa. Só um nível: os filhos ficam recuados com um fio fino e nunca mostram netos. Um ramo longo termina em "Ver mais respostas". Um filho que tem respostas mostra "Ver conversa", que abre aquele filho como conversa própria.
+- Legenda: a publicação em destaque mostra a legenda inteira, sem "mais" (o recolhimento do PR anterior não vale ali).
+- Barra de resposta (`apps/app/src/ui/ReplyBar.js`, `apps/app/src/replySend.js`): só com o nó cheio (hospedado e com internet). Fica fixa embaixo da Conversa com "Escreva uma resposta", "Responder" e um botão que abre o editor completo. Tocar no ícone de responder de uma linha mira nela ("Respondendo a @nome" com "cancelar resposta", que volta a mira para a publicação em destaque). Um texto curto é enviado da barra e aparece na hora, uma vez e na ordem. Texto com link, resposta como Página, texto com mais de 1000 caracteres e resposta recusada pelo portão da fila abrem a Publicar com o rascunho. Texto com termo bloqueado mostra a recusa embaixo da barra. Envio incerto diz que pode ter sido enviado, guarda o texto e nunca tenta de novo sozinho. Sem o nó cheio (sem internet, não hospedado) não há barra e o ícone de responder abre a folha Publicar como antes. O botão de publicar não aparece na Conversa.
+- Rascunho (`apps/app/src/screens/Publicar.js`): quando a barra entrega um rascunho e a Publicar já guarda outra publicação não terminada (texto ou fotos), ela pergunta "Você tem um rascunho não publicado." com "Usar a resposta" e "Manter o rascunho". Compositor vazio recebe o rascunho sem perguntar. Enquanto uma publicação está sendo enviada, manter o rascunho antigo nunca o perde. Recusar a resposta ("Manter o rascunho", Cancelar, fundo) mantém o rascunho antigo com o alvo de resposta ou citação dele.
+- Falhas: a primeira leitura que falha mostra a tela de erro de sempre; puxar para atualizar e falhar mantém a conversa na tela com a nota "Não foi possível atualizar a conversa." e os ramos abertos; uma resposta rápida só atualiza a conversa em silêncio depois de ela ter carregado.
+- Chip e prévias (`apps/app/src/ui/PostRow.js`, `apps/app/src/screens/ARua.js`, `apps/app/App.js`): "respondendo a X" virou o chip "Respondendo a Nome", com alvo de 44 pt, que abre a publicação respondida (texto simples onde a tela não dá abertura). Em A Rua, uma publicação mostra, embaixo da barra de ações, o bloco "Respostas" com até 2 prévias de uma linha, um botão só que abre a conversa. As prévias vêm só de respostas já carregadas mais abaixo na mesma lista (nenhum pedido novo), também para uma publicação mostrada por republicação; resposta só com foto fica de fora. O ícone de responder numa linha da A Rua (e do Diário e das outras listas) abre a Conversa daquela publicação com a barra em foco, quando o nó está cheio e a pessoa não age como Página; senão abre a Publicar.
+- Limites conhecidos: as prévias só existem em A Rua e só a partir das linhas já carregadas (uma resposta que está além da janela carregada não aparece); a barra só existe com o nó cheio; um nível de aninhamento, o resto pelo "Ver conversa"; a Vitrine não responde a envios de verdade, então o texto enviado da barra só prova o desenho e a ordem local.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `cd apps/app && node ../../scripts/run-tests.js test/threadRows.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/replySend.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/replyBar.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/conversaScreen.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/feedPreviews.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/postLayout.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js`
+
+Os testes cobrem os rótulos e a montagem das linhas, a regra de envio da barra (o que envia, o que abre a Publicar, o que recusa), a ordem e a mescla das respostas e as prévias de A Rua. Não cobrem como isso parece na tela nem o teclado: isso é o que a verificação manual confere.
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é um nó hospedado com dados de exemplo e dispensa conta, então a barra aparece. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e, que não liga neste Mac; usa-se o iPhone 17 Pro), Chrome em 390 e em 1280 px. Em cada alvo: claro e escuro, texto grande, leitor de tela e Reduzir movimento. Capturas ficam fora do git.
+
+1. Abra a Conversa de uma publicação cuja resposta tem respostas próprias. Esperado: sob a resposta, a linha "Ver N respostas" (ou "Ver 1 resposta"), com alvo de 44 pt; o leitor de tela lê o rótulo e o estado aberto ou fechado.
+2. Toque na linha. Esperado: os filhos aparecem recuados com um fio fino, a linha vira "Ocultar respostas"; tocar de novo fecha.
+3. Abra um ramo cujo filho também tem respostas. Esperado: só um nível aparece (nunca netos); o filho mostra "Ver conversa". Num ramo longo, o fim traz "Ver mais respostas" e cada toque acrescenta uma página sem duplicar linhas.
+4. Toque em "Ver conversa". Esperado: o filho abre como conversa própria, com as respostas dele.
+5. Toque no chip "Respondendo a Nome" de uma resposta. Esperado: abre a publicação respondida; o alvo tem 44 pt e o leitor de tela lê o chip como botão.
+6. Olhe a publicação em destaque com legenda longa. Esperado: a legenda inteira, sem "mais".
+7. Barra: com o nó cheio, "Escreva uma resposta" e "Responder" ficam fixos embaixo. Toque no ícone de responder de uma resposta. Esperado: "Respondendo a @nome" com "cancelar resposta"; cancelar volta a mira para a publicação em destaque.
+8. Escreva um texto curto e toque em "Responder". Esperado: a resposta aparece na hora, uma vez, na ordem; o campo esvazia.
+9. Escreva um texto com um link e toque em "Responder". Esperado: abre a Publicar com o rascunho (e o alvo de resposta).
+10. Com a Publicar já guardando outra publicação (texto ou fotos), repita o passo 9. Esperado: "Você tem um rascunho não publicado." com "Usar a resposta" e "Manter o rascunho". "Usar a resposta" troca o rascunho; "Manter o rascunho" (ou Cancelar, ou o fundo) mantém o antigo com o próprio alvo. Com a Publicar vazia, o rascunho entra sem perguntar.
+11. Toque no botão que abre o editor completo com texto escrito. Esperado: a Publicar abre com o rascunho da barra.
+12. Teclado: toque no campo da barra. Esperado: o teclado nunca cobre a barra (Android, iOS, web).
+13. Sem internet (ou fora do nó cheio). Esperado: não há barra e o ícone de responder abre a folha Publicar; o botão de publicar não aparece na Conversa.
+14. Em A Rua, toque no ícone de responder de uma linha. Esperado: abre a Conversa daquela publicação com o teclado aberto e a barra em foco. Como Página, abre a Publicar.
+15. Em A Rua, uma publicação com respostas já carregadas mais abaixo mostra "Respostas" com até 2 linhas. Esperado: o bloco é um botão que abre a conversa; a rolagem continua suave; resposta só com foto não aparece nas prévias.
+16. Falha: com a rede cortada, puxe para atualizar a Conversa. Esperado: a conversa fica na tela com "Não foi possível atualizar a conversa." e os ramos abertos continuam abertos.
+17. Leitor de tela: o chip, a linha de expansão, a barra (campo, "Responder", "cancelar resposta") e o bloco "Respostas" têm rótulos que fazem sentido.
+18. Repita no tema escuro, com texto grande e com Reduzir movimento. Esperado: nada cortado, alvos de 44 pt, a barra visível.
+
+Situação, em 2026-11-12 (Vitrine, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1` na porta 8090, porque a 8081 estava com o Metro de outra pasta de trabalho). Nenhum alvo foi percorrido por inteiro, então nenhuma caixa está marcada. Para andar pelos casos que a Vitrine não traz, a passada usou linhas temporárias em `fixtures.js` (uma resposta com ramo, um neto com resposta, um ramo de 55 filhos), depois desfeitas byte a byte. As capturas vieram do painel do navegador embutido e ficam fora do git.
+
+- [ ] Chrome, 390 px, tema claro (parcial; no painel de navegador embutido do app, não no Chrome em si, que não estava conectado): passos 1 e 2 ("Ver 1 resposta" abre e vira "Ocultar respostas", filho recuado com fio fino), passo 3 (parcial: só um nível, e "Ver conversa" só no filho que tem resposta), passo 4 ("Ver conversa" abre o filho como conversa própria), passo 7 (barra com "Respondendo a @nome" e "cancelar resposta"), passo 8 (resposta curta apareceu na hora, uma vez e na ordem), passo 9 (o texto com link abriu a Publicar com o rascunho e o alvo), passo 10 (parcial: "Você tem um rascunho não publicado." com as duas opções apareceu; "Manter o rascunho" manteve o antigo com o alvo dele; "Usar a resposta" não foi percorrido), passo 13 (só a parte "o botão de publicar não aparece na Conversa"), passo 14 (o ícone de responder de uma linha de A Rua abriu a Conversa com a barra em foco). Não verificado: o "Ver mais respostas" do passo 3 (nenhum ramo aberto passou da primeira página), passo 5 (o chip foi só visto, não tocado), 6, 11, 12, 15 (as prévias de "Respostas": a publicação-raiz ficou fora da janela carregada de A Rua e nenhum bloco apareceu), 16, 17, sem internet, texto grande, Reduzir movimento, leitor de tela.
+- [ ] Chrome, 1280 px, tema escuro (parcial): a Conversa abre na mesma coluna estreita, com a barra fixa embaixo. Defeito: a linha "Respondendo a @nome" da barra sai em preto sobre o fundo escuro (`colors.muted` não existe na paleta, ver `apps/app/src/ui/ReplyBar.js:104`). Corrigido depois: a barra usa só chaves da paleta e `apps/app/test/themeUsage.test.js` agora recusa uma chave que não existe; não reconferido no navegador. Não verificado: o resto dos passos.
+- [ ] Android, AVD `varanda-api36` (parcial, passada de teclado de 2026-11-12, Metro na porta 8090 com o app apontado por `debug_http_host`): passo 1 FALHOU. Com o teclado aberto, a barra fica acima dele mas há uma faixa em branco de cerca de 20 dp entre o fundo da barra e o teclado (captura `v3-shots/and-1-keyboard.png`, repete-se em `and-4-dark-reply.png`). Causa: a margem da área segura de baixo continuava com o teclado aberto. Corrigido e repassado no mesmo dia: a faixa de 20 dp sumiu (`and-1-keyboard-fixed.png`); restou uma tira de cerca de 5 dp na cor da página, que é o respiro de 8 dp sob a barra. Esse respiro passou a ter a cor da barra; essa última mudança não foi reconferida no aparelho. Com o teclado fechado, a barra fica logo acima da área de gestos, sem faixa a mais (`and-2-closed-fixed.png`). Passo 2 passou: ao fechar o teclado a barra volta ao fundo, acima da área segura, sem faixa a mais. Passo 3 passou (7 e 8): "Oi teste" apareceu uma vez no bloco "1 resposta". Passo 4 passou (7 e 18): "Respondendo a @lia_oliveira" e o espaço reservado legíveis no tema escuro. Não verificado: os demais passos, texto grande, leitor de tela, Reduzir movimento.
+- [ ] iOS, simulador iPhone 17 Pro (o iPhone 16e não liga aqui) (parcial, passada de teclado de 2026-11-12, Metro na porta 8090 com `RCT_jsLocation`): passo 1 passou: a barra fica rente ao teclado, inteira, sem faixa em branco nem folga acima (`v3-shots/ios-1-keyboard.png`). Passo 2 (parcial): o teclado de software sumiu ao digitar pelo teclado do Mac e a barra voltou ao fundo acima da área segura (`ios-2-after-send.png`); o fechamento pelo próprio teclado não foi tocado. Passo 3 passou: a resposta apareceu uma vez no bloco "1 resposta" (o texto saiu corrigido para "Ok, teste" pelo autocorretor). Passo 4 passou: "Respondendo a @lia_oliveira" e o espaço reservado legíveis no tema escuro (`ios-3-dark-reply.png`); o escuro veio pela opção Escuro de Ajustes > Aparência, porque com Sistema o app ficou claro com o aparelho em escuro (a conferir). Não verificado: os demais passos, texto grande, leitor de tela, Reduzir movimento.
+
+## 192. Feira: vitrine, categorias e filtros (PR feat/feira-browse)
+
+Quarto PR da revisão visual do app. A aba Feira, em Na cidade, ganha um cabeçalho (busca, chip de cidade, botão Filtros e tiles de categoria), uma grade de tiles de anúncio e, sem cidade escolhida, uma vitrine com "Como funciona".
+
+- Vitrine sem cidade (`apps/app/src/screens/Feira.js`): sem estado e cidade lembrados, Na cidade mostra o título "Onde você quer comprar e vender?", os estados (UF), o campo Cidade, o botão "Ver anúncios" e "Como funciona" com quatro passos (Anuncie, Converse, Combine, Avalie).
+- Cidade (`apps/app/src/ui/PlaceSheet.js`): com cidade, o cabeçalho mostra o campo Palavras e um chip com a cidade ("São Paulo, SP"); o leitor de tela lê "Trocar cidade, agora São Paulo, SP". O chip abre a folha "Localização" (27 UFs e Cidade, botão "Ver anúncios"). Escolher outra cidade recarrega a lista. Sem estado ou cidade, a folha diz "Escolha o estado e escreva a cidade.". Não existe busca no país inteiro: UF e cidade são sempre exigidas.
+- Categorias (`apps/app/src/ui/CategoryTiles.js`): fileira rolável de tiles, "Todas" e as categorias da Feira, cada um com ícone, alvo de 44 pt e estado selecionado lido pelo leitor de tela. Categoria e tipo são filtros do servidor: refazem a busca.
+- Grade (`apps/app/src/ui/ListingTile.js`, `apps/app/src/feiraBrowse.js`): os anúncios aparecem em tiles com foto (ou o ícone da categoria), preço (ou "A combinar", "Grátis", "Até R$ x" numa procura), título, lugar e, se houver, o selo (Reservado, Vendido, Procura, "Situação desconhecida"). Colunas por largura: 1 abaixo de 360 px ou com texto grande (escala de fonte a partir de 1,29), 2 abaixo de 600, 3 abaixo de 900. Tocar num tile abre o anúncio. Enquanto carrega, aparecem tiles de esqueleto (nunca em Buscas).
+- Filtros (`apps/app/src/ui/FeiraFilters.js`): a folha "Filtros da Feira" tem "Ordenar por" (Recentes, Menor preço, Maior preço), "Faixa de preço" com "De" e "Até" (preço com vírgula, por exemplo 10,50) e "Tipo de anúncio". Preço fora do formato mostra "Confira os preços. Use, por exemplo, 10,50."; início maior que o fim mostra "O preço de início deve ser menor ou igual ao preço final.". "Aplicar" fecha a folha e "Limpar" zera. Com ordem ou faixa ativas o botão Filtros ganha um ponto. Ordem e faixa só reordenam e filtram os anúncios já carregados; quando ainda há mais páginas, a nota "Ordem e faixa de preço valem para os anúncios já carregados" aparece embaixo da grade (a folha mostra a mesma nota sempre).
+- Buscas salvas: "Salvar busca" continua à mão enquanto há uma busca por cidade; a nota "Busca salva neste aparelho." confirma. Em Buscas aparece a busca ("São Paulo/SP · Todos · Todas as categorias", "N novos", "Remover busca") e nunca há esqueletos.
+- Meus e Salvos usam os mesmos tiles. Os anúncios de uma pessoa ou Página (linha "Anúncios" do perfil) aparecem na grade, sem vitrine nem filtros.
+- Vazio e offline: sem resultado, "Nenhum anúncio por aqui ainda." com "Limpar filtros" e "Trocar cidade"; sem rede, "Conecte-se para consultar a Feira."; índice incompleto, "Alguns anúncios podem faltar. Puxe para atualizar.".
+- Limites conhecidos: ordem e faixa de preço só valem para os anúncios já carregados (a nota diz isso); a casca do app limita o conteúdo a 640 px, então a grade tem no máximo 3 colunas (a quarta, de 900 px, não aparece no app); não há busca nacional (UF e cidade são obrigatórias); a Vitrine só tem 6 anúncios e uma página, então a nota de parcial no rodapé não aparece nela.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `(cd apps/app && node ../../scripts/run-tests.js test/feiraBrowse.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/feiraScreen.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js)`
+
+Os testes cobrem ordem, faixa, colunas, rótulos e as regras da tela. Não cobrem como isso parece na tela: isso é o que a verificação manual confere.
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é um nó hospedado com dados de exemplo e dispensa conta. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e, que não liga neste Mac; usa-se o iPhone 17 Pro), Chrome em 390 e em 1280 px. Capturas ficam fora do git.
+
+1. Abra a Feira sem cidade. Esperado: título, estados, Cidade, "Ver anúncios" e "Como funciona" com os quatro passos.
+2. Escolha SP e "São Paulo". Esperado: o cabeçalho com chip, Filtros e tiles; a grade.
+3. Toque no chip. Esperado: a folha "Localização"; mudar a cidade recarrega; "Cidade" sem nada pede "Escolha o estado e escreva a cidade.".
+4. Toque num tile de categoria. Esperado: ele fica selecionado, a lista é refeita; alvos de 44 pt.
+5. Largura e texto grande. Esperado: 1 coluna em 340 px ou com texto grande, 2 em 390, 3 em 1280 (limite de 640 px).
+6. Filtros: Menor preço, De "10,50". Esperado: grade reordenada e filtrada, ponto no botão; a nota de parcial só com mais páginas.
+7. "Salvar busca" e Buscas. Esperado: a busca aparece, sem esqueletos.
+8. Meus, Salvos e a grade de um perfil. Esperado: tiles, sem vitrine nem filtros no perfil.
+9. Cidade sem anúncios, offline. Esperado: os textos de vazio e de sem rede.
+10. Escuro, texto grande, leitor de tela e Reduzir movimento. Esperado: nada cortado, contraste legível.
+
+Situação, em 2026-11-12 (Vitrine, Metro na porta 8090). Cada caixa só é marcada quando o alvo foi percorrido por inteiro.
+
+- [ ] Android, AVD `varanda-api36` (parcial, Metro na porta 8090, `v4-shots/and-*.png`): passo 1 passou (vitrine com os quatro passos, claro); passo 2 passou ("Sao Paulo" casou com "São Paulo"; chip, Filtros, tiles e "Salvar busca"); passo 4 passou (Casa fica selecionada, sem anúncios mostra "Nenhum anúncio por aqui ainda." com "Limpar filtros" e "Trocar cidade"); passo 5 passou (o AVD vem com texto 1,3: 1 coluna; com texto 1,0: 2 colunas); passo 6 passou (Menor preço e De "10,50": grade reordenada, ponto no Filtros, nota na folha); passo 10 (parcial): escuro conferido na tela de vazio, contraste legível. Não percorrido: passo 3 (folha de localização), 7, 8, sem rede, leitor de tela e Reduzir movimento. O AVD voltou a texto 1,3 e ao tema claro.
+- [ ] iOS, iPhone 17 Pro (o iPhone 16e não liga aqui): não percorrido (sem turnos restantes).
+- [ ] Chrome, 390 px (painel de navegador embutido, não o Chrome em si; parcial): passos 1 a 3 (vitrine, chip e folha de localização recarregando a lista), 4 (tiles), 5 (1 coluna em 340 px, 2 em 390), 6 (ordem e ponto do Filtros; a nota de parcial não aparece porque a Vitrine tem uma página só), 7 (busca salva e Buscas sem esqueletos), 8 (Meus, Salvos e a grade de "Anúncios" do perfil de uma Página, sem vitrine nem filtros), 9 (cidade sem anúncios: "Limpar filtros" e "Trocar cidade"), escuro e claro; o rótulo "Trocar cidade, agora Campinas, SP" apareceu na árvore de acessibilidade. Não percorrido: texto grande, offline, Reduzir movimento, leitor de tela de verdade.
+- [ ] Chrome, 1280 px (painel de navegador embutido; parcial): a grade tem 3 colunas dentro da coluna de 640 px (limite conhecido), tile abre o anúncio, Buscas, Meus e Salvos. Não percorrido: o resto dos passos.
+
+## 193. Feira: anúncio, criação em passos e oferta (PR feat/feira-listing-flow)
+
+Quinto PR da revisão visual do app. A tela Anúncio ganha um cartão de quem anunciou e uma barra fixa embaixo com as ações; Anunciar passa a ser feito em quatro passos; "Fazer oferta" no anúncio abre a conversa com quem anunciou e a folha da oferta para aquele anúncio.
+
+- Detalhe (`apps/app/src/screens/Anuncio.js`, `apps/app/src/anuncioView.js`): fotos, preço, título, "Compartilhar" e "Salvar" logo abaixo do título e a descrição (o título "Descrição" só aparece quando há texto).
+- Cartão de quem anunciou (`apps/app/src/ui/SellerCard.js`): avatar, nome e, no nó hospedado, "Ver todos os anúncios", que abre a grade de anúncios de quem anunciou.
+- Barra fixa (`apps/app/src/ui/StickyBar.js`): para quem vê, "Conversar" e, só em produto ou serviço com preço, "Fazer oferta"; para o dono, só "Editar". As mensagens de ação ("Link copiado.", erro ao salvar, "Não deu para continuar agora. Tente de novo.") aparecem dentro da barra enquanto ela está na tela. Com texto grande, os botões da barra ficam empilhados. O fim do conteúdo nunca fica atrás da barra. Num anúncio de Página, a nota da Página aparece uma vez antes de Conversar ou Fazer oferta.
+- Anunciar em passos (`apps/app/src/screens/Anunciar.js`, `apps/app/src/anunciarSteps.js`): quatro passos (Fotos, O que é, Preço e lugar, Revisão) com "Continuar" e "Voltar"; na Revisão, uma prévia em tile e "Publicar anúncio". Cada passo mostra só os próprios erros. A confirmação "Público na web e em buscadores" fica na Revisão. O botão voltar do Android e o Escape na web voltam um passo; no primeiro passo, com conteúdo, perguntam "Descartar anúncio?" ("Descartar" e "Continuar editando").
+- Oferta (`apps/app/src/App.js`, `apps/app/src/privateReply.js`, `apps/app/src/screens/Mensagem.js`): "Fazer oferta" no anúncio abre a conversa com quem anunciou e a folha "Fazer oferta" para ESTE anúncio, mesmo que a conversa já tenha o link de outro anúncio. Nada é enviado até "Enviar oferta"; fechar a folha não envia nada; voltar e abrir a mesma conversa não reabre a folha.
+- Limites conhecidos: o gesto de borda do iOS e o histórico do navegador saem de Anunciar na hora, sem a pergunta "Descartar anúncio?" (decidido, não é defeito); "Editar anúncio" (`AnuncioEditar`) continua com o formulário único de antes; a nota da Página só vale se a Vitrine tiver um anúncio de Página.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `(cd apps/app && node ../../scripts/run-tests.js test/anunciarSteps.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/anuncioView.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/privateReply.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/feiraCompose.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/feiraOffer.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js)`
+
+Os testes cobrem as ações da barra por papel, o resumo de quem anunciou, os erros de cada passo e o rascunho da oferta. Não cobrem como isso parece na tela nem o botão voltar: isso é o que a verificação manual confere.
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é um nó hospedado com dados de exemplo e dispensa conta. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e, que não liga neste Mac; usa-se o iPhone 17 Pro), Chrome em 390 e em 1280 px. Capturas ficam fora do git.
+
+1. Abra um anúncio alto de outra pessoa. Esperado: fotos, preço, título, Compartilhar e Salvar, descrição, cartão de quem anunciou; rolando até o fim, a barra fixa não cobre o último conteúdo.
+2. Toque em "Compartilhar". Esperado: "Link copiado." aparece dentro da barra.
+3. Toque no cartão em "Ver todos os anúncios". Esperado: abre a grade de quem anunciou.
+4. Toque em "Conversar". Esperado: a conversa abre com o rascunho e o cartão do anúncio no campo de escrita; nada é enviado.
+5. Volte e toque em "Fazer oferta". Esperado: a conversa abre com a folha "Fazer oferta" para este anúncio (também numa conversa que já liga outro anúncio); fechar a folha não envia nada; sair e voltar à conversa não reabre a folha; só "Enviar oferta" envia.
+6. Abra um anúncio seu. Esperado: a barra tem só "Editar", que abre "Editar anúncio" com o formulário único.
+7. Abra um anúncio de Página, se houver. Esperado: a nota da Página aparece uma vez antes de Conversar ou Fazer oferta.
+8. Anunciar, passo a passo. Esperado: Continuar sem os campos do passo mostra só o erro daquele passo; Voltar mantém o que foi escrito; a Revisão mostra o tile e a confirmação "Público na web e em buscadores"; sem ela, o erro "Confirme que o anúncio fica público na web e em buscadores."; "Publicar anúncio" abre o anúncio.
+9. Voltar em Anunciar. Esperado: em passo adiante, o botão voltar do Android e o Escape na web voltam um passo; no primeiro passo com conteúdo, perguntam "Descartar anúncio?".
+10. Texto grande, escuro, leitor de tela e Reduzir movimento. Esperado: com texto grande os botões da barra ficam empilhados; nada cortado, contraste legível; a barra e os passos têm rótulos.
+
+Situação, em 2026-11-12 (Vitrine, Metro na porta 8090). Cada caixa só é marcada quando o alvo foi percorrido por inteiro; nenhuma foi, por falta de turnos.
+
+- [ ] Android, AVD `varanda-api36` (parcial, `v5-shots/a*.png`, `b*.png`, `d*.png`): passo 1 passou no anúncio de Página ("Livros da biblioteca": o AVD vem com texto 1,3, e a barra empilhou "Conversar" e "Fazer oferta"; o cartão mostrou "Ver todos os anúncios", que abriu a grade de quem anunciou, também no escuro); passo 2 só em parte (no Android "Compartilhar" abre a folha de compartilhar do sistema, não a mensagem na barra); passo 4 não percorrido; passo 5 passou para um anúncio de Página (a nota "Conversar com a página" apareceu, "Continuar" abriu a conversa com a folha "Fazer oferta" para "Livros da biblioteca", "Cancelar" fechou a folha, a conversa ficou vazia ("Nenhuma mensagem") e voltar ao anúncio não reabriu a folha); passo 7 passou (nota da Página); passo 8 passou até o passo 2 (Fotos, "O que é", "Escreva um título." só do passo 2, "Voltar" no fim da tela com rolagem); passo 9 passou (voltar do passo 2 vai ao passo 1, e no passo 1 com título digitado pergunta "Descartar anúncio?" com "Descartar" e "Continuar editando"); passo 10 (parcial): escuro e texto grande conferidos. Não percorrido: passos 3 e 4 com conversa que já liga outro anúncio, 6, Preço e lugar, Revisão e "Publicar anúncio", leitor de tela e Reduzir movimento. O AVD voltou ao tema claro.
+- [ ] iOS, iPhone 17 Pro (o iPhone 16e não liga aqui): não percorrido (sem turnos restantes).
+- [ ] Chrome, 390 px (painel de navegador embutido, não o Chrome em si; parcial): passos 1, 2 e 6 num anúncio seu (fotos com pontos, preço, título, "Compartilhar", descrição, cartão com "Ver todos os anúncios", avaliações; a barra tem só "Editar", o fim do conteúdo (Reservado, Vendido, Apagar) fica acima da barra e o endereço do link aparece dentro da barra ao tocar em "Compartilhar", porque o painel não copia). Não percorrido: o resto dos passos, inclusive Anunciar e o Escape.
+- [ ] Chrome, 1280 px: não percorrido.
+- Defeitos: nenhum visto no que foi percorrido. Na folha "Fazer oferta" com texto grande no Android, o conteúdo ficava colado nas bordas da tela (sem margem lateral) e os botões "Enviar oferta" e "Cancelar" ficavam à esquerda com a largura do texto (`v5-shots/a10.png`); corrigido neste PR (margens da folha, `styles.sheet` em `apps/app/src/screens/Mensagem.js`), não reconferido no aparelho.
+
+## 194. Conversas: formatação, blocos de código e spoilers (PR feat/chat-formatting)
+
+Sexto PR da revisão visual do app. Nas mensagens diretas, nos grupos e nas conversas de comunidade, o texto pode ter *negrito*, _itálico_, ~riscado~, `código`, blocos de código e ||spoiler||. O marcador viaja como texto simples: quem tem um build mais antigo vê os marcadores crus.
+
+- Leitor (`apps/app/src/richText.js`, puro): `*negrito*` (também `**`), `_itálico_` (também `__`), `~riscado~`, `` `código` ``, `||spoiler||` e bloco de código (uma linha de três ou mais crases, com a linguagem depois delas se houver, fechada por uma linha só de crases do mesmo tamanho). Os marcadores só abrem e fecham na borda de uma palavra: `2*3*4` e `snake_case` ficam literais. Um link ou um @nome mantém o destino exato, a formatação nunca muda para onde ele aponta, e texto simples nunca vira link. Uma mensagem com caractere de controle invisível mostra o texto sem estilos (os spoilers continuam cobertos).
+- Balão (`apps/app/src/ui/RichText.js`, `apps/app/src/ui/Bubble.js`): trechos estilizados. O bloco de código é uma caixa com o nome da linguagem, "Copiar código" (depois "Copiado" ou "Não deu para copiar" por 2 s), rolagem na horizontal e, passando de 12 linhas, o botão "ver tudo". O spoiler fica coberto (tinta sobre tinta); um toque mostra todos os spoilers daquela mensagem; o rótulo para leitor de tela é "spoiler, toque para mostrar" (no iOS o VoiceOver pode ler só a palavra "spoiler", por desenho). O cartão de prévia de um link não é desenhado quando o link só aparece dentro de um spoiler. Mensagem sem marcadores aparece exatamente como antes.
+- Campo de escrever (`apps/app/src/ui/ChatComposer.js`, `apps/app/src/formatInsert.js`): o botão "Aa" (rótulo "formatação") abre uma fileira com Negrito, Itálico, Riscado, Código, Bloco de código e Spoiler, e a dica "Você também pode digitar *negrito*, _itálico_ e `código`". Um botão envolve a seleção (uma seleção no meio de uma palavra cresce até a palavra toda); tocar de novo numa seleção já envolvida tira os marcadores; Bloco de código envolve a seleção numa cerca. Texto colado com TAB ou CR é limpo (os registros os recusam).
+- Prévias (`apps/app/src/chatPreview.js`, `apps/app/src/conversas.js`, `apps/app/src/groups.js`, `apps/app/src/ui/ReplyPreview.js`): as linhas das caixas (Conversas, Mensagens), a última linha da lista de grupos, a citação de uma resposta no balão, a barra de resposta acima do campo, as prévias de encaminhar e as linhas de comunidade mostram texto simples, sem os marcadores, e cada spoiler vira a palavra "spoiler". Uma prévia de 140 pontos de código ou mais pode ter sido cortada pelo nó, então nada depois do primeiro `||` aparece nela: a linha mostra o texto até ali e a palavra "spoiler" (mesmo quando esse `||` é código, como `a || b`). A citação e a barra de resposta recebem o texto já limpo para a tela, em que um caractere de controle invisível vira U+FFFD; um U+FFFD conta como esse caractere, então elas cobrem o mesmo trecho que a bolha. Uma mensagem com o botão Abrir convite mostra todas as linhas dos blocos de código, cada spoiler como a palavra "spoiler", e não mostra o cartão de um link dentro de um spoiler; um link de convite ou de anúncio só dentro de um spoiler não dá Abrir convite, Ver anúncio nem Fazer oferta. Uma mensagem desenha no máximo 8 blocos de código (`CODE_MAX`); do nono em diante o resto aparece como texto simples, coberto a partir do primeiro `||`, também nas prévias.
+- Limites conhecidos: a formatação vale só nas conversas (não em publicações, legendas nem anúncios); o VoiceOver do iOS lê a cobertura do spoiler como "spoiler"; quem envia ainda monta o cartão de prévia de um link dentro de um spoiler (quem recebe o esconde; o lado de quem envia é corrigido junto com as reações: nos grupos na seção 195, nas conversas diretas na seção 196, corrigido lá); um build mais antigo mostra os marcadores crus; o cartão de prévia de um link também some quando o endereço só aparece dentro de um bloco de código de uma mensagem com spoiler (erra para o lado de esconder).
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `(cd apps/app && node ../../scripts/run-tests.js test/richText.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/formatInsert.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/richTextView.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/chatFormat.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js)`
+
+Os testes cobrem o leitor (bordas de palavra, links e menções intactos, entrada hostil), as inserções do botão de formatação, a leitura do bloco e do spoiler no balão e as prévias em texto simples. Não cobrem como isso parece na tela, o toque, a rolagem nem o leitor de tela: isso é o que a verificação manual confere.
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é um nó hospedado com dados de exemplo e dispensa conta. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e, que não liga neste Mac; usa-se o iPhone 17 Pro), Chrome em 390 e em 1280 px. Capturas ficam fora do git. Se a Vitrine não tiver mensagem com formatação, digite as mensagens abaixo numa conversa e num grupo.
+
+1. Escreva `*negrito* _itálico_ ~riscado~ `código`` numa conversa. Esperado: cada trecho aparece com o seu estilo, sem os marcadores, na bolha própria e na da outra pessoa, e igual num grupo.
+2. Escreva `2*3*4`, `snake_case_nome` e `*aberto sem fechar`. Esperado: tudo literal, nenhum estilo.
+3. Escreva um bloco de código com uma linguagem e mais de 12 linhas, e uma linha comprida dentro dele. Esperado: caixa com o nome da linguagem, 12 linhas e "ver tudo"; "ver tudo" mostra o resto; a linha comprida rola na horizontal sem sair da bolha; "Copiar código" muda para "Copiado" por 2 s; pressionar e segurar no bloco ainda abre as ações da mensagem.
+4. Escreva `||segredo||`. Esperado: o texto fica coberto, sem nada do segredo visível antes do toque; um toque mostra todos os spoilers daquela mensagem; pressionar e segurar ainda abre as ações; no escuro o contraste da cobertura e do código continua legível; o leitor de tela diz "spoiler, toque para mostrar".
+5. Escreva `https://example.com ||segredo||` e depois `||https://example.com||`. Esperado: a primeira mostra o cartão de prévia (quando o nó de quem envia o montou); a segunda não mostra cartão e o link só funciona depois de mostrar o spoiler.
+6. Escreva um link com sublinhado e um @nome, como `https://example.com/a_b_c` e `@maria_silva`. Esperado: o link abre o endereço inteiro e o @nome abre o perfil, sem itálico no meio.
+7. Abra o "Aa" no campo de escrever. Esperado: a fileira Negrito, Itálico, Riscado, Código, Bloco de código e Spoiler e a dica; com uma palavra selecionada, cada botão a envolve; tocar de novo tira os marcadores; Bloco de código envolve a seleção numa cerca.
+8. Cole um texto com TAB. Esperado: o texto fica sem TAB (e sem CR) e envia.
+9. Volte à caixa de Conversas e Mensagens, à lista de grupos e responda a uma mensagem com spoiler. Esperado: a prévia da linha, a citação no balão e a barra de resposta mostram texto simples com a palavra "spoiler" no lugar do segredo, sem marcadores. Com uma mensagem de mais de 140 caracteres e um `||` no começo, a linha da caixa para no primeiro `||` e mostra "spoiler".
+10. Texto grande, escuro, leitor de tela e Reduzir movimento. Esperado: nada cortado; contraste legível no código e no spoiler; os botões do "Aa", "Copiar código", "ver tudo" e a cobertura do spoiler têm rótulos.
+11. Um build mais antigo. Esperado: a mesma mensagem aparece com os marcadores crus (`*negrito*`, `||segredo||`); nada quebra.
+
+Situação, em 2026-11-12 (Vitrine, Metro na porta 8090, com mensagens de exemplo digitadas à mão numa cópia temporária das fixtures, já restaurada; segunda passagem, depois das correções). Cada caixa só é marcada quando o alvo foi percorrido por inteiro; nenhuma foi. Capturas em `v6r-shots/` (fora do git).
+
+- [ ] Android, AVD `varanda-api36` (parcial, `v6r-shots/a01.png` a `a28.png`): passou a lista de Conversas (a última mensagem de um grupo com bloco de código aparece como texto simples, sem cerca: "const longa = ..."; `Bom dia *pessoal*` aparece como "Bom dia pess..." sem asteriscos, `a03.png`); no grupo "Geral" a bolha da citação com bloco de 16 linhas cabe no conteúdo, sem sobreposição e sem vão, e "ver tudo" mostra as 16 linhas (`a04.png`, `a05.png`); a linha de 200 caracteres rola na horizontal dentro da caixa (`a07c.png`); passo 2 (`2*3*4`, `snake_case_nome` e `*aberto sem fechar` ficam literais, `a14.png`); passo 7 (Aa com a palavra "mundo" selecionada: Negrito envolve, tocar de novo tira os marcadores, `a11c.png`, `a12c.png`); mensagem direta com formatação (negrito, spoiler coberto, código, `a26.png`); toque longo no bloco de código e no spoiler abre as ações (`a15.png`, `a17s.png`); modo escuro na conversa e na lista (`a27-28.png`). Não percorrido: passo 8 (colar um TAB: o `adb` não cola, e digitar TAB só move o foco), o spoiler de 150 caracteres na linha do grupo "Horta Comunitária" (a linha corta antes do spoiler, então não prova a cobertura), texto grande, leitor de tela e Reduzir movimento.
+- [ ] iOS, iPhone 17 Pro (o iPhone 16e não liga aqui; parcial, `v6r-shots/i02s.png`, `i03s.png`): passaram o passo 1 (estilos no grupo "Geral"), o passo 3 (bloco com 12 linhas, "ver tudo", "Copiar código", linha comprida cortada dentro da caixa, bolha da citação com o bloco sem sobreposição), o passo 9 (a linha do grupo com bloco de código mostra texto simples) e o spoiler coberto. Não percorrido: o rótulo do VoiceOver no spoiler (o VoiceOver não foi ligado), o toque que revela o spoiler, os passos 2, 5 a 8 e 10.
+- [ ] Chrome, 390 px (painel de navegador embutido, não o Chrome em si, que já estava no tema escuro; parcial): as prévias da lista são texto simples ("Bom dia pessoal", "...neste grupo: spoiler", código sem cerca); a bolha da linha comprida mede 293 px, fica dentro da coluna, a página não rola na horizontal (`scrollWidth` 390) e "Copiar código" fica visível. Não percorrido: passos 7 e 8 (sem seleção nem colagem no painel) e os demais.
+- [ ] Chrome, 1280 px (parcial): a bolha da linha comprida mede 491 px, "Copiar código" fica dentro da tela e as prévias da lista seguem em texto simples. Não percorrido: o resto dos passos.
+- Defeitos da primeira passagem: (1) corrigido: a lista de Conversas e a de grupos mostravam a cerca crua na última linha de um grupo com bloco de código; agora `plainPreview` (`apps/app/src/chatPreview.js`) só trata a prévia como possivelmente cortada a partir de 140 pontos de código, e conferiu-se no Android, no iOS e na web que a linha sai em texto simples. (2) corrigido: no Android a bolha com bloco de código e citação tomava a altura da célula da lista e cobria a mensagem anterior; a caixa do código tem `flexGrow: 0` (`apps/app/src/ui/RichText.js`), e conferiu-se no Android (`a04.png`, `a05.png`) que a bolha cabe no conteúdo. (3) achado e corrigido: na web uma linha de 200 caracteres num bloco alargava a bolha além da tela em 390 px; o invólucro entre a coluna e a bolha agora tem `maxWidth: '100%'` (`apps/app/src/ui/Bubble.js`, `styles.stack`), e conferiu-se que a bolha mede 293 px em 390 e 491 px em 1280. Defeito novo nesta passagem: nenhum.
+
+## 195. Reações em grupos (PR feat/group-reactions)
+
+Sétimo PR da revisão visual do app. Nos grupos, públicos e privados, cada pessoa reage a uma mensagem com um emoji. As reações aparecem como fichas embaixo do balão. O registro novo é `group-react` (`docs/protocol.md`, "Reactions"); o RPC ganha `group.react` e `group.reactors` (`docs/rpc.md` 5.117 e 5.118) e `group.read` devolve `reactions` em cada item (5.40). Termos e Privacidade 40.
+
+Regras que os passos conferem:
+
+- Uma reação por conta em cada mensagem; o texto vazio remove. No máximo 12 emojis diferentes por mensagem (`GROUP_REACTIONS_MAX`): ficam os 12 escolhidos por mais pessoas, e o empate se decide pela ordem do emoji, nunca pela hora da reação. Uma reação cujo emoji fica de fora não aparece em nenhuma ficha nem em "Quem reagiu".
+- As reações são dobradas à parte e nunca mudam a ordem nem o resultado de nenhum outro registro: um leitor antigo calcula os mesmos membros, banimentos, ocultações e mensagens.
+- Grupo privado: o emoji, a mensagem a que a reação se refere e o `seen` vão cifrados; a conta de quem escreveu, a hora e o tamanho do registro continuam visíveis, e o tamanho pode indicar que é uma reação e qual emoji ela leva. A reação aberta não entra na conta de "mensagens cifradas".
+- Uma reação de quem saiu do grupo ou foi banido deixa de contar. Uma mensagem oculta não recebe reação.
+- `group.read` devolve `reactions: [{ emoji, count, mine }]`; `GROUP_LIMIT_DEFAULT` e `GROUP_LIMIT_MAX` passam de 29 para 26 para a página mais pesada caber em `MAX_MESSAGE`.
+- App (`apps/app/src/screens/Grupo.js`, `ui/Reactions.js`, `ui/ReactionPicker.js`, `reactions.js`): fichas embaixo do balão; reações rápidas no alto das ações da mensagem; o "+" abre o seletor; toque longo numa ficha ou "Ver quem reagiu" abre "Quem reagiu" (nomes resolvidos, "e mais N"). As fichas ficam visíveis e desligadas offline, com o grupo trancado, com a chave pendente ou agindo como Página. Uma reação que falha tira a ficha, mostra a recusa e lê de novo; nunca reenvia.
+- As citações (grupos e mensagens diretas) são uma linha de texto simples, cortada em 90 pontos de código (`quoteText` em `apps/app/src/chatPreview.js`). Um link dentro de um spoiler não monta cartão de prévia no envio em grupo.
+- Texto de quem reage nunca vai cru para a tela: os nomes passam por `displayText`.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `node packages/core/test/group.test.js`
+- `node packages/core/test/group-private.test.js`
+- `node packages/core/test/group-member.test.js`
+- `node packages/core/test/session-groups.test.js`
+- `node packages/rpc/test/reaction.test.js`
+- `node packages/rpc/test/methods.test.js`
+- `node packages/rpc/test/sizes.test.js`
+- `node packages/web-member/test/group-ops.test.js`
+- `node packages/web-member/test/session-groups.test.js`
+- `node packages/core/test/terms.test.js`
+- `(cd apps/app && node ../../scripts/run-tests.js test/reactions.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/groupReactions.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/groupScreen.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/chatFormat.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/legal.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js)`
+
+Leitor antigo, pelos testes de propriedade: `an old reader skips group-react and still reads later posts` e `reactions take no part in the fold of any other record (generated logs)` em `packages/core/test/group.test.js`, e `sealed reactions take no part in the fold of any other record (generated logs)` em `packages/core/test/group-private.test.js`. Eles não cobrem como um app antigo desenha o grupo: isso é o passo 14.
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é um nó hospedado com dados de exemplo e dispensa conta; "Nosso Bairro" > "Geral" já traz fichas de exemplo. Ordem: Android (AVD `varanda-api36`), iOS, Chrome em 390 e em 1280 px, claro e escuro, texto grande e leitor de tela; a rodada para quando duas seguidas não mudam nada. Para os passos com dois membros reais (6 a 14), use dois nós web, um em cada navegador. Capturas ficam fora do git.
+
+1. Abra "Nosso Bairro" > "Geral". Esperado: algumas mensagens têm fichas embaixo do balão (emoji e contagem), a ficha de uma reação sua vem marcada.
+2. Toque e segure uma mensagem sem reação. Esperado: o alto das ações traz as reações rápidas e um "+"; tocar numa reação rápida fecha a folha e a ficha aparece embaixo do balão com contagem 1 e marcada.
+3. Troque: abra as ações da mesma mensagem e escolha outro emoji (ou toque no "+" e escolha um no seletor). Esperado: a ficha do primeiro emoji some (ou perde a sua contagem) e a do novo aparece marcada; continua uma reação sua por mensagem.
+4. Tire: toque na sua ficha. Esperado: a ficha some (ou perde a sua contagem) e deixa de vir marcada.
+5. "Quem reagiu": toque e segure uma ficha, e depois abra "Ver quem reagiu" nas ações. Esperado: uma folha com o emoji e os nomes resolvidos (o toque longo numa ficha mostra só o bloco daquele emoji; "Ver quem reagiu" mostra um bloco por emoji), com todos os nomes que vieram (a folha rola) e "e mais N" só quando a contagem é maior do que a lista que veio (no máximo 324 nomes por emoji); um nome com caractere de controle aparece limpo.
+6. Dois membros: o membro A reage, o B vê a ficha depois da próxima leitura, e B reage com o mesmo emoji. Esperado: contagem 2, marcada só em B; "Quem reagiu" lista os dois.
+7. Doze emojis: com 12 emojis diferentes na mesma mensagem, cada um de uma pessoa, uma 13ª pessoa escolhe um 13º emoji. Esperado: a ficha otimista do 13º aparece e, na leitura seguinte, fica só se o emoji vier antes de algum dos 12 na ordem dos emojis (e então sai o último deles); quando uma 14ª pessoa escolhe o mesmo 13º emoji, ele aparece com contagem 2 e sai um dos emojis de uma pessoa só. Nenhuma reação é reenviada.
+8. Grupo privado: repita 2 a 6 num grupo privado. Esperado: as fichas e os nomes aparecem para os membros; nos núcleos (e para um seguidor sem a chave) só existem registros cifrados, com a conta de quem escreveu, a hora e o tamanho visíveis, e o emoji, a mensagem e o `seen` ilegíveis.
+9. Membro removido: o membro A reage e depois é removido do grupo (ou sai). Esperado: a reação de A deixa de contar para os outros, a contagem cai e A some de "Quem reagiu".
+10. Mensagem oculta: um admin oculta uma mensagem que tem fichas. Esperado: a mensagem mostra só o rótulo de oculta, sem fichas, e as ações não oferecem reações nem "Ver quem reagiu".
+11. Offline e chave pendente: com o nó offline, e depois num grupo privado com a chave de uma época nova ainda pendente. Esperado: as fichas continuam visíveis e desligadas (sem resposta ao toque), "Ver quem reagiu" fica desligado e a fileira de reações rápidas some das ações, sem erro; a leitura volta ao normal quando o nó volta.
+12. Página: aja como uma Página num grupo. Esperado: as fichas ficam desligadas e as ações não trazem a fileira de reações rápidas nem o "+" (a Página não reage).
+13. Termos 40: com uma conta que aceitou o 36, abra o app. Esperado: o aviso de aceite aparece antes de qualquer tela; o texto de "Reações" diz que a reação leva o emoji, a mensagem, a hora e a conta, que num grupo privado o emoji e a mensagem vão cifrados e que as mensagens diretas ainda não têm reações; recusar mantém o app trancado como nas versões anteriores.
+14. Build antigo como segundo membro: com um app de antes deste PR (PR6) na outra conta, o membro novo reage em um grupo público e em um privado. Esperado: no público, o build antigo não mostra a reação e continua lendo as mensagens seguintes; no privado, o build antigo mostra uma "mensagem cifrada" a mais por reação, e as mensagens seguintes seguem normais.
+15. Citações: responda a uma mensagem de várias linhas (um grupo e uma conversa direta). Esperado: a citação no balão e a barra de resposta mostram uma só linha de texto simples, cortada em 90 pontos de código, sem marcadores de formatação.
+16. Link em spoiler: envie `||https://example.com||` num grupo. Esperado: nenhum cartão de prévia é montado no envio.
+17. Fichas em balão comprido, texto grande, escuro, leitor de tela e Reduzir movimento. Esperado: as fichas quebram de linha sob o balão sem cortar; o alvo de toque é de 44 pt; cada ficha diz o emoji, a contagem e se é a sua ("..., 2 reações, sua reação"); a folha "Quem reagiu" rola; o contraste da ficha marcada é legível no escuro.
+
+Rollout, nesta ordem: primeiro os semeadores (precisam guardar e servir o registro `group-react` e o novo limite de página), depois o pacote web (o nó do navegador escreve e lê reações) e por último o app. Um app mais novo que o semeador funciona, mas as reações não aparecem para os outros até os semeadores serem atualizados.
+
+Situação, em 2026-11-12 (Vitrine, Metro na porta 8090, sem alterar as fixtures; o método de `docs/design-review.md` não chegou às duas rodadas sem mudança em todos os alvos). Cada caixa só é marcada quando o alvo foi percorrido por inteiro; nenhuma foi. Capturas do Android em `v7-shots/a01.png` a `a18-large-who.png` (fora do git); as do iOS e do painel de navegador ficam só nos resultados da sessão.
+
+- [ ] Android, AVD `varanda-api36` (parcial): passaram, em "Nosso Bairro" > "Geral", as fichas de exemplo (`a03.png`), a fileira de reações rápidas e o "+" no alto das ações (`a04.png`), reagir (😂 na mensagem de Cecília, ficha marcada, `a05.png`), trocar (👍 no lugar, `a08.png`), tirar (toque na ficha própria, `a09.png`), "Quem reagiu" por toque longo numa ficha, com os nomes (`a10.png`), "Ver quem reagiu" nas ações (aparece só quando já há reação, `a07.png`), o seletor do "+" no escuro com busca e categorias (`a14-dark-picker.png`), o escuro nas ações (`a13-dark-sheet.png`) e texto grande 1.3 no escuro: as fichas ficam inteiras, o nome longo é cortado com reticências no balão e a folha mostra os nomes (`a17-large.png`, `a18-large-who.png`). Não percorrido: grupo privado, membro removido, mensagem oculta, offline e chave pendente, Página, aviso dos Termos 40 (a Vitrine não tem esses estados), "e mais N", fichas quebrando de linha sob um balão longo, leitor de tela, Reduzir movimento, seletor no claro, escolha de um emoji do seletor (a escolha feita no escuro foi seguida de uma reinicialização do app pela mudança do texto grande, então a ficha não foi vista).
+- [ ] iOS, iPhone 17 Pro (o iPhone 16e não liga neste Mac; parcial): passaram reagir (😂), trocar (👍 no lugar) e "Quem reagiu" por toque longo na ficha de coração, com a lista de nomes, no claro. Na segunda rodada, tirar passou: o toque na ficha própria de ❤️ baixou a contagem de 2 para 1 e a ficha deixou de vir marcada (a tela mostra a contagem antiga por uma fração de segundo e atualiza na leitura seguinte). No escuro passaram as fichas legíveis e a folha de ações com a fileira de reações rápidas e o "+". Não percorrido: "Quem reagiu" no escuro (o toque longo na ficha, logo depois de fechar a folha de ações, não abriu a folha), texto grande, VoiceOver (não foi ligado) e o resto dos passos. Capturas só nos resultados da sessão (a ferramenta do simulador não grava em arquivo).
+- [ ] Chrome, 390 px (painel de navegador embutido; parcial): no escuro (rodada anterior) passaram reagir, trocar e tirar, confirmados pelos rótulos de leitor de tela ("coração vermelho, 2 reações, sua reação"); a ficha tem 44 px de altura, a página não rola na horizontal e o foco do teclado mostra um anel na ficha. No claro (segunda rodada): as ações da mensagem abrem com toque longo do mouse (pressionar 700 ms no balão; o clique de botão direito não abre nada e o clique simples não abre as ações), com reações rápidas, "+" e, quando há reação, "Ver quem reagiu"; passaram reagir com uma reação rápida (😂), o "+" e a escolha de um emoji do seletor (a ficha passou a 😁 e a 😂 saiu: continua uma reação por mensagem), "Quem reagiu" por toque longo na ficha (❤️: "Lia Oliveira" e "João Nascimento") e "Ver quem reagiu" nas ações (😁: "Lia Oliveira"), sem rolagem horizontal (`scrollWidth` 390). A folha "Quem reagiu" abre em tela cheia, com a lista curta no alto e o resto vazio. Não percorrido: fichas quebrando de linha sob um balão longo (a Vitrine não tem), o seletor aberto visto em captura (só se viu a escolha), o claro com a ficha de dois membros além do exemplo.
+- [ ] Chrome, 1280 px (parcial): passaram reagir (👍 numa mensagem de Cecília, a ficha 😁 foi trocada por 👍 marcada) e "Quem reagiu" por toque longo na ficha (👍: "Lia Oliveira"), esta como folha centrada de 400 px de largura. Não percorrido: "Ver quem reagiu" nas ações a 1280 px (a tentativa fechou a folha em vez de abri-la), o "+" e o seletor, o escuro.
+- Leitor antigo: `node packages/core/test/group.test.js` deu `# tests = 129/129 pass`, `# asserts = 827/827 pass`, `# ok`; `node packages/core/test/group-private.test.js` deu `# tests = 112/112 pass`, `# asserts = 745/745 pass`, `# ok`. Além disso, o teste `an old reader skips group-react and still reads later posts` rodou também contra o código real do PR6 (`git show 273d6aad:packages/core/lib/group.js` e módulos vizinhos, fora do repositório): o `validateGroupRecord` antigo devolve `malformed` para o registro novo, e as mensagens seguintes, a ordem e os resultados são os mesmos. Os testes de propriedade com logs gerados usam o `group.js` atual com o tipo retirado do `RECORD_KEYS`, e não o código do PR6. Um build antigo de verdade do app não foi percorrido (passo 14).
+- Defeitos: nenhum de código achado. Observações: (1) iOS: o toque longo numa mensagem de texto marca o texto (realce cinza) além de abrir as ações; não foi comparado com o PR anterior. (2) "Quem reagiu" abre em tela quase cheia e a lista de poucos nomes deixa a folha quase vazia (`a10.png`). (3) "Quem reagiu" por toque longo mostra o nome da própria conta ("Lia Oliveira" na Vitrine), não "Você". (4) O texto dos Termos 40 confere com o que o app faz nos trechos percorridos (a reação leva emoji, mensagem, hora e conta; as mensagens diretas não têm reações; os nomes são vistos por quem lê o grupo); a parte do grupo privado e o aviso de aceite não foram percorridos.
+- Limites conhecidos: uma recarga de versão, quando alguém publica ou reage, traz a lista de volta para a página mais nova; as mensagens diretas ainda não têm reações; um 13º emoji otimista só fica na leitura seguinte se entrar entre os 12 (os mais escolhidos, com empate pela ordem do emoji).
+
+## 196. Reações em conversas (PR feat/dm-reactions)
+
+Oitavo PR da revisão visual do app. Nas conversas diretas, cada pessoa reage a uma mensagem com um emoji, como nos grupos. A reação viaja como uma mensagem: é o registro interno v4 `react` (`docs/protocol.md`, "Inner v4: a reaction"), selado como as mensagens. O RPC ganha `dm.react` (`docs/rpc.md` 5.119) e `dm.thread` devolve `reactions: [{ emoji, mine }]` em cada mensagem (5.78); `DM_THREAD_LIMIT_MAX` passa de 42 para 41. Termos e Privacidade 41.
+
+Regras que os passos conferem:
+
+- Uma reação por pessoa em cada mensagem. Vale a operação de maior `rev`, e o empate vai para o `id` maior da operação; o texto vazio remove. O nó escolhe o `rev`; o cliente não manda.
+- Uma reação nunca muda o não lido, a prévia da lista de conversas, a ordem, o `dm.seen` nem o teto de mensagens por pessoa. Um app antigo descarta o quadro v4: não mostra nada e não conta nada.
+- Não há "Quem reagiu" nas conversas diretas: são duas pessoas, e a ficha já diz de quem é (a sua vem marcada).
+- Cada reação, troca ou remoção gasta dois selos do limite diário de 200 (`DM_STAMPS_PER_DAY`), como uma mensagem. Sem selo, o nó recusa com "o limite de envio de hoje acabou" e nada é enviado.
+- Toques rápidos: espera de 600 ms e só a última escolha é enviada; voltar à escolha inicial não envia nada nem gasta selo.
+- Uma recusa desfaz a ficha e mostra o texto do nó. Uma resposta sem confirmação ("não deu para confirmar o envio") mantém a ficha, com a nota "Não deu para confirmar a reação."; o app nunca reenvia sozinho.
+- Fichas escondidas: agindo como Página e numa conversa com uma Página (o nó confirmou, pela leitura da outra conta, que ela é Página). Fichas visíveis e controles desligados: enquanto essa leitura não respondeu, offline, com a identidade trancada, com a pessoa bloqueada e num pedido de mensagem (Pedidos). Uma mensagem apagada não tem fichas.
+- A reação vale só para a mensagem exata em que foi feita: leva o resumo SHA-256 da mensagem (`target.digest`), e outra mensagem guardada com o mesmo remetente e o mesmo id não a mostra. Uma mensagem guardada antes deste build não tem resumo e não aceita reação: `dm.thread` a marca com `reactable: false`, o app esconde nela fichas, reações rápidas e "+", e o nó recusa `dm.react` com "esta mensagem não aceita reações" sem gastar selo (a tela desfaz a ficha e mostra o texto, sem reenviar). Uma reação feita num aparelho que guardou a mensagem com resumo gasta dois selos e aparece ali, mas não aparece num aparelho (da outra pessoa ou seu) que guardou a mesma mensagem antes deste build.
+- Um link dentro de um spoiler também não monta cartão de prévia no envio de uma conversa direta (fecha o limite da seção 194).
+- O texto do emoji vem do par: passa por `displayText` antes de ir para a tela.
+- App: `apps/app/src/screens/Mensagem.js`, `apps/app/src/dm-screen.js` (`dmReactionGate`, `reactDebounce`, `dmReactions`), `ui/Reactions.js`, `ui/ReactionPicker.js`, `reactions.js`.
+
+Custo de uma reação (Pergunta 11 do plano). Pelos testes de `packages/web-member/test/dm.test.js` (`dm.react: two stamps and two puts as one dm.send...` e `dm.react: the self copy fails after the peer copy...`):
+
+- Uma reação, uma troca de emoji e uma remoção custam o mesmo: dois envelopes selados (um para a outra pessoa e uma cópia para si, para os outros aparelhos da mesma passkey) e dois selos do limite diário de 200. Repetir a mesma escolha enquanto nada está pendente não envia nem gasta nada.
+- Cada envelope ocupa uma vaga do conjunto comum do semeador (`DM_POOL_MAX` 20000, `packages/core/lib/dm.js:33`) por até sete dias (`DM_RETENTION_MS`). Para o semeador uma reação é igual a uma mensagem.
+- Qualquer envelope guardado pode acionar o aviso anônimo de mensagem nova do semeador: um aviso "Pode haver uma mensagem nova na Varanda" para todas as inscrições de push, no máximo uma vez a cada 15 minutos por processo (`apps/cli/lib/push-relay.js` `sendDmWake`, `apps/cli/lib/account/push-routes.js`, `packages/core/lib/dm-wake.js`). Uma reação acorda o outro aparelho como uma mensagem acordaria; ela não envia aviso nem push próprio.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `node packages/core/test/dm.test.js`
+- `node packages/core/test/dm-fold.test.js`
+- `node packages/core/test/dm-session-refuse.test.js`
+- `node packages/core/test/terms.test.js`
+- `node packages/rpc/test/dm-budget.test.js`
+- `node packages/rpc/test/methods.test.js`
+- `node packages/rpc/test/sizes.test.js`
+- `node packages/web-member/test/dm-store.test.js`
+- `node packages/web-member/test/dm.test.js`
+- `node packages/web-member/test/dm-e2e.test.js`
+- `(cd apps/app && node ../../scripts/run-tests.js test/dmReactions.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/legal.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/vitrine.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js)`
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é um nó hospedado com dados de exemplo e dispensa conta; a conversa de exemplo já traz reações das duas pessoas (`apps/app/src/vitrine/fixtures.js`). Ordem: Android (AVD `varanda-api36`), iOS, Chrome em 390 e em 1280 px, claro e escuro, texto grande e leitor de tela; a rodada para quando duas seguidas não mudam nada. Os passos com duas contas reais (8 e 12) pedem dois nós web, um em cada navegador. Capturas ficam fora do git.
+
+1. Abra a conversa de exemplo. Esperado: algumas mensagens têm fichas embaixo do balão (emoji e contagem, 1 ou 2), a ficha de uma reação sua vem marcada e a da outra pessoa não.
+2. Reaja: toque e segure uma mensagem sem reação sua. Esperado: o alto das ações traz as reações rápidas e um "+"; tocar numa reação rápida fecha a folha e a ficha aparece marcada.
+3. Troque: escolha outro emoji nas ações (ou no "+" e no seletor). Esperado: a ficha do primeiro emoji sai e a do novo aparece marcada; continua uma reação sua por mensagem.
+4. Tire: toque na sua ficha. Esperado: a ficha some.
+5. Toques rápidos: toque na reação rápida e, em menos de 600 ms, escolha outra. Esperado: sai um só envio, com a última escolha. Reaja e tire em menos de 600 ms: nenhum envio.
+6. Selos: com o limite diário quase no fim (um nó de teste), reaja. Esperado: a recusa "o limite de envio de hoje acabou", a ficha volta ao que era e nada é enviado.
+7. Não lido e prévia: reaja e troque numa mensagem da outra pessoa e volte à lista de conversas. Esperado: a prévia, a ordem e a bolinha de não lido não mudam. Do outro lado, a reação recebida também não acende o não lido nem muda a prévia.
+8. Duas contas: a conta A reage, a B vê a ficha na próxima leitura, e B reage na mesma mensagem com outro emoji. Esperado: cada uma vê as duas fichas, a sua marcada; a reação não vira mensagem nem aviso no app.
+9. Segundo aparelho da mesma pessoa: entre com a mesma passkey em outro aparelho (ou navegador) e reaja no primeiro. Esperado: o segundo mostra a mesma reação como sua (marcada) depois da próxima leitura.
+10. Página: abra a conversa com uma Página e depois aja como uma Página. Esperado: nenhuma ficha, nenhuma fileira de reações rápidas e nenhum "+" nas ações.
+11. Offline e pedido de mensagem: com o nó offline, e depois numa conversa em Pedidos. Esperado: as fichas continuam visíveis e desligadas (sem resposta ao toque), as ações não trazem a fileira de reações rápidas, sem erro; tudo volta ao normal com o nó de volta.
+12. Sem confirmação: com um nó de teste que perde a confirmação do semeador, reaja. Esperado: a ficha fica, aparece "Não deu para confirmar a reação." e nada é reenviado sozinho.
+13. Termos 41: com uma conta que aceitou o 37, abra o app. Esperado: o aviso de aceite aparece antes de qualquer tela; o texto de "Reações" diz que, nas conversas diretas, a reação leva o emoji, a mensagem, a hora e a conta, vai cifrada de ponta a ponta num envelope lacrado do mesmo tamanho que os semeadores guardam por até sete dias, e gasta selos como uma mensagem; recusar mantém o app trancado como nas versões anteriores.
+14. Build antigo como outra pessoa: com um app de antes deste PR (PR7) na outra conta, o build novo reage numa conversa direta. Esperado: o build antigo não mostra a reação, não conta nada (não lido, prévia e ordem iguais) e continua lendo as mensagens seguintes.
+15. Fichas em balão comprido, texto grande, escuro, leitor de tela e Reduzir movimento. Esperado: as fichas quebram de linha sob o balão sem cortar; o alvo de toque é de 44 pt; cada ficha diz o emoji e se é a sua; o contraste da ficha marcada é legível no escuro.
+16. Link em spoiler: envie `||https://example.com||` numa conversa direta. Esperado: nenhum cartão de prévia é montado no envio.
+17. Mensagem antiga: na Vitrine, a primeira mensagem da conversa com "Cecília Ramos" vem com `reactable: false`. Esperado: segurar a mensagem não traz a fileira de reações rápidas nem o "+", e ela não tem fichas; as outras mensagens reagem normalmente.
+
+Rollout, nesta ordem: os semeadores não precisam de mudança (os envelopes são opacos e do mesmo tamanho), depois o pacote web (o nó do navegador escreve e lê reações) e por último o app. Um app mais novo que o pacote web não mostra reações nas conversas; um app antigo ignora as reações que chegam.
+
+Situação, em 2026-11-12 (Vitrine, Metro na porta 8090, sem alterar as fixtures). Cada caixa só é marcada quando o alvo foi percorrido por inteiro; nenhuma foi. Capturas em `v8-shots/` fora do git.
+
+- [ ] Android, AVD `varanda-api36`, conversa com "João Nascimento" (parcial, claro e escuro). Passaram em claro e em escuro: reação rápida 😂 (ficha "😂 1" marcada, capturas `a-light-4-react`, `a-dark-2-react`), troca por 👍 (`a-light-5-replace`, `a-dark-3-replace`), o "+" abre o seletor "Reações" e escolher 😍 funciona (`a-light-6-picker`, `a-light-7-picked`, `a-dark-4-picker`), tirar tocando na ficha própria (`a-light-8-removed`, `a-dark-5-removed`). Lista de Conversas depois de reagir e trocar: prévia "Aceite", ordem e bolinhas de não lido iguais às de antes (`a-light-1-conversas` contra `a-light-10-list-after`). Pedidos de mensagem: a conversa de um pedido abre e a folha de ações não traz a fileira de reações rápidas nem o "+" (`a-light-12-request`, `a-light-13-request-sheet`); as fixtures não trazem reações em pedidos, então as fichas visíveis com controles desligados não foram vistas. Texto grande (font_scale 1.3, escuro): a folha com as reações rápidas e a ficha ❤️ 1 ao lado de "Ver anúncio" ficam legíveis, sem corte (`a-dark-9-font13-sheet`, `a-dark-10-font13-chip`); font_scale voltou a 1.0. Não percorrido: fichas quebrando sob um balão comprido (a ficha ficou ao lado do botão "Ver anúncio", sem balão longo com várias fichas), texto grande em claro, Página (as fixtures de `conversations` só têm pares de pessoas, nenhuma conversa com uma Página, então esta tela não se alcança na Vitrine), a ficha de exemplo ❤️ 2 da primeira mensagem (fora da tela inicial da conversa, não rolada).
+- [ ] iOS (UDID 8802DF5C-6A82-406C-8D4D-29618AEEA2BC), conversa com "João Nascimento", rodada 3, parcial. Claro, passaram: a folha de ações com as reações rápidas e o "+" (`i3-2-sheet`, `i-light-1-sheet`), reação rápida 😂 (ficha "😂 1" marcada, `i3-3-react`), troca por 👍 (a 😂 saiu, o 👍 vem destacado na folha, `i3-4-sheet2`, `i3-5-replace`), o "+" abre o seletor "Reações" e escolher 😍 funciona (`i3-6-picker`, `i3-7-picked`), tirar tocando na própria ficha (`i3-8-removed`). Escuro, passaram: reagir com 👍 (`i3-10-dark-sheet`, `i3-11-dark-react`, ficha marcada legível) e tirar pela ficha (`i3-12-dark-removed`); `i3-9-dark-thread` é a conversa antes. Aparência voltou a claro. Não percorrido no iOS: o seletor no escuro, texto grande, VoiceOver, balão comprido com várias fichas, Pedidos e Página.
+- [ ] Chrome, 390 px, claro (painel de navegador embutido; rodada 1, parcial), conversa com "João Nascimento" na Vitrine: passaram a ficha de exemplo (❤️ 2, com o rótulo de leitor de tela "coração vermelho, 2 reações, sua reação, e da outra pessoa"), as ações da mensagem com as reações rápidas e o "+" (aberta pelo botão "ações da mensagem" que aparece ao passar o mouse; o arrasto curto do mouse só o mostra), reagir com 😂 (ficha "😂 1" marcada), trocar por 👍 (a 😂 saiu, rótulo "positivo, 1 reação, sua reação") e tirar tocando na ficha própria (a ficha sumiu). Rodada 3 (1280x900 claro, painel embutido, sem captura salva): a folha de ações abriu pelo botão "ações da mensagem", reagir com 👍 deu a ficha "positivo, 1 reação, sua reação", e tocar na ficha própria a removeu. Os cliques por coordenada no painel caíram fora do alvo (o quadro de captura é 800x562 e o clique usa a janela de 1280x900), então os passos finais foram feitos por clique em referência e por `click()` no DOM; por isso a troca de emoji no desktop, o seletor do "+" e a reação rápida 😂 não foram conferidos de forma limpa. Não percorrido: 390x844 escuro, foco do teclado numa ficha (Tab, Enter e Espaço).
+- Observação da Vitrine: a reação enviada pela Vitrine é guardada só na memória do nó de exemplo; não houve teste de selos nem de recusa. O leitor de tela (VoiceOver e TalkBack) não foi ligado.
+- Dois nós web trocando reações: não percorrido neste passe. A convergência (maior `rev`, empate pelo `id`, uma reação por pessoa, a cópia para si, uma Página que descarta a reação) é coberta pelos testes de dois nós em `packages/web-member/test/dm.test.js`, no semeador local em loopback. Uma conferência com dois aparelhos reais está pendente (passos 8, 9 e 14).
+- Termos 41: o texto de `apps/app/src/legal.js` descreve o que o código faz (a reação leva emoji, mensagem, hora e conta; é cifrada de ponta a ponta como as mensagens; os semeadores guardam o envelope por até sete dias; gasta selos como uma mensagem). O aviso de aceite na primeira abertura não foi percorrido (a Vitrine não tem esse estado).
+- Defeitos: nenhum de código achado nos trechos percorridos. Toque na reação rápida enquanto a folha ainda anima: não reproduzido no Android. Com `adb input swipe` de 700 ms seguido de `input tap` na linha das reações (cerca de 100 ms depois do início da folha), a reação foi aplicada ao alvo certo (😂 1, campo de mensagem vazio, `a-light-9-tapthrough`); o atraso do adb pode ser maior que a animação, então isto não exclui uma janela mais curta. No iOS não foi tentado. A observação da rodada 1 (o toque cair no botão "Ainda está disponível?" atrás da folha) segue só do painel de navegador; com a folha já aberta o toque funciona.
+- Limites conhecidos: as operações pendentes ficam só na memória (`docs/rpc.md` 5.119): uma tranca ou uma recarga esquece uma reação sem confirmação, e se o envelope da outra pessoa tinha chegado, ela vê a reação sem que este aparelho a mostre; as reações da outra pessoa em mensagens de páginas antigas já carregadas só se atualizam ao reabrir a conversa (a releitura de páginas antigas só acontece para mensagens com reação pendente); um toque depois de uma remoção não confirmada vale como nova reação, não como nova tentativa da remoção (o `docs/rpc.md` 5.119 dá a saída); se a consulta que confirma que a outra conta é uma pessoa falha, as reações ficam desligadas até a próxima tentativa (voltar à tela, reconectar ou puxar para atualizar); a regra da Página depende da tela: o nó não recusa `dm.react` para a chave de uma Página, e uma Página cujo roteiro o semeador não serviu pode receber os controles de reação (o envio gasta os selos e a Página descarta a reação); cada reação conta no conjunto comum do semeador e pode acordar o outro aparelho como uma mensagem; a convergência de dois nós é coberta por teste, não por uma conferência real de dois aparelhos.
+
+## 197. Conversas e gestos do chat (PR feat/chat-surfaces)
+
+Nono PR da revisão visual do app. Só interface: nenhum método do RPC, formato de protocolo, texto dos Termos nem fixture muda. Dois grupos de mudança, nas duas telas de conversa (Mensagem e Grupo) e nas listas que levam a elas.
+
+Caixas e listas (Conversas, Mensagens, Comunidades, Comunidade, `ui/ConversationRow.js`, `ui/CommunitiesBox.js`): linhas com feedback ao toque e hora alinhada; cada linha de conversa tem um só nome de acessibilidade (nome, prévia, hora e contagem de novas), e um par cujo nome é "Você" não é lido como a sua própria linha; esqueletos enquanto carrega; estados vazios com uma ação por filtro e para a busca; "Nova conversa" só onde dá para escrever; em Mensagens, nenhuma nova tentativa numa lista que carregou bem; em Comunidades, a busca mostra um só aviso (ainda indexando, pode estar incompleta ou nenhum grupo achado) e o vazio explica o limite de grupos e oferece criar; os nomes na faixa de comunidades quebram em duas linhas.
+
+Gestos do chat (`ui/SwipeReply.js`, `chatGestures.js`, `ui/JumpToEnd.js`, em Mensagem e Grupo): deslizar uma mensagem para a direita responde (só toque, nunca mouse; o deslize precisa começar a mais de 24 pt da borda esquerda, para o gesto de voltar do sistema continuar valendo; cerca de 56 pt de curso respondem; um movimento quase vertical rola a lista; com Reduzir movimento o balão fica parado e só o ícone de resposta aparece). O botão "ir para o fim" com o selo "N novas" aparece quando a pessoa está longe do fim (mais de 1,5 tela) e chegam mensagens; uma chegada com a pessoa lendo mensagens antigas não mexe na lista; o seu próprio envio leva ao fim. Tocar numa citação rola até a mensagem e a destaca; uma citada fora do trecho carregado mostra "Mensagem fora do trecho carregado" (também anunciada ao leitor de tela). Uma conversa vazia oferece "Oi" e "Tudo bem?", que só preenchem o campo (acrescentam numa nova linha ao texto já escrito) e nunca enviam. Grupo num nó que não é hospedado diz "Comunidades indisponíveis" (decidido por `node.hosted`, nunca pela plataforma).
+
+Regras que os passos conferem:
+
+- Responder por deslize só com toque. Mouse não responde e a seleção de texto continua funcionando.
+- Deslize que começa a menos de 24 pt da borda esquerda não responde (o gesto de voltar do sistema vence); mais de 8 pt à direita e pelo menos o dobro na horizontal que na vertical contam como deslize; 56 pt ou mais respondem; menos que isso a bolha volta ao lugar.
+- Rolar na vertical com um leve desvio para a direita rola a lista e não responde. Um bloco de código que rola de lado continua rolando de lado.
+- Toque longo e reações da mensagem seguem como antes.
+- "ir para o fim" só aparece longe do fim; o selo conta as mensagens que chegaram desde que a pessoa se afastou; uma chegada não move a lista de quem lê mensagens antigas; enviar a sua volta ao fim.
+- Citação fora do trecho carregado: nenhuma rolagem, só o aviso. Citação carregada: rola e destaca por um instante.
+- As sugestões da conversa vazia não enviam nada, não apagam o que foi digitado e não se repetem com texto no campo.
+- Nome de acessibilidade de uma linha de conversa: um só, com nome, prévia, hora e a contagem de novas; texto de um par passa por `displayText` antes de ir para a tela.
+- Decisão por capacidade (`node.hosted`, `node.online`), nunca por `Platform.OS` (`platformGate.test.js`).
+- App: `apps/app/src/ui/SwipeReply.js`, `apps/app/src/chatGestures.js`, `apps/app/src/ui/JumpToEnd.js`, `screens/Mensagem.js`, `screens/Grupo.js`, `screens/Conversas.js`, `screens/Mensagens.js`, `screens/Comunidades.js`, `screens/Comunidade.js`, `ui/ConversationRow.js`, `ui/CommunitiesBox.js`.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `(cd apps/app && node ../../scripts/run-tests.js test/chatGestures.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/chatSurfaces.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/vitrine.test.js)`
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é um nó hospedado com dados de exemplo e dispensa conta. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e), Chrome em 390 e em 1280 px, claro e escuro, texto grande, leitor de tela e Reduzir movimento; a rodada para quando duas seguidas não mudam nada. Capturas ficam fora do git.
+
+1. Carregando: abra a aba Conversas com o nó ainda lendo. Esperado: linhas de esqueleto no lugar da lista, sem o vazio "Nenhuma conversa ainda" enquanto carrega.
+2. Vazios por filtro: em Não lidas e em Grupos sem linhas, e com uma busca sem resultado. Esperado: um estado vazio por filtro com a sua ação, e outro para a busca; "Nova conversa" só aparece onde dá para escrever.
+3. Linhas e não lidas: a lista de exemplo com linhas não lidas. Esperado: toque com feedback, hora alinhada à direita, a contagem de novas, e no leitor de tela um só nome por linha (nome, prévia, hora e quantas novas); uma conversa com um par chamado "Você" não é lida como a sua própria linha.
+4. Mensagens, Comunidade e caixa de comunidades: abra Mensagens, uma comunidade e a faixa de comunidades. Esperado: títulos lidos como cabeçalhos, esqueletos ao carregar, estados vazios, linhas alinhadas às de Conversas, nomes compridos em duas linhas, e nenhum "tentar de novo" numa lista que carregou bem.
+5. Comunidades, busca: busque um termo. Esperado: um só aviso por vez (ainda indexando, pode estar incompleta ou nenhum grupo achado). Sem comunidades, o vazio explica o limite de grupos e oferece criar.
+6. Deslizar para responder, no meio da tela: abra a conversa de exemplo e arraste uma mensagem da esquerda para a direita, mais de 56 pt. Esperado: a bolha acompanha o dedo, o ícone de resposta aparece, ao soltar a barra de resposta cita a mensagem e a bolha volta ao lugar. Menos de 56 pt: volta sem responder.
+7. Borda esquerda: comece o deslize a menos de 24 pt da borda (no Android, com o gesto de voltar do sistema ligado; no iOS, o gesto de borda). Esperado: o sistema volta uma tela e nada é respondido.
+8. Rolagem com desvio: arraste a lista para cima com um leve desvio para a direita. Esperado: a lista rola e nada é respondido.
+9. Bloco de código: deslize sobre um bloco de código que rola de lado. Esperado: o bloco rola de lado; um deslize que começa fora do bloco responde.
+10. Toque longo e reações: toque e segure uma mensagem. Esperado: as ações e as reações rápidas abrem como antes e a bolha não se mexe.
+11. Grupo: repita 6 a 10 num grupo (sem hospedagem, o aviso "Comunidades indisponíveis" com "Comunidades disponíveis no site da associação ou no app ligado à instalação.").
+12. "ir para o fim": numa conversa comprida, role para cima mais de uma tela. Esperado: o botão "ir para o fim" aparece; com uma mensagem chegando, ganha o selo "N novas" e a lista não se move; tocar leva ao fim e o botão some.
+13. Envio na rolagem: com o botão visível, envie uma mensagem sua. Esperado: a lista volta ao fim.
+14. Citação: toque numa citação de mensagem carregada. Esperado: a lista rola até a mensagem original, que fica destacada por um instante.
+15. Citação fora do trecho: toque numa citação de mensagem não carregada. Esperado: nenhuma rolagem, aparece "Mensagem fora do trecho carregado" por um instante (lida pelo leitor de tela).
+16. Sugestões: abra uma conversa vazia. Esperado: os chips "Oi" e "Tudo bem?". Toque num: o campo recebe o texto, nada é enviado. Com texto já digitado, o chip acrescenta numa nova linha sem apagar o que estava lá.
+17. Reduzir movimento: ligue no sistema e repita 6. Esperado: a bolha não se move; o ícone de resposta só aparece (com fade) e a resposta funciona.
+18. Chrome, mouse: arraste o mouse sobre uma bolha. Esperado: nada é respondido e o texto é selecionado. Responda pelas ações da mensagem.
+19. Texto grande, escuro e leitor de tela: escala de fonte 1,3 e tema escuro nas telas acima. Esperado: nada cortado ou sobreposto, o botão "ir para o fim" e o selo legíveis e fora da caixa de escrever, os alvos de toque de 44 pt, e o leitor de tela diz "ir para o fim" (com "N novas" na dica).
+
+Situação, em 2026-11-12 (Vitrine, Metro na porta 8090, sem alterar as fixtures). Cada caixa só é marcada quando o alvo foi percorrido por inteiro; nenhuma foi. Capturas em `v9-shots/` fora do git.
+
+- [ ] Android, AVD `varanda-api36` (parcial, uma rodada). Claro, passaram: lista de Conversas com linhas não lidas, contadores e hora alinhada (`a-light-1-conversas`); deslizar uma mensagem recebida para a direita a partir do meio da tela abre a barra de resposta com a mensagem citada (`a-light-3-swipe-reply`); um deslize que começa na borda esquerda (x = 8 px) volta ao Conversas sem criar resposta (`a-light-4-edge`, `a-light-5-after-edge`); rolar a lista com leve desvio para a direita rola e não responde (`a-light-6-drift`); toque longo abre as ações com as reações rápidas e Responder (`a-light-7-longpress`); longe do fim aparece o botão "ir para o fim" (`a-light-8-away`) e tocá-lo leva à última mensagem (`a-light-10-jump`); tocar numa citação carregada destaca a mensagem original por um instante (`a-light-9-quote`). Escuro: deslizar numa mensagem de grupo ("Passeios de bicicleta") abre a barra de resposta legível (`a-dark-1-group-swipe`). Não percorridos no Android: carregamento com esqueleto, filtro sem linhas, busca de Comunidades, selo "N novas" (a Vitrine não faz chegar mensagem), envio com o botão visível, toast de citação fora do trecho, chips "Oi" e "Tudo bem?" (a conversa de exemplo traz as sugestões de anúncio, não uma conversa vazia), Reduzir movimento, texto grande 1,3 e TalkBack.
+- [ ] iOS (UDID 8802DF5C-6A82-406C-8D4D-29618AEEA2BC, que é um iPhone 17 Pro, não o 16e do método; parcial, claro, duas rodadas). Passaram: a lista de Conversas; na conversa com "João Nascimento", um deslize de 140 pt para a direita sobre a mensagem "Aceite" mostra o ícone de resposta e, ao soltar, a barra de resposta diz "João Nascimento @joao_nascimento / Aceite" (a primeira captura sai com a bolha ainda deslocada e a segunda já mostra a barra); um deslize que começa a 2 pt da borda esquerda faz o gesto de voltar do iOS (a lista aparece por baixo) e a barra de resposta que eu já tinha fechado não reaparece na parte visível. Não percorridos no iOS: o deslize de cerca de 80 pt (usei 140 pt), conferir de novo a conversa depois de voltar por inteiro, "ir para o fim", salto de citação, toast, chips, escuro, texto grande e VoiceOver.
+- [ ] Chrome (painel de navegador embutido), rodada 2, 390 px claro (parcial). Passaram: Conversas com Não lidas e Pedidos; busca sem resultado mostra "Nenhuma conversa encontrada." com **Limpar busca** e **Nova conversa**, e Limpar busca devolve a lista; um arrasto do mouse para a direita sobre uma bolha ("Sim, reservei a tarde de domingo.") não abre a barra de resposta. Falhou ou ficou em aberto: a seleção de texto com o mouse numa bolha (clique triplo e arrasto sobre "Vamos conversar no encontro?") devolveu seleção vazia, enquanto a mesma ação no cabeçalho selecionou texto e o estilo `user-select` do texto é `auto`; não conferi se isso já era assim antes do PR9 (PR8), então fica como suspeita, não como defeito confirmado. Não percorridos no Chrome: 1280 px, escuro, "ir para o fim", salto de citação (meu clique caiu no avatar e abriu o perfil), estado vazio de um filtro (Não lidas e Grupos têm linhas na Vitrine), busca de Comunidades, chips (a Vitrine não tem conversa vazia), e o toque emulado: o preset móvel não foi usado, então o deslize com toque na bolha e o deslize horizontal dentro de um bloco de código não foram tentados (a Vitrine também não traz bloco de código).
+- Observação: a Vitrine não faz chegar mensagens nem tem conversa vazia, então o selo "N novas" e os chips "Oi" e "Tudo bem?" só são cobertos pelos testes (`chatGestures.test.js`, `chatSurfaces.test.js`), não por captura.
+
+Defeitos: nenhum confirmado. Suspeita aberta para quem corrige (T28): no Chrome a seleção de texto com o mouse numa bolha de `Mensagem` não selecionou nada (`ui/SwipeReply.js`, ou o `Pressable` da bolha, ao redor das linhas 38 a 45, que tratam o mouse); falta comparar com o PR8 para saber se o PR9 mudou isso. Nada foi corrigido neste PR de documentação.
+
+Limites conhecidos: Comunidades e Comunidade ainda mostram "Só na versão web" num nó que não é hospedado, o que nunca acontece num celular com a instalação (esse celular é hospedado). Quem usa mouse não tem deslize e responde pelas ações da mensagem. O que não foi percorrido está listado na Situação.
+
+## 198. Acabamento das telas (PR feat/screens-polish)
+
+Décimo e último PR da revisão visual do app. Só interface: nenhum método do RPC, formato de protocolo, texto dos Termos nem fixture muda. Ele fecha os achados UX-44 a UX-66 de `docs/ux-audit.md`, em três grupos: feeds e busca, perfil e avisos, e publicar, Momentos, introdução e ajustes.
+
+Feeds e busca (`ARua.js`, `App.js`, `Espiadinha.js`, `Busca.js`, `BuscaGlobal.js`, `ui/MomentosStrip.js`): em A Rua, o feed de membro que falha ao carregar mostra a mesma faixa de erro no topo, com ou sem lista, e mantém a lista já carregada. O feed de Página mantém a regra antiga (uma leitura que falha limpa as linhas). A primeira carga mostra linhas de esqueleto. O toast da casca tem área de toque de 44 pt na ação e, com ação, fica mais tempo quando a escala de fonte é de pelo menos `LARGE_TEXT` (1,29). A Espiadinha tem uma só nota de estado no alto, e a folha de ajuda diz o mesmo que ela; o aviso de expiração e o "atualizar" ficam no rodapé da lista, onde a falha aparece, e as notas continuam ao lado da faixa de erro enquanto há linhas. Indisponível lê "Espiadinha indisponível" com o motivo, e "Saiba mais" só aparece quando o nó não é hospedado. A Busca tem uma só nota (o resto foi para a folha de ajuda), distingue "nada digitado", "buscando" e "sem resultado" e oferece "Limpar"; a região de carga tem rótulo de acessibilidade. A Busca global tem os mesmos três estados, o botão lê "Digitar código" num nó que não é hospedado (ele só põe o foco no campo), e a nota "buscando" mantém a margem de 16 pt. Os anéis da faixa de Momentos respondem ao toque com `PressScale` e o leitor de tela lê o nome inteiro.
+
+Perfil e avisos (`Diario.js`, `Membro.js`, `ui/ProfileHeader.js`, `ui/ProfileBar.js`, `Avisos.js`): Diário e Membro mostram cabeçalho e linhas de esqueleto na primeira carga; em Membro o esqueleto do cabeçalho só aparece enquanto `profile.read` está pendente, então Seguir, Conversar e o menu surgem quando ele responde. Um diário vazio mostra `EmptyState`: no próprio perfil oferece publicar, no de outra pessoa não tem ação, e numa Página lê "As publicações desta Página aparecem aqui.". As ações do cabeçalho seguem como `Pill`. O estado do envio vira um selo com ícone, "Ajustes" ganha maiúscula, a região de avaliações é acessível, a linha "Anúncios" continua sem contagem nem prévia de capa, o estado "montando a lista" tem tratamento próprio, as contagens quebram com texto grande e o avatar tem 88 pt abaixo de 640 pt de largura e 72 pt a partir daí. Avisos num nó que não é hospedado lê "Avisos indisponíveis", com o corpo "Disponível no site da associação ou no app ligado à instalação." e "Saiba mais" abrindo `HELP.avisos`; num nó hospedado sem passkey lê "Os Avisos não estão disponíveis nesta conexão.", sem "Saiba mais"; as linhas respondem ao toque com `PressScale` e mantêm as dicas de acessibilidade; há esqueleto na carga e nenhum título de data (a forma documentada).
+
+Publicar, Momentos, introdução e ajustes (`Publicar.js`, `Momentos.js`, `Introducao.js`, `Ajustes.js`): o contador de caracteres diz a contagem atual quando recebe o foco, só os limiares (restam 20, restam 0) são anunciados sozinhos e a região viva da web é esvaziada quando a contagem sai de um limiar. O botão de foto lê "Adicionar foto". Ao focar o campo, e quando a linha do contador se move, a tela rola para manter o campo e a barra de fotos e emojis à vista (UX-59). Em Momentos, uma legenda cortada ganha "mais" e "menos" (lidos como "mostrar a legenda inteira" e "recolher a legenda"); abrir pausa o tempo, e "menos" ou um passo o retoma; a legenda aberta nunca é menor que a recolhida; quando não cabem três linhas e o botão (texto grande), não há "mais": a legenda usa a altura toda e rola, como antes; o indicador de carga usa um token do tema. Em Introdução, "Pular" continua no canto superior direito, com área de toque de 44 por 44 pt, e os botões seguem sendo `Btn` e `StepLink`; Welcome não muda. Em Ajustes, as linhas ficam em "Perfil e conta", "Privacidade e segurança" e "Aparência e avisos", com "Avançado" como último grupo; cada nota fica dentro do seu grupo, com título. O rodapé de versão tem três itens (app, servidor e nota) e copiar é anunciado. Sair e Excluir conta continuam onde estavam, antes de "Avançado"; nenhuma linha foi removida nem religada.
+
+Regras que os passos conferem:
+
+- Falha ao carregar A Rua: a mesma faixa no topo, com ou sem lista; a lista já carregada fica intacta. A Página limpa as linhas, como antes.
+- O toast com ação tem alvo de 44 pt e dura o dobro com texto a partir de 1,29.
+- Espiadinha: uma nota de estado; a folha de ajuda não contradiz a nota; "Saiba mais" só num nó que não é hospedado; o rodapé leva a expiração e o "atualizar".
+- Busca e Busca global: uma só nota por vez, três estados distintos, "Limpar" onde há texto; "Digitar código" só num nó que não é hospedado.
+- Diário e Membro: esqueleto só na primeira carga; em Membro, Seguir, Conversar e o menu não ficam escondidos depois que `profile.read` responde.
+- Diário vazio: com ação só no próprio perfil. Avisos num nó que não é hospedado: "Avisos indisponíveis" e "Saiba mais" abre a ajuda de Avisos. Sem título de data nas linhas de Avisos.
+- Publicar: o contador só é anunciado sozinho nos limiares; com foco, diz a contagem inteira.
+- Momentos: expandir a legenda pausa o tempo, e também o vídeo curto e a música do momento; "menos" ou um passo retoma; Reduzir movimento continua sem avanço automático.
+- Ajustes: nenhuma linha some e nenhuma muda de destino; Sair e Excluir conta antes de "Avançado".
+- Decisão por capacidade (`node.hosted`, `node.online`), nunca por `Platform.OS` (`platformGate.test.js`). Texto de um par passa por `displayText`.
+- App: `apps/app/App.js`, `screens/ARua.js`, `Espiadinha.js`, `Busca.js`, `BuscaGlobal.js`, `Diario.js`, `Membro.js`, `Avisos.js`, `Publicar.js`, `Momentos.js`, `Introducao.js`, `Ajustes.js`, `ui/MomentosStrip.js`, `ui/PressScale.js`, `ui/ProfileBar.js`, `ui/ProfileHeader.js`; `src/peek.js` e `src/notices.js` perdem a frase "só na versão web", que nenhuma tela usa mais.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `(cd apps/app && node ../../scripts/run-tests.js test/screensPolish.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/profilePolish.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/composePolish.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/versionFooter.test.js)`
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é um nó hospedado com dados de exemplo e dispensa conta. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e), Chrome em 390 e em 1280 px, claro e escuro, texto grande, leitor de tela e Reduzir movimento; a rodada para quando duas seguidas não mudam nada. Capturas ficam fora do git.
+
+1. A Rua com falha de carga. Na Vitrine, cortar a rede não faz `feed.read` falhar (o nó de exemplo responde com dados locais), então aqui só se confere a primeira carga. Esperado: linhas de esqueleto. A faixa no topo (a mesma com ou sem lista, e a lista já carregada intacta) fica coberta por `apps/app/test/screensPolish.test.js`; no aparelho, só com um nó real cuja leitura falhe.
+2. Toast com ação: provoque um toast que traga uma ação. Esperado: a ação tem 44 pt de alto e, com texto grande (1,3), o toast fica mais tempo.
+3. Espiadinha: abra com linhas, depois com a lista vencida ou incompleta. Esperado: uma só nota no alto; a expiração e o "atualizar" no rodapé; a folha de ajuda diz o mesmo que a nota. Num nó que não é hospedado: "Espiadinha indisponível", o motivo e "Saiba mais".
+4. Busca: abra sem digitar, digite, e busque algo sem resultado. Esperado: uma só nota por vez, "Limpar" nos estados com texto, região de carga com nome para o leitor de tela; o que sobrou das notas antigas está na folha de ajuda.
+5. Busca global: os mesmos três estados; num nó que não é hospedado o botão lê "Digitar código" e põe o foco no campo. Esperado: a nota "buscando" com margem de 16 pt.
+6. Faixa de Momentos: toque num anel e use o leitor de tela. Esperado: o anel responde ao toque (`PressScale`) e o leitor diz o nome inteiro.
+7. Diário e Membro, carregando: abra o próprio Diário e o de outra pessoa com o nó ainda lendo. Esperado: esqueleto do cabeçalho e das linhas. Em Membro, Seguir, Conversar e o menu aparecem quando `profile.read` responde, sem esperar as linhas.
+8. Diário vazio: no próprio perfil, no de outra pessoa e numa Página. Esperado: `EmptyState` com "publicar" só no próprio perfil; na Página, "As publicações desta Página aparecem aqui.".
+9. Selo de envio, "Ajustes" e avaliações: publique offline e olhe o Diário e o Membro; olhe o botão de ajustes; percorra a região de avaliações com o leitor de tela. Esperado: selo com ícone, "Ajustes" com maiúscula, a região lida.
+10. Anúncios, lista em montagem e contagens: a linha "Anúncios" segue sem contagem nem capa; o estado "montando a lista" aparece distinto do vazio; com texto grande, as contagens de seguidores quebram sem estourar o cabeçalho.
+11. Avatar: abra um perfil em 390 e em 1280 px. Esperado: 88 pt em 390 e 72 pt em 1280, cabeçalho sem ficar estreito e alto.
+12. Avisos: num nó que não é hospedado, "Avisos indisponíveis" com o corpo "Disponível no site da associação ou no app ligado à instalação." e "Saiba mais" abrindo a ajuda. Hospedado sem passkey: "Os Avisos não estão disponíveis nesta conexão." e nenhum "Saiba mais". Hospedado: esqueleto ao carregar, linhas com toque suave, dicas lidas pelo leitor de tela e nenhum título de data (Avisos mantém a forma documentada).
+13. Publicar, contador: escreva até restarem 20 caracteres e até 0, com o leitor de tela. Esperado: só os dois limiares são anunciados sozinhos; com o foco no contador, ele diz a contagem inteira. Na web, a região viva esvazia quando a contagem sai de um limiar.
+14. Publicar, foto e teclado: o botão de foto lê "Adicionar foto". Com o teclado aberto, a barra de fotos e emojis continua alcançável (UX-59: ao focar o campo, e quando a linha do contador se move, a tela rola para manter o campo e a barra à vista; confira se a barra fica acima do teclado).
+15. Momentos, legenda longa: abra um momento com legenda cortada. Esperado: "mais" abre a legenda e pausa o tempo (num momento com vídeo ou música, também o vídeo e a música); "menos" ou avançar um passo retoma; a legenda aberta não é menor que a recolhida. Com texto grande e pouco espaço, sem "mais": a legenda usa a altura toda e rola; o indicador de carga acompanha o tema.
+16. Introdução: "Pular" no canto superior direito, com 44 por 44 pt de toque; os botões seguem iguais; Welcome igual a antes.
+17. Ajustes, grupos: abra Ajustes. Esperado: "Perfil e conta", "Privacidade e segurança" e "Aparência e avisos", com "Avançado" por último; cada nota dentro do seu grupo, com título; nenhuma linha sumiu nem mudou de destino; Sair e Excluir conta antes de "Avançado", como antes.
+18. Rodapé de versão: percorra com o leitor de tela e toque para copiar. Esperado: três itens (app, servidor e nota) e a cópia é anunciada.
+19. Reduzir movimento: ligue no sistema e repita os passos 2, 6 e 15. Esperado: sem animação nova; o tempo do momento segue sem avanço automático.
+20. Texto grande (1,3), escuro e leitor de tela: percorra todas as telas acima. Esperado: nada cortado ou sobreposto, alvos de 44 pt, e um nome de leitor de tela por controle (anéis de Momentos, linhas de Avisos, contador, "mostrar a legenda inteira", "Adicionar foto", itens do rodapé de versão).
+21. Erro lido pelo leitor de tela: provoque um erro de carga numa tela que agora usa `EmptyState`. Esperado: o texto do erro é lido; o papel "alerta" não existe mais (ver Limites conhecidos).
+
+Situação, em 2026-11-12 (Vitrine, Metro na porta 8090, sem alterar as fixtures; duas rodadas). Cada caixa só é marcada quando o alvo foi percorrido por inteiro; nenhuma destas cinco foi. Capturas do Android e do iOS em `v10-shots/` fora do git; o painel de navegador embutido não salva capturas.
+
+- [ ] Android, AVD `varanda-api36` (parcial, duas rodadas, `v10-shots/android/`): passaram os passos 13 (contagem até 0 de 1000), 14 (a barra de fotos e emojis fica acima do teclado, então o UX-59 já valia no Android), 17 (grupos, com Sair e Excluir conta antes de "Avançado") e 20 (texto grande e escuro em perfil, Avisos e Ajustes); em parte, 3, 4, 5, 6, 10, 12 (sem títulos de data) e 18 (as duas linhas do rodapé). Os outros passos e o TalkBack não foram percorridos.
+- [ ] iOS, simulador UDID 8802DF5C-6A82-406C-8D4D-29618AEEA2BC, que é um iPhone 17 Pro, não o 16e do método (parcial, duas rodadas, `v10-shots/ios/`): passaram os passos 3 (uma nota e a ajuda), 4, 10 (contagens numa linha com texto extra extra grande), 14, 17 (grupos, com Sair e Excluir conta antes de "Avançado") e 20 (escuro em Ajustes e Diário); em parte, 11 (cerca de 88 pt com 402 de largura) e 18 (as duas linhas do rodapé). Os outros passos e o VoiceOver não foram percorridos.
+- [ ] Chrome 390 px, claro e escuro (parcial, painel de navegador embutido, sem capturas): passaram os passos 4 (uma nota por vez e "Limpar"), 12 (sem títulos de data), 13 ("Restam 20" em 980, "Limite de caracteres atingido" em 1000, nada anunciado em 500 e 990, e o rótulo "N de 1000 caracteres"), 14 ("Adicionar foto"), 17 (grupos, com Sair e Excluir conta antes de "Avançado") e 20 no escuro; em parte, 3 e 18 (as duas linhas do rodapé). Os outros passos, o texto grande e o leitor de tela não foram percorridos.
+- [ ] Chrome 1280 px, claro e escuro (parcial): só uma passada curta na primeira rodada, sem passo conferido por inteiro.
+- [ ] Texto grande, Reduzir movimento e leitor de tela (TalkBack, VoiceOver) (parcial): texto grande passou no Android (1,3) em perfil, Avisos e Ajustes e no iOS (extra extra grande) no Diário, com a observação abaixo; Reduzir movimento (passo 19), TalkBack e VoiceOver não foram percorridos.
+
+Defeitos: nenhum confirmado. Observações para a equipe: (1) no iOS, mudar o tamanho do texto com o app aberto cortou rótulos até o app ser reaberto (`v10-shots/ios/`, capturas 08 e 09 contra 11); não foi comparado com a `main`. (2) No iOS, despejar cerca de 3 mil caracteres de uma vez no campo de Publicar com a ferramenta de digitação do simulador (de 90 a 150 caracteres por segundo, bem acima de quem digita) mostrou o erro "Maximum update depth exceeded" em `typePost` (`setText`). O mesmo erro aparece, duas vezes em duas, com o `Publicar.js` do PR anterior da pilha, e as outras mudanças da pilha nesse arquivo só agem quando há um rascunho de resposta pendente, o que não era o caso; então não vem deste PR. Não foi conferido na `main`; fica para investigar à parte. (3) Na folha "Fazer oferta", o campo Valor mostra "80,00" como exemplo fixo, que já existia antes desta série (`apps/app/src/screens/Mensagem.js`); usar o preço do anúncio fica como ideia para depois.
+
+Limites conhecidos: nas telas desta seção, `ErrorState` virou `EmptyState`, então o erro perde o papel "alerta" do leitor de tela (o pedido era esse; confira com o leitor de tela, passo 21). O "Saiba mais" de Avisos e a ajuda da Espiadinha não foram percorridos num celular. A linha "Anúncios" do perfil segue sem contagem e sem prévia de capa (UX-55 só em parte). O que não foi percorrido fica listado na Situação. A Vitrine se comporta como um nó hospedado com passkey, então os estados de nó não hospedado e de nó hospedado sem passkey não foram percorridos no aparelho; ficam cobertos por `screensPolish.test.js` e `profilePolish.test.js`.
+
+### Passada da pilha inteira
+
+Depois dos PRs 1 a 10 juntos, percorra de novo os passos de cabeça de cada seção. Percorrida em 2026-11-12, na segunda rodada (Vitrine, Metro na porta 8090); no Chrome, só 390 px no claro. Uma caixa só é marcada quando todos os passos da linha passaram.
+
+- [x] Android, seção 189: pílula da barra de abas (passo 2) e o botão de publicar ao apertar (passo 8). Passaram na segunda rodada; o botão encolher ao segurar só se vê por um deslocamento de cerca de 3 px na captura (`r2-178-fab-held.png`).
+- [ ] iOS, seção 189: pílula da barra de abas (passo 2) e o botão de publicar ao apertar (passo 8). Em parte, na segunda rodada.
+- [ ] Chrome 390, seção 189: pílula da barra de abas (passo 2) e o botão de publicar ao apertar (passo 8). O passo 2 passou (uma pílula só); o passo 8 não foi percorrido.
+- [ ] Chrome 1280, seção 189: pílula da barra de abas (passo 2) e o botão de publicar ao apertar (passo 8). Não percorrido.
+- [ ] Android, seção 190: fotos antes da legenda e "mais" e "menos" (passos 1 a 3) e o contador do carrossel (passo 8). Não percorrido.
+- [ ] iOS, seção 190: fotos antes da legenda e "mais" e "menos" (passos 1 a 3) e o contador do carrossel (passo 8). Não percorrido.
+- [ ] Chrome 390, seção 190: fotos antes da legenda e "mais" e "menos" (passos 1 a 3) e o contador do carrossel (passo 8). Não percorrido.
+- [ ] Chrome 1280, seção 190: fotos antes da legenda e "mais" e "menos" (passos 1 a 3) e o contador do carrossel (passo 8). Não percorrido.
+- [ ] Android, seção 191: "Ver N respostas" (passos 1 e 2) e a barra de resposta (passos 7 e 8). Não percorrido.
+- [ ] iOS, seção 191: "Ver N respostas" (passos 1 e 2) e a barra de resposta (passos 7 e 8). Não percorrido.
+- [ ] Chrome 390, seção 191: "Ver N respostas" (passos 1 e 2) e a barra de resposta (passos 7 e 8). Não percorrido.
+- [ ] Chrome 1280, seção 191: "Ver N respostas" (passos 1 e 2) e a barra de resposta (passos 7 e 8). Não percorrido.
+- [ ] Android, seção 192: cidade, chip e tiles (passos 2 a 4) e as colunas por largura (passo 5). Em parte.
+- [ ] iOS, seção 192: cidade, chip e tiles (passos 2 a 4) e as colunas por largura (passo 5). Não percorrido.
+- [ ] Chrome 390, seção 192: cidade, chip e tiles (passos 2 a 4) e as colunas por largura (passo 5). Os passos 2, 4 e 5 passaram; o passo 3 não foi percorrido.
+- [ ] Chrome 1280, seção 192: cidade, chip e tiles (passos 2 a 4) e as colunas por largura (passo 5). Não percorrido.
+- [ ] Android, seção 193: barra do anúncio com Conversar e Fazer oferta (passos 4 e 5) e Anunciar em passos (passos 8 e 9). Não percorrido.
+- [ ] iOS, seção 193: barra do anúncio com Conversar e Fazer oferta (passos 4 e 5) e Anunciar em passos (passos 8 e 9). Não percorrido.
+- [ ] Chrome 390, seção 193: barra do anúncio com Conversar e Fazer oferta (passos 4 e 5) e Anunciar em passos (passos 8 e 9). Os passos 4 e 5 passaram, também a folha de oferta num anúncio de Página; Anunciar em passos (8 e 9) não foi percorrido.
+- [ ] Chrome 1280, seção 193: barra do anúncio com Conversar e Fazer oferta (passos 4 e 5) e Anunciar em passos (passos 8 e 9). Não percorrido.
+- [ ] Android, seção 194: negrito, itálico e bloco de código (passos 1 e 3) e o spoiler (passo 4). Os passos 1, 2 e 4 passaram; o bloco de código (passo 3) não foi percorrido.
+- [ ] iOS, seção 194: negrito, itálico e bloco de código (passos 1 e 3) e o spoiler (passo 4). Não percorrido.
+- [ ] Chrome 390, seção 194: negrito, itálico e bloco de código (passos 1 e 3) e o spoiler (passo 4). Não percorrido.
+- [ ] Chrome 1280, seção 194: negrito, itálico e bloco de código (passos 1 e 3) e o spoiler (passo 4). Não percorrido.
+- [ ] Android, seção 195: reagir, trocar e tirar (passos 2 a 4) e "Quem reagiu" (passo 5). Os passos 1, 2 e 5 passaram num grupo público (chips sob a mensagem, "Quem reagiu" com os nomes); trocar e tirar (3 e 4) não foram percorridos.
+- [ ] iOS, seção 195: reagir, trocar e tirar (passos 2 a 4) e "Quem reagiu" (passo 5). Em parte: reagir passou; a troca de emoji não foi feita; tirar funcionou no segundo toque (o primeiro pareceu não fazer nada); "Quem reagiu" só pela folha de ações, não pelo toque longo no chip.
+- [ ] Chrome 390, seção 195: reagir, trocar e tirar (passos 2 a 4) e "Quem reagiu" (passo 5). Os passos 2 a 4 passaram; "Quem reagiu" (passo 5) não foi percorrido.
+- [ ] Chrome 1280, seção 195: reagir, trocar e tirar (passos 2 a 4) e "Quem reagiu" (passo 5). Não percorrido.
+- [ ] Android, seção 196: reagir, trocar e tirar (passos 2 a 4) e os toques rápidos (passo 5). Os passos 2 a 4 passaram; os toques rápidos (passo 5) não foram percorridos.
+- [ ] iOS, seção 196: reagir, trocar e tirar (passos 2 a 4) e os toques rápidos (passo 5). Não percorrido.
+- [ ] Chrome 390, seção 196: reagir, trocar e tirar (passos 2 a 4) e os toques rápidos (passo 5). Não percorrido.
+- [ ] Chrome 1280, seção 196: reagir, trocar e tirar (passos 2 a 4) e os toques rápidos (passo 5). Não percorrido.
+- [ ] Android, seção 197: deslizar para responder e a borda esquerda (passos 6 e 7) e "ir para o fim" (passo 12). Os passos 6 e 7 passaram; "ir para o fim" (passo 12) não foi percorrido.
+- [ ] iOS, seção 197: deslizar para responder e a borda esquerda (passos 6 e 7) e "ir para o fim" (passo 12). Os passos 6 e 7 passaram; "ir para o fim" (passo 12) não foi percorrido.
+- [ ] Chrome 390, seção 197: deslizar para responder e a borda esquerda (passos 6 e 7) e "ir para o fim" (passo 12). Em parte: deslizar não dá para fazer com o mouse; o passo 12 não foi percorrido.
+- [ ] Chrome 1280, seção 197: deslizar para responder e a borda esquerda (passos 6 e 7) e "ir para o fim" (passo 12). Não percorrido.
+
+## 199. Música com cara de Instagram (PR feat/music-instagram-ui)
+
+A música do Audius ganha a interface do seletor, do editor de 15 s, do adesivo do compositor, do cartão compacto e do adesivo do momento. Não há registro, rota nem regra de leitura novos: `docs/protocol.md` não entra neste PR. As regras de disponibilidade, de ticket e de trecho das seções 185, 186 e 187 continuam.
+
+No seletor, cada linha de faixa mostra um azulejo de capa gerado, o título e "artista · m:ss". **Ouvir prévia** toca 15 s a partir do início e **Parar prévia** interrompe. Só uma prévia toca por vez, e ela só começa depois de confirmar a busca do ponto inicial. Uma playlist abre a mesma tela para confirmar. No diário, os chips do editor são **15 s** e **Faixa inteira**. Num momento, o editor oferece só o trecho. A janela de 15 s fica fixa e uma faixa de barras decorativas, derivadas do id da faixa, desliza por baixo. Numa faixa com menos de 15 s, a janela é a faixa inteira e não há início para arrastar. O horário de início fica acima da janela. O valor acessível anuncia os tempos, não a altura das barras. As ações são **Avançar um segundo** e **Voltar um segundo**. Na web, as setas andam um segundo, Home vai ao começo e End vai ao último início. A busca do ponto acontece ao soltar. O editor reutiliza um único ticket de reprodução entre os arrastos e as voltas. A prévia repete o trecho até 8 vezes e então pausa. **Concluído** fica na linha de cima da folha e **Voltar** volta à busca.
+
+No compositor do diário, a ferramenta de ícone tem o nome acessível **Música**. A escolha é um adesivo: tocar reabre o editor no início escolhido, o X remove, e os nomes são **Editar música** e **Remover música**. Na leitura, o cartão compacto mostra o mesmo azulejo, o selo **15 s** (a duração real quando a faixa é mais curta e o item já carregou), o botão redondo, a fonte Audius e o link pequeno **Abrir no Audius**. Ainda não há imagem de capa: em todo lugar a capa é o azulejo gerado no aparelho, e o cartão em repouso não pede capa. O "sem capas" da seção 186 continua valendo nesse sentido: o azulejo não vem do provedor.
+
+O chip de atribuição e o chip separado **Silenciar música** da seção 187 são substituídos por um adesivo no visualizador. Um toque alterna **Silenciar música** e **Ativar música** e pausa o trecho, sem novo pedido de áudio. A página da faixa abre pelo link **Audius** (nome acessível **Abrir no Audius**), que continua pausando o visualizador até a volta, ou por 1 s (`LINK_HOLD_GRACE_MS`) se o visualizador não ficar oculto. O equalizador pequeno do adesivo se move enquanto toca e dá lugar ao ícone de mudo ao silenciar. Com Reduzir movimento, o avanço na janela troca de lugar de uma vez e o equalizador fica parado. Os tempos da barra (`MUSIC_START_WAIT_MS`, `MUSIC_HOLD_MS`, a passagem de 5 s e a espera nova em `node.epoch`) continuam os da seção 187. Os passos manuais de lá que pedem o chip de atribuição, ou o chip separado de silenciar, ficam substituídos pelos passos deste adesivo. No compositor de Momento, o chip "título, artista · Audius" da seção 187 também vira o adesivo do compositor, com "artista · m:ss" (o início do trecho) na segunda linha e sem a palavra Audius. O resto da seção 187 continua valendo. O texto dela não foi editado: onde ele pede o chip de atribuição ou o chip de silenciar, valem os passos deste adesivo.
+
+Como verificar, a partir da raiz:
+
+```sh
+node apps/app/test/music.test.js
+node apps/app/test/musicPicker.test.js
+node apps/app/test/musicPlayerCard.test.js
+node apps/app/test/momentMusic.test.js
+node apps/app/test/musicDraft.test.js
+node apps/app/test/momentosScreen.test.js
+```
+
+Esses testes conferem módulos puros e o texto do código. Não montam a interface num aparelho e não usam a rede pública nem a API real do Audius. A lista é um roteiro, não um registro de execução.
+
+`apps/app/test/music.test.js`: `constants`; `musicRefOf: the three fragments, frozen`; `musicRefOf: hostile or malformed URLs are null`; `musicRefOf: the 300-character card cap`; `isAudiusPage: the service permalink rule`; `musicCardUrl: builds the fragment, or null`; `musicCardFields: title, artist, playlist count; checked against the ref`; `snippet window: maxStart, clampStart, snippetEndMs`; `seekReached and snippetTick: never play outside the window`; `searchBody: { q, kind } or with a canonical cursor`; `parseSearch: the exact shape for each kind, or null`; `parseItem: a track, or a playlist with at most 50 tracks`; `parseResolve: { kind, item } with no tracks`; `parsePlay: a 43-character base64url ticket and an ISO expiry`; `audioPath: only a valid ticket`; `musicOriginOf: music only on a hosted node, by capability`; `queueStep: load, select, next, prev, ended`; `musicQuery, musicErrorText, musicPartialText`; `musicClock formats seconds`; `row and sticker lines for snippet, track and playlist`; `snippetProgress clamps to the window`; `the strip keeps eight points per second and a bounded bar count for a 7200 s track`; `a wide viewport keeps bars under the centred window`; `barHeight is deterministic per id and index and stays in range`; `a drag to the left starts later and clamps at both ends`.
+
+`apps/app/test/musicPicker.test.js`: `returning to search preserves the query and results without another request`; `search generations invalidate old pages and failures before the debounce`; `search errors use the shared texts and retry only on request`; `allowed uses open the editor`; `preview confirms the seek, uses the ticket base and reuses one ticket for a track`; `a ticket answered after stopBoundPlayback never creates or plays audio`; `a zero progress sample during seek does not override its confirmed target`; `errors during a pending seek distinguish unavailable media from seek failures`; `another playback claim cancels a pending preview seek`; `a confirmed seek after leaving releases its bound player without playing`; `close or unmount cancels an unanswered ticket with no later UI update`; `an old seek cannot release or play a newer attempt`; `rejected seeks, including a landing outside the range, never start audio`; `the preview stops at the window end, including a track under fifteen seconds`; `a stream failure reports once, and only a new tap requests a fresh ticket`; `progress schedules the exact remaining window and buffering cancels that timer`; `a late play completion after leaving releases the player`; `expired tickets renew on a tap and the account base reaches the player unchanged`; `the picker stays shared, uses safe provider text and releases on close, pick and unmount`; `a row preview plays without opening the editor`; `one row previews at a time and a new query stops it`; `the editor has Concluído in the top row and Voltar keeps the query`; `done answers a clamped snippet ref, a track ref with start null and a playlist ref`; `a momento picker offers the strip and no chips`; `the snippet host stretches its children and the play toggle stays centered`; `initial reopens the editor at the chosen start`; `closing without Concluído picks nothing`; `the editor loop reuses one ticket and one player across start changes`; `start changes during a seek collapse to the latest target`; `a failed seek moves on to a newer start`; `a resume from pause publishes loading before the seek resolves`; `the loop seeks back at the window end and pauses after MAX_LOOPS`; `setStart resets the loop count`; `an interruption outside a seek publishes paused and one tap resumes`; `a paused status while play is pending does not stop the snippet window`; `a playhead outside the window is a seek error, not a loop`; `an autoplay refusal waits for a tap without an error`; `a failure never mints a ticket by itself and a tap does`; `release aborts a pending ticket and a late answer stays silent`; `a pending open gives way when another player claims playback`; `a lost claim aborts a pending ticket and never starts audio`; `a lost claim whose ticket request rejects shows no error`; `a stream error while the claim is lost releases the player and the next tap opens again`; `a seek-range rejection shows the seek error while superseded stays silent`; `stop keeps the ticket and a paused start change never resumes playback`; `stopping a pending ticket keeps it and a tap resumes that same request`; `stopping during a seek prevents playback after its confirmation`; `editor stream errors preserve the preview error rules while seeking`; `a lost claim during seek needs a fresh claim and keeps seeks serialized`; `a lost seek and a released seek cannot play after they resolve`; `expired editor tickets renew only on a tap and pass their base to the player`; `an obsolete playback epoch disposes the editor job before audio starts`; `editor progress timers respect buffering, short tracks, stop and release`; `the editor loop is a pure module with only the shared music imports`; `the strip is adjustable with times as its value`; `increment and decrement step one second and commit`; `web keys step, Home and End jump, native has no key handler`; `a drag to the left starts later and commits once on release`; `a 7200 s track renders at most 200 bars`.
+
+`apps/app/test/musicPlayerCard.test.js`: `idle cards use stored safe text, make no requests and mount the node reader only on tap`; `a snippet card shows the 15 s badge and a track card does not`; `the badge shows the real window on a short track`; `the round button keeps every accessible name`; `the idle card still names Audius and draws no cover request`; `unhosted cards fall back unchanged and pending availability is scoped to the member`; `availability without an installation origin is false and never probes`; `a rejected availability probe settles unknown to false`; `availability refresh recovers from false or a transient failure`; `availability keeps true during refresh and resets for a different member or origin`; `availability without a refresh key still probes once per member and origin`; `the tap reads the own lowercase key and unmount aborts the active request`; `the controller makes no request until press and checks readiness before the item`; `a nonzero snippet awaits confirmed seek and uses the ticket base`; `a zero progress sample during seek does not override its confirmed target`; `rejected and out-of-range snippets never play from zero`; `superseded and released seeks stop silently`; `snippet progress stops at fifteen seconds and short tracks end early`; `buffering clears the snippet timer and a final timer stops between progress events`; `every pending stage is invalidated when bound playback stops`; `a tap epoch invalidated before mounting does nothing`; `taking a pending claim cancels it without changing the screen epoch`; `taking an active claim releases subscriptions and stops the snippet timer`; `unmount and cancel abort a ticket and never let it restart`; `an old seek cannot release or play a newer attempt`; `a track pauses and resumes without a new ticket and scrubs only on an explicit action`; `expiry has no timer or automatic retry and renews only on a play tap`; `playlist ended advances once, each track gets a ticket, and the last track stops`; `playlist previous and next honor the queue edges`; `a failed queue track stops and retries only when pressed`; `service and stream failures use fixed texts, report once and never reconnect`; `playlist UI safely shows authoritative text and a collapsed capped list with the partial note`; `progress slider exposes web values and keyboard steps while retaining native actions`; `a pending keyboard seek keeps the web slider focusable without starting another seek`; `short snippet progress uses the actual track end`; `the title is interactive only when it has a long press action`; `the playlist toggle announces its expanded state on the web`; `shared player source keeps IO behind the tap and all provider text escaped`.
+
+`apps/app/test/momentMusic.test.js`: `cover tile and equalizer stay local and themed`; `mount starts a single snippet using the ticket base, confirmed seek and real playing progress`; `snippet timers stop at fifteen seconds or the shorter track end`; `the stream end stays ended and a tap does not restart it`; `forged starts and rejected seeks never play from zero`; `progress before the requested start fails without announcing playback`; `pause and mute suspend the snippet and its timer without another seek or ticket`; `a refused autoplay offers a direct gesture retry on the prepared player`; `rejected autoplay promises also offer the gesture chip`; `a refused restart after interruption keeps the first start and never reports unavailable`; `account, ticket and player failures report unavailable and release resources`; `a ticket answered after stopBoundPlayback never creates or plays audio`; `screen changes cancel item, seek and play waits and stale gesture taps`; `interrupted playback restarts with a fresh ticket and seek, but announces the start only once`; `a new attempt owns playback while an interrupted item, ticket or seek is still pending`; `an epoch change observed by progress offers a gesture without reporting a failure`; `a newer playback claim aborts a pending momento ticket`; `unmount aborts requests, removes listeners and releases the player once`; `invalid music and disabled origin make no account requests`; `shared source escapes provider text, uses a bound claim and releases on unmount`; `mounted UI offers another gesture after a second refusal and releases on a later media failure`; `mounted UI sanitizes attribution, opens its URL, exposes the gesture and mutes via pause`; `the sticker toggles mute and the attribution opens the page`.
+
+`apps/app/test/musicDraft.test.js`: `the sticker names the choice, edits on tap and removes separately`; `music snapshots are frozen, sanitized and have no thumbnail`; `music blocks photos, a video, pages, empty text and offline sends`; `the composer shows a music sticker that reopens the editor and can be removed`; `moment choices adapt the saved reference to a snippet without changing the draft`; `resolve targets skip fragments, lookalike hosts and tried URLs`; `compose-time resolution honors the preview preference and online gate`; `resolve runs once, carries the session and abort signal, and keeps a full track`; `late resolutions are dropped on cancellation, leaving, a photo, a video or a picked music`; `typing more text keeps the pending resolve and sets the music draft`; `removing the link aborts without consuming the URL, which can be pasted again`; `a failed resolve leaves the ordinary draft alone and does not retry`; `post, reply and quote send the music card with no image or provider text check`; `music is kept offline and after a gate failure, never queued as plain text`; `a card that does not fit is never sent as plain text`; `uncertain music sends require the same preview URL and never resend`; `switching to a page clears music even while closed or waiting for a page retry`; `picking music refuses staged photos or a video and accepts a valid snippet`; `a video waits for the music card to go, like a link preview`; `attaching a photo removes music only after files were picked`; `publishing clears the music draft for posts, replies and quotes`; `a resolved playlist needs no tracks array`; `publishing or closing lets the same URL resolve in the next draft`; `photo-only momento music has its own video refusal note`.
+
+`apps/app/test/momentosScreen.test.js` segue com os testes de momentos das seções 123, 182 e 187. Os que tratam de música, pelo nome: `momentsOf keeps valid music through repeated cleaning and drops malformed music`; `momento music gates are policy and capability based, with no viewer probe or strip catalog`; `composer probes once per epoch only after opening a hosted momento with policy on`; `a policy response after closing the composer never probes the node`; `viewer starts its 15 s hold with audio and resumes the remaining hold after a press or menu`; `viewer replaces the keyed music on item change and pauses it immediately on close`; `viewer falls back to 5 s on unavailable or a 3 s wait, and restarts at zero on a late start`; `viewer keeps plain moments and disabled music silent at AUTO_ADVANCE_MS`; `reduced motion allows one mounted snippet without any auto-advance`; `momento sends only a chosen music reference, checks author text and never resends an uncertain create`; `T22 fix 1: a saved music chip and its remove button follow the send gate`; `T22 fix 2: the attribution hold releases on visibility return or the popup grace`; `T22 fix 3: pending policy holds zero and an off answer starts the photo segment once`; `T22 fix 3: late policy or readiness never restarts a fallback; only onStart does`; `T22 fix 3: policy and readiness failures end the pending wait`; `T22 fix 4: restarting the first music item remounts it and waits for its new start`; `T22 round 2: a node epoch change waits for the remounted audio with a fresh budget`; `T22 fix 5: returning on top releases a close ignored before a profile push`; `T22 fix 6: slow photos spend no music wait budget and presses keep the remainder`; `T22 fix 6: pending policy and audio share a budget across hidden, menu and stack pauses`; `T22 fix 7: an ignored close pauses the same snippet and resumes the remaining bar`; `viewer ignores music on video, keeps its own sound and uses the video segment clock`; `momento music button follows the draft availability gate`.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Todos os itens estão em aberto.
+
+Usar uma instalação de teste, sem DHT pública, com Termos 39 aceitos, conta vinculada e a música do Audius ligada. O build de debug não entra com passkey de produção. No iOS, a passkey depende do domínio associado da conta Apple Developer (veja `docs/development.md`). Ordem: build de debug do Android, simulador do iOS, depois a web e o PWA.
+
+- [ ] Android, build de debug no emulador ou aparelho, depois de `npm run prepare:native -w apps/app`: percorrer o seletor, o editor, o adesivo do compositor, o cartão compacto e o adesivo do momento. Registrar aparelho e sistema.
+- [ ] iOS, simulador: os mesmos percursos. Registrar o sistema.
+- [ ] Web e PWA, primeiro a 375 pt e depois no computador: os mesmos percursos. Registrar navegador e versão. No PWA instalado, registrar também o sistema.
+- [ ] Tema claro e tema escuro, no celular e na web: seletor, editor, adesivo, cartão compacto e adesivo do momento.
+- [ ] TalkBack no Android e VoiceOver no iOS, na faixa do editor: o controle é ajustável, o valor anuncia os tempos (o início e o fim do trecho, não a altura das barras) e as ações **Avançar um segundo** e **Voltar um segundo** mudam o início.
+- [ ] Na web, com o foco na faixa: seta para a esquerda e para baixo voltam um segundo, seta para a direita e para cima avançam um segundo, Home vai ao começo e End vai ao último início. Tab segue para o próximo controle.
+- [ ] Com Reduzir movimento: o avanço na janela troca de lugar de uma vez, e o equalizador do momento fica parado.
+- [ ] Uma faixa de 7200 s: a janela continua de 15 s e a faixa mostra no máximo 200 barras. Uma faixa com menos de 15 s: a janela é a faixa inteira, não há início para arrastar, e o selo do cartão mostra a duração real depois que o item carrega.
+- [ ] Contar os pedidos de áudio (o play e o corpo do áudio) enquanto um trecho do editor repete, até a prévia pausar, em cada plataforma: Android, iOS, web e PWA. Registrar a contagem. O editor reutiliza um único ticket entre as voltas e os arrastos, e a busca do ponto ao soltar não pede ticket novo.
+- [ ] No visualizador do momento, no lugar do chip de atribuição e do chip separado de silenciar da seção 187: o adesivo mostra a capa gerada, o título e o artista. Um toque alterna **Silenciar música** e **Ativar música**, pausa o trecho sem novo pedido de áudio, e não abre a página. O equalizador pequeno se move enquanto toca e dá lugar ao ícone de mudo ao silenciar.
+- [ ] O link **Audius** (nome acessível **Abrir no Audius**), separado do adesivo, abre a página da faixa e pausa o visualizador até a pessoa voltar. Se o link abrir sem ocultar o visualizador, a pausa termina após 1 s.
+
+## 200. Capas de música pela associação (PR feat/music-covers)
+
+Com `VARANDA_AUDIUS_COVERS` exatamente `1`, e só então, `POST /account/audius/search`, `/item` e `/resolve` com `?covers=1` acrescentam `cover` (booleano) a cada item, faixas da playlist incluídas. `cover: true` quer dizer que o serviço guarda uma URL de arte para aquele item; a URL e os bytes não vêm na resposta. Sem a consulta, ou com o interruptor desligado, a resposta não muda. `covers=0` não é `covers=1`. Um serviço anterior ignora a consulta. `GET /account/audius/policy` continua `{ enabled, moments }`, mesmo com `?covers=1`. `POST /account/audius/art` com exatamente `{ kind, id }` responde `{ mime, bytes }` (base64 canônico; JPEG, PNG ou WebP pelos magic bytes; `ART_MAX_BYTES` 131072). A capa fica só na memória do serviço (no máximo `MAX_ART_CACHED` 128, por `CACHE_TTL_MS`, 10 minutos) e só na memória do aparelho, durante a sessão. Nada é gravado no cartão, no rascunho, no momento nem em disco. Sem capa, ou com o interruptor desligado, o azulejo é gerado no aparelho. A produção permanece em `VARANDA_AUDIUS_COVERS=0` até a versão dos Termos que descreve as capas estar instalada. Nunca definir `VARANDA_AUDIUS_COVERS=1` antes de a versão dos Termos que descreve as capas estar instalada.
+
+Como verificar, a partir da raiz:
+
+```sh
+node apps/cli/test/audius-routes.test.js
+node apps/cli/test/audius-server.test.js
+node apps/cli/test/audius-provider.test.js
+node apps/cli/test/account.test.js
+node apps/cli/test/deploy.test.js
+node apps/app/test/music.test.js
+node apps/app/test/musicClient.test.js
+node apps/app/test/musicDraft.test.js
+node apps/app/test/musicPicker.test.js
+node apps/app/test/musicPlayerCard.test.js
+node apps/app/test/momentMusic.test.js
+```
+
+Esses testes conferem o serviço, o cliente e o texto do código. Não montam a interface num aparelho e não usam a rede pública nem a API real do Audius. A lista é um roteiro, não um registro de execução.
+
+`apps/cli/test/audius-routes.test.js`: `audius: answers are unchanged without the covers query and when the switch is off`; `audius: answers carry a cover boolean with the query and the switch on`; `audius: no answer ever carries an artwork URL`; `audius: the policy answer keeps exactly enabled and moments`; `audius: art answers validated bytes with nosniff and no-store`; `audius: art is feature-off before any counter unless covers are on`; `audius: art refuses bytes that are not JPEG, PNG or WebP by magic`; `audius: art stops at the size cap`; `audius: an oversize cover is remembered as a miss`; `audius: art never sends the API key or member headers to the art host`; `audius: art host must be public https and redirects are re-checked`; `audius: art charges the member cap and one budget token per host contact, not provider calls; a cache hit spends no budget`; `audius: each redirect hop spends one budget token, and a spent budget answers 503 and gives the use back only before any host contact`; `audius: art releases inflight on failure and timeout`; `audius: a failing art host keeps the art use and cannot drain the shared budget`; `audius: covers have their own slot pool`; `audius: the cover flag lives in the item row`; `audius: concurrent loads of one cover contact the host once`; `audius: an expired cover is not served`; `audius: an expired cover is removed without another request`; `audius: a full cover cache evicts the oldest and clears its timer`; `audius: one member cannot hold every cover slot`; `audius: a cover flag always matches what the art route serves`; `audius: a new artwork url replaces a remembered cover`.
+
+`apps/cli/test/audius-server.test.js`: `audius server: covers ride the query, the policy keeps its keys, and art sends nosniff and no-store once`; `audius server: art is feature-off while covers are off`.
+
+`apps/cli/test/audius-provider.test.js`: `parseAudiusConfig: defaults and accepted values` (a configuração padrão inclui `covers: false`); `artOf keeps only a plain https hostname URL`.
+
+`apps/cli/test/account.test.js`: `readEnv: Audius on with the key, optional values checked, values never in the error` (`0` ou vazio desliga, `1` liga, capas não ligam momentos, chave vazia com `VARANDA_AUDIUS_COVERS` é `VARANDA_AUDIUS_API_KEY ausente`, valor ruim é `VARANDA_AUDIUS_COVERS inválido: use 0 ou 1`).
+
+`apps/cli/test/deploy.test.js`: `compose.web.yaml: VARANDA_AUDIUS_COVERS is optional and only on the account service`.
+
+`apps/app/test/music.test.js`: `parsers accept today's item or one more boolean cover and nothing else` (o booleano `cover` só quando é próprio; uma capa nunca chega ao cartão, cujas chaves são `desc`, `host`, `title`, `url`); `artMime knows JPEG, PNG and WebP and nothing else`.
+
+`apps/app/test/musicClient.test.js`: `search, item and resolve ask covers by query with unchanged bodies`; `an older service's answer parses without a cover field`; `audiusArt refuses a mime that does not match the bytes, an oversize body and extra keys`; `audiusArt uses only the account session and origin`; `the cover cache loads once per key, bounds parallel loads, keeps failures, evicts past max and clears`; `a pending cover is never loaded twice`; `a transient cover failure is not remembered`; `a missing cover is remembered`; `audiusArt waits 25 s`; `a queued cover nobody waits for is never loaded`; `a cover loading through a wipe is not loaded twice`; `a session throttle does not hide a cover for the session`; `cover files keep covers in memory only`.
+
+`apps/app/test/musicDraft.test.js`: `the sticker asks its cover through the session and stores nothing`.
+
+`apps/app/test/musicPicker.test.js`: `rows and the editor ask a cover only through useMusicCover`.
+
+`apps/app/test/musicPlayerCard.test.js`: `the idle card asks no cover and shows the tile`; `after the tap the card asks the cover for the answered item only`; `an account change never asks a cover for the new member`.
+
+`apps/app/test/momentMusic.test.js`: `only a base64 JPEG, PNG or WebP cover is drawn, never an SVG`; `the momento sticker asks no cover before playback starts`; `a failed cover leaves the tile and reports nothing`; `an account change resets the cover latch`.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Todos os itens estão em aberto.
+
+Usar uma instalação de teste, sem DHT pública, com a música do Audius ligada. Para as capas ligadas, uma chave de teste (staging), nunca a de produção. O build de debug não entra com passkey de produção. No iOS, a passkey depende do domínio associado da conta Apple Developer (veja `docs/development.md`). Ordem: Android, iOS, depois a web.
+
+- [ ] Capas desligadas (`VARANDA_AUDIUS_COVERS` ausente, vazio ou `0`): seletor, editor, adesivo do compositor, cartão da publicação e visualizador do momento mostram o azulejo gerado, e nenhum pedido vai a `/account/audius/art`.
+- [ ] Capas ligadas (`VARANDA_AUDIUS_COVERS=1`) contra uma chave de teste: o seletor, o editor e o adesivo do compositor mostram a capa.
+- [ ] Uma publicação vista por uma segunda conta: nenhum pedido de capa antes do toque; depois do toque em **Ouvir**, **Ouvir trecho** ou **Ouvir playlist**, a capa aparece enquanto o cartão está ativo.
+- [ ] No visualizador do momento, a capa só aparece depois que a música daquele momento começa a tocar e continua ao silenciar.
+- [ ] Nenhum arquivo de capa no diretório de cache do app.
+- [ ] Uma capa que falha uma vez mostra o azulejo na hora e pode aparecer numa vista seguinte. Não há nova tentativa automática.
+- [ ] Uma linha de busca que sai da tela antes de a capa começar a carregar não dispara o pedido.
+- [ ] Bloquear e desbloquear o app enquanto uma capa carrega: depois de desbloquear, a capa aparece sem um segundo pedido a `/account/audius/art` (conferir no log do serviço).
+- [ ] Trocar de conta com um cartão de música ativo: a nova conta não pede capa antes do próprio toque.
+- [ ] Android, depois iOS, depois a web. Registrar aparelho, sistema e, na web, o navegador.
+
+## 201. Termos 42 para capas de música (PR feat/music-covers-terms)
+
+Termos de Uso e Política de Privacidade na versão 42, de 13/11/2026, com novo aceite. A versão anterior lida na base era 41 nos dois módulos. O serviço de conta busca as capas pelo endereço da associação, sem enviar o endereço do aparelho, a chave, o token ou a conta do membro. A imagem fica só na memória do serviço por até 10 minutos e no aparelho enquanto o app está aberto, sem entrar na publicação, no momento ou em arquivo. As capas e a contagem diária de capas por membro desaparecem ao reiniciar o serviço. O servidor de imagens recebe o endereço da associação e o caminho da imagem.
+
+Instalar esta versão antes de definir `VARANDA_AUDIUS_COVERS=1`. O piso da versão 39 para a música em si permanece.
+
+### Verificação automatizada
+
+Na raiz, com Node 24 e dependências locais, sem rede:
+
+```sh
+npx --no-install standard apps/app/src/legal.js packages/core/lib/terms.js apps/app/test/legal.test.js packages/core/test/terms.test.js apps/site/test/legal.test.js
+node apps/app/test/legal.test.js
+node packages/core/test/terms.test.js
+node apps/site/test/legal.test.js
+node apps/app/test/terms-version.test.js
+node apps/site/scripts/render-legal.js --check
+```
+
+`apps/app/test/legal.test.js`: `legal: this version describes music covers as never stored` confere os parágrafos de capas dos dois documentos, o limite de memória, a contagem diária, a transferência e a reprodução só após o toque. A versão, a data, a nota de revisão e o digest estão fixados. `packages/core/test/terms.test.js` fixa a versão do aceite; `apps/app/test/terms-version.test.js` confere que os módulos concordam. `apps/site/test/legal.test.js` confere a versão e as páginas geradas pelo renderizador, sem edição manual de HTML.
+
+Resultado em Node 24.22.1: app 29/29 testes e 1341/1341 asserções, core 8/8 e 126/126, site 7/7 e 115/115, igualdade de versões 1/1 e 2/2. Standard e renderizador com `--check` passaram. Sem os dois parágrafos novos, o teste de capas falhou; os parágrafos foram restaurados antes da verificação final. Nenhuma dependência foi instalada.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Os itens abaixo continuam em aberto, na ordem Android, iOS e web:
+
+- [ ] Uma conta com aceite anterior precisa aceitar a versão 42 antes de continuar.
+- [ ] A tela de aceite e Ajustes, Termos e privacidade, mostram a versão 42, a data 13/11/2026 e os parágrafos sobre capas.
+- [ ] As páginas de Termos e Privacidade do site apresentam o mesmo texto do app.
+
+## 202. Publicar sem "Maximum update depth exceeded" ao digitar rápido (PR fix/composer-paste-update-loop)
+
+Corrige a observação 2 do §198. Não muda protocolo, semeador nem RPC.
+
+Causa: dois efeitos do campo de Publicar rodam a cada tecla e chamavam o setter mesmo com o valor que já tinham (`setAnnouncement('')` em `useCounterAnnouncement` e `setCheckError('')`). No React 19, essa chamada logo depois de um commit ainda agenda uma renderização. Na digitação do simulador (de 90 a 150 caracteres por segundo), a tecla seguinte chegava antes dessa renderização, e depois de 50 commits seguidos com trabalho pendente o React lançou o erro a partir de `typePost`. Na web, teclas disparadas em sequência reproduzem o mesmo erro, por volta da tecla 52. Não depende de tocar **Cancelar**.
+
+Regras que os passos conferem:
+
+- Os dois efeitos só chamam o setter quando o valor muda: o aviso do contador só é limpo se havia aviso, e a mensagem da conferência do texto só é limpa se havia mensagem.
+- O resto não muda: passado o limite, o contador fica vermelho e negativo e **Publicar** fica desligado. O campo não corta o texto no limite.
+- Os avisos do contador para leitor de tela continuam os mesmos: "Restam N caracteres" a 20 do limite e "Limite de caracteres atingido" ao chegar nele, uma vez cada.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/composePolish.test.js`: `composer keystroke effects call a setter only to change its value` digita 3000 caracteres pelo efeito real do contador, no celular e na web, com limites de 200 e 1000, e confere que nenhum setter recebe o valor que já tinha. Sem a correção, o teste falha.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA:
+
+- [ ] Simulador iOS: abrir Publicar e digitar cerca de 3 mil caracteres com a ferramenta de digitação do simulador. Não aparece a caixa vermelha, o contador acompanha o texto e, depois do limite, fica vermelho e negativo, com **Publicar** desligado.
+- [ ] Depois disso, tocar **Cancelar**: o campo fecha sem erro.
+- [ ] Android: colar um texto de cerca de 3 mil caracteres e digitar rápido em seguida, sem erro.
+- [ ] Web e PWA: colar um texto longo e segurar uma tecla: sem erro no console, e o contador acompanha.
+- [ ] Com VoiceOver ou TalkBack: os avisos de "Restam" e de limite atingido ainda são lidos, uma vez cada.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+- Durante o desenvolvimento, o erro foi reproduzido no simulador iOS e na web com o código anterior. Com a correção, 3190 caracteres digitados no simulador iOS e 3000 teclas na web passaram sem erro, e **Cancelar** fechou o campo. O Android não foi conferido.
+- O teste lê o corpo dos dois efeitos do código-fonte: se a forma deles mudar, o teste falha na primeira asserção e precisa acompanhar.
+
+## 203. Players de música em publicações, carregados ao aparecer, Termos 43
+
+Numa publicação (A Rua, Diário, perfil, conversa, Busca, Espiadinha), um cartão de YouTube, SoundCloud, Spotify ou Apple Music mostra o player do próprio provedor sem toque: não há **Tocar aqui**, **Fechar player** nem aviso embaixo do cartão. O quadro só é montado depois que o cartão fica dentro da faixa da lista (pelo menos metade da largura e o menor entre metade da altura e 120 pt, abaixo da barra de cima e acima da barra de abas, quando há uma) em duas conferências com 500 ms de intervalo, na tela que a pessoa está olhando (a aba escolhida sem nada empilhado por cima, ou a tela do topo da pilha), sem compositor, Ajustes, denúncia, ajuda, aviso de página ou bloqueio por cima, com o app em primeiro plano e sem foto em tela cheia. Na conversa de uma publicação (Conversa), a faixa termina no topo da barra de resposta. Uma medição que não responde antes da conferência seguinte conta como cartão escondido. O quadro sai quando qualquer uma dessas condições deixa de valer, quando o cartão sai da faixa e, por uma conferência, quando outro player do app começa (cartão do Audius, mensagem de voz); depois pode voltar, em silêncio. No máximo 2 quadros de provedor ficam carregados no app; um quadro carregado e visível nunca sai para dar lugar a um novo, e um terceiro cartão espera mostrando o cartão guardado. Os endereços não pedem reprodução automática (YouTube sem autoplay, SoundCloud com `auto_play=false`), a lista `allow` do quadro não tem autoplay e o WebView nativo exige um toque para tocar mídia, então nada soa antes do play dentro do player. O sandbox não mudou (`allow-scripts allow-same-origin allow-presentation`: sem popups e sem navegar a janela de cima), então o próprio player não abre o provedor; o cartão mantém um link compacto "Abrir no <Nome>" embaixo do player e embaixo do cartão guardado, que abre a página guardada só num toque. Um cartão mais estreito que o mínimo do provedor (YouTube abaixo de 200 pt) nunca monta quadro e mostra o cartão guardado com esse link. Carregar um quadro não conta como tocar, então não para uma mensagem de voz, um cartão do Audius nem um momento; o app não vê o play dentro do quadro, então apertar o play num player não pausa outro áudio. O texto mostrado esconde só o link que é o próprio item do cartão (mesma página reconstruída por `embedOf`; `youtu.be/ID` e `watch?v=ID` são o mesmo item, outro `t=` é outro item); todo o resto fica, e o registro guardado não muda. Depois de esconder o link, a pontuação em volta se ajeita, sem que o texto mostrado ganhe link, menção ou palavra que o texto guardado não tem: um par de parênteses ou colchetes que ficou vazio só some quando há espaço ou o limite da linha do lado de fora, a pontuação só se junta à palavra anterior quando vem seguida de espaço ou do fim do texto, e se a arrumação ainda mudasse os links ou as menções, o texto original aparece ("Olha <link>, que legal" vira "Olha, que legal", enquanto "pala( <link> )vra" fica "pala( )vra"). Um tempo do YouTube como `t=1m30s` também é aceito. Os cartões do Audius continuam tocando só com um toque, pelo serviço de conta. Os mesmos players (nunca o do Audius) carregam também numa publicação citada (`QuoteCard`, onde o player fica fora da área de toque da citação e fora do invólucro de acessibilidade escondido da linha, `quotePlayerOf` e `quoteOut`: o nome e o horário da citação são o link que abre a publicação citada, e o player é alcançado por VoiceOver, TalkBack e teclado), nas conversas privadas e nos grupos (`Bubble`, em Mensagem e Grupo, onde a faixa da lista termina no topo do compositor) e na prévia do link no compositor (`LinkDraftCard`: Publicar, conversas privadas e grupos) assim que a prévia fica pronta, antes do envio. Na prévia do compositor, um player mais alto que um terço da janela (álbuns, playlists, sets do SoundCloud) dá lugar ao cartão guardado com o link "Abrir no <Nome>", e o botão de remover aparece em todos os estados. Uma folha aberta descarrega os players embaixo dela, enquanto um cartão dentro da folha mantém o seu; bloquear o app ou mandá-lo para segundo plano descarrega todos. Nos balões e nas citações, o texto mostrado esconde o link do próprio cartão do mesmo jeito (numa mensagem com formatação, o texto fica inteiro); copiar, encaminhar e responder usam o texto inteiro. Numa conversa privada ou num grupo, isso conta ao provedor que o aparelho mostrou aquele item, e quando, mas nunca o texto das mensagens. Num pedido de mensagem, o cartão de música fica um cartão comum, com o link no texto, até a pessoa aceitar; depois disso o player carrega como em qualquer conversa. Cartões de link comuns (qualquer outro site) não mudaram. Termos e Política de Privacidade passam à versão 43, com novo aceite; dizem também que, quando a associação liga a música nos momentos, ver um momento com música, inclusive um seu, já pede o trecho de 15 segundos ao serviço de conta, sem toque à parte, e que ele toca em seguida, a não ser que o navegador só deixe tocar som depois de um toque (o código do momento e `VARANDA_AUDIUS_MOMENTS` não mudaram, desligado por padrão até o Audius responder por escrito).
+
+A seção 184 descreve a regra anterior, de carregar o player só ao tocar em **Tocar aqui**; esta seção a substitui nesse ponto. As seções 185 a 202 não mudam.
+
+Testes automáticos, a partir da raiz, cada arquivo sozinho:
+
+- `node apps/app/test/musicEmbed.test.js`
+- `node apps/app/test/musicEmbedCard.test.js`
+- `node apps/app/test/embedFrame.test.js`
+- `node apps/app/test/links.test.js`
+- `node apps/app/test/linkPreview.test.js`
+- `node apps/app/test/chatMedia.test.js`
+- `node apps/app/test/legal.test.js`
+- `node apps/app/test/dm.test.js`
+- `node apps/app/test/groups.test.js`
+- `node apps/app/test/linkCardBuild.test.js`
+- `node apps/app/test/feedRender.test.js`
+- `node apps/app/test/conversaScreen.test.js`
+
+### Verificação manual
+
+Nenhuma conferência em aparelho nem com os provedores reais foi feita ainda. Os itens abaixo continuam em aberto, primeiro no Android, depois no iOS, na web e no PWA, para cada um dos quatro provedores (YouTube, SoundCloud, Spotify e Apple Music):
+
+- [ ] O player aparece sem toque quando o cartão fica visível.
+- [ ] Nada soa antes do play dentro do player.
+- [ ] O PLAY CONTINUA FUNCIONANDO dentro do player de cada provedor, com o toque exigido para mídia e sem delegação de autoplay.
+- [ ] Rolar rápido (fling) não carrega quadro nenhum (conferir no inspetor de rede).
+- [ ] Com três cartões na tela, carregam dois quadros, e o terceiro carrega quando um deles sai.
+- [ ] O quadro some depois de rolar para longe, depois de empilhar uma tela por cima (o feed coberto não carrega nada), em outra aba, embaixo do compositor, de Ajustes, da denúncia e da ajuda, durante uma foto em tela cheia e depois de mandar o app para segundo plano.
+- [ ] Começar um cartão do Audius ou uma mensagem de voz derruba um player que está tocando.
+- [ ] Abrir qualquer folha por cima do feed (menu da publicação, Conversar com a página num perfil, bloquear, encaminhar) derruba um player carregado.
+- [ ] Em Buscar, trocar de Publicações para Contas não deixa player carregado no painel escondido.
+- [ ] A rotação em tela cheia do YouTube mantém o player.
+- [ ] "Abrir no <Nome>" abre a página fora do app, e o próprio player não consegue navegar para fora.
+- [ ] O link do próprio cartão some do texto, enquanto o resto do texto, um segundo link e uma @menção continuam.
+- [ ] Uma publicação só com a URL não mostra linha de texto.
+- [ ] Uma publicação com fotos mantém a URL no texto e não tem player.
+- [ ] Um cartão de YouTube com menos de 200 pt de largura mostra o cartão guardado e nunca um quadro.
+- [ ] Passar rolando por um cartão do Audius não faz pedido nenhum.
+- [ ] Montar um player não para uma mensagem de voz que está tocando.
+- [ ] O aceite de Termos pede a versão 43 a uma conta que aceitou a 42.
+- [ ] Na web, `frame-src` continua com as quatro origens.
+- [ ] Um cartão de provedor numa conversa privada, num grupo e numa citação mostra o player sem toque.
+- [ ] Um toque ou um toque longo dentro do player de uma citação nunca abre a publicação citada, e dentro do player de um balão nunca abre as ações; um toque longo no texto do balão continua abrindo as ações.
+- [ ] Numa publicação, numa citação e num balão de conversa, no Android e no iOS, play, pausa e avanço funcionam dentro do player de cada provedor, e arrastar na vertical começando no player continua rolando a lista (o espaço do player não reivindica o toque; quem o reivindica é o cartão que ocupa o lugar do player e o WebView nativo).
+- [ ] Abrir o menu da mensagem (toque longo) ou o menu de anexo numa conversa descarrega os players dela.
+- [ ] Uma mensagem só com a URL não mostra linha de texto vazia.
+- [ ] Copiar e encaminhar mantêm o texto inteiro.
+- [ ] Um link do Audius numa conversa continua um cartão comum.
+- [ ] Um cartão escondido atrás do compositor da conversa ou do teclado não carrega nada.
+- [ ] A prévia do compositor em Publicar, numa conversa privada e num grupo mostra o player; o botão de remover funciona enquanto ele toca; a prévia de um álbum ou de uma playlist mostra o cartão compacto.
+- [ ] Em Publicar, o player da prévia pode carregar mesmo com o teclado por cima (os Termos dizem que ele pode carregar assim que a prévia fica pronta).
+- [ ] Abrir uma folha por cima de Publicar (GIF, seletor de fotos) descarrega o player da prévia.
+- [ ] Com dois players carregados numa conversa, a prévia do compositor espera um deles sair da tela.
+- [ ] Um pedido de mensagem com um link de música mostra o cartão comum e o texto do link; depois de aceitar, o player carrega.
+- [ ] Na conversa de uma publicação (Conversa), um cartão quase todo atrás da barra de resposta não carrega, e carrega depois de rolar para cima dela.
+- [ ] VoiceOver, TalkBack e o teclado na web alcançam os controles do player de uma citação e o link "Abrir no <Nome>"; um toque no player nunca abre a publicação citada, e o nome e o horário da citação abrem.
+- [ ] No Safari do iOS e no PWA, com o teclado aberto numa conversa, uma linha atrás do teclado não carrega. Ali o teclado pode não mover o compositor, então registrar o que acontece.
+- [ ] Um link do YouTube com `t=1m30s` abre o player em 1:30.
+- [ ] Uma medição que responde depois da conferência seguinte conta como escondida: num aparelho lento, o cartão ainda carrega depois que a rolagem para.
+- [ ] Pontuação do link escondido: "Olha <link>, que legal" mostra "Olha, que legal"; " (<link>) " não deixa nada; "pala( <link> )vra" mostra "pala( )vra"; o texto mostrado nunca ganha link, menção ou palavra que o texto guardado não tem, e quando a arrumação mudaria links ou menções aparece o texto original.
+- [ ] Limitação conhecida: aspas em volta do link ("<link>", «<link>», “<link>”), espaços não separáveis e "…" depois do link não são arrumados. Registrar o que aparece.
+- [ ] Limitação conhecida: um cartão que entra na tela durante a rotação de tela cheia nativa pode carregar. Registrar o que acontece.
+
+## 204. Música do Audius toca sozinha na publicação, capas e informações da faixa, Termos 44
+
+Numa publicação de texto, resposta ou citação aberta como publicação própria, um cartão cujo URL leva uma referência Audius de trecho ou faixa vira um adesivo compacto: capa ou azulejo gerado, título, segunda linha com "artista · gênero · ano" (só os campos disponíveis), selo **15 s** no trecho, fonte Audius e link **Abrir no Audius**. Depois do item respondido, a segunda linha usa a duração como alternativa apenas quando nenhum dos campos de informação existe; o selo do adesivo continua **15 s**, mesmo numa faixa menor. O app pede `?covers=1&info=1` na busca, no item e no resolve; `info=1` acrescenta gênero (até 40 pontos de código) e ano (1900 a 2100, de `release_date`) só às faixas. Sem essa consulta, as chaves da resposta não mudam.
+
+Num nó ligado à instalação, com **Tocar música sozinha** ligada (padrão, guardada só no aparelho, imediatamente antes de **Prévia de links** em Ajustes), o adesivo visto em duas conferências com 500 ms de intervalo na tela ativa pede disponibilidade, item, capa quando ligada e áudio ao serviço de conta e toca sem toque. Com som silenciado ou inícios automáticos retidos, o adesivo em que a pessoa não tocou não pede nada (seção 208). Não começa enquanto outro player carrega ou toca (voz, vídeo ou música), com quadro de YouTube, SoundCloud, Spotify ou Apple Music carregado, sem rede, sob uma folha ou visualizador de fotos, bloqueado ou em segundo plano. Uma mensagem de voz ou um cartão antigo de música pausado pela pessoa libera a reprodução e não bloqueia outro adesivo. No nativo, o leitor de tela precisa estar confirmado como desligado; com TalkBack ou VoiceOver ligado nada começa sozinho, mas um toque toca e rolar para longe interrompe. A web não detecta leitor de tela pelo react-native-web: ali o início automático segue a chave de Ajustes e as demais condições. O áudio para quando a linha fica quase toda fora da faixa visível, ao trocar de tela ou aba, abrir uma folha ou o visualizador de fotos, perder a rede, bloquear ou ir para segundo plano, inclusive depois de um toque. Só uma música toca por vez, sem laço: o trecho toca uma vez enquanto a linha está visível e pode tocar de novo depois de sair e voltar.
+
+Tocar num adesivo que toca ou carrega silencia o som da sessão, compartilhado pelo feed e pelos momentos, até **Ativar som** ou um toque num adesivo parado. A seção 208 substitui a regra anterior de toque e liberação desta seção. Uma recusa do navegador, ou uma busca automática do ponto inicial que não se confirma em 5 s, mostra **Tocar música**, sem erro. Essas duas falhas e o limite diário retêm os inícios automáticos só nas publicações, até o próximo toque num adesivo, sem silenciar vídeos nem momentos. Outra falha automática não mostra texto nem se repete automaticamente naquela linha. Falhas depois de um toque continuam sendo anunciadas. Playlists e todos os cartões com a chave desligada mantêm o player anterior e não pedem nada antes de um toque. O cartão dentro da citação e o balão de conversa continuam cartões comuns, e o rascunho mantém seu adesivo de edição e prévia por toque. Nenhum frame do Audius é carregado. O registro não mudou: `preview` e mídia nunca vão juntos, e música com foto ou vídeo numa publicação continua recusada. A política continua exatamente `{ enabled, moments }`; limites diários e orçamento compartilhado do provedor não mudam. A primeira carga automática consome um uso de item, um de reprodução e os pedidos de áudio, além da capa quando pedida; uma linha que volta pode reutilizar o item respondido e o ticket ainda válido.
+
+A capa do adesivo só é pedida enquanto ele está visível e depois que seu item foi respondido, por início automático ou toque. Com som silenciado ou inícios automáticos retidos, o adesivo em que a pessoa não tocou mostra só uma capa já na memória, sem pedido de capa (seção 208). O editor pede `POST /account/audius/art?size=480`, com cache separado da capa pequena e alternativa pequena quando não há a maior ou quando ela falha como imagem e uma nova busca ainda cabe nos 20 s de resposta, abaixo do prazo de 25 s do app. Um app anterior continua recebendo a pequena sem `size=480`. As capas dependem de `VARANDA_AUDIUS_COVERS=1`, permanecem só em memória e não são ligadas por esta mudança. Termos e Política de Privacidade passam à versão 44, com novo aceite: o serviço de conta pode saber sem toque que a conta do membro pediu a faixa, portanto que o aparelho mostrou aquela publicação; o Audius continua recebendo o endereço da associação, nunca o do membro. A hipótese de desenho depende de parecer jurídico, e se o início automático nas publicações exige confirmação por escrito do Audius fica pendente da decisão de quem é dono do projeto.
+
+Os passos de leitura que exigem toque nas seções 186 e 200 são substituídos aqui para trechos e faixas com a chave ligada. A regra anterior do Audius por toque na seção 203 também é substituída nesses casos; os players dos quatro outros provedores seguem como na seção 203.
+
+Testes automáticos, a partir da raiz, cada arquivo sozinho:
+
+- `node apps/app/test/postMusic.test.js`
+- `node apps/app/test/postMusicCard.test.js`
+- `node apps/app/test/musicPlayerCard.test.js`
+- `node apps/app/test/chatMedia.test.js`
+- `node apps/app/test/linkPreview.test.js`
+- `node apps/app/test/musicClient.test.js`
+- `node apps/app/test/musicPicker.test.js`
+- `node apps/app/test/legal.test.js`
+- `node apps/cli/test/audius-provider.test.js`
+- `node apps/cli/test/audius-routes.test.js`
+- `node apps/cli/test/audius-server.test.js`
+
+Esses testes conferem a lógica, os contratos e o texto do código. Os testes de rotas e servidor usam apenas fixtures HTTP em loopback; nenhum usa a API real do Audius. A lista é um roteiro, não um registro de execução.
+
+### Verificação manual
+
+Nenhuma conferência em aparelho nem com o provedor real foi feita nesta tarefa. Conferir primeiro no build de debug do Android (emulador ou aparelho), depois no simulador iOS, na web e no PWA, em claro e escuro. O que exige conta numa instalação de produção precisa do APK de preview do EAS, pois a passkey de produção não entra no build de debug; no iOS a passkey depende do domínio associado da conta Apple Developer (veja `development.md`).
+
+- [ ] Trecho e faixa começam após cerca de 1 s visíveis numa publicação, resposta e citação aberta como publicação própria; rolar rápido não pede música.
+- [ ] Rolar para longe para a música, inclusive a iniciada por toque; sair da faixa e voltar permite tocar o trecho de novo, uma vez, sem laço.
+- [ ] Trocar de aba, abrir uma publicação, abrir uma folha (inclusive Ajustes), abrir o visualizador de fotos, perder a rede, bloquear a tela e ir para segundo plano param a música e os pedidos pendentes.
+- [ ] Duas publicações de música tocam uma depois da outra ao rolar, nunca juntas.
+- [ ] Uma mensagem de voz ou vídeo carregando ou tocando nunca é interrompido por início automático do feed.
+- [ ] Pausar uma mensagem de voz e ir ao feed: a música começa, sem ficar bloqueada pela voz pausada.
+- [ ] Um cartão de playlist pausado no feed não impede que outro adesivo comece.
+- [ ] Um player do YouTube já carregado nunca é fechado nem interrompido pelo início automático de um adesivo; repetir com SoundCloud, Spotify e Apple Music.
+- [ ] No app nativo, com TalkBack ou VoiceOver ligado, nada começa sozinho; um toque no adesivo toca e rolar para longe para. Na web, registrar que a detecção não existe e conferir a chave de Ajustes desligada para impedir o início automático.
+- [ ] Na primeira carga da web, sem gesto anterior, a recusa do navegador mostra **Tocar música**; tocar inicia o som e libera os outros adesivos, e nenhuma outra linha tenta antes desse toque.
+- [ ] No Safari do iOS e no PWA instalado, um trecho toca ou mostra **Tocar música** em cerca de 5 s na busca do ponto inicial, sem ficar 20 s com o indicador girando; a recusa não mostra erro.
+- [ ] Com a chave de silêncio do iPhone ligada, registrar o que acontece no app nativo, no Safari e no PWA.
+- [ ] Tocar no adesivo tocando silencia o som da sessão conforme a seção 208; rolar para outro adesivo não começa som; tocar num adesivo parado ou em **Ativar som** ativa o som de novo.
+- [ ] Desligar **Tocar música sozinha**, fechar e abrir o app mantém a escolha só neste aparelho e restaura o cartão antigo: nada é pedido antes do toque em **Ouvir** ou **Ouvir trecho**.
+- [ ] Uma playlist continua no cartão antigo, com **Ouvir playlist**, próxima e anterior, sem pedido antes de um toque, com a chave ligada ou desligada.
+- [ ] O cartão dentro da citação, o balão privado e o de grupo ficam comuns, sem áudio automático; a prévia do compositor continua por toque.
+- [ ] Uma publicação com foto ou vídeo continua sem poder receber música; `preview` e mídia não entram juntos no registro.
+- [ ] No limite diário, a tentativa automática não mostra erro e nenhuma outra linha tenta; só depois de tocar aparece **Limite de músicas por hoje**.
+- [ ] Uma falha automática comum não mostra erro nem se repete automaticamente para a mesma linha, inclusive depois de sair e voltar; um toque permite tentar e anuncia a falha.
+- [ ] Com capas ligadas, o adesivo mostra a capa apenas depois do item respondido e enquanto visível; o editor tem capa nítida de 480 px e usa a pequena quando a maior não pode ser respondida no prazo.
+- [ ] Com capas desligadas, todas as superfícies mantêm o azulejo gerado e nenhum pedido chega a `/account/audius/art`.
+- [ ] Com item carregado, artista, gênero e ano aparecem quando o Audius os fornece; sem nenhum desses campos, a segunda linha usa a duração. O adesivo de trecho mantém **15 s**; o cartão antigo mostra a duração real no selo de faixa menor.
+- [ ] Um app anterior a esta mudança ainda recebe a capa pequena do serviço novo, sem `size=480`.
+- [ ] Uma conta que aceitou a versão 43 recebe os Termos e a Política de Privacidade 44 para novo aceite.
+
+## 205. Players de música que seguem carregados ao rolar, links dentro do player, Termos 45
+
+Numa publicação (A Rua, Diário, perfil, conversa, Busca, Espiadinha), um cartão de YouTube, SoundCloud, Spotify ou Apple Music mostra o player do próprio provedor sem toque: não há botão para carregar nem para fechar o player, nem aviso embaixo do cartão. O quadro só é montado depois que o cartão fica de fato dentro da faixa da lista (pelo menos metade da largura e o menor entre metade da altura e 120 pt, abaixo da barra de cima e acima da barra de abas, quando a tela tem uma) em duas conferências com 500 ms de intervalo, na tela que a pessoa está olhando (a aba escolhida, sem nada empilhado por cima, ou a tela do topo da pilha), sem compositor, Ajustes, denúncia, ajuda, aviso de página ou bloqueio por cima, com o app em primeiro plano e sem foto em tela cheia aberta. Na conversa de uma publicação (Conversa), a faixa termina no topo da barra de resposta. O quadro sai quando qualquer uma dessas condições, menos a da faixa, deixa de valer e, por uma conferência, quando outro player do app começa (cartão do Audius, mensagem de voz); depois pode voltar, em silêncio. Um quadro já carregado continua o mesmo quando o cartão sai da faixa, enquanto a linha segue montada na lista (janela de 7 telas) e o cartão está a no máximo 3 alturas de janela da faixa: voltar com a rolagem não recarrega o provedor nem espera as duas conferências, e o som pode continuar. Uma conferência que encontra o cartão mais longe que isso descarrega o quadro na hora, também numa linha que a lista nunca solta (o FlatList mantém montadas as primeiras linhas, 8 no app); com a janela virada por um player em tela cheia, o quadro fica. No máximo 2 quadros de provedor ficam carregados no app. Um quadro na faixa, ou com a janela virada por um player em tela cheia, nunca sai para dar lugar a um novo. Um quadro fora da faixa por duas conferências seguidas pode ceder o lugar, o que está fora há mais tempo primeiro, a um cartão que ficou visível, e só sai na própria conferência seguinte, se ela ainda o encontrar fora da faixa. O pedido é retirado quando outro quadro sai ou quando o cartão que esperava deixa de esperar (sai da faixa, fica coberto ou sai da lista). Se os dois estão na faixa, o terceiro cartão espera mostrando o cartão guardado. Os endereços dos players não pedem reprodução automática (YouTube sem autoplay, SoundCloud com `auto_play=false`), a permissão do quadro não inclui autoplay e o WebView nativo exige um toque para tocar mídia, então nada soa antes de a pessoa apertar o play dentro do player. Músicas completas dependem do provedor. O sandbox tem `allow-popups` (`allow-scripts allow-same-origin allow-presentation allow-popups`: sem navegar a janela de cima, sem formulários e sem downloads, e sem `allow-popups-to-escape-sandbox`). No app nativo, um toque num link dentro do player não carrega nada no WebView: o endereço só sai para o sistema quando é https num domínio do mesmo provedor ou num subdomínio dele, e nunca pela página de redirecionamento do YouTube (`/redirect`), que leva para fora dele. Na web e no PWA, o link abre outra aba, que continua no sandbox e não consegue trocar a aba do Varanda. Não há a linha "Abrir no <Nome>": enquanto o player não está carregado, um toque no cartão guardado abre a página guardada. Um cartão mais estreito que o mínimo do provedor (YouTube abaixo de 200 pt) nunca monta quadro e mostra o cartão guardado, que abre a página num toque. Carregar um quadro não conta como tocar, então não para uma mensagem de voz, um cartão do Audius nem um momento. O app não vê o play dentro do quadro, então apertar o play num player não pausa outro áudio. O texto mostrado da publicação esconde só o link que é o próprio item do cartão (mesma página reconstruída por `embedOf`; `youtu.be/ID` e `watch?v=ID` são o mesmo item, outro `t=` é outro item); todo o resto do texto fica, e o registro guardado não muda. Depois de esconder o link, a pontuação em volta se ajeita, sem que o texto mostrado ganhe link, menção ou palavra que o texto guardado não tem: um par de parênteses ou colchetes que ficou vazio só some quando há espaço ou o limite da linha do lado de fora, a pontuação só se junta à palavra anterior quando vem seguida de espaço ou do fim do texto, e se a arrumação ainda mudasse os links ou as menções, o texto original aparece ("Olha <link>, que legal" vira "Olha, que legal", enquanto "pala( <link> )vra" fica "pala( )vra"). Um tempo do YouTube como `t=1m30s` também é aceito. Uma medição que não responde antes da conferência seguinte conta como cartão escondido, e uma só dessas não deixa um quadro carregado ceder o lugar. Os mesmos players (nunca o do Audius) carregam também numa publicação citada (`QuoteCard`, onde o player fica fora da área de toque da citação e fora do invólucro de acessibilidade escondido: o nome e o horário da citação são o link que abre a publicação citada, e o player é alcançado por VoiceOver, TalkBack e teclado), nas conversas privadas e nos grupos (`Bubble`, em Mensagem e Grupo, onde a faixa da lista termina no topo do compositor) e na prévia do link no compositor (`LinkDraftCard`: Publicar, conversas privadas e grupos) assim que a prévia fica pronta, antes do envio. Na prévia do compositor, um player mais alto que um terço da janela (álbuns, playlists, sets do SoundCloud) dá lugar ao cartão guardado, e o botão de remover a prévia aparece em todos os estados. Uma folha aberta descarrega os players que ficam embaixo dela, enquanto um cartão dentro da folha mantém o seu. Bloquear o app ou mandá-lo para segundo plano descarrega todos. Nos balões e nas citações, o texto mostrado esconde o link do próprio cartão do mesmo jeito (numa mensagem com formatação, o texto fica inteiro); copiar, encaminhar e responder usam o texto inteiro. Numa conversa privada ou num grupo, isso conta ao provedor que o aparelho mostrou aquele item, e quando, mas nunca o texto das mensagens. Cartões de link comuns (qualquer outro site) não mudaram. Se a página não puder ser lida ao compor a publicação, um link de música reconhecido ainda pode ganhar cartão com o nome do provedor e sem imagem. Um link de Audius nunca carrega o player do provedor. Trechos e faixas do Audius podem tocar sozinhos numa publicação visível, pelo serviço de conta, como descreve a seção 204; playlists continuam esperando um toque. Em Busca, o painel de Publicações tem o próprio sinal de tela visível, então trocar para Contas descarrega um player na hora. Termos e Política de Privacidade na versão 45, de 13/11/2026, com novo aceite. A regra está em `docs/app.md` ("Música em publicações"), na linha do player da tabela LGPD de `docs/design.md` e em "Music links" de `docs/protocol.md`.
+
+Para uma rolagem que mantém a linha montada, esta seção substitui a conferência da seção 203 de que o quadro sai quando o cartão sai da faixa. As seções 184 a 203 ficam como o registro das regras anteriores. Desde essas seções, para ninguém rodar as conferências antigas contra este build: o sandbox agora tem `allow-popups` (as seções 184 e 203 dizem que ele não tinha popups), a linha "Abrir no <Nome>" saiu (a seção 203 a confere) e um quadro já carregado não sai mais quando o cartão sai da faixa (seção 203).
+
+### Verificação automatizada
+
+Cada arquivo sozinho, a partir da raiz, no Node 24. A CI completa (`npm ci`, lint, `npm test` e demo) é a CI de pouso e não entra aqui.
+
+- `node apps/app/test/musicEmbedCard.test.js`: 41/41 testes, 456/456 asserções
+- `node apps/app/test/buscaGlobal.test.js`: 19/19 testes, 117/117 asserções
+- `node apps/app/test/platformGate.test.js`: 3/3 testes, 52/52 asserções
+- `node apps/app/test/linkPreview.test.js`: 17/17 testes, 148/148 asserções
+- `node apps/app/test/musicEmbed.test.js`: 19/19 testes, 1767/1767 asserções
+- `node apps/app/test/embedFrame.test.js`: 13/13 testes, 115/115 asserções
+- `node apps/app/test/legal.test.js`: 30/30 testes, 1396/1396 asserções
+- `node apps/app/test/postMusic.test.js`: 18/18 testes, 263/263 asserções (a música da publicação, seção 204, continua parando quando o adesivo sai da tela: só o quadro de provedor fica carregado)
+- `node apps/app/test/terms-version.test.js`: 1/1 teste, 2/2 asserções
+- `node packages/core/test/terms.test.js`: 8/8 testes, 126/126 asserções
+- `node apps/site/test/legal.test.js`: 7/7 testes, 115/115 asserções
+- `node apps/site/scripts/render-legal.js --check`: passa
+- `npx standard` nos arquivos `.js` alterados: limpo
+
+As asserções novas de `musicEmbedCard.test.js` sobre a troca de lugar (pedido marcado, cedência só na própria conferência escondida, resposta atrasada sem cedência, pedido retirado quando outro quadro sai ou quando o cartão que esperava deixa de esperar, e o quadro que sai quando uma conferência o encontra a mais de 3 alturas de janela da faixa) falham contra o código sem essas correções, assim como as recusas de `musicEmbed.test.js` aos caminhos que o servidor do YouTube leva a `/redirect` (segmento vazio, parâmetro `;`, `.;` e `..;`, barra codificada, `/attribution_link`).
+
+### Verificação manual
+
+Nenhuma conferência em aparelho nem com os provedores reais foi feita. Os itens abaixo continuam em aberto. A ordem é o build de debug do Android primeiro, depois o simulador iOS, depois a web e o PWA.
+
+- [ ] Android primeiro: rolar um player carregado uma tela e duas telas para longe e voltar. A mesma página continua, sem recarregar e sem a espera de 1 s. O FlatList corta as linhas fora da tela por padrão no Android. Se a página recarregar aqui, registrar e parar: não mudar `RefreshableList` neste PR.
+- [ ] O som começado antes de rolar continua enquanto o cartão está fora da vista, e para ao trocar de aba, ao abrir uma folha, um menu, uma foto em tela cheia ou uma tela empilhada, ao bloquear, ao ir para segundo plano, e quando uma mensagem de voz ou um cartão do Audius começa.
+- [ ] Com dois players fora da faixa, um terceiro cartão visível carrega e o que está fora da vista há mais tempo volta ao cartão guardado. Com dois na faixa, o terceiro espera e um toque nele abre o link. Um player em tela cheia, com a janela virada, nunca é o que cede o lugar.
+- [ ] Rolar muitas telas para longe descarrega o player. Ao voltar, ele espera as duas conferências e carrega de novo.
+- [ ] Um player carregado e tocando numa das 8 primeiras linhas de A Rua: rolar 2 telas para baixo mantém o som; rolar mais de 3 telas descarrega o player e o som para.
+- [ ] Em cada um dos quatro provedores, no Android e no iOS: um toque no título ou no logo dentro do player abre a página daquele provedor fora do app, o player nunca navega dentro do app, e um link para outro host não faz nada. Registrar quais hosts os links de cada provedor usam de fato.
+- [ ] Web e PWA: o link abre outra aba. No console dessa aba, `opener.top.location = 'https://example.com'` é recusado. Registrar se a página do provedor funciona nessa aba (formulários e downloads ficam bloqueados ali) e se algum player pede para abrir outro programa.
+- [ ] Não há linha "Abrir no" em estado nenhum. O cartão guardado, um cartão estreito e uma prévia alta do compositor abrem a página guardada num toque. A prévia do compositor mantém o botão de remover, e remover não abre o link.
+- [ ] Um player que não consegue carregar deixa um espaço vazio, sem link. Registrar o que a pessoa vê offline.
+- [ ] O aceite de Termos pede a versão 45 a uma conta que aceitou a 44.
+- [ ] Com dois players estacionados fora da vista e um terceiro cartão na tela, rolar um dos estacionados de volta para a vista no instante em que o terceiro termina a espera: o que volta não recarrega, e o terceiro continua esperando.
+- [ ] iOS: se o player de um provedor abre uma janela sem endereço (`window.open()` e depois uma mudança de `location`), registrar o que acontece. O app não pode cair.
+- [ ] Android: tocar um link no player cujo endereço é recusado (um host fora daquele provedor) e, em seguida, confirmar que o player não abre uma página depois disso sem um toque novo (a biblioteca guarda a janela do popup e informa todo endereço que ela recebe depois). Registrar se essa janela de popup guarda algum cookie.
+- [ ] Busca: começar um player em Busca > Publicações e trocar para Contas. O som para na hora, no Android, no iOS e na web.
+- [ ] Um player estacionado que foi pedido para ceder o lugar, e cuja medição responde tarde (aparelho lento, volta rápida da rolagem), mantém o lugar quando o cartão já está de novo na vista.
+- [ ] YouTube: tocar um link de saída na descrição ou na tela final do vídeo, dentro do player. No Android e no iOS, um link que passa pela página de redirecionamento do YouTube não abre nada. Na web, registrar onde ele abre (a página de redirecionamento do próprio YouTube e o aviso dela).
+- [ ] Limitação conhecida, só registrar, sem correção neste PR: no iPad e numa janela web redimensionada para o outro lado do quadrado, enquanto a janela permanece virada, os players carregados não cedem, então um terceiro cartão visível espera até as linhas deles saírem da lista.
+
+## 206. Reações em momentos (PR feat/moment-reactions)
+
+Num momento de outra pessoa, um toque em um de seis emojis rápidos envia uma mensagem privada só para quem o publicou. Não há curtida, contagem, lista de quem reagiu nem registro no diário. Nada fica público, nem no momento, nem em A Rua, nem no perfil. O momento da própria pessoa não ganha a linha.
+
+Os seis são os de `QUICK` (`apps/app/src/reactions.js`): coração vermelho, positivo, chorando de rir, surpreso, triste e gratidão. O nome acessível é "Reagir com " mais esse nome. Cada botão tem alvo de pelo menos 44 pt e fica na linha de cima de **Responder**, na mesma barra medida. A linha só aparece no nó hospedado, com `node.online === true` e a passkey desbloqueada (`canReact`). Sem uma dessas condições ela some. A decisão é por capacidade, nunca por `Platform.OS`. **Responder** continua só com `node.hosted`. O toque pausa o relógio do visualizador, chama `dm.send` uma vez com `{ to, text, moment }` (`to` a chave de quem publicou, `text` o emoji, `moment` o `seq`) e não repete o pedido sozinho.
+
+O inner é v5 (protocolo, seção 11, "Inner v5"): as chaves da v1, com `moment` logo depois de `text`, `v` 5, `kind` `'msg'`, `replyTo` nulo, `op` e `peer` nulos. `text` é um emoji que passa em `isReaction`, nunca vazio e nunca dois. `moment` é um inteiro seguro `>= 1`: o `seq` de um registro `moment` no diário de `to`. Não leva autor, digest, mídia, cartão nem encaminhamento. A assinatura é Ed25519 de `from` sobre `utf8('varanda-dm-v5\n')` mais os bytes exatos do JSON. O domínio é próprio: uma assinatura v5 não abre como v1, v2, v3 ou v4, e nenhuma dessas abre como v5. Um corpo sem `moment`, ou com `moment` nulo, sai byte a byte como antes. `dmInnerVersion` nunca responde 5, e `innerDigest` recusa `moment`: uma Página escreve só v3. A caixa de uma Página descarta a v5 ao arquivar, como descarta a v4, e o pull segue para a mensagem seguinte. O maior quadro, com o certificado maior, o emoji mais longo que `isReaction` aceita (30 bytes UTF-8) e `moment` `Number.MAX_SAFE_INTEGER`, ocupa 1061 dos 5120 bytes.
+
+`dm.send` (`docs/rpc.md` 5.75) ganha `moment` opcional. Com ele, `replyTo`, `media` e `card` ficam ausentes e `fwd` é `0`, senão `'parâmetro inválido: moment'`. Texto que não é um emoji só dá `'parâmetro inválido: text'`. O nó envia só quando esse momento de `to` está no ar na réplica local (guardado, registro `moment`, não apagado, dentro das 24 h e no máximo `MOMENT_SKEW_MS` à frente do relógio). Senão, `USAGE` `'momento não encontrado'`, e nada é assinado, enviado ou cobrado. Custa e confirma como qualquer `dm.send`: dois selos, um por envelope (o da outra pessoa e a cópia para si). Resposta perdida é incerta (`uncertain: true`, ou a mensagem `'não deu para confirmar o envio'`). O nó não reenvia sozinho. Enquanto essa tentativa incerta continua pendente na memória do nó, uma tentativa nova da pessoa, com os mesmos `to`, `text` e `moment`, recoloca os mesmos envelopes e não gasta selo de novo, mesmo que o momento já tenha saído do ar. Bloquear a identidade, recarregar o app ou concluir o envio apaga essa pendência, e o nó guarda no máximo 32 pendências (a mais antiga sai). Depois disso, repetir o pedido é um envio novo: cria outra mensagem e gasta dois selos se o momento continua no ar, ou é recusado se ele já saiu. Outro emoji, ou outro `seq`, é outra mensagem. Envio para si, pessoa bloqueada e falta de chave de mensagens continuam as recusas de sempre. A faixa mostra no máximo quatro momentos por pessoa (`MAX_MOMENTS_PER_AUTHOR`). O quinto, o mais antigo, sai da faixa e continua no ar: `moment.lookup` responde, e um envio para esse `seq` é aceito enquanto as 24 h não passam. A lista usa o teto; a leitura de um `seq` usa o registro.
+
+Quem lê trata `moment` só como referência. O inner não leva foto, texto nem chave do momento, então quem envia não faz a outra pessoa ver outra coisa senão o momento de `to` naquele `seq`. A conversa resolve com `moment.lookup` (`docs/rpc.md` 5.120) `{ author, seq }`, no diário de `to` (o próprio, numa recebida; o da outra pessoa, numa enviada). Enquanto o momento está no ar, a resposta é `{ mime, w, h, ms, at }`: `ms` é 0 numa imagem e a duração num vídeo, `at` é o ISO do registro. Nunca o texto, a música, o descritor, a chave nem os bytes. A miniatura, quando há, sai de `media.read` com `kind: 'moment'`. Fora do ar (não guardado, não é momento, apagado, passado das 24 h, data adiantada demais) a resposta é `NOT_FOUND` `'foto indisponível'`. O método é só leitura, local, não abre rede e funciona com a identidade bloqueada. O nó do core, a CLI e o `varanda-serve` respondem `USAGE` `'mídia disponível só na versão web'` e não abrem diário. Um nó antigo responde `'método desconhecido'`.
+
+Na conversa, a bolha mostra o rótulo fixo "Você reagiu a um momento" (a enviada) ou "Reagiu ao seu momento" (a recebida), o emoji passado por `displayText` e, só enquanto o momento aparece, uma miniatura de no máximo 72 pt. Um vídeo vira um azulejo com o ícone de tocar e o nome "Vídeo do momento", sem player e sem baixar o arquivo. Um GIF é imagem e ganha miniatura. A consulta se repete a cada 15 s, e a miniatura sai na hora em que as 24 h fecham. As bolhas do mesmo momento numa conversa aberta dividem uma consulta e uma leitura da imagem, e a URL da miniatura é liberada quando a última delas desmonta. Depois de uma falha, a próxima bolha daquele momento que monta consulta de novo, e uma resposta boa devolve a miniatura a todas; um momento fora do ar ou passado das 24 h não é consultado de novo. No fim das 24 h, se o momento foi apagado, ou se a consulta ou a leitura falha, a miniatura sai e fica "Momento indisponível". O emoji continua. Texto que não é um emoji, ou um `seq` que não é inteiro seguro, segue o balão comum: o texto do par nunca vai cru para a tela. A prévia da lista é "Reagiu a um momento" mais o emoji, nunca uma chave, um id ou um nome de arquivo. A reação conta como não lida e ordena a conversa como qualquer mensagem. Uma mensagem apagada ou oculta não vira bolha de reação. Conversa de Página não monta a bolha.
+
+Em Pedidos de mensagem (quem recebe não segue quem enviou, e ainda não aceitou), a bolha não chama `moment.lookup` nem lê a mídia. Aceitar carrega a miniatura. Voltar o estado para pedidos solta a miniatura e não consulta de novo. A prévia da lista já mostra "Reagiu a um momento" e o emoji antes de aceitar.
+
+Se o envio não se confirma, o visualizador mostra "Não deu para confirmar o envio. Confira a conversa antes de tentar de novo.", esconde os seis emojis daquele momento e oferece **Ver conversa**, que abre a conversa sem o chip de contexto do momento. Nenhum timer reenvia. Uma falha comum (não incerta) mostra o texto do erro, devolve os botões e não abre a conversa. "Reação enviada." não trava os botões: outro toque deliberado envia de novo. Fechar o visualizador no meio não dispara um segundo envio.
+
+Um app, uma CLI ou um nó de antes da v5 vê um `v` desconhecido, `openInner` devolve nulo e o drop é pulado. O cursor do pull passa por ele. Não há mensagem de reserva, não entra na conta de não lidas e, depois de atualizar, essa reação não volta.
+
+Termos de Uso e Política de Privacidade passam à versão 46, de 13/11/2026, com novo aceite. Dizem que o toque num dos seis emojis envia uma mensagem privada, sem contagem pública, lista de quem reagiu ou registro no diário. A Política diz que a reação leva o emoji, o número do registro no diário de quem publicou, a hora e a conta de quem envia, cifrados como qualquer mensagem direta, sem copiar a foto ou o vídeo. A conversa mostra uma prévia pequena só enquanto o app ainda mostra o momento. A reação gasta selos como uma mensagem e não pode ser removida. Um app que não foi atualizado não a mostra, e as conversas das páginas não a guardam.
+
+As seções 123, 187 e 199 continuam para o resto dos momentos. O texto delas não foi editado.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o contrato, o nó e o texto do código. Não montam a interface num aparelho e não usam a DHT pública. A lista é um roteiro, não um registro de execução.
+
+```sh
+node packages/core/test/dm.test.js
+node packages/core/test/dm-fold.test.js
+node packages/core/test/moments.test.js
+node packages/core/test/engagement-session.test.js
+node packages/core/test/terms.test.js
+node packages/rpc/test/dm-budget.test.js
+node packages/rpc/test/methods.test.js
+node packages/rpc/test/sizes.test.js
+node packages/web-member/test/dm-store.test.js
+node packages/web-member/test/dm-e2e.test.js
+node packages/web-member/test/dm-moment-e2e.test.js
+node packages/web-member/test/moments-e2e.test.js
+node apps/app/test/moments.test.js
+node apps/app/test/momentosScreen.test.js
+node apps/app/test/dm.test.js
+node apps/app/test/momentPreviews.test.js
+node apps/app/test/vitrine.test.js
+node apps/app/test/legal.test.js
+node apps/app/test/terms-version.test.js
+node apps/site/test/legal.test.js
+```
+
+`packages/core/test/dm.test.js`: `inner v5: constants, exact key set and round trip`; `inner v5: shape rules`; `inner v5: a null or absent moment builds the exact bytes of today`; `inner v5: its own signature domain`; `inner v5: relabelled it never opens, and a reader without v5 drops it`; `inner v5: the largest certificate and the longest reaction fit` (1061 bytes).
+
+`packages/rpc/test/dm-budget.test.js`: `dm-budget: v5 is a reaction to a momento with the v1 keys plus moment` (a ordem das chaves, e `innerVersion` não escolhe a v5); `dm-budget: the largest v5 inner fits the fixed frame and core signs the canonical bytes`.
+
+`packages/rpc/test/methods.test.js`: `dm.send: a reaction to a momento is one emoji and nothing else` (emoji único, `moment` inteiro seguro, e `replyTo`, `media`, `card` ou `fwd` 1 recusam o `moment`; uma chamada sem `moment` não muda); `moment.lookup: an author and a seq, read only` (não é mutante; autor hex64 e `seq` `>= 1`; campo extra é `'parâmetro desconhecido'`).
+
+`packages/rpc/test/sizes.test.js`: `dm.thread: a momento reaction row is never larger than the worst row` (a página máxima pinada continua 262042 bytes).
+
+`packages/core/test/dm-fold.test.js`: `a moment reaction is an ordinary message with a fixed preview` (não lida, ordem da conversa, pasta de pedidos quando quem recebe não segue, caixa de entrada quando a mensagem é própria, prévia `Reagiu a um momento` mais o emoji, `moment` inválido some da linha, uma reação v4 ainda se aplica à linha).
+
+`packages/core/test/moments.test.js`: `showingMoment: one moment by seq, without the list caps` (o mais antigo de mais de quatro continua com a foto dentro das 24 h, e sai se expirou, se a data está adiantada demais, se foi apagado ou se o registro não é momento).
+
+`packages/core/test/engagement-session.test.js`: `the momento methods are refused on the node session, nothing written` (`moment.lookup` responde `'mídia disponível só na versão web'`, não abre diário, e `seq` 0 ou campo extra seguem a regra de parâmetro).
+
+`packages/core/test/terms.test.js`: `constants` (`TERMS_VERSION` 46).
+
+`packages/web-member/test/dm-store.test.js`: `a momento reaction row keeps its moment across a reopen; moment with media, a card, a reply, a forward or non-emoji text is invalid` (o `seq` sobrevive a reabrir; uma linha quebrada com momento e foto é pulada ao carregar).
+
+`packages/web-member/test/dm-moment-e2e.test.js`: `dm moment reaction end to end: sent only to a showing momento, filed with its seq, previewed, retried with the same drops` (recusa apagado, publicação, `seq` desconhecido, expirado e data adiantada, sem selo e sem put; envio no ar gasta dois selos; quem não segue recebe em pedidos, com prévia e não lida; as duas pontas guardam o `seq`; outro momento é outra mensagem; a tentativa incerta recoloca os mesmos envelopes; a tentativa pendente ainda sai depois que o momento é apagado, e um envio novo para ele não; bloqueio e falta de chave de mensagens continuam as recusas de `dm.send`); `a moment reaction sealed to a Página box is never filed, and the pull goes on past it`.
+
+`packages/web-member/test/moments-e2e.test.js`: `moment.lookup: the showing momento a reaction names, a fifth one included, never once gone` (o quinto, fora da faixa, responde `{ mime, w, h, ms, at }` sem texto, chave ou bytes; quem segue responde da réplica, também com a identidade bloqueada; publicação, `seq` ausente, autor desconhecido, data adiantada, expirado e apagado dão `'foto indisponível'`; os outros momentos continuam).
+
+`apps/app/test/moments.test.js`: `canReact requires hosted, online and an unlocked passkey`; `reactionParams copies only the recipient, emoji and safe moment sequence`; `isMomentReaction requires a safe sequence and raw emoji text`; `moment reaction authors and labels follow the message direction`; `unsure recognizes both uncertain send signals`; `previewPlan separates supported images from MP4 video`; `previewPlan drops failed, unsupported and malformed lookups`; `previewUntil expires exactly 24 hours after a safe lookup timestamp`.
+
+`apps/app/test/momentosScreen.test.js`: `viewer offers six private reactions above Responder only on an eligible peer moment`; `viewer reaction sends once while pending, pauses playback, then keeps the row after success`; `viewer uncertain reactions stay blocked by ref, open the conversation without context and never retry`; `viewer plain reaction errors use errorText and keep the row available`; `viewer reaction completion belongs to the captured moment after navigation`; `viewer reaction settles after unmount without allowing a stale button to send`; `viewer keeps the uncertain note and Ver conversa offline without emoji buttons`.
+
+`apps/app/test/dm.test.js`: `threadRows preserves only the source moment, including duplicate message ids`; `moment bubbles render both labels and the emoji through displayText`; `hostile moment text and an ordinary emoji stay on the ordinary message path`; `moment image reads once across polls, fits 72 pt and releases on unmount`; `bubbles of one momento share one lookup and one read`; `video previews use a static tile without reading media`; `requests and missing or invalid authors never look up or read a moment`; `failed lookup and failed media read show the unavailable label`; `a mounted preview expires at its deadline and drops the image`; `a mounted preview discovers deletion on its next poll`; `identity changes release native read files and late reads cannot restore a thumb`; `Mensagem supplies moment context only for private reaction rows`; `expiry drops the mounted image even while a lookup is pending`; `request acceptance loads the preview and returning to requests releases it`.
+
+`apps/app/test/momentPreviews.test.js`: consulta e imagem compartilhadas, isolamento por momento e identidade, expiração e falhas para todas as bolhas, nova tentativa pela próxima bolha depois de uma falha (sem leitura antiga criando uma segunda imagem nem consulta antiga perdendo a nova tentativa), liberação e limpeza de respostas tardias, cache por nó e imports puros.
+
+`apps/app/test/vitrine.test.js`: `momentos: a reaction keeps its moment seq on dm.thread` (a reação guarda o `seq`; uma mensagem comum não ganha a chave `moment`). A lista de chaves de `moment.lookup` em `all vitrine methods match the documented result and row keys` é `mime`, `w`, `h`, `ms`, `at`.
+
+`apps/app/test/legal.test.js`: `legal: version, date and review note` (versão 46, data 13/11/2026, nota de revisão); `legal: version 46 sends a momento reaction as a private message` (as frases da reação nos Termos e na Privacidade); `legal: published text is pinned to its acceptance version` (o digest prende os dois documentos, inclusive os parágrafos da reação a um momento). `apps/app/test/terms-version.test.js`: `LEGAL_VERSION matches the core TERMS_VERSION`. `apps/site/test/legal.test.js`: `legal pages: the files on disk are the render of apps/app/src/legal.js` e `legal pages: title, version, review note and every section of legal.js, in order` (as páginas de Termos e Privacidade são o render desse texto, versão 44).
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Todos os itens estão em aberto.
+
+Usar duas contas de teste, A quem reage e B quem publicou o momento, sem DHT pública, com os Termos 46 aceitos e a chave de mensagens desbloqueada, salvo no item da identidade bloqueada. O build de debug não entra com passkey de produção. No iOS, a passkey depende do domínio associado da conta Apple Developer (veja `docs/development.md`). Ordem: build de debug do Android, simulador do iOS, depois a web e o PWA. Registrar aparelho, sistema e, na web, o navegador.
+
+- [ ] Duas contas, envio: em A, abrir um momento de B (nunca o próprio). Acima de **Responder** há seis botões, coração vermelho, positivo, chorando de rir, surpreso, triste e gratidão, cada um com alvo de 44 pt. No momento da própria pessoa a linha não aparece. Um toque envia uma vez e mostra "Reação enviada.". O momento de B não ganha curtida, contagem nem registro novo no diário. Nada disso aparece em A Rua nem no perfil.
+- [ ] Recebimento: em B, a conversa com A mostra a bolha "Reagiu ao seu momento", o emoji e uma miniatura de até 72 pt enquanto o momento está no ar. Em A, a mesma conversa mostra "Você reagiu a um momento" e a mesma miniatura. A lista mostra "Reagiu a um momento" e o emoji. A miniatura vem de `moment.lookup` e de `media.read` com `kind: 'moment'`, não dos bytes da mensagem. Tocar na miniatura não abre o momento nem toca vídeo.
+- [ ] Pedidos de mensagem: B não segue A. A reação chega em Pedidos de mensagem, não lida, com a prévia, e a bolha não pede `moment.lookup` nem a mídia (conferir que não há miniatura). **Aceitar** leva a conversa para a caixa de entrada e a miniatura aparece.
+- [ ] Identidade bloqueada: com a passkey bloqueada, os seis emojis não aparecem e nenhum envio sai. `moment.lookup` continua só de leitura: não grava e não abre rede.
+- [ ] Sem rede: com o nó offline, os seis emojis não aparecem. Quando a rede volta, nada é enviado sozinho.
+- [ ] Envio incerto: perder a confirmação no meio do envio. O visualizador mostra "Não deu para confirmar o envio. Confira a conversa antes de tentar de novo.", esconde os seis emojis daquele momento e não reenvia. **Ver conversa** abre a conversa sem o chip de contexto do momento. Na conta B, a mensagem chegou no máximo uma vez. Só então decidir se envia de novo, com um toque novo.
+- [ ] Momento expirado: depois de 24 h, a bolha fica com o emoji e "Momento indisponível", sem miniatura. Um envio novo daquele `seq` é recusado com "momento não encontrado" e não gasta selo.
+- [ ] Momento apagado: B apaga o momento. A miniatura some na consulta seguinte (até 15 s) e fica "Momento indisponível". Um envio novo é recusado do mesmo jeito. Os outros momentos de B continuam no ar, com miniatura nas reações deles.
+- [ ] Quinto momento em 24 h: B publica cinco momentos seguidos. A faixa mostra quatro. O mais antigo não entra na faixa nem no visualizador. Enquanto não passam 24 h, `moment.lookup` desse `seq` ainda responde, e uma reação que o nomeia mostra a miniatura na conversa.
+- [ ] Momento de vídeo: a bolha mostra um azulejo com o ícone de tocar e o nome "Vídeo do momento". Não há player, não há pedido do arquivo de vídeo e nada toca. Um GIF continua com miniatura de imagem.
+- [ ] Leitor antigo: um app ou nó de antes desta versão não mostra a reação, não conta como não lida e não deixa texto no lugar. Depois de atualizar, a reação que esse leitor já passou não volta.
+- [ ] Android, depois iOS, depois a web e o PWA, no tema claro e no escuro: envio, recebimento e pedidos de mensagem. Com TalkBack e VoiceOver, cada emoji é "Reagir com " mais o nome, e a miniatura anuncia "Foto do momento" ou "Vídeo do momento".
+
+## 207. Player do SoundCloud sem botões de comprar, compartilhar e baixar
+
+Um ajuste no player do SoundCloud da seção 205, sem mudar Termos nem formato de registro.
+
+O endereço do player do SoundCloud ganha `buying=false`, `sharing=false` e `download=false`, que a documentação do widget (developers.soundcloud.com/docs/api/html5-widget) descreve como os parâmetros que mostram ou escondem os botões de comprar, compartilhar e baixar. O link de compra é quem envia a faixa que escolhe e, na web e no PWA, abria numa aba que o app não confere. A origem do quadro (`https://w.soundcloud.com`) e o `frame-src` não mudam. Os outros links dentro do player (título, nome de quem enviou, logo) continuam abrindo como na seção 205. A regra está em `apps/app/src/musicEmbed.js`, em `docs/app.md` ("Música em publicações") e em "Music links" de `docs/protocol.md`.
+
+Esta seção resolve a limitação do PR da seção 205 sobre o link de compra do SoundCloud na web. A limitação conhecida da janela virada (último item da verificação manual da seção 205) continua em aberto.
+
+### Verificação automatizada
+
+Cada arquivo sozinho, a partir da raiz, no Node 24. A CI completa (`npm ci`, lint, `npm test` e demo) é a CI de pouso e não entra aqui.
+
+- `node apps/app/test/musicEmbed.test.js`: 20/20 testes, 1777/1777 asserções
+- `node apps/app/test/musicEmbedCard.test.js`: 41/41 testes, 456/456 asserções
+- `node apps/app/test/embedFrame.test.js`: 13/13 testes, 115/115 asserções
+- `node apps/app/test/linkPreview.test.js`: 17/17 testes, 148/148 asserções
+- `node apps/app/test/linkCardBuild.test.js`: 17/17 testes, 154/154 asserções
+- `node apps/app/test/chatMedia.test.js`: 51/51 testes, 252/252 asserções
+- `node apps/app/test/postMusic.test.js`: 18/18 testes, 263/263 asserções
+- `node apps/app/test/postMusicCard.test.js`: 18/18 testes, 139/139 asserções
+- `node apps/app/test/platformGate.test.js`: 3/3 testes, 52/52 asserções
+- `npx standard` nos arquivos `.js` alterados: limpo
+
+Em `musicEmbed.test.js`, os três endereços do SoundCloud fixados no teste e um teste novo que exige `buying=false`, `sharing=false` e `download=false`, uma vez cada, em todo endereço do SoundCloud aceito. Sem os três parâmetros, 2 testes e 12 asserções falham.
+
+### Verificação manual
+
+Nenhuma conferência em aparelho nem com o provedor real foi feita. Os itens abaixo continuam em aberto. A ordem é o build de debug do Android primeiro, depois o simulador iOS, depois a web e o PWA.
+
+- [ ] SoundCloud, em todas as plataformas: uma faixa e um set com link de compra definido por quem enviou. O player não mostra botão de comprar, de compartilhar nem de baixar. Registrar se o título, o nome de quem enviou e o logo continuam abrindo a página do SoundCloud (no app, fora dele; na web, em outra aba).
+- [ ] SoundCloud: registrar se algum outro link dentro do player ainda leva a um endereço fora do SoundCloud.
+
+## 208. Silenciar e ativar o som nas publicações e nos momentos, Termos 47
+
+O app tem um só silêncio para a sessão neste aparelho, compartilhado pela música e pelo som dos vídeos do feed e pelos momentos. A escolha não é guardada nem enviada, e o som volta ao reabrir o app, ou recarregar a página na web. Esse silêncio não muda a chave **Tocar música sozinha**, que continua guardada no aparelho. Termos de Uso e Política de Privacidade passam à versão 47, com novo aceite inclusive para quem aceitou a 46. Não muda formato de registro nem RPC.
+
+Cada adesivo de música do feed tem um botão **Silenciar som** ou **Ativar som**, com alto-falante ou alto-falante riscado. Silenciar para de imediato a música de qualquer linha, inclusive pelo botão de um adesivo que não está tocando. Nenhuma música de publicação começa sozinha, não há pedido de música ao serviço de conta e as capas dos adesivos vêm só da memória. Um toque num adesivo que toca ou carrega faz o mesmo. **Ativar som** num adesivo visível começa aquela música no mesmo toque; tocar num adesivo parado também ativa o som. Recusa do navegador e limite diário também mostram o alto-falante riscado, mas só retêm os inícios automáticos nas publicações, sem silenciar vídeos nem momentos. Uma busca automática do ponto inicial que não se confirma em 5 s também retém só esses inícios.
+
+Um vídeo do feed continua começando só ao tocar na capa. Depois de começar, dentro da publicação e em tela cheia, tem o mesmo botão **Silenciar som** ou **Ativar som**. Aberto com som silenciado, toca sem som. A pílula **Ativar som** após recusa do navegador continua e agora ativa o som por inteiro, como o alto-falante. Os controles da própria plataforma podem ativar o som só daquele vídeo, mantendo o silêncio compartilhado; o alto-falante do app continua mostrando esse estado compartilhado ou a recusa local, sem acompanhar o controle de som da plataforma.
+
+O cabeçalho dos momentos tem **Silenciar som** ou **Ativar som** só em vídeos e em momentos com música habilitada. Silenciado, um vídeo toca sem som, e um momento com música não toca nem pede o trecho de 15 s até ativar o som; a conferência de política ainda ocorre. Um momento aberto em silêncio dura os 5 s comuns da foto, sem espera de 3 s. Silenciar um momento cuja música já toca pausa o trecho e mantém o tempo de 15 s; ativar o som o retoma. O adesivo **Silenciar música** ou **Ativar música** muda esse mesmo silêncio compartilhado. Ativar o som num momento com música aberto em silêncio espera até 3 s pelo áudio e reinicia a barra em 15 s quando ele começa. No Safari e no PWA do iOS, o navegador pode exigir outro toque em **Tocar música**. O botão do cabeçalho nunca passa nem pausa o momento. Num vídeo de momento, a pílula **Ativar som** após recusa continua e faz o mesmo que o botão do cabeçalho. Ativar o som no feed não inicia a música de um momento coberto por outra tela.
+
+A chave **Tocar música sozinha**, o cartão por toque e as playlists continuam como antes: esses cartões não têm botão de som e **Ouvir**, **Ouvir trecho** ou **Ouvir playlist** toca com som. Os quatro players incorporados (YouTube, SoundCloud, Spotify e Apple Music) e a regra do leitor de tela não mudam. Esta seção substitui a regra de silêncio por toque da seção 204; as demais condições de início automático continuam.
+
+### Verificação automatizada
+
+Cada arquivo sozinho, a partir da raiz, no Node 24. A CI completa não entra nesta tarefa de documentação.
+
+- `node apps/app/test/soundMute.test.js`
+- `node apps/app/test/postMusic.test.js`
+- `node apps/app/test/postMusicCard.test.js`
+- `node apps/app/test/momentMusic.test.js`
+- `node apps/app/test/momentosScreen.test.js`
+- `node apps/app/test/feedRender.test.js`
+- `node apps/app/test/legal.test.js`
+- `node packages/core/test/terms.test.js`
+- `node apps/site/scripts/render-legal.js --check`
+
+Os testes conferem a lógica, os contratos e o texto do código, com players e serviço de música falsos, sem chamar o Audius nem usar rede externa. A lista é um roteiro, não um registro de execução. O Standard se aplica aos arquivos JavaScript alterados pelas tarefas de implementação; esta tarefa altera só Markdown.
+
+### Verificação manual
+
+Nenhuma conferência em aparelho nem com o provedor real foi feita nesta tarefa. Conferir primeiro no build de debug do Android (emulador ou aparelho), depois no simulador iOS, depois na web e no PWA instalado, em claro e escuro. O que exige conta numa instalação de produção precisa do APK de preview do EAS, pois a passkey de produção não entra no build de debug; no iOS a passkey depende do domínio associado da conta Apple Developer (veja `development.md`). Os itens abaixo continuam em aberto.
+
+- [ ] No feed, tocar em **Silenciar som** enquanto uma música toca: ela para na hora e os próximos adesivos ficam quietos. Repetir tocando no adesivo que toca ou carrega. Sem pedidos de música ao serviço de conta, e capas só da memória.
+- [ ] Com dois adesivos na tela, silenciar pelo alto-falante daquele que não toca interrompe a música do outro na hora.
+- [ ] **Ativar som** num adesivo visível toca aquela música no mesmo toque, no Safari e no Chrome. Um toque num adesivo parado também ativa o som.
+- [ ] Um vídeo do feed aberto com som silenciado só começa ao tocar na capa, sem som; seu alto-falante ativa o som, tanto dentro da publicação como em tela cheia.
+- [ ] O alto-falante não cobre nem disputa toques com os controles da plataforma, dentro da publicação e em tela cheia. Usar o controle de som da própria plataforma e registrar o ícone e o rótulo do alto-falante do app: o controle pode ativar só o som daquele vídeo, mantendo o silêncio compartilhado.
+- [ ] O silêncio do feed chega aos momentos: vídeo sem som e música silenciosa, sem espera de 3 s, com os 5 s comuns da foto e sem pedido do trecho no registro do serviço de conta. A conferência de política continua. Voltar ao feed mantém o silêncio.
+- [ ] Num momento de vídeo que já toca sem som, **Ativar som** no cabeçalho dá som ao vídeo.
+- [ ] Num momento com música aberto em silêncio, **Ativar som** pede o trecho, espera até 3 s e reinicia a barra em 15 s quando o áudio começa. No Safari e no PWA do iOS, toca ou oferece **Tocar música** quando o navegador exige outro toque.
+- [ ] Silenciar um momento cuja música já toca pausa o trecho, mantém os 15 s do momento e, ao ativar o som, retoma o trecho. Repetir pelo adesivo **Silenciar música** ou **Ativar música**, conferindo o mesmo silêncio no feed.
+- [ ] Uma recusa do navegador mostra o alto-falante riscado no adesivo do feed e a pílula **Ativar som** num vídeo. A pílula continua também no vídeo de um momento e faz o mesmo que o cabeçalho.
+- [ ] Atingir o limite diário de música automática ou receber uma recusa no feed não silencia vídeos nem momentos; só retém os inícios automáticos nas publicações.
+- [ ] TalkBack e VoiceOver leem **Silenciar som** ou **Ativar som** em cada botão e o estado selecionado nos alto-falantes dos adesivos e dos vídeos. O botão do cabeçalho dos momentos expõe só o rótulo, pois `IconAction` não expõe estado selecionado.
+- [ ] Depois de uma recusa num vídeo, silenciar em outro lugar e então tocar na pílula **Ativar som** ativa o som por inteiro, e o alto-falante passa a **Silenciar som**. Repetir no feed e num vídeo de momento.
+- [ ] Com um momento coberto por um perfil, ativar o som no feed não começa a música daquele momento nem pede o trecho no registro do serviço de conta.
+- [ ] Tocar no botão do cabeçalho não passa nem pausa o momento; a barra continua avançando. Só vídeos e momentos com música habilitada têm esse botão.
+- [ ] Numa tela de 320 pt de largura e com texto grande, a linha do adesivo continua legível e os botões e o link continuam alcançáveis.
+- [ ] Com **Tocar música sozinha** desligada, o cartão por toque não tem botão de som; playlists também não têm. **Ouvir**, **Ouvir trecho** e **Ouvir playlist** continuam tocando com som, inclusive com o silêncio da sessão.
+- [ ] Os quatro players incorporados e a regra de leitor de tela para início automático continuam como antes.
+- [ ] Fechar e reabrir o app, ou recarregar a página na web, restaura o som. A escolha não aparece em outro aparelho, e **Tocar música sozinha** mantém o valor guardado.
+- [ ] Uma conta que aceitou a versão 46 recebe os Termos de Uso e a Política de Privacidade 47 para novo aceite.

@@ -43,6 +43,7 @@ import { freshKeys, hasFresh, syncLengths } from '../syncSignals'
 import { replyMarkOf, whoOf } from '../who'
 import { COUNTS_MAX, MAX_COOLDOWN_MS, fetchCounts, fetchMember } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
+import { cheapRepliesMap } from '../threadRows'
 import { applyToggle, countsAfter, diaryPeekSlots, emptyState, mergeCounts, poolMap, secondPassRefs } from '../engagement'
 import { orderRefs } from '../visibleFirst'
 import { DeletePrompt, actingPageKey, isBusy, isDiaryGone, isSeederDown, memberKeyOf, pageEngagement, readEngagement, setEngagement, useActing, useDelete } from './Conversa'
@@ -58,7 +59,7 @@ import { PostRow } from '../ui/PostRow'
 import { KeptOnlyContext } from '../ui/MediaView'
 import { TopBar } from '../ui/TopBar'
 import { RefreshableList } from '../ui/RefreshableList'
-import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
+import { EmptyState, ErrorState, ListFooter, SkeletonRow } from '../ui/States'
 import { noteLocalWrite } from '../localWrites'
 import { FEED_FIRST_ROWS, feedDetailsReady } from '../splashGate'
 import { layout, type } from '../ui/theme'
@@ -1159,7 +1160,10 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
 // comes back while nothing the row shows changed, so the memoized PostRow
 // skips its render; the callbacks then read the newest handlers from the
 // row's live box.
-export function socialRowProps ({ post, ref, repostedBy = null, social, profileOf, avatarOf = profileOf, now, ownKey, h, persist, cache, rowKey }) {
+// `replyPreviews`, when a non-empty list, is passed on with onOpenPreviews.
+// That handler opens this post the same way onOpen does. Diário and the
+// Espiadinha share this helper and pass none: their lists are not A Rua.
+export function socialRowProps ({ post, ref, repostedBy = null, social, profileOf, avatarOf = profileOf, now, ownKey, h, persist, cache, rowKey, replyPreviews }) {
   const prof = profileOf(post.author) || null
   const avatarView = avatarOf(post.author)
   const quoteRef = refOf(post.quote)
@@ -1198,6 +1202,9 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
     // Someone else's post, not a page's: PostRow adds the hosted check.
     message: fnOf(h.onMessage) && own !== null && String(post.author).toLowerCase() !== own && !(prof && prof.page === true)
   }
+  // Absent or empty stays off the row: PostRow would draw nothing, and a new
+  // empty array would still bust the memo.
+  const previews = Array.isArray(replyPreviews) && replyPreviews.length > 0 ? replyPreviews : null
   const build = (live) => {
     const name = post.name || (prof ? prof.name : null) || null
     const username = post.username || (prof ? prof.username : null) || null
@@ -1222,6 +1229,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
         onOpenMention: offers.mention ? (u) => live.h.onOpenMention(u, { author: post.quote.author, username: quote.username }) : undefined
       }
     }
+    const openThread = offers.thread ? () => live.h.onOpenThread({ ref, seed: post }) : undefined
     return {
       author: post.author,
       name,
@@ -1241,7 +1249,8 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       liked: s.eng.liked.has(ref),
       reposted: s.eng.reposted.has(ref),
       pending: s.pending.get(ref) || null,
-      onOpen: offers.thread ? () => live.h.onOpenThread({ ref, seed: post }) : undefined,
+      onOpen: openThread,
+      ...(previews ? { replyPreviews: previews, onOpenPreviews: openThread } : {}),
       onOpenAuthor: offers.member ? () => live.h.onOpenMember(post.author, { name, username }) : undefined,
       onOpenMention: offers.mention ? (u) => live.h.onOpenMention(u, { author: post.author, username }) : undefined,
       onOpenParent: parentRef !== null && offers.thread ? () => live.h.onOpenThread({ ref: parentRef }) : undefined,
@@ -1283,6 +1292,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
     quoteTransient: qTransient,
     quotePersist: quoteRef !== null ? social.persistOf(post.quote.author) : null,
     replyToName,
+    replyPreviews: previews,
     // By value: a refetch answers with new objects for the same numbers.
     counts: counts !== null && typeof counts === 'object',
     replies: counts ? counts.replies : null,
@@ -1320,6 +1330,65 @@ export function useRowPropsCache (items, keyOf, latest) {
     pruneRows(cache.current, items.map(keyOf))
   }, [items, keyOf])
   return cache.current
+}
+
+// Distant replies already in this list, keyed by the parent ref. Near rows
+// are on screen as themselves. Only a parent that some loaded row replies
+// to, and that is itself in the list, is passed to cheapRepliesMap: one walk
+// of this list for all of them, asking for nothing else. A blank line is not
+// a preview.
+// Arrays from `prev` stay while their lines are unchanged, so a memoized
+// row re-renders only when its own previews change.
+export function replyPreviewMap (items, prev, blocked) {
+  const sameLines = (a, b) => {
+    if (!Array.isArray(a) || a.length !== b.length) return false
+    for (let i = 0; i < b.length; i++) {
+      const left = a[i]
+      const right = b[i]
+      if (!left || !right || left.key !== right.key || left.name !== right.name || left.text !== right.text) return false
+    }
+    return true
+  }
+  // BlockGate hides a blocked author's row, not its line under another post.
+  const all = Array.isArray(items) ? items : []
+  const list = blocked && typeof blocked.has === 'function' && blocked.size > 0
+    ? all.filter((item) => !(item && typeof item.author === 'string' && blocked.has(item.author)))
+    : all
+  const present = new Set()
+  const wanted = []
+  const seen = new Set()
+  for (const item of list) {
+    // A repost row shows its original, which can then carry previews.
+    const ref = item && item.kind === 'repost' ? refOf(item.to) : refOf(item)
+    if (ref !== null) present.add(ref)
+    // A repost wrapper is not a reply. pageNeeds treats replyTo the same way.
+    if (!item || item.kind === 'repost' || !item.replyTo) continue
+    const parent = refOf(item.replyTo)
+    if (parent === null || seen.has(parent)) continue
+    seen.add(parent)
+    wanted.push(parent)
+  }
+  const prior = prev instanceof Map ? prev : null
+  const out = new Map()
+  const parents = wanted.filter((ref) => present.has(ref))
+  const found = parents.length === 0 ? new Map() : cheapRepliesMap(list, parents)
+  for (const ref of parents) {
+    const next = found.get(ref) || []
+    if (!next.some((line) => line && typeof line.text === 'string' && line.text.trim() !== '')) continue
+    const old = prior === null ? undefined : prior.get(ref)
+    out.set(ref, sameLines(old, next) ? old : next)
+  }
+  return out
+}
+
+// Rebuilt only when the list identity changes. The ref keeps the previous
+// arrays across that change (useMemo itself cannot see them).
+function useReplyPreviews (items) {
+  const prev = useRef(null)
+  const blocked = useBlocks().keys
+  const map = useMemo(() => replyPreviewMap(items, prev.current, blocked), [items, blocked])
+  prev.current = map
+  return map
 }
 
 // 'Alguns números podem estar incompletos.' once at the top of a list (only
@@ -1578,7 +1647,9 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
   // Which handlers exist adds or removes buttons: a change re-renders the rows.
   const offered = Object.keys(handlers).filter((k) => typeof handlers[k] === 'function').join()
   const extra = useMemo(() => ({ profileOf: names.profileOf, now, social: social.social, offered, ownKey }), [names.profileOf, now, social.social, offered, ownKey])
-  const rowCache = useRowPropsCache(view.items, feedKey, { h: handlers, social })
+  const { items, loadedAt, loading, error, incomplete } = view
+  const rowCache = useRowPropsCache(items, feedKey, { h: handlers, social })
+  const replyPreviewsByRef = useReplyPreviews(items)
   // One renderItem for the list's life: FlatList re-renders the cells on
   // extraData, and the rows whose props did not change skip their render.
   const renderRef = useRef(null)
@@ -1599,17 +1670,16 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
           />
         )
       }
-      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf: names.profileOf, now, ownKey, h: handlers, cache: rowCache, rowKey: feedKey(item) })} />
+      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf: names.profileOf, now, ownKey, h: handlers, cache: rowCache, rowKey: feedKey(item), replyPreviews: replyPreviewsByRef.get(refOf(post)) })} />
     }
     // persistOf: own or followed by the MEMBER, never the page's follows.
-    return <PostRow {...socialRowProps({ post: item, ref: feedKey(item), social, profileOf: names.profileOf, now, ownKey, h: handlers, persist: social.persistOf(item.author), cache: rowCache, rowKey: feedKey(item) })} />
+    return <PostRow {...socialRowProps({ post: item, ref: feedKey(item), social, profileOf: names.profileOf, now, ownKey, h: handlers, persist: social.persistOf(item.author), cache: rowCache, rowKey: feedKey(item), replyPreviews: replyPreviewsByRef.get(refOf(item)) })} />
   }
 
-  const { items, loadedAt, loading, error, incomplete } = view
   rowsRef.current = items
   let empty
-  if (error) empty = <ErrorState message={error} onRetry={load} pending={loading} />
-  else if (loadedAt === null) empty = <Skeleton />
+  if (error) empty = null
+  else if (loadedAt === null) empty = <View>{[0, 1, 2].map(row => <SkeletonRow key={row} />)}</View>
   else {
     empty = (
       <EmptyState
@@ -1618,6 +1688,8 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
         body='Siga pessoas como página para ver as publicações delas aqui.'
         actionLabel='Seguir alguém'
         onAction={onFollowSomeone}
+        secondaryLabel='Atualizar'
+        onSecondary={load}
       />
     )
   }
@@ -1635,7 +1707,7 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
         ListHeaderComponent={(
           <View style={styles.footer}>
             <Text style={styles.pageTitle} accessibilityRole='header'>{'A Rua de ' + actingLabel()}</Text>
-            {items.length > 0 && error ? <ErrorState message={error} onRetry={load} pending={loading} /> : null}
+            {error ? <ErrorState message={error} onRetry={load} pending={loading} /> : null}
             {incomplete ? <Soft>incompleto: algumas publicações podem não ter chegado.</Soft> : null}
             <CountsNote social={social} />
           </View>
@@ -2222,8 +2294,8 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   )
 
   let empty
-  if (loadError) empty = <ErrorState message={loadError} onRetry={loadNewest} pending={loading || refreshing} />
-  else if (loadedAt === null) empty = <Skeleton />
+  if (loadError) empty = null
+  else if (loadedAt === null) empty = <View>{[0, 1, 2].map(row => <SkeletonRow key={row} />)}</View>
   else if (followCount === 0) {
     empty = (
       <EmptyState
@@ -2232,6 +2304,8 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
         body='Siga pessoas para ver as publicações delas aqui.'
         actionLabel='Seguir alguém'
         onAction={onFollowSomeone}
+        secondaryLabel='Atualizar'
+        onSecondary={loadNewest}
       />
     )
   } else {
@@ -2240,6 +2314,10 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
         icon='gente'
         title='Ainda não chegou nada'
         body={stillSyncing ? FEED_SYNCING_END : 'Quando as pessoas que você segue publicarem, aparece aqui.'}
+        actionLabel='Atualizar'
+        onAction={loadNewest}
+        secondaryLabel='Seguir alguém'
+        onSecondary={onFollowSomeone}
       />
     )
   }
@@ -2286,6 +2364,9 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     : snapshotRowsShown(items, blockedKeys, blockLoad, ownKey, (ref) => shownOriginals.get(ref))), [items, loadedAt, blockedKeys, blockLoad, ownKey, shownOriginals])
   rowsRef.current = shownItems
   const rowCache = useRowPropsCache(shownItems, feedKey, { h: handlers, social })
+  // Snapshot rows are already filtered, so a blocked reply cannot preview.
+  // Once the feed is live, shownItems is items.
+  const replyPreviewsByRef = useReplyPreviews(shownItems)
   // One renderItem for the list's life: FlatList re-renders the cells on
   // extraData, and the rows whose props did not change skip their render.
   const renderRef = useRef(null)
@@ -2308,9 +2389,9 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
           />
         )
       }
-      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf: names.profileOf, now, ownKey, h: handlers, cache: rowCache, rowKey: feedKey(item) })} />
+      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf: names.profileOf, now, ownKey, h: handlers, cache: rowCache, rowKey: feedKey(item), replyPreviews: replyPreviewsByRef.get(refOf(post)) })} />
     }
-    return <PostRow {...socialRowProps({ post: item, ref: feedKey(item), social, profileOf: names.profileOf, now, ownKey, h: handlers, persist: true, cache: rowCache, rowKey: feedKey(item) })} />
+    return <PostRow {...socialRowProps({ post: item, ref: feedKey(item), social, profileOf: names.profileOf, now, ownKey, h: handlers, persist: true, cache: rowCache, rowKey: feedKey(item), replyPreviews: replyPreviewsByRef.get(refOf(item)) })} />
   }
 
   return (
@@ -2337,7 +2418,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
               onOpen={typeof onOpenMomentos === 'function' ? onOpenMomentos : () => {}}
               onCreate={onCreateMoment}
             />
-            {items.length > 0 && loadError ? <ErrorState message={loadError} onRetry={loadNewest} pending={refreshing} /> : null}
+            {loadError ? <ErrorState message={loadError} onRetry={loadNewest} pending={loading || refreshing} /> : null}
             <CountsNote social={social} />
           </View>
         )}

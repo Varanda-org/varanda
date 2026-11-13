@@ -152,7 +152,7 @@ function emojiJoiner (cps, i) {
 
 const JOINERS = new Set([0xfe0e, 0xfe0f, 0x20e3, 0x200d])
 
-function poisoned (token) {
+export function poisoned (token) {
   if (displayText(token, { multiline: true }) !== token) return true
   const cps = Array.from(token, (ch) => ch.codePointAt(0))
   for (let i = 0; i < cps.length; i++) {
@@ -325,5 +325,152 @@ export function textSegments (text, { mentions = false } = {}) {
     return segments
   } catch {
     return typeof text === 'string' && text !== '' ? [{ text, username: null, href: null }] : []
+  }
+}
+
+// Trim's whitespace, so "whitespace-only" matches the final trim.
+function hasText (s) {
+  return s.trim() !== ''
+}
+
+// JS line terminators. CRLF is one break: a dropped line must not leave a CR.
+function splitLines (text) {
+  const lines = []
+  let start = 0
+  for (let i = 0; i < text.length; i++) {
+    let len = 0
+    const ch = text[i]
+    if (ch === '\r') len = text[i + 1] === '\n' ? 2 : 1
+    else if (ch === '\n' || ch === '\u2028' || ch === '\u2029') len = 1
+    if (len === 0) continue
+    lines.push({ text: text.slice(start, i), sep: text.slice(i, i + len), start })
+    i += len - 1
+    start = i + 1
+  }
+  lines.push({ text: text.slice(start), sep: '', start })
+  return lines
+}
+
+// The module's own separators. A regex whitespace class would also take U+FEFF
+// and the narrow spaces, which do not break a token here, so tidying could
+// join 'www.evil' and '.com' across one of them. Every BREAK_RANGES entry is
+// in the BMP, so one code unit decides.
+function isBreakAt (s, i) {
+  return i >= 0 && i < s.length && inRanges(s.charCodeAt(i), BREAK_RANGES)
+}
+
+// A run of closing punctuation followed by a separator or the end of the line.
+function punctuationRunAt (s, i) {
+  let j = i
+  while (j < s.length && ',.;:!?)]}'.includes(s[j])) j++
+  return j > i && (j === s.length || isBreakAt(s, j))
+}
+
+function tidyLine (line, drops) {
+  let out = ''
+  let cursor = 0
+  const cuts = []
+  for (const drop of drops) {
+    out += line.slice(cursor, drop.start)
+    cuts.push(out.length)
+    cursor = drop.end
+  }
+  out += line.slice(cursor)
+  for (let c = 0; c < cuts.length; c++) {
+    let start = cuts[c]
+    let end = start
+    while (true) {
+      let from = start
+      let to = end
+      while (from > 0 && (out[from - 1] === ' ' || out[from - 1] === '\t')) from--
+      while (to < out.length && (out[to] === ' ' || out[to] === '\t')) to++
+      if (from === 0 || to === out.length || PAIRS[out[to]] !== out[from - 1]) break
+      start = from - 1
+      end = to + 1
+    }
+    if (start === end) continue
+    // Check the outside of the whole nested pair, so no text can be joined.
+    if (start > 0 && !isBreakAt(out, start - 1)) continue
+    if (end < out.length && !isBreakAt(out, end) && !punctuationRunAt(out, end)) continue
+    out = out.slice(0, start) + out.slice(end)
+    // Keep every cut aligned, including another removed link in this pair.
+    for (let k = 0; k < cuts.length; k++) {
+      if (cuts[k] >= start) cuts[k] = Math.max(start, cuts[k] - (end - start))
+    }
+  }
+  const runs = []
+  let i = 0
+  while (i < out.length) {
+    if (out[i] !== ' ' && out[i] !== '\t') {
+      i++
+      continue
+    }
+    const from = i
+    while (i < out.length && (out[i] === ' ' || out[i] === '\t')) i++
+    if (cuts.some((cut) => cut >= from && cut <= i)) runs.push([from, i])
+  }
+  let result = out
+  for (let r = runs.length - 1; r >= 0; r--) {
+    const [from, to] = runs[r]
+    // One space only when the line still has text on both sides of the hole.
+    const { cp, size } = cpBefore(out, from)
+    const ch = out.slice(from - size, from)
+    // The path ranges also cover scripts without upper and lower case.
+    const word = (cp >= 0x30 && cp <= 0x39) || ch.toLowerCase() !== ch.toUpperCase() || inRanges(cp, PATH_LETTER_RANGES)
+    const attaches = word && punctuationRunAt(out, to)
+    const gap = !attaches && hasText(out.slice(0, from)) && hasText(out.slice(to)) ? ' ' : ''
+    result = result.slice(0, from) + gap + result.slice(to)
+  }
+  return result
+}
+
+function withoutDroppedSpans (text, drops) {
+  const kept = []
+  for (const line of splitLines(text)) {
+    const end = line.start + line.text.length
+    const local = []
+    for (const drop of drops) {
+      if (drop.start >= line.start && drop.end <= end) {
+        local.push({ start: drop.start - line.start, end: drop.end - line.start })
+      }
+    }
+    if (local.length === 0) {
+      kept.push(line.text + line.sep)
+      continue
+    }
+    const tidied = tidyLine(line.text, local)
+    // An emptied line goes with the break after it. A last line has none;
+    // the final trim drops the break that stood before it.
+    if (hasText(tidied)) kept.push(tidied + line.sep)
+  }
+  return kept.join('').trim()
+}
+
+// Display only. A removed address must not leave a double space or a blank
+// line, and text that lost nothing stays the same string.
+export function textWithoutHrefs (text, omit) {
+  if (typeof text !== 'string') return ''
+  try {
+    if (typeof omit !== 'function') return text
+    const links = findLinks(text)
+    if (links.length === 0) return text
+    const drops = []
+    for (const link of links) {
+      if (omit(link.href) === true) drops.push(link)
+    }
+    if (drops.length === 0) return text
+    const result = withoutDroppedSpans(text, drops)
+    // Tidying must preserve every remaining target, including its count.
+    const expectedLinks = links.filter((link) => !drops.includes(link))
+    const actualLinks = findLinks(result)
+    if (actualLinks.length !== expectedLinks.length || actualLinks.some((link, i) => link.href !== expectedLinks[i].href)) return text
+    const expectedMentions = findMentions(text)
+      .filter((m) => !drops.some((drop) => m.start < drop.end && drop.start < m.end))
+      .map((m) => text.slice(m.start, m.end))
+    const actualMentions = findMentions(result).map((m) => result.slice(m.start, m.end))
+    if (actualMentions.length !== expectedMentions.length || actualMentions.some((handle, i) => handle !== expectedMentions[i])) return text
+    return result
+  } catch {
+    return text
   }
 }

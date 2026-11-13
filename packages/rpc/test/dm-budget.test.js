@@ -37,6 +37,9 @@ function textOfBytes (n) {
   return '\u{1F600}'.repeat(Math.floor(n / 4)) + 'x'.repeat(n % 4)
 }
 
+// A bound reply's replyTo: the quoted message's sender, id and digest.
+const BOUND = { from: bia.hex, id: 'c'.repeat(32), digest: 'd'.repeat(64) }
+
 function innerLength (inner) {
   return (inner[0] << 8) | inner[1]
 }
@@ -68,18 +71,21 @@ test('dm-budget: version follows what the body needs', (t) => {
   t.is(rpc.dmInnerVersion({ media: [item(1)], card: null, fwd: 0 }), 2)
   t.is(rpc.dmInnerVersion({ media: null, card: {}, fwd: 0 }), 2)
   t.is(rpc.dmInnerVersion({ media: null, card: null, fwd: 1 }), 2)
+  t.is(rpc.dmInnerVersion({ media: null, card: null, fwd: 0, replyTo: BOUND }), 2, 'a bound reply needs v2')
+  t.is(rpc.dmInnerVersion({ media: null, card: null, fwd: 0, replyTo: 'c'.repeat(32) }), 1, 'a bare id stays v1')
+  t.is(rpc.dmInnerVersion({ media: null, card: null, fwd: 0, replyTo: null }), 1)
 })
 
 test('dm-budget: matches core buildInner byte for byte', (t) => {
   const senders = [{ who: plain, cert: undefined }, { who: plain, cert: plain.cert }, { who: wide, cert: wide.cert }, { who: issued, cert: issued.cert }]
   let boundaries = 0
   for (const { who, cert } of senders) {
-    for (const replyTo of [undefined, 'c'.repeat(32)]) {
+    for (const replyTo of [undefined, 'c'.repeat(32), BOUND]) {
       for (let n = 0; n <= 4; n++) {
         const media = n === 0 ? undefined : [1, 2, 3, 4].slice(0, n).map(i => item(i))
         const fields = { kind: 'msg', to: bia.hex, at: AT, cert, replyTo, media }
         const free = rpc.dmTextBudget(fields)
-        const label = (cert ? 'v' + cert.v + ' cert' : 'no cert') + (replyTo ? ', reply' : '') + ', ' + n + ' items'
+        const label = (cert ? 'v' + cert.v + ' cert' : 'no cert') + (replyTo ? (typeof replyTo === 'string' ? ', reply' : ', bound reply') : '') + ', ' + n + ' items'
         // The measured size with a short text equals the budget's arithmetic.
         const inner = dm.buildInner({ ...fields, text: 'x' }, who)
         t.is(dm.DM_INNER_BYTES - 66 - innerLength(inner), free - 1, label + ': same size as the signed inner')
@@ -90,7 +96,7 @@ test('dm-budget: matches core buildInner byte for byte', (t) => {
       }
     }
   }
-  t.ok(boundaries >= 16, 'every case with media is checked at the boundary')
+  t.ok(boundaries >= 24, 'every case with media is checked at the boundary')
 })
 
 test('dm-budget: stand-ins have the length of the real values', (t) => {
@@ -140,4 +146,97 @@ test('dm-budget: v3 writes the v2 keys and matches core innerDigest', (t) => {
   t.ok(free < 4000, 'the budget is below the code point limit here')
   t.ok(dm.innerDigest({ ...full, text: textOfBytes(free) }), 'text at the v3 budget fits')
   t.exception.all(() => dm.innerDigest({ ...full, text: textOfBytes(free + 1) }), /mensagem longa demais/, 'one byte more throws')
+})
+
+test('dm-budget: a bound reply is written in its canonical order and counted', (t) => {
+  const body = { v: 2, kind: 'msg', id: 'a'.repeat(32), from: plain.hex, to: bia.hex, replyTo: { digest: BOUND.digest, id: BOUND.id, from: BOUND.from }, text: 'oi', media: null, card: null, fwd: 0, op: null, peer: null, at: AT, cert: null }
+  const parsed = JSON.parse(budget.canonicalInnerJson(Object.fromEntries(Object.entries(body).reverse())))
+  t.alike(Object.keys(parsed), budget.DM_INNER_KEYS_V2)
+  t.alike(Object.keys(parsed.replyTo), ['from', 'id', 'digest'], 'replyTo in DM_TARGET_KEYS order')
+  t.is(JSON.parse(budget.canonicalInnerJson({ ...body, replyTo: 'c'.repeat(32) })).replyTo, 'c'.repeat(32), 'a bare id as given')
+  const fields = { kind: 'msg', to: bia.hex, at: AT, cert: issued.cert }
+  const bare = rpc.dmTextBudget({ ...fields, replyTo: 'c'.repeat(32) })
+  const bound = rpc.dmTextBudget({ ...fields, replyTo: BOUND })
+  t.is(bare - bound, 190, 'the object and the v2 keys')
+  t.is(bound, 3895, 'a text-only bound reply with the largest certificate')
+  t.is(Math.floor(bound / 4), 973)
+  t.ok(bare >= 4 * dm.DM_MAX_TEXT, 'a bare-id text reply still fits 1000 four-byte characters')
+  const v3 = { ...fields, from: issued.hex }
+  const free = rpc.dmTextBudget({ ...v3, v: 3, replyTo: BOUND })
+  t.is(free, 3887, 'a page reply, bound')
+  t.is(rpc.dmTextBudget({ ...v3, v: 3, replyTo: 'c'.repeat(32) }), 4044)
+  const { json } = dm.innerDigest({ ...v3, replyTo: BOUND, text: 'x' })
+  t.is(dm.DM_INNER_BYTES - 66 - 8 - json.byteLength, free - 1, 'same size as the v3 inner')
+  t.ok(dm.innerDigest({ ...v3, replyTo: BOUND, text: textOfBytes(free) }), 'text at the v3 budget fits')
+  t.exception.all(() => dm.innerDigest({ ...v3, replyTo: BOUND, text: textOfBytes(free + 1) }), /mensagem longa demais/, 'one byte more throws')
+})
+
+// The longest reaction isReaction accepts in UTF-8: eight code points, three
+// pictographs with skin tones joined by two ZWJ (4+4+3+4+4+3+4+4 bytes).
+const LONGEST_EMOJI = '\u{1F468}\u{1F3FB}‍\u{1F468}\u{1F3FB}‍\u{1F468}\u{1F3FB}'
+
+test('dm-budget: v4 is a reaction with its own exact key set', (t) => {
+  t.alike(rpc.DM_INNER_KEYS_V4, ['v', 'kind', 'id', 'from', 'to', 'target', 'emoji', 'rev', 'at', 'cert'])
+  t.is(rpc.DM_INNER_KEYS_V4, budget.DM_INNER_KEYS_V4)
+  t.is(rpc.DM_INNER_KEYS_V4, dm.INNER_KEYS_V4)
+  t.alike(rpc.DM_TARGET_KEYS, ['from', 'id', 'digest'], 'the target names the message by sender, id and digest')
+  t.is(rpc.DM_TARGET_KEYS, dm.DM_TARGET_KEYS)
+  t.ok(Object.isFrozen(rpc.DM_INNER_KEYS_V4) && Object.isFrozen(rpc.DM_TARGET_KEYS))
+  const body = { v: 4, kind: 'react', id: 'a'.repeat(32), from: bia.hex, to: plain.hex, target: { digest: 'c'.repeat(64), id: 'b'.repeat(32), from: plain.hex, extra: 1 }, emoji: '❤️', rev: 1, at: AT, cert: null }
+  const json = budget.canonicalInnerJson(Object.fromEntries(Object.entries(body).reverse()))
+  const parsed = JSON.parse(json)
+  t.alike(Object.keys(parsed), rpc.DM_INNER_KEYS_V4, 'wire order whatever the caller built')
+  t.alike(Object.keys(parsed.target), ['from', 'id', 'digest'], 'target in its canonical order, nothing else')
+})
+
+test('dm-budget: the largest v4 inner fits the fixed frame', (t) => {
+  t.ok(rpc.isReaction(LONGEST_EMOJI))
+  t.is(b4a.byteLength(LONGEST_EMOJI), 30)
+  t.ok(rpc.REACTION_MAX_BYTES >= 30)
+  const body = {
+    v: 4,
+    kind: 'react',
+    id: 'f'.repeat(32),
+    from: 'f'.repeat(64),
+    to: 'e'.repeat(64),
+    target: { from: 'e'.repeat(64), id: 'd'.repeat(32), digest: 'c'.repeat(64) },
+    emoji: LONGEST_EMOJI,
+    rev: 1000000,
+    at: AT,
+    cert: budget.MEMBER_CERT_STANDIN
+  }
+  const bytes = b4a.byteLength(budget.canonicalInnerJson(body))
+  t.ok(bytes + budget.DM_INNER_FRAMING_BYTES <= budget.DM_INNER_BYTES, 'v4 frame ' + (bytes + 66) + ' of ' + budget.DM_INNER_BYTES)
+  // Even an emoji at the byte cap, all of it escaped as \uXXXX (6 bytes per
+  // 1 to 3 bytes), leaves room.
+  const bound = bytes - 30 + rpc.REACTION_MAX_BYTES * 6
+  t.ok(bound + budget.DM_INNER_FRAMING_BYTES <= budget.DM_INNER_BYTES)
+
+  const real = dm.buildInner({ kind: 'react', to: bia.hex, target: { from: bia.hex, id: 'd'.repeat(32), digest: 'c'.repeat(64) }, emoji: LONGEST_EMOJI, rev: 1000000, at: AT, cert: issued.cert }, issued)
+  const realJson = b4a.toString(real.subarray(2, 2 + innerLength(real)))
+  t.alike(Object.keys(JSON.parse(realJson)), rpc.DM_INNER_KEYS_V4)
+  t.is(realJson, budget.canonicalInnerJson(JSON.parse(realJson)), 'core signs the canonical bytes')
+})
+
+test('dm-budget: v5 is a reaction to a momento with the v1 keys plus moment', (t) => {
+  t.alike(rpc.DM_INNER_KEYS_V5, ['v', 'kind', 'id', 'from', 'to', 'replyTo', 'text', 'moment', 'op', 'peer', 'at', 'cert'])
+  t.is(rpc.DM_INNER_KEYS_V5, budget.DM_INNER_KEYS_V5)
+  t.is(rpc.DM_INNER_KEYS_V5, dm.INNER_KEYS_V5)
+  t.ok(Object.isFrozen(rpc.DM_INNER_KEYS_V5))
+  const body = { v: 5, kind: 'msg', id: 'a'.repeat(32), from: bia.hex, to: plain.hex, replyTo: null, text: '❤️', moment: 7, op: null, peer: null, at: AT, cert: null, media: null }
+  const parsed = JSON.parse(budget.canonicalInnerJson(Object.fromEntries(Object.entries(body).reverse())))
+  t.alike(Object.keys(parsed), rpc.DM_INNER_KEYS_V5, 'wire order whatever the caller built, nothing else')
+  t.is(parsed.moment, 7)
+  // Only a moment field asks for v5: innerVersion never picks it.
+  t.is(budget.innerVersion({ ...body, card: null, fwd: 0 }), 1)
+})
+
+test('dm-budget: the largest v5 inner fits the fixed frame and core signs the canonical bytes', (t) => {
+  const real = dm.buildInner({ kind: 'msg', to: bia.hex, text: LONGEST_EMOJI, moment: Number.MAX_SAFE_INTEGER, at: AT, cert: issued.cert }, issued)
+  const realJson = b4a.toString(real.subarray(2, 2 + innerLength(real)))
+  t.alike(Object.keys(JSON.parse(realJson)), rpc.DM_INNER_KEYS_V5)
+  t.is(realJson, budget.canonicalInnerJson(JSON.parse(realJson)), 'core signs the canonical bytes')
+  const standin = { v: 5, kind: 'msg', id: 'f'.repeat(32), from: 'f'.repeat(64), to: 'e'.repeat(64), replyTo: null, text: LONGEST_EMOJI, moment: Number.MAX_SAFE_INTEGER, op: null, peer: null, at: AT, cert: budget.MEMBER_CERT_STANDIN }
+  const bytes = b4a.byteLength(budget.canonicalInnerJson(standin))
+  t.ok(bytes + budget.DM_INNER_FRAMING_BYTES <= budget.DM_INNER_BYTES, 'v5 frame ' + (bytes + 66) + ' of ' + budget.DM_INNER_BYTES)
 })

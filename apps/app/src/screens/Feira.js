@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { Keyboard, Pressable, StyleSheet, Text, View } from 'react-native'
+import { Keyboard, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
@@ -7,20 +7,31 @@ import * as actingAs from '../actingAs'
 import { installationOrigin } from '../installation'
 import { listSaved } from '../feiraSavedStore'
 import { alertsStore } from '../feiraAlertsStore'
+import { PARTIAL_NOTE, browseListings, columnsFor, gridRows, placeLabel } from '../feiraBrowse'
 import {
-  CATEGORY_OPTIONS, KIND_OPTIONS, SEGMENT_OPTIONS, UF_OPTIONS, TEXTS,
-  createFeiraProbe, filterState, loadFeiraPage, mergeRows, rowDecision, runFeiraAlerts, savedSearch, screenState
+  SEGMENT_OPTIONS, UF_OPTIONS, TEXTS,
+  createFeiraProbe, filterState, filtersDot, loadFeiraPage, mergeRows, partialNoteVisible, placeMissing, rowDecision, runFeiraAlerts, savedSearch, screenState, viewFilters
 } from '../feiraScreen'
 import { Btn, Field, Soft, useBottomPad } from '../ui'
-import { TEXT_CAP } from '../ui/Sheet'
+import { CategoryTiles } from '../ui/CategoryTiles'
+import { FeiraFilters } from '../ui/FeiraFilters'
 import { FilterChips } from '../ui/FilterChips'
-import { ListingCard } from '../ui/ListingCard'
+import { Icon } from '../ui/Icon'
+import { ListingTile } from '../ui/ListingTile'
+import { PlaceSheet } from '../ui/PlaceSheet'
 import { RefreshableList } from '../ui/RefreshableList'
+import { TEXT_CAP } from '../ui/Sheet'
+import { EmptyState, SkeletonTile } from '../ui/States'
 import { useStyles } from '../ui/ThemeProvider'
-import { layout, radius, space, type } from '../ui/theme'
+import { fonts, LARGE_TEXT, layout, radius, space, type } from '../ui/theme'
 
 const NO_BLOCKS = new Set()
 const newLabel = (n) => (n === 1 ? '1 novo' : n + ' novos')
+// Submit can fire before the last keystroke has been rendered into state.
+const fieldText = (event, fallback) => {
+  const text = event?.nativeEvent?.text
+  return typeof text === 'string' ? text : fallback
+}
 let rememberedLocation = {}
 
 // locationStore: { load, save }, backed by createLocationStore at integration.
@@ -33,12 +44,18 @@ export default function Feira ({
   const styles = useStyles(makeStyles)
   const insets = useSafeAreaInsets()
   const bottomPad = useBottomPad()
+  const { fontScale } = useWindowDimensions()
   const acting = useSyncExternalStore(actingAs.subscribe, actingAs.get, actingAs.get)
   const [filters, setFilters] = useState(() => filterState(rememberedLocation))
   const [applied, setApplied] = useState(filters)
+  // Sort and price narrow the rows already loaded. They stay out of the index query and out of saved searches.
+  const [view, setView] = useState(() => viewFilters())
   const [segmentChoice, setSegment] = useState('cidade')
   const segment = byAuthor ? 'autor' : segmentChoice
-  const [choosingUf, setChoosingUf] = useState(false)
+  const [placeOpen, setPlaceOpen] = useState(false)
+  const [filtersOpen, setFiltersOpen] = useState(false)
+  const [placeError, setPlaceError] = useState('')
+  const [width, setWidth] = useState(0)
   const [locationReady, setLocationReady] = useState(!locationStore)
   const [storageFailed, setStorageFailed] = useState(false)
   const [loaded, setLoaded] = useState(null)
@@ -115,6 +132,7 @@ export default function Feira ({
       const next = filterState(value || {})
       setFilters(next)
       setApplied(next)
+      setView(viewFilters())
     }, () => { if (alive) setStorageFailed(true) }).finally(() => { if (alive) setLocationReady(true) })
     return () => { alive = false }
   }, [locationStore])
@@ -160,8 +178,24 @@ export default function Feira ({
     }
   }, [scope, active, locationReady])
 
+  function confirmPlace (event) {
+    const next = { ...filters, city: fieldText(event, filters.city) }
+    if (placeMissing(next)) {
+      setFilters(next)
+      setPlaceError(TEXTS.location)
+      return
+    }
+    applyFilters(next)
+  }
+
+  function clearFilters () {
+    setView(viewFilters())
+    applyFilters({ uf: applied.uf, city: applied.city, kind: 'todos', cat: 'todas', words: '' })
+  }
+
   function applyFilters (next = filters) {
     Keyboard.dismiss()
+    setPlaceError('')
     const value = filterState(next)
     setFilters(value)
     setApplied(value)
@@ -191,6 +225,9 @@ export default function Feira ({
     setAlertData({ scope: alertScope, value: answer })
     setAlertNotice(answer.persisted === false ? 'Não foi possível guardar a leitura desta busca neste aparelho.' : '')
     setSegment('cidade')
+    setView(viewFilters())
+    setPlaceOpen(false)
+    setFiltersOpen(false)
     applyFilters({ uf: saved.uf, city: saved.cityLabel, kind: saved.kind, cat: saved.cat, words: saved.tokens.join(' ') })
   }
 
@@ -207,36 +244,114 @@ export default function Feira ({
   const query = savedSearch(applied)
   const controls = state.kind !== 'off' && !(availability?.scope === alertScope && availability.enabled === false)
   const filtering = controls && !byAuthor
+  const showHero = filtering && segment === 'cidade' && locationReady && placeMissing(applied)
+  const cityBrowse = filtering && segment === 'cidade' && locationReady && !showHero
+  const columns = columnsFor(width, fontScale >= LARGE_TEXT)
+  const browsed = browseListings(rows, cityBrowse ? view : viewFilters())
+  const gap = space.sm
+  const inner = Math.max(0, width - space.lg * 2)
+  const tileWidth = columns > 1 ? Math.floor((inner - gap * (columns - 1)) / columns) : inner
+  const grid = gridRows(controls && !showHero ? browsed : [], columns)
+  const note = cityBrowse && partialNoteVisible(view, !!(result && result.next !== null))
+  // The load effect starts after paint. Until this scope is busy, the empty
+  // actions would flash for a query that has not answered. A hidden tab does
+  // not load, so it keeps the quiet status line instead of a running skeleton.
+  const pagePending = active && cityBrowse && !result && state.kind === 'empty'
+  const showEmpty = cityBrowse && browsed.length === 0 && result !== null && (state.kind === 'empty' || state.kind === 'ready')
+  const showSkeletons = segment !== 'buscas' && browsed.length === 0 && !showHero && (state.kind === 'loading' || pagePending)
+  const hideStatus = showEmpty || showSkeletons || (segment === 'buscas' && state.kind === 'empty') || (showHero && (state.kind === 'location' || state.kind === 'loading'))
+  const skeletonRows = []
+  if (showSkeletons) {
+    const count = columns * 2
+    for (let i = 0; i < count; i += columns) {
+      const ids = []
+      for (let n = 0; n < columns && i + n < count; n++) ids.push(i + n)
+      skeletonRows.push(ids)
+    }
+  }
   const header = (
     <View>
       {filtering
         ? (
           <>
-            <FilterChips options={SEGMENT_OPTIONS} selected={segment} onSelect={setSegment} />
-            {segment === 'cidade'
+            <FilterChips options={SEGMENT_OPTIONS} selected={segment} onSelect={(id) => { setSegment(id); setPlaceOpen(false); setFiltersOpen(false) }} />
+            {showHero
+              ? (
+                <View style={styles.hero}>
+                  <View style={styles.heroPad}>
+                    <Text accessibilityRole='header' style={styles.heroTitle}>Onde você quer comprar e vender?</Text>
+                    <Text style={styles.fieldLabel}>Estado</Text>
+                  </View>
+                  <FilterChips options={UF_OPTIONS} selected={filters.uf} onSelect={(uf) => { setPlaceError(''); setFilters({ ...filters, uf }) }} />
+                  <View style={styles.heroPad}>
+                    <Field label='Cidade' value={filters.city} maxLength={40} editable={locationReady} onChangeText={(city) => { setPlaceError(''); setFilters({ ...filters, city }) }} onSubmitEditing={confirmPlace} returnKeyType='search' />
+                    {placeError ? <Text style={styles.message} accessibilityLiveRegion='polite'>{placeError}</Text> : null}
+                    <Btn label='Ver anúncios' onPress={confirmPlace} disabled={!locationReady} block />
+                    <Text accessibilityRole='header' style={styles.howTitle}>Como funciona</Text>
+                    <View style={styles.steps}>
+                      {[['lapis', 'Anuncie'], ['conversas', 'Converse'], ['ok', 'Combine'], ['estrela', 'Avalie']].map(([icon, label]) => (
+                        <View key={label} style={styles.step}>
+                          <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>
+                            <Icon name={icon} size={18} />
+                          </View>
+                          <Text style={styles.stepLabel}>{label}</Text>
+                        </View>
+                      ))}
+                    </View>
+                  </View>
+                </View>
+                )
+              : null}
+            {cityBrowse
               ? (
                 <>
                   <View style={styles.fields}>
-                    <Pressable
-                      accessibilityRole='button'
-                      accessibilityLabel={'Escolher estado' + (filters.uf ? ', ' + displayText(filters.uf) : '')}
-                      accessibilityState={{ expanded: choosingUf, disabled: !locationReady }}
-                      disabled={!locationReady}
-                      onPress={() => setChoosingUf(!choosingUf)}
-                      style={styles.select}
-                    >
-                      <Text style={styles.selectText}>{filters.uf ? 'Estado: ' + displayText(filters.uf) : 'Escolher estado'}</Text>
-                    </Pressable>
-                    {choosingUf
-                      ? <FilterChips options={UF_OPTIONS} selected={filters.uf} onSelect={(uf) => { setFilters({ ...filters, uf }); setChoosingUf(false) }} />
-                      : null}
-                    <Field label='Cidade' value={filters.city} maxLength={40} editable={locationReady} onChangeText={(city) => setFilters({ ...filters, city })} onSubmitEditing={() => applyFilters()} />
-                    <Field label='Palavras (opcional)' value={filters.words} maxLength={100} editable={locationReady} onChangeText={(words) => setFilters({ ...filters, words })} onSubmitEditing={() => applyFilters()} returnKeyType='search' />
-                    <Btn label='Buscar' onPress={() => applyFilters()} disabled={!locationReady} />
+                    <Field label='Palavras' value={filters.words} maxLength={100} editable={locationReady} plain onChangeText={(words) => setFilters({ ...filters, words })} onSubmitEditing={(event) => applyFilters({ ...filters, words: fieldText(event, filters.words) })} returnKeyType='search' />
+                    <View style={styles.toolRow}>
+                      <Pressable
+                        accessibilityRole='button'
+                        accessibilityLabel={'Trocar cidade, agora ' + placeLabel({ city: applied.city, uf: applied.uf })}
+                        onPress={() => setPlaceOpen(true)}
+                        style={({ pressed }) => [styles.placeChip, pressed && styles.pressed]}
+                      >
+                        <View style={[styles.toolInner, styles.toolFill]} pointerEvents='none' accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>
+                          <Icon name='mapa' size={18} />
+                          <Text style={styles.chipLabel} numberOfLines={1}>{placeLabel({ city: applied.city, uf: applied.uf })}</Text>
+                        </View>
+                      </Pressable>
+                      <Pressable
+                        accessibilityRole='button'
+                        accessibilityLabel='Filtros'
+                        accessibilityState={{ selected: filtersDot(view, applied.kind) }}
+                        onPress={() => setFiltersOpen(true)}
+                        style={({ pressed }) => [styles.filterBtn, pressed && styles.pressed]}
+                      >
+                        <View style={styles.toolInner} pointerEvents='none' accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>
+                          <Icon name='filtro' size={18} />
+                          <Text style={styles.selectText}>Filtros</Text>
+                          {filtersDot(view, applied.kind) ? <View style={styles.dot} /> : null}
+                        </View>
+                      </Pressable>
+                    </View>
                   </View>
-                  <FilterChips options={KIND_OPTIONS} selected={filters.kind} onSelect={(kind) => applyFilters({ ...filters, kind })} />
-                  <FilterChips options={CATEGORY_OPTIONS} selected={filters.cat} onSelect={(cat) => applyFilters({ ...filters, cat })} />
+                  <CategoryTiles value={filters.cat} onChange={(cat) => applyFilters({ ...filters, cat })} />
                   {query ? <View style={styles.note}><Btn label='Salvar busca' secondary onPress={saveSearch} /></View> : null}
+                  <PlaceSheet
+                    open={placeOpen}
+                    onClose={() => setPlaceOpen(false)}
+                    uf={applied.uf}
+                    city={applied.city}
+                    onPick={(place) => applyFilters({ ...filters, uf: place.uf, city: place.city })}
+                  />
+                  <FeiraFilters
+                    open={filtersOpen}
+                    onClose={() => setFiltersOpen(false)}
+                    value={{ sort: view.sort, min: view.min, max: view.max, kind: applied.kind }}
+                    onApply={(next) => {
+                      setView(viewFilters(next))
+                      if (next.kind !== applied.kind) applyFilters({ ...filters, kind: next.kind })
+                    }}
+                  />
                 </>
                 )
               : null}
@@ -262,16 +377,55 @@ export default function Feira ({
         : null}
       {storageFailed ? <View style={styles.note}><Soft>{TEXTS.storage}</Soft></View> : null}
       {alertNotice ? <View style={styles.note} accessibilityLiveRegion='polite'><Soft>{alertNotice}</Soft></View> : null}
-      {!controls ? <View style={styles.note}><Soft>{TEXTS.off}</Soft></View> : state.text && !(segment === 'buscas' && state.kind === 'empty') ? <View style={styles.note} accessibilityLiveRegion='polite'><Text style={styles.message}>{displayText(state.text)}</Text></View> : null}
+      {!controls ? <View style={styles.note}><Soft>{TEXTS.off}</Soft></View> : state.text && !hideStatus ? <View style={styles.note} accessibilityLiveRegion='polite'><Text style={styles.message}>{displayText(state.text)}</Text></View> : null}
+      {note ? <View style={styles.note}><Soft>{PARTIAL_NOTE}</Soft></View> : null}
+      {skeletonRows.map((ids) => (
+        <View key={'sk-' + ids[0]} style={styles.gridRow}>
+          {ids.map((id) => (
+            <View key={id} style={{ width: tileWidth }}>
+              <SkeletonTile />
+            </View>
+          ))}
+        </View>
+      ))}
+      {showEmpty
+        ? (
+          <EmptyState
+            icon='feira'
+            title={TEXTS.empty}
+            actionLabel='Limpar filtros'
+            onAction={clearFilters}
+            secondaryLabel='Trocar cidade'
+            onSecondary={() => setPlaceOpen(true)}
+          />
+          )
+        : null}
     </View>
   )
 
   return (
-    <View style={styles.screen}>
+    <View
+      style={styles.screen}
+      onLayout={(event) => {
+        const next = event.nativeEvent.layout.width
+        if (next > 0 && next !== width) setWidth(next)
+      }}
+    >
       <RefreshableList
-        data={controls ? rows : []}
-        keyExtractor={(item) => item.author + ':' + item.seq}
-        renderItem={({ item }) => <ListingCard listing={item} onPress={() => onOpenListing && onOpenListing({ author: item.author, seq: item.seq })} />}
+        data={grid}
+        keyExtractor={(item) => item.map((listing) => listing.author + ':' + listing.seq).join('|')}
+        renderItem={({ item }) => (
+          <View style={styles.gridRow}>
+            {item.map((listing) => (
+              <ListingTile
+                key={listing.author + ':' + listing.seq}
+                listing={listing}
+                width={tileWidth}
+                onPress={() => onOpenListing && onOpenListing({ author: listing.author, seq: listing.seq })}
+              />
+            ))}
+          </View>
+        )}
         ListHeaderComponent={header}
         ListFooterComponent={result && result.next !== null && controls
           ? <View style={styles.note}><Btn label={rows.length ? 'Carregar mais' : 'Continuar busca'} secondary pending={!!loading} onPress={() => load(true)} /></View>
@@ -301,7 +455,23 @@ export default function Feira ({
 
 const makeStyles = (colors) => StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
+  hero: { paddingTop: space.lg, gap: space.md },
+  heroPad: { paddingHorizontal: space.lg, gap: space.md },
+  heroTitle: { ...type.heroTitle, fontFamily: fonts.title, color: colors.ink, textAlign: 'center' },
+  fieldLabel: { ...type.postName, color: colors.ink },
+  howTitle: { ...type.emptyTitle, color: colors.ink, textAlign: 'center' },
+  steps: { flexDirection: 'row', gap: space.sm },
+  step: { flex: 1, minWidth: 0, alignItems: 'center', gap: space.xs },
+  stepLabel: { ...type.chip, color: colors.ink, textAlign: 'center' },
   fields: { padding: space.lg, gap: space.sm },
+  toolRow: { flexDirection: 'row', gap: space.sm, alignItems: 'center' },
+  toolInner: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
+  toolFill: { flex: 1, minWidth: 0 },
+  placeChip: { flex: 1, minWidth: 0, minHeight: layout.hit, justifyContent: 'center', paddingHorizontal: space.md, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.card },
+  filterBtn: { minHeight: layout.hit, justifyContent: 'center', paddingHorizontal: space.md, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.card },
+  chipLabel: { ...type.postText, color: colors.ink, flexShrink: 1 },
+  dot: { width: 8, height: 8, borderRadius: radius.pill, backgroundColor: colors.accent },
+  gridRow: { flexDirection: 'row', gap: space.sm, paddingHorizontal: space.lg, marginBottom: space.sm, alignItems: 'flex-start' },
   search: { gap: space.sm },
   chip: { ...type.pill, color: colors.accent, backgroundColor: colors.accentSoft, borderRadius: radius.pill, padding: space.sm, alignSelf: 'flex-start' },
   select: { minHeight: layout.hit, justifyContent: 'center', paddingHorizontal: space.md, borderRadius: radius.sm, borderWidth: 1, borderColor: colors.line },

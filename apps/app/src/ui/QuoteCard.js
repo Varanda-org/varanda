@@ -13,15 +13,21 @@
 // calls `quote.onOpen`. Web links in a quote stay plain: the 6 line clamp can
 // cut a URL, so the card opens the quoted post, where its links work.
 // `quote.preview`, a stored link card of the quoted post (never with photos),
-// is drawn by ./LinkCard from that stored data only.
+// is drawn by ./LinkCard from that stored data only, or, for a YouTube,
+// SoundCloud, Spotify or Apple Music link, by ./MusicEmbedCard, which loads
+// the provider player while the card is visible; the quote text then hides
+// that card's own link.
 
 import { Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { relativeTime } from '../format'
+import { embedOf, sameMusicPage } from '../musicEmbed'
+import { textWithoutHrefs } from '../links'
 import { whoOf } from '../who'
 import { Avatar } from './Avatar'
 import { MediaGrid } from './MediaGrid'
 import { LinkCard } from './LinkCard'
+import { MusicEmbedCard } from './MusicEmbedCard'
 import { hasMention, MentionText } from './MentionText'
 import { LARGE_TEXT, type } from './theme'
 import { useStyles } from './ThemeProvider'
@@ -39,6 +45,13 @@ function Meta ({ handle, time, styles }) {
   )
 }
 
+export function quotePlayerOf (quote) {
+  const q = quote && typeof quote === 'object' ? quote : {}
+  const missing = q.missing === true
+  const hasMedia = Array.isArray(q.media) && q.media.length > 0
+  return !missing && !hasMedia && q.preview && typeof q.preview === 'object' && typeof q.author === 'string' ? embedOf(q.preview.url) : null
+}
+
 export function QuoteCard ({ quote, now }) {
   const styles = useStyles(makeStyles)
   const q = quote && typeof quote === 'object' ? quote : {}
@@ -46,8 +59,12 @@ export function QuoteCard ({ quote, now }) {
   const missing = q.missing === true
   const hasText = typeof q.text === 'string' && q.text !== ''
   const hasMedia = Array.isArray(q.media) && q.media.length > 0
+  const embed = quotePlayerOf(q)
+  const shownText = embed !== null && hasText ? textWithoutHrefs(q.text, (href) => sameMusicPage(href, q.preview.url)) : q.text
   const preview = !missing && !hasMedia && q.preview && typeof q.preview === 'object' && typeof q.author === 'string'
-    ? <LinkCard card={q.preview} thumb={{ kind: 'post', author: q.author, persist: q.persist === true }} />
+    ? embed !== null
+      ? <MusicEmbedCard embed={embed} card={q.preview} thumb={{ kind: 'post', author: q.author, persist: q.persist === true }} />
+      : <LinkCard card={q.preview} thumb={{ kind: 'post', author: q.author, persist: q.persist === true }} />
     : null
   const loading = !missing && !hasText && !hasMedia
   const who = whoOf({ name: q.name, username: q.username })
@@ -58,7 +75,8 @@ export function QuoteCard ({ quote, now }) {
   const handle = who.subtitle && !(fontScale >= LARGE_TEXT) ? displayText(who.subtitle) : null
   const openMention = typeof q.onOpenMention === 'function' ? q.onOpenMention : undefined
   const label = missing ? 'Publicação indisponível' : 'publicação citada de ' + title
-  if (!missing && openMention && hasText && hasMention(q.text)) {
+  const mentioned = !missing && openMention && hasText && shownText !== '' && hasMention(shownText)
+  if (embed !== null || mentioned) {
     return (
       <View style={styles.card}>
         <Pressable
@@ -72,7 +90,12 @@ export function QuoteCard ({ quote, now }) {
           <Text style={styles.name} numberOfLines={1}>{title}</Text>
           <Meta handle={handle} time={time} styles={styles} />
         </Pressable>
-        <MentionText text={q.text} onOpenMention={openMention} onOpenPlain={open} style={styles.text} numberOfLines={6} />
+        {loading ? <View style={styles.skeleton} accessible={false} /> : null}
+        {hasText && shownText !== ''
+          ? mentioned
+            ? <MentionText text={shownText} onOpenMention={openMention} onOpenPlain={open} style={styles.text} numberOfLines={6} />
+            : <Text onPress={open} style={styles.text} numberOfLines={6}>{displayText(shownText, { multiline: true })}</Text>
+          : null}
         {preview}
         {hasMedia || q.hasQuote === true
           ? (
@@ -105,8 +128,8 @@ export function QuoteCard ({ quote, now }) {
               <Meta handle={handle} time={time} styles={styles} />
             </View>
             {loading ? <View style={styles.skeleton} accessible={false} /> : null}
-            {hasText
-              ? <Text style={styles.text} numberOfLines={6}>{displayText(q.text, { multiline: true })}</Text>
+            {hasText && shownText !== ''
+              ? <Text style={styles.text} numberOfLines={6}>{displayText(shownText, { multiline: true })}</Text>
               : null}
             {hasMedia
               ? <View style={styles.media}><MediaGrid author={q.author} media={q.media} persist={q.persist === true} mosaic /></View>

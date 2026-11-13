@@ -32,8 +32,7 @@
 // never queued, never persisted (for a private group that would leak the
 // plaintext). A mutation answered UNCERTAIN is never resent: the screen
 // re-reads, asks groups.js reconcile and only then offers "tentar de novo".
-// Hosted node only: a node that is not hosted sees the "Só na versão web"
-// state, like Avisos.
+// Group access requires the hosted node capability.
 // Photos and GIFs (a member posting as themself, when the node offers
 // media.upload and is online): the clip opens the attach sheet; the photos
 // upload in order (sealed for a private group, so only members open them),
@@ -54,7 +53,7 @@
 // answers, the composer stays closed.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Keyboard, KeyboardAvoidingView, Pressable, StyleSheet, Text, View } from 'react-native'
+import { AccessibilityInfo, Keyboard, KeyboardAvoidingView, Pressable, StyleSheet, Text, View } from 'react-native'
 import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
 import { MAX_TEXT, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
@@ -73,6 +72,14 @@ import { Btn, ConfirmStack, ErrorText, Notice, Soft, errorText, useAction, useNo
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { Avatar } from '../ui/Avatar'
 import { Bubble } from '../ui/Bubble'
+import { SwipeReply } from '../ui/SwipeReply'
+import { JumpToEnd } from '../ui/JumpToEnd'
+import { awayCount, jumpVisible } from '../chatGestures'
+import { ReactionChips, QuickReactions } from '../ui/Reactions'
+import { ReactionPicker, WhoReacted } from '../ui/ReactionPicker'
+import { toggleOf, applyOptimistic } from '../reactions'
+import { hasRich, parseRich } from '../richText'
+import { cardBesideSpoilers } from '../ui/RichText'
 import { ChatComposer, useLinkDraft } from '../ui/ChatComposer'
 import { cardForSend, withCardFallback } from '../linkCard'
 import { ChatHeader } from '../ui/ChatHeader'
@@ -81,6 +88,7 @@ import { MoreButton } from '../ui/MoreButton'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
+import { EmbedBandBottom } from '../ui/screenVisible'
 import { EmptyState, ErrorState, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
 import { ForwardSheet } from '../ui/ForwardSheet'
@@ -98,7 +106,7 @@ import { chatMediaRefs, followAutocorrect, mediaPostLanded, retryChatSend, runCh
 import { ChatMedia } from '../ui/ChatMedia'
 import { useChatAttachments } from '../ui/AttachSheet'
 
-export const WEB_ONLY_TEXT = 'Comunidades só na versão web'
+export const WEB_ONLY_TEXT = 'Comunidades disponíveis no site da associação ou no app ligado à instalação.'
 const ORPHAN_TEXT = 'Este grupo não pertence a nenhuma comunidade.'
 const NEED_COMMUNITY = 'entre na comunidade primeiro'
 const HEX64 = /^[0-9a-f]{64}$/
@@ -120,6 +128,17 @@ const JOINABLE = [null, 'left', 'pending']
 export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage, onOpenMention, onReport, onSeen, isTop = true }) {
   const styles = useStyles(makeStyles)
   const avoidKeyboard = useKeyboardAvoidEnabled()
+  // A list row under the composer is not seen, and measureInWindow reports
+  // clipped rows unclipped, so the list tells its cards where the composer
+  // starts. Measured on every check: the keyboard moves the composer.
+  const composerBox = useRef(null)
+  const band = useMemo(() => ({
+    measure: (done) => {
+      const node = composerBox.current
+      if (node === null || typeof node.measureInWindow !== 'function') { done(null); return }
+      node.measureInWindow((x, y, w, h) => done(Number.isFinite(y) && y > 0 && h > 0 ? y : null))
+    }
+  }), [])
   const { colors } = useTheme()
   const node = useNode()
   const hosted = node.hosted === true
@@ -151,6 +170,21 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   const [settingsOpen, setSettingsOpen] = useState(false)
   // { source, refs } of the message the Encaminhar sheet forwards.
   const [forwarding, setForwarding] = useState(null)
+  const [reactionOverrides, setReactionOverrides] = useState(new Map())
+  const [reactionError, setReactionError] = useState('')
+  const [reactionPicker, setReactionPicker] = useState(null)
+  const [whoReacted, setWhoReacted] = useState(null)
+  const reactionContext = useMemo(() => ({ live: true, sending: new Set(), unsure: new Map(), reading: new Set(), who: 0, read: 0, readStarts: new WeakMap(), settled: new Map() }), [group, ownKey, asPage.key, asPage.page, request])
+  const reactionContextRef = useRef(reactionContext)
+  reactionContextRef.current = reactionContext
+  useEffect(() => {
+    reactionContext.live = true
+    setReactionOverrides(new Map())
+    setReactionError('')
+    setReactionPicker(null)
+    setWhoReacted(null)
+    return () => { reactionContext.live = false }
+  }, [reactionContext])
   // The community of a group this node does not hold yet (from the index),
   // the community's name, and whether a join was refused for lack of one.
   const [indexCommunity, setIndexCommunity] = useState(null)
@@ -244,7 +278,23 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   }, [request, group])
 
   const commitRead = useCallback((read, before) => {
-    setStore((prev) => applyPage(before === null ? EMPTY_PAGES : prev, read, before))
+    const context = reactionContextRef.current
+    setStore((prev) => {
+      const next = applyPage(before === null ? EMPTY_PAGES : prev, read, before)
+      return before !== null && next.stale ? prev : next
+    })
+    const unsure = new Map(context.unsure)
+    setReactionOverrides((prev) => {
+      const next = new Map(prev)
+      for (const item of read.items || []) {
+        const key = item.writer + ':' + item.seq
+        // A read begun before the append cannot replace this device's known state.
+        const recovered = context.readStarts.get(read) > unsure.get(key)
+        if (recovered) context.unsure.delete(key)
+        if ((recovered || !context.sending.has(key)) && context.readStarts.get(read) > context.settled.get(key)) next.delete(key)
+      }
+      return next
+    })
     if (before === null) {
       setMeta({
         sealed: Number.isSafeInteger(read.sealed) ? read.sealed : 0,
@@ -259,8 +309,14 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   // read; a public one, or one the node has not answered for (the service's
   // read gives the role then), from the service's read.
   const readGroup = useCallback(async (before) => {
+    const context = reactionContextRef.current
+    const started = ++context.read
     const op = before ? { group, before } : { group }
-    if (!asPage.page) return request('group.read', op)
+    if (!asPage.page) {
+      const read = await request('group.read', op)
+      context.readStarts.set(read, started)
+      return read
+    }
     const id = asPage.key + ':' + group
     const { read, visibility: seen, noKey, nodeError } = await readAsPage({
       nodeRead: () => request('group.read', { ...op, page: asPage.key }),
@@ -272,6 +328,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     let note = ''
     if (visibility === null) note = seen === 'private' ? PAGE_NO_KEY_TEXT : (nodeError ? pageGroupErrorText(nodeError) : PAGE_GROUP_LOADING_TEXT)
     setPageVisNote(note)
+    context.readStarts.set(read, started)
     return read
   }, [request, group, node, asPage.page, asPage.key])
   const pageVisNow = () => (pageVisRef.current.id === asPage.key + ':' + group ? pageVisRef.current.value : null)
@@ -395,14 +452,14 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
       if (next.stale) {
         await readNewest()
       } else {
-        setStore(next)
+        commitRead(read, before)
       }
     } catch (err) {
       setMoreError(errorText(err))
     } finally {
       setLoadingMore(false)
     }
-  }, [readGroup, loadingMore, readNewest])
+  }, [readGroup, loadingMore, readNewest, commitRead])
 
   const rawItems = useMemo(() => itemsOf(store), [store])
   // The day chips ("hoje", "ontem") follow the clock: the rows are rebuilt
@@ -410,6 +467,8 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   const now = useNow(60 * 1000)
   const today = new Date(now).toDateString()
   const rows = useMemo(() => groupRows(rawItems, ownKey, now), [rawItems, ownKey, today])
+  const rowsRef = useRef(rows)
+  rowsRef.current = rows
   const rawById = useMemo(() => {
     const m = new Map()
     for (const i of rawItems) m.set(i.writer + ':' + i.seq, i)
@@ -555,7 +614,9 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     const plain = replyTo ? { group, text, replyTo: { writer: replyTo.writer, seq: replyTo.seq } } : { group, text }
     // Without the group's info its visibility is unknown: no card, so a
     // private group's thumbnail is never uploaded in the clear.
-    const snapshot = heldCard === undefined && info !== null ? linkDraft.take(text) : null
+    let snapshot = heldCard === undefined && info !== null ? linkDraft.take(text) : null
+    const blocks = hasRich(text) ? parseRich(text) : null
+    if (snapshot && cardBesideSpoilers(blocks, { url: snapshot.url }) === null) snapshot = null
     let card = heldCard === undefined ? null : heldCard
     const r = await post.run(async () => {
       const visibility = isPrivate ? 'private' : 'public'
@@ -787,16 +848,44 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   }
 
   const scrollToKey = (key) => {
-    const index = rows.findIndex((r) => r.key === key)
+    clearTimeout(jumpTimer.current)
+    clearTimeout(quoteTimer.current)
+    setFlashKey(null)
+    setQuoteToast(false)
+    const missing = () => {
+      setQuoteToast(true)
+      AccessibilityInfo.announceForAccessibility('Mensagem fora do trecho carregado')
+      quoteTimer.current = setTimeout(() => setQuoteToast(false), 3000)
+    }
+    const index = rows.findIndex((row) => row.key === key)
     const list = listRef.current
-    if (index < 0 || !list || typeof list.scrollToIndex !== 'function') return
-    // A quote jump leaves the end: still pinned, its first animated frame
-    // would scroll back to the end.
+    if (index < 0 || !list || typeof list.scrollToIndex !== 'function') return missing()
+    // Released before the scroll so no follow-up frame pulls the list back
+    // to the end; a scroll that throws never moved, so it is put back.
+    const before = { away: away.current, pin: endPin.current }
+    away.current = true
     endPin.current = pinToEnd(endPin.current, { kind: 'user' })
-    // An unmeasured row far up throws without getItemLayout: stay put then.
     try {
-      list.scrollToIndex({ index, animated: true, viewPosition: 0.5 })
-    } catch {}
+      list.scrollToIndex({ index, animated: false, viewPosition: 0.5 })
+    } catch {
+      away.current = before.away
+      endPin.current = before.pin
+      return missing()
+    }
+    // The first offset can be an estimate even when scrollToIndex succeeds.
+    jumpTimer.current = setTimeout(() => {
+      if (listRef.current !== list) return
+      // An older page can land in between and shift the index.
+      const at = rowsRef.current.findIndex((row) => row.key === key)
+      if (at < 0) return missing()
+      try {
+        list.scrollToIndex({ index: at, animated: false, viewPosition: 0.5 })
+        setFlashKey(key)
+        quoteTimer.current = setTimeout(() => setFlashKey(null), 900)
+      } catch {
+        missing()
+      }
+    }, 120)
   }
 
   const hide = async (row, on) => {
@@ -861,6 +950,32 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     })
   }
 
+  const away = useRef(false)
+  const latestKey = rows.length > 0 ? rows[rows.length - 1].key : null
+  const latestKeyRef = useRef(null)
+  latestKeyRef.current = latestKey
+  const [lastSeenKey, setLastSeenKey] = useState(null)
+  const [showJump, setShowJump] = useState(false)
+  const scrollFrame = useRef({ y: 0, contentHeight: 0, layoutHeight: 0 })
+  const [flashKey, setFlashKey] = useState(null)
+  const [quoteToast, setQuoteToast] = useState(false)
+  const quoteTimer = useRef(null)
+  const jumpTimer = useRef(null)
+  useEffect(() => {
+    away.current = false
+    setLastSeenKey(null)
+    setShowJump(false)
+    setFlashKey(null)
+    setQuoteToast(false)
+    return () => {
+      clearTimeout(quoteTimer.current)
+      clearTimeout(jumpTimer.current)
+    }
+  }, [group, ownKey, asPage.key])
+  useEffect(() => {
+    if (!away.current) setLastSeenKey(latestKey)
+  }, [latestKey])
+
   const endPin = useRef({ pinned: true, newest: null, lastY: null })
   // On the web the content size can change before FlatList measured the new
   // row, so the first scroll uses an estimate and stops short: one more once
@@ -868,20 +983,27 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   const settleTimer = useRef(null)
   useEffect(() => () => clearTimeout(settleTimer.current), [])
   const followEnd = useCallback(() => {
+    if (away.current) return
     if (!endPin.current.pinned) return
     const list = listRef.current
     if (!list || typeof list.scrollToEnd !== 'function') return
     list.scrollToEnd({ animated: false })
     clearTimeout(settleTimer.current)
     settleTimer.current = setTimeout(() => {
+      if (away.current) return
       const now = listRef.current
       if (endPin.current.pinned && now && typeof now.scrollToEnd === 'function') now.scrollToEnd({ animated: false })
     }, 50)
   }, [])
   const releaseEnd = useCallback(() => {
+    clearTimeout(jumpTimer.current)
     endPin.current = pinToEnd(endPin.current, { kind: 'user' })
   }, [])
   const scrollToEnd = () => {
+    clearTimeout(jumpTimer.current)
+    away.current = false
+    setLastSeenKey(latestKeyRef.current)
+    setShowJump(false)
     endPin.current = { ...endPin.current, pinned: true }
     followEnd()
   }
@@ -902,6 +1024,8 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   const atBottom = useRef(true)
   const lastY = useRef(null)
   const trackBottom = useCallback(({ y, contentHeight, layoutHeight }) => {
+    scrollFrame.current = { y, contentHeight, layoutHeight }
+    setShowJump(jumpVisible({ distanceFromEnd: contentHeight - y - layoutHeight, viewport: layoutHeight }))
     // A frame only updates the pin. Following the end happens on content
     // growth (onContentSizeChange): calling scrollToEnd from every frame of an
     // animated scroll restarts the animation on Android and turns it into a crawl.
@@ -911,6 +1035,8 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     lastY.current = y
     if (resized && !bottom) return
     atBottom.current = bottom
+    if (bottom || away.current || !endPin.current.pinned) away.current = !bottom
+    if (bottom) setLastSeenKey(latestKeyRef.current)
   }, [])
   useEffect(() => {
     let timers = []
@@ -1055,11 +1181,108 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     }
   }
 
+  const reactionsDisabled = !node.online || node.passkey?.status?.unlocked !== true || meta.state === 'locked' || meta.state === 'rekey-pending' || asPage.page || !reader || orphan || !canWriteHere(info)
+  const reactionViewRef = useRef(null)
+  reactionViewRef.current = { disabled: reactionsDisabled, rawById, overrides: reactionOverrides, picker: reactionPicker, whoOpen: whoReacted !== null }
+  useEffect(() => {
+    if (reactionsDisabled) {
+      reactionContext.who++
+      setReactionPicker(null)
+      setWhoReacted(null)
+    }
+  }, [reactionsDisabled, reactionContext])
+
+  const reactionsFor = (row) => row.hidden ? [] : (reactionOverrides.get(row.key) || row.reactions || [])
+  const whoReactedRows = whoReacted?.map((r) => ({
+    ...r,
+    names: r.by.map((diary) => {
+      const profile = names?.profileOf(diary) || rawItems.find((i) => i.diary === diary && !i.hidden)
+      const title = whoOf(profile).title
+      return displayText(title === UNNAMED ? 'Pessoa' : title)
+    })
+  }))
+
+  function openReactionPicker (key) {
+    if (reactionViewRef.current.disabled || reactionViewRef.current.whoOpen || reactionContext.sending.has(key) || reactionContext.unsure.has(key)) return
+    reactionContext.who++
+    reactionViewRef.current.picker = key
+    setReactionPicker(key)
+  }
+
+  async function toggleReaction (key, picked) {
+    const context = reactionContext
+    const view = reactionViewRef.current
+    const item = view.rawById.get(key)
+    if (!context.live || context !== reactionContextRef.current || view.disabled || !item || item.hidden || context.sending.has(key) || context.unsure.has(key)) return
+    const before = view.overrides.get(key)
+    const reactions = before || item.reactions || []
+    const emoji = toggleOf(reactions, picked)
+    const target = { writer: item.writer, seq: item.seq }
+    context.sending.add(key)
+    context.settled.delete(key)
+    setReactionError('')
+    setReactionOverrides((prev) => new Map(prev).set(key, applyOptimistic(reactions, emoji)))
+    try {
+      try {
+        await request('group.react', { group, target, emoji })
+      } catch (err) {
+        if (context.live && context === reactionContextRef.current) {
+          context.unsure.set(key, context.read)
+          context.settled.set(key, context.read)
+          setReactionOverrides((prev) => {
+            const next = new Map(prev)
+            if (before === undefined) next.delete(key)
+            else next.set(key, before)
+            return next
+          })
+          setReactionError(errorText(err))
+          await readNewest().catch(() => {})
+        }
+        return
+      }
+      if (!context.live || context !== reactionContextRef.current) return
+      context.settled.set(key, context.read)
+    } finally {
+      context.sending.delete(key)
+      // The ref-held flight must repaint so the chips become pressable again.
+      if (context.live && context === reactionContextRef.current) setReactionOverrides((prev) => new Map(prev))
+    }
+  }
+
+  async function showReactors (key, emoji) {
+    const context = reactionContext
+    const view = reactionViewRef.current
+    const item = view.rawById.get(key)
+    if (!context.live || context !== reactionContextRef.current || view.disabled || view.picker !== null || view.whoOpen || !item || item.hidden || context.reading.has(key) || context.sending.has(key) || context.unsure.has(key)) return
+    context.reading.add(key)
+    const ticket = ++context.who
+    setReactionError('')
+    try {
+      const result = await request('group.reactors', { group, target: { writer: item.writer, seq: item.seq } })
+      if (!context.live || context !== reactionContextRef.current || ticket !== context.who || reactionViewRef.current.disabled) return
+      const current = reactionViewRef.current
+      if (current.picker !== null || current.whoOpen || !current.rawById.has(key) || current.rawById.get(key).hidden) return
+      const rows = (result.reactions || []).filter((r) => !emoji || r.emoji === emoji).map((r) => ({
+        emoji: r.emoji,
+        count: r.count,
+        by: r.by || []
+      }))
+      const unknown = [...new Set(rows.flatMap((r) => r.by))].filter((diary) => namesRef.current?.profileOf(diary) === undefined)
+      if (unknown.length > 0) namesRef.current?.resolveMany(unknown)
+      current.whoOpen = true
+      setWhoReacted(rows)
+    } catch (err) {
+      if (context.live && context === reactionContextRef.current && ticket === context.who) setReactionError(errorText(err))
+    } finally {
+      context.reading.delete(key)
+    }
+  }
+
   if (!hosted) {
     return (
       <View style={styles.root}>
         <TopBar title='Grupo' onBack={onBack} />
-        <EmptyState icon='cadeira' title='Só na versão web' body={WEB_ONLY_TEXT} />
+        <EmptyState icon='cadeira' title='Comunidades indisponíveis' body={WEB_ONLY_TEXT} />
       </View>
     )
   }
@@ -1180,6 +1403,9 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   const actionsOf = (row) => {
     const mine = row.mine === true
     const list = []
+    if (!row.hidden && reactionsFor(row).length > 0) {
+      list.push({ icon: 'gente', label: 'Ver quem reagiu', disabled: reactionsDisabled || reactionContext.sending.has(row.key) || reactionContext.unsure.has(row.key), onPress: () => showReactors(row.key) })
+    }
     if (!asPage.page && canPost && !row.hidden) {
       list.push({ icon: 'responder', label: 'Responder', onPress: () => { setReplyKey(row.key); setReplyQuote(quoteOf(row.key)) } })
     }
@@ -1228,23 +1454,32 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
         )
     const rawRow = rawById.get(row.key || row.id)
     const refs = row.hidden || !rawRow ? [] : chatMediaRefs('group', { diary: rawRow.diary, media: rawRow.media })
+    const reply = actionsOf(row).find((action) => action.label === 'Responder')
     return (
-      <Bubble
-        media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} /> : null}
-        item={{ key: row.key, text: row.text, rawText: row.hidden ? undefined : row.rawText, at: row.at, hidden: row.hidden, dayMark: row.dayMark, card: !row.hidden && rawRow && rawRow.card ? rawRow.card : null }}
-        cardThumb={rawRow ? { kind: 'group', diary: rawRow.diary, identity: ownKey } : undefined}
-        mine={mine}
-        shape={row.shape}
-        forwarded={!row.hidden && !!rawRow && rawRow.fwd === 1}
-        name={mine ? undefined : who.title}
-        handle={mine ? undefined : who.subtitle}
-        senderKey={row.diary || row.writer}
-        avatar={avatar}
-        quote={quote ? { ...quote, onPress: () => scrollToKey(row.replyTo) } : null}
-        actions={actionsOf(row)}
-        actionsTitle={mine ? undefined : who.title}
-        onOpenMention={typeof onOpenMention === 'function' ? onOpenMention : undefined}
-      />
+      <SwipeReply disabled={!reply} onReply={reply?.onPress}>
+        <View style={flashKey === row.key ? styles.quoteFlash : undefined}>
+          <Bubble
+            media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} /> : null}
+            item={{ key: row.key, text: row.text, rawText: row.hidden ? undefined : row.rawText, at: row.at, hidden: row.hidden, dayMark: row.dayMark, card: !row.hidden && rawRow && rawRow.card ? rawRow.card : null }}
+            cardThumb={rawRow ? { kind: 'group', diary: rawRow.diary, identity: ownKey } : undefined}
+            mine={mine}
+            shape={row.shape}
+            forwarded={!row.hidden && !!rawRow && rawRow.fwd === 1}
+            name={mine ? undefined : who.title}
+            handle={mine ? undefined : who.subtitle}
+            senderKey={row.diary || row.writer}
+            avatar={avatar}
+            quote={quote ? { ...quote, onPress: () => scrollToKey(row.replyTo) } : null}
+            actions={actionsOf(row)}
+            actionsTitle={mine ? undefined : who.title}
+            below={<ReactionChips reactions={reactionsFor(row)} disabled={reactionsDisabled || reactionContext.sending.has(row.key) || reactionContext.unsure.has(row.key)} onToggle={(emoji) => toggleReaction(row.key, emoji)} onShowWho={(emoji) => showReactors(row.key, emoji)} />}
+            actionsHeader={!row.hidden && !reactionsDisabled && !reactionContext.sending.has(row.key) && !reactionContext.unsure.has(row.key)
+              ? ({ closeThen }) => <QuickReactions mine={reactionsFor(row).find((r) => r.mine)?.emoji} onPick={(emoji) => closeThen(() => toggleReaction(row.key, emoji))} onMore={() => closeThen(() => openReactionPicker(row.key))} />
+              : null}
+            onOpenMention={typeof onOpenMention === 'function' ? onOpenMention : undefined}
+          />
+        </View>
+      </SwipeReply>
     )
   }
 
@@ -1352,24 +1587,46 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
           )
         : null}
       <OfflineNote />
-      <RefreshableList
-        listRef={listRef}
-        data={reader ? rows : []}
-        keyExtractor={(row) => row.key}
-        renderItem={renderItem}
-        extraData={{ role, rawById, names, canPost, replyKey }}
-        contentContainerStyle={styles.thread}
-        ListHeaderComponent={stateNotes}
-        ListEmptyComponent={empty}
-        ListFooterComponent={<View>{act.error ? <View style={styles.note}><ErrorText>{act.error}</ErrorText></View> : null}{banNote}{checkNote}</View>}
-        onRefresh={() => { setLookupTick((n) => n + 1); load(true) }}
-        refreshing={refreshing}
-        keepVisiblePosition
-        onScrollFrame={trackBottom}
-        onContentSizeChange={followEnd}
-        onUserScroll={releaseEnd}
+      <EmbedBandBottom.Provider value={composer ? band : null}>
+        <RefreshableList
+          listRef={listRef}
+          data={reader ? rows : []}
+          keyExtractor={(row) => row.key}
+          renderItem={renderItem}
+          extraData={{ role, rawById, names, canPost, replyKey, flashKey, reactionOverrides, reactionsDisabled }}
+          contentContainerStyle={styles.thread}
+          ListHeaderComponent={stateNotes}
+          ListEmptyComponent={
+            <View>
+              {empty}
+              {loadedAt !== null && !loadError && canPost && node.online && node.passkey?.status?.unlocked === true && !post.pending && !pagePending && postHold === null && check === null && mediaHold === null && !sendingMedia
+                ? <View style={[styles.note, styles.inline]}>{['Oi', 'Tudo bem?'].map((text) => <Pill key={text} label={text} onPress={() => setDraft((d) => d.trim() ? d + '\n' + text : text)} />)}</View>
+                : null}
+            </View>
+          }
+          ListFooterComponent={<View>{reactionError ? <View style={styles.note}><ErrorText>{reactionError}</ErrorText></View> : null}{act.error ? <View style={styles.note}><ErrorText>{act.error}</ErrorText></View> : null}{banNote}{checkNote}</View>}
+          onRefresh={() => { setLookupTick((n) => n + 1); load(true) }}
+          refreshing={refreshing}
+          keepVisiblePosition
+          onScrollFrame={trackBottom}
+          onContentSizeChange={(width, height) => {
+            const { y, layoutHeight } = scrollFrame.current
+            scrollFrame.current.contentHeight = height
+            setShowJump(jumpVisible({ distanceFromEnd: height - y - layoutHeight, viewport: layoutHeight }))
+            followEnd()
+          }}
+          onUserScroll={releaseEnd}
+        />
+      </EmbedBandBottom.Provider>
+      {quoteToast ? <View pointerEvents='none' style={styles.quoteToast}><Text accessibilityLiveRegion='polite' style={styles.quoteToastText}>Mensagem fora do trecho carregado</Text></View> : null}
+      {showJump || (away.current && awayCount(rows, lastSeenKey) > 0) ? <JumpToEnd count={awayCount(rows, lastSeenKey)} onPress={scrollToEnd} /> : null}
+      {composer ? <View ref={composerBox} collapsable={false}>{composer}</View> : null}
+      <ReactionPicker
+        open={reactionPicker !== null && !reactionsDisabled && !reactionContext.sending.has(reactionPicker) && !reactionContext.unsure.has(reactionPicker)}
+        onClose={() => setReactionPicker(null)}
+        onPick={(emoji) => { const key = reactionPicker; setReactionPicker(null); if (key !== null) toggleReaction(key, emoji) }}
       />
-      {composer}
+      <WhoReacted open={whoReacted !== null && !reactionsDisabled} onClose={() => { reactionContext.who++; setWhoReacted(null) }} rows={whoReactedRows} />
       {!asPage.page
         ? (
           <ForwardSheet
@@ -1397,6 +1654,9 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
 }
 
 const makeStyles = (colors) => StyleSheet.create({
+  quoteFlash: { backgroundColor: colors.line },
+  quoteToast: { padding: 12, borderRadius: 12, marginHorizontal: 16, backgroundColor: colors.ink },
+  quoteToastText: { color: colors.bg, textAlign: 'center' },
   root: { flex: 1, backgroundColor: colors.bg },
   pressed: { opacity: 0.6 },
   community: {

@@ -36,8 +36,8 @@ function block (startRe, endRe) {
 
 const check = block(/^ {2}check:/, /^ {2}\S/)
 const deploy = block(/^ {2}deploy:/, /^ {2}\S/)
-// The six test legs, each its own job (no matrix), gated by check.
-const WORKERS = ['core-1', 'core-2', 'cli-1', 'cli-2', 'web-member', 'others']
+// The eight test legs, each its own job (no matrix), gated by check.
+const WORKERS = ['core-1', 'core-2', 'cli-1', 'cli-2', 'web-member-1', 'web-member-2', 'web-member-3', 'others']
 const workers = Object.fromEntries(WORKERS.map((id) => [id, block(new RegExp('^ {2}' + id + ':\\s*$'), /^ {2}\S/)]))
 const GUARD = "github\\.repository == 'Varanda-org\\/varanda' && github\\.ref == 'refs\\/heads\\/main' && vars\\.VARANDA_DEPLOY == 'true'"
 
@@ -64,7 +64,7 @@ test('deploy.yml: permissions, triggers and job shape', (t) => {
   t.ok(check && deploy, 'check and deploy found')
   for (const id of WORKERS) t.ok(workers[id], id + ' job found')
   const jobs = block(/^jobs:/, /^\S/).split('\n').filter((l) => /^ {2}[A-Za-z0-9_-]+:/.test(l)).map((l) => l.trim().replace(/:.*$/, ''))
-  t.alike(jobs.sort(), [...WORKERS, 'check', 'deploy'].sort(), 'jobs are the six legs, check and deploy')
+  t.alike(jobs.sort(), [...WORKERS, 'check', 'deploy'].sort(), 'jobs are the eight legs, check and deploy')
   t.absent(/^\s+strategy:/m.test(code), 'no matrix strategy')
   t.absent(/<<:/.test(code), 'no YAML merge keys')
   t.absent(yml.includes(String.fromCharCode(0x2014)), 'no em dash')
@@ -108,9 +108,9 @@ test('deploy.yml: every job carries the repository, branch and variable guards',
   // The gate runs even when a leg failed, was cancelled or was skipped, and
   // fails closed: a skipped check would read as passing.
   t.ok(new RegExp('^\\s+if:\\s*always\\(\\) && ' + GUARD + '\\s*$', 'm').test(check), 'check gate runs always() under the guard')
-  t.ok(/^ {4}needs:\s*\[\s*core-1,\s*core-2,\s*cli-1,\s*cli-2,\s*web-member,\s*others\s*\]\s*$/m.test(check), 'check needs exactly the six legs')
+  t.ok(/^ {4}needs:\s*\[\s*core-1,\s*core-2,\s*cli-1,\s*cli-2,\s*web-member-1,\s*web-member-2,\s*web-member-3,\s*others\s*\]\s*$/m.test(check), 'check needs exactly the eight legs')
   t.ok(/^\s+RESULTS:\s*\$\{\{ join\(needs\.\*\.result, ' '\) \}\}\s*$/m.test(check), 'check reads every leg result')
-  t.ok(/^\s+\[ "\$#" -eq 6 \] \|\| exit 1\s*$/m.test(check), 'check requires exactly six results')
+  t.ok(/^\s+\[ "\$#" -eq 8 \] \|\| exit 1\s*$/m.test(check), 'check requires exactly eight results')
   t.ok(/^\s+for r in "\$@"; do \[ "\$r" = success \] \|\| exit 1; done\s*$/m.test(check), 'check requires every result to be success')
 })
 
@@ -478,7 +478,7 @@ test('compose.web.yaml and env examples: web push variables are optional and sco
   }
 })
 
-for (const name of ['VARANDA_MAX_MEMBERS', 'VARANDA_ACCOUNT_MAX_CONNECTIONS', 'VARANDA_ACCOUNT_RATE', 'VARANDA_ACCOUNT_BURST', 'VARANDA_ACCOUNT_MAX_PENDING', 'VARANDA_INVITES_PER_WEEK', 'VARANDA_INVITE_DROPS', 'VARANDA_FEIRA_INVITES_PER_WEEK', 'VARANDA_DIDIT_API_KEY', 'VARANDA_DIDIT_WORKFLOW_ID', 'VARANDA_DIDIT_DAILY_LIMIT', 'VARANDA_AGE_SINCE', 'VARANDA_PHONE_KEY', 'VARANDA_PHONE_DAILY_LIMIT']) {
+for (const name of ['VARANDA_MAX_MEMBERS', 'VARANDA_ACCOUNT_MAX_CONNECTIONS', 'VARANDA_ACCOUNT_RATE', 'VARANDA_ACCOUNT_BURST', 'VARANDA_ACCOUNT_MAX_PENDING', 'VARANDA_INVITES_PER_WEEK', 'VARANDA_INVITE_DROPS', 'VARANDA_FEIRA_INVITES_PER_WEEK', 'VARANDA_DIDIT_API_KEY', 'VARANDA_DIDIT_WORKFLOW_ID', 'VARANDA_DIDIT_DAILY_LIMIT', 'VARANDA_AGE_SINCE', 'VARANDA_PHONE_KEY', 'VARANDA_PHONE_DAILY_LIMIT', 'VARANDA_AUDIUS_API_KEY', 'VARANDA_AUDIUS_API_URL', 'VARANDA_AUDIUS_APP_NAME', 'VARANDA_AUDIUS_MOMENTS', 'VARANDA_AUDIUS_COVERS', 'VARANDA_AUDIUS_STREAMS']) {
   test('compose.web.yaml: ' + name + ' is optional and only on the account service', (t) => {
     const webLines = fs.readFileSync(COMPOSE_WEB, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
     const hits = webLines.map((l, i) => [l, i]).filter(([l]) => l.includes(name))
@@ -985,8 +985,9 @@ test('Caddyfile: no handle /mod, and the CSP is unchanged', (t) => {
   t.absent(caddy.includes('handle /mod'), 'no handle /mod')
   const csp = caddy.split('\n').filter((l) => /^\s*Content-Security-Policy /.test(l))
   t.is(csp.length, 1, 'one CSP line')
-  // Byte-identical to the B2 tree (Caddyfile:20): the panel is written for it.
-  t.is(csp[0].trim(), 'Content-Security-Policy "default-src \'self\'; script-src \'self\' \'wasm-unsafe-eval\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data: blob:; media-src \'self\' blob:; font-src \'self\' data:; connect-src \'self\' wss://{$VARANDA_DOMAIN}; manifest-src \'self\'; worker-src \'self\'; frame-ancestors \'none\'; base-uri \'none\'; form-action \'none\'; object-src \'none\'"', 'CSP line unchanged')
+  // Byte-identical to the B2 tree (Caddyfile:20) plus frame-src for music cards:
+  // the panel is written for it.
+  t.is(csp[0].trim(), 'Content-Security-Policy "default-src \'self\'; script-src \'self\' \'wasm-unsafe-eval\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data: blob:; media-src \'self\' blob:; font-src \'self\' data:; connect-src \'self\' wss://{$VARANDA_DOMAIN}; frame-src https://www.youtube-nocookie.com https://w.soundcloud.com https://open.spotify.com https://embed.music.apple.com; manifest-src \'self\'; worker-src \'self\'; frame-ancestors \'none\'; base-uri \'none\'; form-action \'none\'; object-src \'none\'"', 'CSP line unchanged')
   t.is(caddy.split('\n').filter((l) => !/^\s*#/.test(l) && l.includes('camera=()')).length, 1, 'camera=() once')
 })
 

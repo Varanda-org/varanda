@@ -76,11 +76,11 @@ test('showPostButton: no "publicar" on Conversas nor on its screens', async (t) 
     t.ok(showPostButton({ tab, screen: null }), tab)
   }
   t.absent(showPostButton({ tab: 'comunidades', screen: null }), 'the Conversas tab')
-  for (const screen of ['mensagem', 'grupo', 'comunidade', 'comunidade-info', 'comunidades', 'pedidos']) {
+  for (const screen of ['mensagem', 'grupo', 'comunidade', 'comunidade-info', 'comunidades', 'pedidos', 'conversa']) {
     t.absent(showPostButton({ tab: 'comunidades', screen }), screen)
     t.absent(showPostButton({ tab: 'rua', screen }), screen + ' opened from another tab')
   }
-  for (const screen of ['conversa', 'membro', 'curtidas']) {
+  for (const screen of ['membro', 'curtidas']) {
     t.ok(showPostButton({ tab: 'comunidades', screen }), screen + ' keeps it')
   }
 })

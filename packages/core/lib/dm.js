@@ -45,6 +45,14 @@ const DM_SIG_PREFIX_V2 = 'varanda-dm-v2\n'
 // v3 signs a digest of the JSON, so a remote holder of a Página's key signs
 // the prefix and a 32-byte digest and never sees the message.
 const DM_V3_PREFIX = 'varanda-dm-v3\n'
+// A reaction signs under its own domain, so its signature never verifies as
+// a message's and no message signature verifies as a reaction's.
+const DM_SIG_PREFIX_V4 = 'varanda-dm-v4\n'
+// A reaction to a momento (v5) signs under its own domain too, so it never
+// verifies as a plain message, which would show the emoji with no momento.
+const DM_SIG_PREFIX_V5 = 'varanda-dm-v5\n'
+// A reaction's revision: per (target, reactor) the op with the highest rev wins.
+const DM_REACT_REV_MAX = 1000000
 // The service signs a v3 digest with an expiry it chooses (now + TTL). A drop
 // lives at most DM_RETENTION_MS in the pool, so a v3 filed later than its
 // expiry plus that and a day of clock slack was put after its signature
@@ -83,6 +91,9 @@ const DM_OPS = Object.freeze(['accepted', 'declined', 'blocked', 'unblocked', 'd
 const INNER_KEYS = rpc.DM_INNER_KEYS
 const INNER_KEYS_V2 = rpc.DM_INNER_KEYS_V2
 const INNER_KEYS_V3 = INNER_KEYS_V2
+const INNER_KEYS_V4 = rpc.DM_INNER_KEYS_V4
+const INNER_KEYS_V5 = rpc.DM_INNER_KEYS_V5
+const DM_TARGET_KEYS = rpc.DM_TARGET_KEYS
 const DM_MEDIA_KEYS = rpc.DM_MEDIA_KEYS
 const BLOB_KEYS = Object.freeze(['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256'])
 const DM_MEDIA_MAX = 4
@@ -100,6 +111,8 @@ const EXPIRES_BYTES = 8
 const SIG_PREFIX = b4a.from(DM_SIG_PREFIX, 'utf8')
 const SIG_PREFIX_V2 = b4a.from(DM_SIG_PREFIX_V2, 'utf8')
 const SIG_PREFIX_V3 = b4a.from(DM_V3_PREFIX, 'utf8')
+const SIG_PREFIX_V4 = b4a.from(DM_SIG_PREFIX_V4, 'utf8')
+const SIG_PREFIX_V5 = b4a.from(DM_SIG_PREFIX_V5, 'utf8')
 const MAGIC = b4a.from(DM_MAGIC, 'ascii')
 const HEX32 = /^[0-9a-f]{32}$/
 const HEX64_DIGEST = /^[0-9a-f]{64}$/
@@ -203,9 +216,20 @@ function validDmCard (card) {
 // plain text message stays v1 and every message has one encoding. A card
 // goes with text only: a message with media carries card null. v3 is what a
 // Página writes, always: the v2 keys for every msg (text only included) and
-// for a ctl, which carries no media, card or forward.
+// for a ctl, which carries no media, card or forward. v4 is a reaction
+// (kind 'react') to a message of the same conversation, sent by either of
+// the two people; its emoji is one isReaction emoji, or '' to remove.
+// v5 is a reaction to a momento of `to`: a msg with the v1 keys plus
+// `moment`, that momento's seq in the diary of `to`, and one isReaction emoji
+// as its text. It names nothing else (no author, digest or media), so a
+// reader resolves it in its own replica and never trusts it for content.
+// A reply's replyTo is the bare id of the quoted message (v1, and v2 or v3
+// as earlier builds wrote them) or, in v2 and v3, the bound form
+// { from, id, digest } that names that message's content too; a bound
+// reply needs v2, so v1 keeps the bare id only.
 function validBody (b) {
   if (!isPlainObject(b)) return false
+  if (b.v === 4) return validReaction(b)
   if (b.v === 1) {
     if (!hasExactKeys(b, INNER_KEYS)) return false
   } else if (b.v === 2) {
@@ -213,8 +237,11 @@ function validBody (b) {
     // A boolean is another JSON type, so it must not count as forwarded.
     if (b.fwd !== 0 && b.fwd !== 1) return false
     if (b.card !== null && (b.media !== null || !validDmCard(b.card))) return false
-    // Null media is a card or the text forward. Neither of the three is a v1 message.
-    if (b.media === null ? b.fwd !== 1 && b.card === null : !validMedia(b.media)) return false
+    // Null media is a card, the text forward or a bound reply. None of them is a v1 message.
+    if (b.media === null ? b.fwd !== 1 && b.card === null && !isPlainObject(b.replyTo) : !validMedia(b.media)) return false
+  } else if (b.v === 5) {
+    if (!hasExactKeys(b, INNER_KEYS_V5) || b.kind !== 'msg' || b.replyTo !== null) return false
+    if (!Number.isSafeInteger(b.moment) || b.moment < 1 || !rpc.isReaction(b.text)) return false
   } else if (b.v === 3) {
     if (!hasExactKeys(b, INNER_KEYS_V3)) return false
     if (b.fwd !== 0 && b.fwd !== 1) return false
@@ -232,7 +259,7 @@ function validBody (b) {
   if (b.cert !== null && (validateCertShape(b.cert) !== null || b.cert.member !== b.from)) return false
   if (b.kind === 'msg') {
     if (b.op !== null || b.peer !== null || b.from === b.to) return false
-    if (b.replyTo !== null && !isHex32(b.replyTo)) return false
+    if (b.replyTo !== null && !isHex32(b.replyTo) && (b.v === 1 || !validTarget(b.replyTo, b))) return false
     // Empty text is a photo with no caption, not a text-only forward.
     return validText(b.text, b.v !== 1 && b.media !== null)
   }
@@ -240,18 +267,58 @@ function validBody (b) {
   return DM_OPS.includes(b.op) && isHex64(b.peer) && b.peer !== b.from
 }
 
+// A message named by sender, id and the digest of its opened inner body
+// (bodyDigest): a reaction's target or a bound reply's replyTo. The sender
+// is one of the two people of the conversation.
+function validTarget (t, b) {
+  if (!isPlainObject(t) || !hasExactKeys(t, DM_TARGET_KEYS) || !isHex32(t.id)) return false
+  if (typeof t.digest !== 'string' || !HEX64_DIGEST.test(t.digest)) return false
+  return t.from === b.from || t.from === b.to
+}
+
+function validReaction (b) {
+  if (!hasExactKeys(b, INNER_KEYS_V4) || b.kind !== 'react') return false
+  if (!isHex32(b.id) || !isHex64(b.from) || !isHex64(b.to) || b.from === b.to || !isCanonicalIso(b.at)) return false
+  if (b.cert !== null && (validateCertShape(b.cert) !== null || b.cert.member !== b.from)) return false
+  if (!validTarget(b.target, b)) return false
+  if (b.emoji !== '' && !rpc.isReaction(b.emoji)) return false
+  return Number.isInteger(b.rev) && b.rev >= 1 && b.rev <= DM_REACT_REV_MAX
+}
+
 function canonicalJson (b) {
   return rpc.canonicalDmInnerJson(b)
 }
 
 function sigPrefix (v) {
-  return v === 2 ? SIG_PREFIX_V2 : SIG_PREFIX
+  return v === 5 ? SIG_PREFIX_V5 : v === 4 ? SIG_PREFIX_V4 : v === 2 ? SIG_PREFIX_V2 : SIG_PREFIX
 }
 
 function digestBytes (json) {
   const d = b4a.alloc(32)
   sodium.crypto_hash_sha256(d, json)
   return d
+}
+
+// The hex64 sha256 of a body's canonical inner JSON: what a reaction's
+// target.digest names. Only the signed keys of its version count, so the
+// `mine` and `expiresAt` openInner adds never change it. Equal to the digest
+// of the bytes buildInner signed (openInner refuses non-canonical JSON).
+function bodyDigest (body) {
+  if (!isPlainObject(body)) throw new TypeError('mensagem inválida')
+  const json = b4a.from(canonicalJson(body), 'utf8')
+  try {
+    return b4a.toString(digestBytes(json), 'hex')
+  } finally {
+    sodium.sodium_memzero(json)
+  }
+}
+
+// bodyDigest of a framed inner (buildInner's output), read before it is wiped.
+function frameDigest (inner) {
+  if (!isBytes(inner, DM_INNER_BYTES)) throw new TypeError('mensagem inválida')
+  const len = (inner[0] << 8) | inner[1]
+  if (len < 2 || len + LEN_BYTES + SIG_BYTES > DM_INNER_BYTES) throw new TypeError('mensagem inválida')
+  return b4a.toString(digestBytes(inner.subarray(LEN_BYTES, LEN_BYTES + len)), 'hex')
 }
 
 function isExpiresAt (n) {
@@ -300,9 +367,13 @@ function textBudget (fields) {
 }
 
 // fields: { kind, to, text?, replyTo?, media?, card?, fwd?, op?, peer?, id?,
-// at?, cert? }; from is the signing key; cert is the sender's membership
-// certificate (a msg without one is built but never opens). A body that
-// needs nothing of v2 is written as v1. Returns DM_INNER_BYTES bytes the
+// at?, cert? }, or for a reaction { kind: 'react', to, target, emoji, rev,
+// id?, at?, cert? }; from is the signing key; cert is the sender's membership
+// certificate (a msg without one is built but never opens). replyTo is null,
+// a bare id or a bound { from, id, digest } (written as v2). A body that
+// needs nothing of v2 is written as v1. A moment (not undefined or null)
+// writes a v5 reaction to that momento of `to`: text is its emoji, and it
+// takes no replyTo, media, card or forward. Returns DM_INNER_BYTES bytes the
 // caller owns (wipe after sealing).
 function buildInner (fields, signKeyPair) {
   if (!isPlainObject(fields)) throw new TypeError('mensagem inválida')
@@ -312,17 +383,23 @@ function buildInner (fields, signKeyPair) {
   const from = b4a.toString(signKeyPair.publicKey, 'hex')
   if (fields.from !== undefined && fields.from !== from) throw new TypeError('mensagem inválida')
   const kind = fields.kind
+  if (kind === 'react') return signInner(reactionBody(fields, from), signKeyPair)
   const media = fields.media === undefined ? null : fields.media
   const card = fields.card === undefined ? null : fields.card
   const fwd = fields.fwd === undefined ? 0 : fields.fwd
-  const v = rpc.dmInnerVersion({ media, card, fwd })
+  const replyTo = replyField(fields.replyTo)
+  const moment = fields.moment === undefined ? null : fields.moment
+  // A v5 is never also a reply, a photo, a card or a forward: refused here
+  // rather than dropped, so the reaction is never sent as something else.
+  if (moment !== null && (media !== null || card !== null || fwd !== 0 || replyTo !== null)) throw new TypeError('mensagem inválida')
+  const v = moment !== null ? 5 : rpc.dmInnerVersion({ media, card, fwd, replyTo })
   const body = {
     v,
     kind,
     id: fields.id === undefined ? newMessageId() : fields.id,
     from,
     to: kind === 'ctl' && fields.to === undefined ? from : fields.to,
-    replyTo: fields.replyTo === undefined ? null : fields.replyTo,
+    replyTo,
     text: fields.text === undefined && kind === 'ctl' ? '' : fields.text,
     op: fields.op === undefined ? null : fields.op,
     peer: fields.peer === undefined ? null : fields.peer,
@@ -334,10 +411,40 @@ function buildInner (fields, signKeyPair) {
     body.card = card
     body.fwd = fwd
   }
+  if (v === 5) body.moment = moment
+  return signInner(body, signKeyPair)
+}
+
+// A caller's target as a plain { from, id, digest } in DM_TARGET_KEYS order
+// (any other value as given, for validBody to refuse).
+function targetField (t) {
+  return isPlainObject(t) ? { from: t.from, id: t.id, digest: t.digest } : t
+}
+
+function replyField (r) {
+  return r === undefined ? null : targetField(r)
+}
+
+function reactionBody (fields, from) {
+  return {
+    v: 4,
+    kind: 'react',
+    id: fields.id === undefined ? newMessageId() : fields.id,
+    from,
+    to: fields.to,
+    target: targetField(fields.target),
+    emoji: fields.emoji,
+    rev: fields.rev,
+    at: fields.at === undefined ? nowIso() : fields.at,
+    cert: fields.cert === undefined ? null : fields.cert
+  }
+}
+
+function signInner (body, signKeyPair) {
   if (!validBody(body)) throw new TypeError('mensagem inválida')
   const json = b4a.from(canonicalJson(body), 'utf8')
   if (json.byteLength + LEN_BYTES + SIG_BYTES > DM_INNER_BYTES) throw new TypeError('mensagem longa demais')
-  const sig = hcrypto.sign(b4a.concat([sigPrefix(v), json]), signKeyPair.secretKey)
+  const sig = hcrypto.sign(b4a.concat([sigPrefix(body.v), json]), signKeyPair.secretKey)
   const out = frameInner(json, sig)
   sodium.sodium_memzero(json)
   return out
@@ -349,6 +456,8 @@ function buildInner (fields, signKeyPair) {
 // what the key holder signs with signDigest, json goes to assembleInner.
 function innerDigest (fields) {
   if (!isPlainObject(fields) || !isHex64(fields.from)) throw new TypeError('mensagem inválida')
+  // A Página writes v3 only, and v3 has no moment: refused, never dropped.
+  if (fields.moment !== undefined && fields.moment !== null) throw new TypeError('mensagem inválida')
   const kind = fields.kind
   const from = fields.from
   const body = {
@@ -357,7 +466,7 @@ function innerDigest (fields) {
     id: fields.id === undefined ? newMessageId() : fields.id,
     from,
     to: kind === 'ctl' && fields.to === undefined ? from : fields.to,
-    replyTo: fields.replyTo === undefined ? null : fields.replyTo,
+    replyTo: replyField(fields.replyTo),
     text: fields.text === undefined && kind === 'ctl' ? '' : fields.text,
     media: fields.media === undefined ? null : fields.media,
     card: fields.card === undefined ? null : fields.card,
@@ -546,6 +655,9 @@ module.exports = Object.freeze({
   DM_SIG_PREFIX,
   DM_SIG_PREFIX_V2,
   DM_V3_PREFIX,
+  DM_SIG_PREFIX_V4,
+  DM_SIG_PREFIX_V5,
+  DM_REACT_REV_MAX,
   DM_V3_TTL_MS,
   DM_V3_STALE_MS,
   DM_KEY_HKDF_SALT,
@@ -558,6 +670,9 @@ module.exports = Object.freeze({
   INNER_KEYS,
   INNER_KEYS_V2,
   INNER_KEYS_V3,
+  INNER_KEYS_V4,
+  INNER_KEYS_V5,
+  DM_TARGET_KEYS,
   DM_MEDIA_KEYS,
   DM_MEDIA_MAX,
   DM_MEDIA_MIMES,
@@ -583,11 +698,14 @@ module.exports = Object.freeze({
     SEALED_BYTES: DM_SEALED_BYTES
   }),
   isWellFormed,
+  validBody,
   newMessageId,
   newDropId,
   textBudget,
   buildInner,
   innerDigest,
+  bodyDigest,
+  frameDigest,
   signDigest,
   assembleInner,
   pageInnerStale,

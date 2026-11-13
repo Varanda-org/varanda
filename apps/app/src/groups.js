@@ -5,6 +5,7 @@
 
 import rpc from '@varanda/rpc'
 import { shortKey } from './format.js'
+import { plainPreview } from './chatPreview.js'
 
 const { displayText } = rpc
 
@@ -62,7 +63,7 @@ export function lastLine (last) {
   if (!last || typeof last !== 'object') return ''
   if (last.hidden === true) return HIDDEN_LABEL
   // A line break would show as U+FFFD.
-  const text = displayText(typeof last.preview === 'string' ? last.preview.replace(/\r?\n/g, ' ') : '')
+  const text = displayText(plainPreview(last.preview).replace(/\r?\n/g, ' '))
   if (last.mine === true) return text
   let who = ''
   if (typeof last.name === 'string' && displayText(last.name).trim() !== '') who = displayText(last.name)

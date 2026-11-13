@@ -1659,6 +1659,88 @@ test('readEnv: GIF pair on together or off together, https only, values never in
   }
 })
 
+test('readEnv: Audius on with the key, optional values checked, values never in the error', (t) => {
+  const env = { VARANDA_PUBLIC_ORIGIN: ORIGIN, VARANDA_GOOGLE_CLIENT_ID: CLIENT_ID, VARANDA_GOOGLE_CLIENT_SECRET: CLIENT_SECRET }
+  const KEY = 'chave-sentinela-audius-73'
+  t.is(readEnv(env).audius, null, 'unset: off')
+  t.is(readEnv({ ...cleanEnv, ...env }).audius, null, 'cleanEnv (no VARANDA_*) keeps it off')
+  t.is(readEnv({
+    ...env,
+    VARANDA_AUDIUS_API_KEY: '',
+    VARANDA_AUDIUS_API_URL: '',
+    VARANDA_AUDIUS_APP_NAME: '',
+    VARANDA_AUDIUS_MOMENTS: '',
+    VARANDA_AUDIUS_COVERS: '',
+    VARANDA_AUDIUS_STREAMS: ''
+  }).audius, null, 'all empty, as compose passes them: off')
+
+  t.alike(readEnv({ ...env, VARANDA_AUDIUS_API_KEY: KEY }).audius, {
+    base: 'https://api.audius.co/v1',
+    apiHost: 'api.audius.co',
+    apiKey: KEY,
+    appName: 'varanda',
+    moments: false,
+    covers: false,
+    streams: 16
+  }, 'the key alone: defaults, momentos and covers off')
+  t.is(readEnv({ ...env, VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_MOMENTS: '0' }).audius.moments, false)
+  t.is(readEnv({ ...env, VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_COVERS: '0' }).audius.covers, false, 'covers 0: off')
+  t.is(readEnv({ ...env, VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_COVERS: '' }).audius.covers, false, 'covers empty: off')
+  t.is(readEnv({ ...env, VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_COVERS: '1' }).audius.covers, true, 'covers 1: on')
+  t.is(readEnv({ ...env, VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_COVERS: '1' }).audius.moments, false, 'covers do not turn momentos on')
+  t.alike(readEnv({
+    ...env,
+    VARANDA_AUDIUS_API_KEY: KEY,
+    VARANDA_AUDIUS_API_URL: 'https://Audius-Sentinela.example/v1/',
+    VARANDA_AUDIUS_APP_NAME: 'varanda-teste',
+    VARANDA_AUDIUS_MOMENTS: '1',
+    VARANDA_AUDIUS_COVERS: '1',
+    VARANDA_AUDIUS_STREAMS: ' 32 '
+  }).audius, {
+    base: 'https://audius-sentinela.example/v1',
+    apiHost: 'audius-sentinela.example',
+    apiKey: KEY,
+    appName: 'varanda-teste',
+    moments: true,
+    covers: true,
+    streams: 32
+  }, 'every optional value set')
+
+  const bad = [
+    [{ VARANDA_AUDIUS_API_URL: 'https://audius-sentinela.example/v1' }, 'VARANDA_AUDIUS_API_KEY ausente'],
+    [{ VARANDA_AUDIUS_APP_NAME: 'sentinela' }, 'VARANDA_AUDIUS_API_KEY ausente'],
+    [{ VARANDA_AUDIUS_MOMENTS: '1' }, 'VARANDA_AUDIUS_API_KEY ausente'],
+    [{ VARANDA_AUDIUS_COVERS: '1' }, 'VARANDA_AUDIUS_API_KEY ausente'],
+    [{ VARANDA_AUDIUS_COVERS: '0', VARANDA_AUDIUS_API_KEY: '' }, 'VARANDA_AUDIUS_API_KEY ausente'],
+    [{ VARANDA_AUDIUS_STREAMS: '8', VARANDA_AUDIUS_API_KEY: '' }, 'VARANDA_AUDIUS_API_KEY ausente'],
+    [{ VARANDA_AUDIUS_API_KEY: 'chave sentinela' }, 'VARANDA_AUDIUS_API_KEY inválido'],
+    [{ VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_API_URL: 'http://audius-sentinela.example' }, 'VARANDA_AUDIUS_API_URL inválido: use uma URL https sem usuário, consulta nem endereço IP'],
+    [{ VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_API_URL: 'https://10.9.8.7/sentinela' }, 'VARANDA_AUDIUS_API_URL inválido: use uma URL https sem usuário, consulta nem endereço IP'],
+    [{ VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_API_URL: 'https://audius-sentinela.example/v1?api_key=sentinela' }, 'VARANDA_AUDIUS_API_URL inválido: use uma URL https sem usuário, consulta nem endereço IP'],
+    [{ VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_APP_NAME: 'Sentinela_App' }, 'VARANDA_AUDIUS_APP_NAME inválido: use letras minúsculas, números e hífen, até 32'],
+    [{ VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_MOMENTS: 'sim-sentinela' }, 'VARANDA_AUDIUS_MOMENTS inválido: use 0 ou 1'],
+    [{ VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_COVERS: 'sim-sentinela' }, 'VARANDA_AUDIUS_COVERS inválido: use 0 ou 1'],
+    [{ VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_COVERS: 'true' }, 'VARANDA_AUDIUS_COVERS inválido: use 0 ou 1'],
+    [{ VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_STREAMS: '33' }, 'VARANDA_AUDIUS_STREAMS inválido: use um número inteiro de 1 a 32'],
+    [{ VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_STREAMS: '0' }, 'VARANDA_AUDIUS_STREAMS inválido: use um número inteiro de 1 a 32'],
+    [{ VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_STREAMS: '08' }, 'VARANDA_AUDIUS_STREAMS inválido: use um número inteiro de 1 a 32'],
+    [{ VARANDA_AUDIUS_API_KEY: KEY, VARANDA_AUDIUS_STREAMS: 'sentinela' }, 'VARANDA_AUDIUS_STREAMS inválido: use um número inteiro de 1 a 32']
+  ]
+  for (const [vars, message] of bad) {
+    const label = JSON.stringify(vars)
+    try {
+      readEnv({ ...env, ...vars })
+      t.fail(label + ': accepted')
+    } catch (err) {
+      t.ok(err instanceof UsageError, label + ': usage error')
+      t.is(err.message, message, label + ': message')
+      for (const value of Object.values(vars)) {
+        if (value !== '') t.absent(err.message.includes(value), 'the value is not in the message')
+      }
+    }
+  }
+})
+
 test('account (serve): an invalid capacity variable exits 2 without printing it', (t) => {
   const dir = path.join(tmpDir(t), 'account')
   const r = varanda(dir, ['account'], {

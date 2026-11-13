@@ -504,7 +504,7 @@ test('Grupo marks the group seen from one place, never from load, loadOlder or r
   t.absent(load.includes('markSeen') || load.includes('group.seen'), 'a reload never marks by itself')
   t.ok(load.indexOf('paintedRef.current = mine') > load.indexOf('await readNewest()'), 'load records the read that painted')
   const olderAt = src.indexOf('const loadOlder = useCallback(')
-  const older = src.slice(olderAt, src.indexOf('}, [readGroup, loadingMore, readNewest])', olderAt))
+  const older = src.slice(olderAt, src.indexOf('}, [readGroup, loadingMore, readNewest, commitRead])', olderAt))
   t.ok(older.length > 0, 'loadOlder found')
   t.absent(older.includes('group.seen') || older.includes('markSeen'), 'not from loadOlder')
   const newestAt = src.indexOf('const readNewest = useCallback(')
@@ -732,7 +732,7 @@ test('voice: one recording object per gesture, a move only updates the slide off
 
 test('voice: lock and background stop playback; lock sweeps the recorder cache', (t) => {
   const app = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
-  t.ok(app.includes("import { clearChatMedia, onAppStateChange, stopPlayback } from './src/media/chatMedia'"))
+  t.ok(app.includes("import { clearChatMedia, onAppStateChange, screenWatcher, stopBoundPlayback, stopPlayback } from './src/media/chatMedia'"))
   t.ok(app.includes("import { sweepVoiceCache } from './src/media/audio'"))
   t.ok(/useEffect\(\(\) => \{\n {4}stopPlayback\(\)\n {4}clearChatMedia\(\)\n {4}sweepVoiceCache\(\)\n {2}\}, \[generation, locked\]\)/.test(app), 'the lock effect')
   t.ok(app.includes("if (state === 'background') stopPlayback()\n      onAppStateChange(state, { canClear: true })"), 'background')

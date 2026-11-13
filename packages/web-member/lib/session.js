@@ -275,7 +275,7 @@
 // unlock with a dm-key). reset() removes the local store and the dm kv.
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
-const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, PEEK_SEQS_MAX, TESTIMONIAL_PENDING_MAX, FEED_INCOMPLETE_MAX, mediaBounds, audioBounds, stripAudioMetadata, AUDIO_MS_TOLERANCE } = require('@varanda/rpc')
+const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, PEEK_SEQS_MAX, TESTIMONIAL_PENDING_MAX, FEED_INCOMPLETE_MAX, mediaBounds, audioBounds, stripAudioMetadata, AUDIO_MS_TOLERANCE, videoBounds, stripVideoMetadata, VIDEO_MS_TOLERANCE } = require('@varanda/rpc')
 const {
   validRecordCopy,
   validateRecord,
@@ -286,7 +286,11 @@ const {
   MAX_MEDIA_DIMENSION,
   AUDIO_MIME,
   MAX_AUDIO_MS,
-  MAX_AUDIO_BYTES
+  MAX_AUDIO_BYTES,
+  VIDEO_MIME,
+  MAX_VIDEO_MS,
+  MAX_MOMENT_VIDEO_MS,
+  MAX_MOMENT_VIDEO_BYTES
 } = require('@varanda/core/lib/records')
 const { formatEvent, key8 } = require('@varanda/core/lib/sync-format')
 const { safe } = require('@varanda/core/lib/safe')
@@ -384,6 +388,8 @@ const PUSH_LINE = 'enviando ao semeador'
 const DRAIN_WARNING = 'aviso: seguidos ainda não enviados'
 const UPKEEP_WARNING = 'aviso: participação automática neste aparelho não concluída'
 const BAD_MEDIA_ARGS = 'mídia inválida'
+// dm.send with a moment that is not showing here (docs/rpc.md 5.75).
+const MOMENT_NOT_FOUND = 'momento não encontrado'
 const GROUP_MEDIA_UNAVAILABLE = 'mídia indisponível'
 const NO_SEEDER = 'sem conexão com o semeador'
 const PEEK_BUSY = 'espiadinha já em andamento'
@@ -2887,7 +2893,8 @@ function createBrowserSession ({
         followCount: (await store.readFollows(storage)).length,
         sync: syncState(),
         publicDht: false,
-        groups: true
+        groups: true,
+        momentMusic: true
       }
     }),
 
@@ -3676,10 +3683,10 @@ function createBrowserSession ({
     // Momentos (docs/rpc.md 5.113): the item must be one this node's
     // momentPutMedia answered in this unlock; published like post.create.
     // A published item is never offered for a second moment.
-    'moment.create': serialDm(async ({ text, media }, epoch) => {
+    'moment.create': serialDm(async ({ text, media, music }, epoch) => {
       await requireDm()
       await ensureCaughtUp(epoch)
-      const r = await withStore((c) => member.momentCreate(c, { text, media, owned: (item) => dmEngine.isOwnPublicItem(item) }))
+      const r = await withStore((c) => member.momentCreate(c, { text, media, music, owned: (item) => dmEngine.isOwnPublicItem(item) }))
       dmEngine.forgetPublicItem(media)
       wrote(r.seq)
       await pushAfterWrite()
@@ -3688,6 +3695,17 @@ function createBrowserSession ({
 
     // Local data only, works locked (as feed.read).
     'moments.read': serial(async () => withCores((c) => member.momentsRead(c, { now: Date.now() }))),
+
+    // The momento a v5 reaction names, while it is showing (docs/rpc.md
+    // 5.120): local data only, works locked. The record alone answers.
+    'moment.lookup': serial(async ({ author, seq }) => withCores(async (c) => {
+      // A read error propagates, so withCores can fall back (NEEDS_EXCLUSIVE)
+      // instead of a live momento reading as gone.
+      const shown = await member.momentLookup(c, { author, seq, now: Date.now() })
+      if (shown === null) throw rpcError('NOT_FOUND', MOMENT_PHOTO_GONE)
+      const { media, at } = shown
+      return { mime: media.mime, w: media.w, h: media.h, ms: Number.isSafeInteger(media.ms) ? media.ms : 0, at }
+    })),
 
     'moment.delete': serial(async ({ to }, epoch) => {
       const ref = parseRef(to)
@@ -3939,6 +3957,8 @@ function createBrowserSession ({
     'group.ban': groupWrite(member.groupBan, GROUP_AND_COMMUNITY),
     'group.admin': groupWrite(member.groupAdmin),
     'group.hide': groupWrite(member.groupHide, GROUP_AND_COMMUNITY),
+    'group.react': groupWrite(member.groupReact),
+    'group.reactors': serial((params) => withCores((c) => member.groupReactors(c, params))),
     'group.meta': groupWrite(member.groupMeta),
     // Through the caller's CW when it acts for the community, as group.admit.
     'group.invitePolicy': groupWrite(member.groupInvitePolicy, GROUP_AND_COMMUNITY),
@@ -3995,13 +4015,24 @@ function createBrowserSession ({
     // The recipient's key is looked up first (off the chain), then the send
     // runs on the chain. A send for an identity without a published dm-key
     // runs dm.enable first.
-    'dm.send': async ({ to, text, replyTo, media, card, fwd }) => {
+    'dm.send': async ({ to, text, replyTo, media, card, fwd, moment }) => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
       const ident = identityTarget
-      // Self and a blocked peer are refused before any lookup.
+      const fields = { to, text, fwd, card, replyTo: replyTo === undefined ? null : replyTo, media: media === undefined ? null : media, moment: moment === undefined ? null : moment }
+      const momentShowing = async () => {
+        if (moment !== undefined && (await withCores((c) => member.momentMedia(c, { author: to, seq: moment, now: Date.now() }))) === null) {
+          throw new UsageError(MOMENT_NOT_FOUND)
+        }
+      }
+      // Self and a blocked peer are refused before any lookup, and so is a
+      // reaction to a momento of `to` not showing here: nothing signed or
+      // stamped for it. Checked again on the chain right before a new send,
+      // since the lookup awaits in between; a pending send (the user's
+      // retry) re-puts its stamped drops without it.
       await serialDm(async () => {
         dmEngine.checkSend(await requireDm(), to)
         if ((await member.memberBlocks(storage)).has(to)) throw new UsageError(DM_BLOCKED)
+        if (!dmEngine.sendPending(fields)) await momentShowing()
       })({}, ident)
       let recipient
       try {
@@ -4012,7 +4043,29 @@ function createBrowserSession ({
       return serialDm(async (_, epoch) => {
         const own = await requireDm()
         if ((await store.readDmKey(storage)) === null) await dmEnable(epoch)
-        return dmEngine.send(own, keyPair, { to, text, fwd, card, replyTo: replyTo === undefined ? null : replyTo, media: media === undefined ? null : media }, recipient.box)
+        return dmEngine.send(own, keyPair, fields, recipient.box, { beforeNew: moment === undefined ? null : momentShowing })
+      })({}, ident)
+    },
+
+    // A reaction travels as a message does (docs/rpc.md 5.119): the same
+    // refusals, lookup and stamps as dm.send.
+    'dm.react': async ({ to, target, emoji }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const ident = identityTarget
+      await serialDm(async () => {
+        dmEngine.checkSend(await requireDm(), to)
+        if ((await member.memberBlocks(storage)).has(to)) throw new UsageError(DM_BLOCKED)
+      })({}, ident)
+      let recipient
+      try {
+        recipient = await dmLookupOf(to)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+      return serialDm(async (_, epoch) => {
+        const own = await requireDm()
+        if ((await store.readDmKey(storage)) === null) await dmEnable(epoch)
+        return dmEngine.react(own, keyPair, { to, target, emoji }, recipient.box)
       })({}, ident)
     },
 
@@ -4443,8 +4496,12 @@ function createBrowserSession ({
   // height: 0, ms, kind: 'voice', sealed? }: its bytes must pass audioBounds
   // (audio only, no video track) and the result is an audio descriptor, or
   // a private item with plainMime 'audio/mp4' when sealed.
+  // A short video (the second item of a post's [JPEG poster, video] pair) is
+  // { bytes, mime: 'video/mp4', width, height, ms, kind: 'video' }, never
+  // sealed (videoUpload) -> a video descriptor.
   function mediaUpload ({ bytes, mime, width, height, ms, kind, sealed = false, onProgress } = {}) {
     if (sealed !== true && sealed !== false) throw new TypeError(BAD_MEDIA_ARGS)
+    if (kind === 'video' || mime === VIDEO_MIME) return videoUpload({ bytes, mime, width, height, ms, kind, sealed, onProgress })
     if (kind !== undefined || mime === AUDIO_MIME) return voiceUpload({ bytes, mime, width, height, ms, kind, sealed, onProgress })
     const maxBytes = sealed ? MAX_SEALED_MEDIA_PLAIN_BYTES : MAX_MEDIA_ITEM_BYTES
     if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1 || bytes.byteLength > maxBytes) throw new TypeError(BAD_MEDIA_ARGS)
@@ -4535,6 +4592,62 @@ function createBrowserSession ({
     })({})
   }
 
+  // -> { copy, ms } for a short video, or null: copy is the stripped copy
+  // (no place, time or device tags) and ms its samples' duration. The
+  // sender's own file may still carry its metadata, so only the pre-check
+  // tolerates it; the copy must pass the strict check every reader makes.
+  // The caller's sides must be the container's display size and its ms
+  // within VIDEO_MS_TOLERANCE of it: what gets stored is the container's.
+  // Synchronous, so the caller's buffer cannot change under it.
+  function videoArgs ({ bytes, mime, width, height, ms, kind }, maxBytes, maxMs) {
+    if (!(kind === 'video' && mime === VIDEO_MIME && isIntIn(ms, 1, maxMs) &&
+      bytes instanceof Uint8Array && bytes.byteLength >= 1 && bytes.byteLength <= maxBytes)) return null
+    const given = videoBounds(bytes, { maxMs, metadata: true })
+    if (given === null || given.width !== width || given.height !== height || Math.abs(ms - given.ms) > VIDEO_MS_TOLERANCE) return null
+    const copy = stripVideoMetadata(bytes)
+    const strict = copy === null ? null : videoBounds(copy, { maxMs })
+    if (strict === null || strict.width !== width || strict.height !== height || strict.ms !== given.ms) {
+      if (copy !== null) copy.fill(0)
+      return null
+    }
+    return { copy, ms: strict.ms }
+  }
+
+  // mediaUpload's short video path (a post's [poster, video] pair), on the
+  // same chain and gate. What is hashed and stored is the stripped copy. A
+  // video is never sealed: private groups take none.
+  function videoUpload ({ bytes, mime, width, height, ms: given, kind, sealed, onProgress }) {
+    if (sealed) throw new TypeError(BAD_MEDIA_ARGS)
+    const video = videoArgs({ bytes, mime, width, height, ms: given, kind }, MAX_MEDIA_ITEM_BYTES, MAX_VIDEO_MS)
+    if (video === null) throw new TypeError(BAD_MEDIA_ARGS)
+    const { copy, ms } = video
+    const progress = typeof onProgress === 'function' ? (fraction) => { try { onProgress(fraction) } catch {} } : noop
+    return serial(async (_, epoch) => {
+      await requireUnlocked()
+      if (mediaKeyPair === null) throw new UsageError(store.LOCKED)
+      if (!(await identity()).memberCert) throw new Error(member.GENESIS_REQUIRED)
+      const subtle = globalThis.crypto && globalThis.crypto.subtle
+      if (!subtle) throw new Error('WebCrypto indisponível')
+      const sha256 = b4a.toString(new Uint8Array(await subtle.digest('SHA-256', copy)), 'hex')
+      progress(0.25)
+      const blocks = []
+      for (let at = 0; at < copy.byteLength; at += MEDIA_BLOCK_BYTES) {
+        blocks.push(copy.subarray(at, Math.min(copy.byteLength, at + MEDIA_BLOCK_BYTES)))
+      }
+      const { core, declared } = await withStore((c) => member.mediaPrepare(c))
+      if (!declared) {
+        await ensureCaughtUp(epoch)
+        const { seq } = await withStore((c) => member.declareMediaCore(c, core))
+        wrote(seq)
+        await pushAfterWrite()
+      }
+      const descriptor = await withStore((c) => member.mediaCommitVideo(c, { blocks, sha256, width, height, ms }))
+      progress(0.75)
+      progress(1)
+      return descriptor
+    })({})
+  }
+
   // On mediaUpload's chain: the plaintext copy is wiped once sealed.
   async function sealedUpload (copy, { mime, width, height, ms = 0, epoch, progress }) {
     let sealedItem
@@ -4607,13 +4720,24 @@ function createBrowserSession ({
   // FRESH blob and put on the anonymous blob channel by the dm engine (the
   // stamps need the DM key) -> the moment media item. The native IPC
   // moment.putMedia reads its cache file and calls this same function.
-  // Nothing about the bytes is logged.
-  function momentPutMedia ({ bytes, mime, width, height } = {}) {
-    if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1 || bytes.byteLength > MAX_MEDIA_ITEM_BYTES) throw new TypeError(BAD_MEDIA_ARGS)
-    if (typeof mime !== 'string' || !MEDIA_MIMES.includes(mime)) throw new TypeError(BAD_MEDIA_ARGS)
-    if (!isIntIn(width, 1, MAX_MEDIA_DIMENSION) || !isIntIn(height, 1, MAX_MEDIA_DIMENSION)) throw new TypeError(BAD_MEDIA_ARGS)
-    const copy = new Uint8Array(bytes.byteLength)
-    copy.set(bytes)
+  // Nothing about the bytes is logged. A short video is { bytes, mime:
+  // 'video/mp4', width, height, ms, kind: 'video' }, checked as mediaUpload
+  // checks a post's (videoArgs) with a momento's bounds: what is sealed is
+  // the stripped copy.
+  function momentPutMedia ({ bytes, mime, width, height, ms, kind } = {}) {
+    let copy
+    let video = null
+    if (kind === 'video' || mime === VIDEO_MIME) {
+      video = videoArgs({ bytes, mime, width, height, ms, kind }, MAX_MOMENT_VIDEO_BYTES, MAX_MOMENT_VIDEO_MS)
+      if (video === null) throw new TypeError(BAD_MEDIA_ARGS)
+      copy = video.copy
+    } else {
+      if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1 || bytes.byteLength > MAX_MEDIA_ITEM_BYTES) throw new TypeError(BAD_MEDIA_ARGS)
+      if (typeof mime !== 'string' || !MEDIA_MIMES.includes(mime)) throw new TypeError(BAD_MEDIA_ARGS)
+      if (!isIntIn(width, 1, MAX_MEDIA_DIMENSION) || !isIntIn(height, 1, MAX_MEDIA_DIMENSION)) throw new TypeError(BAD_MEDIA_ARGS)
+      copy = new Uint8Array(bytes.byteLength)
+      copy.set(bytes)
+    }
     bytes.fill(0)
     return (async () => {
       try {
@@ -4623,7 +4747,7 @@ function createBrowserSession ({
         return await withDmReady(ident, () => {
           const pair = keyPair
           if (pair === null) throw new UsageError(store.LOCKED)
-          return dmEngine.putPublicMedia(own, pair, { bytes: copy, mime, width, height })
+          return dmEngine.putPublicMedia(own, pair, video !== null ? { bytes: copy, mime, width, height, ms: video.ms } : { bytes: copy, mime, width, height })
         })
       } catch (err) {
         copy.fill(0)
@@ -4632,8 +4756,9 @@ function createBrowserSession ({
     })()
   }
 
-  // The photo of the showing moment author:seq -> { bytes, mime, w, h }, for
-  // the page only (never over RPC). The record is read on the chain from
+  // The photo or video of the showing moment author:seq -> { bytes, mime, w,
+  // h } (and ms for a video), for the page only (never over RPC). The record
+  // is read on the chain from
   // local data; the blob is fetched off it (the public key and nonce of the
   // record open it, no DM key needed). Gone, expired or not verifying:
   // NOT_FOUND 'foto indisponível'.

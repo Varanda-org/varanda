@@ -1,4 +1,5 @@
 import { whoOf, UNNAMED } from './who.js'
+import { plainPreview } from './chatPreview.js'
 
 export const FILTERS = Object.freeze(['todas', 'nao-lidas', 'grupos'])
 
@@ -29,12 +30,12 @@ function flat (value) {
   return textOf(value).replace(/\r?\n/g, ' ')
 }
 
-// Twin of lastLine in groups.js (the hidden label must stay in sync); not imported to stay dependency-free.
-// Keep peer text raw here for displayText at the screen. The own marker is the row's `mine`, never text.
+// Twin of lastLine in groups.js: the hidden label must stay in sync.
+// Escaping stays at the screen's displayText. The own marker is the row's `mine`, never text.
 function groupLine (last) {
   if (!last || typeof last !== 'object') return ''
   if (last.hidden === true) return 'mensagem escondida'
-  const preview = flat(last.preview)
+  const preview = flat(plainPreview(last.preview))
   if (last.mine === true) return preview
   const author = whoOf({ name: last.name, username: last.username }).title
   return author === UNNAMED ? preview : author + ': ' + preview
@@ -68,7 +69,7 @@ export function mergeRows ({ dmConversations = [], groups = [] } = {}) {
       key: 'dm:' + dm.peer,
       peer: dm.peer,
       title: titleOf(dm, null),
-      subtitle: flat(dm.preview),
+      subtitle: flat(plainPreview(dm.preview)),
       mine: dm.mine === true,
       at: timeOf(dm.at) === null ? null : dm.at,
       unread: dm.unread === true,

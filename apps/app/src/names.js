@@ -5,6 +5,12 @@
 // still asks the node); a seed changes the avatar only when it carries an
 // 'avatar' key. avatar is undefined while unknown, null when there is none.
 // The entry rules live in ./namesCache.js.
+// learnVerified takes node-verified diary.peek answers: for a key whose
+// profile.read says `missing` (or an older node, which has no profile.read)
+// the peek stays as the entry instead of null; a profile.read answer always
+// wins over it. Each answer carries the peekScope it started in, and one of an
+// older scope is dropped. forgetVerified drops a kept peek once its diary is
+// gone; isPeeked says whether a key shows one.
 // Everything stored is raw peer data and the SCREENS render it through
 // displayText, as plain text.
 //
@@ -39,7 +45,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { isKey, PROFILE_LIMIT_MAX, USAGE } from '@varanda/rpc'
 import { useNode, useSyncSignals } from './node'
 import { namesQuiet } from './autoSyncPolicy'
-import { absentSeeds, applySeed, fieldsOf, stableView } from './namesCache'
+import { absentSeeds, applySeed, fieldsOf, forgottenEntry, isPeekedKey, missingEntry, peekReplaces, peekedEntry, stableView } from './namesCache'
 import { fetchMember } from './indexClient'
 import { diaryPeekSlots } from './engagement'
 import { createNamePeeker, foldRead, unnamed, withPeek } from './namesPeek'
@@ -76,6 +82,11 @@ export function NamesProvider ({ children }) {
   const signals = useSyncSignals()
   const autoSync = node.autoSync || { wanted: false, reconciling: false }
   const generation = node.passkey ? node.passkey.generation : 0
+  // The scope a diary.peek starts in. learnVerified drops one from an older
+  // epoch or generation, even after the screen that asked has closed.
+  const peekScope = epoch + ':' + generation
+  const peekScopeRef = useRef(peekScope)
+  peekScopeRef.current = peekScope
   const ownKey = node.passkey && node.passkey.status && typeof node.passkey.status.publicKey === 'string'
     ? node.passkey.status.publicKey.toLowerCase()
     : null
@@ -104,6 +115,10 @@ export function NamesProvider ({ children }) {
   const freshPendingRef = useRef(new Set())
   const freshSeenRef = useRef(new Map())
   const mountedRef = useRef(true)
+  // lowercase key -> peekedEntry of a verified diary.peek, kept for `missing`.
+  const peekedRef = useRef(new Map())
+  // Keys whose last profile.read answer in this scope was a profile.
+  const heldRef = useRef(new Set())
   // Bumped with the epoch/generation: a response of an older scope is dropped.
   const scopeRef = useRef(0)
   const ownKeyRef = useRef(ownKey)
@@ -158,6 +173,71 @@ export function NamesProvider ({ children }) {
   const learnMany = useCallback((entries) => apply(entries), [apply])
   // Seeds for keys not in the cache yet only (namesCache.absentSeeds).
   const seedMany = useCallback((entries) => apply(absentSeeds(cacheRef.current, entries)), [apply])
+
+  // Node-verified diary.peek answers ([key, value] pairs). They fill a key the
+  // node has no profile for (`missing`, or an older node) or that only a seed
+  // named, keeping its page hints, never one a pending or answered
+  // profile.read owns; one that lands before the answer waits in
+  // peekedRef for it. heldRef: the last answer was a profile, so a later peek
+  // (two can be in flight) must not bring the key back. The caller passes the
+  // peekScope it started in; an answer of an older scope is dropped.
+  const learnVerified = useCallback((entries, scope) => {
+    if (scope !== peekScopeRef.current) return
+    const next = new Map(cacheRef.current)
+    let changed = false
+    for (const [rawKey, value] of Array.isArray(entries) ? entries : []) {
+      if (typeof rawKey !== 'string' || !isKey(rawKey)) continue
+      const key = rawKey.toLowerCase()
+      const entry = peekedEntry(value)
+      if (entry === null || heldRef.current.has(key)) continue
+      const peeked = peekedRef.current
+      const had = peeked.has(key)
+      peeked.delete(key)
+      peeked.set(key, entry)
+      while (peeked.size > MAX_REASK_KEYS) {
+        const evicted = peeked.keys().next().value
+        peeked.delete(evicted)
+        // Nothing would re-check an evicted peek, so its name must not stay.
+        if (heldRef.current.has(evicted)) continue
+        const old = next.get(evicted)
+        const forgotten = forgottenEntry(old, pageHintFields({}, old))
+        if (forgotten === undefined) continue
+        next.set(evicted, forgotten)
+        changed = true
+      }
+      const known = next.get(key)
+      if (peekReplaces(known, had, unsupportedRef.current)) {
+        const hint = pageHintFields({}, known)
+        next.set(key, hint === null ? { ...entry } : { ...entry, ...hint })
+        changed = true
+      }
+    }
+    if (changed) commit(next)
+  }, [commit])
+
+  // A function, not state: the caller re-checks a shown peek on each open.
+  const isPeeked = useCallback((key) => isPeekedKey(peekedRef.current, heldRef.current, key), [])
+
+  // The diary of a peeked key is gone (blocked, @nome revoked): drop the kept
+  // peek so `missing` no longer restores it, and show the key unnamed. Same
+  // scope rule as learnVerified; a key profile.read holds is never touched.
+  const forgetVerified = useCallback((keys, scope) => {
+    if (scope !== peekScopeRef.current) return
+    const next = new Map(cacheRef.current)
+    let changed = false
+    for (const rawKey of Array.isArray(keys) ? keys : []) {
+      if (typeof rawKey !== 'string' || !isKey(rawKey)) continue
+      const key = rawKey.toLowerCase()
+      peekedRef.current.delete(key)
+      if (heldRef.current.has(key)) continue
+      const known = next.get(key)
+      const entry = forgottenEntry(known, pageHintFields({}, known))
+      if (entry === undefined) continue
+      next.set(key, entry)
+      changed = true
+    }
+    if (changed) commit(next)
+  }, [commit])
 
   const quietOk = (now) => namesQuiet({ ...quietRef.current, now, quietMs: QUIET_MS })
 
@@ -219,8 +299,18 @@ export function NamesProvider ({ children }) {
       for (const [key, entry] of entries) {
         // Authoritative: a null removes what a seed said (username included).
         const old = next.get(key)
-        if (entry !== null && old && old.page === true) Object.assign(entry, { page: true, closed: old.closed === true, moved: old.moved === true })
+        if (entry === null) {
+          // `missing`: only a node-verified diary.peek (learnVerified) stays; a
+          // name the name peeker found does not come back (foldRead).
+          heldRef.current.delete(key)
+          next.set(key, missingEntry(peekedRef.current.get(key)))
+          retryRef.current.delete(key)
+          continue
+        }
+        if (old && old.page === true) Object.assign(entry, { page: true, closed: old.closed === true, moved: old.moved === true })
         next.set(key, entry)
+        peekedRef.current.delete(key)
+        heldRef.current.add(key)
         retryRef.current.delete(key)
       }
       commit(next)
@@ -325,6 +415,8 @@ export function NamesProvider ({ children }) {
     backRef.current.clear()
     backLaneRef.current.clear()
     retryRef.current.clear()
+    peekedRef.current.clear()
+    heldRef.current.clear()
     freshPendingRef.current.clear()
     freshSeenRef.current.clear()
     if (freshTimerRef.current !== null) clearTimeout(freshTimerRef.current)
@@ -474,7 +566,7 @@ export function NamesProvider ({ children }) {
     return p === null ? null : p.name
   }, [profileOf])
 
-  const value = useMemo(() => ({ profileOf, nameOf, learn, learnMany, seedMany, resolve, resolveMany, invalidate, unsupported }), [profileOf, nameOf, learn, learnMany, seedMany, resolve, resolveMany, invalidate, unsupported])
+  const value = useMemo(() => ({ profileOf, nameOf, learn, learnMany, learnVerified, isPeeked, forgetVerified, seedMany, resolve, resolveMany, invalidate, unsupported, peekScope }), [profileOf, nameOf, learn, learnMany, learnVerified, isPeeked, forgetVerified, seedMany, resolve, resolveMany, invalidate, unsupported, peekScope])
 
   return <NamesContext.Provider value={value}>{children}</NamesContext.Provider>
 }

@@ -1,0 +1,24 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'app.varanda'
+version = '0.1.0'
+
+android {
+  namespace "app.varanda.videoprep"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+}
+
+dependencies {
+  // The media3 version expo-video 55.0.21 declares (androidxMedia3Version in
+  // its build.gradle), so Gradle resolves a single media3 stack. Bump both
+  // together.
+  implementation "androidx.media3:media3-transformer:1.8.0"
+  implementation "androidx.media3:media3-effect:1.8.0"
+  implementation "androidx.media3:media3-common:1.8.0"
+}

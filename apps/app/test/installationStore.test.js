@@ -59,6 +59,7 @@ register('data:text/javascript,' + encodeURIComponent(hooks), pathToFileURL(__fi
 
 const CONFIG = 'file:///stub/Documents/varanda-config.json'
 const INSTALLATION = 'file:///stub/Documents/varanda-installation.json'
+const DEFAULT = 'https://bora.varanda.app'
 
 const files = () => globalThis.__stubFiles
 const load = async () => ({
@@ -78,13 +79,15 @@ async function reset () {
   globalThis.__stubTextGate = null
 }
 
-test('no saved installation and no build-time value: null, app flag off', async (t) => {
+test('no saved installation and no build-time value: the default installation', async (t) => {
   const { store, installation, appClient } = await load()
   await reset()
-  t.is(await store.loadInstallation(), null)
-  t.is(installation.installationOrigin(), null)
-  t.is(appClient.isAppClient(), false)
-  t.is(installation.resolveUrl('/account/status'), '/account/status')
+  t.is(await store.loadInstallation(), DEFAULT)
+  t.is(installation.installationOrigin(), DEFAULT)
+  t.is(appClient.isAppClient(), true)
+  t.is(installation.resolveUrl('/account/status'), DEFAULT + '/account/status')
+  t.is(files().size, 0, 'the default is not saved as a choice')
+  await reset()
 })
 
 test('save writes its own file, never the core config, and load reads it back', async (t) => {
@@ -169,14 +172,16 @@ test('a malformed or hand-edited file is ignored', async (t) => {
     '{"v":1,"origin":"http://evil.test"}', '{"v":1,"origin":"https://example.test/path"}']) {
     await reset()
     files().set(INSTALLATION, text)
-    t.is(await store.loadInstallation(), null, text)
-    t.is(installation.installationOrigin(), null)
-    t.is(appClient.isAppClient(), false)
+    t.is(await store.loadInstallation(), DEFAULT, text)
+    t.is(installation.installationOrigin(), DEFAULT)
+    t.is(appClient.isAppClient(), true)
+    t.is(files().get(INSTALLATION), text, 'the bad file stays unchanged')
+    await reset()
   }
   await reset()
 })
 
-test('the build-time value is the fallback; empty or invalid means none', async (t) => {
+test('the build-time value comes before the default; empty or invalid falls through to the default', async (t) => {
   const { store, installation, appClient } = await load()
   await reset()
   process.env.EXPO_PUBLIC_VARANDA_INSTALLATION = 'https://built.test'
@@ -191,21 +196,22 @@ test('the build-time value is the fallback; empty or invalid means none', async 
   for (const value of ['', 'http://built.test', 'not a url']) {
     await reset()
     process.env.EXPO_PUBLIC_VARANDA_INSTALLATION = value
-    t.is(await store.loadInstallation(), null, JSON.stringify(value))
-    t.is(installation.installationOrigin(), null)
-    t.is(appClient.isAppClient(), false)
+    t.is(await store.loadInstallation(), DEFAULT, JSON.stringify(value))
+    t.is(installation.installationOrigin(), DEFAULT)
+    t.is(appClient.isAppClient(), true)
+    await reset()
   }
   await reset()
 })
 
-test('saving null forgets the choice and falls back to the build-time value', async (t) => {
+test('saving null forgets the choice and falls back to the build-time value or the default', async (t) => {
   const { store, installation, appClient } = await load()
   await reset()
   await store.saveInstallation('https://saved.test')
   t.is(await store.saveInstallation(null), true)
   t.is(files().has(INSTALLATION), false)
-  t.is(installation.installationOrigin(), null)
-  t.is(appClient.isAppClient(), false)
+  t.is(installation.installationOrigin(), DEFAULT)
+  t.is(appClient.isAppClient(), true)
 
   process.env.EXPO_PUBLIC_VARANDA_INSTALLATION = 'https://built.test'
   await store.saveInstallation('https://saved.test')
@@ -271,6 +277,37 @@ const jsonAnswer = (association, url) => async () => {
   return { status: 200, redirected: false, url, headers: jsonHeaders(String(Buffer.byteLength(body))), text: async () => body }
 }
 const stored = () => JSON.parse(files().get(INSTALLATION))
+
+test('discovery on the default installation: offline leaves no file, live remembers no saved origin', async (t) => {
+  const { store, installation } = await load()
+  const realFetch = globalThis.fetch
+  const asked = []
+  try {
+    await reset()
+    await store.loadInstallation()
+    globalThis.fetch = async (url) => {
+      asked.push(url)
+      throw new Error('offline')
+    }
+    t.is(await store.discoverConfig(), null)
+    t.alike(asked, [DEFAULT + '/varanda.json'])
+    t.is(files().size, 0, 'offline discovery writes nothing')
+
+    globalThis.fetch = jsonAnswer(ASSOC_A, DEFAULT + '/varanda.json')
+    const config = await store.discoverConfig()
+    t.is(config && config.kind, 'hosted')
+    t.is(config && config.seederUrl, 'wss://bora.varanda.app/seeder')
+    t.is(files().has(INSTALLATION), true, 'the live answer is remembered')
+    const value = JSON.parse(files().get(INSTALLATION) || 'null')
+    t.ok(value && !Object.hasOwn(value, 'origin'), 'the remembered answer has no saved origin')
+
+    installation.setInstallation(null)
+    t.is(await store.loadInstallation(), DEFAULT)
+  } finally {
+    globalThis.fetch = realFetch
+    await reset()
+  }
+})
 
 test('discovery: only a canonical Content-Length within the cap is read', async (t) => {
   const { store } = await load()

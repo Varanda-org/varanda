@@ -5,8 +5,8 @@
 // there is no own live moment, the own viewer otherwise, where 'Novo
 // momento' adds another), then the authors with anything not seen on this
 // device (accent ring), then the fully seen ones (line ring). Under a ring
-// only the first word of the name, at one fixed size on one line (a long
-// word ends in '…'); the full name is in the label. adjustsFontSizeToFit
+// only the first word of the name, on one line with the slot growing with
+// font scaling up to 1.3; the full name is in the label. adjustsFontSizeToFit
 // shrank without limit on Android and not at all on the web. The own ring
 // with '+' opens the composer: no ring, labelled 'novo momento'. Every ring
 // is a 44 pt (or larger) target.
@@ -20,7 +20,7 @@
 // (screens/Momentos.js useMoments, ConfirmMomentDelete).
 
 import { useState } from 'react'
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { ringOrder } from '../moments'
 import { liveAuthors, liveItems, ringSeen, stripShown } from '../momentSeen'
@@ -30,6 +30,7 @@ import { whoOf } from '../who'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
 import { MoreButton } from './MoreButton'
+import { PressScale } from './PressScale'
 import { useStyles, useTheme } from './ThemeProvider'
 import { type } from './theme'
 
@@ -37,8 +38,7 @@ export const OWN_LIVE_TITLE = 'Seus momentos (24 h)'
 const RING = 56
 const EXCERPT = 60
 
-// The cap for the Diário rows and the ring names: they stay on one line with
-// large text, as the other small labels do.
+// The cap keeps the ring names and Diário rows within their compact layout.
 const ROW_CAP = 1.3
 
 // The first word of a display name for the ring ('Você' for the own one).
@@ -64,12 +64,14 @@ export function excerptOf (text) {
 function Ring ({ label, name, unseen, onPress, profile, publicKey, plus }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
+  const { fontScale } = useWindowDimensions()
+  const width = 72 * Math.min(ROW_CAP, Math.max(1, fontScale))
   return (
-    <Pressable
+    <PressScale
       accessibilityRole='button'
       accessibilityLabel={label}
       onPress={onPress}
-      style={({ pressed }) => [styles.ringItem, pressed && styles.pressed]}
+      style={({ pressed }) => [styles.ringItem, { width }, pressed && styles.pressed]}
     >
       <View style={[styles.ring, { borderColor: plus ? 'transparent' : unseen ? colors.accent : colors.line }]}>
         <Avatar name={profile ? (profile.name || profile.username || null) : null} publicKey={publicKey} size={RING - 8} picture={profile ? profile.avatar : undefined} persist />
@@ -82,7 +84,7 @@ function Ring ({ label, name, unseen, onPress, profile, publicKey, plus }) {
           : null}
       </View>
       <Text style={styles.ringName} numberOfLines={1} ellipsizeMode='tail' maxFontSizeMultiplier={ROW_CAP}>{name}</Text>
-    </Pressable>
+    </PressScale>
   )
 }
 
@@ -205,7 +207,7 @@ const makeStyles = (colors) => StyleSheet.create({
   pressed: { opacity: 0.6 },
   ring: { width: RING, height: RING, borderRadius: RING / 2, borderWidth: 2, padding: 2, alignItems: 'center', justifyContent: 'center' },
   plus: { position: 'absolute', right: -2, bottom: -2, width: 20, height: 20, borderRadius: 10, backgroundColor: colors.accent, borderWidth: 2, borderColor: colors.bg, alignItems: 'center', justifyContent: 'center' },
-  ringName: { ...type.postMeta, color: colors.ink, width: 72, textAlign: 'center' },
+  ringName: { ...type.postMeta, color: colors.ink, width: '100%', textAlign: 'center' },
   section: { borderBottomWidth: 1, borderBottomColor: colors.line },
   row: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 44, paddingHorizontal: 16, paddingVertical: 10 },
   rowText: { ...type.postName, color: colors.ink, flex: 1 },

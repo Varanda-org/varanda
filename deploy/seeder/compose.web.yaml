@@ -200,6 +200,17 @@ services:
       VARANDA_GIF_API_URL: "${VARANDA_GIF_API_URL:-}"
       VARANDA_GIF_API_KEY: "${VARANDA_GIF_API_KEY:-}"
       VARANDA_GIF_MEDIA_HOSTS: "${VARANDA_GIF_MEDIA_HOSTS:-}"
+      # Música do Audius: a chave liga, vazia desliga. A chave é segredo, vai
+      # só para o Audius e nunca é impressa; as outras quatro são opcionais e
+      # exigem a chave. O áudio passa pelo serviço e usa a banda dele. Nunca
+      # defina a chave com Termos abaixo da versão 39; momentos só com o "sim"
+      # por escrito do Audius.
+      VARANDA_AUDIUS_API_KEY: "${VARANDA_AUDIUS_API_KEY:-}"
+      VARANDA_AUDIUS_API_URL: "${VARANDA_AUDIUS_API_URL:-}"
+      VARANDA_AUDIUS_APP_NAME: "${VARANDA_AUDIUS_APP_NAME:-}"
+      VARANDA_AUDIUS_MOMENTS: "${VARANDA_AUDIUS_MOMENTS:-}"
+      VARANDA_AUDIUS_COVERS: "${VARANDA_AUDIUS_COVERS:-}"
+      VARANDA_AUDIUS_STREAMS: "${VARANDA_AUDIUS_STREAMS:-}"
       # Excluir conta: o mesmo certificado do assetlinks.json; a conta aceita
       # a passkey do app Android (origem android:apk-key-hash). Vazio: só a
       # origem pública, e a exclusão pelo app Android espera os 7 dias.

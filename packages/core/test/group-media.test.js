@@ -8,7 +8,7 @@ const {
   SEALED_MEDIA_MIME, MAX_SEALED_MEDIA_PLAIN_BYTES, PRIVATE_ITEM_KEYS, MAX_GROUP_MEDIA,
   validPublicItem, validPrivateItem, validGroupMedia, copyGroupItem, copyGroupMedia, sealMedia, openMedia
 } = require('../lib/group-media')
-const { MEDIA_BLOCK_BYTES, MAX_MEDIA_BLOCKS, MAX_MEDIA_ITEM_BLOCKS, MAX_AUDIO_MS, MAX_AUDIO_BYTES, validDescriptor } = require('../lib/records')
+const { MEDIA_BLOCK_BYTES, MAX_MEDIA_BLOCKS, MAX_MEDIA_ITEM_BLOCKS, MAX_AUDIO_MS, MAX_AUDIO_BYTES, validDescriptor, validVideoDescriptor, validPostMedia } = require('../lib/records')
 
 const MAC = sodium.crypto_secretbox_MACBYTES
 const CORE = 'a'.repeat(64)
@@ -209,6 +209,24 @@ test('validGroupMedia: 1..4 items of one kind at distinct places', (t) => {
   const hostile = [pub(1)]
   Object.defineProperty(hostile, 0, { get () { throw new Error('x') } })
   t.absent(validGroupMedia(hostile, false), 'never throws')
+})
+
+test('group media refuses a valid video descriptor and a post video pair', (t) => {
+  const poster = { ...PUBLIC, mime: 'image/jpeg', width: 640, height: 480 }
+  const video = { ...poster, mime: 'video/mp4', start: 4, ms: 3000 }
+  t.ok(validVideoDescriptor(video))
+  t.ok(validPostMedia([poster, video]))
+  t.ok(validGroupMedia([poster], false))
+  t.absent(validPublicItem(video))
+  t.absent(validGroupMedia([video], false))
+  t.absent(validGroupMedia([poster, video], false))
+
+  const { item, cipher } = sealed(100)
+  const privateVideo = { ...item, start: 2, plainMime: 'video/mp4', ms: 3000 }
+  t.absent(validPrivateItem(privateVideo))
+  t.absent(validGroupMedia([privateVideo], true))
+  t.absent(validGroupMedia([item, privateVideo], true))
+  t.is(openMedia(cipher, privateVideo), null)
 })
 
 test('copyGroupItem keeps exactly the keys of the expected kind', (t) => {
