@@ -29,7 +29,7 @@
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
+import { StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { LOG_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { perfMarks, useNode } from '../node'
@@ -52,8 +52,9 @@ import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
 import { ShareProfile } from '../ui/ShareProfile'
 import { Sheet } from '../ui/Sheet'
-import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
-import { ProfileHeader } from '../ui/ProfileHeader'
+import { EmptyState, ErrorState, ListFooter, SkeletonRow } from '../ui/States'
+import { PressScale } from '../ui/PressScale'
+import { ProfileHeader, ProfileStatus } from '../ui/ProfileHeader'
 import { MuralFooter, MuralRow, muralGridRows } from '../ui/MuralGrid'
 import { Segmented } from '../ui/Segmented'
 import { CommunitiesBox } from '../ui/CommunitiesBox'
@@ -64,7 +65,7 @@ import { HelpButton } from '../ui/Help'
 import { HELP } from '../help'
 import { COUNTS_INCOMPLETE_NOTE } from '../pessoas'
 import { useFollowCounts } from '../useFollowCounts'
-import { LARGE_TEXT, type } from '../ui/theme'
+import { LARGE_TEXT, space, type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
 import Perfil from './Perfil'
 import { CountsNote, RepostPlaceholder, SocialToast, liveBinding, refOf, snapshotRowsShown, socialRowProps, useSocial } from './ARua'
@@ -151,11 +152,11 @@ function sessionAllowsDiarioSnapshot (passkey, owner) {
 // The state line of an outbox item. `held`: queued, but not sent
 // automatically (found in storage from an earlier visit).
 function PendingState ({ item, held }) {
-  if (item.state === 'sending') return <Soft>enviando…</Soft>
-  if (held) return <Soft>toque para enviar</Soft>
+  if (item.state === 'sending') return <ProfileStatus icon='sinc' label='enviando…' />
+  if (held) return <ProfileStatus icon='seta_cima' label='toque para enviar' />
   if (item.state === 'uncertain') return <ErrorText>{UNCERTAIN_MESSAGE}</ErrorText>
   if (item.state === 'failed') return <ErrorText>{displayText(plainMessage(item.lastError))}</ErrorText>
-  return <Soft>vai sair quando a conexão voltar</Soft>
+  return <ProfileStatus icon='semconexao' label='vai sair quando a conexão voltar' />
 }
 
 // Only publications are listed: records the person never wrote by hand (profile,
@@ -559,15 +560,15 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const bandControls = (inBar) => (
     <>
       <HelpButton doc={HELP.diario} color='#ffffff' style={inBar ? styles.barButton : (hasBell ? styles.infoShifted : styles.info)} />
-      <Pressable
+      <PressScale
         accessibilityRole='button'
-        accessibilityLabel='ajustes'
+        accessibilityLabel='Ajustes'
         hitSlop={8}
         onPress={() => onSettings('lista')}
         style={inBar ? styles.barButton : (hasBell ? styles.gearShifted : styles.gear)}
       >
         <Icon name='engrenagem' size={20} color='#ffffff' />
-      </Pressable>
+      </PressScale>
       {hasBell ? <BellButton color='#ffffff' badged={avisosNew === true} onPress={onAvisos} style={inBar ? styles.barButton : styles.bell} /> : null}
     </>
   )
@@ -632,7 +633,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const header = info === null
     ? (
       <View>
-        <View style={[styles.plainBand, { height: bandHeight }]} />
+        {loadError ? <View style={[styles.plainBand, { height: bandHeight }]} /> : <ProfileHeader loading bandHeight={bandHeight} />}
       </View>
       )
     : (
@@ -710,7 +711,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   if (data === null) {
     empty = loadError
       ? <ErrorState message={loadError} onRetry={reload} pending={pull.pending} />
-      : <Skeleton />
+      : <><SkeletonRow /><SkeletonRow /><SkeletonRow /></>
   } else {
     empty = !data.atEnd
       // Older pages remain and none shown so far held a publication: loading
@@ -875,13 +876,13 @@ const bandButton = (colors) => ({
 
 const makeStyles = (colors) => StyleSheet.create({
   list: { flex: 1, backgroundColor: colors.bg },
-  barButton: { width: 34, height: 34, borderRadius: 17, backgroundColor: colors.dim, alignItems: 'center', justifyContent: 'center' },
   plainBand: { backgroundColor: colors.bg },
+  barButton: { width: 34, height: 34, borderRadius: 17, backgroundColor: colors.dim, alignItems: 'center', justifyContent: 'center' },
   // The band buttons, right to left: bell (when there is one), gear, help.
   bell: { ...bandButton(colors), right: 16 },
   gear: { ...bandButton(colors), right: 16 },
   gearShifted: { ...bandButton(colors), right: 58 },
-  countsNote: { marginTop: 4 },
+  countsNote: { marginTop: space.xs },
   info: { ...bandButton(colors), right: 58 },
   infoShifted: { ...bandButton(colors), right: 100 },
   shareBody: { padding: 16, gap: 12 },

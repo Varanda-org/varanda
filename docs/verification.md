@@ -9025,3 +9025,116 @@ Situação, em 2026-11-12 (Vitrine, Metro na porta 8090, sem alterar as fixtures
 Defeitos: nenhum confirmado. Suspeita aberta para quem corrige (T28): no Chrome a seleção de texto com o mouse numa bolha de `Mensagem` não selecionou nada (`ui/SwipeReply.js`, ou o `Pressable` da bolha, ao redor das linhas 38 a 45, que tratam o mouse); falta comparar com o PR8 para saber se o PR9 mudou isso. Nada foi corrigido neste PR de documentação.
 
 Limites conhecidos: Comunidades e Comunidade ainda mostram "Só na versão web" num nó que não é hospedado, o que nunca acontece num celular com a instalação (esse celular é hospedado). Quem usa mouse não tem deslize e responde pelas ações da mensagem. O que não foi percorrido está listado na Situação.
+
+## 198. Acabamento das telas (PR feat/screens-polish)
+
+Décimo e último PR da revisão visual do app. Só interface: nenhum método do RPC, formato de protocolo, texto dos Termos nem fixture muda. Ele fecha os achados UX-44 a UX-66 de `docs/ux-audit.md`, em três grupos: feeds e busca, perfil e avisos, e publicar, Momentos, introdução e ajustes.
+
+Feeds e busca (`ARua.js`, `App.js`, `Espiadinha.js`, `Busca.js`, `BuscaGlobal.js`, `ui/MomentosStrip.js`): em A Rua, o feed de membro que falha ao carregar mostra a mesma faixa de erro no topo, com ou sem lista, e mantém a lista já carregada. O feed de Página mantém a regra antiga (uma leitura que falha limpa as linhas). A primeira carga mostra linhas de esqueleto. O toast da casca tem área de toque de 44 pt na ação e, com ação, fica mais tempo quando a escala de fonte é de pelo menos `LARGE_TEXT` (1,29). A Espiadinha tem uma só nota de estado no alto, e a folha de ajuda diz o mesmo que ela; o aviso de expiração e o "atualizar" ficam no rodapé da lista, onde a falha aparece, e as notas continuam ao lado da faixa de erro enquanto há linhas. Indisponível lê "Espiadinha indisponível" com o motivo, e "Saiba mais" só aparece quando o nó não é hospedado. A Busca tem uma só nota (o resto foi para a folha de ajuda), distingue "nada digitado", "buscando" e "sem resultado" e oferece "Limpar"; a região de carga tem rótulo de acessibilidade. A Busca global tem os mesmos três estados, o botão lê "Digitar código" num nó que não é hospedado (ele só põe o foco no campo), e a nota "buscando" mantém a margem de 16 pt. Os anéis da faixa de Momentos respondem ao toque com `PressScale` e o leitor de tela lê o nome inteiro.
+
+Perfil e avisos (`Diario.js`, `Membro.js`, `ui/ProfileHeader.js`, `ui/ProfileBar.js`, `Avisos.js`): Diário e Membro mostram cabeçalho e linhas de esqueleto na primeira carga; em Membro o esqueleto do cabeçalho só aparece enquanto `profile.read` está pendente, então Seguir, Conversar e o menu surgem quando ele responde. Um diário vazio mostra `EmptyState`: no próprio perfil oferece publicar, no de outra pessoa não tem ação, e numa Página lê "As publicações desta Página aparecem aqui.". As ações do cabeçalho seguem como `Pill`. O estado do envio vira um selo com ícone, "Ajustes" ganha maiúscula, a região de avaliações é acessível, a linha "Anúncios" continua sem contagem nem prévia de capa, o estado "montando a lista" tem tratamento próprio, as contagens quebram com texto grande e o avatar tem 88 pt abaixo de 640 pt de largura e 72 pt a partir daí. Avisos num nó que não é hospedado lê "Avisos indisponíveis", com o corpo "Disponível no site da associação ou no app ligado à instalação." e "Saiba mais" abrindo `HELP.avisos`; num nó hospedado sem passkey lê "Os Avisos não estão disponíveis nesta conexão.", sem "Saiba mais"; as linhas respondem ao toque com `PressScale` e mantêm as dicas de acessibilidade; há esqueleto na carga e nenhum título de data (a forma documentada).
+
+Publicar, Momentos, introdução e ajustes (`Publicar.js`, `Momentos.js`, `Introducao.js`, `Ajustes.js`): o contador de caracteres diz a contagem atual quando recebe o foco, só os limiares (restam 20, restam 0) são anunciados sozinhos e a região viva da web é esvaziada quando a contagem sai de um limiar. O botão de foto lê "Adicionar foto". Ao focar o campo, e quando a linha do contador se move, a tela rola para manter o campo e a barra de fotos e emojis à vista (UX-59). Em Momentos, uma legenda cortada ganha "mais" e "menos" (lidos como "mostrar a legenda inteira" e "recolher a legenda"); abrir pausa o tempo, e "menos" ou um passo o retoma; a legenda aberta nunca é menor que a recolhida; quando não cabem três linhas e o botão (texto grande), não há "mais": a legenda usa a altura toda e rola, como antes; o indicador de carga usa um token do tema. Em Introdução, "Pular" continua no canto superior direito, com área de toque de 44 por 44 pt, e os botões seguem sendo `Btn` e `StepLink`; Welcome não muda. Em Ajustes, as linhas ficam em "Perfil e conta", "Privacidade e segurança" e "Aparência e avisos", com "Avançado" como último grupo; cada nota fica dentro do seu grupo, com título. O rodapé de versão tem três itens (app, servidor e nota) e copiar é anunciado. Sair e Excluir conta continuam onde estavam, antes de "Avançado"; nenhuma linha foi removida nem religada.
+
+Regras que os passos conferem:
+
+- Falha ao carregar A Rua: a mesma faixa no topo, com ou sem lista; a lista já carregada fica intacta. A Página limpa as linhas, como antes.
+- O toast com ação tem alvo de 44 pt e dura o dobro com texto a partir de 1,29.
+- Espiadinha: uma nota de estado; a folha de ajuda não contradiz a nota; "Saiba mais" só num nó que não é hospedado; o rodapé leva a expiração e o "atualizar".
+- Busca e Busca global: uma só nota por vez, três estados distintos, "Limpar" onde há texto; "Digitar código" só num nó que não é hospedado.
+- Diário e Membro: esqueleto só na primeira carga; em Membro, Seguir, Conversar e o menu não ficam escondidos depois que `profile.read` responde.
+- Diário vazio: com ação só no próprio perfil. Avisos num nó que não é hospedado: "Avisos indisponíveis" e "Saiba mais" abre a ajuda de Avisos. Sem título de data nas linhas de Avisos.
+- Publicar: o contador só é anunciado sozinho nos limiares; com foco, diz a contagem inteira.
+- Momentos: expandir a legenda pausa o tempo, e também o vídeo curto e a música do momento; "menos" ou um passo retoma; Reduzir movimento continua sem avanço automático.
+- Ajustes: nenhuma linha some e nenhuma muda de destino; Sair e Excluir conta antes de "Avançado".
+- Decisão por capacidade (`node.hosted`, `node.online`), nunca por `Platform.OS` (`platformGate.test.js`). Texto de um par passa por `displayText`.
+- App: `apps/app/App.js`, `screens/ARua.js`, `Espiadinha.js`, `Busca.js`, `BuscaGlobal.js`, `Diario.js`, `Membro.js`, `Avisos.js`, `Publicar.js`, `Momentos.js`, `Introducao.js`, `Ajustes.js`, `ui/MomentosStrip.js`, `ui/PressScale.js`, `ui/ProfileBar.js`, `ui/ProfileHeader.js`; `src/peek.js` e `src/notices.js` perdem a frase "só na versão web", que nenhuma tela usa mais.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `(cd apps/app && node ../../scripts/run-tests.js test/screensPolish.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/profilePolish.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/composePolish.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/versionFooter.test.js)`
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é um nó hospedado com dados de exemplo e dispensa conta. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e), Chrome em 390 e em 1280 px, claro e escuro, texto grande, leitor de tela e Reduzir movimento; a rodada para quando duas seguidas não mudam nada. Capturas ficam fora do git.
+
+1. A Rua com falha de carga. Na Vitrine, cortar a rede não faz `feed.read` falhar (o nó de exemplo responde com dados locais), então aqui só se confere a primeira carga. Esperado: linhas de esqueleto. A faixa no topo (a mesma com ou sem lista, e a lista já carregada intacta) fica coberta por `apps/app/test/screensPolish.test.js`; no aparelho, só com um nó real cuja leitura falhe.
+2. Toast com ação: provoque um toast que traga uma ação. Esperado: a ação tem 44 pt de alto e, com texto grande (1,3), o toast fica mais tempo.
+3. Espiadinha: abra com linhas, depois com a lista vencida ou incompleta. Esperado: uma só nota no alto; a expiração e o "atualizar" no rodapé; a folha de ajuda diz o mesmo que a nota. Num nó que não é hospedado: "Espiadinha indisponível", o motivo e "Saiba mais".
+4. Busca: abra sem digitar, digite, e busque algo sem resultado. Esperado: uma só nota por vez, "Limpar" nos estados com texto, região de carga com nome para o leitor de tela; o que sobrou das notas antigas está na folha de ajuda.
+5. Busca global: os mesmos três estados; num nó que não é hospedado o botão lê "Digitar código" e põe o foco no campo. Esperado: a nota "buscando" com margem de 16 pt.
+6. Faixa de Momentos: toque num anel e use o leitor de tela. Esperado: o anel responde ao toque (`PressScale`) e o leitor diz o nome inteiro.
+7. Diário e Membro, carregando: abra o próprio Diário e o de outra pessoa com o nó ainda lendo. Esperado: esqueleto do cabeçalho e das linhas. Em Membro, Seguir, Conversar e o menu aparecem quando `profile.read` responde, sem esperar as linhas.
+8. Diário vazio: no próprio perfil, no de outra pessoa e numa Página. Esperado: `EmptyState` com "publicar" só no próprio perfil; na Página, "As publicações desta Página aparecem aqui.".
+9. Selo de envio, "Ajustes" e avaliações: publique offline e olhe o Diário e o Membro; olhe o botão de ajustes; percorra a região de avaliações com o leitor de tela. Esperado: selo com ícone, "Ajustes" com maiúscula, a região lida.
+10. Anúncios, lista em montagem e contagens: a linha "Anúncios" segue sem contagem nem capa; o estado "montando a lista" aparece distinto do vazio; com texto grande, as contagens de seguidores quebram sem estourar o cabeçalho.
+11. Avatar: abra um perfil em 390 e em 1280 px. Esperado: 88 pt em 390 e 72 pt em 1280, cabeçalho sem ficar estreito e alto.
+12. Avisos: num nó que não é hospedado, "Avisos indisponíveis" com o corpo "Disponível no site da associação ou no app ligado à instalação." e "Saiba mais" abrindo a ajuda. Hospedado sem passkey: "Os Avisos não estão disponíveis nesta conexão." e nenhum "Saiba mais". Hospedado: esqueleto ao carregar, linhas com toque suave, dicas lidas pelo leitor de tela e nenhum título de data (Avisos mantém a forma documentada).
+13. Publicar, contador: escreva até restarem 20 caracteres e até 0, com o leitor de tela. Esperado: só os dois limiares são anunciados sozinhos; com o foco no contador, ele diz a contagem inteira. Na web, a região viva esvazia quando a contagem sai de um limiar.
+14. Publicar, foto e teclado: o botão de foto lê "Adicionar foto". Com o teclado aberto, a barra de fotos e emojis continua alcançável (UX-59: ao focar o campo, e quando a linha do contador se move, a tela rola para manter o campo e a barra à vista; confira se a barra fica acima do teclado).
+15. Momentos, legenda longa: abra um momento com legenda cortada. Esperado: "mais" abre a legenda e pausa o tempo (num momento com vídeo ou música, também o vídeo e a música); "menos" ou avançar um passo retoma; a legenda aberta não é menor que a recolhida. Com texto grande e pouco espaço, sem "mais": a legenda usa a altura toda e rola; o indicador de carga acompanha o tema.
+16. Introdução: "Pular" no canto superior direito, com 44 por 44 pt de toque; os botões seguem iguais; Welcome igual a antes.
+17. Ajustes, grupos: abra Ajustes. Esperado: "Perfil e conta", "Privacidade e segurança" e "Aparência e avisos", com "Avançado" por último; cada nota dentro do seu grupo, com título; nenhuma linha sumiu nem mudou de destino; Sair e Excluir conta antes de "Avançado", como antes.
+18. Rodapé de versão: percorra com o leitor de tela e toque para copiar. Esperado: três itens (app, servidor e nota) e a cópia é anunciada.
+19. Reduzir movimento: ligue no sistema e repita os passos 2, 6 e 15. Esperado: sem animação nova; o tempo do momento segue sem avanço automático.
+20. Texto grande (1,3), escuro e leitor de tela: percorra todas as telas acima. Esperado: nada cortado ou sobreposto, alvos de 44 pt, e um nome de leitor de tela por controle (anéis de Momentos, linhas de Avisos, contador, "mostrar a legenda inteira", "Adicionar foto", itens do rodapé de versão).
+21. Erro lido pelo leitor de tela: provoque um erro de carga numa tela que agora usa `EmptyState`. Esperado: o texto do erro é lido; o papel "alerta" não existe mais (ver Limites conhecidos).
+
+Situação, em 2026-11-12 (Vitrine, Metro na porta 8090, sem alterar as fixtures; duas rodadas). Cada caixa só é marcada quando o alvo foi percorrido por inteiro; nenhuma destas cinco foi. Capturas do Android e do iOS em `v10-shots/` fora do git; o painel de navegador embutido não salva capturas.
+
+- [ ] Android, AVD `varanda-api36` (parcial, duas rodadas, `v10-shots/android/`): passaram os passos 13 (contagem até 0 de 1000), 14 (a barra de fotos e emojis fica acima do teclado, então o UX-59 já valia no Android), 17 (grupos, com Sair e Excluir conta antes de "Avançado") e 20 (texto grande e escuro em perfil, Avisos e Ajustes); em parte, 3, 4, 5, 6, 10, 12 (sem títulos de data) e 18 (as duas linhas do rodapé). Os outros passos e o TalkBack não foram percorridos.
+- [ ] iOS, simulador UDID 8802DF5C-6A82-406C-8D4D-29618AEEA2BC, que é um iPhone 17 Pro, não o 16e do método (parcial, duas rodadas, `v10-shots/ios/`): passaram os passos 3 (uma nota e a ajuda), 4, 10 (contagens numa linha com texto extra extra grande), 14, 17 (grupos, com Sair e Excluir conta antes de "Avançado") e 20 (escuro em Ajustes e Diário); em parte, 11 (cerca de 88 pt com 402 de largura) e 18 (as duas linhas do rodapé). Os outros passos e o VoiceOver não foram percorridos.
+- [ ] Chrome 390 px, claro e escuro (parcial, painel de navegador embutido, sem capturas): passaram os passos 4 (uma nota por vez e "Limpar"), 12 (sem títulos de data), 13 ("Restam 20" em 980, "Limite de caracteres atingido" em 1000, nada anunciado em 500 e 990, e o rótulo "N de 1000 caracteres"), 14 ("Adicionar foto"), 17 (grupos, com Sair e Excluir conta antes de "Avançado") e 20 no escuro; em parte, 3 e 18 (as duas linhas do rodapé). Os outros passos, o texto grande e o leitor de tela não foram percorridos.
+- [ ] Chrome 1280 px, claro e escuro (parcial): só uma passada curta na primeira rodada, sem passo conferido por inteiro.
+- [ ] Texto grande, Reduzir movimento e leitor de tela (TalkBack, VoiceOver) (parcial): texto grande passou no Android (1,3) em perfil, Avisos e Ajustes e no iOS (extra extra grande) no Diário, com a observação abaixo; Reduzir movimento (passo 19), TalkBack e VoiceOver não foram percorridos.
+
+Defeitos: nenhum confirmado. Observações para a equipe: (1) no iOS, mudar o tamanho do texto com o app aberto cortou rótulos até o app ser reaberto (`v10-shots/ios/`, capturas 08 e 09 contra 11); não foi comparado com a `main`. (2) No iOS, despejar cerca de 3 mil caracteres de uma vez no campo de Publicar com a ferramenta de digitação do simulador (de 90 a 150 caracteres por segundo, bem acima de quem digita) mostrou o erro "Maximum update depth exceeded" em `typePost` (`setText`). O mesmo erro aparece, duas vezes em duas, com o `Publicar.js` do PR anterior da pilha, e as outras mudanças da pilha nesse arquivo só agem quando há um rascunho de resposta pendente, o que não era o caso; então não vem deste PR. Não foi conferido na `main`; fica para investigar à parte. (3) Na folha "Fazer oferta", o campo Valor mostra "80,00" como exemplo fixo, que já existia antes desta série (`apps/app/src/screens/Mensagem.js`); usar o preço do anúncio fica como ideia para depois.
+
+Limites conhecidos: nas telas desta seção, `ErrorState` virou `EmptyState`, então o erro perde o papel "alerta" do leitor de tela (o pedido era esse; confira com o leitor de tela, passo 21). O "Saiba mais" de Avisos e a ajuda da Espiadinha não foram percorridos num celular. A linha "Anúncios" do perfil segue sem contagem e sem prévia de capa (UX-55 só em parte). O que não foi percorrido fica listado na Situação. A Vitrine se comporta como um nó hospedado com passkey, então os estados de nó não hospedado e de nó hospedado sem passkey não foram percorridos no aparelho; ficam cobertos por `screensPolish.test.js` e `profilePolish.test.js`.
+
+### Passada da pilha inteira
+
+Depois dos PRs 1 a 10 juntos, percorra de novo os passos de cabeça de cada seção. Percorrida em 2026-11-12, na segunda rodada (Vitrine, Metro na porta 8090); no Chrome, só 390 px no claro. Uma caixa só é marcada quando todos os passos da linha passaram.
+
+- [x] Android, seção 189: pílula da barra de abas (passo 2) e o botão de publicar ao apertar (passo 8). Passaram na segunda rodada; o botão encolher ao segurar só se vê por um deslocamento de cerca de 3 px na captura (`r2-178-fab-held.png`).
+- [ ] iOS, seção 189: pílula da barra de abas (passo 2) e o botão de publicar ao apertar (passo 8). Em parte, na segunda rodada.
+- [ ] Chrome 390, seção 189: pílula da barra de abas (passo 2) e o botão de publicar ao apertar (passo 8). O passo 2 passou (uma pílula só); o passo 8 não foi percorrido.
+- [ ] Chrome 1280, seção 189: pílula da barra de abas (passo 2) e o botão de publicar ao apertar (passo 8). Não percorrido.
+- [ ] Android, seção 190: fotos antes da legenda e "mais" e "menos" (passos 1 a 3) e o contador do carrossel (passo 8). Não percorrido.
+- [ ] iOS, seção 190: fotos antes da legenda e "mais" e "menos" (passos 1 a 3) e o contador do carrossel (passo 8). Não percorrido.
+- [ ] Chrome 390, seção 190: fotos antes da legenda e "mais" e "menos" (passos 1 a 3) e o contador do carrossel (passo 8). Não percorrido.
+- [ ] Chrome 1280, seção 190: fotos antes da legenda e "mais" e "menos" (passos 1 a 3) e o contador do carrossel (passo 8). Não percorrido.
+- [ ] Android, seção 191: "Ver N respostas" (passos 1 e 2) e a barra de resposta (passos 7 e 8). Não percorrido.
+- [ ] iOS, seção 191: "Ver N respostas" (passos 1 e 2) e a barra de resposta (passos 7 e 8). Não percorrido.
+- [ ] Chrome 390, seção 191: "Ver N respostas" (passos 1 e 2) e a barra de resposta (passos 7 e 8). Não percorrido.
+- [ ] Chrome 1280, seção 191: "Ver N respostas" (passos 1 e 2) e a barra de resposta (passos 7 e 8). Não percorrido.
+- [ ] Android, seção 192: cidade, chip e tiles (passos 2 a 4) e as colunas por largura (passo 5). Em parte.
+- [ ] iOS, seção 192: cidade, chip e tiles (passos 2 a 4) e as colunas por largura (passo 5). Não percorrido.
+- [ ] Chrome 390, seção 192: cidade, chip e tiles (passos 2 a 4) e as colunas por largura (passo 5). Os passos 2, 4 e 5 passaram; o passo 3 não foi percorrido.
+- [ ] Chrome 1280, seção 192: cidade, chip e tiles (passos 2 a 4) e as colunas por largura (passo 5). Não percorrido.
+- [ ] Android, seção 193: barra do anúncio com Conversar e Fazer oferta (passos 4 e 5) e Anunciar em passos (passos 8 e 9). Não percorrido.
+- [ ] iOS, seção 193: barra do anúncio com Conversar e Fazer oferta (passos 4 e 5) e Anunciar em passos (passos 8 e 9). Não percorrido.
+- [ ] Chrome 390, seção 193: barra do anúncio com Conversar e Fazer oferta (passos 4 e 5) e Anunciar em passos (passos 8 e 9). Os passos 4 e 5 passaram, também a folha de oferta num anúncio de Página; Anunciar em passos (8 e 9) não foi percorrido.
+- [ ] Chrome 1280, seção 193: barra do anúncio com Conversar e Fazer oferta (passos 4 e 5) e Anunciar em passos (passos 8 e 9). Não percorrido.
+- [ ] Android, seção 194: negrito, itálico e bloco de código (passos 1 e 3) e o spoiler (passo 4). Os passos 1, 2 e 4 passaram; o bloco de código (passo 3) não foi percorrido.
+- [ ] iOS, seção 194: negrito, itálico e bloco de código (passos 1 e 3) e o spoiler (passo 4). Não percorrido.
+- [ ] Chrome 390, seção 194: negrito, itálico e bloco de código (passos 1 e 3) e o spoiler (passo 4). Não percorrido.
+- [ ] Chrome 1280, seção 194: negrito, itálico e bloco de código (passos 1 e 3) e o spoiler (passo 4). Não percorrido.
+- [ ] Android, seção 195: reagir, trocar e tirar (passos 2 a 4) e "Quem reagiu" (passo 5). Os passos 1, 2 e 5 passaram num grupo público (chips sob a mensagem, "Quem reagiu" com os nomes); trocar e tirar (3 e 4) não foram percorridos.
+- [ ] iOS, seção 195: reagir, trocar e tirar (passos 2 a 4) e "Quem reagiu" (passo 5). Em parte: reagir passou; a troca de emoji não foi feita; tirar funcionou no segundo toque (o primeiro pareceu não fazer nada); "Quem reagiu" só pela folha de ações, não pelo toque longo no chip.
+- [ ] Chrome 390, seção 195: reagir, trocar e tirar (passos 2 a 4) e "Quem reagiu" (passo 5). Os passos 2 a 4 passaram; "Quem reagiu" (passo 5) não foi percorrido.
+- [ ] Chrome 1280, seção 195: reagir, trocar e tirar (passos 2 a 4) e "Quem reagiu" (passo 5). Não percorrido.
+- [ ] Android, seção 196: reagir, trocar e tirar (passos 2 a 4) e os toques rápidos (passo 5). Os passos 2 a 4 passaram; os toques rápidos (passo 5) não foram percorridos.
+- [ ] iOS, seção 196: reagir, trocar e tirar (passos 2 a 4) e os toques rápidos (passo 5). Não percorrido.
+- [ ] Chrome 390, seção 196: reagir, trocar e tirar (passos 2 a 4) e os toques rápidos (passo 5). Não percorrido.
+- [ ] Chrome 1280, seção 196: reagir, trocar e tirar (passos 2 a 4) e os toques rápidos (passo 5). Não percorrido.
+- [ ] Android, seção 197: deslizar para responder e a borda esquerda (passos 6 e 7) e "ir para o fim" (passo 12). Os passos 6 e 7 passaram; "ir para o fim" (passo 12) não foi percorrido.
+- [ ] iOS, seção 197: deslizar para responder e a borda esquerda (passos 6 e 7) e "ir para o fim" (passo 12). Os passos 6 e 7 passaram; "ir para o fim" (passo 12) não foi percorrido.
+- [ ] Chrome 390, seção 197: deslizar para responder e a borda esquerda (passos 6 e 7) e "ir para o fim" (passo 12). Em parte: deslizar não dá para fazer com o mouse; o passo 12 não foi percorrido.
+- [ ] Chrome 1280, seção 197: deslizar para responder e a borda esquerda (passos 6 e 7) e "ir para o fim" (passo 12). Não percorrido.

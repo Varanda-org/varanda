@@ -210,7 +210,7 @@ test('entries show kind and date only, and removal asks first', (t) => {
 test('Ajustes: the row, the title and the embedded screen', (t) => {
   const ajustes = withoutComments(read('screens', 'Ajustes.js'))
   t.ok(ajustes.includes("passkeys: 'Passkeys e recuperação'"))
-  t.ok(ajustes.includes("{account && unlocked ? <Item icon='shield' label='Passkeys e recuperação' onPress={() => onNavigate('passkeys')} /> : null}"))
+  t.ok(ajustes.includes("{account && unlocked ? <Item first icon='shield' label='Passkeys e recuperação' onPress={() => onNavigate('passkeys')} /> : null}"))
   t.ok(ajustes.includes("<Passkeys active={ready && screen === 'passkeys'} embedded />"))
   const signOut = ajustes.match(/SIGN_OUT_TEXT = '([^']+)'/)[1]
   const reset = ajustes.match(/RESET_TEXT = '([^']+)'/)[1]

@@ -5,18 +5,22 @@
 // peer text, which MentionText passes through displayText piece by piece so
 // its links stay tappable, as in a post.
 
-import { Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
+import { StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
 import { MentionText } from './MentionText'
 import { SunsetBand } from './SunsetBand'
-import { fonts, type } from './theme'
+import { PressScale } from './PressScale'
+import { SkeletonRow } from './States'
+import { fonts, layout, radius, space, type } from './theme'
 import { useStyles } from './ThemeProvider'
 
 const STACK_SCALE = 1.3
 
-export function ProfileHeader ({ bandHeight, topInset = 0, onBack, bandButtons, avatar, title, subtitle, bio, counts, note, actions, more, rows, tabs }) {
+export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBack, bandButtons, avatar, title, subtitle, bio, counts, note, actions, more, rows, tabs }) {
   const styles = useStyles(makeStyles)
+  const { width } = useWindowDimensions()
+  const avatarSize = width >= layout.column ? space.xxl * 2 + space.sm : layout.hit * 2
   const shownCounts = Array.isArray(counts) ? counts.filter((c) => c && c.value !== null && c.value !== undefined) : []
   const shownActions = Array.isArray(actions) ? actions.filter(Boolean) : []
   const a = avatar || {}
@@ -30,83 +34,103 @@ export function ProfileHeader ({ bandHeight, topInset = 0, onBack, bandButtons, 
             x=16 and is drawn later, so a bottom-left control would get no touches. */}
         {typeof onBack === 'function'
           ? (
-            <Pressable
+            <PressScale
               accessibilityRole='button'
               accessibilityLabel='voltar'
               hitSlop={8}
               onPress={onBack}
-              style={[styles.back, { top: topInset + 8 }]}
+              style={[styles.back, { top: topInset + space.sm }]}
             >
               <Icon name='voltar' size={22} color='#ffffff' />
-            </Pressable>
+            </PressScale>
             )
           : null}
         {bandButtons}
       </SunsetBand>
-      {/* The row rises into the band (marginTop -44) and is drawn after it,
-          so its empty space would take the band buttons' touches: only the
-          avatar takes touches. */}
-      <View style={styles.headRow} pointerEvents='box-none'>
-        <Avatar name={a.name} publicKey={a.publicKey} size={88} picture={a.picture} persist={a.persist} ring />
-      </View>
-      <View style={styles.data}>
-        {title ? <Text style={styles.name} accessibilityRole='header'>{title}</Text> : null}
-        {subtitle ? <Text style={styles.keyText}>{subtitle}</Text> : null}
-        {bio ? <MentionText text={bio} style={styles.bio} /> : null}
-        {shownCounts.length > 0
-          ? (
-            <View style={styles.countsRow}>
-              {shownCounts.map((c) => {
-                const body = <><Text style={styles.countsNum}>{c.value}</Text> {c.label}</>
-                return typeof c.onPress === 'function'
-                  ? (
-                    <Pressable
-                      key={c.label}
-                      accessibilityRole='link'
-                      accessibilityLabel={`${c.value} ${c.label}`}
-                      hitSlop={8}
-                      onPress={() => c.onPress()}
-                    >
-                      <Text style={styles.counts}>{body}</Text>
-                    </Pressable>
-                    )
-                  : <Text key={c.label} style={styles.counts}>{body}</Text>
-              })}
+      {loading
+        ? <SkeletonRow />
+        : (
+          <>
+            {/* The avatar rises into the band and is drawn after it,
+                so its empty space would take the band buttons' touches: only the
+                avatar takes touches. */}
+            <View style={[styles.headRow, { marginTop: -avatarSize / 2 }]} pointerEvents='box-none'>
+              <Avatar name={a.name} publicKey={a.publicKey} size={avatarSize} picture={a.picture} persist={a.persist} ring />
             </View>
-            )
-          : null}
-        {note || null}
-        {shownActions.length > 0 || more
-          ? (
-            <View style={stacked ? styles.actionsStacked : styles.actions}>
-              {shownActions.map((action, i) => {
-                const last = i === shownActions.length - 1
-                // Stacked: the more button shares the last pill's row.
-                if (stacked && last && more) {
-                  return (
-                    <View key={i} style={styles.lastStacked}>
-                      <View style={styles.actionStackedGrow}>{action}</View>
-                      {more}
-                    </View>
+            <View style={styles.data}>
+              {title ? <Text style={styles.name} accessibilityRole='header'>{title}</Text> : null}
+              {subtitle ? <Text style={styles.keyText}>{subtitle}</Text> : null}
+              {bio ? <MentionText text={bio} style={styles.bio} /> : null}
+              {shownCounts.length > 0
+                ? (
+                  <View style={styles.countsRow}>
+                    {shownCounts.map((c) => {
+                      const body = <><Text style={styles.countsNum}>{c.value}</Text> {c.label}</>
+                      return typeof c.onPress === 'function'
+                        ? (
+                          <PressScale
+                            key={c.label}
+                            style={styles.countLink}
+                            accessibilityRole='link'
+                            accessibilityLabel={`${c.value} ${c.label}`}
+                            hitSlop={8}
+                            onPress={() => c.onPress()}
+                          >
+                            <Text style={styles.counts}>{body}</Text>
+                          </PressScale>
+                          )
+                        : <Text key={c.label} style={styles.counts}>{body}</Text>
+                    })}
+                  </View>
                   )
-                }
-                return <View key={i} style={stacked ? styles.actionStacked : styles.action}>{action}</View>
-              })}
-              {more && !(stacked && shownActions.length > 0) ? <View style={stacked ? styles.moreStacked : null}>{more}</View> : null}
+                : null}
+              {note || null}
+              {shownActions.length > 0 || more
+                ? (
+                  <View style={stacked ? styles.actionsStacked : styles.actions}>
+                    {shownActions.map((action, i) => {
+                      const last = i === shownActions.length - 1
+                      // Stacked: the more button shares the last pill's row.
+                      if (stacked && last && more) {
+                        return (
+                          <View key={i} style={styles.lastStacked}>
+                            <View style={styles.actionStackedGrow}>{action}</View>
+                            {more}
+                          </View>
+                        )
+                      }
+                      return <View key={i} style={stacked ? styles.actionStacked : styles.action}>{action}</View>
+                    })}
+                    {more && !(stacked && shownActions.length > 0) ? <View style={stacked ? styles.moreStacked : null}>{more}</View> : null}
+                  </View>
+                  )
+                : null}
             </View>
-            )
-          : null}
-      </View>
+          </>
+          )}
       {rows || null}
       {tabs || null}
     </View>
   )
 }
 
+// A shared status treatment for outbox and profile indexing progress.
+export function ProfileStatus ({ icon, label }) {
+  const styles = useStyles(makeStyles)
+  return (
+    <View style={styles.status} accessible accessibilityLabel={label} accessibilityLiveRegion='polite'>
+      <Icon name={icon} size={space.lg} />
+      <Text style={styles.statusText}>{label}</Text>
+    </View>
+  )
+}
+
 const makeStyles = (colors) => StyleSheet.create({
+  status: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', gap: space.sm, paddingHorizontal: space.md, paddingVertical: space.sm, borderRadius: radius.sm, backgroundColor: colors.warm, maxWidth: '100%' },
+  statusText: { ...type.caption, color: colors.ink, flexShrink: 1 },
   back: {
     position: 'absolute',
-    left: 16,
+    left: space.lg,
     width: 34,
     height: 34,
     borderRadius: 17,
@@ -115,27 +139,30 @@ const makeStyles = (colors) => StyleSheet.create({
     justifyContent: 'center'
   },
   headRow: {
-    marginTop: -44,
-    paddingHorizontal: 16,
+    width: '100%',
+    maxWidth: layout.column,
+    alignSelf: 'center',
+    paddingHorizontal: space.lg,
     flexDirection: 'row',
     alignItems: 'flex-end',
     justifyContent: 'space-between'
   },
-  data: { paddingTop: 10, paddingHorizontal: 16, paddingBottom: 12, gap: 2 },
+  data: { width: '100%', maxWidth: layout.column, alignSelf: 'center', paddingTop: space.md, paddingHorizontal: space.lg, paddingBottom: space.md, gap: space.xs },
   name: { ...type.profileName, fontFamily: fonts.title, color: colors.ink },
   keyText: { ...type.postMeta, color: colors.soft },
-  bio: { ...type.postText, color: colors.ink, marginTop: 8 },
-  countsRow: { flexDirection: 'row', gap: 16, marginTop: 8 },
-  counts: { fontSize: 15, color: colors.soft },
+  bio: { ...type.postText, color: colors.ink, marginTop: space.sm },
+  countsRow: { flexDirection: 'row', flexWrap: 'wrap', columnGap: space.lg, rowGap: space.sm, marginTop: space.sm },
+  countLink: { maxWidth: '100%', flexShrink: 1, minHeight: layout.hit, justifyContent: 'center' },
+  counts: { ...type.postMeta, color: colors.soft, flexShrink: 1 },
   countsNum: { color: colors.ink, fontWeight: '700' },
   // Pill sets no width, so the column has to stretch it. At most two pills and
   // the overflow button share one row at normal sizes; past STACK_SCALE they
   // stack full width and the overflow button shares the last pill's row.
-  actions: { flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', gap: 8, marginTop: 12 },
+  actions: { flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', gap: space.sm, marginTop: space.md },
   action: { flexGrow: 1, flexBasis: 0, alignItems: 'stretch' },
-  actionsStacked: { flexDirection: 'column', alignItems: 'stretch', gap: 8, marginTop: 12 },
+  actionsStacked: { flexDirection: 'column', alignItems: 'stretch', gap: space.sm, marginTop: space.md },
   actionStacked: { alignItems: 'stretch' },
-  lastStacked: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  lastStacked: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
   actionStackedGrow: { flexGrow: 1, flexBasis: 0, alignItems: 'stretch' },
   moreStacked: { alignSelf: 'flex-end' }
 })

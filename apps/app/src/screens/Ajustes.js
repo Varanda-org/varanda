@@ -43,7 +43,7 @@
 // them and survives a restart on every platform.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Platform, Pressable, StyleSheet, Text, View } from 'react-native'
+import { AccessibilityInfo, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
 import { useNode } from '../node'
 import { invitePolicy } from '../account'
 import { useNames } from '../names'
@@ -58,10 +58,10 @@ import { HelpNote } from '../ui/Help'
 import { Icon } from '../ui/Icon'
 import { Sheet, TEXT_CAP } from '../ui/Sheet'
 import { useEscapeLayer } from '../ui/escapeLayer'
-import { type } from '../ui/theme'
+import { space, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { MODES, MODE_LABELS } from '../appearance'
-import { Btn, ErrorText, Notice, Page, Row, Soft, useAction } from '../ui'
+import { Btn, ErrorText, Notice, Page, Row, SectionHeader, Soft, useAction } from '../ui'
 import { BLOCK_TEXTS } from '../memberBlocks'
 import { pagesOn } from '../pageGate'
 import { PREVIEW_PREF_LABEL, previewsEnabled, setPreviewsEnabled } from '../previewPref'
@@ -205,6 +205,11 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const pushError = pushStore.error
   const [server, setServer] = useState({ status: 'loading', commit: null })
   const [versionNote, setVersionNote] = useState('')
+  useEffect(() => {
+    // The native announcement API is absent on web, which uses the footer live region.
+    if (!versionNote || Platform.OS === 'web') return
+    try { AccessibilityInfo.announceForAccessibility(versionNote) } catch {}
+  }, [versionNote])
   const noteTimer = useRef(null)
   // Bumped on every tap and when the sheet closes: only the latest tap, in the
   // still-open sheet, may show its copy result.
@@ -399,6 +404,9 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const pushRow = pushUi !== null && push.support === 'ok' && push.key !== null
   // A state that could not be confirmed is never labelled "Desligados".
   const pushTrailing = pushUi === null ? null : (pushUi.on ? 'Ligados' : (pushUi.note === PUSH_UNKNOWN ? null : 'Desligados'))
+  const pushNote = pushRow && pushUi.note && pushUi.note !== pushError
+    ? pushUi.note
+    : pushUi !== null && push.support === 'unsupported' ? PUSH_UNSUPPORTED : ''
   const inviting = account && policy !== null && policy.required === true
   const lines = versionLines({ app: BUILD, server })
 
@@ -413,19 +421,26 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
         <View style={shown('lista')}>
           <Page>
             <Notice>{saved}</Notice>
+            <SectionHeader>Perfil e conta</SectionHeader>
             <View style={styles.group}>
               <Item first icon='user' label='Editar perfil' onPress={() => { setSaved(''); onNavigate('perfil') }} />
               {account ? <Item icon='at-sign' label='Conta e @nome' onPress={() => onNavigate('conta')} /> : null}
-              {account && unlocked ? <Item icon='shield' label='Passkeys e recuperação' onPress={() => onNavigate('passkeys')} /> : null}
-              {showChangePhone ? <Item icon='phone' label='Trocar o celular' onPress={() => { setSaved(''); onNavigate('telefone') }} /> : null}
-              {account ? <Item icon='shield' label='Recorrer de um bloqueio' onPress={() => onNavigate('recurso')} /> : null}
-              {hosted ? <Item icon='bloquear' label={BLOCK_TEXTS.listTitle} onPress={() => onNavigate('bloqueados')} /> : null}
               {inviting ? <Item icon='link' label='Convidar pessoas' onPress={() => onNavigate('convites')} /> : null}
               {pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && typeof onOpenPaginas === 'function'
                 ? <Item icon='gente' label='Páginas' onPress={openPaginas} />
                 : null}
-              <Item icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
-              <Item icon='sun' label='Aparência' trailingText={MODE_LABELS[mode]} onPress={() => onNavigate('aparencia')} />
+            </View>
+            <SectionHeader>Privacidade e segurança</SectionHeader>
+            <View style={styles.group}>
+              {account && unlocked ? <Item first icon='shield' label='Passkeys e recuperação' onPress={() => onNavigate('passkeys')} /> : null}
+              {showChangePhone ? <Item first={!(account && unlocked)} icon='phone' label='Trocar o celular' onPress={() => { setSaved(''); onNavigate('telefone') }} /> : null}
+              {account ? <Item first={!(account && unlocked) && !showChangePhone} icon='shield' label='Recorrer de um bloqueio' onPress={() => onNavigate('recurso')} /> : null}
+              {hosted ? <Item first={!account && !showChangePhone} icon='bloquear' label={BLOCK_TEXTS.listTitle} onPress={() => onNavigate('bloqueados')} /> : null}
+              <Item first={!account && !showChangePhone && !hosted} icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
+            </View>
+            <SectionHeader>Aparência e avisos</SectionHeader>
+            <View style={styles.group}>
+              <Item first icon='sun' label='Aparência' trailingText={MODE_LABELS[mode]} onPress={() => onNavigate('aparencia')} />
               {pushRow
                 ? (
                   <Item
@@ -443,16 +458,31 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 ? <Item icon='download' label='Guardar dados neste aparelho' trailing={null} pending={persistPending} onPress={doPersist} />
                 : null}
               {hasPasskey && Platform.OS === 'web' ? <Item icon='smartphone' label='Instalar o app' onPress={() => onNavigate('instalar')} /> : null}
-              {/* Last, so the note right under the group describes this row. */}
+              {/* Last, so the note directly below describes this row. */}
               <Item icon='link' label={PREVIEW_PREF_LABEL} toggle checked={previews} trailingText={previews ? 'Ligada' : 'Desligada'} onPress={togglePreviews} />
+              <View style={styles.notes}>
+                <SectionHeader>Prévia de links</SectionHeader>
+                <Soft>{PREVIEW_PREF_NOTE}</Soft>
+                {pushNote || (pushRow && pushError)
+                  ? (
+                    <>
+                      <SectionHeader>Avisos neste aparelho</SectionHeader>
+                      {pushNote ? <Soft>{pushNote}</Soft> : null}
+                      {pushRow ? <ErrorText>{pushError}</ErrorText> : null}
+                    </>
+                    )
+                  : null}
+                {persisted === null
+                  ? null
+                  : (
+                    <>
+                      <SectionHeader>Dados neste aparelho</SectionHeader>
+                      <Soft>{persisted ? 'Pronto: seus dados ficam guardados neste aparelho.' : 'O navegador não garantiu guardar seus dados: ele pode apagá-los se faltar espaço.'}</Soft>
+                    </>
+                    )}
+              </View>
             </View>
-            <Soft>{PREVIEW_PREF_NOTE}</Soft>
-            {pushRow && pushUi.note && pushUi.note !== pushError ? <Soft>{pushUi.note}</Soft> : null}
-            {pushRow ? <ErrorText>{pushError}</ErrorText> : null}
-            {pushUi !== null && push.support === 'unsupported' ? <Soft>{PUSH_UNSUPPORTED}</Soft> : null}
-            {persisted === null
-              ? null
-              : <Soft>{persisted ? 'Pronto: seus dados ficam guardados neste aparelho.' : 'O navegador não garantiu guardar seus dados: ele pode apagá-los se faltar espaço.'}</Soft>}
+
             {unlocked
               ? (
                 <>
@@ -476,7 +506,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 )
               : null}
 
-            <View style={styles.group}>
+            <View style={[styles.group, styles.advanced]}>
               <Item
                 first
                 icon='sliders'
@@ -510,17 +540,21 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 </View>
                 )
               : null}
-            <Pressable
-              style={styles.version}
-              accessibilityRole='button'
-              accessibilityLabel={[lines.appLine, lines.serverLine, versionNote].filter(Boolean).join('. ')}
-              accessibilityHint='copia os detalhes da versão'
-              onPress={copyVersion}
-            >
-              <Text style={styles.versionText}>{lines.appLine}</Text>
-              {lines.serverLine !== null ? <Text style={styles.versionText}>{lines.serverLine}</Text> : null}
-              {versionNote ? <Text style={styles.versionText}>{versionNote}</Text> : null}
-            </Pressable>
+
+            <View style={styles.version} aria-live={Platform.OS === 'web' ? 'polite' : undefined} aria-atomic={false}>
+              {[lines.appLine, lines.serverLine, versionNote].filter(Boolean).map((line, index) => (
+                <Pressable
+                  key={index}
+                  style={styles.versionItem}
+                  accessibilityRole='button'
+                  accessibilityLabel={line}
+                  accessibilityHint='copia os detalhes da versão'
+                  onPress={copyVersion}
+                >
+                  <Text style={styles.versionText}>{line}</Text>
+                </Pressable>
+              ))}
+            </View>
           </Page>
         </View>
         <View style={shown('perfil')}>
@@ -699,11 +733,14 @@ const makeStyles = (colors) => StyleSheet.create({
     overflow: 'hidden',
     marginBottom: 12
   },
+  notes: { paddingHorizontal: space.lg, paddingBottom: space.md },
+  advanced: { marginTop: space.lg },
   confirm: { gap: 8, marginBottom: 12 },
   row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 14, paddingHorizontal: 16 },
   rowDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
   label: { flex: 1, fontSize: 16, color: colors.ink },
   trailing: { fontSize: 15, color: colors.soft },
   version: { alignItems: 'center', justifyContent: 'center', minHeight: 48, paddingVertical: 12, gap: 2 },
+  versionItem: { minHeight: 44, justifyContent: 'center', alignSelf: 'stretch' },
   versionText: { fontSize: 12, lineHeight: 16, color: colors.soft, textAlign: 'center' }
 })

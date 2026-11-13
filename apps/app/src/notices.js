@@ -6,7 +6,6 @@
 
 export const EMPTY_TITLE = 'Ninguém novo por aqui'
 export const EMPTY_TEXT = 'Quando alguém começar a seguir você, responder, citar, mencionar você, curtir ou republicar uma publicação sua, aparece aqui.'
-export const NOTICES_WEB_ONLY_MESSAGE = 'Nesta versão, os Avisos só funcionam na versão web no site da associação.'
 export const NOTICES_OFFLINE_MESSAGE = 'Confira sua internet.'
 export const NOTICES_UNSUPPORTED_MESSAGE = 'Os Avisos ainda não estão disponíveis nesta associação.'
 // activity false: this seeder still speaks the follows-only notices channel.

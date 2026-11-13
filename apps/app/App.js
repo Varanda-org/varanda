@@ -136,7 +136,7 @@ import { StackLayer, stackBusy, useStackMotion } from './src/ui/StackLayer'
 import { stackEntries } from './src/stackEntries'
 import { HelpButton, closeHelp, useHelpOpen } from './src/ui/Help'
 import { HELP } from './src/help'
-import { layout, space, type } from './src/ui/theme'
+import { LARGE_TEXT, layout, space, type } from './src/ui/theme'
 import { paletteFor, statusBarStyle } from './src/appearance.js'
 import { applyBandMeta } from './src/appearanceStore'
 import Avisos from './src/screens/Avisos'
@@ -328,7 +328,7 @@ function Member () {
   const node = useNode()
   const names = useNames()
   const insets = useSafeAreaInsets()
-  const { width } = useWindowDimensions()
+  const { width, fontScale } = useWindowDimensions()
   const install = useInstall()
   const push = usePush()
   const bootAt = useRef(Date.now()).current
@@ -1712,7 +1712,7 @@ function Member () {
     if (!t || !t.text) return setToast(null)
     const withAction = typeof t.onAction === 'function' && t.actionLabel
     setToast(withAction ? t : { text: t.text })
-    toastTimer.current = setTimeout(() => setToast(null), withAction ? TOAST_ACTION_MS : TOAST_MS)
+    toastTimer.current = setTimeout(() => setToast(null), withAction ? TOAST_ACTION_MS * (fontScale >= LARGE_TEXT ? 2 : 1) : TOAST_MS)
   }
 
   // The outbox (browser node) is sent only while a publish could go out
@@ -3588,7 +3588,6 @@ function Member () {
                     onPress={() => { clearTimeout(toastTimer.current); setToast(null); toast.onAction() }}
                     accessibilityRole='button'
                     accessibilityLabel={toast.actionLabel}
-                    hitSlop={8}
                     style={styles.toastAction}
                   >
                     <Text style={styles.toastActionText}>{toast.actionLabel}</Text>
@@ -3736,6 +3735,6 @@ const makeStyles = (colors) => StyleSheet.create({
   },
   toastLabel: { flexShrink: 1 },
   toastText: { ...type.counter, color: colors.toastInk },
-  toastAction: { marginLeft: 8 },
+  toastAction: { marginLeft: 8, minHeight: 44, minWidth: 44, justifyContent: 'center', alignItems: 'center' },
   toastActionText: { ...type.counter, color: colors.toastInk, fontWeight: '800' }
 })

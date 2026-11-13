@@ -59,7 +59,7 @@ import { PostRow } from '../ui/PostRow'
 import { KeptOnlyContext } from '../ui/MediaView'
 import { TopBar } from '../ui/TopBar'
 import { RefreshableList } from '../ui/RefreshableList'
-import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
+import { EmptyState, ErrorState, ListFooter, SkeletonRow } from '../ui/States'
 import { noteLocalWrite } from '../localWrites'
 import { FEED_FIRST_ROWS, feedDetailsReady } from '../splashGate'
 import { layout, type } from '../ui/theme'
@@ -1678,8 +1678,8 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
 
   rowsRef.current = items
   let empty
-  if (error) empty = <ErrorState message={error} onRetry={load} pending={loading} />
-  else if (loadedAt === null) empty = <Skeleton />
+  if (error) empty = null
+  else if (loadedAt === null) empty = <View>{[0, 1, 2].map(row => <SkeletonRow key={row} />)}</View>
   else {
     empty = (
       <EmptyState
@@ -1688,6 +1688,8 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
         body='Siga pessoas como página para ver as publicações delas aqui.'
         actionLabel='Seguir alguém'
         onAction={onFollowSomeone}
+        secondaryLabel='Atualizar'
+        onSecondary={load}
       />
     )
   }
@@ -1705,7 +1707,7 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
         ListHeaderComponent={(
           <View style={styles.footer}>
             <Text style={styles.pageTitle} accessibilityRole='header'>{'A Rua de ' + actingLabel()}</Text>
-            {items.length > 0 && error ? <ErrorState message={error} onRetry={load} pending={loading} /> : null}
+            {error ? <ErrorState message={error} onRetry={load} pending={loading} /> : null}
             {incomplete ? <Soft>incompleto: algumas publicações podem não ter chegado.</Soft> : null}
             <CountsNote social={social} />
           </View>
@@ -2292,8 +2294,8 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   )
 
   let empty
-  if (loadError) empty = <ErrorState message={loadError} onRetry={loadNewest} pending={loading || refreshing} />
-  else if (loadedAt === null) empty = <Skeleton />
+  if (loadError) empty = null
+  else if (loadedAt === null) empty = <View>{[0, 1, 2].map(row => <SkeletonRow key={row} />)}</View>
   else if (followCount === 0) {
     empty = (
       <EmptyState
@@ -2302,6 +2304,8 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
         body='Siga pessoas para ver as publicações delas aqui.'
         actionLabel='Seguir alguém'
         onAction={onFollowSomeone}
+        secondaryLabel='Atualizar'
+        onSecondary={loadNewest}
       />
     )
   } else {
@@ -2310,6 +2314,10 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
         icon='gente'
         title='Ainda não chegou nada'
         body={stillSyncing ? FEED_SYNCING_END : 'Quando as pessoas que você segue publicarem, aparece aqui.'}
+        actionLabel='Atualizar'
+        onAction={loadNewest}
+        secondaryLabel='Seguir alguém'
+        onSecondary={onFollowSomeone}
       />
     )
   }
@@ -2410,7 +2418,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
               onOpen={typeof onOpenMomentos === 'function' ? onOpenMomentos : () => {}}
               onCreate={onCreateMoment}
             />
-            {items.length > 0 && loadError ? <ErrorState message={loadError} onRetry={loadNewest} pending={refreshing} /> : null}
+            {loadError ? <ErrorState message={loadError} onRetry={loadNewest} pending={loading || refreshing} /> : null}
             <CountsNote social={social} />
           </View>
         )}
