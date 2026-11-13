@@ -8521,3 +8521,48 @@ Os casos no app real continuam em aberto. Usar uma instalação de teste local, 
 - [ ] Web: começar o gesto de puxar para atualizar sobre o vídeo e registrar o que acontece.
 - [ ] Safari ou PWA do iOS com Modo de Baixa Energia: aparece "Toque no play para assistir" e o vídeo toca depois de um toque.
 - [ ] Um início sem som mostra "Ativar som"; tocar nele liga o som.
+
+## 189. Base visual: movimento, esqueletos e barra (PR feat/ui-foundations)
+
+Primeiro PR da revisão visual do app. Muda duas coisas que a pessoa vê e acrescenta peças que nenhuma tela usa ainda.
+
+- Barra de abas (`apps/app/src/ui/TabBar.js`): uma pílula suave (`accentSoft`, 48 por 32 pt, cantos `radius.pill`) fica atrás do ícone da aba ativa e aparece em `motion.fast` (150 ms). Com Reduzir movimento ligado, aparece de uma vez. A aba Diário com a própria pessoa (foto, iniciais ou o ícone de pessoa) não desenha pílula: o anel verde já a marca. A barra continua só com ícones e com 49 pt (83 pt com a área segura). Os leitores de tela leem o nome de cada aba ("<nome>, novidades" quando há ponto de novidade).
+- Botão de publicar (`apps/app/src/ui/Fab.js`, `apps/app/src/ui/PressScale.js`, `apps/app/src/pressMotion.js`): enquanto está apertado, encolhe a 0,97 e escurece a 0,85 de opacidade. Com Reduzir movimento, só escurece.
+- Folha de ações (`apps/app/src/ui/ActionsSheet.js`): ganha um espaço opcional `header`. Nenhuma tela o usa neste PR, então toda folha existente fica igual: a linha escolhida só roda depois que a folha fechou.
+- Peças sem uso em tela: os estilos de texto novos (`caption`, `more`, `price`, `tileTitle`, `code` em `theme.js`), `SkeletonRow`, `SkeletonTile` e `SkeletonBubble` e a segunda ação de `EmptyState` (`States.js`), apelidos de ícones de categoria (`Icon.js`). Nenhuma tela mudou por causa delas. Os tokens de movimento novos já estão em uso: `motion.fast` no fade da pílula e `motion.press` no toque do botão de publicar.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `cd apps/app && node ../../scripts/run-tests.js test/pressMotion.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/uiKit.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/shellChrome.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/appearance.test.js`
+- `cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js`
+
+Os testes cobrem a escala e a opacidade do toque (com e sem Reduzir movimento), a pílula da aba ativa e a ausência dela no Diário com a própria pessoa, o `header` opcional da folha, os esqueletos novos e a regra de que cores só vêm de tokens e de que a paleta não ganha chaves. Não cobrem como o movimento parece na tela: isso é o que a verificação manual confere.
+
+### Verificação manual
+
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) mostra as telas hospedadas com dados de exemplo e dispensa conta. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e), Chrome em 390 e em 1280 px. Em cada alvo: claro e escuro, texto grande, leitor de tela e Reduzir movimento. Capturas ficam fora do git.
+
+1. Abra a Vitrine em A Rua, no tema claro. Esperado: a aba A Rua tem a pílula suave atrás do ícone, centrada e sem cortar; as demais abas não têm pílula; a barra segue só com ícones e 49 pt.
+2. Toque, uma a uma, em Espiadinha, Conversas, Feira e Busca. Esperado: a pílula some da aba anterior e aparece na nova com um fade curto (150 ms); nunca há duas pílulas.
+3. Toque em Diário (foto ou iniciais da própria pessoa). Esperado: o anel verde marca a aba e não há pílula. Em seguida, volte a A Rua: a pílula reaparece.
+4. Repita os passos 1 a 3 no tema escuro. Esperado: a pílula continua visível (contraste do `accentSoft` do tema escuro) e o ícone ativo continua legível por cima dela.
+5. Ligue Reduzir movimento (Android: remover animações; iOS: Reduzir Movimento; web: `prefers-reduced-motion: reduce`) e repita o passo 2. Esperado: a pílula aparece de uma vez, sem fade.
+6. Ligue o texto grande (maior tamanho de fonte do sistema) e repita o passo 2. Esperado: a barra mantém 49 pt, os ícones não mudam de tamanho e nada é cortado.
+7. Com o leitor de tela (TalkBack, VoiceOver, ou a árvore de acessibilidade na web), percorra a barra. Esperado: cada aba é lida pelo nome e como selecionada ou não; "<nome>, novidades" quando há ponto de novidade; a pílula não é lida.
+8. Aperte e segure o botão "publicar" (A Rua), sem soltar. Esperado: o botão encolhe um pouco e escurece. Ao soltar, volta ao normal e a folha de Publicar abre como antes. Um toque rápido ainda abre a folha.
+9. Com Reduzir movimento ligado, repita o passo 8. Esperado: o botão só escurece, sem encolher.
+10. Abra o "..." de uma publicação. Esperado: a folha de ações tem o mesmo desenho de antes (sem espaço de cabeçalho vazio), as mesmas linhas, e cada linha só roda depois que a folha fechou.
+11. Numa conversa, segure uma mensagem. Esperado: a folha abre igual a antes e a ação escolhida roda depois do fechamento.
+12. Rode os passos 1 a 11 em cada alvo, no tema escuro e com texto grande. Esperado: nenhuma tela existente mudou além da barra e do botão de publicar.
+
+Situação, em 2026-11-12 (Vitrine, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1`). Uma primeira passada achou a pílula deslocada para a direita do ícone no Android e no iOS (`TabBar.js`, `left: '50%'` com margem negativa). Foi corrigida com deslocamentos numéricos a partir do ícone de 27 pt. Na segunda passada a pílula ficou centrada nos dois, e uma terceira olhada nada mudou. Nenhum alvo foi percorrido por inteiro, então nenhuma caixa está marcada: cada linha diz o que rodou e o que falta. As capturas ficam fora do git e o caminho de cada uma vai no corpo do PR.
+
+- [ ] Android, AVD `varanda-api36`, build de debug (parcial): pílula centrada atrás do ícone em A Rua, Conversas e Busca, claro e escuro; sem pílula no Diário (o anel marca a aba); texto grande 1,6 sem corte e a barra com 49 pt; com as escalas de animação do sistema em 0, a pílula aparece já no lugar. Nomes lidos de `uiautomator dump` (não foi ligado o TalkBack): "A Rua", "Espiadinha", "Conversas, novidades", "Feira", "Busca", "Diário", com `selected` só na aba ativa. Botão de publicar apertado por 3 s: escurece e encolhe (captura). A folha do "..." de uma publicação e a folha da mensagem (Responder, Copiar, Encaminhar, Denunciar) abrem com o desenho de antes, e "Responder" só mostra a citação depois que a folha fechou. Não verificado: o fade de 150 ms em si (as capturas só mostram o estado final) e o TalkBack de verdade.
+- [ ] iOS, simulador iPhone 16e (parcial): pílula centrada em A Rua no claro e no escuro; Diário sem pílula e com o anel; texto grande (`accessibility-large`) com a barra intacta; folha do "..." igual a antes (escuro). Não verificado: VoiceOver, Reduzir Movimento, o botão de publicar apertado (a captura durante o toque não foi possível) e a folha de mensagem.
+- [ ] Chrome, 390 px (parcial): pílula centrada em A Rua e Conversas, sem pílula no Diário, claro e escuro; árvore de acessibilidade com os nomes das abas ("Conversas, novidades"); botão de publicar apertado fica com opacidade 0,85 e escala 0,97; folha do "..." igual a antes. Não verificado: texto grande, Reduzir movimento e a folha de mensagem. A pílula deste alvo foi vista antes da correção do `TabBar.js` (a web já estava centrada) e não foi revista depois.
+- [ ] Chrome, 1280 px (parcial): só A Rua no claro, coluna central com a barra e a pílula como no 390 px (antes da correção). Passos de texto grande, Reduzir movimento e folhas não percorridos.
