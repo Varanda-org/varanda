@@ -35,7 +35,7 @@ jobs:
   # Repeats the CI checks on purpose: the deploy runs only on a commit that
   # passed them in this same workflow, even if ci.yml was cancelled.
   #
-  # The checks run as six parallel jobs (the same legs as ci.yml on Node 24).
+  # The checks run as eight parallel jobs (the same legs as ci.yml on Node 24).
   # There is no matrix on purpose: a matrix leg cancelled before a runner
   # picked it up has been reported to leave the matrix result at success, and
   # a leg that never ran must never authorize a deploy. Each leg is its own
@@ -114,15 +114,42 @@ jobs:
       VARANDA_TEST_CONCURRENCY: '1'
     steps: *test-steps
 
-  web-member:
-    name: web-member
+  web-member-1:
+    name: web-member 1/3
     if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_DEPLOY == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       NODE: '24'
-      SUITE: web-member
+      SUITE: web-member-1
       WORKSPACE: packages/web-member
+      VARANDA_TEST_SHARD: 1/3
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  web-member-2:
+    name: web-member 2/3
+    if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_DEPLOY == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '24'
+      SUITE: web-member-2
+      WORKSPACE: packages/web-member
+      VARANDA_TEST_SHARD: 2/3
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  web-member-3:
+    name: web-member 3/3
+    if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_DEPLOY == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '24'
+      SUITE: web-member-3
+      WORKSPACE: packages/web-member
+      VARANDA_TEST_SHARD: 3/3
       VARANDA_TEST_CONCURRENCY: '1'
     steps: *test-steps
 
@@ -144,7 +171,7 @@ jobs:
   # count check stops a vacuous pass if needs were ever cut down. The guard
   # still applies, so a paused or foreign run skips the gate and the deploy.
   check:
-    needs: [core-1, core-2, cli-1, cli-2, web-member, others]
+    needs: [core-1, core-2, cli-1, cli-2, web-member-1, web-member-2, web-member-3, others]
     if: always() && github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_DEPLOY == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -154,7 +181,7 @@ jobs:
         run: |
           echo "$RESULTS"
           set -- $RESULTS
-          [ "$#" -eq 6 ] || exit 1
+          [ "$#" -eq 8 ] || exit 1
           for r in "$@"; do [ "$r" = success ] || exit 1; done
 
   # No checkout and no third-party action: only native ssh with the pinned key.

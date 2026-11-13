@@ -36,8 +36,8 @@ function block (startRe, endRe) {
 
 const check = block(/^ {2}check:/, /^ {2}\S/)
 const deploy = block(/^ {2}deploy:/, /^ {2}\S/)
-// The six test legs, each its own job (no matrix), gated by check.
-const WORKERS = ['core-1', 'core-2', 'cli-1', 'cli-2', 'web-member', 'others']
+// The eight test legs, each its own job (no matrix), gated by check.
+const WORKERS = ['core-1', 'core-2', 'cli-1', 'cli-2', 'web-member-1', 'web-member-2', 'web-member-3', 'others']
 const workers = Object.fromEntries(WORKERS.map((id) => [id, block(new RegExp('^ {2}' + id + ':\\s*$'), /^ {2}\S/)]))
 const GUARD = "github\\.repository == 'Varanda-org\\/varanda' && github\\.ref == 'refs\\/heads\\/main' && vars\\.VARANDA_DEPLOY == 'true'"
 
@@ -64,7 +64,7 @@ test('deploy.yml: permissions, triggers and job shape', (t) => {
   t.ok(check && deploy, 'check and deploy found')
   for (const id of WORKERS) t.ok(workers[id], id + ' job found')
   const jobs = block(/^jobs:/, /^\S/).split('\n').filter((l) => /^ {2}[A-Za-z0-9_-]+:/.test(l)).map((l) => l.trim().replace(/:.*$/, ''))
-  t.alike(jobs.sort(), [...WORKERS, 'check', 'deploy'].sort(), 'jobs are the six legs, check and deploy')
+  t.alike(jobs.sort(), [...WORKERS, 'check', 'deploy'].sort(), 'jobs are the eight legs, check and deploy')
   t.absent(/^\s+strategy:/m.test(code), 'no matrix strategy')
   t.absent(/<<:/.test(code), 'no YAML merge keys')
   t.absent(yml.includes(String.fromCharCode(0x2014)), 'no em dash')
@@ -108,9 +108,9 @@ test('deploy.yml: every job carries the repository, branch and variable guards',
   // The gate runs even when a leg failed, was cancelled or was skipped, and
   // fails closed: a skipped check would read as passing.
   t.ok(new RegExp('^\\s+if:\\s*always\\(\\) && ' + GUARD + '\\s*$', 'm').test(check), 'check gate runs always() under the guard')
-  t.ok(/^ {4}needs:\s*\[\s*core-1,\s*core-2,\s*cli-1,\s*cli-2,\s*web-member,\s*others\s*\]\s*$/m.test(check), 'check needs exactly the six legs')
+  t.ok(/^ {4}needs:\s*\[\s*core-1,\s*core-2,\s*cli-1,\s*cli-2,\s*web-member-1,\s*web-member-2,\s*web-member-3,\s*others\s*\]\s*$/m.test(check), 'check needs exactly the eight legs')
   t.ok(/^\s+RESULTS:\s*\$\{\{ join\(needs\.\*\.result, ' '\) \}\}\s*$/m.test(check), 'check reads every leg result')
-  t.ok(/^\s+\[ "\$#" -eq 6 \] \|\| exit 1\s*$/m.test(check), 'check requires exactly six results')
+  t.ok(/^\s+\[ "\$#" -eq 8 \] \|\| exit 1\s*$/m.test(check), 'check requires exactly eight results')
   t.ok(/^\s+for r in "\$@"; do \[ "\$r" = success \] \|\| exit 1; done\s*$/m.test(check), 'check requires every result to be success')
 })
 
