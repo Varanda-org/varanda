@@ -226,10 +226,12 @@ h1 {
 /* O lugar do símbolo: uma cadeira de praia no calçadão */
 .heroi__cadeira {
   position: relative;
-  /* the chair's feet sit 8% above the bottom of its box: lower it so they stand on the sand */
-  margin-bottom: -54px;
-  width: 100%;
-  max-width: 190px;
+  /* the varanda floor ends at the bottom of the art: cancel the scene padding plus 4px so it stands on the sand */
+  margin-bottom: -48px;
+  /* the araucária widens the art: it may reach 12px into each gutter so the varanda stays near its old 340px */
+  width: calc(100% + 24px);
+  max-width: 456px;
+  flex-shrink: 0;
   height: auto;
   z-index: 2;
   /* a warm rim of sunset light keeps the ink frame readable on the dusk colours */
@@ -262,6 +264,15 @@ h1 {
   box-shadow: 0 -1px 0 rgba(31, 42, 36, 0.25);
 }
 
+.pedras {
+  height: 96px;
+  background-image: url("assets/calcada-motivos.svg");
+  background-repeat: repeat-x;
+  background-size: 192px 96px;
+  animation: deslizar-pedras 9.6s linear infinite;
+}
+
+@keyframes deslizar-pedras { to { background-position-x: -192px; } }
 @keyframes deslizar { to { background-position-x: -320px; } }
 @keyframes deslizar-longe { to { background-position-x: -160px; } }
 
@@ -274,7 +285,8 @@ h1 {
   overflow: hidden;
   clip-path: inset(50%);
 }
-.pausar:checked ~ .calcadao .onda { animation-play-state: paused; }
+.pausar:checked ~ .calcadao .onda,
+.pausar:checked ~ .calcadao .pedras { animation-play-state: paused; }
 
 .pausar__rotulo {
   position: absolute;
@@ -317,7 +329,7 @@ h1 {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .onda { animation: none; }
+  .onda, .pedras { animation: none; }
   .botao { transition: none; }
 }
 
@@ -614,15 +626,18 @@ h2::after {
   .heroi__lead { font-size: 1.25rem; }
   .heroi__cena { padding: 0 0 56px; }
   .heroi__cena::before { width: 560px; height: 560px; margin-left: -280px; bottom: -4%; }
-  .heroi__cadeira { max-width: 220px; margin-bottom: -60px; }
+  /* reaches into the 32px grid gap and the 32px side padding, never past the hero edge */
+  .heroi__cadeira { width: calc(100% + 64px); max-width: 536px; margin-bottom: -60px; }
 
   .secao { padding: 104px 0; }
   .cartoes { gap: 22px; }
   .passos { grid-template-columns: repeat(4, 1fr); gap: 24px; }
   .onda--longe { height: 72px; background-size: 192px 72px; animation-name: deslizar-longe-largo; }
   .onda--perto { height: 150px; background-size: 400px 150px; animation-name: deslizar-largo; }
+  .pedras { height: 120px; background-size: 240px 120px; animation-name: deslizar-pedras-largo; }
   .pausar__rotulo { right: 32px; }
 }
 
+@keyframes deslizar-pedras-largo { to { background-position-x: -240px; } }
 @keyframes deslizar-largo { to { background-position-x: -400px; } }
 @keyframes deslizar-longe-largo { to { background-position-x: -192px; } }

@@ -10840,3 +10840,34 @@ node apps/app/scripts/pre-splash.js --check
 ```
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 236. Landing com a cadeira na varanda e a calçada (PR feat/landing-calcada-scene)
+
+Esta seção confere a landing de varanda.app (`apps/site`) com a imagem do topo nova e uma fileira de pedras na calçada. A imagem do topo agora é `assets/varanda-cadeira.svg`: a cadeira de praia, o símbolo da Varanda, numa varanda, em pé sobre a areia, com a araucária de Curitiba ao lado da varanda (estática; a landing não tem céu nem voadores). O texto alternativo é "O símbolo da Varanda, uma cadeira de praia, numa varanda.". O calçadão ganha uma fileira de pedras (`.pedras`, `assets/calcada-motivos.svg`, araucária e São Paulo alternadas) embaixo das duas camadas de onda. Ela desliza na velocidade da onda da frente (20 px/s), e o botão de pausa e o `prefers-reduced-motion` a param como param as ondas.
+
+A arte é gerada a partir do `splashScene.js` do app por `apps/site/scripts/render-calcada.js` (`--write` e `--check`), para a landing e o splash não se separarem.
+
+Nada disso envia pedido nem busca dado: é só a página. Não há mudança de protocolo, RPC nem Termos, e nenhuma dependência nova.
+
+Ordem: Chrome em 390 px, Chrome em 1280 px, depois Safari, sempre em claro.
+
+Rodada de 2026-11-14: Chrome 157 sem janela, e Safari no simulador iPhone 16e (iOS 26.2), a 390 pt. A conferência foi por capturas de tela e pelo estilo calculado das animações, não por vídeo.
+
+- [x] Em 390 px e em 1280 px, em claro, a página abre com a imagem nova e a fileira de pedras sob as ondas, sem corte nas bordas. Chrome 390 px: ok. Chrome 1280 px: ok. Safari: ok.
+- [x] O piso da varanda encontra a areia, sem vão nem sobreposição. Chrome 390 px: ok. Chrome 1280 px: ok. Safari: ok.
+- [ ] A fileira de pedras desliza sem emenda, sem salto na volta do ciclo e sem fio claro entre as pedras. Chrome 390 px: ok, a fileira andou cerca de 20 px/s entre 1 s e 4 s, sem emenda visível. Chrome 1280 px: sem emenda na captura, com a animação rodando em 9,6 s. Safari: sem emenda na captura. A volta do ciclo sem salto só se vê em vídeo: pendente nos três.
+- [ ] O botão de pausa para as ondas e as pedras juntas, e retoma as duas. Chrome 390 px: ok, as três animações pausam juntas e voltam juntas. Chrome 1280 px: ok, o mesmo. Safari: pendente.
+- [ ] Com reduzir movimento ligado, as ondas e as pedras ficam paradas. Chrome 390 px: ok, as três ficam sem animação. Chrome 1280 px: ok, as três ficam com duração 0 s, paradas. Safari: pendente.
+- [x] A imagem do topo ainda se lê no tamanho de celular: a cadeira, a varanda e a araucária se distinguem. Chrome 390 px: ok. Safari: ok.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a página num navegador. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/site/test/calcada.test.js
+node apps/site/test/site.test.js
+node apps/site/test/brand.test.js
+node apps/site/test/legal.test.js
+node apps/site/scripts/render-calcada.js --check
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
