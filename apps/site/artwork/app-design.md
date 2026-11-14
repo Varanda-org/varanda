@@ -23,38 +23,38 @@ A página agora mostra quatro capturas reais do app (veja [screens.md](screens.m
 | listras | `#2576b0` `#e8805a` `#f2b705` `#c23528` `#1d6b4f` | avatares |
 | fim de tarde | `#f7b267 → #e8805a → #8a4e7a → #2b2a4a` | faixa do perfil (gradiente a 170°, como o herói da página) |
 
-### Escuro quente
+### Escuro neutro
 
 Os valores estão em `apps/app/src/appearance.js` (fonte única; `light` e `dark` têm as mesmas chaves). Esta tabela copia os valores do escuro e diz para que cada um serve.
 
 | Nome | Hex | Uso |
 |---|---|---|
-| fundo | `#1c2622` | fundo das telas, barra do topo, barra de abas |
-| cartão | `#24302b` | folhas (Publicar) e cartões (Ajustes) |
-| tinta | `#f4f0e6` | texto, nomes, ícones ativos |
-| texto suave | `#b7c4bb` | @nome, tempo, bio, abas inativas, contador |
-| fio | `rgba(244,240,230,0.14)` | divisórias de 1 pt |
+| fundo | `#101010` | fundo das telas, barra do topo, barra de abas |
+| cartão | `#1c1c1c` | folhas (Publicar) e cartões (Ajustes) |
+| tinta | `#f5f5f5` | texto, nomes, ícones ativos |
+| texto suave | `#c8c8c8` | @nome, tempo, bio, abas inativas, contador |
+| fio | `rgba(245,245,245,0.14)` | divisórias de 1 pt |
 | verde | `#5dcaa0` | ação: aba ativa, nome em "respondendo a", cursor |
 | verde claro | `rgba(93,202,160,0.18)` | fundos verdes suaves (seleção de emoji, mensagens) |
 | texto sobre verde | `#10241c` | texto e ícone sobre o verde (botões cheios) |
-| morno | `#3a3328` | avisos de explicação (instalar, sem rede, notificações) |
-| contorno | `rgba(244,240,230,0.30)` | contorno das pílulas de contorno (Editar perfil, Compartilhar) e citações |
-| anel | `rgba(244,240,230,0.12)` | trilho em Publicar |
-| véu | `rgba(16,22,19,0.55)` | véu atrás de ícones brancos (faixa do pôr do sol, Diário); escuro nos dois modos |
-| fundo da barra de abas | `rgba(28,38,34,0.94)` | barra de abas no app nativo, translúcida (na web a barra é `#1c2622` opaca nos dois modos) |
+| morno | `#2a2824` | avisos de explicação (instalar, sem rede, notificações) |
+| contorno | `rgba(245,245,245,0.32)` | contorno das pílulas de contorno (Editar perfil, Compartilhar) e citações |
+| anel | `rgba(245,245,245,0.12)` | trilho em Publicar |
+| véu | `rgba(0,0,0,0.55)` | véu atrás de ícones brancos (faixa do pôr do sol, Diário); escuro nos dois modos |
+| fundo da barra de abas | `rgba(16,16,16,1)` | barra de abas no app nativo, opaca (na web a barra é `#101010` opaca nos dois modos) |
 | perigo | `#ff8f87` | erros e ações destrutivas (Denunciar, Publicar) |
 | aviso | `#e7c36a` | texto de aviso |
-| dica | `#9aaba2` | texto de dica em campos (placeholder) |
-| esqueleto | `rgba(244,240,230,0.10)` | blocos de carregamento |
+| dica | `#b0b0b0` | texto de dica em campos (placeholder) |
+| esqueleto | `rgba(245,245,245,0.10)` | blocos de carregamento |
 | pílula | `#5dcaa0` | fundo da pílula de estado (`pillBg`, Publicar) |
 | texto da pílula | `#10241c` | texto sobre a pílula (`pillInk`) |
-| campo desligado | `#17211d` | fundo de campo desligado; o texto é o texto suave |
-| balão | `#f4f0e6` | fundo do aviso rápido (creme sobre escuro, o inverso do claro) |
-| texto do balão | `#1c2622` | texto do aviso rápido (`toastInk`) |
+| campo desligado | `#2a2a2a` | fundo de campo desligado; o texto é o texto suave |
+| balão | `#f5f5f5` | fundo do aviso rápido (quase branco sobre escuro, o inverso do claro) |
+| texto do balão | `#101010` | texto do aviso rápido (`toastInk`) |
 
-**Regra.** O app segue o modo do aparelho (Sistema) até a pessoa escolher. A escolha manual fica em Ajustes › Aparência (Sistema, Claro, Escuro) e vale neste aparelho. O escuro é quente e verde, nunca preto. `dim` é sempre um véu escuro, nos dois modos. Listras, faixa do pôr do sol e a cadeira são iguais nos dois modos; no escuro, a cadeira fica sobre um disco creme (barra do topo, splash do app e pré-splash da web), porque o contorno de tinta da arte some sobre o fundo escuro. O splash nativo (iOS, Android e o splash do `app.json`) fica creme nos dois modos, e o splash do app no celular também fica creme: assim a abertura inteira fica creme, sem piscar entre os dois, e o escuro começa na primeira tela do app. Na web, o splash do app e o pré-splash seguem o modo escolhido.
+**Regra.** O app segue o modo do aparelho (Sistema) até a pessoa escolher. A escolha manual fica em Ajustes › Aparência (Sistema, Claro, Escuro) e vale neste aparelho. O escuro é quase neutro, nunca preto puro, e o verde fica para as ações. `dim` é sempre um véu escuro, nos dois modos. Listras, faixa do pôr do sol e a cadeira são iguais nos dois modos; no escuro, a cadeira fica sobre um disco creme (barra do topo, splash do app e pré-splash da web), porque o contorno de tinta da arte some sobre o fundo escuro. O splash nativo (iOS, Android e o splash do `app.json`) fica creme nos dois modos, e o splash do app no celular também fica creme: assim a abertura inteira fica creme, sem piscar entre os dois, e o escuro começa na primeira tela do app. Na web, o splash do app e o pré-splash seguem o modo escolhido depois que o app carrega (antes disso, o pré-splash segue o modo do sistema).
 
-**Contraste medido.** O teste `apps/app/test/appearance.test.js` exige 4,5:1 nos pares de texto dos dois modos. No escuro, os valores medidos são: tinta 13,7:1 no fundo e 12,0:1 no cartão; texto suave 8,6:1 e 7,6:1; verde 7,7:1 e 6,8:1; perigo 7,1:1 e 6,2:1; aviso 9,2:1 e 8,1:1; dica 6,5:1 e 5,7:1; texto sobre verde, texto da pílula e texto do balão entre 8:1 e 14:1; texto suave sobre o campo desligado 9,1:1.
+**Contraste medido.** O teste `apps/app/test/appearance.test.js` exige 4,5:1 nos pares de texto dos dois modos. No escuro, os valores medidos são: tinta 17,5:1 no fundo e 15,6:1 no cartão; texto suave 11,4:1 e 10,2:1; verde 9,4:1 e 8,5:1; perigo 8,6:1 e 7,7:1; aviso 11,2:1 e 10,1:1; dica 8,8:1 e 7,9:1; texto sobre verde e texto da pílula 8,1:1; texto do balão 17,5:1; texto suave sobre o campo desligado 8,6:1.
 
 ## Tipografia
 
@@ -95,7 +95,7 @@ Cantos arredondados, botões em pílula, entrelinha generosa, nomes em negrito.
 - **Tempo relativo**: "agora", "5 min", "1 h", "ontem", depois a data curta ("12 out").
 - **Cartão "Instale o Varanda"**: um cartão calmo embaixo da barra do topo (fundo de cartão, título com o ícone de celular, uma linha suave e dois botões: "Instalar" e "Agora não"; no Safari do iPhone, a instrução de Compartilhar e "Entendi"), mostrado uma vez depois do cadastro novo; "Agora não" grava a mesma dispensa de 30 dias da nota.
 - **Folha de ajuda**: o botão de informação da barra do topo, ou o pequeno botão de informação (18 pt, ícone `info`) ao fim de uma linha curta, abre uma folha de altura inteira com "Fechar" à esquerda e o título como cabeçalho, seguido de parágrafos curtos. Dentro de outra folha (Ajustes, Denunciar), abre por cima dela. O texto longo mora aqui e não na tela.
-- **Barra de abas** (83 pt com a área segura, 49 sem): só ícones, sem rótulo (os leitores de tela leem os nomes), no mesmo 49 pt, com uma pílula suave (`accentSoft`, 48 por 32 pt) atrás do ícone da aba ativa, que aparece em 150 ms e de uma vez com Reduzir movimento (o Diário com a própria pessoa, foto ou iniciais, não tem pílula, o anel já o marca): **A Rua** (uma estrada até o horizonte com a faixa tracejada no centro, a pessoa na varanda vendo a rua passar), **Espiadinha** (olho), **Conversas** (mensagem, só no nó hospedado), **Busca** (lupa) e **Diário** (a foto da própria pessoa ou as iniciais, com um anel verde quando selecionada); quatro abas sem Conversas. No app nativo segue o modo: ativa em verde, traço mais grosso; inativas em texto suave; fundo da barra a 94 % (o conteúdo passa por baixo). Na web é escura e opaca nos dois modos (fundo `#1c2622`, ativa `#5dcaa0`): no app instalado, a barra de navegação do sistema embaixo dela usa uma cor só, o `theme_color` do manifesto (`#1c2622`), e as duas ficam iguais. O app nativo desenha por trás da barra do sistema, então ali a barra de abas segue o modo. Avisos não está na barra: abre pelo sino no canto direito da barra do topo (e um sino branco no canto da faixa do Diário); quando há um aviso ainda não visto, o sino ganha um ponto verde de 8 pt no canto (sem texto, nunca um número).
+- **Barra de abas** (83 pt com a área segura, 49 sem): só ícones, sem rótulo (os leitores de tela leem os nomes), no mesmo 49 pt, com uma pílula suave (`accentSoft`, 48 por 32 pt) atrás do ícone da aba ativa, que aparece em 150 ms e de uma vez com Reduzir movimento (o Diário com a própria pessoa, foto ou iniciais, não tem pílula, o anel já o marca): **A Rua** (uma estrada até o horizonte com a faixa tracejada no centro, a pessoa na varanda vendo a rua passar), **Espiadinha** (olho), **Conversas** (mensagem, só no nó hospedado), **Busca** (lupa) e **Diário** (a foto da própria pessoa ou as iniciais, com um anel verde quando selecionada); quatro abas sem Conversas. No app nativo segue o modo: ativa em verde, traço mais grosso; inativas em texto suave; fundo da barra opaco. Na web é escura e opaca nos dois modos (fundo `#101010`, ativa `#5dcaa0`): no app instalado, a barra de navegação do sistema embaixo dela usa uma cor só, o `theme_color` do manifesto (`#101010`), e as duas ficam iguais. O app nativo desenha por trás da barra do sistema, então ali a barra de abas segue o modo. Avisos não está na barra: abre pelo sino no canto direito da barra do topo (e um sino branco no canto da faixa do Diário); quando há um aviso ainda não visto, o sino ganha um ponto verde de 8 pt no canto (sem texto, nunca um número).
 - **Avisos**: linhas como as de Seguindo, com avatar, "<nome> começou a seguir você" ("Alguém" sem nome), o `@nome` e o tempo relativo em texto suave, sem pílula: a linha é um link que abre o perfil da pessoa, onde está o "Seguir"; a linha sai da lista na próxima leitura depois de seguir. Sem contagem nem lista de seguidores na própria tela (os números e a lista de seguidores ficam nos perfis). Estados com ícone de sino: "Ninguém novo por aqui", "Sem conexão", "Sem avisos por aqui" e, num nó que não é hospedado (nativo sem instalação e `varanda-serve`), "Avisos indisponíveis" com o corpo "Disponível no site da associação ou no app ligado à instalação." e "Saiba mais" que abre a ajuda de Avisos. Esqueleto de linhas na carga, linhas com toque suave (`PressScale`) e nenhum título de data. É o único aviso do app: aparece só dentro dele.
 - **Espiadinha**: linhas iguais às da linha do tempo (respostas, citações e republicações incluídas), com fotos e a barra de ações com os números (responder, republicar, citar, curtir), mais seguir (ícone `user-plus`, pessoa com sinal de mais) e denunciar. Uma publicação por diário não seguido (o próprio fica de fora: já está em A Rua) por rodada, até três rodadas, sem títulos entre elas. No topo, uma linha curta ("Até três publicações de cada diário que você não segue.") que termina com o botão de informação, que abre a regra e a nota de que as publicações ficam só na memória. Puxar para atualizar refaz a lista, sem "ver novidades". Só na web hospedada; num nó que não é hospedado, a aba diz "Espiadinha indisponível" com o motivo e "Saiba mais". As notas são uma só nota de estado no alto (a folha de ajuda diz o mesmo), com o aviso de lista vencida e o "atualizar" no rodapé. Fotos usam a mesma rota `/media` de A Rua, sob demanda, com SHA-256 e cache de endereços `blob:` só em memória; buscadas com `no-store`, nada fica no cache HTTP.
 - **Botão de publicar** (`.app__fab`): círculo verde de 56 pt, lápis branco, a 20 pt da direita e 100 pt do fundo, sombra verde. Abre a folha de Publicar. Apertado, encolhe a 0,97 e escurece a 0,85 de opacidade; com Reduzir movimento, só escurece.

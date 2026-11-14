@@ -7,7 +7,7 @@
 //
 // On the web the bar is dark and opaque in both schemes: under it, the
 // installed web app shows the system navigation bar in the manifest's single
-// theme_color (#1c2622; a manifest has no light and dark pair), so the two
+// theme_color (#101010; a manifest has no light and dark pair), so the two
 // match. The native app draws behind the system bar itself and sets its
 // buttons for the scheme, so there the bar follows the scheme.
 

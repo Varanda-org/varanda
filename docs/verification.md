@@ -10116,3 +10116,32 @@ node apps/app/test/pressMotion.test.js
 ```
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 219. Paleta escura neutra: fundo, cartões, texto e barra de abas (PR feat/dark-neutral-palette)
+
+Esta seção confere a troca do escuro, que deixa de ser verde e passa a ser quase neutro. O claro não muda. Os valores do escuro ficam em `apps/app/src/appearance.js`: fundo `#101010`, cartão `#1c1c1c`, tinta `#f5f5f5`, texto suave `#c8c8c8`, linha `rgba(245,245,245,0.14)` e destaque verde `#5dcaa0`. A bolha da própria mensagem continua `#2c4a3d`. A cor de fundo do pré-splash da web e a `theme_color` do manifesto passam para `#101010`. Nada disso muda protocolo, RPC, Termos ou o que a pessoa pode fazer: muda só a aparência.
+
+Na web, como antes, o pré-splash segue o modo do sistema até o app carregar e só então o modo escolhido em Ajustes (limite conhecido da seção 79). A barra de abas da web usa `#101010` nos dois modos. Os valores escuros citados na seção 79 (`#1c2622`) valem para aquela versão: a partir desta, o escuro é o desta seção. O cartão de convite no escuro passa a usar o fundo `#101010` e a tinta `#f5f5f5` do app.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA. Registrar aparelho, sistema e, na web, o navegador. Conferir sempre nos dois temas, claro e escuro.
+
+- [ ] Fundo e cartões: as telas e as publicações sobre o fundo `#101010`, e os cartões (de link, de música, as folhas e os blocos de Ajustes) com `#1c1c1c`, sem o tom esverdeado de antes. Android, iOS, web e PWA: pendente.
+- [ ] Textos: tinta `#f5f5f5` nos títulos e nomes, e `#c8c8c8` no texto suave, legíveis nos cartões e no fundo. Linhas divisórias com `rgba(245,245,245,0.14)`. Android, iOS, web e PWA: pendente.
+- [ ] Destaque: a aba ativa, o nome em "respondendo a" e o cursor ficam em `#5dcaa0`. A pílula Publicar segue com fundo `#5dcaa0` e texto `#10241c`. Android, iOS, web e PWA: pendente.
+- [ ] Bolha própria: a mensagem enviada por mim em conversa continua `#2c4a3d`, com o texto legível. Android, iOS e web: pendente.
+- [ ] Feed: na A Rua e no Diário, as publicações ficam sobre o fundo `#101010`, separadas por linhas neutras, e as fotos aparecem sem moldura esverdeada. Android, iOS, web e PWA: pendente.
+- [ ] Folhas: a folha de publicação e a folha de ajuda usam o fundo e o cartão neutros, com alça visível. Android, iOS e web: pendente.
+- [ ] Aviso rápido: o balão fica quase branco (`#f5f5f5`) com texto `#101010`, legível. Android, iOS e web: pendente.
+- [ ] Barra de abas: no app nativo, no escuro, o fundo é `rgba(16,16,16,1)`, opaco, e a aba ativa fica em `#5dcaa0` (no claro, nada muda). Na web e no PWA instalado, a barra é `#101010` opaca e a barra de navegação do sistema combina com ela (`theme_color`). Android, iOS, web e PWA: pendente.
+- [ ] Pré-splash da web: com o sistema no escuro, a tela de abertura usa `#101010`, sem quadro esverdeado antes do app carregar. Web e PWA: pendente.
+- [ ] Cartão de convite: no escuro, o cartão sem moldura colorida usa o fundo `#101010`, e a tinta de todos os cartões fica `#f5f5f5`. Android, iOS e web: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem os valores e o contraste, não montam a interface num aparelho. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/app/test/appearance.test.js
+node apps/app/test/pwa.test.js
+node apps/app/test/inviteCardArt.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
