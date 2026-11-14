@@ -35,7 +35,7 @@ import { useStyles, useTheme } from './ThemeProvider'
 import { sunsetStops, type } from './theme'
 
 export const OWN_LIVE_TITLE = 'Seus momentos (24 h)'
-const RING = 56
+const RING = 64
 // The sunset from orange to plum, sampled at its stop positions. The night
 // blue at its end is about 1.4:1 on the dark background, so a third of the
 // ring would vanish there.
@@ -214,16 +214,16 @@ export function DiarioMoments ({ hosted, data, now = Date.now(), onOpenOwn, onDe
 }
 
 const makeStyles = (colors) => StyleSheet.create({
-  stripWrap: { flexGrow: 0, borderBottomWidth: 1, borderBottomColor: colors.line },
-  strip: { flexDirection: 'row', gap: 8, paddingHorizontal: 12, paddingVertical: 10 },
+  stripWrap: { flexGrow: 0 },
+  strip: { flexDirection: 'row', gap: 8, paddingHorizontal: 12, paddingVertical: 12 },
   ringItem: { width: 72, minHeight: 44, alignItems: 'center', gap: 4 },
   pressed: { opacity: 0.6 },
   ring: { width: RING, height: RING, borderRadius: RING / 2, alignItems: 'center', justifyContent: 'center' },
   ringStripes: { ...StyleSheet.absoluteFillObject, borderRadius: RING / 2, overflow: 'hidden' },
   ringStripe: { flex: 1 },
   ringGap: { width: RING - 4, height: RING - 4, borderRadius: (RING - 4) / 2, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center' },
-  plus: { position: 'absolute', right: -2, bottom: -2, width: 20, height: 20, borderRadius: 10, backgroundColor: colors.accent, borderWidth: 2, borderColor: colors.bg, alignItems: 'center', justifyContent: 'center' },
-  ringName: { ...type.caption, color: colors.ink, width: '100%', textAlign: 'center' },
+  plus: { position: 'absolute', right: -2, bottom: -2, width: 24, height: 24, borderRadius: 12, backgroundColor: colors.accent, borderWidth: 2, borderColor: colors.bg, alignItems: 'center', justifyContent: 'center' },
+  ringName: { ...type.caption, color: colors.soft, width: '100%', textAlign: 'center' },
   section: { borderBottomWidth: 1, borderBottomColor: colors.line },
   row: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 44, paddingHorizontal: 16, paddingVertical: 10 },
   rowText: { ...type.postName, color: colors.ink, flex: 1 },

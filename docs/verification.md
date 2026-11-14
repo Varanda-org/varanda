@@ -10661,3 +10661,33 @@ node apps/app/test/hapticsUse.test.js
 ```
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 231. A Rua no visual novo: linha de publicação e rodinhas de momentos (PR feat/restyle-feed)
+
+Esta seção confere o visual novo da linha de publicação e da faixa de momentos. A linha tem ícones de 20 pt na barra de ações, preenchimento de 16 pt no topo e seguir em pílula verde clara; as rodinhas de momentos têm 64 pt, sem fio embaixo da faixa.
+
+Nada disso envia pedido nem busca dado: é só a tela. Não há mudança de protocolo, RPC nem Termos, e nenhuma dependência nova.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA, cada um em claro e escuro. Registrar aparelho, sistema e, na web, o navegador.
+
+- [ ] Linhas de publicação em A Rua, Espiadinha, Busca (Publicações), Diário, Membro e Conversa: ícones de 20 pt na barra de ações, 16 pt de preenchimento no topo, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] O seguir em pílula verde clara no topo da linha, na Espiadinha e na Busca, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] A 320 pt de largura, o cabeçalho de uma publicação com seguir, o botão de mais, um @nome longo e a data "· 31 dez 2025" cabe sem cortar o botão nem quebrar a linha. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Texto grande 1,3: a linha de publicação cresce sem cortar o texto nem os botões. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Em Conversa, a linha da thread liga os avatares da publicação e da resposta, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Faixa de momentos: rodinhas de 64 pt, pôr do sol em quem tem momento não visto, contorno em quem já foi visto, selo de + em "Você" sem momento seu no ar e nenhum fio embaixo da faixa, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] A Rua esconde as barras ao rolar para baixo e as mostra ao rolar para cima, com a faixa de momentos e as linhas novas, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/app/test/postLayout.test.js
+node apps/app/test/conversaScreen.test.js
+node apps/app/test/postClamp.test.js
+node apps/app/test/postOverflow.test.js
+node apps/app/test/feedRender.test.js
+node apps/app/test/momentosScreen.test.js
+node apps/app/test/screensPolish.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.

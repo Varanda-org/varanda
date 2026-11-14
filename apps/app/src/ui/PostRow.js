@@ -89,16 +89,16 @@ import { hasMention, MentionText } from './MentionText'
 import { useHosted } from '../node'
 import { QuoteCard, quotePlayerOf } from './QuoteCard'
 import { screenReaderOn } from './screenReader'
-import { LARGE_TEXT, layout, type } from './theme'
+import { LARGE_TEXT, layout, radius, space, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
 
-const ICON = 18
+const ICON = 20
 // A split toggle and its number never share touch area: a mis-tap on the
 // toggle writes a public signed record.
 const SPLIT_SLOP = { top: 6, bottom: 6, left: 6, right: 0 }
 const COUNT_SLOP = { top: 6, bottom: 6, left: 0, right: 6 }
 // 'seguir' at the counter size plus its padding, until it is measured.
-const FOLLOW_GUESS = 56
+const FOLLOW_GUESS = 64
 // (44 - 20) / 2: the 44 pt targets centre on the 20 pt name line, so a post
 // with only ⋯ is no taller than its text.
 const HEAD_LIFT = 12
@@ -616,7 +616,7 @@ function PostRowView ({
                       onPress={otherPress(onFollow)}
                       style={({ pressed }) => [styles.follow, followPending && styles.disabled, pressed && styles.pressed]}
                     >
-                      <Text style={styles.followText}>seguir</Text>
+                      <View style={styles.followFace}><Text style={styles.followText}>seguir</Text></View>
                     </Pressable>
                     )
                   : null}
@@ -794,7 +794,7 @@ export const PostRow = memo(BlockGate)
 
 const makeStyles = (colors) => StyleSheet.create({
   row: {
-    paddingTop: 12,
+    paddingTop: 16,
     paddingHorizontal: 16,
     paddingBottom: 6,
     borderBottomWidth: 1,
@@ -814,7 +814,8 @@ const makeStyles = (colors) => StyleSheet.create({
   head: { flexDirection: 'row', alignItems: 'baseline' },
   headStacked: { flexWrap: 'wrap' },
   headActions: { position: 'absolute', top: 0, right: 0, flexDirection: 'row', alignItems: 'center' },
-  follow: { minHeight: layout.hit, minWidth: 44, paddingHorizontal: 8, justifyContent: 'center', alignItems: 'center' },
+  follow: { minHeight: layout.hit, minWidth: 44, justifyContent: 'center', alignItems: 'center' },
+  followFace: { minHeight: 32, paddingHorizontal: space.md, borderRadius: radius.pill, backgroundColor: colors.accentSoft, justifyContent: 'center' },
   followText: { ...type.counter, color: colors.accent },
   // The @nome gives way first and the date never does (as on X): one Text for
   // both cut the date to "· 5…", or dropped it at large text.

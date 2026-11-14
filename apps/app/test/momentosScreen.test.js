@@ -478,6 +478,8 @@ test('visual 1, 6 and 7: ring names are the first word, the plus ring has no rin
   t.ok(strip.includes('name={ringName(name)}') && strip.includes("label={'momentos de ' + name}"), 'first word shown, full name read')
   t.absent(code('src/ui/MomentosStrip.js').includes('adjustsFontSizeToFit'), 'no unbounded shrink')
   t.ok(strip.includes("strip: { flexDirection: 'row', gap: 8,"), 'gap 8 between rings')
+  t.ok(strip.includes('const RING = 64'), 'rings are 64 pt')
+  t.absent(/stripWrap: \{[^}]*borderBottomWidth/.test(strip), 'no rule under the strip')
   t.ok(strip.includes("backgroundColor: plus ? 'transparent' : colors.outline"), 'no ring colour on the plus ring')
   t.ok(strip.includes("label={own.length === 0 ? 'novo momento' : 'seu momento'}"), 'plus ring labelled novo momento')
 })
