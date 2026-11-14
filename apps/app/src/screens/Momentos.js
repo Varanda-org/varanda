@@ -34,14 +34,14 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
-import { holdMsOf, momentMusicOf, canReply, expiresIn, firstUnseenIndex, nextIndex, progressOf, replyContext, ringOrder, segmentMs, VIDEO_END_GRACE_MS } from '../moments'
+import { holdMsOf, momentMusicOf, canReply, expiresIn, firstUnseenIndex, nextIndex, nextMomentOf, progressOf, replyContext, ringOrder, segmentMs, VIDEO_END_GRACE_MS } from '../moments'
 import { canReact, reactionParams, unsure, REACTION_SENT, REACTION_UNSURE } from '../momentReaction'
 import { QUICK, reactionName } from '../reactions'
 import { audiusPolicy, audiusReady } from '../account'
 import { musicOriginOf } from '../music'
 import { soundMuted, setSoundMuted, onSoundMute, SOUND_MUTE_LABEL, SOUND_UNMUTE_LABEL } from '../soundMute'
 import { openExternal } from '../openExternal'
-import { MomentMusic } from '../ui/MomentMusic'
+import { MomentMusic, prepareMomentMusic } from '../ui/MomentMusic'
 import { liveAuthors, liveItems, momentsOf } from '../momentSeen'
 import { loadMomentSeen, markMomentSeen, onMomentSeen } from '../momentSeenStore'
 import { adoptVideoFile, revokeUrl, urlFromBytes } from '../media/display'
@@ -562,7 +562,7 @@ function useMomentMusicPolicy (node, member, active) {
   return result.ok
 }
 
-function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage, onCreate }) {
+function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenMember, onMessage, onCreate }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const node = useNode()
@@ -635,8 +635,11 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
     }
   }
   const music = momentMusicOf(item)
+  const nextItem = nextMomentOf(rings, pos)
+  const nextKey = nextItem ? nextItem.ref : ''
+  const nextMusic = momentMusicOf(nextItem)
   const musicOrigin = musicOriginOf(node)
-  const musicOn = useMomentMusicPolicy(node, own, music !== null)
+  const musicOn = useMomentMusicPolicy(node, own, music !== null || nextMusic !== null)
   const [musicState, setMusicState] = useState(null)
   const musicStarted = musicOn === true && musicState?.key === itemKey && musicState.phase === 'playing'
   // Opened muted: use photo time until unmuted, then wait up to 3 s for
@@ -644,6 +647,52 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
   const musicWaiting = music !== null && musicOn !== false && (musicState?.key !== itemKey || musicState.phase === 'waiting') && !soundOff
   const [musicClosed, setMusicClosed] = useState(false)
   useEffect(() => { setMusicState(null) }, [itemKey, node.epoch])
+
+  const ahead = useRef(null)
+  const handed = useRef(null)
+  // One preload per momento-and-next pair for the life of this viewer.
+  // The last pair alone would be tried again after a step back.
+  const tried = useRef(new Set())
+  const musicQuota = useRef(false)
+  const prepared = ahead.current?.key === itemKey ? ahead.current.handle : handed.current?.key === itemKey ? handed.current.handle : null
+  const preloadStream = music === null
+  const musicSettled = preloadStream || musicStarted || (musicState?.key === itemKey && musicState.phase === 'fallback')
+  useEffect(() => {
+    // Cleanups run before setups, so releasing there could cancel a handoff.
+    if (ahead.current?.key === itemKey) {
+      handed.current?.handle.release()
+      handed.current = { key: itemKey, handle: ahead.current.handle }
+      ahead.current = null
+    }
+    if (handed.current && handed.current.key !== itemKey) {
+      handed.current.handle.release()
+      handed.current = null
+    }
+    // Muted, a momento spends no request or play use, and neither does the next one.
+    // A sheet over the stack (Ajustes, a report, help) covers the viewer without moving isTop.
+    const allowed = musicOn === true && isTop && !covered && node.visible !== false && !musicClosed && !soundOff
+    if (ahead.current && (!allowed || ahead.current.key !== nextKey || ahead.current.own !== own || ahead.current.origin !== musicOrigin || ahead.current.epoch !== node.epoch)) {
+      ahead.current.handle.release()
+      ahead.current = null
+    }
+    const pair = itemKey + '>' + nextKey
+    if (allowed && nextMusic !== null && itemKey !== '' && photo.phase !== 'loading' && musicSettled && ahead.current === null && !musicQuota.current && !tried.current.has(pair)) {
+      tried.current.add(pair)
+      // A playing snippet can occupy both relays while seeking; only POSTs
+      // for the next track and ticket may overlap it.
+      const handle = prepareMomentMusic({ member: own, origin: musicOrigin, request: node.request }, nextMusic, { stream: preloadStream })
+      ahead.current = { key: nextKey, handle, own, origin: musicOrigin, epoch: node.epoch }
+      handle.done.then((result) => {
+        if (!result.ok && result.code === 'limite-musica') musicQuota.current = true
+      })
+    }
+  }, [itemKey, nextKey, nextMusic?.id, nextMusic?.start, own, musicOrigin, node.epoch, node.request, musicOn, isTop, covered, node.visible, musicClosed, soundOff, photo.phase, musicSettled, preloadStream])
+  useEffect(() => () => {
+    ahead.current?.handle.release()
+    handed.current?.handle.release()
+    ahead.current = null
+    handed.current = null
+  }, [])
 
   // Seen on this device as soon as it is on screen.
   const { mark } = seenState
@@ -1108,11 +1157,12 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
         </View>
         <View style={[styles.bottom, { paddingBottom: insets.bottom + 12 }]} pointerEvents='box-none' onLayout={(e) => setBottomHeight(e.nativeEvent.layout.height)}>
           {meet ? null : <Scrim edge='bottom' alpha={BOTTOM_SCRIM.alpha} fade={BOTTOM_SCRIM.fade} style={styles.bottomScrim} />}
-          {musicOn
+          {musicOn && music !== null
             ? (
               <MomentMusic
                 key={itemKey + ':' + playback.restartTick}
                 music={music}
+                prepared={prepared}
                 member={own}
                 origin={musicOrigin}
                 request={node.request}
