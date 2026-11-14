@@ -10568,3 +10568,38 @@ node apps/app/test/postLayout.test.js
 ```
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 228. Barra do topo nova: 64 pt, sem fio, voltar e ações em cápsulas (PR feat/restyle-top-bar)
+
+Esta seção confere a barra do topo nova. A barra passa a ter 64 pt de altura e perde o fio embaixo. O título fica em 24 pt. Nas telas empilhadas, o voltar é um círculo de cartão de 44 pt com fio. As ações (ajuda, sino, Mensagem, Grupo, Comunidade, Páginas) ficam numa cápsula de cartão com fio, com ícones de 22 pt e sem sombra. O cabeçalho de conversa usa o título de 20 pt com entrelinha de 28. A tabela está em `apps/site/artwork/app-design.md`.
+
+Nada disso envia pedido nem busca dado: é só a tela. Não há mudança de protocolo, RPC nem Termos, e nenhuma dependência nova.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA, cada um no claro e no escuro. Registrar aparelho, sistema e, na web, o navegador.
+
+- [ ] O título da barra em todas as abas, com 64 pt de altura e sem fio embaixo. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] O círculo de voltar (44 pt, cartão com fio) nas telas empilhadas: perfil, publicação aberta, conversa. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] A cápsula com ajuda e sino. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] A cápsula com uma ação e com várias (Mensagem, Grupo, Comunidade, Páginas). Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] A cápsula de ajuda em Seguidores e Seguindo. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] O título do cabeçalho de conversa (20 pt, entrelinha 28) com o subtítulo. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] A barra de ajuda do onboarding. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] A Rua esconde e mostra as barras ao rolar, com a barra nova de 64 pt. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] Largura de 320 pt: o título cabe em uma linha e não sobrepõe a cápsula. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] Conversas em 320 pt: o +, a ajuda e o sino cabem numa cápsula só, sem cortar. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] Texto grande, escala 1,3 nas configurações do aparelho: nenhum título corta nem sobrepõe. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] A cadeira sobre o disco no escuro. Android, iOS, web e PWA: pendente.
+- [ ] Os ícones do topo do visualizador de Momentos, agora de 22 pt. Android, iOS, web e PWA, claro e escuro: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/app/test/themeUsage.test.js
+node apps/app/test/uiKit.test.js
+node apps/app/test/ruaChrome.test.js
+node apps/app/test/chromeScroll.test.js
+node apps/app/test/tabBar.test.js
+node apps/app/test/shellChrome.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.

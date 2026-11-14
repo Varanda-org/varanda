@@ -133,7 +133,7 @@ test('theme usage: space, radius and the hit target are frozen', async (t) => {
   t.alike({ ...theme.type.profileName }, { fontSize: 22, fontWeight: '800', lineHeight: 26, letterSpacing: -0.2 })
   t.alike({ ...theme.radius }, { sm: 8, md: 12, lg: 18, bubble: 18, pill: 999 })
   t.alike({ ...theme.layout }, {
-    topBar: 52,
+    topBar: 64,
     tabBar: 49,
     fabSize: 56,
     fabRight: 20,

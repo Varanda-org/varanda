@@ -39,6 +39,7 @@ import { RefreshableList } from '../ui/RefreshableList'
 import { SearchField } from '../ui/SearchField'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
+import { TopActions } from '../ui/TopActions'
 import { type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
 import { isSeederDown, learnPeeked, peekAll, useFollowSet } from './Conversa'
@@ -379,7 +380,7 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
   }, [filtering, unresolvedTag, resolveMany, isTop, active])
 
   const title = PESSOAS_TITLE[kind]
-  const top = <TopBar title={title} onBack={onBack} right={<HelpButton doc={HELP.diario} />} />
+  const top = <TopBar title={title} onBack={onBack} right={<TopActions help={HELP.diario} />} />
 
   if (!hosted) {
     return (

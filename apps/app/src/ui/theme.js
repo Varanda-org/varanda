@@ -90,7 +90,7 @@ export const radius = Object.freeze({
 })
 
 export const layout = Object.freeze({
-  topBar: 52,
+  topBar: 64,
   tabBar: 49,
   fabSize: 56,
   fabRight: 20,
