@@ -361,7 +361,7 @@ test('the list renders through EmbedScroll', (t) => {
   t.ok(list.includes('<EmbedHost.Provider value={host}>'))
   t.ok(list.includes('<EmbedRow row={rowKeyOf(keyOf.current, info.item, info.index)}>{renderItem(info)}</EmbedRow>'), 'each row registers with the host')
   t.ok(list.includes('const next = orphanCuts(host.keep.list(), c.kept, c.order, c.deadlines, Date.now(), touchedNow)'), 'rows that left the data, or became a tombstone, drop their kept frame, unless only cut off past the end')
-  t.ok(/c\.order = rowOrder\(data, keyOf\.current, c\.order\)\s*c\.kept = keptRowKeys\(data, keyOf\.current\)\s*pruneOrphans\(\)\s*\}, \[data\]\)/.test(list), 'every data change prunes')
+  t.ok(/const orphans = host\.keep\.list\(\)\.filter\(\(entry\) => entry\.orphan === true\)\.map\(\(entry\) => entry\.row\)\s*c\.order = rowOrder\(data, keyOf\.current, c\.order, orphans\)\s*c\.kept = keptRowKeys\(data, keyOf\.current\)\s*pruneOrphans\(\)\s*\}, \[data\]\)/.test(list), 'every data change prunes')
   const handler = list.slice(list.indexOf('const handleContentSizeChange = useCallback'), list.indexOf('}, [check])', list.indexOf('const handleContentSizeChange = useCallback')))
   t.ok(handler.indexOf('host.contentChanged()') > handler.indexOf('check()'), 'moved rows re-place their frames')
   t.absent(list.includes('removeClippedSubviews'), 'no clipped subviews')
@@ -584,17 +584,17 @@ test('a frame nobody can see opens nothing', (t) => {
 function liftCuts () {
   const { rowKeyOf } = liftKeptRowKeys()
   const cut = layerRaw.match(/export const EMBED_CUT_MS = (\d+)\n/)
-  const ro = layerRaw.match(/export function rowOrder \(data, keyExtractor, order\) \{([\s\S]*?)\n\}/)
+  const ro = layerRaw.match(/export function rowOrder \(data, keyExtractor, order, keep\) \{([\s\S]*?)\n\}/)
   const co = layerRaw.match(/export function cutOff \(row, order\) \{([\s\S]*?)\n\}/)
   const oc = layerRaw.match(/export function orphanCuts \(entries, kept, order, deadlines, now, touched\) \{([\s\S]*?)\n\}/)
   if (!cut || !ro || !co || !oc) throw new Error('the cut helpers not found')
   const EMBED_CUT_MS = Number(cut[1])
-  const roFn = new Function('rowKeyOf', 'data', 'keyExtractor', 'order', ro[1]) // eslint-disable-line no-new-func
+  const roFn = new Function('rowKeyOf', 'data', 'keyExtractor', 'order', 'keep', ro[1]) // eslint-disable-line no-new-func
   const cutOff = new Function('row', 'order', co[1]) // eslint-disable-line no-new-func
   const ocFn = new Function('EMBED_CUT_MS', 'cutOff', 'entries', 'kept', 'order', 'deadlines', 'now', 'touched', oc[1]) // eslint-disable-line no-new-func
   return {
     EMBED_CUT_MS,
-    rowOrder: (data, keyExtractor, order) => roFn(rowKeyOf, data, keyExtractor, order),
+    rowOrder: (data, keyExtractor, order, keep) => roFn(rowKeyOf, data, keyExtractor, order, keep),
     cutOff,
     orphanCuts: (entries, kept, order, deadlines, now, touched) => ocFn(EMBED_CUT_MS, cutOff, entries, kept, order, deadlines, now, touched)
   }
@@ -798,6 +798,19 @@ test('the list clears its re-prune on unmount', async (t) => {
   t.is(timers.size, 0)
 })
 
+test('the list forgets rows no orphan walks back through', async (t) => {
+  const { run, orphanOf, rows, advance, cut, EMBED_CUT_MS } = await liftPrune()
+  for (let i = 0; i < 50; i++) run(rows('s' + i))
+  t.is(cut().order.before.size, 1, 'data replaced again and again keeps one row')
+  run(rows('a', 'b', 'c', 'd'))
+  orphanOf('d')
+  run(rows('a', 'b'))
+  t.ok(cut().order.before.has('d') && cut().order.before.has('c'), 'a cut-off orphan keeps the rows back to the new end')
+  advance(EMBED_CUT_MS)
+  run(rows('a', 'b'))
+  t.absent(cut().order.before.has('d') || cut().order.before.has('c'), 'once its frame went, the next change forgets them')
+})
+
 test('rowOrder, cutOff and orphanCuts', (t) => {
   const { rowOrder, cutOff, orphanCuts, EMBED_CUT_MS } = liftCuts()
   const keyOf = (item) => item.key
@@ -805,11 +818,21 @@ test('rowOrder, cutOff and orphanCuts', (t) => {
   t.alike([...first.before], [['a', null], ['b', 'a']])
   t.alike([...first.present], ['a', 'b'])
   t.is(first.last, 'b')
-  const next = rowOrder([{ key: 'a' }], keyOf, first)
-  t.is(next.before.get('b'), 'a', 'a row that left keeps the row it came after')
+  const next = rowOrder([{ key: 'a' }], keyOf, first, ['b'])
+  t.is(next.before.get('b'), 'a', 'an orphan row that left keeps the row it came after')
   t.is(first.before.size, 2, 'the earlier record is not changed')
   t.ok(cutOff('b', next), 'after the last row: cut off')
-  t.absent(cutOff('b', rowOrder([{ key: 'a' }, { key: 'c' }], keyOf, next)), 'the list goes on: taken out')
+  t.absent(cutOff('b', rowOrder([{ key: 'a' }, { key: 'c' }], keyOf, next, ['b'])), 'the list goes on: taken out')
+  t.absent(rowOrder([{ key: 'a' }], keyOf, first).before.has('b'), 'a row that left with no orphan is forgotten')
+  t.absent(rowOrder([{ key: 'a' }], keyOf, next, []).before.has('b'), 'and so is one whose orphan went')
+  const six = rowOrder(['a', 'b', 'c', 'd', 'e', 'f'].map((key) => ({ key })), keyOf, null)
+  const three = rowOrder([{ key: 'a' }, { key: 'b' }, { key: 'c' }], keyOf, six, ['f', 'zz', 'b'])
+  t.alike([...three.before].sort(), [['a', null], ['b', 'a'], ['c', 'b'], ['d', 'c'], ['e', 'd'], ['f', 'e']], 'the rows an orphan walks back through stay, an unknown one adds nothing')
+  t.ok(cutOff('f', three), 'so the orphan past them is still cut off')
+  t.alike([...rowOrder([{ key: 'z' }], keyOf, { before: new Map([['x', 'y'], ['y', 'x']]) }, ['x']).before].sort(), [['x', 'y'], ['y', 'x'], ['z', null]], 'a cycle ends')
+  let churn = null
+  for (let i = 0; i < 1000; i++) churn = rowOrder([{ key: 'r' + i }], keyOf, churn, [])
+  t.is(churn.before.size, 1, 'replacing the data a thousand times keeps one row')
   for (const data of [null, undefined, {}, 'ab']) {
     const empty = rowOrder(data, keyOf, null)
     t.is(empty.present.size, 0, 'non-array data has no rows')
@@ -820,7 +843,7 @@ test('rowOrder, cutOff and orphanCuts', (t) => {
   t.absent(cutOff('x', null), 'bad input cuts nothing off')
   t.absent(cutOff('x', rowOrder([{ key: 'a' }], keyOf, null)), 'a row never seen, with data: taken out')
 
-  const order = rowOrder([{ key: 'a' }], keyOf, first)
+  const order = rowOrder([{ key: 'a' }], keyOf, first, ['b'])
   const release = () => {}
   const entry = { key: 'kb', row: 'b', orphan: true, release }
   const kept = new Set(['a'])

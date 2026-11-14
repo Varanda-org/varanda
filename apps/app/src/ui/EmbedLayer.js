@@ -144,12 +144,21 @@ export function keptRowKeys (data, keyExtractor) {
 export const EMBED_CUT_MS = 5000
 
 // The rows of data, the last row, and the row each one came after (null for
-// the first). A row that left the data keeps the one it last came after, so
-// a later change can still tell where it was.
-export function rowOrder (data, keyExtractor, order) {
-  const before = order && order.before instanceof Map ? new Map(order.before) : new Map()
+// the first). A row that left the data keeps the one it last came after only
+// while one of the `keep` rows (the orphans) walks back through it, so a
+// later change can still tell where that orphan was and nothing else piles up.
+export function rowOrder (data, keyExtractor, order, keep) {
+  const prior = order && order.before instanceof Map ? order.before : new Map()
   const rows = Array.isArray(data) ? data.map((item, index) => rowKeyOf(keyExtractor, item, index)) : []
+  const before = new Map()
   rows.forEach((row, i) => before.set(row, i > 0 ? rows[i - 1] : null))
+  for (const start of Array.isArray(keep) ? keep : []) {
+    let at = start
+    while (typeof at === 'string' && !before.has(at) && prior.has(at)) {
+      before.set(at, prior.get(at))
+      at = prior.get(at)
+    }
+  }
   return { before, present: new Set(rows), last: rows.length > 0 ? rows[rows.length - 1] : null }
 }
 

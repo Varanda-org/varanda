@@ -543,7 +543,8 @@ export function RefreshableList ({
   }, [host])
   useEffect(() => {
     const c = cut.current
-    c.order = rowOrder(data, keyOf.current, c.order)
+    const orphans = host.keep.list().filter((entry) => entry.orphan === true).map((entry) => entry.row)
+    c.order = rowOrder(data, keyOf.current, c.order, orphans)
     c.kept = keptRowKeys(data, keyOf.current)
     pruneOrphans()
   }, [data])
