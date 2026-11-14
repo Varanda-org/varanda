@@ -15,6 +15,7 @@ import { KeyboardAvoidingView, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { FOLLOW_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
+import { readFollowKeys } from '../follow'
 import { useNames } from '../names'
 import { fetchCounts, fetchMember, fetchPost, COUNTS_MAX } from '../indexClient'
 import { assembleMember, assembleThread, planPeeks } from '../thread'
@@ -284,22 +285,14 @@ export function knownAuthors ({ ownKey, follows, hinted, peeked }) {
 
 // The follow list as a Set (own key not included), read once per screen
 // load: decides the media cache (own/followed authors keep the long cache;
-// strangers' photos are never kept). Null until read; a failed read is an
-// empty set (the safe side: no-store).
+// strangers' photos are never kept). Null until read. A failed read changes
+// nothing (the set read before stays, or null: the safe side, no-store) and
+// resolves to an empty set for callers that wait on it.
 export function useFollowSet (request) {
   const [follows, setFollows] = useState(null)
   const load = useCallback(async () => {
-    const keys = []
-    try {
-      for (let offset = 0; offset < 10000;) {
-        const r = await request('follow.list', { offset, limit: FOLLOW_LIMIT_MAX })
-        const page = Array.isArray(r && r.follows) ? r.follows : []
-        for (const k of page) if (typeof k === 'string') keys.push(k.toLowerCase())
-        offset += page.length
-        if (page.length === 0 || !(r && Number.isSafeInteger(r.total)) || offset >= r.total) break
-      }
-    } catch {}
-    const set = new Set(keys)
+    const set = await readFollowKeys(request, FOLLOW_LIMIT_MAX)
+    if (set === null) return new Set()
     setFollows(set)
     return set
   }, [request])

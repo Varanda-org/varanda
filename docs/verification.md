@@ -2367,7 +2367,7 @@ Nenhuma verificação foi feita ainda. Todos os itens abaixo estão desmarcados 
 - Uma resposta, curtida ou republicação cujo post alvo ainda não está legível na réplica do destinatário no semeador (fora do prefixo contíguo, ou uma leitura sem espera que falhou) não vira aviso, e o bloco não é lido de novo (no máximo uma vez).
 - Se um envio volta 410 enquanto o mesmo `endpoint` é registrado de novo com chaves novas, a remoção compara as chaves antes de entrar na fila do `push.json`, e uma janela curta ainda pode apagar o registro novo. O navegador costuma gerar outro `endpoint` ao assinar de novo; religar em Ajustes resolve.
 - Ao ligar, um cancelamento local que passa de 5 s (`UNSUBSCRIBE_MS`) é dado como não confirmado; o navegador ainda pode concluí-lo depois.
-- A limpeza de Sair e Recomeçar não espera uma troca do interruptor em andamento, e o interruptor continua tocável durante ela: ligar os avisos de novo no meio de Sair pode deixar a nova inscrição ativa.
+- A limpeza de Sair e Recomeçar espera até 3 s (`LEAVE_WAIT_MS`) uma troca do interruptor em andamento e o interruptor não aceita novo toque durante ela. Se o pedido de permissão ficar aberto além disso, um "Permitir" tardio é desligado de novo quando a troca termina (só o cancelamento local, porque o nó já saiu). Conferir num navegador real com o pedido aberto ainda falta.
 - Todo aviso é preenchido até 1024 bytes antes de cifrar (`PUSH_PAD_TO`, preenchimento do RFC 8188), então o tamanho não mostra o tipo nem o nome. Mas a entrega é imediata: o serviço de push do navegador vê o momento de cada aviso e pode cruzá-lo com os registros públicos dos diários. Não há atraso artificial, por escolha: um atraso deixaria todo aviso mais lento.
 - Os caminhos de `apps/app/src/screens/Identidade.js` que trocam a identidade guardada ("apagar e recomeçar" quando a identidade não confere, "criar mesmo assim") não chamam `disablePush`. Num aparelho compartilhado, a inscrição do navegador pode continuar recebendo os avisos da identidade anterior até ser desligada ou até o serviço de push descartá-la (não confirmado de ponta a ponta).
 
@@ -3118,12 +3118,12 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 - [ ] Navegador novo, seguindo contas com histórico longo: A Rua mostra os posts mais novos de cada conta em poucos segundos, enquanto o histórico completa (não realizada ainda).
 - [ ] Visita de volta depois de as contas postarem bastante: os posts novos aparecem antes do histórico que faltava (não realizada ainda).
 - [ ] Semeador sem o meio de um diário: A Rua mostra o começo e os mais novos, e o resto quando o semeador o tiver (não realizada ainda).
-- [ ] Um nome pode aparecer como "sem nome" por um instante, até chegar o bloco do perfil (não realizada ainda).
+- [ ] Um perfil cujo registro está só no meio do diário ainda não baixado aparece "sem nome" por um instante e logo ganha o nome (e o @nome) lido pelo índice do semeador e por `diary.peek`, sem esperar o histórico; no nó central e com o semeador sem índice nenhum pedido a mais é feito (não realizada ainda).
 
 ### Limites
 
 - A Rua atualiza quando o comprimento presente cresce: os posts mais novos aparecem cerca de uma ida e volta depois do bloco 2, ou ao puxar para atualizar se o semeador não tem o meio do diário.
-- Um perfil que está só no meio do diário lê "sem nome" até o histórico chegar.
+- A leitura do nome pelo índice vale só no nó do navegador e uma vez por chave e por conexão: se o índice ou o `diary.peek` falhar, a chave segue "sem nome" até o histórico chegar (`apps/app/test/namesPeek.test.js`).
 - Um semeador que anuncia um comprimento que não serve atrasa o histórico em no máximo 3 s por crescimento do comprimento.
 - Blocos guardados entre o prefixo e a corrida mais nova não aparecem: se um diário ainda no meio do histórico cresce, a corrida anterior some até chegar a ponta nova, e curtidas desfeitas, exclusões ou um perfil novo guardados nesse trecho só valem quando o histórico chega até eles. Mostrar esse trecho não é seguro (uma lápide pode estar num buraco depois dele); aplicar só os registros dele pediria mudar o `buildFeed` de `packages/core`.
 
@@ -4197,7 +4197,7 @@ Web (Chrome ou Safari, com o nó no navegador ou com o `varanda-serve`):
 
 ### Não verificado / limites conhecidos
 
-- Nenhuma caixa acima foi executada nesta documentação. Os testes automáticos cobrem só a janela do toque duplo e a abertura pendente; o pulo, o coração de 64 pt, a vibração e o aviso ainda precisam de aparelho.
+- Nenhuma caixa acima foi executada nesta documentação. Os testes automáticos cobrem só a janela do toque duplo, a abertura pendente e a regra de que um toque duplo com curtida ou republicação pendente da mesma publicação não mostra o coração (`doubleTapPlan`); o pulo, o coração de 64 pt, a vibração e o aviso ainda precisam de aparelho.
 - Um desfazer durante a atualização puxada pode deixar a contagem uma a mais até a próxima atualização.
 - O desfazer atualiza só a tela que mostrou o aviso.
 - Um desfazer enquanto uma curtida da mesma publicação está pendente não entra na fila; o botão de republicar da linha continua desfazendo.
@@ -6316,7 +6316,7 @@ Regras que os passos conferem:
 
 - As rotas existem só quando o semeador tem `VARANDA_PUBLIC_ORIGIN` (no compose, `VARANDA_FEIRA_ORIGIN`). Sem ela, o padrão, `/f/*` e `/index/feira/*` respondem 404. A origem da conta é outra variável e não muda.
 - A página pública escapa todo texto do diário, não tem script nem recurso externo, e responde `no-store`, `nosniff` e `no-referrer`. `index,follow` só para `disponivel` e `reservado`; `vendido` e status desconhecido saem `noindex,follow`, e só `vendido` leva também `X-Robots-Tag: noindex`. Uma publicação, um anúncio apagado, um diário bloqueado ou uma edição desconhecida dão a mesma página 404.
-- As fotos (`/f/<diário>/<seq>/foto/1..4` e `capa`) só saem com tamanho, sha256 e bytes iguais ao descritor. O `sitemap.xml` lista só endereços de anúncios que não estão `vendido`. O Caddy serve o `/robots.txt` (permite `/f/` e, desde a seção 210, `/p/`, só para que leiam o `noindex`) e limita `/f/*` a 30 pedidos por 10 s por endereço; o service worker não intercepta `/f/*`.
+- As fotos (`/f/<diário>/<seq>/foto/1..4` e `capa`) só saem com tamanho, sha256 e bytes iguais ao descritor. O `sitemap.xml` lista só endereços de anúncios que não estão `vendido`. O Caddy serve o `/robots.txt` (permite `/f/` e, desde a seção 211, `/p/`, só para que leiam o `noindex`) e limita `/f/*` a 30 pedidos por 10 s por endereço; o service worker não intercepta `/f/*`.
 - A entrada: `GET /account/feira/policy` responde só `{ enabled }`; `POST /account/feira/start` devolve um código de 1 hora cobrado do dono do anúncio e lê o anúncio sem olhar o status (um anúncio vendido ainda abre a porta). A ordem: o corpo exato; depois o dono da cota (membro vinculado ou dono da página aberta), e sem dono responde `nao-encontrado` sem ler nada no semeador; depois a conferência do anúncio no semeador; por fim o código. Não há limite por chave de dono (qualquer um trancaria os anúncios de alguém). Exige `VARANDA_FEIRA_INVITES_PER_WEEK`, `VARANDA_INVITES_PER_WEEK` e `VARANDA_TRIAGE_TOKEN`.
 - A conferência do anúncio usa a rota própria do semeador `GET /feira-listing/<diário>/<seq>` (com o token, nunca pelo Caddy), que responde só `{ ok: true }` e tem orçamento próprio (2 ao mesmo tempo, 4 por segundo, rajada 8): inundar essa rota nunca faz `/moderation-post` responder 503. O painel continua com `/moderation-listing`.
 - O Caddy limita `/account/feira/*` na zona `feira-entrada`: 5 pedidos a cada 60 s por endereço, antes do handle genérico de `/account/*`. `POST /account/feira/idade` tem zonas próprias: `feira-idade`, 2 pedidos por hora por endereço, e `feira-idade-total`, 50 por hora no total. Cada teto é uma diretiva `rate_limit` separada, em ordem, dentro de um `route` (por endereço primeiro, global depois), para que um pedido recusado por endereço não gaste o teto global. Só um `POST` com `Content-Type: application/json` entra nas zonas da idade; qualquer outro pedido a `/account/feira/idade` recebe 405 do Caddy sem passar por zona nenhuma. O endereço fica só na memória do Caddy durante a janela, e os dois handles tiram `X-Forwarded-For` e `X-Real-Ip`. O serviço só atende `/account/feira/idade`, `/account/feira/start` e `/account/feira/policy` quando o caminho cru do pedido é exatamente esse (`/../`, `/./`, `%2F` ou `%2E%2E` dão 404), porque o Caddy e o serviço normalizam caminhos de jeitos diferentes.
@@ -6342,7 +6342,7 @@ Caminhada com um semeador, um serviço de conta e dois membros de teste (DHT loc
 - [ ] Sem `VARANDA_PUBLIC_ORIGIN`, `GET /f/<diário>/<seq>` e `GET /index/feira/...` respondem 404. Com a origem, a página de um anúncio vivo abre com título, preço, cidade e fotos.
 - [ ] Um anúncio marcado "vendido" mantém a página, com `noindex`, e sai do `sitemap.xml`. Um anúncio apagado dá a página 404.
 - [ ] Abrir `/f/<diário>/<seq>/capa` entrega a primeira foto; depois de editar o anúncio com outra foto, o mesmo endereço entrega a nova.
-- [ ] `GET /robots.txt` no domínio permite `/f/` e `/p/` (seção 210), e nada mais, e aponta o sitemap.
+- [ ] `GET /robots.txt` no domínio permite `/f/` e `/p/` (seção 211), e nada mais, e aponta o sitemap.
 - [ ] Com a entrada ligada, `GET /account/feira/policy` responde `{ enabled: true }`; `POST /account/feira/start` de um anúncio de membro devolve um código; um anúncio de um diário que não é de membro responde `nao-encontrado`. Pelo Caddy, o 6º pedido a `/account/feira/*` do mesmo endereço em 60 s responde 429.
 - [ ] Com um código da Feira, a primeira sessão de idade abre e a segunda do mesmo código no mesmo dia responde `limite-idade`; um convite comum continua abrindo sessão.
 - [ ] Pelo Caddy, com códigos da Feira novos: dois `POST /account/feira/idade` do mesmo endereço na mesma hora chegam ao serviço e o 3º responde 429 do Caddy; de outro endereço, o pedido seguinte ainda passa. Antes disso, vários `GET /account/feira/idade` do mesmo endereço respondem 405 e não gastam o limite. O mesmo código da Feira em `POST /account/age/session` responde `use-a-rota-da-feira` e não abre sessão paga.
@@ -9675,7 +9675,30 @@ Nenhuma conferência em aparelho nem com o provedor real foi feita nesta tarefa.
 - [ ] Fechar e reabrir o app, ou recarregar a página na web, restaura o som. A escolha não aparece em outro aparelho, e **Tocar música sozinha** mantém o valor guardado.
 - [ ] Uma conta que aceitou a versão 46 recebe os Termos de Uso e a Política de Privacidade 47 para novo aceite.
 
-## 209. Registro de publicação na web (post-share) e os métodos post.shared, post.share e post.unshare
+## 209. Reload completo do JS no gate do Android (issue #14, 2026-11-07)
+
+### O que mudou
+
+- `apps/app/scripts/gate-server.js` ganhou `--reload` e o passo `j`; `apps/app/src/gate/harness.js` ganhou a fase `reloaded`. Depois do passo `i`, o app inicia uma sincronização contínua e chama `DevSettings.reload()` (reload completo, não Fast Refresh). O novo contexto inicia o nó com o `recover: true` padrão e confere `node.info`, o post no `log.read` e uma sincronização contínua até `sync ready`. No Android, o driver conta as threads `bare-worklet` do processo antes do reload e depois da resposta do novo nó, e exige o mesmo número (1).
+- Uma falha antes do reload (sem `DevSettings.reload`, ou o `sync.start` que o precede) é reportada como falha do passo `j`, e o gate para na hora em vez de esperar o limite de tempo.
+- Sem `--reload` o gate é o mesmo de antes (passos `a` a `i`).
+- O driver espera o relato do passo `j` terminar (a nova contagem de worklets, até 5 s) antes de aceitar o `done`, para que a pontuação não rode sem o `j`. No Android, uma contagem que o `adb` não devolveu (`pidof` ou `ps` falhou) reprova o passo `j`; no iOS, que não conta worklets, segue como "não medido". O `sync ready` esperado antes do reload é o da nova partida, não um evento velho do passo `f`.
+
+### Executado
+
+Emulador `LembraApi36` (Android 16, API 36, google_apis x86_64), build de debug `app.varanda.debug` (JDK 21, `./gradlew assembleDebug -PreactNativeArchitectures=x86_64`), Metro iniciado sem `CI=1` (em modo CI o Metro não vigia arquivos e serve o código antigo), `npm run gate -- --platform android --host <ip da máquina> --reload`:
+
+- Passos `a` a `i`: PASS, como na seção 30.
+- Passo `j`: PASS. Reload com a sincronização contínua rodando, o novo worklet abriu o armazenamento (`recover true`, sem `LOCKED`), `node.info` e o post presentes, sincronização contínua pronta. Threads `bare-worklet`: 1 antes do reload, 1 depois.
+- Controle: com o worklet criado sem id (`id: null` em `native.js`, revertido depois), o passo `j` também passou, com 1 e 1. No Android, o worklet anterior já sai sem o registro por id (o reload destrói a instância React antiga e o worklet vai junto); o id fixo fica como segunda camada. O teste não distingue as duas.
+
+### Não executado
+
+- [ ] iOS (simulador ou aparelho): o driver não conta worklets no iOS, então o passo `j` só confere que o novo nó abre sem `LOCKED`.
+- [ ] Aparelho Android real e arm64-v8a.
+- [ ] Reload pelo menu de desenvolvedor ou pela tecla `r` do Metro, em vez de `DevSettings.reload()`.
+
+## 210. Registro de publicação na web (post-share) e os métodos post.shared, post.share e post.unshare
 
 O registro assinado `post-share` permite que a pessoa autora autorize a exibição de uma publicação própria, para quem não tem conta, na página pública da instalação. A publicação fica pública enquanto algum desses registros estiver vivo, e retirar apaga todos (`docs/protocol.md` seção 2, "Public share"). Este PR acrescenta também `post.shared`, `post.share` e `post.unshare`; nada é servido ainda e não há mudança nos Termos. A página pública vem no próximo PR, e o fluxo no app no terceiro.
 
@@ -9698,7 +9721,7 @@ Os testes de `web-member` cobrem compartilhar e consultar, repetição sem nova 
 
 Não se aplica a este PR, pois nenhuma tela ou rota usa os métodos ainda. As conferências manuais vêm com os próximos dois PRs.
 
-## 210. Página pública de uma publicação no semeador (/p/<diário>/<seq>)
+## 211. Página pública de uma publicação no semeador (/p/<diário>/<seq>)
 
 Um membro publica uma publicação própria na web ao acrescentar o registro assinado `post-share` ao próprio diário; retirar grava uma tombstone, e apagar a publicação também encerra a página. O semeador serve `GET` e `HEAD /p/<diário>/<seq>`, as fotos em `/p/<diário>/<seq>/foto/<n>` (n de 1 a 4) e `/p/policy`, e só mostra a página com compartilhamento vivo, publicação viva, diário visível, nem retido nem bloqueado, que não seja Página, e com o diário lido por inteiro; na dúvida, não mostra nada. `VARANDA_POSTS_ORIGIN` nasce desligado e é independente de `VARANDA_FEIRA_ORIGIN`.
 
