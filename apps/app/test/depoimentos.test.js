@@ -91,8 +91,8 @@ test("'Agora não' writes no record", (t) => {
   t.ok(body, 'notNow handler found')
   t.absent(/testimonial\.|request\(/.test(body), 'no testimonial.* call and no request')
   t.ok(body.includes('hideTestimonial(row.ref)'), 'hides on this device')
-  t.ok(screen.includes("<Pill label='Agora não' onPress={() => data.notNow(row)} />"), 'the pill calls notNow')
-  t.ok(screen.includes("<Pill label='Mostrar no perfil' filled"), 'Mostrar no perfil is the filled pill')
+  t.ok(screen.includes("<Pill small icon='fechar' accessibilityLabel='Agora não' onPress={() => data.notNow(row)} />"), 'the pill calls notNow')
+  t.ok(screen.includes("<Pill small label='Mostrar no perfil' filled"), 'Mostrar no perfil is the filled pill')
   t.ok(screen.includes("request('testimonial.show', { from: row.from, seq: row.seq })"), 'show by testimonial.show')
   const diario = read('screens/Diario.js')
   t.ok(diario.includes('withPending: true'), 'Diario reads testimonial.pending')
@@ -410,7 +410,7 @@ test("'Agora não' refreshes every instance", (t) => {
 test('Enviados names wrap to two lines and Retirar names the person', (t) => {
   const screen = read('screens/Depoimentos.js')
   t.ok(screen.includes("<Text style={styles.name} numberOfLines={2}>{'Para ' + title}</Text>"), 'two lines')
-  t.ok(screen.includes("accessibilityLabel={'retirar depoimento para ' + title}"), 'Retirar labelled with the name')
+  t.ok(screen.includes("<MoreButton label={'retirar depoimento para ' + title} actions={[{ icon: 'lixeira', label: 'Retirar', danger: true, onPress: () => onRetract({ ref: row.ref, name: title, about: row.to }) }]} />"), 'Retirar in a MoreButton labelled with the name')
   // Sheet titles stay short and fixed: a name there is cut on Android.
   t.ok(screen.includes('title={RETRACT_TITLE}') && screen.includes("export const RETRACT_TITLE = 'Retirar depoimento?'"), 'fixed retract title')
   t.ok(screen.includes('body={retractBody(retracting !== null ? retracting.name : null)}'), 'the body names the person')

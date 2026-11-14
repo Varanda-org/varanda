@@ -4,7 +4,10 @@
 // display-safe strings (already through displayText), except `bio`: the raw
 // peer text, which MentionText passes through displayText piece by piece so
 // its links stay tappable, as in a post.
+// onTabsLayout gets the tabs slot's { y, height } in the header's own
+// coordinates, so a profile bar can pin a copy of the tabs.
 
+import { useCallback, useRef } from 'react'
 import { StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
@@ -17,7 +20,11 @@ import { useStyles } from './ThemeProvider'
 
 const STACK_SCALE = 1.3
 
-export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBack, bandButtons, avatar, title, subtitle, bio, counts, note, actions, more, rows, tabs }) {
+// A Pill with an icon and no label is a 40 pt circle: it keeps its size
+// instead of taking a share of the row.
+const isIconOnly = (el) => !!el && !!el.props && typeof el.props.icon === 'string' && (typeof el.props.label !== 'string' || el.props.label === '')
+
+export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBack, bandButtons, avatar, title, subtitle, bio, counts, note, actions, more, rows, tabs, corner, onTabsLayout }) {
   const styles = useStyles(makeStyles)
   const { width } = useWindowDimensions()
   const avatarSize = width >= layout.column ? space.xxl * 2 + space.sm : layout.hit * 2
@@ -27,8 +34,27 @@ export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBa
   // Large system text: a one-word label in a half-width pill could only wrap
   // inside the word ("Seguin/do"), so each pill takes a full-width row.
   const stacked = useWindowDimensions().fontScale > STACK_SCALE
+  // The slot is the last child, so its y is the header's height less its own.
+  // Read from heights: on the web onLayout fires on a resize only, so a slot
+  // pushed down by a bio that loads late would keep a stale y.
+  const heights = useRef({ root: null, slot: null })
+  const report = useRef(onTabsLayout)
+  report.current = onTabsLayout
+  const emitTabs = useCallback(() => {
+    const { root, slot } = heights.current
+    if (typeof report.current !== 'function' || root === null || slot === null) return
+    report.current({ y: root - slot, height: slot })
+  }, [])
+  const onRootLayout = useCallback((e) => {
+    heights.current.root = e.nativeEvent.layout.height
+    emitTabs()
+  }, [emitTabs])
+  const onSlotLayout = useCallback((e) => {
+    heights.current.slot = e.nativeEvent.layout.height
+    emitTabs()
+  }, [emitTabs])
   return (
-    <View>
+    <View onLayout={onRootLayout}>
       <SunsetBand height={bandHeight}>
         {/* At the top: the avatar row below rises 44 pt into the band from
             x=16 and is drawn later, so a bottom-left control would get no touches. */}
@@ -56,6 +82,7 @@ export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBa
                 avatar takes touches. */}
             <View style={[styles.headRow, { marginTop: -avatarSize / 2 }]} pointerEvents='box-none'>
               <Avatar name={a.name} publicKey={a.publicKey} size={avatarSize} picture={a.picture} persist={a.persist} ring />
+              {corner ? <View style={styles.corner} pointerEvents='auto'>{corner}</View> : null}
             </View>
             <View style={styles.data}>
               {title ? <Text style={styles.name} accessibilityRole='header'>{title}</Text> : null}
@@ -99,7 +126,9 @@ export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBa
                           </View>
                         )
                       }
-                      return <View key={i} style={stacked ? styles.actionStacked : styles.action}>{action}</View>
+                      const round = isIconOnly(action)
+                      const wrap = stacked ? (round ? styles.actionStackedRound : styles.actionStacked) : (round ? styles.actionRound : styles.action)
+                      return <View key={i} style={wrap}>{action}</View>
                     })}
                     {more && !(stacked && shownActions.length > 0) ? <View style={stacked ? styles.moreStacked : null}>{more}</View> : null}
                   </View>
@@ -109,7 +138,7 @@ export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBa
           </>
           )}
       {rows || null}
-      {tabs || null}
+      <View onLayout={onSlotLayout}>{tabs || null}</View>
     </View>
   )
 }
@@ -147,6 +176,7 @@ const makeStyles = (colors) => StyleSheet.create({
     alignItems: 'flex-end',
     justifyContent: 'space-between'
   },
+  corner: { flexShrink: 1, paddingBottom: space.xs },
   data: { width: '100%', maxWidth: layout.column, alignSelf: 'center', paddingTop: space.md, paddingHorizontal: space.lg, paddingBottom: space.md, gap: space.xs },
   name: { ...type.profileName, fontFamily: fonts.title, color: colors.ink },
   keyText: { ...type.postMeta, color: colors.soft },
@@ -160,8 +190,10 @@ const makeStyles = (colors) => StyleSheet.create({
   // stack full width and the overflow button shares the last pill's row.
   actions: { flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', gap: space.sm, marginTop: space.md },
   action: { flexGrow: 1, flexBasis: 0, alignItems: 'stretch' },
+  actionRound: { flexGrow: 0, flexShrink: 0, alignItems: 'flex-start' },
   actionsStacked: { flexDirection: 'column', alignItems: 'stretch', gap: space.sm, marginTop: space.md },
   actionStacked: { alignItems: 'stretch' },
+  actionStackedRound: { alignItems: 'flex-start' },
   lastStacked: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
   actionStackedGrow: { flexGrow: 1, flexBasis: 0, alignItems: 'stretch' },
   moreStacked: { alignSelf: 'flex-end' }

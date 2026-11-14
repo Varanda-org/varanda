@@ -258,3 +258,232 @@ test('unavailable and empty states retain scoped titles, short actions and match
     t.absent(/(?:actionLabel|secondaryLabel|label)='tentar de novo'/.test(read('screens/' + name + '.js')), name + ' uses the shared retry casing')
   }
 })
+
+// Run a discovery screen's own 'seguir' handler (and its helpers) without
+// React: the source text, cut at each function's closing brace, in a vm.
+function followHandler (screen, helpers, context) {
+  const src = read('screens/' + screen + '.js')
+  const cut = (marker) => {
+    const at = src.indexOf(marker)
+    if (at === -1) throw new Error('missing ' + marker + ' in ' + screen)
+    return src.slice(at, src.indexOf('\n  }\n', at) + '\n  }\n'.length)
+  }
+  const body = [...helpers, 'const follow = async (author, name, username) => {'].map(cut).join('')
+  return require('node:vm').runInNewContext('(() => {\n' + body + 'return follow\n})()', context)
+}
+
+function followHarness (screen, { answer, loadedAt = 1, active = true }) {
+  const A = 'a'.repeat(64)
+  const h = { A, calls: [], toasts: [], commits: [], dropped: [], marks: [], reconciles: [], reloads: 0, changed: 0 }
+  const context = {
+    stateRef: { current: { following: new Set(), loadedAt, items: [] } },
+    activeRef: { current: active },
+    mountedRef: { current: true },
+    followsPending: { current: false },
+    commit: (patch) => {
+      context.stateRef.current = { ...context.stateRef.current, ...patch }
+      if (patch.following) h.commits.push([...patch.following])
+    },
+    request: (method, params) => {
+      h.calls.push(method + ' ' + JSON.stringify(params))
+      return answer()
+    },
+    dropFollowed: (author) => h.dropped.push(author),
+    markFollow: (key, on) => h.marks.push([key, on]),
+    reconcileFollows: (alive) => { h.reconciles.push(alive) },
+    loadFollows: () => { h.reloads++ },
+    displayText: (s) => s,
+    whoOf: (p) => ({ title: p.name }),
+    errorText: (err) => (err.uncertain ? 'incerto: pode ter sido aplicado; confira antes de repetir' : err.message),
+    onToast: (text) => h.toasts.push(text),
+    onFollowsChanged: () => { h.changed++ }
+  }
+  h.context = context
+  h.follow = followHandler(screen, screen === 'Espiadinha' ? ['const rereadFollows = () => {'] : [], context)
+  return h
+}
+
+test('a failed or uncertain seguir on Espiadinha and Busca reads the follow set again, with one write per press', async (t) => {
+  const failures = [new Error('falhou'), Object.assign(new Error('x'), { uncertain: true })]
+  for (const screen of ['Espiadinha', 'Busca']) {
+    for (const err of failures) {
+      let reject
+      const h = followHarness(screen, { answer: () => new Promise((resolve, _reject) => { reject = _reject }) })
+      const first = h.follow(h.A, 'Bia', 'bia')
+      await h.follow(h.A, 'Bia', 'bia')
+      t.is(h.calls.length, 1, screen + ': a second press while pending sends nothing')
+      reject(err)
+      await first
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      t.alike(h.calls, ['follow.add ' + JSON.stringify({ key: h.A })], screen + ': exactly one follow.add, never resent')
+      t.alike(h.toasts, [err.uncertain ? 'incerto: pode ter sido aplicado; confira antes de repetir' : 'falhou'], screen + ': the failure is shown, an uncertain one says it may have worked')
+      const reads = screen === 'Espiadinha' ? h.reconciles.length : h.reloads
+      t.is(reads, 1, screen + ': the follow set is read again once')
+      t.alike(h.dropped, [], screen + ': rows leave only after a success')
+      t.alike(h.marks, [], screen + ': the set is not marked on a failure')
+      t.is(h.changed, 0, screen + ': no follow change is announced')
+      t.alike(h.commits, [[h.A], []], screen + ': pending is set before the request and cleared after')
+      if (screen === 'Espiadinha' && h.reconciles.length === 1) {
+        t.is(h.reconciles[0](), true, 'the re-read runs while mounted')
+        h.context.mountedRef.current = false
+        t.is(h.reconciles[0](), false, 'and stops on unmount')
+      }
+    }
+    const ok = followHarness(screen, { answer: () => Promise.resolve({ changed: true }) })
+    await ok.follow(ok.A, 'Bia', 'bia')
+    t.is(ok.calls.length, 1, screen + ': one write on success')
+    t.is(screen === 'Espiadinha' ? ok.reconciles.length : ok.reloads, 0, screen + ': a success reads nothing again')
+    t.alike(screen === 'Espiadinha' ? ok.dropped : ok.marks, screen === 'Espiadinha' ? [ok.A] : [[ok.A, true]], screen + ': a success applies the follow')
+  }
+  for (const [loadedAt, active] of [[null, true], [1, false]]) {
+    const h = followHarness('Espiadinha', { answer: () => Promise.reject(new Error('falhou')), loadedAt, active })
+    await h.follow(h.A, 'Bia', 'bia')
+    t.is(h.calls.length, 1, 'one write')
+    t.is(h.reconciles.length, 0, 'a hidden or loading list does not read now')
+    t.is(h.context.followsPending.current, true, 'it keeps the read for the next show or first page')
+  }
+})
+
+// useFollowSet without React: hook slots persist across renders (in call
+// order) and state commits are recorded. The hook's own source text runs in
+// a vm with the real readFollowKeys; render() re-runs it as React would.
+function followSetHarness (answer, readFollowKeys) {
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Conversa.js'), 'utf8')
+  const at = src.indexOf('export function useFollowSet')
+  if (at === -1) throw new Error('missing useFollowSet')
+  const body = src.slice(at, src.indexOf('\n}\n', at) + 3).replace('export ', '')
+  const h = { commits: [], calls: 0 }
+  const slots = []
+  let slot = 0
+  const keysOf = (v) => [...(v && v.set ? v.set : v)].sort()
+  const context = {
+    FOLLOW_LIMIT_MAX: 500,
+    readFollowKeys,
+    useState: (initial) => {
+      const i = slot++
+      if (!(i in slots)) slots[i] = { value: initial }
+      const cell = slots[i]
+      return [cell.value, (v) => {
+        cell.value = typeof v === 'function' ? v(cell.value) : v
+        h.commits.push(keysOf(cell.value))
+      }]
+    },
+    useRef: (current) => {
+      const i = slot++
+      if (!(i in slots)) slots[i] = { current }
+      return slots[i]
+    },
+    useCallback: (fn) => fn,
+    request: (method, params) => {
+      h.calls++
+      return answer(method, params)
+    }
+  }
+  const hook = require('node:vm').runInNewContext(body + '\nuseFollowSet', context)
+  h.render = () => {
+    slot = 0
+    h.set = hook(context.request)
+    return h.set
+  }
+  h.render()
+  return h
+}
+
+test('a failed follow set read keeps the shown set and its marks, never a partial one', async (t) => {
+  const { readFollowKeys } = await import('../src/follow.js')
+  const [A, B, C] = ['a', 'b', 'c'].map((c) => c.repeat(64))
+  let mode = 'fail'
+  let release
+  const h = followSetHarness((method, { offset }) => {
+    if (mode === 'fail') return Promise.reject(Object.assign(new Error('x'), { uncertain: true }))
+    if (mode === 'slow') {
+      mode = 'ok'
+      return new Promise((resolve) => { release = () => resolve({ follows: [A], total: 1 }) })
+    }
+    if (mode === 'partial' && offset > 0) return Promise.reject(new Error('caiu'))
+    return Promise.resolve(offset === 0 ? { follows: [A.toUpperCase()], total: 2 } : { follows: [B], total: 2 })
+  }, readFollowKeys)
+  const shown = () => {
+    const f = h.render().follows
+    return f === null ? null : [...f].sort()
+  }
+  const first = await h.set.load()
+  t.alike([...first], [], 'a failed first read resolves to an empty set')
+  t.alike(h.commits, [], 'and commits nothing (no-store, the safe side)')
+  t.is(shown(), null, 'the set stays unknown, so no one shows as a stranger')
+  mode = 'ok'
+  const good = await h.set.load()
+  t.alike([...good].sort(), [A, B], 'a complete paged read replaces the set')
+  t.alike(h.commits.at(-1), [A, B])
+  h.set.mark(C, true)
+  t.alike(h.commits.at(-1), [A, B, C], 'mark adds to the known set')
+  for (const failing of ['partial', 'fail']) {
+    mode = failing
+    const before = h.commits.length
+    const got = await h.set.load()
+    t.alike([...got], [], failing + ': resolves to an empty set for callers that wait on it')
+    t.alike(shown(), [A, B, C], failing + ': the shown set keeps the last good read and its marks')
+    t.is(h.commits.length, before, failing + ': commits nothing, so no partial or empty set')
+  }
+  h.set.mark(A, false)
+  t.alike(h.commits.at(-1), [B, C], 'mark keeps working on the kept set')
+  mode = 'ok'
+  t.alike([...await h.set.load()].sort(), [A, B], 'the next good read replaces it')
+  t.alike(shown(), [A, B], 'the new set is shown')
+  t.alike(shown(), [A, B], 'and stays shown across renders')
+  mode = 'fail'
+  let before = h.commits.length
+  t.alike([...await h.set.load()], [], 'a failed read resolves empty')
+  t.is(h.commits.length, before, 'and commits nothing')
+  t.alike(shown(), [A, B], 'the last good set still shows')
+  mode = 'ok'
+  await h.set.load()
+  h.set.mark(C, true)
+  mode = 'fail'
+  before = h.commits.length
+  await h.set.load()
+  t.alike(shown(), [A, B, C], 'a failed re-read keeps the set and its marks')
+  t.is(h.commits.length, before, 'without a commit')
+  h.set.mark(A, false)
+  t.alike(shown(), [B, C], 'mark works')
+  mode = 'slow'
+  const slow = h.set.load()
+  release()
+  t.alike([...await slow], [A], 'a slow read resolves to what it read')
+  t.alike(shown(), [A], 'and is committed when it lands')
+  mode = 'fail'
+  await h.set.load()
+  t.alike(shown(), [A], 'a failure after it keeps it')
+  const partial = followSetHarness((method, { offset }) => offset === 0 ? Promise.resolve({ follows: [A], total: 2 }) : Promise.reject(new Error('caiu')), readFollowKeys)
+  t.alike([...await partial.set.load()], [], 'a first read that fails on a later page is empty, not partial')
+  t.alike(partial.commits, [], 'and commits nothing')
+})
+
+test('Espiadinha and Busca track mount for the follow re-read, StrictMode safe', async (t) => {
+  for (const screen of ['Espiadinha', 'Busca']) {
+    const src = read('screens/' + screen + '.js')
+    const at = src.indexOf('const mountedRef = useRef(true)')
+    t.ok(at !== -1, screen + ' keeps a mounted ref')
+    const block = src.slice(at, src.indexOf('}, [])', at) + '}, [])'.length)
+    const effects = []
+    const ref = require('node:vm').runInNewContext('(() => {\n' + block + '\nreturn mountedRef\n})()', {
+      useRef: (current) => ({ current }),
+      useEffect: (fn, deps) => effects.push({ fn, deps })
+    })
+    t.is(effects.length, 1, screen + ': one effect')
+    t.is(JSON.stringify(effects[0].deps), '[]', screen + ': runs on mount only')
+    ref.current = false
+    const cleanup = effects[0].fn()
+    t.is(ref.current, true, screen + ': the effect body marks it mounted (StrictMode remount)')
+    t.is(typeof cleanup, 'function', screen + ': with a cleanup')
+    if (typeof cleanup === 'function') cleanup()
+    t.is(ref.current, false, screen + ': the cleanup marks it unmounted')
+  }
+  const h = followHarness('Busca', { answer: () => Promise.reject(new Error('falhou')) })
+  const press = h.follow(h.A, 'Bia', 'bia')
+  h.context.mountedRef.current = false
+  await press
+  t.is(h.calls.length, 1, 'one write')
+  t.is(h.reloads, 0, 'Busca does not read the follow set after unmount')
+  t.alike(h.toasts, ['falhou'], 'the failure is still reported')
+})

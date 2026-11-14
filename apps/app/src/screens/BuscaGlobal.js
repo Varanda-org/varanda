@@ -18,6 +18,10 @@
 //
 // Each category keeps its own draft and results while the other is shown:
 // both panes stay mounted and only the selected one is visible.
+//
+// Recent searches (searchRecents.js) live in component state only, one list
+// per category, so they last while the tab stays mounted and never reach a
+// store, a file or a URL (SEARCH_MEMORY). A new signed-in key empties them.
 
 import { useContext, useEffect, useRef, useState } from 'react'
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
@@ -30,6 +34,7 @@ import { whoOf } from '../who'
 import { HELP, SHORT } from '../help'
 import { PARTIAL_KEY_TEXT } from '../followInput'
 import { SEARCH_INPUT_MAX, SEARCH_INVALID, SEARCH_TRUNCATED } from '../topics'
+import { RECENTS_CLEAR, RECENTS_CLEAR_LABEL, RECENTS_REMOVE, RECENTS_TITLE, clearRecents, recordRecent, removeRecent } from '../searchRecents'
 import {
   BUSCA_EMPTY, BUSCA_EMPTY_CODE, BUSCA_LABEL, BUSCA_NOT_HOSTED, BUSCA_NOT_HOSTED_TITLE, BUSCA_PLACEHOLDER, CATEGORIES, CATEGORY_LABEL,
   CODE_FIELD_LABEL, buscaNotice, debouncePlan, plan, staleGuard
@@ -40,14 +45,19 @@ import { MemberRow } from '../ui/MemberRow'
 import { Pill } from '../ui/Pill'
 import { ScreenVisible } from '../ui/screenVisible'
 import { SearchField } from '../ui/SearchField'
+import { Segmented } from '../ui/Segmented'
 import { EmptyState, SkeletonRow } from '../ui/States'
-import { type } from '../ui/theme'
+import { layout, space, type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
 import { useMemberSearch } from '../useMemberSearch'
 import Busca from './Busca'
 import { useFollowSet } from './Conversa'
 
 const NO_DRAFTS = Object.freeze({ contas: '', publicacoes: '' })
+const NO_RECENTS = Object.freeze({ contas: clearRecents(), publicacoes: clearRecents() })
+const TABS = CATEGORIES.map((k) => ({ id: k, label: CATEGORY_LABEL[k] }))
+const FOLLOW_FAILED = 'Não foi possível seguir agora.'
+const FOLLOW_UNCERTAIN = 'Não deu para confirmar se você passou a seguir.'
 
 // `paneRequest` (number): every change, and the mount, shows Contas.
 // `onFollowsChanged` (optional): called after a follow or unfollow that
@@ -71,6 +81,15 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
   draftsRef.current = drafts
 
   useEffect(() => { setCategory('contas') }, [paneRequest])
+
+  const [recents, setRecents] = useState(NO_RECENTS)
+  const record = (cat, text) => setRecents((r) => ({ ...r, [cat]: recordRecent(r[cat], text) }))
+  const lastOwn = useRef(own)
+  useEffect(() => {
+    if (lastOwn.current === own) return
+    lastOwn.current = own
+    setRecents(NO_RECENTS)
+  }, [own])
 
   // A reselect scrolls only the category on screen: each one gets its own
   // signal, so a hidden list never moves.
@@ -103,7 +122,13 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
   const remove = useAction()
   const follow = useAction()
   const search = useMemberSearch({ request: node.request, hosted, online: node.online !== false, ownKey: own })
-  const { setQuery: setSearchQuery, flush: handleSearch, retry: handleRetry } = search
+  const { setQuery: setSearchQuery, flush: flushSearch, retry: handleRetry } = search
+  const handleSearch = () => {
+    const text = draftsRef.current.contas
+    const c = plan('contas', text)
+    if (c.kind === 'name' || c.kind === 'handle') record('contas', text)
+    flushSearch()
+  }
   const searching = search.phase !== 'idle'
   const loading = search.phase === 'loading'
   // Read when search first becomes active and again at every new search (a
@@ -195,8 +220,12 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
 
   // Seguir on a search row: the verified name and @nome come from the peek.
   // One attempt; never retried automatically.
+  // The busy flag is set synchronously: a second press in the same frame must
+  // neither send, toast nor clear the row still in flight.
+  const hitBusy = useRef(false)
   const doFollowHit = async (hit) => {
-    if (hit.author === own) return
+    if (hit.author === own || hitBusy.current) return
+    hitBusy.current = true
     setDone('')
     setFollowing(hit.author)
     try {
@@ -207,9 +236,12 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
         const title = displayText(whoOf({ name: hit.name, username: hit.username }).title)
         setDone(r.value.changed ? 'Agora você segue ' + title + '.' : 'Você já segue esta pessoa.')
         if (r.value.changed && typeof onFollowsChanged === 'function') onFollowsChanged()
+      } else if (typeof onToast === 'function') {
+        onToast(r.uncertain ? FOLLOW_UNCERTAIN : FOLLOW_FAILED)
       }
       loadFollows()
     } finally {
+      hitBusy.current = false
       setFollowing(null)
     }
   }
@@ -280,6 +312,30 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
     </View>
   )
 
+  // Shown only under an empty field; a chosen query runs that pane's submit.
+  const recentList = (cat) => (recents[cat].length === 0 || drafts[cat].trim() !== ''
+    ? null
+    : (
+      <View style={styles.recents}>
+        <View style={styles.recentRow}>
+          <Text style={styles.recentsTitle} accessibilityRole='header'>{RECENTS_TITLE}</Text>
+          <Pressable accessibilityRole='button' accessibilityLabel={RECENTS_CLEAR_LABEL} onPress={() => setRecents((r) => ({ ...r, [cat]: clearRecents() }))} style={styles.recentAction}>
+            <Text style={styles.link}>{RECENTS_CLEAR}</Text>
+          </Pressable>
+        </View>
+        {recents[cat].map((q) => (
+          <View key={q} style={styles.recentRow}>
+            <Pressable accessibilityRole='button' accessibilityLabel={'buscar ' + displayText(q)} onPress={() => chooseRecent(cat, q)} style={styles.recentQuery}>
+              <Text style={styles.recentText} numberOfLines={1}>{displayText(q)}</Text>
+            </Pressable>
+            <Pressable accessibilityRole='button' accessibilityLabel={'remover ' + displayText(q)} onPress={() => setRecents((r) => ({ ...r, [cat]: removeRecent(r[cat], q) }))} style={styles.recentAction}>
+              <Text style={styles.link}>{RECENTS_REMOVE}</Text>
+            </Pressable>
+          </View>
+        ))}
+      </View>
+      ))
+
   const contasScroll = useRef(null)
   useEffect(() => {
     if (tops.contas > 0 && contasScroll.current) contasScroll.current.scrollTo({ y: 0, animated: true })
@@ -299,6 +355,7 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
       <ErrorText>{localError || add.error}</ErrorText>
       <ErrorText>{follow.error || remove.error}</ErrorText>
       <Notice>{done}</Notice>
+      {recentList('contas')}
       {cls.kind === 'empty' && hits.length === 0
         ? <EmptyState icon='gente' title={CATEGORY_LABEL.contas} body={hosted ? BUSCA_EMPTY.contas : BUSCA_EMPTY_CODE} actionLabel={hosted ? BUSCA_LABEL.contas : 'Digitar código'} onAction={() => inputRef.current?.focus()} secondaryLabel={hosted ? CATEGORY_LABEL.publicacoes : undefined} onSecondary={() => setCategory('publicacoes')} />
         : null}
@@ -351,11 +408,13 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
     shownPath.current = r.query.path
     setQuery(r.query)
   }
-  const submit = () => {
+  const submitPosts = (text) => {
     postsSeq.current += 1
     stopPostsTimer()
-    runPosts(drafts.publicacoes, false)
+    if (postsGate === null && plan('publicacoes', text).query !== null) record('publicacoes', text)
+    runPosts(text, false)
   }
+  const submit = () => submitPosts(drafts.publicacoes)
   const typePosts = (text) => {
     const seq = ++postsSeq.current
     stopPostsTimer()
@@ -392,6 +451,7 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
   } else if (query === null) {
     postsPane = (
       <ScrollView ref={postsScroll} keyboardShouldPersistTaps='handled' contentContainerStyle={[styles.pane, { paddingBottom: bottomPad }]}>
+        {recentList('publicacoes')}
         {drafts.publicacoes.trim() === ''
           ? <EmptyState icon='lupa' title={CATEGORY_LABEL.publicacoes} body={BUSCA_EMPTY.publicacoes} actionLabel={BUSCA_LABEL.publicacoes} onAction={() => inputRef.current?.focus()} secondaryLabel={CATEGORY_LABEL.contas} onSecondary={() => setCategory('contas')} />
           : plan('publicacoes', drafts.publicacoes).query === null
@@ -434,40 +494,51 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
     const c = plan('contas', t)
     if (hosted) setSearchQuery(c.kind === 'name' || c.kind === 'handle' ? t : '')
   }
+  // Contas searches the chosen query through the field edit path (one
+  // debounced run); Publicações sends it at once, as Enter does.
+  const chooseRecent = (cat, text) => {
+    if (cat === 'contas') {
+      onChangeText(text)
+      record('contas', text)
+      return
+    }
+    setDrafts((d) => ({ ...d, [cat]: text }))
+    submitPosts(text)
+  }
+  const cancel = () => {
+    onChangeText('')
+    inputRef.current?.blur()
+  }
 
   return (
     <View style={styles.flex}>
       <View style={styles.top}>
         {showField
           ? (
-            <SearchField
-              inputRef={inputRef}
-              label={category === 'contas' && !hosted ? CODE_FIELD_LABEL : BUSCA_LABEL[category]}
-              placeholder={category === 'contas' && !hosted ? 'código da pessoa (64 letras e números)' : BUSCA_PLACEHOLDER[category]}
-              value={draft}
-              onChangeText={onChangeText}
-              maxLength={SEARCH_INPUT_MAX}
-              onSubmitEditing={category === 'contas' ? (hosted ? handleSearch : undefined) : submit}
-            />
+            <View style={styles.fieldRow}>
+              <View style={styles.field}>
+                <SearchField
+                  inputRef={inputRef}
+                  label={category === 'contas' && !hosted ? CODE_FIELD_LABEL : BUSCA_LABEL[category]}
+                  placeholder={category === 'contas' && !hosted ? 'código da pessoa (64 letras e números)' : BUSCA_PLACEHOLDER[category]}
+                  value={draft}
+                  onChangeText={onChangeText}
+                  maxLength={SEARCH_INPUT_MAX}
+                  onSubmitEditing={category === 'contas' ? (hosted ? handleSearch : undefined) : submit}
+                />
+              </View>
+              {draft !== ''
+                ? (
+                  <Pressable accessibilityRole='button' onPress={cancel} style={styles.cancel}>
+                    <Text style={styles.link}>Cancelar</Text>
+                  </Pressable>
+                  )
+                : null}
+            </View>
             )
           : null}
       </View>
-      <View style={styles.tabs} accessibilityRole='tablist'>
-        {CATEGORIES.map((k) => {
-          const selected = k === category
-          return (
-            <Pressable
-              key={k}
-              accessibilityRole='tab'
-              accessibilityState={{ selected }}
-              onPress={() => setCategory(k)}
-              style={[styles.tab, selected && styles.tabOn]}
-            >
-              <Text style={[styles.tabText, selected && styles.tabTextOn]}>{CATEGORY_LABEL[k]}</Text>
-            </Pressable>
-          )
-        })}
-      </View>
+      <Segmented options={TABS} selected={category} onSelect={setCategory} />
       <View style={[styles.flex, category !== 'contas' && styles.hidden]}>{contasPane}</View>
       {/* The hidden pane stays mounted and still measures as on screen, so a
           music player in it must learn that it left the visible screen. */}
@@ -485,17 +556,14 @@ const makeStyles = (colors) => StyleSheet.create({
   pane: { paddingVertical: 12, paddingHorizontal: 16, gap: 8 },
   bleed: { marginHorizontal: -16 },
   addRow: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8 },
-  tabs: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: colors.line },
-  tab: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    minHeight: 44,
-    paddingVertical: 10,
-    borderBottomWidth: 2,
-    borderBottomColor: 'transparent'
-  },
-  tabOn: { borderBottomColor: colors.accent },
-  tabText: { ...type.pill, color: colors.soft },
-  tabTextOn: { color: colors.accent }
+  fieldRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
+  field: { flex: 1, minWidth: 0 },
+  cancel: { minHeight: layout.hit, justifyContent: 'center', paddingHorizontal: space.xs },
+  link: { ...type.more, color: colors.accent },
+  recents: { marginBottom: space.sm },
+  recentRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm, minHeight: layout.hit },
+  recentsTitle: { ...type.postName, flex: 1, color: colors.ink },
+  recentQuery: { flex: 1, minWidth: 0, minHeight: layout.hit, justifyContent: 'center' },
+  recentText: { ...type.postText, color: colors.ink },
+  recentAction: { minHeight: layout.hit, minWidth: layout.hit, alignItems: 'flex-end', justifyContent: 'center' }
 })

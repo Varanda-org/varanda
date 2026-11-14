@@ -154,3 +154,54 @@ test('pessoas.js imports nothing from react, react-native or node built-ins', as
   }
   t.absent(/\brequire\s*\(/.test(src), 'no require')
 })
+
+test('people lists use the search pill, a help button and a follow failure toast', (t) => {
+  const read = (f) => fs.readFileSync(path.join(__dirname, '../src/screens', f), 'utf8')
+  const pessoas = read('Pessoas.js')
+  const seguindo = read('Seguindo.js')
+  for (const src of [pessoas, seguindo]) {
+    t.ok(/<SearchField\b/.test(src))
+    t.absent(/<Field\b/.test(src))
+    t.ok(/<HelpButton doc=\{FILTER_HELP\}/.test(src))
+    t.absent(/<Soft>\{FILTER_HINT\}<\/Soft>/.test(src))
+  }
+  t.absent(/<SectionHeader/.test(seguindo), 'no repeated title')
+  t.ok(/accessibilityLabel=\{who\.known \? 'denunciar '/.test(seguindo), 'report control stays')
+  const fail = pessoas.slice(pessoas.indexOf('const doFollow'), pessoas.indexOf('const doUnfollow'))
+  t.ok(/notify\(FOLLOW_FAILED\(r\)\)\s*\n\s*loadFollows\(\)/.test(fail), 'toast then re-read, no resend')
+  t.is((fail.match(/request\('follow\.add'/g) || []).length, 1)
+})
+
+test('two follow presses in one tick send once, never toast and keep the first pending key', async (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Pessoas.js'), 'utf8')
+  const code = src.slice(src.indexOf('const doFollow = async'), src.indexOf('const doUnfollow'))
+  const pending = []
+  const toasts = []
+  const sent = []
+  let reads = 0
+  let release
+  // Same contract as useAction.run: a call while busy returns without sending.
+  let busy = false
+  const follow = {
+    run: async (fn) => {
+      if (busy) return { ok: false, uncertain: false }
+      busy = true
+      try { return { ok: true, value: await fn() } } finally { busy = false }
+    }
+  }
+  const build = new Function('own', 'followBusy', 'setDone', 'setPendingKey', 'follow', 'request', 'markKnown', 'displayText', 'whoOf', 'notify', 'FOLLOW_FAILED', 'loadFollows', 'onFollowsChanged', code + '; return doFollow') // eslint-disable-line no-new-func
+  const doFollow = build('me', { current: false }, () => {}, (k) => pending.push(k), follow,
+    (m, p) => { sent.push(p.key); return new Promise((resolve) => { release = () => resolve({ changed: true }) }) },
+    () => {}, (x) => x, () => ({ title: 'Ana' }), (m) => toasts.push(m), () => 'falhou', () => { reads++ }, null)
+  const first = doFollow({ author: 'a' })
+  const second = doFollow({ author: 'b' })
+  await second
+  t.alike(sent, ['a'], 'one request')
+  t.alike(pending, ['a'], 'the second press touched nothing')
+  t.is(toasts.length, 0, 'no failure toast')
+  t.is(reads, 0, 'no re-read')
+  release()
+  await first
+  t.alike(pending, ['a', null], 'cleared by its own answer')
+  t.alike(toasts, ['Agora você segue Ana.'])
+})

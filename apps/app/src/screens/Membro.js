@@ -34,6 +34,7 @@ import { displayText } from '@varanda/rpc'
 import { perfMarks, useNode } from '../node'
 import { useNames } from '../names'
 import { readBlockedPeek, useBlocks } from '../blocksProvider'
+import { pinnedContentStyle } from '../profileBar'
 import { BLOCK_TEXTS } from '../memberBlocks'
 import { avatarOf } from '../media/avatar'
 import { fetchFeiraAuthor, fetchMember, invalidateMember, POSTS_MAX } from '../indexClient'
@@ -52,14 +53,14 @@ import { Pill } from '../ui/Pill'
 import { MoreButton } from '../ui/MoreButton'
 import { PageNoticeSheet } from '../ui/PageNoticeSheet'
 import { Sheet } from '../ui/Sheet'
-import { ShareProfile } from '../ui/ShareProfile'
+import { ShareProfile, shareProfileDirect } from '../ui/ShareProfile'
 import { buildProfileUrl } from '../profileLink'
 import { installationOrigin } from '../installation'
 import { pageNoticeStore } from '../pageNoticeStore'
 import { pageNoticeKey, pageReadKind } from '../pageNotice'
 import { PressScale } from '../ui/PressScale'
 import { ProfileHeader, ProfileStatus } from '../ui/ProfileHeader'
-import { ProfileBar, useProfileBar } from '../ui/ProfileBar'
+import { BAR, ProfileBar, usePinnedTabSelect, useProfileBar } from '../ui/ProfileBar'
 import { LABELS } from '../dm'
 import { COUNTS_INCOMPLETE_NOTE } from '../pessoas'
 import { useFollowCounts } from '../useFollowCounts'
@@ -1006,7 +1007,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     !own && asPageMode && !closedPage && !blockedHere
       ? { icon: 'seguir', label: asPageFollowing ? 'Deixar de seguir como a página' : 'Seguir como a página', pending: following, disabled: pageFollows === null, onPress: togglePageFollow }
       : null,
-    profileUrl !== null ? { icon: 'compartilhar', label: 'Compartilhar perfil', onPress: () => setSharing(true) } : null,
+    profileUrl !== null ? { icon: 'compartilhar', label: 'Compartilhar perfil', onPress: () => { shareProfileDirect(profileUrl).then((done) => { if (!done) setSharing(true) }) } } : null,
     canWriteTestimonial && myTestimonial === null ? { icon: 'lapis', label: 'Escrever depoimento', onPress: () => setWritingTestimonial(true) } : null,
     canTestimonial && myTestimonial !== null ? { icon: 'lixeira', label: 'Retirar depoimento', danger: true, onPress: () => setRetractingTestimonial(true) } : null,
     canReport ? { icon: 'bandeira', label: 'Denunciar a conta', danger: true, onPress: () => onReport({ author, name: header.name, username: header.username }) } : null,
@@ -1038,7 +1039,15 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   }, [mural, posts.phase, posts.items, posts.loadingMore, posts.refreshing, posts.moreError, muralFill, loadMore])
 
   const insets = useSafeAreaInsets()
-  const bar = useProfileBar(insets.top + BAND, { controlsBottom: insets.top + 42 })
+  // The Segmented is the tabs View's last child, so its top in the list is
+  // the tabs slot's bottom less its own height (heights stay right on the web,
+  // where onLayout skips a move that does not resize).
+  const [tabsBottom, setTabsBottom] = useState(null)
+  const [segmentedHeight, setSegmentedHeight] = useState(null)
+  const tabsTop = tabsBottom !== null && segmentedHeight !== null ? tabsBottom - segmentedHeight : null
+  const bar = useProfileBar(insets.top + BAND, { controlsBottom: insets.top + 42, tabsTop, topInset: insets.top })
+  const listRef = useRef(null)
+  const selectPinnedTab = usePinnedTabSelect(bar, listRef, shownTab, setTab)
   const head = (
     <>
       <ProfileHeader
@@ -1093,15 +1102,18 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
             ? <Pill icon='mensagem' label='Conversar' onPress={openPageConversation} />
             : null,
           !own && !isPage && node.hosted === true && typeof onMessage === 'function' && !blockedHere
-            ? <Pill icon='mensagem' label={LABELS.message} onPress={() => onMessage(author)} />
+            ? <Pill icon='mensagem' accessibilityLabel={LABELS.message} onPress={() => onMessage(author)} />
             : null
         ].filter(Boolean).slice(0, 2)}
         more={<MoreButton title={displayText(who.title)} actions={moreActions} />}
+        onTabsLayout={(l) => setTabsBottom(l.y + l.height)}
         tabs={full
           ? (
             <View>
               <CommunitiesBox items={common} title='Comunidades em comum' onOpen={typeof onOpenCommunity === 'function' ? onOpenCommunity : undefined} />
-              <Segmented options={tabs} selected={shownTab} onSelect={setTab} />
+              <View onLayout={(e) => setSegmentedHeight(e.nativeEvent.layout.height)}>
+                <Segmented options={tabs} selected={shownTab} onSelect={setTab} />
+              </View>
             </View>
             )
           : null}
@@ -1110,7 +1122,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
         ? (
           <Sheet open={sharing} onClose={() => setSharing(false)} title='Compartilhar perfil'>
             <View style={styles.shareBody}>
-              <ShareProfile url={profileUrl} />
+              <ShareProfile url={profileUrl} onNotice={typeof onToast === 'function' ? (m) => { setSharing(false); onToast(m) } : undefined} />
             </View>
           </Sheet>
           )
@@ -1252,7 +1264,9 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
           // Mural, a tab switch) would otherwise rest with the bar half faded.
           // The 8 pt more tuck the avatar ring, which hangs 48 pt below the
           // band, fully under the 44 pt bar when there is no top inset.
-          contentContainerStyle={{ paddingBottom: bottomPad, minHeight: windowHeight + insets.top + BAND + 8 }}
+          // Raised further once the tabs are measured, so a tab picked from the
+          // pinned copy can always scroll back to the pin boundary.
+          contentContainerStyle={pinnedContentStyle({ paddingBottom: bottomPad, minHeight: windowHeight + insets.top + BAND + 8 }, windowHeight, tabsTop, insets.top + BAR)}
           onRefresh={() => { setTick((n) => n + 1); load(true) }}
           refreshing={refreshing}
           onLoadMore={phase === 'ready' && !seeded && !mural && !depo && !atEnd && !moreError ? loadMore : undefined}
@@ -1260,8 +1274,9 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
           loadMoreError={!!moreError}
           atEnd={(atEnd && !seeded) || mural || depo}
           onScrollFrame={bar.handleScrollFrame}
+          listRef={listRef}
         />
-        <ProfileBar bar={bar} topInset={insets.top} title={displayText(who.title)} onBack={onBack} />
+        <ProfileBar bar={bar} topInset={insets.top} title={displayText(who.title)} onBack={onBack} tabs={<Segmented options={tabs} selected={shownTab} onSelect={selectPinnedTab} />} />
         {pageNoticeSheet}
       </View>
       {testimonialTab.sheets}

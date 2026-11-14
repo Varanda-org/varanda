@@ -413,10 +413,26 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
 
   // 'seguir': the author's rows leave the list once the follow is applied,
   // without a reload (the pages and the scroll stay); followedHereRef keeps a
-  // page in flight from bringing them back. An uncertain failure (timeout) is
-  // reported, never retried automatically.
+  // page in flight from bringing them back. A failed or uncertain answer
+  // (timeout) is reported, never retried automatically, and the follow set
+  // is read once again: it says what really happened, so a follow that did
+  // land drops the author's rows as a follow made elsewhere would. A list
+  // that is hidden or still loading keeps that read for later, like
+  // followsSignal; a pass already started stops only on unmount.
   const dropFollowed = (author) => {
     commit({ items: recordFollow(followedHereRef.current, ++followStampRef.current, stateRef.current.items, author) })
+  }
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+  const rereadFollows = () => {
+    if (stateRef.current.loadedAt === null || !activeRef.current) {
+      followsPending.current = true
+      return
+    }
+    reconcileFollows(() => mountedRef.current)
   }
 
   const follow = async (author, name, username) => {
@@ -430,6 +446,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
       if (typeof onFollowsChanged === 'function') onFollowsChanged()
     } catch (err) {
       if (typeof onToast === 'function') onToast(errorText(err))
+      rereadFollows()
     } finally {
       const rest = new Set(stateRef.current.following)
       rest.delete(author)

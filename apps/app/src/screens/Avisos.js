@@ -1,7 +1,10 @@
 // Avisos: who followed you (and whom you do not follow yet), who replied,
 // quoted or mentioned you, and who liked or reposted your posts, newest
-// first. A follow row opens the person's profile (the Seguir button is
-// there) and leaves on the next read once you follow back (App.js bumps `refresh` on any follow change). A
+// first, under day headers, with Todas, Menções and Seguidores chips that
+// only filter what is drawn. A follow row opens the person's profile and,
+// acting as yourself and not following them yet, has a Seguir de volta pill
+// (one follow.add per press, never resent); the row leaves on the next read
+// once you follow back (App.js bumps `refresh` on any follow change). A
 // reply, quote or mention has no pill and opens that post. A like or repost
 // has no pill and opens the caller's post when the row has a ref, and stays
 // disabled when it does not. Private and quiet: no counts, a plain dot never
@@ -59,7 +62,10 @@ import { HelpSheet } from '../ui/Help'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, SkeletonRow } from '../ui/States'
 import { space, type } from '../ui/theme'
-import { peekAll, postAt } from './Conversa'
+import { FilterChips } from '../ui/FilterChips'
+import { FollowPill } from '../ui/FollowPill'
+import { FILTER_EMPTY_TEXT, FILTER_EMPTY_TITLE, FOLLOW_BACK_LABEL, NOTICE_FILTERS, filterNotices, isDayHeader, showsFollowBack, withDayHeaders } from '../noticesView'
+import { peekAll, postAt, useFollowSet } from './Conversa'
 
 function useActing () {
   return useSyncExternalStore(actingSubscribe, actingGet, actingGet)
@@ -188,6 +194,10 @@ function snippetRef (item) {
   const ref = noticeRef(item)
   return isRef(ref) ? ref : null
 }
+
+// Notices and day headers never share a key (noticeId comes from the row,
+// and a page notice is not checked).
+const rowKey = (row) => (isDayHeader(row) ? row.key : 'n:' + noticeId(row))
 
 const AVATAR_BATCH = 10
 
@@ -336,7 +346,11 @@ function useSnippets (items, request, enabled, retryKey) {
   return texts
 }
 
-function NoticeRow ({ item, now, unread, postText, picture, onOpenMember, onOpenThread }) {
+// The pill never offers Deixar de seguir: once the person is in the follow
+// set the row has no pill, so this only answers a press made mid-request.
+const NO_UNFOLLOW = () => {}
+
+function NoticeRow ({ item, now, unread, postText, picture, onOpenMember, onOpenThread, followBack, followPending, followDisabled, onFollowBack }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const who = whoOf({ name: item.name, username: item.username })
@@ -393,7 +407,7 @@ function NoticeRow ({ item, now, unread, postText, picture, onOpenMember, onOpen
     const open = ref !== null && typeof onOpenThread === 'function' ? () => onOpenThread({ ref }) : undefined
     return (
       <PressScale
-        style={({ pressed }) => [styles.row, pressed && open && styles.pressed]}
+        style={({ pressed }) => [styles.row, unread && styles.unreadRow, pressed && open && styles.pressed]}
         accessibilityRole='link'
         accessibilityLabel={ref === null ? spoken : spoken + ', abrir publicação'}
         accessibilityHint={ref === null ? undefined : 'abre a conversa'}
@@ -408,9 +422,11 @@ function NoticeRow ({ item, now, unread, postText, picture, onOpenMember, onOpen
   const open = typeof onOpenMember === 'function'
     ? () => onOpenMember(item.key, { name: item.name, username: item.username, avatar: picture || null })
     : undefined
-  return (
+  // The pill sits beside the row's control, never inside it: a screen reader
+  // reaches it on its own, and a press on it never opens the profile.
+  const profile = (
     <PressScale
-      style={({ pressed }) => [styles.row, pressed && open && styles.pressed]}
+      style={({ pressed }) => [followBack ? styles.rowMain : styles.row, !followBack && unread && styles.unreadRow, pressed && open && styles.pressed]}
       accessibilityRole='link'
       accessibilityLabel={spoken + ', ver perfil'}
       accessibilityHint='abre o perfil'
@@ -420,6 +436,22 @@ function NoticeRow ({ item, now, unread, postText, picture, onOpenMember, onOpen
       {face}
       {whoBlock}
     </PressScale>
+  )
+  if (!followBack) return profile
+  return (
+    <View style={[styles.row, unread && styles.unreadRow]}>
+      {profile}
+      <FollowPill
+        small
+        label={FOLLOW_BACK_LABEL}
+        following={false}
+        title={displayText(who.title)}
+        pending={followPending}
+        disabled={followDisabled}
+        onFollow={() => onFollowBack(item)}
+        onUnfollow={NO_UNFOLLOW}
+      />
+    </View>
   )
 }
 
@@ -437,6 +469,7 @@ function remoteFor (remoteSeen, namespace) {
 export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollowsChanged, onToast, onBadge, onSeenState, remoteSeen, onOpenThread, onOpenMember }) {
   const styles = useStyles(makeStyles)
   const [helpOpen, setHelpOpen] = useState(false)
+  const [filter, setFilter] = useState('todas')
   const node = useNode()
   const blocks = useBlocks()
   const { profileOf, resolveMany } = useNames()
@@ -846,6 +879,9 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     const changed = refresh !== prev.refresh
     previous.current = { active, refresh: active ? refresh : prev.refresh, scrollToTop, warmToken: prev.warmToken }
     if (!active) return
+    // A show marks every loaded row seen, so every row must be drawn: a
+    // filter left from the last visit would hide a new notice it marks.
+    if (shown) setFilter('todas')
     const current = stateRef.current
     if (current.loading || current.refreshing) {
       if (changed) reloadAfterRef.current = true
@@ -882,6 +918,44 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     if (!stateRef.current.loading && !stateRef.current.refreshing) loadFirst()
   }, [followsVersion, loadFirst])
 
+  // Seguir de volta: the person's own follow set, read as Pessoas does and
+  // again on any follow change or another identity. A page never reads it
+  // and never gets a pill.
+  const { follows, load: loadFollows, mark: markFollow } = useFollowSet(request)
+  useEffect(() => {
+    if (hosted && active && pageKey === null) loadFollows()
+  }, [hosted, active, pageKey, ownKey, followsVersion, loadFollows])
+  const [followBackKey, setFollowBackKey] = useState(null)
+  const followBackRef = useRef(null)
+  // One follow.add per press, as the person, and pending in the same tick
+  // as the press. A failed or uncertain answer is shown and the set read
+  // again (it says what really happened) before the pill is released;
+  // nothing is ever resent.
+  const followBack = useCallback(async (item) => {
+    // The store too, not only the render's copy: a press can land after a
+    // switch to a page and before this screen renders again.
+    if (followBackRef.current !== null || pageKeyRef.current !== null || actingGet().kind === 'page') return
+    const key = item && typeof item.key === 'string' ? item.key.toLowerCase() : ''
+    if (!KEY64.test(key)) return
+    followBackRef.current = key
+    setFollowBackKey(key)
+    try {
+      const r = await request('follow.add', { key })
+      markFollow(key, true)
+      const title = displayText(whoOf({ name: item.name, username: item.username }).title)
+      if (typeof onToast === 'function') onToast(r && r.changed === false ? 'Você já segue esta pessoa.' : 'Agora você segue ' + title + '.')
+      if (typeof onFollowsChanged === 'function') onFollowsChanged()
+    } catch (err) {
+      if (typeof onToast === 'function') onToast(errorText(err))
+      // The pill stays pending until the set is read again, so it is never
+      // offered on a guess.
+      try { await loadFollows() } catch {}
+    } finally {
+      followBackRef.current = null
+      setFollowBackKey(null)
+    }
+  }, [request, markFollow, loadFollows, onToast, onFollowsChanged])
+
   // Who you act as changed: the other list must not stay on screen. The
   // personal poll (notices.list, same interval) resumes when acting is you.
   const actingKey = pageKey || ''
@@ -889,6 +963,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   useEffect(() => {
     if (actingKeyRef.current === actingKey) return
     actingKeyRef.current = actingKey
+    setFilter('todas')
     seqRef.current += 1
     seenRef.current = null
     clearTimeout(busyRetryRef.current)
@@ -1023,6 +1098,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   }
 
   const renderItem = ({ item }) => {
+    if (isDayHeader(item)) return <Text style={styles.dayHeader} accessibilityRole='header' numberOfLines={1}>{displayText(item.title)}</Text>
     const picture = pickAvatar(profileOf(item.key), rowAvatarSource(item, avatars[item.key]))
     return (
       <NoticeRow
@@ -1033,6 +1109,10 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         picture={picture}
         onOpenMember={onOpenMember}
         onOpenThread={onOpenThread}
+        followBack={showsFollowBack(item, { pageActing: pageKey !== null || actingKeyRef.current !== actingKey, follows, ownKey })}
+        followPending={followBackKey !== null && typeof item.key === 'string' && item.key.toLowerCase() === followBackKey}
+        followDisabled={followBackKey !== null}
+        onFollowBack={followBack}
       />
     )
   }
@@ -1083,15 +1163,26 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   }, [active, hosted, shownKeys, resolveMany])
   const avatars = useRowAvatars(shownItems, profileOf, node.request, active && hosted && notice === null, avatarCycle)
   const snippets = useSnippets(shownItems, node.request, active && hosted && notice === null, loadedAt)
+  // The chips and day headers only change what is drawn: settle, the seen
+  // marks and the badge always take the whole loaded list.
+  const filteredItems = filterNotices(shownItems, filter)
+  const rows = withDayHeaders(filteredItems, now)
+  const chips = notice === null && shownItems.length > 0
+    ? <FilterChips options={NOTICE_FILTERS} selected={filter} onSelect={setFilter} />
+    : null
+  const listHeader = chips ? <View>{header}{chips}</View> : header
+  const listEmpty = shownItems.length > 0 && filteredItems.length === 0
+    ? <EmptyState icon='sino' title={FILTER_EMPTY_TITLE} body={FILTER_EMPTY_TEXT} />
+    : empty
   return (
     <>
       <RefreshableList
-        data={shownOnceRef.current ? shownItems : EMPTY_ROWS}
-        keyExtractor={noticeId}
+        data={shownOnceRef.current ? rows : EMPTY_ROWS}
+        keyExtractor={rowKey}
         renderItem={renderItem}
-        extraData={{ now, onOpenMember, onOpenThread, unread, snippets, avatars, profileOf }}
-        ListHeaderComponent={header}
-        ListEmptyComponent={empty}
+        extraData={{ now, onOpenMember, onOpenThread, unread, snippets, avatars, profileOf, follows, followBackKey, pageKey, followBack }}
+        ListHeaderComponent={listHeader}
+        ListEmptyComponent={listEmpty}
         ListFooterComponent={notice === null ? footer : null}
         contentContainerStyle={{ paddingBottom: bottomPad }}
         onRefresh={hosted && !unsupported && !locked ? loadFirst : undefined}
@@ -1117,6 +1208,11 @@ const makeStyles = (colors) => StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: colors.line
   },
+  // With the dot, never instead of it: the spoken label still says não lido.
+  unreadRow: { backgroundColor: colors.accentSoft },
+  // The profile control inside a row that also holds the pill.
+  rowMain: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  dayHeader: { ...type.postMeta, fontWeight: '700', color: colors.soft, paddingHorizontal: 16, paddingTop: space.md, paddingBottom: space.xs },
   avatar: { width: 44, height: 44, position: 'relative' },
   // Off the avatar's corner, so it never covers the initials.
   kindBadge: {

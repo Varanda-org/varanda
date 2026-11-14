@@ -37,8 +37,9 @@ import { useNames } from '../names'
 import { useOutbox } from '../outboxProvider'
 import { UNCERTAIN_MESSAGE } from '../outbox'
 import { deletePostRows } from '../deletion'
+import { pinnedContentStyle } from '../profileBar'
 import { revokeDeletedMedia } from '../media/cache'
-import { relativeTime } from '../format'
+import { formatCount, relativeTime } from '../format'
 import { isLastLogPage, logRows, mergeOlderRows, oldestSeq, shouldReloadDiario } from '../paging'
 import { lastLocalWrite } from '../localWrites'
 import { buildProfileUrl } from '../profileLink'
@@ -50,7 +51,7 @@ import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
-import { ShareProfile } from '../ui/ShareProfile'
+import { ShareProfile, shareProfileDirect } from '../ui/ShareProfile'
 import { Sheet } from '../ui/Sheet'
 import { EmptyState, ErrorState, ListFooter, SkeletonRow } from '../ui/States'
 import { PressScale } from '../ui/PressScale'
@@ -59,7 +60,7 @@ import { MuralFooter, MuralRow, muralGridRows } from '../ui/MuralGrid'
 import { Segmented } from '../ui/Segmented'
 import { CommunitiesBox } from '../ui/CommunitiesBox'
 import { communitiesOf } from '../communitiesBox'
-import { BAR, ProfileBar, useProfileBar } from '../ui/ProfileBar'
+import { BAR, ProfileBar, usePinnedTabSelect, useProfileBar } from '../ui/ProfileBar'
 import { BellButton } from '../ui/TopActions'
 import { HelpButton } from '../ui/Help'
 import { HELP } from '../help'
@@ -556,7 +557,15 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
 
   const bandHeight = insets.top + BAND
   const hasBell = typeof onAvisos === 'function'
-  const bar = useProfileBar(bandHeight, { controlsBottom: bandHeight - 12 })
+  // The Segmented is the tabs View's last child, so its top in the list is
+  // the tabs slot's bottom less its own height (heights stay right on the web,
+  // where onLayout skips a move that does not resize).
+  const [tabsBottom, setTabsBottom] = useState(null)
+  const [segmentedHeight, setSegmentedHeight] = useState(null)
+  const tabsTop = tabsBottom !== null && segmentedHeight !== null ? tabsBottom - segmentedHeight : null
+  const bar = useProfileBar(bandHeight, { controlsBottom: bandHeight - 12, tabsTop, topInset: insets.top })
+  const listRef = useRef(null)
+  const selectPinnedTab = usePinnedTabSelect(bar, listRef, shownTab, setTab)
   // The band's controls, drawn in the header and again in the pinned bar.
   const bandControls = (inBar) => (
     <>
@@ -649,18 +658,19 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
           bio={bio || null}
           counts={[{
             label: 'seguindo',
-            value: info.followCount === undefined || info.followCount === null ? null : displayText(String(info.followCount)),
+            value: info.followCount === undefined || info.followCount === null ? null : displayText(formatCount(info.followCount)),
             onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(ownPublicKey, 'seguindo') : undefined
           }, {
             label: followCounts.seguidores === 1 ? 'seguidor' : 'seguidores',
-            value: followCounts.seguidores === null ? null : displayText(String(followCounts.seguidores)),
+            value: followCounts.seguidores === null ? null : displayText(formatCount(followCounts.seguidores)),
             onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(ownPublicKey, 'seguidores') : undefined
           }]}
           note={followCounts.incomplete && followCounts.seguidores !== null ? <View style={styles.countsNote}><Soft>{COUNTS_INCOMPLETE_NOTE}</Soft></View> : null}
+          corner={<Pill key='edit' label='Editar perfil' onPress={() => setEditing(true)} />}
           actions={[
-            <Pill key='edit' label='Editar perfil' onPress={() => setEditing(true)} />,
-            profileUrl !== null ? <Pill key='share' icon='compartilhar' accessibilityLabel='compartilhar perfil' onPress={() => setSharing(true)} /> : null
+            profileUrl !== null ? <Pill key='share' icon='compartilhar' accessibilityLabel='compartilhar perfil' onPress={() => { shareProfileDirect(profileUrl).then((done) => { if (!done) setSharing(true) }) }} /> : null
           ]}
+          onTabsLayout={(l) => setTabsBottom(l.y + l.height)}
           tabs={
             <View>
               <DiarioMoments
@@ -671,7 +681,9 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
                 onDelete={setMomentDeleting}
               />
               <CommunitiesBox items={communities} title='Suas comunidades' onOpen={typeof onOpenCommunity === 'function' ? onOpenCommunity : undefined} />
-              <Segmented options={tabs} selected={shownTab} onSelect={setTab} />
+              <View onLayout={(e) => setSegmentedHeight(e.nativeEvent.layout.height)}>
+                <Segmented options={tabs} selected={shownTab} onSelect={setTab} />
+              </View>
             </View>
           }
         />
@@ -810,7 +822,9 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
         // Mural, a tab switch) would otherwise rest with the bar half faded.
         // The 8 pt more tuck the avatar ring, which hangs 48 pt below the
         // band, fully under the 44 pt bar when there is no top inset.
-        contentContainerStyle={{ paddingBottom: bottomPad, minHeight: windowHeight + bandHeight + 8 }}
+        // Raised further once the tabs are measured, so a tab picked from the
+        // pinned copy can always scroll back to the pin boundary.
+        contentContainerStyle={pinnedContentStyle({ paddingBottom: bottomPad, minHeight: windowHeight + bandHeight + 8 }, windowHeight, tabsTop, insets.top + BAR)}
         onRefresh={reload}
         refreshing={pull.pending}
         onLoadMore={mural || depo ? undefined : loadOlder}
@@ -819,7 +833,8 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
         atEnd={data === null || mural || depo ? true : data.atEnd}
         scrollToTopSignal={scrollToTop}
         onScrollFrame={bar.handleScrollFrame}
-        newItemsTop={info !== null && bar.interactive ? insets.top + BAR + 8 : undefined}
+        listRef={listRef}
+        newItemsTop={info !== null && bar.interactive ? insets.top + BAR + (bar.pinned && segmentedHeight !== null ? segmentedHeight : 0) + 8 : undefined}
         newItems={{
           label: 'ver novidades',
           visible: !!(node.signals && node.signals.fresh && node.signals.fresh.own),
@@ -828,7 +843,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
       />
       {info !== null
         ? (
-          <ProfileBar bar={bar} topInset={insets.top} title={displayText(who.title)}>
+          <ProfileBar bar={bar} topInset={insets.top} title={displayText(who.title)} tabs={<Segmented options={tabs} selected={shownTab} onSelect={selectPinnedTab} />}>
             {bandControls(true)}
           </ProfileBar>
           )
@@ -852,7 +867,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
         ? (
           <Sheet open={sharing} onClose={() => setSharing(false)} title='Compartilhar perfil'>
             <View style={styles.shareBody}>
-              <ShareProfile url={profileUrl} />
+              <ShareProfile url={profileUrl} onNotice={typeof onToast === 'function' ? (m) => { setSharing(false); onToast(m) } : undefined} />
             </View>
           </Sheet>
           )
