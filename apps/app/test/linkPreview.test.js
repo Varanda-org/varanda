@@ -121,7 +121,7 @@ test('quoted players stay outside the quote and row press areas', (t) => {
   t.ok(row.includes("import { QuoteCard, quotePlayerOf } from './QuoteCard'"), 'the row shares the card rule')
   t.ok(row.includes("const quoteOut = quoteOn && ((typeof quote.text === 'string' && !!quoteMention && hasMention(quote.text)) || quotePlayerOf(quote) !== null)"), 'players and handled mentions leave the hidden wrapper')
   t.ok(/\{quoteNode && !quoteOut\s*\? \(\s*<Pressable[^>]*>\s*<View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>\s*\{quoteNode\}/.test(row), 'only other quotes enter the hidden press area')
-  t.ok(/<\/Pressable>\s*\)\s*: null\}\s*\{previewNode\}\s*\{quoteOut \? quoteNode : null\}/.test(row), 'the lifted quote is outside that Pressable')
+  t.ok(/<\/Pressable>\s*\)\s*: null\}\s*\{videoAbove \? null : previewNode\}\s*\{quoteOut \? quoteNode : null\}/.test(row), 'the lifted quote is outside that Pressable')
   const quote = withoutComments(read('ui', 'QuoteCard.js'))
   const start = quote.indexOf('if (embed !== null || mentioned) {')
   t.ok(start >= 0, 'every player takes the split layout before the default Pressable')
