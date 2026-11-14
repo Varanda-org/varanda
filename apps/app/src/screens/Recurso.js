@@ -13,10 +13,14 @@ import { NOT_LINKED_MESSAGE, TEXT_MAX, appealSend, appealStart, validateAppealTe
 import { countChars } from '../format'
 import { useNode } from '../node'
 import { Btn, ErrorText, Field, Notice, Page, Soft, errorText, useAction } from '../ui'
+import { HelpNote } from '../ui/Help'
 
 const NOT_HOSTED_MESSAGE = 'Nesta versão, recursos só pela versão web no site da associação.'
 const EXPLAIN = 'Se sua conta foi bloqueada pela moderação, você pode pedir uma revisão. Em regra, outra pessoa da equipe, que não decidiu o bloqueio, lê o seu pedido. Se o pedido for negado, só dá para recorrer de novo em 30 dias.'
 const PRIVACY = 'O recurso é assinado com a chave do seu diário e fica só com a moderação. Não vai para o diário nem para outras pessoas.'
+// The privacy sentence is the one caption on screen; how a review works
+// stays one tap away, word for word.
+const EXPLAIN_DOC = Object.freeze({ title: 'Como funciona o recurso', paragraphs: Object.freeze([EXPLAIN]) })
 
 export default function Recurso ({ open, active }) {
   const node = useNode()
@@ -77,13 +81,12 @@ export default function Recurso ({ open, active }) {
   } else {
     body = (
       <>
-        <Soft>{EXPLAIN}</Soft>
         <Field label='o que você quer dizer à moderação (opcional)' value={text} onChangeText={setText} multiline maxLength={TEXT_MAX * 2} />
         {/* maxLength counts UTF-16 units and the limit is in characters
             (code points), so the input only caps at two units per character;
             the counter and validateAppealText enforce TEXT_MAX. */}
         <Soft>{String(countChars(text)) + '/' + String(TEXT_MAX)}</Soft>
-        <Soft>{PRIVACY}</Soft>
+        <HelpNote doc={EXPLAIN_DOC}><Soft>{PRIVACY}</Soft></HelpNote>
         <ErrorText>{send.error}</ErrorText>
         <Notice>{sent}</Notice>
         <Btn label='enviar recurso' onPress={submit} pending={send.pending} disabled={words === null || sent !== ''} />

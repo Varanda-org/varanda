@@ -47,7 +47,8 @@
 // tells the mounted posts at once.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AccessibilityInfo, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
+import { AccessibilityInfo, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { invitePolicy } from '../account'
 import { useNames } from '../names'
@@ -65,7 +66,10 @@ import { useEscapeLayer } from '../ui/escapeLayer'
 import { space, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { MODES, MODE_LABELS } from '../appearance'
-import { Btn, ErrorText, Notice, Page, Row, SectionHeader, Soft, useAction } from '../ui'
+import { Btn, ConfirmStack, ErrorText, FlushSectionHeader, Notice, Page, Soft, useAction } from '../ui'
+import { Avatar } from '../ui/Avatar'
+import { SwitchRow } from '../ui/SwitchRow'
+import { whoOf } from '../who'
 import { BLOCK_TEXTS } from '../memberBlocks'
 import { pagesOn } from '../pageGate'
 import { PREVIEW_PREF_LABEL, previewsEnabled, setPreviewsEnabled } from '../previewPref'
@@ -121,7 +125,7 @@ const PREVIEW_PREF_NOTE = 'Desligada, o app nunca consulta os links que você co
 const SIGN_OUT_TEXT = 'Sair desta conta neste aparelho? Para voltar, use qualquer passkey cadastrada nesta conta ou o código de recuperação.'
 const RESET_TEXT = 'Isto apaga a conta guardada neste aparelho e as publicações que ainda aguardam envio. Para voltar à mesma conta, entre com qualquer passkey cadastrada nela ou com o código de recuperação. Sem passkey e sem código, a conta antiga não pode ser reconstruída: será preciso entrar de novo e vincular outra vez.'
 
-function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailingText = null, pending = false, disabled = false, expanded, checked, toggle = false }) {
+function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailingText = null, pending = false, disabled = false, expanded, checked, toggle = false, caption = null, danger = false }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const state = { disabled: disabled || pending }
@@ -139,7 +143,7 @@ function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailin
     : undefined
   return (
     <Pressable
-      style={[styles.row, !first && styles.rowDivider]}
+      style={({ pressed }) => [styles.row, !first && styles.rowDivider, pressed && styles.rowPressed]}
       accessibilityRole={radio ? (toggle ? 'switch' : 'radio') : 'button'}
       accessibilityLabel={label}
       accessibilityState={state}
@@ -148,11 +152,39 @@ function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailin
       onPress={onPress}
       onKeyDown={radioKeys}
     >
-      <Icon name={icon} size={22} color={colors.soft} />
-      <Text style={styles.label}>{pending ? label + '…' : label}</Text>
+      <Icon name={icon} size={22} color={danger ? colors.danger : colors.soft} />
+      <View style={styles.copy}>
+        <Text style={[styles.label, danger && styles.labelDanger]}>{pending ? label + '…' : label}</Text>
+        {caption ? <Text style={styles.caption}>{caption}</Text> : null}
+      </View>
       {trailingText !== null
         ? <Text style={styles.trailing}>{trailingText}</Text>
         : (trailing ? <Icon name={trailing} size={20} color={colors.soft} /> : null)}
+    </Pressable>
+  )
+}
+
+// The own name and @nome are text from the profile record, so they go
+// through displayText like any peer's.
+function AccountCard ({ ownKey, profile, onPress }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
+  const who = whoOf(profile)
+  const title = displayText(who.title)
+  const handle = who.subtitle ? displayText(who.subtitle) : null
+  return (
+    <Pressable
+      style={({ pressed }) => [styles.card, pressed && styles.rowPressed]}
+      accessibilityRole='button'
+      accessibilityLabel={'Editar perfil, ' + title + (handle ? ', ' + handle : '')}
+      onPress={onPress}
+    >
+      <Avatar name={who.avatarName} publicKey={ownKey} size={52} picture={profile.avatar} persist />
+      <View style={styles.copy}>
+        <Text style={styles.cardName} numberOfLines={1}>{title}</Text>
+        {handle ? <Text style={styles.caption} numberOfLines={1}>{handle}</Text> : null}
+      </View>
+      <Icon name='seta' size={20} color={colors.soft} />
     </Pressable>
   )
 }
@@ -304,8 +336,9 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
     if (screen === 'convites' && policy !== null && policy.required === false) onNavigate('lista')
   }, [screen, policy, onNavigate])
 
+  // The list reads it too, for the account card at its top.
   useEffect(() => {
-    if ((screen !== 'perfil' && screen !== 'convites') || !ready) return
+    if ((screen !== 'lista' && screen !== 'perfil' && screen !== 'convites') || !ready) return
     let alive = true
     setOwnFailed(false)
     node.request('node.info', {}).then((i) => {
@@ -347,6 +380,16 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
       setConfirm(null)
       onClose()
     }
+  }
+
+  // Closing a confirmation sends nothing. While Sair or Recomeçar is in
+  // flight, the sheet's own dismiss paths (Cancelar, backdrop, Escape,
+  // Android back, swipe) do nothing; the shell can still close Ajustes.
+  const dismissConfirm = () => {
+    if (exit.pending || reset.pending) return
+    exit.clearError()
+    reset.clearError()
+    setConfirm(null)
   }
 
   // gateKey is the shell's phone-gate key: markVerified stores the proof only
@@ -433,16 +476,19 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
         <View style={shown('lista')}>
           <Page>
             <Notice>{saved}</Notice>
-            <SectionHeader>Perfil e conta</SectionHeader>
+            <FlushSectionHeader>Perfil e conta</FlushSectionHeader>
             <View style={styles.group}>
-              <Item first icon='user' label='Editar perfil' onPress={() => { setSaved(''); onNavigate('perfil') }} />
+              {/* Until the own profile is read, the plain row stands in. */}
+              {own.key && profile
+                ? <AccountCard ownKey={own.key} profile={profile} onPress={() => { setSaved(''); onNavigate('perfil') }} />
+                : <Item first icon='user' label='Editar perfil' onPress={() => { setSaved(''); onNavigate('perfil') }} />}
               {account ? <Item icon='at-sign' label='Conta e @nome' onPress={() => onNavigate('conta')} /> : null}
               {inviting ? <Item icon='link' label='Convidar pessoas' onPress={() => onNavigate('convites')} /> : null}
               {pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && typeof onOpenPaginas === 'function'
                 ? <Item icon='gente' label='Páginas' onPress={openPaginas} />
                 : null}
             </View>
-            <SectionHeader>Privacidade e segurança</SectionHeader>
+            <FlushSectionHeader>Privacidade e segurança</FlushSectionHeader>
             <View style={styles.group}>
               {account && unlocked ? <Item first icon='shield' label='Passkeys e recuperação' onPress={() => onNavigate('passkeys')} /> : null}
               {showChangePhone ? <Item first={!(account && unlocked)} icon='phone' label='Trocar o celular' onPress={() => { setSaved(''); onNavigate('telefone') }} /> : null}
@@ -450,7 +496,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               {hosted ? <Item first={!account && !showChangePhone} icon='bloquear' label={BLOCK_TEXTS.listTitle} onPress={() => onNavigate('bloqueados')} /> : null}
               <Item first={!account && !showChangePhone && !hosted} icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
             </View>
-            <SectionHeader>Aparência e avisos</SectionHeader>
+            <FlushSectionHeader>Aparência e avisos</FlushSectionHeader>
             <View style={styles.group}>
               <Item first icon='sun' label='Aparência' trailingText={MODE_LABELS[mode]} onPress={() => onNavigate('aparencia')} />
               {pushRow
@@ -470,18 +516,17 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 ? <Item icon='download' label='Guardar dados neste aparelho' trailing={null} pending={persistPending} onPress={doPersist} />
                 : null}
               {hasPasskey && Platform.OS === 'web' ? <Item icon='smartphone' label='Instalar o app' onPress={() => onNavigate('instalar')} /> : null}
-              <Item icon='musica' label={MUSIC_AUTO_PREF_LABEL} toggle checked={musicAuto} trailingText={musicAuto ? 'Ligada' : 'Desligada'} onPress={toggleMusicAuto} />
-              {/* Last, so the note directly below describes this row. */}
-              <Item icon='link' label={PREVIEW_PREF_LABEL} toggle checked={previews} trailingText={previews ? 'Ligada' : 'Desligada'} onPress={togglePreviews} />
+              <View style={styles.rowDivider}>
+                <SwitchRow label={MUSIC_AUTO_PREF_LABEL} caption={MUSIC_AUTO_PREF_NOTE} value={musicAuto} onValueChange={toggleMusicAuto} />
+              </View>
+              <View style={styles.rowDivider}>
+                <SwitchRow label={PREVIEW_PREF_LABEL} caption={PREVIEW_PREF_NOTE} value={previews} onValueChange={togglePreviews} />
+              </View>
               <View style={styles.notes}>
-                <SectionHeader>Prévia de links</SectionHeader>
-                <Soft>{PREVIEW_PREF_NOTE}</Soft>
-                <SectionHeader>{MUSIC_AUTO_PREF_LABEL}</SectionHeader>
-                <Soft>{MUSIC_AUTO_PREF_NOTE}</Soft>
                 {pushNote || (pushRow && pushError)
                   ? (
                     <>
-                      <SectionHeader>Avisos neste aparelho</SectionHeader>
+                      <FlushSectionHeader>Avisos neste aparelho</FlushSectionHeader>
                       {pushNote ? <Soft>{pushNote}</Soft> : null}
                       {pushRow ? <ErrorText>{pushError}</ErrorText> : null}
                     </>
@@ -491,7 +536,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                   ? null
                   : (
                     <>
-                      <SectionHeader>Dados neste aparelho</SectionHeader>
+                      <FlushSectionHeader>Dados neste aparelho</FlushSectionHeader>
                       <Soft>{persisted ? 'Pronto: seus dados ficam guardados neste aparelho.' : 'O navegador não garantiu guardar seus dados: ele pode apagá-los se faltar espaço.'}</Soft>
                     </>
                     )}
@@ -502,21 +547,20 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               ? (
                 <>
                   <View style={styles.group}>
-                    <Item first icon='log-out' label='Sair' trailing={null} onPress={() => { exit.clearError(); setConfirm(confirm === 'sair' ? null : 'sair') }} />
-                    {account ? <Item icon='lixeira' label='Excluir conta' onPress={() => { setConfirm(null); onNavigate('excluir') }} /> : null}
+                    <Item first icon='log-out' label='Sair' danger trailing={null} onPress={() => { exit.clearError(); setConfirm(confirm === 'sair' ? null : 'sair') }} />
+                    {account ? <Item icon='lixeira' label='Excluir conta' danger onPress={() => { setConfirm(null); onNavigate('excluir') }} /> : null}
                   </View>
-                  {confirm === 'sair'
-                    ? (
-                      <View style={styles.confirm}>
-                        <Soft>{SIGN_OUT_TEXT}</Soft>
-                        <Row>
-                          <Btn label='Sair' danger onPress={doExit} pending={exit.pending} />
-                          <Btn label='Cancelar' secondary onPress={() => setConfirm(null)} disabled={exit.pending} />
-                        </Row>
-                      </View>
-                      )
-                    : null}
-                  <ErrorText>{exit.error}</ErrorText>
+                  <Sheet open={screen === 'lista' && confirm === 'sair'} onClose={dismissConfirm} dismissable={!exit.pending} title='Sair'>
+                    {/* The panel clips: at large text the buttons scroll into reach. */}
+                    <ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle={styles.confirm}>
+                      <Soft>{SIGN_OUT_TEXT}</Soft>
+                      <ErrorText>{exit.error}</ErrorText>
+                      <ConfirmStack
+                        confirm={<Btn label='Sair' danger onPress={doExit} pending={exit.pending} />}
+                        cancel={<Btn label='Cancelar' secondary onPress={dismissConfirm} disabled={exit.pending} />}
+                      />
+                    </ScrollView>
+                  </Sheet>
                 </>
                 )
               : null}
@@ -537,22 +581,24 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                     <Item icon='refresh-cw' label='Sincronização' onPress={() => onNavigate('sincronizar')} />
                     <Item icon='key' label='Identidade técnica' onPress={() => onNavigate('identidade')} />
                     {hasPasskey
-                      ? <Item icon='rotate-ccw' label='Recomeçar' trailing={null} onPress={() => { reset.clearError(); setConfirm(confirm === 'recomecar' ? null : 'recomecar') }} />
+                      ? <Item icon='rotate-ccw' label='Recomeçar' danger trailing={null} onPress={() => { reset.clearError(); setConfirm(confirm === 'recomecar' ? null : 'recomecar') }} />
                       : null}
                   </>
                   )
                 : null}
             </View>
-            {advanced && confirm === 'recomecar'
+            {hasPasskey
               ? (
-                <View style={styles.confirm}>
-                  <Soft>{RESET_TEXT}</Soft>
-                  <Row>
-                    <Btn label='Apagar e recomeçar' danger onPress={doReset} pending={reset.pending} />
-                    <Btn label='Cancelar' secondary onPress={() => setConfirm(null)} disabled={reset.pending} />
-                  </Row>
-                  <ErrorText>{reset.error}</ErrorText>
-                </View>
+                <Sheet open={screen === 'lista' && advanced && confirm === 'recomecar'} onClose={dismissConfirm} dismissable={!reset.pending} title='Recomeçar'>
+                  <ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle={styles.confirm}>
+                    <Soft>{RESET_TEXT}</Soft>
+                    <ErrorText>{reset.error}</ErrorText>
+                    <ConfirmStack
+                      confirm={<Btn label='Apagar e recomeçar' danger onPress={doReset} pending={reset.pending} />}
+                      cancel={<Btn label='Cancelar' secondary onPress={dismissConfirm} disabled={reset.pending} />}
+                    />
+                  </ScrollView>
+                </Sheet>
                 )
               : null}
 
@@ -593,7 +639,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 }}
               />
               )
-            : <Page><Soft>carregando…</Soft></Page>}
+            : <Page><Soft>Carregando…</Soft></Page>}
         </View>
         <View style={shown('conta')}>
           <Identidade active={ready && screen === 'conta'} embedded view='conta' onInfo={onInfo} onPhoneRecheck={recheckPhone} />
@@ -661,8 +707,8 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
           ? (
             <View style={shown('convites')}>
               {policyFailed
-                ? <Page><Soft>serviço indisponível</Soft><Btn label='tentar de novo' onPress={askPolicy} /></Page>
-                : <Page><Soft>carregando…</Soft></Page>}
+                ? <Page><Soft>Serviço indisponível</Soft><Btn label='Tentar de novo' onPress={askPolicy} /></Page>
+                : <Page><Soft>Carregando…</Soft></Page>}
             </View>
             )
           : null}
@@ -750,10 +796,16 @@ const makeStyles = (colors) => StyleSheet.create({
   },
   notes: { paddingHorizontal: space.lg, paddingBottom: space.md },
   advanced: { marginTop: space.lg },
-  confirm: { gap: 8, marginBottom: 12 },
+  confirm: { gap: space.md, paddingHorizontal: space.lg, paddingBottom: space.lg },
+  card: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, paddingHorizontal: 16 },
+  cardName: { fontSize: 17, fontWeight: '600', color: colors.ink },
   row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 14, paddingHorizontal: 16 },
   rowDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
-  label: { flex: 1, fontSize: 16, color: colors.ink },
+  rowPressed: { backgroundColor: colors.skeleton },
+  copy: { flex: 1, minWidth: 0, gap: 2 },
+  label: { fontSize: 16, color: colors.ink },
+  labelDanger: { color: colors.danger },
+  caption: { fontSize: 13, lineHeight: 18, color: colors.soft },
   trailing: { fontSize: 15, color: colors.soft },
   version: { alignItems: 'center', justifyContent: 'center', minHeight: 48, paddingVertical: 12, gap: 2 },
   versionItem: { minHeight: 44, justifyContent: 'center', alignSelf: 'stretch' },

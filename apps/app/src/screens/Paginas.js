@@ -25,13 +25,14 @@ import { pagesCore, pagesOn } from '../pageGate'
 import { ACTOR_NOTE, coreActor } from '../pageCore'
 import { copyText } from '../share'
 import { shareNav } from '../shareNav'
-import { Btn, ErrorText, Page, SectionHeader, Soft, errorText, useAction } from '../ui'
+import { ErrorText, Page, SectionHeader, Soft, errorText, useAction } from '../ui'
 import { Avatar } from '../ui/Avatar'
+import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { EmptyState, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
 import { fonts, type } from '../ui/theme'
-import { useStyles } from '../ui/ThemeProvider'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 
 const EMPTY_LIST = Object.freeze({ owned: [], admin: [], invites: [], offers: [] })
 const SOON = 'Disponível em breve.'
@@ -106,6 +107,7 @@ const endedNote = (p) => (p.closed === true ? 'encerrada' : isMoved(p) ? 'mudou 
 // its photo is never kept on disk.
 function PageRow ({ pageKey, profile, kind, note, ended = false, onOpen, children }) {
   const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const who = whoOf(profile)
   const unnamed = who.title === UNNAMED
   const title = unnamed ? NEUTRAL : displayText(who.title)
@@ -126,6 +128,7 @@ function PageRow ({ pageKey, profile, kind, note, ended = false, onOpen, childre
           {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
           {line ? <Text style={styles.note}>{line}</Text> : null}
         </View>
+        {onOpen ? <Icon name='seta' size={20} color={colors.soft} /> : null}
       </Pressable>
       {children}
     </View>
@@ -272,7 +275,6 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
   else {
     body = (
       <>
-        <Btn label='Nova página' onPress={onNewPage} />
         {who.core ? <ActorKey actor={who.actor} /> : null}
         <ErrorText>{loadError}</ErrorText>
         <ErrorText>{act.error}</ErrorText>
@@ -333,7 +335,7 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
 
   return (
     <View style={styles.flex}>
-      <TopBar title='Páginas' onBack={onBack} />
+      <TopBar title='Páginas' onBack={onBack} right={hosted && member !== null && list !== null ? { icon: 'plus', label: 'Nova página', onPress: onNewPage } : undefined} />
       <Page>{body}</Page>
     </View>
   )

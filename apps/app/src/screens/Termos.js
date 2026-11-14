@@ -22,7 +22,7 @@ const NEEDED_TEXT = 'Antes de entrar no Varanda, leia e aceite os Termos de Uso 
 const ACCOUNT_TEXT = 'Esta conta ainda não aceitou os Termos de Uso e a Política de Privacidade neste aparelho. Leia e aceite para continuar.'
 const SAVED_TEXT = 'Não foi possível guardar o aceite neste aparelho; ele será pedido de novo quando você abrir o Varanda outra vez.'
 const BLOCKED_TEXT = 'Sem aceitar, não é possível entrar no Varanda.'
-const ACCEPT_LABEL = 'Li e aceito os Termos de Uso e a Política de Privacidade'
+const ACCEPT_LABEL = 'Aceitar e continuar'
 
 const SYNC_TEXT = {
   registrado: 'Também registrado na sua conta da associação.',

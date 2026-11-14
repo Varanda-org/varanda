@@ -32,7 +32,7 @@
 // block never moves while the sheet is open.
 
 import { useEffect, useRef, useState } from 'react'
-import { AppState, Image, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { AppState, Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { accountStatus } from '../account'
@@ -47,11 +47,13 @@ import { whoOf } from '../who'
 import { HELP, SHORT } from '../help'
 import { Btn, ErrorText, Field, Label, Soft, errorText, useAction } from '../ui'
 import { HelpNote } from '../ui/Help'
+import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
 import { VoiceBubble } from '../ui/VoiceBubble'
-import { type } from '../ui/theme'
-import { useStyles } from '../ui/ThemeProvider'
+import { KeyboardForm } from './Perfil'
+import { layout, space, type } from '../ui/theme'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 
 const PRIVATE_GROUP_NOTICE = 'Este grupo é privado. Ao enviar, a moderação da associação vai ler o texto acima, que sai do grupo como a citação do denunciante. A associação não consegue ler o grupo, só o que você enviar aqui.'
 const PUBLIC_GROUP_NOTICE = 'Este grupo é público. Ao enviar, a moderação da associação recebe o texto acima como citação do denunciante.'
@@ -226,6 +228,7 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
   }
 
   let body
+  let footer = null
   if (!hosted) {
     body = <Soft>{NOT_HOSTED_MESSAGE}</Soft>
   } else if (statusError) {
@@ -275,9 +278,9 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
         {postMode && inGroup ? <Soft>{target.private === true ? PRIVATE_GROUP_NOTICE : PUBLIC_GROUP_NOTICE}</Soft> : null}
         {isDm ? <Soft>{DM_LABELS.reportNote}</Soft> : null}
         {!postMode && !isDm && !isListing ? <Soft>Para denunciar o nome, a bio ou a foto do perfil, escolha a conta toda.</Soft> : null}
-        <View style={styles.pills}>
-          {REASONS.map(([id, label]) => (
-            <ChoicePill key={id} label={label} selected={reason === id} onPress={() => setReason(id)} />
+        <View style={styles.reasons} accessibilityRole='radiogroup' accessibilityLabel='Motivo da denúncia'>
+          {REASONS.map(([id, label], i) => (
+            <ReasonRow key={id} label={label} first={i === 0} checked={reason === id} onPress={() => setReason(id)} />
           ))}
         </View>
         {/* maxLength counts UTF-16 units and the limit is in characters
@@ -286,6 +289,10 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
         <Field label='observação (opcional)' value={note} onChangeText={setNote} maxLength={TEXT_MAX * 2} />
         <Text style={[styles.counter, noteText === null && styles.over]}>{String(countChars(note)) + '/' + String(TEXT_MAX)}</Text>
         <HelpNote doc={HELP.denuncia}><Soft>{SHORT.reportPrivacy}</Soft></HelpNote>
+      </>
+    )
+    footer = (
+      <View style={styles.footer}>
         <ErrorText>{send.error}</ErrorText>
         <Btn
           label='enviar denúncia'
@@ -293,15 +300,20 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
           pending={send.pending}
           disabled={reason === null || noteText === null || anexo.status === 'loading' || nothing || (isListing && listing === null)}
         />
-      </>
+      </View>
     )
   }
 
   return (
     <Sheet open={open} onClose={onClose} title='Denunciar'>
-      <ScrollView style={styles.flex} contentContainerStyle={styles.content} keyboardShouldPersistTaps='handled'>
-        {body}
-      </ScrollView>
+      {/* The submit sits under the scroll: with the keyboard open on
+          "observação" it must rise above it, with its error. */}
+      <KeyboardForm>
+        <ScrollView style={styles.flex} contentContainerStyle={styles.content} keyboardShouldPersistTaps='handled'>
+          {body}
+        </ScrollView>
+        {footer}
+      </KeyboardForm>
     </Sheet>
   )
 }
@@ -316,15 +328,47 @@ function ChoicePill ({ label, selected, onPress }) {
   )
 }
 
+// react-native-web drops accessibilityState (aria-checked carries it) and
+// presses only buttons on Space, so a radio row handles Space itself.
+function ReasonRow ({ label, checked, first, onPress }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
+  const onKeyDown = (e) => {
+    if (e.key !== ' ' && e.key !== 'Spacebar') return
+    e.preventDefault()
+    onPress()
+  }
+  return (
+    <Pressable
+      accessibilityRole='radio'
+      accessibilityLabel={label}
+      accessibilityState={{ checked }}
+      aria-checked={checked}
+      onPress={onPress}
+      onKeyDown={onKeyDown}
+      style={({ pressed }) => [styles.reason, !first && styles.reasonDivider, pressed && styles.reasonPressed]}
+    >
+      <Text style={styles.reasonText}>{label}</Text>
+      {checked ? <Icon name='ok' size={20} color={colors.accent} /> : null}
+    </Pressable>
+  )
+}
+
 const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1 },
   content: { padding: 16, gap: 12 },
   line: { ...type.postText, color: colors.ink },
   name: { fontWeight: '700' },
   pills: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  reasons: { borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.line, backgroundColor: colors.card, overflow: 'hidden' },
+  reason: { flexDirection: 'row', alignItems: 'center', gap: space.md, minHeight: layout.hit, paddingHorizontal: space.lg, paddingVertical: space.md },
+  reasonDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
+  reasonPressed: { backgroundColor: colors.skeleton },
+  reasonText: { ...type.postText, color: colors.ink, flex: 1 },
   quoteBox: { gap: 4, padding: 12, borderRadius: 12, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.bg },
   quote: { ...type.postText, color: colors.ink },
   thumb: { width: '100%', maxHeight: 240, borderRadius: 8, backgroundColor: colors.line },
   counter: { ...type.counter, color: colors.soft, alignSelf: 'flex-end' },
-  over: { color: colors.danger }
+  over: { color: colors.danger },
+  footer: { gap: space.sm, paddingHorizontal: 16, paddingTop: space.md, paddingBottom: space.md, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line }
 })

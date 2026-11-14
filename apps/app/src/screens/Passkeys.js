@@ -32,6 +32,7 @@ import { copyText } from '../share'
 import { shareNav } from '../shareNav'
 import { Body, Btn, Card, ConfirmStack, ErrorText, Label, Mono, Notice, Page, Soft, Title, UNCERTAIN, errorText } from '../ui'
 import { Icon } from '../ui/Icon'
+import { MoreButton } from '../ui/MoreButton'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 
 const ACCOUNT = { recoveryStart, recoveryPut, recoveryRemove, recoveryList }
@@ -126,6 +127,12 @@ function dateText (iso) {
   }
 }
 
+// Names one entry for its row button and sheet, so two passkeys are never
+// announced alike.
+function entryName (e) {
+  return (e.kind === 'code' ? 'Código de recuperação' : 'Passkey') + ', cadastrado em ' + dateText(e.createdAt)
+}
+
 function Check ({ checked, label, onPress }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
@@ -149,6 +156,7 @@ function Check ({ checked, label, onPress }) {
 
 export default function Passkeys ({ active, embedded = false }) {
   const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const node = useNode()
   const passkey = node.passkey
   const status = passkey ? passkey.status : null
@@ -503,16 +511,29 @@ export default function Passkeys ({ active, embedded = false }) {
         {entries !== null && entries.length === 0 ? <Soft>{EMPTY_TEXT}</Soft> : null}
         {(entries || []).map((e) => (
           <View key={e.lookupId} style={styles.entry}>
-            <View style={styles.entryText}>
-              <Body>{e.kind === 'code' ? 'Código de recuperação' : 'Passkey'}</Body>
-              <Soft>{'cadastrado em ' + dateText(e.createdAt)}</Soft>
+            <View style={styles.entryRow}>
+              <Icon name={e.kind === 'code' ? 'hash' : 'chave'} size={22} color={colors.soft} />
+              <View style={styles.entryText}>
+                <Body>{e.kind === 'code' ? 'Código de recuperação' : 'Passkey'}</Body>
+                <Soft>{'cadastrado em ' + dateText(e.createdAt)}</Soft>
+              </View>
+              {/* The sheet only opens the confirmation below; the request
+                  leaves from its own Remover alone. Hidden while that
+                  confirmation is open, as the inline Remover was. */}
+              {confirmRemove === e.lookupId
+                ? null
+                : (
+                  <MoreButton
+                    label={'mais ações, ' + entryName(e)}
+                    title={entryName(e)}
+                    actions={[{ icon: 'lixeira', label: 'Remover', danger: true, disabled: busy, onPress: () => setConfirmRemove(e.lookupId) }]}
+                  />
+                  )}
             </View>
             {confirmRemove === e.lookupId
-              ? null
-              : <Btn label='Remover' secondary onPress={() => setConfirmRemove(e.lookupId)} disabled={busy} />}
-            {confirmRemove === e.lookupId
               ? (
-                <View style={styles.confirm}>
+                // Shown after the sheet closed: announced, not silent.
+                <View style={styles.confirm} accessibilityLiveRegion='polite' aria-live='polite'>
                   <Soft>{e.kind === 'code' ? REMOVE_CODE_TEXT : REMOVE_PASSKEY_TEXT}</Soft>
                   <ConfirmStack
                     confirm={<Btn label='Remover' danger onPress={() => onRemove(e)} pending={busy} />}
@@ -592,7 +613,8 @@ export default function Passkeys ({ active, embedded = false }) {
 
 const makeStyles = (colors) => StyleSheet.create({
   entry: { gap: 6, paddingVertical: 6, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
-  entryText: { gap: 2 },
+  entryRow: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 44 },
+  entryText: { flex: 1, minWidth: 0, gap: 2 },
   confirm: { gap: 8 },
   check: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 44 },
   box: { width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: colors.soft, alignItems: 'center', justifyContent: 'center' },

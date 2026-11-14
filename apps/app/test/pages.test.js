@@ -1413,3 +1413,10 @@ test('a guard left by a publication that never reached the service goes with a f
   const published = await caught(t, pagesDmPrepare(node, { member: M, page, status: { ...status, gen: 1, groupBox: GBOX }, roster: { owner: M, admins: [] } }))
   t.is(published.code, 'rotacao-necessaria', 'a published gen not adopted here still refuses')
 })
+
+test('Páginas: Nova página is a plus in the top bar and openable rows end in a chevron', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Paginas.js'), 'utf8')
+  t.ok(src.includes("{ icon: 'plus', label: 'Nova página', onPress: onNewPage }"), 'the plus keeps the onNewPage press and its label')
+  t.absent(src.includes("<Btn label='Nova página'"), 'no body button')
+  t.ok(src.includes("{onOpen ? <Icon name='seta' size={20} color={colors.soft} /> : null}"), 'a chevron only on rows that open')
+})

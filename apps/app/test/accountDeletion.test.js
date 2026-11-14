@@ -133,3 +133,65 @@ test('Excluir conta: a page owner without Páginas on screen is told the way for
   t.ok(src.includes("{typeof onOpenPaginas === 'function' ? <Btn label='Abrir Páginas' onPress={onOpenPaginas} /> : <Body>{PAGES_LATER}</Body>}"))
   t.absent(src.includes('\u2014'))
 })
+
+test('Excluir conta: every paragraph is listed as bullet rows, one unchanged sentence per row', async (t) => {
+  const fs = require('node:fs')
+  const path = require('node:path')
+  const { DELETE_DAYS, WAIT_TEXT, PASSKEY_TEXT } = await load()
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/ExcluirConta.js'), 'utf8')
+  const lines = {
+    WHAT_GOES: "const WHAT_GOES = 'Excluir a conta apaga, no serviço de conta da associação, o vínculo com a conta Google, se houver, o registro de idade, os aceites dos Termos, os avisos no aparelho, as marcações de visto, os convites, as passkeys extras e o código de recuperação. O número do celular, se houver, fica lacrado por até 180 dias e então é apagado. O seu @nome fica reservado e nunca vai para outra pessoa.'",
+    DIARY: "const DIARY = 'O diário (publicações, perfil, fotos, quem você segue, curtidas e republicações) sai dos semeadores da associação em até ' + DELETE_DAYS + ' dias. Apps e semeadores modificados, cópias que outras pessoas já baixaram, mensagens já entregues e capturas de tela podem manter o conteúdo.'",
+    GROUPS: "const GROUPS = 'As comunidades e os grupos que você criou deixam de existir para todos os participantes.'",
+    KEPT: "const KEPT = 'Ficam guardadas as denúncias feitas por você ou contra você e as decisões dos moderadores, para moderação e pedidos legais.'",
+    DEVICE: "const DEVICE = 'Neste aparelho, a conta e os dados são apagados logo depois do pedido. Não dá para desfazer.'"
+  }
+  const texts = { WAIT_TEXT, PASSKEY_TEXT }
+  for (const [name, line] of Object.entries(lines)) {
+    t.ok(src.includes(line + '\n'), name + ' is byte-identical')
+    texts[name] = new Function('DELETE_DAYS', 'return ' + line.slice(line.indexOf('=') + 1))(DELETE_DAYS) // eslint-disable-line no-new-func
+  }
+  const helper = src.match(/^const sentences = (.+)$/m)
+  t.ok(helper, 'the sentence split lives in the screen')
+  const sentences = new Function('return ' + helper[1])() // eslint-disable-line no-new-func
+  const counts = { WHAT_GOES: 3, DIARY: 2, GROUPS: 1, KEPT: 1, DEVICE: 2, WAIT_TEXT: 3, PASSKEY_TEXT: 3 }
+  for (const [name, count] of Object.entries(counts)) {
+    const rows = sentences(texts[name])
+    t.is(rows.length, count, name + ' has one row per sentence')
+    t.is(rows.join(' '), texts[name], name + ' rows give back the text byte for byte')
+    t.ok(rows.every((r) => r.length > 0 && !r.startsWith(' ')), name + ' has no empty or padded row')
+  }
+  t.ok(src.includes('<Bullets texts={[WHAT_GOES]} strong />'))
+  t.ok(src.includes("<Bullets texts={[DIARY, GROUPS, KEPT, mode === 'agendada' ? WAIT_TEXT : DEVICE, PASSKEY_TEXT]} />"))
+  t.absent(/<(Body|Soft)>\{(WHAT_GOES|DIARY|GROUPS|KEPT|DEVICE)\}<\/(Body|Soft)>/.test(src), 'no paragraph left as a block')
+  t.ok(src.includes('<Soft>Depois, confirme com a sua passkey.</Soft>'), 'the confirmation sentence stays')
+})
+
+test('Excluir conta: the delete action sits in a sticky bar, warns by touch and sends once per confirmed press', (t) => {
+  const fs = require('node:fs')
+  const path = require('node:path')
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/ExcluirConta.js'), 'utf8')
+  t.ok(src.includes("import { tap } from '../ui/haptics'"))
+  t.ok(src.includes("  const press = () => {\n    tap('warn')\n    submit()\n  }"), 'the haptic runs synchronously before submit, so the passkey check stays inside the press')
+  t.ok(src.includes("<Btn label={mode === 'agendada' ? 'Agendar exclusão' : 'Excluir conta'} danger block onPress={press} disabled={!matches} pending={action.pending} />"), 'a danger Btn, disabled until the typed @nome matches')
+  const main = src.slice(src.indexOf('  const press = () => {'), src.indexOf('// A deletion waiting for its date'))
+  const kbOpen = main.indexOf('<KeyboardForm>')
+  const kbClose = main.indexOf('</KeyboardForm>')
+  const pageOpen = main.indexOf('<Page>')
+  const pageClose = main.indexOf('</Page>')
+  const bar = main.indexOf('<View style={styles.bar}>')
+  t.ok(src.includes("import { KeyboardForm } from './Perfil'"))
+  t.ok(kbOpen !== -1 && kbOpen < pageOpen && bar < kbClose, 'the Page and the bar sit inside KeyboardForm, so the bar rises above the keyboard')
+  t.ok(pageClose !== -1 && bar > pageClose, 'the bar is outside the scrolling Page')
+  t.ok(main.slice(pageClose, bar).includes('{username !== null'), 'the bar shows under the same condition as the Field')
+  const barSlice = main.slice(bar, kbClose)
+  t.ok(barSlice.includes('onPress={press}'), 'the delete Btn is in the bar')
+  t.ok(barSlice.indexOf('<ErrorText>{action.error}</ErrorText>') !== -1 && barSlice.indexOf('<ErrorText>{action.error}</ErrorText>') < barSlice.indexOf('onPress={press}'), 'a failed or cancelled press shows its error in the bar, next to the Btn')
+  t.ok(main.slice(pageOpen, pageClose).includes(': <ErrorText>{action.error}</ErrorText>}'), 'without the bar the error still shows in the Page')
+  t.absent(src.includes('insets'), 'the Ajustes Sheet already pads the bottom inset')
+  t.ok(src.includes('  bar: { paddingVertical: space.md, paddingHorizontal: space.lg,'), 'the bar pads only its own spacing')
+  t.is(src.split('submit()').length - 1, 1, 'submit runs only from the press')
+  t.is(src.split('requestDeletion(').length - 1, 1, 'one request per submit')
+  t.ok(src.includes('    prepare()\n  }, [active, prepare])'), 'opening the screen still only asks for a nonce')
+  t.ok(src.includes('<Field label={\'Para confirmar, digite @\' + username} value={typed} onChangeText={setTyped} mono maxLength={24} placeholder={\'@\' + username} />'), 'the typed confirmation stays')
+})

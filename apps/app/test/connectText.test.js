@@ -49,3 +49,9 @@ test('the shown strings avoid technical words and the em dash', async (t) => {
     t.absent(words.some((w) => banned.has(w)), 'no technical word: ' + s)
   }
 })
+
+test('Conexao status line carries a coloured dot', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../src/screens/Conexao.js'), 'utf8')
+  t.ok(src.includes('colors.accent : node.phase') && src.includes('colors.danger') && src.includes('colors.warn'), 'accent, danger and warn dot')
+  t.ok(src.includes('conectado ao varanda-serve'), 'the status sentence is unchanged')
+})

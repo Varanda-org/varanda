@@ -519,3 +519,14 @@ test('foldSignal keeps the same reference for a no-op event and a new one for a 
   t.not(stopped, state, 'a stop of the run is a change')
   t.is(stopped.lengths, state.lengths, 'a stop that grows no baseline keeps the lengths map')
 })
+
+test('Sincronizar shows one status row with a coloured dot and the log behind Ver registro', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../src/screens/Sincronizar.js'), 'utf8')
+  t.ok(src.includes('dotColor(summary, colors)'), 'the dot follows the summary')
+  t.ok(src.includes('colors.danger') && src.includes('colors.warn') && src.includes('colors.accent'), 'accent, warn and danger tones')
+  t.ok(src.includes("const LOG_LABEL = 'Ver registro'"), 'the log row label')
+  t.ok(/\{logOpen\s*\n?\s*\?/.test(src), 'the log renders only when opened')
+  t.ok(src.includes('minHeight: 44'), 'the toggle keeps a 44 pt target')
+  t.ok(src.includes('aria-expanded={logOpen}'), 'the web hears whether the log is open')
+  t.ok(src.includes("summary === 'sincronizando…' || summary === 'recuperando…') return colors.accent"), 'recovering after an unlock is activity, not a warning')
+})

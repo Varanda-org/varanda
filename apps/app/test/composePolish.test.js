@@ -13,9 +13,9 @@ function evaluate (source, deps = {}) {
 test('settings group every row and keep the existing advanced toggle last', (t) => {
   const src = read('screens/Ajustes.js')
   const headings = ['Perfil e conta', 'Privacidade e segurança', 'Aparência e avisos']
-  const positions = headings.map((heading) => src.indexOf('<SectionHeader>' + heading + '</SectionHeader>'))
+  const positions = headings.map((heading) => src.indexOf('<FlushSectionHeader>' + heading + '</FlushSectionHeader>'))
   t.ok(positions.every((at, i) => at >= 0 && (i === 0 || at > positions[i - 1])), 'three ordered groups')
-  t.ok(positions.every((at) => at >= 0) && src.indexOf("label='Avançado'") > positions[2] && !src.includes('<SectionHeader>Avançado'), 'existing advanced row follows the named groups')
+  t.ok(positions.every((at) => at >= 0) && src.indexOf("label='Avançado'") > positions[2] && !src.includes('<FlushSectionHeader>Avançado'), 'existing advanced row follows the named groups')
   const profile = src.slice(positions[0], positions[1])
   const privacy = src.slice(positions[1], positions[2])
   const appearance = src.slice(positions[2], src.indexOf("label='Avançado'"))
@@ -44,11 +44,11 @@ test('settings group every row and keep the existing advanced toggle last', (t) 
     ["'Excluir conta'", "() => { setConfirm(null); onNavigate('excluir') }"],
     ['{MODE_LABELS[m]}', '() => setMode(m)']
   ]
-  const rows = src.match(/<Item\b[\s\S]*?\/>/g) || []
+  const rows = src.match(/<(?:Item|SwitchRow)\b[\s\S]*?\/>/g) || []
   t.is(rows.length, expected.length, 'every HEAD row, including the appearance choice')
   for (const [label, handler] of expected) {
     const row = rows.find((row) => row.includes('label=' + label))
-    t.ok(row && row.includes('onPress={' + handler + '}'), label + ' keeps its HEAD handler')
+    t.ok(row && (row.includes('onPress={' + handler + '}') || row.includes('onValueChange={' + handler + '}')), label + ' keeps its HEAD handler')
   }
   t.ok(profile.includes("label='Editar perfil'") && privacy.includes("label='Passkeys e recuperação'") && appearance.includes("label='Aparência'"), 'rows follow their subject')
   t.ok(src.indexOf("label='Sair'") < src.indexOf("label='Avançado'") && src.indexOf("label='Sair'") < src.indexOf("label='Recomeçar'") && src.indexOf("label='Excluir conta'") > src.indexOf("label='Sair'") && src.indexOf("label='Excluir conta'") < src.indexOf("label='Avançado'"), 'account exit rows precede the last advanced group in HEAD order')
@@ -60,9 +60,10 @@ test('settings group every row and keep the existing advanced toggle last', (t) 
 test('settings notes have titles and version details are separate accessible items', (t) => {
   const src = read('screens/Ajustes.js')
   const notes = src.slice(src.indexOf('<View style={styles.notes}>'), src.indexOf('            {unlocked\n', src.indexOf('<View style={styles.notes}>')))
-  for (const title of ['Prévia de links', 'Avisos neste aparelho', 'Dados neste aparelho']) {
-    t.ok(notes.includes('<SectionHeader>' + title + '</SectionHeader>'), title + ' belongs to the appearance group')
+  for (const title of ['Avisos neste aparelho', 'Dados neste aparelho']) {
+    t.ok(notes.includes('<FlushSectionHeader>' + title + '</FlushSectionHeader>'), title + ' belongs to the appearance group')
   }
+  t.ok(src.includes('caption={PREVIEW_PREF_NOTE}') && src.includes('caption={MUSIC_AUTO_PREF_NOTE}'), 'the two switch notes are captions of their own rows')
   t.ok(/<\/View>\s*<\/View>\s*$/.test(notes) && src.includes('advanced: { marginTop: space.lg }'), 'notes close inside their group and advanced has normal spacing')
   const footer = src.slice(src.indexOf('<View style={styles.version}'), src.indexOf('</Page>'))
   t.is((footer.match(/aria-live=/g) || []).length, 1, 'one web live region for the footer')
@@ -82,6 +83,57 @@ test('settings notes have titles and version details are separate accessible ite
     }
   }
   t.ok(src.includes('[lines.appLine, lines.serverLine, versionNote].filter(Boolean).map(') && src.includes('accessibilityLabel={line}') && src.includes('onPress={copyVersion}'), 'each version line retains its copy action')
+})
+
+test('settings account card opens Editar perfil and falls back to the plain row', (t) => {
+  const src = read('screens/Ajustes.js')
+  const profile = src.slice(src.indexOf('<FlushSectionHeader>Perfil e conta</FlushSectionHeader>'), src.indexOf('<FlushSectionHeader>Privacidade e segurança</FlushSectionHeader>'))
+  const open = "onPress={() => { setSaved(''); onNavigate('perfil') }}"
+  const fallback = "<Item first icon='user' label='Editar perfil' "
+  t.ok(profile.includes('{own.key && profile\n                ? <AccountCard ownKey={own.key} profile={profile} ' + open + ' />\n                : ' + fallback + open + ' />}'), 'card while the own profile is known, the HEAD row otherwise, same destination')
+  t.ok(src.includes("if ((screen !== 'lista' && screen !== 'perfil' && screen !== 'convites') || !ready) return"), 'the list reads the own key for the card')
+  const card = src.slice(src.indexOf('function AccountCard'), src.indexOf('export default function Ajustes'))
+  t.ok(card.includes('const title = displayText(who.title)') && card.includes('const handle = who.subtitle ? displayText(who.subtitle) : null'), 'name and @nome go through displayText')
+  t.ok(card.includes('<Avatar name={who.avatarName} publicKey={ownKey}') && card.includes('{title}</Text>') && card.includes('{handle}</Text>') && card.includes("<Icon name='seta'"), 'avatar, name, @nome and chevron')
+  t.ok(card.includes("accessibilityRole='button'") && card.includes('onPress={onPress}'), 'one button')
+  t.absent(/node\.request|\.run\(/.test(card), 'the card sends nothing')
+})
+
+test('settings Sair and Recomeçar confirm in a sheet that sends nothing when dismissed', (t) => {
+  const src = read('screens/Ajustes.js')
+  const sheets = [
+    ["<Sheet open={screen === 'lista' && confirm === 'sair'} onClose={dismissConfirm} dismissable={!exit.pending} title='Sair'>", 'SIGN_OUT_TEXT', 'exit', "<Btn label='Sair' danger onPress={doExit} pending={exit.pending} />"],
+    ["<Sheet open={screen === 'lista' && advanced && confirm === 'recomecar'} onClose={dismissConfirm} dismissable={!reset.pending} title='Recomeçar'>", 'RESET_TEXT', 'reset', "<Btn label='Apagar e recomeçar' danger onPress={doReset} pending={reset.pending} />"]
+  ]
+  for (const [open, text, action, confirm] of sheets) {
+    const at = src.indexOf(open)
+    t.ok(at >= 0, action + ': its own sheet')
+    const sheet = src.slice(at, src.indexOf('</Sheet>', at))
+    t.ok(sheet.includes('<Soft>{' + text + '}</Soft>'), action + ': the same text')
+    t.ok(sheet.includes('<ErrorText>{' + action + '.error}</ErrorText>'), action + ': errors show inside the sheet')
+    t.ok(sheet.includes('confirm={' + confirm + '}'), action + ': the explicit confirm is the only trigger')
+    t.ok(sheet.includes("cancel={<Btn label='Cancelar' secondary onPress={dismissConfirm} disabled={" + action + '.pending} />}'), action + ': Cancelar dismisses')
+    const scroll = sheet.indexOf("<ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle={styles.confirm}>")
+    const scrollEnd = sheet.lastIndexOf('</ScrollView>')
+    t.ok(scroll >= 0 && scroll < sheet.indexOf('<Soft>') && scrollEnd > sheet.indexOf('cancel={') && sheet.split('<ScrollView').length === 2, action + ': text, error and buttons scroll inside the clipping panel')
+  }
+  t.absent(src.includes('<View style={styles.confirm}>'), 'no fixed confirm body left')
+  for (const fn of ['doExit', 'doReset']) {
+    t.is(src.split(fn).length - 1, 2, fn + ': defined once, called only from its confirm button')
+  }
+  t.is(src.split('<ErrorText>{exit.error}</ErrorText>').length - 1, 1, 'the sign-out error lives only in its sheet')
+  t.absent(src.includes('<Row>'), 'no inline confirmation row left')
+  t.ok(src.indexOf(sheets[0][0]) > src.indexOf("label='Sair'") && src.indexOf(sheets[1][0]) > src.indexOf("label='Recomeçar'"), 'each sheet follows the row that opens it')
+  const body = src.match(/const dismissConfirm = \(\) => \{([^]*?)\n {2}\}\n/)
+  t.ok(body, 'dismissConfirm exists')
+  if (body) {
+    for (const [busy, cleared] of [[null, true], ['exit', false], ['reset', false]]) {
+      const calls = []
+      const fake = (name) => ({ pending: busy === name, clearError: () => calls.push(name + '.clearError'), run: () => calls.push(name + '.run') })
+      evaluate(body[1], { exit: fake('exit'), reset: fake('reset'), setConfirm: (v) => calls.push('setConfirm:' + v), doExit: () => calls.push('doExit'), doReset: () => calls.push('doReset') })
+      t.alike(calls, cleared ? ['exit.clearError', 'reset.clearError', 'setConfirm:null'] : [], (busy || 'idle') + ': dismiss ' + (cleared ? 'closes and sends nothing' : 'waits for the action in flight'))
+    }
+  }
 })
 
 test('long moment captions expand, pause and resume without changing navigation', (t) => {
@@ -137,7 +189,9 @@ test('composer toolbar is revealed on focus and layout, with photo action and pr
 
 test('intro preserves shared buttons and the top-right skip action', (t) => {
   const intro = read('screens/Introducao.js')
-  t.ok(intro.includes('<Btn block large label={index === last ? START_LABEL : NEXT_LABEL} onPress={index === last ? finish : () => goTo(index + 1)} />') && intro.includes('<StepLink label={BACK_LABEL} onPress={() => goTo(index - 1)} />'), 'next and back keep the shared buttons and handlers')
+  t.ok(intro.includes("<Btn block large label={index === last ? START_LABEL : NEXT_LABEL} onPress={index === last ? finish : () => { tap('select'); goTo(index + 1) }} />"), 'next keeps the shared button, selects haptically and advances')
+  t.ok(intro.includes('accessibilityLabel={BACK_LABEL} onPress={() => goTo(index - 1)}') && intro.includes("<Icon name='voltar' size={28} color={colors.ink} />") && /back: \{ height: layout.hit, minWidth: layout.hit/.test(intro), 'back is an icon control at 44 points labelled Voltar')
+  t.ok(intro.includes('Animated.timing(width') && intro.includes('if (reduceMotion) { width.setValue(to); return }'), 'the active dot animates its width and reduce motion snaps')
   t.ok(intro.includes("<Pressable accessibilityRole='button' onPress={finish} hitSlop={8} style={({ pressed }) => [styles.skip, pressed && styles.pressed]}>") && intro.includes('<Text style={styles.skipText}>{SKIP_LABEL}</Text>'), 'Pular keeps its original button and handler')
   t.ok(/skip: \{[^\n]*minHeight: layout.hit, minWidth: layout.hit/.test(intro) && read('ui/theme.js').includes('hit: 44'), 'both skip touch dimensions are 44 points')
   t.ok(intro.includes("alignItems: 'flex-end'") && intro.includes("skipText: { fontSize: 15, fontWeight: '700', color: colors.soft }"), 'skip stays at the top right with its original text style')

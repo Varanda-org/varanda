@@ -348,10 +348,32 @@ test('termsStore.web: a throwing or missing storage never throws', async (t) => 
 test('the terms gate keeps its legal words on the shared frame', (t) => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', 'Termos.js'), 'utf8')
   for (const word of [
-    "const ACCEPT_LABEL = 'Li e aceito os Termos de Uso e a Política de Privacidade'",
+    "const ACCEPT_LABEL = 'Aceitar e continuar'",
     "const BLOCKED_TEXT = 'Sem aceitar, não é possível entrar no Varanda.'",
     "const NEEDED_TEXT = 'Antes de entrar no Varanda, leia e aceite os Termos de Uso e a Política de Privacidade.'",
     'OptionList', 'block large', "icon='file-text'", 'aria-expanded'
   ]) t.ok(src.includes(word), word)
   t.is(src.split('onPress={onAccept}').length - 1, 1, 'only the accept button accepts')
+})
+
+// The accept button is a short label, so the sentence above it is what asks
+// the person to read and accept both documents: it must stay on the gate.
+test('the terms gate shows the consent sentence above the accept button', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', 'Termos.js'), 'utf8')
+  const gate = src.slice(src.indexOf('if (gate) {'), src.indexOf('onPress={onAccept}'))
+  t.ok(gate.includes('<Stepper'), 'the gate renders the Stepper')
+  t.ok(gate.includes('hint={gateText(reason, version)}'), 'the gate Stepper renders the consent sentence')
+  for (const word of [
+    "const NEEDED_TEXT = 'Antes de entrar no Varanda, leia e aceite os Termos de Uso e a Política de Privacidade.'",
+    "const ACCOUNT_TEXT = 'Esta conta ainda não aceitou os Termos de Uso e a Política de Privacidade neste aparelho. Leia e aceite para continuar.'"
+  ]) t.ok(src.includes(word), word)
+  const start = src.indexOf('function gateText (reason, version) {')
+  t.ok(start !== -1, 'gateText exists')
+  const body = src.slice(start, src.indexOf('\n}\n', start))
+  t.is(body, [
+    'function gateText (reason, version) {',
+    "  if (reason === 'updated') return 'Os Termos de Uso e a Política de Privacidade mudaram. Leia e aceite a versão ' + version + ' para continuar.'",
+    "  if (reason === 'account') return ACCOUNT_TEXT",
+    '  return NEEDED_TEXT'
+  ].join('\n'), 'gateText returns the updated, account and needed sentences')
 })
