@@ -3331,17 +3331,10 @@ function Member () {
       ? (topProfile.screen === 'membro' ? profileTabs[(stack.length - 1) + ':' + topProfile.key] : undefined)
       : (tab === 'diario' ? profileTabs.diario : undefined)
     const fabShown = !viewerLeaving && showPostButton({ tab, screen: stacked ? topProfile.screen : null, profileTab })
-    const tabActions = <TopActions key={tab} help={HELP[tab === 'comunidades' ? 'conversas' : tab]} onAvisos={mode === 'hosted' ? openAvisos : undefined} avisosNew={avisosNew} avisosActive={tab === 'avisos'} />
-    // Conversas puts its "+" before help and the bell (the WhatsApp header);
-    // its search is a field above the chips, not a header action.
-    const topRight = stacked
-      ? null
-      : tab === 'comunidades'
-        ? [
-            { icon: 'plus', label: 'nova conversa', onPress: () => setConvCompose(true) },
-            tabActions
-          ]
-        : tabActions
+    const convActions = tab === 'comunidades' ? [{ icon: 'plus', label: 'nova conversa', onPress: () => setConvCompose(true) }] : undefined
+    const tabActions = <TopActions key={tab} actions={convActions} help={HELP[tab === 'comunidades' ? 'conversas' : tab]} onAvisos={mode === 'hosted' ? openAvisos : undefined} avisosNew={avisosNew} avisosActive={tab === 'avisos'} />
+    // Conversas puts its '+' first in the same capsule as help and the bell.
+    const topRight = stacked ? null : tabActions
     // The invite note sits above the other notes, so it takes the top inset on
     // Diário and the note under it does not.
     const inviteNoteShown = !!(inviteDrop.note && atTabs && ajustes !== 'convites' && !stacked)

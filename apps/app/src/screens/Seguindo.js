@@ -35,6 +35,7 @@ import { SearchField } from '../ui/SearchField'
 import { EmptyState, ListFooter, Skeleton } from '../ui/States'
 import { OfflineNote } from '../ui/OfflineNote'
 import { TopBar } from '../ui/TopBar'
+import { TopActions } from '../ui/TopActions'
 import { pageBadgeLabel } from './Membro'
 import { type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
@@ -419,7 +420,7 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
 
   return (
     <View style={styles.screen}>
-      <TopBar title='Seguindo' onBack={onBack} right={<HelpButton doc={HELP.seguindo} />} />
+      <TopBar title='Seguindo' onBack={onBack} right={<TopActions help={HELP.seguindo} />} />
       <OfflineNote />
       <RefreshableList
         scrollToTopSignal={scrollToTop}
