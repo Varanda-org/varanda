@@ -79,20 +79,29 @@ test('index.html carries the install metas in pt-BR', (t) => {
 test('index.html paints the brand before the bundle runs', (t) => {
   t.ok(/<div id="root"><\/div>\s*<div id="varanda-pre-splash" role="status" aria-label="Varanda, carregando">/.test(html), 'splash follows the empty root')
   const start = html.indexOf('<div id="varanda-pre-splash"')
-  const block = html.slice(start, html.indexOf('</div>', start))
+  const tail = '<div class="bar" aria-hidden="true"><span></span></div>\n    </div>'
+  const block = html.slice(start, html.indexOf(tail, start) + tail.length)
   t.ok(block.includes('<svg'), 'chair svg')
   t.ok(block.includes('viewBox="0 0 256 256"'), 'chair viewBox')
   for (const fill of ['#2a7fb8', '#e8805a', '#f2b705', '#e94e3c', '#1d6b4f', '#a7382b', '#ae8303']) {
     t.ok(block.includes(fill), fill)
   }
-  t.is((block.match(/<path/g) || []).length, 21, '21 chair paths')
+  const chair = /<svg class="chair"[\s\S]*?<\/svg>/.exec(block)
+  t.ok(chair, 'chair svg element')
+  t.is(((chair && chair[0]).match(/<path/g) || []).length, 21, '21 chair paths')
   t.absent(/href|<text|<filter|<img|<iframe|<object|<embed|<script/i.test(block), 'no external or forbidden markup in the splash')
   t.absent(block.includes('conectando'), 'no connecting text')
+  t.absent(/<use|data:/.test(block), 'no <use> or data: URL in the splash')
+  t.absent(/#cde6f1|f-asa/.test(block), 'no flat blue sky or blue butterfly wing')
+  t.ok(/\.ceu \{[^}]*linear-gradient\(/.test(html), 'the sky band is the sunset gradient')
   t.ok(html.includes('<div class="bar" aria-hidden="true"><span></span></div>\n    </div>'), 'progress bar, last in the splash')
   t.ok(html.includes('width: calc(var(--varanda-progress, 0.1) * 100%)'), 'the bar fill follows the app')
-  const letters = ['V', 'a', 'r', 'a', 'n', 'd', 'a']
-  const spans = letters.map((letter, i) => '<span style="--i:' + i + '">' + letter + '</span>').join('')
-  t.ok(block.includes(spans), 'Varanda letter spans in order')
+  // The word is the logo's hand lettering: one svg per letter, in order.
+  const word = /<div class="word" aria-hidden="true">([\s\S]*?)<\/div>/.exec(block)
+  t.ok(word, 'word div')
+  const svgs = [...((word && word[1]) || '').matchAll(/<svg style="--i:(\d+)"[^>]*>([\s\S]*?)<\/svg>/g)]
+  t.alike(svgs.map((s) => Number(s[1])), [0, 1, 2, 3, 4, 5, 6], 'seven letter svgs in order')
+  for (const s of svgs) t.is((s[2].match(/<path/g) || []).length, 1, 'letter ' + s[1] + ' has one path')
   t.ok(html.includes('<meta name="color-scheme" content="light dark" />'), 'color-scheme meta')
   t.ok(html.includes('<meta name="theme-color" content="#fbf8f3" />'), 'light theme-color meta')
   t.ok(html.includes('<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#101010" />'), 'dark theme-color meta')
@@ -104,7 +113,8 @@ test('index.html paints the brand before the bundle runs', (t) => {
   const dark = /@media \(prefers-color-scheme: dark\) \{([\s\S]*?)\n {6}\}/.exec(html)
   t.ok(dark, 'dark media query exists')
   t.ok(dark && dark[1].includes('#varanda-pre-splash { background: #101010; }'), 'dark pre-splash background')
-  t.ok(dark && /\.chair \{[^}]*background: #fbf8f3/.test(dark[1]), 'chair keeps a cream pad in dark')
+  t.absent(/\.chair \{[^}]*(background|padding)/.test(html), 'no cream pad rule on the chair')
+  t.ok(dark && dark[1].includes('--vps-parede: #f3ede2;'), 'the parede stays cream in dark')
   t.ok(html.includes('prefers-reduced-motion: no-preference'), 'motion lives in the no-preference query')
   t.ok(html.includes('pointer-events: none'), 'splash does not eat taps')
   t.ok(html.includes('visibility: hidden'), 'expiry keyframe')

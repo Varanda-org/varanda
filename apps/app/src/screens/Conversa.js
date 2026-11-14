@@ -733,7 +733,7 @@ const INITIAL = {
   refreshing: false
 }
 
-export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onToast, onDeletedPost, onMessage, composeSignal, onComposeSeen, onPublished }) {
+export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onToast, onDeletedPost, onMessage, composeSignal, onComposeSeen, onPublished }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
@@ -1101,9 +1101,9 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
   const post = view.post || (phase !== 'ready' ? seed : null)
   const focalTarget = { ref: focal, ...(post ? identityOf(names, post.author, post) : {}), text: post ? post.text : '' }
   const target = replyTarget || focalTarget
-  const expandReply = async (draft, target = replyTarget || focalTarget) => {
+  const expandReply = async (draft, target = replyTarget || focalTarget, attach) => {
     if (typeof onReply !== 'function') return false
-    const accepted = await onReply({ ...target, draft })
+    const accepted = await onReply(attach ? { ...target, draft, attach } : { ...target, draft })
     if (accepted === true && replyDraft.current.focal === focal && replyDraft.current.text === draft) replyDraft.current.text = ''
     return accepted
   }
@@ -1279,8 +1279,8 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
       {full || sending
         ? (
           // The open keyboard already covers the gesture bar: its inset would
-          // leave a band between the bar and the keyboard. The padding takes the
-          // bar's colour so no strip of page shows under it.
+          // leave a band between the bar and the keyboard. The page background
+          // shows around the floating pill, so the padding keeps it off the edges.
           <View ref={barBox} collapsable={false} style={[styles.barWrap, { paddingBottom: keyboardOpen ? 8 : Math.max(8, insets.bottom) }]}>
             <ReplyBar
               key={focal}
@@ -1289,6 +1289,9 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
               onDraftChange={(text) => { if (replyDraft.current.focal === focal) replyDraft.current.text = text }}
               onSend={sendReply}
               onExpand={expandReply}
+              onAttach={(draft) => expandReply(draft, undefined, 'photo')}
+              me={me}
+              nonFocalTarget={replyTarget !== null && replyTarget.ref !== focal}
               onClearTarget={() => setReplyTarget(null)}
               busy={sending}
               disabled={!post && !replyTarget}
@@ -1304,7 +1307,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
 
 const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
-  barWrap: { backgroundColor: colors.card },
+  barWrap: { backgroundColor: colors.bg, paddingHorizontal: space.md, paddingTop: space.sm },
   note: { paddingHorizontal: 16, paddingVertical: 12 },
   prompt: { paddingHorizontal: 16, paddingVertical: 12, gap: 8 },
   child: { marginLeft: space.xl, borderLeftWidth: 1, borderLeftColor: colors.line },
