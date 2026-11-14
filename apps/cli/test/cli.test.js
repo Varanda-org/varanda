@@ -243,6 +243,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     triageToken: null,
     pushToken: null,
     publicOrigin: null,
+    postsOrigin: null,
     accountHttp: 'http://127.0.0.1:8790',
     accountPort: null,
     accountHost: null,
@@ -451,6 +452,19 @@ test('CLI parser, R5 help and command router', async (t) => {
   for (const value of ['http://varanda.test', 'https://varanda.test/', 'https://Varanda.test', 'https://varanda.test/x', ' https://varanda.test']) {
     usage(t, ['seed'], 'VARANDA_PUBLIC_ORIGIN inválido', { VARANDA_PUBLIC_ORIGIN: value })
     t.is(parse(['account', 'serve'], { VARANDA_PUBLIC_ORIGIN: value }).publicOrigin, null, 'another command ignores a value only seed reads')
+  }
+  // The post pages switch is independent of the Feira origin, both ways.
+  t.is(parse([], { VARANDA_PUBLIC_ORIGIN: 'https://varanda.test' }).postsOrigin, null, 'a Feira origin alone leaves the post pages off')
+  t.is(parse(['seed'], { VARANDA_PUBLIC_ORIGIN: 'https://varanda.test' }).postsOrigin, null, 'also for seed')
+  t.is(parse(['seed'], { VARANDA_POSTS_ORIGIN: 'https://varanda.test' }).postsOrigin, 'https://varanda.test')
+  t.is(parse(['seed'], { VARANDA_POSTS_ORIGIN: 'https://varanda.test' }).publicOrigin, null, 'a posts origin alone leaves the Feira off')
+  t.is(parse(['seed'], { VARANDA_POSTS_ORIGIN: 'https://varanda.test:8443' }).postsOrigin, 'https://varanda.test:8443')
+  t.is(parse(['seed'], { VARANDA_POSTS_ORIGIN: '' }).postsOrigin, null, 'empty means the post pages are off')
+  t.is(parse(['seed'], {}).postsOrigin, null, 'unset means the post pages are off')
+  for (const value of ['http://varanda.test', 'https://varanda.test/', 'https://Varanda.test', 'https://varanda.test/x', ' https://varanda.test', 'https://varanda.test:0']) {
+    usage(t, ['seed'], 'VARANDA_POSTS_ORIGIN inválido', { VARANDA_POSTS_ORIGIN: value })
+    usage(t, ['seed'], 'VARANDA_POSTS_ORIGIN inválido', { VARANDA_POSTS_ORIGIN: value, VARANDA_PUBLIC_ORIGIN: 'https://varanda.test' })
+    t.is(parse(['account', 'serve'], { VARANDA_POSTS_ORIGIN: value }).postsOrigin, null, 'another command ignores a value only seed reads')
   }
   for (const name of ['timeout-ms', 'limit']) {
     for (const value of ['0', '-1', '1.5', 'abc', '', 'Infinity', '1e3', '0x10']) usage(t, ['--' + name, value])
