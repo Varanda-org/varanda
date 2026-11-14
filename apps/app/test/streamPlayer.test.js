@@ -383,6 +383,26 @@ test('web: the source is set at creation, with metadata preload and no crossOrig
   player.release()
 })
 
+test('web: preload auto buffers ahead, any other value stays metadata', async (t) => {
+  const w = await web()
+  installFakeAudio()
+  let player = w.createStreamPlayer(PATH, { preload: 'auto' })
+  t.is(globalThis.__el.preload, 'auto')
+  player.release()
+
+  installFakeAudio()
+  player = w.createStreamPlayer(PATH)
+  t.is(globalThis.__el.preload, 'metadata', 'no option')
+  player.release()
+
+  for (const preload of [undefined, 'metadata', 'none', 'AUTO', 'auto ', '']) {
+    installFakeAudio()
+    player = w.createStreamPlayer(PATH, { origin: null, preload })
+    t.is(globalThis.__el.preload, 'metadata', 'preload ' + JSON.stringify(preload))
+    player.release()
+  }
+})
+
 test('web: seek(12000) before play sets 12 s and resolves on seeked', async (t) => {
   const w = await web()
   const log = installFakeAudio()
