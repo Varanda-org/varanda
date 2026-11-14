@@ -562,7 +562,7 @@ function useMomentMusicPolicy (node, member, active) {
   return result.ok
 }
 
-function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage, onCreate }) {
+function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenMember, onMessage, onCreate }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const node = useNode()
@@ -669,7 +669,8 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
       handed.current = null
     }
     // Muted, a momento spends no request or play use, and neither does the next one.
-    const allowed = musicOn === true && isTop && node.visible !== false && !musicClosed && !soundOff
+    // A sheet over the stack (Ajustes, a report, help) covers the viewer without moving isTop.
+    const allowed = musicOn === true && isTop && !covered && node.visible !== false && !musicClosed && !soundOff
     if (ahead.current && (!allowed || ahead.current.key !== nextKey || ahead.current.own !== own || ahead.current.origin !== musicOrigin || ahead.current.epoch !== node.epoch)) {
       ahead.current.handle.release()
       ahead.current = null
@@ -685,7 +686,7 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
         if (!result.ok && result.code === 'limite-musica') musicQuota.current = true
       })
     }
-  }, [itemKey, nextKey, nextMusic?.id, nextMusic?.start, own, musicOrigin, node.epoch, node.request, musicOn, isTop, node.visible, musicClosed, soundOff, photo.phase, musicSettled, preloadStream])
+  }, [itemKey, nextKey, nextMusic?.id, nextMusic?.start, own, musicOrigin, node.epoch, node.request, musicOn, isTop, covered, node.visible, musicClosed, soundOff, photo.phase, musicSettled, preloadStream])
   useEffect(() => () => {
     ahead.current?.handle.release()
     handed.current?.handle.release()

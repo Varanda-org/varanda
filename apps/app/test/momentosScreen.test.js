@@ -977,7 +977,7 @@ function preparedHandle (done = Promise.resolve({ ok: true })) {
   }
 }
 
-async function viewerHost ({ music = true, tracks = null, medias = null, policy = true, ready = true, reduce = false, photo = 'ok', media = null, author = A, hosted = true, online = true, unlocked = true, send, muted = false, onStateChange, prepare } = {}) {
+async function viewerHost ({ music = true, tracks = null, medias = null, policy = true, ready = true, reduce = false, photo = 'ok', media = null, author = A, hosted = true, online = true, unlocked = true, send, muted = false, covered = false, onStateChange, prepare } = {}) {
   const moments = await import('../src/moments.js')
   const seen = await import('../src/momentSeen.js')
   const soundMute = await import('../src/soundMute.js')
@@ -1063,7 +1063,7 @@ async function viewerHost ({ music = true, tracks = null, medias = null, policy 
   }
   const setup = 'useMoments = () => mocked.data; useMomentSeen = () => mocked.seenState; useMotionReduced = () => mocked.env.reduce; useMomentPhoto = () => ({ phase: mocked.env.photo })'
   const host = hookHost(read('src/screens/Momentos.js'), 'Viewer', deps, setup)
-  host.render({ entry: { key: author }, ownKey: A, onBack: () => { env.back++ }, onMessage: (...args) => env.messages.push(args) })
+  host.render({ entry: { key: author }, ownKey: A, covered, onBack: () => { env.back++ }, onMessage: (...args) => env.messages.push(args) })
   await host.flush()
   return {
     ...host,
@@ -1128,6 +1128,23 @@ test('T4: muted sound preloads nothing and muting releases the ahead step', asyn
   await h.flush()
   t.is(h.preloads[0]?.handle.releases, 1, 'muting releases it')
   setSoundMuted(false)
+  await h.flush()
+  t.is(h.preloads.length, 1, 'the pair is not tried again')
+})
+
+test('T4: a sheet covering the viewer preloads nothing and releases the ahead step', async (t) => {
+  const h = await viewerHost({ tracks: [null, PRELOAD_TRACKS[1]], covered: true })
+  t.teardown(h.unmount)
+  const props = (covered) => ({ entry: { key: A }, ownKey: A, onBack: () => {}, covered })
+  t.is(h.preloads.length, 0, 'a covered viewer spends no request ahead')
+  h.render(props(false))
+  await h.flush()
+  t.is(h.preloads.length, 1, 'uncovering preloads the next momento')
+  t.is(h.preloads[0]?.handle.releases, 0)
+  h.render(props(true))
+  await h.flush()
+  t.is(h.preloads[0]?.handle.releases, 1, 'covering releases it')
+  h.render(props(false))
   await h.flush()
   t.is(h.preloads.length, 1, 'the pair is not tried again')
 })
