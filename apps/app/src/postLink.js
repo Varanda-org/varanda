@@ -50,6 +50,12 @@ export function postRef (target) {
   return isRef(ref) ? ref : null
 }
 
+// The post opening card on a first visit. The signed invite card has its own
+// opening and wins, so the two never stack or fight over the same screen.
+export function postOpeningGate ({ introShow, ageReturn, inviteOpening, otherLink, post, dismissed } = {}) {
+  return introShow === true && !ageReturn && inviteOpening === 'none' && !otherLink && postRef(post) !== null && !dismissed
+}
+
 // A bare origin only. The public link is always <origin>/p/<author>/<seq>,
 // so a path or a trailing slash would point somewhere else.
 function bareOrigin (origin) {
