@@ -59,6 +59,9 @@ const resultKeys = {
   'post.reply': ['seq', 'ref'],
   'post.quote': ['seq'],
   'post.delete': ['seq', 'ref', 'changed', 'deleted'],
+  'post.shared': ['shareSeq'],
+  'post.share': ['shareSeq', 'created'],
+  'post.unshare': ['ok', 'changed'],
   'like.set': ['seq', 'on', 'changed'],
   'repost.set': ['seq', 'on', 'changed'],
   'engagement.read': ['liked', 'reposted'],
@@ -583,6 +586,9 @@ function samples (f) {
     'post.reply': { to, text: 'Até amanhã!' },
     'post.quote': { to, text: 'Vamos conversar sobre isso.' },
     'post.delete': { to },
+    'post.shared': { to },
+    'post.share': { to },
+    'post.unshare': { to },
     'like.set': { to, on: true },
     'repost.set': { to, on: true },
     'engagement.read': { refs: [to] },
@@ -1532,4 +1538,32 @@ test('group reactions outside the 12 shown stay counted and come back, as in the
   // Taking the reaction back shows the hidden emoji again with its count.
   await answer(t, request, 'group.react', { group, target, emoji: '' })
   t.alike((await read()).reactions, twelve.map((emoji) => ({ emoji, count: 1, mine: false })))
+})
+
+test('post.share, post.shared and post.unshare follow the newest live share', async (t) => {
+  const { fixtures: f, request } = await load()
+  const call = (method, params) => answer(t, request, method, params)
+  const to = samples(f)['post.shared'].to
+  t.alike(await call('post.shared', { to }), { shareSeq: null })
+  t.alike(await call('post.unshare', { to }), { ok: true, changed: false }, 'nothing to withdraw')
+  const first = await call('post.share', { to })
+  t.is(first.created, true)
+  t.ok(Number.isSafeInteger(first.shareSeq) && first.shareSeq > Number(to.split(':')[1]))
+  t.alike(await call('post.shared', { to }), { shareSeq: first.shareSeq })
+  t.alike(await call('post.share', { to }), { shareSeq: first.shareSeq, created: false }, 'a live share is not written twice')
+  t.alike(await call('post.unshare', { to }), { ok: true, changed: true })
+  t.alike(await call('post.shared', { to }), { shareSeq: null })
+  t.alike(await call('post.unshare', { to }), { ok: true, changed: false })
+  const again = await call('post.share', { to })
+  t.is(again.created, true)
+  t.ok(again.shareSeq > first.shareSeq, 'a new share after a withdrawal is a new block')
+  t.alike(await call('post.shared', { to }), { shareSeq: again.shareSeq })
+  for (const method of ['post.shared', 'post.share', 'post.unshare']) {
+    await refused(t, request, method, { to: `${f.members[1].author}:3` }, 'USAGE', 'referência inválida')
+    await refused(t, request, method, { to: `${f.own}:1` }, 'USAGE', 'o registro não é uma publicação')
+    await refused(t, request, method, { to: `${f.own}:0` }, 'USAGE')
+  }
+  const post = await call('post.create', { text: 'Some daqui a pouco.' })
+  await call('post.delete', { to: post.ref })
+  for (const method of ['post.shared', 'post.share', 'post.unshare']) await refused(t, request, method, { to: post.ref }, 'USAGE', 'referência inválida')
 })

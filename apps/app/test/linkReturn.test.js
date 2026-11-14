@@ -161,6 +161,30 @@ test('parseAppLink: listing links reject malformed paths and foreign origins', a
   }
 })
 
+test('parseAppLink: public post links', async (t) => {
+  const { parseAppLink } = await load()
+  await withOrigin(t, 'https://varanda.example')
+  const target = { kind: 'publicacao', author: KEY, seq: 5 }
+  for (const prefix of ['https://varanda.example', 'varanda://']) {
+    t.alike(parseAppLink(prefix + '/publicacao/' + KEY + '/5'), target)
+    t.alike(parseAppLink(prefix + '/p/' + KEY + '/5'), target)
+  }
+  for (const bad of [
+    'https://varanda.example/p/policy',
+    'varanda:///p/policy',
+    'https://varanda.example/publicacao/' + KEY + '/0',
+    'varanda:///p/' + KEY + '/0',
+    'https://varanda.example/p/' + KEY + '/5/foto/1',
+    'varanda:///publicacao/' + KEY + '/5/foto/1',
+    'https://varanda.example/publicacao/' + KEY.slice(1) + '/5',
+    'varanda:///p/' + KEY.slice(1) + '/5',
+    'varanda:///p/' + KEY.toUpperCase() + '/5',
+    'https://varanda.example/publicacao/' + KEY.toUpperCase() + '/5'
+  ]) {
+    t.is(parseAppLink(bad), null, bad)
+  }
+})
+
 test('parseAppLink: listing https links wait for the installation', async (t) => {
   const { parseAppLink, waitsForInstallation } = await load()
   const { setInstallation } = await import('../src/installation.js')
