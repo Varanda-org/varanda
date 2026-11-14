@@ -153,8 +153,8 @@ const makeStyles = (colors) => StyleSheet.create({
     maxWidth: layout.column,
     alignSelf: 'center',
     backgroundColor: colors.card,
-    borderTopLeftRadius: radius.lg,
-    borderTopRightRadius: radius.lg,
+    borderTopLeftRadius: layout.sheetRadius,
+    borderTopRightRadius: layout.sheetRadius,
     paddingTop: space.sm
   },
   grabber: { alignSelf: 'center', width: 36, height: 5, borderRadius: radius.pill, backgroundColor: colors.line, marginBottom: space.sm },
