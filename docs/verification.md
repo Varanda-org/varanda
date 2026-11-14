@@ -10092,3 +10092,54 @@ node apps/app/test/platformGate.test.js
 ```
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 217. A Rua esconde as barras ao rolar para baixo (PR feat/rua-chrome-on-scroll)
+
+Esta seção confere a rolagem da A Rua que esconde as barras. Só na aba A Rua, rolar o feed para baixo tira da tela a barra de cima (o título, com o ⓘ e o sino, e os avisos logo abaixo dela, como sem conexão, exclusão agendada, atualização, instalação e notificações), a barra de abas e o botão + (Publicar). Os avisos voltam com a barra. As três saem juntas em 200 ms, e o feed sobe e ganha o espaço, para mostrar mais publicações. Numa tela com área de relógio, uma faixa na cor do fundo cobre essa área enquanto a barra de cima está fora, para que nenhuma publicação passe por baixo do relógio. Rolar para cima mostra tudo de novo.
+
+Só a rolagem feita pela pessoa conta: arrastar ou tocar, a roda do mouse, a barra de rolagem e o teclado (veja os limites). Uma rolagem feita pelo app (tocar em A Rua de novo, uma lista que muda de tamanho, publicações novas que entram acima da que está na tela, um feed que carrega mais) nunca esconde as barras, e algo que sai de cima da que está na tela não as traz de volta. Ao voltar para A Rua (de outra aba ou de um perfil), a contagem começa de onde o feed está. Elas escondem depois de 24 pt de rolagem para baixo, quando o feed já passou da barra de cima (52 pt), e voltam depois de 8 pt de rolagem para cima ou no topo do feed.
+
+As outras abas (Espiadinha, Conversas, Feira, Buscar e os perfis) nunca escondem as barras. Também não escondem quando há uma tela empilhada sobre A Rua (um perfil, uma publicação aberta), com a composição aberta ou com um aviso que tem botão de ação.
+
+Depois que as barras mudam, o resto do mesmo gesto não as troca de volta: arraste para baixo para esconder, solte, e arraste para cima para mostrar. No Android, o feed anda sob o dedo enquanto as barras deslizam, e esse movimento não pode ser lido como rolagem no sentido contrário. Na web, uma sequência de roda do mouse conta como um gesto só até ficar 250 ms parada.
+
+Perto do fim do feed, as barras só escondem quando há espaço embaixo para isso, para não piscar no fim da lista.
+
+Com Reduzir movimento, TalkBack ou VoiceOver ligado, as barras nunca escondem. Um leitor de tela ligado com as barras já escondidas as traz de volta no próximo quadro de rolagem. Na web o app não sabe se há um leitor de tela (o react-native-web não informa), então lá as barras escondem mesmo com um leitor ligado. Escondidas, as barras saem da árvore de acessibilidade em todas as plataformas (na web, com `aria-hidden`) e não podem ser tocadas; na web, se o foco do teclado (Tab) chegar a uma delas, as barras voltam.
+
+Um aviso curto (toast) desce até a borda inferior enquanto as barras estão fora, em vez de flutuar acima do espaço vazio da barra de abas.
+
+O botão "ver novidades" desce para baixo da faixa do relógio enquanto as barras estão fora, para não ficar coberto por ela.
+
+Nada disso envia pedido nem busca dado: é só a tela. Não há mudança de protocolo, RPC nem Termos, e nenhuma dependência nova.
+
+Limites conhecidos. Na web, um leitor de tela não impede que as barras escondam, porque o app não consegue saber se há um ligado. Na web, rolar para baixo só pelo teclado (seta para baixo, Page Down, End, espaço) pode não esconder as barras: essas teclas não contam como um gesto novo, porque numa conversa elas não podem tirar a lista do fim. A roda do mouse, um clique na lista ou uma tecla que sobe a lista contam. Trocar de sentido dentro do mesmo arrasto (ou da mesma sequência de roda na web) só mostra ou esconde as barras no gesto seguinte. Um leitor de tela ligado no meio da sessão vale a partir do próximo quadro de rolagem. No fim da lista, o espaço muda uma vez a cada esconder e uma vez a cada mostrar: o feed ganha o espaço no começo de esconder e o devolve no fim de mostrar.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA. Registrar aparelho, sistema e, na web, o navegador.
+
+- [ ] Rolar para baixo esconde a barra de cima, a barra de abas e o botão +, com a faixa sobre o relógio; rolar para cima mostra. Emulador Android (Android 16, build de debug): conferido em 14/11/2026; arrastar para baixo esconde a barra de cima, a barra de abas e o botão +, com a faixa sobre o relógio; um arrasto separado para cima mostra. Simulador iOS (iPhone 17 Pro, iOS 26.2): conferido em 14/11/2026; arrastar para baixo esconde as três, com a faixa sobre o relógio; um arrasto separado para cima mostra. Web (Chromium, tela de 390x844): conferido em 14/11/2026; roda para baixo de 300 px esconde (a barra de cima e o feed sobem 52 px, o feed cresce até preencher a tela e a barra de abas desce 49 px); uma nova sequência de roda para cima, depois de uma pausa, mostra. Toque num navegador de celular: pendente. PWA: pendente.
+- [ ] O feed andando sob o dedo enquanto as barras deslizam não as faz voltar (o mesmo gesto não troca de novo; o próximo troca). Emulador Android (Android 16, build de debug): conferido em 14/11/2026; o feed andou 47 pt para trás durante e depois do deslize, e as barras ficaram escondidas. Simulador iOS (iPhone 17 Pro, iOS 26.2): pendente. Web (Chromium, tela de 390x844): pendente. PWA: pendente.
+- [ ] Fim do feed: escondidas continuam escondidas; perto do fim só escondem com espaço. Emulador Android (Android 16, build de debug): conferido em 14/11/2026; no fim do feed, as barras escondidas continuam escondidas; perto do fim, não escondem enquanto não há espaço. Simulador iOS (iPhone 17 Pro, iOS 26.2): pendente. Web (Chromium, tela de 390x844): pendente. PWA: pendente.
+- [ ] Só A Rua esconde (Espiadinha e as outras abas não). Emulador Android (Android 16, build de debug): conferido em 14/11/2026; a Espiadinha nunca esconde as barras; as outras abas: pendente. Simulador iOS (iPhone 17 Pro, iOS 26.2): pendente. Web (Chromium, tela de 390x844): pendente. PWA: pendente.
+- [ ] Tocar em A Rua de novo sobe ao topo com as barras à mostra; abrir um perfil e voltar mostra as barras e mantém a posição. Emulador Android (Android 16, build de debug): conferido em 14/11/2026; tocar em A Rua de novo sobe ao topo com as barras à mostra; abrir um perfil e voltar mostra as barras e mantém a posição do feed. Simulador iOS (iPhone 17 Pro, iOS 26.2): pendente. Web (Chromium, tela de 390x844): pendente. PWA: pendente.
+- [ ] Reduzir movimento: as barras não escondem. Emulador Android (Android 16, build de debug): conferido em 14/11/2026; com "Escala de animação de transição" desligada (o que o React Native lê no Android como Reduzir movimento), as barras ficam à mostra ao rolar. Simulador iOS (iPhone 17 Pro, iOS 26.2): pendente. Web (Chromium, tela de 390x844): pendente. PWA: pendente.
+- [ ] Leitor de tela: as barras não escondem; escondidas, saem da árvore de acessibilidade. Emulador Android (Android 16, build de debug): conferido em 14/11/2026 na árvore de acessibilidade (uiautomator dump): com as barras escondidas, elas saem da árvore; com o TalkBack ligado, as barras não escondem: pendente. Simulador iOS (iPhone 17 Pro, iOS 26.2) com VoiceOver: pendente. Web: pendente. PWA: pendente.
+- [ ] Aviso (toast) desce até a borda enquanto as barras estão fora. Android, iOS, web e PWA: pendente.
+- [ ] Web: com as barras fora, elas têm `aria-hidden`, e o Tab até a barra de abas ou o botão + traz as barras de volta. Web (Chromium, tela de 390x844): conferido em 14/11/2026 pelo DOM; com as barras fora, a barra de cima, a barra de abas e o botão + têm `aria-hidden` e `pointer-events: none`; o foco numa aba da barra tira o `aria-hidden` das três e devolve os toques; uma nova sequência de roda para baixo esconde de novo. O deslize em si não foi observado nessa conferência. PWA: pendente.
+- [ ] Com as barras fora, o botão "ver novidades" aparece abaixo da faixa do relógio, sem ficar coberto. Android, iOS, web e PWA: pendente.
+- [ ] Publicações novas que entram acima da que está na tela, com a pessoa parada, não escondem as barras, e algo que sai de cima não as mostra. Android, iOS, web e PWA: pendente.
+- [ ] Voltar de um perfil com o feed no meio e rolar um pouco, para cima ou para baixo, não esconde as barras. Android, iOS, web e PWA: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/app/test/chromeScroll.test.js
+node apps/app/test/ruaChrome.test.js
+node apps/app/test/tabBar.test.js
+node apps/app/test/shellChrome.test.js
+node apps/app/test/feedRender.test.js
+node apps/app/test/hapticsUse.test.js
+node apps/app/test/platformGate.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.

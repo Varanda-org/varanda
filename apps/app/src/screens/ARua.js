@@ -33,6 +33,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { StatusBar } from 'expo-status-bar'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { ENGAGEMENT_LIMIT_MAX, FEED_LIMIT_DEFAULT, FEED_LIMIT_MAX, FOLLOW_LIMIT_MAX, LOG_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { perfMarks, useNode, useSyncSignals } from '../node'
 import { useNames } from '../names'
@@ -58,6 +59,7 @@ import { Icon } from '../ui/Icon'
 import { PostRow } from '../ui/PostRow'
 import { KeptOnlyContext } from '../ui/MediaView'
 import { TopBar } from '../ui/TopBar'
+import { useChromeMotion } from '../ui/chromeMotion'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, SkeletonRow } from '../ui/States'
 import { noteLocalWrite } from '../localWrites'
@@ -1544,7 +1546,7 @@ function startPageFeed (node, page) {
 
 // A Rua of a page: what its newest follows posted, read on demand (page.feed:
 // no cursor, no sync signals), so it is one list with a pull to refresh.
-function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onDeletedPost }) {
+function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onDeletedPost, onScrollFrame, onUserScroll }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
@@ -1730,6 +1732,8 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
         refreshing={loading && loadedAt !== null}
         scrollToTopSignal={scrollToTop}
         atEnd
+        onScrollFrame={onScrollFrame}
+        onUserScroll={onUserScroll}
       />
       <SocialToast text={social.toast} />
     </View>
@@ -1757,7 +1761,7 @@ export default function ARua (props) {
   return <MemberARua {...props} />
 }
 
-function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onDeletedPost, onBoot, onMessage, onOpenMomentos, onCreateMoment }) {
+function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onDeletedPost, onBoot, onMessage, onOpenMomentos, onCreateMoment, onScrollFrame, onUserScroll }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   // The full hints (per-diary lengths, fresh keys): useNode() keeps only the
@@ -1768,6 +1772,11 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   // The floating publish button sits over the list's end: clear it too.
   const bottomPad = useBottomPad() + layout.fabSize
   const blocks = useBlocks()
+  // With the bars away the list starts under the status strip (App.js), so
+  // the new-posts pill moves below it.
+  const chrome = useChromeMotion()
+  const insets = useSafeAreaInsets()
+  const newItemsTop = chrome.hidden && insets.top > 0 ? insets.top + 8 : undefined
   // The snapshot is read once, in the first render, so the first frame can
   // paint it and the first loadNewest (an effect) comes after it.
   const [boot] = useState(() => {
@@ -2445,7 +2454,10 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
         atEnd={atEnd}
         scrollToTopSignal={scrollToTop}
         newItems={{ label: 'ver novidades', visible: fresh && loadedAt !== null && items.length > 0, onPress: showNewItems }}
+        newItemsTop={newItemsTop}
         keepVisiblePosition
+        onScrollFrame={onScrollFrame}
+        onUserScroll={onUserScroll}
       />
       <SocialToast text={social.toast} />
     </View>

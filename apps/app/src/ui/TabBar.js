@@ -17,6 +17,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { tap } from './haptics'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
+import { useChromeMotion } from './chromeMotion'
+import { chromeHiddenProps } from '../chromeScroll'
 import { useReduceMotion } from './StackLayer'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, motion, radius } from './theme'
@@ -66,8 +68,19 @@ export function TabBar ({ current, onSelect, onReselect, badges = {}, tabs = TAB
   const colors = alwaysDark ? DARK : theme.colors
   const reduceMotion = useReduceMotion()
   const insets = useSafeAreaInsets()
+  const { progress, hidden, show } = useChromeMotion()
+  const barHeight = layout.tabBar + insets.bottom
+  // Translate, never resize: the layout stays put while the bar slides away.
+  const translateY = progress.interpolate({ inputRange: [0, 1], outputRange: [0, barHeight] })
+  const hiddenProps = hidden
+    ? { pointerEvents: 'none', ...chromeHiddenProps(show) }
+    : null
   return (
-    <View style={[styles.bar, { height: layout.tabBar + insets.bottom, paddingBottom: insets.bottom }]} accessibilityRole='tablist'>
+    <Animated.View
+      {...hiddenProps}
+      style={[styles.bar, { height: barHeight, paddingBottom: insets.bottom, transform: [{ translateY }] }]}
+      accessibilityRole='tablist'
+    >
       {tabs.map((tab) => {
         const selected = tab.id === current
         const tint = selected ? colors.accent : colors.soft
@@ -113,7 +126,7 @@ export function TabBar ({ current, onSelect, onReselect, badges = {}, tabs = TAB
           </Pressable>
         )
       })}
-    </View>
+    </Animated.View>
   )
 }
 

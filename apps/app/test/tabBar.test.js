@@ -84,3 +84,19 @@ test('showPostButton: no "publicar" on Conversas nor on its screens', async (t) 
     t.ok(showPostButton({ tab: 'comunidades', screen }), screen + ' keeps it')
   }
 })
+
+test('TabBar: follows the chrome motion value and takes no touches while hidden', (t) => {
+  t.ok(tabBarSrc.includes('useChromeMotion()'), 'useChromeMotion is used')
+  t.ok(tabBarSrc.includes('progress.interpolate({ inputRange: [0, 1], outputRange: [0, barHeight] })'), 'the translate interpolates progress')
+  t.ok(tabBarSrc.includes('transform: [{ translateY }]'), 'translate, not height')
+  t.ok(/hidden\s*\? \{ pointerEvents: 'none', \.\.\.chromeHiddenProps\(show\) \}/.test(tabBarSrc), 'no touches and the hidden props while hidden')
+  t.ok(tabBarSrc.includes("import { chromeHiddenProps } from '../chromeScroll'"), 'the shared hidden props')
+})
+
+test('Fab: leaves with the bar and takes no touches while hidden', (t) => {
+  const fabSrc = readFileSync(join(__dirname, '..', 'src', 'ui', 'Fab.js'), 'utf8')
+  t.ok(fabSrc.includes('useChromeMotion()'), 'useChromeMotion is used')
+  t.ok(fabSrc.includes('progress.interpolate({ inputRange: [0, 1], outputRange: [0, offset + layout.fabSize] })'), 'the translate interpolates progress')
+  t.ok(fabSrc.includes("pointerEvents={hidden ? 'none' : 'box-none'}"), 'no touches while hidden')
+  t.ok(fabSrc.includes('const hiddenProps = hidden ? chromeHiddenProps(show) : null') && fabSrc.includes("import { chromeHiddenProps } from '../chromeScroll'"), 'no focus while hidden')
+})

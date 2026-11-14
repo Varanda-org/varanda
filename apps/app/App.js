@@ -54,9 +54,9 @@
 // The service is still asked in the background and its answer wins.
 // Design: apps/site/artwork/app-design.md.
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { StatusBar } from 'expo-status-bar'
-import { AppState, BackHandler, Linking, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
+import { Animated, AppState, BackHandler, Linking, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { NodeProvider, perfMarks, useNode } from './src/node'
 import { hostedPage, rememberedConfig } from './src/configStore'
@@ -134,7 +134,10 @@ import { ScreenCovered, ScreenVisible } from './src/ui/screenVisible'
 import { holdAllEmbeds } from './src/embedLive'
 import { TopBar } from './src/ui/TopBar'
 import { TopActions } from './src/ui/TopActions'
-import { StackLayer, stackBusy, useStackMotion } from './src/ui/StackLayer'
+import { StackLayer, stackBusy, useReduceMotion, useStackMotion } from './src/ui/StackLayer'
+import { ChromeMotion } from './src/ui/chromeMotion'
+import { screenReaderOn } from './src/ui/screenReader'
+import { chromeGesture, chromeHiddenProps, chromeShow, contentShift, initialChrome, nextChrome } from './src/chromeScroll'
 import { stackEntries } from './src/stackEntries'
 import { HelpButton, closeHelp, useHelpOpen } from './src/ui/Help'
 import { HELP } from './src/help'
@@ -203,6 +206,9 @@ const TOAST_ACTION_MS = 4000
 // wraps it: the side insets around it would otherwise show the dark bg.
 const SPLASH_WRAP = Platform.OS === 'web' ? null : { backgroundColor: paletteFor('light').bg }
 const TAB_TITLES = { rua: 'A Rua', espiadinha: 'Espiadinha', comunidades: 'Conversas', feira: 'Feira', busca: 'Busca', avisos: 'Avisos' }
+const CHROME_MS = 200
+// The web has no native animated driver; StackLayer makes the same choice.
+const CHROME_NATIVE_DRIVER = Platform.OS !== 'web'
 // 'Um instante' offers 'Continuar mesmo assim' after this long.
 const SLOW_LOOKUP_MS = 10000
 // While the own profile is still unknown, it is asked again this often (the
@@ -2766,6 +2772,103 @@ function Member () {
     setComposer((c) => ({ ...c, open: true, reply: null, quote: null, moment: (c.moment || 0) + 1 }))
   }
   const reselectTab = (id) => setScrollSignal((s) => ({ ...s, [id]: (s[id] || 0) + 1 }))
+
+  // --- the bars hiding while A Rua scrolls down ---
+  // `chromeHidden` changes only when the bars flip, never per frame; the
+  // whole nextChrome result stays in a ref and goes back in on the next frame.
+  const chromeProgress = useRef(new Animated.Value(0)).current
+  const chromeState = useRef(initialChrome())
+  const chromeUserScrolled = useRef(false)
+  const [chromeHidden, setChromeHidden] = useState(false)
+  // Extra room under the content while the bars are away; given back only
+  // once they are back, or the bottom of the list would show bare for the slide.
+  const [chromeRoom, setChromeRoom] = useState(false)
+  const [chromeTop, setChromeTop] = useState(0)
+  const reduceMotion = useReduceMotion()
+  // Only A Rua with nothing over it may hide the bars: another tab, a pushed
+  // screen or one still leaving, the composer, a toast waiting for its
+  // action, reduced motion and a screen reader keep them in place.
+  const chromeMayHide = tab === 'rua' && nav.depth(stack) === 0 && !stackMotion.leaving && !composer.open && !(toast && toast.onAction) && !reduceMotion && !screenReaderOn()
+  const chromeMayHideRef = useRef(chromeMayHide)
+  chromeMayHideRef.current = chromeMayHide
+  const reduceMotionRef = useRef(reduceMotion)
+  reduceMotionRef.current = reduceMotion
+  const chromeTopRef = useRef(chromeTop)
+  chromeTopRef.current = chromeTop
+  const chromeListHeight = useRef(null)
+  const chromeContentHeight = useRef(null)
+  // A flip holds the anchor until a new gesture (nextChrome's hold), and a
+  // gesture that starts while the bars still slide would get the same shift,
+  // so frames during the slide only move the anchor too.
+  const chromeMoving = useRef(false)
+  const resetChrome = useCallback(() => {
+    chromeState.current = initialChrome()
+    chromeUserScrolled.current = false
+    // A flip whose state update merged with this one never runs its slide,
+    // so nothing else would clear the token.
+    chromeMoving.current = false
+    setChromeHidden(false)
+  }, [])
+  // Either way across chromeMayHide (leaving A Rua or coming back, a push or a
+  // pop) and on a reselect, which scrolls to the top by program.
+  useEffect(() => { resetChrome() }, [chromeMayHide, tab, stack.length, scrollSignal.rua, resetChrome])
+  const onRuaUserScroll = useCallback(() => {
+    chromeUserScrolled.current = true
+    chromeState.current = chromeGesture(chromeState.current)
+  }, [])
+  const onRuaScrollFrame = useCallback(({ y, contentHeight, layoutHeight }) => {
+    if (!chromeMayHideRef.current) return
+    // A frame where the list itself changed height (the room under it coming
+    // or going) comes from layout, not the person: it only moves the anchor.
+    const resized = chromeListHeight.current !== null && layoutHeight !== chromeListHeight.current
+    chromeListHeight.current = layoutHeight
+    const prev = chromeState.current
+    const grew = chromeContentHeight.current === null ? 0 : contentHeight - chromeContentHeight.current
+    chromeContentHeight.current = contentHeight
+    const shifted = contentShift({ y, lastY: prev.lastY, grew })
+    const next = nextChrome(prev, { y, userScrolled: chromeUserScrolled.current && !resized && !shifted && !chromeMoving.current, reduceMotion: reduceMotionRef.current, screenReader: screenReaderOn(), top: layout.topBar, below: contentHeight - layoutHeight - y, grow: chromeTopRef.current })
+    chromeState.current = next
+    if (next.hidden === prev.hidden) return
+    chromeMoving.current = true
+    if (next.hidden) setChromeRoom(true)
+    setChromeHidden(next.hidden)
+  }, [])
+  useEffect(() => {
+    chromeProgress.stopAnimation()
+    if (reduceMotion) {
+      chromeMoving.current = false
+      chromeProgress.setValue(chromeHidden ? 1 : 0)
+      setChromeRoom(chromeHidden)
+      return
+    }
+    // Only a flip from a scroll frame holds the guard (the first run on mount
+    // moves nothing), and only this run's end clears it: a stopped run
+    // reports after the next one has started.
+    const slide = {}
+    if (chromeMoving.current) chromeMoving.current = slide
+    const run = Animated.timing(chromeProgress, { toValue: chromeHidden ? 1 : 0, duration: CHROME_MS, useNativeDriver: CHROME_NATIVE_DRIVER })
+    run.start(({ finished }) => {
+      if (chromeMoving.current === slide) chromeMoving.current = false
+      if (finished && !chromeHidden) setChromeRoom(false)
+    })
+    return () => run.stop()
+  }, [chromeHidden, reduceMotion, chromeProgress])
+  // Tab focus on a hidden bar (web): show them, no scroll involved.
+  const showChrome = useCallback(() => {
+    const next = chromeShow(chromeState.current)
+    if (next === chromeState.current) return
+    chromeState.current = next
+    setChromeHidden(false)
+  }, [])
+  const chromeMotion = useMemo(() => ({ progress: chromeProgress, hidden: chromeHidden, show: showChrome }), [chromeProgress, chromeHidden, showChrome])
+  const onChromeLayout = useCallback((e) => {
+    const h = e.nativeEvent.layout.height
+    setChromeTop((prev) => (Number.isFinite(h) && Math.abs(prev - h) >= 0.5 ? h : prev))
+  }, [])
+  // Translate only, never animate a height: the list viewport keeps its
+  // size during the slide. With nothing measured (Diário without its top
+  // bar) both stay at 0.
+  const chromeShift = chromeProgress.interpolate({ inputRange: [0, 1], outputRange: [0, -chromeTop] })
   const openAvisos = () => {
     if (tab === 'avisos') reselectTab('avisos')
     else enterAvisos()
@@ -3400,47 +3503,53 @@ function Member () {
     }
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
-        {tab !== 'diario'
-          ? (
-            <TopBar
-              title={TAB_TITLES[tab]}
-              onBack={tab === 'avisos' && !stacked ? closeAvisos : undefined}
-              right={topRight}
-            />
-            )
-          : null}
-        <OfflineNote inset={tab === 'diario'} />
-        {showArrival
-          ? (
-            <InviteArrival
-              key={arrivalResult.recordId + ':' + generation}
-              result={arrivalResult}
-              request={node.request}
-              resolve={resolveArrival}
-              guard={arrivalGuard}
-              onStale={reloadCard}
-              onFollowed={followsChanged}
-              onLater={closeArrival}
-              onDone={closeArrival}
-            />
-            )
-          : null}
-        {scheduledDeletion !== null
-          ? <DeletionNote scheduled={scheduledDeletion} onOpen={() => setAjustes('excluir')} inset={tab === 'diario' && node.online !== false} />
-          : null}
-        {inviteNoteShown
-          ? <InviteDropNote record={inviteDrop.note} onShown={handleInviteShown} onOpen={() => { inviteDrop.dismiss(); openInvites() }} inset={tab === 'diario' && node.online !== false} />
-          : null}
-        {updateReady && !updateDismissed
-          ? <UpdateNote onUpdate={() => { try { if (Platform.OS === 'web') window.location.reload() } catch {} }} onClose={() => setUpdateDismissed(true)} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} />
-          : installCardOpen && install.card !== 'none'
-            ? <InstallCard kind={install.card} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} onInstall={() => { install.promptInstall(); setInstallCardOpen(false) }} onClose={() => { setInstallCardOpen(false); install.dismissInstall() }} />
-            : install.note !== 'none'
-              ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} />
-              : push.note === 'offer' && pushMember !== null && push.member === pushMember ? <PushNote text={push.error || undefined} pending={push.pending} onEnable={() => { push.activatePush({ node, member: pushMember }) }} onClose={() => { push.dismissPush() }} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} /> : null}
+        <Animated.View
+          {...(chromeHidden ? { pointerEvents: 'none', ...chromeHiddenProps(showChrome) } : null)}
+          onLayout={onChromeLayout}
+          style={{ transform: [{ translateY: chromeShift }] }}
+        >
+          {tab !== 'diario'
+            ? (
+              <TopBar
+                title={TAB_TITLES[tab]}
+                onBack={tab === 'avisos' && !stacked ? closeAvisos : undefined}
+                right={topRight}
+              />
+              )
+            : null}
+          <OfflineNote inset={tab === 'diario'} />
+          {showArrival
+            ? (
+              <InviteArrival
+                key={arrivalResult.recordId + ':' + generation}
+                result={arrivalResult}
+                request={node.request}
+                resolve={resolveArrival}
+                guard={arrivalGuard}
+                onStale={reloadCard}
+                onFollowed={followsChanged}
+                onLater={closeArrival}
+                onDone={closeArrival}
+              />
+              )
+            : null}
+          {scheduledDeletion !== null
+            ? <DeletionNote scheduled={scheduledDeletion} onOpen={() => setAjustes('excluir')} inset={tab === 'diario' && node.online !== false} />
+            : null}
+          {inviteNoteShown
+            ? <InviteDropNote record={inviteDrop.note} onShown={handleInviteShown} onOpen={() => { inviteDrop.dismiss(); openInvites() }} inset={tab === 'diario' && node.online !== false} />
+            : null}
+          {updateReady && !updateDismissed
+            ? <UpdateNote onUpdate={() => { try { if (Platform.OS === 'web') window.location.reload() } catch {} }} onClose={() => setUpdateDismissed(true)} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} />
+            : installCardOpen && install.card !== 'none'
+              ? <InstallCard kind={install.card} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} onInstall={() => { install.promptInstall(); setInstallCardOpen(false) }} onClose={() => { setInstallCardOpen(false); install.dismissInstall() }} />
+              : install.note !== 'none'
+                ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} />
+                : push.note === 'offer' && pushMember !== null && push.member === pushMember ? <PushNote text={push.error || undefined} pending={push.pending} onEnable={() => { push.activatePush({ node, member: pushMember }) }} onClose={() => { push.dismissPush() }} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} /> : null}
+        </Animated.View>
         <TabBarShown.Provider value={!barsHidden}>
           <ScreenCovered.Provider value={covered}>
-            <View style={styles.flex}>
+            <Animated.View style={[styles.flex, { marginBottom: chromeRoom ? -chromeTop : 0, transform: [{ translateY: chromeShift }] }]}>
               <View style={shown('rua')}>
                 <ScreenVisible.Provider value={screenSeen('rua')}>
                   <ARua
@@ -3461,6 +3570,8 @@ function Member () {
                     onCreateMoment={openMomentComposer}
                     ownKey={ownKey}
                     scrollToTop={scrollSignal.rua}
+                    onUserScroll={onRuaUserScroll}
+                    onScrollFrame={onRuaScrollFrame}
                     followCount={followCount}
                     onFollowSomeone={() => {
                       setTab('busca')
@@ -3596,7 +3707,7 @@ function Member () {
                   />
                 </ScreenVisible.Provider>
               </View>
-            </View>
+            </Animated.View>
             {stacked || stackMotion.leaving
               ? (
                 <View style={styles.layer} pointerEvents='box-none'>
@@ -3606,12 +3717,17 @@ function Member () {
               : null}
           </ScreenCovered.Provider>
         </TabBarShown.Provider>
+        {/* With the top bar away the list would run under the status bar. */}
+        {chromeTop > 0 && insets.top > 0
+          ? <Animated.View pointerEvents='none' style={[styles.statusShield, { height: insets.top, opacity: chromeProgress }]} />
+          : null}
         {fabShown ? <Fab onPress={openComposer} /> : null}
         {/* After the Fab, and above it when it shows: a long toast wraps
-            upward and must never sit under the button. */}
+            upward and must never sit under the button. While A Rua has the
+            bars away (an action toast keeps them) it drops to the edge. */}
         {toast && !(viewerOnTop || viewerLeaving)
           ? (
-            <View style={[styles.toast, { bottom: fabShown ? insets.bottom + layout.tabBar + layout.fabAboveTabs + layout.fabSize + 12 : (barsHidden ? 0 : layout.tabBar) + insets.bottom + 12 }]} pointerEvents='box-none'>
+            <View style={[styles.toast, { bottom: fabShown ? insets.bottom + layout.tabBar + layout.fabAboveTabs + layout.fabSize + 12 : (barsHidden ? 0 : layout.tabBar) + insets.bottom + 12 }, chromeHidden && { bottom: insets.bottom + 12 }]} pointerEvents='box-none'>
               {/* Only the action takes touches: under box-none the label would
                   otherwise swallow taps meant for the screen below. */}
               <View pointerEvents='none' style={styles.toastLabel}>
@@ -3666,7 +3782,9 @@ function Member () {
   return (
     <View style={[styles.root, coveringBoot && SPLASH_WRAP, { paddingHorizontal: sidePad }]}>
       {coveringBoot ? bootCover : null}
-      <View style={coveringBoot ? styles.hidden : styles.flex}>{content}</View>
+      <ChromeMotion.Provider value={chromeMotion}>
+        <View style={coveringBoot ? styles.hidden : styles.flex}>{content}</View>
+      </ChromeMotion.Provider>
       {/* The terms gate used to unmount these sheets on a hosted lock as a
           side effect, and a current terms record no longer brings it up. So
           Publicar is not mounted while locked (its draft and photo go) and
@@ -3753,6 +3871,7 @@ const makeStyles = (colors) => StyleSheet.create({
   layer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
   shell: { flex: 1, width: '100%', maxWidth: layout.column, alignSelf: 'center', backgroundColor: colors.bg },
   shellWide: { borderLeftWidth: 1, borderRightWidth: 1, borderColor: colors.line },
+  statusShield: { position: 'absolute', top: 0, left: 0, right: 0, backgroundColor: colors.bg },
   helpBar: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'flex-end', paddingRight: space.sm, backgroundColor: colors.bg },
   link: { alignItems: 'center', paddingTop: 14, borderTopWidth: 1, borderTopColor: colors.line, backgroundColor: colors.bg },
   linkText: { fontSize: 15, fontWeight: '600', color: colors.accent },
