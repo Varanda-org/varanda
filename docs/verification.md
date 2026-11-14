@@ -9724,3 +9724,58 @@ Os testes cobrem a resposta do semeador em cada caso que não mostra nada (sem c
 ### Verificação manual
 
 Nenhuma tela muda neste PR. A página é exercitada em HTTP de verdade por `seeder-post-http.test.js`, contra um semeador numa DHT local. Não houve passagem com curl nem com um navegador numa instalação de teste com `VARANDA_POSTS_ORIGIN` ligado; isso vem com o terceiro PR, quando o app puder publicar.
+
+## 211. Link de publicação, folha "Página pública na web" e chegada por /publicacao, Termos 48
+
+Toda publicação de diário ganha o link `<origem>/p/<chave>/<seq>` (botão "compartilhar" e "Copiar link" no "mais"). Nas publicações próprias, com o nó hospedado e `GET /p/policy` respondendo `{"enabled":true}`, o "mais" ganha "Página pública na web", que abre a folha que lê (`post.shared`), publica (`post.share`) e tira da web (`post.unshare`). Um link para uma publicação que não aparece leva a `/publicacao/<chave>/<seq>` no app, que guarda o destino e, sem sessão, mostra o cartão "Você abriu o link de uma publicação. Entre ou crie sua conta para ver."; com sessão e nó hospedado, abre a Conversa uma vez. App Links e associação iOS só para `/publicacao/`; `/p/` continua no navegador. Termos e Política na versão 48.
+
+### Verificação automatizada
+
+Cada arquivo sozinho, a partir da raiz, no Node 24.22.1. A CI completa (`npm ci`, lint, `npm test` e demo) é a CI de pouso e não entra aqui.
+
+- `node apps/app/test/postLink.test.js`: 9/9 testes, 94/94 asserções
+- `node apps/app/test/linkReturn.test.js`: 27/27 testes, 267/267 asserções
+- `node apps/app/test/postShare.test.js`: 14/14 testes, 397/397 asserções
+- `node apps/app/test/postShareRow.test.js`: 8/8 testes, 78/78 asserções
+- `node apps/app/test/postActions.test.js`: 16/16 testes, 141/141 asserções
+- `node apps/app/test/vitrine.test.js`: 33/33 testes, 3491/3491 asserções
+- `node apps/app/test/platformGate.test.js`: 3/3 testes, 52/52 asserções
+- `node apps/app/test/nativeLinks.test.js`: 7/7 testes, 31/31 asserções
+- `node apps/app/test/chatMedia.test.js`: 51/51 testes, 252/252 asserções
+- `node apps/app/test/musicEmbedCard.test.js`: 41/41 testes, 456/456 asserções
+- `node apps/app/test/eas-preview.test.js`: 10/10 testes, 58/58 asserções
+- `node apps/app/test/hardening.test.js`: 24/24 testes, 201/201 asserções
+- `node apps/app/test/legal.test.js`: 32/32 testes, 1465/1465 asserções
+- `node apps/app/test/terms-version.test.js`: 1/1 teste, 2/2 asserções
+- `node packages/core/test/terms.test.js`: 8/8 testes, 126/126 asserções
+- `node apps/site/test/legal.test.js`: 7/7 testes, 115/115 asserções
+- `node apps/cli/test/deploy.test.js`: 60/60 testes, 756/756 asserções
+- `node apps/cli/test/hosted-lab.test.js`: 11/11 testes, 134/134 asserções
+- os 34 arquivos de teste de `apps/app/test` que leem o `App.js`: todos passam
+- `npx standard` nos arquivos `.js` alterados: limpo
+
+Os testes cobrem o link e a ref (`<chave>:<seq>` dentro do app, `/p/<chave>/<seq>` fora). Cobrem `parseAppLink` com `/publicacao/` e com `/p/`. Cobrem a captura na abertura da página (`capturePostPath`): um caminho de publicação válido é guardado, todo caminho de publicação, válido ou não, sai da barra de endereço, e a busca e o fragmento ficam iguais. Cobrem o depósito que guarda o destino no recarregamento da entrada pela web: armazenamento da aba por 1 hora, memória da página quando o armazenamento da aba recusa, e só memória no nativo. A sonda da política responde verdadeiro só com 200 e `enabled === true`. Erro de rede, 5xx, 408 ou 429 é perguntado de novo mais tarde. Uma resposta definitiva fica guardada por origem. Uma resposta redirecionada conta como desligada, também quando o `fetch` do React Native não marca `redirected`: o endereço final precisa ser o `/p/policy` da origem perguntada. A sonda vai sem opção de cache, porque o `fetch` do React Native acrescentaria `?_=` ao endereço e a resposta pareceria redirecionada. Cobrem os estados da folha, inclusive `uncertain`, sem nova tentativa automática. Logo depois de publicar, a folha mostra só o aviso de envio, sem o texto de ligada. A linha de publicar aparece só na publicação de diário da própria pessoa, nunca como Página e nunca numa republicação. A chegada espera as abas e um nó hospedado e abre uma vez. A folha conta como cobertura, então uma nota de voz ou um player de música embaixo dela para. App Links só para `/publicacao/`. Termos 48 no app, no núcleo e no site.
+
+### Verificação manual
+
+A passagem manual rodou o laboratório hospedado `node apps/cli/scripts/hosted-lab.js --port 8090 --expo http://127.0.0.1:8083 --publicacoes` (a flag nova `--publicacoes` deste PR) com o servidor web do Expo `npm run web -w apps/app -- --port 8083`, no Chrome sem tela, dirigido pelo protocolo DevTools, com um autenticador virtual de passkey (PRF, backup eligible) e cadastro por celular com o código de SMS simulado do laboratório. Larguras: 390 e 360 px, depois 1280 px.
+
+1. Membro A (Ana Teste) publica um texto com `<b>sem html</b>`. No "mais" da publicação própria: "Copiar link", "Página pública na web" e "Apagar". A folha, desligada, mostra o aceite e "Publicar na web"; depois de publicar, "Enviado para a web. Se o link ainda não mostrar a publicação, tente de novo em instantes.", o texto de ligada, o link e "Compartilhar", "Copiar link" e "Tirar da web". Depois desta passagem, a folha deixou de mostrar o texto de ligada logo após publicar (ele volta quando a folha lê o estado de novo); isso foi conferido só pelo teste.
+2. `curl` em `/p/<A>/4`: 200, `X-Robots-Tag: noindex, nofollow, noarchive`, `Cache-Control: no-store`, título "Publicação de Ana Teste na Varanda", o `<b>` escapado, só o link "Ver na Varanda", nenhum `<script>`. `/p/policy` responde `{"enabled":true}`; uma publicação desconhecida, 302.
+3. Visitante sem conta (360 px): a página aparece limpa; "Ver na Varanda" leva a `/publicacao/<A>/4`. Com o destino na aba, a tela de entrada mostra o cartão "Você abriu o link de uma publicação. Entre ou crie sua conta para ver." com "Agora não", "Criar minha conta" e "Já tenho conta". "Agora não" tira o cartão e apaga o destino.
+4. Membro A com a sessão aberta e o destino na aba: depois de recarregar, a Conversa da publicação abre e o destino é apagado; recarregar de novo não abre outra vez.
+5. A folha reaberta lê o estado ligado. "Tirar da web" mostra "Pedido enviado para tirar da web. Cópias já feitas ficam fora do nosso alcance." e o `curl` passa a dar 302 na hora, com cabeçalhos e corpo iguais aos de uma publicação desconhecida (só o caminho do Location muda). "Publicar na web" de novo: um 302 enquanto o semeador relê o diário (cerca de 5 s) e depois 200.
+6. Membro B segue A. No "mais" da publicação de A: "Mensagem em particular", "Copiar link", "Denunciar" e "Bloquear", sem "Página pública na web"; "Copiar link" copia `http://localhost:8090/p/<A>/4` (conferido interceptando a escrita na área de transferência). Uma mensagem privada de B para A não tem link: as ações da mensagem são "Responder", "Copiar" e "Encaminhar", e a tela não contém nenhum endereço `/p/`.
+7. 1280 px: a folha e a página pública aparecem bem.
+8. Interruptor desligado, num segundo laboratório sem `--publicacoes` (porta 8091): `/p/policy` responde `{"enabled":false}`, `/p/<A>/4` dá o mesmo 302, e na publicação própria de um membro C o "mais" mostra só "Copiar link" e "Apagar".
+
+### Não verificado
+
+- iOS (simulador) e Android (emulador): não rodou. Os aparelhos estavam em uso por outro trabalho, e o laboratório não entra no app nativo (a configuração hospedada exige https, o rp.id da passkey não pode ser um IP, o iOS espera o domínio associado e o build de debug do Android não atende o assetlinks da instalação).
+- App Links do Android e links universais do iOS para `/publicacao/` num aparelho: dependem do domínio de produção.
+- A captura de `/publicacao/<chave>/<seq>` ao abrir a página na web hospedada: no laboratório a página é http em loopback, então `hostedPage` é falso e a captura não roda (o link `/@nome` também não abre ali). O destino foi gravado à mão na aba (`sessionStorage`, chave `varanda.postLink`) para conferir o resto do caminho. A função da captura tem teste próprio.
+- Um segundo membro compartilhando o link de uma publicação que o autor não publicou, aberto por um visitante: não rodou assim. Rodaram separados o 302 de uma publicação não publicada (passos 5 e 8) e o cartão de entrada com o destino na aba (passo 3).
+- A folha de compartilhamento do sistema (`navigator.share` e a do celular): o Chrome sem tela não a abre.
+- O Caddy na frente de `/p/*` (zona de limite `publicacao`): o laboratório manda `/p/*` direto ao semeador.
+- Conta com passkey de produção.
+

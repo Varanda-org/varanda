@@ -665,8 +665,8 @@ function checkAssocShapes (t, wk) {
   t.alike(JSON.parse(fs.readFileSync(path.join(wk, 'apple-app-site-association'), 'utf8')),
     {
       webcredentials: { apps: [FAKE_IOS] },
-      applinks: { apps: [], details: [{ appIDs: [FAKE_IOS], components: [{ '/': '/anuncio/*' }] }] }
-    }, 'apple-app-site-association shape (applinks for /anuncio/ only)')
+      applinks: { apps: [], details: [{ appIDs: [FAKE_IOS], components: [{ '/': '/anuncio/*' }, { '/': '/publicacao/*' }] }] }
+    }, 'apple-app-site-association shape (applinks for /anuncio/ and /publicacao/ only)')
 }
 
 // A temporary root with deploy/seeder/.env and a www holding the SPA.

@@ -141,6 +141,16 @@ export function createVitrineRequest (fixtures, options) {
   const testimonialSource = () => ({ entries: allEntries(), deleted: new Set(deleted.keys()) })
   useTestimonialSource(testimonialSource)
   const liveEntry = (author, seq) => deleted.has(`${author}:${seq}`) ? null : (logs.get(author) || []).find((e) => e.seq === seq) || null
+  // A post-share target: a live own post, with the refusals of 5.121.
+  const shareTarget = (to) => {
+    const target = targetOf(to)
+    const entry = target.author === data.own ? liveEntry(data.own, target.seq) : null
+    if (!entry) refuse('USAGE', 'referência inválida')
+    if (entry.record.type !== 'post') refuse('USAGE', 'o registro não é uma publicação')
+    return target.seq
+  }
+  // The live post-share seqs for one post, ascending.
+  const liveShares = (seq) => logs.get(data.own).filter((e) => e.record.type === 'post-share' && e.record.seq === seq && liveEntry(data.own, e.seq)).map((e) => e.seq)
   // The web node's verifyShow: a show stands only while the writer block is
   // live, addressed to the show's diary and commits to the shown text.
   function showHolds (author, record) {
@@ -562,6 +572,22 @@ export function createVitrineRequest (fixtures, options) {
       data.feed = data.feed.filter((p) => (p.author !== data.own || p.seq !== target.seq) &&
         !(p.kind === 'repost' && p.to && p.to.author === target.author && p.to.seq === target.seq))
       return { ...result, changed: true, deleted: [target.seq] }
+    },
+    // Public share (5.121 to 5.123): the newest live post-share decides.
+    'post.shared': ({ to }) => {
+      const shares = liveShares(shareTarget(to))
+      return { shareSeq: shares.length > 0 ? shares[shares.length - 1] : null }
+    },
+    'post.share': ({ to }) => {
+      const seq = shareTarget(to)
+      const shares = liveShares(seq)
+      if (shares.length > 0) return { shareSeq: shares[shares.length - 1], created: false }
+      return { shareSeq: append({ type: 'post-share', seq, at: stamp() }).seq, created: true }
+    },
+    'post.unshare': ({ to }) => {
+      const shares = liveShares(shareTarget(to))
+      for (const seq of shares) deleted.set(`${data.own}:${seq}`, append({ type: 'delete', seq, at: stamp() }))
+      return { ok: true, changed: shares.length > 0 }
     },
     'like.set': (params) => toggle('like', params),
     'repost.set': (params) => toggle('repost', params),

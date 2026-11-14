@@ -28,6 +28,8 @@ import { registerLocalCache, cacheGeneration } from '../localCaches'
 import { replyNameOf, whoOf } from '../who'
 import { avatarOf, pickAvatar } from '../media/avatar'
 import { canDelete, isPageRef } from '../deletion'
+import { installationOrigin } from '../installation'
+import { postLink } from '../postLink'
 import * as actingStore from '../actingAs'
 import { actAs } from '../pages'
 import { pagesCore } from '../pageGate'
@@ -573,6 +575,18 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
   const authorProfile = names.profileOf(item.author)
   const messageable = typeof onMessage === 'function' && typeof ownKey === 'string' && hasSeq &&
     String(item.author).toLowerCase() !== ownKey.toLowerCase() && !(authorProfile && authorProfile.page === true)
+  // The seeder's public page shows diary posts only. Chats, groups and
+  // moments never come through here and are not kind 'post'; a page's diary
+  // is told apart by its profile.
+  const diaryPost = item.kind === 'post' && hasSeq && !(authorProfile && authorProfile.page === true)
+  const authorKey = String(item.author).toLowerCase()
+  const postRef = diaryPost ? authorKey + ':' + item.seq : null
+  const link = postRef !== null ? postLink(installationOrigin() || globalThis.location?.origin || null, postRef) : null
+  // The member's own diary only, never the page acted as: the writer refuses
+  // a post-share for any diary but the caller's own. Membro passes a repost's
+  // original with extra.repostedBy.
+  const publishable = postRef !== null && typeof ownKey === 'string' && authorKey === ownKey.toLowerCase() &&
+    authorKey !== actingPageKey() && (extra.repostedBy === undefined || extra.repostedBy === null)
   return {
     author: item.author,
     name: who.name,
@@ -608,6 +622,9 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
       : undefined,
     seq: hasSeq ? item.seq : undefined,
     onMessage: messageable ? onMessage : undefined,
+    // Before ...extra, so a link a caller passes (an offer's) keeps winning.
+    link,
+    publishable,
     ...extra
   }
 }
