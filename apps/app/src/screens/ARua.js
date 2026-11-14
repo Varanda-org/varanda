@@ -61,11 +61,11 @@ import { TopBar } from '../ui/TopBar'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, SkeletonRow } from '../ui/States'
 import { noteLocalWrite } from '../localWrites'
-import { FEED_FIRST_ROWS, feedDetailsReady } from '../splashGate'
+import { FEED_FIRST_ROWS, feedDetailsReady, momentsSettled } from '../splashGate'
 import { layout, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { MomentosStrip } from '../ui/MomentosStrip'
-import { canPublishMoment } from '../momentSeen'
+import { canPublishMoment, liveAuthors, liveItems, stripShown } from '../momentSeen'
 import { useMomentSeen, useMoments } from './Momentos'
 import { useBlocks } from '../blocksProvider'
 import { installationOrigin } from '../installation'
@@ -1755,6 +1755,7 @@ export default function ARua (props) {
     if (!pageActing || typeof onBoot !== 'function') return
     onBoot('page')
     onBoot('details')
+    onBoot('moments')
   }, [pageActing, onBoot])
   if (acting.kind === 'page') {
     // The core session refuses page.feed, so there is nothing to read here.
@@ -1989,13 +1990,12 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     }
   }, [request, ackFresh, commit, learnPage, ingest])
 
-  // The boot cover (App.js) waits for these, once each: the first page in,
-  // then the names and counts of its first rows. A failed first read ends
-  // both: there is nothing more to wait for.
-  const bootRef = useRef({ page: false, details: false })
+  // The boot cover (App.js) waits for each stage once. A failed first feed
+  // read ends page and details; Momentos settles independently.
+  const bootRef = useRef({ page: false, details: false, moments: false })
   const socialState = social.social
-  // Snapshot rows on screen: the cover lifts at once. The names are seeds
-  // only, never loaded; the live page's resolveMany still reads the profiles.
+  // Snapshot rows settle page and details, but the cover still waits for
+  // Momentos. Names are seeds only; the live page still reads the profiles.
   useEffect(() => {
     const snapshot = boot.snapshot
     if (snapshot === null) return
@@ -2028,6 +2028,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
       authors: first.authors,
       shown: first.shown,
       profileOf: names.profileOf,
+      strictProfiles: node.hosted === true,
       // A repost row shows its original: wait for its answer (any outcome,
       // a transient one included), never for a retry.
       originals: rows.filter((i) => i.kind === 'repost').map((i) => refOf(i.to)).filter((r) => r !== null),
@@ -2040,6 +2041,29 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     perfMarks().mark('details')
     onBoot('details')
   }, [onBoot, feed.loadedAt, feed.loadError, feed.items, names.profileOf, socialState, node.hosted, node.online])
+
+  const authorsLive = useMemo(() => liveAuthors(moments.authors, now), [moments.authors, now])
+  const ownLive = useMemo(() => liveItems(moments.own, now), [moments.own, now])
+  const canPublish = canPublishMoment(node)
+  const stripVisible = stripShown({ hosted: node.hosted === true, authors: authorsLive, own: ownLive, canPublish })
+  const hasCreateMoment = typeof onCreateMoment === 'function'
+  const ringKeys = useMemo(() => {
+    const keys = authorsLive.map((a) => a.author)
+    if (typeof ownKey === 'string' && (ownLive.length > 0 || (canPublish === true && hasCreateMoment))) keys.push(ownKey)
+    return keys
+  }, [authorsLive, ownLive, ownKey, canPublish, hasCreateMoment])
+  // Ask early so ring authors can join the feed batch; later refreshes also
+  // need their profiles after the boot latch has closed.
+  useEffect(() => {
+    if (ringKeys.length > 0) resolveMany(ringKeys)
+  }, [ringKeys, resolveMany])
+  useEffect(() => {
+    if (typeof onBoot !== 'function' || bootRef.current.moments) return
+    if (!momentsSettled({ phase: moments.phase, seenLoaded: momentSeen.loaded, stripVisible, authors: ringKeys, profileOf: names.profileOf })) return
+    bootRef.current.moments = true
+    perfMarks().mark('moments')
+    onBoot('moments')
+  }, [onBoot, moments.phase, momentSeen.loaded, stripVisible, ringKeys, names.profileOf])
 
   // What the snapshot holds of the live feed: its first page (row keys) and
   // the load it came from. Every commit that changes it (a refresh, a quiet
