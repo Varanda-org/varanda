@@ -66,6 +66,7 @@ export function FollowPill ({ following, title, pending, disabled, onFollow, onU
     <>
       <Pill
         label={FOLLOWING_LABEL}
+        tonal
         small={small}
         onPress={() => {
           if (!view.busy) setOpen(true)

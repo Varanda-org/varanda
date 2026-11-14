@@ -298,6 +298,7 @@ test('Sheet and ActionsSheet take web Escape through the shared layer stack', (t
 test('round 8: filled and outline pills share a height', (t) => {
   const pill = read('ui/Pill.js')
   t.ok(pill.includes('paddingVertical: 9.5, paddingHorizontal: 17'), 'filled 9.5 = outline 8 + 1.5 border')
+  t.ok(pill.includes('tonal: { backgroundColor: colors.inputOff, paddingVertical: 9.5, paddingHorizontal: 17 }'), 'tonal face has no border, same height')
 })
 
 test('the sheet Cancelar is a 44 pt target', (t) => {

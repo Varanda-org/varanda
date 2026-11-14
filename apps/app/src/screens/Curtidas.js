@@ -84,7 +84,7 @@ function EngagerRow ({ row, onOpen }) {
       disabled={!open}
       onPress={open}
     >
-      <Avatar name={who.avatarName} publicKey={row.author} size={44} picture={row.avatar} persist={false} />
+      <Avatar name={who.avatarName} publicKey={row.author} size={48} picture={row.avatar} persist={false} />
       <View style={styles.who}>
         <Text style={styles.name} numberOfLines={1}>{title}</Text>
         {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
@@ -325,18 +325,16 @@ const makeStyles = (colors) => StyleSheet.create({
   // A shrunk count stays centred in the tab instead of riding low.
   tabText: { ...type.pill, color: colors.soft, alignSelf: 'stretch', textAlign: 'center', textAlignVertical: 'center', includeFontPadding: false },
   tabTextOn: { color: colors.accent },
-  head: { paddingHorizontal: 16, paddingVertical: 12, gap: 4, borderBottomWidth: 1, borderBottomColor: colors.line },
+  head: { paddingHorizontal: 16, paddingVertical: 12, gap: 4 },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
     paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.line
+    paddingHorizontal: 16
   },
   pressed: { opacity: 0.6 },
   who: { flex: 1, minWidth: 0 },
-  name: { ...type.postName, color: colors.ink },
-  handle: { ...type.postMeta, color: colors.soft }
+  name: { ...type.rowName, color: colors.ink },
+  handle: { ...type.meta, color: colors.soft }
 })

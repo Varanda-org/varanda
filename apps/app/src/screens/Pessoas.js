@@ -128,7 +128,7 @@ function OwnRow ({ row, own, profile, onOpen }) {
       disabled={!open}
       onPress={open}
     >
-      <Avatar name={who.avatarName} publicKey={row.key} size={44} picture={pickAvatar(profile, row)} persist={typeof own === 'string' && row.key === own} />
+      <Avatar name={who.avatarName} publicKey={row.key} size={48} picture={pickAvatar(profile, row)} persist={typeof own === 'string' && row.key === own} />
       <View style={styles.who}>
         <Text style={styles.name} numberOfLines={1}>{title}</Text>
         {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
@@ -525,7 +525,7 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
 
 const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
-  head: { paddingHorizontal: 16, paddingVertical: 12, gap: 8, borderBottomWidth: 1, borderBottomColor: colors.line },
+  head: { paddingHorizontal: 16, paddingVertical: 12, gap: 8 },
   count: { ...type.postName, color: colors.ink },
   note: { paddingHorizontal: 16, paddingVertical: 12 },
   row: {
@@ -533,12 +533,10 @@ const makeStyles = (colors) => StyleSheet.create({
     alignItems: 'center',
     gap: 12,
     paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.line
+    paddingHorizontal: 16
   },
   pressed: { opacity: 0.6 },
   who: { flex: 1, minWidth: 0 },
-  name: { ...type.postName, color: colors.ink },
-  handle: { ...type.postMeta, color: colors.soft }
+  name: { ...type.rowName, color: colors.ink },
+  handle: { ...type.meta, color: colors.soft }
 })

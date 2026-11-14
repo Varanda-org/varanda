@@ -69,7 +69,7 @@ function FollowRow ({ followKey, profile, onOpen, onRemove, onReport, pending, d
         disabled={!open}
         onPress={open}
       >
-        <Avatar name={who.avatarName} publicKey={followKey} size={44} picture={(profile || {}).avatar} persist />
+        <Avatar name={who.avatarName} publicKey={followKey} size={48} picture={(profile || {}).avatar} persist />
         <View style={styles.who}>
           {who.known
             ? (
@@ -477,14 +477,12 @@ const makeStyles = (colors) => StyleSheet.create({
     alignItems: 'center',
     gap: 12,
     paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.line
+    paddingHorizontal: 16
   },
   open: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 12 },
   pressed: { opacity: 0.6 },
   who: { flex: 1, minWidth: 0 },
-  name: { ...type.postName, color: colors.ink },
-  handle: { ...type.postMeta, color: colors.soft },
+  name: { ...type.rowName, color: colors.ink },
+  handle: { ...type.meta, color: colors.soft },
   skeleton: { height: 14, width: '55%', borderRadius: 7, backgroundColor: colors.line }
 })
