@@ -2730,7 +2730,7 @@ A person who opens a shared listing link and is not a member yet signs up with a
 
 ## 16. Página pública de uma publicação (`packages/core/lib/post-share.js`, `seeder.js`, `apps/cli/lib/seed-ws.js`, `post-page.js`)
 
-A member can send the link of a diary post to someone outside Varanda: `<origin>/p/<D>/<seq>` (D the author's diary key, 64 lower-case hex; seq the post's block index). The page shows the post only when its author published it; in every other case the visitor is sent into the app, which shows a preview of the post before sign-in only when the seeder's preview route returns it, and everything else only after sign-in. The page is a peek for people without an account, not a public feed: it is never meant for search engines, and it shows one post and nothing around it.
+A member can send the link of a diary post to someone outside Varanda: `<origin>/p/<D>/<seq>` (D the author's diary key, 64 lower-case hex; seq the post's block index). The page shows the post only when its author published it; in every other case the visitor is sent into the app, which shows a preview of the post before sign-in only when the seeder's preview route returns it, and everything else only after sign-in. The page is a peek for people without an account, not a public feed: it is never meant for search engines, and it shows one post and nothing around it. The two dimmed rows under the post are drawings, not posts.
 
 ### Who publishes
 
@@ -2782,9 +2782,9 @@ A member can send the link of a diary post to someone outside Varanda: `<origin>
 
 ### What the page shows and never shows (`apps/cli/lib/post-page.js`)
 
-- Every string comes from a peer: it loses its unsafe code points and is HTML-escaped, and the page caps text at 1000, name at 80, @nome at 40 and card fields at 300 characters. The page has no script, no external resource, no inline handler and exactly one link, into the app (`/publicacao/<D>/<seq>`). It carries `<meta name="robots" content="noindex, nofollow, noarchive">`.
-- It shows: the author's name and @nome, the post's date (Brasília time), its text, at most 4 of its photos (`/p/<D>/<seq>/foto/<n>`) and how many more there are, for a video post only its cover and a line saying the video is in the app, a link card's title and host (no URL and no link), and a line saying the post replies to or quotes another post. The Open Graph tags carry the title (`Publicação de <name> na Varanda`), up to 200 characters of the text, and `og:image` as the absolute URL of photo 1 under the posts origin.
-- It never shows: the post a reply or quote points at, the replies, likes, reposts or any count, other posts of the author, the profile bio or avatar, followers, the video itself, the link card's URL, or any key besides D in the path.
+- Every string comes from a peer: it loses its unsafe code points and is HTML-escaped, and the page caps text at 1000, name at 80, @nome at 40 and card fields at 300 characters. The page has no script, no external resource, no inline handler and exactly one link, into the app (`/publicacao/<D>/<seq>`). Its icons are inline SVG drawings. It carries `<meta name="robots" content="noindex, nofollow, noarchive">`.
+- It shows: a disc with the author's initials (from the name, else the @nome; a person glyph when neither has a visible letter), coloured by one of five colours chosen from the first byte of D, never the profile photo; the author's name and @nome, the post's date (Brasília time), its text, at most 4 of its photos (`/p/<D>/<seq>/foto/<n>`) and how many more there are, for a video post only its cover and a line saying the video is in the app, a link card's title and host (no URL and no link), and a line saying the post replies to or quotes another post. It also shows the reply, repost and like icons, which are drawings with no count and no link. The Open Graph tags carry the title (`Publicação de <name> na Varanda`), up to 200 characters of the text, and `og:image` as the absolute URL of photo 1 under the posts origin.
+- It never shows: the post a reply or quote points at, the replies, likes, reposts or any count, other posts of the author, the profile bio or profile photo, followers, the video itself, the link card's URL, or any key besides D in the path.
 - The seeder keeps no copy of a page between requests.
 
 ### Photos

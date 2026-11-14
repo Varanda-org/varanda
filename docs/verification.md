@@ -10871,3 +10871,32 @@ node apps/site/scripts/render-calcada.js --check
 ```
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 237. Página pública de uma publicação com cara de feed (PR feat/post-page-feed-style)
+
+Esta seção confere a página `/p/<D>/<seq>` (`apps/cli/lib/post-page.js`) redesenhada para parecer uma linha de publicação de A Rua: disco com as iniciais numa de cinco cores, nome, @nome e data numa linha, texto, fotos em grade, cartão de link, desenhos de responder, repostar e curtir sem contagem, o botão "Ver na Varanda" embaixo e duas linhas esmaecidas. Continua sem script, sem recurso externo e com um só link. Formato, rotas, RPC e Termos não mudam; `docs/protocol.md` seção 16 passa a descrever o disco de iniciais e os desenhos.
+
+Rodada de 2026-11-14: navegador do painel do app (Chromium), com um servidor de teste na porta 47321 e a CSP de produção do `deploy/seeder/Caddyfile`, fotos de mentira em SVG.
+
+- [x] 375x812 em claro: todas as variantes (texto longo em três parágrafos, curto, 1 a 4 e 10 fotos, vídeo, cartão de link com e sem foto, resposta, citação) batem com a linha de A Rua: disco de 40 com a faixa e as iniciais, cabeça numa linha, grade 4:3 para uma foto e quadrados para 2 a 4, "Mais 6 fotos na Varanda" para 10, disco de play na capa do vídeo, cartão com ícone de link e host, três ícones sem contagem, botão e nota embaixo, duas linhas esmaecidas.
+- [x] 375x812 em escuro: a paleta troca (fundo #101010, botão #5dcaa0 com tinta escura) e o disco de play fica claro sobre o escuro.
+- [x] 1280x800 em claro e em escuro: uma coluna de 640 px centralizada, com o texto da barra alinhado à coluna.
+- [x] 320x640: duas fotos cabem, a cabeça fica numa linha e a nota quebra.
+- [x] 568x320 (celular deitado): a linha e o botão aparecem na primeira tela.
+- [x] 188x406 (375 com zoom de 200%): a cabeça quebrava no meio das palavras, porque só sobravam cerca de 60 px (44 px de margem à direita para o desenho "mais"). Depois da correção (em telas de até 300 px a cabeça usa a largura toda e o desenho "mais" some; a data nunca quebra) passou.
+- [x] Nome de 80 caracteres: a cabeça quebra em várias linhas e o @nome de 38 caracteres quebra no meio a 375 px. Aceito, é caso de borda.
+- [x] Texto hostil (`<"` nas iniciais): as iniciais saem como texto, o título tem o nome escapado e nenhuma marcação rodou.
+- [x] Sem nome e sem @nome: o glifo de pessoa no lugar das iniciais e o título "Publicação na Varanda".
+- [x] Página de reserva (endereço inválido): só a barra, o título e o botão, que leva a `/`.
+- [x] Rede e console: só o documento e `/p/<chave>/321/foto/<1 a 4>`; o console fica vazio, sem violação de CSP.
+
+Testes automáticos desta mudança, a partir da raiz. `apps/cli/test/post-page.test.js` tem 27 testes: iniciais, cores da faixa, ordem dos elementos, SVG inerte, um só bloco de estilo com claro e escuro e tamanho abaixo de 64 KiB. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/cli/test/post-page.test.js
+```
+
+- [ ] Android Chrome no aparelho, em claro e em escuro: pendente.
+- [ ] iOS Safari no aparelho, em claro e em escuro: pendente.
+- [ ] Link aberto de dentro do WhatsApp e do Instagram (navegador embutido): pendente.
+- [ ] Fonte maior no sistema ou no navegador (ajuste de tamanho do texto, não zoom da página), no Android e no iOS: pendente. A página usa tamanhos em px, como o app.
