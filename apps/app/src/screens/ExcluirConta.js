@@ -25,6 +25,7 @@ import { accountStatus, deleteCancelFinish, deleteCancelStart, deleteFinish, del
 import { DELETE_DAYS, DELETED_TEXT, DONE_TEXT, PASSKEY_TEXT, PENDING_TEXT, WAIT_TEXT, cancelDeletion, deletedOf, deletionMode, newReceipt, requestDeletion, scheduledText, typedMatches } from '../accountDeletion'
 import { clearDeletionReceipt, loadDeletionReceipt, saveDeletionReceipt } from '../deletionReceiptStore'
 import { Body, Btn, ErrorText, Field, Page, Row, Soft, errorText, useAction } from '../ui'
+import { Stepper } from '../ui/Stepper'
 import { KeyboardForm } from './Perfil'
 import { tap } from '../ui/haptics'
 import { useStyles } from '../ui/ThemeProvider'
@@ -275,13 +276,16 @@ export function CancelarExclusao ({ member, scheduled, onCancelled }) {
 export function ContaExcluida ({ state, onErase }) {
   const action = useAction()
   return (
-    <Page>
-      <Body>{DELETED_TEXT}</Body>
-      <Soft>{state === 'concluida' ? DONE_TEXT : PENDING_TEXT}</Soft>
-      <Soft>Apague a conta deste aparelho para continuar. Para usar o Varanda de novo, crie uma conta nova com outra passkey.</Soft>
-      <Soft>{PASSKEY_TEXT}</Soft>
-      <Btn label='Apagar deste aparelho' danger onPress={() => action.run(onErase)} pending={action.pending} />
-      <ErrorText>{action.error}</ErrorText>
+    <Page flush grow padBottom={16}>
+      <Stepper
+        title={DELETED_TEXT}
+        icon='pessoa'
+        actions={<><Btn label='Apagar deste aparelho' danger onPress={() => action.run(onErase)} pending={action.pending} block large /><ErrorText>{action.error}</ErrorText></>}
+      >
+        <Soft>{state === 'concluida' ? DONE_TEXT : PENDING_TEXT}</Soft>
+        <Soft>Apague a conta deste aparelho para continuar. Para usar o Varanda de novo, crie uma conta nova com outra passkey.</Soft>
+        <Soft>{PASSKEY_TEXT}</Soft>
+      </Stepper>
     </Page>
   )
 }

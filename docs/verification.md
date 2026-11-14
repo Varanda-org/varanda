@@ -10890,3 +10890,30 @@ node apps/app/test/tabBar.test.js
 ```
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 238. Telas de entrada no visual novo (PR feat/restyle-entry-screens)
+
+Esta seção confere as telas de antes do app (Introdução, link de convite, link de publicação e a folha dele, Termos e conta excluída) nos tokens do novo visual. Só o visual: sem mudança de protocolo, RPC, Termos nem dependência.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA, cada um em claro e escuro, com texto grande 1,3 e em largura estreita.
+
+- [ ] Introdução: "Pular" no canto de cima à direita (tipo 15/600), os três cartões, o círculo "Voltar" de 44 pt com fundo de cartão e borda, "Começar" no último, e a linha do topo com 64 pt de altura. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Todos os desenhos do convite (só os links): "Como funciona" e "Depois" no tipo 15/600. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Link de uma publicação e o link da folha dela: mesmo tipo 15/600, sem mudar o botão "Ver mais". Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Termos antes de entrar: as linhas abrem no lugar e "Aceitar" funciona; o mesmo em Ajustes > Termos. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Tela de conta excluída, nos dois estados: com a exclusão pendente e com erro embaixo do botão vermelho de 52 pt. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho.
+
+```sh
+node apps/app/test/composePolish.test.js
+node apps/app/test/intro.test.js
+node apps/app/test/inviteWelcome.test.js
+node apps/app/test/inviteCardFrame.test.js
+node apps/app/test/postLinkOpen.test.js
+node apps/app/test/terms.test.js
+node apps/app/test/legal.test.js
+node apps/app/test/accountDeletion.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.

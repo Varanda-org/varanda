@@ -102,6 +102,6 @@ const makeStyles = (colors) => StyleSheet.create({
   dim: { opacity: 0.45 },
   links: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', gap: space.sm, paddingHorizontal: space.lg, paddingTop: space.md },
   link: { minHeight: layout.hit, justifyContent: 'center', paddingHorizontal: space.xs },
-  linkText: { fontSize: 15, fontWeight: '700', color: colors.ink },
+  linkText: { ...type.pill, color: colors.ink },
   pressed: { opacity: 0.6 }
 })
