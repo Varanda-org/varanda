@@ -26,12 +26,21 @@
 // parked (optional) keeps a loaded frame whose list row is gone out of the
 // screen reader: it stays loaded, so playback goes on, but nothing reads or
 // focuses a player the person cannot see.
+// onReady() (optional) is called once, SETTLE_MS after the wrapper document
+// first reports a load: the provider page has loaded, which is not a proof
+// that the provider drew its player. The load event is a navigation callback
+// of the wrapper document, read with no argument, so it is no bridge either.
+// onEngage(boolean) (optional) follows touches on the wrapper View, which
+// listens without claiming the responder: true when a touch starts, false
+// when the list takes it over as a drag before any touch on this frame
+// ended (touchStep).
 
-import { useRef } from 'react'
+import { useEffect, useRef } from 'react'
 import { View } from 'react-native'
 import { WebView } from 'react-native-webview'
 
 const HTTPS = /^https:\/\//i
+const SETTLE_MS = 500
 
 // What happens to one navigation the WebView asks about: 'allow' or 'refuse',
 // never a hand-off to the system browser. With the sandbox nothing in the
@@ -72,6 +81,29 @@ export function goneOnce (fired, onGone) {
   try { onGone() } catch {}
 }
 
+// Starts the one settle timer after a load of the wrapper document; later
+// loads (a reload, a second report) neither restart it nor call onReady again.
+export function settleReady (timer, fired, onReady) {
+  if (!timer || timer.current != null || !fired || fired.current === true || typeof onReady !== 'function') return
+  timer.current = setTimeout(() => {
+    timer.current = null
+    goneOnce(fired, onReady)
+  }, SETTLE_MS)
+}
+
+// One touch event on the wrapper: kind is 'start', 'end' or 'cancel', and
+// engage is what to tell onEngage (null: nothing). A touch that ended inside
+// the frame was the person's, for good; a cancel means the list took the
+// touch as a scroll, which takes back the start only while no touch on this
+// frame has ever ended.
+export function touchStep (state, kind) {
+  const ended = state !== null && typeof state === 'object' && state.ended === true
+  if (kind === 'start') return { state: { ended }, engage: true }
+  if (kind === 'end') return { state: { ended: true }, engage: null }
+  if (kind === 'cancel') return { state: { ended }, engage: ended ? null : false }
+  return { state, engage: null }
+}
+
 // Props for the wrapper of a parked frame: iOS reads accessibilityElementsHidden,
 // Android importantForAccessibility, and each ignores the other. Nothing at
 // all for a frame in view, so today's callers render as before.
@@ -85,8 +117,12 @@ export function parkedA11y (parked) {
 // stays an empty slot.
 const blank = () => <View />
 
-export function EmbedFrame ({ html, baseUrl, allowTop, height, title, onOpen, onGone, parked }) {
+export function EmbedFrame ({ html, baseUrl, allowTop, height, title, onOpen, onGone, parked, onReady, onEngage }) {
   const gone = useRef(false)
+  const ready = useRef(false)
+  const settle = useRef(null)
+  const touch = useRef({ ended: false })
+  useEffect(() => () => clearTimeout(settle.current), [])
   if (typeof html !== 'string' || typeof baseUrl !== 'string') return null
 
   const onShouldStartLoadWithRequest = (request) => navDecision(request, allowTop) === 'allow'
@@ -111,8 +147,29 @@ export function EmbedFrame ({ html, baseUrl, allowTop, height, title, onOpen, on
   // the system, which is what keeps a dead renderer from taking the app down.
   const onProcessGone = () => { goneOnce(gone, onGone) }
 
+  const onLoad = () => { settleReady(settle, ready, onReady) }
+
+  // A throwing caller must not reach the library's event dispatch.
+  const touched = (kind) => {
+    const step = touchStep(touch.current, kind)
+    touch.current = step.state
+    if (step.engage === null || typeof onEngage !== 'function') return
+    try { onEngage(step.engage) } catch {}
+  }
+  const onTouchStart = () => { touched('start') }
+  const onTouchEnd = () => { touched('end') }
+  const onTouchCancel = () => { touched('cancel') }
+
   return (
-    <View style={{ height, width: '100%' }} {...parkedA11y(parked)}>
+    // Plain touch listeners, never a responder claim: the list and the player
+    // keep every touch they would get without them.
+    <View
+      style={{ height, width: '100%' }}
+      {...parkedA11y(parked)}
+      onTouchStart={onTouchStart}
+      onTouchEnd={onTouchEnd}
+      onTouchCancel={onTouchCancel}
+    >
       <WebView
         source={{ html, baseUrl }}
         // Every scheme reaches onShouldStartLoadWithRequest: anything outside
@@ -125,6 +182,7 @@ export function EmbedFrame ({ html, baseUrl, allowTop, height, title, onOpen, on
         // iOS reports the first, Android the second; each platform ignores the other.
         onContentProcessDidTerminate={onProcessGone}
         onRenderProcessGone={onProcessGone}
+        onLoad={onLoad}
         javaScriptEnabled
         domStorageEnabled
         allowsInlineMediaPlayback

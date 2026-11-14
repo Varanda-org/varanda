@@ -232,7 +232,7 @@ test('mounting asks nothing, and only two visible checks start the song', async 
 test('nothing starts by itself over another player, a loaded frame, a screen reader or before its answer', async (t) => {
   for (const [name, setup, undo] of [
     ['busy playback', (h) => { h.env.busy = true }],
-    ['a loaded provider frame', (h) => { h.release = h.embedLive.embedSlots.acquire() }, (h) => h.release()],
+    ['a touched provider frame', (h) => { h.release = h.embedLive.embedSlots.acquire(); h.embedLive.embedSlots.engage(h.release) }, (h) => h.release()],
     ['a screen reader', (h) => { h.env.readerOn = true }],
     ['an unknown screen reader', (h) => { h.env.readerKnown = false }],
     ['a held silence', (h) => { h.postMusic.holdMusicAuto() }]
@@ -256,6 +256,79 @@ test('nothing starts by itself over another player, a loaded frame, a screen rea
   h.tick()
   t.is(h.presses().length, 1)
   h.unmount()
+})
+
+test('an untouched loaded provider frame does not hold the automatic start', async (t) => {
+  const h = await harness()
+  const release = h.embedLive.embedSlots.acquire()
+  h.render()
+  h.tick()
+  h.tick()
+  t.is(h.presses().length, 1, 'the song starts beside a frame nobody touched')
+  release()
+  h.unmount()
+})
+
+test('an automatic song yields once a provider frame is touched; a manual one does not', async (t) => {
+  const h = await harness()
+  const release = h.embedLive.embedSlots.acquire()
+  h.render()
+  h.tick()
+  h.tick()
+  t.is(h.presses().length, 1)
+  h.controller.publish({ phase: 'playing' })
+  h.render()
+  h.tick()
+  t.is(h.stops(), 0, 'an untouched frame leaves it playing')
+  h.embedLive.embedSlots.engage(release)
+  h.tick()
+  t.is(h.stops(), 1, 'the touched frame stops the automatic song')
+  release()
+  h.unmount()
+  const m = await harness({ readerOn: true })
+  const hold = m.embedLive.embedSlots.acquire()
+  m.render()
+  m.sticker().props.onPress()
+  m.controller.publish({ phase: 'playing' })
+  m.render()
+  m.embedLive.embedSlots.engage(hold)
+  m.tick()
+  m.tick()
+  t.is(m.stops(), 0, 'a manual song is not stopped')
+  hold()
+  m.unmount()
+})
+
+test('a screen reader turning on beside a loaded frame stops an automatic song only', async (t) => {
+  for (const turn of [(env) => { env.readerOn = true }, (env) => { env.readerKnown = false }]) {
+    const h = await harness()
+    const release = h.embedLive.embedSlots.acquire()
+    h.render()
+    h.tick()
+    h.tick()
+    t.is(h.presses().length, 1)
+    h.controller.publish({ phase: 'playing' })
+    h.render()
+    h.tick()
+    t.is(h.stops(), 0, 'an untouched frame and no reader leaves it playing')
+    turn(h.env)
+    h.tick()
+    t.is(h.stops(), 1, 'the reader makes the loaded frame count as touched')
+    release()
+    h.unmount()
+    const m = await harness({ readerOn: true })
+    const hold = m.embedLive.embedSlots.acquire()
+    m.render()
+    m.sticker().props.onPress()
+    m.controller.publish({ phase: 'playing' })
+    m.render()
+    turn(m.env)
+    m.tick()
+    m.tick()
+    t.is(m.stops(), 0, 'a manual song is not stopped')
+    hold()
+    m.unmount()
+  }
 })
 
 test('a screen reader still lets a tap play, and scrolling away stops it', async (t) => {
@@ -657,11 +730,11 @@ test('PostMusic source rules', (t) => {
   t.ok(/if \(auto && \(next\.error \|\| next\.fallback\)\) \{\s*failedRef\.current = true\s*markMusicAutoFailed\(failKey\)/.test(code), 'an automatic error or fallback fails quietly, for the session')
   t.ok(code.includes('const failKey = JSON.stringify([member, origin, music.kind, music.id, music.start])'), 'the mark names the playback')
   const busy = settle.indexOf('playbackBusy()')
-  const slots = settle.indexOf('embedSlots.count() > 0')
+  const slots = settle.indexOf('embedSlots.engagedCount() > 0')
   const step = settle.indexOf('ambientStep(stepRef.current, { hidden, busy, failed: failedRef.current || musicAutoFailed(failKeyRef.current) })')
   t.ok(busy > 0 && slots > 0 && step > busy && step > slots, 'the probes are read right before the step')
   t.ok(/const autoOk = !musicAutoHeld\(\) && screenReaderKnown\(\) && !screenReaderOn\(\)/.test(settle), 'the automatic gate')
-  t.ok(settle.includes('const busy = !autoOk || playbackBusy() || embedSlots.count() > 0'), 'no automatic start without the gate')
+  t.ok(settle.includes('const busy = !autoOk || playbackBusy() || embedSlots.engagedCount() > 0 || (embedSlots.count() > 0 && readerTouch)'), 'no automatic start without the gate')
   const measure = between(code, 'view.measureInWindow((x, y, w, h) => {', '} catch {')
   t.ok(measure.includes('settle(mostlyHidden('), 'the step runs inside the measure answer')
 

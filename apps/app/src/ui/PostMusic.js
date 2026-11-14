@@ -198,10 +198,14 @@ function AmbientMusic ({ card, music }) {
         see(!hidden)
         // Read here, right before the step: the controller claims playback
         // synchronously inside press(), so two rows never start together.
-        // A claim pauses whoever played and a loaded provider frame drops on
-        // any claim: an automatic start must do neither.
+        // A claim pauses whoever played: an automatic start must not. A
+        // preloaded provider frame nobody touched cannot sound and no longer
+        // closes on a claim, so only a touched one holds the automatic start.
         const autoOk = !musicAutoHeld() && screenReaderKnown() && !screenReaderOn()
-        const busy = !autoOk || playbackBusy() || embedSlots.count() > 0
+        // A loaded frame counts as touched while a screen reader is on or its
+        // state unknown, so the rule is read now, not when the song started.
+        const readerTouch = screenReaderOn() || !screenReaderKnown()
+        const busy = !autoOk || playbackBusy() || embedSlots.engagedCount() > 0 || (embedSlots.count() > 0 && readerTouch)
         const { state: next, action } = ambientStep(stepRef.current, { hidden, busy, failed: failedRef.current || musicAutoFailed(failKeyRef.current) })
         stepRef.current = next
         if (action === 'start') {
@@ -211,6 +215,11 @@ function AmbientMusic ({ card, music }) {
             controller.current.press(playbackEpoch(), { auto: true })
           }
         } else if (action === 'stop') {
+          stepRef.current = EMBED_IDLE
+          controller.current.stop()
+        } else if (attemptRef.current === 'auto' && phaseRef.current !== 'idle' && (embedSlots.engagedCount() > 0 || (embedSlots.count() > 0 && readerTouch))) {
+          // ambientStep keeps a live row live: a song that started by itself
+          // must yield once the person presses play in a provider player.
           stepRef.current = EMBED_IDLE
           controller.current.stop()
         }

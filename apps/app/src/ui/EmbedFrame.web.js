@@ -14,15 +14,26 @@
 // hidden with visibility rather than display or a new src, so its document
 // stays loaded (and keeps playing) while it leaves the Tab order and the
 // accessibility tree.
+//
+// onReady() (optional) is called once, SETTLE_MS after the iframe first
+// reports a load: the provider page has loaded, which is not a proof that
+// the provider drew its player. onEngage(true) (optional) is called once
+// when focus moves into this iframe, the only sign a cross-origin frame gives
+// of a click inside it: a window blur, or a FOCUS_POLL_MS check for the
+// focus that came without one. The component adds only ref and onLoad to
+// frameProps, so the iframe itself is as before.
 
-import { createElement } from 'react'
+import { createElement, useEffect, useRef } from 'react'
 import { EMBED_SANDBOX } from '../musicEmbed.js'
 
 const HTTPS = /^https:\/\//i
+const SETTLE_MS = 500
+const FOCUS_POLL_MS = 500
 
-export function EmbedFrame ({ embedUrl, height, title, parked }) {
+// The iframe's props, or null for an address that is not framed.
+export function frameProps ({ embedUrl, height, title, parked }) {
   if (typeof embedUrl !== 'string' || !HTTPS.test(embedUrl)) return null
-  return createElement('iframe', {
+  return {
     src: embedUrl,
     title,
     width: '100%',
@@ -32,7 +43,58 @@ export function EmbedFrame ({ embedUrl, height, title, parked }) {
     allowFullScreen: true,
     referrerPolicy: 'strict-origin-when-cross-origin',
     sandbox: EMBED_SANDBOX
-  })
+  }
+}
+
+// The caller must hear of a ready frame only once, and a throwing caller must
+// not reach React's event dispatch.
+function callOnce (fired, fn, ...args) {
+  if (typeof fn !== 'function' || !fired || fired.current === true) return
+  fired.current = true
+  try { fn(...args) } catch {}
+}
+
+// Starts the one settle timer after a load of the iframe; later loads (the
+// player moving to another page of its own) neither restart it nor call
+// onReady again.
+export function settleReady (timer, fired, onReady) {
+  if (!timer || timer.current != null || !fired || fired.current === true || typeof onReady !== 'function') return
+  timer.current = setTimeout(() => {
+    timer.current = null
+    callOnce(fired, onReady)
+  }, SETTLE_MS)
+}
+
+export function EmbedFrame ({ embedUrl, height, title, parked, onReady, onEngage }) {
+  const frame = useRef(null)
+  const ready = useRef(false)
+  const settle = useRef(null)
+  const engaged = useRef(false)
+  const engage = useRef(onEngage)
+  engage.current = onEngage
+  const listens = typeof onEngage === 'function'
+  useEffect(() => () => clearTimeout(settle.current), [])
+  useEffect(() => {
+    if (!listens || engaged.current || typeof document === 'undefined' || typeof window === 'undefined') return
+    let poll = null
+    const stop = () => {
+      window.removeEventListener('blur', check)
+      clearInterval(poll)
+    }
+    const check = () => {
+      if (frame.current === null || document.activeElement !== frame.current) return
+      stop()
+      callOnce(engaged, engage.current, true)
+    }
+    window.addEventListener('blur', check)
+    poll = setInterval(check, FOCUS_POLL_MS)
+    return stop
+  }, [listens])
+
+  const props = frameProps({ embedUrl, height, title, parked })
+  if (props === null) return null
+  const onLoad = () => { settleReady(settle, ready, onReady) }
+  return createElement('iframe', { ...props, ref: frame, onLoad })
 }
 
 export default EmbedFrame

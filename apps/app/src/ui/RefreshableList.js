@@ -50,7 +50,7 @@ import { createFrameStats, frameLine, monotonicNow, perfEnabled } from '../perfM
 import { Spinner } from './index'
 import { Icon } from './Icon'
 import { NewItemsPill } from './States'
-import { EmbedRow, keptRowKeys, renderScroll, rowKeyOf, useEmbedHost } from './EmbedLayer'
+import { EmbedRow, keptRowKeys, orphanCuts, renderScroll, rowKeyOf, rowOrder, touchedNow, useEmbedHost } from './EmbedLayer'
 import { EmbedHost } from './screenVisible'
 import { motion, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
@@ -525,12 +525,33 @@ export function RefreshableList ({
     <EmbedRow row={rowKeyOf(keyOf.current, info.item, info.index)}>{renderItem(info)}</EmbedRow>
   ), [renderItem])
   // A row that left the data, or whose item became a tombstone, has no player
-  // to come back to. A prepend keeps every row, so it drops nothing.
+  // to come back to. A prepend keeps every row, so it drops nothing; a first
+  // page read again only cuts the older rows off for now, so their untouched
+  // players wait EMBED_CUT_MS, and go then even with no further change.
+  const cut = useRef({ order: null, kept: new Set(), deadlines: new Map(), timer: null })
+  const pruneOrphans = useCallback(() => {
+    const c = cut.current
+    if (c.timer !== null) clearTimeout(c.timer)
+    c.timer = null
+    const next = orphanCuts(host.keep.list(), c.kept, c.order, c.deadlines, Date.now(), touchedNow)
+    c.deadlines = next.deadlines
+    if (next.drop.length > 0) {
+      const drop = new Set(next.drop)
+      host.keep.prune((row, key) => !drop.has(key))
+    }
+    if (next.wait !== null) c.timer = setTimeout(pruneOrphans, next.wait)
+  }, [host])
   useEffect(() => {
-    if (!host.keep.hasOrphan()) return
-    const kept = keptRowKeys(data, keyOf.current)
-    host.keep.prune((row) => kept.has(row))
+    const c = cut.current
+    const orphans = host.keep.list().filter((entry) => entry.orphan === true).map((entry) => entry.row)
+    c.order = rowOrder(data, keyOf.current, c.order, orphans)
+    c.kept = keptRowKeys(data, keyOf.current)
+    pruneOrphans()
   }, [data])
+  useEffect(() => () => {
+    if (cut.current.timer !== null) clearTimeout(cut.current.timer)
+    cut.current.timer = null
+  }, [])
 
   // FlatList throws if onViewableItemsChanged changes identity. One function
   // reads the latest caller. Turning tracking on later would change the prop
