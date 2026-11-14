@@ -3,14 +3,14 @@
 // never records anything, the caller does that from onDone.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AccessibilityInfo, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { AccessibilityInfo, Animated, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { StatusBar } from 'expo-status-bar'
 import { INTRO_CARDS } from '../intro'
 import { Icon } from '../ui/Icon'
 import { statusBarStyle } from '../appearance'
 import { Body, Btn } from '../ui'
-import { StepLink } from '../ui/Stepper'
+import { tap } from '../ui/haptics'
 import { fonts, layout, space, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 
@@ -18,9 +18,21 @@ const SKIP_LABEL = 'Pular'
 const BACK_LABEL = 'Voltar'
 const NEXT_LABEL = 'Próximo'
 const START_LABEL = 'Começar'
+const DOT = 8
+const DOT_ACTIVE = 24
 
 function announcement (index) {
   return 'Cartão ' + (index + 1) + ' de ' + INTRO_CARDS.length + ': ' + INTRO_CARDS[index].title
+}
+
+function Dot ({ active, style, reduceMotion }) {
+  const width = useRef(new Animated.Value(active ? DOT_ACTIVE : DOT)).current
+  useEffect(() => {
+    const to = active ? DOT_ACTIVE : DOT
+    if (reduceMotion) { width.setValue(to); return }
+    Animated.timing(width, { toValue: to, duration: 200, useNativeDriver: false }).start()
+  }, [active, reduceMotion, width])
+  return <Animated.View style={[style, { width }]} />
 }
 
 export default function Introducao ({ onDone, sidePad = 0, edges }) {
@@ -156,13 +168,17 @@ export default function Introducao ({ onDone, sidePad = 0, edges }) {
         <View style={styles.footer}>
           <View style={styles.dots} accessible={false} importantForAccessibility='no-hide-descendants'>
             {INTRO_CARDS.map((card, i) => (
-              <View key={card.id} style={[styles.dot, i === index ? styles.dotActive : i < index ? styles.dotDone : styles.dotPending]} />
+              <Dot key={card.id} active={i === index} reduceMotion={reduceMotion} style={[styles.dot, i === index ? styles.dotActive : i < index ? styles.dotDone : styles.dotPending]} />
             ))}
           </View>
           <View style={styles.actions}>
-            <Btn block large label={index === last ? START_LABEL : NEXT_LABEL} onPress={index === last ? finish : () => goTo(index + 1)} />
+            <Btn block large label={index === last ? START_LABEL : NEXT_LABEL} onPress={index === last ? finish : () => { tap('select'); goTo(index + 1) }} />
             {index > 0
-              ? <StepLink label={BACK_LABEL} onPress={() => goTo(index - 1)} />
+              ? (
+                <Pressable accessibilityRole='button' accessibilityLabel={BACK_LABEL} onPress={() => goTo(index - 1)} hitSlop={8} style={({ pressed }) => [styles.back, pressed && styles.pressed]}>
+                  <Icon name='voltar' size={28} color={colors.ink} />
+                </Pressable>
+                )
               : <View style={styles.backSpace} />}
           </View>
         </View>
@@ -186,11 +202,12 @@ const makeStyles = (colors) => StyleSheet.create({
   hidden: { position: 'absolute', width: 1, height: 1, opacity: 0 },
   footer: { width: '100%', maxWidth: layout.column, alignSelf: 'center', paddingHorizontal: space.xl, paddingBottom: space.xl, gap: 20 },
   dots: { flexDirection: 'row', gap: space.sm, justifyContent: 'center' },
-  dot: { width: 8, height: 8, borderRadius: 4 },
+  dot: { height: DOT, borderRadius: DOT / 2 },
   dotActive: { backgroundColor: colors.accent },
   dotDone: { backgroundColor: colors.accent, opacity: 0.5 },
   dotPending: { backgroundColor: colors.line },
   title: { ...type.heroTitle, fontFamily: fonts.title, color: colors.ink, textAlign: 'center' },
   actions: { gap: space.sm },
+  back: { height: layout.hit, minWidth: layout.hit, alignSelf: 'center', alignItems: 'center', justifyContent: 'center' },
   backSpace: { height: layout.hit }
 })

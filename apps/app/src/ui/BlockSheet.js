@@ -7,7 +7,7 @@ import { displayText } from '@varanda/rpc'
 import { useBlockAsk, useBlocks } from '../blocksProvider'
 import { BLOCK_TEXTS, confirmTitle } from '../memberBlocks'
 import { whoOf } from '../who'
-import { Btn, ErrorText, Soft, useAction } from './index'
+import { Btn, ConfirmStack, ErrorText, Soft, useAction } from './index'
 import { Sheet } from './Sheet'
 import { space } from './theme'
 
@@ -33,13 +33,15 @@ export function BlockSheet ({ onToast }) {
       <View style={styles.body}>
         <Soft>{BLOCK_TEXTS.confirmNote}</Soft>
         <ErrorText>{act.error}</ErrorText>
-        <Btn label={BLOCK_TEXTS.block} danger onPress={confirm} pending={act.pending} />
-        <Btn label={BLOCK_TEXTS.cancel} secondary onPress={dismiss} disabled={act.pending} />
+        <ConfirmStack
+          confirm={<Btn label={BLOCK_TEXTS.block} danger onPress={confirm} pending={act.pending} />}
+          cancel={<Btn label={BLOCK_TEXTS.cancel} secondary onPress={dismiss} disabled={act.pending} />}
+        />
       </View>
     </Sheet>
   )
 }
 
 const styles = StyleSheet.create({
-  body: { padding: space.lg, gap: space.md }
+  body: { gap: space.md, paddingHorizontal: space.lg, paddingBottom: space.lg }
 })

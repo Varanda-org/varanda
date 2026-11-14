@@ -5,10 +5,17 @@
 // by the provider, keyed by runId), the next retry and the last 200 event and
 // warning lines.
 
+import { useState } from 'react'
+import { Pressable, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode, useSyncLines, useSyncSignals } from '../node'
 import { chipState } from '../syncSignals'
 import { Body, Btn, Card, Mono, Page, Soft, Title, useNow } from '../ui'
+import { type } from '../ui/theme'
+import { useTheme } from '../ui/ThemeProvider'
+
+// The log stays behind this row; the label is also the accessibility label.
+const LOG_LABEL = 'Ver registro'
 
 const REASONS = {
   done: 'concluída',
@@ -40,8 +47,18 @@ function stateLine (active, recovering) {
   return kind + 'execução ' + String(active.runId) + ')'
 }
 
+// Dot colour of the status row: danger when there is no network or node,
+// accent when syncing or recovering, warn for the waiting states in between.
+function dotColor (summary, colors) {
+  if (summary === 'sem rede' || summary === 'sem conexão') return colors.danger
+  if (summary === 'sincronização automática' || summary === 'sincronizando…' || summary === 'recuperando…') return colors.accent
+  return colors.warn
+}
+
 export default function Sincronizar ({ embedded = false, onOpenConnection }) {
   const node = useNode()
+  const { colors } = useTheme()
+  const [logOpen, setLogOpen] = useState(false)
   const { sync, autoSync } = node
   const lines = useSyncLines()
   // lastDownloadAt drives the chip's 'sincronizando…'.
@@ -64,7 +81,10 @@ export default function Sincronizar ({ embedded = false, onOpenConnection }) {
     <Page>
       {embedded ? null : <Title>Sincronização</Title>}
       <Card>
-        <Body>{summary}</Body>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+          <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: dotColor(summary, colors) }} />
+          <Body style={{ flex: 1 }}>{summary}</Body>
+        </View>
         {node.phase !== 'ready' ? <Soft>sem conexão com o nó</Soft> : null}
         {node.phase !== 'ready' && typeof onOpenConnection === 'function' ? <Btn label='abrir Conexão' secondary onPress={onOpenConnection} /> : null}
         <Body>{stateLine(sync.active, Boolean(node.passkey && node.passkey.recovering))}</Body>
@@ -73,11 +93,26 @@ export default function Sincronizar ({ embedded = false, onOpenConnection }) {
         {autoSync.reconciling ? <Soft>conferindo o estado…</Soft> : null}
         <Soft>Atualiza sozinho enquanto o app está aberto e com rede.</Soft>
       </Card>
-      <Card>
-        <Soft>{'linhas (as últimas ' + String(lines.length) + ')'}</Soft>
-        {lines.length === 0 ? <Soft>Nenhuma linha ainda.</Soft> : null}
-        {lines.map((line, i) => <Mono key={i}>{displayText(line)}</Mono>)}
-      </Card>
+      <Pressable
+        onPress={() => setLogOpen((o) => !o)}
+        accessibilityRole='button'
+        accessibilityLabel={LOG_LABEL}
+        accessibilityState={{ expanded: logOpen }}
+        // react-native-web does not map accessibilityState.expanded.
+        aria-expanded={logOpen}
+        style={{ minHeight: 44, justifyContent: 'center' }}
+      >
+        <Text style={{ ...type.counter, color: colors.accent }}>{LOG_LABEL}</Text>
+      </Pressable>
+      {logOpen
+        ? (
+          <Card>
+            <Soft>{'linhas (as últimas ' + String(lines.length) + ')'}</Soft>
+            {lines.length === 0 ? <Soft>Nenhuma linha ainda.</Soft> : null}
+            {lines.map((line, i) => <Mono key={i}>{displayText(line)}</Mono>)}
+          </Card>
+          )
+        : null}
     </Page>
   )
 }

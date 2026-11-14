@@ -153,3 +153,14 @@ test('app client: absolute URLs, header and no credentials only with the flag on
   setInstallation(null)
   t.is(buildAppealStart({ member: M }).url, '/account/appeal/start')
 })
+
+test('Recurso: the privacy sentence is the one caption, the explanation sits behind help', (t) => {
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '../src/screens/Recurso.js'), 'utf8')
+  t.ok(src.includes('<HelpNote doc={EXPLAIN_DOC}><Soft>{PRIVACY}</Soft></HelpNote>'), 'the privacy sentence stays visible')
+  t.ok(src.includes("const EXPLAIN_DOC = Object.freeze({ title: 'Como funciona o recurso', paragraphs: Object.freeze([EXPLAIN]) })"), 'the explanation is unchanged behind help')
+  t.ok(src.includes('Se o pedido for negado, só dá para recorrer de novo em 30 dias.'), 'the 30-day rule is still told')
+  t.absent(src.includes('<Soft>{EXPLAIN}</Soft>'), 'one caption on screen')
+  t.ok(src.includes("<Btn label='enviar recurso' onPress={submit} pending={send.pending} disabled={words === null || sent !== ''} />"), 'one press, one send, none after success')
+  t.is(src.split('send.run(').length - 1, 1, 'one send path, never a resend')
+  t.ok(/appealStart\(\{ member \}\)[\s\S]*node\.request\('appeal\.sign', \{ nonce, text: words \}\)[\s\S]*appealSend\(\{ member, nonce, text: words, signature \}\)/.test(src), 'the appeal payload is unchanged')
+})

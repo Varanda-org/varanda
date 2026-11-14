@@ -203,8 +203,36 @@ test('entries show kind and date only, and removal asks first', (t) => {
   t.ok(code.includes("e.kind === 'code' ? 'Código de recuperação' : 'Passkey'"))
   t.ok(code.includes("'cadastrado em ' + dateText(e.createdAt)"))
   t.absent(/\{[^}]*e\.lookupId[^}]*\}<\//.test(code), 'the lookup id is never drawn')
-  t.ok(code.includes('onPress={() => setConfirmRemove(e.lookupId)}'))
+  t.ok(code.includes("{ icon: 'lixeira', label: 'Remover', danger: true, disabled: busy, onPress: () => setConfirmRemove(e.lookupId) }"), 'the sheet Remover only opens the confirmation')
   t.ok(code.includes('onPress={() => onRemove(e)}'))
+})
+
+test('each entry is one row: icon, kind, date and a trailing MoreButton', (t) => {
+  const start = code.indexOf('{(entries || []).map((e) => (')
+  const row = code.slice(start, code.indexOf('<Soft>{LIST_NOTE}</Soft>', start))
+  t.ok(start > 0 && row.length > 0, 'the entry list found')
+  const icon = row.indexOf("<Icon name={e.kind === 'code' ? 'hash' : 'chave'}")
+  const kind = row.indexOf("<Body>{e.kind === 'code' ? 'Código de recuperação' : 'Passkey'}</Body>")
+  const date = row.indexOf("<Soft>{'cadastrado em ' + dateText(e.createdAt)}</Soft>")
+  const more = row.indexOf('<MoreButton')
+  const confirm = row.indexOf('<View style={styles.confirm}')
+  t.ok(icon > 0 && kind > icon && date > kind && more > date, 'icon, kind, date, then the trailing button')
+  t.ok(confirm > more, 'the confirmation follows the row')
+  t.ok(screen.includes("return (e.kind === 'code' ? 'Código de recuperação' : 'Passkey') + ', cadastrado em ' + dateText(e.createdAt)"), 'an entry is named by kind and date')
+  t.ok(row.includes("label={'mais ações, ' + entryName(e)}"), 'each row button is announced with its own entry')
+  t.ok(row.includes('title={entryName(e)}'), 'the sheet title carries the date too')
+  t.ok(/\{confirmRemove === e\.lookupId\n\s+\? null\n\s+: \(\n\s+<MoreButton/.test(row), 'the row button is gone while its confirmation is open')
+  t.ok(row.includes("<View style={styles.confirm} accessibilityLiveRegion='polite' aria-live='polite'>"), 'the confirmation is announced when it appears')
+  t.absent(row.includes("<Btn label='Remover' secondary"), 'no inline Remover beside the row')
+  t.is(code.split('onRemove(').length - 1, 1, 'onRemove runs only from the confirmation press')
+  t.is(code.split('removeEntry(').length - 1, 1, 'one removal request in the screen')
+  const sheet = row.slice(more, confirm)
+  t.absent(/onRemove|removeEntry|request|load\(/.test(sheet), 'opening or dismissing the sheet sends nothing')
+  const remove = body(code, 'const onRemove = (e) => {')
+  t.ok(remove.indexOf('if (!begin()) return') > 0 && remove.indexOf('if (!begin()) return') < remove.indexOf('removeEntry('), 'one press, one request: the busy guard comes first')
+  t.absent(/retry|setTimeout|setInterval/.test(remove), 'nothing retries on its own')
+  t.ok(code.includes('<Body>{INTRO_TEXT}</Body>') && code.includes('<Soft>{LOSS_TEXT}</Soft>'), 'the intro and loss texts stay visible')
+  t.ok(code.includes('<Soft>{LIST_NOTE}</Soft>'), 'the note that the creation passkey is not listed stays visible')
 })
 
 test('Ajustes: the row, the title and the embedded screen', (t) => {
@@ -393,9 +421,10 @@ test('the stacked page buttons share one width and Adicionar hides behind the ch
 test('Ajustes: the link preview note sits right under the row it describes', (t) => {
   const ajustes = withoutComments(read('screens', 'Ajustes.js'))
   const row = ajustes.indexOf('label={PREVIEW_PREF_LABEL}')
-  const note = ajustes.indexOf('<Soft>{PREVIEW_PREF_NOTE}</Soft>')
+  // The note is now the row's own caption, the closest it can sit.
+  const note = ajustes.indexOf('caption={PREVIEW_PREF_NOTE}')
   t.ok(row > 0 && note > row, 'the note follows the row')
-  t.is(ajustes.slice(row, note).split('<Item').length - 1, 0, 'with no other row between them')
+  t.is(ajustes.slice(row, note).split(/<Item|<SwitchRow/).length - 1, 0, 'with no other row between them')
 })
 
 test('Ajustes sub-pages go back with an icon-only chevron', (t) => {

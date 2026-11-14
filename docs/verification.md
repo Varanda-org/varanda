@@ -10322,3 +10322,82 @@ node apps/app/test/uiKit.test.js
 ```
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 223. Ajustes, conta e entrada mais leves: interruptores, cartão da conta, código em seis casas, denúncia, passkeys e status (PR feat/settings-onboarding-slim)
+
+Esta seção confere a revisão de Ajustes, conta e entrada: os interruptores e a cor de perigo em Ajustes, o cartão do perfil, as folhas de Sair e Recomeçar, Excluir conta, Denunciar, Recorrer, a folha de Bloquear, Passkeys e recuperação, a Introdução, Páginas, Sincronizar e Conexão, e os passos da entrada, com o código do celular em seis casas. Nos Ajustes, os dois interruptores (música sozinha e prévia de links) levam a nota na própria linha; sumiram o texto "Ligada"/"Desligada" e o cabeçalho separado de "Prévia de links". Sair, Excluir conta e Recomeçar aparecem em cor de perigo, os cabeçalhos das seções ficam colados à lista e as linhas escurecem enquanto são tocadas. "Carregando…", "Serviço indisponível" e o botão "Tentar de novo" começam com maiúscula.
+
+Na entrada, o progresso aparece uma vez, em pontos, e o leitor de tela diz "Passo N de M"; o aviso de um passo é uma linha com ícone de informação. O botão de aceite dos Termos diz "Aceitar e continuar"; a frase de consentimento acima dele não mudou, e a versão dos Termos e o aceite também não. O código do celular é desenhado em seis células sobre um só campo, que mantém as configurações sem preenchimento automático. Quando uma edição ou uma colagem completa seis dígitos, o código é conferido uma vez sozinho. Nada é conferido sozinho enquanto uma conferência está em andamento, nem depois de um erro ou de uma resposta incerta, até a pessoa editar o código ou tocar em Confirmar. "Reenviar código" é um link de texto, com a espera no rótulo enquanto está desligado, e "Trocar número" limpa o que já foi conferido.
+
+Em Ajustes, o cartão no alto de "Perfil e conta" (avatar, nome, @nome e uma seta) abre Editar perfil; enquanto o perfil não é conhecido, a linha "Editar perfil" aparece no lugar. As confirmações de Sair e de Recomeçar abrem numa folha com os mesmos textos, o mesmo botão de confirmação ("Sair", "Apagar e recomeçar") e Cancelar, e só o botão de confirmação age. Enquanto Sair ou Recomeçar está em andamento, Cancelar, o fundo, Escape, o botão voltar do Android e o arrasto não fecham a folha, que rola quando o texto é longo.
+
+Excluir conta lista a explicação em linhas com tópicos; juntas, as frases são as mesmas, byte por byte. O botão de perigo e o erro ficam numa barra embaixo, que sobe acima do teclado no Android. O fluxo não mudou: digitar o @nome, depois a passkey, depois o pedido, e um toque envia no máximo um pedido.
+
+Denunciar: os motivos são linhas de botão de rádio num grupo que o leitor de tela chama "Motivo da denúncia", e o botão de enviar fica num rodapé embaixo da lista, que sobe acima do teclado no Android. O que é enviado não mudou. Em Recorrer de um bloqueio, a explicação fica atrás de um ⓘ com o título "Como funciona o recurso", com as mesmas palavras; a frase sobre privacidade continua visível.
+
+Bloquear (folha): os botões de confirmação ficam empilhados, com a ação de confirmar acima de Cancelar, numa folha mais compacta. Os textos não mudaram.
+
+Passkeys e recuperação: cada passkey ou código de recuperação é uma linha, com um ícone, o tipo, "cadastrado em <data>" e um botão "mais ações" cujo rótulo falado diz qual entrada ele abre. O "Remover" dessa linha abre a mesma confirmação, embaixo da linha; só o Remover da confirmação remove, uma vez por toque. Enquanto ela está aberta, o botão da linha fica escondido, e o leitor de tela anuncia a confirmação quando ela aparece. Os textos de introdução e de perda continuam visíveis.
+
+Introdução: o ponto ativo fica mais largo (sem animação com Reduzir movimento); "Próximo" dá um toque leve de seleção; "Voltar" é um botão de ícone com o rótulo falado "Voltar".
+
+Páginas: "Nova página" virou um + na barra do topo, mostrado na mesma condição de antes; as linhas que abrem uma página têm uma seta.
+
+Sincronizar mostra uma linha de estado, com uma bolinha colorida (destaque quando sincroniza, recupera ou está automática; aviso ou perigo nos estados ruins) e a frase do estado atual. O registro fica atrás de "Ver registro", fechado no começo, com as mesmas linhas. Em Conexão, a linha de estado do nó ganha a mesma bolinha colorida.
+
+Limites conhecidos. Na web, o botão voltar do navegador ainda pode fechar Ajustes enquanto Sair ou Recomeçar está em andamento; isso já acontecia antes, e o pedido não é reenviado. No iOS, dentro da folha, o teclado ainda pode cobrir parte da barra de Excluir conta e do rodapé de Denunciar enquanto a pessoa digita, porque a forma de teclado compartilhada ainda não mede o topo da folha no iOS; antes desta mudança, o botão ficava no fim do conteúdo com rolagem, sem ajuste ao teclado. "Motivo da denúncia" (só para o leitor de tela) e "Ver registro" são rótulos novos. As conferências em aparelho continuam pendentes em todas as plataformas.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA. Registrar aparelho, sistema e, na web, o navegador. Conferir sempre nos dois temas, claro e escuro. Os itens com "precisa de conta" dependem de uma conta de teste: APK de preview do EAS ou TestFlight.
+
+- [ ] Interruptores de Ajustes: "Tocar música sozinha" e "Prévia de links" são linhas com interruptor, e a nota de cada uma fica na legenda da própria linha, palavra por palavra; não há "Ligada"/"Desligada" nem cabeçalho separado de "Prévia de links". Android, iOS, web e PWA: pendente.
+- [ ] Ajustes, cor e ritmo: Sair, Excluir conta e Recomeçar em cor de perigo; cabeçalhos de seção colados à lista; linhas escurecem enquanto são tocadas; "Carregando…", "Serviço indisponível" e o botão "Tentar de novo" ao lado com maiúscula inicial. Android, iOS, web e PWA: pendente.
+- [ ] Entrada, progresso: o progresso aparece uma vez, em pontos, e o leitor de tela diz "Passo N de M"; o aviso de um passo é uma linha com ícone de informação. Android, iOS, web e PWA: pendente.
+- [ ] Termos: o botão de aceite diz "Aceitar e continuar"; a frase de consentimento acima dele é a mesma; versão e aceite não mudaram. Android, iOS, web e PWA: pendente.
+- [ ] Código do celular, seis casas: o código aparece em seis células sobre um só campo; colar "123-456" continua funcionando. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Código do celular, conferência sozinha: ao completar seis dígitos por digitação ou colagem, o código é conferido uma vez sozinho. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Código do celular, sem repetição: nada é conferido sozinho durante uma conferência, depois de um erro ou de uma resposta incerta, até a pessoa editar o código ou tocar em Confirmar; os mesmos seis dígitos nunca são conferidos duas vezes sozinhos. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Código do celular, Confirmar e Enter: Confirmar continua para tentar de novo; Enter segue a mesma regra do botão. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Código do celular, cursor e foco: o cursor fica no fim; a célula ativa só aparece com o campo em foco. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Código do celular, reenvio e troca: "Reenviar código" é um link de texto, com a espera no rótulo enquanto está desligado; "Trocar número" limpa o que já foi conferido. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Conferência do código na web: com cinco dígitos digitados, a seta para a esquerda não tira o cursor do fim, e um sexto dígito entra no fim; colar "123-456" envia uma conferência só; depois de um código errado, nada é enviado até a pessoa editar o código ou tocar em Confirmar. Web e PWA: pendente (precisa de conta na web hospedada).
+- [ ] Cartão do perfil em Ajustes: no alto de "Perfil e conta", avatar, nome, @nome e seta abrem Editar perfil; sem perfil conhecido, a linha "Editar perfil" aparece no lugar. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Folhas de Sair e Recomeçar: mesmos textos, mesmos botões de confirmação ("Sair", "Apagar e recomeçar") e Cancelar; só o botão de confirmação age. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Folhas de Sair e Recomeçar durante o envio: Cancelar, fundo, Escape, o botão voltar do Android e o arrasto não fecham a folha; com texto longo, a folha rola. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Folhas de Sair e Recomeçar, iOS: as duas fecham limpo depois de terminar, com as duas folhas empilhadas. iOS: pendente (precisa de conta: TestFlight).
+- [ ] Excluir conta, explicação: as frases aparecem em linhas com tópicos e, juntas, são as mesmas de antes, byte por byte. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Excluir conta, barra e fluxo: o botão de perigo e o erro ficam numa barra embaixo; digitar o @nome, depois a passkey, depois o pedido; um toque envia no máximo um pedido. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Excluir conta e Denunciar, teclado aberto: a barra de Excluir conta e o rodapé de Denunciar podem ser alcançados no Android; no iOS, conferir quanto o teclado ainda cobre (limite conhecido acima). Android e iOS: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Denunciar: os motivos são linhas de botão de rádio num grupo que o leitor de tela chama "Motivo da denúncia"; o envio fica num rodapé acima do teclado no Android; o que é enviado não mudou. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Recorrer de um bloqueio: a explicação fica atrás de um ⓘ com o título "Como funciona o recurso", com as mesmas palavras; a frase sobre privacidade continua visível. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Bloquear (folha): os botões de confirmação ficam empilhados, com a ação de confirmar acima de Cancelar, numa folha mais compacta; os textos não mudaram. Android, iOS, web e PWA: pendente.
+- [ ] Passkeys e recuperação, linhas: cada entrada tem um ícone, o tipo, "cadastrado em <data>" e um botão "mais ações" cujo rótulo falado diz a qual entrada ele pertence. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Passkeys e recuperação, Remover: abre a confirmação embaixo da linha; só o Remover da confirmação remove, uma vez por toque; o botão da linha fica escondido enquanto ela está aberta; o leitor de tela anuncia a confirmação. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Passkeys e recuperação, textos: a introdução e os textos de perda continuam visíveis. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Passkeys e recuperação com duas passkeys: o leitor de tela diz a qual passkey cada botão "mais ações" pertence. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Introdução: o ponto ativo fica mais largo, sem animação com Reduzir movimento; "Próximo" dá um toque leve de seleção; "Voltar" é um botão de ícone com o rótulo falado "Voltar". Android, iOS, web e PWA: pendente.
+- [ ] Páginas: "Nova página" é um + na barra do topo, mostrado na mesma condição de antes; as linhas que abrem uma página têm uma seta. Android, iOS, web e PWA: pendente.
+- [ ] Sincronizar: uma linha de estado, com bolinha colorida (destaque quando sincroniza, recupera ou está automática; aviso ou perigo nos estados ruins) e a frase do estado atual. Android, iOS, web e PWA: pendente.
+- [ ] Sincronizar, registro: "Ver registro" começa fechado e mostra as mesmas linhas. Android, iOS, web e PWA: pendente.
+- [ ] Conexão: a linha de estado do nó ganha a mesma bolinha colorida. Android, iOS, web e PWA: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem a estrutura e os textos do código, não montam a interface num aparelho. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/app/test/composePolish.test.js
+node apps/app/test/uiKit.test.js
+node apps/app/test/onboarding.test.js
+node apps/app/test/terms.test.js
+node apps/app/test/phoneEntry.test.js
+node apps/app/test/accountDeletion.test.js
+node apps/app/test/report.test.js
+node apps/app/test/appeal.test.js
+node apps/app/test/passkeysScreen.test.js
+node apps/app/test/intro.test.js
+node apps/app/test/pages.test.js
+node apps/app/test/syncSignals.test.js
+node apps/app/test/connectText.test.js
+node apps/app/test/postMusicCard.test.js
+node apps/app/test/platformGate.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.

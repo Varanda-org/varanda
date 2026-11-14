@@ -245,6 +245,7 @@ function ConexaoNavegador ({ active = true, embedded = false }) {
 }
 
 function ConexaoNo ({ active = true, embedded = false }) {
+  const { colors } = useTheme()
   const node = useNode()
   const [form, setForm] = useState(() => formOf(node.config))
   const [localError, setLocalError] = useState('')
@@ -290,7 +291,10 @@ function ConexaoNo ({ active = true, embedded = false }) {
         {embedded ? null : <Title>Conexão</Title>}
         <Card>
           <Label>estado</Label>
-          <Body>{{ ready: 'conectado ao varanda-serve', connecting: 'conectando…', loading: 'conectando…' }[node.phase] || 'desconectado'}</Body>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+            <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: node.phase === 'ready' ? colors.accent : node.phase === 'error' ? colors.danger : colors.warn }} />
+            <Body style={{ flex: 1 }}>{{ ready: 'conectado ao varanda-serve', connecting: 'conectando…', loading: 'conectando…' }[node.phase] || 'desconectado'}</Body>
+          </View>
           {ready && info !== null ? <Soft>{info.publicDht ? 'o nó usa a DHT pública' : 'o nó usa a rede privada (bootstrap)'}</Soft> : null}
           <ErrorText>{node.error || infoError}</ErrorText>
           {node.phase === 'error' ? <Soft>Para conectar, abra o endereço impresso pelo varanda-serve.</Soft> : null}

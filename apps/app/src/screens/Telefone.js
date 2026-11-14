@@ -4,17 +4,20 @@
 // (src/usePhoneVerify.js); the screen shows what the person typed and never a
 // number from the service. Nothing comes from the URL, and the code field
 // asks for no SMS autofill. The explanations live in HELP.telefone, behind
-// the (i) of the step bar.
+// the (i) of the step bar. The code is one input under six drawn cells; a
+// completed code is checked once from the edit (src/phoneEntry.js).
 
 import { useEffect, useRef, useState } from 'react'
-import { StyleSheet, TextInput, View } from 'react-native'
+import { StyleSheet, Text, TextInput, View } from 'react-native'
 import { useNode } from '../node'
-import { codeDigits } from '../phone'
+import { codeDigits, isCode } from '../phone'
+import { cellsOf, shouldAutoSubmit } from '../phoneEntry'
 import { STEP_HINTS, STEP_TITLES } from '../onboarding'
 import { usePhoneVerify } from '../usePhoneVerify'
 import { Btn, ErrorText, Label, Notice, Page, Soft } from '../ui'
 import { Stepper, StepLink, StepNotice } from '../ui/Stepper'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
+import { webInputReset } from '../ui/theme'
 import { KeyboardForm } from './Perfil'
 
 const OFFLINE_TEXT = 'Sem conexão. A confirmação precisa de internet.'
@@ -41,21 +44,38 @@ const makeStyles = (colors) => StyleSheet.create({
     fontSize: 16,
     color: colors.ink
   },
-  code: { letterSpacing: 6, textAlign: 'center', fontSize: 20 },
   off: { backgroundColor: colors.inputOff, color: colors.soft },
+  codeBox: { position: 'relative' },
+  cells: { flexDirection: 'row', gap: 8 },
+  cell: {
+    flex: 1,
+    minHeight: 52,
+    paddingVertical: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: 12
+  },
+  cellOn: { borderColor: colors.accent, borderWidth: 2 },
+  cellText: { fontSize: 22, fontWeight: '700', color: colors.ink },
+  // The digits are drawn by the cells; the input stays on top, invisible, so
+  // typing, pasting and the keyboard all go to one field.
+  codeInput: { ...StyleSheet.absoluteFillObject, color: 'transparent', backgroundColor: 'transparent', fontSize: 16, ...webInputReset },
   plain: { gap: 12 }
 })
 
 const NO_AUTOFILL = { autoComplete: 'off', autoCorrect: false, autoCapitalize: 'none', spellCheck: false, importantForAutofill: 'no', textContentType: 'none' }
 
-function Input ({ label, value, onChangeText, keyboardType, maxLength, editable, code, onSubmitEditing }) {
+function Input ({ label, value, onChangeText, keyboardType, maxLength, editable, onSubmitEditing }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   return (
     <View style={styles.field}>
       <Label>{label}</Label>
       <TextInput
-        style={[styles.input, code && styles.code, !editable && styles.off]}
+        style={[styles.input, !editable && styles.off]}
         value={value}
         onChangeText={onChangeText}
         keyboardType={keyboardType}
@@ -67,6 +87,55 @@ function Input ({ label, value, onChangeText, keyboardType, maxLength, editable,
         returnKeyType='done'
         {...NO_AUTOFILL}
       />
+    </View>
+  )
+}
+
+// The cells are hidden from accessibility: a screen reader reaches the input,
+// which carries the label and the digits typed. The caret stays at the end,
+// so a tap on a middle cell never edits a digit the person cannot see.
+function CodeInput ({ label, value, onChangeText, editable, onSubmitEditing }) {
+  const styles = useStyles(makeStyles)
+  const [focused, setFocused] = useState(false)
+  // Moving the caret causes no render, and the web applies `selection` only
+  // on a render: a caret left away from the end forces one.
+  const [, setCaretPin] = useState(0)
+  const pinCaret = (e) => {
+    const sel = e && e.nativeEvent ? e.nativeEvent.selection : null
+    if (sel && (sel.start !== value.length || sel.end !== value.length)) setCaretPin((n) => n + 1)
+  }
+  const cells = cellsOf(value)
+  const at = Math.min(value.length, cells.length - 1)
+  return (
+    <View style={styles.field}>
+      <Label>{label}</Label>
+      <View style={styles.codeBox}>
+        <View style={styles.cells} accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>
+          {cells.map((digit, i) => (
+            <View key={i} style={[styles.cell, editable && focused && i === at && styles.cellOn, !editable && styles.off]}>
+              <Text style={styles.cellText}>{digit}</Text>
+            </View>
+          ))}
+        </View>
+        <TextInput
+          style={styles.codeInput}
+          value={value}
+          onChangeText={onChangeText}
+          keyboardType='number-pad'
+          maxLength={12}
+          editable={editable}
+          caretHidden
+          selectionColor='transparent'
+          selection={{ start: value.length, end: value.length }}
+          onSelectionChange={pinCaret}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          accessibilityLabel={label}
+          onSubmitEditing={onSubmitEditing}
+          returnKeyType='done'
+          {...NO_AUTOFILL}
+        />
+      </View>
     </View>
   )
 }
@@ -91,9 +160,19 @@ export default function Telefone ({ mode = 'setup', member, gateKey, onVerified,
   // The gate key an uncertain check started under, until the recheck answers.
   const [awaiting, setAwaiting] = useState(null)
   const sawBusy = useRef(false)
+  // The code checked last, by an edit or by Confirmar: an edit never sends it
+  // again by itself.
+  const lastChecked = useRef(null)
+  // A send or check this screen started and that has not answered: an edit
+  // can land before the render that shows verify.busy.
+  const inFlight = useRef(null)
   const holding = awaiting !== null && awaiting === gateKey && !checkError
   const waiting = (checking && !checkError) || holding
   const locked = verify.busy || waiting || offline
+  const codeLocked = locked || awaiting !== null
+  // The Confirmar rule; Enter in the code field follows it too, because the
+  // browser fires onSubmitEditing even on a read-only field.
+  const canConfirm = !codeLocked && code.trim().length === 6
 
   // The recheck starts in the same render that sets awaiting (onUncertain is
   // called in the same batch), so a read not busy then never started.
@@ -113,6 +192,12 @@ export default function Telefone ({ mode = 'setup', member, gateKey, onVerified,
     setAwaiting(null)
     if (answered && statusVerified && onVerified) onVerified(undefined, awaiting)
   }, [awaiting, gateKey, checkError, statusBusy, statusVerified])
+  // A new gate drops every answer started before (usePhoneVerify), so no
+  // request or code from the old one holds the new one.
+  useEffect(() => {
+    inFlight.current = null
+    lastChecked.current = null
+  }, [gateKey])
 
   const finish = (r) => {
     if (r === null) return
@@ -123,16 +208,44 @@ export default function Telefone ({ mode = 'setup', member, gateKey, onVerified,
     }
   }
   const send = async () => {
-    const r = await verify.send(phone)
-    if (r !== null && (r.state === 'enviado' || r.state === 'verificado')) setCode('')
-    finish(r)
+    const mine = {}
+    if (inFlight.current === null) inFlight.current = mine
+    try {
+      const r = await verify.send(phone)
+      if (r !== null && (r.state === 'enviado' || r.state === 'verificado')) setCode('')
+      finish(r)
+    } finally {
+      if (inFlight.current === mine) inFlight.current = null
+    }
   }
-  const confirm = async () => {
-    const r = await verify.check(code)
-    if (r !== null && r.uncertain === true) setAwaiting(r.key)
-    finish(r)
+  // The candidate is passed in: an edit checks before `code` holds it. Only a
+  // code that is handed to verify.check counts as checked.
+  const checkCode = async (candidate) => {
+    if (!isCode(candidate) || inFlight.current !== null) return
+    const mine = {}
+    inFlight.current = mine
+    lastChecked.current = candidate
+    try {
+      const r = await verify.check(candidate)
+      if (r !== null && r.uncertain === true) setAwaiting(r.key)
+      finish(r)
+    } finally {
+      if (inFlight.current === mine) inFlight.current = null
+    }
   }
+  const confirm = () => {
+    if (!canConfirm) return
+    checkCode(code.trim())
+  }
+  const editCode = (text) => {
+    const next = codeDigits(text)
+    setCode(next)
+    if (shouldAutoSubmit({ code: next, last: lastChecked.current, locked: codeLocked || inFlight.current !== null })) checkCode(next)
+  }
+  // A new number gets new codes; a resend keeps lastChecked.
   const change = () => {
+    lastChecked.current = null
+    inFlight.current = null
     setAwaiting(null)
     setCode('')
     verify.reset()
@@ -142,8 +255,8 @@ export default function Telefone ({ mode = 'setup', member, gateKey, onVerified,
   const actions = verify.sent
     ? (
       <>
-        <Btn label={CONFIRM_LABEL} onPress={confirm} disabled={locked || code.trim().length !== 6} pending={verify.busy} block large />
-        <Btn label={resendLabel} secondary onPress={send} disabled={locked || verify.resendIn > 0} block large />
+        <Btn label={CONFIRM_LABEL} onPress={confirm} disabled={!canConfirm} pending={verify.busy} block large />
+        <StepLink label={resendLabel} onPress={send} disabled={locked || verify.resendIn > 0} />
         <StepLink label={CHANGE_LABEL} onPress={change} disabled={(checking && !checkError) || verify.busy} />
       </>
       )
@@ -163,7 +276,7 @@ export default function Telefone ({ mode = 'setup', member, gateKey, onVerified,
       <Input label={NUMBER_LABEL} value={phone} onChangeText={setPhone} keyboardType='phone-pad' maxLength={20} editable={!verify.sent && !locked} onSubmitEditing={verify.sent ? undefined : send} />
       {verify.note ? <StepNotice><Notice>{verify.note}</Notice></StepNotice> : null}
       {verify.sent
-        ? <Input label={CODE_LABEL} value={code} onChangeText={(t) => setCode(codeDigits(t))} keyboardType='number-pad' maxLength={12} editable={!locked} code onSubmitEditing={confirm} />
+        ? <CodeInput label={CODE_LABEL} value={code} onChangeText={editCode} editable={!locked} onSubmitEditing={confirm} />
         : null}
       <ErrorText>{verify.error}</ErrorText>
       {offline ? <StepNotice><Soft>{OFFLINE_TEXT}</Soft></StepNotice> : null}

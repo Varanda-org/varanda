@@ -6,7 +6,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { Spinner } from './index'
 import { Icon } from './Icon'
 import { useStyles, useTheme } from './ThemeProvider'
-import { fonts, layout, radius, space, type } from './theme'
+import { fonts, layout, space, type } from './theme'
 
 export function Stepper ({ index, total, title, hint, icon, busy, hero, actions, children }) {
   const styles = useStyles(makeStyles)
@@ -14,7 +14,7 @@ export function Stepper ({ index, total, title, hint, icon, busy, hero, actions,
   const dots = []
   if (typeof total === 'number') {
     for (let i = 0; i < total; i++) {
-      dots.push(<View key={i} style={[styles.dot, i === index ? styles.dotActive : i < index ? styles.dotDone : styles.dotPending]} />)
+      dots.push(<View key={i} importantForAccessibility='no' accessibilityElementsHidden style={[styles.dot, i === index ? styles.dotActive : i < index ? styles.dotDone : styles.dotPending]} />)
     }
   }
   return (
@@ -22,10 +22,9 @@ export function Stepper ({ index, total, title, hint, icon, busy, hero, actions,
       <View style={styles.header}>
         {typeof total === 'number'
           ? (
-            <>
-              <Text style={styles.step}>{'Passo ' + (index + 1) + ' de ' + total}</Text>
-              <View style={styles.dots} accessible={false} importantForAccessibility='no-hide-descendants'>{dots}</View>
-            </>
+            // no-hide-descendants would hide this labelled view from TalkBack too,
+            // so each dot hides itself instead.
+            <View style={styles.dots} accessible accessibilityLabel={'Passo ' + (index + 1) + ' de ' + total}>{dots}</View>
             )
           : null}
         {hero !== undefined
@@ -73,14 +72,19 @@ export function StepLink ({ label, onPress, disabled }) {
 
 export function StepNotice ({ children }) {
   const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   if (children === null || children === undefined || children === false || children === '') return null
-  return <View style={styles.notice}>{children}</View>
+  return (
+    <View style={styles.notice}>
+      <Icon name='info' size={16} color={colors.warn} />
+      <View style={styles.noticeText}>{children}</View>
+    </View>
+  )
 }
 
 const makeStyles = (colors) => StyleSheet.create({
   column: { width: '100%', maxWidth: 400, alignSelf: 'center', paddingHorizontal: space.xl, paddingTop: space.lg, flexGrow: 1, gap: space.md },
   header: { alignItems: 'center', gap: space.sm },
-  step: { ...type.stepLabel, color: colors.soft, textAlign: 'center' },
   dots: { flexDirection: 'row', justifyContent: 'center', gap: 8 },
   dot: { width: 8, height: 8, borderRadius: 4 },
   dotActive: { backgroundColor: colors.accent },
@@ -96,5 +100,6 @@ const makeStyles = (colors) => StyleSheet.create({
   linkPressed: { opacity: 0.6 },
   off: { opacity: 0.45 },
   linkText: { ...type.pill, color: colors.accent, textAlign: 'center' },
-  notice: { backgroundColor: colors.warm, borderRadius: radius.md, padding: space.md, gap: space.sm }
+  notice: { flexDirection: 'row', alignItems: 'flex-start', gap: space.sm },
+  noticeText: { flex: 1, gap: space.sm }
 })
