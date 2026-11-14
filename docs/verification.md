@@ -10799,3 +10799,44 @@ node apps/app/test/postLinkOpen.test.js
 node apps/cli/test/post-page.test.js
 node apps/cli/test/seeder-post-http.test.js
 ```
+
+## 235. Splash com a varanda, a cadeira e a calçada (PR feat/splash-calcada-scene)
+
+Esta seção confere o splash novo, uma cena inteira desenhada por um módulo puro (`apps/app/src/ui/splashScene.js`): uma faixa de céu de pôr do sol atrás da varanda, a mesma da página inicial, do chão até acima do telhado, que em degradê sai do creme da página no alto (o topo da tela fica creme, para a tela de abertura nativa seguir sem corte), passa pelo laranja e desce até o roxo e o azul do anoitecer na linha do chão; o sol se pondo, um brilho redondo e suave que sobe por trás do telhado da varanda; três passarinhos pequenos que cruzam o céu devagar; uma borboleta perto da planta, que bate as asas e faz laços; uma araucária (o pinheiro de Curitiba, copa em candelabro) à esquerda da varanda, no mesmo chão; a varanda (telhado, colunas, parede creme, grade e um vaso de planta) com a cadeira de praia, o símbolo da Varanda, no piso; e uma calçada de petit-pavê preto e branco com o meio-fio e a Rua embaixo. Em cima fica a palavra VARANDA, o lettering desenhado à mão do próprio logo (o mesmo desenho de `apps/site/public/assets/logo-lockup.svg`, não uma fonte), com as letras subindo uma a uma acima da barra de progresso. Na web, o overlay sem script de `apps/app/public/index.html` (gerado por `apps/app/scripts/pre-splash.js`) continua dono do splash inteiro, e o bundle só assume aos 20 s.
+
+Os motivos: a faixa de trás traz a onda do "mar largo" de Copacabana (Rio de Janeiro), o mesmo desenho lisboeta do Largo de São Sebastião, em Manaus; a faixa da frente alterna a araucária de Curitiba vista de cima e uma silhueta simplificada do estado de São Paulo, desenho nosso em homenagem à calçada do mapa do estado, projetada por Mirthes Bernardes. A árvore ao lado da varanda é outra araucária, a mesma de Curitiba, agora de lado. Em telas baixas a cena usa degraus fixos de escala (1, 0,75, 0,5 e 0,375 pela altura), para as pedras ficarem em pixels inteiros. Quem lê a tela ouve só "Varanda, carregando".
+
+Nada disso envia pedido nem busca dado: é só a tela. Não há mudança de protocolo, RPC nem Termos, e nenhuma coleta de dados. A única dependência nova é `react-native-svg` 15.15.3, com versão exata; o `Podfile.lock` do iOS ganha o RNSVG.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA, cada um em claro e escuro. Registrar aparelho, sistema e, na web, o navegador. Abrir o app do zero, com o processo fechado, para ver o splash de verdade.
+
+Rodada de 2026-11-14: emulador Android `varanda-api36` (Android 16, API 36) e simulador iPhone 16e (iOS 26.2), os dois com o build de debug; Chrome 157 sem janela, a 390 px de largura; Safari no mesmo simulador. A conferência foi por capturas de tela em sequência, não por vídeo, então o que só se vê em movimento contínuo ficou pendente.
+
+- [ ] A entrada, em cerca de 1,3 s: o chão sobe, a varanda aparece, a cadeira sobe até o piso, as letras sobem uma a uma e a barra aparece. O céu e o sol já estão no lugar quando a varanda surge, e a araucária surge junto com ela; os passarinhos e a borboleta entram se mexendo e andam com suavidade, sem pulo, e o ciclo deles também volta sem salto. Emulador Android (build de debug): pendente; a captura do emulador é lenta demais para a entrada, mas um quadro do meio dela mostra o céu, o sol e o chão já no lugar antes da varanda. Simulador iOS: ok, o chão aparece, as letras sobem e a cena fica inteira. Web: ok no Chrome, aos 250 e aos 700 ms. A suavidade dos passarinhos e da borboleta e a volta do ciclo deles: pendente em todos. PWA: pendente.
+- [ ] O deslizar da calçada desde o começo: a faixa da frente a 20 px/s (um período de 2 motivos em 9,6 s) e a de trás uma pedra em 20,8 s, sem emenda, sem salto na volta do ciclo e sem fio claro entre as pedras. Os passarinhos cruzam o céu e a borboleta voa em laços, sem pulo nem quebra quando o movimento recomeça. Emulador Android (build de debug): ok, as duas faixas andam para a esquerda, na razão das velocidades da página inicial, sem emenda visível nos quadros. Simulador iOS: ok, a faixa da frente anda para a esquerda, sem emenda visível. Web: ok no Chrome, a faixa da frente andou entre 1,5 s e 4,5 s. A volta do ciclo sem salto e o voo dos passarinhos e da borboleta só se veem em vídeo: pendente em todos. PWA: pendente.
+- [ ] A cena vai até as duas bordas, sem faixa nas laterais, e a Rua passa por baixo do indicador de início (iOS) ou da barra de navegação (Android), sem vão. Emulador Android (build de debug): ok, a Rua passa por baixo da barra de navegação por gestos. Simulador iOS: ok, a Rua vai até a borda de baixo, sob o indicador de início. PWA: pendente.
+- [ ] Os degraus 0,75, 0,5 e 0,375 em janelas baixas (web: alturas 500, 380 e 320): a palavra e a barra ficam acima da cena, sem sobreposição, e as pedras seguem nítidas. Emulador Android (build de debug): pendente, a tela do emulador fica no degrau 1. Simulador iOS: pendente, o iPhone 16e fica no degrau 1. Web: ok no Chrome, nas alturas 500, 380 e 320. PWA: pendente.
+- [ ] O céu do pôr do sol vai do creme ao laranja e ao roxo do anoitecer num degradê suave, sem faixas visíveis, sem fio nem tom estranho na emenda com o creme, e o topo da tela é creme. O sol se pondo fica centrado na varanda, com o brilho subindo por trás do telhado. O sol, a árvore, os passarinhos e a borboleta nunca cobrem a palavra nem a barra, mesmo em janelas baixas (web: alturas 500, 380 e 320). Emulador Android (build de debug): ok. Simulador iOS: ok. Web: ok no Chrome, também nas alturas 500, 380 e 320, e no Safari do simulador iOS 26.2. PWA: pendente.
+- [ ] Reduzir movimento (Android: Remover animações; iOS: Reduzir Movimento; web: `prefers-reduced-motion`): a cena aparece inteira de uma vez e parada, com os passarinhos e a borboleta parados como o resto. Emulador Android (build de debug): a cena aparece inteira já no primeiro quadro, mas só um quadro do splash foi capturado, então ver que ela fica parada está pendente. Simulador iOS: ok, inteira desde o primeiro quadro; os quadros seguintes têm só uma diferença pequena, provavelmente a barra. Web: ok no Chrome, com `prefers-reduced-motion` emulado, inteira aos 250 ms. PWA: pendente.
+- [ ] TalkBack e VoiceOver leem só "Varanda, carregando", sem ler a cena, as letras nem as pedras. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Claro e escuro: o nativo continua claro nos dois esquemas. Na web em escuro, o céu vira azul-noite, o sol, os passarinhos e a borboleta somem, a calçada e a árvore ficam escurecidas, a parede da varanda continua creme e o lettering fica creme. Emulador Android (build de debug): ok, continua claro no modo noturno. Simulador iOS: ok, continua claro na aparência escura. Web: ok no Chrome, céu azul-noite sem sol, passarinhos nem borboleta, calçada e árvore escurecidas, parede e lettering creme. PWA: pendente.
+- [ ] Web: o overlay pinta antes do bundle numa rede lenta (estrangular no DevTools), nada pula nem pisca quando o app monta por baixo, ele sai quando a primeira tela está pronta, e o console não mostra erro de CSP. Web: pendente. PWA: pendente.
+- [ ] Web, a saída aos 20 s: com o bundle bloqueado, o overlay assume a tela por 20 s e então o splash do React monta já assentado e continua deslizando; um pequeno salto nessa troca é aceito. Web: pendente. PWA: pendente.
+- [ ] Safari no iOS: as faixas feitas com `<pattern>` ficam sem emenda, sem fio entre as pedras e sem tremer ao deslizar. Web: no Safari do simulador iOS 26.2, sem emenda nem fio entre as pedras nos quadros, e a faixa da frente andou entre eles; tremer ao deslizar não se julga por quadros parados: pendente. PWA: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/app/test/splashScene.test.js
+node apps/app/test/splashMotion.test.js
+node apps/app/test/splashWiring.test.js
+node apps/app/test/splashGate.test.js
+node apps/app/test/loopMotion.test.js
+node apps/app/test/preSplash.test.js
+node apps/app/test/pwa.test.js
+node apps/app/test/podsLock.test.js
+node apps/app/test/hardening.test.js
+node apps/app/scripts/pre-splash.js --check
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
