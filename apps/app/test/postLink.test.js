@@ -212,3 +212,22 @@ test('capturePostPath: saves a valid post, cleans every post path, leaves others
   t.is(capturePostPath(null, null, () => t.fail('no save')), null)
   t.is(capturePostPath({ pathname: 42 }, null, () => t.fail('no save')), null)
 })
+
+test('postOpeningGate: only a first visit with a post and nothing else pending', async (t) => {
+  const { postOpeningGate } = await load()
+  const base = { introShow: true, ageReturn: false, inviteOpening: 'none', otherLink: false, post: { author: 'a'.repeat(64), seq: 3 }, dismissed: false }
+  t.is(postOpeningGate(base), true)
+  t.is(postOpeningGate(), false)
+  const flips = [
+    { introShow: false },
+    { ageReturn: true },
+    { inviteOpening: 'card' },
+    { inviteOpening: 'wait' },
+    { otherLink: true },
+    { post: null },
+    { post: { author: 'a'.repeat(64), seq: 0 } },
+    { post: { author: 'zz', seq: 3 } },
+    { dismissed: true }
+  ]
+  for (const flip of flips) t.is(postOpeningGate({ ...base, ...flip }), false, JSON.stringify(flip))
+})

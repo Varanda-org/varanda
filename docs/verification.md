@@ -9842,3 +9842,36 @@ Nenhuma passagem em aparelho foi feita nesta seção. A ordem é o build de debu
 - [ ] Travar e destravar não traz a capa de volta.
 
 Limites: os bytes das fotos das publicações, das imagens de avatar e da mídia dos momentos não fazem parte do sinal. A conferência mais estrita do autor roda só num nó hospedado. Nenhuma passagem em aparelho foi feita nesta seção.
+
+## 214. Cartão de abertura do link de uma publicação
+
+Na primeira visita, quem abre o link de uma publicação que não aparece na web (`/publicacao/<chave>/<seq>`) vê, no lugar dos cartões de apresentação, um cartão dizendo que a publicação espera pela entrada. O convite assinado tem prioridade: com a abertura do convite, um convite de perfil ou um link de grupo ou comunidade pendente, o cartão não aparece (`postOpeningGate` em `apps/app/src/postLink.js`). Entrar marca a apresentação como vista e leva aos Termos e a Entrar, onde o cartão da publicação e o destino continuam. Como funciona mostra os cartões e volta. Agora não esconde o cartão só nesta carga.
+
+Sem mudança de protocolo, RPC nem Termos.
+
+### Verificação automatizada
+
+A partir da raiz.
+
+- `npm run lint`: passa.
+- `node apps/app/test/postLink.test.js`: 10/10 testes, 105/105 asserções.
+- `node apps/app/test/postLinkOpen.test.js`: 1/1 teste, 6/6 asserções.
+- `node apps/app/test/nativeLinks.test.js`: 8/8 testes, 35/35 asserções. Com o `App.js` da `main` (sem a correção), o teste novo "the post opening card sits between the invite card and the intro" falha (7/8).
+- `node apps/app/test/platformGate.test.js`: 3/3 testes, 52/52 asserções.
+
+### Verificação manual
+
+Antes da correção, em produção (`bora.varanda.app`, interruptor desligado, `/p/policy` respondendo `{"enabled":false}`), numa aba sem dados: `/p/<64 zeros>/1` deu o 302 para `/publicacao/...`, o app gravou o destino na aba (`varanda.postLink`) e limpou o caminho para `/`, mas a tela foi a dos cartões de apresentação ("Seu diário, perto de você") e depois os Termos, sem nada sobre a publicação. Os Termos não foram aceitos em produção.
+
+Depois da correção, no laboratório hospedado (`node apps/cli/scripts/hosted-lab.js --port 8090 --expo http://127.0.0.1:8083`, com `npm run web -w apps/app -- --port 8083 --clear`), com o armazenamento da origem apagado e o destino gravado à mão na aba (no laboratório http `hostedPage` é falso e a captura não roda, como na seção 212):
+
+1. A 360 px: a primeira tela é o cartão "Você abriu o link de uma publicação", com "Entrar" na largura toda, "Como funciona" e "Agora não".
+2. "Como funciona" mostra os cartões de apresentação; "Pular" volta ao cartão da publicação.
+3. "Agora não" mostra os cartões de apresentação, e o destino continua na aba.
+4. A 1280 px, depois de recarregar: o cartão volta, centrado na coluna.
+5. "Entrar" leva aos Termos versão 48; depois do aceite (no laboratório), Entrar mostra "Você abriu o link de uma publicação. Entre ou crie sua conta para ver.".
+
+### Não verificado
+
+- iOS (simulador) e Android (emulador): não rodou. O laboratório não entra no app nativo (seção 212), e o caminho no nativo é o mesmo ramo do `App.js`, com o destino vindo do Linking.
+- A captura de `/publicacao/` na web hospedada em https ponta a ponta com a correção: depende da implantação.
