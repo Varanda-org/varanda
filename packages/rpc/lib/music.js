@@ -3,9 +3,10 @@
 // The music of a momento (docs/protocol.md, "Momentos"): a reference to one
 // Audius track and the second it starts from, shared by core's record check
 // and the RPC contract. No title, artist or URL is kept: the viewer asks the
-// association's service for them only when it plays, so a diary never holds
-// text it would have to trust. Zero dependencies, no Node built-ins. Never
-// throws.
+// association's service for them when that momento plays or, while the
+// Momentos viewer is open, just before for the single next momento, so a
+// diary never holds text it would have to trust. Zero dependencies, no Node
+// built-ins. Never throws.
 
 const MOMENT_MUSIC_KEYS = ['p', 'id', 'start']
 // The length of the excerpt a viewer plays from `start`, in seconds.
