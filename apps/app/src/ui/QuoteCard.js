@@ -20,7 +20,7 @@
 
 import { Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
-import { relativeTime } from '../format'
+import { compactTime, relativeTime } from '../format'
 import { embedOf, sameMusicPage } from '../musicEmbed'
 import { textWithoutHrefs } from '../links'
 import { whoOf } from '../who'
@@ -69,7 +69,8 @@ export function QuoteCard ({ quote, now }) {
   const loading = !missing && !hasText && !hasMedia
   const who = whoOf({ name: q.name, username: q.username })
   const title = displayText(who.title)
-  const time = typeof q.at === 'string' ? (relativeTime(q.at, now) ?? displayText(q.at)) : null
+  // Same date as the post row: compact under a week, the date after.
+  const time = typeof q.at === 'string' ? (compactTime(q.at, now) ?? relativeTime(q.at, now) ?? displayText(q.at)) : null
   // At large text the @nome is left out, as in PostRow.
   const { fontScale } = useWindowDimensions()
   const handle = who.subtitle && !(fontScale >= LARGE_TEXT) ? displayText(who.subtitle) : null
@@ -147,8 +148,8 @@ const makeStyles = (colors) => StyleSheet.create({
     marginTop: 8,
     paddingVertical: 8,
     paddingHorizontal: 12,
-    borderWidth: 1,
-    borderColor: colors.outline,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.line,
     borderRadius: 12,
     gap: 4
   },
@@ -156,8 +157,8 @@ const makeStyles = (colors) => StyleSheet.create({
   avatarBox: { marginRight: 6 },
   // As in PostRow: the handle gives way first and stops at 32, then the name.
   name: { ...type.postName, fontSize: 14, color: colors.ink, flexShrink: 1, marginRight: 6 },
-  meta: { ...type.postMeta, fontSize: 14, color: colors.soft, flexShrink: 10000, minWidth: 32 },
-  time: { ...type.postMeta, fontSize: 14, color: colors.soft, flexShrink: 0 },
+  meta: { ...type.meta, color: colors.soft, flexShrink: 10000, minWidth: 32 },
+  time: { ...type.meta, color: colors.soft, flexShrink: 0 },
   text: { ...type.postText, fontSize: 14.5, lineHeight: 20, color: colors.ink },
   media: { marginTop: 2 },
   soft: { ...type.replyMark, color: colors.soft },

@@ -33,6 +33,20 @@ test('LinkCard never reaches the linked site', (t) => {
   t.ok(src.includes('<MediaView author={thumb.author} descriptor={stored}'), 'post thumbnails use the post photo path')
 })
 
+test('LinkCard shows the title and host, with a hairline and no fill', (t) => {
+  const src = withoutComments(read('ui', 'LinkCard.js'))
+  t.ok(src.includes('const THUMB = 64'), 'the thumbnail stays 64')
+  t.ok(src.includes('{title ? <Text style={styles.title} numberOfLines={2}>{title}</Text> : null}'), 'the title stays')
+  t.ok(src.includes('<Text style={styles.host} numberOfLines={1}>{shownHost}</Text>'), 'the host stays')
+  t.ok(src.includes("const label = LINK_CARD_OPEN + ': ' + (title ? title + ', ' : '') + shownHost"), 'the accessibility label stays title and host')
+  t.ok(src.includes('accessibilityLabel={label}'), 'the label is announced')
+  t.absent(src.includes('styles.desc'), 'the description is not drawn')
+  t.absent(src.includes('data.desc'), 'the description is not read onto the screen')
+  const card = src.slice(src.indexOf('\n  card: {'), src.indexOf('\n  body:'))
+  t.ok(card.includes('borderWidth: StyleSheet.hairlineWidth') && card.includes('borderColor: colors.line'), 'the hairline border stays')
+  t.absent(card.includes('backgroundColor'), 'the card has no filled background')
+})
+
 test('LinkCard thumbnails leave taps to the card', (t) => {
   const src = withoutComments(read('ui', 'LinkCard.js'))
   const media = [...src.matchAll(/<MediaView\b[^>]*(?:descriptor=\{stored\}|uri=\{chatUri\})[^>]*\/>/g)]

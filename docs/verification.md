@@ -10145,3 +10145,53 @@ node apps/app/test/inviteCardArt.test.js
 ```
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 220. Feed mais leve: cabeçalho, toque longo, resposta, Momentos, composição e contagens (PR feat/feed-slim)
+
+Esta seção confere a versão mais leve do feed, da composição e dos Momentos. Na publicação, o nome usa o estilo de nome e o @nome e a data ficam no estilo de metadados, menores; a data é compacta (`5min`, `3h`, `2d`; abaixo de um minuto, "agora"; a partir de 7 dias, a data, "5 nov", ou "5 nov 2025" em outro ano), o avatar tem 40 pt, e as contagens da barra de ações são compactas (`12,3 mil`), com o número completo lido pelo leitor de tela só nos botões que abrem quem curtiu e quem republicou. "seguir" e o botão "mais ações" ficam no canto superior direito, com alvo de 44 pt. Um toque longo de 350 ms no corpo da publicação abre as ações, com um toque leve de háptico. A linha "respondendo a" ganha texto suave e alvo de pelo menos 44 pt de altura. O cartão de link mostra só o título e o domínio, com miniatura de 64 pt. Nos Momentos, as rodinhas de A Rua mostram faixas do pôr do sol para quem tem algo não visto e um contorno fino para quem já viu; o visualizador troca de pessoa com arrasto horizontal e fecha com arrasto para baixo. Em Publicar, o contador só aparece a partir de 80% do limite e as observações do modo Momento viram uma frase de estado. Em Curtidas, as contagens ficam dentro dos nomes das abas. Em A Rua, Busca, Espiadinha e Diário, a nota de números incompletos vira a linha "Números incompletos" com um ⓘ, que abre a folha com a frase. Nada disso muda protocolo, RPC ou Termos: muda a aparência, os alvos de toque e o gesto.
+
+Limites conhecidos. A seção 123 descreve as cores das rodinhas (anel verde e anel de linha). A partir desta seção, o anel de quem tem algo não visto são as faixas do pôr do sol, e o de quem já viu é o contorno. Na web, um toque longo numa legenda que tem link ou @menção não abre a folha (o `Text` do react-native-web não tem toque longo); vale o toque longo do próprio navegador, e o botão ⋯ continua. No Android e no iOS, funciona. As contagens compactas podem ser mais largas que os dígitos: com três contagens de 10 mil ou mais numa tela de 360 pt (ou menos, maiores, numa de 320 pt), a barra de ações pode ficar sem espaço. O toque longo só abre a folha quando a publicação tem ações, e não funciona com leitor de tela ligado (o botão ⋯ é o caminho). O gesto de trocar pessoa nos Momentos ainda precisa de conferência em aparelho no Android e no iOS, listada abaixo como pendente.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA. Registrar aparelho, sistema e, na web, o navegador. Conferir sempre nos dois temas, claro e escuro.
+
+- [ ] Cabeçalho da publicação: nome, @nome e data, com a data compacta (`5min`, `3h`, `2d`) e o avatar de 40 pt. Android, iOS, web e PWA: pendente.
+- [ ] Data: compacta abaixo de 7 dias; a partir de 7 dias, a data (`5 nov`, ou `5 nov 2025` em outro ano); "agora" abaixo de um minuto. Com leitor de tela, a data é dita por extenso ("3 h", "ontem", "5 nov"), nunca "3h". Android, iOS, web e PWA: pendente.
+- [ ] Controles do cabeçalho com TalkBack e VoiceOver: a ordem de leitura é legenda, "Ver mais", respostas, "seguir", "mais ações" e, por fim, a barra de ações. O nome e a data nunca passam por baixo dos controles. Android, iOS, web e PWA: pendente.
+- [ ] Texto grande no cabeçalho: com o texto em tamanho grande ou maior, o nome fica na primeira linha ao lado dos controles e a data desce para a linha de baixo. Android, iOS, web e PWA: pendente.
+- [ ] Toque longo de 350 ms no corpo, na legenda, no nome, na data e na linha "respondendo a" abre as ações, com toque leve. Android e iOS: pendente. Na web, só a legenda simples, o nome, a data e a linha "respondendo a": pendente.
+- [ ] Linha "respondendo a": texto suave, alvo de 44 pt de altura e a linha ocupa cerca de 32 pt. Android, iOS, web e PWA: pendente.
+- [ ] Cartão de link: só o título e o domínio, sem descrição, sem fundo e com borda fina, miniatura de 64 pt. Android, iOS, web e PWA: pendente.
+- [ ] Cartão de citação: borda fina e cabeçalho com o texto de metadados. Android, iOS, web e PWA: pendente.
+- [ ] Contagens: a barra de ações mostra `12,3 mil`; o leitor de tela lê o número completo só nos botões "ver quem curtiu, 12345" e "ver quem republicou, 12345", e em nenhum outro. Android, iOS, web e PWA: pendente.
+- [ ] Rodinhas de A Rua (Momentos): anel em faixas do pôr do sol para quem tem algo não visto, contorno fino para quem já viu, e uma faixa do fundo entre o anel e a foto, nos dois temas; no claro, as faixas do laranja ao ameixa precisam ler bem sobre o fundo claro. Android, iOS, web e PWA: pendente.
+- [ ] Curtidas: as contagens compactas dentro dos nomes das abas; o leitor de tela ouve o nome da aba e a frase com o número completo. Android, iOS, web e PWA: pendente.
+- [ ] Composição: o ícone de vídeo na barra de ferramentas da publicação (rótulo "Vídeo" para leitor de tela); no modo Momento, a opção "Vídeo" ainda é a pílula de texto. O contador aparece só a partir de 80% do limite, e o leitor de tela continua lendo a contagem. Android, iOS, web e PWA: pendente.
+- [ ] Contador da composição com leitor de tela: a linha do contador (anel e número) lê "N de 1000 caracteres" em publicações e "N de 200 caracteres" em Momento; o contador do Momento mantém a linha quando vazio, sem salto ao chegar a 80%. Android, iOS, web e PWA: pendente.
+- [ ] Composição no modo Momento: uma frase de estado só, na ordem erro, bloqueado (também sem internet), mídia e rascunho. Android, iOS, web e PWA: pendente.
+- [ ] Remover foto na composição: a área de toque tem 44 pt, e o desenho é um ponto escuro de 24 pt com um x. Android, iOS, web e PWA: pendente.
+- [ ] Momentos, troca de pessoa: arrasto para a esquerda vai para a pessoa seguinte, para a direita para a anterior, mesmo com vários momentos; a troca de pessoa dá um toque leve. Na primeira pessoa, arrasto para a direita repete o momento na tela; depois da última, arrasto para a esquerda fecha. Um arrasto segue a direção em que começou (um arrasto para baixo que se desvia para o lado ainda fecha; um deslize para os lados nunca fecha). Com a ajuda, o menu ou a folha de apagar abertos por cima, os arrastos são ignorados. Android e iOS: pendente; web: pendente.
+- [ ] Momentos, fechar e toques: arrasto para baixo fecha; toque na metade direita avança e na esquerda volta, um momento de cada vez; segurar pausa; a legenda rola e o áudio seguem como antes. Android e iOS: pendente. Web: pendente.
+- [ ] Momentos, ⓘ no próprio momento: o botão "Sobre seus momentos" mostra a frase de 7 dias e pausa a reprodução; a folha de apagar continua mostrando a frase. Android, iOS e web: pendente.
+- [ ] Números incompletos em A Rua, Busca, Espiadinha e Diário: a linha "Números incompletos" com um ⓘ aparece só quando os números estão incompletos; o alvo de 44 pt fica dentro da linha, e o ⓘ abre a folha "Números incompletos" com a frase "Alguns números podem estar incompletos.". Aparece no nó hospedado, a web e o app nativo ligado à instalação. Android, iOS, web e PWA: pendente.
+- [ ] Alinhamento do fio da conversa: o fio e os links "Ver conversa" ficam centrados no avatar de 40 pt. Android, iOS, web e PWA: pendente.
+- [ ] Resposta em uma linha numa conversa: o campo, o botão de abrir o editor completo e o de enviar ficam na mesma linha, com cancelar, foco, teclado e rascunho como antes. A partir de 900 caracteres, o contador aparece embaixo, à direita, e o campo continua largo com texto grande numa tela de 320 pt. Android, iOS, web e PWA: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem a estrutura e os textos do código, não montam a interface num aparelho. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/app/test/postLayout.test.js
+node apps/app/test/postOverflow.test.js
+node apps/app/test/postClamp.test.js
+node apps/app/test/linkPreview.test.js
+node apps/app/test/momentosScreen.test.js
+node apps/app/test/momentSwipe.test.js
+node apps/app/test/composeStatus.test.js
+node apps/app/test/composePolish.test.js
+node apps/app/test/engagers.test.js
+node apps/app/test/screensPolish.test.js
+node apps/app/test/conversaScreen.test.js
+node apps/app/test/replyBar.test.js
+node apps/app/test/format.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.

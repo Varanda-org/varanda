@@ -66,6 +66,7 @@ import { countChars } from '../format'
 import { sentMatcher } from '../replySend'
 import { whoOf } from '../who'
 import { ringState } from '../composeRing'
+import { composeStatus } from '../composeStatus'
 import { countAfterInsert, insertAt } from '../emoji'
 import { MAX_MEDIA_PER_POST, durationLabel } from '../media/plan'
 import { validDescriptor } from '../media/fetch'
@@ -99,7 +100,7 @@ import { refusalOf } from '../wordCheck'
 import { Sheet, TEXT_CAP } from '../ui/Sheet'
 import { tap } from '../ui/haptics'
 import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
-import { space, type } from '../ui/theme'
+import { layout, space, type } from '../ui/theme'
 import { PressScale } from '../ui/PressScale'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { pagesOn } from '../pageGate'
@@ -113,6 +114,8 @@ export const MOMENT_TEXT_MAX = 200
 // maxLength counts UTF-16 units on the web: 200 code points of emoji take 400.
 export const MOMENT_FIELD_MAX = 2 * MOMENT_TEXT_MAX
 export const MOMENT_COUNTER_WARN = 180
+// The number is noise while far from the limit; its label still reads the count.
+export const COUNT_SHOW_AT = 0.8
 export const MODES = [{ id: 'post', label: 'Publicação' }, { id: 'moment', label: 'Momento' }]
 export const MOMENT_LOCKED = 'Desbloqueie com a passkey para publicar um momento.'
 export const MOMENT_STALE = 'A foto precisa ser preparada de novo. Toque em Publicar para enviar.'
@@ -1471,6 +1474,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // Locked: the draft is what was signed and waits for its retry. Frozen
   // also covers a page send in flight.
   const held = busy || frozen
+  const videoOff = held || hasVideo || items.some((item) => item.status === 'encoding')
   const replyDraftConflict = replyDraftPending && (held || hasMedia || (text !== '' && text !== reply.draft))
   useEffect(() => {
     if (!replyDraftPending) return
@@ -1498,6 +1502,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const handleDiscardMoment = moment.reset
   const postDraft = text !== '' || hasMedia
   const momentCount = momentLength(moment.text)
+  const momentStatus = composeStatus({ error: !!moment.error, locked: !moment.unlocked || node.online === false, media: !!(moment.photo.note || moment.note), draft: !!postDraft })
   const momentAnnouncement = useCounterAnnouncement(open && momentMode, momentCount, MOMENT_TEXT_MAX)
   const postAnnouncement = useCounterAnnouncement(open && !momentMode, len, MAX_TEXT)
   // While a text box has focus it stays in view with its counter (see
@@ -1662,17 +1667,17 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                 ref={momentView.tailRef}
                 onLayout={(e) => momentView.handleTailLayout(e, 'body')}
                 style={[styles.counter, styles.momentCounter, momentCount >= MOMENT_COUNTER_WARN && styles.counterWarn, momentCount > MOMENT_TEXT_MAX && styles.counterFull]}
+                accessible
                 accessibilityLabel={momentCount + ' de ' + MOMENT_TEXT_MAX + ' caracteres'}
                 accessibilityLiveRegion='none'
               >
-                {momentCount + '/' + MOMENT_TEXT_MAX}
+                {momentCount < MOMENT_TEXT_MAX * COUNT_SHOW_AT ? '' : momentCount + '/' + MOMENT_TEXT_MAX}
               </Text>
               <Soft>Fica 24 horas para quem segue você. Responder abre uma conversa privada.</Soft>
-              {!moment.unlocked ? <Soft>{MOMENT_LOCKED}</Soft> : null}
-              {node.online === false ? <Soft>Momentos precisam de internet</Soft> : null}
-              {moment.photo.note || moment.note ? <Soft>{moment.note || moment.photo.note}</Soft> : null}
-              {postDraft ? <Soft>{DRAFT_KEPT}</Soft> : null}
-              <ErrorText>{moment.error}</ErrorText>
+              {momentStatus === 'locked' ? <Soft>{!moment.unlocked ? MOMENT_LOCKED : 'Momentos precisam de internet'}</Soft> : null}
+              {momentStatus === 'media' ? <Soft>{moment.note || moment.photo.note}</Soft> : null}
+              {momentStatus === 'draft' ? <Soft>{DRAFT_KEPT}</Soft> : null}
+              {momentStatus === 'error' ? <ErrorText>{moment.error}</ErrorText> : null}
               {moment.held
                 ? (
                   <View style={styles.retryRow}>
@@ -1866,7 +1871,21 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
           <MentionSuggest rows={frozen ? [] : suggestions} loading={!frozen && mentionQuery !== '' && search.phase === 'loading'} onPick={pickMention} />
           <View ref={postView.tailRef} style={styles.counterRow} onLayout={postView.handleTailLayout}>
             <View style={styles.tools}>
-              {canVideo ? <Pill label='Vídeo' onPress={attachVideo} disabled={held || hasVideo || items.some((item) => item.status === 'encoding')} /> : null}
+              {canVideo
+                ? (
+                  <PressScale
+                    accessibilityRole='button'
+                    accessibilityLabel='Vídeo'
+                    accessibilityState={{ disabled: videoOff }}
+                    disabled={videoOff}
+                    onPress={attachVideo}
+                    hitSlop={6}
+                    style={({ pressed }) => [styles.tool, videoOff && styles.toolOff, pressed && styles.toolPressed]}
+                  >
+                    <Icon name='video' size={21} color={colors.soft} />
+                  </PressScale>
+                  )
+                : null}
               <PressScale
                 accessibilityRole='button'
                 accessibilityLabel={emojiOpen ? 'fechar emojis' : 'emojis'}
@@ -1912,10 +1931,12 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                   )
                 : null}
             </View>
-            <View style={styles.count}>
+            {/* The label sits on the row: below 80% the number is empty and
+                only the ring gives the row a size to focus. */}
+            <View style={styles.count} accessible accessibilityLabel={len + ' de ' + MAX_TEXT + ' caracteres'} accessibilityLiveRegion='none'>
               <Ring progress={ring.progress} tone={ring.tone} />
-              <Text accessibilityLabel={len + ' de ' + MAX_TEXT + ' caracteres'} accessibilityLiveRegion='none' style={[styles.counter, ring.tone === 'warn' && styles.counterWarn, ring.tone === 'danger' && styles.counterFull]}>
-                {ring.remaining === null ? len + '/' + MAX_TEXT : String(ring.remaining)}
+              <Text style={[styles.counter, ring.tone === 'warn' && styles.counterWarn, ring.tone === 'danger' && styles.counterFull]}>
+                {len < MAX_TEXT * COUNT_SHOW_AT ? '' : ring.remaining === null ? len + '/' + MAX_TEXT : String(ring.remaining)}
               </Text>
             </View>
           </View>
@@ -2055,10 +2076,11 @@ function Thumb ({ item, index, count, busy, onRemove, onRetry, onMoveBefore, onM
           accessibilityState={{ disabled: busy }}
           disabled={busy}
           onPress={onRemove}
-          hitSlop={6}
           style={styles.remove}
         >
-          <Icon name='x' size={14} color='#ffffff' />
+          <View style={styles.removeDot}>
+            <Icon name='x' size={14} color='#ffffff' />
+          </View>
         </Pressable>
       </View>
       {canMove
@@ -2138,22 +2160,25 @@ const makeStyles = (colors) => StyleSheet.create({
   thumbEmpty: { alignItems: 'center', justifyContent: 'center' },
   bar: { position: 'absolute', left: 6, right: 6, bottom: 6, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.6)', overflow: 'hidden' },
   barFill: { height: 4, backgroundColor: colors.accent },
+  // The touch target is full size; the dot stays small so it does not cover
+  // most of an 80 pt thumbnail.
   remove: {
     position: 'absolute',
-    top: 4,
-    right: 4,
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(0,0,0,0.6)'
+    top: 0,
+    right: 0,
+    width: layout.hit,
+    height: layout.hit,
+    alignItems: 'flex-end',
+    justifyContent: 'flex-start',
+    padding: 4
   },
+  removeDot: { width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.6)' },
   thumbError: { fontSize: 12, lineHeight: 15, color: colors.danger },
   momentBody: { gap: space.md, paddingHorizontal: space.lg, paddingTop: space.md, paddingBottom: space.lg, alignItems: 'flex-start' },
   momentPhoto: { width: 160, height: 200, borderRadius: 12, overflow: 'hidden', backgroundColor: colors.skeleton },
   momentInput: { ...type.compose, alignSelf: 'stretch', color: colors.ink, minHeight: MOMENT_MIN_HEIGHT, maxHeight: MOMENT_MAX_HEIGHT, borderWidth: 1, borderColor: colors.line, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, backgroundColor: colors.card },
-  momentCounter: { alignSelf: 'flex-end', marginTop: -4 },
+  // Keeps its line while empty: no jump at 80%, and still a place to focus.
+  momentCounter: { alignSelf: 'flex-end', marginTop: -4, minHeight: type.counter.lineHeight },
   tools: { flexDirection: 'row', alignItems: 'center', gap: 4, flex: 1 },
   linkAsk: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center', marginLeft: 60, paddingHorizontal: 8, borderRadius: 22 },
   linkAskText: { ...type.replyMark, color: colors.accent, fontWeight: '600' },

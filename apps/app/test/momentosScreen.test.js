@@ -53,7 +53,7 @@ test('the viewer: text through displayText, reply through canReply and openMessa
   t.absent(/\{item\.text\}/.test(src), 'never the raw text')
   t.ok(src.includes('canReply(node)'), 'reply bar gated by canReply')
   t.ok(src.includes('onMessage(author, { context: replyContext(item, author) })'), 'openMessage with the reply context')
-  t.ok(src.includes("<Pill label='Responder' icon='mensagem' onPress={reply} />"), 'one Responder pill with the mensagem icon')
+  t.ok(src.includes("<Pill label='Responder' icon='mensagem' onPress={() => { if (!draggedRef.current) reply() }} />"), 'one Responder pill with the mensagem icon')
   t.ok(src.includes("export const OWN_NOTE = 'O momento sai dos servidores em até 7 dias.'"), 'own note covers photos and videos')
   t.ok(src.includes("export const DELETE_TITLE = 'Apagar momento?'"), 'delete confirmation title')
   t.ok(src.includes("request('moment.delete', { to: target.ref })"), 'moment.delete')
@@ -462,10 +462,10 @@ test('visual 1, 4: the reply context names a moment', async (t) => {
   t.is(replyContext({ seq: 1, at: '2026-11-07T12:00:00.000Z', text: '' }, A).kind, 'moment')
 })
 
-test('visual 1, 5: white note and time', (t) => {
+test('visual 1, 5: white help and time', (t) => {
   const src = read('src/screens/Momentos.js')
   t.absent(src.includes("backgroundColor: 'rgba(0,0,0,0.55)'") || src.includes("backgroundColor: 'rgba(0,0,0,0.25)'"), 'no hard-edged band')
-  t.ok(src.includes("note: { flex: 1, minWidth: 160, color: 'rgba(255,255,255,0.8)', ...TEXT_SHADOW }") && src.includes("time: { ...type.postMeta, color: 'rgba(255,255,255,0.8)', ...TEXT_SHADOW }"), 'note and time in white at 0.8')
+  t.ok(/<HelpButton[^>]+color='rgba\(255,255,255,0.8\)'/.test(src) && src.includes("time: { ...type.postMeta, color: 'rgba(255,255,255,0.8)', ...TEXT_SHADOW }"), 'help and time in white at 0.8')
 })
 
 test('visual 1, 6 and 7: ring names are the first word, the plus ring has no ring', (t) => {
@@ -478,8 +478,56 @@ test('visual 1, 6 and 7: ring names are the first word, the plus ring has no rin
   t.ok(strip.includes('name={ringName(name)}') && strip.includes("label={'momentos de ' + name}"), 'first word shown, full name read')
   t.absent(code('src/ui/MomentosStrip.js').includes('adjustsFontSizeToFit'), 'no unbounded shrink')
   t.ok(strip.includes("strip: { flexDirection: 'row', gap: 8,"), 'gap 8 between rings')
-  t.ok(strip.includes("borderColor: plus ? 'transparent' :"), 'no ring colour on the plus ring')
+  t.ok(strip.includes("backgroundColor: plus ? 'transparent' : colors.outline"), 'no ring colour on the plus ring')
   t.ok(strip.includes("label={own.length === 0 ? 'novo momento' : 'seu momento'}"), 'plus ring labelled novo momento')
+})
+
+test('strip rings use sunset stripes for unseen moments and a theme gap around the avatar', (t) => {
+  const source = read('src/ui/MomentosStrip.js')
+  t.ok(source.includes("import { sunsetStops, type } from './theme'"), 'stripes share the sunset stops')
+  for (const colors of [{ bg: 'light-bg', outline: 'light-outline' }, { bg: 'dark-bg', outline: 'dark-outline' }]) {
+    const stops = [['dawn', 0], ['coral', 0.42], ['plum', 0.78], ['night', 1]]
+    const sampled = []
+    const interpolateStops = (given, n) => {
+      sampled.push(given)
+      return given.map(([color]) => color + '/' + n)
+    }
+    const h = hookHost(source, 'Ring', {
+      interpolateStops,
+      StyleSheet: { create: (styles) => styles, absoluteFillObject: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0 } },
+      useStyles: (makeStyles) => makeStyles(colors),
+      useTheme: () => ({ colors }),
+      useWindowDimensions: () => ({ fontScale: 2 }),
+      sunsetStops: stops,
+      type: {},
+      PressScale: 'PressScale',
+      View: 'View',
+      Text: 'Text',
+      Avatar: 'Avatar',
+      Icon: 'Icon'
+    })
+    t.teardown(h.unmount)
+    for (const unseen of [true, false]) {
+      for (const plus of [true, false]) {
+        const onPress = () => {}
+        const tree = h.render({ label: 'momentos de Cecília Ramos', name: 'Cecília', unseen, plus, onPress, publicKey: A })
+        const ring = tree.children[0]
+        t.is(ring.props.style[1].backgroundColor, plus ? 'transparent' : colors.outline, 'seen outline or no ring for the composer')
+        const stripes = treeNodes(ring).filter((n) => n.props.style?.[0]?.flex === 1)
+        t.alike(stripes.map((n) => n.props.style[1].backgroundColor), unseen && !plus ? ['dawn/6', 'coral/6', 'plum/6'] : [], 'sunset only on unseen rings, sampled at its stops, without the night blue')
+        t.alike(sampled, [stops.slice(0, 3)], 'the stops keep their positions')
+        const gap = treeNodes(ring).find((n) => n.props.style?.backgroundColor === colors.bg)
+        const avatar = treeNodes(gap).find((n) => n.type === 'Avatar')
+        t.ok(gap && avatar, 'avatar sits inside the theme gap')
+        t.is(gap?.props.style.width, avatar?.props.size + 4, 'two point gap on each side')
+        t.is(ring.props.style[0].width, gap?.props.style.width + 4, 'two point outer ring')
+        t.is(tree.type, 'PressScale')
+        t.is(tree.props.accessibilityLabel, 'momentos de Cecília Ramos')
+        t.is(tree.props.onPress, onPress)
+        t.is(tree.props.style({ pressed: false })[1].width, 72 * 1.3, 'large text keeps the growing slot')
+      }
+    }
+  }
 })
 
 test('visual 1, 8: deleting the only own moment closes the viewer', (t) => {
@@ -522,10 +570,11 @@ test('visual 2, 1: solid scrims behind the text, a real gradient past it, a text
   t.ok(src.includes("topScrim: { position: 'absolute', top: 0, left: 0, right: 0, bottom: -TOP_SCRIM.fade }"), 'top: solid to the header row bottom, fade past it')
   t.ok(src.includes("bottomScrim: { position: 'absolute', top: -BOTTOM_SCRIM.fade, left: 0, right: 0, bottom: 0 }"), 'bottom: fade above the content, solid behind it')
   t.ok(src.includes("const TEXT_SHADOW = { textShadowColor: 'rgba(0,0,0,0.6)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 4 }"), 'text shadow')
-  for (const style of ['name: {', 'time: {', 'text: {', 'note: {']) {
+  for (const style of ['name: {', 'time: {', 'text: {']) {
     const at = src.indexOf('  ' + style, src.indexOf('const makeStyles'))
     t.ok(src.slice(at, src.indexOf('\n', at)).includes('...TEXT_SHADOW'), style + ' shadowed')
   }
+  t.ok(/<HelpButton[^>]+paragraphs: \[OWN_NOTE\]/.test(src), 'the former note is read in the help sheet')
 })
 
 test('visual 2, 2: iOS composers inset for the keyboard, the Momento end scrolls into view', (t) => {
@@ -596,7 +645,7 @@ test('visual 3, 2: the caption scrolls inside 40% of the window, scrims never le
   t.ok(src.includes('style={[styles.caption, { maxHeight: captionMax }]}') && src.includes('caption: { flexGrow: 0 },'), 'capped, sized by its text below the cap')
   t.ok(src.includes('scrollEnabled={captionScrolls}') && src.includes('const captionScrolls = captionHeight > captionMax'), 'scrolls only when it overflows')
   t.ok(src.includes('<Text style={styles.text} selectable={false}>{text}</Text>\n                </Pressable>\n              </ScrollView>'), 'the caption text inside the scroll')
-  t.ok(src.includes('g.dy > 12 && g.dy > Math.abs(g.dx) * 1.5 && !(captionTouchRef.current && captionOffsetRef.current > 0)'), 'a drag down on a scrolled caption scrolls it back, never closes')
+  t.ok(src.includes('if (overlayRef.current || (captionTouchRef.current && captionOffsetRef.current > 0)) return false\n      const axis = momentSwipe(g)\n      if (axis === null) return false'), 'a drag on a scrolled caption stays with the caption')
   const scrimsMeet = loadFn('src/screens/Momentos.js', 'export function scrimsMeet (topEnd, bottomStart)', 'scrimsMeet', 'const TOP_SCRIM = { alpha: 0.55, fade: 32 }; const BOTTOM_SCRIM = { alpha: 0.6, fade: 48 }; const SCRIM_MIN_CLEAR = 96;')()
   t.absent(scrimsMeet(120, 500), 'far apart: two fades')
   t.ok(scrimsMeet(120, 199), 'closer than both fades: solid')
@@ -663,8 +712,8 @@ test('visual 4 (iOS XXXL): the caption cap leaves the header and the bar free', 
 
 test('visual 4 (Android): a drag down on a scrolling caption at its top closes', (t) => {
   const src = readFileSync(join(__dirname, '../src/screens/Momentos.js'), 'utf8')
-  t.ok(src.includes('captionStartRef.current = { y: e.nativeEvent.pageY, atTop: captionOffsetRef.current <= 0 }'), 'the touch remembers where it started and whether the caption was at its top')
-  t.ok(src.includes('if (start !== null && start.atTop && captionOffsetRef.current <= 0 && e.nativeEvent.pageY - start.y > CLOSE_DRAG) close()'), 'and closes past the same distance as the photo swipe')
+  t.ok(src.includes('captionStartRef.current = { x: e.nativeEvent.pageX, y: e.nativeEvent.pageY, atTop: captionOffsetRef.current <= 0 }'), 'the touch remembers where it started and whether the caption was at its top')
+  t.ok(src.includes("if (start !== null && start.atTop && captionOffsetRef.current <= 0 && e.nativeEvent.pageY - start.y > CLOSE_DRAG && momentSwipe({ dx: e.nativeEvent.pageX - start.x, dy: e.nativeEvent.pageY - start.y }) === 'down') close()"), 'and closes past the same distance as the photo swipe only when downward')
   t.ok(src.includes('onTouchStart={handleCaptionTouchStart}') && src.includes('onTouchEnd={handleCaptionTouchEnd}'), 'wired on the caption')
 })
 
@@ -977,7 +1026,7 @@ function preparedHandle (done = Promise.resolve({ ok: true })) {
   }
 }
 
-async function viewerHost ({ music = true, tracks = null, medias = null, policy = true, ready = true, reduce = false, photo = 'ok', media = null, author = A, hosted = true, online = true, unlocked = true, send, muted = false, covered = false, onStateChange, prepare } = {}) {
+async function viewerHost ({ music = true, tracks = null, medias = null, policy = true, ready = true, reduce = false, photo = 'ok', media = null, author = A, hosted = true, online = true, unlocked = true, send, muted = false, covered = false, onStateChange, prepare, seenRefs = [], caption = '' } = {}) {
   const moments = await import('../src/moments.js')
   const seen = await import('../src/momentSeen.js')
   const soundMute = await import('../src/soundMute.js')
@@ -999,18 +1048,18 @@ async function viewerHost ({ music = true, tracks = null, medias = null, policy 
       throw new Error('unexpected viewer request')
     }
   }
-  const item = (seq, key = A) => ({ seq, ref: key + ':' + seq, at: new Date().toISOString(), text: '', media: medias ? medias[seq - 1] : media, music: tracks ? tracks[seq - 1] : music ? { id: 'abc', start: 30 } : null })
+  const item = (seq, key = A) => ({ seq, ref: key + ':' + seq, at: new Date().toISOString(), text: caption, media: medias ? medias[seq - 1] : media, music: tracks ? tracks[seq - 1] : music ? { id: 'abc', start: 30 } : null })
   const items = (key) => Array.from({ length: tracks ? tracks.length : 2 }, (_, i) => item(i + 1, key)).reverse()
   const data = { phase: 'ready', authors: [{ author: B, items: items(B) }], own: items(A) }
-  const seenState = { loaded: true, seen: [], mark () {} }
-  const env = { node, data, reduce, photo, back: 0, policyCalls: 0, opened: [], messages: [], calls, steps: [], preloads }
+  const seenState = { loaded: true, seen: seenRefs, mark () {} }
+  const env = { node, data, reduce, photo, back: 0, policyCalls: 0, opened: [], messages: [], calls, steps: [], preloads, haptics: [], helpOpen: false }
   class Value {
     constructor (value) { this.value = value }
     setValue (value) { this.value = value }
     stopAnimation (fn) { fn(this.value) }
     interpolate () { return this.value }
   }
-  const elements = ['ActivityIndicator', 'Image', 'Pressable', 'ScrollView', 'Text', 'View', 'ActionsSheet', 'Avatar', 'Icon', 'Pill', 'Scrim', 'IconAction', 'MomentMusic', 'Soft', 'VideoPlayer']
+  const elements = ['ActivityIndicator', 'Image', 'Pressable', 'ScrollView', 'Text', 'View', 'ActionsSheet', 'Avatar', 'Icon', 'Pill', 'Scrim', 'IconAction', 'MomentMusic', 'Soft', 'VideoPlayer', 'HelpButton']
   const deps = {
     ...moments,
     ...seen,
@@ -1018,6 +1067,9 @@ async function viewerHost ({ music = true, tracks = null, medias = null, policy 
     ...(await import('../src/momentReaction.js')),
     ...timers,
     ...soundMute,
+    ...(await import('../src/momentSwipe.js')),
+    tap: (kind) => env.haptics.push(kind),
+    useHelpOpen: () => env.helpOpen,
     onStateChange,
     nextIndex: (...args) => { env.steps.push(args[2]); return moments.nextIndex(...args) },
     Date: class extends Date { static now () { return timers.now() } },
@@ -1055,7 +1107,7 @@ async function viewerHost ({ music = true, tracks = null, medias = null, policy 
       }
     },
     Easing: { linear: 'linear' },
-    PanResponder: { create: () => ({ panHandlers: {} }) },
+    PanResponder: { create: (handlers) => { env.pan = handlers; return { panHandlers: handlers } } },
     STACK_MS: 200,
     scrimColor: () => '#000000',
     relativeTime: () => '',
@@ -1394,6 +1446,188 @@ test('T4: rebuilding nextMusic on an unrelated render does not rerun reconciliat
 function reactionButtons (h) {
   return treeNodes(h.render()).filter((n) => n.props.accessibilityLabel?.startsWith('Reagir com '))
 }
+
+// As on device: the capture sees part of the drag, the grant resets dx and dy
+// to 0, and the move and release see only the rest.
+function swipeViewer (t, h, dx, dy = 0, vy = 0) {
+  const seen = { dx: Math.round(dx * 0.6), dy: Math.round(dy * 0.6), vy: 0 }
+  const rest = { dx: dx - seen.dx, dy: dy - seen.dy, vy }
+  t.ok(h.env.pan.onMoveShouldSetPanResponderCapture(null, seen), 'the viewer captures the swipe')
+  h.env.pan.onPanResponderGrant(null, { dx: 0, dy: 0, vy: 0 })
+  h.render()
+  h.env.pan.onPanResponderMove(null, rest)
+  h.env.pan.onPanResponderRelease(null, rest)
+  h.render()
+}
+
+const viewerVideo = (h) => treeNodes(h.render()).find((n) => n.type === 'VideoPlayer')
+
+test('horizontal swipes jump between people while taps keep stepping through their moments', async (t) => {
+  const h = await viewerHost({ media: { mime: 'video/mp4', ms: 8000 } })
+  t.teardown(h.unmount)
+  t.ok(viewerVideo(h).props.key.startsWith(A + ':1:'))
+  swipeViewer(t, h, -100)
+  t.ok(viewerVideo(h).props.key.startsWith(B + ':1:'), 'skips the remaining own moment')
+  t.alike(h.env.haptics, ['light'], 'one light tap per person change')
+  h.button('próximo momento').props.onPress({ nativeEvent: {} })
+  t.ok(viewerVideo(h).props.key.startsWith(B + ':1:'), 'the trailing swipe press never steps')
+  const event = { nativeEvent: { pageX: 300, pageY: 50 } }
+  h.button('próximo momento').props.onPressIn(event)
+  h.button('próximo momento').props.onPressOut()
+  h.button('próximo momento').props.onPress(event)
+  t.ok(viewerVideo(h).props.key.startsWith(B + ':2:'), 'a new tap advances only one moment')
+  t.alike(h.env.haptics, ['light'], 'ordinary taps do not vibrate for a jump')
+  swipeViewer(t, h, 100)
+  t.ok(viewerVideo(h).props.key.startsWith(A + ':1:'), 'previous person starts at the ring start, not its last item')
+  t.alike(h.env.haptics, ['light', 'light'])
+  const firstKey = viewerVideo(h).props.key
+  swipeViewer(t, h, 100)
+  t.ok(viewerVideo(h).props.key.startsWith(A + ':1:'))
+  t.not(viewerVideo(h).props.key, firstKey, 'swiping back on the first person restarts playback')
+  t.alike(h.env.haptics, ['light', 'light'], 'restart does not change person')
+  const event2 = { nativeEvent: { pageX: 300, pageY: 50 } }
+  h.button('próximo momento').props.onPressIn(event2)
+  h.button('próximo momento').props.onPressOut()
+  h.button('próximo momento').props.onPress(event2)
+  t.ok(viewerVideo(h).props.key.startsWith(A + ':2:'), 'a tap moves on within the first person')
+  const tappedKey = viewerVideo(h).props.key
+  swipeViewer(t, h, 100)
+  t.ok(viewerVideo(h).props.key.startsWith(A + ':2:'), 'swiping back on the first person replays the moment on screen, not its ring start')
+  t.not(viewerVideo(h).props.key, tappedKey, 'and restarts it')
+  t.alike(h.env.haptics, ['light', 'light'])
+})
+
+test('a drag keeps the axis it was claimed on', async (t) => {
+  const h = await viewerHost()
+  t.teardown(h.unmount)
+  const start = { dx: 5, dy: 30, vy: 0 }
+  const drift = { dx: 70, dy: 90, vy: 1 }
+  t.ok(h.env.pan.onMoveShouldSetPanResponderCapture(null, start))
+  h.env.pan.onPanResponderGrant(null, { ...start, dx: 0, dy: 0 })
+  h.env.pan.onPanResponderMove(null, drift)
+  h.env.pan.onPanResponderRelease(null, drift)
+  t.is(h.env.back, 1, 'a downward drag that drifts sideways still closes on a flick')
+})
+
+test('a press that ends a drag is not a press', async (t) => {
+  const h = await viewerHost({ author: B, send: async () => ({}) })
+  t.teardown(h.unmount)
+  const tap = { stopPropagation () {} }
+  t.ok(h.env.pan.onMoveShouldSetPanResponderCapture(null, { dx: 50, dy: 0 }))
+  h.env.pan.onPanResponderGrant(null, { dx: 0, dy: 0, vy: 0 })
+  h.env.pan.onPanResponderRelease(null, { dx: -40, dy: 0, vy: 0 })
+  h.render()
+  // On the web the click still reaches the button where the mouse swipe began and ended.
+  h.button('Responder').props.onPress(tap)
+  await reactionButtons(h)[0].props.onPress(tap)
+  t.is(h.env.messages.length, 0, 'no reply after a drag')
+  t.alike(h.calls, [], 'no reaction after a drag')
+  h.timers.fire(0)
+  h.button('Responder').props.onPress(tap)
+  t.is(h.env.messages.length, 1, 'the next press replies, a key press too, with no touch before it')
+})
+
+test('a sheet over the viewer keeps its touches', async (t) => {
+  const h = await viewerHost()
+  t.teardown(h.unmount)
+  h.button('mais ações').props.onPress()
+  h.render()
+  t.absent(h.env.pan.onMoveShouldSetPanResponderCapture(null, { dx: -100, dy: 0 }), 'no swipe while the menu is open')
+  treeNodes(h.render()).find((n) => n.type === 'ActionsSheet').props.onClose()
+  h.timers.fire(1000)
+  h.render()
+  t.ok(h.env.pan.onMoveShouldSetPanResponderCapture(null, { dx: -100, dy: 0 }), 'swipes come back once it closes')
+})
+
+test('swipes use first unseen starts and close after the last person even with moments left', async (t) => {
+  const h = await viewerHost({ media: { mime: 'video/mp4', ms: 8000 }, seenRefs: [B + ':1'] })
+  t.teardown(h.unmount)
+  swipeViewer(t, h, -100)
+  t.ok(viewerVideo(h).props.key.startsWith(B + ':2:'), 'next ring starts at its first unseen moment')
+  const event = { nativeEvent: { pageX: 30, pageY: 50 } }
+  h.button('momento anterior').props.onPressIn(event)
+  h.button('momento anterior').props.onPressOut()
+  h.button('momento anterior').props.onPress(event)
+  t.ok(viewerVideo(h).props.key.startsWith(B + ':1:'), 'tap goes back within the last person')
+  swipeViewer(t, h, -100)
+  t.is(h.env.back, 1, 'swipe closes without playing the remaining moment')
+  t.alike(h.env.haptics, ['light'], 'close does not change person')
+})
+
+test('swiping holds playback, termination resumes it and only downward swipes dismiss', async (t) => {
+  const h = await viewerHost()
+  t.teardown(h.unmount)
+  h.music().props.onStart()
+  h.render()
+  const key = h.music().props.key
+  h.env.pan.onPanResponderGrant()
+  t.ok(h.music().props.paused, 'drag holds the current snippet')
+  h.env.pan.onPanResponderTerminate()
+  t.absent(h.music().props.paused, 'termination releases the hold')
+  t.is(h.music().props.key, key, 'termination does not navigate')
+  swipeViewer(t, h, -200, 110, 2)
+  t.is(h.env.back, 0, 'a horizontal swipe with vertical drift and velocity never dismisses')
+  t.alike(h.env.haptics, ['light'])
+  swipeViewer(t, h, 0, 40)
+  t.is(h.env.back, 0, 'a short downward drag settles back')
+  swipeViewer(t, h, 0, 40, 1)
+  t.is(h.env.back, 1, 'a downward flick still dismisses')
+})
+
+test('caption scrolling keeps gestures and a horizontal caption swipe cannot trigger its dismiss fallback', async (t) => {
+  const h = await viewerHost({ caption: 'Legenda longa. '.repeat(30), music: false })
+  t.teardown(h.unmount)
+  const caption = () => treeNodes(h.render()).find((n) => n.type === 'ScrollView')
+  const touch = (pageX, pageY) => ({ nativeEvent: { pageX, pageY } })
+  caption().props.onScroll({ nativeEvent: { contentOffset: { y: 50 } } })
+  caption().props.onTouchStart(touch(0, 0))
+  for (const [dx, dy] of [[-100, 0], [100, 0], [0, 150]]) {
+    t.absent(h.env.pan.onMoveShouldSetPanResponderCapture(null, { dx, dy }), 'scrolled caption owns the gesture')
+  }
+  caption().props.onTouchEnd(touch(0, 150))
+  t.is(h.env.back, 0, 'scrolling back does not dismiss')
+  caption().props.onScroll({ nativeEvent: { contentOffset: { y: 0 } } })
+  caption().props.onTouchStart(touch(0, 0))
+  caption().props.onTouchMove(touch(-200, 110))
+  caption().props.onTouchCancel()
+  h.timers.advance(120)
+  t.is(h.env.back, 0, 'a horizontal cancel never queues a downward dismissal')
+  caption().props.onTouchStart(touch(0, 0))
+  caption().props.onTouchEnd(touch(-200, 110))
+  t.is(h.env.back, 0, 'a horizontal touch end never dismisses')
+  caption().props.onTouchStart(touch(0, 0))
+  caption().props.onTouchMove(touch(0, 5))
+  caption().props.onTouchCancel()
+  swipeViewer(t, h, -200, 110)
+  h.timers.advance(120)
+  t.is(h.env.back, 0, 'claiming a pan cancels an early downward fallback')
+  t.alike(h.env.haptics, ['light'], 'caption swipe changes person once')
+  caption().props.onTouchStart(touch(0, 0))
+  caption().props.onTouchEnd(touch(0, 150))
+  t.is(h.env.back, 1, 'a downward pull at the caption top still dismisses')
+})
+
+test('own note stays verbatim in the delete sheet and one viewer help pauses playback', async (t) => {
+  const src = read('src/screens/Momentos.js')
+  t.ok(src.includes('<Soft>{OWN_NOTE}</Soft>'), 'delete sheet still shows the note')
+  const h = await viewerHost()
+  t.teardown(h.unmount)
+  const helps = treeNodes(h.render()).filter((n) => n.type === 'HelpButton')
+  t.is(helps.length, 1, 'one help entry in the own viewer')
+  t.alike(helps[0].props.doc.paragraphs, ['O momento sai dos servidores em até 7 dias.'])
+  t.absent(treeNodes(h.render()).some((n) => n.type === 'Soft' && n.children.includes(helps[0].props.doc.paragraphs[0])), 'viewer copy is inside help')
+  h.music().props.onStart()
+  h.render()
+  const key = h.music().props.key
+  h.env.helpOpen = true
+  t.ok(h.music().props.paused, 'help pauses audio')
+  t.absent(h.animation(), 'help pauses the progress clock')
+  h.timers.advance(20000)
+  h.env.helpOpen = false
+  t.absent(h.music().props.paused, 'closing help resumes audio')
+  t.is(h.music().props.key, key, 'the same moment remains open')
+  t.ok(h.animation(), 'the progress clock resumes')
+})
 
 function viewerNote (h, text) {
   return treeNodes(h.render()).find((n) => n.type === 'Text' && n.children.includes(text))

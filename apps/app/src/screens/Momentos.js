@@ -36,6 +36,7 @@ import { useNode } from '../node'
 import { useNames } from '../names'
 import { holdMsOf, momentMusicOf, canReply, expiresIn, firstUnseenIndex, nextIndex, nextMomentOf, progressOf, replyContext, ringOrder, segmentMs, VIDEO_END_GRACE_MS } from '../moments'
 import { canReact, reactionParams, unsure, REACTION_SENT, REACTION_UNSURE } from '../momentReaction'
+import { momentSwipe, swipeRelease, swipeTotal } from '../momentSwipe'
 import { QUICK, reactionName } from '../reactions'
 import { audiusPolicy, audiusReady } from '../account'
 import { musicOriginOf } from '../music'
@@ -52,6 +53,8 @@ import { ConfirmStack, ErrorText, Soft, UNCERTAIN, errorText, useNow } from '../
 import { ActionsSheet } from '../ui/ActionsSheet'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
+import { HelpButton, useHelpOpen } from '../ui/Help'
+import { tap } from '../ui/haptics'
 import { Pill } from '../ui/Pill'
 import { Scrim, scrimColor } from '../ui/Scrim'
 import { Sheet } from '../ui/Sheet'
@@ -577,6 +580,7 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
   const seenState = useMomentSeen()
   const reduce = useMotionReduced()
   const autoOn = autoAdvanceOn(reduce)
+  const helpOpen = useHelpOpen()
   const [soundOff, setSoundOff] = useState(soundMuted())
   useEffect(() => {
     const sync = () => setSoundOff(soundMuted())
@@ -742,6 +746,8 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
   // Set while a drag runs (cleared on the next press): the halves ignore the
   // press a drag ends with, so a swipe never also steps.
   const draggedRef = useRef(false)
+  const swipeAxis = useRef(null)
+  const swipeFrom = useRef({ dx: 0, dy: 0 })
   // A press that moved more than TAP_SLOP (a quick mouse drag on the web,
   // which no pan claimed) is not a tap: it never steps.
   const pressStartRef = useRef(null)
@@ -832,6 +838,17 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
     setPos({ ring: pos.ring, item: 0 })
     restart.current()
   }, [rings, pos, close])
+  const jump = useCallback((dir) => {
+    setCaptionExpanded(false)
+    if (rings === null || pos.ring < 0) return
+    // No one before the first person: replay the moment on screen, wherever
+    // the taps left it.
+    if (dir === 'prev' && pos.ring === 0) return restart.current()
+    const r = dir === 'next' ? pos.ring + 1 : pos.ring - 1
+    if (r >= rings.length) return close()
+    setPos({ ring: r, item: rings[r].start })
+    tap('light')
+  }, [rings, pos, close])
   const video = item !== null && item.media?.mime === 'video/mp4'
   const videoControl = useRef(null)
   const playback = useMomentPlayback({
@@ -839,7 +856,7 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
     ms: video ? segmentMs(item, photo.ms) : holdMsOf(item, musicStarted),
     video: video && photo.phase === 'ok',
     loaded: photo.phase !== 'loading',
-    active: isTop && node.visible !== false && item !== null && !held && !dragging && !menuOpen && deleting === null && !musicClosed && !linkHeld && !reacting && !musicWaiting && !captionExpanded,
+    active: isTop && node.visible !== false && item !== null && !held && !dragging && !menuOpen && deleting === null && !helpOpen && !musicClosed && !linkHeld && !reacting && !musicWaiting && !captionExpanded,
     autoOn,
     step,
     control: videoControl
@@ -856,7 +873,7 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
     setMusicState(null)
     playback.restart()
   }
-  const paused = !isTop || node.visible === false || item === null || photo.phase === 'loading' || held || dragging || menuOpen || deleting !== null || musicClosed || linkHeld || reacting || captionExpanded
+  const paused = !isTop || node.visible === false || item === null || photo.phase === 'loading' || held || dragging || menuOpen || deleting !== null || musicClosed || helpOpen || linkHeld || reacting || captionExpanded
   const musicWaitRemaining = useRef(MUSIC_START_WAIT_MS)
   useEffect(() => { musicWaitRemaining.current = MUSIC_START_WAIT_MS }, [itemKey, playback.restartTick, node.epoch])
   useEffect(() => {
@@ -890,40 +907,67 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
   const captionStartRef = useRef(null)
   const captionPullTimer = useRef(null)
   useEffect(() => () => clearTimeout(captionPullTimer.current), [])
+  // A sheet over the viewer (help, menu, delete) keeps its own touches.
+  const overlayRef = useRef(false)
+  overlayRef.current = helpOpen || menuOpen || deleting !== null
+  // On the web a click still reaches a button where a mouse swipe began and
+  // ended, right after the release and before any timer: the flag holds until
+  // then, so the viewer's buttons skip that click, and clears for the next
+  // press, a key press included.
+  const settleDrag = () => setTimeout(() => { draggedRef.current = false }, 0)
   const pan = useMemo(() => PanResponder.create({
-    onMoveShouldSetPanResponderCapture: (_e, g) => g.dy > 12 && g.dy > Math.abs(g.dx) * 1.5 && !(captionTouchRef.current && captionOffsetRef.current > 0),
+    // The axis is read here: the grant gets dx and dy reset to 0.
+    onMoveShouldSetPanResponderCapture: (_e, g) => {
+      if (overlayRef.current || (captionTouchRef.current && captionOffsetRef.current > 0)) return false
+      const axis = momentSwipe(g)
+      if (axis === null) return false
+      swipeAxis.current = axis
+      swipeFrom.current = { dx: g.dx, dy: g.dy }
+      return true
+    },
     onPanResponderGrant: () => {
       draggedRef.current = true
+      captionStartRef.current = null
+      clearTimeout(captionPullTimer.current)
       setDragging(true)
     },
-    onPanResponderMove: (_e, g) => drag.setValue(Math.max(0, g.dy)),
+    onPanResponderMove: (_e, g) => drag.setValue(swipeAxis.current === 'down' ? Math.max(0, g.dy) : 0),
     onPanResponderRelease: (_e, g) => {
-      if (g.dy > CLOSE_DRAG || g.vy > 0.8) {
+      settleDrag()
+      const action = swipeRelease(swipeAxis.current, swipeTotal(swipeFrom.current, g), CLOSE_DRAG)
+      swipeAxis.current = null
+      if (action === 'close') {
         close()
         return
       }
       drag.setValue(0)
       setDragging(false)
+      if (action === 'next' || action === 'prev') jump(action)
     },
     onPanResponderTerminate: () => {
+      settleDrag()
+      swipeAxis.current = null
       drag.setValue(0)
       setDragging(false)
     }
-  }), [drag, close])
+  }), [drag, close, jump])
 
   const handleCaptionTouchStart = (e) => {
     captionTouchRef.current = true
-    captionStartRef.current = { y: e.nativeEvent.pageY, atTop: captionOffsetRef.current <= 0 }
+    captionStartRef.current = { x: e.nativeEvent.pageX, y: e.nativeEvent.pageY, atTop: captionOffsetRef.current <= 0 }
   }
   const handleCaptionTouchEnd = (e) => {
     captionTouchRef.current = false
     const start = captionStartRef.current
     captionStartRef.current = null
-    if (start !== null && start.atTop && captionOffsetRef.current <= 0 && e.nativeEvent.pageY - start.y > CLOSE_DRAG) close()
+    if (start !== null && start.atTop && captionOffsetRef.current <= 0 && e.nativeEvent.pageY - start.y > CLOSE_DRAG && momentSwipe({ dx: e.nativeEvent.pageX - start.x, dy: e.nativeEvent.pageY - start.y }) === 'down') close()
   }
   const handleCaptionTouchMove = (e) => {
     const start = captionStartRef.current
-    if (start !== null) start.lastY = e.nativeEvent.pageY
+    if (start !== null) {
+      start.lastX = e.nativeEvent.pageX
+      start.lastY = e.nativeEvent.pageY
+    }
   }
   // Android: once the caption's native ScrollView claims the vertical drag,
   // JS gets a cancel instead of the end, after only the first few pixels of
@@ -935,6 +979,7 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
     const start = captionStartRef.current
     captionStartRef.current = null
     if (start === null || !start.atTop || !Number.isFinite(start.lastY) || start.lastY - start.y <= CAPTION_PULL) return
+    if (start.lastY - start.y <= Math.abs(start.lastX - start.x) * 1.5) return
     clearTimeout(captionPullTimer.current)
     captionPullTimer.current = setTimeout(() => { if (captionOffsetRef.current <= 0) close() }, CAPTION_PULL_SETTLE_MS)
   }
@@ -1219,8 +1264,8 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
           {mine
             ? (
               <View style={styles.bar} onLayout={measureBar}>
-                <Soft style={styles.note}>{OWN_NOTE}</Soft>
-                {typeof onCreate === 'function' ? <Pill label='Novo momento' icon='plus' onPress={onCreate} /> : null}
+                <HelpButton doc={{ title: 'Sobre seus momentos', paragraphs: [OWN_NOTE] }} color='rgba(255,255,255,0.8)' style={{ margin: 0 }} />
+                {typeof onCreate === 'function' ? <Pill label='Novo momento' icon='plus' onPress={() => { if (!draggedRef.current) onCreate() }} /> : null}
               </View>
               )
             : reply !== null
@@ -1240,7 +1285,7 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
                                   accessibilityLabel={'Reagir com ' + reactionName(emoji)}
                                   accessibilityState={{ disabled: reacting }}
                                   disabled={reacting}
-                                  onPress={(e) => { e.stopPropagation(); return react(emoji) }}
+                                  onPress={(e) => { e.stopPropagation(); if (!draggedRef.current) return react(emoji) }}
                                   style={({ pressed }) => [styles.reactionHit, pressed && styles.pressed]}
                                 >
                                   <Text style={styles.reactionEmoji}>{emoji}</Text>
@@ -1254,7 +1299,7 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
                             <Pressable
                               accessibilityRole='button'
                               accessibilityLabel='Ver conversa'
-                              onPress={(e) => { e.stopPropagation(); onMessage(author) }}
+                              onPress={(e) => { e.stopPropagation(); if (!draggedRef.current) onMessage(author) }}
                               style={({ pressed }) => [styles.reactionHit, pressed && styles.pressed]}
                             >
                               <Text style={styles.text}>Ver conversa</Text>
@@ -1264,7 +1309,7 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
                       </View>
                       )
                     : null}
-                  <Pill label='Responder' icon='mensagem' onPress={reply} />
+                  <Pill label='Responder' icon='mensagem' onPress={() => { if (!draggedRef.current) reply() }} />
                 </View>
                 )
               : null}
@@ -1309,6 +1354,5 @@ const makeStyles = (colors) => StyleSheet.create({
   reactionHit: { minWidth: layout.hit, minHeight: layout.hit, alignItems: 'center', justifyContent: 'center' },
   reactionEmoji: { fontSize: 24, color: '#ffffff' },
   reactionNote: { ...type.postMeta, color: '#ffffff', ...TEXT_SHADOW },
-  note: { flex: 1, minWidth: 160, color: 'rgba(255,255,255,0.8)', ...TEXT_SHADOW },
   sheetBody: { gap: 12, paddingHorizontal: 16, paddingBottom: 16 }
 })
