@@ -5,6 +5,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ## [Não lançado]
 
+- A Rua no visual novo (PR `feat/restyle-feed`): a linha de publicação com ícones de 20 pt, preenchimento de 16 pt no topo e seguir em pílula verde clara, e as rodinhas de momentos de 64 pt, sem fio embaixo da faixa. Só o visual: sem mudança de protocolo, RPC, Termos nem dependência. Conferência em `docs/verification.md` seção 231.
 - Conversas no visual novo (PR `feat/restyle-chat-surfaces`): linhas de Conversas e Mensagens com título de 16 pt em entrelinha de 24, chips sem fio embaixo, campo de escrever em tom de campo desligado e cantos de 24 pt nos balões (4 pt entre balões do mesmo grupo). Só o visual: sem mudança de protocolo, RPC, Termos nem dependência. Conferência em `docs/verification.md` seção 230.
 - Linhas de pessoa novas (PR `feat/restyle-people-rows`): avatar de 48 pt, sem fio entre linhas e Seguindo em pílula tonal, com alvos de 44 pt. Só o visual: sem mudança de protocolo, RPC, Termos nem dependência. Conferência em `docs/verification.md` seção 229.
 - Barra do topo nova (PR `feat/restyle-top-bar`): 64 pt, sem fio embaixo, voltar num círculo de 44 pt e ações numa cápsula, com ícones de 22 pt. Só o visual: sem mudança de protocolo, RPC, Termos nem dependência. Conferência em `docs/verification.md` seção 228.

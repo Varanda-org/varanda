@@ -1315,8 +1315,8 @@ const makeStyles = (colors) => StyleSheet.create({
   parent: { opacity: 0.72 },
   focal: { position: 'relative' },
   accentBar: { position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, backgroundColor: colors.accent },
-  // Avatar centre x is 36 (paddingHorizontal 16 + 40 / 2); starts 4 below the parent avatar (12 + 40).
-  connector: { position: 'absolute', left: 35, top: 56, width: 2, backgroundColor: colors.line },
+  // Avatar centre x is 36 (paddingHorizontal 16 + 40 / 2); starts 4 below the parent avatar (16 + 40).
+  connector: { position: 'absolute', left: 35, top: 60, width: 2, backgroundColor: colors.line },
   repliesHead: { paddingHorizontal: 16, paddingVertical: 12, gap: 4, borderBottomWidth: 1, borderBottomColor: colors.line },
   repliesTitle: { ...type.section, color: colors.soft }
 })
