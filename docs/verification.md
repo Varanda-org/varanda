@@ -10898,7 +10898,7 @@ Esta seção confere as telas de antes do app (Introdução, link de convite, li
 Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA, cada um em claro e escuro, com texto grande 1,3 e em largura estreita.
 
 - [ ] Introdução: "Pular" no canto de cima à direita (tipo 15/600), os três cartões, o círculo "Voltar" de 44 pt com fundo de cartão e borda, "Começar" no último, e a linha do topo com 64 pt de altura. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
-- [ ] Todos os desenhos do convite (só os links): "Como funciona" e "Depois" no tipo 15/600. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Todos os desenhos do convite (só os links): "Como funciona" e "Agora não" no tipo 15/600. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
 - [ ] Link de uma publicação e o link da folha dela: mesmo tipo 15/600, sem mudar o botão "Ver mais". Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
 - [ ] Termos antes de entrar: as linhas abrem no lugar e "Aceitar" funciona; o mesmo em Ajustes > Termos. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
 - [ ] Tela de conta excluída, nos dois estados: com a exclusão pendente e com erro embaixo do botão vermelho de 52 pt. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
