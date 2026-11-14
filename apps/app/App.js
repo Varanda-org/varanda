@@ -138,7 +138,7 @@ import { TabBarShown } from './src/ui/tabBarShown'
 import { ScreenCovered, ScreenVisible } from './src/ui/screenVisible'
 import { holdAllEmbeds } from './src/embedLive'
 import { TopBar } from './src/ui/TopBar'
-import { TopActions } from './src/ui/TopActions'
+import { ActionCapsule, TopActions } from './src/ui/TopActions'
 import { StackLayer, stackBusy, useReduceMotion, useStackMotion } from './src/ui/StackLayer'
 import { ChromeMotion } from './src/ui/chromeMotion'
 import { screenReaderOn } from './src/ui/screenReader'
@@ -3169,7 +3169,7 @@ function Member () {
   // Onboarding steps draw their own title (src/ui/Stepper.js, src/ui/Welcome.js); the bar keeps only the help.
   const stepBar = (
     <View style={[styles.helpBar, { paddingTop: insets.top, minHeight: layout.topBar + insets.top }]}>
-      {HELP[step] ? <HelpButton key={step} doc={HELP[step]} /> : null}
+      {HELP[step] ? <ActionCapsule><HelpButton key={step} doc={HELP[step]} style={styles.helpHit} /></ActionCapsule> : null}
     </View>
   )
   if (setupStep) {
@@ -3924,9 +3924,11 @@ const makeStyles = (colors) => StyleSheet.create({
   shell: { flex: 1, width: '100%', maxWidth: layout.column, alignSelf: 'center', backgroundColor: colors.bg },
   shellWide: { borderLeftWidth: 1, borderRightWidth: 1, borderColor: colors.line },
   statusShield: { position: 'absolute', top: 0, left: 0, right: 0, backgroundColor: colors.bg },
-  helpBar: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'flex-end', paddingRight: space.sm, backgroundColor: colors.bg },
-  link: { alignItems: 'center', paddingTop: 14, borderTopWidth: 1, borderTopColor: colors.line, backgroundColor: colors.bg },
-  linkText: { fontSize: 15, fontWeight: '600', color: colors.accent },
+  helpBar: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', paddingRight: space.lg, backgroundColor: colors.bg },
+  // Replaces HelpButton's negative margin, which would shrink the capsule.
+  helpHit: { minWidth: layout.hit, minHeight: layout.hit, alignItems: 'center', justifyContent: 'center' },
+  link: { alignItems: 'center', justifyContent: 'center', minHeight: layout.hit, paddingTop: 14, backgroundColor: colors.bg },
+  linkText: { ...type.pill, color: colors.accent },
   toast: {
     position: 'absolute',
     alignSelf: 'center',

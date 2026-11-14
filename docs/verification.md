@@ -10917,3 +10917,40 @@ node apps/app/test/accountDeletion.test.js
 ```
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 239. Passos de entrada no visual novo (PR feat/restyle-account-setup)
+
+Esta seção confere os passos de configuração antes do app e a tela Conectar avulsa nos tokens do novo visual: o (i) na cápsula da barra do topo, o rodapé Conexão, os estados excepcionais do Entrar sem cartão e o campo e as células do telefone. Só o visual: sem mudança de protocolo, RPC nem do fluxo de entrada.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA, cada um em claro e escuro, com texto grande 1,3.
+
+- [ ] A cápsula do (i) em cada passo da configuração (Criar sua conta, Liberar sua conta, Como você quer aparecer, e na web as boas-vindas e @nome): mesma cápsula de cartão elevado das ações da barra do topo, alvo de 44 pt, a 16 pt da borda; a folha de ajuda abre e fecha. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Rodapé "Conexão" no nativo, no fim da configuração: sem linha fina em cima, no tipo 15/600, e abre Ajustes. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Tela Conectar avulsa, na falha de conexão e na configuração manual: título de 28 pt; Ajustes > Conexão segue com o título de antes. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Entrar, criar conta, recuperar, vincular aparelho, certificado e o campo do código manual (tipo de código 14, raio médio). Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Estados excepcionais na configuração (erro de estado, servidor por IP, navegador bloqueado, sem PRF, recuperação): sem cartão e com os botões de ação em largura total de 52 pt; as pílulas de compartilhar o convite, quando aparecem, seguem como antes. Os mesmos em Ajustes: cartão e botões de 40 pt, como antes. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Telefone, número e as seis células do código, na configuração e em "Trocar o celular": raio médio, dígitos 20/600. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Passos que não mudam: Idade, aviso do Telefone, erro e ocupado do passo, carregando e Perfil, iguais a antes. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Todo fluxo termina como antes: entrar, criar conta, recuperar, vincular aparelho, certificado e telefone. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+
+Não dá para conferir com o build de debug: entrar com passkey numa instalação de produção exige o APK de preview do EAS, e no iOS depende do domínio associado da conta Apple Developer. Isso fica pendente, não verificado.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho.
+
+```sh
+node apps/app/test/uiKit.test.js
+node apps/app/test/themeUsage.test.js
+node apps/app/test/connectText.test.js
+node apps/app/test/help.test.js
+node apps/app/test/shareShell.test.js
+node apps/app/test/splashGate.test.js
+node apps/app/test/passkeyTrouble.test.js
+node apps/app/test/linkReturn.test.js
+node apps/app/test/passkeysScreen.test.js
+node apps/app/test/phoneEntry.test.js
+node apps/app/test/phoneExplainer.test.js
+node apps/app/test/age.test.js
+node apps/app/test/wordCheck.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
