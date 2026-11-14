@@ -14,6 +14,7 @@ test('profile header wraps counts, uses token spacing and adapts its avatar', (t
   t.ok(src.includes('columnGap: space.lg, rowGap: space.sm, marginTop: space.sm'))
   t.ok(src.includes('bio: { ...type.postText, color: colors.ink, marginTop: space.sm }'))
   t.ok(src.includes("data: { width: '100%', maxWidth: layout.column, alignSelf: 'center'"))
+  t.ok(src.includes('name: { ...type.barTitle, fontFamily: fonts.title, color: colors.ink }'))
   t.ok(src.includes('size={avatarSize}'))
   t.ok(src.includes('marginTop: -avatarSize / 2'))
   const size = src.match(/const avatarSize = (.+)/)

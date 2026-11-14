@@ -6,6 +6,8 @@ O visual que o app vai ganhar, definido primeiro na página (varanda.app) e depo
 
 A página agora mostra quatro capturas reais do app (veja [screens.md](screens.md)), não uma prévia em HTML; este arquivo documenta o desenho.
 
+O espaçamento, a escala de texto e as formas dos componentes agora seguem um kit de interface social usado como referência: só números e ideias de layout, sem nenhum arquivo, ícone, imagem ou tela copiado dele no repositório. As cores, o pôr do sol e as listras continuam sendo do Varanda. Os papéis do kit correspondem assim: marca é o verde (`accent`), marca a 10% é o verde claro (`accentSoft`), superfície fraca é o campo desligado (`inputOff`) e superfície elevada é o cartão com fio (`card` com a linha).
+
 **A referência visual era a própria página:** as classes `.app`, `.post`, `.avatar`, `.app__abas`, `.app__fab`, `.folha` e `.perfil` em [public/styles.css](../public/styles.css), com o HTML em [public/index.html](../public/index.html). Lá, 1 pt = `100cqw / 402` (a tela tem 402 pt de largura, como o iPhone 17 Pro).
 
 ## Cores
@@ -62,15 +64,17 @@ Fonte do sistema (SF no iOS, Roboto no Android, `system-ui` na web). Títulos na
 
 | Peça | Tamanho | Peso | Entrelinha |
 |---|---|---|---|
-| título da barra ("A Rua") | 21 | 800 | 1,2 |
+| título da barra ("A Rua") | 24 | 600 | 1,33 |
 | título das boas-vindas (`heroTitle`) | 28 | 800 | 34 |
-| nome no perfil | 22 | 800 | 1,2 |
-| nome na publicação | 15 | 700 | 1,35 |
+| nome no perfil | 24 | 600 | 1,33 |
+| nome na publicação | 15 | 600 | 1,35 |
+| nome em linha de lista | 16 | 600 | 1,5 |
+| título de conversa | 20 | 600 | 1,4 |
 | @nome · tempo | 15 | 400 | 1,35 |
 | texto da publicação | 15,5 | 400 | 1,38 |
 | "respondendo a …" | 13 | 400 (nome 600) | 1,35 |
 | texto em Publicar | 18 | 400 | 1,35 |
-| pílulas (Publicar, Editar perfil) | 15 | 700 | 1 |
+| pílulas (Publicar, Editar perfil) | 15 | 600 | 1 |
 | rótulo de aba | 10 | 600 | 1 |
 | contador | 13 | 600 | 1 |
 | cabeçalho de seção ("PUBLICAÇÕES") | 13, caixa alta, +0,04 em | 700 | 1 |

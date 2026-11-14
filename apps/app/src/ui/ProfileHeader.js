@@ -178,7 +178,7 @@ const makeStyles = (colors) => StyleSheet.create({
   },
   corner: { flexShrink: 1, paddingBottom: space.xs },
   data: { width: '100%', maxWidth: layout.column, alignSelf: 'center', paddingTop: space.md, paddingHorizontal: space.lg, paddingBottom: space.md, gap: space.xs },
-  name: { ...type.profileName, fontFamily: fonts.title, color: colors.ink },
+  name: { ...type.barTitle, fontFamily: fonts.title, color: colors.ink },
   keyText: { ...type.postMeta, color: colors.soft },
   bio: { ...type.postText, color: colors.ink, marginTop: space.sm },
   countsRow: { flexDirection: 'row', flexWrap: 'wrap', columnGap: space.lg, rowGap: space.sm, marginTop: space.sm },

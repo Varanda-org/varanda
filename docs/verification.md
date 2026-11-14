@@ -10540,3 +10540,31 @@ node apps/app/test/platformGate.test.js
 ```
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 227. Escala de texto nova: títulos em 24 pt e negrito em 600 (PR feat/restyle-type-scale)
+
+Esta seção confere a escala de texto nova dos tokens do tema. Os títulos da barra e o nome no perfil passam a 24 pt com entrelinha de 32 e peso 600 (antes 800), o nome da publicação, as pílulas, os títulos de folha e os estados vazios passam de 700 para 600, e entram dois tamanhos novos: o nome em linha de lista (16 pt, 600, entrelinha 24) e o título de conversa (20 pt, 600, entrelinha 28). O espaçamento e as formas seguem um kit de interface social usado só como referência de números; as cores, o pôr do sol e as listras continuam sendo do Varanda. A tabela de Tipografia está em `apps/site/artwork/app-design.md`.
+
+Nada disso envia pedido nem busca dado: é só a tela. Não há mudança de protocolo, RPC nem Termos, e nenhuma dependência nova.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA, cada um no claro e no escuro. Registrar aparelho, sistema e, na web, o navegador.
+
+- [ ] O título da barra em todas as abas, em telas de 320 e de 390 pt: cabe em uma linha, sem cortar e sem sobrepor os ícones da direita. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] O título no cabeçalho de uma conversa (20 pt, 600). Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] O nome no perfil, no Diário e no Membro (24 pt, 600): quebra bem com nome longo. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] As pílulas (Publicar, Editar perfil, Seguir) em 600, sem cortar o texto. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] Os títulos das folhas (ajuda, Publicar, Ajustes). Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] Os estados vazios (A Rua, Avisos, Conversas, Feira, Buscar). Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] O título da ComunidadeInfo. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] Texto grande, escala 1,3 nas configurações do aparelho: nenhum título corta nem sobrepõe. Android, iOS, web e PWA, claro e escuro: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/app/test/themeUsage.test.js
+node apps/app/test/profilePolish.test.js
+node apps/app/test/uiKit.test.js
+node apps/app/test/postLayout.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
