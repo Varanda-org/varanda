@@ -9697,3 +9697,26 @@ Emulador `LembraApi36` (Android 16, API 36, google_apis x86_64), build de debug 
 - [ ] iOS (simulador ou aparelho): o driver não conta worklets no iOS, então o passo `j` só confere que o novo nó abre sem `LOCKED`.
 - [ ] Aparelho Android real e arm64-v8a.
 - [ ] Reload pelo menu de desenvolvedor ou pela tecla `r` do Metro, em vez de `DevSettings.reload()`.
+
+## 210. Registro de publicação na web (post-share) e os métodos post.shared, post.share e post.unshare
+
+O registro assinado `post-share` permite que a pessoa autora autorize a exibição de uma publicação própria, para quem não tem conta, na página pública da instalação. A publicação fica pública enquanto algum desses registros estiver vivo, e retirar apaga todos (`docs/protocol.md` seção 2, "Public share"). Este PR acrescenta também `post.shared`, `post.share` e `post.unshare`; nada é servido ainda e não há mudança nos Termos. A página pública vem no próximo PR, e o fluxo no app no terceiro.
+
+### Verificação automatizada
+
+Cada arquivo sozinho, a partir da raiz, no Node 24. A CI completa (`npm ci`, lint, `npm test` e demo) é a CI de pouso e não entra aqui.
+
+- `node packages/core/test/records.test.js`: 63/63 testes, 1509/1509 asserções
+- `node packages/core/test/post-share.test.js`: 6/6 testes, 72/72 asserções
+- `node packages/core/test/deletion.test.js`: 57/57 testes, 920/920 asserções
+- `node packages/core/test/session-post-share.test.js`: 1/1 teste, 4/4 asserções
+- `node packages/rpc/test/methods.test.js`: 130/130 testes, 6169/6169 asserções
+- `node packages/web-member/test/post-share.test.js`: 9/9 testes, 116/116 asserções
+- `node packages/web-member/test/delete.test.js`: 9/9 testes, 87/87 asserções
+- `npx standard` nos arquivos `.js` alterados: limpo
+
+Os testes de `web-member` cobrem compartilhar e consultar, repetição sem nova escrita, retirada, novo compartilhamento com registro mais alto, contagem de registros antigos ainda vivos sob um registro tombstonado e retirada dos nove registros vivos em mais de um append. Cobrem também recusas para publicação de outra autoria, apagada, registro que não é publicação ou sequência fora do intervalo, identidade bloqueada para compartilhar e retirar, consulta com identidade bloqueada e push após compartilhar, retirar e compartilhar de novo depois de um push já confirmado pelo semeador. Blocos guardados depois de um buraco contam (uma tombstone e um compartilhamento vivo), e um alvo dentro do buraco é recusado. O limite de publicações compartilhadas por diário (`shareRoom`, 4096 por padrão) recusa uma publicação nova quando está cheio, mas não uma que já tem compartilhamento, vivo ou retirado. Uma retirada cujo segundo append falha conta e envia as oito tombstones já gravadas, sem repetir nada, e o compartilhamento que sobra continua vivo. Remover `wrote()` antes do push, a checagem de tombstone na dobra dos compartilhamentos vivos, a leitura de todos os blocos guardados ou o repasse do que já foi gravado quando um append falha faz os testes falharem. O teste do nó da CLI confere também que as recusas não criam arquivos.
+
+### Verificação manual
+
+Não se aplica a este PR, pois nenhuma tela ou rota usa os métodos ainda. As conferências manuais vêm com os próximos dois PRs.
