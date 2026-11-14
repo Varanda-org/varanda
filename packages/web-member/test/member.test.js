@@ -34,7 +34,7 @@ test('hypercore 10 here, hypercore 11 under @varanda/core', async (t) => {
   const here = createRequire(require.resolve('../lib/member'))
   const core = createRequire(require.resolve('@varanda/core/lib/seeder'))
   t.is(here('hypercore/package.json').version, '10.38.2')
-  t.is(core('hypercore/package.json').version, '11.39.0')
+  t.is(core('hypercore/package.json').version, '11.40.4')
   t.is(here('compact-encoding/package.json').version, '3.5.2', 'the workspace itself pins compact-encoding 3')
   t.is(here('@hyperswarm/secret-stream/package.json').version, '6.9.2')
 })
