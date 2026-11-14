@@ -3,7 +3,8 @@
 // or 32 pt when `small` (give it an accessibilityLabel). `iconEnd` sits right
 // of the label: the chevron of a pill that opens a list of choices.
 // `maxFontSizeMultiplier` caps the label, for a pill in a Sheet header whose
-// other controls are capped.
+// other controls are capped. `iconFilled` draws the icon's solid shape (a
+// saved star), so the state is not shown by colour alone.
 
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { PRESSED_OPACITY } from '../pressMotion'
@@ -11,7 +12,7 @@ import { Icon } from './Icon'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, type } from './theme'
 
-export function Pill ({ label, icon, iconEnd, onPress, filled, danger, disabled, pending, accessibilityLabel, maxFontSizeMultiplier, small }) {
+export function Pill ({ label, icon, iconFilled, iconEnd, onPress, filled, danger, disabled, pending, accessibilityLabel, maxFontSizeMultiplier, small }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const iconOnly = typeof label !== 'string' || label === ''
@@ -27,7 +28,7 @@ export function Pill ({ label, icon, iconEnd, onPress, filled, danger, disabled,
   ]
   const content = (
     <>
-      {typeof icon === 'string' ? <Icon name={icon} size={18} color={tint} /> : null}
+      {typeof icon === 'string' ? <Icon name={icon} size={18} color={tint} filled={iconFilled === true} /> : null}
       {iconOnly
         ? null
         : (

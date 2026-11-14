@@ -81,13 +81,15 @@ const VERSION_PAGES = 10
 // unchanged until it is checked on a device.
 const formStyles = StyleSheet.create({ fill: { flex: 1 } })
 
-export function KeyboardForm ({ children }) {
+// A full-screen stack layer sits in the main window, so its measured top is
+// right on iOS too (inWindow); the page sheet is left alone until checked.
+export function KeyboardForm ({ children, inWindow = false }) {
   const ref = useRef(null)
   const avoidKeyboard = useKeyboardAvoidEnabled()
   const [top, setTop] = useState(0)
   const measure = () => {
     const view = ref.current
-    if (Platform.OS !== 'android' || !view || typeof view.measureInWindow !== 'function') return
+    if ((!inWindow && Platform.OS !== 'android') || !view || typeof view.measureInWindow !== 'function') return
     view.measureInWindow((x, y) => { if (Number.isFinite(y)) setTop(y) })
   }
   return (

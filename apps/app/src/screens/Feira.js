@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { Keyboard, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import * as actingAs from '../actingAs'
 import { installationOrigin } from '../installation'
-import { listSaved } from '../feiraSavedStore'
+import { listSaved, toggleSaved } from '../feiraSavedStore'
+import { SAVED_FULL_TEXT } from '../feiraSaved'
+import { ownerDest } from '../feiraCompose'
 import { alertsStore } from '../feiraAlertsStore'
 import { PARTIAL_NOTE, browseListings, columnsFor, gridRows, placeLabel } from '../feiraBrowse'
 import {
@@ -19,11 +21,14 @@ import { FilterChips } from '../ui/FilterChips'
 import { Icon } from '../ui/Icon'
 import { ListingTile } from '../ui/ListingTile'
 import { PlaceSheet } from '../ui/PlaceSheet'
+import { PressScale } from '../ui/PressScale'
 import { RefreshableList } from '../ui/RefreshableList'
+import { SearchField } from '../ui/SearchField'
+import { Segmented } from '../ui/Segmented'
 import { TEXT_CAP } from '../ui/Sheet'
 import { EmptyState, SkeletonTile } from '../ui/States'
 import { useStyles } from '../ui/ThemeProvider'
-import { fonts, LARGE_TEXT, layout, radius, space, type } from '../ui/theme'
+import { elevation, fonts, LARGE_TEXT, layout, radius, space, type } from '../ui/theme'
 
 const NO_BLOCKS = new Set()
 const newLabel = (n) => (n === 1 ? '1 novo' : n + ' novos')
@@ -33,8 +38,14 @@ const fieldText = (event, fallback) => {
   return typeof text === 'string' ? text : fallback
 }
 let rememberedLocation = {}
+const HEX64 = /^[0-9a-f]{64}$/
+const SAVE_FAILED = 'Não foi possível salvar neste aparelho.'
+const listingId = (listing) => listing.author + ':' + listing.seq
 
 // locationStore: { load, save }, backed by createLocationStore at integration.
+// Photos nearly touch, as in the other grids.
+const GRID_GAP = 2
+
 export default function Feira ({
   active = true, ownKey, origin, blocked = NO_BLOCKS, locationStore,
   onOpenListing, onAnnounce, onSaveSearch, scrollToTop, author
@@ -63,11 +74,15 @@ export default function Feira ({
   const [alertData, setAlertData] = useState(null)
   const [alertNotice, setAlertNotice] = useState('')
   const [availability, setAvailability] = useState(null)
+  const [savedKeys, setSavedKeys] = useState(null)
+  const [saveNotice, setSaveNotice] = useState(null)
   const alive = useRef(true)
   const generation = useRef(0)
   const pending = useRef(null)
   const storageGeneration = useRef(0)
   const probe = useRef(null)
+  const saving = useRef(new Set())
+  const savedRead = useRef(0)
   if (probe.current === null) probe.current = createFeiraProbe()
   // The same origin Anuncio saves under: the hosted web keeps no installation
   // record, so the page's own origin stands for it.
@@ -84,6 +99,12 @@ export default function Feira ({
   currentScope.current = scope
   const result = loaded && loaded.scope === scope ? loaded.result : null
   const loading = busy && busy.scope === scope
+  const savedIds = savedKeys && savedKeys.scope === scope ? savedKeys.keys : null
+  const starNotice = saveNotice && saveNotice.scope === scope ? saveNotice.text : ''
+  const actingPage = acting.kind === 'page' ? acting.key : null
+  const ownerKnown = HEX64.test(actingPage || ownKey || '')
+  // A new array on every render would redraw every tile on each keystroke.
+  const listExtra = useMemo(() => [savedIds, ownerKnown, actingPage, ownKey], [savedIds, ownerKnown, actingPage, ownKey])
 
   useEffect(() => {
     alive.current = true
@@ -137,9 +158,22 @@ export default function Feira ({
     return () => { alive = false }
   }, [locationStore])
 
+  // Anuncio saves through the same store while this screen stays mounted
+  // under the stack, so the set is read again on every load, not once. Only
+  // the newest read for the current scope lands; a failed read leaves every
+  // star hollow.
+  function readSaved () {
+    const at = currentScope.current
+    const ticket = ++savedRead.current
+    Promise.resolve().then(() => listSaved(savedOrigin)).then((refs) => new Set(refs.map(listingId)), () => new Set()).then((keys) => {
+      if (alive.current && ticket === savedRead.current && currentScope.current === at) setSavedKeys({ scope: at, keys })
+    })
+  }
+
   const load = useCallback(async (more = false) => {
     if (!active || !locationReady) return
     if (more && (pending.current || !result || result.next === null)) return
+    if (!more) readSaved()
     const ticket = ++generation.current
     const cursor = more ? result.next : null
     pending.current = ticket
@@ -219,6 +253,30 @@ export default function Feira ({
     if (answer.saved && onSaveSearch) onSaveSearch(query)
   }
 
+  // One local write per press, never repeated: a refused write only shows the
+  // notice. A press on a tile whose write is still pending is dropped.
+  async function toggleSave (listing) {
+    const id = listingId(listing)
+    if (saving.current.has(id)) return
+    saving.current.add(id)
+    const at = currentScope.current
+    setSaveNotice(null)
+    let answer = null
+    try {
+      answer = await toggleSaved(savedOrigin, { author: listing.author, seq: listing.seq })
+    } catch {} finally {
+      saving.current.delete(id)
+    }
+    if (!alive.current) return
+    if (!answer) { setSaveNotice({ scope: at, text: SAVE_FAILED }); readSaved(); return }
+    if (answer.full) { setSaveNotice({ scope: at, text: SAVED_FULL_TEXT }); return }
+    setSaveNotice(answer.persisted === false ? { scope: at, text: SAVE_FAILED } : null)
+    // The store is the truth: read it again rather than flip what was on
+    // screen, which may be stale (saved elsewhere, another segment, a read
+    // still pending). The read starts after this write, so it includes it.
+    readSaved()
+  }
+
   async function openSearch (saved) {
     const answer = await alertsStore.markSeen(savedOrigin, saved.id)
     if (!alive.current || currentAlertScope.current !== alertScope) return
@@ -248,8 +306,8 @@ export default function Feira ({
   const cityBrowse = filtering && segment === 'cidade' && locationReady && !showHero
   const columns = columnsFor(width, fontScale >= LARGE_TEXT)
   const browsed = browseListings(rows, cityBrowse ? view : viewFilters())
-  const gap = space.sm
-  const inner = Math.max(0, width - space.lg * 2)
+  const gap = GRID_GAP
+  const inner = Math.max(0, width)
   const tileWidth = columns > 1 ? Math.floor((inner - gap * (columns - 1)) / columns) : inner
   const grid = gridRows(controls && !showHero ? browsed : [], columns)
   const note = cityBrowse && partialNoteVisible(view, !!(result && result.next !== null))
@@ -274,7 +332,7 @@ export default function Feira ({
       {filtering
         ? (
           <>
-            <FilterChips options={SEGMENT_OPTIONS} selected={segment} onSelect={(id) => { setSegment(id); setPlaceOpen(false); setFiltersOpen(false) }} />
+            <Segmented options={SEGMENT_OPTIONS} selected={segment} onSelect={(id) => { setSegment(id); setPlaceOpen(false); setFiltersOpen(false) }} />
             {showHero
               ? (
                 <View style={styles.hero}>
@@ -306,7 +364,29 @@ export default function Feira ({
               ? (
                 <>
                   <View style={styles.fields}>
-                    <Field label='Palavras' value={filters.words} maxLength={100} editable={locationReady} plain onChangeText={(words) => setFilters({ ...filters, words })} onSubmitEditing={(event) => applyFilters({ ...filters, words: fieldText(event, filters.words) })} returnKeyType='search' />
+                    <SearchField
+                      label='Palavras'
+                      placeholder='Buscar na Feira'
+                      value={filters.words}
+                      maxLength={100}
+                      onChangeText={(words) => setFilters({ ...filters, words })}
+                      onSubmitEditing={(event) => applyFilters({ ...filters, words: fieldText(event, filters.words) })}
+                      right={(
+                        <Pressable
+                          accessibilityRole='button'
+                          accessibilityLabel='Filtros'
+                          accessibilityState={{ selected: filtersDot(view, applied.kind) }}
+                          onPress={() => setFiltersOpen(true)}
+                          hitSlop={space.sm}
+                          style={({ pressed }) => [styles.filterBtn, pressed && styles.pressed]}
+                        >
+                          <View pointerEvents='none' accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>
+                            <Icon name='filtro' size={20} />
+                            {filtersDot(view, applied.kind) ? <View style={styles.dot} /> : null}
+                          </View>
+                        </Pressable>
+                      )}
+                    />
                     <View style={styles.toolRow}>
                       <Pressable
                         accessibilityRole='button'
@@ -317,19 +397,6 @@ export default function Feira ({
                         <View style={[styles.toolInner, styles.toolFill]} pointerEvents='none' accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>
                           <Icon name='mapa' size={18} />
                           <Text style={styles.chipLabel} numberOfLines={1}>{placeLabel({ city: applied.city, uf: applied.uf })}</Text>
-                        </View>
-                      </Pressable>
-                      <Pressable
-                        accessibilityRole='button'
-                        accessibilityLabel='Filtros'
-                        accessibilityState={{ selected: filtersDot(view, applied.kind) }}
-                        onPress={() => setFiltersOpen(true)}
-                        style={({ pressed }) => [styles.filterBtn, pressed && styles.pressed]}
-                      >
-                        <View style={styles.toolInner} pointerEvents='none' accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>
-                          <Icon name='filtro' size={18} />
-                          <Text style={styles.selectText}>Filtros</Text>
-                          {filtersDot(view, applied.kind) ? <View style={styles.dot} /> : null}
                         </View>
                       </Pressable>
                     </View>
@@ -411,8 +478,10 @@ export default function Feira ({
         if (next > 0 && next !== width) setWidth(next)
       }}
     >
+      {starNotice ? <View style={styles.note} accessibilityLiveRegion='polite' aria-live='polite'><Soft>{starNotice}</Soft></View> : null}
       <RefreshableList
         data={grid}
+        extraData={listExtra}
         keyExtractor={(item) => item.map((listing) => listing.author + ':' + listing.seq).join('|')}
         renderItem={({ item }) => (
           <View style={styles.gridRow}>
@@ -422,6 +491,8 @@ export default function Feira ({
                 listing={listing}
                 width={tileWidth}
                 onPress={() => onOpenListing && onOpenListing({ author: listing.author, seq: listing.seq })}
+                saved={savedIds !== null && savedIds.has(listingId(listing))}
+                onSave={ownerKnown && HEX64.test(listing.author) && ownerDest(listing, { me: ownKey, actingPage }) === null ? () => toggleSave(listing) : undefined}
               />
             ))}
           </View>
@@ -439,14 +510,14 @@ export default function Feira ({
       />
       {controls && state.canAnnounce && onAnnounce && !byAuthor
         ? (
-          <Pressable
+          <PressScale
             accessibilityRole='button'
             accessibilityLabel='Anunciar'
             onPress={onAnnounce}
             style={({ pressed }) => [styles.fab, { bottom: insets.bottom + layout.tabBar + layout.fabAboveTabs }, pressed && styles.pressed]}
           >
-            <Text style={styles.fabText} maxFontSizeMultiplier={TEXT_CAP}>Anunciar</Text>
-          </Pressable>
+            <Text style={styles.fabText} maxFontSizeMultiplier={TEXT_CAP}>+</Text>
+          </PressScale>
           )
         : null}
     </View>
@@ -468,17 +539,17 @@ const makeStyles = (colors) => StyleSheet.create({
   toolInner: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
   toolFill: { flex: 1, minWidth: 0 },
   placeChip: { flex: 1, minWidth: 0, minHeight: layout.hit, justifyContent: 'center', paddingHorizontal: space.md, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.card },
-  filterBtn: { minHeight: layout.hit, justifyContent: 'center', paddingHorizontal: space.md, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.card },
+  filterBtn: { minWidth: layout.hit, minHeight: layout.hit, marginVertical: -1.5, alignItems: 'center', justifyContent: 'center' },
   chipLabel: { ...type.postText, color: colors.ink, flexShrink: 1 },
-  dot: { width: 8, height: 8, borderRadius: radius.pill, backgroundColor: colors.accent },
-  gridRow: { flexDirection: 'row', gap: space.sm, paddingHorizontal: space.lg, marginBottom: space.sm, alignItems: 'flex-start' },
+  dot: { position: 'absolute', top: -2, right: -2, width: 8, height: 8, borderRadius: radius.pill, backgroundColor: colors.accent },
+  gridRow: { flexDirection: 'row', gap: GRID_GAP, marginBottom: GRID_GAP, alignItems: 'flex-start' },
   search: { gap: space.sm },
   chip: { ...type.pill, color: colors.accent, backgroundColor: colors.accentSoft, borderRadius: radius.pill, padding: space.sm, alignSelf: 'flex-start' },
   select: { minHeight: layout.hit, justifyContent: 'center', paddingHorizontal: space.md, borderRadius: radius.sm, borderWidth: 1, borderColor: colors.line },
   selectText: { ...type.postText, color: colors.ink },
   note: { paddingHorizontal: space.lg, paddingVertical: space.md },
   message: { ...type.postText, color: colors.soft },
-  fab: { position: 'absolute', right: layout.fabRight, minHeight: layout.fabSize, paddingHorizontal: space.xl, borderRadius: radius.pill, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
-  fabText: { ...type.pill, color: colors.accentInk },
+  fab: { position: 'absolute', right: layout.fabRight, width: layout.fabSize, height: layout.fabSize, borderRadius: layout.fabSize / 2, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center', boxShadow: `${elevation.raised} ${colors.shadow}` },
+  fabText: { ...type.heroTitle, color: colors.accentInk },
   pressed: { opacity: 0.7 }
 })

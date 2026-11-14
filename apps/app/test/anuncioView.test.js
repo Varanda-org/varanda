@@ -74,9 +74,20 @@ test('detail chips show category, city and kind with safe peer text', async (t) 
 test('listing keeps secondary and owner controls around its new sticky actions', (t) => {
   const src = read('screens/Anuncio.js')
   const pills = src.slice(src.indexOf('<View style={styles.secondaryActions}>'), src.indexOf('<Text style={styles.section}>Descrição'))
-  for (const label of ["label='Compartilhar'", "label={saved ? 'Salvo' : 'Salvar'}", "label='Denunciar'", "label='Avaliar'"]) {
+  for (const label of ["accessibilityLabel='Compartilhar'", "accessibilityLabel={saved ? 'Salvo' : 'Salvar'}", "label='Avaliar'"]) {
     t.ok(pills.includes(label), label + ' stays under the title')
   }
+  t.absent(pills.includes('Denunciar'), 'report left the pill row')
+  t.ok(pills.includes("icon='compartilhar'") && pills.includes("icon='estrela'") && !pills.includes("label='Compartilhar'"), 'share and save are icon-only pills')
+  t.ok(pills.includes('filled={saved} iconFilled={saved}'), 'a saved listing shows a solid star, not only an accent fill')
+  t.ok(readFileSync(join(__dirname, '..', 'src', 'ui', 'Pill.js'), 'utf8').includes('filled={iconFilled === true}'), 'Pill draws the solid icon on request')
+  const top = src.slice(src.indexOf('<TopBar'), src.indexOf('<ScrollView'))
+  t.ok(top.includes('<MoreButton') && top.includes("label: 'Denunciar'") && top.includes('onDenunciar(reportTarget(listing))'), 'Denunciar lives in the more button')
+  const card = read('ui/SellerCard.js')
+  t.absent(card.includes('borderRadius') || card.includes('backgroundColor'), 'seller card is a flat row')
+  t.ok(card.includes('borderTopWidth: 1, borderBottomWidth: 1'), 'seller card keeps hairlines')
+  t.is(src.split('<MediaGrid').length, 2, 'one viewer only')
+  t.ok(src.includes('<View style={styles.bleed}><MediaGrid') && src.includes('bleed: { marginHorizontal: -space.lg'), 'photos bleed past the body padding')
   const owner = src.slice(src.indexOf('<View style={styles.ownerActions}>'), src.indexOf('</ScrollView>'))
   t.ok(owner.includes("label={confirmDelete ? 'Confirmar: apagar' : 'Apagar'}") && owner.includes('onPress={apagar}'), 'delete confirmation remains in the owner section')
   t.ok(owner.includes('acts.statuses.map') && owner.includes('setStatus(b.status)'), 'owner keeps status controls')

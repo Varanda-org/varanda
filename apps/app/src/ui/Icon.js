@@ -133,6 +133,11 @@ export function Icon ({ name, size = 24, color, style, filled }) {
   if (name === 'coracao' && filled) {
     return <Ionicons name='heart' size={size} color={tint} style={[{ lineHeight: size }, style]} />
   }
+  // Same for a chosen rating star: solid against Feather's outline, so the
+  // choice shows by shape and not only by colour.
+  if (name === 'estrela' && filled) {
+    return <Ionicons name='star' size={size} color={tint} style={[{ lineHeight: size }, style]} />
+  }
   if (ION_GLYPHS[name]) {
     return <Ionicons name={ION_GLYPHS[name]} size={size} color={tint} style={[{ lineHeight: size }, style]} />
   }
