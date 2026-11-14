@@ -41,9 +41,9 @@ export const LARGE_TEXT = 1.29
 
 export const type = {
   heroTitle: { fontSize: 28, fontWeight: '800', lineHeight: 34, letterSpacing: -0.4 },
-  barTitle: { fontSize: 21, fontWeight: '800', lineHeight: 25, letterSpacing: -0.2 },
+  barTitle: { fontSize: 24, fontWeight: '600', lineHeight: 32, letterSpacing: -0.24 },
   profileName: { fontSize: 22, fontWeight: '800', lineHeight: 26, letterSpacing: -0.2 },
-  postName: { fontSize: 15, fontWeight: '700', lineHeight: 20 },
+  postName: { fontSize: 15, fontWeight: '600', lineHeight: 20 },
   postMeta: { fontSize: 15, fontWeight: '400', lineHeight: 20 },
   postText: { fontSize: 15.5, fontWeight: '400', lineHeight: 21 },
   replyMark: { fontSize: 13, fontWeight: '400', lineHeight: 18 },
@@ -54,14 +54,16 @@ export const type = {
   tileTitle: { fontSize: 15, fontWeight: '700', lineHeight: 20 },
   code: { fontSize: 14, fontWeight: '400', lineHeight: 20, fontFamily: fonts.mono },
   compose: { fontSize: 18, fontWeight: '400', lineHeight: 24 },
-  pill: { fontSize: 15, fontWeight: '700', lineHeight: 18 },
+  pill: { fontSize: 15, fontWeight: '600', lineHeight: 18 },
   chip: { fontSize: 12, fontWeight: '600', lineHeight: 14 },
   tab: { fontSize: 10, fontWeight: '600', lineHeight: 12 },
   counter: { fontSize: 13, fontWeight: '600', lineHeight: 16 },
   section: { fontSize: 13, fontWeight: '700', lineHeight: 16, letterSpacing: 0.5, textTransform: 'uppercase' },
   cancel: { fontSize: 17, fontWeight: '400', lineHeight: 22 },
-  sheetTitle: { fontSize: 17, fontWeight: '700', lineHeight: 22 },
-  emptyTitle: { fontSize: 18, fontWeight: '700', lineHeight: 24 },
+  sheetTitle: { fontSize: 17, fontWeight: '600', lineHeight: 22 },
+  emptyTitle: { fontSize: 18, fontWeight: '600', lineHeight: 24 },
+  rowName: { fontSize: 16, fontWeight: '600', lineHeight: 24 },
+  threadTitle: { fontSize: 20, fontWeight: '600', lineHeight: 28 },
   stepLabel: { fontSize: 13, fontWeight: '700', lineHeight: 16, letterSpacing: 0.5, textTransform: 'uppercase' }
 }
 

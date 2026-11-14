@@ -54,5 +54,5 @@ const makeStyles = (colors) => StyleSheet.create({
   },
   chipOn: { backgroundColor: colors.ink, borderColor: colors.ink },
   label: { ...type.pill, color: colors.ink },
-  labelOn: { color: colors.bg, fontWeight: '700' }
+  labelOn: { color: colors.bg, fontWeight: '600' }
 })

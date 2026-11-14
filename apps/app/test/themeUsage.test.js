@@ -127,6 +127,10 @@ test('theme usage: space, radius and the hit target are frozen', async (t) => {
   t.absent(stubbed.includes("from 'react-native'"), 'platform import is stubbed')
   const theme = await import('data:text/javascript,' + encodeURIComponent(stubbed))
   t.alike({ ...theme.space }, { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 32 })
+  t.alike({ ...theme.type.barTitle }, { fontSize: 24, fontWeight: '600', lineHeight: 32, letterSpacing: -0.24 })
+  t.alike({ ...theme.type.rowName }, { fontSize: 16, fontWeight: '600', lineHeight: 24 })
+  t.alike({ ...theme.type.threadTitle }, { fontSize: 20, fontWeight: '600', lineHeight: 28 })
+  t.alike({ ...theme.type.profileName }, { fontSize: 22, fontWeight: '800', lineHeight: 26, letterSpacing: -0.2 })
   t.alike({ ...theme.radius }, { sm: 8, md: 12, lg: 18, bubble: 18, pill: 999 })
   t.alike({ ...theme.layout }, {
     topBar: 52,

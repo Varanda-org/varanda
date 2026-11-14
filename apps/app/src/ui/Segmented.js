@@ -54,5 +54,5 @@ const makeStyles = (colors) => StyleSheet.create({
   pressed: { opacity: 0.6 },
   // A shrunk label stays centred in the tab instead of riding low.
   label: { ...type.pill, color: colors.soft, textAlign: 'center', textAlignVertical: 'center', includeFontPadding: false },
-  labelOn: { color: colors.ink, fontWeight: '700' }
+  labelOn: { color: colors.ink, fontWeight: '600' }
 })
