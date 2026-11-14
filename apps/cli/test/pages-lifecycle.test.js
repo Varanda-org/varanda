@@ -101,10 +101,12 @@ async function thirdMember (t, bootstrap, association) {
       return out
     },
     // A closed page's cleared blocks are skipped; its last block must be there.
-    // Every block is asked at once on one session: a cleared block never
-    // arrives, and read one by one each of them (and any block the seeder is
-    // slow to serve right after the close) cost the whole timeout, so on a
-    // loaded runner a single pass could eat the caller's deadline.
+    // Every block is asked at once on one session. Read one by one, each
+    // cleared block cost the whole timeout, and in hypercore 11.39.0 a
+    // timed-out get leaves a stale queue entry that can keep the next get
+    // from ever being requested (fixed upstream in 11.40.0, holepunchto/
+    // hypercore#896), so held blocks timed out too and a pass could eat the
+    // caller's deadline.
     async sparse (key, length) {
       if (await read(key, length - 1) === null) return null
       const core = store.get({ key: b4a.from(key, 'hex'), valueEncoding: 'json' })
