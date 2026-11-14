@@ -1,7 +1,8 @@
-// The right corner of the top bar: the help button, then the Avisos bell in
-// the corner. The bell shows a plain dot for news (never a count). IconAction
-// is the 44 pt icon button a screen's TopBar draws for each { icon, label,
-// onPress, badge } it passes as `right`.
+// The right corner of the top bar, in one ActionCapsule: the screen's own
+// `actions` first, then the help button, then the Avisos bell in the corner.
+// The bell shows a plain dot for news (never a count). IconAction is the
+// 44 pt icon button a screen's TopBar draws for each { icon, label, onPress,
+// badge } it passes as `right`.
 
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native'
 import { HelpButton } from './Help'

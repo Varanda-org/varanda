@@ -1,9 +1,11 @@
 // The top bar of a tab or a pushed screen: the chair mark (or, with
 // `onBack`, a 'voltar' button in its place), the title, an optional
 // `subtitle` under it and an optional right slot. Callers pass display-safe
-// text (displayText) as title and subtitle. `right` takes a node (the older
-// text pills keep working) or { icon, label, onPress, badge } actions, alone
-// or in a list, each drawn as a 44 pt icon button.
+// text (displayText) as title and subtitle; `compact` sets the chat title
+// size. `right` takes a node (the older text pills keep working) or
+// { icon, label, onPress, badge } actions, alone or in a list. Actions alone
+// share one ActionCapsule of 44 pt icon buttons; a list mixed with nodes
+// draws them in a plain row.
 
 import { isValidElement } from 'react'
 import { Image, Pressable, StyleSheet, Text, View } from 'react-native'
