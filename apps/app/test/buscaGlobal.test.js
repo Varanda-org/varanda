@@ -8,6 +8,18 @@ test('handle follow keeps its target in the accessible label', (t) => {
   const src = fs.readFileSync(path.join(__dirname, '../src/screens/BuscaGlobal.js'), 'utf8')
   t.ok(src.includes("<Pill label='Seguir' accessibilityLabel={'seguir @' + handle} filled onPress={doAdd} pending={add.pending} disabled={changing || offline || !followsReady} />"), 'a long handle does not lengthen the visible action or change its guards')
 })
+
+test('opening a profile, a thread or a mention from the search closes the keyboard', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/BuscaGlobal.js'), 'utf8')
+  t.ok(/import \{[^}]*\bKeyboard\b[^}]*\} from 'react-native'/.test(src))
+  for (const name of ['Member', 'Thread', 'Mention']) {
+    t.ok(src.includes(`const open${name} = (...args) => { Keyboard.dismiss(); return onOpen${name}(...args) }`), name)
+  }
+  t.ok(src.includes('onOpen={openMember}'), 'the account rows')
+  t.ok(src.includes('onOpenThread={openThread}\n        onOpenMember={openMember}\n        onOpenMention={openMention}'), 'the post results')
+  t.absent(src.includes('onOpen={onOpenMember}'))
+})
+
 const load = () => import('../src/buscaGlobal.js')
 
 const EM_DASH = '\u2014'
