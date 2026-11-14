@@ -824,6 +824,7 @@ test('momentsOf keeps valid music through repeated cleaning and drops malformed 
 function hookHost (source, name, deps, setup = '') {
   const { transformSync } = require('@babel/core')
   const slots = []
+  const effects = []
   let cursor, dirty, output, props
   let pending = []
   const changed = (old, values) => !old || values.some((v, i) => !Object.is(v, old.values[i]))
@@ -873,11 +874,15 @@ function hookHost (source, name, deps, setup = '') {
       pending = []
       output = component(props)
       for (const effect of pending) slots[effect.at]?.cleanup?.()
-      for (const { at, fn, values } of pending) slots[at] = { values, cleanup: fn() }
+      for (const { at, fn, values } of pending) {
+        effects.push(fn)
+        slots[at] = { values, cleanup: fn() }
+      }
     } while (dirty)
     return output
   }
   return {
+    effects,
     render,
     flush: async () => {
       for (let i = 0; i < 20; i++) { await Promise.resolve(); render() }
@@ -1011,7 +1016,17 @@ test('a policy response after closing the composer never probes the node', async
   t.is(probes, 0)
 })
 
-async function viewerHost ({ music = true, policy = true, ready = true, reduce = false, photo = 'ok', media = null, author = A, hosted = true, online = true, unlocked = true, send, muted = false, onStateChange, seenRefs = [], caption = '' } = {}) {
+function preparedHandle (done = Promise.resolve({ ok: true })) {
+  return {
+    matches: () => true,
+    take: () => {},
+    releases: 0,
+    release () { this.releases++ },
+    done
+  }
+}
+
+async function viewerHost ({ music = true, tracks = null, medias = null, policy = true, ready = true, reduce = false, photo = 'ok', media = null, author = A, hosted = true, online = true, unlocked = true, send, muted = false, covered = false, onStateChange, prepare, seenRefs = [], caption = '' } = {}) {
   const moments = await import('../src/moments.js')
   const seen = await import('../src/momentSeen.js')
   const soundMute = await import('../src/soundMute.js')
@@ -1021,6 +1036,7 @@ async function viewerHost ({ music = true, policy = true, ready = true, reduce =
   const timers = clock()
   const animations = []
   const calls = []
+  const preloads = []
   const node = {
     hosted,
     online,
@@ -1032,10 +1048,11 @@ async function viewerHost ({ music = true, policy = true, ready = true, reduce =
       throw new Error('unexpected viewer request')
     }
   }
-  const item = (seq, key = A) => ({ seq, ref: key + ':' + seq, at: new Date().toISOString(), text: caption, media, ...(music ? { music: { id: 'abc', start: 30 } } : {}) })
-  const data = { phase: 'ready', authors: [{ author: B, items: [item(2, B), item(1, B)] }], own: [item(2), item(1)] }
+  const item = (seq, key = A) => ({ seq, ref: key + ':' + seq, at: new Date().toISOString(), text: caption, media: medias ? medias[seq - 1] : media, music: tracks ? tracks[seq - 1] : music ? { id: 'abc', start: 30 } : null })
+  const items = (key) => Array.from({ length: tracks ? tracks.length : 2 }, (_, i) => item(i + 1, key)).reverse()
+  const data = { phase: 'ready', authors: [{ author: B, items: items(B) }], own: items(A) }
   const seenState = { loaded: true, seen: seenRefs, mark () {} }
-  const env = { node, reduce, photo, back: 0, policyCalls: 0, opened: [], messages: [], calls, steps: [], haptics: [], helpOpen: false }
+  const env = { node, data, reduce, photo, back: 0, policyCalls: 0, opened: [], messages: [], calls, steps: [], preloads, haptics: [], helpOpen: false }
   class Value {
     constructor (value) { this.value = value }
     setValue (value) { this.value = value }
@@ -1061,6 +1078,11 @@ async function viewerHost ({ music = true, policy = true, ready = true, reduce =
     whoOf: (await import('../src/who.js')).whoOf,
     ...Object.fromEntries(elements.map((name) => [name, name])),
     musicOriginOf,
+    prepareMomentMusic: (session, music, options) => {
+      const handle = prepare ? prepare(session, music, options) : preparedHandle()
+      preloads.push({ session, music, options, handle })
+      return handle
+    },
     audiusPolicy: async () => { env.policyCalls++; return typeof policy === 'function' ? policy() : { moments: policy } },
     audiusReady: async () => typeof ready === 'function' ? ready() : ready,
     useNode: () => node,
@@ -1093,7 +1115,7 @@ async function viewerHost ({ music = true, policy = true, ready = true, reduce =
   }
   const setup = 'useMoments = () => mocked.data; useMomentSeen = () => mocked.seenState; useMotionReduced = () => mocked.env.reduce; useMomentPhoto = () => ({ phase: mocked.env.photo })'
   const host = hookHost(read('src/screens/Momentos.js'), 'Viewer', deps, setup)
-  host.render({ entry: { key: author }, ownKey: A, onBack: () => { env.back++ }, onMessage: (...args) => env.messages.push(args) })
+  host.render({ entry: { key: author }, ownKey: A, covered, onBack: () => { env.back++ }, onMessage: (...args) => env.messages.push(args) })
   await host.flush()
   return {
     ...host,
@@ -1107,6 +1129,319 @@ async function viewerHost ({ music = true, policy = true, ready = true, reduce =
     animation: () => animations.findLast((a) => a.active)
   }
 }
+
+const PRELOAD_TRACKS = [{ id: 'abc', start: 30 }, { id: 'def', start: 12 }, { id: 'ghi', start: 0 }]
+
+test('T4: shown music waits for onStart before preloading only the next track and ticket', async (t) => {
+  const h = await viewerHost({ tracks: PRELOAD_TRACKS })
+  t.teardown(h.unmount)
+  t.is(h.preloads.length, 0, 'shown snippet owns its loading budget')
+  h.music().props.onStart()
+  await h.flush()
+  t.is(h.preloads.length, 1, 'one preload immediately after start')
+  t.alike(h.preloads[0]?.music, PRELOAD_TRACKS[1])
+  t.alike(h.preloads[0]?.session, { member: A, origin: undefined, request: h.node.request })
+  t.alike(h.preloads[0]?.options, { stream: false }, 'no competing audio relay')
+  t.is(h.music().props.prepared, null, 'successor handle is not for the shown item')
+  h.button('próximo momento').props.onPressIn({ nativeEvent: { pageX: 300, pageY: 50 } })
+  h.render()
+  h.button('próximo momento').props.onPressOut()
+  await h.flush()
+  t.is(h.preloads.length, 1, 'pause and resume never repeat the pair')
+  t.is(h.preloads[0]?.handle.releases, 0)
+})
+
+test('T4: a plain photo warms policy and preloads a stream only after loading', async (t) => {
+  const h = await viewerHost({ tracks: [null, PRELOAD_TRACKS[1]], photo: 'loading' })
+  t.teardown(h.unmount)
+  t.is(h.env.policyCalls, 1, 'policy warms one item early')
+  t.absent(h.music(), 'no MomentMusic with null music even when policy is ready')
+  t.is(h.preloads.length, 0, 'loading photo cannot preload')
+  h.env.photo = 'ok'
+  await h.flush()
+  t.is(h.preloads.length, 1)
+  t.alike(h.preloads[0]?.music, PRELOAD_TRACKS[1])
+  t.alike(h.preloads[0]?.options, { stream: true }, 'plain photo leaves relays free for seek')
+  t.absent(h.music(), 'warming the successor does not mount audio on a plain photo')
+  t.is(h.animation()?.duration, 5000)
+})
+
+test('T4: muted sound preloads nothing and muting releases the ahead step', async (t) => {
+  const { setSoundMuted } = await import('../src/soundMute.js')
+  const h = await viewerHost({ tracks: [null, PRELOAD_TRACKS[1]], muted: true })
+  t.teardown(h.unmount)
+  await h.flush()
+  t.is(h.preloads.length, 0, 'a muted viewer spends no request ahead')
+  setSoundMuted(false)
+  await h.flush()
+  t.is(h.preloads.length, 1, 'unmuting preloads the next momento')
+  t.is(h.preloads[0]?.handle.releases, 0)
+  setSoundMuted(true)
+  await h.flush()
+  t.is(h.preloads[0]?.handle.releases, 1, 'muting releases it')
+  setSoundMuted(false)
+  await h.flush()
+  t.is(h.preloads.length, 1, 'the pair is not tried again')
+})
+
+test('T4: a sheet covering the viewer preloads nothing and releases the ahead step', async (t) => {
+  const h = await viewerHost({ tracks: [null, PRELOAD_TRACKS[1]], covered: true })
+  t.teardown(h.unmount)
+  const props = (covered) => ({ entry: { key: A }, ownKey: A, onBack: () => {}, covered })
+  t.is(h.preloads.length, 0, 'a covered viewer spends no request ahead')
+  h.render(props(false))
+  await h.flush()
+  t.is(h.preloads.length, 1, 'uncovering preloads the next momento')
+  t.is(h.preloads[0]?.handle.releases, 0)
+  h.render(props(true))
+  await h.flush()
+  t.is(h.preloads[0]?.handle.releases, 1, 'covering releases it')
+  h.render(props(false))
+  await h.flush()
+  t.is(h.preloads.length, 1, 'the pair is not tried again')
+})
+
+test('T4: shown music after fallback preloads a ticket without a stream', async (t) => {
+  for (const fallback of ['unavailable', 'timeout']) {
+    const h = await viewerHost({ tracks: PRELOAD_TRACKS })
+    t.is(h.preloads.length, 0)
+    if (fallback === 'unavailable') h.music().props.onUnavailable()
+    else h.timers.fire(3000)
+    await h.flush()
+    t.is(h.preloads.length, 1, fallback + ': round 3 allows the POST-only stage')
+    t.alike(h.preloads[0]?.options, { stream: false })
+    t.is(h.animation()?.duration, 5000, 'fallback duration stays unchanged')
+    h.music().props.onStart()
+    await h.flush()
+    t.is(h.preloads.length, 1, 'late start does not repeat the preload')
+    t.is(h.animation()?.duration, 15000)
+    h.unmount()
+  }
+})
+
+test('T4: preloading never looks past a video or a plain next item', async (t) => {
+  for (const video of [true, false]) {
+    const tracks = video ? PRELOAD_TRACKS : [PRELOAD_TRACKS[0], null, PRELOAD_TRACKS[2]]
+    const medias = video ? [null, { mime: 'video/mp4', ms: 8000 }, null] : null
+    const h = await viewerHost({ tracks, medias })
+    h.music().props.onStart()
+    await h.flush()
+    t.is(h.preloads.length, 0, video ? 'video is not preloaded' : 'plain photo is not preloaded')
+    h.button('próximo momento').props.onPress({ nativeEvent: {} })
+    await h.flush()
+    t.is(h.preloads.length, 1, 'third item becomes eligible only after stepping')
+    t.alike(h.preloads[0]?.music, PRELOAD_TRACKS[2])
+    t.absent(h.music(), 'no music mounted for the video or plain item')
+    h.unmount()
+  }
+})
+
+test('T4: policy false, pending and unlinked accounts cannot preload', async (t) => {
+  for (const gate of ['off', 'pending', 'unlinked']) {
+    const pending = deferred()
+    let enabled = false
+    const h = await viewerHost({
+      tracks: [null, PRELOAD_TRACKS[1]],
+      policy: () => gate === 'pending' && !enabled ? pending.promise : { moments: gate !== 'off' || enabled },
+      ready: () => gate !== 'unlinked' || enabled
+    })
+    t.is(h.preloads.length, 0, gate)
+    t.absent(h.music(), 'plain photo stays silent')
+    enabled = true
+    if (gate === 'pending') pending.resolve({ moments: true })
+    else h.node.epoch++
+    await h.flush()
+    t.is(h.preloads.length, 1, gate + ': preload starts once the gate opens')
+    h.unmount()
+  }
+})
+
+test('T4: stepping onto a preload hands the same handle over without release or reload', async (t) => {
+  for (const stream of [true, false]) {
+    const h = await viewerHost({ tracks: [stream ? null : PRELOAD_TRACKS[0], PRELOAD_TRACKS[1]] })
+    if (!stream) h.music().props.onStart()
+    await h.flush()
+    const handle = h.preloads[0]?.handle
+    t.ok(handle)
+    h.button('próximo momento').props.onPress({ nativeEvent: {} })
+    const tree = await h.flush()
+    t.is(treeNodes(tree).find((n) => n.type === 'MomentMusic')?.props.prepared, handle, 'handoff survives every cleanup before setup')
+    t.is(h.preloads.length, 1, 'no second load for the newly shown item')
+    t.is(handle?.releases, 0, 'not released during adoption')
+    h.render()
+    t.is(h.music().props.prepared, handle, 'handed ref retains it on later renders')
+    h.unmount()
+    t.is(handle?.releases, 1, 'unmount also releases a handed handle the string host never took')
+  }
+})
+
+test('T4: failed preloads are handed over without a new attempt', async (t) => {
+  for (const code of ['seek-failed', 'offline']) {
+    const h = await viewerHost({ tracks: [null, PRELOAD_TRACKS[1]], prepare: () => preparedHandle(Promise.resolve({ ok: false, code })) })
+    const handle = h.preloads[0]?.handle
+    t.ok(handle)
+    h.button('próximo momento').props.onPress({ nativeEvent: {} })
+    await h.flush()
+    t.is(h.music().props.prepared, handle, code + ': MomentMusic handles the ticket or final failure')
+    t.is(h.preloads.length, 1)
+    t.is(handle?.releases, 0)
+    h.unmount()
+  }
+})
+
+test('T4: cover, background, close and session changes release an unused preload once', async (t) => {
+  for (const action of ['cover', 'background', 'close', 'epoch', 'member', 'origin']) {
+    const h = await viewerHost({ tracks: [null, PRELOAD_TRACKS[1]] })
+    const handle = h.preloads[0]?.handle
+    t.ok(handle, action + ': preload exists')
+    if (action === 'cover') h.render({ entry: { key: A }, ownKey: A, isTop: false })
+    if (action === 'background') h.node.visible = false
+    if (action === 'close') h.button('fechar momentos').props.onPress()
+    if (action === 'epoch') h.node.epoch++
+    if (action === 'member') h.render({ entry: { key: A }, ownKey: C })
+    if (action === 'origin') h.node.hosted = false
+    await h.flush()
+    t.is(handle?.releases, 1, action + ': unused handle released')
+    h.node.visible = true
+    h.node.hosted = true
+    if (action === 'close') h.timers.fire(1000)
+    h.render({ entry: { key: A }, ownKey: A, isTop: true })
+    await h.flush()
+    t.is(h.preloads.length, 1, action + ': returning cannot retry the same pair')
+    h.unmount()
+    t.is(handle?.releases, 1, action + ': cleared ref is not released again on unmount')
+  }
+})
+
+test('T4: stepping back releases the unused successor and never repeats that pair', async (t) => {
+  const h = await viewerHost({ tracks: [null, null, PRELOAD_TRACKS[2]] })
+  t.is(h.preloads.length, 0)
+  h.button('próximo momento').props.onPress({ nativeEvent: {} })
+  await h.flush()
+  const handle = h.preloads[0]?.handle
+  t.ok(handle)
+  h.button('momento anterior').props.onPress({ nativeEvent: {} })
+  await h.flush()
+  t.is(handle?.releases, 1)
+  h.button('próximo momento').props.onPress({ nativeEvent: {} })
+  await h.flush()
+  t.is(h.preloads.length, 1)
+  h.unmount()
+  t.is(handle?.releases, 1)
+})
+
+test('T4: oscillating between A, B and C preloads A>B and B>C only once', async (t) => {
+  const h = await viewerHost({ tracks: [null, PRELOAD_TRACKS[1], PRELOAD_TRACKS[2]] })
+  t.teardown(h.unmount)
+  t.is(h.preloads.length, 1, 'photo A preloads B')
+  t.alike(h.preloads[0]?.music, PRELOAD_TRACKS[1])
+  t.alike(h.preloads[0]?.options, { stream: true })
+  h.button('próximo momento').props.onPress({ nativeEvent: {} })
+  await h.flush()
+  h.music().props.onStart()
+  await h.flush()
+  t.is(h.preloads.length, 2, 'B starting preloads C')
+  t.alike(h.preloads[1]?.music, PRELOAD_TRACKS[2])
+  t.alike(h.preloads[1]?.options, { stream: false })
+  const successor = h.preloads[1]?.handle
+  h.button('momento anterior').props.onPress({ nativeEvent: {} })
+  await h.flush()
+  t.is(successor?.releases, 1, 'leaving B releases the unused C preload')
+  h.button('próximo momento').props.onPress({ nativeEvent: {} })
+  await h.flush()
+  h.music().props.onStart()
+  await h.flush()
+  t.is(h.preloads.length, 2, 'A>B and B>C stay tried for the life of the viewer')
+  t.alike(h.preloads.map((entry) => entry.music), [PRELOAD_TRACKS[1], PRELOAD_TRACKS[2]])
+})
+
+test('T4: deleting the next item releases its handle and preloads its replacement', async (t) => {
+  const h = await viewerHost({ tracks: [null, PRELOAD_TRACKS[1], PRELOAD_TRACKS[2]] })
+  const handle = h.preloads[0]?.handle
+  t.ok(handle)
+  h.env.data.own = h.env.data.own.filter((item) => item.seq !== 2)
+  await h.flush()
+  t.is(handle?.releases, 1)
+  t.is(h.preloads.length, 2)
+  t.alike(h.preloads[1]?.music, PRELOAD_TRACKS[2])
+  h.unmount()
+  t.is(handle?.releases, 1)
+  t.is(h.preloads[1]?.handle.releases, 1, 'unmount releases the unused replacement')
+})
+
+test('T4: advancing again releases the older handed handle', async (t) => {
+  const h = await viewerHost({ tracks: [null, PRELOAD_TRACKS[1], PRELOAD_TRACKS[2]] })
+  const first = h.preloads[0]?.handle
+  t.ok(first)
+  h.button('próximo momento').props.onPress({ nativeEvent: {} })
+  await h.flush()
+  h.music().props.onStart()
+  await h.flush()
+  const second = h.preloads[1]?.handle
+  t.ok(second)
+  h.button('próximo momento').props.onPress({ nativeEvent: {} })
+  await h.flush()
+  t.is(first?.releases, 1, 'older handed handle released in setup')
+  t.is(second?.releases, 0, 'new handoff is preserved')
+  t.is(h.music().props.prepared, second)
+  h.button('momento anterior').props.onPress({ nativeEvent: {} })
+  await h.flush()
+  t.is(second?.releases, 1, 'leaving without a new handoff also clears handed')
+  t.is(h.music().props.prepared, null)
+  h.unmount()
+  t.is(first?.releases, 1)
+  t.is(second?.releases, 1)
+})
+
+test('T4: limite-musica latches preloads until the viewer unmounts', async (t) => {
+  const answer = deferred()
+  const h = await viewerHost({ tracks: [null, PRELOAD_TRACKS[1], PRELOAD_TRACKS[2]], prepare: () => preparedHandle(answer.promise) })
+  t.is(h.preloads.length, 1)
+  answer.resolve({ ok: false, code: 'limite-musica' })
+  await h.flush()
+  h.button('próximo momento').props.onPress({ nativeEvent: {} })
+  await h.flush()
+  h.music().props.onStart()
+  await h.flush()
+  t.is(h.preloads.length, 1, 'new pair cannot bypass the quota latch')
+  h.node.epoch++
+  await h.flush()
+  h.music().props.onStart()
+  await h.flush()
+  t.is(h.preloads.length, 1, 'epoch cannot reset the latch')
+  h.unmount()
+  const reopened = await viewerHost({ tracks: [null, PRELOAD_TRACKS[1]] })
+  t.is(reopened.preloads.length, 1, 'new viewer gets a fresh quota latch')
+  reopened.unmount()
+})
+
+test('T4: reduced motion still preloads exactly one next momento', async (t) => {
+  const h = await viewerHost({ tracks: [null, PRELOAD_TRACKS[1]], reduce: true })
+  t.is(h.preloads.length, 1)
+  t.alike(h.preloads[0]?.options, { stream: true })
+  h.timers.advance(20000)
+  await h.flush()
+  t.is(h.preloads.length, 1, 'no renewal after the handle idle deadline')
+  t.absent(h.animation(), 'reduced motion still stops auto-advance')
+  h.unmount()
+  t.is(h.preloads[0]?.handle.releases, 1)
+})
+
+test('T4: rebuilding nextMusic on an unrelated render does not rerun reconciliation', async (t) => {
+  const h = await viewerHost({ tracks: [null, PRELOAD_TRACKS[1]] })
+  t.teardown(h.unmount)
+  t.is(h.preloads.length, 1)
+  const reconciles = () => h.effects.filter((fn) => fn.toString().includes('prepareMomentMusic')).length
+  const before = reconciles()
+  t.ok(before > 0, 'observe the real reconciliation effect')
+  h.button('próximo momento').props.onPressIn({ nativeEvent: { pageX: 300, pageY: 50 } })
+  await h.flush()
+  h.button('próximo momento').props.onPressOut()
+  await h.flush()
+  t.is(reconciles(), before, 'dependencies use primitives, not the rebuilt nextMusic object')
+  t.is(h.preloads.length, 1)
+  t.is(h.preloads[0]?.handle.releases, 0)
+})
 
 function reactionButtons (h) {
   return treeNodes(h.render()).filter((n) => n.props.accessibilityLabel?.startsWith('Reagir com '))

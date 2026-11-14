@@ -8,6 +8,7 @@
 import { applicationServerKey } from './push-state.js'
 import { AGE_STATES } from './age.js'
 import { installationOrigin, resolveUrl } from './installation.js'
+import { cacheGeneration, registerLocalCache } from './localCaches.js'
 import { accountOriginOf } from './pageGate.js'
 import { isAppClient } from './appClient.js'
 import { vitrineEnabled } from './vitrine/enabled.js'
@@ -980,6 +981,7 @@ export const previewFetch = async (url, { origin, member, request, signal } = {}
 // (audiusArt) is bytes checked against their own magic and handed back only
 // to src/musicCover.js, which keeps it in memory for the session (Audius API
 // Terms): never in a post, a draft or any storage.
+// Opt-in track answers stay in memory to avoid charging another daily use when a momento replays or preloads.
 export const AUDIUS_POLICY_RETRY_MS = 30 * 1000
 const AUDIUS_OFF = Object.freeze({ enabled: false, moments: false })
 // moments only counts while the feature is on, as the service answers it.
@@ -990,9 +992,72 @@ export const audiusPolicy = servicePolicy('audius', AUDIUS_POLICY_RETRY_MS, { re
 
 const AUDIUS_READY_TTL_MS = 5 * 60 * 1000
 const audiusLinked = new Map()
+export const AUDIUS_ITEM_REUSE_MS = 10 * 60 * 1000
+const audiusItems = new Map()
+let audiusItemGeneration = 0
+let audiusItemTimer = null
+// Clock that stamped each `at`. audiusItem passes the caller's `now`.
+let audiusItemsNow = Date.now
+
+function clearAudiusItemTimer () {
+  if (audiusItemTimer === null) return
+  clearTimeout(audiusItemTimer)
+  audiusItemTimer = null
+}
+
+function sweepAudiusItems () {
+  const t = audiusItemsNow()
+  for (const [key, item] of audiusItems) {
+    if (t - item.at >= AUDIUS_ITEM_REUSE_MS) audiusItems.delete(key)
+  }
+  armAudiusItemTimer()
+}
+
+// One timer for the soonest expiry, so a title, artist and link leave memory
+// when their ten minutes end even if nobody asks for that track again.
+function armAudiusItemTimer () {
+  clearAudiusItemTimer()
+  if (audiusItems.size === 0) return
+  let earliest = Infinity
+  for (const item of audiusItems.values()) {
+    if (item.at < earliest) earliest = item.at
+  }
+  const now = audiusItemsNow
+  const delay = Math.max(0, earliest + AUDIUS_ITEM_REUSE_MS - now())
+  const handle = setTimeout(sweepAudiusItems, delay)
+  // A Node timer would keep the process up. React Native returns a number.
+  if (handle && typeof handle.unref === 'function') handle.unref()
+  audiusItemTimer = handle
+}
+
+registerLocalCache({
+  wipe: () => {
+    audiusItems.clear()
+    clearAudiusItemTimer()
+  }
+})
+
+function forgetAudiusItems (key) {
+  audiusItemGeneration++
+  if (key === null) audiusItems.clear()
+  else {
+    for (const itemKey of audiusItems.keys()) {
+      if (itemKey.startsWith(key + ' ')) audiusItems.delete(itemKey)
+    }
+  }
+  if (audiusItems.size === 0) clearAudiusItemTimer()
+  else armAudiusItemTimer()
+}
+
 const audius = memberSessions('audius', {
-  onUnauthorized: (key) => audiusLinked.delete(key),
-  onForget: (key) => { if (key === null) audiusLinked.clear(); else audiusLinked.delete(key) }
+  onUnauthorized: (key) => {
+    audiusLinked.delete(key)
+    forgetAudiusItems(key)
+  },
+  onForget: (key) => {
+    if (key === null) audiusLinked.clear(); else audiusLinked.delete(key)
+    forgetAudiusItems(key)
+  }
 })
 export const forgetAudiusSession = audius.forget
 // A page of fifty items (or a playlist with fifty tracks) of 80-code-point
@@ -1038,13 +1103,38 @@ export const audiusSearch = async (q, { kind, cursor, origin, member, request, s
 }
 
 // -> the track, or the playlist plus its first tracks.
-export const audiusItem = async (kind, id, { origin, member, request, signal } = {}) => {
+export const audiusItem = async (kind, id, { origin, member, request, signal, reuse = false, now = Date.now } = {}) => {
   if (!AUDIUS_KINDS.includes(kind) || typeof id !== 'string' || !MUSIC_ID_RE.test(id)) throw toError('pedido-invalido')
-  return audius.withSession({ member, origin, request }, async (sessionToken) => {
+  const keep = reuse === true && kind === 'track'
+  let key
+  if (keep) {
+    if (typeof member !== 'string' || !HEX64_RE.test(member) || typeof request !== 'function') throw toError('pedido-invalido')
+    key = audius.keyOf(member, origin) + ' ' + kind + ' ' + id
+    const cached = audiusItems.get(key)
+    if (cached && now() - cached.at < AUDIUS_ITEM_REUSE_MS) return { ...cached.answer }
+    if (audiusItems.delete(key)) armAudiusItemTimer()
+  }
+  // Read before the session opens: a wipe or forget while it opens must not
+  // let this answer back in. A 401 never wipes the local caches.
+  const generation = cacheGeneration()
+  const itemGeneration = audiusItemGeneration
+  let attempts = 0
+  const answer = await audius.withSession({ member, origin, request }, async (sessionToken) => {
+    attempts++
     const parsed = parseItem(await call('POST', '/account/audius/item?covers=1&info=1', { kind, id }, { origin, sessionToken, signal, maxBody: AUDIUS_LIST_BODY, timeoutMs: AUDIUS_ITEM_TIMEOUT_MS }), kind)
     if (parsed === null || parsed.id !== id) throw toError('indisponivel')
     return parsed
   })
+  if (!keep) return answer
+  // Each 401 retry forgets this member once. Any other forget since the first
+  // read, here or concurrently, keeps the answer out.
+  if (!(signal && signal.aborted) && generation === cacheGeneration() && audiusItemGeneration === itemGeneration + attempts - 1) {
+    audiusItemsNow = now
+    audiusItems.set(key, { answer, at: now() })
+    while (audiusItems.size > 32) audiusItems.delete(audiusItems.keys().next().value)
+    armAudiusItemTimer()
+  }
+  return { ...answer }
 }
 
 // A pasted audius.co page -> { kind, item }.

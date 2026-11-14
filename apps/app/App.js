@@ -3300,7 +3300,7 @@ function Member () {
       if (entry.screen === 'momentos') {
         return (
           <StackLayer key={i + ':momentos:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
-            <Momentos entry={entry} ownKey={ownKey} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onMessage={openMessage} onCreate={openMomentComposer} />
+            <Momentos entry={entry} ownKey={ownKey} isTop={i === stack.length - 1} covered={covered} onBack={goBack} onOpenMember={openMember} onMessage={openMessage} onCreate={openMomentComposer} />
           </StackLayer>
         )
       }
