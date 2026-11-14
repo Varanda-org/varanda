@@ -204,7 +204,7 @@ test('splashScene: palettes', async (t) => {
   const light = m.scenePalette('light')
   const dark = m.scenePalette('dark')
   t.alike(Object.keys(dark).sort(), Object.keys(light).sort())
-  for (const key of ['pedra', 'tinta', 'junta', 'parede', 'telha', 'beiral', 'madeira', 'planta', 'meioFio', 'asfalto', 'ceuTopo', 'ceuOuro', 'ceuLaranja', 'ceuCoral', 'ceuAmeixa', 'ceuNoite', 'solNucleo', 'solMeio', 'sol', 'tronco', 'copa']) {
+  for (const key of ['pedra', 'tinta', 'junta', 'parede', 'telha', 'beiral', 'madeira', 'planta', 'meioFio', 'asfalto', 'ceuTopo', 'ceuOuro', 'ceuLaranja', 'ceuCoral', 'ceuAmeixa', 'ceuNoite', 'solNucleo', 'solMeio', 'solHalo', 'sol', 'ave', 'tronco', 'copa']) {
     t.ok(/^#[0-9a-f]{6}$/.test(light[key]) && /^#[0-9a-f]{6}$/.test(dark[key]), key + ' in both')
   }
   t.is(light.parede, '#f3ede2')
@@ -219,13 +219,24 @@ test('splashScene: palettes', async (t) => {
   // The landing's sunset (apps/site/public/styles.css .heroi) by day.
   t.alike(m.SKY_STOPS.map((s) => light[s.key]), ['#fbf8f3', '#f7b267', '#f09a5f', '#e8805a', '#8a4e7a', '#2b2a4a'])
   t.alike(m.SUN_STOPS.map((s) => light[s.key]), ['#ffe2a8', '#ffc77c', '#f7b267', '#f7b267'])
-  // At night the band leaves the dark page and darkens no further than a night blue.
+  // In dark the band is a moonlit night that melts out of the dark page.
   const night = m.SKY_STOPS.map((s) => dark[s.key])
   t.is(night[0], '#101010', 'the night starts at the dark page')
-  t.is(night[night.length - 1], '#1c2b3b', 'and ends at the night blue')
-  for (let i = 1; i < night.length; i++) t.ok(lum(night[i]) > lum(night[i - 1]), 'the night lightens toward the floor at stop ' + i)
+  for (let i = 1; i < night.length; i++) t.ok(lum(night[i]) > lum(night[i - 1]), 'stop ' + i + ' is lighter than the one above')
+  const rgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16))
+  for (const c of night.slice(1)) t.ok(rgb(c)[2] > rgb(c)[0], c + ' is a cool blue')
+  for (const key of ['solNucleo', 'solMeio']) t.ok(night.every((c) => lum(dark[key]) > lum(c)), key + ': the moon is lighter than the sky')
+  for (const key of ['ceuCoral', 'ceuAmeixa']) t.ok(lum(dark.solHalo) > lum(dark[key]), 'the halo is lighter than ' + key)
+  t.is(light.solHalo, light.ceuOuro, 'the day halo is the gold')
+  t.alike(m.SUN_STOPS.slice(2).map((s) => s.key), ['solHalo', 'solHalo'], 'the outer glow uses the halo key')
+  t.is(dark.ave, '#c3cad6', 'silver birds on the night sky')
+  t.is(light.ave, light.tinta, 'the day birds keep the ink')
+  // The wall and the lettering stay cream; the birds turn light to read on the
+  // night, and the moon is the night's light. The moonlit floor is lighter
+  // than the day's navy, since the night lightens toward the floor line.
+  const lit = ['parede', 'letra', 'ave', 'solNucleo', 'solMeio', 'solHalo', 'ceuNoite']
   for (const key of Object.keys(light)) {
-    if (key !== 'parede' && key !== 'letra') t.ok(lum(dark[key]) < lum(light[key]), key + ' dims in dark')
+    if (!lit.includes(key)) t.ok(lum(dark[key]) < lum(light[key]), key + ' dims in dark')
   }
   for (const [name, tile] of Object.entries(tiles(m))) {
     for (const s of tile.shapes) {
@@ -588,7 +599,7 @@ test('splashScene: sun, birds and butterfly', async (t) => {
   const bird = m.birdArt().shapes
   t.is(bird.length, 1)
   t.is(bird[0].fill, undefined, 'stroke only')
-  t.is(bird[0].stroke, 'tinta')
+  t.is(bird[0].stroke, 'ave', 'the birds have their own key')
   const b = m.butterflyArt()
   t.alike(b.shapes.map((s) => s.fill || s.stroke), ['sol', 'telha', 'tinta', 'tinta'], 'two wing pairs and an ink body')
   // The body is on the centre line, so a scaleX flap folds the wings onto it.

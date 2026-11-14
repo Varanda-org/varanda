@@ -131,10 +131,10 @@ test('the sky, the tree and the flyers', async (t) => {
   // motion still shows them on screen.
   t.ok(/\.a1 \{ top: \d+px; height: \d+px; transform: translateX\(calc\(/.test(style.slice(0, at)), 'birds rest on screen')
   const media = /@media \(prefers-color-scheme: dark\) \{([\s\S]*?)\n {6}\}/.exec(style)
-  const hide = '#varanda-pre-splash .ceu .sol, #varanda-pre-splash .ave, #varanda-pre-splash .borboleta { display: none; }'
-  t.ok(media && media[1].includes(hide), 'dark hides the sun, birds and butterfly')
-  t.ok(style.includes('html[data-scheme=dark] #varanda-pre-splash .ceu .sol, html[data-scheme=dark] #varanda-pre-splash .ave, html[data-scheme=dark] #varanda-pre-splash .borboleta { display: none; }'), 'manual Escuro hides them')
-  t.ok(style.includes('html[data-scheme=light] #varanda-pre-splash .ceu .sol, html[data-scheme=light] #varanda-pre-splash .ave, html[data-scheme=light] #varanda-pre-splash .borboleta { display: block; }'), 'manual Claro shows them')
+  t.ok(media, 'the dark media query')
+  t.absent(/display: none/.test(style), 'dark no longer hides the sun, birds and butterfly')
+  t.absent(/(\.sol|\.ave|\.borboleta)[^{]*\{ display: block; \}/.test(style), 'no per-scheme show rules for them')
+  t.ok(markup.includes('class="s-ave"'), 'the birds stroke with their own palette key')
 })
 
 test('the band and the sun draw the module\'s stops', async (t) => {
@@ -150,19 +150,32 @@ test('the band and the sun draw the module\'s stops', async (t) => {
   t.alike(sky[1].split(', '), SKY_STOPS.map((s) => 'var(--vps-' + s.key + ') ' + pct(s.offset)), 'the band stops are the module\'s')
   const sun = /\.sol \{[^}]*background: radial-gradient\(circle closest-side, ([^;]*)\); \}/.exec(style)
   t.ok(sun, 'the sun is a radial gradient')
-  const colour = (s) => {
-    if (s.opacity === 1) return light[s.key]
-    return 'rgba(' + [1, 3, 5].map((i) => parseInt(light[s.key].slice(i, i + 2), 16)).join(', ') + ', ' + s.opacity + ')'
+  t.alike(sun[1].split(', '), SUN_STOPS.map((s, i) => 'var(--vps-sun' + i + ') ' + pct(s.offset)), 'the sun reads its stops from variables')
+  t.absent(/#[0-9a-f]{6}|rgba/.test(sun[1]), 'no baked colour in the sun')
+  const colour = (palette, s) => {
+    if (s.opacity === 1) return palette[s.key]
+    return 'rgba(' + [1, 3, 5].map((i) => parseInt(palette[s.key].slice(i, i + 2), 16)).join(', ') + ', ' + s.opacity + ')'
   }
-  t.alike(sun[1].match(/(#[0-9a-f]{6}|rgba\([^)]*\)) [\d.]+%/g), SUN_STOPS.map((s) => colour(s) + ' ' + pct(s.offset)), 'the sun stops are the module\'s')
-  // The band reads the palette variables, so the dark blocks switch it to the night.
+  // The band and the sun read the palette variables, so the dark blocks switch them to the moonlit night.
   const media = /@media \(prefers-color-scheme: dark\) \{([\s\S]*?)\n {6}\}/.exec(style)
   const manualDark = /html\[data-scheme=dark\] #varanda-pre-splash \{ ([^}]*)\}/.exec(style)
+  const lightBlock = /#varanda-pre-splash, html\[data-scheme=light\] #varanda-pre-splash \{ ([^}]*)\}/.exec(style)
   for (const s of SKY_STOPS) {
     const v = '--vps-' + s.key + ': ' + dark[s.key] + ';'
     t.ok(media && media[1].includes(v), 'dark media query: ' + v)
     t.ok(manualDark && manualDark[1].includes(v), 'manual Escuro: ' + v)
   }
-  t.ok(media && media[1].includes('#varanda-pre-splash .ceu .sol, #varanda-pre-splash .ave, #varanda-pre-splash .borboleta { display: none; }'), 'dark hides the sun, birds and butterfly')
+  SUN_STOPS.forEach((s, i) => {
+    const d = '--vps-sun' + i + ': ' + colour(dark, s) + ';'
+    t.ok(media && media[1].includes(d), 'dark media query: ' + d)
+    t.ok(manualDark && manualDark[1].includes(d), 'manual Escuro: ' + d)
+    const l = '--vps-sun' + i + ': ' + colour(light, s) + ';'
+    t.ok(lightBlock && lightBlock[1].includes(l), 'light and manual Claro: ' + l)
+  })
+  for (const v of ['--vps-sun0: #f4f1e8;', '--vps-sun2: rgba(159, 176, 204, 0.55);']) {
+    t.ok(media && media[1].includes(v), 'the dark media query draws the moon: ' + v)
+    t.ok(manualDark && manualDark[1].includes(v), 'manual Escuro draws the moon: ' + v)
+  }
+  t.ok(lightBlock && lightBlock[1].includes('--vps-sun2: rgba(247, 178, 103, 0.55);'), 'Claro keeps the gold halo')
   t.absent(/\.sol \{[^}]*animation/.test(style), 'the sun stays still')
 })
