@@ -521,6 +521,21 @@ test('/f/* is never intercepted, /anuncio/* keeps the shell', async (t) => {
   t.ok((await dispatch(w, ORIGIN + '/fa', { mode: 'navigate' })).responded, '/fa is an app route')
 })
 
+// Public post pages come from the seeder; /publicacao/... is the app route.
+test('/p/* is never intercepted, /publicacao/* keeps the shell', async (t) => {
+  const { w } = await installed()
+  w.server = offline
+  const A = 'a'.repeat(64)
+  for (const p of ['/p/' + A + '/1', '/p/' + A + '/1/foto/1', '/p/policy', '/p']) {
+    t.absent((await dispatch(w, ORIGIN + p)).responded, p)
+    t.absent((await dispatch(w, ORIGIN + p, { method: 'HEAD' })).responded, 'HEAD ' + p)
+    t.absent((await dispatch(w, ORIGIN + p, { mode: 'navigate' })).responded, 'navigate ' + p)
+  }
+  t.is(w.calls.length, 0, 'the worker fetched nothing')
+  t.ok((await dispatch(w, ORIGIN + '/publicacao/' + A + '/1', { mode: 'navigate' })).responded, '/publicacao/<hex>/<seq> keeps the shell')
+  t.ok((await dispatch(w, ORIGIN + '/pa', { mode: 'navigate' })).responded, '/pa is an app route')
+})
+
 test('nothing cached and offline: 503 sem conexão', async (t) => {
   const dist = makeDist()
   quiet(() => finishWeb(dist))
@@ -921,13 +936,15 @@ test('notificationclick: the moderation panel and other bypassed pages are never
   const panel = fakeWindow(ORIGIN + '/account/mod/')
   const media = fakeWindow(ORIGIN + '/media/x')
   const blob = fakeWindow(ORIGIN + '/blob/' + 'a'.repeat(64) + '/0')
+  const post = fakeWindow(ORIGIN + '/p/' + 'a'.repeat(64) + '/1')
   const app = fakeWindow(ORIGIN + '/?conta=1')
-  w.windows = [panel, media, blob, app]
+  w.windows = [panel, media, blob, post, app]
   await click(w, { kind: 'like', actor: ACTOR, recipient: RECIPIENT, ref: REF })
   t.is(panel.focused, 0)
   t.is(panel.messages.length, 0)
   t.is(media.focused, 0)
   t.is(blob.focused, 0, 'a /blob/ chunk tab is not the app')
+  t.is(post.focused, 0, 'a /p/ page is not the app')
   t.is(app.focused, 1)
   t.is(app.messages.length, 1)
 
@@ -1539,7 +1556,7 @@ test('share target: a store failing half way leaves nothing and still redirects'
 
 test('share target: other POSTs are never answered', async (t) => {
   const w = renderedWorker()
-  for (const url of [ORIGIN + '/account/x', ORIGIN + '/other', ORIGIN + '/seeder/x', ORIGIN + '/f/x', ORIGIN + '/compartilhar/', 'https://other.test/compartilhar']) {
+  for (const url of [ORIGIN + '/account/x', ORIGIN + '/other', ORIGIN + '/seeder/x', ORIGIN + '/f/x', ORIGIN + '/p/x', ORIGIN + '/compartilhar/', 'https://other.test/compartilhar']) {
     t.absent((await share(w, shareForm({ text: 'x' }), { url })).responded, url)
   }
   t.absent((await share(w, shareForm({ text: 'x' }), { method: 'PUT' })).responded, 'PUT /compartilhar')

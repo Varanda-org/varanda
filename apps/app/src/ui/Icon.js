@@ -142,8 +142,7 @@ export function Icon ({ name, size = 24, color, style, filled }) {
 // Loads the icon fonts; resolves even when loading fails (glyphs then show
 // as blanks rather than crashing the app).
 export async function loadIcons () {
-  try {
-    await Feather.loadFont()
-    await Ionicons.loadFont()
-  } catch {}
+  // Apart: a Feather failure must not skip the Ionicons heart.
+  try { await Feather.loadFont() } catch {}
+  try { await Ionicons.loadFont() } catch {}
 }

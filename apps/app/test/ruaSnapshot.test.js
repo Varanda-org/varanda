@@ -164,11 +164,12 @@ test('MemberARua reads the snapshot before its first loadNewest and only with a 
   t.ok(/seed: boot\.social/.test(member) && /socialSeed\(snapshot\)/.test(member), 'useSocial gets the social seed')
 })
 
-test('the snapshot path lifts the boot cover at once and learns the names', (t) => {
+test('the snapshot reports page and details and seeds names while Momentos still gates the cover', (t) => {
   const at = member.indexOf('const snapshot = boot.snapshot')
   t.ok(at > 0)
   const effect = member.slice(at, member.indexOf('}, [])', at))
   t.ok(effect.includes("onBoot('page')") && effect.includes("onBoot('details')"))
+  t.absent(effect.includes("onBoot('moments')"))
   t.ok(effect.includes("perfMarks().mark('rows-snapshot')"))
   t.ok(effect.includes('seedMany(Object.entries(snapshot.names))'), 'seeds only for authors not known yet')
   t.absent(effect.includes('learnMany('), 'never learnMany: it would overwrite a newer entry')

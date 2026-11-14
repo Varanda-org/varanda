@@ -852,6 +852,7 @@ async function momentUI (file, options = {}) {
   const { runInNewContext } = require('node:vm')
   const reaction = await import('../src/momentReaction.js')
   const { showsMeta } = await import('../src/dm-screen.js')
+  const previews = await import('../src/momentPreviews.js')
   const rpc = require('@varanda/rpc')
   let now = Date.parse('2026-11-13T12:00:00.000Z')
   let cursor = 0
@@ -881,7 +882,7 @@ async function momentUI (file, options = {}) {
     cloneElement: (value, props) => element(value.type, { ...value.props, ...props })
   }
   const lookup = { mime: 'image/jpeg', w: 160, h: 320, ms: 0, at: new Date(now).toISOString() }
-  const node = {
+  const node = options.node || {
     request: async (method, params) => {
       calls.lookup.push({ method, params: { ...params } })
       return options.lookup ? options.lookup() : lookup
@@ -900,6 +901,7 @@ async function momentUI (file, options = {}) {
     'react-native': { View: 'View', Text: 'Text', Image: 'Image', Pressable: 'Pressable', StyleSheet: { create: (x) => x, hairlineWidth: 1 }, useWindowDimensions: () => ({ width: 400 }) },
     '@varanda/rpc': { ...rpc, displayText: (text, opts) => { calls.display.push(text); return rpc.displayText(text, opts) } },
     '../momentReaction': reaction,
+    '../momentPreviews': previews,
     '../node': { useNode: () => node },
     '../media/display': { urlFromBytes: () => 'blob:moment', revokeUrl: (uri) => calls.revoke.push(uri) },
     '../ui': { Soft: 'Soft' },
@@ -1012,6 +1014,25 @@ test('moment image reads once across polls, fits 72 pt and releases on unmount',
   t.is(h.timers.size, 0)
 })
 
+test('bubbles of one momento share one lookup and one read', async (t) => {
+  const a = await momentUI('MomentReactionPreview')
+  const b = await momentUI('MomentReactionPreview', { node: a.node })
+  await a.flush()
+  t.is(a.calls.lookup.length, 1)
+  t.is(a.calls.read.length, 1)
+  t.is(a.tree().type, 'Image')
+  t.is(b.tree().type, 'Image')
+  t.is(a.tree().props.source.uri, b.tree().props.source.uri)
+  await a.advance(15000)
+  t.is(a.calls.lookup.length, 2)
+  t.is(a.calls.read.length, 1)
+  a.unmount()
+  t.alike(a.calls.revoke, [])
+  b.unmount()
+  t.alike(a.calls.revoke, ['blob:moment'])
+  t.is(a.timers.size, 0)
+})
+
 test('video previews use a static tile without reading media', async (t) => {
   const h = await momentUI('MomentReactionPreview', { lookup: () => ({ mime: 'video/mp4', w: 320, h: 180, ms: 5000, at: '2026-11-13T12:00:00.000Z' }) })
   t.alike(h.calls.read, [])
@@ -1046,7 +1067,7 @@ test('a mounted preview expires at its deadline and drops the image', async (t) 
   await h.advance(5000)
   t.is(h.tree().props.children, 'Momento indisponível')
   t.alike(h.calls.revoke, ['blob:moment'])
-  t.is(h.calls.lookup.length, 2, 'checks again at expiry before the next poll')
+  t.is(h.calls.lookup.length, 1, 'no lookup is sent at the deadline')
   t.is(h.calls.read.length, 1)
   h.unmount()
   t.is(h.timers.size, 0)
@@ -1102,7 +1123,7 @@ test('expiry drops the mounted image even while a lookup is pending', async (t) 
   await h.advance(5000)
   t.is(h.tree().props.children, 'Momento indisponível')
   t.alike(h.calls.revoke, ['blob:moment'])
-  t.is(calls, 3, 'the expiry lookup does not wait for the pending poll')
+  t.is(calls, 2, 'the deadline drop does not wait for the pending poll')
   h.unmount()
   t.is(h.timers.size, 0)
 })

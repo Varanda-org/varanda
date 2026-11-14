@@ -31,6 +31,9 @@ services:
       # Origem https das páginas públicas da Feira (/f/*, /index/feira/*).
       # Vazio (padrão) = rotas desligadas, respondem 404.
       VARANDA_PUBLIC_ORIGIN: "${VARANDA_FEIRA_ORIGIN:-}"
+      # Origem https das páginas públicas de publicação (/p/*), independente
+      # da Feira. Vazio (padrão) = páginas desligadas, redirecionam para o app.
+      VARANDA_POSTS_ORIGIN: "${VARANDA_POSTS_ORIGIN:-}"
       VARANDA_INDEX_MAX_IN_FLIGHT: "${VARANDA_INDEX_MAX_IN_FLIGHT:-}"
       VARANDA_INDEX_RATE: "${VARANDA_INDEX_RATE:-}"
       VARANDA_INDEX_BURST: "${VARANDA_INDEX_BURST:-}"
