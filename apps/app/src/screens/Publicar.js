@@ -666,6 +666,8 @@ function Ring ({ progress, tone }) {
   )
 }
 
+const ATTACH_AFTER_OPEN_MS = 700
+
 // `quote` takes precedence over `reply` (the shell keeps them exclusive);
 // `onClearQuote` (optional) adds 'cancelar citação'. onPublished(kind, ref)
 // with kind 'post' | 'reply' | 'quote' | 'queued-post' | 'queued-reply'.
@@ -1475,6 +1477,11 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // also covers a page send in flight.
   const held = busy || frozen
   const videoOff = held || hasVideo || items.some((item) => item.status === 'encoding')
+  // One launch per handoff serial; attachRef reads the latest attach when the timer fires.
+  const attachedHandoffRef = useRef(null)
+  const attachTimerRef = useRef(null)
+  const attachRef = useRef(attach)
+  attachRef.current = attach
   const replyDraftConflict = replyDraftPending && (held || hasMedia || (text !== '' && text !== reply.draft))
   useEffect(() => {
     if (!replyDraftPending) return
@@ -1482,7 +1489,18 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     if (replyDraftConflict) return
     setText(reply.draft)
     settleReplyDraft(true)
+    if (reply.attach === 'photo' && attachedHandoffRef.current !== reply.handoff) {
+      attachedHandoffRef.current = reply.handoff
+      // The sheet is still sliding in: iOS drops a picker presented over a Modal that is mid-presentation.
+      attachTimerRef.current = setTimeout(() => { attachTimerRef.current = null; attachRef.current() }, ATTACH_AFTER_OPEN_MS)
+    }
   }, [replyDraftPending, replyDraftConflict, held, reply, onReplyDraft])
+  useEffect(() => {
+    if (open) return undefined
+    if (attachTimerRef.current) clearTimeout(attachTimerRef.current)
+    attachTimerRef.current = null
+  }, [open])
+  useEffect(() => () => { if (attachTimerRef.current) clearTimeout(attachTimerRef.current) }, [])
   let pillLabel = offlineQueue && !hasMedia && musicDraft === null ? 'Guardar' : 'Publicar'
   if (locked) pillLabel = 'Tentar de novo'
 

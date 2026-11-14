@@ -3364,6 +3364,7 @@ function Member () {
       : null
     const screenProps = {
       ownKey,
+      me: tabMe,
       onBack: goBack,
       onReply: startReply,
       onQuote: startQuote,
