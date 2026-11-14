@@ -266,6 +266,15 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     publicOrigin = null
   }
 
+  // The https origin of the seeder's public post pages (/p/*). Same rule as
+  // VARANDA_PUBLIC_ORIGIN and independent of it: a Feira origin never turns
+  // these pages on, and this one never turns the Feira on.
+  let postsOrigin = env.VARANDA_POSTS_ORIGIN === undefined || env.VARANDA_POSTS_ORIGIN === '' ? null : env.VARANDA_POSTS_ORIGIN
+  if (postsOrigin !== null && !/^https:\/\/[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[1-9][0-9]{0,4})?$/.test(postsOrigin)) {
+    if (positionals[0] === 'seed') throw new UsageError('VARANDA_POSTS_ORIGIN inválido')
+    postsOrigin = null
+  }
+
   const accountHttp = env.VARANDA_ACCOUNT_HTTP === undefined || env.VARANDA_ACCOUNT_HTTP === '' ? 'http://127.0.0.1:8790' : env.VARANDA_ACCOUNT_HTTP
   const accountHttpMatch = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\]):([0-9]{1,5})\/?$/.exec(accountHttp)
   if (!accountHttpMatch || Number(accountHttpMatch[2]) < 1 || Number(accountHttpMatch[2]) > 65535) throw new UsageError('VARANDA_ACCOUNT_HTTP inválido')
@@ -310,6 +319,7 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     triageToken,
     pushToken,
     publicOrigin,
+    postsOrigin,
     accountHttp: accountHttp.replace(/\/$/, ''),
     accountPort: port(get('account-port') ?? env.VARANDA_ACCOUNT_PORT ?? null, 'account-port'),
     accountHost,

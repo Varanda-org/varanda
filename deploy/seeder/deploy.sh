@@ -43,8 +43,8 @@ sha_re='^[0-9a-f]{40}$'
 # Minúsculas e sem ponto final: o semeador exige que https://<domínio> seja
 # exatamente uma origem (originList em apps/cli/lib/cli.js) e não subiria.
 domain_re='^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
-# A origem da Feira: https, minúsculas, sem caminho (PUBLIC_ORIGIN_RE em
-# apps/cli/lib/seed-ws.js).
+# A origem da Feira e a das páginas de publicação: https, minúsculas, sem
+# caminho (PUBLIC_ORIGIN_RE em apps/cli/lib/seed-ws.js).
 origem_re='^https://[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[1-9][0-9]{0,4})?$'
 # A chave pública da associação, servida pelo Caddy em /varanda.json. Qualquer
 # caixa, como na CLI e no app (que normalizam para minúsculas); a sonda compara
@@ -238,7 +238,7 @@ escolher_alvo() {
 }
 
 conferir_antes() {
-  local env_file="$root/deploy/seeder/.env" triagem origem_feira google_id google_secret moderators item itens=0 nome limite entrada min max faixa minimo maximo valor stats mods_lc stats_itens=0 saude saude_re
+  local env_file="$root/deploy/seeder/.env" triagem origem_feira origem_publicacao google_id google_secret moderators item itens=0 nome limite entrada min max faixa minimo maximo valor stats mods_lc stats_itens=0 saude saude_re
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
     log "alterações locais em $root: guarde ou descarte"
     exit 1
@@ -388,6 +388,15 @@ conferir_antes() {
     sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
   if [ -n "$origem_feira" ] && ! [[ $origem_feira =~ $origem_re ]]; then
     log "VARANDA_FEIRA_ORIGIN inválido em deploy/seeder/.env"
+    exit 1
+  fi
+  # A origem das páginas públicas de publicação: mesma regra, opcional (vazio:
+  # cada página redireciona para o app e /p/policy diz que estão desligadas)
+  # e independente da origem da Feira.
+  origem_publicacao=$(sed -n 's/^[[:space:]]*VARANDA_POSTS_ORIGIN[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r' |
+    sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+  if [ -n "$origem_publicacao" ] && ! [[ $origem_publicacao =~ $origem_re ]]; then
+    log "VARANDA_POSTS_ORIGIN inválido em deploy/seeder/.env"
     exit 1
   fi
   # Limites do semeador web: opcionais (ausente ou vazio usa o padrão do

@@ -15,6 +15,7 @@ import { KeyboardAvoidingView, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { FOLLOW_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
+import { readFollowKeys } from '../follow'
 import { useNames } from '../names'
 import { fetchCounts, fetchMember, fetchPost, COUNTS_MAX } from '../indexClient'
 import { assembleMember, assembleThread, planPeeks } from '../thread'
@@ -28,6 +29,8 @@ import { registerLocalCache, cacheGeneration } from '../localCaches'
 import { replyNameOf, whoOf } from '../who'
 import { avatarOf, pickAvatar } from '../media/avatar'
 import { canDelete, isPageRef } from '../deletion'
+import { installationOrigin } from '../installation'
+import { postLink } from '../postLink'
 import * as actingStore from '../actingAs'
 import { actAs } from '../pages'
 import { pagesCore } from '../pageGate'
@@ -284,22 +287,14 @@ export function knownAuthors ({ ownKey, follows, hinted, peeked }) {
 
 // The follow list as a Set (own key not included), read once per screen
 // load: decides the media cache (own/followed authors keep the long cache;
-// strangers' photos are never kept). Null until read; a failed read is an
-// empty set (the safe side: no-store).
+// strangers' photos are never kept). Null until read. A failed read changes
+// nothing (the set read before stays, or null: the safe side, no-store) and
+// resolves to an empty set for callers that wait on it.
 export function useFollowSet (request) {
   const [follows, setFollows] = useState(null)
   const load = useCallback(async () => {
-    const keys = []
-    try {
-      for (let offset = 0; offset < 10000;) {
-        const r = await request('follow.list', { offset, limit: FOLLOW_LIMIT_MAX })
-        const page = Array.isArray(r && r.follows) ? r.follows : []
-        for (const k of page) if (typeof k === 'string') keys.push(k.toLowerCase())
-        offset += page.length
-        if (page.length === 0 || !(r && Number.isSafeInteger(r.total)) || offset >= r.total) break
-      }
-    } catch {}
-    const set = new Set(keys)
+    const set = await readFollowKeys(request, FOLLOW_LIMIT_MAX)
+    if (set === null) return new Set()
     setFollows(set)
     return set
   }, [request])
@@ -573,6 +568,18 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
   const authorProfile = names.profileOf(item.author)
   const messageable = typeof onMessage === 'function' && typeof ownKey === 'string' && hasSeq &&
     String(item.author).toLowerCase() !== ownKey.toLowerCase() && !(authorProfile && authorProfile.page === true)
+  // The seeder's public page shows diary posts only. Chats, groups and
+  // moments never come through here and are not kind 'post'; a page's diary
+  // is told apart by its profile.
+  const diaryPost = item.kind === 'post' && hasSeq && !(authorProfile && authorProfile.page === true)
+  const authorKey = String(item.author).toLowerCase()
+  const postRef = diaryPost ? authorKey + ':' + item.seq : null
+  const link = postRef !== null ? postLink(installationOrigin() || globalThis.location?.origin || null, postRef) : null
+  // The member's own diary only, never the page acted as: the writer refuses
+  // a post-share for any diary but the caller's own. Membro passes a repost's
+  // original with extra.repostedBy.
+  const publishable = postRef !== null && typeof ownKey === 'string' && authorKey === ownKey.toLowerCase() &&
+    authorKey !== actingPageKey() && (extra.repostedBy === undefined || extra.repostedBy === null)
   return {
     author: item.author,
     name: who.name,
@@ -608,6 +615,9 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
       : undefined,
     seq: hasSeq ? item.seq : undefined,
     onMessage: messageable ? onMessage : undefined,
+    // Before ...extra, so a link a caller passes (an offer's) keeps winning.
+    link,
+    publishable,
     ...extra
   }
 }

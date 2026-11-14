@@ -124,3 +124,13 @@ test('pendingOpen: armedAt is per row', async (t) => {
   t.is(pending.armedAt(b), 1200)
   t.alike(timers.ms(), [50], 'a custom window')
 })
+
+test('doubleTapPlan: a like or repost on its way owns the post, so no heart without a like', async (t) => {
+  const { doubleTapPlan } = await load()
+  t.alike(doubleTapPlan({ liked: false, pending: null }), { like: true, burst: true })
+  t.alike(doubleTapPlan({ liked: false, pending: undefined }), { like: true, burst: true })
+  t.alike(doubleTapPlan({ liked: false, pending: 'repost' }), { like: false, burst: false }, 'repost pending')
+  t.alike(doubleTapPlan({ liked: false, pending: 'like' }), { like: false, burst: false }, 'like pending')
+  t.alike(doubleTapPlan({ liked: true, pending: null }), { like: false, burst: true }, 'already liked: never unlikes')
+  t.alike(doubleTapPlan({ liked: true, pending: 'repost' }), { like: false, burst: true })
+})

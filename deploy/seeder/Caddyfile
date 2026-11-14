@@ -57,13 +57,13 @@
 	# /.well-known/* têm o seu próprio no-store, /seeder fica como está,
 	# /account/* vem do serviço de conta com o no-store dele, /media/* vem do
 	# semeador com o cache longo dele, /blob/* vem do semeador com o cache
-	# privado dele e /index/* e /f/* vem do semeador com o no-store dele. Um robô de
+	# privado dele e /index/*, /f/* e /p/* vêm do semeador com o no-store dele. Um robô de
 	# prévia de link em /convite/* (o mesmo par de path e User-Agent de
 	# @previaConvite, abaixo) recebe a página do serviço de conta com o
 	# no-store dele; uma pessoa em /convite/* segue com o index.html e o
 	# no-cache de sempre.
 	@mutavel {
-		not path /varanda.json /.well-known/* /seeder /account/* /media/* /blob/* /index/* /f/*
+		not path /varanda.json /.well-known/* /seeder /account/* /media/* /blob/* /index/* /f/* /p/*
 		not {
 			path /convite/*
 			header_regexp User-Agent (?i)(facebookexternalhit|facebot|whatsapp|telegrambot|twitterbot|slackbot|discordbot|linkedinbot|skypeuripreview|applebot)
@@ -86,7 +86,7 @@
 	}
 	@ausenteApp {
 		not path *.*
-		not path /.well-known/* /seeder /account/* /media/* /blob/* /index/* /f/*
+		not path /.well-known/* /seeder /account/* /media/* /blob/* /index/* /f/* /p/*
 		not {
 			path /convite/*
 			header_regexp User-Agent (?i)(facebookexternalhit|facebot|whatsapp|telegrambot|twitterbot|slackbot|discordbot|linkedinbot|skypeuripreview|applebot)
@@ -401,6 +401,35 @@
 		}
 	}
 
+	# As páginas públicas de uma publicação (um aperitivo para quem está fora
+	# da Varanda): GET|HEAD /p/<diário>/<seq>, /p/<diário>/<seq>/foto/<n> e
+	# /p/policy, servidas pelo semeador na porta do WebSocket, em 127.0.0.1.
+	# Só mostram uma publicação quando ele tem VARANDA_POSTS_ORIGIN, que não
+	# depende da origem da Feira; sem isso, a página redireciona para o app
+	# (/publicacao/...) e /p/policy diz que estão desligadas. Como /f/*: só o
+	# Host do destino; os cabeçalhos com o endereço do cliente saem, e o
+	# Cache-Control (no-store) e
+	# os cabeçalhos próprios vêm do semeador, por isso /p/* fica fora de
+	# @mutavel e de @ausenteApp. O CSP não muda. O service worker também deixa
+	# /p/* passar direto para a rede. Limite por cliente, numa zona própria:
+	# 30 requisições a cada 10 s; o endereço fica só na memória do Caddy,
+	# durante a janela. Antes do handle do app: sem este, /p/* cairia no
+	# index.html.
+	handle /p/* {
+		rate_limit {
+			zone publicacao {
+				key {remote_host}
+				events 30
+				window 10s
+			}
+		}
+		reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {
+			header_up Host {upstream_hostport}
+			header_up -X-Forwarded-For
+			header_up -X-Real-Ip
+		}
+	}
+
 	# A prévia de um convite (/convite/<código>) para os robôs que montam o
 	# cartão de um link no WhatsApp, Telegram, Facebook, X, Slack, Discord,
 	# LinkedIn, Skype e Apple: eles não rodam o app, então leem as tags og:
@@ -434,7 +463,10 @@
 	}
 
 	# Só as páginas da Feira são para buscadores; o app e o resto ficam de
-	# fora. Antes do handle do app: sem este, /robots.txt viria do www.
+	# fora. /p/ também é permitido, sem sitemap, só para o robô poder ler o
+	# noindex de cada página pública de publicação (um Disallow esconderia o
+	# noindex e o link poderia aparecer na busca mesmo assim). Antes do
+	# handle do app: sem este, /robots.txt viria do www.
 	handle /robots.txt {
 		header Content-Type "text/plain; charset=utf-8"
 		# Heredoc: o Caddyfile não interpreta \n dentro de aspas.
@@ -442,6 +474,7 @@
 			body <<ROBOTS
 				User-agent: *
 				Allow: /f/
+				Allow: /p/
 				Disallow: /
 				Sitemap: https://{$VARANDA_DOMAIN}/f/sitemap.xml
 				ROBOTS

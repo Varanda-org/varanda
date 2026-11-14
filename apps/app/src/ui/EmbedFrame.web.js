@@ -8,22 +8,26 @@
 // page itself sends Referrer-Policy: no-referrer, and the video player
 // refuses to play without a Referer, so this frame alone sends the origin.
 //
-// Props: embedUrl, height, title. html, baseUrl, allowTop and onOpen belong
-// to the native WebView and are ignored here.
+// Props: embedUrl, height, title, parked. html, baseUrl, allowTop and onOpen
+// belong to the native WebView and are ignored here, and so is onGone: an
+// iframe raises no event when its document's process dies. A parked frame is
+// hidden with visibility rather than display or a new src, so its document
+// stays loaded (and keeps playing) while it leaves the Tab order and the
+// accessibility tree.
 
 import { createElement } from 'react'
 import { EMBED_SANDBOX } from '../musicEmbed.js'
 
 const HTTPS = /^https:\/\//i
 
-export function EmbedFrame ({ embedUrl, height, title }) {
+export function EmbedFrame ({ embedUrl, height, title, parked }) {
   if (typeof embedUrl !== 'string' || !HTTPS.test(embedUrl)) return null
   return createElement('iframe', {
     src: embedUrl,
     title,
     width: '100%',
     height,
-    style: { border: 0, display: 'block' },
+    style: parked === true ? { border: 0, display: 'block', visibility: 'hidden' } : { border: 0, display: 'block' },
     allow: 'clipboard-write; encrypted-media; fullscreen; picture-in-picture',
     allowFullScreen: true,
     referrerPolicy: 'strict-origin-when-cross-origin',

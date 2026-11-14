@@ -20,8 +20,14 @@
 //
 // Props: html, baseUrl, allowTop(url) -> boolean, height, title (accessibility
 // label), onOpen(url) (optional); embedUrl is for the web frame, which loads
-// it directly.
+// it directly. onGone() (optional) is called once when the system kills the
+// page's content process: the frame is then blank or frozen and never
+// recovers on its own, so the caller drops it and can load the player again.
+// parked (optional) keeps a loaded frame whose list row is gone out of the
+// screen reader: it stays loaded, so playback goes on, but nothing reads or
+// focuses a player the person cannot see.
 
+import { useRef } from 'react'
 import { View } from 'react-native'
 import { WebView } from 'react-native-webview'
 
@@ -57,11 +63,30 @@ export function popupTarget (event) {
   }
 }
 
+// The caller must drop the frame only once, and a second event can arrive
+// before the frame unmounts; a throwing caller must not reach the library's
+// event dispatch.
+export function goneOnce (fired, onGone) {
+  if (typeof onGone !== 'function' || !fired || fired.current === true) return
+  fired.current = true
+  try { onGone() } catch {}
+}
+
+// Props for the wrapper of a parked frame: iOS reads accessibilityElementsHidden,
+// Android importantForAccessibility, and each ignores the other. Nothing at
+// all for a frame in view, so today's callers render as before.
+export function parkedA11y (parked) {
+  return parked === true
+    ? { accessibilityElementsHidden: true, importantForAccessibility: 'no-hide-descendants' }
+    : {}
+}
+
 // The library's default error view is English text; a failed player just
 // stays an empty slot.
 const blank = () => <View />
 
-export function EmbedFrame ({ html, baseUrl, allowTop, height, title, onOpen }) {
+export function EmbedFrame ({ html, baseUrl, allowTop, height, title, onOpen, onGone, parked }) {
+  const gone = useRef(false)
   if (typeof html !== 'string' || typeof baseUrl !== 'string') return null
 
   const onShouldStartLoadWithRequest = (request) => navDecision(request, allowTop) === 'allow'
@@ -82,8 +107,12 @@ export function EmbedFrame ({ html, baseUrl, allowTop, height, title, onOpen }) 
     try { onOpen(url) } catch {}
   }
 
+  // Returns nothing on purpose: on Android the library itself answers true to
+  // the system, which is what keeps a dead renderer from taking the app down.
+  const onProcessGone = () => { goneOnce(gone, onGone) }
+
   return (
-    <View style={{ height, width: '100%' }}>
+    <View style={{ height, width: '100%' }} {...parkedA11y(parked)}>
       <WebView
         source={{ html, baseUrl }}
         // Every scheme reaches onShouldStartLoadWithRequest: anything outside
@@ -93,6 +122,9 @@ export function EmbedFrame ({ html, baseUrl, allowTop, height, title, onOpen }) 
         originWhitelist={['*']}
         onShouldStartLoadWithRequest={onShouldStartLoadWithRequest}
         onOpenWindow={onOpenWindow}
+        // iOS reports the first, Android the second; each platform ignores the other.
+        onContentProcessDidTerminate={onProcessGone}
+        onRenderProcessGone={onProcessGone}
         javaScriptEnabled
         domStorageEnabled
         allowsInlineMediaPlayback
