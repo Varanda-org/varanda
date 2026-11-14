@@ -73,6 +73,10 @@ import { NamesProvider, useNames } from './src/names'
 import { BlocksProvider, useBlocks } from './src/blocksProvider'
 import { BlockSheet } from './src/ui/BlockSheet'
 import { PageNoticeSheet } from './src/ui/PageNoticeSheet'
+import { PostShareSheet } from './src/ui/PostShareSheet'
+import { PostPublicProvider } from './src/postPublicContext'
+import { capturePostPath, postLink, postOpeningGate, postRef } from './src/postLink'
+import { clearPostLink, savePostLink, takePostLink } from './src/postLinkStore'
 import { fetchMember } from './src/indexClient'
 import { pageDmPlan, pageReadKind, pageNoticeSeen } from './src/pageNotice'
 import { pageNoticeStore } from './src/pageNoticeStore'
@@ -104,7 +108,7 @@ import { useTerms } from './src/useTerms'
 import { useAgeMemory } from './src/useAgeMemory'
 import { INTRO_VERSION, introDecision } from './src/intro'
 import { useIntro } from './src/useIntro'
-import { CONNECT_PATIENCE_MS, DETAILS_GRACE_MS, SPLASH_MIN_MS, bootPatienceMs, bootProgress, coverBoot, coverConnecting, detailsGraceOver, holdBootCover, holdSplash, previewAllowed } from './src/splashGate'
+import { CONNECT_PATIENCE_MS, SPLASH_MIN_MS, bootPatienceMs, bootProgress, coverBoot, coverConnecting, holdBootCover, holdSplash, previewAllowed, ruaFeedReady } from './src/splashGate'
 import { Btn, ErrorText, Page, errorText } from './src/ui'
 import { Stepper } from './src/ui/Stepper'
 import { ThemeProvider, useStyles, useTheme } from './src/ui/ThemeProvider'
@@ -118,6 +122,7 @@ import { DeletionNote } from './src/ui/DeletionNote'
 import { InviteDropNote } from './src/ui/InviteDropNote'
 import { InviteArrival } from './src/ui/InviteArrival'
 import { InviteCardOpen } from './src/ui/InviteCardOpen'
+import { PostLinkOpen } from './src/ui/PostLinkOpen'
 import { useInviteDrop } from './src/useInviteDrop'
 import { useSharedIntent } from './src/useSharedIntent'
 import { UpdateNote } from './src/ui/UpdateNote'
@@ -273,6 +278,12 @@ const CAPTURED_ENTRY = captureEntryLink()
 const FEIRA_ENTRY = createFeiraEntry({ getStorage: entryStorage })
 const CAPTURED_LISTING = captureListing()
 if (CAPTURED_LISTING !== null) FEIRA_ENTRY.capture({ author: CAPTURED_LISTING.author, seq: CAPTURED_LISTING.seq, origin: '' })
+// A public post link (/publicacao/<hex>/<seq>, where the seeder sends a post
+// it will not show, or /p/<hex>/<seq>) is read and cleaned the same way. The
+// post waits in tab storage (src/postLinkStore) through the sign-in reload and
+// opens once the tabs are up. The path is cleaned so that reload cannot save
+// it again after it opened.
+if (hostedPage === true) capturePostPath(globalThis.location, globalThis.history, savePostLink)
 // The native app reads Linking's initial URL once per process: it stays the
 // same for the whole run, and Member may mount again.
 let initialUrlTaken = false
@@ -351,12 +362,10 @@ function Member () {
   const bootCoverAt = useRef(null)
   const bootStepRef = useRef(null)
   const bootSettled = useRef(false)
-  // Names and counts get a short grace after A Rua's first page so slow
-  // detail reads cannot keep a usable feed covered.
-  const [feedBoot, setFeedBoot] = useState({ page: false, details: false })
-  const feedPageAt = useRef(null)
+  // A Rua's first page, its details and Momentos settle separately so the
+  // cover waits for the whole first screen, within the content patience.
+  const [feedBoot, setFeedBoot] = useState({ page: false, details: false, moments: false })
   const onFeedBoot = useCallback((stage) => {
-    if (stage === 'page' && feedPageAt.current === null) feedPageAt.current = Date.now()
     setFeedBoot((b) => (b[stage] ? b : { ...b, [stage]: true }))
   }, [])
   const barRef = useRef(0)
@@ -1397,6 +1406,10 @@ function Member () {
   const [pendingLink, setPendingLink] = useState(() => CAPTURED_ENTRY !== null
     ? { kind: CAPTURED_ENTRY.kind, key: CAPTURED_ENTRY.key, origin: ageOrigin }
     : null)
+  // A public post to open after sign-in (src/postLink.js). takePostLink only
+  // peeks: the record is cleared once the thread opens or the card is
+  // dismissed, so a web sign-in reload still finds it.
+  const [pendingPost, setPendingPost] = useState(() => takePostLink())
   const heldUrlRef = useRef(null)
   const appUrlRef = useRef(null)
   // The installation a Feira listing entry belongs to: '' on the hosted web
@@ -1455,6 +1468,12 @@ function Member () {
       }
       FEIRA_ENTRY.capture({ author: link.author, seq: link.seq, origin: feiraOrigin })
       setFeiraTick((n) => n + 1)
+      return
+    }
+    if (link !== null && link.kind === 'publicacao') {
+      const target = { author: link.author, seq: link.seq }
+      savePostLink(target)
+      setPendingPost(target)
       return
     }
     if (signup === null && rec === null && link === null && waitsForInstallation(url)) {
@@ -1644,6 +1663,7 @@ function Member () {
   // Agora não on the opening card: hidden for this load, code and card kept.
   const [openLater, setOpenLater] = useState(false)
   const [openHow, setOpenHow] = useState(false)
+  const [postOpenLater, setPostOpenLater] = useState(false)
   const openResult = cardViewFor('open')
   // An offline membership ('unknown') or a node not ready yet is still
   // pending; an unlinked key, a bad signature or an expired card is not a card.
@@ -2308,6 +2328,11 @@ function Member () {
   const intentsRef = useRef(new Map())
   // The page notice asked from a post's "Mensagem em particular" ({ key }).
   const [pageDmAsk, setPageDmAsk] = useState(null)
+  // The colon ref of the own post whose "Página pública na web" sheet is open.
+  const [shareTarget, setShareTarget] = useState(null)
+  const openPostShare = useCallback((ref) => setShareTarget(nav.isRef(ref) ? ref : null), [])
+  // A lock, an unlock or another identity closes it: the post is the old one's.
+  useEffect(() => setShareTarget(null), [ownKey, nodeEpoch])
   // Hidden tabs and covered stack entries stay mounted, so playback follows
   // the visible screen and whatever covers or replaces it (a lock or reset,
   // the report sheet, help, the page notice), not component lifetimes. The
@@ -2326,10 +2351,11 @@ function Member () {
       locked,
       report !== null,
       helpOpen,
-      pageDmAsk !== null
+      pageDmAsk !== null,
+      shareTarget !== null
     ])
     if (screenWatch.current(key)) stopBoundPlayback()
-  }, [tab, stack, composer.open, ajustes !== null, generation, locked, report !== null, helpOpen, pageDmAsk !== null])
+  }, [tab, stack, composer.open, ajustes !== null, generation, locked, report !== null, helpOpen, pageDmAsk !== null, shareTarget !== null])
   const pageDmPending = useRef(null)
   // A lock, an unlock or another identity drops every pending context, and a
   // page notice left open must not open a conversation under the new identity.
@@ -2507,6 +2533,17 @@ function Member () {
     pushScreen({ screen: pendingLink.kind === 'grupo' ? 'grupo' : 'comunidade', key: pendingLink.key, params: {} })
     setPendingLink(null)
   }, [pendingLink, mode, atTabs, pushScreen, ageOrigin])
+  // A public post link opens its thread once the tabs are on screen and the
+  // node is hosted (only a hosted node reads a whole thread; it waits through a
+  // reconnect, like the group link), exactly once: the store and the state are
+  // cleared in the same pass.
+  useEffect(() => {
+    if (pendingPost === null || !atTabs || mode !== 'hosted') return
+    const ref = postRef(pendingPost)
+    if (ref !== null) openThread({ ref })
+    clearPostLink()
+    setPendingPost(null)
+  }, [pendingPost, atTabs, mode, openThread])
   // A Feira listing link opens once the tabs are on screen on a hosted node,
   // exactly once (consume), and only ever shows the listing. An entry of
   // another installation is dropped by load().
@@ -2879,7 +2916,7 @@ function Member () {
   const sideEdges = { top: 'additive', bottom: 'additive', left: 'off', right: 'off' }
 
   // Only grows: a later step or reconnect never moves the bar back.
-  const bootBar = Math.max(barRef.current, bootProgress({ phase: node.phase, step, page: feedBoot.page, details: feedBoot.details }))
+  const bootBar = Math.max(barRef.current, bootProgress({ phase: node.phase, step, page: feedBoot.page, details: feedBoot.details, moments: feedBoot.moments }))
   barRef.current = bootBar
   const splash = <Splash edges={sideEdges} progress={bootBar} />
   // The intro cards come first, once per device (src/intro.js): presentation
@@ -2919,16 +2956,9 @@ function Member () {
   // Conexão must not spend it. SLOW_LOOKUP_MS equals the patience, so
   // 'carregando' needs this clock of its own to reach "Continuar mesmo assim".
   // Render-time ref writes, as with released.current = true.
-  // Only A Rua as the first screen waits for its rows; a stacked screen (a
-  // link opened at boot) or another tab shows at once.
-  const feedGrace = !feedBoot.details && tab === 'rua' && topEntry === null && detailsGraceOver({ page: feedBoot.page, pageAtMs: feedPageAt.current, nowMs: Date.now() })
-  const feedReady = feedBoot.details || tab !== 'rua' || topEntry !== null || feedGrace
-  useEffect(() => {
-    if (!feedBoot.page || feedBoot.details) return
-    const remaining = Math.max(0, DETAILS_GRACE_MS - (Date.now() - feedPageAt.current))
-    const t = setTimeout(() => bumpSplash((n) => n + 1), remaining + 50)
-    return () => clearTimeout(t)
-  }, [feedBoot.page, feedBoot.details])
+  // Only A Rua as the first screen waits for its details and Momentos; a
+  // stacked screen (a link opened at boot) or another tab shows at once.
+  const feedReady = ruaFeedReady({ details: feedBoot.details, moments: feedBoot.moments, onRua: tab === 'rua', stacked: topEntry !== null })
   const cover = coverBoot({ step, passkeyKnown: passkey === null || pkStatus !== null || !!passkey.error, age: ageNeeded, ageError, phone: phone.gate, phoneError: phoneErrorShown, infoKnown: info !== null || infoError !== '', profileSlow: slow, feedReady })
   if (atShell && cover && !bootSettled.current && bootStepRef.current !== step) {
     bootStepRef.current = step
@@ -2963,8 +2993,8 @@ function Member () {
   useEffect(() => {
     if (!atShell || coveringBoot || splashEndMarked.current) return
     splashEndMarked.current = true
-    perfMarks().mark('splash-end', feedGrace ? 'grace' : feedReady ? 'feedReady' : 'patience')
-  }, [atShell, coveringBoot, feedReady, feedGrace])
+    perfMarks().mark('splash-end', feedReady ? 'feedReady' : 'patience')
+  }, [atShell, coveringBoot, feedReady])
   const markedTab = useRef(tab)
   useEffect(() => {
     if (markedTab.current === tab) return
@@ -3066,6 +3096,13 @@ function Member () {
         edges={sideEdges}
       />
     )
+  }
+  // A shared post link on a first visit: say what waits before the intro
+  // cards. Entrar marks them seen, as the invite card does, and leads to
+  // the Terms and then Entrar, where the post card and the destination stay.
+  if (postOpeningGate({ introShow: showIntro, ageReturn: AGE_RETURN, inviteOpening: opening, otherLink: invite !== null || pendingLink !== null, post: pendingPost, dismissed: postOpenLater })) {
+    if (openHow) return <Introducao key='how' onDone={() => setOpenHow(false)} sidePad={sidePad} edges={sideEdges} />
+    return <PostLinkOpen onEnter={() => intro.markSeen()} onHow={() => setOpenHow(true)} onLater={() => setPostOpenLater(true)} sidePad={sidePad} edges={sideEdges} />
   }
   if (showIntro) {
     introRendered.current = true
@@ -3203,7 +3240,18 @@ function Member () {
             onDismiss: () => { dropEntryLink(); setPendingLink(null) }
           }
         : null
-      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} onLinked={takeLinked} onInviteChanged={reloadCard} onPhoneRecheck={recheckPhone} invite={inviteProp || entryProp} feira={{ holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode }} />
+      // A public post link waiting for the sign-in, after any invite or entry
+      // link. It grants no entry code: it only names the thread to open.
+      const postProp = invite === null && pendingLink === null && pendingPost !== null
+        ? {
+            text: 'Você abriu o link de uma publicação. Entre ou crie sua conta para ver.',
+            openText: 'Para ver, abra este link no Chrome ou no Safari.',
+            labels: { field: 'link da publicação', copyLabel: 'copiar link da publicação', shareLabel: 'compartilhar publicação' },
+            link: postLink(ageOrigin, postRef(pendingPost)),
+            onDismiss: () => { clearPostLink(); setPendingPost(null) }
+          }
+        : null
+      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} onLinked={takeLinked} onInviteChanged={reloadCard} onPhoneRecheck={recheckPhone} invite={inviteProp || entryProp || postProp} feira={{ holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode }} />
     } else if (infoError) {
       body = (
         <Page flush grow padBottom={16}>
@@ -3270,7 +3318,7 @@ function Member () {
     const stacked = nav.depth(stack) > 0
     // The same cover signals as the screen key above: a provider player loads
     // only on the screen the person is looking at.
-    const covered = composer.open || ajustes !== null || report !== null || helpOpen || pageDmAsk !== null || locked || backgrounded
+    const covered = composer.open || ajustes !== null || report !== null || helpOpen || pageDmAsk !== null || shareTarget !== null || locked || backgrounded
     const screenSeen = (id) => !covered && !stacked && tab === id
     // The black Momentos viewer slides out over the tabs on close: the tab bar
     // and the publish button wait for the end of its pop, or they show over
@@ -3758,6 +3806,12 @@ function Member () {
             pushScreen({ screen: 'mensagem', key: k, params: {} })
           }}
         />
+        <PostShareSheet
+          open={shareTarget !== null}
+          target={shareTarget}
+          link={postLink(installationOrigin() || globalThis.location?.origin || null, shareTarget)}
+          onClose={() => setShareTarget(null)}
+        />
         {/* Avisos is not a tab: the bar keeps the tab it was opened from, and that tab's icon closes it. */}
         {barsHidden ? null : <TabBar current={tab === 'avisos' ? returnTab : tab} onSelect={setTab} onReselect={tab === 'avisos' ? closeAvisos : reselectTab} badges={{ comunidades: groupsBadge || dmDot, feira: feiraBadge }} tabs={tabsFor(mode)} me={tabMe} />}
       </View>
@@ -3776,6 +3830,9 @@ function Member () {
   // Set only past the early returns, so the intro, the terms and Conexão do
   // not count as the first screen; a patience expiry latches too.
   if (!coveringBoot) bootSettled.current = true
+  // Post rows read whether "Página pública na web" shows (src/postPublicContext).
+  // The wrapper is unconditional, so it never remounts the screens.
+  content = <PostPublicProvider hosted={node.hosted === true} online={node.online} visible={node.visible} open={openPostShare}>{content}</PostPublicProvider>
   // Side insets are applied once here (sidePad); top and bottom by each bar;
   // Modal content (sheets, photo viewer) pads itself. The wrapper is
   // permanent: a conditional one would remount Identidade at the reveal.

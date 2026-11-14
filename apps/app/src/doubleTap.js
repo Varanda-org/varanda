@@ -50,3 +50,13 @@ export function createPendingOpen ({ setTimer = setTimeout, clearTimer = clearTi
 // any other touch (another row, a tab) cancels it, so a late open never lands
 // on a screen the person already left.
 export const pendingOpen = createPendingOpen()
+
+// What the second tap of a double tap does. `pending` is the like or repost
+// already on its way for this post: it owns the post until it answers, so a
+// like cannot start and the big heart would show a like that never happens.
+// A post already liked still gets the heart, as before.
+export function doubleTapPlan ({ liked, pending }) {
+  if (liked) return { like: false, burst: true }
+  if (pending === 'like' || pending === 'repost') return { like: false, burst: false }
+  return { like: true, burst: true }
+}

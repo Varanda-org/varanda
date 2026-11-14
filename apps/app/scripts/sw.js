@@ -39,12 +39,12 @@ const PRECACHE = __VARANDA_PRECACHE__
 const PREFIX = 'varanda-shell-'
 const CACHE = PREFIX + VERSION
 
-// Paths that are never intercepted (besides /seeder/..., /account/..., /media/..., /blob/..., /index/... and /f/...):
+// Paths that are never intercepted (besides /seeder/..., /account/..., /media/..., /blob/..., /index/..., /f/... and /p/...):
 // live configuration, the worker script itself and the seeder's own pages.
 // /version.json is live deploy state written by deploy.sh: never precached,
 // never answered from the cache or with the shell, so offline it fails like
 // any network error. The pathname check below already ignores a query string.
-const BYPASS = new Set(['/varanda.json', '/sw.js', '/seeder', '/version.json', '/f'])
+const BYPASS = new Set(['/varanda.json', '/sw.js', '/seeder', '/version.json', '/f', '/p'])
 // The account service (Google link, @username; a later moderation panel under
 // /account/mod/) is reverse-proxied by Caddy and never part of the shell. The
 // Google step returns by a top-level navigation to /account/callback?code=…,
@@ -72,6 +72,10 @@ const INDEX_PREFIX = '/index/'
 // prefix is bypassed; /anuncio/... is an app route that keeps the shell, and
 // /robots.txt is a Caddy response the worker never looks at.
 const FEIRA_PREFIX = '/f/'
+// Public post pages (/p/<diary>/<seq>, .../foto/<n>, /p/policy) come from the
+// seeder with their own headers, a 302 and real 404s. Only '/p/' is bypassed;
+// /publicacao/... is an app route that keeps the shell.
+const POST_PAGE_PREFIX = '/p/'
 const BAD_TYPES = new Set(['opaque', 'opaqueredirect', 'error'])
 // Mute deadline for DM wakes after an own send. The cache name must not start
 // with PREFIX (dropOldCaches deletes those), and the fetch handler only ever
@@ -424,7 +428,7 @@ self.addEventListener('fetch', (event) => {
   // stay a real 404, never the cached shell.
   if (BYPASS.has(pathname) || pathname.startsWith('/seeder/') || pathname.startsWith('/.well-known/') || pathname.startsWith(ACCOUNT_PREFIX) ||
     pathname.startsWith(MEDIA_PREFIX) || pathname.startsWith(BLOB_PREFIX) || pathname.startsWith(INDEX_PREFIX) ||
-    pathname.startsWith(FEIRA_PREFIX)) return
+    pathname.startsWith(FEIRA_PREFIX) || pathname.startsWith(POST_PAGE_PREFIX)) return
   if (request.mode === 'navigate') {
     event.respondWith(navigate(request))
   } else if (pathname === '/varanda-node.js') {
@@ -523,7 +527,8 @@ function isAppWindow (c) {
     const p = u.pathname
     return u.origin === self.location.origin && !BYPASS.has(p) && !p.startsWith('/seeder/') &&
       !p.startsWith('/.well-known/') && !p.startsWith(ACCOUNT_PREFIX) && !p.startsWith(MEDIA_PREFIX) &&
-      !p.startsWith(BLOB_PREFIX) && !p.startsWith(INDEX_PREFIX) && !p.startsWith(FEIRA_PREFIX)
+      !p.startsWith(BLOB_PREFIX) && !p.startsWith(INDEX_PREFIX) && !p.startsWith(FEIRA_PREFIX) &&
+      !p.startsWith(POST_PAGE_PREFIX)
   } catch {
     return false
   }

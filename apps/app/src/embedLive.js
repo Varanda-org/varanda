@@ -1,14 +1,14 @@
 // Lifetime rules for a provider player frame that loads when its card is seen.
-// A loaded frame survives its card leaving the band on the visible screen:
-// coming back must find the same provider page, mid-track, instead of a fresh
-// load. It survives only until a check finds it more than EMBED_FAR_SCREENS
-// window heights away, because a list may keep a row mounted for good. The
-// app cannot see play or pause inside a cross-origin frame, so a frame in the
-// band never yields to a newcomer; only a frame found out of the band on two
-// checks in a row may, because a measurement that has not answered by the
-// next tick counts as hidden, and one late answer must not cost a playing
-// frame its slot. The inline feed video shares the visibility rule and timing
-// constants.
+// A loaded frame is kept for as long as its screen is the one being looked
+// at: coming back to its card must find the same provider page, mid-track,
+// instead of a fresh load, however far or long the person scrolled. A list
+// draws its frames in one layer of its own (./ui/EmbedLayer), so the frame
+// outlives a row the list unmounts. The app cannot see play or pause inside
+// a cross-origin frame, so a frame in the band never yields to a newcomer;
+// only a frame found out of the band on two checks in a row may, because a
+// measurement that has not answered by the next tick counts as hidden, and
+// one late answer must not cost a playing frame its slot. The inline feed
+// video shares the visibility rule and timing constants.
 
 export const VISIBILITY_MS = 500
 // A just-tapped player may still be scrolling into view, so it is not closed
@@ -29,16 +29,6 @@ export function mostlyHidden (x, y, w, h, top, bottom, width) {
   const seenW = Math.max(0, Math.min(x + w, width) - Math.max(x, 0))
   const seenH = Math.max(0, Math.min(y + h, bottom) - Math.max(y, top))
   return seenW * 2 < w || seenH < Math.min(h / 2, SEEN_ENOUGH)
-}
-
-export const EMBED_FAR_SCREENS = 3
-
-// An unmeasurable slot is never far: it already counts as hidden, and only a
-// real measurement may unload a frame the person may be listening to.
-export function farFromBand (y, h, top, bottom, winHeight) {
-  if (![y, h, top, bottom, winHeight].every(Number.isFinite) || !(h > 0) || !(winHeight > 0)) return false
-  const reach = EMBED_FAR_SCREENS * winHeight
-  return y + h < top - reach || y > bottom + reach
 }
 
 export const EMBED_TICK_MS = VISIBILITY_MS
@@ -64,7 +54,6 @@ export function embedStep (state, sample) {
     if (sample.turned === true) return EMBED_IDLE
     // An invalid sample cannot keep a frame.
     if (sample.hidden !== true && sample.hidden !== false) return EMBED_IDLE
-    if (state.live && sample.far === true) return EMBED_IDLE
     if (state.live) {
       if (sample.hidden === false) return state.away > 0 ? EMBED_LIVE : state
       return state.away >= 1 ? EMBED_PARKED : EMBED_AWAY

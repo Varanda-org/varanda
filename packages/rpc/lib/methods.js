@@ -1040,6 +1040,9 @@ const SPECS = {
   },
   // Tombstones the caller's own publication (docs/rpc.md 5.33).
   'post.delete': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
+  'post.shared': { fields: { to: req((v) => isRef(v, 1)) } },
+  'post.share': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
+  'post.unshare': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
   'like.set': { fields: { to: req((v) => isRef(v, 1)), on: req(isBool) }, mutating: true },
   'repost.set': { fields: { to: req((v) => isRef(v, 1)), on: req(isBool) }, mutating: true },
   'engagement.read': { fields: { refs: req(isRefList) } },

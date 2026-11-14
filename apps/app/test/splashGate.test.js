@@ -83,10 +83,18 @@ test('splash gate: pure helper and app integration guards', (t) => {
   t.absent(source.includes("from 'react"))
   t.absent(source.includes('require('))
   t.absent(source.includes('node:'))
+  t.absent(/\bimport\b/.test(source))
+  t.absent(source.includes('DETAILS_GRACE_MS'))
+  t.absent(source.includes('detailsGraceOver'))
   const app = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
   t.ok(app.includes('holdSplash('))
   t.ok(app.includes("holdSplash({ phase: ready || seen ? 'ready' : node.phase"))
-  t.ok(app.includes('detailsGraceOver('))
+  t.absent(app.includes('DETAILS_GRACE_MS'))
+  t.absent(app.includes('detailsGraceOver'))
+  t.ok(app.includes('ruaFeedReady('))
+  t.ok(app.includes('moments: false'))
+  t.ok(app.includes('feedBoot.details'))
+  t.ok(app.includes('feedBoot.page'))
   t.ok(app.includes('coverConnecting('))
   t.absent(app.includes("node.phase === 'connecting' && !node.canConfigure"))
   t.ok(app.includes('coverBoot('))
@@ -159,21 +167,83 @@ test('splash gate: pronto stays covered until A Rua is ready, at most CONTENT_PA
   t.is(holdBootCover({ cover: true, step: 'pronto', elapsedMs: 0, settled: true }), false, 'never after the first reveal')
 })
 
-test('splash gate: details grace starts only after the first page', async (t) => {
-  const { detailsGraceOver, DETAILS_GRACE_MS } = await load()
-  t.is(DETAILS_GRACE_MS, 400)
-  t.is(detailsGraceOver({ page: true, pageAtMs: 1000, nowMs: 1399 }), false)
-  t.is(detailsGraceOver({ page: true, pageAtMs: 1000, nowMs: 1400 }), true)
-  t.is(detailsGraceOver({ page: true, pageAtMs: 1000, nowMs: 1500 }), true)
-  t.is(detailsGraceOver({ page: true, pageAtMs: 1000, nowMs: 999 }), false)
-  t.is(detailsGraceOver({ page: true, pageAtMs: 0, nowMs: 400 }), true)
-  for (const page of [false, undefined, null, 1]) {
-    t.is(detailsGraceOver({ page, pageAtMs: 1000, nowMs: 1400 }), false)
+test('splash gate: profile answers include avatar metadata, never just a seed', async (t) => {
+  const { profileAnswered } = await load()
+  for (const [profile, expected] of [
+    [null, true],
+    [undefined, false],
+    [{ name: 'a', avatar: undefined }, false],
+    [{ avatar: null }, true],
+    [{ avatar: { ref: 'a:1' } }, true],
+    ['a', false],
+    [1, false]
+  ]) t.is(profileAnswered(profile), expected)
+})
+
+test('splash gate: Momentos waits for its visible rings and seen state', async (t) => {
+  const { momentsSettled } = await load()
+  const ready = { phase: 'ready', stripVisible: true, seenLoaded: true, authors: [] }
+  t.is(momentsSettled(), false)
+  for (const [input, expected] of [
+    [{ phase: 'off' }, true],
+    [{ phase: 'error' }, true],
+    [{ ...ready, phase: 'idle' }, false],
+    [{ ...ready, phase: 'other' }, false],
+    [{ ...ready, phase: undefined }, false],
+    [{ phase: 'ready', stripVisible: false }, true],
+    [{ ...ready, seenLoaded: undefined }, false],
+    [ready, true],
+    [{ ...ready, authors: ['a'], profileOf: () => undefined }, false],
+    [{ ...ready, authors: ['a'], profileOf: () => ({ name: 'A', username: 'a', avatar: undefined }) }, false],
+    [{ ...ready, authors: ['a', 'b'], profileOf: (key) => key === 'a' ? null : { avatar: null } }, true],
+    [{ ...ready, authors: 'a' }, false],
+    [{ ...ready, authors: undefined }, false],
+    [{ ...ready, authors: ['a'] }, false]
+  ]) t.is(momentsSettled(input), expected)
+  for (const value of [false, undefined, null, 1, 'true']) {
+    t.is(momentsSettled({ ...ready, seenLoaded: value }), false, 'seenLoaded must be literal true')
+    t.is(momentsSettled({ phase: 'ready', stripVisible: value }), true, 'only literal true makes the strip visible')
   }
-  for (const time of [NaN, Infinity, -Infinity, undefined, null, '1000']) {
-    t.is(detailsGraceOver({ page: true, pageAtMs: time, nowMs: 1400 }), false)
-    t.is(detailsGraceOver({ page: true, pageAtMs: 1000, nowMs: time }), false)
+})
+
+test('splash gate: A Rua needs both details and Momentos only when it is the first screen', async (t) => {
+  const { ruaFeedReady } = await load()
+  const values = [true, false, undefined, null, 1, 'true']
+  for (const details of values) {
+    for (const moments of values) {
+      t.is(ruaFeedReady({ onRua: true, details, moments }), details === true && moments === true)
+    }
   }
+  for (const onRua of [false, undefined, null, 1]) t.is(ruaFeedReady({ onRua }), true)
+  t.is(ruaFeedReady(), true)
+  t.is(ruaFeedReady({ onRua: true, stacked: true }), true)
+  for (const stacked of [false, undefined, null, 1]) t.is(ruaFeedReady({ onRua: true, stacked }), false)
+})
+
+test('splash gate: completed details still wait for Momentos until the content ceiling', async (t) => {
+  const { coverBoot, holdBootCover, ruaFeedReady } = await load()
+  for (const elapsedMs of [0, 400, 2500, 5000]) {
+    for (const moments of [false, true]) {
+      const feedReady = ruaFeedReady({ details: true, moments, onRua: true })
+      t.is(holdBootCover({ cover: coverBoot({ step: 'pronto', feedReady }), elapsedMs, step: 'pronto' }), !moments && elapsedMs < 5000)
+    }
+  }
+})
+
+test('splash gate: A Rua reports Momentos separately and resolves ring profiles', (t) => {
+  const rua = fs.readFileSync(path.join(__dirname, '../src/screens/ARua.js'), 'utf8')
+  t.ok(rua.includes('momentsSettled('))
+  t.ok(rua.includes('resolveMany(ringKeys)'))
+  t.ok(rua.includes('strictProfiles: node.hosted === true'))
+  const pageActing = rua.slice(rua.indexOf('if (!pageActing'), rua.indexOf('}, [pageActing, onBoot])'))
+  t.ok(pageActing.includes("onBoot('moments')"))
+  const latchAt = rua.indexOf('if (typeof onBoot !== \'function\' || bootRef.current.moments) return')
+  t.ok(latchAt > rua.indexOf('const ringKeys = useMemo('), 'the latch reads ringKeys after it is derived')
+  t.ok(rua.indexOf('const ringKeys = useMemo(') > rua.indexOf('const stripVisible = stripShown('))
+  const latch = rua.slice(latchAt, rua.indexOf('}, [onBoot, moments.phase, momentSeen.loaded, stripVisible, ringKeys, names.profileOf])', latchAt))
+  t.ok(latch.includes('momentsSettled({ phase: moments.phase, seenLoaded: momentSeen.loaded, stripVisible, authors: ringKeys, profileOf: names.profileOf })'))
+  t.ok(latch.includes('bootRef.current.moments = true'), 'the latch reports Momentos once')
+  t.ok(latch.includes("onBoot('moments')"))
 })
 
 test('splash gate: first rows are ready once their names and counts answered', async (t) => {
@@ -200,6 +270,18 @@ test('splash gate: first rows are ready once their names and counts answered', a
   t.is(feedDetailsReady(), false)
 })
 
+test('splash gate: strict feed profiles wait for answers while older nodes accept seeds', async (t) => {
+  const { feedDetailsReady } = await load()
+  const seed = { name: 'A', username: 'a', avatar: undefined }
+  const first = { authors: ['a'], shown: [], profileOf: () => seed }
+  t.is(feedDetailsReady({ ...first, strictProfiles: true }), false)
+  t.is(feedDetailsReady(first), true)
+  for (const strictProfiles of [false, null, 1]) t.is(feedDetailsReady({ ...first, strictProfiles }), true)
+  for (const profile of [null, { avatar: null }, { avatar: { ref: 'a:1' } }]) {
+    t.is(feedDetailsReady({ ...first, strictProfiles: true, profileOf: () => profile }), true)
+  }
+})
+
 test('splash gate: the bar follows real steps and only grows along them', async (t) => {
   const { bootProgress } = await load()
   const steps = [
@@ -207,11 +289,18 @@ test('splash gate: the bar follows real steps and only grows along them', async 
     bootProgress({ phase: 'ready', step: 'carregando' }),
     bootProgress({ phase: 'ready', step: 'pronto' }),
     bootProgress({ phase: 'ready', step: 'pronto', page: true }),
-    bootProgress({ phase: 'ready', step: 'pronto', page: true, details: true })
+    bootProgress({ phase: 'ready', step: 'pronto', page: true, details: true }),
+    bootProgress({ phase: 'ready', step: 'pronto', page: true, details: true, moments: true })
   ]
-  t.alike(steps, [0.1, 0.35, 0.6, 0.8, 1])
+  t.alike(steps, [0.1, 0.35, 0.6, 0.8, 0.9, 1])
   t.is(bootProgress(), 0.1)
-  t.is(bootProgress({ details: true }), 1)
+  t.is(bootProgress({ details: true }), 0.9)
+  t.is(bootProgress({ details: true, moments: true }), 1)
+  for (const moments of [false, undefined, null, 1]) t.is(bootProgress({ details: true, moments }), 0.9)
+  t.is(bootProgress({ moments: true }), 0.1)
+  t.is(bootProgress({ phase: 'ready', moments: true }), 0.35)
+  t.is(bootProgress({ step: 'pronto', moments: true }), 0.6)
+  t.is(bootProgress({ page: true, moments: true }), 0.8)
 })
 
 test('splash gate: boot patience yields the real screen when a read hangs', async (t) => {
