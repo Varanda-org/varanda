@@ -1,34 +1,29 @@
 /* global document, getComputedStyle */
-// Presentational splash while the app decides its first screen: the chair
-// rises and settles, the letters of the name enter one by one, then the
-// progress bar fades in and pulses; its fill follows `progress` (real boot
-// steps, src/splashGate.js bootProgress). On native it stays cream in both schemes to match the
-// launch screens (their raster chair has an ink frame that vanishes on dark);
-// on the web it follows the scheme, like the pre-splash in index.html.
+// Presentational splash while the app decides its first screen: the street
+// and the sky band rise, the varanda appears beside its araucária, the chair
+// comes up onto its floor (birds cross the sky and a butterfly flutters by
+// the plant, by day only), the logo's hand-drawn letters of the name enter
+// one by one, then the progress bar fades in and pulses while the calçada
+// keeps sliding; the bar's fill follows `progress` (real boot steps,
+// src/splashGate.js bootProgress). On native it stays cream in both schemes
+// to match the launch screens; on the web it follows the scheme, like the
+// pre-splash in index.html.
 // On the web, public/index.html paints its own opaque overlay with the same
 // composition before the bundle runs; this component then stays silent under
 // it and removes it on unmount, so it is neither cut short nor doubled.
 
-import { useEffect, useRef, useState } from 'react'
-import { AccessibilityInfo, Animated, Easing, Image, Platform, StyleSheet, View } from 'react-native'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { AccessibilityInfo, Animated, Easing, Platform, StyleSheet, View, useWindowDimensions } from 'react-native'
 import { StatusBar } from 'expo-status-bar'
-import { SafeAreaView } from 'react-native-safe-area-context'
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { light, statusBarStyle } from '../appearance'
 import { useStyles, useTheme } from './ThemeProvider'
-import { fonts, type } from './theme'
 import { loopTiming } from './loopMotion'
-import { BAR_MS, BAR_WIDTH, SPLASH_LABEL, SPLASH_WORD, PULSE_MS, splashMotion } from './splashMotion'
-
-const mark = require('../../assets/cadeira.png')
+import { BAR_MS, BAR_WIDTH, FLYERS, SPLASH_LABEL, PULSE_MS, flyerMotion, slideMotion, splashMotion } from './splashMotion'
+import { sceneLayout, scenePalette, stripLoops } from './splashScene'
+import { SplashLettering, SplashScene, hiddenFromReaders } from './SplashSceneView'
 
 const native = Platform.OS !== 'web'
-
-// react-native-web 0.21 reads only aria-hidden; native reads the other two.
-const hiddenFromReaders = {
-  'aria-hidden': true,
-  accessibilityElementsHidden: true,
-  importantForAccessibility: 'no-hide-descendants'
-}
 
 const unit = (x) => (Number.isFinite(x) ? Math.min(1, Math.max(0, x)) : 0)
 
@@ -37,6 +32,12 @@ export function Splash ({ sidePad = 0, edges, progress = 0 }) {
   const theme = useTheme()
   const styles = nativeStyles || themed
   const scheme = native ? 'light' : theme.scheme
+  const { width, height } = useWindowDimensions()
+  const insets = useSafeAreaInsets()
+  const layout = useMemo(() => sceneLayout({ width, height }), [width, height])
+  const layoutRef = useRef(layout)
+  layoutRef.current = layout
+  const palette = scenePalette(scheme)
   const full = useRef(null)
   if (full.current === null) full.current = splashMotion(false)
   const shellRef = useRef(undefined)
@@ -62,6 +63,30 @@ export function Splash ({ sidePad = 0, edges, progress = 0 }) {
       translateY: new Animated.Value(f.translateY),
       scale: new Animated.Value(f.scale),
       rotate: new Animated.Value(f.rotate)
+    }
+  }
+  const ground = useRef(null)
+  if (ground.current === null) {
+    const f = full.current.ground.from
+    ground.current = { opacity: new Animated.Value(f.opacity), translateY: new Animated.Value(f.translateY) }
+  }
+  const varanda = useRef(null)
+  if (varanda.current === null) {
+    const f = full.current.varanda.from
+    varanda.current = { opacity: new Animated.Value(f.opacity), translateY: new Animated.Value(f.translateY) }
+  }
+  const slideNear = useRef(null)
+  if (slideNear.current === null) slideNear.current = new Animated.Value(0)
+  const slideFar = useRef(null)
+  if (slideFar.current === null) slideFar.current = new Animated.Value(0)
+  // The sky's flyers: one 0..1 crossing per bird, the butterfly's wing beat
+  // and its drift. At 0 every flyer stands at its visible rest pose.
+  const flyers = useRef(null)
+  if (flyers.current === null) {
+    flyers.current = {
+      birds: FLYERS.birds.map(() => new Animated.Value(0)),
+      flap: new Animated.Value(0),
+      drift: new Animated.Value(0)
     }
   }
   const letters = useRef(null)
@@ -99,16 +124,33 @@ export function Splash ({ sidePad = 0, edges, progress = 0 }) {
     let reduced = false
     let composite = null
     let loop = null
+    let slides = []
+    let flights = []
     const stopAll = () => {
       if (composite) composite.stop()
       if (loop) loop.stop()
+      slides.forEach((s) => s.stop())
+      flights.forEach((f) => f.stop())
       composite = null
       loop = null
+      slides = []
+      flights = []
     }
     const settle = () => {
       reduced = true
       stillRef.current = true
       stopAll()
+      const pose = (v, to) => {
+        v.opacity.setValue(to.opacity)
+        v.translateY.setValue(to.translateY)
+      }
+      pose(ground.current, m.ground.to)
+      pose(varanda.current, m.varanda.to)
+      slideNear.current.setValue(0)
+      slideFar.current.setValue(0)
+      flyers.current.birds.forEach((v) => v.setValue(0))
+      flyers.current.flap.setValue(0)
+      flyers.current.drift.setValue(0)
       const c = chair.current
       c.opacity.setValue(m.chair.to.opacity)
       c.translateY.setValue(m.chair.to.translateY)
@@ -131,13 +173,38 @@ export function Splash ({ sidePad = 0, edges, progress = 0 }) {
       loop = Animated.loop(Animated.sequence([pulse(0.6), pulse(1)]), { resetBeforeIteration: false })
       loop.start()
     }
+    const startSlides = () => {
+      if (!slideMotion(reduced)) return
+      const loops = stripLoops(layoutRef.current.k)
+      const near = Animated.loop(Animated.timing(slideNear.current, loopTiming({ toValue: 1, duration: loops.near.ms, easing: Easing.linear, useNativeDriver: native })))
+      const far = Animated.loop(Animated.timing(slideFar.current, loopTiming({ toValue: 1, duration: loops.far.ms, easing: Easing.linear, useNativeDriver: native })))
+      slides = [near, far]
+      near.start()
+      far.start()
+    }
+    const startFlyers = () => {
+      const f = flyerMotion(reduced)
+      if (!f) return
+      const v = flyers.current
+      const birds = v.birds.map((b, i) => Animated.loop(Animated.timing(b, loopTiming({ toValue: 1, duration: f.birds[i].ms, easing: Easing.linear, useNativeDriver: native }))))
+      const flap = Animated.loop(Animated.timing(v.flap, loopTiming({ toValue: 1, duration: f.butterfly.flapMs, easing: Easing.linear, useNativeDriver: native })))
+      const drift = Animated.loop(Animated.timing(v.drift, loopTiming({ toValue: 1, duration: f.butterfly.driftMs, easing: Easing.linear, useNativeDriver: native })))
+      flights = [...birds, flap, drift]
+      flights.forEach((a) => a.start())
+    }
     const play = () => {
       const c = chair.current
       const chairEase = Easing.bezier(0.22, 1, 0.36, 1)
       const ease = Easing.out(Easing.quad)
       const timing = (value, toValue, duration, delay, easing) =>
         Animated.timing(value, { toValue, duration, delay, easing, useNativeDriver: native })
+      const g = ground.current
+      const v = varanda.current
       const steps = [
+        timing(g.opacity, m.ground.to.opacity, m.ground.duration, m.ground.delay, ease),
+        timing(g.translateY, m.ground.to.translateY, m.ground.duration, m.ground.delay, ease),
+        timing(v.opacity, m.varanda.to.opacity, m.varanda.duration, m.varanda.delay, ease),
+        timing(v.translateY, m.varanda.to.translateY, m.varanda.duration, m.varanda.delay, ease),
         timing(c.opacity, m.chair.to.opacity, m.chair.duration, m.chair.delay, chairEase),
         timing(c.translateY, m.chair.to.translateY, m.chair.duration, m.chair.delay, chairEase),
         timing(c.scale, m.chair.to.scale, m.chair.duration, m.chair.delay, chairEase),
@@ -155,6 +222,8 @@ export function Splash ({ sidePad = 0, edges, progress = 0 }) {
         if (finished !== true || cancelled || reduced) return
         startPulse()
       })
+      startSlides()
+      startFlyers()
     }
     const skip = () => {
       if (!cancelled) settle()
@@ -185,7 +254,14 @@ export function Splash ({ sidePad = 0, edges, progress = 0 }) {
           Promise.resolve(AccessibilityInfo.isReduceMotionEnabled()).then((reduce) => {
             if (cancelled || reduced) return
             if (reduce === true) settle()
-            else startPulse()
+            else {
+              startPulse()
+              // The strips and the flyers restart from 0 here: on this 20 s
+              // failure path a one-off hop against the overlay's last frame
+              // is acceptable.
+              startSlides()
+              startFlyers()
+            }
           }, skip)
         } catch {
           settle()
@@ -215,40 +291,38 @@ export function Splash ({ sidePad = 0, edges, progress = 0 }) {
     }
   }, [])
 
-  const c = chair.current
-  const rotate = c.rotate.interpolate({ inputRange: [-6, 0], outputRange: ['-6deg', '0deg'] })
-
   return (
     <SafeAreaView
       style={[styles.root, { paddingHorizontal: sidePad }]}
       edges={edges}
       {...(underShell ? { 'aria-hidden': true } : null)}
     >
-      <Animated.View
-        style={[styles.chair, scheme === 'dark' && styles.chairDisc, {
-          opacity: c.opacity,
-          transform: [{ translateY: c.translateY }, { scale: c.scale }, { rotate }]
-        }]}
-      >
-        <Image source={mark} style={styles.mark} accessible={false} accessibilityIgnoresInvertColors />
-      </Animated.View>
-      <View accessible accessibilityRole='header' accessibilityLabel={SPLASH_LABEL} style={styles.word}>
-        {Array.from(SPLASH_WORD).map((ch, i) => (
-          <Animated.Text
-            key={i}
-            {...hiddenFromReaders}
-            style={[styles.letter, {
-              opacity: letters.current[i].opacity,
-              transform: [{ translateY: letters.current[i].translateY }]
-            }]}
-          >
-            {ch}
-          </Animated.Text>
-        ))}
+      {!underShell && (
+        // App.js pads the splash wrapper by the side insets; the scene undoes
+        // that so the pavement reaches both screen edges.
+        <View style={[styles.scene, { left: -Math.max(insets.left, insets.right), right: -Math.max(insets.left, insets.right) }]}>
+          <SplashScene
+            layout={layout}
+            palette={palette}
+            daylight={scheme !== 'dark'}
+            bottomInset={insets.bottom}
+            ground={ground.current}
+            varanda={varanda.current}
+            chair={chair.current}
+            slideNear={slideNear.current}
+            slideFar={slideFar.current}
+            flyers={flyers.current}
+          />
+        </View>
+      )}
+      <View style={[styles.top, { marginBottom: layout.height }]}>
+        <View accessible accessibilityRole='header' accessibilityLabel={SPLASH_LABEL} style={styles.word}>
+          <SplashLettering palette={palette} letters={letters.current} />
+        </View>
+        <Animated.View {...hiddenFromReaders} style={[styles.bar, { opacity: hintOpacity.current }]}>
+          <Animated.View style={[styles.barFill, { width: fill.current.interpolate({ inputRange: [0, 1], outputRange: [0, BAR_WIDTH] }) }]} />
+        </Animated.View>
       </View>
-      <Animated.View {...hiddenFromReaders} style={[styles.bar, { opacity: hintOpacity.current }]}>
-        <Animated.View style={[styles.barFill, { width: fill.current.interpolate({ inputRange: [0, 1], outputRange: [0, BAR_WIDTH] }) }]} />
-      </Animated.View>
       <StatusBar style={statusBarStyle(scheme)} />
     </SafeAreaView>
   )
@@ -257,21 +331,11 @@ export function Splash ({ sidePad = 0, edges, progress = 0 }) {
 const makeStyles = (colors) => StyleSheet.create({
   root: {
     flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
     backgroundColor: colors.bg
   },
-  chair: { marginBottom: 12 },
-  // The ink frame of the chair art vanishes on the dark background, so it
-  // sits on the cream it was drawn for.
-  chairDisc: { backgroundColor: '#fbf8f3', borderRadius: 28, padding: 8 },
-  mark: { width: 96, height: 96 },
+  scene: { position: 'absolute', bottom: 0 },
+  top: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   word: { flexDirection: 'row', marginBottom: 8 },
-  letter: {
-    ...type.profileName,
-    fontFamily: fonts.title,
-    color: colors.accent
-  },
   bar: {
     width: BAR_WIDTH,
     height: 4,
