@@ -2419,6 +2419,31 @@ function createBrowserSession ({
     return { seq: r.seq, ref: r.ref, changed: r.changed, deleted: r.deleted }
   }
 
+  // post.share / post.unshare (docs/rpc.md 5.122, 5.123): the recordDelete
+  // path. pushAfterWrite is called even when nothing was written: it still
+  // pushes while the seeder has not confirmed the local length.
+  async function shareWrite (write, to, epoch) {
+    const ref = parseRef(to)
+    if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+    await requireUnlocked()
+    await ensureCaughtUp(epoch)
+    let r
+    try {
+      r = await withStore((c) => write(c, { to: ref }))
+    } catch (err) {
+      // Part of the append landed (post.unshare across chunks): count and
+      // push it, never retry the rest, and answer the original error.
+      if (err !== null && typeof err === 'object' && Number.isSafeInteger(err.written)) {
+        wrote(err.written)
+        try { await pushAfterWrite() } catch {}
+      }
+      throw err
+    }
+    if (r.written !== null) wrote(r.written)
+    await pushAfterWrite()
+    return r
+  }
+
   // ---- direct messages (docs/rpc.md 5.73 to 5.81) ----
 
   // The roots of the pages whose secrets are held (dm.pageForget or a lock
@@ -3480,6 +3505,23 @@ function createBrowserSession ({
     }),
 
     'post.delete': serial(async ({ to }, epoch) => recordDelete(member.postDelete, { to }, epoch)),
+
+    // Local data only, works locked (as listing.mine): docs/rpc.md 5.121.
+    'post.shared': serial(async ({ to }) => {
+      const ref = parseRef(to)
+      if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+      return withCores((c) => member.postShared(c, { to: ref }))
+    }),
+
+    'post.share': serial(async ({ to }, epoch) => {
+      const r = await shareWrite(member.postShare, to, epoch)
+      return { shareSeq: r.shareSeq, created: r.created }
+    }),
+
+    'post.unshare': serial(async ({ to }, epoch) => {
+      const r = await shareWrite(member.postUnshare, to, epoch)
+      return { ok: true, changed: r.changed }
+    }),
 
     'profile.delete': serial(async ({ to }, epoch) => recordDelete(member.profileDelete, { to }, epoch)),
 

@@ -904,7 +904,7 @@ test('old readers: unknown types stay malformed', async (t) => {
 test('group-join records', async (t) => {
   await testnet(t)
   const { groupJoinRecord, TYPES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY } = records
-  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment'], 'TYPES parity')
+  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share'], 'TYPES parity')
   t.ok(Object.isFrozen(TYPES))
   t.alike([MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY], [512, 64, 32, 16, 80, 8])
   const gj = { type: 'group-join', group: K1, writer: K2, on: true, at: AT }
@@ -1233,6 +1233,46 @@ test('validateRecord: delete records', async (t) => {
   t.is(validateRecord(trap, 7), 'malformed')
   t.is(records.validRecordCopy(hostileSeq, 7), null)
   t.alike(records.validRecordCopy(del, 7), del)
+})
+
+test('validateRecord: post-share records', async (t) => {
+  const { postShareRecord, POST_SHARE_KEYS } = records
+  const share = { type: 'post-share', seq: 3, at: AT }
+  t.alike([...POST_SHARE_KEYS], ['type', 'seq', 'at'])
+  t.ok(Object.isFrozen(POST_SHARE_KEYS))
+  t.is(validateRecord(share, 7), null)
+  t.is(validateRecord(share, 4), null, 'the block right after the post')
+  t.is(validateRecord(share, 0), 'genesis-required')
+  t.is(validateRecord({ ...share, extra: 1 }, 7), 'malformed', 'a fourth key')
+  t.is(validateRecord({ ...share, nonce: K1 }, 7), 'malformed', 'no nonce field')
+  t.is(validateRecord({ ...share, origin: K1 }, 7), 'malformed', 'no origin field')
+  const noAt = { ...share }
+  delete noAt.at
+  t.is(validateRecord(noAt, 7), 'malformed', 'missing at')
+  const noSeq = { ...share }
+  delete noSeq.seq
+  t.is(validateRecord(noSeq, 7), 'malformed', 'missing seq')
+  t.is(validateRecord({ ...share, seq: 7 }, 7), 'post-share-invalid', 'self target')
+  t.is(validateRecord({ ...share, seq: 8 }, 7), 'post-share-invalid', 'forward target')
+  for (const seq of [0, -1, 1.5, '1', null, Number.MAX_SAFE_INTEGER + 1, NaN]) {
+    t.is(validateRecord({ ...share, seq }, 7), 'post-share-invalid', 'seq ' + String(seq))
+  }
+  t.is(validateRecord({ ...share, seq: 1 }, 1), 'post-share-invalid', 'a share at block 1 has no post')
+  t.is(validateRecord(share, undefined), 'post-share-invalid', 'no block index')
+  t.is(validateRecord({ ...share, at: '2026-01-01' }, 7), 'date-invalid')
+  t.is(validateRecord({ ...share, at: null }, 7), 'date-invalid')
+  const hostile = { type: 'post-share', at: AT }
+  Object.defineProperty(hostile, 'seq', { enumerable: true, get () { throw new Error('boom') } })
+  t.is(validateRecord(hostile, 7), 'malformed', 'a throwing getter never throws')
+
+  t.alike(postShareRecord({ seq: 3, at: AT }), share)
+  t.alike(Object.keys(postShareRecord({ seq: 3, at: AT })), ['type', 'seq', 'at'])
+  t.ok(isCanonicalIso(postShareRecord({ seq: 1 }).at))
+  await t.exception.all(async () => postShareRecord({ seq: 0, at: AT }), /post-share-invalid/)
+  await t.exception.all(async () => postShareRecord({ seq: '3', at: AT }), /post-share-invalid/)
+  await t.exception.all(async () => postShareRecord({ at: AT }), /post-share-invalid/)
+  await t.exception.all(async () => postShareRecord(), /post-share-invalid/)
+  await t.exception.all(async () => postShareRecord({ seq: 3, at: 'x' }), /date-invalid/)
 })
 
 test('validateRecord: dm-key', (t) => {

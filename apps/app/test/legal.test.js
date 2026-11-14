@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 48)
+  t.is(LEGAL_VERSION, 49)
   t.is(LEGAL_DATE, '13/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 48, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 49, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -83,7 +83,7 @@ test('legal: version 39 describes music through the account service', async (t) 
   t.ok(section('Música do Audius').includes('Num momento, se a associação ligar a música nos momentos, ver um momento com música, inclusive um seu, já pede o trecho de 15 segundos ao serviço de conta, sem um toque à parte; o trecho toca em seguida, a não ser que o navegador só deixe tocar som depois de um toque.'), 'privacy: momento music starts on view')
 })
 
-test('legal: version 48 asks for the next momento snippet ahead, never while muted', async (t) => {
+test('legal: version 49 asks for the next momento snippet ahead, never while muted', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const terms = TERMS.sections.find((s) => s.heading === 'Música do Audius').paragraphs.join(' ')
   t.ok(terms.includes('Enquanto você vê os momentos, o app pode pedir ao serviço de conta o trecho do momento seguinte um pouco antes de ele aparecer, no máximo um à frente, sem a capa e nunca com o som silenciado.'), 'terms: one momento ahead, no cover, not muted')
@@ -286,7 +286,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '6daca63e8cbf9a3e06e4054f05912cde179d5191b3c1081d3595de3f62c0f438', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '29f4a2434fc61d0847ff7f179fcf002148bca2d27bf25c8f65f518ad77001df3', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -592,4 +592,24 @@ test('legal: version 37 discloses video scope, preparation and its limits', asyn
     t.ok(text(doc).includes('fotos ou vídeos salvos'), doc.title + ': saved videos survive')
     t.absent(text(doc).includes('Vídeos não são aceitos'), doc.title + ': no blanket video ban')
   }
+})
+
+test('legal: version 48 describes the public page of a post', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const page = (doc) => doc.sections.find((s) => s.heading === 'Página pública de uma publicação').paragraphs.join(' ')
+  for (const required of [
+    'Onde a instalação ligou essa função',
+    'Publicar deixa a publicação pública na web, não só para quem tem o link',
+    'até 4 fotos (de um vídeo, só a capa)',
+    'não a indexem e não há mapa do site',
+    'não podem ser impedidos nem removidos pela associação'
+  ]) t.ok(page(TERMS).includes(required), 'terms: ' + required)
+  for (const required of [
+    'Onde a instalação ligou essa função',
+    'Não é só para quem tem o link',
+    'até 4 fotos (de um vídeo, só a capa)',
+    'até a pessoa retirar a publicação da web ou apagá-la',
+    'pode guardar o endereço pedido e o endereço de internet (IP)',
+    'ficam fora do controle da associação'
+  ]) t.ok(page(PRIVACY).includes(required), 'privacy: ' + required)
 })

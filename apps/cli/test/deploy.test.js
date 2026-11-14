@@ -248,6 +248,7 @@ test('deploy.sh: executable, required strings and last line', (t) => {
     'VARANDA_INVITES_PER_WEEK',
     'VARANDA_FEIRA_INVITES_PER_WEEK',
     'VARANDA_FEIRA_ORIGIN',
+    'VARANDA_POSTS_ORIGIN inválido em deploy/seeder/.env',
     '/account/mod/api/me',
     // The optional native app associations (rules in well-known.sh) are
     // validated before anything changes and written into www after the copy.
@@ -664,8 +665,8 @@ function checkAssocShapes (t, wk) {
   t.alike(JSON.parse(fs.readFileSync(path.join(wk, 'apple-app-site-association'), 'utf8')),
     {
       webcredentials: { apps: [FAKE_IOS] },
-      applinks: { apps: [], details: [{ appIDs: [FAKE_IOS], components: [{ '/': '/anuncio/*' }] }] }
-    }, 'apple-app-site-association shape (applinks for /anuncio/ only)')
+      applinks: { apps: [], details: [{ appIDs: [FAKE_IOS], components: [{ '/': '/anuncio/*' }, { '/': '/publicacao/*' }] }] }
+    }, 'apple-app-site-association shape (applinks for /anuncio/ and /publicacao/ only)')
 }
 
 // A temporary root with deploy/seeder/.env and a www holding the SPA.
@@ -1153,6 +1154,19 @@ test('deploy.sh: conferir_antes rejects a bad VARANDA_MAX_MEMBERS and accepts an
     t.is(res.status, 1, 'VARANDA_FEIRA_ORIGIN=' + bad + ' exits 1')
     t.ok(res.stderr.includes('VARANDA_FEIRA_ORIGIN inválido em deploy/seeder/.env'), 'says the origin is invalid')
   }
+  // The post pages origin follows the same rule, on its own.
+  for (const ok of ['', 'https://varanda.example', 'https://varanda.example:8443']) {
+    t.is(run('VARANDA_POSTS_ORIGIN=' + ok + '\n').status, 0, 'VARANDA_POSTS_ORIGIN=' + ok + ' passes')
+  }
+  for (const bad of ['http://varanda.example', 'https://Varanda.example', 'https://varanda.example/', 'varanda.example', 'https://varanda.example/p']) {
+    const res = run('VARANDA_POSTS_ORIGIN=' + bad + '\n')
+    t.is(res.status, 1, 'VARANDA_POSTS_ORIGIN=' + bad + ' exits 1')
+    t.ok(res.stderr.includes('VARANDA_POSTS_ORIGIN inválido em deploy/seeder/.env'), 'says the posts origin is invalid')
+    t.absent(res.stderr.includes('VARANDA_FEIRA_ORIGIN'), 'not blamed on the Feira origin')
+    const withFeira = run('VARANDA_FEIRA_ORIGIN=https://varanda.example\nVARANDA_POSTS_ORIGIN=' + bad + '\n')
+    t.is(withFeira.status, 1, 'a valid Feira origin does not excuse a bad posts origin')
+  }
+  t.is(run('VARANDA_FEIRA_ORIGIN=https://varanda.example\nVARANDA_POSTS_ORIGIN=https://outra.example\n').status, 0, 'both origins set pass')
   const drops = run('VARANDA_INVITES_PER_WEEK=1\nVARANDA_INVITE_DROPS=1\n')
   t.is(drops.status, 0, 'both set passes: ' + drops.stderr)
   t.is(run('VARANDA_INVITE_DROPS=2\nVARANDA_INVITES_PER_WEEK=1\n').status, 1, 'VARANDA_INVITE_DROPS only takes 1')
@@ -1171,6 +1185,27 @@ test('compose.web.yaml: the seeder origin is VARANDA_FEIRA_ORIGIN, empty by defa
   const example = fs.readFileSync(path.join(repoRoot, 'deploy/seeder/seeder.env.example'), 'utf8').split('\n')
   t.ok(example.some((l) => /^#VARANDA_FEIRA_ORIGIN=/.test(l)), 'seeder.env.example documents VARANDA_FEIRA_ORIGIN')
   t.ok(example.some((l) => /^#VARANDA_FEIRA_INVITES_PER_WEEK=10$/.test(l)), 'seeder.env.example documents VARANDA_FEIRA_INVITES_PER_WEEK')
+})
+
+// The post pages switch is its own variable, off by default, only on the
+// seeder, and never derived from the Feira origin.
+test('compose.web.yaml and seeder.env.example: VARANDA_POSTS_ORIGIN is optional, empty by default and only on the seeder', (t) => {
+  const webLines = fs.readFileSync(COMPOSE_WEB, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
+  const hits = webLines.map((l, i) => [l, i]).filter(([l]) => l.includes('VARANDA_POSTS_ORIGIN'))
+  t.is(hits.length, 1, 'mentioned exactly once')
+  const start = webLines.findIndex((l) => /^ {2}seeder:\s*$/.test(l))
+  let end = webLines.length
+  for (let i = start + 1; i < webLines.length; i++) {
+    if (/^ {0,2}\S/.test(webLines[i])) { end = i; break }
+  }
+  t.ok(start !== -1 && hits[0][1] > start && hits[0][1] < end, 'it sits under the seeder service')
+  t.is(hits[0][0].trim(), 'VARANDA_POSTS_ORIGIN: "${VARANDA_POSTS_ORIGIN:-}"', 'optional (:-), never :?, never the Feira origin') // eslint-disable-line no-template-curly-in-string
+  const example = fs.readFileSync(path.join(repoRoot, 'deploy/seeder/seeder.env.example'), 'utf8').split('\n')
+  const at = example.findIndex((l) => /^#VARANDA_POSTS_ORIGIN=https:\/\/varanda\.example$/.test(l))
+  t.ok(at !== -1, 'seeder.env.example documents VARANDA_POSTS_ORIGIN, commented out (off)')
+  t.absent(example.some((l) => /^VARANDA_POSTS_ORIGIN=/.test(l)), 'never set by default')
+  const note = example.slice(Math.max(0, at - 8), at).join('\n')
+  t.ok(/versão 48/.test(note), 'the comment ties it to Terms version 48')
 })
 
 test('deploy.sh: limites_conta matches the ranges in account.js LIMIT_ENV', (t) => {

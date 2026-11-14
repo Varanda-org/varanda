@@ -16,6 +16,12 @@ test('native group and community links reach the shell through Linking', (t) => 
   t.absent(s.includes("hostedPage === true && Platform.OS === 'web'"))
 })
 
+test('a public post link opens only on a hosted node, once', (t) => {
+  const s = source()
+  t.ok(s.includes("if (pendingPost === null || !atTabs || mode !== 'hosted') return"), 'waits for the tabs and a hosted node')
+  t.ok(s.includes('}, [pendingPost, atTabs, mode, openThread])'))
+})
+
 test('a group or community link is never consent to join', (t) => {
   const s = source()
   t.absent(s.includes('group.join'))
@@ -72,6 +78,6 @@ test('Entrar announces a pending entry link and agora nao drops it', (t) => {
   const s = source()
   t.ok(s.includes('entryCardText(pendingLink.kind)'))
   t.ok(s.includes('const entryProp = invite === null && pendingLink !== null'), 'a pending profile invite always wins')
-  t.ok(s.includes('invite={inviteProp || entryProp}'))
+  t.ok(s.includes('invite={inviteProp || entryProp || postProp}'))
   t.ok(s.includes('onDismiss: () => { dropEntryLink(); setPendingLink(null) }'))
 })
