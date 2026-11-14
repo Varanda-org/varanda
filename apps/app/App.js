@@ -108,7 +108,7 @@ import { useTerms } from './src/useTerms'
 import { useAgeMemory } from './src/useAgeMemory'
 import { INTRO_VERSION, introDecision } from './src/intro'
 import { useIntro } from './src/useIntro'
-import { CONNECT_PATIENCE_MS, DETAILS_GRACE_MS, SPLASH_MIN_MS, bootPatienceMs, bootProgress, coverBoot, coverConnecting, detailsGraceOver, holdBootCover, holdSplash, previewAllowed } from './src/splashGate'
+import { CONNECT_PATIENCE_MS, SPLASH_MIN_MS, bootPatienceMs, bootProgress, coverBoot, coverConnecting, holdBootCover, holdSplash, previewAllowed, ruaFeedReady } from './src/splashGate'
 import { Btn, ErrorText, Page, errorText } from './src/ui'
 import { Stepper } from './src/ui/Stepper'
 import { ThemeProvider, useStyles, useTheme } from './src/ui/ThemeProvider'
@@ -355,12 +355,10 @@ function Member () {
   const bootCoverAt = useRef(null)
   const bootStepRef = useRef(null)
   const bootSettled = useRef(false)
-  // Names and counts get a short grace after A Rua's first page so slow
-  // detail reads cannot keep a usable feed covered.
-  const [feedBoot, setFeedBoot] = useState({ page: false, details: false })
-  const feedPageAt = useRef(null)
+  // A Rua's first page, its details and Momentos settle separately so the
+  // cover waits for the whole first screen, within the content patience.
+  const [feedBoot, setFeedBoot] = useState({ page: false, details: false, moments: false })
   const onFeedBoot = useCallback((stage) => {
-    if (stage === 'page' && feedPageAt.current === null) feedPageAt.current = Date.now()
     setFeedBoot((b) => (b[stage] ? b : { ...b, [stage]: true }))
   }, [])
   const barRef = useRef(0)
@@ -2813,7 +2811,7 @@ function Member () {
   const sideEdges = { top: 'additive', bottom: 'additive', left: 'off', right: 'off' }
 
   // Only grows: a later step or reconnect never moves the bar back.
-  const bootBar = Math.max(barRef.current, bootProgress({ phase: node.phase, step, page: feedBoot.page, details: feedBoot.details }))
+  const bootBar = Math.max(barRef.current, bootProgress({ phase: node.phase, step, page: feedBoot.page, details: feedBoot.details, moments: feedBoot.moments }))
   barRef.current = bootBar
   const splash = <Splash edges={sideEdges} progress={bootBar} />
   // The intro cards come first, once per device (src/intro.js): presentation
@@ -2853,16 +2851,9 @@ function Member () {
   // Conexão must not spend it. SLOW_LOOKUP_MS equals the patience, so
   // 'carregando' needs this clock of its own to reach "Continuar mesmo assim".
   // Render-time ref writes, as with released.current = true.
-  // Only A Rua as the first screen waits for its rows; a stacked screen (a
-  // link opened at boot) or another tab shows at once.
-  const feedGrace = !feedBoot.details && tab === 'rua' && topEntry === null && detailsGraceOver({ page: feedBoot.page, pageAtMs: feedPageAt.current, nowMs: Date.now() })
-  const feedReady = feedBoot.details || tab !== 'rua' || topEntry !== null || feedGrace
-  useEffect(() => {
-    if (!feedBoot.page || feedBoot.details) return
-    const remaining = Math.max(0, DETAILS_GRACE_MS - (Date.now() - feedPageAt.current))
-    const t = setTimeout(() => bumpSplash((n) => n + 1), remaining + 50)
-    return () => clearTimeout(t)
-  }, [feedBoot.page, feedBoot.details])
+  // Only A Rua as the first screen waits for its details and Momentos; a
+  // stacked screen (a link opened at boot) or another tab shows at once.
+  const feedReady = ruaFeedReady({ details: feedBoot.details, moments: feedBoot.moments, onRua: tab === 'rua', stacked: topEntry !== null })
   const cover = coverBoot({ step, passkeyKnown: passkey === null || pkStatus !== null || !!passkey.error, age: ageNeeded, ageError, phone: phone.gate, phoneError: phoneErrorShown, infoKnown: info !== null || infoError !== '', profileSlow: slow, feedReady })
   if (atShell && cover && !bootSettled.current && bootStepRef.current !== step) {
     bootStepRef.current = step
@@ -2897,8 +2888,8 @@ function Member () {
   useEffect(() => {
     if (!atShell || coveringBoot || splashEndMarked.current) return
     splashEndMarked.current = true
-    perfMarks().mark('splash-end', feedGrace ? 'grace' : feedReady ? 'feedReady' : 'patience')
-  }, [atShell, coveringBoot, feedReady, feedGrace])
+    perfMarks().mark('splash-end', feedReady ? 'feedReady' : 'patience')
+  }, [atShell, coveringBoot, feedReady])
   const markedTab = useRef(tab)
   useEffect(() => {
     if (markedTab.current === tab) return
