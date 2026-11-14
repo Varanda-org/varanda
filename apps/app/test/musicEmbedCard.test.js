@@ -38,11 +38,13 @@ test('the card never claims playback and watches other players', (t) => {
 })
 
 test('the frame mounts only for a live state on the visible screen', (t) => {
-  t.ok(src.includes("import { EmbedBandBottom, ScreenVisible, SheetDepth } from './screenVisible'"), 'imports ScreenVisible')
+  t.ok(src.includes("import { EmbedBandBottom, EmbedHost, EmbedRowKey, RowShift, ScreenVisible, SheetDepth } from './screenVisible'"), 'imports ScreenVisible')
   t.ok(src.includes('const visible = useContext(ScreenVisible)'), 'reads ScreenVisible')
   const frames = [...src.matchAll(/<EmbedFrame\b/g)]
   t.is(frames.length, 1, 'one EmbedFrame')
   t.ok(/state\.live && active\s*\?\s*\(\s*$/.test(src.slice(0, frames[0].index)), 'preceded by state.live && active')
+  t.ok(/\{live && key !== '' && !inline\s*\? <View style=\{\{ height \}\} accessibilityLabel=\{'Player do ' \+ name\} onStartShouldSetResponder=\{\(\) => true\} \/>\s*: state\.live && active\s*\?/.test(src), 'a card in a list row leaves an empty slot of the player height for the layer')
+  t.ok(src.includes('const live = state.live && active'))
   const frame = src.slice(frames[0].index, src.indexOf('/>', frames[0].index))
   for (const prop of [
     'embedUrl={embed.embedUrl}',
@@ -52,6 +54,7 @@ test('the frame mounts only for a live state on the visible screen', (t) => {
     'height={height}'
   ]) t.ok(frame.includes(prop), prop)
   t.ok(frame.includes('onOpen={openFromPlayer}'), 'a link inside the player is handed to openFromPlayer')
+  t.ok(frame.includes('onGone={() => apply(EMBED_IDLE)}'), 'a dead content process brings the stored card back')
   t.ok(/const out = embedExitUrl\(embed, target\)\s*if \(out !== null\) openExternal\(out\)/.test(src), 'it leaves the app only through embedExitUrl')
   t.ok(src.includes('  embedExitUrl,\n') && src.includes("} from '../musicEmbed'"), 'embedExitUrl comes from ../musicEmbed')
   t.ok(src.includes('const active = visible && !held && fits'), 'active needs the visible screen, no hold and a fit')
@@ -61,13 +64,14 @@ test('the frame mounts only for a live state on the visible screen', (t) => {
 })
 
 test('the card checks its slot every 500 ms against the feed band', (t) => {
-  t.ok(src.includes("import { EMBED_IDLE, EMBED_PARKED, EMBED_TICK_MS, EMBED_WAITING, embedSlots, embedStep, embedsHeld, farFromBand, mostlyHidden, onEmbedHold } from '../embedLive'"), 'imports from ../embedLive')
+  t.ok(src.includes("import { EMBED_IDLE, EMBED_PARKED, EMBED_TICK_MS, EMBED_WAITING, embedSlots, embedStep, embedsHeld, mostlyHidden, onEmbedHold } from '../embedLive'"), 'imports from ../embedLive')
+  t.absent(/farFromBand|EMBED_FAR_SCREENS|\bfar\b/.test(src), 'no distance rule')
   t.absent(/function mostlyHidden/.test(src), 'no local mostlyHidden')
   t.ok(src.includes('setInterval(check, EMBED_TICK_MS)'), 'EMBED_TICK_MS in setInterval')
   t.ok(src.includes('const top = insets.top + layout.topBar'), 'the band starts under the top bar')
   t.ok(src.includes('const bottom = win.height - (insets.bottom + (tabBarShown ? layout.tabBar : 0))'), 'the band ends above the tab bar, when there is one')
-  t.ok(src.includes('settle(mostlyHidden(x, y, w, h, top, bottom, win.width), true, farFromBand(y, h, top, bottom, win.height))'), 'measured against the band, and how far from it')
-  t.ok(/const settle = \(hidden, mayYield = true, far = false\) => \{\s*pending = false\s*apply\(embedStep\(stateRef\.current, \{ hidden, allowed, turned, free, far \}\), mayYield\)\s*\}/.test(src), 'embedStep with the answer and far')
+  t.ok(src.includes('settle(mostlyHidden(x, y, w, h, top, bottom, win.width))'), 'measured against the band')
+  t.ok(/const settle = \(hidden, mayYield = true\) => \{\s*pending = false\s*apply\(embedStep\(stateRef\.current, \{ hidden, allowed, turned, free \}\), mayYield\)\s*\}/.test(src), 'embedStep with the answer')
   t.ok(src.includes('return () => { cancelled = true; clearInterval(timer) }'), 'the cleanup')
   t.ok(/if \(!active\) \{\s*apply\(EMBED_IDLE\)\s*return undefined\s*\}/.test(src), 'inactive drops the frame at once, with no timer')
   t.ok(/if \(!view \|\| typeof view\.measureInWindow !== 'function'\) \{\s*unseen\(\)\s*return\s*\}/.test(src), 'no slot or no measure counts as hidden')
@@ -90,14 +94,6 @@ test('a check whose answer never came counts as hidden', (t) => {
   t.ok(/measureInWindow\(\(x, y, w, h\) => \{\s*if \(cancelled \|\| !alive\.current \|\| id !== round\) return\n/.test(src), 'only the latest check applies')
 })
 
-test('a fresh measurement says whether the card is far from the band', (t) => {
-  t.is((src.match(/farFromBand\(/g) || []).length, 2, 'only the two fresh measurement paths ask how far')
-  t.is((src.match(/farFromBand\(y, h, top, (?:bottom|lower), win\.height\)/g) || []).length, 2, 'both against the window height')
-  t.ok(/if \(missed\) settle\(true, false\)\s*pending = true/.test(src), 'the late path stays hidden, never far')
-  t.ok(src.includes('const unseen = () => settle(true)\n'), 'an unmeasurable slot is never far')
-  t.ok(/limit > 0\)\) \{\s*settle\(true\)\s*return\s*\}/.test(src), 'a band with no answer is never far')
-})
-
 // The card's check() lifted out of its source and run against stub
 // measurements, with the real embedLive rules.
 async function liftCheck (env) {
@@ -105,8 +101,8 @@ async function liftCheck (env) {
   const start = raw.indexOf('    let round = 0')
   const end = raw.indexOf('    // The dwell counts ticks')
   if (start === -1 || end === -1) throw new Error('check() not found in MusicEmbedCard.js')
-  const names = ['playbackClaimCount', 'claims', 'apply', 'EMBED_IDLE', 'embedSlots', 'stateRef', 'base', 'win', 'embedStep', 'slot', 'band', 'alive', 'mostlyHidden', 'farFromBand', 'top', 'bottom', 'cancelled']
-  const all = { ...env, EMBED_IDLE: live.EMBED_IDLE, embedStep: live.embedStep, mostlyHidden: live.mostlyHidden, farFromBand: live.farFromBand, cancelled: false }
+  const names = ['playbackClaimCount', 'claims', 'apply', 'EMBED_IDLE', 'embedSlots', 'stateRef', 'base', 'win', 'embedStep', 'slot', 'band', 'alive', 'mostlyHidden', 'top', 'bottom', 'cancelled', 'placeFrame']
+  const all = { placeFrame: () => {}, ...env, EMBED_IDLE: live.EMBED_IDLE, embedStep: live.embedStep, mostlyHidden: live.mostlyHidden, cancelled: false }
   const make = new Function(...names, raw.slice(start, end) + '\nreturn check') // eslint-disable-line no-new-func
   return { check: make(...names.map((n) => all[n])), live }
 }
@@ -211,7 +207,7 @@ async function liftCards () {
   const start = raw.indexOf('  const apply = (')
   const end = raw.indexOf('  useEffect(() => {\n    alive.current = true')
   if (start === -1 || end === -1) throw new Error('apply() not found in MusicEmbedCard.js')
-  const names = ['embedSlots', 'release', 'stateRef', 'base', 'win', 'alive', 'setState', 'EMBED_PARKED', 'EMBED_IDLE', 'EMBED_WAITING']
+  const names = ['embedSlots', 'release', 'stateRef', 'base', 'win', 'alive', 'setState', 'EMBED_PARKED', 'EMBED_IDLE', 'EMBED_WAITING', 'hosted', 'host']
   const makeApply = new Function(...names, raw.slice(start, end) + '\nreturn apply') // eslint-disable-line no-new-func
   let most = 0
   const card = async () => {
@@ -225,7 +221,7 @@ async function liftCards () {
       slot: { current: { measureInWindow: (cb) => answers.push(cb) } },
       shown: []
     }
-    const apply = makeApply(slots, c.release, c.stateRef, c.base, c.win, c.alive, (s) => c.shown.push(s), live.EMBED_PARKED, live.EMBED_IDLE, live.EMBED_WAITING)
+    const apply = makeApply(slots, c.release, c.stateRef, c.base, c.win, c.alive, (s) => c.shown.push(s), live.EMBED_PARKED, live.EMBED_IDLE, live.EMBED_WAITING, { current: '' }, null)
     c.apply = (...args) => {
       apply(...args)
       most = Math.max(most, slots.count())
@@ -251,8 +247,8 @@ async function liftCards () {
     c.check = check
     c.seen = () => { check(); answer(300) }
     c.unseen = () => { check(); answer(2000) }
-    // More than 3 window heights (3 * 844) below the band's bottom (761).
-    c.far = () => { check(); answer(4000) }
+    // Many window heights below the band's bottom (761).
+    c.far = () => { check(); answer(40000) }
     c.answerSeen = () => answer(300)
     c.holds = () => c.release.current !== null
     c.asked = () => c.holds() && slots.yielding(c.release.current)
@@ -433,66 +429,25 @@ test('one of two waiting newcomers leaving leaves the other to ask again', async
   t.ok(most() <= 2, 'never more than two slots taken')
 })
 
-test('a parked holder found far away releases its slot', async (t) => {
+test('a parked holder found far away keeps its slot', async (t) => {
   const { live, slots, three, most } = await liftCards()
   const { a, b, c } = await three()
   a.park()
   t.is(a.stateRef.current, live.EMBED_PARKED)
   t.is(slots.count(), 2)
-  a.far()
-  t.is(a.stateRef.current, live.EMBED_IDLE, 'a check that finds it far unloads it')
-  t.absent(a.holds(), 'and releases its slot')
-  t.is(slots.count(), 1, 'one slot fewer is taken')
-  t.is(b.stateRef.current, live.EMBED_LIVE, 'the other holder is untouched')
-  c.seen()
-  t.is(c.stateRef.current, live.EMBED_LIVE, 'the waiting newcomer goes live on its next tick')
-  t.ok(c.holds())
+  for (let i = 0; i < 10; i++) a.far()
+  t.is(a.stateRef.current, live.EMBED_PARKED, 'a check that finds it far keeps it loaded')
+  t.ok(a.holds(), 'and its slot')
   t.is(slots.count(), 2)
   b.far()
-  t.is(b.stateRef.current, live.EMBED_IDLE, 'a live holder found far away unloads too, parked or not')
-  t.is(slots.count(), 1)
+  t.is(b.stateRef.current, live.EMBED_AWAY, 'a live holder found far away is only away')
+  t.ok(b.holds())
+  a.seen()
+  t.is(a.stateRef.current, live.EMBED_LIVE, 'scrolled back, the same frame is live again')
+  t.ok(a.holds())
+  c.seen()
+  t.is(c.stateRef.current, live.EMBED_WAITING, 'the newcomer still waits for a parked holder to yield')
   t.ok(most() <= 2, 'never more than two slots taken')
-})
-
-test('a late answer never counts as far', async (t) => {
-  const { check, live, stateRef, answers } = await liftLive()
-  check()
-  check()
-  t.is(stateRef.current, live.EMBED_AWAY, 'the missing answer counts as hidden only')
-  check()
-  t.is(stateRef.current, live.EMBED_PARKED, 'and keeps the frame loaded')
-  answers.splice(0).pop()(0, 4000, 300, 152)
-  t.is(stateRef.current, live.EMBED_IDLE, 'only a fresh far answer unloads it')
-})
-
-test('a lowered band measures far from its own bottom', async (t) => {
-  const run = async (y) => {
-    const stateRef = { current: null }
-    const answers = []
-    const { check, live } = await liftCheck({
-      playbackClaimCount: () => 0,
-      claims: { current: 0 },
-      apply: (next) => { stateRef.current = next },
-      embedSlots: { count: () => 1, free: () => false },
-      stateRef,
-      base: { current: false },
-      win: { width: 390, height: 844 },
-      slot: { current: { measureInWindow: (cb) => answers.push(cb) } },
-      band: { measure: (reply) => reply(600) },
-      alive: { current: true },
-      top: 99,
-      bottom: 761
-    })
-    stateRef.current = live.EMBED_LIVE
-    check()
-    answers.shift()(0, y, 300, 152)
-    return { state: stateRef.current, live }
-  }
-  // 600 + 3 * 844 = 3132; 761 + 3 * 844 = 3293.
-  const lowered = await run(3200)
-  t.is(lowered.state, lowered.live.EMBED_IDLE, 'far from the lowered band, though within reach of the window band')
-  const near = await run(3132)
-  t.is(near.state, near.live.EMBED_AWAY, 'at the reach of the lowered band it is only away')
 })
 
 test('the dwell counts ticks, not effect runs', (t) => {
@@ -507,9 +462,10 @@ test('a slot is acquired on going live and released on leave and unmount', (t) =
   t.ok(/done\(\)\s*\}\s*if \(next\.live && release\.current !== null\) embedSlots\.park\(release\.current, next === EMBED_PARKED\)\s*const changed/.test(src), 'a live card reports whether it is parked after the release block')
   t.absent(/onEvict|evicted/i.test(raw), 'no card is evicted by another')
   t.ok(/if \(!next\.live && release\.current !== null\) \{\s*const done = release\.current\s*release\.current = null\s*done\(\)/.test(src), 'apply releases on leaving live')
-  t.ok(/return \(\) => \{\s*alive\.current = false\s*if \(stateRef\.current === EMBED_WAITING\) embedSlots\.withdraw\(\)\s*stateRef\.current = EMBED_IDLE\s*const done = release\.current\s*release\.current = null\s*if \(typeof done === 'function'\) done\(\)/.test(src), 'unmount releases')
+  t.ok(/return \(\) => \{\s*alive\.current = false\s*if \(stateRef\.current === EMBED_WAITING\) embedSlots\.withdraw\(\)\s*const kept = stateRef\.current\.live \? hosted\.current : ''\s*hosted\.current = ''\s*stateRef\.current = EMBED_IDLE\s*const done = release\.current\s*release\.current = null\s*if \(kept !== '' && typeof done === 'function'\) \{\s*if \(playbackClaimCount\(\) !== claims\.current\) \{\s*if \(host\.keep\.drop\(kept\)\) return\s*\} else \{\s*embedSlots\.park\(done, true\)\s*if \(host\.keep\.orphan\(kept\)\) return\s*\}\s*\}\s*if \(typeof done === 'function'\) done\(\)/.test(src), 'unmount releases, or leaves a hosted frame parked with the list unless another player started')
+  t.ok(/if \(!next\.live && hosted\.current !== ''\) \{\s*const kept = hosted\.current\s*hosted\.current = ''\s*if \(host\.keep\.drop\(kept\)\) release\.current = null\s*\}/.test(src), 'leaving live drops a hosted frame, whose drop ran the release')
   t.ok(src.includes('    if (stateRef.current === EMBED_WAITING && next !== EMBED_WAITING && !next.live) embedSlots.withdraw()\n    if (!next.live && release.current !== null) {'), 'a card that stops waiting without going live withdraws its request, after the acquire block')
-  t.ok(/alive\.current = false\s*if \(stateRef\.current === EMBED_WAITING\) embedSlots\.withdraw\(\)\s*stateRef\.current = EMBED_IDLE/.test(src), 'a waiting card withdraws on unmount, before its state is reset')
+  t.ok(/alive\.current = false\s*if \(stateRef\.current === EMBED_WAITING\) embedSlots\.withdraw\(\)\s*const kept[^\n]*\s*hosted\.current = ''\s*stateRef\.current = EMBED_IDLE/.test(src), 'a waiting card withdraws on unmount, before its state is reset')
 })
 
 test('a turned window keeps a live frame', (t) => {
@@ -542,6 +498,8 @@ test('the visible-screen signal is provided by the App and the stack', (t) => {
   t.ok(visible.includes('export const ScreenCovered = createContext(false)'))
   t.ok(visible.includes('export const SheetDepth = createContext(0)'))
   t.ok(visible.includes('export const EmbedBandBottom = createContext(null)'))
+  t.ok(visible.includes('export const EmbedHost = createContext(null)'))
+  t.ok(visible.includes("export const EmbedRowKey = createContext('')"))
   const stack = withoutComments(fs.readFileSync(path.join(APP, 'src/ui/StackLayer.js'), 'utf8'))
   t.ok(stack.includes('const covered = useContext(ScreenCovered)'), 'the stack reads ScreenCovered')
   t.ok(stack.includes("<ScreenVisible.Provider value={!covered && role === 'top'}>"), 'only the top entry is visible')
@@ -571,7 +529,7 @@ test('a list may lower the band', (t) => {
   const call = src.indexOf('band.measure(')
   t.ok(measure !== -1 && call > measure, 'band.measure is called inside the measureInWindow callback')
   t.ok(/if \(!\(typeof limit === 'number' && Number\.isFinite\(limit\) && limit > 0\)\) \{\s*settle\(true\)\s*return\s*\}/.test(src), 'a band with no usable answer counts as hidden')
-  t.ok(/const lower = Math\.min\(bottom, limit\)\s*settle\(mostlyHidden\(x, y, w, h, top, lower, win\.width\), true, farFromBand\(y, h, top, lower, win\.height\)\)/.test(src), 'a usable answer lowers the band, for hidden and far alike')
+  t.ok(/const lower = Math\.min\(bottom, limit\)\s*settle\(mostlyHidden\(x, y, w, h, top, lower, win\.width\)\)/.test(src), 'a usable answer lowers the band')
   t.ok(/const withLimit = \(limit\) => \{[^}]*?if \(cancelled \|\| !alive\.current \|\| id !== round\) return\n/.test(src), 'cancelled is tested again in the band callback')
   t.ok(/try \{\s*band\.measure\(withLimit\)\s*\} catch \{\s*withLimit\(null\)\s*\}/.test(src), 'a throw counts as no answer, so hidden')
   t.absent(/:\s*bottom\b/.test(src.slice(src.indexOf('const withLimit'), src.indexOf('band.measure(withLimit)'))), 'the band callback never falls back to the window band')
@@ -665,48 +623,19 @@ test('embedLive: mostlyHidden', async (t) => {
   t.is(EMBED_TICK_MS, VISIBILITY_MS)
 })
 
-test('embedLive: farFromBand', async (t) => {
-  const { farFromBand: far, EMBED_FAR_SCREENS } = await import('../src/embedLive.js')
-  t.is(EMBED_FAR_SCREENS, 3)
-  // Band 99 to 761 in an 844 pt window: the reach is 3 * 844 = 2532 pt.
-  t.is(far(3294, 152, 99, 761, 844), true, 'below the reach')
-  t.is(far(3293, 152, 99, 761, 844), false, 'exactly at the reach below')
-  t.is(far(-2586, 152, 99, 761, 844), true, 'above the reach')
-  t.is(far(-2585, 152, 99, 761, 844), false, 'exactly at the reach above')
-  t.is(far(3200, 200, 99, 761, 844), false, 'starting inside the reach below')
-  t.is(far(-2600, 200, 99, 761, 844), false, 'ending inside the reach above')
-  t.is(far(2000, 152, 99, 761, 844), false, 'out of the band but within reach')
-  t.is(far(300, 152, 99, 761, 844), false, 'in the band')
-  for (const bad of [NaN, Infinity, -Infinity, undefined, null, '4000']) {
-    t.is(far(bad, 152, 99, 761, 844), false, 'a non-finite y is never far')
-    t.is(far(4000, bad, 99, 761, 844), false, 'a non-finite height is never far')
-    t.is(far(4000, 152, bad, 761, 844), false, 'a non-finite top is never far')
-    t.is(far(4000, 152, 99, bad, 844), false, 'a non-finite bottom is never far')
-    t.is(far(4000, 152, 99, 761, bad), false, 'a non-finite window height is never far')
-  }
-  t.is(far(4000, 0, 99, 761, 844), false, 'a zero height is never far')
-  t.is(far(4000, -152, 99, 761, 844), false, 'a negative height is never far')
-  t.is(far(4000, 152, 99, 761, 0), false, 'a zero window height is never far')
-  t.is(far(4000, 152, 99, 761, -844), false, 'a negative window height is never far')
-})
-
-test('embedLive: a check that finds a loaded frame far away unloads it', async (t) => {
-  const { embedStep, EMBED_IDLE, EMBED_LIVE, EMBED_AWAY, EMBED_PARKED } = await import('../src/embedLive.js')
+test('embedLive: a loaded frame is kept at any distance', async (t) => {
+  const live = await import('../src/embedLive.js')
+  const { embedStep, EMBED_LIVE, EMBED_AWAY, EMBED_PARKED } = live
+  t.absent('farFromBand' in live, 'no distance rule')
+  t.absent('EMBED_FAR_SCREENS' in live)
   const far = { hidden: true, far: true, allowed: true, turned: false, free: true }
-  const hidden = { ...far, far: false }
-  t.is(embedStep(EMBED_LIVE, far), EMBED_IDLE, 'a live frame')
-  t.is(embedStep(EMBED_AWAY, far), EMBED_IDLE, 'an away frame')
-  t.is(embedStep(EMBED_PARKED, far), EMBED_IDLE, 'a parked frame')
-  t.is(embedStep({ live: true, seen: 2 }, far), EMBED_IDLE, 'any valid live state')
-  t.is(embedStep(EMBED_AWAY, { ...far, turned: true }), EMBED_LIVE, 'a turned window keeps the frame, far or not')
-  t.is(embedStep(EMBED_LIVE, { ...far, turned: true }), EMBED_LIVE)
+  t.is(embedStep(EMBED_LIVE, far), EMBED_AWAY, 'a far check is a hidden check')
+  t.is(embedStep(EMBED_AWAY, far), EMBED_PARKED, 'and parks the frame on the second')
   let state = EMBED_PARKED
-  for (let i = 0; i < 1000; i++) state = embedStep(state, hidden)
-  t.is(state, EMBED_PARKED, 'hidden checks alone keep a parked frame for good')
-  t.is(embedStep(state, far), EMBED_IDLE, 'the first far check unloads it')
-  t.is(embedStep(EMBED_IDLE, far), EMBED_IDLE, 'a card that is not live stays idle')
-  t.is(embedStep({ live: false, seen: 1 }, far), EMBED_IDLE, 'a dwell resets')
-  t.is(embedStep(EMBED_LIVE, { ...far, far: 1 }), EMBED_AWAY, 'only far: true counts as far')
+  for (let i = 0; i < 1000; i++) state = embedStep(state, far)
+  t.is(state, EMBED_PARKED, 'far checks keep a parked frame for good')
+  t.is(embedStep(EMBED_LIVE, { ...far, hidden: false }), EMBED_LIVE, 'a visible far sample stays live')
+  t.is(embedStep(EMBED_PARKED, { ...far, hidden: false }), EMBED_LIVE, 'a parked frame back in view is live')
 })
 
 test('embedLive: a card goes live after two visible checks', async (t) => {
@@ -917,4 +846,10 @@ test('embedLive: holds are layered', async (t) => {
     off()
     for (const release of releases) release()
   }
+})
+
+test('the card hands its row shift to the list layer', (t) => {
+  t.ok(/const shift = useContext\(RowShift\)/.test(src))
+  t.ok(/host\.keep\.show\(key, \{[\s\S]*?\bshift\n\s*\}, release\.current, rowKey\)/.test(src))
+  t.ok(src.includes('}, [live, height, width, key, shift])'))
 })
