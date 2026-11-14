@@ -229,7 +229,7 @@ const makeStyles = (colors) => StyleSheet.create({
   skProfileCounts: { flexDirection: 'row', gap: space.lg, marginTop: space.sm },
   skMediaWrap: { width: '100%', maxWidth: layout.column, alignSelf: 'center', paddingHorizontal: space.lg, paddingVertical: space.md },
   // A post photo, not the square listing tile, clipped like MediaGrid.
-  skMedia: { width: '100%', aspectRatio: 4 / 3, borderRadius: radius.bubble - 4, backgroundColor: colors.skeleton },
+  skMedia: { width: '100%', aspectRatio: 4 / 3, borderRadius: 14, backgroundColor: colors.skeleton },
   empty: { alignItems: 'center', gap: 12, paddingVertical: 32, paddingHorizontal: 16 },
   emptyTitle: { ...type.emptyTitle, color: colors.ink, textAlign: 'center' },
   emptyBody: { textAlign: 'center' },

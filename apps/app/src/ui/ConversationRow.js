@@ -107,11 +107,11 @@ const makeStyles = (colors) => StyleSheet.create({
   pressed: { backgroundColor: colors.line },
   body: { flex: 1, minWidth: 0, gap: 2 },
   line: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
-  title: { ...type.postName, fontSize: 16, fontWeight: '600', lineHeight: 21, flex: 1, minWidth: 0, color: colors.ink },
+  title: { ...type.rowName, flex: 1, minWidth: 0, color: colors.ink },
   titleUnread: { fontWeight: '700' },
   time: { ...type.replyMark, color: colors.soft, flexShrink: 0, textAlign: 'right' },
   timeUnread: { color: colors.accent, fontWeight: '600' },
-  preview: { ...type.postMeta, fontSize: 14, lineHeight: 19, flex: 1, minWidth: 0, color: colors.soft },
+  preview: { ...type.postMeta, fontSize: 14, lineHeight: 20, flex: 1, minWidth: 0, color: colors.soft },
   own: { color: colors.accent, fontWeight: '600' },
   previewUnread: { color: colors.ink, fontWeight: '700' },
   // A plain 8 pt disc: the spoken label already carries the count.
