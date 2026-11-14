@@ -81,3 +81,14 @@ test('Entrar announces a pending entry link and agora nao drops it', (t) => {
   t.ok(s.includes('invite={inviteProp || entryProp || postProp}'))
   t.ok(s.includes('onDismiss: () => { dropEntryLink(); setPendingLink(null) }'))
 })
+
+test('the post opening card sits between the invite card and the intro', (t) => {
+  const s = source()
+  const invite = s.indexOf("opening === 'card' && openResult !== null")
+  const post = s.indexOf('postOpeningGate(')
+  const intro = s.indexOf('if (showIntro) {')
+  t.ok(invite > 0 && post > invite && intro > post)
+  t.ok(s.includes('inviteOpening: opening'))
+  t.ok(s.includes('dismissed: postOpenLater'))
+  t.ok(s.includes('<PostLinkOpen onEnter={() => intro.markSeen()}'))
+})

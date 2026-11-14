@@ -75,7 +75,7 @@ import { BlockSheet } from './src/ui/BlockSheet'
 import { PageNoticeSheet } from './src/ui/PageNoticeSheet'
 import { PostShareSheet } from './src/ui/PostShareSheet'
 import { PostPublicProvider } from './src/postPublicContext'
-import { capturePostPath, postLink, postRef } from './src/postLink'
+import { capturePostPath, postLink, postOpeningGate, postRef } from './src/postLink'
 import { clearPostLink, savePostLink, takePostLink } from './src/postLinkStore'
 import { fetchMember } from './src/indexClient'
 import { pageDmPlan, pageReadKind, pageNoticeSeen } from './src/pageNotice'
@@ -122,6 +122,7 @@ import { DeletionNote } from './src/ui/DeletionNote'
 import { InviteDropNote } from './src/ui/InviteDropNote'
 import { InviteArrival } from './src/ui/InviteArrival'
 import { InviteCardOpen } from './src/ui/InviteCardOpen'
+import { PostLinkOpen } from './src/ui/PostLinkOpen'
 import { useInviteDrop } from './src/useInviteDrop'
 import { useSharedIntent } from './src/useSharedIntent'
 import { UpdateNote } from './src/ui/UpdateNote'
@@ -1656,6 +1657,7 @@ function Member () {
   // Agora não on the opening card: hidden for this load, code and card kept.
   const [openLater, setOpenLater] = useState(false)
   const [openHow, setOpenHow] = useState(false)
+  const [postOpenLater, setPostOpenLater] = useState(false)
   const openResult = cardViewFor('open')
   // An offline membership ('unknown') or a node not ready yet is still
   // pending; an unlinked key, a bad signature or an expired card is not a card.
@@ -2991,6 +2993,13 @@ function Member () {
         edges={sideEdges}
       />
     )
+  }
+  // A shared post link on a first visit: say what waits before the intro
+  // cards. Entrar marks them seen, as the invite card does, and leads to
+  // the Terms and then Entrar, where the post card and the destination stay.
+  if (postOpeningGate({ introShow: showIntro, ageReturn: AGE_RETURN, inviteOpening: opening, otherLink: invite !== null || pendingLink !== null, post: pendingPost, dismissed: postOpenLater })) {
+    if (openHow) return <Introducao key='how' onDone={() => setOpenHow(false)} sidePad={sidePad} edges={sideEdges} />
+    return <PostLinkOpen onEnter={() => intro.markSeen()} onHow={() => setOpenHow(true)} onLater={() => setPostOpenLater(true)} sidePad={sidePad} edges={sideEdges} />
   }
   if (showIntro) {
     introRendered.current = true
