@@ -10543,7 +10543,7 @@ Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de pas
 
 ## 227. Escala de texto nova: títulos em 24 pt e negrito em 600 (PR feat/restyle-type-scale)
 
-Esta seção confere a escala de texto nova dos tokens do tema. Os títulos da barra e o nome no perfil passam a 24 pt com entrelinha de 32, o negrito passa a 600 (antes 700 e 800), e entram dois tamanhos novos: o nome em linha de lista (16 pt, 600, entrelinha 24) e o título de conversa (20 pt, 600, entrelinha 28). O espaçamento e as formas seguem um kit de interface social usado só como referência de números; as cores, o pôr do sol e as listras continuam sendo do Varanda. A tabela de Tipografia está em `apps/site/artwork/app-design.md`.
+Esta seção confere a escala de texto nova dos tokens do tema. Os títulos da barra e o nome no perfil passam a 24 pt com entrelinha de 32 e peso 600 (antes 800), o nome da publicação, as pílulas, os títulos de folha e os estados vazios passam de 700 para 600, e entram dois tamanhos novos: o nome em linha de lista (16 pt, 600, entrelinha 24) e o título de conversa (20 pt, 600, entrelinha 28). O espaçamento e as formas seguem um kit de interface social usado só como referência de números; as cores, o pôr do sol e as listras continuam sendo do Varanda. A tabela de Tipografia está em `apps/site/artwork/app-design.md`.
 
 Nada disso envia pedido nem busca dado: é só a tela. Não há mudança de protocolo, RPC nem Termos, e nenhuma dependência nova.
 
