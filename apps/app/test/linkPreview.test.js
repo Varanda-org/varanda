@@ -259,6 +259,8 @@ test('MusicEmbedCard draws stored data until it is on screen', (t) => {
   t.absent(src.includes('MediaView'), 'no MediaView of its own')
   const card = withoutComments(read('ui', 'LinkCard.js'))
   t.ok(card.includes('const open = () => openExternal(url)'), 'a LinkCard always opens its link on a tap')
+  const cover = withoutComments(read('ui', 'EmbedCover.js'))
+  t.absent(/openExternal|Linking|onPress=/.test(cover), 'the cover never opens a link')
   t.absent(/\bstill\b/.test(card), 'LinkCard has no still prop')
   const frames = [...src.matchAll(/<EmbedFrame\b/g)]
   t.is(frames.length, 1, 'one EmbedFrame')

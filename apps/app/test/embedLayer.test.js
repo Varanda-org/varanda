@@ -380,7 +380,7 @@ test('the layer keeps every frame mounted', (t) => {
   t.ok(layer.includes('useSyncExternalStore(keep.subscribe, keep.list, keep.list)'), 'reads the keep through useSyncExternalStore')
   t.ok(layer.includes("pointerEvents='box-none'"), 'the layer takes no touch of its own')
   t.ok(layer.includes('StyleSheet.absoluteFill'))
-  t.ok(layer.includes('<Animated.View key={entry.key} collapsable={false} pointerEvents={parked ? \'none\' : \'auto\'} style={framePlace(entry)}>'), 'keyed by entry, and a parked frame takes no touch')
+  t.ok(layer.includes('<Animated.View collapsable={false} pointerEvents={parked ? \'none\' : \'auto\'} style={fading ? [framePlace(entry), { opacity }] : framePlace(entry)}>'), 'keyed by entry, and a parked frame takes no touch')
   t.ok(layer.includes("{ position: 'absolute', left: 0, top: 0, width: spec.width, height: spec.height, opacity: 0 }"), 'a parked frame keeps its size')
   t.ok(layer.includes('const parked = rect === null || entry.ready !== true'), 'a frame whose page has not loaded is parked')
   t.absent(/display:\s*'none'/.test(layer), 'never display none')
@@ -946,7 +946,11 @@ test('a placed frame follows its row shift, a parked one never moves', (t) => {
 })
 
 test('every kept frame wrapper is an Animated.View, so a shift never remounts it', (t) => {
-  t.ok(/<Animated\.View key=\{entry\.key\}[^>]*style=\{framePlace\(entry\)\}/.test(layer))
+  t.ok(layer.includes('<Kept key={entry.key}'), 'each entry renders through Kept, keyed by entry')
+  t.ok(/<Animated\.View collapsable=\{false\}[^>]*style=\{fading \? \[framePlace\(entry\), \{ opacity \}\] : framePlace\(entry\)\}/.test(layer), 'the wrapper places by framePlace in both branches')
+  t.ok(layer.includes('useReveal(entry.ready === true)'), 'the fade is keyed on ready only')
+  t.absent(/useReveal\([^)]*rect/.test(layer), 'a row coming back never fades again')
+  t.ok(layer.includes('const fading = !parked && !settled'), 'the fade style applies only while fading')
   t.absent(layer.includes('<View key={entry.key}'))
 })
 
