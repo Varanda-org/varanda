@@ -63,6 +63,7 @@ import { hostedPage, rememberedConfig } from './src/configStore'
 import { pagesOn, setCoreReach } from './src/pageGate'
 import { CROSS_ORIGIN_PAGES } from './src/pageReach'
 import { installationOrigin, rpIdOf } from './src/installation'
+import { swappedInstallation } from './src/installationSwap'
 import { parseSnapshot } from './src/feedSnapshot'
 import { clearSnapshot, loadSnapshotText, previewCapable } from './src/feedSnapshotStore'
 import { sessionStore } from './src/sessionStore'
@@ -447,6 +448,9 @@ function Member () {
   const [avisosNew, setAvisosNew] = useState(false)
   const [info, setInfo] = useState(null)
   const [infoError, setInfoError] = useState('')
+  // The link card of the setup read the account (or failed to).
+  const [acctKnown, setAcctKnown] = useState(false)
+  const knowAccount = useCallback(() => setAcctKnown(true), [])
   // Latched once node.info confirmed the identity and the certificate: a
   // later failed or slow read never hides the tabs again.
   const [setupDone, setSetupDone] = useState(false)
@@ -493,6 +497,8 @@ function Member () {
     setInfo(i)
     setInfoError('')
   }, [])
+
+  const failInfo = useCallback((text) => setInfoError(text), [])
 
   // Browser node: the passkey identity. Every page load starts locked; the
   // tabs show only while it is unlocked and node.info is about that key.
@@ -658,6 +664,7 @@ function Member () {
   useEffect(() => {
     setInfo(null)
     setInfoError('')
+    setAcctKnown(false)
     setSetupDone(false)
     setReachedTabs(false)
   }, [generation])
@@ -921,6 +928,18 @@ function Member () {
   const ageReadKeyRef = useRef(null)
   const ageOriginRef = useRef(ageOrigin)
   ageOriginRef.current = ageOrigin
+  // The held sign-up invite belongs to the installation it was meant for. The
+  // policy, the age answer and the Feira entry carry their origin and read as
+  // unread under another; this one is stored bare, so a swap drops it.
+  const inviteOriginRef = useRef(ageOrigin)
+  useEffect(() => {
+    const previous = inviteOriginRef.current
+    inviteOriginRef.current = ageOrigin
+    if (!swappedInstallation(previous, ageOrigin)) return
+    dropSignupInvite()
+    dropSignupInviteCard()
+    reloadCard()
+  }, [ageOrigin])
   useEffect(() => {
     ageSeq.current += 1
     ageRan.current = null
@@ -2960,7 +2979,7 @@ function Member () {
   // Only A Rua as the first screen waits for its details and Momentos; a
   // stacked screen (a link opened at boot) or another tab shows at once.
   const feedReady = ruaFeedReady({ details: feedBoot.details, moments: feedBoot.moments, onRua: tab === 'rua', stacked: topEntry !== null })
-  const cover = coverBoot({ step, passkeyKnown: passkey === null || pkStatus !== null || !!passkey.error, age: ageNeeded, ageError, phone: phone.gate, phoneError: phoneErrorShown, infoKnown: info !== null || infoError !== '', profileSlow: slow, feedReady })
+  const cover = coverBoot({ step, passkeyKnown: passkey === null || pkStatus !== null || !!passkey.error, age: ageNeeded, ageError, phone: phone.gate, phoneError: phoneErrorShown, infoKnown: info !== null || infoError !== '', accountKnown: acctKnown || infoError !== '' || (info !== null && info.publicKey === null), profileSlow: slow, feedReady })
   if (atShell && cover && !bootSettled.current && bootStepRef.current !== step) {
     bootStepRef.current = step
     bootCoverAt.current = Date.now()
@@ -3149,7 +3168,7 @@ function Member () {
 
   // The 'Conexão' footer of the setup steps: only where a person may have to
   // configure the node (native, manual web setups), never on the hosted page.
-  const connectionLink = mode === 'hosted'
+  const connectionLink = mode === 'hosted' && !node.canConfigure
     ? null
     : (
       <Pressable
@@ -3252,7 +3271,7 @@ function Member () {
             onDismiss: () => { clearPostLink(); setPendingPost(null) }
           }
         : null
-      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} onLinked={takeLinked} onInviteChanged={reloadCard} onPhoneRecheck={recheckPhone} invite={inviteProp || entryProp || postProp} feira={{ holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode }} />
+      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} initialInfo={info} onInfoError={failInfo} onAccountKnown={knowAccount} onLinked={takeLinked} onInviteChanged={reloadCard} onPhoneRecheck={recheckPhone} invite={inviteProp || entryProp || postProp} feira={{ holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode }} />
     } else if (infoError) {
       body = (
         <Page flush grow padBottom={16}>

@@ -109,6 +109,31 @@ test('splash gate: pure helper and app integration guards', (t) => {
   t.is(app.split('<Splash ').length - 1, 1)
 })
 
+test('splash gate: the link card tells the shell when the account answered', (t) => {
+  const app = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
+  const identidade = fs.readFileSync(path.join(__dirname, '../src/screens/Identidade.js'), 'utf8')
+  t.ok(app.includes('onAccountKnown={knowAccount}'))
+  t.ok(app.includes("accountKnown: acctKnown || infoError !== '' || (info !== null && info.publicKey === null)"))
+  t.ok(identidade.includes('const known = cur !== null || acctError !== \'\''))
+  t.ok(identidade.includes('onKnown={onAccountKnown}'))
+})
+
+test('splash gate: Identidade starts from the info the shell already has', (t) => {
+  const app = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
+  const identidade = fs.readFileSync(path.join(__dirname, '../src/screens/Identidade.js'), 'utf8')
+  t.ok(app.includes('onInfo={takeInfo} initialInfo={info}'))
+  t.ok(identidade.includes('useState(initialInfo)'))
+  t.ok(identidade.includes('if (initialInfo !== null && generation === mountedGeneration.current) return'))
+})
+
+test('splash gate: a failed node.info read in Identidade reaches the shell at once', (t) => {
+  const app = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
+  const identidade = fs.readFileSync(path.join(__dirname, '../src/screens/Identidade.js'), 'utf8')
+  t.ok(app.includes('const failInfo = useCallback((text) => setInfoError(text), [])'))
+  t.ok(app.includes('initialInfo={info} onInfoError={failInfo}'))
+  t.ok(identidade.includes("if (notify && typeof onInfoError === 'function') onInfoError(text)"))
+})
+
 test('splash gate: boot cover only while the deciding read has not answered', async (t) => {
   const { coverBoot, BOOT_PATIENCE_MS, RECOVERY_PATIENCE_MS, bootPatienceMs } = await load()
   t.is(BOOT_PATIENCE_MS, 10000)
@@ -140,11 +165,16 @@ test('splash gate: boot cover only while the deciding read has not answered', as
   t.is(coverBoot({ step: 'telefone', age: 'loading', phone: 'needed' }), false, 'the age gate does not cover the phone step')
   t.is(coverBoot({ step: 'idade', age: 'needed', phone: 'loading' }), false, 'nor the phone gate the age step')
   t.is(bootPatienceMs('telefone'), BOOT_PATIENCE_MS)
-  for (const step of ['vinculo', 'identidade', 'certificado']) {
+  for (const step of ['identidade', 'certificado']) {
     t.is(coverBoot({ step, infoKnown: false }), true, step + ' unknown')
     t.is(coverBoot({ step, infoKnown: undefined }), true, step + ' undefined')
     t.is(coverBoot({ step, infoKnown: true }), false, step + ' known')
   }
+  t.is(coverBoot({ step: 'vinculo', infoKnown: false, accountKnown: true }), true, 'vinculo without info')
+  t.is(coverBoot({ step: 'vinculo', infoKnown: undefined, accountKnown: true }), true)
+  t.is(coverBoot({ step: 'vinculo', infoKnown: true, accountKnown: false }), true, 'vinculo waits for the account')
+  t.is(coverBoot({ step: 'vinculo', infoKnown: true }), true, 'account unknown by default')
+  t.is(coverBoot({ step: 'vinculo', infoKnown: true, accountKnown: true }), false)
   t.is(coverBoot({ step: 'carregando', profileSlow: false }), true)
   t.is(coverBoot({ step: 'carregando', profileSlow: undefined }), true)
   t.is(coverBoot({ step: 'carregando', profileSlow: true }), false)

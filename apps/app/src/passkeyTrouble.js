@@ -65,7 +65,7 @@ export function unusableSteps ({ userIds = [], withLink = false, created = false
   const retry = known
     ? 'Toque em ' + RETRY_LABEL + '.'
     : created
-      ? 'Toque em ' + RETRY_LABEL + ' e crie a passkey outra vez. Se o aparelho perguntar onde salvar, escolha um gerenciador de senhas que sincroniza entre aparelhos (o do celular, do Google ou da Apple).'
+      ? 'Toque em ' + RETRY_LABEL + ' e crie a passkey outra vez. Se o aparelho perguntar onde salvar, escolha um gerenciador de senhas que sincroniza entre aparelhos (o do celular ou outro que sincronize).'
       : 'Toque em ' + RETRY_LABEL + ' e escolha outra passkey do Varanda, se tiver.'
   const steps = [
     ...cleanupSteps(cleaned, userIds),
@@ -90,7 +90,7 @@ export function notSyncedSteps ({ userIds = [], cleaned = false, native = false,
       : 'Se não der certo, abra o Varanda no celular e crie a passkey lá: o celular guarda a passkey num gerenciador que sincroniza.'
   const steps = [
     ...cleanupSteps(cleaned, userIds),
-    'Toque em ' + RETRY_LABEL + ' e, ao criar, escolha um gerenciador de senhas que sincroniza entre aparelhos (o do celular, do Google, da Apple ou outro), nunca uma chave de segurança, o Windows Hello ou o perfil do navegador.',
+    'Toque em ' + RETRY_LABEL + ' e, ao criar, escolha um gerenciador de senhas que sincroniza entre aparelhos (o do celular ou outro que sincronize), nunca uma chave de segurança, o Windows Hello ou o perfil do navegador.',
     withLink ? '' : fallback
   ].filter(Boolean)
   return steps.map((s, i) => (i + 1) + '. ' + s)
