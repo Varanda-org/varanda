@@ -1,3 +1,4 @@
+/* global requestAnimationFrame, cancelAnimationFrame */
 // A bottom sheet with a top row (Cancelar, optional title, a right slot).
 // iOS uses the native page sheet (it dims and shrinks the screen behind);
 // Android and web draw a backdrop and a rounded panel. Modal unmounts its
@@ -5,17 +6,19 @@
 // colours the body down to the bottom edge (home indicator included); it
 // defaults to the card colour.
 
-import { useContext, useEffect, useState } from 'react'
-import { Modal, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
+import { useContext, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Animated, Modal, PanResponder, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Backdrop } from './Backdrop'
 import { scrollerFocusProps } from './scrollerFocus'
 import { useStyles, useTheme } from './ThemeProvider'
-import { layout, type } from './theme'
+import { layout, motion, type } from './theme'
 import { sideInset } from './sideInset'
 import { useEscapeLayer } from './escapeLayer'
 import { holdEmbeds } from '../embedLive'
 import { ScreenVisible, SheetDepth } from './screenVisible'
+import { useReduceMotion } from './StackLayer'
+import { claimDrag, dragVerdict } from '../sheetDrag'
 
 export const TEXT_CAP = 1.3
 // The row's 16 pt edge plus 8 pt of air between a side control and the title.
@@ -103,14 +106,120 @@ function IosContent ({ onClose, title, left, right, background, grabber, childre
   )
 }
 
-// `dismissable` false turns off the iOS swipe-down, which can close the page
-// sheet without waiting for onClose (a sheet with a send in flight).
-export function Sheet ({ open, onClose, onBack, title, left, right, background, grabber = false, dismissable = true, children }) {
+function usePanelDrag ({ open, dismissable, onClose, reduceMotion }) {
+  const y = useRef(new Animated.Value(0)).current
+  const height = useRef(0)
+  const active = useRef(false)
+  // A touch that starts on the empty header moves nothing until claimDrag
+  // accepts it, so a sideways swipe there cannot close the sheet.
+  const unclaimed = useRef(false)
+  const start = useRef(0)
+  const [dragging, setDragging] = useState(false)
+  const releaseTimer = useRef(null)
+  const closeFrame = useRef(null)
+  const latest = useRef(null)
+  latest.current = { open, dismissable, onClose, reduceMotion }
+  const finish = () => {
+    active.current = false
+    unclaimed.current = false
+    clearTimeout(releaseTimer.current)
+    // Keep header buttons out of hit testing until the release click is dispatched.
+    releaseTimer.current = setTimeout(() => setDragging(false), 0)
+  }
+  const responder = useRef(null)
+  if (responder.current === null) {
+    const enabled = () => latest.current.open && latest.current.dismissable !== false
+    const reset = (immediate = false) => {
+      y.stopAnimation()
+      if (!latest.current.open) return
+      if (immediate || latest.current.reduceMotion) y.setValue(0)
+      else Animated.timing(y, { toValue: 0, duration: motion.fast, useNativeDriver: false }).start()
+    }
+    const accepts = (_event, gesture) => {
+      const yes = enabled() && claimDrag(gesture)
+      if (yes) unclaimed.current = false
+      return yes
+    }
+    responder.current = PanResponder.create({
+      // React Native's Modal takes every touch start no child took, and then
+      // offers the moves only to its own ancestors. So the header takes a touch
+      // that starts on its empty part; a button inside it claims first.
+      onStartShouldSetPanResponder: () => {
+        const yes = enabled()
+        unclaimed.current = yes
+        return yes
+      },
+      onMoveShouldSetPanResponder: accepts,
+      onMoveShouldSetPanResponderCapture: accepts,
+      onPanResponderGrant: () => {
+        clearTimeout(releaseTimer.current)
+        cancelAnimationFrame(closeFrame.current)
+        // A grab during the return animation continues from where the panel is.
+        start.current = 0
+        y.stopAnimation((value) => { start.current = Math.max(0, value) })
+        active.current = enabled()
+        setDragging(active.current)
+      },
+      onPanResponderMove: (_event, gesture) => {
+        if (!enabled()) {
+          finish()
+          return reset(true)
+        }
+        if (!active.current) return
+        if (unclaimed.current) {
+          if (!claimDrag(gesture)) return
+          unclaimed.current = false
+        }
+        y.setValue(Math.max(0, start.current + gesture.dy))
+      },
+      onPanResponderRelease: (_event, gesture) => {
+        if (!active.current) return
+        const close = !unclaimed.current && enabled() && dragVerdict({ ...gesture, dy: start.current + gesture.dy, height: height.current }) === 'close'
+        finish()
+        if (!close) return reset()
+        latest.current.onClose()
+        // Keep the release position during exit; a dirty draft may refuse to close.
+        closeFrame.current = requestAnimationFrame(() => {
+          if (latest.current.open) reset()
+        })
+      },
+      onPanResponderTerminate: () => {
+        finish()
+        reset()
+      },
+      // react-native-web ends the responder on a text selection unless refused.
+      onPanResponderTerminationRequest: () => !active.current || unclaimed.current
+    })
+  }
+  useLayoutEffect(() => {
+    finish()
+    y.stopAnimation()
+    if (open) y.setValue(0)
+    return () => {
+      active.current = false
+      clearTimeout(releaseTimer.current)
+      cancelAnimationFrame(closeFrame.current)
+      y.stopAnimation()
+    }
+  }, [open, dismissable, reduceMotion, y])
+  return {
+    y,
+    dragging,
+    panHandlers: responder.current.panHandlers,
+    handleLayout: (event) => { height.current = event.nativeEvent.layout.height }
+  }
+}
+
+// `dismissable` false also turns off the native iOS swipe, which can close
+// the page sheet without waiting for onClose (a sheet with a send in flight).
+export function Sheet ({ open, onClose, onBack, title, left, right, background, grabber = true, dismissable = true, children }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const bodyBackground = background ?? colors.card
   const insets = useSafeAreaInsets()
   const { width } = useWindowDimensions()
+  const reduceMotion = useReduceMotion()
+  const drag = usePanelDrag({ open, dismissable, onClose, reduceMotion })
   // Web: Escape closes this sheet only, not the screen behind it, and leaves
   // the key to a menu opened on top.
   useEscapeLayer(!!open, onClose, 'sheet')
@@ -124,7 +233,7 @@ export function Sheet ({ open, onClose, onBack, title, left, right, background, 
     return (
       <Modal
         visible={!!open}
-        animationType='slide'
+        animationType={reduceMotion ? 'none' : 'slide'}
         presentationStyle='pageSheet'
         // A swipe down has already dismissed the page sheet when this runs,
         // so it always closes (onBack is the Android back button only).
@@ -146,19 +255,23 @@ export function Sheet ({ open, onClose, onBack, title, left, right, background, 
   return (
     <Modal
       visible={!!open}
-      animationType='slide'
+      animationType={reduceMotion ? 'none' : 'slide'}
       transparent
       statusBarTranslucent
       onRequestClose={typeof onBack === 'function' ? onBack : onClose}
     >
       <Backdrop style={styles.backdrop} onClose={onClose} />
-      <View style={[styles.panel, { top: insets.top + layout.sheetTop }]} {...scrollerFocusProps}>
-        {grabber ? <View style={styles.grabberRow} pointerEvents='none'><View style={styles.grabber} /></View> : null}
-        <View style={{ paddingLeft: padL, paddingRight: padR }}>
-          <TopRow onClose={onClose} title={title} left={left} right={right} />
+      <Animated.View style={[styles.panel, { top: insets.top + layout.sheetTop, transform: [{ translateY: drag.y }] }]} onLayout={drag.handleLayout} {...scrollerFocusProps}>
+        {/* Android flattens a layout-only View, so a touch on the empty header
+            would land on the panel and never reach these handlers. */}
+        <View style={[styles.dragHeader, { paddingLeft: padL, paddingRight: padR }]} collapsable={false} {...drag.panHandlers}>
+          <View pointerEvents={drag.dragging ? 'none' : 'auto'}>
+            {grabber ? <View style={styles.grabberRow} pointerEvents='none'><View style={styles.grabber} /></View> : null}
+            <TopRow onClose={onClose} title={title} left={left} right={right} />
+          </View>
         </View>
         <View style={[styles.children, { paddingBottom: insets.bottom, paddingLeft: padL, paddingRight: padR, backgroundColor: bodyBackground }]}>{body}</View>
-      </View>
+      </Animated.View>
     </Modal>
   )
 }
@@ -166,6 +279,9 @@ export function Sheet ({ open, onClose, onBack, title, left, right, background, 
 const makeStyles = (colors) => StyleSheet.create({
   // A 44 pt target: the word alone was 22 pt tall.
   cancelHit: { minHeight: 44, justifyContent: 'center' },
+  // The browser must not take over a vertical header drag for page scrolling
+  // or turn it into a text selection.
+  dragHeader: Platform.select({ web: { touchAction: 'pan-x', userSelect: 'none' }, default: {} }),
   iosRoot: { flex: 1, backgroundColor: colors.card },
   backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.45)' },
   panel: {

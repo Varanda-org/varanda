@@ -22,7 +22,7 @@
 // onComposing }.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
+import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { perfMarks, useNode } from '../node'
 import { cacheGeneration } from '../localCaches'
 import { useNames } from '../names'
@@ -33,8 +33,9 @@ import { FilterChips } from '../ui/FilterChips'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
+import { SearchField } from '../ui/SearchField'
 import { EmptyState as ListEmptyState, SkeletonRow } from '../ui/States'
-import { layout, radius, space, type, webInputReset } from '../ui/theme'
+import { radius, space, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { NovaComunidade, memberSnapshotBinding, readGroupSnapshot, sameSnapshotBinding, saveGroupSnapshot } from './Comunidades'
 import { useActing } from './Conversa'
@@ -277,7 +278,6 @@ export function Conversas ({
   composing = false, onComposing
 }) {
   const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
   const node = useNode()
   const bottomPad = useBottomPad()
   const now = useNow(60000)
@@ -288,7 +288,6 @@ export function Conversas ({
   const bumpDm = node.bumpDm
   const [filter, setFilter] = useState('todas')
   const [query, setQuery] = useState('')
-  const [searchFocused, setSearchFocused] = useState(false)
   const [creating, setCreating] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
 
@@ -489,28 +488,14 @@ export function Conversas ({
   const header = (
     <View>
       <PageInboxNote pageKey={pageKey} />
-      <View style={[styles.search, searchFocused && styles.searchFocused]}>
-        <Icon name='lupa' size={20} color={colors.soft} />
-        <TextInput
-          style={[styles.input, webInputReset]}
-          onFocus={() => setSearchFocused(true)}
-          onBlur={() => setSearchFocused(false)}
+      <View style={styles.search}>
+        <SearchField
+          label='buscar conversas'
+          clearLabel='limpar busca'
+          placeholder={SEARCH_PLACEHOLDER}
           value={query}
           onChangeText={setQuery}
-          placeholder={SEARCH_PLACEHOLDER}
-          placeholderTextColor={colors.placeholder}
-          autoCapitalize='none'
-          autoCorrect={false}
-          returnKeyType='search'
-          accessibilityLabel='buscar conversas'
         />
-        {query !== ''
-          ? (
-            <Pressable accessibilityRole='button' accessibilityLabel='limpar busca' hitSlop={space.md} onPress={() => setQuery('')} style={styles.clear}>
-              <Icon name='fechar' size={18} color={colors.soft} />
-            </Pressable>
-            )
-          : null}
       </View>
       <FilterChips options={FILTERS.map((id) => ({ id, label: FILTER_LABELS[id] }))} selected={filter} onSelect={setFilter} />
       {!unlocked ? <View style={styles.pad}><Soft>{LOCKED_TEXT}</Soft></View> : null}
@@ -621,23 +606,8 @@ function PinnedRow ({ icon, title, dot, chevron, onPress }) {
 const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   pad: { paddingHorizontal: space.lg, paddingVertical: space.sm, gap: space.sm },
-  search: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: space.sm,
-    marginHorizontal: space.lg,
-    marginVertical: space.sm,
-    paddingHorizontal: space.md,
-    // minHeight: large system text grows the field instead of squeezing it.
-    minHeight: layout.hit,
-    borderRadius: radius.md,
-    borderWidth: 1.5,
-    borderColor: 'transparent',
-    backgroundColor: colors.inputOff
-  },
-  searchFocused: { borderColor: colors.accent, backgroundColor: colors.card },
-  input: { ...type.postText, flex: 1, minWidth: 0, minHeight: layout.hit - 3, paddingVertical: 0, color: colors.ink },
-  clear: { minWidth: space.xl, minHeight: space.xl, alignItems: 'center', justifyContent: 'center' },
+  // The shared field draws the pill. This screen still insets it with the row gutter.
+  search: { marginHorizontal: space.lg, marginVertical: space.sm },
   pressed: { backgroundColor: colors.line },
   pinnedRow: { flexDirection: 'row', alignItems: 'center', gap: space.md, minHeight: PINNED_HEIGHT, paddingHorizontal: space.lg },
   glyph: { width: AVATAR_COLUMN, alignItems: 'center', justifyContent: 'center' },

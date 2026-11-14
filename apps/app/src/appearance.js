@@ -32,7 +32,8 @@ export const light = Object.freeze({
   toastBg: '#1f2a24',
   toastInk: '#ffffff',
   // The own chat bubble: a clear mint, so an own message reads at a glance.
-  bubbleMine: '#d9efe2'
+  bubbleMine: '#d9efe2',
+  shadow: 'rgba(31,42,36,0.28)'
 })
 
 export const dark = Object.freeze({
@@ -58,7 +59,8 @@ export const dark = Object.freeze({
   inputOff: '#17211d',
   toastBg: '#f4f0e6',
   toastInk: '#1c2622',
-  bubbleMine: '#2c4a3d'
+  bubbleMine: '#2c4a3d',
+  shadow: 'rgba(0,0,0,0.45)'
 })
 
 export function paletteFor (scheme) {

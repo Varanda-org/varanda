@@ -40,7 +40,7 @@ test('a plain scrolling container gives focus up, a control keeps it', async (t)
 
 test('every sheet and menu panel carries the guard, and native is a no-op', (t) => {
   const read = (f) => fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', f), 'utf8')
-  t.ok(read('Sheet.js').includes('{...scrollerFocusProps}'))
+  t.ok(/<Animated\.View[^>]*styles\.panel[^>]*\{\.\.\.scrollerFocusProps\}/.test(read('Sheet.js')), 'the animated panel keeps the focus guard')
   t.ok(read('ActionsSheet.js').includes('{...scrollerFocusProps}'))
   t.ok(read('scrollerFocus.native.js').includes('export const scrollerFocusProps = {}'))
 })

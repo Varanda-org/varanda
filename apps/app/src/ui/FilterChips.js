@@ -2,6 +2,7 @@
 // each chip is a 44 pt tall touch target with accessibilityState.selected.
 
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { tap } from './haptics'
 import { useStyles } from './ThemeProvider'
 import { layout, radius, space, type } from './theme'
 
@@ -21,7 +22,10 @@ export function FilterChips ({ options, selected, onSelect }) {
               accessibilityRole='button'
               accessibilityState={{ selected: on }}
               accessibilityLabel={option.label + (count > 0 ? ', ' + count : '')}
-              onPress={() => onSelect(option.id)}
+              onPress={() => {
+                if (!on) tap('select')
+                onSelect(option.id)
+              }}
               style={({ pressed }) => [styles.hit, pressed && styles.pressed]}
             >
               <View style={[styles.chip, on && styles.chipOn]}>
@@ -48,7 +52,7 @@ const makeStyles = (colors) => StyleSheet.create({
     borderColor: colors.line,
     backgroundColor: colors.card
   },
-  chipOn: { backgroundColor: colors.accentSoft, borderColor: colors.accentSoft },
+  chipOn: { backgroundColor: colors.ink, borderColor: colors.ink },
   label: { ...type.pill, color: colors.ink },
-  labelOn: { color: colors.accent, fontWeight: '700' }
+  labelOn: { color: colors.bg, fontWeight: '700' }
 })

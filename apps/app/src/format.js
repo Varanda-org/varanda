@@ -1,6 +1,6 @@
 // Pure display helpers (short keys, avatar color, relative time,
-// gradient sampling). No imports and no Node built-ins: Metro bundles it and
-// the Node tests import it.
+// compact counts, gradient sampling). No imports and no Node built-ins: Metro
+// bundles it and the Node tests import it.
 
 export const MONTHS = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez']
 
@@ -56,6 +56,43 @@ export function sinceText (ms, now = Date.now()) {
 
 export function countChars (s) {
   return Array.from(String(s)).length
+}
+
+// Hand-built: Hermes and Node disagree on Intl compact spaces and suffixes.
+const COUNT_SUFFIX = ['', 'mil', 'mi', 'bi', 'tri']
+
+export function formatCount (n) {
+  if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) return null
+  const tenths = (unit) => Math.round((n / unit) * 10)
+  let tier = 0
+  let unit = 1
+  while (tier < COUNT_SUFFIX.length - 1 && tenths(unit) >= 10000) {
+    unit *= 1000
+    tier++
+  }
+  const scaled = tenths(unit)
+  const whole = Math.floor(scaled / 10)
+  const frac = scaled % 10
+  const body = frac === 0 ? String(whole) : whole + ',' + frac
+  const suffix = COUNT_SUFFIX[tier]
+  return suffix ? body + ' ' + suffix : body
+}
+
+// Date stringification differs by engine, so a Date uses getTime.
+// Numbers are epoch milliseconds. Anything else is parsed like relativeTime.
+function instantMs (value) {
+  if (typeof value === 'number') return value
+  if (value instanceof Date) return value.getTime()
+  return new Date(String(value)).getTime()
+}
+
+// Under a minute, in the future, or not a time: the caller keeps its own fallback.
+export function compactTime (at, now = Date.now()) {
+  const diff = instantMs(now) - instantMs(at)
+  if (!Number.isFinite(diff) || diff < 60000) return null
+  if (diff < 3600000) return Math.floor(diff / 60000) + 'min'
+  if (diff < 86400000) return Math.floor(diff / 3600000) + 'h'
+  return Math.floor(diff / 86400000) + 'd'
 }
 
 // n colors '#rrggbb' sampled evenly along [hex, position] stops.

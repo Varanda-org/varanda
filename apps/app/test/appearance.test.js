@@ -32,7 +32,8 @@ test('light palette keeps the strings the app shipped with', async (t) => {
     inputOff: '#efece5',
     toastBg: '#1f2a24',
     toastInk: '#ffffff',
-    bubbleMine: '#d9efe2'
+    bubbleMine: '#d9efe2',
+    shadow: 'rgba(31,42,36,0.28)'
   })
   t.ok(Object.isFrozen(light))
 })
@@ -50,6 +51,8 @@ test('dark palette shares the keys and is warm green ink, not black', async (t) 
   t.not(dark.bg, '#000000')
   const [r, g, b] = [1, 3, 5].map((i) => parseInt(dark.bg.slice(i, i + 2), 16))
   t.ok(g > r && g > b)
+  t.is(light.shadow, 'rgba(31,42,36,0.28)')
+  t.is(dark.shadow, 'rgba(0,0,0,0.45)')
   t.is(paletteFor('dark'), dark)
   t.is(paletteFor('light'), light)
   t.is(paletteFor('unspecified'), light)

@@ -27,3 +27,19 @@ test('pressMotion loads without UI or platform dependencies', (t) => {
   t.absent(/\b(?:import|require)\s*\(?/.test(src), 'no runtime imports')
   t.absent(src.includes('\u2014'), 'no em dash')
 })
+
+test('PRESSED_OPACITY is the shared pressed fade', async (t) => {
+  const { PRESSED_OPACITY } = await load()
+  t.is(PRESSED_OPACITY, 0.7)
+  const root = path.join(__dirname, '../src')
+  const shared = [
+    ['pressMotion.js', 'export const PRESSED_OPACITY = 0.7'],
+    ['ui/PressScale.js', '{ opacity: PRESSED_OPACITY }'],
+    ['ui/index.js', 'opacity: PRESSED_OPACITY'],
+    ['ui/Pill.js', 'opacity: PRESSED_OPACITY']
+  ]
+  for (const [file, needle] of shared) {
+    const src = fs.readFileSync(path.join(root, file), 'utf8')
+    t.ok(src.includes(needle), file + ' shares PRESSED_OPACITY')
+  }
+})

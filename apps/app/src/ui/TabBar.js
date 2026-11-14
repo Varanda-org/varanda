@@ -14,6 +14,7 @@
 import { useEffect, useRef } from 'react'
 import { Animated, Platform, Pressable, StyleSheet, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
+import { tap } from './haptics'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
 import { useReduceMotion } from './StackLayer'
@@ -86,6 +87,7 @@ export function TabBar ({ current, onSelect, onReselect, badges = {}, tabs = TAB
               if (selected) {
                 if (onReselect) onReselect(tab.id)
               } else {
+                tap('select')
                 onSelect(tab.id)
               }
             }}

@@ -6,8 +6,7 @@
 // most 8), titled from the names cache. The sheet only reports the choice;
 // the caller owns navigation (it pushes 'mensagem' for a person).
 
-import { useState } from 'react'
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
@@ -19,9 +18,10 @@ import { Icon } from '../ui/Icon'
 import { Sheet } from '../ui/Sheet'
 import { ErrorText, Soft } from '../ui'
 import { Pill } from '../ui/Pill'
+import { SearchField } from '../ui/SearchField'
 import { Skeleton } from '../ui/States'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
-import { layout, radius, space, type, webInputReset } from '../ui/theme'
+import { layout, radius, space, type } from '../ui/theme'
 
 function Entry ({ icon, label, onPress }) {
   const styles = useStyles(makeStyles)
@@ -58,11 +58,9 @@ function PersonRow ({ peer, who, picture, onPress }) {
 
 function Body ({ onOpenThread, onNewCommunity, onNewGroup, recent }) {
   const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
   const node = useNode()
   const ownKey = node.passkey && node.passkey.status ? node.passkey.status.publicKey : null
   const search = useMemberSearch({ request: node.request, hosted: node.hosted === true, online: node.online, ownKey })
-  const [focused, setFocused] = useState(false)
   const hits = search.hits.filter((h) => h.author !== ownKey)
   const names = useNames()
   const profileOf = names ? names.profileOf : null
@@ -76,21 +74,12 @@ function Body ({ onOpenThread, onNewCommunity, onNewGroup, recent }) {
   const recentPeers = (Array.isArray(recent) ? recent : []).filter((peer) => typeof peer === 'string' && peer !== ownKey).slice(0, RECENT_MAX)
   return (
     <ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle={styles.body}>
-      <View style={[styles.search, focused && styles.searchFocused]}>
-        <Icon name='lupa' size={20} color={colors.soft} />
-        <TextInput
-          style={[styles.input, webInputReset]}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
-          value={search.query}
-          onChangeText={(text) => search.setQuery(text)}
-          placeholder='Buscar pessoa pelo nome'
-          placeholderTextColor={colors.placeholder}
-          autoCapitalize='none'
-          autoCorrect={false}
-          accessibilityLabel='buscar pessoa'
-        />
-      </View>
+      <SearchField
+        label='buscar pessoa'
+        placeholder='Buscar pessoa pelo nome'
+        value={search.query}
+        onChangeText={(text) => search.setQuery(text)}
+      />
       {search.query.trim() === ''
         ? (
           <View>
@@ -164,20 +153,6 @@ export function NovaConversa ({ open, onClose, onOpenThread, onNewCommunity, onN
 
 const makeStyles = (colors) => StyleSheet.create({
   body: { padding: space.lg, gap: space.md },
-  // The same rounded field as the Conversas search, so the two read as one control.
-  search: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: space.sm,
-    paddingHorizontal: space.md,
-    height: layout.hit,
-    borderRadius: radius.md,
-    borderWidth: 1.5,
-    borderColor: 'transparent',
-    backgroundColor: colors.inputOff
-  },
-  searchFocused: { borderColor: colors.accent, backgroundColor: colors.card },
-  input: { ...type.postText, flex: 1, minWidth: 0, height: layout.hit - 3, paddingVertical: 0, color: colors.ink },
   pressed: { opacity: 0.6 },
   entry: { flexDirection: 'row', alignItems: 'center', gap: space.md, minHeight: layout.hit + space.sm },
   entryIcon: { width: 40, height: 40, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.accent },

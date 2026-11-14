@@ -22,7 +22,7 @@
 
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { fetch as expoFetch } from 'expo/fetch'
-import { Image, Pressable, StyleSheet, Text, View } from 'react-native'
+import { Animated, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
 import { perfMarks, useNode } from '../node'
 import { fetchMedia, validDescriptor } from '../media/fetch'
 import { nativeSubtle } from '../media/hash'
@@ -34,7 +34,9 @@ import { loadKept, registerKeptStore } from '../media/keptLoad'
 import { bumpCacheGeneration, cacheGeneration, registerLocalCache } from '../localCaches'
 import { isAppClient } from '../appClient'
 import { Icon } from './Icon'
+import { useReduceMotion } from './StackLayer'
 import { useStyles, useTheme } from './ThemeProvider'
+import { motion } from './theme'
 
 // The native app streams media through expo/fetch so the byte cap stops the
 // download (see fetchMedia); the web keeps the global fetch.
@@ -148,12 +150,78 @@ function useMedia (author, descriptor, persist) {
   return { state: 'loading', url: null, retry }
 }
 
+// Android's Image fades for 300 ms on its own (fadeDuration). iOS and the web
+// have no such prop, and the web warns if it is passed through.
+const imageFadeOff = Platform.OS === 'android' ? { fadeDuration: 0 } : null
+
+function startImageFade (opacity, reduceMotion) {
+  // Hidden until its own bitmap is ready. Reduced motion snaps to full opacity.
+  const duration = reduceMotion ? 0 : motion.fast
+  const toValue = 1
+  if (duration === 0) {
+    opacity.setValue(toValue)
+    return null
+  }
+  // JS driver: react-native-web has no native driver and warns if asked.
+  // isInteraction false: a feed of fades must not hold the list window (loopMotion).
+  const run = Animated.timing(opacity, {
+    toValue,
+    duration,
+    useNativeDriver: false,
+    isInteraction: false
+  })
+  run.start()
+  return run
+}
+
+// Mounted with key={url}. Resetting one shared value during MediaView's
+// render reaches the mounted Animated nodes (react-native-web scheduleUpdate),
+// and a cached bitmap can fire onLoad during commit, before any effect.
+function FadingPhoto ({ url, fit, dark, reduceMotion }) {
+  const styles = useStyles(makeStyles)
+  const opacity = useRef(new Animated.Value(reduceMotion ? 1 : 0)).current
+  const fadeRun = useRef(null)
+  // A reduced-motion setting that arrives late settles a fade already running.
+  useEffect(() => {
+    if (!reduceMotion) return
+    if (fadeRun.current) {
+      fadeRun.current.stop()
+      fadeRun.current = null
+    }
+    opacity.setValue(1)
+  }, [reduceMotion, opacity])
+  useEffect(() => () => {
+    if (fadeRun.current) fadeRun.current.stop()
+  }, [])
+  // The placeholder clears as the photo arrives, so a contained photo in a
+  // viewer is not framed by the loading tint.
+  const cover = useMemo(() => opacity.interpolate({ inputRange: [0, 1], outputRange: [1, 0] }), [opacity])
+  const reveal = () => {
+    if (fadeRun.current) fadeRun.current.stop()
+    fadeRun.current = startImageFade(opacity, reduceMotion)
+  }
+  return (
+    <>
+      <Animated.View style={[styles.fill, dark ? styles.loadingDark : styles.loading, { opacity: cover }]} />
+      <Animated.Image
+        source={{ uri: url }}
+        style={[styles.fill, { opacity }]}
+        resizeMode={fit}
+        accessibilityIgnoresInvertColors
+        onLoad={reveal}
+        {...imageFadeOff}
+      />
+    </>
+  )
+}
+
 // tapRetry false: a failed photo stays a plain image (no retry button of its
 // own), for a parent control that owns the press, such as a Mural tile; the
 // automatic retries still run.
 export function MediaView ({ author, descriptor, uri, label = 'foto', fit = 'cover', style, onPress, dark, persist = true, tapRetry = true, tabIndex }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
+  const reduceMotion = useReduceMotion()
   const local = uri !== undefined
   const fetched = useMedia(author, local ? null : descriptor, persist !== false)
   const { state, url, retry } = local
@@ -164,7 +232,7 @@ export function MediaView ({ author, descriptor, uri, label = 'foto', fit = 'cov
   const a11y = failed ? label + (tapRetry ? ', indisponível; toque para tentar de novo' : ', indisponível') : label
   let inner
   if (state === 'ok') {
-    inner = <Image source={{ uri: url }} style={styles.fill} resizeMode={fit} accessibilityIgnoresInvertColors />
+    inner = <FadingPhoto key={url} url={url} fit={fit} dark={dark} reduceMotion={reduceMotion} />
   } else if (state === 'loading') {
     inner = <View style={[styles.fill, dark ? styles.loadingDark : styles.loading]} />
   } else {

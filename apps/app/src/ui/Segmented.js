@@ -2,6 +2,7 @@
 // 2 pt accent line; each tab is a 44 pt tall touch target.
 
 import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { tap } from './haptics'
 import { useStyles } from './ThemeProvider'
 import { layout, space, type } from './theme'
 
@@ -32,7 +33,10 @@ export function Segmented ({ options, selected, onSelect }) {
             accessibilityState={{ selected: on }}
             aria-selected={on}
             accessibilityLabel={option.label}
-            onPress={() => onSelect(option.id)}
+            onPress={() => {
+              if (!on) tap('select')
+              onSelect(option.id)
+            }}
             style={({ pressed }) => [styles.tab, on && styles.tabOn, pressed && styles.pressed]}
           >
             <Text style={[styles.label, on && styles.labelOn]} numberOfLines={1} maxFontSizeMultiplier={cap} adjustsFontSizeToFit minimumFontScale={0.7}>{option.label}</Text>

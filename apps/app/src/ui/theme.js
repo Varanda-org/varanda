@@ -47,6 +47,7 @@ export const type = {
   postMeta: { fontSize: 15, fontWeight: '400', lineHeight: 20 },
   postText: { fontSize: 15.5, fontWeight: '400', lineHeight: 21 },
   replyMark: { fontSize: 13, fontWeight: '400', lineHeight: 18 },
+  meta: { fontSize: 13, fontWeight: '400', lineHeight: 18 },
   caption: { fontSize: 12, fontWeight: '400', lineHeight: 16 },
   more: { fontSize: 14, fontWeight: '600', lineHeight: 20 },
   price: { fontSize: 20, fontWeight: '800', lineHeight: 26 },
@@ -62,6 +63,10 @@ export const type = {
   sheetTitle: { fontSize: 17, fontWeight: '700', lineHeight: 22 },
   emptyTitle: { fontSize: 18, fontWeight: '700', lineHeight: 24 },
   stepLabel: { fontSize: 13, fontWeight: '700', lineHeight: 16, letterSpacing: 0.5, textTransform: 'uppercase' }
+}
+
+export const elevation = {
+  raised: '0px 6px 16px'
 }
 
 // The scale below is frozen so one screen cannot resize it for the rest.
