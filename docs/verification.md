@@ -10776,26 +10776,42 @@ Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de pas
 
 ## 234. Prévia de uma publicação compartilhada antes da entrada (PR feat/post-link-preview)
 
-Esta seção confere a prévia que quem não tem conta vê ao abrir o link de uma publicação na primeira visita, isto é, num aparelho ou navegador que ainda não passou pela introdução (`/publicacao/<D>/<seq>`, no app e na web; na web, `/p/<D>/<seq>` leva até ela pelo redirecionamento quando a página pública não aparece, ou pelo link "Ver na Varanda" da página quando aparece). Antes da entrada, o app lê `GET /p/<D>/<seq>/previa` do semeador. A resposta é `{"post":{...}}` só quando `VARANDA_POSTS_ORIGIN` está ligada e quem publicou tornou a publicação pública; em todos os outros casos a resposta é a mesma `{"post":null}`, e a prévia mostra um esqueleto sem conteúdo, igual ao de uma publicação que não existe. O botão "Ver mais" e cada toque na prévia abrem a folha "Entre para ver mais", com "Criar minha conta" e "Entrar", que seguem para Termos e depois Identidade com a publicação como destino. O orçamento desse caminho no semeador é de 4 pedidos em andamento, 8 por segundo, rajada de 16 e 5 s de prazo. Esta lista é um roteiro: nada foi marcado como conferido, e o que não foi executado fica pendente.
+Esta seção confere a prévia que quem não tem conta vê ao abrir o link de uma publicação, numa primeira visita ou numa visita seguinte, no aparelho ou navegador sem conta, inclusive numa instalação do Android ou do iOS sem conta (`/publicacao/<D>/<seq>`, no app e na web; na web, `/p/<D>/<seq>` leva até ela pelo redirecionamento quando a página pública não aparece, ou pelo link "Ver na Varanda" da página quando aparece). Antes da entrada, o app lê `GET /p/<D>/<seq>/previa` do semeador. A resposta é `{"post":{...}}` só quando `VARANDA_POSTS_ORIGIN` está ligada e quem publicou tornou a publicação pública; em todos os outros casos a resposta é a mesma `{"post":null}`, e a prévia mostra um esqueleto sem conteúdo, igual ao de uma publicação que não existe. O botão "Ver mais" e cada toque na prévia abrem a folha "Entre para ver mais", com "Criar minha conta" e "Entrar", que seguem para Termos e depois Identidade com a publicação como destino. O orçamento desse caminho no semeador é de 4 pedidos em andamento, 8 por segundo, rajada de 16 e 5 s de prazo. Esta lista é um roteiro: nada foi marcado como conferido, e o que não foi executado fica pendente.
 
 Ordem: Android (build de debug) e simulador iOS primeiro, depois web e PWA instalado. Registrar aparelho, sistema e, na web, o navegador, e o resultado de cada item.
 
-- [ ] a. Android, build de debug: abrir `https://bora.varanda.app/publicacao/<D>/<seq>` como link do app, com o app fechado (início a frio) e com o app já aberto, num aparelho que nunca passou pela introdução. A prévia aparece, e com o interruptor desligado mostra o esqueleto. Pendente.
+- [ ] a. Android, build de debug: abrir `https://bora.varanda.app/publicacao/<D>/<seq>` como link do app, com o app fechado (início a frio) e com o app já aberto, num aparelho sem conta. A prévia aparece, e com o interruptor desligado mostra o esqueleto. Pendente.
 - [ ] b. iOS, simulador: `varanda:///publicacao/<D>/<seq>` com o app fechado e com o app aberto. Também um `varanda://` de início a frio, antes de a instalação carregar: a prévia tem de buscar `/previa` uma vez, quando a instalação carregar. Conferir o link universal do iOS num aparelho real continua pendente.
-- [ ] c. Web e PWA, em janela privada: abrir `https://<host>/publicacao/<D>/<seq>` e conferir a mesma prévia. Com o interruptor desligado, `https://<host>/p/<D>/<seq>` redireciona para ela; com o interruptor ligado e a publicação publicada, `/p/` mostra a página do semeador, e o link "Ver na Varanda" leva à prévia. Pendente.
+- [ ] c. Web e PWA, em janela privada, sem conta: abrir `https://<host>/publicacao/<D>/<seq>` e conferir a mesma prévia. Com o interruptor desligado, `https://<host>/p/<D>/<seq>` redireciona para ela; com o interruptor ligado e a publicação publicada, `/p/` mostra a página do semeador, e o link "Ver na Varanda" leva à prévia. Pendente.
 - [ ] d. Interruptor desligado: uma publicação existente e uma inventada mostram o mesmo esqueleto, sem nome, texto ou foto. Pendente.
 - [ ] e. Interruptor ligado e publicação publicada: nome, @nome, data, texto e fotos aparecem. Não aparecem foto de perfil, contagens nem player, e um endereço dentro do texto não é um link tocável. Pendente.
 - [ ] f. Cada toque (linha, autor, foto, cartão, cada ícone de ação, "mais", "Ver mais" e os esqueletos), a ativação por TalkBack ou VoiceOver e a ativação por teclado na web abrem a folha "Entre para ver mais"; nenhum outro menu abre. Pendente.
-- [ ] g. "Criar minha conta" e "Entrar" chegam a Termos e depois a Identidade, com o cartão da publicação; depois da entrada, a publicação abre uma vez. Fechar a folha volta à prévia, "Como funciona" volta à prévia, e "Agora não" vai para a introdução. Pendente.
+- [ ] g. "Criar minha conta" e "Entrar" chegam a Termos e depois a Identidade, com o cartão da publicação; depois da entrada, a publicação abre uma vez. Fechar a folha volta à prévia, "Como funciona" volta à prévia, e "Agora não" vai para a introdução numa primeira visita e, nas demais, para Termos e Entrar. Pendente.
 - [ ] h. Uniformidade: `curl -i https://<host>/p/<D>/<seq>/previa` para uma publicação publicada, uma não publicada e uma inventada. As duas últimas são idênticas byte a byte, exceto pelo cabeçalho Date. Pendente.
 - [ ] i. Retirada: depois de quem publicou retirar a publicação, reabrir o link no Android e no iOS não mostra nenhuma foto do cache de imagens do aparelho. Pendente.
 - [ ] j. Texto grande, temas claro e escuro e áreas seguras (entalhe e barra de gestos): a prévia e a folha cabem sem corte e sem rolagem horizontal. Pendente.
+- [ ] k. Android e iOS, instalação sem conta e com a introdução já vista: início a frio e app já aberto (link com o app aberto). A prévia aparece nos dois. Pendente.
+- [ ] l. Web, visitante que passou pela introdução sem criar conta: a prévia aparece. Pendente.
+- [ ] m. Conta aberta, bloqueada (também depois de Sair), em recuperação e excluída não veem a prévia, inclusive no aparelho de um membro cujo registro da introdução foi apagado (aí a prévia pode aparecer até a identidade ser lida, e depois sai). Pendente.
+- [ ] n. Um cadastro com passkey esperando "concluir" conta como conta: recarregar não traz a prévia de volta. Uma criação de conta que falhou ainda conta como sem conta, então a prévia pode voltar depois de recarregar, e o Entrar dela leva de volta à etapa da conta. Pendente.
+- [ ] o. Conexão lenta: a prévia vem depois da abertura; Termos fica retido por no máximo 6 s e nunca é trocado depois de mostrado. Num nó em que Conexão pode aparecer, uma conexão mais lenta que 10 s mostra Conexão, e a prévia não volta nessa carga. Pendente.
+- [ ] p. "Recomeçar" e o apagar da conta excluída não trazem a prévia. Pendente.
+- [ ] q. "Entrar" não volta à prévia nesta carga. Recarregar sem conta mostra a prévia de novo, como no item n. Pendente.
+- [ ] r. Um link novo mostra a prévia de novo. Pendente.
+- [ ] s. Numa visita seguinte, a prévia da publicação vence um cartão de convite de cadastro guardado. Pendente.
+- [ ] t. O início a frio de um membro com sessão e um link de publicação fica como antes. Pendente.
+- [ ] u. Android e iOS, recuperação com código num aparelho novo: depois de o código ser aceito, na etapa de criar a passkey, um link de publicação com o app aberto não troca a tela de Identidade, e a etapa continua. O mesmo vale para um cadastro esperando "concluir". Pendente.
+- [ ] v. Com Termos ou Conexão já na tela durante a abertura, um link novo não traz a tela de abertura de volta, e o que foi digitado em Conexão continua lá. Pendente.
+- [ ] w. Um nó que não informa `pending` no estado da passkey, ou um aparelho que não conseguiu ler o arquivo de tentativas de passkey (o estado traz `pending: null`), não mostra a prévia numa visita seguinte (só na primeira). Pendente.
 
 Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho:
 
 ```sh
 node apps/app/test/postPreview.test.js
 node apps/app/test/postLinkOpen.test.js
+node apps/app/test/postLink.test.js
+node apps/app/test/nativeLinks.test.js
+node apps/app/test/identityRecoveryNative.test.js
 node apps/cli/test/post-page.test.js
 node apps/cli/test/seeder-post-http.test.js
 ```

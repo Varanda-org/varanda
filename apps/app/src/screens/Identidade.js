@@ -691,7 +691,10 @@ function LinkCard ({ publicKey, memberCert, active, quiet, recovering = false, s
 // a drop), so the shell reads the card again.
 // onPhoneRecheck: the service answered 'telefone-pendente', so the shell
 // asks the phone status again (src/usePhoneGate.js recheck).
-export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, onInfo, onLinked, onInviteChanged, onPhoneRecheck, invite = null, feira = null }) {
+// onStepHeld: true while a step must be finished on this screen (a code that
+// opened the root, a creation awaiting 'concluir'), so the shell keeps a post
+// preview from replacing it; false otherwise and on unmount.
+export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, onInfo, onLinked, onInviteChanged, onPhoneRecheck, onStepHeld, invite = null, feira = null }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const outbox = useOutbox()
@@ -753,6 +756,12 @@ export default function Identidade ({ active, embedded = false, setup = false, v
   // A code opened the account's root ({ needsPasskey }): the next press
   // creates the passkey (finishRecovery).
   const [needsPasskey, setNeedsPasskey] = useState(false)
+  const stepHeld = needsPasskey || awaitingComplete
+  useEffect(() => {
+    if (typeof onStepHeld !== 'function') return
+    onStepHeld(stepHeld)
+    return () => onStepHeld(false)
+  }, [onStepHeld, stepHeld])
   // The registration of that passkey failed (shown once unlocked).
   const [regNote, setRegNote] = useState('')
   // The result of the finishRecovery (or its 'concluir') that installed the
@@ -982,6 +991,11 @@ export default function Identidade ({ active, embedded = false, setup = false, v
     try { pending = call() } catch (err) { pending = Promise.reject(err) }
     Promise.resolve(pending)
       .then(async (r) => {
+        // The stepHeld effect reports one commit late: a link batched into
+        // this update would see neither the recovery nor the hold.
+        if ((r && r.pending === true) || (r && r.needsPasskey === true)) {
+          if (typeof onStepHeld === 'function') onStepHeld(true)
+        }
         if (r && r.pending === true) {
           passkey.endRecovery()
           setAwaitingComplete(true)
