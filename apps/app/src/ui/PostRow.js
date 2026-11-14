@@ -51,6 +51,8 @@
 // - link: a public http(s) URL of the post (postActions.shareLink decides);
 //   without one there is no Compartilhar. onNotice(text) shows the toast of
 //   a copy to the clipboard.
+// - publishable: the member's own diary post, so 'Página pública na web' may
+//   open the publish sheet (only the own diary's writer accepts a post-share).
 // - onOpenMention(username): makes the @nome in the text and in the quote
 //   tappable (./MentionText). The post text with an http(s)/www link or a
 //   handled mention is rendered outside the body's single accessible element,
@@ -61,12 +63,13 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { AccessibilityInfo, Animated, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { displayText } from '@varanda/rpc'
-import { pendingOpen, tapKind } from '../doubleTap'
+import { doubleTapPlan, pendingOpen, tapKind } from '../doubleTap'
 import { compactTime, formatCount, relativeTime } from '../format'
 import { hasLink, textWithoutHrefs } from '../links'
 import { embedOf, sameMusicPage } from '../musicEmbed'
 import { musicRefOf } from '../music'
 import { moreActions, repostActions, shareLink } from '../postActions'
+import { usePostPublic } from '../postPublicContext'
 import { useBlocks } from '../blocksProvider'
 import { blockedRowView } from '../memberBlocks'
 import { canShare, copyText, shareUrl } from '../share'
@@ -195,7 +198,7 @@ function PostRowView ({
   quote, repostedBy, counts, liked, reposted, pending, expanded = false,
   onOpen, onOpenAuthor, onOpenParent, onOpenPreviews, onOpenReposter, onFollowReposter, onOpenMention,
   onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onBlock, onDelete, link, onNotice,
-  seq, onMessage
+  seq, onMessage, publishable
 }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
@@ -302,9 +305,12 @@ function PostRowView ({
   // The hosted flag alone: the full node value is rebuilt on every sync flag.
   const hosted = useHosted()
   const messageable = fn(onMessage) && hosted === true && Number.isSafeInteger(seq) && seq > 0
+  const postPublic = usePostPublic()
+  const publicRow = publishable === true && postPublic.enabled === true && fn(postPublic.open) && Number.isSafeInteger(seq) && seq > 0
   const moreRows = [
     ...(messageable ? [{ id: 'message', icon: 'mensagem', label: 'Mensagem em particular' }] : []),
     ...moreActions(null, { link, onReport: fn(onReport) ? true : null, onBlock: fn(onBlock) ? true : null }),
+    ...(publicRow ? [{ id: 'public', icon: 'link', label: 'Página pública na web' }] : []),
     ...(fn(onDelete) ? [{ id: 'delete', icon: 'lixeira', label: 'Apagar', danger: true }] : [])
   ]
   const runMore = (row) => {
@@ -315,6 +321,7 @@ function PostRowView ({
       }
     }
     if (row.id === 'message') return () => onMessage(author, { context: { author, seq, at, text, hasMedia } })
+    if (row.id === 'public') return () => postPublic.open(String(author).toLowerCase() + ':' + seq)
     if (row.id === 'report') return onReport
     if (row.id === 'block') return onBlock
     if (row.id === 'delete') return onDelete
@@ -367,8 +374,9 @@ function PostRowView ({
         }
         if (kind === 'double') {
           // Never unlikes, and never doubles a like already on its way.
-          if (!liked) pressLike()
-          burst()
+          const plan = doubleTapPlan({ liked, pending })
+          if (plan.like) pressLike()
+          if (plan.burst) burst()
           return
         }
         pendingOpen.arm(open, rowId, now)

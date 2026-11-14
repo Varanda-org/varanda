@@ -243,3 +243,79 @@ test('react-native-webview is pinned exactly to 13.16.0', (t) => {
   const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8'))
   t.is(pkg.dependencies['react-native-webview'], '13.16.0')
 })
+
+// A pure top-level function of EmbedFrame.native.js, run on its own.
+function lift (name) {
+  const start = nativeRaw.indexOf('export function ' + name + ' (')
+  const end = nativeRaw.indexOf('\n}\n', start)
+  if (start === -1 || end === -1) throw new Error(name + ' not found in EmbedFrame.native.js')
+  const fn = nativeRaw.slice(start, end + 2).replace('export ', '')
+  return new Function(fn + '\nreturn ' + name)() // eslint-disable-line no-new-func
+}
+
+test('native: one handler reports a dead content process on both platforms', (t) => {
+  const ios = /onContentProcessDidTerminate=\{([A-Za-z_$][\w$]*)\}/.exec(nativeSrc)
+  const android = /onRenderProcessGone=\{([A-Za-z_$][\w$]*)\}/.exec(nativeSrc)
+  t.ok(ios, 'onContentProcessDidTerminate is passed a named handler')
+  t.ok(android, 'onRenderProcessGone is passed a named handler')
+  t.is(ios && ios[1], android && android[1], 'the same handler')
+  t.ok(/const onProcessGone = \(\) => \{ goneOnce\(gone, onGone\) \}/.test(nativeSrc), 'the handler only runs the guard and returns nothing')
+  t.ok(/const gone = useRef\(false\)/.test(nativeSrc), 'the guard is a ref, one per mounted frame')
+  t.absent(/Platform\.OS/.test(nativeSrc), 'no Platform.OS')
+})
+
+test('native: goneOnce calls onGone once and never throws', (t) => {
+  const goneOnce = lift('goneOnce')
+  let calls = 0
+  let argCount = -1
+  const fired = { current: false }
+  goneOnce(fired, function () {
+    calls++
+    argCount = arguments.length
+  })
+  goneOnce(fired, () => { calls++ })
+  t.is(calls, 1, 'two deaths, one call')
+  t.is(argCount, 0, 'onGone is called with zero arguments')
+
+  const other = { current: false }
+  goneOnce(other, () => { calls++ })
+  t.is(calls, 2, 'another frame has its own guard')
+
+  for (const onGone of [undefined, null, 'x', 42, {}]) {
+    t.execution(() => goneOnce({ current: false }, onGone), 'no onGone: ' + JSON.stringify(onGone))
+  }
+  const late = { current: false }
+  goneOnce(late, undefined)
+  goneOnce(late, () => { calls++ })
+  t.is(calls, 3, 'an event with no onGone does not use up the one call')
+
+  const throwing = { current: false }
+  t.execution(() => goneOnce(throwing, () => { throw new Error('x') }), 'a throwing onGone is caught')
+  t.execution(() => goneOnce(throwing, () => { throw new Error('x') }), 'and stays caught')
+  t.is(throwing.current, true)
+  t.execution(() => goneOnce(null, () => { calls++ }), 'no ref')
+  t.is(calls, 3, 'no ref, no call')
+})
+
+test('native: only a parked frame is hidden from accessibility', (t) => {
+  const parkedA11y = lift('parkedA11y')
+  t.alike(parkedA11y(true), { accessibilityElementsHidden: true, importantForAccessibility: 'no-hide-descendants' })
+  for (const parked of [false, undefined, null, 'true', 1]) {
+    t.alike(parkedA11y(parked), {}, 'not parked: ' + JSON.stringify(parked))
+  }
+  t.ok(/<View style=\{\{ height, width: '100%' \}\} \{\.\.\.parkedA11y\(parked\)\}>/.test(nativeSrc), 'the wrapper View takes them, with no visual change')
+})
+
+test('web: a parked frame stays loaded but hidden', async (t) => {
+  const { EmbedFrame } = await import('../src/ui/EmbedFrame.web.js')
+  const props = { embedUrl: 'https://w.soundcloud.com/player/?url=x', height: 166, title: 'Player do SoundCloud' }
+  const shown = EmbedFrame(props)
+  const parked = EmbedFrame({ ...props, parked: true, onGone: () => {} })
+  t.is(parked.props.style.visibility, 'hidden')
+  t.is(parked.props.style.display, 'block', 'not display none')
+  t.is(parked.props.src, shown.props.src, 'same src')
+  t.absent('visibility' in shown.props.style, 'no visibility key when not parked')
+  t.absent('visibility' in EmbedFrame({ ...props, parked: false }).props.style, 'nor when parked is false')
+  t.alike(Object.keys(parked.props).sort(), Object.keys(shown.props).sort(), 'no new iframe prop')
+  t.alike(Object.keys(parked.props).sort(), ['allow', 'allowFullScreen', 'height', 'referrerPolicy', 'sandbox', 'src', 'style', 'title', 'width'])
+})

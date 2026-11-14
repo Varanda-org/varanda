@@ -345,20 +345,20 @@ test('a failed or uncertain seguir on Espiadinha and Busca reads the follow set 
 })
 
 // useFollowSet without React: hook slots persist across renders (in call
-// order), state commits are recorded, the node epoch is h.epoch. The hook's
-// own source text runs in a vm; render() re-runs it as React would.
-function followSetHarness (answer) {
+// order) and state commits are recorded. The hook's own source text runs in
+// a vm with the real readFollowKeys; render() re-runs it as React would.
+function followSetHarness (answer, readFollowKeys) {
   const src = fs.readFileSync(path.join(__dirname, '../src/screens/Conversa.js'), 'utf8')
   const at = src.indexOf('export function useFollowSet')
   if (at === -1) throw new Error('missing useFollowSet')
   const body = src.slice(at, src.indexOf('\n}\n', at) + 3).replace('export ', '')
-  const h = { commits: [], calls: 0, epoch: 1 }
+  const h = { commits: [], calls: 0 }
   const slots = []
   let slot = 0
   const keysOf = (v) => [...(v && v.set ? v.set : v)].sort()
   const context = {
     FOLLOW_LIMIT_MAX: 500,
-    useNode: () => ({ epoch: h.epoch }),
+    readFollowKeys,
     useState: (initial) => {
       const i = slot++
       if (!(i in slots)) slots[i] = { value: initial }
@@ -389,9 +389,11 @@ function followSetHarness (answer) {
   return h
 }
 
-test('a failed follow set re-read keeps the last good set and its marks, never a partial one', async (t) => {
+test('a failed follow set read keeps the shown set and its marks, never a partial one', async (t) => {
+  const { readFollowKeys } = await import('../src/follow.js')
   const [A, B, C] = ['a', 'b', 'c'].map((c) => c.repeat(64))
   let mode = 'fail'
+  let release
   const h = followSetHarness((method, { offset }) => {
     if (mode === 'fail') return Promise.reject(Object.assign(new Error('x'), { uncertain: true }))
     if (mode === 'slow') {
@@ -400,10 +402,15 @@ test('a failed follow set re-read keeps the last good set and its marks, never a
     }
     if (mode === 'partial' && offset > 0) return Promise.reject(new Error('caiu'))
     return Promise.resolve(offset === 0 ? { follows: [A.toUpperCase()], total: 2 } : { follows: [B], total: 2 })
-  })
+  }, readFollowKeys)
+  const shown = () => {
+    const f = h.render().follows
+    return f === null ? null : [...f].sort()
+  }
   const first = await h.set.load()
   t.alike([...first], [], 'a failed first read resolves to an empty set')
-  t.alike(h.commits, [[]], 'and commits it (no-store, the safe side)')
+  t.alike(h.commits, [], 'and commits nothing (no-store, the safe side)')
+  t.is(shown(), null, 'the set stays unknown, so no one shows as a stranger')
   mode = 'ok'
   const good = await h.set.load()
   t.alike([...good].sort(), [A, B], 'a complete paged read replaces the set')
@@ -413,54 +420,43 @@ test('a failed follow set re-read keeps the last good set and its marks, never a
   for (const failing of ['partial', 'fail']) {
     mode = failing
     const before = h.commits.length
-    const kept = await h.set.load()
-    t.alike([...kept].sort(), [A, B, C], failing + ': resolves to the last good set with its marks')
+    const got = await h.set.load()
+    t.alike([...got], [], failing + ': resolves to an empty set for callers that wait on it')
+    t.alike(shown(), [A, B, C], failing + ': the shown set keeps the last good read and its marks')
     t.is(h.commits.length, before, failing + ': commits nothing, so no partial or empty set')
   }
   h.set.mark(A, false)
   t.alike(h.commits.at(-1), [B, C], 'mark keeps working on the kept set')
   mode = 'ok'
   t.alike([...await h.set.load()].sort(), [A, B], 'the next good read replaces it')
-  const shown = () => {
-    const f = h.render().follows
-    return f === null ? null : [...f].sort()
-  }
-  t.alike(shown(), [A, B], 'the epoch 1 set is shown')
-  h.epoch = 2
-  t.alike(shown(), [A, B], 'after an epoch change (a reconnect) the set still shows, as before')
+  t.alike(shown(), [A, B], 'the new set is shown')
+  t.alike(shown(), [A, B], 'and stays shown across renders')
   mode = 'fail'
   let before = h.commits.length
-  t.alike([...await h.set.load()], [], 'a failed read in a new epoch is empty, not the old set')
-  t.is(h.commits.length, before + 1, 'and commits it (no-store)')
-  t.alike(shown(), [], 'the empty set shows')
+  t.alike([...await h.set.load()], [], 'a failed read resolves empty')
+  t.is(h.commits.length, before, 'and commits nothing')
+  t.alike(shown(), [A, B], 'the last good set still shows')
   mode = 'ok'
   await h.set.load()
   h.set.mark(C, true)
   mode = 'fail'
   before = h.commits.length
-  t.alike([...await h.set.load()].sort(), [A, B, C], 'a failed re-read in the same epoch keeps the set and its marks')
+  await h.set.load()
+  t.alike(shown(), [A, B, C], 'a failed re-read keeps the set and its marks')
   t.is(h.commits.length, before, 'without a commit')
   h.set.mark(A, false)
   t.alike(shown(), [B, C], 'mark works')
-  let release
   mode = 'slow'
-  const stale = h.set.load()
-  h.epoch = 3
-  h.render()
+  const slow = h.set.load()
+  release()
+  t.alike([...await slow], [A], 'a slow read resolves to what it read')
+  t.alike(shown(), [A], 'and is committed when it lands')
+  mode = 'fail'
   await h.set.load()
-  release()
-  t.alike([...await stale], [A], 'a read that outlived its epoch still resolves')
-  t.alike(shown(), [A, B], 'but does not replace a set committed in a newer epoch')
-  mode = 'slow'
-  const late = h.set.load()
-  h.epoch = 4
-  h.render()
-  release()
-  await late
-  t.alike(shown(), [A], 'with nothing newer committed, a late read is committed')
-  const partial = followSetHarness((method, { offset }) => offset === 0 ? Promise.resolve({ follows: [A], total: 2 }) : Promise.reject(new Error('caiu')))
+  t.alike(shown(), [A], 'a failure after it keeps it')
+  const partial = followSetHarness((method, { offset }) => offset === 0 ? Promise.resolve({ follows: [A], total: 2 }) : Promise.reject(new Error('caiu')), readFollowKeys)
   t.alike([...await partial.set.load()], [], 'a first read that fails on a later page is empty, not partial')
-  t.alike(partial.commits, [[]])
+  t.alike(partial.commits, [], 'and commits nothing')
 })
 
 test('Espiadinha and Busca track mount for the follow re-read, StrictMode safe', async (t) => {

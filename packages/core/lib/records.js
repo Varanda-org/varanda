@@ -104,6 +104,7 @@ const GROUP_CONFIRM_KEYS = ['type', 'group', 'writer', 'seq', 'digest', 'at']
 const DELETE_KEYS = ['type', 'seq', 'at']
 const DELETE_MEDIA_KEYS = ['type', 'seq', 'at', 'media']
 const DELETE_RANGE_KEYS = ['core', 'start', 'blocks']
+const POST_SHARE_KEYS = Object.freeze(['type', 'seq', 'at'])
 // Depoimentos (docs/protocol.md): the writer's sealed commitment and the
 // recipient's opt-in copy of the text.
 const TESTIMONIAL_KEYS = ['type', 'to', 'gen', 'hash', 'box', 'at']
@@ -522,7 +523,7 @@ function validPageShape (r) {
     isHex64(r.owner) && r.actor === r.owner && validPageAdmins(r.admins, r.owner)
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment'])
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share'])
 
 // Required lazily: lib/group.js requires this module at load time.
 function weakBoxKey (hex) {
@@ -546,6 +547,14 @@ function check (record, seq) {
     if (!isCanonicalIso(record.at)) return 'date-invalid'
     if (withMedia && !validDeleteRanges(record.media)) return 'media-invalid'
     return null
+  }
+  // The author's consent to the public page (docs/protocol.md section 2, "Public share", and section 16):
+  // whether block `seq` is a live post of this diary is the fold's check,
+  // this module sees one record.
+  if (type === 'post-share') {
+    if (!hasExactKeys(record, POST_SHARE_KEYS)) return 'malformed'
+    if (!Number.isSafeInteger(record.seq) || record.seq < 1 || !(record.seq < seq)) return 'post-share-invalid'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   // Shape only: the issuer signatures are checked by verifyUsernameRecord
   // (lib/cert.js) where the username is read (lib/username.js).
@@ -796,6 +805,11 @@ function deleteRecord ({ seq, at = nowIso(), media } = {}) {
   return build(record, Number.isSafeInteger(seq) ? seq + 1 : 1)
 }
 
+// Validated as if appended right after its post, like deleteRecord.
+function postShareRecord ({ seq, at = nowIso() } = {}) {
+  return build({ type: 'post-share', seq, at }, Number.isSafeInteger(seq) ? seq + 1 : 1)
+}
+
 // Every chunk shares one `at`, read once, so the records of one deletion
 // carry the same instant.
 function deleteRecords ({ seq, at = nowIso(), media } = {}) {
@@ -1007,6 +1021,7 @@ module.exports = {
   POST_PREVIEW_KEYS,
   QUOTE_PREVIEW_KEYS,
   DELETE_RANGE_KEYS,
+  POST_SHARE_KEYS,
   LISTING_KEYS: feira.LISTING_KEYS,
   LISTING_MEDIA_KEYS: feira.LISTING_MEDIA_KEYS,
   LISTING_EDIT_KEYS: feira.EDIT_KEYS,
@@ -1042,6 +1057,7 @@ module.exports = {
   momentRecord,
   deleteRecord,
   deleteRecords,
+  postShareRecord,
   listingRecord,
   listingEditRecord,
   listingStatusRecord,

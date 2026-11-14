@@ -25,14 +25,14 @@ test('method list and mutating set', (t) => {
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
     'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moments.read', 'node.close', 'node.info', 'notices.list',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read', 'phone.proof', 'phone.sign',
-    'post.create', 'post.delete', 'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
+    'post.create', 'post.delete', 'post.quote', 'post.reply', 'post.share', 'post.shared', 'post.unshare', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
     'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
     'block.set', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.react', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
     'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.react', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
     'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'listing.create', 'listing.delete', 'listing.edit', 'listing.rate', 'listing.status', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'node.close', 'page.register', 'post.create', 'post.delete',
-    'post.quote', 'post.reply',
+    'post.quote', 'post.reply', 'post.share', 'post.unshare',
     'profile.delete', 'profile.set', 'repost.set', 'sync.start', 'sync.stop', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'username.add'
   ])
 })
@@ -2721,5 +2721,20 @@ test('moment.lookup: an author and a seq, read only', (t) => {
   for (const author of [KEY.toUpperCase(), KEY.slice(1), KEY + ':1', null, 1]) bad(t, 'moment.lookup', { author, seq: 1 }, 'author ' + JSON.stringify(author))
   for (const extra of [{ ref: KEY + ':1' }, { text: 'x' }, { blob: KEY }, { page: KEY }]) {
     t.is(validateParams('moment.lookup', { author: KEY, seq: 1, ...extra }).message, 'parâmetro desconhecido', 'extra ' + Object.keys(extra)[0])
+  }
+})
+
+test('post.shared, post.share and post.unshare take one canonical ref and nothing else', (t) => {
+  t.absent(isMutating('post.shared'))
+  t.ok(isMutating('post.share'))
+  t.ok(isMutating('post.unshare'))
+  for (const method of ['post.shared', 'post.share', 'post.unshare']) {
+    ok(t, method, { to: KEY + ':1' }, { to: KEY + ':1' })
+    ok(t, method, { to: KEY + ':' + Number.MAX_SAFE_INTEGER }, { to: KEY + ':' + Number.MAX_SAFE_INTEGER })
+    t.is(validateParams(method, {}).message, 'parâmetro obrigatório: to')
+    t.is(validateParams(method, { to: KEY + ':1', extra: true }).message, 'parâmetro desconhecido')
+    for (const to of [null, 1, {}, { author: KEY, seq: 1 }, 'x', KEY, KEY + ':0', KEY + ':01', KEY + ':-1', KEY + ':1.5', KEY.toUpperCase() + ':1', KEY + ':9007199254740992']) {
+      t.is(validateParams(method, { to }).message, 'parâmetro inválido: to', method + ' ' + JSON.stringify(to))
+    }
   }
 })

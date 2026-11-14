@@ -61,14 +61,15 @@ import { TopBar } from '../ui/TopBar'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, SkeletonRow } from '../ui/States'
 import { noteLocalWrite } from '../localWrites'
-import { FEED_FIRST_ROWS, feedDetailsReady } from '../splashGate'
+import { FEED_FIRST_ROWS, feedDetailsReady, momentsSettled } from '../splashGate'
 import { layout, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { MomentosStrip } from '../ui/MomentosStrip'
-import { canPublishMoment } from '../momentSeen'
+import { canPublishMoment, liveAuthors, liveItems, stripShown } from '../momentSeen'
 import { useMomentSeen, useMoments } from './Momentos'
 import { useBlocks } from '../blocksProvider'
 import { installationOrigin } from '../installation'
+import { postLink } from '../postLink'
 import { bumpCacheGeneration, cacheGeneration, keepOnlyAuthors, registerLocalCache } from '../localCaches'
 import { buildSnapshot, initialFeedState, keepOnlyAuthors as snapshotKeepOnly, parseSnapshot, socialSeed, withoutAuthors } from '../feedSnapshot'
 import { clearSnapshot, loadSnapshotText, saveSnapshotText } from '../feedSnapshotStore'
@@ -1184,6 +1185,19 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       pending: typeof social.pending === 'function' ? social.pending(parentRef) : false
     })
   const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
+  // The seeder's public page shows diary posts only. Chats, groups and
+  // moments never come through here and are not kind 'post'; a page's diary
+  // is told apart by its profile.
+  const diaryPost = post.kind === 'post' && !(prof && prof.page === true)
+  const postRef = diaryPost ? refOf(post) : null
+  const origin = installationOrigin() || globalThis.location?.origin || null
+  const link = postRef !== null ? postLink(origin, postRef) : null
+  // The member's own diary only, never the page acted as: the writer refuses
+  // a post-share for any diary but the caller's own. The original under a
+  // repost is published from its own row.
+  const authorKey = String(post.author).toLowerCase()
+  const publishable = postRef !== null && own !== null && authorKey === own && authorKey !== actingPageKey() &&
+    repostedBy === null && Number.isSafeInteger(post.seq)
   // While the index is still being built a count would be misleadingly small.
   const counts = s.flags.indexing ? null : (s.counts.get(ref) || null)
   const fnOf = (f) => typeof f === 'function'
@@ -1267,7 +1281,9 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       onDelete: offers.delete ? () => live.h.onDelete({ ref, seq: post.seq }) : undefined,
       onReport: offers.report ? () => live.h.onReport({ author: post.author, name, username, seq: post.seq, text: post.text }) : undefined,
       seq: post.seq,
-      onMessage: offers.message ? (author, options) => live.h.onMessage(author, options) : undefined
+      onMessage: offers.message ? (author, options) => live.h.onMessage(author, options) : undefined,
+      link,
+      publishable
     }
   }
   const latest = { h, social, ref }
@@ -1302,6 +1318,9 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
     liked: s.eng.liked.has(ref),
     reposted: s.eng.reposted.has(ref),
     pending: s.pending.get(ref) || null,
+    link,
+    origin,
+    publishable,
     ...Object.fromEntries(Object.entries(offers).map(([k, v]) => ['offers.' + k, v]))
   }
   return cachedRow(cache, rowKey, inputs, latest, (live) => build(withActions(live)))
@@ -1748,6 +1767,7 @@ export default function ARua (props) {
     if (!pageActing || typeof onBoot !== 'function') return
     onBoot('page')
     onBoot('details')
+    onBoot('moments')
   }, [pageActing, onBoot])
   if (acting.kind === 'page') {
     // The core session refuses page.feed, so there is nothing to read here.
@@ -1982,13 +2002,12 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     }
   }, [request, ackFresh, commit, learnPage, ingest])
 
-  // The boot cover (App.js) waits for these, once each: the first page in,
-  // then the names and counts of its first rows. A failed first read ends
-  // both: there is nothing more to wait for.
-  const bootRef = useRef({ page: false, details: false })
+  // The boot cover (App.js) waits for each stage once. A failed first feed
+  // read ends page and details; Momentos settles independently.
+  const bootRef = useRef({ page: false, details: false, moments: false })
   const socialState = social.social
-  // Snapshot rows on screen: the cover lifts at once. The names are seeds
-  // only, never loaded; the live page's resolveMany still reads the profiles.
+  // Snapshot rows settle page and details, but the cover still waits for
+  // Momentos. Names are seeds only; the live page still reads the profiles.
   useEffect(() => {
     const snapshot = boot.snapshot
     if (snapshot === null) return
@@ -2021,6 +2040,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
       authors: first.authors,
       shown: first.shown,
       profileOf: names.profileOf,
+      strictProfiles: node.hosted === true,
       // A repost row shows its original: wait for its answer (any outcome,
       // a transient one included), never for a retry.
       originals: rows.filter((i) => i.kind === 'repost').map((i) => refOf(i.to)).filter((r) => r !== null),
@@ -2033,6 +2053,29 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     perfMarks().mark('details')
     onBoot('details')
   }, [onBoot, feed.loadedAt, feed.loadError, feed.items, names.profileOf, socialState, node.hosted, node.online])
+
+  const authorsLive = useMemo(() => liveAuthors(moments.authors, now), [moments.authors, now])
+  const ownLive = useMemo(() => liveItems(moments.own, now), [moments.own, now])
+  const canPublish = canPublishMoment(node)
+  const stripVisible = stripShown({ hosted: node.hosted === true, authors: authorsLive, own: ownLive, canPublish })
+  const hasCreateMoment = typeof onCreateMoment === 'function'
+  const ringKeys = useMemo(() => {
+    const keys = authorsLive.map((a) => a.author)
+    if (typeof ownKey === 'string' && (ownLive.length > 0 || (canPublish === true && hasCreateMoment))) keys.push(ownKey)
+    return keys
+  }, [authorsLive, ownLive, ownKey, canPublish, hasCreateMoment])
+  // Ask early so ring authors can join the feed batch; later refreshes also
+  // need their profiles after the boot latch has closed.
+  useEffect(() => {
+    if (ringKeys.length > 0) resolveMany(ringKeys)
+  }, [ringKeys, resolveMany])
+  useEffect(() => {
+    if (typeof onBoot !== 'function' || bootRef.current.moments) return
+    if (!momentsSettled({ phase: moments.phase, seenLoaded: momentSeen.loaded, stripVisible, authors: ringKeys, profileOf: names.profileOf })) return
+    bootRef.current.moments = true
+    perfMarks().mark('moments')
+    onBoot('moments')
+  }, [onBoot, moments.phase, momentSeen.loaded, stripVisible, ringKeys, names.profileOf])
 
   // What the snapshot holds of the live feed: its first page (row keys) and
   // the load it came from. Every commit that changes it (a refresh, a quiet
