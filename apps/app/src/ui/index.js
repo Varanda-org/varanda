@@ -256,8 +256,9 @@ export function ConfirmStack ({ confirm, cancel }) {
   )
 }
 
-// Key, JSON and host fields are `mono`: no capitalisation or correction.
-// Free text (name, bio) keeps the platform defaults.
+// Key, JSON and host fields are `mono`: no capitalisation or correction, and
+// the typed value in the monospace font (an empty field keeps its placeholder
+// in the normal one). Free text (name, bio) keeps the platform defaults.
 export function Field ({ label, value, onChangeText, multiline, maxLength, editable = true, placeholder, mono, lines = 4, onSubmitEditing, returnKeyType, plain }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
@@ -271,7 +272,7 @@ export function Field ({ label, value, onChangeText, multiline, maxLength, edita
     <View style={styles.field}>
       {label ? <Label>{label}</Label> : null}
       <TextInput
-        style={[styles.input, multiline && { minHeight: lines * 22 + 20, textAlignVertical: 'top' }, mono && styles.inputMono, !editable && styles.inputOff]}
+        style={[styles.input, multiline && { minHeight: lines * 22 + 20, textAlignVertical: 'top' }, mono && value !== '' && styles.inputMono, !editable && styles.inputOff]}
         value={value}
         onChangeText={onChangeText}
         multiline={multiline}

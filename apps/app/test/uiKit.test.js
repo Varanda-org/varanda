@@ -218,6 +218,11 @@ test('MoreButton owns an ActionsSheet and hides when nothing is usable', (t) => 
   t.ok(more.includes("icon='mais'"), 'mais icon')
 })
 
+test('a mono field uses the monospace font only for the typed value, not the placeholder', (t) => {
+  t.ok(index.includes("mono && value !== '' && styles.inputMono"))
+  t.absent(index.includes('mono && styles.inputMono'))
+})
+
 test('nothing is clipped: no numberOfLines in Pill, Btn or sheet rows', (t) => {
   t.absent(pill.includes('numberOfLines'), 'Pill')
   const btn = index.slice(index.indexOf('export function Btn'), index.indexOf('export function Field'))

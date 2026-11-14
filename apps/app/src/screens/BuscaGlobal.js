@@ -24,7 +24,7 @@
 // store, a file or a URL (SEARCH_MEMORY). A new signed-in key empties them.
 
 import { useContext, useEffect, useRef, useState } from 'react'
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { Keyboard, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { displayText, isKey } from '@varanda/rpc'
 import { useNode, useNotice } from '../node'
 import { useNames } from '../names'
@@ -71,6 +71,11 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
   const names = useNames()
   const bottomPad = useBottomPad()
   const inputRef = useRef(null)
+  // Leaving for a profile, a thread or a mention closes the keyboard, or it
+  // would stay up over the screen that opens.
+  const openMember = (...args) => { Keyboard.dismiss(); return onOpenMember(...args) }
+  const openThread = (...args) => { Keyboard.dismiss(); return onOpenThread(...args) }
+  const openMention = (...args) => { Keyboard.dismiss(); return onOpenMention(...args) }
   const [category, setCategory] = useState('contas')
   const visible = useContext(ScreenVisible)
   const [drafts, setDrafts] = useState(NO_DRAFTS)
@@ -284,7 +289,7 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
                 hint={names.profileOf(hit.author)}
                 avatar={pickAvatar(names.profileOf(hit.author), hit)}
                 following={follows === null ? null : follows.has(hit.author)}
-                onOpen={onOpenMember}
+                onOpen={openMember}
                 onFollow={doFollowHit}
                 onUnfollow={(h) => doRemove(h.author)}
                 pending={following === hit.author || removing === hit.author}
@@ -475,9 +480,9 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
         onReply={onReply}
         onReport={onReport}
         onQuote={onQuote}
-        onOpenThread={onOpenThread}
-        onOpenMember={onOpenMember}
-        onOpenMention={onOpenMention}
+        onOpenThread={openThread}
+        onOpenMember={openMember}
+        onOpenMention={openMention}
         onOpenEngagers={onOpenEngagers}
         onFollowsChanged={onFollowsChanged}
         onToast={onToast}
