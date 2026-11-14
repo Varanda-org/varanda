@@ -9,7 +9,7 @@ import { HOW_LABEL } from '../inviteCardCopy'
 import { SHEET_BODY, SHEET_TITLE } from '../postPreviewCopy'
 import { Btn, ConfirmStack, Soft } from './index'
 import { Sheet } from './Sheet'
-import { layout, space } from './theme'
+import { layout, space, type } from './theme'
 import { useStyles } from './ThemeProvider'
 
 export function PostLinkSheet ({ open, onClose, onEnter, onHow }) {
@@ -45,6 +45,6 @@ export function PostLinkSheet ({ open, onClose, onEnter, onHow }) {
 const makeStyles = (colors) => StyleSheet.create({
   body: { gap: space.md, paddingHorizontal: space.lg, paddingBottom: space.lg },
   link: { alignSelf: 'center', minHeight: layout.hit, justifyContent: 'center', paddingHorizontal: space.xs },
-  linkText: { fontSize: 15, fontWeight: '700', color: colors.ink },
+  linkText: { ...type.pill, color: colors.ink },
   pressed: { opacity: 0.6 }
 })
