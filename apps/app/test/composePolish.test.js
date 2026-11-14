@@ -190,12 +190,12 @@ test('composer toolbar is revealed on focus and layout, with photo action and pr
 test('intro preserves shared buttons and the top-right skip action', (t) => {
   const intro = read('screens/Introducao.js')
   t.ok(intro.includes("<Btn block large label={index === last ? START_LABEL : NEXT_LABEL} onPress={index === last ? finish : () => { tap('select'); goTo(index + 1) }} />"), 'next keeps the shared button, selects haptically and advances')
-  t.ok(intro.includes('accessibilityLabel={BACK_LABEL} onPress={() => goTo(index - 1)}') && intro.includes("<Icon name='voltar' size={28} color={colors.ink} />") && /back: \{ height: layout.hit, minWidth: layout.hit/.test(intro), 'back is an icon control at 44 points labelled Voltar')
+  t.ok(intro.includes('accessibilityLabel={BACK_LABEL} onPress={() => goTo(index - 1)}') && intro.includes("<Icon name='voltar' size={22} color={colors.ink} />") && /back: \{ width: layout.hit, height: layout.hit, borderRadius: layout.hit \/ 2/.test(intro), 'back is a 44 point card circle labelled Voltar')
   t.ok(intro.includes('Animated.timing(width') && intro.includes('if (reduceMotion) { width.setValue(to); return }'), 'the active dot animates its width and reduce motion snaps')
   t.ok(intro.includes("<Pressable accessibilityRole='button' onPress={finish} hitSlop={8} style={({ pressed }) => [styles.skip, pressed && styles.pressed]}>") && intro.includes('<Text style={styles.skipText}>{SKIP_LABEL}</Text>'), 'Pular keeps its original button and handler')
   t.ok(/skip: \{[^\n]*minHeight: layout.hit, minWidth: layout.hit/.test(intro) && read('ui/theme.js').includes('hit: 44'), 'both skip touch dimensions are 44 points')
-  t.ok(intro.includes("alignItems: 'flex-end'") && intro.includes("skipText: { fontSize: 15, fontWeight: '700', color: colors.soft }"), 'skip stays at the top right with its original text style')
-  t.ok(intro.includes('paddingHorizontal: space.xl, paddingBottom: space.xl, gap: 20'), 'intro spacing preserves the footer gap')
+  t.ok(intro.includes("alignItems: 'flex-end'") && intro.includes('skipText: { ...type.pill, color: colors.soft }'), 'skip stays at the top right in the pill type')
+  t.ok(intro.includes('paddingHorizontal: space.xl, paddingBottom: space.xl, gap: space.xl'), 'intro spacing preserves the footer gap')
   t.absent(intro.includes('PressScale'), 'no hand-rolled button replacements')
 })
 

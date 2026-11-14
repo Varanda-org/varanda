@@ -31,12 +31,14 @@
 // 400 pt farther away), and yields on its own next check only if that check
 // still finds it out of the band; no card ever changes another card's state.
 //
-// Until the provider page has loaded, the slot holds the stored ./LinkCard
-// built from stored data only, and a tap opens the link; the frame loads
-// under it, transparent and out of touches. The slot keeps the player's
-// height in every state, so loading or unloading the frame never moves the
-// list. The card never claims playback, so a silent frame never stops a voice
-// note, an Audius card or a momento.
+// Until the provider page has loaded, the slot draws ./EmbedCover at the
+// player's own size, built from stored data only, so the player shows up in
+// place instead of growing out of a small row; a tap on it does nothing. The
+// frame loads above it, transparent and out of touches, fades in when ready,
+// and the cover stays a moment longer so no gap flashes during the fade. The
+// slot keeps the player's height in every state, so loading or unloading the
+// frame never moves the list. The card never claims playback, so a silent
+// frame never stops a voice note, an Audius card or a momento.
 //
 // The frame's sandbox grants popups but no top navigation. On native a popup
 // is cancelled and its address leaves the app only through embedExitUrl,
@@ -49,7 +51,7 @@
 // cards of one row, a post's and its quote's).
 
 import { useContext, useEffect, useRef, useState } from 'react'
-import { Pressable, StyleSheet, View, useWindowDimensions } from 'react-native'
+import { Animated, Pressable, StyleSheet, View, useWindowDimensions } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { cardUrlHost } from '@varanda/rpc'
 import {
@@ -62,14 +64,17 @@ import {
 } from '../musicEmbed'
 import { openExternal } from '../openExternal'
 import { embedKey } from '../embedKeep'
+import { coverLingers } from '../embedCover'
 import { EMBED_IDLE, EMBED_PARKED, EMBED_TICK_MS, EMBED_WAITING, bandGap, embedNear, embedSlots, embedStays, embedStep, embedTouched, embedsHeld, embedsHeldAll, mostlyHidden, onEmbedHold } from '../embedLive'
 import { playbackClaimCount } from '../media/chatMedia'
+import { EmbedCover } from './EmbedCover'
 import { EmbedFrame } from './EmbedFrame'
 import { Icon } from './Icon'
 import { LINK_CARD_DISMISS, LinkCard } from './LinkCard'
 import { screenReaderKnown, screenReaderOn } from './screenReader'
 import { EmbedBandBottom, EmbedHost, EmbedRowKey, RowShift, ScreenVisible, SheetDepth } from './screenVisible'
 import { TabBarShown } from './tabBarShown'
+import { useReveal } from './useReveal'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, space } from './theme'
 
@@ -451,6 +456,7 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
     : null
   const height = embedHeight(embed, width)
   const live = state.live
+  const { opacity, settled } = useReveal(live && ready, 100)
 
   const openFromPlayer = (target) => {
     const out = embedExitUrl(embed, target)
@@ -520,7 +526,7 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
   }
 
   const parts = slotParts(live, key !== '' && !inline, ready)
-  const frameLook = ready ? styles.frame : [styles.frame, styles.loading]
+  const lingers = coverLingers(parts.standIn, live, ready, settled)
   return (
     <View style={styles.wrap} onLayout={onLayout}>
       <View
@@ -534,11 +540,22 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
         onClick={stopClick}
         onKeyDown={stopPressKeys}
       >
-        {parts.standIn
-          // The responder is negotiated from the touched node upward, so the
-          // card's own Pressable takes a tap on it, and this claim keeps a
-          // tap beside it from reaching a quote's or a bubble's Pressable.
-          ? <View key='standIn' style={styles.standIn} onStartShouldSetResponder={() => true}>{plain}</View>
+        {parts.standIn || lingers
+          // First child, so the frame draws over it. The claim keeps a tap on
+          // or beside it from reaching a quote's or a bubble's Pressable;
+          // while it only lingers under the fading frame it takes no touch.
+          ? (
+            <View
+              key='cover'
+              style={styles.cover}
+              pointerEvents={parts.standIn ? 'auto' : 'none'}
+              accessibilityElementsHidden={!parts.standIn}
+              importantForAccessibility={parts.standIn ? 'auto' : 'no-hide-descendants'}
+              onStartShouldSetResponder={() => true}
+            >
+              <EmbedCover provider={embed.provider} name={name} card={draft ? undefined : card} draft={draft || undefined} imageUri={imageUri} thumb={thumb} width={width} height={height} onLongPress={onLongPress} />
+            </View>
+            )
           : null}
         {parts.empty
           // The layer draws the frame over this empty slot; the claim keeps a
@@ -546,10 +563,10 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
           ? <View key='empty' style={{ height }} accessibilityLabel={'Player do ' + name} onStartShouldSetResponder={() => true} />
           : null}
         {parts.frame
-          // Over the stored card, transparent and out of touches until the
+          // Over the cover, transparent and out of touches until the
           // provider page has loaded; the key keeps it mounted when it shows.
           ? (
-            <View key='frame' style={frameLook} pointerEvents={ready ? 'auto' : 'none'}>
+            <Animated.View key='frame' style={settled ? styles.frame : [styles.frame, { opacity: ready ? opacity : 0 }]} pointerEvents={ready ? 'auto' : 'none'}>
               <EmbedFrame
                 embedUrl={embed.embedUrl}
                 html={embedHtml(embed)}
@@ -565,7 +582,7 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
                 onEngage={(on) => embedSlots.engage(release.current, on, playbackClaimCount())}
                 onGone={() => { embedSlots.shrink(Date.now()); apply(EMBED_IDLE) }}
               />
-            </View>
+            </Animated.View>
             )
           : null}
       </View>
@@ -577,9 +594,8 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
 const makeStyles = (colors) => StyleSheet.create({
   wrap: { marginTop: space.sm },
   slot: { width: '100%', overflow: 'hidden' },
-  standIn: { flex: 1, justifyContent: 'center' },
+  cover: { ...StyleSheet.absoluteFillObject },
   frame: { ...StyleSheet.absoluteFillObject },
-  loading: { opacity: 0 },
   pressed: { opacity: 0.7 },
   actions: { flexDirection: 'row', justifyContent: 'flex-end', paddingHorizontal: space.sm, paddingTop: space.sm },
   dismiss: { width: layout.hit, minHeight: layout.hit, alignItems: 'center', justifyContent: 'center' }

@@ -545,3 +545,73 @@ test('musicEmbed: sameMusicPage matches only the same item', async (t) => {
   t.is(sameMusicPage(null, null), false, 'two nulls')
   t.is(sameMusicPage('https://audius.co/artist/track', 'https://audius.co/artist/track'), false, 'two Audius links')
 })
+
+test('musicEmbed: COVER_IMAGE_DOMAINS is deeply frozen and keyed by provider', async (t) => {
+  const { COVER_IMAGE_DOMAINS, EMBED_PROVIDER_NAMES } = await load()
+  t.ok(Object.isFrozen(COVER_IMAGE_DOMAINS), 'map frozen')
+  t.alike(Object.keys(COVER_IMAGE_DOMAINS).sort(), Object.keys(EMBED_PROVIDER_NAMES).sort(), 'one entry per player provider')
+  for (const [provider, list] of Object.entries(COVER_IMAGE_DOMAINS)) {
+    t.ok(Object.isFrozen(list), provider + ' list frozen')
+    t.absent(list.some((d) => d.includes('spotifycdn')), provider + ': no unmeasured spotifycdn.com')
+  }
+  t.alike(COVER_IMAGE_DOMAINS, { youtube: ['ytimg.com'], spotify: ['scdn.co'], soundcloud: ['sndcdn.com'], apple: ['mzstatic.com'] }, 'measured domains only')
+})
+
+test('musicEmbed: coverImageAllowed', async (t) => {
+  const { coverImageAllowed } = await load()
+  const yt = 'https://www.youtube.com/watch?v=' + YT
+  const sp = 'https://open.spotify.com/track/' + SP
+  const sc = 'https://soundcloud.com/artist-1/song_name'
+  const ap = 'https://music.apple.com/br/album/nome/123456789?i=987654321'
+  t.is(coverImageAllowed(yt, 'https://i.ytimg.com/vi/' + YT + '/hqdefault.jpg'), true, 'i.ytimg.com for YouTube')
+  t.is(coverImageAllowed('https://youtu.be/' + YT, 'https://i9.ytimg.com/vi/' + YT + '/hq.jpg'), true, 'numbered sibling for youtu.be')
+  t.is(coverImageAllowed(sp, 'https://i.scdn.co/image/ab67616d0000b273'), true, 'i.scdn.co for Spotify')
+  t.is(coverImageAllowed(sc, 'https://i1.sndcdn.com/artworks-000-t500x500.jpg'), true, 'i1.sndcdn.com for SoundCloud')
+  t.is(coverImageAllowed(ap, 'https://is1-ssl.mzstatic.com/image/thumb/a.jpg/600x600bb.jpg'), true, 'is1-ssl.mzstatic.com for Apple')
+  t.is(coverImageAllowed(yt, 'https://i.ytimg.com:443/vi/x.jpg'), true, 'explicit default port')
+
+  t.is(coverImageAllowed(yt, 'https://evil.com/x.jpg'), false, 'evil.com')
+  t.is(coverImageAllowed(yt, 'https://ytimg.com.evil.com/x.jpg'), false, 'listed domain as a prefix')
+  t.is(coverImageAllowed(yt, 'https://evilytimg.com/x.jpg'), false, 'listed domain as a suffix without a dot')
+  t.is(coverImageAllowed(yt, 'https://ytimg.com/x.jpg'), false, 'bare apex')
+  t.is(coverImageAllowed(yt, 'http://i.ytimg.com/vi/x.jpg'), false, 'http')
+  t.is(coverImageAllowed(yt, 'https://user@i.ytimg.com/x.jpg'), false, 'credentials')
+  t.is(coverImageAllowed(yt, 'https://i.scdn.co/image/x'), false, 'Spotify host for a YouTube page')
+  t.is(coverImageAllowed(sp, 'https://i.ytimg.com/vi/x.jpg'), false, 'YouTube host for a Spotify page')
+  t.is(coverImageAllowed(sc, 'https://is1-ssl.mzstatic.com/x.jpg'), false, 'Apple host for a SoundCloud page')
+  for (const host of ['i.spotifycdn.com', 'image-cdn-ak.spotifycdn.com', 'spotifycdn.com']) {
+    t.is(coverImageAllowed(sp, 'https://' + host + '/image/x'), false, host)
+  }
+  t.is(coverImageAllowed('https://example.com/page', 'https://i.ytimg.com/vi/x.jpg'), false, 'non-music page')
+  t.is(coverImageAllowed('https://audius.co/artist/track', 'https://i.ytimg.com/vi/x.jpg'), false, 'Audius page')
+  for (const bad of [null, undefined, 42, {}, ['https://i.ytimg.com/x.jpg'], '']) {
+    t.execution(() => coverImageAllowed(bad, 'https://i.ytimg.com/x.jpg'), String(bad) + ' page: no throw')
+    t.is(coverImageAllowed(bad, 'https://i.ytimg.com/x.jpg'), false, String(bad) + ' page')
+    t.is(coverImageAllowed(yt, bad), false, String(bad) + ' image')
+  }
+})
+
+test('musicEmbed: coverImageAllowed compares lowercase hosts', async (t) => {
+  const { coverImageAllowed } = await load()
+  const yt = 'https://www.youtube.com/watch?v=' + YT
+  const img = 'https://I.YTIMG.COM/vi/x.jpg'
+  t.is(coverImageAllowed(yt, img), rpc.cardUrlHost(img) !== null, 'upper case host follows cardUrlHost')
+  t.is(coverImageAllowed(yt, 'https://I.YTIMG.COM.evil.com/x.jpg'), false, 'upper case prefix trick')
+})
+
+test('musicEmbed: coverTarget', async (t) => {
+  const { coverTarget } = await load()
+  const watch = 'https://www.youtube.com/watch?v=' + YT
+  t.is(coverTarget('https://youtu.be/' + YT), watch, 'youtu.be')
+  t.is(coverTarget('https://www.youtube.com/shorts/' + YT), watch, 'shorts')
+  t.is(coverTarget('https://m.youtube.com/watch?v=' + YT + '&si=abc'), watch, 'mobile watch with tracking')
+  t.is(coverTarget(watch), watch, 'watch')
+  t.is(coverTarget('https://www.youtube.com/playlist?list=' + YT_LIST), null, 'playlist')
+  t.is(coverTarget('https://open.spotify.com/track/' + SP), null, 'Spotify')
+  t.is(coverTarget('https://soundcloud.com/artist-1/song_name'), null, 'SoundCloud')
+  t.is(coverTarget('https://example.com/watch?v=' + YT), null, 'non-music link')
+  for (const bad of [null, undefined, 42, {}, '', 'not a url']) {
+    t.execution(() => coverTarget(bad), String(bad) + ': no throw')
+    t.is(coverTarget(bad), null, String(bad))
+  }
+})

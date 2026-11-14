@@ -19,6 +19,10 @@ export function useFeiraEntryStart ({ feira = null, active = false, required, bl
   const entry = feira !== null && feira.holder ? feira.holder.load(feira.origin) : null
   const [policy, setPolicy] = useState(undefined)
   const asked = useRef(false)
+  // The installation the press was made on: a code that answers after a swap
+  // belongs to the old one and is dropped.
+  const originRef = useRef(feira === null ? '' : feira.origin)
+  originRef.current = feira === null ? '' : feira.origin
   const [tried, setTried] = useState(false)
   const [busy, setBusy] = useState(false)
   const [retry, setRetry] = useState(false)
@@ -50,7 +54,8 @@ export function useFeiraEntryStart ({ feira = null, active = false, required, bl
     setTried(true)
     setBusy(true)
     setRetry(false)
-    startEntry({ holder: feira.holder, entry, start: feiraStart, hold: feira.hold, isHeld: () => loadSignupInvite() !== null })
+    const pressedOn = originRef.current
+    startEntry({ holder: feira.holder, entry, start: feiraStart, hold: feira.hold, isHeld: () => originRef.current !== pressedOn || loadSignupInvite() !== null })
       .then((r) => {
         if (r.ok || r.superseded) note('')
         else {

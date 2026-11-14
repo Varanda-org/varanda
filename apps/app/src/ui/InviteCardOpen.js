@@ -19,7 +19,7 @@ import { welcomeBands } from '../inviteWelcomeStage'
 import { InviteCard } from './InviteCard'
 import { InviteWelcomeHeader, InviteWelcomeStage, useWelcomeEntrance } from './InviteWelcome'
 import { Btn } from './index'
-import { layout, space } from './theme'
+import { layout, space, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
 
 export function InviteCardOpen ({ card, username = null, expiryText = '', onEnter, onHow, onLater, sidePad = 0, edges }) {
@@ -75,6 +75,6 @@ const makeStyles = (colors) => StyleSheet.create({
   actions: { gap: space.sm, marginTop: space.sm },
   links: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', gap: space.sm },
   link: { minHeight: layout.hit, justifyContent: 'center', paddingHorizontal: space.xs },
-  linkText: { fontSize: 15, fontWeight: '700', color: colors.ink },
+  linkText: { ...type.pill, color: colors.ink },
   pressed: { opacity: 0.6 }
 })

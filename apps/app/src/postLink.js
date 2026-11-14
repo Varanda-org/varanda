@@ -50,10 +50,50 @@ export function postRef (target) {
   return isRef(ref) ? ref : null
 }
 
-// The post opening card on a first visit. The signed invite card has its own
-// opening and wins, so the two never stack or fight over the same screen.
-export function postOpeningGate ({ introShow, ageReturn, inviteOpening, otherLink, post, dismissed } = {}) {
-  return introShow === true && !ageReturn && inviteOpening === 'none' && !otherLink && postRef(post) !== null && !dismissed
+export const POST_OPEN_WAIT_MS = 6000
+
+// Fails closed: anything short of a clear "no account here" keeps the preview
+// away from a person who already has one. A pending passkey ceremony still has
+// exists false, so it is named before the exists check. An older node omits
+// pending and an unreadable attempts file leaves it unset, so only an explicit
+// false counts as no ceremony. held is a step the screen itself still owns,
+// such as a recovery code accepted while the node keeps the opened root.
+export function postAccount ({ identity, status, recovering, deleted, held } = {}) {
+  if (deleted === true) return 'deleted'
+  if (recovering === true) return 'recovering'
+  if (held === true) return 'pending'
+  if (identity !== true || status === null || typeof status !== 'object') return 'unknown'
+  if (status.unlocked === true) return 'signedIn'
+  if (status.pending === true) return 'pending'
+  if (status.exists !== false) return 'locked'
+  if (status.pending !== false) return 'unknown'
+  return 'none'
+}
+
+export function postWaitDelay (startedAt, now) {
+  if (!Number.isFinite(startedAt) || !Number.isFinite(now)) return null
+  return Math.max(0, startedAt + POST_OPEN_WAIT_MS - now)
+}
+
+// A returning visitor sees the preview only once the identity says no account
+// exists here, and only before another screen took its place. The signed
+// invite card has its own opening and wins, so the two never stack.
+function postOpening ({ introShow, ageReturn, inviteOpening, otherLink, post, dismissed, account, passed, booting, waitedMs } = {}) {
+  if (ageReturn || inviteOpening !== 'none' || otherLink || postRef(post) === null || dismissed) return 'none'
+  if (account === 'signedIn' || account === 'pending' || account === 'locked' || account === 'recovering' || account === 'deleted') return 'none'
+  if (introShow === true) return 'show'
+  if (passed === true) return 'none'
+  if (account === 'none') return 'show'
+  if (booting === true && Number.isFinite(waitedMs) && waitedMs < POST_OPEN_WAIT_MS) return 'wait'
+  return 'none'
+}
+
+export function postOpeningGate (o = {}) {
+  return postOpening(o) === 'show'
+}
+
+export function postOpeningWait (o = {}) {
+  return postOpening(o) === 'wait'
 }
 
 // A bare origin only. The public link is always <origin>/p/<author>/<seq>,

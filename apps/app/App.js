@@ -76,7 +76,7 @@ import { BlockSheet } from './src/ui/BlockSheet'
 import { PageNoticeSheet } from './src/ui/PageNoticeSheet'
 import { PostShareSheet } from './src/ui/PostShareSheet'
 import { PostPublicProvider } from './src/postPublicContext'
-import { capturePostPath, postLink, postOpeningGate, postRef } from './src/postLink'
+import { POST_OPEN_WAIT_MS, capturePostPath, postAccount, postLink, postOpeningGate, postOpeningWait, postRef, postWaitDelay } from './src/postLink'
 import { clearPostLink, savePostLink, takePostLink } from './src/postLinkStore'
 import { fetchMember } from './src/indexClient'
 import { pageDmPlan, pageReadKind, pageNoticeSeen } from './src/pageNotice'
@@ -139,7 +139,7 @@ import { TabBarShown } from './src/ui/tabBarShown'
 import { ScreenCovered, ScreenVisible } from './src/ui/screenVisible'
 import { holdAllEmbeds } from './src/embedLive'
 import { TopBar } from './src/ui/TopBar'
-import { TopActions } from './src/ui/TopActions'
+import { ActionCapsule, TopActions } from './src/ui/TopActions'
 import { StackLayer, stackBusy, useReduceMotion, useStackMotion } from './src/ui/StackLayer'
 import { ChromeMotion } from './src/ui/chromeMotion'
 import { screenReaderOn } from './src/ui/screenReader'
@@ -1023,6 +1023,16 @@ function Member () {
   // "Pedir entrada" shows on this step when the network is by invite.
   const [ageInviteRequired, setAgeInviteRequired] = useState(undefined)
   const [ageInviteRefused, setAgeInviteRefused] = useState(false)
+  // The policy is the installation's: after a swap it is read again, and a
+  // refusal of the old one does not carry over.
+  const ageInviteOriginRef = useRef(ageOrigin)
+  useEffect(() => {
+    const previous = ageInviteOriginRef.current
+    ageInviteOriginRef.current = ageOrigin
+    if (!swappedInstallation(previous, ageOrigin)) return
+    setAgeInviteRequired(undefined)
+    setAgeInviteRefused(false)
+  }, [ageOrigin])
   const [, setAgeInviteTick] = useState(0)
   const ageFeiraHere = FEIRA_ENTRY.load(hostedPage === true ? '' : ageOrigin) !== null
   useEffect(() => {
@@ -1033,7 +1043,7 @@ function Member () {
       () => { if (!cancelled) setAgeInviteRequired(false) }
     )
     return () => { cancelled = true }
-  }, [ageHosted, ready, ageInviteRequired, ageFeiraHere])
+  }, [ageHosted, ready, ageInviteRequired, ageFeiraHere, ageOrigin])
   const ageInvitePaste = invitePasteShown({
     native: NATIVE_APP,
     required: ageInviteRequired,
@@ -1429,6 +1439,15 @@ function Member () {
   // peeks: the record is cleared once the thread opens or the card is
   // dismissed, so a web sign-in reload still finds it.
   const [pendingPost, setPendingPost] = useState(() => takePostLink())
+  const postPassed = useRef(false)
+  const postWaitAt = useRef(null)
+  // Never reset: once Termos or Conexão stood here, a new link must not bring
+  // the splash back over it and lose what was typed.
+  const postScreenSeen = useRef(false)
+  // Identidade owns a step the person must finish there (Identidade.js
+  // onStepHeld), so a warm link must not replace it with the preview.
+  const postHeld = useRef(false)
+  const holdPostStep = useCallback((held) => { postHeld.current = held === true }, [])
   const heldUrlRef = useRef(null)
   const appUrlRef = useRef(null)
   // The installation a Feira listing entry belongs to: '' on the hosted web
@@ -1494,6 +1513,8 @@ function Member () {
       savePostLink(target)
       setPendingPost(target)
       setPostOpenLater(false)
+      postPassed.current = false
+      postWaitAt.current = null
       return
     }
     if (signup === null && rec === null && link === null && waitsForInstallation(url)) {
@@ -3065,6 +3086,33 @@ function Member () {
     const t = setTimeout(() => bumpSplash((n) => n + 1), Math.max(0, OPEN_WAIT_MS - (Date.now() - openWaitAt.current)) + 50)
     return () => clearTimeout(t)
   }, [opening])
+  // Before the node is ready the identity is still unread, so the Terms can
+  // render ahead of the splash. A returning visitor with a post link keeps
+  // the splash a little while instead, so the Terms never show and then give
+  // way to the preview.
+  if (!loadingGate && !holding && pendingPost !== null && postWaitAt.current === null) postWaitAt.current = Date.now()
+  const deletedNotice = deletedState !== null && member !== null && passkey !== null
+  const postGate = {
+    introShow: showIntro,
+    ageReturn: AGE_RETURN,
+    inviteOpening: opening,
+    otherLink: invite !== null || pendingLink !== null,
+    post: pendingPost,
+    dismissed: postOpenLater,
+    account: postAccount({ identity: passkey !== null, status: pkStatus, recovering, deleted: deletedNotice, held: postHeld.current }),
+    passed: postPassed.current,
+    booting: !postScreenSeen.current && !ready && !seen && (node.phase === 'loading' || node.phase === 'connecting'),
+    waitedMs: postWaitAt.current === null ? NaN : Date.now() - postWaitAt.current
+  }
+  const postWait = postOpeningWait(postGate)
+  const postDeadline = postWaitAt.current === null ? null : postWaitAt.current + POST_OPEN_WAIT_MS
+  useEffect(() => {
+    if (!postWait) return
+    const left = postWaitDelay(postWaitAt.current, Date.now())
+    if (left === null) return
+    const t = setTimeout(() => bumpSplash((n) => n + 1), left + 50)
+    return () => clearTimeout(t)
+  }, [postWait, postDeadline])
   // The preview stands only where the splash would. In the render in which
   // identity.status names another owner, a locked or signed-out identity, or
   // Entrar is the real screen, it goes and the local caches of other
@@ -3099,7 +3147,7 @@ function Member () {
   // across these returns and the final one, so the chair animation does not
   // replay and, on the web, the Splash unmount that removes
   // #varanda-pre-splash happens only when the real screen is ready.
-  if (loadingGate || holding || opening === 'wait') return <View style={[styles.root, SPLASH_WRAP, { paddingHorizontal: sidePad }]}>{bootCover}</View>
+  if (loadingGate || holding || opening === 'wait' || postWait) return <View style={[styles.root, SPLASH_WRAP, { paddingHorizontal: sidePad }]}>{bootCover}</View>
   if (opening === 'card' && openResult !== null) {
     // Como funciona: the intro cards, then back to the card; only Entrar
     // marks them seen.
@@ -3117,13 +3165,21 @@ function Member () {
       />
     )
   }
-  // A shared post link on a first visit: say what waits before the intro
-  // cards. Entrar marks them seen, as the invite card does, and leads to
-  // the Terms and then Entrar, where the post card and the destination stay.
-  if (postOpeningGate({ introShow: showIntro, ageReturn: AGE_RETURN, inviteOpening: opening, otherLink: invite !== null || pendingLink !== null, post: pendingPost, dismissed: postOpenLater })) {
+  // A shared post link with no account here (a first visit, or a returning
+  // visitor once the identity says no account exists) says what waits.
+  // Entrar marks the intro seen, as the invite card does, and dismisses the
+  // preview for this load, leading to the Terms and then Entrar, where the
+  // post card and the destination stay.
+  if (postOpeningGate(postGate)) {
     if (openHow) return <Introducao key='how' onDone={() => setOpenHow(false)} sidePad={sidePad} edges={sideEdges} />
-    return <PostLinkOpen post={pendingPost} origin={ageOrigin} onEnter={() => intro.markSeen()} onHow={() => setOpenHow(true)} onLater={() => setPostOpenLater(true)} sidePad={sidePad} edges={sideEdges} />
+    return <PostLinkOpen post={pendingPost} origin={ageOrigin} onEnter={() => { intro.markSeen(); setPostOpenLater(true) }} onHow={() => setOpenHow(true)} onLater={() => setPostOpenLater(true)} sidePad={sidePad} edges={sideEdges} />
   }
+  // Once a real screen stands here, a late identity read, a Recomeçar or an
+  // erase must not swap the preview in. The connecting splash is not a screen.
+  // A new link resets the latch but not postScreenSeen, so it may still show
+  // the preview and never the splash again.
+  if (showIntro || deletedNotice || showTerms || !connectingSplash) postPassed.current = true
+  if (postPassed.current) postScreenSeen.current = true
   if (showIntro) {
     introRendered.current = true
     return <Introducao key='intro' onDone={() => intro.markSeen()} sidePad={sidePad} edges={sideEdges} />
@@ -3168,7 +3224,7 @@ function Member () {
 
   // The 'Conexão' footer of the setup steps: only where a person may have to
   // configure the node (native, manual web setups), never on the hosted page.
-  const connectionLink = mode === 'hosted' && !node.canConfigure
+  const connectionLink = mode === 'hosted' && hostedPage === true
     ? null
     : (
       <Pressable
@@ -3188,7 +3244,7 @@ function Member () {
   // Onboarding steps draw their own title (src/ui/Stepper.js, src/ui/Welcome.js); the bar keeps only the help.
   const stepBar = (
     <View style={[styles.helpBar, { paddingTop: insets.top, minHeight: layout.topBar + insets.top }]}>
-      {HELP[step] ? <HelpButton key={step} doc={HELP[step]} /> : null}
+      {HELP[step] ? <ActionCapsule><HelpButton key={step} doc={HELP[step]} style={styles.helpHit} /></ActionCapsule> : null}
     </View>
   )
   if (setupStep) {
@@ -3271,7 +3327,7 @@ function Member () {
             onDismiss: () => { clearPostLink(); setPendingPost(null) }
           }
         : null
-      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} initialInfo={info} onInfoError={failInfo} onAccountKnown={knowAccount} onLinked={takeLinked} onInviteChanged={reloadCard} onPhoneRecheck={recheckPhone} invite={inviteProp || entryProp || postProp} feira={{ holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode }} />
+      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} initialInfo={info} onInfoError={failInfo} onAccountKnown={knowAccount} onLinked={takeLinked} onInviteChanged={reloadCard} onPhoneRecheck={recheckPhone} onStepHeld={holdPostStep} invite={inviteProp || entryProp || postProp} feira={{ holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode }} />
     } else if (infoError) {
       body = (
         <Page flush grow padBottom={16}>
@@ -3943,9 +3999,11 @@ const makeStyles = (colors) => StyleSheet.create({
   shell: { flex: 1, width: '100%', maxWidth: layout.column, alignSelf: 'center', backgroundColor: colors.bg },
   shellWide: { borderLeftWidth: 1, borderRightWidth: 1, borderColor: colors.line },
   statusShield: { position: 'absolute', top: 0, left: 0, right: 0, backgroundColor: colors.bg },
-  helpBar: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'flex-end', paddingRight: space.sm, backgroundColor: colors.bg },
-  link: { alignItems: 'center', paddingTop: 14, borderTopWidth: 1, borderTopColor: colors.line, backgroundColor: colors.bg },
-  linkText: { fontSize: 15, fontWeight: '600', color: colors.accent },
+  helpBar: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', paddingRight: space.lg, backgroundColor: colors.bg },
+  // Replaces HelpButton's negative margin, which would shrink the capsule.
+  helpHit: { minWidth: layout.hit, minHeight: layout.hit, alignItems: 'center', justifyContent: 'center' },
+  link: { alignItems: 'center', justifyContent: 'center', minHeight: layout.hit, paddingTop: 14, backgroundColor: colors.bg },
+  linkText: { ...type.pill, color: colors.accent },
   toast: {
     position: 'absolute',
     alignSelf: 'center',

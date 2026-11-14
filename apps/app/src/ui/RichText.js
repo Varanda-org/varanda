@@ -14,6 +14,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
+import { embedOf } from '../musicEmbed'
 import { parseRich } from '../richText'
 import { copyText } from '../share'
 import { shareNav } from '../shareNav'
@@ -121,6 +122,9 @@ function CodeBlock ({ text, lang, onLongPress }) {
 // sides are compared through that same step, decoded, without one final '/'.
 // That loose key makes /final and /final/ alike, so a card whose key also
 // matches a link inside a spoiler stays hidden: it may have been built from it.
+// A music link's card may carry the provider's canonical page instead of the
+// link typed (a youtu.be link's card names the watch page), so a link also
+// matches through its embed's pageUrl, on both sides.
 export function cardBesideSpoilers (blocks, card) {
   if (card === null || !Array.isArray(blocks)) return card
   const key = (value) => {
@@ -130,6 +134,26 @@ export function cardBesideSpoilers (blocks, card) {
     } catch {}
     return out.endsWith('/') ? out.slice(0, -1) : out
   }
+  // The embed is read from the href as written and with its scheme and host
+  // lowercased and an https :443 dropped, by hand, since React Native's URL
+  // keeps both: a look-alike hidden link still counts on every platform.
+  const keys = (href) => {
+    const out = [key(href)]
+    const forms = [href]
+    const parts = /^([a-z][a-z0-9+.-]*):\/\/([^/?#]*)(.*)$/i.exec(href)
+    if (parts) {
+      const scheme = parts[1].toLowerCase()
+      const host = parts[2].toLowerCase()
+      forms.push(scheme + '://' + (scheme === 'https' ? host.replace(/:443$/, '') : host) + parts[3])
+    }
+    for (const form of forms) {
+      try {
+        const embed = embedOf(form)
+        if (embed && typeof embed.pageUrl === 'string') out.push(key(embed.pageUrl))
+      } catch {}
+    }
+    return out
+  }
   const target = card && typeof card.url === 'string' ? key(card.url) : null
   let spoiler = false
   let visible = false
@@ -138,7 +162,7 @@ export function cardBesideSpoilers (blocks, card) {
     if (block.kind === 'code') continue
     for (const span of block.spans) {
       if (span.spoiler) spoiler = true
-      const match = target !== null && span.atom && span.segment && typeof span.segment.href === 'string' && key(span.segment.href) === target
+      const match = target !== null && span.atom && span.segment && typeof span.segment.href === 'string' && keys(span.segment.href).includes(target)
       if (match && span.spoiler) hidden = true
       else if (match) visible = true
     }

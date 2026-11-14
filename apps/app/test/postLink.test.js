@@ -213,7 +213,7 @@ test('capturePostPath: saves a valid post, cleans every post path, leaves others
   t.is(capturePostPath({ pathname: 42 }, null, () => t.fail('no save')), null)
 })
 
-test('postOpeningGate: only a first visit with a post and nothing else pending', async (t) => {
+test('postOpeningGate: today\'s inputs, first visit', async (t) => {
   const { postOpeningGate } = await load()
   const base = { introShow: true, ageReturn: false, inviteOpening: 'none', otherLink: false, post: { author: 'a'.repeat(64), seq: 3 }, dismissed: false }
   t.is(postOpeningGate(base), true)
@@ -230,4 +230,86 @@ test('postOpeningGate: only a first visit with a post and nothing else pending',
     { dismissed: true }
   ]
   for (const flip of flips) t.is(postOpeningGate({ ...base, ...flip }), false, JSON.stringify(flip))
+})
+
+test('postAccount: fails closed to an account unless the identity says none', async (t) => {
+  const { postAccount } = await load()
+  const rows = [
+    [{ identity: false, status: { exists: false } }, 'unknown'],
+    [{ identity: true, status: null }, 'unknown'],
+    [{ identity: true, status: { exists: false, pending: false } }, 'none'],
+    [{ identity: true, status: { exists: false } }, 'unknown'],
+    [{ identity: true, status: { exists: false, pending: 'false' } }, 'unknown'],
+    [{ identity: true, status: { exists: false, pending: null } }, 'unknown'],
+    [{ identity: true, status: { exists: true, unlocked: false } }, 'locked'],
+    [{ identity: true, status: { exists: true, unlocked: false, pending: false } }, 'locked'],
+    [{ identity: true, status: { exists: true, unlocked: false, signedOut: true, pending: false } }, 'locked'],
+    [{ identity: true, status: { exists: true, unlocked: true } }, 'signedIn'],
+    [{ identity: true, status: { exists: false, unlocked: true } }, 'signedIn'],
+    [{ identity: true, status: { exists: false, pending: true } }, 'pending'],
+    [{ identity: true, status: { exists: true, pending: true, unlocked: true } }, 'signedIn'],
+    [{ identity: true, status: { exists: false, pending: false }, recovering: true }, 'recovering'],
+    [{ identity: true, status: { exists: false, pending: false }, deleted: true }, 'deleted'],
+    [{ identity: true, status: { exists: false, pending: false }, held: true }, 'pending'],
+    [{ identity: true, status: { exists: false, pending: false }, held: false }, 'none'],
+    [{ identity: true, status: {} }, 'locked']
+  ]
+  for (const [input, want] of rows) t.is(postAccount(input), want, JSON.stringify(input))
+  t.is(postAccount(), 'unknown')
+})
+
+const POST = { author: 'a'.repeat(64), seq: 3 }
+const RETURNING = { introShow: false, ageReturn: false, inviteOpening: 'none', otherLink: false, post: POST, dismissed: false, account: 'none', passed: false }
+const EXCLUSIONS = [
+  { ageReturn: true },
+  { inviteOpening: 'card' },
+  { inviteOpening: 'wait' },
+  { otherLink: true },
+  { post: null },
+  { post: { author: 'zz', seq: 3 } },
+  { dismissed: true }
+]
+const KNOWN = ['signedIn', 'pending', 'locked', 'recovering', 'deleted']
+
+test('postOpeningGate: a returning visitor with no account here sees the preview, an account never does', async (t) => {
+  const { postOpeningGate } = await load()
+  for (const account of [undefined, 'unknown', 'none']) t.is(postOpeningGate({ ...RETURNING, introShow: true, account }), true, 'first visit ' + account)
+  t.is(postOpeningGate(RETURNING), true)
+  for (const account of KNOWN) {
+    t.is(postOpeningGate({ ...RETURNING, account }), false, 'returning ' + account)
+    t.is(postOpeningGate({ ...RETURNING, introShow: true, account }), false, 'first visit ' + account)
+  }
+  t.is(postOpeningGate({ ...RETURNING, account: 'unknown' }), false)
+  t.is(postOpeningGate({ ...RETURNING, passed: true }), false)
+  t.is(postOpeningGate({ ...RETURNING, introShow: true, passed: true }), true)
+  for (const flip of EXCLUSIONS) t.is(postOpeningGate({ ...RETURNING, ...flip }), false, JSON.stringify(flip))
+})
+
+test('postOpeningWait: only while booting, unknown account, under the bound', async (t) => {
+  const { postOpeningWait, postOpeningGate, POST_OPEN_WAIT_MS } = await load()
+  const base = { ...RETURNING, account: 'unknown', booting: true, waitedMs: 1000 }
+  t.is(postOpeningWait(base), true)
+  t.is(postOpeningGate(base), false)
+  t.is(postOpeningWait({ ...base, waitedMs: POST_OPEN_WAIT_MS - 1 }), true)
+  t.is(postOpeningWait({ ...base, waitedMs: POST_OPEN_WAIT_MS }), false)
+  t.is(postOpeningWait({ ...base, waitedMs: NaN }), false)
+  t.is(postOpeningWait({ ...base, waitedMs: undefined }), false)
+  t.is(postOpeningWait({ ...base, booting: false }), false)
+  t.is(postOpeningWait({ ...base, passed: true }), false)
+  t.is(postOpeningWait({ ...base, introShow: true }), false)
+  for (const account of [...KNOWN, 'none']) t.is(postOpeningWait({ ...base, account }), false, account)
+  for (const flip of EXCLUSIONS) t.is(postOpeningWait({ ...base, ...flip }), false, JSON.stringify(flip))
+  t.is(postOpeningWait(), false)
+})
+
+test('postWaitDelay: time left on the wait, null before the clock starts', async (t) => {
+  const { postWaitDelay } = await load()
+  t.is(postWaitDelay(null, T0), null)
+  t.is(postWaitDelay(undefined, T0), null)
+  t.is(postWaitDelay(NaN, T0), null)
+  t.is(postWaitDelay(T0, NaN), null)
+  t.is(postWaitDelay(T0, T0), 6000)
+  t.is(postWaitDelay(T0, T0 + 4000), 2000)
+  t.is(postWaitDelay(T0, T0 + 6000), 0)
+  t.is(postWaitDelay(T0, T0 + 60000), 0)
 })

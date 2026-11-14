@@ -19,7 +19,12 @@ test('swappedInstallation: only a change from a known installation counts', asyn
 test('installation swap: App drops the held invite and shows Conexão where the installation can change', (t) => {
   const app = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
   t.ok(app.includes('if (!swappedInstallation(previous, ageOrigin)) return\n    dropSignupInvite()\n    dropSignupInviteCard()'))
-  t.ok(app.includes("const connectionLink = mode === 'hosted' && !node.canConfigure"))
+  t.ok(app.includes("const connectionLink = mode === 'hosted' && hostedPage === true"), 'only the hosted page hides it, not every browser without a local node')
+  t.absent(app.includes("mode === 'hosted' && !node.canConfigure"))
+  t.ok(app.includes('if (!swappedInstallation(previous, ageOrigin)) return\n    setAgeInviteRequired(undefined)\n    setAgeInviteRefused(false)'), 'the invite policy is read again after a swap')
+  t.ok(app.includes('[ageHosted, ready, ageInviteRequired, ageFeiraHere, ageOrigin]'), 'a read for the old installation is cancelled')
+  const hook = fs.readFileSync(path.join(__dirname, '../src/useFeiraEntryStart.js'), 'utf8')
+  t.ok(hook.includes('isHeld: () => originRef.current !== pressedOn || loadSignupInvite() !== null'), 'a code answered after a swap is dropped')
   const src = fs.readFileSync(path.join(__dirname, '../src/installationSwap.js'), 'utf8')
   for (const bad of ["from 'react", 'require(', 'node:']) t.absent(src.includes(bad), bad)
 })

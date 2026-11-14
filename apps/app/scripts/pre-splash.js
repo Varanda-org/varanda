@@ -15,8 +15,6 @@ const STYLE_OPEN = '<style id="varanda-pre-splash-style">'
 const DIV_OPEN = '<div id="varanda-pre-splash" role="status" aria-label="Varanda, carregando">'
 const DIV_CLOSE = '\n    </div>\n  </body>'
 const P = '#varanda-pre-splash'
-// The daytime pieces: the sun's glow, the birds and the butterfly.
-const HIDE_AT_NIGHT = [P + ' .ceu .sol', P + ' .ave', P + ' .borboleta'].join(', ')
 const LETTER_EASE = 'ease-out'
 const SPRING = 'cubic-bezier(0.22, 1, 0.36, 1)'
 
@@ -82,8 +80,16 @@ function keyframes (name, step) {
   return '@keyframes ' + name + ' { from ' + frame(step.from) + ' to ' + frame(step.to) + ' }'
 }
 
-function vars (palette) {
-  return Object.keys(palette).map((key) => '--vps-' + key + ': ' + palette[key] + ';').join(' ')
+// Each scheme also carries the sun's stops as ready colours: the faded ones
+// need rgba, and color-mix() is missing on older Safari.
+function vars (palette, sunStops) {
+  const colour = (s) => {
+    if (s.opacity === 1) return palette[s.key]
+    const [r, g, b] = [1, 3, 5].map((i) => parseInt(palette[s.key].slice(i, i + 2), 16))
+    return 'rgba(' + r + ', ' + g + ', ' + b + ', ' + s.opacity + ')'
+  }
+  return Object.keys(palette).map((key) => '--vps-' + key + ': ' + palette[key] + ';')
+    .concat(sunStops.map((s, i) => '--vps-sun' + i + ': ' + colour(s) + ';')).join(' ')
 }
 
 function px (n) {
@@ -95,19 +101,13 @@ function pct (n) {
 }
 
 // The band reads its stops through the palette variables, so the dark
-// scheme's values turn the same gradient into the night sky.
+// scheme's values turn the same gradient into the moonlit night.
 function skyGradient (stops) {
   return 'linear-gradient(180deg, ' + stops.map((s) => 'var(--vps-' + s.key + ') ' + pct(s.offset)).join(', ') + ')'
 }
 
-// The sun only shows by day, so its stops take the light colours directly.
-function sunGradient (stops, palette) {
-  const colour = (s) => {
-    if (s.opacity === 1) return palette[s.key]
-    const [r, g, b] = [1, 3, 5].map((i) => parseInt(palette[s.key].slice(i, i + 2), 16))
-    return 'rgba(' + r + ', ' + g + ', ' + b + ', ' + s.opacity + ')'
-  }
-  return 'radial-gradient(circle closest-side, ' + stops.map((s) => colour(s) + ' ' + pct(s.offset)).join(', ') + ')'
+function sunGradient (stops) {
+  return 'radial-gradient(circle closest-side, ' + stops.map((s, i) => 'var(--vps-sun' + i + ') ' + pct(s.offset)).join(', ') + ')'
 }
 
 // The flyers' loops, inside the no-preference block: a bird drifts from just
@@ -206,8 +206,8 @@ async function renderPreSplash () {
     '@keyframes vps-expire { to { visibility: hidden; } }',
     P + ' { overflow: hidden; padding-bottom: ' + H + 'px; box-sizing: border-box; }',
     '/* the data-scheme selectors outrank the media query, so Ajustes wins over the system scheme */',
-    P + ', html[data-scheme=light] ' + P + ' { ' + vars(light) + ' }',
-    'html[data-scheme=dark] ' + P + ' { ' + vars(dark) + ' }',
+    P + ', html[data-scheme=light] ' + P + ' { ' + vars(light, scene.SUN_STOPS) + ' }',
+    'html[data-scheme=dark] ' + P + ' { ' + vars(dark, scene.SUN_STOPS) + ' }',
     P + ' .word { position: relative; width: ' + wordW + 'px; height: ' + wordH + 'px; }',
     P + ' .word svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }',
     P + ' .letra { fill: var(--vps-letra); }',
@@ -221,7 +221,7 @@ async function renderPreSplash () {
     P + ' .scene .chair { left: calc(50% ' + px(L.chair.x - mid) + '); top: ' + L.chair.y + 'px; width: ' + L.chair.size + 'px; height: ' + L.chair.size + 'px; }',
     '/* the landing\'s sunset, melting out of the page cream at the top */',
     P + ' .ceu { position: absolute; left: 0; right: 0; top: ' + L.sky.y + 'px; height: ' + L.sky.height + 'px; background: ' + skyGradient(scene.SKY_STOPS) + '; }',
-    P + ' .sol { position: absolute; left: calc(50% ' + px(L.sun.x - mid) + '); top: ' + L.sun.y + 'px; width: ' + L.sun.size + 'px; height: ' + L.sun.size + 'px; background: ' + sunGradient(scene.SUN_STOPS, light) + '; }',
+    P + ' .sol { position: absolute; left: calc(50% ' + px(L.sun.x - mid) + '); top: ' + L.sun.y + 'px; width: ' + L.sun.size + 'px; height: ' + L.sun.size + 'px; background: ' + sunGradient(scene.SUN_STOPS) + '; }',
     P + ' .arvore { left: ' + treeLeft + '; top: ' + L.tree.y + 'px; width: ' + L.tree.w + 'px; height: ' + L.tree.h + 'px; }',
     '/* a bird at rest sits `phase` of the way across, where its drift starts */',
     P + ' .ave { position: absolute; left: 0; width: 100%; }',
@@ -254,10 +254,9 @@ async function renderPreSplash () {
     '  html,',
     '  body,',
     '  ' + P + ' { background: #101010; }',
-    '  ' + P + ' { ' + vars(dark) + ' }',
+    '  ' + P + ' { ' + vars(dark, scene.SUN_STOPS) + ' }',
     '  ' + P + ' .bar { background: rgba(245,245,245,0.14); }',
     '  ' + P + ' .bar span { background: #5dcaa0; }',
-    '  ' + HIDE_AT_NIGHT + ' { display: none; }',
     '}',
     '/* once the bundle runs, html carries the scheme chosen in Ajustes, which can differ from the system\'s */',
     'html[data-scheme=light] ' + P + ' { background: #fbf8f3; }',
@@ -266,9 +265,6 @@ async function renderPreSplash () {
     'html[data-scheme=dark] ' + P + ' { background: #101010; }',
     'html[data-scheme=dark] ' + P + ' .bar { background: rgba(245,245,245,0.14); }',
     'html[data-scheme=dark] ' + P + ' .bar span { background: #5dcaa0; }',
-    '/* the sun, the birds and the butterfly are daytime only */',
-    HIDE_AT_NIGHT.split(', ').map((sel) => 'html[data-scheme=light] ' + sel).join(', ') + ' { display: block; }',
-    HIDE_AT_NIGHT.split(', ').map((sel) => 'html[data-scheme=dark] ' + sel).join(', ') + ' { display: none; }',
     '@media (prefers-reduced-motion: no-preference) {',
     '  /* generated from apps/app/src/ui/splashMotion.js */',
     '  ' + P + ' .ceu, ' + P + ' .ground { animation: vps-ground ' + m.ground.duration + 'ms ' + SPRING + ' ' + m.ground.delay + 'ms both; }',

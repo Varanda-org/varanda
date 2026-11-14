@@ -27,6 +27,8 @@ const ORIGIN = 'https://varanda.test'
 const SITE = 'https://preview.test'
 const TITLE = 'Titulo sentinela da pagina'
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(32, 7)])
+const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(32, 9)])
+const YT = 'https://www.youtube.com/watch?v='
 
 function page (head, body = '') {
   return '<!doctype html><html><head>' + head + '</head><body>' + body + '</body></html>'
@@ -44,6 +46,31 @@ function fixtureSite () {
     const go = (location) => {
       res.writeHead(302, { Location: location })
       res.end()
+    }
+    const host = String(req.headers.host).split(':')[0]
+    // The thumbnail host answers a JPEG for every video id except nothumb.
+    if (host === 'i.ytimg.com') {
+      if (url.pathname.startsWith('/vi/nothumb')) {
+        res.writeHead(404)
+        return res.end()
+      }
+      res.writeHead(200, { 'Content-Type': 'image/jpeg' })
+      return res.end(JPEG)
+    }
+    if (host === 'www.youtube.com' && url.pathname === '/watch') {
+      const v = url.searchParams.get('v')
+      if (v === 'bigpage0001') {
+        // A real watch page is about 1.4 MB, past PAGE_CAP.
+        res.writeHead(200, { 'Content-Type': 'text/html' })
+        const chunk = Buffer.alloc(64 * 1024, 0x61)
+        for (let i = 0; i < 9; i++) res.write(chunk)
+        return res.end()
+      }
+      if (v === 'notitle0001') return html(page('<meta name="viewport" content="width=device-width">'))
+      if (v === 'notitlebad1') return html(page('<meta property="og:image" content="/fake.png">'))
+      if (v === 'titled00001') return html(page('<title>Musica - YouTube</title><meta property="og:image" content="/img.png">'))
+      if (v === 'badogimage1') return html(page('<title>Musica - YouTube</title><meta property="og:image" content="/fake.png">'))
+      if (v === 'topipe00001') return go('/a|b')
     }
     switch (url.pathname) {
       case '/page':
@@ -78,6 +105,7 @@ function fixtureSite () {
       case '/topipe': return go('/a|b')
       case '/tolong': return go('/page?' + 'q'.repeat(300))
       case '/a|b': return html(page('<title>pipe</title>'))
+      case '/notitle': return html(page('<meta property="og:image" content="/img.png">'))
       case '/slow': return undefined
       case '/bigimg': return html(page('<title>t</title><meta property="og:image" content="https://img.test/huge.png">'))
       case '/svgimg': return html(page('<title>t</title><meta property="og:image" content="/x.svg">'))
@@ -120,7 +148,7 @@ function fixtureSite () {
 }
 
 function transportFor (port, { allowlist = true, deadlineMs } = {}) {
-  const names = { 'preview.test': '127.0.0.1', 'img.test': '127.0.0.1', 'private.test': '10.0.0.1' }
+  const names = { 'preview.test': '127.0.0.1', 'img.test': '127.0.0.1', 'private.test': '10.0.0.1', 'www.youtube.com': '127.0.0.1', 'i.ytimg.com': '127.0.0.1', 'music.youtube.com': '10.0.0.1' }
   const t = {
     // Every target is https on 443; the fixture speaks plain HTTP on its own port.
     request: (opts) => http.request({ ...opts, port }),
@@ -616,4 +644,115 @@ test('preview: a replayed or refused finish never charges the finish limit', asy
     if (res.status !== 409) return t.fail('pending terms ' + i + ' answered ' + res.status)
   }
   t.pass('refused finishes never reached 429')
+})
+
+// The answer previewAnswer of apps/app/src/account.js accepts: exactly these
+// keys, a non-empty title, and a host that is the URL's.
+function appAccepts (json) {
+  return Object.keys(json).sort().join() === 'desc,host,image,title,url' && typeof json.title === 'string' && json.title !== '' && new URL(json.url).hostname === json.host
+}
+
+const thumbs = (site) => site.seen.filter((s) => s.host.startsWith('i.ytimg.com'))
+
+test('preview: a YouTube watch page past the cap or failing falls back to the thumbnail', async (t) => {
+  const { login, fetchPreview, site, logs } = await setup(t)
+  const { token } = await login()
+  for (const id of ['bigpage0001', 'missing0001']) {
+    const res = await fetchPreview(token, { url: YT + id })
+    t.is(res.status, 200, id)
+    t.alike(res.json, { url: YT + id, host: 'www.youtube.com', title: 'YouTube', desc: '', image: { mime: 'image/jpeg', bytes: JPEG.toString('base64') } }, id + ': the link sent, named YouTube')
+    t.ok(appAccepts(res.json), id + ': the app keeps the card')
+  }
+  t.alike(thumbs(site).map((s) => s.path), ['/vi/bigpage0001/mqdefault.jpg', '/vi/missing0001/mqdefault.jpg'], 'the one thumbnail address per link')
+
+  const start = await fetchPreview(token, { url: YT + 'bigpage0001&t=42s' })
+  t.is(start.status, 200, 'a start time keeps the canonical form')
+  t.is(start.json.url, YT + 'bigpage0001&t=42s')
+
+  const none = await fetchPreview(token, { url: YT + 'nothumb0001' })
+  t.is(none.status, 503, 'no page and no thumbnail')
+  t.alike(none.json, { error: 'indisponivel' })
+
+  const pipe = await fetchPreview(token, { url: YT + 'topipe00001' })
+  t.is(pipe.status, 200, 'a final URL no card may carry still gets the thumbnail')
+  t.is(pipe.json.url, YT + 'topipe00001', 'named after the link sent, never the redirect target')
+  t.is(pipe.json.title, 'YouTube')
+
+  const text = JSON.stringify(logs)
+  for (const secret of ['youtube', 'ytimg', 'bigpage']) t.absent(text.includes(secret), 'no ' + secret + ' in logs')
+  const mine = logs.filter((e) => e.event === 'preview')
+  t.ok(mine.every((e) => Object.keys(e).every((k) => k === 'event' || k === 'reason')), 'count events only')
+  t.alike(mine.map((e) => e.reason), ['sessao', 'previa-imagem', 'previa-imagem', 'previa-imagem', 'indisponivel', 'previa-imagem'], 'one line per request')
+})
+
+test('preview: a titleless YouTube page gets the title YouTube, and a page image wins over the thumbnail', async (t) => {
+  const { login, fetchPreview, site } = await setup(t)
+  const { token } = await login()
+  const bare = await fetchPreview(token, { url: YT + 'notitle0001' })
+  t.is(bare.status, 200)
+  t.is(bare.json.title, 'YouTube', 'never an empty title the app would refuse')
+  t.alike(bare.json.image, { mime: 'image/jpeg', bytes: JPEG.toString('base64') }, 'no og:image: the thumbnail')
+  t.ok(appAccepts(bare.json), 'the app keeps the card and its cover')
+  t.ok(validLinkCard({ url: bare.json.url, host: bare.json.host, title: bare.json.title, desc: bare.json.desc, image: null }))
+
+  site.seen.length = 0
+  const bad = await fetchPreview(token, { url: YT + 'notitlebad1' })
+  t.is(bad.json.title, 'YouTube')
+  t.alike(bad.json.image, { mime: 'image/jpeg', bytes: JPEG.toString('base64') }, 'a broken og:image: the thumbnail')
+  t.alike(site.seen.map((s) => s.path), ['/watch', '/fake.png', '/vi/notitlebad1/mqdefault.jpg'], 'the page and two images, no more')
+
+  site.seen.length = 0
+  const titled = await fetchPreview(token, { url: YT + 'titled00001' })
+  t.is(titled.json.title, 'Musica - YouTube', 'a page title is kept')
+  t.alike(titled.json.image, { mime: 'image/png', bytes: PNG.toString('base64') }, 'the og:image')
+  t.is(thumbs(site).length, 0, 'no thumbnail fetched when the page image loads')
+
+  const fallback = await fetchPreview(token, { url: YT + 'badogimage1' })
+  t.is(fallback.json.title, 'Musica - YouTube')
+  t.is(fallback.json.image.mime, 'image/jpeg', 'the thumbnail after a broken og:image')
+})
+
+test('preview: a non-YouTube page gets no fallback, and a titleless one stays empty', async (t) => {
+  const { login, fetchPreview, site } = await setup(t)
+  const { token } = await login()
+  for (const url of [SITE + '/big', SITE + '/missing', SITE + '/topipe', 'https://www.youtube.com/playlist?list=PL1', 'https://www.youtube.com/watch?v=bigpage0001&list=PL1']) {
+    const res = await fetchPreview(token, { url })
+    t.is(res.status, 503, url)
+    t.alike(res.json, { error: 'indisponivel' })
+  }
+  t.is(thumbs(site).length, 0, 'no thumbnail outside the canonical watch form')
+  const plain = await fetchPreview(token, { url: SITE + '/fakeimg' })
+  t.is(plain.json.image, null, 'a broken image on another site stays without one')
+  const bare = await fetchPreview(token, { url: SITE + '/notitle' })
+  t.is(bare.status, 200)
+  t.is(bare.json.title, '', 'a titleless page elsewhere keeps its empty title')
+  t.is(thumbs(site).length, 0)
+})
+
+test('preview: a refused YouTube address gives the count back with no fallback fetch', async (t) => {
+  const { login, fetchPreview, site } = await setup(t)
+  const { token } = await login()
+  for (let i = 0; i < PREVIEWS_PER_DAY; i++) {
+    const res = await fetchPreview(token, { url: 'https://music.youtube.com/watch?v=bigpage0001' })
+    if (res.status !== 503) return t.fail('refused preview ' + i + ' answered ' + res.status)
+  }
+  t.is(site.seen.length, 0, 'neither the page nor the thumbnail was fetched')
+  t.is((await fetchPreview(token, { url: YT + 'bigpage0001' })).status, 200, 'the refused ones were not counted')
+
+  const extra = await fetchPreview(token, { url: YT + 'bigpage0001', extra: 1 })
+  t.is(extra.status, 400, 'the body is still exactly { url }')
+  t.is(extra.json.error, 'pedido-invalido')
+})
+
+test('preview: a YouTube fallback counts once against the daily limit', async (t) => {
+  const { login, fetchPreview, site } = await setup(t)
+  const { token } = await login()
+  for (let i = 0; i < PREVIEWS_PER_DAY; i++) {
+    const res = await fetchPreview(token, { url: YT + 'missing0001' })
+    if (res.status !== 200) return t.fail('fallback preview ' + i + ' answered ' + res.status)
+  }
+  const over = await fetchPreview(token, { url: YT + 'missing0001' })
+  t.is(over.status, 429)
+  t.alike(over.json, { error: 'limite-previa' })
+  t.is(thumbs(site).length, PREVIEWS_PER_DAY, 'one thumbnail per counted preview')
 })

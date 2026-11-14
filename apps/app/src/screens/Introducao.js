@@ -176,7 +176,7 @@ export default function Introducao ({ onDone, sidePad = 0, edges }) {
             {index > 0
               ? (
                 <Pressable accessibilityRole='button' accessibilityLabel={BACK_LABEL} onPress={() => goTo(index - 1)} hitSlop={8} style={({ pressed }) => [styles.back, pressed && styles.pressed]}>
-                  <Icon name='voltar' size={28} color={colors.ink} />
+                  <Icon name='voltar' size={22} color={colors.ink} />
                 </Pressable>
                 )
               : <View style={styles.backSpace} />}
@@ -191,16 +191,16 @@ export default function Introducao ({ onDone, sidePad = 0, edges }) {
 const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   flex: { flex: 1 },
-  top: { minHeight: 48, alignItems: 'flex-end', justifyContent: 'center', paddingHorizontal: space.lg },
+  top: { minHeight: layout.topBar, alignItems: 'flex-end', justifyContent: 'center', paddingHorizontal: space.lg },
   skip: { paddingVertical: 8, paddingHorizontal: 8, minHeight: layout.hit, minWidth: layout.hit, justifyContent: 'center' },
-  skipText: { fontSize: 15, fontWeight: '700', color: colors.soft },
+  skipText: { ...type.pill, color: colors.soft },
   pressed: { opacity: 0.7 },
   pageContent: { flexGrow: 1, justifyContent: 'center', padding: space.xl },
   column: { width: '100%', maxWidth: layout.column, alignSelf: 'center', alignItems: 'center', gap: space.lg },
   circle: { width: 112, height: 112, borderRadius: 56, backgroundColor: colors.accentSoft, alignItems: 'center', justifyContent: 'center' },
   body: { textAlign: 'center' },
   hidden: { position: 'absolute', width: 1, height: 1, opacity: 0 },
-  footer: { width: '100%', maxWidth: layout.column, alignSelf: 'center', paddingHorizontal: space.xl, paddingBottom: space.xl, gap: 20 },
+  footer: { width: '100%', maxWidth: layout.column, alignSelf: 'center', paddingHorizontal: space.xl, paddingBottom: space.xl, gap: space.xl },
   dots: { flexDirection: 'row', gap: space.sm, justifyContent: 'center' },
   dot: { height: DOT, borderRadius: DOT / 2 },
   dotActive: { backgroundColor: colors.accent },
@@ -208,6 +208,6 @@ const makeStyles = (colors) => StyleSheet.create({
   dotPending: { backgroundColor: colors.line },
   title: { ...type.heroTitle, fontFamily: fonts.title, color: colors.ink, textAlign: 'center' },
   actions: { gap: space.sm },
-  back: { height: layout.hit, minWidth: layout.hit, alignSelf: 'center', alignItems: 'center', justifyContent: 'center' },
+  back: { width: layout.hit, height: layout.hit, borderRadius: layout.hit / 2, alignSelf: 'center', alignItems: 'center', justifyContent: 'center', backgroundColor: colors.card, borderWidth: 1, borderColor: colors.line },
   backSpace: { height: layout.hit }
 })

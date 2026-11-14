@@ -140,6 +140,34 @@ test('a link card is not drawn for a link hidden in a spoiler', async (t) => {
   t.ok(bubble.includes('<LinkCard card={card}'), 'the checked card is the one drawn')
 })
 
+test('a music card named by its canonical page still matches its visible short link beside a spoiler', async (t) => {
+  const { embedOf, coverTarget } = await import('../src/musicEmbed.js')
+  const { parseRich } = await import('../src/richText.js')
+  const src = ui('RichText.js')
+  const start = src.indexOf('function cardBesideSpoilers (')
+  const end = src.indexOf('\n}\n', start)
+  const cardBesideSpoilers = new Function('embedOf', 'return ' + src.slice(start, end + 2))(embedOf) // eslint-disable-line no-new-func
+  const short = 'https://youtu.be/dQw4w9WgXcQ'
+  const card = { url: coverTarget(short), host: 'www.youtube.com', title: 'YouTube' }
+  t.is(card.url, 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'the builders name the watch page')
+  t.is(cardBesideSpoilers(parseRich(short + ' ||comentário||'), card), card, 'the visible short link keeps its canonical card')
+  t.is(cardBesideSpoilers(parseRich('||veja ' + short + ' aqui||'), card), null, 'the short link only inside a spoiler: no card')
+  t.is(cardBesideSpoilers(parseRich(short + ' ||veja https://www.youtube.com/watch?v=dQw4w9WgXcQ aqui||'), card), null, 'the same video also inside a spoiler: no card')
+  t.is(cardBesideSpoilers(parseRich('https://www.youtube.com/watch?v=dQw4w9WgXcQ ||veja ' + short + ' aqui||'), card), null, 'the short form of the same video inside a spoiler: no card')
+  // React Native's URL keeps an uppercase host and :443; this stand-in does too.
+  const KeepsCase = class { constructor (value) { this.href = String(value) } }
+  const nativeLike = new Function('embedOf', 'URL', 'return ' + src.slice(start, end + 2))(embedOf, KeepsCase) // eslint-disable-line no-new-func
+  for (const check of [cardBesideSpoilers, nativeLike]) {
+    t.is(check(parseRich(short + ' ||comentário||'), card), card, 'the visible short link keeps its canonical card, whatever the URL class')
+    for (const lookAlike of ['https://YOUTU.BE/dQw4w9WgXcQ', 'https://youtu.be:443/dQw4w9WgXcQ', 'HTTPS://youtu.be/dQw4w9WgXcQ']) {
+      t.is(check(parseRich('||veja ' + lookAlike + ' aqui|| ' + short), card), null, lookAlike + ' inside a spoiler: no card, whatever the URL class')
+    }
+  }
+  t.is(cardBesideSpoilers(parseRich('https://youtu.be/aaaaaaaaaaa ||x||'), card), null, 'another video visible: no card')
+  const plain = { url: 'https://example.com/final', host: 'example.com', title: 'Final' }
+  t.is(cardBesideSpoilers(parseRich('https://example.com/final ||x||'), plain), plain, 'a plain link still matches as before')
+})
+
 test('a message with Abrir convite keeps its spoilers and a spoiler link card covered', async (t) => {
   const screen = withoutComments(readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8'))
   const richImport = screen.match(/^import \{([^}]*)\} from '\.\.\/richText'$/m)

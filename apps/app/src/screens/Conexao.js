@@ -102,7 +102,7 @@ function ConexaoNavegador ({ active = true, embedded = false }) {
     const problem = connectProblem(node.error || apply.error)
     return (
       <Page>
-        <Title>Conectar</Title>
+        <Title hero>Conectar</Title>
         {busy && problem.text === '' ? <Notice>conectando…</Notice> : <ErrorText>{problem.text}</ErrorText>}
         <Btn
           label={RETRY_LABEL}
@@ -149,7 +149,7 @@ function ConexaoNavegador ({ active = true, embedded = false }) {
   if (node.phase === 'config-error' && !manual) {
     return (
       <Page>
-        {embedded ? null : <Title>Conectar</Title>}
+        {embedded ? null : <Title hero>Conectar</Title>}
         <Card>
           <ErrorText>{node.error}</ErrorText>
           <Btn label='Tentar de novo' onPress={() => apply.run(() => node.retryDiscovery())} pending={apply.pending} />
@@ -164,7 +164,7 @@ function ConexaoNavegador ({ active = true, embedded = false }) {
   if (node.hosted && node.config && !manual) {
     return (
       <Page>
-        {embedded ? null : <Title>{ready ? 'Conexão' : 'Conectar'}</Title>}
+        {embedded ? null : <Title hero>{ready ? 'Conexão' : 'Conectar'}</Title>}
         {copy}
         {busy ? <Notice>conectando…</Notice> : null}
         <ErrorText>{node.error || apply.error || infoError}</ErrorText>
@@ -202,7 +202,7 @@ function ConexaoNavegador ({ active = true, embedded = false }) {
   }
   return (
     <Page>
-      {embedded ? null : <Title>{ready ? 'Conexão' : 'Conectar'}</Title>}
+      {embedded ? null : <Title hero>{ready ? 'Conexão' : 'Conectar'}</Title>}
       {!ready ? copy : null}
       {busy ? <Notice>conectando…</Notice> : null}
       <ErrorText>{node.error || apply.error || infoError}</ErrorText>
@@ -288,7 +288,7 @@ function ConexaoNo ({ active = true, embedded = false }) {
   if (!node.canConfigure) {
     return (
       <Page>
-        {embedded ? null : <Title>Conexão</Title>}
+        {embedded ? null : <Title hero>Conexão</Title>}
         <Card>
           <Label>estado</Label>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
@@ -326,7 +326,7 @@ function ConexaoNo ({ active = true, embedded = false }) {
     const configError = node.phase === 'config-error'
     return (
       <Page>
-        {embedded ? null : <Title>{ready ? 'Conexão' : 'Conectar'}</Title>}
+        {embedded ? null : <Title hero>{ready ? 'Conexão' : 'Conectar'}</Title>}
         {!ready ? <Soft>Informe o endereço da instalação do Varanda. O app usa a mesma passkey e o mesmo diário do site.</Soft> : null}
         {busy ? <Notice>conectando…</Notice> : null}
         <ErrorText>{node.error || apply.error || infoError}</ErrorText>
@@ -371,7 +371,7 @@ function ConexaoNo ({ active = true, embedded = false }) {
 
   return (
     <Page>
-      {embedded ? null : <Title>{ready ? 'Conexão' : 'Conectar'}</Title>}
+      {embedded ? null : <Title hero>{ready ? 'Conexão' : 'Conectar'}</Title>}
       {!ready ? <Soft>Informe a associação e como achar outros aparelhos. Nada aqui é segredo: as chaves ficam dentro do app.</Soft> : null}
       {busy ? <Notice>conectando…</Notice> : null}
       <ErrorText>{node.error || apply.error || infoError}</ErrorText>

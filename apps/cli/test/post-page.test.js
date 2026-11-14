@@ -420,3 +420,222 @@ test('postPreviewData: hostile input never throws and stays bounded', (t) => {
     t.is(postPreviewData(args), null, 'no args object: ' + String(args))
   }
 })
+
+const SVG_CHILDREN = ['svg', 'path', 'circle', 'polyline', 'polygon', 'line']
+
+// What the row drawing may contain, read tag by tag: escaped peer text can
+// spell any of these words as text, never as a tag or an attribute.
+function assertInert (t, html, label) {
+  const tags = (html.match(/<\/?[a-z][^>]*>/gi) || []).map((raw) => ({
+    raw,
+    bare: raw.replace(/"[^"]*"/g, '""'),
+    name: raw.match(/^<\/?([a-z][a-z0-9]*)/i)[1].toLowerCase(),
+    closing: raw.startsWith('</')
+  }))
+  const banned = ['use', 'image', 'foreignobject', 'form', 'button', 'input']
+  t.absent(tags.some((tag) => banned.includes(tag.name)), label + ': no use, image, foreignObject, form, button or input')
+  t.absent(tags.some((tag) => /\sstyle\s*=/i.test(tag.bare)), label + ': no style attribute')
+  t.absent(tags.some((tag) => /\sxlink:/i.test(tag.bare)), label + ': no xlink attribute')
+  const hrefs = tags.filter((tag) => /\shref\s*=/i.test(tag.bare))
+  t.is(hrefs.length, 1, label + ': one href')
+  t.ok(hrefs.length === 1 && hrefs[0].name === 'a', label + ': the href is on the anchor')
+  t.is((html.match(/<\/title>/g) || []).length, 1, label + ': one </title>')
+  const svgs = tags.filter((tag) => tag.name === 'svg' && !tag.closing)
+  t.ok(svgs.every((tag) => tag.raw.includes(' aria-hidden="true"')), label + ': every svg aria-hidden')
+  let depth = 0
+  let stray = false
+  for (const tag of tags) {
+    if (tag.name === 'svg') depth += tag.closing ? -1 : 1
+    else if (depth > 0 && !SVG_CHILDREN.includes(tag.name)) stray = true
+  }
+  t.is(depth, 0, label + ': every svg closes')
+  t.absent(stray, label + ': only drawing elements inside an svg')
+}
+
+function between (html, from, to) {
+  const start = html.indexOf(from)
+  const end = html.indexOf(to, start)
+  return start >= 0 && end > start ? html.slice(start, end) : null
+}
+
+function avatarOf (html) {
+  const m = html.match(/<div class="avatar (a[0-4])" aria-hidden="true">([\s\S]*?)<\/div>/)
+  return m ? { stripe: m[1], inner: m[2] } : { stripe: null, inner: '' }
+}
+
+test('the page is one timeline row: bar, row, button and note, then two dimmed rows', (t) => {
+  const media = [image(0), image(1), image(2), image(3), image(4)]
+  const html = page({}, { replyTo: { author: 'cd'.repeat(32), seq: 3 }, media, preview: { url: 'https://x.example/', host: 'x.example', title: 'Um site', desc: '', image: null } })
+  assertSafe(t, html, 'full row')
+  const order = [
+    '<meta name="color-scheme" content="light dark">',
+    '<header class="bar">',
+    '<main>',
+    '<article class="row">',
+    '<div class="avatar a1" aria-hidden="true">AS</div>',
+    '<div class="body">',
+    '<div class="head">',
+    '<h1>Ana Souza</h1>',
+    '<p class="meta">@ana</p>',
+    '<span class="dot" aria-hidden="true">',
+    '<p class="meta">12/11/2026</p>',
+    '</div>',
+    '<span class="more" aria-hidden="true">',
+    '<p class="label">Em resposta a outra publicação</p>',
+    '<p class="text">',
+    '<div class="photos n4">',
+    '<p class="label">Mais 1 foto na Varanda</p>',
+    '<p class="card">',
+    '<span class="card-title">Um site</span>',
+    '<span class="card-host">x.example</span>',
+    '<div class="actions" aria-hidden="true">',
+    '</article>',
+    '<div class="join">',
+    '<a class="enter" href="' + APP + '">Ver na Varanda</a>',
+    '<p class="note">',
+    '<div class="sk" aria-hidden="true">',
+    '</main>'
+  ]
+  let at = -1
+  for (const piece of order) {
+    const next = html.indexOf(piece, at + 1)
+    t.ok(next > at, 'in order: ' + piece)
+    if (next > at) at = next
+  }
+  t.is((html.match(/<div class="sk" aria-hidden="true">/g) || []).length, 2, 'two dimmed rows')
+  t.is((html.match(/<article/g) || []).length, 1, 'one post')
+  t.absent(html.includes('class="kicker"'), 'the bar replaces the kicker')
+  const card = between(html, '<p class="card">', '</p>')
+  t.ok(card !== null && card.indexOf('<svg') < card.indexOf('<span class="card-host">'), 'the link icon comes before the host')
+  const actions = between(html, '<div class="actions" aria-hidden="true">', '</div>')
+  t.is(((actions || '').match(/<svg/g) || []).length, 3, 'reply, repost and like')
+})
+
+test('initials come from the name, else the username, else the person glyph', (t) => {
+  const cases = [
+    [{ name: 'Ana Maria Souza' }, 'AS', 'multi-word'],
+    [{ name: 'Ana' }, 'AN', 'single word'],
+    [{ name: 'Zé' }, 'ZÉ', 'single short word'],
+    [{ name: 'érica lima' }, 'ÉL', 'accent'],
+    [{ name: '😀 Lua' }, '😀L', 'astral'],
+    [{ name: '𝒜b' }, '𝒜B', 'astral single word'],
+    [{ name: '@ana souza' }, 'AS', 'a leading @'],
+    [{ name: '@@ \uff20\ufe6b bia' }, 'BI', 'a leading run of at-signs and spaces'],
+    [{ name: 'ana@casa' }, 'AN', 'an inner @ stays'],
+    [{ name: '', username: 'joao' }, 'JO', 'username fallback'],
+    [{ name: '@ ', username: 'joao' }, 'JO', 'a name of only at-signs falls back'],
+    [{ name: 'A\u200fna\u0085 S\u0000ouza' }, 'AS', 'control characters dropped'],
+    [{ name: '\u202e\u0007Bia' }, 'BI', 'control characters never lead'],
+    [{ name: '<b onmouseover="x">Eva</b></title>' }, '&lt;O', 'hostile name'],
+    [{ name: '\u200b@ana' }, 'AN', 'a leading zero-width space before the @'],
+    [{ name: '\u200b\u200b', username: 'bia' }, 'BI', 'an invisible name falls back'],
+    [{ name: '\u3164', username: 'bia' }, 'BI', 'a Hangul filler name falls back'],
+    [{ name: '\u00adAna Souza' }, 'AS', 'a leading soft hyphen'],
+    [{ name: 'Ana \u200bSouza' }, 'AS', 'an invisible at the start of the last word']
+  ]
+  for (const [over, want, label] of cases) {
+    const html = page({ username: 'ana', ...over })
+    const avatar = avatarOf(html)
+    t.ok(avatar.stripe !== null, label + ': an avatar')
+    t.is(avatar.inner, want, label)
+    assertSafe(t, html, label)
+  }
+  for (const over of [{ name: '', username: '' }, { name: '@@', username: '' }, { name: undefined, username: 7 }]) {
+    const avatar = avatarOf(page(over))
+    t.ok(avatar.inner.startsWith('<svg') && avatar.inner.includes('<circle cx="12" cy="7" r="4"/>'), 'glyph for ' + JSON.stringify(over))
+  }
+  const odd = Array.from(avatarOf(page({ name: 'A\u0001\u0085\u200e\u2066 B' })).inner)
+  t.absent(odd.some((ch) => { const cp = ch.codePointAt(0); return cp < 0x20 || (cp >= 0x7f && cp <= 0x9f) || (cp >= 0x2066 && cp <= 0x2069) || cp === 0x200e }), 'no control character in the initials')
+})
+
+test('the avatar stripe follows the first key byte mod 5', (t) => {
+  const want = { '00': 'a0', '01': 'a1', '04': 'a4', ab: 'a1', ff: 'a0' }
+  for (const [prefix, stripe] of Object.entries(want)) {
+    const html = renderPostPage({ origin: ORIGIN, author: prefix + 'ab'.repeat(31), seq: 7, record: post(), name: 'Ana Souza', username: 'ana' })
+    t.is(avatarOf(html).stripe, stripe, prefix)
+    for (let i = 0; i < 5; i++) t.ok(html.includes('.a' + i + '{'), prefix + ': stripe a' + i + ' styled')
+  }
+})
+
+test('drawings stay inert on every kind of page, with no counts', (t) => {
+  const ten = []
+  for (let i = 0; i < 10; i++) ten.push(image(i))
+  const pages = {
+    plain: page(),
+    hostile: page({ name: '<svg onload=1><use href="#x"/></svg>', username: 'eva"><style>' }, {
+      text: '<svg><image href="data:x"/><foreignObject><form><button>1</button></form></foreignObject></svg> style="x" xlink:href="y"',
+      preview: { url: 'https://x.example/', host: '<title>x</title>', title: '<input value=1>', desc: '', image: null }
+    }),
+    'four photos': page({}, { media: [image(0), image(1), image(2), image(3)] }),
+    'ten photos': page({}, { media: ten }),
+    video: page({}, { media: [image(0), videoItem()] }),
+    fallback: renderPostPage({ origin: ORIGIN, author: 'x', seq: 7, record: post() })
+  }
+  for (const [label, html] of Object.entries(pages)) {
+    assertSafe(t, html, label)
+    assertInert(t, html, label)
+    if (label === 'fallback') continue
+    const actions = between(html, '<div class="actions" aria-hidden="true">', '</div>')
+    t.ok(actions !== null, label + ': actions')
+    t.absent(/\d/.test((actions || '').replace(/<[^>]*>/g, '')), label + ': no count in the actions')
+    const dimmed = between(html, '<div class="sk" aria-hidden="true">', '</main>')
+    t.ok(dimmed !== null, label + ': dimmed rows')
+    t.absent(/\d/.test((dimmed || '').replace(/<[^>]*>/g, '')), label + ': no text in the dimmed rows')
+    t.absent(/<(?!\/?div[\s>])[a-z/]/i.test(dimmed || ''), label + ': dimmed rows are only divs')
+  }
+})
+
+test('one style block for every page, light and dark', (t) => {
+  const styleOf = (html) => (html.match(/<style>([\s\S]*?)<\/style>/) || [null, null])[1]
+  const plain = styleOf(page())
+  const hostile = styleOf(page({ name: '</style><b>', username: 'x' }, { text: '</style>' }))
+  const fallback = styleOf(renderPostPage(null))
+  t.ok(plain !== null && plain.length > 0)
+  t.is(hostile, plain, 'hostile page: same style')
+  t.is(fallback, plain, 'fallback: same style')
+  t.is((page().match(/<style>/g) || []).length, 1, 'one style block')
+  t.ok(renderPostPage(null).includes('<meta name="color-scheme" content="light dark">'))
+  t.ok(page().includes('<meta name="color-scheme" content="light dark">'))
+  t.is((plain.match(/prefers-color-scheme/g) || []).length, 1, 'one dark block')
+  t.ok(plain.includes('@media (prefers-color-scheme: dark)'))
+  t.ok(plain.includes('scroll-padding-top'), 'the focused button never hides under the bar')
+  t.ok(renderPostPage(null).includes('<header class="bar">'), 'the fallback shares the bar')
+  t.absent(renderPostPage(null).includes('class="sk"'), 'the fallback has no dimmed rows')
+})
+
+test('dot, play disc and photo grid class follow the content', (t) => {
+  t.ok(page().includes('<span class="dot" aria-hidden="true">'), 'dot with a date')
+  t.absent(page({}, { at: 'ontem' }).includes('class="dot"'), 'no dot without a date')
+  t.ok(page({ name: '', username: 'ana' }).includes('<span class="dot" aria-hidden="true">'), 'dot with a date and no handle line')
+  const video = page({}, { media: [image(0), videoItem()] })
+  t.is((video.match(/<span class="play" aria-hidden="true">/g) || []).length, 1, 'one play disc on a video cover')
+  const grid = between(video, '<div class="photos n1">', '</div>')
+  t.ok(grid !== null && grid.indexOf('<img ') < grid.indexOf('<span class="play"'), 'the disc sits over the cover')
+  t.absent(page({}, { media: [image(0)] }).includes('class="play"'), 'no play disc on a photo')
+  for (let n = 1; n <= 4; n++) {
+    const media = []
+    for (let i = 0; i < n; i++) media.push(image(i))
+    t.ok(page({}, { media }).includes('<div class="photos n' + n + '">'), n + ' photos')
+  }
+  const ten = []
+  for (let i = 0; i < 10; i++) ten.push(image(i))
+  t.ok(page({}, { media: ten }).includes('<div class="photos n4">'), 'ten photos show four')
+  t.absent(page().includes('class="photos'), 'no grid without photos')
+})
+
+test('the worst capped input stays under the 64 KiB frame', (t) => {
+  const ten = []
+  for (let i = 0; i < 10; i++) ten.push(image(i))
+  const q = '"'.repeat(5000)
+  const html = renderPostPage({
+    origin: ORIGIN,
+    author: HEX,
+    seq: Number.MAX_SAFE_INTEGER,
+    record: post({ text: q, media: ten, quote: { author: HEX, seq: 1 }, replyTo: { author: HEX, seq: 2 }, preview: { url: 'https://x.example/', host: q, title: q, desc: q, image: null } }),
+    name: q,
+    username: q
+  })
+  assertSafe(t, html, 'worst case')
+  t.ok(html.includes('<p class="text">' + '&quot;'.repeat(1000) + '</p>'), 'the text is at its cap')
+  t.ok(Buffer.byteLength(html) < 65536, 'under 65536 bytes: ' + Buffer.byteLength(html))
+})
