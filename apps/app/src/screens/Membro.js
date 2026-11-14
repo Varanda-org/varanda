@@ -1080,6 +1080,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
               <Pill
                 label={pageFollowsFailed ? 'Tentar de novo' : pageFollows !== null && pageFollows.has(author) ? 'Seguindo' : 'Seguir'}
                 filled={!pageFollowsFailed && !(pageFollows !== null && pageFollows.has(author))}
+                tonal={!pageFollowsFailed && pageFollows !== null && pageFollows.has(author)}
                 pending={following}
                 disabled={pageFollows === null && !pageFollowsFailed}
                 onPress={pageFollowsFailed ? loadPageFollows : togglePageFollow}

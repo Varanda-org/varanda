@@ -321,3 +321,8 @@ test('the Seguir label defaults to FOLLOW_LABEL, can be replaced, and small pass
   t.is(pill(followingSmall).props.label, follow.FOLLOWING_LABEL)
   t.is(pill(followingSmall).props.small, true)
 })
+
+test('Membro draws its own page follow pill tonal while it says Seguindo', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Membro.js'), 'utf8')
+  t.ok(src.includes('tonal={!pageFollowsFailed && pageFollows !== null && pageFollows.has(author)}'))
+})
