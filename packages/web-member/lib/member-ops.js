@@ -59,6 +59,7 @@ const {
   testimonialRecord,
   testimonialShowRecord,
   momentRecord,
+  postShareRecord,
   MAX_TESTIMONIAL,
   charLength,
   validTestimonialText,
@@ -98,6 +99,7 @@ const gc = require('@varanda/core/lib/group-crypto')
 const { validPrivateItem, copyGroupMedia, PRIVATE_ITEM_KEYS, MAX_GROUP_MEDIA } = require('@varanda/core/lib/group-media')
 const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX, COMMUNITY_LIST_MAX, feira, mediaBounds, videoBounds } = require('@varanda/rpc')
 const listing = require('@varanda/core/lib/listing')
+const { POST_SHARES_PER_DIARY, foldShare } = require('@varanda/core/lib/post-share')
 const { stillImageSize } = require('@varanda/core/lib/still-image')
 const store = require('./node-store')
 
@@ -1049,6 +1051,108 @@ function postDelete (ctx, params) {
 
 function profileDelete (ctx, params) {
   return recordDelete(ctx, 'profile', params)
+}
+
+// ---- public share (docs/rpc.md 5.121 to 5.123) ----
+
+const NOT_A_POST = 'o registro não é uma publicação'
+const SHARE_LIMIT = 'limite de publicações na web atingido'
+
+// Every stored block of the own diary (holes skipped), not only the present
+// prefix: a tombstone or a share stored past a block not downloaded yet
+// still counts.
+async function heldDiary (diary, ownHex) {
+  const { entries } = await store.readHeld(diary)
+  return { entries, deleted: deletedSeqs(entries), ownHex, length: diary.length }
+}
+
+// Only a live post of the caller's own diary may be shared: a share is the
+// author's consent to show it to people without an account. A target not
+// held here (in a gap) is refused like any unreadable block.
+function shareTarget ({ entries, deleted, ownHex, length }, to) {
+  if (to.author !== ownHex || !(to.seq >= 1) || to.seq >= length) throw new UsageError('referência inválida')
+  const entry = entries.find((e) => e.seq === to.seq)
+  const target = entry === undefined ? null : validRecordCopy(entry.record, to.seq)
+  if (target === null || deleted.has(to.seq)) throw new UsageError('referência inválida')
+  if (target.type !== 'post') throw new UsageError(NOT_A_POST)
+}
+
+// Each valid post-share block as [post seq, share seq], tombstoned or not.
+function shareBlocks (entries) {
+  const out = []
+  for (const { seq, record } of entries) {
+    if (record === null || typeof record !== 'object' || record.type !== 'post-share') continue
+    const copy = validRecordCopy(record, seq)
+    if (copy !== null && copy.type === 'post-share') out.push([copy.seq, seq])
+  }
+  return out
+}
+
+// The seqs of the post's live `post-share` blocks, ascending. Any live
+// share counts and a tombstoned one never does: seeders never download a
+// tombstoned block and every node clears it, so a replica may lack one, and
+// it must not change the answer.
+function liveShares ({ entries, deleted }, postSeq) {
+  return shareBlocks(entries).filter(([p, seq]) => p === postSeq && !deleted.has(seq)).map(([, seq]) => seq)
+}
+
+// Whether a new share of `postSeq`, appended after `entries`, is one the
+// reader's bounded fold (foldShare, block order) keeps: a post it already
+// holds always is, a new post only while the fold has room.
+function shareRoom (entries, postSeq, maxPosts = POST_SHARES_PER_DIARY) {
+  const map = new Map()
+  for (const [p, seq] of shareBlocks(entries)) foldShare(map, p, seq, { maxPosts })
+  return map.has(postSeq) || map.size < maxPosts
+}
+
+function postShared (ctx, { to }) {
+  // Judged after the read, so a refusal never makes a borrowed read fall
+  // back to the exclusive path.
+  return withIdentity(ctx, ({ diary, ownHex }) => heldDiary(diary, ownHex)).then((held) => {
+    shareTarget(held, to)
+    const live = liveShares(held, to.seq)
+    return { shareSeq: live.length === 0 ? null : live[live.length - 1] }
+  })
+}
+
+// written: the highest appended block's seq, or null when nothing was written.
+function postShare (ctx, { to }) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    const held = await heldDiary(diary, ownHex)
+    shareTarget(held, to)
+    const live = liveShares(held, to.seq)
+    if (live.length > 0) return { shareSeq: live[live.length - 1], created: false, written: null }
+    // A share the public page would never honour is not written.
+    if (!shareRoom(held.entries, to.seq)) throw new UsageError(SHARE_LIMIT)
+    const seq = await appendOwn(ctx, diary, buildRecord(() => postShareRecord({ seq: to.seq, at: nowIso() })))
+    return { shareSeq: seq, created: true, written: seq }
+  })
+}
+
+// One tombstone per live share (normally one), in appends of at most
+// APPEND_MAX. A chunk that fails is never retried: the error carries
+// `written`, the highest block already stored, so the caller still pushes
+// it. The shares not yet tombstoned stay live: a repeat finishes them while
+// the diary has room, and a diary that filled up can append nothing more.
+// The share blocks are not cleared here: they carry no media, and their
+// tombstones alone withdraw them.
+function postUnshare (ctx, { to }) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    const held = await heldDiary(diary, ownHex)
+    shareTarget(held, to)
+    const live = liveShares(held, to.seq)
+    if (live.length === 0) return { ok: true, changed: false, written: null }
+    const at = nowIso()
+    const records = live.map((seq) => buildRecord(() => deleteRecord({ seq, at })))
+    let seq = null
+    try {
+      for (let i = 0; i < records.length; i += APPEND_MAX) seq = await appendAll(ctx, diary, records.slice(i, i + APPEND_MAX))
+    } catch (err) {
+      if (seq !== null && err !== null && typeof err === 'object') err.written = seq
+      throw err
+    }
+    return { ok: true, changed: true, written: seq }
+  })
 }
 
 // ---- likes / reposts ----
@@ -5391,6 +5495,10 @@ module.exports = {
   postReply,
   postQuote,
   postDelete,
+  postShared,
+  postShare,
+  postUnshare,
+  shareRoom,
   listingCreate,
   listingEdit,
   listingStatus,

@@ -63,7 +63,7 @@ export function QuoteCard ({ quote, now }) {
   const shownText = embed !== null && hasText ? textWithoutHrefs(q.text, (href) => sameMusicPage(href, q.preview.url)) : q.text
   const preview = !missing && !hasMedia && q.preview && typeof q.preview === 'object' && typeof q.author === 'string'
     ? embed !== null
-      ? <MusicEmbedCard embed={embed} card={q.preview} thumb={{ kind: 'post', author: q.author, persist: q.persist === true }} />
+      ? <MusicEmbedCard embed={embed} card={q.preview} thumb={{ kind: 'post', author: q.author, persist: q.persist === true }} part='q' />
       : <LinkCard card={q.preview} thumb={{ kind: 'post', author: q.author, persist: q.persist === true }} />
     : null
   const loading = !missing && !hasText && !hasMedia

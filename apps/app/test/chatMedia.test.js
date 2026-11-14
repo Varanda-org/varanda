@@ -696,7 +696,7 @@ test('source: App.js stops bound playback when the visible screen changes', (t) 
   t.ok(/import \{[^}]*\bscreenWatcher\b[^}]*\} from '\.\/src\/media\/chatMedia'/.test(code), 'watcher imported')
   t.ok(/const screenWatch = useRef\(null\)\s+if \(screenWatch\.current === null\) screenWatch\.current = screenWatcher\(\)/.test(code), 'one watcher, created on first use')
   const effects = [...code.matchAll(/useLayoutEffect\(\(\) => \{([\s\S]*?)\n {2}\}, \[([^\]]*)\]\)/g)]
-  const wanted = ['tab', 'stack', 'composer.open', 'ajustes !== null', 'generation', 'locked', 'report !== null', 'helpOpen', 'pageDmAsk !== null']
+  const wanted = ['tab', 'stack', 'composer.open', 'ajustes !== null', 'generation', 'locked', 'report !== null', 'helpOpen', 'pageDmAsk !== null', 'shareTarget !== null']
   const effect = effects.find((match) => wanted.every((dep) => match[2].includes(dep)))
   t.ok(effect, 'a layout effect depends on the screen, the overlays and the covering states')
   if (!effect) return
@@ -705,7 +705,7 @@ test('source: App.js stops bound playback when the visible screen changes', (t) 
   t.ok(/nav\.depth\(stack\)/.test(body) && /nav\.top\(stack\)/.test(body), 'the key includes stack depth and top')
   t.ok(/\.screen/.test(body) && /\.key/.test(body) && /''/.test(body), 'the top is identified by screen and key, or empty')
   t.ok(/composer\.open/.test(body) && /ajustes !== null/.test(body), 'both overlays contribute to the key')
-  t.ok(/\bgeneration\b/.test(body) && /\blocked\b/.test(body) && /report !== null/.test(body) && /\bhelpOpen\b/.test(body) && /pageDmAsk !== null/.test(body), 'lock, report, help and the page notice contribute to the key')
+  t.ok(/\bgeneration\b/.test(body) && /\blocked\b/.test(body) && /report !== null/.test(body) && /\bhelpOpen\b/.test(body) && /pageDmAsk !== null/.test(body) && /shareTarget !== null/.test(body), 'lock, report, help, the page notice and the publish sheet contribute to the key')
 })
 
 test('source: App.js stops bound playback when the app goes to the background', (t) => {
