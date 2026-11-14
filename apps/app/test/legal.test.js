@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 51)
+  t.is(LEGAL_VERSION, 52)
   t.is(LEGAL_DATE, '14/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 51, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 52, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -177,7 +177,7 @@ test('legal: version 49 keeps a loaded music player at any scroll distance', asy
       'Um toque num link dentro do player abre, fora do Varanda, o endereço indicado pelo player',
       'no app instalado (Android e iOS), só endereços do próprio serviço são abertos',
       'na versão web, inclusive instalada na tela inicial, o link abre em outra aba, e o Varanda não confere o endereço',
-      'um toque no cartão abre o link',
+      'um toque na capa não abre o link',
       'No máximo quatro players ficam carregados ao mesmo tempo'
     ]) t.ok(text(doc).includes(required), doc.title + ': ' + required)
     for (const gone of [
@@ -218,12 +218,30 @@ test('legal: version 51 preloads music players before the card appears', async (
       'quando você troca de aba, abre outra tela, um menu, um painel ou uma foto ampliada',
       'Um player em que você tocou fecha nesses casos e quando outro áudio do Varanda começa',
       'Todo player fecha quando o aplicativo é bloqueado ou vai para segundo plano',
-      'ou quando um cartão mais perto precisa do lugar dele',
-      'Até a página do provedor carregar, o cartão guardado continua como cartão de link, e um toque no cartão abre o link'
+      'ou quando um cartão mais perto precisa do lugar dele'
     ]) t.ok(text(doc).includes(required), doc.title + ': ' + required)
     for (const gone of ['no máximo dois ficam carregados', 'quando o cartão fica visível na tela', 'a qualquer distância', 'sempre pronto']) {
       t.absent(text(doc).includes(gone), doc.title + ': no ' + gone)
     }
+  }
+})
+
+test('legal: version 52 shows a provider cover until the player loads and fetches it at compose time', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  const domains = '(subdomínios de ytimg.com, scdn.co, sndcdn.com e mzstatic.com; para um vídeo do YouTube, a miniatura padrão em i.ytimg.com)'
+  for (const doc of [TERMS, PRIVACY]) {
+    t.ok(text(doc).includes('Até a página do provedor carregar, o lugar do player mostra uma capa do mesmo tamanho, feita só com o cartão guardado (a imagem, o título e o nome do serviço), sem buscar nada para desenhá-la, e um toque na capa não abre o link.'), doc.title + ': cover until the player loads')
+    t.ok(text(doc).includes(domains), doc.title + ': provider image domains')
+    t.ok(text(doc).includes('Quem lê nunca fala com o site para mostrar o cartão'), doc.title + ': readers fetch nothing')
+    for (const gone of ['o cartão guardado continua como cartão de link', 'um toque no cartão abre o link']) {
+      t.absent(text(doc).includes(gone), doc.title + ': no ' + gone)
+    }
+  }
+  t.ok(text(TERMS).includes('Para um link de YouTube, SoundCloud, Spotify ou Apple Music, a imagem pequena é a capa do próprio serviço, buscada uma vez, quando a prévia é montada, quando possível: no app nativo, o aparelho de quem envia busca a capa só nos endereços de imagem do próprio serviço ' + domains + '; na versão web hospedada, o serviço de conta busca a imagem que a página indica, como em qualquer prévia, e, para um vídeo do YouTube, a mesma miniatura; se a busca falhar, o cartão fica sem imagem.'))
+  t.ok(text(PRIVACY).includes('Para um link de YouTube, SoundCloud, Spotify ou Apple Music, o aparelho de quem envia também fala com o endereço de imagem do próprio serviço ' + domains + ', para buscar a capa uma vez, quando possível; na versão web hospedada, o serviço de conta busca a imagem que a página indica, como em qualquer prévia, e, para um vídeo do YouTube, a mesma miniatura.'))
+  for (const doc of [TERMS, PRIVACY]) {
+    t.absent(text(doc).includes('ou o serviço de conta na versão web hospedada, também fala com o endereço de imagem'), doc.title + ': the service is not limited to the provider image domains')
   }
 })
 
@@ -306,7 +324,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '0b674553d09b99f41c63345ea4e5dd0ae96bc36e4da33e9fbb11d561a07e128d', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '2ef3d799a4f53d671c68207d4d44f8a376f4837960a1ab56664e1a60d35e6fe5', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {

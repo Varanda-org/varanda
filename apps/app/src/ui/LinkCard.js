@@ -62,7 +62,7 @@ export function chatThumbRef (thumb, image) {
 
 // The device-local URI of a group or DM card's thumbnail, or null while
 // loading or when it cannot be shown. Pinned while on screen.
-function useChatThumb (thumb, image) {
+export function useChatThumb (thumb, image) {
   const node = useNode()
   const ref = chatThumbRef(thumb, image)
   const identity = ref !== null ? thumb.identity : null
