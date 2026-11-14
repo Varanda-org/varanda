@@ -16,7 +16,7 @@ import { Icon } from '../ui/Icon'
 import { OptionList } from '../ui/OptionRow'
 import { Stepper } from '../ui/Stepper'
 import { useStyles } from '../ui/ThemeProvider'
-import { space } from '../ui/theme'
+import { layout, space, type } from '../ui/theme'
 
 const NEEDED_TEXT = 'Antes de entrar no Varanda, leia e aceite os Termos de Uso e a Política de Privacidade.'
 const ACCOUNT_TEXT = 'Esta conta ainda não aceitou os Termos de Uso e a Política de Privacidade neste aparelho. Leia e aceite para continuar.'
@@ -143,10 +143,10 @@ const makeStyles = (colors) => StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    minHeight: 44
+    minHeight: layout.hit
   },
   headerPressed: { opacity: 0.8 },
-  headerTitle: { flex: 1, fontSize: 16, fontWeight: '700', color: colors.ink },
+  headerTitle: { ...type.rowName, flex: 1, color: colors.ink },
   cue: { fontSize: 14, color: colors.soft },
   paragraph: { fontSize: 16, lineHeight: 22, color: colors.ink },
   center: { textAlign: 'center' },
