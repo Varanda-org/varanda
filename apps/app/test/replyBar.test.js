@@ -43,7 +43,7 @@ test('ReplyBar pins accessible copy, theme, capped text and keyboard handling', 
   t.ok(src.includes("<Icon name='imagem' size={18} color={colors.soft} />") && src.includes("accessibilityLabel='adicionar foto'"), 'plain photo icon')
   t.ok(src.includes("const expanded = focused || text.trim() !== '' || nonFocalTarget === true"), 'expanded state')
   t.ok(src.includes('me = null, nonFocalTarget = false') && src.includes('onAttach'), 'new props')
-  t.ok(src.includes('{expanded && target\n') && src.includes('{expanded\n'), 'target row and send only when expanded')
+  t.ok(src.includes('{expanded && target\n'), 'target row only when expanded')
   t.is(src.split('<TextInput').length - 1, 1, 'one input instance in both states')
   t.ok(src.indexOf('<View style={styles.target}>') < src.indexOf('<TextInput') && src.indexOf('<TextInput') < src.indexOf("accessibilityLabel='Responder'"), 'target above the input, send after the pill')
   t.ok(src.includes("bar: { paddingTop: space.sm, gap: space.xs, backgroundColor: 'transparent' }") && src.includes('radius.bubble'), 'transparent bar, round pill')
@@ -55,7 +55,7 @@ test('ReplyBar pins accessible copy, theme, capped text and keyboard handling', 
   t.ok(src.includes('{replyChip(target)}'))
   t.ok(src.includes("<Icon name='fechar' size={18} color={colors.soft} />"))
   t.absent(src.includes('Pill'), 'the tools are plain icons, with no outlined circles')
-  const field = between(line, '<View style={[styles.pill', '\n        </View>\n        {expanded')
+  const field = between(line, '<View style={[styles.pill', '\n        </View>\n        {hasText')
   t.ok(field.includes('<TextInput') && field.includes("accessibilityLabel='abrir editor completo'") && field.includes("accessibilityLabel='cancelar resposta'"), 'expand and cancel sit inside the pill')
   t.absent(field.includes("accessibilityLabel='Responder'"), 'send sits beside the pill')
   t.ok(src.includes('style={[styles.input, webInputReset, { height: Math.min(height, maxHeight), maxHeight }]}'), 'no browser focus ring inside the rounded field')
@@ -91,6 +91,13 @@ test('ReplyBar pins accessible copy, theme, capped text and keyboard handling', 
   t.absent(src.includes('Platform.OS'))
   t.absent(/#[\da-f]{3,8}\b/i.test(src))
   t.absent(src.includes(String.fromCodePoint(0x2014)))
+})
+
+test('a blur never moves photo or expand: send shows on text alone', (t) => {
+  t.ok(src.includes("const hasText = text.trim() !== ''"), 'send condition reads only the text')
+  const sendBlock = src.slice(src.lastIndexOf('{', src.indexOf("accessibilityLabel='Responder'")), src.indexOf("accessibilityLabel='Responder'"))
+  t.ok(sendBlock.startsWith('{hasText\n'), 'send renders under hasText')
+  t.absent(/focused|expanded/.test(sendBlock), 'focus cannot add or remove send')
 })
 
 test('only true send success clears the unchanged draft', async (t) => {
