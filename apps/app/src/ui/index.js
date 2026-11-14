@@ -141,9 +141,9 @@ export function FlushSectionHeader (props) {
   return <SectionHeader {...props} flush />
 }
 
-export function Title ({ children }) {
+export function Title ({ children, hero }) {
   const styles = useStyles(makeStyles)
-  return <Text style={styles.title} accessibilityRole='header'>{children}</Text>
+  return <Text style={hero ? [styles.title, styles.titleHero] : styles.title} accessibilityRole='header'>{children}</Text>
 }
 
 export function Label ({ children }) {
@@ -306,6 +306,7 @@ const makeStyles = (colors) => StyleSheet.create({
   sectionFlush: { paddingHorizontal: 0 },
   sectionText: { ...type.section, color: colors.soft },
   title: { fontSize: 22, fontWeight: '800', color: colors.ink, fontFamily: fonts.title },
+  titleHero: { ...type.heroTitle },
   label: { fontSize: 14, fontWeight: '600', color: colors.soft },
   body: { fontSize: 16, lineHeight: 22, color: colors.ink },
   soft: { fontSize: 14, lineHeight: 20, color: colors.soft },
