@@ -356,3 +356,12 @@ test('a sheet title shrinks to fit at large text before it is cut', (t) => {
   t.ok(modal.includes('const TITLE_FIT_MARGIN = 0.93') && modal.includes('const TITLE_MIN_SCALE_NARROW = 0.6'), 'margin and narrow floor')
   t.ok(modal.includes('fontSize: type.sheetTitle.fontSize * scale'), 'the font shrinks on every platform')
 })
+
+test('loadIcons loads each font apart, so a Feather failure still loads Ionicons', (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const icon = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'Icon.js'), 'utf8')
+  const fn = icon.slice(icon.indexOf('export async function loadIcons'))
+  t.ok(fn.includes('try { await Feather.loadFont() } catch {}'))
+  t.ok(fn.includes('try { await Ionicons.loadFont() } catch {}'))
+})

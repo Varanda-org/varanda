@@ -14,7 +14,7 @@ import { radius, space } from './theme'
 
 export const INVITE_CARD_MAX_WIDTH = 420
 
-function Shape ({ item }) {
+export function Shape ({ item }) {
   if (item.kind === 'tri') {
     const edge = item.up ? 'borderBottom' : 'borderTop'
     return (

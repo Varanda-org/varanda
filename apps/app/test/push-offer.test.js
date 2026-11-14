@@ -97,7 +97,8 @@ function fixture (opts = {}) {
       disablePush: f.disablePush,
       pushSupportNow: f.pushSupportNow,
       storage: f.storage,
-      now: f.now
+      now: f.now,
+      ...(f.leaveWaitMs !== undefined ? { leaveWaitMs: f.leaveWaitMs } : {})
     })
   }
   return f
@@ -432,15 +433,82 @@ test('offHere', async (t) => {
   g.disableResults[0].resolve({ ok: true })
   await q
 
+  // A turn-on that never lands (the prompt stays open): Sair stops waiting
+  // after leaveWaitMs and turns push off, and again when the turn-on ends.
   const h = fixture()
+  h.leaveWaitMs = 5
   const busy = await h.make()
   await busy.read(A)
   busy.activate({ member: A })
   const w = busy.offHere({ member: A })
+  t.is(h.disablePush.calls.length, 0, 'waits for the step in flight')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  t.is(h.disablePush.calls.length, 1, 'then turns off anyway')
   h.disableResults[0].resolve({ ok: true })
   await w
   t.is(busy.getSnapshot().pending, true, 'resolved while the enable is still pending')
   t.is(h.enableResults.length, 1)
+  h.enableResults[0].resolve({ ok: false, reason: 'failed' })
+  await tick()
+  await tick()
+  t.is(h.disablePush.calls.length, 2, 'a late Permitir is turned off when the step ends')
+  t.alike(h.disablePush.calls[1], { node: undefined, member: A, registration: h.disablePush.calls[1].registration, subscription: null })
+  h.disableResults[1].resolve({ ok: true })
+})
+
+test('a late turn-off keeps the switch shut and spares another identity', async (t) => {
+  const f = fixture()
+  f.leaveWaitMs = 5
+  const store = await f.make()
+  await store.read(A)
+  store.activate({ member: A })
+  const w = store.offHere({ node: 'n', member: A })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  f.disableResults[0].resolve({ ok: true })
+  await w
+  f.enableResults[0].resolve({ ok: false, reason: 'failed' })
+  await tick()
+  await tick()
+  t.is(f.disablePush.calls.length, 2, 'the same member is still turned off')
+  t.is(store.toggle({ node: 'n', member: A }), false, 'no bell tap while the late turn-off runs')
+  t.is(store.activate({ node: 'n', member: A }), false)
+  f.disableResults[1].resolve({ ok: true })
+  await tick()
+  await tick()
+
+  const g = fixture()
+  g.leaveWaitMs = 5
+  const other = await g.make()
+  await other.read(A)
+  other.activate({ member: A })
+  const x = other.offHere({ node: 'n', member: A })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  g.disableResults[0].resolve({ ok: true })
+  await x
+  await other.read(B)
+  g.enableResults[0].resolve({ ok: false, reason: 'failed' })
+  await tick()
+  await tick()
+  t.is(g.disablePush.calls.length, 1, 'another identity subscription is not cancelled')
+})
+
+test('offHere waits for a turn-on that lands in time, and the switch refuses meanwhile', async (t) => {
+  const f = fixture()
+  const store = await f.make()
+  await store.read(A)
+  t.is(store.activate({ node: 'n', member: A }), true)
+  const w = store.offHere({ node: 'n', member: A })
+  await tick()
+  t.is(f.disablePush.calls.length, 0, 'not before the turn-on ends')
+  f.enableResults[0].resolve({ ok: true, subscription: { s: 1 }, endpoint: 'https://x/y' })
+  await tick()
+  await tick()
+  t.is(f.disablePush.calls.length, 1, 'then once')
+  t.is(store.toggle({ node: 'n', member: A }), false, 'no new step while leaving')
+  t.is(store.activate({ node: 'n', member: A }), false)
+  f.disableResults[0].resolve({ ok: true })
+  await w
+  t.is(f.disablePush.calls.length, 1, 'a step that landed in time is not turned off twice')
 })
 
 test('snapshot identity and unsubscribe', async (t) => {

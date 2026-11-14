@@ -668,3 +668,9 @@ test('empty chat starters only fill the draft and respect writing capability', (
     }
   }
 })
+
+test('SwipeReply provides RowShift with the value its transform uses', (t) => {
+  const src = source('ui/SwipeReply.js')
+  t.ok(src.includes('transform: [{ translateX: reduce ? 0 : x }]'))
+  t.ok(src.includes('<RowShift.Provider value={reduce ? null : x}>{children}</RowShift.Provider>'))
+})

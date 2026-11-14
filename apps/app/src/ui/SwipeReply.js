@@ -5,6 +5,7 @@ import { Icon } from './Icon'
 import { useTheme } from './ThemeProvider'
 import { useReduceMotion } from './StackLayer'
 import { tap } from './haptics'
+import { RowShift } from './screenVisible'
 
 export function SwipeReply ({ children, onReply, disabled = false }) {
   const { colors } = useTheme()
@@ -85,7 +86,9 @@ export function SwipeReply ({ children, onReply, disabled = false }) {
       <Animated.View pointerEvents='none' accessibilityElementsHidden importantForAccessibility='no-hide-descendants' style={[styles.icon, { opacity: x.interpolate({ inputRange: [0, 56], outputRange: [0, 1], extrapolate: 'clamp' }) }]}>
         <Icon name='responder' size={22} color={colors.accent} />
       </Animated.View>
-      <Animated.View style={{ transform: [{ translateX: reduce ? 0 : x }] }}>{children}</Animated.View>
+      <Animated.View style={{ transform: [{ translateX: reduce ? 0 : x }] }}>
+        <RowShift.Provider value={reduce ? null : x}>{children}</RowShift.Provider>
+      </Animated.View>
     </View>
   )
 }

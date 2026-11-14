@@ -216,6 +216,11 @@ test('routeOf', (t) => {
   t.is(routeOf('/index/a'), 'seeder')
   t.is(routeOf('/account/x'), 'account')
   t.is(routeOf('/x'), 'ui')
+  t.is(routeOf('/p/policy'), 'seeder')
+  t.is(routeOf('/p/' + 'a'.repeat(64) + '/1'), 'seeder')
+  t.is(routeOf('/p'), 'ui')
+  t.is(routeOf('/px'), 'ui')
+  t.is(routeOf('/publicacao/' + 'a'.repeat(64) + '/1'), 'ui')
 })
 
 test('the lab refuses anything off loopback before it starts', (t) => {
@@ -249,6 +254,8 @@ test('the dataset flags: a seed, a bounded size, rajada only with a dataset', (t
   const plain = parseArgs([])
   t.is(plain.dataset, null, 'no dataset by default')
   t.is(plain.rajada, false)
+  t.is(parseArgs([]).publicacoes, false)
+  t.is(parseArgs(['--publicacoes']).publicacoes, true)
   const d = parseArgs(['--dataset', 'seed_1', '--dataset-size', '6x20', '--rajada'])
   t.is(d.dataset, 'seed_1')
   t.alike(d.datasetSize, { members: 6, blocksPerMember: 20 })
