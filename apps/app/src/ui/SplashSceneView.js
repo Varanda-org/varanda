@@ -132,7 +132,7 @@ function flyerArt (layout, palette, flyers) {
   }
 }
 
-export function SplashScene ({ layout, palette, daylight = true, bottomInset = 0, ground, varanda, chair, slideNear, slideFar, flyers }) {
+export function SplashScene ({ layout, palette, bottomInset = 0, ground, varanda, chair, slideNear, slideFar, flyers }) {
   const { width, k } = layout
   // Splash re-renders on every progress step; the paths are built once per
   // size and scheme so a frame only moves already drawn layers.
@@ -173,7 +173,7 @@ export function SplashScene ({ layout, palette, daylight = true, bottomInset = 0
     >
       <Animated.View style={[StyleSheet.absoluteFill, { opacity: ground.opacity, transform: [{ translateY: ground.translateY }] }]}>
         <View style={[styles.band, { top: sky.y, height: sky.height }]}>{art.sky}</View>
-        {daylight && <View style={[styles.at, { left: sun.x, top: sun.y }]}>{art.sun}</View>}
+        <View style={[styles.at, { left: sun.x, top: sun.y }]}>{art.sun}</View>
         <View style={[styles.band, { top: far.y, height: far.height }]}>
           <Animated.View
             renderToHardwareTextureAndroid
@@ -196,15 +196,13 @@ export function SplashScene ({ layout, palette, daylight = true, bottomInset = 0
         {/* Runs on under the home indicator, so the street reaches the screen's bottom edge. */}
         <View style={[styles.band, { top: rua.y, height: rua.height + bottomInset, backgroundColor: palette.asfalto }]} />
       </Animated.View>
-      {daylight && (
-        <Animated.View style={[StyleSheet.absoluteFill, { opacity: ground.opacity }]}>
-          {art.flyers.birds.map((b) => (
-            <Animated.View key={b.key} style={[styles.at, { left: 0, top: b.top, transform: [{ translateX: b.translateX }, { translateY: b.translateY }] }]}>
-              {b.svg}
-            </Animated.View>
-          ))}
-        </Animated.View>
-      )}
+      <Animated.View style={[StyleSheet.absoluteFill, { opacity: ground.opacity }]}>
+        {art.flyers.birds.map((b) => (
+          <Animated.View key={b.key} style={[styles.at, { left: 0, top: b.top, transform: [{ translateX: b.translateX }, { translateY: b.translateY }] }]}>
+            {b.svg}
+          </Animated.View>
+        ))}
+      </Animated.View>
       {/* Before the varanda, so on a narrow screen the crown tucks behind it. */}
       <Animated.View style={[styles.at, { left: tree.x, top: tree.y }, varandaMotion]}>
         {art.tree}
@@ -222,13 +220,11 @@ export function SplashScene ({ layout, palette, daylight = true, bottomInset = 0
       >
         {art.chair}
       </Animated.View>
-      {daylight && (
-        <Animated.View style={[styles.at, { left: layout.butterfly.x, top: layout.butterfly.y, opacity: varanda.opacity }]}>
-          <Animated.View style={{ transform: [{ translateX: art.flyers.butterfly.translateX }, { translateY: art.flyers.butterfly.translateY }, { scaleX: art.flyers.butterfly.scaleX }] }}>
-            {art.flyers.butterfly.svg}
-          </Animated.View>
+      <Animated.View style={[styles.at, { left: layout.butterfly.x, top: layout.butterfly.y, opacity: varanda.opacity }]}>
+        <Animated.View style={{ transform: [{ translateX: art.flyers.butterfly.translateX }, { translateY: art.flyers.butterfly.translateY }, { scaleX: art.flyers.butterfly.scaleX }] }}>
+          {art.flyers.butterfly.svg}
         </Animated.View>
-      )}
+      </Animated.View>
     </View>
   )
 }

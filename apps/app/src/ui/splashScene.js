@@ -171,7 +171,7 @@ export function sceneLayout ({ width, height }) {
 // the band: it melts out of the page cream, the birds fly in the orange, and
 // plum turns to dusk navy behind the lower varanda, down to the floor line.
 // Offsets run 0 (band top) to 1 (floor line); keys name palette colours, so
-// the dark palette turns the same stops into a night sky.
+// the dark palette turns the same stops into a moonlit night.
 export const SKY_STOPS = deepFreeze([
   { offset: 0, key: 'ceuTopo' },
   { offset: 0.13, key: 'ceuOuro' },
@@ -183,12 +183,13 @@ export const SKY_STOPS = deepFreeze([
 
 // The landing's sun glow. Offsets are of the box's half side (the landing's
 // `circle` reaches the box corner, so its stops are scaled by 1.41 here):
-// the warm edge fades out right at the box edge.
+// the warm edge fades out right at the box edge. The outer glow has its own
+// key so the moon's halo can be pale on a dark sky.
 export const SUN_STOPS = deepFreeze([
   { offset: 0, key: 'solNucleo', opacity: 1 },
   { offset: 0.45, key: 'solMeio', opacity: 1 },
-  { offset: 0.68, key: 'ceuOuro', opacity: 0.55 },
-  { offset: 1, key: 'ceuOuro', opacity: 0 }
+  { offset: 0.68, key: 'solHalo', opacity: 0.55 },
+  { offset: 1, key: 'solHalo', opacity: 0 }
 ])
 
 const LIGHT = {
@@ -213,6 +214,9 @@ const LIGHT = {
   ceuNoite: '#2b2a4a',
   solNucleo: '#ffe2a8',
   solMeio: '#ffc77c',
+  solHalo: '#f7b267',
+  // The birds' ink, their own key so the dark sky can light them.
+  ave: '#1f2a24',
   // The stripe yellow of the chair: the butterfly's upper wings, over the
   // plum where its old blue was lost and the telha fell under 3:1.
   sol: '#f2b705',
@@ -238,17 +242,21 @@ const DARK = {
   asfalto: '#303532',
   // lockup-dark.svg draws the lettering in cream.
   letra: '#fbf8f3',
-  // The night: out of the dark page (#101010) down to a night blue.
+  // The moonlit night: out of the dark page (#101010), lightening in cool
+  // blue down to the floor line.
   ceuTopo: '#101010',
-  ceuOuro: '#121417',
-  ceuLaranja: '#14181d',
-  ceuCoral: '#161c24',
-  ceuAmeixa: '#18212b',
-  ceuNoite: '#1c2b3b',
-  // The sun, the birds and the butterfly are hidden at night; these only
-  // keep the palette whole.
-  solNucleo: '#c7b083',
-  solMeio: '#c79b61',
+  ceuOuro: '#131a2a',
+  ceuLaranja: '#18233a',
+  ceuCoral: '#1e2c4a',
+  ceuAmeixa: '#233456',
+  ceuNoite: '#2a3d62',
+  // The sun becomes a full moon rising behind the roof, with a pale silver
+  // halo.
+  solNucleo: '#f4f1e8',
+  solMeio: '#d6dbe4',
+  solHalo: '#9fb0cc',
+  // Silver birds, lit by the moon.
+  ave: '#c3cad6',
   sol: '#bd8f04',
   tronco: '#785340',
   copa: '#144936'
@@ -554,7 +562,7 @@ function buildBird () {
     width: BIRD_W,
     height: BIRD_W / 2,
     viewBox: '0 0 ' + BIRD_W + ' ' + BIRD_W / 2,
-    shapes: [{ d: 'M1.5 4Q6 0.8 10 6Q14 0.8 18.5 4', stroke: 'tinta', width: 1.6, cap: 'round', join: 'round' }]
+    shapes: [{ d: 'M1.5 4Q6 0.8 10 6Q14 0.8 18.5 4', stroke: 'ave', width: 1.6, cap: 'round', join: 'round' }]
   }
 }
 
