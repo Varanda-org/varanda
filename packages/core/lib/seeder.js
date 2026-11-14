@@ -206,6 +206,8 @@ const { parseQuery } = require('./search-text')
 const { createTopicIndex, QUERY_RE, tokensOf } = require('./topic-index')
 const { createFeiraIndex } = require('./feira-index')
 const { verifyConsent, foldListings } = require('./listing')
+const { foldShare, newestShare, POST_SHARES_PER_DIARY } = require('./post-share')
+const { MAX_FUTURE_MS } = require('./feed')
 const { feira } = require('@varanda/rpc')
 const { UsageError } = require('./errors')
 const clock = require('./clock')
@@ -2131,6 +2133,14 @@ class Seeder {
       groupFirst: new Map(),
       groupLive: new Map(),
       groupRefused: new Map(),
+      // Public share hint, rebuilt by every scan from block 1 (in memory
+      // only): `shares` post seq -> the highest valid post-share seq the
+      // scan read (lib/post-share.js), `sharesOverflow` that a share of a
+      // post past POST_SHARES_PER_DIARY was refused. Tombstones never touch
+      // it: postPublic checks the share is live when it reads, so a newer
+      // tombstoned share hides the post (fails closed).
+      shares: new Map(),
+      sharesOverflow: false,
       indexed: 1,
       indexQueued: false,
       indexPaused: false,
@@ -2693,6 +2703,11 @@ class Seeder {
       if (block.type === 'follow') {
         const r = validRecordCopy(block, i)
         if (r !== null) this._notices.foldFollow(key, i, r)
+        continue
+      }
+      if (block.type === 'post-share') {
+        const r = validRecordCopy(block, i)
+        if (r !== null && !foldShare(entry.shares, r.seq, i, { maxPosts: POST_SHARES_PER_DIARY })) entry.sharesOverflow = true
         continue
       }
       if (block.type === 'group-join') {
@@ -6040,6 +6055,69 @@ class Seeder {
         username,
         page: page.page === true
       }
+    } catch {
+      return null
+    }
+  }
+
+  // Post `seq` of `hex` for the public page, to people without an account
+  // (docs/protocol.md section 2, "Public share"): the post, the author's
+  // display name and verified @nome, and the share seq that allows it. Peer
+  // text, returned as stored: the caller renders it with displayText. null
+  // unless the highest share the scan recorded for that post is a live,
+  // valid post-share naming it and the post is a live post of a visible,
+  // scanned diary that is not a page. Every doubt answers null: a post with
+  // no recorded share (past the cap included), a scan or a name index
+  // behind, a hold, a block, a date too far ahead.
+  async postPublic (hex, seq) {
+    try {
+      if (typeof hex !== 'string' || !HEX64.test(hex) || !Number.isSafeInteger(seq) || seq < 1) return null
+      const entry = this._served.get(hex)
+      if (!entry || !scanCaughtUp(entry)) return null
+      if (!this._feiraVisible(hex) || this._searchHeld(hex)) return null
+      // The page flag comes from the name index, on its own cursor
+      // (entry.indexed): until it has read the whole diary a page reads as
+      // a person, so nothing is shown. The bound is the signed length, not
+      // the present length, which is raised asynchronously and can lag it.
+      if (entry.indexPaused || entry.indexed < entry.core.length) return null
+      if (this._names.hint(hex).page === true) return null
+      const shareSeq = newestShare(entry.shares, seq)
+      if (shareSeq === null) return null
+      const share = await this._liveRecord(hex, shareSeq)
+      if (share === null || share.type !== 'post-share' || share.seq !== seq) return null
+      const record = await this._liveRecord(hex, seq)
+      if (record === null || record.type !== 'post') return null
+      // As the feed: a post dated far ahead is held back until its time.
+      const t = Date.parse(record.at)
+      if (!Number.isFinite(t) || t - Date.now() > MAX_FUTURE_MS) return null
+      const hints = this._index.hints(hex)
+      let name = null
+      if (hints.profileSeq !== null) {
+        const profile = await this._liveRecord(hex, hints.profileSeq)
+        if (profile !== null && profile.type === 'profile' && typeof profile.name === 'string') name = profile.name
+      }
+      let username = null
+      if (hints.usernameSeq !== null) {
+        const r = await this._liveRecord(hex, hints.usernameSeq)
+        const opts = this._certOpts()
+        const revoked = opts && opts.revokedIssuers instanceof Set ? opts.revokedIssuers : new Set()
+        if (r !== null && r.type === 'username' && !revoked.has(r.issuer) &&
+          cert.verifyUsernameRecord(r, hex, this.association).ok === true) username = r.username
+      }
+      // Re-read after the awaits: a drop, a re-serve, a block, a hold, a
+      // newer share or a tombstone of the post or of its share may have run.
+      if (this._served.get(hex) !== entry || !scanCaughtUp(entry)) return null
+      if (newestShare(entry.shares, seq) !== shareSeq) return null
+      const hidden = this._effectiveDeleted(entry)
+      if (hidden.has(seq) || hidden.has(shareSeq)) return null
+      if (!this._feiraVisible(hex) || this._searchHeld(hex)) return null
+      if (entry.indexPaused || entry.indexed < entry.core.length) return null
+      if (this._names.hint(hex).page === true) return null
+      // A profile or @nome deleted meanwhile drops only its own field: it
+      // does not withdraw the post.
+      if (hints.profileSeq !== null && hidden.has(hints.profileSeq)) name = null
+      if (hints.usernameSeq !== null && hidden.has(hints.usernameSeq)) username = null
+      return { record, name, username, shareSeq }
     } catch {
       return null
     }
