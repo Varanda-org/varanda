@@ -818,3 +818,62 @@ test('bindPasskey: signOut waits for its keychain save', async (t) => {
   t.alike(await leaving, {})
   t.is(await store.load({ rpId: RP, publicKey: pkOf(ROOT_HEX) }), null, 'no root secret left after Sair')
 })
+
+test('status: an unreadable attempts file leaves pending unknown, not false', async (t) => {
+  resetStubs()
+  const local = memoryLocal()
+  local.byRp.set(RP, { pending: { credentialId: FRESH, userId: PLAIN_ID }, refused: [] })
+  const load = local.load
+  local.load = async () => { throw new Error('keychain') }
+  const { id } = await makeIdentity(fakeWorklet(), { local })
+  t.is((await id.status()).pending, null, 'a pending creation may be on disk')
+  local.load = load
+  t.is((await id.status()).pending, true, 'read again on the next call')
+})
+
+test('status: a creation held in memory stays pending while the attempts file is unreadable', async (t) => {
+  resetStubs()
+  fakePasskey({ create: () => creation(ORIG, null) })
+  const local = memoryLocal()
+  local.load = async () => { throw new Error('keychain') }
+  const { id } = await makeIdentity(fakeWorklet(), { local })
+  t.alike(await id.unlock({ register: true }), { pending: true })
+  t.is((await id.status()).pending, true, 'concluir still shows')
+})
+
+test('status: a read still in flight is not taken as read', async (t) => {
+  resetStubs()
+  const local = memoryLocal()
+  local.byRp.set(RP, { pending: { credentialId: FRESH, userId: PLAIN_ID }, refused: [] })
+  const load = local.load
+  let release
+  const slow = new Promise((resolve) => { release = resolve })
+  let calls = 0
+  local.load = async (rp) => {
+    calls++
+    if (calls === 1) throw new Error('keychain')
+    await slow
+    return load(rp)
+  }
+  const w = fakeWorklet()
+  const request = w.request
+  let open
+  const gate = new Promise((resolve) => { open = resolve })
+  let gated = true
+  w.request = async (method, params) => {
+    if (method === 'identity.status' && gated) {
+      gated = false
+      await gate
+    }
+    return request(method, params)
+  }
+  const { id } = await makeIdentity(w, { local })
+  const first = id.status()
+  await new Promise((resolve) => setImmediate(resolve))
+  const second = id.status()
+  await new Promise((resolve) => setImmediate(resolve))
+  open()
+  t.is((await first).pending, null, 'the second read has not finished')
+  release()
+  t.is((await second).pending, true)
+})
