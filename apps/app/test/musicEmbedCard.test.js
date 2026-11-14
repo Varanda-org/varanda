@@ -505,7 +505,7 @@ test('the visible-screen signal is provided by the App and the stack', (t) => {
   t.ok(stack.includes("<ScreenVisible.Provider value={!covered && role === 'top'}>"), 'only the top entry is visible')
   const app = withoutComments(fs.readFileSync(path.join(APP, 'App.js'), 'utf8'))
   t.ok(app.includes('<ScreenCovered.Provider value={covered}>'), 'the App provides ScreenCovered')
-  t.ok(app.includes('const covered = composer.open || ajustes !== null || report !== null || helpOpen || pageDmAsk !== null || locked || backgrounded'), 'covered')
+  t.ok(app.includes('const covered = composer.open || ajustes !== null || report !== null || helpOpen || pageDmAsk !== null || shareTarget !== null || locked || backgrounded'), 'covered')
   t.ok(app.includes('const screenSeen = (id) => !covered && !stacked && tab === id'), 'screenSeen')
   t.ok(app.includes("const [backgrounded, setBackgrounded] = useState(() => AppState.currentState === 'background')"), 'backgrounded starts from the current state')
   const tabs = ['rua', 'espiadinha', 'busca', 'avisos', 'comunidades', 'feira', 'diario']
