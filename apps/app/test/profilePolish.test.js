@@ -151,3 +151,20 @@ test('member header stops loading when an unnamed profile answers before posts',
   await stale
   t.ok(profilePending, 'an obsolete read cannot settle the current header')
 })
+
+test('an icon-only action keeps its round size while labelled pills share the row', (t) => {
+  const src = read('ui/ProfileHeader.js')
+  const helper = src.match(/const isIconOnly = .+/)
+  t.ok(helper, 'one small helper decides by props')
+  if (!helper) return
+  const isIconOnly = vm.runInNewContext('(' + helper[0].replace('const isIconOnly = ', '') + ')')
+  t.ok(isIconOnly({ props: { icon: 'mensagem', accessibilityLabel: 'x' } }), 'icon without label')
+  t.ok(isIconOnly({ props: { icon: 'compartilhar', label: '' } }), 'empty label')
+  t.absent(isIconOnly({ props: { icon: 'mais', label: 'Seguir' } }), 'labelled stays')
+  t.absent(isIconOnly({ props: { label: 'Seguir' } }), 'no icon, no round')
+  t.absent(isIconOnly(null))
+  t.ok(src.includes("actionRound: { flexGrow: 0, flexShrink: 0, alignItems: 'flex-start' }"), 'round wrapper does not grow')
+  t.ok(src.includes("actionStackedRound: { alignItems: 'flex-start' }"), 'nor stretch when stacked')
+  t.ok(src.includes('const round = isIconOnly(action)'), 'decided from the element')
+  t.ok(src.includes('round ? styles.actionRound : styles.action'), 'chosen per action')
+})

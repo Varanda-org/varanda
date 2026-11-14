@@ -70,3 +70,12 @@ test('stacked pills keep the more button on the last pill row', (t) => {
   t.ok(src.includes('if (stacked && last && more)'), 'the last stacked pill takes the more button beside it')
   t.ok(src.includes('!(stacked && shownActions.length > 0)'), 'the more button is not repeated alone below the pills')
 })
+
+test('profile share buttons share directly and open the sheet only when that fails', (t) => {
+  for (const file of ['screens/Membro.js', 'screens/Diario.js']) {
+    const src = read(file)
+    t.ok(src.includes('shareProfileDirect(profileUrl).then((done) => { if (!done) setSharing(true) })'), file + ' direct share with sheet fallback')
+    t.ok(src.includes("<ShareProfile url={profileUrl} onNotice={typeof onToast === 'function' ? (m) => { setSharing(false); onToast(m) } : undefined} />"), file + ' sheet reuses the toast')
+  }
+  t.ok(read('screens/Membro.js').includes("icon='mensagem' accessibilityLabel={LABELS.message}"), 'Mensagem is icon-only')
+})

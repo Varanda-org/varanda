@@ -33,6 +33,7 @@ import { whoOf } from '../who'
 import { refusalOf } from '../wordCheck'
 import { ConfirmStack, ErrorText, Label, Soft, UNCERTAIN, errorText, useBottomPad, useNow } from '../ui'
 import { Icon } from '../ui/Icon'
+import { MoreButton } from '../ui/MoreButton'
 import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
 import { Sheet, TEXT_CAP } from '../ui/Sheet'
@@ -653,7 +654,7 @@ function SentRow ({ row, profile, now, onOpenMember, onRetract }) {
         <Text style={styles.name} numberOfLines={2}>{'Para ' + title}</Text>
         <Text style={styles.meta} numberOfLines={1}>{time}</Text>
       </Pressable>
-      <Pill label='Retirar' accessibilityLabel={'retirar depoimento para ' + title} onPress={() => onRetract({ ref: row.ref, name: title, about: row.to })} />
+      <MoreButton label={'retirar depoimento para ' + title} actions={[{ icon: 'lixeira', label: 'Retirar', danger: true, onPress: () => onRetract({ ref: row.ref, name: title, about: row.to }) }]} />
     </View>
   )
 }
@@ -751,8 +752,8 @@ export default function Depoimentos ({ entry, ownKey, onBack, onOpenMember, onRe
       const row = item.row
       return (
         <TestimonialRow row={row} profile={names ? names.profileOf(row.from) : null} now={now} ownKey={ownKey} onOpenMember={onOpenMember} onReport={onReport}>
-          <Pill label='Mostrar no perfil' filled pending={showing === row.ref} disabled={showing !== null && showing !== row.ref} onPress={() => show(row)} />
-          <Pill label='Agora não' onPress={() => data.notNow(row)} />
+          <Pill small label='Mostrar no perfil' filled pending={showing === row.ref} disabled={showing !== null && showing !== row.ref} onPress={() => show(row)} />
+          <Pill small icon='fechar' accessibilityLabel='Agora não' onPress={() => data.notNow(row)} />
         </TestimonialRow>
       )
     }

@@ -284,11 +284,23 @@ export function knownAuthors ({ ownKey, follows, hinted, peeked }) {
 
 // The follow list as a Set (own key not included), read once per screen
 // load: decides the media cache (own/followed authors keep the long cache;
-// strangers' photos are never kept). Null until read; a failed read is an
-// empty set (the safe side: no-store).
+// strangers' photos are never kept). Null until read. A failed first read is
+// an empty set (the safe side: no-store). A failed re-read, often right after
+// a failed follow when the connection is down, keeps the last good set and
+// its marks: an empty or partial set would show "Seguir" on authors already
+// followed. Only a complete paged read replaces the set. The ref holds the
+// set load resolves to, so it never depends on when setState lands. The last
+// good set is kept only for a failed re-read on the same connection (node
+// epoch); after a reconnect or another identity a failed read is empty again,
+// as before.
 export function useFollowSet (request) {
+  const { epoch } = useNode()
+  const epochRef = useRef(epoch)
+  epochRef.current = epoch
   const [follows, setFollows] = useState(null)
+  const knownRef = useRef(null)
   const load = useCallback(async () => {
+    const at = epochRef.current
     const keys = []
     try {
       for (let offset = 0; offset < 10000;) {
@@ -298,18 +310,28 @@ export function useFollowSet (request) {
         offset += page.length
         if (page.length === 0 || !(r && Number.isSafeInteger(r.total)) || offset >= r.total) break
       }
-    } catch {}
+    } catch {
+      const known = knownRef.current
+      if (known !== null && known.epoch === at) return known.set
+      keys.length = 0
+    }
     const set = new Set(keys)
-    setFollows(set)
+    // Epochs only grow: a read that outlived its epoch never replaces a set
+    // committed in a newer one.
+    const known = knownRef.current
+    if (known === null || !(known.epoch > at)) {
+      knownRef.current = { epoch: at, set }
+      setFollows(set)
+    }
     return set
   }, [request])
   const mark = useCallback((key, on) => {
-    setFollows((f) => {
-      const next = new Set(f || [])
-      if (on) next.add(key)
-      else next.delete(key)
-      return next
-    })
+    const known = knownRef.current
+    const next = new Set(known !== null ? known.set : [])
+    if (on) next.add(key)
+    else next.delete(key)
+    knownRef.current = { epoch: known !== null ? known.epoch : epochRef.current, set: next }
+    setFollows(next)
   }, [])
   return { follows, load, mark }
 }

@@ -213,3 +213,84 @@ test('the search field grows with large text instead of clipping its placeholder
   t.ok(src.includes('minHeight: layout.hit,') && src.includes('minHeight: layout.hit - 3'))
   t.absent(/\bheight: layout\.hit/.test(src.replace(/minHeight/g, '')), 'no fixed height left')
 })
+
+test('the categories use the shared Segmented control', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', 'BuscaGlobal.js'), 'utf8')
+  t.ok(src.includes("import { Segmented } from '../ui/Segmented'"))
+  t.ok(src.includes('const TABS = CATEGORIES.map((k) => ({ id: k, label: CATEGORY_LABEL[k] }))'), 'one option per category, labels from the model')
+  t.ok(src.includes('<Segmented options={TABS} selected={category} onSelect={setCategory} />'))
+  t.absent(src.includes("accessibilityRole='tab'"), 'no local tab row left')
+  t.absent(/\btabOn\b|\btabTextOn\b/.test(src), 'no local tab styles left')
+})
+
+test('Cancelar clears the field through its edit path and blurs it', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', 'BuscaGlobal.js'), 'utf8')
+  t.ok(/const cancel = \(\) => \{\s*onChangeText\(''\)\s*inputRef\.current\?\.blur\(\)\s*\}/.test(src), 'clears and blurs')
+  t.ok(/\{draft !== ''\s*\? \(\s*<Pressable accessibilityRole='button' onPress=\{cancel\} style=\{styles\.cancel\}>\s*<Text style=\{styles\.link\}>Cancelar<\/Text>/.test(src), 'shown while the field has text')
+  t.ok(src.includes("cancel: { minHeight: layout.hit, justifyContent: 'center'"), 'a 44 pt target')
+})
+
+test('recent searches: recorded on submit only, shown under an empty field, chosen once', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', 'BuscaGlobal.js'), 'utf8')
+  const contas = src.slice(src.indexOf('const handleSearch = () => {'), src.indexOf('const searching ='))
+  t.ok(contas.includes("if (c.kind === 'name' || c.kind === 'handle') record('contas', text)"), 'Contas records a name or @nome search, never a code')
+  t.ok(contas.includes('flushSearch()'), 'and still flushes the search')
+  t.is(src.split("record('contas'").length - 1, 2, 'Contas records on submit and on a chosen recent only')
+  const posts = src.slice(src.indexOf('const submitPosts = (text) => {'), src.indexOf('const typePosts'))
+  t.ok(posts.includes("if (postsGate === null && plan('publicacoes', text).query !== null) record('publicacoes', text)"), 'Publicações records a query it can send')
+  t.ok(posts.includes('const submit = () => submitPosts(drafts.publicacoes)'), 'Enter goes through the same path')
+  t.is(src.split("record('publicacoes'").length - 1, 1, 'typing never records')
+  const typing = src.slice(src.indexOf('const typePosts'), src.indexOf('// Own and followed authors only'))
+  t.absent(typing.includes('record('), 'the debounced run does not record')
+  t.ok(src.includes("const recentList = (cat) => (recents[cat].length === 0 || drafts[cat].trim() !== ''"), 'only under an empty field')
+  t.ok(src.includes("{recentList('contas')}") && src.includes("{recentList('publicacoes')}"), 'both panes list their own')
+  t.ok(src.includes('onPress={() => setRecents((r) => ({ ...r, [cat]: removeRecent(r[cat], q) }))}'), 'Remover drops one')
+  t.ok(src.includes('onPress={() => setRecents((r) => ({ ...r, [cat]: clearRecents() }))}'), 'Limpar empties the pane list')
+  t.ok(src.includes('{displayText(q)}'), 'the query is shown through displayText')
+  const choose = src.slice(src.indexOf('const chooseRecent = (cat, text) => {'), src.indexOf('const cancel = () => {'))
+  t.is(choose.split('submitPosts(text)').length - 1, 1, 'a chosen post query is submitted once')
+  t.is(choose.split('onChangeText(text)').length - 1, 1, 'a chosen account query goes through the field edit path once')
+  t.absent(/flushSearch\(|handleSearch\(/.test(choose), 'no second, immediate account run on top of the edit')
+})
+
+test('a failed or uncertain follow from a search row shows a toast, rereads and never resends', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', 'BuscaGlobal.js'), 'utf8')
+  const hit = src.slice(src.indexOf('const doFollowHit = async (hit) => {'), src.indexOf('const changing ='))
+  t.ok(/\} else if \(typeof onToast === 'function'\) \{\s*onToast\(r\.uncertain \? FOLLOW_UNCERTAIN : FOLLOW_FAILED\)\s*\}\s*loadFollows\(\)/.test(hit), 'toast on failure, then the reread')
+  t.is(hit.split("node.request('follow.add'").length - 1, 1, 'one request, no retry')
+  t.ok(src.includes("const FOLLOW_FAILED = 'Não foi possível seguir agora.'"))
+  t.ok(src.includes("const FOLLOW_UNCERTAIN = 'Não deu para confirmar se você passou a seguir.'"))
+  t.ok(src.includes('<ErrorText>{follow.error || remove.error}</ErrorText>'), 'the error line stays')
+})
+
+test('two follow presses on search rows in one tick send once, never toast and keep the first row pending', async (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', 'BuscaGlobal.js'), 'utf8')
+  const code = src.slice(src.indexOf('const doFollowHit = async (hit) => {'), src.indexOf('const changing ='))
+  const following = []
+  const toasts = []
+  const sent = []
+  let reads = 0
+  let release
+  let busy = false
+  const follow = {
+    run: async (fn) => {
+      if (busy) return { ok: false, uncertain: false }
+      busy = true
+      try { return { ok: true, value: await fn() } } finally { busy = false }
+    }
+  }
+  const node = { request: (m, p) => { sent.push(p.key); return new Promise((resolve) => { release = () => resolve({ changed: true }) }) } }
+  const build = new Function('own', 'hitBusy', 'setDone', 'setFollowing', 'follow', 'node', 'markKnown', 'names', 'displayText', 'whoOf', 'onToast', 'FOLLOW_FAILED', 'FOLLOW_UNCERTAIN', 'loadFollows', 'onFollowsChanged', code + '; return doFollowHit') // eslint-disable-line no-new-func
+  const doFollowHit = build('me', { current: false }, () => {}, (k) => following.push(k), follow, node,
+    () => {}, { learnMany: () => {} }, (x) => x, () => ({ title: 'Ana' }), (m) => toasts.push(m), 'falhou', 'incerto', () => { reads++ }, null)
+  const first = doFollowHit({ author: 'a' })
+  const second = doFollowHit({ author: 'b' })
+  await second
+  t.alike(sent, ['a'], 'one request')
+  t.alike(following, ['a'], 'the second press touched nothing')
+  t.is(toasts.length, 0, 'no failure toast')
+  t.is(reads, 0, 'no re-read yet')
+  release()
+  await first
+  t.alike(following, ['a', null], 'cleared by its own answer')
+})

@@ -16,9 +16,22 @@ const PROFILE_LABELS = Object.freeze({
   shareLabel: 'compartilhar perfil'
 })
 
+// Direct share for a caller's own button: false when the platform cannot
+// share (or the share failed), so the caller opens the sheet instead.
+// Cancelling counts as handled and sends nothing.
+export async function shareProfileDirect (url, nav = shareNav()) {
+  if (typeof url !== 'string') return false
+  const result = await shareUrl(nav, { url, title: 'Varanda' })
+  return result !== 'failed'
+}
+
+// onNotice(message): a caller's toast, used only for the copy confirmation
+// (the caller closes its sheet first, or the toast hides behind it). A copy
+// failure always stays inline: the selectable link it points to is in here.
+// Without onNotice both stay inline.
 // labels: other wording for another kind of link (missing keys keep the
 // profile's). showUrl: draw any link, not only a /@ profile URL.
-export function ShareProfile ({ url, labels, showUrl = false }) {
+export function ShareProfile ({ url, labels, showUrl = false, onNotice }) {
   const styles = useStyles(makeStyles)
   const text = labels ? { ...PROFILE_LABELS, ...labels } : PROFILE_LABELS
   const [note, setNote] = useState('')
@@ -45,10 +58,14 @@ export function ShareProfile ({ url, labels, showUrl = false }) {
 
   const nav = shareNav()
   const shown = showUrl ? url : visibleUrl(url)
+  const report = (message) => {
+    if (typeof onNotice === 'function') onNotice(message)
+    else setNote(message)
+  }
   const copyOrSelect = async () => {
     if (await copyText(nav, url)) {
       setManual(false)
-      setNote('link copiado')
+      report('link copiado')
     } else {
       setManual(true)
       setSelectTick((n) => n + 1)
@@ -72,10 +89,10 @@ export function ShareProfile ({ url, labels, showUrl = false }) {
     <>
       {shown !== null ? <Mono>{displayText(url)}</Mono> : null}
       <Row>
-        <Pill label={text.copy} accessibilityLabel={text.copyLabel} onPress={copy} />
         {canShare(nav)
           ? <Pill label={text.share} accessibilityLabel={text.shareLabel} onPress={share} />
           : null}
+        <Pill label={text.copy} accessibilityLabel={text.copyLabel} onPress={copy} />
       </Row>
       {manual
         ? (

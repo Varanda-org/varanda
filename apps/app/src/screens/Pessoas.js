@@ -30,12 +30,13 @@ import { FILTER_EMPTY, FILTER_HINT, FILTER_LABEL, FILTER_PLACEHOLDER, filterPeop
 import { HELP } from '../help'
 import { pickAvatar } from '../media/avatar'
 import { whoOf } from '../who'
-import { ErrorText, Field, Notice, Soft, errorText, useAction, useBottomPad } from '../ui'
+import { ErrorText, Notice, Soft, errorText, useAction, useBottomPad } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { HelpButton } from '../ui/Help'
 import { MemberRow } from '../ui/MemberRow'
 import { OfflineNote } from '../ui/OfflineNote'
 import { RefreshableList } from '../ui/RefreshableList'
+import { SearchField } from '../ui/SearchField'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
 import { type } from '../ui/theme'
@@ -44,6 +45,11 @@ import { isSeederDown, learnPeeked, peekAll, useFollowSet } from './Conversa'
 
 // Half the names cache's retry window (5 s), as in Seguindo.js.
 const NAMES_RETRY_MS = 2500
+// The filter hint stays word for word, inside the field's help button.
+const FILTER_HELP = Object.freeze({ title: 'Sobre o filtro', paragraphs: Object.freeze([FILTER_HINT]) })
+const FOLLOW_FAILED = (r) => r.uncertain === true
+  ? 'Não deu para confirmar. Pode ter funcionado: confira a lista.'
+  : 'Não deu para seguir agora. Tente de novo.'
 
 const isSeq = (n) => Number.isSafeInteger(n) && n >= 1
 
@@ -289,10 +295,14 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
   const follow = useAction()
   const remove = useAction()
   const [pendingKey, setPendingKey] = useState(null)
+  // Set synchronously: a second press in the same frame must neither send,
+  // toast nor clear the row still in flight.
+  const followBusy = useRef(false)
 
   // One attempt each; never retried automatically.
   const doFollow = async (hit) => {
-    if (hit.author === own) return
+    if (hit.author === own || followBusy.current) return
+    followBusy.current = true
     setDone('')
     setPendingKey(hit.author)
     try {
@@ -304,9 +314,11 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
         if (r.value.changed && typeof onFollowsChanged === 'function') onFollowsChanged()
       } else {
         // A failed or uncertain answer: the set says what really happened.
+        notify(FOLLOW_FAILED(r))
         loadFollows()
       }
     } finally {
+      followBusy.current = false
       setPendingKey(null)
     }
   }
@@ -386,15 +398,14 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
 
   const header = (
     <View style={styles.head}>
-      <Field
+      <SearchField
         label={FILTER_LABEL}
         placeholder={FILTER_PLACEHOLDER}
         value={text}
         onChangeText={setText}
         maxLength={80}
-        returnKeyType='search'
+        right={<HelpButton doc={FILTER_HELP} />}
       />
-      <Soft>{FILTER_HINT}</Soft>
       {count ? <Text style={styles.count}>{count}</Text> : null}
       {notes.map((line) => <Soft key={line}>{line}</Soft>)}
       {rows.length > 0 && error ? <ErrorState message={displayText(error)} onRetry={() => load(true)} pending={refreshing} /> : null}

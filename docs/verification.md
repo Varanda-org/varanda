@@ -9798,3 +9798,58 @@ node apps/app/test/format.test.js
 ```
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 212. Perfis, pessoas, busca e avisos (PR feat/profiles-people)
+
+Esta seção confere os perfis, as listas de pessoas, a Busca e os Avisos depois desta revisão. No Diário, "Editar perfil" fica ao lado do avatar, na mesma linha dele, e "Compartilhar" continua um botão de ícone; "N seguindo" e "N seguidores" aparecem compactos (`12,3 mil`). No Membro, "Mensagem" é só um ícone, com o nome "Mensagem" para o leitor de tela, e "Compartilhar perfil" fica no botão ⋯, que compartilha direto. Depois de rolar para além das abas de perfil, uma cópia delas fica fixa embaixo da barra do topo. Seguir é otimista: um toque muda o botão para "Seguindo" na hora, com um toque leve de háptico; o botão fica ocupado até a resposta, e cada toque envia exatamente um pedido, que nunca é reenviado. Se a resposta falha ou fica incerta, a tela relê a lista de seguidos e o botão mostra o estado real. Deixar de seguir continua pedindo confirmação, e "Cancelar" não envia nada. Compartilhar abre a folha de compartilhar do sistema na hora, onde o sistema permite; nos outros lugares, abre a folha "Compartilhar perfil", com "Compartilhar" antes de "Copiar link". Em Pessoas e Seguindo, o filtro é o campo de busca com o botão de limpar. Em Buscar, Contas e Publicações viram um controle segmentado, e as buscas recentes ficam só na memória desta sessão. Em Avisos, há filtros (Todas, Menções e Seguidores), dias como títulos e, para quem é seguido de volta, um botão "Seguir de volta". Nada disso muda protocolo, RPC nem Termos: muda a aparência, os toques, as folhas e o que a tela faz depois de uma falha de seguir.
+
+Limites conhecidos. Com as abas de perfil fixas, um leitor de tela encontra ao mesmo tempo a cópia fixa e as abas do próprio perfil. Se a primeira leitura da lista de seguidos falha, o botão "Seguir de volta" pode aparecer para uma pessoa que já é seguida; um toque então responde "Você já segue esta pessoa.". Com Avisos aberto em Menções ou Seguidores, os avisos que chegam pela atualização periódica são marcados como vistos mesmo que o filtro os esconda, porque a marcação usa a lista inteira. A lista de seguidos mantém a última leitura completa: uma releitura depois de falha nunca troca essa lista por uma vazia ou pela metade. Só se a primeira leitura falha a lista fica vazia, como antes.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA. Registrar aparelho, sistema e, na web, o navegador. Conferir sempre nos dois temas, claro e escuro. Os itens com "precisa de conta" dependem de uma conta de teste: APK de preview do EAS ou TestFlight.
+
+- [ ] Diário, perfil próprio: "Editar perfil" ao lado do avatar, na mesma linha dele; "Compartilhar" continua um botão de ícone; "N seguindo" e "N seguidores" compactos (`12,3 mil`). Android, iOS, web e PWA: pendente.
+- [ ] Seguir é otimista: um toque muda o botão para "Seguindo" na hora, com háptico leve, e o botão fica ocupado até a resposta. Vale no perfil, em Seguindo, Pessoas, Buscar e nas linhas de membros. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Seguir com resposta incerta (tempo esgotado ou conexão perdida): a tela relê a lista de seguidos, o botão mostra o estado real e nenhum pedido é reenviado. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Deixar de seguir: a confirmação aparece; "Cancelar" não envia nada, e só "Deixar de seguir" envia o pedido. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Compartilhar perfil (Diário e Membro): onde o sistema permite, o botão abre a folha de compartilhar do sistema na hora; na folha, "Compartilhar" vem antes de "Copiar link"; copiar fecha a folha e mostra o aviso breve "link copiado"; se a cópia falha, a mensagem fica na folha, ao lado do link selecionado. Convites e Identidade continuam com o texto dentro da folha, como antes. Android, iOS, web e PWA: pendente.
+- [ ] Depoimentos enviados: "Retirar" fica no botão ⋯ da linha, com o nome "retirar depoimento para <nome>". Android, iOS, web e PWA: pendente.
+- [ ] Depoimentos para aprovar: "Mostrar no perfil" é um botão pequeno e cheio; "Agora não" é um ✕ pequeno cujo nome para o leitor de tela é "Agora não". Android, iOS, web e PWA: pendente.
+- [ ] Abas de perfil fixas (Diário e Membro): depois de rolar para além das abas, uma cópia delas fica fixa embaixo da barra do topo, e some quando as abas voltam ao lugar; escolher uma aba abre o primeiro item dela, com as abas ainda fixas. Um leitor de tela não alcança a cópia enquanto ela está oculta. Android, iOS, web e PWA: pendente.
+- [ ] Abas fixas, trocar para uma aba curta ou vazia: a aba abre sem erro, mesmo sem itens, e as abas continuam fixas. Android, iOS, web e PWA: pendente.
+- [ ] Pessoas e Seguindo: o filtro é o campo de busca com o botão de limpar; a dica "Para encontrar outra conta, use a Busca." fica atrás de um ⓘ com o título "Sobre o filtro"; Seguindo não repete o título, e a contagem "N pessoas" fica numa linha curta; o controle de denúncia de cada linha continua visível. Android, iOS, web e PWA: pendente.
+- [ ] Pessoas, seguir falha: aparece o aviso breve "Não deu para seguir agora. Tente de novo.", ou, na resposta incerta, "Não deu para confirmar. Pode ter funcionado: confira a lista.", e a lista é relida, sem reenvio. Android, iOS, web e PWA: pendente.
+- [ ] Buscar: Contas e Publicações são um controle segmentado; "Cancelar" aparece ao lado do campo enquanto ele tem texto, limpa o campo e fecha o teclado. Android, iOS, web e PWA: pendente.
+- [ ] Buscas recentes: até 8 por aba, a mais nova primeiro, sem repetidas; "Limpar" e "Remover" em cada linha; tocar numa busca recente roda essa busca uma vez. Uma busca só entra quando é enviada; em Contas, um nome ou @nome entra, e um código não entra; uma busca de menos de 2 caracteres não entra. Android, iOS, web e PWA: pendente.
+- [ ] Buscas recentes, troca de conta: depois de trocar de conta, a lista de buscas recentes some. Android, iOS, web e PWA: pendente.
+- [ ] Linhas de membros: o @nome na meta menor, um botão pequeno de seguir e um divisor fino que começa depois do avatar. Android, iOS, web e PWA: pendente.
+- [ ] Perfil de membro: "Mensagem" é só ícone, com o nome "Mensagem" para o leitor de tela; "Compartilhar perfil" fica no ⋯ e compartilha direto, com a folha como reserva; "Comunidades em comum" continua igual. Android, iOS, web e PWA: pendente.
+- [ ] Avisos: os filtros Todas, Menções (menção, resposta, citação) e Seguidores; os dias como títulos; um aviso não lido ganha um fundo de destaque suave, ao lado do ponto que já existia; não há curtidas agrupadas. Android, iOS, web e PWA: pendente.
+- [ ] Avisos, filtro vazio: "Nada neste filtro" aparece; marcar como visto e o selo de não lidos usam a lista inteira, nunca a filtrada, e o mesmo vale para a conferência dos avisos. Android, iOS, web e PWA: pendente.
+- [ ] Avisos, "Seguir de volta": um botão pequeno só em aviso de seguidor, quando nenhuma Página age e a pessoa ainda não é seguida; um toque envia um pedido e mostra "Agora você segue <nome>." ou "Você já segue esta pessoa."; uma falha ou resposta incerta mostra o erro num aviso breve e relê a lista, sem reenvio, e o botão fica ocupado até a releitura acabar. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Avisos, "Seguir de volta" enquanto uma Página age: o botão não aparece nos avisos de seguidor. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Avisos, filtro: o filtro volta para Todas toda vez que Avisos é aberto de novo e quando a identidade que age muda. Android, iOS, web e PWA: pendente.
+- [ ] Espiadinha e Busca, seguir falha: aparece o aviso breve, a lista é relida uma vez, sem reenvio; as linhas da Espiadinha só saem depois de um sucesso. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Lista de seguidos com a conexão desligada: uma releitura depois de falha mantém a última lista lida por inteiro, e um seguir que falha não faz voltar para "Seguir" as pessoas que já eram seguidas. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem a estrutura e os textos do código, não montam a interface num aparelho. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/app/test/followPill.test.js
+node apps/app/test/follow.test.js
+node apps/app/test/shareProfile.test.js
+node apps/app/test/depoimentos.test.js
+node apps/app/test/profileBar.test.js
+node apps/app/test/profilePolish.test.js
+node apps/app/test/profileActions.test.js
+node apps/app/test/pessoas.test.js
+node apps/app/test/peopleFilter.test.js
+node apps/app/test/buscaGlobal.test.js
+node apps/app/test/searchRecents.test.js
+node apps/app/test/memberRow.test.js
+node apps/app/test/pageCallers.test.js
+node apps/app/test/noticesView.test.js
+node apps/app/test/avisosHosted.test.js
+node apps/app/test/screensPolish.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.

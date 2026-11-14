@@ -345,6 +345,228 @@ test('the hidden poll still starts the first read, and rows are not drawn before
   t.is(loads, 1, 'the 5-minute poll lights the bell while the tab is hidden')
   const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
   t.ok(source.includes('if (active) shownOnceRef.current = true'))
-  t.ok(source.includes('data={shownOnceRef.current ? shownItems : EMPTY_ROWS}'))
+  t.ok(source.includes('data={shownOnceRef.current ? rows : EMPTY_ROWS}'))
+  t.ok(source.includes('const filteredItems = filterNotices(shownItems, filter)'), 'the drawn rows still come from shownItems')
+  t.ok(source.includes('const rows = withDayHeaders(filteredItems, now)'))
   t.ok(source.includes('const EMPTY_ROWS = Object.freeze([])'))
+})
+
+test('the filter chips and day headers never reach settle, the seen marks or the badge', (t) => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
+  const allowed = new Set(['items', 'merged', 'page.notices', 'stateRef.current.items', 'current.items', 'plan.settle.list', 'list'])
+  const calls = [...source.matchAll(/\bsettle(?:Ref\.current)?\(([^,)]+)/g)].map((m) => m[1].trim())
+  t.ok(calls.length >= 10)
+  for (const arg of calls) t.ok(allowed.has(arg), 'settle takes a whole loaded list: ' + arg)
+  t.is(source.split('filterNotices(').length - 1, 1, 'filtered only where the rows are drawn')
+  t.is(source.split('withDayHeaders(').length - 1, 1)
+  for (const derived of ['filteredItems', 'rows']) {
+    for (const sink of ['settle(', 'badge(', 'hasNew(', 'seenOnScreen(', 'markSeenPadded(', 'onSeenStateRef.current(']) {
+      t.absent(source.includes(sink + derived), sink + derived)
+    }
+  }
+  // The filtered list and the drawn rows go nowhere else: the header rows,
+  // the data prop and the filter's empty state.
+  const component = source.slice(source.indexOf('export default function Avisos'), source.indexOf('const makeStyles'))
+  t.is(component.split(/\bfilteredItems\b/).length - 1, 3, 'filteredItems: declared, given to withDayHeaders, and the empty check')
+  t.ok(component.includes('const rows = withDayHeaders(filteredItems, now)'))
+  t.ok(component.includes('const listEmpty = shownItems.length > 0 && filteredItems.length === 0'))
+  // settle has a `rows` of its own (remoteFoldPlan), declared before this one.
+  const drawn = component.slice(component.indexOf('const rows = withDayHeaders('))
+  t.is(drawn.split(/\brows\b/).length - 1, 2, 'rows: declared and drawn, nothing else')
+  t.is(component.split('withDayHeaders(').length - 1, 1)
+  t.ok(component.includes('data={shownOnceRef.current ? rows : EMPTY_ROWS}'))
+  // Day headers have keys of their own and never pass for a notice.
+  t.ok(source.includes("const rowKey = (row) => (isDayHeader(row) ? row.key : 'n:' + noticeId(row))"))
+  t.ok(source.includes('keyExtractor={rowKey}'))
+  t.ok(source.includes("if (isDayHeader(item)) return <Text style={styles.dayHeader} accessibilityRole='header' numberOfLines={1}>{displayText(item.title)}</Text>"), 'a header title goes through displayText too')
+})
+
+test('Avisos tints an unread row beside its dot', (t) => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
+  t.ok(source.includes('unreadRow: { backgroundColor: colors.accentSoft }'))
+  const row = source.slice(source.indexOf('function NoticeRow'), source.indexOf('export default function Avisos'))
+  t.ok(row.includes('[styles.row, unread && styles.unreadRow, pressed && open && styles.pressed]'), 'a post row')
+  t.ok(row.includes('!followBack && unread && styles.unreadRow'), 'a follow row without the pill')
+  t.ok(row.includes('<View style={[styles.row, unread && styles.unreadRow]}>'), 'a follow row with the pill')
+  t.ok(row.includes('{unread ? <View style={styles.unreadDot} accessible={false} /> : null}'), 'the dot stays')
+})
+
+test('the Seguir de volta pill is only for the person, only for someone not followed', (t) => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
+  // A list cleared only in the acting effect still holds the page's rows for
+  // one commit after a switch back to the person: no pill until it is cleared.
+  t.ok(source.includes('followBack={showsFollowBack(item, { pageActing: pageKey !== null || actingKeyRef.current !== actingKey, follows, ownKey })}'))
+  t.ok(/if \(actingKeyRef\.current === actingKey\) return\n\s*actingKeyRef\.current = actingKey/.test(source), 'the ref moves only where the list is cleared')
+  t.is(source.split('actingKeyRef.current = actingKey').length - 1, 1)
+  // The pressed row is the key that is sent.
+  t.ok(source.includes('onFollow={() => onFollowBack(item)}'))
+  t.ok(source.includes('onFollowBack={followBack}'))
+  t.ok(source.includes("const key = item && typeof item.key === 'string' ? item.key.toLowerCase() : ''"))
+  t.ok(source.includes("const r = await request('follow.add', { key })"))
+  // The handler's page guard reads the render's copy and the store itself.
+  t.ok(source.includes('pageKeyRef.current = pageKey\n'))
+  t.ok(source.includes("if (followBackRef.current !== null || pageKeyRef.current !== null || actingGet().kind === 'page') return"))
+  t.ok(source.includes("import { get as actingGet, subscribe as actingSubscribe } from '../actingAs'"))
+  t.ok(source.includes("const pageKey = acting.kind === 'page' ? acting.key : null"))
+  t.ok(source.includes('if (hosted && active && pageKey === null) loadFollows()'), 'a page never reads the person\'s follow set')
+  t.ok(source.includes('}, [hosted, active, pageKey, ownKey, followsVersion, loadFollows])'), 'read again on any follow change or identity')
+  t.ok(source.includes('const { follows, load: loadFollows, mark: markFollow } = useFollowSet(request)'))
+  t.ok(source.includes('label={FOLLOW_BACK_LABEL}'))
+  t.ok(source.includes('followDisabled={followBackKey !== null}'), 'one follow back at a time')
+  const row = source.slice(source.indexOf('function NoticeRow'), source.indexOf('export default function Avisos'))
+  t.ok(row.indexOf('</PressScale>') < row.indexOf('<FollowPill'), 'the pill is not inside the row control')
+  t.is(source.split("request('follow.add'").length - 1, 1, 'one follow.add call site')
+  t.absent(source.includes("'follow.remove'"))
+})
+
+const A = 'a'.repeat(64)
+
+function followBackHarness ({ pageKey = null, acting = { kind: 'me' }, answer, reload = () => {} }) {
+  const calls = []
+  const toasts = []
+  const marks = []
+  const pending = []
+  let reloads = 0
+  let changed = 0
+  const context = {
+    followBackRef: { current: null },
+    pageKeyRef: { current: pageKey },
+    actingGet: () => acting,
+    KEY64: /^[0-9a-f]{64}$/i,
+    setFollowBackKey: (key) => pending.push(key),
+    request: (method, params) => {
+      // The params object is built inside the vm context: compared as text.
+      calls.push(method + ' ' + JSON.stringify(params))
+      return answer()
+    },
+    markFollow: (key, on) => marks.push([key, on]),
+    displayText: (s) => s,
+    whoOf: (p) => ({ title: p.name }),
+    onToast: (text) => toasts.push(text),
+    onFollowsChanged: () => { changed++ },
+    errorText: (err) => (err.uncertain ? 'incerto' : err.message),
+    loadFollows: () => {
+      reloads++
+      return reload()
+    }
+  }
+  const followBack = screenCallback('Avisos', 'const followBack = useCallback(', context)
+  return { followBack, calls, toasts, marks, pending, context, reloads: () => reloads, changed: () => changed }
+}
+
+test('Seguir de volta sends one follow.add per press and marks it pending before the request', async (t) => {
+  let resolve
+  const h = followBackHarness({ answer: () => new Promise((_resolve) => { resolve = _resolve }) })
+  const item = { key: A, seq: 1, name: 'Bia', username: 'bia' }
+  const first = h.followBack(item)
+  t.alike(h.pending, [A], 'pending is set in the same tick as the press')
+  t.alike(h.calls, ['follow.add ' + JSON.stringify({ key: A })])
+  await h.followBack(item)
+  t.is(h.calls.length, 1, 'a second press while pending sends nothing')
+  resolve({ changed: true })
+  await first
+  t.alike(h.marks, [[A, true]])
+  t.is(h.changed(), 1, 'onFollowsChanged on success')
+  t.alike(h.toasts, ['Agora você segue Bia.'])
+  t.alike(h.pending, [A, null])
+  t.is(h.reloads(), 0)
+})
+
+test('Seguir de volta never resends after a failed or uncertain answer, and reads the set again', async (t) => {
+  for (const err of [Object.assign(new Error('falhou'), { code: 'USAGE' }), Object.assign(new Error('x'), { uncertain: true })]) {
+    const h = followBackHarness({ answer: () => Promise.reject(err) })
+    await h.followBack({ key: A, seq: 1, name: 'Bia' })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    t.is(h.calls.length, 1, 'exactly one request')
+    t.alike(h.toasts, [err.uncertain ? 'incerto' : 'falhou'], 'the error text is shown')
+    t.is(h.reloads(), 1, 'the follow set is read again')
+    t.is(h.changed(), 0)
+    t.alike(h.marks, [])
+    t.alike(h.pending, [A, null])
+  }
+})
+
+test('Seguir de volta reads the acting store, not only the render copy', async (t) => {
+  const h = followBackHarness({ acting: { kind: 'page', key: 'b'.repeat(64) }, answer: () => Promise.resolve({ changed: true }) })
+  await h.followBack({ key: A, seq: 1, name: 'Bia' })
+  t.is(h.calls.length, 0, 'a switch to a page that has not rendered yet still sends nothing')
+  t.alike(h.pending, [])
+})
+
+test('Seguir de volta keeps the pill pending until the set is read again after a failure', async (t) => {
+  let finish
+  const h = followBackHarness({
+    answer: () => Promise.reject(Object.assign(new Error('x'), { uncertain: true })),
+    reload: () => new Promise((_resolve) => { finish = _resolve })
+  })
+  const press = h.followBack({ key: A, seq: 1, name: 'Bia' })
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  t.alike(h.toasts, ['incerto'], 'the toast comes before the re-read')
+  t.is(h.reloads(), 1)
+  t.alike(h.pending, [A], 'still pending while the set is read')
+  finish(new Set())
+  await press
+  t.alike(h.pending, [A, null])
+  t.is(h.calls.length, 1, 'never resent')
+  const broken = followBackHarness({ answer: () => Promise.reject(new Error('falhou')), reload: () => Promise.reject(new Error('lista')) })
+  await broken.followBack({ key: A, seq: 1, name: 'Bia' })
+  t.alike(broken.pending, [A, null], 'a failed re-read still releases the pill')
+  t.is(broken.calls.length, 1)
+})
+
+test('Seguir de volta sends the row key in lower case', async (t) => {
+  const h = followBackHarness({ answer: () => Promise.resolve({ changed: true }) })
+  await h.followBack({ key: 'A'.repeat(64) + '', seq: 1, name: 'Bia' })
+  t.alike(h.calls, ['follow.add ' + JSON.stringify({ key: A })])
+  t.alike(h.marks, [[A, true]])
+})
+
+test('a show and an acting switch set the filter back to Todas before anything is marked seen', (t) => {
+  const events = []
+  const base = {
+    previous: { current: { active: false, refresh: 0, scrollToTop: 0 } },
+    refresh: 0,
+    scrollToTop: 0,
+    stateRef: { current: { loading: false, refreshing: false, loadedAt: Date.now(), items: ['row'] } },
+    reloadAfterRef: { current: false },
+    promote: () => {},
+    shouldReloadOnShow: () => false,
+    settle: () => events.push('settle'),
+    loadFirst: () => events.push('load'),
+    setFilter: (id) => events.push('filter ' + id)
+  }
+  const shownEffect = screenCallback('Avisos', 'useEffect(() => {\n    const prev = previous.current', { ...base, active: true })
+  shownEffect()
+  t.alike(events, ['filter todas', 'settle'], 'reset, then the show marks the loaded rows')
+  events.length = 0
+  shownEffect()
+  t.alike(events, [], 'still shown: the chosen filter stays')
+  const hiddenEffect = screenCallback('Avisos', 'useEffect(() => {\n    const prev = previous.current', { ...base, previous: { current: { active: false } }, active: false })
+  hiddenEffect()
+  t.alike(events, [], 'hidden: nothing')
+  const actingEffect = screenCallback('Avisos', 'useEffect(() => {\n    if (actingKeyRef.current === actingKey) return', {
+    actingKey: 'b'.repeat(64),
+    actingKeyRef: { current: '' },
+    seqRef: { current: 0 },
+    seenRef: { current: null },
+    busyRetryRef: { current: null },
+    backoffRef: { current: false },
+    clearTimeout: () => {},
+    commit: () => events.push('commit'),
+    badge: () => {},
+    loadFirstRef: { current: () => events.push('load') },
+    setFilter: (id) => events.push('filter ' + id)
+  })
+  actingEffect()
+  t.alike(events, ['filter todas', 'commit', 'load'])
+})
+
+test('Seguir de volta does nothing while a page is acting', async (t) => {
+  const h = followBackHarness({ pageKey: 'b'.repeat(64), answer: () => Promise.resolve({ changed: true }) })
+  await h.followBack({ key: A, seq: 1, name: 'Bia' })
+  t.is(h.calls.length, 0, 'follow.add would act as the person')
+  t.alike(h.pending, [])
+  const bad = followBackHarness({ answer: () => Promise.resolve({ changed: true }) })
+  await bad.followBack({ key: 'not-a-key', seq: 1 })
+  t.is(bad.calls.length, 0, 'only a 64-hex key')
 })

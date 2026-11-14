@@ -25,12 +25,13 @@ import { UNNAMED, whoOf } from '../who'
 import { HELP, SHORT } from '../help'
 import { HelpButton } from '../ui/Help'
 import { FILTER_EMPTY, FILTER_HINT, FILTER_LABEL, FILTER_PLACEHOLDER, filterPeople } from '../peopleFilter'
-import { Card, ErrorText, Field, Notice, SectionHeader, Soft, errorText, useAction, useBottomPad } from '../ui'
+import { Card, ErrorText, Notice, Soft, errorText, useAction, useBottomPad } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { FollowPill } from '../ui/FollowPill'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
+import { SearchField } from '../ui/SearchField'
 import { EmptyState, ListFooter, Skeleton } from '../ui/States'
 import { OfflineNote } from '../ui/OfflineNote'
 import { TopBar } from '../ui/TopBar'
@@ -41,6 +42,8 @@ import { useStyles, useTheme } from '../ui/ThemeProvider'
 const PAGE = 50
 // Half the names cache's retry window (5 s): see the filter below.
 const NAMES_RETRY_MS = 2500
+// The filter hint stays word for word, inside the field's help button.
+const FILTER_HELP = Object.freeze({ title: 'Sobre o filtro', paragraphs: Object.freeze([FILTER_HINT]) })
 
 // One followed diary. The avatar and name column open the member's profile
 // (`onOpen(followKey, profile)`, optional); 'denunciar' opens the report sheet
@@ -356,15 +359,14 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
 
   const header = (
     <View style={styles.header}>
-      <Field
+      <SearchField
         label={FILTER_LABEL}
         placeholder={FILTER_PLACEHOLDER}
         value={text}
         onChangeText={setText}
         maxLength={80}
-        returnKeyType='search'
+        right={<HelpButton doc={FILTER_HELP} />}
       />
-      <Soft>{FILTER_HINT}</Soft>
       {legacyApi !== null && !legacyHidden && legacy !== null && legacy.length > 0
         ? (
           <Card>
@@ -437,9 +439,7 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
         ListHeaderComponent={
           <>
             {header}
-            <SectionHeader right={loaded ? <Soft>{String(total) + (total === 1 ? ' pessoa' : ' pessoas')}</Soft> : null}>
-              Seguindo
-            </SectionHeader>
+            {loaded ? <View style={styles.note}><Soft>{String(total) + (total === 1 ? ' pessoa' : ' pessoas')}</Soft></View> : null}
             <View style={styles.note}>
               <Soft>{SHORT.followsPublic}</Soft>
             </View>

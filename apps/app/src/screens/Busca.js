@@ -229,8 +229,15 @@ export default function Busca ({ query, header, ownKey, avatarOf, active, scroll
 
   // 'seguir': unlike the rounds, the author's rows stay (search results are
   // not "people you do not follow"). `onFollowed(author)` is an optional hook
-  // for a caller that keeps another list of strangers. An uncertain failure
-  // is reported, never retried.
+  // for a caller that keeps another list of strangers. A failed or uncertain
+  // answer is reported, never retried, and the follow set is read once
+  // again: it says what really happened. Not after unmount (the query was
+  // cleared, or another account unlocked): nothing is left to show it.
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
   const follow = async (author, name, username) => {
     if (stateRef.current.following.has(author)) return
     commit({ following: new Set(stateRef.current.following).add(author) })
@@ -243,6 +250,7 @@ export default function Busca ({ query, header, ownKey, avatarOf, active, scroll
       if (typeof onFollowsChanged === 'function') onFollowsChanged()
     } catch (err) {
       if (typeof onToast === 'function') onToast(errorText(err))
+      if (mountedRef.current) loadFollows()
     } finally {
       const rest = new Set(stateRef.current.following)
       rest.delete(author)
