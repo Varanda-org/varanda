@@ -69,6 +69,7 @@ import { canPublishMoment } from '../momentSeen'
 import { useMomentSeen, useMoments } from './Momentos'
 import { useBlocks } from '../blocksProvider'
 import { installationOrigin } from '../installation'
+import { postLink } from '../postLink'
 import { bumpCacheGeneration, cacheGeneration, keepOnlyAuthors, registerLocalCache } from '../localCaches'
 import { buildSnapshot, initialFeedState, keepOnlyAuthors as snapshotKeepOnly, parseSnapshot, socialSeed, withoutAuthors } from '../feedSnapshot'
 import { clearSnapshot, loadSnapshotText, saveSnapshotText } from '../feedSnapshotStore'
@@ -1184,6 +1185,19 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       pending: typeof social.pending === 'function' ? social.pending(parentRef) : false
     })
   const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
+  // The seeder's public page shows diary posts only. Chats, groups and
+  // moments never come through here and are not kind 'post'; a page's diary
+  // is told apart by its profile.
+  const diaryPost = post.kind === 'post' && !(prof && prof.page === true)
+  const postRef = diaryPost ? refOf(post) : null
+  const origin = installationOrigin() || globalThis.location?.origin || null
+  const link = postRef !== null ? postLink(origin, postRef) : null
+  // The member's own diary only, never the page acted as: the writer refuses
+  // a post-share for any diary but the caller's own. The original under a
+  // repost is published from its own row.
+  const authorKey = String(post.author).toLowerCase()
+  const publishable = postRef !== null && own !== null && authorKey === own && authorKey !== actingPageKey() &&
+    repostedBy === null && Number.isSafeInteger(post.seq)
   // While the index is still being built a count would be misleadingly small.
   const counts = s.flags.indexing ? null : (s.counts.get(ref) || null)
   const fnOf = (f) => typeof f === 'function'
@@ -1267,7 +1281,9 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       onDelete: offers.delete ? () => live.h.onDelete({ ref, seq: post.seq }) : undefined,
       onReport: offers.report ? () => live.h.onReport({ author: post.author, name, username, seq: post.seq, text: post.text }) : undefined,
       seq: post.seq,
-      onMessage: offers.message ? (author, options) => live.h.onMessage(author, options) : undefined
+      onMessage: offers.message ? (author, options) => live.h.onMessage(author, options) : undefined,
+      link,
+      publishable
     }
   }
   const latest = { h, social, ref }
@@ -1302,6 +1318,9 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
     liked: s.eng.liked.has(ref),
     reposted: s.eng.reposted.has(ref),
     pending: s.pending.get(ref) || null,
+    link,
+    origin,
+    publishable,
     ...Object.fromEntries(Object.entries(offers).map(([k, v]) => ['offers.' + k, v]))
   }
   return cachedRow(cache, rowKey, inputs, latest, (live) => build(withActions(live)))
