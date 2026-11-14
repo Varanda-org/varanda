@@ -103,6 +103,7 @@ async function fixture (t, options = {}) {
     audiusPlay: async (id, opts) => { calls.push(['ticket', id, opts]); return options.ticket ? options.ticket() : ticket },
     createStreamPlayer: (url, opts) => {
       calls.push(['create', url, opts])
+      options.create?.()
       const progress = new Set()
       const errors = new Set()
       const player = {
@@ -125,14 +126,18 @@ async function fixture (t, options = {}) {
   }
   const body = source.slice(source.indexOf('export const momentMusicIdle'), source.indexOf('export function MomentMusic')).replace(/\bexport /g, '')
   // eslint-disable-next-line no-new-func
-  const create = new Function(...Object.keys(deps), body + '\nreturn createMomentPlayback')(...Object.values(deps))
+  const { createMomentPlayback: create, prepareMomentMusic, PRELOAD_IDLE_MS } = new Function(...Object.keys(deps), body + '\nreturn { createMomentPlayback, prepareMomentMusic, PRELOAD_IDLE_MS }')(...Object.values(deps))
   const session = { member: 'b'.repeat(64), origin: 'node-origin', request: () => {}, ...options.session }
-  const playback = create(session, options.music || { id: 'abc', start: 30 }, (state) => states.push(state), {
+  const music = options.music || { id: 'abc', start: 30 }
+  const prepared = options.prepare ? prepareMomentMusic(session, music, options.prepare) : options.prepared
+  t.teardown(() => prepared?.release())
+  const playback = create(session, music, (state) => states.push(state), {
+    prepared,
     onStart: () => { starts++ },
     onUnavailable: (error) => unavailable.push(error)
   })
   t.teardown(() => playback.release())
-  return { playback, calls, states, players, timers, unavailable, session, starts: () => starts }
+  return { playback, prepared, prepareMomentMusic, PRELOAD_IDLE_MS, deps, music, calls, states, players, timers, unavailable, session, starts: () => starts }
 }
 
 const count = (f, name) => f.calls.filter((c) => c[0] === name).length
@@ -1128,4 +1133,553 @@ test('unmuting a paused momento spends nothing until it is visible', async (t) =
   await flush()
   t.alike(calls, ['item', 'ticket', 'seek', 'play'])
   t.is(playbackClaimCount(), claims + 1)
+})
+
+test('preloading waits for metadata before the ticket and rejects an invalid clamp without audio', async (t) => {
+  const { MUSIC_SEEK_TEXT } = await dependencies()
+  for (const start of [30, 89]) {
+    const pending = deferred()
+    const f = await fixture(t, { prepare: {}, music: { id: 'abc', start }, item: () => pending.promise })
+    t.alike(f.calls.map((c) => c[0]), ['item'])
+    t.is(f.calls[0][3].reuse, true)
+    pending.resolve(track)
+    const done = await f.prepared.done
+    if (start === 89) {
+      t.alike(done, { ok: false, code: MUSIC_SEEK_TEXT })
+      t.is(count(f, 'ticket'), 0)
+      t.is(count(f, 'create'), 0)
+      await f.playback.start()
+      t.alike(f.unavailable, [MUSIC_SEEK_TEXT])
+      t.alike(f.states.at(-1).item, track, 'the refusal keeps the track answer')
+      t.is(count(f, 'item'), 1)
+    } else {
+      t.alike(done, { ok: true })
+      t.alike(f.calls.map((c) => c[0]), ['item', 'ticket', 'create', 'seek'])
+    }
+  }
+})
+
+test('ready preloads stay silent and transfer their player exactly once', async (t) => {
+  const { playbackClaimCount } = await dependencies()
+  const claims = playbackClaimCount()
+  const f = await fixture(t, { prepare: {} })
+  await f.prepared.done
+  t.is(playbackClaimCount(), claims)
+  t.alike(f.states, [])
+  t.alike(f.calls.map((c) => c[0]), ['item', 'ticket', 'create', 'seek'])
+  t.alike(f.calls[2], ['create', ticket.url, { origin: ticket.base, preload: 'auto' }])
+  t.is(f.PRELOAD_IDLE_MS, 18000)
+  t.is(f.timers.size, 1)
+  t.is([...f.timers.values()][0].ms, 18000)
+  t.is(f.players[0].errorListeners.size, 1)
+  await f.playback.start()
+  t.alike(f.calls.map((c) => c[0]), ['item', 'ticket', 'create', 'seek', 'play'])
+  t.is(f.states.at(-1).item, track)
+  t.is(f.players[0].errorListeners.size, 1, 'only the playback listener remains')
+  t.is(f.players[0].progressListeners.size, 1)
+  t.is(f.timers.size, 0)
+  f.prepared.release()
+  t.is(count(f, 'release'), 0, 'the taker owns the player')
+  t.is(await f.prepared.take(), null)
+  progress(f.players[0], 30000, { buffering: true })
+  t.is(f.starts(), 0)
+  progress(f.players[0], 30000)
+  progress(f.players[0], 31000)
+  t.is(f.starts(), 1)
+})
+
+test('a paused viewer adopts silently and resumes the same player', async (t) => {
+  const f = await fixture(t, { prepare: {} })
+  await f.prepared.done
+  f.playback.setPaused(true)
+  await f.playback.start()
+  t.is(f.states.at(-1).phase, 'paused')
+  t.is(count(f, 'play'), 0)
+  await f.playback.setPaused(false)
+  t.is(count(f, 'play'), 1)
+  t.is(count(f, 'item'), 1)
+  t.is(count(f, 'ticket'), 1)
+  t.is(count(f, 'create'), 1)
+  t.is(count(f, 'seek'), 1)
+})
+
+test('taking a pending preload waits for that load without another request', async (t) => {
+  for (const key of ['item', 'ticket', 'seek']) {
+    const pending = deferred()
+    const f = await fixture(t, { prepare: {}, [key]: () => pending.promise })
+    const loading = f.playback.start()
+    await flush()
+    t.is(count(f, 'item'), 1, key)
+    t.is(count(f, 'play'), 0)
+    pending.resolve(key === 'ticket' ? ticket : track)
+    await loading
+    t.is(count(f, 'item'), 1)
+    t.is(count(f, 'ticket'), 1)
+    t.is(count(f, 'create'), 1)
+    t.is(count(f, 'seek'), 1)
+    t.is(count(f, 'play'), 1)
+    t.is(f.timers.size, 0)
+    f.playback.release()
+  }
+})
+
+test('failed preload POSTs report their original error once without another request', async (t) => {
+  const { musicErrorText } = await dependencies()
+  for (const key of ['item', 'ticket']) {
+    for (const code of ['limite-musica', 'nao-encontrado', 'nao-vinculado']) {
+      const err = Object.assign(new Error('failure'), { code })
+      const options = { prepare: {}, [key]: async () => { throw err } }
+      const f = await fixture(t, options)
+      t.alike(await f.prepared.done, { ok: false, code: code || 'failure' })
+      await f.playback.start()
+      await f.playback.start()
+      await f.playback.press()
+      t.alike(f.unavailable, [musicErrorText(err)])
+      t.alike(f.states.at(-1).item, key === 'ticket' ? track : null, 'a refusal after the item keeps it')
+      t.is(count(f, 'item'), 1)
+      t.is(count(f, 'ticket'), key === 'ticket' ? 1 : 0)
+      t.is(count(f, 'create'), 0)
+      const g = await fixture(t, options)
+      t.alike(await g.prepared.take(), { ok: false, error: musicErrorText(err), item: key === 'ticket' ? track : null })
+    }
+  }
+})
+
+function rejectOnce (key, err) {
+  let attempts = 0
+  return {
+    prepare: {},
+    [key]: async () => {
+      if (++attempts === 1) throw err
+      return key === 'ticket' ? ticket : track
+    }
+  }
+}
+
+function assertReloaded (t, f, key, label) {
+  t.alike(f.unavailable, [], label)
+  t.is(count(f, 'play'), 1, label)
+  t.is(count(f, 'item'), 2, label)
+  t.is(count(f, 'ticket'), key === 'item' ? 1 : 2, label)
+  t.is(count(f, 'create'), 1, label)
+  t.ok(f.calls[0][3].signal.aborted, label)
+  t.is(f.calls[0][3].reuse, true, label)
+  const again = f.calls.filter((c) => c[0] === 'item')[1]
+  t.absent(again[3].signal.aborted, label)
+  t.is(again[3].reuse, true, label)
+  t.is(f.players.length, 1, label)
+  progress(f.players[0], 30000)
+  t.is(f.starts(), 1, label)
+  t.is(f.states.at(-1).phase, 'playing', label)
+}
+
+test('an indisponivel item preload is not the momento load, so showing it asks and plays', async (t) => {
+  const err = Object.assign(new Error('no answer'), { code: 'indisponivel' })
+  const f = await fixture(t, rejectOnce('item', err))
+  t.alike(await f.prepared.done, { ok: false, code: 'indisponivel' })
+  await f.playback.start()
+  assertReloaded(t, f, 'item', 'item indisponivel')
+  const g = await fixture(t, rejectOnce('item', err))
+  t.is(await g.prepared.take(), null)
+  t.ok(g.calls[0][3].signal.aborted)
+  t.is(g.players.length, 0)
+  t.is(g.timers.size, 0)
+  t.is(count(g, 'release'), 0)
+  t.is(count(g, 'create'), 0)
+  t.is(count(g, 'ticket'), 0)
+})
+
+test('an indisponivel play preload is not the momento load, so showing it asks and plays', async (t) => {
+  const err = Object.assign(new Error('no answer'), { code: 'indisponivel' })
+  const f = await fixture(t, rejectOnce('ticket', err))
+  t.alike(await f.prepared.done, { ok: false, code: 'indisponivel' })
+  await f.playback.start()
+  assertReloaded(t, f, 'ticket', 'play indisponivel')
+  t.ok(f.calls[1][2].signal.aborted, 'the preload play request is dropped')
+  t.absent(f.calls.filter((c) => c[0] === 'ticket')[1][2].signal.aborted)
+  const g = await fixture(t, rejectOnce('ticket', err))
+  t.is(await g.prepared.take(), null)
+  t.ok(g.calls[1][2].signal.aborted)
+  t.is(g.players.length, 0)
+  t.is(g.timers.size, 0)
+  t.is(count(g, 'release'), 0)
+  t.is(count(g, 'create'), 0)
+})
+
+test('a preload with no definite answer is not the momento load, so showing it asks and plays', async (t) => {
+  const cases = [
+    ['item', new TypeError('bad')],
+    ['item', new Error('failure')],
+    ['ticket', Object.assign(new Error('failure'), { code: 'limite-musica', uncertain: true })],
+    ['ticket', Object.assign(new Error('failure'), { uncertain: true })]
+  ]
+  for (const [key, err] of cases) {
+    const label = key + ' ' + (typeof err.code === 'string' ? err.code : err.name)
+    const f = await fixture(t, rejectOnce(key, err))
+    t.alike(await f.prepared.done, { ok: false, code: typeof err.code === 'string' ? err.code : err.message }, label)
+    await f.playback.start()
+    assertReloaded(t, f, key, label)
+    const g = await fixture(t, rejectOnce(key, err))
+    t.is(await g.prepared.take(), null, label)
+    t.ok(g.calls[0][3].signal.aborted, label)
+    t.is(g.players.length, 0, label)
+    t.is(g.timers.size, 0, label)
+    t.is(count(g, 'release'), 0, label)
+    t.is(count(g, 'create'), 0, label)
+    f.playback.release()
+  }
+})
+
+test('ticket-only preloads hand off the ticket and create audio only on show', async (t) => {
+  const f = await fixture(t, { prepare: { stream: false } })
+  t.alike(await f.prepared.done, { ok: true })
+  t.alike(f.calls.map((c) => c[0]), ['item', 'ticket'])
+  t.is(f.timers.size, 0)
+  await f.playback.start()
+  t.alike(f.calls.map((c) => c[0]), ['item', 'ticket', 'create', 'seek', 'play'])
+  t.alike(f.calls[2], ['create', ticket.url, { origin: ticket.base }])
+  const g = await fixture(t, { prepare: { stream: false } })
+  t.alike(await g.prepared.take(), { ok: true, item: track, ticket, stream: null })
+})
+
+test('preload player failures preserve the ticket for one fresh player on show', async (t) => {
+  for (const stage of ['create', 'seek', 'relay', 'idle', 'expiry', 'pending-error']) {
+    let attempts = 0
+    const options = { prepare: {} }
+    const err = Object.assign(new Error('audio failed'), { code: stage === 'relay' ? '503' : 'seek-timeout' })
+    if (stage === 'create') options.create = () => { if (++attempts === 1) throw err }
+    if (stage === 'seek') options.seek = async () => { if (++attempts === 1) throw err }
+    if (stage === 'relay' || stage === 'pending-error') options.seek = async (player) => { if (++attempts === 1) player.error(err) }
+    const f = await fixture(t, options)
+    const loading = stage === 'pending-error' ? f.playback.start() : null
+    await f.prepared.done
+    if (stage === 'idle') f.players[0].error(err)
+    if (stage === 'expiry') [...f.timers.values()][0].fn()
+    if (loading) await loading
+    else await f.playback.start()
+    t.is(count(f, 'item'), 1, stage + ': no repeated item POST')
+    t.is(count(f, 'ticket'), 1, stage + ': no repeated ticket POST')
+    t.is(count(f, 'create'), 2, stage + ': a fresh audio player')
+    t.is(count(f, 'release'), stage === 'create' ? 0 : 1)
+    t.is(count(f, 'play'), 1)
+    t.alike(f.calls.filter((c) => c[0] === 'create')[1], ['create', ticket.url, { origin: ticket.base }])
+    t.alike(f.unavailable, [])
+    f.playback.release()
+  }
+})
+
+test('unusable handles release their player and allow one normal load', async (t) => {
+  const { playbackEpoch } = await dependencies()
+  for (const reason of ['released', 'epoch', 'expiry', 'invalid-expiry', 'expired-player-ticket']) {
+    let epoch = playbackEpoch()
+    let clock = Date.parse(ticket.expiresAt) - 120000
+    const f = await fixture(t, { prepare: { now: () => clock }, dependencies: { playbackEpoch: () => epoch } })
+    await f.prepared.done
+    if (reason === 'released') { f.prepared.release(); f.prepared.release() }
+    if (reason === 'epoch') epoch++
+    if (reason === 'expiry') clock += 60001
+    if (reason === 'invalid-expiry') clock = NaN
+    if (reason === 'expired-player-ticket') {
+      clock += 60001
+      const timer = [...f.timers.values()][0]
+      timer.fn()
+    }
+    t.is(await f.prepared.take(), null, reason)
+    t.is(count(f, 'release'), 1)
+    t.is(f.players[0].errorListeners.size, 0)
+    t.is(f.timers.size, 0)
+    if (reason === 'epoch') epoch--
+    await f.playback.start()
+    t.is(count(f, 'item'), 2)
+    t.is(count(f, 'ticket'), 2)
+    t.is(count(f, 'create'), 2)
+    t.is(count(f, 'play'), 1)
+    f.playback.release()
+  }
+})
+
+test('release before take aborts every pending stage and discards late answers', async (t) => {
+  for (const key of ['item', 'ticket', 'seek']) {
+    const pending = deferred()
+    const f = await fixture(t, { prepare: {}, [key]: () => pending.promise })
+    await flush()
+    f.prepared.release()
+    f.prepared.release()
+    t.ok(f.calls[0][3].signal.aborted, key)
+    t.alike(await Promise.race([f.prepared.done, flush()]), { ok: false, code: 'released' })
+    t.is(await Promise.race([f.prepared.take(), flush()]), null)
+    pending.resolve(key === 'ticket' ? ticket : track)
+    await flush()
+    t.is(count(f, 'create'), key === 'seek' ? 1 : 0)
+    t.is(count(f, 'release'), key === 'seek' ? 1 : 0)
+    t.is(count(f, 'play'), 0)
+    t.is(f.timers.size, 0)
+  }
+})
+
+test('unmount and newer claims cancel pending takes before their requests settle', async (t) => {
+  const { claimPlayback } = await dependencies()
+  for (const reason of ['unmount', 'claim']) {
+    for (const key of ['item', 'ticket', 'seek']) {
+      const pending = deferred()
+      const f = await fixture(t, { prepare: {}, [key]: () => pending.promise })
+      const loading = f.playback.start()
+      await flush()
+      let unclaim
+      if (reason === 'unmount') f.playback.release()
+      else unclaim = claimPlayback({ pause () {} })
+      t.ok(f.calls[0][3].signal.aborted, reason + ': ' + key)
+      await Promise.race([loading, flush()])
+      t.is(count(f, 'release'), key === 'seek' ? 1 : 0)
+      t.is(count(f, 'play'), 0)
+      t.alike(f.unavailable, [])
+      pending.resolve(key === 'ticket' ? ticket : track)
+      await flush()
+      t.is(count(f, 'create'), key === 'seek' ? 1 : 0)
+      t.is(count(f, 'play'), 0)
+      t.is(f.timers.size, 0)
+      unclaim?.()
+      f.playback.release()
+    }
+  }
+})
+
+test('release after a pending take leaves its result with the taker', async (t) => {
+  const pending = deferred()
+  const f = await fixture(t, { prepare: {}, item: () => pending.promise })
+  const taking = f.prepared.take()
+  f.prepared.release()
+  t.absent(f.calls[0][3].signal.aborted)
+  pending.resolve(track)
+  const result = await taking
+  t.alike(result, { ok: true, item: track, stream: f.players[0], startMs: 30000, endMs: 45000 })
+  t.is(count(f, 'release'), 0)
+  t.is(f.players[0]?.errorListeners.size, 0)
+  t.is(f.timers.size, 0)
+  result?.stream?.release()
+})
+
+test('a stale job releases a stream transferred just before the take returns', async (t) => {
+  let releases = 0
+  const f = await fixture(t, {
+    prepared: {
+      matches: () => true,
+      take: async () => {
+        f.playback.release()
+        return { ok: true, stream: { release: () => { releases++ } } }
+      },
+      release () {}
+    }
+  })
+  await f.playback.start()
+  t.is(releases, 1)
+  t.alike(f.calls, [])
+  t.alike(f.unavailable, [])
+})
+
+test('preloads match the complete session and music reference and ignore other owners', async (t) => {
+  const f = await fixture(t)
+  const prepared = f.prepareMomentMusic(f.session, f.music)
+  t.teardown(() => prepared.release())
+  await prepared.done
+  t.ok(prepared.matches({ ...f.session }, { ...f.music }))
+  for (const patch of [{ member: 'other' }, { origin: 'other' }, { request: () => {} }]) {
+    t.absent(prepared.matches({ ...f.session, ...patch }, f.music))
+  }
+  for (const music of [{ ...f.music, id: 'def' }, { ...f.music, start: 0 }, null]) {
+    t.absent(prepared.matches(f.session, music))
+  }
+  // Mutating the caller's session must not change ownership of the earlier load.
+  const original = { ...f.session }
+  f.session.member = 'other'
+  t.absent(prepared.matches(f.session, f.music))
+  t.ok(prepared.matches(original, f.music))
+  let takes = 0
+  const g = await fixture(t, { prepared: { matches: () => false, take: () => { takes++ }, release () {} } })
+  await g.playback.start()
+  t.is(takes, 0)
+  t.alike(g.calls.map((c) => c[0]), ['item', 'ticket', 'create', 'seek', 'play'])
+})
+
+test('invalid preload references and disabled origins fail without requests', async (t) => {
+  for (const options of [{ music: { id: '../bad', start: 0 } }, { session: { origin: null } }]) {
+    const f = await fixture(t, { ...options, prepare: {} })
+    t.is((await f.prepared.done).ok, false)
+    // No token: the preload is not an answer. Showing still fails closed, with no request.
+    t.is(await f.prepared.take(), null)
+    t.alike(f.calls, [])
+    await f.playback.start()
+    t.is(f.unavailable.length, 1)
+    t.alike(f.calls, [])
+  }
+})
+
+test('an adopted player keeps gesture retries and fails other errors without reloading', async (t) => {
+  const { MUSIC_UNAVAILABLE_TEXT } = await dependencies()
+  for (const mode of ['gesture', 'failure']) {
+    let attempts = 0
+    const f = await fixture(t, {
+      prepare: {},
+      play: async (player) => {
+        if (++attempts === 1) player.error(mode === 'gesture' ? { cause: { name: 'NotAllowedError' } } : { code: '503' })
+      }
+    })
+    await f.prepared.done
+    await f.playback.start()
+    t.is(f.unavailable.length, 1)
+    if (mode === 'gesture') {
+      t.is(f.states.at(-1).phase, 'gesture')
+      t.is(count(f, 'release'), 0)
+      await f.playback.press()
+      progress(f.players[0], 30000)
+      t.is(f.starts(), 1)
+      t.is(count(f, 'play'), 2)
+    } else {
+      t.is(f.states.at(-1).phase, 'unavailable')
+      t.alike(f.unavailable, [MUSIC_UNAVAILABLE_TEXT])
+      t.is(count(f, 'release'), 1)
+      await f.playback.press()
+      t.is(count(f, 'play'), 1)
+    }
+    t.is(count(f, 'item'), 1)
+    t.is(count(f, 'ticket'), 1)
+    t.is(count(f, 'create'), 1)
+    t.is(count(f, 'seek'), 1)
+    f.playback.release()
+  }
+})
+
+test('the mounted component adopts once, keeps covers gated and ignores preload prop changes', async (t) => {
+  let attempts = 0
+  const f = await fixture(t, {
+    prepare: {},
+    play: async () => { if (++attempts === 1) throw Object.assign(new Error('gesture'), { name: 'NotAllowedError' }) }
+  })
+  await f.prepared.done
+  const covers = []
+  let starts = 0
+  const unavailable = []
+  const h = await ui({ ...f.deps, useMusicCover: (...args) => { covers.push(args); return null } })
+  t.teardown(() => h.unmount())
+  const props = { ...f.session, music: f.music, prepared: f.prepared, onStart: () => { starts++ }, onUnavailable: (error) => unavailable.push(error) }
+  h.render(props)
+  h.mount()
+  await flush()
+  const gesture = nodes(h.render(props)).find((n) => n.type === 'Pressable' && textOf(n).includes('Tocar música'))
+  t.ok(gesture)
+  t.is(unavailable.length, 1)
+  t.is(covers.at(-1)[3], false)
+  t.is(count(f, 'release'), 0)
+  await gesture.props.onPress()
+  t.is(count(f, 'play'), 2)
+  h.render(props)
+  t.is(covers.at(-1)[3], false)
+  progress(f.players[0], 30000, { buffering: true })
+  h.render(props)
+  t.is(covers.at(-1)[3], false)
+  progress(f.players[0], 30000)
+  h.render(props)
+  t.is(covers.at(-1)[3], true)
+  t.is(starts, 1)
+  t.is(count(f, 'item'), 1)
+  t.is(count(f, 'ticket'), 1)
+  t.is(count(f, 'create'), 1)
+  h.render({ ...props, prepared: { matches: () => { throw new Error('rerender restarted playback') } } })
+  h.mount()
+  t.is(count(f, 'release'), 0)
+  t.is(count(f, 'item'), 1)
+  f.players[0].error({ code: '503' })
+  h.render(props)
+  t.is(unavailable.length, 2)
+  t.is(count(f, 'release'), 1)
+  t.is(count(f, 'item'), 1)
+  h.unmount()
+  const remount = await ui(f.deps)
+  t.teardown(() => remount.unmount())
+  remount.render(props)
+  remount.mount()
+  await flush()
+  t.is(count(f, 'item'), 2, 'a consumed preload cannot be used by a remount')
+  t.is(count(f, 'ticket'), 2)
+  t.is(count(f, 'create'), 2)
+})
+
+test('the effect reads the latest prepared prop when a new momento mounts', async (t) => {
+  const f = await fixture(t)
+  const h = await ui(f.deps)
+  t.teardown(() => h.unmount())
+  const props = { ...f.session, music: f.music }
+  h.render(props)
+  h.mount()
+  await flush()
+  const music = { id: 'def', start: 0 }
+  const prepared = f.prepareMomentMusic(f.session, music, { stream: false })
+  t.teardown(() => prepared.release())
+  await prepared.done
+  h.render({ ...props, music, prepared })
+  h.mount()
+  await flush()
+  t.is(count(f, 'item'), 2)
+  t.is(count(f, 'ticket'), 2)
+  t.is(count(f, 'create'), 2)
+  t.alike(f.calls.filter((c) => c[0] === 'seek').at(-1), ['seek', 0])
+})
+
+test('a tap without a job loads normally after interrupting an adopted player', async (t) => {
+  const { stopBoundPlayback } = await dependencies()
+  const f = await fixture(t, { prepare: {} })
+  await f.prepared.done
+  await f.playback.start()
+  stopBoundPlayback()
+  await f.playback.press()
+  t.is(count(f, 'item'), 2)
+  t.is(count(f, 'ticket'), 2)
+  t.is(count(f, 'create'), 2)
+  t.alike(f.calls.filter((c) => c[0] === 'create')[1], ['create', ticket.url, { origin: ticket.base }])
+})
+
+test('taking with an already aborted signal cancels the preload immediately', async (t) => {
+  const pending = deferred()
+  const f = await fixture(t, { prepare: {}, item: () => pending.promise })
+  const controller = new AbortController()
+  controller.abort()
+  t.is(await Promise.race([f.prepared.take(controller.signal), flush()]), null)
+  t.ok(f.calls[0][3].signal.aborted)
+  pending.resolve(track)
+  await flush()
+  t.is(count(f, 'ticket'), 0)
+  t.is(count(f, 'create'), 0)
+})
+
+test('failed or idle-expired players return a usable ticket until its safety margin', async (t) => {
+  for (const reason of ['create', 'seek', 'idle', 'expiry']) {
+    for (const remaining of [60001, 60000, 59999]) {
+      const err = new Error('audio failed')
+      const f = await fixture(t, {
+        prepare: { now: () => Date.parse(ticket.expiresAt) - remaining },
+        ...(reason === 'create' ? { create: () => { throw err } } : {}),
+        ...(reason === 'seek' ? { seek: async () => { throw err } } : {})
+      })
+      await f.prepared.done
+      if (reason === 'idle') f.players[0].error(err)
+      if (reason === 'expiry') [...f.timers.values()][0].fn()
+      const result = await f.prepared.take()
+      t.alike(result, remaining > 60000 ? { ok: true, item: track, ticket, stream: null } : null, reason + ': ' + remaining)
+      t.is(count(f, 'release'), reason === 'create' ? 0 : 1)
+      t.is(f.timers.size, 0)
+    }
+  }
+})
+
+test('normal loads keep cancellation codes ended at every asynchronous stage', async (t) => {
+  for (const code of ['released', 'superseded']) {
+    for (const key of ['item', 'ticket', 'seek']) {
+      const f = await fixture(t, { [key]: async () => { throw Object.assign(new Error('cancelled'), { code }) } })
+      await f.playback.start()
+      t.is(f.states.at(-1).phase, 'ended')
+      t.alike(f.unavailable, [])
+      t.is(count(f, 'play'), 0)
+      t.is(count(f, 'release'), key === 'seek' ? 1 : 0)
+    }
+  }
 })

@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 49)
+  t.is(LEGAL_VERSION, 50)
   t.is(LEGAL_DATE, '13/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 49, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 50, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -81,6 +81,24 @@ test('legal: version 39 describes music through the account service', async (t) 
   const terms = TERMS.sections.find((s) => s.heading === 'Música do Audius').paragraphs.join(' ')
   t.ok(terms.includes('Num momento, se a associação ligar a música nos momentos, ver um momento com música, inclusive um seu, já pede o trecho de 15 segundos ao serviço de conta, sem um toque à parte; o trecho toca em seguida, a não ser que o navegador só deixe tocar som depois de um toque. Num momento aberto com o som silenciado, o app só pede o trecho quando você ativa o som. O Audius continua recebendo só o endereço da associação.'), 'terms: momento music starts on view')
   t.ok(section('Música do Audius').includes('Num momento, se a associação ligar a música nos momentos, ver um momento com música, inclusive um seu, já pede o trecho de 15 segundos ao serviço de conta, sem um toque à parte; o trecho toca em seguida, a não ser que o navegador só deixe tocar som depois de um toque.'), 'privacy: momento music starts on view')
+})
+
+test('legal: version 50 asks for the next momento snippet ahead, never while muted', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const terms = TERMS.sections.find((s) => s.heading === 'Música do Audius').paragraphs.join(' ')
+  t.ok(terms.includes('Enquanto você vê os momentos, o app pode pedir ao serviço de conta o trecho do momento seguinte um pouco antes de ele aparecer, no máximo um à frente, sem a capa e nunca com o som silenciado.'), 'terms: one momento ahead, no cover, not muted')
+  const privacy = PRIVACY.sections.find((s) => s.heading === 'Música do Audius').paragraphs.join(' ')
+  for (const required of [
+    'Enquanto você vê os momentos, o app também pode pedir antes o trecho do momento seguinte, quando ele tem música, para que a música possa começar junto com a foto: pede a faixa e a permissão para tocá-la e, às vezes, o começo do áudio, sem tocar nada antes de o momento aparecer.',
+    'Por isso o serviço fica sabendo que a sua conta pediu aquela faixa, mesmo que você não chegue a esse momento.',
+    'Com o som silenciado, o app não pede nada antes.',
+    'Esse pedido antecipado conta nos mesmos limites diários de uso.',
+    'A capa continua sendo pedida só depois que a música daquele momento começa a tocar.',
+    'O áudio não é guardado no aparelho.'
+  ]) t.ok(privacy.includes(required), 'privacy: ' + required)
+  t.ok(PRIVACY.sections.find((s) => s.heading === 'Finalidades e bases legais propostas').paragraphs.join(' ').includes('A mesma base legal proposta vale para pedir e tocar o trecho de um momento com música quando ele aparece e, um pouco antes, para pedir o trecho do momento seguinte da fila.'), 'privacy: legal basis covers momento music and the next snippet')
+  const retention = PRIVACY.sections.find((s) => s.heading === 'Por quanto tempo').paragraphs.join(' ')
+  t.ok(retention.includes('No aparelho, o título, o artista e o link da faixa de um momento ficam só na memória, enquanto o momento está na tela e, depois, por até 10 minutos, para o app não pedir de novo; saem quando o app é bloqueado, quando você sai da conta ou troca de conta e quando o app fecha; o app não guarda o áudio.'), 'privacy: device keeps momento track info in memory only')
 })
 
 test('legal: version 46 sends a momento reaction as a private message', async (t) => {
@@ -270,7 +288,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'edd16d74283f52073d06f65e24f55bba8d94c0c24fee1c6436077d4d85825da9', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '0989328c03d6b15eb1b83ff8a04c67f4b3466566d67e53eff0c02e7c83ef6fe0', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
