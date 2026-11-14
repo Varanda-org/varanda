@@ -7,8 +7,9 @@
 //     app-return.js): varanda://idade?volta=1. Only a hint: the outcome is
 //     always asked of the service again. varanda://conta is not a return
 //     (any app can claim or forge it);
-//   - invite, profile, group (/g/<hex64>), community (/c/<hex64>) and listing
-//     (/anuncio/<hex64>/<seq> or /f/<hex64>/<seq>) links,
+//   - invite, profile, group (/g/<hex64>), community (/c/<hex64>), listing
+//     (/anuncio/<hex64>/<seq> or /f/<hex64>/<seq>) and public post
+//     (/publicacao/<hex64>/<seq> or /p/<hex64>/<seq>) links,
 //     either varanda:///<path> (empty host, so the path is the web path) or
 //     an https link of this installation.
 // A link is never consent to follow or to join: the profile store records
@@ -21,6 +22,7 @@ import { parseSignupInvitePath, CODE_RE } from './signupInvite.js'
 import { parseProfilePath } from './profileLink.js'
 import { parseGroupPath, parseCommunityPath } from './groupLink.js'
 import { parseListingPath } from './feiraLink.js'
+import { parsePostPath } from './postLink.js'
 
 const MAX_URL = 400
 const AGE_PREFIX = 'varanda://idade?'
@@ -88,7 +90,8 @@ function linkPath (url) {
 
 // -> { kind: 'convite', code } | { kind: 'perfil', username } |
 // { kind: 'perfil', key } | { kind: 'grupo', key } |
-// { kind: 'comunidade', key } | { kind: 'anuncio', author, seq } | null.
+// { kind: 'comunidade', key } | { kind: 'anuncio', author, seq } |
+// { kind: 'publicacao', author, seq } | null.
 export function parseAppLink (url) {
   if (!clean(url)) return null
   const path = linkPath(url)
@@ -96,6 +99,12 @@ export function parseAppLink (url) {
   if (path.startsWith('/anuncio/') || path.startsWith('/f/')) {
     const listing = parseListingPath(path)
     return listing !== null ? { kind: 'anuncio', author: listing.author, seq: listing.seq } : null
+  }
+  // A /p/ or /publicacao/ path that is not a post must not fall through:
+  // /p/policy is neither a profile nor an invite.
+  if (path.startsWith('/publicacao/') || path.startsWith('/p/')) {
+    const post = parsePostPath(path)
+    return post !== null ? { kind: 'publicacao', author: post.author, seq: post.seq } : null
   }
   const code = parseSignupInvitePath(path)
   if (code !== null) return { kind: 'convite', code }

@@ -65,7 +65,7 @@ Passos no Chrome:
 
 ### Marcas de tempo
 
-Só em desenvolvimento e só no aparelho: as marcas viram linhas `perf: <nome> <ms>` no console e nunca são enviadas nem guardadas. Nomes: `config`, `sync.status`, `identity.status`, `ready`, `req:<método>`, `first-rows`, `details`, `splash-end` (com `feedReady`, `grace` ou `patience`: `grace` é o fim do splash 400 ms depois de a primeira página chegar, sem esperar nomes e contagens), `rows-snapshot` e `rows-live` (com sufixo `:diario`, `:membro`, `:conversas` ou `:comunidades` nas telas), `preview-shown`, `media-hash`, `frames` e `tab:<id>`.
+Só em desenvolvimento e só no aparelho: as marcas viram linhas `perf: <nome> <ms>` no console e nunca são enviadas nem guardadas. Nomes: `config`, `sync.status`, `identity.status`, `ready`, `req:<método>`, `first-rows`, `details`, `moments`, `splash-end` (com `feedReady`, detalhes e Momentos assentados, ou `patience`, o teto de 5 s; `grace` deixou de ser emitido), `rows-snapshot` e `rows-live` (com sufixo `:diario`, `:membro`, `:conversas` ou `:comunidades` nas telas), `preview-shown`, `media-hash`, `frames` e `tab:<id>`.
 
 ### Lista nativa sem conta
 
