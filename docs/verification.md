@@ -10613,7 +10613,7 @@ Nada disso envia pedido nem busca dado: é só a tela. Não há mudança de prot
 Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA, cada um em claro e escuro. Registrar aparelho, sistema e, na web, o navegador.
 
 - [ ] Busca (Contas), Seguidores, Seguindo e Curtidas e republicações: avatar de 48 pt e nome de 16 pt, sem fio entre as linhas e sem fio embaixo do cabeçalho da lista, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
-- [ ] Seguir aparece cheia e Seguindo tonal, nas duas com alvo de toque de 44 pt, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Seguir aparece cheia e Seguindo tonal (também no Membro quando uma Página age), nas duas com alvo de toque de 44 pt, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
 - [ ] Tocar em Seguindo ainda abre a confirmação "Deixar de seguir <nome>?", em Seguindo, Seguidores, Busca e Membro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
 - [ ] Nomes longos com a tela em 320 pt: a linha não corta a pílula nem o nome fica sobre ela. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
 - [ ] Texto grande 1,3: a linha cresce sem cortar o nome, o `@nome` nem a pílula. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
