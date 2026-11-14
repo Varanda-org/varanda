@@ -131,8 +131,11 @@ test('quoted players stay outside the quote and row press areas', (t) => {
   t.ok(/<Pressable\s+accessibilityRole=\{open \? 'link' : 'text'\}\s+accessibilityLabel=\{label\}/.test(split), 'the head keeps its labelled link')
   t.ok(split.includes('onPress={open}'), 'the head opens the quoted post')
   const headEnd = split.indexOf('</Pressable>')
-  const player = split.indexOf('{preview}')
-  t.ok(headEnd > 0 && player > headEnd && player < split.indexOf('<Pressable', headEnd), 'the player follows the closed head, before any other Pressable')
+  const nextPress = split.indexOf('<Pressable', headEnd)
+  for (const slot of ['{videoAbove ? preview : null}', '{videoAbove ? null : preview}']) {
+    const at = split.indexOf(slot)
+    t.ok(headEnd > 0 && at > headEnd && at < nextPress, slot + ' follows the closed head, before any other Pressable')
+  }
   t.ok(quote.includes('? <MusicEmbedCard embed={embed} card={q.preview}'), 'preview contains the stored player')
   t.ok(split.includes('<Text onPress={open} style={styles.text} numberOfLines={6}>{displayText(shownText, { multiline: true })}</Text>'), 'plain shown text opens the quote separately')
   t.ok(split.includes('<MentionText text={shownText} onOpenMention={openMention} onOpenPlain={open}'), 'mentions keep separate profile and quote taps')
@@ -180,6 +183,47 @@ test('a quote hides only its own music link', (t) => {
   t.ok(quote.includes('displayText(shownText, { multiline: true })'))
   t.absent(quote.includes('displayText(q.text'))
   t.absent(quote.includes('<MentionText text={q.text}'))
+})
+
+test('a quoted video sits above the quote text, other players below', async (t) => {
+  const { embedOf } = await import('../src/musicEmbed.js')
+  const quote = withoutComments(read('ui', 'QuoteCard.js'))
+  const rule = quote.match(/\n {2}const videoAbove = ([^\n]+)\n/)
+  t.ok(rule, 'the slot rule is one constant')
+  if (!rule) return
+  t.is(rule[1], "embed !== null && embed.provider === 'youtube'")
+  t.absent(/hasText|shownText|mentioned|loading|q\./.test(rule[1]), 'only the stored player decides the slot')
+  const videoAbove = new Function('embed', 'return ' + rule[1]) // eslint-disable-line no-new-func
+  t.is(videoAbove(null), false)
+  for (const url of [
+    'https://youtu.be/dQw4w9WgXcQ',
+    'https://www.youtube.com/shorts/dQw4w9WgXcQ',
+    'https://www.youtube.com/playlist?list=PLx0sYbCqOb8TBPRdmBHs5Iftvv9TPboYG'
+  ]) t.is(videoAbove(embedOf(url)), true, url)
+  for (const url of [
+    'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC',
+    'https://soundcloud.com/artist-1/song_name',
+    'https://music.apple.com/br/album/some-album/1440857781'
+  ]) {
+    const embed = embedOf(url)
+    t.ok(embed !== null, url + ' has a player')
+    t.is(videoAbove(embed), false, url)
+  }
+  const start = quote.indexOf('if (embed !== null || mentioned) {')
+  const end = quote.indexOf('\n  return (\n    <Pressable', start)
+  t.ok(start >= 0 && end > start)
+  const split = quote.slice(start, end)
+  const rest = quote.slice(end)
+  const marks = ['</Pressable>', '{videoAbove ? preview : null}', '{loading ? <View style={styles.skeleton}', "{hasText && shownText !== ''", '{videoAbove ? null : preview}', '{hasMedia || q.hasQuote === true']
+  const at = marks.map((m) => split.indexOf(m))
+  t.ok(at.every((i) => i >= 0), 'every part is in the split layout')
+  t.alike(at, [...at].sort((a, b) => a - b), 'head, video slot, skeleton, caption, lower slot, media')
+  for (const slot of ['{videoAbove ? preview : null}', '{videoAbove ? null : preview}']) {
+    t.is(split.split(slot).length - 1, 1, slot)
+  }
+  t.absent(split.includes('{preview}'), 'no unconditional slot in the split layout')
+  t.is(rest.split('{preview}').length - 1, 1, 'the grouped layout keeps its one card')
+  t.absent(rest.includes('videoAbove'))
 })
 
 test('Audius fragments take precedence without subscribing PostRow to the node', (t) => {

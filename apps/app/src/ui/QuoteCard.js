@@ -60,6 +60,8 @@ export function QuoteCard ({ quote, now }) {
   const hasText = typeof q.text === 'string' && q.text !== ''
   const hasMedia = Array.isArray(q.media) && q.media.length > 0
   const embed = quotePlayerOf(q)
+  // A quoted video is what the quote shows, so it leads and the caption reads under it; other players stay below.
+  const videoAbove = embed !== null && embed.provider === 'youtube'
   const shownText = embed !== null && hasText ? textWithoutHrefs(q.text, (href) => sameMusicPage(href, q.preview.url)) : q.text
   const preview = !missing && !hasMedia && q.preview && typeof q.preview === 'object' && typeof q.author === 'string'
     ? embed !== null
@@ -91,13 +93,14 @@ export function QuoteCard ({ quote, now }) {
           <Text style={styles.name} numberOfLines={1}>{title}</Text>
           <Meta handle={handle} time={time} styles={styles} />
         </Pressable>
+        {videoAbove ? preview : null}
         {loading ? <View style={styles.skeleton} accessible={false} /> : null}
         {hasText && shownText !== ''
           ? mentioned
             ? <MentionText text={shownText} onOpenMention={openMention} onOpenPlain={open} style={styles.text} numberOfLines={6} />
             : <Text onPress={open} style={styles.text} numberOfLines={6}>{displayText(shownText, { multiline: true })}</Text>
           : null}
-        {preview}
+        {videoAbove ? null : preview}
         {hasMedia || q.hasQuote === true
           ? (
             <Pressable accessible={false} tabIndex={-1} disabled={!open} onPress={open}>
