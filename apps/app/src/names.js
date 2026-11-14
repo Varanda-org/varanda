@@ -35,12 +35,20 @@
 // later; an older node without profile.read ('método desconhecido') answers
 // null for every key, with no further request. The cache belongs to one
 // connection epoch and one passkey generation.
+//
+// A key profile.read finds no name or @nome for (its profile record may sit
+// in the middle of a diary the browser node has not downloaded yet) is named
+// from the seeder index and diary.peek, one key at a time and once per scope
+// (./namesPeek.js, #436). Only the browser node: the core node never asks.
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { isKey, PROFILE_LIMIT_MAX, USAGE } from '@varanda/rpc'
 import { useNode, useSyncSignals } from './node'
 import { namesQuiet } from './autoSyncPolicy'
-import { absentSeeds, applySeed, authoritative, fieldsOf, forgottenEntry, isPeekedKey, missingEntry, peekReplaces, peekedEntry, stableView } from './namesCache'
+import { absentSeeds, applySeed, fieldsOf, forgottenEntry, isPeekedKey, missingEntry, peekReplaces, peekedEntry, stableView } from './namesCache'
+import { fetchMember } from './indexClient'
+import { diaryPeekSlots } from './engagement'
+import { createNamePeeker, foldRead, peekApply } from './namesPeek'
 
 // The seeder's page hint rides with the name (only a hint: Membro verifies
 // with page.read). profile.read never says it, so it is carried over.
@@ -67,7 +75,7 @@ export function useNames () {
 
 export function NamesProvider ({ children }) {
   const node = useNode()
-  const { phase, sync, request, epoch } = node
+  const { phase, sync, request, epoch, hosted } = node
   const promoteRef = useRef(node.promote)
   promoteRef.current = node.promote
   // Every fresh key, not only the own one useNode().signals keeps.
@@ -115,6 +123,15 @@ export function NamesProvider ({ children }) {
   const scopeRef = useRef(0)
   const ownKeyRef = useRef(ownKey)
   ownKeyRef.current = ownKey
+  const requestRef = useRef(request)
+  requestRef.current = request
+  const hostedRef = useRef(hosted === true)
+  hostedRef.current = hosted === true
+  // Named through the index and diary.peek (see the header): one per scope.
+  const peekerRef = useRef(null)
+  const peekBusyRef = useRef(false)
+  const peekTimerRef = useRef(null)
+  const lastPeekRef = useRef(0)
 
   const gate = phase === 'ready' &&
     !(sync.active && sync.active.once) &&
@@ -277,26 +294,27 @@ export function NamesProvider ({ children }) {
       const res = await request('profile.read', { authors }, lane)
       if (scope !== scopeRef.current) return
       const next = new Map(cacheRef.current)
-      for (const p of (res && res.profiles) || []) {
-        if (!p || typeof p.author !== 'string') continue
-        const key = p.author.toLowerCase()
+      const peeker = peekerRef.current
+      const { entries, lonely } = foldRead(res, peeker)
+      for (const [key, entry] of entries) {
         // Authoritative: a null removes what a seed said (username included).
         const old = next.get(key)
-        const entry = authoritative(p)
+        if (entry === null) {
+          // `missing`: only a node-verified diary.peek (learnVerified) stays; a
+          // name the name peeker found does not come back (foldRead).
+          heldRef.current.delete(key)
+          next.set(key, missingEntry(peekedRef.current.get(key)))
+          retryRef.current.delete(key)
+          continue
+        }
         if (old && old.page === true) Object.assign(entry, { page: true, closed: old.closed === true, moved: old.moved === true })
         next.set(key, entry)
         peekedRef.current.delete(key)
         heldRef.current.add(key)
         retryRef.current.delete(key)
       }
-      for (const rawKey of (res && res.missing) || []) {
-        if (typeof rawKey !== 'string') continue
-        const key = rawKey.toLowerCase()
-        heldRef.current.delete(key)
-        next.set(key, missingEntry(peekedRef.current.get(key)))
-        retryRef.current.delete(key)
-      }
       commit(next)
+      if (peeker && hostedRef.current && lonely.length > 0 && peeker.enqueue(lonely) > 0) schedulePeek()
     } catch (err) {
       if (scope !== scopeRef.current) return
       if (err && err.code === USAGE && err.message === 'método desconhecido') {
@@ -320,10 +338,50 @@ export function NamesProvider ({ children }) {
     }
   }
 
+  const schedulePeek = useCallback((ms = MIN_GAP_MS) => {
+    if (!mountedRef.current || peekTimerRef.current !== null) return
+    peekTimerRef.current = setTimeout(() => {
+      peekTimerRef.current = null
+      peekFlushRef.current()
+    }, ms)
+  }, [])
+
+  // One peek at a time, spaced like the profile batches, never while a batch
+  // or the run's quiet window says to wait, and not for a node that cannot.
+  const peekFlushRef = useRef(() => {})
+  peekFlushRef.current = async () => {
+    const peeker = peekerRef.current
+    if (!peeker || peeker.size === 0 || peeker.off || peekBusyRef.current) return
+    if (busyRef.current || !gateRef.current) { schedulePeek(); return }
+    const now = Date.now()
+    const wait = Math.max(lastPeekRef.current, lastBatchRef.current) + MIN_GAP_MS - now
+    if (wait > 0) { schedulePeek(wait); return }
+    if (!quietOk(now)) { schedulePeek(QUIET_MS); return }
+    peekBusyRef.current = true
+    lastPeekRef.current = now
+    const scope = scopeRef.current
+    try {
+      const done = await peeker.next()
+      if (scope !== scopeRef.current || done === null || done.fields === null) return
+      const known = cacheRef.current.get(done.key)
+      const filled = peekApply(known, done.fields)
+      if (filled === null) return
+      const next = new Map(cacheRef.current)
+      next.set(done.key, filled)
+      peekerRef.current.remember(done.key, known)
+      commit(next)
+    } finally {
+      peekBusyRef.current = false
+      if (mountedRef.current && peekerRef.current && peekerRef.current.size > 0 && !peekerRef.current.off) schedulePeek(MIN_GAP_MS)
+    }
+  }
+
   useEffect(() => {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
+      if (peekTimerRef.current !== null) clearTimeout(peekTimerRef.current)
+      peekTimerRef.current = null
       if (timerRef.current !== null) clearTimeout(timerRef.current)
       if (freshTimerRef.current !== null) clearTimeout(freshTimerRef.current)
       timerRef.current = null
@@ -342,6 +400,13 @@ export function NamesProvider ({ children }) {
     if (own !== null && isKey(own)) { keys.delete(own); keys.add(own) }
     const retained = [...keys].slice(-MAX_REASK_KEYS)
     scopeRef.current += 1
+    peekerRef.current = createNamePeeker({
+      enabled: true,
+      lookup: (key) => fetchMember(key),
+      peek: (params) => diaryPeekSlots.run(() => requestRef.current('diary.peek', params))
+    })
+    if (peekTimerRef.current !== null) clearTimeout(peekTimerRef.current)
+    peekTimerRef.current = null
     cacheRef.current = new Map()
     setCache(cacheRef.current)
     unsupportedRef.current = false
