@@ -79,7 +79,7 @@ import { hasRich, parseRich, plainOf } from '../richText'
 import { cardBesideSpoilers } from '../ui/RichText'
 import { ReactionChips, QuickReactions } from '../ui/Reactions'
 import { ReactionPicker } from '../ui/ReactionPicker'
-import { PressScale } from '../ui/PressScale'
+import { olderInitial, olderStep } from '../olderTrigger'
 import { actAs, pagesDm } from '../pages'
 import { pageKeyText } from '../pageSecrets'
 import { pagesOn } from '../pageGate'
@@ -372,6 +372,9 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   nextRef.current = next
   // True once an older page is held: a newer read then keeps its cursor.
   const olderRef = useRef(false)
+  // True while loadError came from an older page: only a later older page
+  // clears it, never a thread read's own error.
+  const olderErr = useRef(false)
   const listRef = useRef(null)
   const bumpDm = node.bumpDm
   const reread = useCallback(() => { if (typeof bumpDm === 'function') bumpDm() }, [bumpDm])
@@ -406,6 +409,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       if (!olderRef.current) setNext(r.next || null)
       setFolder(r.folder === 'request' ? 'request' : 'inbox')
       setBlocked(r.blocked === true)
+      olderErr.current = false
       setLoadError('')
       // Only reactions change on held older rows; the cursor and scroll order stay.
       for (const [before, keys] of context.pages) {
@@ -434,7 +438,10 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       }
       setReactionOverrides(new Map(context.overrides))
     } catch (err) {
-      if (gen === genRef.current && context.live && context === reactionContextRef.current) setLoadError(errorText(err))
+      if (gen === genRef.current && context.live && context === reactionContextRef.current) {
+        olderErr.current = false
+        setLoadError(errorText(err))
+      }
     }
     if (gen === genRef.current && context.live && context === reactionContextRef.current) setLoaded(true)
   }, [dm, peer, commitRead])
@@ -642,8 +649,15 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const [quoteToast, setQuoteToast] = useState(false)
   const quoteTimer = useRef(null)
   const jumpTimer = useRef(null)
+  // Older pages load near the top only after the person scrolled: the first
+  // layout and the opening scroll to the end are frames too.
+  const userScrolled = useRef(false)
+  const olderState = useRef(olderInitial())
+  const olderLive = useRef({ hasNext: false, loading: false, failed: false, loadOlder: null })
   useEffect(() => {
     away.current = false
+    userScrolled.current = false
+    olderState.current = olderInitial()
     setLastSeenKey(null)
     setShowJump(false)
     setFlashKey(null)
@@ -700,6 +714,10 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   // the state, or the newest line stayed behind the composer afterwards.
   const atBottom = useRef(true)
   const lastY = useRef(null)
+  const userScroll = useCallback(() => {
+    userScrolled.current = true
+    releaseEnd()
+  }, [releaseEnd])
   const trackBottom = useCallback(({ y, contentHeight, layoutHeight }) => {
     scrollFrame.current = { y, contentHeight, layoutHeight }
     setShowJump(jumpVisible({ distanceFromEnd: contentHeight - y - layoutHeight, viewport: layoutHeight }))
@@ -707,6 +725,10 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     // growth (onContentSizeChange): calling scrollToEnd from every frame of an
     // animated scroll restarts the animation on Android and turns it into a crawl.
     endPin.current = pinToEnd(endPin.current, { kind: 'frame', y, contentHeight, layoutHeight })
+    const live = olderLive.current
+    const older = olderStep(olderState.current, { y, userScrolled: userScrolled.current, hasNext: live.hasNext, loading: live.loading, failed: live.failed })
+    olderState.current = older.state
+    if (older.load && typeof live.loadOlder === 'function') live.loadOlder()
     const bottom = y + layoutHeight >= contentHeight - 48
     const resized = lastY.current !== null && y === lastY.current
     lastY.current = y
@@ -1071,12 +1093,18 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         rawRef.current = merged
         setRaw(merged)
         setNext(r.next || null)
+        if (olderErr.current) {
+          olderErr.current = false
+          setLoadError('')
+        }
       }
     } catch (err) {
+      olderErr.current = true
       setLoadError(errorText(err))
     }
     setLoadingMore(false)
   }
+  olderLive.current = { hasNext: !!next, loading: loadingMore, failed: loadError !== '', loadOlder }
 
   const open = onOpenMember ? () => onOpenMember(peer) : undefined
   // The keyboard is put away first: it came back by itself after the sheets
@@ -1458,33 +1486,26 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
                     onOpenMention={mentionTap}
                     below={chips.length > 0 || link !== null || offerRow !== null || (listing !== null && typeof onOpenListing === 'function')
                       ? (
-                        <View style={styles.inline}>
-                          {chips.map((chip) => (
-                            <PressScale
-                              key={chip.emoji}
-                              disabled={reactionOff}
-                              accessibilityLabel={displayText(chip.label + (chip.mine ? (chip.count > 1 ? ', e da outra pessoa' : '') : ', da outra pessoa'))}
-                              accessibilityState={{ selected: chip.mine }}
-                              onPress={() => toggleReaction(item.key, chip.emoji)}
-                            >
-                              {/* The outer control adds ownership without a separate people sheet. */}
-                              <View pointerEvents='none' accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden inert>
-                                <ReactionChips reactions={[chip]} disabled={reactionOff} />
+                        <>
+                          {chips.length > 0 ? <ReactionChips reactions={reactionsFor(item)} disabled={reactionOff} onToggle={(emoji) => toggleReaction(item.key, emoji)} labelOf={(chip) => chip.label + (chip.mine ? (chip.count > 1 ? ', e da outra pessoa' : '') : ', da outra pessoa')} overlap /> : null}
+                          {link !== null || (listing !== null && typeof onOpenListing === 'function') || (offerRow !== null && ((offerRow.answer && canAnswer) || offerRow.rate))
+                            ? (
+                              <View style={styles.inline}>
+                                {link !== null ? <Pill label={OPEN_INVITE} accessibilityLabel={OPEN_INVITE + (link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade')} onPress={() => onOpenInvite(link)} /> : null}
+                                {listing !== null && typeof onOpenListing === 'function' ? <Pill label='Ver anúncio' onPress={() => onOpenListing(listing.author, listing.seq)} /> : null}
+                                {offerRow !== null && offerRow.answer && canAnswer
+                                  ? <Pill label='Aceitar' filled onPress={() => { offerAct.clearError(); setConfirming({ offer: offerRow.offer, listing: offerRow.listing }) }} />
+                                  : null}
+                                {offerRow !== null && offerRow.answer && canAnswer
+                                  ? <Pill label='Recusar' onPress={() => declineOffer({ offer: offerRow.offer, listing: offerRow.listing })} />
+                                  : null}
+                                {offerRow !== null && offerRow.rate
+                                  ? <Pill label='Avaliar' onPress={() => onAvaliar({ author: offerRow.listing.author, seq: offerRow.listing.seq, offer: offerRow.offer.id })} />
+                                  : null}
                               </View>
-                            </PressScale>
-                          ))}
-                          {link !== null ? <Pill label={OPEN_INVITE} accessibilityLabel={OPEN_INVITE + (link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade')} onPress={() => onOpenInvite(link)} /> : null}
-                          {listing !== null && typeof onOpenListing === 'function' ? <Pill label='Ver anúncio' onPress={() => onOpenListing(listing.author, listing.seq)} /> : null}
-                          {offerRow !== null && offerRow.answer && canAnswer
-                            ? <Pill label='Aceitar' filled onPress={() => { offerAct.clearError(); setConfirming({ offer: offerRow.offer, listing: offerRow.listing }) }} />
+                              )
                             : null}
-                          {offerRow !== null && offerRow.answer && canAnswer
-                            ? <Pill label='Recusar' onPress={() => declineOffer({ offer: offerRow.offer, listing: offerRow.listing })} />
-                            : null}
-                          {offerRow !== null && offerRow.rate
-                            ? <Pill label='Avaliar' onPress={() => onAvaliar({ author: offerRow.listing.author, seq: offerRow.listing.seq, offer: offerRow.offer.id })} />
-                            : null}
-                        </View>
+                        </>
                         )
                       : null}
                   />
@@ -1513,7 +1534,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
             setShowJump(jumpVisible({ distanceFromEnd: height - y - layoutHeight, viewport: layoutHeight }))
             followEnd()
           }}
-          onUserScroll={releaseEnd}
+          onUserScroll={userScroll}
         />
       </EmbedBandBottom.Provider>
       {quoteToast ? <View pointerEvents='none' style={styles.quoteToast}><Text accessibilityLiveRegion='polite' style={styles.quoteToastText}>Mensagem fora do trecho carregado</Text></View> : null}

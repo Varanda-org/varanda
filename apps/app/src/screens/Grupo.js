@@ -75,6 +75,7 @@ import { Bubble } from '../ui/Bubble'
 import { SwipeReply } from '../ui/SwipeReply'
 import { JumpToEnd } from '../ui/JumpToEnd'
 import { awayCount, jumpVisible } from '../chatGestures'
+import { olderInitial, olderStep } from '../olderTrigger'
 import { ReactionChips, QuickReactions } from '../ui/Reactions'
 import { ReactionPicker, WhoReacted } from '../ui/ReactionPicker'
 import { toggleOf, applyOptimistic } from '../reactions'
@@ -961,8 +962,15 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   const [quoteToast, setQuoteToast] = useState(false)
   const quoteTimer = useRef(null)
   const jumpTimer = useRef(null)
+  // Older pages load near the top only after the person scrolled: the first
+  // layout and the opening scroll to the end are frames too.
+  const userScrolled = useRef(false)
+  const olderState = useRef(olderInitial())
+  const olderLive = useRef({ hasNext: false, loading: false, failed: false, loadOlder: null })
   useEffect(() => {
     away.current = false
+    userScrolled.current = false
+    olderState.current = olderInitial()
     setLastSeenKey(null)
     setShowJump(false)
     setFlashKey(null)
@@ -1023,6 +1031,10 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   // the state, or the newest line stayed behind the composer afterwards.
   const atBottom = useRef(true)
   const lastY = useRef(null)
+  const userScroll = useCallback(() => {
+    userScrolled.current = true
+    releaseEnd()
+  }, [releaseEnd])
   const trackBottom = useCallback(({ y, contentHeight, layoutHeight }) => {
     scrollFrame.current = { y, contentHeight, layoutHeight }
     setShowJump(jumpVisible({ distanceFromEnd: contentHeight - y - layoutHeight, viewport: layoutHeight }))
@@ -1030,6 +1042,10 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     // growth (onContentSizeChange): calling scrollToEnd from every frame of an
     // animated scroll restarts the animation on Android and turns it into a crawl.
     endPin.current = pinToEnd(endPin.current, { kind: 'frame', y, contentHeight, layoutHeight })
+    const live = olderLive.current
+    const older = olderStep(olderState.current, { y, userScrolled: userScrolled.current, hasNext: live.hasNext, loading: live.loading, failed: live.failed })
+    olderState.current = older.state
+    if (older.load && typeof live.loadOlder === 'function') live.loadOlder()
     const bottom = y + layoutHeight >= contentHeight - 48
     const resized = lastY.current !== null && y === lastY.current
     lastY.current = y
@@ -1071,6 +1087,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     if (paintedRef.current !== seqRef.current) return
     markSeen()
   }, [asPage.page, visible, isTop, reader, lastId, loadedAt, loadError, markSeen])
+  olderLive.current = { hasNext: reader && !!store.next, loading: loadingMore, failed: moreError !== '', loadOlder }
 
   const nameText = info && typeof info.name === 'string' && info.name !== ''
     ? info.name
@@ -1472,7 +1489,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
             quote={quote ? { ...quote, onPress: () => scrollToKey(row.replyTo) } : null}
             actions={actionsOf(row)}
             actionsTitle={mine ? undefined : who.title}
-            below={<ReactionChips reactions={reactionsFor(row)} disabled={reactionsDisabled || reactionContext.sending.has(row.key) || reactionContext.unsure.has(row.key)} onToggle={(emoji) => toggleReaction(row.key, emoji)} onShowWho={(emoji) => showReactors(row.key, emoji)} />}
+            below={<ReactionChips reactions={reactionsFor(row)} disabled={reactionsDisabled || reactionContext.sending.has(row.key) || reactionContext.unsure.has(row.key)} onToggle={(emoji) => toggleReaction(row.key, emoji)} onShowWho={(emoji) => showReactors(row.key, emoji)} overlap />}
             actionsHeader={!row.hidden && !reactionsDisabled && !reactionContext.sending.has(row.key) && !reactionContext.unsure.has(row.key)
               ? ({ closeThen }) => <QuickReactions mine={reactionsFor(row).find((r) => r.mine)?.emoji} onPick={(emoji) => closeThen(() => toggleReaction(row.key, emoji))} onMore={() => closeThen(() => openReactionPicker(row.key))} />
               : null}
@@ -1615,7 +1632,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
             setShowJump(jumpVisible({ distanceFromEnd: height - y - layoutHeight, viewport: layoutHeight }))
             followEnd()
           }}
-          onUserScroll={releaseEnd}
+          onUserScroll={userScroll}
         />
       </EmbedBandBottom.Provider>
       {quoteToast ? <View pointerEvents='none' style={styles.quoteToast}><Text accessibilityLiveRegion='polite' style={styles.quoteToastText}>Mensagem fora do trecho carregado</Text></View> : null}

@@ -6,6 +6,7 @@
 // most 8), titled from the names cache. The sheet only reports the choice;
 // the caller owns navigation (it pushes 'mensagem' for a person).
 
+import { useContext } from 'react'
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
@@ -20,6 +21,7 @@ import { ErrorText, Soft } from '../ui'
 import { Pill } from '../ui/Pill'
 import { SearchField } from '../ui/SearchField'
 import { Skeleton } from '../ui/States'
+import { ScreenVisible } from '../ui/screenVisible'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { layout, radius, space, type } from '../ui/theme'
 
@@ -56,7 +58,7 @@ function PersonRow ({ peer, who, picture, onPress }) {
   )
 }
 
-function Body ({ onOpenThread, onNewCommunity, onNewGroup, recent }) {
+function Body ({ onOpenThread, onNewCommunity, onNewGroup, recent, autoFocus }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const ownKey = node.passkey && node.passkey.status ? node.passkey.status.publicKey : null
@@ -79,6 +81,7 @@ function Body ({ onOpenThread, onNewCommunity, onNewGroup, recent }) {
         placeholder='Buscar pessoa pelo nome'
         value={search.query}
         onChangeText={(text) => search.setQuery(text)}
+        autoFocus={autoFocus}
       />
       {search.query.trim() === ''
         ? (
@@ -124,7 +127,7 @@ function Body ({ onOpenThread, onNewCommunity, onNewGroup, recent }) {
               ? (
                 <>
                   <Soft>Não deu para conferir todo mundo agora.</Soft>
-                  <Pill label='tentar de novo' onPress={() => search.retry()} />
+                  <Pill label='Tentar de novo' onPress={() => search.retry()} />
                 </>
                 )
               : null}
@@ -139,9 +142,14 @@ function Body ({ onOpenThread, onNewCommunity, onNewGroup, recent }) {
 }
 
 export function NovaConversa ({ open, onClose, onOpenThread, onNewCommunity, onNewGroup, recent }) {
+  // Read outside the Sheet, which marks its own body visible: the keyboard
+  // comes up only while the screen under the sheet is the one in view, never
+  // for a sheet left open on a hidden tab or under a covering layer.
+  const seen = useContext(ScreenVisible)
   return (
     <Sheet open={open} onClose={onClose} title='Nova conversa'>
       <Body
+        autoFocus={open === true && seen === true}
         recent={recent}
         onOpenThread={(peer) => { onClose(); onOpenThread(peer) }}
         onNewCommunity={onNewCommunity ? () => { onClose(); onNewCommunity() } : undefined}

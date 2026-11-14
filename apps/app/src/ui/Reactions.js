@@ -1,5 +1,5 @@
 // Chips under a message, and the quick row for an actions sheet header.
-// ReactionChips: { reactions, onToggle, onShowWho, disabled }
+// ReactionChips: { reactions, onToggle, onShowWho, disabled, overlap, labelOf }
 // QuickReactions: { mine, onPick, onMore }
 // The row does not close the sheet. The header slot's closeThen has to run
 // first, or a sheet opened from here would stack on the one still leaving.
@@ -17,19 +17,27 @@ const CHIP_MIN = 32
 // the gap beside a short chip and stays off the line above it.
 const CHIP_SLOP = { top: 0, bottom: 0, left: space.xs, right: space.xs }
 
-export function ReactionChips ({ reactions, onToggle, onShowWho, disabled }) {
+const CHIP_OVERLAP = 24
+
+// overlap: the chip sits on the bubble corner. The chip rides at the top of
+// its layout.hit pressable and the row is lifted by half the chip only, so the
+// rest of the 44 pt target hangs below the bubble: a tap on the bubble never
+// reacts. The margin sits on the row, once, so wrapped rows keep their full
+// 44 pt of layout and never cover the row above.
+// labelOf(chip): a screen that knows who reacted says it in the spoken label.
+export function ReactionChips ({ reactions, onToggle, onShowWho, disabled, overlap = false, labelOf }) {
   const styles = useStyles(makeStyles)
   const chips = reactionChips(reactions)
   if (chips.length === 0) return null
   const off = disabled === true
   return (
-    <View style={styles.row}>
+    <View style={overlap === true ? [styles.row, styles.rowOverlap] : styles.row}>
       {chips.map((chip) => (
         <PressScale
           key={chip.emoji}
           disabled={off}
           hitSlop={CHIP_SLOP}
-          accessibilityLabel={displayText(chip.label)}
+          accessibilityLabel={displayText(typeof labelOf === 'function' ? labelOf(chip) : chip.label)}
           accessibilityState={{ selected: chip.mine === true }}
           onPress={() => {
             if (off || typeof onToggle !== 'function') return
@@ -39,9 +47,9 @@ export function ReactionChips ({ reactions, onToggle, onShowWho, disabled }) {
             if (off || typeof onShowWho !== 'function') return
             onShowWho(chip.emoji)
           }}
-          style={[styles.hit, off && styles.dim]}
+          style={[overlap === true ? styles.hitOverlap : styles.hit, off && styles.dim]}
         >
-          <View style={[styles.chip, chip.mine ? styles.mine : styles.other]}>
+          <View style={overlap === true ? [styles.chip, styles.chipOverlap, chip.mine ? styles.mine : styles.other] : [styles.chip, chip.mine ? styles.mine : styles.other]}>
             <Text style={[styles.emoji, chip.mine ? styles.mineText : styles.otherText]}>{displayText(chip.emoji)}</Text>
             <Text style={[styles.count, chip.mine ? styles.mineText : styles.otherText]}>{chip.count}</Text>
           </View>
@@ -90,6 +98,9 @@ const makeStyles = (colors) => StyleSheet.create({
     gap: space.sm
   },
   hit: { minHeight: layout.hit, justifyContent: 'center' },
+  rowOverlap: { marginTop: -(CHIP_OVERLAP / 2) },
+  hitOverlap: { minHeight: layout.hit, justifyContent: 'flex-start' },
+  chipOverlap: { minHeight: CHIP_OVERLAP },
   dim: { opacity: 0.45 },
   chip: {
     minHeight: CHIP_MIN,

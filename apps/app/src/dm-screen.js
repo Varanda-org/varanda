@@ -185,6 +185,14 @@ export function bubbleShape (rows, i, { breakKey = null } = {}) {
   return 'single'
 }
 
+// The time line shows under the last bubble of a run; a mid-run bubble shows
+// it only while its own send is unsettled, so the sender sees the state.
+export function showsMeta ({ meta, shape, mine, status }) {
+  if (typeof meta !== 'string' || meta === '') return false
+  if (shape === 'single' || shape === 'last') return true
+  return mine === true && (status === 'pending' || status === 'uncertain')
+}
+
 // An older page prepended to what the screen holds; the held copy wins.
 export function mergeMessages (older, current) {
   const out = new Map()

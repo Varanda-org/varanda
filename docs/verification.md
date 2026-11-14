@@ -10250,3 +10250,75 @@ node apps/app/test/screensPolish.test.js
 ```
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 222. Conversas mais leves: bolhas, reações, páginas anteriores, caixa de entrada, grupos e gravação (PR feat/chat-slim)
+
+Esta seção confere a revisão das conversas: bolhas, caixa de entrada, gestos, fichas de reação, páginas anteriores, nota de voz, a faixa Pedidos · Comunidades, Comunidades, o campo de escrever e os Ajustes do grupo. Nas bolhas das conversas diretas e dos grupos, a hora aparece só na última mensagem de cada sequência, as bolhas não têm cauda, e a data é um texto suave e centralizado, no lugar do chip. Uma mensagem própria ainda pendente ou incerta sempre mostra a sua linha de situação. Os leitores de tela continuam sem ler a hora em cada bolha, como antes. Na caixa de Conversas, o contador de não lidas virou um ponto de 8 pt na cor de destaque, e a prévia não lida fica em negrito; o rótulo falado continua dizendo a contagem.
+
+Deslizar para responder dá um toque leve de háptico quando cruza o limite de resposta. O botão de ir para o fim tem 36 pt, com área de toque maior, um ponto de não lidas e a contagem na dica do leitor de tela; aparece com fade, exceto com Reduzir movimento. As fichas de reação das conversas diretas e dos grupos ficam no canto de baixo do balão, com 24 pt visíveis e 44 pt de alvo de toque; numa conversa direta, o leitor de tela ainda diz ", da outra pessoa" e ", e da outra pessoa", e, num grupo, um toque longo numa ficha ainda mostra quem reagiu. Os botões de ação (convite, Ver anúncio, Aceitar, Recusar e Avaliar) continuam embaixo do balão.
+
+Páginas anteriores: nas conversas diretas e nos grupos, rolar até dentro de 200 pt do topo carrega a página anterior sozinho, uma vez a cada vez que a pessoa se aproxima do topo. Isso só vale depois de a pessoa ter rolado: nunca ao abrir a conversa, e nunca durante a rolagem inicial até o fim. Depois de um erro, nada carrega sozinho, e a pílula é a única nova tentativa. A pílula "mensagens anteriores" (conversa direta) e a "Mensagens anteriores" (grupo) continuam para carregar à mão e como nova tentativa. Numa conversa direta, uma tentativa que dá certo limpa o erro e devolve o carregamento automático, que volta na próxima vez que a pessoa sair da área do topo e voltar; um erro de leitura da própria conversa não é limpo por uma página anterior. Rolar nunca envia, não marca como lido e não mostra digitação.
+
+Nota de voz: enquanto toca, mostra o tempo que falta; pausada, mostra a duração total. Enquanto toca, o leitor de tela diz "<tempo> restantes".
+
+Ajustes do grupo: o topo mostra o avatar, o nome e "N membros", contando só os membros ativos (os banidos ficam de fora). O cabeçalho tem "Compartilhar", que envia o link do convite, e "Sair do grupo", com a mesma confirmação, que só aparece quando sair é permitido; o botão de sair no fim da tela saiu. A explicação do convite fica atrás de um ⓘ com o título "Convite". "Nome" e "Convidar para o grupo" são linhas que abrem o seu campo. Um campo já aberto continua montado enquanto a tela estiver aberta, então recolhê-lo não perde um convite em andamento nem uma resposta incerta. Os administradores aparecem uma vez, com selo de papel, e "Tirar admin" fica na linha de cada um. Não foi criada nenhuma opção de silenciar.
+
+Conversas e Comunidades: "Pedidos" e "Comunidades" viraram uma faixa "Pedidos · Comunidades" no topo da lista, logo abaixo do filtro. Cada parte é um alvo de 44 pt, com o seu rótulo falado (Pedidos continua falando "Pedidos de mensagem"); só Pedidos tem ponto, quando há pedido novo, e Comunidades não tem ponto nem seta. A faixa some durante a busca. Os botões de nova tentativa dizem "Tentar de novo". Em Nova conversa, o campo de busca ganha o foco sozinho quando a folha abre sobre uma Conversas visível. As linhas de Comunidades e de grupos usam o visual da linha da caixa (tamanho do avatar, título e prévia, espaçamento); o contador de não lidas do grupo virou o ponto de destaque, e o rótulo falado continua com a contagem e "abre o grupo". A busca usa o campo de busca compartilhado. "Nova comunidade" virou um + na barra do topo, e aparece quando a instalação é hospedada e nenhuma Página age, como antes. Quem vê a lista de membros não mudou.
+
+Campo de escrever: o botão "Aa" fica escondido até o campo receber o foco pela primeira vez; depois, fica visível enquanto a conversa estiver aberta, e também enquanto a fileira de formatação estiver aberta. O microfone é um ícone simples, sem círculo cheio. Começar uma gravação dá um toque leve de háptico. Cancelar uma gravação que já começou dá um háptico de aviso, também quando o app vai para o segundo plano ou o microfone é desligado no meio da gravação. Segurar para gravar e o botão de enviar, que aparece quando há texto, não mudaram.
+
+Nada disso muda protocolo, RPC nem Termos: muda a aparência, os gestos e o que a tela faz depois de uma falha.
+
+Limites conhecidos. A faixa de Conversas mostra "Pedidos", enquanto a ajuda ainda diz "Pedidos de mensagem". Depois que a pessoa rolou uma vez, um salto para uma mensagem citada antiga que cai perto do topo pode carregar uma página anterior uma vez. As conferências em aparelho continuam pendentes em todas as plataformas.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA. Registrar aparelho, sistema e, na web, o navegador. Conferir sempre nos dois temas, claro e escuro. Os itens com "precisa de conta" dependem de uma conta de teste: APK de preview do EAS ou TestFlight.
+
+- [ ] Bolhas: a hora aparece só na última bolha de cada sequência; as bolhas não têm cauda; a data é texto suave e centralizado, sem chip; uma mensagem própria pendente ou incerta mostra a sua linha de situação; o leitor de tela não lê a hora em cada bolha. Android, iOS, web e PWA: pendente.
+- [ ] Caixa de Conversas: o contador de não lidas é um ponto de 8 pt na cor de destaque, a prévia não lida fica em negrito, e o rótulo falado continua dizendo a contagem. Android, iOS, web e PWA: pendente.
+- [ ] Deslizar para responder: um toque leve de háptico quando o deslize cruza o limite de resposta; um deslize que cruza já no primeiro movimento vibra só ao soltar. Android, iOS, web e PWA: pendente.
+- [ ] Botão de ir para o fim: 36 pt com área de toque maior, ponto de não lidas e contagem na dica do leitor de tela; aparece com fade. Com Reduzir movimento ligado, aparece sem fade. Android, iOS, web e PWA: pendente.
+- [ ] Fichas de reação: no canto de baixo do balão, 24 pt visíveis e 44 pt de alvo de toque; numa conversa direta, o leitor de tela diz ", da outra pessoa" e ", e da outra pessoa"; num grupo, um toque longo numa ficha mostra quem reagiu. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Botões de ação (convite, Ver anúncio, Aceitar, Recusar, Avaliar): continuam embaixo do balão, fora das fichas. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Páginas anteriores, conversa longa: abrir a conversa, e a rolagem inicial até o fim, não carrega página anterior. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Páginas anteriores, topo: rolar até dentro de 200 pt do topo carrega uma página anterior, uma vez por aproximação. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Páginas anteriores, falha (conexão desligada): nada carrega sozinho; só a pílula tenta de novo; uma tentativa que dá certo devolve o carregamento automático (conversa direta). Um erro de leitura da própria conversa não é limpo por uma página anterior. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Páginas anteriores: rolar nunca envia mensagem, não marca como lido e não mostra digitação. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Nota de voz: enquanto toca, mostra o tempo que falta; pausada, mostra a duração total; enquanto toca, o leitor de tela diz "<tempo> restantes". Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Ajustes do grupo, topo: avatar, nome e "N membros" (só membros ativos); "Compartilhar" envia o link do convite; "Sair do grupo" no cabeçalho, com a mesma confirmação, só quando sair é permitido; o botão de sair no fim da tela não existe mais; ⓘ com o título "Convite". Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Ajustes do grupo, campos: "Nome" e "Convidar para o grupo" abrem o seu campo; com um convite sendo enviado, recolher "Convidar para o grupo" e reabrir mantém o estado (o convite em andamento ou a resposta incerta continuam lá). Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Ajustes do grupo, administradores: cada um aparece uma vez, com selo de papel; "Tirar admin" fica na linha; não há opção de silenciar. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Conversas, faixa "Pedidos · Comunidades": no topo da lista, logo abaixo do filtro; cada parte com alvo de 44 pt e o seu rótulo falado ("Pedidos de mensagem" para pedidos); só Pedidos tem ponto, quando há pedido novo, e Comunidades não tem ponto nem seta; a faixa some durante a busca. Android, iOS, web e PWA: pendente.
+- [ ] Botões de nova tentativa em Conversas dizem "Tentar de novo". Android, iOS, web e PWA: pendente.
+- [ ] Nova conversa: o campo de busca ganha o foco sozinho quando a folha abre sobre uma Conversas visível. Android, iOS, web e PWA: pendente.
+- [ ] Comunidades e grupos: as linhas usam o visual da linha da caixa (avatar, título, prévia, espaçamento). Android, iOS, web e PWA: pendente.
+- [ ] Comunidades: o contador de não lidas do grupo vira ponto de destaque; o rótulo falado mantém a contagem e "abre o grupo". Android, iOS, web e PWA: pendente.
+- [ ] Comunidades: a busca usa o campo de busca compartilhado. Android, iOS, web e PWA: pendente.
+- [ ] Comunidades: "Nova comunidade" é um + na barra do topo; aparece só na instalação hospedada e sem Página agindo; quem vê a lista de membros não mudou. Android, iOS, web e PWA: pendente.
+- [ ] Campo de escrever: "Aa" fica escondido até o primeiro foco no campo; depois, fica visível com a conversa aberta e enquanto a fileira de formatação está aberta. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Campo de escrever, web: com o campo em foco, clicar em "Aa" com o mouse abre a fileira de formatação. Web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Microfone: ícone simples, sem círculo cheio; um toque leve de háptico quando a gravação começa. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Cancelar uma gravação que já começou: háptico de aviso; também ao ir para o segundo plano ou desligar o microfone no meio da gravação. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+- [ ] Segurar para gravar e o botão de enviar (com texto): sem mudança. Android, iOS, web e PWA: pendente (precisa de conta: APK de preview do EAS ou TestFlight).
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem a estrutura e os textos do código, não montam a interface num aparelho. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/app/test/olderTrigger.test.js
+node apps/app/test/chatGestures.test.js
+node apps/app/test/reactions.test.js
+node apps/app/test/dmReactions.test.js
+node apps/app/test/groupReactions.test.js
+node apps/app/test/chatMedia.test.js
+node apps/app/test/voice.test.js
+node apps/app/test/conversas.test.js
+node apps/app/test/conversasList.test.js
+node apps/app/test/chatSurfaces.test.js
+node apps/app/test/group-flow.test.js
+node apps/app/test/gruposSnapshot.test.js
+node apps/app/test/postOverflow.test.js
+node apps/app/test/chatFormat.test.js
+node apps/app/test/dm.test.js
+node apps/app/test/uiKit.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.

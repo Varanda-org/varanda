@@ -57,6 +57,12 @@ test('community search distinguishes an unfinished empty index and preserves ref
   t.ok(state.includes('{search.indexing ? <Soft>A busca ainda está sendo atualizada; tente de novo depois.</Soft> : search.partial ? <Soft>Alguns grupos podem faltar</Soft> : null}\n          {search.more ? <Soft>Há mais resultados: refine a busca.</Soft> : null}'), 'refinement remains visible alongside either unfinished-index note')
 })
 
+test('the Nova comunidade + shows only on the hosted, non-page list', (t) => {
+  t.ok(communities.includes('const plus = hosted && pageKey === null\n'))
+  t.ok(communities.includes("accessibilityLabel='Nova comunidade'"))
+  t.ok(communities.includes('right={plus}'))
+})
+
 test('community empty lists explain their scope and offer existing actions', (t) => {
   const empty = communities.slice(communities.indexOf('  let empty'), communities.indexOf('  const renderItem'))
   t.ok(empty.includes('até 32 grupos sob a mesma moderação'))
@@ -82,6 +88,7 @@ test('conversation accessible label includes safe name, preview, time and unread
     t.ok(src.includes('numberOfLines={1}'), 'single line preview')
   }
   t.ok(row.includes('unread && styles.titleUnread'))
+  t.ok(row.includes('previewUnread: { color: colors.ink, fontWeight: \'700\' }') && row.includes('unread && styles.previewUnread'), 'unread preview is ink at 700')
   t.ok(community.includes('unread && styles.nameUnread'))
 })
 

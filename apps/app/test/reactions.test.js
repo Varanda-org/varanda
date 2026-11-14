@@ -232,6 +232,42 @@ test('reaction UI blocks use the sheet, the picker and press scale', (t) => {
   }
 })
 
+test('chips overlap the bubble only when asked, with the target kept', (t) => {
+  const src = read('src/ui/Reactions.js')
+  t.ok(src.includes('overlap = false'))
+  t.ok(src.includes('CHIP_OVERLAP = 24'))
+  t.ok(/chipOverlap:\s*\{\s*minHeight:\s*CHIP_OVERLAP\s*\}/.test(src))
+  // Only the visible chip rides over the bubble; the rest of the 44 pt target hangs below it.
+  t.ok(/rowOverlap:\s*\{\s*marginTop:\s*-\(CHIP_OVERLAP \/ 2\)\s*\}/.test(src))
+  t.ok(/hitOverlap:\s*\{\s*minHeight:\s*layout\.hit,\s*justifyContent:\s*'flex-start'\s*\}/.test(src))
+  t.ok(src.includes('[styles.row, styles.rowOverlap] : styles.row'))
+  t.ok(src.includes('style={[overlap === true ? styles.hitOverlap : styles.hit, off && styles.dim]}'), 'overlap mode uses the top-aligned pressable')
+  // The offset is on the container once, never on each pressable.
+  t.absent(/style=\{[^\n]*styles\.hit,[^\n]*Overlap/.test(src))
+  // The default row keeps today's style arrays.
+  t.ok(src.includes(': styles.hit, off && styles.dim]}'), 'the default row keeps styles.hit and the dim')
+  t.ok(src.includes(': [styles.chip, chip.mine ? styles.mine : styles.other]'))
+  // The pressable keeps layout.hit in both modes: the overlap style sets no height.
+  t.ok(/hit:\s*\{\s*minHeight:\s*layout\.hit/.test(src))
+  t.absent(/rowOverlap:[^}]*(minHeight|height)/.test(src))
+})
+
+test('chips speak their own label unless the screen passes labelOf', async (t) => {
+  const { runInNewContext } = require('node:vm')
+  const { displayText } = require('@varanda/rpc')
+  const { reactionChips } = await load()
+  const src = read('src/ui/Reactions.js')
+  t.ok(src.includes('overlap = false, labelOf }) {'))
+  const spoken = src.match(/accessibilityLabel=\{(displayText\([^\n]*\))\}\n/)
+  t.ok(spoken)
+  const say = (chip, labelOf) => runInNewContext(spoken[1], { displayText, chip, labelOf })
+  const [chip] = reactionChips([{ emoji: '\u{1f44d}', count: 2, mine: true }])
+  t.is(say(chip), displayText(chip.label), 'without labelOf the chip label is spoken')
+  t.is(say(chip, 'not a function'), displayText(chip.label))
+  t.is(say(chip, (c) => c.label + ', extra'), displayText(chip.label + ', extra'), 'labelOf replaces the spoken label')
+  t.is(say(chip, () => 'a‮b'), displayText('a‮b'), 'a screen label still goes through displayText')
+})
+
 test('quick targets are at least 44 pt wide on a 320 pt screen', (t) => {
   const src = read('src/ui/Reactions.js')
   const theme = read('src/ui/theme.js')

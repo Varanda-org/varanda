@@ -264,7 +264,8 @@ test('the Comunidades list shrinks above the keyboard, so a search result can be
 test('the group search is typed as is', (t) => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Comunidades.js'), 'utf8')
   const ui = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'ui', 'index.js'), 'utf8')
-  t.ok(/returnKeyType='search'\s+plain/.test(src), 'the field is plain')
+  const field = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'ui', 'SearchField.js'), 'utf8')
+  t.ok(src.includes("<SearchField\n          label='Buscar grupos públicos'") && field.includes("returnKeyType='search'") && field.includes("autoCapitalize='none'") && field.includes('autoCorrect={false}'), 'the field is plain')
   t.ok(ui.includes("mono || plain ? { autoCapitalize: 'none', autoCorrect: false, spellCheck: false }"), 'plain turns capitals and autocorrect off')
 })
 

@@ -121,6 +121,7 @@ function useVoiceRecorder ({ onVoice, onNote }) {
     if (r.phase !== 'recording' || !send) {
       // A start still waiting (the permission prompt) is dropped when it
       // resolves: recRef no longer names it.
+      if (r.phase === 'recording') tap('warn')
       cancelRecording()
       return
     }
@@ -166,6 +167,7 @@ function useVoiceRecorder ({ onVoice, onNote }) {
       cancelRecording()
       return
     }
+    tap('select')
     update({ ...r, phase: 'recording', startedAt: Date.now() })
   }
 
@@ -441,6 +443,8 @@ export function ChatComposer ({
   const [emojiOpen, setEmojiOpen] = useState(false)
   const [formatOpen, setFormatOpen] = useState(false)
   const [focused, setFocused] = useState(false)
+  // A latch: a blur must not unmount Aa before its click lands.
+  const [reached, setReached] = useState(false)
   const [note, setNote] = useState('')
   // selRef follows the field's selection; forcedSel places the caret once
   // after an insert. `caret` only forces the re-render that moves the @token.
@@ -707,21 +711,25 @@ export function ChatComposer ({
           >
             <Icon name='sorriso' size={22} color={emojiOpen ? colors.accent : colors.soft} />
           </Pressable>
-          <Pressable
-            accessibilityRole='button'
-            accessibilityLabel='formatação'
-            accessibilityState={{ expanded: formatOpen, disabled: !editable }}
-            disabled={!editable}
-            onPress={() => setFormatOpen((v) => !v)}
-            hitSlop={(layout.hit - SEND) / 2}
-            style={({ pressed }) => [styles.tool, pressed && styles.pressed]}
-          >
-            <Text style={{ color: formatOpen ? colors.accent : colors.soft }}>Aa</Text>
-          </Pressable>
+          {reached || formatOpen
+            ? (
+              <Pressable
+                accessibilityRole='button'
+                accessibilityLabel='formatação'
+                accessibilityState={{ expanded: formatOpen, disabled: !editable }}
+                disabled={!editable}
+                onPress={() => setFormatOpen((v) => !v)}
+                hitSlop={(layout.hit - SEND) / 2}
+                style={({ pressed }) => [styles.tool, pressed && styles.pressed]}
+              >
+                <Text style={{ color: formatOpen ? colors.accent : colors.soft }}>Aa</Text>
+              </Pressable>
+              )
+            : null}
           <TextInput
             ref={inputRef}
             style={[styles.input, webInputReset, { height }]}
-            onFocus={() => setFocused(true)}
+            onFocus={() => { setFocused(true); setReached(true) }}
             onBlur={() => setFocused(false)}
             value={text}
             onChangeText={changeText}
@@ -791,9 +799,9 @@ export function ChatComposer ({
               accessibilityLabel='Gravar mensagem de voz'
               accessibilityHint='Toque e segure para gravar, ou toque para gravar sem segurar'
               onAccessibilityTap={() => { if (voice.recRef.current === null) voice.begin('tap') }}
-              style={[styles.send, recording && styles.micHeld]}
+              style={[styles.mic, recording && styles.micHeld]}
             >
-              <Icon name='microfone' size={20} color={colors.accentInk} />
+              <Icon name='microfone' size={20} color={colors.ink} />
             </View>
             )
           : null}
@@ -881,6 +889,7 @@ const makeStyles = (colors) => StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center'
   },
+  mic: { width: SEND, height: SEND, alignItems: 'center', justifyContent: 'center' },
   sendOff: { opacity: 0.5 },
   sendWrap: { width: SEND, height: SEND, alignItems: 'center', justifyContent: 'center' },
   ring: { position: 'absolute', left: (SEND - RING) / 2, top: (SEND - RING) / 2, width: RING, height: RING },

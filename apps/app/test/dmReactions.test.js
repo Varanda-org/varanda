@@ -309,6 +309,7 @@ test('older reaction reads isolate a failed cursor and skip pages without pendin
     commitRead: h.commitRead,
     rawRef,
     olderRef: { current: true },
+    olderErr: { current: false },
     genRef: { current: 0 },
     dm: async (method, params) => {
       reads.push(params.before || 'newest')
@@ -440,14 +441,32 @@ test('DM source pins shared reaction UI, page checks, quiet uncertainty and spoi
   t.ok(src.includes('closeThen(() => toggleReaction(item.key, emoji))'))
   t.ok(src.includes('closeThen(() => openReactionPicker(item.key))'))
   t.ok(src.includes('below={chips.length > 0'))
-  t.ok(src.includes('<ReactionChips reactions={[chip]} disabled={reactionOff} />'))
-  t.ok(src.includes("accessibilityLabel={displayText(chip.label + (chip.mine ? (chip.count > 1 ? ', e da outra pessoa' : '') : ', da outra pessoa'))}"))
+  const chipsAt = src.indexOf('{chips.length > 0 ? <ReactionChips reactions={reactionsFor(item)} disabled={reactionOff} onToggle={(emoji) => toggleReaction(item.key, emoji)} labelOf={')
+  t.ok(chipsAt > 0, 'chips sit on the bubble corner, gated by the same chips check')
+  t.ok(src.slice(chipsAt, src.indexOf('\n', chipsAt)).endsWith(' overlap /> : null}'))
+  t.ok(chipsAt < src.indexOf('<View style={styles.inline}>', chipsAt), 'the action pills stay in their own row under the chips')
+  // The spoken label says whose reaction it is, through the shared chip.
+  const shared = readFileSync(join(__dirname, '../src/ui/Reactions.js'), 'utf8')
+  const spoken = shared.match(/accessibilityLabel=\{(displayText\(typeof labelOf[^\n]*\))\}\n/)
+  t.ok(spoken, 'the shared chip speaks labelOf(chip) when given')
+  const labelAt = src.indexOf('labelOf={', chipsAt)
+  const labelOf = labelAt > 0 && labelAt < src.indexOf('\n', chipsAt)
+    ? runInNewContext(src.slice(labelAt + 'labelOf={'.length, src.indexOf('} overlap />', labelAt)))
+    : undefined
+  const { displayText } = require('@varanda/rpc')
+  const say = (chip) => spoken ? runInNewContext(spoken[1], { displayText, labelOf, chip }) : ''
+  t.is(say({ label: 'curtir, 1 reação', mine: false, count: 1 }), 'curtir, 1 reação, da outra pessoa')
+  t.is(say({ label: 'curtir, 2 reações, sua reação', mine: true, count: 2 }), 'curtir, 2 reações, sua reação, e da outra pessoa')
+  t.is(say({ label: 'curtir, 1 reação, sua reação', mine: true, count: 1 }), 'curtir, 1 reação, sua reação')
+  t.ok(shared.includes('accessibilityState={{ selected: chip.mine === true }}'))
+  t.ok(readFileSync(join(__dirname, '../src/reactions.js'), 'utf8').includes("label + ', sua reação'"))
   t.absent(src.includes('onShowWho'))
   t.ok(src.includes('<ReactionPicker'))
   t.ok(src.includes('<Soft>Não deu para confirmar a reação.</Soft>'))
   t.ok(src.includes('reactionContext.debounce.clear()'))
   t.ok(src.includes('context.pages.set(cursor, new Set((r.messages || []).map(messageKey)))'))
-  t.ok(src.includes("importantForAccessibility='no-hide-descendants' aria-hidden inert"), 'one accessible and keyboard-focusable chip control')
+  t.absent(src.includes('reactions={[chip]}') || src.includes('aria-hidden inert'), 'no hidden chip inside a second control')
+  t.ok(/<PressScale\s+key=\{chip\.emoji\}/.test(shared), 'one accessible and keyboard-focusable chip control')
   t.ok(src.includes('const richBlocks = hasRich(text) ? parseRich(text) : null'))
   t.ok(src.includes('if (snapshot && cardBesideSpoilers(richBlocks, { url: snapshot.url }) === null) snapshot = null'))
 })
@@ -542,6 +561,7 @@ async function threadReader (h, rows, dm) {
     commitRead: h.commitRead,
     rawRef,
     olderRef: { current: true },
+    olderErr: { current: false },
     genRef: { current: 0 },
     dm,
     setRaw: (rows) => { rawRef.current = rows },
@@ -685,6 +705,7 @@ test('an older-page reread carries reactable: false, so the reaction controls go
     commitRead: h.commitRead,
     rawRef,
     olderRef: { current: true },
+    olderErr: { current: false },
     genRef: { current: 0 },
     dm: async (method, params) => {
       const row = params.before ? rows[0] : rows[1]
@@ -709,4 +730,72 @@ test('an older-page reread carries reactable: false, so the reaction controls go
   pend()
   await read()
   t.absent('reactable' in rawRef.current[0], 'a fresh row without the mark drops it')
+})
+
+test('a successful older page clears only the error an older page set', async (t) => {
+  const { refreshThread, newestOf, messageKey, mergeMessages, pinToEnd } = await load()
+  const h = await screenReactions(async () => ({}))
+  h.context.pages = new Map()
+  const row = (id) => ({ from: 'peer', id, at: id === 'new' ? 2 : 1, text: id, reactions: [] })
+  const state = { loadError: '', calls: 0 }
+  let fail = ''
+  const env = {
+    ...h.env,
+    refreshThread,
+    newestOf,
+    messageKey,
+    mergeMessages,
+    pinToEnd,
+    commitRead: h.commitRead,
+    olderRef: { current: false },
+    olderErr: { current: false },
+    genRef: { current: 0 },
+    nextRef: { current: 'cursor' },
+    endPin: { current: { pinned: true } },
+    loadingMore: false,
+    dm: async (method, params) => {
+      state.calls++
+      if (fail) throw new Error(fail)
+      return params.before ? { messages: [row('old')], next: 'cursor' } : { messages: [row('new')], next: 'cursor' }
+    },
+    setRaw: (rows) => { env.rawRef.current = rows },
+    setNext: () => {},
+    setLoadError: (text) => { state.loadError = text },
+    setLoadingMore: () => {},
+    setNewest: () => {},
+    setFolder: () => {},
+    setBlocked: () => {},
+    setLoaded: () => {}
+  }
+  const src = screen()
+  const thread = src.slice(src.indexOf('  const readThread ='), src.indexOf('  const reactionGate ='))
+  const older = src.slice(src.indexOf('  const loadOlder = async () => {'), src.indexOf('\n  olderLive.current ='))
+  const { readThread, loadOlder } = runInNewContext(thread + older + '\n;({ readThread, loadOlder })', env)
+  fail = 'offline'
+  await loadOlder()
+  t.is(state.loadError, 'offline', 'an older page failure shows its error')
+  fail = ''
+  await loadOlder()
+  t.is(state.loadError, '', 'the pill retry that lands clears that error')
+  t.absent(env.olderErr.current)
+  fail = 'thread down'
+  await readThread()
+  t.is(state.loadError, 'thread down')
+  fail = ''
+  await loadOlder()
+  t.is(state.loadError, 'thread down', 'an older page never clears a thread read error')
+  fail = 'offline'
+  await loadOlder()
+  fail = ''
+  await readThread()
+  t.is(state.loadError, '', 'a thread read that lands clears either error')
+  t.absent(env.olderErr.current, 'and forgets where it came from')
+  fail = 'offline'
+  await loadOlder()
+  fail = 'thread down'
+  await readThread()
+  fail = ''
+  await loadOlder()
+  t.is(state.loadError, 'thread down', 'a thread error that replaced an older one stays')
+  t.ok(state.calls >= 8)
 })

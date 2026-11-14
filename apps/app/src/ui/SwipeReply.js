@@ -15,6 +15,7 @@ export function SwipeReply ({ children, onReply, disabled = false }) {
   latest.current = { onReply, disabled, reduce }
   const active = useRef(false)
   const start = useRef(null)
+  const crossed = useRef(false)
   const responder = useRef(null)
   if (responder.current === null) {
     const touchOnly = (event) => {
@@ -32,6 +33,7 @@ export function SwipeReply ({ children, onReply, disabled = false }) {
     const accepts = (event, gesture) => touchOnly(event) && plan(gesture) !== 'ignore'
     const reset = () => {
       active.current = false
+      crossed.current = false
       x.stopAnimation()
       if (latest.current.reduce) x.setValue(0)
       else Animated.timing(x, { toValue: 0, duration: 120, useNativeDriver: false }).start()
@@ -45,7 +47,7 @@ export function SwipeReply ({ children, onReply, disabled = false }) {
       onStartShouldSetPanResponder: () => false,
       onMoveShouldSetPanResponder: accepts,
       onMoveShouldSetPanResponderCapture: accepts,
-      onPanResponderGrant: () => { active.current = true; x.stopAnimation() },
+      onPanResponderGrant: () => { active.current = true; crossed.current = false; x.stopAnimation() },
       onPanResponderStart: (event) => { if (!touchOnly(event)) reset() },
       onPanResponderMove: (event, gesture) => {
         if (!active.current || !start.current) return
@@ -54,12 +56,19 @@ export function SwipeReply ({ children, onReply, disabled = false }) {
         // The same ratio as swipePlan: a swipe that could not reply is let go.
         if (Math.abs(dx) < 2 * Math.abs(dy)) return reset()
         x.setValue(Math.max(0, Math.min(72, dx)))
+        // Once per swipe, at the moment the release would reply.
+        if (!crossed.current && swipePlan(dx, dy, start.current.x) === 'reply') {
+          crossed.current = true
+          tap('light')
+        }
       },
       onPanResponderRelease: (event, gesture) => {
         const reply = active.current && !latest.current.disabled && plan(gesture) === 'reply'
+        const tapped = crossed.current
         reset()
         if (reply && typeof latest.current.onReply === 'function') {
-          tap('light')
+          // A fast swipe can cross on the grant event, which never reaches the move handler.
+          if (!tapped) tap('light')
           latest.current.onReply()
         }
       },

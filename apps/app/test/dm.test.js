@@ -851,6 +851,7 @@ async function momentUI (file, options = {}) {
   const { transformSync } = require('@babel/core')
   const { runInNewContext } = require('node:vm')
   const reaction = await import('../src/momentReaction.js')
+  const { showsMeta } = await import('../src/dm-screen.js')
   const previews = await import('../src/momentPreviews.js')
   const rpc = require('@varanda/rpc')
   let now = Date.parse('2026-11-13T12:00:00.000Z')
@@ -909,6 +910,7 @@ async function momentUI (file, options = {}) {
     './Icon': { Icon: 'Icon' },
     './MomentReactionPreview': { MomentReactionPreview: 'MomentReactionPreview' },
     '../dm': { LABELS: {} },
+    '../dm-screen': { showsMeta },
     '../forward': {},
     '../links': {},
     '../musicEmbed': {},
@@ -1124,6 +1126,25 @@ test('expiry drops the mounted image even while a lookup is pending', async (t) 
   t.is(calls, 2, 'the deadline drop does not wait for the pending poll')
   h.unmount()
   t.is(h.timers.size, 0)
+})
+
+test('showsMeta: the time shows under single and last, and mid-run only while the send is unsettled', async (t) => {
+  const { showsMeta } = await import('../src/dm-screen.js')
+  const meta = '12:30'
+  t.is(showsMeta({ meta, shape: 'single', mine: false, status: undefined }), true)
+  t.is(showsMeta({ meta, shape: 'last', mine: false, status: undefined }), true)
+  t.is(showsMeta({ meta, shape: 'first', mine: false, status: undefined }), false)
+  t.is(showsMeta({ meta, shape: 'middle', mine: false, status: undefined }), false)
+  t.is(showsMeta({ meta, shape: 'middle', mine: true, status: 'pending' }), true)
+  t.is(showsMeta({ meta, shape: 'middle', mine: true, status: 'uncertain' }), true)
+  t.is(showsMeta({ meta, shape: 'first', mine: true, status: 'pending' }), true)
+  t.is(showsMeta({ meta, shape: 'middle', mine: false, status: 'pending' }), false)
+  t.is(showsMeta({ meta, shape: 'middle', mine: true, status: 'sent' }), false)
+  for (const shape of ['single', 'first', 'middle', 'last']) {
+    t.is(showsMeta({ meta: '', shape, mine: true, status: 'pending' }), false, shape + ' without a time')
+  }
+  const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
+  t.ok(bubble.includes('showsMeta('), 'Bubble uses the tested rule')
 })
 
 test('request acceptance loads the preview and returning to requests releases it', async (t) => {

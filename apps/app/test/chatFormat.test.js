@@ -211,3 +211,14 @@ test('ReplyPreview uses one plain quote for display and accessibility', async (t
     ['😀'.repeat(91), '😀'.repeat(90)]
   ]) t.is(preview(text), expected)
 })
+
+test('Aa shows only while focused or open, and the mic is a bare ink icon with haptics', (t) => {
+  const src = read('ui/ChatComposer.js')
+  t.ok(src.includes('{reached || formatOpen'))
+  t.absent(src.includes('{focused || formatOpen'), 'blur must not hide Aa')
+  t.ok(src.includes('onFocus={() => { setFocused(true); setReached(true) }}'))
+  t.absent(/setReached\(false\)/.test(src), 'the latch never resets')
+  t.ok(src.includes("<Icon name='microfone' size={20} color={colors.ink} />"))
+  t.ok(src.includes("    tap('select')\n    update({ ...r, phase: 'recording'"))
+  t.ok(src.includes("if (r.phase === 'recording') tap('warn')"))
+})
