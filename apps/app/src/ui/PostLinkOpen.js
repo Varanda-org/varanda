@@ -1,11 +1,13 @@
 /* global AbortController */
-// What a first visit sees when it opened a shared post link (App.js decides
-// when, through postLink.js postOpeningGate): the post as the installation's
-// seeder previews it (../postPreview.js), else a row with no content, drawn
-// the same whether the preview is loading or will never come. Every press
-// in it, and Ver mais, opens ./PostLinkSheet, whose buttons go on to the
-// terms gate as the intro's last card would. Como funciona shows the intro
-// cards and comes back here; Agora não hides the preview for this load only.
+// What a visitor with no account on this device sees when it opened a shared
+// post link, on a first visit or a later one (App.js decides when, through
+// postLink.js postOpeningGate): the post as the installation's seeder
+// previews it (../postPreview.js), else a row with no content, drawn the same
+// whether the preview is loading or will never come. Every press in it, and
+// Ver mais, opens ./PostLinkSheet, whose buttons go on to the terms gate as
+// the intro's last card would. Como funciona shows the intro cards and comes
+// back here; Agora não hides the preview for this load only, leading to the
+// intro on a first visit and otherwise to the Terms and Entrar.
 
 import { useEffect, useState } from 'react'
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
@@ -102,6 +104,6 @@ const makeStyles = (colors) => StyleSheet.create({
   dim: { opacity: 0.45 },
   links: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', gap: space.sm, paddingHorizontal: space.lg, paddingTop: space.md },
   link: { minHeight: layout.hit, justifyContent: 'center', paddingHorizontal: space.xs },
-  linkText: { fontSize: 15, fontWeight: '700', color: colors.ink },
+  linkText: { ...type.pill, color: colors.ink },
   pressed: { opacity: 0.6 }
 })

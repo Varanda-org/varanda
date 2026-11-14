@@ -389,3 +389,47 @@ export function embedHtml (embed) {
 export function topNavigationAllowed (url) {
   return url === EMBED_BASE_URL || url === EMBED_BASE_URL + '/' || url === 'about:blank'
 }
+
+// Image hosts a preview builder may fetch a player's cover from, per
+// provider. Hosts measured on 2026-11-14 were i.ytimg.com, i.scdn.co,
+// i1.sndcdn.com and is1-ssl.mzstatic.com; a strict-subdomain rule covers the
+// numbered siblings those providers rotate. Only measured domains are listed:
+// spotifycdn.com was not seen serving a cover, so it stays out.
+export const COVER_IMAGE_DOMAINS = Object.freeze({
+  youtube: Object.freeze(['ytimg.com']),
+  spotify: Object.freeze(['scdn.co']),
+  soundcloud: Object.freeze(['sndcdn.com']),
+  apple: Object.freeze(['mzstatic.com'])
+})
+
+// Whether a cover image at `imageUrl` may be fetched for the music link
+// `pageUrl`: an https image on a strict subdomain of a domain listed for that
+// link's own provider. The apex is refused because a cover was only ever
+// measured on a subdomain. Never throws.
+export function coverImageAllowed (pageUrl, imageUrl) {
+  try {
+    const embed = embedOf(pageUrl)
+    if (embed === null) return false
+    if (typeof imageUrl !== 'string' || !imageUrl.startsWith('https://')) return false
+    const host = cardUrlHost(imageUrl)
+    if (host === null) return false
+    if (!Object.prototype.hasOwnProperty.call(COVER_IMAGE_DOMAINS, embed.provider)) return false
+    const lower = host.toLowerCase()
+    return COVER_IMAGE_DOMAINS[embed.provider].some((d) => lower.endsWith('.' + d))
+  } catch {
+    return false
+  }
+}
+
+// The page a preview builder reads a cover from, or null. Only a single
+// YouTube video, at its canonical watch address, so youtu.be and shorts links
+// read the same page. Never throws.
+export function coverTarget (url) {
+  try {
+    const embed = embedOf(url)
+    if (embed === null || embed.provider !== 'youtube' || embed.kind !== 'video') return null
+    return typeof embed.pageUrl === 'string' ? embed.pageUrl : null
+  } catch {
+    return null
+  }
+}

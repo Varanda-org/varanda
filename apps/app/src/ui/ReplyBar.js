@@ -29,6 +29,9 @@ export function ReplyBar ({ target = null, onSend, onExpand, onAttach, onClearTa
   const off = busy || disabled || action.pending
   // Focus alone would collapse the bar on the blur that a tap on send causes, so text keeps it open.
   const expanded = focused || text.trim() !== '' || nonFocalTarget === true
+  // Send waits for text, never focus: on the web a tap on photo or expand blurs the field first, and
+  // a send that left on that blur slid both buttons out from under the pointer, so the tap was lost.
+  const hasText = text.trim() !== ''
   const attachOff = off || typeof onAttach !== 'function'
   const sendOff = off || text.trim() === ''
   const length = [...text].length
@@ -129,7 +132,7 @@ export function ReplyBar ({ target = null, onSend, onExpand, onAttach, onClearTa
             </Pressable>
           </View>
         </View>
-        {expanded
+        {hasText
           ? (
             <Pressable
               accessibilityRole='button'

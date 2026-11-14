@@ -4,7 +4,7 @@ const https = require('node:https')
 const dns = require('node:dns')
 const { isHostname, publicAddress, httpsTarget, createSafeFetch } = require('./safe-fetch')
 const { refundableWindow, createMemberSession } = require('./member-session')
-const { MAX_CARD_URL, MAX_CARD_TITLE, MAX_CARD_DESC, cardUrlHost, parseOg } = require('@varanda/rpc')
+const { MAX_CARD_URL, MAX_CARD_TITLE, MAX_CARD_DESC, cardUrlHost, parseOg, youtubeCoverUrl } = require('@varanda/rpc')
 
 // Link previews through the account service (mounted by ./server.js), so the
 // member's device never opens a link it did not tap and the site sees this
@@ -28,6 +28,14 @@ const { MAX_CARD_URL, MAX_CARD_TITLE, MAX_CARD_DESC, cardUrlHost, parseOg } = re
 //     framed or loaded except the og:image, fetched under the same guards
 //     (IMAGE_CAP, an image type confirmed by its leading bytes) and returned
 //     as base64 bytes. `url` and `host` name the final page after redirects.
+//   - A YouTube watch page is larger than PAGE_CAP, so for a link in the
+//     canonical watch form (youtubeCoverUrl of @varanda/rpc) a page that
+//     fails, cannot carry a card or yields no image falls back to the video's
+//     thumbnail, fetched under the same guards; the answer then names the
+//     link sent, with the title 'YouTube' (the app refuses a card with an
+//     empty title, which would throw the cover away). An address this
+//     service refused gets no fallback. At most the page and two images per
+//     request.
 //
 // Nothing is stored: no URL, title or token reaches memory beyond the
 // request or any log line; logs carry { event: 'preview', reason } counts.
@@ -176,34 +184,56 @@ function createPreviewRoutes ({
     if (!quota(member)) throw overLimit()
     inflight++
     inflightOf.set(member, mine + 1)
+    const cover = youtubeCoverUrl(url.href)
+    // The thumbnail alone is still a card worth showing, named after the link
+    // sent since no page said otherwise.
+    const coverCard = async (reason) => {
+      const image = cover === null ? null : await fetchImage(cover)
+      if (image === null) {
+        log({ event: 'preview', reason })
+        throw unavailable()
+      }
+      return { card: { url: url.href, host: url.hostname, title: '', desc: '' }, image }
+    }
     let card
     let image
     try {
       let page
+      let failed = false
       const { seen, done } = watchedFetch(url.href, { cap: PAGE_CAP, accept: 'text/html', types: PAGE_TYPES, plain: true })
       try {
         page = await done
       } catch {
-        if (seen.refused && !seen.admitted) quota.giveBack(member)
-        log({ event: 'preview', reason: 'indisponivel' })
-        throw unavailable()
+        if (seen.refused && !seen.admitted) {
+          quota.giveBack(member)
+          log({ event: 'preview', reason: 'indisponivel' })
+          throw unavailable()
+        }
+        failed = true
       }
-      // The answer names the page the text came from: after a redirect, the
-      // final URL and its host, never the link that was sent.
-      card = cardFromPage(page.body.toString('utf8'), page.url)
-      if (card === null) {
-        log({ event: 'preview', reason: 'destino' })
-        throw unavailable()
+      if (failed) {
+        ({ card, image } = await coverCard('indisponivel'))
+      } else {
+        // The answer names the page the text came from: after a redirect, the
+        // final URL and its host, never the link that was sent.
+        card = cardFromPage(page.body.toString('utf8'), page.url)
+        if (card === null) {
+          ({ card, image } = await coverCard('destino'))
+        } else {
+          image = await fetchImage(card.imageUrl)
+          // The same address again would only repeat a fetch that just failed.
+          if (image === null && cover !== null && card.imageUrl !== cover) image = await fetchImage(cover)
+        }
       }
-      image = await fetchImage(card.imageUrl)
     } finally {
       inflight--
       const left = inflightOf.get(member) - 1
       if (left > 0) inflightOf.set(member, left)
       else inflightOf.delete(member)
     }
+    const title = card.title === '' && cover !== null ? 'YouTube' : card.title
     log({ event: 'preview', reason: image === null ? 'previa' : 'previa-imagem' })
-    send(res, 200, { url: card.url, host: card.host, title: card.title, desc: card.desc, image })
+    send(res, 200, { url: card.url, host: card.host, title, desc: card.desc, image })
   }
 
   function owns (pathname) {

@@ -180,6 +180,8 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
   // created: this app made it (false for a sign-in passkey without PRF).
   let refused = []
   let loadedFor = null
+  // loadedFor is set before the read finishes; readFor only once it did.
+  let readFor = null
   let loading = Promise.resolve()
   let resuming = Promise.resolve()
   let epochChecked = false
@@ -245,6 +247,7 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
         return
       }
       if (loadedFor !== rpId) return
+      readFor = rpId
       pendingReg = rec && rec.pending && validId(rec.pending.credentialId)
         ? { credentialId: rec.pending.credentialId, userId: typeof rec.pending.userId === 'string' ? rec.pending.userId : '' }
         : null
@@ -271,6 +274,7 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
           pendingReg = { credentialId: rec.pending.credentialId, userId: typeof rec.pending.userId === 'string' ? rec.pending.userId : '' }
         }
         loadedFor = rpId
+        readFor = rpId
       }
       await local.save(rpId, { pending: pendingReg, refused: refused.map((r) => ({ ...r })) })
     } catch {}
@@ -1069,7 +1073,10 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
       hybrid: 'unknown',
       platform: 'unknown',
       signal: 'no',
-      pending: pendingReg !== null,
+      // A creation this run holds is pending even when the attempts file is
+      // unreadable; with none in memory and the file unread, one may still be
+      // on disk, so null rather than a false that claims there is none.
+      pending: pendingReg !== null ? true : (typeof rpId === 'string' && rpId !== '' && readFor !== rpId ? null : false),
       refused: refused.map((r) => ({ userId: r.userId, code: r.code, cleaned: r.cleaned, created: r.created })),
       rpId: typeof rpId === 'string' ? rpId : null
     }

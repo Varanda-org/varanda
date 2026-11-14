@@ -29,6 +29,7 @@ import { createEmbedKeep } from '../embedKeep'
 import { EMBED_TICK_MS, embedSlots, embedStays, embedTouched, embedsHeld, embedsHeldAll, onEmbedHold } from '../embedLive'
 import { playbackClaimCount } from '../media/chatMedia'
 import { EmbedFrame } from './EmbedFrame'
+import { useReveal } from './useReveal'
 import { screenReaderKnown, screenReaderOn } from './screenReader'
 import { EmbedHost, EmbedRowKey, ScreenVisible, SheetDepth } from './screenVisible'
 
@@ -380,6 +381,21 @@ export function framePlace (entry) {
   return place
 }
 
+// The fade is keyed on ready alone, never on the rect: orphan() sets rect null
+// each time a row unmounts, and a loaded player returns with its row without
+// fading a second time.
+function Kept ({ entry, keep, visible, held }) {
+  const { rect, spec } = entry
+  const parked = rect === null || entry.ready !== true
+  const { opacity, settled } = useReveal(entry.ready === true)
+  const fading = !parked && !settled
+  return (
+    <Animated.View collapsable={false} pointerEvents={parked ? 'none' : 'auto'} style={fading ? [framePlace(entry), { opacity }] : framePlace(entry)}>
+      <KeptFrame spec={spec} parked={parked} opens={frameOpens(parked, visible, held)} keep={keep} id={entry.key} release={entry.release} />
+    </Animated.View>
+  )
+}
+
 // The leaf reads the screen and the sheet, not the list, so a tab switch
 // renders the layer alone.
 function Layer ({ host }) {
@@ -398,15 +414,9 @@ function Layer ({ host }) {
   const entries = useSyncExternalStore(keep.subscribe, keep.list, keep.list)
   return (
     <View collapsable={false} pointerEvents='box-none' onLayout={onLayerLayout} style={[StyleSheet.absoluteFill, styles.layer]}>
-      {entries.map((entry) => {
-        const { rect, spec } = entry
-        const parked = rect === null || entry.ready !== true
-        return (
-          <Animated.View key={entry.key} collapsable={false} pointerEvents={parked ? 'none' : 'auto'} style={framePlace(entry)}>
-            <KeptFrame spec={spec} parked={parked} opens={frameOpens(parked, visible, held)} keep={keep} id={entry.key} release={entry.release} />
-          </Animated.View>
-        )
-      })}
+      {entries.map((entry) => (
+        <Kept key={entry.key} entry={entry} keep={keep} visible={visible} held={held} />
+      ))}
     </View>
   )
 }

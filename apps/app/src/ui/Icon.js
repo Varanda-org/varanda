@@ -13,7 +13,6 @@ const GLYPHS = {
   pessoa: 'user',
   resposta: 'message-circle',
   conversas: 'message-square',
-  feira: 'shopping-bag',
   lapis: 'edit-2',
   engrenagem: 'settings',
   sinc: 'refresh-cw',
@@ -83,9 +82,8 @@ const GLYPHS = {
   sair: 'log-out'
 }
 
-// The Feira tab already uses Feather's bag, and Feather's archive reads as a
-// storage box. Clothing and furniture use Ionicons outlines (the set already
-// loaded for the filled heart).
+// Feather's archive reads as a storage box. Clothing and furniture use
+// Ionicons outlines (the set already loaded for the filled heart).
 const ION_GLYPHS = {
   cat_roupa: 'shirt-outline',
   cat_moveis: 'bed-outline'
@@ -126,6 +124,28 @@ export function Icon ({ name, size = 24, color, style, filled }) {
         <View style={{ ...dash, top: 15 * unit, height: 4 * unit }} />
         <View style={{ ...dash, top: 10.5 * unit, height: 3 * unit }} />
         <View style={{ ...dash, top: 7.5 * unit, height: 2 * unit }} />
+      </View>
+    )
+  }
+  // Feather has no market stall: a barraca de feira (striped canopy, scalloped
+  // valance, poles, counter) on its 24-unit grid with the same 2-unit stroke.
+  if (name === 'feira') {
+    const unit = size / 24
+    const fill = { position: 'absolute', backgroundColor: tint }
+    const ring = { position: 'absolute', top: -4 * unit, width: 8 * unit, height: 8 * unit, borderRadius: 4 * unit, borderWidth: 2 * unit, borderColor: tint }
+    return (
+      <View style={[{ width: size, height: size }, style]}>
+        <View style={{ position: 'absolute', left: 2 * unit, top: 3 * unit, width: 20 * unit, height: 6 * unit, borderWidth: 2 * unit, borderRadius: 2 * unit, borderColor: tint }} />
+        <View style={{ ...fill, left: 8 * unit, top: 3 * unit, width: 2 * unit, height: 6 * unit }} />
+        <View style={{ ...fill, left: 14 * unit, top: 3 * unit, width: 2 * unit, height: 6 * unit }} />
+        <View style={{ position: 'absolute', left: 2 * unit, top: 8 * unit, width: 20 * unit, height: 4 * unit, overflow: 'hidden' }}>
+          <View style={{ ...ring, left: 0 }} />
+          <View style={{ ...ring, left: 6 * unit }} />
+          <View style={{ ...ring, left: 12 * unit }} />
+        </View>
+        <View style={{ ...fill, borderRadius: unit, left: 2 * unit, top: 8 * unit, width: 2 * unit, height: 13 * unit }} />
+        <View style={{ ...fill, borderRadius: unit, left: 20 * unit, top: 8 * unit, width: 2 * unit, height: 13 * unit }} />
+        <View style={{ ...fill, borderRadius: unit, left: 2 * unit, top: 16 * unit, width: 20 * unit, height: 2 * unit }} />
       </View>
     )
   }

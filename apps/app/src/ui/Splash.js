@@ -304,7 +304,6 @@ export function Splash ({ sidePad = 0, edges, progress = 0 }) {
           <SplashScene
             layout={layout}
             palette={palette}
-            daylight={scheme !== 'dark'}
             bottomInset={insets.bottom}
             ground={ground.current}
             varanda={varanda.current}

@@ -12,9 +12,10 @@ test('handle follow keeps its target in the accessible label', (t) => {
 test('opening a profile, a thread or a mention from the search closes the keyboard', (t) => {
   const src = fs.readFileSync(path.join(__dirname, '../src/screens/BuscaGlobal.js'), 'utf8')
   t.ok(/import \{[^}]*\bKeyboard\b[^}]*\} from 'react-native'/.test(src))
-  for (const name of ['Member', 'Thread', 'Mention']) {
+  for (const name of ['Member', 'Thread']) {
     t.ok(src.includes(`const open${name} = (...args) => { Keyboard.dismiss(); return onOpen${name}(...args) }`), name)
   }
+  t.ok(src.includes('const openMention = onOpenMention ? (...args) => { Keyboard.dismiss(); return onOpenMention(...args) } : undefined'), 'a mention stays untappable without a handler')
   t.ok(src.includes('onOpen={openMember}'), 'the account rows')
   t.ok(src.includes('onOpenThread={openThread}\n        onOpenMember={openMember}\n        onOpenMention={openMention}'), 'the post results')
   t.absent(src.includes('onOpen={onOpenMember}'))

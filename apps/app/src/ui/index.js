@@ -141,9 +141,9 @@ export function FlushSectionHeader (props) {
   return <SectionHeader {...props} flush />
 }
 
-export function Title ({ children }) {
+export function Title ({ children, hero }) {
   const styles = useStyles(makeStyles)
-  return <Text style={styles.title} accessibilityRole='header'>{children}</Text>
+  return <Text style={hero ? [styles.title, styles.titleHero] : styles.title} accessibilityRole='header'>{children}</Text>
 }
 
 export function Label ({ children }) {
@@ -272,7 +272,7 @@ export function Field ({ label, value, onChangeText, multiline, maxLength, edita
     <View style={styles.field}>
       {label ? <Label>{label}</Label> : null}
       <TextInput
-        style={[styles.input, multiline && { minHeight: lines * 22 + 20, textAlignVertical: 'top' }, mono && value !== '' && styles.inputMono, !editable && styles.inputOff]}
+        style={[styles.input, multiline && { minHeight: lines * 22 + 20, textAlignVertical: 'top' }, mono && styles.inputMonoSize, mono && value !== '' && styles.inputMono, !editable && styles.inputOff]}
         value={value}
         onChangeText={onChangeText}
         multiline={multiline}
@@ -307,6 +307,7 @@ const makeStyles = (colors) => StyleSheet.create({
   sectionFlush: { paddingHorizontal: 0 },
   sectionText: { ...type.section, color: colors.soft },
   title: { fontSize: 22, fontWeight: '800', color: colors.ink, fontFamily: fonts.title },
+  titleHero: { ...type.heroTitle },
   label: { fontSize: 14, fontWeight: '600', color: colors.soft },
   body: { fontSize: 16, lineHeight: 22, color: colors.ink },
   soft: { fontSize: 14, lineHeight: 20, color: colors.soft },
@@ -355,6 +356,7 @@ const makeStyles = (colors) => StyleSheet.create({
     fontSize: 16,
     color: colors.ink
   },
-  inputMono: { fontFamily: fonts.mono, fontSize: 14 },
+  inputMonoSize: { fontSize: 14 },
+  inputMono: { fontFamily: fonts.mono },
   inputOff: { backgroundColor: colors.inputOff, color: colors.soft }
 })

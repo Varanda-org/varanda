@@ -77,7 +77,7 @@ import { HelpNote } from '../ui/Help'
 import { OptionBlock, OptionList, OptionRow, OptionsToggle } from '../ui/OptionRow'
 import { ShareProfile } from '../ui/ShareProfile'
 import { StepNotice, Stepper } from '../ui/Stepper'
-import { fonts, radius, space } from '../ui/theme'
+import { radius, space, type } from '../ui/theme'
 import { WelcomeHeader } from '../ui/Welcome'
 import { useStyles } from '../ui/ThemeProvider'
 import { atName } from '../who'
@@ -691,7 +691,10 @@ function LinkCard ({ publicKey, memberCert, active, quiet, recovering = false, s
 // a drop), so the shell reads the card again.
 // onPhoneRecheck: the service answered 'telefone-pendente', so the shell
 // asks the phone status again (src/usePhoneGate.js recheck).
-export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, onInfo, onLinked, onInviteChanged, onPhoneRecheck, invite = null, feira = null }) {
+// onStepHeld: true while a step must be finished on this screen (a code that
+// opened the root, a creation awaiting 'concluir'), so the shell keeps a post
+// preview from replacing it; false otherwise and on unmount.
+export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, onInfo, onLinked, onInviteChanged, onPhoneRecheck, onStepHeld, invite = null, feira = null }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const outbox = useOutbox()
@@ -753,6 +756,12 @@ export default function Identidade ({ active, embedded = false, setup = false, v
   // A code opened the account's root ({ needsPasskey }): the next press
   // creates the passkey (finishRecovery).
   const [needsPasskey, setNeedsPasskey] = useState(false)
+  const stepHeld = needsPasskey || awaitingComplete
+  useEffect(() => {
+    if (typeof onStepHeld !== 'function') return
+    onStepHeld(stepHeld)
+    return () => onStepHeld(false)
+  }, [onStepHeld, stepHeld])
   // The registration of that passkey failed (shown once unlocked).
   const [regNote, setRegNote] = useState('')
   // The result of the finishRecovery (or its 'concluir') that installed the
@@ -982,6 +991,11 @@ export default function Identidade ({ active, embedded = false, setup = false, v
     try { pending = call() } catch (err) { pending = Promise.reject(err) }
     Promise.resolve(pending)
       .then(async (r) => {
+        // The stepHeld effect reports one commit late: a link batched into
+        // this update would see neither the recovery nor the hold.
+        if ((r && r.pending === true) || (r && r.needsPasskey === true)) {
+          if (typeof onStepHeld === 'function') onStepHeld(true)
+        }
         if (r && r.pending === true) {
           passkey.endRecovery()
           setAwaitingComplete(true)
@@ -1140,6 +1154,10 @@ export default function Identidade ({ active, embedded = false, setup = false, v
       </>
       )
     : null
+  // The setup step has no card and stacks large full-width buttons.
+  const Box = setup ? View : Card
+  const boxStyle = setup ? styles.stepBody : undefined
+  const bigSetup = setup ? { block: true, large: true } : {}
   let entrar = null
   if (passkey !== null && locked) {
     // The browser itself cannot (no WebAuthn, or it reports no PRF): only
@@ -1150,28 +1168,28 @@ export default function Identidade ({ active, embedded = false, setup = false, v
     if (pkStatus === null) {
       entrar = passkey.error
         ? (
-          <Card>
+          <Box style={boxStyle}>
             <ErrorText>{passkey.error}</ErrorText>
-            <Btn label='Tentar de novo' onPress={() => passkey.refresh()} />
-          </Card>
+            <Btn label='Tentar de novo' onPress={() => passkey.refresh()} {...bigSetup} />
+          </Box>
           )
         : <Soft>carregando…</Soft>
     } else if (pkStatus.rpIdError && !NATIVE) {
       // The address cannot carry a passkey (an IP): the page must be opened
       // by its domain name (localhost in development).
       entrar = (
-        <Card>
+        <Box style={boxStyle}>
           <Notice>{displayText(pkStatus.rpIdError)}</Notice>
           {blockedInvite}
-        </Card>
+        </Box>
       )
     } else if (browserBlocked) {
       // No live failure here, so no passkey is named for deletion.
       entrar = (
-        <Card>
+        <Box style={boxStyle}>
           <Notice>{NATIVE ? DEVICE_TEXT : BROWSER_TEXT}</Notice>
           {blockedInvite}
-        </Card>
+        </Box>
       )
     } else if (noPrf !== null) {
       // A passkey was created or chosen but its manager gives no PRF, or the
@@ -1181,30 +1199,30 @@ export default function Identidade ({ active, embedded = false, setup = false, v
         ? notSyncedSteps({ userIds: staleIds, cleaned: noPrf.cleaned === true, native: NATIVE, withLink: inviteHere, phone: phoneOk })
         : unusableSteps({ userIds: staleIds, withLink: inviteHere, created: noPrf.created, known: pkStatus.passkeyKnown === true && noPrf.created !== true, native: NATIVE, cleaned: noPrf.cleaned === true })
       entrar = (
-        <Card>
+        <Box style={boxStyle}>
           <Notice>{noPrf.notSynced === true ? NOT_SYNCED_TITLE : UNUSABLE_TITLE}</Notice>
           {steps.map((step) => <Body key={step}>{step}</Body>)}
-          <Btn label={RETRY_BUTTON} onPress={() => setNoPrf(null)} disabled={pkPending} />
+          <Btn label={RETRY_BUTTON} onPress={() => setNoPrf(null)} disabled={pkPending} {...bigSetup} />
           {blockedInvite}
-        </Card>
+        </Box>
       )
     } else if (needsPasskey) {
       // Exclusive: a pending creation here can only be the recovery's own
       // (the code entry is hidden while another one awaits 'concluir').
       entrar = (
-        <Card>
+        <Box style={boxStyle}>
           <Body>{NEEDS_PASSKEY_TEXT}</Body>
           {showComplete
             ? (
               <>
                 <Body>{PENDING_TEXT}</Body>
-                <Btn label='Concluir a criação da passkey' onPress={onFinishComplete} pending={pkPending} />
+                <Btn label='Concluir a criação da passkey' onPress={onFinishComplete} pending={pkPending} {...bigSetup} />
               </>
               )
-            : <Btn label='Criar passkey nova' onPress={onFinishRecovery} pending={pkPending} />}
-          <Btn label='Cancelar' secondary onPress={onCancelRecovery} disabled={pkPending} />
+            : <Btn label='Criar passkey nova' onPress={onFinishRecovery} pending={pkPending} {...bigSetup} />}
+          <Btn label='Cancelar' secondary onPress={onCancelRecovery} disabled={pkPending} {...bigSetup} />
           <ErrorText>{pkError}</ErrorText>
-        </Card>
+        </Box>
       )
     } else {
       // The welcome: a hero above (src/ui/Welcome.js), two large buttons and
@@ -1498,11 +1516,10 @@ const makeStyles = (colors) => StyleSheet.create({
     backgroundColor: colors.card,
     borderWidth: 1,
     borderColor: colors.line,
-    borderRadius: 12,
+    borderRadius: radius.md,
     paddingHorizontal: 12,
     paddingVertical: 10,
-    fontFamily: fonts.mono,
-    fontSize: 13,
+    ...type.code,
     color: colors.ink,
     minHeight: 64
   }
