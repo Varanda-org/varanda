@@ -13,15 +13,18 @@ function between (source, start, end) {
 }
 
 // Execute the actual handlers and useAction lock without loading native UI.
-function handlers (onSend, onExpand = async () => false, off = false) {
+function handlers (onSend, onExpand = async () => false, off = false, onAttach = async () => false) {
   let text = 'resposta'
   const actionSource = between(read('ui/index.js'), 'export function useAction () {', '// Date.now()').replace('export ', '')
   const useAction = new Function('useState', 'useRef', 'useCallback', 'errorText', actionSource + '\nreturn useAction') // eslint-disable-line no-new-func
   const action = useAction(() => [false, () => {}], (value) => ({ current: value }), (fn) => fn, (err) => err.message)()
   const code = between(src, '  const send = async () => {', '  const grow = (event) => {')
-  const build = new Function('off', 'text', 'action', 'onSend', 'onExpand', 'setText', code + '\nreturn { send, expand }') // eslint-disable-line no-new-func
+  const attachStart = src.indexOf('  const attachPhoto = async () => {')
+  const attachCode = src.slice(attachStart, src.indexOf('\n  }\n', attachStart) + 4)
+  const attachOff = off || typeof onAttach !== 'function'
+  const build = new Function('off', 'text', 'action', 'onSend', 'onExpand', 'onAttach', 'attachOff', 'setText', code + '\n' + attachCode + '\nreturn { send, expand, attachPhoto }') // eslint-disable-line no-new-func
   return {
-    ...build(off, text, action, onSend, onExpand, (next) => { text = typeof next === 'function' ? next(text) : next }),
+    ...build(off, text, action, onSend, onExpand, onAttach, attachOff, (next) => { text = typeof next === 'function' ? next(text) : next }),
     text: () => text,
     change: (value) => { text = value }
   }
@@ -31,20 +34,42 @@ test('ReplyBar pins accessible copy, theme, capped text and keyboard handling', 
   for (const text of ['Escreva uma resposta', 'cancelar resposta', 'Responder', 'abrir editor completo']) t.ok(src.includes(text), text)
   t.ok(src.includes("accessibilityLabel='cancelar resposta'"))
   t.ok(src.includes("accessibilityLabel='abrir editor completo'"))
-  t.ok(src.includes("<Pill label='Responder'"))
-  const line = between(src, '<View style={styles.line}>', '\n      </View>')
-  t.ok(line.includes('<TextInput') && line.includes("<Pill label='Responder'"), 'the field and the send share one line')
-  t.ok(line.indexOf('<TextInput') < line.indexOf("<Pill label='Responder'"))
+  t.ok(src.includes("accessibilityLabel='Responder'"))
+  const line = between(src, '<View style={styles.line}>', '\n      </View>\n      {/*')
+  t.ok(line.includes('<TextInput') && line.includes("accessibilityLabel='Responder'"), 'the pill and the send share one line')
+  t.ok(line.indexOf('<TextInput') < line.indexOf("accessibilityLabel='Responder'"))
   t.ok(line.includes("accessibilityLabel='abrir editor completo'"), 'expand stays on that line')
-  t.absent(line.includes('cancelar resposta'), 'cancel stays off the field line')
+  t.ok(src.includes("import { Avatar } from './Avatar'") && src.includes('size={28}') && src.includes('{me ? '), 'the member avatar leads the pill')
+  t.ok(src.includes("<Icon name='imagem' size={18} color={colors.soft} />") && src.includes("accessibilityLabel='adicionar foto'"), 'plain photo icon')
+  t.ok(src.includes("const expanded = focused || text.trim() !== '' || nonFocalTarget === true"), 'expanded state')
+  t.ok(src.includes('me = null, nonFocalTarget = false') && src.includes('onAttach'), 'new props')
+  t.ok(src.includes('{expanded && target\n') && src.includes('{expanded\n'), 'target row and send only when expanded')
+  t.is(src.split('<TextInput').length - 1, 1, 'one input instance in both states')
+  t.ok(src.indexOf('<View style={styles.target}>') < src.indexOf('<TextInput') && src.indexOf('<TextInput') < src.indexOf("accessibilityLabel='Responder'"), 'target above the input, send after the pill')
+  t.ok(src.includes("bar: { paddingTop: space.sm, gap: space.xs, backgroundColor: 'transparent' }") && src.includes('radius.bubble'), 'transparent bar, round pill')
   t.absent(line.includes('{length}/1000'), 'the counter sits under the line, so the field keeps its width at large text')
   t.ok(src.includes("counter: { ...type.counter, color: colors.soft, alignSelf: 'flex-end' }"))
-  t.ok(src.indexOf('<View style={styles.target}>') < src.indexOf('<View style={styles.line}>'))
   t.ok(src.includes("line: { flexDirection: 'row', alignItems: 'flex-end', gap: space.sm }"))
   t.absent(src.includes('styles.actions'), 'no second row of actions')
   t.ok(src.includes("import { replyChip } from '../threadRows'"))
   t.ok(src.includes('{replyChip(target)}'))
-  t.ok(src.includes("icon='fechar' accessibilityLabel='cancelar resposta'"))
+  t.ok(src.includes("<Icon name='fechar' size={18} color={colors.soft} />"))
+  t.absent(src.includes('Pill'), 'the tools are plain icons, with no outlined circles')
+  const field = between(line, '<View style={[styles.pill', '\n        </View>\n        {expanded')
+  t.ok(field.includes('<TextInput') && field.includes("accessibilityLabel='abrir editor completo'") && field.includes("accessibilityLabel='cancelar resposta'"), 'expand and cancel sit inside the pill')
+  t.absent(field.includes("accessibilityLabel='Responder'"), 'send sits beside the pill')
+  t.ok(src.includes('style={[styles.input, webInputReset, { height: Math.min(height, maxHeight), maxHeight }]}'), 'no browser focus ring inside the rounded field')
+  t.ok(src.includes('pillFocused: { borderColor: colors.accent }'), 'focus shows on the pill')
+  t.ok(src.includes('backgroundColor: colors.inputOff'))
+  t.ok(src.includes("<Icon name='expandir' size={18} color={colors.soft} />"))
+  t.ok(src.includes("<Icon name='send' size={18} color={colors.accentInk} />"))
+  t.ok(src.includes('accessibilityState={{ disabled: sendOff, busy: action.pending }}'))
+  t.ok(src.includes("const sendOff = off || text.trim() === ''"))
+  t.ok(src.includes('hitSlop={(layout.hit - SEND) / 2}'))
+  t.is(src.split("accessibilityRole='button'").length - 1, 4, 'cancel, photo, expand and send are all buttons')
+  t.ok(src.split('disabled={off}').length - 1 >= 2, 'cancel and expand really disable')
+  t.ok(src.includes('disabled={attachOff}') && src.includes("const attachOff = off || typeof onAttach !== 'function'"), 'photo really disables')
+  t.is(src.split('disabled={sendOff}').length - 1, 1, 'send really disables when empty')
   t.ok(src.includes('displayText(note)'))
   t.absent(src.includes('KeyboardAvoidingView'), 'the bar never pads itself for the keyboard')
   const conversa = read('screens/Conversa.js')
@@ -119,6 +144,46 @@ test('expansion passes the draft, clears it only on acceptance and respects disa
   await blocked.send()
   await blocked.expand()
   t.is(calls, 0)
+})
+
+test('photo handler locks, passes the draft and clears only an unchanged draft on true', async (t) => {
+  const accepted = handlers(async () => false, async () => false, false, async (draft) => { t.is(draft, 'resposta'); return true })
+  await accepted.attachPhoto()
+  t.is(accepted.text(), '')
+  const changed = handlers(async () => false, async () => false, false, async () => { changed.change('novo'); return true })
+  await changed.attachPhoto()
+  t.is(changed.text(), 'novo')
+  const refused = handlers(async () => false, async () => false, false, async () => false)
+  await refused.attachPhoto()
+  t.is(refused.text(), 'resposta')
+  const failure = handlers(async () => false, async () => false, false, async () => { throw new Error('falhou') })
+  await failure.attachPhoto()
+  t.is(failure.text(), 'resposta')
+  let calls = 0
+  await handlers(async () => true, async () => true, true, async () => { calls++; return true }).attachPhoto()
+  await handlers(async () => true, async () => true, false, null).attachPhoto()
+  t.is(calls, 0, 'off or no onAttach does nothing')
+  let release
+  let n = 0
+  const h = handlers(() => new Promise((resolve) => { release = resolve }), async () => true, false, async () => { n++; return true })
+  const first = h.send()
+  await h.attachPhoto()
+  t.is(n, 0, 'the action lock covers the photo button')
+  release(false)
+  await first
+})
+
+test('Publicar launches the photo picker once per handoff, only on the no-conflict path', (t) => {
+  const seed = between(publicar, '    if (!replyDraftPending)', '\n  }, [replyDraftPending')
+  t.ok(seed.includes("reply.attach === 'photo' && attachedHandoffRef.current !== reply.handoff"))
+  t.ok(seed.includes('attachedHandoffRef.current = reply.handoff'))
+  t.ok(seed.indexOf('if (replyDraftConflict) return') < seed.indexOf('attachRef.current()'))
+  t.ok(seed.indexOf('settleReplyDraft(true)') < seed.indexOf('attachRef.current()'))
+  t.ok(seed.includes('ATTACH_AFTER_OPEN_MS'), 'waits for the sheet to finish presenting')
+  t.ok(publicar.includes('attachRef.current = attach'))
+  const conflict = between(publicar, '    const keepDraft =', '    return (\n      <Sheet open={open}')
+  t.absent(/attach/.test(conflict), 'the conflict choices never launch the picker')
+  t.is(publicar.split("reply.attach === 'photo'").length - 1, 1, 'one launch site')
 })
 
 function handoff (onReplyDraft = () => {}) {
