@@ -797,7 +797,7 @@ test('Conversa: reply branch controls are slim text links, not filled pills', (t
   t.ok(rowsSrc.includes("label='Ver conversa'"))
   t.ok(rowsSrc.includes('[styles.child, styles.branchAction, childErrors.has(key) && styles.branchError]'), 'more rows continue the branch line')
   t.ok(src.includes("import { BranchLink } from '../ui/BranchLink'"))
-  t.ok(src.includes("branchAction: { paddingLeft: 72, paddingRight: space.lg, alignItems: 'flex-start' }"))
+  t.ok(src.includes("branchAction: { paddingLeft: 68, paddingRight: space.lg, alignItems: 'flex-start' }"))
   t.ok(src.includes('branchError: { paddingTop: space.sm }'))
   t.ok(src.includes("<Btn label='Apagar' danger"), 'delete keeps its button')
   t.ok(link.includes("accessibilityRole='button'"))

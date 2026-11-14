@@ -86,10 +86,11 @@ function instantMs (value) {
   return new Date(String(value)).getTime()
 }
 
-// Under a minute, in the future, or not a time: the caller keeps its own fallback.
+// Under a minute, a week or more ("400d" says less than "5 nov"), in the
+// future, or not a time: the caller keeps its own fallback.
 export function compactTime (at, now = Date.now()) {
   const diff = instantMs(now) - instantMs(at)
-  if (!Number.isFinite(diff) || diff < 60000) return null
+  if (!Number.isFinite(diff) || diff < 60000 || diff >= 7 * 86400000) return null
   if (diff < 3600000) return Math.floor(diff / 60000) + 'min'
   if (diff < 86400000) return Math.floor(diff / 3600000) + 'h'
   return Math.floor(diff / 86400000) + 'd'

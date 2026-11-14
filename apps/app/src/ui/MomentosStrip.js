@@ -4,7 +4,7 @@
 // own one first with a '+' badge (it opens the composer in Momento mode when
 // there is no own live moment, the own viewer otherwise, where 'Novo
 // momento' adds another), then the authors with anything not seen on this
-// device (accent ring), then the fully seen ones (line ring). Under a ring
+// device (sunset ring), then the fully seen ones (outline ring). Under a ring
 // only the first word of the name, on one line with the slot growing with
 // font scaling up to 1.3; the full name is in the label. adjustsFontSizeToFit
 // shrank without limit on Android and not at all on the web. The own ring
@@ -24,7 +24,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } fr
 import { displayText } from '@varanda/rpc'
 import { ringOrder } from '../moments'
 import { liveAuthors, liveItems, ringSeen, stripShown } from '../momentSeen'
-import { relativeTime } from '../format'
+import { interpolateStops, relativeTime } from '../format'
 import { contextDate } from '../privateReply'
 import { whoOf } from '../who'
 import { Avatar } from './Avatar'
@@ -32,10 +32,14 @@ import { Icon } from './Icon'
 import { MoreButton } from './MoreButton'
 import { PressScale } from './PressScale'
 import { useStyles, useTheme } from './ThemeProvider'
-import { type } from './theme'
+import { sunsetStops, type } from './theme'
 
 export const OWN_LIVE_TITLE = 'Seus momentos (24 h)'
 const RING = 56
+// The sunset from orange to plum, sampled at its stop positions. The night
+// blue at its end is about 1.4:1 on the dark background, so a third of the
+// ring would vanish there.
+const RING_BANDS = interpolateStops(sunsetStops.slice(0, 3), 6)
 const EXCERPT = 60
 
 // The cap keeps the ring names and Diário rows within their compact layout.
@@ -73,8 +77,17 @@ function Ring ({ label, name, unseen, onPress, profile, publicKey, plus }) {
       onPress={onPress}
       style={({ pressed }) => [styles.ringItem, { width }, pressed && styles.pressed]}
     >
-      <View style={[styles.ring, { borderColor: plus ? 'transparent' : unseen ? colors.accent : colors.line }]}>
-        <Avatar name={profile ? (profile.name || profile.username || null) : null} publicKey={publicKey} size={RING - 8} picture={profile ? profile.avatar : undefined} persist />
+      <View style={[styles.ring, { backgroundColor: plus ? 'transparent' : colors.outline }]}>
+        {unseen && !plus
+          ? (
+            <View style={styles.ringStripes}>
+              {RING_BANDS.map((color, i) => <View key={i} style={[styles.ringStripe, { backgroundColor: color }]} />)}
+            </View>
+            )
+          : null}
+        <View style={styles.ringGap}>
+          <Avatar name={profile ? (profile.name || profile.username || null) : null} publicKey={publicKey} size={RING - 8} picture={profile ? profile.avatar : undefined} persist />
+        </View>
         {plus
           ? (
             <View style={styles.plus}>
@@ -205,9 +218,12 @@ const makeStyles = (colors) => StyleSheet.create({
   strip: { flexDirection: 'row', gap: 8, paddingHorizontal: 12, paddingVertical: 10 },
   ringItem: { width: 72, minHeight: 44, alignItems: 'center', gap: 4 },
   pressed: { opacity: 0.6 },
-  ring: { width: RING, height: RING, borderRadius: RING / 2, borderWidth: 2, padding: 2, alignItems: 'center', justifyContent: 'center' },
+  ring: { width: RING, height: RING, borderRadius: RING / 2, alignItems: 'center', justifyContent: 'center' },
+  ringStripes: { ...StyleSheet.absoluteFillObject, borderRadius: RING / 2, overflow: 'hidden' },
+  ringStripe: { flex: 1 },
+  ringGap: { width: RING - 4, height: RING - 4, borderRadius: (RING - 4) / 2, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center' },
   plus: { position: 'absolute', right: -2, bottom: -2, width: 20, height: 20, borderRadius: 10, backgroundColor: colors.accent, borderWidth: 2, borderColor: colors.bg, alignItems: 'center', justifyContent: 'center' },
-  ringName: { ...type.postMeta, color: colors.ink, width: '100%', textAlign: 'center' },
+  ringName: { ...type.caption, color: colors.ink, width: '100%', textAlign: 'center' },
   section: { borderBottomWidth: 1, borderBottomColor: colors.line },
   row: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 44, paddingHorizontal: 16, paddingVertical: 10 },
   rowText: { ...type.postName, color: colors.ink, flex: 1 },

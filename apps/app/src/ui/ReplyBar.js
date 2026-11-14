@@ -59,24 +59,25 @@ export function ReplyBar ({ target = null, onSend, onExpand, onClearTarget, busy
           </View>
           )
         : null}
-      <TextInput
-        ref={inputRef}
-        value={text}
-        onChangeText={setText}
-        editable={!off}
-        multiline
-        placeholder='Escreva uma resposta'
-        accessibilityLabel='Escreva uma resposta'
-        placeholderTextColor={colors.placeholder}
-        maxFontSizeMultiplier={TEXT_CAP}
-        onContentSizeChange={grow}
-        style={[styles.input, { height: Math.min(height, maxHeight), maxHeight }]}
-      />
-      <View style={styles.actions}>
+      <View style={styles.line}>
+        <TextInput
+          ref={inputRef}
+          value={text}
+          onChangeText={setText}
+          editable={!off}
+          multiline
+          placeholder='Escreva uma resposta'
+          accessibilityLabel='Escreva uma resposta'
+          placeholderTextColor={colors.placeholder}
+          maxFontSizeMultiplier={TEXT_CAP}
+          onContentSizeChange={grow}
+          style={[styles.input, { height: Math.min(height, maxHeight), maxHeight }]}
+        />
         <Pill icon='maximize-2' accessibilityLabel='abrir editor completo' onPress={expand} disabled={off} />
-        {length >= 900 ? <Text style={[styles.counter, length > 1000 && styles.over]} maxFontSizeMultiplier={TEXT_CAP}>{length}/1000</Text> : null}
         <Pill label='Responder' filled onPress={send} disabled={off || text.trim() === ''} pending={action.pending} maxFontSizeMultiplier={TEXT_CAP} />
       </View>
+      {/* Under the line: beside the buttons at large text on a narrow screen it left the field no width. */}
+      {length >= 900 ? <Text style={[styles.counter, length > 1000 && styles.over]} maxFontSizeMultiplier={TEXT_CAP}>{length}/1000</Text> : null}
       {note ? <Text style={styles.note} maxFontSizeMultiplier={TEXT_CAP}>{displayText(note)}</Text> : null}
       {action.error ? <Text style={styles.error} accessibilityRole='alert' maxFontSizeMultiplier={TEXT_CAP}>{action.error}</Text> : null}
     </View>
@@ -87,9 +88,11 @@ const makeStyles = (colors) => StyleSheet.create({
   bar: { padding: space.md, gap: space.sm, backgroundColor: colors.card, borderTopWidth: 1, borderTopColor: colors.outline },
   target: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
   targetText: { ...type.replyMark, color: colors.soft, flex: 1 },
-  input: { ...type.postText, color: colors.ink, padding: space.sm, textAlignVertical: 'top', minHeight: MIN_HEIGHT },
-  actions: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: space.sm },
-  counter: { ...type.counter, color: colors.soft },
+  // The field grows to four lines; send stays on the last line of this row.
+  // minWidth 0: on the web a flex item stays as wide as its placeholder and would push send off the row.
+  line: { flexDirection: 'row', alignItems: 'flex-end', gap: space.sm },
+  input: { ...type.postText, color: colors.ink, flex: 1, minWidth: 0, padding: space.sm, textAlignVertical: 'top', minHeight: MIN_HEIGHT },
+  counter: { ...type.counter, color: colors.soft, alignSelf: 'flex-end' },
   over: { color: colors.danger },
   note: { ...type.caption, color: colors.soft },
   error: { ...type.caption, color: colors.danger }

@@ -47,6 +47,33 @@ test('both A Rua feeds keep load errors in the list header', (t) => {
   t.ok(src.includes("actionLabel='Atualizar'"), 'a followed but empty feed can refresh')
 })
 
+test('incomplete counts keep their explanation in a shared info button', async (t) => {
+  const src = read('screens/ARua.js')
+  const note = section(src, 'export function CountsNote', '\n\n')
+  t.ok(src.includes("import { HelpButton, HelpNote } from '../ui/Help'"), 'the shared help control is imported')
+  t.ok(src.includes("const INCOMPLETE_NOTE = 'Alguns números podem estar incompletos.'"), 'the original sentence stays unchanged')
+  t.ok(note.includes('const doc = countsNoteDoc(social.social.flags)') && note.includes('if (doc === null) return null'), 'CountsNote renders only when the rule gives a doc')
+  t.ok(note.includes('<HelpButton doc={doc} size={18} style={styles.countsHelp} />'), 'CountsNote renders a HelpButton with its own doc')
+  t.ok(note.includes("<Text style={styles.countsNoteText} accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>{doc.title}</Text>"), 'a visible label, read once on the button')
+  t.ok(src.includes("countsNote: { flexDirection: 'row', alignItems: 'center', paddingLeft: 16, minHeight: layout.hit }") && src.includes('countsHelp: { marginLeft: -8 }'), 'the 44 pt target stays inside its own row, without the inset margin')
+  const rule = section(src, 'export function countsNoteDoc', '\n\n')
+  t.ok(rule.length > 0, 'one pure rule picks the note')
+  const countsNoteDoc = evaluate(rule.replace('export ', '') + '\nreturn countsNoteDoc', { INCOMPLETE_NOTE: 'Alguns números podem estar incompletos.' })
+  for (const indexing of [false, true]) {
+    for (const complete of [false, true, undefined, null, 0]) {
+      const doc = countsNoteDoc({ indexing, complete })
+      t.alike(doc, !indexing && complete === false ? { title: 'Números incompletos', paragraphs: ['Alguns números podem estar incompletos.'] } : null, 'indexing=' + indexing + ', complete=' + complete)
+    }
+  }
+  for (const name of ['Busca', 'Diario', 'Espiadinha']) {
+    const consumer = read('screens/' + name + '.js')
+    t.ok(/import \{[^}]*\bCountsNote\b[^}]*\} from '\.\/ARua'/.test(consumer) && consumer.includes('<CountsNote social={social} />'), name + ' shares the same control')
+  }
+  t.ok(src.includes('{incomplete ? <Soft>incompleto: algumas publicações podem não ter chegado.</Soft> : null}'), 'the separate publication warning stays')
+  const { HELP } = await import('../src/help.js')
+  t.is(HELP.rua.paragraphs[2], 'Os números de curtidas e respostas podem chegar incompletos. Eles não mudam o que foi publicado.', 'the general feed help keeps its distinct sentence')
+})
+
 test('shell toast has a 44 point action and extends action lifetime for large text', (t) => {
   const src = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
   t.ok(/toastAction: \{[^\n]*minHeight: 44[^\n]*minWidth: 44/.test(src), 'both touch dimensions on the visible action')
@@ -138,6 +165,7 @@ test('Momentos rings animate presses and grow with text while announcing the ful
   t.ok(ring.includes('const width = 72 * Math.min(ROW_CAP, Math.max(1, fontScale))'), 'the slot grows at font scale 1.3')
   t.ok(ring.includes('styles.ringItem, { width }'), 'the calculated width reaches the control')
   t.ok(/ringName: \{[^\n]*width: '100%'/.test(src), 'the name uses the enlarged slot')
+  t.ok(/ringName: \{ \.\.\.type\.caption,/.test(src), 'ring labels use the caption token')
   t.ok(src.includes("label={'momentos de ' + name}") && src.includes('const name = displayText(whoOf(profile || {}).title)'), 'the full label remains sanitized')
   t.ok(ring.includes('maxFontSizeMultiplier={ROW_CAP}') && src.includes('const ROW_CAP = 1.3'), 'text and slot share the cap')
 })

@@ -7,6 +7,42 @@ const path = require('path')
 const read = (file) => fs.readFileSync(path.join(__dirname, '../src/ui', file), 'utf8')
 const post = read('PostRow.js')
 
+test('head controls stay outside the hidden body, after the content and before the bar', (t) => {
+  const body = post.indexOf('<View style={styles.body}')
+  const controls = post.indexOf('<View style={[styles.headActions, !stackHead && { top: -HEAD_LIFT }]}')
+  t.ok(controls > body && body >= 0, 'head actions are inside the body column')
+  const stack = []
+  for (const match of post.slice(body, controls).matchAll(/<(\/)?(View|Pressable)\b([^>]*?)>/g)) {
+    if (match[1]) stack.pop()
+    else if (!match[3].endsWith('/')) stack.push(match[0])
+  }
+  t.alike(stack, ['<View style={styles.body} onLayout={measureCaption}>'], 'actions are siblings of the closed body pressable, outside hidden ancestors')
+  const end = post.indexOf('<View style={styles.bar}>', controls)
+  const buttons = post.slice(controls, end)
+  t.ok(end > controls, 'controls precede the bar')
+  t.ok(post.indexOf('{textOut ? textNode : null}') < controls && post.indexOf('<ClampControl') < controls && post.indexOf('{previewNode}') < controls, 'a screen reader reads the interactive caption, its clamp control and the replies before the controls')
+  t.ok(buttons.includes("accessibilityLabel={'seguir ' + title}") && buttons.includes("label='mais ações'"), 'both labelled controls are in the visible accessibility tree')
+  t.absent(/accessibilityElementsHidden|no-hide-descendants|accessible=\{false\}/.test(buttons), 'neither control is hidden')
+  t.ok(buttons.includes('onPress={otherPress(onFollow)}') && buttons.includes('disabled={!!followPending}') && buttons.includes('accessibilityState={{ disabled: !!followPending }}'), 'follow retains its handler and announced pending state')
+  t.ok(buttons.includes('<Text style={styles.followText}>seguir</Text>'), 'follow is a text button')
+  t.ok(post.includes('followText: { ...type.counter, color: colors.accent }'), 'follow uses the accent')
+  t.ok(buttons.includes("onPress={otherPress(() => setSheet('more'))}"), 'more keeps the same sheet and cancels pending navigation')
+})
+
+test('head reserves the measured space of its absolute controls', (t) => {
+  t.ok(post.includes("headActions: { position: 'absolute', top: 0, right: 0, flexDirection: 'row', alignItems: 'center' }"))
+  t.ok(post.includes('onLayout={measureHeadActions}'), 'measurement includes text scaling')
+  t.ok(post.includes('headActions && !stackHead && { paddingRight: headReserve.width }'), 'name and date clear the width of the targets')
+  t.ok(post.includes('const HEAD_LIFT = 12') && post.includes('<View style={[styles.headActions, !stackHead && { top: -HEAD_LIFT }]}'), 'the 44 pt targets centre on the 20 pt name line')
+  t.ok(post.includes('headActions && !stackHead && fn(onFollow) && { minHeight: headReserve.height - HEAD_LIFT }'), 'with seguir, the head is tall enough that its target never covers the caption')
+  t.absent(post.includes('minHeight: headReserve.height }'), 'only ⋯: the head adds no height to the post')
+  t.ok(post.includes('const headReserve = headActionsSize.width > 0 ? headActionsSize : { width: (fn(onFollow) ? FOLLOW_GUESS : 0) + (hasMore ? layout.hit : 0), height: layout.hit }'), 'before measurement the targets reserve their usual size, never zero')
+  t.ok(post.includes('const stackHead = headActions && fontScale >= LARGE_TEXT') && post.includes("headStacked: { flexWrap: 'wrap' }") && post.includes("stackHead && { width: '100%', paddingRight: headReserve.width, minHeight: headReserve.height"), 'at large text the name keeps the first line beside the targets and the date wraps below them')
+  t.ok(post.includes('const headActions = !!fn(onFollow) || hasMore'), 'only visible controls reserve space')
+  t.ok(/follow: \{[^}]*minHeight: layout\.hit[^}]*minWidth: 44/.test(post), 'follow keeps a 44 pt target')
+  t.ok(/action: \{[^}]*minHeight: layout\.hit[^}]*minWidth: 44/.test(post), 'more keeps its Action target')
+})
+
 test('PostRow places media before the caption in both text branches', (t) => {
   t.ok(/\{mediaNode\}\s*\{textOut \? null : textNode\}/.test(post), 'plain caption follows photos')
   t.is(post.split('{mediaNode}').length - 1, 1, 'photos keep one parent in both caption branches, so opening a caption never remounts the carousel')
@@ -27,7 +63,7 @@ test('PostRow measures the caption column and forwards the expanded override', (
 test('a clamped caption is plain sanitized Text and expansion restores interaction', (t) => {
   t.ok(post.includes('const textOut = hasText && numberOfLines === 0 &&'), 'links and mentions leave the body only when uncapped')
   t.ok(/<Text style=\{styles.text\} numberOfLines=\{numberOfLines\} onTextLayout=\{onTextLayout\}>\{shownText\}<\/Text>/.test(post), 'native layout refines the clamped caption')
-  t.ok(post.includes('<MentionText text={body} onOpenMention={openMention} onOpenPlain={openTap} onTextLayout={onTextLayout} style={styles.text} />'), 'uncapped text keeps full interactive links and mentions')
+  t.ok(post.includes('<MentionText text={body} onOpenMention={openMention} onOpenPlain={openTap} onLongPress={bodyLongPress} onTextLayout={onTextLayout} style={styles.text} />'), 'uncapped text keeps full interactive links and mentions')
   t.ok(post.includes('onTextLayout={onTextLayout} style={styles.text} />'), 'the expanded caption with links or mentions is measured too, so collapsing can drop a control it does not need')
   const mention = read('MentionText.js')
   t.is(mention.split('onTextLayout={onTextLayout}').length - 1, 2, 'MentionText hands onTextLayout to both of its root Text branches')
@@ -79,7 +115,8 @@ test('the reply line is a 44 pt replyChip and plain text without onOpenParent', 
     'link labelled with the chip text, no hitSlop'
   )
   t.ok(/replyChip: \{[^}]*minHeight: layout\.hit/.test(post), 'the chip box is at least 44 pt')
-  t.ok(post.includes('replyChipText: { ...type.replyMark, color: colors.accent'), 'reply line is accent-coloured text')
+  t.ok(/replyChip: \{[^}]*marginVertical: -6/.test(post), 'negative margin pulls the 44 pt target in so the line costs about 32 pt')
+  t.ok(post.includes('replyChipText: { ...type.meta, color: colors.soft'), 'reply line is soft meta text, and the plain branch uses it')
   const chipBox = /replyChip: \{([^}]*)\}/.exec(post)
   t.ok(chipBox && !/backgroundColor|borderRadius/.test(chipBox[1]), 'no pill behind the reply line')
   const chipAt = post.indexOf('accessibilityLabel={replyLabel}')

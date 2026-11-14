@@ -14,7 +14,7 @@ import { layout, space, type } from './theme'
 
 const ROW_PADDING = space.lg * 2
 // PostRow's avatar and gap also reduce the body's available text width.
-const AVATAR_SIZE = 44
+const AVATAR_SIZE = 40
 const AVATAR_GAP = 12
 
 const CONTROL_LABELS = {

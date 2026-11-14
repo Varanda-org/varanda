@@ -53,7 +53,7 @@ import { pagesFeedKeys, pagesFollows } from '../pages'
 import { revokeDeletedMedia } from '../media/cache'
 import { HELP } from '../help'
 import { Soft, errorText, useBottomPad, useNow } from '../ui'
-import { HelpNote } from '../ui/Help'
+import { HelpButton, HelpNote } from '../ui/Help'
 import { Icon } from '../ui/Icon'
 import { PostRow } from '../ui/PostRow'
 import { KeptOnlyContext } from '../ui/MediaView'
@@ -1393,12 +1393,24 @@ function useReplyPreviews (items) {
 
 // 'Alguns números podem estar incompletos.' once at the top of a list (only
 // when counts were read from the index, i.e. on the hosted web).
+export function countsNoteDoc (flags) {
+  if (flags.indexing || flags.complete !== false) return null
+  return { title: 'Números incompletos', paragraphs: [INCOMPLETE_NOTE] }
+}
+
+// A labelled row, not a lone ⓘ that said nothing: the 44 pt target stays in
+// the row instead of reaching into the strip above. The label is the
+// button's own name, so a screen reader hears it once, on the button.
 export function CountsNote ({ social }) {
   const styles = useStyles(makeStyles)
-  const f = social.social.flags
-  if (f.indexing || f.complete !== false) return null
-  // A footnote, not a row: the feed's first line stays a post.
-  return <Text style={styles.footnote}>{INCOMPLETE_NOTE}</Text>
+  const doc = countsNoteDoc(social.social.flags)
+  if (doc === null) return null
+  return (
+    <View style={styles.countsNote}>
+      <Text style={styles.countsNoteText} accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>{doc.title}</Text>
+      <HelpButton doc={doc} size={18} style={styles.countsHelp} />
+    </View>
+  )
 }
 
 // A repost whose original is loading (`missing` false) or unavailable.
@@ -2539,7 +2551,10 @@ const makeStyles = (colors) => StyleSheet.create({
   previewTrack: { height: 2, backgroundColor: colors.line },
   previewFill: { height: 2, backgroundColor: colors.accent },
   footer: { padding: 16, gap: 8 },
-  footnote: { ...type.replyMark, fontSize: 12, lineHeight: 16, color: colors.soft, paddingHorizontal: 16, paddingTop: 6, paddingBottom: 2 },
+  countsNote: { flexDirection: 'row', alignItems: 'center', paddingLeft: 16, minHeight: layout.hit },
+  countsNoteText: { ...type.meta, color: colors.soft },
+  // The icon sits by the label; the target overlaps the label's last 8 pt.
+  countsHelp: { marginLeft: -8 },
   pageTitle: { ...type.counter, color: colors.ink, fontWeight: '700' },
   placeholder: {
     paddingVertical: 12,

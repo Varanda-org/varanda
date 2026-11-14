@@ -3,6 +3,8 @@
 'use strict'
 
 const test = require('brittle')
+const fs = require('fs')
+const path = require('path')
 const load = () => import('../src/engagers.js')
 
 const A = 'ab'.repeat(32)
@@ -215,4 +217,19 @@ test('constants and no exported string has an em dash', async (t) => {
   collect(mod.notesOf({ complete: false, unconfirmed: 2 }))
   t.ok(strings.length > 20)
   for (const s of strings) t.absent(s.includes(String.fromCodePoint(0x2014)), s)
+})
+
+test('Curtidas folds a known total into the tab label', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Curtidas.js'), 'utf8')
+  const fn = src.slice(src.indexOf('function tabLabel'), src.indexOf('function EngagerRow'))
+  t.ok(fn.includes("tab && tab.phase === 'ready' ? countLabel(kind, tab.total) : ''"), 'a total counts only once the tab is ready')
+  t.ok(fn.includes('sentence ? displayText(formatCount(tab.total)) : \'\''), 'known total through formatCount and displayText, unknown stays off')
+  t.ok(fn.includes("spoken: shown ? name + ', ' + sentence : name"), 'the spoken label keeps the full count sentence')
+  t.ok(fn.includes("text: shown ? name + ' · ' + shown : name"), 'the drawn label folds the compact count in')
+  t.ok(src.includes('const label = tabLabel(k, tabs[k])'), 'each tab carries its own total')
+  t.ok(src.includes('accessibilityLabel={label.spoken}'))
+  t.ok(src.includes('{label.text}'))
+  t.absent(src.includes('styles.count'), 'no separate count line')
+  t.absent(src.includes('Seguir'), 'no follow button')
+  t.absent(src.includes('\u2014'), 'no em dash')
 })

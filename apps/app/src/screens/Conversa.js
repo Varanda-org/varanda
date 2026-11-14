@@ -1200,7 +1200,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
           )
         : null}
       {parent && post && parentHeight !== null
-        ? <View pointerEvents='none' accessible={false} style={[styles.connector, { height: parentHeight - 52 }]} />
+        ? <View pointerEvents='none' accessible={false} style={[styles.connector, { height: parentHeight - 48 }]} />
         : null}
       {phase === 'ready' && !view.post
         ? <View style={styles.note}><Soft>Esta publicação não pôde ser verificada agora.</Soft></View>
@@ -1298,15 +1298,15 @@ const makeStyles = (colors) => StyleSheet.create({
   note: { paddingHorizontal: 16, paddingVertical: 12 },
   prompt: { paddingHorizontal: 16, paddingVertical: 12, gap: 8 },
   child: { marginLeft: space.xl, borderLeftWidth: 1, borderLeftColor: colors.line },
-  // 72 is the post text column (PostRow padding 16 + avatar 44 + gap 12). No vertical padding: the 44 pt box of the link is the row.
-  branchAction: { paddingLeft: 72, paddingRight: space.lg, alignItems: 'flex-start' },
+  // 68 is the post text column (PostRow padding 16 + avatar 40 + gap 12). No vertical padding: the 44 pt box of the link is the row.
+  branchAction: { paddingLeft: 68, paddingRight: space.lg, alignItems: 'flex-start' },
   branchError: { paddingTop: space.sm },
   header: { position: 'relative' },
   parent: { opacity: 0.72 },
   focal: { position: 'relative' },
   accentBar: { position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, backgroundColor: colors.accent },
-  // Avatar centre x is 38 (paddingHorizontal 16 + 44 / 2); starts 4 below the parent avatar (12 + 44).
-  connector: { position: 'absolute', left: 37, top: 60, width: 2, backgroundColor: colors.line },
+  // Avatar centre x is 36 (paddingHorizontal 16 + 40 / 2); starts 4 below the parent avatar (12 + 40).
+  connector: { position: 'absolute', left: 35, top: 56, width: 2, backgroundColor: colors.line },
   repliesHead: { paddingHorizontal: 16, paddingVertical: 12, gap: 4, borderBottomWidth: 1, borderBottomColor: colors.line },
   repliesTitle: { ...type.section, color: colors.soft }
 })

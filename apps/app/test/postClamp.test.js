@@ -178,7 +178,7 @@ test('measurements ignore the rendered cap and preserve a larger full count', as
 test('ClampText defaults to the body column until a positive finite width is measured', (t) => {
   const src = read('ui/ClampText.js')
   t.ok(src.includes('const ROW_PADDING = space.lg * 2'))
-  t.ok(src.includes('const AVATAR_SIZE = 44'))
+  t.ok(src.includes('const AVATAR_SIZE = 40'))
   t.ok(src.includes('const AVATAR_GAP = 12'))
   t.ok(src.includes('const defaultWidth = Math.min(windowWidth, layout.column) - ROW_PADDING - AVATAR_SIZE - AVATAR_GAP'))
   t.ok(src.includes('const textWidth = Number.isFinite(width) && width > 0 ? width : defaultWidth'), 'undefined, zero, negative and non-finite widths use the default')

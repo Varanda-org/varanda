@@ -1,8 +1,8 @@
 // A link card: what the sender's device read once from a page it linked
 // (docs/protocol.md, "Link cards"), drawn from that stored data only. Showing
 // it never contacts the site: no request to the URL, no site icon, no
-// prefetch, no frame, no player. The title, description and host are peer
-// text and go through displayText. The host shown is the one the URL really
+// prefetch, no frame, no player. The title and host are peer text and go
+// through displayText. The host shown is the one the URL really
 // opens (cardUrlHost), so a card cannot name one site and open another; a
 // card whose URL fails that rule is not drawn at all. An allowlisted music
 // link is drawn by ./MusicEmbedCard instead, which loads the provider's player
@@ -92,7 +92,6 @@ export function LinkCard ({ card, draft, imageUri, onDismiss, thumb, onLongPress
   const chatUri = useChatThumb(draft ? null : thumb, stored)
   if (host === null) return null
   const title = textOf(data.title)
-  const desc = textOf(data.desc)
   const shownHost = displayText(host)
   const open = () => openExternal(url)
   const label = LINK_CARD_OPEN + ': ' + (title ? title + ', ' : '') + shownHost
@@ -121,7 +120,6 @@ export function LinkCard ({ card, draft, imageUri, onDismiss, thumb, onLongPress
         </View>
         <View style={styles.words}>
           {title ? <Text style={styles.title} numberOfLines={2}>{title}</Text> : null}
-          {desc ? <Text style={styles.desc} numberOfLines={2}>{desc}</Text> : null}
           <Text style={styles.host} numberOfLines={1}>{shownHost}</Text>
         </View>
       </Pressable>
@@ -149,7 +147,6 @@ const makeStyles = (colors) => StyleSheet.create({
     borderRadius: radius.md,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.line,
-    backgroundColor: colors.card,
     overflow: 'hidden'
   },
   body: { flex: 1, flexDirection: 'row', alignItems: 'center', minHeight: Math.max(layout.hit, THUMB), gap: space.sm },
@@ -165,7 +162,6 @@ const makeStyles = (colors) => StyleSheet.create({
   fill: { position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 },
   words: { flex: 1, paddingVertical: space.sm, paddingRight: space.sm, gap: 2 },
   title: { fontSize: 15, lineHeight: 20, fontWeight: '700', color: colors.ink },
-  desc: { fontSize: 13, lineHeight: 18, color: colors.soft },
   host: { fontSize: 12, lineHeight: 16, color: colors.soft },
   dismiss: { width: layout.hit, minHeight: layout.hit, alignItems: 'center', justifyContent: 'center' }
 })

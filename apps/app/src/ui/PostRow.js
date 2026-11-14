@@ -28,7 +28,7 @@
 // - repostedBy: null | { author, name, username }: a top line 'Nome
 //   republicou' (pressable -> onOpenReposter). onFollowReposter, when also
 //   given, is a small 'seguir' on that line (disabled while followPending).
-//   It follows the reposter; the action bar's onFollow follows the author.
+//   It follows the reposter; the head's onFollow follows the author.
 // - counts: null | { replies, likes, reposts, quotes }: the numbers show only
 //   when it is an object (and the number is above 0).
 // - liked, reposted: the own state; pending: null | 'like' | 'repost' (that
@@ -40,7 +40,8 @@
 //   when absent), onOpenReposter, and the action bar: onReply, onRepost,
 //   onQuote, onLike,
 //   onFollow ('seguir', disabled while followPending), onReport, onDelete.
-//   The bar is reply, repost, like, share and 'mais'. The repost button opens
+//   The bar is reply, repost, like and share; follow and 'mais' sit at the head.
+//   The repost button opens
 //   a small sheet (Republicar, and Citar with onQuote); report and delete live
 //   in the 'mais' sheet next to Copiar link, each only with its handler.
 // - onMessage(author, { context }), with the post's `seq`: 'Mensagem em
@@ -61,7 +62,7 @@ import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { AccessibilityInfo, Animated, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { pendingOpen, tapKind } from '../doubleTap'
-import { relativeTime } from '../format'
+import { compactTime, formatCount, relativeTime } from '../format'
 import { hasLink, textWithoutHrefs } from '../links'
 import { embedOf, sameMusicPage } from '../musicEmbed'
 import { musicRefOf } from '../music'
@@ -93,6 +94,11 @@ const ICON = 18
 // toggle writes a public signed record.
 const SPLIT_SLOP = { top: 6, bottom: 6, left: 6, right: 0 }
 const COUNT_SLOP = { top: 6, bottom: 6, left: 0, right: 6 }
+// 'seguir' at the counter size plus its padding, until it is measured.
+const FOLLOW_GUESS = 56
+// (44 - 20) / 2: the 44 pt targets centre on the 20 pt name line, so a post
+// with only ⋯ is no taller than its text.
+const HEAD_LIFT = 12
 
 const fn = (f) => (typeof f === 'function' ? f : undefined)
 
@@ -101,6 +107,13 @@ function countOf (counts, field) {
   if (!counts || typeof counts !== 'object') return null
   const n = counts[field]
   return Number.isSafeInteger(n) && n > 0 ? n : null
+}
+
+// formatCount returns null for a value that is not a count. displayText(null)
+// would paint the word "null", so that result stays off the row.
+function countLabel (n) {
+  const shown = formatCount(n)
+  return shown === null ? null : displayText(shown)
 }
 
 // multiline so a line break stays a space after the collapse, not U+FFFD.
@@ -158,6 +171,7 @@ function Bump ({ scale, children }) {
 
 function Action ({ label, onPress, disabled, on, count, split, children }) {
   const styles = useStyles(makeStyles)
+  const shown = countLabel(count)
   return (
     <Pressable
       accessibilityRole='button'
@@ -169,8 +183,8 @@ function Action ({ label, onPress, disabled, on, count, split, children }) {
       style={({ pressed }) => [styles.action, split && styles.actionSplit, disabled && styles.disabled, pressed && styles.pressed]}
     >
       {children}
-      {count !== null && count !== undefined
-        ? <Text style={[styles.count, on && styles.countOn]}>{displayText(String(count))}</Text>
+      {shown !== null
+        ? <Text style={[styles.count, on && styles.countOn]}>{shown}</Text>
         : null}
     </Pressable>
   )
@@ -187,6 +201,8 @@ function PostRowView ({
   const { colors } = useTheme()
   const likes = countOf(counts, 'likes')
   const reposts = countOf(counts, 'reposts')
+  const likeText = countLabel(likes)
+  const repostText = countLabel(reposts)
   const hasMedia = Array.isArray(media) && media.length > 0
   const embed = preview && typeof preview === 'object' ? embedOf(preview.url) : null
   const music = preview && typeof preview === 'object' ? musicRefOf(preview.url) : null
@@ -197,6 +213,12 @@ function PostRowView ({
   // The body label, the plain text and the label without the text all use it.
   const shownText = useMemo(() => (hasText ? displayText(body, { multiline: true }) : null), [hasText, body])
   const [captionWidth, setCaptionWidth] = useState(undefined)
+  const [headActionsSize, setHeadActionsSize] = useState({ width: 0, height: 0 })
+  // Measure the targets so larger text reserves its actual space in the head.
+  const measureHeadActions = (event) => {
+    const { width, height } = event.nativeEvent.layout
+    setHeadActionsSize((prev) => prev.width === width && prev.height === height ? prev : { width, height })
+  }
   const { numberOfLines, control, onTextLayout, toggle } = useClamp({
     text: shownText,
     hasMedia,
@@ -207,7 +229,11 @@ function PostRowView ({
     const width = event.nativeEvent.layout.width
     setCaptionWidth(Number.isFinite(width) && width > 0 ? width : undefined)
   }
-  const time = relativeTime(at, now) ?? displayText(at)
+  // compactTime has no word for under a minute or a clock ahead of ours;
+  // relativeTime says 'agora' or the date there, never the raw timestamp.
+  const time = compactTime(at, now) ?? relativeTime(at, now) ?? displayText(at)
+  // Read aloud as words: "3 h" or "5 nov", never "3h".
+  const spokenTime = relativeTime(at, now) ?? displayText(at)
   const who = whoOf({ name, username })
   const title = displayText(who.title)
   // At large text there is no room for the @nome beside the name and the
@@ -301,6 +327,20 @@ function PostRowView ({
     onPress: row.id === 'repost' ? doRepost : fn(onQuote)
   }))
   const hasMore = moreSheet.length > 0
+  const headActions = !!fn(onFollow) || hasMore
+  // Until the targets report their size, reserve what they usually take, so a
+  // row never paints them over the name for a frame.
+  const headReserve = headActionsSize.width > 0 ? headActionsSize : { width: (fn(onFollow) ? FOLLOW_GUESS : 0) + (hasMore ? layout.hit : 0), height: layout.hit }
+  // At large text the date cannot shrink and would run under the targets on a
+  // narrow screen, so the name keeps the first line and the date moves below.
+  const stackHead = headActions && fontScale >= LARGE_TEXT
+  const longPress = () => {
+    if (!hasMore || screenReaderOn()) return
+    cancelPendingOpen()
+    tap('light')
+    setSheet('more')
+  }
+  const bodyLongPress = hasMore && !screenReaderOn() ? longPress : undefined
   const burst = () => {
     if (reduceMotionOn) return
     burstScale.setValue(0.6)
@@ -357,17 +397,17 @@ function PostRowView ({
   const reposter = repostedBy && typeof repostedBy === 'object' ? repostedBy : null
   const reposterName = reposter ? displayText(whoOf({ name: reposter.name, username: reposter.username }).title) : ''
   const openReposter = otherPress(onOpenReposter)
-  // On the reposter's line, never the action bar: that 'seguir' follows the
+  // On the reposter's line, never the author's head: that 'seguir' follows the
   // original's author, and under their name it would read as the wrong person.
   const followReposter = reposter ? otherPress(onFollowReposter) : undefined
-  const bar = fn(onReply) || fn(onRepost) || fn(onQuote) || fn(onLike) || fn(onFollow) || hasMore || href !== null
+  const bar = fn(onReply) || fn(onRepost) || fn(onQuote) || fn(onLike) || href !== null
   // Composed label for the post body element: author, reply-to, text, date.
   // The avatar link already provides profile access, so name here is context.
   const bodyParts = [
     title,
     replyToName !== null ? ('respondendo a ' + displayText(replyToName)) : null,
     shownText,
-    time
+    spokenTime
   ].filter(Boolean)
   const bodyLabel = bodyParts.join('. ')
   const replyLabel = replyToName ? replyChip({ name: replyToName }) : ''
@@ -383,13 +423,15 @@ function PostRowView ({
   const label = textOut ? bodyParts.filter((part) => part !== shownText).join('. ') : bodyLabel
   const textNode = hasText
     ? textOut
-      ? <MentionText text={body} onOpenMention={openMention} onOpenPlain={openTap} onTextLayout={onTextLayout} style={styles.text} />
+      ? <MentionText text={body} onOpenMention={openMention} onOpenPlain={openTap} onLongPress={bodyLongPress} onTextLayout={onTextLayout} style={styles.text} />
       : (
         <Pressable
           accessibilityRole={open ? 'link' : 'text'}
           accessibilityHint={open ? 'abre a conversa' : undefined}
-          disabled={!open}
+          disabled={!open && !bodyLongPress}
           onPress={openTap}
+          onLongPress={bodyLongPress}
+          delayLongPress={350}
           {...a11yOpen}
         >
           <Text style={styles.text} numberOfLines={numberOfLines} onTextLayout={onTextLayout}>{shownText}</Text>
@@ -458,7 +500,7 @@ function PostRowView ({
           onPress={openAuthor}
           style={({ pressed }) => pressed && openAuthor && styles.pressed}
         >
-          <Avatar name={who.avatarName} publicKey={author} size={44} picture={avatar} persist={persistMedia !== false} />
+          <Avatar name={who.avatarName} publicKey={author} size={40} picture={avatar} persist={persistMedia !== false} />
         </Pressable>
         {/* Body: a single accessible element (author, text, date) so screen
             readers read in the order: avatar → post content → actions.
@@ -467,7 +509,9 @@ function PostRowView ({
         <View style={styles.body} onLayout={measureCaption}>
           <Pressable
             onPress={openTap}
-            disabled={!open}
+            onLongPress={bodyLongPress}
+            delayLongPress={350}
+            disabled={!open && !bodyLongPress}
             accessible
             accessibilityRole={open ? 'link' : 'text'}
             accessibilityLabel={label}
@@ -475,13 +519,15 @@ function PostRowView ({
             {...a11yOpen}
           >
             <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
-              <View style={styles.head}>
+              <View style={[styles.head, stackHead && styles.headStacked, headActions && !stackHead && { paddingRight: headReserve.width }, headActions && !stackHead && fn(onFollow) && { minHeight: headReserve.height - HEAD_LIFT }]}>
                 <Pressable
                   accessibilityRole='link'
                   accessibilityLabel={'ver o perfil de ' + title}
                   disabled={!openAuthor}
                   onPress={openAuthor}
-                  style={({ pressed }) => [styles.nameBox, handle && styles.nameBeside, pressed && openAuthor && styles.pressed]}
+                  onLongPress={bodyLongPress}
+                  delayLongPress={350}
+                  style={({ pressed }) => [styles.nameBox, handle && styles.nameBeside, stackHead && { width: '100%', paddingRight: headReserve.width, minHeight: headReserve.height, justifyContent: 'center' }, pressed && openAuthor && styles.pressed]}
                 >
                   <Text style={styles.name} numberOfLines={1}>{title}</Text>
                 </Pressable>
@@ -491,6 +537,8 @@ function PostRowView ({
                       accessible={false}
                       disabled={!open}
                       onPress={openTap}
+                      onLongPress={bodyLongPress}
+                      delayLongPress={350}
                       hitSlop={4}
                       style={({ pressed }) => [styles.metaBox, pressed && open && styles.pressed]}
                     >
@@ -503,11 +551,13 @@ function PostRowView ({
                   accessibilityLabel={open ? 'abrir conversa' : undefined}
                   disabled={!open}
                   onPress={openTap}
+                  onLongPress={bodyLongPress}
+                  delayLongPress={350}
                   {...a11yOpen}
                   hitSlop={4}
                   style={({ pressed }) => [styles.timeBox, pressed && open && styles.pressed]}
                 >
-                  <Text style={styles.time} numberOfLines={1}>{(handle ? '\u00a0· ' : '· ') + time}</Text>
+                  <Text style={styles.time} numberOfLines={1}>{(handle ? '\u00a0· ' : stackHead ? '' : '· ') + time}</Text>
                 </Pressable>
               </View>
               {replyToName
@@ -517,6 +567,8 @@ function PostRowView ({
                       accessibilityRole='link'
                       accessibilityLabel={replyLabel}
                       onPress={openParent}
+                      onLongPress={bodyLongPress}
+                      delayLongPress={350}
                       style={({ pressed }) => [styles.replyChip, pressed && styles.pressed]}
                     >
                       <Text style={styles.replyChipText} numberOfLines={1}>{replyLabel}</Text>
@@ -541,6 +593,35 @@ function PostRowView ({
             : null}
           {previewNode}
           {quoteOut ? quoteNode : null}
+          {/* After the content, so a screen reader reads the caption before
+              them; the position is absolute, so they still draw at the top. */}
+          {headActions
+            ? (
+              <View style={[styles.headActions, !stackHead && { top: -HEAD_LIFT }]} onLayout={measureHeadActions}>
+                {fn(onFollow)
+                  ? (
+                    <Pressable
+                      accessibilityRole='button'
+                      accessibilityLabel={'seguir ' + title}
+                      accessibilityState={{ disabled: !!followPending }}
+                      disabled={!!followPending}
+                      onPress={otherPress(onFollow)}
+                      style={({ pressed }) => [styles.follow, followPending && styles.disabled, pressed && styles.pressed]}
+                    >
+                      <Text style={styles.followText}>seguir</Text>
+                    </Pressable>
+                    )
+                  : null}
+                {hasMore
+                  ? (
+                    <Action label='mais ações' onPress={otherPress(() => setSheet('more'))}>
+                      <Icon name='mais' size={ICON} color={colors.soft} />
+                    </Action>
+                    )
+                  : null}
+              </View>
+              )
+            : null}
           {bar
             ? (
               <View style={styles.bar}>
@@ -572,7 +653,9 @@ function PostRowView ({
                           onPress={otherPress(onOpenReposts)}
                           style={styles.countAction}
                         >
-                          <Text style={[styles.count, reposted && styles.countOn]}>{displayText(String(reposts))}</Text>
+                          {repostText !== null
+                            ? <Text style={[styles.count, reposted && styles.countOn]}>{repostText}</Text>
+                            : null}
                         </Pressable>
                       </View>
                       )
@@ -618,7 +701,9 @@ function PostRowView ({
                           onPress={otherPress(onOpenLikes)}
                           style={styles.countAction}
                         >
-                          <Text style={[styles.count, liked && styles.countOn]}>{displayText(String(likes))}</Text>
+                          {likeText !== null
+                            ? <Text style={[styles.count, liked && styles.countOn]}>{likeText}</Text>
+                            : null}
                         </Pressable>
                       </View>
                       )
@@ -634,13 +719,6 @@ function PostRowView ({
                       </Action>
                       )
                   : null}
-                {fn(onFollow)
-                  ? (
-                    <Action label={'seguir ' + title} onPress={otherPress(onFollow)} disabled={!!followPending}>
-                      <Icon name='seguir' size={ICON} color={colors.soft} />
-                    </Action>
-                    )
-                  : null}
                 {href !== null
                   ? (
                     <Action label='compartilhar' onPress={pressShare}>
@@ -648,13 +726,6 @@ function PostRowView ({
                     </Action>
                     )
                   : null}
-                {hasMore
-                  ? (
-                    <Action label='mais ações' onPress={otherPress(() => setSheet('more'))}>
-                      <Icon name='mais' size={ICON} color={colors.soft} />
-                    </Action>
-                    )
-                  : <View style={styles.slot} />}
               </View>
               )
             : null}
@@ -733,6 +804,10 @@ const makeStyles = (colors) => StyleSheet.create({
   // no-break space (web drops a plain leading space under numberOfLines), so
   // the "·" has one space on each side.
   head: { flexDirection: 'row', alignItems: 'baseline' },
+  headStacked: { flexWrap: 'wrap' },
+  headActions: { position: 'absolute', top: 0, right: 0, flexDirection: 'row', alignItems: 'center' },
+  follow: { minHeight: layout.hit, minWidth: 44, paddingHorizontal: 8, justifyContent: 'center', alignItems: 'center' },
+  followText: { ...type.counter, color: colors.accent },
   // The @nome gives way first and the date never does (as on X): one Text for
   // both cut the date to "· 5…", or dropped it at large text.
   nameBox: { flexShrink: 1, marginRight: 6 },
@@ -749,27 +824,25 @@ const makeStyles = (colors) => StyleSheet.create({
   // a child's width in Yoga, so a non-shrinking time inside it still clipped.
   metaBox: { flexShrink: 10000, minWidth: 32 },
   timeBox: { flexShrink: 0 },
-  handle: { ...type.postMeta, color: colors.soft, flexShrink: 1 },
-  time: { ...type.postMeta, color: colors.soft, flexShrink: 0 },
-  // Plain coloured text, no box. Web ignores hitSlop, so the invisible box
-  // itself is the 44 pt target.
+  handle: { ...type.meta, color: colors.soft, flexShrink: 1 },
+  time: { ...type.meta, color: colors.soft, flexShrink: 0 },
+  // Web ignores hitSlop, so the invisible box itself is the 44 pt target.
+  // Negative margin pulls that target in: the line costs about 32 pt.
   replyChip: {
     alignSelf: 'flex-start',
     maxWidth: '100%',
     minHeight: layout.hit,
     minWidth: layout.hit,
+    marginVertical: -6,
     justifyContent: 'center'
   },
-  replyChipText: { ...type.replyMark, color: colors.accent, flexShrink: 1 },
+  replyChipText: { ...type.meta, color: colors.soft, flexShrink: 1 },
   previews: { marginTop: 8, minHeight: layout.hit, justifyContent: 'center' },
   previewsLabel: { ...type.replyMark, color: colors.soft, fontWeight: '700' },
   previewLine: { ...type.replyMark, color: colors.ink },
   text: { ...type.postText, color: colors.ink, marginTop: 3 },
   bar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 0, marginBottom: -4, marginLeft: -8, maxWidth: 360 },
   action: { flexDirection: 'row', alignItems: 'center', gap: 5, minHeight: layout.hit, minWidth: 44, paddingHorizontal: 8 },
-  // An empty column where "mais" would be, so a row without it keeps its icons
-  // in the same columns as the rows around it (the bar spreads them apart).
-  slot: { minWidth: 44 },
   // A split pair is as wide as the combined button (8 + icon + gap + digits +
   // 8), so the bar still fits a 320 pt screen.
   actionSplit: { gap: 0, minWidth: 0, paddingRight: 2 },

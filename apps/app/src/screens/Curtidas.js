@@ -7,7 +7,7 @@
 // (node.hosted === true: the site and the installed app on an installation);
 // a manual configuration or varanda-serve requests nothing.
 // Nothing is persisted. No follow pill (the profile has it) and no like
-// timestamp.
+// timestamp. A known total is part of the tab label, not a line of its own.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
@@ -18,6 +18,7 @@ import { withoutBlockedRefs } from '../memberBlocks'
 import { useNames } from '../names'
 import { fetchEngagers } from '../indexClient'
 import { planPeeks } from '../thread'
+import { formatCount } from '../format'
 import {
   END_TEXT, ENGAGERS_TITLE, MORE_FAILED, SEEDER_DOWN, TAB_LABEL,
   confirmEngagers, countLabel, errorFor, listView, mergeRows, nextCursor, notesOf
@@ -53,6 +54,18 @@ const emptyTab = () => ({
   refreshing: false,
   error: ''
 })
+
+// The drawn label uses the compact count. The spoken label keeps countLabel's
+// full sentence ("1 curtida", not "1"). An unknown total stays off both.
+function tabLabel (kind, tab) {
+  const name = TAB_LABEL[kind]
+  const sentence = tab && tab.phase === 'ready' ? countLabel(kind, tab.total) : ''
+  const shown = sentence ? displayText(formatCount(tab.total)) : ''
+  return {
+    text: shown ? name + ' · ' + shown : name,
+    spoken: shown ? name + ', ' + sentence : name
+  }
+}
 
 // Peek-only names: a row shows what the engager's own diary says, never the
 // names cache, so it matches what was verified.
@@ -221,17 +234,16 @@ export default function Curtidas ({ entry, onBack, onOpenMember }) {
   }
 
   const ready = phase === 'ready'
-  const count = ready ? countLabel(kind, total) : ''
   // The 'hidden' view already says why the list is short.
   const notes = ready && v.view !== 'hidden'
     ? notesOf({ ...meta, unconfirmed, total, listed: rows.length, atEnd: next === null })
     : []
-  const header = ready
+  const listError = rows.length > 0 && error ? error : ''
+  const header = notes.length > 0 || listError
     ? (
       <View style={styles.head}>
-        {count ? <Text style={styles.count}>{count}</Text> : null}
         {notes.map((line) => <Soft key={line}>{line}</Soft>)}
-        {rows.length > 0 && error ? <ErrorState message={displayText(error)} onRetry={() => load(kind, true)} pending={refreshing} /> : null}
+        {listError ? <ErrorState message={displayText(listError)} onRetry={() => load(kind, true)} pending={refreshing} /> : null}
       </View>
       )
     : null
@@ -247,15 +259,17 @@ export default function Curtidas ({ entry, onBack, onOpenMember }) {
       <View style={styles.tabs} accessibilityRole='tablist'>
         {TABS.map((k) => {
           const selected = k === kind
+          const label = tabLabel(k, tabs[k])
           return (
             <Pressable
               key={k}
               accessibilityRole='tab'
               accessibilityState={{ selected }}
+              accessibilityLabel={label.spoken}
               onPress={() => setKind(k)}
               style={[styles.tab, selected && styles.tabOn]}
             >
-              <Text style={[styles.tabText, selected && styles.tabTextOn]}>{TAB_LABEL[k]}</Text>
+              <Text style={[styles.tabText, selected && styles.tabTextOn]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.7} maxFontSizeMultiplier={1.5}>{label.text}</Text>
             </Pressable>
           )
         })}
@@ -308,10 +322,10 @@ const makeStyles = (colors) => StyleSheet.create({
     borderBottomColor: 'transparent'
   },
   tabOn: { borderBottomColor: colors.accent },
-  tabText: { ...type.pill, color: colors.soft },
+  // A shrunk count stays centred in the tab instead of riding low.
+  tabText: { ...type.pill, color: colors.soft, alignSelf: 'stretch', textAlign: 'center', textAlignVertical: 'center', includeFontPadding: false },
   tabTextOn: { color: colors.accent },
   head: { paddingHorizontal: 16, paddingVertical: 12, gap: 4, borderBottomWidth: 1, borderBottomColor: colors.line },
-  count: { ...type.postName, color: colors.ink },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
