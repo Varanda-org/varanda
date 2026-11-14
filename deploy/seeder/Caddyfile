@@ -402,8 +402,9 @@
 	}
 
 	# As páginas públicas de uma publicação (um aperitivo para quem está fora
-	# da Varanda): GET|HEAD /p/<diário>/<seq>, /p/<diário>/<seq>/foto/<n> e
-	# /p/policy, servidas pelo semeador na porta do WebSocket, em 127.0.0.1.
+	# da Varanda): GET|HEAD /p/<diário>/<seq>, /p/<diário>/<seq>/foto/<n>,
+	# /p/<diário>/<seq>/previa e /p/policy, servidas pelo semeador na porta do
+	# WebSocket, em 127.0.0.1.
 	# Só mostram uma publicação quando ele tem VARANDA_POSTS_ORIGIN, que não
 	# depende da origem da Feira; sem isso, a página redireciona para o app
 	# (/publicacao/...) e /p/policy diz que estão desligadas. Como /f/*: só o
