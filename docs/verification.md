@@ -10694,17 +10694,17 @@ Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de pas
 
 ## 232. Folhas com cantos de 24 pt (PR feat/restyle-sheets)
 
-Esta seção confere os cantos de 24 pt no topo das folhas: Publicar, mais ações, Ajustes, Denunciar e as demais folhas que sobem por cima da tela. Antes eram de 18 pt.
+Esta seção confere os cantos de 24 pt no topo das folhas que sobem por cima da tela, antes de 18 pt. No Android e na web valem para todas (Publicar, mais ações, Ajustes, Denunciar e as demais). No iOS, só a folha de mais ações muda: as outras abrem na folha de página do sistema, que mantém o canto do sistema.
 
 Nada disso envia pedido nem busca dado: é só a tela. Não há mudança de protocolo, RPC nem Termos, e nenhuma dependência nova.
 
 Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA, cada um em claro e escuro. Registrar aparelho, sistema e, na web, o navegador.
 
-- [ ] Publicar: a folha abre com cantos de 24 pt no topo, sem cortar "Cancelar" nem a pílula Publicar, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Publicar: no Android e na web, a folha abre com cantos de 24 pt no topo, sem cortar "Cancelar" nem a pílula Publicar, em claro e escuro; no iOS, a folha de página do sistema mantém o canto do sistema, sem corte. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
 - [ ] A folha de mais ações de uma publicação: cantos de 24 pt no topo e as linhas de ação sem corte nos cantos, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
-- [ ] Uma folha que rola (Ajustes ou a lista de curtidas): o conteúdo rola por baixo do topo arredondado sem vazar para fora dos cantos, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Uma folha que rola (Ajustes ou a folha de ajuda): o conteúdo rola por baixo do topo arredondado sem vazar para fora dos cantos, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
 - [ ] Uma folha com título longo: o título quebra ou termina em reticências sem encostar nos cantos nem no botão de fechar. Texto grande 1,3: o topo cresce sem cortar o título. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
-- [ ] No iOS, a folha arrasta para baixo para fechar e o canto de 24 pt acompanha o gesto, sem faixa de fundo aparecendo atrás do canto. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] No Android e na web, a folha arrasta para baixo para fechar e o canto de 24 pt acompanha o gesto, sem faixa de fundo aparecendo atrás do canto. Emulador Android (build de debug): pendente. Web: pendente. PWA: pendente.
 
 Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A lista é um roteiro, não um registro de execução.
 
