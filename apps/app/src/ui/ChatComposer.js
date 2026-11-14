@@ -845,8 +845,6 @@ export function ChatComposer ({
 
 const makeStyles = (colors) => StyleSheet.create({
   composer: {
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.line,
     backgroundColor: colors.bg,
     paddingHorizontal: space.sm,
     paddingVertical: space.sm - 2,
@@ -860,12 +858,12 @@ const makeStyles = (colors) => StyleSheet.create({
     alignItems: 'flex-end',
     minHeight: SEND,
     borderRadius: radius.lg + 2,
-    backgroundColor: colors.card,
+    backgroundColor: colors.inputOff,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.line
+    borderColor: 'transparent'
   },
   fieldFocused: { borderColor: colors.accent },
-  fieldOff: { backgroundColor: colors.inputOff },
+  fieldOff: { opacity: 0.6 },
   tool: { width: SEND, height: SEND, alignItems: 'center', justifyContent: 'center' },
   formatRow: { gap: space.xs },
   formatButton: { minWidth: layout.hit, minHeight: layout.hit, paddingHorizontal: space.sm, justifyContent: 'center' },

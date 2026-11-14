@@ -1,13 +1,14 @@
-// The right corner of the top bar: the help button, then the Avisos bell in
-// the corner. The bell shows a plain dot for news (never a count). IconAction
-// is the 44 pt icon button a screen's TopBar draws for each { icon, label,
-// onPress, badge } it passes as `right`.
+// The right corner of the top bar, in one ActionCapsule: the screen's own
+// `actions` first, then the help button, then the Avisos bell in the corner.
+// The bell shows a plain dot for news (never a count). IconAction is the
+// 44 pt icon button a screen's TopBar draws for each { icon, label, onPress,
+// badge } it passes as `right`.
 
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native'
 import { HelpButton } from './Help'
 import { Icon } from './Icon'
 import { useStyles, useTheme } from './ThemeProvider'
-import { layout } from './theme'
+import { layout, radius } from './theme'
 
 export function BellButton ({ onPress, badged, active, color, style }) {
   const styles = useStyles(makeStyles)
@@ -52,7 +53,7 @@ export function IconAction ({ icon, label, onPress, badge, color, disabled, pend
       style={({ pressed }) => [styles.hit, pressed && styles.pressed, disabled && styles.disabled]}
     >
       <View style={styles.iconWrap}>
-        {pending === true ? <ActivityIndicator size='small' color={tint} /> : <Icon name={icon} size={24} color={tint} />}
+        {pending === true ? <ActivityIndicator size='small' color={tint} /> : <Icon name={icon} size={22} color={tint} />}
         {count > 0
           ? <View style={styles.count}><Text style={styles.countText} numberOfLines={1}>{countText}</Text></View>
           : dot ? <View style={styles.dot} /> : null}
@@ -61,20 +62,28 @@ export function IconAction ({ icon, label, onPress, badge, color, disabled, pend
   )
 }
 
-export function TopActions ({ help, onAvisos, avisosNew, avisosActive }) {
+export function ActionCapsule ({ children }) {
   const styles = useStyles(makeStyles)
+  return <View style={styles.capsule}>{children}</View>
+}
+
+export function TopActions ({ actions, help, onAvisos, avisosNew, avisosActive }) {
+  const styles = useStyles(makeStyles)
+  const list = Array.isArray(actions) ? actions.filter(Boolean) : []
+  if (list.length === 0 && !help && typeof onAvisos !== 'function') return null
   return (
-    <View style={styles.row}>
-      {help ? <HelpButton doc={help} /> : null}
+    <ActionCapsule>
+      {list.map((a, i) => <IconAction key={'a' + i + ':' + a.icon} {...a} />)}
+      {help ? <HelpButton doc={help} style={styles.hit} /> : null}
       {typeof onAvisos === 'function'
         ? <BellButton onPress={onAvisos} badged={avisosNew === true} active={avisosActive === true} />
         : null}
-    </View>
+    </ActionCapsule>
   )
 }
 
 const makeStyles = (colors) => StyleSheet.create({
-  row: { flexDirection: 'row', alignItems: 'center' },
+  capsule: { flexDirection: 'row', alignItems: 'center', borderRadius: radius.pill, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.line },
   hit: { minWidth: layout.hit, minHeight: layout.hit, alignItems: 'center', justifyContent: 'center' },
   pressed: { opacity: 0.6 },
   disabled: { opacity: 0.4 },

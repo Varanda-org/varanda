@@ -233,3 +233,10 @@ test('Curtidas folds a known total into the tab label', (t) => {
   t.absent(src.includes('Seguir'), 'no follow button')
   t.absent(src.includes('\u2014'), 'no em dash')
 })
+
+test('the curtidas rows carry no bottom border and use the 48 avatar', async (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Curtidas.js'), 'utf8')
+  const row = src.match(/\n {2}row: \{[^}]*\}/)[0]
+  t.absent(/borderBottomWidth/.test(row), 'row style has no borderBottomWidth')
+  t.ok(src.includes('size={48}'), 'row avatar is 48')
+})

@@ -1,7 +1,8 @@
-// A pill-shaped button: filled (accent) or outlined (ink or danger). `icon`
-// sits left of the label; with no label it is a round icon-only pill, 40 pt,
-// or 32 pt when `small` (give it an accessibilityLabel). `iconEnd` sits right
-// of the label: the chevron of a pill that opens a list of choices.
+// A pill-shaped button: filled (accent), tonal (soft ink on a quiet fill) or
+// outlined (ink or danger). `icon` sits left of the label; with no label it is
+// a round icon-only pill, 40 pt, or 32 pt when `small` (give it an
+// accessibilityLabel). `iconEnd` sits right of the label: the chevron of a
+// pill that opens a list of choices.
 // `maxFontSizeMultiplier` caps the label, for a pill in a Sheet header whose
 // other controls are capped. `iconFilled` draws the icon's solid shape (a
 // saved star), so the state is not shown by colour alone.
@@ -12,16 +13,17 @@ import { Icon } from './Icon'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, type } from './theme'
 
-export function Pill ({ label, icon, iconFilled, iconEnd, onPress, filled, danger, disabled, pending, accessibilityLabel, maxFontSizeMultiplier, small }) {
+export function Pill ({ label, icon, iconFilled, iconEnd, onPress, filled, danger, disabled, pending, accessibilityLabel, maxFontSizeMultiplier, tonal, small }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const iconOnly = typeof label !== 'string' || label === ''
-  const tint = filled ? colors.accentInk : danger ? colors.danger : colors.ink
+  const flat = tonal === true && !filled
+  const tint = filled ? colors.accentInk : flat ? colors.soft : danger ? colors.danger : colors.ink
   const off = disabled === true || pending === true
   const face = [
     styles.pill,
-    filled ? styles.filled : styles.outline,
-    !filled && danger && styles.outlineDanger,
+    filled ? styles.filled : flat ? styles.tonal : styles.outline,
+    !filled && !flat && danger && styles.outlineDanger,
     iconOnly && styles.round,
     small && styles.small,
     small && iconOnly && styles.smallRound
@@ -32,7 +34,7 @@ export function Pill ({ label, icon, iconFilled, iconEnd, onPress, filled, dange
       {iconOnly
         ? null
         : (
-          <Text style={[styles.text, small && styles.textSmall, filled ? styles.textFilled : danger ? styles.textDanger : styles.textInk]} maxFontSizeMultiplier={maxFontSizeMultiplier}>
+          <Text style={[styles.text, small && styles.textSmall, filled ? styles.textFilled : flat ? styles.textTonal : danger ? styles.textDanger : styles.textInk]} maxFontSizeMultiplier={maxFontSizeMultiplier}>
             {pending ? label + '…' : label}
           </Text>
           )}
@@ -66,6 +68,7 @@ const makeStyles = (colors) => StyleSheet.create({
   // Same height as an outline pill: its 8 padding plus the 1.5 border.
   filled: { backgroundColor: colors.accent, paddingVertical: 9.5, paddingHorizontal: 17 },
   outline: { borderWidth: 1.5, borderColor: colors.outline, paddingVertical: 8, paddingHorizontal: 15 },
+  tonal: { backgroundColor: colors.inputOff, paddingVertical: 9.5, paddingHorizontal: 17 },
   outlineDanger: { borderColor: colors.danger },
   small: { minHeight: 32, paddingVertical: 0, paddingHorizontal: 12 },
   smallRound: { width: 32, height: 32, minHeight: 32, paddingVertical: 0, paddingHorizontal: 0 },
@@ -79,6 +82,7 @@ const makeStyles = (colors) => StyleSheet.create({
   text: { ...type.pill, flexShrink: 1, textAlign: 'center', paddingHorizontal: 1 },
   textSmall: { fontSize: 13, lineHeight: 16 },
   textFilled: { color: colors.accentInk },
+  textTonal: { color: colors.soft },
   textInk: { color: colors.ink },
   textDanger: { color: colors.danger }
 })

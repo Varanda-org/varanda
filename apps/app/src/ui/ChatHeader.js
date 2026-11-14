@@ -50,6 +50,7 @@ export function ChatHeader ({ title, subtitle, publicKey, picture, persist = fal
   return (
     <TopBar
       onBack={onBack}
+      compact
       leading={leading}
       title={shownTitle}
       subtitle={shownSubtitle || undefined}

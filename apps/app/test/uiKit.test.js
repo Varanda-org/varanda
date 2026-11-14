@@ -125,7 +125,7 @@ test('skeletons share one pulse, and profile and media shapes are exported', (t)
   t.ok(states.includes('const Block = reduce ? View : Animated.View'), 'reduced motion draws a static block')
   t.ok(states.includes('skBand: { height: PROFILE_BAND, backgroundColor: colors.skeleton }'), 'the profile band uses the skeleton token')
   t.ok(states.includes('skProfileAvatar: { width: layout.hit * 2, height: layout.hit * 2, borderRadius: layout.hit, backgroundColor: colors.skeleton }'), 'the profile avatar uses the skeleton token')
-  t.ok(states.includes('skMedia: { width: \'100%\', aspectRatio: 4 / 3, borderRadius: radius.bubble - 4, backgroundColor: colors.skeleton }'), 'the media block uses the skeleton token')
+  t.ok(states.includes('skMedia: { width: \'100%\', aspectRatio: 4 / 3, borderRadius: 14, backgroundColor: colors.skeleton }'), 'the media block uses the skeleton token')
   t.is((states.match(/new Animated\.Value\(/g) || []).length, 2, 'the shared pulse and the new-items pill')
   t.is((states.match(/Animated\.loop\(/g) || []).length, 1, 'one loop in the file')
 })
@@ -298,6 +298,7 @@ test('Sheet and ActionsSheet take web Escape through the shared layer stack', (t
 test('round 8: filled and outline pills share a height', (t) => {
   const pill = read('ui/Pill.js')
   t.ok(pill.includes('paddingVertical: 9.5, paddingHorizontal: 17'), 'filled 9.5 = outline 8 + 1.5 border')
+  t.ok(pill.includes('tonal: { backgroundColor: colors.inputOff, paddingVertical: 9.5, paddingHorizontal: 17 }'), 'tonal face has no border, same height')
 })
 
 test('the sheet Cancelar is a 44 pt target', (t) => {
@@ -368,4 +369,20 @@ test('loadIcons loads each font apart, so a Feather failure still loads Ionicons
   const fn = icon.slice(icon.indexOf('export async function loadIcons'))
   t.ok(fn.includes('try { await Feather.loadFont() } catch {}'))
   t.ok(fn.includes('try { await Ionicons.loadFont() } catch {}'))
+})
+
+test('the top bar has no hairline, a raised back circle and an action capsule', (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const read = (f) => fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', f), 'utf8')
+  const bar = read('TopBar.js')
+  const actions = read('TopActions.js')
+  t.absent(bar.includes('borderBottomWidth'), 'no hairline under the bar')
+  t.ok(/back: \{[^}]*backgroundColor: colors\.card/.test(bar) && /back: \{[^}]*width: layout\.hit/.test(bar), 'back is a raised 44 pt circle')
+  t.ok(actions.includes('export function ActionCapsule'), 'the capsule is exported')
+  t.ok(bar.includes('<ActionCapsule>'), 'rightSlot draws actions in the capsule')
+  t.ok(bar.includes('titleCompact: { ...type.threadTitle }'), 'the compact title')
+  t.ok(read('ChatHeader.js').includes('compact'), 'chats pass compact')
+  t.ok(/hit: \{ minWidth: layout\.hit, minHeight: layout\.hit/.test(actions), 'hit still reads layout.hit')
+  t.ok(actions.includes('<ActionCapsule>') && actions.includes('<IconAction key={'), 'TopActions renders its actions prop inside the capsule')
 })

@@ -10541,6 +10541,181 @@ node apps/app/test/platformGate.test.js
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
 
+## 227. Escala de texto nova: títulos em 24 pt e negrito em 600 (PR feat/restyle-type-scale)
+
+Esta seção confere a escala de texto nova dos tokens do tema. Os títulos da barra e o nome no perfil passam a 24 pt com entrelinha de 32 e peso 600 (antes 800), o nome da publicação, as pílulas, os títulos de folha e os estados vazios passam de 700 para 600, e entram dois tamanhos novos: o nome em linha de lista (16 pt, 600, entrelinha 24) e o título de conversa (20 pt, 600, entrelinha 28). O espaçamento e as formas seguem um kit de interface social usado só como referência de números; as cores, o pôr do sol e as listras continuam sendo do Varanda. A tabela de Tipografia está em `apps/site/artwork/app-design.md`.
+
+Nada disso envia pedido nem busca dado: é só a tela. Não há mudança de protocolo, RPC nem Termos, e nenhuma dependência nova.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA, cada um no claro e no escuro. Registrar aparelho, sistema e, na web, o navegador.
+
+- [ ] O título da barra em todas as abas, em telas de 320 e de 390 pt: cabe em uma linha, sem cortar e sem sobrepor os ícones da direita. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] O título no cabeçalho de uma conversa (20 pt, 600). Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] O nome no perfil, no Diário e no Membro (24 pt, 600): quebra bem com nome longo. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] As pílulas (Publicar, Editar perfil, Seguir) em 600, sem cortar o texto. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] Os títulos das folhas (ajuda, Publicar, Ajustes). Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] Os estados vazios (A Rua, Avisos, Conversas, Feira, Buscar). Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] O título da ComunidadeInfo. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] Texto grande, escala 1,3 nas configurações do aparelho: nenhum título corta nem sobrepõe. Android, iOS, web e PWA, claro e escuro: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/app/test/themeUsage.test.js
+node apps/app/test/profilePolish.test.js
+node apps/app/test/uiKit.test.js
+node apps/app/test/postLayout.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 228. Barra do topo nova: 64 pt, sem fio, voltar e ações em cápsulas (PR feat/restyle-top-bar)
+
+Esta seção confere a barra do topo nova. A barra passa a ter 64 pt de altura e perde o fio embaixo. O título fica em 24 pt. Nas telas empilhadas, o voltar é um círculo de cartão de 44 pt com fio. As ações (ajuda, sino, Mensagem, Grupo, Comunidade, Páginas) ficam numa cápsula de cartão com fio, com ícones de 22 pt e sem sombra. O cabeçalho de conversa usa o título de 20 pt com entrelinha de 28. A tabela está em `apps/site/artwork/app-design.md`.
+
+Nada disso envia pedido nem busca dado: é só a tela. Não há mudança de protocolo, RPC nem Termos, e nenhuma dependência nova.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA, cada um no claro e no escuro. Registrar aparelho, sistema e, na web, o navegador.
+
+- [ ] O título da barra em todas as abas, com 64 pt de altura e sem fio embaixo. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] O círculo de voltar (44 pt, cartão com fio) nas telas empilhadas: perfil, publicação aberta, conversa. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] A cápsula com ajuda e sino. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] A cápsula com uma ação e com várias (Mensagem, Grupo, Comunidade, Páginas). Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] A cápsula de ajuda em Seguidores e Seguindo. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] O título do cabeçalho de conversa (20 pt, entrelinha 28) com o subtítulo. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] A barra de ajuda do onboarding. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] A Rua esconde e mostra as barras ao rolar, com a barra nova de 64 pt. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] Largura de 320 pt: o título cabe em uma linha e não sobrepõe a cápsula. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] Conversas em 320 pt: o +, a ajuda e o sino cabem numa cápsula só, sem cortar. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] Texto grande, escala 1,3 nas configurações do aparelho: nenhum título corta nem sobrepõe. Android, iOS, web e PWA, claro e escuro: pendente.
+- [ ] A cadeira sobre o disco no escuro. Android, iOS, web e PWA: pendente.
+- [ ] Os ícones do topo do visualizador de Momentos, agora de 22 pt. Android, iOS, web e PWA, claro e escuro: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/app/test/themeUsage.test.js
+node apps/app/test/uiKit.test.js
+node apps/app/test/ruaChrome.test.js
+node apps/app/test/chromeScroll.test.js
+node apps/app/test/tabBar.test.js
+node apps/app/test/shellChrome.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 229. Linhas de pessoa novas: avatar de 48 pt, sem fio e Seguindo em pílula tonal (PR feat/restyle-people-rows)
+
+Esta seção confere o visual novo das linhas de pessoa. Em Busca (Contas), Seguidores, Seguindo e Curtidas e republicações, cada linha tem avatar de 48 pt e nome de 16 pt, sem fio entre as linhas e sem fio embaixo do cabeçalho da lista. A pílula Seguir é cheia e a Seguindo é tonal (campo desligado com texto suave, sem contorno), as duas com alvo de toque de 44 pt. Tocar em Seguindo continua abrindo a confirmação "Deixar de seguir <nome>?".
+
+Nada disso envia pedido nem busca dado: é só a tela. Não há mudança de protocolo, RPC nem Termos, e nenhuma dependência nova.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA, cada um em claro e escuro. Registrar aparelho, sistema e, na web, o navegador.
+
+- [ ] Busca (Contas), Seguidores, Seguindo e Curtidas e republicações: avatar de 48 pt e nome de 16 pt, sem fio entre as linhas e sem fio embaixo do cabeçalho da lista, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Seguir aparece cheia e Seguindo tonal (também no Membro quando uma Página age), nas duas com alvo de toque de 44 pt, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Tocar em Seguindo ainda abre a confirmação "Deixar de seguir <nome>?", em Seguindo, Seguidores, Busca e Membro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Nomes longos com a tela em 320 pt: a linha não corta a pílula nem o nome fica sobre ela. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Texto grande 1,3: a linha cresce sem cortar o nome, o `@nome` nem a pílula. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/app/test/memberRow.test.js
+node apps/app/test/pessoas.test.js
+node apps/app/test/engagers.test.js
+node apps/app/test/follow.test.js
+node apps/app/test/followPill.test.js
+node apps/app/test/uiKit.test.js
+node apps/app/test/mediaKeptLoad.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 230. Conversas no visual novo: linhas, campo de escrever e cantos dos balões (PR feat/restyle-chat-surfaces)
+
+Esta seção confere o visual novo das superfícies de conversa. As linhas de Conversas, Mensagens e Comunidades têm título de 16 pt e ritmo de 72 pt, com o ponto de novas; os chips de Conversas, Avisos e Feira ficam sem fio embaixo; o campo de escrever de Mensagem e Grupo usa a cor de campo desligado, sem fio no topo; e os balões têm cantos de 24 pt, com 4 pt entre balões do mesmo grupo, sem cauda.
+
+Nada disso envia pedido nem busca dado: é só a tela. Não há mudança de protocolo, RPC nem Termos, e nenhuma dependência nova.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA, cada um em claro e escuro. Registrar aparelho, sistema e, na web, o navegador.
+
+- [ ] Linhas de Conversas, Mensagens e Comunidades: título de 16 pt, ritmo de 72 pt e ponto de novas, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Chips de Conversas, Avisos e Feira, sem fio embaixo deles, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Campo de escrever em Mensagem e Grupo, com o teclado aberto: parado, com foco, desligado, gravando e com várias linhas, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Balões: várias linhas com cantos de 24 pt, sequência de três, foto, voz, bloco de código, citação, apagada e pendente, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] O esqueleto da foto do feed continua com cantos de 14 pt. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Texto grande 1,3: a linha, o campo e os balões crescem sem cortar o texto. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/app/test/chatSurfaces.test.js
+node apps/app/test/chatFormat.test.js
+node apps/app/test/themeUsage.test.js
+node apps/app/test/uiKit.test.js
+node apps/app/test/chatMedia.test.js
+node apps/app/test/dm.test.js
+node apps/app/test/groups.test.js
+node apps/app/test/hapticsUse.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 231. A Rua no visual novo: linha de publicação e rodinhas de momentos (PR feat/restyle-feed)
+
+Esta seção confere o visual novo da linha de publicação e da faixa de momentos. A linha tem ícones de 20 pt na barra de ações, preenchimento de 16 pt no topo e seguir em pílula verde clara; as rodinhas de momentos têm 64 pt, sem fio embaixo da faixa.
+
+Nada disso envia pedido nem busca dado: é só a tela. Não há mudança de protocolo, RPC nem Termos, e nenhuma dependência nova.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA, cada um em claro e escuro. Registrar aparelho, sistema e, na web, o navegador.
+
+- [ ] Linhas de publicação em A Rua, Espiadinha, Busca (Publicações), Diário, Membro e Conversa: ícones de 20 pt na barra de ações, 16 pt de preenchimento no topo, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] O seguir em pílula verde clara no topo da linha, na Espiadinha e na Busca, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] A 320 pt de largura, o cabeçalho de uma publicação com seguir, o botão de mais, um @nome longo e a data "· 31 dez 2025" cabe sem cortar o botão nem quebrar a linha. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Texto grande 1,3: a linha de publicação cresce sem cortar o texto nem os botões. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Em Conversa, a linha da thread liga os avatares da publicação e da resposta, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Faixa de momentos: rodinhas de 64 pt, pôr do sol em quem tem momento não visto, contorno em quem já foi visto, selo de + em "Você" sem momento seu no ar e nenhum fio embaixo da faixa, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] A Rua esconde as barras ao rolar para baixo e as mostra ao rolar para cima, com a faixa de momentos e as linhas novas, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/app/test/postLayout.test.js
+node apps/app/test/conversaScreen.test.js
+node apps/app/test/postClamp.test.js
+node apps/app/test/postOverflow.test.js
+node apps/app/test/feedRender.test.js
+node apps/app/test/momentosScreen.test.js
+node apps/app/test/screensPolish.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 232. Folhas com cantos de 24 pt (PR feat/restyle-sheets)
+
+Esta seção confere os cantos de 24 pt no topo das folhas que sobem por cima da tela, antes de 18 pt. No Android e na web valem para todas (Publicar, mais ações, Ajustes, Denunciar e as demais). No iOS, só a folha de mais ações muda: as outras abrem na folha de página do sistema, que mantém o canto do sistema.
+
+Nada disso envia pedido nem busca dado: é só a tela. Não há mudança de protocolo, RPC nem Termos, e nenhuma dependência nova.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA, cada um em claro e escuro. Registrar aparelho, sistema e, na web, o navegador.
+
+- [ ] Publicar: no Android e na web, a folha abre com cantos de 24 pt no topo, sem cortar "Cancelar" nem a pílula Publicar, em claro e escuro; no iOS, a folha de página do sistema mantém o canto do sistema, sem corte. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] A folha de mais ações de uma publicação: cantos de 24 pt no topo e as linhas de ação sem corte nos cantos, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Uma folha que rola (Ajustes ou a folha de ajuda): o conteúdo rola por baixo do topo arredondado sem vazar para fora dos cantos, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Uma folha com título longo: o título quebra ou termina em reticências sem encostar nos cantos nem no botão de fechar. Texto grande 1,3: o topo cresce sem cortar o título. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] No Android e na web, a folha arrasta para baixo para fechar e o canto de 24 pt acompanha o gesto, sem faixa de fundo aparecendo atrás do canto. Emulador Android (build de debug): pendente. Web: pendente. PWA: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/app/test/themeUsage.test.js
+node apps/app/test/shellChrome.test.js
+node apps/app/test/sheetDrag.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
 ## 233. Players de música já carregados no feed (PR fix/preload-music-players)
 
 Esta seção confere o ciclo de vida dos players do YouTube, do SoundCloud, do Spotify e do Apple Music em publicações, conversas e na prévia do compositor. O quadro do provedor carrega quando o cartão está na faixa da lista ou a até duas alturas dela (`EMBED_AHEAD_BANDS` = 2), em duas conferências de 500 ms (`EMBED_TICK_MS`, `EMBED_DWELL_TICKS`), só na tela que a pessoa está olhando. No máximo 4 quadros ficam carregados no app (`EMBED_LIVE_MAX`), e o teto baixa em 1 a cada morte de um processo de conteúdo (no máximo uma vez a cada 5 s, `EMBED_SHRINK_MS`), nunca abaixo de 2 (`EMBED_LIVE_MIN`). Um quadro em que a pessoa não tocou fica carregado ao sair da tela olhada (troca de aba, tela empilhada, folha, menu, foto em tela cheia); um tocado fecha aí e quando outro áudio do Varanda começa; bloquear e segundo plano fecham todos. "Tocado" é o dedo ou o foco no quadro, ou qualquer quadro com leitor de tela ligado ou desconhecido, lido na hora de cada decisão. O cartão guardado fica no lugar até a página do provedor carregar (evento de carga do invólucro mais 500 ms, uma heurística, não prova de que o player foi desenhado), e um quadro que não carregou não abre nada. A reprodução automática do Audius só fica suspensa com um quadro tocado (`embedSlots.engagedCount() > 0`); uma faixa do Audius que começou sozinha para quando um player de provedor passa a ser tocado, e uma que a pessoa começou não para. Termos e Política na versão 51, com novo aceite. Não há mudança de protocolo no formato dos registros nem de RPC. A lista abaixo é um roteiro: nada aqui foi marcado como conferido, e o que não foi executado fica pendente.

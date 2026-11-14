@@ -11,7 +11,7 @@ export function FilterChips ({ options, selected, onSelect }) {
   const styles = useStyles(makeStyles)
   const list = Array.isArray(options) ? options : []
   return (
-    <View style={styles.wrap}>
+    <View>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.row} keyboardShouldPersistTaps='handled'>
         {list.map((option) => {
           const on = option.id === selected
@@ -40,7 +40,6 @@ export function FilterChips ({ options, selected, onSelect }) {
 }
 
 const makeStyles = (colors) => StyleSheet.create({
-  wrap: { borderBottomWidth: 1, borderBottomColor: colors.line },
   row: { paddingHorizontal: space.lg, paddingVertical: space.sm, gap: space.sm, alignItems: 'center' },
   hit: { minHeight: layout.hit, justifyContent: 'center' },
   pressed: { opacity: 0.6 },
@@ -54,5 +53,5 @@ const makeStyles = (colors) => StyleSheet.create({
   },
   chipOn: { backgroundColor: colors.ink, borderColor: colors.ink },
   label: { ...type.pill, color: colors.ink },
-  labelOn: { color: colors.bg, fontWeight: '700' }
+  labelOn: { color: colors.bg, fontWeight: '600' }
 })

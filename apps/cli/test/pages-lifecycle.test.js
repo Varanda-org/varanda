@@ -101,14 +101,20 @@ async function thirdMember (t, bootstrap, association) {
       return out
     },
     // A closed page's cleared blocks are skipped; its last block must be there.
+    // Every block is asked at once on one session: a cleared block never
+    // arrives, and read one by one each of them (and any block the seeder is
+    // slow to serve right after the close) cost the whole timeout, so on a
+    // loaded runner a single pass could eat the caller's deadline.
     async sparse (key, length) {
       if (await read(key, length - 1) === null) return null
-      const out = []
-      for (let seq = 0; seq < length; seq++) {
-        const record = await read(key, seq)
-        if (record !== null) out.push({ seq, record })
+      const core = store.get({ key: b4a.from(key, 'hex'), valueEncoding: 'json' })
+      await core.ready()
+      try {
+        const records = await Promise.all(Array.from({ length }, (_, seq) => core.get(seq, { timeout: 3000 }).catch(() => null)))
+        return records.flatMap((record, seq) => record === null ? [] : [{ seq, record }])
+      } finally {
+        await core.close().catch(() => {})
       }
-      return out
     }
   }
 }

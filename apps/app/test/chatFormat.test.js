@@ -222,3 +222,12 @@ test('Aa shows only while focused or open, and the mic is a bare ink icon with h
   t.ok(src.includes("    tap('select')\n    update({ ...r, phase: 'recording'"))
   t.ok(src.includes("if (r.phase === 'recording') tap('warn')"))
 })
+
+test('the composer field is a tonal pill and the composer has no top rule', (t) => {
+  const src = read('ui/ChatComposer.js')
+  const field = src.match(/\n {2}field: \{[^}]*\}/)[0]
+  const composer = src.match(/\n {2}composer: \{[^}]*\}/)[0]
+  t.ok(field.includes('backgroundColor: colors.inputOff'))
+  t.absent(composer.includes('borderTopWidth'))
+  t.ok(src.includes('fieldFocused: { borderColor: colors.accent }'))
+})

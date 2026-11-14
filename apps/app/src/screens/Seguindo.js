@@ -35,6 +35,7 @@ import { SearchField } from '../ui/SearchField'
 import { EmptyState, ListFooter, Skeleton } from '../ui/States'
 import { OfflineNote } from '../ui/OfflineNote'
 import { TopBar } from '../ui/TopBar'
+import { TopActions } from '../ui/TopActions'
 import { pageBadgeLabel } from './Membro'
 import { type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
@@ -68,7 +69,7 @@ function FollowRow ({ followKey, profile, onOpen, onRemove, onReport, pending, d
         disabled={!open}
         onPress={open}
       >
-        <Avatar name={who.avatarName} publicKey={followKey} size={44} picture={(profile || {}).avatar} persist />
+        <Avatar name={who.avatarName} publicKey={followKey} size={48} picture={(profile || {}).avatar} persist />
         <View style={styles.who}>
           {who.known
             ? (
@@ -419,7 +420,7 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
 
   return (
     <View style={styles.screen}>
-      <TopBar title='Seguindo' onBack={onBack} right={<HelpButton doc={HELP.seguindo} />} />
+      <TopBar title='Seguindo' onBack={onBack} right={<TopActions help={HELP.seguindo} />} />
       <OfflineNote />
       <RefreshableList
         scrollToTopSignal={scrollToTop}
@@ -476,14 +477,12 @@ const makeStyles = (colors) => StyleSheet.create({
     alignItems: 'center',
     gap: 12,
     paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.line
+    paddingHorizontal: 16
   },
   open: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 12 },
   pressed: { opacity: 0.6 },
   who: { flex: 1, minWidth: 0 },
-  name: { ...type.postName, color: colors.ink },
-  handle: { ...type.postMeta, color: colors.soft },
+  name: { ...type.rowName, color: colors.ink },
+  handle: { ...type.meta, color: colors.soft },
   skeleton: { height: 14, width: '55%', borderRadius: 7, backgroundColor: colors.line }
 })

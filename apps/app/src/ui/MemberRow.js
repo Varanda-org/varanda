@@ -28,33 +28,30 @@ export function MemberRow ({ hit, hint, avatar, following, onOpen, onFollow, onU
   const subtitle = who.subtitle ? displayText(who.subtitle) : null
   const open = typeof onOpen === 'function' ? () => onOpen(hit.author, profile) : undefined
   return (
-    <View>
-      <View style={styles.row}>
-        <Pressable
-          style={({ pressed }) => [styles.open, pressed && open && styles.pressed]}
-          accessibilityRole='link'
-          accessibilityLabel={'ver o perfil de ' + title}
-          disabled={!open}
-          onPress={open}
-        >
-          <Avatar name={who.avatarName} publicKey={hit.author} size={44} picture={avatar} persist={following === true} />
-          <View style={styles.who}>
-            <Text style={styles.name} numberOfLines={1}>{title}</Text>
-            {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
-            {badge ? <Text style={styles.handle} numberOfLines={1}>{badge}</Text> : null}
-          </View>
-        </Pressable>
-        <FollowPill
-          small
-          following={following}
-          title={title}
-          pending={pending}
-          disabled={disabled}
-          onFollow={() => onFollow(hit)}
-          onUnfollow={() => onUnfollow(hit)}
-        />
-      </View>
-      <View style={styles.divider} />
+    <View style={styles.row}>
+      <Pressable
+        style={({ pressed }) => [styles.open, pressed && open && styles.pressed]}
+        accessibilityRole='link'
+        accessibilityLabel={'ver o perfil de ' + title}
+        disabled={!open}
+        onPress={open}
+      >
+        <Avatar name={who.avatarName} publicKey={hit.author} size={48} picture={avatar} persist={following === true} />
+        <View style={styles.who}>
+          <Text style={styles.name} numberOfLines={1}>{title}</Text>
+          {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
+          {badge ? <Text style={styles.handle} numberOfLines={1}>{badge}</Text> : null}
+        </View>
+      </Pressable>
+      <FollowPill
+        small
+        following={following}
+        title={title}
+        pending={pending}
+        disabled={disabled}
+        onFollow={() => onFollow(hit)}
+        onUnfollow={() => onUnfollow(hit)}
+      />
     </View>
   )
 }
@@ -67,11 +64,9 @@ const makeStyles = (colors) => StyleSheet.create({
     paddingVertical: 10,
     paddingHorizontal: 16
   },
-  // Starts after the avatar (16 padding + 44 avatar + 12 gap).
-  divider: { marginLeft: 72, height: StyleSheet.hairlineWidth, backgroundColor: colors.line },
   open: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 12 },
   pressed: { opacity: 0.6 },
   who: { flex: 1, minWidth: 0 },
-  name: { ...type.postName, color: colors.ink },
+  name: { ...type.rowName, color: colors.ink },
   handle: { ...type.meta, color: colors.soft }
 })
