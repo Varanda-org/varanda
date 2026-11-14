@@ -9842,3 +9842,84 @@ Nenhuma passagem em aparelho foi feita nesta seção. A ordem é o build de debu
 - [ ] Travar e destravar não traz a capa de volta.
 
 Limites: os bytes das fotos das publicações, das imagens de avatar e da mídia dos momentos não fazem parte do sinal. A conferência mais estrita do autor roda só num nó hospedado. Nenhuma passagem em aparelho foi feita nesta seção.
+
+## 214. Abertura animada do convite pessoal, por região
+
+Quem chega por um convite pessoal verificado, com a introdução ainda por ver, vê a abertura em volta do cartão. A tela é a de `openingGate` quando o resultado é `'card'` (`apps/app/src/inviteCardCopy.js`). O portão devolve `'card'` só com a introdução devida (`introShow`), sem retorno de link (`linkReturn`) e sem retorno de idade (`ageReturn`), com cartão, sem dispensa (`dismissed`) e com `verified === true`. `App.js` passa `introShow` quando a introdução seria mostrada e não há trava de carga nem espera, passa `ageReturn` como `AGE_RETURN` e não passa `linkReturn` (ausente vale como falso). Um retorno de idade também tira `introShow`.
+
+`App.js` trata associação desconhecida como pendente e, fora isso, usa `canAttribute`. Uma assinatura válida sozinha não abre a tela: `canAttribute` exige `signature === 'ok'`, `membership === 'linked'`, `expired === false` e `member` string. Enquanto o resultado ainda não existe, a assinatura é `'wait'`, ou a assinatura é `'ok'` com `membership === 'unknown'`, `verified` fica `null`. Nesse intervalo o splash espera no máximo `OPEN_WAIT_MS` (6 s), contados de quando a introdução passaria a aparecer. O temporizador que força o redesenho soma 50 ms. Passado o prazo, o portão devolve `'none'`, a introdução aparece e o splash não volta: se a introdução já foi desenhada, um `'wait'` seguinte vira `'none'`. Um cartão conferido depois ainda toma o lugar da introdução enquanto ela segue elegível (não vista, não dispensada, sem retorno de idade). Assinatura ruim, cartão vencido ou chave sem vínculo deixam `verified` falso: a tela não aparece, e não há essa espera. **Agora não** guarda o código e o cartão; a dispensa vale só nesta carga.
+
+Um link cujo índice de desenho o parser não conhece é recusado. `parseInviteCardUrl` (`packages/rpc/lib/invite-card.js`) devolve nulo quando `designAt` não acha o índice, então o convite não vira cartão. A cena neutra é só reserva do componente: `welcomeCopy` sem região usa o título "Tem lugar pra você." e a frase "A varanda está aberta.", sem etiqueta, e `motifsFor` não devolve motivos.
+
+O chão da tela é o fundo do desenho (`art.bg` do tema claro ou escuro). A tinta das palavras é `art.ink` do mesmo par. Os motivos são grupos de formas recortadas da mesma arte (`apps/app/src/inviteWelcomeStage.js`, janelas de `MOTIF_WINDOWS`; listras ficam de fora) e desenhados com `Shape`. A quantidade vem da classe da tela: 3 num telefone pequeno (`compact`: largura menor que 360 ou altura menor que 600, tamanho de base 40), 5 num telefone (`phone`, tamanho de base 52: três em cima e dois no pé) e 9 numa tela larga (`wide`: largura a partir de 768 e altura a partir de 600, tamanho de base 72: cinco em cima, dois nas calhas ao lado da coluna de 420 e dois no pé). Na larga, os dois do meio ficam fora da coluna de 420, um à esquerda e um à direita. Nenhum motivo fica atrás do cartão: os de cima ficam na faixa superior e os de baixo na inferior. Uma placa da cor do chão segura o cabeçalho, para um motivo não aparecer por baixo das palavras quando a coluna rola sobre a fileira de cima.
+
+O movimento vem da região do desenho (`apps/app/src/inviteWelcomeMotion.js`, `REGION_MOTION`). Essa região é a que quem convidou escolheu com o desenho (`regionOf`). Nada no texto diz de onde quem chega veio. Não há geolocalização, pedido de perfil nem chamada de rede nova. Os cinco:
+
+- Norte: sobe como água. Parte 48 px abaixo e 12 px para o lado (espelhado nos lados), escala 0,8, sem rotação, 70 ms entre motivos.
+- Nordeste: desce balançando. Parte 56 px acima, rotação de 14 graus espelhada, escala 1, 60 ms entre motivos.
+- Centro-Oeste: cai como pétala. Parte 64 px acima e 24 px à esquerda, escala 0,7, rotação -20 graus, sem espelho, 80 ms entre motivos.
+- Sudeste: surge como azulejo assentado. Escala 0,2 no lugar, sem translação, 50 ms entre motivos.
+- Sul: vem com o vento. Parte 64 px à direita, rotação de 8 graus, escala 0,9, sem espelho, 70 ms entre motivos.
+
+Cada motivo espera 80 ms (`MOTIF_DELAY_MS`) mais a ordem vezes o intervalo da região, anda 720 ms (`MOTIF_MS`) e termina dentro de 1,5 s (`WELCOME_MS`). A curva é `[0.22, 1, 0.36, 1]`. Uma região que o componente não conhece usa o movimento neutro (16 px abaixo, escala 1, 70 ms), não um destes cinco. Um link não chega aí: o parser já recusou o índice.
+
+A etiqueta, o título e a frase são texto do app (`apps/app/src/inviteWelcomeCopy.js`). O título é "Tem lugar pra você." A etiqueta visível é a região, um ponto mediano e o nome do desenho (por exemplo, Norte · Marajoara). O nome que o leitor de tela ouve é "Cartão <desenho>, <região>" (`tagLabel`, como "Cartão Marajoara, Norte"). As frases, uma por desenho:
+
+- Marajoara (Norte): "Losangos e espirais, feitos com calma."
+- Encontro das águas (Norte): "Dois rios lado a lado, sem pressa."
+- Vitória-régia (Norte): "Folhas largas sobre a água parada."
+- Cordel (Nordeste): "Sol alto e história boa de contar."
+- Bandeirinhas (Nordeste): "As bandeirinhas já estão no alto."
+- Chita (Nordeste): "Flor miúda, cor por todo lado."
+- Ipê-amarelo (Centro-Oeste): "O ipê abriu, é tempo de visita."
+- Pantanal (Centro-Oeste): "Água rasa e horizonte largo."
+- Azulejo (Sudeste): "Azulejo na parede, café na mesa."
+- Copacabana (Sudeste): "O mar vai e volta, sem cansar."
+- Minas (Sudeste): "Conversa baixa ao pé da serra."
+- Araucária (Sul): "Sombra de araucária e ar frio."
+- Chimarrão (Sul): "A cuia está passando na roda."
+
+O nome ("Pra " mais o nome), a mensagem e o @nome ficam no cartão e passam por `displayText`. O prazo também fica no cartão: é a linha de `expiryLine` (texto do app, como "Vale até hoje."), não a mensagem de quem convidou. O cabeçalho entra uma vez: a etiqueta aos 120 ms por 360 ms, o título aos 220 ms por 420 ms e a frase aos 380 ms por 420 ms, cada um saindo de opacidade 0 e 10 px abaixo. O título é cabeçalho (`accessibilityRole='header'`). Os motivos não entram na árvore de acessibilidade e não recebem toque.
+
+A entrada espera a resposta de Reduzir movimento e só toca se a consulta tiver sucesso e devolver exatamente falso, e se o palco já tiver medido a tela. Toca uma vez por montagem e depois nada se move: não há laço. Com Reduzir movimento ligado, com a consulta falha, ou sem resposta em 300 ms (`PREF_WAIT_MS`), os motivos, o cabeçalho e a vibração não tocam: a cena pronta aparece (os valores vão ao fim). Uma resposta que liberaria o movimento depois disso não começa a entrada. Se Reduzir movimento liga no meio da entrada, motivos e cabeçalho assentam na hora e a vibração que ainda não saiu é cancelada. O cartão em si conserva o fade e o crescimento curtos de `inviteCardMotion` (420 ms, ou já no fim quando a configuração dele, `useReduceMotion`, pede movimento reduzido). Esta abertura não muda essa decisão. A consulta da abertura, quando falha ou passa de 300 ms, não é a consulta do cartão.
+
+No telefone, uma vibração de sucesso sai aos 420 ms (`HAPTIC_MS`, `tap('success')`), uma vez, e só quando a entrada toca. Na web o módulo de vibração é vazio, então não há toque. Com Reduzir movimento, consulta falha ou prazo de 300 ms, não há toque. Não há som e não há estado guardado da entrada.
+
+**Entrar** marca a introdução como vista (`intro.markSeen`). **Como funciona** mostra os cartões da introdução e, ao terminar, volta ao cartão: a tela monta de novo e a entrada toca outra vez, de propósito. **Agora não** esconde a tela nesta carga. Os três respondem desde o primeiro instante, também nos primeiros 300 ms e enquanto o cartão ainda faz o fade dele.
+
+`InviteArrival`, depois da configuração, e a prévia no compositor de convites continuam como estavam, sem esta abertura. A decisão de mostrar a tela é por capacidade (`openingGate`, `canAttribute`). O único `Platform.OS` da abertura escolhe o driver da animação (`Platform.OS !== 'web'` em `apps/app/src/ui/InviteWelcome.js`). Sem mudança de protocolo, RPC nem Termos. As seções 126 e 127 continuam para o cartão. O texto delas não foi editado.
+
+Testes automáticos, a partir de `apps/app`, cada arquivo sozinho. Conferem o contrato e o texto do código. Não montam a interface num aparelho. A lista é um roteiro, não um registro de execução. A verificação em aparelho desta seção continua por fazer, por uma pessoa.
+
+```sh
+node ../../scripts/run-tests.js test/inviteWelcomeStage.test.js
+node ../../scripts/run-tests.js test/inviteWelcomeMotion.test.js
+node ../../scripts/run-tests.js test/inviteWelcomeCopy.test.js
+node ../../scripts/run-tests.js test/inviteWelcome.test.js
+node ../../scripts/run-tests.js test/inviteCardFrame.test.js
+node ../../scripts/run-tests.js test/inviteCardFlow.test.js
+```
+
+`test/inviteWelcomeStage.test.js` prende o recorte dos motivos, as classes, as faixas, as contagens 3, 5 e 9, as calhas da coluna de 420 e o contraste da tinta com o chão. `test/inviteWelcomeMotion.test.js` prende os cinco movimentos, o teto de 1,5 s, a vibração única aos 420 ms, o assentamento com Reduzir movimento, com consulta falha e aos 300 ms sem resposta, e a ausência de repetição. `test/inviteWelcomeCopy.test.js` prende o título, as treze frases, a etiqueta lida e a reserva neutra. `test/inviteWelcome.test.js` lê o fonte de `InviteWelcome.js` e de `InviteCardOpen.js`: um só `Platform.OS`, ações soltas, motivos fora do leitor, sem laço e sem `displayText`. `test/inviteCardFrame.test.js` prende o `Shape` compartilhado e o `displayText` do nome, da mensagem e do @nome. `test/inviteCardFlow.test.js` prende que assinatura ruim, chave sem vínculo, cartão vencido e associação desconhecida não autorizam, e que o cartão de chegada não escreve sozinho.
+
+### Verificação manual
+
+Nenhuma verificação em aparelho foi feita. Os itens estão em aberto. São um roteiro, não um registro de execução. Ordem: build de debug do Android, simulador do iOS, depois a web e o PWA instalado. Onde o item não diz outra coisa, repetir nas quatro. Registrar aparelho, sistema e, na web, o navegador. Os links saem de Convites, como na seção 127: convite pessoal já conferido, introdução ainda não vista.
+
+- [ ] 1. Um link de cada região (Norte, Nordeste, Centro-Oeste, Sudeste, Sul) e, no conjunto, os 13 desenhos, no tema claro e no escuro. Resultado esperado: a tela toma a cor do desenho; os motivos chegam com o movimento daquela região, listado acima, e param; acima do cartão aparecem a etiqueta da região e do desenho, o título "Tem lugar pra você." e a frase daquele desenho.
+- [ ] 2. Telefone com 320 px de largura. Resultado esperado: classe compacta, 3 motivos na faixa de cima, nenhum no pé; o texto cabe e as três ações continuam alcançáveis.
+- [ ] 3. Tela curta, em que a coluna precisa rolar. Resultado esperado: a coluna rola; as palavras ficam legíveis sobre a fileira de cima, na placa da cor do chão.
+- [ ] 4. Paisagem, no telefone. Resultado esperado: com a altura menor que 600, a classe é compacta (3 motivos); a coluna rola se precisar e as palavras continuam legíveis.
+- [ ] 5. Janela de 1280 px na web e no PWA instalado. Resultado esperado: 9 motivos; os dois do meio ficam nas calhas laterais, fora da coluna de 420, e nenhum motivo fica atrás do cartão.
+- [ ] 6. Fonte a 200 por cento. Resultado esperado: nenhum texto cortado; **Entrar**, **Como funciona** e **Agora não** continuam alcançáveis.
+- [ ] 7. Reduzir movimento ligado antes de abrir. Resultado esperado: os motivos e o cabeçalho aparecem já no lugar, sem deslocar e sem vibração. O cartão segue a configuração dele e, com Reduzir movimento ligado, o fade curto também assenta na hora, como já fazia.
+- [ ] 8. Reduzir movimento ligado no meio da entrada. Resultado esperado: os motivos e o cabeçalho vão na hora para o lugar final; a vibração que ainda não saiu não sai.
+- [ ] 9. TalkBack no Android, VoiceOver no iOS e um leitor de tela na web. Resultado esperado: leem a etiqueta como "Cartão <desenho>, <região>", o título como cabeçalho, a frase, "Pra <nome>", a mensagem, o @nome, o prazo, **Entrar**, **Como funciona** e **Agora não**. Não leem motivo nenhum.
+- [ ] 10. Na web, Tab no teclado. Resultado esperado: o foco chega em **Entrar**, **Como funciona** e **Agora não**.
+- [ ] 11. Toque em **Entrar** nos primeiros 300 ms. Resultado esperado: a introdução fica marcada como vista e o fluxo segue, com a entrada ainda no começo.
+- [ ] 12. Esperar 2 s com a tela aberta, sem Reduzir movimento. Resultado esperado: depois de 1,5 s nada mais se move, e não recomeça.
+- [ ] 13. Vibração. Resultado esperado: no telefone, um toque só, aos 420 ms; na web, nenhum; com Reduzir movimento, com a consulta falha ou sem resposta em 300 ms, nenhum.
+- [ ] 14. **Como funciona** e voltar. Resultado esperado: aparecem os cartões da introdução; ao voltar, a abertura toca de novo, porque a tela montou de novo.
+- [ ] 15. **Agora não**. Resultado esperado: a abertura some nesta carga e a introdução segue; o código e o cartão continuam guardados.
+- [ ] 16. Cartão ainda não conferido (nó sem resposta, ou associação desconhecida). Resultado esperado: o splash espera e, aos 6 s, a introdução aparece; o splash não volta. Se o cartão for conferido depois e ainda for elegível, ele toma o lugar da introdução.
+- [ ] 17. Assinatura ruim, cartão vencido ou chave sem vínculo. Resultado esperado: a abertura não aparece e não há espera de 6 s.
