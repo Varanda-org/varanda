@@ -10799,3 +10799,51 @@ node apps/app/test/postLinkOpen.test.js
 node apps/cli/test/post-page.test.js
 node apps/cli/test/seeder-post-http.test.js
 ```
+
+## 237. Capa dos players de música antes de carregar (PR feat/music-player-cover)
+
+Esta seção confere a capa que o lugar do player do YouTube, do SoundCloud, do Spotify e do Apple Music mostra antes de a página do provedor carregar, e a busca dessa capa ao compor. Ao escrever, quem monta o cartão (o aparelho de quem envia no app nativo, o serviço de conta na web hospedada) guarda como `card.image` a capa do provedor: o `og:image` da página (no app nativo, só quando o host é o da própria página ou um subdomínio estrito de um domínio de imagem do próprio provedor, `COVER_IMAGE_DOMAINS` em `apps/app/src/musicEmbed.js`: `ytimg.com`, `scdn.co`, `sndcdn.com`, `mzstatic.com`; na web, o serviço de conta busca o `og:image` como em qualquer prévia, com as verificações de endereço dele) e, num vídeo do YouTube, lido no endereço canônico (`coverTarget`), a miniatura padrão `https://i.ytimg.com/vi/<id>/mqdefault.jpg` (`youtubeCoverUrl` de `@varanda/rpc`) quando a página ou a imagem dela não dá nenhuma; um cartão feito só com essa miniatura se chama "YouTube". No app nativo são no máximo duas buscas de imagem, sem seguir redirecionamento, com os mesmos limites de antes (5 s, 256 KiB, tipo conferido pelos primeiros bytes); no serviço, a página e no máximo duas imagens, o pedido continua exatamente `{ url }` e a cota é a mesma. A imagem é recodificada no `card.image` de sempre (JPEG, até 320 px por lado, 32752 bytes): o formato dos registros não muda. Ao mostrar, o lugar do player desenha desde o primeiro quadro uma capa parada do tamanho exato do player, só com o cartão guardado (imagem, título, nome do provedor e selo de play; sem imagem, um quadro do provedor com um ícone de música), sem falar com ninguém; o player continua carregando embaixo dela (comportamento da seção 233, sem mudança), aparece num esmaecimento quando fica pronto e a capa sai. Um toque na capa não faz nada; o toque longo abre o menu como antes. Termos e Política na versão 52, com novo aceite. Sem mudança de RPC. A lista abaixo é um roteiro: nada aqui foi marcado como conferido, e o que não foi executado fica pendente.
+
+Ordem: Android (build de debug) e simulador iOS primeiro, depois web e PWA instalado. Registrar aparelho, sistema e, na web, o navegador, e o resultado de cada item.
+
+Ao compor:
+
+- [ ] a. Publicação nova com um link de cada provedor (um vídeo do YouTube, uma faixa do Spotify, uma do SoundCloud e uma do Apple Music), pelo app nativo: o cartão guardado traz a capa do provedor. Android, iOS: pendente. Resultado: pendente.
+- [ ] b. O mesmo pela web hospedada e pelo PWA: o serviço de conta devolve a capa e ela fica guardada. Web e PWA: pendente. Resultado: pendente.
+- [ ] c. Com a chave **Prévia de links** desligada em Ajustes, nenhuma busca de capa sai (nem da página nem da imagem), conferido no registro de rede ou no proxy. Android, iOS, web: pendente. Resultado: pendente.
+- [ ] d. Um link do YouTube numa conversa privada e num grupo ganha cartão com a miniatura e, com ela, o player e a capa, no app nativo e na web. Android, iOS, web: pendente. Resultado: pendente.
+- [ ] e. Resposta do serviço de conta a partir do endereço do datacenter da associação, para cada provedor (`POST /account/preview` com um link de YouTube, Spotify, SoundCloud e Apple Music): registrar se vem `image` e, no YouTube, se a miniatura entrou e o título é "YouTube" quando a página não deu nenhum. Pendente. Resultado: pendente.
+
+Ao mostrar:
+
+- [ ] f. Nas publicações novas dos itens a e b, a capa aparece na hora, no tamanho do player, e o player aparece por cima num esmaecimento, para os quatro provedores; o esmaecimento nunca descobre um player em branco. Android, iOS, web e PWA: pendente. Resultado: pendente.
+- [ ] g. Uma publicação antiga sem imagem no cartão mostra o quadro do provedor com o ícone de música. Android, iOS, web e PWA: pendente. Resultado: pendente.
+- [ ] h. Com Reduzir movimento ligado, o player aparece de uma vez, sem esmaecimento. Android, iOS, web: pendente. Resultado: pendente.
+- [ ] i. Numa citação de uma publicação com player, a capa e o esmaecimento se comportam como na publicação. Android, iOS, web e PWA: pendente. Resultado: pendente.
+- [ ] j. Na prévia do compositor (Publicar, conversa privada e grupo), o rascunho mostra a capa e o player esmaece no próprio lugar. Android, iOS, web e PWA: pendente. Resultado: pendente.
+- [ ] k. Rolar para longe de um player já carregado e voltar: ele aparece na hora, sem capa e sem um segundo esmaecimento. Android, iOS, web e PWA: pendente. Resultado: pendente.
+- [ ] l. Um toque na capa não faz nada (não abre o link nem o player), e o toque longo abre o menu da publicação ou da mensagem. Android, iOS, web e PWA: pendente. Resultado: pendente.
+- [ ] m. Quem lê não faz nenhum pedido para desenhar a capa: no registro de rede, abrir uma publicação com capa não busca imagem do provedor (só o quadro do player, como na seção 233). Android, iOS, web: pendente. Resultado: pendente.
+- [ ] n. Termos e Política na versão 52: o aceite novo aparece antes de qualquer tela e a versão 51 não vale mais. Android, iOS, web e PWA: pendente. Resultado: pendente.
+- [ ] o. Aparelho Android real (não só o emulador): itens a, f, k e l. Pendente. Resultado: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho:
+
+```sh
+node packages/rpc/test/music-cover.test.js
+node apps/app/test/musicEmbed.test.js
+node apps/app/test/linkCardBuild.test.js
+node apps/app/test/coverBuildWeb.test.js
+node apps/app/test/embedCover.test.js
+node apps/app/test/embedCoverView.test.js
+node apps/app/test/useReveal.test.js
+node apps/app/test/embedLayer.test.js
+node apps/app/test/musicEmbedCard.test.js
+node apps/cli/test/preview-routes.test.js
+node apps/app/test/legal.test.js
+node apps/app/test/terms-version.test.js
+node packages/core/test/terms.test.js
+node apps/site/test/legal.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.

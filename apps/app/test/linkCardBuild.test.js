@@ -340,6 +340,153 @@ test('native buildPreview: a redirected page gives no card and a redirected imag
   t.is(imageMoved.url, URL1, 'the card names the link asked')
 })
 
+const SPOTIFY = 'https://open.spotify.com/track/' + 'A'.repeat(22)
+const YT_ID = 'abcdefghijk'
+const YT_WATCH = 'https://www.youtube.com/watch?v=' + YT_ID
+const YT_THUMB = 'https://i.ytimg.com/vi/' + YT_ID + '/mqdefault.jpg'
+const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1, 2, 3])
+const ogPage = (image) => '<html><head><meta property="og:title" content="Faixa"><meta property="og:image" content="' + image + '"></head></html>'
+
+test('native buildPreview: a music cover from the provider image domain only', async (t) => {
+  const { buildPreview } = await native()
+  const asked = []
+  const fetchFor = (image) => async (url) => {
+    asked.push(url)
+    if (url === SPOTIFY) return response(200, 'text/html', enc(ogPage(image)), url)
+    if (url === image) return response(200, 'image/jpeg', JPEG, url)
+    throw new Error('unexpected ' + url)
+  }
+  const scdn = 'https://i.scdn.co/image/ab67616d0000b273'
+  const cover = await buildPreview(SPOTIFY, { fetch: fetchFor(scdn) })
+  t.is(cover.title, 'Faixa')
+  t.is(cover.imageMime, 'image/jpeg', 'i.scdn.co is the Spotify cover domain')
+  t.alike(cover.imageBytes, JPEG)
+  t.alike(asked, [SPOTIFY, scdn])
+
+  asked.length = 0
+  const other = 'https://images.example.net/cover.jpg'
+  const none = await buildPreview(SPOTIFY, { fetch: fetchFor(other) })
+  t.is(none.title, 'Faixa')
+  t.is(none.imageBytes, null, 'another domain gives no cover')
+  t.alike(asked, [SPOTIFY], 'and is never asked')
+
+  asked.length = 0
+  const notMusic = await buildPreview(URL1, {
+    fetch: async (url) => { asked.push(url); return url === URL1 ? response(200, 'text/html', enc(ogPage(scdn)), url) : response(200, 'image/jpeg', JPEG, url) }
+  })
+  t.is(notMusic.imageBytes, null, 'a provider image domain counts only for that provider link')
+  t.alike(asked, [URL1])
+})
+
+test('native buildPreview: a YouTube video gets its thumbnail when the page gives none', async (t) => {
+  const { buildPreview } = await native()
+  const asked = []
+  const fetchWith = (pageAnswer, thumbAnswer = (url) => response(200, 'image/jpeg', JPEG, url)) => async (url) => {
+    asked.push(url)
+    if (url === YT_WATCH) return pageAnswer(url)
+    if (url === YT_THUMB) return thumbAnswer(url)
+    throw new Error('unexpected ' + url)
+  }
+
+  for (const [name, pageAnswer] of [
+    ['a page answering 500', (url) => response(500, 'text/html', enc('x'), url)],
+    ['a page past PAGE_CAP', (url) => response(200, 'text/html', new Uint8Array(512 * 1024 + 1), url)]
+  ]) {
+    asked.length = 0
+    const p = await buildPreview(YT_WATCH, { fetch: fetchWith(pageAnswer) })
+    t.alike(p, { url: YT_WATCH, host: 'www.youtube.com', title: 'YouTube', desc: '', imageBytes: JPEG, imageMime: 'image/jpeg' }, name + ': the provider card with the thumbnail')
+    t.alike(asked, [YT_WATCH, YT_THUMB], name + ': the thumbnail address built from the id')
+  }
+
+  asked.length = 0
+  const short = await buildPreview('https://youtu.be/' + YT_ID + '?t=42', { fetch: fetchWith((url) => response(500, 'text/html', enc('x'), url)) })
+  t.alike(asked, [YT_WATCH + '&t=42s', YT_THUMB], 'a youtu.be link with a start is read at its watch address')
+  t.is(short.url, YT_WATCH + '&t=42s', 'the card keeps the start')
+  t.is(short.title, 'YouTube')
+
+  asked.length = 0
+  await buildPreview('https://youtu.be/' + YT_ID, { fetch: fetchWith((url) => response(500, 'text/html', enc('x'), url)) })
+  t.alike(asked, [YT_WATCH, YT_THUMB], 'youtu.be fetched at https://www.youtube.com/watch?v=<id>')
+
+  asked.length = 0
+  const titled = await buildPreview(YT_WATCH, { fetch: fetchWith((url) => response(200, 'text/html', enc('<title>Vídeo</title>'), url)) })
+  t.is(titled.title, 'Vídeo', 'a page card keeps its own title')
+  t.alike(titled.imageBytes, JPEG, 'and gets the thumbnail')
+
+  asked.length = 0
+  const ogFails = await buildPreview(YT_WATCH, {
+    fetch: async (url) => {
+      asked.push(url)
+      if (url === YT_WATCH) return response(200, 'text/html', enc(ogPage('https://i.ytimg.com/vi/' + YT_ID + '/maxresdefault.jpg')), url)
+      if (url === YT_THUMB) return response(200, 'image/jpeg', JPEG, url)
+      return response(404, 'image/jpeg', JPEG, url)
+    }
+  })
+  t.alike(ogFails.imageBytes, JPEG, 'a failed og:image falls back to the thumbnail')
+  t.is(asked.length, 3, 'two image GETs at most')
+
+  asked.length = 0
+  const sameFails = await buildPreview(YT_WATCH, {
+    fetch: async (url) => {
+      asked.push(url)
+      return url === YT_WATCH ? response(200, 'text/html', enc(ogPage(YT_THUMB)), url) : response(404, 'image/jpeg', JPEG, url)
+    }
+  })
+  t.is(sameFails.imageBytes, null)
+  t.alike(asked, [YT_WATCH, YT_THUMB], 'the same address is never asked twice')
+
+  asked.length = 0
+  const playlist = 'https://www.youtube.com/playlist?list=' + 'P'.repeat(16)
+  t.is(await buildPreview(playlist, { fetch: async (url) => { asked.push(url); return response(500, 'text/html', enc('x'), url) } }), null, 'a playlist has no thumbnail address')
+  t.alike(asked, [playlist])
+})
+
+test('native buildPreview: a redirected or wrong-type thumbnail gives no image', async (t) => {
+  const { buildPreview } = await native()
+  const failed = (url) => response(500, 'text/html', enc('x'), url)
+  for (const [name, thumb] of [
+    ['redirected', (url) => response(200, 'image/jpeg', JPEG, 'https://i.ytimg.com/vi/other/mqdefault.jpg')],
+    ['followed by the transport', (url) => response(200, 'image/jpeg', JPEG, url, { redirected: true })],
+    ['not an image type', (url) => response(200, 'text/html', JPEG, url)],
+    ['bytes that are not an image', (url) => response(200, 'image/jpeg', enc('not an image at all'), url)]
+  ]) {
+    const fetch = async (url) => url === YT_WATCH ? failed(url) : thumb(url)
+    t.is(await buildPreview(YT_WATCH, { fetch }), null, name + ': no card when the page also failed')
+    const withPage = await buildPreview(YT_WATCH, { fetch: async (url) => url === YT_WATCH ? response(200, 'text/html', enc('<title>Vídeo</title>'), url) : thumb(url) })
+    t.is(withPage.title, 'Vídeo')
+    t.is(withPage.imageBytes, null, name + ': the page card without an image')
+  }
+})
+
+test('native buildPreview: an aborted build of a music link yields null', async (t) => {
+  const { buildPreview } = await native()
+  const pre = new AbortController()
+  pre.abort()
+  t.is(await buildPreview(YT_WATCH, { signal: pre.signal, fetch: async (url) => response(200, 'image/jpeg', JPEG, url) }), null, 'aborted before start')
+
+  const mid = new AbortController()
+  const asked = []
+  const p = await buildPreview(YT_WATCH, {
+    signal: mid.signal,
+    fetch: async (url) => {
+      asked.push(url)
+      if (url === YT_WATCH) return response(200, 'text/html', enc('<title>Vídeo</title>'), url)
+      mid.abort()
+      return response(200, 'image/jpeg', JPEG, url)
+    }
+  })
+  t.is(p, null, 'aborted during the thumbnail')
+  t.alike(asked, [YT_WATCH, YT_THUMB])
+
+  const early = new AbortController()
+  const askedEarly = []
+  t.is(await buildPreview(YT_WATCH, {
+    signal: early.signal,
+    fetch: async (url) => { askedEarly.push(url); early.abort(); return response(500, 'text/html', enc('x'), url) }
+  }), null, 'aborted during the page')
+  t.alike(askedEarly, [YT_WATCH], 'the thumbnail is not asked after an abort')
+})
+
 function filesUnder (dir) {
   const out = []
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {

@@ -9,6 +9,13 @@
 // intranet page the sender's network reaches) gets no preview, and an
 // og:image that redirects gets no thumbnail. The web proxy instead follows
 // up to 3 redirects, checking each address.
+// A music link keeps its cover even though providers serve it from their own
+// image domains: a fixed list of the provider's names (musicEmbed.js
+// coverImageAllowed). A single YouTube video is read at its canonical watch
+// address, because youtu.be answers with a redirect; that page is past
+// PAGE_CAP, so its thumbnail, an address built from the video id alone
+// (@varanda/rpc youtubeCoverUrl), stands in, on the provider's name as the
+// card when the page gave nothing. At most two image GETs, no other request.
 // Shared code imports './previewBuild'; previewBuild.web.js has the same
 // export. Only called while "Prévia de links" is on (previewPref.js).
 // -> { url, host, title, desc, imageBytes, imageMime } or null; never rejects.
@@ -16,8 +23,9 @@
 import rpc from '@varanda/rpc'
 import { fetch as expoFetch } from 'expo/fetch'
 import { extractPreview } from './preview.js'
+import { coverImageAllowed, coverTarget, fallbackCard } from './musicEmbed.js'
 
-const { cardUrlHost } = rpc
+const { cardUrlHost, youtubeCoverUrl } = rpc
 const PAGE_TIMEOUT_MS = 5000
 const PAGE_CAP = 512 * 1024
 const IMAGE_CAP = 256 * 1024
@@ -82,14 +90,11 @@ async function readBody (res, cap, stop) {
 
 // One GET under the caps, never through a redirect -> Uint8Array, or null.
 async function getCapped (url, { fetchImpl, signal, cap, types, accept }) {
-  if (cardUrlHost(url) === null) return null
+  if (cardUrlHost(url) === null || (signal && signal.aborted)) return null
   const ctl = new AbortController()
   const stop = () => ctl.abort()
   const timer = setTimeout(stop, PAGE_TIMEOUT_MS)
-  if (signal) {
-    if (signal.aborted) return null
-    signal.addEventListener('abort', stop)
-  }
+  if (signal) signal.addEventListener('abort', stop)
   try {
     const res = await fetchImpl(url, {
       method: 'GET',
@@ -152,31 +157,47 @@ export function sameSiteImage (pageHost, imageUrl) {
   return typeof pageHost === 'string' && host !== null && (host === pageHost || host.endsWith('.' + pageHost))
 }
 
+// One image GET under IMAGE_CAP, kept only when its leading bytes are an
+// image -> { imageBytes, imageMime } or null.
+async function getImage (url, fetchImpl, signal) {
+  const got = await getCapped(url, { fetchImpl, signal, cap: IMAGE_CAP, types: IMAGE_TYPES, accept: IMAGE_TYPES.join(', ') })
+  const mime = sniffImage(got)
+  return mime === null ? null : { imageBytes: got, imageMime: mime }
+}
+
 // `fetch` defaults to expo/fetch, whose body is a stream (React Native's
 // global fetch buffers the whole body first); only tests replace it.
 export async function buildPreview (url, { signal, fetch: fetchImpl = expoFetch } = {}) {
   try {
     if (typeof fetchImpl !== 'function' || cardUrlHost(url) === null) return null
-    const page = await getCapped(url, { fetchImpl, signal, cap: PAGE_CAP, types: PAGE_TYPES, accept: 'text/html' })
-    if (page === null) return null
-    const html = utf8(page)
-    const found = html === null ? null : extractPreview(html, url)
-    if (found === null || (signal && signal.aborted)) return null
-    let imageBytes = null
-    let imageMime = null
+    const target = coverTarget(url) || url
+    if (cardUrlHost(target) === null) return null
+    const page = await getCapped(target, { fetchImpl, signal, cap: PAGE_CAP, types: PAGE_TYPES, accept: 'text/html' })
+    const found = page === null ? null : extractPreview(utf8(page), target)
+    if (signal && signal.aborted) return null
+    let image = null
+    let tried = null
     // The phone cannot check where a name resolves, so a page may not point
     // it at another host (an intranet one) for the image: same host or a
-    // subdomain of it only. The web proxy, which checks addresses, has no
-    // such limit.
-    if (found.imageUrl && sameSiteImage(found.host, found.imageUrl)) {
-      const got = await getCapped(found.imageUrl, { fetchImpl, signal, cap: IMAGE_CAP, types: IMAGE_TYPES, accept: IMAGE_TYPES.join(', ') })
-      const mime = sniffImage(got)
-      if (mime !== null) {
-        imageBytes = got
-        imageMime = mime
-      }
+    // subdomain of it, or a strict subdomain of the link's own music
+    // provider's image domains, which are fixed names, never read from the
+    // page. The web proxy, which checks addresses, has no such limit.
+    if (found !== null && found.imageUrl && (sameSiteImage(found.host, found.imageUrl) || coverImageAllowed(target, found.imageUrl))) {
+      tried = found.imageUrl
+      image = await getImage(found.imageUrl, fetchImpl, signal)
+      if (signal && signal.aborted) return null
     }
-    if (signal && signal.aborted) return null
+    const thumbUrl = image === null ? youtubeCoverUrl(target) : null
+    if (thumbUrl !== null && thumbUrl !== tried) {
+      image = await getImage(thumbUrl, fetchImpl, signal)
+      if (signal && signal.aborted) return null
+    }
+    const imageBytes = image === null ? null : image.imageBytes
+    const imageMime = image === null ? null : image.imageMime
+    if (found === null) {
+      const fallback = image === null ? null : fallbackCard(url)
+      return fallback === null ? null : { ...fallback, imageBytes, imageMime }
+    }
     return { url: found.url, host: found.host, title: found.title, desc: found.desc, imageBytes, imageMime }
   } catch {
     return null

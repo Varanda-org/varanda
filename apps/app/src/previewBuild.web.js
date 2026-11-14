@@ -9,6 +9,7 @@
 
 import rpc from '@varanda/rpc'
 import { previewFetch, previewPolicy } from './account.js'
+import { coverTarget } from './musicEmbed.js'
 
 const { cardUrlHost } = rpc
 
@@ -18,7 +19,9 @@ export async function buildPreview (url, { signal, member, request, origin, acco
     if (origin === null || cardUrlHost(url) === null || typeof member !== 'string' || typeof request !== 'function') return null
     if (!(await account.previewPolicy({ origin }))) return null
     if (signal && signal.aborted) return null
-    const p = await account.previewFetch(url, { origin, member, request, signal })
+    // The service builds a YouTube thumbnail only from the canonical watch
+    // address, never from a youtu.be or embed link.
+    const p = await account.previewFetch(coverTarget(url) || url, { origin, member, request, signal })
     if (signal && signal.aborted) return null
     return {
       url: p.url,

@@ -17,6 +17,7 @@ const dmBudget = require('./lib/dm-budget')
 const linkCard = require('./lib/link-card')
 const music = require('./lib/music')
 const ogParse = require('./lib/og-parse')
+const musicCover = require('./lib/music-cover')
 const feira = require('./lib/feira')
 const inviteCard = require('./lib/invite-card')
 const reaction = require('./lib/reaction')
@@ -93,6 +94,8 @@ module.exports = {
   parseOg: ogParse.parseOg,
   ogText: ogParse.ogText,
   ogImageUrl: ogParse.ogImageUrl,
+  YOUTUBE_COVER_HOST: musicCover.YOUTUBE_COVER_HOST,
+  youtubeCoverUrl: musicCover.youtubeCoverUrl,
   feira,
   ...inviteCard,
   isReaction: reaction.isReaction,
