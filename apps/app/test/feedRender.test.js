@@ -332,3 +332,16 @@ test('RefreshableList treats web keyboard scrolls and mouse presses as user gest
   t.ok(effect.includes('const onMouseDown = () => notifyUserScroll()'), 'a press notifies the gesture')
   t.ok(effect.includes("node.removeEventListener('wheel', onWheel, { passive: true })"), 'the wheel listener stays')
 })
+
+test('ARua forwards the scroll callbacks to both live lists', (t) => {
+  const src = read('screens/ARua.js')
+  const lists = src.split('<RefreshableList').slice(1, 3)
+  t.is(lists.length, 2, 'two live lists')
+  for (const list of lists) {
+    const body = list.slice(0, list.indexOf('\n      />'))
+    t.ok(body.includes('onScrollFrame={onScrollFrame}'), 'frames are forwarded')
+    t.ok(body.includes('onUserScroll={onUserScroll}'), 'user scrolls are forwarded')
+  }
+  t.ok(src.includes('onDeletedPost, onScrollFrame, onUserScroll })'), 'the page feed takes both props')
+  t.ok(src.includes('onCreateMoment, onScrollFrame, onUserScroll })'), 'the member feed takes both props')
+})

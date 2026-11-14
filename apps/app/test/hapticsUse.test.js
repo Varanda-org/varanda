@@ -204,6 +204,8 @@ test('TabBar taps select once when the tab changes and not on a reselect', (t) =
     './Avatar': { Avatar: 'Avatar' },
     './Icon': { Icon: 'Icon' },
     './StackLayer': { useReduceMotion () { return false } },
+    './chromeMotion': { useChromeMotion () { return { progress: { interpolate () { return 0 } }, hidden: false, show () {} } } },
+    '../chromeScroll': { chromeHiddenProps () { return {} } },
     '../appearance': {
       paletteFor () {
         return colors

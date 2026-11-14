@@ -1,7 +1,9 @@
 // The floating "publicar" button above the tab bar.
 
-import { StyleSheet } from 'react-native'
+import { Animated, StyleSheet } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
+import { useChromeMotion } from './chromeMotion'
+import { chromeHiddenProps } from '../chromeScroll'
 import { Icon } from './Icon'
 import { PressScale } from './PressScale'
 import { useStyles, useTheme } from './ThemeProvider'
@@ -11,19 +13,31 @@ export function Fab ({ onPress }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const insets = useSafeAreaInsets()
+  const { progress, hidden, show } = useChromeMotion()
+  const offset = insets.bottom + layout.tabBar + layout.fabAboveTabs
+  // Leaves with the tab bar: its own offset plus the fab's height.
+  const translateY = progress.interpolate({ inputRange: [0, 1], outputRange: [0, offset + layout.fabSize] })
+  const hiddenProps = hidden ? chromeHiddenProps(show) : null
   return (
-    <PressScale
-      accessibilityRole='button'
-      accessibilityLabel='publicar'
-      onPress={onPress}
-      style={({ pressed }) => [styles.fab, { bottom: insets.bottom + layout.tabBar + layout.fabAboveTabs }, pressed && styles.pressed]}
+    <Animated.View
+      {...hiddenProps}
+      pointerEvents={hidden ? 'none' : 'box-none'}
+      style={[styles.layer, { transform: [{ translateY }] }]}
     >
-      <Icon name='lapis' size={26} color={colors.accentInk} />
-    </PressScale>
+      <PressScale
+        accessibilityRole='button'
+        accessibilityLabel='publicar'
+        onPress={onPress}
+        style={({ pressed }) => [styles.fab, { bottom: insets.bottom + layout.tabBar + layout.fabAboveTabs }, pressed && styles.pressed]}
+      >
+        <Icon name='lapis' size={26} color={colors.accentInk} />
+      </PressScale>
+    </Animated.View>
   )
 }
 
 const makeStyles = (colors) => StyleSheet.create({
+  layer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
   fab: {
     position: 'absolute',
     right: layout.fabRight,
