@@ -19,9 +19,9 @@ const source = (file) => fs.readFileSync(path.join(__dirname, '..', file), 'utf8
 test('feiraCompose: stepped creation keeps the fields, preview and publication controls', (t) => {
   const src = source('src/screens/Anunciar.js')
   const step = (name, next) => src.slice(src.indexOf("{STEPS[index] === '" + name + "'"), next ? src.indexOf("{STEPS[index] === '" + next + "'") : src.indexOf("{error !== '' ?"))
-  t.ok(/<Stepper\s+index=\{index\}\s+total=\{STEPS.length\}\s+title=\{STEP_TITLES\[index\]\}/.test(src))
+  t.ok(/<Stepper index=\{index\} title=\{STEP_TITLES\[index\]\}>/.test(src))
   t.ok(src.includes("<Btn label='Continuar' block onPress={advance}"))
-  t.ok(src.includes("<Btn label='Voltar' block secondary onPress={goBack}"))
+  t.ok(src.includes("<StepLink label='Voltar' onPress={goBack}"), 'Voltar is a text link that keeps the discard confirm')
   t.ok(src.includes("<Btn label='Publicar anúncio' block onPress={publish}"))
   t.ok(step('fotos', 'detalhes').includes('Fotos só podem ser publicadas na versão web.'))
   t.ok(src.includes("throw new Error('mídia disponível só na versão web')"))
@@ -562,4 +562,60 @@ test('feiraCompose: a listed term refuses the listing before any upload or send'
   t.is(edit.error, refusalText(term))
   t.is(d.calls.uploads, 0, 'nothing uploaded')
   t.is(d.calls.sends.length, 0, 'nothing sent')
+})
+
+test('feiraCompose: Anunciar and AnuncioEditar use the photo grid, a thin progress bar and sticky actions', (t) => {
+  const create = source('src/screens/Anunciar.js')
+  const edit = source('src/screens/AnuncioEditar.js')
+  for (const src of [create, edit]) {
+    t.ok(src.includes('<ListingPhotoGrid photos={photos} max={MAX_PHOTOS} locked={locked} canAdd={canAttach && !encoding} onAdd={attach} onRemove={removePhoto} onMove={movePhoto} />'), 'the grid replaces the old photo row')
+    t.absent(/styles\.photo\b|photoImg|<Image/.test(src), 'no private photo markup left')
+    t.ok(/const movePhoto = \(id, delta\) => \{\s+if \(locked\) return\s+setPhotos\(\(list\) => moveById\(list, id, delta\)\)/.test(src), 'a reorder only swaps the newest list and respects the lock')
+    t.ok(src.includes("import { moveById } from '../photoOrder'"), 'the move uses the shared helper')
+    t.ok(src.includes('pickImages(MAX_PHOTOS)') && !/expo-camera/.test(src), 'library picker, no camera')
+  }
+  t.ok(create.includes("accessibilityRole='progressbar'") && create.includes('(index + 1) / STEPS.length'), 'progress bar from the step count')
+  t.ok(create.indexOf('<View style={[styles.bar, { paddingBottom: insets.bottom + space.md }]}>') > create.indexOf('</ScrollView>'), 'Continuar sits in a bar below the scroll')
+  t.ok(/<View style=\{\[styles\.bar, \{ paddingBottom: insets\.bottom \+ space\.md \}\]\}>\s+\{error !== '' \? <ErrorText>\{error\}<\/ErrorText> : null\}\s+<Btn label='Salvar' block onPress=\{save\}/.test(edit), 'Salvar is in the sticky bar, under the repeated error')
+  t.ok(edit.indexOf("label='Salvar'") > edit.indexOf('</ScrollView>'), 'Salvar sits below the scroll')
+  t.is(edit.split("label='Salvar'").length, 2, 'one Salvar button')
+  t.is(create.split("label='Publicar anúncio'").length, 2, 'one Publicar button')
+})
+
+test('feiraCompose: the sticky bars follow the keyboard and clear the bottom safe area', (t) => {
+  const create = source('src/screens/Anunciar.js')
+  const edit = source('src/screens/AnuncioEditar.js')
+  for (const src of [create, edit]) {
+    t.ok(src.includes("import { KeyboardForm } from './Perfil'"), 'shared keyboard wrapper')
+    t.ok(src.includes('{ paddingBottom: insets.bottom + space.md }'), 'bar padding uses the bottom inset')
+    t.ok(src.includes('const insets = useSafeAreaInsets()'), 'insets come from the safe area hook')
+  }
+  t.ok(create.includes('</KeyboardForm>') && edit.includes('</KeyboardForm>'), 'wrapper is closed')
+  t.ok(create.indexOf('</KeyboardForm>') > create.indexOf('styles.bar, {') && edit.indexOf('</KeyboardForm>') > edit.indexOf('styles.bar, {'), 'the bar is inside the wrapper')
+  const wrapped = (src) => src.slice(src.indexOf('<KeyboardForm inWindow>'), src.indexOf('</KeyboardForm>'))
+  t.ok(wrapped(create).includes('<ScrollView ref={scrollRef}') && wrapped(create).includes('styles.bar'), 'Anunciar wraps scroll and bar')
+  t.absent(wrapped(create).includes('<Sheet'), 'the confirm sheet stays outside')
+  t.absent(create.slice(0, create.indexOf('<KeyboardForm inWindow>')).includes('<ScrollView ref'), 'scroll is inside the wrapper')
+  t.ok(wrapped(edit).includes('<ScrollView') && wrapped(edit).includes('styles.bar'), 'AnuncioEditar wraps scroll and bar')
+  t.ok(create.indexOf('<TopBar') < create.indexOf('<KeyboardForm inWindow>') && edit.indexOf('<TopBar title={asPage') < edit.indexOf('<KeyboardForm inWindow>'), 'TopBar stays above')
+})
+
+test('feiraCompose: full-screen forms measure the keyboard form on iOS too, sheets keep the Android rule', (t) => {
+  for (const file of ['Anunciar', 'AnuncioEditar']) t.ok(source('src/screens/' + file + '.js').includes('<KeyboardForm inWindow>'), file + ' opts in')
+  const perfil = source('src/screens/Perfil.js')
+  t.ok(perfil.includes('export function KeyboardForm ({ children, inWindow = false })'), 'default is off')
+  t.ok(perfil.includes("(!inWindow && Platform.OS !== 'android') || !view"), 'without inWindow the Android-only rule stays')
+  t.absent(/<KeyboardForm inWindow/.test(source('src/screens/ExcluirConta.js') + source('src/screens/Denunciar.js')), 'sheets are unchanged')
+})
+
+test('feiraCompose: the error is repeated in the bottom bar, above its button', (t) => {
+  for (const file of ['src/screens/Anunciar.js', 'src/screens/AnuncioEditar.js']) {
+    const src = source(file)
+    const bar = src.slice(src.indexOf('<View style={[styles.bar'), src.indexOf('</KeyboardForm>'))
+    const line = bar.indexOf("{error !== '' ? <ErrorText>{error}</ErrorText> : null}")
+    t.ok(line >= 0 && line < bar.indexOf('<Btn'), file + ': the error shows beside the action even when its field is scrolled away')
+  }
+  const create = source('src/screens/Anunciar.js')
+  t.absent(create.slice(0, create.indexOf('<View style={[styles.bar')).includes("{error !== '' ? <ErrorText>{error}</ErrorText> : null}"), 'Anunciar shows the repeated error once')
+  t.ok(source('src/screens/AnuncioEditar.js').includes("{error !== '' && field === '' && !conflict && pending !== null ? <ErrorText>{error}</ErrorText> : null}"), 'Editar keeps the error in the form only while the bar is hidden')
 })

@@ -53,6 +53,7 @@ import { StickyBar } from '../ui/StickyBar'
 import { PageNoticeSheet } from '../ui/PageNoticeSheet'
 import { TopBar } from '../ui/TopBar'
 import { Pill } from '../ui/Pill'
+import { MoreButton } from '../ui/MoreButton'
 import { ErrorState } from '../ui/States'
 import { layout, space, type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
@@ -307,20 +308,23 @@ export default function Anuncio ({
 
   return (
     <View style={styles.flex}>
-      <TopBar title={listing.kind === 'procura' ? 'Procura-se' : 'Anúncio'} onBack={onBack} />
+      <TopBar
+        title={listing.kind === 'procura' ? 'Procura-se' : 'Anúncio'}
+        onBack={onBack}
+        right={acts.denunciar && typeof onDenunciar === 'function'
+          ? <MoreButton title='Anúncio' actions={[{ icon: 'bandeira', label: 'Denunciar', danger: true, onPress: () => onDenunciar(reportTarget(listing)) }]} />
+          : null}
+      />
       <ScrollView contentContainerStyle={[styles.body, { paddingBottom: barActions.length > 0 ? Math.max(space.lg, barHeight) : space.lg }]}>
-        {listing.media.length > 0 ? <MediaGrid author={listing.author} media={listing.media} persist={false} /> : null}
+        {listing.media.length > 0 ? <View style={styles.bleed}><MediaGrid author={listing.author} media={listing.media} persist={false} /></View> : null}
         <View style={styles.row}>
           <Text style={styles.price}>{listing.priceLabel}</Text>
           {badge !== '' ? <Text style={styles.badge}>{badge}</Text> : null}
         </View>
         <Text style={styles.title}>{listing.title}</Text>
         <View style={styles.secondaryActions}>
-          {acts.compartilhar && url !== null ? <Pill label='Compartilhar' onPress={compartilhar} /> : null}
-          {acts.salvar ? <Pill label={saved ? 'Salvo' : 'Salvar'} filled={saved} onPress={salvar} /> : null}
-          {acts.denunciar && typeof onDenunciar === 'function'
-            ? <Pill label='Denunciar' onPress={() => onDenunciar(reportTarget(listing))} />
-            : null}
+          {acts.compartilhar && url !== null ? <Pill icon='compartilhar' accessibilityLabel='Compartilhar' onPress={compartilhar} /> : null}
+          {acts.salvar ? <Pill icon='estrela' accessibilityLabel={saved ? 'Salvo' : 'Salvar'} filled={saved} iconFilled={saved} onPress={salvar} /> : null}
           {typeof onAvaliar === 'function' && owner === null ? <Pill label='Avaliar' onPress={() => onAvaliar(listing)} /> : null}
         </View>
         <View style={styles.pills}>
@@ -403,6 +407,7 @@ const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   body: { padding: space.lg, gap: 10 },
+  bleed: { marginHorizontal: -space.lg, marginTop: -space.lg },
   section: { ...type.section, color: colors.ink },
   title: { ...type.profileName, color: colors.ink },
   row: { flexDirection: 'row', alignItems: 'center', gap: 10, flexWrap: 'wrap' },

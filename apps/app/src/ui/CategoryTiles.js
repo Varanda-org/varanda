@@ -4,7 +4,7 @@ import { CATEGORY_ICONS } from '../feiraBrowse'
 import { Icon } from './Icon'
 import { PressScale } from './PressScale'
 import { useStyles, useTheme } from './ThemeProvider'
-import { layout, radius, space, type } from './theme'
+import { layout, space, type } from './theme'
 
 const OPTIONS = [{ id: 'todas', label: 'Todas' }, ...Object.entries(CAT_LABELS).map(([id, label]) => ({ id, label }))]
 
@@ -19,12 +19,12 @@ export function CategoryTiles ({ value = 'todas', onChange }) {
           accessibilityLabel={label}
           accessibilityState={{ selected: value === id }}
           onPress={() => onChange(id)}
-          style={[styles.tile, value === id && styles.selected]}
+          style={styles.tile}
         >
-          <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>
-            <Icon name={id === 'todas' ? 'grade' : CATEGORY_ICONS[id]} color={value === id ? colors.accent : colors.ink} />
+          <View style={[styles.disc, value === id && styles.selected]} accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>
+            <Icon name={id === 'todas' ? 'grade' : CATEGORY_ICONS[id]} color={value === id ? colors.bg : colors.ink} />
           </View>
-          <Text style={[styles.label, value === id && styles.labelSelected]}>{label}</Text>
+          <Text style={styles.label} numberOfLines={1}>{label}</Text>
         </PressScale>
       ))}
     </ScrollView>
@@ -32,9 +32,9 @@ export function CategoryTiles ({ value = 'todas', onChange }) {
 }
 
 const makeStyles = (colors) => StyleSheet.create({
-  row: { paddingHorizontal: space.lg, paddingVertical: space.sm, gap: space.sm },
-  tile: { minWidth: layout.hit, minHeight: layout.hit, alignItems: 'center', justifyContent: 'center', gap: space.sm, padding: space.md, borderRadius: radius.md, backgroundColor: colors.card },
-  selected: { backgroundColor: colors.accentSoft },
-  label: { ...type.chip, color: colors.ink },
-  labelSelected: { color: colors.accent }
+  row: { paddingHorizontal: space.lg, paddingVertical: space.sm, gap: space.md },
+  tile: { minWidth: layout.hit, minHeight: layout.hit, alignItems: 'center', gap: space.xs },
+  disc: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.card },
+  selected: { backgroundColor: colors.ink },
+  label: { ...type.chip, color: colors.ink }
 })

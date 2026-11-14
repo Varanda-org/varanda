@@ -2,7 +2,7 @@ import { StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { PressScale } from './PressScale'
 import { useStyles } from './ThemeProvider'
-import { layout, radius, space, type } from './theme'
+import { layout, space, type } from './theme'
 
 export function SellerCard ({ avatar, name, lines = [], onOpenAuthor, onOpenListings }) {
   const styles = useStyles(makeStyles)
@@ -27,11 +27,11 @@ export function SellerCard ({ avatar, name, lines = [], onOpenAuthor, onOpenList
 }
 
 const makeStyles = (colors) => StyleSheet.create({
-  card: { borderWidth: 1, borderColor: colors.line, borderRadius: radius.md, backgroundColor: colors.card },
-  author: { minHeight: layout.hit, flexDirection: 'row', alignItems: 'center', gap: space.md, padding: space.lg },
+  card: { borderTopWidth: 1, borderBottomWidth: 1, borderColor: colors.line },
+  author: { minHeight: layout.hit, flexDirection: 'row', alignItems: 'center', gap: space.md, paddingVertical: space.md },
   details: { flex: 1, gap: space.xs },
   name: { ...type.postName, color: colors.ink },
   line: { ...type.postMeta, color: colors.soft },
-  listings: { minHeight: layout.hit, justifyContent: 'center', padding: space.md, borderTopWidth: 1, borderTopColor: colors.line },
+  listings: { minHeight: layout.hit, justifyContent: 'center', paddingVertical: space.sm, borderTopWidth: 1, borderTopColor: colors.line },
   link: { ...type.pill, color: colors.accent }
 })

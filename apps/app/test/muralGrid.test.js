@@ -53,9 +53,10 @@ test('a tile opens its post even when the cover failed', (t) => {
   t.ok(view.includes('const press = failed ? (tapRetry ? retry : undefined) : onPress'), 'MediaView honours tapRetry')
 })
 
-test('a listing card keeps retry off inside its button', (t) => {
-  const listing = read('ListingCard.js')
-  const media = listing.slice(listing.indexOf('<MediaView'), listing.indexOf('/>', listing.indexOf('<MediaView')))
+test('the listing card is gone, ListingTile carries the retry rule', (t) => {
+  t.absent(require('fs').existsSync(require('path').join(__dirname, '..', 'src', 'ui', 'ListingCard.js')), 'ListingCard.js is deleted')
+  const tile = read('ListingTile.js')
+  const media = tile.slice(tile.indexOf('<MediaView'), tile.indexOf('/>', tile.indexOf('<MediaView')))
   t.ok(media.includes('tapRetry={false}'), 'no nested retry button')
   t.absent(media.includes('onPress'), 'MediaView gets no onPress')
 })

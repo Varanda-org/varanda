@@ -24,8 +24,10 @@ import { installationOrigin } from '../installation'
 import { Btn, ErrorText, Field, Soft, Spinner, errorText } from '../ui'
 import { refusalOf } from '../wordCheck'
 import { TopBar } from '../ui/TopBar'
+import { Icon } from '../ui/Icon'
+import { tap } from '../ui/haptics'
 import { type } from '../ui/theme'
-import { useStyles } from '../ui/ThemeProvider'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 
 const { feira } = rpc
 
@@ -68,6 +70,7 @@ async function findListing (request, author, seq) {
 
 export default function Avaliar ({ author, seq, offer: offerId, me = null, actingPage = null, onBack, onRated }) {
   const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const node = useNode()
   const nodeRef = useRef(node)
   nodeRef.current = node
@@ -202,10 +205,10 @@ export default function Avaliar ({ author, seq, offer: offerId, me = null, actin
               accessibilityLabel={n === 1 ? '1 estrela' : n + ' estrelas'}
               accessibilityState={{ checked: stars === n }}
               disabled={locked}
-              onPress={() => { setStars(n); setError('') }}
+              onPress={() => { if (n !== stars) tap('select'); setStars(n); setError('') }}
               style={styles.star}
             >
-              <Text style={[styles.starText, n <= stars && styles.starOn]}>{n <= stars ? '★' : '☆'}</Text>
+              <Icon name='estrela' size={36} filled={n <= stars} color={n <= stars ? colors.accent : colors.soft} />
             </Pressable>
           ))}
         </View>
@@ -245,7 +248,5 @@ const makeStyles = (colors) => StyleSheet.create({
   label: { ...type.section, color: colors.ink },
   row: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   stars: { flexDirection: 'row', gap: 4 },
-  star: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
-  starText: { fontSize: 30, color: colors.soft },
-  starOn: { color: colors.accent }
+  star: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' }
 })
