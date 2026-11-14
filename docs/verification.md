@@ -11045,3 +11045,15 @@ node apps/cli/test/post-page.test.js
 - [ ] iOS Safari no aparelho, em claro e em escuro: pendente.
 - [ ] Link aberto de dentro do WhatsApp e do Instagram (navegador embutido): pendente.
 - [ ] Fonte maior no sistema ou no navegador (ajuste de tamanho do texto, não zoom da página), no Android e no iOS: pendente. A página usa tamanhos em px, como o app.
+
+## 241. Resposta apagada some das Conversas abertas por baixo (PR fix/sobras-exclusao-conversa)
+
+Fecha parte da #228, só no app. Antes, apagar uma resposta deixava a cópia dela nas Conversas mais antigas ainda abertas na pilha até um recarregamento. Agora `announceDeleted` (`apps/app/src/screens/Conversa.js`) avisa cada Conversa montada, e `dropDeleted` tira a resposta das listas dela e baixa a contagem do pai. Uma Conversa que não mostra a publicação não muda. A publicação focal de uma Conversa mais antiga não entra aqui.
+
+Fora desta mudança: depois de uma exclusão incerta na Conversa, a publicação pode seguir visível até a releitura (`recheck`); apagar de novo é idempotente, então o item da #228 fica como está.
+
+1. [ ] Android e iOS: abrir uma publicação, tocar numa resposta para abrir a Conversa dela, apagar uma resposta lá, voltar: a Conversa de baixo não mostra mais a resposta e a contagem do pai baixou (não realizada ainda).
+2. [ ] Apagar uma resposta própria no Diário com uma Conversa aberta por baixo, voltar: a resposta não está lá (não realizada ainda).
+3. [ ] Uma Conversa de baixo sem a publicação apagada continua igual (não realizada ainda).
+
+Teste: `apps/app/test/conversaScreen.test.js` (confere o código, não monta a tela).

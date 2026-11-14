@@ -319,7 +319,7 @@ test('Conversa quick send uses a quiet read only without pending pages', async (
 
 async function localReplies (registerLocalCache = () => {}) {
   const { withOwnReply } = await import('../src/threadRows.js')
-  return handler(src.replace('export function branchView', 'function branchView'), 'const ownReplyCache =', 'const INITIAL =', '{ branchView, ownFor, cacheOwnReply, ownReplyCache, ownReplyCopies, forgetOwnReplies, dropOwnReplies, pruneOwnReplies }', {
+  return handler(src.replace('export function branchView', 'function branchView'), 'const ownReplyCache =', 'const INITIAL =', '{ branchView, ownFor, cacheOwnReply, ownReplyCache, ownReplyCopies, deletionListeners, announceDeleted, forgetOwnReplies, dropOwnReplies, pruneOwnReplies }', {
     withOwnReply,
     registerLocalCache,
     refOf: (author, seq) => author + ':' + seq
@@ -519,9 +519,13 @@ test('Conversa delete lowers the actual parent count once and removes cached cop
       setOpen: (update) => { state.open = update(state.open) },
       viewRef: { current: { replies: [], parent: null, meta: null } },
       commit: () => {},
-      refOf: (author, seq) => author + ':' + seq
+      refOf: (author, seq) => author + ':' + seq,
+      useRef: (value) => ({ current: value }),
+      useEffect: () => {},
+      deletionListeners: new Set(),
+      focalRef: { current: focal }
     }
-    const del = handler(src, '  const del = useDelete({', '  const handlers =', 'del', context)
+    const del = handler(src, '  const dropDeleted = useRef(null)', '  const handlers =', 'del', context)
     await del.onDeleted({ ref: A + ':8', seq: 8 })
     t.is(context.eng.counts.get(parent).replies, Math.max(0, count - 1))
     t.is(context.eng.counts.get(parent).likes, 4)
@@ -826,4 +830,57 @@ test('Conversa: reply branch controls are slim text links, not filled pills', (t
   t.absent(/outlineStyle|outlineWidth|webInputReset|backgroundColor|borderWidth|Platform/.test(link), 'focus ring and shared platform behavior stay intact')
   t.absent(/\bhitSlop\s*=/.test(link), 'no hitSlop prop; the comment may name it')
   t.absent(link.includes('\u2014'))
+})
+
+test('Conversa: a deletion made on another screen reaches the Conversas still open below it', (t) => {
+  t.ok(src.includes('const deletionListeners = new Set()'))
+  t.ok(src.includes('function announceDeleted (refs) {\n  for (const listener of deletionListeners) listener(refs)\n}'))
+  t.ok(src.includes('forgetOwnReplies(refs)\n        announceDeleted(refs)'), 'after the screen that deleted has dropped its own copy')
+  t.ok(src.includes('deletionListeners.add(listener)') && src.includes('deletionListeners.delete(listener)'), 'a Conversa listens while mounted')
+  t.ok(src.includes('if (ref !== focalRef.current) dropDeleted.current(ref)'), 'the focal post of an older screen is left to its own flow')
+  t.ok(src.includes('dropDeleted.current(t.ref, true)'), 'the screen that deleted always clears its flags')
+  t.ok(src.includes('if (!force && !held && !shown.replies'), 'a screen that does not show the post stays as it is')
+})
+
+test('Conversa: an older screen drops a reply deleted above it and lowers the parent count', async (t) => {
+  const own = await localReplies()
+  const parent = A + ':2'
+  const gone = item(8, 2)
+  const kept = item(9, 2)
+  const state = { children: new Map([[parent, [gone, kept]]]), open: new Set([parent]) }
+  const context = {
+    ...own,
+    useDelete: (options) => options,
+    request: () => {},
+    node: {},
+    onToast: () => {},
+    load: () => {},
+    genRef: { current: 1 },
+    onDeletedPost: () => { throw new Error('only the screen that deleted counts it') },
+    revokeDeletedMedia: () => {},
+    focal,
+    peekedRef: { current: new Map() },
+    childrenRef: { current: state.children },
+    ownReplies: { current: new Map() },
+    eng: { counts: new Map([[parent, { replies: 2 }]]) },
+    setCount: (key, value) => context.eng.counts.set(key, value),
+    setChildren: (update) => { state.children = update(state.children) },
+    setOpen: (update) => { state.open = update(state.open) },
+    viewRef: { current: { replies: [], parent: null, meta: null } },
+    commit: () => {},
+    refOf: (author, seq) => author + ':' + seq,
+    useRef: (value) => ({ current: value }),
+    useEffect: (fn) => fn(),
+    deletionListeners: new Set(),
+    focalRef: { current: focal }
+  }
+  handler(src, '  const dropDeleted = useRef(null)', '  const handlers =', 'del', context)
+  const [listener] = [...context.deletionListeners]
+  listener(new Set([A + ':8']))
+  t.is(context.eng.counts.get(parent).replies, 1)
+  t.alike(state.children.get(parent).map((row) => row.seq), [9])
+  listener(new Set([A + ':77']))
+  t.is(context.eng.counts.get(parent).replies, 1, 'a post this screen does not hold changes nothing')
+  listener(new Set([focal]))
+  t.is(context.eng.counts.get(parent).replies, 1, 'the focal post is left alone')
 })
