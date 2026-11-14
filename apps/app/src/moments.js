@@ -79,6 +79,17 @@ export function nextIndex (i, length, dir) {
   return to
 }
 
+// The momento a "next" step lands on, as the viewer's step() moves: the next
+// item, else the next author's first unseen one. `rings` as the viewer holds them.
+export function nextMomentOf (rings, pos) {
+  if (rings === null || pos.ring < 0) return null
+  const ring = rings[pos.ring]
+  const to = nextIndex(pos.item, ring.items.length, 'next')
+  if (to !== null) return ring.items[to]
+  const next = rings[pos.ring + 1]
+  return next ? next.items[next.start] : null
+}
+
 // The PR3 openMessage context for "Responder". `kind` names it a moment in
 // the chip and the sent prefix (privateReply.js), never 'a sua publicação'.
 export function replyContext (moment, author) {

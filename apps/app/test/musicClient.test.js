@@ -252,6 +252,365 @@ test('audiusItem: { kind, id } in the body, strict answer', async (t) => {
   t.is(calls.length, before, 'nothing fetched for a bad request')
 })
 
+test('audiusItem: reuse keeps track answers as independent shallow copies', async (t) => {
+  const a = await load()
+  a.forgetAudiusSession()
+  const calls = stub(t, session({ '/account/audius/item': json(200, track) }))
+  const opts = { member: M, request: signer([]), reuse: true }
+  const first = await a.audiusItem('track', track.id, opts)
+  const second = await a.audiusItem('track', track.id, opts)
+  t.alike(first, track)
+  t.alike(second, first)
+  t.not(first, second)
+  first.title = 'Changed'
+  second.artist = 'Changed'
+  t.alike(await a.audiusItem('track', track.id, opts), track, 'callers cannot change the cached answer')
+  t.is(reads(calls, '/account/audius/item').length, 1)
+  t.is(reads(calls, '/account/audius/session/start').length, 1)
+  const before = calls.length
+  for (const changes of [{ request: null }, { member: 'zz' }]) {
+    t.is(await code(t, a.audiusItem('track', track.id, { ...opts, ...changes })), 'pedido-invalido')
+  }
+  t.is(await code(t, a.audiusItem('album', track.id, opts)), 'pedido-invalido')
+  t.is(calls.length, before, 'validation still precedes a cache hit')
+})
+
+test('audiusItem: only reuse === true reads or writes the track cache', async (t) => {
+  const a = await load()
+  a.forgetAudiusSession()
+  const routes = session({ '/account/audius/item': json(200, track) })
+  const calls = stub(t, routes)
+  const opts = { member: M, request: signer([]) }
+  for (const reuse of [undefined, false, 'yes']) {
+    await a.audiusItem('track', track.id, { ...opts, reuse })
+    await a.audiusItem('track', track.id, { ...opts, reuse })
+  }
+  t.is(reads(calls, '/account/audius/item').length, 6, 'ordinary calls always ask')
+  const cached = { ...track, title: 'Kept' }
+  routes['/account/audius/item'] = json(200, cached)
+  t.alike(await a.audiusItem('track', track.id, { ...opts, reuse: true }), cached, 'ordinary calls wrote nothing')
+  routes['/account/audius/item'] = json(200, track)
+  for (const reuse of [undefined, false, 'yes']) {
+    t.alike(await a.audiusItem('track', track.id, { ...opts, reuse }), track, 'ordinary calls ignore a warm cache')
+  }
+  t.alike(await a.audiusItem('track', track.id, { ...opts, reuse: true }), cached, 'ordinary calls did not replace the entry')
+  t.is(reads(calls, '/account/audius/item').length, 10)
+})
+
+test('audiusItem: reuse expires after ten minutes on the injected clock', async (t) => {
+  const a = await load()
+  a.forgetAudiusSession()
+  let clock = 1000000
+  const calls = stub(t, session({ '/account/audius/item': json(200, track) }))
+  const opts = { member: M, request: signer([]), reuse: true, now: () => clock }
+  t.is(a.AUDIUS_ITEM_REUSE_MS, 10 * 60 * 1000)
+  await a.audiusItem('track', track.id, opts)
+  clock += a.AUDIUS_ITEM_REUSE_MS - 1
+  await a.audiusItem('track', track.id, opts)
+  t.is(reads(calls, '/account/audius/item').length, 1, 'still fresh')
+  clock++
+  await a.audiusItem('track', track.id, opts)
+  t.is(reads(calls, '/account/audius/item').length, 2, 'expired at the boundary')
+  clock += a.AUDIUS_ITEM_REUSE_MS + 1
+  await a.audiusItem('track', track.id, opts)
+  t.is(reads(calls, '/account/audius/item').length, 3, 'older than ten minutes')
+})
+
+test('audiusItem: the reuse timer drops a track after ten minutes with no further ask', async (t) => {
+  const a = await load()
+  const timers = []
+  const realSet = globalThis.setTimeout
+  const realClear = globalThis.clearTimeout
+  globalThis.setTimeout = (fn, ms) => {
+    const timer = { fn, ms, cleared: false, fake: true, unrefed: false }
+    timer.unref = () => { timer.unrefed = true }
+    timer.close = () => { timer.cleared = true }
+    timers.push(timer)
+    return timer
+  }
+  globalThis.clearTimeout = (id) => {
+    if (id && id.fake === true) id.cleared = true
+    else realClear(id)
+  }
+  t.teardown(() => {
+    a.forgetAudiusSession()
+    globalThis.setTimeout = realSet
+    globalThis.clearTimeout = realClear
+  })
+  a.forgetAudiusSession()
+  let clock = 1000000
+  const calls = stub(t, session({ '/account/audius/item': json(200, track) }))
+  const opts = { member: M, request: signer([]), reuse: true, now: () => clock }
+  const armed = () => timers.filter((x) => !x.cleared)
+  await a.audiusItem('track', track.id, opts)
+  t.is(armed().length, 1, 'one timer for the earliest expiry')
+  t.is(armed()[0].ms, a.AUDIUS_ITEM_REUSE_MS)
+  t.is(armed()[0].unrefed, true, 'the timer does not keep the process alive')
+  armed()[0].fn()
+  await a.audiusItem('track', track.id, opts)
+  t.is(reads(calls, '/account/audius/item').length, 1, 'a sweep before ten minutes keeps the track')
+  t.is(armed().length, 1, 'the timer is armed again for the same entry')
+  t.is(armed()[0].ms, a.AUDIUS_ITEM_REUSE_MS)
+  clock += a.AUDIUS_ITEM_REUSE_MS
+  armed()[0].fn()
+  t.is(armed().length, 0, 'an empty map clears the timer')
+  // Back inside the original window: a hit would mean the sweep left the entry.
+  clock = 1000000 + 1
+  await a.audiusItem('track', track.id, opts)
+  t.is(reads(calls, '/account/audius/item').length, 2, 'gone after ten minutes without another ask')
+  a.forgetAudiusSession()
+  t.is(armed().length, 0, 'forget clears the timer')
+  await a.audiusItem('track', track.id, opts)
+  const { wipeLocalCaches } = await import('../src/localCaches.js')
+  t.is(armed().length, 1)
+  wipeLocalCaches()
+  t.is(armed().length, 0, 'a wipe clears the timer')
+})
+
+test('audiusItem: reuse never keeps a failed or aborted answer', async (t) => {
+  const a = await load()
+  const opts = { member: M, request: signer([]), reuse: true }
+  for (const failure of [json(503, { error: 'indisponivel' }), json(200, { ...track, id: 'Other1' }), json(200, { ...track, x: 1 }), (init) => {
+    t.ok(init.signal.aborted, 'the caller abort reached fetch')
+    const err = new Error('aborted')
+    err.name = 'AbortError'
+    throw err
+  }]) {
+    a.forgetAudiusSession()
+    const ctl = new AbortController()
+    if (typeof failure === 'function') ctl.abort()
+    const routes = session({ '/account/audius/item': failure })
+    const calls = stub(t, routes)
+    t.is(await code(t, a.audiusItem('track', track.id, { ...opts, signal: ctl.signal })), 'indisponivel')
+    routes['/account/audius/item'] = json(200, track)
+    t.alike(await a.audiusItem('track', track.id, opts), track)
+    t.alike(await a.audiusItem('track', track.id, opts), track)
+    t.is(reads(calls, '/account/audius/item').length, 2, 'only the successful answer is kept')
+  }
+})
+
+test('audiusItem: concurrent reuse calls have independent requests and abort signals', async (t) => {
+  const a = await load()
+  a.forgetAudiusSession()
+  const pending = []
+  const routes = session({ '/account/audius/item': (init) => new Promise((resolve) => { pending.push({ init, resolve }) }) })
+  const calls = stub(t, routes)
+  const opts = { member: M, request: signer([]), reuse: true }
+  const ctl = new AbortController()
+  const first = a.audiusItem('track', track.id, { ...opts, signal: ctl.signal })
+  const second = a.audiusItem('track', track.id, opts)
+  await flushAll()
+  t.is(pending.length, 2, 'item requests are never shared')
+  ctl.abort()
+  t.ok(pending[0].init.signal.aborted)
+  t.absent(pending[1].init.signal.aborted, 'the other caller stays live')
+  pending[0].resolve(json(200, track))
+  t.alike(await first, track, 'even a fetch that ignores abort may settle')
+  routes['/account/audius/item'] = json(200, track)
+  await a.audiusItem('track', track.id, opts)
+  t.is(reads(calls, '/account/audius/item').length, 3, 'the aborted answer was not kept')
+  pending[1].resolve(json(200, track))
+  t.alike(await second, track)
+  await a.audiusItem('track', track.id, opts)
+  t.is(reads(calls, '/account/audius/item').length, 3, 'the live answer is reusable')
+})
+
+test('audiusItem: reuse separates members, origins and ids', async (t) => {
+  const a = await load()
+  a.forgetAudiusSession()
+  const calls = stub(t, session({ '/account/audius/item': (init) => json(200, { ...track, id: JSON.parse(init.body).id }) }))
+  const opts = { member: M, origin: 'https://mus-reuse.example.org', request: signer([]), reuse: true }
+  for (const changes of [{}, { member: 'cd'.repeat(32) }, { origin: 'https://mus-reuse-other.example.org' }, { id: 'T2abc' }]) {
+    const { id = track.id, ...overrides } = changes
+    const local = { ...opts, ...overrides }
+    t.alike(await a.audiusItem('track', id, local), { ...track, id })
+    t.alike(await a.audiusItem('track', id, local), { ...track, id })
+  }
+  t.is(reads(calls, '/account/audius/item').length, 4)
+})
+
+test('audiusItem: forgetting a session drops only its entries, or all without a member', async (t) => {
+  const a = await load()
+  a.forgetAudiusSession()
+  const calls = stub(t, session({ '/account/audius/item': json(200, track) }))
+  const opts = { member: M, origin: 'https://mus-forget.example.org', request: signer([]), reuse: true }
+  const sessions = [opts, { ...opts, member: 'cd'.repeat(32) }, { ...opts, origin: 'https://mus-forget-other.example.org' }]
+  for (const s of sessions) await a.audiusItem('track', track.id, s)
+  a.forgetAudiusSession(opts)
+  for (const s of sessions) await a.audiusItem('track', track.id, s)
+  t.is(reads(calls, '/account/audius/item').length, 4, 'other members and origins keep their entries')
+  a.forgetAudiusSession()
+  for (const s of sessions) await a.audiusItem('track', track.id, s)
+  for (const s of sessions) await a.audiusItem('track', track.id, s)
+  t.is(reads(calls, '/account/audius/item').length, 7, 'forget all clears every entry')
+})
+
+test('audiusItem: a 401 on a read or session opening clears the member cache', async (t) => {
+  const a = await load()
+  for (const duringSession of [false, true]) {
+    a.forgetAudiusSession()
+    const routes = session({ '/account/audius/item': json(200, track), '/account/audius/search': json(401, { error: 'nao-autorizado' }) })
+    const calls = stub(t, routes)
+    const opts = { member: M, request: signer([]), reuse: true }
+    await a.audiusItem('track', track.id, opts)
+    await a.audiusItem('track', track.id, opts)
+    t.is(reads(calls, '/account/audius/item').length, 1)
+    if (duringSession) {
+      routes['/account/audius/session/start'] = json(401, { error: 'nao-autorizado' })
+      const realNow = Date.now
+      Date.now = () => new Date(LATER).getTime()
+      try {
+        t.is(await code(t, a.audiusSearch('a', { ...opts, kind: 'track' })), 'nao-autorizado')
+      } finally {
+        Date.now = realNow
+      }
+    } else {
+      t.is(await code(t, a.audiusSearch('a', { ...opts, kind: 'track' })), 'nao-autorizado')
+    }
+    routes['/account/audius/session/start'] = json(200, { nonce: NONCE })
+    await a.audiusItem('track', track.id, opts)
+    await a.audiusItem('track', track.id, opts)
+    t.is(reads(calls, '/account/audius/item').length, 2, 'the 401 dropped the track')
+  }
+})
+
+test('audiusItem: wiping local caches clears reusable tracks', async (t) => {
+  const a = await load()
+  const { wipeLocalCaches } = await import('../src/localCaches.js')
+  a.forgetAudiusSession()
+  const calls = stub(t, session({ '/account/audius/item': json(200, track) }))
+  const opts = { member: M, request: signer([]), reuse: true }
+  await a.audiusItem('track', track.id, opts)
+  wipeLocalCaches()
+  await a.audiusItem('track', track.id, opts)
+  await a.audiusItem('track', track.id, opts)
+  t.is(reads(calls, '/account/audius/item').length, 2)
+})
+
+test('audiusItem: a late answer after invalidation is returned but never stored', async (t) => {
+  const a = await load()
+  const { wipeLocalCaches, bumpCacheGeneration } = await import('../src/localCaches.js')
+  for (const invalidate of ['wipe', 'forget', 'forget all', '401', 'generation']) {
+    a.forgetAudiusSession()
+    let finish
+    const routes = session({
+      '/account/audius/item': () => new Promise((resolve) => { finish = resolve }),
+      '/account/audius/search': json(401, { error: 'nao-autorizado' })
+    })
+    const calls = stub(t, routes)
+    const opts = { member: M, request: signer([]), reuse: true }
+    const pending = a.audiusItem('track', track.id, opts)
+    await flushAll()
+    t.is(reads(calls, '/account/audius/item').length, 1, 'request started before ' + invalidate)
+    if (invalidate === 'wipe') wipeLocalCaches()
+    else if (invalidate === 'forget') a.forgetAudiusSession(opts)
+    else if (invalidate === 'forget all') a.forgetAudiusSession()
+    else if (invalidate === 'generation') bumpCacheGeneration()
+    else t.is(await code(t, a.audiusSearch('a', { ...opts, kind: 'track' })), 'nao-autorizado')
+    finish(json(200, track))
+    t.alike(await pending, track, 'the original caller still gets its answer after ' + invalidate)
+    routes['/account/audius/item'] = json(200, track)
+    await a.audiusItem('track', track.id, opts)
+    await a.audiusItem('track', track.id, opts)
+    t.is(reads(calls, '/account/audius/item').length, 2, 'the late answer was not kept after ' + invalidate)
+  }
+})
+
+test('audiusItem: an invalidation while the session opens keeps the answer out', async (t) => {
+  const a = await load()
+  const { wipeLocalCaches, bumpCacheGeneration } = await import('../src/localCaches.js')
+  for (const invalidate of ['wipe', 'forget', 'forget all', 'generation']) {
+    a.forgetAudiusSession()
+    let opened
+    const routes = session({
+      '/account/audius/session/finish': () => new Promise((resolve) => { opened = resolve }),
+      '/account/audius/item': json(200, track)
+    })
+    const calls = stub(t, routes)
+    const opts = { member: M, request: signer([]), reuse: true }
+    const pending = a.audiusItem('track', track.id, opts)
+    await flushAll()
+    t.is(reads(calls, '/account/audius/session/finish').length, 1, 'session opening before ' + invalidate)
+    t.is(reads(calls, '/account/audius/item').length, 0)
+    if (invalidate === 'wipe') wipeLocalCaches()
+    else if (invalidate === 'forget') a.forgetAudiusSession(opts)
+    else if (invalidate === 'forget all') a.forgetAudiusSession()
+    else bumpCacheGeneration()
+    opened(json(200, { token: TOKEN, expiresAt: LATER }))
+    t.alike(await pending, track, 'the caller still gets its answer after ' + invalidate)
+    await a.audiusItem('track', track.id, opts)
+    t.is(reads(calls, '/account/audius/item').length, 2, 'the answer was not kept after ' + invalidate)
+  }
+})
+
+test('audiusItem: a forget while the 401 retry opens its session keeps the answer out', async (t) => {
+  const a = await load()
+  a.forgetAudiusSession()
+  let n = 0
+  let finishes = 0
+  let opened = null
+  const routes = session({
+    '/account/audius/item': () => (++n === 1 ? json(401, { error: 'nao-autorizado' }) : json(200, track))
+  })
+  routes['/account/audius/session/finish'] = () => (++finishes === 1
+    ? json(200, { token: TOKEN, expiresAt: LATER })
+    : new Promise((resolve) => { opened = resolve }))
+  const calls = stub(t, routes)
+  const opts = { member: M, request: signer([]), reuse: true }
+  const pending = a.audiusItem('track', track.id, opts)
+  for (let i = 0; i < 10; i++) await flushAll()
+  t.ok(opened, 'the retry is opening its session')
+  a.forgetAudiusSession(opts)
+  opened(json(200, { token: TOKEN, expiresAt: LATER }))
+  t.alike(await pending, track, 'the caller still gets its answer')
+  t.is(reads(calls, '/account/audius/item').length, 2)
+  await a.audiusItem('track', track.id, opts)
+  t.is(reads(calls, '/account/audius/item').length, 3, 'the answer was not kept')
+})
+
+test('audiusItem: a 401 retry is returned and stored for reuse', async (t) => {
+  const a = await load()
+  a.forgetAudiusSession()
+  let n = 0
+  const calls = stub(t, session({
+    '/account/audius/item': () => (++n === 1 ? json(401, { error: 'nao-autorizado' }) : json(200, track))
+  }))
+  const opts = { member: M, request: signer([]), reuse: true }
+  t.alike(await a.audiusItem('track', track.id, opts), track)
+  t.is(reads(calls, '/account/audius/item').length, 2, 'the 401 was retried once')
+  t.alike(await a.audiusItem('track', track.id, opts), track)
+  t.is(reads(calls, '/account/audius/item').length, 2, 'the retried answer is reused within ten minutes')
+})
+
+test('audiusItem: the 33rd reusable track evicts the oldest insertion', async (t) => {
+  const a = await load()
+  a.forgetAudiusSession()
+  const calls = stub(t, session({ '/account/audius/item': (init) => json(200, { ...track, id: JSON.parse(init.body).id }) }))
+  const opts = { member: M, request: signer([]), reuse: true }
+  for (let i = 0; i < 32; i++) await a.audiusItem('track', 'T' + i, opts)
+  await a.audiusItem('track', 'T0', opts)
+  t.is(reads(calls, '/account/audius/item').length, 32, 'a hit keeps its insertion order')
+  await a.audiusItem('track', 'T32', opts)
+  await a.audiusItem('track', 'T1', opts)
+  t.is(reads(calls, '/account/audius/item').length, 33, 'the second entry survives')
+  await a.audiusItem('track', 'T0', opts)
+  t.is(reads(calls, '/account/audius/item').length, 34, 'the oldest entry was dropped')
+})
+
+test('audiusItem: playlists never reuse or populate the track cache', async (t) => {
+  const a = await load()
+  a.forgetAudiusSession()
+  const full = { ...playlist, id: track.id, tracks: [track] }
+  const calls = stub(t, session({ '/account/audius/item': (init) => json(200, JSON.parse(init.body).kind === 'track' ? track : full) }))
+  const opts = { member: M, request: signer([]), reuse: true }
+  t.alike(await a.audiusItem('playlist', track.id, opts), full)
+  t.alike(await a.audiusItem('playlist', track.id, opts), full)
+  t.alike(await a.audiusItem('track', track.id, opts), track)
+  t.alike(await a.audiusItem('playlist', track.id, opts), full)
+  t.alike(await a.audiusItem('track', track.id, opts), track)
+  t.is(reads(calls, '/account/audius/item').length, 4)
+})
+
 test('audiusResolve: only an audius.co page leaves the device, to the account origin', async (t) => {
   const a = await load()
   a.forgetAudiusSession()

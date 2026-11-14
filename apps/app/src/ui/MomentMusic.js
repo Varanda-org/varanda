@@ -16,7 +16,149 @@ import { layout, radius, space } from './theme'
 
 export const momentMusicIdle = { item: null, phase: 'idle', error: '' }
 
-export function createMomentPlayback (session, music, notify, { onStart, onUnavailable } = {}) {
+export const PRELOAD_IDLE_MS = 18000
+
+async function loadMomentMusic (session, ref, { signal, stale, onItem, onTicket, onStream, ready, stream: withStream = true, preload = false }) {
+  const opts = { ...session, signal }
+  const item = ready ? ready.item : await audiusItem('track', ref.id, { ...opts, reuse: true })
+  if (stale()) return null
+  onItem?.(item)
+  if (clampStart(ref.start, item.duration) !== ref.start) throw new Error(MUSIC_SEEK_TEXT)
+  const startMs = ref.start * 1000
+  const endMs = snippetEndMs(ref.start, item.duration)
+  const ticket = ready ? ready.ticket : await audiusPlay(ref.id, opts)
+  if (stale()) return null
+  onTicket?.(item, ticket)
+  const { url, base, expiresAt } = ticket
+  if (!withStream) return { item, ticket, stream: null }
+  const stream = preload
+    ? createStreamPlayer(url, { origin: base, preload: 'auto' })
+    : createStreamPlayer(url, { origin: base })
+  onStream?.(stream, startMs, endMs)
+  await stream.seek(startMs)
+  if (stale()) return null
+  // The resolved seek is the landing; an older progress sample is stale.
+  if (snippetTick({ ms: startMs, startMs, endMs }) === 'stop') throw new Error(MUSIC_SEEK_TEXT)
+  return { item, stream, startMs, endMs, expiresAt }
+}
+
+function momentPreloadRefusal (err) {
+  if (err?.message === MUSIC_SEEK_TEXT) return MUSIC_SEEK_TEXT
+  if (err?.uncertain === true || typeof err?.code !== 'string' || err.code === 'indisponivel') return null
+  return musicErrorText(err)
+}
+
+export function prepareMomentMusic (session, music, { epoch = playbackEpoch(), now = Date.now, stream = true } = {}) {
+  const ref = momentMusicOf({ music })
+  const owner = { member: session.member, origin: session.origin, request: session.request }
+  const controller = new AbortController()
+  let taken = false
+  let cancelled = false
+  let player = null
+  let off = null
+  let timer = null
+  let item = null
+  let ready = null
+  let failure = null
+  let mediaFailed = false
+  let settle
+  const interrupted = new Promise((resolve, reject) => { settle = { resolve, reject } })
+
+  function detach () {
+    clearTimeout(timer)
+    timer = null
+    off?.()
+    off = null
+  }
+
+  function dropPlayer () {
+    detach()
+    if (player) { player.release(); player = null }
+  }
+
+  function cancel () {
+    cancelled = true
+    controller.abort()
+    dropPlayer()
+    settle.resolve(null)
+  }
+
+  function mediaError (err) {
+    mediaFailed = true
+    dropPlayer()
+    settle.reject(err)
+  }
+
+  const loading = !ref || session.origin === null
+    ? Promise.reject(new Error(musicErrorText()))
+    : loadMomentMusic(session, ref, {
+      signal: controller.signal,
+      stale: () => cancelled || mediaFailed,
+      stream,
+      preload: true,
+      onItem: (value) => { item = value },
+      onTicket: (item, ticket) => { ready = { item, ticket } },
+      onStream: (value) => {
+        player = value
+        off = player.onError(mediaError)
+      }
+    })
+  const done = Promise.race([loading, interrupted]).then((result) => {
+    if (!result || cancelled) return { ok: false, code: 'released' }
+    if (player && !taken) {
+      timer = setTimeout(() => {
+        mediaFailed = true
+        dropPlayer()
+      }, PRELOAD_IDLE_MS)
+    }
+    return { ok: true }
+  }, (err) => {
+    dropPlayer()
+    // Only a definite refusal or an unplayable start is this momento's load.
+    // Anything else is not an answer: take() drops the attempt and the
+    // momento loads when it appears. After the ticket, the audio is the
+    // only part that can be opened again.
+    if (!ready && !cancelled) {
+      const text = momentPreloadRefusal(err)
+      if (text) failure = text
+    }
+    return { ok: false, code: typeof err?.code === 'string' ? err.code : err?.message }
+  })
+
+  async function take (signal) {
+    if (taken) return null
+    taken = true
+    clearTimeout(timer)
+    timer = null
+    signal?.addEventListener('abort', cancel, { once: true })
+    if (signal?.aborted) cancel()
+    try {
+      await done
+      if (cancelled || epoch !== playbackEpoch()) { cancel(); return null }
+      if (failure) return { ok: false, error: failure, item }
+      if (!ready || !(Date.parse(ready.ticket.expiresAt) > now() + 60000)) { cancel(); return null }
+      detach()
+      if (!player || mediaFailed) return { ok: true, ...ready, stream: null }
+      const result = { ok: true, item: ready.item, stream: player, startMs: ref.start * 1000, endMs: snippetEndMs(ref.start, ready.item.duration) }
+      player = null
+      return result
+    } finally {
+      signal?.removeEventListener('abort', cancel)
+    }
+  }
+
+  return {
+    matches: (session, music) => {
+      const next = momentMusicOf({ music })
+      return !!ref && !!next && owner.member === session.member && owner.origin === session.origin && owner.request === session.request && ref.id === next.id && ref.start === next.start
+    },
+    take,
+    release: () => { if (!taken && !cancelled) cancel() },
+    done
+  }
+}
+
+export function createMomentPlayback (session, music, notify, { onStart, onUnavailable, prepared } = {}) {
   let state = momentMusicIdle
   let current = null
   let live = true
@@ -101,17 +243,8 @@ export function createMomentPlayback (session, music, notify, { onStart, onUnava
     publish({ phase: 'loading' })
     const ref = momentMusicOf({ music })
     if (!ref || session.origin === null) return fail(job, musicErrorText())
-    const opts = { ...session, signal: job.controller.signal }
-    try {
-      const item = await audiusItem('track', ref.id, opts)
-      if (stale(job)) return
-      publish({ item })
-      if (clampStart(ref.start, item.duration) !== ref.start) return fail(job, MUSIC_SEEK_TEXT)
-      const startMs = ref.start * 1000
-      const endMs = snippetEndMs(ref.start, item.duration)
-      const { url, base } = await audiusPlay(ref.id, opts)
-      if (stale(job)) return
-      const stream = job.player = createStreamPlayer(url, { origin: base })
+    const attach = (stream, startMs, endMs) => {
+      job.player = stream
       job.offs.push(stream.onError((err) => playbackError(job, err)))
       job.offs.push(stream.onProgress((update) => {
         if (stale(job) || job.phase !== 'playing') return
@@ -126,10 +259,33 @@ export function createMomentPlayback (session, music, notify, { onStart, onUnava
         }
       }))
       job.phase = 'seeking'
-      await stream.seek(startMs)
-      if (stale(job)) return
-      // The resolved seek is the landing; an older progress sample is stale.
-      if (snippetTick({ ms: startMs, startMs, endMs }) === 'stop') return fail(job, MUSIC_SEEK_TEXT)
+    }
+    try {
+      let ready = null
+      const ahead = prepared
+      prepared = null
+      if (ahead?.matches(session, music)) {
+        ready = await ahead.take(job.controller.signal)
+        if (stale(job)) { ready?.stream?.release(); return }
+        if (ready && !ready.ok) {
+          // As a load on show, a refusal after the track answer keeps its title and link.
+          if (ready.item) publish({ item: ready.item })
+          return fail(job, ready.error)
+        }
+      }
+      if (ready?.stream) {
+        attach(ready.stream, ready.startMs, ready.endMs)
+        publish({ item: ready.item })
+      } else {
+        await loadMomentMusic(session, ref, {
+          signal: job.controller.signal,
+          stale: () => stale(job),
+          onItem: (item) => publish({ item }),
+          onStream: attach,
+          ready
+        })
+        if (stale(job)) return
+      }
       job.phase = 'paused'
       publish({ phase: 'paused' })
       await play(job)
@@ -137,7 +293,7 @@ export function createMomentPlayback (session, music, notify, { onStart, onUnava
     } catch (err) {
       if (stale(job)) return
       if (err?.code === 'superseded' || err?.code === 'released') return stop()
-      fail(job, job.phase === 'seeking' ? MUSIC_SEEK_TEXT : musicErrorText(err))
+      fail(job, job.phase === 'seeking' || err?.message === MUSIC_SEEK_TEXT ? MUSIC_SEEK_TEXT : musicErrorText(err))
     }
   }
 
@@ -173,7 +329,7 @@ export function createMomentPlayback (session, music, notify, { onStart, onUnava
   return { start, press, setPaused, release }
 }
 
-export function MomentMusic ({ music, member, origin, request, paused, onStart, onUnavailable, onOpenExternal }) {
+export function MomentMusic ({ music, member, origin, request, paused, prepared, onStart, onUnavailable, onOpenExternal }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const [state, setState] = useState(momentMusicIdle)
@@ -184,7 +340,7 @@ export function MomentMusic ({ music, member, origin, request, paused, onStart, 
   const [coverOf, setCoverOf] = useState(null)
   const playback = useRef(null)
   const latest = useRef(null)
-  latest.current = { paused: paused === true || muted, onStart, onUnavailable }
+  latest.current = { paused: paused === true || muted, prepared, onStart, onUnavailable }
   const id = music?.id
   const start = music?.start
   useEffect(() => {
@@ -202,6 +358,7 @@ export function MomentMusic ({ music, member, origin, request, paused, onStart, 
       setCoverOf(owner)
       if (next.phase === 'playing') setPlayed(true)
     }, {
+      prepared: latest.current.prepared,
       onStart: () => latest.current.onStart?.(),
       onUnavailable: (error) => latest.current.onUnavailable?.(error)
     })

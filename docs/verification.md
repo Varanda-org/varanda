@@ -10012,7 +10012,64 @@ Depois da correção, no laboratório hospedado (`node apps/cli/scripts/hosted-l
 - iOS (simulador) e Android (emulador): não rodou. O laboratório não entra no app nativo (seção 212), e o caminho no nativo é o mesmo ramo do `App.js`, com o destino vindo do Linking.
 - A captura de `/publicacao/` na web hospedada em https ponta a ponta com a correção: depende da implantação.
 
-## 217. Base visual do app: botões pequenos, busca, barras de aviso, alça das folhas (PR feat/ui-kit-foundations)
+## 217. Música do momento junto com a foto, Termos 50
+
+Mudança só no cliente. O serviço de conta e os limites dele ficam como estão (`STREAMS_PER_MEMBER` continua 2, `TICKETS_PER_MEMBER` continua 8, `STALL_MS` continua 20 s). O registro do momento não muda: continua sem título, artista, capa ou URL. A capa segue só depois que a música daquele momento está tocando.
+
+No visualizador de Momentos, com o momento mostrado assentado (a música dele tocando, ou sem música e com a foto carregada), a tela por cima e visível e o som da sessão ativado (seção 208), o app adianta o único próximo momento, o mesmo passo de um toque. O anel seguinte começa no primeiro item ainda não visto. São duas etapas. A resposta da faixa e o ticket saem sempre à frente. O áudio do trecho de 15 s só é aberto à frente depois de uma foto sem música, porque um momento que está tocando já ocupa uma das 2 retransmissões de áudio por membro. O player adiantado é criado, posicionado no início, nunca toca e nunca toma a reprodução. Na web, esse player pausado enche o buffer (`preload` auto). A política e o vínculo da conta também rodam quando só o próximo momento tem música. Um momento seguinte em vídeo não é adiantado.
+
+Quando a pessoa chega nesse momento, o que já está pronto é usado. Com o player aberto à frente, o som começa junto com a foto e a barra. Se o áudio não foi aberto à frente, o momento abre o player com o mesmo ticket na hora, sem novo uso de item nem de toque. Se o áudio adiantado falha, o momento abre um player novo com o mesmo ticket quando aparece, também sem novo uso de item nem de toque. Há no máximo um adiantamento, um por momento mostrado e por destino. Ele é largado na hora ao fechar o visualizador, ao cobri-lo, ao silenciar o som, ao ir para segundo plano, ao mudar a conta ou a conexão (`node.epoch`), ou ao mudar o próximo momento. Depois de 18 s sem uso (`PRELOAD_IDLE_MS` = 18000, abaixo do corte de ociosidade de 20 s do serviço), só o player de áudio adiantado é largado: a resposta da faixa e o ticket ficam, e o momento abre um player novo com esse ticket quando aparece, sem novo uso de item nem de toque. Um adiantamento só com o ticket, depois de um momento com música, não tem player nem o prazo de 18 s. Um adiantamento largado, com a época de reprodução (`playbackEpoch`) mudada, ou com o ticket a 60 s ou menos do fim, é ignorado e o momento carrega como antes. Só uma recusa definitiva do pedido de item ou de toque (como `limite-musica`) ou um início inválido conta como a carga daquele momento: nada é pedido de novo sozinho, a foto fica os 5 s de sempre, e tocar de novo carrega normalmente. Um player pronto que falha depois de ser entregue não é carregado de novo. O primeiro momento de uma visita ainda carrega quando aparece, então a foto pode surgir enquanto a barra espera até 3 s (`MUSIC_START_WAIT_MS` = 3000). A espera de 3 s, a passagem de 5 s e o reinício de 15 s (`MUSIC_HOLD_MS` = 15000) não mudam.
+
+A resposta da faixa fica na memória por até 10 minutos (`AUDIUS_ITEM_REUSE_MS` = 600000), por membro e origem, no máximo 32 entradas, e sai no bloqueio, na saída, no reset e na troca de conta. Tickets não ficam em cache. O áudio nunca é armazenado: vive só no player. Com o som silenciado, nada é pedido à frente, e ativar o som de novo não refaz o adiantamento largado daquele par: o passo seguinte volta a adiantar. Com Reduzir movimento, vale o mesmo único adiantamento: depois de 18 s sem uso, só o player de áudio adiantado é largado, a resposta da faixa e o ticket ficam, e o momento abre um player novo com esse ticket quando aparece, sem novo uso de item nem de toque. Um navegador que recusa tocar sozinho ainda mostra **Tocar música**, e o toque toca o player pronto sem pedido novo. O mesmo código compartilhado roda no Android, no iOS e na web (player de fluxo nativo ou o elemento de áudio), sem ramo de plataforma.
+
+No custo do dia, um momento assistido gasta 1 uso de item (0 quando a resposta já está lembrada), 1 uso de toque e, em geral, 2 aberturas de áudio, como hoje. Um adiantamento que ninguém usa gasta o mesmo uso de item e o mesmo uso de toque, no máximo um por momento mostrado. Se o adiantamento falha sem resposta certa (sem rede, tempo esgotado ou erro do serviço), ou fica de lado porque a reprodução mudou ou o ticket está a 60 s do fim, o momento carrega do zero quando aparece e pode gastar mais um uso de toque (e de item, se a resposta não estiver lembrada). As aberturas de áudio desse adiantamento só entram quando o áudio foi aberto à frente. O cliente não limita as aberturas de áudio: um seek ou uma retomada abre mais. Um início inválido continua sem gastar uso de toque. `limite-musica` interrompe o adiantamento até o visualizador reabrir. Uma troca de conexão ou de conta (`node.epoch`) monta a tela de Momentos de novo e conta como reabrir: o par já tentado pode ser adiantado outra vez, gastando mais um uso de toque, e depois de `limite-musica` o próximo adiantamento é tentado de novo. Segurar no máximo dois players, o mostrado e o próximo, reduz a chance de passar das 2 retransmissões, mas não garante permanecer dentro delas. Um 503 na carga à frente não é repetido. Largar um adiantamento não revoga o ticket: o serviço guarda 8 por membro, e o nono aposenta o mais antigo.
+
+O adiantamento está em `prepareMomentMusic` (`apps/app/src/ui/MomentMusic.js`). A resposta reaproveitada está em `audiusItem` (`apps/app/src/account.js`). O visualizador está em `apps/app/src/screens/Momentos.js`. As seções 187 e 199 continuam para o resto da música nos momentos. O texto delas não foi editado.
+
+Termos de Uso e Política de Privacidade estão na versão 50, de 13/11/2026, com novo aceite (`LEGAL_VERSION` e `TERMS_VERSION`). Enquanto a pessoa vê os momentos, o app pode pedir ao serviço de conta o trecho do momento seguinte um pouco antes de ele aparecer, no máximo um à frente, sem a capa e nunca com o som silenciado. A Política diz que esse pedido leva a faixa e a permissão para tocá-la e, às vezes, o começo do áudio, sem tocar nada antes de o momento aparecer, que o serviço fica sabendo da conta mesmo que a pessoa não chegue a esse momento, que o pedido conta nos mesmos limites diários, que a capa continua só depois que a música daquele momento começa a tocar, e que o áudio não é guardado no aparelho. No aparelho, título, artista e link da faixa ficam só na memória, enquanto o momento está na tela e depois por até 10 minutos.
+
+### Verificação automatizada
+
+Nenhum teste automatizado exercita estes documentos. Os arquivos abaixo cobrem o cliente, o cache da faixa e o texto da versão 50. A lista é um roteiro, não um registro de execução. Cada arquivo sozinho, a partir da raiz. Não usar a DHT pública.
+
+```sh
+node apps/app/test/momentMusic.test.js
+node apps/app/test/momentosScreen.test.js
+node apps/app/test/musicClient.test.js
+node apps/app/test/legal.test.js
+node apps/app/test/terms-version.test.js
+node packages/core/test/terms.test.js
+node apps/site/test/legal.test.js
+```
+
+`apps/app/test/momentMusic.test.js` cobre o adiantamento: a resposta da faixa antes do ticket e a recusa de um início inválido sem áudio; o player pronto fica em silêncio e passa uma vez só, com `preload` auto e `PRELOAD_IDLE_MS` = 18000; o adiantamento só com ticket abre o áudio na hora em que o momento aparece; a falha do player adiantado guarda o ticket para um player novo; uma recusa definitiva do POST (como `limite-musica`) não pede de novo; um player vencido ou largado ainda entrega o ticket dentro da margem de 60 s; um player já entregue que falha não é recarregado, e o toque de **Tocar música** usa o player pronto; a capa não é pedida antes de a música tocar.
+
+`apps/app/test/momentosScreen.test.js`: `T4: muted sound preloads nothing and muting releases the ahead step` e `T4: a sheet covering the viewer preloads nothing and releases the ahead step`. `apps/app/test/musicClient.test.js`: `audiusItem: reuse expires after ten minutes on the injected clock` (`AUDIUS_ITEM_REUSE_MS` = 600000) e `audiusItem: the 33rd reusable track evicts the oldest insertion` (32 entradas). `apps/app/test/legal.test.js`: `legal: version, date and review note` (versão 50, data 13/11/2026) e `legal: version 50 asks for the next momento snippet ahead, never while muted`. `apps/app/test/terms-version.test.js`: `LEGAL_VERSION matches the core TERMS_VERSION`. `packages/core/test/terms.test.js`: `constants` (`TERMS_VERSION` 50). `apps/site/test/legal.test.js`: as páginas de Termos e Privacidade são o render de `apps/app/src/legal.js`.
+
+`npx standard packages/rpc/lib/music.js` confere o comentário do contrato. O comentário não muda código.
+
+### Verificação manual
+
+Nenhuma conferência em aparelho foi feita nesta seção. Os itens abaixo continuam em aberto. Ordem: build de debug do Android primeiro, simulador do iOS, depois a web e o PWA. O build de debug não entra com passkey de produção. No iOS, a passkey depende do domínio associado da conta Apple Developer (veja `docs/development.md`). Registrar aparelho, sistema e, na web, o navegador. Sem DHT pública.
+
+- [ ] Dois momentos com música seguidos: o segundo soa junto com a foto e a barra. A resposta da faixa e o ticket desse segundo saíram enquanto o primeiro tocava. O áudio dele não foi aberto à frente, porque o primeiro já ocupa uma retransmissão.
+- [ ] Uma foto sem música, depois um momento com música: o áudio do segundo é aberto à frente, pausado. Ao avançar, o som começa com a foto e a barra. Na web, o player adiantado enche o buffer (`preload` auto) enquanto está pausado.
+- [ ] Tempo, em cada plataforma, da foto aparecer até o primeiro som. Anotar o de um build de antes desta mudança e o desta mudança, nos dois casos: dois momentos com música seguidos, e uma foto sem música seguida de um momento com música.
+- [ ] O primeiro momento de uma visita, a frio: a foto pode aparecer enquanto a barra espera até 3 s. Não há adiantamento antes de ele aparecer.
+- [ ] Voltar e tocar de novo: o momento carrega de novo, com a resposta da faixa lembrada se ainda estiver nos 10 minutos.
+- [ ] Fechar durante um adiantamento: nenhum som continua. Reabrir não retoma aquele player.
+- [ ] Do visualizador, abrir um perfil, tocar a música de uma publicação lá e voltar: o adiantamento foi largado ao cobrir o visualizador, e a música da publicação não fica por baixo do momento.
+- [ ] Mandar o app para segundo plano e voltar: o adiantamento foi largado. **Tocar música** aparece para o momento que estava na tela, como já era.
+- [ ] Reduzir movimento ligado: o mesmo único adiantamento. Esperar mais de 20 s antes de avançar. O som ainda começa pelo ticket que ficou, e a rede não mostra pedido novo de item nem de toque, só pedidos de áudio.
+- [ ] Segurar o momento por mais de 20 s e então avançar: o som ainda começa pelo ticket que ficou, e a rede não mostra pedido novo de item nem de toque, só pedidos de áudio.
+- [ ] Navegador que bloqueia tocar sozinho: aparece **Tocar música**. O toque toca o player pronto e não faz pedido novo de item nem de toque.
+- [ ] Silenciar o som com o visualizador aberto: o adiantamento é largado, e a rede não mostra pedido de item nem de toque à frente enquanto o som está silenciado. Ativar o som e avançar: o passo seguinte volta a adiantar.
+- [ ] Com o visualizador aberto, abrir uma folha por cima dele, como Ajustes pelo aviso de exclusão agendada: o adiantamento é largado, e a rede não mostra pedido de item nem de toque à frente enquanto a folha está aberta.
+- [ ] O momento seguinte é um vídeo: não há adiantamento de música. O vídeo toca com o próprio som.
+- [ ] A capa só aparece depois que o som daquele momento está tocando. Antes disso, o azulejo gerado.
+- [ ] Uma conta que aceitou a versão 49 recebe os Termos de Uso e a Política de Privacidade 50 para novo aceite.
+
+## 218. Base visual do app: botões pequenos, busca, barras de aviso, alça das folhas (PR feat/ui-kit-foundations)
 
 Esta seção confere a base visual que as telas usam em comum (`apps/app/src/ui`). Nada disso muda protocolo, RPC, Termos ou o que a pessoa pode fazer: muda a aparência, o alvo de toque e o retorno sensorial. As frases das notas são as mesmas de antes.
 
@@ -10060,7 +10117,7 @@ node apps/app/test/pressMotion.test.js
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
 
-## 218. Paleta escura neutra: fundo, cartões, texto e barra de abas (PR feat/dark-neutral-palette)
+## 219. Paleta escura neutra: fundo, cartões, texto e barra de abas (PR feat/dark-neutral-palette)
 
 Esta seção confere a troca do escuro, que deixa de ser verde e passa a ser quase neutro. O claro não muda. Os valores do escuro ficam em `apps/app/src/appearance.js`: fundo `#101010`, cartão `#1c1c1c`, tinta `#f5f5f5`, texto suave `#c8c8c8`, linha `rgba(245,245,245,0.14)` e destaque verde `#5dcaa0`. A bolha da própria mensagem continua `#2c4a3d`. A cor de fundo do pré-splash da web e a `theme_color` do manifesto passam para `#101010`. Nada disso muda protocolo, RPC, Termos ou o que a pessoa pode fazer: muda só a aparência.
 
@@ -10089,7 +10146,7 @@ node apps/app/test/inviteCardArt.test.js
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
 
-## 219. Feed mais leve: cabeçalho, toque longo, resposta, Momentos, composição e contagens (PR feat/feed-slim)
+## 220. Feed mais leve: cabeçalho, toque longo, resposta, Momentos, composição e contagens (PR feat/feed-slim)
 
 Esta seção confere a versão mais leve do feed, da composição e dos Momentos. Na publicação, o nome usa o estilo de nome e o @nome e a data ficam no estilo de metadados, menores; a data é compacta (`5min`, `3h`, `2d`; abaixo de um minuto, "agora"; a partir de 7 dias, a data, "5 nov", ou "5 nov 2025" em outro ano), o avatar tem 40 pt, e as contagens da barra de ações são compactas (`12,3 mil`), com o número completo lido pelo leitor de tela só nos botões que abrem quem curtiu e quem republicou. "seguir" e o botão "mais ações" ficam no canto superior direito, com alvo de 44 pt. Um toque longo de 350 ms no corpo da publicação abre as ações, com um toque leve de háptico. A linha "respondendo a" ganha texto suave e alvo de pelo menos 44 pt de altura. O cartão de link mostra só o título e o domínio, com miniatura de 64 pt. Nos Momentos, as rodinhas de A Rua mostram faixas do pôr do sol para quem tem algo não visto e um contorno fino para quem já viu; o visualizador troca de pessoa com arrasto horizontal e fecha com arrasto para baixo. Em Publicar, o contador só aparece a partir de 80% do limite e as observações do modo Momento viram uma frase de estado. Em Curtidas, as contagens ficam dentro dos nomes das abas. Em A Rua, Busca, Espiadinha e Diário, a nota de números incompletos vira a linha "Números incompletos" com um ⓘ, que abre a folha com a frase. Nada disso muda protocolo, RPC ou Termos: muda a aparência, os alvos de toque e o gesto.
 
@@ -10139,7 +10196,7 @@ node apps/app/test/format.test.js
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
 
-## 220. Perfis, pessoas, busca e avisos (PR feat/profiles-people)
+## 221. Perfis, pessoas, busca e avisos (PR feat/profiles-people)
 
 Esta seção confere os perfis, as listas de pessoas, a Busca e os Avisos depois desta revisão. No Diário, "Editar perfil" fica ao lado do avatar, na mesma linha dele, e "Compartilhar" continua um botão de ícone; "N seguindo" e "N seguidores" aparecem compactos (`12,3 mil`). No Membro, "Mensagem" é só um ícone, com o nome "Mensagem" para o leitor de tela, e "Compartilhar perfil" fica no botão ⋯, que compartilha direto. Depois de rolar para além das abas de perfil, uma cópia delas fica fixa embaixo da barra do topo. Seguir é otimista: um toque muda o botão para "Seguindo" na hora, com um toque leve de háptico; o botão fica ocupado até a resposta, e cada toque envia exatamente um pedido, que nunca é reenviado. Se a resposta falha ou fica incerta, a tela relê a lista de seguidos e o botão mostra o estado real. Deixar de seguir continua pedindo confirmação, e "Cancelar" não envia nada. Compartilhar abre a folha de compartilhar do sistema na hora, onde o sistema permite; nos outros lugares, abre a folha "Compartilhar perfil", com "Compartilhar" antes de "Copiar link". Em Pessoas e Seguindo, o filtro é o campo de busca com o botão de limpar. Em Buscar, Contas e Publicações viram um controle segmentado, e as buscas recentes ficam só na memória desta sessão. Em Avisos, há filtros (Todas, Menções e Seguidores), dias como títulos e, para quem é seguido de volta, um botão "Seguir de volta". Nada disso muda protocolo, RPC nem Termos: muda a aparência, os toques, as folhas e o que a tela faz depois de uma falha de seguir.
 
@@ -10194,7 +10251,7 @@ node apps/app/test/screensPolish.test.js
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
 
-## 221. Conversas mais leves: bolhas, reações, páginas anteriores, caixa de entrada, grupos e gravação (PR feat/chat-slim)
+## 222. Conversas mais leves: bolhas, reações, páginas anteriores, caixa de entrada, grupos e gravação (PR feat/chat-slim)
 
 Esta seção confere a revisão das conversas: bolhas, caixa de entrada, gestos, fichas de reação, páginas anteriores, nota de voz, a faixa Pedidos · Comunidades, Comunidades, o campo de escrever e os Ajustes do grupo. Nas bolhas das conversas diretas e dos grupos, a hora aparece só na última mensagem de cada sequência, as bolhas não têm cauda, e a data é um texto suave e centralizado, no lugar do chip. Uma mensagem própria ainda pendente ou incerta sempre mostra a sua linha de situação. Os leitores de tela continuam sem ler a hora em cada bolha, como antes. Na caixa de Conversas, o contador de não lidas virou um ponto de 8 pt na cor de destaque, e a prévia não lida fica em negrito; o rótulo falado continua dizendo a contagem.
 
@@ -10266,7 +10323,7 @@ node apps/app/test/uiKit.test.js
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
 
-## 222. Ajustes, conta e entrada mais leves: interruptores, cartão da conta, código em seis casas, denúncia, passkeys e status (PR feat/settings-onboarding-slim)
+## 223. Ajustes, conta e entrada mais leves: interruptores, cartão da conta, código em seis casas, denúncia, passkeys e status (PR feat/settings-onboarding-slim)
 
 Esta seção confere a revisão de Ajustes, conta e entrada: os interruptores e a cor de perigo em Ajustes, o cartão do perfil, as folhas de Sair e Recomeçar, Excluir conta, Denunciar, Recorrer, a folha de Bloquear, Passkeys e recuperação, a Introdução, Páginas, Sincronizar e Conexão, e os passos da entrada, com o código do celular em seis casas. Nos Ajustes, os dois interruptores (música sozinha e prévia de links) levam a nota na própria linha; sumiram o texto "Ligada"/"Desligada" e o cabeçalho separado de "Prévia de links". Sair, Excluir conta e Recomeçar aparecem em cor de perigo, os cabeçalhos das seções ficam colados à lista e as linhas escurecem enquanto são tocadas. "Carregando…", "Serviço indisponível" e o botão "Tentar de novo" começam com maiúscula.
 
@@ -10345,11 +10402,11 @@ node apps/app/test/platformGate.test.js
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
 
-## 223. Feira mais leve: grade de ponta a ponta, busca, filtros, botão de anunciar, anúncio, formulários com grade de fotos, estrelas e salvar no tile (PR feat/feira-slim)
+## 224. Feira mais leve: grade de ponta a ponta, busca, filtros, botão de anunciar, anúncio, formulários com grade de fotos, estrelas e salvar no tile (PR feat/feira-slim)
 
 Esta seção confere a revisão da Feira: a grade de anúncios de ponta a ponta, o campo de busca com o botão **Filtros** dentro dele, os segmentos e as categorias em discos, a folha Filtros da Feira, o botão redondo de anunciar, a tela Anúncio, o formulário Anunciar com barra de progresso e barra de ações, a grade de fotos de Anunciar e de Editar anúncio, as estrelas de Avaliar e o botão de salvar no tile. No tile, a foto fica em 4:5, com o preço num chip sobre uma faixa escura embaixo da foto, o título numa linha e o selo no canto superior esquerdo. A cidade saiu do tile e só o leitor de tela a lê.
 
-Na tela Anúncio, as fotos vão de borda a borda no alto, **Compartilhar** e **Salvar** são botões de ícone logo abaixo do título (Salvar é uma estrela, cheia quando salvo) e **Denunciar** foi para o botão de mais ações da barra do topo. No formulário Anunciar, uma barra fina de progresso fica sob a barra do topo, e as ações do passo ficam numa barra embaixo, que sobe acima do teclado. Em Editar anúncio, as fotos também podem ser reordenadas, e **Salvar** fica nessa mesma barra. Esses dois formulários abrem em tela cheia, e a forma de teclado compartilhada mede o próprio topo também no iOS (as folhas da seção 222 ainda medem só no Android). Em Avaliar, as cinco estrelas são ícones, e a escolha dá um toque leve de seleção. O salvar do tile usa a mesma lista salva neste aparelho que a tela Anúncio e o segmento **Salvos**; ele nunca abre o anúncio.
+Na tela Anúncio, as fotos vão de borda a borda no alto, **Compartilhar** e **Salvar** são botões de ícone logo abaixo do título (Salvar é uma estrela, cheia quando salvo) e **Denunciar** foi para o botão de mais ações da barra do topo. No formulário Anunciar, uma barra fina de progresso fica sob a barra do topo, e as ações do passo ficam numa barra embaixo, que sobe acima do teclado. Em Editar anúncio, as fotos também podem ser reordenadas, e **Salvar** fica nessa mesma barra. Esses dois formulários abrem em tela cheia, e a forma de teclado compartilhada mede o próprio topo também no iOS (as folhas da seção 223 ainda medem só no Android). Em Avaliar, as cinco estrelas são ícones, e a escolha dá um toque leve de seleção. O salvar do tile usa a mesma lista salva neste aparelho que a tela Anúncio e o segmento **Salvos**; ele nunca abre o anúncio.
 
 Limites conhecidos. A medição do teclado no iOS para Anunciar e Editar anúncio não foi conferida em aparelho; antes desta mudança, no iOS, o botão ficava no fim do conteúdo, sem ajuste ao teclado. Na folha Filtros da Feira, Aplicar só é alcançado por rolagem quando o teclado está aberto, e a própria folha não sobe acima do teclado. A cidade não aparece mais no tile (só é lida pelo leitor de tela). Com a Feira aberta em duas abas do navegador, a estrela de uma aba que ainda não foi atualizada inverte o que está guardado (a lista só sabe inverter, como já fazia o Salvar da tela Anúncio); a estrela mostra o resultado logo depois. Salvar na tela Anúncio e no tile é uma estrela, não um coração: o coração é curtida pública nas publicações, e a lista de salvos fica neste aparelho. As conferências em aparelho continuam pendentes em todas as plataformas.
 
@@ -10394,7 +10451,7 @@ node apps/app/test/platformGate.test.js
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
 
-## 224. Fotos com zoom: pinça, toque duplo e arrastar para fechar na tela cheia (PR feat/photo-viewer-zoom)
+## 225. Fotos com zoom: pinça, toque duplo e arrastar para fechar na tela cheia (PR feat/photo-viewer-zoom)
 
 Esta seção confere o zoom das fotos na tela cheia: a pinça, o toque duplo e o arrastar para fechar. Só a tela cheia de fotos amplia: a de uma publicação (A Rua, Diário, perfil e onde mais a tela cheia de fotos de uma publicação abre) e a de uma foto de conversa. Os carrosséis do feed não ampliam, e a rolagem vertical do feed sobre uma foto continua como antes. A tela cheia de vídeo não mudou, porque vídeo não amplia.
 

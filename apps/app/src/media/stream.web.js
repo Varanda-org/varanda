@@ -31,12 +31,14 @@ function listen (target, type, fn, offs) {
 
 // origin: the base audiusPlay returned; null or undefined on the hosted web
 // app, whose ticket path is relative.
-export function createStreamPlayer (url, { origin } = {}) {
+export function createStreamPlayer (url, { origin, preload } = {}) {
   if (!isStreamUrl(url, origin)) throw new Error('áudio inválido')
   let el = new globalThis.Audio()
   // Set now, not on play: the ticket exists only after a tap, and a snippet
   // start has to be confirmed by a seek before play.
   el.preload = 'metadata'
+  // A momento's music loaded ahead must be able to sound at once.
+  if (preload === 'auto') el.preload = 'auto'
   el.src = url
   const listeners = new Set()
   const errorListeners = new Set()
