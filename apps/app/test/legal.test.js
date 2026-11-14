@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 50)
-  t.is(LEGAL_DATE, '13/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 50, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(LEGAL_VERSION, 51)
+  t.is(LEGAL_DATE, '14/11/2026')
+  t.is(REVIEW_NOTE, 'Versão 51, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -162,15 +162,15 @@ test('legal: version 49 keeps a loaded music player at any scroll distance', asy
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   t.ok(text(TERMS).includes('Ao carregar, o serviço recebe o endereço de internet do seu aparelho'), 'terms: player sends the device address')
   t.ok(text(PRIVACY).includes('Ao carregar, o provedor recebe o endereço de internet do seu aparelho'), 'privacy: player sends the device address')
-  t.ok(text(TERMS).includes('o som que você iniciou pode continuar, e o serviço continua em contato com o seu aparelho'), 'terms: an offscreen player keeps contact')
-  t.ok(text(PRIVACY).includes('o som que você iniciou pode continuar, e o provedor continua em contato com o seu aparelho'), 'privacy: an offscreen player keeps contact')
+  t.ok(text(TERMS).includes('o serviço continua em contato com o seu aparelho'), 'terms: an offscreen player keeps contact')
+  t.ok(text(PRIVACY).includes('o provedor continua em contato com o seu aparelho'), 'privacy: an offscreen player keeps contact')
   for (const doc of [TERMS, PRIVACY]) {
     for (const required of [
       'Um link de YouTube, SoundCloud, Spotify ou Apple Music pode aparecer como um cartão com o player do próprio serviço',
       'numa publicação, numa citação, numa conversa privada, num grupo e na prévia enquanto você escreve',
       'mas fica sabendo que o seu aparelho mostrou aquele item, e quando',
       'Na prévia enquanto você escreve, o player pode carregar assim que a prévia fica pronta, antes de você publicar ou enviar.',
-      'O player carrega sozinho quando o cartão fica visível na tela, sem um toque antes',
+      'O player carrega sozinho um pouco antes de o cartão aparecer',
       'pode usar cookies e outros dados que o serviço guarda no aparelho',
       'O player não começa com som: o som só sai quando você toca o play dentro do player',
       'Ouvir músicas completas depende do serviço',
@@ -178,10 +178,7 @@ test('legal: version 49 keeps a loaded music player at any scroll distance', asy
       'no app instalado (Android e iOS), só endereços do próprio serviço são abertos',
       'na versão web, inclusive instalada na tela inicial, o link abre em outra aba, e o Varanda não confere o endereço',
       'um toque no cartão abre o link',
-      'continua aberto enquanto você rola a mesma tela',
-      'no máximo dois ficam carregados ao mesmo tempo',
-      'O player fecha quando',
-      'a qualquer distância'
+      'No máximo quatro players ficam carregados ao mesmo tempo'
     ]) t.ok(text(doc).includes(required), doc.title + ': ' + required)
     for (const gone of [
       'Tocar aqui',
@@ -203,10 +200,31 @@ test('legal: version 49 keeps a loaded music player at any scroll distance', asy
     'O provedor é o controlador desses dados',
     'podem ser tratados fora do Brasil por esse provedor'
   ]) t.ok(thirdParties.includes(required), required)
-  t.ok(section('Finalidades e bases legais propostas').includes('Players de música de terceiros, carregados quando o cartão fica visível: para mostrar a publicação, a mensagem ou a prévia com o player do link publicado ou enviado, a base legal proposta é execução de contrato, Art. 7º, V, ainda sujeita a parecer jurídico'))
+  t.ok(section('Finalidades e bases legais propostas').includes('Players de música de terceiros, carregados um pouco antes de o cartão aparecer: para mostrar a publicação, a mensagem ou a prévia com o player do link publicado ou enviado, a base legal proposta é execução de contrato, Art. 7º, V, ainda sujeita a parecer jurídico'))
   const retention = section('Por quanto tempo')
   t.ok(retention.includes('Nos players de YouTube, SoundCloud, Spotify e Apple Music, a associação não guarda os dados enviados ao provedor pelo player de música nem um histórico do que você ouve'))
   t.ok(retention.includes('A retenção pelo provedor segue a política dele; o cartão continua guardado como a publicação ou a mensagem em que ele está.'))
+})
+
+test('legal: version 51 preloads music players before the card appears', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const doc of [TERMS, PRIVACY]) {
+    for (const required of [
+      'O player carrega sozinho um pouco antes de o cartão aparecer, quando o item está perto da parte visível da lista na tela que você está olhando',
+      'também para itens aos quais você nunca chega a rolar, inclusive numa conversa privada ou num grupo',
+      'No máximo quatro players ficam carregados ao mesmo tempo, e menos (nunca menos de dois) depois que o sistema fecha players por falta de memória',
+      'Um player em que você não tocou continua carregado',
+      'quando você troca de aba, abre outra tela, um menu, um painel ou uma foto ampliada',
+      'Um player em que você tocou fecha nesses casos e quando outro áudio do Varanda começa',
+      'Todo player fecha quando o aplicativo é bloqueado ou vai para segundo plano',
+      'ou quando um cartão mais perto precisa do lugar dele',
+      'Até a página do provedor carregar, o cartão guardado continua como cartão de link, e um toque no cartão abre o link'
+    ]) t.ok(text(doc).includes(required), doc.title + ': ' + required)
+    for (const gone of ['no máximo dois ficam carregados', 'quando o cartão fica visível na tela', 'a qualquer distância', 'sempre pronto']) {
+      t.absent(text(doc).includes(gone), doc.title + ': no ' + gone)
+    }
+  }
 })
 
 test('legal: version 29 has no tolerance for abuse, a real contact, a content license and the age check on the app', async (t) => {
@@ -288,7 +306,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '0989328c03d6b15eb1b83ff8a04c67f4b3466566d67e53eff0c02e7c83ef6fe0', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '0b674553d09b99f41c63345ea4e5dd0ae96bc36e4da33e9fbb11d561a07e128d', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -490,7 +508,7 @@ test('legal: version 24 describes link previews built once and never fetched by 
   t.ok(text(PRIVACY).includes('Quem lê nunca fala com o site'))
   t.ok(text(PRIVACY).includes('A chave Prévia de links, em Ajustes, desliga a montagem'))
   t.ok(text(TERMS).includes('tocar nele abre o link apenas se a pessoa escolher. O player de YouTube, SoundCloud, Spotify ou Apple Music é a exceção, descrita no parágrafo seguinte.'))
-  t.ok(text(PRIVACY).includes('o link só é aberto quando a pessoa toca no cartão. A exceção é o player de YouTube, SoundCloud, Spotify ou Apple Music, que carrega quando o cartão fica visível, como descrito em Compartilhamento e cópias fora do Brasil.'))
+  t.ok(text(PRIVACY).includes('o link só é aberto quando a pessoa toca no cartão. A exceção é o player de YouTube, SoundCloud, Spotify ou Apple Music, que carrega um pouco antes de o cartão aparecer, como descrito em Compartilhamento e cópias fora do Brasil.'))
 })
 
 test('legal: version 28 describes the Feira listings, offers and ratings', async (t) => {

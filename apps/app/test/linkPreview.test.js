@@ -218,7 +218,10 @@ test('MusicEmbedCard draws stored data until it is on screen', (t) => {
   t.absent(/\bstill\b/.test(card), 'LinkCard has no still prop')
   const frames = [...src.matchAll(/<EmbedFrame\b/g)]
   t.is(frames.length, 1, 'one EmbedFrame')
-  t.ok(src.slice(Math.max(0, frames[0].index - 80), frames[0].index).includes('state.live && active'), 'EmbedFrame only for a live state on the visible screen')
+  const before = src.slice(0, frames[0].index)
+  t.ok(before.slice(before.lastIndexOf('{parts.')).startsWith('{parts.frame'), 'EmbedFrame only inside the parts.frame branch')
+  t.ok(/function slotParts \(live, hosted, ready\) \{[^}]*frame: live && !hosted\s*\}/.test(src), 'which needs a live state')
+  t.ok(src.includes('const live = state.live\n'), 'live is the card state')
 })
 
 test('Ajustes: Prévia de links switch uses previewPref', (t) => {

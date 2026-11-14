@@ -48,7 +48,7 @@ export function createEmbedKeep () {
     if (entry && entry.spec === spec && entry.row === row) return true
     const next = Object.freeze(entry
       ? { ...entry, row, spec }
-      : { key, row, spec, rect: null, release, orphan: false })
+      : { key, row, spec, rect: null, release, orphan: false, ready: false })
     entries.set(key, next)
     changed()
     return entries.get(key) === next
@@ -89,6 +89,15 @@ export function createEmbedKeep () {
     return { release: entry.release, spec: entry.spec }
   }
 
+  // The provider page has loaded once; a frame that moves or is claimed again
+  // keeps it, so the slot does not fall back to the stored card.
+  const ready = (key) => {
+    const entry = entries.get(key)
+    if (!entry || entry.ready === true) return
+    entries.set(key, Object.freeze({ ...entry, ready: true }))
+    changed()
+  }
+
   const prune = (isKept) => {
     const keys = []
     for (const entry of entries.values()) {
@@ -114,6 +123,7 @@ export function createEmbedKeep () {
     has: (key) => entries.has(key),
     show,
     place,
+    ready,
     orphan,
     claim,
     drop: (key) => remove([key]),

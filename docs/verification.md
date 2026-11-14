@@ -10540,3 +10540,61 @@ node apps/app/test/platformGate.test.js
 ```
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 233. Players de música já carregados no feed (PR fix/preload-music-players)
+
+Esta seção confere o ciclo de vida dos players do YouTube, do SoundCloud, do Spotify e do Apple Music em publicações, conversas e na prévia do compositor. O quadro do provedor carrega quando o cartão está na faixa da lista ou a até duas alturas dela (`EMBED_AHEAD_BANDS` = 2), em duas conferências de 500 ms (`EMBED_TICK_MS`, `EMBED_DWELL_TICKS`), só na tela que a pessoa está olhando. No máximo 4 quadros ficam carregados no app (`EMBED_LIVE_MAX`), e o teto baixa em 1 a cada morte de um processo de conteúdo (no máximo uma vez a cada 5 s, `EMBED_SHRINK_MS`), nunca abaixo de 2 (`EMBED_LIVE_MIN`). Um quadro em que a pessoa não tocou fica carregado ao sair da tela olhada (troca de aba, tela empilhada, folha, menu, foto em tela cheia); um tocado fecha aí e quando outro áudio do Varanda começa; bloquear e segundo plano fecham todos. "Tocado" é o dedo ou o foco no quadro, ou qualquer quadro com leitor de tela ligado ou desconhecido, lido na hora de cada decisão. O cartão guardado fica no lugar até a página do provedor carregar (evento de carga do invólucro mais 500 ms, uma heurística, não prova de que o player foi desenhado), e um quadro que não carregou não abre nada. A reprodução automática do Audius só fica suspensa com um quadro tocado (`embedSlots.engagedCount() > 0`); uma faixa do Audius que começou sozinha para quando um player de provedor passa a ser tocado, e uma que a pessoa começou não para. Termos e Política na versão 51, com novo aceite. Não há mudança de protocolo no formato dos registros nem de RPC. A lista abaixo é um roteiro: nada aqui foi marcado como conferido, e o que não foi executado fica pendente.
+
+Limites conhecidos. A primeira vez que uma tela é vista, a volta do bloqueio ou do segundo plano, uma rolagem rápida e um lugar tomado por um cartão mais próximo mostram o cartão guardado até o player carregar; o app não promete que o player esteja sempre pronto. Na web, ao voltar para uma aba depois de trocar no fim de uma lista longa, a rolagem pode voltar mais acima (o navegador limita a posição enquanto a lista está escondida e mais curta), e players não tocados podem trocar de lugar e carregar de novo. Se um arrasto da lista que começa sobre um player conta como toque no player é um dos pontos a conferir abaixo.
+
+Ordem: Android (build de debug, aparelho de pouca memória) e simulador iOS primeiro, depois web e PWA instalado. Registrar aparelho, sistema e, na web, o navegador, e os resultados de cada item.
+
+Primeira conferência, porque abas escondidas e entradas cobertas da pilha usam `display: none` (`apps/app/App.js`, linhas 3317 e 3925, e `apps/app/src/ui/StackLayer.js`, linhas 383 e 401), e um documento num quadro com `display: none` pode recarregar:
+
+- [ ] Um player não tocado sobrevive a uma troca de aba e a abrir e fechar uma publicação, sem recarregar. Contar as cargas de documento (por exemplo, o registro de rede do provedor ou o inspetor do WebView) para distinguir um quadro mantido de um remontado. Android, iOS, web e PWA: pendente. Se recarregar em alguma plataforma, registrar e usar a alternativa documentada: `embedStays` passa a devolver `false`, aplicado pela manutenção junto com testes, Termos e docs, não por esta verificação.
+- [ ] O mesmo player não tocado sobrevive a abrir e fechar uma folha, um menu e a foto em tela cheia. Android, iOS, web e PWA: pendente.
+- [ ] Um player tocado fecha nesses mesmos casos (troca de aba, publicação aberta, folha, menu, foto em tela cheia). Android, iOS, web e PWA: pendente.
+
+Comportamento:
+
+- [ ] Rolando em velocidade de leitura, os players já estão carregados ao chegar ao cartão, para os quatro provedores. Android, iOS, web e PWA: pendente.
+- [ ] Rolar além de mais de quatro players e voltar: o teto de 4 é respeitado, e o cartão guardado aparece onde não há lugar. Android, iOS, web e PWA: pendente.
+- [ ] O cartão guardado fica até a página do provedor carregar, para os quatro provedores, sem um buraco em branco entre os dois. Android, iOS, web e PWA: pendente.
+- [ ] Um player tocado, longe da faixa, não é fechado por pré-cargas. Android, iOS, web e PWA: pendente.
+- [ ] Um arrasto da lista que começa sobre um player: conferir se conta como toque no iOS e no Android (o quadro passa a ser tratado como tocado). Registrar o que acontece numa troca de aba depois. Android, iOS: pendente.
+- [ ] Tocar o play por teclado físico no Android e no iPad (não gera toque no quadro): registrar o que acontece numa troca de aba. Android e iPad: pendente.
+- [ ] Bloquear a tela e ir para segundo plano fecham todos os quadros; ao voltar, o cartão guardado aparece e o player carrega de novo. Android, iOS, web e PWA: pendente.
+- [ ] O Audius toca sozinho ao lado de um player não tocado e não toca ao lado de um tocado; uma faixa do Audius que começou sozinha para quando um player de provedor passa a ser tocado, e uma começada à mão não para. Android, iOS, web e PWA: pendente.
+- [ ] Outro áudio do Varanda (mensagem de voz, Audius) fecha um player tocado e não fecha um não tocado. Android, iOS, web e PWA: pendente.
+- [ ] Um áudio do Varanda que começou antes de a pessoa tocar no player não fecha esse player; um que começa depois do toque fecha. Android, iOS, web e PWA: pendente.
+- [ ] Trocar de aba no fim de uma lista longa, com players carregados além da primeira página, e voltar: os não tocados continuam carregados enquanto a lista lê de novo a primeira página e volta a paginar (até 5 s, `EMBED_CUT_MS`). Android, iOS, web e PWA: pendente.
+- [ ] Apagar uma publicação com player, silenciar ou bloquear quem a publicou, inclusive quando ela é a última carregada na lista: o player fecha (um não tocado no fim da lista, em até 5 s; um tocado, na hora). Uma busca nova fecha os players da busca anterior. Android, iOS, web e PWA: pendente.
+- [ ] Um player numa tela escondida, ou sob uma folha, um menu ou a foto em tela cheia, não abre link; de volta à tela, um toque num link do player abre como antes. Android, iOS, web e PWA: pendente.
+- [ ] Nenhum player toca sozinho. Android, iOS, web e PWA: pendente.
+- [ ] Web: a detecção de foco que marca um quadro como tocado (`onEngage`) funciona no Safari do iOS e no Chrome do Android. Registrar se um toque no player conta. iOS Safari e Android Chrome: pendente.
+- [ ] TalkBack e VoiceOver: com o leitor ligado todo quadro conta como tocado; os players saem da leitura quando escondidos e a pessoa os alcança quando visíveis. Android e iOS: pendente.
+- [ ] Termos e Política na versão 51: o aceite novo aparece antes de qualquer tela e a versão 50 não vale mais. Android, iOS, web e PWA: pendente.
+
+Memória e processo de conteúdo, no aparelho Android de pouca memória, com o mesmo aparelho e a mesma sequência de rolagem na branch base (teto de 2) e nesta (teto de 4):
+
+- [ ] `adb shell dumpsys meminfo` do app e dos processos de conteúdo, com quatro quadros carregados contra a base com dois. Registrar os dois totais. Pendente.
+- [ ] Ciclos repetidos de rolar além dos quadros e voltar, sem crescimento acumulado da memória. Pendente.
+- [ ] Matar o renderizador do WebView (por exemplo, `adb shell kill` no processo de conteúdo) e conferir que o teto cai em 1 (de 4 para 3, depois 2, sem passar de uma queda a cada 5 s) e que o cartão guardado volta. Pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho:
+
+```sh
+node apps/app/test/musicEmbed.test.js
+node apps/app/test/embedKeep.test.js
+node apps/app/test/embedFrame.test.js
+node apps/app/test/embedLayer.test.js
+node apps/app/test/musicEmbedCard.test.js
+node apps/app/test/postMusic.test.js
+node apps/app/test/postMusicCard.test.js
+node apps/app/test/linkPreview.test.js
+node apps/app/test/legal.test.js
+node packages/core/test/terms.test.js
+node apps/site/test/legal.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.

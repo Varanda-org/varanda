@@ -34,7 +34,9 @@ test('the card never claims playback and watches other players', (t) => {
   t.absent(raw.includes('claimPlayback'), 'no claimPlayback anywhere')
   t.ok(src.includes("import { playbackClaimCount } from '../media/chatMedia'"), 'imports playbackClaimCount')
   t.ok(src.includes('const claims = useRef(playbackClaimCount())'), 'the count when the card mounts')
-  t.ok(/const count = playbackClaimCount\(\)\s*const allowed = count === claims\.current\s*claims\.current = count/.test(src), 'a new claim drops the frame for one check')
+  t.ok(/const count = playbackClaimCount\(\)\s*const touching = embedSlots\.engaged\(release\.current\)\s*const at = embedSlots\.engagedAt\(release\.current\)\s*if \(touching && !touchSeen\.current && Number\.isFinite\(at\)\) claims\.current = Math\.max\(claims\.current, at\)\s*touchSeen\.current = touching\s*const allowed = count === claims\.current \|\| !touchedNow\(release\.current\)\s*claims\.current = count/.test(src), 'a new claim drops a touched frame for one check, unless it came before the touch')
+  t.ok(/function touchedNow \(release\) \{\s*return embedTouched\(embedSlots\.engaged\(release\), screenReaderOn\(\), screenReaderKnown\(\)\)\s*\}/.test(src), 'touched is read at the moment of each decision')
+  t.ok(src.includes("import { screenReaderKnown, screenReaderOn } from './screenReader'"), 'the screen reader state comes from ./screenReader')
 })
 
 test('the frame mounts only for a live state on the visible screen', (t) => {
@@ -42,9 +44,10 @@ test('the frame mounts only for a live state on the visible screen', (t) => {
   t.ok(src.includes('const visible = useContext(ScreenVisible)'), 'reads ScreenVisible')
   const frames = [...src.matchAll(/<EmbedFrame\b/g)]
   t.is(frames.length, 1, 'one EmbedFrame')
-  t.ok(/state\.live && active\s*\?\s*\(\s*$/.test(src.slice(0, frames[0].index)), 'preceded by state.live && active')
-  t.ok(/\{live && key !== '' && !inline\s*\? <View style=\{\{ height \}\} accessibilityLabel=\{'Player do ' \+ name\} onStartShouldSetResponder=\{\(\) => true\} \/>\s*: state\.live && active\s*\?/.test(src), 'a card in a list row leaves an empty slot of the player height for the layer')
-  t.ok(src.includes('const live = state.live && active'))
+  t.ok(/\{parts\.frame\s*\?\s*\(\s*<View key='frame' style=\{frameLook\} pointerEvents=\{ready \? 'auto' : 'none'\}>\s*$/.test(src.slice(0, frames[0].index)), 'inside the parts.frame branch, out of touches until loaded')
+  t.ok(/\{parts\.empty\s*\? <View key='empty' style=\{\{ height \}\} accessibilityLabel=\{'Player do ' \+ name\} onStartShouldSetResponder=\{\(\) => true\} \/>\s*: null\}/.test(src), 'a card in a list row leaves an empty slot of the player height for the layer')
+  t.ok(src.includes("const parts = slotParts(live, key !== '' && !inline, ready)"), 'what the slot draws comes from slotParts')
+  t.ok(src.includes('const live = state.live\n'), 'a kept frame stays live while its screen is not shown')
   const frame = src.slice(frames[0].index, src.indexOf('/>', frames[0].index))
   for (const prop of [
     'embedUrl={embed.embedUrl}',
@@ -53,8 +56,12 @@ test('the frame mounts only for a live state on the visible screen', (t) => {
     'allowTop={topNavigationAllowed}',
     'height={height}'
   ]) t.ok(frame.includes(prop), prop)
-  t.ok(frame.includes('onOpen={openFromPlayer}'), 'a link inside the player is handed to openFromPlayer')
-  t.ok(frame.includes('onGone={() => apply(EMBED_IDLE)}'), 'a dead content process brings the stored card back')
+  t.ok(frame.includes('onOpen={ready && active ? openFromPlayer : undefined}'), 'a link inside a loaded player is handed to openFromPlayer, only while it is shown and not held')
+  t.ok(src.includes('const active = visible && !held && fits\n'), 'active needs a shown screen and no hold')
+  t.ok(frame.includes('onGone={() => { embedSlots.shrink(Date.now()); apply(EMBED_IDLE) }}'), 'a dead content process lowers the cap and brings the stored card back')
+  t.ok(frame.includes('onEngage={(on) => embedSlots.engage(release.current, on, playbackClaimCount())}'), 'a touch marks the slot engaged')
+  t.ok(frame.includes('onReady={() => setReady(true)}'), 'the loaded page shows the frame')
+  t.ok(frame.includes('parked={!ready}'), 'out of the screen reader until loaded')
   t.ok(/const out = embedExitUrl\(embed, target\)\s*if \(out !== null\) openExternal\(out\)/.test(src), 'it leaves the app only through embedExitUrl')
   t.ok(src.includes('  embedExitUrl,\n') && src.includes("} from '../musicEmbed'"), 'embedExitUrl comes from ../musicEmbed')
   t.ok(src.includes('const active = visible && !held && fits'), 'active needs the visible screen, no hold and a fit')
@@ -64,25 +71,27 @@ test('the frame mounts only for a live state on the visible screen', (t) => {
 })
 
 test('the card checks its slot every 500 ms against the feed band', (t) => {
-  t.ok(src.includes("import { EMBED_IDLE, EMBED_PARKED, EMBED_TICK_MS, EMBED_WAITING, embedSlots, embedStep, embedsHeld, mostlyHidden, onEmbedHold } from '../embedLive'"), 'imports from ../embedLive')
+  t.ok(src.includes("import { EMBED_IDLE, EMBED_PARKED, EMBED_TICK_MS, EMBED_WAITING, bandGap, embedNear, embedSlots, embedStays, embedStep, embedTouched, embedsHeld, embedsHeldAll, mostlyHidden, onEmbedHold } from '../embedLive'"), 'imports from ../embedLive')
   t.absent(/farFromBand|EMBED_FAR_SCREENS|\bfar\b/.test(src), 'no distance rule')
   t.absent(/function mostlyHidden/.test(src), 'no local mostlyHidden')
   t.ok(src.includes('setInterval(check, EMBED_TICK_MS)'), 'EMBED_TICK_MS in setInterval')
   t.ok(src.includes('const top = insets.top + layout.topBar'), 'the band starts under the top bar')
   t.ok(src.includes('const bottom = win.height - (insets.bottom + (tabBarShown ? layout.tabBar : 0))'), 'the band ends above the tab bar, when there is one')
-  t.ok(src.includes('settle(mostlyHidden(x, y, w, h, top, bottom, win.width))'), 'measured against the band')
-  t.ok(/const settle = \(hidden, mayYield = true\) => \{\s*pending = false\s*apply\(embedStep\(stateRef\.current, \{ hidden, allowed, turned, free \}\), mayYield\)\s*\}/.test(src), 'embedStep with the answer')
+  t.ok(src.includes('answer(x, y, w, h, bottom)'), 'measured against the band')
+  t.ok(/const settle = \(hidden, mayYield = true, gap = Infinity, near = false\) => \{\s*pending = false\s*const free = stateRef\.current\.live \|\| embedSlots\.free\(gap, readerTouchNow\(\)\)\s*apply\(embedStep\(stateRef\.current, \{ hidden, near, allowed, turned, free \}\), mayYield, gap\)\s*\}/.test(src), 'embedStep with the answer, its distance handed to apply')
+  t.ok(/const answer = \(x, y, w, h, lower\) => \{\s*const hidden = mostlyHidden\(x, y, w, h, top, lower, win\.width\)\s*const gap = hidden \? Math\.max\(bandGap\(x, y, w, h, top, lower, win\.width\), 1\) : 0\s*settle\(hidden, true, gap, embedNear\(gap, top, lower\)\)\s*\}/.test(src), 'the distance and nearness of the slot, never 0 when hidden')
   t.ok(src.includes('return () => { cancelled = true; clearInterval(timer) }'), 'the cleanup')
-  t.ok(/if \(!active\) \{\s*apply\(EMBED_IDLE\)\s*return undefined\s*\}/.test(src), 'inactive drops the frame at once, with no timer')
+  t.ok(/if \(!active\) \{\s*if \(!stateRef\.current\.live \|\| !fits \|\| !embedStays\(touchedNow\(release\.current\), locked\)\) \{\s*apply\(EMBED_IDLE\)\s*return undefined\s*\}/.test(src), 'inactive drops a touched frame at once, with no timer')
+  t.ok(/const idle = setInterval\(keep, EMBED_TICK_MS\)\s*return \(\) => clearInterval\(idle\)\s*\}/.test(src), 'an untouched one keeps only a tick that parks it')
   t.ok(/if \(!view \|\| typeof view\.measureInWindow !== 'function'\) \{\s*unseen\(\)\s*return\s*\}/.test(src), 'no slot or no measure counts as hidden')
   t.ok(/\} catch \{\s*unseen\(\)\s*\}/.test(src), 'a throwing measure counts as hidden')
   t.ok(src.includes('const unseen = () => settle(true)'), 'hidden: true')
   t.ok(src.includes("import { TabBarShown } from './tabBarShown'") && src.includes('useContext(TabBarShown)'), 'reads TabBarShown')
-  t.ok(src.includes('[active, win.width, win.height, insets.top, insets.bottom, tabBarShown, band]'), 'the effect dependencies')
+  t.ok(src.includes('[active, fits, locked, win.width, win.height, insets.top, insets.bottom, tabBarShown, band]'), 'the effect dependencies')
 })
 
 test('a new claim drops the frame before any measurement', (t) => {
-  t.ok(/const allowed = count === claims\.current\s*claims\.current = count\s*if \(!allowed\) \{\s*apply\(EMBED_IDLE\)\s*return\s*\}/.test(src), 'dropped synchronously')
+  t.ok(/const allowed = count === claims\.current \|\| !touchedNow\(release\.current\)\s*claims\.current = count\s*if \(!allowed\) \{\s*apply\(EMBED_IDLE\)\s*return\s*\}/.test(src), 'dropped synchronously')
 })
 
 test('a check whose answer never came counts as hidden', (t) => {
@@ -94,15 +103,35 @@ test('a check whose answer never came counts as hidden', (t) => {
   t.ok(/measureInWindow\(\(x, y, w, h\) => \{\s*if \(cancelled \|\| !alive\.current \|\| id !== round\) return\n/.test(src), 'only the latest check applies')
 })
 
+// The card's touchedNow(), as written, against the given slots and a stub
+// screen reader.
+function liftTouched (live, slots, reader) {
+  const m = raw.match(/function touchedNow \(release\) \{([\s\S]*?)\n\}/)
+  if (!m) throw new Error('touchedNow not found in MusicEmbedCard.js')
+  const fn = new Function('embedTouched', 'embedSlots', 'screenReaderOn', 'screenReaderKnown', 'release', m[1]) // eslint-disable-line no-new-func
+  return (release) => fn(live.embedTouched, slots, () => reader.on, () => reader.known, release)
+}
+
+// The card's readerTouchNow(), as written, against a stub screen reader.
+function liftReaderTouch (live, reader) {
+  const m = raw.match(/function readerTouchNow \(\) \{([\s\S]*?)\n\}/)
+  if (!m) throw new Error('readerTouchNow not found in MusicEmbedCard.js')
+  const fn = new Function('embedTouched', 'screenReaderOn', 'screenReaderKnown', m[1]) // eslint-disable-line no-new-func
+  return () => fn(live.embedTouched, () => reader.on, () => reader.known)
+}
+
 // The card's check() lifted out of its source and run against stub
-// measurements, with the real embedLive rules.
+// measurements, with the real embedLive rules. env.reader is the screen
+// reader (default: known off).
 async function liftCheck (env) {
   const live = await import('../src/embedLive.js')
   const start = raw.indexOf('    let round = 0')
   const end = raw.indexOf('    // The dwell counts ticks')
   if (start === -1 || end === -1) throw new Error('check() not found in MusicEmbedCard.js')
-  const names = ['playbackClaimCount', 'claims', 'apply', 'EMBED_IDLE', 'embedSlots', 'stateRef', 'base', 'win', 'embedStep', 'slot', 'band', 'alive', 'mostlyHidden', 'top', 'bottom', 'cancelled', 'placeFrame']
-  const all = { placeFrame: () => {}, ...env, EMBED_IDLE: live.EMBED_IDLE, embedStep: live.embedStep, mostlyHidden: live.mostlyHidden, cancelled: false }
+  const names = ['playbackClaimCount', 'claims', 'apply', 'EMBED_IDLE', 'embedSlots', 'stateRef', 'base', 'win', 'embedStep', 'slot', 'band', 'alive', 'mostlyHidden', 'bandGap', 'embedNear', 'top', 'bottom', 'cancelled', 'placeFrame', 'release', 'touchedNow', 'readerTouchNow', 'touchSeen']
+  const all = { placeFrame: () => {}, release: { current: null }, touchSeen: { current: false }, ...env, EMBED_IDLE: live.EMBED_IDLE, embedStep: live.embedStep, mostlyHidden: live.mostlyHidden, bandGap: live.bandGap, embedNear: live.embedNear, cancelled: false }
+  all.touchedNow = liftTouched(live, all.embedSlots, env.reader || { on: false, known: true })
+  all.readerTouchNow = liftReaderTouch(live, env.reader || { on: false, known: true })
   const make = new Function(...names, raw.slice(start, end) + '\nreturn check') // eslint-disable-line no-new-func
   return { check: make(...names.map((n) => all[n])), live }
 }
@@ -111,8 +140,10 @@ test('a measurement in flight across a playback claim never applies', async (t) 
   let claimCount = 0
   const answers = []
   const stateRef = { current: null }
-  const slots = { count: () => 0, free: () => true }
+  const slots = { count: () => 0, free: () => true, engaged: () => false, engagedAt: () => null }
   const { check, live } = await liftCheck({
+    // A reader that has not answered counts as a touch, so a claim drops the dwell.
+    reader: { on: false, known: false },
     playbackClaimCount: () => claimCount,
     claims: { current: 0 },
     apply: (next) => { stateRef.current = next },
@@ -154,7 +185,7 @@ async function liftLive () {
     playbackClaimCount: () => 0,
     claims: { current: 0 },
     apply: (next) => { stateRef.current = next; seen.push(next) },
-    embedSlots: { count: () => 1, free: () => false },
+    embedSlots: { count: () => 1, free: () => false, engaged: () => false, engagedAt: () => null },
     stateRef,
     base: { current: false },
     win: { width: 390, height: 844 },
@@ -199,16 +230,34 @@ test('one late answer never parks a card', async (t) => {
   t.is(stateRef.current, live.EMBED_LIVE, 'the next visible answer clears it')
 })
 
+// The card's effect branch for a card that is not active (its screen not
+// shown, a hold, no fit), as written. It returns the effect's cleanup, or null
+// when the card is active.
+function liftInactive () {
+  const start = raw.indexOf('    if (!active) {')
+  const end = raw.indexOf('    // measureInWindow answers later')
+  if (start === -1 || end === -1) throw new Error('the inactive branch not found in MusicEmbedCard.js')
+  const names = ['active', 'stateRef', 'fits', 'embedStays', 'touchedNow', 'release', 'locked', 'apply', 'EMBED_IDLE', 'EMBED_PARKED', 'EMBED_TICK_MS', 'setInterval', 'clearInterval']
+  return { names, run: new Function(...names, raw.slice(start, end) + '\nreturn null') } // eslint-disable-line no-new-func
+}
+
 // Cards driven through their real apply() and check(), lifted from the
-// source, sharing one real createEmbedSlots(2).
-async function liftCards () {
+// source, sharing one real createEmbedSlots(max), a claim count, a screen
+// reader and a clock that moves one tick before each check.
+async function liftCards (max = 2) {
   const live = await import('../src/embedLive.js')
-  const slots = live.createEmbedSlots(2)
+  const slots = live.createEmbedSlots(max)
   const start = raw.indexOf('  const apply = (')
   const end = raw.indexOf('  useEffect(() => {\n    alive.current = true')
   if (start === -1 || end === -1) throw new Error('apply() not found in MusicEmbedCard.js')
-  const names = ['embedSlots', 'release', 'stateRef', 'base', 'win', 'alive', 'setState', 'EMBED_PARKED', 'EMBED_IDLE', 'EMBED_WAITING', 'hosted', 'host']
+  const names = ['embedSlots', 'release', 'stateRef', 'base', 'win', 'alive', 'setState', 'EMBED_PARKED', 'EMBED_IDLE', 'EMBED_WAITING', 'hosted', 'host', 'Date', 'readerTouchNow', 'request']
   const makeApply = new Function(...names, raw.slice(start, end) + '\nreturn apply') // eslint-disable-line no-new-func
+  const inactive = liftInactive()
+  const playback = { count: 0 }
+  const reader = { on: false, known: true }
+  const clock = { now: 1000 }
+  const touchedNow = liftTouched(live, slots, reader)
+  const readerTouchNow = liftReaderTouch(live, reader)
   let most = 0
   const card = async () => {
     const answers = []
@@ -221,14 +270,16 @@ async function liftCards () {
       slot: { current: { measureInWindow: (cb) => answers.push(cb) } },
       shown: []
     }
-    const apply = makeApply(slots, c.release, c.stateRef, c.base, c.win, c.alive, (s) => c.shown.push(s), live.EMBED_PARKED, live.EMBED_IDLE, live.EMBED_WAITING, { current: '' }, null)
+    const apply = makeApply(slots, c.release, c.stateRef, c.base, c.win, c.alive, (s) => c.shown.push(s), live.EMBED_PARKED, live.EMBED_IDLE, live.EMBED_WAITING, { current: '' }, null, { now: () => clock.now }, readerTouchNow, { current: '' })
     c.apply = (...args) => {
       apply(...args)
       most = Math.max(most, slots.count())
     }
     const { check } = await liftCheck({
-      playbackClaimCount: () => 0,
-      claims: { current: 0 },
+      reader,
+      release: c.release,
+      playbackClaimCount: () => playback.count,
+      claims: { current: playback.count },
       apply: c.apply,
       embedSlots: slots,
       stateRef: c.stateRef,
@@ -244,12 +295,41 @@ async function liftCards () {
       const latest = answers.splice(0).pop()
       latest(0, y, 300, 152)
     }
-    c.check = check
-    c.seen = () => { check(); answer(300) }
-    c.unseen = () => { check(); answer(2000) }
+    c.answers = answers
+    c.check = () => { clock.now += live.EMBED_TICK_MS; check() }
+    c.seen = () => { c.check(); answer(300) }
+    // Past two band heights (2 x 662 pt) below the band's bottom (761).
+    c.unseen = () => { c.check(); answer(3000) }
     // Many window heights below the band's bottom (761).
-    c.far = () => { check(); answer(40000) }
+    c.far = () => { c.check(); answer(40000) }
+    // gap pt below the band: near up to 1324.
+    c.near = (gap = 239) => { c.check(); answer(761 + gap) }
     c.answerSeen = () => answer(300)
+    // The card's screen is not shown (or a hold): runs the inactive branch
+    // with a stub timer; c.idleTick() is one of its ticks.
+    c.hide = ({ fits = true, locked = false } = {}) => {
+      if (c.stop) c.stop()
+      c.idleTick = null
+      const env = {
+        active: false,
+        stateRef: c.stateRef,
+        fits,
+        embedStays: live.embedStays,
+        touchedNow,
+        release: c.release,
+        locked,
+        apply: c.apply,
+        EMBED_IDLE: live.EMBED_IDLE,
+        EMBED_PARKED: live.EMBED_PARKED,
+        EMBED_TICK_MS: live.EMBED_TICK_MS,
+        setInterval: (fn, ms) => { c.idleTick = fn; c.idleMs = ms; return 1 },
+        clearInterval: () => { c.idleTick = null }
+      }
+      const stop = inactive.run(...inactive.names.map((n) => env[n]))
+      c.stop = typeof stop === 'function' ? stop : null
+    }
+    // As the frame reports a touch: with the claim count at that moment.
+    c.engage = (on = true) => slots.engage(c.release.current, on, playback.count)
     c.holds = () => c.release.current !== null
     c.asked = () => c.holds() && slots.yielding(c.release.current)
     c.park = () => { c.unseen(); c.unseen() }
@@ -263,7 +343,7 @@ async function liftCards () {
     for (const x of [a, a, b, b, c, c]) x.seen()
     return { a, b, c }
   }
-  return { live, slots, card, three, most: () => most }
+  return { live, slots, card, three, playback, reader, clock, most: () => most }
 }
 
 test('three cards share two slots through the real apply', async (t) => {
@@ -296,6 +376,8 @@ test('three cards share two slots through the real apply', async (t) => {
   t.absent(a.asked(), 'a visible check clears the request')
 
   a.park()
+  // Only a touched player can be in native full screen.
+  a.engage()
   c.seen()
   t.ok(a.asked())
   a.win.width = 844
@@ -306,6 +388,7 @@ test('three cards share two slots through the real apply', async (t) => {
   t.absent(a.asked(), 'a turned check clears the request')
   a.win.width = 390
   a.win.height = 844
+  a.engage(false)
 
   a.park()
   c.seen()
@@ -450,27 +533,453 @@ test('a parked holder found far away keeps its slot', async (t) => {
   t.ok(most() <= 2, 'never more than two slots taken')
 })
 
+test('a near card out of the band goes live after two ticks and then parks', async (t) => {
+  const { live, slots, card } = await liftCards(4)
+  const n = await card()
+  n.near()
+  t.alike(n.stateRef.current, { live: false, seen: 1 }, 'one near check loads nothing')
+  t.absent(n.holds())
+  n.near()
+  t.is(n.stateRef.current, live.EMBED_LIVE, 'the second near check loads the frame before it is seen')
+  t.ok(n.holds())
+  n.near()
+  t.is(n.stateRef.current, live.EMBED_AWAY, 'out of the band it is away')
+  n.near()
+  t.is(n.stateRef.current, live.EMBED_PARKED, 'and then parked, still loaded')
+  t.ok(n.holds())
+  const f = await card()
+  f.unseen()
+  f.unseen()
+  t.is(f.stateRef.current, live.EMBED_IDLE, 'a card past two band heights never loads')
+  t.is(slots.count(), 1)
+})
+
+test('two near cards in one tick load one frame', async (t) => {
+  const { live, slots, card, clock } = await liftCards(4)
+  const a = await card()
+  const b = await card()
+  a.near()
+  b.near()
+  a.near()
+  clock.now -= live.EMBED_TICK_MS
+  b.near()
+  t.is(a.stateRef.current, live.EMBED_LIVE)
+  t.is(b.stateRef.current, live.EMBED_WAITING, 'the second preload in the same tick waits')
+  t.is(slots.count(), 1)
+  b.near()
+  t.is(b.stateRef.current, live.EMBED_LIVE, 'and loads on the next tick')
+  t.is(slots.count(), 2)
+})
+
+test('a preloaded holder yields to a nearer newcomer, never to one inside the 400 pt margin', async (t) => {
+  const { live, slots, card, most } = await liftCards(1)
+  const a = await card()
+  a.near(1300)
+  a.near(1300)
+  t.is(a.stateRef.current, live.EMBED_LIVE, 'preloaded 1300 pt below the band')
+  a.near(1300)
+  a.near(1300)
+  t.is(a.stateRef.current, live.EMBED_PARKED)
+  const b = await card()
+  b.near(1000)
+  b.near(1000)
+  t.is(b.stateRef.current, live.EMBED_WAITING, 'a newcomer 300 pt nearer waits')
+  t.absent(a.asked(), 'and asks nothing of the holder')
+  a.near(1300)
+  t.is(a.stateRef.current, live.EMBED_PARKED, 'the holder keeps its frame')
+  t.ok(a.holds())
+  b.apply(live.EMBED_IDLE)
+  const c = await card()
+  c.near()
+  c.near()
+  t.is(c.stateRef.current, live.EMBED_WAITING, 'a newcomer over 400 pt nearer waits a tick')
+  t.ok(a.asked(), 'and asks the holder')
+  a.near(1300)
+  t.is(a.stateRef.current, live.EMBED_IDLE, 'the holder yields on its own next check')
+  t.absent(a.holds())
+  c.near()
+  t.is(c.stateRef.current, live.EMBED_LIVE, 'the newcomer loads')
+  t.is(slots.count(), 1)
+  t.ok(most() <= 1)
+})
+
+// Only touching the band, 0 pt away, the slot is still hidden: its request is
+// a preload.
+test('a hidden card touching the band edge never asks a touched frame', async (t) => {
+  const { live, slots, card } = await liftCards(4)
+  const a = await card()
+  a.seen()
+  a.seen()
+  a.engage()
+  a.park()
+  t.is(a.stateRef.current, live.EMBED_PARKED, 'a touched frame parked')
+  const others = [await card(), await card(), await card()]
+  for (let i = 0; i < 2; i++) for (const x of others) x.seen()
+  t.ok(others.every((x) => x.stateRef.current === live.EMBED_LIVE), 'three untouched frames live in the band')
+  t.is(slots.count(), 4)
+  const e = await card()
+  e.near(0)
+  e.near(0)
+  t.is(e.stateRef.current, live.EMBED_WAITING, 'the card at the band edge waits')
+  t.absent(a.asked(), 'and never asks the touched frame')
+  a.unseen()
+  t.is(a.stateRef.current, live.EMBED_PARKED, 'which keeps its slot')
+  t.ok(a.holds())
+  e.seen()
+  t.ok(a.asked(), 'in the band, with no untouched frame parked, the same card asks it')
+  a.unseen()
+  t.is(a.stateRef.current, live.EMBED_IDLE, 'and the touched frame yields')
+})
+
+test('a waiting card that leaves the band withdraws its visible request once', async (t) => {
+  const { live, card } = await liftCards(1)
+  const a = await card()
+  a.seen()
+  a.seen()
+  a.engage()
+  a.park()
+  t.is(a.stateRef.current, live.EMBED_PARKED, 'a touched frame parked')
+  const c = await card()
+  c.seen()
+  c.seen()
+  t.is(c.stateRef.current, live.EMBED_WAITING, 'a visible card waits')
+  t.ok(a.asked(), 'and asks the touched frame, the only one parked')
+  c.near()
+  t.is(c.stateRef.current, live.EMBED_WAITING, 'out of the band but near, it still waits')
+  t.absent(a.asked(), 'with its visible request withdrawn')
+  a.unseen()
+  t.is(a.stateRef.current, live.EMBED_PARKED, 'so the touched frame keeps its slot')
+  t.ok(a.holds())
+  const d = await card()
+  d.seen()
+  d.seen()
+  t.ok(a.asked(), 'another visible card asks')
+  c.near()
+  t.ok(a.asked(), 'and the near card does not withdraw again on its next tick')
+  d.near()
+  t.absent(a.asked(), 'until that one leaves the band too')
+  c.seen()
+  t.ok(a.asked(), 'back in the band, the card asks again')
+  a.unseen()
+  t.is(a.stateRef.current, live.EMBED_IDLE, 'and the frame yields to it')
+})
+
+test('a touched parked frame is never taken by a preload', async (t) => {
+  const { live, card } = await liftCards(1)
+  const a = await card()
+  a.seen()
+  a.seen()
+  a.park()
+  t.is(a.stateRef.current, live.EMBED_PARKED)
+  a.engage()
+  const c = await card()
+  c.near()
+  c.near()
+  t.is(c.stateRef.current, live.EMBED_WAITING, 'the preload waits')
+  t.absent(a.asked(), 'the touched frame is not asked')
+  a.unseen()
+  t.is(a.stateRef.current, live.EMBED_PARKED, 'and keeps its slot')
+  t.ok(a.holds())
+  a.engage(false)
+  c.near()
+  t.ok(a.asked(), 'untouched, the same frame would be asked')
+})
+
+test('a marked holder re-checks with its fresh distance through the real apply', async (t) => {
+  const { live, slots, card, most } = await liftCards(1)
+  const a = await card()
+  a.seen()
+  a.seen()
+  a.far()
+  a.far()
+  t.is(a.stateRef.current, live.EMBED_PARKED, 'parked far below the band')
+  const b = await card()
+  b.near()
+  b.near()
+  t.is(b.stateRef.current, live.EMBED_WAITING, 'a preload waits')
+  t.ok(a.asked(), 'and asks the far holder')
+  a.near(300)
+  t.is(a.stateRef.current, live.EMBED_PARKED, 'back within the margin of the request, the holder keeps its frame')
+  t.ok(a.holds())
+  a.far()
+  t.is(a.stateRef.current, live.EMBED_IDLE, 'found far again, it yields')
+  t.absent(a.holds())
+  b.near()
+  t.is(b.stateRef.current, live.EMBED_LIVE, 'the newcomer loads')
+  t.is(slots.count(), 1)
+  t.ok(most() <= 1)
+})
+
+test('a screen reader keeps a parked frame from a preload through the real check', async (t) => {
+  const { live, card, reader } = await liftCards(1)
+  const a = await card()
+  a.seen()
+  a.seen()
+  a.far()
+  a.far()
+  t.is(a.stateRef.current, live.EMBED_PARKED)
+  reader.on = true
+  const b = await card()
+  b.near()
+  b.near()
+  t.is(b.stateRef.current, live.EMBED_WAITING, 'the preload waits')
+  t.absent(a.asked(), 'and marks nobody while a screen reader runs')
+  a.far()
+  t.is(a.stateRef.current, live.EMBED_PARKED, 'the holder keeps its frame')
+  t.ok(a.holds())
+  reader.on = false
+  b.near()
+  t.ok(a.asked(), 'with the reader off, the same preload marks the holder')
+  reader.known = false
+  a.far()
+  t.is(a.stateRef.current, live.EMBED_PARKED, 'a reader that has not answered refuses the mark at the holder\'s check')
+  t.ok(a.holds())
+  reader.on = true
+  reader.known = true
+  a.far()
+  t.is(a.stateRef.current, live.EMBED_PARKED, 'so does a running one')
+  reader.on = false
+  a.far()
+  t.is(a.stateRef.current, live.EMBED_IDLE, 'known off, the holder yields')
+})
+
+test('a card on a hidden screen keeps an untouched frame and yields it at once when asked', async (t) => {
+  const { live, slots, card, most } = await liftCards(2)
+  const a = await card()
+  const b = await card()
+  for (const x of [a, a, b, b]) x.seen()
+  t.is(a.stateRef.current, live.EMBED_LIVE)
+  a.hide()
+  t.is(a.stateRef.current, live.EMBED_PARKED, 'unseen, the untouched frame is parked at once')
+  t.ok(a.holds(), 'and keeps its slot')
+  t.is(typeof a.idleTick, 'function', 'with a tick')
+  t.is(a.idleMs, live.EMBED_TICK_MS)
+  a.idleTick()
+  t.is(a.stateRef.current, live.EMBED_PARKED, 'still loaded on the next tick')
+  t.is(a.answers.length, 0, 'no measurement while hidden')
+  const c = await card()
+  c.seen()
+  c.seen()
+  t.is(c.stateRef.current, live.EMBED_WAITING)
+  t.ok(a.asked(), 'the hidden holder is asked first, as the farthest')
+  t.absent(b.asked())
+  a.idleTick()
+  t.is(a.stateRef.current, live.EMBED_IDLE, 'and yields on its next tick')
+  t.absent(a.holds())
+  c.seen()
+  t.is(c.stateRef.current, live.EMBED_LIVE)
+  t.is(slots.count(), 2)
+  t.ok(most() <= 2)
+  const idle = await card()
+  idle.hide()
+  t.is(idle.stateRef.current, live.EMBED_IDLE, 'a card with no frame starts nothing while hidden')
+  t.is(idle.idleTick, null)
+  t.absent(idle.holds())
+})
+
+test('a touched frame drops on a hidden screen and on a playback claim, an untouched one survives both', async (t) => {
+  const { live, slots, card, playback, reader } = await liftCards(4)
+  const a = await card()
+  const b = await card()
+  for (const x of [a, a, b, b]) x.seen()
+  a.engage()
+  a.hide()
+  t.is(a.stateRef.current, live.EMBED_IDLE, 'the touched frame drops when its screen hides')
+  t.absent(a.holds())
+  t.is(a.idleTick, null, 'with no tick')
+  b.hide()
+  t.is(b.stateRef.current, live.EMBED_PARKED, 'the untouched one stays loaded')
+  t.ok(b.holds())
+
+  const d = await card()
+  const e = await card()
+  for (const x of [d, d, e, e]) x.seen()
+  d.engage()
+  playback.count++
+  d.check()
+  t.is(d.stateRef.current, live.EMBED_IDLE, 'another player closes the touched frame, before any measurement')
+  t.is(d.answers.length, 0)
+  t.absent(d.holds())
+  e.seen()
+  t.is(e.stateRef.current, live.EMBED_LIVE, 'and leaves the untouched one')
+  t.ok(e.holds())
+  reader.known = false
+  playback.count++
+  e.check()
+  t.is(e.stateRef.current, live.EMBED_IDLE, 'with a screen reader that has not answered, it counts as touched')
+  reader.known = true
+  b.idleTick()
+  t.is(b.stateRef.current, live.EMBED_PARKED)
+  reader.on = true
+  b.idleTick()
+  t.is(b.stateRef.current, live.EMBED_IDLE, 'a screen reader turned on while hidden closes it on the next tick')
+  reader.on = false
+  t.is(slots.count(), 0)
+})
+
+test('a touch wins over an automatic claim made before it', async (t) => {
+  const { live, slots, card, playback } = await liftCards(4)
+  const a = await card()
+  a.seen()
+  a.seen()
+  t.is(a.stateRef.current, live.EMBED_LIVE)
+  playback.count++
+  a.engage()
+  a.check()
+  if (a.answers.length) a.answerSeen()
+  t.is(a.stateRef.current, live.EMBED_LIVE, 'a claim made before the touch leaves the tapped frame live')
+  t.ok(a.holds())
+  t.ok(slots.engaged(a.release.current), 'and engaged')
+  a.seen()
+  t.is(a.stateRef.current, live.EMBED_LIVE, 'on the next check too')
+  playback.count++
+  a.check()
+  t.is(a.stateRef.current, live.EMBED_IDLE, 'a claim made after the touch closes it')
+  t.absent(a.holds())
+})
+
+test('a lock drops every frame', async (t) => {
+  const { live, slots, card } = await liftCards(4)
+  const a = await card()
+  const b = await card()
+  for (const x of [a, a, b, b]) x.seen()
+  a.hide()
+  t.is(a.stateRef.current, live.EMBED_PARKED)
+  a.hide({ locked: true })
+  t.is(a.stateRef.current, live.EMBED_IDLE, 'a kept untouched frame drops on a lock')
+  b.hide({ locked: true })
+  t.is(b.stateRef.current, live.EMBED_IDLE, 'and so does a live one')
+  t.is(slots.count(), 0)
+  const c = await card()
+  c.seen()
+  c.seen()
+  c.hide({ fits: false })
+  t.is(c.stateRef.current, live.EMBED_IDLE, 'a card that no longer fits drops its frame')
+})
+
+test('an untouched frame re-bases to a real rotation', async (t) => {
+  const { live, card } = await liftCards(2)
+  const a = await card()
+  a.seen()
+  a.seen()
+  a.park()
+  a.win.width = 844
+  a.win.height = 390
+  a.unseen()
+  t.is(a.stateRef.current, live.EMBED_PARKED, 'not counted as turned, so it stays parked')
+  a.engage()
+  a.win.width = 390
+  a.win.height = 844
+  a.unseen()
+  t.is(a.stateRef.current, live.EMBED_LIVE, 'a touched one counts as turned and is un-parked')
+})
+
+test('the cap is never exceeded', async (t) => {
+  const { live, slots, card, most } = await liftCards(4)
+  const cards = []
+  for (let i = 0; i < 6; i++) cards.push(await card())
+  for (let round = 0; round < 4; round++) for (const c of cards) c.seen()
+  t.is(cards.filter((c) => c.holds()).length, 4, 'four cards hold the four slots')
+  t.ok(cards.slice(4).every((c) => c.stateRef.current === live.EMBED_WAITING), 'the others wait')
+  t.is(slots.shrink(0), 3, 'a dead content process lowers the cap')
+  for (const c of cards.slice(0, 2)) c.park()
+  for (let round = 0; round < 4; round++) for (const c of cards.slice(4)) c.seen()
+  for (const c of cards.slice(0, 2)) c.unseen()
+  for (let round = 0; round < 4; round++) for (const c of cards.slice(4)) c.seen()
+  t.ok(most() <= 4, 'never more than four frames at once')
+  t.is(slots.count(), 3, 'the pool drained to the lowered cap')
+  t.is(cards.filter((c) => c.holds()).length, 3)
+})
+
+// The inline frame's own callbacks, as written, against a card's real apply().
+test('the inline frame lowers the cap when its process dies and reports its touches', async (t) => {
+  const { live, slots, card } = await liftCards(4)
+  const a = await card()
+  a.seen()
+  a.seen()
+  const frame = src.slice(src.indexOf('<EmbedFrame'), src.indexOf('/>', src.indexOf('<EmbedFrame')))
+  const gone = frame.match(/onGone=\{\(\) => \{ ([^}]*) \}\}/)
+  const engage = frame.match(/onEngage=\{\(on\) => ([^}]*)\}/)
+  t.ok(gone && engage, 'both callbacks found')
+  const onEngage = new Function('embedSlots', 'release', 'playbackClaimCount', 'on', engage[1]) // eslint-disable-line no-new-func
+  onEngage(slots, a.release, () => 7, true)
+  t.ok(slots.engaged(a.release.current), 'a touch engages the frame')
+  t.is(slots.engagedAt(a.release.current), 7, 'with the claim count at the touch')
+  onEngage(slots, a.release, () => 7, false)
+  t.absent(slots.engaged(a.release.current))
+  const onGone = new Function('embedSlots', 'apply', 'EMBED_IDLE', 'Date', gone[1]) // eslint-disable-line no-new-func
+  onGone(slots, a.apply, live.EMBED_IDLE, { now: () => 0 })
+  t.is(slots.limit(), live.EMBED_LIVE_MAX - 1, 'the cap drops one step')
+  t.is(a.stateRef.current, live.EMBED_IDLE, 'the stored card comes back')
+  t.absent(a.holds())
+})
+
+// What the slot draws, as written.
+function liftSlotParts () {
+  const m = raw.match(/function slotParts \(live, hosted, ready\) \{([\s\S]*?)\n\}/)
+  if (!m) throw new Error('slotParts not found in MusicEmbedCard.js')
+  return new Function('live', 'hosted', 'ready', m[1]) // eslint-disable-line no-new-func
+}
+
+test('the stored card stays drawn until the provider page has loaded', (t) => {
+  const slotParts = liftSlotParts()
+  t.alike(slotParts(false, true, false), { standIn: true, empty: false, frame: false }, 'no frame: the stored card')
+  t.alike(slotParts(true, true, false), { standIn: true, empty: false, frame: false }, 'a hosted frame still loading: the stored card')
+  t.alike(slotParts(true, true, true), { standIn: false, empty: true, frame: false }, 'a hosted frame loaded: the empty slot under it')
+  t.alike(slotParts(true, false, false), { standIn: true, empty: false, frame: true }, 'an inline frame loading under the stored card')
+  t.alike(slotParts(true, false, true), { standIn: false, empty: false, frame: true }, 'an inline frame loaded')
+  t.alike(slotParts(false, false, true), { standIn: true, empty: false, frame: false }, 'a stale ready never hides the stored card')
+  t.ok(src.includes('const frameLook = ready ? styles.frame : [styles.frame, styles.loading]'), 'transparent until loaded')
+  t.ok(src.includes('loading: { opacity: 0 }'))
+  t.ok(src.includes('frame: { ...StyleSheet.absoluteFillObject }'), 'drawn over the stored card, so showing it moves nothing')
+  t.ok(src.includes('useEffect(() => { if (!state.live) setReady(false) }, [state.live])'), 'a frame that unloads must load again before it shows')
+})
+
+// The card's onLayout handler, as written.
+function liftOnLayout () {
+  const start = '  const onLayout = (event) => {\n'
+  const a = raw.indexOf(start)
+  const b = raw.indexOf('\n  }\n', a)
+  if (a === -1 || b === -1) throw new Error('onLayout not found in MusicEmbedCard.js')
+  return new Function('visible', 'held', 'setWidth', 'event', raw.slice(a + start.length, b)) // eslint-disable-line no-new-func
+}
+
+test('a hidden screen reporting width 0 keeps the measured width', (t) => {
+  const onLayout = liftOnLayout()
+  const run = (visible, held, width) => {
+    const set = []
+    onLayout(visible, held, (w) => set.push(w), { nativeEvent: { layout: { width } } })
+    return set
+  }
+  t.alike(run(false, false, 0), [], 'a hidden screen reporting 0 is ignored')
+  t.alike(run(true, true, 0), [], 'so is a held card reporting 0')
+  t.alike(run(true, false, 0), [0], 'a shown card takes a 0 width')
+  t.alike(run(false, false, 320), [320], 'a hidden card takes a real width')
+  t.alike(run(true, false, NaN), [], 'never an unreadable width')
+  t.alike(run(false, false, -1), [], 'nor a negative one while hidden')
+})
+
 test('the dwell counts ticks, not effect runs', (t) => {
   t.ok(/if \(stateRef\.current\.live\) check\(\)\s*const timer = setInterval\(check, EMBED_TICK_MS\)/.test(src), 'only a live frame is checked at once')
   t.absent(/\n\s*check\(\)\n\s*const timer/.test(src), 'no unconditional immediate check')
 })
 
 test('a slot is acquired on going live and released on leave and unmount', (t) => {
-  t.ok(/if \(next\.live && !stateRef\.current\.live\) \{\s*const done = embedSlots\.acquire\(\)\s*if \(done === null\) \{\s*next = EMBED_WAITING\s*\} else \{\s*release\.current = done/.test(src), 'acquire only on going live, a null result keeps the finished wait, the release is kept')
-  t.ok(/const apply = \(next, mayYield = true\) => \{\s*if \(mayYield && next === EMBED_PARKED && release\.current !== null && embedSlots\.yielding\(release\.current\)\) next = EMBED_IDLE\n/.test(src), 'a wanted player yields only on its own parked check, first thing in apply')
+  t.ok(/if \(next\.live && !stateRef\.current\.live\) \{\s*const done = embedSlots\.acquire\(gap, Date\.now\(\), readerTouchNow\(\)\)\s*if \(done === null\) \{\s*next = EMBED_WAITING\s*request\.current = gap > 0 \? 'preload' : 'visible'\s*\} else \{\s*release\.current = done/.test(src), 'acquire only on going live, a null result keeps the finished wait and its kind, the release is kept')
+  t.ok(/const apply = \(next, mayYield = true, gap\) => \{\s*if \(mayYield && next === EMBED_PARKED && release\.current !== null && embedSlots\.yielding\(release\.current, gap, readerTouchNow\(\)\)\) next = EMBED_IDLE\n/.test(src), 'a wanted player yields only on its own parked check, first thing in apply')
   t.is((src.match(/\bapply\([^)]*,\s*false\)/g) || []).length, 0, 'no apply call bars yielding by itself')
-  t.ok(/done\(\)\s*\}\s*if \(next\.live && release\.current !== null\) embedSlots\.park\(release\.current, next === EMBED_PARKED\)\s*const changed/.test(src), 'a live card reports whether it is parked after the release block')
+  t.ok(/done\(\)\s*\}\s*if \(next\.live && release\.current !== null\) embedSlots\.park\(release\.current, next === EMBED_PARKED, gap\)\s*const changed/.test(src), 'a live card reports whether it is parked after the release block')
   t.absent(/onEvict|evicted/i.test(raw), 'no card is evicted by another')
   t.ok(/if \(!next\.live && release\.current !== null\) \{\s*const done = release\.current\s*release\.current = null\s*done\(\)/.test(src), 'apply releases on leaving live')
-  t.ok(/return \(\) => \{\s*alive\.current = false\s*if \(stateRef\.current === EMBED_WAITING\) embedSlots\.withdraw\(\)\s*const kept = stateRef\.current\.live \? hosted\.current : ''\s*hosted\.current = ''\s*stateRef\.current = EMBED_IDLE\s*const done = release\.current\s*release\.current = null\s*if \(kept !== '' && typeof done === 'function'\) \{\s*if \(playbackClaimCount\(\) !== claims\.current\) \{\s*if \(host\.keep\.drop\(kept\)\) return\s*\} else \{\s*embedSlots\.park\(done, true\)\s*if \(host\.keep\.orphan\(kept\)\) return\s*\}\s*\}\s*if \(typeof done === 'function'\) done\(\)/.test(src), 'unmount releases, or leaves a hosted frame parked with the list unless another player started')
+  t.ok(/return \(\) => \{\s*alive\.current = false\s*if \(stateRef\.current === EMBED_WAITING\) embedSlots\.withdraw\(\)\s*const kept = stateRef\.current\.live \? hosted\.current : ''\s*hosted\.current = ''\s*stateRef\.current = EMBED_IDLE\s*const done = release\.current\s*release\.current = null\s*if \(kept !== '' && typeof done === 'function'\) \{\s*if \(playbackClaimCount\(\) !== claims\.current && touchedNow\(done\)\) \{\s*if \(host\.keep\.drop\(kept\)\) return\s*\} else \{\s*embedSlots\.park\(done, true\)\s*if \(host\.keep\.orphan\(kept\)\) return\s*\}\s*\}\s*if \(typeof done === 'function'\) done\(\)/.test(src), 'unmount releases, or leaves a hosted frame parked with the list unless another player started and it was touched')
   t.ok(/if \(!next\.live && hosted\.current !== ''\) \{\s*const kept = hosted\.current\s*hosted\.current = ''\s*if \(host\.keep\.drop\(kept\)\) release\.current = null\s*\}/.test(src), 'leaving live drops a hosted frame, whose drop ran the release')
-  t.ok(src.includes('    if (stateRef.current === EMBED_WAITING && next !== EMBED_WAITING && !next.live) embedSlots.withdraw()\n    if (!next.live && release.current !== null) {'), 'a card that stops waiting without going live withdraws its request, after the acquire block')
+  t.ok(src.includes('    if (stateRef.current === EMBED_WAITING && next !== EMBED_WAITING && !next.live) embedSlots.withdraw()\n    if (next !== EMBED_WAITING) request.current = \'\'\n    if (!next.live && release.current !== null) {'), 'a card that stops waiting without going live withdraws its request and forgets its kind, after the acquire block')
   t.ok(/alive\.current = false\s*if \(stateRef\.current === EMBED_WAITING\) embedSlots\.withdraw\(\)\s*const kept[^\n]*\s*hosted\.current = ''\s*stateRef\.current = EMBED_IDLE/.test(src), 'a waiting card withdraws on unmount, before its state is reset')
 })
 
 test('a turned window keeps a live frame', (t) => {
   t.ok(src.includes('const turned = (win.width > win.height) !== base.current'), 'turned is compared with base.current')
-  t.ok(src.includes('if (embedSlots.count() === 0 || !stateRef.current.live) base.current = win.width > win.height'), 'the base follows the window while this card is not live')
+  t.ok(src.includes('if (embedSlots.count() === 0 || !stateRef.current.live || !touchedNow(release.current)) base.current = win.width > win.height'), 'the base follows the window while this card is not live or its frame is untouched')
   const at = src.indexOf('return () => { cancelled = true; clearInterval(timer) }')
   t.ok(at !== -1, 'the cleanup cancels and clears the interval')
   t.absent(src.slice(at, src.indexOf('\n', at)).includes('apply('), 'the cleanup does not reset the state')
@@ -520,7 +1029,8 @@ test('the visible-screen signal is provided by the App and the stack', (t) => {
 test('the card follows its sheet depth', (t) => {
   t.ok(src.includes('const depth = useContext(SheetDepth)'))
   t.ok(src.includes('const [held, setHeld] = useState(() => embedsHeld(depth))'))
-  t.ok(/const sync = \(\) => setHeld\(embedsHeld\(depth\)\)\s*sync\(\)\s*return onEmbedHold\(sync\)\s*\}, \[depth\]\)/.test(src), 'the sync effect is keyed on depth')
+  t.ok(/const sync = \(\) => \{\s*setHeld\(embedsHeld\(depth\)\)\s*setLocked\(embedsHeldAll\(\)\)\s*\}\s*sync\(\)\s*return onEmbedHold\(sync\)\s*\}, \[depth\]\)/.test(src), 'the sync effect is keyed on depth and tracks a lock too')
+  t.ok(src.includes('const [locked, setLocked] = useState(() => embedsHeldAll())'))
 })
 
 test('a list may lower the band', (t) => {
@@ -529,7 +1039,7 @@ test('a list may lower the band', (t) => {
   const call = src.indexOf('band.measure(')
   t.ok(measure !== -1 && call > measure, 'band.measure is called inside the measureInWindow callback')
   t.ok(/if \(!\(typeof limit === 'number' && Number\.isFinite\(limit\) && limit > 0\)\) \{\s*settle\(true\)\s*return\s*\}/.test(src), 'a band with no usable answer counts as hidden')
-  t.ok(/const lower = Math\.min\(bottom, limit\)\s*settle\(mostlyHidden\(x, y, w, h, top, lower, win\.width\)\)/.test(src), 'a usable answer lowers the band')
+  t.ok(/answer\(x, y, w, h, Math\.min\(bottom, limit\)\)/.test(src), 'a usable answer lowers the band')
   t.ok(/const withLimit = \(limit\) => \{[^}]*?if \(cancelled \|\| !alive\.current \|\| id !== round\) return\n/.test(src), 'cancelled is tested again in the band callback')
   t.ok(/try \{\s*band\.measure\(withLimit\)\s*\} catch \{\s*withLimit\(null\)\s*\}/.test(src), 'a throw counts as no answer, so hidden')
   t.absent(/:\s*bottom\b/.test(src.slice(src.indexOf('const withLimit'), src.indexOf('band.measure(withLimit)'))), 'the band callback never falls back to the window band')
@@ -542,7 +1052,7 @@ test('the stand-in is the stored LinkCard', (t) => {
   t.absent(/\bstill\b/.test(src), 'no still anywhere in the card')
   t.absent(cards[0].includes('onDismiss'), 'no onDismiss passed to it')
   t.ok(src.includes('const plain = <LinkCard '), 'the card is named plain')
-  t.ok(src.includes('<View style={styles.standIn} onStartShouldSetResponder={() => true}>{plain}</View>'), 'the slot draws it')
+  t.ok(src.includes("<View key='standIn' style={styles.standIn} onStartShouldSetResponder={() => true}>{plain}</View>"), 'the slot draws it')
   t.absent(src.includes('MediaView'), 'no MediaView in the card')
 })
 
@@ -560,7 +1070,7 @@ test('taps inside the slot stay in the slot', (t) => {
   t.absent(slot.includes('onStartShouldSetResponder'), 'the slot claims no touch, so Android never intercepts a drag in the player')
   t.ok(slot.includes('onClick={stopClick}'))
   t.ok(slot.includes('onKeyDown={stopPressKeys}'))
-  t.ok(/<View style=\{styles\.standIn\} onStartShouldSetResponder=\{\(\) => true\}>/.test(src), 'the stand-in claims the touch')
+  t.ok(/<View key='standIn' style=\{styles\.standIn\} onStartShouldSetResponder=\{\(\) => true\}>/.test(src), 'the stand-in claims the touch')
   t.absent(/onResponderGrant/.test(src), 'no responder grant')
   t.ok(/<\/View>\s*\{actions\}\s*<\/View>\s*\)\s*\}\s*const makeStyles/.test(src), 'the slot is followed by the actions row')
 })
@@ -688,7 +1198,7 @@ test('embedLive: a card goes live after two visible checks', async (t) => {
 
 test('embedLive: a parked holder is asked to yield, never removed', async (t) => {
   const { createEmbedSlots, embedSlots, EMBED_LIVE_MAX } = await import('../src/embedLive.js')
-  t.is(EMBED_LIVE_MAX, 2)
+  t.is(EMBED_LIVE_MAX, 4)
   t.is(embedSlots.count(), 0, 'the shared slots start empty')
   const slots = createEmbedSlots(2)
   t.is(slots.count(), 0)
@@ -782,6 +1292,356 @@ test('embedLive: a parked holder is asked to yield, never removed', async (t) =>
   t.is(single.acquire(), null, 'the supplied maximum is honored')
   release()
   t.is(embedSlots.count(), 0, 'the shared slots stay empty')
+})
+
+test('embedLive: bandGap measures the distance to the band', async (t) => {
+  const { bandGap, EMBED_LIVE_MIN, EMBED_AHEAD_BANDS, EMBED_YIELD_GAP, EMBED_SHRINK_MS } = await import('../src/embedLive.js')
+  t.is(EMBED_LIVE_MIN, 2)
+  t.is(EMBED_AHEAD_BANDS, 2)
+  t.is(EMBED_YIELD_GAP, 400)
+  t.is(EMBED_SHRINK_MS, 5000)
+  t.is(bandGap(0, 200, 300, 200, 100, 800, 400), 0, 'inside the band')
+  t.is(bandGap(0, 0, 300, 200, 100, 800, 400), 0, 'overlapping the top')
+  t.is(bandGap(0, -100, 300, 200, 100, 800, 400), 0, 'touching the top')
+  t.is(bandGap(0, 800, 300, 200, 100, 800, 400), 0, 'touching the bottom')
+  t.is(bandGap(0, -300, 300, 200, 100, 800, 400), 200, 'above the band')
+  t.is(bandGap(0, 1000, 300, 200, 100, 800, 400), 200, 'below the band')
+  t.is(bandGap(-150, 1000, 300, 200, 100, 800, 400), 200, 'exactly half the width in')
+  t.is(bandGap(-151, 1000, 300, 200, 100, 800, 400), Infinity, 'under half the width in')
+  t.is(bandGap(251, 300, 300, 200, 100, 800, 400), Infinity, 'under half the width in, on the right')
+  for (const args of [
+    [NaN, 0, 300, 200, 100, 800, 400],
+    [0, undefined, 300, 200, 100, 800, 400],
+    [0, 0, 0, 200, 100, 800, 400],
+    [0, 0, 300, 0, 100, 800, 400],
+    [0, 0, -300, 200, 100, 800, 400],
+    [0, 0, 300, 200, 100, Infinity, 400],
+    [0, 0, 300, 200, 100, 800, '400']
+  ]) t.is(bandGap(...args), Infinity, 'bad input is never near')
+})
+
+test('embedLive: embedNear allows two band heights', async (t) => {
+  const { embedNear } = await import('../src/embedLive.js')
+  t.is(embedNear(0, 100, 500), true, 'in the band')
+  t.is(embedNear(800, 100, 500), true, 'exactly two band heights away')
+  t.is(embedNear(801, 100, 500), false, 'farther than two band heights')
+  t.is(embedNear(Infinity, 100, 500), false, 'not measured')
+  t.is(embedNear(NaN, 100, 500), false)
+  t.is(embedNear(undefined, 100, 500), false)
+  t.is(embedNear(10, 100, NaN), false, 'a bad band is never near')
+  t.is(embedNear(Infinity, 0, Infinity), false, 'an unmeasured slot is never near')
+})
+
+test('embedLive: a near card dwells like a visible one', async (t) => {
+  const { embedStep, EMBED_IDLE, EMBED_LIVE, EMBED_AWAY, EMBED_PARKED, EMBED_WAITING } = await import('../src/embedLive.js')
+  const near = { hidden: true, near: true, allowed: true, turned: false, free: true }
+  const first = embedStep(EMBED_IDLE, near)
+  t.alike(first, { live: false, seen: 1 }, 'one near check mounts no frame')
+  t.is(embedStep(first, near), EMBED_LIVE, 'the second near check loads the frame')
+  t.is(embedStep(first, { ...near, free: false }), EMBED_WAITING, 'a near card with no free slot waits')
+  t.is(embedStep(EMBED_IDLE, { ...near, near: false }), EMBED_IDLE, 'hidden and not near stays idle')
+  t.is(embedStep(first, { ...near, near: false }), EMBED_IDLE, 'and resets the dwell')
+  t.is(embedStep(EMBED_IDLE, { ...near, near: 1 }), EMBED_IDLE, 'only near === true counts')
+  t.is(embedStep(EMBED_LIVE, near), EMBED_AWAY, 'a live frame out of the band still goes away')
+  t.is(embedStep(EMBED_AWAY, near), EMBED_PARKED, 'and then parks')
+  t.is(embedStep(first, { ...near, allowed: false }), EMBED_IDLE, 'near never overrides a disallowed sample')
+})
+
+test('embedLive: the farthest untouched holder is asked first', async (t) => {
+  const { createEmbedSlots } = await import('../src/embedLive.js')
+  const slots = createEmbedSlots(3)
+  const a = slots.acquire()
+  const b = slots.acquire()
+  const c = slots.acquire()
+  slots.park(a, true, 500)
+  slots.park(b, true, 2000)
+  slots.park(c, true, 1000)
+  t.is(slots.acquire(), null)
+  t.is(slots.yielding(b), true, 'the farthest holder is asked')
+  t.is(slots.yielding(a), false)
+  t.is(slots.yielding(c), false)
+  b()
+  const d = slots.acquire()
+  t.is(typeof d, 'function')
+  slots.park(d, true)
+  t.is(slots.acquire(), null)
+  t.is(slots.yielding(d), true, 'an unknown gap counts as farthest')
+  slots.park(d, false)
+  slots.park(a, true, 1000)
+  t.is(slots.acquire(), null)
+  t.is(slots.yielding(a), true, 'equal gaps go to the holder parked first')
+  t.is(slots.yielding(c), false)
+  a()
+  c()
+  d()
+})
+
+test('embedLive: a preload asks only a holder 400 pt farther away', async (t) => {
+  const { createEmbedSlots } = await import('../src/embedLive.js')
+  const slots = createEmbedSlots(1)
+  const a = slots.acquire()
+  slots.park(a, true, 1000)
+  t.is(slots.free(600), false, 'no holder far enough for this preload')
+  t.is(slots.acquire(600, 0), null)
+  t.is(slots.yielding(a), false, 'exactly 400 pt farther is not enough')
+  t.is(slots.free(599), true)
+  t.is(slots.acquire(599, 0), null)
+  t.is(slots.yielding(a), true, 'more than 400 pt farther is asked')
+  a()
+})
+
+test('embedLive: a preload never marks an engaged holder', async (t) => {
+  const { createEmbedSlots } = await import('../src/embedLive.js')
+  const slots = createEmbedSlots(1)
+  const a = slots.acquire()
+  slots.park(a, true, 5000)
+  slots.engage(a)
+  t.is(slots.free(100), false, 'an engaged holder makes no room for a preload')
+  t.is(slots.acquire(100, 0), null)
+  slots.engage(a, false)
+  t.is(slots.yielding(a), false, 'the preload marked nobody')
+  a()
+})
+
+test('embedLive: a visible card asks an engaged holder only when no untouched one is parked', async (t) => {
+  const { createEmbedSlots } = await import('../src/embedLive.js')
+  const slots = createEmbedSlots(2)
+  const a = slots.acquire()
+  const b = slots.acquire()
+  slots.park(a, true, 3000)
+  slots.park(b, true, 100)
+  slots.engage(a)
+  t.is(slots.free(), true)
+  t.is(slots.acquire(), null)
+  t.is(slots.yielding(b), true, 'the untouched holder is asked, though nearer')
+  slots.park(b, false)
+  t.is(slots.yielding(a), false, 'the engaged holder was not marked')
+  t.is(slots.acquire(), null)
+  t.is(slots.yielding(a), true, 'with no untouched holder parked, the engaged one is asked')
+  a()
+  b()
+})
+
+test('embedLive: one preload per tick, a visible card is never held back', async (t) => {
+  const { createEmbedSlots, EMBED_TICK_MS } = await import('../src/embedLive.js')
+  const slots = createEmbedSlots(4)
+  const first = slots.acquire(100, 1000)
+  t.is(typeof first, 'function')
+  t.is(slots.acquire(100, 1000 + EMBED_TICK_MS - 1), null, 'a second preload in the same tick waits')
+  t.is(slots.count(), 1)
+  const seen = slots.acquire(0, 1000 + EMBED_TICK_MS - 1)
+  t.is(typeof seen, 'function', 'a visible card is not throttled')
+  const again = slots.acquire(100, 1000 + EMBED_TICK_MS - 1)
+  t.is(again, null, 'a visible grant does not reset the preload clock')
+  const next = slots.acquire(100, 1000 + EMBED_TICK_MS)
+  t.is(typeof next, 'function', 'the next tick may preload')
+  const noClock = slots.acquire(100)
+  t.is(typeof noClock, 'function', 'a call with no time is not throttled')
+  t.is(slots.count(), 4)
+  slots.park(first, true, 5000)
+  t.is(slots.acquire(100, 1000 + EMBED_TICK_MS + 1), null)
+  t.is(slots.yielding(first), false, 'a throttled preload marks nobody')
+  t.is(slots.acquire(100, 1000 + 2 * EMBED_TICK_MS), null)
+  t.is(slots.yielding(first), true, 'a later preload marks the far holder')
+  for (const release of [first, seen, next, noClock]) if (typeof release === 'function') release()
+})
+
+test('embedLive: two near cards never take turns', async (t) => {
+  const { createEmbedSlots } = await import('../src/embedLive.js')
+  const slots = createEmbedSlots(2)
+  const a = slots.acquire()
+  const b = slots.acquire()
+  slots.park(a, true, 100)
+  slots.park(b, true, 300)
+  t.is(slots.acquire(300, 0), null)
+  t.is(slots.yielding(a), false, 'a near caller does not mark a nearer holder')
+  t.is(slots.acquire(100, 1000), null)
+  t.is(slots.yielding(b), false, 'nor a holder under 400 pt farther')
+  t.is(slots.acquire(400, 2000), null)
+  t.is(slots.yielding(a), false)
+  t.is(slots.yielding(b), false)
+  a()
+  b()
+})
+
+test('embedLive: a mark is re-checked when the holder decides', async (t) => {
+  const { createEmbedSlots } = await import('../src/embedLive.js')
+  const engaged = createEmbedSlots(1)
+  const a = engaged.acquire()
+  engaged.park(a, true, 2000)
+  t.is(engaged.acquire(100, 0), null)
+  engaged.engage(a)
+  t.is(engaged.yielding(a), false, 'a holder engaged after a preload marked it does not yield')
+  engaged.engage(a, false)
+  t.is(engaged.yielding(a), true, 'the mark stands while the request is still met')
+  a()
+
+  const closer = createEmbedSlots(1)
+  const b = closer.acquire()
+  closer.park(b, true, 2000)
+  t.is(closer.acquire(100, 0), null)
+  closer.park(b, true, 500)
+  t.is(closer.yielding(b), false, 'a holder whose gap shrank inside the margin does not yield')
+  b()
+
+  const visible = createEmbedSlots(1)
+  const c = visible.acquire()
+  visible.park(c, true, 100)
+  t.is(visible.acquire(), null)
+  t.is(visible.yielding(c), true, 'a holder marked by a visible card yields')
+  visible.park(c, true, 50)
+  t.is(visible.yielding(c), true, 'at any distance')
+  visible.engage(c)
+  t.is(visible.yielding(c), true, 'and engaged, with no untouched holder parked')
+  c()
+
+  const both = createEmbedSlots(1)
+  const d = both.acquire()
+  both.park(d, true, 2000)
+  t.is(both.acquire(), null)
+  t.is(both.acquire(100, 0), null)
+  both.engage(d)
+  t.is(both.yielding(d), true, 'a later preload does not narrow a visible mark')
+  d()
+
+  const untouched = createEmbedSlots(2)
+  const e = untouched.acquire()
+  const f = untouched.acquire()
+  untouched.park(e, true, 100)
+  untouched.engage(e)
+  t.is(untouched.acquire(), null)
+  t.is(untouched.yielding(e), true, 'an engaged holder is asked while it is the only one parked')
+  untouched.park(f, true, 100)
+  t.is(untouched.yielding(e), false, 'but not once an untouched holder parks')
+  e()
+  f()
+})
+
+test('embedLive: yielding re-checks with the fresh gap it is given', async (t) => {
+  const { createEmbedSlots } = await import('../src/embedLive.js')
+  const slots = createEmbedSlots(1)
+  const a = slots.acquire()
+  slots.park(a, true, 2000)
+  t.is(slots.acquire(100, 0), null)
+  t.is(slots.yielding(a), true, 'with no fresh gap, the parked one stands')
+  t.is(slots.yielding(a, 300), false, 'a fresh gap inside the margin keeps the slot')
+  t.is(slots.yielding(a), false, 'and is stored')
+  t.is(slots.yielding(a, 3000), true, 'a fresh gap beyond the margin yields')
+  t.is(slots.yielding(a, 300), false)
+  t.is(slots.yielding(a, NaN), true, 'a non-finite gap counts as farthest')
+  t.is(slots.yielding(a, 300), false)
+  t.is(slots.yielding(a, Infinity), true)
+  a()
+})
+
+test('embedLive: a screen reader counts every holder as touched', async (t) => {
+  const { createEmbedSlots } = await import('../src/embedLive.js')
+  const slots = createEmbedSlots(2)
+  const a = slots.acquire()
+  const b = slots.acquire()
+  slots.park(a, true, 3000)
+  slots.park(b, true, 5000)
+  t.is(slots.free(100, true), false, 'a full pool has nothing for a preload while a reader runs')
+  t.is(slots.free(100), true, 'without it, the far untouched holder would be asked')
+  t.is(slots.acquire(100, 0, true), null)
+  t.is(slots.yielding(a), false, 'the preload marked nobody')
+  t.is(slots.yielding(b), false)
+  t.is(slots.acquire(100, 0), null)
+  t.is(slots.yielding(b), true, 'a preload with the reader off marks the far holder')
+  t.is(slots.yielding(b, undefined, true), false, 'the re-check with the reader on refuses it')
+  t.is(slots.yielding(b, 5000, true), false)
+  slots.withdraw()
+  t.is(slots.free(0, true), true, 'a visible card still finds a slot')
+  t.is(slots.acquire(0, 0, true), null)
+  t.is(slots.yielding(a, undefined, true), true, 'and asks the holder parked first, though nearer')
+  t.is(slots.yielding(b, undefined, true), false)
+  a()
+  b()
+})
+
+test('embedLive: engage marks a holder as touched', async (t) => {
+  const { createEmbedSlots } = await import('../src/embedLive.js')
+  const slots = createEmbedSlots(2)
+  const a = slots.acquire()
+  const b = slots.acquire()
+  t.is(slots.engagedCount(), 0)
+  t.is(slots.engaged(a), false)
+  slots.engage(a)
+  t.is(slots.engaged(a), true)
+  t.is(slots.engaged(b), false)
+  t.is(slots.engagedCount(), 1)
+  slots.engage(b, true)
+  t.is(slots.engagedCount(), 2)
+  slots.engage(b, false)
+  t.is(slots.engaged(b), false)
+  t.is(slots.engagedCount(), 1)
+  t.is(slots.engagedAt(a), null, 'a touch with no claim count carries no mark')
+  slots.engage(b, true, 3)
+  t.is(slots.engagedAt(b), 3, 'the claim count at the touch')
+  slots.engage(b, false, 4)
+  t.is(slots.engagedAt(b), null, 'no mark once not engaged')
+  t.is(slots.engagedAt(() => {}), null)
+  t.is(slots.engaged(() => {}), false, 'an unknown release is not engaged')
+  slots.engage(() => {})
+  t.is(slots.engagedCount(), 1, 'engaging an unknown release changes nothing')
+  a()
+  t.is(slots.engagedCount(), 0, 'a release forgets the holder')
+  t.is(slots.engaged(a), false)
+  b()
+})
+
+test('embedLive: shrink lowers the cap without closing anything', async (t) => {
+  const { createEmbedSlots, EMBED_LIVE_MAX, EMBED_LIVE_MIN, EMBED_SHRINK_MS } = await import('../src/embedLive.js')
+  const slots = createEmbedSlots()
+  t.is(slots.limit(), EMBED_LIVE_MAX)
+  const held = [slots.acquire(), slots.acquire(), slots.acquire(), slots.acquire()]
+  t.ok(held.every((release) => typeof release === 'function'))
+  t.is(slots.shrink(1000), EMBED_LIVE_MAX - 1)
+  t.is(slots.shrink(1000 + EMBED_SHRINK_MS - 1), EMBED_LIVE_MAX - 1, 'one step per window')
+  t.is(slots.limit(), EMBED_LIVE_MAX - 1)
+  t.is(slots.shrink(1000 + EMBED_SHRINK_MS), EMBED_LIVE_MAX - 2)
+  t.is(slots.shrink(1000 + 10 * EMBED_SHRINK_MS), EMBED_LIVE_MIN, 'never under the floor')
+  t.is(slots.shrink(1000 + 20 * EMBED_SHRINK_MS), EMBED_LIVE_MIN)
+  t.is(slots.count(), 4, 'nobody is evicted')
+  t.is(slots.free(), false)
+  t.is(slots.acquire(), null)
+  held[0]()
+  held[1]()
+  t.is(slots.acquire(), null, 'the pool drains to the lower cap')
+  held[2]()
+  const next = slots.acquire()
+  t.is(typeof next, 'function')
+  if (typeof next === 'function') next()
+  held[3]()
+  const small = createEmbedSlots(1)
+  t.is(small.shrink(0), 1, 'a cap already under the floor stays')
+})
+
+test('embedLive: embedsHeldAll sees only an all-card hold', async (t) => {
+  const { holdEmbeds, holdAllEmbeds, embedsHeldAll } = await import('../src/embedLive.js')
+  t.is(embedsHeldAll(), false)
+  const layer = holdEmbeds()
+  t.is(embedsHeldAll(), false, 'a layer is not an all-card hold')
+  const all = holdAllEmbeds()
+  t.is(embedsHeldAll(), true)
+  all()
+  t.is(embedsHeldAll(), false)
+  layer()
+})
+
+test('embedLive: embedStays and embedTouched', async (t) => {
+  const { embedStays, embedTouched } = await import('../src/embedLive.js')
+  t.is(embedStays(false, false), true, 'an untouched frame on an unlocked device stays')
+  t.is(embedStays(true, false), false, 'a touched frame goes')
+  t.is(embedStays(false, true), false, 'a lock closes it')
+  t.is(embedStays(undefined, false), false, 'an unknown touch state goes')
+  t.is(embedStays(false, undefined), false, 'an unknown lock state goes')
+  t.is(embedTouched(false, false, true), false, 'untouched with the reader known off')
+  t.is(embedTouched(true, false, true), true, 'engaged')
+  t.is(embedTouched(false, true, true), true, 'a running screen reader counts as a touch')
+  t.is(embedTouched(false, false, false), true, 'an unknown reader state counts as a touch')
+  t.is(embedTouched(false, false, undefined), true)
+  t.is(embedTouched(1, 1, true), false, 'only true counts')
 })
 
 test('embedLive: holds are layered', async (t) => {

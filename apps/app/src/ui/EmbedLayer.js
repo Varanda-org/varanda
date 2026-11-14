@@ -8,36 +8,81 @@
 // stays loaded, hidden and out of the screen reader, until the row comes back
 // and its card takes the same frame again.
 //
-// A kept frame closes when the list's screen stops being the one looked at or
-// a sheet, a menu or a lock holds the players, when another player starts in
-// the app, when a newly visible card needs its slot (two at most app-wide,
-// ../embedLive), when its row leaves the list's data or its message is hidden
-// or deleted, and when its content process dies.
+// A kept frame stays transparent, out of touches and out of the screen reader
+// until the provider page has loaded (../embedKeep ready), so the card under
+// it shows, and takes the tap and the screen reader, meanwhile.
+//
+// When the list's screen stops being the one looked at, or a sheet or a menu
+// holds the players, a frame the person touched closes, since it may be
+// playing, and an untouched one stays loaded (../embedLive embedStays); a
+// running or unknown screen reader counts as a touch. A lock or the
+// background closes every kept frame. An orphan the person touched also
+// closes when another player starts in the app. A kept frame closes when a
+// newly visible card needs its slot (../embedLive), when its row leaves the
+// list's data (an untouched one cut off past the end waits EMBED_CUT_MS for
+// it to come back) or its message is hidden or deleted, and when its content
+// process dies, which also lowers the app-wide cap (../embedLive shrink).
 
 import { forwardRef, memo, useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { Animated, ScrollView, StyleSheet, View } from 'react-native'
 import { createEmbedKeep } from '../embedKeep'
-import { EMBED_TICK_MS, embedSlots, embedsHeld, onEmbedHold } from '../embedLive'
+import { EMBED_TICK_MS, embedSlots, embedStays, embedTouched, embedsHeld, embedsHeldAll, onEmbedHold } from '../embedLive'
 import { playbackClaimCount } from '../media/chatMedia'
 import { EmbedFrame } from './EmbedFrame'
+import { screenReaderKnown, screenReaderOn } from './screenReader'
 import { EmbedHost, EmbedRowKey, ScreenVisible, SheetDepth } from './screenVisible'
 
 const ORIGIN = Object.freeze({ x: 0, y: 0 })
 
 // The keys of the frames one tick of the host closes. A card whose row is gone
-// has no check of its own, so the host yields for it: every orphan goes when
-// another player started since the last tick, and an orphan asked to give its
-// slot to a newly visible card goes at once, since nobody can see it.
-export function orphanTick (entries, claimsChanged, yielding) {
+// has no check of its own, so the host yields for it: an orphan the person
+// touched goes when another player started since the last tick, since it may
+// be playing, and an orphan asked to give its slot to a newly visible card
+// goes at once, since nobody can see it. engaged(release) tells a touched
+// frame; a missing or throwing one counts as touched.
+export function orphanTick (entries, claimsChanged, yielding, engaged) {
   const keys = []
   if (!Array.isArray(entries)) return keys
   for (const entry of entries) {
     if (!entry || entry.orphan !== true) continue
-    let drop = claimsChanged === true
+    let drop = false
+    if (claimsChanged === true) {
+      drop = true
+      try { drop = typeof engaged !== 'function' || engaged(entry.release) !== false } catch {}
+    }
     if (!drop) {
       try { drop = typeof yielding === 'function' && yielding(entry.release) === true } catch {}
     }
     if (drop) keys.push(entry.key)
+  }
+  return keys
+}
+
+// Read at the moment of each decision: the reader can be turned on, and the
+// frame touched, at any time after it loaded.
+export function touchedNow (release) {
+  return embedTouched(embedSlots.engaged(release), screenReaderOn(), screenReaderKnown())
+}
+
+// What the slot pool is told when an orphan is asked to yield: while a screen
+// reader runs, or has not answered yet, every frame counts as touched.
+function readerTouchNow () {
+  return embedTouched(false, screenReaderOn(), screenReaderKnown())
+}
+
+// The keys of the kept frames to close while the screen is not shown (another
+// screen, a sheet, a menu or a lock holds the players). A touched frame may be
+// playing with nobody looking; an untouched one stays loaded, unless the
+// device is locked or in the background. A missing or throwing touched counts
+// as touched.
+export function heldDrops (entries, shown, locked, touched) {
+  const keys = []
+  if (!Array.isArray(entries) || (shown === true && locked === false)) return keys
+  for (const entry of entries) {
+    if (!entry) continue
+    let on = true
+    try { on = typeof touched !== 'function' || touched(entry.release) !== false } catch {}
+    if (!embedStays(on, locked)) keys.push(entry.key)
   }
   return keys
 }
@@ -93,6 +138,71 @@ export function keptRowKeys (data, keyExtractor) {
   return rows
 }
 
+// How long an untouched orphan whose row was cut off past the end of the
+// data waits for the row to come back: a list that reads its first page
+// again (a tab coming back, a refresh) drops the older rows for a moment.
+export const EMBED_CUT_MS = 5000
+
+// The rows of data, the last row, and the row each one came after (null for
+// the first). A row that left the data keeps the one it last came after, so
+// a later change can still tell where it was.
+export function rowOrder (data, keyExtractor, order) {
+  const before = order && order.before instanceof Map ? new Map(order.before) : new Map()
+  const rows = Array.isArray(data) ? data.map((item, index) => rowKeyOf(keyExtractor, item, index)) : []
+  rows.forEach((row, i) => before.set(row, i > 0 ? rows[i - 1] : null))
+  return { before, present: new Set(rows), last: rows.length > 0 ? rows[rows.length - 1] : null }
+}
+
+// Whether a row missing from the data was only cut off past its end: the
+// data is empty, or the nearest row still present before it is the last
+// one. Otherwise the list goes on past where it was, or was replaced, so the
+// row was taken out for good.
+export function cutOff (row, order) {
+  if (!order || !(order.present instanceof Set) || !(order.before instanceof Map)) return false
+  if (order.present.size === 0) return true
+  const seen = new Set()
+  let at = row
+  while (!seen.has(at)) {
+    seen.add(at)
+    const prev = order.before.get(at)
+    if (typeof prev !== 'string') return false
+    if (order.present.has(prev)) return prev === order.last
+    at = prev
+  }
+  return false
+}
+
+// The orphans to drop at now, the deadline of each row cut off past the end
+// (kept from the change that first found it missing), and the wait until the
+// earliest one, or null. A tombstone, a touched orphan (it may be playing; a
+// missing or throwing touched counts as touched) and a row taken out drop
+// now; a row back in the data loses its deadline.
+export function orphanCuts (entries, kept, order, deadlines, now, touched) {
+  const drop = []
+  const next = new Map()
+  let wait = null
+  if (!Array.isArray(entries)) return { drop, deadlines: next, wait }
+  for (const entry of entries) {
+    if (!entry || entry.orphan !== true) continue
+    const row = entry.row
+    if (kept instanceof Set && kept.has(row)) continue
+    let gone = !!order && order.present instanceof Set && order.present.has(row)
+    if (!gone) {
+      let on = true
+      try { on = typeof touched !== 'function' || touched(entry.release) !== false } catch {}
+      gone = on || !cutOff(row, order)
+    }
+    const at = deadlines instanceof Map && Number.isFinite(deadlines.get(row)) ? deadlines.get(row) : now + EMBED_CUT_MS
+    if (gone || !(now < at)) {
+      drop.push(entry.key)
+      continue
+    }
+    next.set(row, at)
+    if (wait === null || at - now < wait) wait = at - now
+  }
+  return { drop, deadlines: next, wait }
+}
+
 function createEmbedHost () {
   const keep = createEmbedKeep()
   const listeners = new Set()
@@ -116,7 +226,9 @@ function createEmbedHost () {
     const count = playbackClaimCount()
     const changed = count !== seen
     seen = count
-    for (const key of orphanTick(keep.list(), changed, embedSlots.yielding)) keep.drop(key)
+    // An orphan has no check of its own, so its last parked distance stands.
+    const yielding = (release) => embedSlots.yielding(release, undefined, readerTouchNow())
+    for (const key of orphanTick(keep.list(), changed, yielding, touchedNow)) keep.drop(key)
     const next = orphanRowTick(keep.list(), (row) => rows.has(row), grace)
     grace = next.counts
     for (const key of next.drop) keep.drop(key)
@@ -201,8 +313,23 @@ export function EmbedRow ({ row, children }) {
   return <EmbedRowKey.Provider value={row}>{children}</EmbedRowKey.Provider>
 }
 
-const KeptFrame = memo(function KeptFrame ({ spec, parked, keep, id }) {
-  const onGone = useCallback(() => keep.drop(id), [keep, id])
+// Whether a kept frame may hand a link to the system browser: only one on the
+// screen, loaded, with the screen shown and no sheet, menu or lock holding
+// the players. An open asked for by a frame nobody can see is not the
+// person's.
+export function frameOpens (parked, shown, held) {
+  return parked === false && shown === true && held === false
+}
+
+const KeptFrame = memo(function KeptFrame ({ spec, parked, opens, keep, id, release }) {
+  // The system reclaimed a content process: fewer frames load from then on.
+  // shrink steps once per window, however many frames go at once.
+  const onGone = useCallback(() => {
+    embedSlots.shrink(Date.now())
+    keep.drop(id)
+  }, [keep, id])
+  const onReady = useCallback(() => keep.ready(id), [keep, id])
+  const onEngage = useCallback((on) => embedSlots.engage(release, on, playbackClaimCount()), [release])
   return (
     <EmbedFrame
       embedUrl={spec.embedUrl}
@@ -211,18 +338,19 @@ const KeptFrame = memo(function KeptFrame ({ spec, parked, keep, id }) {
       allowTop={spec.allowTop}
       height={spec.height}
       title={spec.title}
-      // A parked frame has no card on the screen: an open it asks for is
-      // not the person's.
-      onOpen={parked ? undefined : spec.onOpen}
+      onOpen={opens ? spec.onOpen : undefined}
       parked={parked}
       onGone={onGone}
+      onReady={onReady}
+      onEngage={onEngage}
     />
   )
 })
 
 // A frame is never unmounted, re-keyed, sized to 0 or taken out of the layout
 // while its entry is kept: any of those would reload the provider page. One
-// whose card is not placed just turns transparent and stops taking touches.
+// whose card is not placed, or whose provider page has not loaded yet, just
+// turns transparent and stops taking touches.
 export function EmbedLayer () {
   const host = useContext(EmbedHost)
   if (!host) return null
@@ -231,11 +359,14 @@ export function EmbedLayer () {
 
 // Where a kept frame is drawn. A placed frame follows its row's shift (a
 // swipe to reply), which its card's slot does not report: layout measures
-// ignore transforms. A parked frame is out of sight and stays put.
+// ignore transforms. A parked frame is out of sight and stays put. A placed
+// frame whose provider page has not loaded yet already sits on its slot, so
+// showing it later moves nothing, but is transparent over the card.
 export function framePlace (entry) {
   const { rect, spec } = entry
   if (rect === null) return { position: 'absolute', left: 0, top: 0, width: spec.width, height: spec.height, opacity: 0 }
   const place = { position: 'absolute', left: rect.x, top: rect.y, width: rect.w, height: rect.h }
+  if (entry.ready !== true) place.opacity = 0
   if (spec.shift !== null && typeof spec.shift === 'object') place.transform = [{ translateX: spec.shift }]
   return place
 }
@@ -248,20 +379,22 @@ function Layer ({ host }) {
   const depth = useContext(SheetDepth)
   useEffect(() => {
     const sync = () => {
-      if (!visible || embedsHeld(depth)) host.keep.dropAll()
+      const locked = embedsHeldAll()
+      for (const key of heldDrops(host.keep.list(), visible && !embedsHeld(depth), locked, touchedNow)) host.keep.drop(key)
     }
     sync()
     return onEmbedHold(sync)
   }, [host, visible, depth])
+  const held = useSyncExternalStore(onEmbedHold, () => embedsHeld(depth), () => embedsHeld(depth))
   const entries = useSyncExternalStore(keep.subscribe, keep.list, keep.list)
   return (
     <View collapsable={false} pointerEvents='box-none' onLayout={onLayerLayout} style={[StyleSheet.absoluteFill, styles.layer]}>
       {entries.map((entry) => {
         const { rect, spec } = entry
-        const parked = rect === null
+        const parked = rect === null || entry.ready !== true
         return (
           <Animated.View key={entry.key} collapsable={false} pointerEvents={parked ? 'none' : 'auto'} style={framePlace(entry)}>
-            <KeptFrame spec={spec} parked={parked} keep={keep} id={entry.key} />
+            <KeptFrame spec={spec} parked={parked} opens={frameOpens(parked, visible, held)} keep={keep} id={entry.key} release={entry.release} />
           </Animated.View>
         )
       })}
