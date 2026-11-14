@@ -232,3 +232,39 @@ test('MediaCarousel keeps the photo overlay colors', (t) => {
   t.absent(src.includes('colors.dim'), 'the overlay is not the theme dim')
   t.absent(src.includes('stripes'), 'the overlay is not a stripe ink')
 })
+
+test('MediaCarousel zooms only when zoomable and stops paging while zoomed', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/ui/MediaCarousel.js'), 'utf8')
+  t.ok(src.includes("import { ZoomView } from './ZoomView'"), 'the carousel uses the shared zoom view')
+  t.ok(/\n {2}zoomable = false,\n {2}onDismiss,\n/.test(src), 'zoomable defaults to off and onDismiss is optional')
+  t.ok(src.includes('const [zoomed, setZoomed] = useState(false)'), 'the carousel tracks a zoomed page')
+  const scroll = src.slice(src.indexOf('<ScrollView'), src.indexOf('>', src.indexOf('pagingEnabled')))
+  t.ok(scroll.includes('scrollEnabled={!zoomed}'), 'the paging scroll stops while a photo is zoomed')
+  t.is(src.split('scrollEnabled=').length - 1, 1, 'nothing else turns paging off')
+  const wrap = src.slice(src.indexOf('const zoomWrap = '), src.indexOf('const conceal = '))
+  t.ok(wrap.includes('if (!zoomable) return photo'), 'without zoomable the photo is drawn as before')
+  t.ok(wrap.indexOf('if (!zoomable) return photo') < wrap.indexOf('<ZoomView'), 'ZoomView is only built when zoomable')
+  const zoom = wrap.slice(wrap.indexOf('<ZoomView'), wrap.indexOf('>', wrap.indexOf('<ZoomView')))
+  t.ok(zoom.includes('style={styles.fill}'), 'the zoom view fills the page')
+  t.ok(zoom.includes('ratio={zoomRatio(descriptor)}'), 'pans are clamped to the photo ratio')
+  t.ok(zoom.includes('disabled={!current}'), 'a page the viewer left is reset and releases the pager')
+  t.ok(zoom.includes('onZoomChange={setZoomed}'), 'the zoom view drives the pager lock')
+  t.ok(zoom.includes('onDismiss={onDismiss}'), 'drag to close reaches the caller')
+  t.is(src.split('<ZoomView').length - 1, 1, 'one zoom view')
+  t.ok(/strip = zoomWrap\(\n {6}<MediaView[\s\S]*?\/>,\n {6}items\[0\],\n {6}true\n {4}\)/.test(src), 'a single photo zooms too')
+  t.ok(/\{live\n {16}\? zoomWrap\(\n {18}<MediaView[\s\S]*?\/>,\n {18}descriptor,\n {18}current\n {16}\)/.test(src), 'each live page wraps its photo')
+  const page = src.slice(src.indexOf('<View\n              key={i}'), src.indexOf('{live'))
+  t.ok(page.includes('onStartShouldSetResponder={claimTouch ? claim : undefined}'), 'the page keeps its touch claim below the scroll view')
+  t.is(src.split('<MediaView').length - 1, 2, 'one photo element per strip shape')
+})
+
+test('zoomRatio uses only a finite positive size', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/ui/MediaCarousel.js'), 'utf8')
+  const body = src.slice(src.indexOf('function zoomRatio (d) {'), src.indexOf('\n}\n', src.indexOf('function zoomRatio (d) {')) + 2)
+  // eslint-disable-next-line no-new-func
+  const zoomRatio = new Function(body + '\nreturn zoomRatio')()
+  t.is(zoomRatio({ width: 400, height: 200 }), 2)
+  for (const d of [null, undefined, {}, { width: 0, height: 10 }, { width: 10, height: -1 }, { width: NaN, height: 10 }, { width: 10, height: Infinity }, { width: '4', height: '3' }]) {
+    t.is(zoomRatio(d), undefined, JSON.stringify(d))
+  }
+})

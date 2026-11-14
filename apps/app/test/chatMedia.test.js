@@ -776,6 +776,27 @@ test('the photo viewer stops bound playback, and the App tells the cards when th
   t.ok(app.includes('<TabBarShown.Provider value={!barsHidden}>'), 'App wraps screens in TabBarShown.Provider')
 })
 
+test('the chat photo viewer zooms the photo and keeps its close button outside the zoom', (t) => {
+  const ui = withoutComments(fs.readFileSync(path.join(__dirname, '../src/ui/ChatMedia.js'), 'utf8'))
+  t.ok(ui.includes("import { ZoomView } from './ZoomView'"), 'ZoomView is imported')
+  const start = ui.indexOf('function Viewer')
+  const viewer = ui.slice(start, ui.indexOf('\n}\n', start))
+  const open = viewer.indexOf('<ZoomView ')
+  const close = viewer.indexOf('</ZoomView>')
+  t.ok(open > 0 && close > open, 'the viewer has one ZoomView')
+  const tag = viewer.slice(open, viewer.indexOf('>', open))
+  t.ok(tag.includes('onDismiss={onClose}'), 'drag to close calls the same onClose as the button and back')
+  t.ok(tag.includes('resetKey={uri}'), 'a newly opened photo starts at 1x')
+  t.ok(tag.includes('ratio={ratio}'), 'the pan limits use the item aspect')
+  t.ok(viewer.slice(open, close).includes("<MediaView uri={uri} label='Foto' fit='contain'"), 'the photo is inside the ZoomView')
+  const button = viewer.indexOf("accessibilityLabel='Fechar foto'")
+  t.ok(button > close, 'the close button comes after the ZoomView, above it and still pressable while zoomed')
+  t.absent(viewer.slice(viewer.indexOf('<Modal'), open).includes('<Pressable'), 'nothing pressable wraps the photo')
+  t.ok(/onRequestClose=\{onClose\}/.test(viewer), 'Android back still closes')
+  t.ok(/onPress=\{\(\) => onOpen\(uri, itemRatio\(refItem && refItem\.item\)\)\}/.test(ui), 'a cell opens with its item aspect')
+  t.ok(/return w > 0 && h > 0 \? w \/ h : undefined/.test(ui), 'no aspect without a positive stated size')
+})
+
 test('playbackClaimCount rises on an accepted claim only', async (t) => {
   const { claimPlayback, playbackClaimCount, playbackEpoch, stopBoundPlayback } = await load()
   const start = playbackClaimCount()

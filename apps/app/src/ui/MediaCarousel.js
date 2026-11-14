@@ -6,7 +6,8 @@
 // control: that would collapse every photo button into it and VoiceOver would
 // lose open and retry. The scroller installs no responder, so the vertical
 // feed, pull to refresh and the back-edge swipe keep the gesture; only the
-// viewer opts its pages into one (claimTouch, below).
+// viewer opts its pages into one (claimTouch, below) and into zooming
+// (zoomable).
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Animated, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
@@ -15,6 +16,7 @@ import { Icon } from './Icon'
 import { MediaView } from './MediaView'
 import { useReduceMotion } from './StackLayer'
 import { useStyles } from './ThemeProvider'
+import { ZoomView } from './ZoomView'
 import { layout, motion, radius, space } from './theme'
 
 // Pages are whole. A fractional or inverted index would land in a gap and the
@@ -33,6 +35,12 @@ function clampIndex (index, count) {
 // photo with no onPress; a page that claims first keeps the responder below
 // the scroll view, as a pressable photo does in the feed.
 const claim = () => true
+
+// Without a stated size the pan limits fall back to the whole frame.
+function zoomRatio (d) {
+  if (!d || !Number.isFinite(d.width) || !Number.isFinite(d.height) || d.width <= 0 || d.height <= 0) return undefined
+  return d.width / d.height
+}
 
 function dotLook (styles, dark, active) {
   if (dark) return active ? styles.dotOnDark : styles.dotOffDark
@@ -74,6 +82,8 @@ export function MediaCarousel ({
   frameStyle,
   style,
   claimTouch = false,
+  zoomable = false,
+  onDismiss,
   focusRequest = 0
 }) {
   const styles = useStyles(makeStyles)
@@ -84,6 +94,9 @@ export function MediaCarousel ({
   const [width, setWidth] = useState(0)
   const [hovered, setHovered] = useState(false)
   const [focused, setFocused] = useState(false)
+  // A native scroll can take the touch whatever the JS responder says, so
+  // paging is turned off while a photo is zoomed, pinched or dragged to close.
+  const [zoomed, setZoomed] = useState(false)
   const prevArrow = useRef(null)
   const nextArrow = useRef(null)
   // The chevron to focus once the page changes: 'prev', 'next' or null.
@@ -250,10 +263,23 @@ export function MediaCarousel ({
     else setFocused(false)
   }, [page])
 
+  // Only the viewer zooms: at rest ZoomView sets the web touch-action to
+  // pan-x, which would stop the feed scrolling vertically over a photo. A page
+  // left by the viewer's arrows or keys is disabled, which resets it and
+  // releases the pager through onZoomChange(false).
+  const zoomWrap = (photo, descriptor, current) => {
+    if (!zoomable) return photo
+    return (
+      <ZoomView style={styles.fill} ratio={zoomRatio(descriptor)} disabled={!current} onZoomChange={setZoomed} onDismiss={onDismiss}>
+        {photo}
+      </ZoomView>
+    )
+  }
+
   const conceal = many && page !== 0 && ready === false
   let strip = null
   if (count === 1) {
-    strip = (
+    strip = zoomWrap(
       <MediaView
         author={author}
         descriptor={items[0]}
@@ -263,7 +289,9 @@ export function MediaCarousel ({
         label={slideLabel(0, count)}
         style={styles.fill}
         onPress={onPressItem ? () => onPressItem(0) : undefined}
-      />
+      />,
+      items[0],
+      true
     )
   } else if (many && measured) {
     strip = (
@@ -271,6 +299,7 @@ export function MediaCarousel ({
         ref={scroller}
         horizontal
         pagingEnabled
+        scrollEnabled={!zoomed}
         showsHorizontalScrollIndicator={false}
         scrollEventThrottle={16}
         style={[styles.scroller, conceal && styles.concealed]}
@@ -311,7 +340,7 @@ export function MediaCarousel ({
               onStartShouldSetResponder={claimTouch ? claim : undefined}
             >
               {live
-                ? (
+                ? zoomWrap(
                   <MediaView
                     author={author}
                     descriptor={descriptor}
@@ -322,8 +351,10 @@ export function MediaCarousel ({
                     style={styles.fill}
                     tabIndex={current ? undefined : -1}
                     onPress={onPressItem ? () => onPressItem(i) : undefined}
-                  />
-                  )
+                  />,
+                  descriptor,
+                  current
+                )
                 : null}
             </View>
           )

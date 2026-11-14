@@ -140,6 +140,8 @@ function Viewer ({ author, media, index, onIndex, onClose, persist }) {
             showCounter={false}
             showArrows={false}
             claimTouch
+            zoomable
+            onDismiss={onClose}
             frameStyle={styles.viewerFrame}
             style={styles.viewerImage}
           />
