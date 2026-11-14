@@ -181,7 +181,7 @@ test('the plugin restores the microphone and the camera removal', (t) => {
 // iOS offers the installation's passkeys, and hands the https return of the
 // Google step, only to the app named by the apple-app-site-association that
 // deploy/seeder/well-known.sh writes from VARANDA_IOS_APP_ID (TEAMID.app.varanda).
-// applinks lists only /anuncio/ there, so the public /f/ page stays in the browser.
+// applinks lists only /anuncio/ and /publicacao/ there, so the public /f/ page stays in the browser.
 test('the iOS entitlement, the passkey flag and the deploy name the same app and host', (t) => {
   const app = JSON.parse(read('app.json')).expo
   const committed = entitlements(read(ENTITLEMENTS))
@@ -204,7 +204,7 @@ test('the iOS entitlement, the passkey flag and the deploy name the same app and
   const wellKnown = read(WELL_KNOWN)
   const appId = app.ios.bundleIdentifier.replace(/\./g, '\\.')
   t.ok(wellKnown.includes('[[ $ios_app_id =~ ^[A-Z0-9]{10}\\.' + appId + '$ ]]'), 'the deploy accepts only TEAMID.' + app.ios.bundleIdentifier)
-  t.ok(wellKnown.includes('printf \'{"webcredentials":{"apps":["%s"]},"applinks":{"apps":[],"details":[{"appIDs":["%s"],"components":[{"/":"/anuncio/*"}]}]}}\\n\' "$ios_app_id" "$ios_app_id"'), 'and lists it under webcredentials and applinks (/anuncio/ only)')
+  t.ok(wellKnown.includes('printf \'{"webcredentials":{"apps":["%s"]},"applinks":{"apps":[],"details":[{"appIDs":["%s"],"components":[{"/":"/anuncio/*"},{"/":"/publicacao/*"}]}]}}\\n\' "$ios_app_id" "$ios_app_id"'), 'and lists it under webcredentials and applinks (/anuncio/ and /publicacao/ only)')
 })
 
 // Sign-in needs the passkey PRF, which iOS offers from 18.0, so an older iPhone

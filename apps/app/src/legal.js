@@ -3,9 +3,9 @@
 // Sources: docs/design.md (LGPD, moderation, identity), docs/app.md and
 // SECURITY.md. Planned flows must not read as features already available.
 
-export const LEGAL_VERSION = 47
+export const LEGAL_VERSION = 48
 export const LEGAL_DATE = '13/11/2026'
-export const REVIEW_NOTE = 'Versão 47, sujeita a revisão jurídica. Não é parecer jurídico.'
+export const REVIEW_NOTE = 'Versão 48, sujeita a revisão jurídica. Não é parecer jurídico.'
 
 export const TERMS = {
   title: 'Termos de Uso',
@@ -132,6 +132,14 @@ export const TERMS = {
       ]
     },
     {
+      heading: 'Página pública de uma publicação',
+      paragraphs: [
+        'Onde a instalação ligou essa função, você pode publicar uma das suas publicações, uma de cada vez, numa página da web no endereço da instalação, que qualquer pessoa lê sem conta. É uma escolha sua, por publicação, e você pode retirá-la a qualquer momento ou apagar a publicação.',
+        'Publicar deixa a publicação pública na web, não só para quem tem o link: quem conhece o seu perfil pode encontrar as publicações que você publicou. A página mostra o nome, o @nome, a data, o texto, até 4 fotos (de um vídeo, só a capa) e o título e o domínio de um link. Nunca mostra respostas, curtidas, a publicação a que uma resposta ou citação se refere, nem outras publicações.',
+        'Qualquer pessoa com conta pode passar adiante o link de qualquer publicação, mas o link só mostra o conteúdo se quem escreveu a publicou na web. Se não, ele leva ao app, onde a publicação só se vê depois de entrar. A página pede aos buscadores que não a indexem e não há mapa do site, mas cópias, prévias e caches feitos por outras pessoas enquanto ela esteve pública não podem ser impedidos nem removidos pela associação.'
+      ]
+    },
+    {
       heading: 'Limites da exclusão',
       paragraphs: [
         'Você pode apagar uma publicação (resposta e citação incluídas) e uma versão do perfil. Os semeadores e apps oficiais e atualizados deixam de mostrar o item e descartam os bytes dele nas suas cópias, inclusive as imagens e os vídeos que só ele usava. Isso não é um apagamento garantido em qualquer lugar: um aparelho que acabou de seguir você pode guardar o conteúdo por pouco tempo, até receber a exclusão. Apps e semeadores antigos ou modificados não obedecem, e cópias que já chegaram a outros aparelhos, fotos e vídeos já baixados, capturas de tela, imagens guardadas em cache e as citações guardadas pelo serviço de conta numa denúncia podem manter o conteúdo. Um diário que já atingiu o limite de blocos não aceita mais nem o registro de exclusão. Limpar os dados do site só apaga os dados locais; não apaga as cópias que já chegaram a outros aparelhos ou semeadores.',
@@ -219,6 +227,13 @@ export const PRIVACY = {
         'O arquivo feira-invites.json guarda só a chave de quem é responsável pelo convite e o hash do código, nunca o código em si.',
         'Os anúncios salvos e as buscas salvas ficam só no seu aparelho, e a pesquisa repetida não é guardada. Os valores de uma oferta viajam apenas dentro da conversa selada. A conversa com uma Página que ativou as Conversas privadas é cifrada entre você e quem administra a página, com os limites descritos em Páginas.',
         'Cópias, prévias e caches de buscadores fora desta instalação podem continuar existindo depois que um anúncio é removido. A associação nunca cobra nem move dinheiro.'
+      ]
+    },
+    {
+      heading: 'Página pública de uma publicação',
+      paragraphs: [
+        'Onde a instalação ligou essa função, quem escreve uma publicação pode torná-la pública na web, uma de cada vez e por escolha própria. O semeador entrega o nome, o @nome, a data, o texto, até 4 fotos (de um vídeo, só a capa) e o título e o domínio de um link a qualquer pessoa que abra o endereço, inclusive a robôs de prévia de links. Não é só para quem tem o link: quem conhece o perfil pode encontrar as publicações publicadas. Respostas, curtidas, a publicação a que uma resposta ou citação se refere e outras publicações nunca aparecem na página.',
+        'A escolha fica registrada no diário de quem publicou e dura até a pessoa retirar a publicação da web ou apagá-la. A página pede aos buscadores que não a indexem e não há mapa do site. O semeador não guarda cópia da página nem registra nada nessas páginas, mas o registro de erros do servidor web pode guardar o endereço pedido e o endereço de internet (IP). Cópias, prévias e caches feitos por outras pessoas ou por buscadores enquanto a página esteve pública ficam fora do controle da associação.'
       ]
     },
     {

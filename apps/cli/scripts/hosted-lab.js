@@ -5,7 +5,7 @@
 // the stub of ./phone-stub.js (no SMS provider): the banner prints its code,
 // and with no age store a send needs no age record.
 //   node scripts/hosted-lab.js [--host 127.0.0.1] [--port 8080] [--ui <dist dir> | --expo <http://127.0.0.1:8081>]
-//                              [--dataset <semente> [--dataset-size 60x150] [--rajada]]
+//                              [--dataset <semente> [--dataset-size 60x150] [--rajada]] [--publicacoes]
 // It starts a loopback hyperdht testnet (or uses VARANDA_BOOTSTRAP, which must
 // be loopback, e.g. from scripts/local-dht.js), an association, a certified
 // seeder with its WebSocket listener (as `seed --ws-port`), and the account
@@ -14,7 +14,7 @@
 // /account/age/policy answers { required: false }), an issuer certified by
 // the lab association and the terms store on. Passkey, terms and the account flow are the real ones.
 // One origin, http://localhost:<port>, carries what Caddy carries in a
-// deployment: /varanda.json, /seeder, /media/*, /index/*, /account/*, and
+// deployment: /varanda.json, /seeder, /media/*, /index/*, /account/*, /p/*, and
 // everything else goes to the Expo web dev server or to an exported dist.
 // --dataset fills the lab with other members' diaries once it is up
 // (./lab-dataset.js, from the plan of ../lib/lab-dataset-plan.js) and
@@ -54,11 +54,12 @@ const TYPES = {
 
 const USAGE = [
   'uso: node scripts/hosted-lab.js [--host 127.0.0.1] [--port 8080] [--ui <dist> | --expo <http://127.0.0.1:8081>]',
-  '                                [--dataset <semente> [--dataset-size <membros>x<blocos>] [--rajada]]',
+  '                                [--dataset <semente> [--dataset-size <membros>x<blocos>] [--rajada]] [--publicacoes]',
   '  --dataset <semente>      cria diários de outros membros (fotos, respostas, citações, curtidas,',
   '                           repostagens e duas comunidades) e escreve reader-setup.js',
   '  --dataset-size 60x150    quantos membros e quantos blocos por diário (padrão 60x150)',
-  '  --rajada                 depois do conjunto, um post novo por segundo em 5 membros até o Ctrl-C'
+  '  --rajada                 depois do conjunto, um post novo por segundo em 5 membros até o Ctrl-C',
+  '  --publicacoes            liga as páginas públicas de publicações (/p/), como VARANDA_POSTS_ORIGIN'
 ].join('\n')
 
 class LabUsageError extends Error {}
@@ -84,7 +85,7 @@ function allowedHost (host, port) {
 }
 
 function parseArgs (argv) {
-  const opts = { host: '127.0.0.1', port: DEFAULT_PORT, ui: null, expo: DEFAULT_EXPO, dataset: null, datasetSize: DEFAULT_DATASET_SIZE, rajada: false }
+  const opts = { host: '127.0.0.1', port: DEFAULT_PORT, ui: null, expo: DEFAULT_EXPO, dataset: null, datasetSize: DEFAULT_DATASET_SIZE, rajada: false, publicacoes: false }
   let sizeGiven = false
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
@@ -103,6 +104,7 @@ function parseArgs (argv) {
       opts.datasetSize = parseDatasetSize(value())
       if (opts.datasetSize === null) throw new LabUsageError('--dataset-size deve ser <membros>x<blocos>, por exemplo 60x150')
     } else if (a === '--rajada') opts.rajada = true
+    else if (a === '--publicacoes') opts.publicacoes = true
     else if (a === '--help' || a === '-h') opts.help = true
     else throw new LabUsageError('opção desconhecida: ' + a)
   }
@@ -146,6 +148,7 @@ function routeOf (pathname) {
   if (pathname === '/varanda.json') return 'config'
   if (pathname === '/seeder') return 'seeder'
   if (pathname.startsWith('/media/') || pathname.startsWith('/index/')) return 'seeder'
+  if (pathname.startsWith('/p/')) return 'seeder'
   if (pathname === '/account' || pathname.startsWith('/account/')) return 'account'
   return 'ui'
 }
@@ -445,13 +448,17 @@ async function main () {
       host: '127.0.0.1',
       dm: { postage: createPostageFile(seedDir), onDrop: () => {} }
     })
-    const ws = await startSeedWs({ host: '127.0.0.1', port: 0, seeder })
+    const origin = labOrigin(opts.port)
+    const wsOpts = { host: '127.0.0.1', port: 0, seeder }
+    // seed-ws accepts only an https origin and uses it only for the page's og:image address, which nothing reads in the lab.
+    if (opts.publicacoes) wsOpts.postsOrigin = origin.replace(/^http:/, 'https:')
+    const ws = await startSeedWs(wsOpts)
     cleanups.push(() => ws.close())
     await seeder.start()
     cleanups.push(() => seeder.close())
     log('semeador certificado no ar')
+    if (opts.publicacoes) log('páginas públicas de publicações ligadas (/p/)')
 
-    const origin = labOrigin(opts.port)
     const accountDir = path.join(root, 'account')
     const kp = crypto.keyPair()
     saveKeyPairFile(path.join(accountDir, KEY_FILE), kp)
