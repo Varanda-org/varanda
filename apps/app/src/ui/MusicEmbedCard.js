@@ -6,16 +6,20 @@
 // (./screenVisible: the screen the person is looking at, or the sheet the
 // card sits in), and at most two frames load app-wide (embedSlots). Nothing
 // autoplays: the person starts the player with its own controls, and nothing
-// is drawn over it. A loaded player stays, playback included, while its card
-// is scrolled out of the band on the same visible screen, so scrolling back
-// finds the same provider page. It unloads at once when the card is held (a
-// sheet, a menu or the photo viewer over it, another tab, a covered screen, a
-// lock, the background), when another player starts in the app, when the
-// list unmounts its row, or when a check finds its card more than three window
-// heights past the band (a list may keep a row mounted for good). A frame
-// found out of the band on two checks in a row is asked to yield to a card
-// that became visible, and yields on its own next check only if that check
-// still finds it out of the band; no card ever changes another card's state.
+// is drawn over it. A loaded player stays, playback included, for as long as
+// its screen is the one looked at, however far the person scrolls, so
+// scrolling back finds the same provider page. In a list (./RefreshableList)
+// the frame is drawn by the list's player layer (./EmbedLayer) over this
+// card's slot, so it outlives the row when the list unmounts it, and the card
+// takes the same frame again when the row comes back. Elsewhere (the
+// composer's draft, a header) the card draws the frame itself. It unloads at
+// once when the card is held (a sheet, a menu or the photo viewer over it,
+// another tab, a covered screen, a lock, the background), when another player
+// starts in the app, when its row leaves the list or the card leaves a row
+// that stays, or when the system ends its content process. A frame found out
+// of the band on two checks in a row is asked to yield to a card that became
+// visible, and yields on its own next check only if that check still finds it
+// out of the band; no card ever changes another card's state.
 // Until a player loads, the slot holds the stored ./LinkCard drawn from stored
 // data only: nothing contacts the provider, and a tap opens the link. The slot
 // keeps the player's height in every state, so loading or unloading the frame
@@ -29,7 +33,8 @@
 //
 // Props: embed (embedOf of the link), card (the stored link card) or draft
 // (the composer's draft, with imageUri and onDismiss, its remove button),
-// thumb (as for ./LinkCard), onLongPress.
+// thumb (as for ./LinkCard), onLongPress, part (optional: tells apart two
+// cards of one row, a post's and its quote's).
 
 import { useContext, useEffect, useRef, useState } from 'react'
 import { Pressable, StyleSheet, View, useWindowDimensions } from 'react-native'
@@ -44,12 +49,13 @@ import {
   topNavigationAllowed
 } from '../musicEmbed'
 import { openExternal } from '../openExternal'
-import { EMBED_IDLE, EMBED_PARKED, EMBED_TICK_MS, EMBED_WAITING, embedSlots, embedStep, embedsHeld, farFromBand, mostlyHidden, onEmbedHold } from '../embedLive'
+import { embedKey } from '../embedKeep'
+import { EMBED_IDLE, EMBED_PARKED, EMBED_TICK_MS, EMBED_WAITING, embedSlots, embedStep, embedsHeld, mostlyHidden, onEmbedHold } from '../embedLive'
 import { playbackClaimCount } from '../media/chatMedia'
 import { EmbedFrame } from './EmbedFrame'
 import { Icon } from './Icon'
 import { LINK_CARD_DISMISS, LinkCard } from './LinkCard'
-import { EmbedBandBottom, ScreenVisible, SheetDepth } from './screenVisible'
+import { EmbedBandBottom, EmbedHost, EmbedRowKey, RowShift, ScreenVisible, SheetDepth } from './screenVisible'
 import { TabBarShown } from './tabBarShown'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, space } from './theme'
@@ -65,7 +71,17 @@ const stopPressKeys = (e) => {
   if (e && (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar')) stopClick(e)
 }
 
-export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss, thumb, onLongPress }) {
+// The width a kept frame was drawn at, so a card that comes back is active on
+// its first commit: with no width it would count as not fitting and close the
+// frame it is about to take again.
+function keptWidth (host, key) {
+  if (!key) return 0
+  const entry = host.keep.list().find((e) => e.key === key)
+  const w = entry && entry.spec ? entry.spec.width : NaN
+  return Number.isFinite(w) && w > 0 ? w : 0
+}
+
+export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss, thumb, onLongPress, part }) {
   const embed = given && typeof given === 'object' ? given : NO_EMBED
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
@@ -75,17 +91,31 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
   const visible = useContext(ScreenVisible)
   const depth = useContext(SheetDepth)
   const band = useContext(EmbedBandBottom)
+  const host = useContext(EmbedHost)
+  const rowKey = useContext(EmbedRowKey)
+  const shift = useContext(RowShift)
+  // '' draws the frame here: the composer's draft and any card outside a
+  // list row.
+  const key = host && !draft ? embedKey(rowKey, part, embed.embedUrl) : ''
   const [held, setHeld] = useState(() => embedsHeld(depth))
   useEffect(() => {
     const sync = () => setHeld(embedsHeld(depth))
     sync()
     return onEmbedHold(sync)
   }, [depth])
-  const [state, setState] = useState(EMBED_IDLE)
-  const stateRef = useRef(EMBED_IDLE)
-  const [width, setWidth] = useState(0)
+  // A kept frame starts parked: the mount effect takes it, with its slot,
+  // before any check.
+  const [state, setState] = useState(() => (key && host.keep.has(key) ? EMBED_PARKED : EMBED_IDLE))
+  const stateRef = useRef(state)
+  const [width, setWidth] = useState(() => keptWidth(host, key))
   const slot = useRef(null)
   const release = useRef(null)
+  // The key the list's layer draws this card's live frame under, or ''. Kept
+  // apart from key: a cleanup for an old key runs after key has moved on.
+  const hosted = useRef('')
+  // The layer refused the frame (another card holds key): drawn here instead.
+  const [inline, setInline] = useState(false)
+  const placeRound = useRef(0)
   const alive = useRef(true)
   const base = useRef(win.width > win.height)
   const claims = useRef(playbackClaimCount())
@@ -106,6 +136,13 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
         base.current = win.width > win.height
       }
     }
+    if (!next.live && hosted.current !== '') {
+      const kept = hosted.current
+      hosted.current = ''
+      // The drop ran the release: running it again here could free a slot
+      // the next card took meanwhile.
+      if (host.keep.drop(kept)) release.current = null
+    }
     if (stateRef.current === EMBED_WAITING && next !== EMBED_WAITING && !next.live) embedSlots.withdraw()
     if (!next.live && release.current !== null) {
       const done = release.current
@@ -118,17 +155,96 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
     if (alive.current && changed) setState(next)
   }
 
+  // Measured against the list's scroll content, the ancestor of both this
+  // slot and the layer: the new architecture measures a view only against
+  // one of its ancestors, and the layer is a sibling of the rows.
+  const placeFrame = () => {
+    const kept = hosted.current
+    if (kept === '' || !alive.current) return
+    const id = ++placeRound.current
+    const put = (rect) => {
+      if (alive.current && hosted.current === kept && id === placeRound.current) host.keep.place(kept, rect)
+    }
+    const view = slot.current
+    const content = host.content()
+    if (!view || content === null || typeof view.measureLayout !== 'function') {
+      put(null)
+      return
+    }
+    try {
+      view.measureLayout(content, (x, y, w, h) => {
+        const o = host.origin()
+        put({ x: x - o.x, y: y - o.y, w, h })
+      }, () => put(null))
+    } catch {
+      put(null)
+    }
+  }
+
   useEffect(() => {
     alive.current = true
     return () => {
       alive.current = false
       if (stateRef.current === EMBED_WAITING) embedSlots.withdraw()
+      const kept = stateRef.current.live ? hosted.current : ''
+      hosted.current = ''
       stateRef.current = EMBED_IDLE
       const done = release.current
       release.current = null
+      // The list keeps the frame, and its slot, for the row's return. A
+      // keep already disposed (the list left with its screen) refuses it.
+      if (kept !== '' && typeof done === 'function') {
+        // Another player started since this card's last check, which would
+        // have closed the frame: an orphan would miss it, so it goes now.
+        if (playbackClaimCount() !== claims.current) {
+          if (host.keep.drop(kept)) return
+        } else {
+          embedSlots.park(done, true)
+          if (host.keep.orphan(kept)) return
+        }
+      }
       if (typeof done === 'function') done()
     }
   }, [])
+
+  // Before the check effect, which would close a parked state with no slot.
+  useEffect(() => {
+    const kept = key ? host.keep.claim(key) : null
+    if (kept !== null) {
+      release.current = kept.release
+      hosted.current = key
+      if (!stateRef.current.live) {
+        stateRef.current = EMBED_PARKED
+        setState(EMBED_PARKED)
+      }
+      // A player that started while the frame had no card, after the list
+      // last checked, closes it as this card's own check would have.
+      const seen = host.claimsSeen()
+      if (playbackClaimCount() !== seen) apply(EMBED_IDLE)
+      else claims.current = seen
+    } else if (stateRef.current.live) {
+      apply(EMBED_IDLE)
+    }
+    // A new key while mounted: the frame kept under the old one goes.
+    return () => { if (alive.current) apply(EMBED_IDLE) }
+  }, [key])
+
+  // The list drops a kept frame on its own (its content process died, its
+  // row left the data, its screen was left): the card shows the stored card
+  // again.
+  useEffect(() => {
+    if (!key) return undefined
+    const offKeep = host.keep.subscribe(() => {
+      if (hosted.current !== '' && !host.keep.has(hosted.current)) {
+        hosted.current = ''
+        // The drop ran the release already.
+        release.current = null
+        apply(EMBED_IDLE)
+      }
+    })
+    const offContent = host.onContentChange(placeFrame)
+    return () => { offKeep(); offContent() }
+  }, [key])
 
   useEffect(() => {
     if (!active) {
@@ -167,9 +283,9 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
       // a loaded frame stays while it is turned.
       const turned = (win.width > win.height) !== base.current
       const free = stateRef.current.live || embedSlots.free()
-      const settle = (hidden, mayYield = true, far = false) => {
+      const settle = (hidden, mayYield = true) => {
         pending = false
-        apply(embedStep(stateRef.current, { hidden, allowed, turned, free, far }), mayYield)
+        apply(embedStep(stateRef.current, { hidden, allowed, turned, free }), mayYield)
       }
       const unseen = () => settle(true)
       const view = slot.current
@@ -177,13 +293,14 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
         unseen()
         return
       }
+      placeFrame()
       if (missed) settle(true, false)
       pending = true
       try {
         view.measureInWindow((x, y, w, h) => {
           if (cancelled || !alive.current || id !== round) return
           if (!band || typeof band.measure !== 'function') {
-            settle(mostlyHidden(x, y, w, h, top, bottom, win.width), true, farFromBand(y, h, top, bottom, win.height))
+            settle(mostlyHidden(x, y, w, h, top, bottom, win.width))
             return
           }
           // A composer under the list lowers the band to its top. A band that
@@ -199,7 +316,7 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
               return
             }
             const lower = Math.min(bottom, limit)
-            settle(mostlyHidden(x, y, w, h, top, lower, win.width), true, farFromBand(y, h, top, lower, win.height))
+            settle(mostlyHidden(x, y, w, h, top, lower, win.width))
           }
           try {
             band.measure(withLimit)
@@ -221,16 +338,39 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
 
   const data = draft || card
   const url = data && typeof data === 'object' && typeof data.url === 'string' ? data.url : ''
-  const host = cardUrlHost(url)
+  const linkHost = cardUrlHost(url)
   const name = Object.prototype.hasOwnProperty.call(EMBED_PROVIDER_NAMES, embed.provider)
     ? EMBED_PROVIDER_NAMES[embed.provider]
     : null
-  if (host === null || name === null) return null
+  const height = embedHeight(embed, width)
+  const live = state.live && active
 
   const openFromPlayer = (target) => {
     const out = embedExitUrl(embed, target)
     if (out !== null) openExternal(out)
   }
+
+  // Handed to the list's layer on going live and again when the size or the
+  // key changes; the same release keeps the same frame.
+  useEffect(() => {
+    if (!key || !live || name === null || release.current === null) return
+    const shown = host.keep.show(key, {
+      embedUrl: embed.embedUrl,
+      html: embedHtml(embed),
+      baseUrl: EMBED_BASE_URL,
+      allowTop: topNavigationAllowed,
+      height,
+      width,
+      title: 'Player do ' + name,
+      onOpen: openFromPlayer,
+      shift
+    }, release.current, rowKey)
+    hosted.current = shown ? key : ''
+    setInline(!shown)
+    if (shown) placeFrame()
+  }, [live, height, width, key, shift])
+
+  if (linkHost === null || name === null) return null
   const onLayout = (event) => {
     const w = event && event.nativeEvent && event.nativeEvent.layout ? event.nativeEvent.layout.width : NaN
     if (Number.isFinite(w)) setWidth(w)
@@ -253,7 +393,6 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
       )
     : null
 
-  const height = embedHeight(embed, width)
   const tooNarrow = width > 0 && width < embed.minWidth
   // Album, playlist and SoundCloud set players are 352 to 450 pt tall: in the
   // composer one would push the text field off the screen. Decided only while
@@ -275,30 +414,36 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
         ref={slot}
         collapsable={false}
         style={[styles.slot, { height }]}
+        onLayout={() => placeFrame()}
         // No touch claim here: on Android the view holding the JS responder
         // intercepts the moves of its children, which would cancel a drag
-        // inside the player. The stand-in and the WebView claim instead.
+        // inside the player. The stand-in and the frame claim instead.
         onClick={stopClick}
         onKeyDown={stopPressKeys}
       >
-        {state.live && active
-          ? (
-            <EmbedFrame
-              embedUrl={embed.embedUrl}
-              html={embedHtml(embed)}
-              baseUrl={EMBED_BASE_URL}
-              allowTop={topNavigationAllowed}
-              height={height}
-              title={'Player do ' + name}
-              onOpen={openFromPlayer}
-            />
-            )
-          : (
-            // The responder is negotiated from the touched node upward, so the
-            // card's own Pressable takes a tap on it, and this claim keeps a
-            // tap beside it from reaching a quote's or a bubble's Pressable.
-            <View style={styles.standIn} onStartShouldSetResponder={() => true}>{plain}</View>
-            )}
+        {live && key !== '' && !inline
+          // The layer draws the frame over this empty slot; the claim keeps a
+          // tap before the first placement from reaching a quote or a bubble.
+          ? <View style={{ height }} accessibilityLabel={'Player do ' + name} onStartShouldSetResponder={() => true} />
+          : state.live && active
+            ? (
+              <EmbedFrame
+                embedUrl={embed.embedUrl}
+                html={embedHtml(embed)}
+                baseUrl={EMBED_BASE_URL}
+                allowTop={topNavigationAllowed}
+                height={height}
+                title={'Player do ' + name}
+                onOpen={openFromPlayer}
+                onGone={() => apply(EMBED_IDLE)}
+              />
+              )
+            : (
+              // The responder is negotiated from the touched node upward, so the
+              // card's own Pressable takes a tap on it, and this claim keeps a
+              // tap beside it from reaching a quote's or a bubble's Pressable.
+              <View style={styles.standIn} onStartShouldSetResponder={() => true}>{plain}</View>
+              )}
       </View>
       {actions}
     </View>
