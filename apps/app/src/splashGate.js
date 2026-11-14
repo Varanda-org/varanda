@@ -33,14 +33,9 @@ export function coverConnecting ({ phase, canConfigure, elapsedMs, released }) {
 // sets once the first real screen has shown.
 export const BOOT_PATIENCE_MS = 10000
 export const RECOVERY_PATIENCE_MS = 65000
-// A missing first page must not keep A Rua covered forever. Names and counts
-// get only a short grace after the page arrives, then finish in view.
+// Names, author photos' metadata, counts and the Momentos strip belong to the
+// first screen. A hung read still ends at CONTENT_PATIENCE_MS.
 export const CONTENT_PATIENCE_MS = 5000
-export const DETAILS_GRACE_MS = 400
-
-export function detailsGraceOver ({ page, pageAtMs, nowMs }) {
-  return page === true && Number.isFinite(pageAtMs) && Number.isFinite(nowMs) && nowMs - pageAtMs >= DETAILS_GRACE_MS
-}
 
 export function bootPatienceMs (step) {
   if (step === 'recuperando') return RECOVERY_PATIENCE_MS
@@ -63,14 +58,21 @@ export function coverBoot ({ step, passkeyKnown, age, ageError, phone, phoneErro
 // screen of A Rua.
 export const FEED_FIRST_ROWS = 6
 
+export function profileAnswered (p) {
+  return p === null || (typeof p === 'object' && p !== null && p.avatar !== undefined)
+}
+
 // Whether A Rua's first rows are ready to show: every author looked up (a
 // profileOf answer other than undefined, null included), every reposted
 // original answered (hasOriginal, any outcome), and the counts answered for
 // at least one of their posts, unless counts are not read here
 // (countsSkipped: no hosted node, offline, indexing, or a failed answer).
-export function feedDetailsReady ({ authors, shown, profileOf, originals, hasOriginal, hasCount, countsSkipped } = {}) {
+// Strict profiles also need avatar metadata. Older non-hosted nodes without
+// profile.read never answer, so strictness there would spend the full ceiling
+// on every start.
+export function feedDetailsReady ({ authors, shown, profileOf, originals, hasOriginal, hasCount, countsSkipped, strictProfiles } = {}) {
   if (!Array.isArray(authors) || typeof profileOf !== 'function') return false
-  if (!authors.every((a) => profileOf(a) !== undefined)) return false
+  if (!authors.every((a) => strictProfiles === true ? profileAnswered(profileOf(a)) : profileOf(a) !== undefined)) return false
   const reposted = Array.isArray(originals) ? originals : []
   if (reposted.length > 0 && (typeof hasOriginal !== 'function' || !reposted.every(hasOriginal))) return false
   if (countsSkipped === true) return true
@@ -78,10 +80,21 @@ export function feedDetailsReady ({ authors, shown, profileOf, originals, hasOri
   return refs.length === 0 || (typeof hasCount === 'function' && refs.some(hasCount))
 }
 
+export function momentsSettled ({ phase, seenLoaded, stripVisible, authors, profileOf } = {}) {
+  if (phase === 'off' || phase === 'error') return true
+  if (phase !== 'ready') return false
+  if (stripVisible !== true) return true
+  return seenLoaded === true && Array.isArray(authors) && (authors.length === 0 || (typeof profileOf === 'function' && authors.every((key) => profileAnswered(profileOf(key)))))
+}
+
+export function ruaFeedReady ({ details, moments, onRua, stacked } = {}) {
+  return onRua !== true || stacked === true || (details === true && moments === true)
+}
+
 // The bar under the splash: real steps only (connected, own profile known,
-// first page, its names and counts), never a timer. 0..1.
-export function bootProgress ({ phase, step, page, details } = {}) {
-  if (details === true) return 1
+// first page, its names and counts, Momentos), never a timer. 0..1.
+export function bootProgress ({ phase, step, page, details, moments } = {}) {
+  if (details === true) return moments === true ? 1 : 0.9
   if (page === true) return 0.8
   if (step === 'pronto') return 0.6
   if (phase === 'ready') return 0.35

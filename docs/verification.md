@@ -2367,7 +2367,7 @@ Nenhuma verificação foi feita ainda. Todos os itens abaixo estão desmarcados 
 - Uma resposta, curtida ou republicação cujo post alvo ainda não está legível na réplica do destinatário no semeador (fora do prefixo contíguo, ou uma leitura sem espera que falhou) não vira aviso, e o bloco não é lido de novo (no máximo uma vez).
 - Se um envio volta 410 enquanto o mesmo `endpoint` é registrado de novo com chaves novas, a remoção compara as chaves antes de entrar na fila do `push.json`, e uma janela curta ainda pode apagar o registro novo. O navegador costuma gerar outro `endpoint` ao assinar de novo; religar em Ajustes resolve.
 - Ao ligar, um cancelamento local que passa de 5 s (`UNSUBSCRIBE_MS`) é dado como não confirmado; o navegador ainda pode concluí-lo depois.
-- A limpeza de Sair e Recomeçar não espera uma troca do interruptor em andamento, e o interruptor continua tocável durante ela: ligar os avisos de novo no meio de Sair pode deixar a nova inscrição ativa.
+- A limpeza de Sair e Recomeçar espera até 3 s (`LEAVE_WAIT_MS`) uma troca do interruptor em andamento e o interruptor não aceita novo toque durante ela. Se o pedido de permissão ficar aberto além disso, um "Permitir" tardio é desligado de novo quando a troca termina (só o cancelamento local, porque o nó já saiu). Conferir num navegador real com o pedido aberto ainda falta.
 - Todo aviso é preenchido até 1024 bytes antes de cifrar (`PUSH_PAD_TO`, preenchimento do RFC 8188), então o tamanho não mostra o tipo nem o nome. Mas a entrega é imediata: o serviço de push do navegador vê o momento de cada aviso e pode cruzá-lo com os registros públicos dos diários. Não há atraso artificial, por escolha: um atraso deixaria todo aviso mais lento.
 - Os caminhos de `apps/app/src/screens/Identidade.js` que trocam a identidade guardada ("apagar e recomeçar" quando a identidade não confere, "criar mesmo assim") não chamam `disablePush`. Num aparelho compartilhado, a inscrição do navegador pode continuar recebendo os avisos da identidade anterior até ser desligada ou até o serviço de push descartá-la (não confirmado de ponta a ponta).
 
@@ -3118,12 +3118,12 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 - [ ] Navegador novo, seguindo contas com histórico longo: A Rua mostra os posts mais novos de cada conta em poucos segundos, enquanto o histórico completa (não realizada ainda).
 - [ ] Visita de volta depois de as contas postarem bastante: os posts novos aparecem antes do histórico que faltava (não realizada ainda).
 - [ ] Semeador sem o meio de um diário: A Rua mostra o começo e os mais novos, e o resto quando o semeador o tiver (não realizada ainda).
-- [ ] Um nome pode aparecer como "sem nome" por um instante, até chegar o bloco do perfil (não realizada ainda).
+- [ ] Um perfil cujo registro está só no meio do diário ainda não baixado aparece "sem nome" por um instante e logo ganha o nome (e o @nome) lido pelo índice do semeador e por `diary.peek`, sem esperar o histórico; no nó central e com o semeador sem índice nenhum pedido a mais é feito (não realizada ainda).
 
 ### Limites
 
 - A Rua atualiza quando o comprimento presente cresce: os posts mais novos aparecem cerca de uma ida e volta depois do bloco 2, ou ao puxar para atualizar se o semeador não tem o meio do diário.
-- Um perfil que está só no meio do diário lê "sem nome" até o histórico chegar.
+- A leitura do nome pelo índice vale só no nó do navegador e uma vez por chave e por conexão: se o índice ou o `diary.peek` falhar, a chave segue "sem nome" até o histórico chegar (`apps/app/test/namesPeek.test.js`).
 - Um semeador que anuncia um comprimento que não serve atrasa o histórico em no máximo 3 s por crescimento do comprimento.
 - Blocos guardados entre o prefixo e a corrida mais nova não aparecem: se um diário ainda no meio do histórico cresce, a corrida anterior some até chegar a ponta nova, e curtidas desfeitas, exclusões ou um perfil novo guardados nesse trecho só valem quando o histórico chega até eles. Mostrar esse trecho não é seguro (uma lápide pode estar num buraco depois dele); aplicar só os registros dele pediria mudar o `buildFeed` de `packages/core`.
 
@@ -4197,7 +4197,7 @@ Web (Chrome ou Safari, com o nó no navegador ou com o `varanda-serve`):
 
 ### Não verificado / limites conhecidos
 
-- Nenhuma caixa acima foi executada nesta documentação. Os testes automáticos cobrem só a janela do toque duplo e a abertura pendente; o pulo, o coração de 64 pt, a vibração e o aviso ainda precisam de aparelho.
+- Nenhuma caixa acima foi executada nesta documentação. Os testes automáticos cobrem só a janela do toque duplo, a abertura pendente e a regra de que um toque duplo com curtida ou republicação pendente da mesma publicação não mostra o coração (`doubleTapPlan`); o pulo, o coração de 64 pt, a vibração e o aviso ainda precisam de aparelho.
 - Um desfazer durante a atualização puxada pode deixar a contagem uma a mais até a próxima atualização.
 - O desfazer atualiza só a tela que mostrou o aviso.
 - Um desfazer enquanto uma curtida da mesma publicação está pendente não entra na fila; o botão de republicar da linha continua desfazendo.
@@ -6316,7 +6316,7 @@ Regras que os passos conferem:
 
 - As rotas existem só quando o semeador tem `VARANDA_PUBLIC_ORIGIN` (no compose, `VARANDA_FEIRA_ORIGIN`). Sem ela, o padrão, `/f/*` e `/index/feira/*` respondem 404. A origem da conta é outra variável e não muda.
 - A página pública escapa todo texto do diário, não tem script nem recurso externo, e responde `no-store`, `nosniff` e `no-referrer`. `index,follow` só para `disponivel` e `reservado`; `vendido` e status desconhecido saem `noindex,follow`, e só `vendido` leva também `X-Robots-Tag: noindex`. Uma publicação, um anúncio apagado, um diário bloqueado ou uma edição desconhecida dão a mesma página 404.
-- As fotos (`/f/<diário>/<seq>/foto/1..4` e `capa`) só saem com tamanho, sha256 e bytes iguais ao descritor. O `sitemap.xml` lista só endereços de anúncios que não estão `vendido`. O Caddy serve o `/robots.txt` (permite só `/f/`) e limita `/f/*` a 30 pedidos por 10 s por endereço; o service worker não intercepta `/f/*`.
+- As fotos (`/f/<diário>/<seq>/foto/1..4` e `capa`) só saem com tamanho, sha256 e bytes iguais ao descritor. O `sitemap.xml` lista só endereços de anúncios que não estão `vendido`. O Caddy serve o `/robots.txt` (permite `/f/` e, desde a seção 211, `/p/`, só para que leiam o `noindex`) e limita `/f/*` a 30 pedidos por 10 s por endereço; o service worker não intercepta `/f/*`.
 - A entrada: `GET /account/feira/policy` responde só `{ enabled }`; `POST /account/feira/start` devolve um código de 1 hora cobrado do dono do anúncio e lê o anúncio sem olhar o status (um anúncio vendido ainda abre a porta). A ordem: o corpo exato; depois o dono da cota (membro vinculado ou dono da página aberta), e sem dono responde `nao-encontrado` sem ler nada no semeador; depois a conferência do anúncio no semeador; por fim o código. Não há limite por chave de dono (qualquer um trancaria os anúncios de alguém). Exige `VARANDA_FEIRA_INVITES_PER_WEEK`, `VARANDA_INVITES_PER_WEEK` e `VARANDA_TRIAGE_TOKEN`.
 - A conferência do anúncio usa a rota própria do semeador `GET /feira-listing/<diário>/<seq>` (com o token, nunca pelo Caddy), que responde só `{ ok: true }` e tem orçamento próprio (2 ao mesmo tempo, 4 por segundo, rajada 8): inundar essa rota nunca faz `/moderation-post` responder 503. O painel continua com `/moderation-listing`.
 - O Caddy limita `/account/feira/*` na zona `feira-entrada`: 5 pedidos a cada 60 s por endereço, antes do handle genérico de `/account/*`. `POST /account/feira/idade` tem zonas próprias: `feira-idade`, 2 pedidos por hora por endereço, e `feira-idade-total`, 50 por hora no total. Cada teto é uma diretiva `rate_limit` separada, em ordem, dentro de um `route` (por endereço primeiro, global depois), para que um pedido recusado por endereço não gaste o teto global. Só um `POST` com `Content-Type: application/json` entra nas zonas da idade; qualquer outro pedido a `/account/feira/idade` recebe 405 do Caddy sem passar por zona nenhuma. O endereço fica só na memória do Caddy durante a janela, e os dois handles tiram `X-Forwarded-For` e `X-Real-Ip`. O serviço só atende `/account/feira/idade`, `/account/feira/start` e `/account/feira/policy` quando o caminho cru do pedido é exatamente esse (`/../`, `/./`, `%2F` ou `%2E%2E` dão 404), porque o Caddy e o serviço normalizam caminhos de jeitos diferentes.
@@ -6342,7 +6342,7 @@ Caminhada com um semeador, um serviço de conta e dois membros de teste (DHT loc
 - [ ] Sem `VARANDA_PUBLIC_ORIGIN`, `GET /f/<diário>/<seq>` e `GET /index/feira/...` respondem 404. Com a origem, a página de um anúncio vivo abre com título, preço, cidade e fotos.
 - [ ] Um anúncio marcado "vendido" mantém a página, com `noindex`, e sai do `sitemap.xml`. Um anúncio apagado dá a página 404.
 - [ ] Abrir `/f/<diário>/<seq>/capa` entrega a primeira foto; depois de editar o anúncio com outra foto, o mesmo endereço entrega a nova.
-- [ ] `GET /robots.txt` no domínio permite só `/f/` e aponta o sitemap.
+- [ ] `GET /robots.txt` no domínio permite `/f/` e `/p/` (seção 211), e nada mais, e aponta o sitemap.
 - [ ] Com a entrada ligada, `GET /account/feira/policy` responde `{ enabled: true }`; `POST /account/feira/start` de um anúncio de membro devolve um código; um anúncio de um diário que não é de membro responde `nao-encontrado`. Pelo Caddy, o 6º pedido a `/account/feira/*` do mesmo endereço em 60 s responde 429.
 - [ ] Com um código da Feira, a primeira sessão de idade abre e a segunda do mesmo código no mesmo dia responde `limite-idade`; um convite comum continua abrindo sessão.
 - [ ] Pelo Caddy, com códigos da Feira novos: dois `POST /account/feira/idade` do mesmo endereço na mesma hora chegam ao serviço e o 3º responde 429 do Caddy; de outro endereço, o pedido seguinte ainda passa. Antes disso, vários `GET /account/feira/idade` do mesmo endereço respondem 405 e não gastam o limite. O mesmo código da Feira em `POST /account/age/session` responde `use-a-rota-da-feira` e não abre sessão paga.
@@ -9498,7 +9498,7 @@ O inner é v5 (protocolo, seção 11, "Inner v5"): as chaves da v1, com `moment`
 
 Quem lê trata `moment` só como referência. O inner não leva foto, texto nem chave do momento, então quem envia não faz a outra pessoa ver outra coisa senão o momento de `to` naquele `seq`. A conversa resolve com `moment.lookup` (`docs/rpc.md` 5.120) `{ author, seq }`, no diário de `to` (o próprio, numa recebida; o da outra pessoa, numa enviada). Enquanto o momento está no ar, a resposta é `{ mime, w, h, ms, at }`: `ms` é 0 numa imagem e a duração num vídeo, `at` é o ISO do registro. Nunca o texto, a música, o descritor, a chave nem os bytes. A miniatura, quando há, sai de `media.read` com `kind: 'moment'`. Fora do ar (não guardado, não é momento, apagado, passado das 24 h, data adiantada demais) a resposta é `NOT_FOUND` `'foto indisponível'`. O método é só leitura, local, não abre rede e funciona com a identidade bloqueada. O nó do core, a CLI e o `varanda-serve` respondem `USAGE` `'mídia disponível só na versão web'` e não abrem diário. Um nó antigo responde `'método desconhecido'`.
 
-Na conversa, a bolha mostra o rótulo fixo "Você reagiu a um momento" (a enviada) ou "Reagiu ao seu momento" (a recebida), o emoji passado por `displayText` e, só enquanto o momento aparece, uma miniatura de no máximo 72 pt. Um vídeo vira um azulejo com o ícone de tocar e o nome "Vídeo do momento", sem player e sem baixar o arquivo. Um GIF é imagem e ganha miniatura. A consulta se repete a cada 15 s e de novo na hora em que as 24 h fecham. No fim das 24 h, se o momento foi apagado, ou se a consulta ou a leitura falha, a miniatura sai e fica "Momento indisponível". O emoji continua. Texto que não é um emoji, ou um `seq` que não é inteiro seguro, segue o balão comum: o texto do par nunca vai cru para a tela. A prévia da lista é "Reagiu a um momento" mais o emoji, nunca uma chave, um id ou um nome de arquivo. A reação conta como não lida e ordena a conversa como qualquer mensagem. Uma mensagem apagada ou oculta não vira bolha de reação. Conversa de Página não monta a bolha.
+Na conversa, a bolha mostra o rótulo fixo "Você reagiu a um momento" (a enviada) ou "Reagiu ao seu momento" (a recebida), o emoji passado por `displayText` e, só enquanto o momento aparece, uma miniatura de no máximo 72 pt. Um vídeo vira um azulejo com o ícone de tocar e o nome "Vídeo do momento", sem player e sem baixar o arquivo. Um GIF é imagem e ganha miniatura. A consulta se repete a cada 15 s, e a miniatura sai na hora em que as 24 h fecham. As bolhas do mesmo momento numa conversa aberta dividem uma consulta e uma leitura da imagem, e a URL da miniatura é liberada quando a última delas desmonta. Depois de uma falha, a próxima bolha daquele momento que monta consulta de novo, e uma resposta boa devolve a miniatura a todas; um momento fora do ar ou passado das 24 h não é consultado de novo. No fim das 24 h, se o momento foi apagado, ou se a consulta ou a leitura falha, a miniatura sai e fica "Momento indisponível". O emoji continua. Texto que não é um emoji, ou um `seq` que não é inteiro seguro, segue o balão comum: o texto do par nunca vai cru para a tela. A prévia da lista é "Reagiu a um momento" mais o emoji, nunca uma chave, um id ou um nome de arquivo. A reação conta como não lida e ordena a conversa como qualquer mensagem. Uma mensagem apagada ou oculta não vira bolha de reação. Conversa de Página não monta a bolha.
 
 Em Pedidos de mensagem (quem recebe não segue quem enviou, e ainda não aceitou), a bolha não chama `moment.lookup` nem lê a mídia. Aceitar carrega a miniatura. Voltar o estado para pedidos solta a miniatura e não consulta de novo. A prévia da lista já mostra "Reagiu a um momento" e o emoji antes de aceitar.
 
@@ -9528,6 +9528,7 @@ node packages/web-member/test/moments-e2e.test.js
 node apps/app/test/moments.test.js
 node apps/app/test/momentosScreen.test.js
 node apps/app/test/dm.test.js
+node apps/app/test/momentPreviews.test.js
 node apps/app/test/vitrine.test.js
 node apps/app/test/legal.test.js
 node apps/app/test/terms-version.test.js
@@ -9560,7 +9561,9 @@ node apps/site/test/legal.test.js
 
 `apps/app/test/momentosScreen.test.js`: `viewer offers six private reactions above Responder only on an eligible peer moment`; `viewer reaction sends once while pending, pauses playback, then keeps the row after success`; `viewer uncertain reactions stay blocked by ref, open the conversation without context and never retry`; `viewer plain reaction errors use errorText and keep the row available`; `viewer reaction completion belongs to the captured moment after navigation`; `viewer reaction settles after unmount without allowing a stale button to send`; `viewer keeps the uncertain note and Ver conversa offline without emoji buttons`.
 
-`apps/app/test/dm.test.js`: `threadRows preserves only the source moment, including duplicate message ids`; `moment bubbles render both labels and the emoji through displayText`; `hostile moment text and an ordinary emoji stay on the ordinary message path`; `moment image reads once across polls, fits 72 pt and releases on unmount`; `video previews use a static tile without reading media`; `requests and missing or invalid authors never look up or read a moment`; `failed lookup and failed media read show the unavailable label`; `a mounted preview expires at its deadline and drops the image`; `a mounted preview discovers deletion on its next poll`; `identity changes release native read files and late reads cannot restore a thumb`; `Mensagem supplies moment context only for private reaction rows`; `expiry drops the mounted image even while a lookup is pending`; `request acceptance loads the preview and returning to requests releases it`.
+`apps/app/test/dm.test.js`: `threadRows preserves only the source moment, including duplicate message ids`; `moment bubbles render both labels and the emoji through displayText`; `hostile moment text and an ordinary emoji stay on the ordinary message path`; `moment image reads once across polls, fits 72 pt and releases on unmount`; `bubbles of one momento share one lookup and one read`; `video previews use a static tile without reading media`; `requests and missing or invalid authors never look up or read a moment`; `failed lookup and failed media read show the unavailable label`; `a mounted preview expires at its deadline and drops the image`; `a mounted preview discovers deletion on its next poll`; `identity changes release native read files and late reads cannot restore a thumb`; `Mensagem supplies moment context only for private reaction rows`; `expiry drops the mounted image even while a lookup is pending`; `request acceptance loads the preview and returning to requests releases it`.
+
+`apps/app/test/momentPreviews.test.js`: consulta e imagem compartilhadas, isolamento por momento e identidade, expiração e falhas para todas as bolhas, nova tentativa pela próxima bolha depois de uma falha (sem leitura antiga criando uma segunda imagem nem consulta antiga perdendo a nova tentativa), liberação e limpeza de respostas tardias, cache por nó e imports puros.
 
 `apps/app/test/vitrine.test.js`: `momentos: a reaction keeps its moment seq on dm.thread` (a reação guarda o `seq`; uma mensagem comum não ganha a chave `moment`). A lista de chaves de `moment.lookup` em `all vitrine methods match the documented result and row keys` é `mime`, `w`, `h`, `ms`, `at`.
 
@@ -9672,7 +9675,344 @@ Nenhuma conferência em aparelho nem com o provedor real foi feita nesta tarefa.
 - [ ] Fechar e reabrir o app, ou recarregar a página na web, restaura o som. A escolha não aparece em outro aparelho, e **Tocar música sozinha** mantém o valor guardado.
 - [ ] Uma conta que aceitou a versão 46 recebe os Termos de Uso e a Política de Privacidade 47 para novo aceite.
 
-## 209. Base visual do app: botões pequenos, busca, barras de aviso, alça das folhas (PR feat/ui-kit-foundations)
+## 209. Reload completo do JS no gate do Android (issue #14, 2026-11-07)
+
+### O que mudou
+
+- `apps/app/scripts/gate-server.js` ganhou `--reload` e o passo `j`; `apps/app/src/gate/harness.js` ganhou a fase `reloaded`. Depois do passo `i`, o app inicia uma sincronização contínua e chama `DevSettings.reload()` (reload completo, não Fast Refresh). O novo contexto inicia o nó com o `recover: true` padrão e confere `node.info`, o post no `log.read` e uma sincronização contínua até `sync ready`. No Android, o driver conta as threads `bare-worklet` do processo antes do reload e depois da resposta do novo nó, e exige o mesmo número (1).
+- Uma falha antes do reload (sem `DevSettings.reload`, ou o `sync.start` que o precede) é reportada como falha do passo `j`, e o gate para na hora em vez de esperar o limite de tempo.
+- Sem `--reload` o gate é o mesmo de antes (passos `a` a `i`).
+- O driver espera o relato do passo `j` terminar (a nova contagem de worklets, até 5 s) antes de aceitar o `done`, para que a pontuação não rode sem o `j`. No Android, uma contagem que o `adb` não devolveu (`pidof` ou `ps` falhou) reprova o passo `j`; no iOS, que não conta worklets, segue como "não medido". O `sync ready` esperado antes do reload é o da nova partida, não um evento velho do passo `f`.
+
+### Executado
+
+Emulador `LembraApi36` (Android 16, API 36, google_apis x86_64), build de debug `app.varanda.debug` (JDK 21, `./gradlew assembleDebug -PreactNativeArchitectures=x86_64`), Metro iniciado sem `CI=1` (em modo CI o Metro não vigia arquivos e serve o código antigo), `npm run gate -- --platform android --host <ip da máquina> --reload`:
+
+- Passos `a` a `i`: PASS, como na seção 30.
+- Passo `j`: PASS. Reload com a sincronização contínua rodando, o novo worklet abriu o armazenamento (`recover true`, sem `LOCKED`), `node.info` e o post presentes, sincronização contínua pronta. Threads `bare-worklet`: 1 antes do reload, 1 depois.
+- Controle: com o worklet criado sem id (`id: null` em `native.js`, revertido depois), o passo `j` também passou, com 1 e 1. No Android, o worklet anterior já sai sem o registro por id (o reload destrói a instância React antiga e o worklet vai junto); o id fixo fica como segunda camada. O teste não distingue as duas.
+
+### Não executado
+
+- [ ] iOS (simulador ou aparelho): o driver não conta worklets no iOS, então o passo `j` só confere que o novo nó abre sem `LOCKED`.
+- [ ] Aparelho Android real e arm64-v8a.
+- [ ] Reload pelo menu de desenvolvedor ou pela tecla `r` do Metro, em vez de `DevSettings.reload()`.
+
+## 210. Registro de publicação na web (post-share) e os métodos post.shared, post.share e post.unshare
+
+O registro assinado `post-share` permite que a pessoa autora autorize a exibição de uma publicação própria, para quem não tem conta, na página pública da instalação. A publicação fica pública enquanto algum desses registros estiver vivo, e retirar apaga todos (`docs/protocol.md` seção 2, "Public share"). Este PR acrescenta também `post.shared`, `post.share` e `post.unshare`; nada é servido ainda e não há mudança nos Termos. A página pública vem no próximo PR, e o fluxo no app no terceiro.
+
+### Verificação automatizada
+
+Cada arquivo sozinho, a partir da raiz, no Node 24. A CI completa (`npm ci`, lint, `npm test` e demo) é a CI de pouso e não entra aqui.
+
+- `node packages/core/test/records.test.js`: 63/63 testes, 1509/1509 asserções
+- `node packages/core/test/post-share.test.js`: 6/6 testes, 72/72 asserções
+- `node packages/core/test/deletion.test.js`: 57/57 testes, 920/920 asserções
+- `node packages/core/test/session-post-share.test.js`: 1/1 teste, 4/4 asserções
+- `node packages/rpc/test/methods.test.js`: 130/130 testes, 6169/6169 asserções
+- `node packages/web-member/test/post-share.test.js`: 9/9 testes, 116/116 asserções
+- `node packages/web-member/test/delete.test.js`: 9/9 testes, 87/87 asserções
+- `npx standard` nos arquivos `.js` alterados: limpo
+
+Os testes de `web-member` cobrem compartilhar e consultar, repetição sem nova escrita, retirada, novo compartilhamento com registro mais alto, contagem de registros antigos ainda vivos sob um registro tombstonado e retirada dos nove registros vivos em mais de um append. Cobrem também recusas para publicação de outra autoria, apagada, registro que não é publicação ou sequência fora do intervalo, identidade bloqueada para compartilhar e retirar, consulta com identidade bloqueada e push após compartilhar, retirar e compartilhar de novo depois de um push já confirmado pelo semeador. Blocos guardados depois de um buraco contam (uma tombstone e um compartilhamento vivo), e um alvo dentro do buraco é recusado. O limite de publicações compartilhadas por diário (`shareRoom`, 4096 por padrão) recusa uma publicação nova quando está cheio, mas não uma que já tem compartilhamento, vivo ou retirado. Uma retirada cujo segundo append falha conta e envia as oito tombstones já gravadas, sem repetir nada, e o compartilhamento que sobra continua vivo. Remover `wrote()` antes do push, a checagem de tombstone na dobra dos compartilhamentos vivos, a leitura de todos os blocos guardados ou o repasse do que já foi gravado quando um append falha faz os testes falharem. O teste do nó da CLI confere também que as recusas não criam arquivos.
+
+### Verificação manual
+
+Não se aplica a este PR, pois nenhuma tela ou rota usa os métodos ainda. As conferências manuais vêm com os próximos dois PRs.
+
+## 211. Página pública de uma publicação no semeador (/p/<diário>/<seq>)
+
+Um membro publica uma publicação própria na web ao acrescentar o registro assinado `post-share` ao próprio diário; retirar grava uma tombstone, e apagar a publicação também encerra a página. O semeador serve `GET` e `HEAD /p/<diário>/<seq>`, as fotos em `/p/<diário>/<seq>/foto/<n>` (n de 1 a 4) e `/p/policy`, e só mostra a página com compartilhamento vivo, publicação viva, diário visível, nem retido nem bloqueado, que não seja Página, e com o diário lido por inteiro; na dúvida, não mostra nada. `VARANDA_POSTS_ORIGIN` nasce desligado e é independente de `VARANDA_FEIRA_ORIGIN`.
+
+### Verificação automatizada
+
+Cada arquivo sozinho, a partir da raiz, no Node 24. A CI completa (`npm ci`, lint, `npm test` e demo) é a CI de pouso e não entra aqui.
+
+- `node packages/core/test/seeder-post-public.test.js`: 4/4 testes, 69/69 asserções
+- `node packages/core/test/seeder-feira.test.js`: 19/19 testes, 122/122 asserções
+- `node apps/cli/test/post-page.test.js`: 15/15 testes, 443/443 asserções
+- `node apps/cli/test/seeder-post-http.test.js`: 2/2 testes, 195/195 asserções
+- `node apps/cli/test/seed-ws.test.js`: 86/86 testes, 1607/1607 asserções
+- `node apps/cli/test/seeder-feira-http.test.js`: 1/1 teste, 46/46 asserções
+- `node apps/cli/test/caddyfile.test.js`: 20/20 testes, 247/247 asserções
+- `node apps/cli/test/deploy.test.js`: 60/60 testes, 756/756 asserções
+- `node apps/cli/test/cli.test.js`: 5/5 testes, 1296/1296 asserções
+- `node apps/cli/test/readme-help.test.js`: 1/1 teste, 2/2 asserções
+- `node apps/app/test/sw.test.js`: 77/77 testes, 712/712 asserções
+- `npx standard` nos arquivos `.js` alterados: limpo
+
+Os testes cobrem a resposta do semeador em cada caso que não mostra nada (sem compartilhamento, retirado, um compartilhamento mais novo já retirado por cima de um vivo mais antigo, publicação apagada, Página, diário retido ou bloqueado, varredura ou índice de nomes atrasado, data mais de 24 h à frente, acima do teto de 4096) e a nova conferência depois das leituras (retirada, exclusão, bloqueio, compartilhamento mais novo, índice atrasado, Página). Um perfil ou um @nome apagado durante as leituras derruba só esse campo. Cobrem o desenho da página (escape, sem script, até 4 fotos e "Mais N", só a capa no vídeo, rótulos de resposta e de citação, o único link, noindex) e as rotas HTTP (o mesmo 302 comparado em cada caso, em GET e em HEAD; fotos de 1 a 4 byte a byte; foto 5 e outros caminhos com 404; uma retirada durante a leitura da foto devolve 404; POST devolve 405; o orçamento da página; policy ligada e desligada; cada interruptor sozinho não liga o outro). Cobrem também o que o Caddy, o deploy e o service worker fixam para `/p/*`.
+
+### Verificação manual
+
+Nenhuma tela muda neste PR. A página é exercitada em HTTP de verdade por `seeder-post-http.test.js`, contra um semeador numa DHT local. Não houve passagem com curl nem com um navegador numa instalação de teste com `VARANDA_POSTS_ORIGIN` ligado; isso vem com o terceiro PR, quando o app puder publicar.
+
+## 212. Link de publicação, folha "Página pública na web" e chegada por /publicacao, Termos 48
+
+Toda publicação de diário ganha o link `<origem>/p/<chave>/<seq>` (botão "compartilhar" e "Copiar link" no "mais"). Nas publicações próprias, com o nó hospedado e `GET /p/policy` respondendo `{"enabled":true}`, o "mais" ganha "Página pública na web", que abre a folha que lê (`post.shared`), publica (`post.share`) e tira da web (`post.unshare`). Um link para uma publicação que não aparece leva a `/publicacao/<chave>/<seq>` no app, que guarda o destino e, sem sessão, mostra o cartão "Você abriu o link de uma publicação. Entre ou crie sua conta para ver."; com sessão e nó hospedado, abre a Conversa uma vez. App Links e associação iOS só para `/publicacao/`; `/p/` continua no navegador. Termos e Política na versão 48.
+
+### Verificação automatizada
+
+Cada arquivo sozinho, a partir da raiz, no Node 24.22.1. A CI completa (`npm ci`, lint, `npm test` e demo) é a CI de pouso e não entra aqui.
+
+- `node apps/app/test/postLink.test.js`: 9/9 testes, 94/94 asserções
+- `node apps/app/test/linkReturn.test.js`: 27/27 testes, 267/267 asserções
+- `node apps/app/test/postShare.test.js`: 14/14 testes, 397/397 asserções
+- `node apps/app/test/postShareRow.test.js`: 8/8 testes, 78/78 asserções
+- `node apps/app/test/postActions.test.js`: 16/16 testes, 141/141 asserções
+- `node apps/app/test/vitrine.test.js`: 33/33 testes, 3491/3491 asserções
+- `node apps/app/test/platformGate.test.js`: 3/3 testes, 52/52 asserções
+- `node apps/app/test/nativeLinks.test.js`: 7/7 testes, 31/31 asserções
+- `node apps/app/test/chatMedia.test.js`: 51/51 testes, 252/252 asserções
+- `node apps/app/test/musicEmbedCard.test.js`: 41/41 testes, 456/456 asserções
+- `node apps/app/test/eas-preview.test.js`: 10/10 testes, 58/58 asserções
+- `node apps/app/test/hardening.test.js`: 24/24 testes, 201/201 asserções
+- `node apps/app/test/legal.test.js`: 32/32 testes, 1465/1465 asserções
+- `node apps/app/test/terms-version.test.js`: 1/1 teste, 2/2 asserções
+- `node packages/core/test/terms.test.js`: 8/8 testes, 126/126 asserções
+- `node apps/site/test/legal.test.js`: 7/7 testes, 115/115 asserções
+- `node apps/cli/test/deploy.test.js`: 60/60 testes, 756/756 asserções
+- `node apps/cli/test/hosted-lab.test.js`: 11/11 testes, 134/134 asserções
+- os 34 arquivos de teste de `apps/app/test` que leem o `App.js`: todos passam
+- `npx standard` nos arquivos `.js` alterados: limpo
+
+Os testes cobrem o link e a ref (`<chave>:<seq>` dentro do app, `/p/<chave>/<seq>` fora). Cobrem `parseAppLink` com `/publicacao/` e com `/p/`. Cobrem a captura na abertura da página (`capturePostPath`): um caminho de publicação válido é guardado, todo caminho de publicação, válido ou não, sai da barra de endereço, e a busca e o fragmento ficam iguais. Cobrem o depósito que guarda o destino no recarregamento da entrada pela web: armazenamento da aba por 1 hora, memória da página quando o armazenamento da aba recusa, e só memória no nativo. A sonda da política responde verdadeiro só com 200 e `enabled === true`. Erro de rede, 5xx, 408 ou 429 é perguntado de novo mais tarde. Uma resposta definitiva fica guardada por origem. Uma resposta redirecionada conta como desligada, também quando o `fetch` do React Native não marca `redirected`: o endereço final precisa ser o `/p/policy` da origem perguntada. A sonda vai sem opção de cache, porque o `fetch` do React Native acrescentaria `?_=` ao endereço e a resposta pareceria redirecionada. Cobrem os estados da folha, inclusive `uncertain`, sem nova tentativa automática. Logo depois de publicar, a folha mostra só o aviso de envio, sem o texto de ligada. A linha de publicar aparece só na publicação de diário da própria pessoa, nunca como Página e nunca numa republicação. A chegada espera as abas e um nó hospedado e abre uma vez. A folha conta como cobertura, então uma nota de voz ou um player de música embaixo dela para. App Links só para `/publicacao/`. Termos 48 no app, no núcleo e no site.
+
+### Verificação manual
+
+A passagem manual rodou o laboratório hospedado `node apps/cli/scripts/hosted-lab.js --port 8090 --expo http://127.0.0.1:8083 --publicacoes` (a flag nova `--publicacoes` deste PR) com o servidor web do Expo `npm run web -w apps/app -- --port 8083`, no Chrome sem tela, dirigido pelo protocolo DevTools, com um autenticador virtual de passkey (PRF, backup eligible) e cadastro por celular com o código de SMS simulado do laboratório. Larguras: 390 e 360 px, depois 1280 px.
+
+1. Membro A (Ana Teste) publica um texto com `<b>sem html</b>`. No "mais" da publicação própria: "Copiar link", "Página pública na web" e "Apagar". A folha, desligada, mostra o aceite e "Publicar na web"; depois de publicar, "Enviado para a web. Se o link ainda não mostrar a publicação, tente de novo em instantes.", o texto de ligada, o link e "Compartilhar", "Copiar link" e "Tirar da web". Depois desta passagem, a folha deixou de mostrar o texto de ligada logo após publicar (ele volta quando a folha lê o estado de novo); isso foi conferido só pelo teste.
+2. `curl` em `/p/<A>/4`: 200, `X-Robots-Tag: noindex, nofollow, noarchive`, `Cache-Control: no-store`, título "Publicação de Ana Teste na Varanda", o `<b>` escapado, só o link "Ver na Varanda", nenhum `<script>`. `/p/policy` responde `{"enabled":true}`; uma publicação desconhecida, 302.
+3. Visitante sem conta (360 px): a página aparece limpa; "Ver na Varanda" leva a `/publicacao/<A>/4`. Com o destino na aba, a tela de entrada mostra o cartão "Você abriu o link de uma publicação. Entre ou crie sua conta para ver." com "Agora não", "Criar minha conta" e "Já tenho conta". "Agora não" tira o cartão e apaga o destino.
+4. Membro A com a sessão aberta e o destino na aba: depois de recarregar, a Conversa da publicação abre e o destino é apagado; recarregar de novo não abre outra vez.
+5. A folha reaberta lê o estado ligado. "Tirar da web" mostra "Pedido enviado para tirar da web. Cópias já feitas ficam fora do nosso alcance." e o `curl` passa a dar 302 na hora, com cabeçalhos e corpo iguais aos de uma publicação desconhecida (só o caminho do Location muda). "Publicar na web" de novo: um 302 enquanto o semeador relê o diário (cerca de 5 s) e depois 200.
+6. Membro B segue A. No "mais" da publicação de A: "Mensagem em particular", "Copiar link", "Denunciar" e "Bloquear", sem "Página pública na web"; "Copiar link" copia `http://localhost:8090/p/<A>/4` (conferido interceptando a escrita na área de transferência). Uma mensagem privada de B para A não tem link: as ações da mensagem são "Responder", "Copiar" e "Encaminhar", e a tela não contém nenhum endereço `/p/`.
+7. 1280 px: a folha e a página pública aparecem bem.
+8. Interruptor desligado, num segundo laboratório sem `--publicacoes` (porta 8091): `/p/policy` responde `{"enabled":false}`, `/p/<A>/4` dá o mesmo 302, e na publicação própria de um membro C o "mais" mostra só "Copiar link" e "Apagar".
+
+### Não verificado
+
+- iOS (simulador) e Android (emulador): não rodou. Os aparelhos estavam em uso por outro trabalho, e o laboratório não entra no app nativo (a configuração hospedada exige https, o rp.id da passkey não pode ser um IP, o iOS espera o domínio associado e o build de debug do Android não atende o assetlinks da instalação).
+- App Links do Android e links universais do iOS para `/publicacao/` num aparelho: dependem do domínio de produção.
+- A captura de `/publicacao/<chave>/<seq>` ao abrir a página na web hospedada: no laboratório a página é http em loopback, então `hostedPage` é falso e a captura não roda (o link `/@nome` também não abre ali). O destino foi gravado à mão na aba (`sessionStorage`, chave `varanda.postLink`) para conferir o resto do caminho. A função da captura tem teste próprio.
+- Um segundo membro compartilhando o link de uma publicação que o autor não publicou, aberto por um visitante: não rodou assim. Rodaram separados o 302 de uma publicação não publicada (passos 5 e 8) e o cartão de entrada com o destino na aba (passo 3).
+- A folha de compartilhamento do sistema (`navigator.share` e a do celular): o Chrome sem tela não a abre.
+- O Caddy na frente de `/p/*` (zona de limite `publicacao`): o laboratório manda `/p/*` direto ao semeador.
+- Conta com passkey de produção.
+
+## 213. A abertura espera Momentos e os detalhes da primeira tela
+
+A capa de abertura é o splash. No nativo, com sessão guardada e instantâneo de no máximo 24 h, a prévia das linhas guardadas fica no mesmo lugar. A folga `DETAILS_GRACE_MS`, de 400 ms depois da primeira página, saiu. A capa sai com a primeira tela inteira: nomes, metadados das fotos dos autores, contagens e a faixa de Momentos.
+
+A capa fica até as duas condições abaixo, ou até 5 s (`CONTENT_PATIENCE_MS`) se uma leitura trava. Outra aba, ou uma tela empilhada aberta na partida (um link), aparece na hora: `ruaFeedReady` só espera com A Rua na primeira tela. O mínimo de 1,5 s continua só enquanto o app carrega ou conecta, ou quando a introdução ou os Termos vêm em seguida. Quem volta, com a configuração lembrada, não tem espera fixa.
+
+Detalhes das primeiras linhas, em `apps/app/src/splashGate.js`. `profileAnswered` aceita `null` ou um objeto com `avatar` definido: o metadado da foto chegou, e `null` conta. `feedDetailsReady` espera esse perfil, a resposta da publicação original de cada republicação e as contagens de pelo menos uma linha. `strictProfiles` só vale como `true` literal. A Rua passa `strictProfiles: node.hosted === true`. Num nó hospedado, a semente do feed (nome com `avatar` indefinido) não conta, e a resposta de `profile.read` precisa ter chegado. Num nó sem hospedagem, qualquer resposta de `profileOf` diferente de `undefined` continua valendo. Sem nó hospedado, sem rede, com o índice indexando ou com a resposta de contagens incompleta, as contagens não seguram a capa. Uma primeira leitura do feed que falha encerra página e detalhes.
+
+Faixa de Momentos, em `momentsSettled`. A fase `off` (nó sem hospedagem) ou `error` (a leitura falhou) assenta na hora. Com `moments.read` em `ready` e a faixa fora da tela, também assenta. Com a faixa na tela, a lista de vistos precisa estar carregada e cada autor de anel precisa de `profileAnswered`. Falha ao carregar a lista conta como carregada, com lista vazia. A Rua pede esses perfis com `resolveMany(ringKeys)`, também depois da trava. Quando a trava passa, grava a marca `moments` e chama `onBoot('moments')`. Agindo como Página, `onBoot('page')`, `onBoot('details')` e `onBoot('moments')` saem juntos: não há feed de membro para esperar.
+
+O instantâneo guardado marca `page` e `details` na hora e semeia os nomes. Não marca `moments`. Sozinho, não levanta a capa: ela continua até a faixa assentar, ou até o teto de 5 s.
+
+Em `apps/app/App.js`, `feedBoot` guarda `page`, `details` e `moments`. `feedReady` é `ruaFeedReady(...)`. A marca `splash-end` sai com `feedReady` ou `patience`. `grace` deixou de ser emitida. `bootProgress` vai a 0,8 na página, 0,9 nos detalhes e 1 com detalhes e Momentos. A barra só cresce.
+
+Sem mudança de protocolo, RPC nem Termos.
+
+### Verificação automatizada
+
+A partir da raiz. A lista é um roteiro, não um registro de execução.
+
+- `node apps/app/test/splashGate.test.js`
+- `node apps/app/test/ruaSnapshot.test.js`
+- `npm run lint`
+- `npm test`
+- `npm run demo`
+
+`splashGate.test.js` cobre `profileAnswered`, `momentsSettled`, `ruaFeedReady`, `strictProfiles`, a barra, a ausência de `DETAILS_GRACE_MS`, `resolveMany(ringKeys)` e `onBoot('moments')` ao agir como Página. `ruaSnapshot.test.js` cobre o instantâneo marcando página e detalhes sem marcar Momentos. `npm run lint`, `npm test` e `npm run demo` são os passos da CI.
+
+### Verificação manual
+
+Nenhuma passagem em aparelho foi feita nesta seção. A ordem é o build de debug do Android (emulador ou aparelho) primeiro, depois o simulador iOS, depois a web e o PWA.
+
+- [ ] Abrir já conectado, com a primeira página guardada: A Rua aparece com os anéis de Momentos, nomes, fotos e contagens já no lugar, sem a linha pular.
+- [ ] Abrir já conectado, sem a primeira página guardada: o mesmo.
+- [ ] Com `moments.read` lento, a capa fica até a faixa assentar ou cerca de 5 s.
+- [ ] Um link de conversa ou de perfil aberto na partida mostra a tela na hora.
+- [ ] Num nó sem hospedagem, a capa não espera Momentos.
+- [ ] Travar e destravar não traz a capa de volta.
+
+Limites: os bytes das fotos das publicações, das imagens de avatar e da mídia dos momentos não fazem parte do sinal. A conferência mais estrita do autor roda só num nó hospedado. Nenhuma passagem em aparelho foi feita nesta seção.
+
+## 214. Abertura animada do convite pessoal, por região
+
+Quem chega por um convite pessoal verificado, com a introdução ainda por ver, vê a abertura em volta do cartão. A tela é a de `openingGate` quando o resultado é `'card'` (`apps/app/src/inviteCardCopy.js`). O portão devolve `'card'` só com a introdução devida (`introShow`), sem retorno de link (`linkReturn`) e sem retorno de idade (`ageReturn`), com cartão, sem dispensa (`dismissed`) e com `verified === true`. `App.js` passa `introShow` quando a introdução seria mostrada e não há trava de carga nem espera, passa `ageReturn` como `AGE_RETURN` e não passa `linkReturn` (ausente vale como falso). Um retorno de idade também tira `introShow`.
+
+`App.js` trata associação desconhecida como pendente e, fora isso, usa `canAttribute`. Uma assinatura válida sozinha não abre a tela: `canAttribute` exige `signature === 'ok'`, `membership === 'linked'`, `expired === false` e `member` string. Enquanto o resultado ainda não existe, a assinatura é `'wait'`, ou a assinatura é `'ok'` com `membership === 'unknown'`, `verified` fica `null`. Nesse intervalo o splash espera no máximo `OPEN_WAIT_MS` (6 s), contados de quando a introdução passaria a aparecer. O temporizador que força o redesenho soma 50 ms. Passado o prazo, o portão devolve `'none'`, a introdução aparece e o splash não volta: se a introdução já foi desenhada, um `'wait'` seguinte vira `'none'`. Um cartão conferido depois ainda toma o lugar da introdução enquanto ela segue elegível (não vista, não dispensada, sem retorno de idade). Assinatura ruim, cartão vencido ou chave sem vínculo deixam `verified` falso: a tela não aparece, e não há essa espera. **Agora não** guarda o código e o cartão; a dispensa vale só nesta carga.
+
+Um link cujo índice de desenho o parser não conhece é recusado. `parseInviteCardUrl` (`packages/rpc/lib/invite-card.js`) devolve nulo quando `designAt` não acha o índice, então o convite não vira cartão. A cena neutra é só reserva do componente: `welcomeCopy` sem região usa o título "Tem lugar pra você." e a frase "A varanda está aberta.", sem etiqueta, e `motifsFor` não devolve motivos.
+
+O chão da tela é o fundo do desenho (`art.bg` do tema claro ou escuro). A tinta das palavras é `art.ink` do mesmo par. Os motivos são grupos de formas recortadas da mesma arte (`apps/app/src/inviteWelcomeStage.js`, janelas de `MOTIF_WINDOWS`; listras ficam de fora) e desenhados com `Shape`. A quantidade vem da classe da tela: 3 num telefone pequeno (`compact`: largura menor que 360 ou altura menor que 600, tamanho de base 40), 5 num telefone (`phone`, tamanho de base 52: três em cima e dois no pé) e 9 numa tela larga (`wide`: largura a partir de 768 e altura a partir de 600, tamanho de base 72: cinco em cima, dois nas calhas ao lado da coluna de 420 e dois no pé). Na larga, os dois do meio ficam fora da coluna de 420, um à esquerda e um à direita. Nenhum motivo fica atrás do cartão: os de cima ficam na faixa superior e os de baixo na inferior. Uma placa da cor do chão segura o cabeçalho, para um motivo não aparecer por baixo das palavras quando a coluna rola sobre a fileira de cima.
+
+O movimento vem da região do desenho (`apps/app/src/inviteWelcomeMotion.js`, `REGION_MOTION`). Essa região é a que quem convidou escolheu com o desenho (`regionOf`). Nada no texto diz de onde quem chega veio. Não há geolocalização, pedido de perfil nem chamada de rede nova. Os cinco:
+
+- Norte: sobe como água. Parte 48 px abaixo e 12 px para o lado (espelhado nos lados), escala 0,8, sem rotação, 70 ms entre motivos.
+- Nordeste: desce balançando. Parte 56 px acima, rotação de 14 graus espelhada, escala 1, 60 ms entre motivos.
+- Centro-Oeste: cai como pétala. Parte 64 px acima e 24 px à esquerda, escala 0,7, rotação -20 graus, sem espelho, 80 ms entre motivos.
+- Sudeste: surge como azulejo assentado. Escala 0,2 no lugar, sem translação, 50 ms entre motivos.
+- Sul: vem com o vento. Parte 64 px à direita, rotação de 8 graus, escala 0,9, sem espelho, 70 ms entre motivos.
+
+Cada motivo espera 80 ms (`MOTIF_DELAY_MS`) mais a ordem vezes o intervalo da região, anda 720 ms (`MOTIF_MS`) e termina dentro de 1,5 s (`WELCOME_MS`). A curva é `[0.22, 1, 0.36, 1]`. Uma região que o componente não conhece usa o movimento neutro (16 px abaixo, escala 1, 70 ms), não um destes cinco. Um link não chega aí: o parser já recusou o índice.
+
+A etiqueta, o título e a frase são texto do app (`apps/app/src/inviteWelcomeCopy.js`). O título é "Tem lugar pra você." A etiqueta visível é a região, um ponto mediano e o nome do desenho (por exemplo, Norte · Marajoara). O nome que o leitor de tela ouve é "Cartão <desenho>, <região>" (`tagLabel`, como "Cartão Marajoara, Norte"). As frases, uma por desenho:
+
+- Marajoara (Norte): "Losangos e espirais, feitos com calma."
+- Encontro das águas (Norte): "Dois rios lado a lado, sem pressa."
+- Vitória-régia (Norte): "Folhas largas sobre a água parada."
+- Cordel (Nordeste): "Sol alto e história boa de contar."
+- Bandeirinhas (Nordeste): "As bandeirinhas já estão no alto."
+- Chita (Nordeste): "Flor miúda, cor por todo lado."
+- Ipê-amarelo (Centro-Oeste): "O ipê abriu, é tempo de visita."
+- Pantanal (Centro-Oeste): "Água rasa e horizonte largo."
+- Azulejo (Sudeste): "Azulejo na parede, café na mesa."
+- Copacabana (Sudeste): "O mar vai e volta, sem cansar."
+- Minas (Sudeste): "Conversa baixa ao pé da serra."
+- Araucária (Sul): "Sombra de araucária e ar frio."
+- Chimarrão (Sul): "A cuia está passando na roda."
+
+O nome ("Pra " mais o nome), a mensagem e o @nome ficam no cartão e passam por `displayText`. O prazo também fica no cartão: é a linha de `expiryLine` (texto do app, como "Vale até hoje."), não a mensagem de quem convidou. O cabeçalho entra uma vez: a etiqueta aos 120 ms por 360 ms, o título aos 220 ms por 420 ms e a frase aos 380 ms por 420 ms, cada um saindo de opacidade 0 e 10 px abaixo. O título é cabeçalho (`accessibilityRole='header'`). Os motivos não entram na árvore de acessibilidade e não recebem toque.
+
+A entrada espera a resposta de Reduzir movimento e só toca se a consulta tiver sucesso e devolver exatamente falso, e se o palco já tiver medido a tela. Toca uma vez por montagem e depois nada se move: não há laço. Com Reduzir movimento ligado, com a consulta falha, ou sem resposta em 300 ms (`PREF_WAIT_MS`), os motivos, o cabeçalho e a vibração não tocam: a cena pronta aparece (os valores vão ao fim). Uma resposta que liberaria o movimento depois disso não começa a entrada. Se Reduzir movimento liga no meio da entrada, motivos e cabeçalho assentam na hora e a vibração que ainda não saiu é cancelada. O cartão em si conserva o fade e o crescimento curtos de `inviteCardMotion` (420 ms, ou já no fim quando a configuração dele, `useReduceMotion`, pede movimento reduzido). Esta abertura não muda essa decisão. A consulta da abertura, quando falha ou passa de 300 ms, não é a consulta do cartão.
+
+No telefone, uma vibração de sucesso sai aos 420 ms (`HAPTIC_MS`, `tap('success')`), uma vez, e só quando a entrada toca. Na web o módulo de vibração é vazio, então não há toque. Com Reduzir movimento, consulta falha ou prazo de 300 ms, não há toque. Não há som e não há estado guardado da entrada.
+
+**Entrar** marca a introdução como vista (`intro.markSeen`). **Como funciona** mostra os cartões da introdução e, ao terminar, volta ao cartão: a tela monta de novo e a entrada toca outra vez, de propósito. **Agora não** esconde a tela nesta carga. Os três respondem desde o primeiro instante, também nos primeiros 300 ms e enquanto o cartão ainda faz o fade dele.
+
+`InviteArrival`, depois da configuração, e a prévia no compositor de convites continuam como estavam, sem esta abertura. A decisão de mostrar a tela é por capacidade (`openingGate`, `canAttribute`). O único `Platform.OS` da abertura escolhe o driver da animação (`Platform.OS !== 'web'` em `apps/app/src/ui/InviteWelcome.js`). Sem mudança de protocolo, RPC nem Termos. As seções 126 e 127 continuam para o cartão. O texto delas não foi editado.
+
+Testes automáticos, a partir de `apps/app`, cada arquivo sozinho. Conferem o contrato e o texto do código. Não montam a interface num aparelho. A lista é um roteiro, não um registro de execução. A verificação em aparelho desta seção continua por fazer, por uma pessoa.
+
+```sh
+node ../../scripts/run-tests.js test/inviteWelcomeStage.test.js
+node ../../scripts/run-tests.js test/inviteWelcomeMotion.test.js
+node ../../scripts/run-tests.js test/inviteWelcomeCopy.test.js
+node ../../scripts/run-tests.js test/inviteWelcome.test.js
+node ../../scripts/run-tests.js test/inviteCardFrame.test.js
+node ../../scripts/run-tests.js test/inviteCardFlow.test.js
+```
+
+`test/inviteWelcomeStage.test.js` prende o recorte dos motivos, as classes, as faixas, as contagens 3, 5 e 9, as calhas da coluna de 420 e o contraste da tinta com o chão. `test/inviteWelcomeMotion.test.js` prende os cinco movimentos, o teto de 1,5 s, a vibração única aos 420 ms, o assentamento com Reduzir movimento, com consulta falha e aos 300 ms sem resposta, e a ausência de repetição. `test/inviteWelcomeCopy.test.js` prende o título, as treze frases, a etiqueta lida e a reserva neutra. `test/inviteWelcome.test.js` lê o fonte de `InviteWelcome.js` e de `InviteCardOpen.js`: um só `Platform.OS`, ações soltas, motivos fora do leitor, sem laço e sem `displayText`. `test/inviteCardFrame.test.js` prende o `Shape` compartilhado e o `displayText` do nome, da mensagem e do @nome. `test/inviteCardFlow.test.js` prende que assinatura ruim, chave sem vínculo, cartão vencido e associação desconhecida não autorizam, e que o cartão de chegada não escreve sozinho.
+
+### Verificação manual
+
+Nenhuma verificação em aparelho foi feita. Os itens estão em aberto. São um roteiro, não um registro de execução. Ordem: build de debug do Android, simulador do iOS, depois a web e o PWA instalado. Onde o item não diz outra coisa, repetir nas quatro. Registrar aparelho, sistema e, na web, o navegador. Os links saem de Convites, como na seção 127: convite pessoal já conferido, introdução ainda não vista.
+
+- [ ] 1. Um link de cada região (Norte, Nordeste, Centro-Oeste, Sudeste, Sul) e, no conjunto, os 13 desenhos, no tema claro e no escuro. Resultado esperado: a tela toma a cor do desenho; os motivos chegam com o movimento daquela região, listado acima, e param; acima do cartão aparecem a etiqueta da região e do desenho, o título "Tem lugar pra você." e a frase daquele desenho.
+- [ ] 2. Telefone com 320 px de largura. Resultado esperado: classe compacta, 3 motivos na faixa de cima, nenhum no pé; o texto cabe e as três ações continuam alcançáveis.
+- [ ] 3. Tela curta, em que a coluna precisa rolar. Resultado esperado: a coluna rola; as palavras ficam legíveis sobre a fileira de cima, na placa da cor do chão.
+- [ ] 4. Paisagem, no telefone. Resultado esperado: com a altura menor que 600, a classe é compacta (3 motivos); a coluna rola se precisar e as palavras continuam legíveis.
+- [ ] 5. Janela de 1280 px na web e no PWA instalado. Resultado esperado: 9 motivos; os dois do meio ficam nas calhas laterais, fora da coluna de 420, e nenhum motivo fica atrás do cartão.
+- [ ] 6. Fonte a 200 por cento. Resultado esperado: nenhum texto cortado; **Entrar**, **Como funciona** e **Agora não** continuam alcançáveis.
+- [ ] 7. Reduzir movimento ligado antes de abrir. Resultado esperado: os motivos e o cabeçalho aparecem já no lugar, sem deslocar e sem vibração. O cartão segue a configuração dele e, com Reduzir movimento ligado, o fade curto também assenta na hora, como já fazia.
+- [ ] 8. Reduzir movimento ligado no meio da entrada. Resultado esperado: os motivos e o cabeçalho vão na hora para o lugar final; a vibração que ainda não saiu não sai.
+- [ ] 9. TalkBack no Android, VoiceOver no iOS e um leitor de tela na web. Resultado esperado: leem a etiqueta como "Cartão <desenho>, <região>", o título como cabeçalho, a frase, "Pra <nome>", a mensagem, o @nome, o prazo, **Entrar**, **Como funciona** e **Agora não**. Não leem motivo nenhum.
+- [ ] 10. Na web, Tab no teclado. Resultado esperado: o foco chega em **Entrar**, **Como funciona** e **Agora não**.
+- [ ] 11. Toque em **Entrar** nos primeiros 300 ms. Resultado esperado: a introdução fica marcada como vista e o fluxo segue, com a entrada ainda no começo.
+- [ ] 12. Esperar 2 s com a tela aberta, sem Reduzir movimento. Resultado esperado: depois de 1,5 s nada mais se move, e não recomeça.
+- [ ] 13. Vibração. Resultado esperado: no telefone, um toque só, aos 420 ms; na web, nenhum; com Reduzir movimento, com a consulta falha ou sem resposta em 300 ms, nenhum.
+- [ ] 14. **Como funciona** e voltar. Resultado esperado: aparecem os cartões da introdução; ao voltar, a abertura toca de novo, porque a tela montou de novo.
+- [ ] 15. **Agora não**. Resultado esperado: a abertura some nesta carga e a introdução segue; o código e o cartão continuam guardados.
+- [ ] 16. Cartão ainda não conferido (nó sem resposta, ou associação desconhecida). Resultado esperado: o splash espera e, aos 6 s, a introdução aparece; o splash não volta. Se o cartão for conferido depois e ainda for elegível, ele toma o lugar da introdução.
+- [ ] 17. Assinatura ruim, cartão vencido ou chave sem vínculo. Resultado esperado: a abertura não aparece e não há espera de 6 s.
+
+## 215. Players de música carregados a qualquer distância ao rolar, Termos 49
+
+Um player de YouTube, SoundCloud, Spotify ou Apple Music já carregado fica carregado, e em contato com o provedor, enquanto a pessoa rola a mesma tela a qualquer distância, mesmo depois que a lista desmonta a linha. A camada de players dentro do conteúdo de rolagem mantém a mesma página e o ponto da música, sem recarga nem espera de 1 s quando a linha volta. Há no máximo dois quadros no app, incluindo o rascunho do compositor. Um cartão visível pede o lugar do quadro fora da vista há mais tempo; uma linha desmontada conta como fora da vista e seu quadro sai na próxima conferência da camada, em até 500 ms após o pedido. Sair da tela ou da aba, abrir uma folha, um menu ou uma foto em tela cheia por cima, bloquear, ir para segundo plano ou iniciar outro áudio do Varanda fecha o quadro. Retirar a linha dos dados (publicação apagada, silenciada ou lista reiniciada) também fecha o quadro, assim como perder o processo de conteúdo no Android e no iOS; inserir linhas no início não fecha nenhum. Se um cartão sai de uma linha que continua montada e nos dados da lista, a lista fecha seu quadro escondido após cerca de 1 s (duas conferências de 500 ms). No Android e no iOS, se o processo morre, o cartão guardado volta e carrega o player após a espera normal quando fica visível. Na web, o app não enxerga um processo de iframe morto e mostra o que o navegador mostrar. Cabeçalhos de Conversa e rascunhos ficam no próprio espaço. A reprodução automática do Audius fica suspensa enquanto há qualquer quadro de provedor carregado na tela, inclusive fora da vista, durante toda a visita. Termos e Política de Privacidade na versão 49, com novo aceite. Esta seção substitui as regras de descarregamento por distância e por desmontagem da linha da seção 205.
+
+### Verificação automatizada
+
+```sh
+node apps/app/test/embedKeep.test.js
+node apps/app/test/embedFrame.test.js
+node apps/app/test/embedLayer.test.js
+node apps/app/test/musicEmbedCard.test.js
+node apps/app/test/legal.test.js
+node apps/site/scripts/render-legal.js --check
+npm run lint
+npm test
+npm run demo
+```
+
+### Verificação manual
+
+Executar o roteiro abaixo em cada plataforma, nesta ordem. Registrar aparelho, versão, provedor e resultado antes de marcar a plataforma como conferida.
+
+- [ ] Build de debug do Android, emulador ou aparelho.
+- [ ] Simulador iOS.
+- [ ] Web.
+- [ ] PWA.
+
+Roteiro para cada plataforma; as ações exclusivas do sistema ficam registradas na plataforma correspondente.
+
+- [ ] Carregar um player numa linha depois da oitava, iniciar uma faixa, rolar 20 telas para longe e voltar. A mesma página continua, no ponto da música, sem recarregar nem esperar 1 s.
+- [ ] Começar um arrasto sobre o player e conferir que a lista rola.
+- [ ] Receber novas linhas no início pela sincronização em A Rua e numa conversa. Nenhum player fica sobre outra linha, e o conteúdo que a pessoa está lendo mantém a posição. No Android, conferir a âncora de rolagem.
+- [ ] Com dois players fora da vista, fazer um terceiro cartão ficar visível. Ele carrega em cerca de 2 s, e o player fora da vista há mais tempo volta ao cartão guardado. Conferir também com a linha desse player desmontada.
+- [ ] Manter dois players na faixa visível e mostrar um terceiro cartão. Ele espera, sem tirar nenhum dos dois.
+- [ ] Conferir que o player fecha ao trocar de aba, abrir uma folha, um menu ou uma foto em tela cheia por cima, bloquear, ir para segundo plano ou começar uma mensagem de voz.
+- [ ] Apagar ou silenciar uma publicação cujo player está fora da vista. Retirar a linha dos dados fecha o player.
+- [ ] Numa conversa, com o player de uma mensagem carregado e fora da vista enquanto sua linha continua montada, apagar essa mensagem pelo outro aparelho. O player escondido fecha em cerca de 1 s.
+- [ ] Num grupo, com o player de uma mensagem carregado, rolar até a linha sair da janela da lista (mais de cerca de 3 telas) e então ocultar essa mensagem como moderador ou apagá-la pelo outro aparelho. O player escondido fecha na hora, sem som nem tráfego com o provedor, e ao voltar a mensagem aparece sem player.
+- [ ] No Android e no iOS, matar o processo renderizador do WebView e conferir que o cartão guardado volta. Ao ficar visível, o player carrega de novo após a espera normal. No emulador Android, tentar executar `adb root`, localizar o processo renderizador do WebView (`sandboxed_process`) com `adb shell ps -A` e encerrá-lo com `adb shell kill <pid>`. No simulador iOS, tentar encerrar o processo `com.apple.WebKit.WebContent` da página no Mac, por exemplo pelo Monitor de Atividade. Registrar o método usado.
+- [ ] Com TalkBack, VoiceOver e Tab, conferir que um player cuja linha está desmontada nunca recebe foco. Registrar a ordem de leitura e de teclado de um player visível, alcançado depois das linhas da lista, fora da própria publicação.
+- [ ] No Android, conferir os cartões do cabeçalho de Conversa: ficam no próprio espaço, mantêm a página ao rolar para longe e voltam sem recarga nem espera de 1 s.
+- [ ] Numa conversa privada e num grupo, com um player carregado numa mensagem, deslizar a mensagem para responder: o player acompanha o balão durante o gesto e volta com ele. Com "reduzir movimento" ligado, nada se move.
+- [ ] Conferir a prévia no rascunho do compositor: fica no próprio espaço, conta no limite de dois quadros e segue as mesmas regras de fechamento, sem limite de distância.
+- [ ] Repetir as conferências com cada um dos quatro provedores: YouTube, SoundCloud, Spotify e Apple Music.
+- [ ] Num Android com pouca memória, manter dois players carregados durante uma visita inteira. Registrar o uso de memória e qualquer pausa, perda do processo ou recarga.
+- [ ] Entrar com uma conta que aceitou uma versão anterior e conferir que o aceite pede os Termos e a Política de Privacidade 49.
+
+### Limites conhecidos
+
+- O provedor pode pausar por conta própria quando o quadro fica escondido.
+- Na web, um player fora da vista cuja linha continua montada permanece alcançável com Tab, como na seção 205.
+- Leitores de tela e teclado alcançam um player visível depois das linhas da lista, em vez de dentro da publicação.
+- Um cartão que some e volta na mesma linha após mais de cerca de 1 s encontra o player fechado e o carrega de novo.
+- Na web, o app não enxerga a morte do processo de um iframe: o quadro não fecha sozinho, o cartão guardado não volta e a tela mostra o que o navegador mostrar.
+
+## 216. Cartão de abertura do link de uma publicação
+
+Na primeira visita, quem abre o link de uma publicação que não aparece na web (`/publicacao/<chave>/<seq>`) vê, no lugar dos cartões de apresentação, um cartão dizendo que a publicação espera pela entrada. O convite assinado tem prioridade: com a abertura do convite, um convite de perfil ou um link de grupo ou comunidade pendente, o cartão não aparece (`postOpeningGate` em `apps/app/src/postLink.js`). Entrar marca a apresentação como vista e leva aos Termos e a Entrar, onde o cartão da publicação e o destino continuam. Como funciona mostra os cartões e volta. Agora não esconde o cartão só nesta carga.
+
+Sem mudança de protocolo, RPC nem Termos.
+
+### Verificação automatizada
+
+A partir da raiz.
+
+- `npm run lint`: passa.
+- `node apps/app/test/postLink.test.js`: 10/10 testes, 105/105 asserções.
+- `node apps/app/test/postLinkOpen.test.js`: 1/1 teste, 6/6 asserções.
+- `node apps/app/test/nativeLinks.test.js`: 8/8 testes, 35/35 asserções. Com o `App.js` da `main` (sem a correção), o teste novo "the post opening card sits between the invite card and the intro" falha (7/8).
+- `node apps/app/test/platformGate.test.js`: 3/3 testes, 52/52 asserções.
+
+### Verificação manual
+
+Antes da correção, em produção (`bora.varanda.app`, interruptor desligado, `/p/policy` respondendo `{"enabled":false}`), numa aba sem dados: `/p/<64 zeros>/1` deu o 302 para `/publicacao/...`, o app gravou o destino na aba (`varanda.postLink`) e limpou o caminho para `/`, mas a tela foi a dos cartões de apresentação ("Seu diário, perto de você") e depois os Termos, sem nada sobre a publicação. Os Termos não foram aceitos em produção.
+
+Depois da correção, no laboratório hospedado (`node apps/cli/scripts/hosted-lab.js --port 8090 --expo http://127.0.0.1:8083`, com `npm run web -w apps/app -- --port 8083 --clear`), com o armazenamento da origem apagado e o destino gravado à mão na aba (no laboratório http `hostedPage` é falso e a captura não roda, como na seção 212):
+
+1. A 360 px: a primeira tela é o cartão "Você abriu o link de uma publicação", com "Entrar" na largura toda, "Como funciona" e "Agora não".
+2. "Como funciona" mostra os cartões de apresentação; "Pular" volta ao cartão da publicação.
+3. "Agora não" mostra os cartões de apresentação, e o destino continua na aba.
+4. A 1280 px, depois de recarregar: o cartão volta, centrado na coluna.
+5. "Entrar" leva aos Termos versão 48; depois do aceite (no laboratório), Entrar mostra "Você abriu o link de uma publicação. Entre ou crie sua conta para ver.".
+
+### Não verificado
+
+- iOS (simulador) e Android (emulador): não rodou. O laboratório não entra no app nativo (seção 212), e o caminho no nativo é o mesmo ramo do `App.js`, com o destino vindo do Linking.
+- A captura de `/publicacao/` na web hospedada em https ponta a ponta com a correção: depende da implantação.
+
+## 217. Base visual do app: botões pequenos, busca, barras de aviso, alça das folhas (PR feat/ui-kit-foundations)
 
 Esta seção confere a base visual que as telas usam em comum (`apps/app/src/ui`). Nada disso muda protocolo, RPC, Termos ou o que a pessoa pode fazer: muda a aparência, o alvo de toque e o retorno sensorial. As frases das notas são as mesmas de antes.
 
@@ -9720,7 +10060,7 @@ node apps/app/test/pressMotion.test.js
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
 
-## 210. Paleta escura neutra: fundo, cartões, texto e barra de abas (PR feat/dark-neutral-palette)
+## 218. Paleta escura neutra: fundo, cartões, texto e barra de abas (PR feat/dark-neutral-palette)
 
 Esta seção confere a troca do escuro, que deixa de ser verde e passa a ser quase neutro. O claro não muda. Os valores do escuro ficam em `apps/app/src/appearance.js`: fundo `#101010`, cartão `#1c1c1c`, tinta `#f5f5f5`, texto suave `#c8c8c8`, linha `rgba(245,245,245,0.14)` e destaque verde `#5dcaa0`. A bolha da própria mensagem continua `#2c4a3d`. A cor de fundo do pré-splash da web e a `theme_color` do manifesto passam para `#101010`. Nada disso muda protocolo, RPC, Termos ou o que a pessoa pode fazer: muda só a aparência.
 
@@ -9749,7 +10089,7 @@ node apps/app/test/inviteCardArt.test.js
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
 
-## 211. Feed mais leve: cabeçalho, toque longo, resposta, Momentos, composição e contagens (PR feat/feed-slim)
+## 219. Feed mais leve: cabeçalho, toque longo, resposta, Momentos, composição e contagens (PR feat/feed-slim)
 
 Esta seção confere a versão mais leve do feed, da composição e dos Momentos. Na publicação, o nome usa o estilo de nome e o @nome e a data ficam no estilo de metadados, menores; a data é compacta (`5min`, `3h`, `2d`; abaixo de um minuto, "agora"; a partir de 7 dias, a data, "5 nov", ou "5 nov 2025" em outro ano), o avatar tem 40 pt, e as contagens da barra de ações são compactas (`12,3 mil`), com o número completo lido pelo leitor de tela só nos botões que abrem quem curtiu e quem republicou. "seguir" e o botão "mais ações" ficam no canto superior direito, com alvo de 44 pt. Um toque longo de 350 ms no corpo da publicação abre as ações, com um toque leve de háptico. A linha "respondendo a" ganha texto suave e alvo de pelo menos 44 pt de altura. O cartão de link mostra só o título e o domínio, com miniatura de 64 pt. Nos Momentos, as rodinhas de A Rua mostram faixas do pôr do sol para quem tem algo não visto e um contorno fino para quem já viu; o visualizador troca de pessoa com arrasto horizontal e fecha com arrasto para baixo. Em Publicar, o contador só aparece a partir de 80% do limite e as observações do modo Momento viram uma frase de estado. Em Curtidas, as contagens ficam dentro dos nomes das abas. Em A Rua, Busca, Espiadinha e Diário, a nota de números incompletos vira a linha "Números incompletos" com um ⓘ, que abre a folha com a frase. Nada disso muda protocolo, RPC ou Termos: muda a aparência, os alvos de toque e o gesto.
 

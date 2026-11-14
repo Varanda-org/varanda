@@ -8,6 +8,7 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 const { MEDIA_BLOCK_BYTES } = require('@varanda/core/lib/records')
 const { feira } = require('@varanda/rpc')
 const { renderListingPage, renderNotFound, renderSitemap } = require('./feira-page')
+const { renderPostPage, postPhotos } = require('./post-page')
 
 // WebSocket entry of `seed --ws-port` (docs/protocol.md section 7): a phase 0
 // spike that lets a browser-held member replicate through the seeder. Each
@@ -253,6 +254,31 @@ const { renderListingPage, renderNotFound, renderSitemap } = require('./feira-pa
 //   in-flight FEIRA_SITEMAP_MAX_IN_FLIGHT, /index bucket.
 // Other methods are 405 with Allow, a query string is 404, Host first
 // (421). Nothing is logged: no path, key, word or title.
+//
+// The public page of a shared post (docs/protocol.md section 16) is on only
+// when startSeedWs is given a `postsOrigin` (VARANDA_POSTS_ORIGIN), which is
+// independent of `publicOrigin`: neither turns the other on. Every path
+// under /p/ is answered here whatever the switch says, so Caddy's app
+// fallback never serves one. GET|HEAD only (405 with Allow otherwise), Host
+// first (421), and nothing is logged: no path, key, seq or address.
+// - /p/policy: {"enabled":true|false}, no-store.
+// - /p/<D>/<seq>: 200 with the page (apps/cli/lib/post-page.js escapes
+//   every peer string), X-Robots-Tag noindex, nofollow, noarchive and
+//   no-store, only when the switch is on and Seeder#postPublic answers.
+//   Every other case (switch off, nothing shared, withdrawn, deleted,
+//   unknown or page diary, a non-canonical seq, no slot, deadline passed)
+//   is ONE 302 to /publicacao/<D>/<seq> built from the matched path only,
+//   with the same headers and an empty body, so the answer is no oracle of
+//   which posts exist or are shared. Own budget (POST_PAGE_MAX_IN_FLIGHT,
+//   POST_PAGE_RATE per second, burst POST_PAGE_BURST, an answer within
+//   POST_PAGE_DEADLINE_MS), never the Feira's.
+// - /p/<D>/<seq>/foto/<1..4>: photo n of what the page shows (postPhotos:
+//   for a video post only its cover, never video bytes), checked as the
+//   Feira photos are, and served only if postPublic still answers with the
+//   same share after the bytes are read; else the generic 404. In-flight
+//   POST_PHOTO_MAX_IN_FLIGHT, deadline POST_PHOTO_DEADLINE_MS, /media
+//   token bucket.
+// - anything else under /p/ is the generic 404.
 const DEFAULT_HOST = '127.0.0.1'
 const PATH = '/seeder'
 const MAX_SOCKETS = 128
@@ -387,6 +413,20 @@ const FEIRA_PAGE_HEADERS = {
   'Cache-Control': 'no-store',
   'Referrer-Policy': 'no-referrer'
 }
+const POSTS_PREFIX = '/p'
+const POST_POLICY = '/p/policy'
+// Any digit string, so a non-canonical seq still gets the uniform 302.
+const POST_PAGE_RE = /^\/p\/([0-9a-f]{64})\/([0-9]+)$/
+const POST_FOTO_RE = /^\/p\/([0-9a-f]{64})\/([1-9][0-9]{0,15})\/foto\/([1-4])$/
+const CANONICAL_SEQ_RE = /^[1-9][0-9]{0,15}$/
+const POST_PAGE_MAX_BODY = 65536
+const POST_PAGE_MAX_IN_FLIGHT = 4
+const POST_PAGE_RATE = 8
+const POST_PAGE_BURST = 16
+const POST_PAGE_DEADLINE_MS = 5000
+const POST_PHOTO_MAX_IN_FLIGHT = 4
+const POST_PHOTO_DEADLINE_MS = 10000
+const POST_ROBOTS = 'noindex, nofollow, noarchive'
 
 const sha256 = (value) => nodeCrypto.createHash('sha256').update(value).digest()
 
@@ -604,24 +644,39 @@ function refuse (socket, code, reason) {
 // routes, backed by indexFeira, indexFeiraAuthor, indexFeiraRatings,
 // listingPublic(hex, seq), mediaRead and feiraRecent(limit); feiraLimits:
 // overrides ({ photoMaxInFlight, photoDeadlineMs, sitemapMaxInFlight,
-// listingMaxInFlight, listingRate, listingBurst }), for tests.
+// listingMaxInFlight, listingRate, listingBurst }), for tests. postsOrigin:
+// null or an https origin that turns on the public post pages, backed by
+// postPublic(hex, seq) and mediaRead; postsLimits: overrides
+// ({ pageMaxInFlight, pageRate, pageBurst, pageDeadlineMs, photoMaxInFlight,
+// photoDeadlineMs }), for tests.
 // The listener's socket cap: `sockets` when it is an integer >= 1
 // (VARANDA_MAX_SOCKETS), else room for every external WebSocket, every
 // /media and /index response in flight and 64 more for keep-alives and
 // requests being refused (32 + 16 + 16 + 64 = MAX_SOCKETS by default), never
 // below MAX_SOCKETS, so lowering one cap never shrinks the listener. The
-// POST_MAX_IN_FLIGHT /moderation-post answers and the Feira photo and
-// sitemap slots fit in those 64.
+// POST_MAX_IN_FLIGHT /moderation-post answers, the Feira photo and
+// sitemap slots and the post page and photo slots fit in those 64.
 function socketCap ({ maxExternal, mediaInFlight, indexInFlight, sockets = null }) {
   if (Number.isInteger(sockets) && sockets >= 1) return sockets
   return Math.max(MAX_SOCKETS, maxExternal + mediaInFlight + indexInFlight + 64)
 }
 
-function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {}, index = {}, sockets = null, triageToken = null, post = {}, publicOrigin = null, feiraLimits = {} }) {
+function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {}, index = {}, sockets = null, triageToken = null, post = {}, publicOrigin = null, feiraLimits = {}, postsOrigin = null, postsLimits = {} }) {
   if (publicOrigin !== null && publicOrigin !== undefined && (typeof publicOrigin !== 'string' || !PUBLIC_ORIGIN_RE.test(publicOrigin))) {
     throw new TypeError('publicOrigin inválido')
   }
+  if (postsOrigin !== null && postsOrigin !== undefined && (typeof postsOrigin !== 'string' || !PUBLIC_ORIGIN_RE.test(postsOrigin))) {
+    throw new TypeError('postsOrigin inválido')
+  }
   const origin = publicOrigin || null
+  const postsOn = postsOrigin || null
+  const postPageMaxInFlight = postsLimits.pageMaxInFlight ?? POST_PAGE_MAX_IN_FLIGHT
+  const postPageDeadlineMs = postsLimits.pageDeadlineMs ?? POST_PAGE_DEADLINE_MS
+  const takePostPageToken = tokenBucket(postsLimits.pageRate ?? POST_PAGE_RATE, postsLimits.pageBurst ?? POST_PAGE_BURST)
+  const postPhotoMaxInFlight = postsLimits.photoMaxInFlight ?? POST_PHOTO_MAX_IN_FLIGHT
+  const postPhotoDeadlineMs = postsLimits.photoDeadlineMs ?? POST_PHOTO_DEADLINE_MS
+  let postPageInFlight = 0
+  let postPhotoInFlight = 0
   const photoMaxInFlight = feiraLimits.photoMaxInFlight ?? FEIRA_PHOTO_MAX_IN_FLIGHT
   const photoDeadlineMs = feiraLimits.photoDeadlineMs ?? FEIRA_PHOTO_DEADLINE_MS
   const sitemapMaxInFlight = feiraLimits.sitemapMaxInFlight ?? FEIRA_SITEMAP_MAX_IN_FLIGHT
@@ -1081,7 +1136,14 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (typeof seeder.listingPublic !== 'function' || typeof seeder.mediaRead !== 'function') return null
     const card = await seeder.listingPublic(hex, seq)
     if (card === null || typeof card !== 'object' || card.record === null || typeof card.record !== 'object') return null
-    const d = photosOf(card.record)[n - 1]
+    return descriptorBytes(hex, photosOf(card.record)[n - 1], isClosed)
+  }
+
+  // The bytes of the still image descriptor `d` of diary `hex`, read through
+  // mediaRead and checked against the descriptor (size, sha256) and the
+  // declared mime (magic bytes), or null. Shared by the Feira and post photos.
+  async function descriptorBytes (hex, d, isClosed) {
+    if (typeof seeder.mediaRead !== 'function') return null
     if (!d || typeof d !== 'object' || !Object.prototype.hasOwnProperty.call(IMAGE_MAGIC, d.mime)) return null
     if (!Number.isSafeInteger(d.bytes) || d.bytes < 1 || d.bytes > MEDIA_MAX_BLOCKS * MEDIA_BLOCK_BYTES) return null
     if (typeof d.sha256 !== 'string' || !HEX64_RE.test(d.sha256)) return null
@@ -1161,6 +1223,106 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (m) return serveFeiraPhoto(req, res, m, Number(m[3]))
     m = FEIRA_CAPA_RE.exec(url)
     if (m) return serveFeiraPhoto(req, res, m, 1)
+    return send(res, 404, NOT_FOUND)
+  }
+
+  // The one answer of every post page that shows nothing. Only the
+  // regex-matched hex64 and digit string reach the Location, and no header
+  // depends on why nothing is shown.
+  function postAway (res, hex, digits) {
+    res.writeHead(302, {
+      Location: '/publicacao/' + hex + '/' + digits,
+      'X-Robots-Tag': POST_ROBOTS,
+      'Cache-Control': 'no-store',
+      'Content-Length': 0
+    })
+    res.end()
+  }
+
+  // A usable postPublic answer: the shown post and the share that allows it.
+  function shownPost (answer) {
+    if (answer === null || typeof answer !== 'object' || answer.record === null || typeof answer.record !== 'object') return null
+    if (!Number.isSafeInteger(answer.shareSeq)) return null
+    return answer
+  }
+
+  async function servePostPage (req, res, hex, digits) {
+    if (postsOn === null || typeof seeder.postPublic !== 'function') return postAway(res, hex, digits)
+    const seq = Number(digits)
+    if (!CANONICAL_SEQ_RE.test(digits) || !Number.isSafeInteger(seq)) return postAway(res, hex, digits)
+    if (!takePostPageToken() || postPageInFlight >= postPageMaxInFlight) return postAway(res, hex, digits)
+    postPageInFlight++
+    // The answer is due by the deadline (then the 302); the slot stays held
+    // until the lookup settles, and a response still open at twice the
+    // deadline (a client that never reads) is destroyed.
+    let timer = null
+    const late = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(null), postPageDeadlineMs)
+      timer.unref()
+    })
+    const answer = await Promise.race([late, slotted(res, postPageDeadlineMs * 2, () => { postPageInFlight-- }, async () => {
+      const shown = shownPost(await seeder.postPublic(hex, seq))
+      if (shown === null) return null
+      const html = renderPostPage({ origin: postsOn, author: hex, seq, record: shown.record, name: shown.name, username: shown.username })
+      if (typeof html !== 'string' || Buffer.byteLength(html) > POST_PAGE_MAX_BODY) return null
+      return html
+    })])
+    clearTimeout(timer)
+    if (answer === CLOSED || res.destroyed || res.writableEnded || res.headersSent) return
+    if (answer === null) return postAway(res, hex, digits)
+    res.writeHead(200, {
+      ...FEIRA_PAGE_HEADERS,
+      'X-Robots-Tag': POST_ROBOTS,
+      'Cache-Control': 'no-store',
+      'Content-Length': Buffer.byteLength(answer)
+    })
+    res.end(req.method === 'HEAD' ? undefined : answer)
+  }
+
+  // Photo n of what the page shows, its bytes checked, and only if the same
+  // share still allows the post once they are read (a withdrawal or a delete
+  // during the read then serves nothing); else null.
+  async function postPhotoBytes (hex, seq, n, isClosed) {
+    const shown = shownPost(await seeder.postPublic(hex, seq))
+    if (shown === null) return null
+    const got = await descriptorBytes(hex, postPhotos(shown.record).items[n - 1], isClosed)
+    if (got === null || isClosed()) return null
+    const again = shownPost(await seeder.postPublic(hex, seq))
+    if (again === null || again.shareSeq !== shown.shareSeq) return null
+    return got
+  }
+
+  async function servePostPhoto (req, res, hex, seq, n) {
+    if (postsOn === null || typeof seeder.postPublic !== 'function' || !Number.isSafeInteger(seq)) return send(res, 404, NOT_FOUND)
+    if (!takeToken() || postPhotoInFlight >= postPhotoMaxInFlight) return send(res, 503, BUSY, { 'Retry-After': '1' })
+    postPhotoInFlight++
+    const answer = await slotted(res, postPhotoDeadlineMs, () => { postPhotoInFlight-- },
+      (isClosed) => postPhotoBytes(hex, seq, n, isClosed))
+    if (answer === CLOSED) return
+    if (answer === null) return send(res, 404, NOT_FOUND)
+    res.writeHead(200, {
+      'Content-Type': answer.mime,
+      'Content-Length': answer.bytes.byteLength,
+      ...BASE_HEADERS,
+      'Referrer-Policy': 'no-referrer',
+      'X-Robots-Tag': POST_ROBOTS
+    })
+    res.end(req.method === 'HEAD' ? undefined : answer.bytes)
+  }
+
+  // Every path under /p/, whatever the switch says. The page matches the
+  // path without its query, so a link a messenger decorated still lands.
+  function servePosts (req, res, pathname) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'método não permitido\n', { Allow: 'GET, HEAD' })
+    if (pathname === POST_POLICY) {
+      const body = postsOn !== null ? '{"enabled":true}' : '{"enabled":false}'
+      res.writeHead(200, { ...INDEX_HEADERS, 'Content-Length': Buffer.byteLength(body) })
+      return res.end(req.method === 'HEAD' ? undefined : body)
+    }
+    let m = POST_PAGE_RE.exec(pathname)
+    if (m) return servePostPage(req, res, m[1], m[2])
+    m = POST_FOTO_RE.exec(req.url)
+    if (m) return servePostPhoto(req, res, m[1], Number(m[2]), Number(m[3]))
     return send(res, 404, NOT_FOUND)
   }
 
@@ -1310,6 +1472,9 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (origin !== null && pathname.startsWith(FEIRA_PREFIX + '/')) {
       return Promise.resolve().then(() => serveFeira(req, res)).catch(() => res.destroy())
     }
+    if (pathname === POSTS_PREFIX || pathname.startsWith(POSTS_PREFIX + '/')) {
+      return Promise.resolve().then(() => servePosts(req, res, pathname)).catch(() => res.destroy())
+    }
     send(res, 404, NOT_FOUND)
   })
   const maxExternal = Number.isInteger(seeder.maxExternal) && seeder.maxExternal >= 1 ? seeder.maxExternal : 32
@@ -1438,6 +1603,15 @@ module.exports = {
   FEIRA_PHOTO_MAX_IN_FLIGHT,
   FEIRA_PHOTO_DEADLINE_MS,
   FEIRA_SITEMAP_MAX_IN_FLIGHT,
+  POST_POLICY,
+  POST_PAGE_RE,
+  POST_FOTO_RE,
+  POST_PAGE_MAX_IN_FLIGHT,
+  POST_PAGE_RATE,
+  POST_PAGE_BURST,
+  POST_PAGE_DEADLINE_MS,
+  POST_PHOTO_MAX_IN_FLIGHT,
+  POST_PHOTO_DEADLINE_MS,
   LISTING_MOD_RE,
   FEIRA_LISTING_RE,
   FEIRA_LISTING_MAX_IN_FLIGHT,

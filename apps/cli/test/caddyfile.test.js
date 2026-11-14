@@ -91,8 +91,8 @@ test('Caddyfile: cache headers', (t) => {
   t.ok(lines.some((l) => l.trim() === 'header @mutavel Cache-Control "no-cache"'), '@mutavel is no-cache')
   const mutavel = block('@mutavel {').filter((l) => /^\s*not path\s/.test(l))
   t.is(mutavel.length, 1, 'one not path line in @mutavel')
-  t.alike(mutavel[0].trim().split(/\s+/).slice(2).sort(), ['/.well-known/*', '/account/*', '/blob/*', '/f/*', '/index/*', '/media/*', '/seeder', '/varanda.json'],
-    '@mutavel excludes exactly /varanda.json, /.well-known/*, /seeder, /account/*, /media/*, /blob/*, /index/* and /f/*')
+  t.alike(mutavel[0].trim().split(/\s+/).slice(2).sort(), ['/.well-known/*', '/account/*', '/blob/*', '/f/*', '/index/*', '/media/*', '/p/*', '/seeder', '/varanda.json'],
+    '@mutavel excludes exactly /varanda.json, /.well-known/*, /seeder, /account/*, /media/*, /blob/*, /index/*, /f/* and /p/*')
 
   // Every 404 is no-store: a missing file with an extension, or a missing
   // index.html behind an app route.
@@ -111,8 +111,8 @@ test('Caddyfile: cache headers', (t) => {
     '@ausenteApp leaves /index/* alone')
   const appPaths = app.filter((l) => /^\s*not path\s/.test(l) && !l.includes('*.*'))
   t.is(appPaths.length, 1, 'one not path list of routes in @ausenteApp')
-  t.alike(appPaths[0].trim().split(/\s+/).slice(2).sort(), ['/.well-known/*', '/account/*', '/blob/*', '/f/*', '/index/*', '/media/*', '/seeder'],
-    '@ausenteApp excludes exactly /.well-known/*, /seeder, /account/*, /media/*, /blob/*, /index/* and /f/*')
+  t.alike(appPaths[0].trim().split(/\s+/).slice(2).sort(), ['/.well-known/*', '/account/*', '/blob/*', '/f/*', '/index/*', '/media/*', '/p/*', '/seeder'],
+    '@ausenteApp excludes exactly /.well-known/*, /seeder, /account/*, /media/*, /blob/*, /index/*, /f/* and /p/*')
   t.ok(app.some((l) => l.trim() === 'not file /index.html {'), '@ausenteApp is a missing index.html')
   t.ok(lines.some((l) => l.trim() === 'header @ausenteArquivo Cache-Control "no-store"'), 'missing file -> no-store')
   t.ok(lines.some((l) => l.trim() === 'header @ausenteApp Cache-Control "no-store"'), 'missing index.html -> no-store')
@@ -203,12 +203,13 @@ test('Caddyfile: /index/* goes to the seeder, before the SPA handle', (t) => {
 // Caddy's memory: never logged, never sent upstream.
 test('Caddyfile: /index/*, /media/* and /blob/* have a per-client rate limit', (t) => {
   t.ok(lines.some((l) => l.trim() === 'order rate_limit before reverse_proxy'), 'order rate_limit before reverse_proxy')
-  t.is(count('rate_limit {'), 8, 'exactly eight rate_limit blocks (each Feira handle has two)')
+  t.is(count('rate_limit {'), 9, 'exactly nine rate_limit blocks (each Feira entry handle has two)')
   const limits = {
     'handle /index/* {': ['index', '20', '10s'],
     'handle /media/* {': ['media', '120', '10s'],
     'handle /blob/* {': ['blob', '300', '10s'],
     'handle /f/* {': ['feira', '30', '10s'],
+    'handle /p/* {': ['publicacao', '30', '10s'],
     'handle /account/feira/* {': ['feira-entrada', '5', '60s']
   }
   {
@@ -301,7 +302,7 @@ test('Caddyfile: /account/feira/idade has its own per-address zone and global ce
 // rate_limit logger (it prints remote_ip on every 429); it must not set an
 // output or any other option, and no site block has a log directive.
 // The Feira public pages and robots.txt, both before the SPA catch-all.
-test('Caddyfile: /f/* goes to the seeder and /robots.txt allows only /f/, before the SPA handle', (t) => {
+test('Caddyfile: /f/* goes to the seeder and /robots.txt allows only /f/ and /p/, before the SPA handle', (t) => {
   const feira = block('handle /f/* {').map((l) => l.trim())
   t.ok(feira.length > 0, 'handle /f/*')
   t.is(count('handle /f/* {'), 1, 'exactly one /f/* handle')
@@ -317,11 +318,34 @@ test('Caddyfile: /f/* goes to the seeder and /robots.txt allows only /f/, before
   const rstart = lines.findIndex((l) => l.trim() === 'handle /robots.txt {')
   t.ok(start !== -1 && spa > start && rstart !== -1 && spa > rstart, 'both come before the catch-all handle')
   t.alike(robots.map((l) => l.trim()).slice(robots.findIndex((l) => l.trim() === 'body <<ROBOTS') + 1, -2),
-    ['User-agent: *', 'Allow: /f/', 'Disallow: /', 'Sitemap: https://{$VARANDA_DOMAIN}/f/sitemap.xml', 'ROBOTS'], 'robots body'
+    ['User-agent: *', 'Allow: /f/', 'Allow: /p/', 'Disallow: /', 'Sitemap: https://{$VARANDA_DOMAIN}/f/sitemap.xml', 'ROBOTS'], 'robots body'
   )
+  t.is(count('Sitemap:'), 1, 'one sitemap, the Feira one: /p/ has none')
   t.ok(robots.some((l) => l.trim() === 'header Content-Type "text/plain; charset=utf-8"'), 'robots is text/plain')
   t.absent(lines.some((l) => /^\s*handle\s+\/moderation-listing/.test(l)), 'no handle /moderation-listing')
   t.is(count('moderation-listing'), 0, 'moderation-listing never mentioned outside comments')
+})
+
+// The public post pages: the same proxy as /f/*, in their own zone so one
+// surface cannot exhaust the other's budget, right after /f/* and before the
+// SPA catch-all.
+test('Caddyfile: /p/* goes to the seeder like /f/*, in its own zone, before the SPA handle', (t) => {
+  const posts = block('handle /p/* {').map((l) => l.trim())
+  t.ok(posts.length > 0, 'handle /p/*')
+  t.is(count('handle /p/* {'), 1, 'exactly one /p/* handle')
+  t.ok(posts.includes('reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {'), 'proxied to the seeder WebSocket port')
+  t.ok(posts.includes('header_up Host {upstream_hostport}'), 'Host rewritten to the upstream')
+  t.ok(posts.includes('header_up -X-Forwarded-For') && posts.includes('header_up -X-Real-Ip'), 'client address headers stripped')
+  t.absent(posts.some((l) => /Cache-Control/.test(l)), 'no Cache-Control set by Caddy for /p/*')
+  const body = (b) => b.slice(1).map((l) => l.trim()).filter((l) => !/^zone\s/.test(l))
+  t.alike(body(block('handle /p/* {')), body(block('handle /f/* {')), 'same body as /f/* apart from the zone name')
+  t.is(count('zone publicacao {'), 1, 'the publicacao zone is used once')
+  const f = lines.findIndex((l) => l.trim() === 'handle /f/* {')
+  const fEnd = f + block('handle /f/* {').length
+  const p = lines.findIndex((l) => l.trim() === 'handle /p/* {')
+  const spa = lines.findIndex((l) => l === '\thandle {')
+  t.ok(f !== -1 && p > f && spa > p, 'after /f/* and before the catch-all handle')
+  t.ok(lines.slice(fEnd, p).every((l) => l.trim() === ''), 'right after the /f/* handle')
 })
 
 test('Caddyfile: no access log, and the rate_limit logger (client IP) is excluded', (t) => {
