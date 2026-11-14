@@ -205,3 +205,10 @@ test('two follow presses in one tick send once, never toast and keep the first p
   t.alike(pending, ['a', null], 'cleared by its own answer')
   t.alike(toasts, ['Agora você segue Ana.'])
 })
+
+test('the people list rows carry no bottom border and use the 48 avatar', async (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Pessoas.js'), 'utf8')
+  const row = src.match(/\n {2}row: \{[^}]*\}/)[0]
+  t.absent(/borderBottomWidth/.test(row), 'row style has no borderBottomWidth')
+  t.ok(src.includes('size={48}'), 'row avatar is 48')
+})

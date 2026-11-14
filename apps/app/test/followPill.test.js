@@ -157,6 +157,7 @@ test('Seguir flips at once, taps light and calls onFollow once per press', (t) =
   const first = h.render(base)
   t.is(pill(first).props.label, 'Seguir')
   t.is(pill(first).props.filled, true)
+  t.absent(pill(first).props.tonal)
   t.alike(h.taps, [], 'rendering does not tap')
 
   const press = pill(first).props.onPress
@@ -168,6 +169,7 @@ test('Seguir flips at once, taps light and calls onFollow once per press', (t) =
   // The caller sets pending in the same handler, so the next commit has both.
   const flipped = h.render({ ...base, pending: true })
   t.is(pill(flipped).props.label, 'Seguindo', 'flips before the answer')
+  t.is(pill(flipped).props.tonal, true)
   t.is(pill(flipped).props.pending, true)
   pill(flipped).props.onPress()
   t.absent(sheet(h.render()), 'a press while pending opens nothing')
@@ -318,4 +320,9 @@ test('the Seguir label defaults to FOLLOW_LABEL, can be replaced, and small pass
   const followingSmall = harness().render({ following: true, title: 'Bia', label: 'Seguir de volta', small: true, onFollow: c.onFollow, onUnfollow: c.onUnfollow })
   t.is(pill(followingSmall).props.label, follow.FOLLOWING_LABEL)
   t.is(pill(followingSmall).props.small, true)
+})
+
+test('Membro draws its own page follow pill tonal while it says Seguindo', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Membro.js'), 'utf8')
+  t.ok(src.includes('tonal={!pageFollowsFailed && pageFollows !== null && pageFollows.has(author)}'))
 })

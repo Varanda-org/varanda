@@ -5,6 +5,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ## [Não lançado]
 
+- Linhas de pessoa novas (PR `feat/restyle-people-rows`): avatar de 48 pt, sem fio entre linhas e Seguindo em pílula tonal, com alvos de 44 pt. Só o visual: sem mudança de protocolo, RPC, Termos nem dependência. Conferência em `docs/verification.md` seção 229.
 - Barra do topo nova (PR `feat/restyle-top-bar`): 64 pt, sem fio embaixo, voltar num círculo de 44 pt e ações numa cápsula, com ícones de 22 pt. Só o visual: sem mudança de protocolo, RPC, Termos nem dependência. Conferência em `docs/verification.md` seção 228.
 - Escala de texto nova (PR `feat/restyle-type-scale`): títulos da barra e nome no perfil em 24 pt e peso 600 (antes 800), nome da publicação, pílulas, títulos de folha e estados vazios em 600 em vez de 700, e dois tamanhos novos para nome em linha de lista e título de conversa. Só o visual: sem mudança de protocolo, RPC, Termos nem dependência. Conferência em `docs/verification.md` seção 227.
 - A Rua esconde as barras ao rolar (PR `feat/rua-chrome-on-scroll`): na aba A Rua, rolar para baixo esconde a barra de cima, a barra de abas e o botão de publicar, e rolar para cima as mostra de novo. Com Reduzir movimento, TalkBack ou VoiceOver ligado, as barras ficam sempre à mostra (na web o app não sabe se há um leitor de tela). Escondidas, as barras saem da leitura de tela, o foco do teclado que chega a elas as traz de volta, e o aviso curto desce até a borda. Sem mudança de protocolo, RPC nem Termos. Verificação em `docs/verification.md` seção 226.

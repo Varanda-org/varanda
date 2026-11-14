@@ -10603,3 +10603,31 @@ node apps/app/test/shellChrome.test.js
 ```
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 229. Linhas de pessoa novas: avatar de 48 pt, sem fio e Seguindo em pílula tonal (PR feat/restyle-people-rows)
+
+Esta seção confere o visual novo das linhas de pessoa. Em Busca (Contas), Seguidores, Seguindo e Curtidas e republicações, cada linha tem avatar de 48 pt e nome de 16 pt, sem fio entre as linhas e sem fio embaixo do cabeçalho da lista. A pílula Seguir é cheia e a Seguindo é tonal (campo desligado com texto suave, sem contorno), as duas com alvo de toque de 44 pt. Tocar em Seguindo continua abrindo a confirmação "Deixar de seguir <nome>?".
+
+Nada disso envia pedido nem busca dado: é só a tela. Não há mudança de protocolo, RPC nem Termos, e nenhuma dependência nova.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA, cada um em claro e escuro. Registrar aparelho, sistema e, na web, o navegador.
+
+- [ ] Busca (Contas), Seguidores, Seguindo e Curtidas e republicações: avatar de 48 pt e nome de 16 pt, sem fio entre as linhas e sem fio embaixo do cabeçalho da lista, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Seguir aparece cheia e Seguindo tonal (também no Membro quando uma Página age), nas duas com alvo de toque de 44 pt, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Tocar em Seguindo ainda abre a confirmação "Deixar de seguir <nome>?", em Seguindo, Seguidores, Busca e Membro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Nomes longos com a tela em 320 pt: a linha não corta a pílula nem o nome fica sobre ela. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Texto grande 1,3: a linha cresce sem cortar o nome, o `@nome` nem a pílula. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/app/test/memberRow.test.js
+node apps/app/test/pessoas.test.js
+node apps/app/test/engagers.test.js
+node apps/app/test/follow.test.js
+node apps/app/test/followPill.test.js
+node apps/app/test/uiKit.test.js
+node apps/app/test/mediaKeptLoad.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
