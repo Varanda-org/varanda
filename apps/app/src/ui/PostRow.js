@@ -210,6 +210,9 @@ function PostRowView ({
   const embed = preview && typeof preview === 'object' ? embedOf(preview.url) : null
   const music = preview && typeof preview === 'object' ? musicRefOf(preview.url) : null
   const ownLink = !hasMedia && music === null && embed !== null
+  // Video is the post's picture, so it sits where photos do; sound-only players stay below.
+  // Only the stored card decides its slot, so opening the caption never remounts the player.
+  const videoAbove = ownLink && embed.provider === 'youtube'
   // The card already shows this link, so its raw address is hidden from the shown text only.
   const body = useMemo(() => (ownLink && typeof text === 'string' ? textWithoutHrefs(text, (href) => sameMusicPage(href, preview.url)) : text), [ownLink, text, preview])
   const hasText = typeof body === 'string' && body !== ''
@@ -440,6 +443,7 @@ function PostRowView ({
           onPress={openTap}
           onLongPress={bodyLongPress}
           delayLongPress={350}
+          tabIndex={videoAbove ? -1 : undefined}
           {...a11yOpen}
         >
           <Text style={styles.text} numberOfLines={numberOfLines} onTextLayout={onTextLayout}>{shownText}</Text>
@@ -456,6 +460,10 @@ function PostRowView ({
         ? <MusicEmbedCard embed={embed} card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />
         : <LinkCard card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />
     : null
+  // The player takes its own touches outside the row's open area, so the plain caption follows it out.
+  // The body label speaks the caption before the player; this copy is for sight and touch only,
+  // hidden from web screen readers by aria-hidden and from native ones by the other two props.
+  const textUnder = videoAbove && hasText && !textOut ? <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>{textNode}</View> : null
   const previewsBody = previewLines.length === 0
     ? null
     : (
@@ -585,9 +593,11 @@ function PostRowView ({
                   : <Text style={styles.replyChipText} numberOfLines={1}>{replyLabel}</Text>
                 : null}
               {mediaNode}
-              {textOut ? null : textNode}
+              {textOut || videoAbove ? null : textNode}
             </View>
           </Pressable>
+          {videoAbove ? previewNode : null}
+          {textUnder}
           {textOut ? textNode : null}
           <ClampControl control={control} onPress={otherPress(toggle)} />
           {quoteNode && !quoteOut
@@ -599,7 +609,7 @@ function PostRowView ({
               </Pressable>
               )
             : null}
-          {previewNode}
+          {videoAbove ? null : previewNode}
           {quoteOut ? quoteNode : null}
           {/* After the content, so a screen reader reads the caption before
               them; the position is absolute, so they still draw at the top. */}
