@@ -294,6 +294,29 @@ test('a tap plays the video inside the tile', (t) => {
   t.absent(pressKeys.includes('Escape'), 'Escape on the inline player still reaches the app')
 })
 
+test('only the photo viewer zooms and drags to close', (t) => {
+  const src = read('ui/MediaGrid.js')
+  const { VideoViewer: video, MediaGrid: grid } = videoSlices(src)
+  const viewer = src.slice(src.indexOf('function Viewer ('), src.indexOf('function useVideoClip ('))
+  const carousels = src.match(/<MediaCarousel\b[\s\S]*?\/>/g) || []
+  t.is(carousels.length, 2, 'the viewer and the feed carousel')
+  const photo = viewer.match(/<MediaCarousel\b[\s\S]*?\/>/g) || []
+  t.is(photo.length, 1, 'one carousel in the photo viewer')
+  t.ok(photo.length === 1 && /\n\s+zoomable\n/.test(photo[0]), 'the viewer carousel zooms')
+  t.ok(photo.length === 1 && photo[0].includes('onDismiss={onClose}'), 'drag to close uses the same close as the button')
+  t.ok(photo.length === 1 && /\n\s+claimTouch\n/.test(photo[0]) && photo[0].includes("fit='contain'"), 'the zoomed carousel is the full-screen one')
+  const feed = grid.match(/<MediaCarousel\b[\s\S]*?\/>/g) || []
+  t.is(feed.length, 1, 'one carousel in the feed grid')
+  t.absent(feed.length !== 1 || feed[0].includes('zoomable') || feed[0].includes('onDismiss'), 'the feed carousel does not zoom')
+  t.is(src.split('zoomable').length - 1, 1, 'nothing else asks for zoom')
+  t.ok(video.length > 0, 'the video viewer slice exists')
+  t.absent(video.includes('ZoomView') || video.includes('zoomable') || video.includes('onDismiss'), 'the video viewer does not zoom')
+  t.absent(src.includes('ZoomView'), 'the grid reaches zoom only through the carousel')
+  t.ok(viewer.includes("accessibilityLabel='fechar' onPress={onClose}"), 'the close button stays')
+  t.ok(viewer.includes('onRequestClose={onClose}'), 'back still closes')
+  t.ok(viewer.includes("useEscapeLayer(!!open, () => closeRef.current(), 'viewer')"), 'Escape still closes')
+})
+
 test('RefreshableList treats web keyboard scrolls and mouse presses as user gestures', (t) => {
   const src = read('ui/RefreshableList.js')
   const start = src.indexOf("node.addEventListener('wheel', onWheel, { passive: true })")

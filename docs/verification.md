@@ -10053,3 +10053,42 @@ node apps/app/test/platformGate.test.js
 ```
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 216. Fotos com zoom: pinça, toque duplo e arrastar para fechar na tela cheia (PR feat/photo-viewer-zoom)
+
+Esta seção confere o zoom das fotos na tela cheia: a pinça, o toque duplo e o arrastar para fechar. Só a tela cheia de fotos amplia: a de uma publicação (A Rua, Diário, perfil e onde mais a tela cheia de fotos de uma publicação abre) e a de uma foto de conversa. Os carrosséis do feed não ampliam, e a rolagem vertical do feed sobre uma foto continua como antes. A tela cheia de vídeo não mudou, porque vídeo não amplia.
+
+Na tela cheia de uma publicação, a pinça com dois dedos amplia de 1x até 4x em volta do ponto entre os dedos, e uma pinça para dentro volta a 1x, sem passar disso. O toque duplo amplia 2,5x no ponto tocado, e outro toque duplo volta a 1x (na web, o clique duplo faz o mesmo). Com a foto ampliada, arrastar com um dedo move a foto, que nunca sai da moldura. Enquanto a foto está ampliada, ou durante uma pinça ou um arrasto para fechar, deslizar não troca de foto; em 1x, deslizar para o lado troca de foto como antes. Em 1x, arrastar para baixo move a foto junto com o dedo: soltar depois de 120 pt, ou num arrasto rápido para baixo, fecha a tela cheia, e um arrasto curto volta para o lugar. Na web, as setas e as teclas de seta trocam de foto também com a foto ampliada; a foto deixada volta a 1x, e o deslizar volta a funcionar. Na web, com a foto ampliada, os gestos de toque ficam com a foto, e o navegador não rola nem amplia a página. Com Reduzir movimento, a foto muda de tamanho e de lugar sem animação. Nada disso envia pedido nenhum: é só a tela.
+
+Para o leitor de tela, os rótulos e botões da tela cheia não mudaram: "fechar", o contador "N de M" e, na web, as setas "foto anterior" e "próxima foto" na tela cheia de uma publicação, e "Fechar foto" na de uma conversa.
+
+Nas conversas, um toque numa foto ("Abrir foto") abre a tela cheia, onde a foto tem os mesmos gestos: pinça até 4x, toque duplo a 2,5x e arrastar para baixo em 1x. A tela cheia de uma conversa mostra uma foto por vez, então não há troca de foto nela. "Fechar foto", o Esc na web e o voltar do Android continuam fechando, e cada foto aberta começa em 1x. Os limites do arrasto usam a proporção da foto que a mensagem já traz; nada novo é baixado ou pedido, e as regras de um pedido de mensagem não mudaram.
+
+Limites conhecidos. No iOS, um arrasto que começa enquanto a foto ainda desliza depois de trocar de foto fica com o carrossel (o iOS entrega o toque à rolagem que ainda está em movimento); com a foto parada, o arrasto para fechar funciona, conferido no simulador. O toque duplo no iOS não foi conferido no simulador (a ferramenta não dá dois toques dentro de 280 ms); a pinça, o arrasto e o fechar foram. Na web, deslizar com o dedo para trocar de foto num navegador de celular não foi conferido; a conferência da web usou mouse, teclado e toques sintéticos para a pinça, num Chromium com tela de 375x812. A tela cheia de vídeo e a foto do perfil (avatar) não ampliam. As fotos de uma conversa ainda não foram conferidas em aparelho (item 9 da lista: pendente).
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA. Registrar aparelho, sistema e, na web, o navegador.
+
+- [ ] Trocar de foto em 1x: deslizar para o lado troca de foto como antes. Emulador Android (Android 16, build de debug): conferido em 14/11/2026; trocar de foto deslizando em 1x (1, 2, 3, 2). Simulador iOS (iPhone 17 Pro, iOS 26.2): conferido em 14/11/2026; trocar de foto deslizando em 1x. Web (Chromium, tela de 375x812): conferido em 14/11/2026; setas e teclas trocam de foto em 1x. Deslizar com o dedo num navegador de celular: pendente. PWA: pendente.
+- [ ] Pinça: amplia até 4x em volta dos dedos, sem trocar de foto; pinça para dentro volta a 1x. Emulador Android (Android 16, build de debug): conferido em 14/11/2026; pinça horizontal amplia sem trocar de foto; pinça para dentro volta a 1x; pinça com o ponto entre os dedos andando 350 px para o lado amplia sem trocar de foto. Simulador iOS (iPhone 17 Pro, iOS 26.2): conferido em 14/11/2026; pinça amplia sem trocar de foto; pinça para dentro volta a 1x. Web (Chromium, tela de 375x812): conferido em 14/11/2026; pinça com toques sintéticos amplia (3x para dedos que se afastam de 80 para 240 px) sem trocar de foto, e pinça para dentro volta a 1x. PWA: pendente.
+- [ ] Toque duplo (clique duplo na web): amplia 2,5x no ponto tocado e volta a 1x. Emulador Android (Android 16, build de debug): conferido em 14/11/2026; toque duplo em 1x amplia no ponto tocado (também o primeiro toque duplo depois de abrir a tela cheia, fora do centro); toque duplo volta a 1x. Simulador iOS (iPhone 17 Pro, iOS 26.2): pendente (a ferramenta não dá dois toques dentro de 280 ms). Web (Chromium, tela de 375x812): conferido em 14/11/2026; o primeiro clique duplo amplia 2,5x no ponto clicado; clique duplo volta a 1x. PWA: pendente.
+- [ ] Foto ampliada: arrastar move a foto dentro da moldura, sem trocar de foto. Emulador Android (Android 16, build de debug): conferido em 14/11/2026; arrastar com a foto ampliada move a foto sem trocar de foto. Simulador iOS (iPhone 17 Pro, iOS 26.2): conferido em 14/11/2026; arrastar com a foto ampliada move a foto sem trocar de foto. Web (Chromium, tela de 375x812): conferido em 14/11/2026; arrastar com o mouse move a foto ampliada sem trocar de foto. PWA: pendente.
+- [ ] Arrastar para baixo em 1x: arrasto curto volta, arrasto longo ou rápido fecha. Emulador Android (Android 16, build de debug): conferido em 14/11/2026; arrasto curto para baixo (76 pt) volta; arrasto diagonal longo (267 pt para baixo, 95 pt para o lado) fecha, e o carrossel do feed fica na foto em que a tela cheia estava. Simulador iOS (iPhone 17 Pro, iOS 26.2): conferido em 14/11/2026; arrasto curto (60 pt) volta; arrasto vertical longo (450 pt) e arrasto diagonal longo, com a foto parada, fecham. Web (Chromium, tela de 375x812): conferido em 14/11/2026; arrasto curto para baixo volta e arrasto longo fecha. PWA: pendente.
+- [ ] Web: setas e teclas com a foto ampliada trocam de foto, e a foto deixada volta a 1x. Web (Chromium, tela de 375x812): conferido em 14/11/2026; seta para a direita com a foto ampliada troca de foto e a foto deixada volta a 1x; setas e teclas trocam de foto em 1x. PWA: pendente.
+- [ ] Feed: os carrosséis não ampliam e a rolagem vertical sobre uma foto continua. Emulador Android (Android 16, build de debug): pendente. Simulador iOS (iPhone 17 Pro, iOS 26.2): pendente. Web (Chromium, tela de 375x812): conferido em 14/11/2026; os carrosséis do feed não ampliam. PWA: pendente.
+- [ ] Reduzir movimento: sem animação ao ampliar, voltar e fechar. Android, iOS, web e PWA: pendente.
+- [ ] Conversa (F6): pinça, toque duplo, arrastar e fechar na foto de uma conversa. Android, iOS, web e PWA: pendente.
+- [ ] Leitor de tela: rótulos e botões da tela cheia sem mudança ("fechar", "N de M" e, na web, "foto anterior" e "próxima foto"; "Fechar foto" na conversa). Android, iOS, web e PWA: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/app/test/zoom.test.js
+node apps/app/test/carousel.test.js
+node apps/app/test/feedRender.test.js
+node apps/app/test/postActions.test.js
+node apps/app/test/escapeLayer.test.js
+node apps/app/test/chatMedia.test.js
+node apps/app/test/platformGate.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
