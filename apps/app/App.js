@@ -1474,6 +1474,7 @@ function Member () {
       const target = { author: link.author, seq: link.seq }
       savePostLink(target)
       setPendingPost(target)
+      setPostOpenLater(false)
       return
     }
     if (signup === null && rec === null && link === null && waitsForInstallation(url)) {
@@ -3102,7 +3103,7 @@ function Member () {
   // the Terms and then Entrar, where the post card and the destination stay.
   if (postOpeningGate({ introShow: showIntro, ageReturn: AGE_RETURN, inviteOpening: opening, otherLink: invite !== null || pendingLink !== null, post: pendingPost, dismissed: postOpenLater })) {
     if (openHow) return <Introducao key='how' onDone={() => setOpenHow(false)} sidePad={sidePad} edges={sideEdges} />
-    return <PostLinkOpen onEnter={() => intro.markSeen()} onHow={() => setOpenHow(true)} onLater={() => setPostOpenLater(true)} sidePad={sidePad} edges={sideEdges} />
+    return <PostLinkOpen post={pendingPost} origin={ageOrigin} onEnter={() => intro.markSeen()} onHow={() => setOpenHow(true)} onLater={() => setPostOpenLater(true)} sidePad={sidePad} edges={sideEdges} />
   }
   if (showIntro) {
     introRendered.current = true

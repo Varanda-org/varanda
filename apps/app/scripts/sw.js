@@ -72,7 +72,7 @@ const INDEX_PREFIX = '/index/'
 // prefix is bypassed; /anuncio/... is an app route that keeps the shell, and
 // /robots.txt is a Caddy response the worker never looks at.
 const FEIRA_PREFIX = '/f/'
-// Public post pages (/p/<diary>/<seq>, .../foto/<n>, /p/policy) come from the
+// Public post pages (/p/<diary>/<seq>, .../foto/<n>, .../previa, /p/policy) come from the
 // seeder with their own headers, a 302 and real 404s. Only '/p/' is bypassed;
 // /publicacao/... is an app route that keeps the shell.
 const POST_PAGE_PREFIX = '/p/'

@@ -20,7 +20,7 @@ test('head controls stay outside the hidden body, after the content and before t
   const end = post.indexOf('<View style={styles.bar}>', controls)
   const buttons = post.slice(controls, end)
   t.ok(end > controls, 'controls precede the bar')
-  t.ok(post.indexOf('{textOut ? textNode : null}') < controls && post.indexOf('<ClampControl') < controls && post.indexOf('{previewNode}') < controls, 'a screen reader reads the interactive caption, its clamp control and the replies before the controls')
+  t.ok(post.indexOf('{textOut ? textNode : null}') < controls && post.indexOf('<ClampControl') < controls && post.indexOf('{videoAbove ? null : previewNode}') >= 0 && post.indexOf('{videoAbove ? null : previewNode}') < controls, 'a screen reader reads the interactive caption, its clamp control and the replies before the controls')
   t.ok(buttons.includes("accessibilityLabel={'seguir ' + title}") && buttons.includes("label='mais ações'"), 'both labelled controls are in the visible accessibility tree')
   t.absent(/accessibilityElementsHidden|no-hide-descendants|accessible=\{false\}/.test(buttons), 'neither control is hidden')
   t.ok(buttons.includes('onPress={otherPress(onFollow)}') && buttons.includes('disabled={!!followPending}') && buttons.includes('accessibilityState={{ disabled: !!followPending }}'), 'follow retains its handler and announced pending state')
@@ -47,11 +47,46 @@ test('head reserves the measured space of its absolute controls', (t) => {
 })
 
 test('PostRow places media before the caption in both text branches', (t) => {
-  t.ok(/\{mediaNode\}\s*\{textOut \? null : textNode\}/.test(post), 'plain caption follows photos')
+  t.ok(/\{mediaNode\}\s*\{textOut \|\| videoAbove \? null : textNode\}/.test(post), 'plain caption follows photos')
   t.is(post.split('{mediaNode}').length - 1, 1, 'photos keep one parent in both caption branches, so opening a caption never remounts the carousel')
   t.ok(post.indexOf('{textOut ? textNode : null}') > post.indexOf('{mediaNode}'), 'interactive caption follows photos')
   t.absent(/\{[^{}]*textOut[^{}]*mediaNode[^{}]*\}/.test(post), 'no caption branch decides where the photos render')
   t.ok(post.includes('const mediaNode = hasMedia ? <MediaGrid'), 'text-only posts add no media')
+})
+
+test('PostRow places a video before the caption, outside the open area', async (t) => {
+  t.ok(post.includes("const videoAbove = ownLink && embed.provider === 'youtube'"))
+  t.absent(/const videoAbove = [^\n]*(textOut|numberOfLines|control|hasText)/.test(post), 'caption expansion never moves the player')
+  t.ok(/<\/Pressable>\s*\{videoAbove \? previewNode : null\}\s*\{textUnder\}\s*\{textOut \? textNode : null\}/.test(post), 'player precedes both caption branches outside the open area')
+  const start = post.indexOf('<View style={styles.body}')
+  const end = post.indexOf('{videoAbove ? previewNode : null}')
+  const stack = []
+  for (const match of post.slice(start, end).matchAll(/<(\/)?(View|Pressable)\b([^>]*?)>/g)) {
+    if (match[1]) stack.pop()
+    else if (!match[3].endsWith('/')) stack.push(match[0])
+  }
+  t.ok(start >= 0 && end > start, 'body and player found')
+  t.alike(stack, ['<View style={styles.body} onLayout={measureCaption}>'], 'player has no hidden or pressable ancestor within the body')
+  t.is(post.split('{videoAbove ? previewNode : null}').length - 1, 1, 'one player slot above the caption')
+  t.is(post.split('{videoAbove ? null : previewNode}').length - 1, 1, 'one lower slot for other cards')
+  t.absent(post.includes('{previewNode}'), 'no unconditional player slot')
+  t.ok(/const textUnder = videoAbove && hasText && !textOut \? <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>\{textNode\}<\/View> : null/.test(post), 'the plain caption is hidden from native and web screen readers')
+  t.ok(post.includes('tabIndex={videoAbove ? -1 : undefined}'), 'the hidden caption adds no keyboard stop')
+  t.ok(post.includes("const label = textOut ? bodyParts.filter((part) => part !== shownText).join('. ') : bodyLabel"), 'the body label keeps the plain caption before the player')
+  const { embedOf } = await import('../src/musicEmbed.js')
+  for (const url of [
+    'https://youtu.be/dQw4w9WgXcQ',
+    'https://www.youtube.com/shorts/dQw4w9WgXcQ',
+    'https://www.youtube.com/playlist?list=PLx0sYbCqOb8TBPRdmBHs5Iftvv9TPboYG'
+  ]) t.is(embedOf(url).provider, 'youtube', url)
+  for (const url of [
+    'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC?si=xyz',
+    'https://soundcloud.com/artist-1/song_name',
+    'https://music.apple.com/br/album/some-album/1440857781'
+  ]) {
+    const embed = embedOf(url)
+    t.ok(embed !== null && embed.provider !== 'youtube', url)
+  }
 })
 
 test('PostRow measures the caption column and forwards the expanded override', (t) => {
