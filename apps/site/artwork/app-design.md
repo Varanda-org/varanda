@@ -166,6 +166,8 @@ Cantos arredondados, botões em pílula, entrelinha generosa, nomes em negrito.
 
 ### Feira
 
+O ícone da Feira é uma barraca desenhada em Views na grade de 24 do Feather, com traço de 2 unidades, como a cadeira e a rua.
+
 Na cidade, de cima para baixo: o campo de busca, com o botão Filtros como ícone no fim direito dele (com um ponto de destaque quando ordem ou faixa estão ativas); uma linha com o chip da cidade (ícone de mapa e "Cidade, UF", que abre a folha de localização); a fileira rolável de discos de categoria (48 pt, com o nome embaixo; o selecionado é escuro, com ícone claro, e o leitor de tela também o ouve como selecionado); "Salvar busca" e a grade. Sem cidade, uma vitrine com o título, os estados, o campo Cidade e "Como funciona" em quatro passos com ícone.
 
 O tile de anúncio tem fundo `card`, sem cantos arredondados, com a foto em 4:5 em cima (ou o ícone da categoria sobre `skeleton`); o preço fica num chip sobre uma faixa escura embaixo da foto, o título numa linha, e o selo, se houver, num chip no canto superior esquerdo da foto. A cidade não aparece no tile (o leitor de tela a lê). A grade tem 1 coluna abaixo de 360 pt ou com texto grande, 2 abaixo de 600, 3 abaixo de 900; a casca do app limita o conteúdo a 640 pt, então o máximo é 3.

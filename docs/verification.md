@@ -10871,3 +10871,22 @@ node apps/site/scripts/render-calcada.js --check
 ```
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 237. Ícone da Feira: barraca (PR feat/feira-tent-icon)
+
+Esta seção confere o novo ícone da Feira, uma barraca de feira (toldo listrado, bambolim recortado, dois postes e balcão) desenhada com Views na grade de 24, no lugar da sacola de compras. Só o visual: sem mudança de protocolo, RPC, Termos nem dependência.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA, cada um em claro e escuro.
+
+- [ ] Aba Feira (27 pt), parada e ativa, em claro e escuro e com texto grande 1,3: toldo, recortes, postes e balcão se juntam sem fresta fina e nada é cortado. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Linha "Anúncios" de um perfil (20 pt): a barraca fica legível, sem fresta nem corte. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Estado vazio da Feira: a barraca aparece inteira, sem fresta nem corte, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho.
+
+```sh
+node apps/app/test/uiKit.test.js
+node apps/app/test/tabBar.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.

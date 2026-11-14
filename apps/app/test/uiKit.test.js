@@ -56,7 +56,11 @@ test('new icon aliases resolve to glyphs in the set they render from', (t) => {
   const featherReturn = body.lastIndexOf('return <Feather name={GLYPHS[name] || name}')
   t.ok(ionGate >= 0 && ionReturn > ionGate && featherReturn > ionReturn, 'Ionicons aliases render before the Feather fallback')
   t.absent(body.slice(ionGate, ionReturn).includes('filled'), 'category icons are not gated on filled')
-  t.is(feather.feira, 'shopping-bag', 'the Feira tab keeps its bag')
+  t.absent(feather.feira, 'feira is drawn, not a Feather glyph')
+  t.absent(ion.feira, 'nor an Ionicons one')
+  const feiraAt = body.indexOf("if (name === 'feira') {")
+  t.ok(feiraAt >= 0 && feiraAt < ionGate, 'the Feira stall is drawn before any font glyph')
+  t.ok(body.slice(feiraAt, ionGate).includes("overflow: 'hidden'"), 'the valance is clipped rings')
   const aliases = {
     codigo: ['Feather', 'code'],
     filtro: ['Feather', 'filter'],
@@ -84,7 +88,6 @@ test('new icon aliases resolve to glyphs in the set they render from', (t) => {
     t.absent(other[name], name + ' is not also a ' + (set === 'Ionicons' ? 'Feather' : 'Ionicons') + ' alias')
     t.ok(Object.hasOwn(maps[set], glyph), name + ' exists in ' + set)
   }
-  t.ok(ion.cat_roupa !== feather.feira, 'clothing is not the Feira bag')
   t.ok(ion.cat_moveis !== 'archive', 'furniture is not a storage box')
 })
 
