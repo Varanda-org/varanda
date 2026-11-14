@@ -12,7 +12,7 @@
 // asks reconcile first.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ScrollView, StyleSheet, Text, View } from 'react-native'
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { MAX_GROUP_NAME, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { countChars, shortKey } from '../format'
@@ -24,12 +24,14 @@ import { Btn, ConfirmStack, ErrorText, Field, Notice, SectionHeader, Soft, error
 import { MoreButton } from '../ui/MoreButton'
 import { ActionsSheet } from '../ui/ActionsSheet'
 import { Avatar } from '../ui/Avatar'
+import { HelpButton } from '../ui/Help'
+import { Icon } from '../ui/Icon'
 import { publicGroupRefusal } from '../wordCheck'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
 import { Skeleton } from '../ui/States'
 import { type } from '../ui/theme'
-import { useStyles } from '../ui/ThemeProvider'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { canShare, copyText, shareUrl } from '../share'
 import { shareNav } from '../shareNav'
 
@@ -53,6 +55,23 @@ function origin () {
   return installationOrigin() || globalThis.location?.origin || ''
 }
 
+function OpenRow ({ label, open, onPress }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
+  return (
+    <Pressable
+      style={({ pressed }) => [styles.openRow, pressed && styles.pressed]}
+      accessibilityRole='button'
+      accessibilityLabel={label}
+      accessibilityState={{ expanded: open }}
+      onPress={onPress}
+    >
+      <Text style={styles.name} numberOfLines={1}>{label}</Text>
+      <View style={open ? styles.chevronOpen : null}><Icon name='seta' size={20} color={colors.soft} /></View>
+    </Pressable>
+  )
+}
+
 function PersonRow ({ row, label, onOpenMember, children }) {
   const styles = useStyles(makeStyles)
   const name = nameOf(row)
@@ -63,7 +82,7 @@ function PersonRow ({ row, label, onOpenMember, children }) {
         {typeof onOpenMember === 'function'
           ? <Text style={styles.name} accessibilityRole='link' accessibilityLabel={name + ', ver perfil'} onPress={() => onOpenMember(row.member)} numberOfLines={1}>{name}</Text>
           : <Text style={styles.name} numberOfLines={1}>{name}</Text>}
-        {label ? <Text style={styles.meta}>{label}</Text> : null}
+        {label ? <View style={styles.badge}><Text style={styles.badgeText}>{label}</Text></View> : null}
       </View>
       <View style={styles.inline}>{children}</View>
     </View>
@@ -86,6 +105,14 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
   const [confirm, setConfirm] = useState(null)
   const [policyOpen, setPolicyOpen] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
+  const [openField, setOpenField] = useState(null)
+  // A field once opened stays mounted: InviteByName keeps an in-flight send
+  // and its uncertain-state retry, which an unmount would lose.
+  const [opened, setOpened] = useState({})
+  const toggleField = (key) => {
+    setOpened((o) => (o[key] ? o : { ...o, [key]: true }))
+    setOpenField((f) => (f === key ? null : key))
+  }
   const act = useAction()
   const more = useAction()
   const seqRef = useRef(0)
@@ -267,6 +294,9 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
     if (canShare(nav) && (await shareUrl(nav, { url, title })) !== 'failed') return
     setShareNote((await copyText(nav, url)) ? 'Link copiado.' : 'Não foi possível copiar o link.')
   }
+  // group.members total also counts banned entries; group.info counts members.
+  const activeCount = info && Number.isSafeInteger(info.members) ? info.members : live.length
+  const groupName = info && typeof info.name === 'string' ? displayText(info.name) : ''
   const newName = nameDraft.trim()
   const nameRefused = publicGroupRefusal(info?.visibility, newName)
   const nameOk = newName !== '' && countChars(newName) <= MAX_GROUP_NAME && nameRefused === '' && newName !== info?.name
@@ -309,7 +339,7 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
         label={'ações de ' + nameOf(m)}
         title={nameOf(m)}
         actions={[
-          can('admin', role) ? { icon: 'shield', label: m.admin ? 'Tirar admin' : 'Tornar admin', pending: act.pending, onPress: () => admin(m.member, !m.admin) } : null,
+          can('admin', role) && !m.admin ? { icon: 'shield', label: 'Tornar admin', pending: act.pending, onPress: () => admin(m.member, true) } : null,
           staff && !m.admin
             ? { icon: 'slash', label: 'Banir', danger: true, pending: act.pending, onPress: () => setConfirm({ text: 'Banir ' + nameOf(m) + ' deste grupo?', label: 'Banir', run: () => ban(m.member, true) }) }
             : null
@@ -333,6 +363,28 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
       <>
         <ErrorText>{loadError}</ErrorText>
         <ErrorText>{act.error}</ErrorText>
+        <View style={styles.header}>
+          <Avatar name={groupName} publicKey={group} size={72} />
+          <Text style={styles.groupName} numberOfLines={2}>{groupName}</Text>
+          <Text style={styles.meta}>{activeCount === 1 ? '1 membro' : activeCount + '\u00a0membros'}</Text>
+          <View style={styles.inline}>
+            {link0 ? <Pill icon='compartilhar' label='Compartilhar' onPress={() => shareInvite(link0)} /> : null}
+            {can('leave', role) && writerOnDevice(info)
+              ? (
+                <Pill
+                  label='Sair do grupo'
+                  danger
+                  pending={act.pending}
+                  onPress={() => setConfirm({
+                    text: isPrivate ? LEAVE_PRIVATE : (info.join === 'approval' ? LEAVE_APPROVAL : LEAVE_OPEN),
+                    label: 'Sair',
+                    run: leave
+                  })}
+                />
+                )
+              : null}
+          </View>
+        </View>
         {checkBox}
         {confirmBox}
 
@@ -341,10 +393,11 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
             <View>
               <SectionHeader>Convite</SectionHeader>
               <View style={styles.box}>
-                <Soft>Envie o convite deste grupo para quem você quiser.</Soft>
-                <Btn label='Compartilhar' onPress={() => shareInvite(link0)} secondary />
+                <View style={styles.helpLine}>
+                  <View style={styles.personText}><Soft>Envie o convite deste grupo para quem você quiser.</Soft></View>
+                  <HelpButton doc={{ title: 'Convite', paragraphs: [isPrivate ? 'Grupo privado: quem abrir o convite pede para entrar, e um administrador aprova.' : 'Quem abrir o convite pode entrar no grupo.'] }} size={18} />
+                </View>
                 {shareNote ? <Soft>{shareNote}</Soft> : null}
-                <Soft>{isPrivate ? 'Grupo privado: quem abrir o convite pede para entrar, e um administrador aprova.' : 'Quem abrir o convite pode entrar no grupo.'}</Soft>
               </View>
             </View>
             )
@@ -353,13 +406,17 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
         {can('meta', role)
           ? (
             <View>
-              <SectionHeader>Nome</SectionHeader>
-              <View style={styles.box}>
-                <Field label='Novo nome' value={nameDraft} onChangeText={setNameDraft} maxLength={MAX_GROUP_NAME * 2} placeholder={typeof info.name === 'string' ? displayText(info.name) : ''} />
-                {countChars(newName) > MAX_GROUP_NAME ? <Soft>{'No máximo ' + MAX_GROUP_NAME + ' caracteres.'}</Soft> : null}
-                <ErrorText>{nameRefused}</ErrorText>
-                <Btn label='Renomear' onPress={() => rename(newName)} disabled={!nameOk || !node.online} pending={act.pending} />
-              </View>
+              <OpenRow label='Nome' open={openField === 'name'} onPress={() => toggleField('name')} />
+              {opened.name
+                ? (
+                  <View style={[styles.box, openField !== 'name' && styles.hidden]}>
+                    <Field label='Novo nome' value={nameDraft} onChangeText={setNameDraft} maxLength={MAX_GROUP_NAME * 2} placeholder={typeof info.name === 'string' ? displayText(info.name) : ''} />
+                    {countChars(newName) > MAX_GROUP_NAME ? <Soft>{'No máximo ' + MAX_GROUP_NAME + ' caracteres.'}</Soft> : null}
+                    <ErrorText>{nameRefused}</ErrorText>
+                    <Btn label='Renomear' onPress={() => rename(newName)} disabled={!nameOk || !node.online} pending={act.pending} />
+                  </View>
+                  )
+                : null}
             </View>
             )
           : null}
@@ -367,20 +424,24 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
         {node.hosted && can('invite', role, { memberInvite: info.memberInvite === true })
           ? (
             <View>
-              <SectionHeader>Convidar para o grupo</SectionHeader>
-              <InviteByName
-                request={request}
-                hosted={node.hosted === true}
-                online={node.online !== false}
-                ownKey={ownKey}
-                isMember={isGroupMember}
-                makeText={() => {
-                  const base = origin()
-                  return base === '' || !link0
-                    ? null
-                    : inviteText({ communityName, groupName: typeof info.name === 'string' ? info.name : '', link: base + link0, group: true })
-                }}
-              />
+              <OpenRow label='Convidar para o grupo' open={openField === 'invite'} onPress={() => toggleField('invite')} />
+              {opened.invite && (
+                <View style={openField !== 'invite' && styles.hidden}>
+                  <InviteByName
+                    request={request}
+                    hosted={node.hosted === true}
+                    online={node.online !== false}
+                    ownKey={ownKey}
+                    isMember={isGroupMember}
+                    makeText={() => {
+                      const base = origin()
+                      return base === '' || !link0
+                        ? null
+                        : inviteText({ communityName, groupName: typeof info.name === 'string' ? info.name : '', link: base + link0, group: true })
+                    }}
+                  />
+                </View>
+              )}
             </View>
             )
           : null}
@@ -427,19 +488,13 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
         <SectionHeader>Membros</SectionHeader>
         {live.map((m) => (
           <PersonRow key={m.member} row={m} label={m.member === creator ? 'criador' : (m.admin ? 'administrador' : '')} onOpenMember={openMember}>
+            {m.admin === true && can('admin', role) && m.member !== creator ? <Pill label='Tirar admin' onPress={() => admin(m.member, false)} pending={act.pending} /> : null}
             {memberActions(m)}
           </PersonRow>
         ))}
         {members.rows.length < members.total ? <View style={styles.box}><Pill label='Mais membros' onPress={() => loadMore('members')} pending={more.pending} /></View> : null}
-        <ErrorText>{more.error}</ErrorText>
-
-        <SectionHeader>Administradores</SectionHeader>
         {admins.length === 0 ? <View style={styles.box}><Soft>Nenhum administrador listado.</Soft></View> : null}
-        {admins.map((m) => (
-          <PersonRow key={'a' + m.member} row={m} label={m.member === creator ? 'criador' : 'administrador'} onOpenMember={openMember}>
-            {can('admin', role) && m.member !== creator ? <Pill label='Tirar admin' onPress={() => admin(m.member, false)} pending={act.pending} /> : null}
-          </PersonRow>
-        ))}
+        <ErrorText>{more.error}</ErrorText>
 
         {staff || banned.length > 0
           ? (
@@ -467,22 +522,6 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
             )
           : null}
 
-        {can('leave', role) && writerOnDevice(info)
-          ? (
-            <View style={styles.box}>
-              <Btn
-                label='Sair do grupo'
-                danger
-                pending={act.pending}
-                onPress={() => setConfirm({
-                  text: isPrivate ? LEAVE_PRIVATE : (info.join === 'approval' ? LEAVE_APPROVAL : LEAVE_OPEN),
-                  label: 'Sair',
-                  run: leave
-                })}
-              />
-            </View>
-            )
-          : null}
       </>
     )
   }
@@ -510,5 +549,14 @@ const makeStyles = (colors) => StyleSheet.create({
   },
   personText: { flex: 1, minWidth: 0 },
   name: { ...type.postName, color: colors.ink },
-  meta: { ...type.postMeta, color: colors.soft }
+  meta: { ...type.postMeta, color: colors.soft },
+  header: { alignItems: 'center', gap: 6, paddingHorizontal: 16, paddingTop: 8, paddingBottom: 12 },
+  groupName: { ...type.postName, color: colors.ink, textAlign: 'center' },
+  helpLine: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  badge: { alignSelf: 'flex-start', marginTop: 2, paddingHorizontal: 8, paddingVertical: 1, borderRadius: 999, backgroundColor: colors.line },
+  badgeText: { ...type.postMeta, color: colors.soft },
+  openRow: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 52, paddingHorizontal: 16, borderBottomWidth: 1, borderBottomColor: colors.line },
+  pressed: { opacity: 0.6 },
+  hidden: { display: 'none' },
+  chevronOpen: { transform: [{ rotate: '90deg' }] }
 })

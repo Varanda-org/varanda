@@ -1,6 +1,6 @@
 // One row of the unified Conversas list (WhatsApp/Telegram style): avatar (round for
 // a person, rounded square for a group or community) on the left, bold title, one grey preview line, the time at the
-// top right and the unread badge at the bottom right. A person's title comes
+// top right and an unread dot at the bottom right. A person's title comes
 // from the row's own name, then the names cache, then the @username; never
 // "sem nome" while any of them is known. The own marker (OWN_LABEL) is drawn
 // apart from the preview, never joined to it, so a peer named "Você" never
@@ -10,13 +10,13 @@ import { useEffect } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { relativeTime } from '../format'
-import { OWN_LABEL, unreadLabel } from '../groups'
+import { OWN_LABEL } from '../groups'
 import { useNames } from '../names'
 import { UNNAMED, readsAs, whoOf } from '../who'
 import { Avatar } from './Avatar'
 import { PressScale } from './PressScale'
 import { useStyles } from './ThemeProvider'
-import { radius, space, type } from './theme'
+import { space, type } from './theme'
 
 const SIZE = 48
 
@@ -60,7 +60,6 @@ export function ConversationRow ({ item, now, onPress }) {
   const count = Number.isInteger(item.unread) ? item.unread : 0
   const dot = item.unread === true
   const unread = dot || count > 0
-  const badge = unreadLabel(count)
   const unreadText = item.unread === true
     ? 'mensagens novas'
     : count === 1 ? '1 mensagem nova' : count >= 99 ? '99 ou mais mensagens novas' : count + ' mensagens novas'
@@ -83,11 +82,11 @@ export function ConversationRow ({ item, now, onPress }) {
         {preview !== '' || unread
           ? (
             <View style={styles.line}>
-              <Text style={styles.preview} numberOfLines={1}>
+              <Text style={[styles.preview, unread && styles.previewUnread]} numberOfLines={1}>
                 {own ? <Text style={styles.own}>{OWN_LABEL + ': '}</Text> : null}
                 {preview}
               </Text>
-              {unread ? <View style={[styles.badge, dot && styles.dot]}>{!dot ? <Text style={styles.badgeText} maxFontSizeMultiplier={1.5}>{badge}</Text> : null}</View> : null}
+              {unread ? <View style={styles.dot} /> : null}
             </View>
             )
           : null}
@@ -114,16 +113,7 @@ const makeStyles = (colors) => StyleSheet.create({
   timeUnread: { color: colors.accent, fontWeight: '600' },
   preview: { ...type.postMeta, fontSize: 14, lineHeight: 19, flex: 1, minWidth: 0, color: colors.soft },
   own: { color: colors.accent, fontWeight: '600' },
-  badge: {
-    // minHeight: with large text a fixed 20 pt cut the digits.
-    minWidth: 20,
-    minHeight: 20,
-    paddingHorizontal: 6,
-    borderRadius: radius.pill,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.accent
-  },
-  dot: { minWidth: 12, width: 12, minHeight: 12, height: 12, paddingHorizontal: 0 },
-  badgeText: { ...type.chip, color: colors.accentInk }
+  previewUnread: { color: colors.ink, fontWeight: '700' },
+  // A plain 8 pt disc: the spoken label already carries the count.
+  dot: { width: 8, height: 8, borderRadius: 4, flexShrink: 0, backgroundColor: colors.accent }
 })

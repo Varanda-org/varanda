@@ -2,10 +2,11 @@
 // bubbles sit on the right in the accent tint, the others on the left on the
 // card. Consecutive bubbles of one sender form a run (dm-screen.js
 // bubbleShape: 'single' | 'first' | 'middle' | 'last'): their facing corners
-// tighten, the last one gets a small tail, the sender's name (groups) shows
+// tighten, the sender's name (groups) shows
 // on the first one only and the avatar (groups) beside the last one only.
-// The time sits small inside the bubble at its bottom right; "Enviada" joins
-// it only while an own message is pending or uncertain. No read, delivered
+// The time sits small inside the bubble at its bottom right, on the last
+// bubble of a run only; "Enviada" joins it, on any bubble, only while an own
+// message is pending or uncertain. No read, delivered
 // or typing state, ever.
 //
 // A long press opens the ActionsSheet with `actions`; so does the chevron that
@@ -49,6 +50,7 @@ import { cloneElement, isValidElement, useMemo, useState } from 'react'
 import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { LABELS } from '../dm'
+import { showsMeta } from '../dm-screen'
 import { isMomentReaction, reactionLabel } from '../momentReaction'
 import { FORWARDED_LABEL } from '../forward'
 import { textWithoutHrefs } from '../links'
@@ -69,7 +71,6 @@ import { layout, radius, space, type } from './theme'
 export { senderColor }
 
 const AVATAR = 32
-const TAIL = 8
 const JOINED = 4
 
 // -> 'HH:MM' in local time, or '' for a missing or invalid instant. The day
@@ -103,18 +104,17 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
   const rows = usableActions(actions)
   const hasAbove = shape === 'middle' || shape === 'last'
   const hasBelow = shape === 'first' || shape === 'middle'
-  const tail = !hasBelow
+  const last = !hasBelow
   const side = mine ? 'Right' : 'Left'
   const corners = {}
   if (hasAbove) corners['borderTop' + side + 'Radius'] = JOINED
   if (hasBelow) corners['borderBottom' + side + 'Radius'] = JOINED
-  // The tail grows out of a square corner.
-  if (tail) corners['borderBottom' + side + 'Radius'] = 0
   const fill = mine ? colors.bubbleMine : colors.card
   const muted = item.hidden === true || item.deleted === true
   const momentReaction = !muted && moment && isMomentReaction({ ...item, moment: moment.seq })
   const rich = !muted && typeof item.rawText === 'string'
   const meta = bubbleMeta({ at: item.at, mine, status })
+  const showMeta = showsMeta({ meta, shape, mine, status })
   const shownName = !mine && !hasAbove && typeof name === 'string' ? displayText(name).trim() : ''
   const nameKey = typeof senderKey === 'string' ? senderKey : ''
   const withAvatar = !mine && avatar !== undefined && avatar !== null
@@ -147,15 +147,15 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
       : rich
         ? <MentionText text={shown} onOpenMention={onOpenMention} onLongPress={rows.length > 0 ? () => setOpen(true) : undefined} style={styles.text} />
         : <Text style={[styles.text, muted && styles.muted]}>{displayText(typeof item.text === 'string' ? item.text : '', { multiline: true })}</Text>
-  const spacer = meta && !card ? <Text style={[styles.metaSpace, { color: fill }]}>{'   ' + meta}</Text> : null
+  const spacer = showMeta && !card ? <Text style={[styles.metaSpace, { color: fill }]}>{'   ' + meta}</Text> : null
   return (
     <View>
       {item.dayMark
-        ? <View style={styles.dayRow}><Text style={styles.dayChip} accessibilityRole='header'>{displayText(item.dayMark)}</Text></View>
+        ? <View style={styles.dayRow}><Text style={styles.dayText} accessibilityRole='header'>{displayText(item.dayMark)}</Text></View>
         : null}
       <View style={[styles.row, mine && styles.rowMine, hasAbove ? styles.rowJoinedTop : styles.rowTop]}>
         {withAvatar
-          ? <View style={styles.avatar}>{tail ? avatar : null}</View>
+          ? <View style={styles.avatar}>{last ? avatar : null}</View>
           : null}
         <View style={[styles.column, mine && styles.columnMine]}>
           {/* On the web the column's children size to their content, and a
@@ -232,14 +232,14 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
                   : null}
               {card
                 ? (
-                  <View style={[styles.cardBox, meta && styles.cardWithMeta]}>
+                  <View style={[styles.cardBox, showMeta && styles.cardWithMeta]}>
                     {embed !== null
                       ? <MusicEmbedCard embed={embed} card={card} thumb={cardThumb} onLongPress={rows.length > 0 ? () => setOpen(true) : undefined} />
                       : <LinkCard card={card} thumb={cardThumb} onLongPress={rows.length > 0 ? () => setOpen(true) : undefined} />}
                   </View>
                   )
                 : null}
-              {meta
+              {showMeta
                 ? <Text style={styles.meta} accessibilityElementsHidden importantForAccessibility='no'>{meta}</Text>
                 : null}
             </Pressable>
@@ -265,14 +265,6 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
                 </Pressable>
                 )
               : null}
-            {tail
-              ? (
-                <View pointerEvents='none' style={[styles.tail, mine ? styles.tailMine : styles.tailTheirs]}>
-                  {!mine ? <View style={[styles.tri, styles.triTheirs, styles.triEdge]} /> : null}
-                  <View style={[styles.tri, mine ? styles.triMine : styles.triTheirs, { [mine ? 'borderLeftColor' : 'borderRightColor']: fill }]} />
-                </View>
-                )
-              : null}
           </View>
           {below || null}
         </View>
@@ -286,15 +278,7 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
 
 const makeStyles = (colors) => StyleSheet.create({
   dayRow: { alignItems: 'center', paddingVertical: space.sm },
-  dayChip: {
-    ...type.chip,
-    color: colors.soft,
-    backgroundColor: colors.skeleton,
-    borderRadius: radius.pill,
-    paddingHorizontal: 10,
-    paddingVertical: space.xs,
-    overflow: 'hidden'
-  },
+  dayText: { ...type.meta, color: colors.soft, textAlign: 'center' },
   row: { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: space.md, gap: space.xs + 2 },
   rowMine: { justifyContent: 'flex-end' },
   rowTop: { paddingTop: space.sm - 2 },
@@ -329,8 +313,6 @@ const makeStyles = (colors) => StyleSheet.create({
   cardWithMeta: { paddingBottom: 16 },
   metaSpace: { fontSize: 11, lineHeight: 22, color: 'transparent' },
   meta: { position: 'absolute', right: space.md - 2, bottom: 5, fontSize: 11, lineHeight: 14, color: colors.soft },
-  // Two stacked triangles on the card side: a line-coloured one 1 pt larger
-  // under the card-coloured one, so the tail carries the bubble's hairline.
   chevron: {
     position: 'absolute',
     top: 2,
@@ -342,12 +324,5 @@ const makeStyles = (colors) => StyleSheet.create({
     borderRadius: radius.pill,
     backgroundColor: colors.card
   },
-  chevronHidden: { opacity: 0 },
-  tail: { position: 'absolute', bottom: 0, width: TAIL + 1, height: TAIL + 1 },
-  tailMine: { right: -TAIL },
-  tailTheirs: { left: -TAIL },
-  tri: { position: 'absolute', bottom: 0, width: 0, height: 0, borderTopWidth: TAIL, borderTopColor: 'transparent' },
-  triMine: { left: 0, borderLeftWidth: TAIL },
-  triTheirs: { right: 0, borderRightWidth: TAIL },
-  triEdge: { borderTopWidth: TAIL + 1, borderRightWidth: TAIL + 1, borderRightColor: colors.line, right: -0.5 }
+  chevronHidden: { opacity: 0 }
 })

@@ -14,7 +14,7 @@
 // acting as the member.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Keyboard, Pressable, StyleSheet, Text, View } from 'react-native'
+import { Keyboard, StyleSheet, Text, View } from 'react-native'
 import rpc from '@varanda/rpc'
 import { perfMarks, useNode } from '../node'
 import { cacheGeneration } from '../localCaches'
@@ -30,9 +30,11 @@ import { liveBinding } from './ARua'
 import { Btn, ErrorText, Field, SectionHeader, Soft, UNCERTAIN, errorText, useAction, useBottomPad } from '../ui'
 import { refusalOf } from '../wordCheck'
 import { Avatar } from '../ui/Avatar'
+import { PressScale } from '../ui/PressScale'
 import { RefreshableList } from '../ui/RefreshableList'
+import { SearchField } from '../ui/SearchField'
 import { EmptyState, ErrorState, SkeletonRow } from '../ui/States'
-import { type } from '../ui/theme'
+import { space, type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
 import { Choice, NAME_MAX, nameLength, useEscapeClose } from './NovoGrupo'
 import { KeyboardForm } from './Perfil'
@@ -97,20 +99,20 @@ function communitySubtitle (row) {
 function Row ({ title, subtitle, dot, hint, seed, avatarName, onPress, metaLines = 1 }) {
   const styles = useStyles(makeStyles)
   return (
-    <Pressable
+    <PressScale
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}
       accessibilityRole='button'
       accessibilityLabel={title + (subtitle ? ', ' + subtitle : '') + (dot ? ', novidades' : '')}
       accessibilityHint={hint}
       onPress={onPress}
     >
-      <Avatar name={avatarName} publicKey={seed} size={44} shape='square' />
+      <Avatar name={avatarName} publicKey={seed} size={48} shape='square' />
       <View style={styles.texts}>
-        <Text style={styles.name} numberOfLines={1}>{title}</Text>
+        <Text style={[styles.name, dot && styles.nameUnread]} numberOfLines={1}>{title}</Text>
         {subtitle ? <Text style={styles.meta} numberOfLines={metaLines}>{subtitle}</Text> : null}
       </View>
       {dot ? <View style={styles.dot} /> : null}
-    </Pressable>
+    </PressScale>
   )
 }
 
@@ -342,7 +344,15 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
     if (typeof onOpenGroup === 'function') onOpenGroup(group)
   }, [onOpenGroup])
 
-  const bar = <TopBar title='Comunidades' onBack={onBack} />
+  // The icon set has no plus glyph ('mais' is the overflow dots), so the + is text.
+  const plus = hosted && pageKey === null
+    ? (
+      <PressScale accessibilityRole='button' accessibilityLabel='Nova comunidade' onPress={() => setCreating(true)} style={styles.plus}>
+        <Text style={styles.plusText} maxFontSizeMultiplier={1.5}>+</Text>
+      </PressScale>
+      )
+    : null
+  const bar = <TopBar title='Comunidades' onBack={onBack} right={plus} />
   if (!hosted) {
     return (
       <View style={styles.root}>
@@ -371,13 +381,6 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
 
   // Search first, like other apps: a field under a long list ends up under
   // the keyboard. Then the person's own communities.
-  const createButton = pageKey === null
-    ? (
-      <View style={styles.block}>
-        <Btn label='Nova comunidade' onPress={() => setCreating(true)} />
-      </View>
-      )
-    : null
   const mineSection = (
     <View>
       <SectionHeader>Minhas comunidades</SectionHeader>
@@ -414,13 +417,11 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
     <View>
       <SectionHeader>Descobrir</SectionHeader>
       <View style={styles.block}>
-        <Field
+        <SearchField
           label='Buscar grupos públicos'
           value={query}
           onChangeText={setQuery}
           placeholder='Nome do grupo'
-          returnKeyType='search'
-          plain
         />
         <Soft>O resultado abre um grupo da comunidade</Soft>
         {searchState}
@@ -431,7 +432,6 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
 
   const header = (
     <View>
-      {createButton}
       {discover}
       {mineSection}
     </View>
@@ -498,20 +498,23 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
 
 const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
-  block: { paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
+  block: { paddingHorizontal: space.lg, paddingVertical: 10, gap: space.sm },
   sheet: { padding: 16, gap: 12 },
+  plus: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
+  plusText: { fontSize: 28, lineHeight: 32, fontWeight: '400', color: colors.ink },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    gap: space.md,
+    minHeight: 72,
     paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.line
+    paddingHorizontal: space.lg
   },
-  pressed: { opacity: 0.6 },
-  texts: { flex: 1, minWidth: 0 },
-  name: { ...type.postName, color: colors.ink },
-  meta: { ...type.postMeta, color: colors.soft },
-  dot: { width: 10, height: 10, borderRadius: 5, backgroundColor: colors.accent }
+  pressed: { backgroundColor: colors.line },
+  texts: { flex: 1, minWidth: 0, gap: 2 },
+  name: { ...type.postName, fontSize: 16, fontWeight: '600', lineHeight: 21, color: colors.ink },
+  nameUnread: { fontWeight: '700' },
+  meta: { ...type.postMeta, fontSize: 14, lineHeight: 19, color: colors.soft },
+  // The 8 pt disc of ConversationRow: the spoken label already says ', novidades'.
+  dot: { width: 8, height: 8, borderRadius: 4, flexShrink: 0, backgroundColor: colors.accent }
 })

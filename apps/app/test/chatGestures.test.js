@@ -133,6 +133,7 @@ test('SwipeReply uses the real PanResponder touch history through grant and rele
     h.move(173, 101)
     t.ok(h.claimed, 'right swipe claims before x0 is assigned')
     t.is(h.positions.at(-1), 72, 'first post-grant move keeps the original displacement')
+    t.alike(h.haptics, ['light'], 'haptic fires once when the move crosses the threshold')
     h.move(200, 102)
     t.is(h.replies, 0)
     h.release()
@@ -156,8 +157,26 @@ test('SwipeReply uses the real PanResponder touch history through grant and rele
   t.absent(vertical.claimed, 'vertical scrolling stays with the list')
   vertical.release()
   t.is(vertical.replies, 0)
+  const fast = mount()
+  fast.move(172)
+  fast.release()
+  t.is(fast.replies, 1)
+  t.alike(fast.haptics, ['light'], 'a swipe that crosses on the grant event still taps once')
+  const edge = mount()
+  edge.move(172)
+  edge.move(173)
+  edge.move(150)
+  t.alike(edge.haptics, ['light'], 'crossing is a haptic even if the release does not reply')
   const short = mount()
   short.move(172)
+  short.move(173)
+  short.move(130)
+  t.alike(short.haptics, ['light'])
+  const slow = mount()
+  slow.move(130)
+  slow.move(150)
+  t.alike(slow.haptics, [], 'below the threshold stays silent')
+  slow.release()
   short.move(130)
   short.release()
   t.is(short.replies, 0, 'ending at dx 30 does not reply')
@@ -189,6 +208,7 @@ test('SwipeReply uses the real PanResponder touch history through grant and rele
 test('chat scrolling keeps arrivals away, counts only new rows and clears the badge at the end', async (t) => {
   const { jumpVisible, awayCount } = await import('../src/chatGestures.js')
   const { pinToEnd } = await import('../src/dm-screen.js')
+  const { olderInitial, olderStep } = await import('../src/olderTrigger.js')
   for (const file of ['Grupo', 'Mensagem']) {
     const src = source('screens/' + file + '.js')
     const start = src.indexOf('  const trackBottom =')
@@ -197,6 +217,10 @@ test('chat scrolling keeps arrivals away, counts only new rows and clears the ba
     const env = {
       useCallback: (fn) => fn,
       pinToEnd,
+      olderStep,
+      olderState: { current: olderInitial() },
+      userScrolled: { current: false },
+      olderLive: { current: { hasNext: false, loading: false, failed: false, loadOlder: null } },
       jumpVisible,
       scrollFrame: { current: {} },
       setShowJump: (value) => { shown = value },
@@ -238,8 +262,157 @@ test('chat scrolling keeps arrivals away, counts only new rows and clears the ba
   }
 })
 
+test('DM loads older pages near the top only after the person scrolled, once per visit, never after an error', async (t) => {
+  const { jumpVisible } = await import('../src/chatGestures.js')
+  const { pinToEnd } = await import('../src/dm-screen.js')
+  const { olderInitial, olderStep } = await import('../src/olderTrigger.js')
+  const src = source('screens/Mensagem.js')
+  const start = src.indexOf('  const userScroll =')
+  const end = src.indexOf('  useEffect(', start)
+  t.ok(start > 0 && end > start)
+  const body = src.slice(start, end)
+  for (const call of ['send(', 'dm(', 'request(', 'setDraft', 'dm.seen']) t.absent(body.includes(call), 'the scroll path never ' + call)
+  let loads = 0
+  let releases = 0
+  const env = {
+    useCallback: (fn) => fn,
+    pinToEnd,
+    jumpVisible,
+    olderStep,
+    olderState: { current: olderInitial() },
+    userScrolled: { current: false },
+    olderLive: { current: { hasNext: true, loading: false, failed: false, loadOlder: () => { loads++ } } },
+    releaseEnd: () => { releases++ },
+    scrollFrame: { current: {} },
+    setShowJump () {},
+    endPin: { current: { pinned: true, newest: 'b', lastY: null } },
+    lastY: { current: null },
+    atBottom: { current: true },
+    away: { current: false },
+    latestKeyRef: { current: 'b' },
+    setLastSeenKey () {}
+  }
+  const { track, scroll } = runInNewContext(body + '\n;({ track: trackBottom, scroll: userScroll })', env)
+  const frame = (y) => track({ y, contentHeight: 1600, layoutHeight: 400 })
+  frame(0)
+  t.is(loads, 0, 'the first layout at the top does not load')
+  frame(120)
+  frame(1200)
+  t.is(loads, 0, 'the opening scroll to the end passes the top without loading')
+  scroll()
+  t.is(releases, 1, 'a user scroll still releases the end pin')
+  t.ok(env.userScrolled.current)
+  frame(600)
+  t.is(loads, 0, 'away from the top nothing loads')
+  frame(150)
+  t.is(loads, 1, 'near the top after a scroll loads once')
+  frame(90)
+  frame(0)
+  t.is(loads, 1, 'staying near the top does not load again')
+  env.olderLive.current.loading = true
+  frame(700)
+  frame(100)
+  t.is(loads, 1, 'no second page while one loads')
+  env.olderLive.current.loading = false
+  frame(700)
+  env.olderLive.current.hasNext = false
+  frame(100)
+  t.is(loads, 1, 'nothing older, nothing to load')
+  env.olderLive.current.hasNext = true
+  frame(700)
+  env.olderLive.current.failed = true
+  frame(100)
+  t.is(loads, 1, 'after an error only the pill retries')
+  env.olderLive.current.failed = false
+  frame(80)
+  t.is(loads, 1, 'an error cleared near the top waits for the person to leave first')
+  frame(700)
+  frame(80)
+  t.is(loads, 2, 'returning to the top loads again')
+  t.ok(src.includes("<Pill label='mensagens anteriores' onPress={loadOlder} pending={loadingMore} />"), 'the pill stays as the manual load')
+  t.ok(src.includes("olderLive.current = { hasNext: !!next, loading: loadingMore, failed: loadError !== '', loadOlder }"))
+  t.ok(src.includes('onUserScroll={userScroll}'))
+})
+
+test('group loads older pages near the top only after the person scrolled, once per visit, never after an error', async (t) => {
+  const { jumpVisible } = await import('../src/chatGestures.js')
+  const { pinToEnd } = await import('../src/dm-screen.js')
+  const { olderInitial, olderStep } = await import('../src/olderTrigger.js')
+  const src = source('screens/Grupo.js')
+  const start = src.indexOf('  const userScroll =')
+  const end = src.indexOf('  useEffect(', start)
+  t.ok(start > 0 && end > start)
+  const body = src.slice(start, end)
+  for (const call of ['send(', 'group(', 'request(', 'setDraft', 'markSeen', 'group.seen', 'typing']) t.absent(body.includes(call), 'the scroll path never ' + call)
+  let loads = 0
+  let releases = 0
+  const env = {
+    useCallback: (fn) => fn,
+    pinToEnd,
+    jumpVisible,
+    olderStep,
+    olderState: { current: olderInitial() },
+    userScrolled: { current: false },
+    olderLive: { current: { hasNext: true, loading: false, failed: false, loadOlder: () => { loads++ } } },
+    releaseEnd: () => { releases++ },
+    scrollFrame: { current: {} },
+    setShowJump () {},
+    endPin: { current: { pinned: true, newest: 'b', lastY: null } },
+    lastY: { current: null },
+    atBottom: { current: true },
+    away: { current: false },
+    latestKeyRef: { current: 'b' },
+    setLastSeenKey () {}
+  }
+  const { track, scroll } = runInNewContext(body + '\n;({ track: trackBottom, scroll: userScroll })', env)
+  const frame = (y) => track({ y, contentHeight: 1600, layoutHeight: 400 })
+  frame(0)
+  t.is(loads, 0, 'the first layout at the top does not load')
+  frame(0)
+  t.is(loads, 0, 'a resize frame at the top does not load either')
+  frame(120)
+  frame(1200)
+  t.is(loads, 0, 'the opening scroll to the end passes the top without loading')
+  scroll()
+  t.is(releases, 1, 'a user scroll still releases the end pin')
+  t.is(loads, 0, 'the scroll gesture alone never loads')
+  t.ok(env.userScrolled.current)
+  frame(600)
+  t.is(loads, 0, 'away from the top nothing loads')
+  frame(150)
+  t.is(loads, 1, 'near the top after a scroll loads once')
+  frame(90)
+  frame(0)
+  t.is(loads, 1, 'staying near the top does not load again')
+  env.olderLive.current.loading = true
+  frame(700)
+  frame(100)
+  t.is(loads, 1, 'no second page while one loads')
+  env.olderLive.current.loading = false
+  frame(700)
+  env.olderLive.current.hasNext = false
+  frame(100)
+  t.is(loads, 1, 'nothing older, nothing to load')
+  env.olderLive.current.hasNext = true
+  frame(700)
+  env.olderLive.current.failed = true
+  frame(100)
+  t.is(loads, 1, 'after an error only the pill retries')
+  env.olderLive.current.failed = false
+  frame(80)
+  t.is(loads, 1, 'an error cleared near the top waits for the person to leave first')
+  frame(700)
+  frame(80)
+  t.is(loads, 2, 'returning to the top loads again')
+  t.ok(src.includes("<Pill label='Mensagens anteriores' onPress={loadOlder} pending={loadingMore} />"), 'the pill stays as the manual load')
+  t.ok(src.includes("olderLive.current = { hasNext: reader && !!store.next, loading: loadingMore, failed: moreError !== '', loadOlder }"))
+  const list = src.slice(src.indexOf('<RefreshableList'), src.indexOf('\n      />', src.indexOf('<RefreshableList')))
+  t.ok(list.includes('onUserScroll={userScroll}'))
+})
+
 test('quote jumps settle once, preserve the pin on failure and cancel on navigation or user scroll', async (t) => {
   const { pinToEnd } = await import('../src/dm-screen.js')
+  const { olderInitial } = await import('../src/olderTrigger.js')
   for (const file of ['Mensagem', 'Grupo']) {
     const src = source('screens/' + file + '.js')
     const timers = new Map()
@@ -325,6 +498,9 @@ test('quote jumps settle once, preserve the pin on failure and cancel on navigat
       asPage: { key: null },
       ready: true,
       isTop: true,
+      olderInitial,
+      userScrolled: { current: true },
+      olderState: { current: { fired: true } },
       setLastSeenKey: (value) => { context.seen = value },
       setShowJump: (value) => { context.shown = value },
       useEffect: (effect, next) => {
@@ -357,6 +533,8 @@ test('quote jumps settle once, preserve the pin on failure and cancel on navigat
     fire(env.jumpTimer.current)
     t.is(jumps.length, 8, 'changed conversation cancels the follow-up')
     t.absent(env.away.current)
+    t.absent(context.userScrolled.current, file + ' another thread waits for a new scroll before loading older pages')
+    t.alike(context.olderState.current, olderInitial())
     t.is(context.seen, null)
     t.absent(context.shown)
     jump('one')
@@ -401,6 +579,16 @@ test('new own DM returns to the end while incoming messages preserve the reading
     t.is(seen, mine ? 'new' : 'old')
     t.ok(env.endPin.current.pinned)
   }
+})
+
+test('JumpToEnd is a 36 pt button with a 44 pt target, a dot, the count as hint and a fade', (t) => {
+  const src = source('ui/JumpToEnd.js')
+  t.ok(src.includes('width: 36, height: 36'))
+  t.ok(src.includes('hitSlop={4}'))
+  t.ok(src.includes('width: 8, height: 8'))
+  t.ok(src.includes("accessibilityHint={count > 0 ? count + ' novas' : undefined}"))
+  t.ok(src.includes('duration: motion.fast'))
+  t.ok(src.includes('useReduceMotion'))
 })
 
 test('both chats show new arrivals even less than one and a half viewports away', async (t) => {

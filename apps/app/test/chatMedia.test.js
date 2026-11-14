@@ -828,3 +828,15 @@ test('source: a paused voice note lets go of playback', (t) => {
   const returnAt = toggle.indexOf('return', releaseAt)
   t.ok(pauseAt >= 0 && releaseAt > pauseAt && returnAt > releaseAt, 'the branch that calls player.pause() calls releaseClaim.current() before it returns')
 })
+
+test('source: while playing the spoken time says how much is left', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/ui/VoiceBubble.js'), 'utf8')
+  t.ok(src.includes("(playing ? durationLabel(left) + ' restantes' : durationLabel(total))"), 'playing speaks the time left, paused the total')
+})
+
+test('source: a voice note shows the time left while playing and the total when paused', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/ui/VoiceBubble.js'), 'utf8')
+  t.ok(src.includes('const left = Math.max(0, total - pos)'), 'left is never negative')
+  t.ok(src.includes('durationLabel(playing ? left : total)'), 'playing shows left, paused shows the total')
+  t.ok(src.includes('const shown = Math.min(pos, total > 0 ? total : rpc.MAX_AUDIO_MS)') && src.includes(': durationLabel(shown)'), 'an unknown total keeps the elapsed time')
+})

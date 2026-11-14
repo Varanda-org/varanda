@@ -108,11 +108,11 @@ function GroupRow ({ title, detail, own, time, unread, onPress }) {
         {detail || unread
           ? (
             <View style={styles.line}>
-              <Text style={[styles.handle, styles.grow]} numberOfLines={1}>
+              <Text style={[styles.handle, styles.grow, unread && styles.handleUnread]} numberOfLines={1}>
                 {own ? <Text style={styles.own}>{OWN_LABEL + ': '}</Text> : null}
                 {displayText(detail || '')}
               </Text>
-              {unread ? <View style={styles.badge}><Text style={styles.badgeText} maxFontSizeMultiplier={1.5}>{unread}</Text></View> : null}
+              {unread ? <View style={styles.dot} /> : null}
             </View>
             )
           : null}
@@ -660,14 +660,13 @@ const makeStyles = (colors) => StyleSheet.create({
   name: { ...type.postName, fontSize: 16, lineHeight: 21, fontWeight: '600', color: colors.ink, flex: 1, minWidth: 0 },
   nameUnread: { fontWeight: '700' },
   handle: { ...type.postMeta, fontSize: 14, lineHeight: 19, color: colors.soft },
+  handleUnread: { color: colors.ink, fontWeight: '700' },
   own: { color: colors.accent, fontWeight: '600' },
   time: { ...type.replyMark, color: colors.soft, flexShrink: 0, textAlign: 'right' },
   // As in Conversas (ui/ConversationRow): an unread row's date takes the accent.
   timeUnread: { color: colors.accent, fontWeight: '600' },
   grow: { flex: 1, minWidth: 0 },
-  // minHeight and a font cap, as in ConversationRow: a fixed height clipped the
-  // digits at large text.
-  badge: { minWidth: 22, minHeight: 22, borderRadius: radius.pill, paddingHorizontal: space.sm, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
-  badgeText: { fontSize: 12, fontWeight: '600', color: colors.accentInk },
+  // The 8 pt disc of ConversationRow: the spoken label already carries the count.
+  dot: { width: 8, height: 8, borderRadius: 4, flexShrink: 0, backgroundColor: colors.accent },
   hitText: { flex: 1, minWidth: 0, gap: 2 }
 })

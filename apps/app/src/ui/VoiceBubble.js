@@ -1,5 +1,6 @@
 // A voice note inside its chat bubble (DMs and groups): a play / pause
-// button, a progress bar that seeks on a tap, and the elapsed and total time.
+// button, a progress bar that seeks on a tap, and the time left while
+// playing and the total when paused.
 // ChatMedia hands over the source state of the item (../media/chatMedia.js
 // sourceFor): the player opens only that device-local URI (blob: or
 // file://), never a network address, and no third-party player is involved
@@ -185,7 +186,10 @@ export function VoiceBubble ({ state, uri, retry, show, durationMs = 0, mine = f
       </View>
     )
   }
+  // Playing shows the time left, paused the total; with no known total, the
+  // elapsed time as before.
   const shown = Math.min(pos, total > 0 ? total : rpc.MAX_AUDIO_MS)
+  const left = Math.max(0, total - pos)
   const fill = total > 0 ? Math.max(0, Math.min(1, pos / total)) : 0
   return (
     <View style={frame} accessibilityLabel={VOICE_LABEL}>
@@ -217,8 +221,8 @@ export function VoiceBubble ({ state, uri, retry, show, durationMs = 0, mine = f
             <View style={[styles.fill, { width: (fill * 100) + '%' }]} />
           </View>
         </Pressable>
-        <Text style={styles.time} accessibilityLabel={durationLabel(shown) + ' de ' + durationLabel(total)}>
-          {durationLabel(shown) + ' / ' + durationLabel(total)}
+        <Text style={styles.time} accessibilityLabel={total > 0 ? (playing ? durationLabel(left) + ' restantes' : durationLabel(total)) : durationLabel(shown)}>
+          {total > 0 ? durationLabel(playing ? left : total) : durationLabel(shown)}
         </Text>
       </View>
     </View>

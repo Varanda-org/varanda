@@ -251,7 +251,7 @@ test('large text: headers fit their room, avatars and badges hold their text', (
   t.ok(modal.includes('numberOfLines={1} maxFontSizeMultiplier={TEXT_CAP}'), 'sheet title one line, capped')
   t.ok(bar.includes('numberOfLines: 1, adjustsFontSizeToFit: true') && !bar.includes('numberOfLines={2}'), 'top bar title never splits a word')
   t.ok(avatar.includes('allowFontScaling={false}') && avatar.includes('Math.round(size * 0.36)'), 'initials sized to the avatar')
-  t.ok(/badge: \{[^}]*minHeight: 20/.test(row) && !/badge: \{[^}]*\n {4}height: 20/.test(row), 'unread badge grows with its digits')
+  t.ok(row.includes('dot: { width: 8, height: 8, borderRadius: 4') && !row.includes('badgeText'), 'unread is a digitless 8 pt disc')
 })
 
 test('states, pills and section headers', (t) => {

@@ -2,10 +2,10 @@
 // newest first (WhatsApp/Telegram style). Rows come from conversas.js
 // (mergeRows) over the existing reads: dm.list (rpc 5.77) for the inbox, and
 // community.list (5.62) then community.info (5.59, at most INFO_AT_ONCE at a
-// time) for the groups the person belongs to. Pinned above them: Pedidos de
-// mensagem (a dot, never a count; pushes nav 'pedidos', Mensagens.js) and
-// Comunidades (pushes nav 'comunidades' to browse and create). Above the
-// chips (Todas / Não lidas / Grupos) a search field filters the loaded rows
+// time) for the groups the person belongs to. A strip in the list header,
+// under the chips, holds Pedidos (a dot, never a count; pushes nav 'pedidos',
+// Mensagens.js) and Comunidades (pushes nav 'comunidades' to browse and
+// create). Above the chips (Todas / Não lidas / Grupos) a search field filters the loaded rows
 // (WhatsApp/Telegram); App.js draws the "+" in the top bar (`composing`, the
 // NovaConversa sheet). Groups are counted as seen only by group.seen when
 // a group opens (Grupo reports it as `seenTick`). dm.pull runs on mount, on
@@ -21,7 +21,7 @@
 // onOpenCommunities, onOpenRequests, showInbox, seenTick, composing,
 // onComposing }.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { perfMarks, useNode } from '../node'
 import { cacheGeneration } from '../localCaches'
@@ -30,13 +30,12 @@ import { FILTERS, FILTER_LABELS, RECENT_MAX, applyFilter, conversasReadsAllowed,
 import { ErrorText, Soft, errorText, useBottomPad, useNow } from '../ui'
 import { ConversationRow, personTitle } from '../ui/ConversationRow'
 import { FilterChips } from '../ui/FilterChips'
-import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
 import { SearchField } from '../ui/SearchField'
 import { EmptyState as ListEmptyState, SkeletonRow } from '../ui/States'
-import { radius, space, type } from '../ui/theme'
-import { useStyles, useTheme } from '../ui/ThemeProvider'
+import { layout, radius, space, type } from '../ui/theme'
+import { useStyles } from '../ui/ThemeProvider'
 import { NovaComunidade, memberSnapshotBinding, readGroupSnapshot, sameSnapshotBinding, saveGroupSnapshot } from './Comunidades'
 import { useActing } from './Conversa'
 import { NovaConversa } from './NovaConversa'
@@ -51,9 +50,12 @@ const MEMBER_ROLES = new Set(['creator', 'admin', 'member'])
 const HEX64 = /^[0-9a-f]{64}$/
 const LIST_DELAY_MS = 800
 const SEARCH_PLACEHOLDER = 'Buscar conversas'
-// ConversationRow's avatar width, so pinned titles start where row titles do.
-const AVATAR_COLUMN = 48
-const PINNED_HEIGHT = 56
+const RETRY_LABEL = 'Tentar de novo'
+// The strip's short names; the spoken label keeps the full row title.
+const STRIP_PARTS = {
+  requests: { label: 'Pedidos', news: ', há pedidos novos' },
+  communities: { label: 'Comunidades', news: ', há novidades' }
+}
 
 // Runs `work` over `items` with at most `limit` calls in flight.
 async function eachLimited (items, limit, work) {
@@ -412,8 +414,7 @@ export function Conversas ({
     })
   }, [merged, ready, inbox.next, inbox.rows, storedGroupIds])
   const needle = query.trim().toLocaleLowerCase('pt-BR')
-  // A search keeps the chip: both narrow the same loaded rows, and the
-  // pinned rows step aside while it runs.
+  // A search keeps the chip: both narrow the same loaded rows.
   const data = useMemo(() => {
     if (needle !== '') {
       return applyFilter(merged.filter((row) => {
@@ -422,8 +423,11 @@ export function Conversas ({
       }), filter)
     }
     const rows = filter === 'todas' ? paged : merged
-    return applyFilter([requestsRow({ requests: inbox.requests }), communitiesRow(), ...rows], filter)
-  }, [merged, paged, needle, filter, inbox.requests, profileOf])
+    return applyFilter(rows, filter)
+  }, [merged, paged, needle, filter, profileOf])
+  // Pedidos and Comunidades follow the chip like the rows do, and step aside
+  // while a search runs.
+  const pinned = useMemo(() => (needle !== '' ? [] : applyFilter([requestsRow({ requests: inbox.requests }), communitiesRow()], filter)), [needle, filter, inbox.requests])
   // The sheet's "Conversas recentes": the loaded private conversations,
   // newest first (mergeRows order).
   const recent = useMemo(() => merged.filter((row) => row.kind === 'dm').slice(0, RECENT_MAX).map((row) => row.peer), [merged])
@@ -505,7 +509,21 @@ export function Conversas ({
             <Soft>{PARTIAL_TEXT}</Soft>
             {dmFailed ? <ErrorText>{inbox.error}</ErrorText> : null}
             {groupsFailed ? <ErrorText>{groups.error}</ErrorText> : null}
-            <Pill label='tentar de novo' onPress={refresh} />
+            <Pill label={RETRY_LABEL} onPress={refresh} />
+          </View>
+          )
+        : null}
+      {pinned.length > 0
+        ? (
+          <View style={styles.strip}>
+            {pinned.map((item, i) => (
+              <Fragment key={item.key}>
+                {i > 0 ? <Text style={styles.stripSep} aria-hidden importantForAccessibility='no' accessibilityElementsHidden>·</Text> : null}
+                {item.kind === 'requests'
+                  ? <StripPart kind='requests' title={item.title} dot={item.unread === true} onPress={() => { if (typeof onOpenRequests === 'function') onOpenRequests() }} />
+                  : <StripPart kind='communities' title={item.title} dot={item.unread === true} onPress={() => { if (typeof onOpenCommunities === 'function') onOpenCommunities() }} />}
+              </Fragment>
+            ))}
           </View>
           )
         : null}
@@ -521,7 +539,7 @@ export function Conversas ({
       <View style={styles.pad}>
         <Soft>{PARTIAL_TEXT}</Soft>
         <ErrorText>{inbox.pageError}</ErrorText>
-        <Pill label='tentar de novo' onPress={() => inbox.loadMore()} />
+        <Pill label={RETRY_LABEL} onPress={() => inbox.loadMore()} />
       </View>
     )
   } else if (items.length === 0 && !partial && (ready || needle !== '' || filter === 'grupos')) {
@@ -532,16 +550,6 @@ export function Conversas ({
   }
 
   const renderItem = ({ item }) => {
-    if (item.kind === 'requests') {
-      return (
-        <PinnedRow icon='conversas' title={item.title} dot={item.unread === true} chevron onPress={() => { if (typeof onOpenRequests === 'function') onOpenRequests() }} />
-      )
-    }
-    if (item.kind === 'communities') {
-      return (
-        <PinnedRow icon='gente' title={item.title} chevron onPress={() => { if (typeof onOpenCommunities === 'function') onOpenCommunities() }} />
-      )
-    }
     if (item.kind === 'dm') {
       return (
         <ConversationRow
@@ -582,23 +590,20 @@ export function Conversas ({
   )
 }
 
-// Pedidos de mensagem and Comunidades: compact pinned rows, the glyph in the
-// avatar column so the titles line up with the rows below. Pedidos shows a
-// dot for news, never a count.
-function PinnedRow ({ icon, title, dot, chevron, onPress }) {
+// One part of the Pedidos · Comunidades strip: its own 44 pt target, spoken
+// by the full row title. Pedidos shows a dot for news, never a count.
+function StripPart ({ kind, title, dot, onPress }) {
   const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
+  const part = STRIP_PARTS[kind]
   return (
     <Pressable
       accessibilityRole='button'
-      accessibilityLabel={title + (dot ? ', há pedidos novos' : '')}
+      accessibilityLabel={title + (dot ? part.news : '')}
       onPress={onPress}
-      style={({ pressed }) => [styles.pinnedRow, pressed && styles.pressed]}
+      style={({ pressed }) => [styles.stripPart, pressed && styles.pressed]}
     >
-      <View style={styles.glyph}><Icon name={icon} size={24} color={colors.accent} /></View>
-      <Text style={styles.pinnedTitle} numberOfLines={1}>{title}</Text>
+      <Text style={styles.stripLabel} numberOfLines={1}>{part.label}</Text>
       {dot ? <View style={styles.dot} /> : null}
-      {chevron ? <Icon name='seta' size={20} color={colors.soft} /> : null}
     </Pressable>
   )
 }
@@ -609,8 +614,10 @@ const makeStyles = (colors) => StyleSheet.create({
   // The shared field draws the pill. This screen still insets it with the row gutter.
   search: { marginHorizontal: space.lg, marginVertical: space.sm },
   pressed: { backgroundColor: colors.line },
-  pinnedRow: { flexDirection: 'row', alignItems: 'center', gap: space.md, minHeight: PINNED_HEIGHT, paddingHorizontal: space.lg },
-  glyph: { width: AVATAR_COLUMN, alignItems: 'center', justifyContent: 'center' },
-  pinnedTitle: { ...type.postName, flex: 1, minWidth: 0, color: colors.ink },
-  dot: { width: 12, height: 12, borderRadius: radius.pill, backgroundColor: colors.accent }
+  // The strip's inset plus a part's own padding put the labels on the row gutter.
+  strip: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', paddingHorizontal: space.lg - space.sm },
+  stripPart: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: space.xs, minHeight: layout.hit, minWidth: layout.hit, paddingHorizontal: space.sm, borderRadius: radius.sm },
+  stripLabel: { ...type.more, color: colors.ink },
+  stripSep: { ...type.more, color: colors.soft },
+  dot: { width: 8, height: 8, borderRadius: radius.pill, backgroundColor: colors.accent }
 })
