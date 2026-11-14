@@ -224,4 +224,45 @@ function renderPostPage (args) {
   }
 }
 
-module.exports = { renderPostPage, postPhotos, MAX_PHOTOS }
+// postPreviewData({ record, name, username }) -> the JSON twin of the page
+// for the app before sign-in (/p/<D>/<seq>/previa), or null. Exactly what
+// render() shows, cleaned and capped as it does but not HTML-escaped (the
+// app draws text, never markup): name and username null when the page
+// leaves them out, text and date '' when absent, card null or
+// { title, host } with at least one non-empty. It carries no URL, key,
+// count, timestamp or media descriptor: the photos are only counted.
+// Pure, never throws.
+function postPreviewData (args) {
+  try {
+    if (!isPlainObject(args)) return null
+    const post = isPlainObject(args.record) ? args.record : {}
+    const name = cleanCut(args.name, MAX_NAME_CHARS, false).trim()
+    const username = cleanCut(args.username, MAX_USERNAME_CHARS, false).trim()
+    const photos = postPhotos(post)
+    let relation = null
+    if (isPlainObject(post.quote)) relation = 'quote'
+    else if (isPlainObject(post.replyTo)) relation = 'reply'
+    let card = null
+    if (isPlainObject(post.preview)) {
+      const title = cleanCut(post.preview.title, MAX_CARD_CHARS, false).trim()
+      const host = cleanCut(post.preview.host, MAX_CARD_CHARS, false).trim()
+      if (title !== '' || host !== '') card = { title, host }
+    }
+    return {
+      v: 1,
+      name: name !== '' ? name : null,
+      username: username !== '' ? username : null,
+      date: dateOf(post.at),
+      text: cleanCut(post.text, MAX_TEXT_CHARS, true),
+      photoCount: photos.items.length,
+      morePhotos: photos.more,
+      video: photos.video,
+      relation,
+      card
+    }
+  } catch {
+    return null
+  }
+}
+
+module.exports = { renderPostPage, postPreviewData, postPhotos, MAX_PHOTOS }

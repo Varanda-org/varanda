@@ -90,5 +90,5 @@ test('the post opening card sits between the invite card and the intro', (t) => 
   t.ok(invite > 0 && post > invite && intro > post)
   t.ok(s.includes('inviteOpening: opening'))
   t.ok(s.includes('dismissed: postOpenLater'))
-  t.ok(s.includes('<PostLinkOpen onEnter={() => intro.markSeen()}'))
+  t.ok(s.includes('<PostLinkOpen post={pendingPost} origin={ageOrigin} onEnter={() => intro.markSeen()}'))
 })

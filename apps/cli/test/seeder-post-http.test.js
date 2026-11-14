@@ -4,7 +4,8 @@
 // Seeder on a local testnet (docs/protocol.md section 16): /p/policy, the
 // page behind the operator switch, the one uniform 302 for every case that
 // shows nothing, the photos checked against their descriptors and the
-// re-check of the share after the bytes are read, and the switch being
+// re-check of the share after the bytes are read, the page's JSON twin
+// (/previa) with its one uniform {"post":null}, and the switch being
 // independent of the Feira's.
 const test = require('brittle')
 const fs = require('node:fs')
@@ -155,6 +156,28 @@ const AWAY = {
   body: ''
 }
 
+const PREVIA_KEYS = ['v', 'name', 'username', 'date', 'text', 'photoCount', 'morePhotos', 'video', 'relation', 'card']
+const PREVIA_HEADERS = {
+  'content-type': 'application/json; charset=utf-8',
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'no-referrer',
+  'x-robots-tag': ROBOTS,
+  'cache-control': 'no-store',
+  connection: 'close'
+}
+
+// Every preview that shows nothing, Date set aside.
+function noPreview (method) {
+  const body = method === 'HEAD' ? '' : b4a.from('{"post":null}').toString('hex')
+  return { status: 200, headers: { ...PREVIA_HEADERS, 'content-length': '13' }, body }
+}
+
+function previaShape (res) {
+  const headers = { ...res.headers }
+  delete headers.date
+  return { status: res.status, headers, body: res.body.toString('hex') }
+}
+
 test('post pages over a real Seeder: policy, page, the uniform 302, photos, the re-check and the switch', async (t) => {
   t.timeout(240000)
   const { bootstrap } = await testnet(t)
@@ -166,7 +189,7 @@ test('post pages over a real Seeder: policy, page, the uniform 302, photos, the 
   await seeder.start()
   // A bucket wide enough for this test's burst of page requests (the
   // budget itself is checked in the next test).
-  const wide = { pageRate: 1000, pageBurst: 1000 }
+  const wide = { pageRate: 1000, pageBurst: 1000, previewRate: 1000, previewBurst: 1000 }
   const on = await startSeedWs({ port: 0, seeder, postsOrigin: ORIGIN, postsLimits: wide })
   t.teardown(() => on.close(), { force: true })
   const off = await startSeedWs({ port: 0, seeder, postsLimits: wide })
@@ -264,6 +287,70 @@ test('post pages over a real Seeder: policy, page, the uniform 302, photos, the 
   seeder._names.hint = hint
   t.alike(shape(pageDiary), AWAY, 'a page diary')
   t.is((await get(on.port, base)).status, 200, 'shown again once it is a person')
+
+  // The preview: what the page shows, as JSON, and the photos it counts are
+  // the ones /foto/<n> serves.
+  async function served (port, h, seq) {
+    let n = 0
+    for (let i = 1; i <= 4; i++) if ((await get(port, '/p/' + h + '/' + seq + '/foto/' + i)).status === 200) n++
+    return n
+  }
+  const previa = await get(on.port, base + '/previa')
+  t.is(previa.status, 200)
+  t.alike(Object.keys(previa.headers).filter((k) => k !== 'date' && k !== 'content-length').sort(), Object.keys(PREVIA_HEADERS).sort(), 'exactly the preview headers')
+  for (const [k, v] of Object.entries(PREVIA_HEADERS)) t.is(previa.headers[k], v, k)
+  t.is(previa.headers['content-length'], String(previa.body.byteLength))
+  t.is(previa.headers['access-control-allow-origin'], undefined, 'no CORS')
+  const shownPreview = JSON.parse(previa.body.toString())
+  t.alike(Object.keys(shownPreview), ['post'])
+  t.alike(Object.keys(shownPreview.post), PREVIA_KEYS)
+  t.alike(shownPreview.post, {
+    v: 1,
+    name: 'Ana <b>',
+    username: null,
+    date: '01/03/2026',
+    text: HOSTILE,
+    photoCount: 4,
+    morePhotos: 1,
+    video: false,
+    relation: null,
+    card: null
+  }, 'the post as the page shows it, not HTML-escaped')
+  t.is(shownPreview.post.photoCount, await served(on.port, A.key, '3'), 'photoCount is what /foto/<n> serves')
+  t.absent(previa.body.toString().includes(A.key), 'no diary key')
+  t.absent(previa.body.toString().includes(K), 'no media key')
+  t.absent(/https?:|\/foto\/|sha256|\d{4}-\d{2}-\d{2}T/.test(previa.body.toString()), 'no URL, descriptor or timestamp')
+  const headPrevia = await get(on.port, base + '/previa', { method: 'HEAD' })
+  t.is(headPrevia.status, 200)
+  t.is(headPrevia.body.byteLength, 0, 'HEAD has no body')
+  t.is(headPrevia.headers['content-length'], previa.headers['content-length'], 'HEAD has the same length')
+  const videoPreview = JSON.parse((await get(on.port, '/p/' + A.key + '/12/previa')).body.toString()).post
+  t.is(videoPreview.video, true)
+  t.is(videoPreview.photoCount, 1, 'a video post counts only its cover')
+  t.is(videoPreview.morePhotos, 0)
+  t.is(videoPreview.photoCount, await served(on.port, A.key, '12'), 'the video photoCount is what /foto/<n> serves')
+
+  // Every preview that shows nothing: the same 200, byte for byte.
+  for (const [name, server, h, digits] of cases) {
+    for (const method of ['GET', 'HEAD']) {
+      const res = await get(server.port, '/p/' + h + '/' + digits + '/previa', { method })
+      t.alike(previaShape(res), noPreview(method), 'preview: ' + name + ' (' + method + ')')
+    }
+  }
+  seeder._names.hint = (k) => k === A.key ? { page: true, closed: false, moved: false } : hint(k)
+  const pagePreview = await get(on.port, base + '/previa')
+  seeder._names.hint = hint
+  t.alike(previaShape(pagePreview), noPreview('GET'), 'preview: a page diary')
+  for (const server of [on, off]) {
+    for (const url of [base + '/previa?x=1', base + '/previa/x', base + '/previa/', '/p/' + A.key + '/previa']) {
+      const res = await get(server.port, url)
+      t.is(res.status, 404, 'not the preview: ' + url.slice(67))
+      t.is(res.body.toString(), 'não encontrado\n')
+    }
+    const post = await get(server.port, base + '/previa', { method: 'POST' })
+    t.is(post.status, 405, 'POST /previa')
+    t.is(post.headers.allow, 'GET, HEAD')
+  }
 
   // Photos: the first four images of post 3, checked.
   for (let n = 1; n <= 4; n++) {
@@ -411,4 +498,58 @@ test('post page budget: a full slot, a missed deadline and a throw are the same 
   t.is((await get(flood.port, '/p/' + hex + '/3')).status, 200)
   t.alike(shape(await get(flood.port, '/p/' + hex + '/3')), AWAY, 'the bucket is empty')
   t.is((await get(flood.port, '/f/' + hex + '/3')).status, 404, 'the page bucket is not the Feira')
+  t.is((await get(flood.port, '/p/' + hex + '/3/previa')).status, 200, 'the page bucket is not the preview')
+  t.ok(JSON.parse((await get(flood.port, '/p/' + hex + '/3/previa')).body.toString()).post, 'the preview still shows the post')
+})
+
+test('preview budget: its own slot, deadline and bucket, every refusal the same {"post":null}', async (t) => {
+  await testnet(t)
+  const hex = 'ab'.repeat(32)
+  let release = null
+  const gate = new Promise((resolve) => { release = resolve })
+  let asked = 0
+  const seeder = {
+    postPublic: async (h, seq) => {
+      asked++
+      if (seq === 1) {
+        await gate
+        return null
+      }
+      if (seq === 2) throw new Error('boom')
+      return { record: { type: 'post', text: 'oi', at: at(1), replyTo: null }, name: null, username: null, shareSeq: seq + 1 }
+    }
+  }
+  const server = await startSeedWs({ port: 0, seeder, postsOrigin: ORIGIN, postsLimits: { previewMaxInFlight: 1, previewDeadlineMs: 300 } })
+  t.teardown(() => server.close(), { force: true })
+  t.teardown(() => release(), { force: true })
+  const previa = (seq, method) => get(server.port, '/p/' + hex + '/' + seq + '/previa', { method })
+
+  const shown = await previa(3)
+  t.is(shown.status, 200)
+  t.alike(JSON.parse(shown.body.toString()).post, {
+    v: 1, name: null, username: null, date: '01/03/2026', text: 'oi', photoCount: 0, morePhotos: 0, video: false, relation: null, card: null
+  })
+
+  const started = Date.now()
+  const slow = previa(1)
+  await until(() => asked === 2, { name: 'busca iniciada' })
+  t.alike(previaShape(await previa(3)), noPreview('GET'), 'no free slot')
+  t.alike(previaShape(await previa(3, 'HEAD')), noPreview('HEAD'), 'no free slot (HEAD)')
+  t.is((await get(server.port, '/p/' + hex + '/3')).status, 200, 'a full preview slot leaves the page serving')
+  const late = await slow
+  t.ok(Date.now() - started >= 250, 'answered at the deadline')
+  t.alike(previaShape(late), noPreview('GET'), 'the deadline passed')
+  t.alike(previaShape(await previa(3)), noPreview('GET'), 'the slot is still held while the lookup runs')
+  release()
+  await until(async () => (await previa(3)).body.toString() !== '{"post":null}', { name: 'vaga liberada' })
+  t.pass('the slot is freed once the lookup settles')
+  t.alike(previaShape(await previa(2)), noPreview('GET'), 'a throwing lookup')
+  t.alike(previaShape(await previa(2, 'HEAD')), noPreview('HEAD'), 'a throwing lookup (HEAD)')
+
+  const flood = await startSeedWs({ port: 0, seeder, postsOrigin: ORIGIN, postsLimits: { previewRate: 0.001, previewBurst: 2 } })
+  t.teardown(() => flood.close(), { force: true })
+  t.is((await get(flood.port, '/p/' + hex + '/3/previa')).body.toString().startsWith('{"post":{'), true)
+  t.is((await get(flood.port, '/p/' + hex + '/3/previa')).body.toString().startsWith('{"post":{'), true)
+  t.alike(previaShape(await get(flood.port, '/p/' + hex + '/3/previa')), noPreview('GET'), 'the preview bucket is empty')
+  t.is((await get(flood.port, '/p/' + hex + '/3')).status, 200, 'an empty preview bucket leaves the page serving')
 })

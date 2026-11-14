@@ -8,7 +8,7 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 const { MEDIA_BLOCK_BYTES } = require('@varanda/core/lib/records')
 const { feira } = require('@varanda/rpc')
 const { renderListingPage, renderNotFound, renderSitemap } = require('./feira-page')
-const { renderPostPage, postPhotos } = require('./post-page')
+const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 
 // WebSocket entry of `seed --ws-port` (docs/protocol.md section 7): a phase 0
 // spike that lets a browser-held member replicate through the seeder. Each
@@ -272,6 +272,13 @@ const { renderPostPage, postPhotos } = require('./post-page')
 //   which posts exist or are shared. Own budget (POST_PAGE_MAX_IN_FLIGHT,
 //   POST_PAGE_RATE per second, burst POST_PAGE_BURST, an answer within
 //   POST_PAGE_DEADLINE_MS), never the Feira's.
+// - /p/<D>/<seq>/previa (no query string): the page's JSON twin for the app
+//   before sign-in, 200 {"post":<postPreviewData>} under exactly the page's
+//   gate. Every other case is ONE 200 {"post":null} with the same headers
+//   (application/json, nosniff, no-referrer, X-Robots-Tag, no-store), so it
+//   is no oracle either. Own budget (POST_PREVIA_MAX_IN_FLIGHT,
+//   POST_PREVIA_RATE per second, burst POST_PREVIA_BURST, an answer within
+//   POST_PREVIA_DEADLINE_MS), never the page's nor the Feira's.
 // - /p/<D>/<seq>/foto/<1..4>: photo n of what the page shows (postPhotos:
 //   for a video post only its cover, never video bytes), checked as the
 //   Feira photos are, and served only if postPublic still answers with the
@@ -418,6 +425,8 @@ const POST_POLICY = '/p/policy'
 // Any digit string, so a non-canonical seq still gets the uniform 302.
 const POST_PAGE_RE = /^\/p\/([0-9a-f]{64})\/([0-9]+)$/
 const POST_FOTO_RE = /^\/p\/([0-9a-f]{64})\/([1-9][0-9]{0,15})\/foto\/([1-4])$/
+// Any digit string, so a non-canonical seq still gets the uniform answer.
+const POST_PREVIA_RE = /^\/p\/([0-9a-f]{64})\/([0-9]+)\/previa$/
 const CANONICAL_SEQ_RE = /^[1-9][0-9]{0,15}$/
 const POST_PAGE_MAX_BODY = 65536
 const POST_PAGE_MAX_IN_FLIGHT = 4
@@ -426,7 +435,20 @@ const POST_PAGE_BURST = 16
 const POST_PAGE_DEADLINE_MS = 5000
 const POST_PHOTO_MAX_IN_FLIGHT = 4
 const POST_PHOTO_DEADLINE_MS = 10000
+const POST_PREVIA_MAX_BODY = 65536
+const POST_PREVIA_MAX_IN_FLIGHT = 4
+const POST_PREVIA_RATE = 8
+const POST_PREVIA_BURST = 16
+const POST_PREVIA_DEADLINE_MS = 5000
 const POST_ROBOTS = 'noindex, nofollow, noarchive'
+const POST_PREVIA_NONE = '{"post":null}'
+const POST_PREVIA_HEADERS = {
+  'Content-Type': 'application/json; charset=utf-8',
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+  'X-Robots-Tag': POST_ROBOTS,
+  'Cache-Control': 'no-store'
+}
 
 const sha256 = (value) => nodeCrypto.createHash('sha256').update(value).digest()
 
@@ -648,14 +670,15 @@ function refuse (socket, code, reason) {
 // null or an https origin that turns on the public post pages, backed by
 // postPublic(hex, seq) and mediaRead; postsLimits: overrides
 // ({ pageMaxInFlight, pageRate, pageBurst, pageDeadlineMs, photoMaxInFlight,
-// photoDeadlineMs }), for tests.
+// photoDeadlineMs, previewMaxInFlight, previewRate, previewBurst,
+// previewDeadlineMs }), for tests.
 // The listener's socket cap: `sockets` when it is an integer >= 1
 // (VARANDA_MAX_SOCKETS), else room for every external WebSocket, every
 // /media and /index response in flight and 64 more for keep-alives and
 // requests being refused (32 + 16 + 16 + 64 = MAX_SOCKETS by default), never
 // below MAX_SOCKETS, so lowering one cap never shrinks the listener. The
 // POST_MAX_IN_FLIGHT /moderation-post answers, the Feira photo and
-// sitemap slots and the post page and photo slots fit in those 64.
+// sitemap slots and the post page, preview and photo slots fit in those 64.
 function socketCap ({ maxExternal, mediaInFlight, indexInFlight, sockets = null }) {
   if (Number.isInteger(sockets) && sockets >= 1) return sockets
   return Math.max(MAX_SOCKETS, maxExternal + mediaInFlight + indexInFlight + 64)
@@ -675,8 +698,12 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
   const takePostPageToken = tokenBucket(postsLimits.pageRate ?? POST_PAGE_RATE, postsLimits.pageBurst ?? POST_PAGE_BURST)
   const postPhotoMaxInFlight = postsLimits.photoMaxInFlight ?? POST_PHOTO_MAX_IN_FLIGHT
   const postPhotoDeadlineMs = postsLimits.photoDeadlineMs ?? POST_PHOTO_DEADLINE_MS
+  const postPreviewMaxInFlight = postsLimits.previewMaxInFlight ?? POST_PREVIA_MAX_IN_FLIGHT
+  const postPreviewDeadlineMs = postsLimits.previewDeadlineMs ?? POST_PREVIA_DEADLINE_MS
+  const takePostPreviewToken = tokenBucket(postsLimits.previewRate ?? POST_PREVIA_RATE, postsLimits.previewBurst ?? POST_PREVIA_BURST)
   let postPageInFlight = 0
   let postPhotoInFlight = 0
+  let postPreviewInFlight = 0
   const photoMaxInFlight = feiraLimits.photoMaxInFlight ?? FEIRA_PHOTO_MAX_IN_FLIGHT
   const photoDeadlineMs = feiraLimits.photoDeadlineMs ?? FEIRA_PHOTO_DEADLINE_MS
   const sitemapMaxInFlight = feiraLimits.sitemapMaxInFlight ?? FEIRA_SITEMAP_MAX_IN_FLIGHT
@@ -1279,6 +1306,39 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     res.end(req.method === 'HEAD' ? undefined : answer)
   }
 
+  // The one shape of every preview answer: only the body says whether a post
+  // is shown, and every case that shows nothing has the same body.
+  function previewAnswer (req, res, body) {
+    res.writeHead(200, { ...POST_PREVIA_HEADERS, 'Content-Length': Buffer.byteLength(body) })
+    res.end(req.method === 'HEAD' ? undefined : body)
+  }
+
+  // The page's gate, deadline and slot rules with the preview's own budget.
+  async function servePostPreview (req, res, hex, digits) {
+    if (postsOn === null || typeof seeder.postPublic !== 'function') return previewAnswer(req, res, POST_PREVIA_NONE)
+    const seq = Number(digits)
+    if (!CANONICAL_SEQ_RE.test(digits) || !Number.isSafeInteger(seq)) return previewAnswer(req, res, POST_PREVIA_NONE)
+    if (!takePostPreviewToken() || postPreviewInFlight >= postPreviewMaxInFlight) return previewAnswer(req, res, POST_PREVIA_NONE)
+    postPreviewInFlight++
+    let timer = null
+    const late = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(null), postPreviewDeadlineMs)
+      timer.unref()
+    })
+    const answer = await Promise.race([late, slotted(res, postPreviewDeadlineMs * 2, () => { postPreviewInFlight-- }, async () => {
+      const shown = shownPost(await seeder.postPublic(hex, seq))
+      if (shown === null) return null
+      const data = postPreviewData({ record: shown.record, name: shown.name, username: shown.username })
+      if (data === null) return null
+      const body = JSON.stringify({ post: data })
+      if (typeof body !== 'string' || Buffer.byteLength(body) > POST_PREVIA_MAX_BODY) return null
+      return body
+    })])
+    clearTimeout(timer)
+    if (answer === CLOSED || res.destroyed || res.writableEnded || res.headersSent) return
+    previewAnswer(req, res, answer === null ? POST_PREVIA_NONE : answer)
+  }
+
   // Photo n of what the page shows, its bytes checked, and only if the same
   // share still allows the post once they are read (a withdrawal or a delete
   // during the read then serves nothing); else null.
@@ -1311,7 +1371,9 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
   }
 
   // Every path under /p/, whatever the switch says. The page matches the
-  // path without its query, so a link a messenger decorated still lands.
+  // path without its query, so a link a messenger decorated still lands; the
+  // preview and the photos are no link anyone pastes, so they match the whole
+  // URL.
   function servePosts (req, res, pathname) {
     if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'método não permitido\n', { Allow: 'GET, HEAD' })
     if (pathname === POST_POLICY) {
@@ -1321,6 +1383,8 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     }
     let m = POST_PAGE_RE.exec(pathname)
     if (m) return servePostPage(req, res, m[1], m[2])
+    m = POST_PREVIA_RE.exec(req.url)
+    if (m) return servePostPreview(req, res, m[1], m[2])
     m = POST_FOTO_RE.exec(req.url)
     if (m) return servePostPhoto(req, res, m[1], Number(m[2]), Number(m[3]))
     return send(res, 404, NOT_FOUND)
@@ -1612,6 +1676,11 @@ module.exports = {
   POST_PAGE_DEADLINE_MS,
   POST_PHOTO_MAX_IN_FLIGHT,
   POST_PHOTO_DEADLINE_MS,
+  POST_PREVIA_RE,
+  POST_PREVIA_MAX_IN_FLIGHT,
+  POST_PREVIA_RATE,
+  POST_PREVIA_BURST,
+  POST_PREVIA_DEADLINE_MS,
   LISTING_MOD_RE,
   FEIRA_LISTING_RE,
   FEIRA_LISTING_MAX_IN_FLIGHT,

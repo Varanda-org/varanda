@@ -4,7 +4,7 @@
 // no network.
 
 const test = require('brittle')
-const { renderPostPage, postPhotos, MAX_PHOTOS } = require('../lib/post-page')
+const { renderPostPage, postPreviewData, postPhotos, MAX_PHOTOS } = require('../lib/post-page')
 
 const HEX = 'ab'.repeat(32)
 const ORIGIN = 'https://bora.varanda.app'
@@ -270,4 +270,153 @@ test('malformed record fields do not throw and render as absent', (t) => {
   }
   const trap = { get author () { throw new Error('boom') } }
   t.ok(renderPostPage(trap).includes('href="/"'))
+})
+
+const PREVIEW_KEYS = ['v', 'name', 'username', 'date', 'text', 'photoCount', 'morePhotos', 'video', 'relation', 'card']
+
+function preview (over, recordOver) {
+  return postPreviewData({ record: post(recordOver), name: 'Ana Souza', username: 'ana', ...over })
+}
+
+function escHtml (value) {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+}
+
+// Nothing in a preview may be a link, a key, a timestamp or a descriptor.
+function assertPreviewSafe (t, data, label) {
+  const json = JSON.stringify(data)
+  t.absent(/https?:|www\.|\/p\/|\/foto\/|\/publicacao\//i.test(json), label + ': no URL')
+  t.absent(/\d{4}-\d{2}-\d{2}T/.test(json), label + ': no ISO timestamp')
+  t.absent(/"(core|mime|start|blocks|bytes|sha256|width|height|ms|url|image|desc|at|seq|shareSeq|author|key|replyTo|quote|preview|media)":/.test(json), label + ': no descriptor or record field')
+  t.absent(json.includes('\ufffd') || json.includes('\uFFFD'), label + ': no U+FFFD')
+  t.absent(json.includes('\u2014'), label + ': no em dash')
+}
+
+test('postPreviewData: exactly the listed fields of a plain post', (t) => {
+  const data = preview()
+  t.alike(Object.keys(data), PREVIEW_KEYS)
+  t.alike(data, {
+    v: 1,
+    name: 'Ana Souza',
+    username: 'ana',
+    date: '12/11/2026',
+    text: 'Bom dia, vizinhança.\nCafé pronto.',
+    photoCount: 0,
+    morePhotos: 0,
+    video: false,
+    relation: null,
+    card: null
+  })
+  assertPreviewSafe(t, data, 'plain')
+  t.is(preview({ name: '  ', username: '' }).name, null, 'a blank name is null')
+  t.is(preview({ name: undefined, username: 7 }).username, null, 'a non-string username is null')
+  t.is(preview({}, { at: '2026-11-13T02:00:00.000Z' }).date, '12/11/2026', 'the date in Brasília time')
+  t.is(preview({}, { at: 'ontem' }).date, '')
+  t.is(preview({}, { text: 42 }).text, '')
+})
+
+test('postPreviewData: photos are only counted, as the page shows them', (t) => {
+  const ten = []
+  for (let i = 0; i < 10; i++) ten.push(image(i))
+  const many = preview({}, { media: ten })
+  t.is(many.photoCount, 4)
+  t.is(many.morePhotos, 6)
+  t.is(many.video, false)
+  const video = preview({}, { media: [image(0), videoItem()] })
+  t.is(video.photoCount, 1, 'a video post shows only its cover')
+  t.is(video.morePhotos, 0)
+  t.is(video.video, true)
+  const onlyVideo = preview({}, { media: [videoItem()] })
+  t.is(onlyVideo.photoCount, 0)
+  t.is(onlyVideo.video, true)
+  t.is(preview({}, { media: new Array(11).fill(image(0)) }).photoCount, 0, 'more than records allow is no media')
+  for (const d of [many, video, onlyVideo]) assertPreviewSafe(t, d, 'photos')
+})
+
+test('postPreviewData: relation by the page precedence, card by the page rule', (t) => {
+  const other = { author: 'cd'.repeat(32), seq: 3, text: 'SEGREDO DO OUTRO' }
+  t.is(preview({}, { replyTo: other }).relation, 'reply')
+  t.is(preview({}, { quote: other }).relation, 'quote')
+  t.is(preview({}, { quote: other, replyTo: other }).relation, 'quote', 'quote wins, as on the page')
+  t.is(preview({}, { replyTo: 'cd'.repeat(32) }).relation, null, 'a malformed replyTo is absent')
+  const quoted = preview({}, { quote: other })
+  t.absent(JSON.stringify(quoted).includes('SEGREDO'))
+  t.absent(JSON.stringify(quoted).includes('cd'.repeat(32)))
+  const card = preview({}, { preview: { url: 'https://x.example/a', host: 'x.example', title: 'Um site', desc: 'd', image: image(9) } })
+  t.alike(card.card, { title: 'Um site', host: 'x.example' })
+  assertPreviewSafe(t, card, 'card')
+  t.alike(preview({}, { preview: { title: '', host: 'x.example' } }).card, { title: '', host: 'x.example' })
+  t.is(preview({}, { preview: { title: ' ', host: '' } }).card, null, 'an empty card is absent')
+  t.is(preview({}, { preview: 'card' }).card, null)
+})
+
+test('postPreviewData: every projected string is on the page, escaped, and the date is the page date', (t) => {
+  const inputs = [
+    [{}, {}],
+    [{ name: '<b onmouseover="x">Eva</b></title>', username: 'eva"><script>' }, {
+      text: '</p><script src=//x></script><img onerror=1 src=x>"\'&</title>',
+      preview: { url: 'https://x.example/', host: '<i>x.example</i>', title: '"><script>alert(1)</script>&', desc: '', image: null }
+    }],
+    [{ name: 'A\u200fna\u0085', username: 'a\u202ena' }, {
+      text: 'Bi\u0000ci\u202ecle\u0007ta\nok\u2066',
+      preview: { url: 'https://x.example/', host: 'x.exa\u200emple', title: 'T\u00ed\u0001tulo', desc: '', image: null }
+    }],
+    [{ name: '', username: 'so_nome' }, { text: '\u00e9'.repeat(1500), media: [image(0), image(1), image(2), image(3), image(4)] }],
+    [{ name: 'x'.repeat(500), username: 'y'.repeat(500) }, { media: [image(0), videoItem()], preview: { title: 'z'.repeat(900), host: '' } }],
+    [{}, { at: '2026-01-01T03:00:00.000Z', quote: { author: 'cd'.repeat(32), seq: 1 } }]
+  ]
+  for (const [over, recordOver] of inputs) {
+    const html = page(over, recordOver)
+    const data = preview(over, recordOver)
+    const label = JSON.stringify(over).slice(0, 40)
+    assertPreviewSafe(t, data, label)
+    if (data.name !== null) t.ok(html.includes('<h1>' + escHtml(data.name) + '</h1>'), label + ': name')
+    if (data.username !== null) t.ok(html.includes('@' + escHtml(data.username) + '<'), label + ': username')
+    if (data.name === null && data.username === null) t.ok(html.includes('<h1>Publicação na Varanda</h1>'))
+    if (data.text !== '') t.ok(html.includes('<p class="text">' + escHtml(data.text) + '</p>'), label + ': text')
+    else t.absent(html.includes('<p class="text">'))
+    const pageDate = (html.match(/<p class="meta">(\d\d\/\d\d\/\d{4})<\/p>/) || [null, ''])[1]
+    t.is(data.date, pageDate, label + ': the page date')
+    t.is((html.match(/<img /g) || []).length, data.photoCount, label + ': photo count')
+    t.is(html.includes('Vídeo disponível na Varanda'), data.video, label + ': video')
+    if (data.morePhotos > 0) t.ok(html.includes('Mais ' + data.morePhotos + ' foto'), label + ': more photos')
+    else t.absent(html.includes('Mais '))
+    t.is(html.includes('Cita outra publicação'), data.relation === 'quote')
+    t.is(html.includes('Em resposta a outra publicação'), data.relation === 'reply')
+    if (data.card !== null) {
+      if (data.card.title !== '') t.ok(html.includes('<span class="card-title">' + escHtml(data.card.title) + '</span>'), label + ': card title')
+      if (data.card.host !== '') t.ok(html.includes('<span class="card-host">' + escHtml(data.card.host) + '</span>'), label + ': card host')
+    } else {
+      t.absent(html.includes('<p class="card">'))
+    }
+  }
+})
+
+test('postPreviewData: hostile input never throws and stays bounded', (t) => {
+  const huge = 'x'.repeat(5 * 1024 * 1024)
+  const records = [
+    null,
+    'post',
+    42,
+    [],
+    { text: 42, at: {}, replyTo: 7, quote: 'x', media: { length: 3 }, preview: 'card' },
+    { text: huge, media: [huge, { mime: huge }], preview: { title: huge, host: huge } },
+    { text: ['a'], media: [null, undefined, 1], preview: { title: 1, host: {} } },
+    { media: new Array(1e6) },
+    { text: '\ud800\udc00\ud800 ok \ufffd', at: '2026-11-12T15:30:00.000Z' },
+    Object.create(null)
+  ]
+  for (const record of records) {
+    const data = postPreviewData({ record, name: huge, username: { x: 1 } })
+    t.alike(Object.keys(data), PREVIEW_KEYS, 'record ' + Object.prototype.toString.call(record))
+    assertPreviewSafe(t, data, 'record ' + Object.prototype.toString.call(record))
+    t.ok(Buffer.byteLength(JSON.stringify(data)) < 16 * 1024, 'bounded size')
+    t.is(Array.from(data.name).length <= 80, true)
+  }
+  t.is(postPreviewData({ record: { get text () { throw new Error('boom') } } }), null, 'a throwing record is null')
+  t.is(postPreviewData({ get record () { throw new Error('boom') } }), null, 'throwing args are null')
+  for (const args of [undefined, null, 'x', 7, [], [{ record: post() }]]) {
+    t.is(postPreviewData(args), null, 'no args object: ' + String(args))
+  }
 })
