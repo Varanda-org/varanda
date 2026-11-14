@@ -10631,3 +10631,33 @@ node apps/app/test/mediaKeptLoad.test.js
 ```
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 230. Conversas no visual novo: linhas, campo de escrever e cantos dos balões (PR feat/restyle-chat-surfaces)
+
+Esta seção confere o visual novo das superfícies de conversa. As linhas de Conversas, Mensagens e Comunidades têm título de 16 pt e ritmo de 72 pt, com o ponto de novas; os chips de Conversas, Avisos e Feira ficam sem fio embaixo; o campo de escrever de Mensagem e Grupo usa a cor de campo desligado, sem fio no topo; e os balões têm cantos de 24 pt, com 4 pt entre balões do mesmo grupo, sem cauda.
+
+Nada disso envia pedido nem busca dado: é só a tela. Não há mudança de protocolo, RPC nem Termos, e nenhuma dependência nova.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA, cada um em claro e escuro. Registrar aparelho, sistema e, na web, o navegador.
+
+- [ ] Linhas de Conversas, Mensagens e Comunidades: título de 16 pt, ritmo de 72 pt e ponto de novas, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Chips de Conversas, Avisos e Feira, sem fio embaixo deles, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Campo de escrever em Mensagem e Grupo, com o teclado aberto: parado, com foco, desligado, gravando e com várias linhas, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Balões: várias linhas com cantos de 24 pt, sequência de três, foto, voz, bloco de código, citação, apagada e pendente, em claro e escuro. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] O esqueleto da foto do feed continua com cantos de 14 pt. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Texto grande 1,3: a linha, o campo e os balões crescem sem cortar o texto. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/app/test/chatSurfaces.test.js
+node apps/app/test/chatFormat.test.js
+node apps/app/test/themeUsage.test.js
+node apps/app/test/uiKit.test.js
+node apps/app/test/chatMedia.test.js
+node apps/app/test/dm.test.js
+node apps/app/test/groups.test.js
+node apps/app/test/hapticsUse.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.

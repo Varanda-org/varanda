@@ -11,6 +11,7 @@ const communities = read('screens/Comunidades')
 const community = read('screens/Comunidade')
 const row = read('ui/ConversationRow')
 const box = read('ui/CommunitiesBox')
+const chips = read('ui/FilterChips')
 
 test('chat lists use row skeletons for the first load', (t) => {
   for (const src of [conversations, messages, communities, community]) {
@@ -157,4 +158,10 @@ test('chat presentation adds no receipt, presence, typing, platform gates or em 
     t.absent(src.includes('Platform.OS'))
     t.absent(src.includes('\u2014'))
   }
+})
+
+test('conversation rows use the row name type and the chips carry no rule', (t) => {
+  t.ok(row.includes('...type.rowName'))
+  t.absent(row.includes('...type.postName'))
+  t.absent(chips.includes('borderBottomWidth'))
 })

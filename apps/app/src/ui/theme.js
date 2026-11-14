@@ -85,7 +85,7 @@ export const radius = Object.freeze({
   sm: 8,
   md: 12,
   lg: 18,
-  bubble: 18,
+  bubble: 24,
   pill: 999
 })
 
