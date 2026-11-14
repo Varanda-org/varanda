@@ -9674,3 +9674,58 @@ Nenhuma conferência em aparelho nem com o provedor real foi feita nesta tarefa.
 - [ ] Os quatro players incorporados e a regra de leitor de tela para início automático continuam como antes.
 - [ ] Fechar e reabrir o app, ou recarregar a página na web, restaura o som. A escolha não aparece em outro aparelho, e **Tocar música sozinha** mantém o valor guardado.
 - [ ] Uma conta que aceitou a versão 46 recebe os Termos de Uso e a Política de Privacidade 47 para novo aceite.
+
+## 209. Players de música carregados a qualquer distância ao rolar, Termos 48
+
+Um player de YouTube, SoundCloud, Spotify ou Apple Music já carregado fica carregado, e em contato com o provedor, enquanto a pessoa rola a mesma tela a qualquer distância, mesmo depois que a lista desmonta a linha. A camada de players dentro do conteúdo de rolagem mantém a mesma página e o ponto da música, sem recarga nem espera de 1 s quando a linha volta. Há no máximo dois quadros no app, incluindo o rascunho do compositor. Um cartão visível pede o lugar do quadro fora da vista há mais tempo; uma linha desmontada conta como fora da vista e seu quadro sai na próxima conferência da camada, em até 500 ms após o pedido. Sair da tela ou da aba, abrir uma folha, um menu ou uma foto em tela cheia por cima, bloquear, ir para segundo plano ou iniciar outro áudio do Varanda fecha o quadro. Retirar a linha dos dados (publicação apagada, silenciada ou lista reiniciada) também fecha o quadro, assim como perder o processo de conteúdo no Android e no iOS; inserir linhas no início não fecha nenhum. Se um cartão sai de uma linha que continua montada e nos dados da lista, a lista fecha seu quadro escondido após cerca de 1 s (duas conferências de 500 ms). No Android e no iOS, se o processo morre, o cartão guardado volta e carrega o player após a espera normal quando fica visível. Na web, o app não enxerga um processo de iframe morto e mostra o que o navegador mostrar. Cabeçalhos de Conversa e rascunhos ficam no próprio espaço. A reprodução automática do Audius fica suspensa enquanto há qualquer quadro de provedor carregado na tela, inclusive fora da vista, durante toda a visita. Termos e Política de Privacidade na versão 48, com novo aceite. Esta seção substitui as regras de descarregamento por distância e por desmontagem da linha da seção 205.
+
+### Verificação automatizada
+
+```sh
+node apps/app/test/embedKeep.test.js
+node apps/app/test/embedFrame.test.js
+node apps/app/test/embedLayer.test.js
+node apps/app/test/musicEmbedCard.test.js
+node apps/app/test/legal.test.js
+node apps/site/scripts/render-legal.js --check
+npm run lint
+npm test
+npm run demo
+```
+
+### Verificação manual
+
+Executar o roteiro abaixo em cada plataforma, nesta ordem. Registrar aparelho, versão, provedor e resultado antes de marcar a plataforma como conferida.
+
+- [ ] Build de debug do Android, emulador ou aparelho.
+- [ ] Simulador iOS.
+- [ ] Web.
+- [ ] PWA.
+
+Roteiro para cada plataforma; as ações exclusivas do sistema ficam registradas na plataforma correspondente.
+
+- [ ] Carregar um player numa linha depois da oitava, iniciar uma faixa, rolar 20 telas para longe e voltar. A mesma página continua, no ponto da música, sem recarregar nem esperar 1 s.
+- [ ] Começar um arrasto sobre o player e conferir que a lista rola.
+- [ ] Receber novas linhas no início pela sincronização em A Rua e numa conversa. Nenhum player fica sobre outra linha, e o conteúdo que a pessoa está lendo mantém a posição. No Android, conferir a âncora de rolagem.
+- [ ] Com dois players fora da vista, fazer um terceiro cartão ficar visível. Ele carrega em cerca de 2 s, e o player fora da vista há mais tempo volta ao cartão guardado. Conferir também com a linha desse player desmontada.
+- [ ] Manter dois players na faixa visível e mostrar um terceiro cartão. Ele espera, sem tirar nenhum dos dois.
+- [ ] Conferir que o player fecha ao trocar de aba, abrir uma folha, um menu ou uma foto em tela cheia por cima, bloquear, ir para segundo plano ou começar uma mensagem de voz.
+- [ ] Apagar ou silenciar uma publicação cujo player está fora da vista. Retirar a linha dos dados fecha o player.
+- [ ] Numa conversa, com o player de uma mensagem carregado e fora da vista enquanto sua linha continua montada, apagar essa mensagem pelo outro aparelho. O player escondido fecha em cerca de 1 s.
+- [ ] Num grupo, com o player de uma mensagem carregado, rolar até a linha sair da janela da lista (mais de cerca de 3 telas) e então ocultar essa mensagem como moderador ou apagá-la pelo outro aparelho. O player escondido fecha na hora, sem som nem tráfego com o provedor, e ao voltar a mensagem aparece sem player.
+- [ ] No Android e no iOS, matar o processo renderizador do WebView e conferir que o cartão guardado volta. Ao ficar visível, o player carrega de novo após a espera normal. No emulador Android, tentar executar `adb root`, localizar o processo renderizador do WebView (`sandboxed_process`) com `adb shell ps -A` e encerrá-lo com `adb shell kill <pid>`. No simulador iOS, tentar encerrar o processo `com.apple.WebKit.WebContent` da página no Mac, por exemplo pelo Monitor de Atividade. Registrar o método usado.
+- [ ] Com TalkBack, VoiceOver e Tab, conferir que um player cuja linha está desmontada nunca recebe foco. Registrar a ordem de leitura e de teclado de um player visível, alcançado depois das linhas da lista, fora da própria publicação.
+- [ ] No Android, conferir os cartões do cabeçalho de Conversa: ficam no próprio espaço, mantêm a página ao rolar para longe e voltam sem recarga nem espera de 1 s.
+- [ ] Numa conversa privada e num grupo, com um player carregado numa mensagem, deslizar a mensagem para responder: o player acompanha o balão durante o gesto e volta com ele. Com "reduzir movimento" ligado, nada se move.
+- [ ] Conferir a prévia no rascunho do compositor: fica no próprio espaço, conta no limite de dois quadros e segue as mesmas regras de fechamento, sem limite de distância.
+- [ ] Repetir as conferências com cada um dos quatro provedores: YouTube, SoundCloud, Spotify e Apple Music.
+- [ ] Num Android com pouca memória, manter dois players carregados durante uma visita inteira. Registrar o uso de memória e qualquer pausa, perda do processo ou recarga.
+- [ ] Entrar com uma conta que aceitou uma versão anterior e conferir que o aceite pede os Termos e a Política de Privacidade 48.
+
+### Limites conhecidos
+
+- O provedor pode pausar por conta própria quando o quadro fica escondido.
+- Na web, um player fora da vista cuja linha continua montada permanece alcançável com Tab, como na seção 205.
+- Leitores de tela e teclado alcançam um player visível depois das linhas da lista, em vez de dentro da publicação.
+- Um cartão que some e volta na mesma linha após mais de cerca de 1 s encontra o player fechado e o carrega de novo.
+- Na web, o app não enxerga a morte do processo de um iframe: o quadro não fecha sozinho, o cartão guardado não volta e a tela mostra o que o navegador mostrar.

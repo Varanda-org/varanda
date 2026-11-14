@@ -50,6 +50,8 @@ import { createFrameStats, frameLine, monotonicNow, perfEnabled } from '../perfM
 import { Spinner } from './index'
 import { Icon } from './Icon'
 import { NewItemsPill } from './States'
+import { EmbedRow, keptRowKeys, renderScroll, rowKeyOf, useEmbedHost } from './EmbedLayer'
+import { EmbedHost } from './screenVisible'
 import { motion, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
 
@@ -139,6 +141,9 @@ export function RefreshableList ({
   const { colors } = useTheme()
   const node = useNode()
   const syncNow = node && node.syncNow
+  // Loaded players live in a layer of the list's own scroll content, not in
+  // their rows (./EmbedLayer): a row this list unmounts keeps its player.
+  const host = useEmbedHost()
   const busy = useRef(false) // one refresh across web and native gestures
   const [spinning, setSpinning] = useState(false)
   const list = useRef(null)
@@ -500,12 +505,32 @@ export function RefreshableList ({
     measured.current = true
     endLayoutWait()
     check()
+    // Rows above a player moved it: its card places the frame again.
+    host.contentChanged()
     if (typeof contentSizeChange.current === 'function') contentSizeChange.current(w, h)
   }, [check])
   const onLayout = useCallback((e) => {
     metrics.current = { ...metrics.current, layout: e.nativeEvent.layout.height }
     check()
   }, [check])
+
+  // Most screens pass an inline keyExtractor: as a dependency it would give
+  // renderRow a new identity on every render, and FlatList would render every
+  // mounted row again.
+  const keyOf = useRef(keyExtractor)
+  keyOf.current = keyExtractor
+  // Each row tells its music cards which row they are in, so the frame kept
+  // for a row is found again when the list mounts that row anew.
+  const renderRow = useCallback((info) => (
+    <EmbedRow row={rowKeyOf(keyOf.current, info.item, info.index)}>{renderItem(info)}</EmbedRow>
+  ), [renderItem])
+  // A row that left the data, or whose item became a tombstone, has no player
+  // to come back to. A prepend keeps every row, so it drops nothing.
+  useEffect(() => {
+    if (!host.keep.hasOrphan()) return
+    const kept = keptRowKeys(data, keyOf.current)
+    host.keep.prune((row) => kept.has(row))
+  }, [data])
 
   // FlatList throws if onViewableItemsChanged changes identity. One function
   // reads the latest caller. Turning tracking on later would change the prop
@@ -641,36 +666,39 @@ export function RefreshableList ({
           </Pressable>
           )
         : null}
-      <FlatList
-        ref={setList}
-        style={styles.list}
-        data={data}
-        renderItem={renderItem}
-        keyExtractor={keyExtractor}
-        extraData={extraData}
-        initialNumToRender={FIRST_ROWS}
-        maxToRenderPerBatch={ROWS_PER_BATCH}
-        windowSize={WINDOW_SCREENS}
-        ListHeaderComponent={ListHeaderComponent}
-        ListFooterComponent={footer}
-        ListEmptyComponent={ListEmptyComponent}
-        contentContainerStyle={contentContainerStyle}
-        onEndReached={check}
-        onEndReachedThreshold={END_THRESHOLD}
-        keyboardShouldPersistTaps='handled'
-        onScroll={onScroll}
-        onScrollBeginDrag={web ? undefined : notifyUserScroll}
-        onContentSizeChange={handleContentSizeChange}
-        onLayout={onLayout}
-        scrollEventThrottle={16}
-        dataSet={{ pull: 'y' }}
-        maintainVisibleContentPosition={keepVisiblePosition ? KEEP_VISIBLE : undefined}
-        onViewableItemsChanged={trackViewable ? onViewable : undefined}
-        viewabilityConfig={trackViewable ? VIEWABILITY_CONFIG : undefined}
-        refreshControl={web
-          ? undefined
-          : <RefreshControl refreshing={!!refreshing || spinning} onRefresh={runRefresh} tintColor={colors.accent} colors={[colors.accent]} progressBackgroundColor={colors.card} />}
-      />
+      <EmbedHost.Provider value={host}>
+        <FlatList
+          ref={setList}
+          style={styles.list}
+          data={data}
+          renderItem={renderRow}
+          keyExtractor={keyExtractor}
+          extraData={extraData}
+          initialNumToRender={FIRST_ROWS}
+          maxToRenderPerBatch={ROWS_PER_BATCH}
+          windowSize={WINDOW_SCREENS}
+          ListHeaderComponent={ListHeaderComponent}
+          ListFooterComponent={footer}
+          ListEmptyComponent={ListEmptyComponent}
+          contentContainerStyle={contentContainerStyle}
+          onEndReached={check}
+          onEndReachedThreshold={END_THRESHOLD}
+          keyboardShouldPersistTaps='handled'
+          onScroll={onScroll}
+          onScrollBeginDrag={web ? undefined : notifyUserScroll}
+          onContentSizeChange={handleContentSizeChange}
+          onLayout={onLayout}
+          scrollEventThrottle={16}
+          dataSet={{ pull: 'y' }}
+          maintainVisibleContentPosition={keepVisiblePosition ? KEEP_VISIBLE : undefined}
+          onViewableItemsChanged={trackViewable ? onViewable : undefined}
+          viewabilityConfig={trackViewable ? VIEWABILITY_CONFIG : undefined}
+          renderScrollComponent={renderScroll}
+          refreshControl={web
+            ? undefined
+            : <RefreshControl refreshing={!!refreshing || spinning} onRefresh={runRefresh} tintColor={colors.accent} colors={[colors.accent]} progressBackgroundColor={colors.card} />}
+        />
+      </EmbedHost.Provider>
       {web && showIndicator
         ? (
           <Animated.View

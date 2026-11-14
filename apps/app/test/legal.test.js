@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 47)
+  t.is(LEGAL_VERSION, 48)
   t.is(LEGAL_DATE, '13/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 47, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 48, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -139,7 +139,7 @@ test('legal: version 47 plays post music by itself while the sticker is visible'
   ]) t.absent(privacy.includes(gone), 'privacy: no ' + gone)
 })
 
-test('legal: version 45 loads music players when the card is visible', async (t) => {
+test('legal: version 48 keeps a loaded music player at any scroll distance', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   t.ok(text(TERMS).includes('Ao carregar, o serviço recebe o endereço de internet do seu aparelho'), 'terms: player sends the device address')
@@ -162,7 +162,8 @@ test('legal: version 45 loads music players when the card is visible', async (t)
       'um toque no cartão abre o link',
       'continua aberto enquanto você rola a mesma tela',
       'no máximo dois ficam carregados ao mesmo tempo',
-      'O player fecha quando'
+      'O player fecha quando',
+      'a qualquer distância'
     ]) t.ok(text(doc).includes(required), doc.title + ': ' + required)
     for (const gone of [
       'Tocar aqui',
@@ -172,7 +173,8 @@ test('legal: version 45 loads music players when the card is visible', async (t)
       'O cartão traz um link',
       'Rolar o cartão para fora da tela',
       'no aplicativo, só endereços do próprio serviço',
-      'abre a página do serviço fora do Varanda'
+      'abre a página do serviço fora do Varanda',
+      'quando o cartão fica longe na lista'
     ]) t.absent(text(doc).includes(gone), doc.title + ': no ' + gone)
   }
   const section = (heading) => PRIVACY.sections.find((s) => s.heading === heading).paragraphs.join(' ')
@@ -268,7 +270,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '4928cae245aa151095d7f8f39a332b51add9fda80a5e85da4e6e41e22795679e', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'a6fc687794a70fbe7a47de5699348e1990dfbdc7a4a1ccb30dd73a0e0ce88968', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
