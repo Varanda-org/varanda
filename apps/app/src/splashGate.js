@@ -43,12 +43,13 @@ export function bootPatienceMs (step) {
   return BOOT_PATIENCE_MS
 }
 
-export function coverBoot ({ step, passkeyKnown, age, ageError, phone, phoneError, infoKnown, profileSlow, feedReady } = {}) {
+export function coverBoot ({ step, passkeyKnown, age, ageError, phone, phoneError, infoKnown, accountKnown, profileSlow, feedReady } = {}) {
   if (step === 'entrar') return passkeyKnown !== true
   if (step === 'recuperando') return true
   if (step === 'idade') return age === 'loading' && !(typeof ageError === 'string' && ageError !== '')
   if (step === 'telefone') return phone === 'loading' && !(typeof phoneError === 'string' && phoneError !== '')
-  if (step === 'vinculo' || step === 'identidade' || step === 'certificado') return infoKnown !== true
+  if (step === 'vinculo') return infoKnown !== true || accountKnown !== true
+  if (step === 'identidade' || step === 'certificado') return infoKnown !== true
   if (step === 'carregando') return profileSlow !== true
   if (step === 'pronto') return feedReady !== true
   return false

@@ -2705,7 +2705,7 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 
 - A lista de passkeys que falharam fica só na memória da página: depois de recarregar, o nó pode oferecer de novo uma passkey que já falhou, e o cartão só a nomeia quando ela falhar outra vez.
 - Tentar de novo no mesmo gerenciador sem PRF pode dar "já existe uma passkey do Varanda neste gerenciador: use entrar"; entrar com ela leva de volta ao cartão com os passos.
-- Os textos citam a Apple e o Google para todos; o app não detecta a plataforma.
+- Os passos do cartão não citam mais a Apple nem o Google: dizem "o do celular ou outro que sincronize", sem detectar a plataforma (`apps/app/test/passkeyTrouble.test.js`).
 - Se a passkey escolhida em Entrar era a da criação pendente, "concluir" continua aparecendo e, tocado, só diz "nenhuma criação de passkey pendente"; "Criar passkey" ao lado resolve. Esconder o "concluir" depois de uma falha dele perderia uma criação ainda viva quando a pessoa só fechou o diálogo, e a tela não distingue os dois casos. Essa passkey também não é nomeada para apagar. Saber qual das duas falhou exigiria o nó informar a criação pendente.
 - Os estados presos e as saídas novas (passkey sem sincronização, caminho pelo celular, passkeys recusadas guardadas, saída de uma passkey conhecida perdida) estão em §109; os resultados desta seção não foram refeitos.
 
@@ -3469,7 +3469,7 @@ Verificação do app nativo com todas as mudanças da pilha "celular primeiro" a
 
 - Aparelho real, emulador x86_64, build de release.
 - Entrar com passkey: precisa de conta Google e bloqueio de tela no emulador, que não foram criados. Além disso, o build de debug (`app.varanda.debug`) não casa com o `assetlinks` da instalação de produção (`app.varanda`), então não entra por passkey nela. Por isso nenhuma tela autenticada foi aberta, inclusive cadeira e comunidade depois do login.
-- O rodapé "Conexão" nos passos de configuração do celular com a instalação ficou como na `main` (escondido): mostrá-lo deixaria trocar de instalação no meio do cadastro, e a política de idade, o resultado da idade e o convite guardado ainda não são zerados por instalação nesse caminho. Fica para um PR próprio.
+- O rodapé "Conexão" nos passos de configuração do celular com a instalação ficou como na `main` (escondido) nesta seção. Passou a aparecer na seção 237 (troca de instalação).
 - Push do sistema, login no iOS.
 - O workflow `native.yml` não foi disparado.
 
@@ -10871,3 +10871,24 @@ node apps/site/scripts/render-calcada.js --check
 ```
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+## 237. Sobras do splash e da troca de instalação (PR fix/sobras-splash-onboarding-v2)
+
+Fecha parte da #355 sobre o onboarding atual.
+
+- Passo "Escolha seu @nome": o splash segue até a conta responder ou falhar (`accountKnown` em `coverBoot`, sinal `onAccountKnown` do cartão de vínculo), sem o "Preparando sua conta…" do próprio cartão. O teto de 10 s continua valendo.
+- `node.info` com passkey: um erro da `Identidade` chega à casca na hora (`onInfoError`), em vez de esperar os 10 s.
+- Configuração manual sem passkey: a `Identidade` já abre com o `node.info` da casca (`initialInfo`).
+- Os passos do cartão de passkey sem PRF não citam mais a Apple nem o Google.
+- O rodapé "Conexão" aparece nos passos de configuração do app instalado (`!node.canConfigure` o esconde só na página hospedada). A política de idade, o resultado da idade e a entrada da Feira levam a origem da instalação e leem como "não lidos" sob outra. O convite de cadastro guardado não leva origem: `swappedInstallation` (`apps/app/src/installationSwap.js`) detecta a troca e `App.js` descarta o convite e o cartão dele. Ir de "instalação desconhecida" para a salva (abertura a frio) não conta como troca.
+
+Fora desta mudança: a entrada do splash tocar uma vez por execução. O splash foi redesenhado na seção 235 e isso pede outro PR sobre o código novo.
+
+1. [ ] Passkey com `node.info` falhando: o erro aparece sem esperar 10 s (não realizada ainda).
+2. [ ] "Escolha seu @nome" abre sem spinner do cartão (não realizada ainda).
+3. [ ] No Android, no passo de idade ou de vínculo, o rodapé "Conexão" aparece; trocar de instalação leva ao splash e à tela da nova instalação, com o convite antigo descartado (não realizada ainda).
+4. [ ] Voltar para a instalação original: a idade e a política são lidas de novo, sem valor da outra (não realizada ainda).
+5. [ ] Abertura a frio por um link de convite, sem trocar nada: o convite continua (não realizada ainda).
+
+Limites: o `sessionStorage` da web não é tocado (a página hospedada não troca de instalação).
+
+Testes: `apps/app/test/installationSwap.test.js`, `apps/app/test/splashGate.test.js` e `apps/app/test/passkeyTrouble.test.js`.
