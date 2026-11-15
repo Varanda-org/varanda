@@ -67,7 +67,11 @@ function jpeg (size, fill) {
 // Media blocks: 1 a JPEG, 2 PNG bytes (declared JPEG below), 3 a JPEG whose
 // descriptor carries another hash, 4 the JPEG an edit shows, 5.. one big
 // JPEG over BIG_BLOCKS blocks.
-const BIG_BLOCKS = 128
+// 256 is the per-photo ceiling (MAX_MEDIA_ITEM_BLOCKS, 8 MiB). At 4 MiB a
+// kernel whose loopback send buffer autotunes that far takes the whole
+// response before the paused client reads, and the photo slot is freed at
+// once, so the slot test below would see 200 instead of 503.
+const BIG_BLOCKS = 256
 const SMALL = [jpeg(300, 1), b4a.concat([b4a.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), b4a.alloc(200, 2)]), jpeg(300, 3), jpeg(300, 4)]
 const BIG = jpeg(BIG_BLOCKS * MEDIA_BLOCK_BYTES, 5)
 

@@ -331,7 +331,8 @@ test('frameDeadlineFor: base plus one second per 64 KiB, capped', (t) => {
   t.is(frameDeadlineFor(1), 11000)
   t.is(frameDeadlineFor(65536), 11000)
   t.is(frameDeadlineFor(65537), 12000)
-  t.is(frameDeadlineFor(MAX_EXTERNAL_FRAME), 120000, 'capped at 120 s')
+  t.is(frameDeadlineFor(MAX_EXTERNAL_FRAME), 139000, '129 s at 64 KiB/s plus the 10 s base: the default cap never cuts it')
+  t.is(frameDeadlineFor(MAX_EXTERNAL_FRAME + 65536), 139000, 'capped at 139 s')
   t.is(frameDeadlineFor(1000, 200, 120000), 1200)
   t.is(frameDeadlineFor(1000, 300, 800), 800)
 })
@@ -673,6 +674,43 @@ test('acceptStream: a charged frame that drips is dropped at the first throughpu
   t.is(JSON.stringify(drops).includes('127.0.0.1'), false, 'no address logged')
   t.is(seeder._frameMemory, 0, 'the reservation was released')
   t.is(seeder._frameGuards.size, 0, 'no charged guard left')
+})
+
+test('acceptStream: a charged frame paused by local backpressure is still dropped at the idle deadline and released', async (t) => {
+  t.timeout(60000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, {
+    associationKey: assoc.hex,
+    externalIdleMs: 1500,
+    frameDeadlineBaseMs: 30000 // only the idle deadline can end this test
+  })
+  const { port, accepted } = await streamServer(t, seeder)
+  const tcp = rawConnect(t, port)
+  const noise = new NoiseSecretStream(true, tcp, { keyPair: generateNoiseKeyPair() })
+  noise.on('error', () => {})
+  t.teardown(() => noise.destroy(), { force: true })
+  await new Promise((resolve) => noise.once('connect', resolve))
+  await until(() => accepted.length === 1 && accepted[0].noise.connected, { name: 'conectado no semeador', timeoutMs: 5000 })
+
+  // The seeder's secret stream stops reading its guard, as it does when its
+  // own consumer lags; a charged frame then makes the guard pause the socket.
+  const guard = accepted[0].noise.rawStream
+  guard.pause()
+  const LEN = 1024 * 1024
+  tcp.write(b4a.concat([frameHeader(LEN), crypto.randomBytes(20000)]))
+  await until(() => seeder._frameMemory === LEN && guard._pausedAt !== null, { name: 'reservada e pausada', timeoutMs: 5000 })
+  t.is(guard._timer, null, 'no frame deadline runs while paused')
+  t.is(guard._progress, null, 'no throughput check runs while paused')
+
+  // Still bounded: the idle deadline, refreshed only by bytes the guard
+  // forwards, drops the socket and the reservation is released.
+  await until(() => accepted[0].raw.destroyed && accepted[0].noise.destroyed, { name: 'destruída pelo ocioso', timeoutMs: 15000 })
+  t.is(seeder._frameMemory, 0, 'the reservation was released')
+  t.is(seeder._frameGuards.size, 0, 'no charged guard left')
+  const frameDrops = events.filter((e) => e.event === 'peer-dropped' && (e.reason === 'frame-deadline' || e.reason === 'frame-budget'))
+  t.is(frameDrops.length, 0, 'not dropped as a slow frame')
 })
 
 test('acceptStream: stalled declarations filling the budget cannot keep members out or drop them', async (t) => {

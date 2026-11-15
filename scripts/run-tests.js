@@ -32,12 +32,15 @@
 // shard that selects nothing fails, so a mistyped CI job never goes green.
 // Skip (VARANDA_TEST_SKIP_WORKSPACES) lets CI run a workspace in a dedicated
 // sharded job and skip it in the job that runs the root `npm test`.
-// Affected (--workspaces --affected=<ref>, a local shortcut that CI never
-// uses) runs only the workspaces that scripts/affected.js says a change
-// since <ref> can reach, and every workspace when a file that decides how
-// all of them run has changed. Nothing changed, or nothing reached, passes
-// with a message. A workspace left out is still checked for this runner as
-// its test script.
+// Affected (--workspaces --affected=<ref>) runs only the workspaces that
+// scripts/affected.js says a change since <ref> can reach, and every
+// workspace when a file that decides how all of them run has changed.
+// Nothing changed, or nothing reached, passes with a message. A workspace
+// left out is still checked for this runner as its test script. CI uses it
+// on pull requests; a push to main runs every workspace.
+// List (--workspaces --list, with or without --affected) prints the
+// workspaces that would run, one per line, and runs nothing: CI's `affected`
+// job reads it to skip the sharded jobs of a workspace no change reaches.
 // Every variable treats an empty string as unset, since an unset value in a
 // workflow env expands to an empty string.
 const fs = require('node:fs')
@@ -196,7 +199,7 @@ function selectWorkspaceFiles (root, ref) {
     if (skip.includes(dir)) skipped.push(dir)
     else kept.push(dir)
   }
-  const selected = { entries: [], skipped, unaffected: [], note: null }
+  const selected = { entries: [], dirs: [], skipped, unaffected: [], note: null }
   let reached = null
   if (ref !== null) {
     const picked = affectedWorkspaces(root, listed.dirs, ref)
@@ -213,6 +216,7 @@ function selectWorkspaceFiles (root, ref) {
     const cwd = path.join(root, dir)
     const files = testFiles(cwd)
     if (files.length === 0) return { error: '# workspace ' + dir + ': nenhum arquivo de teste' }
+    selected.dirs.push(dir)
     for (const file of files) selected.entries.push({ cwd, file, label: dir + '/' + posix(file) })
   }
   return selected
@@ -370,27 +374,35 @@ function isAffectedFlag (arg) {
   return arg === '--affected' || arg.startsWith('--affected=')
 }
 
-// { workspaces, ref } for the root run, { files } for a workspace run.
+// { workspaces, ref, list } for the root run, { files } for a workspace run.
 function parseArgs (args) {
   if (args[0] !== '--workspaces') {
     if (args.some(isAffectedFlag)) return { error: '# --affected só vale com --workspaces' }
+    if (args.includes('--list')) return { error: '# --list só vale com --workspaces' }
     return { workspaces: false, files: args }
   }
   const rest = args.slice(1)
+  const list = rest.filter((arg) => arg === '--list').length
   const flags = rest.filter(isAffectedFlag)
-  if (flags.length < rest.length) return { error: '# --workspaces não aceita arquivos' }
+  if (flags.length + list < rest.length) return { error: '# --workspaces não aceita arquivos' }
+  if (list > 1) return { error: '# --list aparece mais de uma vez' }
   if (flags.length > 1) return { error: '# --affected aceita uma só referência' }
-  if (flags.length === 0) return { workspaces: true, ref: null }
+  if (flags.length === 0) return { workspaces: true, ref: null, list: list === 1 }
   const ref = flags[0].slice('--affected='.length)
   if (flags[0] === '--affected' || ref === '') {
     return { error: '# --affected precisa de uma referência: --affected=<ref> (ex. origin/main)' }
   }
-  return { workspaces: true, ref }
+  return { workspaces: true, ref, list: list === 1 }
 }
 
 async function main () {
   const parsed = parseArgs(process.argv.slice(2))
   if (parsed.error) return finalExit(parsed.error + '\n', 1)
+  if (parsed.list) {
+    const selected = selectWorkspaceFiles(process.cwd(), parsed.ref)
+    if (selected.error) return finalExit(selected.error + '\n', 1)
+    return finalExit(selected.dirs.map((dir) => dir + '\n').join(''), 0)
+  }
   const workspaces = parsed.workspaces
   if (!workspaces) {
     const skipped = workspaceSkipped()

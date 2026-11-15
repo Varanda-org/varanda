@@ -217,6 +217,7 @@ const clock = require('./clock')
 const {
   FrameGuard,
   frameDeadlineFor,
+  frameVictims,
   MAX_HANDSHAKE_FRAME,
   MAX_HANDSHAKE_BYTES,
   MAX_EXTERNAL_FRAME,
@@ -291,6 +292,14 @@ const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'p
 // keeps its responder defaults (2 handshake frames of at most
 // MAX_HANDSHAKE_FRAME, then frames of at most MAX_EXTERNAL_FRAME) and gets
 // the seeder-wide budget below (_frameBudget).
+
+// Frame guard time: the monotonic clock (a wall-clock step must not cut an
+// honest frame or extend a deadline) and real timers.
+const FRAME_CLOCK = Object.freeze({
+  now: () => clock.now(),
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (timer) => clearTimeout(timer)
+})
 
 // An external socket with no incoming data for this long after the handshake
 // is dropped (Hypercore keep-alives every 5 s keep a live peer well inside it).
@@ -1147,13 +1156,17 @@ class Seeder {
     this._frameMemory = 0
     this._frameGuards = new Set()
     this._frameBudget = {
-      // A reservation that does not fit evicts the slowest charged guard
-      // whose reservation is old enough, then retries once.
+      // The newcomer loses: a reservation that does not fit evicts only
+      // charged guards that are stalled or below the minimum throughput
+      // (never in their first frameEvictAgeMs, never one keeping up), and
+      // only when evicting them makes room; otherwise nobody is evicted and
+      // the requester alone is refused (frameVictims in frame-guard.js).
       reserve: (n, guard) => {
-        if (this._frameMemory + n > this.maxFrameMemory) {
-          const victim = this._frameVictim()
-          if (victim === null) return false
-          victim.evict()
+        const over = this._frameMemory + n - this.maxFrameMemory
+        if (over > 0) {
+          const victims = frameVictims(this._frameGuards, over, this.frameEvictAgeMs)
+          if (victims === null) return false
+          for (const victim of victims) victim.evict()
           if (this._frameMemory + n > this.maxFrameMemory) return false
         }
         this._frameMemory += n
@@ -2265,7 +2278,8 @@ class Seeder {
       if (entry.dropped || this._closing) return
       if (this._overQuota(core)) this._drop(key, 'quota')
       // The signed length grew: the committed follows may miss the new
-      // blocks until the scan reaches them, so pages say incomplete.
+      // blocks until the scan reaches them, so they are unpublished and
+      // the pages they touch say incomplete (lib/notices.js).
       // The same growth marks the diary active (wall clock: the windows are
       // Brasília calendar days). The synchronous call at the end of _serve
       // sees core.length === activityLength, so a restore, a re-gate or a
@@ -2800,7 +2814,8 @@ class Seeder {
     // The loop stops at an unknown hole, while the signed length advances
     // before the blocks arrive: publishing a prefix could hide a later
     // unfollow, so only a fold that reached the signed length is committed
-    // (a pending author marks every page `incomplete`).
+    // (a pending author's edges are unpublished, and the pages it may touch
+    // say `incomplete`: lib/notices.js).
     if (entry.scanned >= core.length) {
       this._notices.commit(key)
       this._postNotices.settle(key)
@@ -6915,23 +6930,6 @@ class Seeder {
     this._attachPeer(socket)
   }
 
-  // The charged FrameGuard with the lowest progress (received / declared)
-  // whose reservation is at least frameEvictAgeMs old, or null.
-  _frameVictim () {
-    const now = Date.now()
-    let victim = null
-    let lowest = Infinity
-    for (const guard of this._frameGuards) {
-      if (now - guard.reservedAt < this.frameEvictAgeMs) continue
-      const p = guard.progress()
-      if (p < lowest) {
-        lowest = p
-        victim = guard
-      }
-    }
-    return victim
-  }
-
   // Admits a member over a raw duplex that is not the swarm (phase 0 spike:
   // a WebSocket). The stream is wrapped as a Noise responder keyed with
   // seeder-key.json, so the member's seeder verification (seederCertForKey
@@ -6980,6 +6978,7 @@ class Seeder {
         this.log({ event: 'peer-dropped', peerKey: key, reason })
       },
       budget: this._frameBudget,
+      clock: FRAME_CLOCK,
       deadlineBaseMs: this.frameDeadlineBaseMs,
       deadlineCapMs: this.frameDeadlineCapMs,
       smallBytes: this.frameSmallBytes
@@ -7132,16 +7131,17 @@ class Seeder {
             }
             return true
           }
-          const engagementRows = this._index.noticeRows(target, Date.now(), visible)
+          const engagement = this._index.noticePage(target, Date.now(), visible)
           const result = this._postNotices.pageV3({
             target,
             followRows: f.rows,
             followIncomplete: f.incomplete,
-            engagementRows,
+            engagementRows: engagement.rows,
             // Not stats().saturated: it turns true at the cap before anything
             // is refused and stays on; a refused block pauses that diary's
             // cursor, which _indexFlags already reports (as indexEngagers).
-            engagementIncomplete: held || !this._indexFlags().complete,
+            // noticePage's own flag: its per-request scan cap cut the rows.
+            engagementIncomplete: held || engagement.incomplete || !this._indexFlags().complete,
             isBlocked,
             issuerUsable: (i) => !revoked.has(i),
             after,
