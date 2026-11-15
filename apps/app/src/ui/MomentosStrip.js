@@ -77,7 +77,11 @@ function Ring ({ label, name, unseen, onPress, profile, publicKey, plus }) {
       onPress={onPress}
       style={({ pressed }) => [styles.ringItem, { width }, pressed && styles.pressed]}
     >
-      <View style={[styles.ring, { backgroundColor: plus ? 'transparent' : colors.outline }]}>
+      {/* collapsable: the own ring mounts as '+' (transparent) and takes the
+          outline once moments load. Android flattens the transparent View away
+          and, when it later becomes a real view, draws the outline without the
+          radius: a grey square behind the avatar. */}
+      <View collapsable={false} style={[styles.ring, { backgroundColor: plus ? 'transparent' : colors.outline }]}>
         {unseen && !plus
           ? (
             <View style={styles.ringStripes}>

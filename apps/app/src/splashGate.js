@@ -1,19 +1,14 @@
-// The entrance needs time on screen during loading and connecting. 'ready'
-// skips the minimum so a returning member sees A Rua as soon as it is ready.
-// A failure is exempt when Conexao would show next, so retry and
-// 'Detalhes técnicos' stay reachable:
-// node.js uses 'config' for a failed configurable connection or the first-run
-// form, and 'config-error' for hosted discovery failure. When the intro or the
-// terms gate comes next (gateNext), holding delays nothing anyone needs, so the
-// minimum applies whatever the phase. Once Conexao shows, retries keep it
-// mounted so its local state survives.
-export const SPLASH_MIN_MS = 1500
+// The splash leaves only after it has shown its whole presentation (Splash's
+// onPresented), in every phase, Conexão included, so nothing replaces it
+// mid-entrance. The cap bounds a Splash that never reports, so it cannot trap
+// the app. Once Conexão shows, retries keep it mounted so its local state
+// survives.
+export const SPLASH_CAP_MS = 5000
 export const CONNECT_PATIENCE_MS = 10000
-export const HOLD_PHASES = ['loading', 'connecting']
 
-export function holdSplash ({ phase, elapsedMs, released, gateNext }) {
+export function holdSplash ({ presented, elapsedMs, released } = {}) {
   const elapsed = Number.isFinite(elapsedMs) ? elapsedMs : 0
-  return released !== true && elapsed < SPLASH_MIN_MS && (gateNext === true || HOLD_PHASES.includes(phase))
+  return released !== true && presented !== true && elapsed < SPLASH_CAP_MS
 }
 
 export function coverConnecting ({ phase, canConfigure, elapsedMs, released }) {
@@ -111,7 +106,8 @@ export function holdBootCover ({ cover, elapsedMs, settled, step } = {}) {
 // A returning member's cold start on the phone may show A Rua's saved rows
 // (./feedSnapshot.js) instead of the splash while the node boots. It is a
 // cover, never a step: it shows only where the splash would, and every gate
-// still decides what comes after it. Any doubt keeps the splash.
+// still decides what comes after it. Any doubt keeps the splash. The preview
+// waits for the presentation too.
 // - snapshot: parsed for this installation and association, with rows;
 // - previewCapable: the store's flag (false on the web);
 // - savedAt within PREVIEW_MAX_AGE_MS and not in the future: an older first
@@ -125,7 +121,8 @@ export const PREVIEW_MAX_AGE_MS = 24 * 60 * 60 * 1000
 export const PREVIEW_BLOCKED_STEPS = ['entrar', 'recuperando', 'idade', 'vinculo', 'identidade', 'certificado', 'perfil']
 const PREVIEW_STEPS = ['carregando', 'pronto']
 
-export function previewAllowed ({ snapshot, previewCapable, gateNext, showConexao, step, locked, sessionLive, nowMs } = {}) {
+export function previewAllowed ({ presented, snapshot, previewCapable, gateNext, showConexao, step, locked, sessionLive, nowMs } = {}) {
+  if (presented !== true) return false
   if (previewCapable !== true || sessionLive !== true) return false
   if (gateNext !== false || showConexao !== false || locked !== false) return false
   if (step !== null && !PREVIEW_STEPS.includes(step)) return false

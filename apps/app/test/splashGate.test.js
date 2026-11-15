@@ -6,40 +6,23 @@ const path = require('path')
 
 const load = () => import('../src/splashGate.js')
 
-test('splash gate: minimum duration only holds boot phases', async (t) => {
-  const { holdSplash, HOLD_PHASES, SPLASH_MIN_MS, CONNECT_PATIENCE_MS } = await load()
-  t.is(SPLASH_MIN_MS, 1500)
+test('splash gate: the splash holds in every phase until it has presented', async (t) => {
+  const mod = await load()
+  const { holdSplash, SPLASH_CAP_MS, CONNECT_PATIENCE_MS } = mod
+  t.is(SPLASH_CAP_MS, 5000)
   t.is(CONNECT_PATIENCE_MS, 10000)
-  t.alike(HOLD_PHASES, ['loading', 'connecting'])
-  for (const phase of ['loading', 'connecting']) {
-    t.is(holdSplash({ phase, elapsedMs: 0 }), true, phase + ' starts held')
-    t.is(holdSplash({ phase, elapsedMs: 1499 }), true, phase + ' stays held before minimum')
-    t.is(holdSplash({ phase, elapsedMs: 1500 }), false, phase + ' ends hold at minimum')
-    t.is(holdSplash({ phase, elapsedMs: 0, released: true }), false, phase + ' stays released')
+  t.absent('HOLD_PHASES' in mod)
+  t.absent('SPLASH_MIN_MS' in mod)
+  t.is(holdSplash({ elapsedMs: 0 }), true, 'no phase input, held at 0')
+  t.is(holdSplash({ presented: false, elapsedMs: 100 }), true)
+  t.is(holdSplash({ presented: true, elapsedMs: 100 }), false, 'presented releases')
+  for (const presented of [false, undefined, null, 1, 'true']) {
+    t.is(holdSplash({ presented, elapsedMs: 0 }), true, 'only literal true presents')
   }
-  for (const phase of ['ready', 'config', 'config-error', 'error', 'x']) {
-    t.is(holdSplash({ phase, elapsedMs: 0 }), false, phase + ' is never held')
-  }
-})
-
-test('splash gate: a returning member skips the minimum once ready', async (t) => {
-  const { holdSplash } = await load()
-  t.is(holdSplash({ phase: 'ready', elapsedMs: 100, gateNext: false }), false)
-  t.is(holdSplash({ phase: 'ready', elapsedMs: 100, gateNext: true }), true)
-  t.is(holdSplash({ phase: 'connecting', elapsedMs: 100, gateNext: false }), true)
-})
-
-test('splash gate: gateNext holds any phase until the minimum', async (t) => {
-  const { holdSplash } = await load()
-  for (const phase of ['ready', 'config', 'config-error', 'error', 'x']) {
-    t.is(holdSplash({ phase, elapsedMs: 0, gateNext: true }), true, phase + ' held at 0')
-    t.is(holdSplash({ phase, elapsedMs: 1499, gateNext: true }), true, phase + ' held at 1499')
-    t.is(holdSplash({ phase, elapsedMs: 1500, gateNext: true }), false, phase + ' ends hold at minimum')
-    t.is(holdSplash({ phase, elapsedMs: 0, gateNext: true, released: true }), false, phase + ' released wins')
-    for (const gateNext of [false, undefined]) {
-      t.is(holdSplash({ phase, elapsedMs: 0, gateNext }), false, phase + ' not held without gateNext')
-    }
-  }
+  t.is(holdSplash({ presented: false, elapsedMs: 0, released: true }), false, 'released wins')
+  t.is(holdSplash({ presented: false, elapsedMs: SPLASH_CAP_MS - 1 }), true, 'held just before the cap')
+  t.is(holdSplash({ presented: false, elapsedMs: SPLASH_CAP_MS }), false, 'the cap releases a splash that never reports')
+  t.is(holdSplash(), true)
 })
 
 test('splash gate: connection coverage ends at configurable patience', async (t) => {
@@ -63,8 +46,7 @@ test('splash gate: connection coverage ends at configurable patience', async (t)
 test('splash gate: non-finite elapsed time counts as zero', async (t) => {
   const { holdSplash, coverConnecting } = await load()
   for (const elapsedMs of [NaN, undefined, null, Infinity]) {
-    t.is(holdSplash({ phase: 'connecting', elapsedMs }), true)
-    t.is(holdSplash({ phase: 'ready', elapsedMs }), false)
+    t.is(holdSplash({ presented: false, elapsedMs }), true)
     t.is(coverConnecting({ phase: 'connecting', canConfigure: true, elapsedMs }), true)
   }
 })
@@ -72,8 +54,7 @@ test('splash gate: non-finite elapsed time counts as zero', async (t) => {
 test('splash gate: only literal true releases the splash', async (t) => {
   const { holdSplash, coverConnecting } = await load()
   for (const released of [false, undefined, null, 1]) {
-    t.is(holdSplash({ phase: 'connecting', elapsedMs: 0, released }), true)
-    t.is(holdSplash({ phase: 'ready', elapsedMs: 0, released, gateNext: true }), true)
+    t.is(holdSplash({ presented: false, elapsedMs: 0, released }), true)
     t.is(coverConnecting({ phase: 'connecting', canConfigure: true, elapsedMs: 0, released }), true)
   }
 })
@@ -88,7 +69,12 @@ test('splash gate: pure helper and app integration guards', (t) => {
   t.absent(source.includes('detailsGraceOver'))
   const app = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
   t.ok(app.includes('holdSplash('))
-  t.ok(app.includes("holdSplash({ phase: ready || seen ? 'ready' : node.phase"))
+  t.ok(app.includes('holdSplash({ presented, elapsedMs: Date.now() - bootAt, released: released.current })'))
+  t.ok(app.includes('onPresented={onPresented}'))
+  t.ok(app.includes('entered={presented}'), 'a remounted splash opens on the finished picture')
+  t.ok(app.includes('setPresented(true)'))
+  const gateCall = app.slice(app.indexOf('const previewOn ='), app.indexOf('const bootCover = '))
+  t.ok(gateCall.includes('presented,'), 'previewAllowed gets presented')
   t.absent(app.includes('DETAILS_GRACE_MS'))
   t.absent(app.includes('detailsGraceOver'))
   t.ok(app.includes('ruaFeedReady('))
@@ -364,10 +350,11 @@ test('splash gate: the cold-start preview only for a live, fresh, gate-free boot
   t.is(PREVIEW_MAX_AGE_MS, 24 * 60 * 60 * 1000)
   const now = 1_800_000_000_000
   const snapshot = { items: [{ kind: 'post' }], savedAt: now - 1000 }
-  const ok = { snapshot, previewCapable: true, gateNext: false, showConexao: false, step: null, locked: false, sessionLive: true, nowMs: now }
+  const ok = { presented: true, snapshot, previewCapable: true, gateNext: false, showConexao: false, step: null, locked: false, sessionLive: true, nowMs: now }
   t.is(previewAllowed(ok), true, 'boot, step unknown')
   t.is(previewAllowed({ ...ok, step: 'carregando' }), true)
   t.is(previewAllowed({ ...ok, step: 'pronto' }), true)
+  for (const presented of [false, undefined, 1]) t.is(previewAllowed({ ...ok, presented }), false, 'not presented: ' + presented)
   t.is(previewAllowed({ ...ok, previewCapable: false }), false, 'web')
   t.is(previewAllowed({ ...ok, previewCapable: undefined }), false)
   t.is(previewAllowed({ ...ok, snapshot: null }), false)
