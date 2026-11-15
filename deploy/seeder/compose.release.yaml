@@ -1,0 +1,9 @@
+# Versão publicada do semeador: aplicado depois de compose.yaml, troca só a
+# imagem pela publicada em ghcr.io/varanda-org/varanda-seeder, fixada por
+# digest. O build de compose.yaml fica, mas nunca é usado: o atualizador passa
+# sempre --no-build. O nome do projeto continua varanda-seeder (compose.yaml),
+# então os volumes de antes são reaproveitados.
+#   docker compose -p varanda-seeder -f compose.yaml -f compose.release.yaml up -d --no-build
+services:
+  seeder:
+    image: "${VARANDA_SEEDER_IMAGE:?defina VARANDA_SEEDER_IMAGE com a imagem publicada do semeador}"
