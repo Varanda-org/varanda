@@ -102,7 +102,7 @@ import { memberKeyOf, useActing } from './Conversa'
 import { shouldRedirectToCommunity } from '../groupRedirect'
 import { GrupoAjustes } from './GrupoAjustes'
 import { composePlan, stagedVoice, voiceUploadError } from '../attach-plan'
-import { publicGroupRefusal } from '../wordCheck'
+import { publicGroupPreviewRefusal, publicGroupRefusal } from '../wordCheck'
 import { chatMediaRefs, followAutocorrect, mediaPostLanded, retryChatSend, runChatSend, stagedOf } from '../chatSend'
 import { ChatMedia } from '../ui/ChatMedia'
 import { useChatAttachments } from '../ui/AttachSheet'
@@ -873,7 +873,8 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     if (mediaHold) return retryMedia()
     // Before every path below (a caption, a page's statement, plain text). The
     // draft is kept, so the person can edit it.
-    const refused = publicGroupRefusal(knownVisibility({ page: asPage.page, info, epoch: meta.epoch, pagePrivate: pageVis === 'private' }), draft)
+    const visibility = knownVisibility({ page: asPage.page, info, epoch: meta.epoch, pagePrivate: pageVis === 'private' })
+    const refused = publicGroupRefusal(visibility, draft) || publicGroupPreviewRefusal(visibility, linkDraft.view)
     setDraftRefusal(refused)
     if (refused !== '') return
     if (attachments.items.length > 0 && !asPage.page) {

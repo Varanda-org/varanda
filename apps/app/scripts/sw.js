@@ -32,7 +32,8 @@
 // real DM wake still on screen. Whether Chrome counts a notice closed at once
 // as shown (with the app in the background it may show its own generic
 // notice) is not verified: the manual matrix in docs/verification.md section
-// 112 records it, and its results go back to the owner.
+// 112 records it, and its results go back to the owner. On Android the close
+// is not at once: it waits QUIET_CLOSE_WAIT_MS (see showQuietlyAndClose).
 
 const VERSION = __VARANDA_VERSION__
 const PRECACHE = __VARANDA_PRECACHE__
@@ -743,14 +744,37 @@ async function wakeFocusedWindow () {
 }
 
 const DM_WAKE_QUIET_TAG = 'varanda-dm-wake-quiet'
+const QUIET_CLOSE_WAIT_MS = 2000
+let quietShows = 0
 
-// Shown, so the push is not a silent one, then closed at once: no sound, no
-// vibration, and only notices with this tag are closed.
+// Any browser on Android, the installed app included: there a close sent right
+// after showNotification resolved was seen to be lost (see showQuietlyAndClose).
+function postsLate () {
+  try {
+    const ua = self.navigator && self.navigator.userAgent
+    return typeof ua === 'string' && ua.includes('Android')
+  } catch {
+    return false
+  }
+}
+
+// Shown, so the push is not a silent one, then closed: no sound, no
+// vibration, and only notices with this tag are closed. The close is sent at
+// once, except on Android, where it waits QUIET_CLOSE_WAIT_MS: an installed
+// app there left the notice in the tray after an immediate close, most likely
+// because the system posts it asynchronously and the earlier close is lost
+// (inferred from one device report, docs/verification/fix-android-quiet-notice-close.md). A later quiet notice with the same tag replaces this one and closes
+// after its own wait.
 async function showQuietlyAndClose () {
   try {
     await self.registration.showNotification('Varanda', {
       body: DM_WAKE_TEXT, icon: '/icon-192.png', tag: DM_WAKE_QUIET_TAG, renotify: false, silent: true, data: { kind: 'dm-wake' }
     })
+    const mine = ++quietShows
+    if (postsLate()) {
+      await new Promise((resolve) => setTimeout(resolve, QUIET_CLOSE_WAIT_MS))
+      if (mine !== quietShows) return
+    }
     const shown = await self.registration.getNotifications({ tag: DM_WAKE_QUIET_TAG })
     for (const n of shown) {
       try { n.close() } catch {}

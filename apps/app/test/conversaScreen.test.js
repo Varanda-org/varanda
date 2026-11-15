@@ -368,7 +368,7 @@ test('Conversa bar respects the safe area and consumes compose intent once', (t)
   t.ok(src.includes('<View ref={barBox} collapsable={false} style={[style, { paddingBottom: keyboardOpen ? 8 : Math.max(8, insets.bottom) }]}>'), 'the inset is dropped while the keyboard is open')
   t.ok(/<ReplyDock barBox=\{barBox\} style=\{styles.barWrap\}>\s*<ReplyBar/.test(src), 'the bar sits in the dock')
   t.ok(src.includes('barWrap: { backgroundColor: colors.bg, paddingHorizontal: space.md, paddingTop: space.sm }'), 'the page shows around the floating pill')
-  t.ok(src.includes('me={me}') && /export default function Conversa \(\{[^}]*\bme,/.test(src), 'the bar gets the own profile')
+  t.ok(src.includes('me={me}') && /function ConversaList \(\{[^}]*\bme,/.test(src), 'the bar gets the own profile')
   t.ok(app.includes('me: tabMe,'), 'App passes the tab profile to screens')
   t.ok(src.includes("onAttach={(draft) => expandReply(draft, undefined, 'photo')}"), 'the photo button expands with attach')
   t.ok(src.includes('nonFocalTarget={replyTarget !== null && !toRoot}'), 'a reply to another row is flagged')
@@ -642,7 +642,7 @@ async function loading (options) {
   const own = await localReplies()
   const postAt = handler(src.replace('export function postAt', 'function postAt'), 'function postAt', '// Names learned from the peeks', 'postAt', { parseRef: thread.parseRef, assembleMember: thread.assembleMember, postsByPeek: new WeakMap() })
   const anchorOfFn = await anchorOfLoaded()
-  const state = { resolves: 0, opened: [], rodaResets: 0, fetchPost: [], fetchRoda: [], peeks: [] }
+  const state = { resolves: 0, opened: [], rodaResets: 0, fetchPost: [], fetchRoda: [], peeks: [], resets: 0, undos: 0 }
   const context = {
     ownFor: own.ownFor,
     pruneOwnReplies: own.pruneOwnReplies,
@@ -678,8 +678,8 @@ async function loading (options) {
     sleep: async () => {},
     SEEDER_RETRY_MS: 0,
     focusTop: options.focusTop || null,
-    reset: () => {},
-    readOwn: async () => {},
+    reset: () => { state.resets++; return () => { state.undos++ } },
+    readOwn: async () => { if (options.readOwnFails && options.readOwnFails()) throw new Error('falhou') },
     loadFollows: async () => new Set(),
     followsRef: { current: Promise.resolve(new Set()) },
     assembleThread: thread.assembleThread,
@@ -1091,6 +1091,117 @@ test('Conversa delete closes an emptied roda and a deleted comment takes its rod
   const root = await deleting({ comments: [item(2, 1, B, A)], rodas: new Map() })
   await root.del.onDeleted({ ref: R, seq: 1 })
   t.is(root.state.back, 1, 'deleting the root leaves the screen')
+})
+
+test('a refresh that fails after the clear gives the counts and own likes back', async (t) => {
+  let failing = false
+  const failed = await loading({ ...deepThread(), readOwnFails: () => failing })
+  await failed.load(false)
+  failing = true
+  await failed.load(true)
+  t.is(failed.state.resets, 1)
+  t.is(failed.state.undos, 1, 'the cleared engagement is restored')
+  t.is(failed.context.viewRef.current.phase, 'ready')
+  t.is(failed.context.viewRef.current.error, 'Não foi possível atualizar a conversa.')
+  const ok = await loading(deepThread())
+  await ok.load(false)
+  await ok.load(true)
+  t.is(ok.state.resets, 1)
+  t.is(ok.state.undos, 0, 'a refresh that lands keeps the new engagement')
+  let superseded = false
+  const stale = await loading({ ...deepThread(), readOwnFails: () => { if (!superseded) return false; stale.context.genRef.current++; return true } })
+  await stale.load(false)
+  superseded = true
+  await stale.load(true)
+  t.is(stale.state.undos, 0, 'a load superseded meanwhile leaves the engagement to the newer one')
+
+  const stateRef = { current: { liked: new Set(['a:1', 'a:2']), reposted: new Set(['a:1']) } }
+  const countsRef = { current: new Map([['a:1', { likes: 3 }], ['a:2', { likes: 1 }]]) }
+  const touchedRef = { current: new Map() }
+  const counts = { current: countsRef.current }
+  const { emptyState } = await import('../src/engagement.js')
+  let current = stateRef.current
+  const reset = handler(src, '  const reset = useCallback(() => {', '  // engagement.read for', 'reset', {
+    useCallback: (fn) => fn,
+    stateRef,
+    countsRef,
+    clockRef: { current: 0 },
+    touchedRef,
+    pendingRef: { current: new Map() },
+    emptyState,
+    setState: (update) => { current = typeof update === 'function' ? update(current) : update },
+    setCounts: (update) => { counts.current = typeof update === 'function' ? update(counts.current) : update }
+  })
+  const undo = reset()
+  t.is(current.liked.size, 0)
+  t.is(counts.current.size, 0)
+  // Read after the clear, and a like toggled after it.
+  counts.current = new Map([['a:1', { likes: 9 }]])
+  touchedRef.current.set('liked|a:2', 99)
+  undo()
+  t.alike([...current.liked], ['a:1'], 'a field touched since the clear is not brought back')
+  t.alike([...current.reposted], ['a:1'])
+  t.alike(counts.current.get('a:1'), { likes: 9 }, 'a fresher count wins')
+  t.alike(counts.current.get('a:2'), { likes: 1 }, 'the old count of a row still on screen returns')
+})
+
+test('Conversa decides Apagar with the postActions rule and carries no copy', async (t) => {
+  t.absent(/from '\.\.\/deletion'/.test(src) && /import \{[^}]*\bcanDelete\b[^}]*\} from '\.\.\/deletion'/.test(src), 'no canDelete import')
+  t.absent(/(^|[^\w.])canDelete\(/m.test(src), 'no call to the deletion rule')
+  t.ok(src.includes("import { canDeletePost } from '../postActions'"))
+  const { canDeletePost } = await import('../src/postActions.js')
+  let page = null
+  const here = handler(src.replace('export function canDeleteHere', 'function canDeleteHere'), 'function canDeleteHere', 'export function refOf', 'canDeleteHere', { canDeletePost, actingPageKey: () => page })
+  const mine = { kind: 'post', author: A, seq: 3 }
+  t.is(here(mine, A), true)
+  t.is(here(mine, B), false)
+  t.is(here({ ...mine, author: A.toUpperCase() }, A), true, 'the rule lowercases the author')
+  t.is(here({ ...mine, seq: 0 }, A), false)
+  t.is(here({ ...mine, repostedBy: B }, A), false, 'a repost row never offers Apagar')
+  page = B
+  t.is(here({ kind: 'post', author: B, seq: 2 }, A), true, 'the page acted as owns its posts')
+})
+
+test('Conversa: thread rows offer the quotes list on the same gate as likes and reposts', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Conversa.js'), 'utf8')
+  t.ok(/onOpenQuotes: eng && hasSeq && has\('onOpenQuotes'\) \? \(\) => live\.handlers\.onOpenQuotes\(\{ ref \}\)/.test(src), 'row prop gated on engagement and a seq')
+  t.ok(/const handlers = \{[^}]*onOpenQuotes/.test(src), 'the screen hands its handler to the rows')
+  t.ok(/function ConversaList \(\{[^}]*onOpenQuotes/.test(src), 'the screen receives it from App')
+})
+
+test('the undo of a failed refresh never brings back a like a read since the clear cleared', async (t) => {
+  const src = readFileSync(join(__dirname, '..', 'src', 'screens', 'Conversa.js'), 'utf8')
+  const { emptyState, fromRead } = await import('../src/engagement.js')
+  let current = { liked: new Set(['a:1', 'a:2']), reposted: new Set() }
+  const clockRef = { current: 0 }
+  const touchedRef = { current: new Map() }
+  const context = {
+    useCallback: (fn) => fn,
+    stateRef: { get current () { return current } },
+    countsRef: { current: new Map() },
+    clockRef,
+    touchedRef,
+    touch: (field, ref) => touchedRef.current.set(field + '|' + ref, ++clockRef.current),
+    pendingRef: { current: new Map() },
+    readRefs: { current: new Set() },
+    sourceRef: { current: null },
+    request: null,
+    emptyState,
+    fromRead,
+    chunks: (list, size) => [list.slice(0, size)],
+    ENGAGEMENT_MAX: 62,
+    actingPageKey: () => null,
+    readEngagement: async () => ({ liked: ['a:2'], reposted: [] }),
+    setState: (update) => { current = typeof update === 'function' ? update(current) : update },
+    setCounts: () => {}
+  }
+  const reset = handler(src, '  const reset = useCallback(() => {', '  // engagement.read for', 'reset', context)
+  const readOwn = handler(src, '  const readOwn = useCallback(async', '  // Index counts for', 'readOwn', context)
+  const undo = reset()
+  await readOwn(['a:1'])
+  undo()
+  t.absent(current.liked.has('a:1'), 'a like removed elsewhere and read since stays off')
+  t.ok(current.liked.has('a:2'), 'a ref not read since comes back')
 })
 
 test('Conversa: a deletion made on another screen reaches the Conversas still open below it', (t) => {

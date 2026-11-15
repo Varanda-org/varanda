@@ -272,12 +272,12 @@ function sourceFn (src, name) {
 async function cachedRowProps () {
   const conversa = fs.readFileSync(path.join(__dirname, '../src/screens/Conversa.js'), 'utf8')
   const { cachedRow } = await import('../src/namesCache.js')
-  const { canDelete } = await import('../src/deletion.js')
+  const { canDeletePost } = await import('../src/postActions.js')
   // eslint-disable-next-line no-new-func
   return new Function(
-    'cachedRow', 'canDelete', 'postLink', 'actingPageKey', 'installationOrigin', 'pickAvatar', 'replyNameOf', 'postAt',
-    [sourceFn(conversa, 'refOf'), sourceFn(conversa, 'identityOf'), sourceFn(conversa, 'rowProps'), 'return rowProps'].join('\n')
-  )(cachedRow, canDelete, () => null, () => null, () => null, () => null, (p) => (p ? p.name : null), () => null)
+    'cachedRow', 'canDeletePost', 'postLink', 'actingPageKey', 'installationOrigin', 'pickAvatar', 'replyNameOf', 'postAt',
+    [sourceFn(conversa, 'refOf'), sourceFn(conversa, 'identityOf'), sourceFn(conversa, 'canDeleteHere'), sourceFn(conversa, 'rowProps'), 'return rowProps'].join('\n')
+  )(cachedRow, canDeletePost, () => null, () => null, () => null, () => null, (p) => (p ? p.name : null), () => null)
 }
 
 const engOf = (over = {}) => ({ counts: new Map(), state: { liked: new Set(), reposted: new Set() }, pending: new Map(), toggle () {}, ...over })

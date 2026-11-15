@@ -52,7 +52,7 @@ function callbackText (src, name) {
 }
 
 const CODE = withoutComments(DIARIO)
-const screen = fnText(CODE, 'Diario')
+const screen = fnText(CODE, 'DiarioList')
 const loadNewest = callbackText(screen, 'loadNewest')
 const loadOlder = callbackText(screen, 'loadOlder')
 const writeSnapshot = callbackText(screen, 'writeSnapshot')
