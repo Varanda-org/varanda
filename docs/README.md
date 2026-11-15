@@ -15,6 +15,7 @@
 | [performance.md](performance.md) | pt-BR | Desempenho do carregamento de A Rua, Diário, perfis e Conversas: o conjunto de dados D1, as ferramentas de medição (nó, laboratório, Chrome, emulador e simulador), as metas provisórias e o ciclo de medição. |
 | [seeder-capacity.md](seeder-capacity.md) | inglês | Medição em loopback, numa só máquina, de onde o semeador começa a recusar leitores (1, 16, 32 e 64 clientes): os comandos, as tabelas, os custos internos e os limites que o operador pode subir. Não é promessa de capacidade. |
 | [ux-audit.md](ux-audit.md) | pt-BR | Auditoria de UX do app por tela: achados com arquivo e linha, mudança proposta, PR dono, e o checklist VC da verificação visual (método em [design-review.md](design-review.md)). |
+| [sentinela.md](sentinela.md) | pt-BR | Proposta de "sentinelas", modelos pequenos e só consultivos no aparelho que avisam antes de publicar e sinalizam o que chega: ameaças, desenho, candidatos, avaliação em pt-BR, o método e as tabelas do spike e as decisões para a manutenção. Nada foi entregue. |
 
 O README da raiz ([../README.md](../README.md)) descreve o programa de linha de comando e o `varanda-serve`.
 
