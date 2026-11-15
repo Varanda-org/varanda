@@ -203,6 +203,11 @@ import Termos from './src/screens/Termos'
 import { ContaExcluida, ExclusaoRecibo } from './src/screens/ExcluirConta'
 import { clearChatMedia, onAppStateChange, screenWatcher, stopBoundPlayback, stopPlayback } from './src/media/chatMedia'
 import { sweepVoiceCache } from './src/media/audio'
+import { bindSoundMute } from './src/soundMute'
+import { soundMuteStore } from './src/soundMuteStore'
+
+// Before any component: each useState(soundMuted()) must read the saved choice.
+bindSoundMute(soundMuteStore())
 
 // Inlined by Expo at build time; set only for the iOS worklet gate
 // (docs/ios-gate.md).
