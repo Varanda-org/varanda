@@ -816,6 +816,8 @@ Regras de operação:
 
 O fluxo `deploy` (`.github/workflows/deploy.yml`) implanta `main` no servidor a cada push. Ele repete as checagens do CI (`npm ci`, lint, testes e demo) como os mesmos oito jobs em paralelo, no Node 24. O job `check` reúne os oito e só passa se todos passaram. Se `check` passar, o fluxo entra no servidor por SSH como `varanda-deploy` e roda `deploy/seeder/deploy.sh`. O SHA testado vai pela entrada padrão do SSH, nunca por argumento.
 
+O job `deploy` usa o ambiente `producao`. Se o ambiente pede a aprovação de um revisor, só a execução mais nova espera por ela: antes da aprovação, o job `supersede` cancela as execuções mais antigas de `main` que ainda esperam, e uma execução que chega lá depois de uma mais nova ter começado termina verde sem implantar. Uma implantação que já começou nunca é cancelada: a seguinte espera ela terminar. Por isso o fluxo não tem concorrência própria, e as checagens de dois pushes seguidos podem rodar ao mesmo tempo. Os fluxos `ios-release` e `site` têm o mesmo job.
+
 O script só implanta se esse SHA for a ponta de `origin/main`. Se `main` já avançou, sai com 3 e o fluxo termina verde com um aviso: a execução mais nova de `main` implanta (se nenhuma estiver na fila, use Run workflow). Ele recusa, sem mudar nada, um checkout com alterações locais ou com commits que não estão em `origin/main`, e um `VARANDA_DOMAIN` que não seja um nome em minúsculas sem ponto final. Depois ele:
 
 - guarda a imagem que o semeador está rodando (etiquetada `varanda-seeder:anterior`) e uma cópia do `deploy/seeder/www` em `/var/lib/varanda-deploy`; o commit que está no ar fica anotado em `/var/lib/varanda-deploy/implantado` desde a última implantação;
