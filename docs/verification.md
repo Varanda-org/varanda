@@ -1780,14 +1780,14 @@ Cobertura no repositório:
 
 - `apps/cli/test/ai-triage.test.js`: a regra pura (limiares, partida a frio, motivos, texto idêntico).
 - `apps/cli/test/ai-exemplar-store.test.js`: `exemplars.json` (validação total, teto, modelo).
-- `apps/cli/test/ai-ledger.test.js`: `triage.json` (marcas, cache, arquivo corrompido posto de lado).
+- `apps/cli/test/ai-ledger.test.js`: `triage.json` e `triage-marks.jsonl` (marcas, cache, uma marca igual não grava nada, o registro só é reaplicado com o mesmo `log`, uma última linha cortada é ignorada, uma linha ruim no meio põe os dois arquivos de lado, compactação, migração do formato 1; uma falha ao gravar o cabeçalho do registro é tentada de novo uma vez).
 - `apps/cli/test/ai-embedder.test.js`: o embedder com tokenizer e modelo injetados; o modelo real só quando `VARANDA_AI_MODEL_DIR` aponta para um diretório do `fetch-ai-model.js` (não definido no CI).
 - `apps/cli/test/ai-post-route.test.js`: `GET /moderation-post/<D>/<seq>` e `Seeder#postBlock`.
 - `apps/cli/test/ai-read-post.test.js`: a reconferência no serviço de conta.
-- `apps/cli/test/ai-worker.test.js`: modos, tetos, espera crescente, aprendizado.
-- `apps/cli/test/ai-hooks.test.js`: ganchos em `mod-routes.js`; a projeção do painel e do pull traz `actor` e não traz e-mail.
+- `apps/cli/test/ai-worker.test.js`: modos, tetos, espera crescente, aprendizado; uma denúncia reaberta fica com uma pessoa, e só o campo `reopened` já basta; nenhuma sugestão velha numa denúncia reaberta; o teto conta o bloqueio reaberto depois de reiniciar (#229).
+- `apps/cli/test/ai-hooks.test.js`: ganchos em `mod-routes.js`; a projeção do painel e do pull traz `actor` e não traz e-mail; a rota `reopen` (#229).
 - `apps/cli/test/ai-e2e.test.js`: o laço em loopback, da denúncia assinada ao bloqueio no semeador, com embedder falso no lugar do MiniLM.
-- Estendidos: `apps/cli/test/moderation-store.test.js` (`humanReversed`), `mod-apply.test.js` (a marca `(ia)` e a recusa do formato antigo), `account-mod.test.js`, `account.test.js` (ambiente, subida, `status`), `panel.test.js`, `deploy.test.js`, `caddyfile.test.js` (a rota não entra no Caddy) e `cli.test.js`.
+- Estendidos: `apps/cli/test/moderation-store.test.js` (`humanReversed`; `reopen` recusa decisão de pessoa, denúncia aberta e ator IA; o campo `reopened` sobrevive à saída do evento e recusa a IA; um campo malformado torna o arquivo indisponível; uma pessoa que bloqueia uma denúncia reaberta não repete o id no pedido, e o arquivo continua legível; `humanReversed` lembra um bloqueio da IA reaberto e desfeito depois que os eventos saem), `mod-apply.test.js` (a marca `(ia)` e a recusa do formato antigo), `account-mod.test.js`, `account.test.js` (ambiente, subida, `status`), `panel.test.js` (Reabrir só nas linhas decididas pela IA), `deploy.test.js`, `caddyfile.test.js` (a rota não entra no Caddy) e `cli.test.js`.
 
 ### Limites
 
@@ -1797,7 +1797,10 @@ Cobertura no repositório:
 - Cancelar um desbloqueio também conta como "uma pessoa já mexeu nesta conta". A IA só se abstém.
 - Os limiares (0,92, 0,90, 0,12, 20 precedentes de cada lado, 5 diários) são iniciais e devem ser revistos com o Histórico. A checagem com o modelo real (cosseno 0,86 entre paráfrases) indica que a IA age sobretudo em textos quase idênticos.
 - A IA não vê imagens. A comparação com listas de hashes de mídia ilegal (issue #79) continua não existindo.
-- `exemplars.json` inválido (uma linha basta) fica indisponível e nunca é regravado. `triage.json` corrompido é renomeado para `triage.json.corrupt-<ms>` e recriado.
+- `exemplars.json` inválido (uma linha basta) fica indisponível e nunca é regravado. `triage.json` corrompido, ou uma linha ruim no meio de `triage-marks.jsonl`, põe os dois arquivos de lado como `.corrupt-<ms>` e a triagem recomeça sem marcas; uma última linha cortada (queda no meio da gravação) é ignorada.
+- Reabrir (#229) grava na linha da denúncia, em `moderation.json`, o campo `reopened`, que nunca sai, e o evento `reaberto` no registro de eventos (teto de 10000). O sinal que dura é o campo da linha: a IA não decide de novo uma denúncia reaberta mesmo depois que o evento sai do registro ou que os arquivos da triagem são postos de lado. A marca em `triage-marks.jsonl` e o evento são sinais a mais. Um bloqueio da IA reaberto continua contando no teto do dia em que a IA o tomou, também depois de reiniciar o serviço.
+- Reabrir não desfaz nada: um bloqueio da IA continua em Bloqueadas (ou em Pendentes, antes do `mod apply`) até alguém usar Desbloquear ou cancelar. Só uma pessoa com sessão no painel reabre; o processo da IA não chama a rota.
+- Voltar a uma versão anterior do serviço de conta não é seguro: ela não conhece o formato 2 de `triage.json`, o `triage-marks.jsonl`, o evento `reaberto` nem o campo `reopened`. Uma linha com esse campo, ou o evento, faz a versão anterior recusar o `moderation.json` inteiro (indisponível) até o campo e o evento saírem.
 
 ### Verificação humana
 
@@ -1810,6 +1813,8 @@ Cobertura no repositório:
 - [ ] Denúncias `ilegal` e de publicação com fotos ficam abertas.
 - [ ] O log do serviço não tem texto de publicação.
 - [ ] `curl` da rota sem token no semeador dá 404, e pela URL pública (Caddy) também.
+- [ ] No Histórico, uma decisão da IA mostra Reabrir e uma decisão de pessoa não. Reabrir um bloqueio da IA: a denúncia volta para Abertas, o bloqueio continua em Bloqueadas (ou em Pendentes, antes do `mod apply`) e a IA não decide de novo essa denúncia (#229).
+- [ ] `triage-marks.jsonl` ganha uma linha por marca nova; uma triagem repetida sem mudança não acrescenta linha (#229).
 
 ## 28. Estatísticas de uso no painel de moderação (2026-10-27)
 
@@ -4148,6 +4153,7 @@ Uma conta verificada há tempo, no app Android ligado à instalação, via depoi
 
 - Recusa lembrada: uma recusa vale na hora para a sessão (membro e instalação) e é gravada no aparelho, com uma nova tentativa se a gravação falhar; ela vence as provas do nó, então uma conta recusada continua fechada depois de reabrir, mesmo sem internet. Um `verificado` numa instalação nunca apaga a recusa de outra. Mudanças feitas antes de o registro carregar entram numa fila aplicada sobre o que foi lido e gravada mesmo que a tela saia antes; cada gravação lê de novo o registro guardado e aplica a mudança por cima (outra aba não é sobrescrita).
 - Piso do `since`: o serviço assina o maior entre `VARANDA_AGE_SINCE`, o início do dia UTC seguinte à primeira faixa registrada, a última vez em que a verificação foi religada (guardada em `age-check.json`) e o vínculo mais recente sem faixa registrada mais 1 ms.
+- Piso que falha: um `age-check.json` ilegível ou um diretório que não responde na partida deixam `/account/age/since` em 503 `indisponivel` (nunca `null`), e o pedido seguinte recalcula esse piso, no máximo a cada 30 s, até ele responder: ao consertar o arquivo a rota volta sem reiniciar. Um piso que respondeu fica como está até o reinício. Um armazenamento de idade ou piso em falha escreve uma linha de log por episódio (`armazenamento-indisponivel` ou `estado-indisponivel`), não uma por pedido; depois de a rota voltar a responder e falhar de novo, a linha sai outra vez. Um `age.json` ilegível deixa a rota em 503 até o arquivo ser consertado: o batimento do serviço (10 s) lê o arquivo de novo (`heal()`), e o piso recalculado vem na tentativa seguinte, então a rota volta em até cerca de 40 s sem reiniciar. Perder o travamento do diretório (`fail()`) continua definitivo. Cobertura: `apps/cli/test/account-age.test.js` (recuperação, tentativa no máximo a cada 30 s, um log por episódio) e `apps/cli/test/account-age-serve.test.js` (o `serve` real com `VARANDA_AGE_SINCE` e o par da Didit liga os dois pisos, `age-check.json` e vínculo mais recente sem faixa, à rota, e recupera sem reiniciar, com `age-check.json` ou `age.json` ilegível na partida).
 - Emissor: o `age-since` só vale para o certificado v2 do bloco 0 assinado pelo mesmo emissor do atestado, nunca para um de outro emissor nem para um certificado v1.
 - Janela: o certificado só vale com data entre o `since` e a data em que ele foi assinado (`ageSinceUntil` no `node.info`, `null` quando não há `since`), que o serviço renova a cada pedido; sem teto, o caminho do certificado fica desligado.
 - `since`: pedido uma vez por instalação e geração; só a resposta mais recente vale; uma falha de leitura ou de gravação no nó é tentada de novo depois de 5 s, 15 s e então a cada 60 s, e na hora quando a conexão volta.
@@ -4180,9 +4186,10 @@ Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm ru
 - O texto da Política de Privacidade (`apps/app/src/legal.js`) ainda não menciona o registro no aparelho nem os atestados guardados no nó (revisão jurídica).
 - Sem `VARANDA_AGE_SINCE`, ou enquanto o serviço não tem certificado de emissor ou nenhuma faixa registrada, o caminho do certificado fica desligado (`{ since: null }`).
 - Um app modificado, ou uma chave de associação trocada na configuração do nó (a configuração hospedada na web, o argumento do worklet no nativo), ainda abre a própria porta com um emissor e atestados próprios, como já podia alterar o app; o serviço continua exigindo a faixa no vínculo, na troca de nome e nos convites.
-- Um `since` assinado servido antes pode ser posto de volta no kv (repetição), mas só vale para certificados com data até a da assinatura dele; e o serviço nunca serve um `since` abaixo do piso. Um `age-verified` repetido para o mesmo membro diz algo verdadeiro (o serviço nunca apaga uma faixa).
+- Um `since` assinado servido antes pode ser posto de volta no kv (repetição), mas só vale para certificados com data até a da assinatura dele; e o serviço nunca serve um `since` abaixo do piso. Um `age-verified` repetido para o mesmo membro diz algo que foi verdade na data dele (a faixa foi conferida), mesmo que o serviço tenha apagado a faixa depois: na exclusão da conta, cuja chave não vincula de novo, ou de uma chave que não vinculou conta (30 dias ou recusa do teto).
 - Apagar uma recusa do registro do aparelho só tira um auxílio que falha fechado; o serviço continua recusando.
-- Os limites da janela confiam no relógio do serviço de conta: um erro de relógio durante uma troca de desligado para ligado pode deixar passar um certificado que não deveria valer.
+- Os limites da janela confiam no relógio do serviço de conta: um erro de relógio durante uma troca de desligado para ligado pode deixar passar um certificado que não deveria valer. Decisão do dono do produto (2026-11-15): limite conhecido, sem mudança de código (registrado em `docs/design.md`, seção LGPD).
+- O piso do vínculo mais recente sem faixa é recalculado a cada partida. Excluir conta apaga um vínculo, então depois de uma exclusão esse piso pode voltar para o vínculo sem faixa anterior. Os certificados desse intervalo são de membros com faixa, que não precisam de piso, ou de chaves excluídas, que não vinculam de novo (`conta-excluida`); enquanto `age-check.json` tem `enabledAt`, o piso dele também os cobre.
 - `ageVerifiedDate`, `ageSince` e `age.proof` existem só no nó do navegador (`packages/web-member`), que o app nativo também roda no worklet no modo hospedado; o nó do núcleo (CLI) não os tem, e ali a porta só abre com a resposta do serviço.
 
 ## 83. Interações da Rua: curtir animado, toque duplo, fio da conversa, desfazer (PR feat/rua-interacoes)
@@ -6083,7 +6090,8 @@ O que muda:
 O que não muda:
 
 - A leitura não reserva vaga, e um convite não abre vaga. `required: false` na política de convites continua não significando que há vaga.
-- As recusas "lista-de-espera" seguem em `POST /account/start`, na volta do Google (redireciona para `/?conta=lista-de-espera`), em `POST /account/finish` e em `POST /account/age/session`.
+- As recusas "lista-de-espera" seguem em `POST /account/start`, `POST /account/phone/send`, `POST /account/finish` e `POST /account/age/session` (o retorno do Google foi aposentado e não recusa mais).
+- Se o teto enche depois de a idade ser verificada, a recusa no envio do código (`phone/send`) e na conclusão (`finish`), pedidos assinados, apaga na hora o registro de idade `{ band, method, checkedAt }` da chave recusada; a recusa em `POST /account/start` (não assinado) não apaga nada. Para esta e para quem desiste, o serviço varre o `age.json` ao iniciar e a cada hora, até 200 registros por passada (o resto fica para a seguinte), e apaga o registro de toda chave com `checkedAt` de mais de 30 dias (`AGE_UNLINKED_TTL_MS`) que não é membro vinculado, Página, conta em exclusão nem vínculo em andamento (decisão do dono, 2026-11-15; `docs/design.md`, seção LGPD). O log traz só `idade varridas` com a contagem; um apagamento que falha vira `idade varredura-falhou` (ou `esquecer-falhou` na recusa) e a varredura seguinte tenta de novo. A frase do app ("Esta tentativa não criou conta nem lugar em fila") continua verdadeira. Cobertura: `apps/cli/test/account-age.test.js` ("age record: ...", "age sweep: ...", inclusive o limite por passada) e `apps/cli/test/account-age-serve.test.js` (a varredura roda no `serve` real).
 - A configuração manual, uma configuração digitada à mão na página hospedada e o `varanda-serve` não perguntam e mantêm o comportamento de antes.
 
 Como verificar, a partir da raiz (um arquivo por vez):
