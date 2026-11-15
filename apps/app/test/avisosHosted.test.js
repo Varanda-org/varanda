@@ -529,6 +529,8 @@ test('a show and an acting switch set the filter back to Todas before anything i
     scrollToTop: 0,
     stateRef: { current: { loading: false, refreshing: false, loadedAt: Date.now(), items: ['row'] } },
     reloadAfterRef: { current: false },
+    followsReadAtRef: { current: null },
+    followsReadCovers: () => false,
     promote: () => {},
     shouldReloadOnShow: () => false,
     settle: () => events.push('settle'),
@@ -569,4 +571,62 @@ test('Seguir de volta does nothing while a page is acting', async (t) => {
   const bad = followBackHarness({ answer: () => Promise.resolve({ changed: true }) })
   await bad.followBack({ key: 'not-a-key', seq: 1 })
   t.is(bad.calls.length, 0, 'only a 64-hex key')
+})
+
+test('a follows change reads on its own only while the tab is hidden (issue #230)', async (t) => {
+  const { followsReadsHere } = await import('../src/notices.js')
+  t.is(followsReadsHere({ active: true, busy: false }), false, 'shown: the refresh bump reads, once')
+  t.is(followsReadsHere({ active: true, busy: true }), false)
+  t.is(followsReadsHere({ active: false, busy: false }), true, 'hidden: read in the background')
+  t.is(followsReadsHere({ active: false, busy: true }), false, 'a read in flight is not doubled')
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
+  t.ok(source.includes('if (!followsReadsHere({ active, busy: current.loading || current.refreshing })) return'))
+  t.absent(source.includes('if (!stateRef.current.loading && !stateRef.current.refreshing) loadFirst()'), 'no unconditional read on a follows bump')
+})
+
+test('Seguir de volta asks for one reload only when the follow changed', async (t) => {
+  const changed = followBackHarness({ answer: () => Promise.resolve({ changed: true }) })
+  await changed.followBack({ key: A, seq: 1, name: 'Bia' })
+  t.is(changed.changed(), 1)
+  const same = followBackHarness({ answer: () => Promise.resolve({ changed: false }) })
+  await same.followBack({ key: A, seq: 1, name: 'Bia' })
+  t.is(same.changed(), 0, 'nothing changed: no reload')
+})
+
+test('a hidden follows read keeps the refresh bump from reading again at show (issue #230)', async (t) => {
+  const { followsReadCovers, FOLLOWS_COVER_MS } = await import('../src/notices.js')
+  const run = (readAt) => {
+    const events = []
+    const previous = { current: { active: false, refresh: 0, scrollToTop: 0 } }
+    const followsReadAtRef = { current: readAt }
+    const ctx = (extra) => ({
+      previous,
+      scrollToTop: 0,
+      stateRef: { current: { loading: false, refreshing: false, loadedAt: Date.now(), items: [] } },
+      reloadAfterRef: { current: false },
+      followsReadAtRef,
+      followsReadCovers,
+      promote: () => {},
+      shouldReloadOnShow: () => false,
+      settle: () => {},
+      loadFirst: () => events.push('load'),
+      setFilter: () => {},
+      ...extra
+    })
+    screenCallback('Avisos', 'useEffect(() => {\n    const prev = previous.current', ctx({ active: false, refresh: 1 }))()
+    const adopted = previous.current.refresh
+    const cleared = followsReadAtRef.current
+    screenCallback('Avisos', 'useEffect(() => {\n    const prev = previous.current', ctx({ active: true, refresh: 1 }))()
+    return { adopted, cleared, events }
+  }
+  const fresh = run(Date.now())
+  t.is(fresh.adopted, 1, 'a bump right after a hidden follows read is adopted')
+  t.is(fresh.cleared, null, 'once')
+  t.alike(fresh.events, [], 'shown with the same refresh: no second read')
+  const stale = run(Date.now() - FOLLOWS_COVER_MS - 1000)
+  t.is(stale.adopted, 0, 'a later, unrelated bump is not adopted')
+  t.is(stale.cleared, null)
+  t.alike(stale.events, ['load'], 'so the show reads')
+  t.absent(followsReadCovers({ readAt: null, now: Date.now() }), 'no follows read')
+  t.absent(followsReadCovers({ readAt: Date.now() + 5000, now: Date.now() }), 'a clock step back covers nothing')
 })

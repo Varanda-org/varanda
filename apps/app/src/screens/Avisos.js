@@ -40,7 +40,7 @@ import { avatarOf, pickAvatar } from '../media/avatar'
 import {
   ACTIVITY_QUIET_TEXT, EMPTY_TEXT, EMPTY_TITLE, NOTICES_FIRST_READ_QUIET_MS, NOTICES_INCOMPLETE_TEXT, NOTICES_OFFLINE_MESSAGE, NOTICES_POLL_MS,
   NOTICES_UNSUPPORTED_MESSAGE, PAGE_EMPTY_TEXT, PAGE_EMPTY_TITLE, PAGE_NOTICES_READ_LINE, PAGE_NOTICES_UNAVAILABLE_TITLE, SEEN_MAX,
-  compareNotices, hasNew, hasPageSeenNamespaces, isLastNoticesPage, isPageNoticesUnavailable, isPageSeenNamespace, isWebOnlyError, markSeenPadded, mergePage, mergeRemoteSeen, noticeIcon, noticeId, noticeKind, noticeLine, noticeParts, noticeRef, noticesNotice,
+  compareNotices, followsReadCovers, followsReadsHere, hasNew, hasPageSeenNamespaces, isLastNoticesPage, isPageNoticesUnavailable, isPageSeenNamespace, isWebOnlyError, markSeenPadded, mergePage, mergeRemoteSeen, noticeIcon, noticeId, noticeKind, noticeLine, noticeParts, noticeRef, noticesNotice,
   needsAvatar, padSeen, pageNoticesHeader, pageSeenNamespace, parseSeenNamespace, readNotices, remoteFoldPlan, resolveRowAvatars, rowAvatarSource, seenOnScreen, seenUnion, shouldPoll, shouldStartNoticesFirstRead, snippetOf, writeSeenNamespace
 } from '../notices'
 import { getPeekWarmState, isSeederBusyError, subscribePeekWarm, updatePeekWarmState } from '../peek'
@@ -877,7 +877,11 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     const shown = active && !prev.active
     const reselected = scrollToTop !== prev.scrollToTop
     const changed = refresh !== prev.refresh
-    previous.current = { active, refresh: active ? refresh : prev.refresh, scrollToTop, warmToken: prev.warmToken }
+    // Hidden, a bump is adopted (no read at the next show) only right after a
+    // hidden follows read, which covers it; any other waits for the show.
+    const covered = !active && changed && followsReadCovers({ readAt: followsReadAtRef.current, now: Date.now() })
+    previous.current = { active, refresh: active || covered ? refresh : prev.refresh, scrollToTop, warmToken: prev.warmToken }
+    if (!active && changed) followsReadAtRef.current = null
     if (!active) return
     // A show marks every loaded row seen, so every row must be drawn: a
     // filter left from the last visit would hide a new notice it marks.
@@ -908,15 +912,27 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     }
   }, [active, state.loading, state.refreshing, loadFirst])
 
-  // Follows changed (here or on another device): the list is read again, also
-  // while the tab is not shown.
+  // Follows changed (here or on another device). Hidden, the list is read
+  // again in the background. Shown, this effect stays out: a follow made on
+  // this device reaches App, whose `refresh` bump reads once (each first read
+  // dials the seeder). For one made on another device or by sync, the
+  // Seguir de volta pills read the follow set again below at once; the only
+  // row that depends on the member's own follows, the follow row of someone
+  // now followed back, stays without its pill until the next full read
+  // (pull or show).
   const followsVersion = node.followsVersion
   const followsRef = useRef(followsVersion)
+  const followsReadAtRef = useRef(null)
   useEffect(() => {
     if (followsVersion === followsRef.current) return
     followsRef.current = followsVersion
-    if (!stateRef.current.loading && !stateRef.current.refreshing) loadFirst()
-  }, [followsVersion, loadFirst])
+    const current = stateRef.current
+    if (!followsReadsHere({ active, busy: current.loading || current.refreshing })) return
+    // The refresh bump a follow made here sends next must not read again at
+    // show (followsReadCovers).
+    followsReadAtRef.current = Date.now()
+    loadFirst()
+  }, [followsVersion, active, loadFirst])
 
   // Seguir de volta: the person's own follow set, read as Pessoas does and
   // again on any follow change or another identity. A page never reads it
@@ -944,7 +960,9 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       markFollow(key, true)
       const title = displayText(whoOf({ name: item.name, username: item.username }).title)
       if (typeof onToast === 'function') onToast(r && r.changed === false ? 'Você já segue esta pessoa.' : 'Agora você segue ' + title + '.')
-      if (typeof onFollowsChanged === 'function') onFollowsChanged()
+      // Nothing changed: no reload. Kept otherwise, as the node's follows
+      // event can lag or never come (offline).
+      if (!(r && r.changed === false) && typeof onFollowsChanged === 'function') onFollowsChanged()
     } catch (err) {
       if (typeof onToast === 'function') onToast(errorText(err))
       // The pill stays pending until the set is read again, so it is never
