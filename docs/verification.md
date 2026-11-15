@@ -1465,6 +1465,19 @@ None of these was performed for this change. Use two browsers (or profiles) with
 - [ ] Native app and `varanda-serve`: the tab shows "Só na versão web" and never errors; no `notices.list` call is made.
 - [ ] Caddy logs show no new route and no new error; the seeder log shows one `peer` event per read.
 
+### Index hardening (issue #230)
+
+- Pending fails closed: a diary marked pending (a read stopped short, a failed block, an `append`, a re-serve) has its follows unpublished until the next commit, so an unfollow behind blocks the seeder could not read never stays listed.
+- Quota share: past `NOTICES_LIGHT_TARGETS` 256 targets an author may not take the last quarter of `NOTICES_MAX_EDGES` (`NOTICES_RESERVE_DIVISOR` 4).
+- `incomplete` per target, in the Avisos page and in Seguidores: a diary that has not committed since it was served marks every page; one that committed before marks only the targets of its fold; a follow refused at a cap marks only that target (`MAX_CUT_TARGETS_PER_AUTHOR` 64, past which every page). The same rule for replies, quotes and mentions (`MAX_CUT_PAIRS_PER_AUTHOR` 64).
+- A notices page merges sorted per-pair lists from the cursor (`PAGE_CACHE_PAIRS` 128) instead of sorting every candidate; likes and reposts scan at most `NOTICE_SCAN_MAX` 16384 edges per request (far-future edges and one engager's edges past its newest 64 take no scan slot; a hidden engager's do) and say `incomplete` when the cap cut rows.
+- Page cache worst case: the `PAGE_CACHE_PAIRS` lists hold a subset of the stored rows, so at most `POST_NOTICES_MAX_EDGES` (about 262k row objects, roughly 30 MB by estimate, not measured), plus `cutOf` bounded by 64 x 4096 pairs.
+- Accepted rule, arrives late: "Alguns avisos ainda podem chegar." covers a diary not read since it was served, a pending diary whose fold or rows touch this member, the member's own diary pending (replies, quotes and mentions; a follows page does not count it), and rows lost at a cap; it does not cover a follow, reply, quote or mention in blocks of an already read diary that the seeder has not reached yet and that touched this member nowhere before: that row arrives at the next read, never as a false notice.
+- Automated: `node packages/core/test/notices.test.js`, `post-notices.test.js`, `engagement.test.js`, `node apps/cli/test/seeder-notices.test.js`, `node apps/cli/test/seeder-post-notices.test.js`.
+- [ ] Not performed. With A following B and C on one seeder: stop A's diary mid-download after its first full read (the seeder log shows the scan short): B's Avisos and B's Seguidores keep A's row out, and only the targets A's fold names say so (Avisos: "Alguns avisos ainda podem chegar."; Seguidores: "A lista pode estar incompleta."); C, whom A does not follow, sees a complete page.
+- Avisos reads once per follow back: with the tab shown the follows event no longer starts its own read (App's `refresh` bump reads or defers behind one in flight); hidden, it still reads in the background and the later show does not read again for that change (a `refresh` bump within `FOLLOWS_COVER_MS` 2 s of that read; a later bump, such as a block, still reads at show). A press that changed nothing (`changed: false`) asks for no reload; `follow.add` is still sent once per press. Accepted: shown, a follow made on another device no longer reads the list at once. The Seguir de volta pills update at once (the follow set is read again on every follows change); the only row that depends on the member's own follows, the follow row of someone now followed back, stays without its pill until the next full read (pull or show).
+- [ ] Not performed. Tap Seguir de volta on one notice with the Avisos tab shown and count `notices.list` reads (seeder log, `peer` events): one, and the list ends with the row gone from the pill.
+
 ## 21. Seeder capacity for the hosted web (PR feat/seeder-web-capacity, 2026-10-27)
 
 ### Summary
