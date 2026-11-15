@@ -239,7 +239,7 @@ jobs:
             exit 1
           fi
           seq="$(git rev-list --count --first-parent HEAD)"
-          if ! [[ "$seq" =~ ^[1-9][0-9]*$ ]]; then
+          if ! [[ "$seq" =~ ^[1-9][0-9]{0,9}$ ]]; then
             echo "::error::seq inválido"
             exit 1
           fi
@@ -307,7 +307,7 @@ jobs:
               "$COSIGN_IMAGE" "$@"
           }
           tag="sha-$GITHUB_SHA"
-          re='^\{"v":1,"commit":"([0-9a-f]{40})","seq":([0-9]+),"web":"ghcr\.io/varanda-org/varanda-web@(sha256:[0-9a-f]{64})"\}$'
+          re='^\{"v":1,"commit":"([0-9a-f]{40})","seq":([1-9][0-9]{0,9}),"web":"ghcr\.io/varanda-org/varanda-web@(sha256:[0-9a-f]{64})"\}$'
           # Prints "<seeder digest> <web digest>" of a release this workflow
           # already signed for this commit. Returns 1 when there is none to
           # reuse (build) and 2 when the registry did not answer (the step
@@ -411,7 +411,7 @@ jobs:
             -f deploy/seeder/Dockerfile -t "$SEEDER_REPO:$tag" .
           seeder="$(push_digest "$SEEDER_REPO")"
           release="$(docker run --rm --network none --entrypoint cat "$SEEDER_REPO@$seeder" /app/release.json)"
-          re='^\{"v":1,"commit":"([0-9a-f]{40})","seq":([0-9]+),"web":"ghcr\.io/varanda-org/varanda-web@(sha256:[0-9a-f]{64})"\}$'
+          re='^\{"v":1,"commit":"([0-9a-f]{40})","seq":([1-9][0-9]{0,9}),"web":"ghcr\.io/varanda-org/varanda-web@(sha256:[0-9a-f]{64})"\}$'
           if ! [[ "$release" =~ $re ]] || [ "${BASH_REMATCH[1]}" != "$GITHUB_SHA" ] || [ "${BASH_REMATCH[2]}" != "$SEQ" ] \
             || [ "${BASH_REMATCH[3]}" != "$web" ]; then
             echo "::error::/app/release.json de $SEEDER_REPO@$seeder não confere com este commit"

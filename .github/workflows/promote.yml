@@ -199,7 +199,7 @@ jobs:
               --certificate-oidc-issuer "$ISSUER" \
               "$1" > /dev/null
           }
-          re='^\{"v":1,"commit":"([0-9a-f]{40})","seq":(0|[1-9][0-9]{0,15}),"web":"ghcr\.io/varanda-org/varanda-web@(sha256:[0-9a-f]{64})"\}$'
+          re='^\{"v":1,"commit":"([0-9a-f]{40})","seq":([1-9][0-9]{0,9}),"web":"ghcr\.io/varanda-org/varanda-web@(sha256:[0-9a-f]{64})"\}$'
           # Prints "<commit> <seq> <web digest>" of the image, or fails.
           read_release () {
             local f="$RUNNER_TEMP/release-$2.json"
