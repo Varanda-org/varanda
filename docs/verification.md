@@ -2,6 +2,8 @@
 
 Date: 2026-10-22 (sections 1 to 5) and 2026-10-23 (section 6, the public DHT; section 7, the new app design on iOS). Every check below was run on one Mac. Logs and screenshots stayed in the verification sessions' scratchpads (not committed).
 
+New verification goes in its own file per pull request under [verification/](verification/README.md), named after the branch and without a section number. This file keeps the numbered sections written before that, cited by number.
+
 ## Machine
 
 | Item | Version |
@@ -3802,7 +3804,7 @@ Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emula
 1. **Barra.** Cinco ícones sem palavras, na ordem A Rua (estrada com a faixa tracejada), Espiadinha, Conversas, Busca (lupa) e Diário (a foto da própria pessoa ou as iniciais, com anel verde quando selecionado). Numa configuração manual são quatro, sem Conversas. TalkBack e VoiceOver leem os nomes.
 2. **Sino.** O sino aparece no canto direito da barra do topo de cada aba (A Rua, Espiadinha, Conversas, Busca) e, branco, no canto da faixa do Diário. Com novidade em Avisos há um ponto no sino (nunca um número). Tocar abre Avisos com o título "Avisos" e a seta de voltar, que leva à aba anterior; o ponto some. Um push de quem seguiu ainda abre Avisos.
 3. **Busca › Contas (hospedado).** Nome e @nome buscam depois de 2 letras; "Seguir @nome" segue; o código de 64 letras e números mostra "Seguir"; um código incompleto mostra "Código incompleto: são 64 letras e números.". Numa configuração manual só há o campo "Cole o código da pessoa (64 letras e números)." e a pílula "Seguir".
-4. **Busca › Publicações.** Só pesquisa ao enviar, nunca a cada tecla; mostra os resultados; "limpar" apaga; cada categoria guarda o próprio rascunho ao trocar. Numa configuração manual aparece "Só na versão web", sem nenhum pedido.
+4. **Busca › Publicações.** Só pesquisa ao enviar, nunca a cada tecla; mostra os resultados; "limpar" apaga; cada categoria guarda o próprio rascunho ao trocar. Numa configuração manual aparece "Pesquisa indisponível", sem nenhum pedido.
 5. **Espiadinha.** Sem campo de pesquisa; carrega e atualiza como antes.
 6. **Seguindo.** "N seguindo" no Diário abre a lista. O campo "Filtrar nesta lista" ("nome ou @nome") reduz a lista no aparelho, com a dica "Para encontrar outra conta, use a Busca." e, sem correspondência, "Ninguém com esse nome nesta lista."; colar um código de 64 letras e números não segue ninguém; "Deixar de seguir" ainda pede confirmação; voltar retorna ao Diário. Sem internet, com nomes ainda não lidos, o filtro mostra "Carregando nomes…" e pede os nomes de novo enquanto a tela está no topo; ao voltar a conexão, eles aparecem.
 7. **Perfil de outra pessoa.** Tem o desenho do Diário: faixa atrás da barra de estado com a barra de estado clara, o círculo de voltar no canto esquerdo da faixa acessível (não coberto pelo avatar), avatar com anel à esquerda, nome, @nome, bio e as pílulas Seguir, Mensagem (hospedado) e denunciar a conta, todas funcionando.
@@ -8629,7 +8631,7 @@ Segundo PR da revisão visual do app. A linha de publicação mostra as fotos pr
 - Recolhimento (`apps/app/src/postClamp.js`, `apps/app/src/ui/ClampText.js`): 3 linhas com fotos, 9 só com texto. O recolhimento só começa quando a estimativa passa do limite por 2 linhas ou mais. O botão embaixo diz "mais" (com fotos), "ver mais" (só texto) e, aberto, "menos". Os leitores de tela ouvem "mais, ver texto completo", "ver mais, texto completo" e "menos, recolher texto", com o estado aberto ou fechado. O rótulo da publicação continua com a legenda inteira. Tocar na legenda recolhida ainda abre a Conversa.
 - Links e menções: enquanto recolhida, a legenda é texto simples; links e @menções só funcionam depois de aberta.
 - Carrossel (`apps/app/src/ui/MediaCarousel.js`, `apps/app/src/carousel.js`): o contador "1/5" aparece quando o carrossel surge ou a página muda, fica 1,6 s (`motion.hold`) e some em 250 ms (`motion.normal`); com Reduzir movimento, some de uma vez depois da espera. No máximo 5 pontos, acompanhando a página atual. As setas só aparecem com o mouse em cima ou o foco do teclado no carrossel (web); um toque, um clique ou fechar a tela cheia com um toque nunca as deixa na tela.
-- Limites conhecidos: o nativo mede as linhas reais depois do desenho e, se a legenda couber, mostra tudo sem botão; a web não mede e decide só pela estimativa pela largura, então uma legenda de exatamente 3 ou 9 linhas pode manter o botão até ser aberta uma vez. Recolhida, a legenda não tem links nem menções tocáveis. A estimativa para de crescer na escala de fonte 1,3 do sistema, de propósito: com texto maior que isso, uma legenda longa pode ficar aberta sem botão, nunca cortada sem botão.
+- Limites conhecidos: o nativo mede as linhas reais depois do desenho e, se a legenda couber, mostra tudo sem botão; a web não mede e decide só pela estimativa pela largura, então uma legenda de exatamente 3 ou 9 linhas pode manter o botão até ser aberta uma vez. Recolhida, a legenda não tem links nem menções tocáveis. Alvos do cabeçalho (`apps/app/src/hit.js`): perto de 44 pt com `hitSlop`; a linha "republicou" chega a cerca de 36 pt sem o "seguir", o nome a cerca de 32 pt sob uma linha "republicou", e a web ignora `hitSlop`. Embaixo, nome, @handle e data só crescem 3 pt (a margem de cima da legenda, `CAPTION_GAP`), para não pegar a primeira linha dela. Em cima, a folga entra no espaço do topo da linha: no emulador Android e no simulador iOS, um toque cerca de 10 pt acima do nome abriu o perfil e um acima do @handle abriu a conversa. A estimativa para de crescer na escala de fonte 1,3 do sistema, de propósito: com texto maior que isso, uma legenda longa pode ficar aberta sem botão, nunca cortada sem botão.
 
 Como verificar, a partir da raiz:
 
@@ -8659,6 +8661,8 @@ Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) mo
 11. Web a 1280 px, só com o teclado: Tab até a foto (as setas aparecem), Tab até uma seta, Enter até a última ou a primeira foto. Esperado: o foco passa à outra seta e nunca cai na página.
 12. Leitor de tela: o rótulo da publicação traz a legenda inteira, mesmo recolhida; o botão é lido como "mais, ver texto completo", "ver mais, texto completo" ou "menos, recolher texto", com o estado aberto ou fechado.
 13. Repita no tema escuro e com texto grande. Esperado: nada cortado, o botão mantém o alvo de 44 pt.
+14. Setas do carrossel (leitor de tela): numa publicação de 5 fotos, na foto 3, ouça as setas. Esperado: "Foto anterior, 2 de 5" e "Próxima foto, 4 de 5"; na primeira foto só a próxima, na última só a anterior.
+15. Cabeçalho da publicação: toque pouco fora do avatar, do nome, do @handle, da data, do link "republicou" e do "seguir" dele. Esperado: o toque vale em cerca de 44 pt (nativo); a linha "republicou" sem "seguir" chega a cerca de 36 pt e o nome sob "republicou" a cerca de 32 pt de altura (limite); embaixo o toque vale só 3 pt; na web o `hitSlop` não vale.
 
 Limites desta passada: a Vitrine não traz legenda longa, então as publicações de teste foram feitas no compositor da própria Vitrine (as fotos de uma publicação nova aparecem como quadro neutro ou "foto indisponível", só o desenho da legenda e do carrossel vale). O arrastar com o mouse abre a tela cheia em vez de deslizar, então o passo 7 não foi feito por deslizar.
 
@@ -8718,6 +8722,7 @@ Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é
 16. Falha: com a rede cortada, puxe para atualizar a Conversa. Esperado: a conversa fica na tela com "Não foi possível atualizar a conversa." e os ramos abertos continuam abertos.
 17. Leitor de tela: o chip, a linha de expansão, a barra (campo, "Responder", "cancelar resposta") e o bloco "Respostas" têm rótulos que fazem sentido.
 18. Repita no tema escuro, com texto grande e com Reduzir movimento. Esperado: nada cortado, alvos de 44 pt, a barra visível.
+19. Rótulo do pai: abra a Conversa de uma resposta. Esperado: a publicação respondida, mais apagada, traz o rótulo "Em resposta a Nome" (só "Em resposta a" se o nome não é conhecido); o chip "Respondendo a Nome" segue abrindo a publicação respondida.
 
 Situação, em 2026-11-12 (Vitrine, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1` na porta 8090, porque a 8081 estava com o Metro de outra pasta de trabalho). Nenhum alvo foi percorrido por inteiro, então nenhuma caixa está marcada. Para andar pelos casos que a Vitrine não traz, a passada usou linhas temporárias em `fixtures.js` (uma resposta com ramo, um neto com resposta, um ramo de 55 filhos), depois desfeitas byte a byte. As capturas vieram do painel do navegador embutido e ficam fora do git.
 
@@ -8738,7 +8743,7 @@ Quarto PR da revisão visual do app. A aba Feira, em Na cidade, ganha um cabeça
 - Buscas salvas: "Salvar busca" continua à mão enquanto há uma busca por cidade; a nota "Busca salva neste aparelho." confirma. Em Buscas aparece a busca ("São Paulo/SP · Todos · Todas as categorias", "N novos", "Remover busca") e nunca há esqueletos.
 - Meus e Salvos usam os mesmos tiles. Os anúncios de uma pessoa ou Página (linha "Anúncios" do perfil) aparecem na grade, sem vitrine nem filtros.
 - Vazio e offline: sem resultado, "Nenhum anúncio por aqui ainda." com "Limpar filtros" e "Trocar cidade"; sem rede, "Conecte-se para consultar a Feira."; índice incompleto, "Alguns anúncios podem faltar. Puxe para atualizar.".
-- Limites conhecidos: ordem e faixa de preço só valem para os anúncios já carregados (a nota diz isso); a casca do app limita o conteúdo a 640 px, então a grade tem no máximo 3 colunas (a quarta, de 900 px, não aparece no app); não há busca nacional (UF e cidade são obrigatórias); a Vitrine só tem 6 anúncios e uma página, então a nota de parcial no rodapé não aparece nela.
+- Limites conhecidos: ordem e faixa de preço só valem para os anúncios já carregados (a nota diz isso); a casca do app limita o conteúdo a 640 px, então a grade tem no máximo 3 colunas (a quarta, de 900 px, não aparece no app); não há busca nacional (UF e cidade são obrigatórias); a marca "novos desde a última visita" só vale na ordem Recentes e por cidade; a Vitrine só tem 6 anúncios e uma página, então a nota de parcial no rodapé não aparece nela.
 
 Como verificar, a partir da raiz:
 
@@ -8764,6 +8769,8 @@ Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é
 8. Meus, Salvos e a grade de um perfil. Esperado: tiles, sem vitrine nem filtros no perfil.
 9. Cidade sem anúncios, offline. Esperado: os textos de vazio e de sem rede.
 10. Escuro, texto grande, leitor de tela e Reduzir movimento. Esperado: nada cortado, contraste legível.
+11. Buscas sem nenhuma busca salva. Esperado: "Você ainda não tem buscas salvas neste aparelho." com o botão "Buscar na cidade", que volta ao segmento Na cidade.
+12. Marca de visita: abra a lista de uma cidade, saia, deixe chegar anúncios novos e volte (na Vitrine, com anúncios novos de exemplo). Esperado: a lista mostra "N novos desde a última visita", os anúncios novos e "Anteriores" com o resto; só na ordem Recentes e por cidade; na primeira visita a uma cidade nada é marcado.
 
 Situação, em 2026-11-12 (Vitrine, Metro na porta 8090). Cada caixa só é marcada quando o alvo foi percorrido por inteiro.
 
@@ -8810,6 +8817,8 @@ Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é
 8. Anunciar, passo a passo. Esperado: Continuar sem os campos do passo mostra só o erro daquele passo; Voltar mantém o que foi escrito; a Revisão mostra o tile e a confirmação "Público na web e em buscadores"; sem ela, o erro "Confirme que o anúncio fica público na web e em buscadores."; "Publicar anúncio" abre o anúncio.
 9. Voltar em Anunciar. Esperado: em passo adiante, o botão voltar do Android e o Escape na web voltam um passo; no primeiro passo com conteúdo, perguntam "Descartar anúncio?".
 10. Texto grande, escuro, leitor de tela e Reduzir movimento. Esperado: com texto grande os botões da barra ficam empilhados; nada cortado, contraste legível; a barra e os passos têm rótulos.
+11. Desfazer foto: em Anunciar, passo Fotos, e em "Editar anúncio", toque em "Remover foto". Esperado: "Foto removida." com "Desfazer" por 8 s; "Desfazer" devolve a foto ao lugar de onde saiu; passados os 8 s o aviso some; com o limite de fotos cheio, o "Desfazer" não passa dele.
+12. Valor: em Anunciar e em "Editar anúncio", toque no campo Valor. Esperado: teclado numérico; digitar 2500 mostra 25,00 (máscara de centavos); apagar volta pelos centavos.
 
 Situação, em 2026-11-12 (Vitrine, Metro na porta 8090). Cada caixa só é marcada quando o alvo foi percorrido por inteiro; nenhuma foi, por falta de turnos.
 
@@ -8856,6 +8865,9 @@ Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é
 9. Volte à caixa de Conversas e Mensagens, à lista de grupos e responda a uma mensagem com spoiler. Esperado: a prévia da linha, a citação no balão e a barra de resposta mostram texto simples com a palavra "spoiler" no lugar do segredo, sem marcadores. Com uma mensagem de mais de 140 caracteres e um `||` no começo, a linha da caixa para no primeiro `||` e mostra "spoiler".
 10. Texto grande, escuro, leitor de tela e Reduzir movimento. Esperado: nada cortado; contraste legível no código e no spoiler; os botões do "Aa", "Copiar código", "ver tudo" e a cobertura do spoiler têm rótulos.
 11. Um build mais antigo. Esperado: a mesma mensagem aparece com os marcadores crus (`*negrito*`, `||segredo||`); nada quebra.
+12. Tirar a formatação: selecione uma palavra com negrito e toque em Negrito. Esperado: só o par de marcadores é tirado; num link ou @nome os marcadores do alvo nunca mudam. Toque duas vezes em Bloco de código: a segunda tira as cercas, não aninha outra.
+13. Código e cursor: com o cursor dentro de um bloco de código ou de um código em linha, toque nos botões do "Aa". Esperado: nada é inserido; letras da linguagem depois das três crases não contam como texto; marcadores sozinhos dentro de código não ganham estilo; colar um texto que repete um trecho do rascunho deixa o cursor na cópia certa.
+14. Campo que cresce: escreva uma palavra, abra o "Aa" e toque em Bloco de código. Esperado: o campo cresce até mostrar as duas cercas. No Android o campo não mede de novo um texto posto pelo botão, só o digitado; a altura mínima vem das quebras de linha (`apps/app/src/composerHeight.js`, até 6 linhas).
 
 Situação, em 2026-11-12 (Vitrine, Metro na porta 8090, com mensagens de exemplo digitadas à mão numa cópia temporária das fixtures, já restaurada; segunda passagem, depois das correções). Cada caixa só é marcada quando o alvo foi percorrido por inteiro; nenhuma foi. Capturas em `v6r-shots/` (fora do git).
 
@@ -8864,6 +8876,7 @@ Situação, em 2026-11-12 (Vitrine, Metro na porta 8090, com mensagens de exempl
 - [ ] Chrome, 390 px (painel de navegador embutido, não o Chrome em si, que já estava no tema escuro; parcial): as prévias da lista são texto simples ("Bom dia pessoal", "...neste grupo: spoiler", código sem cerca); a bolha da linha comprida mede 293 px, fica dentro da coluna, a página não rola na horizontal (`scrollWidth` 390) e "Copiar código" fica visível. Não percorrido: passos 7 e 8 (sem seleção nem colagem no painel) e os demais.
 - [ ] Chrome, 1280 px (parcial): a bolha da linha comprida mede 491 px, "Copiar código" fica dentro da tela e as prévias da lista seguem em texto simples. Não percorrido: o resto dos passos.
 - Defeitos da primeira passagem: (1) corrigido: a lista de Conversas e a de grupos mostravam a cerca crua na última linha de um grupo com bloco de código; agora `plainPreview` (`apps/app/src/chatPreview.js`) só trata a prévia como possivelmente cortada a partir de 140 pontos de código, e conferiu-se no Android, no iOS e na web que a linha sai em texto simples. (2) corrigido: no Android a bolha com bloco de código e citação tomava a altura da célula da lista e cobria a mensagem anterior; a caixa do código tem `flexGrow: 0` (`apps/app/src/ui/RichText.js`), e conferiu-se no Android (`a04.png`, `a05.png`) que a bolha cabe no conteúdo. (3) achado e corrigido: na web uma linha de 200 caracteres num bloco alargava a bolha além da tela em 390 px; o invólucro entre a coluna e a bolha agora tem `maxWidth: '100%'` (`apps/app/src/ui/Bubble.js`, `styles.stack`), e conferiu-se que a bolha mede 293 px em 390 e 491 px em 1280. Defeito novo nesta passagem: nenhum.
+- Passo 14, em 2026-11-15 (PR `fix/ux-audit-leftovers`, Vitrine): achado e corrigido. No Android, com "banana" escrito, Bloco de código deixava o campo com uma linha e as cercas escondidas; com a altura mínima pelas quebras de linha, o campo mostra as quatro linhas e as duas cercas no AVD `varanda-api36-parity`. Na web (painel de navegador embutido) o mesmo passo, digitado com teclas, põe o bloco depois de "banana" e deixa o campo com 106 px (quatro linhas), sem rolagem. iOS não foi conferido nesta passagem (a Vitrine parou no aviso dos Termos 52, que não foi aceito); nele a mudança só pode deixar o campo mais alto, nunca mais baixo.
 
 ## 195. Reações em grupos (PR feat/group-reactions)
 
@@ -9068,6 +9081,8 @@ Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é
 17. Reduzir movimento: ligue no sistema e repita 6. Esperado: a bolha não se move; o ícone de resposta só aparece (com fade) e a resposta funciona.
 18. Chrome, mouse: arraste o mouse sobre uma bolha. Esperado: nada é respondido e o texto é selecionado. Responda pelas ações da mensagem.
 19. Texto grande, escuro e leitor de tela: escala de fonte 1,3 e tema escuro nas telas acima. Esperado: nada cortado ou sobreposto, o botão "ir para o fim" e o selo legíveis e fora da caixa de escrever, os alvos de toque de 44 pt, e o leitor de tela diz "ir para o fim" (com "N novas" na dica).
+20. Barra "Respondendo a": numa conversa e num grupo, deslize uma mensagem carregada para responder e toque na barra. Esperado: a lista rola até a mensagem citada; com a citada fora do trecho carregado, nenhuma rolagem e "Mensagem fora do trecho carregado" por um instante (lida pelo leitor de tela).
+21. Sem hospedagem: abra Comunidades, uma Comunidade, a informação da Comunidade e a lista de curtidas. Esperado: "Comunidades indisponíveis" nas três telas e "Curtidas indisponíveis" na lista, nunca "Só na versão web".
 
 Situação, em 2026-11-12 (Vitrine, Metro na porta 8090, sem alterar as fixtures). Cada caixa só é marcada quando o alvo foi percorrido por inteiro; nenhuma foi. Capturas em `v9-shots/` fora do git.
 
@@ -9078,7 +9093,7 @@ Situação, em 2026-11-12 (Vitrine, Metro na porta 8090, sem alterar as fixtures
 
 Defeitos: nenhum confirmado. Suspeita aberta para quem corrige (T28): no Chrome a seleção de texto com o mouse numa bolha de `Mensagem` não selecionou nada (`ui/SwipeReply.js`, ou o `Pressable` da bolha, ao redor das linhas 38 a 45, que tratam o mouse); falta comparar com o PR8 para saber se o PR9 mudou isso. Nada foi corrigido neste PR de documentação.
 
-Limites conhecidos: Comunidades e Comunidade ainda mostram "Só na versão web" num nó que não é hospedado, o que nunca acontece num celular com a instalação (esse celular é hospedado). Quem usa mouse não tem deslize e responde pelas ações da mensagem. O que não foi percorrido está listado na Situação.
+Limites conhecidos: Comunidades, Comunidade e a informação da Comunidade dizem "Comunidades indisponíveis" num nó que não é hospedado (o que nunca acontece num celular com a instalação), e nenhuma tela diz mais "Só na versão web". Quem usa mouse não tem deslize e responde pelas ações da mensagem. O que não foi percorrido está listado na Situação.
 
 ## 198. Acabamento das telas (PR feat/screens-polish)
 
@@ -11250,3 +11265,33 @@ Fecha três itens da #448, só no app:
 4. [ ] Ajuda da Busca no app instalado: o texto não cita o navegador (não realizada ainda).
 
 Testes: `apps/app/test/buscaGlobal.test.js`, `apps/app/test/uiKit.test.js` e `apps/app/test/help.test.js`. Os testes de `Field` e de `BuscaGlobal` conferem o código, não montam a tela.
+
+## 252. Linha de base M5: a lentidão do app nativo, medida (branch test/perf-m5-harness)
+
+Esta seção registra a medição que responde se o app ficou mais lento desde a rodada M4 (11cdb47f) e onde está o custo hoje. Nenhum código de produto muda nela; usa as marcas, as linhas de render e a rolagem roteirizada de `src/perfMarks.js`, `src/perfScroll.js` e `scripts/perf-summary.js`, descritas em `docs/performance.md` ("Marcas de tempo", "Lista nativa sem conta"). Os números, os comandos e a tabela de custos estão em `docs/performance.md`, seção "M5, linha de base".
+
+Rodada de 2026-11-15: Mac M4 Pro com outras sessões rodando (carga média de 1 min entre 6 e 23), builds de desenvolvimento servidos pelo Metro, Vitrine grande (sem nó e sem sincronização). Emulador Android `varanda-perf` (API 36, GPU em software) aberto com `-no-window`; com janela ele caiu para cerca de 1 núcleo e todas as execuções travaram, e essas foram descartadas. Simulador iPhone 16e. Chrome sem cabeça com CPU 4x mais lenta.
+
+- [x] Conferência do instrumento no Android: fotos, citações em grade, carrossel de seis fotos com pontos, cartões de link e a capa do Spotify antes do player aparecem; as barras somem na descida e voltam na subida; só A Rua rola. O player do SoundCloud carrega, mas diz que a URL do dado de exemplo não é válida (dado de exemplo, não o app).
+- [x] Nó, A/B com `startup-bench.js` (arquivos e IndexedDB, A B A B, 3 x `--runs 5`): sem regressão, todas as diferenças dentro da dispersão.
+- [x] Android, A/B da interface (A B A B, 3 de cada, só texto): primeiras linhas de A Rua 3,0 s depois de `Running "main"` contra 1,2 s em 11cdb47f (+1,8 s, o shell espera a apresentação inteira do splash); `splash-end` 7,1 s (`patience`) contra 1,7 s (`grace`), porque a marca `details` nunca sai na Vitrine (até 3,9 s disso podem ser artefato da Vitrine: com `details` assentando junto com `moments`, o splash terminaria em cerca de 3,2 s, +1,5 s contra 11cdb47f). `TotalTime` e rolagem à mão sem diferença acima do ruído.
+- [x] Android, custo por lista: A Rua renderiza cerca de 1200 vezes em 60 s de rolagem (12,7 s de render com texto, 9,5 s com linhas ricas, 13,4 s com players); as abas escondidas renderizam cerca de 120 vezes (0,3 s), e 2,8 vezes mais com um player vivo.
+- [x] Android, teto de players 0, 1 e 4 (editado à mão em `src/embedLive.js` e restaurado com `git restore`): teto 0 custa o mesmo que sem players; o custo vem das WebViews vivas e das renderizações que elas provocam, não das checagens de 500 ms por cartão.
+- [x] Android, 75 s parado em A Rua: nenhuma renderização de aba escondida, nenhuma linha `req:` (a Vitrine não passa pelo `request` do nó).
+- [x] Android, partidas: `TotalTime` frio 730 ms, quente 100 a 131 ms em quatro de cinco partidas e 622 ms na quinta; `app-commit` 691 ms e `first-rows:rua` 3465 ms desde `js-entry`; `Start proc` a `js-entry` cerca de 2,0 s no build de debug.
+- [x] iOS, texto, ricas e players (3 execuções cada) e 5 partidas a frio: `app-commit` 587 ms, `first-rows:rua` 2769 ms; A Rua 5,8 a 8,1 s de render em 60 s; players não aumentam as abas escondidas.
+- [x] Web, Chrome 4x: primeira pintura em cerca de 50 ms; `EvaluateScript` do pacote do app 295 a 304 ms (12% das primeiras linhas; 18% no pacote de desenvolvimento) e `varanda-node.js` 290 a 330 ms de avaliação (release); na Vitrine de desenvolvimento, primeiras linhas em 2,24 s desde `js-entry`, e quatro abas escondidas renderizam uma vez por quadro o tempo todo, parado inclusive (cerca de 3270 vezes e 5,4 a 5,8 s na janela de 60 s da rolagem; causa não identificada nesta medição).
+- [x] Portões: prévias de momentos, não avaliado (a Vitrine não passa por `node.request`; conferir com nó real); varredura do cache de mídia, não roda (0 a 17 ms; só o que a Vitrine deixou, cache de instalação real não medido); inline requires, roda, sob a regra de manutenção (TotalTime e primeiras linhas desde o processo melhoram 10% ou mais em 5 partidas frias intercaladas); timer único dos players, não roda (teto 0 = sem players; WebViews e as renderizações que um player vivo provoca dominam; mudar quando ou quantos carregam é decisão do mantenedor e mudaria os Termos); telas sob demanda na web, não roda (12%, abaixo de 15%; 18% só no pacote de desenvolvimento); nota de projeto do nó do navegador em worker, não roda (avaliação do nó 12% a 14%).
+- [ ] iOS, A/B contra 11cdb47f: não medido (em 11cdb47f as marcas só saem com um toque numa aba).
+- [ ] iOS, partida a quente e `splash-end`: não medidos.
+- [ ] PWA instalado, nó vivo (Android, iOS e web), build de release nativo, celular de verdade: não medidos.
+
+Testes automáticos do instrumento, a partir da raiz. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/app/test/perfMarks.test.js
+node apps/app/test/perfScroll.test.js
+node apps/app/test/perfSummary.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.

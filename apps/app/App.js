@@ -54,11 +54,12 @@
 // The service is still asked in the background and its answer wins.
 // Design: apps/site/artwork/app-design.md.
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Profiler, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { StatusBar } from 'expo-status-bar'
 import { Animated, AppState, BackHandler, Linking, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { NodeProvider, perfMarks, useNode } from './src/node'
+import { bootMark, flushEarly, flushRenders, onRenderProfile, perfOn } from './src/perfMarks'
 import { hostedPage, rememberedConfig } from './src/configStore'
 import { pagesOn, setCoreReach } from './src/pageGate'
 import { CROSS_ORIGIN_PAGES } from './src/pageReach'
@@ -150,24 +151,24 @@ import { HELP } from './src/help'
 import { LARGE_TEXT, layout, space, type } from './src/ui/theme'
 import { paletteFor, statusBarStyle } from './src/appearance.js'
 import { applyBandMeta } from './src/appearanceStore'
-import Avisos from './src/screens/Avisos'
-import BuscaGlobal from './src/screens/BuscaGlobal'
-import { Grupo } from './src/screens/Grupo'
-import { Conversas } from './src/screens/Conversas'
-import { Mensagens } from './src/screens/Mensagens'
-import { Comunidades } from './src/screens/Comunidades'
-import { Mensagem } from './src/screens/Mensagem'
+import AvisosScreen from './src/screens/Avisos'
+import BuscaGlobalScreen from './src/screens/BuscaGlobal'
+import { Grupo as GrupoScreen } from './src/screens/Grupo'
+import { Conversas as ConversasScreen } from './src/screens/Conversas'
+import { Mensagens as MensagensScreen } from './src/screens/Mensagens'
+import { Comunidades as ComunidadesScreen } from './src/screens/Comunidades'
+import { Mensagem as MensagemScreen } from './src/screens/Mensagem'
 import { onDmOpen, onDmWake, requestDmOpen } from './src/dm-open'
-import { Comunidade } from './src/screens/Comunidade'
-import { ComunidadeInfo } from './src/screens/ComunidadeInfo'
+import { Comunidade as ComunidadeScreen } from './src/screens/Comunidade'
+import { ComunidadeInfo as ComunidadeInfoScreen } from './src/screens/ComunidadeInfo'
 import Ajustes from './src/screens/Ajustes'
 import ARua, { ARuaPreview, liveBinding, noteDeleted, previewBinding } from './src/screens/ARua'
 import Conexao from './src/screens/Conexao'
-import Conversa, { useActing } from './src/screens/Conversa'
-import Curtidas from './src/screens/Curtidas'
+import ConversaScreen, { useActing } from './src/screens/Conversa'
+import CurtidasScreen from './src/screens/Curtidas'
 import Denunciar from './src/screens/Denunciar'
-import Diario from './src/screens/Diario'
-import Espiadinha from './src/screens/Espiadinha'
+import DiarioScreen from './src/screens/Diario'
+import EspiadinhaScreen from './src/screens/Espiadinha'
 import Introducao from './src/screens/Introducao'
 import Identidade from './src/screens/Identidade'
 import Idade, { AGE_APP_NOTE } from './src/screens/Idade'
@@ -176,13 +177,13 @@ import TelefoneAviso from './src/screens/TelefoneAviso'
 import { showExplainer } from './src/phoneExplainer'
 import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, parseAppLink, parseAppReturn, waitsForInstallation } from './src/linkReturn'
 import Membro, { canConverseWithPage } from './src/screens/Membro'
-import Depoimentos from './src/screens/Depoimentos'
-import Momentos from './src/screens/Momentos'
-import Feira from './src/screens/Feira'
-import Anuncio from './src/screens/Anuncio'
-import Anunciar from './src/screens/Anunciar'
-import AnuncioEditar from './src/screens/AnuncioEditar'
-import Avaliar from './src/screens/Avaliar'
+import DepoimentosScreen from './src/screens/Depoimentos'
+import MomentosScreen from './src/screens/Momentos'
+import FeiraScreen from './src/screens/Feira'
+import AnuncioScreen from './src/screens/Anuncio'
+import AnunciarScreen from './src/screens/Anunciar'
+import AnuncioEditarScreen from './src/screens/AnuncioEditar'
+import AvaliarScreen from './src/screens/Avaliar'
 import { alertsStore } from './src/feiraAlertsStore'
 import { alertsBadge } from './src/feiraScreen'
 import { createFeiraEntry, decideEntry, heldIsFeira } from './src/feiraEntry'
@@ -190,22 +191,56 @@ import { useFeiraEntryStart } from './src/useFeiraEntryStart'
 import { captureListing, dropListing, entryStorage, holdFeiraCode } from './src/feiraEntryStore'
 import { feiraLocation } from './src/feiraPlaceStore'
 import Perfil from './src/screens/Perfil'
-import Pessoas from './src/screens/Pessoas'
-import Paginas from './src/screens/Paginas'
-import NovaPagina from './src/screens/NovaPagina'
-import PaginaAjustes from './src/screens/PaginaAjustes'
+import PessoasScreen from './src/screens/Pessoas'
+import PaginasScreen from './src/screens/Paginas'
+import NovaPaginaScreen from './src/screens/NovaPagina'
+import PaginaAjustesScreen from './src/screens/PaginaAjustes'
 import * as actingAs from './src/actingAs'
 import Publicar from './src/screens/Publicar'
-import Seguindo from './src/screens/Seguindo'
+import SeguindoScreen from './src/screens/Seguindo'
 import Termos from './src/screens/Termos'
 import { ContaExcluida, ExclusaoRecibo } from './src/screens/ExcluirConta'
 import { clearChatMedia, onAppStateChange, screenWatcher, stopBoundPlayback, stopPlayback } from './src/media/chatMedia'
 import { sweepVoiceCache } from './src/media/audio'
+import { createStableHandlerSets, createStableHandlers } from './src/stableHandlers'
 import { bindSoundMute } from './src/soundMute'
 import { soundMuteStore } from './src/soundMuteStore'
 
 // Before any component: each useState(soundMuted()) must read the saved choice.
 bindSoundMute(soundMuteStore())
+
+// The shell holds most of the app's state, and the tabs stay mounted while
+// hidden: unmemoized, every shell update rendered every screen. They get
+// primitives, stable handlers (src/stableHandlers.js) and memoized objects,
+// so a screen renders for its own props and contexts only.
+// ARua and Membro keep their import names (tests pin those imports).
+const ARuaMemo = memo(ARua)
+const Espiadinha = memo(EspiadinhaScreen)
+const BuscaGlobal = memo(BuscaGlobalScreen)
+const Avisos = memo(AvisosScreen)
+const Conversas = memo(ConversasScreen)
+const Feira = memo(FeiraScreen)
+const Diario = memo(DiarioScreen)
+const Grupo = memo(GrupoScreen)
+const Comunidade = memo(ComunidadeScreen)
+const ComunidadeInfo = memo(ComunidadeInfoScreen)
+const Comunidades = memo(ComunidadesScreen)
+const Depoimentos = memo(DepoimentosScreen)
+const Momentos = memo(MomentosScreen)
+const Mensagens = memo(MensagensScreen)
+const Mensagem = memo(MensagemScreen)
+const Anuncio = memo(AnuncioScreen)
+const AnuncioEditar = memo(AnuncioEditarScreen)
+const Avaliar = memo(AvaliarScreen)
+const Anunciar = memo(AnunciarScreen)
+const Seguindo = memo(SeguindoScreen)
+const Paginas = memo(PaginasScreen)
+const NovaPagina = memo(NovaPaginaScreen)
+const PaginaAjustes = memo(PaginaAjustesScreen)
+const Pessoas = memo(PessoasScreen)
+const Conversa = memo(ConversaScreen)
+const Curtidas = memo(CurtidasScreen)
+const MembroMemo = memo(Membro)
 
 // Inlined by Expo at build time; set only for the iOS worklet gate
 // (docs/ios-gate.md).
@@ -2833,6 +2868,18 @@ function Member () {
     setComposer((c) => ({ ...c, open: true, reply: null, quote: null, moment: (c.moment || 0) + 1 }))
   }
   const reselectTab = (id) => setScrollSignal((s) => ({ ...s, [id]: (s[id] || 0) + 1 }))
+  // Handlers for the memoized screens, updated on every render of the tabs
+  // (see the module comment above).
+  const screenHandlers = useRef(null)
+  if (screenHandlers.current === null) screenHandlers.current = createStableHandlers()
+  const entryHandlers = useRef(null)
+  if (entryHandlers.current === null) entryHandlers.current = createStableHandlerSets()
+  // The Diário tab's avatar: from the profiles cache, like the composer's.
+  const tabMeName = ownProfile ? (ownProfile.name || ownProfile.username || null) : null
+  const tabMePicture = ownProfile ? ownProfile.avatar : undefined
+  const tabMe = useMemo(() => (typeof ownKey === 'string'
+    ? { name: tabMeName, publicKey: ownKey, picture: tabMePicture }
+    : null), [ownKey, tabMeName, tabMePicture])
 
   // --- the bars hiding while A Rua scrolls down ---
   // `chromeHidden` changes only when the bars flip, never per frame; the
@@ -3025,11 +3072,13 @@ function Member () {
     markedTab.current = tab
     const marks = perfMarks()
     marks.mark('tab:' + tab)
-    for (const line of marks.report()) console.log(line)
+    // Only the marks not printed yet: each prints once per run.
+    for (const line of marks.fresh()) console.log(line)
+    if (perfOn) flushRenders()
   }, [tab])
   useEffect(() => {
     if (!feedBoot.details) return
-    for (const line of perfMarks().report()) console.log(line)
+    for (const line of perfMarks().fresh()) console.log(line)
   }, [feedBoot.details])
   // Light over the Diário band (dark over the offline note above it) and over
   // Membro's band, which stays on top while offline (its note sits below the
@@ -3398,30 +3447,50 @@ function Member () {
     // The invite note sits above the other notes, so it takes the top inset on
     // Diário and the note under it does not.
     const inviteNoteShown = !!(inviteDrop.note && atTabs && ajustes !== 'convites' && !stacked)
-    // The Diário tab's avatar: from the profiles cache, like the composer's.
-    const tabMe = typeof ownKey === 'string'
-      ? { name: ownProfile ? (ownProfile.name || ownProfile.username || null) : null, publicKey: ownKey, picture: ownProfile ? ownProfile.avatar : undefined }
-      : null
+    const h = screenHandlers.current.update({
+      handleStartReply: startReply,
+      handleStartQuote: startQuote,
+      handleShowToast: showToast,
+      handleOpenMomentComposer: openMomentComposer,
+      handleOpenComposer: openComposer,
+      handleFollowSomeone: () => {
+        setTab('busca')
+        setBuscaPane((n) => n + 1)
+      },
+      handleOpenListingOf: ({ author, seq } = {}) => openListing(author, seq),
+      handleDiarioTabChange: (id) => reportProfileTab('diario', id),
+      handleOpenAvisos: mode === 'hosted' ? openAvisos : undefined,
+      handleOnPublished: onPublished,
+      handleListingSaved: () => { setListingRefresh((n) => n + 1); goBack() },
+      handleNewPage: () => pushScreen({ screen: 'novapagina' }),
+      handleOpenPage: (key, row) => openMember(key, { page: true, closed: !!(row && row.closed), movedTo: row && typeof row.movedTo === 'string' ? row.movedTo : null }),
+      handlePageCreated: (pageKey) => openMember(pageKey, { page: true }),
+      handleOpenPageSettings: pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? (key) => pushScreen({ screen: 'paginaajustes', key }) : undefined,
+      handleOpenListings: node.hosted === true ? (author) => pushScreen({ screen: 'anuncios', key: author }) : undefined,
+      handleComposeSeen: () => setComposeSignal(null),
+      handleOpenInvite: (link) => link.kind === 'grupo' ? openGroup(link.key) : openCommunity(link.key),
+      handleConversar: ({ peer, draft, card }) => openMessage(peer, { draft, card })
+    })
     const screenProps = {
       ownKey,
       me: tabMe,
       onBack: goBack,
-      onReply: startReply,
-      onQuote: startQuote,
+      onReply: h.handleStartReply,
+      onQuote: h.handleStartQuote,
       onReport: setReport,
       onOpenThread: openThread,
       onOpenEngagers: openEngagers,
       onOpenMember: openMember,
       onOpenMention: mentionHandler,
-      onToast: showToast,
+      onToast: h.handleShowToast,
       onFollowsChanged: followsChanged,
       onMessage: openMessage,
       onOpenCommunity: openCommunity,
       onDeletedPost: deletedPost,
-      onOpenPageSettings: pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? (key) => pushScreen({ screen: 'paginaajustes', key }) : undefined,
+      onOpenPageSettings: h.handleOpenPageSettings,
       onOpenPeople: openPeople,
       onOpenTestimonials: openTestimonials,
-      onOpenListings: node.hosted === true ? (author) => pushScreen({ screen: 'anuncios', key: author }) : undefined
+      onOpenListings: h.handleOpenListings
     }
     // Pushed screens, plus the one sliding out after a pop under its old index
     // (and key), so it stays mounted until StackLayer says it has left. Both
@@ -3457,7 +3526,7 @@ function Member () {
       if (entry.screen === 'momentos') {
         return (
           <StackLayer key={i + ':momentos:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
-            <Momentos entry={entry} ownKey={ownKey} isTop={i === stack.length - 1} covered={covered} onBack={goBack} onOpenMember={openMember} onMessage={openMessage} onCreate={openMomentComposer} />
+            <Momentos entry={entry} ownKey={ownKey} isTop={i === stack.length - 1} covered={covered} onBack={goBack} onOpenMember={openMember} onMessage={openMessage} onCreate={h.handleOpenMomentComposer} />
           </StackLayer>
         )
       }
@@ -3471,7 +3540,7 @@ function Member () {
       if (entry.screen === 'mensagem') {
         return (
           <StackLayer key={i + ':mensagem:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
-            <Mensagem peer={entry.key} intent={i === stack.length - 1 ? intentsRef.current.get(entry.key) : undefined} onIntentUsed={intentUsed} initial={entry.params.initial || undefined} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onOpenInvite={(link) => link.kind === 'grupo' ? openGroup(link.key) : openCommunity(link.key)} onOpenListing={openListing} onAvaliar={openAvaliar} />
+            <Mensagem peer={entry.key} intent={i === stack.length - 1 ? intentsRef.current.get(entry.key) : undefined} onIntentUsed={intentUsed} initial={entry.params.initial || undefined} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onOpenInvite={h.handleOpenInvite} onOpenListing={openListing} onAvaliar={openAvaliar} />
           </StackLayer>
         )
       }
@@ -3489,8 +3558,8 @@ function Member () {
               me={ownKey}
               actingPage={actingPage}
               onBack={goBack}
-              onConversar={({ peer, draft, card }) => openMessage(peer, { draft, card })}
-              onOffer={(listing) => openMessage(author, { offer: listing })}
+              onConversar={h.handleConversar}
+              onOffer={entryHandlers.current.for(i + ':anuncio:' + entry.key, { handleOffer: (listing) => openMessage(author, { offer: listing }) }).handleOffer}
               // eslint-disable-next-line react/jsx-handler-names -- Forward the shared capability callback unchanged.
               onOpenListings={screenProps.onOpenListings}
               onDenunciar={setReport}
@@ -3511,7 +3580,7 @@ function Member () {
         return (
           <StackLayer key={i + ':' + entry.screen + ':' + entry.key + ':' + actingIdentity + ':' + (actingPage || '') + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
             {entry.screen === 'editar-anuncio'
-              ? <AnuncioEditar author={author} seq={seq} me={ownKey} actingPage={actingPage} onBack={goBack} onSaved={() => { setListingRefresh((n) => n + 1); goBack() }} />
+              ? <AnuncioEditar author={author} seq={seq} me={ownKey} actingPage={actingPage} onBack={goBack} onSaved={h.handleListingSaved} />
               : <Avaliar author={author} seq={seq} offer={entry.params.offer} me={ownKey} actingPage={actingPage} onBack={goBack} onRated={goBack} />}
           </StackLayer>
         )
@@ -3527,20 +3596,24 @@ function Member () {
                 ownKey={ownKey}
                 origin={installationOrigin()}
                 locationStore={feiraLocation}
-                onOpenListing={({ author, seq } = {}) => openListing(author, seq)}
+                onOpenListing={h.handleOpenListingOf}
               />
             </View>
           </StackLayer>
         )
       }
       if (entry.screen === 'anunciar') {
+        // Anunciar registers once per mount, so the guard checks the stack at
+        // call time. backGuardRef holds one guard and Anunciar is its only
+        // registrant: a second one would need Anunciar to register again.
+        const guardRegistrar = entryHandlers.current.for(i + ':anunciar', { handleRegisterBackGuard: (fn) => registerBackGuard(() => stackRef.current.length - 1 === i && stackRef.current[i].screen === 'anunciar' && fn()) }).handleRegisterBackGuard
         return (
           <StackLayer key={i + ':anunciar:' + actingIdentity} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
             <Anunciar
               initialPlace={feiraPlaceRef.current}
               onBack={goBack}
               onPublished={showPublished}
-              registerBackGuard={(fn) => registerBackGuard(() => stackRef.current[stackRef.current.length - 1] === entry && fn())}
+              registerBackGuard={guardRegistrar}
             />
           </StackLayer>
         )
@@ -3558,7 +3631,7 @@ function Member () {
               onReport={setReport}
               onFollowsChanged={followsChanged}
               onOpenMember={openMember}
-              onToast={showToast}
+              onToast={h.handleShowToast}
               followsTick={version}
               isTop={i === stack.length - 1}
             />
@@ -3573,9 +3646,9 @@ function Member () {
         return (
           <StackLayer key={i + ':' + entry.screen + ':' + (entry.key || '') + ':' + actingIdentity} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
             {entry.screen === 'paginas'
-              ? <Paginas active={top} onBack={goBack} onNewPage={() => pushScreen({ screen: 'novapagina' })} onOpenPage={(key, row) => openMember(key, { page: true, closed: !!(row && row.closed), movedTo: row && typeof row.movedTo === 'string' ? row.movedTo : null })} onChanged={followsChanged} />
+              ? <Paginas active={top} onBack={goBack} onNewPage={h.handleNewPage} onOpenPage={h.handleOpenPage} onChanged={followsChanged} />
               : entry.screen === 'novapagina'
-                ? <NovaPagina onBack={goBack} onCreated={(pageKey) => openMember(pageKey, { page: true })} />
+                ? <NovaPagina onBack={goBack} onCreated={h.handlePageCreated} />
                 : <PaginaAjustes entry={entry} onBack={goBack} onChanged={followsChanged} onOpenMember={openMember} />}
           </StackLayer>
         )
@@ -3591,15 +3664,15 @@ function Member () {
               onBack={goBack}
               onOpenMember={openMember}
               onFollowsChanged={followsChanged}
-              onToast={showToast}
+              onToast={h.handleShowToast}
             />
           </StackLayer>
         )
       }
-      const Screen = entry.screen === 'conversa' ? Conversa : entry.screen === 'curtidas' ? Curtidas : Membro
+      const Screen = entry.screen === 'conversa' ? Conversa : entry.screen === 'curtidas' ? Curtidas : MembroMemo
       return (
         <StackLayer key={i + ':' + entry.screen + ':' + entry.key + (entry.screen === 'conversa' && entry.key === threadReload.ref ? ':' + threadReload.n : '')} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
-          <Screen entry={entry} {...screenProps} onComposeSeen={() => setComposeSignal(null)} composeSignal={entry.screen === 'conversa' && i === stack.length - 1 ? composeSignal : null} onPublished={onPublished} onTabChange={entry.screen === 'membro' ? (id) => reportProfileTab(i + ':' + entry.key, id) : undefined} />
+          <Screen entry={entry} {...screenProps} onComposeSeen={h.handleComposeSeen} composeSignal={entry.screen === 'conversa' && i === stack.length - 1 ? composeSignal : null} onPublished={h.handleOnPublished} onTabChange={entry.screen === 'membro' ? entryHandlers.current.for(i + ':membro:' + entry.key, { handleTabChange: (id) => reportProfileTab(i + ':' + entry.key, id) }).handleTabChange : undefined} />
         </StackLayer>
       )
     }
@@ -3654,110 +3727,117 @@ function Member () {
             <Animated.View style={[styles.flex, { marginBottom: chromeRoom ? -chromeTop : 0, transform: [{ translateY: chromeShift }] }]}>
               <View style={shown('rua')}>
                 <ScreenVisible.Provider value={screenSeen('rua')}>
-                  <ARua
-                    onBoot={onFeedBoot}
-                    onDeletedPost={deletedPost}
-                    active={on('rua')}
-                    refresh={version}
-                    onReply={startReply}
-                    onReport={setReport}
-                    onToast={showToast}
-                    onOpenThread={openThread}
-                    onOpenEngagers={openEngagers}
-                    onOpenMember={openMember}
-                    onOpenMention={mentionHandler}
-                    onQuote={startQuote}
-                    onMessage={openMessage}
-                    onOpenMomentos={openMomentos}
-                    onCreateMoment={openMomentComposer}
-                    ownKey={ownKey}
-                    scrollToTop={scrollSignal.rua}
-                    onUserScroll={onRuaUserScroll}
-                    onScrollFrame={onRuaScrollFrame}
-                    followCount={followCount}
-                    onFollowSomeone={() => {
-                      setTab('busca')
-                      setBuscaPane((n) => n + 1)
-                    }}
-                  />
+                  {tabProfiled('rua',
+                    <ARuaMemo
+                      onBoot={onFeedBoot}
+                      onDeletedPost={deletedPost}
+                      active={on('rua')}
+                      refresh={version}
+                      onReply={h.handleStartReply}
+                      onReport={setReport}
+                      onToast={h.handleShowToast}
+                      onOpenThread={openThread}
+                      onOpenEngagers={openEngagers}
+                      onOpenMember={openMember}
+                      onOpenMention={mentionHandler}
+                      onQuote={h.handleStartQuote}
+                      onMessage={openMessage}
+                      onOpenMomentos={openMomentos}
+                      onCreateMoment={h.handleOpenMomentComposer}
+                      ownKey={ownKey}
+                      scrollToTop={scrollSignal.rua}
+                      onUserScroll={onRuaUserScroll}
+                      onScrollFrame={onRuaScrollFrame}
+                      followCount={followCount}
+                      onFollowSomeone={h.handleFollowSomeone}
+                    />
+                  )}
                 </ScreenVisible.Provider>
               </View>
               <View style={shown('espiadinha')}>
                 <ScreenVisible.Provider value={screenSeen('espiadinha')}>
-                  <Espiadinha
-                    active={on('espiadinha')}
-                    refresh={peekVersion}
-                    followsSignal={followsSignal}
-                    onPublish={openComposer}
-                    onReply={startReply}
-                    onReport={setReport}
-                    onOpenThread={openThread}
-                    onOpenEngagers={openEngagers}
-                    onOpenMember={openMember}
-                    onOpenMention={mentionHandler}
-                    onQuote={startQuote}
-                    ownKey={ownKey}
-                    scrollToTop={scrollSignal.espiadinha}
-                    onFollowsChanged={followsChanged}
-                    onToast={showToast}
-                  />
+                  {tabProfiled('espiadinha',
+                    <Espiadinha
+                      active={on('espiadinha')}
+                      refresh={peekVersion}
+                      followsSignal={followsSignal}
+                      onPublish={h.handleOpenComposer}
+                      onReply={h.handleStartReply}
+                      onReport={setReport}
+                      onOpenThread={openThread}
+                      onOpenEngagers={openEngagers}
+                      onOpenMember={openMember}
+                      onOpenMention={mentionHandler}
+                      onQuote={h.handleStartQuote}
+                      ownKey={ownKey}
+                      scrollToTop={scrollSignal.espiadinha}
+                      onFollowsChanged={followsChanged}
+                      onToast={h.handleShowToast}
+                    />
+                  )}
                 </ScreenVisible.Provider>
               </View>
               <View style={shown('busca')}>
                 <ScreenVisible.Provider value={screenSeen('busca')}>
-                  <BuscaGlobal
-                    active={on('busca')}
-                    refresh={version}
-                    paneRequest={buscaPane}
-                    ownKey={ownKey}
-                    scrollToTop={scrollSignal.busca}
-                    onOpenMember={openMember}
-                    onFollowsChanged={followsChanged}
-                    onToast={showToast}
-                    onReply={startReply}
-                    onReport={setReport}
-                    onQuote={startQuote}
-                    onOpenThread={openThread}
-                    onOpenMention={mentionHandler}
-                    onOpenEngagers={openEngagers}
-                  />
+                  {tabProfiled('busca',
+                    <BuscaGlobal
+                      active={on('busca')}
+                      refresh={version}
+                      paneRequest={buscaPane}
+                      ownKey={ownKey}
+                      scrollToTop={scrollSignal.busca}
+                      onOpenMember={openMember}
+                      onFollowsChanged={followsChanged}
+                      onToast={h.handleShowToast}
+                      onReply={h.handleStartReply}
+                      onReport={setReport}
+                      onQuote={h.handleStartQuote}
+                      onOpenThread={openThread}
+                      onOpenMention={mentionHandler}
+                      onOpenEngagers={openEngagers}
+                    />
+                  )}
                 </ScreenVisible.Provider>
               </View>
               {/* Not a tab: kept mounted so its poll lights the bell's dot. */}
               <View style={shown('avisos')}>
                 <ScreenVisible.Provider value={screenSeen('avisos')}>
-                  <Avisos
-                    active={on('avisos')}
-                    refresh={version + avisosReload}
-                    ownKey={ownKey}
-                    onOpenThread={openThread}
-                    onOpenMember={openMember}
-                    scrollToTop={scrollSignal.avisos}
-                    onFollowsChanged={followsChanged}
-                    onToast={showToast}
-                    onBadge={setAvisosNew}
-                    onSeenState={onAvisosSeen}
-                    remoteSeen={remoteSeen}
-                  />
+                  {tabProfiled('avisos',
+                    <Avisos
+                      active={on('avisos')}
+                      refresh={version + avisosReload}
+                      ownKey={ownKey}
+                      onOpenThread={openThread}
+                      onOpenMember={openMember}
+                      scrollToTop={scrollSignal.avisos}
+                      onFollowsChanged={followsChanged}
+                      onToast={h.handleShowToast}
+                      onBadge={setAvisosNew}
+                      onSeenState={onAvisosSeen}
+                      remoteSeen={remoteSeen}
+                    />
+                  )}
                 </ScreenVisible.Provider>
               </View>
               {mode === 'hosted'
                 ? (
                   <View style={shown('comunidades')}>
                     <ScreenVisible.Provider value={screenSeen('comunidades')}>
-                      <Conversas
-                        key={'g' + nodeEpoch}
-                        active={on('comunidades') && !stacked}
-                        onOpenGroup={openGroup}
-                        onOpenCommunity={openCommunity}
-                        onOpenThread={openMessage}
-                        onOpenCommunities={openCommunities}
-                        onOpenRequests={openRequests}
-                        showInbox={dmOpenCount}
-                        seenTick={seenTick}
-                        composing={convCompose}
-                        onComposing={setConvCompose}
-                      />
+                      {tabProfiled('comunidades',
+                        <Conversas
+                          key={'g' + nodeEpoch}
+                          active={on('comunidades') && !stacked}
+                          onOpenGroup={openGroup}
+                          onOpenCommunity={openCommunity}
+                          onOpenThread={openMessage}
+                          onOpenCommunities={openCommunities}
+                          onOpenRequests={openRequests}
+                          showInbox={dmOpenCount}
+                          seenTick={seenTick}
+                          composing={convCompose}
+                          onComposing={setConvCompose}
+                        />
+                      )}
                     </ScreenVisible.Provider>
                   </View>
                   )
@@ -3766,47 +3846,51 @@ function Member () {
                 ? (
                   <View style={shown('feira')}>
                     <ScreenVisible.Provider value={screenSeen('feira')}>
-                      <Feira
-                        key={'f' + nodeEpoch}
-                        active={on('feira') && !stacked}
-                        ownKey={ownKey}
-                        origin={installationOrigin()}
-                        locationStore={feiraLocation}
-                        onOpenListing={({ author, seq } = {}) => openListing(author, seq)}
-                        onAnnounce={openAnnounce}
-                        scrollToTop={scrollSignal.feira}
-                      />
+                      {tabProfiled('feira',
+                        <Feira
+                          key={'f' + nodeEpoch}
+                          active={on('feira') && !stacked}
+                          ownKey={ownKey}
+                          origin={installationOrigin()}
+                          locationStore={feiraLocation}
+                          onOpenListing={h.handleOpenListingOf}
+                          onAnnounce={openAnnounce}
+                          scrollToTop={scrollSignal.feira}
+                        />
+                      )}
                     </ScreenVisible.Provider>
                   </View>
                   )
                 : null}
               <View style={shown('diario')}>
                 <ScreenVisible.Provider value={screenSeen('diario')}>
-                  <Diario
-                    onTabChange={(id) => reportProfileTab('diario', id)}
-                    onDeletedPost={deletedPost}
-                    active={on('diario')}
-                    refresh={version}
-                    onSettings={setAjustes}
-                    onToast={showToast}
-                    onReport={setReport}
-                    onReply={startReply}
-                    onPublish={openComposer}
-                    onMessage={openMessage}
-                    onOpenThread={openThread}
-                    onOpenEngagers={openEngagers}
-                    onOpenMember={openMember}
-                    onOpenMention={mentionHandler}
-                    onQuote={startQuote}
-                    onOpenCommunity={openCommunity}
-                    ownKey={ownKey}
-                    scrollToTop={scrollSignal.diario}
-                    onAvisos={mode === 'hosted' ? openAvisos : undefined}
-                    avisosNew={avisosNew}
-                    onOpenPeople={openPeople}
-                    onOpenTestimonials={openTestimonials}
-                    onOpenMomentos={openMomentos}
-                  />
+                  {tabProfiled('diario',
+                    <Diario
+                      onTabChange={h.handleDiarioTabChange}
+                      onDeletedPost={deletedPost}
+                      active={on('diario')}
+                      refresh={version}
+                      onSettings={setAjustes}
+                      onToast={h.handleShowToast}
+                      onReport={setReport}
+                      onReply={h.handleStartReply}
+                      onPublish={h.handleOpenComposer}
+                      onMessage={openMessage}
+                      onOpenThread={openThread}
+                      onOpenEngagers={openEngagers}
+                      onOpenMember={openMember}
+                      onOpenMention={mentionHandler}
+                      onQuote={h.handleStartQuote}
+                      onOpenCommunity={openCommunity}
+                      ownKey={ownKey}
+                      scrollToTop={scrollSignal.diario}
+                      onAvisos={h.handleOpenAvisos}
+                      avisosNew={avisosNew}
+                      onOpenPeople={openPeople}
+                      onOpenTestimonials={openTestimonials}
+                      onOpenMomentos={openMomentos}
+                    />
+                  )}
                 </ScreenVisible.Provider>
               </View>
             </Animated.View>
@@ -3870,6 +3954,8 @@ function Member () {
         {barsHidden ? null : <TabBar current={tab === 'avisos' ? returnTab : tab} onSelect={setTab} onReselect={tab === 'avisos' ? closeAvisos : reselectTab} badges={{ comunidades: groupsBadge || dmDot, feira: feiraBadge }} tabs={tabsFor(mode)} me={tabMe} />}
       </View>
     )
+    // Entries that left the stack drop their handlers.
+    entryHandlers.current.sweep()
   }
 
   // The own identity for the composer: from the profiles cache, never
@@ -3938,7 +4024,15 @@ function Member () {
   )
 }
 
+// Dev perf only: a Profiler per tab screen; off, the child renders as is.
+const tabProfiled = (name, child) => perfOn ? <Profiler id={'tab:' + name} onRender={onRenderProfile}>{child}</Profiler> : child
+
 export default function App () {
+  useEffect(() => {
+    if (!perfOn) return
+    bootMark('app-commit')
+    flushEarly(perfMarks())
+  }, [])
   useEffect(() => { loadIcons().catch(() => {}) }, [])
   // The gate build never mounts Splash, which is what normally removes the overlay.
   useEffect(() => {
