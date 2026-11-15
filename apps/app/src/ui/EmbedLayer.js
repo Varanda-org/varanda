@@ -17,14 +17,24 @@
 // playing, and an untouched one stays loaded (../embedLive embedStays); a
 // running or unknown screen reader counts as a touch. A lock or the
 // background closes every kept frame. An orphan the person touched also
-// closes when another player starts in the app. A kept frame closes when a
+// closes when another player starts in the app, and within one tick when its
+// row is unmounted (orphanAwayKeys): nothing the person started plays on once
+// its post is off the screen. Since a running or unknown screen reader counts
+// as a touch, no orphan of an unmounted row survives while one runs. A window
+// turned from the shape the frame went live in (native full screen, whose
+// reflow can unmount the playing row) keeps it; out of full screen, a
+// rotation or a resize across square after the touch (the web or the PWA, an
+// iPad, a large-screen Android that ignores the portrait lock) also counts as turned,
+// so that player stays until another player starts, a lock or a screen
+// change. An orphan whose row is still mounted (a quote that reloads) keeps
+// the grace of orphanRowTick. A kept frame closes when a
 // newly visible card needs its slot (../embedLive), when its row leaves the
 // list's data (an untouched one cut off past the end waits EMBED_CUT_MS for
 // it to come back) or its message is hidden or deleted, and when its content
 // process dies, which also lowers the app-wide cap (../embedLive shrink).
 
 import { forwardRef, memo, useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { Animated, ScrollView, StyleSheet, View } from 'react-native'
+import { Animated, Dimensions, ScrollView, StyleSheet, View } from 'react-native'
 import { createEmbedKeep } from '../embedKeep'
 import { EMBED_TICK_MS, embedSlots, embedStays, embedTouched, embedsHeld, embedsHeldAll, onEmbedHold } from '../embedLive'
 import { playbackClaimCount } from '../media/chatMedia'
@@ -112,6 +122,39 @@ export function orphanRowTick (entries, mounted, counts) {
     else next.set(entry.key, n)
   }
   return { drop, counts: next }
+}
+
+// The orphans the person touched whose row is no longer mounted: their card
+// is gone, so nothing else closes them, and they may be playing off the
+// screen. One whose window is turned stays (native full screen). A missing or
+// throwing touched counts as touched, a missing or throwing mounted as not
+// mounted, a missing or throwing turned as not turned.
+export function orphanAwayKeys (entries, mounted, touched, turned) {
+  const keys = []
+  if (!Array.isArray(entries)) return keys
+  for (const entry of entries) {
+    if (!entry || entry.orphan !== true) continue
+    let here = false
+    try { here = typeof mounted === 'function' && mounted(entry.row) === true } catch {}
+    if (here) continue
+    let on = true
+    try { on = typeof touched !== 'function' || touched(entry.release) !== false } catch {}
+    if (!on) continue
+    let away = false
+    try { away = typeof turned === 'function' && turned(entry) === true } catch {}
+    if (!away) keys.push(entry.key)
+  }
+  return keys
+}
+
+// Whether the window is wider than tall, or null when it cannot be read.
+function windowWide () {
+  try {
+    const { width, height } = Dimensions.get('window')
+    return Number.isFinite(width) && Number.isFinite(height) ? width > height : null
+  } catch {
+    return null
+  }
 }
 
 // '' when the key cannot be read: that row's players are drawn in the row,
@@ -227,6 +270,34 @@ function createEmbedHost () {
   // that claimed asks for this count right after.
   let seen = null
   let grace = new Map()
+  // The window shape each kept frame went live in. It follows the window
+  // while the frame is untouched, as the card's own base does: only a touched
+  // player can be in native full screen.
+  const shapes = new Map()
+  const noteShape = (key) => {
+    const entry = keep.list().find((e) => e.key === key)
+    if (!entry || entry.orphan === true) return
+    if (!shapes.has(key) || !touchedNow(entry.release)) shapes.set(key, windowWide())
+  }
+  const turned = (entry) => {
+    const was = shapes.get(entry.key)
+    const now = windowWide()
+    return typeof was === 'boolean' && typeof now === 'boolean' && was !== now
+  }
+  // The card shows and places its frame through these, so the host sees the
+  // shape at each step without the keep knowing about windows.
+  const hostKeep = {
+    ...keep,
+    show: (key, spec, release, row) => {
+      const ok = keep.show(key, spec, release, row)
+      if (ok) noteShape(key)
+      return ok
+    },
+    place: (key, rect) => {
+      keep.place(key, rect)
+      noteShape(key)
+    }
+  }
   const contentChanged = () => {
     for (const fn of [...listeners]) {
       try { fn() } catch {}
@@ -239,11 +310,13 @@ function createEmbedHost () {
     // An orphan has no check of its own, so its last parked distance stands.
     const yielding = (release) => embedSlots.yielding(release, undefined, readerTouchNow())
     for (const key of orphanTick(keep.list(), changed, yielding, touchedNow)) keep.drop(key)
+    for (const key of orphanAwayKeys(keep.list(), (row) => rows.has(row), touchedNow, turned)) keep.drop(key)
     const next = orphanRowTick(keep.list(), (row) => rows.has(row), grace)
     grace = next.counts
     for (const key of next.drop) keep.drop(key)
   }
   const sync = () => {
+    for (const key of shapes.keys()) if (!keep.has(key)) shapes.delete(key)
     if (keep.hasOrphan()) {
       if (timer !== null) return
       // Counted from when the first orphan appears: a card checks for a new
@@ -257,7 +330,7 @@ function createEmbedHost () {
     }
   }
   return Object.freeze({
-    keep,
+    keep: hostKeep,
     setContent: (node) => {
       const next = node || null
       if (next === content) return
@@ -293,6 +366,10 @@ function createEmbedHost () {
       }
     },
     claimsSeen: () => (seen === null ? playbackClaimCount() : seen),
+    shapeOf: (key) => {
+      const shape = shapes.get(key)
+      return typeof shape === 'boolean' ? shape : null
+    },
     start: () => {
       const off = keep.subscribe(sync)
       sync()

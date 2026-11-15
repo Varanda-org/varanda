@@ -11189,6 +11189,37 @@ node apps/app/test/embedFrame.test.js
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
 
+## 246. Nada toca sozinho no feed, som silenciado guardado, player fecha ao sair da tela (PR feat/feed-playback-rules)
+
+Esta seção confere três comportamentos do feed. Primeiro, nada toca sozinho em A Rua: a música do Audius numa publicação é sempre o cartão por toque (`MusicPlayerCard.js`), e sumiram o adesivo (`PostMusic.js`, `postMusic.js`), o par `musicAutoStore` e a chave **Tocar música sozinha** de Ajustes. Os momentos continuam tocando vídeo e música sozinhos. Segundo, um cartão tocado do Audius pausa (faixa, playlist) ou para (trecho, carregando) quando fica quase todo fora da faixa visível, conferido a cada 500 ms depois de 2 s de espera (`musicLeaves`); não volta sozinho e não lê nem muda o silêncio compartilhado. Terceiro, o silêncio compartilhado (`soundMute.js`) fica guardado só neste aparelho: `{"v":1,"muted":bool}` em `varanda-som-mudo` (`localStorage` na web, `varanda-som-mudo.json` na pasta de documentos no nativo, par `soundMuteStore`), ligado de forma síncrona na abertura em `App.js` e enviado a ninguém; registro presente mas ilegível vale como silenciado. Além disso, um player de provedor (YouTube, SoundCloud, Spotify, Apple Music) em que a pessoa tocou fecha depois de duas conferências novas seguidas fora da faixa, com 2 s de espera depois do toque (`embedLeaves`), e um quadro tocado cuja linha a lista desmontou fecha na conferência seguinte de 500 ms da camada (`orphanAwayKeys`); um toque só de leitor de tela fecha apenas um quadro que estava na faixa, e na tela cheia nativa o quadro tocado continua. Não há canal para dentro do quadro, então ele descarrega em vez de pausar. Termos e Política na versão 53, com novo aceite.
+
+Substitui, sem reescrevê-las, as partes das seções 204 e 208 que descrevem o início automático, o adesivo, o botão de som nos adesivos e a chave **Tocar música sozinha** (os trechos perto das linhas 9388, 9627 e 10352 deste arquivo), e o silêncio só da sessão da seção 208.
+
+Limite conhecido: fora da tela cheia, quando a tela gira ou a janela muda de retrato para paisagem ou o contrário (web, PWA, iPad, Android de tela grande), um player tocado mantém o comportamento anterior (fica até outro player começar, um bloqueio ou uma troca de tela).
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA. Os passos de aparelho são para uma pessoa rodar; nenhum resultado abaixo foi observado.
+
+- [ ] Nenhuma música começa sozinha em A Rua: com publicações do Audius (trecho, faixa e playlist) na lista, rolar e esperar não toca nada. Ajustes não tem **Tocar música sozinha**. Android: pendente. iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Silêncio guardado: em Momentos, silenciar o som, fechar o app por completo e reabrir (na web, recarregar): continua silenciado. Ativar o som, reabrir: continua ativado. Android: pendente. iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Começar um cartão do YouTube, rolar até ele sair da tela e voltar: o cartão guardado (capa) aparece no lugar do player. Android: pendente. iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Rolar rápido para longe logo depois de apertar o play de um player: ele não fica carregado fora da tela. Android: pendente. iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Tocar num player dentro de uma publicação citada enquanto a citação recarrega ("carregando" por um momento): o player tocado não fica preso nem some sem motivo. Android: pendente. iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Tela cheia nativa com rotação: o player sobrevive à rotação, também numa lista longa. Android: pendente. iOS: pendente.
+- [ ] iPad (simulador), fora da tela cheia: girar de retrato para paisagem com um player tocado: ele continua até outro player começar, um bloqueio ou uma troca de tela. Pendente.
+- [ ] Tocar numa faixa do Audius, rolar até sair da tela: a faixa fica pausada e não volta sozinha; o silêncio compartilhado não muda. Android: pendente. iOS: pendente. Web: pendente. PWA: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho.
+
+```sh
+node apps/app/test/soundMute.test.js
+node apps/app/test/musicPlayerCard.test.js
+node apps/app/test/musicEmbedCard.test.js
+node apps/app/test/embedLayer.test.js
+node apps/app/test/legal.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
 ## 247. Polimento da Busca, da ajuda e do campo mono (PR fix/polimento-navegacao-sobras)
 
 Fecha três itens da #448, só no app:
