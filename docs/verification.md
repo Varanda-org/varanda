@@ -5847,7 +5847,7 @@ Pontos conhecidos, deixados como estão (P3):
 
 - Cabeçalho de publicação e de citação com texto de acessibilidade extra-grande, tela de 320 pt e data de ano anterior: o nome fica com cerca de 80 pt na publicação e 40 pt no cartão de citação; não chega a zero, mas rever se um aparelho mostrar o contrário.
 - Visualizador de foto da conversa: ícones da barra de status escuros sobre o fundo preto no Android (já era assim; a correção pede definir a barra antes de abrir o Modal ou trocar o Modal por uma sobreposição).
-- Texto: "Fechar" e "Cancelar" ainda variam entre telas; "serviço indisponível" e "foto indisponível" em minúscula; marcador monoespaçado do convite; Perfil como folha no Diário e como página nos Ajustes; iniciais do cabeçalho de pedido contra o ícone da lista; o rótulo Denunciar na publicação e no perfil tem tintas diferentes (fixado pelos testes de `postActions`).
+- Texto: "Fechar" e "Cancelar" ainda variam entre telas; "serviço indisponível" e "foto indisponível" em minúscula; Perfil como folha no Diário e como página nos Ajustes; iniciais do cabeçalho de pedido contra o ícone da lista; o rótulo Denunciar na publicação e no perfil tem tintas diferentes (fixado pelos testes de `postActions`).
 - Web: anel de foco do Fechar sem folga; seta de voltar de 40 x 40; foco depois de Escape volta ao topo em vez de à lista; campo da Busca 4 pt abaixo do de Conversas; abas da Busca sem `aria-selected`; foco depois de fechar a Publicar com Escape; o rascunho do Perfil zera ao voltar para a lista de Ajustes (igual com a seta; já era assim).
 - Compartilhar sem origem da instalação mostra "Não foi possível copiar o link." (`communityShare.js`, fora desta PR).
 
@@ -11134,7 +11134,22 @@ node apps/cli/test/post-page.test.js
 - [ ] Link aberto de dentro do WhatsApp e do Instagram (navegador embutido): pendente.
 - [ ] Fonte maior no sistema ou no navegador (ajuste de tamanho do texto, não zoom da página), no Android e no iOS: pendente. A página usa tamanhos em px, como o app.
 
-## 245. Linha de base M5: a lentidão do app nativo, medida (branch test/perf-m5-harness)
+## 247. Polimento da Busca, da ajuda e do campo mono (PR fix/polimento-navegacao-sobras)
+
+Fecha três itens da #448, só no app:
+
+- Em "Convidar por @nome" (e em todo campo `mono`), a fonte monoespaçada vale só para o valor digitado: o marcador do campo vazio fica na fonte normal (`Field` em `apps/app/src/ui/index.js`). O tamanho (14) vale para o campo todo, vazio ou não, então a primeira tecla não muda a altura do campo.
+- A ajuda da Busca (`SEARCH_MEMORY` em `apps/app/src/topics.js`) deixou de falar em "memória do navegador enquanto a aba está aberta" e diz "memória, enquanto o app ou a aba está aberto".
+- Na Busca, abrir um perfil, uma publicação ou uma @menção fecha o teclado (`openMember`, `openThread` e `openMention` em `apps/app/src/screens/BuscaGlobal.js`), para ele não ficar por cima da tela que abre.
+
+1. [ ] Android e iOS: em Busca, Contas, digitar um nome e tocar numa pessoa: o perfil abre sem teclado (não realizada ainda).
+2. [ ] Android e iOS: em Busca, Publicações, tocar num autor, numa publicação e numa @menção: sem teclado na tela nova (não realizada ainda).
+3. [ ] Convidar por @nome: o marcador "nome, @nome ou código" aparece na fonte normal e o que se digita, em monoespaçado, sem mudar o tamanho nem a altura do campo na primeira tecla (não realizada ainda).
+4. [ ] Ajuda da Busca no app instalado: o texto não cita o navegador (não realizada ainda).
+
+Testes: `apps/app/test/buscaGlobal.test.js`, `apps/app/test/uiKit.test.js` e `apps/app/test/help.test.js`. Os testes de `Field` e de `BuscaGlobal` conferem o código, não montam a tela.
+
+## 252. Linha de base M5: a lentidão do app nativo, medida (branch test/perf-m5-harness)
 
 Esta seção registra a medição que responde se o app ficou mais lento desde a rodada M4 (11cdb47f) e onde está o custo hoje. Nenhum código de produto muda nela; usa as marcas, as linhas de render e a rolagem roteirizada de `src/perfMarks.js`, `src/perfScroll.js` e `scripts/perf-summary.js`, descritas em `docs/performance.md` ("Marcas de tempo", "Lista nativa sem conta"). Os números, os comandos e a tabela de custos estão em `docs/performance.md`, seção "M5, linha de base".
 
@@ -11164,11 +11179,11 @@ node apps/app/test/perfSummary.test.js
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
 
-## 246. Isolamento de renderização: linhas, abas escondidas, Skeleton e movimento reduzido (branch perf/render-isolation)
+## 253. Isolamento de renderização: linhas, abas escondidas, Skeleton e movimento reduzido (branch perf/render-isolation)
 
-Esta seção confere o PR2 da rodada de desempenho: as linhas (`Avatar`, `MediaView`, `LinkCard`, `ChatMedia`, `MomentReactionPreview`, `PostMusic`, `MusicPlayerCard`, `RefreshableList`) leem um contexto estreito do nó (`NodeHandleContext`, `OnlineContext`, `MemberKeyContext`) em vez do contexto inteiro; 27 telas de `App.js` são `memo` de módulo com tratadores estáveis; o pulso do `Skeleton` pausa enquanto a tela está escondida; o `MusicEqualizer` usa o driver nativo; uma só assinatura de movimento reduzido (`src/reduceMotionStore.js`). Medido com o mesmo instrumento e os mesmos roteiros da seção 245 (linha de base em `docs/performance.md`, "M5, linha de base"). Decisão por contadores (renderizações e ms de render), não por p95 de quadro. Abaixo de 10% de diferença: "dentro do ruído".
+Esta seção confere o PR2 da rodada de desempenho: as linhas (`Avatar`, `MediaView`, `LinkCard`, `ChatMedia`, `MomentReactionPreview`, `PostMusic`, `MusicPlayerCard`, `RefreshableList`) leem um contexto estreito do nó (`NodeHandleContext`, `OnlineContext`, `MemberKeyContext`) em vez do contexto inteiro; 27 telas de `App.js` são `memo` de módulo com tratadores estáveis; o pulso do `Skeleton` pausa enquanto a tela está escondida; o `MusicEqualizer` usa o driver nativo; uma só assinatura de movimento reduzido (`src/reduceMotionStore.js`). Medido com o mesmo instrumento e os mesmos roteiros da seção 252 (linha de base em `docs/performance.md`, "M5, linha de base"). Decisão por contadores (renderizações e ms de render), não por p95 de quadro. Abaixo de 10% de diferença: "dentro do ruído".
 
-Ambiente: o mesmo da seção 245 (emulador `varanda-perf` com `-no-window`, simulador iPhone 16e, Chrome sem cabeça 412x915 com CPU 4x, Metro com `--clear`, Vitrine grande, sem nó). Carga média de 1 min por célula entre 8,5 e 22,2 (anotada abaixo). Alcance do isolamento: a memo de aba isola atualizações do estado do shell (aviso, selo, barra que some ou volta). Uma mudança de `online` ou de visibilidade do nó ainda renderiza o componente de topo de cada aba, porque as telas de aba chamam `useNode()`.
+Ambiente: o mesmo da seção 252 (emulador `varanda-perf` com `-no-window`, simulador iPhone 16e, Chrome sem cabeça 412x915 com CPU 4x, Metro com `--clear`, Vitrine grande, sem nó). Carga média de 1 min por célula entre 8,5 e 22,2 (anotada abaixo). Alcance do isolamento: a memo de aba isola atualizações do estado do shell (aviso, selo, barra que some ou volta). Uma mudança de `online` ou de visibilidade do nó ainda renderiza o componente de topo de cada aba, porque as telas de aba chamam `useNode()`.
 
 ```sh
 # Metro por célula (a partir de apps/app), depois a rolagem roteirizada; no Android e no iOS
@@ -11177,7 +11192,7 @@ node apps/app/scripts/perf-summary.js <log>
 # web: npx expo export --platform web --dev --output-dir <pasta> com as mesmas variáveis, servido por servidor estático e medido por CDP (CPU 4x)
 ```
 
-Antes (linha de base 245, mediana) e depois (esta branch, mediana), na rolagem roteirizada de A Rua de 60 s. "Abas escondidas" soma os ids `tab:*` fora de `rua`.
+Antes (linha de base 252, mediana) e depois (esta branch, mediana), na rolagem roteirizada de A Rua de 60 s. "Abas escondidas" soma os ids `tab:*` fora de `rua`.
 
 | Célula | Medida | Antes | Depois | Mudança |
 |---|---|---|---|---|
@@ -11200,7 +11215,7 @@ Leituras:
 
 - O ganho está onde o PR mirou: as abas escondidas. Na web, o pulso do `Skeleton` que mantinha quatro abas renderizando a cada quadro (cerca de 60 por segundo, parado inclusive) sumiu. No Android e no iOS, restam de 78 a 90 renderizações por aba na rolagem (cerca de 13 a 15 por aba, uma por inversão das barras e por mudanças de `online`/visível via `useNode()`), mas elas custam 40 a 60 ms em vez de 300 a 400.
 - A lista de A Rua não ficou mais barata (dentro do ruído, com a carga entre 8 e 22): a barra que some ou volta renderiza a tela dela de qualquer forma, e a memo das linhas já existia. Não se afirma ganho de rolagem. A execução 1 das ricas no Android (carga 17,2, 888 renderizações, p95 de 96,9 ms, 1694 quadros) é uma execução lenta do emulador, não regressão: as outras duas deram 1100 e 1139.
-- Parado no Android: sem RPC medida, porque a Vitrine não passa por `node.request` (nenhuma linha `req:`), como na seção 245.
+- Parado no Android: sem RPC medida, porque a Vitrine não passa por `node.request` (nenhuma linha `req:`), como na seção 252.
 
 ### Regressão ou lacuna encontrada
 
@@ -11224,16 +11239,16 @@ Android (emulador, Vitrine rica com players, Metro 8096), cada item com captura 
 
 - Células de rolagem com players no Android (acima); com players no iOS e no web: não repetidas (a tarefa pedia uma vez, no Android).
 - iOS parado 60 s e web parado 60 s à parte: a web parada foi lida pelos 110 s de cada execução (as quatro abas ficaram em 18 renderizações cada, contra 3245 a 3281); o iOS parado não foi repetido.
-- Nó vivo, PWA instalado, build de release e aparelho de verdade: mesma lista da seção 245.
+- Nó vivo, PWA instalado, build de release e aparelho de verdade: mesma lista da seção 252.
 - Frame p95 não foi usado como portão.
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
 
-## 247. Montagem das linhas de publicação: uma renderização por linha (branch perf/row-mount)
+## 254. Montagem das linhas de publicação: uma renderização por linha (branch perf/row-mount)
 
 Esta seção confere o PR3 da rodada de desempenho. Uma linha de publicação passa a renderizar uma vez ao montar: `src/postRowLayout.js` mantém a largura da legenda dentro de 0,5 pt da estimativa (`captionWidthNext`), compara tamanhos com tolerância de 0,5 pt (`sameSize`) e guarda num cache do módulo o último tamanho dos alvos do cabeçalho, que semeia a reserva do primeiro render da linha seguinte (`headReserveOf`, uma semente por linha); `ClampText` só guarda uma contagem medida quando ela muda a conta (`measurementToStore`); cada `ActionsSheet` monta na primeira abertura e fica (`openedNext`); o ouvinte de movimento reduzido do módulo `PostRow` foi trocado pelo repositório compartilhado (`useReduceMotion`). A foto (`MediaView`, `startImageFade`) anima no driver nativo onde existe e no JS na web, e um movimento reduzido que chega tarde a encaixa por `stopAnimation`.
 
-Ambiente: o mesmo das seções 245 e 246 (emulador `varanda-perf` com `-no-window`, simulador iPhone 16e, Chrome sem cabeça com CPU 4x, Metro com `--clear`, Vitrine grande, sem nó, carga média de 1 min anotada abaixo). Antes é a seção 246 (T7, mesma máquina, no mesmo dia); depois é esta branch com as mudanças ainda sem commit. Alcance: A Rua com rolagem roteirizada de 60 s.
+Ambiente: o mesmo das seções 252 e 253 (emulador `varanda-perf` com `-no-window`, simulador iPhone 16e, Chrome sem cabeça com CPU 4x, Metro com `--clear`, Vitrine grande, sem nó, carga média de 1 min anotada abaixo). Antes é a seção 253 (T7, mesma máquina, no mesmo dia); depois é esta branch com as mudanças ainda sem commit. Alcance: A Rua com rolagem roteirizada de 60 s.
 
 ```sh
 # a partir de apps/app; por célula, Metro novo e a rolagem roteirizada (Android e iOS)
@@ -11244,7 +11259,7 @@ node apps/app/scripts/perf-summary.js <log>
 
 Antes e depois (mediana de 3 execuções cada; web e iOS ricas, Android texto e ricas). `rendersPerMountMedian` e `P95` vêm de `perf-summary.js`. Dentro do ruído quer dizer menos de 10%.
 
-| Célula | Medida | Antes (246) | Depois | Mudança |
+| Célula | Medida | Antes (253) | Depois | Mudança |
 |---|---|---|---|---|
 | Android texto (carga 17,1 a 19,1) | `tab:rua`, renderizações | 1149 | 794 | -31% |
 | | `tab:rua`, ms | 13470 | 10904 | -19% |
@@ -11281,15 +11296,15 @@ Android (emulador, Vitrine rica, Metro 8097), com captura de tela:
 
 ### Não medido
 
-- Android ricas com players (`EMBEDS=1`): ainda aborta pelo laço de permissão de DRM (PR #606), como na seção 246; não repetido.
+- Android ricas com players (`EMBEDS=1`): ainda aborta pelo laço de permissão de DRM (PR #606), como na seção 253; não repetido.
 - Android texto: a contagem de renderizações por linha no P95 e as linhas com legenda longa; iOS texto e web texto: não repetidos (a tarefa pedia só ricas no iOS e na web).
-- Nó vivo, PWA instalado, build de release e aparelho de verdade: mesma lista da seção 245.
+- Nó vivo, PWA instalado, build de release e aparelho de verdade: mesma lista da seção 252.
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
 
-## 248. Linhas estáveis nas demais listas e relógio de minuto pausado (branch perf/list-rows)
+## 255. Linhas estáveis nas demais listas e relógio de minuto pausado (branch perf/list-rows)
 
-Esta seção confere o PR4 da rodada de desempenho: Espiadinha, Diário, Busca, Conversa, Membro e Mensagem passam a ter linhas estáveis (tratadores e `extraData` que não mudam a cada renderização da tela), e `useVisibleNow(60000)` (`src/ui/index.js`, `src/visibleNow.js`) pausa o relógio de minuto enquanto a tela está escondida. Ambiente: o das seções 245 a 247 (emulador Android `varanda-perf` sem janela, Vitrine grande e rica, sem nó). Antes é o PR3 (seção 247, logs de T10 no mesmo emulador); depois é esta árvore, com as mudanças ainda sem commit.
+Esta seção confere o PR4 da rodada de desempenho: Espiadinha, Diário, Busca, Conversa, Membro e Mensagem passam a ter linhas estáveis (tratadores e `extraData` que não mudam a cada renderização da tela), e `useVisibleNow(60000)` (`src/ui/index.js`, `src/visibleNow.js`) pausa o relógio de minuto enquanto a tela está escondida. Ambiente: o das seções 252 a 254 (emulador Android `varanda-perf` sem janela, Vitrine grande e rica, sem nó). Antes é o PR3 (seção 254, logs de T10 no mesmo emulador); depois é esta árvore, com as mudanças ainda sem commit.
 
 ```sh
 # a partir de apps/app, Metro novo por célula
@@ -11299,7 +11314,7 @@ EXPO_PUBLIC_VARANDA_VITRINE=1 EXPO_PUBLIC_VARANDA_VITRINE_LARGE=1 EXPO_PUBLIC_VA
 
 Rolagem roteirizada de A Rua, Android rico, mediana de 3 execuções. Atenção à carga: antes 17 a 22, depois 10 a 12 (a máquina estava mais livre), então milissegundos e quadros não se comparam com o antes; só as contagens.
 
-| Medida | Antes (247) | Depois | Leitura |
+| Medida | Antes (254) | Depois | Leitura |
 |---|---|---|---|
 | `tab:rua`, renderizações / ms | 817 / 9363 | 980 / 6625 | contagem maior com mais quadros (3109 contra 2192), carga diferente: sem conclusão |
 | renderizações por linha montada | 1 | 1 | igual |
@@ -11309,7 +11324,7 @@ Rolagem roteirizada de A Rua, Android rico, mediana de 3 execuções. Atenção 
 | `tab:busca`, `list:conversas` | 11, 6 | 11, 6 | igual |
 | quadros p95 | 64,8 | 38,0 | carga diferente, não se afirma ganho |
 
-Parado e em uso, 60 s por tela (uma execução; sem linha de base, porque as seções 245 a 247 não mediram estas telas):
+Parado e em uso, 60 s por tela (uma execução; sem linha de base, porque as seções 252 a 254 não mediram estas telas):
 
 | Tela | renderizações / ms em 60 s |
 |---|---|
@@ -11343,7 +11358,7 @@ Android (emulador, Vitrine rica, Metro 8097), com captura de tela:
 
 ### Não medido
 
-- iOS e web nesta rodada; Android com players; nó vivo, PWA, release e aparelho de verdade (lista da seção 245).
+- iOS e web nesta rodada; Android com players; nó vivo, PWA, release e aparelho de verdade (lista da seção 252).
 - Antes das telas parada, thread, Membro, Mensagem e teclado: sem linha de base (nenhuma seção anterior as mediu e não se troca de branch para obter uma).
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
