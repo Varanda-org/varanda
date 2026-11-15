@@ -2669,8 +2669,9 @@ Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
 - A sobreposição da web não conhece a fase real da conexão. Ela sai quando o app a remove, ou some sozinha em 20 s; se o app montar depois disso, o splash do app toca a entrada e passa a ser o anunciado para leitor de tela.
 - 1,5 s e 10 s são fixos, sem configuração. O piso de 1,5 s não vale mais para quem volta ao app com a fase `ready` e sem cartões nem Termos a seguir (seção 152): a marca sai quando A Rua está pronta.
 - No nativo não há desenho animado em SVG, porque o app não tem biblioteca SVG. A cadeira é o PNG de 128 px, mostrado no máximo a 96 px.
-- Na primeira abertura, se o nó ainda estiver conectando depois dos cartões, o splash do app toca a entrada de novo (a sobreposição web já saiu).
-- No nativo, o primeiro quadro do splash é transparente (a entrada parte da opacidade 0), como no splash anterior; com "reduzir movimento", a marca aparece de uma vez.
+- Resolvido (#355): na primeira abertura, se o nó ainda estiver conectando depois dos cartões, o splash volta já assentado, sem tocar a entrada de novo (`App.js` passa `entered={presented}` ao `Splash`).
+- No nativo, o primeiro quadro do splash mostra só o fundo da janela (`app.json`, `backgroundColor` #fbf8f3): a cena entra a partir da opacidade 0, de propósito (seção 242); com "reduzir movimento", a marca aparece de uma vez.
+- Resolvido (#355): na web, antes do JavaScript, a sobreposição segue a escolha manual de Ajustes › Aparência. `public/pre-scheme.js`, carregado no `<head>` (CSP `script-src 'self'`, sem código inline), lê o registro `varanda-aparencia` do `localStorage` e põe `data-scheme` no `html`; sem registro, ou com Sistema, vale o modo do sistema. Teste: `apps/app/test/preSplash.test.js`.
 - Uma queda da conexão logo depois de `ready`, ainda dentro do 1,5 s (que hoje só se aplica a quem tem cartões ou Termos a seguir), segue o caminho de antes: o app já marcou a conexão como vista e não volta para Conectar.
 
 ### Splash até a primeira tela (fix/boot-splash-first-screen, 2026-11-03)
@@ -2685,6 +2686,17 @@ Antes, o splash saía cedo e deixava aparecer telas de espera (passkey "carregan
 6. [ ] Web: "Entrar" com a passkey aparece como antes, e depois de entrar as telas seguem como antes (não realizada ainda).
 7. [ ] Cartões de introdução, Termos e Conexão sem mudança (não realizada ainda).
 8. [ ] Depois de A Rua, bloquear e desbloquear não traz o splash de volta (não realizada ainda).
+
+Limites resolvidos (#355, `apps/app/test/identidadeBoot.test.js`):
+
+- "Escolha seu @nome" como primeira tela não abre mais no próprio "Preparando sua conta…": o splash espera também a leitura do estado da conta daquela chave (`apps/app/src/setupInfoKnown.js`; o `LinkCard` avisa a chave lida por `onAccountRead`), dentro da mesma paciência de 10 s. Quando o passo vem depois de "Confirme sua idade" ou "Confirme seu celular", o app já saiu do splash e ele não volta: aí "Preparando sua conta…" aparece no passo, de propósito.
+- Com passkey, um erro de `node.info` na `Identidade` chega ao shell na hora (`onInfoError`) e a tela de erro aparece sem esperar os 10 s.
+- Na configuração manual sem passkey, a `Identidade` começa com o `node.info` que o shell já leu (`initialInfo`), sem o "carregando…" curto; ela ainda relê uma vez para buscar a identidade.
+- Não se aplica: o rodapé "Conexão" continua escondido nos passos do celular com a instalação (modo `hosted`), então não há troca de instalação no meio do cadastro. A política e o resultado da idade já são guardados por instalação (`App.js`, `agePolicyEntry.origin` e `ageOriginRef`); o convite guardado não carrega a instalação (`apps/app/src/profileLink.js`, `encodeInvite`), o que só importaria se o rodapé aparecesse.
+
+9. [ ] Android, depois iOS: primeira entrada com Google até "Escolha seu @nome": do splash direto ao formulário, sem "Preparando sua conta…" (não realizada ainda).
+10. [ ] Nó que falha em `node.info` logo depois de entrar com passkey: a mensagem de erro com "Tentar de novo" aparece sem esperar 10 s (não realizada ainda).
+11. [ ] Configuração manual sem passkey (nativo ou instalação própria): o passo "Liberar sua conta" aparece sem um "carregando…" curto (não realizada ainda).
 
 ## 45. Passkey sem PRF: cartão Entrar com passos e "tentar de novo" (PR fix/passkey-no-prf-ux, 2026-10-30)
 
@@ -2726,7 +2738,7 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 
 - A lista de passkeys que falharam fica só na memória da página: depois de recarregar, o nó pode oferecer de novo uma passkey que já falhou, e o cartão só a nomeia quando ela falhar outra vez.
 - Tentar de novo no mesmo gerenciador sem PRF pode dar "já existe uma passkey do Varanda neste gerenciador: use entrar"; entrar com ela leva de volta ao cartão com os passos.
-- Os textos citam a Apple e o Google para todos; o app não detecta a plataforma.
+- Os textos citam a Apple e o Google e dizem "ou outro" gerenciador de senhas (decisão da manutenção, #355); o app não detecta a plataforma.
 - Se a passkey escolhida em Entrar era a da criação pendente, "concluir" continua aparecendo e, tocado, só diz "nenhuma criação de passkey pendente"; "Criar passkey" ao lado resolve. Esconder o "concluir" depois de uma falha dele perderia uma criação ainda viva quando a pessoa só fechou o diálogo, e a tela não distingue os dois casos. Essa passkey também não é nomeada para apagar. Saber qual das duas falhou exigiria o nó informar a criação pendente.
 - Os estados presos e as saídas novas (passkey sem sincronização, caminho pelo celular, passkeys recusadas guardadas, saída de uma passkey conhecida perdida) estão em §109; os resultados desta seção não foram refeitos.
 
@@ -3490,7 +3502,7 @@ Verificação do app nativo com todas as mudanças da pilha "celular primeiro" a
 
 - Aparelho real, emulador x86_64, build de release.
 - Entrar com passkey: precisa de conta Google e bloqueio de tela no emulador, que não foram criados. Além disso, o build de debug (`app.varanda.debug`) não casa com o `assetlinks` da instalação de produção (`app.varanda`), então não entra por passkey nela. Por isso nenhuma tela autenticada foi aberta, inclusive cadeira e comunidade depois do login.
-- O rodapé "Conexão" nos passos de configuração do celular com a instalação ficou como na `main` (escondido): mostrá-lo deixaria trocar de instalação no meio do cadastro, e a política de idade, o resultado da idade e o convite guardado ainda não são zerados por instalação nesse caminho. Fica para um PR próprio.
+- O rodapé "Conexão" nos passos de configuração do celular com a instalação ficou como na `main` (escondido). Conferido na issue #355: nesse modo (`hosted`) não há como trocar de instalação no meio do cadastro, e a política e o resultado da idade já são guardados por instalação. Veja §44.
 - Push do sistema, login no iOS.
 - O workflow `native.yml` não foi disparado.
 
