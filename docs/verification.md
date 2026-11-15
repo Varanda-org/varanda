@@ -11244,11 +11244,11 @@ Android (emulador, Vitrine rica com players, Metro 8096), cada item com captura 
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
 
-## 247. Montagem das linhas de publicação: uma renderização por linha (branch perf/row-mount)
+## 254. Montagem das linhas de publicação: uma renderização por linha (branch perf/row-mount)
 
 Esta seção confere o PR3 da rodada de desempenho. Uma linha de publicação passa a renderizar uma vez ao montar: `src/postRowLayout.js` mantém a largura da legenda dentro de 0,5 pt da estimativa (`captionWidthNext`), compara tamanhos com tolerância de 0,5 pt (`sameSize`) e guarda num cache do módulo o último tamanho dos alvos do cabeçalho, que semeia a reserva do primeiro render da linha seguinte (`headReserveOf`, uma semente por linha); `ClampText` só guarda uma contagem medida quando ela muda a conta (`measurementToStore`); cada `ActionsSheet` monta na primeira abertura e fica (`openedNext`); o ouvinte de movimento reduzido do módulo `PostRow` foi trocado pelo repositório compartilhado (`useReduceMotion`). A foto (`MediaView`, `startImageFade`) anima no driver nativo onde existe e no JS na web, e um movimento reduzido que chega tarde a encaixa por `stopAnimation`.
 
-Ambiente: o mesmo das seções 245 e 246 (emulador `varanda-perf` com `-no-window`, simulador iPhone 16e, Chrome sem cabeça com CPU 4x, Metro com `--clear`, Vitrine grande, sem nó, carga média de 1 min anotada abaixo). Antes é a seção 246 (T7, mesma máquina, no mesmo dia); depois é esta branch com as mudanças ainda sem commit. Alcance: A Rua com rolagem roteirizada de 60 s.
+Ambiente: o mesmo das seções 252 e 253 (emulador `varanda-perf` com `-no-window`, simulador iPhone 16e, Chrome sem cabeça com CPU 4x, Metro com `--clear`, Vitrine grande, sem nó, carga média de 1 min anotada abaixo). Antes é a seção 253 (T7, mesma máquina, no mesmo dia); depois é esta branch com as mudanças ainda sem commit. Alcance: A Rua com rolagem roteirizada de 60 s.
 
 ```sh
 # a partir de apps/app; por célula, Metro novo e a rolagem roteirizada (Android e iOS)
@@ -11259,7 +11259,7 @@ node apps/app/scripts/perf-summary.js <log>
 
 Antes e depois (mediana de 3 execuções cada; web e iOS ricas, Android texto e ricas). `rendersPerMountMedian` e `P95` vêm de `perf-summary.js`. Dentro do ruído quer dizer menos de 10%.
 
-| Célula | Medida | Antes (246) | Depois | Mudança |
+| Célula | Medida | Antes (253) | Depois | Mudança |
 |---|---|---|---|---|
 | Android texto (carga 17,1 a 19,1) | `tab:rua`, renderizações | 1149 | 794 | -31% |
 | | `tab:rua`, ms | 13470 | 10904 | -19% |
@@ -11296,8 +11296,8 @@ Android (emulador, Vitrine rica, Metro 8097), com captura de tela:
 
 ### Não medido
 
-- Android ricas com players (`EMBEDS=1`): ainda aborta pelo laço de permissão de DRM (PR #606), como na seção 246; não repetido.
+- Android ricas com players (`EMBEDS=1`): ainda aborta pelo laço de permissão de DRM (PR #606), como na seção 253; não repetido.
 - Android texto: a contagem de renderizações por linha no P95 e as linhas com legenda longa; iOS texto e web texto: não repetidos (a tarefa pedia só ricas no iOS e na web).
-- Nó vivo, PWA instalado, build de release e aparelho de verdade: mesma lista da seção 245.
+- Nó vivo, PWA instalado, build de release e aparelho de verdade: mesma lista da seção 252.
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
