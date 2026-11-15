@@ -1,12 +1,14 @@
 // Lifetime rules for a provider player frame that loads by itself in a list.
 // A card loads its frame once it has been in the band, or near it (up to
 // EMBED_AHEAD_BANDS band heights ahead or behind), on two checks in a row, so
-// the player is ready before the person reaches it. A loaded frame is kept
-// for as long as its screen is the one being looked at: coming back to its
-// card must find the same provider page, mid-track, instead of a fresh load,
-// however far or long the person scrolled. A list draws its frames in one
-// layer of its own (./ui/EmbedLayer), so the frame outlives a row the list
-// unmounts. At most EMBED_LIVE_MAX frames load app-wide, a cap that shrink
+// the player is ready before the person reaches it. A loaded frame the person
+// has not touched is kept for as long as its screen is the one being looked
+// at: coming back to its card must find the same provider page instead of a
+// fresh load, however far or long the person scrolled. Only that untouched
+// frame is kept at any distance: what the person started must not go on once
+// its post is off the screen, so a touched frame found out of the band
+// unloads (embedLeaves). A list draws its frames in one layer of its own
+// (./ui/EmbedLayer), so a frame outlives a row the list unmounts. At most EMBED_LIVE_MAX frames load app-wide, a cap that shrink
 // lowers, never under EMBED_LIVE_MIN, when the system reclaims a frame's
 // content process. The app cannot see play or pause inside a cross-origin
 // frame, so it treats a frame the person touched (engaged) as playing: such a
@@ -111,8 +113,13 @@ export function embedStep (state, sample) {
 // first. A preload (gap > 0) asks only an untouched holder at least
 // EMBED_YIELD_GAP farther away, and takes at most one new slot per tick, so a
 // fling does not load a burst of frames at once; a visible card is never
-// held back. A release frees a slot, so it clears every request: a newcomer
-// that still needs one asks again on its next tick, and no holder yields
+// held back: while one waits, the slot that frees is kept from preloads
+// for 2 ticks after the last visible ask. Neither a withdraw nor a visible
+// card taking a slot ends that hold, since the pool cannot tell whose
+// request it was or whether another visible card still waits: a card that
+// stops asking lets the hold run out. A release frees a
+// slot, so it clears every request: a newcomer that still needs one asks
+// again on its next tick, and no holder yields
 // while a slot stands free. shrink lowers the cap without closing anything:
 // the pool drains to it as holders release.
 export function createEmbedSlots (max = EMBED_LIVE_MAX) {
@@ -120,6 +127,7 @@ export function createEmbedSlots (max = EMBED_LIVE_MAX) {
   let order = 0
   let lastPreload = -Infinity
   let lastShrink = -Infinity
+  let askedAt = -Infinity
   const count = () => holders.size
   const preloadOf = (gap) => (gap > 0 ? gap : 0)
   const untouched = (holder, readerTouch) => readerTouch !== true && holder.engaged === false
@@ -165,10 +173,15 @@ export function createEmbedSlots (max = EMBED_LIVE_MAX) {
     if (holder.since > 0 && typeof gap === 'number') holder.gap = Number.isFinite(gap) ? gap : Infinity
     return holder.wanted === true && eligible(holder, holder.wantGap, readerTouch)
   }
-  const free = (gap = 0, readerTouch) => count() < max || pick(preloadOf(gap), readerTouch) !== null
+  const visibleWaits = (now) => Number.isFinite(now) && now - askedAt < 2 * EMBED_TICK_MS
+  const free = (gap = 0, readerTouch, now) => {
+    if (preloadOf(gap) > 0 && visibleWaits(now)) return false
+    return count() < max || pick(preloadOf(gap), readerTouch) !== null
+  }
   const acquire = (gap = 0, now, readerTouch) => {
     const want = preloadOf(gap)
     if (want > 0 && Number.isFinite(now) && now - lastPreload < EMBED_TICK_MS) return null
+    if (want > 0 && visibleWaits(now)) return null
     if (count() < max) {
       const release = () => {
         if (!holders.delete(release)) return
@@ -184,6 +197,7 @@ export function createEmbedSlots (max = EMBED_LIVE_MAX) {
       holder.wantGap = holder.wanted === true ? Math.min(holder.wantGap, want) : want
       holder.wanted = true
     }
+    if (want === 0 && Number.isFinite(now)) askedAt = now
     return null
   }
   // A waiting card holds no handle to its own request, so it clears them
@@ -276,6 +290,17 @@ export function embedStays (touched, locked) {
 // as a touch.
 export function embedTouched (engaged, readerOn, readerKnown) {
   return engaged === true || readerOn === true || readerKnown !== true
+}
+
+// Whether a frame found out of the band on two checks in a row unloads. A
+// touched one may be playing, but a just-tapped or just-taken-back one may
+// still be scrolling into view, so it waits OPEN_GRACE_MS from the touch; an
+// unreadable age counts as old. While a screen reader runs every frame counts
+// as touched, yet a preloaded frame never found in the band (shown) stays:
+// closing it would only load it again on a later check, in a loop.
+export function embedLeaves (engaged, readerTouch, shown, touchAgeMs) {
+  if (engaged === true) return !Number.isFinite(touchAgeMs) || touchAgeMs >= OPEN_GRACE_MS
+  return readerTouch === true && shown === true
 }
 
 export function embedsHeld (depth = 0) {
