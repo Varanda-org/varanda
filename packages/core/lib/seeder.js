@@ -2241,7 +2241,8 @@ class Seeder {
       if (entry.dropped || this._closing) return
       if (this._overQuota(core)) this._drop(key, 'quota')
       // The signed length grew: the committed follows may miss the new
-      // blocks until the scan reaches them, so pages say incomplete.
+      // blocks until the scan reaches them, so they are unpublished and
+      // the pages they touch say incomplete (lib/notices.js).
       // The same growth marks the diary active (wall clock: the windows are
       // Brasília calendar days). The synchronous call at the end of _serve
       // sees core.length === activityLength, so a restore, a re-gate or a
@@ -2770,7 +2771,8 @@ class Seeder {
     // The loop stops at an unknown hole, while the signed length advances
     // before the blocks arrive: publishing a prefix could hide a later
     // unfollow, so only a fold that reached the signed length is committed
-    // (a pending author marks every page `incomplete`).
+    // (a pending author's edges are unpublished, and the pages it may touch
+    // say `incomplete`: lib/notices.js).
     if (entry.scanned >= core.length) {
       this._notices.commit(key)
       this._postNotices.settle(key)
@@ -6980,16 +6982,17 @@ class Seeder {
             }
             return true
           }
-          const engagementRows = this._index.noticeRows(target, Date.now(), visible)
+          const engagement = this._index.noticePage(target, Date.now(), visible)
           const result = this._postNotices.pageV3({
             target,
             followRows: f.rows,
             followIncomplete: f.incomplete,
-            engagementRows,
+            engagementRows: engagement.rows,
             // Not stats().saturated: it turns true at the cap before anything
             // is refused and stays on; a refused block pauses that diary's
             // cursor, which _indexFlags already reports (as indexEngagers).
-            engagementIncomplete: held || !this._indexFlags().complete,
+            // noticePage's own flag: its per-request scan cap cut the rows.
+            engagementIncomplete: held || engagement.incomplete || !this._indexFlags().complete,
             isBlocked,
             issuerUsable: (i) => !revoked.has(i),
             after,
