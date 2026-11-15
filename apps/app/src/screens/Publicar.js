@@ -744,6 +744,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const genRef = useRef(0)
   // True while Publicar uploads the items (one send at a time).
   const uploadingRef = useRef(false)
+  // While the node seals a post for the outbox: no second send meanwhile.
+  const queueingRef = useRef(false)
   const [uploading, setUploading] = useState(false)
   const media = node.media && typeof node.media.upload === 'function' ? node.media : null
   const mediaOnline = node.online !== false
@@ -812,6 +814,12 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const frozen = locked || pageSending
   const openRef = useRef(open)
   openRef.current = open
+  // Bumped on every close: what settles later knows the composer it began in
+  // is gone.
+  const closesRef = useRef(0)
+  useEffect(() => {
+    if (!open) closesRef.current++
+  }, [open])
   const asPageRef = useRef(asPage)
   asPageRef.current = asPage
   const canAttach = typeof pickImages === 'function' && (media !== null || asPage !== null)
@@ -1233,11 +1241,17 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     onPublished(sentReply ? 'reply' : 'post', sentReply ? sentReply.ref : null)
   }
 
-  // Keeps the post in the outbox (the reply target verbatim). True when it
-  // was stored; otherwise the draft stays with the reason.
-  const queue = (sent, sentReply) => {
+  // Keeps the post in the outbox (the reply target verbatim), sealed by the
+  // node before it is stored. True when it was stored; otherwise the draft
+  // stays with the reason. onPublished only while this composer is still
+  // mounted and open since the seal began: a seal that settles after it
+  // closed (even if it was opened again) reports nothing.
+  const queue = async (sent, sentReply) => {
+    if (queueingRef.current) return false
+    queueingRef.current = true
+    const closes = closesRef.current
     try {
-      outbox.add({
+      await outbox.add({
         author: self.publicKey,
         association: node.config.association,
         kind: sentReply ? 'reply' : 'post',
@@ -1247,9 +1261,13 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     } catch (err) {
       setCheckError(errorText(err))
       return false
+    } finally {
+      queueingRef.current = false
     }
     setText((current) => (current === sent ? '' : current))
-    onPublished(sentReply ? 'queued-reply' : 'queued-post', sentReply ? sentReply.ref : null)
+    if (mountedRef.current && openRef.current && closesRef.current === closes) {
+      onPublished(sentReply ? 'queued-reply' : 'queued-post', sentReply ? sentReply.ref : null)
+    }
     return true
   }
 
@@ -1332,7 +1350,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   }
 
   const send = async () => {
-    if (busy || uploadingRef.current || video.draft.state.phase === 'preparing') return
+    if (busy || uploadingRef.current || queueingRef.current || video.draft.state.phase === 'preparing') return
     setCheckError('')
     // Before every path below (photos, the outbox, a page's signature). The
     // draft is kept, so the person can edit it. A signed post waiting for its
@@ -1370,7 +1388,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       }
       if (sentMedia === null) return
     } else if (offlineQueue && !sentQuote && sentMusic === null) {
-      queue(sent, sentReply)
+      await queue(sent, sentReply)
       return
     }
     // The node stamps `at` from the same clock: a match must be this send's.
@@ -1426,7 +1444,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     // post waits in the outbox (text only: a post with photos or a quote
     // stays here).
     if (sentMusic === null && sentMedia === null && !sentQuote && canQueue && raw && raw.uncertain !== true && raw.message === GATE_MESSAGE) {
-      if (queue(sent, sentReply)) action.clearError()
+      if (await queue(sent, sentReply)) action.clearError()
       return
     }
     if (!r.uncertain) return

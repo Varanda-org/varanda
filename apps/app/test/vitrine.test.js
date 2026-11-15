@@ -39,6 +39,8 @@ const resultKeys = {
   'inviteCard.verify': ['ok', 'reason'],
   'push.sign': ['signature'],
   'seen.sign': ['signature', 'prevHash'],
+  'outbox.seal': ['box'],
+  'outbox.open': ['to', 'text'],
   'seen.merge': ['avisos', 'pending', 'dmChanged', 'groupChanged', 'blocksChanged', 'caughtUp'],
   'report.sign': ['signature'],
   'appeal.sign': ['signature'],
@@ -565,6 +567,7 @@ function samples (f) {
   const to = `${f.own}:3`
   const nonce = 'v'.repeat(43)
   const card = { code: nonce, design: 'cordel', name: 'Ana', message: 'Vem pra praça.', expires: 1800000000 }
+  const queued = { id: '0123456789abcdef', author: f.own, association: 'c'.repeat(64), kind: 'post', writtenAt: '2026-11-15T12:00:00.000Z' }
   const params = {
     'session.open': {},
     'node.info': {},
@@ -620,6 +623,8 @@ function samples (f) {
     'inviteCard.sign': card,
     'inviteCard.verify': { ...card, member: 'ab'.repeat(32), signature: '0'.repeat(128) },
     'push.sign': { action: 'on', nonce, endpoint: 'https://push.example.org/vitrine', p256dh: 'vitrine', auth: 'vitrine' },
+    'outbox.seal': { ...queued, to: null, text: 'Fica para depois.' },
+    'outbox.open': { ...queued, box: Buffer.from(JSON.stringify([1, queued.id, queued.author, queued.association, queued.kind, null, 'Fica para depois.', queued.writtenAt])).toString('base64url') },
     'seen.sign': { nonce, action: 'read' },
     'seen.merge': { blob: null, avisos: { own: [] }, unchanged: false },
     'report.sign': { nonce, target: member, reason: 'outro' },
@@ -704,6 +709,18 @@ function appSources (dir) {
     return entry.isDirectory() ? appSources(file) : entry.name.endsWith('.js') ? [file] : []
   })
 }
+
+test('the demo outbox seal opens as itself only, and skips another identity', async (t) => {
+  const { fixtures: f, request } = await load()
+  const item = { id: '00000000000000aa', author: f.own, association: 'c'.repeat(64), kind: 'reply', writtenAt: '2026-11-15T12:00:00.000Z' }
+  const text = 'Até já 😀\nde novo'
+  const { box } = await answer(t, request, 'outbox.seal', { ...item, to: `${f.own}:3`, text })
+  t.alike(await answer(t, request, 'outbox.open', { ...item, box }), { to: `${f.own}:3`, text })
+  await refused(t, request, 'outbox.open', { ...item, writtenAt: '2026-11-15T12:00:01.000Z', box }, 'USAGE', 'item da fila de saída inválido')
+  await refused(t, request, 'outbox.open', { ...item, box: 'QUFB' }, 'USAGE', 'item da fila de saída inválido')
+  await refused(t, request, 'outbox.open', { ...item, author: f.members[2].author, box }, 'USAGE', 'item da fila de saída de outra identidade')
+  await refused(t, request, 'outbox.seal', { ...item, author: f.members[2].author, to: `${f.own}:3`, text }, 'USAGE', 'item da fila de saída de outra identidade')
+})
 
 test('every quoted RPC method used by the app has a documented vitrine answer', async (t) => {
   const { fixtures: f, createVitrineRequest } = await load()

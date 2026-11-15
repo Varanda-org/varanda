@@ -326,7 +326,8 @@ const { followSet } = require('@varanda/core/lib/media')
 const { sealMedia, openMedia, validPrivateItem, PRIVATE_ITEM_KEYS, MAX_SEALED_MEDIA_PLAIN_BYTES } = require('@varanda/core/lib/group-media')
 const { signNoticeProof } = require('@varanda/core/lib/notices')
 const store = require('./node-store')
-const { groupKeyPairFromPrf } = require('./passkey')
+const { groupKeyPairFromPrf, outboxKeyFromPrf } = require('./passkey')
+const { sealOutbox, openOutbox, WRONG_AUTHOR: OUTBOX_WRONG_AUTHOR } = require('./outbox-seal')
 const { createGroupKeys } = require('./group-keys')
 const { checkSeederUrl } = require('./seeder-url')
 const { createDmEngine, MOMENT_PHOTO_GONE, BLOCKED: DM_BLOCKED, NO_PAGE_KEY, KEY_MISMATCH: DM_KEY_MISMATCH, USE_PAGE_DRAFT: DM_USE_PAGE_DRAFT } = require('./dm')
@@ -903,6 +904,11 @@ function createBrowserSession ({
   let keyPair = null
   let mediaKeyPair = null
   let groupPrf = null
+  // The outbox key (passkey.js outboxKeyFromPrf), derived from groupPrf on
+  // the first outbox.seal / outbox.open and zero-filled with it; outboxGen
+  // moves on every zeroing, so a derivation that straddles one is dropped.
+  let outboxKey = null
+  let outboxGen = 0
   // The direct message store unlock setKeyPair starts off the chain (it reads
   // and opens every local row): settles once that unlock is done or
   // superseded, never rejects, and is null when none is pending. Every
@@ -2084,6 +2090,35 @@ function createBrowserSession ({
     return { seq: r.seq, on: r.on, changed: r.changed }
   }
 
+  // The outbox seal of the unlocked identity `author` (docs/rpc.md 5.124
+  // and 5.125): fn(key) runs in the same tick as the last check, so a lock
+  // can never hand it a zeroed key. Off the chain: it reads no storage.
+  async function withOutboxKey (author, fn) {
+    const check = () => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      if (keyPair === null || groupPrf === null) throw new UsageError(store.LOCKED)
+      if (b4a.toString(keyPair.publicKey, 'hex') !== author) throw new UsageError(OUTBOX_WRONG_AUTHOR)
+    }
+    try {
+      check()
+      if (outboxKey === null) {
+        const gen = outboxGen
+        const key = await outboxKeyFromPrf(groupPrf, { hkdf })
+        if (gen !== outboxGen) {
+          key.fill(0)
+          check()
+          throw new UsageError(store.LOCKED)
+        }
+        if (outboxKey === null) outboxKey = key
+        else key.fill(0)
+        check()
+      }
+      return fn(outboxKey)
+    } catch (err) {
+      throw toRpcError(err, reportInternal)
+    }
+  }
+
   function checkGroupOperation (epoch, generation) {
     if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
     if (epoch !== connection) throw rpcError('USAGE', 'conexão encerrada')
@@ -3099,6 +3134,15 @@ function createBrowserSession ({
       const signature = signRecovery(fields, keyPair)
       return { signature }
     }),
+
+    // The app's outbox items (docs/rpc.md 5.124 and 5.125): target and text
+    // sealed under the outbox key, bound to the readable fields. Neither
+    // writes anything.
+    'outbox.seal': ({ id, author, association, kind, to, text, writtenAt }) =>
+      withOutboxKey(author, (key) => ({ box: sealOutbox(key, { id, author, association, kind, to, text, writtenAt }) })),
+
+    'outbox.open': ({ box, id, author, association, kind, writtenAt }) =>
+      withOutboxKey(author, (key) => openOutbox(key, box, { id, author, association, kind, writtenAt })),
 
     // Signs the signup-invite request with the in-memory key (docs/rpc.md
     // 5.30), exactly like terms.sign. The session fills in member and
@@ -4363,6 +4407,9 @@ function createBrowserSession ({
     mediaKeyPair = null
     if (groupPrf !== null) groupPrf.fill(0)
     groupPrf = null
+    outboxGen++
+    if (outboxKey !== null) outboxKey.fill(0)
+    outboxKey = null
     boxKeys.lock()
     dmEngine.lock()
     pageGroupKeys.lock()

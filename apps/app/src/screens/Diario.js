@@ -36,6 +36,7 @@ import { perfMarks, useNode } from '../node'
 import { useNames } from '../names'
 import { useOutbox } from '../outboxProvider'
 import { UNCERTAIN_MESSAGE } from '../outbox'
+import { canDiscard } from '../outboxSeal'
 import { deletePostRows } from '../deletion'
 import { pinnedContentStyle } from '../profileBar'
 import { revokeDeletedMedia } from '../media/cache'
@@ -152,6 +153,9 @@ function sessionAllowsDiarioSnapshot (passkey, owner) {
   return st !== null && typeof st === 'object' && st.unlocked === true && st.signedOut !== true &&
     typeof st.publicKey === 'string' && st.publicKey.toLowerCase() === owner
 }
+
+// An outbox item whose text is still sealed (not opened since the unlock).
+const SEALED_TEXT = 'Texto protegido até desbloquear.'
 
 // The state line of an outbox item. `held`: queued, but not sent
 // automatically (found in storage from an earlier visit).
@@ -601,8 +605,10 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const pending = info && node.config ? outbox.itemsFor(info.publicKey, node.config.association) : []
   // Queued items not approved in this page session (stored before it, or
   // changed in storage since they were approved): they wait for 'enviar',
-  // which approves them exactly as shown here.
-  const held = pending.filter((item) => item.state === 'queued' && !outbox.isAllowed(item))
+  // which approves them exactly as shown here. An item not open yet (its
+  // text still sealed, src/outboxSeal.js) cannot be approved: it shows the
+  // placeholder and no action but 'apagar'.
+  const held = pending.filter((item) => item.state === 'queued' && item.opened && !outbox.isAllowed(item))
   const heldIds = held.map((item) => item.id)
   // The post a queued reply answers, shown before it is approved: the stored
   // target can be changed by any script of this origin, so the person must
@@ -626,22 +632,24 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
           : null}
         {pending.map((item) => (
           <View key={item.id} style={styles.pending}>
-            <Text style={styles.pendingText}>{displayText(item.text, { multiline: true })}</Text>
-            {item.kind === 'reply'
+            <Text style={styles.pendingText}>{item.opened ? displayText(item.text, { multiline: true }) : SEALED_TEXT}</Text>
+            {item.opened && item.kind === 'reply'
               ? <Soft>{'resposta a ' + replyTargetText(item.to)}</Soft>
               : null}
             <Soft>
               {'escrito ' + (relativeTime(item.writtenAt, now) ?? displayText(item.writtenAt)) +
                 ' · a data será a do envio'}
             </Soft>
-            <PendingState item={item} held={heldIds.includes(item.id)} />
-            {item.state !== 'sending'
+            {item.opened || item.state !== 'queued' ? <PendingState item={item} held={heldIds.includes(item.id)} /> : null}
+            {/* An open 'sending' item waits for its reconciliation; one not
+                open in this window is never reconciled here, so it can go. */}
+            {canDiscard(item)
               ? (
                 <View style={styles.pendingActions}>
                   {heldIds.includes(item.id)
                     ? <Pill label='Enviar' onPress={() => outbox.release([item])} />
                     : null}
-                  {!heldIds.includes(item.id) && (item.state === 'uncertain' || item.state === 'failed')
+                  {item.opened && !heldIds.includes(item.id) && (item.state === 'uncertain' || item.state === 'failed')
                     ? <Pill label='Tentar de novo' onPress={() => outbox.retry(item)} />
                     : null}
                   <Pill icon='lixeira' accessibilityLabel='apagar' onPress={() => outbox.discard(item.id)} />
