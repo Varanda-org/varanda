@@ -25,8 +25,8 @@ export const BUSCA_PLACEHOLDER = Object.freeze({
   publicacoes: SEARCH_PLACEHOLDER
 })
 
-export const BUSCA_NOT_HOSTED_TITLE = 'Só na versão web'
-export const BUSCA_NOT_HOSTED = 'Nesta versão, a pesquisa de publicações só funciona no site da associação ou no app ligado à instalação.'
+export const BUSCA_NOT_HOSTED_TITLE = 'Pesquisa indisponível'
+export const BUSCA_NOT_HOSTED = 'A pesquisa de publicações está disponível no site da associação ou no app ligado à instalação.'
 export const BUSCA_UNAVAILABLE_TITLE = 'Busca indisponível'
 export const BUSCA_UNAVAILABLE = 'A pesquisa não está disponível nesta conexão.'
 
