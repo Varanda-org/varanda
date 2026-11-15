@@ -14,6 +14,7 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.io.File
 import java.io.FileInputStream
+import java.io.FileNotFoundException
 import java.nio.LongBuffer
 import java.nio.file.Files
 import java.nio.file.LinkOption
@@ -22,29 +23,34 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
-// Dev-only measurement spike: the account service's pinned MiniLM model on
-// ONNX Runtime (CPU), to measure load time, inference time and memory on a
-// real phone. Product code never calls it. The model is read only from
-// <filesDir>/sentinel/model_quantized.onnx (a fixed path, never one from JS),
-// and its sha256 is streamed and compared with the caller's pin before the
-// session is created. Nothing is logged (ONNX Runtime at FATAL) and nothing
-// touches the network. Every operation runs on one worker thread, one at a
-// time (BUSY otherwise). Native error text never reaches JS. Unless the host
-// app is debuggable (its own ApplicationInfo, not this library's BuildConfig),
-// isAvailable is false and every call rejects UNSUPPORTED: the spike runs in
-// debug builds only.
+// Dev-only measurement spike: a pinned model on ONNX Runtime (CPU), to
+// measure load time, inference time and memory on a real phone. Product code
+// never calls it. load takes a model key from a fixed allowlist (embed: the
+// account service's MiniLM embedder, nli: a zero-shot NLI classifier), and
+// the model is read only from that key's fixed file in <filesDir>/sentinel
+// (never a path from JS). Its sha256 is streamed and compared with the
+// caller's pin before the session is created. One model is loaded at a time.
+// Nothing is logged (ONNX Runtime at FATAL) and nothing touches the network.
+// Every operation runs on one worker thread, one at a time (BUSY otherwise).
+// Native error text never reaches JS. Unless the host app is debuggable (its
+// own ApplicationInfo, not this library's BuildConfig), isAvailable is false
+// and every call rejects UNSUPPORTED: the spike runs in debug builds only.
 class SentinelSpikeModule : Module() {
   companion object {
     private const val DIM = 384
     // The account service's MAX_TOKENS and the pinned tokenizer's vocabulary
-    // size (see modules/sentinel-spike/index.js).
+    // size, then the NLI pair limit, the vocabulary of the on-device MiniLM
+    // NLI model (multilingual-MiniLMv2-L6-mnli-xnli, 250002 entries) and the
+    // accepted label counts (see modules/sentinel-spike/index.js).
     private const val MAX_TOKENS = 128
     private const val VOCAB_SIZE = 250_002
+    private const val MAX_PAIR_TOKENS = 256
+    private const val NLI_VOCAB_SIZE = 250_002
+    private const val MIN_LABELS = 2
+    private const val MAX_LABELS = 8
     private const val MAX_THREADS = 4
     private const val CHUNK_BYTES = 1 shl 20
     private const val DIR = "sentinel"
-    private const val MODEL = "model_quantized.onnx"
-    private const val OUTPUT = "last_hidden_state"
 
     // One environment for the process, created on first use at FATAL.
     // getEnvironment(level, name) logs a warning when the environment
@@ -54,10 +60,21 @@ class SentinelSpikeModule : Module() {
     }
   }
 
+  // The only models load accepts. JS names a key; the file name and the
+  // output the session must have are fixed here.
+  private enum class Kind(val key: String, val fileName: String, val output: String) {
+    EMBED("embed", "model_quantized.onnx", "last_hidden_state"),
+    NLI("nli", "nli_quantized.onnx", "logits");
+
+    companion object {
+      fun named(key: String): Kind? = values().firstOrNull { it.key == key }
+    }
+  }
+
   private class Missing : Exception()
   private class PinMismatch : Exception()
 
-  private class Loaded(val session: OrtSession, val tokenTypes: Boolean)
+  private class Loaded(val session: OrtSession, val tokenTypes: Boolean, val kind: Kind)
 
   private val busy = AtomicBoolean(false)
   private val worker: ExecutorService = Executors.newSingleThreadExecutor { task ->
@@ -74,22 +91,26 @@ class SentinelSpikeModule : Module() {
       enabled()
     }
 
-    AsyncFunction("load") { expected: String, threads: Double, promise: Promise ->
+    AsyncFunction("load") { model: String, expected: String, threads: Double, promise: Promise ->
       if (!enabled()) {
         promise.reject("UNSUPPORTED", "unsupported", null)
         return@AsyncFunction
       }
-      if (!isSha256Hex(expected) || !threads.isFinite() || threads != Math.rint(threads)) {
+      val kind = Kind.named(model)
+      if (kind == null || !isSha256Hex(expected) || !threads.isFinite() || threads != Math.rint(threads)) {
         promise.reject("INVALID", "invalid", null)
         return@AsyncFunction
       }
       val count = threads.coerceIn(1.0, MAX_THREADS.toDouble()).toInt()
+      // No app storage means this environment cannot host the model at all
+      // (UNSUPPORTED, as on iOS without Documents); MISSING is kept for a
+      // model file that is absent.
       val filesDir = appContext.reactContext?.filesDir
       if (filesDir == null) {
         promise.reject("UNSUPPORTED", "unsupported", null)
         return@AsyncFunction
       }
-      val file = File(File(filesDir, DIR), MODEL)
+      val file = File(File(filesDir, DIR), kind.fileName)
       submit(promise) {
         val start = SystemClock.elapsedRealtimeNanos()
         // The old session goes first, so the memory reading after a reload
@@ -102,7 +123,7 @@ class SentinelSpikeModule : Module() {
         } catch (e: PinMismatch) {
           return@submit Answer.Reject("PIN")
         }
-        loaded = open(file, count)
+        loaded = open(file, count, kind)
         Answer.Resolve(mapOf("loadMs" to msSince(start), "fileBytes" to bytes.toDouble()))
       }
     }
@@ -112,18 +133,41 @@ class SentinelSpikeModule : Module() {
         promise.reject("UNSUPPORTED", "unsupported", null)
         return@AsyncFunction
       }
-      val tokens = tokens(ids, mask)
+      val tokens = tokens(ids, mask, MAX_TOKENS, VOCAB_SIZE)
       if (tokens == null) {
         promise.reject("INVALID", "invalid", null)
         return@AsyncFunction
       }
       submit(promise) {
         val current = loaded ?: return@submit Answer.Reject("NOT_LOADED")
+        if (current.kind != Kind.EMBED) return@submit Answer.Reject("WRONG_MODEL")
         val start = SystemClock.elapsedRealtimeNanos()
         val hidden = hidden(current, tokens.first, tokens.second)
         val inferMs = msSince(start)
         val vector = poolAndNormalize(hidden, tokens.second) ?: return@submit Answer.Reject("FAILED")
         Answer.Resolve(mapOf("vector" to vector.toList(), "inferMs" to inferMs))
+      }
+    }
+
+    // JS always sends typeIds, null when absent.
+    AsyncFunction("classify") { ids: List<Double>, mask: List<Double>, typeIds: List<Double>?, promise: Promise ->
+      if (!enabled()) {
+        promise.reject("UNSUPPORTED", "unsupported", null)
+        return@AsyncFunction
+      }
+      val tokens = tokens(ids, mask, MAX_PAIR_TOKENS, NLI_VOCAB_SIZE)
+      val types = typeIds?.let { bits(it) }
+      if (tokens == null || (typeIds != null && (types == null || types.size != ids.size))) {
+        promise.reject("INVALID", "invalid", null)
+        return@AsyncFunction
+      }
+      submit(promise) {
+        val current = loaded ?: return@submit Answer.Reject("NOT_LOADED")
+        if (current.kind != Kind.NLI) return@submit Answer.Reject("WRONG_MODEL")
+        val start = SystemClock.elapsedRealtimeNanos()
+        val logits = logits(current, tokens.first, tokens.second, types)
+        val inferMs = msSince(start)
+        Answer.Resolve(mapOf("logits" to logits.toList(), "inferMs" to inferMs))
       }
     }
 
@@ -216,15 +260,21 @@ class SentinelSpikeModule : Module() {
   private fun msSince(start: Long) = (SystemClock.elapsedRealtimeNanos() - start) / 1_000_000.0
 
   // Streams the file's sha256 in 1 MiB reads and compares it with the pin.
-  // A missing path, a symlink or anything but a regular file is Missing. The
-  // file is opened again by path for the session; the window between the two
-  // is inside the app's own private storage. A symlinked parent directory is
-  // the same class of risk: only the app itself could plant it there.
+  // A missing path, a symlink or anything but a regular file is Missing, and
+  // so is a file that vanishes before it can be opened (FileNotFoundException).
+  // The file is opened again by path for the session; the window between the
+  // two is inside the app's own private storage. A symlinked parent directory
+  // is the same class of risk: only the app itself could plant it there.
   private fun checkPin(file: File, expected: String): Long {
     if (!Files.isRegularFile(file.toPath(), LinkOption.NOFOLLOW_LINKS)) throw Missing()
     val digest = MessageDigest.getInstance("SHA-256")
     var total = 0L
-    FileInputStream(file).use { input ->
+    val stream = try {
+      FileInputStream(file)
+    } catch (e: FileNotFoundException) {
+      throw Missing()
+    }
+    stream.use { input ->
       val buffer = ByteArray(CHUNK_BYTES)
       while (true) {
         val read = input.read(buffer)
@@ -238,10 +288,10 @@ class SentinelSpikeModule : Module() {
     return total
   }
 
-  // A CPU session, or an exception unless the inputs and outputs are the
-  // MiniLM ones: int64 input_ids and attention_mask, optional int64
-  // token_type_ids, last_hidden_state.
-  private fun open(file: File, threads: Int): Loaded {
+  // A CPU session, or an exception unless the inputs are int64 input_ids
+  // and attention_mask, plus optional int64 token_type_ids, and it has its
+  // kind's output (last_hidden_state for embed, logits for nli).
+  private fun open(file: File, threads: Int, kind: Kind): Loaded {
     val session = OrtSession.SessionOptions().use { options ->
       options.setIntraOpNumThreads(threads)
       options.setInterOpNumThreads(1)
@@ -255,41 +305,33 @@ class SentinelSpikeModule : Module() {
       val known = setOf("input_ids", "attention_mask", "token_type_ids")
       val int64 = inputs.values.all { (it.info as? TensorInfo)?.type == OnnxJavaType.INT64 }
       if (!known.containsAll(inputs.keys) || !inputs.containsKey("input_ids") ||
-        !inputs.containsKey("attention_mask") || !int64 || OUTPUT !in session.outputNames) {
+        !inputs.containsKey("attention_mask") || !int64 || kind.output !in session.outputNames) {
         throw IllegalStateException()
       }
-      return Loaded(session, inputs.containsKey("token_type_ids"))
+      return Loaded(session, inputs.containsKey("token_type_ids"), kind)
     } catch (e: Exception) {
       session.close()
       throw e
     }
   }
 
-  // last_hidden_state for one sequence, exactly [1, n, DIM] floats.
-  private fun hidden(current: Loaded, ids: LongArray, mask: LongArray): FloatArray {
+  // Runs one sequence and hands the kind's output to `read` while it is
+  // still open. token_type_ids, when the model takes them, are the caller's
+  // or zeros.
+  private fun <T> infer(current: Loaded, ids: LongArray, mask: LongArray, types: LongArray?, read: (OnnxTensor) -> T): T {
     val shape = longArrayOf(1, ids.size.toLong())
     val tensors = mutableMapOf<String, OnnxTensor>()
     try {
       tensors["input_ids"] = OnnxTensor.createTensor(ENV, LongBuffer.wrap(ids), shape)
       tensors["attention_mask"] = OnnxTensor.createTensor(ENV, LongBuffer.wrap(mask), shape)
       if (current.tokenTypes) {
-        tensors["token_type_ids"] = OnnxTensor.createTensor(ENV, LongBuffer.wrap(LongArray(ids.size)), shape)
+        tensors["token_type_ids"] = OnnxTensor.createTensor(ENV, LongBuffer.wrap(types ?: LongArray(ids.size)), shape)
       }
       OrtSession.RunOptions().use { run ->
         run.setLogLevel(OrtLoggingLevel.ORT_LOGGING_LEVEL_FATAL)
-        current.session.run(tensors, setOf(OUTPUT), run).use { result ->
-          val value = result.get(OUTPUT).orElse(null) as? OnnxTensor ?: throw IllegalStateException()
-          val info = value.info
-          val dims = info.shape
-          if (info.type != OnnxJavaType.FLOAT || dims.size != 3 || dims[0] != 1L ||
-            dims[1] != ids.size.toLong() || dims[2] != DIM.toLong()) {
-            throw IllegalStateException()
-          }
-          val buffer = value.floatBuffer
-          if (buffer.remaining() != ids.size * DIM) throw IllegalStateException()
-          val out = FloatArray(ids.size * DIM)
-          buffer.get(out)
-          return out
+        current.session.run(tensors, setOf(current.kind.output), run).use { result ->
+          val value = result.get(current.kind.output).orElse(null) as? OnnxTensor ?: throw IllegalStateException()
+          return read(value)
         }
       }
     } finally {
@@ -297,22 +339,70 @@ class SentinelSpikeModule : Module() {
     }
   }
 
-  // One tokenized text: the same non-empty length up to MAX_TOKENS, whole ids
-  // inside the vocabulary, a 0/1 mask with at least one 1.
-  private fun tokens(ids: List<Double>, mask: List<Double>): Pair<LongArray, LongArray>? {
-    if (ids.isEmpty() || ids.size > MAX_TOKENS || ids.size != mask.size) return null
+  // last_hidden_state for one sequence, exactly [1, n, DIM] floats.
+  private fun hidden(current: Loaded, ids: LongArray, mask: LongArray): FloatArray {
+    if (current.kind != Kind.EMBED) throw IllegalStateException()
+    return infer(current, ids, mask, null) { value ->
+      val info = value.info
+      val dims = info.shape
+      if (info.type != OnnxJavaType.FLOAT || dims.size != 3 || dims[0] != 1L ||
+        dims[1] != ids.size.toLong() || dims[2] != DIM.toLong()) {
+        throw IllegalStateException()
+      }
+      val buffer = value.floatBuffer
+      if (buffer.remaining() != ids.size * DIM) throw IllegalStateException()
+      val out = FloatArray(ids.size * DIM)
+      buffer.get(out)
+      out
+    }
+  }
+
+  // The raw logits of one pair: exactly [1, k] floats, MIN_LABELS <= k <=
+  // MAX_LABELS, all finite.
+  private fun logits(current: Loaded, ids: LongArray, mask: LongArray, types: LongArray?): DoubleArray {
+    if (current.kind != Kind.NLI) throw IllegalStateException()
+    return infer(current, ids, mask, types) { value ->
+      val info = value.info
+      val dims = info.shape
+      if (info.type != OnnxJavaType.FLOAT || dims.size != 2 || dims[0] != 1L ||
+        dims[1] < MIN_LABELS.toLong() || dims[1] > MAX_LABELS.toLong()) {
+        throw IllegalStateException()
+      }
+      val k = dims[1].toInt()
+      val buffer = value.floatBuffer
+      if (buffer.remaining() != k) throw IllegalStateException()
+      val floats = FloatArray(k)
+      buffer.get(floats)
+      DoubleArray(k) { i ->
+        val v = floats[i]
+        if (!v.isFinite()) throw IllegalStateException()
+        v.toDouble()
+      }
+    }
+  }
+
+  // One tokenized input: the same non-empty length up to maxTokens, whole ids
+  // below vocabSize, a 0/1 mask with at least one 1.
+  private fun tokens(ids: List<Double>, mask: List<Double>, maxTokens: Int, vocabSize: Int): Pair<LongArray, LongArray>? {
+    if (ids.isEmpty() || ids.size > maxTokens || ids.size != mask.size) return null
     val outIds = LongArray(ids.size)
     for ((i, id) in ids.withIndex()) {
-      if (!id.isFinite() || id != Math.rint(id) || id < 0 || id >= VOCAB_SIZE) return null
+      if (!id.isFinite() || id != Math.rint(id) || id < 0 || id >= vocabSize) return null
       outIds[i] = id.toLong()
     }
-    val outMask = LongArray(mask.size)
-    for ((i, m) in mask.withIndex()) {
-      if (m != 0.0 && m != 1.0) return null
-      outMask[i] = m.toLong()
-    }
+    val outMask = bits(mask) ?: return null
     if (outMask.none { it == 1L }) return null
     return Pair(outIds, outMask)
+  }
+
+  // Each value 0 or 1, else null.
+  private fun bits(values: List<Double>): LongArray? {
+    val out = LongArray(values.size)
+    for ((i, v) in values.withIndex()) {
+      if (v != 0.0 && v != 1.0) return null
+      out[i] = v.toLong()
+    }
+    return out
   }
 
   // Attention-mask-aware mean pooling over [1, n, DIM], then L2

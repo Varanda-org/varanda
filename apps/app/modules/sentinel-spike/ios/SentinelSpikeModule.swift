@@ -4,16 +4,17 @@ import ExpoModulesCore
 import Foundation
 import onnxruntime_objc
 
-// Dev-only measurement spike: the account service's pinned MiniLM model on
-// ONNX Runtime (CPU), to measure load time, inference time and memory on a
-// real iPhone. Product code never calls it. The model is read only from
-// Documents/sentinel/model_quantized.onnx (a fixed path, never one from JS),
-// and its sha256 is streamed and compared with the caller's pin before the
-// session is created. Nothing is logged and nothing touches the network.
-// Every operation runs on one serial queue, one at a time (BUSY otherwise).
-// Native error text never reaches JS. A Release build answers isAvailable
-// false and rejects every call UNSUPPORTED: the spike runs in debug builds
-// only.
+// Dev-only measurement spike: a pinned model on ONNX Runtime (CPU), to
+// measure load time, inference time and memory on a real iPhone. Product code
+// never calls it. load takes a model key from a fixed allowlist (embed: the
+// account service's MiniLM embedder, nli: a zero-shot NLI classifier), and
+// the model is read only from that key's fixed file in Documents/sentinel
+// (never a path from JS). Its sha256 is streamed and compared with the
+// caller's pin before the session is created. One model is loaded at a time.
+// Nothing is logged and nothing touches the network. Every operation runs on
+// one serial queue, one at a time (BUSY otherwise). Native error text never
+// reaches JS. A Release build answers isAvailable false and rejects every
+// call UNSUPPORTED: the spike runs in debug builds only.
 public class SentinelSpikeModule: Module {
   #if DEBUG
   static let enabled = true
@@ -23,9 +24,15 @@ public class SentinelSpikeModule: Module {
 
   static let dim = 384
   // The account service's MAX_TOKENS and the pinned tokenizer's vocabulary
-  // size (see modules/sentinel-spike/index.js).
+  // size, then the NLI pair limit, the vocabulary of the on-device MiniLM NLI
+  // model (multilingual-MiniLMv2-L6-mnli-xnli, 250002 entries) and the
+  // accepted label counts (see modules/sentinel-spike/index.js).
   static let maxTokens = 128
   static let vocabSize = 250_002
+  static let maxPairTokens = 256
+  static let nliVocabSize = 250_002
+  static let minLabels = 2
+  static let maxLabels = 8
   static let maxThreads = 4
   static let chunkBytes = 1 << 20
 
@@ -42,16 +49,24 @@ public class SentinelSpikeModule: Module {
       return SentinelSpikeModule.enabled
     }
 
-    AsyncFunction("load") { (expected: String, threads: Double, promise: Promise) in
+    AsyncFunction("load") { (model: String, expected: String, threads: Double, promise: Promise) in
       guard SentinelSpikeModule.enabled else {
         promise.reject("UNSUPPORTED", "unsupported")
         return
       }
-      guard SentinelSpikeModule.isSha256Hex(expected), threads.isFinite, threads == threads.rounded() else {
+      guard let kind = SentinelSpikeKind.named(model), SentinelSpikeModule.isSha256Hex(expected),
+            threads.isFinite, threads == threads.rounded() else {
         promise.reject("INVALID", "invalid")
         return
       }
       let count = Int(min(Double(SentinelSpikeModule.maxThreads), max(1, threads)))
+      // No Documents directory means this environment cannot host the model
+      // at all (UNSUPPORTED, as on Android without filesDir); MISSING is kept
+      // for a model file that is absent.
+      guard let url = SentinelSpikeModule.modelURL(kind) else {
+        promise.reject("UNSUPPORTED", "unsupported")
+        return
+      }
       guard self.begin() else {
         promise.reject("BUSY", "busy")
         return
@@ -64,9 +79,8 @@ public class SentinelSpikeModule: Module {
         var answer: [String: Any]?
         var code = "FAILED"
         do {
-          let fileBytes = try SentinelSpikeModule.checkPin(expected)
-          guard let url = SentinelSpikeModule.modelURL() else { throw SentinelSpikeError.failed }
-          self.runtime = try SentinelSpikeRuntime(path: url.path, threads: count)
+          let fileBytes = try SentinelSpikeModule.checkPin(url, expected)
+          self.runtime = try SentinelSpikeRuntime(kind: kind, path: url.path, threads: count)
           answer = ["loadMs": SentinelSpikeModule.msSince(start), "fileBytes": Double(fileBytes)]
         } catch SentinelSpikeError.missing {
           code = "MISSING"
@@ -91,7 +105,9 @@ public class SentinelSpikeModule: Module {
         promise.reject("UNSUPPORTED", "unsupported")
         return
       }
-      guard let tokens = SentinelSpikeTokens(ids: ids, mask: mask) else {
+      guard let tokens = SentinelSpikeTokens(ids: ids, mask: mask, typeIds: nil,
+                                             maxTokens: SentinelSpikeModule.maxTokens,
+                                             vocabSize: SentinelSpikeModule.vocabSize) else {
         promise.reject("INVALID", "invalid")
         return
       }
@@ -105,6 +121,11 @@ public class SentinelSpikeModule: Module {
           promise.reject("NOT_LOADED", "not loaded")
           return
         }
+        guard runtime.kind == .embed else {
+          self.end()
+          promise.reject("WRONG_MODEL", "wrong model")
+          return
+        }
         let start = DispatchTime.now().uptimeNanoseconds
         let hidden = try? runtime.hidden(tokens)
         let inferMs = SentinelSpikeModule.msSince(start)
@@ -112,6 +133,45 @@ public class SentinelSpikeModule: Module {
         self.end()
         if let vector = vector {
           promise.resolve(["vector": vector, "inferMs": inferMs])
+        } else {
+          promise.reject("FAILED", "failed")
+        }
+      }
+    }
+
+    // JS always sends typeIds, null when absent.
+    AsyncFunction("classify") { (ids: [Double], mask: [Double], typeIds: [Double]?, promise: Promise) in
+      guard SentinelSpikeModule.enabled else {
+        promise.reject("UNSUPPORTED", "unsupported")
+        return
+      }
+      guard let tokens = SentinelSpikeTokens(ids: ids, mask: mask, typeIds: typeIds,
+                                             maxTokens: SentinelSpikeModule.maxPairTokens,
+                                             vocabSize: SentinelSpikeModule.nliVocabSize) else {
+        promise.reject("INVALID", "invalid")
+        return
+      }
+      guard self.begin() else {
+        promise.reject("BUSY", "busy")
+        return
+      }
+      self.queue.async {
+        guard let runtime = self.runtime else {
+          self.end()
+          promise.reject("NOT_LOADED", "not loaded")
+          return
+        }
+        guard runtime.kind == .nli else {
+          self.end()
+          promise.reject("WRONG_MODEL", "wrong model")
+          return
+        }
+        let start = DispatchTime.now().uptimeNanoseconds
+        let logits = try? runtime.logits(tokens)
+        let inferMs = SentinelSpikeModule.msSince(start)
+        self.end()
+        if let logits = logits {
+          promise.resolve(["logits": logits, "inferMs": inferMs])
         } else {
           promise.reject("FAILED", "failed")
         }
@@ -175,20 +235,20 @@ public class SentinelSpikeModule: Module {
     return Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
   }
 
-  static func modelURL() -> URL? {
+  static func modelURL(_ kind: SentinelSpikeKind) -> URL? {
     return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
       .appendingPathComponent("sentinel", isDirectory: true)
-      .appendingPathComponent("model_quantized.onnx", isDirectory: false)
+      .appendingPathComponent(kind.fileName, isDirectory: false)
   }
 
   // Streams the file's sha256 in 1 MiB reads and compares it with the pin.
-  // A missing path, a symlink or anything but a regular file is MISSING. The
-  // file is opened again by path for the session; the window between the two
-  // is inside the app's own sandbox. A symlinked parent directory is the same
-  // class of risk: only something already inside the sandbox could plant it.
-  static func checkPin(_ expected: String) throws -> Int64 {
-    guard let url = modelURL(),
-          let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+  // A missing path, a symlink or anything but a regular file is MISSING, and
+  // so is a file that vanishes before it can be opened. The file is opened
+  // again by path for the session; the window between the two is inside the
+  // app's own sandbox. A symlinked parent directory is the same class of
+  // risk: only something already inside the sandbox could plant it.
+  static func checkPin(_ url: URL, _ expected: String) throws -> Int64 {
+    guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
           attributes[.type] as? FileAttributeType == .typeRegular,
           let handle = try? FileHandle(forReadingFrom: url) else {
       throw SentinelSpikeError.missing
@@ -259,20 +319,50 @@ public class SentinelSpikeModule: Module {
   }
 }
 
-// A CPU session on the checked model. Refused unless its inputs are the
-// MiniLM ones (input_ids, attention_mask, optional token_type_ids) and it
-// has last_hidden_state. ONNX Runtime logs at FATAL only, so nothing reaches
-// the device log. Used from the module's serial queue only.
+// The only models load accepts. JS names a key; the file name and the output
+// the session must have are fixed here.
+enum SentinelSpikeKind {
+  case embed
+  case nli
+
+  static func named(_ key: String) -> SentinelSpikeKind? {
+    switch key {
+    case "embed": return .embed
+    case "nli": return .nli
+    default: return nil
+    }
+  }
+
+  var fileName: String {
+    switch self {
+    case .embed: return "model_quantized.onnx"
+    case .nli: return "nli_quantized.onnx"
+    }
+  }
+
+  var output: String {
+    switch self {
+    case .embed: return "last_hidden_state"
+    case .nli: return "logits"
+    }
+  }
+}
+
+// A CPU session on the checked model. Refused unless its inputs are
+// input_ids and attention_mask, plus optional token_type_ids, and it has its
+// kind's output (last_hidden_state for embed, logits for nli). ONNX Runtime
+// logs at FATAL only, so nothing reaches the device log. Used from the
+// module's serial queue only.
 final class SentinelSpikeRuntime {
-  private static let output = "last_hidden_state"
   // One environment for the process (ONNX Runtime shares it anyway). A
   // static let is initialized once, thread safely, on first use.
   private static let env: ORTEnv? = try? ORTEnv(loggingLevel: .fatal)
 
+  let kind: SentinelSpikeKind
   private let session: ORTSession
   private let tokenTypes: Bool
 
-  init(path: String, threads: Int) throws {
+  init(kind: SentinelSpikeKind, path: String, threads: Int) throws {
     guard let env = SentinelSpikeRuntime.env else { throw SentinelSpikeError.failed }
     let options = try ORTSessionOptions()
     try options.setIntraOpNumThreads(Int32(threads))
@@ -282,19 +372,59 @@ final class SentinelSpikeRuntime {
     // The Objective-C API of 1.21 lists input names but not their element
     // types. The tensors below are int64, and ONNX Runtime refuses a run
     // whose input type differs from the model's, so a non-int64 model input
-    // fails the first embed (FAILED) instead of producing a vector.
+    // fails the first run (FAILED) instead of producing a result.
     let inputs = Set(try session.inputNames())
     let known: Set<String> = ["input_ids", "attention_mask", "token_type_ids"]
     guard inputs.isSubset(of: known), inputs.contains("input_ids"), inputs.contains("attention_mask"),
-          try session.outputNames().contains(SentinelSpikeRuntime.output) else {
+          try session.outputNames().contains(kind.output) else {
       throw SentinelSpikeError.failed
     }
+    self.kind = kind
     self.session = session
     tokenTypes = inputs.contains("token_type_ids")
   }
 
   // last_hidden_state for one sequence, exactly [1, n, dim] floats.
   func hidden(_ tokens: SentinelSpikeTokens) throws -> Data {
+    guard kind == .embed else { throw SentinelSpikeError.failed }
+    let n = tokens.count
+    let value = try run(tokens)
+    let info = try value.tensorTypeAndShapeInfo()
+    let dims = info.shape.map { $0.intValue }
+    guard info.elementType == .float, dims == [1, n, SentinelSpikeModule.dim] else { throw SentinelSpikeError.failed }
+    let data = try value.tensorData() as Data
+    guard data.count == n * SentinelSpikeModule.dim * MemoryLayout<Float>.size else { throw SentinelSpikeError.failed }
+    return data
+  }
+
+  // The raw logits of one pair: exactly [1, k] floats, minLabels <= k <=
+  // maxLabels, all finite.
+  func logits(_ tokens: SentinelSpikeTokens) throws -> [Double] {
+    guard kind == .nli else { throw SentinelSpikeError.failed }
+    let value = try run(tokens)
+    let info = try value.tensorTypeAndShapeInfo()
+    let dims = info.shape.map { $0.intValue }
+    guard info.elementType == .float, dims.count == 2, dims[0] == 1,
+          dims[1] >= SentinelSpikeModule.minLabels, dims[1] <= SentinelSpikeModule.maxLabels else {
+      throw SentinelSpikeError.failed
+    }
+    let k = dims[1]
+    let data = try value.tensorData() as Data
+    guard data.count == k * MemoryLayout<Float>.size else { throw SentinelSpikeError.failed }
+    var floats = [Float](repeating: 0, count: k)
+    _ = floats.withUnsafeMutableBytes { data.copyBytes(to: $0) }
+    var out = [Double]()
+    out.reserveCapacity(k)
+    for f in floats {
+      guard f.isFinite else { throw SentinelSpikeError.failed }
+      out.append(Double(f))
+    }
+    return out
+  }
+
+  // Runs one sequence and returns the kind's output. token_type_ids, when
+  // the model takes them, are the caller's or zeros.
+  private func run(_ tokens: SentinelSpikeTokens) throws -> ORTValue {
     let n = tokens.count
     let shape: [NSNumber] = [1, NSNumber(value: n)]
     func tensor(_ values: [Int64]) throws -> (NSMutableData, ORTValue) {
@@ -311,21 +441,16 @@ final class SentinelSpikeRuntime {
       inputs[name] = value
     }
     if tokenTypes {
-      let (data, value) = try tensor([Int64](repeating: 0, count: n))
+      let (data, value) = try tensor(tokens.typeIds ?? [Int64](repeating: 0, count: n))
       buffers.append(data)
       inputs["token_type_ids"] = value
     }
     let run = try ORTRunOptions()
     try run.setLogSeverityLevel(.fatal)
-    let outputs = try session.run(withInputs: inputs, outputNames: [SentinelSpikeRuntime.output], runOptions: run)
+    let outputs = try session.run(withInputs: inputs, outputNames: [kind.output], runOptions: run)
     withExtendedLifetime(buffers) {}
-    guard let value = outputs[SentinelSpikeRuntime.output] else { throw SentinelSpikeError.failed }
-    let info = try value.tensorTypeAndShapeInfo()
-    let dims = info.shape.map { $0.intValue }
-    guard info.elementType == .float, dims == [1, n, SentinelSpikeModule.dim] else { throw SentinelSpikeError.failed }
-    let data = try value.tensorData() as Data
-    guard data.count == n * SentinelSpikeModule.dim * MemoryLayout<Float>.size else { throw SentinelSpikeError.failed }
-    return data
+    guard let value = outputs[kind.output] else { throw SentinelSpikeError.failed }
+    return value
   }
 }
 
@@ -335,29 +460,41 @@ enum SentinelSpikeError: Error {
   case failed
 }
 
-// One tokenized text: the same non-empty length up to maxTokens, whole ids
-// inside the vocabulary, a 0/1 mask with at least one 1.
+// One tokenized input: the same non-empty length up to maxTokens, whole ids
+// below vocabSize, a 0/1 mask with at least one 1, and token type ids that
+// are absent or one 0/1 per token.
 struct SentinelSpikeTokens {
   let ids: [Int64]
   let mask: [Int64]
+  let typeIds: [Int64]?
   var count: Int { return ids.count }
 
-  init?(ids: [Double], mask: [Double]) {
-    guard !ids.isEmpty, ids.count <= SentinelSpikeModule.maxTokens, ids.count == mask.count else { return nil }
+  init?(ids: [Double], mask: [Double], typeIds: [Double]?, maxTokens: Int, vocabSize: Int) {
+    guard !ids.isEmpty, ids.count <= maxTokens, ids.count == mask.count else { return nil }
     var outIds = [Int64]()
     outIds.reserveCapacity(ids.count)
     for id in ids {
-      guard id.isFinite, id == id.rounded(), id >= 0, id < Double(SentinelSpikeModule.vocabSize) else { return nil }
+      guard id.isFinite, id == id.rounded(), id >= 0, id < Double(vocabSize) else { return nil }
       outIds.append(Int64(id))
     }
-    var outMask = [Int64]()
-    outMask.reserveCapacity(mask.count)
-    for m in mask {
-      guard m == 0 || m == 1 else { return nil }
-      outMask.append(Int64(m))
+    guard let outMask = SentinelSpikeTokens.bits(mask), outMask.contains(1) else { return nil }
+    var outTypes: [Int64]?
+    if let typeIds = typeIds {
+      guard typeIds.count == ids.count, let bits = SentinelSpikeTokens.bits(typeIds) else { return nil }
+      outTypes = bits
     }
-    guard outMask.contains(1) else { return nil }
     self.ids = outIds
     self.mask = outMask
+    self.typeIds = outTypes
+  }
+
+  private static func bits(_ values: [Double]) -> [Int64]? {
+    var out = [Int64]()
+    out.reserveCapacity(values.count)
+    for v in values {
+      guard v == 0 || v == 1 else { return nil }
+      out.append(Int64(v))
+    }
+    return out
   }
 }

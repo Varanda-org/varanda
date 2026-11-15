@@ -96,3 +96,21 @@ test('formatLine: rejects arrays, strings and non-finite values in stats', async
   t.exception(() => formatLine('ok', { n: Infinity }))
   t.exception(() => formatLine('ok', null))
 })
+
+test('maxAbsDiff: largest elementwise gap, validates its input', async (t) => {
+  const { maxAbsDiff } = await load()
+  t.is(maxAbsDiff([1, 2, 3], [1, 2, 3]), 0)
+  t.is(maxAbsDiff([1, -2, 3], [1.5, -2.25, 2]), 1)
+  t.exception(() => maxAbsDiff([1, 2], [1]))
+  t.exception(() => maxAbsDiff([], []))
+  t.exception(() => maxAbsDiff([1, NaN], [1, 2]))
+})
+
+test('argmax: index of the largest element, first on a tie', async (t) => {
+  const { argmax } = await load()
+  t.is(argmax([0.1, 0.9, -1]), 1)
+  t.is(argmax([-3, -2, -1]), 2)
+  t.is(argmax([2, 2, 1]), 0)
+  t.exception(() => argmax([]))
+  t.exception(() => argmax([1, 'x']))
+})

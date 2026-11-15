@@ -33,6 +33,26 @@ export function cosine (a, b) {
   return dot / (Math.sqrt(na) * Math.sqrt(nb))
 }
 
+// Largest absolute elementwise difference of two equal-length, non-empty
+// numeric vectors.
+export function maxAbsDiff (a, b) {
+  assertVector(a, 'a')
+  assertVector(b, 'b')
+  if (a.length !== b.length) throw new Error('length mismatch: ' + a.length + ' vs ' + b.length)
+  let max = 0
+  for (let i = 0; i < a.length; i++) max = Math.max(max, Math.abs(a[i] - b[i]))
+  return max
+}
+
+// Index of the largest element of a non-empty numeric vector (the first one
+// on a tie).
+export function argmax (v) {
+  assertVector(v, 'v')
+  let best = 0
+  for (let i = 1; i < v.length; i++) if (v[i] > v[best]) best = i
+  return best
+}
+
 // Nearest-rank percentile on an already sorted array: index ceil(p/100 * n) - 1.
 function nearestRank (sorted, p) {
   const rank = Math.ceil((p / 100) * sorted.length)
