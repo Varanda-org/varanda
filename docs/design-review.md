@@ -37,6 +37,7 @@ Confira cada tela nas plataformas do ciclo:
 - Conversa
 - Membro
 - Diário
+- Posts salvos
 - Conversas e filtros
 - Mensagem
 - Comunidade
