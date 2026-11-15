@@ -28,6 +28,7 @@ import { Worklet } from 'react-native-bare-kit'
 import { Directory, Paths } from 'expo-file-system'
 import { createClient, encodeFrame, createFrameDecoder, MAX_REQUEST, MAX_MESSAGE, EVENTS } from '@varanda/rpc'
 import bundle from '../../assets/worklet/main.bundle.js'
+import { bootSpan, monotonicNow, perfOn } from '../perfMarks.js'
 
 const KEY = '__varandaNode'
 const NODE_WORKLET_ID = 'app.varanda.node'
@@ -114,7 +115,9 @@ function launch (args, { onEvent, id = null } = {}) {
     for (const name of EVENTS) client.on(name, (data) => onEvent(name, data))
   }
 
+  const startedAt = perfOn ? monotonicNow() : 0
   worklet.start('/app.bundle', bundle, [JSON.stringify(args)])
+  if (perfOn) bootSpan('worklet-start', startedAt, monotonicNow())
   return { worklet, client, ended }
 }
 
