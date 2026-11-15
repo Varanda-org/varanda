@@ -1366,9 +1366,10 @@ test('account (serve): an invalid VARANDA_AI is a usage error; a missing model r
   t.is(bad.code, 2)
   t.ok(bad.stderr.includes('VARANDA_AI inválido'))
   t.absent(fs.existsSync(path.join(dir, LOCK_FILE)), 'refused before the lock and the listen')
-  const badToken = varanda(dir, ['account'], { ...env, VARANDA_AI: '1', VARANDA_TRIAGE_TOKEN: 'segredo' })
+  // A value the usage text (HELP) can never contain, so only an echo matches.
+  const badToken = varanda(dir, ['account'], { ...env, VARANDA_AI: '1', VARANDA_TRIAGE_TOKEN: 'tk-ruim-q7z' })
   t.is(badToken.code, 2)
-  t.absent(badToken.stderr.includes('segredo'), 'the token is never printed')
+  t.absent(badToken.stderr.includes('tk-ruim-q7z'), 'the token is never printed')
 
   const svc = await serveCli(t, dir, { ...env, VARANDA_AI: '1', VARANDA_TRIAGE_TOKEN: token, VARANDA_AI_MODEL_DIR: path.join(root, 'sem-modelo') })
   const port = await until(() => listeningPort(svc.stdout()), { name: 'listening' })
