@@ -847,6 +847,7 @@ function createAccountServer ({
     since: ageSince,
     ageCheck,
     directoryFloor: ageDirectoryFloor,
+    linking: (m) => linking.has(m),
     issuer,
     http: { send, sendError, redirect, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
   })
@@ -864,6 +865,7 @@ function createAccountServer ({
     association,
     store,
     ageVerified: (m) => !ageRoutes.required() || ageRoutes.verified(m),
+    forgetAge: forgetRefusedAge,
     linked: (m) => store.status(m).linked || linking.has(m),
     deleted: (m) => store.deletedAt(m) !== null,
     burnable: (m) => {
@@ -1071,6 +1073,19 @@ function createAccountServer ({
   // phone code, a certificate, a rename or an invite. Off, it never refuses.
   function ageChecked (member) {
     if (ageRoutes.required() && !ageRoutes.verified(member)) throw refuse('idade-pendente')
+  }
+
+  // A full member cap refuses a key that already passed the age check (owner
+  // decision, 2026-11-15): the refusal forgets its { band, method, checkedAt },
+  // so the attempt leaves nothing about the person. Best effort: a store that
+  // cannot forget is logged without the member, and the refusal stands.
+  async function forgetRefusedAge (member) {
+    if (ages === null) return
+    try {
+      await ages.forget(member)
+    } catch {
+      log({ event: 'idade', reason: 'esquecer-falhou' })
+    }
   }
 
   // The same with phone verification on: a key without a verified number
@@ -1388,6 +1403,7 @@ function createAccountServer ({
       // then releases the reservation and the code works at once.
       const taken = mark && row.invite !== null && row.invite !== undefined && (routeErr.token === 'nome-em-uso' || routeErr.token === 'conta-vinculada')
       if (taken) store.dropPending(row.id)
+      if (routeErr.token === 'lista-de-espera') await forgetRefusedAge(row.member)
       // A waitlist or invite refusal deleted the row too: clear the cookie
       // as on success, so a retry starts over instead of answering 'expirado'.
       if (taken || routeErr.token === 'lista-de-espera' || routeErr.token === 'convite-invalido') routeErr.headers = clear
