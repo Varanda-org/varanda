@@ -63,7 +63,7 @@ const FOLLOW_UNCERTAIN = 'Não deu para confirmar se você passou a seguir.'
 // `onFollowsChanged` (optional): called after a follow or unfollow that
 // changed the follows, so the shell refreshes A Rua, Diário and the count.
 // `refresh`: the shell's bump after a follow or a sent post.
-export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest, onOpenMember, onFollowsChanged, onToast, onReply, onReport, onQuote, onOpenThread, onOpenMention, onOpenEngagers, refresh }) {
+export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest, onOpenMember, onFollowsChanged, onToast, onReply, onReport, onQuote, onOpenThread, onOpenMention, onOpenEngagers, onOpenQuotes, refresh }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const hosted = node.hosted === true
@@ -485,6 +485,7 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
         onOpenMember={openMember}
         onOpenMention={openMention}
         onOpenEngagers={onOpenEngagers}
+        onOpenQuotes={onOpenQuotes}
         onFollowsChanged={onFollowsChanged}
         onToast={onToast}
         onClear={() => onChangeText('')}

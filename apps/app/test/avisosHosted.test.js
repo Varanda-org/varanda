@@ -147,6 +147,14 @@ test('Avisos asks the names cache only while the screen is active and hosted', (
   t.ok(source.includes('}, [active, hosted, shownKeys, resolveMany])'))
 })
 
+test('Avisos gives a snippet read that came back without the post another chance on reload', (t) => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', 'Avisos.js'), 'utf8')
+  const hook = source.slice(source.indexOf('function useSnippets'), source.indexOf('function NoticeRow'))
+  t.ok(/if \(post === null\) blankRef\.current\.add\(r\)/.test(hook), 'a finished read without the post is remembered apart')
+  t.ok(hook.includes('for (const r of [...exhaustedRef.current, ...blankRef.current])'), 'a reload releases blank refs with the exhausted ones')
+  t.ok(hook.includes('blankRef.current.clear()'), 'and forgets them, so the next blank read is tracked again')
+})
+
 test('Avisos retries avatars once per full reload, not per partial page', (t) => {
   const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
   const callAt = source.indexOf('useRowAvatars(shownItems')

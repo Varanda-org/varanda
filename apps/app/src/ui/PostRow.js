@@ -77,6 +77,7 @@ import { shareNav } from '../shareNav'
 import { replyChip } from '../threadRows'
 import { whoOf } from '../who'
 import { ActionsSheet } from './ActionsSheet'
+import { usePostSheet } from './PostSheetHost'
 import { Avatar } from './Avatar'
 import { ClampControl, captionEstimate, useClamp } from './ClampText'
 import { Icon } from './Icon'
@@ -213,7 +214,7 @@ function PostRowView ({
   author, name, username, avatar, at, text, replyToName, replyPreviews, media, preview, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending, expanded = false,
   onOpen, onOpenAuthor, onOpenParent, onOpenPreviews, onOpenReposter, onFollowReposter, onOpenMention,
-  onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onBlock, onDelete, link, onNotice,
+  onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onOpenQuotes, onFollow, followPending, onReport, onBlock, onDelete, link, onNotice,
   seq, onMessage, publishable
 }) {
   // perfOn never changes while the app runs, so this hook call is stable.
@@ -224,6 +225,7 @@ function PostRowView ({
   const reposts = countOf(counts, 'reposts')
   const likeText = countLabel(likes)
   const repostText = countLabel(reposts)
+  const quotes = countOf(counts, 'quotes')
   const hasMedia = Array.isArray(media) && media.length > 0
   const embed = preview && typeof preview === 'object' ? embedOf(preview.url) : null
   const music = preview && typeof preview === 'object' ? musicRefOf(preview.url) : null
@@ -269,7 +271,18 @@ function PostRowView ({
   const burstScale = useRef(new Animated.Value(0.6)).current
   const burstOpacity = useRef(new Animated.Value(0)).current
   const [burstOn, setBurstOn] = useState(false)
-  const [sheet, setSheet] = useState(null)
+  const [localSheet, setLocalSheet] = useState(null)
+  // Under a list's PostSheetProvider the sheet is the list's, not the row's.
+  const host = usePostSheet()
+  const sheetRef = useRef({ repost: [], more: [] })
+  const hostSheet = useRef(null)
+  const setSheet = (kind) => {
+    if (kind !== null && host !== null) {
+      hostSheet.current = kind
+      host.show(rowId, sheetRef.current[kind] || [])
+    } else if (host === null) setLocalSheet(kind)
+  }
+  const sheet = localSheet
   const [opened, setOpened] = useState(null)
   if (sheet !== null && openedNext(opened, sheet) !== opened) setOpened(openedNext(opened, sheet))
   const reduceMotionOn = useReduceMotion()
@@ -331,6 +344,7 @@ function PostRowView ({
     ...(messageable ? [{ id: 'message', icon: 'mensagem', label: 'Mensagem em particular' }] : []),
     ...moreActions(null, { link, onReport: fn(onReport) ? true : null, onBlock: fn(onBlock) ? true : null }),
     ...(publicRow ? [{ id: 'public', icon: 'link', label: 'Página pública na web' }] : []),
+    ...(fn(onOpenQuotes) && quotes !== null && quotes > 0 ? [{ id: 'quotes', icon: 'citar', label: quotes === 1 ? 'Ver 1 citação' : 'Ver ' + quotes + ' citações' }] : []),
     ...(fn(onDelete) ? [{ id: 'delete', icon: 'lixeira', label: 'Apagar', danger: true }] : [])
   ]
   const runMore = (row) => {
@@ -341,6 +355,7 @@ function PostRowView ({
       }
     }
     if (row.id === 'message') return () => onMessage(author, { context: { author, seq, at, text, hasMedia } })
+    if (row.id === 'quotes') return onOpenQuotes
     if (row.id === 'public') return () => postPublic.open(String(author).toLowerCase() + ':' + seq)
     if (row.id === 'report') return onReport
     if (row.id === 'block') return onBlock
@@ -353,6 +368,12 @@ function PostRowView ({
     label: row.id === 'repost' && reposted ? 'Desfazer republicação' : row.label,
     onPress: row.id === 'repost' ? doRepost : fn(onQuote)
   }))
+  sheetRef.current = { repost: repostSheet, more: moreSheet }
+  // While this row's actions are up in the list's sheet, each render hands the
+  // fresh ones over (the host ignores a row that no longer owns it).
+  useEffect(() => {
+    if (host !== null && hostSheet.current !== null) host.refresh(rowId, sheetRef.current[hostSheet.current] || [])
+  })
   const hasMore = moreSheet.length > 0
   const headActions = !!fn(onFollow) || hasMore
   // Until the targets report their size, reserve what they usually take, so a
@@ -819,8 +840,8 @@ function PostRowView ({
                 )
               : <View style={styles.previews}>{previewsBody}</View>
             : null}
-          {opened && opened.repost ? <ActionsSheet open={sheet === 'repost'} onClose={() => setSheet(null)} actions={repostSheet} /> : null}
-          {opened && opened.more ? <ActionsSheet open={sheet === 'more'} onClose={() => setSheet(null)} actions={moreSheet} /> : null}
+          {host === null && opened && opened.repost ? <ActionsSheet open={sheet === 'repost'} onClose={() => setSheet(null)} actions={repostSheet} /> : null}
+          {host === null && opened && opened.more ? <ActionsSheet open={sheet === 'more'} onClose={() => setSheet(null)} actions={moreSheet} /> : null}
           {burstOn
             ? (
               <Animated.View

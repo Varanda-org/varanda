@@ -9,7 +9,7 @@ const load = () => import('../src/dm.js')
 test('dm.js exports the list helpers, the thread and the labels', async (t) => {
   const dm = await load()
   t.alike(Object.keys(dm).sort(), [
-    'LABELS', 'UNSURE_SEND', 'quoteIndex', 'quoteOf', 'requestsDot', 'sortConversations', 'splitFolders', 'tabDot', 'threadOf'
+    'LABELS', 'UNSURE_SEND', 'quoteIndex', 'quoteOf', 'sortConversations', 'splitFolders', 'tabDot', 'threadOf'
   ].sort())
   const imports = readFileSync(join(__dirname, '../src/dm.js'), 'utf8')
     .split('\n')
@@ -29,9 +29,7 @@ test('LABELS are the approved Portuguese', async (t) => {
     report: 'Denunciar',
     reply: 'Responder',
     message: 'Mensagem',
-    newMessage: 'Nova mensagem',
     requests: 'Pedidos de mensagem',
-    emptyInbox: 'Nenhuma conversa ainda. Abra o perfil de alguém e toque em Mensagem.',
     emptyRequests: 'Nenhum pedido de mensagem',
     requestNote: 'Até você aceitar, quem enviou não sabe se você leu',
     noBox: 'Esta pessoa ainda não recebe mensagens. Assim que ela abrir o Varanda com a versão nova, dá para escrever.',
@@ -84,8 +82,8 @@ test('splitFolders separates inbox and requests and drops anything else', async 
   t.alike(splitFolders({ folder: 'inbox' }), { inbox: [], requests: [] })
 })
 
-test('tabDot and requestsDot are booleans and never a count', async (t) => {
-  const { tabDot, requestsDot, splitFolders } = await load()
+test('tabDot is a boolean and never a count', async (t) => {
+  const { tabDot, splitFolders } = await load()
   const many = [{ unread: true }, { unread: true }, { unread: true }, { unread: true }]
   const dot = tabDot({ inbox: many, requests: [] })
   t.is(dot, true)
@@ -96,20 +94,11 @@ test('tabDot and requestsDot are booleans and never a count', async (t) => {
   t.is(tabDot({ inbox: [{ unread: 5 }], requests: [{ unread: 2 }] }), false, 'a number is not a dot')
   t.is(tabDot(null), false)
   t.is(tabDot({}), false)
-  const requestsDotOn = requestsDot(many)
-  t.is(requestsDotOn, true)
-  t.is(typeof requestsDotOn, 'boolean')
-  t.is(requestsDot([]), false)
-  t.is(requestsDot([{ unread: false }]), false)
-  t.is(requestsDot([{ unread: 9 }, { unread: 9 }]), false)
-  t.is(requestsDot(null), false)
-  t.is(requestsDot(4), false)
   const split = splitFolders([
     { peer: 'a', folder: 'inbox', unread: false },
     { peer: 'b', folder: 'request', unread: true }
   ])
   t.is(tabDot(split), true)
-  t.is(requestsDot(split.requests), true)
   t.is(tabDot({ inbox: split.inbox, requests: [] }), false)
 })
 

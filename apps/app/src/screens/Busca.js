@@ -45,6 +45,7 @@ import { pruneRows } from '../namesCache'
 import { peekAll, useFollowSet } from './Conversa'
 import { Soft, errorText, useBottomPad, useVisibleNow } from '../ui'
 import { PostRow } from '../ui/PostRow'
+import { PostSheetProvider } from '../ui/PostSheetHost'
 import { HelpNote } from '../ui/Help'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, SkeletonRow } from '../ui/States'
@@ -69,7 +70,12 @@ function pageNeeds (items) {
   return { local, shown, need, authors: [] }
 }
 
-export default function Busca ({ query, header, ownKey, avatarOf, active, scrollToTop, refresh, onReply, onReport, onQuote, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onFollowsChanged, onFollowed, onSocialChanged, onToast, onClear }) {
+// One actions sheet for the whole list instead of two per row.
+export default function Busca (props) {
+  return <PostSheetProvider><BuscaList {...props} /></PostSheetProvider>
+}
+
+function BuscaList ({ query, header, ownKey, avatarOf, active, scrollToTop, refresh, onReply, onReport, onQuote, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onFollowsChanged, onFollowed, onSocialChanged, onToast, onClear }) {
   const node = useNode()
   const { request } = node
   const social = useSocial({ ownKey, onToast })
@@ -314,7 +320,7 @@ export default function Busca ({ query, header, ownKey, avatarOf, active, scroll
   const reportable = (item) => hosted && typeof onReport === 'function' && typeof ownKey === 'string' && item.author !== ownKey
   const isOwn = (item) => typeof ownKey === 'string' && item.author === ownKey.toLowerCase()
   const known = (item) => follows === null || follows.has(item.author)
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onReply, onQuote, onReport }
   // One renderItem for the list's life, row props from A Rua's cache, and
   // like, repost and follow wrappers made once per row: they read the newest
   // handlers from `ctl` at call time, so a row that skips its render still
