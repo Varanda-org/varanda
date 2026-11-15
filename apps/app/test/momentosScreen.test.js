@@ -515,6 +515,7 @@ test('strip rings use sunset stripes for unseen moments and a theme gap around t
         const tree = h.render({ label: 'momentos de Cecília Ramos', name: 'Cecília', unseen, plus, onPress, publicKey: A })
         const ring = tree.children[0]
         t.is(ring.props.style[1].backgroundColor, plus ? 'transparent' : colors.outline, 'seen outline or no ring for the composer')
+        t.is(ring.props.collapsable, false, 'the ring stays a real view, so Android keeps its radius when the plus ring takes the outline')
         const stripes = treeNodes(ring).filter((n) => n.props.style?.[0]?.flex === 1)
         t.alike(stripes.map((n) => n.props.style[1].backgroundColor), unseen && !plus ? ['dawn/6', 'coral/6', 'plum/6'] : [], 'sunset only on unseen rings, sampled at its stops, without the night blue')
         t.alike(sampled, [stops.slice(0, 3)], 'the stops keep their positions')

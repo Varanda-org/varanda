@@ -835,11 +835,11 @@ test('Conversa: reply branch controls are slim text links, not filled pills', (t
 test('Conversa: a deletion made on another screen reaches the Conversas still open below it', (t) => {
   t.ok(src.includes('const deletionListeners = new Set()'))
   t.ok(src.includes('function announceDeleted (refs) {\n  for (const listener of deletionListeners) listener(refs)\n}'))
-  t.ok(src.includes('forgetOwnReplies(refs)\n        announceDeleted(refs)'), 'after the screen that deleted has dropped its own copy')
+  t.ok(src.includes('announceDeleted(refs)\n        forgetOwnReplies(refs)'), 'the Conversas below still find the reply in their own copy')
   t.ok(src.includes('deletionListeners.add(listener)') && src.includes('deletionListeners.delete(listener)'), 'a Conversa listens while mounted')
   t.ok(src.includes('if (ref !== focalRef.current) dropDeleted.current(ref)'), 'the focal post of an older screen is left to its own flow')
   t.ok(src.includes('dropDeleted.current(t.ref, true)'), 'the screen that deleted always clears its flags')
-  t.ok(src.includes('if (!force && !held && !shown.replies'), 'a screen that does not show the post stays as it is')
+  t.ok(src.includes('if (!force && !held && !quoted && !wasReply'), 'a screen that does not show the post stays as it is')
 })
 
 test('Conversa: an older screen drops a reply deleted above it and lowers the parent count', async (t) => {
@@ -883,4 +883,58 @@ test('Conversa: an older screen drops a reply deleted above it and lowers the pa
   t.is(context.eng.counts.get(parent).replies, 1, 'a post this screen does not hold changes nothing')
   listener(new Set([focal]))
   t.is(context.eng.counts.get(parent).replies, 1, 'the focal post is left alone')
+})
+
+function olderScreen (view, peeked, counts) {
+  const state = { commits: [] }
+  const context = {
+    useDelete: (options) => options,
+    request: () => {},
+    node: {},
+    onToast: () => {},
+    load: () => {},
+    genRef: { current: 1 },
+    onDeletedPost: () => {},
+    revokeDeletedMedia: () => {},
+    focal,
+    peekedRef: { current: peeked },
+    childrenRef: { current: new Map() },
+    ownReplies: { current: new Map() },
+    ownReplyCache: new Map(),
+    ownFor: () => [],
+    eng: { counts },
+    setCount: (key, value) => counts.set(key, value),
+    setChildren: () => {},
+    setOpen: () => {},
+    viewRef: { current: view },
+    commit: (patch) => { state.commits.push(patch) },
+    refOf: (author, seq) => author + ':' + seq,
+    useRef: (value) => ({ current: value }),
+    useEffect: (fn) => fn(),
+    deletionListeners: new Set(),
+    focalRef: { current: focal }
+  }
+  handler(src, '  const dropDeleted = useRef(null)', '  const handlers =', 'del', context)
+  return { state, listener: [...context.deletionListeners][0] }
+}
+
+test('Conversa: an older screen that only quotes the deleted post clears the quote', (t) => {
+  const peeked = new Map([[A, { key: A, entries: [{ seq: 8 }, { seq: 9 }] }]])
+  const { state, listener } = olderScreen({ replies: [], parent: null, meta: null }, peeked, new Map())
+  listener(new Set([A + ':8']))
+  t.alike(peeked.get(A).entries.map((e) => e.seq), [9])
+  t.is(state.commits.length, 1, 'the screen renders again')
+  listener(new Set([A + ':77']))
+  t.is(state.commits.length, 1, 'a post that is neither shown nor quoted changes nothing')
+})
+
+test('Conversa: an older screen lowers the focal count for a reply it only showed', (t) => {
+  const counts = new Map([[focal, { replies: 3, likes: 1 }]])
+  const view = { replies: [item(8), item(9)], parent: null, meta: { repliesTotal: 3 } }
+  const { state, listener } = olderScreen(view, new Map(), counts)
+  listener(new Set([A + ':8']))
+  t.is(counts.get(focal).replies, 2)
+  t.is(counts.get(focal).likes, 1)
+  t.alike(state.commits[0].replies.map((r) => r.seq), [9])
+  t.is(state.commits[0].meta.repliesTotal, 2)
 })

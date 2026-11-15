@@ -8,6 +8,9 @@ export const BAR_WIDTH = 120
 export const BAR_MS = 400
 export const PULSE_MS = 1200
 export const ENTRANCE_MS = 1280
+// The rest on the finished picture before the splash may leave.
+export const REST_MS = 220
+export const PRESENTATION_MS = ENTRANCE_MS + REST_MS
 export const SLIDES = { near: { tile: 96, ms: 4800 }, far: { tile: 128, ms: 20800 } }
 
 const GROUND_FROM = { opacity: 0, translateY: 24 }
@@ -20,6 +23,21 @@ const LETTER_FROM = { opacity: 0, translateY: 8 }
 const LETTER_TO = { opacity: 1, translateY: 0 }
 const HINT_FROM = { opacity: 0 }
 const HINT_TO = { opacity: 1 }
+
+// How much of the presentation the web overlay still has to play. Its
+// 'vps-expire' animation always runs (scripts/pre-splash.js, outside the
+// reduced-motion query) and starts with the overlay's other animations, so its
+// currentTime is the overlay's own clock. Any doubt returns the full time: it
+// may over-wait, never cut.
+export function overlayRemainingMs (animations, presentMs) {
+  if (!Number.isFinite(presentMs) || presentMs < 0) return 0
+  if (!Array.isArray(animations)) return presentMs
+  const clock = animations.find((a) => a && a.animationName === 'vps-expire')
+  if (!clock) return presentMs
+  const at = clock.currentTime === null ? NaN : Number(clock.currentTime)
+  if (!Number.isFinite(at) || at < 0) return presentMs
+  return Math.max(0, presentMs - at)
+}
 
 export function splashMotion (reduced) {
   const step = (delay, duration, from, to) => reduced === true

@@ -344,13 +344,14 @@ export function useDelete ({ request, node, onToast, onDeleted, recheck, onUncer
     if (r.ok) {
       setTarget(null)
       notify('publicação apagada')
-      // onDeleted finds the parent in the screen's own copy to lower its
-      // count, so the copies are dropped only after it.
+      // onDeleted and the Conversas below find the parent in their own copy
+      // of the replies sent here to lower its count, so those copies are
+      // dropped only after both have run.
       try {
         await onDeleted(target)
       } finally {
-        forgetOwnReplies(refs)
         announceDeleted(refs)
+        forgetOwnReplies(refs)
       }
     } else if (r.uncertain) {
       setTarget(null)
@@ -1044,14 +1045,18 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
   dropDeleted.current = (ref, force = false) => {
     const shown = viewRef.current
     const held = [...childrenRef.current.values(), ...ownReplies.current.values()].some((items) => items.some((item) => refOf(item.author, item.seq) === ref))
-    if (!force && !held && !shown.replies.some((r) => refOf(r.author, r.seq) === ref) && !(shown.parent && refOf(shown.parent.author, shown.parent.seq) === ref)) return
-    // A load started before the deletion would bring the row back.
-    genRef.current += 1
-    // A quote of the deleted post must not keep showing its text.
     const [author, seqText] = ref.split(':')
     const known = peekedRef.current.get(author)
+    // A quote of the deleted post must not keep showing its text.
+    const quoted = !!known && known.entries.some((e) => e.seq === Number(seqText))
+    const wasReply = shown.replies.some((r) => refOf(r.author, r.seq) === ref)
+    if (!force && !held && !quoted && !wasReply && !(shown.parent && refOf(shown.parent.author, shown.parent.seq) === ref)) return
+    // A load started before the deletion would bring the row back.
+    genRef.current += 1
     if (known) peekedRef.current.set(author, { ...known, entries: known.entries.filter((e) => e.seq !== Number(seqText)) })
     const parents = new Set()
+    // A reply shown under the focal post counts against the focal post.
+    if (wasReply) parents.add(focalRef.current)
     for (const [key, items] of [...childrenRef.current, ...ownReplies.current, ...ownReplyCache]) {
       if (items.some((item) => refOf(item.author, item.seq) === ref)) parents.add(key)
     }
@@ -1071,7 +1076,6 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
     setChildren((previous) => new Map([...previous].map(([key, items]) => [key, items.filter((item) => refOf(item.author, item.seq) !== ref)])))
     ownReplies.current = new Map([...ownReplies.current].map(([key, items]) => [key, items.filter((item) => refOf(item.author, item.seq) !== ref)]))
     const cur = viewRef.current
-    const wasReply = cur.replies.some((r) => refOf(r.author, r.seq) === ref)
     commit({
       replies: cur.replies.filter((r) => refOf(r.author, r.seq) !== ref),
       parent: cur.parent && refOf(cur.parent.author, cur.parent.seq) === ref ? null : cur.parent,

@@ -117,6 +117,13 @@ export function snippetOf (notice, postText) {
   return chars.slice(0, SNIPPET_MAX).join('')
 }
 
+// Whether snippetOf cut the post text. A cut can end inside an address, so a
+// cut snippet is shown as plain text and never as a link.
+export function snippetCut (notice, postText) {
+  if (snippetOf(notice, postText) === '') return false
+  return Array.from(postText.replace(/[\r\n\u2028\u2029]+/g, ' ')).length > SNIPPET_MAX
+}
+
 // Newest first by Date.parse(at): string order breaks for negative-year ISO
 // dates (feed.js). Same instant: key ascending, then seq descending, so a
 // later block of the same diary stays above the earlier one.
