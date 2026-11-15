@@ -103,7 +103,8 @@ test('A Rua keys the row cache on what each row shows', (t) => {
   t.ok(/cache: rowCache, rowKey: feedKey\(item\)/.test(src), 'A Rua passes its row cache')
   t.ok(src.includes('const renderItem = useCallback((info) => renderRef.current(info), [])'), 'renderItem is stable')
   t.absent(src.includes('await countsDone'), 'the next page does not wait for counts')
-  t.ok(src.includes('(countedRef.current.get(ref) || 0) > started'), 'an older counts answer never replaces a newer one')
+  t.ok(src.includes('if (!countAnswerApplies({'), 'the count guard is countAnswerApplies, tested in engagement.test.js')
+  t.ok(src.includes('answeredAt: countedRef.current.get(ref) || 0'), 'an older counts answer never replaces a newer one')
 })
 
 test('PostRow is memoized with the default comparison and reads text once', (t) => {
