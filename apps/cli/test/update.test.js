@@ -2042,6 +2042,10 @@ test('update.sh: secrets-key accepts a pretty-printed key file and refuses two p
 // The seq of the sealed file (secrets verify --json) and the floor in
 // state/segredos/seq.
 const SEQ_FILE = 'state/segredos/seq'
+// The floor is exactly "<seq> <sha256 of the applied sealed file>\n".
+const SEALED = '{"v":1}\n'
+const sha256 = (b) => crypto.createHash('sha256').update(b).digest('hex')
+const floorOf = (seq, hash = sha256(SEALED)) => seq + ' ' + hash + '\n'
 const seqServer = (t, { mode = 'manual', seq = null, floor = null } = {}) => {
   const x = secretsServer(t, { localEnv: PLAIN })
   x.s.write('etc/update.conf', 'VARANDA_UPDATE=' + mode + '\n')
@@ -2072,79 +2076,129 @@ test('update.sh: secrets verify runs locked down without the key, and its seq be
     ' ' + SEEDER_REF + ' secrets verify --file /segredos/selado.json --signers /segredos/assinantes.txt --json',
   'the verified image by digest, the sealed file and signers of the same bundle, nothing else')
   t.ok(r.calls.indexOf(' secrets verify ') < r.calls.indexOf(' secrets open '), 'verified before it is opened')
-  t.ok(/--signers \/segredos\/assinantes\.txt --json 2>"\$segredos\/conferir\.err" \|\n\s*head -c 4096\) \|\| rc=\$\?\n/.test(shCode), 'stdout is read up to 4 KB')
+  t.ok(/--signers \/segredos\/assinantes\.txt --json \\\n\s*>"\$segredos\/conferir\.out" 2>"\$segredos\/conferir\.err" \|\| rc=\$\?\n\s*saida=\$\(head -c 4096 "\$segredos\/conferir\.out" 2>\/dev\/null\) \|\| saida=''\n/.test(shCode),
+    'stdout goes to a file, outside $(...), and is read up to 4 KB')
   t.absent(s.exists('state/segredos/conferir.err'), 'the stderr file of secrets verify is gone')
-  t.is(s.read(SEQ_FILE), '7\n', 'the floor is the applied seq')
+  t.absent(s.exists('state/segredos/conferir.out'), 'the stdout file of secrets verify is gone')
+  t.absent(s.exists('state/segredos/abrir.err'), 'the stderr file of secrets open is gone')
+  t.is(s.read(SEQ_FILE), floorOf(7), 'the floor is the applied seq')
   t.is(modeOf(s.p(SEQ_FILE)), 0o600, 'the floor is 0600')
   t.absent(s.exists(SEQ_FILE + '.tmp'), 'no temporary file left')
-  t.ok(r.log.includes('segredos compartilhados: seq 7 anotado em ' + s.p(SEQ_FILE)), 'logs the new floor')
+  t.ok(r.log.includes('segredos compartilhados: seq 7 (sha256 ' + sha256(SEALED) + ') anotado em ' + s.p(SEQ_FILE)), 'logs the new floor')
+  t.ok(shCode.includes('if ! saida=$(sha256sum <"$selado") || ! [[ $' + '{saida%% *} =~ $hash_re ]]; then'), 'the hash is the sha256 of the sealed file verify and open read')
   t.absent((r.out + r.log).includes('VERIFY-STDERR-CANARY'), 'the stderr of secrets verify never reaches the log')
   t.alike(leaks(r, Object.values(v)), [], 'no value or key in the log or the output')
   // The way back after a failed gate, and the gate itself, run before the
   // floor moves: a failed apply of seq 9 leaves 7.
-  const g = seqServer(t, { seq: 9, floor: '7\n' })
+  const g = seqServer(t, { seq: 9, floor: floorOf(7) })
   g.s.write('fix/gate_fail_1', '')
   const rg = g.s.run(MAIN + 'cmd_apply')
   t.is(rg.status, 1, 'the failed gate fails the apply')
   t.ok(rg.log.includes('voltando'), 'the way back ran')
-  t.is(g.s.read(SEQ_FILE), '7\n', 'a failed switch and the way back leave the floor')
+  t.is(g.s.read(SEQ_FILE), floorOf(7), 'a failed switch and the way back leave the floor')
 })
 
 test('update.sh: the timer refuses a lower seq and changes nothing; equal and higher pass and the floor follows', (t) => {
   if (!hasBash(t)) return
-  const { s, v } = seqServer(t, { mode: 'auto', seq: 4, floor: '5\n' })
+  const { s, v } = seqServer(t, { mode: 'auto', seq: 4, floor: floorOf(5) })
   const { val, text } = keepEfetivo(s)
   const r = s.run(MAIN + 'cmd_run')
-  seqRefused(t, s, r, text, '5\n', 'a lower seq on the timer')
+  seqRefused(t, s, r, text, floorOf(5), 'a lower seq on the timer')
   t.ok(r.log.includes('segredos compartilhados: o arquivo selado da nova versão tem seq 4, menor que o último aplicado 5; nada mudou. Para aplicar mesmo assim, rode update.sh apply'),
     'names both seqs and the way to accept it: ' + r.log)
   t.alike(leaks(r, [...Object.values(v), val]), [], 'no value in the log or the output')
 
-  const e = seqServer(t, { mode: 'auto', seq: 5, floor: '5\n' })
+  const e = seqServer(t, { mode: 'auto', seq: 5, floor: floorOf(5) })
   const re = e.s.run(MAIN + 'cmd_run')
   t.is(re.status, 0, 'an equal seq passes (every release ships the same file): ' + re.log)
-  t.is(e.s.read(SEQ_FILE), '5\n', 'the floor stays')
+  t.is(e.s.read(SEQ_FILE), floorOf(5), 'the floor stays')
   t.is(e.s.read('state/atual'), record(COMMIT, 5, SEEDER_REF, WEB_REF), 'the release is applied')
 
-  const h = seqServer(t, { mode: 'auto', seq: 9, floor: '5' })
+  const h = seqServer(t, { mode: 'auto', seq: 9, floor: floorOf(5, H('a', 64)) })
   const rh = h.s.run(MAIN + 'cmd_run')
-  t.is(rh.status, 0, 'a higher seq passes, and a floor without LF is read: ' + rh.log)
-  t.is(h.s.read(SEQ_FILE), '9\n', 'the floor follows the applied seq')
+  t.is(rh.status, 0, 'a higher seq passes whatever the hash of the floor: ' + rh.log)
+  t.is(h.s.read(SEQ_FILE), floorOf(9), 'the floor follows the applied seq')
 
   // The largest seq the format allows.
-  const m = seqServer(t, { mode: 'auto', seq: 4294967295, floor: '4294967294\n' })
+  const m = seqServer(t, { mode: 'auto', seq: 4294967295, floor: floorOf(4294967294) })
   t.is(m.s.run(MAIN + 'cmd_run').status, 0, 'seq 4294967295 passes')
-  t.is(m.s.read(SEQ_FILE), '4294967295\n', 'and becomes the floor')
+  t.is(m.s.read(SEQ_FILE), floorOf(4294967295), 'and becomes the floor')
+})
+
+test('update.sh: an equal seq with other content is refused on the timer and taken by apply, which records the new hash', (t) => {
+  if (!hasBash(t)) return
+  const msg = 'segredos compartilhados: o arquivo selado da nova versão tem o mesmo seq 5 do último aplicado, com conteúdo diferente; nada mudou. Sele de novo com seq maior, ou rode update.sh apply'
+  // The release ships another sealed file under the seq already applied.
+  const other = '{"v":1,"outro":true}\n'
+  const { s, v } = seqServer(t, { mode: 'auto', seq: 5, floor: floorOf(5) })
+  s.write('fix/bundle/secrets.sealed.json', other)
+  const { val, text } = keepEfetivo(s)
+  const r = s.run(MAIN + 'cmd_run')
+  seqRefused(t, s, r, text, floorOf(5), 'an equal seq with other content on the timer')
+  t.ok(r.log.includes(msg), 'names the seq and the two ways out: ' + r.log)
+  t.alike(leaks(r, [...Object.values(v), val]), [], 'no value in the log or the output')
+  const a = s.run(MAIN + 'cmd_apply')
+  t.is(a.status, 0, 'apply takes it: ' + a.log)
+  t.ok(a.log.includes('segredos compartilhados: aplicando o arquivo selado com o mesmo seq 5 do último aplicado, com conteúdo diferente'), 'and says so')
+  t.is(s.read(SEQ_FILE), floorOf(5, sha256(other)), 'the floor holds the hash of the file now in use')
+  // Same seq, a floor whose hash is not this file: refused the same way.
+  const d = seqServer(t, { mode: 'auto', seq: 5, floor: floorOf(5, H('a', 64)) })
+  const kd = keepEfetivo(d.s)
+  const rd = d.s.run(MAIN + 'cmd_run')
+  seqRefused(t, d.s, rd, kd.text, floorOf(5, H('a', 64)), 'an equal seq with another floor hash')
+  t.ok(rd.log.includes(msg), 'with the same message')
+})
+
+test('update.sh: a sha256 that fails or is not 64 lower hex changes nothing', (t) => {
+  if (!hasBash(t)) return
+  const cases = [
+    ['sha256sum fails', 'sha256sum() { return 1; }\n'],
+    ['an empty hash', "sha256sum() { printf '  -\\n'; }\n"],
+    ['an uppercase hash', "sha256sum() { printf '%s  -\\n' " + H('A', 64) + '; }\n'],
+    ['a short hash', "sha256sum() { printf '%s  -\\n' " + H('a', 63) + '; }\n']
+  ]
+  for (const [what, stub] of cases) {
+    for (const cmd of ['cmd_run', 'cmd_apply']) {
+      const { s } = seqServer(t, { mode: 'auto', seq: 9, floor: floorOf(5) })
+      const { text } = keepEfetivo(s)
+      const r = s.run(stub + MAIN + cmd)
+      const label = what + ', ' + cmd
+      nothingChanged(t, s, r, text, label)
+      t.ok(r.log.includes('não foi possível calcular o sha256 do arquivo selado; nada mudou'), 'says so (' + label + '): ' + r.log)
+      t.absent(s.exists('fix/open_calls'), 'secrets open never runs (' + label + ')')
+      t.is(s.read(SEQ_FILE), floorOf(5), 'the floor is unchanged (' + label + ')')
+    }
+  }
 })
 
 test('update.sh: apply and reconfigure take a lower seq, say so and lower the floor; rollback leaves it', (t) => {
   if (!hasBash(t)) return
-  const { s } = seqServer(t, { seq: 3, floor: '5\n' })
+  const { s } = seqServer(t, { seq: 3, floor: floorOf(5) })
   const r = s.run(MAIN + 'cmd_apply')
   t.is(r.status, 0, 'an explicit apply goes on with a lower seq: ' + r.log)
   t.ok(r.log.includes('segredos compartilhados: aplicando o arquivo selado com seq 3, menor que o último aplicado 5'), 'logs both seqs')
-  t.is(s.read(SEQ_FILE), '3\n', 'the floor is the applied seq, even if lower')
+  t.is(s.read(SEQ_FILE), floorOf(3), 'the floor is the applied seq, even if lower')
 
   // rollback goes back to the previous release and never touches the floor.
   const rb = s.run(MAIN + 'cmd_rollback')
   t.is(rb.status, 0, 'rollback passes: ' + rb.log)
   t.is(s.read('state/atual'), record(OLD_COMMIT, 1, OLD_SEEDER, OLD_WEB), 'the previous release is back')
-  t.is(s.read(SEQ_FILE), '3\n', 'rollback leaves the floor')
+  t.is(s.read(SEQ_FILE), floorOf(3), 'rollback leaves the floor')
 
   // reconfigure reopens the installed bundle with the same rule.
-  const c = seqServer(t, { seq: 4, floor: '9\n' })
+  const c = seqServer(t, { seq: 4, floor: floorOf(9) })
   installRelease(c.s, COMMIT, { www: false })
   c.s.write('state/atual', record(COMMIT, 5, SEEDER_REF, WEB_REF))
   const rc = c.s.run(MAIN + 'cmd_reconfigure')
   t.is(rc.status, 0, 'reconfigure goes on with a lower seq: ' + rc.log)
   t.ok(rc.log.includes('aplicando o arquivo selado com seq 4, menor que o último aplicado 9'), 'and says so')
-  t.is(c.s.read(SEQ_FILE), '4\n', 'the floor follows after the healthy reconfigure')
+  t.is(c.s.read(SEQ_FILE), floorOf(4), 'the floor follows after the healthy reconfigure')
   // A reconfigure whose gate fails leaves the floor.
-  c.s.write(SEQ_FILE, '9\n', 0o600)
+  c.s.write(SEQ_FILE, floorOf(9), 0o600)
   c.s.write('fix/gate_fail_' + (Number(c.s.read('fix/gate_n')) + 1), '')
   const bad = c.s.run(MAIN + 'cmd_reconfigure')
   t.is(bad.status, 1, 'the failed gate fails reconfigure')
-  t.is(c.s.read(SEQ_FILE), '9\n', 'the floor is unchanged')
+  t.is(c.s.read(SEQ_FILE), floorOf(9), 'the floor is unchanged')
 })
 
 test('update.sh: a secrets verify that fails or prints anything but the one expected line changes nothing', (t) => {
@@ -2168,7 +2222,7 @@ test('update.sh: a secrets verify that fails or prints anything but the one expe
     ['a valid line past 4 KB', { out: ' '.repeat(5000) + line(5) }, 0]
   ]
   for (const [what, { rc, out }, code] of cases) {
-    const { s, v } = seqServer(t, { floor: '5\n' })
+    const { s, v } = seqServer(t, { floor: floorOf(5) })
     const { val, text } = keepEfetivo(s)
     if (rc) s.write('fix/verify_rc', rc)
     if (out !== undefined) s.write('fix/verify_out', out)
@@ -2176,7 +2230,7 @@ test('update.sh: a secrets verify that fails or prints anything but the one expe
     nothingChanged(t, s, r, text, what)
     t.ok(r.log.includes('não foi possível conferir o arquivo selado (saída ' + code + '); nada mudou'), 'only the exit code is logged (' + what + '): ' + r.log)
     t.absent(s.exists('fix/open_calls'), 'secrets open never runs (' + what + ')')
-    t.is(s.read(SEQ_FILE), '5\n', 'the floor is unchanged (' + what + ')')
+    t.is(s.read(SEQ_FILE), floorOf(5), 'the floor is unchanged (' + what + ')')
     t.absent((r.out + r.log).includes(canary), 'the output of secrets verify is never logged (' + what + ')')
     t.alike(leaks(r, [...Object.values(v), val]), [], 'no value in the log or the output (' + what + ')')
   }
@@ -2184,10 +2238,14 @@ test('update.sh: a secrets verify that fails or prints anything but the one expe
 
 test('update.sh: a corrupt floor refuses on the timer and on apply until it is deleted', (t) => {
   if (!hasBash(t)) return
+  const hash = sha256(SEALED)
   const variants = [
-    ['letters', 'abc\n'], ['zero', '0\n'], ['a leading zero', '05\n'], ['above 4294967295', '4294967296\n'],
-    ['two LFs', '5\n\n'], ['a trailing space', '5 \n'], ['CRLF', '5\r\n'], ['empty', ''], ['a NUL byte', '5\0'],
-    ['eleven digits', '12345678901'], ['a symlink', null], ['a directory', null]
+    ['letters', 'abc ' + hash + '\n'], ['zero', floorOf(0)], ['a leading zero', floorOf('05')], ['above 4294967295', floorOf(4294967296)],
+    ['the seq alone', '5\n'], ['no LF', floorOf(5).slice(0, -1)], ['two LFs', floorOf(5) + '\n'], ['a trailing space', '5 ' + hash + ' \n'],
+    ['CRLF', '5 ' + hash + '\r\n'], ['empty', ''], ['a NUL byte', '5 ' + hash + '\0'], ['eleven digits', floorOf('12345678901')],
+    ['an uppercase hash', floorOf(5, hash.toUpperCase())], ['a 63-hex hash', floorOf(5, hash.slice(1))], ['a 65-hex hash', floorOf(5, hash + 'a')],
+    ['a non-hex hash', floorOf(5, 'g' + hash.slice(1))], ['two spaces', '5  ' + hash + '\n'], ['a tab', '5\t' + hash + '\n'],
+    ['a leading space', ' ' + floorOf(5)], ['a third field', '5 ' + hash + ' x\n'], ['a symlink', null], ['a directory', null]
   ]
   for (const [what, body] of variants) {
     for (const cmd of ['cmd_run', 'cmd_apply']) {
@@ -2195,7 +2253,7 @@ test('update.sh: a corrupt floor refuses on the timer and on apply until it is d
       const { text } = keepEfetivo(s)
       const f = s.p(SEQ_FILE)
       if (what === 'a symlink') {
-        s.write('fix/real_floor', '1\n')
+        s.write('fix/real_floor', floorOf(1))
         fs.symlinkSync(s.p('fix/real_floor'), f)
       } else if (what === 'a directory') {
         fs.mkdirSync(f)
@@ -2205,7 +2263,7 @@ test('update.sh: a corrupt floor refuses on the timer and on apply until it is d
       const r = s.run(MAIN + cmd)
       const label = what + ', ' + cmd
       nothingChanged(t, s, r, text, label)
-      t.ok(r.log.includes(f + ' não é um número de 1 a 4294967295 num arquivo comum; nada mudou. Para aceitar o seq do próximo arquivo selado, apague ' + f),
+      t.ok(r.log.includes(f + ' não é uma linha "<seq> <sha256>" (seq de 1 a 4294967295, sha256 em 64 hexadecimais minúsculos) num arquivo comum; nada mudou. Para aceitar o seq do próximo arquivo selado, apague ' + f),
         'names the file and the fix (' + label + '): ' + r.log)
       t.absent(s.exists('state/recusadas'), 'the digest is not refused (' + label + ')')
       t.absent(s.exists('state/intervencao'), 'no intervention (' + label + ')')
@@ -2217,51 +2275,93 @@ test('update.sh: a corrupt floor refuses on the timer and on apply until it is d
   const { s } = seqServer(t, { mode: 'auto', seq: 2, floor: 'x\n' })
   fs.rmSync(s.p(SEQ_FILE))
   t.is(s.run(MAIN + 'cmd_run').status, 0, 'with the floor deleted the timer applies')
-  t.is(s.read(SEQ_FILE), '2\n', 'and records the new floor')
+  t.is(s.read(SEQ_FILE), floorOf(2), 'and records the new floor')
 })
 
 test('update.sh: a release without a sealed file, without the key or not for this server leaves the floor', (t) => {
   if (!hasBash(t)) return
-  const a = seqServer(t, { mode: 'auto', seq: 2, floor: '5\n' })
+  const a = seqServer(t, { mode: 'auto', seq: 2, floor: floorOf(5) })
   fs.rmSync(a.s.p('fix/bundle/secrets.sealed.json'))
   t.is(a.s.run(MAIN + 'cmd_run').status, 0, 'a release without a sealed file applies')
   t.absent(a.s.exists('fix/verify_calls'), 'secrets verify never runs')
-  t.is(a.s.read(SEQ_FILE), '5\n', 'the floor is unchanged')
+  t.is(a.s.read(SEQ_FILE), floorOf(5), 'the floor is unchanged')
 
-  const b = seqServer(t, { mode: 'auto', seq: 2, floor: '5\n' })
+  const b = seqServer(t, { mode: 'auto', seq: 2, floor: floorOf(5) })
   fs.rmSync(b.s.p('etc/secrets-key.json'))
   t.is(b.s.run(MAIN + 'cmd_run').status, 0, 'a server without the key applies')
   t.absent(b.s.exists('fix/verify_calls'), 'secrets verify never runs without the key')
-  t.is(b.s.read(SEQ_FILE), '5\n', 'the floor is unchanged')
+  t.is(b.s.read(SEQ_FILE), floorOf(5), 'the floor is unchanged')
 
   // Not a recipient: no sealed values applied, so neither the floor check
   // nor the floor write applies.
-  const c = seqServer(t, { mode: 'auto', seq: 2, floor: '5\n' })
+  const c = seqServer(t, { mode: 'auto', seq: 2, floor: floorOf(5) })
   c.s.write('fix/open_rc', '3')
   t.is(c.s.run(MAIN + 'cmd_run').status, 0, 'a server that is not a recipient applies')
-  t.is(c.s.read(SEQ_FILE), '5\n', 'the floor is unchanged')
+  t.is(c.s.read(SEQ_FILE), floorOf(5), 'the floor is unchanged')
   const d = seqServer(t, { mode: 'auto', seq: 9 })
   d.s.write('fix/open_rc', '3')
   t.is(d.s.run(MAIN + 'cmd_run').status, 0, 'applies')
   t.absent(d.s.exists(SEQ_FILE), 'no floor is created')
 })
 
-test('update.sh: a floor that cannot be written leaves an intervention, and apply records it', (t) => {
+test('update.sh: a floor that cannot be written stops before state/atual with an intervention, and apply records it', (t) => {
   if (!hasBash(t)) return
-  const { s } = seqServer(t, { mode: 'auto', seq: 8, floor: '5\n' })
+  const { s } = seqServer(t, { mode: 'auto', seq: 8, floor: floorOf(5) })
+  const before = s.read('state/atual')
   const failChmod = 'chmod() { case $2 in *segredos/seq.tmp) return 1 ;; esac; command chmod "$@"; }\n'
   const r = s.run(failChmod + MAIN + 'cmd_run')
-  t.is(r.status, 0, 'the healthy switch still finishes: ' + r.log)
-  t.is(s.read('state/atual'), record(COMMIT, 5, SEEDER_REF, WEB_REF), 'the release is recorded')
-  t.is(s.read(SEQ_FILE), '5\n', 'the floor is unchanged')
+  t.is(r.status, 1, 'the run fails: ' + r.log)
+  t.is(s.read('state/atual'), before, 'state/atual still names the old release')
+  t.absent(r.log.includes('atualizado para ' + COMMIT), 'no success is logged')
+  t.is(s.read(SEQ_FILE), floorOf(5), 'the floor is unchanged')
   t.absent(s.exists(SEQ_FILE + '.tmp'), 'no temporary file left')
-  t.ok(s.read('state/intervencao').includes('seq 8, mas ' + s.p(SEQ_FILE) + ' não foi gravado'), 'an intervention names the file and the seq')
+  t.ok(s.read('state/intervencao').includes('seq 8, mas ' + s.p(SEQ_FILE) + ' não foi gravado: rode update.sh apply, ou grave nele a linha "8 ' + sha256(SEALED) + '" (root, 0600)'),
+    'an intervention names the file, the line and the fix')
+  // The next timer run neither goes on nor reports the release as current.
   const again = s.run(MAIN + 'cmd_run')
   t.is(again.status, 1, 'the timer stops on the intervention')
+  t.absent(again.log.includes('em dia'), 'it never reports em dia with the stale floor: ' + again.log)
+  t.is(s.read('state/atual'), before, 'state/atual is still the old release')
+  t.is(s.read(SEQ_FILE), floorOf(5), 'the floor is still the old one')
   const fix = s.run(MAIN + 'cmd_apply')
-  t.is(fix.status, 0, 'apply re-ups the installed release: ' + fix.log)
-  t.is(s.read(SEQ_FILE), '8\n', 'and records the floor')
+  t.is(fix.status, 0, 'apply finishes the switch: ' + fix.log)
+  t.is(s.read(SEQ_FILE), floorOf(8), 'and records the floor')
+  t.is(s.read('state/atual'), record(COMMIT, 5, SEEDER_REF, WEB_REF), 'then state/atual')
   t.absent(s.exists('state/intervencao'), 'the intervention is over')
+  // Up to date with an intervention: a floor write that fails after a healthy
+  // gate says so, not that the gate failed.
+  fs.rmSync(s.p(SEQ_FILE))
+  s.write('state/intervencao', 'x\n')
+  const em = s.run(failChmod + MAIN + 'cmd_apply')
+  t.is(em.status, 1, 'apply fails: ' + em.log)
+  t.ok(em.log.includes('a versão instalada está saudável, mas o piso dos segredos compartilhados não foi gravado; a intervenção continua'), 'names the floor')
+  t.absent(em.log.includes('não passou na verificação'), 'never blames the health gate')
+  t.ok(s.read('state/intervencao').includes('seq 8, mas ' + s.p(SEQ_FILE) + ' não foi gravado'), 'the intervention stays, about the floor')
+  t.absent(s.exists(SEQ_FILE), 'no floor')
+})
+
+test('update.sh: install over running containers takes a seq below the floor like apply, and lowers it', (t) => {
+  if (!hasBash(t)) return
+  const s = server(t)
+  s.write('etc/update.conf', 'VARANDA_UPDATE=manual\nVARANDA_PROFILE=full\n')
+  s.write('etc/varanda.env', FULL_ENV)
+  s.write('fix/ps_seeder', 'aaa111\n')
+  s.write('fix/ps_web', 'bbb222\n')
+  s.write('fix/img_aaa111', 'sha256:old-seeder\n')
+  s.write('fix/img_bbb222', 'sha256:old-caddy\n')
+  s.write('fix/workdir', s.p('checkout') + '\n')
+  s.write('fix/bundle/secrets.sealed.json', SEALED)
+  s.write('fix/bundle/secrets-signers.txt', H('5', 64) + '\n')
+  s.write('etc/secrets-key.json', '{"v":1,"publicKey":"' + H('f', 64) + '","secretKey":"' + sentinel('key') + '"}\n')
+  s.write('fix/aberto.env', "VARANDA_GIF_API_KEY='" + sentinel('gif') + "'\n")
+  s.write('fix/seq', '4')
+  fs.mkdirSync(s.p('state/segredos'), { recursive: true })
+  s.write(SEQ_FILE, floorOf(9), 0o600)
+  const r = s.run(MAIN + 'ref_install=' + SEEDER_REF + '\ncmd_install')
+  t.is(r.status, 0, 'install over the checkout passes: ' + r.log)
+  t.ok(r.log.includes('segredos compartilhados: aplicando o arquivo selado com seq 4, menor que o último aplicado 9'), 'logs both seqs')
+  t.is(s.read('state/atual'), record(COMMIT, 5, SEEDER_REF, WEB_REF), 'the release is applied')
+  t.is(s.read(SEQ_FILE), floorOf(4), 'the floor is the applied seq and hash')
 })
 
 test('update.sh: install applies the floor rule like apply', (t) => {
@@ -2279,7 +2379,7 @@ test('update.sh: install applies the floor rule like apply', (t) => {
   t.absent(n.exists(SEQ_FILE), 'no floor before anything passed the gate')
   const a = n.run(MAIN + 'cmd_apply')
   t.is(a.status, 0, 'the first apply passes: ' + a.log)
-  t.is(n.read(SEQ_FILE), '6\n', 'the first apply records the floor')
+  t.is(n.read(SEQ_FILE), floorOf(6), 'the first apply records the floor')
   // A corrupt floor refuses install too.
   const c = server(t)
   c.write('etc/update.conf', 'VARANDA_UPDATE=manual\n')
@@ -2342,7 +2442,7 @@ test('update.sh: only a known CLI message from secrets open or verify reaches th
   for (const step of ['open', 'verify']) {
     const msg = step === 'open' ? 'não foi possível abrir os segredos compartilhados' : 'não foi possível conferir o arquivo selado'
     for (const line of known) {
-      const { s, v } = seqServer(t, { floor: '5\n' })
+      const { s, v } = seqServer(t, { floor: floorOf(5) })
       const { val, text } = keepEfetivo(s)
       s.write('fix/' + step + '_rc', '1')
       s.write('fix/' + step + '_err', 'linha de antes\n' + line + '\n')
@@ -2353,7 +2453,7 @@ test('update.sh: only a known CLI message from secrets open or verify reaches th
       t.alike(leaks(r, [...Object.values(v), val]), [], 'no value or key in the log (' + step + ')')
     }
     for (const line of unknown) {
-      const { s, v } = seqServer(t, { floor: '5\n' })
+      const { s, v } = seqServer(t, { floor: floorOf(5) })
       const { text } = keepEfetivo(s)
       s.write('fix/' + step + '_rc', '1')
       s.write('fix/' + step + '_err', line + '\n')

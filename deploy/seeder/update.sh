@@ -108,13 +108,18 @@ env_local=''
 ref_chave=''
 # 1: o candidato efetivo.env.novo existe; 0: sem segredos compartilhados.
 segredos_novo=0
-# O seq do arquivo selado do candidato, lido de secrets verify --json (vazio
-# sem conferência).
+# O seq do arquivo selado do candidato, lido de secrets verify --json, e o
+# sha256 dos bytes do mesmo arquivo (vazios sem conferência).
 segredos_seq=''
-# O seq do arquivo selado que trocar_segredos pôs em uso (vazio quando o
-# ambiente novo não traz segredos compartilhados): vira o piso em
-# $segredos/seq só depois que a troca passou na verificação de saúde.
+segredos_hash=''
+# O seq e o sha256 do arquivo selado que trocar_segredos pôs em uso (vazios
+# quando o ambiente novo não traz segredos compartilhados): viram o piso em
+# $segredos/seq depois da verificação de saúde, antes de $state/atual.
 seq_trocado=''
+hash_trocado=''
+hash_re='^[0-9a-f]{64}$'
+# O piso: exatamente "<seq> <sha256>" e um LF.
+piso_re='^([1-9][0-9]{0,9}) ([0-9a-f]{64})$'
 # Uma linha, exatamente o resultado de secrets verify --json.
 verificado_re='^\{"signer":"[0-9a-f]{64}","recipients":[1-9][0-9]*,"seq":([1-9][0-9]{0,9})\}$'
 # As únicas mensagens do CLI com número que vão para o registro.
@@ -200,7 +205,8 @@ ao_sair() {
   # Texto aberto não sobrevive à execução que o criou (uma saída antecipada
   # ou um TERM). Só esta execução, com o lock, o criou.
   if [ "$segredos_criados" = 1 ]; then
-    rm -rf "$segredos/abrir" "$segredos/efetivo.env.novo" "$segredos/conferir.err" || true
+    rm -rf "$segredos/abrir" "$segredos/efetivo.env.novo" "$segredos/conferir.out" "$segredos/conferir.err" \
+      "$segredos/abrir.err" || true
   fi
 }
 
@@ -854,66 +860,83 @@ mensagem_cli() {
   return 0
 }
 
-# O piso de $segredos/seq na saída (vazio sem o arquivo: o primeiro arquivo
-# selado vale com qualquer seq). Um arquivo que não seja exatamente o número
-# e um LF opcional retorna 1: sem piso legível, nada de arquivo selado novo.
+# O piso de $segredos/seq na saída, "<seq> <sha256>" (vazio sem o arquivo: o
+# primeiro arquivo selado vale com qualquer seq). Um arquivo que não seja
+# exatamente essa linha e um LF retorna 1: sem piso legível, nada de arquivo
+# selado novo.
 ler_piso_segredos() {
   local f="$segredos/seq" n v=''
   if [ ! -e "$f" ] && [ ! -L "$f" ]; then
     return 0
   fi
-  if [ ! -L "$f" ] && [ -f "$f" ] && n=$(wc -c <"$f" | tr -d ' ') && [ "$n" -le 11 ] \
-    && v=$(cat "$f") && [[ $v =~ $seq_re ]] && [ "$v" -le "$seq_segredos_max" ] \
-    && { printf '%s' "$v" | cmp -s - "$f" || printf '%s\n' "$v" | cmp -s - "$f"; }; then
+  if [ ! -L "$f" ] && [ -f "$f" ] && n=$(wc -c <"$f" | tr -d ' ') && [ "$n" -le 76 ] \
+    && v=$(cat "$f") && [[ $v =~ $piso_re ]] && [ "${BASH_REMATCH[1]}" -le "$seq_segredos_max" ] \
+    && printf '%s\n' "$v" | cmp -s - "$f"; then
     printf '%s\n' "$v"
     return 0
   fi
   # Chamada dentro de $(...): o registro vai pelo erro padrão.
-  log "segredos compartilhados: $f não é um número de 1 a $seq_segredos_max num arquivo comum; nada mudou. Para aceitar o seq do próximo arquivo selado, apague $f" >&2
+  log "segredos compartilhados: $f não é uma linha \"<seq> <sha256>\" (seq de 1 a $seq_segredos_max, sha256 em 64 hexadecimais minúsculos) num arquivo comum; nada mudou. Para aceitar o seq do próximo arquivo selado, apague $f" >&2
   return 1
 }
 
-# Com um arquivo selado novo (segredos_novo=1), compara o seq dele com o piso.
-# Igual passa (cada versão traz o mesmo arquivo). Menor com $1=recusar (o
+# Com um arquivo selado novo (segredos_novo=1), compara o seq e o sha256 dele
+# com o piso. Seq maior passa; igual passa só com o mesmo sha256 (cada versão
+# traz o mesmo arquivo). Menor, ou igual com outro conteúdo, com $1=recusar (o
 # timer) recusa a troca, como uma perda de nomes; senão (apply, reconfigure,
-# install) só fica no registro, e o piso desce depois da troca saudável.
+# install) só fica no registro, e o piso segue depois da troca saudável.
 conferir_seq_segredos() {
-  local piso
+  local piso piso_seq piso_hash
   if [ "$segredos_novo" != 1 ]; then
     return 0
   fi
-  if ! [[ $segredos_seq =~ $seq_re ]]; then
+  if ! [[ $segredos_seq =~ $seq_re ]] || ! [[ $segredos_hash =~ $hash_re ]]; then
     log 'segredos compartilhados: o seq do arquivo selado não foi conferido; nada mudou'
     return 1
   fi
   piso=$(ler_piso_segredos) || return 1
-  if [ -z "$piso" ] || [ "$segredos_seq" -ge "$piso" ]; then
+  if [ -z "$piso" ]; then
+    return 0
+  fi
+  piso_seq=${piso%% *}
+  piso_hash=${piso#* }
+  if [ "$segredos_seq" -gt "$piso_seq" ] || { [ "$segredos_seq" = "$piso_seq" ] && [ "$segredos_hash" = "$piso_hash" ]; }; then
+    return 0
+  fi
+  if [ "$segredos_seq" = "$piso_seq" ]; then
+    if [ "$1" = recusar ]; then
+      log "segredos compartilhados: o arquivo selado da nova versão tem o mesmo seq $segredos_seq do último aplicado, com conteúdo diferente; nada mudou. Sele de novo com seq maior, ou rode update.sh apply"
+      return 1
+    fi
+    log "segredos compartilhados: aplicando o arquivo selado com o mesmo seq $segredos_seq do último aplicado, com conteúdo diferente"
     return 0
   fi
   if [ "$1" = recusar ]; then
-    log "segredos compartilhados: o arquivo selado da nova versão tem seq $segredos_seq, menor que o último aplicado $piso; nada mudou. Para aplicar mesmo assim, rode update.sh apply"
+    log "segredos compartilhados: o arquivo selado da nova versão tem seq $segredos_seq, menor que o último aplicado $piso_seq; nada mudou. Para aplicar mesmo assim, rode update.sh apply"
     return 1
   fi
-  log "segredos compartilhados: aplicando o arquivo selado com seq $segredos_seq, menor que o último aplicado $piso"
+  log "segredos compartilhados: aplicando o arquivo selado com seq $segredos_seq, menor que o último aplicado $piso_seq"
   return 0
 }
 
-# Depois de uma troca saudável que pôs um arquivo selado em uso: o seq dele
-# vira o piso, gravado com um rename (root, 0600). Sem gravar, o timer
-# aceitaria de novo um arquivo mais velho: fica uma intervenção.
+# Depois de uma troca saudável que pôs um arquivo selado em uso: o seq e o
+# sha256 dele viram o piso, gravado com um rename (root, 0600). Sem gravar, o
+# timer aceitaria de novo um arquivo mais velho: fica uma intervenção.
 gravar_piso_segredos() {
   local f="$segredos/seq"
   if [ -z "$seq_trocado" ]; then
     return 0
   fi
-  if [ ! -d "$f" ] && rm -f "$f.tmp" && (umask 077 && printf '%s\n' "$seq_trocado" >"$f.tmp") \
+  if [[ $seq_trocado =~ $seq_re ]] && [[ $hash_trocado =~ $hash_re ]] && [ ! -d "$f" ] && rm -f "$f.tmp" \
+    && (umask 077 && printf '%s %s\n' "$seq_trocado" "$hash_trocado" >"$f.tmp") \
     && chmod 0600 "$f.tmp" && mv -f "$f.tmp" "$f"; then
-    log "segredos compartilhados: seq $seq_trocado anotado em $f"
+    log "segredos compartilhados: seq $seq_trocado (sha256 $hash_trocado) anotado em $f"
     seq_trocado=''
+    hash_trocado=''
     return 0
   fi
   rm -f "$f.tmp" 2>/dev/null || true
-  marcar_intervencao "a versão em uso aplicou o arquivo selado com seq $seq_trocado, mas $f não foi gravado: grave $seq_trocado nele (root, 0600) ou rode update.sh apply"
+  marcar_intervencao "a versão em uso aplicou o arquivo selado com seq $seq_trocado, mas $f não foi gravado: rode update.sh apply, ou grave nele a linha \"$seq_trocado $hash_trocado\" (root, 0600)"
   return 1
 }
 
@@ -988,19 +1011,20 @@ juntar_segredos() {
 # secrets-signers.txt do mesmo pacote (senão a saída 1), e prepara o candidato $segredos/efetivo.env.novo
 # (segredos_novo=1). Sem arquivo selado, sem chave ou com a saída 3 (este
 # servidor não é destinatário), o candidato é "sem segredos compartilhados"
-# (segredos_novo=0). Com a chave, o seq do arquivo vai para segredos_seq antes
+# (segredos_novo=0). Com a chave, o seq e o sha256 do arquivo vão para segredos_seq e segredos_hash antes
 # de abrir. Qualquer outra falha retorna 1 sem nada mudado.
 preparar_segredos() {
   local imagem=$1 selado="$2/secrets.sealed.json" assinantes="$2/secrets-signers.txt" trabalho="$segredos/abrir" novo="$segredos/efetivo.env.novo" dm rc=0 saida='' erro=''
   segredos_novo=0
   segredos_seq=''
+  segredos_hash=''
   if [ -L "$segredos" ] || ! (umask 077 && mkdir -p "$segredos") || ! chmod 0700 "$segredos"; then
     log "$segredos precisa ser um diretório comum"
     return 1
   fi
   # Uma execução que morreu no meio pode ter deixado o diretório de trabalho.
   segredos_criados=1
-  rm -rf "$trabalho" "$novo" || return 1
+  rm -rf "$trabalho" "$novo" "$segredos/conferir.out" "$segredos/conferir.err" "$segredos/abrir.err" || return 1
   if [ ! -f "$selado" ]; then
     log 'segredos compartilhados: o pacote não traz secrets.sealed.json'
     return 0
@@ -1025,18 +1049,29 @@ preparar_segredos() {
   # O seq vem só da conferência da assinatura, sem a chave montada: a saída
   # é lida até 4 KB e só vale exatamente uma linha do formato esperado. No
   # registro, o código de saída e, do erro padrão, só uma mensagem conhecida.
-  saida=$(docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 0:0 \
+  # Arquivos, e não $(...): no bash 3.2, com set -E, o trap ERR dentro da
+  # substituição troca o código de saída por 1.
+  docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 0:0 \
     --mount "type=bind,source=$selado,target=/segredos/selado.json,readonly" \
     --mount "type=bind,source=$assinantes,target=/segredos/assinantes.txt,readonly" \
-    "$imagem" secrets verify --file /segredos/selado.json --signers /segredos/assinantes.txt --json 2>"$segredos/conferir.err" |
-    head -c 4096) || rc=$?
+    "$imagem" secrets verify --file /segredos/selado.json --signers /segredos/assinantes.txt --json \
+    >"$segredos/conferir.out" 2>"$segredos/conferir.err" || rc=$?
+  saida=$(head -c 4096 "$segredos/conferir.out" 2>/dev/null) || saida=''
   erro=$(tail -c 4096 "$segredos/conferir.err" 2>/dev/null) || erro=''
-  rm -f "$segredos/conferir.err" || true
+  rm -f "$segredos/conferir.out" "$segredos/conferir.err" || true
   if [ "$rc" != 0 ] || ! [[ $saida =~ $verificado_re ]] || [ "${BASH_REMATCH[1]}" -gt "$seq_segredos_max" ]; then
     log "não foi possível conferir o arquivo selado (saída $rc$(mensagem_cli "$erro")); nada mudou"
     return 1
   fi
   segredos_seq=${BASH_REMATCH[1]}
+  # O piso guarda também o sha256 destes bytes: um mesmo seq com outro
+  # conteúdo não passa como o arquivo já aplicado.
+  if ! saida=$(sha256sum <"$selado") || ! [[ ${saida%% *} =~ $hash_re ]]; then
+    segredos_seq=''
+    log 'não foi possível calcular o sha256 do arquivo selado; nada mudou'
+    return 1
+  fi
+  segredos_hash=${saida%% *}
   saida=''
   # Sempre um diretório novo e vazio: na saída 3 o comando deixa um --out que
   # já existia como estava, e só vale um aberto.env que esta execução gravou.
@@ -1046,13 +1081,15 @@ preparar_segredos() {
   fi
   # Do processo que segurou a chave, só o código de saída e uma mensagem
   # conhecida do erro padrão (lido até 4 KB) vão para o registro.
-  erro=$(docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 0:0 \
+  docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 0:0 \
     --mount "type=bind,source=$chave_segredos,target=/segredos/chave.json,readonly" \
     --mount "type=bind,source=$selado,target=/segredos/selado.json,readonly" \
     --mount "type=bind,source=$assinantes,target=/segredos/assinantes.txt,readonly" \
     --mount "type=bind,source=$trabalho,target=/segredos/saida" \
     "$imagem" secrets open --key-file /segredos/chave.json --file /segredos/selado.json \
-    --signers /segredos/assinantes.txt --out /segredos/saida/aberto.env 2>&1 >/dev/null | tail -c 4096) || rc=$?
+    --signers /segredos/assinantes.txt --out /segredos/saida/aberto.env >/dev/null 2>"$segredos/abrir.err" || rc=$?
+  erro=$(tail -c 4096 "$segredos/abrir.err" 2>/dev/null) || erro=''
+  rm -f "$segredos/abrir.err" || true
   case $rc in
     0) ;;
     3)
@@ -1121,8 +1158,10 @@ trocar_segredos() {
     return 1
   fi
   seq_trocado=''
+  hash_trocado=''
   if [ "$segredos_novo" = 1 ]; then
     seq_trocado=$segredos_seq
+    hash_trocado=$segredos_hash
   fi
   segredos_novo=0
   usar_env "$e"
@@ -1756,6 +1795,11 @@ apagar_imagens_velhas() {
 
 # Etapa 7: no ar e saudável. Daqui em diante nada justifica voltar.
 concluir() {
+  # O piso antes de $state/atual: morrer entre os dois só repete a mesma
+  # versão, com seq igual ao piso; uma falha aqui deixa a intervenção.
+  if ! gravar_piso_segredos; then
+    exit 1
+  fi
   if ! trocar_atual "$cand_dir"; then
     log "aviso: não foi possível apontar $releases/current para $cand_dir"
   fi
@@ -1766,10 +1810,6 @@ concluir() {
   apagar_imagens_velhas
   rm -f "$state/disponivel" "$state/preparada" "$state/anterior.velho" "$state/intervencao" \
     "$segredos/efetivo.env.anterior.velho"
-  # Depois de apagar a intervenção: uma falha aqui deixa uma nova.
-  if ! gravar_piso_segredos; then
-    log "aviso: o piso dos segredos compartilhados não foi gravado"
-  fi
   limpar_versoes
   if ! docker image prune -f; then
     log 'aviso: docker image prune falhou'
@@ -2051,8 +2091,9 @@ subir_instalada() {
   if ! verificar_saude; then
     return 1
   fi
+  # 2: no ar e saudável, só o piso não foi gravado (fica a intervenção).
   if ! gravar_piso_segredos; then
-    return 1
+    return 2
   fi
 }
 
@@ -2108,13 +2149,19 @@ cmd_run() {
 
 # Um apply explícito ignora as recusadas.
 cmd_apply() {
+  local rc=0
   comecar apply
   if ! verificar; then
     exit 1
   fi
   if [ "$em_dia" = 1 ]; then
     if [ -f "$state/intervencao" ]; then
-      if ! subir_instalada --force-recreate; then
+      subir_instalada --force-recreate || rc=$?
+      if [ "$rc" = 2 ]; then
+        log 'a versão instalada está saudável, mas o piso dos segredos compartilhados não foi gravado; a intervenção continua'
+        exit 1
+      fi
+      if [ "$rc" != 0 ]; then
         log 'a versão instalada não passou na verificação; a intervenção continua'
         exit 1
       fi
