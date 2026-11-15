@@ -1707,7 +1707,7 @@ function createAccountServer ({
       closing = new Promise((resolve) => {
         server.close(() => resolve())
         server.closeAllConnections()
-      }).then(() => pagesRoutes.close())
+      }).then(() => (pushRoutes !== null ? pushRoutes.close() : undefined)).then(() => pagesRoutes.close())
       return closing
     }
 
