@@ -158,17 +158,21 @@ async function readsDuring (keys, fn) {
 async function orderedReadsDuring (keys, fn) {
   const watched = new Set(keys)
   const reads = []
+  const at = []
   const get = Hypercore.prototype.get
   Hypercore.prototype.get = function (index, opts) {
     if (opts && opts.raw === true && opts.timeout !== undefined && this.key) {
       const key = hex(this.key)
-      if (watched.has(key)) reads.push(key + ':' + index)
+      if (watched.has(key)) {
+        reads.push(key + ':' + index)
+        at.push(Date.now())
+      }
     }
     return get.call(this, index, opts)
   }
   try {
     const result = await fn()
-    return { result, reads }
+    return { result, reads, at }
   } finally {
     Hypercore.prototype.get = get
   }
@@ -325,8 +329,9 @@ test('testimonial.pending: one deadline for all its peeks, pointers first', asyn
   pointers[B.key] = [{ from: A.key, seq: w.seq }]
   await eventually(() => B.web.request('testimonial.pending', {}), (r) => r.items.length === 1 && !r.incomplete, 'w pending')
 
-  // X sorts before every other writer and waits out the deadline, declined;
-  // Y, kept, comes after it.
+  // X sorts before every other writer, declined; Y, kept, comes after it.
+  // Whether X's peek waits out the deadline or fails at once depends on the
+  // host, so the check is that no read starts once the deadline passed.
   const X = unknownKey(A.key)
   const Y = (() => {
     for (;;) {
@@ -337,12 +342,16 @@ test('testimonial.pending: one deadline for all its peeks, pointers first', asyn
   t.alike(await B.web.request('testimonial.decide', { from: X, seq: 1, state: 'declined' }), { changed: true })
   t.alike(await B.web.request('testimonial.decide', { from: Y, seq: 1, state: 'kept' }), { changed: true })
   const started = Date.now()
-  const { result, reads } = await readsDuring([A.key, X, Y], () => B.web.request('testimonial.pending', {}))
+  const { result, reads, at } = await orderedReadsDuring([A.key, X, Y], () => B.web.request('testimonial.pending', {}))
   const took = Date.now() - started
   t.ok(took < BUDGET + 3000, 'answered within the deadline (' + took + ' ms)')
   t.alike(ids(result.items), [[A.key, w.seq]], 'the pointed writer is read first')
   t.ok(reads.includes(A.key + ':' + w.seq) && reads.some((r) => r.startsWith(X + ':')), 'then the decided-only writers by key')
-  t.absent(reads.some((r) => r.startsWith(Y + ':')), 'the chunk past the deadline is not read')
+  // A peek begun just before the deadline may issue its block gets a little
+  // later (TESTIMONIAL_LATE_GRACE_MS): no read starts past that.
+  t.alike(reads.filter((r, i) => at[i] > started + BUDGET + 1500), [], 'no chunk is read past the deadline')
+  const firstOf = (k) => reads.findIndex((r) => r.startsWith(k + ':'))
+  t.ok(firstOf(Y) === -1 || firstOf(X) < firstOf(Y), 'X is asked before Y')
   t.is(result.incomplete, true, 'a decided block not read: incomplete')
   t.alike([A.internal, B.internal], [[], []], 'no internal error')
 })
