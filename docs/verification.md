@@ -11302,9 +11302,9 @@ Android (emulador, Vitrine rica, Metro 8097), com captura de tela:
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
 
-## 248. Linhas estáveis nas demais listas e relógio de minuto pausado (branch perf/list-rows)
+## 255. Linhas estáveis nas demais listas e relógio de minuto pausado (branch perf/list-rows)
 
-Esta seção confere o PR4 da rodada de desempenho: Espiadinha, Diário, Busca, Conversa, Membro e Mensagem passam a ter linhas estáveis (tratadores e `extraData` que não mudam a cada renderização da tela), e `useVisibleNow(60000)` (`src/ui/index.js`, `src/visibleNow.js`) pausa o relógio de minuto enquanto a tela está escondida. Ambiente: o das seções 245 a 247 (emulador Android `varanda-perf` sem janela, Vitrine grande e rica, sem nó). Antes é o PR3 (seção 247, logs de T10 no mesmo emulador); depois é esta árvore, com as mudanças ainda sem commit.
+Esta seção confere o PR4 da rodada de desempenho: Espiadinha, Diário, Busca, Conversa, Membro e Mensagem passam a ter linhas estáveis (tratadores e `extraData` que não mudam a cada renderização da tela), e `useVisibleNow(60000)` (`src/ui/index.js`, `src/visibleNow.js`) pausa o relógio de minuto enquanto a tela está escondida. Ambiente: o das seções 252 a 254 (emulador Android `varanda-perf` sem janela, Vitrine grande e rica, sem nó). Antes é o PR3 (seção 254, logs de T10 no mesmo emulador); depois é esta árvore, com as mudanças ainda sem commit.
 
 ```sh
 # a partir de apps/app, Metro novo por célula
@@ -11314,7 +11314,7 @@ EXPO_PUBLIC_VARANDA_VITRINE=1 EXPO_PUBLIC_VARANDA_VITRINE_LARGE=1 EXPO_PUBLIC_VA
 
 Rolagem roteirizada de A Rua, Android rico, mediana de 3 execuções. Atenção à carga: antes 17 a 22, depois 10 a 12 (a máquina estava mais livre), então milissegundos e quadros não se comparam com o antes; só as contagens.
 
-| Medida | Antes (247) | Depois | Leitura |
+| Medida | Antes (254) | Depois | Leitura |
 |---|---|---|---|
 | `tab:rua`, renderizações / ms | 817 / 9363 | 980 / 6625 | contagem maior com mais quadros (3109 contra 2192), carga diferente: sem conclusão |
 | renderizações por linha montada | 1 | 1 | igual |
@@ -11324,7 +11324,7 @@ Rolagem roteirizada de A Rua, Android rico, mediana de 3 execuções. Atenção 
 | `tab:busca`, `list:conversas` | 11, 6 | 11, 6 | igual |
 | quadros p95 | 64,8 | 38,0 | carga diferente, não se afirma ganho |
 
-Parado e em uso, 60 s por tela (uma execução; sem linha de base, porque as seções 245 a 247 não mediram estas telas):
+Parado e em uso, 60 s por tela (uma execução; sem linha de base, porque as seções 252 a 254 não mediram estas telas):
 
 | Tela | renderizações / ms em 60 s |
 |---|---|
@@ -11358,7 +11358,7 @@ Android (emulador, Vitrine rica, Metro 8097), com captura de tela:
 
 ### Não medido
 
-- iOS e web nesta rodada; Android com players; nó vivo, PWA, release e aparelho de verdade (lista da seção 245).
+- iOS e web nesta rodada; Android com players; nó vivo, PWA, release e aparelho de verdade (lista da seção 252).
 - Antes das telas parada, thread, Membro, Mensagem e teclado: sem linha de base (nenhuma seção anterior as mediu e não se troca de branch para obter uma).
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
