@@ -119,8 +119,9 @@ export function createVitrineRequest (fixtures, options) {
   const groupReactors = new Map()
   const reactionKey = (group, target) => group + ':' + target.writer + ':' + target.seq
   // As the core fold: every member's reaction is kept, and only the 12
-  // emojis with the most reactors (ties by emoji) are shown.
-  const shownReactions = (rows) => rows.slice().sort((a, b) => b.count - a.count || compareText(a.emoji, b.emoji)).slice(0, GROUP_REACTIONS_MAX)
+  // emojis with the most reactors are shown, a tie to the emoji first used
+  // (rows keep that order: a new emoji is appended).
+  const shownReactions = (rows) => rows.map((row, first) => ({ row, first })).sort((a, b) => b.row.count - a.row.count || a.first - b.first).map(({ row }) => row).slice(0, GROUP_REACTIONS_MAX)
   for (const g of data.groups) {
     for (const item of g.items) {
       const others = data.members.filter((m) => m.author !== data.own).map((m) => m.author)

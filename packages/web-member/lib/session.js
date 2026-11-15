@@ -2935,6 +2935,41 @@ function createBrowserSession ({
     }
   })
 
+  // The bounded rule: the service refreshes the roster every
+  // PAGE_ROSTER_REFRESH_BLOCKS blocks, so a verifying roster that new is
+  // the current one; an older one may have been superseded unseen.
+  const pageRosterFresh = (length) => (state) => state.page && state.seq >= length - PAGE_ROSTER_REFRESH_BLOCKS
+
+  // page.read from a diary held here, never the network: { base, result },
+  // result null when the diary is not held.
+  async function pageReadHeld (pageHex) {
+    const local = await serial(async () => {
+      const own = await requireOwnKey()
+      const mod = await member.moderation(storage, cfg.association)
+      let held = null
+      try {
+        held = await withCores(async (c) => {
+          const read = await member.logReadRaw(c, { author: pageHex })
+          return { ...read, forked: pageHex !== own && await replicaForked(c, pageHex) }
+        })
+      } catch (err) {
+        if (messageOf(err) !== NO_LOCAL_DATA) throw err
+      }
+      return { own, revokedIssuers: mod.revokedIssuers, held }
+    })({})
+    const base = { pageHex, own: local.own, association: cfg.association, revokedIssuers: local.revokedIssuers }
+    if (local.held === null) return { base, result: null }
+    // A held diary is read RAW: a tombstone a leaked page key appends
+    // cannot reopen a close nor undo a move or a roster. Every stored block
+    // counts (a followed diary downloads newest-first, its tail past a
+    // gap); only a diary held whole is walked as a chain.
+    // A forked replica answers as the core node's pageRead: no page.
+    if (local.held.forked) throw rpcError('NOT_FOUND', NO_LOCAL_DATA)
+    const { entries, length } = local.held
+    if (entries.length === length) return { base, result: pageReadResult({ ...base, entries, full: true, complete: () => true }) }
+    return { base, result: pageReadResult({ ...base, entries, full: false, complete: pageRosterFresh(length) }) }
+  }
+
   // ---- handlers (docs/rpc.md section 5; params arrive validated) ----
 
   const handlers = {
@@ -3322,36 +3357,9 @@ function createBrowserSession ({
     'page.read': async ({ key, full }) => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
       const pageHex = key.toLowerCase()
-      const local = await serial(async () => {
-        const own = await requireOwnKey()
-        const mod = await member.moderation(storage, cfg.association)
-        let held = null
-        try {
-          held = await withCores(async (c) => {
-            const read = await member.logReadRaw(c, { author: pageHex })
-            return { ...read, forked: pageHex !== own && await replicaForked(c, pageHex) }
-          })
-        } catch (err) {
-          if (messageOf(err) !== NO_LOCAL_DATA) throw err
-        }
-        return { own, revokedIssuers: mod.revokedIssuers, held }
-      })({})
-      const base = { pageHex, own: local.own, association: cfg.association, revokedIssuers: local.revokedIssuers }
-      // The bounded rule: the service refreshes the roster every
-      // PAGE_ROSTER_REFRESH_BLOCKS blocks, so a verifying roster that new is
-      // the current one; an older one may have been superseded unseen.
-      const fresh = (length) => (state) => state.page && state.seq >= length - PAGE_ROSTER_REFRESH_BLOCKS
-      // A held diary is read RAW: a tombstone a leaked page key appends
-      // cannot reopen a close nor undo a move or a roster. Every stored block
-      // counts (a followed diary downloads newest-first, its tail past a
-      // gap); only a diary held whole is walked as a chain.
-      if (local.held !== null) {
-        // A forked replica answers as the core node's pageRead: no page.
-        if (local.held.forked) throw rpcError('NOT_FOUND', NO_LOCAL_DATA)
-        const { entries, length } = local.held
-        if (entries.length === length) return pageReadResult({ ...base, entries, full: true, complete: () => true })
-        return pageReadResult({ ...base, entries, full: false, complete: fresh(length) })
-      }
+      const { base, result } = await pageReadHeld(pageHex)
+      if (result !== null) return result
+      const fresh = pageRosterFresh
       try {
         const first = await diaryPeek({ author: pageHex, seqs: [1, 2, 3] })
         const length = first.length
@@ -4142,6 +4150,15 @@ function createBrowserSession ({
         dmEngine.checkSend(await requireDm(), to)
         if ((await member.memberBlocks(storage)).has(to)) throw new UsageError(DM_BLOCKED)
       })({}, ident)
+      // A Página key is known only from its diary held here (the page.read
+      // answer the app's gate reads), never from the network: a reaction to a
+      // peer whose diary is not held does not wait for a seeder peek, goes
+      // through, and the Página drops it on pull.
+      let page = false
+      try {
+        const { result: r } = await pageReadHeld(to.toLowerCase())
+        page = r !== null && (r.gen !== null || r.owner !== null || r.closed === true || (r.movedTo !== null && r.movedTo !== undefined))
+      } catch {}
       let recipient
       try {
         recipient = await dmLookupOf(to)
@@ -4151,7 +4168,7 @@ function createBrowserSession ({
       return serialDm(async (_, epoch) => {
         const own = await requireDm()
         if ((await store.readDmKey(storage)) === null) await dmEnable(epoch)
-        return dmEngine.react(own, keyPair, { to, target, emoji }, recipient.box)
+        return dmEngine.react(own, keyPair, { to, target, emoji }, recipient.box, { page })
       })({}, ident)
     },
 

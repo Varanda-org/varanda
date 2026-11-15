@@ -1546,13 +1546,17 @@ test('group reactions outside the 12 shown stay counted and come back, as in the
   const group = f.groups[0].group
   const target = { writer: item.writer, seq: item.seq }
   const read = async () => (await request('group.read', { group })).items.find((p) => p.writer === target.writer && p.seq === target.seq)
-  // An emoji that sorts first pushes the last of the twelve out of view.
+  // A tie goes to the emoji first used: a 13th emoji is the one cut, even
+  // one whose text sorts before the twelve.
   await answer(t, request, 'group.react', { group, target, emoji: '\u{1f600}' })
   const shown = (await read()).reactions.map((r) => r.emoji)
-  t.alike(shown, ['\u{1f600}', ...twelve.slice(0, 11)])
+  t.alike(shown, twelve)
+  t.absent((await read()).reactions.some((r) => r.mine), 'the own emoji is counted but not shown')
   const who = await answer(t, request, 'group.reactors', { group, target })
   t.alike(who.reactions.map((r) => r.emoji), shown, 'group.reactors lists the same 12')
-  // Taking the reaction back shows the hidden emoji again with its count.
+  // Moving the reaction onto a shown emoji counts it there.
+  await answer(t, request, 'group.react', { group, target, emoji: twelve[11] })
+  t.alike((await read()).reactions[0], { emoji: twelve[11], count: 2, mine: true })
   await answer(t, request, 'group.react', { group, target, emoji: '' })
   t.alike((await read()).reactions, twelve.map((emoji) => ({ emoji, count: 1, mine: false })))
 })
