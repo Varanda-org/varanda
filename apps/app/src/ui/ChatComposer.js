@@ -55,7 +55,7 @@
 //   being answered, as a tap on the quote inside a bubble does. Absent: no tap.
 //   attachments: [{ id, status: 'encoding' | 'ready' | 'invalid', thumb, error }]
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ActivityIndicator, AppState, Image, Keyboard, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { MAX_TEXT, activeMention } from '@varanda/rpc'
@@ -87,6 +87,7 @@ import { MentionSuggest } from './MentionSuggest'
 import { ReplyPreview } from './ReplyPreview'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, radius, space, webInputReset } from './theme'
+import { measureField } from './fieldMeasure'
 
 const LINE = 22
 const PAD_V = 9
@@ -436,13 +437,17 @@ export function ChatComposer ({
   const text = typeof value === 'string' ? value : ''
   const change = (next) => { if (typeof onChangeText === 'function') onChangeText(next) }
   const [height, setHeight] = useState(MIN_HEIGHT)
-  // On the web the measured content height never falls below the field's
-  // current height, so an emptied draft (a send, a clear) drops back to one
-  // line here. A partial delete keeps the height: the web skips the
-  // content-size event when the line count did not change, and a reset there
-  // would hide the remaining lines.
-  useEffect(() => {
+  // An emptied draft (a send, a clear) drops back to one line. On the web the
+  // field is measured from its scrollHeight after every change, before the
+  // paint (it grows and shrinks between one and MAX_LINES lines):
+  // react-native-web fires onContentSizeChange when typing grows the field,
+  // never when deleting shrinks it. Native has no measurement (null) and
+  // relies on onContentSizeChange.
+  const inputRef = useRef(null)
+  useLayoutEffect(() => {
     if (text === '') setHeight(MIN_HEIGHT)
+    const measured = measureField(inputRef.current, MIN_HEIGHT, MAX_HEIGHT)
+    if (measured !== null) setHeight((was) => (was === measured ? was : measured))
   }, [text])
   const shownHeight = Math.max(height, heightFloor(text, { line: LINE, pad: PAD_V, maxLines: MAX_LINES }))
   const [emojiOpen, setEmojiOpen] = useState(false)
@@ -455,7 +460,6 @@ export function ChatComposer ({
   // after an insert. `caret` only forces the re-render that moves the @token.
   const [forcedSel, setForcedSel] = useState(null)
   const selRef = useRef(null)
-  const inputRef = useRef(null)
   const [caret, setCaret] = useState(0)
   const [collapsed, setCollapsed] = useState(true)
   const [sheetOpen, setSheetOpen] = useState(false)

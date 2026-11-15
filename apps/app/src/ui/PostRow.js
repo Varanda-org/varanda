@@ -60,7 +60,7 @@
 //   for a handled mention; its web links stay plain (./QuoteCard).
 
 import { memo, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { AccessibilityInfo, Animated, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
+import { Animated, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { doubleTapPlan, pendingOpen, tapKind } from '../doubleTap'
 import { compactTime, formatCount, relativeTime } from '../format'
@@ -77,8 +77,9 @@ import { shareNav } from '../shareNav'
 import { replyChip } from '../threadRows'
 import { whoOf } from '../who'
 import { ActionsSheet } from './ActionsSheet'
+import { usePostSheet } from './PostSheetHost'
 import { Avatar } from './Avatar'
-import { ClampControl, useClamp } from './ClampText'
+import { ClampControl, captionEstimate, useClamp } from './ClampText'
 import { Icon } from './Icon'
 import { LinkCard } from './LinkCard'
 import { MusicEmbedCard } from './MusicEmbedCard'
@@ -87,6 +88,8 @@ import { MediaGrid } from './MediaGrid'
 import { tap } from './haptics'
 import { hasMention, MentionText } from './MentionText'
 import { useHosted } from '../node'
+import { captionWidthNext, headActionsKey, headReserveOf, openedNext, rememberHeadActions, sameSize, seedHeadActions } from '../postRowLayout'
+import { useReduceMotion } from './StackLayer'
 import { closeRow, countRowRender, openRow, perfOn } from '../perfMarks'
 import { PerfListId } from './screenVisible'
 import { QuoteCard, quotePlayerOf } from './QuoteCard'
@@ -162,14 +165,6 @@ function previewLineText (line) {
 const NATIVE_DRIVER = Platform.OS !== 'web'
 const BURST_MS = 600
 
-// Read once for the module, not per row mount: a feed mounts many rows and
-// each query is a bridge call. The listener keeps a changed setting current.
-let reduceMotionOn = false
-try {
-  Promise.resolve(AccessibilityInfo.isReduceMotionEnabled()).then((reduce) => { reduceMotionOn = reduce === true }, () => {})
-  AccessibilityInfo.addEventListener('reduceMotionChanged', (reduce) => { reduceMotionOn = reduce === true })
-} catch {}
-
 // The pop when a toggle turns on: the scale is owned by the row, so the icon
 // keeps it when the bar swaps between its split and plain layouts (the first
 // like gives the count that brings the split in).
@@ -219,7 +214,7 @@ function PostRowView ({
   author, name, username, avatar, at, text, replyToName, replyPreviews, media, preview, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending, expanded = false,
   onOpen, onOpenAuthor, onOpenParent, onOpenPreviews, onOpenReposter, onFollowReposter, onOpenMention,
-  onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onBlock, onDelete, link, onNotice,
+  onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onOpenQuotes, onFollow, followPending, onReport, onBlock, onDelete, link, onNotice,
   seq, onMessage, publishable
 }) {
   // perfOn never changes while the app runs, so this hook call is stable.
@@ -230,6 +225,7 @@ function PostRowView ({
   const reposts = countOf(counts, 'reposts')
   const likeText = countLabel(likes)
   const repostText = countLabel(reposts)
+  const quotes = countOf(counts, 'quotes')
   const hasMedia = Array.isArray(media) && media.length > 0
   const embed = preview && typeof preview === 'object' ? embedOf(preview.url) : null
   const music = preview && typeof preview === 'object' ? musicRefOf(preview.url) : null
@@ -243,21 +239,18 @@ function PostRowView ({
   // The body label, the plain text and the label without the text all use it.
   const shownText = useMemo(() => (hasText ? displayText(body, { multiline: true }) : null), [hasText, body])
   const [captionWidth, setCaptionWidth] = useState(undefined)
-  const [headActionsSize, setHeadActionsSize] = useState({ width: 0, height: 0 })
-  // Measure the targets so larger text reserves its actual space in the head.
-  const measureHeadActions = (event) => {
-    const { width, height } = event.nativeEvent.layout
-    setHeadActionsSize((prev) => prev.width === width && prev.height === height ? prev : { width, height })
-  }
+  const [headActionsSize, setHeadActionsSize] = useState(null)
+  const headSeed = useRef(null)
   const { numberOfLines, control, onTextLayout, toggle } = useClamp({
     text: shownText,
     hasMedia,
     width: captionWidth,
     forceExpanded: expanded
   })
+  const { width: windowWidth, fontScale } = useWindowDimensions()
   const measureCaption = (event) => {
-    const width = event.nativeEvent.layout.width
-    setCaptionWidth(Number.isFinite(width) && width > 0 ? width : undefined)
+    const next = captionWidthNext(captionEstimate(windowWidth), event.nativeEvent.layout.width)
+    if (next !== captionWidth) setCaptionWidth(next)
   }
   // compactTime has no word for under a minute or a clock ahead of ours;
   // relativeTime says 'agora' or the date there, never the raw timestamp.
@@ -270,7 +263,6 @@ function PostRowView ({
   // date: iOS shrank it to a clipped sliver ("( · 5 nov"), so it is left out.
   // Android's 1.3 step arrives as 1.2999999523 (a 32-bit float), so the
   // threshold sits just under it.
-  const { fontScale } = useWindowDimensions()
   const handle = who.subtitle && !(fontScale >= LARGE_TEXT) ? displayText(who.subtitle) : null
   const open = fn(onOpen)
   const like = fn(onLike)
@@ -279,7 +271,21 @@ function PostRowView ({
   const burstScale = useRef(new Animated.Value(0.6)).current
   const burstOpacity = useRef(new Animated.Value(0)).current
   const [burstOn, setBurstOn] = useState(false)
-  const [sheet, setSheet] = useState(null)
+  const [localSheet, setLocalSheet] = useState(null)
+  // Under a list's PostSheetProvider the sheet is the list's, not the row's.
+  const host = usePostSheet()
+  const sheetRef = useRef({ repost: [], more: [] })
+  const hostSheet = useRef(null)
+  const setSheet = (kind) => {
+    if (kind !== null && host !== null) {
+      hostSheet.current = kind
+      host.show(rowId, sheetRef.current[kind] || [])
+    } else if (host === null) setLocalSheet(kind)
+  }
+  const sheet = localSheet
+  const [opened, setOpened] = useState(null)
+  if (sheet !== null && openedNext(opened, sheet) !== opened) setOpened(openedNext(opened, sheet))
+  const reduceMotionOn = useReduceMotion()
   const rowId = useRef({}).current
   const previousTap = useRef(null)
   useEffect(() => () => pendingOpen.cancelOwn(rowId), [])
@@ -338,6 +344,7 @@ function PostRowView ({
     ...(messageable ? [{ id: 'message', icon: 'mensagem', label: 'Mensagem em particular' }] : []),
     ...moreActions(null, { link, onReport: fn(onReport) ? true : null, onBlock: fn(onBlock) ? true : null }),
     ...(publicRow ? [{ id: 'public', icon: 'link', label: 'Página pública na web' }] : []),
+    ...(fn(onOpenQuotes) && quotes !== null && quotes > 0 ? [{ id: 'quotes', icon: 'citar', label: quotes === 1 ? 'Ver 1 citação' : 'Ver ' + quotes + ' citações' }] : []),
     ...(fn(onDelete) ? [{ id: 'delete', icon: 'lixeira', label: 'Apagar', danger: true }] : [])
   ]
   const runMore = (row) => {
@@ -348,6 +355,7 @@ function PostRowView ({
       }
     }
     if (row.id === 'message') return () => onMessage(author, { context: { author, seq, at, text, hasMedia } })
+    if (row.id === 'quotes') return onOpenQuotes
     if (row.id === 'public') return () => postPublic.open(String(author).toLowerCase() + ':' + seq)
     if (row.id === 'report') return onReport
     if (row.id === 'block') return onBlock
@@ -360,11 +368,32 @@ function PostRowView ({
     label: row.id === 'repost' && reposted ? 'Desfazer republicação' : row.label,
     onPress: row.id === 'repost' ? doRepost : fn(onQuote)
   }))
+  sheetRef.current = { repost: repostSheet, more: moreSheet }
+  // While this row's actions are up in the list's sheet, each render hands the
+  // fresh ones over (the host ignores a row that no longer owns it).
+  useEffect(() => {
+    if (host !== null && hostSheet.current !== null) host.refresh(rowId, sheetRef.current[hostSheet.current] || [])
+  })
   const hasMore = moreSheet.length > 0
   const headActions = !!fn(onFollow) || hasMore
   // Until the targets report their size, reserve what they usually take, so a
   // row never paints them over the name for a frame.
-  const headReserve = headActionsSize.width > 0 ? headActionsSize : { width: (fn(onFollow) ? FOLLOW_GUESS : 0) + (hasMore ? layout.hit : 0), height: layout.hit }
+  const headKey = headActionsKey(!!fn(onFollow), hasMore, fontScale)
+  headSeed.current = seedHeadActions(headSeed.current, headKey)
+  const headReserve = headReserveOf({
+    key: headKey,
+    measured: headActionsSize,
+    seeded: headSeed.current,
+    guess: { width: (fn(onFollow) ? FOLLOW_GUESS : 0) + (hasMore ? layout.hit : 0), height: layout.hit }
+  })
+  // Measure the targets so larger text reserves its actual space in the head.
+  // A size the first render already reserved is not stored again.
+  const measureHeadActions = (event) => {
+    const { width, height } = event.nativeEvent.layout
+    rememberHeadActions(headKey, { width, height })
+    if (sameSize(headReserve, { width, height })) return
+    setHeadActionsSize({ key: headKey, width, height })
+  }
   // The pill's face starts at the edge of its target, so the date kept no
   // space before it (Android drew them touching). ⋯ sits inside a wider
   // target and needs no gap.
@@ -811,8 +840,8 @@ function PostRowView ({
                 )
               : <View style={styles.previews}>{previewsBody}</View>
             : null}
-          <ActionsSheet open={sheet === 'repost'} onClose={() => setSheet(null)} actions={repostSheet} />
-          <ActionsSheet open={sheet === 'more'} onClose={() => setSheet(null)} actions={moreSheet} />
+          {host === null && opened && opened.repost ? <ActionsSheet open={sheet === 'repost'} onClose={() => setSheet(null)} actions={repostSheet} /> : null}
+          {host === null && opened && opened.more ? <ActionsSheet open={sheet === 'more'} onClose={() => setSheet(null)} actions={moreSheet} /> : null}
           {burstOn
             ? (
               <Animated.View

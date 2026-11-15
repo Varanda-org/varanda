@@ -70,6 +70,7 @@ import { sessionStore } from './src/sessionStore'
 import { cacheGeneration, wipeLocalCaches } from './src/localCaches'
 import { registerBackgroundRefresh, unregisterBackgroundRefresh } from './src/backgroundTask'
 import { makeIntent, validIntent } from './src/privateReply'
+import { restoresParked } from './src/replyHandoff'
 import { NamesProvider, useNames } from './src/names'
 import { BlocksProvider, useBlocks } from './src/blocksProvider'
 import { BlockSheet } from './src/ui/BlockSheet'
@@ -83,7 +84,7 @@ import { pageDmPlan, pageReadKind, pageNoticeSeen } from './src/pageNotice'
 import { pageNoticeStore } from './src/pageNoticeStore'
 import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, passkeyAdd, passkeyStart, seenFinish, seenStart, termsFinish, termsStart } from './src/account'
 import { NOTICES_POLL_MS } from './src/notices'
-import { ackCaughtUp, cleanAvisos, createSeenScheduler, dropSent, rememberSent, reportAvisosSeen, runSeenPass, snapshotBefore } from './src/seenSync'
+import { ackCaughtUp, cleanAvisos, createSeenScheduler, dropSent, rememberSent, reportAvisosSeen, runSeenPass, snapshotOnAnswer } from './src/seenSync'
 import { deletedOf, newReceipt, scheduledOf } from './src/accountDeletion'
 import { enrolWith } from './src/passkeyEnrol'
 import { loadDeletionReceipt, saveDeletionReceipt } from './src/deletionReceiptStore'
@@ -166,6 +167,7 @@ import ARua, { ARuaPreview, liveBinding, noteDeleted, previewBinding } from './s
 import Conexao from './src/screens/Conexao'
 import ConversaScreen, { useActing } from './src/screens/Conversa'
 import CurtidasScreen from './src/screens/Curtidas'
+import CitacoesScreen from './src/screens/Citacoes'
 import Denunciar from './src/screens/Denunciar'
 import DiarioScreen from './src/screens/Diario'
 import EspiadinhaScreen from './src/screens/Espiadinha'
@@ -185,7 +187,7 @@ import AnunciarScreen from './src/screens/Anunciar'
 import AnuncioEditarScreen from './src/screens/AnuncioEditar'
 import AvaliarScreen from './src/screens/Avaliar'
 import { alertsStore } from './src/feiraAlertsStore'
-import { alertsBadge } from './src/feiraScreen'
+import { alertsBadge, badgeRefreshPlan, runFeiraAlerts } from './src/feiraScreen'
 import { createFeiraEntry, decideEntry, heldIsFeira } from './src/feiraEntry'
 import { useFeiraEntryStart } from './src/useFeiraEntryStart'
 import { captureListing, dropListing, entryStorage, holdFeiraCode } from './src/feiraEntryStore'
@@ -240,6 +242,7 @@ const PaginaAjustes = memo(PaginaAjustesScreen)
 const Pessoas = memo(PessoasScreen)
 const Conversa = memo(ConversaScreen)
 const Curtidas = memo(CurtidasScreen)
+const Citacoes = memo(CitacoesScreen)
 const MembroMemo = memo(Membro)
 
 // Inlined by Expo at build time; set only for the iOS worklet gate
@@ -445,6 +448,8 @@ function Member () {
   const [buscaPane, setBuscaPane] = useState(0)
   // reply and quote are mutually exclusive.
   const [composer, setComposer] = useState({ open: false, reply: null, quote: null })
+  // Set by Publicar while it uploads or sends.
+  const composerBusyRef = useRef(false)
   // The screens pushed above the tabs (src/nav.js), oldest first.
   const [stack, setStack] = useState(nav.EMPTY)
   const stackRef = useRef(stack)
@@ -1856,13 +1861,18 @@ function Member () {
   const [composeSignal, setComposeSignal] = useState(null)
   const replyDraftResolve = useRef(null)
   const replyDraftStash = useRef(null)
+  const replyDraftHandoff = useRef(null)
   const replyHandoffSerial = useRef(0)
   const settleReplyDraft = useCallback((accepted, restore = true) => {
     const resolve = replyDraftResolve.current
     const saved = replyDraftStash.current
+    const handoff = replyDraftHandoff.current
     replyDraftResolve.current = null
     replyDraftStash.current = null
-    if (saved && accepted !== true && restore) setComposer((c) => ({ ...c, ...saved }))
+    replyDraftHandoff.current = null
+    // Only while the composer still holds this hand-off: an older target must
+    // not replace a reply the person opened during the send.
+    if (saved) setComposer((c) => (restoresParked({ accepted, restore, saved, handoff, reply: c.reply }) ? { ...c, ...saved } : c))
     if (resolve) resolve(accepted === true)
   }, [])
   useEffect(() => {
@@ -1883,7 +1893,9 @@ function Member () {
       return new Promise((resolve) => {
         replyDraftResolve.current = resolve
         replyDraftStash.current = saved
-        setComposer({ open: true, reply: { ...r, handoff: ++replyHandoffSerial.current }, quote: null })
+        const handoff = ++replyHandoffSerial.current
+        replyDraftHandoff.current = handoff
+        setComposer({ open: true, reply: { ...r, handoff }, quote: null })
       })
     }
     setComposer({ open: true, reply: r, quote: null })
@@ -1942,9 +1954,14 @@ function Member () {
           // A sheet is open: Back closes it first and the screen stays. The
           // popstate already stepped the history back, so the entries it
           // dropped are pushed again (history depth stays equal to the stack).
-          setComposer((c) => ({ ...c, open: false }))
-          setReport(null)
-          setAjustes(null)
+          // Not while the composer is sending: its own close is a no-op then
+          // (see Publicar), and closing it here would let the post go out
+          // after the sheet is gone.
+          if (!composerBusyRef.current) {
+            setComposer((c) => ({ ...c, open: false }))
+            setReport(null)
+            setAjustes(null)
+          }
           const h = globalThis.history
           const d = nav.depth(stackRef.current)
           if (h && typeof h.pushState === 'function') {
@@ -2002,6 +2019,9 @@ function Member () {
   }, [pushScreen])
   const openEngagers = useCallback(({ ref, kind } = {}) => {
     pushScreen({ screen: 'curtidas', key: ref, params: { kind: kind === 'reposts' ? 'reposts' : 'likes' } })
+  }, [pushScreen])
+  const openQuotes = useCallback(({ ref } = {}) => {
+    pushScreen({ screen: 'citacoes', key: ref, params: {} })
   }, [pushScreen])
   const openGroup = useCallback((group) => {
     pushScreen({ screen: 'grupo', key: typeof group === 'string' ? group.toLowerCase() : group, params: {} })
@@ -2192,8 +2212,8 @@ function Member () {
     }
   }, [dmReady, dmDotGate, readDmDot, node.dmVersion, stackDepth])
   // --- Feira: the tab dot from saved searches (src/feiraAlerts.js) ---
-  // Only the Feira screen runs the searches, when it is opened; this reads
-  // the counts that run left on the device, so nothing polls here. Counts
+  // The searches run when the Feira opens and on the 15-minute foreground
+  // timer below; this reads the counts they left on the device. Counts
   // are recorded only while the Feira answered as on, so a stored count
   // stands for "on" at the last opening. Same origin rule as Feira.js.
   const feiraAlertsOrigin = installationOrigin() || globalThis.location?.origin || node.accountOrigin
@@ -2207,6 +2227,42 @@ function Member () {
     }, () => {})
     return () => { live = false }
   }, [mode, ready, locked, feiraOnScreen, feiraAlertsOrigin, nodeEpoch])
+  // The dot also refreshes every 15 minutes while the app is in the foreground,
+  // whichever tab is open (badgeRefreshPlan). Background, offline or a Feira
+  // that answered off: no timer and no call. The store throttles the runs.
+  const feiraNodeRef = useRef(node)
+  feiraNodeRef.current = node
+  const feiraOffRef = useRef(null)
+  const feiraRunAt = useRef(null)
+  useEffect(() => {
+    if (mode !== 'hosted' || !ready || locked) return
+    const scopeKey = JSON.stringify([nodeEpoch, feiraAlertsOrigin])
+    if (feiraOffRef.current === scopeKey) return
+    let live = true
+    let timer = null
+    const tick = () => {
+      timer = null
+      if (!live || feiraOffRef.current === scopeKey) return
+      const current = feiraNodeRef.current
+      const plan = badgeRefreshPlan({ now: Date.now(), lastAt: feiraRunAt.current, foreground: current.visible !== false, online: current.online, hosted: current.hosted === true, enabled: true })
+      if (plan.waitMs === null) return
+      if (plan.run) {
+        feiraRunAt.current = Date.now()
+        runFeiraAlerts({ node: current, enabled: true, origin: feiraAlertsOrigin, store: alertsStore, isActive: () => live }).then(async (answer) => {
+          if (!live) return
+          if (answer.off) feiraOffRef.current = scopeKey
+          const value = await alertsStore.load(feiraAlertsOrigin)
+          if (live) setFeiraAlerts({ epoch: nodeEpoch, origin: feiraAlertsOrigin, value })
+        }, () => {})
+      }
+      timer = setTimeout(tick, plan.waitMs)
+    }
+    tick()
+    return () => {
+      live = false
+      if (timer !== null) clearTimeout(timer)
+    }
+  }, [mode, ready, locked, node.visible, node.online, node.hosted, feiraAlertsOrigin, nodeEpoch])
   const feiraBadge = mode === 'hosted' && !locked && !feiraOnScreen && feiraAlerts !== null &&
     feiraAlerts.epoch === nodeEpoch && feiraAlerts.origin === feiraAlertsOrigin &&
     alertsBadge({ node, enabled: true, searches: feiraAlerts.value.searches, counts: feiraAlerts.value.counts })
@@ -2257,11 +2313,11 @@ function Member () {
     if (seenMember === null) return
     const member = seenMember
     const run = async () => {
-      // caughtUp describes the groups as the merge saw them: only the
-      // versions known when the first merge went out are acknowledged, so a
-      // post that arrives after it keeps its dot. Versions restart per node
+      // caughtUp describes the groups as the merge saw them when it
+      // answered: the versions known at that answer are acknowledged, so a
+      // post that lands after it keeps its dot. Versions restart per node
       // epoch, so the epoch is taken with them.
-      const { request, snap } = snapshotBefore(seenRequestRef.current, 'seen.merge', () => ({
+      const { request, snap } = snapshotOnAnswer(seenRequestRef.current, 'seen.merge', () => ({
         versions: groupVersionsRef.current,
         epoch: nodeEpochRef.current
       }))
@@ -2285,7 +2341,7 @@ function Member () {
       if (result.blocksChanged) refreshBlocks().catch(() => {})
       if (result.groupChanged) {
         bumpSeen()
-        const taken = snap.value
+        const taken = { epoch: snap.epoch, versions: snap.versions }
         setGroupSeen((cur) => ackCaughtUp(cur, result.caughtUp, taken))
       }
     }
@@ -3480,6 +3536,7 @@ function Member () {
       onReport: setReport,
       onOpenThread: openThread,
       onOpenEngagers: openEngagers,
+      onOpenQuotes: openQuotes,
       onOpenMember: openMember,
       onOpenMention: mentionHandler,
       onToast: h.handleShowToast,
@@ -3669,7 +3726,7 @@ function Member () {
           </StackLayer>
         )
       }
-      const Screen = entry.screen === 'conversa' ? Conversa : entry.screen === 'curtidas' ? Curtidas : MembroMemo
+      const Screen = entry.screen === 'conversa' ? Conversa : entry.screen === 'curtidas' ? Curtidas : entry.screen === 'citacoes' ? Citacoes : MembroMemo
       return (
         <StackLayer key={i + ':' + entry.screen + ':' + entry.key + (entry.screen === 'conversa' && entry.key === threadReload.ref ? ':' + threadReload.n : '')} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
           <Screen entry={entry} {...screenProps} onComposeSeen={h.handleComposeSeen} composeSignal={entry.screen === 'conversa' && i === stack.length - 1 ? composeSignal : null} onPublished={h.handleOnPublished} onTabChange={entry.screen === 'membro' ? entryHandlers.current.for(i + ':membro:' + entry.key, { handleTabChange: (id) => reportProfileTab(i + ':' + entry.key, id) }).handleTabChange : undefined} />
@@ -3738,6 +3795,7 @@ function Member () {
                       onToast={h.handleShowToast}
                       onOpenThread={openThread}
                       onOpenEngagers={openEngagers}
+                      onOpenQuotes={openQuotes}
                       onOpenMember={openMember}
                       onOpenMention={mentionHandler}
                       onQuote={h.handleStartQuote}
@@ -3766,6 +3824,7 @@ function Member () {
                       onReport={setReport}
                       onOpenThread={openThread}
                       onOpenEngagers={openEngagers}
+                      onOpenQuotes={openQuotes}
                       onOpenMember={openMember}
                       onOpenMention={mentionHandler}
                       onQuote={h.handleStartQuote}
@@ -3795,6 +3854,7 @@ function Member () {
                       onOpenThread={openThread}
                       onOpenMention={mentionHandler}
                       onOpenEngagers={openEngagers}
+                      onOpenQuotes={openQuotes}
                     />
                   )}
                 </ScreenVisible.Provider>
@@ -3878,6 +3938,7 @@ function Member () {
                       onMessage={openMessage}
                       onOpenThread={openThread}
                       onOpenEngagers={openEngagers}
+                      onOpenQuotes={openQuotes}
                       onOpenMember={openMember}
                       onOpenMention={mentionHandler}
                       onQuote={h.handleStartQuote}
@@ -3999,6 +4060,7 @@ function Member () {
           onSharedDone={(id) => share.done(id)}
           onSharedTaken={(id) => share.taken(id)}
           me={me}
+          busyRef={composerBusyRef}
           onClose={() => setComposer((c) => ({ ...c, open: false }))}
           onClearReply={() => setComposer((c) => ({ ...c, reply: null }))}
           onClearQuote={() => setComposer((c) => ({ ...c, quote: null }))}

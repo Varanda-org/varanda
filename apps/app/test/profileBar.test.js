@@ -176,3 +176,17 @@ test('both profile lists size their content through pinnedContentStyle', (t) => 
   t.ok(read('Diario.js').includes('contentContainerStyle={pinnedContentStyle({ paddingBottom: bottomPad, minHeight: windowHeight + bandHeight + 8 }, windowHeight, tabsTop, insets.top + BAR)}'))
   t.ok(read('Membro.js').includes('contentContainerStyle={pinnedContentStyle({ paddingBottom: bottomPad, minHeight: windowHeight + insets.top + BAND + 8 }, windowHeight, tabsTop, insets.top + BAR)}'))
 })
+
+test('profile bar title stops growing at the header cap so it fits the fixed bar', (t) => {
+  const fs = require('node:fs')
+  const path = require('node:path')
+  const src = fs.readFileSync(path.join(__dirname, '../src/ui/ProfileBar.js'), 'utf8')
+  const sheet = fs.readFileSync(path.join(__dirname, '../src/ui/Sheet.js'), 'utf8')
+  t.ok(src.includes("import { TEXT_CAP } from './Sheet'") && sheet.includes('export const TEXT_CAP = 1.3'), 'the shared header cap')
+  t.ok(src.includes("<Text style={styles.title} numberOfLines={1} maxFontSizeMultiplier={TEXT_CAP} accessibilityRole='header'>"), 'the title is capped')
+  const theme = fs.readFileSync(path.join(__dirname, '../src/ui/theme.js'), 'utf8')
+  const line = Number(/sheetTitle: \{[^}]*lineHeight: (\d+)/.exec(theme)?.[1])
+  const bar = Number(/export const BAR = (\d+)/.exec(src)?.[1])
+  t.ok(/title: \{ \.\.\.type\.sheetTitle,/.test(src), 'the title uses the sheetTitle type')
+  t.ok(line > 0 && bar > 0 && line * 1.3 < bar, 'a capped title line (' + line + ' pt line at 1.3) fits the ' + bar + ' pt bar row')
+})

@@ -254,6 +254,15 @@ function openInvitesStore (dataDir, {
   let byId = new Map()
   let failed = false
   let dirty = false
+  // capOn 'use': holder -> { id, inviter, until, live }, in memory only. A
+  // sign-up whose finish is in flight holds one slot of its code's inviter
+  // from reserve() until it is consumed, released or its `until` passes, so
+  // concurrent finishes can never pass check() beyond perWeek. `holder`
+  // names the pending row and live() says whether that row still exists: a
+  // hold whose row is gone (linked, dropped, evicted or expired) counts for
+  // nothing, so no hold outlives its row. A restart drops them, which only
+  // frees slots.
+  const reserved = new Map()
 
   function setState (next) {
     state = next
@@ -416,6 +425,26 @@ function openInvitesStore (dataDir, {
     return n
   }
 
+  // A live() that throws keeps the hold (until its `until`): refusing a
+  // slot is the safe side.
+  function holding (r) {
+    if (r.live === null) return true
+    try {
+      return r.live() !== false
+    } catch {
+      return true
+    }
+  }
+
+  function reservedCount (member, except, nowMs) {
+    let n = 0
+    for (const [holder, r] of reserved) {
+      if (r.until <= nowMs || !holding(r)) reserved.delete(holder)
+      else if (r.inviter === member && r.id !== except && !used(r.id)) n++
+    }
+    return n
+  }
+
   function counted (invites, member, nowMs) {
     return capOn === 'use' ? useCount(invites, member, nowMs) : weekCount(invites, member, nowMs)
   }
@@ -509,7 +538,7 @@ function openInvitesStore (dataDir, {
     // A code from an earlier week would be counted in that week only, so it
     // could pass after Monday 00:00 outside both counts: it is refused.
     if (capOn === 'use' && Date.parse(r.createdAt) < weekStart(nowMs)) return 'convite-invalido'
-    if (capOn === 'use' && (perWeek === null || useCount(state.invites, r.inviter, nowMs) >= perWeek)) return 'convite-invalido'
+    if (capOn === 'use' && (perWeek === null || useCount(state.invites, r.inviter, nowMs) + reservedCount(r.inviter, id, nowMs) >= perWeek)) return 'convite-invalido'
     return null
   }
 
@@ -521,10 +550,29 @@ function openInvitesStore (dataDir, {
     return byId.get(id).inviter
   }
 
+  // Atomic check-and-reserve (synchronous): true when check(id) accepts the
+  // code, which then holds one of its inviter's slots for `holder` (default
+  // the id) until `untilMs`, a consume(id), a release(holder) or live()
+  // answering false. false (nothing held) otherwise or when the store has
+  // no 'use' cap. A holder holds one slot at most.
+  function reserve (id, untilMs, holder = id, live = null) {
+    if (typeof holder !== 'string') throw new TypeError('holder must be a string')
+    if (live !== null && typeof live !== 'function') throw new TypeError('live must be a function')
+    reserved.delete(holder)
+    if (capOn !== 'use' || check(id) !== null) return false
+    reserved.set(holder, { id, inviter: byId.get(id).inviter, until: untilMs, live })
+    return true
+  }
+
+  function release (holder) {
+    reserved.delete(holder)
+  }
+
   // Idempotent: the link commit in the directory is the single-use authority
   // and already happened, so this only drops the hash and marks the row.
   function consume (id) {
     return enqueue(() => {
+      for (const [holder, r] of reserved) if (r.id === id) reserved.delete(holder)
       if (!validId(id)) throw new TypeError('id must be 64 lowercase hex characters')
       writable()
       const { next, stale } = reread()
@@ -590,6 +638,8 @@ function openInvitesStore (dataDir, {
     holds,
     check,
     inviterOf,
+    reserve,
+    release,
     consume,
     heal,
     summary,
@@ -598,6 +648,7 @@ function openInvitesStore (dataDir, {
     available () { return !failed }
   }
   Object.defineProperty(store, 'perWeek', { value: perWeek, enumerable: true, writable: false })
+  Object.defineProperty(store, 'fileName', { value: fileName, enumerable: true, writable: false })
   return store
 }
 

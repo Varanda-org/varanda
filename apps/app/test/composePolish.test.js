@@ -299,3 +299,58 @@ test('composer keystroke effects call a setter only to change its value', (t) =>
   clear('erro')
   t.alike(calls, [''], 'a message about the old text is cleared')
 })
+
+test('Publicar: closing keeps the text and the photos, only Descartar frees them', (t) => {
+  const src = read('screens/Publicar.js')
+  const start = src.indexOf('// Closing the composer (Cancelar')
+  const close = src.slice(start, src.indexOf('}, [open])', start))
+  t.ok(start > 0 && close.includes('if (open) return'), 'the close effect is found')
+  t.absent(close.includes('removeItems(') || close.includes('video.draft.clear()') || close.includes('genRef.current++'), 'a close frees no photo, video or pending encode')
+  t.absent(close.includes('setText('), 'nor the text')
+  const discard = src.slice(src.indexOf('const discardPost = () =>'), src.indexOf('const momentCount'))
+  t.ok(discard.includes('removeItems(Array.from(liveRef.current))') && discard.includes('video.draft.clear()') && discard.includes("setText('')"), 'Descartar frees the photos, the video and the text')
+  t.ok(discard.includes('genRef.current++'), 'a late encode of a discarded photo is ignored')
+  t.ok(src.includes("<Btn label='Descartar' secondary onPress={discardPost} disabled={held} />"), 'the button is on the post composer')
+  t.ok(src.includes('{!locked && (postDraft || musicDraft !== null)'), 'only with a draft, and not while a page retry has its own Descartar')
+})
+
+test('Publicar: a send in flight cannot be closed, so no post.create follows a Cancelar', (t) => {
+  const src = read('screens/Publicar.js')
+  t.ok(src.includes('onClose={busy ? noop : onClose}') && src.includes('dismissable={!busy}') && src.includes('left={busy ? null : undefined}'), 'the post sheet: no close, no swipe, no Cancelar while busy')
+  t.ok(src.includes('onClose={moment.pending ? noop : onClose}') && src.includes('dismissable={!moment.pending}'), 'the moment sheet too')
+  t.absent(src.includes('or the composer was closed'), 'uploadAll no longer claims a close stops it')
+})
+
+test('Publicar: Usar a resposta frees the video and the music too', (t) => {
+  const src = read('screens/Publicar.js')
+  const use = src.slice(src.indexOf('const useReplyDraft = () =>'), src.indexOf('return (', src.indexOf('const useReplyDraft = () =>')))
+  t.ok(use.includes('discardPost()') && use.includes('setText(reply.draft)'), 'it goes through discardPost, then takes the reply text')
+  t.absent(use.includes('removeItems('), 'no private copy of the clearing that forgets the video')
+})
+
+test('App: browser Back over a pushed screen does not close the composer around a send', (t) => {
+  const app = readFileSync(join(__dirname, '../App.js'), 'utf8')
+  const from = app.indexOf('if (sheetOpenRef.current) {', app.indexOf('const binding = bindHistory'))
+  const to = app.indexOf('          return\n        }', from)
+  t.ok(from > 0 && to > from, 'the sheet branch is found')
+  const run = (busy) => {
+    const calls = { composer: 0, report: 0, ajustes: 0, pushed: [] }
+    const fn = evaluate('return (n) => {' + app.slice(from, to) + '          return\n        }\n        return "fell"}', {
+      sheetOpenRef: { current: true },
+      composerBusyRef: { current: busy },
+      setComposer: () => { calls.composer++ },
+      setReport: () => { calls.report++ },
+      setAjustes: () => { calls.ajustes++ },
+      nav: { depth: () => 2 },
+      stackRef: { current: [] },
+      globalThis: { history: { pushState: (state) => calls.pushed.push(state.varanda) } }
+    })
+    t.is(fn(1), undefined, 'the screen stays')
+    return calls
+  }
+  t.alike(run(false), { composer: 1, report: 1, ajustes: 1, pushed: [2] }, 'idle: the sheet closes and the entry is pushed again')
+  t.alike(run(true), { composer: 0, report: 0, ajustes: 0, pushed: [2] }, 'sending: nothing closes, the entry is still pushed again')
+  const pub = read('screens/Publicar.js')
+  t.ok(pub.includes('busyRef.current = sending') && pub.includes('const sending = busy || moment.pending') && pub.includes('return () => { busyRef.current = false }'), 'Publicar reports a send and clears it on unmount')
+  t.ok(app.includes('busyRef={composerBusyRef}'), 'App passes the ref')
+})

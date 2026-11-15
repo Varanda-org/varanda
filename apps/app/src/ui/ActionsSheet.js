@@ -28,6 +28,7 @@ import { escapeLayerCount, useEscapeLayer } from './escapeLayer'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, radius, space, type } from './theme'
 import { holdEmbeds } from '../embedLive'
+import { useHandedOpen } from './Sheet'
 
 // Open menus, so a parent layer with its own key handling can leave Escape
 // to the menu on top of it.
@@ -67,7 +68,12 @@ export function ActionsSheet ({ open, onClose, title, actions, header }) {
   // slide; marking that late flush as gone would leave the new opening dead.
   const shownNow = useRef(shown)
   shownNow.current = shown
+  // A menu asked right after a sheet closed (a long press just after "Quem
+  // reagiu") waits for that sheet to leave, and this one counts as leaving
+  // until its own dismissal, so a sheet a row opens hands over the same way.
+  const handed = useHandedOpen(shown)
   const flush = () => {
+    handed.dismissed()
     const fn = pending.current
     pending.current = null
     if (!shownNow.current) gone.current = true
@@ -76,6 +82,10 @@ export function ActionsSheet ({ open, onClose, title, actions, header }) {
   useEffect(() => {
     if (shown) {
       gone.current = false
+      // Opened again during the slide out (a list's shared sheet another row
+      // opened): the pressed action runs now instead of after this opening,
+      // and the new rows answer.
+      if (pending.current !== null) flush()
       return undefined
     }
     // Modal reports its dismissal on iOS and on the web (where the closing
@@ -102,7 +112,7 @@ export function ActionsSheet ({ open, onClose, title, actions, header }) {
   return (
     // A compact bottom panel as tall as its rows, as the message menus of the
     // chat apps are: a full-height sheet for three actions reads as a new page.
-    <Modal visible={shown} transparent animationType='slide' statusBarTranslucent onRequestClose={onClose} onDismiss={flush}>
+    <Modal visible={handed.visible} transparent animationType='slide' statusBarTranslucent onRequestClose={onClose} onDismiss={flush}>
       <View style={styles.fill}>
         <Backdrop style={styles.backdrop} onClose={onClose} />
         {/* Capped at 85% of the screen and scrolling inside: long labels at

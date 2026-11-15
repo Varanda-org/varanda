@@ -34,7 +34,3 @@ export function mergeSuggestions (memberHits, pageHits, query, ownKey) {
     chipLabel: hit.kind === 'page' ? 'Página' : null
   }))
 }
-
-export function openTarget (row) {
-  return validTarget(row) ? { screen: 'membro', key: row.key } : null
-}

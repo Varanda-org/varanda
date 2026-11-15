@@ -98,6 +98,7 @@ export default function Anunciar ({ initialPlace = null, onBack, registerBackGua
   const [encoding, setEncoding] = useState(false)
   const [sending, setSending] = useState(false)
   const sendingRef = useRef(false)
+  const stepErrorRef = useRef(false)
   const [error, setError] = useState('')
   const [field, setField] = useState('')
   const [note, setNote] = useState('')
@@ -120,6 +121,7 @@ export default function Anunciar ({ initialPlace = null, onBack, registerBackGua
 
   const move = (next) => {
     setIndex(next)
+    stepErrorRef.current = false
     setError('')
     setField('')
     scrollRef.current?.scrollTo({ y: 0, animated: false })
@@ -154,6 +156,7 @@ export default function Anunciar ({ initialPlace = null, onBack, registerBackGua
     if (sendingRef.current || encoding) return
     const [problem] = stepErrors(form, STEPS[index], ack)
     if (problem) {
+      stepErrorRef.current = true
       setField(problem.field)
       setError(problem.error)
       return
@@ -174,10 +177,19 @@ export default function Anunciar ({ initialPlace = null, onBack, registerBackGua
     thumbsRef.current.clear()
   }, [])
 
+  // An edit retires a step error at the field and in the bar alike: the bar
+  // would otherwise keep asking for what was just filled in. The word check is
+  // a step error with no field, so the step marks its own errors. An error of
+  // a publish with no field (a failed send) stays until the next attempt.
+  const clearFieldError = () => {
+    if (field !== '' || stepErrorRef.current) setError('')
+    stepErrorRef.current = false
+    setField('')
+  }
   const set = (patch) => {
     if (locked) return
     setForm((f) => updateForm(f, patch))
-    setField('')
+    clearFieldError()
   }
 
   const attach = async () => {
@@ -313,6 +325,7 @@ export default function Anunciar ({ initialPlace = null, onBack, registerBackGua
     if (sendingRef.current || pending !== null || encoding) return
     sendingRef.current = true
     setSending(true)
+    stepErrorRef.current = false
     setError('')
     setField('')
     const to = dest
@@ -445,7 +458,7 @@ export default function Anunciar ({ initialPlace = null, onBack, registerBackGua
                 <>
                   <Label>Prévia</Label>
                   <ListingTile listing={previewListing(form)} width='100%' />
-                  <Pressable accessibilityRole='checkbox' accessibilityState={{ checked: ack }} disabled={locked} onPress={() => { setAck((v) => !v); setField('') }} style={styles.ack}>
+                  <Pressable accessibilityRole='checkbox' accessibilityState={{ checked: ack }} disabled={locked} onPress={() => { setAck((v) => !v); clearFieldError() }} style={styles.ack}>
                     <View style={[styles.box, ack && styles.boxOn]}>{ack ? <Icon name='ok' size={14} color={colors.accentInk} /> : null}</View>
                     <Text style={styles.ackText}>{ACK_TEXT}</Text>
                   </Pressable>
