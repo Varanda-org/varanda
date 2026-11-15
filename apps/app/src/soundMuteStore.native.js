@@ -1,9 +1,9 @@
-let prefStore = null
+let muteStore = null
 
-export function musicAutoStore () {
-  if (prefStore !== null) return prefStore
+export function soundMuteStore () {
+  if (muteStore !== null) return muteStore
   const { File, Paths } = require('expo-file-system')
-  const file = (suffix = '') => new File(Paths.document, 'varanda-musica-sozinha.json' + suffix)
+  const file = (suffix = '') => new File(Paths.document, 'varanda-som-mudo.json' + suffix)
 
   function removeQuietly (f) {
     try {
@@ -11,10 +11,10 @@ export function musicAutoStore () {
     } catch {}
   }
 
-  prefStore = {
+  muteStore = {
     getItem () {
-      // Unreadable is not absent: a stored opt-out that cannot be read must
-      // not turn music back on, so a file nobody can read reads as invalid.
+      // Unreadable is not absent: a stored mute that cannot be read must
+      // not turn sound back on, so a file nobody can read reads as invalid.
       let present = false
       for (const suffix of ['', '.bak']) {
         try {
@@ -27,7 +27,7 @@ export function musicAutoStore () {
       return present ? '' : null
     },
     setItem (_key, value) {
-      // File.write truncates in place and can lose an opt-out mid-write.
+      // File.write truncates in place and can lose the saved choice mid-write.
       // move never overwrites, so keep a backup until the new file is in place.
       removeQuietly(file('.tmp'))
       try {
@@ -56,5 +56,5 @@ export function musicAutoStore () {
       removeQuietly(file('.bak'))
     }
   }
-  return prefStore
+  return muteStore
 }
