@@ -1348,7 +1348,8 @@ async function scrolled (t, { music = { kind: 'track', id: 'abc' }, item, measur
   let memo
   const view = { measureInWindow: (fn) => measure.current(fn) }
   const h = await ui({
-    useNode: () => ({ hosted: true, accountOrigin: 'account-origin', request: 'signer', passkey: { status: { publicKey: 'AB'.repeat(32) } } }),
+    useNodeHandle: () => ({ hosted: true, accountOrigin: 'account-origin', request: 'signer' }),
+    useMemberKey: () => memberKeyOf({ status: { publicKey: 'AB'.repeat(32) } }),
     useMemo: (fn) => memo || (memo = fn()),
     audiusReady: async () => true,
     audiusItem: item || (async (kind, id) => track(id)),
