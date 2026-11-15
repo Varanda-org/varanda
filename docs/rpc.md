@@ -398,6 +398,8 @@ The follower and following counts and lists ("N seguindo", "N seguidores", the S
 
 Who liked and who reposted is not an RPC method either. The hosted app calls `GET|HEAD /index/likes/<author>/<seq>[/<cursor>]` and `GET|HEAD /index/reposts/<author>/<seq>[/<cursor>]` (protocol §7 "Seeder index route") and verifies each engager with one `diary.peek` `{ author, seqs: [seq], profileSeq?, usernameSeq? }`. The entry must be that `like` or `repost` with `on: true` and `to` equal to the post; anything else is dropped and counted as unavailable. Names come from the peeked profile and the verified username. There is no new method and no row in the size table. On the core node, `diary.peek` stays `USAGE` `'leitura sob demanda só na versão web'`.
 
+The roda of a conversation is not an RPC method either. A hosted app reads it with `GET|HEAD /index/roda/<author>/<seq>[/<cursor>]` (protocol §7 "Seeder index route") and must verify every row with `diary.peek` of the signed reply (its `replyTo` must be `top` or an accepted reply, and `top` and `root` the chain of section 5 "Seeder engagement index"). No new method and no row in the size table.
+
 A node that predates 5.23 to 5.27 answers `USAGE` `'método desconhecido'`.
 
 ### 5.28 `notices.list`

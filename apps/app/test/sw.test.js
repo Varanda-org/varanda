@@ -155,7 +155,8 @@ function loadWorker (code, server, opts = {}) {
   const handlers = {}
   const caches = opts.caches || fakeCaches()
   const calls = []
-  const w = { handlers, caches, calls, server, shown: [], closed: new Set(), windows: [], opened: [], now: null }
+  const w = { handlers, caches, calls, server, shown: [], closed: new Set(), windows: [], opened: [], now: null, postDelayMs: 0 }
+  const timers = opts.timers || { setTimeout, clearTimeout }
   class WorkerDate extends Date {
     static now () { return w.now === null ? Date.now() : w.now }
   }
@@ -165,12 +166,17 @@ function loadWorker (code, server, opts = {}) {
   }
   const self = {
     location: { origin: ORIGIN, host: 'example.test' },
+    navigator: opts.navigator,
     addEventListener: (type, fn) => { handlers[type] = fn },
     registration: {
-      showNotification: async (title, options) => { w.shown.push({ title, options }) },
+      showNotification: async (title, options) => {
+        const record = { title, options, posted: w.postDelayMs === 0 }
+        w.shown.push(record)
+        if (w.postDelayMs > 0) timers.setTimeout(() => { record.posted = true }, w.postDelayMs)
+      },
       getNotifications: async (filter) => w.shown
-        .filter((n) => !w.closed.has(n) && (!filter || !filter.tag || n.options.tag === filter.tag))
-        .map((n) => ({ close: () => { w.closed.add(n) } }))
+        .filter((n) => !w.closed.has(n) && !n.dropped && (!filter || !filter.tag || n.options.tag === filter.tag))
+        .map((n) => ({ close: () => { if (n.posted) w.closed.add(n); else n.dropped = true } }))
     }
   }
   const clients = {
@@ -180,7 +186,7 @@ function loadWorker (code, server, opts = {}) {
     },
     openWindow: async (url) => { w.opened.push(url) }
   }
-  vm.runInNewContext(code, { self, caches, clients, fetch, Request, Response, Headers, URL, TextDecoder, crypto: globalThis.crypto, Date: WorkerDate, MessageChannel, setTimeout, clearTimeout })
+  vm.runInNewContext(code, { self, caches, clients, fetch, Request, Response, Headers, URL, TextDecoder, crypto: globalThis.crypto, Date: WorkerDate, MessageChannel, setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout })
   return w
 }
 
@@ -976,10 +982,10 @@ const RECIPIENT = 'b'.repeat(64)
 const REF = RECIPIENT + ':7'
 const FALLBACK = 'Você tem um aviso novo na Varanda'
 
-function renderedWorker () {
+function renderedWorker (opts) {
   const dist = makeDist()
   quiet(() => finishWeb(dist))
-  return loadWorker(readWorker(dist).code, offline)
+  return loadWorker(readWorker(dist).code, offline, opts)
 }
 
 const pushData = (payload) => ({ json: () => payload })
@@ -1395,6 +1401,126 @@ async function wakeShown (w) {
 function openNotices (w) {
   return w.shown.filter((n) => !w.closed.has(n))
 }
+
+const ANDROID_UA = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36'
+const DESKTOP_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+
+function fakeTimers () {
+  let now = 0
+  let next = 1
+  const pending = new Map()
+  return {
+    setTimeout: (fn, ms) => { const id = next++; pending.set(id, { fn, at: now + ms }); return id },
+    clearTimeout: (id) => { pending.delete(id) },
+    advance (ms) {
+      now += ms
+      const due = [...pending].filter(([, x]) => x.at <= now).sort((a, b) => a[1].at - b[1].at)
+      for (const [id, x] of due) {
+        if (!pending.delete(id)) continue
+        x.fn()
+      }
+    }
+  }
+}
+
+async function settle (cond, max = 50) {
+  for (let i = 0; i < max && !cond(); i++) await new Promise(setImmediate)
+}
+
+function startPush (w, data) {
+  const waits = []
+  w.handlers.push({ data, waitUntil: (p) => waits.push(p) })
+  return Promise.all(waits)
+}
+
+test('dm wake: on Android the quiet notice is closed only once the system has posted it', async (t) => {
+  const cases = {
+    'focused window': async (w) => { w.windows = [activeWindow(ORIGIN + '/')] },
+    'own send': async (w) => { await message(w, { type: 'varanda-dm-sent' }, fakeWindow(ORIGIN + '/')) },
+    'blocked actor': async (w) => { await message(w, { type: 'varanda-blocks', keys: [ACTOR] }, fakeWindow(ORIGIN + '/')) }
+  }
+  for (const [label, prepare] of Object.entries(cases)) {
+    const clock = fakeTimers()
+    const w = renderedWorker({ navigator: { userAgent: ANDROID_UA }, timers: clock })
+    w.postDelayMs = 500
+    await prepare(w)
+    const done = startPush(w, pushData(label === 'blocked actor' ? valid() : DM_WAKE))
+    await settle(() => w.shown.length === 1)
+    t.is(w.shown.length, 1, label + ': one notice shown')
+    t.is(openNotices(w).length, 1, label + ': still open')
+    clock.advance(1999)
+    await settle(() => false, 5)
+    t.is(openNotices(w).length, 1, label + ': still open before the wait ends')
+    clock.advance(1)
+    await done
+    t.alike(openNotices(w), [], label + ': closed')
+    t.ok(w.closed.has(w.shown[0]), label + ': the close was kept')
+  }
+})
+
+test('dm wake: outside Android the quiet notice is still closed at once', async (t) => {
+  for (const [label, opts] of [['no navigator', {}], ['desktop Chrome', { navigator: { userAgent: DESKTOP_UA } }]]) {
+    const clock = fakeTimers()
+    const w = renderedWorker({ ...opts, timers: clock })
+    w.windows = [activeWindow(ORIGIN + '/')]
+    await startPush(w, pushData(DM_WAKE))
+    t.is(w.shown.length, 1, label + ': one notice shown')
+    t.ok(w.closed.has(w.shown[0]), label + ': closed with no timer advanced')
+  }
+})
+
+test('dm wake: on Android a second quiet notice inside the wait is closed after its own wait', async (t) => {
+  const clock = fakeTimers()
+  const w = renderedWorker({ navigator: { userAgent: ANDROID_UA }, timers: clock })
+  w.postDelayMs = 500
+  w.windows = [activeWindow(ORIGIN + '/')]
+  let done1 = false
+  let done2 = false
+  const p1 = startPush(w, pushData(DM_WAKE)).then(() => { done1 = true })
+  await settle(() => w.shown.length === 1)
+  clock.advance(1500)
+  const p2 = startPush(w, pushData(DM_WAKE)).then(() => { done2 = true })
+  await settle(() => w.shown.length === 2)
+  clock.advance(500)
+  await p1
+  t.ok(done1, 'the first push is done')
+  t.not(done2, 'the second push still waits')
+  t.absent(w.closed.has(w.shown[1]), 'the second notice is not closed')
+  t.absent(w.shown[1].dropped, 'the second notice is not dropped')
+  clock.advance(1500)
+  await p2
+  t.alike(openNotices(w), [], 'closed after its own wait')
+})
+
+test('dm wake: on Android the delayed close leaves a real DM wake on screen', async (t) => {
+  const clock = fakeTimers()
+  const w = renderedWorker({ navigator: { userAgent: ANDROID_UA }, timers: clock })
+  w.postDelayMs = 500
+  const real = startPush(w, pushData(DM_WAKE))
+  await settle(() => w.shown.length === 1)
+  clock.advance(500)
+  await real
+  await message(w, { type: 'varanda-dm-sent' }, fakeWindow(ORIGIN + '/'))
+  const quietWake = startPush(w, pushData(DM_WAKE))
+  await settle(() => w.shown.length === 2)
+  clock.advance(2000)
+  await quietWake
+  const open = openNotices(w)
+  t.is(open.length, 1, 'one notice left')
+  t.is(open[0].options.tag, 'varanda-dm-wake', 'the real wake')
+})
+
+test('push: on Android a failing showNotification neither waits nor throws', async (t) => {
+  const clock = fakeTimers()
+  const w = renderedWorker({ navigator: { userAgent: ANDROID_UA }, timers: clock })
+  w.windows = [activeWindow(ORIGIN + '/')]
+  w.shown = { push: () => { throw new Error('quota') } }
+  let done = false
+  const p = startPush(w, pushData(DM_WAKE)).then(() => { done = true })
+  await settle(() => done)
+  t.ok(done, 'settled with no timer advanced')
+  await t.execution(p)
+})
 
 test('dm wake: a wake this device hides is still shown, quietly, and closed at once', async (t) => {
   // WebKit revokes a subscription whose push shows no notification.
