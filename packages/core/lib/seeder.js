@@ -214,6 +214,7 @@ const clock = require('./clock')
 const {
   FrameGuard,
   frameDeadlineFor,
+  frameVictims,
   MAX_HANDSHAKE_FRAME,
   MAX_HANDSHAKE_BYTES,
   MAX_EXTERNAL_FRAME,
@@ -284,6 +285,14 @@ const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'p
 // keeps its responder defaults (2 handshake frames of at most
 // MAX_HANDSHAKE_FRAME, then frames of at most MAX_EXTERNAL_FRAME) and gets
 // the seeder-wide budget below (_frameBudget).
+
+// Frame guard time: the monotonic clock (a wall-clock step must not cut an
+// honest frame or extend a deadline) and real timers.
+const FRAME_CLOCK = Object.freeze({
+  now: () => clock.now(),
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (timer) => clearTimeout(timer)
+})
 
 // An external socket with no incoming data for this long after the handshake
 // is dropped (Hypercore keep-alives every 5 s keep a live peer well inside it).
@@ -1135,13 +1144,17 @@ class Seeder {
     this._frameMemory = 0
     this._frameGuards = new Set()
     this._frameBudget = {
-      // A reservation that does not fit evicts the slowest charged guard
-      // whose reservation is old enough, then retries once.
+      // The newcomer loses: a reservation that does not fit evicts only
+      // charged guards that are stalled or below the minimum throughput
+      // (never in their first frameEvictAgeMs, never one keeping up), and
+      // only when evicting them makes room; otherwise nobody is evicted and
+      // the requester alone is refused (frameVictims in frame-guard.js).
       reserve: (n, guard) => {
-        if (this._frameMemory + n > this.maxFrameMemory) {
-          const victim = this._frameVictim()
-          if (victim === null) return false
-          victim.evict()
+        const over = this._frameMemory + n - this.maxFrameMemory
+        if (over > 0) {
+          const victims = frameVictims(this._frameGuards, over, this.frameEvictAgeMs)
+          if (victims === null) return false
+          for (const victim of victims) victim.evict()
           if (this._frameMemory + n > this.maxFrameMemory) return false
         }
         this._frameMemory += n
@@ -6765,23 +6778,6 @@ class Seeder {
     this._attachPeer(socket)
   }
 
-  // The charged FrameGuard with the lowest progress (received / declared)
-  // whose reservation is at least frameEvictAgeMs old, or null.
-  _frameVictim () {
-    const now = Date.now()
-    let victim = null
-    let lowest = Infinity
-    for (const guard of this._frameGuards) {
-      if (now - guard.reservedAt < this.frameEvictAgeMs) continue
-      const p = guard.progress()
-      if (p < lowest) {
-        lowest = p
-        victim = guard
-      }
-    }
-    return victim
-  }
-
   // Admits a member over a raw duplex that is not the swarm (phase 0 spike:
   // a WebSocket). The stream is wrapped as a Noise responder keyed with
   // seeder-key.json, so the member's seeder verification (seederCertForKey
@@ -6830,6 +6826,7 @@ class Seeder {
         this.log({ event: 'peer-dropped', peerKey: key, reason })
       },
       budget: this._frameBudget,
+      clock: FRAME_CLOCK,
       deadlineBaseMs: this.frameDeadlineBaseMs,
       deadlineCapMs: this.frameDeadlineCapMs,
       smallBytes: this.frameSmallBytes

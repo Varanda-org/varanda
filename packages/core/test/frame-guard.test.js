@@ -3,8 +3,9 @@
 // FrameGuard in isolation, over a fake raw duplex: exact limits, one byte
 // over, split headers, several frames per chunk, the responder (2 handshake
 // frames) vs initiator (1) direction, early EOF, teardown, the frame
-// budget (unlimited by default, or injected) and the frame deadline. The
-// end-to-end
+// budget (unlimited by default, or injected), the eviction rule of the
+// seeder's budget, the frame deadline and local backpressure (time paused by
+// the guard itself is not counted). The end-to-end
 // behaviour through Seeder.acceptStream is covered by
 // packages/core/test/seeder-stream.test.js.
 const test = require('brittle')
@@ -13,6 +14,7 @@ const b4a = require('b4a')
 const {
   FrameGuard,
   frameDeadlineFor,
+  frameVictims,
   HANDSHAKE_FRAMES,
   MAX_HANDSHAKE_FRAME,
   MAX_HANDSHAKE_BYTES,
@@ -21,7 +23,8 @@ const {
   SMALL_FRAME_BYTES,
   FRAME_DEADLINE_BASE_MS,
   FRAME_DEADLINE_CAP_MS,
-  FRAME_MIN_BYTES_PER_S
+  FRAME_MIN_BYTES_PER_S,
+  FRAME_EVICT_MIN_AGE_MS
 } = require('../lib/frame-guard')
 
 class FakeRaw extends EventEmitter {
@@ -31,6 +34,8 @@ class FakeRaw extends EventEmitter {
     this.ended = false
     this.written = []
     this.writeResult = true
+    this.paused = false
+    this.pauses = 0
   }
 
   write (data) {
@@ -39,8 +44,13 @@ class FakeRaw extends EventEmitter {
   }
 
   end () { this.ended = true }
-  pause () {}
-  resume () {}
+
+  pause () {
+    if (!this.paused) this.pauses++
+    this.paused = true
+  }
+
+  resume () { this.paused = false }
 
   destroy () {
     if (this.destroyed) return
@@ -80,6 +90,38 @@ function sleep (ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+// A fake clock for FrameGuard's `clock` option: time moves only on
+// advance(ms), which runs the timers due on the way in time order.
+function fakeClock () {
+  let now = 0
+  let seq = 0
+  const timers = new Set()
+  return {
+    now: () => now,
+    setTimeout: (fn, ms) => {
+      const timer = { at: now + ms, seq: seq++, fn }
+      timers.add(timer)
+      return timer
+    },
+    clearTimeout: (timer) => { timers.delete(timer) },
+    pending: () => timers.size,
+    advance (ms) {
+      const end = now + ms
+      for (;;) {
+        let next = null
+        for (const timer of timers) {
+          if (timer.at <= end && (next === null || timer.at < next.at || (timer.at === next.at && timer.seq < next.seq))) next = timer
+        }
+        if (next === null) break
+        timers.delete(next)
+        now = next.at
+        next.fn()
+      }
+      now = end
+    }
+  }
+}
+
 // A budget that records every reservation and release.
 function recordingBudget (allow = () => true) {
   const log = { reserved: [], released: [], held: 0 }
@@ -110,7 +152,7 @@ test('production limits are unchanged and the seeder re-exports them', (t) => {
   t.is(MAX_FRAME_MEMORY, 64 * 1024 * 1024)
   t.is(SMALL_FRAME_BYTES, 64 * 1024)
   t.is(FRAME_DEADLINE_BASE_MS, 10000)
-  t.is(FRAME_DEADLINE_CAP_MS, 120000)
+  t.is(FRAME_DEADLINE_CAP_MS, 139000, 'derived: 129 s for MAX_EXTERNAL_FRAME at the minimum rate plus 10 s')
   t.is(FRAME_MIN_BYTES_PER_S, 65536)
   t.is(seeder.MAX_FRAME_MEMORY, MAX_FRAME_MEMORY)
   t.is(seeder.SMALL_FRAME_BYTES, SMALL_FRAME_BYTES)
@@ -257,6 +299,14 @@ test('custom maxHandshakeFrame and maxFrame are honoured exactly', async (t) => 
   t.is(b.state.limits, 1)
 })
 
+test('the default clock is monotonic, not the wall clock', (t) => {
+  const guard = new FrameGuard(new FakeRaw())
+  guard.on('error', () => {})
+  t.ok(Math.abs(guard._clock.now() - performance.now()) < 1000, 'performance.now()')
+  t.ok(Math.abs(guard._clock.now() - Date.now()) > 1000, 'not Date.now()')
+  guard.destroy()
+})
+
 test('invalid options are refused', async (t) => {
   const raw = new FakeRaw()
   await t.exception.all(() => new FrameGuard(raw, { handshakeFrames: 0 }), /handshakeFrames/)
@@ -269,6 +319,8 @@ test('invalid options are refused', async (t) => {
   await t.exception.all(() => new FrameGuard(raw, { smallBytes: Infinity }), /smallBytes/)
   await t.exception.all(() => new FrameGuard(raw, { budget: {} }), /budget/)
   await t.exception.all(() => new FrameGuard(raw, { budget: null }), /budget/)
+  await t.exception.all(() => new FrameGuard(raw, { clock: {} }), /clock/)
+  await t.exception.all(() => new FrameGuard(raw, { clock: null }), /clock/)
   t.is(raw.listenerCount('data'), 0, 'a refused guard attaches no listener')
 })
 
@@ -393,9 +445,10 @@ test('a large incomplete frame is charged to an injected budget and released on 
   await feed(f.subarray(0, 100), f.subarray(100, 200))
   t.alike(budget.log.reserved, [5000], 'reserved once, the whole declared length')
   t.is(budget.log.held, 5000)
-  t.ok(guard.reservedAt > 0)
+  t.is(guard.reserved, 5000)
   t.ok(guard.progress() > 0 && guard.progress() < 1)
   await feed(f.subarray(200))
+  t.is(guard.reserved, 0)
   t.alike(budget.log.released, [5000])
   t.is(budget.log.held, 0)
   t.is(state.limits, 0)
@@ -496,4 +549,227 @@ test('a frame completed before its deadline clears the timer', async (t) => {
   await sleep(80)
   t.is(state.limits, 0)
   t.absent(guard.destroyed)
+})
+
+test('frameDeadlineFor: a maximum frame at exactly the minimum rate fits under the deadline cap', (t) => {
+  const transfer = Math.ceil(MAX_EXTERNAL_FRAME / FRAME_MIN_BYTES_PER_S) * 1000
+  t.is(transfer, 129000, 'MAX_EXTERNAL_FRAME takes 129 s at 64 KiB/s')
+  t.is(FRAME_DEADLINE_CAP_MS, transfer + FRAME_DEADLINE_BASE_MS, 'the cap is that time plus one base window')
+  t.is(frameDeadlineFor(MAX_EXTERNAL_FRAME), FRAME_DEADLINE_CAP_MS)
+  t.ok(frameDeadlineFor(MAX_EXTERNAL_FRAME) > transfer)
+})
+
+test('a maximum frame sent exactly at the minimum rate completes within the deadline', async (t) => {
+  const clock = fakeClock()
+  const { raw, guard, state, feed } = setup({ clock })
+  await feed(frame(32), frame(64))
+  // The header alone at t = 0, then 64 KiB of body per second, in chunks
+  // under the readable high-water mark so no backpressure pause occurs.
+  await feed(header(MAX_EXTERNAL_FRAME))
+  t.is(guard.reserved, MAX_EXTERNAL_FRAME, 'charged')
+  const piece = b4a.alloc(8192)
+  const seconds = MAX_EXTERNAL_FRAME / FRAME_MIN_BYTES_PER_S
+  const evictableAt = []
+  for (let s = 1; s <= seconds; s++) {
+    clock.advance(1000)
+    if (state.limits > 0) break
+    for (let i = 0; i < FRAME_MIN_BYTES_PER_S / piece.byteLength; i++) await feed(piece)
+    // Body bytes keep it fresh: never stalled, never below the rate.
+    if (s < seconds && guard.evictable(FRAME_EVICT_MIN_AGE_MS)) evictableAt.push(s)
+  }
+  t.alike(evictableAt, [], 'never evictable while it keeps the minimum rate')
+  t.is(clock.now(), 129000, 'the last body byte arrived at 129 s')
+  t.alike(state.reasons, [], 'never dropped')
+  t.absent(guard.destroyed)
+  t.is(raw.pauses, 0, 'no paused time was excluded')
+  t.is(guard.reserved, 0, 'completed and released')
+  t.is(clock.pending(), 0, 'no timer left')
+  t.is(state.bytes, 35 + 67 + 3 + MAX_EXTERNAL_FRAME)
+})
+
+// Starts a guard on the seeder's budget that declares `len` bytes and sends
+// `first` body bytes at the fake clock's current time.
+async function chargedOn (budget, clock, len, first) {
+  const g = setup({ budget, clock })
+  await g.feed(frame(32), frame(64), b4a.concat([header(len), b4a.alloc(first)]))
+  return g
+}
+
+function seederBudget (maxFrameMemory) {
+  const { Seeder } = require('../lib/seeder')
+  return new Seeder({ dataDir: '/nonexistent', maxFrameMemory })
+}
+
+test('budget: new declarations do not evict an older frame that is making progress (the newcomer loses)', async (t) => {
+  const MiB = 1024 * 1024
+  const seeder = seederBudget(2 * MAX_EXTERNAL_FRAME)
+  const budget = seeder._frameBudget
+  const clock = fakeClock()
+  // A member's maximum frame, well above the minimum rate, for 2 s.
+  const member = await chargedOn(budget, clock, MAX_EXTERNAL_FRAME, MiB)
+  clock.advance(1000)
+  await member.feed(b4a.alloc(MiB))
+  clock.advance(1000)
+  await member.feed(b4a.alloc(MiB))
+  t.absent(member.guard.evictable(FRAME_EVICT_MIN_AGE_MS), 'the member keeps the minimum rate')
+  // New maximum declarations, too young to be evicted themselves.
+  const first = await chargedOn(budget, clock, MAX_EXTERNAL_FRAME, 1)
+  t.alike(first.state.reasons, [], 'the first newcomer still fits')
+  const second = await chargedOn(budget, clock, MAX_EXTERNAL_FRAME, 1)
+  t.alike(second.state.reasons, ['frame-budget'], 'the newcomer that does not fit is refused')
+  t.ok(second.raw.destroyed)
+  t.alike(member.state.reasons, [], 'the member is not evicted')
+  t.absent(member.guard.destroyed)
+  t.is(seeder._frameMemory, 2 * MAX_EXTERNAL_FRAME)
+  t.ok(seeder._frameGuards.has(member.guard) && seeder._frameGuards.has(first.guard))
+
+  // Once the first newcomer is old and stalled it is evictable, and a new
+  // declaration evicts it, never the member.
+  clock.advance(1500)
+  await member.feed(b4a.alloc(MiB))
+  t.ok(first.guard.evictable(FRAME_EVICT_MIN_AGE_MS), 'a stalled declaration past its first second is evictable')
+  const third = await chargedOn(budget, clock, MAX_EXTERNAL_FRAME, 1)
+  t.alike(third.state.reasons, [], 'admitted after the eviction')
+  t.alike(first.state.reasons, ['frame-budget'], 'the stalled declaration was evicted')
+  t.alike(member.state.reasons, [], 'the member survives')
+  t.is(seeder._frameMemory, 2 * MAX_EXTERNAL_FRAME)
+})
+
+test('budget: an eviction that would not make room evicts nobody', async (t) => {
+  const MiB = 1024 * 1024
+  const seeder = seederBudget(MAX_EXTERNAL_FRAME + MiB)
+  const budget = seeder._frameBudget
+  const clock = fakeClock()
+  const stalled = await chargedOn(budget, clock, 512 * 1024, 1)
+  const member = await chargedOn(budget, clock, MAX_EXTERNAL_FRAME, MiB)
+  clock.advance(1000)
+  await member.feed(b4a.alloc(MiB))
+  clock.advance(1000)
+  await member.feed(b4a.alloc(MiB))
+  t.ok(stalled.guard.evictable(FRAME_EVICT_MIN_AGE_MS), 'the stalled frame is evictable')
+  t.absent(member.guard.evictable(FRAME_EVICT_MIN_AGE_MS))
+  // Evicting the stalled 512 KiB would not make room for this declaration.
+  const newcomer = await chargedOn(budget, clock, MAX_EXTERNAL_FRAME, 1)
+  t.alike(newcomer.state.reasons, ['frame-budget'], 'the requester alone is refused')
+  t.alike(stalled.state.reasons, [], 'the stalled peer, which did not need to fall, stays')
+  t.absent(stalled.guard.destroyed)
+  t.alike(member.state.reasons, [])
+  t.is(seeder._frameMemory, MAX_EXTERNAL_FRAME + 512 * 1024)
+})
+
+test('budget: only as many evictable frames as needed are evicted, lowest progress first', async (t) => {
+  const KiB = 1024
+  const seeder = seederBudget(3 * 512 * KiB)
+  const budget = seeder._frameBudget
+  const clock = fakeClock()
+  const slowest = await chargedOn(budget, clock, 512 * KiB, 1)
+  const slow = await chargedOn(budget, clock, 512 * KiB, 1000)
+  const member = await chargedOn(budget, clock, 512 * KiB, 100 * KiB)
+  clock.advance(1000)
+  await member.feed(b4a.alloc(100 * KiB))
+  clock.advance(1000)
+  await member.feed(b4a.alloc(100 * KiB))
+  const newcomer = await chargedOn(budget, clock, 512 * KiB, 1)
+  t.alike(newcomer.state.reasons, [], 'admitted')
+  t.alike(slowest.state.reasons, ['frame-budget'], 'the lowest progress is evicted')
+  t.alike(slow.state.reasons, [], 'one eviction was enough')
+  t.alike(member.state.reasons, [])
+  t.is(seeder._frameMemory, 3 * 512 * KiB)
+})
+
+test('budget: an eviction that needs two victims evicts both and admits the newcomer', async (t) => {
+  const KiB = 1024
+  const seeder = seederBudget(3 * 512 * KiB)
+  const budget = seeder._frameBudget
+  const clock = fakeClock()
+  const stalledA = await chargedOn(budget, clock, 512 * KiB, 1)
+  const stalledB = await chargedOn(budget, clock, 512 * KiB, 1000)
+  const member = await chargedOn(budget, clock, 512 * KiB, 100 * KiB)
+  clock.advance(1000)
+  await member.feed(b4a.alloc(100 * KiB))
+  clock.advance(1000)
+  await member.feed(b4a.alloc(100 * KiB))
+  t.is(seeder._frameMemory, 3 * 512 * KiB, 'the budget is full')
+  // 1 MiB needs both stalled reservations.
+  const newcomer = await chargedOn(budget, clock, 1024 * KiB, 1)
+  t.alike(newcomer.state.reasons, [], 'admitted')
+  t.is(newcomer.guard.reserved, 1024 * KiB)
+  t.alike(stalledA.state.reasons, ['frame-budget'], 'first victim dropped')
+  t.alike(stalledB.state.reasons, ['frame-budget'], 'second victim dropped')
+  t.ok(stalledA.raw.destroyed && stalledB.raw.destroyed)
+  t.is(stalledA.guard.reserved + stalledB.guard.reserved, 0, 'victims released')
+  t.alike(member.state.reasons, [], 'the member stays')
+  t.is(seeder._frameMemory, 512 * KiB + 1024 * KiB, 'exactly the member and the newcomer are held')
+  t.is(seeder._frameGuards.size, 2)
+  t.ok(seeder._frameGuards.has(member.guard) && seeder._frameGuards.has(newcomer.guard))
+})
+
+test('evictable: young, stalled and too-slow frames', async (t) => {
+  const MiB = 1024 * 1024
+  const clock = fakeClock()
+  const fast = await chargedOn(recordingBudget(), clock, MAX_EXTERNAL_FRAME, 4 * MiB)
+  const drip = await chargedOn(recordingBudget(), clock, MAX_EXTERNAL_FRAME, 1)
+  const small = setup({ clock })
+  await small.feed(frame(32), frame(64), frame(500).subarray(0, 10))
+  clock.advance(FRAME_EVICT_MIN_AGE_MS - 1)
+  t.absent(drip.guard.evictable(FRAME_EVICT_MIN_AGE_MS), 'never in its first second')
+  clock.advance(100)
+  t.ok(drip.guard.evictable(FRAME_EVICT_MIN_AGE_MS), 'below the minimum rate after the first second')
+  t.absent(small.guard.evictable(FRAME_EVICT_MIN_AGE_MS), 'an uncharged frame holds nothing to evict')
+  // A frame that sent fast and then stopped: its average still beats the
+  // minimum rate, but a base window without a byte makes it stalled.
+  clock.advance(FRAME_DEADLINE_BASE_MS - FRAME_EVICT_MIN_AGE_MS - 100)
+  t.is(clock.now(), FRAME_DEADLINE_BASE_MS - 1)
+  t.absent(fast.guard.evictable(FRAME_EVICT_MIN_AGE_MS), 'still within a base window of its last byte')
+  clock.advance(1)
+  t.ok(fast.guard.evictable(FRAME_EVICT_MIN_AGE_MS), 'stalled for a base window')
+  t.alike(frameVictims([fast.guard, drip.guard], 1), [drip.guard], 'lowest progress first, only what is needed')
+  t.is(frameVictims([fast.guard, drip.guard], 2 * MAX_EXTERNAL_FRAME + 1), null, 'not enough: nobody')
+})
+
+test('backpressure: time paused by a lagging consumer does not count for the throughput check', async (t) => {
+  const clock = fakeClock()
+  const budget = recordingBudget()
+  const { raw, guard, state, feed } = setup({ clock, budget })
+  await feed(frame(32), frame(64))
+  // The consumer stops reading: a chunk over the high-water mark makes the
+  // guard pause raw.
+  guard.pause()
+  await feed(b4a.concat([header(MAX_EXTERNAL_FRAME), b4a.alloc(20000)]))
+  t.ok(raw.paused, 'raw paused by the guard')
+  t.is(budget.log.held, MAX_EXTERNAL_FRAME)
+  clock.advance(10 * 60 * 1000)
+  t.alike(state.reasons, [], 'ten paused minutes: not dropped as slow')
+  t.absent(guard.destroyed)
+  t.absent(guard.evictable(FRAME_EVICT_MIN_AGE_MS), 'nor evictable for the paused time')
+  // The consumer reads again: from here the peer owes the minimum rate.
+  guard.resume()
+  await tick()
+  t.absent(raw.paused, 'raw resumed')
+  clock.advance(2 * FRAME_DEADLINE_BASE_MS - 1)
+  t.alike(state.reasons, [], 'the first check after the resume is grace')
+  clock.advance(1)
+  t.alike(state.reasons, ['frame-deadline'], 'a peer that then stalls is dropped at the second check')
+  t.is(budget.log.held, 0, 'reservation released')
+})
+
+test('backpressure: time paused by a lagging consumer does not count for the frame deadline', async (t) => {
+  const clock = fakeClock()
+  const { raw, guard, state, feed } = setup({ clock })
+  await feed(frame(32), frame(64))
+  guard.pause()
+  // A whole frame over the high-water mark, then a small frame left
+  // incomplete (uncharged: only its completion deadline).
+  await feed(b4a.concat([frame(20000), header(500), b4a.alloc(10)]))
+  t.ok(raw.paused)
+  const deadline = frameDeadlineFor(500)
+  clock.advance(deadline * 10)
+  t.alike(state.reasons, [], 'paused far past its deadline: not dropped')
+  guard.resume()
+  await tick()
+  clock.advance(deadline - 1)
+  t.alike(state.reasons, [], 'the deadline counts active time only')
+  clock.advance(1)
+  t.alike(state.reasons, ['frame-deadline'])
+  t.ok(raw.destroyed)
 })
