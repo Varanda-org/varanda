@@ -575,6 +575,7 @@ function EspiadinhaList ({ active, refresh, onReply, onReport, onQuote, onOpenTh
   return (
     <>
       <RefreshableList
+        perfId='espiadinha'
         data={shownItems}
         keyExtractor={peekKey}
         renderItem={renderItem}

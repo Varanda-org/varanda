@@ -1260,6 +1260,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     <View style={styles.flex}>
       <View style={styles.flex}>
         <RefreshableList
+          perfId='membro'
           data={depo ? testimonialTab.items : phase === 'ready' ? (mural ? muralRows : shownItems) : []}
           keyExtractor={depo ? testimonialTab.keyExtractor : mural ? (row) => 'm' + row.key : (i) => i.kind + ':' + i.seq}
           renderItem={depo ? testimonialTab.renderItem : mural ? renderMural : renderItem}

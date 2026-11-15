@@ -1208,6 +1208,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   return (
     <>
       <RefreshableList
+        perfId='avisos'
         data={shownOnceRef.current ? rows : EMPTY_ROWS}
         keyExtractor={rowKey}
         renderItem={renderItem}

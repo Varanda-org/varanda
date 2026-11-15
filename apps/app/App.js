@@ -54,11 +54,12 @@
 // The service is still asked in the background and its answer wins.
 // Design: apps/site/artwork/app-design.md.
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Profiler, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { StatusBar } from 'expo-status-bar'
 import { Animated, AppState, BackHandler, Linking, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { NodeProvider, perfMarks, useNode } from './src/node'
+import { bootMark, flushEarly, flushRenders, onRenderProfile, perfOn } from './src/perfMarks'
 import { hostedPage, rememberedConfig } from './src/configStore'
 import { pagesOn, setCoreReach } from './src/pageGate'
 import { CROSS_ORIGIN_PAGES } from './src/pageReach'
@@ -3037,11 +3038,13 @@ function Member () {
     markedTab.current = tab
     const marks = perfMarks()
     marks.mark('tab:' + tab)
-    for (const line of marks.report()) console.log(line)
+    // Only the marks not printed yet: each prints once per run.
+    for (const line of marks.fresh()) console.log(line)
+    if (perfOn) flushRenders()
   }, [tab])
   useEffect(() => {
     if (!feedBoot.details) return
-    for (const line of perfMarks().report()) console.log(line)
+    for (const line of perfMarks().fresh()) console.log(line)
   }, [feedBoot.details])
   // Light over the Diário band (dark over the offline note above it) and over
   // Membro's band, which stays on top while offline (its note sits below the
@@ -3667,113 +3670,123 @@ function Member () {
             <Animated.View style={[styles.flex, { marginBottom: chromeRoom ? -chromeTop : 0, transform: [{ translateY: chromeShift }] }]}>
               <View style={shown('rua')}>
                 <ScreenVisible.Provider value={screenSeen('rua')}>
-                  <ARua
-                    onBoot={onFeedBoot}
-                    onDeletedPost={deletedPost}
-                    active={on('rua')}
-                    refresh={version}
-                    onReply={startReply}
-                    onReport={setReport}
-                    onToast={showToast}
-                    onOpenThread={openThread}
-                    onOpenEngagers={openEngagers}
-                    onOpenQuotes={openQuotes}
-                    onOpenMember={openMember}
-                    onOpenMention={mentionHandler}
-                    onQuote={startQuote}
-                    onMessage={openMessage}
-                    onOpenMomentos={openMomentos}
-                    onCreateMoment={openMomentComposer}
-                    ownKey={ownKey}
-                    scrollToTop={scrollSignal.rua}
-                    onUserScroll={onRuaUserScroll}
-                    onScrollFrame={onRuaScrollFrame}
-                    followCount={followCount}
-                    onFollowSomeone={() => {
-                      setTab('busca')
-                      setBuscaPane((n) => n + 1)
-                    }}
-                  />
+                  {tabProfiled('rua',
+                    <ARua
+                      onBoot={onFeedBoot}
+                      onDeletedPost={deletedPost}
+                      active={on('rua')}
+                      refresh={version}
+                      onReply={startReply}
+                      onReport={setReport}
+                      onToast={showToast}
+                      onOpenThread={openThread}
+                      onOpenEngagers={openEngagers}
+                      onOpenQuotes={openQuotes}
+                      onOpenMember={openMember}
+                      onOpenMention={mentionHandler}
+                      onQuote={startQuote}
+                      onMessage={openMessage}
+                      onOpenMomentos={openMomentos}
+                      onCreateMoment={openMomentComposer}
+                      ownKey={ownKey}
+                      scrollToTop={scrollSignal.rua}
+                      onUserScroll={onRuaUserScroll}
+                      onScrollFrame={onRuaScrollFrame}
+                      followCount={followCount}
+                      onFollowSomeone={() => {
+                        setTab('busca')
+                        setBuscaPane((n) => n + 1)
+                      }}
+                    />
+                  )}
                 </ScreenVisible.Provider>
               </View>
               <View style={shown('espiadinha')}>
                 <ScreenVisible.Provider value={screenSeen('espiadinha')}>
-                  <Espiadinha
-                    active={on('espiadinha')}
-                    refresh={peekVersion}
-                    followsSignal={followsSignal}
-                    onPublish={openComposer}
-                    onReply={startReply}
-                    onReport={setReport}
-                    onOpenThread={openThread}
-                    onOpenEngagers={openEngagers}
-                    onOpenQuotes={openQuotes}
-                    onOpenMember={openMember}
-                    onOpenMention={mentionHandler}
-                    onQuote={startQuote}
-                    ownKey={ownKey}
-                    scrollToTop={scrollSignal.espiadinha}
-                    onFollowsChanged={followsChanged}
-                    onToast={showToast}
-                  />
+                  {tabProfiled('espiadinha',
+                    <Espiadinha
+                      active={on('espiadinha')}
+                      refresh={peekVersion}
+                      followsSignal={followsSignal}
+                      onPublish={openComposer}
+                      onReply={startReply}
+                      onReport={setReport}
+                      onOpenThread={openThread}
+                      onOpenEngagers={openEngagers}
+                      onOpenQuotes={openQuotes}
+                      onOpenMember={openMember}
+                      onOpenMention={mentionHandler}
+                      onQuote={startQuote}
+                      ownKey={ownKey}
+                      scrollToTop={scrollSignal.espiadinha}
+                      onFollowsChanged={followsChanged}
+                      onToast={showToast}
+                    />
+                  )}
                 </ScreenVisible.Provider>
               </View>
               <View style={shown('busca')}>
                 <ScreenVisible.Provider value={screenSeen('busca')}>
-                  <BuscaGlobal
-                    active={on('busca')}
-                    refresh={version}
-                    paneRequest={buscaPane}
-                    ownKey={ownKey}
-                    scrollToTop={scrollSignal.busca}
-                    onOpenMember={openMember}
-                    onFollowsChanged={followsChanged}
-                    onToast={showToast}
-                    onReply={startReply}
-                    onReport={setReport}
-                    onQuote={startQuote}
-                    onOpenThread={openThread}
-                    onOpenMention={mentionHandler}
-                    onOpenEngagers={openEngagers}
-                    onOpenQuotes={openQuotes}
-                  />
+                  {tabProfiled('busca',
+                    <BuscaGlobal
+                      active={on('busca')}
+                      refresh={version}
+                      paneRequest={buscaPane}
+                      ownKey={ownKey}
+                      scrollToTop={scrollSignal.busca}
+                      onOpenMember={openMember}
+                      onFollowsChanged={followsChanged}
+                      onToast={showToast}
+                      onReply={startReply}
+                      onReport={setReport}
+                      onQuote={startQuote}
+                      onOpenThread={openThread}
+                      onOpenMention={mentionHandler}
+                      onOpenEngagers={openEngagers}
+                      onOpenQuotes={openQuotes}
+                    />
+                  )}
                 </ScreenVisible.Provider>
               </View>
               {/* Not a tab: kept mounted so its poll lights the bell's dot. */}
               <View style={shown('avisos')}>
                 <ScreenVisible.Provider value={screenSeen('avisos')}>
-                  <Avisos
-                    active={on('avisos')}
-                    refresh={version + avisosReload}
-                    ownKey={ownKey}
-                    onOpenThread={openThread}
-                    onOpenMember={openMember}
-                    scrollToTop={scrollSignal.avisos}
-                    onFollowsChanged={followsChanged}
-                    onToast={showToast}
-                    onBadge={setAvisosNew}
-                    onSeenState={onAvisosSeen}
-                    remoteSeen={remoteSeen}
-                  />
+                  {tabProfiled('avisos',
+                    <Avisos
+                      active={on('avisos')}
+                      refresh={version + avisosReload}
+                      ownKey={ownKey}
+                      onOpenThread={openThread}
+                      onOpenMember={openMember}
+                      scrollToTop={scrollSignal.avisos}
+                      onFollowsChanged={followsChanged}
+                      onToast={showToast}
+                      onBadge={setAvisosNew}
+                      onSeenState={onAvisosSeen}
+                      remoteSeen={remoteSeen}
+                    />
+                  )}
                 </ScreenVisible.Provider>
               </View>
               {mode === 'hosted'
                 ? (
                   <View style={shown('comunidades')}>
                     <ScreenVisible.Provider value={screenSeen('comunidades')}>
-                      <Conversas
-                        key={'g' + nodeEpoch}
-                        active={on('comunidades') && !stacked}
-                        onOpenGroup={openGroup}
-                        onOpenCommunity={openCommunity}
-                        onOpenThread={openMessage}
-                        onOpenCommunities={openCommunities}
-                        onOpenRequests={openRequests}
-                        showInbox={dmOpenCount}
-                        seenTick={seenTick}
-                        composing={convCompose}
-                        onComposing={setConvCompose}
-                      />
+                      {tabProfiled('comunidades',
+                        <Conversas
+                          key={'g' + nodeEpoch}
+                          active={on('comunidades') && !stacked}
+                          onOpenGroup={openGroup}
+                          onOpenCommunity={openCommunity}
+                          onOpenThread={openMessage}
+                          onOpenCommunities={openCommunities}
+                          onOpenRequests={openRequests}
+                          showInbox={dmOpenCount}
+                          seenTick={seenTick}
+                          composing={convCompose}
+                          onComposing={setConvCompose}
+                        />
+                      )}
                     </ScreenVisible.Provider>
                   </View>
                   )
@@ -3782,48 +3795,52 @@ function Member () {
                 ? (
                   <View style={shown('feira')}>
                     <ScreenVisible.Provider value={screenSeen('feira')}>
-                      <Feira
-                        key={'f' + nodeEpoch}
-                        active={on('feira') && !stacked}
-                        ownKey={ownKey}
-                        origin={installationOrigin()}
-                        locationStore={feiraLocation}
-                        onOpenListing={({ author, seq } = {}) => openListing(author, seq)}
-                        onAnnounce={openAnnounce}
-                        scrollToTop={scrollSignal.feira}
-                      />
+                      {tabProfiled('feira',
+                        <Feira
+                          key={'f' + nodeEpoch}
+                          active={on('feira') && !stacked}
+                          ownKey={ownKey}
+                          origin={installationOrigin()}
+                          locationStore={feiraLocation}
+                          onOpenListing={({ author, seq } = {}) => openListing(author, seq)}
+                          onAnnounce={openAnnounce}
+                          scrollToTop={scrollSignal.feira}
+                        />
+                      )}
                     </ScreenVisible.Provider>
                   </View>
                   )
                 : null}
               <View style={shown('diario')}>
                 <ScreenVisible.Provider value={screenSeen('diario')}>
-                  <Diario
-                    onTabChange={(id) => reportProfileTab('diario', id)}
-                    onDeletedPost={deletedPost}
-                    active={on('diario')}
-                    refresh={version}
-                    onSettings={setAjustes}
-                    onToast={showToast}
-                    onReport={setReport}
-                    onReply={startReply}
-                    onPublish={openComposer}
-                    onMessage={openMessage}
-                    onOpenThread={openThread}
-                    onOpenEngagers={openEngagers}
-                    onOpenQuotes={openQuotes}
-                    onOpenMember={openMember}
-                    onOpenMention={mentionHandler}
-                    onQuote={startQuote}
-                    onOpenCommunity={openCommunity}
-                    ownKey={ownKey}
-                    scrollToTop={scrollSignal.diario}
-                    onAvisos={mode === 'hosted' ? openAvisos : undefined}
-                    avisosNew={avisosNew}
-                    onOpenPeople={openPeople}
-                    onOpenTestimonials={openTestimonials}
-                    onOpenMomentos={openMomentos}
-                  />
+                  {tabProfiled('diario',
+                    <Diario
+                      onTabChange={(id) => reportProfileTab('diario', id)}
+                      onDeletedPost={deletedPost}
+                      active={on('diario')}
+                      refresh={version}
+                      onSettings={setAjustes}
+                      onToast={showToast}
+                      onReport={setReport}
+                      onReply={startReply}
+                      onPublish={openComposer}
+                      onMessage={openMessage}
+                      onOpenThread={openThread}
+                      onOpenEngagers={openEngagers}
+                      onOpenQuotes={openQuotes}
+                      onOpenMember={openMember}
+                      onOpenMention={mentionHandler}
+                      onQuote={startQuote}
+                      onOpenCommunity={openCommunity}
+                      ownKey={ownKey}
+                      scrollToTop={scrollSignal.diario}
+                      onAvisos={mode === 'hosted' ? openAvisos : undefined}
+                      avisosNew={avisosNew}
+                      onOpenPeople={openPeople}
+                      onOpenTestimonials={openTestimonials}
+                      onOpenMomentos={openMomentos}
+                    />
+                  )}
                 </ScreenVisible.Provider>
               </View>
             </Animated.View>
@@ -3955,7 +3972,15 @@ function Member () {
   )
 }
 
+// Dev perf only: a Profiler per tab screen; off, the child renders as is.
+const tabProfiled = (name, child) => perfOn ? <Profiler id={'tab:' + name} onRender={onRenderProfile}>{child}</Profiler> : child
+
 export default function App () {
+  useEffect(() => {
+    if (!perfOn) return
+    bootMark('app-commit')
+    flushEarly(perfMarks())
+  }, [])
   useEffect(() => { loadIcons().catch(() => {}) }, [])
   // The gate build never mounts Splash, which is what normally removes the overlay.
   useEffect(() => {

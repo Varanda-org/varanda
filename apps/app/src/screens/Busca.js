@@ -337,6 +337,7 @@ function BuscaList ({ query, header, ownKey, avatarOf, active, scrollToTop, refr
 
   return (
     <RefreshableList
+      perfId='busca'
       data={items}
       keyExtractor={itemKey}
       renderItem={renderItem}

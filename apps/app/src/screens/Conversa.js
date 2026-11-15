@@ -1290,6 +1290,7 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
       <View style={styles.flex}>
         <EmbedBandBottom.Provider value={full || sending ? band : null}>
           <RefreshableList
+            perfId='conversa'
             data={phase === 'ready' ? rows : []}
             keyExtractor={(row) => row.key}
             renderItem={({ item: row }) => renderThreadRow(row)}
