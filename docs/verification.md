@@ -2,6 +2,8 @@
 
 Date: 2026-10-22 (sections 1 to 5) and 2026-10-23 (section 6, the public DHT; section 7, the new app design on iOS). Every check below was run on one Mac. Logs and screenshots stayed in the verification sessions' scratchpads (not committed).
 
+New verification goes in its own file per pull request under [verification/](verification/README.md), named after the branch and without a section number. This file keeps the numbered sections written before that, cited by number.
+
 ## Machine
 
 | Item | Version |
@@ -11257,3 +11259,33 @@ Mais sobras da #448 (PR `fix/polish-nav-leftovers`), só no app:
 14. [x] Celular com o maior tamanho de texto do sistema: no Diário, o botão "Editar perfil" não cobre os botões da faixa (Sobre, Ajustes, Avisos) (feita em 2026-11-15 no simulador iPhone 17 Pro e no emulador Android com fonte 2,0, Vitrine).
 
 Testes: `apps/app/test/buscaGlobal.test.js`, `apps/app/test/uiKit.test.js`, `apps/app/test/help.test.js`, `apps/app/test/profileSave.test.js`, `apps/app/test/composePolish.test.js`, `apps/app/test/chatMedia.test.js`, `apps/app/test/nav.test.js`, `apps/app/test/profileBar.test.js`, `apps/app/test/profilePolish.test.js`, `apps/app/test/chatSurfaces.test.js`, `apps/app/test/fieldGrow.test.js` e `apps/app/test/keyboardLift.test.js`. Os testes de `Field` e de `BuscaGlobal` conferem o código, não montam a tela.
+
+## 252. Linha de base M5: a lentidão do app nativo, medida (branch test/perf-m5-harness)
+
+Esta seção registra a medição que responde se o app ficou mais lento desde a rodada M4 (11cdb47f) e onde está o custo hoje. Nenhum código de produto muda nela; usa as marcas, as linhas de render e a rolagem roteirizada de `src/perfMarks.js`, `src/perfScroll.js` e `scripts/perf-summary.js`, descritas em `docs/performance.md` ("Marcas de tempo", "Lista nativa sem conta"). Os números, os comandos e a tabela de custos estão em `docs/performance.md`, seção "M5, linha de base".
+
+Rodada de 2026-11-15: Mac M4 Pro com outras sessões rodando (carga média de 1 min entre 6 e 23), builds de desenvolvimento servidos pelo Metro, Vitrine grande (sem nó e sem sincronização). Emulador Android `varanda-perf` (API 36, GPU em software) aberto com `-no-window`; com janela ele caiu para cerca de 1 núcleo e todas as execuções travaram, e essas foram descartadas. Simulador iPhone 16e. Chrome sem cabeça com CPU 4x mais lenta.
+
+- [x] Conferência do instrumento no Android: fotos, citações em grade, carrossel de seis fotos com pontos, cartões de link e a capa do Spotify antes do player aparecem; as barras somem na descida e voltam na subida; só A Rua rola. O player do SoundCloud carrega, mas diz que a URL do dado de exemplo não é válida (dado de exemplo, não o app).
+- [x] Nó, A/B com `startup-bench.js` (arquivos e IndexedDB, A B A B, 3 x `--runs 5`): sem regressão, todas as diferenças dentro da dispersão.
+- [x] Android, A/B da interface (A B A B, 3 de cada, só texto): primeiras linhas de A Rua 3,0 s depois de `Running "main"` contra 1,2 s em 11cdb47f (+1,8 s, o shell espera a apresentação inteira do splash); `splash-end` 7,1 s (`patience`) contra 1,7 s (`grace`), porque a marca `details` nunca sai na Vitrine (até 3,9 s disso podem ser artefato da Vitrine: com `details` assentando junto com `moments`, o splash terminaria em cerca de 3,2 s, +1,5 s contra 11cdb47f). `TotalTime` e rolagem à mão sem diferença acima do ruído.
+- [x] Android, custo por lista: A Rua renderiza cerca de 1200 vezes em 60 s de rolagem (12,7 s de render com texto, 9,5 s com linhas ricas, 13,4 s com players); as abas escondidas renderizam cerca de 120 vezes (0,3 s), e 2,8 vezes mais com um player vivo.
+- [x] Android, teto de players 0, 1 e 4 (editado à mão em `src/embedLive.js` e restaurado com `git restore`): teto 0 custa o mesmo que sem players; o custo vem das WebViews vivas e das renderizações que elas provocam, não das checagens de 500 ms por cartão.
+- [x] Android, 75 s parado em A Rua: nenhuma renderização de aba escondida, nenhuma linha `req:` (a Vitrine não passa pelo `request` do nó).
+- [x] Android, partidas: `TotalTime` frio 730 ms, quente 100 a 131 ms em quatro de cinco partidas e 622 ms na quinta; `app-commit` 691 ms e `first-rows:rua` 3465 ms desde `js-entry`; `Start proc` a `js-entry` cerca de 2,0 s no build de debug.
+- [x] iOS, texto, ricas e players (3 execuções cada) e 5 partidas a frio: `app-commit` 587 ms, `first-rows:rua` 2769 ms; A Rua 5,8 a 8,1 s de render em 60 s; players não aumentam as abas escondidas.
+- [x] Web, Chrome 4x: primeira pintura em cerca de 50 ms; `EvaluateScript` do pacote do app 295 a 304 ms (12% das primeiras linhas; 18% no pacote de desenvolvimento) e `varanda-node.js` 290 a 330 ms de avaliação (release); na Vitrine de desenvolvimento, primeiras linhas em 2,24 s desde `js-entry`, e quatro abas escondidas renderizam uma vez por quadro o tempo todo, parado inclusive (cerca de 3270 vezes e 5,4 a 5,8 s na janela de 60 s da rolagem; causa não identificada nesta medição).
+- [x] Portões: prévias de momentos, não avaliado (a Vitrine não passa por `node.request`; conferir com nó real); varredura do cache de mídia, não roda (0 a 17 ms; só o que a Vitrine deixou, cache de instalação real não medido); inline requires, roda, sob a regra de manutenção (TotalTime e primeiras linhas desde o processo melhoram 10% ou mais em 5 partidas frias intercaladas); timer único dos players, não roda (teto 0 = sem players; WebViews e as renderizações que um player vivo provoca dominam; mudar quando ou quantos carregam é decisão do mantenedor e mudaria os Termos); telas sob demanda na web, não roda (12%, abaixo de 15%; 18% só no pacote de desenvolvimento); nota de projeto do nó do navegador em worker, não roda (avaliação do nó 12% a 14%).
+- [ ] iOS, A/B contra 11cdb47f: não medido (em 11cdb47f as marcas só saem com um toque numa aba).
+- [ ] iOS, partida a quente e `splash-end`: não medidos.
+- [ ] PWA instalado, nó vivo (Android, iOS e web), build de release nativo, celular de verdade: não medidos.
+
+Testes automáticos do instrumento, a partir da raiz. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/app/test/perfMarks.test.js
+node apps/app/test/perfScroll.test.js
+node apps/app/test/perfSummary.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.

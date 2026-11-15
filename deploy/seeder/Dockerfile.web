@@ -1,0 +1,61 @@
+# Imagem web do Varanda: o Caddy (com o limite de taxa por cliente, como em
+# Dockerfile.caddy), o Caddyfile e o PWA já construído, para que nenhum servidor
+# precise construir o app. Uma imagem vale para toda instalação: o app se
+# configura em tempo de execução por /varanda.json, que o Caddy responde a
+# partir do ambiente (Caddyfile). O build recebe só o commit.
+#
+# Build a partir da raiz do repositório (o .dockerignore ao lado,
+# Dockerfile.web.dockerignore, admite só o que o build do app lê):
+#   docker build -f deploy/seeder/Dockerfile.web --build-arg VARANDA_COMMIT=<40 hex> .
+#
+# O servidor copia /srv/web desta imagem para um diretório de versão e o monta
+# sobre /srv/web do compose.web.yaml (junto com o Caddyfile do pacote de
+# implantação). O LICENSE vai para /srv/LICENSE: a PolyForm Noncommercial 1.0.0
+# exige que os termos acompanhem cada cópia.
+#
+# Tudo fixo por digest sha256. A imagem Node é a mesma de deploy/seeder/Dockerfile
+# e de build-web.sh; as do Caddy são as de Dockerfile.caddy. Troque-as juntas.
+FROM node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 AS app
+ARG VARANDA_COMMIT
+# O commit vem só do argumento e precisa ter a forma exata.
+RUN printf '%s' "$VARANDA_COMMIT" | grep -Eq '^[0-9a-f]{40}$' \
+    || { echo 'VARANDA_COMMIT inválido (40 hexadecimais minúsculos)' >&2; exit 1; }
+COPY --chown=node:node . /src
+WORKDIR /src
+USER node
+# --ignore-scripts: nenhum script de instalação de dependência roda no build.
+ENV HOME=/tmp \
+    npm_config_cache=/tmp/npm-cache \
+    CI=1 \
+    EXPO_NO_TELEMETRY=1 \
+    EXPO_PUBLIC_VARANDA_COMMIT=$VARANDA_COMMIT
+RUN npm ci --no-audit --no-fund --ignore-scripts && npm run export:web -w apps/app
+
+FROM caddy:2.11.6-builder-alpine@sha256:096ec6e825e219175bd5be64b5e7a4000977f701a2bcaab825621d9fb1e1154b AS builder
+RUN xcaddy build --with github.com/mholt/caddy-ratelimit@v0.1.0
+
+FROM caddy:2.11.6-alpine@sha256:d44355d3c2149dc580ce2cac735955d1c08d3d00882c30489c241aa51a5c10d9
+ARG VARANDA_COMMIT
+LABEL org.opencontainers.image.licenses='PolyForm-Noncommercial-1.0.0 AND Apache-2.0' \
+      org.opencontainers.image.source=https://github.com/Varanda-org/varanda
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+COPY deploy/seeder/Caddyfile /etc/caddy/Caddyfile
+COPY --from=app /src/apps/app/dist /srv/web
+COPY LICENSE /srv/LICENSE
+# O build roda código das dependências: confere o resultado (regra do
+# deploy.sh), tira o .well-known (quem serve é o servidor) e reescreve o
+# version.json do argumento, nunca do que o build gerou (mesmos bytes do
+# well-known.sh). Dono root e modos fixos (0755 diretórios, 0644 arquivos):
+# nada de setuid nem do usuário do build chega aos servidores.
+RUN set -e; \
+    for f in index.html varanda-node.js sw.js; do \
+      test -f "/srv/web/$f" || { echo "o build não gerou $f" >&2; exit 1; }; \
+    done; \
+    if [ -n "$(find /srv/web ! -type f ! -type d -print -quit)" ]; then \
+      echo 'o build gerou links simbólicos ou arquivos especiais' >&2; exit 1; \
+    fi; \
+    rm -rf /srv/web/.well-known /srv/web/version.json; \
+    printf '{"v":1,"commit":"%s"}\n' "$VARANDA_COMMIT" > /srv/web/version.json; \
+    chown -R 0:0 /srv/web; \
+    find /srv/web -type d -exec chmod 0755 {} +; \
+    find /srv/web -type f -exec chmod 0644 {} +

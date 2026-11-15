@@ -811,6 +811,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
     <View style={styles.list}>
       <DeletePrompt del={del} />
       <RefreshableList
+        perfId='diario'
         data={depo ? testimonialTab.items : mural ? muralRows : posts}
         keyExtractor={depo ? testimonialTab.keyExtractor : mural ? (row) => 'm' + row.key : (row) => (row.invalid ? 'i' : 'e') + row.seq}
         renderItem={depo ? testimonialTab.renderItem : mural ? renderMural : renderItem}
