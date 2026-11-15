@@ -21,6 +21,10 @@ if (__DEV__ && process.env.EXPO_PUBLIC_VARANDA_HASH_BENCH === '1') {
   setTimeout(() => require('./src/media/hashBench').runHashBench(), 4000)
 }
 
+if (__DEV__ && process.env.EXPO_PUBLIC_VARANDA_SENTINEL_BENCH === '1') {
+  setTimeout(() => require('./src/sentinel/runBench').runSentinelBench(), 6000)
+}
+
 // registerRootComponent registers App as 'main' and sets up the environment
 // for both Expo Go and native builds.
 registerRootComponent(App)

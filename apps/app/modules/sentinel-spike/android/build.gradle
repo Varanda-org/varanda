@@ -1,0 +1,28 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'app.varanda'
+version = '0.1.0'
+
+android {
+  namespace "app.varanda.sentinelspike"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+}
+
+dependencies {
+  // 1.21.1: the account service runs onnxruntime-node 1.21.0 (apps/cli,
+  // through @huggingface/transformers 3.8.1), and 1.21.0's Android
+  // libonnxruntime4j_jni.so has 4 KB LOAD segments, which a 16 KB page
+  // device refuses; 1.21.1 aligns both libraries to 16 KB. MIT. `strictly`,
+  // so no other module's request resolves a different runtime.
+  implementation("com.microsoft.onnxruntime:onnxruntime-android") {
+    version {
+      strictly "1.21.1"
+    }
+  }
+}
