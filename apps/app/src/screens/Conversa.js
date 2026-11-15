@@ -26,6 +26,7 @@ import { refusalOf } from '../wordCheck'
 import { applyToggle, countsAfter, diaryPeekSlots, emptyState, fromRead, mergeCounts } from '../engagement'
 import { noteLocalWrite } from '../localWrites'
 import { registerLocalCache, cacheGeneration } from '../localCaches'
+import { parentLabel } from '../parentLabel'
 import { replyNameOf, whoOf } from '../who'
 import { avatarOf, pickAvatar } from '../media/avatar'
 import { canDelete, isPageRef } from '../deletion'
@@ -843,6 +844,7 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
   const { follows, load: loadFollows } = useFollowSet(request)
   const [view, setView] = useState(INITIAL)
   const [parentHeight, setParentHeight] = useState(null)
+  const [parentLabelHeight, setParentLabelHeight] = useState(0)
   const [open, setOpen] = useState(new Set())
   const [children, setChildren] = useState(new Map())
   const [childNext, setChildNext] = useState(new Map())
@@ -1307,9 +1309,15 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
     <View style={styles.header}>
       {parent
         ? (
-          <View style={styles.parent} onLayout={(e) => setParentHeight(e.nativeEvent.layout.height)}>
-            <PostRow {...props(parent)} />
-          </View>
+          <>
+            {/* Outside the dimmed box: the label is the context, not part of the faded post. */}
+            <View onLayout={(e) => setParentLabelHeight(e.nativeEvent.layout.height)}>
+              <Text style={styles.parentLabel}>{parentLabel(identityOf(names, parent.author, parent))}</Text>
+            </View>
+            <View style={styles.parent} onLayout={(e) => setParentHeight(e.nativeEvent.layout.height)}>
+              <PostRow {...props(parent)} />
+            </View>
+          </>
           )
         : null}
       {post
@@ -1322,7 +1330,7 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
           )
         : null}
       {parent && post && parentHeight !== null
-        ? <View pointerEvents='none' accessible={false} style={[styles.connector, { height: parentHeight - 48 }]} />
+        ? <View pointerEvents='none' accessible={false} style={[styles.connector, { top: 60 + parentLabelHeight, height: parentHeight - 48 }]} />
         : null}
       {phase === 'ready' && !view.post
         ? <View style={styles.note}><Soft>Esta publicação não pôde ser verificada agora.</Soft></View>
@@ -1440,6 +1448,8 @@ const makeStyles = (colors) => StyleSheet.create({
   branchAction: { paddingLeft: 68, paddingRight: space.lg, alignItems: 'flex-start' },
   branchError: { paddingTop: space.sm },
   header: { position: 'relative' },
+  // Its height is measured, and the connector starts below it.
+  parentLabel: { ...type.replyMark, color: colors.soft, paddingHorizontal: 16, paddingTop: space.sm },
   parent: { opacity: 0.72 },
   focal: { position: 'relative' },
   accentBar: { position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, backgroundColor: colors.accent },

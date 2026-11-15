@@ -1460,6 +1460,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         onCancelAttachments={mediaHold === null && !(mediaSend && mediaSend.phase === 'sending') ? cancelMedia : undefined}
         progress={sendingMedia ? mediaSend.progress : null}
         reply={replyTo ? { name: replyTo.name, handle: replyTo.mine ? undefined : quoteHandle, text: replyTo.text, mine: replyTo.mine, senderKey: replyTo.mine ? undefined : peer } : null}
+        onOpenReply={replyTo ? () => scrollToKey(rows.find((row) => row.id === replyTo.id)?.key) : undefined}
         onCancelReply={() => setReplyTo(null)}
         notice={notice}
         ownKey={ownKey}

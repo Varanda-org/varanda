@@ -191,6 +191,8 @@ test('deploy.sh: executable, required strings and last line', (t) => {
   const required = [
     'set -Eeuo pipefail',
     "trap '' HUP PIPE",
+    // A server that moved to the pull updater (update.sh install) refuses the push path.
+    'modo-pull',
     'cd "$root"',
     'flock',
     'merge-base --is-ancestor',
@@ -1039,6 +1041,40 @@ test('compose.web.yaml and Dockerfile.caddy: the Caddy image is built, pinned an
   t.absent(df.join('\n').includes('@latest'), 'no @latest')
   t.absent(/--with\s+\S+\s*(\\|$)/m.test(df.join('\n').replace(/--with \S+@\S+/g, '')), 'no unpinned --with')
   t.ok(df.some((l) => l.trim() === 'COPY --from=builder /usr/bin/caddy /usr/bin/caddy'), 'the built binary replaces the runtime one')
+})
+
+test('deploy.sh: recusar_pull refuses a server that moved to the pull updater, under the lock and before ler_sha', (t) => {
+  const src = fs.readFileSync(SCRIPT, 'utf8')
+  const fn = src.match(/^recusar_pull\(\) \{\n[\s\S]*?^\}\n/m)
+  const main = src.match(/^main\(\) \{\n[\s\S]*?^\}\n/m)
+  t.ok(fn && main, 'recusar_pull and main located')
+  const calls = main[0].split('\n').map((l) => l.trim())
+  const lock = calls.indexOf('pegar_lock')
+  const refuse = calls.indexOf('recusar_pull')
+  const sha = calls.indexOf('ler_sha')
+  t.ok(lock >= 0 && refuse > lock, 'recusar_pull runs after pegar_lock')
+  t.ok(sha > refuse, 'recusar_pull runs before ler_sha (no fetch, build or container change yet)')
+  for (const step of ['escolher_alvo', 'guardar_snapshots', 'construir_web']) {
+    const at = calls.indexOf(step)
+    t.ok(at < 0 || at > refuse, 'recusar_pull runs before ' + step)
+  }
+  if (!hasBash(t)) return
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-modo-pull-'))
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const run = () => spawnSync('bash', ['-c', 'set -Eeuo pipefail\nstate=' + JSON.stringify(dir) +
+    '\nlog() { printf "%s\\n" "$*"; }\n' + fn[0] + 'recusar_pull\nprintf "seguiu\\n"\n'], { encoding: 'utf8' })
+
+  const free = run()
+  t.is(free.status, 0, 'without the marker it returns 0: ' + free.stderr)
+  t.is(free.stdout, 'seguiu\n', 'without the marker it prints nothing and the deploy goes on')
+
+  fs.writeFileSync(path.join(dir, 'modo-pull'), '')
+  const marked = run()
+  t.is(marked.status, 1, 'with the marker it exits 1 (failure, nothing changed)')
+  t.ok(marked.stdout.includes('este servidor atualiza por imagem'), 'says the server updates by image')
+  t.ok(marked.stdout.includes('/var/lib/varanda-deploy/modo-pull'), 'says how to go back to the push path')
+  t.absent(marked.stdout.includes('seguiu'), 'nothing after the refusal runs')
 })
 
 test('deploy.sh: bash -n and refusal to run as non-root', (t) => {

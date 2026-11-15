@@ -11,6 +11,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Animated, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { arrowLabel } from '../arrowLabel'
 import { counterShown, counterText, dotWindow, offsetOf, pageAt, shouldMount, slideLabel, stepIndex } from '../carousel'
 import { Icon } from './Icon'
 import { MediaView } from './MediaView'
@@ -385,7 +386,7 @@ export function MediaCarousel ({
             <Pressable
               ref={prevArrow}
               accessibilityRole='button'
-              accessibilityLabel='foto anterior'
+              accessibilityLabel={arrowLabel(page, count, -1)}
               onPress={() => go(-1)}
               style={[styles.arrow, styles.arrowLeft]}
             >
@@ -398,7 +399,7 @@ export function MediaCarousel ({
             <Pressable
               ref={nextArrow}
               accessibilityRole='button'
-              accessibilityLabel='próxima foto'
+              accessibilityLabel={arrowLabel(page, count, 1)}
               onPress={() => go(1)}
               style={[styles.arrow, styles.arrowRight]}
             >
