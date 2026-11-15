@@ -97,7 +97,7 @@ import { MusicPicker } from '../ui/MusicPicker'
 import { useMusicAvailable } from '../ui/MusicPlayerCard'
 import { MusicSticker } from '../ui/MusicSticker'
 import { withPreview } from '../attach-plan'
-import { refusalOf } from '../wordCheck'
+import { previewRefusal, refusalOf } from '../wordCheck'
 import { Sheet, TEXT_CAP } from '../ui/Sheet'
 import { tap } from '../ui/haptics'
 import { KeyboardLift } from '../ui/KeyboardLift'
@@ -1358,7 +1358,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     // Before every path below (photos, the outbox, a page's signature). The
     // draft is kept, so the person can edit it. A signed post waiting for its
     // retry passed this when it was first sent.
-    const refused = pageRetryRef.current === null ? refusalOf(text) : ''
+    const refused = pageRetryRef.current === null ? (refusalOf(text) || previewRefusal(linkDraft.view)) : ''
     if (refused !== '') {
       setCheckError(refused)
       return

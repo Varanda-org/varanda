@@ -6686,9 +6686,8 @@ Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e dep
 Limites desta caminhada:
 
 - Nenhuma caixa acima foi marcada nesta documentação.
-- A conferência não cobre o título e a descrição de uma prévia de link, que vêm do site.
+- Letras e números colados (`termo123`) e a prévia de link passam a ser conferidos: veja `docs/verification/fix-conferencia-palavras-sobras.md`.
 - O serviço de conta não conhece a lista, então um @nome só é recusado no app.
-- Um @nome com letras e números colados (`termo123`) conta como uma palavra só e passa.
 - Um app modificado, um build antigo ou a CLI publicam sem passar por ela. Isso se confere lendo `apps/app/src/wordCheck.js`: o protocolo e o semeador não têm a lista.
 - Ela não lê fotos nem áudio, e grafias diferentes passam.
 
