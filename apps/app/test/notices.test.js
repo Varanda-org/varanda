@@ -1242,3 +1242,17 @@ test('peek eligibility releases notices when its warm will not run', async (t) =
     t.is(shouldStartNoticesFirstRead({ ...ready, epoch: 1, peekWarm: { epoch: 1, eligible } }), true)
   }
 })
+
+test('snippetCut: a cut snippet is plain, an intact one may carry links', async (t) => {
+  const { snippetCut, snippetOf } = await load()
+  const links = await import('../src/links.js')
+  const key = 'ab'.repeat(32)
+  const row = Object.freeze({ kind: 'reply', key })
+  const short = 'veja https://exemplo.com/a agora'
+  t.is(snippetCut(row, short), false)
+  t.ok(links.textSegments(snippetOf(row, short)).some((s) => s.href === 'https://exemplo.com/a'), 'the address is a link')
+  const long = 'https://exemplo.com/' + 'a'.repeat(200)
+  t.is(snippetCut(row, long), true, 'a cut address is never a link')
+  t.is(snippetCut(Object.freeze({ kind: 'follow', key }), long), false, 'a follow has no snippet')
+  t.is(snippetCut(row, null), false)
+})

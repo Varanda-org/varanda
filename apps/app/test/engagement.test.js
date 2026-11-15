@@ -204,3 +204,14 @@ test('secondPassRefs: quote and reply parent, one level, deduped', async (t) => 
   t.alike(secondPassRefs([quoted, again, reply, quoted]), [C + ':1', B + ':2'], 'deduped')
   t.alike(secondPassRefs(null), [])
 })
+
+test('countAnswerApplies: an answer read before a settled toggle never replaces its number', async (t) => {
+  const { countAnswerApplies } = await load()
+  const base = { pending: false, answeredAt: 0, touchedAt: 0, started: 10, hasCount: true }
+  t.is(countAnswerApplies(base), true, 'a quiet post takes the answer')
+  t.is(countAnswerApplies({ ...base, pending: true }), false, 'a toggle in flight owns the number')
+  t.is(countAnswerApplies({ ...base, answeredAt: 11 }), false, 'a newer read already answered')
+  t.is(countAnswerApplies({ ...base, touchedAt: 11 }), false, 'a toggle (or its Desfazer) settled during the read')
+  t.is(countAnswerApplies({ ...base, touchedAt: 9 }), true, 'a toggle before the read is already in the answer')
+  t.is(countAnswerApplies({ ...base, touchedAt: 11, hasCount: false }), true, 'no number on screen yet: nothing to keep')
+})

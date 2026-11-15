@@ -9,7 +9,7 @@ export const PUSH_KINDS = Object.freeze(['follow', 'reply', 'like', 'repost'])
 export const PUSH_LABEL = 'Avisos no aparelho'
 export const PUSH_ON = 'Ativar avisos neste aparelho'
 export const PUSH_OFF = 'Desligar avisos neste aparelho'
-export const PUSH_HINT = 'Receba um aviso quando alguém seguir você, responder, curtir ou republicar o que você publicou, e quando chegar um convite pra sua varanda. Mostra o nome de quem fez a ação. Só neste aparelho.'
+export const PUSH_HINT = 'Receba um aviso quando alguém seguir você, responder, curtir ou republicar o que você publicou, e quando chegar um convite pra sua varanda. Mostra o nome de quem fez a ação. Só neste aparelho. Um aviso pode levar até cerca de um minuto para chegar, de propósito, para que o horário dele não revele o que você acabou de receber.'
 export const PUSH_DENIED = 'Os avisos do sistema estão desligados neste aparelho.'
 export const PUSH_UNAVAILABLE = 'Os avisos ainda não estão disponíveis nesta associação.'
 export const PUSH_UNSUPPORTED = 'No iPhone e no iPad, os avisos só funcionam com o Varanda na Tela de Início.'
@@ -123,6 +123,30 @@ export function pushUiState ({ support, keyAvailable, permission, subscribed, re
   if (swUpToDate !== true && !on) return { visible: true, on, disabled: true, note: PUSH_RELOAD }
   const note = subscribed === null || (subscribed === true && registered === null) ? PUSH_UNKNOWN : null
   return { visible: true, on, disabled: pending === true, note }
+}
+
+// What the Ajustes "Avisos no aparelho" row shows, from the store's view
+// (`push`: null while this member is not eligible) and the store's pending and
+// error. row: the row is drawn at all (a key the service did not hand over
+// hides it: push is off here). trailing: "Ligados", "Desligados" or null when
+// the state could not be confirmed. note: the line under the row.
+export function pushRowView ({ push, pending, error } = {}) {
+  if (push === null || push === undefined) return { ui: null, row: false, trailing: null, note: '' }
+  const ui = pushUiState({
+    support: push.support,
+    keyAvailable: push.key !== null,
+    permission: push.permission,
+    subscribed: push.subscribed,
+    registered: push.registered,
+    pending,
+    swUpToDate: push.swUpToDate
+  })
+  const row = ui.visible === true && push.support === 'ok' && push.key !== null
+  const trailing = ui.on ? 'Ligados' : (ui.note === PUSH_UNKNOWN ? null : 'Desligados')
+  const note = row && ui.note && ui.note !== error
+    ? ui.note
+    : push.support === 'unsupported' ? PUSH_UNSUPPORTED : ''
+  return { ui, row, trailing, note }
 }
 
 function decodePart (s) {
