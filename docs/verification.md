@@ -5574,7 +5574,9 @@ O serviço de conta guarda, por membro, um bloco cifrado com as marcas de visto 
 
 Rodar um arquivo por vez, com `node <arquivo>`:
 
-- `node packages/core/test/seen-blob.test.js`: chave, cifra, limites (256, 4 x 32, 736 e 128, 32336 bytes no limite), corte determinístico e fusão comutativa.
+- `node packages/core/test/seen-blob.test.js`: chave, cifra, limites (256, 4 x 32, 520 e 128, versão 1 com 736), corte determinístico e fusão comutativa.
+- `node packages/web-member/test/seen-sync.test.js`: além da fusão entre dois aparelhos, um lote de 737 marcas de mensagens fica com as 520 mais novas, a lista local cheia (5000) não perde leitura local para tokens remotos antigos, um token de Avisos cortado não volta como novo, e `caughtUp` deixa de fora um grupo sem post legível aqui.
+- `node apps/app/test/seenSync.test.js` e `node apps/app/test/notices.test.js`: o ponto da aba de grupos segue as versões da hora da resposta da fusão, e a lista de vistos de uma página fica separada por identidade (uma lista antiga sem dono continua legível por qualquer identidade até a primeira gravação de página, que a adota para quem grava).
 - `node packages/core/test/seen-proof.test.js`: enunciado `varanda-seen-v1`, assinatura e recusa de outro prefixo.
 - `node apps/cli/test/account-seen-store.test.js`: arquivo 0600 num diretório 0700, CAS, duas gravações concorrentes (uma só vence), arquivo de tamanho errado, link simbólico, zerar antes de apagar, limite de membros e registro sem membro nem bytes.
 - `node apps/cli/test/account-seen.test.js`: as rotas `start` e `finish`, conflito 409, nonce de uso único, Termos pendentes, limite de 429, tamanho do arquivo e 503 sem armazenamento.
@@ -5615,11 +5617,11 @@ Pré-requisito: a mesma passkey em dois navegadores (ou aba e app instalado) na 
 ### Limites desta parte
 
 - A rodada de vistos corre só depois que o nó está pronto e online, então um aparelho sem rede não mostra as marcas dos outros até voltar a rede.
-- Migração: uma entrada antiga com enchimento só viaja quando uma linha carregada bate com ela, por isso outro aparelho pode mostrar um aviso antigo como novo até a pessoa abrir a aba onde ele aparece.
-- Os limites do bloco (256 avisos, 4 x 32 em páginas, 736 mensagens de Conversas e 128 grupos) cortam o mais antigo; um item que sai do bloco pode voltar como novo em outro aparelho.
-- O ponto da aba de grupos só é apagado até as versões que o app conhecia quando a fusão foi pedida. Uma publicação que chega durante a fusão mantém o ponto, mesmo que outro aparelho já a tenha lido; ele some ao abrir a aba ou o grupo.
+- Decidido: uma entrada antiga da lista de Avisos do aparelho só viaja quando uma linha carregada bate com ela. A lista guardada é preenchida com tokens aleatórios de propósito, para não mostrar quantos avisos foram vistos, e só uma linha carregada separa um token real do enchimento; mandar a lista inteira encheria a janela de 256 com enchimento e tiraria marcas reais. Outro aparelho pode mostrar um aviso antigo como novo até a linha dele ser carregada (as leituras carregam da mais nova para a mais antiga).
+- Os limites do bloco (256 avisos, 4 x 32 em páginas, 520 mensagens de Conversas e 128 grupos) cortam o mais antigo; um item que sai do bloco antes de outro aparelho o receber aparece como novo lá. Um item já cortado não volta mais como marca nova (kv `seenHeld`), então não empurra marcas mais novas para fora. A `seenHeld` tem 2048 vagas: cheia de tokens reais, cada token novo tira um guardado ao acaso, e um token que saiu assim pode voltar como marca nova uma vez.
+- O ponto da aba de grupos é apagado nas versões que o app conhece quando a resposta da fusão chega. Um evento de grupo que ainda não passou pela tela nessa hora (milissegundos) mantém o ponto até abrir a aba ou o grupo.
 - A trava da conta não é do sistema operacional. Se o processo perder a trava entre a conferência e o renomear, uma gravação antiga pode substituir um bloco que o novo titular já confirmou. A conferência não reproduz essa corrida; ela se recupera pela fusão, porque cada aparelho reescreve as suas marcas (`seen-store.js`, cabeçalho).
-- Não há apagamento pedido por um aparelho: a rota `delete` existe, mas nenhum cliente a chama. O apagamento hoje é um pedido à associação.
+- Decidido: a rota `delete` fica sem cliente no app. Ela é ferramenta da associação, no caminho da exclusão da conta; quem quer apagar só o estado de vistos pede à associação.
 - A exclusão da conta existe (seção 115) e apaga o bloco cifrado de vistos no serviço de conta.
 - Não verificado em servidor real: esta seção foi escrita sem executar os roteiros acima, o do servidor e o do app.
 

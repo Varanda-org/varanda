@@ -83,7 +83,7 @@ import { pageDmPlan, pageReadKind, pageNoticeSeen } from './src/pageNotice'
 import { pageNoticeStore } from './src/pageNoticeStore'
 import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, passkeyAdd, passkeyStart, seenFinish, seenStart, termsFinish, termsStart } from './src/account'
 import { NOTICES_POLL_MS } from './src/notices'
-import { ackCaughtUp, cleanAvisos, createSeenScheduler, dropSent, rememberSent, reportAvisosSeen, runSeenPass, snapshotBefore } from './src/seenSync'
+import { ackCaughtUp, cleanAvisos, createSeenScheduler, dropSent, rememberSent, reportAvisosSeen, runSeenPass, snapshotOnAnswer } from './src/seenSync'
 import { deletedOf, newReceipt, scheduledOf } from './src/accountDeletion'
 import { enrolWith } from './src/passkeyEnrol'
 import { loadDeletionReceipt, saveDeletionReceipt } from './src/deletionReceiptStore'
@@ -2257,11 +2257,11 @@ function Member () {
     if (seenMember === null) return
     const member = seenMember
     const run = async () => {
-      // caughtUp describes the groups as the merge saw them: only the
-      // versions known when the first merge went out are acknowledged, so a
-      // post that arrives after it keeps its dot. Versions restart per node
+      // caughtUp describes the groups as the merge saw them when it
+      // answered: the versions known at that answer are acknowledged, so a
+      // post that lands after it keeps its dot. Versions restart per node
       // epoch, so the epoch is taken with them.
-      const { request, snap } = snapshotBefore(seenRequestRef.current, 'seen.merge', () => ({
+      const { request, snap } = snapshotOnAnswer(seenRequestRef.current, 'seen.merge', () => ({
         versions: groupVersionsRef.current,
         epoch: nodeEpochRef.current
       }))
@@ -2285,7 +2285,7 @@ function Member () {
       if (result.blocksChanged) refreshBlocks().catch(() => {})
       if (result.groupChanged) {
         bumpSeen()
-        const taken = snap.value
+        const taken = { epoch: snap.epoch, versions: snap.versions }
         setGroupSeen((cur) => ackCaughtUp(cur, result.caughtUp, taken))
       }
     }
