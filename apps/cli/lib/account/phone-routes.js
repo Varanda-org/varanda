@@ -108,6 +108,7 @@ function createPhoneRoutes ({
   association,
   store,
   ageVerified,
+  forgetAge = async () => {},
   linked,
   deleted,
   burnable,
@@ -362,7 +363,11 @@ function createPhoneRoutes ({
     // session.
     if (!ageVerified(member)) throw refuse('idade-pendente')
     const isLinked = linked(member) === true
-    if (!isLinked && store.isFull()) throw refuse('lista-de-espera')
+    if (!isLinked && store.isFull()) {
+      // The band was recorded before the cap filled: the refusal forgets it.
+      await forgetAge(member)
+      throw refuse('lista-de-espera')
+    }
     const index = storeRead(() => phones.indexOf(phone))
     const live = storeRead(() => (phones.verified(member) ? phones.live(member) : null))
     if (live !== null && sameIndex(live.index, index)) return sendVerified(res, member)

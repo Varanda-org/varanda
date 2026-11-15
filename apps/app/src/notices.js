@@ -584,12 +584,25 @@ function personalIds (parsed) {
   return parsed.ids
 }
 
+// Page lists belong to the identity in `own`: two identities of one browser
+// that run the same page never share its seen list. An entry from before
+// that split with no `own` (a page list written before any personal one)
+// stays readable by any identity until the first page write, which adopts it
+// for the writing identity, so no mark is lost.
+function pagesOwnedBy (parsed, ownKey) {
+  if (typeof ownKey !== 'string' || !KEY64.test(ownKey.toLowerCase()) || !parsed) return false
+  return parsed.own === ownKey || parsed.own === '' || parsed.own === undefined
+}
+
 // The id list for one namespace. A 64-hex namespace is the person
-// (parseSeen). A page namespace reads `pages` and never the person's ids.
-export function parseSeenNamespace (text, namespace) {
+// (parseSeen). A page namespace reads `pages` of ownKey's entry and never
+// the person's ids.
+export function parseSeenNamespace (text, namespace, ownKey) {
   if (isPageSeenNamespace(namespace)) {
     try {
-      const ids = pageMap(JSON.parse(text))[namespace]
+      const parsed = JSON.parse(text)
+      if (!pagesOwnedBy(parsed, ownKey)) return []
+      const ids = pageMap(parsed)[namespace]
       return ids || []
     } catch {
       return []
@@ -599,20 +612,27 @@ export function parseSeenNamespace (text, namespace) {
 }
 
 // Writes one namespace and keeps the others. A page write never sets `own`
-// to the page namespace and never puts page tokens in `ids`.
-export function writeSeenNamespace (text, namespace, ids) {
+// to the page namespace and never puts page tokens in `ids`; it is stored
+// under ownKey, and another identity's entry is replaced, as a personal
+// write for another identity does. Without a valid ownKey a page write
+// changes nothing.
+export function writeSeenNamespace (text, namespace, ids, ownKey) {
   let parsed = null
   try { parsed = JSON.parse(text) } catch {}
   let pages = pageMap(parsed)
   if (isPageSeenNamespace(namespace)) {
+    if (typeof ownKey !== 'string' || !KEY64.test(ownKey.toLowerCase())) return typeof text === 'string' ? text : JSON.stringify({ v: 3, own: '', ids: [] })
+    if (!pagesOwnedBy(parsed, ownKey)) {
+      parsed = null
+      pages = {}
+    }
     // Re-inserting moves the key last, so the first keys are the least
     // recently written.
     delete pages[namespace]
     pages[namespace] = ids
     const keys = Object.keys(pages)
     for (const key of keys.slice(0, Math.max(0, keys.length - PAGE_SEEN_MAX))) delete pages[key]
-    const own = parsed && typeof parsed.own === 'string' ? parsed.own : ''
-    return JSON.stringify({ v: 3, own, ids: personalIds(parsed), pages })
+    return JSON.stringify({ v: 3, own: ownKey, ids: personalIds(parsed), pages })
   }
   // Another identity: its page lists go with its personal list.
   if (!parsed || parsed.own !== namespace) pages = {}

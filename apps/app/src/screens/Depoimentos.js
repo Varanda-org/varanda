@@ -864,6 +864,7 @@ export default function Depoimentos ({ entry, ownKey, onBack, onOpenMember, onRe
     <View style={styles.root}>
       {bar}
       <RefreshableList
+        perfId='depoimentos'
         data={items}
         keyExtractor={(item) => item.key}
         renderItem={renderItem}

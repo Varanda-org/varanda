@@ -79,14 +79,20 @@ test('kv seenSync: hash and gen round-trip, bound to the own key', async (t) => 
   }
 })
 
-test('deleteDmData clears seenLocal, seenRemote and seenSync with the dm state', async (t) => {
+test('deleteDmData clears seenLocal, seenRemote, seenHeld and seenSync with the dm state', async (t) => {
   const storage = memoryNodeStorage()
   const blob = b4a.toString(crypto.randomBytes(SEEN_BLOB_BYTES), 'base64')
   await nodeStore.writeSeenLocal(storage, PUBLIC_KEY, blob)
   await nodeStore.writeSeenSync(storage, PUBLIC_KEY, { hash: 'ef'.repeat(32), gen: 3 })
   await nodeStore.writeSeenRemote(storage, PUBLIC_KEY, blob)
   await nodeStore.writeDmSeen(storage, ['01'.repeat(16)])
+  const held = new Array(nodeStore.SEEN_HELD_MAX).fill('02'.repeat(16))
+  await nodeStore.writeSeenHeld(storage, PUBLIC_KEY, held)
+  t.alike(await nodeStore.readSeenHeld(storage, PUBLIC_KEY), held)
+  t.is(await nodeStore.readSeenHeld(storage, OTHER_KEY), null, 'bound to the own key')
+  await t.exception.all(async () => nodeStore.writeSeenHeld(storage, PUBLIC_KEY, held.slice(1)), /visto inválido/)
   await nodeStore.deleteDmData(storage)
+  t.is(await nodeStore.readSeenHeld(storage, PUBLIC_KEY), null, 'seenHeld gone')
   t.is(await nodeStore.readSeenLocal(storage, PUBLIC_KEY), null, 'seenLocal gone')
   t.alike(await nodeStore.readSeenSync(storage, PUBLIC_KEY), { hash: null, gen: 0 }, 'seenSync gone')
   t.is(await nodeStore.readSeenRemote(storage, PUBLIC_KEY), null, 'seenRemote gone')

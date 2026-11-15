@@ -25,11 +25,34 @@ export function withFreshReactions (row, fresh) {
   return { ...rest, reactions: fresh.reactions, ...(fresh.reactable === false ? { reactable: false } : {}) }
 }
 
+// The held older pages a thread read refreshes. `pages` is in load order,
+// newest first. The other person mostly reacts to recent messages and each
+// page is one more dm.thread read, so only the newest REREAD_OLDER_PAGES are
+// read on every pass; a deeper page only while a row of it has a change of
+// this device pending (pending(key)), otherwise it refreshes on reopening.
+export const REREAD_OLDER_PAGES = 3
+export function olderPagesToReread (pages, pending, cap = REREAD_OLDER_PAGES) {
+  const out = []
+  let i = 0
+  for (const [before, keys] of pages) {
+    if (i++ < cap || [...keys].some(pending)) out.push([before, keys])
+  }
+  return out
+}
+
 // An incomplete answer can identify a person; an index hint cannot hide chips.
 export function dmReactionGate ({ read, peer, peerKind, pageKey = null, hosted, unlocked, online, isTop, blocked, folder }) {
   const hidden = pageKey !== null || peerKind === 'page'
   const disabled = hidden || read?.page !== peer || !hosted || !unlocked || !online || !isTop || blocked || folder !== 'inbox'
   return { hidden, disabled }
+}
+
+// A failed "is a person" lookup (page.read) leaves the reaction controls off,
+// so it is tried again on its own: 2 s after the first failure, doubling, at
+// most a minute apart, never in a tight loop.
+export function peerReadDelay (failures) {
+  const n = Number.isSafeInteger(failures) && failures > 0 ? Math.min(failures, 5) : 0
+  return Math.min(60000, 2000 * 2 ** n)
 }
 
 // Keep the first choice across the whole burst: returning to it costs no stamps.

@@ -291,7 +291,8 @@ export function revokeMedia (ranges) {
   }
 }
 
-// A post's photos or its link card thumbnail, as shownMedia in
+// A post's photos or its link card thumbnail, a profile's avatar, a listing's
+// or listing edit's photos, as shownMedia in
 // packages/core/lib/deletion.js counts them.
 function descriptorRanges (record) {
   if (!record || typeof record !== 'object') return []
@@ -301,6 +302,7 @@ function descriptorRanges (record) {
     return image !== null && typeof image === 'object' ? [image] : []
   }
   if (record.type === 'profile' && record.avatar !== null && typeof record.avatar === 'object') return [record.avatar]
+  if (record.type === 'listing' || record.type === 'listing-edit') return Array.isArray(record.media) ? record.media : []
   return []
 }
 
@@ -341,6 +343,8 @@ export function tombstoneRanges (entries, seqs) {
   const live = []
   for (const entry of rest) {
     if (deleted.has(entry.seq)) continue
+    // An edit of a deleted listing shows nothing, so it keeps nothing live.
+    if (entry.record.type === 'listing-edit' && deleted.has(entry.record.seq)) continue
     for (const d of descriptorRanges(entry.record)) {
       const range = asRange(d)
       if (range !== null) live.push(range)

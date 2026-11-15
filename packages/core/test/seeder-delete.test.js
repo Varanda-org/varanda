@@ -128,6 +128,12 @@ function settled (seeder, m, { paused = false } = {}) {
   }, { name: 'diário processado até ' + m.diary.length })
 }
 
+// mediaRead serves nothing before the seeder's local re-gate of the media
+// core's block 0 (_gateMedia), which runs asynchronously after the download.
+function mediaGated (seeder, K) {
+  return until(() => seeder._mediaServed.get(K)?.headerOk === true, { name: 'mídia conferida' })
+}
+
 function descriptor (core, start, blocks) {
   return { core, mime: 'image/jpeg', start, blocks, bytes: blocks * MEDIA_BLOCK_BYTES, sha256: 'ab'.repeat(32), width: 100, height: 100 }
 }
@@ -402,6 +408,10 @@ test('mediaRead refuses a range listed by a tombstone unless a surviving post sh
   await admit(A, assoc)
   await until(() => events.find((e) => e.event === 'media-admitted' && e.key === K), { name: 'mídia admitida', timeoutMs: 30000 })
   await until(() => seeder._mediaServed.get(K)?.core.contiguousLength === 5, { name: 'mídia baixada' })
+  await mediaGated(seeder, K)
+  // The media core can finish downloading before the diary scan reaches the
+  // posts that show it, and mediaRead fails closed until the scan catches up.
+  await settled(seeder, A)
   t.ok(await seeder.mediaRead(A.key, K, 1, 2), 'served before the tombstone')
 
   await append(A, [
@@ -444,6 +454,7 @@ test('a post of ten photos deleted by three split tombstones has every range ref
   await admit(A, assoc)
   await until(() => first.events.find((e) => e.event === 'media-admitted' && e.key === K), { name: 'mídia admitida', timeoutMs: 30000 })
   await until(() => first.seeder._mediaServed.get(K)?.core.contiguousLength === 12, { name: 'mídia baixada' })
+  await mediaGated(first.seeder, K)
   await settled(first.seeder, A)
   for (let b = 1; b <= 10; b++) t.ok(await first.seeder.mediaRead(A.key, K, b, 1), 'range ' + b + ' served before the delete')
 
@@ -583,6 +594,7 @@ test('mediaRead stops serving a range deleted while its reads are in flight', as
   await admit(A, assoc)
   await until(() => events.find((e) => e.event === 'media-admitted' && e.key === K), { name: 'mídia admitida', timeoutMs: 30000 })
   await until(() => seeder._mediaServed.get(K)?.core.contiguousLength === 5, { name: 'mídia baixada' })
+  await mediaGated(seeder, K)
 
   // The next read of a media block (not the header) waits until released.
   const core = seeder._mediaServed.get(K).core
@@ -648,6 +660,7 @@ test('a tombstone deleted by a later tombstone no longer hides its target from p
   await admit(A, assoc)
   await until(() => events.find((e) => e.event === 'media-admitted' && e.key === K), { name: 'mídia admitida', timeoutMs: 30000 })
   await until(() => seeder._mediaServed.get(K)?.core.contiguousLength === 2, { name: 'mídia baixada' })
+  await mediaGated(seeder, K)
   await settled(seeder, A)
 
   await append(A, [deleteRecord({ seq: 2, at: at(2), media: [{ core: K, start: 1, blocks: 1 }] })])
@@ -747,6 +760,7 @@ test('a restart clears what the stored tombstones delete before anything is fetc
   await admit(A, assoc)
   await until(() => first.events.find((e) => e.event === 'media-admitted' && e.key === K), { name: 'mídia admitida', timeoutMs: 30000 })
   await until(() => first.seeder._mediaServed.get(K)?.core.contiguousLength === 3, { name: 'mídia baixada' })
+  await mediaGated(first.seeder, K)
   await settled(first.seeder, A)
   t.ok(await first.seeder._served.get(A.key).core.has(2), 'kept under the kill switch')
   await first.seeder.close()
@@ -798,6 +812,7 @@ test('mediaRead of one block stays fast with thousands of tombstones and media p
   await admit(A, assoc)
   await until(() => events.find((e) => e.event === 'media-admitted' && e.key === K), { name: 'mídia admitida', timeoutMs: 30000 })
   await until(() => seeder._mediaServed.get(K)?.core.contiguousLength === 3, { name: 'mídia baixada' })
+  await mediaGated(seeder, K)
   await until(() => seeder._served.get(A.key)?.scanned >= A.diary.length, { name: 'varredura completa', timeoutMs: 120000 })
 
   const timed = async (start, blocks) => {
@@ -853,6 +868,7 @@ test('media deletion state is kept for a bounded number of cores per diary, and 
   await admit(A, assoc)
   await until(() => events.find((e) => e.event === 'media-admitted' && e.key === K), { name: 'mídia admitida', timeoutMs: 30000 })
   await until(async () => (await seeder._mediaServed.get(K)?.core.has(2)) === true, { name: 'mídia baixada' })
+  await mediaGated(seeder, K)
   await settled(seeder, A)
   const entry = seeder._served.get(A.key)
   await until(() => !entry.mediaRecounting, { name: 'recontagem' })
@@ -895,6 +911,7 @@ test('a media core used before its declaration closes the media of the diary', a
   await admit(A, assoc)
   await until(() => events.find((e) => e.event === 'media-admitted' && e.key === K), { name: 'mídia admitida', timeoutMs: 30000 })
   await until(async () => (await seeder._mediaServed.get(K)?.core.has(2)) === true, { name: 'mídia baixada' })
+  await mediaGated(seeder, K)
   await settled(seeder, A)
   t.ok(seeder._served.get(A.key).mediaIrregular, 'the diary is irregular for media')
   t.is(await seeder.mediaRead(A.key, K, 1, 1), null, 'the range readers treat as deleted is refused')
@@ -925,6 +942,7 @@ test('nested tombstones close the media of the diary', async (t) => {
   await admit(A, assoc)
   await until(() => events.find((e) => e.event === 'media-admitted' && e.key === K), { name: 'mídia admitida', timeoutMs: 30000 })
   await until(async () => (await seeder._mediaServed.get(K)?.core.has(2)) === true, { name: 'mídia baixada' })
+  await mediaGated(seeder, K)
   await settled(seeder, A)
   t.is(await seeder.postBlock(A.key, 2), null, 'postBlock follows the readers fold')
   t.is(await seeder.mediaRead(A.key, K, 1, 1), null, 'the media of the deleted post is refused')
@@ -959,6 +977,7 @@ test('an irregular diary does not read its tombstones back on a pass that change
   await admit(A, assoc)
   await until(() => events.find((e) => e.event === 'media-admitted' && e.key === K), { name: 'mídia admitida', timeoutMs: 30000 })
   await until(async () => (await seeder._mediaServed.get(K)?.core.has(3)) === true, { name: 'mídia baixada' })
+  await mediaGated(seeder, K)
   await settled(seeder, A)
   const entry = seeder._served.get(A.key)
   t.ok(entry.mediaIrregular, 'the diary is irregular for media')
@@ -1013,6 +1032,7 @@ test('an honest diary with two media cores serves live ranges and refuses delete
   for (const k of [K, L]) {
     await until(() => events.find((e) => e.event === 'media-admitted' && e.key === k), { name: 'mídia admitida', timeoutMs: 30000 })
     await until(async () => { const c = seeder._mediaServed.get(k)?.core; return !!c && await c.has(2) && (k !== K || await c.has(1)) }, { name: 'mídia baixada' })
+    await mediaGated(seeder, k)
   }
   await settled(seeder, A)
   t.is(seeder._served.get(A.key).media.size, 2)
@@ -1041,6 +1061,7 @@ test('mediaRead and postBlock answer nothing until the scan has caught up', asyn
   await admit(A, assoc)
   await until(() => events.find((e) => e.event === 'media-admitted' && e.key === K), { name: 'mídia admitida', timeoutMs: 30000 })
   await until(() => seeder._mediaServed.get(K)?.core.contiguousLength === 3, { name: 'mídia baixada' })
+  await mediaGated(seeder, K)
   await settled(seeder, A)
   t.ok(await seeder.postBlock(A.key, 2))
   t.ok(await seeder.mediaRead(A.key, K, 1, 1))
@@ -1094,6 +1115,7 @@ test('mediaRead and postBlock answer nothing while a block below the signed leng
   await admit(A, assoc)
   await until(() => events.find((e) => e.event === 'media-admitted' && e.key === K), { name: 'mídia admitida', timeoutMs: 30000 })
   await until(() => seeder._mediaServed.get(K)?.core.contiguousLength === 2, { name: 'mídia baixada' })
+  await mediaGated(seeder, K)
   await settled(seeder, A)
   t.ok(await seeder.postBlock(A.key, 2))
   t.ok(await seeder.mediaRead(A.key, K, 1, 1))

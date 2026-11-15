@@ -165,3 +165,13 @@ test('conversation rows use the row name type and the chips carry no rule', (t) 
   t.absent(row.includes('...type.postName'))
   t.absent(chips.includes('borderBottomWidth'))
 })
+
+test('a list empty component is never a bare Fragment: react-native-web clones it with onLayout and style', (t) => {
+  const { readdirSync } = require('node:fs')
+  const dir = join(__dirname, '../src/screens')
+  const bare = /\b(?:empty|listEmpty)\s*=\s*\(?\s*<>|ListEmptyComponent=\{\s*\(?\s*<>/
+  const files = readdirSync(dir).filter((name) => name.endsWith('.js'))
+  t.ok(files.length > 20, 'the screens are found')
+  for (const name of files) t.absent(bare.test(readFileSync(join(dir, name), 'utf8')), name + ' wraps its empty state in a View')
+  for (const name of ['Avisos', 'Diario', 'Membro']) t.ok(read('screens/' + name).includes('<View>{[0, 1, 2].map((row) => <SkeletonRow key={row} />)}</View>'), name + ' skeleton rows in a View')
+})

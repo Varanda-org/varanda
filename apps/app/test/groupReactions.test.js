@@ -22,11 +22,11 @@ const deferred = () => {
 async function harness (request, { batchStore = false } = {}) {
   const { toggleOf, applyOptimistic } = await import('../src/reactions.js')
   const { whoOf, UNNAMED } = await import('../src/who.js')
-  const { applyPage, EMPTY_PAGES } = await import('../src/groups.js')
+  const { applyPage, EMPTY_PAGES, mergeNewest, reloadDone, reloadWalks } = await import('../src/groups.js')
   const context = runInNewContext(source.match(/const reactionContext = useMemo\(\(\) => (\(.*\)), \[/)[1])
   const rawItems = [{ writer: A, seq: 1, diary: A, reactions: initial }, { writer: B, seq: 2, diary: B, reactions: [] }]
   const view = { disabled: false, rawById: new Map([[key, rawItems[0]], [secondKey, rawItems[1]]]), overrides: new Map(), picker: null, whoOpen: false }
-  const state = { error: '', who: null, store: EMPTY_PAGES, resolved: [], storeUpdates: [] }
+  const state = { error: '', who: null, store: EMPTY_PAGES, resolved: [], storeUpdates: [], walks: reloadWalks() }
   const profiles = new Map([[A, { name: 'Ana\u202e' }]])
   const names = { profileOf: (diary) => profiles.get(diary), resolveMany: (keys) => state.resolved.push(keys) }
   const contextRef = { current: context }
@@ -38,7 +38,10 @@ async function harness (request, { batchStore = false } = {}) {
     setReactionError: (error) => { state.error = error },
     setWhoReacted: (rows) => { state.who = rows },
     setReactionPicker: (key) => { view.picker = key },
-    setStore: (update) => { if (batchStore) state.storeUpdates.push(update); else state.store = update(state.store) },
+    setStore: (value) => {
+      const update = typeof value === 'function' ? value : () => value
+      if (batchStore) state.storeUpdates.push(update); else state.store = update(state.store)
+    },
     setMeta: () => {},
     setPageRole: () => {},
     useCallback: (fn) => fn,
@@ -46,6 +49,11 @@ async function harness (request, { batchStore = false } = {}) {
     node: {},
     applyPage,
     EMPTY_PAGES,
+    mergeNewest,
+    reloadDone,
+    walksRef: { get current () { return state.walks } },
+    storeRef: { get current () { return state.store }, set current (value) { state.store = value } },
+    pageRoleOf: () => null,
     request,
     group: 'ef'.repeat(32),
     toggleOf,
@@ -57,7 +65,7 @@ async function harness (request, { batchStore = false } = {}) {
     UNNAMED,
     displayText
   }
-  const readStart = source.indexOf('  const commitRead =')
+  const readStart = source.indexOf('  const noteRead =')
   const readEnd = source.indexOf('  // The call carries', readStart)
   const start = source.indexOf('  function openReactionPicker (')
   const end = source.indexOf('  if (!hosted) {', start)
@@ -65,7 +73,7 @@ async function harness (request, { batchStore = false } = {}) {
   const renderStart = source.indexOf('  const whoReactedRows =')
   const render = compileFunction(source.slice(renderStart, start) + '\nreturn whoReactedRows', ['whoReacted', 'names', 'rawItems', 'whoOf', 'UNNAMED', 'displayText'])
   const flushStore = () => { for (const update of state.storeUpdates.splice(0)) state.store = update(state.store) }
-  return { ...handlers, context, contextRef, state, view, profiles, flushStore, renderWho: () => render(state.who, names, rawItems, whoOf, UNNAMED, displayText) }
+  return { ...handlers, walks: state.walks, context, contextRef, state, view, profiles, flushStore, renderWho: () => render(state.who, names, rawItems, whoOf, UNNAMED, displayText) }
 }
 
 test('Grupo wires the existing bubble slots and closes the actions sheet before another sheet', (t) => {
@@ -233,6 +241,123 @@ test('a read started before failure cannot enable reactions but a later older pa
   h.openReactionPicker(key)
   t.is(h.view.picker, key, 'a committed older page started after failure releases its message')
 })
+
+test('a version reload re-reads the older pages that were loaded, keeping the position', async (t) => {
+  const at = (s) => '2026-11-12T12:00:0' + s + '.000Z'
+  const it = (seq) => ({ writer: A, diary: A, seq, at: at(seq), reactions: [] })
+  const cur = (seq) => ({ writer: A, seq, at: at(seq) })
+  const pages = new Map([['', { items: [it(6), it(5)], next: cur(5) }], ['5', { items: [it(4), it(3)], next: cur(3) }], ['3', { items: [it(2), it(1)], next: cur(1) }], ['1', { items: [it(0)], next: null }]])
+  const reads = []
+  const h = await harness(async (method, params) => {
+    reads.push(params.before ? params.before.seq : null)
+    return { ...pages.get(params.before ? String(params.before.seq) : ''), sealed: 0, state: 'ok', epoch: null }
+  })
+  // Loaded before the reload: two pages, down to message 3.
+  h.commitRead({ items: [it(5), it(4)], next: cur(4) }, null)
+  h.commitRead({ items: [it(3)], next: cur(3) }, cur(4))
+  await h.readNewest()
+  await settle()
+  t.alike(reads, [null, 5], 'the newest page, then older pages until message 3 is back')
+  t.alike(h.state.store.pages.flatMap((p) => p.items.map((i) => i.seq)), [6, 5, 4, 3])
+  t.alike(h.state.store.next, cur(3), 'older pages still continue from there')
+  reads.length = 0
+  h.state.store = { ...h.state.store, pages: h.state.store.pages.slice(0, 1), next: cur(5) }
+  await h.readNewest()
+  await settle()
+  t.alike(reads, [null], 'a reload from the newest page alone reads only that page')
+})
+
+const settle = () => new Promise((resolve) => setImmediate(resolve))
+
+function walkWorld () {
+  const at = (s) => '2026-11-12T12:00:0' + s + '.000Z'
+  const it = (seq) => ({ writer: A, diary: A, seq, at: at(seq), reactions: [] })
+  const cur = (seq) => ({ writer: A, seq, at: at(seq) })
+  const pages = new Map([['', { items: [it(6), it(5)], next: cur(5) }], ['5', { items: [it(4), it(3)], next: cur(3) }], ['3', { items: [it(2), it(1)], next: cur(1) }]])
+  const seqs = (store) => store.pages.flatMap((p) => p.items.map((i) => i.seq))
+  return { it, cur, pages, seqs }
+}
+
+test('a reload never empties the list: older pages stay between the newest commit and the final one', async (t) => {
+  const { it, cur, pages, seqs } = walkWorld()
+  const older = deferred()
+  const h = await harness(async (method, params) => {
+    if (params.before) return older.promise
+    return { ...pages.get(''), sealed: 0, state: 'ok', epoch: null }
+  })
+  h.commitRead({ items: [it(5), it(4)], next: cur(4) }, null)
+  h.commitRead({ items: [it(3)], next: cur(3) }, cur(4))
+  const read = await h.readNewest()
+  t.alike(read.items.map((i) => i.seq), [6, 5], 'the caller has the newest page before the walk ends')
+  t.alike(seqs(h.state.store), [6, 5, 4, 3], 'the new message shows; the row it pushed out of the newest page and the older loaded page stay')
+  t.alike(h.state.store.next, cur(3), 'and still continues from the old position')
+  older.resolve({ ...pages.get('5'), sealed: 0, state: 'ok', epoch: null })
+  await settle()
+  t.alike(seqs(h.state.store), [6, 5, 4, 3], 'the older pages are replaced in one commit')
+  t.alike(h.state.store.next, cur(3))
+})
+
+test('a newer reload ends the older walk, which commits nothing, and goes at least as deep', async (t) => {
+  const { it, cur, pages, seqs } = walkWorld()
+  const held = []
+  const reads = []
+  const h = await harness(async (method, params) => {
+    reads.push(params.before ? params.before.seq : null)
+    const page = { ...pages.get(params.before ? String(params.before.seq) : ''), sealed: 0, state: 'ok', epoch: null }
+    if (!params.before) return page
+    const d = deferred()
+    held.push({ d, page })
+    return d.promise
+  })
+  h.commitRead({ items: [it(5), it(4)], next: cur(4) }, null)
+  h.commitRead({ items: [it(3)], next: cur(3) }, cur(4))
+  await h.readNewest()
+  const first = held.shift()
+  // A second reload while the first still waits for its older page.
+  await h.readNewest()
+  const merged = h.state.store
+  t.alike(seqs(merged), [6, 5, 4, 3], 'no row lost while both walks run')
+  first.d.resolve(first.page)
+  await settle()
+  t.is(h.state.store, merged, 'the superseded walk commits nothing')
+  t.alike(reads, [null, 5, null, 5], 'the newer walk walks back too')
+  const second = held.shift()
+  second.d.resolve(second.page)
+  await settle()
+  t.alike(seqs(h.state.store), [6, 5, 4, 3], 'the newer walk commits')
+  t.not(h.state.store, merged)
+})
+
+test('an older page loaded during a reload walk is kept by the walk\'s final commit', async (t) => {
+  const { it, cur, pages, seqs } = walkWorld()
+  const held = []
+  const h = await harness(async (method, params) => {
+    const page = { ...pages.get(params.before ? String(params.before.seq) : ''), sealed: 0, state: 'ok', epoch: null }
+    if (!params.before) return page
+    const d = deferred()
+    held.push({ d, page })
+    return d.promise
+  })
+  h.commitRead({ items: [it(5), it(4)], next: cur(4) }, null)
+  h.commitRead({ items: [it(3)], next: cur(3) }, cur(4))
+  await h.readNewest()
+  // "Mensagens anteriores" lands a deeper page while the walk waits.
+  const loadOlder = source.slice(source.indexOf('      const next = applyPage(storeRef.current, read, before)'), source.indexOf('    } catch (err) {\n      setMoreError'))
+  t.ok(loadOlder.includes('walksRef.current.deepen(next)\n        commitRead(read, before)'), 'loadOlder deepens a running walk')
+  const deeper = { items: [it(2), it(1)], next: null, sealed: 0, state: 'ok', epoch: null }
+  h.walks.deepen(applyStore(h, deeper, cur(3)))
+  held.shift().d.resolve({ ...pages.get('5'), sealed: 0, state: 'ok', epoch: null })
+  await settle()
+  t.is(held.length, 1, 'the walk reads on to the deeper page')
+  held.shift().d.resolve({ ...pages.get('3'), sealed: 0, state: 'ok', epoch: null })
+  await settle()
+  t.alike(seqs(h.state.store), [6, 5, 4, 3, 2, 1], 'the rows loaded during the walk stay')
+})
+
+function applyStore (h, read, before) {
+  h.commitRead(read, before)
+  return h.state.store
+}
 
 test('a batched newest commit followed by a stale older page keeps the newest thread', async (t) => {
   const h = await harness(async () => {}, { batchStore: true })

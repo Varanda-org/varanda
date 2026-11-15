@@ -6,7 +6,7 @@
 // from the Conversas "+" sheet, hence the export). There is no paste field: a
 // /c/ or /g/ link opens its screen (App.js). Groups live inside a community:
 // there is no "Novo grupo" here. Hosted node only: a node that is not hosted
-// shows the "só na versão web" note, like Avisos, and calls nothing.
+// says Comunidades are unavailable, as Grupo does, and calls nothing.
 // Props: onBack, onOpenGroup(group), onOpenCommunity(community); both take a
 // hex64 root key. onOpenCommunity also opens a community just made.
 // Minhas comunidades paints the stored 'comunidades' snapshot
@@ -43,7 +43,10 @@ import { TopBar } from '../ui/TopBar'
 
 const { displayText } = rpc
 
-export const WEB_ONLY_MESSAGE = 'Comunidades só na versão web'
+// By capability, not platform: a phone without the installation lands here too,
+// so the text points at where Comunidades do work. The same words as Grupo.
+export const UNAVAILABLE_TITLE = 'Comunidades indisponíveis'
+export const UNAVAILABLE_MESSAGE = 'Comunidades disponíveis no site da associação ou no app ligado à instalação.'
 const SEARCH_DELAY_MS = 400
 const LIST_DELAY_MS = 800
 const HEX64 = /^[0-9a-f]{64}$/
@@ -357,7 +360,7 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
     return (
       <View style={styles.root}>
         {bar}
-        <EmptyState icon='cadeira' title='Só na versão web' body={WEB_ONLY_MESSAGE} />
+        <EmptyState icon='cadeira' title={UNAVAILABLE_TITLE} body={UNAVAILABLE_MESSAGE} />
       </View>
     )
   }
@@ -470,6 +473,7 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
           view above it. */}
       <KeyboardForm>
         <RefreshableList
+          perfId='comunidades'
           data={list.rows}
           keyExtractor={(c) => c.community}
           renderItem={renderItem}

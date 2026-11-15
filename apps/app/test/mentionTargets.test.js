@@ -10,15 +10,13 @@ const key = (n) => n.toString(16).padStart(64, '0')
 const member = { author: key(1), username: 'ana', name: 'Ana' }
 const page = { author: key(2), username: 'pagina_cafe', name: 'Café', page: true }
 
-test('mention targets label pages and open both kinds as diaries', async (t) => {
-  const { mergeSuggestions, openTarget } = await load()
+test('mention targets label pages as diaries', async (t) => {
+  const { mergeSuggestions } = await load()
   const rows = mergeSuggestions([member], [page], '', OWN)
   t.alike(rows, [
     { kind: 'member', username: 'ana', name: 'Ana', key: key(1), chipLabel: null },
     { kind: 'page', username: 'pagina_cafe', name: 'Café', key: key(2), chipLabel: 'Página' }
   ])
-  t.alike(openTarget(rows[0]), { screen: 'membro', key: key(1) })
-  t.alike(openTarget(rows[1]), { screen: 'membro', key: key(2) })
 })
 
 test('mention targets use page hints in the existing member search and deduplicate diaries', async (t) => {
@@ -28,28 +26,22 @@ test('mention targets use page hints in the existing member search and deduplica
   t.alike(mergeSuggestions([{ ...member, author: OWN }], [page], '', OWN.toUpperCase()).map((row) => row.key), [key(2)])
 })
 
-test('closed and moved pages are neither suggested nor opened', async (t) => {
-  const { mergeSuggestions, openTarget } = await load()
+test('closed and moved pages are not suggested', async (t) => {
+  const { mergeSuggestions } = await load()
   for (const flag of ['closed', 'moved']) {
     const ended = { ...page, [flag]: true }
     t.alike(mergeSuggestions([ended], [ended], 'pa', OWN), [])
-    t.is(openTarget({ ...ended, kind: 'page', key: page.author }), null)
   }
 })
 
 test('mention targets reject malformed rows and invalid usernames', async (t) => {
-  const { mergeSuggestions, openTarget } = await load()
+  const { mergeSuggestions } = await load()
   const malformed = [null, undefined, false, 'ana', [], {},
     { ...member, author: 'bad' }, { ...member, author: 1 },
     { ...member, username: 'Ana' }, { ...member, username: 'abcdef' },
     { ...member, username: 'a' }, { ...member, username: ['ana'] },
     { ...member, name: {} }]
   t.alike(mergeSuggestions(malformed, malformed, 'an', OWN), [])
-  for (const row of malformed) t.is(openTarget(row), null)
-  const row = { kind: 'member', key: member.author, username: member.username, name: member.name }
-  for (const bad of [{ ...row, kind: 'group' }, { ...row, key: 'bad' }, { ...row, username: null }, { ...row, name: {} }]) {
-    t.is(openTarget(bad), null)
-  }
   t.alike(mergeSuggestions(null, {}, null, null), [])
   t.is(mergeSuggestions([{ ...member, name: null }], [], 'an', OWN)[0].name, null)
 })

@@ -16,7 +16,7 @@
 // result counts as saved; otherwise the draft stays for the person to decide.
 
 import { useEffect, useRef, useState } from 'react'
-import { KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
+import { Platform, Pressable, StyleSheet, Text, View } from 'react-native'
 import { LOG_LIMIT_MAX, MAX_BIO, MAX_NAME, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
@@ -28,13 +28,13 @@ import { openImage } from '../media/avatarEncode'
 import { AVATAR_SIDE, MAX_AVATAR_BYTES, checkAvatarBytes } from '../media/avatar'
 import { revokeDeletedMedia } from '../media/cache'
 import { revokeUrl, urlFromBytes } from '../media/display'
-import { confirmSaved, planSave } from '../profileSave'
+import { confirmSaved, draftFor, planSave, startFields } from '../profileSave'
 import { Btn, ConfirmStack, ErrorText, Field, Page, Row, SectionHeader, Soft, errorText, useAction } from '../ui'
 import { refusalOf } from '../wordCheck'
 import { Avatar, primeAvatar } from '../ui/Avatar'
 import { AvatarEditor } from '../ui/AvatarEditor'
 import { Icon } from '../ui/Icon'
-import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
+import { KeyboardLift } from '../ui/KeyboardLift'
 import { Pill } from '../ui/Pill'
 import { Sheet, TEXT_CAP } from '../ui/Sheet'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
@@ -72,33 +72,12 @@ const VERSION_PAGES = 10
 // The own profile versions, newest first, each with 'Apagar versão'
 // (profile.delete once; the node deletes a compat pair as one version). After
 // an uncertain failure the list is re-read before the button is offered again.
-// Every form avoids the keyboard: iOS never resizes for it, and Android runs
-// edge to edge (targetSdk 36), where adjustResize no longer resizes either.
-// KeyboardAvoidingView compares its parent-relative frame with the keyboard's
-// screen position, so inside a sheet it pads too little by the sheet's own
-// top; the measured top goes back in as keyboardVerticalOffset. Android only:
-// that is where the form sits under the keyboard; the iOS page sheet is
-// unchanged until it is checked on a device.
-const formStyles = StyleSheet.create({ fill: { flex: 1 } })
-
-// A full-screen stack layer sits in the main window, so its measured top is
-// right on iOS too (inWindow); the page sheet is left alone until checked.
+// Every form avoids the keyboard (../ui/KeyboardLift). Android only: that is
+// where the form sits under the keyboard; the iOS page sheet is unchanged
+// until it is checked on a device. A full-screen stack layer sits in the main
+// window, so its measured top is right on iOS too (inWindow).
 export function KeyboardForm ({ children, inWindow = false }) {
-  const ref = useRef(null)
-  const avoidKeyboard = useKeyboardAvoidEnabled()
-  const [top, setTop] = useState(0)
-  const measure = () => {
-    const view = ref.current
-    if ((!inWindow && Platform.OS !== 'android') || !view || typeof view.measureInWindow !== 'function') return
-    view.measureInWindow((x, y) => { if (Number.isFinite(y)) setTop(y) })
-  }
-  return (
-    <View ref={ref} style={formStyles.fill} onLayout={measure} collapsable={false}>
-      <KeyboardAvoidingView style={formStyles.fill} behavior='padding' keyboardVerticalOffset={top} enabled={avoidKeyboard}>
-        {children}
-      </KeyboardAvoidingView>
-    </View>
-  )
+  return <KeyboardLift measured={inWindow || Platform.OS === 'android'}>{children}</KeyboardLift>
 }
 
 function ProfileVersions ({ node, ownKey, shown }) {
@@ -233,6 +212,17 @@ export default function Perfil ({ open, current, onClose, onSaved, ownKey, page 
   const action = useAction()
   const [name, setName] = useState('')
   const [bio, setBio] = useState('')
+  // What the person typed and has not saved: closing the sheet keeps it, a
+  // successful save (or a plain profile reported on close) clears it.
+  const textDraftRef = useRef(null)
+  const editName = (value) => {
+    textDraftRef.current = { ...draftFor(textDraftRef.current, ownKey), key: ownKey, name: value }
+    setName(value)
+  }
+  const editBio = (value) => {
+    textDraftRef.current = { ...draftFor(textDraftRef.current, ownKey), key: ownKey, bio: value }
+    setBio(value)
+  }
   // An uncertain save is being checked against the diary.
   const [checking, setChecking] = useState(false)
   const [uploading, setUploading] = useState(false)
@@ -282,8 +272,9 @@ export default function Perfil ({ open, current, onClose, onSaved, ownKey, page 
     refocusRef.current = true
   }
 
-  // The form starts from `current` each time the sheet opens; a reload
-  // while it is open never overwrites the draft. Closing drops the photo draft.
+  // The form starts from the kept text draft, else from `current`, each time
+  // the sheet opens; a reload while it is open never overwrites the draft.
+  // Closing drops the photo draft but keeps the typed name and bio.
   useEffect(() => {
     setDraft(undefined)
     releaseHandle(editorRef.current)
@@ -300,13 +291,14 @@ export default function Perfil ({ open, current, onClose, onSaved, ownKey, page 
       const plain = plainDoneRef.current
       if (plain && typeof plain === 'object' && !lockRef.current) {
         plainDoneRef.current = true
+        textDraftRef.current = null
         onSaved(plain)
       }
       return
     }
-    const c = currentRef.current || {}
-    setName(c.name || '')
-    setBio(c.bio || '')
+    const start = startFields(draftFor(textDraftRef.current, ownKey), currentRef.current)
+    setName(start.name)
+    setBio(start.bio)
     action.clearError()
   }, [shown])
 
@@ -430,6 +422,7 @@ export default function Perfil ({ open, current, onClose, onSaved, ownKey, page 
       draftRef.current = undefined
       setDraftState(undefined)
     }
+    textDraftRef.current = null
     const values = { name: sent.name, bio: sent.bio }
     if (Object.hasOwn(sent, 'avatar')) values.avatar = sent.avatar
     // The plain profile is reported by this save: nothing left to report.
@@ -555,8 +548,8 @@ export default function Perfil ({ open, current, onClose, onSaved, ownKey, page 
 
   const inputs = (
     <>
-      <Field label={'Nome (' + nameLen + '/' + MAX_NAME + ')'} value={name} onChangeText={setName} editable={!locked} />
-      <Field label={'Bio (' + bioLen + '/' + MAX_BIO + ')'} value={bio} onChangeText={setBio} editable={!locked} multiline lines={3} />
+      <Field label={'Nome (' + nameLen + '/' + MAX_NAME + ')'} value={name} onChangeText={editName} editable={!locked} />
+      <Field label={'Bio (' + bioLen + '/' + MAX_BIO + ')'} value={bio} onChangeText={editBio} editable={!locked} multiline lines={3} />
       <ErrorText>{refused}</ErrorText>
       <ErrorText>{action.error}</ErrorText>
     </>

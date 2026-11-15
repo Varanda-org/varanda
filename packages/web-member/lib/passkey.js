@@ -77,6 +77,8 @@ const DM_BOX_HKDF_SALT = b4a.from('varanda/member-dm-box/hkdf/v1', 'utf8')
 const DM_BOX_HKDF_INFO = b4a.from('varanda/member-dm-box/x25519/v1', 'utf8')
 const DM_LOCAL_HKDF_SALT = b4a.from('varanda/member-dm-local/hkdf/v1', 'utf8')
 const DM_LOCAL_HKDF_INFO = b4a.from('varanda/member-dm-local/secretbox/v1', 'utf8')
+const OUTBOX_HKDF_SALT = b4a.from('varanda/member-outbox/hkdf/v1', 'utf8')
+const OUTBOX_HKDF_INFO = b4a.from('varanda/member-outbox/secretbox/v1', 'utf8')
 
 const PRF_BYTES = 32
 const NONCE_BYTES = 32
@@ -283,6 +285,13 @@ async function dmBoxKeyPairFromPrf (prf, gen, { hkdf: derive } = {}) {
 async function dmLocalKeyFromPrf (prf, { hkdf: derive } = {}) {
   checkPrf(prf)
   return hkdf(prf, DM_LOCAL_HKDF_SALT, DM_LOCAL_HKDF_INFO, derive)
+}
+
+// The 32-byte crypto_secretbox key of the app's outbox items
+// (./outbox-seal.js), in a fresh buffer; the caller zeroes it when done.
+async function outboxKeyFromPrf (prf, { hkdf: derive } = {}) {
+  checkPrf(prf)
+  return hkdf(prf, OUTBOX_HKDF_SALT, OUTBOX_HKDF_INFO, derive)
 }
 
 function boxKeyPairFromSeed (seed) {
@@ -632,6 +641,8 @@ module.exports = {
   DM_BOX_HKDF_INFO,
   DM_LOCAL_HKDF_SALT,
   DM_LOCAL_HKDF_INFO,
+  OUTBOX_HKDF_SALT,
+  OUTBOX_HKDF_INFO,
   MESSAGES,
   seedFromPrf,
   keyPairFromPrf,
@@ -640,6 +651,7 @@ module.exports = {
   boxKeyPairFromPrf,
   dmBoxKeyPairFromPrf,
   dmLocalKeyFromPrf,
+  outboxKeyFromPrf,
   rpIdFor,
   supportStatus,
   forgetCredential,
