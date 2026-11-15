@@ -29,6 +29,11 @@ export const EmbedHost = createContext(null)
 // list keeps for a row is found again by this key when the row comes back.
 export const EmbedRowKey = createContext('')
 
+// Dev perf only: the perfId of the list a row is drawn in, so each list's
+// frames line counts its own rows (perfMarks rowStatsLine). RefreshableList
+// provides it only with the marks on, and only PostRow's perfOn hook reads it.
+export const PerfListId = createContext('')
+
 // null, or the Animated value a row moves its content by (./SwipeReply): a
 // frame drawn outside the row, in the list's layer, moves with it.
 export const RowShift = createContext(null)
