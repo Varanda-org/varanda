@@ -41,18 +41,61 @@ on:
 permissions:
   contents: read
 
-# Never cancel: a cancelled run may already have queued a build on EAS.
-concurrency:
-  group: ios-release-${{ github.ref }}
-  cancel-in-progress: false
-
+# No workflow concurrency: a run that waits for approval would keep a newer
+# run from starting at all. The testflight job has its own group, and the
+# supersede job keeps only the newest run waiting for approval.
 jobs:
-  testflight:
+  # Only the newest run asks for approval. A run that a newer one already
+  # follows skips the build, and older runs still waiting for approval are
+  # cancelled. The status is read again right before each cancel, so a run
+  # that was approved meanwhile is left alone. The same job is in deploy.yml
+  # and site.yml (apps/cli/test/supersede.test.js).
+  supersede:
     if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_IOS_RELEASE == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    outputs:
+      go: ${{ steps.runs.outputs.go }}
+    steps:
+      - id: runs
+        name: Keep only the newest run waiting for approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          api="repos/$GITHUB_REPOSITORY/actions"
+          wf=$(gh api "$api/runs/$GITHUB_RUN_ID" --jq .workflow_id)
+          runs=$(gh api "$api/workflows/$wf/runs?branch=main&per_page=100")
+          newer=$(jq --argjson n "$GITHUB_RUN_NUMBER" '[.workflow_runs[] | select(.run_number > $n)] | length' <<< "$runs")
+          if [ "$newer" -gt 0 ]; then
+            echo "::notice::uma execução mais nova deste fluxo já começou e pede a aprovação; esta termina sem implantar"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          waiting=$(jq --argjson n "$GITHUB_RUN_NUMBER" '.workflow_runs[] | select(.run_number < $n and .status == "waiting") | .id' <<< "$runs")
+          for id in $waiting; do
+            [ "$(gh api "$api/runs/$id" --jq .status)" = waiting ] || continue
+            if gh api -X POST "$api/runs/$id/cancel" > /dev/null; then
+              echo "::notice::execução $id cancelada: esperava aprovação de um commit mais antigo"
+            else
+              echo "::warning::não foi possível cancelar a execução $id"
+            fi
+          done
+          echo "go=true" >> "$GITHUB_OUTPUT"
+
+  # Never cancelled once it runs: it may already have queued a build on EAS.
+  testflight:
+    needs: supersede
+    if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_IOS_RELEASE == 'true' && needs.supersede.outputs.go == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment:
       name: app-store
+    concurrency:
+      group: ios-release-${{ github.ref }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

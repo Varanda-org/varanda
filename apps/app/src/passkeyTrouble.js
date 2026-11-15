@@ -65,7 +65,7 @@ export function unusableSteps ({ userIds = [], withLink = false, created = false
   const retry = known
     ? 'Toque em ' + RETRY_LABEL + '.'
     : created
-      ? 'Toque em ' + RETRY_LABEL + ' e crie a passkey outra vez. Se o aparelho perguntar onde salvar, escolha um gerenciador de senhas que sincroniza entre aparelhos (o do celular, do Google ou da Apple).'
+      ? 'Toque em ' + RETRY_LABEL + ' e crie a passkey outra vez. Se o aparelho perguntar onde salvar, escolha um gerenciador de senhas que sincroniza entre aparelhos (o do celular, do Google, da Apple ou outro).'
       : 'Toque em ' + RETRY_LABEL + ' e escolha outra passkey do Varanda, se tiver.'
   const steps = [
     ...cleanupSteps(cleaned, userIds),
