@@ -110,8 +110,8 @@
 // `signals` folds the sync events into UI hints (syncSignals.js).
 // Contexts: a sync log line or a download hint arrives dozens of times a
 // second while many diaries sync, so neither rides in the useNode() value
-// (which screens read; rows read useNodeHandle(), useOnline() and
-// useMemberKey(), which ignore the sync flags). useSyncLines()
+// (which screens read; rows read useNodeHandle() and useMemberKey(),
+// which ignore the sync flags). useSyncLines()
 // carries the log and useSyncSignals() the folded hints; useNode() keeps
 // sync { active, stopped, starting } and `signals` as a run-flags view
 // (see runFlags) that does not change on download lines. useHosted() is only
@@ -206,9 +206,8 @@ const SyncSignalsContext = createContext(EMPTY_SIGNALS)
 // the whole session): rows keep identities apart through MemberKeyContext
 // and their identity-keyed caches, rendered in the same commit.
 const NodeHandleContext = createContext(null)
-// Primitives, so a flag flip elsewhere does not redraw their readers. Off and
-// none without a provider: nothing plays or asks for an unknown member.
-const OnlineContext = createContext(false)
+// A primitive, so a flag flip elsewhere does not redraw its readers. None
+// without a provider: nothing asks for an unknown member.
 const MemberKeyContext = createContext(null)
 
 // The chat media calls a handle may offer besides upload (see the header).
@@ -227,10 +226,6 @@ export function useNodeHandle () {
   return useContext(NodeHandleContext)
 }
 
-export function useOnline () {
-  return useContext(OnlineContext)
-}
-
 // The unlocked or known member key, lowercased, or null.
 export function useMemberKey () {
   return useContext(MemberKeyContext)
@@ -246,12 +241,10 @@ function useHandle (hosted, request, media, accountOrigin, syncNow) {
   return useMemo(() => ({ hosted, request, media, accountOrigin, syncNow }), [hosted, request, media, accountOrigin, syncNow])
 }
 
-function RowContexts ({ handle, online, memberKey, children }) {
+function RowContexts ({ handle, memberKey, children }) {
   return (
     <NodeHandleContext.Provider value={handle}>
-      <OnlineContext.Provider value={online}>
-        <MemberKeyContext.Provider value={memberKey}>{children}</MemberKeyContext.Provider>
-      </OnlineContext.Provider>
+      <MemberKeyContext.Provider value={memberKey}>{children}</MemberKeyContext.Provider>
     </NodeHandleContext.Provider>
   )
 }
@@ -452,7 +445,7 @@ function VitrineNodeProvider ({ children }) {
   return (
     <HostedContext.Provider value>
       <NodeContext.Provider value={value}>
-        <RowContexts handle={handle} online memberKey={memberKeyOf(value.passkey)}>
+        <RowContexts handle={handle} memberKey={memberKeyOf(value.passkey)}>
           <SyncSignalsContext.Provider value={EMPTY_SIGNALS}>
             <SyncLinesContext.Provider value={EMPTY_LINES}>{children}</SyncLinesContext.Provider>
           </SyncSignalsContext.Provider>
@@ -1730,7 +1723,7 @@ function LiveNodeProvider ({ children }) {
   return (
     <HostedContext.Provider value={hosted}>
       <NodeContext.Provider value={value}>
-        <RowContexts handle={handle} online={online} memberKey={memberKey}>
+        <RowContexts handle={handle} memberKey={memberKey}>
           <SyncSignalsContext.Provider value={signals}>
             <SyncLinesContext.Provider value={sync.lines}>{children}</SyncLinesContext.Provider>
           </SyncSignalsContext.Provider>

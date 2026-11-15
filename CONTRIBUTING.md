@@ -115,6 +115,8 @@ Abra o PR a partir do seu fork, com destino à branch `main` do repositório do 
 - Trate um assunto por PR.
 - Descreva o que mudou e por quê.
 - Referencie a issue com `Closes #n`, substituindo `n` pelo número. Não esqueça: é isso que fecha a issue e atualiza o quadro.
+- Mudança que a pessoa usuária ou o operador percebe ganha uma entrada no changelog num arquivo novo, `docs/changelog/<branch>.md` (o nome da branch com `/` trocado por `-`). Não acrescente linhas ao `CHANGELOG.md`: os arquivos entram nele quando uma versão é lançada, e assim o merge de um PR não deixa os outros em conflito. Formato e exemplo em [docs/changelog/README.md](docs/changelog/README.md).
+- Se você registrar a verificação (o que conferiu e como), use um arquivo novo `docs/verification/<branch>.md`, sem número de seção, e não uma seção nova no `docs/verification.md`. Veja [docs/verification/README.md](docs/verification/README.md).
 - Espere a CI passar antes do merge.
 - Aguarde a revisão de @Varanda-org/mantenedores, equipe responsável pelos arquivos no CODEOWNERS.
 

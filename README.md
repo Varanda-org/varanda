@@ -816,6 +816,8 @@ Regras de operação:
 
 O fluxo `deploy` (`.github/workflows/deploy.yml`) implanta `main` no servidor a cada push. Ele repete as checagens do CI (`npm ci`, lint, testes e demo) como os mesmos oito jobs em paralelo, no Node 24. O job `check` reúne os oito e só passa se todos passaram. Se `check` passar, o fluxo entra no servidor por SSH como `varanda-deploy` e roda `deploy/seeder/deploy.sh`. O SHA testado vai pela entrada padrão do SSH, nunca por argumento.
 
+O job `deploy` usa o ambiente `producao`. Se o ambiente pede a aprovação de um revisor, só a execução mais nova espera por ela: antes da aprovação, o job `supersede` cancela as execuções mais antigas de `main` que ainda esperam, e uma execução que chega lá depois de uma mais nova ter começado termina verde sem implantar. Uma implantação que já começou nunca é cancelada: a seguinte espera ela terminar. Por isso o fluxo não tem concorrência própria, e as checagens de dois pushes seguidos podem rodar ao mesmo tempo. Os fluxos `ios-release` e `site` têm o mesmo job.
+
 O script só implanta se esse SHA for a ponta de `origin/main`. Se `main` já avançou, sai com 3 e o fluxo termina verde com um aviso: a execução mais nova de `main` implanta (se nenhuma estiver na fila, use Run workflow). Ele recusa, sem mudar nada, um checkout com alterações locais ou com commits que não estão em `origin/main`, e um `VARANDA_DOMAIN` que não seja um nome em minúsculas sem ponto final. Depois ele:
 
 - guarda a imagem que o semeador está rodando (etiquetada `varanda-seeder:anterior`) e uma cópia do `deploy/seeder/www` em `/var/lib/varanda-deploy`; o commit que está no ar fica anotado em `/var/lib/varanda-deploy/implantado` desde a última implantação;
@@ -906,6 +908,81 @@ Uma chave vazada só consegue pedir a implantação da ponta de `main`: se ela j
 Quem tem o servidor de fato é quem faz merge em `main`: os compose, o Dockerfile e o `build-web.sh` vêm do checkout e rodam como root. A proteção é a regra de `main` (revisão, code owners e os checks `test (20)` e `test (24)`).
 
 Se a conexão SSH cair, o script termina sozinho; leia `/var/lib/varanda-deploy/deploy.log`. Alterações locais em `/opt/varanda` barram a implantação (`alterações locais`): guarde-as ou descarte-as. Para repetir, use Run workflow, não Re-run de uma execução antiga: um Re-run pode deslocar uma execução mais nova que está esperando, e ela sai com 3. Recuperação à mão, como root no servidor: `bash deploy/seeder/deploy.sh </dev/null` (da raiz do repositório), e `docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml logs`.
+
+Um servidor que atualiza por imagem não usa este caminho: veja a próxima seção, "Atualização por imagem (pull)"; o `deploy.sh` recusa um servidor que migrou.
+
+### Atualização por imagem (pull)
+
+Em vez de o GitHub entrar no servidor por SSH, cada servidor baixa imagens assinadas do GHCR e se atualiza sozinho: ninguém guarda uma chave SSH por servidor. O fluxo `release` (`.github/workflows/release.yml`) publica `ghcr.io/varanda-org/varanda-seeder` e `ghcr.io/varanda-org/varanda-web` (só amd64) depois de cada `main` verde e as assina; o fluxo `promote` (`.github/workflows/promote.yml`) move o canal `stable` para uma versão já publicada. `update.sh` (`deploy/seeder/update.sh`), disparado por um timer do systemd, faz o resto no servidor. Só precisa de Docker com o plugin compose v2, `curl`, `flock` e `systemctl`: sem git, sem Node e sem `jq`.
+
+Canais: `stable` (padrão) só muda quando alguém aprova um `promote` no ambiente `release-stable`; `edge` segue cada `main` verde. Modos, escolha obrigatória e sem padrão: `VARANDA_UPDATE=auto` aplica sozinho cada versão nova assinada do canal; `VARANDA_UPDATE=manual` só avisa no registro e espera `update.sh apply`. Perfis: `seeder` (padrão) sobe só o semeador; `full` sobe também o Caddy com o app web e o serviço de conta (e exige `/etc/varanda/varanda.env`).
+
+**Confiança, sem rodeio.** As imagens são públicas e não levam segredo nenhum. Cada versão é assinada sem chave guardada (cosign keyless, pelo OIDC do GitHub Actions) com uma destas identidades, emitidas por `https://token.actions.githubusercontent.com`: `https://github.com/Varanda-org/varanda/.github/workflows/release.yml@refs/heads/main` (`edge`) e `https://github.com/Varanda-org/varanda/.github/workflows/promote.yml@refs/heads/main` (`stable`, que ainda passa pela aprovação humana). O atualizador confere a assinatura antes de usar qualquer coisa da imagem, com o cosign fixado em `deploy/seeder/cosign.ref` (nunca o da imagem candidata), recusa uma versão com `seq` mais antigo e troca os próprios scripts pelos da imagem conferida. Logo, quem consegue fazer merge em `main` manda nos servidores, como já acontece no deploy por SSH acima; o `stable` só acrescenta uma aprovação.
+
+**1. Primeira conferência, obrigatória, antes de rodar qualquer coisa da imagem como root.** O `update.sh` que vai rodar sai da própria imagem, então a primeira cópia dele precisa ser conferida à mão. Como root no servidor (para `edge`, troque a etiqueta por `edge` e a identidade pela do `release.yml`):
+
+```sh
+repo=ghcr.io/varanda-org/varanda-seeder
+digest=$(docker buildx imagetools inspect "$repo:stable" | sed -n 's/^Digest: *//p' | head -n 1)
+echo "$digest"   # sha256:<64 hex>
+
+docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --tmpfs /cosign-home:rw,nosuid,nodev,noexec,size=64m,mode=1777 -e HOME=/cosign-home \
+  ghcr.io/sigstore/cosign/cosign:v3.1.4@sha256:0f06154836d2de34f887a5c273506d52ca43edaa1d9e53e6510fa78a48f69c2d verify \
+  --certificate-identity https://github.com/Varanda-org/varanda/.github/workflows/promote.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "$repo@$digest" >/dev/null && echo 'assinatura conferida'
+```
+
+Só continue se imprimiu `assinatura conferida`. Depois extraia o pacote DESSE digest (nunca de uma etiqueta lida de novo) para um diretório de root, sem escrita para grupo ou outros (o `update.sh` recusa rodar de outro jeito):
+
+```sh
+cid=$(docker create --network none --entrypoint cat "$repo@$digest")
+docker cp "$cid:/app/deploy/seeder" /root/varanda-bootstrap
+docker rm "$cid"
+```
+
+Configure (passo 2) e rode `cd /root/varanda-bootstrap && ./update.sh install --image "$repo@$digest"`. O `install` confere de novo a assinatura e o digest, mas é só uma segunda linha de defesa: não substitui este passo.
+
+**2. Configuração.** `/etc/varanda/update.conf`, a partir de `deploy/seeder/update.conf.example`: uma linha `NOME=valor` por variável, sem aspas, lido e nunca executado, com `VARANDA_UPDATE` (obrigatória), `VARANDA_CHANNEL` (`stable` ou `edge`) e `VARANDA_PROFILE` (`seeder` ou `full`). Sem `VARANDA_UPDATE` o `update.sh` sai com 2. `/etc/varanda/varanda.env` é o `deploy/seeder/.env` do servidor (variáveis em `deploy/seeder/.env.example`): dono root, modo `0600`, arquivo comum. É obrigatório no perfil `full` e opcional no `seeder`; quando existe, o pré-voo confere antes de tocar em qualquer coisa que roda as mesmas regras que o `deploy.sh` conferia (no `full`: domínio, associação, cliente do Google, moderadores e limites do serviço de conta; nos dois perfis: as origens e os limites do semeador), e um arquivo recusado barra a troca. Um valor local não vazio é o que os serviços recebem.
+
+**3. O que o `install` faz.** Exige root, amd64 (x86_64), o plugin compose v2 e `systemctl`. Num servidor novo (nenhum contêiner do projeto `varanda-seeder`): prepara a versão em `/opt/varanda-release/<commit>`, aponta `/opt/varanda-release/current` para ela e não inicia nada; faça antes a chave e o certificado do semeador como na seção "Docker Compose", trocando `docker compose -f deploy/seeder/compose.yaml` por `/opt/varanda-release/current/update.sh compose` (por exemplo `update.sh compose run --rm seeder seed key --association "$ASSOC"`), e então rode `update.sh apply`. Num servidor que vem do deploy por SSH: confere o checkout de onde o semeador roda (o diretório e cada ancestral, e `compose.yaml`, `compose.web.yaml`, `Caddyfile` e `.env`, precisam ser de root e sem escrita para grupo ou outros), guarda as imagens em execução como `varanda-seeder:antes-do-pull` e `varanda-caddy:antes-do-pull`, registra o checkout como versão anterior e aplica uma vez, em qualquer modo. Com o perfil `seeder`, recusa um servidor que roda o Caddy ou o serviço de conta (defina `VARANDA_PROFILE=full` e rode de novo). Em todo caso instala `varanda-update.service` e `varanda-update.timer` em `/etc/systemd/system`, habilita o timer na hora (`enable --now`) e grava o marcador `/var/lib/varanda-deploy/modo-pull`, que faz o `deploy.sh` recusar. O timer dispara três minutos depois do boot e a cada 15 minutos, com até 15 minutos de atraso aleatório, para os servidores não reiniciarem todos juntos; enquanto não houve o primeiro `apply`, cada disparo só registra "aguardando o primeiro apply". O estado fica em `/var/lib/varanda-update` (registro em `update.log`, até 5 MB mais uma geração `.1`; o journal recebe só as linhas de log: `journalctl -u varanda-update`), e as versões em `/opt/varanda-release` (só a atual e a anterior). Rodar `install` num servidor já instalado só atualiza as unidades.
+
+**4. No dia a dia** (como root, `/opt/varanda-release/current/update.sh`):
+
+- `status`: modo, canal, perfil, versão instalada, disponível, preparada e anterior, e a intervenção pendente, se houver. Avisa quando as unidades do systemd diferem das da versão em uso.
+- `check`: baixa o canal, confere a assinatura e o `seq` e anota a versão disponível, sem trocar nada.
+- `apply`: aplica a versão do canal agora, em qualquer modo, e ignora as digests recusadas.
+- `rollback`: volta para a versão anterior (o servidor que veio do deploy por SSH volta ao checkout). O digest de que voltou também fica recusado.
+- `reconfigure`: depois de editar `/etc/varanda/varanda.env`, sobe de novo a mesma versão com as associações regravadas e confere a saúde, sem trocar de versão.
+- `compose ps`, `compose logs -f seeder` e demais argumentos: o `docker compose` da versão em uso, já com as imagens e o arquivo de ambiente certos.
+- `run` é o que o timer roda. Em `manual` só registra "nova versão disponível"; em `auto` prepara e aplica.
+
+Toda troca (`run` em `auto`, `apply`, ou o primeiro `apply` do `install`) faz um pré-voo (arquivo de ambiente e `docker compose config -q`) antes de tocar no que roda, sobe a versão nova com `up -d --no-build` e só dá por concluída depois da verificação de saúde: `/health` do semeador com 200 em até 180 s e, no perfil `full`, o app, `/varanda.json`, `/account/health` e o painel de moderação servidos pelo domínio como esperado em até 60 s, um WebSocket de verdade em `wss://<domínio>/seeder` e cada serviço rodando a imagem da versão. Se algo falhar (ou chegar SIGTERM no meio), volta sozinho para a versão anterior (ou, num servidor que veio do deploy por SSH, ao checkout antigo) e sai com 1. Um digest que voltou fica em `/var/lib/varanda-update/recusadas` e, em `auto`, nunca é aplicado de novo; só um `apply` explícito o força. Códigos de saída: 0 feito ou nada a fazer, 1 falha (nada mudou ou voltou), 2 uso errado.
+
+**Intervenção.** Se nem a volta funcionou (ou a versão nova subiu e saudável, mas o estado não pôde ser gravado), o `update.sh` grava o motivo em `/var/lib/varanda-update/intervencao` e o `status` o mostra. Enquanto o arquivo existir, `run` não troca nada: só registra "intervenção pendente" e sai com 1; `check`, `status`, `reconfigure` e `compose` continuam funcionando. Corrija a causa (o registro do servidor, em `update.log`, diz qual) e rode `update.sh apply` (com a versão instalada já em dia, ele a sobe de novo e, se ela passar na verificação, apaga o arquivo; com uma versão nova, a troca que dá certo o apaga) ou `update.sh rollback` (quando volta para uma versão instalada e dá certo, também o apaga). Uma exceção, de propósito: uma volta ao checkout antigo, automática (o primeiro `apply` falhou) ou por `update.sh rollback`, deixa a intervenção anotada. O servidor roda de novo o checkout, mas `run` não troca nada até você decidir. Nesse caso só um `apply` que dê certo (prepara a versão, troca e passa na verificação de saúde) apaga o arquivo; outro `rollback` volta ao checkout de novo e a anota outra vez.
+
+**5. Migrar um servidor que usa o deploy por SSH.**
+
+1. Deixe o deploy por SSH implantar o commit que traz a recusa do modo pull (`recusar_pull` em `deploy/seeder/deploy.sh`).
+2. No GitHub, defina a variável `VARANDA_DEPLOY` com qualquer valor diferente de `true` (o fluxo `deploy` pausa).
+3. No servidor, copie `deploy/seeder/.env` para `/etc/varanda/varanda.env`, dono root, modo `0600`, e crie `/etc/varanda/update.conf` (`VARANDA_PROFILE=full` se o servidor roda o Caddy).
+4. Faça a conferência do passo 1 e rode `./update.sh install --image "$repo@$digest"`.
+5. Confira com `update.sh status` e `curl -s http://127.0.0.1:8788/health`.
+
+Se o primeiro `apply` falhar, o servidor volta sozinho aos contêineres do checkout antigo: o compose do próprio checkout com `--no-build --force-recreate` e as imagens `antes-do-pull`, nunca o `deploy.sh` (ele buscaria a ponta de `main` e reconstruiria). Isso deixa a intervenção anotada de propósito: o servidor fica sem atualização automática até você rodar `update.sh apply` (que a apaga se der certo). Para voltar de propósito ao deploy por SSH, desative o timer (`systemctl disable --now varanda-update.timer`) e apague `/var/lib/varanda-deploy/modo-pull`; o `deploy.sh` volta a funcionar. Depois que todos os servidores migrarem, remova o usuário `varanda-deploy`, a entrada dele no sudoers e o segredo `DEPLOY_SSH_KEY`.
+
+**6. Segredos.** Nenhum segredo entra numa imagem. As variáveis de `/etc/varanda/varanda.env` (referência em `deploy/seeder/.env.example` e `deploy/seeder/compose.web.yaml`) caem em três grupos. Credenciais de provedor, que podem ser as mesmas em vários servidores: `VARANDA_DIDIT_API_KEY`, `VARANDA_DIDIT_WORKFLOW_ID`, `VARANDA_GOOGLE_CLIENT_ID`, `VARANDA_GOOGLE_CLIENT_SECRET`, `VARANDA_GIF_API_URL`, `VARANDA_GIF_API_KEY`, `VARANDA_GIF_MEDIA_HOSTS` e `VARANDA_AUDIUS_API_KEY`. Chaves de dados de cada servidor, que nunca se compartilham, porque cifram os dados daquele servidor: `VARANDA_PHONE_KEY` e `VARANDA_PAGE_KEYS`. Tokens por servidor: `VARANDA_TRIAGE_TOKEN` e `VARANDA_PUSH_TOKEN`. Um servidor só de semeador não precisa de nenhuma credencial de provedor.
+
+**7. Para quem mantém o repositório** (uma vez, nesta ordem; nenhum agente faz isso):
+
+1. Em Settings > Secrets and variables > Actions > Variables, crie `VARANDA_RELEASE` com o valor `true`. Só liga o `release.yml`.
+2. Depois da primeira execução do `release`, torne públicos os dois pacotes (`varanda-seeder` e `varanda-web`): Packages > pacote > Package settings > Change visibility > Public. Sem isso o servidor não baixa sem credencial.
+3. Confira, em cada pacote (Package settings > Manage Actions access), que o repositório tem acesso Write; sem ele o `promote` falha ao mover a tag. Pode não ser preciso quando o fluxo que publica está no mesmo repositório que o pacote: confira em vez de supor.
+4. Settings > Environments > New environment `release-stable`: revisores obrigatórios (quem mantém), sem autorrevisão e implantação só a partir de `main`. Faça isto ANTES de definir `VARANDA_PROMOTE`: o GitHub cria um ambiente que falta sem proteção nenhuma na primeira vez que um job o cita.
+5. Só então defina a variável `VARANDA_PROMOTE` com o valor `true` (liga só o `promote.yml`).
+6. Rode o `promote` (Actions > promote > Run workflow, em `main`, com o SHA de 40 dígitos de um commit já publicado pelo `release`) para a primeira versão `stable`.
+7. Rode a lista de `docs/verification/feat-seeder-pull-updater.md` num servidor de teste antes de migrar a produção.
 
 ### systemd
 
@@ -1045,7 +1122,9 @@ node apps/cli/scripts/fetch-ai-model.js --dir <dataDir>/ai-model
 
 Numa instalação local, prefira `npm ci --ignore-scripts` (ou defina `ONNXRUNTIME_NODE_INSTALL_CUDA=skip`, que evita o download de artefatos CUDA no linux x64). O CI, o fluxo de deploy, `deploy/seeder/build-web.sh` e a imagem Docker instalam com `--ignore-scripts`: nenhum script de instalação de dependência roda, e os binários nativos usados já vêm nos pacotes.
 
-`account status` mostra `Triagem IA: desligada`, `Triagem IA: <n> precedentes` ou `Triagem IA: indisponível (exemplars.json inválido)`. Inclua `exemplars.json` e `triage.json` no backup do volume `account-data`, junto de `moderation.json` (modo `0600`).
+No Histórico do painel, uma decisão da IA tem o botão Reabrir: a denúncia volta para Abertas e uma pessoa decide; a reabertura fica gravada na própria denúncia (campo `reopened` em `moderation.json`) e a IA nunca a decide de novo. Reabrir não desfaz nada: um bloqueio da IA continua até alguém usar Desbloquear (ou cancelar, enquanto está em Pendentes). O `pull` de moderação não muda. As marcas da triagem ficam em `triage-marks.jsonl`, uma linha por marca nova (uma marca igual não grava nada), compactado de tempos em tempos em `triage.json`.
+
+`account status` mostra `Triagem IA: desligada`, `Triagem IA: <n> precedentes` ou `Triagem IA: indisponível (exemplars.json inválido)`. Inclua `exemplars.json`, `triage.json` e `triage-marks.jsonl` no backup do volume `account-data`, junto de `moderation.json` (modo `0600`).
 
 ##### Avisos push (opcional)
 
@@ -1173,7 +1252,7 @@ npm run lint
 
 `npm test` executa `node scripts/run-tests.js --workspaces`: um só pool de processos filhos com os `test/*.test.js` de todos os workspaces, `VARANDA_TEST_CONCURRENCY` por vez, cada arquivo rodando a partir do diretório do seu workspace (com prazo por arquivo: `VARANDA_TEST_TIMEOUT_MS`, padrão 180000). O script de teste de cada workspace é `node ../../scripts/run-tests.js`, que faz o mesmo para um workspace só (`npm test -w <workspace>`); um workspace com outro script de teste faz a execução da raiz falhar, em vez de ficar de fora. Com mais de um arquivo por vez, os mais lentos começam primeiro, pela duração da última execução, guardada em `node_modules/.cache/varanda-test-durations.json` (`VARANDA_TEST_DURATIONS` muda o caminho; arquivo nunca medido começa primeiro, e sem o arquivo vale a ordem da lista). Sem a variável, o pool é a metade inteira dos núcleos da CPU, no máximo 4 (4 num Mac de 12 núcleos, 2 numa máquina de 4 núcleos), porque vários testes medem tempos abaixo de 100 ms que mudam sob carga; `VARANDA_TEST_CONCURRENCY=1` roda um arquivo por vez, com a saída ao vivo. Com mais de um arquivo por vez, a saída de cada um sai num bloco ao terminar (ordem de término, sem intercalação), e o resumo lista `# falha: <arquivo>` para cada falha antes de `# N arquivo(s) de teste, M falha(s)`. `VARANDA_TEST_SHARD=I/N` roda só os arquivos cuja posição i (base 0, na lista ordenada ou na ordem da linha de comando) satisfaz `i % N == I - 1`; um fragmento sem arquivos sai com falha (`# nenhum arquivo neste fragmento`), e um valor inválido também. Se um teste de tempo falhar, rode-o sozinho (`node <arquivo>`) ou com `VARANDA_TEST_CONCURRENCY=1` antes de culpar a sua mudança.
 
-Para iterar mais rápido, `npm test -- --affected=origin/main` roda só os workspaces que uma mudança desde `origin/main` pode alcançar ([scripts/affected.js](scripts/affected.js)). Conta como mudança o que mudou desde a base comum com `HEAD`: commits, edições com ou sem stage e arquivos novos que o git não ignora. A referência também pode ser uma árvore (o `git write-tree` da última execução verde), comparada como está. Um workspace alterado roda inteiro. Outro roda quando algum arquivo dele cita um arquivo alterado, direta ou indiretamente: caminho relativo, caminho a partir da raiz, `path.join` a partir de `__dirname`, nome de pacote em `require` ou `import`, ou workspace listado nas dependências do seu `package.json`. Mudar o `package.json` da raiz, o `package-lock.json`, `scripts/` ou o `package.json` de qualquer workspace roda todos. Sem mudança, ou sem workspace alcançado, sai com 0 e diz por quê. A busca por citações é heurística e só vale localmente: a CI sempre roda todos os workspaces.
+Para iterar mais rápido, `npm test -- --affected=origin/main` roda só os workspaces que uma mudança desde `origin/main` pode alcançar ([scripts/affected.js](scripts/affected.js)). Conta como mudança o que mudou desde a base comum com `HEAD`: commits, edições com ou sem stage e arquivos novos que o git não ignora. A referência também pode ser uma árvore (o `git write-tree` da última execução verde), comparada como está. Um workspace alterado roda inteiro. Outro roda quando algum arquivo dele cita um arquivo alterado, direta ou indiretamente: caminho relativo, caminho a partir da raiz, `path.join` a partir de `__dirname`, nome de pacote em `require` ou `import`, ou workspace listado nas dependências do seu `package.json`. Mudar o `package.json` da raiz, o `package-lock.json`, `scripts/` ou o `package.json` de qualquer workspace roda todos. Sem mudança, ou sem workspace alcançado, sai com 0 e diz por quê. A busca por citações é heurística. A CI de um PR usa a mesma seleção, a partir do pai do commit de merge de teste (`HEAD^1`): o job `affected` pula os jobs fragmentados de um workspace que a mudança não alcança, e o job `others` roda com `--affected`. Cada push na `main` roda todos os workspaces, e é ele que pega uma dependência que a busca não vê. `npm test -- --list` (com ou sem `--affected=<ref>`) só imprime os workspaces que rodariam, um por linha, sem rodar nenhum.
 
 Um workspace:
 

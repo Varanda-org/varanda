@@ -1,6 +1,7 @@
-// Picks the workspaces whose tests a change can reach, for a local
-// `npm test -- --affected=<ref>`. CI never uses it: every pull request and
-// every push to main runs every workspace.
+// Picks the workspaces whose tests a change can reach, for
+// `npm test -- --affected=<ref>`. CI uses it on pull requests (the `affected`
+// job of ci.yml, from the base of the test merge commit); every push to main
+// runs every workspace.
 //
 // Changed files, a rename counted at both paths: when <ref> names a commit,
 // `git diff --name-only --no-renames <base>` (commits since <base> plus
@@ -41,8 +42,8 @@
 // dependencies, reach everything outside their test/. Every file reached is
 // followed in turn, except the files that select every workspace anyway.
 //
-// The scan is a heuristic: a dependency it cannot see is caught by CI, which
-// runs every workspace.
+// The scan is a heuristic: a dependency it cannot see is caught by the push
+// to main, whose CI runs every workspace.
 const fs = require('node:fs')
 const path = require('node:path')
 const { spawnSync } = require('node:child_process')
@@ -101,7 +102,15 @@ function worktreeTree (root) {
   // worktree, and adding everything would then add the copy being written.
   const index = realIndex + '.affected-' + process.pid
   try {
-    try { fs.copyFileSync(realIndex, index) } catch {}
+    try {
+      fs.copyFileSync(realIndex, index)
+      // The copy keeps the real index's times. Git compares by content an
+      // entry stamped no earlier than the index file (its racy check); with a
+      // fresh mtime on the copy, a same-size rewrite made in the second the
+      // real index was written would look unchanged.
+      const st = fs.statSync(realIndex)
+      fs.utimesSync(index, st.atime, st.mtime)
+    } catch {}
     const env = { ...process.env, GIT_INDEX_FILE: index }
     const added = git(root, ['add', '-A', '--', ':/'], env)
     if (added.error) return added

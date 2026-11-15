@@ -391,7 +391,7 @@ Não medido. O build de debug nativo não entra com passkey numa instalação lo
 
 ### M5, resultados (15/11/2026, pilha perf-m5 sobre main@414e19c7)
 
-Pergunta: a regressão nativa desde 11cdb47f acabou? Resposta curta: a rolagem e a memória não são piores que em 11cdb47f, e o custo por renderização caiu; a partida de A Rua no Android continua cerca de 1,8 s mais tarde, e isso é a apresentação do splash, que o mantenedor decidiu (PRs #553 e #597) e que fica. Detalhes e comandos na seção 257 de `docs/verification.md`. Ambiente como na linha de base: builds de desenvolvimento pelo Metro, Vitrine grande, sem nó, emulador Android `varanda-perf` (GPU em software), simulador iPhone 16e, Chrome 4x; carga de 1 min de 6 a 37 (por célula na seção 257). Contadores, não p95 de quadro.
+Pergunta: a regressão nativa desde 11cdb47f acabou? Resposta curta: a rolagem e a memória não são piores que em 11cdb47f, e o custo por renderização caiu; a partida de A Rua no Android continua cerca de 1,8 s mais tarde, e isso é a apresentação do splash, que o mantenedor decidiu (PRs #553 e #597) e que fica. Detalhes e comandos em `docs/verification/docs-perf-m5.md`. Ambiente como na linha de base: builds de desenvolvimento pelo Metro, Vitrine grande, sem nó, emulador Android `varanda-perf` (GPU em software), simulador iPhone 16e, Chrome 4x; carga de 1 min de 6 a 37 (por célula naquele arquivo). Contadores, não p95 de quadro.
 
 #### Android, A/B contra 11cdb47f (Vitrine grande só texto, mesmo método da linha de base, ABABAB, n = 3)
 
@@ -414,7 +414,7 @@ Android, o antes é o PR1 (f7d08ccc) medido na mesma sessão, ABABAB; a carga su
 | `list:rua`, renderizações / ms | 894 [763-953] / 13275 [13221-17019] | 781 [632-969] / 10625 [7367-11371] |
 | renderizações por linha montada (mediana / P95) | 2 / 3 | 1 / 3 |
 | abas escondidas, renderizações / ms | 124 [119-124] / 562,8 [549-645] | 80 [68-80] / 69,9 [62,0-76,8] |
-| parado 60 s, `list:rua` | 5 a 14 (seções 255 e 252) | 7 [7-8] renderizações, 103,3 [99,8-112,1] ms; abas escondidas 0 |
+| parado 60 s, `list:rua` | 5 a 14 (PR4 e seção 252) | 7 [7-8] renderizações, 103,3 [99,8-112,1] ms; abas escondidas 0 |
 | `app-commit` / primeiras linhas, desde `js-entry` | 698 [693-743] / 4120 [3573-4242] ms | 728 [726-754] / 3914 [3880-5620] ms |
 
 iOS, o antes é a seção 252 (PR1, carga 7,6 a 11,5; agora 12,4 a 16,7).
@@ -428,7 +428,7 @@ iOS, o antes é a seção 252 (PR1, carga 7,6 a 11,5; agora 12,4 a 16,7).
 | só texto, abas escondidas, renderizações / ms | 136 a 137 / 343 a 378 | 88 / 58,4 |
 | `app-commit` / primeiras linhas, rica | 605 a 627 / 2789 a 2847 ms | 617 [610-713] / 2809 [2777-3017] ms |
 
-Web, Chrome 4x, rica, desenvolvimento (110 s de rolagem; o antes de A Rua é o PR3, seção 254, porque o PR4 e o PR5 não mexem nela na web): `list:rua` 1604 / 11677 contra 1592 [1583-1601] / 11511 [11386-11836]; seis abas escondidas 82 renderizações e 141 a 161 ms (a linha de base mediu quatro abas em cerca de 3270 renderizações e 5,4 a 5,8 s numa janela de 60 s); renderizações por linha 1 (P95 2); primeiras linhas 2444 [2395-2491] ms desde o início da navegação. PWA instalado: não medido.
+Web, Chrome 4x, rica, desenvolvimento (110 s de rolagem; o antes de A Rua é o PR3, `docs/verification/perf-row-mount.md`, porque o PR4 e o PR5 não mexem nela na web): `list:rua` 1604 / 11677 contra 1592 [1583-1601] / 11511 [11386-11836]; seis abas escondidas 82 renderizações e 141 a 161 ms (a linha de base mediu quatro abas em cerca de 3270 renderizações e 5,4 a 5,8 s numa janela de 60 s); renderizações por linha 1 (P95 2); primeiras linhas 2444 [2395-2491] ms desde o início da navegação. PWA instalado: não medido.
 
 #### Memória (soaks)
 
@@ -446,25 +446,25 @@ Leitura: o tip não é pior que 11cdb47f no controle sem instrumento, então os 
 
 #### O que cada PR trouxe
 
-- PR2 (seção 253, `perf/render-isolation`): linhas leem contextos estreitos do nó, 27 telas são `memo`, o pulso do `Skeleton` pausa nas abas escondidas, uma só assinatura de movimento reduzido. Efeito visto na ponta: abas escondidas de 124 para 80 renderizações (Android) e 124 para 86 (iOS), e de ~3270 (quatro abas) para 82 (seis abas) na web.
-- PR3 (seção 254, `perf/row-mount`): uma renderização por linha de publicação ao montar. Efeito: renderizações por linha montada de 2 para 1 (mediana) no Android, iOS e web.
-- PR4 (seção 255, `perf/list-rows`): linhas estáveis em Espiadinha, Diário, Busca, Conversa, Membro e Mensagem, e relógio de minuto pausado nas telas escondidas. Efeito: as listas escondidas de 21 a 23 renderizações para 4 a 6 na rolagem de A Rua do Android (medido contra o PR1).
-- PR5 (seção 256, `perf/native-boot`): barra do splash no driver nativo. Efeito esperado e medido: nenhum na partida, acima do ruído (Android `TotalTime` 653 ms, iOS `app-commit` 585 ms).
+- PR2 (`perf/render-isolation`, `docs/verification/perf-render-isolation.md`): linhas leem contextos estreitos do nó, 27 telas são `memo`, o pulso do `Skeleton` pausa nas abas escondidas, uma só assinatura de movimento reduzido. Efeito visto na ponta: abas escondidas de 124 para 80 renderizações (Android) e 124 para 86 (iOS), e de ~3270 (quatro abas) para 82 (seis abas) na web.
+- PR3 (`perf/row-mount`, `docs/verification/perf-row-mount.md`): uma renderização por linha de publicação ao montar. Efeito: renderizações por linha montada de 2 para 1 (mediana) no Android, iOS e web.
+- PR4 (`perf/list-rows`, `docs/verification/perf-list-rows.md`): linhas estáveis em Espiadinha, Diário, Busca, Conversa, Membro e Mensagem, e relógio de minuto pausado nas telas escondidas. Efeito: as listas escondidas de 21 a 23 renderizações para 4 a 6 na rolagem de A Rua do Android (medido contra o PR1).
+- PR5 (`perf/native-boot`, `docs/verification/perf-native-boot.md`): barra do splash no driver nativo. Efeito esperado e medido: nenhum na partida, acima do ruído (Android `TotalTime` 653 ms, iOS `app-commit` 585 ms).
 - PR1 (seção 252): o instrumento e a linha de base.
 
 #### Tarefas condicionais que não entraram
 
 - Pausa da consulta de prévias de momentos: o portão não pôde ser avaliado, porque a Vitrine não passa por `node.request`. Precisa de um nó vivo.
 - Varredura do cache de mídia fora do primeiro desenho: `sweep-media-cache` 1 a 2 ms no Android e 1 a 17 ms no iOS, abaixo do portão de 20 ms.
-- Inline requires: descartado. Com carga parecida o ganho ficou abaixo da regra de 10% (`TotalTime` empatado, primeiras linhas de 0 a 9%), e os registros de limpeza (snapshots de tela, fotos guardadas) e o preload do nó web passariam a carregar tarde (seção 256).
+- Inline requires: descartado. Com carga parecida o ganho ficou abaixo da regra de 10% (`TotalTime` empatado, primeiras linhas de 0 a 9%), e os registros de limpeza (snapshots de tela, fotos guardadas) e o preload do nó web passariam a carregar tarde (`docs/verification/perf-native-boot.md`).
 - Timer único dos players: dominam as WebViews e as renderizações que um player vivo provoca (+26% a +46% de ms de render no Android); mudar quando ou quantos players carregam é decisão do mantenedor e mudaria os Termos.
 - Telas sob demanda na web: avaliação do pacote 12% das primeiras linhas, abaixo do portão de 15%.
 - Nó do navegador em worker (nota de projeto): 12% a 14% das primeiras linhas, abaixo do portão de 20%.
 
 #### Próximos candidatos
 
-- Relógios de minuto que ainda rodam em A Rua atrás de uma tela empilhada (Conversa, Membro, Mensagem): 4 a 5 renderizações por minuto, cerca de 100 ms (seção 255; `ARua.js` não entrou no PR4).
-- Linhas de Conversa sem memo: `list:conversa` parada renderiza 8 vezes em 60 s (36 ms) e 2 vezes (31 ms) com o teclado aberto (seção 255); não se mediu se uma linha de mensagem renderiza ao digitar, então não há número do ganho.
+- Relógios de minuto que ainda rodam em A Rua atrás de uma tela empilhada (Conversa, Membro, Mensagem): 4 a 5 renderizações por minuto, cerca de 100 ms (`docs/verification/perf-list-rows.md`; `ARua.js` não entrou no PR4).
+- Linhas de Conversa sem memo: `list:conversa` parada renderiza 8 vezes em 60 s (36 ms) e 2 vezes (31 ms) com o teclado aberto (`docs/verification/perf-list-rows.md`); não se mediu se uma linha de mensagem renderiza ao digitar, então não há número do ganho.
 - Inline requires com um módulo de boot explícito, medido num build de release: a avaliação dos módulos (`js-entry` a `Running "main"`) é 588 [577-634] ms no debug, cerca de 13% de `Start proc` até as primeiras linhas (cerca de 5,5 s).
 - Duração da apresentação do splash: +1,8 s nas primeiras linhas e +5,8 s no `splash-end` contra 11cdb47f no Android. Decisão do mantenedor (#553 e #597).
 - As WebViews dos players: +26% a +46% de ms de render da lista no Android com players vivos. Decisão do mantenedor.

@@ -14,9 +14,8 @@
 // - expanded: shows the full caption without a clamp control (default false).
 // - preview: null | a stored link card (the post's `preview`), drawn by
 //   ./LinkCard from that data only, its thumbnail read like a post photo. A
-//   card whose URL carries an Audius music ref uses ./PostMusic (a sticker
-//   that plays a track or snippet by itself while seen, or ./MusicPlayerCard
-//   for a playlist or with the Ajustes switch off); other allowlisted music
+//   card whose URL carries an Audius music ref uses ./MusicPlayerCard, which
+//   asks nothing until a tap and never plays by itself; other allowlisted music
 //   links (embedOf) use ./MusicEmbedCard. A link only in the text never gets
 //   a player.
 // - replyPreviews: optional [{ key, name, text }], not the link card above.
@@ -65,6 +64,7 @@ import { Animated, Platform, Pressable, StyleSheet, Text, View, useWindowDimensi
 import { displayText } from '@varanda/rpc'
 import { doubleTapPlan, pendingOpen, tapKind } from '../doubleTap'
 import { compactTime, formatCount, relativeTime } from '../format'
+import { hitSlopFor } from '../hit'
 import { hasLink, textWithoutHrefs } from '../links'
 import { embedOf, sameMusicPage } from '../musicEmbed'
 import { musicRefOf } from '../music'
@@ -82,7 +82,7 @@ import { ClampControl, captionEstimate, useClamp } from './ClampText'
 import { Icon } from './Icon'
 import { LinkCard } from './LinkCard'
 import { MusicEmbedCard } from './MusicEmbedCard'
-import PostMusic from './PostMusic'
+import { MusicPlayerCard } from './MusicPlayerCard'
 import { MediaGrid } from './MediaGrid'
 import { tap } from './haptics'
 import { hasMention, MentionText } from './MentionText'
@@ -106,6 +106,17 @@ const FOLLOW_GUESS = 64
 // (44 - 20) / 2: the 44 pt targets centre on the 20 pt name line, so a post
 // with only ⋯ is no taller than its text.
 const HEAD_LIFT = 12
+// Room the head targets may reach, so a bigger hit area never sits on another
+// target: the row's top padding, the gap under a "republicou" line (split
+// between it and the line below), and the caption's top margin. Below the head
+// that margin is all the room there is: past it the slop would sit on the
+// caption's first line.
+const ROW_PAD_TOP = 16
+const REPOSTED_GAP = 4
+const CAPTION_GAP = 3
+const HEAD_ROOM_BELOW = CAPTION_GAP
+const REPOSTED_ROW = 18
+const REPOSTED_FOLLOW_ROW = 28
 
 const fn = (f) => (typeof f === 'function' ? f : undefined)
 
@@ -436,6 +447,23 @@ function PostRowView ({
   // On the reposter's line, never the author's head: that 'seguir' follows the
   // original's author, and under their name it would read as the wrong person.
   const followReposter = reposter ? otherPress(onFollowReposter) : undefined
+  // hitSlop is native only (web ignores it), and it grows the touch area, not
+  // the layout. Name, @handle and date sit side by side, so they grow up and
+  // down only: sideways each would take the neighbour's taps. The slop above
+  // the head reaches into the row's top padding (checked on Android and iOS).
+  const headAbove = reposter ? REPOSTED_GAP / 2 : ROW_PAD_TOP
+  const headRoom = { left: 0, right: 0, top: headAbove, bottom: HEAD_ROOM_BELOW }
+  const nameSlop = hitSlopFor({ height: stackHead ? headReserve.height : type.postName.lineHeight }, headRoom)
+  const metaSlop = hitSlopFor({ height: type.meta.lineHeight }, stackHead ? { ...headRoom, top: 0 } : headRoom)
+  const avatarSlop = hitSlopFor({ width: 40, height: 40 }, { top: headAbove })
+  const repostedRowHeight = followReposter ? REPOSTED_FOLLOW_ROW : REPOSTED_ROW
+  const repostedRoom = (height) => {
+    const slack = (repostedRowHeight - height) / 2
+    return { left: 0, right: 0, top: ROW_PAD_TOP + slack, bottom: REPOSTED_GAP / 2 + slack }
+  }
+  const repostedSlop = hitSlopFor({ height: REPOSTED_ROW }, repostedRoom(REPOSTED_ROW))
+  // "seguir" is about 40 pt wide, with 8 pt of gap to its left.
+  const repostedFollowSlop = { ...hitSlopFor({ height: REPOSTED_FOLLOW_ROW }, repostedRoom(REPOSTED_FOLLOW_ROW)), left: 2, right: 2 }
   const bar = fn(onReply) || fn(onRepost) || fn(onQuote) || fn(onLike) || href !== null
   // Composed label for the post body element: author, reply-to, text, date.
   // The avatar link already provides profile access, so name here is context.
@@ -480,7 +508,7 @@ function PostRowView ({
   // Outside the row's open area: a tap on the card opens the link, never the conversation.
   const previewNode = !hasMedia && preview && typeof preview === 'object'
     ? music !== null
-      ? <PostMusic card={preview} music={music} />
+      ? <MusicPlayerCard card={preview} music={music} />
       : embed !== null
         ? <MusicEmbedCard embed={embed} card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />
         : <LinkCard card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />
@@ -509,7 +537,7 @@ function PostRowView ({
               accessibilityLabel={reposterName + ' republicou'}
               disabled={!openReposter}
               onPress={openReposter}
-              hitSlop={4}
+              hitSlop={repostedSlop}
               style={({ pressed }) => [styles.repostedLink, pressed && openReposter && styles.pressed]}
             >
               <Icon name='republicar' size={14} color={colors.soft} />
@@ -523,7 +551,7 @@ function PostRowView ({
                   accessibilityState={{ disabled: !!followPending }}
                   disabled={!!followPending}
                   onPress={followReposter}
-                  hitSlop={6}
+                  hitSlop={repostedFollowSlop}
                   style={({ pressed }) => [styles.repostedFollow, followPending && styles.disabled, pressed && styles.pressed]}
                 >
                   <Text style={styles.repostedFollowText}>seguir</Text>
@@ -539,6 +567,7 @@ function PostRowView ({
           accessibilityLabel={'ver o perfil de ' + title}
           disabled={!openAuthor}
           onPress={openAuthor}
+          hitSlop={avatarSlop}
           style={({ pressed }) => pressed && openAuthor && styles.pressed}
         >
           <Avatar name={who.avatarName} publicKey={author} size={40} picture={avatar} persist={persistMedia !== false} />
@@ -568,6 +597,7 @@ function PostRowView ({
                   onPress={openAuthor}
                   onLongPress={bodyLongPress}
                   delayLongPress={350}
+                  hitSlop={nameSlop}
                   style={({ pressed }) => [styles.nameBox, handle && styles.nameBeside, stackHead && { width: '100%', paddingRight: headPad, minHeight: headReserve.height, justifyContent: 'center' }, pressed && openAuthor && styles.pressed]}
                 >
                   <Text style={styles.name} numberOfLines={1}>{title}</Text>
@@ -580,7 +610,7 @@ function PostRowView ({
                       onPress={openTap}
                       onLongPress={bodyLongPress}
                       delayLongPress={350}
-                      hitSlop={4}
+                      hitSlop={metaSlop}
                       style={({ pressed }) => [styles.metaBox, pressed && open && styles.pressed]}
                     >
                       <Text style={styles.handle} numberOfLines={1}>{handle}</Text>
@@ -595,7 +625,7 @@ function PostRowView ({
                   onLongPress={bodyLongPress}
                   delayLongPress={350}
                   {...a11yOpen}
-                  hitSlop={4}
+                  hitSlop={metaSlop}
                   style={({ pressed }) => [styles.timeBox, pressed && open && styles.pressed]}
                 >
                   <Text style={styles.time} numberOfLines={1}>{(handle ? '\u00a0· ' : stackHead ? '' : '· ') + time}</Text>
@@ -829,14 +859,14 @@ export const PostRow = memo(BlockGate)
 
 const makeStyles = (colors) => StyleSheet.create({
   row: {
-    paddingTop: 16,
+    paddingTop: ROW_PAD_TOP,
     paddingHorizontal: 16,
     paddingBottom: 6,
     borderBottomWidth: 1,
     borderBottomColor: colors.line,
     backgroundColor: colors.bg
   },
-  reposted: { flexDirection: 'row', alignItems: 'center', gap: 8, marginLeft: 26, marginBottom: 4, maxWidth: '100%' },
+  reposted: { flexDirection: 'row', alignItems: 'center', gap: 8, marginLeft: 26, marginBottom: REPOSTED_GAP, maxWidth: '100%' },
   repostedLink: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 1 },
   repostedText: { ...type.replyMark, color: colors.soft, fontWeight: '600', flexShrink: 1 },
   repostedFollow: { flexShrink: 0, minHeight: 28, justifyContent: 'center', paddingHorizontal: 2 },
@@ -884,7 +914,7 @@ const makeStyles = (colors) => StyleSheet.create({
   previews: { marginTop: 8, minHeight: layout.hit, justifyContent: 'center' },
   previewsLabel: { ...type.replyMark, color: colors.soft, fontWeight: '700' },
   previewLine: { ...type.replyMark, color: colors.ink },
-  text: { ...type.postText, color: colors.ink, marginTop: 3 },
+  text: { ...type.postText, color: colors.ink, marginTop: CAPTION_GAP },
   bar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 0, marginBottom: -4, marginLeft: -8, maxWidth: 360 },
   action: { flexDirection: 'row', alignItems: 'center', gap: 5, minHeight: layout.hit, minWidth: 44, paddingHorizontal: 8 },
   // A split pair is as wide as the combined button (8 + icon + gap + digits +

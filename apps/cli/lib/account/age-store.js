@@ -12,7 +12,8 @@
 // nobody is verified yet) and a readOnly store never writes. Validation is
 // total: a file this module would not have written is never rewritten, and
 // every method then throws { code: 'indisponivel' } until an operator
-// repairs it. Bad argument shapes throw TypeError.
+// repairs it; heal() (every heartbeat of the service) reads it again, so the
+// repair is picked up without a restart. fail() is final. Bad argument shapes throw TypeError.
 //
 // Every write runs in one in-process queue and first re-reads the file (the
 // service lock can go stale and writeJsonAtomic renames unconditionally), so
@@ -41,6 +42,10 @@ const VERSION = 1
 const BANDS = Object.freeze(['16-17', '18+'])
 const METHODS = Object.freeze(['didit'])
 const ENTRY_KEYS = ['band', 'method', 'checkedAt']
+// A band whose key has not linked an account this long after checkedAt is
+// forgotten (staleUnlinked): the person gave up, or the cap refused the name
+// step, which is unsigned and so cannot erase it. Owner decision, 2026-11-15.
+const AGE_UNLINKED_TTL_MS = 30 * 24 * 3600 * 1000
 
 function fail (code) {
   const err = new Error(code)
@@ -133,11 +138,29 @@ function merge (mem, disk) {
   return out
 }
 
+// The members whose record is older than `ttlMs` and that `held` does not
+// vouch for (a linked member, a page, an account being deleted, a link in
+// flight). Pure: `entries` is [{ member, checkedAt }], `now` a number of ms.
+function staleUnlinked (entries, { held, now, ttlMs = AGE_UNLINKED_TTL_MS }) {
+  if (typeof held !== 'function') throw new TypeError('held must be a function')
+  if (!Number.isFinite(now)) throw new TypeError('now must be a number')
+  const out = []
+  for (const { member, checkedAt } of entries) {
+    if (now - Date.parse(checkedAt) <= ttlMs) continue
+    if (!held(member)) out.push(member)
+  }
+  return out
+}
+
 function openAgeStore (dataDir, { now = Date.now, guard = () => true, readOnly = false } = {}) {
   refuseSymlinkDir(dataDir)
   const file = path.join(dataDir, FILE)
   let state = emptyState()
+  // `failed`: the file could not be read as valid; heal() looks again, so an
+  // operator's repair is picked up without a restart. `halted`: fail(), the
+  // service lost its lock; for good.
   let failed = false
+  let halted = false
   let dirty = false
   try {
     state = readState(file) || emptyState()
@@ -153,7 +176,7 @@ function openAgeStore (dataDir, { now = Date.now, guard = () => true, readOnly =
   }
 
   function usable () {
-    if (failed) throw fail('indisponivel')
+    if (failed || halted) throw fail('indisponivel')
   }
 
   // `state` changes only after the write returned and guard() still holds.
@@ -242,11 +265,12 @@ function openAgeStore (dataDir, { now = Date.now, guard = () => true, readOnly =
     })
   }
 
-  // True when it wrote. Never throws, never writes a file it would not have
+  // True when it wrote or when the file read as valid again after a failure
+  // (startHeal logs 'reparado'). Never throws, never writes a file it would not have
   // written.
   function heal () {
     return enqueue(() => {
-      if (failed || readOnly || !guard()) return false
+      if (halted || readOnly || !guard()) return false
       let disk
       try {
         disk = readState(file)
@@ -254,13 +278,18 @@ function openAgeStore (dataDir, { now = Date.now, guard = () => true, readOnly =
         failed = true
         return false
       }
+      // A file that reads as valid again clears `failed`; the merge below
+      // keeps every durable entry this holder knew, and never rewrites a file
+      // this module would not have written (the read above refused it).
+      const recovered = failed
+      failed = false
       const next = merge(state, disk)
       if (dirty || canonical(next) !== canonical(disk || emptyState())) {
         persist(next)
         return true
       }
       state = next
-      return false
+      return recovered
     }).catch(() => false)
   }
 
@@ -285,20 +314,29 @@ function openAgeStore (dataDir, { now = Date.now, guard = () => true, readOnly =
     return min
   }
 
+  // Every record, for the sweep of keys that never linked.
+  function entries () {
+    usable()
+    return Object.entries(state.members).map(([member, e]) => ({ member, ...copyEntry(e) }))
+  }
+
   return {
     record,
     forget,
+    entries,
     get,
     verified,
     earliest,
     heal,
-    fail () { failed = true },
-    available () { return !failed }
+    fail () { halted = true },
+    available () { return !failed && !halted }
   }
 }
 
 module.exports = {
   openAgeStore,
+  staleUnlinked,
+  AGE_UNLINKED_TTL_MS,
   FILE,
   BANDS,
   METHODS

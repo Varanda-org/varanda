@@ -124,6 +124,7 @@ test('listView branches, first match wins', async (t) => {
   const base = { hosted: true, online: true, phase: 'done', rows: [], next: null, unconfirmed: 0, kind: 'likes', total: 0 }
   const view = (o) => listView({ ...base, ...o }).view
   t.is(view({ hosted: false }), 'web-only')
+  t.alike(listView({ ...base, hosted: false }), { view: 'web-only', title: 'Curtidas indisponíveis', body: 'Quem curtiu e quem republicou aparece no site da associação ou no app ligado à instalação, com internet.' })
   t.is(view({ unsupported: true, rows: [{ author: B }] }), 'unavailable')
   t.alike(listView({ ...base, unsupported: true, rows: [{ author: B }] }), { view: 'unavailable', title: 'Lista indisponível', body: 'Quem curtiu e quem republicou não está disponível nesta conexão.' })
   t.alike(listView({ ...base, online: false }), { view: 'offline', title: 'Sem conexão', body: 'A lista precisa de internet.', action: 'tentar de novo' })
