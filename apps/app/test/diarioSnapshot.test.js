@@ -267,7 +267,7 @@ test('stored rows under the block list: blocked reposts go, a failed list keeps 
   t.alike([...shown(seededRows(), { keys: new Set(), loadState: 'pending' }, OWN, none)], [9, 8, 7, 6, 5], 'nothing known: all')
   t.alike([...shown(seededRows(), { keys: new Set([FOLLOW]), loadState: 'ok' }, OWN, none)], [8, 7, 6, 5], 'a blocked author\'s repost goes')
   t.alike([...shown(seededRows(), { keys: new Set(), loadState: 'failed' }, OWN, none)], [6, 5], 'failed list: only own rows naming no one else')
-  t.ok(CODE.includes("import { CountsNote, RepostPlaceholder, SocialToast, liveBinding, refOf, snapshotRowsShown, socialRowProps, useSocial } from './ARua'"), 'A Rua\'s rule, reused')
+  t.ok(CODE.includes("import { CountsNote, RepostPlaceholder, SocialToast, liveBinding, refOf, snapshotRowsShown, socialRowProps, useRowPropsCache, useSocial } from './ARua'"), 'A Rua\'s rule, reused')
 })
 
 test('a row deleted in this session is never written back', (t) => {
@@ -279,4 +279,33 @@ test('a row deleted in this session is never written back', (t) => {
   t.ok(/if \(cur\.seeded \|\| holdsDeleted\(cur\.rows, deletedSeqsRef\.current\)\) \{\s+clearScreenSnapshot\('diario'\)\s+return/.test(writeSnapshot), 'cleared instead of saved')
   t.ok(/if \(row !== cur\.rows\[i\]\) deletedSeqsRef\.current\.add\(row\.seq\)/.test(screen), 'the rows the deletion changed are kept')
   t.ok(/if \(Number\.isSafeInteger\(seq\)\) deletedSeqsRef\.current\.add\(seq\)/.test(screen), 'and the own post seq of the ref')
+})
+
+test('Diario rows come from the props cache through one stable renderItem', (t) => {
+  const src = withoutComments(DIARIO)
+  t.ok(/useRowPropsCache\(posts, rowKeyOf, \{ h: handlers, social \}\)/.test(src), 'row props cache')
+  t.ok(/const renderItem = useCallback\(\(info\) => renderRef\.current\(info\), \[\]\)/.test(src), 'renderItem via ref, empty deps')
+  t.ok(/renderRef\.current = \(/.test(src), 'ref holds the newest render')
+  t.is((src.match(/socialRowProps\(\{[^}]*cache: rowCache, rowKey/g) || []).length, 2, 'both rows use the cache')
+  t.absent(/const renderItem = \(\{ item: row \}\)/.test(src), 'no inline arrow renderItem')
+  t.ok(/ownPostOf\(info\.publicKey, row\.seq, record\)/.test(src), 'own post object kept per record')
+})
+
+test('Diario own posts: one post object per record, so the row props are reused', async (t) => {
+  const { cachedRow } = await import('../src/namesCache.js')
+  const code = withoutComments(DIARIO)
+  const body = (name) => fnText(code, name)
+  /* eslint-disable no-new-func */
+  const postOf = new Function(body('postOf').replace('function postOf', 'return function postOf'))()
+  const ownPostOf = new Function('postOf', 'ownPosts', body('ownPostOf').replace('function ownPostOf', 'return function ownPostOf'))(postOf, new WeakMap())
+  /* eslint-enable no-new-func */
+  const record = { type: 'post', at: 1, text: 'oi' }
+  const a = ownPostOf(OWN, 3, record)
+  t.is(ownPostOf(OWN, 3, record), a, 'same record, same post')
+  t.not(ownPostOf(OWN, 4, record), a, 'another seq is another post')
+  const cache = new Map()
+  const build = (live) => ({ live })
+  const p1 = cachedRow(cache, 'e3', { post: ownPostOf(OWN, 3, record) }, {}, build)
+  const p2 = cachedRow(cache, 'e3', { post: ownPostOf(OWN, 3, record) }, {}, build)
+  t.is(p1, p2, 'two renders give the same props object')
 })

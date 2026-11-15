@@ -47,7 +47,7 @@
 // offer state is read from the thread every time, nothing else is stored,
 // and an uncertain offer, aceite or recusa is resent only by "Tentar de novo".
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AccessibilityInfo, Keyboard, KeyboardAvoidingView, StyleSheet, Text, View } from 'react-native'
 import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
@@ -72,7 +72,7 @@ import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
 import { listingLinkOf } from '../feiraChat'
 import { parsePriceText, quickReplies } from '../feira'
 import { CONSENT_NOTE, acceptCard, acceptText, buttonState, centsLabel, consentParams, declineCard, declineText, offerCard, offerOfMessage, offerState, offerTarget, proposalText, validCents } from '../feiraOffer'
-import { mergeMessages, newestOf, pageDmClient, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey, quoteTargets, dmReactions, reactDebounce, dmReactionGate, dmReactable, withFreshReactions } from '../dm-screen'
+import { mergeMessages, newestOf, pageDmClient, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey, quoteTargets, dmReactions, reactDebounce, dmReactionGate, dmReactable, withFreshReactions, peerReadDelay, olderPagesToReread } from '../dm-screen'
 import { pageReadKind } from '../pageNotice'
 import { applyOptimistic, reactionChips, toggleOf } from '../reactions'
 import { hasRich, parseRich, plainOf } from '../richText'
@@ -88,7 +88,7 @@ import { cardForSend, draftView, freezeSnapshot, linkDraftIdle, linkDraftStep, w
 import { previewTarget } from '../preview'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { chatMediaRefs, followAutocorrect, retryChatSend, runChatSend, stagedOf } from '../chatSend'
-import { Btn, ErrorText, Field, Soft, errorText, useAction, useNow } from '../ui'
+import { Btn, ErrorText, Field, Soft, errorText, useAction, useVisibleNow } from '../ui'
 import { useStyles } from '../ui/ThemeProvider'
 import { Bubble } from '../ui/Bubble'
 import { SwipeReply } from '../ui/SwipeReply'
@@ -183,7 +183,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const insets = useSafeAreaInsets()
   const origin = installationOrigin() || globalThis.location?.origin || ''
   const node = useNode()
-  const now = useNow(60000)
+  const now = useVisibleNow(60000)
   const { request } = node
   const hosted = node.hosted === true
   const acting = useActing()
@@ -221,19 +221,24 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const quoteHandle = peerWho.subtitle || undefined
 
   const [peerRead, setPeerRead] = useState(null)
-  const peerReadContext = useMemo(() => ({ live: true, pending: false, trailing: false, answer: null }), [request, peer])
+  const [peerRetry, setPeerRetry] = useState(0)
+  const peerReadContext = useMemo(() => ({ live: true, pending: false, trailing: false, answer: null, failures: 0, retry: null }), [request, peer])
   useEffect(() => {
     peerReadContext.live = true
-    return () => { peerReadContext.live = false }
+    return () => {
+      peerReadContext.live = false
+      clearTimeout(peerReadContext.retry)
+    }
   }, [peerReadContext])
   const readPeer = useCallback(async () => {
     if (!hosted || !unlocked || !node.online || pageKey !== null) return
     if (peerReadContext.pending) { peerReadContext.trailing = true; return }
     peerReadContext.pending = true
+    let answered = false
     try {
       for (let attempt = 0; attempt < 2; attempt++) {
         peerReadContext.trailing = false
-        let answered = false
+        answered = false
         try {
           const read = await request('page.read', { key: peer })
           answered = read?.page === peer
@@ -248,15 +253,26 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       peerReadContext.pending = false
       peerReadContext.trailing = false
     }
+    // Unanswered, the reactions stay off: the effect below reads again after
+    // a growing wait, with the conditions of that moment (online, unlocked).
+    clearTimeout(peerReadContext.retry)
+    peerReadContext.retry = null
+    if (answered) peerReadContext.failures = 0
+    else if (peerReadContext.live && peerReadContext.answer === null) {
+      peerReadContext.retry = setTimeout(() => {
+        peerReadContext.retry = null
+        if (peerReadContext.live) setPeerRetry((n) => n + 1)
+      }, peerReadDelay(peerReadContext.failures++))
+    }
   }, [request, peer, peerReadContext, hosted, unlocked, node.online, pageKey])
   useEffect(() => {
     if (isTop && node.visible !== false && peerReadContext.answer === null) readPeer()
-  }, [isTop, node.visible, peerReadContext, readPeer])
+  }, [isTop, node.visible, peerReadContext, readPeer, peerRetry])
 
   const [reactionOverrides, setReactionOverrides] = useState(new Map())
   const [reactionError, setReactionError] = useState('')
   const [reactionPicker, setReactionPicker] = useState(null)
-  const reactionContext = useMemo(() => ({ live: true, sending: new Set(), unsure: new Map(), settled: new Map(), bases: new Map(), overrides: new Map(), pages: new Map(), read: 0, debounce: reactDebounce() }), [peer, ownKey, pageKey, request])
+  const reactionContext = useMemo(() => ({ live: true, sending: new Set(), unsure: new Map(), removed: new Map(), settled: new Map(), bases: new Map(), overrides: new Map(), pages: new Map(), read: 0, debounce: reactDebounce() }), [peer, ownKey, pageKey, request])
   const reactionContextRef = useRef(reactionContext)
   reactionContextRef.current = reactionContext
   useEffect(() => {
@@ -385,6 +401,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       const key = messageKey(item)
       if (context.sending.has(key) || context.debounce.has(key) || started <= (context.settled.get(key) || 0)) continue
       context.unsure.delete(key)
+      context.removed.delete(key)
       context.overrides.delete(key)
     }
     setReactionOverrides(new Map(context.overrides))
@@ -411,9 +428,11 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       setBlocked(r.blocked === true)
       olderErr.current = false
       setLoadError('')
-      // Only reactions change on held older rows; the cursor and scroll order stay.
-      for (const [before, keys] of context.pages) {
-        if (![...keys].some((key) => context.overrides.has(key) || context.debounce.has(key) || context.unsure.has(key))) continue
+      // Only reactions change on held older rows; the cursor and scroll order
+      // stay. The newest held pages are read again, so the other person's
+      // reaction on an older message shows without reopening the conversation.
+      const pending = (key) => context.overrides.has(key) || context.debounce.has(key) || context.unsure.has(key)
+      for (const [before, keys] of olderPagesToReread(context.pages, pending)) {
         const started = ++context.read
         try {
           const older = await dm('dm.thread', { peer, before })
@@ -434,6 +453,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       for (const key of new Set([...context.unsure.keys(), ...context.overrides.keys()])) {
         if (context.sending.has(key) || context.debounce.has(key) || started <= (context.settled.get(key) || 0) || covered.has(key) || failed.has(key)) continue
         context.unsure.delete(key)
+        context.removed.delete(key)
         context.overrides.delete(key)
       }
       setReactionOverrides(new Map(context.overrides))
@@ -493,6 +513,10 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     }
     const target = { from: item.from, id: item.id }
     context.unsure.delete(key)
+    // Any answer settles the last unconfirmed removal: confirmed, failed, or
+    // unconfirmed again (then set anew below).
+    const removed = context.removed.get(key)
+    context.removed.delete(key)
     context.sending.add(key)
     paintReactions(context)
     try {
@@ -502,6 +526,9 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       if (!context.live || context !== reactionContextRef.current) return
       if (unsureSend(err)) {
         context.unsure.set(key, emoji)
+        // The emoji an unconfirmed removal took away: tapping it again is the
+        // retry of that removal (docs/rpc.md 5.119), not a new reaction.
+        if (emoji === '') context.removed.set(key, context.bases.get(key)?.find((r) => r.mine)?.emoji || removed || '')
       } else {
         cancelReaction(context, key)
         setReactionError(errorText(err))
@@ -522,8 +549,9 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     const reactions = context.overrides.get(key) || dmReactions(item.reactions)
     if (!context.bases.has(key)) context.bases.set(key, reactions)
     const starting = context.bases.get(key).find((r) => r.mine)?.emoji || ''
-    const retry = context.unsure.has(key) && context.unsure.get(key) === picked
-    const emoji = retry ? picked : toggleOf(reactions, picked)
+    const unsure = context.unsure.get(key)
+    const retry = context.unsure.has(key) && (unsure === picked || (unsure === '' && picked !== '' && picked === context.removed.get(key)))
+    const emoji = retry ? unsure : toggleOf(reactions, picked)
     context.overrides.set(key, applyOptimistic(reactions, emoji))
     setReactionError('')
     paintReactions(context)
@@ -1129,7 +1157,9 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   }
 
   const cardOf = new Map(raw.map((m) => [messageKey(m), m.card]))
-  const rows = withDayMarks(gestureRows, now)
+  // One array while the thread and the day are unchanged: typing in the
+  // composer re-renders this screen and hands the list the same data.
+  const rows = useMemo(() => withDayMarks(gestureRows, now), [gestureRows, now])
   const rowsRef = useRef(rows)
   rowsRef.current = rows
   for (const row of rows) {
@@ -1257,6 +1287,61 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const fwdOf = new Map(raw.map((m) => [messageKey(m), m.fwd]))
   // Forwarding writes as the person, never as a page.
   const canForward = pageKey === null && unlocked
+
+  const rowLive = useRef(null)
+  rowLive.current = { reactionsFor, quoteAuthor, quoteMine, quoteMissing, quoteTarget, offerOfRow, scrollToKey, setReplyTo, setForwarding, toggleReaction, openReactionPicker, mentionTap, onReport, onOpenInvite, onOpenListing, onAvaliar, setConfirming, declineOffer, offerAct }
+  const rowCalls = useMemo(() => liveRowCalls(rowLive), [])
+  const invitable = typeof onOpenInvite === 'function'
+  // Which optional handlers exist adds or removes buttons on the rows.
+  const offered = [onReport, onOpenListing, onAvaliar, mentionTap].reduce((out, fn) => out + (typeof fn === 'function' ? '1' : '0'), '')
+  // What renderItem reads besides `rows`: a change re-renders the cells, and
+  // the rows whose props did not change skip their render.
+  const extra = useMemo(() => ({ now, nameText, folder, ownKey, reactionOverrides, reactionsDisabled, reactionsHidden, flashKey, pageKey, peer, quoteName, quoteHandle, canForward, canAnswer, origin, invitable, offered, online: node.online, styles, sending: reactionContext.sending }), [now, nameText, folder, ownKey, reactionOverrides, reactionsDisabled, reactionsHidden, flashKey, pageKey, peer, quoteName, quoteHandle, canForward, canAnswer, origin, invitable, offered, node.online, styles, reactionContext.sending])
+  // One renderItem for the list's life. Each render of this screen (each
+  // keystroke in the composer) still runs it for every mounted cell, since
+  // the list is not strictMode and gets an inline keyExtractor, header and
+  // footer; only MessageRow skips its render while its props are unchanged.
+  const renderRef = useRef(null)
+  const renderItem = useCallback((info) => renderRef.current(info), [])
+  renderRef.current = ({ item, index }) => {
+    const offer = item.deleted ? null : offerOfRow(index)
+    return (
+      <MessageRow
+        item={item}
+        base={gestureRows[index]}
+        index={index}
+        calls={rowCalls}
+        styles={styles}
+        shape={bubbleShape(rows, index)}
+        flash={flashKey === item.key}
+        reactions={reactionOverrides.get(item.key) || item.reactions || null}
+        chipsReady={!reactionsHidden && reactionRowReady(reactionViewRef.current.rawById.get(item.key))}
+        reactionOff={!canReact(item.key)}
+        offerKey={offer === null ? null : `${offer.listing.author}:${offer.listing.seq}:${offer.offer.id}:${offer.answer}:${offer.rate}`}
+        quoteKey={quoteTarget(item)?.key}
+        quoteGone={quoteMissing(item)}
+        quoteSelf={quoteMine(item)}
+        quoteBy={quoteAuthor(item)}
+        card={cardOf.get(item.key)}
+        media={mediaOf.get(item.key)}
+        fwd={fwdOf.get(item.key)}
+        dayMark={item.dayMark}
+        origin={origin}
+        invitable={invitable}
+        pageKey={pageKey}
+        folder={folder}
+        ownKey={ownKey}
+        peer={peer}
+        quoteName={quoteName}
+        quoteHandle={quoteHandle}
+        canForward={canForward}
+        canAnswer={canAnswer}
+        reportable={typeof onReport === 'function'}
+        listable={typeof onOpenListing === 'function'}
+        canMention={mentionTap !== undefined}
+      />
+    )
+  }
 
   // Footers without a field sit on the gesture bar: keep their buttons above it.
   const footer = [styles.composer, { paddingBottom: Math.max(8, insets.bottom) }]
@@ -1403,6 +1488,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         onCancelAttachments={mediaHold === null && !(mediaSend && mediaSend.phase === 'sending') ? cancelMedia : undefined}
         progress={sendingMedia ? mediaSend.progress : null}
         reply={replyTo ? { name: replyTo.name, handle: replyTo.mine ? undefined : quoteHandle, text: replyTo.text, mine: replyTo.mine, senderKey: replyTo.mine ? undefined : peer } : null}
+        onOpenReply={replyTo ? () => scrollToKey(rows.find((row) => row.id === replyTo.id)?.key) : undefined}
         onCancelReply={() => setReplyTo(null)}
         notice={notice}
         ownKey={ownKey}
@@ -1435,85 +1521,12 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       <OfflineNote />
       <EmbedBandBottom.Provider value={composer ? band : null}>
         <RefreshableList
+          perfId='mensagem'
           data={rows}
           listRef={listRef}
           keyExtractor={(row) => row.key}
-          renderItem={({ item, index }) => {
-            const mine = item.mine === true
-            const chips = !reactionsHidden && reactionRowReady(reactionViewRef.current.rawById.get(item.key)) ? reactionChips(reactionsFor(item)) : []
-            const reactionOff = !canReact(item.key)
-            const link = item.inviteLink || null
-            const listing = item.listingLink
-            const offerRow = item.deleted ? null : offerOfRow(index)
-            const actions = []
-            const refs = item.deleted ? [] : chatMediaRefs('dm', { from: item.from || (mine ? ownKey : null), id: item.id, media: mediaOf.get(item.key) })
-            if (!item.deleted) {
-              actions.push({ icon: 'responder', label: 'Responder', onPress: () => setReplyTo({ id: item.id, text: item.text, mine, name: mine ? OWN_LABEL : quoteName }) })
-              actions.push({ icon: 'copiar', label: 'Copiar', onPress: () => { copyText(shareNav(), displayText(item.rawText, { multiline: true })) } })
-            }
-            // A message with no text whose media expired has nothing to forward.
-            const forwardSource = !item.deleted && canForward ? dmForwardSource(item.rawText, mediaOf.get(item.key)) : null
-            if (forwardSource !== null) {
-              actions.push({ icon: 'encaminhar', label: 'Encaminhar', onPress: () => setForwarding({ source: forwardSource, refs }) })
-            }
-            if (!mine && !item.deleted && typeof onReport === 'function') {
-              actions.push({ icon: 'bandeira', label: LABELS.report, danger: true, onPress: () => onReport({ dm: true, id: item.id, text: item.rawText, author: item.from, ...(Array.isArray(mediaOf.get(item.key)) ? { media: mediaOf.get(item.key) } : {}) }) })
-            }
-            // Beside Abrir convite the bubble draws plain text and parses nothing,
-            // so its spoilers and its link card are settled here.
-            const stored = !item.deleted && cardOf.get(item.key) ? cardOf.get(item.key) : null
-            const quoted = item.replyTo != null
-              ? { name: quoteAuthor(item), handle: quoteMine(item) ? undefined : quoteHandle, text: item.replyTo, mine: quoteMine(item), senderKey: quoteMine(item) ? undefined : peer, onPress: quoteMissing(item) ? undefined : () => scrollToKey(quoteTarget(item)?.key) }
-              : null
-            const reply = actions.find((action) => action.label === 'Responder')
-            return (
-              <SwipeReply disabled={!reply} onReply={reply?.onPress}>
-                <View style={flashKey === item.key ? styles.quoteFlash : undefined}>
-                  <Bubble
-                    moment={pageKey === null && !item.deleted && isMomentReaction(item) ? { author: momentAuthor(item, { peer, ownKey }), seq: item.moment, identity: ownKey, folder } : undefined}
-                    media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} deferred={folder === 'request'} /> : null}
-                    item={{ key: item.key, text: link ? plainOf(item.rawText, { full: true }) : item.text, rawText: link ? undefined : item.rawText, at: item.at, deleted: item.deleted, dayMark: item.dayMark, card: link && stored ? cardBesideSpoilers(parseRich(item.rawText), stored) : stored }}
-                    mine={mine}
-                    cardThumb={item.deleted || pageKey !== null ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey }}
-                    plainCard={folder === 'request'}
-                    shape={bubbleShape(rows, index)}
-                    forwarded={!item.deleted && fwdOf.get(item.key) === 1}
-                    quote={quoted}
-                    actions={actions}
-                    actionsHeader={!reactionOff
-                      ? ({ closeThen }) => <QuickReactions mine={reactionsFor(item).find((r) => r.mine)?.emoji} onPick={(emoji) => closeThen(() => toggleReaction(item.key, emoji))} onMore={() => closeThen(() => openReactionPicker(item.key))} />
-                      : null}
-                    onOpenMention={mentionTap}
-                    below={chips.length > 0 || link !== null || offerRow !== null || (listing !== null && typeof onOpenListing === 'function')
-                      ? (
-                        <>
-                          {chips.length > 0 ? <ReactionChips reactions={reactionsFor(item)} disabled={reactionOff} onToggle={(emoji) => toggleReaction(item.key, emoji)} labelOf={(chip) => chip.label + (chip.mine ? (chip.count > 1 ? ', e da outra pessoa' : '') : ', da outra pessoa')} overlap /> : null}
-                          {link !== null || (listing !== null && typeof onOpenListing === 'function') || (offerRow !== null && ((offerRow.answer && canAnswer) || offerRow.rate))
-                            ? (
-                              <View style={styles.inline}>
-                                {link !== null ? <Pill label={OPEN_INVITE} accessibilityLabel={OPEN_INVITE + (link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade')} onPress={() => onOpenInvite(link)} /> : null}
-                                {listing !== null && typeof onOpenListing === 'function' ? <Pill label='Ver anúncio' onPress={() => onOpenListing(listing.author, listing.seq)} /> : null}
-                                {offerRow !== null && offerRow.answer && canAnswer
-                                  ? <Pill label='Aceitar' filled onPress={() => { offerAct.clearError(); setConfirming({ offer: offerRow.offer, listing: offerRow.listing }) }} />
-                                  : null}
-                                {offerRow !== null && offerRow.answer && canAnswer
-                                  ? <Pill label='Recusar' onPress={() => declineOffer({ offer: offerRow.offer, listing: offerRow.listing })} />
-                                  : null}
-                                {offerRow !== null && offerRow.rate
-                                  ? <Pill label='Avaliar' onPress={() => onAvaliar({ author: offerRow.listing.author, seq: offerRow.listing.seq, offer: offerRow.offer.id })} />
-                                  : null}
-                              </View>
-                              )
-                            : null}
-                        </>
-                        )
-                      : null}
-                  />
-                </View>
-              </SwipeReply>
-            )
-          }}
-          extraData={{ now, nameText, folder, ownKey, reactionOverrides, reactionsDisabled, flashKey }}
+          renderItem={renderItem}
+          extraData={extra}
           ListFooterComponent={reactionError || reactionContext.unsure.size > 0 ? <View style={styles.pad}><ErrorText>{reactionError}</ErrorText>{reactionContext.unsure.size > 0 ? <Soft>Não deu para confirmar a reação.</Soft> : null}</View> : null}
           ListHeaderComponent={next ? <View style={styles.pad}><Pill label='mensagens anteriores' onPress={loadOlder} pending={loadingMore} /></View> : null}
           ListEmptyComponent={
@@ -1555,7 +1568,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       <Sheet open={isTop && offerOpen && offerListing !== null && folder === 'inbox' && blockNote === null} onClose={() => { if (!offerAct.pending) setOfferOpen(false) }} title='Fazer oferta'>
         <View style={styles.sheet}>
           <Soft>{offerListing !== null && offerListing.title !== '' ? displayText(offerListing.title) : 'Anúncio na Feira'}</Soft>
-          <Field label='Valor (R$)' value={offerValue} onChangeText={(t) => { setOfferValue(t); setOfferNote('') }} placeholder='80,00' maxLength={16} editable={!offerAct.pending} />
+          <Field label='Valor (R$)' value={offerValue} onChangeText={(t) => { setOfferValue(t); setOfferNote('') }} placeholder='0,00' maxLength={16} editable={!offerAct.pending} />
           <Soft>A oferta vai como mensagem nesta conversa. Não é um pagamento: vocês combinam o resto por aqui.</Soft>
           <ErrorText>{offerNote || offerAct.error}</ErrorText>
           <Btn block label='Enviar oferta' onPress={() => sendOffer(offerListing)} pending={offerAct.pending} disabled={node.online === false || offerValue.trim() === ''} />
@@ -1598,6 +1611,105 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     </KeyboardAvoidingView>
   )
 }
+
+// Stands in for the per-render handlers and helpers of the thread: each call
+// reads the newest one, so a memoized row never runs a handler, or reads a
+// quote or offer helper, of the render that last drew it.
+const ROW_CALLS = ['reactionsFor', 'quoteAuthor', 'quoteMine', 'quoteMissing', 'quoteTarget', 'offerOfRow', 'scrollToKey', 'setReplyTo', 'setForwarding', 'toggleReaction', 'openReactionPicker', 'mentionTap', 'onReport', 'onOpenInvite', 'onOpenListing', 'onAvaliar', 'setConfirming', 'declineOffer']
+export function liveRowCalls (live) {
+  const calls = Object.fromEntries(ROW_CALLS.map((name) => [name, (...args) => live.current[name](...args)]))
+  calls.offerAct = { clearError: () => live.current.offerAct.clearError() }
+  return calls
+}
+
+// Every prop but `item` is compared: `item` is a fresh object each render,
+// made only from `base` (the memoized thread row), dayMark, card, origin and
+// invitable, which are compared instead. reactions, offerKey and the quote
+// props are not read by the row (it asks `calls`); they redraw it when what
+// those calls answer changed.
+export function sameMessageRow (prev, next) {
+  const keys = Object.keys(next)
+  if (keys.length !== Object.keys(prev).length) return false
+  for (const k of keys) if (k !== 'item' && !Object.is(prev[k], next[k])) return false
+  return true
+}
+
+const MessageRow = memo(function MessageRow ({ item, index, calls, styles, shape, flash, chipsReady, reactionOff, offerKey, card, media, fwd, pageKey, folder, ownKey, peer, quoteName, quoteHandle, canForward, canAnswer, reportable, listable, canMention }) {
+  const { reactionsFor, quoteAuthor, quoteMine, quoteMissing, quoteTarget, offerOfRow, scrollToKey, setReplyTo, setForwarding, toggleReaction, openReactionPicker, onReport, onOpenInvite, onOpenListing, onAvaliar, setConfirming, declineOffer, offerAct } = calls
+  const mentionTap = canMention ? calls.mentionTap : undefined
+  const mine = item.mine === true
+  const chips = chipsReady ? reactionChips(reactionsFor(item)) : []
+  const link = item.inviteLink || null
+  const listing = item.listingLink
+  const offerRow = item.deleted || offerKey === null ? null : offerOfRow(index)
+  const actions = []
+  const refs = item.deleted ? [] : chatMediaRefs('dm', { from: item.from || (mine ? ownKey : null), id: item.id, media })
+  if (!item.deleted) {
+    actions.push({ icon: 'responder', label: 'Responder', onPress: () => setReplyTo({ id: item.id, text: item.text, mine, name: mine ? OWN_LABEL : quoteName }) })
+    actions.push({ icon: 'copiar', label: 'Copiar', onPress: () => { copyText(shareNav(), displayText(item.rawText, { multiline: true })) } })
+  }
+  // A message with no text whose media expired has nothing to forward.
+  const forwardSource = !item.deleted && canForward ? dmForwardSource(item.rawText, media) : null
+  if (forwardSource !== null) {
+    actions.push({ icon: 'encaminhar', label: 'Encaminhar', onPress: () => setForwarding({ source: forwardSource, refs }) })
+  }
+  if (!mine && !item.deleted && reportable) {
+    actions.push({ icon: 'bandeira', label: LABELS.report, danger: true, onPress: () => onReport({ dm: true, id: item.id, text: item.rawText, author: item.from, ...(Array.isArray(media) ? { media } : {}) }) })
+  }
+  // Beside Abrir convite the bubble draws plain text and parses nothing,
+  // so its spoilers and its link card are settled here.
+  const stored = !item.deleted && card ? card : null
+  const quoted = item.replyTo != null
+    ? { name: quoteAuthor(item), handle: quoteMine(item) ? undefined : quoteHandle, text: item.replyTo, mine: quoteMine(item), senderKey: quoteMine(item) ? undefined : peer, onPress: quoteMissing(item) ? undefined : () => scrollToKey(quoteTarget(item)?.key) }
+    : null
+  const reply = actions.find((action) => action.label === 'Responder')
+  return (
+    <SwipeReply disabled={!reply} onReply={reply?.onPress}>
+      <View style={flash ? styles.quoteFlash : undefined}>
+        <Bubble
+          moment={pageKey === null && !item.deleted && isMomentReaction(item) ? { author: momentAuthor(item, { peer, ownKey }), seq: item.moment, identity: ownKey, folder } : undefined}
+          media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} deferred={folder === 'request'} /> : null}
+          item={{ key: item.key, text: link ? plainOf(item.rawText, { full: true }) : item.text, rawText: link ? undefined : item.rawText, at: item.at, deleted: item.deleted, dayMark: item.dayMark, card: link && stored ? cardBesideSpoilers(parseRich(item.rawText), stored) : stored }}
+          mine={mine}
+          cardThumb={item.deleted || pageKey !== null ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey }}
+          plainCard={folder === 'request'}
+          shape={shape}
+          forwarded={!item.deleted && fwd === 1}
+          quote={quoted}
+          actions={actions}
+          actionsHeader={!reactionOff
+            ? ({ closeThen }) => <QuickReactions mine={reactionsFor(item).find((r) => r.mine)?.emoji} onPick={(emoji) => closeThen(() => toggleReaction(item.key, emoji))} onMore={() => closeThen(() => openReactionPicker(item.key))} />
+            : null}
+          onOpenMention={mentionTap}
+          below={chips.length > 0 || link !== null || offerRow !== null || (listing !== null && listable)
+            ? (
+              <>
+                {chips.length > 0 ? <ReactionChips reactions={reactionsFor(item)} disabled={reactionOff} onToggle={(emoji) => toggleReaction(item.key, emoji)} labelOf={(chip) => chip.label + (chip.mine ? (chip.count > 1 ? ', e da outra pessoa' : '') : ', da outra pessoa')} overlap /> : null}
+                {link !== null || (listing !== null && listable) || (offerRow !== null && ((offerRow.answer && canAnswer) || offerRow.rate))
+                  ? (
+                    <View style={styles.inline}>
+                      {link !== null ? <Pill label={OPEN_INVITE} accessibilityLabel={OPEN_INVITE + (link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade')} onPress={() => onOpenInvite(link)} /> : null}
+                      {listing !== null && listable ? <Pill label='Ver anúncio' onPress={() => onOpenListing(listing.author, listing.seq)} /> : null}
+                      {offerRow !== null && offerRow.answer && canAnswer
+                        ? <Pill label='Aceitar' filled onPress={() => { offerAct.clearError(); setConfirming({ offer: offerRow.offer, listing: offerRow.listing }) }} />
+                        : null}
+                      {offerRow !== null && offerRow.answer && canAnswer
+                        ? <Pill label='Recusar' onPress={() => declineOffer({ offer: offerRow.offer, listing: offerRow.listing })} />
+                        : null}
+                      {offerRow !== null && offerRow.rate
+                        ? <Pill label='Avaliar' onPress={() => onAvaliar({ author: offerRow.listing.author, seq: offerRow.listing.seq, offer: offerRow.offer.id })} />
+                        : null}
+                    </View>
+                    )
+                  : null}
+              </>
+              )
+            : null}
+        />
+      </View>
+    </SwipeReply>
+  )
+}, sameMessageRow)
 
 const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },

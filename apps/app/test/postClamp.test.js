@@ -180,7 +180,8 @@ test('ClampText defaults to the body column until a positive finite width is mea
   t.ok(src.includes('const ROW_PADDING = space.lg * 2'))
   t.ok(src.includes('const AVATAR_SIZE = 40'))
   t.ok(src.includes('const AVATAR_GAP = 12'))
-  t.ok(src.includes('const defaultWidth = Math.min(windowWidth, layout.column) - ROW_PADDING - AVATAR_SIZE - AVATAR_GAP'))
+  t.ok(src.includes('return Math.min(windowWidth, layout.column) - ROW_PADDING - AVATAR_SIZE - AVATAR_GAP'))
+  t.ok(src.includes('const defaultWidth = captionEstimate(windowWidth)'))
   t.ok(src.includes('const textWidth = Number.isFinite(width) && width > 0 ? width : defaultWidth'), 'undefined, zero, negative and non-finite widths use the default')
   t.ok(src.includes('width: textWidth,'), 'the estimate receives the effective width')
   t.ok(/body.*measured width.*onLayout/.test(src), 'caller guidance names the body onLayout measurement')
@@ -212,8 +213,8 @@ test('ClampText invalidates measurements on text, effective width or font scale 
   t.is(src.split('setExpanded(false)').length - 1, 1, 'layout changes preserve expansion')
   t.ok(src.includes('const measured = measurementChanged ? undefined : measuredLines'), 'stale measurements cannot hide the control during the reset render')
   t.ok(src.includes('if (generation.current !== layoutGeneration) return'), 'old events are discarded')
-  t.ok(src.includes('setMeasuredLines((prev) => acceptMeasurement({ prev, count, renderedCap }))'), 'the hook delegates measurement acceptance to the tested function')
-  t.ok(src.includes('}, [layoutGeneration, renderedCap])'), 'the callback captures the current layout and cap')
+  t.ok(src.includes('const next = measurementToStore({ plan: { lines: planLines, control: planControl }, prev, count, renderedCap })'), 'the hook delegates measurement acceptance to the tested function')
+  t.ok(src.includes('}, [layoutGeneration, renderedCap, planLines, planControl])'), 'the callback captures the current layout and cap')
 })
 
 test('ClampControl names include visible words and expose expansion without a tall row', (t) => {
@@ -250,4 +251,32 @@ test('ClampText wires the estimate, the hit target and the labels', (t) => {
   t.absent(src.includes('Platform'), 'layout capability, not the platform name')
   t.absent(src.includes('\u2014'), 'ClampText has no em dash')
   t.absent(/#[0-9a-fA-F]{3,8}/.test(src), 'no color literal')
+})
+
+test('a layout that would not change the caption is not stored', async (t) => {
+  const { clampPlan, measurementToStore } = await load()
+  const short = plan(clampPlan, 'ab')
+  t.is(measurementToStore({ plan: short, prev: undefined, count: 2, renderedCap: short.lines }), undefined, 'uncapped stays uncapped')
+  const long = plan(clampPlan, 'x'.repeat(40))
+  t.ok(long.lines > 0)
+  t.is(measurementToStore({ plan: long, prev: undefined, count: long.lines + 5, renderedCap: 0 }), long.lines + 5, 'a clamped caption keeps its full count')
+  t.is(measurementToStore({ plan: long, prev: undefined, count: 2, renderedCap: 0 }), 2, 'a fit lifts the clamp')
+  t.is(measurementToStore({ plan: long, prev: 2, count: 2, renderedCap: 0 }), undefined, 'same count')
+  t.ok(read('ui/ClampText.js').includes('return next === undefined ? prev : next'))
+})
+
+test('a count measured while expanded removes a dead control after collapsing', async (t) => {
+  const { clampPlan, refine, measurementToStore } = await load()
+  const text = 'x'.repeat(40)
+  const collapsed = plan(clampPlan, text)
+  const limit = collapsed.lines
+  t.ok(limit > 0 && collapsed.control !== null, 'the estimate overshoots and clamps')
+  t.is(measurementToStore({ plan: collapsed, prev: undefined, count: limit, renderedCap: limit }), undefined, 'the cut layout proves nothing')
+  const open = plan(clampPlan, text, { expanded: true })
+  const stored = measurementToStore({ plan: open, prev: undefined, count: limit, renderedCap: 0 })
+  t.is(stored, limit, 'the full count is kept while expanded')
+  t.alike(refine(collapsed, stored), { lines: 0, control: null }, 'collapsing shows the caption with no control')
+  t.is(measurementToStore({ plan: collapsed, prev: stored, count: 2, renderedCap: limit }), undefined, 'a shorter count never discards it')
+  const short = plan(clampPlan, 'ab')
+  t.is(measurementToStore({ plan: short, prev: undefined, count: 1, renderedCap: 0 }), undefined, 'no clamp drawn, nothing stored')
 })

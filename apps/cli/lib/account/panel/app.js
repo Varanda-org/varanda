@@ -40,6 +40,8 @@ const API_ERRORS = {
   'muitos-pedidos': 'muitos pedidos, espere um minuto e tente de novo',
   rede: 'sem conexão com o servidor',
   'ja-revertido': 'Essa decisão já foi desfeita por outra mais recente.',
+  // "Reabrir" on a decision that a person, not the AI, took (a stale page).
+  'sem-permissao': 'Só uma decisão da IA pode ser reaberta.',
   expirado: 'a sessão expirou, entre de novo',
   defasado: 'a lista mudou, recarregue o painel e tente de novo',
   'grupo-nao-confirmado': 'o semeador não confirmou o grupo e a autoria: só é possível descartar',
@@ -86,7 +88,8 @@ const AI_REASONS = {
   lotado: 'a lista de bloqueio está cheia',
   exato: 'igual a um caso já decidido',
   // ./ai/worker.js never reads a Feira listing: a person always decides.
-  anuncio: 'anúncio, só revisão humana'
+  anuncio: 'anúncio, só revisão humana',
+  reaberto: 'uma pessoa reabriu a decisão da IA: só uma pessoa decide'
 }
 const AI_FALLBACK = 'sem precedente suficiente'
 const VERIFIED_MAX = 1000
@@ -172,6 +175,9 @@ const TEXT = {
   showMore: 'mostrar mais',
   beyondLimit: 'Há decisões mais antigas que o painel não mostra.',
   noDecided: 'Nenhuma decisão ainda.',
+  reopen: 'Reabrir',
+  reopenQuestion: 'Reabrir esta denúncia? Ela volta para Abertas e uma pessoa decide. Se a IA bloqueou, o bloqueio continua até alguém usar Desbloquear.',
+  reopened: 'Denúncia reaberta: ela voltou para Abertas.',
   pendingBanner: 'As decisões só valem depois que a associação rodar `varanda mod apply` e publicar a lista.',
   noPending: 'Nenhuma mudança pendente.',
   claimed: 'enviada para assinatura',
@@ -1370,7 +1376,10 @@ function createPanel (env) {
       h('p', { text: 'denunciada: ' + who(r.reported.member, r.reported.username) }),
       r.kind === 'listing' ? null : verifiedBlock(r.verified),
       r.note !== '' ? h('p', { className: 'label', text: 'motivo da decisão' }) : null,
-      r.note !== '' ? untrusted('p', r.note) : null
+      r.note !== '' ? untrusted('p', r.note) : null,
+      r.actor === 'ia'
+        ? button(TEXT.reopen, () => mutate(TEXT.reopenQuestion, API + 'reports/' + encodeURIComponent(r.id) + '/reopen', {}, TEXT.reopened), { disabled: busy })
+        : null
     ))
     return h('div', { className: 'list' }, ...cards,
       truncated ? h('p', { className: 'meta', text: TEXT.moreDecided }) : null,

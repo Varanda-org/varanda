@@ -1,0 +1,18 @@
+# /etc/varanda/update.conf: configuração do atualizador por imagem
+# (update.sh e varanda-update.timer). Lido, nunca executado: uma linha
+# NOME=valor por variável, sem aspas. Passo a passo no README, seção
+# "Atualização por imagem (pull)".
+
+# Obrigatória, sem padrão: auto aplica sozinho cada versão nova assinada do
+# canal (com verificação de saúde e volta automática); manual só avisa no
+# registro e espera `update.sh apply`. Tire o # de uma das duas linhas.
+#VARANDA_UPDATE=manual
+#VARANDA_UPDATE=auto
+
+# Canal: stable (padrão) recebe só versões promovidas; edge, cada merge em
+# main que passou na CI.
+#VARANDA_CHANNEL=stable
+
+# Perfil: seeder (padrão) sobe só o semeador; full sobe também o Caddy com o
+# app web e o serviço de conta, e exige /etc/varanda/varanda.env.
+#VARANDA_PROFILE=seeder

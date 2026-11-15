@@ -513,7 +513,7 @@ test('Grupo marks the group seen from one place, never from load, loadOlder or r
   t.ok(older.length > 0, 'loadOlder found')
   t.absent(older.includes('group.seen') || older.includes('markSeen'), 'not from loadOlder')
   const newestAt = src.indexOf('const readNewest = useCallback(')
-  const newest = src.slice(newestAt, src.indexOf('}, [readGroup, commitRead, asPage.page])', newestAt))
+  const newest = src.slice(newestAt, src.indexOf('}, [readGroup, noteRead, walkOlder, asPage.page])', newestAt))
   t.ok(newest.length > 0, 'readNewest found')
   t.absent(newest.includes('group.seen') || newest.includes('markSeen'), 'not from readNewest')
 })
