@@ -10,6 +10,7 @@ const test = require('brittle')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
+const crypto = require('node:crypto')
 const { spawnSync } = require('node:child_process')
 
 const repoRoot = path.resolve(__dirname, '../../..')
@@ -69,14 +70,46 @@ idof() {
   fi
   if [ -n "$v" ]; then printf '%s\n' "$v"; else printf 'sha256:id-%s\n' "$1"; fi
 }
+# The host path bound at container path $1 by a --mount of the docker run.
+mount_source() {
+  local alvo=$1 a src
+  shift
+  for a in "$@"; do
+    case $a in
+      type=bind,source=*",target=$alvo"*)
+        src=$` + '{a#type=bind,source=}' + String.raw`
+        printf '%s\n' "$` + '{src%%,target=*}' + String.raw`"
+        return 0 ;;
+    esac
+  done
+  return 1
+}
+# The last non-empty-or-empty assignment of $1 in env file $2, quotes dropped.
+env_valor() { sed -n "s/^$1=//p" "$2" | tail -n 1 | tr -d "'\""; }
 docker() {
-  local a ultimo='' svc='' si wi
+  local a ultimo='' svc='' si wi prev='' ef=''
   for a in "$@"; do ultimo=$a; done
   case $1 in
     compose)
       si=$(printenv VARANDA_SEEDER_IMAGE || true)
       wi=$(printenv VARANDA_WEB_IMAGE || true)
       printf 'compose pwd=%s seeder=%s web=%s %s\n' "$PWD" "$si" "$wi" "$*" >>"$CALLS"
+      # Like real Compose with \${VAR:?}: up refuses an env file whose
+      # Google client is absent or empty.
+      if [ -f "$FIX/up_needs_google" ]; then
+        case " $* " in
+          *" up "*)
+            for a in "$@"; do
+              if [ "$prev" = --env-file ]; then ef=$a; fi
+              prev=$a
+            done
+            if [ -z "$ef" ] || [ -z "$(env_valor VARANDA_GOOGLE_CLIENT_ID "$ef")" ] ||
+              [ -z "$(env_valor VARANDA_GOOGLE_CLIENT_SECRET "$ef")" ]; then
+              printf 'compose up refused %s\n' "$ef" >>"$CALLS"
+              return 1
+            fi ;;
+        esac
+      fi
       return 0 ;;
   esac
   printf 'docker %s\n' "$*" >>"$CALLS"
@@ -87,6 +120,32 @@ docker() {
       ;;
     run)
       case " $* " in
+        *" secrets open "*)
+          printf '%s\n' "$*" >>"$FIX/open_calls"
+          si=$(cat "$FIX/open_rc" 2>/dev/null || printf '0')
+          # A careless CLI echoing the key file: update.sh must never log it.
+          cat "$(mount_source /segredos/chave.json "$@")" >&2
+          if [ "$si" = 0 ]; then
+            wi=$(mount_source /segredos/saida "$@")
+            cp "$FIX/aberto.env" "$wi/aberto.env"
+            if [ -f "$FIX/aberto_link" ]; then rm -f "$wi/aberto.env"; ln -s "$FIX/aberto.env" "$wi/aberto.env"; fi
+            printf '1 nome gravado\n'
+          fi
+          return "$si" ;;
+        *" secrets key "*)
+          printf '%s\n' "$*" >>"$FIX/key_calls"
+          if [ -f "$FIX/key_fail" ]; then return 1; fi
+          wi=$(mount_source /saida "$@")
+          if [ -f "$FIX/key_pretty" ]; then
+            printf '{\n  "v": 1,\n  "publicKey" : "%s",\n  "secretKey": "%s"\n}\n' "$(cat "$FIX/pub")" "$(cat "$FIX/sec")" >"$wi/secrets-key.json"
+          elif [ -f "$FIX/key_two" ]; then
+            printf '{"v":1,"publicKey":"%s","publicKey":"%s","secretKey":"%s"}\n' "$(cat "$FIX/pub")" "$(cat "$FIX/key_two")" "$(cat "$FIX/sec")" >"$wi/secrets-key.json"
+          else
+            printf '{"v":1,"publicKey":"%s","secretKey":"%s"}\n' "$(cat "$FIX/pub")" "$(cat "$FIX/sec")" >"$wi/secrets-key.json"
+          fi
+          chmod 600 "$wi/secrets-key.json"
+          cat "$FIX/pub"
+          return 0 ;;
         *" verify "*)
           printf '%s\n' "$*" >>"$FIX/cosign_calls"
           if [ -f "$FIX/cosign_fail" ]; then return 1; fi ;;
@@ -103,7 +162,10 @@ docker() {
       ;;
     image)
       case $2 in
-        tag) printf '%s %s\n' "$4" "$(idof "$3")" >>"$FIX/tags" ;;
+        tag)
+          if [ -f "$FIX/tag_fail" ]; then return 1; fi
+          if [ -f "$FIX/term_at_tag" ]; then kill -TERM $$; fi
+          printf '%s %s\n' "$4" "$(idof "$3")" >>"$FIX/tags" ;;
         inspect) idof "$ultimo" ;;
       esac
       ;;
@@ -173,6 +235,7 @@ sleep() { SECONDS=$((SECONDS + $` + '{1%.*}' + String.raw`)); }
 uname() { cat "$FIX/uname" 2>/dev/null || printf 'x86_64\n'; }
 dono_modo() {
   if [ -f "$FIX/dono_bad" ] && [ "$1" = "$(cat "$FIX/dono_bad")" ]; then printf '1000 755\n'; return 0; fi
+  if [ -f "$FIX/dm_$` + '{1##*/}' + String.raw`" ]; then cat "$FIX/dm_$` + '{1##*/}' + String.raw`"; return 0; fi
   cat "$FIX/dono_modo" 2>/dev/null || printf '0 600\n'
 }
 trocar_atual() { rm -f "$releases/current"; ln -s "$1" "$releases/current"; }
@@ -224,9 +287,10 @@ function server (t) {
       'conf_file=' + JSON.stringify(p('etc/update.conf')) + '\nenv_padrao=' + JSON.stringify(p('etc/varanda.env')) + '\n' +
       'releases=' + JSON.stringify(p('releases')) + '\nunits_dir=' + JSON.stringify(p('units')) + '\n' +
       'aqui=' + JSON.stringify(p('aqui')) + '\nFIX=' + JSON.stringify(p('fix')) + '\nCALLS=' + JSON.stringify(p('calls')) + '\n' +
+      'chave_segredos=' + JSON.stringify(p('etc/secrets-key.json')) + '\nsegredos="$state/segredos"\n' +
       '. ' + JSON.stringify(WELL_KNOWN) + '\n' + STUBS + '\n' + commands + '\n'
     const res = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
-    return { status: res.status, out: res.stdout + res.stderr, log: read('state/update.log'), calls: read('calls') }
+    return { status: res.status, out: res.stdout + res.stderr, stdout: res.stdout, log: read('state/update.log'), calls: read('calls') }
   }
   return { d, p, write, exists, read, run }
 }
@@ -1330,4 +1394,624 @@ test('update.sh: a real gate failure in apply fires the way back, which passes t
   t.ok(r.log.includes('voltou para ' + OLD_COMMIT), 'logs the way back')
   t.absent(s.exists('state/intervencao'), 'no intervention')
   t.is(s.read('state/recusadas'), DIGEST + '\n', 'the digest is refused')
+})
+
+// Shared secrets (secrets.sealed.json in the bundle, opened by the new image).
+// Every value and key is a fresh sentinel, so a leak into the log or the
+// output is caught by a plain search.
+const sentinel = (tag) => tag + crypto.randomBytes(8).toString('hex')
+const MARK = '# segredos compartilhados (update.sh)'
+const leaks = (r, values) => values.filter((x) => (r.out + r.log).includes(x))
+const modeOf = (p) => { try { return fs.statSync(p).mode & 0o777 } catch { return null } }
+
+// A server running OLD_COMMIT whose next bundle carries secrets.sealed.json,
+// with a key file and the lines `secrets open` writes.
+function secretsServer (t, { profile = 'seeder', localEnv = null } = {}) {
+  const s = server(t)
+  const v = { gif: sentinel('gif'), id: sentinel('id'), secret: sentinel('sec'), key: sentinel('key') }
+  s.write('etc/update.conf', 'VARANDA_UPDATE=manual\nVARANDA_PROFILE=' + profile + '\n')
+  if (localEnv !== null) s.write('etc/varanda.env', localEnv)
+  s.write('fix/bundle/secrets.sealed.json', '{"v":1}\n')
+  s.write('fix/bundle/secrets-signers.txt', H('5', 64) + '\n')
+  s.write('etc/secrets-key.json', '{"v":1,"publicKey":"' + H('f', 64) + '","secretKey":"' + v.key + '"}\n')
+  s.write('fix/aberto.env', "VARANDA_GIF_API_KEY='" + v.gif + "'\nVARANDA_GOOGLE_CLIENT_ID='" + v.id +
+    "'\nVARANDA_GOOGLE_CLIENT_SECRET='" + v.secret + "'\n")
+  s.write('state/atual', record(OLD_COMMIT, 1, OLD_SEEDER, OLD_WEB))
+  installRelease(s, OLD_COMMIT, { www: profile === 'full' })
+  fs.mkdirSync(s.p('state/segredos'), { recursive: true })
+  return { s, v }
+}
+
+test('update.sh: shared secrets fill only what varanda.env leaves absent or empty', (t) => {
+  if (!hasBash(t)) return
+  const localId = sentinel('localid')
+  // No final LF, a non-empty local Google id and an empty local secret.
+  const localEnv = 'VARANDA_DOMAIN=app.exemplo.org\nVARANDA_ASSOCIATION=' + H('a', 64) +
+    '\nVARANDA_GOOGLE_CLIENT_ID=' + localId + '\nVARANDA_GOOGLE_CLIENT_SECRET='
+  const { s, v } = secretsServer(t, { profile: 'full', localEnv })
+  // The running release already took its Google secret from a sealed file.
+  const oldSecret = sentinel('oldsec')
+  const oldEfetivo = localEnv + '\n' + MARK + "\nVARANDA_GOOGLE_CLIENT_SECRET='" + oldSecret + "'\n"
+  s.write('state/segredos/efetivo.env', oldEfetivo, 0o600)
+  const r = s.run(MAIN + 'cmd_apply')
+  t.is(r.status, 0, 'a full apply whose Google secret comes only from the sealed file passes: ' + r.log)
+  const efetivo = s.p('state/segredos/efetivo.env')
+  t.is(s.read('state/segredos/efetivo.env'), localEnv + '\n' + MARK + '\n' + "VARANDA_GIF_API_KEY='" + v.gif + "'\n" +
+    "VARANDA_GOOGLE_CLIENT_SECRET='" + v.secret + "'\n",
+  'varanda.env bytes, a LF, then the absent name and the empty one; the non-empty local id wins')
+  t.is(modeOf(efetivo), 0o600, 'efetivo.env is 0600')
+  t.is(modeOf(s.p('state/segredos')), 0o700, 'the segredos directory is 0700')
+  t.ok(r.log.includes('segredos compartilhados: 2 variáveis aplicadas'), 'logs the number of names applied')
+  const open = s.read('fix/open_calls')
+  t.ok(open.includes('run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 0:0 '),
+    'secrets open runs without network, read-only, without capabilities or new privileges')
+  t.ok(open.includes('type=bind,source=' + s.p('etc/secrets-key.json') + ',target=/segredos/chave.json,readonly'), 'the key file is mounted read-only')
+  t.ok(open.includes('type=bind,source=' + s.p('releases', COMMIT + '.tmp', 'secrets.sealed.json') + ',target=/segredos/selado.json,readonly'),
+    'the sealed file of the new, verified bundle is mounted read-only')
+  t.ok(open.includes('type=bind,source=' + s.p('releases', COMMIT + '.tmp', 'secrets-signers.txt') + ',target=/segredos/assinantes.txt,readonly'),
+    'the signers list of the same bundle is mounted read-only')
+  t.ok(open.includes(' ' + SEEDER_REF + ' secrets open --key-file /segredos/chave.json --file /segredos/selado.json --signers /segredos/assinantes.txt --out /segredos/saida/aberto.env'),
+    'the new image runs by digest, with the pinned signers')
+  t.ok(r.calls.indexOf(' secrets open ') < r.calls.indexOf('config -q'), 'opened before compose config')
+  t.ok(r.calls.includes('--env-file ' + s.p('state/segredos/efetivo.env.novo') + ' -f compose.yaml -f compose.web.yaml -f compose.release.yaml -f compose.release.web.yaml config -q\n'),
+    'compose config checks the candidate')
+  t.ok(r.calls.includes('compose -p varanda-seeder --env-file ' + efetivo + ' -f compose.yaml -f compose.web.yaml -f compose.release.yaml -f compose.release.web.yaml up -d --no-build\n'),
+    'compose up reads efetivo.env')
+  t.absent(s.exists('state/segredos/abrir'), 'no aberto.env or work directory left')
+  t.absent(s.exists('state/segredos/efetivo.env.novo'), 'the candidate became efetivo.env')
+  t.is(s.read('state/segredos/efetivo.env.anterior'), oldEfetivo, 'the running release efetivo.env follows the previous record')
+  t.alike(leaks(r, [...Object.values(v), localId, oldSecret]), [], 'no value or key in the log or the output')
+  const st = s.run(MAIN + 'cmd_status')
+  t.ok(st.out.split('\n').includes('segredos compartilhados: VARANDA_GIF_API_KEY VARANDA_GOOGLE_CLIENT_SECRET'), 'status names the shared names')
+  t.alike(leaks(st, [...Object.values(v), localId]), [], 'status shows no value')
+  const c = s.run(MAIN + 'cmd_compose ps')
+  t.ok(c.calls.includes('compose -p varanda-seeder --env-file ' + efetivo + ' '), 'update.sh compose reads efetivo.env')
+
+  // The last local assignment wins, as in compose; a file ending in LF gets
+  // no blank line.
+  const local2 = 'VARANDA_GIF_API_KEY=antes\nVARANDA_GIF_API_KEY= # vazia\nVARANDA_GOOGLE_CLIENT_ID=""\nVARANDA_GOOGLE_CLIENT_SECRET=' + localId + '\n'
+  const b = secretsServer(t, { localEnv: local2 })
+  const r2 = b.s.run(MAIN + 'cmd_apply')
+  t.is(r2.status, 0, 'profile seeder apply passes: ' + r2.log)
+  t.is(b.s.read('state/segredos/efetivo.env'), local2 + MARK + '\n' + "VARANDA_GIF_API_KEY='" + b.v.gif + "'\n" +
+    "VARANDA_GOOGLE_CLIENT_ID='" + b.v.id + "'\n", 'an emptied last assignment and a quoted empty value take the shared value')
+  t.alike(leaks(r2, [...Object.values(b.v), localId]), [], 'no value in the log or the output')
+
+  // Without varanda.env (profile seeder), the opened lines alone.
+  const n = secretsServer(t)
+  const r3 = n.s.run(MAIN + 'cmd_apply')
+  t.is(r3.status, 0, 'apply without varanda.env passes: ' + r3.log)
+  t.is(n.s.read('state/segredos/efetivo.env'), MARK + '\n' + n.s.read('fix/aberto.env'), 'every opened name is added')
+  t.ok(r3.log.includes('segredos compartilhados: 3 variáveis aplicadas'), 'all three counted')
+})
+
+test('update.sh: secrets open exit 3, no sealed file or no key file mean no shared secrets; another exit changes nothing', (t) => {
+  if (!hasBash(t)) return
+  const old = (s) => {
+    const val = sentinel('velho')
+    s.write('state/segredos/efetivo.env', 'VARANDA_GIF_API_KEY=' + val + '\n', 0o600)
+    return val
+  }
+  const plain = 'VARANDA_MAX_SOCKETS=10\n'
+  const back = (s) => 'compose -p varanda-seeder --env-file ' + s.p('etc/varanda.env') + ' -f compose.yaml -f compose.release.yaml up -d --no-build\n'
+
+  // Exit 3, with an aberto.env left by an earlier run in the work directory.
+  const a = secretsServer(t, { localEnv: plain })
+  const val = old(a.s)
+  fs.mkdirSync(a.s.p('state/segredos/abrir'))
+  const stale = sentinel('stale')
+  a.s.write('state/segredos/abrir/aberto.env', "VARANDA_GIF_API_KEY='" + stale + "'\n")
+  a.s.write('fix/open_rc', '3')
+  const r = a.s.run(MAIN + 'cmd_apply')
+  t.is(r.status, 0, 'exit 3 still applies: ' + r.log)
+  t.ok(r.log.includes('segredos compartilhados: este servidor não é destinatário'), 'logs that this server is not a recipient')
+  t.absent(a.s.exists('state/segredos/efetivo.env'), 'efetivo.env is removed at the switch')
+  t.ok(r.calls.includes(back(a.s)), 'compose reads varanda.env, as without shared secrets')
+  t.ok(a.s.read('state/segredos/efetivo.env.anterior').includes(val), 'the previous efetivo.env follows the previous release')
+  t.absent(a.s.exists('state/segredos/abrir'), 'the stale aberto.env is never used and is gone')
+  t.alike(leaks(r, [...Object.values(a.v), val, stale]), [], 'no value in the log or the output')
+
+  // No sealed file in the bundle: secrets open never runs.
+  const b = secretsServer(t, { localEnv: plain })
+  old(b.s)
+  fs.rmSync(b.s.p('fix/bundle/secrets.sealed.json'))
+  const rb = b.s.run(MAIN + 'cmd_apply')
+  t.is(rb.status, 0, 'a bundle without secrets.sealed.json applies: ' + rb.log)
+  t.absent(b.s.exists('fix/open_calls'), 'secrets open never runs')
+  t.absent(b.s.exists('state/segredos/efetivo.env'), 'no efetivo.env')
+  t.ok(rb.calls.includes(back(b.s)), 'compose reads varanda.env')
+
+  // No key file: the same.
+  const c = secretsServer(t, { localEnv: plain })
+  old(c.s)
+  fs.rmSync(c.s.p('etc/secrets-key.json'))
+  const rc = c.s.run(MAIN + 'cmd_apply')
+  t.is(rc.status, 0, 'a server without the key file applies: ' + rc.log)
+  t.absent(c.s.exists('fix/open_calls'), 'secrets open never runs without the key')
+  t.absent(c.s.exists('state/segredos/efetivo.env'), 'no efetivo.env')
+
+  // Any other exit aborts before anything running changes.
+  for (const code of ['1', '2']) {
+    const d = secretsServer(t, { localEnv: plain })
+    const keep = old(d.s)
+    d.s.write('fix/open_rc', code)
+    const rd = d.s.run(MAIN + 'cmd_apply')
+    t.is(rd.status, 1, 'exit ' + code + ' fails the apply')
+    t.ok(rd.log.includes('não foi possível abrir os segredos compartilhados (saída ' + code + '); nada mudou'), 'says so, without a value')
+    t.absent(composeRan(rd.calls), 'no compose at all, not even config')
+    t.is(d.s.read('state/atual'), record(OLD_COMMIT, 1, OLD_SEEDER, OLD_WEB), 'atual unchanged')
+    t.is(d.s.read('state/segredos/efetivo.env'), 'VARANDA_GIF_API_KEY=' + keep + '\n', 'efetivo.env unchanged')
+    t.absent(d.s.exists('state/segredos/abrir'), 'no aberto.env left')
+    t.absent(d.s.exists('state/segredos/efetivo.env.novo'), 'no candidate left')
+    t.alike(fs.readdirSync(d.s.p('releases')), [OLD_COMMIT], 'no new release directory')
+    t.alike(leaks(rd, [...Object.values(d.v), keep]), [], 'no value in the log or the output')
+  }
+
+  // A symlink where aberto.env should be is refused.
+  const e = secretsServer(t, { localEnv: plain })
+  e.s.write('fix/aberto_link', '')
+  const re = e.s.run(MAIN + 'cmd_apply')
+  t.is(re.status, 1, 'an opened file that is a link is refused')
+  t.absent(composeRan(re.calls), 'no compose')
+})
+
+test('update.sh: the key file must be a regular root file with mode 0600', (t) => {
+  if (!hasBash(t)) return
+  const plain = 'VARANDA_MAX_SOCKETS=10\n'
+  const refused = (s, what) => {
+    const r = s.run(MAIN + 'cmd_apply')
+    t.is(r.status, 1, what + ' is refused')
+    t.absent(s.exists('fix/open_calls'), 'secrets open never runs (' + what + ')')
+    t.absent(composeRan(r.calls), 'no compose (' + what + ')')
+    t.is(s.read('state/atual'), record(OLD_COMMIT, 1, OLD_SEEDER, OLD_WEB), 'atual unchanged (' + what + ')')
+    return r
+  }
+  const l = secretsServer(t, { localEnv: plain })
+  l.s.write('fix/real-key.json', l.s.read('etc/secrets-key.json'))
+  fs.rmSync(l.s.p('etc/secrets-key.json'))
+  fs.symlinkSync(l.s.p('fix/real-key.json'), l.s.p('etc/secrets-key.json'))
+  t.ok(refused(l.s, 'a symlink').log.includes('precisa ser um arquivo comum'), 'says it must be a regular file')
+  for (const [dm, what] of [['1000 600\n', 'another owner'], ['0 640\n', 'mode 0640'], ['0 400\n', 'mode 0400']]) {
+    const k = secretsServer(t, { localEnv: plain })
+    k.s.write('fix/dm_secrets-key.json', dm)
+    t.ok(refused(k.s, what).log.includes('precisa ser de root, modo 0600'), 'names the rule for ' + what)
+  }
+})
+
+test('update.sh: the way back and rollback restore efetivo.env.anterior', (t) => {
+  if (!hasBash(t)) return
+  const plain = 'VARANDA_MAX_SOCKETS=10\n'
+  const { s, v } = secretsServer(t, { localEnv: plain })
+  const older = H('2', 40)
+  s.write('state/anterior', record(older, 1, OLDER_SEEDER, OLDER_WEB))
+  installRelease(s, older, { www: false })
+  const cur = 'VARANDA_GIF_API_KEY=' + sentinel('atual') + '\n'
+  const prev = 'VARANDA_GIF_API_KEY=' + sentinel('anterior') + '\n'
+  s.write('state/segredos/efetivo.env', cur, 0o600)
+  s.write('state/segredos/efetivo.env.anterior', prev, 0o600)
+  s.write('fix/gate_fail_1', '')
+  const r = s.run(MAIN + 'cmd_apply')
+  t.is(r.status, 1, 'the failed apply exits 1')
+  const e = s.p('state/segredos/efetivo.env')
+  t.ok(r.calls.includes('compose pwd=' + s.p('releases', OLD_COMMIT) + ' seeder=' + OLD_SEEDER + ' web=' + OLD_WEB +
+    ' compose -p varanda-seeder --env-file ' + e + ' -f compose.yaml -f compose.release.yaml up -d --no-build --force-recreate\n'),
+  'the way back recreates the previous release with efetivo.env')
+  t.is(s.read('state/segredos/efetivo.env'), cur, 'efetivo.env is the running release one again')
+  t.is(modeOf(e), 0o600, 'and 0600')
+  t.is(s.read('state/segredos/efetivo.env.anterior'), prev, 'efetivo.env.anterior follows the restored anterior')
+  t.absent(s.exists('state/segredos/efetivo.env.anterior.velho'), 'no .velho left')
+  t.is(s.read('state/anterior'), record(older, 1, OLDER_SEEDER, OLDER_WEB), 'anterior restored')
+  t.alike(leaks(r, [...Object.values(v), cur.slice(20, -1), prev.slice(20, -1)]), [], 'no value in the log or the output')
+
+  // A successful apply keeps the old efetivo.env as the anterior one.
+  const ok = secretsServer(t, { localEnv: plain })
+  ok.s.write('state/segredos/efetivo.env', cur, 0o600)
+  t.is(ok.s.run(MAIN + 'cmd_apply').status, 0, 'apply passes')
+  t.is(ok.s.read('state/segredos/efetivo.env.anterior'), cur, 'the previous efetivo.env became efetivo.env.anterior')
+
+  // rollback restores it together with the release directory.
+  const rb = server(t)
+  rb.write('etc/varanda.env', plain)
+  installRelease(rb, OLD_COMMIT, { www: false })
+  rb.write('state/atual', record(COMMIT, 5, SEEDER_REF, WEB_REF))
+  rb.write('state/anterior', record(OLD_COMMIT, 1, OLD_SEEDER, OLD_WEB))
+  fs.mkdirSync(rb.p('state/segredos'))
+  rb.write('state/segredos/efetivo.env', cur, 0o600)
+  rb.write('state/segredos/efetivo.env.anterior', prev, 0o600)
+  const back = rb.run(MAIN + 'cmd_rollback')
+  t.is(back.status, 0, 'rollback passes: ' + back.log)
+  t.ok(back.calls.includes('compose pwd=' + rb.p('releases', OLD_COMMIT) + ' seeder=' + OLD_SEEDER + ' web=' + OLD_WEB +
+    ' compose -p varanda-seeder --env-file ' + rb.p('state/segredos/efetivo.env') + ' '), 'rollback runs compose with the restored efetivo.env')
+  t.is(rb.read('state/segredos/efetivo.env'), prev, 'efetivo.env is the anterior one')
+  t.absent(rb.exists('state/segredos/efetivo.env.anterior'), 'nothing is left as anterior')
+
+  // A previous release without shared secrets: efetivo.env goes away.
+  const nb = server(t)
+  nb.write('etc/varanda.env', plain)
+  installRelease(nb, OLD_COMMIT, { www: false })
+  nb.write('state/atual', record(COMMIT, 5, SEEDER_REF, WEB_REF))
+  nb.write('state/anterior', record(OLD_COMMIT, 1, OLD_SEEDER, OLD_WEB))
+  fs.mkdirSync(nb.p('state/segredos'))
+  nb.write('state/segredos/efetivo.env', cur, 0o600)
+  const nback = nb.run(MAIN + 'cmd_rollback')
+  t.is(nback.status, 0, 'rollback passes')
+  t.absent(nb.exists('state/segredos/efetivo.env'), 'efetivo.env is removed')
+  t.ok(nback.calls.includes('compose -p varanda-seeder --env-file ' + nb.p('etc/varanda.env') + ' '), 'compose reads varanda.env again')
+})
+
+test('update.sh: reconfigure rebuilds efetivo.env with the installed image, with the same abort rule', (t) => {
+  if (!hasBash(t)) return
+  const { s, v } = secretsServer(t, { localEnv: 'VARANDA_MAX_SOCKETS=10\n' })
+  const dir = installRelease(s, COMMIT, { www: false })
+  s.write('state/atual', record(COMMIT, 5, SEEDER_REF, WEB_REF))
+  const r = s.run(MAIN + 'cmd_reconfigure')
+  t.is(r.status, 0, 'reconfigure passes: ' + r.log)
+  t.ok(s.read('fix/open_calls').includes(' ' + SEEDER_REF + ' secrets open ') &&
+    s.read('fix/open_calls').includes('source=' + path.join(dir, 'secrets.sealed.json') + ','), 'opens the installed bundle with the installed image')
+  t.ok(s.read('state/segredos/efetivo.env').includes("VARANDA_GOOGLE_CLIENT_ID='" + v.id + "'"), 'efetivo.env rebuilt')
+  t.ok(r.calls.includes('compose -p varanda-seeder --env-file ' + s.p('state/segredos/efetivo.env') + ' -f compose.yaml -f compose.release.yaml up -d --no-build\n'), 'compose up reads it')
+  const before = s.read('state/segredos/efetivo.env')
+  s.write('fix/open_rc', '1')
+  fs.rmSync(s.p('calls'))
+  const bad = s.run(MAIN + 'cmd_reconfigure')
+  t.is(bad.status, 1, 'a failed open fails reconfigure')
+  t.absent(composeRan(bad.calls), 'no compose up')
+  t.is(s.read('state/segredos/efetivo.env'), before, 'efetivo.env unchanged')
+  t.alike(leaks(r, Object.values(v)).concat(leaks(bad, Object.values(v))), [], 'no value in the log or the output')
+})
+
+test('update.sh: secrets-key creates the key once, verifies the image before install and prints only the public key', (t) => {
+  if (!hasBash(t)) return
+  const usage = (args) => spawnSync('bash', [SCRIPT, ...args], { encoding: 'utf8', input: '' }).status
+  t.is(usage(['secrets-key', 'x']), 2, 'secrets-key takes no positional argument')
+  t.is(usage(['secrets-key', '--image', 'ghcr.io/varanda-org/varanda-seeder:stable']), 2, 'secrets-key refuses a tag')
+  t.ok(sh.includes('| secrets-key [--image'), 'the usage line names secrets-key')
+
+  const keyed = () => {
+    const s = server(t)
+    const pub = H('9', 64)
+    const sec = sentinel('secret')
+    s.write('fix/pub', pub + '\n')
+    s.write('fix/sec', sec)
+    return { s, pub, sec }
+  }
+  // Before install: --image is required, verified, and only then run.
+  const { s, pub, sec } = keyed()
+  const none = s.run(MAIN + 'cmd_secrets_key')
+  t.is(none.status, 2, 'without an installed release --image is required')
+  t.absent(s.exists('fix/key_calls'), 'nothing ran')
+  const r = s.run(MAIN + 'ref_chave=' + SEEDER_REF + '\ncmd_secrets_key')
+  t.is(r.status, 0, 'secrets-key passes: ' + r.out)
+  t.is(r.stdout, pub + '\n', 'stdout is exactly the public key')
+  t.ok(s.read('fix/cosign_calls').includes('--certificate-identity ' + ID_STABLE + ' --certificate-oidc-issuer https://token.actions.githubusercontent.com ' + SEEDER_REF),
+    'the image is verified with the channel identity')
+  t.absent(r.calls.includes('docker pull ghcr.io/varanda-org/varanda-seeder:'), 'no tag is pulled')
+  const call = s.read('fix/key_calls')
+  t.ok(call.includes('run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 0:0 '), 'no network, read-only, no capabilities')
+  t.ok(call.includes(' ' + SEEDER_REF + ' secrets key --out /saida/secrets-key.json'), 'the verified image runs by digest')
+  t.ok(r.calls.indexOf('verify') < r.calls.indexOf('secrets key'), 'verified before it runs')
+  t.ok(s.read('etc/secrets-key.json').includes(sec), 'the key file holds the secret key')
+  t.absent(s.exists('etc/.secrets-key.tmp'), 'the temporary directory is gone')
+  t.alike(leaks(r, [sec]), [], 'the secret key is never in the log or the output')
+  t.absent(r.log.includes(pub), 'the log does not repeat the key')
+
+  // An existing file or symlink is never replaced.
+  const again = s.run(MAIN + 'ref_chave=' + SEEDER_REF + '\ncmd_secrets_key')
+  t.is(again.status, 1, 'an existing key file is refused')
+  t.is(s.read('fix/key_calls'), call, 'secrets key did not run again')
+  t.ok(s.read('etc/secrets-key.json').includes(sec), 'the key file is unchanged')
+  const ln = keyed()
+  fs.symlinkSync(ln.s.p('nada'), ln.s.p('etc/secrets-key.json'))
+  t.is(ln.s.run(MAIN + 'ref_chave=' + SEEDER_REF + '\ncmd_secrets_key').status, 1, 'a dangling symlink is refused too')
+  t.absent(ln.s.exists('fix/key_calls'), 'nothing ran')
+
+  // A failed verification runs nothing of the image.
+  const bad = keyed()
+  bad.s.write('fix/cosign_fail', '')
+  const rb = bad.s.run(MAIN + 'ref_chave=' + SEEDER_REF + '\ncmd_secrets_key')
+  t.is(rb.status, 1, 'a failed verification fails')
+  t.absent(bad.s.exists('fix/key_calls'), 'secrets key never ran')
+  t.absent(bad.s.exists('etc/secrets-key.json'), 'no key file')
+  t.is(rb.stdout, '', 'nothing on stdout')
+
+  // With an installed release: its image, without --image or a new check.
+  const inst = keyed()
+  inst.s.write('state/atual', record(COMMIT, 5, SEEDER_REF, WEB_REF))
+  t.is(inst.s.run(MAIN + 'ref_chave=' + SEEDER_REF + '\ncmd_secrets_key').status, 2, '--image is refused once a release is installed')
+  const ri = inst.s.run(MAIN + 'cmd_secrets_key')
+  t.is(ri.status, 0, 'secrets-key uses the installed image: ' + ri.out)
+  t.ok(inst.s.read('fix/key_calls').includes(' ' + SEEDER_REF + ' secrets key '), 'the installed image by digest')
+  t.absent(inst.s.exists('fix/cosign_calls'), 'no new signature check')
+  t.is(ri.stdout, inst.pub + '\n', 'stdout is the public key')
+  t.alike(leaks(ri, [inst.sec]), [], 'no secret key in the log or the output')
+})
+
+// A running efetivo.env with a sentinel value, and the checks that a refused
+// secrets step changed nothing at all.
+const PLAIN = 'VARANDA_MAX_SOCKETS=10\n'
+function keepEfetivo (s) {
+  const val = sentinel('velho')
+  const text = PLAIN + MARK + "\nVARANDA_GIF_API_KEY='" + val + "'\n"
+  s.write('state/segredos/efetivo.env', text, 0o600)
+  return { val, text }
+}
+function nothingChanged (t, s, r, text, what) {
+  t.is(r.status, 1, what + ' fails the apply')
+  t.absent(/ up -d/.test(r.calls), 'no compose up (' + what + ')')
+  t.is(s.read('state/atual'), record(OLD_COMMIT, 1, OLD_SEEDER, OLD_WEB), 'atual unchanged (' + what + ')')
+  t.is(s.read('state/segredos/efetivo.env'), text, 'efetivo.env unchanged (' + what + ')')
+  t.absent(s.exists('state/segredos/efetivo.env.novo'), 'no candidate left (' + what + ')')
+  t.absent(s.exists('state/segredos/abrir'), 'no opened file left (' + what + ')')
+}
+
+test('update.sh: install on a new server keeps the opened secrets for compose until the first apply', (t) => {
+  if (!hasBash(t)) return
+  const s = server(t)
+  const v = { id: sentinel('id'), secret: sentinel('sec'), key: sentinel('key') }
+  s.write('etc/update.conf', 'VARANDA_UPDATE=manual\nVARANDA_PROFILE=full\n')
+  s.write('etc/varanda.env', 'VARANDA_DOMAIN=app.exemplo.org\nVARANDA_ASSOCIATION=' + H('a', 64) + '\n')
+  s.write('fix/bundle/secrets.sealed.json', '{"v":1}\n')
+  s.write('fix/bundle/secrets-signers.txt', H('5', 64) + '\n')
+  s.write('etc/secrets-key.json', '{"v":1,"publicKey":"' + H('f', 64) + '","secretKey":"' + v.key + '"}\n')
+  s.write('fix/aberto.env', "VARANDA_GOOGLE_CLIENT_ID='" + v.id + "'\nVARANDA_GOOGLE_CLIENT_SECRET='" + v.secret + "'\n")
+  s.write('fix/up_needs_google', '')
+  const r = s.run(MAIN + 'ref_install=' + SEEDER_REF + '\ncmd_install')
+  t.is(r.status, 0, 'install with the Google client only in the sealed file passes: ' + r.log)
+  t.absent(s.exists('state/atual'), 'nothing installed yet')
+  t.ok(s.read('state/segredos/efetivo.env').includes("VARANDA_GOOGLE_CLIENT_SECRET='" + v.secret + "'"), 'the candidate became efetivo.env')
+  t.is(modeOf(s.p('state/segredos/efetivo.env')), 0o600, 'and it is 0600')
+  t.absent(s.exists('state/segredos/efetivo.env.novo'), 'no candidate left')
+  t.absent(s.exists('state/segredos/abrir'), 'no opened file left')
+  t.ok(r.log.includes('update.sh secrets-key'), 'the final message points to secrets-key')
+  const c = s.run(MAIN + 'cmd_compose ps')
+  t.ok(c.calls.includes('compose -p varanda-seeder --env-file ' + s.p('state/segredos/efetivo.env') + ' '),
+    'update.sh compose before the first apply reads efetivo.env')
+  t.alike(leaks(r, Object.values(v)).concat(leaks(c, Object.values(v))), [], 'no value or key in the log or the output')
+})
+
+test('update.sh: apply is refused before the switch when the way back would not start with its env', (t) => {
+  if (!hasBash(t)) return
+  const localEnv = 'VARANDA_DOMAIN=app.exemplo.org\nVARANDA_ASSOCIATION=' + H('a', 64) + '\n'
+  // The installed release runs without efetivo.env, and varanda.env has no
+  // Google client: real Compose would refuse the way back.
+  const { s, v } = secretsServer(t, { profile: 'full', localEnv })
+  s.write('fix/up_needs_google', '')
+  s.write('fix/gate_fail_1', '')
+  const r = s.run(MAIN + 'cmd_apply')
+  t.is(r.status, 1, 'the apply is refused')
+  t.ok(r.log.includes('a volta automática para a versão instalada não subiria com ' + s.p('etc/varanda.env') + '; nada mudou'),
+    'says the way back would not start with varanda.env')
+  t.ok(r.log.includes('update.sh reconfigure'), 'and what to do')
+  t.absent(/ up -d/.test(r.calls), 'no compose up at all')
+  t.absent(r.calls.includes('docker image tag'), 'no image tagged')
+  t.is(s.read('state/atual'), record(OLD_COMMIT, 1, OLD_SEEDER, OLD_WEB), 'atual unchanged')
+  t.absent(s.exists('state/anterior'), 'no anterior written')
+  t.absent(s.exists('state/intervencao'), 'no intervention')
+  t.absent(s.exists('state/recusadas'), 'the digest is not refused')
+  t.absent(s.exists('state/segredos/efetivo.env'), 'no efetivo.env')
+  t.absent(s.exists('state/segredos/efetivo.env.novo'), 'no candidate left')
+  t.alike(leaks(r, Object.values(v)), [], 'no value in the log or the output')
+
+  // With an efetivo.env that carries the client, the way back can start: a
+  // failed gate goes back with it.
+  const ok = secretsServer(t, { profile: 'full', localEnv })
+  const running = localEnv + MARK + "\nVARANDA_GOOGLE_CLIENT_ID='" + sentinel('rid') + "'\nVARANDA_GOOGLE_CLIENT_SECRET='" + sentinel('rsec') + "'\n"
+  ok.s.write('state/segredos/efetivo.env', running, 0o600)
+  ok.s.write('fix/up_needs_google', '')
+  ok.s.write('fix/gate_fail_1', '')
+  const back = ok.s.run(MAIN + 'cmd_apply')
+  t.is(back.status, 1, 'the failed gate exits 1')
+  t.ok(back.log.includes('voltou para a versão anterior'), 'the way back worked: ' + back.log)
+  t.absent(back.calls.includes('compose up refused'), 'no compose up was refused')
+  t.is(ok.s.read('state/segredos/efetivo.env'), running, 'efetivo.env is the running one again')
+})
+
+test('update.sh: a sealed name spelled with export or a colon in varanda.env is refused', (t) => {
+  if (!hasBash(t)) return
+  for (const line of ['export VARANDA_GIF_API_KEY=local', 'VARANDA_GIF_API_KEY: local', '  export\tVARANDA_GOOGLE_CLIENT_ID', 'VARANDA_GOOGLE_CLIENT_SECRET :local']) {
+    const { s, v } = secretsServer(t, { localEnv: PLAIN + line + '\n' })
+    const { val, text } = keepEfetivo(s)
+    const r = s.run(MAIN + 'cmd_apply')
+    nothingChanged(t, s, r, text, JSON.stringify(line))
+    t.ok(r.log.includes(' em ' + s.p('etc/varanda.env') + " usa export ou ':'; escreva NOME=valor; nada mudou"), 'asks for NOME=valor: ' + line)
+    t.alike(leaks(r, [...Object.values(v), val]), [], 'no value in the log or the output')
+  }
+  const { s } = secretsServer(t, { localEnv: 'export VARANDA_MAX_SOCKETS=10\n' })
+  t.is(s.run(MAIN + 'cmd_apply').status, 0, 'export of a name that is never shared is left alone')
+})
+
+test('update.sh: an opened file fora do formato, with another name, a repeated name or other bytes changes nothing', (t) => {
+  if (!hasBash(t)) return
+  const cases = [
+    ...['VARANDA_PHONE_KEY', 'VARANDA_PUSH_TOKEN', 'COMPOSE_REMOVE_ORPHANS', 'DOCKER_HOST', 'VARANDA_DOMAIN']
+      .map((n) => [(x) => n + "='" + x + "'\n", 'traz ' + n + ', que não é um nome compartilhado']),
+    [(x) => "VARANDA_GIF_API_KEY='" + x + "'\nVARANDA_GIF_API_KEY='" + x + "'\n", 'repete VARANDA_GIF_API_KEY'],
+    [(x) => "VARANDA_GIF_API_KEY='a\t" + x + "'\n", 'bytes fora do ASCII imprimível'],
+    [(x) => "VARANDA_GIF_API_KEY='a\x01" + x + "'\n", 'bytes fora do ASCII imprimível'],
+    [(x) => "VARANDA_GIF_API_KEY='" + x + "'\r\n", 'bytes fora do ASCII imprimível'],
+    [(x) => "VARANDA_GIF_API_KEY='é" + x + "'\n", 'bytes fora do ASCII imprimível'],
+    [(x) => 'VARANDA_GIF_API_KEY=' + x + '\n', 'fora do formato NOME=valor'],
+    [(x) => "varanda_gif_api_key='" + x + "'\n", 'fora do formato NOME=valor'],
+    [(x) => "VARANDA_GIF_API_KEY='a'" + x + "'\n", 'fora do formato NOME=valor'],
+    [(x) => "VARANDA_GIF_API_KEY='a\\" + x + "'\n", 'fora do formato NOME=valor']
+  ]
+  for (const [content, says] of cases) {
+    const { s, v } = secretsServer(t, { localEnv: PLAIN })
+    const x = sentinel('opened')
+    s.write('fix/aberto.env', content(x))
+    const { val, text } = keepEfetivo(s)
+    const r = s.run(MAIN + 'cmd_apply')
+    nothingChanged(t, s, r, text, says)
+    t.ok(r.log.includes('segredos compartilhados: ') && r.log.includes(says), 'says ' + says)
+    t.ok(r.log.includes('não foi possível montar o ambiente com os segredos compartilhados; nada mudou'), 'and that nothing changed')
+    t.alike(fs.readdirSync(s.p('releases')), [OLD_COMMIT], 'no new release directory (' + says + ')')
+    t.alike(leaks(r, [...Object.values(v), val, x]), [], 'no value in the log or the output (' + says + ')')
+  }
+})
+
+test('update.sh: opened plaintext never outlives the run that created it, and other commands never delete it', (t) => {
+  if (!hasBash(t)) return
+  const { s, v } = secretsServer(t, { localEnv: PLAIN })
+  // The prepare succeeds, then tagging fails: an early exit 1 in aplicar.
+  s.write('fix/tag_fail', '')
+  const r = s.run(MAIN + 'cmd_apply')
+  t.is(r.status, 1, 'the apply exits early')
+  t.ok(r.log.includes('segredos compartilhados: 3 variáveis aplicadas'), 'after a successful prepare')
+  t.ok(r.log.includes('não foi possível etiquetar as imagens'), 'at the tagging step')
+  t.absent(s.exists('state/segredos/efetivo.env.novo'), 'the candidate is gone')
+  t.absent(s.exists('state/segredos/abrir'), 'the work directory is gone')
+  t.alike(leaks(r, Object.values(v)), [], 'no value in the log or the output')
+
+  // SIGTERM at the same point, before the INT/TERM trap of the switch.
+  const k = secretsServer(t, { localEnv: PLAIN })
+  k.s.write('fix/term_at_tag', '')
+  const rk = k.s.run(MAIN + 'cmd_apply')
+  t.not(rk.status, 0, 'the terminated apply does not exit 0')
+  t.ok(rk.log.includes('segredos compartilhados: 3 variáveis aplicadas'), 'it was terminated after a successful prepare')
+  t.absent(k.s.exists('state/segredos/efetivo.env.novo'), 'SIGTERM leaves no candidate')
+  t.absent(k.s.exists('state/segredos/abrir'), 'and no work directory')
+  t.is(k.s.read('state/atual'), record(OLD_COMMIT, 1, OLD_SEEDER, OLD_WEB), 'atual unchanged')
+
+  // status and check never touch a candidate a locked run is writing.
+  s.write('state/segredos/efetivo.env.novo', 'X=1\n', 0o600)
+  fs.mkdirSync(s.p('state/segredos/abrir'))
+  s.write('state/segredos/abrir/aberto.env', 'X=1\n')
+  t.is(s.run(MAIN + 'cmd_status').status, 0, 'status passes')
+  t.is(s.run(MAIN + 'cmd_check').status, 0, 'check passes')
+  t.ok(s.exists('state/segredos/efetivo.env.novo'), 'status and check leave the candidate')
+  t.ok(s.exists('state/segredos/abrir/aberto.env'), 'and the work directory')
+})
+
+test('update.sh: the timer never drops shared names on its own; apply and reconfigure go on and say so', (t) => {
+  if (!hasBash(t)) return
+  const pair = () => ({ api: sentinel('didit'), wf: sentinel('wf') })
+  const withPair = (s, p) => {
+    const text = PLAIN + MARK + "\nVARANDA_DIDIT_API_KEY='" + p.api + "'\nVARANDA_DIDIT_WORKFLOW_ID='" + p.wf + "'\n"
+    s.write('state/segredos/efetivo.env', text, 0o600)
+    return text
+  }
+  const names = 'VARANDA_DIDIT_API_KEY VARANDA_DIDIT_WORKFLOW_ID'
+
+  // Not a recipient any more: the timer refuses, with the names only.
+  const { s, v } = secretsServer(t, { localEnv: PLAIN })
+  s.write('etc/update.conf', 'VARANDA_UPDATE=auto\n')
+  const p = pair()
+  const text = withPair(s, p)
+  s.write('fix/open_rc', '3')
+  const r = s.run(MAIN + 'cmd_run')
+  t.is(r.status, 1, 'run exits 1')
+  t.ok(r.log.includes('segredos compartilhados: a nova versão deixaria sem valor ' + names + '; nada mudou. Para subir sem eles, rode update.sh apply'),
+    'names the lost names and the way to accept it: ' + r.log)
+  t.absent(/ up -d/.test(r.calls), 'no compose up')
+  t.is(s.read('state/atual'), record(OLD_COMMIT, 1, OLD_SEEDER, OLD_WEB), 'atual unchanged')
+  t.is(s.read('state/segredos/efetivo.env'), text, 'efetivo.env unchanged')
+  t.absent(s.exists('state/segredos/efetivo.env.novo'), 'no candidate left')
+  t.absent(s.exists('state/recusadas'), 'the digest is not refused')
+  t.absent(s.exists('state/intervencao'), 'no intervention')
+  t.alike(leaks(r, [...Object.values(v), p.api, p.wf]), [], 'no value in the log or the output')
+
+  // An explicit apply goes on and logs the loss.
+  const a = s.run(MAIN + 'cmd_apply')
+  t.is(a.status, 0, 'explicit apply passes: ' + a.log)
+  t.ok(a.log.includes('segredos compartilhados: seguindo sem ' + names + ', que a versão em uso tinha'), 'logs the names it goes on without')
+  t.absent(s.exists('state/segredos/efetivo.env'), 'efetivo.env is gone')
+  t.alike(leaks(a, [...Object.values(v), p.api, p.wf]), [], 'no value in the log or the output')
+
+  // A candidate that keeps the names, or varanda.env setting them, passes.
+  const k = secretsServer(t, { localEnv: PLAIN })
+  k.s.write('etc/update.conf', 'VARANDA_UPDATE=auto\n')
+  const kp = pair()
+  withPair(k.s, kp)
+  k.s.write('fix/aberto.env', "VARANDA_DIDIT_API_KEY='" + kp.api + "'\nVARANDA_DIDIT_WORKFLOW_ID='" + kp.wf + "'\n")
+  const kr = k.s.run(MAIN + 'cmd_run')
+  t.is(kr.status, 0, 'run passes when the candidate keeps the names: ' + kr.log)
+  t.ok(k.s.read('state/segredos/efetivo.env').includes("VARANDA_DIDIT_API_KEY='" + kp.api + "'"), 'the names are still there')
+  const l = secretsServer(t, { localEnv: PLAIN + 'VARANDA_DIDIT_API_KEY=local\nVARANDA_DIDIT_WORKFLOW_ID=local\n' })
+  l.s.write('etc/update.conf', 'VARANDA_UPDATE=auto\n')
+  withPair(l.s, pair())
+  l.s.write('fix/open_rc', '3')
+  t.is(l.s.run(MAIN + 'cmd_run').status, 0, 'run passes when varanda.env sets the names')
+
+  // reconfigure goes on and logs it too.
+  const c = secretsServer(t, { localEnv: PLAIN })
+  installRelease(c.s, COMMIT, { www: false })
+  c.s.write('state/atual', record(COMMIT, 5, SEEDER_REF, WEB_REF))
+  withPair(c.s, pair())
+  c.s.write('fix/open_rc', '3')
+  const cr = c.s.run(MAIN + 'cmd_reconfigure')
+  t.is(cr.status, 0, 'reconfigure passes: ' + cr.log)
+  t.ok(cr.log.includes('seguindo sem ' + names), 'and logs the names')
+})
+
+test('update.sh: a sealed file needs the signers list of the same bundle', (t) => {
+  if (!hasBash(t)) return
+  const { s, v } = secretsServer(t, { localEnv: PLAIN })
+  fs.rmSync(s.p('fix/bundle/secrets-signers.txt'))
+  const { val, text } = keepEfetivo(s)
+  const r = s.run(MAIN + 'cmd_apply')
+  nothingChanged(t, s, r, text, 'no secrets-signers.txt')
+  t.ok(r.log.includes('segredos compartilhados: o pacote traz secrets.sealed.json sem secrets-signers.txt; nada mudou'), 'says the signers list is missing')
+  t.absent(s.exists('fix/open_calls'), 'secrets open never runs')
+  t.alike(leaks(r, [...Object.values(v), val]), [], 'no value in the log or the output')
+
+  const l = secretsServer(t, { localEnv: PLAIN })
+  fs.rmSync(l.s.p('fix/bundle/secrets-signers.txt'))
+  fs.mkdirSync(l.s.p('fix/bundle/secrets-signers.txt'))
+  const rl = l.s.run(MAIN + 'cmd_apply')
+  t.is(rl.status, 1, 'a signers path that is not a regular file is refused')
+  t.absent(l.s.exists('fix/open_calls'), 'secrets open never runs')
+
+  // Without a sealed file the signers list is optional.
+  const n = secretsServer(t, { localEnv: PLAIN })
+  fs.rmSync(n.s.p('fix/bundle/secrets-signers.txt'))
+  fs.rmSync(n.s.p('fix/bundle/secrets.sealed.json'))
+  t.is(n.s.run(MAIN + 'cmd_apply').status, 0, 'a bundle with neither file applies')
+
+  // A bad signature (exit 1 of secrets open) aborts like any other failure.
+  const b = secretsServer(t, { localEnv: PLAIN })
+  const kept = keepEfetivo(b.s)
+  b.s.write('fix/open_rc', '1')
+  nothingChanged(t, b.s, b.s.run(MAIN + 'cmd_apply'), kept.text, 'exit 1 of secrets open')
+})
+
+test('update.sh: rollback pre-flights efetivo.env.anterior, not the running env', (t) => {
+  if (!hasBash(t)) return
+  const rb = server(t)
+  rb.write('etc/varanda.env', PLAIN)
+  installRelease(rb, OLD_COMMIT, { www: false })
+  rb.write('state/atual', record(COMMIT, 5, SEEDER_REF, WEB_REF))
+  rb.write('state/anterior', record(OLD_COMMIT, 1, OLD_SEEDER, OLD_WEB))
+  fs.mkdirSync(rb.p('state/segredos'))
+  rb.write('state/segredos/efetivo.env', PLAIN, 0o600)
+  rb.write('state/segredos/efetivo.env.anterior', 'VARANDA_MAX_SOCKETS=abc\n', 0o600)
+  const r = rb.run(MAIN + 'cmd_rollback')
+  t.is(r.status, 1, 'a bad efetivo.env.anterior refuses the rollback')
+  t.ok(r.log.includes('VARANDA_MAX_SOCKETS inválido em ' + rb.p('state/segredos/efetivo.env.anterior')), 'the pre-flight read efetivo.env.anterior')
+  t.absent(composeRan(r.calls), 'no compose')
+  t.is(rb.read('state/atual'), record(COMMIT, 5, SEEDER_REF, WEB_REF), 'atual unchanged')
+})
+
+test('update.sh: secrets-key accepts a pretty-printed key file and refuses two public keys', (t) => {
+  if (!hasBash(t)) return
+  const keyed = () => {
+    const s = server(t)
+    const pub = H('9', 64)
+    const sec = sentinel('secret')
+    s.write('fix/pub', pub + '\n')
+    s.write('fix/sec', sec)
+    return { s, pub, sec }
+  }
+  const p = keyed()
+  p.s.write('fix/key_pretty', '')
+  const r = p.s.run(MAIN + 'ref_chave=' + SEEDER_REF + '\ncmd_secrets_key')
+  t.is(r.status, 0, 'a pretty-printed key file passes: ' + r.out)
+  t.is(r.stdout, p.pub + '\n', 'stdout is exactly the public key')
+  t.alike(leaks(r, [p.sec]), [], 'no secret key in the log or the output')
+
+  const two = keyed()
+  two.s.write('fix/key_two', H('8', 64))
+  const rt = two.s.run(MAIN + 'ref_chave=' + SEEDER_REF + '\ncmd_secrets_key')
+  t.is(rt.status, 1, 'a key file with two public keys is refused')
+  t.absent(two.s.exists('etc/secrets-key.json'), 'no key file')
+  t.is(rt.stdout, '', 'nothing on stdout')
 })

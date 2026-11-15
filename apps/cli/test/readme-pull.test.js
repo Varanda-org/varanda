@@ -14,6 +14,8 @@ const read = (file) => fs.readFileSync(path.join(repoRoot, file), 'utf8')
 
 const readme = read('README.md')
 const updateSh = read('deploy/seeder/update.sh')
+const cliSource = read('apps/cli/lib/cli.js')
+const { ALLOWED } = require('../lib/sealed-secrets')
 const cosignRef = read('deploy/seeder/cosign.ref').trim()
 const EM_DASH = String.fromCharCode(0x2014)
 const HEADING = '### Atualização por imagem (pull)'
@@ -105,7 +107,7 @@ test('every command of the update.sh usage line appears in the section', (t) => 
   const usage = /^uso='uso: update\.sh (.*)'$/m.exec(updateSh)
   t.ok(usage, 'update.sh has a usage line')
   const commands = usage[1].split('|').map((part) => part.trim().split(' ')[0])
-  t.alike(commands, ['install', 'run', 'check', 'apply', 'reconfigure', 'rollback', 'status', 'compose'], 'the eight commands')
+  t.alike(commands, ['install', 'run', 'check', 'apply', 'reconfigure', 'rollback', 'status', 'compose', 'secrets-key'], 'the nine commands')
   for (const command of commands) {
     t.ok(new RegExp('(update\\.sh |`)' + command + '\\b').test(section), command + ' is documented')
   }
@@ -160,14 +162,69 @@ test('no em dash in the README section, the CHANGELOG entry or verification sect
   const first = changelog.slice(top + 18, changelog.indexOf('\n- ', top + 18))
   t.ok(first.includes('feat/seeder-pull-updater'), 'the top entry is the pull-updater entry')
   t.is(first.includes(EM_DASH), false, 'CHANGELOG entry')
+  const secondFrom = top + 18 + first.length + 1
+  const second = changelog.slice(secondFrom, changelog.indexOf('\n- ', secondFrom + 1))
+  t.ok(second.startsWith('- ') && second.includes('feat/seeder-sealed-secrets'), 'the next entry is the sealed-secrets entry')
+  t.is(second.includes(EM_DASH), false, 'CHANGELOG sealed-secrets entry')
   const verification = read('docs/verification.md')
   const at = verification.indexOf('\n## 247. ')
   t.ok(at > -1, 'verification has section 247')
   const next = verification.indexOf('\n## ', at + 1)
   const part = next === -1 ? verification.slice(at) : verification.slice(at, next)
   t.is(part.includes(EM_DASH), false, 'verification section 247')
-  t.ok(part.startsWith('\n## 247. Versões do semeador por imagem (PRs build/seeder-release-images, feat/seeder-pull-updater)\n'), 'section 247 has its title')
+  t.ok(part.startsWith('\n## 247. Versões do semeador por imagem (PRs build/seeder-release-images, feat/seeder-pull-updater, feat/seeder-sealed-secrets)\n'), 'section 247 has its title')
   t.ok(part.includes('Manage Actions access'), 'section 247 checks the Write access of the packages')
+})
+
+// The flags of `secrets seal` as the HELP block of cli.js lists them.
+function sealFlags () {
+  const line = /^ {2}secrets seal .*\((--[a-z-]+(?:, --[a-z-]+)*)\)$/m.exec(cliSource)
+  return line ? line[1].split(', ') : []
+}
+
+test('the section documents the sealed secrets flow as the code does it', (t) => {
+  const keyFile = shValue('chave_segredos')
+  t.is(keyFile, '/etc/varanda/secrets-key.json', 'update.sh keeps the server key here')
+  t.ok(section.includes(keyFile), 'the section names the server key file')
+  t.ok(section.includes('update.sh secrets-key'), 'and the command that creates it')
+  t.ok(section.includes('secrets-key --image ghcr.io/varanda-org/varanda-seeder@sha256:'), 'including the form before install')
+  t.ok(section.includes('secrets.sealed.json'), 'the sealed file is named')
+  t.ok(section.includes('deploy/seeder/secrets.sealed.json'), 'with its path in the repository')
+  t.ok(section.includes('efetivo.env'), 'the effective env file is named')
+  t.ok(section.includes(shValue('state') + '/segredos/efetivo.env'), 'with the path update.sh gives it')
+  const mark = /^marca_segredos='(.*)'$/m.exec(updateSh)
+  t.ok(mark, 'update.sh has the marker line')
+  t.ok(section.includes(mark[1]), 'the marker line is shown')
+  for (const log of ['este servidor não é destinatário', 'variáveis aplicadas', 'segredos compartilhados:', 'chave dos segredos:']) {
+    t.ok(updateSh.includes(log), 'update.sh prints ' + log)
+    t.ok(section.includes(log), 'the section says ' + log)
+  }
+  for (const name of ALLOWED) t.ok(section.includes('`' + name + '`'), name + ' is named as shareable')
+  for (const name of ['VARANDA_PHONE_KEY', 'VARANDA_PAGE_KEYS', 'VARANDA_TRIAGE_TOKEN', 'VARANDA_PUSH_TOKEN']) {
+    t.ok(section.includes('`' + name + '`'), name + ' is named as never shared')
+  }
+  t.ok(section.includes('--network none --read-only --cap-drop ALL'), 'the isolation of the open step')
+  t.ok(updateSh.includes('--network none --read-only --cap-drop ALL'), 'which update.sh uses')
+})
+
+test('the seal command in the section has the flags cli.js lists', (t) => {
+  const flags = sealFlags()
+  t.alike(flags, ['--file', '--recipients', '--signing-key', '--out'], 'cli.js lists four flags for secrets seal')
+  const command = /`varanda secrets seal ([^`]*)`/.exec(section)
+  t.ok(command, 'the section shows the seal command')
+  for (const flag of flags) t.ok(command[1].includes(flag + ' '), 'the seal command passes ' + flag)
+  t.ok(command[1].includes('--out deploy/seeder/secrets.sealed.json'), 'and writes the file the bundle carries')
+})
+
+test('section 247 checks the sealed secrets flow', (t) => {
+  const verification = read('docs/verification.md')
+  const at = verification.indexOf('\n## 247. ')
+  const next = verification.indexOf('\n## ', at + 1)
+  const part = next === -1 ? verification.slice(at) : verification.slice(at, next)
+  for (const needle of ['secrets-key', '/etc/varanda/secrets-key.json', 'efetivo.env', 'não é destinatário', 'docker inspect', 'rollback', 'secrets.test.js']) {
+    t.ok(part.includes(needle), 'section 247 names ' + needle)
+  }
+  t.ok(part.includes('- [ ] 41. ') && part.includes('- [ ] 50. '), 'the sealed checks are numbered 41 to 50')
 })
 
 test('the new files carry no em dash', (t) => {

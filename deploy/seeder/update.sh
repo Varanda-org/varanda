@@ -12,6 +12,13 @@
 #   update.sh rollback     # volta para a versão anterior
 #   update.sh status
 #   update.sh compose <argumentos do docker compose>
+#   update.sh secrets-key [--image ghcr.io/varanda-org/varanda-seeder@sha256:<64 hex>]
+#
+# Segredos compartilhados: o pacote da versão pode trazer secrets.sealed.json
+# (varanda secrets seal). Com /etc/varanda/secrets-key.json (secrets-key), a
+# imagem nova, já conferida, o abre sem rede, e o compose recebe
+# $state/segredos/efetivo.env: varanda.env mais os nomes que ele deixa
+# ausentes ou vazios. Um valor local não vazio sempre vence.
 #
 # Modelo de confiança: só roda uma imagem de ghcr.io/varanda-org/varanda-seeder
 # assinada (cosign keyless) pelo workflow do canal em main. A assinatura é
@@ -40,6 +47,10 @@ lock_file="$lock_dir/lock"
 marcador="$lock_dir/modo-pull"
 conf_file=/etc/varanda/update.conf
 env_padrao=/etc/varanda/varanda.env
+# A chave X25519 deste servidor (secrets-key) e, de root e 0700, o ambiente
+# efetivo do compose (efetivo.env), o da versão anterior e o candidato.
+chave_segredos=/etc/varanda/secrets-key.json
+segredos="$state/segredos"
 releases=/opt/varanda-release
 units_dir=/etc/systemd/system
 # Acima disto o registro vira .1 (só uma geração guardada).
@@ -70,7 +81,17 @@ json_type_re='^application/json( *;.*)?$'
 moderator_re='^[^[:space:],@]+@[^[:space:],@]+$'
 limite_re='^[1-9][0-9]{0,7}$'
 limites_conta='VARANDA_MAX_MEMBERS:1:4096 VARANDA_ACCOUNT_MAX_CONNECTIONS:1:4096 VARANDA_ACCOUNT_RATE:1:10000 VARANDA_ACCOUNT_BURST:1:100000 VARANDA_ACCOUNT_MAX_PENDING:1:100000 VARANDA_INVITES_PER_WEEK:1:100 VARANDA_INVITE_DROPS:1:1 VARANDA_FEIRA_INVITES_PER_WEEK:1:100'
-uso='uso: update.sh install --image ghcr.io/varanda-org/varanda-seeder@sha256:<64 hex> | run | check | apply | reconfigure | rollback | status | compose <argumentos>'
+uso='uso: update.sh install --image ghcr.io/varanda-org/varanda-seeder@sha256:<64 hex> | run | check | apply | reconfigure | rollback | status | compose <argumentos> | secrets-key [--image ghcr.io/varanda-org/varanda-seeder@sha256:<64 hex>]'
+# Uma linha de `varanda secrets open`: NOME='valor', sem aspas simples nem
+# barra invertida dentro do valor.
+aberto_re="^([A-Z][A-Z0-9_]*)='[^'\\\\]*'\$"
+# Os únicos nomes que um arquivo selado pode trazer (os de secrets.js): um
+# arquivo aberto com qualquer outro nome é recusado inteiro.
+nomes_segredos='VARANDA_DIDIT_API_KEY VARANDA_DIDIT_WORKFLOW_ID VARANDA_GOOGLE_CLIENT_ID VARANDA_GOOGLE_CLIENT_SECRET VARANDA_GIF_API_URL VARANDA_GIF_API_KEY VARANDA_GIF_MEDIA_HOSTS VARANDA_AUDIUS_API_KEY'
+# Separa, no efetivo.env, as linhas de varanda.env das que vieram do arquivo
+# selado (status lê os nomes depois dela). Um comentário para o compose.
+marca_segredos='# segredos compartilhados (update.sh)'
+chave_hex_re='^[0-9a-f]{64}$'
 
 # O diretório real deste script: cosign.ref e well-known.sh vêm daqui, nunca
 # da imagem candidata.
@@ -82,6 +103,17 @@ perfil=''
 identidade=''
 cosign_ref=''
 env_file=''
+# /etc/varanda/varanda.env quando existe; env_file é ele ou um efetivo.env.
+env_local=''
+ref_chave=''
+# 1: o candidato efetivo.env.novo existe; 0: sem segredos compartilhados.
+segredos_novo=0
+# 1 depois que esta execução (com o lock) começou a abrir segredos: ao_sair
+# apaga o que sobrou de texto aberto. Um comando sem lock nunca apaga.
+segredos_criados=0
+# 1 na primeira passada do pré-voo: o cliente Google ainda pode vir do
+# arquivo selado, e o candidato é conferido por inteiro depois.
+adiar_google=0
 domain=''
 assoc=''
 # Preenchidos por ler_associacoes e lidos por gravar_associacoes (well-known.sh).
@@ -152,6 +184,11 @@ ao_sair() {
   local rc=$?
   if [ "$isolado" = 1 ] && [ "$rc" = 1 ]; then
     printf '%s\n' "detalhes no servidor: $log_file" >&3 2>/dev/null || true
+  fi
+  # Texto aberto não sobrevive à execução que o criou (uma saída antecipada
+  # ou um TERM). Só esta execução, com o lock, o criou.
+  if [ "$segredos_criados" = 1 ]; then
+    rm -rf "$segredos/abrir" "$segredos/efetivo.env.novo" || true
   fi
 }
 
@@ -253,10 +290,11 @@ ler_conf() {
 }
 
 # O arquivo de ambiente do compose. Tudo que o lê passa por $env_file, e só
-# esta função decide qual é.
+# usar_env decide qual é: o efetivo.env da versão em uso ou varanda.env.
 arquivo_env() {
   local dm
   env_file=''
+  env_local=''
   if [ -e "$env_padrao" ] || [ -L "$env_padrao" ]; then
     if [ -L "$env_padrao" ] || [ ! -f "$env_padrao" ]; then
       morrer_cedo 1 "$env_padrao precisa ser um arquivo comum"
@@ -266,10 +304,32 @@ arquivo_env() {
     if ! [[ $dm =~ $privado_re ]]; then
       morrer_cedo 1 "$env_padrao precisa ser de root, sem acesso para grupo ou outros (chmod 600)"
     fi
-    env_file=$env_padrao
+    env_local=$env_padrao
   elif [ "$perfil" = full ]; then
     morrer_cedo 1 "falta $env_padrao (o perfil full exige)"
   fi
+  # O ambiente efetivo da versão em uso, quando um apply o gravou.
+  if [ -e "$segredos/efetivo.env" ] || [ -L "$segredos/efetivo.env" ]; then
+    if [ -L "$segredos/efetivo.env" ] || [ ! -f "$segredos/efetivo.env" ]; then
+      morrer_cedo 1 "$segredos/efetivo.env precisa ser um arquivo comum"
+    fi
+    dm=$(dono_modo "$segredos/efetivo.env") || morrer_cedo 1 "não foi possível ler o dono de $segredos/efetivo.env"
+    if ! [[ $dm =~ $privado_re ]]; then
+      morrer_cedo 1 "$segredos/efetivo.env precisa ser de root, sem acesso para grupo ou outros"
+    fi
+  fi
+  usar_env "$segredos/efetivo.env"
+}
+
+# O arquivo de ambiente do compose: o efetivo dado, se existir (um arquivo
+# comum), senão varanda.env, exatamente como sem segredos compartilhados.
+usar_env() {
+  if [ -f "$1" ] && [ ! -L "$1" ]; then
+    env_file=$1
+  else
+    env_file=$env_local
+  fi
+  return 0
 }
 
 # Root roda well-known.sh e confia em cosign.ref: se alguém além de root
@@ -562,15 +622,18 @@ conferir_env_web() {
     return 1
   fi
   # O cliente OAuth: só se estão vazios; o valor nunca vai para o registro.
-  google_id=$(sed -n 's/^VARANDA_GOOGLE_CLIENT_ID=//p' "$env_file" | tail -n 1 | tr -d '\r"'"'")
-  if [ -z "$google_id" ]; then
-    log "VARANDA_GOOGLE_CLIENT_ID ausente em $env_file"
-    return 1
-  fi
-  google_secret=$(sed -n 's/^VARANDA_GOOGLE_CLIENT_SECRET=//p' "$env_file" | tail -n 1 | tr -d '\r"'"'")
-  if [ -z "$google_secret" ]; then
-    log "VARANDA_GOOGLE_CLIENT_SECRET ausente em $env_file"
-    return 1
+  # Na primeira passada ele ainda pode vir do arquivo selado.
+  if [ "$adiar_google" = 0 ]; then
+    google_id=$(sed -n 's/^VARANDA_GOOGLE_CLIENT_ID=//p' "$env_file" | tail -n 1 | tr -d '\r"'"'")
+    if [ -z "$google_id" ]; then
+      log "VARANDA_GOOGLE_CLIENT_ID ausente em $env_file"
+      return 1
+    fi
+    google_secret=$(sed -n 's/^VARANDA_GOOGLE_CLIENT_SECRET=//p' "$env_file" | tail -n 1 | tr -d '\r"'"'")
+    if [ -z "$google_secret" ]; then
+      log "VARANDA_GOOGLE_CLIENT_SECRET ausente em $env_file"
+      return 1
+    fi
   fi
   moderators=$(sed -n 's/^VARANDA_MODERATOR_EMAILS=//p' "$env_file" | tail -n 1 | tr -d '\r"'"'" |
     sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
@@ -699,6 +762,265 @@ conferir_env() {
   if [ "$perfil" = full ] && ! ler_associacoes "$env_file"; then
     return 1
   fi
+}
+
+# O valor local de $1 em varanda.env (vazio sem ele): a última atribuição,
+# aspas, CR e comentário no fim descartados. Nunca vai para o registro.
+valor_local() {
+  if [ -z "$env_local" ]; then
+    return 0
+  fi
+  sed -n "s/^[[:space:]]*$1[[:space:]]*=//p" "$env_local" | tail -n 1 | tr -d '\r"'"'" |
+    sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+# Os nomes depois da última marca de um efetivo.env, separados por espaço
+# (vazio sem o arquivo): nunca um valor.
+nomes_compartilhados() {
+  if [ ! -f "$1" ] || [ -L "$1" ]; then
+    return 0
+  fi
+  awk -v m="$marca_segredos" '$0 == m { s = ""; on = 1; next }
+    on && match($0, /^[A-Z][A-Z0-9_]*=/) { s = s " " substr($0, 1, RLENGTH - 1) }
+    END { print s }' "$1"
+}
+
+# Os nomes compartilhados que o efetivo.env em uso traz e que o ambiente
+# novo perderia (fora do candidato e vazios em varanda.env). Com $1=recusar
+# (o timer), uma perda recusa a troca; senão (apply, reconfigure) só fica no
+# registro. Só nomes, nunca valores.
+conferir_perda_segredos() {
+  local atuais novos='' nome perdidos=''
+  atuais=$(nomes_compartilhados "$segredos/efetivo.env") || return 1
+  if [ -z "$atuais" ]; then
+    return 0
+  fi
+  if [ "$segredos_novo" = 1 ]; then
+    novos=$(nomes_compartilhados "$segredos/efetivo.env.novo") || return 1
+  fi
+  for nome in $atuais; do
+    case " $novos " in *" $nome "*) continue ;; esac
+    if [ -n "$(valor_local "$nome")" ]; then
+      continue
+    fi
+    perdidos="$perdidos $nome"
+  done
+  if [ -z "$perdidos" ]; then
+    return 0
+  fi
+  if [ "$1" = recusar ]; then
+    log "segredos compartilhados: a nova versão deixaria sem valor${perdidos}; nada mudou. Para subir sem eles, rode update.sh apply"
+    return 1
+  fi
+  log "segredos compartilhados: seguindo sem${perdidos}, que a versão em uso tinha"
+  return 0
+}
+
+# O candidato: os bytes de varanda.env, um LF se ele não termina com um, e as
+# linhas abertas só dos nomes que varanda.env deixa ausentes ou vazios (a
+# última atribuição vale, como no compose). Chamada com umask 077: o arquivo
+# nasce 0600. Nunca registra um valor.
+juntar_segredos() {
+  local aberto=$1 novo=$2 linha nome valor n=0 vistos=' ' rc=0
+  # Só bytes ASCII imprimíveis: nada de tabulação, CR ou controle. grep sai
+  # com 1 só quando leu tudo e não achou nenhum.
+  LC_ALL=C grep -q '[^ -~]' "$aberto" || rc=$?
+  if [ "$rc" != 1 ]; then
+    log 'segredos compartilhados: o arquivo aberto tem bytes fora do ASCII imprimível'
+    return 1
+  fi
+  # A busca do valor local abaixo só entende NOME=valor; o compose também lê
+  # "export NOME=valor" e "NOME: valor", que perderiam para o compartilhado.
+  if [ -n "$env_local" ]; then
+    for nome in $nomes_segredos; do
+      if grep -Eq "^[[:space:]]*(export[[:space:]]+${nome}([[:space:]]*[=:]|[[:space:]]*\$)|${nome}[[:space:]]*:)" "$env_local"; then
+        log "$nome em $env_local usa export ou ':'; escreva NOME=valor; nada mudou"
+        return 1
+      fi
+    done
+  fi
+  rm -f "$novo" || return 1
+  : >"$novo" || return 1
+  chmod 0600 "$novo" || return 1
+  if [ -n "$env_local" ]; then
+    cat "$env_local" >>"$novo" || return 1
+    # $(...) tira os LF do fim: vazio quando o último byte é LF.
+    if [ -n "$(tail -c 1 "$env_local")" ]; then
+      printf '\n' >>"$novo" || return 1
+    fi
+  fi
+  while IFS= read -r linha || [ -n "$linha" ]; do
+    if ! [[ $linha =~ $aberto_re ]]; then
+      log 'segredos compartilhados: uma linha aberta está fora do formato NOME=valor'
+      return 1
+    fi
+    nome=${BASH_REMATCH[1]}
+    case " $nomes_segredos " in
+      *" $nome "*) ;;
+      *)
+        log "segredos compartilhados: o arquivo aberto traz $nome, que não é um nome compartilhado"
+        return 1
+        ;;
+    esac
+    case $vistos in
+      *" $nome "*)
+        log "segredos compartilhados: o arquivo aberto repete $nome"
+        return 1
+        ;;
+    esac
+    vistos="$vistos$nome "
+    valor=$(valor_local "$nome") || return 1
+    if [ -n "$valor" ]; then
+      continue
+    fi
+    if [ "$n" = 0 ]; then
+      printf '%s\n' "$marca_segredos" >>"$novo" || return 1
+    fi
+    printf '%s\n' "$linha" >>"$novo" || return 1
+    n=$((n + 1))
+  done <"$aberto"
+  log "segredos compartilhados: $n variáveis aplicadas"
+}
+
+# Abre o secrets.sealed.json do pacote em $2 com a imagem $1 (já conferida,
+# por digest), sem rede, só se assinado por um remetente de
+# secrets-signers.txt do mesmo pacote (senão a saída 1), e prepara o candidato $segredos/efetivo.env.novo
+# (segredos_novo=1). Sem arquivo selado, sem chave ou com a saída 3 (este
+# servidor não é destinatário), o candidato é "sem segredos compartilhados"
+# (segredos_novo=0). Qualquer outra falha retorna 1 sem nada mudado.
+preparar_segredos() {
+  local imagem=$1 selado="$2/secrets.sealed.json" assinantes="$2/secrets-signers.txt" trabalho="$segredos/abrir" novo="$segredos/efetivo.env.novo" dm rc=0
+  segredos_novo=0
+  if [ -L "$segredos" ] || ! (umask 077 && mkdir -p "$segredos") || ! chmod 0700 "$segredos"; then
+    log "$segredos precisa ser um diretório comum"
+    return 1
+  fi
+  # Uma execução que morreu no meio pode ter deixado o diretório de trabalho.
+  segredos_criados=1
+  rm -rf "$trabalho" "$novo" || return 1
+  if [ ! -f "$selado" ]; then
+    log 'segredos compartilhados: o pacote não traz secrets.sealed.json'
+    return 0
+  fi
+  # Só um remetente da lista fixada no pacote (conferida com a imagem) vale.
+  if [ -L "$assinantes" ] || [ ! -f "$assinantes" ]; then
+    log 'segredos compartilhados: o pacote traz secrets.sealed.json sem secrets-signers.txt; nada mudou'
+    return 1
+  fi
+  if [ ! -e "$chave_segredos" ] && [ ! -L "$chave_segredos" ]; then
+    log "segredos compartilhados: sem $chave_segredos (update.sh secrets-key)"
+    return 0
+  fi
+  if [ -L "$chave_segredos" ] || [ ! -f "$chave_segredos" ]; then
+    log "$chave_segredos precisa ser um arquivo comum; nada mudou"
+    return 1
+  fi
+  if ! dm=$(dono_modo "$chave_segredos") || [ "$dm" != '0 600' ]; then
+    log "$chave_segredos precisa ser de root, modo 0600; nada mudou"
+    return 1
+  fi
+  # Sempre um diretório novo e vazio: na saída 3 o comando deixa um --out que
+  # já existia como estava, e só vale um aberto.env que esta execução gravou.
+  if ! mkdir -m 0700 "$trabalho"; then
+    log "não foi possível criar $trabalho; nada mudou"
+    return 1
+  fi
+  # Nada do processo que segurou a chave vai para o registro: a saída do
+  # comando conta só pelo código.
+  docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 0:0 \
+    --mount "type=bind,source=$chave_segredos,target=/segredos/chave.json,readonly" \
+    --mount "type=bind,source=$selado,target=/segredos/selado.json,readonly" \
+    --mount "type=bind,source=$assinantes,target=/segredos/assinantes.txt,readonly" \
+    --mount "type=bind,source=$trabalho,target=/segredos/saida" \
+    "$imagem" secrets open --key-file /segredos/chave.json --file /segredos/selado.json \
+    --signers /segredos/assinantes.txt --out /segredos/saida/aberto.env >/dev/null 2>&1 || rc=$?
+  case $rc in
+    0) ;;
+    3)
+      rm -rf "$trabalho"
+      log 'segredos compartilhados: este servidor não é destinatário'
+      return 0
+      ;;
+    *)
+      rm -rf "$trabalho"
+      log "não foi possível abrir os segredos compartilhados (saída $rc); nada mudou"
+      return 1
+      ;;
+  esac
+  if [ -L "$trabalho/aberto.env" ] || [ ! -f "$trabalho/aberto.env" ]; then
+    rm -rf "$trabalho"
+    log 'segredos compartilhados: a abertura não gravou um arquivo comum; nada mudou'
+    return 1
+  fi
+  rc=0
+  umask 077
+  juntar_segredos "$trabalho/aberto.env" "$novo" || rc=$?
+  umask 022
+  rm -rf "$trabalho"
+  if [ "$rc" != 0 ]; then
+    rm -f "$novo"
+    log 'não foi possível montar o ambiente com os segredos compartilhados; nada mudou'
+    return 1
+  fi
+  segredos_novo=1
+}
+
+# O candidato passa a ser o efetivo.env. Com $1=1 (a versão instalada vira a
+# anterior), o efetivo.env atual vira efetivo.env.anterior e o anterior de
+# antes fica em efetivo.env.anterior.velho até concluir. Um arquivo ausente
+# quer dizer "sem segredos compartilhados" e também é levado. Numa falha,
+# desfaz o que trocou e retorna 1.
+trocar_segredos() {
+  local e="$segredos/efetivo.env" ea="$segredos/efetivo.env.anterior" passo=0
+  if [ "$1" = 1 ]; then
+    rm -f "$ea.velho" || return 1
+    if [ -f "$ea" ] && ! mv -f "$ea" "$ea.velho"; then
+      return 1
+    fi
+    passo=1
+    if [ -f "$e" ]; then
+      mv -f "$e" "$ea" || passo=-1
+    else
+      rm -f "$ea" || passo=-1
+    fi
+    if [ "$passo" = -1 ]; then
+      if [ -f "$ea.velho" ]; then mv -f "$ea.velho" "$ea" || true; fi
+      return 1
+    fi
+    passo=2
+  fi
+  if [ "$segredos_novo" = 1 ]; then
+    mv -f "$segredos/efetivo.env.novo" "$e" || passo=-2
+  else
+    rm -f "$e" || passo=-2
+  fi
+  if [ "$passo" = -2 ]; then
+    if [ "$1" = 1 ]; then
+      if [ -f "$ea" ]; then mv -f "$ea" "$e" || true; fi
+      if [ -f "$ea.velho" ]; then mv -f "$ea.velho" "$ea" || true; fi
+    fi
+    return 1
+  fi
+  segredos_novo=0
+  usar_env "$e"
+}
+
+# A volta: o efetivo.env da versão anterior (ou nenhum) volta a ser o do
+# compose, por cópia, e efetivo.env.anterior continua com o registro anterior.
+restaurar_segredos() {
+  local e="$segredos/efetivo.env" ea="$segredos/efetivo.env.anterior" rc=0
+  if [ -f "$ea" ] && [ ! -L "$ea" ]; then
+    umask 077
+    { rm -f "$e.tmp" && cp "$ea" "$e.tmp" && chmod 0600 "$e.tmp" && mv -f "$e.tmp" "$e"; } || rc=1
+    umask 022
+    if [ "$rc" != 0 ]; then
+      rm -f "$e.tmp" || true
+    fi
+  else
+    rm -f "$e" || rc=1
+  fi
+  usar_env "$e"
+  return "$rc"
 }
 
 # O compose de uma versão: sempre do diretório real dela, com as imagens
@@ -909,20 +1231,43 @@ em_uso() {
   montado "$dir"
 }
 
+# O candidato de uma preparação que falhou não serve para nada e guarda
+# segredos: sai, e o compose volta ao ambiente da versão em uso.
+descartar_candidato() {
+  rm -f "$segredos/efetivo.env.novo" || true
+  segredos_novo=0
+  usar_env "$segredos/efetivo.env"
+}
+
 # Etapas 1 a 3, antes de tocar em qualquer coisa que roda: o pacote da
-# imagem conferida, o www (perfil full), o pré-voo do arquivo de ambiente e
-# do compose e, só então, o diretório final.
+# imagem conferida, os segredos compartilhados, o www (perfil full), o
+# pré-voo do arquivo de ambiente e do compose e, só então, o diretório final.
+# Numa falha, o candidato dos segredos sai junto.
 preparar_versao() {
+  if montar_versao; then
+    return 0
+  fi
+  descartar_candidato
+  return 1
+}
+
+montar_versao() {
   local dir="$releases/$cand_commit" tmp="$releases/$cand_commit.tmp" f dm instalada=''
   local -a exigidos=(compose.yaml compose.release.yaml update.sh well-known.sh cosign.ref varanda-update.service varanda-update.timer)
   cand_dir=''
   if [ "$perfil" = full ]; then
     exigidos+=(compose.web.yaml compose.release.web.yaml Caddyfile)
   fi
+  # Primeira passada, em varanda.env: o cliente Google pode vir do arquivo
+  # selado, então o candidato é conferido por inteiro depois de aberto.
+  env_file=$env_local
+  adiar_google=1
   if ! conferir_env; then
+    adiar_google=0
     log 'arquivo de ambiente recusado; nada mudou'
     return 1
   fi
+  adiar_google=0
   if [ -L "$releases" ] || ! mkdir -p "$releases"; then
     log "$releases precisa ser um diretório comum"
     return 1
@@ -947,6 +1292,18 @@ preparar_versao() {
       return 1
     fi
   done
+  # Daqui em diante o www, o pré-voo e o compose config leem o candidato,
+  # nunca o efetivo.env da versão em uso.
+  if ! preparar_segredos "$cand_seeder" "$tmp"; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  usar_env "$segredos/efetivo.env.novo"
+  if ! conferir_env; then
+    log 'arquivo de ambiente recusado; nada mudou'
+    rm -rf "$tmp"
+    return 1
+  fi
   if [ "$perfil" = full ] && ! preparar_www "$tmp"; then
     rm -rf "$tmp"
     return 1
@@ -1284,7 +1641,8 @@ concluir() {
     exit 1
   fi
   apagar_imagens_velhas
-  rm -f "$state/disponivel" "$state/preparada" "$state/anterior.velho" "$state/intervencao"
+  rm -f "$state/disponivel" "$state/preparada" "$state/anterior.velho" "$state/intervencao" \
+    "$segredos/efetivo.env.anterior.velho"
   limpar_versoes
   if ! docker image prune -f; then
     log 'aviso: docker image prune falhou'
@@ -1292,9 +1650,34 @@ concluir() {
   log "atualizado para $cand_commit"
 }
 
+# A volta automática sobe a versão instalada com o ambiente dela (o
+# efetivo.env atual, ou varanda.env sem ele), e o pré-voo de antes só
+# conferiu o candidato por inteiro. Antes da troca, o ambiente da volta passa
+# pela mesma conferência; o candidato volta a ser o do compose depois.
+conferir_env_da_volta() {
+  local candidato=$env_file rc=0
+  if [ ! -f "$state/atual" ]; then
+    return 0
+  fi
+  usar_env "$segredos/efetivo.env"
+  conferir_env || rc=$?
+  if [ "$rc" != 0 ]; then
+    log "a volta automática para a versão instalada não subiria com $env_file; nada mudou. Mantenha esses valores em $env_padrao até instalar uma versão que os traga selados para este servidor, ou rode update.sh reconfigure se a versão instalada já os traz"
+  fi
+  env_file=$candidato
+  if [ "$rc" = 0 ]; then
+    # Os valores lidos (domínio, associações) voltam a ser os do candidato.
+    conferir_env || rc=$?
+  fi
+  return "$rc"
+}
+
 # Etapas 4 a 7 com a versão já preparada em $cand_dir. Uma falha ou um
 # INT/TERM depois do compose up volta para a anterior.
 aplicar() {
+  if ! conferir_env_da_volta; then
+    exit 1
+  fi
   if ! garantir_imagem "$cand_seeder"; then
     exit 1
   fi
@@ -1316,6 +1699,19 @@ aplicar() {
       exit 1
     fi
     anterior_trocado=1
+  fi
+  # No mesmo ponto, o candidato vira o efetivo.env e o de antes acompanha o
+  # registro anterior.
+  if ! trocar_segredos "$anterior_trocado"; then
+    if [ "$anterior_trocado" = 1 ]; then
+      if [ -f "$state/anterior.velho" ]; then
+        mv -f "$state/anterior.velho" "$state/anterior" || true
+      else
+        rm -f "$state/anterior" || true
+      fi
+    fi
+    log "não foi possível trocar $segredos/efetivo.env; nada do que roda mudou"
+    exit 1
   fi
   alvo_versao "$cand_dir" "$cand_seeder" "$cand_web"
   log "aplicando $cand_commit (seq $cand_seq)"
@@ -1348,6 +1744,11 @@ voltar_versao() {
   log "voltando para $r_commit"
   if ! garantir_imagem "$r_seeder" || { [ "$perfil" = full ] && ! garantir_imagem "$r_web"; }; then
     marcar_intervencao "as imagens da versão anterior ($r_commit) não estão disponíveis"
+    return 1
+  fi
+  # O ambiente volta junto com o diretório da versão.
+  if ! restaurar_segredos; then
+    marcar_intervencao "não foi possível restaurar $segredos/efetivo.env da versão anterior ($r_commit)"
     return 1
   fi
   alvo_versao "$dir" "$r_seeder" "$r_web"
@@ -1449,6 +1850,11 @@ voltar() {
       else
         rm -f "$state/anterior"
       fi
+      if [ -f "$segredos/efetivo.env.anterior.velho" ]; then
+        mv -f "$segredos/efetivo.env.anterior.velho" "$segredos/efetivo.env.anterior"
+      else
+        rm -f "$segredos/efetivo.env.anterior"
+      fi
     fi
     log "voltou para a versão anterior; $cand_commit anotada em $state/recusadas"
   fi
@@ -1474,14 +1880,40 @@ subir_instalada() {
     log "a versão instalada ($dir) foi preparada sem o app web (perfil seeder) e o perfil agora é full: volte a VARANDA_PROFILE=seeder em $conf_file, ou rode update.sh apply quando sair a próxima versão, que é preparada com o app web"
     return 1
   fi
+  # varanda.env pode ter mudado: o efetivo.env é refeito do pacote instalado,
+  # com a imagem instalada e a mesma regra de apply, antes de qualquer troca.
+  env_file=$env_local
+  adiar_google=1
   if ! conferir_env; then
+    adiar_google=0
+    log 'arquivo de ambiente recusado; nada mudou'
+    return 1
+  fi
+  adiar_google=0
+  if ! garantir_imagem "$r_seeder" || { [ "$perfil" = full ] && ! garantir_imagem "$r_web"; }; then
+    return 1
+  fi
+  if ! conferir_arvore "$dir" || ! preparar_segredos "$r_seeder" "$dir"; then
+    descartar_candidato
+    return 1
+  fi
+  if ! conferir_perda_segredos registrar; then
+    descartar_candidato
+    return 1
+  fi
+  usar_env "$segredos/efetivo.env.novo"
+  if ! conferir_env; then
+    descartar_candidato
     log 'arquivo de ambiente recusado; nada mudou'
     return 1
   fi
   if [ "$perfil" = full ] && ! gravar_associacoes "$dir/www"; then
+    descartar_candidato
     return 1
   fi
-  if ! garantir_imagem "$r_seeder" || { [ "$perfil" = full ] && ! garantir_imagem "$r_web"; }; then
+  if ! trocar_segredos 0; then
+    descartar_candidato
+    log "não foi possível trocar $segredos/efetivo.env; nada mudou"
     return 1
   fi
   alvo_versao "$dir" "$r_seeder" "$r_web"
@@ -1533,6 +1965,13 @@ cmd_run() {
   if ! preparar_versao; then
     exit 1
   fi
+  # Sozinho, o timer nunca desliga o que vinha do arquivo selado (a
+  # verificação de idade da Didit, por exemplo). Sem recusada e sem
+  # intervenção: a próxima versão que os traga aplica normalmente.
+  if ! conferir_perda_segredos recusar; then
+    descartar_candidato
+    exit 1
+  fi
   aplicar
   exit 0
 }
@@ -1555,6 +1994,10 @@ cmd_apply() {
     exit 0
   fi
   if ! preparar_versao; then
+    exit 1
+  fi
+  if ! conferir_perda_segredos registrar; then
+    descartar_candidato
     exit 1
   fi
   aplicar
@@ -1585,9 +2028,13 @@ cmd_rollback() {
     digest=$(ler_estado "$state/atual" seeder)
     digest=${digest#*@}
   fi
-  if [ "$(ler_estado "$state/anterior" origem)" != checkout ] && ! conferir_env; then
-    log 'arquivo de ambiente recusado; nada mudou'
-    exit 1
+  # O pré-voo confere o ambiente com que a volta sobe: o da versão anterior.
+  if [ "$(ler_estado "$state/anterior" origem)" != checkout ]; then
+    usar_env "$segredos/efetivo.env.anterior"
+    if ! conferir_env; then
+      log 'arquivo de ambiente recusado; nada mudou'
+      exit 1
+    fi
   fi
   trap - ERR
   trap '' INT TERM
@@ -1602,7 +2049,8 @@ cmd_rollback() {
         marcar_intervencao "voltou para $r_commit, mas $state/atual não foi gravado"
         exit 1
       fi
-      rm -f "$state/anterior" "$state/anterior.velho" "$state/intervencao"
+      rm -f "$state/anterior" "$state/anterior.velho" "$state/intervencao" \
+        "$segredos/efetivo.env.anterior" "$segredos/efetivo.env.anterior.velho"
       if ! trocar_atual "$releases/$r_commit"; then
         log "aviso: não foi possível apontar $releases/current para $r_commit"
       fi
@@ -1621,7 +2069,7 @@ cmd_rollback() {
 }
 
 cmd_status() {
-  local u
+  local u nomes
   printf 'modo: %s\ncanal: %s\nperfil: %s\n' "$modo" "$canal" "$perfil"
   if ler_registro "$state/atual"; then
     printf 'instalada: %s (seq %s)\n' "$r_commit" "$r_seq"
@@ -1645,6 +2093,12 @@ cmd_status() {
     printf 'intervenção: %s\n' "$(head -n 1 "$state/intervencao")"
   else
     printf 'intervenção: nenhuma\n'
+  fi
+  # Só os nomes, os depois da última marca: nunca um valor.
+  nomes=$(nomes_compartilhados "$segredos/efetivo.env")
+  printf 'segredos compartilhados:%s\n' "${nomes:- nenhum}"
+  if [ -f "$chave_segredos" ]; then
+    printf 'chave dos segredos: %s\n' "$chave_segredos"
   fi
   for u in varanda-update.service varanda-update.timer; do
     if ! cmp -s "$units_dir/$u" "$releases/current/$u"; then
@@ -1792,18 +2246,101 @@ cmd_install() {
     aplicar
     exit 0
   fi
+  # Nada sobe agora, mas o candidato vira o efetivo.env: os comandos do
+  # compose até o primeiro apply (a cerimônia de chaves) precisam dos
+  # segredos compartilhados. O primeiro apply os abre de novo.
+  if ! trocar_segredos 0; then
+    descartar_candidato
+    log "não foi possível gravar $segredos/efetivo.env; nada foi iniciado"
+    exit 1
+  fi
   if ! gravar_estado "$state/preparada" "$cand_commit" "$cand_seq" "$cand_seeder" "$cand_web"; then
     log "não foi possível registrar a versão preparada em $cand_dir"
     exit 1
   fi
-  log "instalação preparada em $cand_dir; nada foi iniciado. Antes do primeiro apply, faça a cerimônia de chaves do semeador da seção 'Atualização por imagem (pull)' do README e depois rode update.sh apply"
+  log "instalação preparada em $cand_dir; nada foi iniciado. Antes do primeiro apply, faça a cerimônia de chaves do semeador da seção 'Atualização por imagem (pull)' do README e depois rode update.sh apply. Para receber segredos compartilhados, este servidor precisa da chave de update.sh secrets-key (mesma seção)"
+  exit 0
+}
+
+# A chave X25519 deste servidor para os segredos compartilhados, em
+# /etc/varanda/secrets-key.json (root, 0600). Funciona antes de install (o
+# perfil full pode precisar dos segredos já no primeiro apply): sem versão
+# instalada, a imagem de --image é conferida como em install antes de rodar;
+# com uma, vale a imagem instalada. Nunca baixa uma etiqueta. A saída tem só
+# a chave pública, a que vai para quem mantém o projeto; a secreta fica só no
+# arquivo, e os registros vão para o erro padrão.
+cmd_secrets_key() {
+  local destino tmpd pub='' dm imagem
+  destino=$(dirname "$chave_segredos")
+  tmpd="$destino/.secrets-key.tmp"
+  exec 4>&1 1>&2
+  comecar secrets-key
+  if [ -e "$chave_segredos" ] || [ -L "$chave_segredos" ]; then
+    log "$chave_segredos já existe; nada mudou (para trocar a chave, apague o arquivo e mande a nova chave pública a quem mantém o projeto)"
+    exit 1
+  fi
+  if [ -L "$destino" ] || [ ! -d "$destino" ]; then
+    log "$destino precisa ser um diretório comum; nada mudou"
+    exit 1
+  fi
+  if ler_registro "$state/atual"; then
+    if [ -n "$ref_chave" ]; then
+      log "há uma versão instalada ($r_commit): rode update.sh secrets-key sem --image"
+      exit 2
+    fi
+    imagem=$r_seeder
+    if ! garantir_imagem "$imagem"; then
+      exit 1
+    fi
+  else
+    if [ -z "$ref_chave" ]; then
+      log "nenhuma versão instalada: informe --image $seeder_repo@sha256:<64 hex>, a mesma imagem de install"
+      exit 2
+    fi
+    if ! definir_candidato "$ref_chave" || ! verificar_assinatura "$cand_seeder"; then
+      log 'chave não criada; nada mudou'
+      exit 1
+    fi
+    imagem=$cand_seeder
+  fi
+  if ! rm -rf "$tmpd" || ! mkdir -m 0700 "$tmpd"; then
+    log "não foi possível criar $tmpd; nada mudou"
+    exit 1
+  fi
+  if ! pub=$(docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 0:0 \
+    --mount "type=bind,source=$tmpd,target=/saida" \
+    "$imagem" secrets key --out /saida/secrets-key.json); then
+    rm -rf "$tmpd"
+    log 'varanda secrets key falhou; nada mudou'
+    exit 1
+  fi
+  pub=$(printf '%s\n' "$pub" | tr -d '\r' | tail -n 1)
+  # Exatamente uma chave pública no arquivo, a impressa, com ou sem espaço
+  # em volta dos dois-pontos (JSON compacto ou formatado).
+  if ! [[ $pub =~ $chave_hex_re ]] || [ -L "$tmpd/secrets-key.json" ] || [ ! -f "$tmpd/secrets-key.json" ] \
+    || ! dm=$(dono_modo "$tmpd/secrets-key.json") || [ "$dm" != '0 600' ] \
+    || [ "$(grep -o '"publicKey"' "$tmpd/secrets-key.json" | wc -l | tr -d ' ')" != 1 ] \
+    || ! grep -Eq "\"publicKey\"[[:space:]]*:[[:space:]]*\"$pub\"" "$tmpd/secrets-key.json"; then
+    rm -rf "$tmpd"
+    log 'a chave gerada não está na forma esperada; nada mudou'
+    exit 1
+  fi
+  # ln não sobrescreve: um arquivo que apareceu nesse meio tempo fica.
+  if ! ln "$tmpd/secrets-key.json" "$chave_segredos"; then
+    rm -rf "$tmpd"
+    log "não foi possível gravar $chave_segredos; nada mudou"
+    exit 1
+  fi
+  rm -rf "$tmpd" || log "aviso: não foi possível apagar $tmpd"
+  log "chave dos segredos criada em $chave_segredos; mande a chave pública impressa na saída a quem mantém o projeto"
+  printf '%s\n' "$pub" >&4
   exit 0
 }
 
 main() {
   local cmd=${1:-} c
   case $cmd in
-    install | run | check | apply | reconfigure | rollback | status | compose) shift ;;
+    install | run | check | apply | reconfigure | rollback | status | compose | secrets-key) shift ;;
     *) morrer_cedo 2 "$uso" ;;
   esac
   case $cmd in
@@ -1812,6 +2349,12 @@ main() {
         morrer_cedo 2 "$uso"
       fi
       ref_install=$2
+      ;;
+    secrets-key)
+      if [ "$#" -ne 0 ] && { [ "$#" -ne 2 ] || [ "$1" != --image ] || ! [[ $2 =~ $seeder_ref_re ]]; }; then
+        morrer_cedo 2 "$uso"
+      fi
+      ref_chave=${2:-}
       ;;
     compose)
       if [ "$#" -eq 0 ]; then
@@ -1848,6 +2391,7 @@ main() {
     rollback) cmd_rollback ;;
     status) cmd_status ;;
     compose) cmd_compose "$@" ;;
+    secrets-key) cmd_secrets_key ;;
   esac
 }
 

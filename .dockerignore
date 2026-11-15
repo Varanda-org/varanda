@@ -22,6 +22,7 @@
 !deploy/seeder/cosign.ref
 !deploy/seeder/.env.example
 !deploy/seeder/secrets.sealed.json
+!deploy/seeder/secrets-signers.txt
 **/node_modules
 **/test
 apps/cli/data
