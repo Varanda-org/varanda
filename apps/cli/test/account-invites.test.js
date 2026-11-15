@@ -982,7 +982,7 @@ test('notifyInvite: no push without the current terms; inviteRoom follows push',
   const s = await setup(t, {
     serverOpts: {
       terms,
-      push: { pushStore, vapid: { ...generateVapidKeys(), subject: ORIGIN }, send: async (args) => { sent.push(args); return 'ok' }, relayTokenHash: null }
+      push: { pushStore, vapid: { ...generateVapidKeys(), subject: ORIGIN }, delayMs: () => 0, send: async (args) => { sent.push(args); return 'ok' }, relayTokenHash: null }
     }
   })
   t.ok(s.server.inviteRoom() > 0)
