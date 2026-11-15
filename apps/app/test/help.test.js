@@ -39,6 +39,8 @@ test('help preserves the peek rule and search explanation', async (t) => {
   t.is(HELP.busca.paragraphs[0], SEARCH_HINT)
   t.ok(HELP.busca.paragraphs[0].includes('"ceu" encontra "Céu" e "#Céu"'))
   t.is(HELP.busca.paragraphs[1], SEARCH_MEMORY)
+  t.absent(/navegador/.test(SEARCH_MEMORY), 'the installed app has no browser')
+  t.ok(SEARCH_MEMORY.includes('app'))
 })
 
 test('sign-in help explains synced recovery and phone QR while preserving passkey loss warnings', async (t) => {
