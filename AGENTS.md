@@ -58,11 +58,11 @@ npm run lint                # standard
 npm test                    # todos os workspaces (brittle)
 npm run demo                # deve terminar com "DEMO OK"
 npm test -w packages/core   # um workspace
-npm test -- --affected=origin/main   # só os workspaces que a mudança alcança (local)
+npm test -- --affected=origin/main   # só os workspaces que a mudança alcança, como a CI de um PR
 node apps/cli/test/serve.test.js   # um arquivo
 ```
 
-A CI roda `npm ci --ignore-scripts`, lint, test e demo no Node 20 e no 24, divididos em jobs paralelos e reunidos por `test (20)` e `test (24)`. Rode os quatro passos antes de abrir o PR. Localmente, `npm test -- --affected=origin/main` vale pelo `npm test`, porque a CI roda todos os workspaces em cada PR. Depois de qualquer `npm install` ou `npm ci`, o build nativo do app precisa de `npm run prepare:native -w apps/app` de novo. Os testes de `packages/web-member` exigem Node 20.19 ou mais novo.
+A CI roda `npm ci --ignore-scripts`, lint, test e demo no Node 20 e no 24, divididos em jobs paralelos e reunidos por `test (20)` e `test (24)`. Rode os quatro passos antes de abrir o PR. Localmente, `npm test -- --affected=origin/main` vale pelo `npm test`: a CI de um PR roda a mesma seleção (só os workspaces que a mudança alcança), e cada push na `main` roda todos. Depois de qualquer `npm install` ou `npm ci`, o build nativo do app precisa de `npm run prepare:native -w apps/app` de novo. Os testes de `packages/web-member` exigem Node 20.19 ou mais novo.
 
 ## Armadilhas
 
