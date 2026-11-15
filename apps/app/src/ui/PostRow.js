@@ -60,7 +60,7 @@
 //   browser or the profile, never the conversation. A quote is lifted out only
 //   for a handled mention; its web links stay plain (./QuoteCard).
 
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { AccessibilityInfo, Animated, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { doubleTapPlan, pendingOpen, tapKind } from '../doubleTap'
@@ -87,6 +87,8 @@ import { MediaGrid } from './MediaGrid'
 import { tap } from './haptics'
 import { hasMention, MentionText } from './MentionText'
 import { useHosted } from '../node'
+import { closeRow, countRowRender, openRow, perfOn } from '../perfMarks'
+import { PerfListId } from './screenVisible'
 import { QuoteCard, quotePlayerOf } from './QuoteCard'
 import { screenReaderOn } from './screenReader'
 import { LARGE_TEXT, layout, radius, space, type } from './theme'
@@ -193,6 +195,15 @@ function Action ({ label, onPress, disabled, on, count, split, children }) {
   )
 }
 
+// Dev perf only: counts this row's renders per mount (src/perfMarks.js).
+function usePerfRow (key) {
+  const listId = useContext(PerfListId)
+  const token = useRef(null)
+  if (token.current === null) token.current = openRow(key, listId)
+  countRowRender(token.current)
+  useEffect(() => () => closeRow(token.current), [])
+}
+
 function PostRowView ({
   author, name, username, avatar, at, text, replyToName, replyPreviews, media, preview, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending, expanded = false,
@@ -200,6 +211,8 @@ function PostRowView ({
   onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onBlock, onDelete, link, onNotice,
   seq, onMessage, publishable
 }) {
+  // perfOn never changes while the app runs, so this hook call is stable.
+  if (perfOn) usePerfRow((repostedBy ? 'repost:' + String(repostedBy.author) : 'post') + ':' + String(author) + ':' + String(seq))
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const likes = countOf(counts, 'likes')

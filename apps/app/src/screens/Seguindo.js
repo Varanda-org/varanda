@@ -423,6 +423,7 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
       <TopBar title='Seguindo' onBack={onBack} right={<TopActions help={HELP.seguindo} />} />
       <OfflineNote />
       <RefreshableList
+        perfId='seguindo'
         scrollToTopSignal={scrollToTop}
         contentContainerStyle={{ paddingBottom: bottomPad }}
         data={shownKeys}
