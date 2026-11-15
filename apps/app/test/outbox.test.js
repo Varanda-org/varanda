@@ -13,9 +13,22 @@ const OTHER_ASSOC = 'd'.repeat(64)
 const T0 = Date.parse('2026-10-24T12:00:00.000Z')
 
 const idOf = (n) => n.toString(16).padStart(16, '0')
+// Any well-formed box: the node seals it (test/outboxSeal.test.js covers
+// sealing and opening); this layer only checks its shape.
+const BOX = 'Qk9Y'.repeat(20)
 
+// Enqueues (stored as v2, sealed) and returns the new item open, i.e. with
+// `to` and `text` in memory, as the provider holds it after outbox.open.
 function add (o, items, fields) {
-  return o.enqueue(items, { author: A, association: ASSOC, kind: 'post', to: null, text: 'olá', now: T0, id: idOf(1), ...fields })
+  const f = { author: A, association: ASSOC, kind: 'post', to: null, text: 'olá', now: T0, id: idOf(1), box: BOX, ...fields }
+  const next = o.enqueue(items, f)
+  return next.map((item, i) => i === next.length - 1 ? o.hydrate(item, { to: f.to === undefined ? null : f.to, text: f.text }) : item)
+}
+
+// The same item as stored before the seal (v1, clear `to` and `text`).
+function legacy (o, item) {
+  const { box, ...rest } = o.storedItem(item)
+  return { ...rest, v: 1, to: item.to, text: item.text }
 }
 
 const entry = (seq, text, replyTo = null, at = new Date(T0).toISOString()) => ({ seq, record: { type: 'post', text, replyTo, at } })
@@ -32,18 +45,52 @@ test('parse/serialize round trip', async (t) => {
   const o = await load()
   let items = add(o, [], { id: idOf(1) })
   items = add(o, items, { id: idOf(2), kind: 'reply', to: B + ':3', text: 'resposta', now: T0 + 1000 })
-  const back = o.parseOutbox(o.serializeOutbox(items))
-  t.alike(back, items)
+  const text = o.serializeOutbox(items)
+  const back = o.parseOutbox(text)
+  t.alike(back, items.map(o.storedItem))
+  t.is(JSON.parse(text).v, 2)
+  t.is(back[0].v, 2)
+  t.is(back[0].box, BOX)
   t.is(back[0].writtenAt, new Date(T0).toISOString())
   t.is(back[0].state, 'queued')
-  t.is(back[1].to, B + ':3')
+  t.is(items[1].to, B + ':3', 'open in memory')
+  t.absent('to' in back[1], 'the target is not stored')
+  t.absent('text' in back[1], 'the text is not stored')
+  t.absent(text.includes('resposta') || text.includes(B + ':3'), 'nothing of it in the stored value')
+})
+
+test('v1 items still parse, and are written back as they are', async (t) => {
+  const o = await load()
+  const v1 = legacy(o, add(o, [], { id: idOf(1), kind: 'reply', to: B + ':3', text: 'antiga' })[0])
+  const [v2] = add(o, [], { id: idOf(2) }).map(o.storedItem)
+  const back = o.parseOutbox(JSON.stringify({ v: 1, items: [v1] }))
+  t.alike(back, [v1], 'a v1 envelope')
+  t.alike(o.parseOutbox(JSON.stringify({ v: 2, items: [v1, v2] })), [v1, v2], 'v1 and v2 side by side')
+  t.alike(o.parseOutbox(o.serializeOutbox([v1, v2])), [v1, v2], 'a v1 item keeps its clear fields until it is sealed')
+})
+
+test('sealedItem: the v1 item as v2 under the box, without to and text', async (t) => {
+  const o = await load()
+  const v1 = legacy(o, add(o, [], { kind: 'reply', to: B + ':3', text: 'antiga' })[0])
+  const v2 = o.sealedItem(v1, BOX)
+  t.is(v2.v, 2)
+  t.is(v2.box, BOX)
+  t.absent('to' in v2)
+  t.absent('text' in v2)
+  const { box, ...restV2 } = v2
+  const { to, text, ...restV1 } = v1
+  t.alike({ ...restV2, v: 1 }, restV1, 'every other field kept')
+  t.alike(o.sealParams(v1), { id: v1.id, author: A, association: ASSOC, kind: 'reply', to: B + ':3', text: 'antiga', writtenAt: v1.writtenAt })
+  t.alike(o.openParams(v2), { box: BOX, id: v1.id, author: A, association: ASSOC, kind: 'reply', writtenAt: v1.writtenAt })
+  t.exception(() => o.sealedItem(v1, 'curta'), /publicação inválida/)
 })
 
 test('bad envelope gives []', async (t) => {
   const o = await load()
+  const [good] = add(o, [], {}).map(o.storedItem)
   t.alike(o.parseOutbox('not json'), [])
   t.alike(o.parseOutbox(null), [])
-  t.alike(o.parseOutbox(JSON.stringify({ v: 2, items: [] })), [])
+  t.alike(o.parseOutbox(JSON.stringify({ v: 3, items: [good] })), [], 'unknown envelope version')
   t.alike(o.parseOutbox(JSON.stringify({ v: 1, items: {} })), [])
   t.alike(o.parseOutbox(JSON.stringify([])), [])
   t.alike(o.parseOutbox('null'), [])
@@ -51,20 +98,33 @@ test('bad envelope gives []', async (t) => {
 
 test('malformed items are dropped', async (t) => {
   const o = await load()
-  const good = add(o, [], {})[0]
+  const good = o.storedItem(add(o, [], {})[0])
+  const old = legacy(o, add(o, [], {})[0])
   const bad = [
     { ...good, author: A.toUpperCase() },
     { ...good, author: 'ab' },
     { ...good, association: 1 },
     { ...good, kind: 'repost' },
-    { ...good, to: B + ':1' },
-    { ...good, kind: 'reply', to: null },
-    { ...good, kind: 'reply', to: B + ':0' },
-    { ...good, kind: 'reply', to: B.toUpperCase() + ':1' },
-    { ...good, kind: 'reply', to: B + ':01' },
-    { ...good, text: '' },
-    { ...good, text: 'x'.repeat(1001) },
-    { ...good, text: 5 },
+    { ...old, to: B + ':1' },
+    { ...old, kind: 'reply', to: null },
+    { ...old, kind: 'reply', to: B + ':0' },
+    { ...old, kind: 'reply', to: B.toUpperCase() + ':1' },
+    { ...old, kind: 'reply', to: B + ':01' },
+    { ...old, kind: 'reply', to: B + ':9007199254740993' },
+    { ...old, text: '' },
+    { ...old, text: 'x'.repeat(1001) },
+    { ...old, text: 5 },
+    { ...good, box: undefined },
+    { ...good, box: '' },
+    { ...good, box: 'Q'.repeat(o.BOX_MIN - 1) },
+    { ...good, box: 'Q'.repeat(o.BOX_MAX + 1) },
+    { ...good, box: 'Q'.repeat(60) + '==' },
+    { ...good, box: 'Q+/'.repeat(30) },
+    { ...good, box: 'Q'.repeat(57) },
+    { ...good, box: 'Q'.repeat(57) + 'R' },
+    { ...good, box: 'Q'.repeat(54) + 'R' },
+    { ...good, box: 5 },
+    { ...good, v: 3 },
     { ...good, state: 'done' },
     { ...good, attempts: -1 },
     { ...good, attempts: 1.5 },
@@ -74,13 +134,30 @@ test('malformed items are dropped', async (t) => {
     { ...good, lastError: null },
     { ...good, id: 'xyz' },
     { ...good, writtenAt: 'ontem' },
+    { ...good, writtenAt: '' },
+    { ...good, writtenAt: 'Sun Nov 15 2026 12:00:00 GMT+0000 (Horário Padrão)' },
     null,
     'item'
   ]
-  const kept = { ...good, id: idOf(9), text: '😀'.repeat(1000) }
-  const parsed = o.parseOutbox(JSON.stringify({ v: 1, items: [...bad, kept] }))
-  t.is(parsed.length, 1)
+  const kept = { ...old, id: idOf(9), text: '😀'.repeat(1000) }
+  const keptV2 = { ...good, id: idOf(10), box: 'Q'.repeat(o.BOX_MAX), to: B + ':1', text: 'plantado em claro' }
+  // The node's bounds: the shortest box, the longest writtenAt, the largest
+  // safe seq, and the other canonical tails.
+  const keptEdges = [
+    { ...good, id: idOf(11), box: 'Q'.repeat(o.BOX_MIN) },
+    { ...good, id: idOf(12), writtenAt: '2026-11-15T12:00:00.00000000000Z' },
+    { ...old, id: idOf(13), kind: 'reply', to: B + ':9007199254740991' },
+    { ...good, id: idOf(14), box: 'Q'.repeat(57) + 'Q' },
+    { ...good, id: idOf(15), box: 'Q'.repeat(54) + 'A' }
+  ]
+  const parsed = o.parseOutbox(JSON.stringify({ v: 2, items: [...bad, kept, keptV2, ...keptEdges] }))
+  t.alike(parsed.slice(2).map((i) => i.id), keptEdges.map((i) => i.id), 'the node\'s bounds are kept')
+  t.is(parsed.length, 2 + keptEdges.length)
+  t.is(keptEdges[1].writtenAt.length, o.WRITTEN_AT_MAX)
   t.is(parsed[0].id, idOf(9))
+  t.is(parsed[1].id, idOf(10))
+  t.absent('text' in parsed[1], 'a clear text next to a box is ignored')
+  t.absent('to' in parsed[1])
 })
 
 test('a sending item survives parse as sending with floorSeq and attemptAt', async (t) => {
@@ -102,10 +179,17 @@ test('enqueue validation errors', async (t) => {
     { kind: 'post', to: B + ':1' },
     { kind: 'reply', to: null },
     { kind: 'reply', to: B + ':0' },
+    { kind: 'reply', to: B + ':9007199254740993' },
     { text: '' },
     { text: 'x'.repeat(1001) },
     { id: 'short' },
-    { id: idOf(1).toUpperCase().replace(/0/g, 'F') }
+    { id: idOf(1).toUpperCase().replace(/0/g, 'F') },
+    { box: undefined },
+    { box: 'Q'.repeat(o.BOX_MIN - 1) },
+    { box: 'Q'.repeat(o.BOX_MAX + 1) },
+    { box: 'Q+'.repeat(40) },
+    { box: 'Q'.repeat(57) + 'R' },
+    { now: -1 }
   ]
   for (const fields of invalid) {
     t.exception(() => add(o, [], fields), /publicação inválida/, JSON.stringify(fields))
@@ -147,7 +231,7 @@ test('enqueue refuses exactly the text the diary refuses', async (t) => {
     }
     t.is(enqueued, accepted, 'outbox ' + label)
     const [good] = add(o, [], {})
-    const parsed = o.parseOutbox(JSON.stringify({ v: 1, items: [{ ...good, text }] }))
+    const parsed = o.parseOutbox(JSON.stringify({ v: 1, items: [{ ...legacy(o, good), text }] }))
     t.is(parsed.length, accepted ? 1 : 0, 'parse ' + label)
   }
 })
@@ -214,6 +298,29 @@ test('claim, markRetry and wake refuse an invalid now', async (t) => {
     t.exception(() => o.wake(items, A, ASSOC, now), /instante inválido/, 'wake ' + String(now))
   }
   t.is(o.wake(items, A, ASSOC, 0)[0].nextAt, 0, 'zero is a valid instant')
+})
+
+test('reconcile: a sending item that is not open is left alone', async (t) => {
+  const o = await load()
+  const items = o.claim(add(o, [], {}), idOf(1), { now: T0, floorSeq: 5 }).map(o.storedItem)
+  for (const p of [page([entry(6, 'olá')]), page([], 0), null]) {
+    const r = o.reconcile(items, A, ASSOC, p, T0)
+    t.is(r.status, 'sealed')
+    t.is(r.items, items, 'the same array: nothing to save')
+    t.is(r.sent, null)
+  }
+})
+
+test('checkDraft and writtenAtOf', async (t) => {
+  const o = await load()
+  t.execution(() => o.checkDraft({ author: A, association: ASSOC, kind: 'reply', to: B + ':1', text: 'oi' }))
+  t.execution(() => o.checkDraft({ author: A, association: ASSOC, kind: 'post', text: 'oi' }), 'to defaults to null')
+  t.exception(() => o.checkDraft({ author: A, association: ASSOC, kind: 'post', to: B + ':1', text: 'oi' }), /publicação inválida/)
+  t.exception(() => o.checkDraft({ author: A, association: ASSOC, kind: 'post', to: null, text: '' }), /publicação inválida/)
+  t.is(o.writtenAtOf(T0), new Date(T0).toISOString())
+  t.exception(() => o.writtenAtOf(NaN), /publicação inválida/)
+  const [item] = add(o, [], { now: T0 + 7 })
+  t.is(item.writtenAt, o.writtenAtOf(T0 + 7), 'enqueue stores the writtenAt that was sealed')
 })
 
 test('reconcile: a match removes the item and reports seq and ref', async (t) => {

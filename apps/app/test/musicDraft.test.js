@@ -380,6 +380,7 @@ async function sender (overrides = {}) {
     ...await import('../src/attach-plan.js'),
     busy: false,
     uploadingRef: { current: false },
+    queueingRef: { current: false },
     setCheckError: (e) => { state.errors.push(e) },
     pageRetryRef: { current: null },
     refusalOf: (text) => { state.checked.push(text); return refusalOf(text) },
