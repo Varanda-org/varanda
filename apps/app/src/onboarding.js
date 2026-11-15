@@ -26,8 +26,8 @@ export const STEP_TITLES = {
   pronto: 'Tudo pronto'
 }
 
+// 'entrar' has none: its welcome header (src/ui/Welcome.js) carries its own line.
 export const STEP_HINTS = {
-  entrar: 'Crie sua conta ou entre na que já tem. Sem senha e sem e-mail.',
   recuperando: 'Estamos trazendo de volta o que já é seu.',
   idade: 'A Varanda é para quem tem 16 anos ou mais. Só a sua faixa de idade fica guardada.',
   telefone: 'Use um celular brasileiro. O número não serve para recuperar a conta: ele permite responder a uma ordem judicial e impede que uma conta bloqueada volte.',
