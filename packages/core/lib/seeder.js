@@ -38,9 +38,9 @@
 // blocked diary leaves the index the moment its drop starts, and reads filter
 // out any author that is not served, gated and unblocked. Trust model: the
 // index only says WHERE TO LOOK (refs, seq hints, counts); nodes fetch and
-// verify the content from the diaries themselves (indexPost, indexEngagers,
-// indexCounts, indexMember, indexTestimonials back the /index routes of
-// apps/cli/lib/seed-ws.js).
+// verify the content from the diaries themselves (indexPost, indexRoda,
+// indexEngagers, indexCounts, indexMember, indexTestimonials back the /index
+// routes of apps/cli/lib/seed-ws.js).
 //
 // Name index (lib/name-index.js): fed by the same scan, the folded tokens of
 // each served author's newest display name and its verified @nome. Like the
@@ -5697,6 +5697,24 @@ class Seeder {
       const page = this._index.post(authorHex + ':' + seq, cursor, (hex) => this._indexVisible(hex))
       if (page === null) return null
       return { ...page, ...this._indexFlags() }
+    } catch {
+      return null
+    }
+  }
+
+  // The roda (conversation circle) of a reply: its thread root, the
+  // top-level comment under it and that comment's whole subtree flattened,
+  // parents before children, paged. Null for anything unknown, as
+  // indexPost, and for a post that is not a reply. Each request costs
+  // O(min(descendants, RODA_SCAN)) of engagement-index.js and is recomputed
+  // for every page; a walk down cut at that bound answers complete false.
+  indexRoda (authorHex, seq, cursor = null) {
+    try {
+      if (!this._indexVisible(authorHex) || !Number.isSafeInteger(seq) || seq < 1) return null
+      const page = this._index.roda(authorHex + ':' + seq, cursor, (hex) => this._indexVisible(hex))
+      if (page === null) return null
+      const flags = this._indexFlags()
+      return { ref: page.ref, root: page.root, top: page.top, items: page.items, next: page.next, total: page.total, authors: page.authors, indexing: flags.indexing, complete: flags.complete && !page.truncated }
     } catch {
       return null
     }

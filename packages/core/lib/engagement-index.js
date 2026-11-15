@@ -69,6 +69,10 @@ const NOTICE_ROWS_PER_ENGAGER = 64
 const NOTICE_ROWS_MAX = 4096
 const NOTICE_CACHE_AUTHORS = 16
 const TESTIMONIAL_ROWS = 64
+const RODA_PAGE = 50
+// One budget per roda() call, spent twice: on the hops of the walk up and on
+// the reply edges examined by the walk down.
+const RODA_SCAN = 1000
 // Same value as lib/feed.js MAX_FUTURE_MS (not imported: this module only
 // requires ./records and ./testimonials). An engager edge dated further ahead is hidden, never
 // removed, and appears once the clock catches up.
@@ -785,6 +789,103 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     }
   }
 
+  // The roda (conversation circle) of a reply: the thread root, the
+  // top-level comment `top` under it, and every reply of top's subtree as
+  // { ref, to } (to = the parent ref), flattened so a parent always comes
+  // before its children, at most RODA_PAGE strictly after `cursor`. Nothing
+  // is stored for it: each call walks the stored replyTo links up and the
+  // reply lists down, at most RODA_SCAN hops up and RODA_SCAN edges down,
+  // so a request costs O(min(descendants, RODA_SCAN)) and is recomputed for
+  // every page. Null for a malformed ref or cursor, a post not indexed, a
+  // post that is not a reply, and a walk up that meets a missing, deleted or
+  // hidden post, a cycle (refs are predictable, so two diaries can reply to
+  // each other's future posts) or the bound. `truncated` says the walk down
+  // stopped at the bound with edges left unexamined.
+  function roda (ref, cursor = null, visible = allVisible) {
+    try {
+      const parsed = validRef(ref)
+      if (parsed === null) return null
+      const after = parseCursor(cursor)
+      if (after === undefined) return null
+      if (typeof visible !== 'function') visible = allVisible
+      const entry = authors.get(parsed.author)
+      if (entry === undefined || !visible(parsed.author)) return null
+      const info = entry.posts.get(parsed.seq)
+      if (info === undefined || info.replyTo === null) return null
+      // `root` is only a claim: add() stores replyTo as null when the parent
+      // was already deleted, so an orphaned reply looks like a root here.
+      const seenUp = new Set([ref])
+      let top = ref
+      let parent = info.replyTo
+      let root = null
+      for (let hops = 0; root === null; hops++) {
+        if (hops >= RODA_SCAN || seenUp.has(parent) || deletedRefs.has(parent)) return null
+        seenUp.add(parent)
+        const p = validRef(parent)
+        if (p === null) return null
+        const pinfo = authors.get(p.author)?.posts.get(p.seq)
+        if (pinfo === undefined || !visible(p.author)) return null
+        if (pinfo.replyTo === null) {
+          root = parent
+        } else {
+          top = parent
+          parent = pinfo.replyTo
+        }
+      }
+      // Breadth first from top. The listing key of a node is its own atMs
+      // raised to one past its parent's, so a child dated before its parent
+      // (a skewed or hostile clock) still sorts after it under compareEdges
+      // and the reply cursor grammar.
+      const kept = []
+      const seenDown = new Set([top])
+      const queue = [top]
+      let examined = 0
+      let truncated = false
+      const effOf = new Map()
+      for (let qi = 0; qi < queue.length && !truncated; qi++) {
+        const node = queue[qi]
+        const list = targets.get(node)?.replies || EMPTY_LIST
+        const base = effOf.get(node)
+        for (const edge of list) {
+          if (examined >= RODA_SCAN) {
+            truncated = true
+            break
+          }
+          examined++
+          const child = edgeRef(edge)
+          if (seenDown.has(child)) continue
+          seenDown.add(child)
+          if (!visible(edge.author)) continue
+          const atMs = base === undefined ? edge.atMs : Math.max(edge.atMs, base + 1)
+          effOf.set(child, atMs)
+          kept.push({ atMs, author: edge.author, seq: edge.seq, ref: child, to: node })
+          queue.push(child)
+        }
+      }
+      kept.sort(compareEdges)
+      const start = after === null ? 0 : upperBound(kept, after)
+      const page = kept.slice(start, start + RODA_PAGE)
+      const authorHints = {}
+      const hint = (author) => { if (!(author in authorHints)) authorHints[author] = hints(author) }
+      hint(parsed.author)
+      hint(root.slice(0, 64))
+      hint(top.slice(0, 64))
+      for (const item of page) hint(item.author)
+      return {
+        ref,
+        root,
+        top,
+        items: page.map((item) => ({ ref: item.ref, to: item.to })),
+        next: page.length > 0 && start + page.length < kept.length ? edgeCursor(page[page.length - 1]) : null,
+        total: kept.length,
+        truncated,
+        authors: authorHints
+      }
+    } catch {
+      return null
+    }
+  }
+
   // { [ref]: { replies, likes, reposts, quotes } } for every ref of `refs`
   // whose post is indexed or that has engagement, filtered by `visible`.
   // Every ref is computed ONCE (duplicates collapse) and each computation
@@ -1032,7 +1133,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     fullAuthors = 0
   }
 
-  return { add, removePost, removeRecord, removeDiary, post, counts, engagers, member, hints, noticeRows, testimonials, stats, clear }
+  return { add, removePost, removeRecord, removeDiary, post, roda, counts, engagers, member, hints, noticeRows, testimonials, stats, clear }
 }
 
 module.exports = {
@@ -1048,5 +1149,7 @@ module.exports = {
   NOTICE_ROWS_MAX,
   NOTICE_CACHE_AUTHORS,
   TESTIMONIAL_ROWS,
+  RODA_PAGE,
+  RODA_SCAN,
   CURSOR_RE
 }
