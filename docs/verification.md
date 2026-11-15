@@ -2,6 +2,8 @@
 
 Date: 2026-10-22 (sections 1 to 5) and 2026-10-23 (section 6, the public DHT; section 7, the new app design on iOS). Every check below was run on one Mac. Logs and screenshots stayed in the verification sessions' scratchpads (not committed).
 
+New verification goes in its own file per pull request under [verification/](verification/README.md), named after the branch and without a section number. This file keeps the numbered sections written before that, cited by number.
+
 ## Machine
 
 | Item | Version |
