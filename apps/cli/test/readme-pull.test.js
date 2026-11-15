@@ -18,6 +18,7 @@ const cosignRef = read('deploy/seeder/cosign.ref').trim()
 const EM_DASH = String.fromCharCode(0x2014)
 const HEADING = '### Atualização por imagem (pull)'
 const COSIGN_PREFIX = 'ghcr.io/sigstore/cosign/cosign:'
+const VERIFICATION = 'docs/verification/feat-seeder-pull-updater.md'
 
 // The text from the heading up to the next "### " heading, or null.
 function readmeSection (text) {
@@ -152,22 +153,17 @@ test('the section names the files and the marker that update.sh uses', (t) => {
   t.ok(section.includes(marker), 'modo-pull marker')
 })
 
-test('no em dash in the README section, the CHANGELOG entry or verification section 252', (t) => {
+test('no em dash in the README section, the changelog entry or the verification file', (t) => {
   t.is(section.includes(EM_DASH), false, 'README section')
-  const changelog = read('CHANGELOG.md')
-  const top = changelog.indexOf('## [Não lançado]\n\n')
-  t.ok(top > -1, 'CHANGELOG has the Não lançado section')
-  const first = changelog.slice(top + 18, changelog.indexOf('\n- ', top + 18))
-  t.ok(first.includes('feat/seeder-pull-updater'), 'the top entry is the pull-updater entry')
-  t.is(first.includes(EM_DASH), false, 'CHANGELOG entry')
-  const verification = read('docs/verification.md')
-  const at = verification.indexOf('\n## 252. ')
-  t.ok(at > -1, 'verification has section 252')
-  const next = verification.indexOf('\n## ', at + 1)
-  const part = next === -1 ? verification.slice(at) : verification.slice(at, next)
-  t.is(part.includes(EM_DASH), false, 'verification section 252')
-  t.ok(part.startsWith('\n## 252. Versões do semeador por imagem (PRs build/seeder-release-images, feat/seeder-pull-updater)\n'), 'section 252 has its title')
-  t.ok(part.includes('Manage Actions access'), 'section 252 checks the Write access of the packages')
+  const entry = read('docs/changelog/feat-seeder-pull-updater.md')
+  t.ok(entry.startsWith('- Versões por imagem'), 'the changelog entry file holds the pull-updater entry')
+  t.ok(entry.includes('`' + VERIFICATION + '`'), 'the changelog entry cites the verification file')
+  t.is(entry.includes(EM_DASH), false, 'changelog entry')
+  const part = read(VERIFICATION)
+  t.is(part.includes(EM_DASH), false, 'verification file')
+  t.ok(part.startsWith('# Versões do semeador por imagem (PRs build/seeder-release-images, feat/seeder-pull-updater)\n'), 'the verification file has its title')
+  t.ok(part.includes('Manage Actions access'), 'the verification file checks the Write access of the packages')
+  t.ok(section.includes('`' + VERIFICATION + '`'), 'the README maintainer steps cite the verification file')
 })
 
 test('the new files carry no em dash', (t) => {
