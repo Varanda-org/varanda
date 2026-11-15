@@ -1670,6 +1670,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
       <OfflineNote />
       <EmbedBandBottom.Provider value={composer ? band : null}>
         <RefreshableList
+          perfId='grupo'
           listRef={listRef}
           data={reader ? rows : []}
           keyExtractor={(row) => row.key}

@@ -569,6 +569,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   return (
     <>
       <RefreshableList
+        perfId='espiadinha'
         data={shownItems}
         keyExtractor={peekKey}
         renderItem={renderItem}

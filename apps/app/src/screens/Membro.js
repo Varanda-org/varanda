@@ -1254,6 +1254,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     <View style={styles.flex}>
       <View style={styles.flex}>
         <RefreshableList
+          perfId='membro'
           data={depo ? testimonialTab.items : phase === 'ready' ? (mural ? muralRows : shownItems) : []}
           keyExtractor={depo ? testimonialTab.keyExtractor : mural ? (row) => 'm' + row.key : (i) => i.kind + ':' + i.seq}
           renderItem={depo ? testimonialTab.renderItem : mural ? renderMural : renderItem}

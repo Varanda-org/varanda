@@ -32,6 +32,10 @@ const MISMATCH = 'chave da página não confere'
 const SECRET = 'para-a-pagina-zqx'
 const AT = '2026-11-03T12:00:00.000Z'
 const RNONCE = 'r'.repeat(43)
+// Below the runner's 180 s file limit (scripts/run-tests.js): a test that
+// stalls fails here by name instead of the whole file being killed silently.
+// Each test takes seconds; the margin is for a loaded machine.
+const TEST_TIMEOUT_MS = 150000
 
 function noop () {}
 
@@ -153,10 +157,6 @@ function isZero (buf) {
   return buf.every((x) => x === 0)
 }
 
-function sleep (ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
 // A dm.pull, then the published-key checks it starts in the background:
 // waits until every held page was looked up and its result applied.
 async function pulled (N) {
@@ -165,7 +165,9 @@ async function pulled (N) {
   const before = held.map((p) => N.peekCalls.get(p) || 0)
   const r = await N.web.request('dm.pull')
   await until(async () => held.every((p, i) => (N.peekCalls.get(p) || 0) > before[i]))
-  await sleep(100)
+  // What follows each answer (the flag and its event, the client's delivery)
+  // runs on microtasks: one macrotask turn drains them all.
+  await new Promise((resolve) => setImmediate(resolve))
   return r
 }
 
@@ -214,7 +216,7 @@ async function importBundle (N, bundle) {
 }
 
 test('page secrets: generate, adopt, share, late key catch-up, draft and send as the page, mismatch, lock', async (t) => {
-  t.timeout(300000)
+  t.timeout(TEST_TIMEOUT_MS)
   const assoc = generateAssociationKeyPair()
   const issuerKp = crypto.keyPair()
   const issuer = { kp: issuerKp, cert: createIssuerCert({ issuer: hex(issuerKp.publicKey) }, assoc) }
@@ -437,7 +439,7 @@ test('page secrets: generate, adopt, share, late key catch-up, draft and send as
 })
 
 test('a page message put after its signature expired is never filed, by the member nor by the page', async (t) => {
-  t.timeout(300000)
+  t.timeout(TEST_TIMEOUT_MS)
   const assoc = generateAssociationKeyPair()
   const issuerKp = crypto.keyPair()
   const issuer = { kp: issuerKp, cert: createIssuerCert({ issuer: hex(issuerKp.publicKey) }, assoc) }
@@ -478,7 +480,7 @@ test('a page message put after its signature expired is never filed, by the memb
 })
 
 test('the published dm-key check compares the gen too; a replica behind the held gen does not flag', async (t) => {
-  t.timeout(300000)
+  t.timeout(TEST_TIMEOUT_MS)
   const assoc = generateAssociationKeyPair()
   const issuerKp = crypto.keyPair()
   const issuer = { kp: issuerKp, cert: createIssuerCert({ issuer: hex(issuerKp.publicKey) }, assoc) }
@@ -554,7 +556,7 @@ test('the published dm-key check compares the gen too; a replica behind the held
 })
 
 test('a drop sealed to the previous gen still opens after a new gen; a bundle whose seen write failed is seen on retry', async (t) => {
-  t.timeout(300000)
+  t.timeout(TEST_TIMEOUT_MS)
   const assoc = generateAssociationKeyPair()
   const issuerKp = crypto.keyPair()
   const issuer = { kp: issuerKp, cert: createIssuerCert({ issuer: hex(issuerKp.publicKey) }, assoc) }
@@ -814,7 +816,7 @@ test('a page history whose forget failed half way is gone after a reset', async 
 })
 
 test('the legacy bundle: chunks in any order file once, ops stay local, blocks wait for a signed ctl', async (t) => {
-  t.timeout(300000)
+  t.timeout(TEST_TIMEOUT_MS)
   const assoc = generateAssociationKeyPair()
   const issuerKp = crypto.keyPair()
   const issuer = { kp: issuerKp, cert: createIssuerCert({ issuer: hex(issuerKp.publicKey) }, assoc) }
@@ -1005,7 +1007,7 @@ test('a forget during a pull: the pull stops writing for the page and never open
 })
 
 test('dm.pull answers while the published-key checks still wait; the event follows', async (t) => {
-  t.timeout(180000)
+  t.timeout(TEST_TIMEOUT_MS)
   const assoc = generateAssociationKeyPair()
   const issuerKp = crypto.keyPair()
   const issuer = { kp: issuerKp, cert: createIssuerCert({ issuer: hex(issuerKp.publicKey) }, assoc) }
@@ -1127,7 +1129,7 @@ test('page holder: a share below the highest gen held is refused, after forget a
 })
 
 test('legacy import: filed below what the page already holds, its box written before memory, one history per page', async (t) => {
-  t.timeout(300000)
+  t.timeout(TEST_TIMEOUT_MS)
   const assoc = generateAssociationKeyPair()
   const issuerKp = crypto.keyPair()
   const issuer = { kp: issuerKp, cert: createIssuerCert({ issuer: hex(issuerKp.publicKey) }, assoc) }
@@ -1195,7 +1197,7 @@ test('legacy import: filed below what the page already holds, its box written be
 })
 
 test('a legacy bundle carried over on a move: filed for the new page when its verified origin names the old one', async (t) => {
-  t.timeout(300000)
+  t.timeout(TEST_TIMEOUT_MS)
   const assoc = generateAssociationKeyPair()
   const issuerKp = crypto.keyPair()
   const issuer = { kp: issuerKp, cert: createIssuerCert({ issuer: hex(issuerKp.publicKey) }, assoc) }
@@ -1227,7 +1229,7 @@ test('a legacy bundle carried over on a move: filed for the new page when its ve
 })
 
 test('a legacy bundle carried over two moves files for the newest page; a forwarded legacy row keeps fwd', async (t) => {
-  t.timeout(300000)
+  t.timeout(TEST_TIMEOUT_MS)
   const assoc = generateAssociationKeyPair()
   const issuerKp = crypto.keyPair()
   const issuer = { kp: issuerKp, cert: createIssuerCert({ issuer: hex(issuerKp.publicKey) }, assoc) }
@@ -1247,7 +1249,7 @@ test('a legacy bundle carried over two moves files for the newest page; a forwar
 })
 
 test('a carried legacy box opens drops to the old page key and files them for the new page', async (t) => {
-  t.timeout(300000)
+  t.timeout(TEST_TIMEOUT_MS)
   const assoc = generateAssociationKeyPair()
   const issuerKp = crypto.keyPair()
   const issuer = { kp: issuerKp, cert: createIssuerCert({ issuer: hex(issuerKp.publicKey) }, assoc) }
