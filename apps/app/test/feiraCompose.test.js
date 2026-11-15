@@ -604,7 +604,7 @@ test('feiraCompose: full-screen forms measure the keyboard form on iOS too, shee
   for (const file of ['Anunciar', 'AnuncioEditar']) t.ok(source('src/screens/' + file + '.js').includes('<KeyboardForm inWindow>'), file + ' opts in')
   const perfil = source('src/screens/Perfil.js')
   t.ok(perfil.includes('export function KeyboardForm ({ children, inWindow = false })'), 'default is off')
-  t.ok(perfil.includes("(!inWindow && Platform.OS !== 'android') || !view"), 'without inWindow the Android-only rule stays')
+  t.ok(perfil.includes("measured={inWindow || Platform.OS === 'android'}"), 'without inWindow the Android-only rule stays')
   t.absent(/<KeyboardForm inWindow/.test(source('src/screens/ExcluirConta.js') + source('src/screens/Denunciar.js')), 'sheets are unchanged')
 })
 

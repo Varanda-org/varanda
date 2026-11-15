@@ -52,7 +52,7 @@ import { Pill } from '../ui/Pill'
 import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
 import { ShareProfile, shareProfileDirect } from '../ui/ShareProfile'
-import { Sheet } from '../ui/Sheet'
+import { Sheet, TEXT_CAP } from '../ui/Sheet'
 import { EmptyState, ErrorState, ListFooter, SkeletonRow } from '../ui/States'
 import { PressScale } from '../ui/PressScale'
 import { ProfileHeader, ProfileStatus } from '../ui/ProfileHeader'
@@ -666,7 +666,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
             onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(ownPublicKey, 'seguidores') : undefined
           }]}
           note={followCounts.incomplete && followCounts.seguidores !== null ? <View style={styles.countsNote}><Soft>{COUNTS_INCOMPLETE_NOTE}</Soft></View> : null}
-          corner={<Pill key='edit' label='Editar perfil' onPress={() => setEditing(true)} />}
+          corner={<Pill key='edit' label='Editar perfil' onPress={() => setEditing(true)} maxFontSizeMultiplier={TEXT_CAP} />}
           actions={[
             profileUrl !== null ? <Pill key='share' icon='compartilhar' accessibilityLabel='compartilhar perfil' onPress={() => { shareProfileDirect(profileUrl).then((done) => { if (!done) setSharing(true) }) }} /> : null
           ]}
@@ -724,7 +724,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   if (data === null) {
     empty = loadError
       ? <ErrorState message={loadError} onRetry={reload} pending={pull.pending} />
-      : <><SkeletonRow /><SkeletonRow /><SkeletonRow /></>
+      : <View>{[0, 1, 2].map((row) => <SkeletonRow key={row} />)}</View>
   } else {
     empty = !data.atEnd
       // Older pages remain and none shown so far held a publication: loading
@@ -865,7 +865,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
       />
       {profileUrl !== null
         ? (
-          <Sheet open={sharing} onClose={() => setSharing(false)} title='Compartilhar perfil'>
+          <Sheet open={sharing} onClose={() => setSharing(false)} title='Compartilhar perfil' closeLabel='Fechar'>
             <View style={styles.shareBody}>
               <ShareProfile url={profileUrl} onNotice={typeof onToast === 'function' ? (m) => { setSharing(false); onToast(m) } : undefined} />
             </View>

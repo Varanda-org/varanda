@@ -1121,7 +1121,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
       />
       {profileUrl !== null
         ? (
-          <Sheet open={sharing} onClose={() => setSharing(false)} title='Compartilhar perfil'>
+          <Sheet open={sharing} onClose={() => setSharing(false)} title='Compartilhar perfil' closeLabel='Fechar'>
             <View style={styles.shareBody}>
               <ShareProfile url={profileUrl} onNotice={typeof onToast === 'function' ? (m) => { setSharing(false); onToast(m) } : undefined} />
             </View>
@@ -1197,7 +1197,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
 
   let empty = null
   if (blockedHere && phase !== 'loading') empty = <EmptyState icon='bloquear' title={BLOCK_TEXTS.profileTitle} body={BLOCK_TEXTS.profileBody} />
-  else if (phase === 'loading') empty = <><SkeletonRow /><SkeletonRow /><SkeletonRow /></>
+  else if (phase === 'loading') empty = <View>{[0, 1, 2].map((row) => <SkeletonRow key={row} />)}</View>
   else if (phase === 'error') empty = <ErrorState message={displayText(error)} onRetry={() => { setTick((n) => n + 1); load(false) }} pending={refreshing} />
   else if (unavailable === 0 && atEnd && !indexing && complete !== false) empty = <EmptyState icon='lapis' title='Nenhuma publicação ainda' body={isPage ? 'As publicações desta Página aparecem aqui.' : 'As publicações desta pessoa aparecem aqui.'} />
 

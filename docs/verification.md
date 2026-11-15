@@ -5846,10 +5846,9 @@ Ainda falta a um humano, em aparelho real (nenhuma caixa acima foi executada nes
 Pontos conhecidos, deixados como estão (P3):
 
 - Cabeçalho de publicação e de citação com texto de acessibilidade extra-grande, tela de 320 pt e data de ano anterior: o nome fica com cerca de 80 pt na publicação e 40 pt no cartão de citação; não chega a zero, mas rever se um aparelho mostrar o contrário.
-- Visualizador de foto da conversa: ícones da barra de status escuros sobre o fundo preto no Android (já era assim; a correção pede definir a barra antes de abrir o Modal ou trocar o Modal por uma sobreposição).
-- Texto: "Fechar" e "Cancelar" ainda variam entre telas; "serviço indisponível" e "foto indisponível" em minúscula; Perfil como folha no Diário e como página nos Ajustes; iniciais do cabeçalho de pedido contra o ícone da lista; o rótulo Denunciar na publicação e no perfil tem tintas diferentes (fixado pelos testes de `postActions`).
-- Web: anel de foco do Fechar sem folga; seta de voltar de 40 x 40; foco depois de Escape volta ao topo em vez de à lista; campo da Busca 4 pt abaixo do de Conversas; abas da Busca sem `aria-selected`; foco depois de fechar a Publicar com Escape; o rascunho do Perfil zera ao voltar para a lista de Ajustes (igual com a seta; já era assim).
-- Compartilhar sem origem da instalação mostra "Não foi possível copiar o link." (`communityShare.js`, fora desta PR).
+- Texto: "serviço indisponível" e "foto indisponível" em minúscula; iniciais do cabeçalho de pedido contra o ícone da lista. Decidido: Perfil continua folha no Diário e página nos Ajustes (é um formulário, não duas versões do perfil). "Fechar" vale para folha só de leitura e "Cancelar" para o que descarta algo digitado ou escolhido: `Sheet` ganhou `closeLabel` (padrão "Cancelar") e as folhas Reações, Quem reagiu, lista de comunidades, link da publicação, busca de GIF e Compartilhar perfil usam "Fechar"; a folha de localização da Feira mantém "Cancelar" (perde a cidade digitada).
+- Web: anel de foco do Fechar sem folga; seta de voltar de 40 x 40; foco depois de Escape volta ao topo em vez de à lista; campo da Busca 4 pt abaixo do de Conversas; abas da Busca sem `aria-selected`; foco depois de fechar a Publicar com Escape.
+- Compartilhar sem origem da instalação mostra "Não foi possível copiar o link." (`communityShare.js`). Decidido: no nativo abre a folha do sistema e a nota só aparece no recurso, então não há o que mudar.
 
 Limites desta caminhada:
 
@@ -11147,4 +11146,30 @@ Fecha três itens da #448, só no app:
 3. [ ] Convidar por @nome: o marcador "nome, @nome ou código" aparece na fonte normal e o que se digita, em monoespaçado, sem mudar o tamanho nem a altura do campo na primeira tecla (não realizada ainda).
 4. [ ] Ajuda da Busca no app instalado: o texto não cita o navegador (não realizada ainda).
 
-Testes: `apps/app/test/buscaGlobal.test.js`, `apps/app/test/uiKit.test.js` e `apps/app/test/help.test.js`. Os testes de `Field` e de `BuscaGlobal` conferem o código, não montam a tela.
+Mais sobras da #448 (PR `fix/polish-nav-leftovers`), só no app:
+
+- O visualizador de foto da conversa pede ícones claros da barra de status antes de abrir (no Android a janela do `Modal` copia o estilo uma só vez, ao aparecer, então um `StatusBar` dentro dela não muda nada) e devolve o estilo da tela ao fechar (`ChatMedia.js`).
+- Editar perfil guarda o que foi digitado ao fechar a folha; só um salvamento com sucesso limpa o rascunho (`startFields` em `profileSave.js`). O rascunho guarda só os campos editados: um campo que não foi tocado segue o perfil salvo (outra instância de Perfil, no Diário ou nos Ajustes, pode tê-lo salvo desde então). A foto continua sendo descartada ao fechar.
+- Em Publicar, Cancelar, deslizar e o fundo mantêm o texto e as fotos ou o vídeo; o botão "Descartar" (abaixo do campo, só com rascunho) é o único que apaga. A música escolhida (da busca do catálogo, sem link no texto) sai ao fechar e não volta; uma música de um link que ficou no texto volta sozinha. Enquanto um envio está em andamento a folha não fecha (sem Cancelar, deslizar, fundo nem Voltar do Android), para que nenhuma publicação saia depois de um Cancelar. "Usar a resposta" no conflito de rascunho descarta também o vídeo e a música.
+- Um só bloco de teclado, `apps/app/src/ui/KeyboardLift.js`, atrás de `KeyboardForm` (Perfil) e `SheetKeyboard` (Publicar).
+- Web: depois de recarregar numa tela funda, o Voltar do navegador não fica morto: a entrada atual vira profundidade 0 e uma entrada antiga com número maior leva de uma vez ao que vem antes da primeira tela (`history.web.js`).
+- A barra de perfil (`ProfileBar`) limita o título a 1,3 vez o tamanho do texto, como os outros cabeçalhos, para caber na barra de altura fixa.
+- O botão "Editar perfil" no canto do cabeçalho do Diário também para em 1,3 vez: no maior tamanho de texto ele crescia por cima dos botões da faixa.
+- Web: o campo de escrever de Publicar (publicação e momento) e o do chat crescem e encolhem com o texto, lendo o `scrollHeight` do textarea (`fieldMeasure.web.js`; no nativo `fieldMeasure.native.js` não faz nada).
+- Web: Avisos, Diário e Membro não geram mais "Invalid prop `onLayout` supplied to `React.Fragment`": as linhas de esqueleto do estado vazio ficam dentro de uma `View`.
+- O nome no cabeçalho do perfil já quebrava linha (sem `numberOfLines`): sem mudança de código, só um teste que garante isso.
+- O campo de valor da oferta mostra "0,00" (o preço do anúncio não é conhecido ali).
+- Decidido, sem mudança de código: a legenda recolhida é texto simples (§190); o aviso de cópia no nativo (`communityShare.js`) só vale no recurso sem a folha do sistema; "o perfil tem duas apresentações" é o editor (folha no Diário, página nos Ajustes), um formulário.
+
+5. [x] Android: abrir uma foto numa conversa: os ícones da barra de status ficam claros sobre o preto, e voltam ao normal ao fechar (feita em 2026-11-15 no emulador, tema claro, Vitrine).
+6. [x] Editar perfil: mudar o nome e a bio, tocar em Cancelar, abrir de novo: o texto digitado continua; Salvar e abrir de novo: mostra o salvo (feita em 2026-11-15 no emulador, Vitrine: conferido o rascunho mantido depois de Cancelar; o Salvar não foi conferido).
+7. [x] Publicar: escolher uma foto, escrever, tocar em Cancelar e abrir de novo: foto e texto continuam; "Descartar" apaga os dois (feita em 2026-11-15 no emulador, Vitrine).
+8. [x] Web: abrir uma tela funda (conversa, perfil), recarregar a página e tocar em Voltar do navegador: não fica parado por vários toques (feita em 2026-11-15 na Vitrine: depois de recarregar numa conversa a entrada fica com profundidade 0, e abrir uma conversa e tocar em Voltar a fecha).
+9. [x] iOS: com o maior tamanho de texto do sistema, rolar um perfil até a barra aparecer: o título cabe na barra; mudar o tamanho com o app aberto não a deixa em branco (feita em 2026-11-15 no simulador iPhone 17 Pro, Vitrine, no Diário).
+10. [x] Web: o campo de Publicar (e o do Momento) e o do chat crescem ao digitar várias linhas e encolhem ao apagar (feita em 2026-11-15 na Vitrine: Publicar de 120 a 200 px e de volta, chat de 40 a 106 px e de volta; o do Momento não foi conferido).
+11. [x] Web: Avisos, Diário e Membro com o console aberto: sem o aviso "Invalid prop `onLayout`" (feita em 2026-11-15 na Vitrine, onde os dados chegam logo e o esqueleto quase não aparece; o teste de fonte cobre o resto).
+12. [ ] Tela de 320 pt de largura com texto extra-grande: o nome no perfil quebra em mais linhas, sem corte (não realizada ainda).
+13. [ ] Publicar: tocar em Publicar com fotos e, durante o envio, tentar Cancelar, deslizar e o Voltar do Android: a folha não fecha e não aparece Cancelar; se o envio falha, ele volta (não realizada ainda).
+14. [x] Celular com o maior tamanho de texto do sistema: no Diário, o botão "Editar perfil" não cobre os botões da faixa (Sobre, Ajustes, Avisos) (feita em 2026-11-15 no simulador iPhone 17 Pro e no emulador Android com fonte 2,0, Vitrine).
+
+Testes: `apps/app/test/buscaGlobal.test.js`, `apps/app/test/uiKit.test.js`, `apps/app/test/help.test.js`, `apps/app/test/profileSave.test.js`, `apps/app/test/composePolish.test.js`, `apps/app/test/chatMedia.test.js`, `apps/app/test/nav.test.js`, `apps/app/test/profileBar.test.js`, `apps/app/test/profilePolish.test.js`, `apps/app/test/chatSurfaces.test.js`, `apps/app/test/fieldGrow.test.js` e `apps/app/test/keyboardLift.test.js`. Os testes de `Field` e de `BuscaGlobal` conferem o código, não montam a tela.

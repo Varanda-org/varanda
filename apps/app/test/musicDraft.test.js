@@ -664,7 +664,7 @@ test('publishing or closing lets the same URL resolve in the next draft', async 
     } else {
       r.ctx.open = false
       r.run()
-      const start = source.indexOf('  useEffect(() => {', source.indexOf('// Closing the composer discards'))
+      const start = source.indexOf('  useEffect(() => {', source.indexOf('// Closing the composer (Cancelar'))
       const end = source.indexOf('\n  useEffect(', start + 1)
       const ctx = {
         ...r.ctx,
