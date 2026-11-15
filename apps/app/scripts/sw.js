@@ -694,7 +694,7 @@ function postsLate () {
 // once, except on Android, where it waits QUIET_CLOSE_WAIT_MS: an installed
 // app there left the notice in the tray after an immediate close, most likely
 // because the system posts it asynchronously and the earlier close is lost
-// (inferred from one device report, docs/verification.md section 112). A later quiet notice with the same tag replaces this one and closes
+// (inferred from one device report, docs/verification/fix-android-quiet-notice-close.md). A later quiet notice with the same tag replaces this one and closes
 // after its own wait.
 async function showQuietlyAndClose () {
   try {
