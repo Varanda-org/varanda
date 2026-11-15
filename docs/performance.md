@@ -109,7 +109,7 @@ Metas para o conjunto D1, com a mediana de 5 execuções. Os valores de "hoje" s
 | `profile.read` de 61 autores | <= 120 ms | 193 ms em IndexedDB, 284 a 333 ms em arquivos (M0); M4: 211,2 e 201,4 ms, meta não atingida |
 | `log.read`, página 8 | <= 1,5x a página 1 | 4 ms em IndexedDB e 18 a 26 ms em arquivos, as duas páginas iguais |
 | Leitura depois do fim da concessão (`leaseGapReadMs`, arquivos) | <= 100 ms | 390 a 476 ms (M0); M4: 270 ms, meta não atingida |
-| Chrome 4x, laboratório: até as linhas de A Rua | <= 2,5 s (o mínimo de 1,5 s do splash vale só para carregando, conectando ou introdução e Termos a seguir; a rodada M0 media com ele) | 5,8 s (build de produção), 6,5 s (desenvolvimento) |
+| Chrome 4x, laboratório: até as linhas de A Rua | <= 2,5 s (o splash fica sempre os 1,5 s da apresentação inteira, contados na web da pintura da página; a rodada M0 media com o mínimo antigo, que valia só para carregando, conectando ou introdução e Termos a seguir) | 5,8 s (build de produção), 6,5 s (desenvolvimento) |
 | Chrome 4x, laboratório: troca de aba | <= 400 ms | a medir |
 | Chrome 4x, laboratório: perfil | <= 500 ms | a medir |
 | Chrome 4x, laboratório: rajada de 2 minutos | nenhum "pedidos demais em andamento" e nenhum "pedido lento" | a medir |

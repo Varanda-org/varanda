@@ -11090,3 +11090,41 @@ node apps/app/test/postOverflow.test.js
 ```
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 242. O splash mostra a apresentação inteira antes da primeira tela (PR fix/splash-full-presentation)
+
+Esta seção confere que o splash só sai depois de mostrar a apresentação inteira: a entrada (o chão, a varanda, a cadeira, as letras e a barra, cerca de 1,3 s) e uma pausa curta na cena pronta, 1,5 s no total (`PRESENTATION_MS` em `apps/app/src/ui/splashMotion.js`). Pode ficar mais enquanto o app carrega, nunca menos. Vale no Android, no iOS, na web e no PWA.
+
+O que muda:
+
+- O `Splash` avisa o app (`onPresented`) uma vez, quando a apresentação foi vista: no nativo, 220 ms depois de a entrada terminar; com reduzir movimento, quando a cena parada completa 1,5 s; na web, sob o overlay de `public/index.html`, pelo relógio da própria animação `vps-expire` do overlay, então os 1,5 s contam da pintura da página, não da montagem do app.
+- `holdSplash` (`apps/app/src/splashGate.js`) segura o splash em qualquer fase até esse aviso: com o nó já pronto (A Rua, Entrar), numa falha (Conectar, o formulário da primeira abertura no nativo) e antes da Introdução e dos Termos. A prévia de A Rua guardada no celular também espera (`previewAllowed`). Um teto de 5 s desde a montagem (`SPLASH_CAP_MS`) libera o app se o aviso nunca vier.
+- Um splash que volta depois de a apresentação ter sido vista (por exemplo, depois da Introdução ou dos Termos, com o nó ainda conectando) abre já assentado, com a calçada deslizando, sem repetir a entrada.
+- Esta seção substitui o que as seções 44, 152 e 213 dizem sobre o mínimo de 1,5 s: ele não vale mais só nas fases de carregamento ou com a Introdução e os Termos a seguir, nem conta da montagem do app; agora vale sempre, contado do começo da apresentação. O resto daquelas seções (a paciência de 10 s de Conectar, a espera das primeiras linhas de A Rua e de Momentos, o teto de 5 s do conteúdo) segue igual.
+
+Nada disso envia pedido nem guarda dado. Sem mudança de protocolo, RPC nem Termos.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA. Abrir o app do zero, com o processo fechado.
+
+Rodada de 2026-11-14: emulador Android `varanda-api36` (Android 16, API 36) e simulador iPhone 16e (iOS 26.2), os dois com o build de debug servido pelo Metro; Chrome sem janela, a 390 px, no servidor de desenvolvimento. No nativo, vídeo da tela a 20 quadros por segundo, contado do primeiro quadro com o pôr do sol até o primeiro quadro da tela seguinte; os primeiros quadros da entrada, com o chão ainda quase transparente, não entram na conta, então a duração real é um pouco maior que a medida. Na web, o tempo entre o início da animação do overlay e a saída dele, no relógio da página.
+
+- [ ] Primeira abertura com os Termos ou a Introdução a seguir: o splash mostra a entrada inteira e a cena pronta antes da tela seguinte, por pelo menos 1,5 s desde o começo da entrada. Emulador Android (build de debug): ok pela ordem, em duas aberturas, lida com um registro temporário no JS (logcat, retirado antes do commit): a entrada terminou (aos 7,3 s e aos 4,4 s do começo), o aviso veio depois (aos 9,5 s e aos 9,1 s) e só então o splash saiu (8 ms e 1,2 s depois do aviso), seguido dos Termos 51. O emulador estava muito lento pela carga da máquina (a entrada de 1,3 s levou de 4 a 7 s) e o gravador de tela dele pegou poucos quadros, então a duração medida em vídeo num aparelho sem carga fica pendente. Simulador iOS: ok, 1,50 s e 1,45 s em duas aberturas, depois os Termos 51; nos quadros, a entrada termina com a barra visível antes da troca. Web: ok, 1500, 1500 e 1517 ms, depois a Introdução. PWA: pendente.
+- [ ] Falha de conexão: a tela Conectar só aparece depois da apresentação. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: ok, com a Introdução já vista e sem semeador no servidor de desenvolvimento, 1500 ms de splash e então Conectar (antes aparecia de imediato). PWA: pendente.
+- [ ] Quem volta com a configuração lembrada e o nó pronto cedo (A Rua ou Entrar): o splash não sai antes de 1,5 s. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Celular com A Rua guardada: a prévia das linhas guardadas só substitui o splash depois da apresentação. Emulador Android (build de debug): pendente. Simulador iOS: pendente.
+- [ ] Reduzir movimento (Android: Remover animações; iOS: Reduzir Movimento; web: `prefers-reduced-motion`): a cena parada fica 1,5 s e então vem a tela seguinte. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: ok, 1516, 1517 e 1517 ms com a preferência emulada. PWA: pendente.
+- [ ] Ligar reduzir movimento no meio da entrada: a cena assenta e para, e fica até completar 1,5 s desde o começo. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente.
+- [ ] Splash que volta depois dos Termos ou da Introdução com o nó ainda conectando: abre assentado, com a calçada deslizando, sem repetir a entrada. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Web com rede lenta (estrangular no DevTools): o overlay fica até o app ficar pronto e sai sem somar outro 1,5 s depois do bundle. Web: pendente. PWA: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho.
+
+```sh
+node apps/app/test/splashGate.test.js
+node apps/app/test/splashMotion.test.js
+node apps/app/test/splashWiring.test.js
+node apps/app/test/ruaSnapshot.test.js
+node apps/app/test/preSplash.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.

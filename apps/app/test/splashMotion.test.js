@@ -20,8 +20,8 @@ test('splashMotion: constants', async (t) => {
 })
 
 test('splashMotion: full choreography', async (t) => {
-  const { splashMotion, ENTRANCE_MS } = await load()
-  const { SPLASH_MIN_MS } = await import('../src/splashGate.js')
+  const { splashMotion, ENTRANCE_MS, REST_MS, PRESENTATION_MS } = await load()
+  const { SPLASH_CAP_MS } = await import('../src/splashGate.js')
   const m = splashMotion(false)
   t.alike(m.ground, {
     delay: 0,
@@ -46,8 +46,25 @@ test('splashMotion: full choreography', async (t) => {
   t.is(m.hint.duration, 320)
   const steps = [m.ground, m.varanda, m.chair, ...m.letters, m.hint]
   t.is(ENTRANCE_MS, Math.max(...steps.map((s) => s.delay + s.duration)))
-  t.ok(ENTRANCE_MS <= SPLASH_MIN_MS, 'the entrance fits within the minimum splash')
+  t.is(PRESENTATION_MS, ENTRANCE_MS + REST_MS)
+  t.is(PRESENTATION_MS, 1500)
+  t.ok(PRESENTATION_MS < SPLASH_CAP_MS, 'the cap outlasts the presentation')
   t.ok(m.chair.delay + m.chair.duration > m.varanda.delay + m.varanda.duration, 'the chair lands after the varanda is in')
+})
+
+test('overlayRemainingMs: what the web overlay still has to play', async (t) => {
+  const { overlayRemainingMs } = await load()
+  const clock = (currentTime) => [{ animationName: 'other', currentTime: 5 }, { animationName: 'vps-expire', currentTime }]
+  t.is(overlayRemainingMs([{ animationName: 'vps-expire', currentTime: 400 }], 1500), 1100)
+  t.is(overlayRemainingMs(clock(400), 1500), 1100, 'other animations are ignored')
+  t.is(overlayRemainingMs(clock(1500), 1500), 0)
+  t.is(overlayRemainingMs(clock(9000), 1500), 0)
+  t.is(overlayRemainingMs(clock('400'), 1500), 1100)
+  for (const anims of [[{ animationName: 'other', currentTime: 400 }], [], null, undefined]) {
+    t.is(overlayRemainingMs(anims, 1500), 1500, 'no clock, full time')
+  }
+  for (const at of [null, NaN, -5]) t.is(overlayRemainingMs(clock(at), 1500), 1500, 'bad time: ' + at)
+  for (const ms of [NaN, -1, undefined]) t.is(overlayRemainingMs(clock(0), ms), 0)
 })
 
 test('slideMotion: continuous slide speeds match the landing page', async (t) => {
