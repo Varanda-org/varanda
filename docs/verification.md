@@ -11159,6 +11159,28 @@ node apps/cli/test/post-page.test.js
 - [ ] Link aberto de dentro do WhatsApp e do Instagram (navegador embutido): pendente.
 - [ ] Fonte maior no sistema ou no navegador (ajuste de tamanho do texto, não zoom da página), no Android e no iOS: pendente. A página usa tamanhos em px, como o app.
 
+## 245. Players carregam no Android sem tela de permissão (PR fix/android-player-never-loads)
+
+Esta seção confere que os players de YouTube e Spotify carregam no app Android sem a tela de permissão do sistema. O player do Spotify pede acesso a mídia protegida (`requestMediaKeySystemAccess`, Widevine e outros) ao carregar. Com `allowsProtectedMedia` desligado, o react-native-webview transforma esse pedido num pedido de permissão do Android: a tela de permissão abre por cima, o app vai para segundo plano, todos os players fecham, carregam de novo e o pedido volta. Agora o documento do player no app nativo não inclui `encrypted-media` na permissão do quadro, então a Permissions Policy recusa o pedido dentro do quadro, sem chegar ao WebView. O Android já recusava o pedido no fim da tela, então o que toca não muda. Não liga `allowsProtectedMedia`, que daria ao provedor um identificador de DRM do aparelho. A web não muda: o navegador trata o pedido sozinho. Sem mudança de protocolo, RPC, Termos nem dependência.
+
+Ordem: Android (build de debug, emulador), depois iOS e web, com os dados da Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) e quatro publicações de YouTube e quatro de Spotify.
+
+- [x] Android, emulador API 36, build de debug, A Rua com um cartão do Spotify à vista, sem a correção: 7 telas de permissão (`REQUEST_PERMISSIONS` do app) e 7 pausas da `MainActivity` em cerca de 80 s; o primeiro YouTube ficou na capa por cerca de 150 s. Conferido em 2026-11-15.
+- [x] O mesmo, com a correção, por 6 minutos: nenhuma tela de permissão e nenhuma pausa; os dois players trocaram a capa pelo player em cerca de 73 s, numa máquina muito carregada. Os 14 pedidos de mídia protegida de um quadro do Spotify foram recusados pela Permissions Policy. Conferido em 2026-11-15.
+- [x] Com a correção, tocar no Spotify toca a prévia de 30 s, como antes, e tocar no YouTube toca o vídeo. Conferido em 2026-11-15.
+- [ ] No Android do relato (instalação da loja ou APK), A Rua com Spotify e YouTube: os players carregam e nenhuma tela de permissão pisca. Pendente.
+- [ ] iOS, simulador: os players carregam e tocam como antes. Pendente.
+- [ ] Web e PWA: nada muda (o quadro da web mantém `encrypted-media`). Pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A asserção nova (sem `encrypted-media` no documento nativo) falha sem a correção.
+
+```sh
+node apps/app/test/musicEmbed.test.js
+node apps/app/test/embedFrame.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
 ## 247. Polimento da Busca, da ajuda e do campo mono (PR fix/polimento-navegacao-sobras)
 
 Fecha três itens da #448, só no app:
