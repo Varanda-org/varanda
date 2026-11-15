@@ -40,8 +40,8 @@
 // show; nothing is written, followed or retried.
 // A group or community link (/g/<key>, /c/<key>) is announced on Entrar and
 // opens the screen once the tabs show; it is never consent to join.
-// A splash holds a short minimum while the app loads and, on the web, covers
-// the node's connection; the intro cards (src/intro.js) follow once per device,
+// A splash stays until its whole presentation has been seen, in every phase,
+// and, on the web, covers the node's connection; the intro cards (src/intro.js) follow once per device,
 // before the Termos.
 // The age gate (a hosted node, on the site or in the app on an installation;
 // src/age.js) holds every member, linked or
@@ -108,7 +108,7 @@ import { useTerms } from './src/useTerms'
 import { useAgeMemory } from './src/useAgeMemory'
 import { INTRO_VERSION, introDecision } from './src/intro'
 import { useIntro } from './src/useIntro'
-import { CONNECT_PATIENCE_MS, SPLASH_MIN_MS, bootPatienceMs, bootProgress, coverBoot, coverConnecting, holdBootCover, holdSplash, previewAllowed, ruaFeedReady } from './src/splashGate'
+import { CONNECT_PATIENCE_MS, SPLASH_CAP_MS, bootPatienceMs, bootProgress, coverBoot, coverConnecting, holdBootCover, holdSplash, previewAllowed, ruaFeedReady } from './src/splashGate'
 import { Btn, ErrorText, Page, errorText } from './src/ui'
 import { Stepper } from './src/ui/Stepper'
 import { ThemeProvider, useStyles, useTheme } from './src/ui/ThemeProvider'
@@ -375,10 +375,12 @@ function Member () {
   }, [])
   const barRef = useRef(0)
   const [, bumpSplash] = useState(0)
+  const [presented, setPresented] = useState(false)
+  const onPresented = useCallback(() => setPresented(true), [])
   // A timer can fire a few ms before Date.now() reaches the threshold; the
   // slack makes the re-render see it passed, since nothing re-arms the timer.
   useEffect(() => {
-    const t = setTimeout(() => bumpSplash((n) => n + 1), SPLASH_MIN_MS + 50)
+    const t = setTimeout(() => bumpSplash((n) => n + 1), SPLASH_CAP_MS + 50)
     return () => clearTimeout(t)
   }, [])
   const [updateReady, setUpdateReady] = useState(false)
@@ -2935,7 +2937,7 @@ function Member () {
   // Only grows: a later step or reconnect never moves the bar back.
   const bootBar = Math.max(barRef.current, bootProgress({ phase: node.phase, step, page: feedBoot.page, details: feedBoot.details, moments: feedBoot.moments }))
   barRef.current = bootBar
-  const splash = <Splash edges={sideEdges} progress={bootBar} />
+  const splash = <Splash edges={sideEdges} progress={bootBar} onPresented={onPresented} entered={presented} />
   // The intro cards come first, once per device (src/intro.js): presentation
   // only, so autosync, the outbox and the invite keep waiting for termsOk. An
   // age return skips them for that page load without marking them seen.
@@ -2959,10 +2961,10 @@ function Member () {
     return () => clearTimeout(t)
   }, [coveringConnect, node.canConfigure])
   const loadingGate = decision === 'loading' || introState === 'loading'
-  // Once the node was seen ready the shell may already be up (no fixed
-  // minimum for 'ready'), so a reconnect inside the first 1.5 s must not
-  // bring the splash back and unmount the tree.
-  const holding = holdSplash({ phase: ready || seen ? 'ready' : node.phase, elapsedMs: Date.now() - bootAt, released: released.current, gateNext })
+  // Before the presentation has been seen nothing replaces the splash, ready
+  // or not. The latch only goes one way, so a reconnect later never brings it
+  // back.
+  const holding = holdSplash({ presented, elapsedMs: Date.now() - bootAt, released: released.current })
   const showIntro = introState === 'show' && !AGE_RETURN
   const showTerms = decision === 'needed' || decision === 'updated' || decision === 'account'
   const connectingSplash = !ready && !seen && coverConnecting({ phase: node.phase, canConfigure: node.canConfigure, elapsedMs: connectingAt.current === null ? 0 : Date.now() - connectingAt.current, released: released.current })
@@ -3108,6 +3110,7 @@ function Member () {
   // not yet the step; a recovery is always its own step.
   const previewStep = recovering ? 'recuperando' : (cover ? null : step)
   const previewOn = previewOwner !== null && !previewMismatch && previewAllowed({
+    presented,
     snapshot: previewSeed.snapshot,
     previewCapable,
     // Not known yet whether a gate comes next counts as one.

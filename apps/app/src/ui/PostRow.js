@@ -340,6 +340,10 @@ function PostRowView ({
   // Until the targets report their size, reserve what they usually take, so a
   // row never paints them over the name for a frame.
   const headReserve = headActionsSize.width > 0 ? headActionsSize : { width: (fn(onFollow) ? FOLLOW_GUESS : 0) + (hasMore ? layout.hit : 0), height: layout.hit }
+  // The pill's face starts at the edge of its target, so the date kept no
+  // space before it (Android drew them touching). ⋯ sits inside a wider
+  // target and needs no gap.
+  const headPad = headReserve.width + (fn(onFollow) ? space.sm : 0)
   // At large text the date cannot shrink and would run under the targets on a
   // narrow screen, so the name keeps the first line and the date moves below.
   const stackHead = headActions && fontScale >= LARGE_TEXT
@@ -534,7 +538,7 @@ function PostRowView ({
             {...a11yOpen}
           >
             <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
-              <View style={[styles.head, stackHead && styles.headStacked, headActions && !stackHead && { paddingRight: headReserve.width }, headActions && !stackHead && fn(onFollow) && { minHeight: headReserve.height - HEAD_LIFT }]}>
+              <View style={[styles.head, stackHead && styles.headStacked, headActions && !stackHead && { paddingRight: headPad }, headActions && !stackHead && fn(onFollow) && { minHeight: headReserve.height - HEAD_LIFT }]}>
                 <Pressable
                   accessibilityRole='link'
                   accessibilityLabel={'ver o perfil de ' + title}
@@ -542,7 +546,7 @@ function PostRowView ({
                   onPress={openAuthor}
                   onLongPress={bodyLongPress}
                   delayLongPress={350}
-                  style={({ pressed }) => [styles.nameBox, handle && styles.nameBeside, stackHead && { width: '100%', paddingRight: headReserve.width, minHeight: headReserve.height, justifyContent: 'center' }, pressed && openAuthor && styles.pressed]}
+                  style={({ pressed }) => [styles.nameBox, handle && styles.nameBeside, stackHead && { width: '100%', paddingRight: headPad, minHeight: headReserve.height, justifyContent: 'center' }, pressed && openAuthor && styles.pressed]}
                 >
                   <Text style={styles.name} numberOfLines={1}>{title}</Text>
                 </Pressable>
