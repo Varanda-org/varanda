@@ -1436,6 +1436,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       <OfflineNote />
       <EmbedBandBottom.Provider value={composer ? band : null}>
         <RefreshableList
+          perfId='mensagem'
           data={rows}
           listRef={listRef}
           keyExtractor={(row) => row.key}

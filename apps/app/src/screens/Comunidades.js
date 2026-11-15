@@ -473,6 +473,7 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
           view above it. */}
       <KeyboardForm>
         <RefreshableList
+          perfId='comunidades'
           data={list.rows}
           keyExtractor={(c) => c.community}
           renderItem={renderItem}
