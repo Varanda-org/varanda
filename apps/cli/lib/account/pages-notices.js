@@ -3,16 +3,19 @@
 // Notices of a hosted page (docs/rpc.md 5.28 shape, docs/protocol.md
 // 'Notices link'), read by the account service that holds the page key:
 // who followed the page and whom it does not follow yet, and who replied to,
-// quoted or mentioned it. The rules are packages/web-member/lib/notices.js's
-// (not imported: that package is browser-only), on the CLI's Hypercore 11.
+// quoted or mentioned it, and who liked or reposted one of its posts. The
+// rules are packages/web-member/lib/notices.js's (not imported: that package
+// is browser-only), on the CLI's Hypercore 11.
 //
 // One short-lived link per read: a WebSocket to the loopback seeder
 // (/seeder), a NoiseSecretStream with a FRESH key, the admission hello with
 // role 'member', an EMPTY inventory and no announce, the seeder's hello
 // verified (role 'seeder', seederCertForKey on its Noise key) before
-// anything else is sent. Then 'varanda/notices/2' in the member role proves
-// the PAGE key: the channel builds the v2 payload (notices-v2.js, its own
-// prefix, so a v1 proof never opens it) and the page secret only signs it.
+// anything else is sent. Then 'varanda/notices/3' (else 'varanda/notices/2',
+// which has no likes or reposts) in the member role proves the PAGE key: the
+// channel builds its own payload (notices-v3.js / notices-v2.js, own prefix,
+// so a v1 proof never opens it) and the page secret only signs it. A v3
+// channel left unanswered, then v2, marks the read incomplete.
 //
 // TRUST MODEL: the seeder can withhold but not forge. Every row is checked
 // on the same link against the author's signed blocks, replicated into a
@@ -20,9 +23,13 @@
 // revoked issuers, fork 0, quota on the verified length), the blocklist,
 // then block `seq`, which must be the author's signed follow of the page
 // with on: true and the claimed `at` (a later signed unfollow in the
-// verified tail drops it), or a signed post whose kind is DERIVED here: a
+// verified tail drops it), a signed post whose kind is DERIVED here (a
 // reply to or a quote of a page post block, else an '@nome' that the page
-// diary verifiably held (heldUsernames). The seeder's kind is never used.
+// diary verifiably held, heldUsernames), or, on a v3 read only, a signed
+// on: true like or repost whose target is a post the page diary still holds
+// (the row carries it as `post`; a later toggle of the same target drops the
+// row, and one author's like of one post is one row, the highest seq). The
+// seeder's kind is never used.
 //
 // COST: at most MAX_SEEDER_PAGES pages, DEADLINE_MS and BUDGET_BYTES of
 // WebSocket payload per read; one read in flight per page; one cached
@@ -50,7 +57,7 @@ const { seederCertForKey } = require('@varanda/core/lib/cert')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { PEEK_TAIL_BLOCKS, diaryPeek, retainRecords } = require('@varanda/core/lib/peek')
 const { NOTICES_LIMIT_MAX, NOTICES_LIMIT_DEFAULT } = require('@varanda/core/lib/notices')
-const { attachNoticesV2, NOTICES_REQUEST_TIMEOUT_MS } = require('@varanda/core/lib/notices-net')
+const { attachNoticesV2, attachNoticesV3, NOTICES_REQUEST_TIMEOUT_MS } = require('@varanda/core/lib/notices-net')
 const { MAX_FUTURE_MS } = require('@varanda/core/lib/feed')
 const { heldUsernames } = require('@varanda/core/lib/username')
 const { mentionTokens } = require('@varanda/rpc')
@@ -79,6 +86,10 @@ const KEY_RE = /^[0-9a-f]{64}$/
 const TIMEOUT = Symbol('timeout')
 
 function noop () {}
+
+function isEngagement (type) {
+  return type === 'like' || type === 'repost'
+}
 
 function fail (code) {
   const err = new Error(code)
@@ -216,7 +227,7 @@ function createPagesNotices ({ keys, writer, seederWs, association, blocklist = 
 
   function openLink (run, page, secretKey) {
     return new Promise((resolve, reject) => {
-      const link = { ws: null, noise: null, v2: null, verified: false, closeCode: null }
+      const link = { ws: null, noise: null, v2: null, v3: null, verified: false, closeCode: null }
       run.link = link
       let settled = false
       const finish = (err) => {
@@ -278,7 +289,7 @@ function createPagesNotices ({ keys, writer, seederWs, association, blocklist = 
           })
           // On the muxer before the hello, so protomux pairs the seeder's
           // open; the proof is refused until the hello verified.
-          link.v2 = attachNoticesV2(link.noise, {
+          const noticesOpts = {
             role: 'member',
             ownKey: page,
             requestTimeoutMs: L.requestTimeoutMs,
@@ -286,7 +297,11 @@ function createPagesNotices ({ keys, writer, seederWs, association, blocklist = 
               if (!link.verified) throw new Error('semeador não verificado')
               return hcrypto.sign(bytes, secretKey)
             }
-          })
+          }
+          // v3 (likes and reposts) first; v2 is the fallback for an older
+          // seeder, and the channel not used is closed once one is chosen.
+          link.v2 = attachNoticesV2(link.noise, noticesOpts)
+          link.v3 = attachNoticesV3(link.noise, noticesOpts)
         } catch {
           finish(fail('sem-semeador'))
         }
@@ -297,6 +312,7 @@ function createPagesNotices ({ keys, writer, seederWs, association, blocklist = 
   function destroyLink (link) {
     if (link === null) return
     try { if (link.v2 !== null) link.v2.close() } catch {}
+    try { if (link.v3 !== null) link.v3.close() } catch {}
     try { if (link.noise !== null) link.noise.destroy() } catch {}
     try { if (link.ws !== null) link.ws.terminate() } catch {}
   }
@@ -374,6 +390,8 @@ function createPagesNotices ({ keys, writer, seederWs, association, blocklist = 
           quote: signed.quote === undefined || signed.quote === null ? null : { author: signed.quote.author, seq: signed.quote.seq },
           mentions: mentionTokens(signed.text)
         }
+      } else if ((signed.type === 'like' || signed.type === 'repost') && signed.on === true && signed.to.author === ctx.own) {
+        facts = { type: signed.type, to: { author: signed.to.author, seq: signed.to.seq } }
       } else {
         return DROPPED
       }
@@ -403,6 +421,9 @@ function createPagesNotices ({ keys, writer, seederWs, association, blocklist = 
         const copy = validRecordCopy(record, seq)
         if (copy !== null && copy.type === 'delete' && copy.seq >= 1 && copy.seq < length) gone.add(copy.seq)
         if (facts.type === 'follow' && seq > item.seq && copy !== null && copy.type === 'follow' && copy.key === ctx.own && copy.on === false) return DROPPED
+        // A later toggle of the same target: an unlike ends the row, and a
+        // later like is the row that stands for it.
+        if (seq > item.seq && copy !== null && copy.type === facts.type && isEngagement(copy.type) && copy.to.author === facts.to.author && copy.to.seq === facts.to.seq) return DROPPED
       }
       if (q.fork !== 0 || overQuota(q)) return DROPPED
       return { state: 'ok', evidence: { length, seqs, records: retainRecords(entries), at: signed.at, facts } }
@@ -433,8 +454,17 @@ function createPagesNotices ({ keys, writer, seederWs, association, blocklist = 
     if (r.state !== 'ok') return r
     const evidence = r.evidence
     let kind
+    let target = null
     if (evidence.facts.type === 'follow') {
       kind = 'follow'
+    } else if (isEngagement(evidence.facts.type)) {
+      // Only a v3 read lists likes and reposts, and only of a post the page
+      // diary still holds (a deleted block is not among ctx.posts).
+      const to = evidence.facts.to
+      if (!ctx.v3 || to.author !== ctx.own || !ctx.posts.has(to.seq)) return DROPPED
+      if (Date.parse(evidence.at) - Date.now() > MAX_FUTURE_MS) return DROPPED
+      kind = evidence.facts.type
+      target = item.key + '|' + kind + '|' + to.seq
     } else {
       kind = postKind(evidence.facts, ctx)
       if (kind === null || Date.parse(evidence.at) - Date.now() > MAX_FUTURE_MS) return DROPPED
@@ -443,7 +473,10 @@ function createPagesNotices ({ keys, writer, seederWs, association, blocklist = 
     if (v.reason !== null || ctx.claimedSeqs.has(ck)) return DROPPED
     if (kind === 'follow' && !claimFollow(item.key, ctx)) return DROPPED
     ctx.claimedSeqs.add(ck)
-    return { state: 'accepted', row: { kind, key: item.key, seq: item.seq, at: item.at, name: v.name, username: v.username, avatar: v.avatar } }
+    const row = { kind, key: item.key, seq: item.seq, at: item.at, name: v.name, username: v.username, avatar: v.avatar }
+    // docs/rpc.md 5.28: a like or repost row names the page post it targets.
+    if (target !== null) row.post = ctx.own + ':' + evidence.facts.to.seq
+    return { state: 'accepted', target, row }
   }
 
   // ---- read ----
@@ -488,7 +521,17 @@ function createPagesNotices ({ keys, writer, seederWs, association, blocklist = 
     }, L.deadlineMs)
 
     const link = await openLink(run, page, secretKey)
-    const supported = await within(link.v2.supported, Math.min(L.requestTimeoutMs, left()))
+    // v3 first (it carries every v2 kind plus likes and reposts); a seeder
+    // that does not pair it still gives the v2 rows.
+    const supportedV3 = await within(link.v3.supported, Math.min(L.requestTimeoutMs, left()))
+    if (run.lost) throw fail('sem-semeador')
+    const v3 = supportedV3 === true
+    // A v3 channel left unanswered, then v2: likes and reposts may be missing,
+    // so the read says it may be incomplete (the app's "may still arrive" note).
+    if (supportedV3 === TIMEOUT) run.incomplete = true
+    const handle = v3 ? link.v3 : link.v2
+    try { (v3 ? link.v2 : link.v3).close() } catch {}
+    const supported = v3 ? true : await within(link.v2.supported, Math.min(L.requestTimeoutMs, left()))
     if (run.lost) throw fail('sem-semeador')
     if (supported === TIMEOUT) return empty({ incomplete: true })
     if (supported !== true) {
@@ -497,7 +540,7 @@ function createPagesNotices ({ keys, writer, seederWs, association, blocklist = 
     }
     let proved
     try {
-      proved = await within(link.v2.proved, Math.min(L.requestTimeoutMs, left()))
+      proved = await within(handle.proved, Math.min(L.requestTimeoutMs, left()))
     } catch {
       proved = false
     }
@@ -508,7 +551,7 @@ function createPagesNotices ({ keys, writer, seederWs, association, blocklist = 
     }
 
     const cut = () => Date.now() >= deadline - MIN_FETCH_MS || run.cutoff || run.lost || run.link === null
-    const ctx = { own: page, follows, revoked, deadline, cut, names, posts, claimed: new Set(), claimedSeqs: new Set() }
+    const ctx = { v3, own: page, follows, revoked, deadline, cut, names, posts, claimed: new Set(), claimedSeqs: new Set() }
     const seen = []
     let accepted = 0
     let more = false
@@ -521,7 +564,7 @@ function createPagesNotices ({ keys, writer, seederWs, association, blocklist = 
         break
       }
       let pageResult
-      const asked = link.v2.requestPage({ after: cursor, limit: NOTICES_LIMIT_MAX })
+      const asked = handle.requestPage({ after: cursor, limit: NOTICES_LIMIT_MAX })
       asked.catch(noop)
       try {
         pageResult = await within(asked, left())
@@ -536,7 +579,7 @@ function createPagesNotices ({ keys, writer, seederWs, association, blocklist = 
       }
       pages++
       if (pageResult.incomplete) run.incomplete = true
-      const batch = pageResult.items.map((item) => ({ item, state: 'pending', row: null }))
+      const batch = pageResult.items.map((item) => ({ item, state: 'pending', row: null, target: null }))
       seen.push(...batch)
       await pool(batch, L.parallel, async (e) => {
         if (accepted >= limit) return
@@ -548,6 +591,7 @@ function createPagesNotices ({ keys, writer, seederWs, association, blocklist = 
         e.state = r.state
         if (r.state === 'accepted') {
           e.row = r.row
+          e.target = r.target
           accepted++
         } else if (r.state === 'pending') {
           run.incomplete = true
@@ -571,7 +615,12 @@ function createPagesNotices ({ keys, writer, seederWs, association, blocklist = 
       if (e.state === 'pending') break
       prefix.push(e)
     }
-    const rows = prefix.filter((e) => e.state === 'accepted').map((e) => e.row).sort(compareRows)
+    // One author's like (or repost) of one post is one row: the highest seq.
+    const top = new Map()
+    for (const e of prefix) {
+      if (e.state === 'accepted' && e.target !== null && (!top.has(e.target) || top.get(e.target) < e.row.seq)) top.set(e.target, e.row.seq)
+    }
+    const rows = prefix.filter((e) => e.state === 'accepted' && (e.target === null || top.get(e.target) === e.row.seq)).map((e) => e.row).sort(compareRows)
     const notices = rows.slice(0, limit).map((r) => ({ ...r, seen: seenToken(page, r.key, r.seq) }))
     const last = notices.length > 0 ? notices[notices.length - 1] : null
     const cursorOf = (r) => ({ at: r.at, key: r.key, seq: r.seq })
