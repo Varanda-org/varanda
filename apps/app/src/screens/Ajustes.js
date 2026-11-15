@@ -52,7 +52,7 @@ import { useOutbox } from '../outboxProvider'
 import { askPersist } from '../persist'
 import { useInstall } from '../install'
 import { LEGAL_VERSION } from '../legal'
-import { PUSH_LABEL, PUSH_UNKNOWN, PUSH_UNSUPPORTED, pushUiState } from '../push-state'
+import { PUSH_HINT, PUSH_LABEL, pushRowView } from '../push-state'
 import { usePush } from '../usePush'
 import { HELP, SHORT } from '../help'
 import { HelpNote } from '../ui/Help'
@@ -432,24 +432,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const phoneMember = typeof gateMember === 'string' ? gateMember : member
   const phoneNode = nodeProp || node
   const showChangePhone = account && phoneNode.hosted === true && unlocked && phoneGate === 'ok' && typeof phoneMember === 'string'
-  const pushUi = push === null
-    ? null
-    : pushUiState({
-      support: push.support,
-      keyAvailable: push.key !== null,
-      permission: push.permission,
-      subscribed: push.subscribed,
-      registered: push.registered,
-      pending: pushPending,
-      swUpToDate: push.swUpToDate
-    })
-  // A key the service did not hand over hides the row: push is off here.
-  const pushRow = pushUi !== null && push.support === 'ok' && push.key !== null
-  // A state that could not be confirmed is never labelled "Desligados".
-  const pushTrailing = pushUi === null ? null : (pushUi.on ? 'Ligados' : (pushUi.note === PUSH_UNKNOWN ? null : 'Desligados'))
-  const pushNote = pushRow && pushUi.note && pushUi.note !== pushError
-    ? pushUi.note
-    : pushUi !== null && push.support === 'unsupported' ? PUSH_UNSUPPORTED : ''
+  const { ui: pushUi, row: pushRow, trailing: pushTrailing, note: pushNote } = pushRowView({ push, pending: pushPending, error: pushError })
   const inviting = account && policy !== null && policy.required === true
   const lines = versionLines({ app: BUILD, server })
 
@@ -508,10 +491,11 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 <SwitchRow label={PREVIEW_PREF_LABEL} caption={PREVIEW_PREF_NOTE} value={previews} onValueChange={togglePreviews} />
               </View>
               <View style={styles.notes}>
-                {pushNote || (pushRow && pushError)
+                {pushNote || pushRow
                   ? (
                     <>
                       <FlushSectionHeader>Avisos neste aparelho</FlushSectionHeader>
+                      {pushRow ? <Soft>{PUSH_HINT}</Soft> : null}
                       {pushNote ? <Soft>{pushNote}</Soft> : null}
                       {pushRow ? <ErrorText>{pushError}</ErrorText> : null}
                     </>
