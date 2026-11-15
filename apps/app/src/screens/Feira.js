@@ -511,6 +511,7 @@ export default function Feira ({
     >
       {starNotice ? <View style={styles.note} accessibilityLiveRegion='polite' aria-live='polite'><Soft>{starNotice}</Soft></View> : null}
       <RefreshableList
+        perfId='feira'
         data={grid}
         extraData={listExtra}
         keyExtractor={(item) => item.map((listing) => listing.author + ':' + listing.seq).join('|')}

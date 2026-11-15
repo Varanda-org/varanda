@@ -139,7 +139,7 @@ import { createRequestQueue } from './requestQueue'
 import { createAttempts } from './attempts'
 import { noteOwnDmDrop } from './dmWakeMute'
 import { setDmDropObserver } from './pages'
-import { vitrineEnabled, vitrineLarge } from './vitrine/enabled'
+import { vitrineEnabled, vitrineLarge, vitrineRich, vitrineEmbeds } from './vitrine/enabled'
 import { createMarks, devHookRequest, perfEnabled } from './perfMarks'
 import { recoveryFetch } from './account'
 import { NOT_FOUND_TEXT, SERVICE_DOWN_TEXT } from './recovery'
@@ -256,6 +256,10 @@ const noConnection = () => Promise.reject(Object.assign(new Error('sem conexão 
 // The Vitrine (src/vitrine/enabled.js): development bundles only, behind an
 // opt-in env var. The literal member access is what Expo inlines.
 const VITRINE = vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE }, typeof __DEV__ !== 'undefined' && __DEV__)
+// Rich rows and provider players in those timing rows: no effect unless
+// VITRINE_LARGE is on too (vitrine/request.js builds them only then).
+const VITRINE_RICH = vitrineRich({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE, EXPO_PUBLIC_VARANDA_VITRINE_RICH: process.env.EXPO_PUBLIC_VARANDA_VITRINE_RICH }, typeof __DEV__ !== 'undefined' && __DEV__)
+const VITRINE_EMBEDS = vitrineEmbeds({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE, EXPO_PUBLIC_VARANDA_VITRINE_EMBEDS: process.env.EXPO_PUBLIC_VARANDA_VITRINE_EMBEDS }, typeof __DEV__ !== 'undefined' && __DEV__)
 // 200 extra feed rows for timing native list rendering (docs/performance.md).
 const VITRINE_LARGE = vitrineLarge({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE, EXPO_PUBLIC_VARANDA_VITRINE_LARGE: process.env.EXPO_PUBLIC_VARANDA_VITRINE_LARGE }, typeof __DEV__ !== 'undefined' && __DEV__)
 
@@ -298,7 +302,7 @@ export function NodeProvider ({ children }) {
 function VitrineNodeProvider ({ children }) {
   // The device clock (vitrine sources never read it): Momentos keep their
   // demo-clock ages, so the 24 h rule on the device still shows them.
-  const [fixtureRequest] = useState(() => vitrine.createVitrineRequest(vitrine.fixtures, { large: VITRINE_LARGE, clock: Date.now }))
+  const [fixtureRequest] = useState(() => vitrine.createVitrineRequest(vitrine.fixtures, { large: VITRINE_LARGE, rich: VITRINE_RICH, embeds: VITRINE_EMBEDS, clock: Date.now }))
   const [dmVersion, setDmVersion] = useState(0)
   const bumpDm = useCallback(() => setDmVersion((n) => n + 1), [])
   const [autoWanted, setAutoWanted] = useState(false)
