@@ -2,6 +2,8 @@
 
 Date: 2026-10-22 (sections 1 to 5) and 2026-10-23 (section 6, the public DHT; section 7, the new app design on iOS). Every check below was run on one Mac. Logs and screenshots stayed in the verification sessions' scratchpads (not committed).
 
+New verification goes in its own file per pull request under [verification/](verification/README.md), named after the branch and without a section number. This file keeps the numbered sections written before that, cited by number.
+
 ## Machine
 
 | Item | Version |
@@ -439,7 +441,7 @@ Verified findings, after merging duplicates and an upgrade-only triage (five wer
 | high | relay page: the diary's signing key was also the Noise and DHT key (cross-protocol reuse, non-constant-time DH with attacker-chosen points) | Claude, verifier | fixed: an ephemeral key pair per relay session |
 | high | the page hook handed the member object (and its secret key) to any script; the secret key is stored unencrypted in IndexedDB | Claude, verifier | hook fixed (a frozen view with only `key`, `length` and `replicate`); **encryption at rest accepted as a known risk of this spike and deferred to PR 4** (decision 2026-10-23; resolved in section 10: the key is derived from a passkey and never stored) |
 | high | the browser member replicated its diary before the seeder's certificate was verified | Grok | fixed: replication starts only after a verified seeder hello (tests with an impostor endpoint) |
-| medium | a handshaken client can hold a frame of up to `MAX_EXTERNAL_FRAME` open (secret-stream allocates the declared length up front); dripping one body byte every < 30 s also keeps the external idle deadline from firing, so 32 such clients pin about 256 MiB and every WebSocket slot (swarm peers keep their half) | Claude (low), Grok re-audit (medium) | amplified vector fixed in the seeder capacity PR (section 21): a frame-completion deadline that body bytes do not refresh, `min(120 s, 10 s + 1 s per 64 KiB)` of declared length, a 64 KiB/s minimum throughput (after 10 s of grace) for frames over 64 KiB left incomplete, and a 64 MiB budget charged only by those frames, which evicts the slowest stalled reservation instead of refusing a newcomer (reasons `frame-deadline` and `frame-budget`); a non-amplified, time-bounded ws buffer remains (see the residual bullet below). A lower frame limit until the peer has an admitted diary was not pursued |
+| medium | a handshaken client can hold a frame of up to `MAX_EXTERNAL_FRAME` open (secret-stream allocates the declared length up front); dripping one body byte every < 30 s also keeps the external idle deadline from firing, so 32 such clients pin about 256 MiB and every WebSocket slot (swarm peers keep their half) | Claude (low), Grok re-audit (medium) | amplified vector fixed in the seeder capacity PR (section 21): a frame-completion deadline that body bytes do not refresh, `min(139 s, 10 s + 1 s per 64 KiB)` of declared length, a 64 KiB/s minimum throughput (after 10 s of grace) for frames over 64 KiB left incomplete, both counted in active time (time paused by the seeder's own backpressure excluded), and a 64 MiB budget charged only by those frames, where a newcomer that does not fit may evict only stalled or too-slow reservations older than 1 s, and only when that makes room; otherwise the newcomer alone is refused (issue #226; reasons `frame-deadline` and `frame-budget`); a non-amplified, time-bounded ws buffer remains (see the residual bullet below). A lower frame limit until the peer has an admitted diary was not pursued |
 | high (re-audit) | the page hook's facade still let a page script reach the key pair through `replicate()` with its own muxer, contrary to its comment | Claude (re-audit) | same impact as the accepted key-at-rest risk (a same-origin script can read the key from IndexedDB): the comment now says the hook is not a security boundary; the hook goes away in PR 4, when the relay entry joins the page bundle |
 | low (re-audit) | an external socket that sends a hello and goes silent kept a WebSocket slot for good | Claude (re-audit) | fixed: a 30 s inactivity deadline on external sockets after the handshake (live peers send keep-alives every 5 s) |
 | medium (re-audit) | upstream dht-relay defect 2 above (`lib/server-proxy.js:91-93` sends `destroy` without `paired`, the encoder throws inside an `'error'` listener): any DHT peer that fails a relayed handshake stops the relay process; the script's `unhandledRejection` net does not catch a synchronous throw | Grok (re-audit) | deferred with the relay decision to the hardening PR (same reason as the next row) |
@@ -457,7 +459,7 @@ Deferred, not fixed in this PR:
 - `member.post()` does not enforce the diary quota (100,000 blocks / 64 MiB); the seeder would reject and purge on `quota`. The real browser session must enforce it.
 - `ws-stream` drops buffered bytes on `end()` or `destroy()` before the socket opens.
 - Relay page: "apagar tudo" does not leave the relay swarm, and the relay path does not announce to seeders (only direct member to member).
-- Frame pinning (section 21): fixed for the amplified vector. FrameGuard gives each incomplete frame `frameDeadlineFor(len)` = `min(120 s, 10 s + 1 s per 64 KiB)` from its header (body bytes do not refresh it). Only a frame over `SMALL_FRAME_BYTES` (64 KiB) still incomplete at the end of a chunk is charged to the seeder's single `maxFrameMemory` budget (default `MAX_FRAME_MEMORY`, 64 MiB): it reserves its declared length until it completes or the guard is destroyed, and is checked every 10 s for 64 KiB/s on average after a 10 s grace (a drip dies at 20 s, not 120 s). When a reservation does not fit, the slowest reservation older than 1 s is evicted (`frame-budget`) and the reservation retried once; only then is the requester refused. Handshake frames, keep-alives and frames that arrive whole are never charged, so a filled budget can neither refuse new members nor drop admitted ones (re-audit HIGH, CWE-400: 8 stalled 8 MiB declarations used to fill the budget for ~40 bytes and drop everyone at their next frame for up to 120 s). The caps are independent (`maxConnections` for swarm sockets, `maxExternal` for external ones), so the shared-sum race is gone. Remaining, bounded but not zero: `ws` buffers a whole WebSocket message, up to `MAX_PAYLOAD` (about 8 MiB), before FrameGuard sees it. Those are bytes the client really sent (not amplified), the 10 s handshake and 30 s idle deadlines drop a socket that stalls, and a partial message delivers nothing to the secret stream, so a stalled message pins at most `MAX_PAYLOAD` per socket for 30 s. Worst-case receive memory is about `maxExternal` x `MAX_PAYLOAD` + `maxFrameMemory`; size them together (section 21).
+- Frame pinning (section 21): fixed for the amplified vector. FrameGuard gives each incomplete frame `frameDeadlineFor(len)` = `min(139 s, 10 s + 1 s per 64 KiB)` from its header (body bytes do not refresh it; the 139 s cap is the 129 s a `MAX_EXTERNAL_FRAME` takes at 64 KiB/s plus one 10 s base window). Only a frame over `SMALL_FRAME_BYTES` (64 KiB) still incomplete at the end of a chunk is charged to the seeder's single `maxFrameMemory` budget (default `MAX_FRAME_MEMORY`, 64 MiB): it reserves its declared length until it completes or the guard is destroyed, and is checked every 10 s for 64 KiB/s on average after a 10 s grace (a drip dies at 20 s, not 139 s). These times are active times: while the seeder's own consumer lags and the guard pauses the socket, they stop, so a paused consumer never drops an honest peer as slow (section 21 says why this cannot be abused). When a reservation does not fit, the newcomer loses: only reservations older than 1 s that are stalled (no byte for 10 s) or below 64 KiB/s may be evicted (`frame-budget`), lowest progress first and only as many as needed, and only if that makes room; otherwise nobody is evicted and only the requester is refused (issue #226). Handshake frames, keep-alives and frames that arrive whole are never charged, so a filled budget never refuses them (re-audit HIGH, CWE-400: 8 stalled 8 MiB declarations used to fill the budget for ~40 bytes and drop everyone at their next frame for up to 120 s). Limit, the accepted cost of "the newcomer loses" (maintainers' decision, 2026-11-15): while older reservations keep up with the minimum rate, or are still in their first second, the budget stays full, and a newer large charged frame that does not fit is refused, an honest one included (a peer that sends only whole frames, as members over WebSocket do, is never charged, so never refused); this is bounded per frame by the 139 s cap and `MAX_EXTERNAL_FRAME`, per socket by one charged frame at a time and in total by `maxFrameMemory`, and a refused frame is never corrupted (nothing of it is forwarded; its socket is dropped with `frame-budget`). The caps are independent (`maxConnections` for swarm sockets, `maxExternal` for external ones), so the shared-sum race is gone. Remaining, bounded but not zero: `ws` buffers a whole WebSocket message, up to `MAX_PAYLOAD` (about 8 MiB), before FrameGuard sees it. Those are bytes the client really sent (not amplified), the 10 s handshake and 30 s idle deadlines drop a socket that stalls, and a partial message delivers nothing to the secret stream, so a stalled message pins at most `MAX_PAYLOAD` per socket for 30 s. Worst-case receive memory is about `maxExternal` x `MAX_PAYLOAD` + `maxFrameMemory`; size them together (section 21).
 - Seeder WebSocket entry: swarm sockets keep secret-stream's own 16 MiB behaviour; the transport is plain `ws://` on loopback until the TLS proxy (Caddy) PR. (The per-frame allocation by a handshaken peer and the shared-cap race are addressed in section 21.)
 - The shim's scalar multiplication is not constant-time; it mirrors libsodium's subgroup check, which accepts order-2L points (as libsodium itself does).
 - dht-relay 0.4.3: the two upstream defects above, plus a third found by the security audit (a duplicate `noiseReply` stops the relay process); experimental; custodial mode leaks the secret key.
@@ -1465,12 +1467,31 @@ None of these was performed for this change. Use two browsers (or profiles) with
 - [ ] Native app and `varanda-serve`: the tab shows "Só na versão web" and never errors; no `notices.list` call is made.
 - [ ] Caddy logs show no new route and no new error; the seeder log shows one `peer` event per read.
 
+### Index hardening (issue #230)
+
+- Pending fails closed: a diary marked pending (a read stopped short, a failed block, an `append`, a re-serve) has its follows unpublished until the next commit, so an unfollow behind blocks the seeder could not read never stays listed.
+- Quota share: past `NOTICES_LIGHT_TARGETS` 256 targets an author may not take the last quarter of `NOTICES_MAX_EDGES` (`NOTICES_RESERVE_DIVISOR` 4).
+- `incomplete` per target, in the Avisos page and in Seguidores: a diary that has not committed since it was served marks every page; one that committed before marks only the targets of its fold; a follow refused at a cap marks only that target (`MAX_CUT_TARGETS_PER_AUTHOR` 64, past which every page). The same rule for replies, quotes and mentions (`MAX_CUT_PAIRS_PER_AUTHOR` 64).
+- A notices page merges sorted per-pair lists from the cursor (`PAGE_CACHE_PAIRS` 128) instead of sorting every candidate; likes and reposts scan at most `NOTICE_SCAN_MAX` 16384 edges per request (far-future edges and one engager's edges past its newest 64 take no scan slot; a hidden engager's do) and say `incomplete` when the cap cut rows.
+- Page cache worst case: the `PAGE_CACHE_PAIRS` lists hold a subset of the stored rows, so at most `POST_NOTICES_MAX_EDGES` (about 262k row objects, roughly 30 MB by estimate, not measured), plus `cutOf` bounded by 64 x 4096 pairs.
+- Accepted rule, arrives late: "Alguns avisos ainda podem chegar." covers a diary not read since it was served, a pending diary whose fold or rows touch this member, the member's own diary pending (replies, quotes and mentions; a follows page does not count it), and rows lost at a cap; it does not cover a follow, reply, quote or mention in blocks of an already read diary that the seeder has not reached yet and that touched this member nowhere before: that row arrives at the next read, never as a false notice.
+- Automated: `node packages/core/test/notices.test.js`, `post-notices.test.js`, `engagement.test.js`, `node apps/cli/test/seeder-notices.test.js`, `node apps/cli/test/seeder-post-notices.test.js`.
+- [ ] Not performed. With A following B and C on one seeder: stop A's diary mid-download after its first full read (the seeder log shows the scan short): B's Avisos and B's Seguidores keep A's row out, and only the targets A's fold names say so (Avisos: "Alguns avisos ainda podem chegar."; Seguidores: "A lista pode estar incompleta."); C, whom A does not follow, sees a complete page.
+- Avisos reads once per follow back: with the tab shown the follows event no longer starts its own read (App's `refresh` bump reads or defers behind one in flight); hidden, it still reads in the background and the later show does not read again for that change (a `refresh` bump within `FOLLOWS_COVER_MS` 2 s of that read; a later bump, such as a block, still reads at show). A press that changed nothing (`changed: false`) asks for no reload; `follow.add` is still sent once per press. Accepted: shown, a follow made on another device no longer reads the list at once. The Seguir de volta pills update at once (the follow set is read again on every follows change); the only row that depends on the member's own follows, the follow row of someone now followed back, stays without its pill until the next full read (pull or show).
+- [ ] Not performed. Tap Seguir de volta on one notice with the Avisos tab shown and count `notices.list` reads (seeder log, `peer` events): one, and the list ends with the row gone from the pill.
+
 ## 21. Seeder capacity for the hosted web (PR feat/seeder-web-capacity, 2026-10-27)
 
 ### Summary
 
 - The WebSocket entry has its own cap, independent of the swarm: `maxExternal` (`VARANDA_MAX_EXTERNAL`, 1 to 4096; default half of `maxConnections`, that is 32) bounds external sockets, in-flight handshakes included, and `maxConnections` bounds swarm sockets only. `/health` and `/metrics` report `swarm`, `external`, `maxConnections` and `maxExternal`.
-- Frame pinning, amplified vector: see the residual bullet in section 8 (`frameDeadlineFor(len)` = `min(120 s, 10 s + 1 s per 64 KiB)` for every incomplete frame; frames over 64 KiB left incomplete are charged to the 64 MiB `maxFrameMemory` budget and must keep 64 KiB/s after a 10 s grace; a full budget evicts the slowest stalled reservation older than 1 s; drop reasons `frame-deadline` and `frame-budget`). The shared budget cannot be used to drop active members or refuse new ones. Tests in `packages/core/test/seeder-stream.test.js`: `a charged frame that drips is dropped at the first throughput check after the grace`, `stalled declarations filling the budget cannot keep members out or drop them`, `a full budget evicts the stalled reservation for a member frame that makes progress`, `charged declarations over the frame memory budget are refused when nothing can be evicted`.
+- Frame pinning, amplified vector: see the residual bullet in section 8 (`frameDeadlineFor(len)` = `min(139 s, 10 s + 1 s per 64 KiB)` for every incomplete frame; frames over 64 KiB left incomplete are charged to the 64 MiB `maxFrameMemory` budget and must keep 64 KiB/s after a 10 s grace; drop reasons `frame-deadline` and `frame-budget`). Handshakes, keep-alives and frames that arrive whole never touch the shared budget; what a full budget does refuse is in the limits bullet below. Tests in `packages/core/test/seeder-stream.test.js`: `a charged frame that drips is dropped at the first throughput check after the grace`, `stalled declarations filling the budget cannot keep members out or drop them`, `a full budget evicts the stalled reservation for a member frame that makes progress`, `charged declarations over the frame memory budget are refused when nothing can be evicted`.
+- Frame budget limits, revised for issue #226 (memory limits unchanged: `MAX_EXTERNAL_FRAME` 8 MiB + 64 KiB, `MAX_FRAME_MEMORY` 64 MiB, `SMALL_FRAME_BYTES` 64 KiB, 64 KiB/s minimum, 10 s base window, 1 s minimum eviction age):
+  - Eviction, "the newcomer loses": when a reservation does not fit, only an evictable reservation may go, that is one at least 1 s old (`FRAME_EVICT_MIN_AGE_MS`) that is stalled (no byte for one 10 s base window) or too slow (fewer body bytes than 64 KiB/s over its age minus that first second). Victims go lowest progress first, only as many as the requester needs, and only when evicting them actually makes room; otherwise nobody is evicted and only the requester is refused (`frame-budget`). A frame keeping up with 64 KiB/s is never evicted for a newer declaration, so new 8 MiB declarations (immune in their first second) cannot displace a member's large frame. Limit, the accepted cost of this rule (maintainers' decision, 2026-11-15): while older reservations keep up with the minimum rate, or are still in their first second, the budget stays full, and a newer charged frame that does not fit is refused, an honest one included. A peer that sends only whole frames, as members over WebSocket do, is never charged, so never refused. It is bounded per frame by the 139 s cap and `MAX_EXTERNAL_FRAME`, per socket by one charged frame at a time and in total by `maxFrameMemory`; a refused frame is never corrupted (nothing of it is forwarded, its socket is dropped with `frame-budget`).
+  - Clock: frame times are read from a monotonic clock (`lib/clock.js`, injected by the seeder), so a wall-clock step neither cuts an honest frame nor extends a deadline.
+  - Deadline cap: `FRAME_DEADLINE_CAP_MS` = 10 s + `ceil(MAX_EXTERNAL_FRAME / 64 KiB)` s = 10 s + 129 s = 139 s (it was 120 s, less than the 129 s a maximum frame takes at the minimum rate). A maximum frame sent at exactly 64 KiB/s now completes with a 10 s margin.
+  - Local backpressure: while the seeder's own consumer lags and the guard pauses the socket, the frame deadline, the throughput checks and the eviction age stop, and they resume when reading resumes; a paused consumer no longer drops an honest peer as slow. Why it cannot be abused: the peer cannot cause the pause with the frame itself (secret-stream forwards nothing of an incomplete frame, and every byte the peer sends meanwhile belongs to that frame, so the consumer can only lag on data received before its header); a paused frame holds only its reservation, bounded by `MAX_EXTERNAL_FRAME` and by the budget; the 30 s idle deadline, refreshed only by bytes the guard forwards, still drops a socket that stays paused; and after the resume the peer owes the minimum rate again.
+  - Tests in `packages/core/test/frame-guard.test.js` (fake clock, no network): `budget: new declarations do not evict an older frame that is making progress (the newcomer loses)`, `budget: an eviction that would not make room evicts nobody`, `budget: only as many evictable frames as needed are evicted, lowest progress first`, `evictable: young, stalled and too-slow frames`, `frameDeadlineFor: a maximum frame at exactly the minimum rate fits under the deadline cap`, `a maximum frame sent exactly at the minimum rate completes within the deadline`, `backpressure: time paused by a lagging consumer does not count for the throughput check`, `backpressure: time paused by a lagging consumer does not count for the frame deadline`. Each was checked to fail with its fix reverted. Added in review: `budget: an eviction that needs two victims evicts both and admits the newcomer` (fails if only one victim is evicted) and `the default clock is monotonic, not the wall clock` (fails with `Date.now()` as the default) in the same file, and `acceptStream: a charged frame paused by local backpressure is still dropped at the idle deadline and released` in `packages/core/test/seeder-stream.test.js`, which pins the existing 30 s idle bound for a paused frame rather than a fix.
 - The HTTP listener (`/seeder`, `/media`, `/index`, Caddy keep-alives) has a socket cap that only bounds file descriptors: `max(128, maxExternal + media in flight + index in flight + 64)`, or `VARANDA_MAX_SOCKETS` (1 to 8192) when set (then used as given); the computed value is never below 128.
 - Operator variables (all optional, read by `seed`; empty in `deploy/seeder/.env` means the default): `VARANDA_MAX_EXTERNAL`, `VARANDA_MAX_SOCKETS`, `VARANDA_FRAME_MEMORY` (bytes, 8454144 to 1073741824; the minimum is `MAX_EXTERNAL_FRAME`, so one legal frame always fits), `VARANDA_MEDIA_MAX_IN_FLIGHT`, `VARANDA_MEDIA_RATE`, `VARANDA_MEDIA_BURST`, `VARANDA_INDEX_MAX_IN_FLIGHT`, `VARANDA_INDEX_RATE`, `VARANDA_INDEX_BURST` (1 to 1024, 1 to 100000 and 1 to 100000 respectively). Defaults: media 16 in flight, 64/s, burst 128; index 16 in flight, 32/s, burst 64.
 - Besides the long WebSocket of each member, two features open short extra seeder connections per member while they run: the Espiadinha (`peek.read`) and the follow notices (`notices.list`, polled every 5 minutes by the Avisos screen, `packages/web-member/lib/notices.js`). Count them when choosing `VARANDA_MAX_EXTERNAL`; at the cap the seeder refuses with `connection-limit` and the feature answers "sem conexão com o semeador" or tries again at the next poll.
@@ -2650,8 +2671,9 @@ Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
 - A sobreposição da web não conhece a fase real da conexão. Ela sai quando o app a remove, ou some sozinha em 20 s; se o app montar depois disso, o splash do app toca a entrada e passa a ser o anunciado para leitor de tela.
 - 1,5 s e 10 s são fixos, sem configuração. O piso de 1,5 s não vale mais para quem volta ao app com a fase `ready` e sem cartões nem Termos a seguir (seção 152): a marca sai quando A Rua está pronta.
 - No nativo não há desenho animado em SVG, porque o app não tem biblioteca SVG. A cadeira é o PNG de 128 px, mostrado no máximo a 96 px.
-- Na primeira abertura, se o nó ainda estiver conectando depois dos cartões, o splash do app toca a entrada de novo (a sobreposição web já saiu).
-- No nativo, o primeiro quadro do splash é transparente (a entrada parte da opacidade 0), como no splash anterior; com "reduzir movimento", a marca aparece de uma vez.
+- Resolvido (#355): na primeira abertura, se o nó ainda estiver conectando depois dos cartões, o splash volta já assentado, sem tocar a entrada de novo (`App.js` passa `entered={presented}` ao `Splash`).
+- No nativo, o primeiro quadro do splash mostra só o fundo da janela (`app.json`, `backgroundColor` #fbf8f3): a cena entra a partir da opacidade 0, de propósito (seção 242); com "reduzir movimento", a marca aparece de uma vez.
+- Resolvido (#355): na web, antes do JavaScript, a sobreposição segue a escolha manual de Ajustes › Aparência. `public/pre-scheme.js`, carregado no `<head>` (CSP `script-src 'self'`, sem código inline), lê o registro `varanda-aparencia` do `localStorage` e põe `data-scheme` no `html`; sem registro, ou com Sistema, vale o modo do sistema. Teste: `apps/app/test/preSplash.test.js`.
 - Uma queda da conexão logo depois de `ready`, ainda dentro do 1,5 s (que hoje só se aplica a quem tem cartões ou Termos a seguir), segue o caminho de antes: o app já marcou a conexão como vista e não volta para Conectar.
 
 ### Splash até a primeira tela (fix/boot-splash-first-screen, 2026-11-03)
@@ -2666,6 +2688,17 @@ Antes, o splash saía cedo e deixava aparecer telas de espera (passkey "carregan
 6. [ ] Web: "Entrar" com a passkey aparece como antes, e depois de entrar as telas seguem como antes (não realizada ainda).
 7. [ ] Cartões de introdução, Termos e Conexão sem mudança (não realizada ainda).
 8. [ ] Depois de A Rua, bloquear e desbloquear não traz o splash de volta (não realizada ainda).
+
+Limites resolvidos (#355, `apps/app/test/identidadeBoot.test.js`):
+
+- "Escolha seu @nome" como primeira tela não abre mais no próprio "Preparando sua conta…": o splash espera também a leitura do estado da conta daquela chave (`apps/app/src/setupInfoKnown.js`; o `LinkCard` avisa a chave lida por `onAccountRead`), dentro da mesma paciência de 10 s. Quando o passo vem depois de "Confirme sua idade" ou "Confirme seu celular", o app já saiu do splash e ele não volta: aí "Preparando sua conta…" aparece no passo, de propósito.
+- Com passkey, um erro de `node.info` na `Identidade` chega ao shell na hora (`onInfoError`) e a tela de erro aparece sem esperar os 10 s.
+- Na configuração manual sem passkey, a `Identidade` começa com o `node.info` que o shell já leu (`initialInfo`), sem o "carregando…" curto; ela ainda relê uma vez para buscar a identidade.
+- Não se aplica: o rodapé "Conexão" continua escondido nos passos do celular com a instalação (modo `hosted`), então não há troca de instalação no meio do cadastro. A política e o resultado da idade já são guardados por instalação (`App.js`, `agePolicyEntry.origin` e `ageOriginRef`); o convite guardado não carrega a instalação (`apps/app/src/profileLink.js`, `encodeInvite`), o que só importaria se o rodapé aparecesse.
+
+9. [ ] Android, depois iOS: primeira entrada com Google até "Escolha seu @nome": do splash direto ao formulário, sem "Preparando sua conta…" (não realizada ainda).
+10. [ ] Nó que falha em `node.info` logo depois de entrar com passkey: a mensagem de erro com "Tentar de novo" aparece sem esperar 10 s (não realizada ainda).
+11. [ ] Configuração manual sem passkey (nativo ou instalação própria): o passo "Liberar sua conta" aparece sem um "carregando…" curto (não realizada ainda).
 
 ## 45. Passkey sem PRF: cartão Entrar com passos e "tentar de novo" (PR fix/passkey-no-prf-ux, 2026-10-30)
 
@@ -2707,7 +2740,7 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 
 - A lista de passkeys que falharam fica só na memória da página: depois de recarregar, o nó pode oferecer de novo uma passkey que já falhou, e o cartão só a nomeia quando ela falhar outra vez.
 - Tentar de novo no mesmo gerenciador sem PRF pode dar "já existe uma passkey do Varanda neste gerenciador: use entrar"; entrar com ela leva de volta ao cartão com os passos.
-- Os textos citam a Apple e o Google para todos; o app não detecta a plataforma.
+- Os textos citam a Apple e o Google e dizem "ou outro" gerenciador de senhas (decisão da manutenção, #355); o app não detecta a plataforma.
 - Se a passkey escolhida em Entrar era a da criação pendente, "concluir" continua aparecendo e, tocado, só diz "nenhuma criação de passkey pendente"; "Criar passkey" ao lado resolve. Esconder o "concluir" depois de uma falha dele perderia uma criação ainda viva quando a pessoa só fechou o diálogo, e a tela não distingue os dois casos. Essa passkey também não é nomeada para apagar. Saber qual das duas falhou exigiria o nó informar a criação pendente.
 - Os estados presos e as saídas novas (passkey sem sincronização, caminho pelo celular, passkeys recusadas guardadas, saída de uma passkey conhecida perdida) estão em §109; os resultados desta seção não foram refeitos.
 
@@ -3471,7 +3504,7 @@ Verificação do app nativo com todas as mudanças da pilha "celular primeiro" a
 
 - Aparelho real, emulador x86_64, build de release.
 - Entrar com passkey: precisa de conta Google e bloqueio de tela no emulador, que não foram criados. Além disso, o build de debug (`app.varanda.debug`) não casa com o `assetlinks` da instalação de produção (`app.varanda`), então não entra por passkey nela. Por isso nenhuma tela autenticada foi aberta, inclusive cadeira e comunidade depois do login.
-- O rodapé "Conexão" nos passos de configuração do celular com a instalação ficou como na `main` (escondido): mostrá-lo deixaria trocar de instalação no meio do cadastro, e a política de idade, o resultado da idade e o convite guardado ainda não são zerados por instalação nesse caminho. Fica para um PR próprio.
+- O rodapé "Conexão" nos passos de configuração do celular com a instalação ficou como na `main` (escondido). Conferido na issue #355: nesse modo (`hosted`) não há como trocar de instalação no meio do cadastro, e a política e o resultado da idade já são guardados por instalação. Veja §44.
 - Push do sistema, login no iOS.
 - O workflow `native.yml` não foi disparado.
 
@@ -11134,6 +11167,59 @@ node apps/cli/test/post-page.test.js
 - [ ] Link aberto de dentro do WhatsApp e do Instagram (navegador embutido): pendente.
 - [ ] Fonte maior no sistema ou no navegador (ajuste de tamanho do texto, não zoom da página), no Android e no iOS: pendente. A página usa tamanhos em px, como o app.
 
+## 245. Players carregam no Android sem tela de permissão (PR fix/android-player-never-loads)
+
+Esta seção confere que os players de YouTube e Spotify carregam no app Android sem a tela de permissão do sistema. O player do Spotify pede acesso a mídia protegida (`requestMediaKeySystemAccess`, Widevine e outros) ao carregar. Com `allowsProtectedMedia` desligado, o react-native-webview transforma esse pedido num pedido de permissão do Android: a tela de permissão abre por cima, o app vai para segundo plano, todos os players fecham, carregam de novo e o pedido volta. Agora o documento do player no app nativo não inclui `encrypted-media` na permissão do quadro, então a Permissions Policy recusa o pedido dentro do quadro, sem chegar ao WebView. O Android já recusava o pedido no fim da tela, então o que toca não muda. Não liga `allowsProtectedMedia`, que daria ao provedor um identificador de DRM do aparelho. A web não muda: o navegador trata o pedido sozinho. Sem mudança de protocolo, RPC, Termos nem dependência.
+
+Ordem: Android (build de debug, emulador), depois iOS e web, com os dados da Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) e quatro publicações de YouTube e quatro de Spotify.
+
+- [x] Android, emulador API 36, build de debug, A Rua com um cartão do Spotify à vista, sem a correção: 7 telas de permissão (`REQUEST_PERMISSIONS` do app) e 7 pausas da `MainActivity` em cerca de 80 s; o primeiro YouTube ficou na capa por cerca de 150 s. Conferido em 2026-11-15.
+- [x] O mesmo, com a correção, por 6 minutos: nenhuma tela de permissão e nenhuma pausa; os dois players trocaram a capa pelo player em cerca de 73 s, numa máquina muito carregada. Os 14 pedidos de mídia protegida de um quadro do Spotify foram recusados pela Permissions Policy. Conferido em 2026-11-15.
+- [x] Com a correção, tocar no Spotify toca a prévia de 30 s, como antes, e tocar no YouTube toca o vídeo. Conferido em 2026-11-15.
+- [ ] No Android do relato (instalação da loja ou APK), A Rua com Spotify e YouTube: os players carregam e nenhuma tela de permissão pisca. Pendente.
+- [ ] iOS, simulador: os players carregam e tocam como antes. Pendente.
+- [ ] Web e PWA: nada muda (o quadro da web mantém `encrypted-media`). Pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A asserção nova (sem `encrypted-media` no documento nativo) falha sem a correção.
+
+```sh
+node apps/app/test/musicEmbed.test.js
+node apps/app/test/embedFrame.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 246. Nada toca sozinho no feed, som silenciado guardado, player fecha ao sair da tela (PR feat/feed-playback-rules)
+
+Esta seção confere três comportamentos do feed. Primeiro, nada toca sozinho em A Rua: a música do Audius numa publicação é sempre o cartão por toque (`MusicPlayerCard.js`), e sumiram o adesivo (`PostMusic.js`, `postMusic.js`), o par `musicAutoStore` e a chave **Tocar música sozinha** de Ajustes. Os momentos continuam tocando vídeo e música sozinhos. Segundo, um cartão tocado do Audius pausa (faixa, playlist) ou para (trecho, carregando) quando fica quase todo fora da faixa visível, conferido a cada 500 ms depois de 2 s de espera (`musicLeaves`); não volta sozinho e não lê nem muda o silêncio compartilhado. Terceiro, o silêncio compartilhado (`soundMute.js`) fica guardado só neste aparelho: `{"v":1,"muted":bool}` em `varanda-som-mudo` (`localStorage` na web, `varanda-som-mudo.json` na pasta de documentos no nativo, par `soundMuteStore`), ligado de forma síncrona na abertura em `App.js` e enviado a ninguém; registro presente mas ilegível vale como silenciado. Além disso, um player de provedor (YouTube, SoundCloud, Spotify, Apple Music) em que a pessoa tocou fecha depois de duas conferências novas seguidas fora da faixa, com 2 s de espera depois do toque (`embedLeaves`), e um quadro tocado cuja linha a lista desmontou fecha na conferência seguinte de 500 ms da camada (`orphanAwayKeys`); um toque só de leitor de tela fecha apenas um quadro que estava na faixa, e na tela cheia nativa o quadro tocado continua. Não há canal para dentro do quadro, então ele descarrega em vez de pausar. Termos e Política na versão 53, com novo aceite.
+
+Substitui, sem reescrevê-las, as partes das seções 204 e 208 que descrevem o início automático, o adesivo, o botão de som nos adesivos e a chave **Tocar música sozinha** (os trechos perto das linhas 9388, 9627 e 10352 deste arquivo), e o silêncio só da sessão da seção 208.
+
+Limite conhecido: fora da tela cheia, quando a tela gira ou a janela muda de retrato para paisagem ou o contrário (web, PWA, iPad, Android de tela grande), um player tocado mantém o comportamento anterior (fica até outro player começar, um bloqueio ou uma troca de tela).
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA. Os passos de aparelho são para uma pessoa rodar; nenhum resultado abaixo foi observado.
+
+- [ ] Nenhuma música começa sozinha em A Rua: com publicações do Audius (trecho, faixa e playlist) na lista, rolar e esperar não toca nada. Ajustes não tem **Tocar música sozinha**. Android: pendente. iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Silêncio guardado: em Momentos, silenciar o som, fechar o app por completo e reabrir (na web, recarregar): continua silenciado. Ativar o som, reabrir: continua ativado. Android: pendente. iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Começar um cartão do YouTube, rolar até ele sair da tela e voltar: o cartão guardado (capa) aparece no lugar do player. Android: pendente. iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Rolar rápido para longe logo depois de apertar o play de um player: ele não fica carregado fora da tela. Android: pendente. iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Tocar num player dentro de uma publicação citada enquanto a citação recarrega ("carregando" por um momento): o player tocado não fica preso nem some sem motivo. Android: pendente. iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Tela cheia nativa com rotação: o player sobrevive à rotação, também numa lista longa. Android: pendente. iOS: pendente.
+- [ ] iPad (simulador), fora da tela cheia: girar de retrato para paisagem com um player tocado: ele continua até outro player começar, um bloqueio ou uma troca de tela. Pendente.
+- [ ] Tocar numa faixa do Audius, rolar até sair da tela: a faixa fica pausada e não volta sozinha; o silêncio compartilhado não muda. Android: pendente. iOS: pendente. Web: pendente. PWA: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho.
+
+```sh
+node apps/app/test/soundMute.test.js
+node apps/app/test/musicPlayerCard.test.js
+node apps/app/test/musicEmbedCard.test.js
+node apps/app/test/embedLayer.test.js
+node apps/app/test/legal.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
 ## 247. Polimento da Busca, da ajuda e do campo mono (PR fix/polimento-navegacao-sobras)
 
 Fecha três itens da #448, só no app:
@@ -11176,189 +11262,5 @@ node apps/app/test/perfMarks.test.js
 node apps/app/test/perfScroll.test.js
 node apps/app/test/perfSummary.test.js
 ```
-
-Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
-
-## 253. Isolamento de renderização: linhas, abas escondidas, Skeleton e movimento reduzido (branch perf/render-isolation)
-
-Esta seção confere o PR2 da rodada de desempenho: as linhas (`Avatar`, `MediaView`, `LinkCard`, `ChatMedia`, `MomentReactionPreview`, `PostMusic`, `MusicPlayerCard`, `RefreshableList`) leem um contexto estreito do nó (`NodeHandleContext`, `OnlineContext`, `MemberKeyContext`) em vez do contexto inteiro; 27 telas de `App.js` são `memo` de módulo com tratadores estáveis; o pulso do `Skeleton` pausa enquanto a tela está escondida; o `MusicEqualizer` usa o driver nativo; uma só assinatura de movimento reduzido (`src/reduceMotionStore.js`). Medido com o mesmo instrumento e os mesmos roteiros da seção 252 (linha de base em `docs/performance.md`, "M5, linha de base"). Decisão por contadores (renderizações e ms de render), não por p95 de quadro. Abaixo de 10% de diferença: "dentro do ruído".
-
-Ambiente: o mesmo da seção 252 (emulador `varanda-perf` com `-no-window`, simulador iPhone 16e, Chrome sem cabeça 412x915 com CPU 4x, Metro com `--clear`, Vitrine grande, sem nó). Carga média de 1 min por célula entre 8,5 e 22,2 (anotada abaixo). Alcance do isolamento: a memo de aba isola atualizações do estado do shell (aviso, selo, barra que some ou volta). Uma mudança de `online` ou de visibilidade do nó ainda renderiza o componente de topo de cada aba, porque as telas de aba chamam `useNode()`.
-
-```sh
-# Metro por célula (a partir de apps/app), depois a rolagem roteirizada; no Android e no iOS
-EXPO_PUBLIC_VARANDA_VITRINE=1 EXPO_PUBLIC_VARANDA_VITRINE_LARGE=1 EXPO_PUBLIC_VARANDA_PERF=1 EXPO_PUBLIC_VARANDA_PERF_SCROLL=rua [EXPO_PUBLIC_VARANDA_VITRINE_RICH=1] npx expo start --port 8097 --clear
-node apps/app/scripts/perf-summary.js <log>
-# web: npx expo export --platform web --dev --output-dir <pasta> com as mesmas variáveis, servido por servidor estático e medido por CDP (CPU 4x)
-```
-
-Antes (linha de base 252, mediana) e depois (esta branch, mediana), na rolagem roteirizada de A Rua de 60 s. "Abas escondidas" soma os ids `tab:*` fora de `rua`.
-
-| Célula | Medida | Antes | Depois | Mudança |
-|---|---|---|---|---|
-| Android texto (3 e 3; carga 16,3 a 18,9) | abas escondidas, renderizações / ms | 119 / 336 | 82 / 53 | -31% / -84% |
-| | `tab:rua`, renderizações / ms | 1230 / 12742 | 1176 / 13470 | -4% / +6%, dentro do ruído |
-| | quadros p95 | 42,2 | 50,6 | dentro do ruído (execuções de 43 a 54 contra 39 a 50) |
-| Android ricas (3 e 3; carga 15,1 a 22,2) | abas escondidas | 124 / 375 | 78 / 54 | -37% / -86% |
-| | `tab:rua` | 1182 / 9589 | 1100 / 11120 | -7% / +16%; a execução 1 (carga 17, 888 renderizações) pegou um estouro, ver abaixo |
-| Android parado 75 s (1 e 1) | abas escondidas, partida inclusa | 66 | 51 | -23% |
-| iOS texto (3 e 3; carga 8,9 a 12,3) | abas escondidas | 136 / 345 | 90 / 57 | -34% / -83% |
-| | `list:rua` / `tab:rua` | 1233 / 8177 ms | 1225 / 8259 ms | dentro do ruído |
-| iOS ricas (3 e 3; carga 8,5 a 11,1) | abas escondidas | 124 / 302 | 84 / 44 | -32% / -85% |
-| | `tab:rua` | 1226 / 5819 | 1193 / 5817 | dentro do ruído |
-| Web Chrome 4x, rolagem de 60 s (3 e 3; carga 8,3 a 12,2) | cada aba que renderizava por quadro (Espiadinha, Avisos, Comunidades, Diário) | 3245 a 3281 | 18 | -99% |
-| | soma das abas escondidas, ms | 5350 a 5828 | 190 a 255 | -96% |
-| | `tab:rua` | 1831 a 1849 / 14072 a 14342 | 1801 a 1830 / 14590 a 15134 | dentro do ruído |
-| | quadros p95 | 35,2 a 38,3 | 32,7 a 34,5 | -4 a -12%, perto do ruído |
-
-Leituras:
-
-- O ganho está onde o PR mirou: as abas escondidas. Na web, o pulso do `Skeleton` que mantinha quatro abas renderizando a cada quadro (cerca de 60 por segundo, parado inclusive) sumiu. No Android e no iOS, restam de 78 a 90 renderizações por aba na rolagem (cerca de 13 a 15 por aba, uma por inversão das barras e por mudanças de `online`/visível via `useNode()`), mas elas custam 40 a 60 ms em vez de 300 a 400.
-- A lista de A Rua não ficou mais barata (dentro do ruído, com a carga entre 8 e 22): a barra que some ou volta renderiza a tela dela de qualquer forma, e a memo das linhas já existia. Não se afirma ganho de rolagem. A execução 1 das ricas no Android (carga 17,2, 888 renderizações, p95 de 96,9 ms, 1694 quadros) é uma execução lenta do emulador, não regressão: as outras duas deram 1100 e 1139.
-- Parado no Android: sem RPC medida, porque a Vitrine não passa por `node.request` (nenhuma linha `req:`), como na seção 252.
-
-### Regressão ou lacuna encontrada
-
-- Android, ricas + players (`EMBEDS=1`): as 4 execuções (1 mais 3 de repetição) abortaram a rolagem com `scroll-aborted list=rua hidden`, cerca de 8,6 s depois do início, sempre no mesmo ponto. O logcat mostra o `GrantPermissionsActivity` do sistema abrindo por um instante (o WebView do player pede `PROTECTED_MEDIA_ID`, DRM) e fechando; o app recebe `onHostResume`, `backgrounded` vira verdadeiro e `screenSeen('rua')` fica falso. Na linha de base (3 de 3) isto não aconteceu no mesmo emulador. É o laço de permissão de DRM do Android que o PR #606 (aberto) corrige: o Spotify chama `requestMediaKeySystemAccess`, o react-native-webview transforma o pedido numa tela de permissão do sistema, que pausa a atividade e manda o app para segundo plano. Isso acontece na `main` de hoje e depende de qual player carrega e quando; nenhum arquivo deste PR trata permissão de WebView. Fica sem contadores para a célula "ricas + players" no Android até o #606 entrar.
-
-### À mão
-
-Android (emulador, Vitrine rica com players, Metro 8096), cada item com captura de tela:
-
-- [x] As barras somem na descida e voltam na subida.
-- [x] Trocar de aba (A Rua, Espiadinha e de volta); tocar de novo na aba de A Rua depois de rolar leva ao topo.
-- [x] Citar depois de trocar de aba abre o compositor citando a publicação certa (Lia Oliveira). Responder abre a conversa com a barra de resposta (a tela diz "conversa não disponível" porque a Vitrine não tem nó). O momento "Você" abre e fecha.
-- [x] Segundo plano e volta: o app volta em A Rua; o player de YouTube volta fechado (comportamento da regra de segundo plano).
-- [ ] Movimento reduzido ligado (escalas de animação do sistema em 0): o fechamento do visualizador de momentos foi instantâneo; a abertura não ficou clara na captura (o `screencap` leva mais que a transição). Inconclusivo; esqueleto e equalizador parados não conferidos.
-- [ ] Player tocando continua carregado na troca de aba (contagem de vivos) e equalizador pulando: não conferido. O player do YouTube carregou, mas dirigir o toque no vídeo e a contagem de vivos pelo `adb` não coube neste orçamento.
-- [ ] Esqueleto de uma aba escondida começa a pulsar quando a aba abre: não conferido à mão (a Vitrine não mostra esqueleto nas abas). Coberto só pelo teste `loopRender.test.js`.
-- [ ] Toast e botão publicar: o botão de publicar abriu o compositor (visto na captura da citação); toast não disparado.
-- [ ] iOS à mão e web à mão: não feitos (sem como tocar no simulador e no Chrome sem cabeça neste orçamento). O simulador e o Chrome rodaram só as células de medida.
-
-### Não medido
-
-- Células de rolagem com players no Android (acima); com players no iOS e no web: não repetidas (a tarefa pedia uma vez, no Android).
-- iOS parado 60 s e web parado 60 s à parte: a web parada foi lida pelos 110 s de cada execução (as quatro abas ficaram em 18 renderizações cada, contra 3245 a 3281); o iOS parado não foi repetido.
-- Nó vivo, PWA instalado, build de release e aparelho de verdade: mesma lista da seção 252.
-- Frame p95 não foi usado como portão.
-
-Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
-
-## 254. Montagem das linhas de publicação: uma renderização por linha (branch perf/row-mount)
-
-Esta seção confere o PR3 da rodada de desempenho. Uma linha de publicação passa a renderizar uma vez ao montar: `src/postRowLayout.js` mantém a largura da legenda dentro de 0,5 pt da estimativa (`captionWidthNext`), compara tamanhos com tolerância de 0,5 pt (`sameSize`) e guarda num cache do módulo o último tamanho dos alvos do cabeçalho, que semeia a reserva do primeiro render da linha seguinte (`headReserveOf`, uma semente por linha); `ClampText` só guarda uma contagem medida quando ela muda a conta (`measurementToStore`); cada `ActionsSheet` monta na primeira abertura e fica (`openedNext`); o ouvinte de movimento reduzido do módulo `PostRow` foi trocado pelo repositório compartilhado (`useReduceMotion`). A foto (`MediaView`, `startImageFade`) anima no driver nativo onde existe e no JS na web, e um movimento reduzido que chega tarde a encaixa por `stopAnimation`.
-
-Ambiente: o mesmo das seções 252 e 253 (emulador `varanda-perf` com `-no-window`, simulador iPhone 16e, Chrome sem cabeça com CPU 4x, Metro com `--clear`, Vitrine grande, sem nó, carga média de 1 min anotada abaixo). Antes é a seção 253 (T7, mesma máquina, no mesmo dia); depois é esta branch com as mudanças ainda sem commit. Alcance: A Rua com rolagem roteirizada de 60 s.
-
-```sh
-# a partir de apps/app; por célula, Metro novo e a rolagem roteirizada (Android e iOS)
-EXPO_PUBLIC_VARANDA_VITRINE=1 EXPO_PUBLIC_VARANDA_VITRINE_LARGE=1 EXPO_PUBLIC_VARANDA_PERF=1 EXPO_PUBLIC_VARANDA_PERF_SCROLL=rua [EXPO_PUBLIC_VARANDA_VITRINE_RICH=1] npx expo start --port 8097 --clear
-node apps/app/scripts/perf-summary.js <log>
-# web: npx expo export --platform web --dev --output-dir <pasta> com as mesmas variáveis (ricas), servido e medido por CDP com CPU 4x
-```
-
-Antes e depois (mediana de 3 execuções cada; web e iOS ricas, Android texto e ricas). `rendersPerMountMedian` e `P95` vêm de `perf-summary.js`. Dentro do ruído quer dizer menos de 10%.
-
-| Célula | Medida | Antes (253) | Depois | Mudança |
-|---|---|---|---|---|
-| Android texto (carga 17,1 a 19,1) | `tab:rua`, renderizações | 1149 | 794 | -31% |
-| | `tab:rua`, ms | 13470 | 10904 | -19% |
-| | renderizações por linha montada, mediana / P95 | 2 / 3 | 1 / 3 | -50% / igual |
-| | abas escondidas, renderizações / ms | 82 / 54 | 82 / 79 | igual / +46% (de 54 para 79 ms, ver leituras) |
-| | quadros p95 | 52,7 | 58,2 | +10% (execuções de 57 a 70 contra 43 a 54), dentro do ruído da carga |
-| Android ricas (carga 17,4 a 19,4) | `tab:rua`, renderizações | 1100 | 817 | -26% |
-| | `tab:rua`, ms | 11120 | 9363 | -16% |
-| | renderizações por linha, mediana / P95 | 2 / 3 | 1 / 3 | -50% / igual |
-| | quadros p95 | 52,7 | 64,8 | +23%, execuções de 55 a 69 contra 45 a 97; carga 17 a 22 nos dois |
-| iOS ricas (carga 10 a 18) | `tab:rua`, renderizações / ms | 1193 / 5817 | 937 / 4272 | -21% / -27% |
-| | renderizações por linha, mediana / P95 | 2 / 3 | 1 / 3 | -50% / igual |
-| Web Chrome 4x, ricas (carga 12 a 30) | `tab:rua`, renderizações / ms | 1822 / 14742 | 1604 / 11677 | -12% / -21% |
-| | renderizações por linha, mediana / P95 | 2 / 3 | 1 / 2 | -50% / -33% |
-| | quadros p95 | 33,4 | 32,6 | dentro do ruído |
-
-Critério do plano (renderizações por linha montada e milissegundos de render da lista, ao menos 20% abaixo da 246 no emulador Android): renderizações por linha, atingido (mediana de 2 para 1); renderizações da lista, atingido (-31% e -26%); milissegundos de render da lista, quase: -19% no texto e -16% nas ricas, ou seja, não atinge 20% no Android. No iOS (-27%) e na web (-21%) atinge. O P95 de renderizações por linha continua em 3 no Android e no iOS: as linhas que renderizam mais de uma vez ao montar (legenda clampada que o estimador erra, curtida que chega) não foram eliminadas.
-
-Leituras:
-
-- O ganho vem de a linha deixar de renderizar uma segunda vez ao montar (mediana de renderizações por linha de 2 para 1), não de a rolagem ficar mais barata por quadro: o p95 de quadros no Android não melhorou (subiu de 52,7 para 58,2 e 64,8, mas as execuções se cruzam e a carga foi de 17 a 22 nos dois lados; não se afirma ganho nem regressão).
-- Abas escondidas no Android: o número de renderizações não mudou (82), mas o custo somado subiu de 54 para 77 a 79 ms nas duas configurações. Pode ser ruído de carga (cada renderização custa menos de 1 ms) ou a leitura de um contexto novo (`useReduceMotion`); não foi isolado nesta medição. Fica registrado.
-- Nenhuma célula foi repetida com contas de usuário reais: a Vitrine não passa por `node.request`.
-
-### À mão
-
-Android (emulador, Vitrine rica, Metro 8097), com captura de tela:
-
-- [x] Abrir a folha de ações (⋯) de uma publicação e tocar em "Copiar link": a folha abre na primeira vez, fecha e o aviso "Link copiado" aparece uma vez (a ação rodou uma só vez, depois do fechamento).
-- [x] Fotos aparecem e a Vitrine carrega sem erro (primeira tela com fotos ao abrir).
-- [ ] Clamp e "ver mais" numa publicação longa; fonte 1,3: não conferido. A Vitrine tem só publicações curtas (25 rolagens sem achar "ver mais" pelo `uiautomator`); sem nó não há como criar uma. O comportamento do clamp está coberto por `postClamp.test.js` e `postRowLayout.test.js`.
-- [ ] Pressão longa numa linha; folha com fechar e reabrir rápido no iOS; foto em cache aparece de uma vez; curtida depois do fade mantém a opacidade 1; movimento reduzido encaixa a foto; deslizar para responder numa linha de Mensagem ou Grupo com player; listas da web crescem além das primeiras linhas: não conferidos.
-- iOS e web à mão: não feitos (sem como tocar no simulador e no Chrome sem cabeça neste orçamento; só as células de medida rodaram).
-
-### Não medido
-
-- Android ricas com players (`EMBEDS=1`): ainda aborta pelo laço de permissão de DRM (PR #606), como na seção 253; não repetido.
-- Android texto: a contagem de renderizações por linha no P95 e as linhas com legenda longa; iOS texto e web texto: não repetidos (a tarefa pedia só ricas no iOS e na web).
-- Nó vivo, PWA instalado, build de release e aparelho de verdade: mesma lista da seção 252.
-
-Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
-
-## 255. Linhas estáveis nas demais listas e relógio de minuto pausado (branch perf/list-rows)
-
-Esta seção confere o PR4 da rodada de desempenho: Espiadinha, Diário, Busca, Conversa, Membro e Mensagem passam a ter linhas estáveis (tratadores e `extraData` que não mudam a cada renderização da tela), e `useVisibleNow(60000)` (`src/ui/index.js`, `src/visibleNow.js`) pausa o relógio de minuto enquanto a tela está escondida. Ambiente: o das seções 252 a 254 (emulador Android `varanda-perf` sem janela, Vitrine grande e rica, sem nó). Antes é o PR3 (seção 254, logs de T10 no mesmo emulador); depois é esta árvore, com as mudanças ainda sem commit.
-
-```sh
-# a partir de apps/app, Metro novo por célula
-EXPO_PUBLIC_VARANDA_VITRINE=1 EXPO_PUBLIC_VARANDA_VITRINE_LARGE=1 EXPO_PUBLIC_VARANDA_PERF=1 EXPO_PUBLIC_VARANDA_VITRINE_RICH=1 [EXPO_PUBLIC_VARANDA_PERF_SCROLL=rua] npx expo start --port 8097 --clear
-# idle e teclado: toques de adb nas abas, contagem das linhas "perf: render" do logcat por janela de horário
-```
-
-Rolagem roteirizada de A Rua, Android rico, mediana de 3 execuções. Atenção à carga: antes 17 a 22, depois 10 a 12 (a máquina estava mais livre), então milissegundos e quadros não se comparam com o antes; só as contagens.
-
-| Medida | Antes (254) | Depois | Leitura |
-|---|---|---|---|
-| `tab:rua`, renderizações / ms | 817 / 9363 | 980 / 6625 | contagem maior com mais quadros (3109 contra 2192), carga diferente: sem conclusão |
-| renderizações por linha montada | 1 | 1 | igual |
-| abas escondidas somadas, renderizações / ms | 82 / 77 | 80 / 49 | igual / dentro da carga |
-| `tab:espiadinha` / `list:espiadinha` | 15 / 4 | 13 / 4 | -2 / igual |
-| `tab:diario` / `list:diario` | 15 / 6 | 15 / 6 | igual |
-| `tab:busca`, `list:conversas` | 11, 6 | 11, 6 | igual |
-| quadros p95 | 64,8 | 38,0 | carga diferente, não se afirma ganho |
-
-Parado e em uso, 60 s por tela (uma execução; sem linha de base, porque as seções 252 a 254 não mediram estas telas):
-
-| Tela | renderizações / ms em 60 s |
-|---|---|
-| A Rua parada (abas escondidas 2 a 4 cada) | `list:rua` 5 / 100 |
-| Espiadinha parada | `list:espiadinha` 12 / 148 |
-| Busca parada | `tab:busca` 1 / 5 |
-| Diário parado (inclui carga inicial) | `list:diario` 18 / 463 |
-| Conversa (thread) parada | `list:conversa` 8 / 36 |
-| Conversa, teclado aberto | `list:conversa` 2 / 31 |
-| Membro parado | `list:membro` 12 / 313 |
-| Mensagem parada | `list:mensagem` 10 / 193 |
-| Mensagem, 8 caracteres digitados com teclado aberto | `list:mensagem` 11 / 59 |
-| Mensagem, 10 caracteres a mais | `list:mensagem` 15 ou mais / 42 |
-| Rolagem Espiadinha (4 linhas) | `list:espiadinha` 49 / 76, p95 de quadro 20,9 |
-| Rolagem Diário | `list:diario` 136 / 642, p95 49,6, 69 quadros acima de 32 ms, renderizações por linha 1 (P95 3) |
-
-A Rua escondida atrás de uma tela empilhada (Conversa, Membro, Mensagem) ainda renderiza 4 a 5 vezes por minuto (cerca de 100 ms); `ARua.js` não faz parte deste PR.
-
-### À mão
-
-Android (emulador, Vitrine rica, Metro 8097), com captura de tela:
-
-- [x] Espiadinha: curtir uma linha marca só aquela linha (Tomás Ferreira, contagem 1); seguir Bia Araújo tira a linha dela e mantém a de Tomás.
-- [x] Busca, aba Publicações, busca "cafe": curtir marca a linha certa (João Nascimento, "descurtir", 1).
-- [x] Conversa (thread) abre de uma publicação; a Vitrine não tem nó, diz "Esta conversa não está disponível" e o campo de resposta abre o teclado.
-- [x] Membro (João) abre pelo cabeçalho e Mensagem abre pelo botão "Mensagem", com a conversa da Feira da Vitrine.
-- [x] Mensagem: digitar no campo de texto mostra o texto e o botão de enviar.
-- [ ] Não verificado: denunciar, reação, apagar e bloquear na thread, prévia de resposta, Diário apagar e republicar, enviar, reagir, deslizar para responder, pular com destaque e abrir mídia no chat. Motivo: sem nó a Vitrine não executa essas ações (as folhas abrem, o resultado não se confere) e o orçamento da rodada acabou.
-- [ ] Não verificado: se uma linha de mensagem renderiza ao digitar. O `Profiler` de `list:mensagem` cobre a lista inteira e dá cerca de 1,5 commits por caractere a 2,8 ms cada, o que não separa linhas de rodapé da lista (as sugestões de resposta); o contador de linhas só existe em `PostRow`. Fica como leitura aberta, sem prova de que linha alguma renderiza.
-- iOS: não medido nem conferido à mão (orçamento esgotado; o simulador não rodou nenhuma célula desta rodada).
-
-### Não medido
-
-- iOS e web nesta rodada; Android com players; nó vivo, PWA, release e aparelho de verdade (lista da seção 252).
-- Antes das telas parada, thread, Membro, Mensagem e teclado: sem linha de base (nenhuma seção anterior as mediu e não se troca de branch para obter uma).
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.

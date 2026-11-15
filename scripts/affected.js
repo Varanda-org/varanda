@@ -1,6 +1,7 @@
-// Picks the workspaces whose tests a change can reach, for a local
-// `npm test -- --affected=<ref>`. CI never uses it: every pull request and
-// every push to main runs every workspace.
+// Picks the workspaces whose tests a change can reach, for
+// `npm test -- --affected=<ref>`. CI uses it on pull requests (the `affected`
+// job of ci.yml, from the base of the test merge commit); every push to main
+// runs every workspace.
 //
 // Changed files, a rename counted at both paths: when <ref> names a commit,
 // `git diff --name-only --no-renames <base>` (commits since <base> plus
@@ -41,8 +42,8 @@
 // dependencies, reach everything outside their test/. Every file reached is
 // followed in turn, except the files that select every workspace anyway.
 //
-// The scan is a heuristic: a dependency it cannot see is caught by CI, which
-// runs every workspace.
+// The scan is a heuristic: a dependency it cannot see is caught by the push
+// to main, whose CI runs every workspace.
 const fs = require('node:fs')
 const path = require('node:path')
 const { spawnSync } = require('node:child_process')

@@ -362,5 +362,5 @@ test('site.yml: permissions, triggers, checkout, path and branch guard', (t) => 
   t.ok(/path:\s*apps\/site\/public\s*$/m.test(code), 'upload path is apps/site/public')
   const guard = /^\s+if:\s*github\.ref == 'refs\/heads\/main'\s*$/m
   t.ok(guard.test(build), 'build job is guarded')
-  t.ok(guard.test(deploy), 'deploy job is guarded')
+  t.ok(/^\s+if:\s*github\.ref == 'refs\/heads\/main' && needs\.supersede\.outputs\.go == 'true'\s*$/m.test(deploy), 'deploy job is guarded and needs the supersede go (apps/cli/test/supersede.test.js)')
 })

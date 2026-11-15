@@ -585,7 +585,7 @@ test('complete: a marked pending creation with no held root and locked is refuse
   const { id } = await makeIdentity(w, { local })
   const err = await id.complete().catch((e) => e)
   t.is(err.code, 'RECOVERY_BAD')
-  t.is(err.message, 'essa passkey não pôde ser concluída: entre com a sua passkey ou com o código de recuperação')
+  t.is(err.message, 'não deu para terminar: entre de novo na sua conta ou com o código de recuperação')
   t.is(seen.length, 0, 'no ceremony')
   t.absent(w.methods().includes('identity.recoveryWrap'))
   t.absent(w.methods().includes('identity.install'))
