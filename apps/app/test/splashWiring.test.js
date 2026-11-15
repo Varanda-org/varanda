@@ -120,3 +120,14 @@ test('splash wiring: the splash reports its presentation once, never after unmou
   t.ok(listener.includes('motionOff = true'), 'the listener marks Reduce Motion switched on')
   t.ok(src.includes('if (cancelled || motionOff) return'), 'a stale answer never starts the entrance')
 })
+
+test('splash wiring: the bar slides a full-width fill by translateX on the native driver', (t) => {
+  const src = withoutComments(read(SPLASH))
+  t.ok(/Animated\.timing\(fill\.current,.*useNativeDriver: native\b/.test(src), 'the bar timing uses the native flag')
+  t.absent(/Animated\.timing\(fill\.current,.*useNativeDriver: false/.test(src), 'never the JS driver')
+  t.ok(/translateX: fill\.current\.interpolate\(\{ inputRange: \[0, 1\], outputRange: \[-BAR_WIDTH, 0\] \}\)/.test(src), 'the fill moves by translateX')
+  t.absent(/width: fill\.current/.test(src), 'the width is not animated')
+  t.absent(/scaleX/.test(src), 'no scaleX')
+  const fillStyle = src.slice(src.indexOf('barFill: {'))
+  t.ok(/width: BAR_WIDTH/.test(fillStyle.slice(0, fillStyle.indexOf('}'))), 'the fill is full width inside the clipped track')
+})
