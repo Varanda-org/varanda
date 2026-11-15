@@ -100,7 +100,14 @@ test('A Rua keys the row cache on what each row shows', (t) => {
   for (const field of ['post,', 'prof,', 'quoteOriginal: q', 'quoteProfile', 'quoteTransient', 'replyToName', 'likes:', 'replies:', 'reposts:', 'quotes:', 'liked:', 'reposted:', 'pending:', 'now,', "'offers.'"]) {
     t.ok(body.includes(field), field)
   }
+  // A folded card re-renders only when its header, lines, more line or focus change.
+  for (const field of ['folded,', 'replyPreviews: previews', 'previewsMore,', 'commentLabel,', 'commenter,', 'focusRef,', 'focusTop,']) {
+    t.ok(body.includes(field), field)
+  }
   t.ok(/cache: rowCache, rowKey: feedKey\(item\)/.test(src), 'A Rua passes its row cache')
+  t.ok(src.includes('cache, rowKey: item.key, fold: item'), 'a fold row is cached under its own key')
+  t.is(src.split('useRowPropsCache(rows, rowKeyOf, { h: handlers, social })').length - 1, 2, 'both live caches prune by the row keys the list shows')
+  t.is(src.split('keyExtractor={rowKeyOf}').length - 1, 3, 'every list keys a fold row by row.key')
   t.ok(src.includes('const renderItem = useCallback((info) => renderRef.current(info), [])'), 'renderItem is stable')
   t.absent(src.includes('await countsDone'), 'the next page does not wait for counts')
   t.ok(src.includes('if (!countAnswerApplies({'), 'the count guard is countAnswerApplies, tested in engagement.test.js')

@@ -20,9 +20,16 @@
 //   links (embedOf) use ./MusicEmbedCard. A link only in the text never gets
 //   a player.
 // - replyPreviews: optional [{ key, name, text }], not the link card above.
-//   Under the action bar, 'Respostas' and one line per preview ('Nome:
+//   Under the action bar, 'Comentários' and one line per preview ('Nome:
 //   texto'), at most two with text. Absent or empty renders nothing. Raw
 //   peer strings go through displayText here.
+// - previewsMore: optional string, the last line of that block inside the
+//   same button ('Ver todos os N comentários'), plain text in the same slot
+//   without onOpenPreviews. The block also renders when only previewsMore is
+//   set (a photo-only comment).
+// - commentedBy: optional { label, onOpen }: a top line with the resposta
+//   icon, in the slot of repostedBy, which wins when both are given. label
+//   is a display string; empty draws nothing; without onOpen it is plain text.
 // - quote: null | { author, name, username, at, text, media, missing, onOpen }
 //   rendered by ./QuoteCard (one level only).
 // - repostedBy: null | { author, name, username }: a top line 'Nome
@@ -99,6 +106,8 @@ const ICON = 20
 // toggle writes a public signed record.
 const SPLIT_SLOP = { top: 6, bottom: 6, left: 6, right: 0 }
 const COUNT_SLOP = { top: 6, bottom: 6, left: 0, right: 6 }
+// The 'comentou' line is one short row: the vertical slop brings its target near 44 pt.
+const COMMENTER_SLOP = { top: 12, bottom: 12, left: 4, right: 4 }
 // 'seguir' at the counter size plus its padding, until it is measured.
 const FOLLOW_GUESS = 64
 // (44 - 20) / 2: the 44 pt targets centre on the 20 pt name line, so a post
@@ -196,7 +205,7 @@ function Action ({ label, onPress, disabled, on, count, split, children }) {
 }
 
 function PostRowView ({
-  author, name, username, avatar, at, text, replyToName, level, tag, replyQuote, replyPreviews, media, preview, persistMedia = true, now,
+  author, name, username, avatar, at, text, replyToName, level, tag, replyQuote, replyPreviews, previewsMore, commentedBy, media, preview, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending, expanded = false,
   onOpen, onOpenAuthor, onOpenParent, onOpenPreviews, onOpenReposter, onFollowReposter, onOpenMention,
   onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onBlock, onDelete, link, onNotice,
@@ -449,7 +458,12 @@ function PostRowView ({
   const bodyLabel = bodyParts.join('. ')
   const replyLabel = replyToName ? replyChip({ name: replyToName }) : ''
   const previewLines = replyPreviewLines(replyPreviews)
-  const previewsLabel = 'Respostas. ' + previewLines.map(previewLineText).join('. ')
+  // Drawn even without onOpenPreviews (plain text then, as in the cold-start
+  // preview), so the card keeps its height when the live feed replaces it.
+  const moreText = typeof previewsMore === 'string' ? displayText(previewsMore).trim() : ''
+  const previewsLabel = 'Comentários. ' + previewLines.map(previewLineText).concat(moreText === '' ? [] : [moreText]).join('. ')
+  const commenterLabel = !reposter && commentedBy && typeof commentedBy === 'object' && typeof commentedBy.label === 'string' ? displayText(commentedBy.label).trim() : ''
+  const openCommenter = otherPress(commentedBy && commentedBy.onOpen)
   const openMention = otherPress(onOpenMention)
   const quoteOn = quote && typeof quote === 'object'
   const textOut = hasText && numberOfLines === 0 && (hasLink(body) || (!!openMention && hasMention(body)))
@@ -490,14 +504,15 @@ function PostRowView ({
   // The body label speaks the caption before the player; this copy is for sight and touch only,
   // hidden from web screen readers by aria-hidden and from native ones by the other two props.
   const textUnder = videoAbove && hasText && !textOut ? <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>{textNode}</View> : null
-  const previewsBody = previewLines.length === 0
+  const previewsBody = previewLines.length === 0 && moreText === ''
     ? null
     : (
       <>
-        <Text style={styles.previewsLabel}>Respostas</Text>
+        <Text style={styles.previewsLabel}>Comentários</Text>
         {previewLines.map((line, index) => (
           <Text key={index + ':' + line.key} style={styles.previewLine} numberOfLines={1}>{previewLineText(line)}</Text>
         ))}
+        {moreText !== '' ? <Text style={styles.previewLine} numberOfLines={1}>{moreText}</Text> : null}
       </>
       )
   return (
@@ -533,7 +548,23 @@ function PostRowView ({
               : null}
           </View>
           )
-        : null}
+        : commenterLabel !== ''
+          ? (
+            <View style={styles.reposted}>
+              <Pressable
+                accessibilityRole={openCommenter ? 'link' : 'text'}
+                accessibilityLabel={commenterLabel}
+                disabled={!openCommenter}
+                onPress={openCommenter}
+                hitSlop={COMMENTER_SLOP}
+                style={({ pressed }) => [styles.repostedLink, pressed && openCommenter && styles.pressed]}
+              >
+                <Icon name='resposta' size={14} color={colors.soft} />
+                <Text style={styles.repostedText} numberOfLines={1}>{commenterLabel}</Text>
+              </Pressable>
+            </View>
+            )
+          : null}
       <View style={styles.main}>
         <Pressable
           accessibilityRole='link'
@@ -785,7 +816,7 @@ function PostRowView ({
               </View>
               )
             : null}
-          {previewLines.length > 0
+          {previewsBody !== null
             ? openPreviews
               ? (
                 <Pressable

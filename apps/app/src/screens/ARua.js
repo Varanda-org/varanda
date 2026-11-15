@@ -18,6 +18,15 @@
 // hints a peek carries no name) they are not read and the mark reads 'sem
 // nome'. A reposted original's parent is not on the page: the second pass
 // (secondPassRefs) asks for it, and for what that original quotes, one level.
+// Comments fold into the card of their post (../feedFold.js, 'Ana
+// comentou'), in the live lists and in the cold-start preview alike. For
+// that, A Rua's ingests (fold: true; the other screens sharing useSocial
+// leave it off) also read the reply parents of own and followed authors on
+// any node, then at most FOLD_READ_ROUNDS rounds of the ancestors still
+// missing (FOLD_STRANGER_READS of strangers' per ingest, hosted and online
+// only; ../foldRounds.js). A chain that stays unreadable keeps the plain
+// comment row. A fold root that is no feed item gets its counts and own
+// like/repost state read like a feed post's.
 // Counts (hosted web only) come from the seeder index (/index/counts, 31 refs
 // per call) and the own like/repost state from engagement.read (62 refs per
 // call); like and repost taps are optimistic (../engagement.js), then
@@ -44,7 +53,8 @@ import { freshKeys, hasFresh, syncLengths } from '../syncSignals'
 import { replyMarkOf, whoOf } from '../who'
 import { COUNTS_MAX, MAX_COOLDOWN_MS, fetchCounts, fetchMember } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
-import { cheapRepliesMap } from '../threadRows'
+import { commentedLabel, foldFeed, foldNeeds, previewName } from '../feedFold'
+import { FOLD_STRANGER_READS, foldOriginalOf, foldRounds, foldTracker, parentAsks, pendingOf, queueIngest, replayIngest, rootIngest, staleOf } from '../foldRounds'
 import { applyToggle, countAnswerApplies, countsAfter, diaryPeekSlots, emptyState, mergeCounts, poolMap, secondPassRefs } from '../engagement'
 import { orderRefs } from '../visibleFirst'
 import { DeletePrompt, actingPageKey, isBusy, isDiaryGone, isSeederDown, memberKeyOf, pageEngagement, readEngagement, setEngagement, useActing, useDelete } from './Conversa'
@@ -138,6 +148,77 @@ const UNCERTAIN_TOGGLE = 'Não sabemos se deu certo. Toque de novo para reenviar
 
 const seqOfRef = (ref) => Number(ref.slice(ref.indexOf(':') + 1))
 const authorOfRef = (ref) => ref.slice(0, ref.indexOf(':'))
+
+// A list row's key: a fold row's own, else the feed item's.
+export function rowKeyOf (row) {
+  return row && row.kind === 'comentarios' && typeof row.key === 'string' ? row.key : feedKey(row)
+}
+
+// The fold reads the first rows still wait on: refs an ingest asked for
+// (`asked`, social.pending) and not answered. A ref the fold gave up on
+// (`dead`, social.social.dead) ends its chain, and a transient failure is an
+// answer, so neither holds the boot cover or the snapshot write.
+export function foldWaits (rows, originals, asked, dead = null) {
+  const originalOf = (ref) => {
+    const item = originals.get(ref)
+    if (item === TRANSIENT) return null
+    return item === undefined && dead instanceof Set && dead.has(ref) ? null : item
+  }
+  return foldNeeds(rows, originalOf).filter((ref) => asked(ref) === true)
+}
+
+const sameEntries = (a, b, fields) => Array.isArray(a) && Array.isArray(b) && a.length === b.length &&
+  a.every((x, i) => fields.every((f) => x[f] === b[i][f]))
+
+function keepParts (next, old) {
+  if (!old) return { by: next.by, lines: next.lines, comments: next.comments }
+  return {
+    by: sameEntries(old.by, next.by, ['author', 'name']) ? old.by : next.by,
+    lines: sameEntries(old.lines, next.lines, ['key', 'name', 'text']) ? old.lines : next.lines,
+    comments: sameEntries(old.comments, next.comments, ['ref', 'top']) ? old.comments : next.comments
+  }
+}
+
+const sameParts = (old, parts) => !!old && old.by === parts.by && old.lines === parts.lines && old.comments === parts.comments
+
+// foldFeed builds its fold rows and attached values anew on every call.
+// Those whose content did not change come back as last time's objects, so
+// the props cache and the memoized row see no change. A pending row gets the
+// reply it stands for (`reply`, from `items`), for the commenter's line.
+export function keepFold (next, prev, items) {
+  const before = prev && Array.isArray(prev.rows) && prev.attached instanceof Map ? prev : null
+  const oldRows = new Map()
+  if (before !== null) {
+    for (const row of before.rows) if (row && row.kind === 'comentarios') oldRows.set(row.key, row)
+  }
+  let byKey = null
+  const rows = next.rows.map((row) => {
+    if (!row || row.kind !== 'comentarios') return row
+    const old = oldRows.get(row.key)
+    if (row.state === 'pending') {
+      if (byKey === null) {
+        byKey = new Map()
+        for (const item of Array.isArray(items) ? items : []) {
+          if (item && item.kind !== 'repost' && typeof item.author === 'string') byKey.set(feedKey(item), item)
+        }
+      }
+      const reply = byKey.get(row.key) || null
+      return old && old.state === 'pending' && old.reply === reply ? old : { ...row, reply }
+    }
+    const was = old && old.state !== 'pending' ? old : null
+    const parts = keepParts(row, was)
+    if (sameParts(was, parts) && was.root === row.root && was.post === row.post) return was
+    return { ...row, ...parts }
+  })
+  const attached = new Map()
+  for (const [key, value] of next.attached) {
+    const old = before !== null ? before.attached.get(key) : undefined
+    const parts = keepParts(value, old)
+    attached.set(key, sameParts(old, parts) ? old : parts)
+  }
+  const same = before !== null && before.rows.length === rows.length && rows.every((row, i) => row === before.rows[i])
+  return { rows: same ? before.rows : rows, attached }
+}
 
 // A Rua's snapshot (../feedSnapshot.js): the last first page, painted on a
 // cold start while the node starts and feed.read answers. The live first
@@ -374,6 +455,8 @@ registerLocalCache({
   keepOnlyAuthors: (allowed) => rewriteStored((snapshot) => snapshotKeepOnly(snapshot, allowed))
 })
 
+const isTransient = (item) => item === TRANSIENT
+
 // { first, last } inclusive over the viewable row indices, or null when the
 // list has not reported any. FlatList's header is not a row, so the indices
 // are the list's own.
@@ -415,11 +498,23 @@ function indexByRef (items, originals) {
       direct.push(ref)
       add(ref, i)
     }
-    if (typeof item.author === 'string' && Number.isSafeInteger(item.seq) && item.seq >= 1) take(feedKey(item))
-    if (item.kind === 'repost') take(refOf(item.to))
-    else {
-      take(refOf(item.quote))
-      take(refOf(item.replyTo))
+    if (item.kind === 'comentarios') {
+      // A fold row shows its root and holds its comments; a pending one
+      // stands for a reply whose ancestors are being read.
+      take(item.root)
+      if (item.post) take(refOf(item.post.quote))
+      if (Array.isArray(item.comments)) for (const c of item.comments) take(c && c.ref)
+      if (item.reply) {
+        take(item.key)
+        take(refOf(item.reply.replyTo))
+      }
+    } else {
+      if (typeof item.author === 'string' && Number.isSafeInteger(item.seq) && item.seq >= 1) take(feedKey(item))
+      if (item.kind === 'repost') take(refOf(item.to))
+      else {
+        take(refOf(item.quote))
+        take(refOf(item.replyTo))
+      }
     }
     if (known === null) continue
     for (let d = 0; d < direct.length; d++) {
@@ -449,7 +544,7 @@ function visibleRowIndex (map, ref, range) {
 }
 
 // Originals, counts and the own like/repost state of the rows on screen.
-// - ingest({ shown, need, parents, local, authors, reset }): `shown` = refs
+// - ingest({ shown, need, parents, local, authors, reset, fold }): `shown` = refs
 //   whose counts and own state are wanted (the posts with an action bar);
 //   `need` = refs to resolve (repost originals, quoted posts). What those
 //   resolve to is read one level further (quote and replyTo); `parents` =
@@ -457,8 +552,15 @@ function visibleRowIndex (map, ref, range) {
 //   neither own nor followed (for the reply mark's name); `local` = a Map ref ->
 //   post item already at hand (feed posts); `authors` = keys known to be own
 //   or followed (their photos may be kept). Calls run one after the other
-//   (the browser node allows only two concurrent peeks).
+//   (the browser node allows only two concurrent peeks). `fold` (A Rua
+//   only): `parents` of own and followed authors are read too, on any node,
+//   then the comment fold's missing ancestors (../foldRounds.js says which
+//   are read, given up on or left for later). No blocked author's post is
+//   read for it, round 0 included.
 // - original(ref): the post item, null (unavailable) or undefined (loading).
+// - foldOriginal(ref): original() as the fold sees it: null also for a ref
+//   the fold gave up on (social.dead), and while a refresh reads a ref again,
+//   what the previous epoch held for it.
 // - pending(ref): true while `ref` was asked for and has no answer yet (not
 //   a transient failure either).
 // - toggle(kind, ref): 'like' | 'repost', optimistic.
@@ -482,13 +584,23 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
   nodeRef.current = node
   const online = node.online !== false
   const { learnMany, resolveMany } = names
+  // Read when an ingest runs: the fold reads no blocked author's post.
+  const blocksRef = useRef(null)
+  blocksRef.current = useBlocks().keys
+  const isBlockedNow = useCallback((author) => {
+    const blocked = blocksRef.current
+    return !!blocked && typeof blocked.has === 'function' && blocked.has(author) === true
+  }, [])
   // flags: the index's `indexing` / `complete` of the counts shown.
   const [social, setSocial] = useState(() => ({
     originals: seed ? new Map(seed.originals) : new Map(),
     counts: seed ? new Map(seed.counts) : new Map(),
     eng: seed ? { liked: new Set(seed.liked), reposted: new Set(seed.reposted) } : emptyState(),
     pending: new Map(),
-    flags: { indexing: false, complete: true }
+    flags: { indexing: false, complete: true },
+    // Refs the fold gave up on this epoch: its chains end there, while the
+    // originals stay unread so any other need still reads them.
+    dead: new Set()
   }))
   // Refs whose count still comes from the seed: the first reset ingest drops
   // each one it cannot read again, so a stale number never stays on screen.
@@ -499,8 +611,21 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
   // Bumped whenever `originals` is dropped (refresh, follows/moderation may
   // have changed): a read started before never writes into the new map.
   const epochRef = useRef(0)
-  // The refs asked for since the last refresh, to re-resolve after a drop.
-  const seenRef = useRef({ need: new Set(), local: new Map() })
+  // The refs asked for since the last refresh, to re-resolve after a drop:
+  // `need` replayed as plain reads, `fold` the fold's own asks, which only a
+  // fold ingest asks again (under its budget, gate and block filter).
+  const seenRef = useRef({ need: new Set(), local: new Map(), fold: new Set() })
+  // While an A Rua fold ingest is queued or reading: what pending() guesses.
+  const trackerRef = useRef(null)
+  if (trackerRef.current === null) trackerRef.current = foldTracker()
+  // Whether this screen ever ingested with the fold (A Rua): a drop re-runs it.
+  const foldOnRef = useRef(false)
+  // What the previous epoch held (post item, or null) for each ref, for the
+  // fold while the new epoch reads it again; and the fold roots whose counts
+  // and own state were asked this epoch.
+  const staleRef = useRef(new Map())
+  const foldShownRef = useRef(new Set())
+  const ingestRef = useRef(null)
   const deletedRef = useRef(new Set())
   const change = useCallback((update) => {
     const patch = update(socialRef.current)
@@ -810,7 +935,7 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
   }, [request, readAuthor, isKnown, change, resolveMany, loadFollows, scheduleNameRetry, rowsRef, visibleRangeRef])
   resolveRef.current = resolve
 
-  const ingestNow = useCallback(async ({ shown = [], need = [], parents = [], local = new Map(), authors = [], reset = false }) => {
+  const ingestNow = useCallback(async ({ shown = [], need = [], parents = [], local = new Map(), authors = [], reset = false, fold = false }) => {
     // A refresh rebuilds the followed set (an unfollowed author's photos are
     // no longer kept): this page's authors (own or followed now) plus a
     // fresh follow.list; older pages only add their own authors.
@@ -819,12 +944,15 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
       followsLoadedRef.current = false
       epochRef.current++
       shownRef.current = new Set()
-      seenRef.current = { need: new Set(), local: new Map() }
+      foldShownRef.current = new Set()
+      seenRef.current = { need: new Set(), local: new Map(), fold: new Set() }
+      staleRef.current = staleOf(socialRef.current.originals, { dead: socialRef.current.dead, deleted: deletedRef.current, isTransient, prev: staleRef.current, isBlocked: isBlockedNow })
       dropNameRetries()
     }
+    if (fold === true) foldOnRef.current = true
     for (const a of authors) if (typeof a === 'string') knownRef.current.add(a.toLowerCase())
     const refs = [...new Set(shown.filter((r) => typeof r === 'string'))]
-    if (reset) change(() => ({ flags: { indexing: false, complete: true } }))
+    if (reset) change(() => ({ flags: { indexing: false, complete: true }, dead: new Set() }))
     // The chunks answer in any order: indexing is on when any of this
     // ingest's answers says so, never switched off by a slower one.
     let indexing = false
@@ -901,11 +1029,21 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
     // sync for a mark that still reads 'sem nome'. The browser node serves
     // member reads from the live run's cores, so batching them still saves
     // requests and native preemptions.
+    // The fold (A Rua) also reads the parents of own and followed authors,
+    // on any node: their posts are local, or one log.read on a core node.
     const asked = hosted && online ? parents.filter((r) => typeof r === 'string') : []
-    if (asked.some((r) => !isKnown(authorOfRef(r)))) await loadFollows()
+    const folded = fold === true ? parents.filter((r) => typeof r === 'string') : []
+    if (asked.concat(folded).some((r) => !isKnown(authorOfRef(r)))) await loadFollows()
     const needed = need.filter((r) => typeof r === 'string')
-    const strangers = asked.filter((r) => !isKnown(authorOfRef(r)))
+    const blocked = blocksRef.current
+    const isBlocked = (author) => !!blocked && typeof blocked.has === 'function' && blocked.has(author) === true
+    const { strangers, kin } = parentAsks(parents, { fold, strangers: hosted && online, isKnown, isBlocked })
     for (const r of needed.concat(strangers)) seenRef.current.need.add(r)
+    for (const r of kin) seenRef.current.fold.add(r)
+    // The follow list is known from here: pending() guesses what this
+    // ingest's reads would ask for, not any author, through the engagement
+    // reads and the plain resolves below too.
+    if (fold === true) trackerRef.current.start({ budget: FOLD_STRANGER_READS, strangers: hosted && online, isBlocked })
     for (const [ref, item] of local) {
       if (!deletedRef.current.has(ref)) seenRef.current.local.set(ref, item)
     }
@@ -977,18 +1115,67 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
     }
     const second = secondPassRefs(firstRefs.map(at).filter(Boolean))
     if (second.length > 0 && mountedRef.current) await resolve(second)
-    if (strangers.length > 0 && mountedRef.current) await resolve([...new Set(strangers)])
-  }, [request, hosted, online, change, resolve, loadFollows, isKnown, dropNameRetries])
+    const parentRefs = [...new Set(strangers.concat(kin))]
+    if (fold !== true) {
+      if (parentRefs.length > 0 && mountedRef.current) await resolve(parentRefs)
+      return
+    }
+    if (!mountedRef.current) return
+    // The fold's rounds over every feed post at hand since the last refresh,
+    // this page's first (FOLD_STRANGER_READS goes to them first). A blocked
+    // author's reply is still a link of its chain: the list is not filtered,
+    // only no blocked author's post is read.
+    const list = [...local.values()]
+    for (const [ref, item] of seenRef.current.local) if (!local.has(ref)) list.push(item)
+    const live = () => mountedRef.current && epoch === epochRef.current
+    const stored = (ref) => (deletedRef.current.has(ref) ? null : socialRef.current.originals.get(ref))
+    const { roots } = await foldRounds({
+      list,
+      parents: parentRefs,
+      answered: firstRefs.concat(second),
+      stored,
+      transient: (ref) => stored(ref) === TRANSIENT,
+      isDead: (ref) => socialRef.current.dead.has(ref),
+      resolve,
+      isKnown,
+      isBlocked,
+      live,
+      loadFollows,
+      strangers: hosted && online,
+      onAsk: (refs) => { for (const r of refs) seenRef.current.fold.add(r) },
+      onDead: (refs) => change((prev) => {
+        const dead = new Set(prev.dead)
+        for (const r of refs) if (prev.originals.get(r) === undefined) dead.add(r)
+        return { dead }
+      }),
+      ownKey: own,
+      blocked,
+      tracker: trackerRef.current
+    })
+    // A root that is no feed item gets the counts and own state a feed post
+    // gets, once per epoch, through a plain ingest that reads no fold.
+    if (!live()) return
+    const rootArgs = rootIngest(roots, { shown: shownRef.current, done: foldShownRef.current })
+    if (rootArgs !== null) ingestRef.current(rootArgs)
+  }, [request, hosted, online, change, resolve, loadFollows, isKnown, dropNameRetries, own, isBlockedNow])
 
   // Stable identity (the screens' load callbacks depend on it): the queued
   // run uses the latest ingestNow.
   const ingestNowRef = useRef(ingestNow)
   ingestNowRef.current = ingestNow
+  // A fold ingest is marked queued at once, so pending() and the first-paint
+  // gate hold before its asks are recorded; rows drawn on that guess are
+  // drawn again once the last one settles.
   const ingest = useCallback((args) => {
-    const run = queueRef.current.then(() => (mountedRef.current ? ingestNowRef.current(args) : null)).catch(() => {})
+    const run = queueIngest(queueRef.current, () => (mountedRef.current ? ingestNowRef.current(args) : null), {
+      fold: !!args && args.fold === true,
+      tracker: trackerRef.current,
+      onRender: () => { if (mountedRef.current) change(() => ({})) }
+    })
     queueRef.current = run
     return run
-  }, [])
+  }, [change])
+  ingestRef.current = ingest
 
   const toggle = useCallback(async (kind, ref, requestedOn) => {
     if ((kind !== 'like' && kind !== 'repost') || typeof ref !== 'string') return
@@ -1112,9 +1299,15 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
     followsLoadedRef.current = false
     dropNameRetries()
     const { need, local } = seenRef.current
-    change(() => ({ originals: new Map(local) }))
-    if (need.size > 0) ingest({ need: [...need], local })
-  }, [followsVersion, change, ingest, dropNameRetries])
+    // The fold's asks are not replayed as plain reads: a fold ingest over
+    // the posts at hand asks again under its budget, gate and block filter.
+    seenRef.current = { need, local, fold: new Set() }
+    staleRef.current = staleOf(socialRef.current.originals, { dead: socialRef.current.dead, deleted: deletedRef.current, isTransient, prev: staleRef.current, isBlocked: isBlockedNow })
+    foldShownRef.current = new Set()
+    change(() => ({ originals: new Map(local), dead: new Set() }))
+    const args = replayIngest({ need, local }, foldOnRef.current)
+    if (args !== null) ingest(args)
+  }, [followsVersion, change, ingest, dropNameRetries, isBlockedNow])
 
   // Acting as another identity: the likes and reposts shown were that
   // identity's, so they are read again (the page's from a fresh status).
@@ -1141,13 +1334,33 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
   // The ask is recorded before the change that renders the page's originals,
   // and each answer changes `originals`, so renders after the ask see it
   // current (rows rendered before ingest runs read not pending).
-  const pending = useCallback((ref) => typeof ref === 'string' && seenRef.current.need.has(ref) && social.originals.get(ref) === undefined, [social])
+  // While a fold ingest is queued or reading, a ref not asked yet that it
+  // may still ask for (the next hop of a chain) is pending too
+  // (../foldRounds.js foldTracker); one the fold gave up on is not.
+  const pending = useCallback((ref) => pendingOf(ref, {
+    stored: (r) => social.originals.get(r),
+    need: seenRef.current.need,
+    fold: seenRef.current.fold,
+    dead: social.dead,
+    guess: (author) => trackerRef.current.guess(author, { isKnown, isBlocked: isBlockedNow })
+  }), [social, isKnown, isBlockedNow])
+  // A refresh empties the originals: while it reads a ref again, the fold
+  // shows what the previous epoch held, so a card does not split into one
+  // placeholder per comment and fold back. Its answer then wins.
+  const foldOriginal = useCallback((ref) => foldOriginalOf(ref, {
+    stored: (r) => social.originals.get(r),
+    isTransient,
+    dead: social.dead,
+    stale: staleRef.current,
+    pending,
+    isBlocked: isBlockedNow
+  }), [social, pending, isBlockedNow])
   const retry = useCallback((ref) => {
     if (typeof ref === 'string') ingest({ need: [ref] })
   }, [ingest])
   const persistOf = useCallback((author) => typeof author === 'string' && isKnown(author.toLowerCase()), [isKnown])
 
-  return { social, ingest, toggle, original, transient, pending, retry, persistOf, toast, deleteOriginal, notify: showToast }
+  return { social, ingest, toggle, original, foldOriginal, transient, pending, retry, persistOf, toast, deleteOriginal, notify: showToast }
 }
 
 // The PostRow props of `post` (a post item) whose actions target `ref`.
@@ -1158,10 +1371,12 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
 // comes back while nothing the row shows changed, so the memoized PostRow
 // skips its render; the callbacks then read the newest handlers from the
 // row's live box.
-// `replyPreviews`, when a non-empty list, is passed on with onOpenPreviews.
-// That handler opens this post the same way onOpen does. Diário and the
-// Espiadinha share this helper and pass none: their lists are not A Rua.
-export function socialRowProps ({ post, ref, repostedBy = null, social, profileOf, avatarOf = profileOf, now, ownKey, h, persist, cache, rowKey, replyPreviews }) {
+// `fold` ({ by, lines, comments } of ../feedFold.js, A Rua only): the
+// comments folded into this post. Its lines are the previews, its newest
+// commenter the 'Ana comentou' line (which a repost line wins over), and
+// the previews button opens this post with the newest comment in focus.
+// Diário, Busca and the Espiadinha pass none: their rows stay comment rows.
+export function socialRowProps ({ post, ref, repostedBy = null, social, profileOf, avatarOf = profileOf, now, ownKey, h, persist, cache, rowKey, fold = null }) {
   const prof = profileOf(post.author) || null
   const avatarView = avatarOf(post.author)
   const quoteRef = refOf(post.quote)
@@ -1215,7 +1430,19 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
   }
   // Absent or empty stays off the row: PostRow would draw nothing, and a new
   // empty array would still bust the memo.
-  const previews = Array.isArray(replyPreviews) && replyPreviews.length > 0 ? replyPreviews : null
+  const folded = fold !== null && typeof fold === 'object'
+  const previews = folded && Array.isArray(fold.lines) && fold.lines.length > 0 ? fold.lines : null
+  const by = folded && Array.isArray(fold.by) && fold.by.length > 0 ? fold.by : null
+  const commentLabel = by !== null ? commentedLabel(by) : ''
+  const commenter = by !== null && typeof by[0].author === 'string' ? by[0].author : null
+  const focus = folded && Array.isArray(fold.comments) && fold.comments.length > 0 ? fold.comments[0] : null
+  const focusRef = focus !== null && typeof focus.ref === 'string' ? focus.ref : null
+  const focusTop = focus !== null && typeof focus.top === 'string' ? focus.top : null
+  // The total only when the index gave it (counts is null while indexing)
+  // and it says more than the lines shown.
+  const shownLines = previews !== null ? previews.length : 0
+  const total = counts !== null && Number.isSafeInteger(counts.replies) ? counts.replies : null
+  const previewsMore = !folded ? null : total !== null && total > shownLines ? 'Ver todos os ' + total + ' comentários' : 'Ver comentários'
   const build = (live) => {
     const name = post.name || (prof ? prof.name : null) || null
     const username = post.username || (prof ? prof.username : null) || null
@@ -1241,6 +1468,9 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       }
     }
     const openThread = offers.thread ? () => live.h.onOpenThread({ ref, seed: post }) : undefined
+    const openPreviews = offers.thread
+      ? () => live.h.onOpenThread({ ref, seed: post, ...(focusRef !== null ? { focus: { ref: focusRef, top: focusTop } } : {}) })
+      : undefined
     return {
       author: post.author,
       name,
@@ -1251,6 +1481,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       media: post.media || null,
       preview: post.preview || null,
       replyToName,
+      level: post.replyTo ? 'comment' : 'post',
       // Feed posts pass persist: true (own or followed by construction).
       persistMedia: persist === true ? true : social.persistOf(post.author),
       now,
@@ -1261,7 +1492,12 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       reposted: s.eng.reposted.has(ref),
       pending: s.pending.get(ref) || null,
       onOpen: openThread,
-      ...(previews ? { replyPreviews: previews, onOpenPreviews: openThread } : {}),
+      // Without a thread handler (the cold-start preview) PostRow draws the
+      // more line as plain text, so the card keeps the live card's height.
+      ...(folded ? { replyPreviews: previews, previewsMore, ...(openPreviews ? { onOpenPreviews: openPreviews } : {}) } : {}),
+      ...(commentLabel !== ''
+        ? { commentedBy: { label: commentLabel, onOpen: commenter !== null && offers.member ? () => live.h.onOpenMember(commenter) : undefined } }
+        : {}),
       onOpenAuthor: offers.member ? () => live.h.onOpenMember(post.author, { name, username }) : undefined,
       onOpenMention: offers.mention ? (u) => live.h.onOpenMention(u, { author: post.author, username }) : undefined,
       onOpenParent: parentRef !== null && offers.thread ? () => live.h.onOpenThread({ ref: parentRef }) : undefined,
@@ -1305,7 +1541,13 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
     quoteTransient: qTransient,
     quotePersist: quoteRef !== null ? social.persistOf(post.quote.author) : null,
     replyToName,
+    folded,
     replyPreviews: previews,
+    previewsMore,
+    commentLabel,
+    commenter,
+    focusRef,
+    focusTop,
     // By value: a refetch answers with new objects for the same numbers.
     counts: counts !== null && typeof counts === 'object',
     replies: counts ? counts.replies : null,
@@ -1348,65 +1590,6 @@ export function useRowPropsCache (items, keyOf, latest) {
   return cache.current
 }
 
-// Distant replies already in this list, keyed by the parent ref. Near rows
-// are on screen as themselves. Only a parent that some loaded row replies
-// to, and that is itself in the list, is passed to cheapRepliesMap: one walk
-// of this list for all of them, asking for nothing else. A blank line is not
-// a preview.
-// Arrays from `prev` stay while their lines are unchanged, so a memoized
-// row re-renders only when its own previews change.
-export function replyPreviewMap (items, prev, blocked) {
-  const sameLines = (a, b) => {
-    if (!Array.isArray(a) || a.length !== b.length) return false
-    for (let i = 0; i < b.length; i++) {
-      const left = a[i]
-      const right = b[i]
-      if (!left || !right || left.key !== right.key || left.name !== right.name || left.text !== right.text) return false
-    }
-    return true
-  }
-  // BlockGate hides a blocked author's row, not its line under another post.
-  const all = Array.isArray(items) ? items : []
-  const list = blocked && typeof blocked.has === 'function' && blocked.size > 0
-    ? all.filter((item) => !(item && typeof item.author === 'string' && blocked.has(item.author)))
-    : all
-  const present = new Set()
-  const wanted = []
-  const seen = new Set()
-  for (const item of list) {
-    // A repost row shows its original, which can then carry previews.
-    const ref = item && item.kind === 'repost' ? refOf(item.to) : refOf(item)
-    if (ref !== null) present.add(ref)
-    // A repost wrapper is not a reply. pageNeeds treats replyTo the same way.
-    if (!item || item.kind === 'repost' || !item.replyTo) continue
-    const parent = refOf(item.replyTo)
-    if (parent === null || seen.has(parent)) continue
-    seen.add(parent)
-    wanted.push(parent)
-  }
-  const prior = prev instanceof Map ? prev : null
-  const out = new Map()
-  const parents = wanted.filter((ref) => present.has(ref))
-  const found = parents.length === 0 ? new Map() : cheapRepliesMap(list, parents)
-  for (const ref of parents) {
-    const next = found.get(ref) || []
-    if (!next.some((line) => line && typeof line.text === 'string' && line.text.trim() !== '')) continue
-    const old = prior === null ? undefined : prior.get(ref)
-    out.set(ref, sameLines(old, next) ? old : next)
-  }
-  return out
-}
-
-// Rebuilt only when the list identity changes. The ref keeps the previous
-// arrays across that change (useMemo itself cannot see them).
-function useReplyPreviews (items) {
-  const prev = useRef(null)
-  const blocked = useBlocks().keys
-  const map = useMemo(() => replyPreviewMap(items, prev.current, blocked), [items, blocked])
-  prev.current = map
-  return map
-}
-
 // 'Alguns números podem estar incompletos.' once at the top of a list (only
 // when counts were read from the index, i.e. on the hosted web).
 export function countsNoteDoc (flags) {
@@ -1432,8 +1615,9 @@ export function CountsNote ({ social }) {
 // A repost whose original is loading (`missing` false) or unavailable.
 // `transient`: unavailable for now; a tap calls `onRetry`.
 // `onFollowReposter` (optional, with `followPending`): a small 'seguir' on
-// the reposter's line. A Rua and Diário pass neither.
-export function RepostPlaceholder ({ repostedBy, missing, transient, onRetry, onOpenReposter, onFollowReposter, followPending }) {
+// the reposter's line. A Rua and Diário pass neither. `verb` names what
+// that person did ('comentou' on A Rua's comment whose post is on its way).
+export function RepostPlaceholder ({ repostedBy, missing, transient, onRetry, onOpenReposter, onFollowReposter, followPending, verb = 'republicou' }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const who = displayText(whoOf({ name: repostedBy.name, username: repostedBy.username }).title)
@@ -1445,10 +1629,10 @@ export function RepostPlaceholder ({ repostedBy, missing, transient, onRetry, on
           style={styles.reposted}
           onPress={onOpenReposter}
           accessibilityRole={onOpenReposter ? 'link' : 'text'}
-          accessibilityLabel={who + ' republicou'}
+          accessibilityLabel={who + ' ' + verb}
         >
-          <Icon name='republicar' size={14} color={colors.soft} />
-          {' ' + who + ' republicou'}
+          <Icon name={verb === 'comentou' ? 'resposta' : 'republicar'} size={14} color={colors.soft} />
+          {' ' + who + ' ' + verb}
         </Text>
         {followReposter
           ? (
@@ -1475,6 +1659,25 @@ export function RepostPlaceholder ({ repostedBy, missing, transient, onRetry, on
         : missing ? <Soft>Publicação indisponível</Soft> : <View style={styles.skeleton} accessible={false} />}
     </View>
   )
+}
+
+// A fold row of foldFeed: the post under 'Ana comentou' with its comment
+// lines, or, while the post's ancestors are read (state 'pending'), the
+// commenter's line over a loading card.
+function foldRowView (item, { social, profileOf, now, ownKey, h, cache, persist }) {
+  if (item.state === 'pending') {
+    const reply = item.reply || {}
+    // The card's own naming rule: a peer whose name reads as 'Você' is shown
+    // by @nome or as 'Alguém', never as the viewer.
+    const title = previewName(reply)
+    const by = { author: reply.author, name: title !== '' ? title : null, username: null }
+    const open = typeof h.onOpenMember === 'function' && typeof reply.author === 'string'
+      ? () => h.onOpenMember(reply.author, { name: reply.name || null, username: reply.username || null })
+      : undefined
+    return <RepostPlaceholder verb='comentou' repostedBy={by} missing={false} transient={false} onOpenReposter={open} />
+  }
+  const post = item.post
+  return <PostRow {...socialRowProps({ post, ref: item.root, social, profileOf, now, ownKey, h, persist: persist === true ? true : social.persistOf(post.author), cache, rowKey: item.key, fold: item })} />
 }
 
 // The transient error line of a failed toggle (when the shell gives no toast).
@@ -1530,14 +1733,16 @@ function pageNeeds (pageItems) {
     const q = refOf(i.quote)
     if (q !== null) need.push(q)
   }
-  // Reply parents not on this page (useSocial reads only strangers' ones).
+  // Reply parents not on this page.
   const parents = new Set()
   for (const i of pageItems) {
     if (i.kind === 'repost' || !i.replyTo) continue
     const p = refOf(i.replyTo)
     if (p !== null && !local.has(p)) parents.add(p)
   }
-  return { local, shown, need, parents: [...parents], authors }
+  // fold: useSocial reads the parents of own and followed authors too, and
+  // the fold's missing ancestors (A Rua only).
+  return { local, shown, need, parents: [...parents], authors, fold: true }
 }
 
 // The page.feed load in flight on the node ({ page, promise, again }), or
@@ -1569,6 +1774,9 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
   const bottomPad = useBottomPad() + layout.fabSize
   const visibleRangeRef = useRef(null)
   const rowsRef = useRef(null)
+  // The fold of the latest render, so a commit can hand resolve the rows it
+  // is about to show.
+  const foldOfRef = useRef((list) => list)
   // FlatList throws if this identity changes. The ref it writes is read when
   // resolve runs, not on the scroll that reported it.
   const onViewableItemsChanged = useRef((info) => {
@@ -1586,7 +1794,7 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
   const commit = useCallback((patch) => {
     viewRef.current = { ...viewRef.current, ...patch }
     // Before ingest, so resolve orders against the list it is about to show.
-    if (Object.prototype.hasOwnProperty.call(patch, 'items')) rowsRef.current = viewRef.current.items
+    if (Object.prototype.hasOwnProperty.call(patch, 'items')) rowsRef.current = foldOfRef.current(viewRef.current.items)
     setView(viewRef.current)
   }, [])
   const page = acting.key
@@ -1676,13 +1884,23 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
   const offered = Object.keys(handlers).filter((k) => typeof handlers[k] === 'function').join()
   const extra = useMemo(() => ({ profileOf: names.profileOf, now, social: social.social, offered, ownKey }), [names.profileOf, now, social.social, offered, ownKey])
   const { items, loadedAt, loading, error, incomplete } = view
-  const rowCache = useRowPropsCache(items, feedKey, { h: handlers, social })
-  const replyPreviewsByRef = useReplyPreviews(items)
+  // Comments fold into their post's card (../feedFold.js); a block re-folds
+  // at once, so a blocked commenter leaves the header and the lines.
+  const blockedKeys = useBlocks().keys
+  const { foldOriginal, pending } = social
+  const foldOpts = { originalOf: foldOriginal, pendingOf: pending, ownKey, blocked: blockedKeys }
+  foldOfRef.current = (list) => foldFeed(list, foldOpts).rows
+  const foldRef = useRef(null)
+  const fold = useMemo(() => keepFold(foldFeed(items, foldOpts), foldRef.current, items), [items, foldOriginal, pending, ownKey, blockedKeys])
+  foldRef.current = fold
+  const rows = fold.rows
+  const rowCache = useRowPropsCache(rows, rowKeyOf, { h: handlers, social })
   // One renderItem for the list's life: FlatList re-renders the cells on
   // extraData, and the rows whose props did not change skip their render.
   const renderRef = useRef(null)
   const renderItem = useCallback((info) => renderRef.current(info), [])
   renderRef.current = ({ item }) => {
+    if (item.kind === 'comentarios') return foldRowView(item, { social, profileOf: names.profileOf, now, ownKey, h: handlers, cache: rowCache })
     if (item.kind === 'repost') {
       const ref = refOf(item.to)
       const repostedBy = { author: item.author, name: item.name, username: item.username }
@@ -1698,13 +1916,13 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
           />
         )
       }
-      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf: names.profileOf, now, ownKey, h: handlers, cache: rowCache, rowKey: feedKey(item), replyPreviews: replyPreviewsByRef.get(refOf(post)) })} />
+      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf: names.profileOf, now, ownKey, h: handlers, cache: rowCache, rowKey: feedKey(item), fold: fold.attached.get(feedKey(item)) || null })} />
     }
     // persistOf: own or followed by the MEMBER, never the page's follows.
-    return <PostRow {...socialRowProps({ post: item, ref: feedKey(item), social, profileOf: names.profileOf, now, ownKey, h: handlers, persist: social.persistOf(item.author), cache: rowCache, rowKey: feedKey(item), replyPreviews: replyPreviewsByRef.get(refOf(item)) })} />
+    return <PostRow {...socialRowProps({ post: item, ref: feedKey(item), social, profileOf: names.profileOf, now, ownKey, h: handlers, persist: social.persistOf(item.author), cache: rowCache, rowKey: feedKey(item), fold: fold.attached.get(feedKey(item)) || null })} />
   }
 
-  rowsRef.current = items
+  rowsRef.current = rows
   let empty
   if (error) empty = null
   else if (loadedAt === null) empty = <View>{[0, 1, 2].map(row => <SkeletonRow key={row} />)}</View>
@@ -1728,8 +1946,8 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
       <RefreshableList
         listRef={listRef}
         onViewableItemsChanged={onViewableItemsChanged}
-        data={items}
-        keyExtractor={feedKey}
+        data={rows}
+        keyExtractor={rowKeyOf}
         renderItem={renderItem}
         extraData={extra}
         ListHeaderComponent={(
@@ -1826,6 +2044,9 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   }, [])
   const visibleRangeRef = useRef(null)
   const rowsRef = useRef(null)
+  // The fold of the latest render, so a commit can hand resolve the rows it
+  // is about to show.
+  const foldOfRef = useRef((list) => list)
   // FlatList throws if this identity changes. The ref it writes is read when
   // resolve runs, not on the scroll that reported it.
   const onViewableItemsChanged = useRef((info) => {
@@ -1878,7 +2099,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   const commit = useCallback((patch) => {
     feedRef.current = { ...feedRef.current, ...patch }
     // Before ingest, so resolve orders against the list it is about to show.
-    if (Object.prototype.hasOwnProperty.call(patch, 'items')) rowsRef.current = feedRef.current.items
+    if (Object.prototype.hasOwnProperty.call(patch, 'items')) rowsRef.current = foldOfRef.current(feedRef.current.items)
     setFeed(feedRef.current)
   }, [])
 
@@ -2046,8 +2267,9 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
       profileOf: names.profileOf,
       strictProfiles: node.hosted === true,
       // A repost row shows its original: wait for its answer (any outcome,
-      // a transient one included), never for a retry.
-      originals: rows.filter((i) => i.kind === 'repost').map((i) => refOf(i.to)).filter((r) => r !== null),
+      // a transient one included), never for a retry. A comment waits for
+      // the fold reads asked for it, so the first live rows come folded.
+      originals: rows.filter((i) => i.kind === 'repost').map((i) => refOf(i.to)).filter((r) => r !== null).concat(foldWaits(rows, socialState.originals, social.pending, socialState.dead)),
       hasOriginal: (ref) => socialState.originals.has(ref),
       hasCount: (ref) => socialState.counts.has(ref),
       countsSkipped: node.hosted !== true || node.online === false || flags.indexing === true || flags.complete === false
@@ -2056,7 +2278,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     b.details = true
     perfMarks().mark('details')
     onBoot('details')
-  }, [onBoot, feed.loadedAt, feed.loadError, feed.items, names.profileOf, socialState, node.hosted, node.online])
+  }, [onBoot, feed.loadedAt, feed.loadError, feed.items, names.profileOf, socialState, social.pending, node.hosted, node.online])
 
   const authorsLive = useMemo(() => liveAuthors(moments.authors, now), [moments.authors, now])
   const ownLive = useMemo(() => liveItems(moments.own, now), [moments.own, now])
@@ -2169,7 +2391,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
       authors: first.authors,
       shown: first.shown,
       profileOf: names.profileOf,
-      originals: rows.filter((i) => i.kind === 'repost').map((i) => refOf(i.to)).filter((r) => r !== null),
+      originals: rows.filter((i) => i.kind === 'repost').map((i) => refOf(i.to)).filter((r) => r !== null).concat(foldWaits(rows, socialState.originals, social.pending, socialState.dead)),
       hasOriginal: (ref) => socialState.originals.has(ref),
       hasCount: (ref) => socialState.counts.has(ref),
       countsSkipped: node.hosted !== true || node.online === false || flags.indexing === true || flags.complete === false
@@ -2181,7 +2403,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     }
     clearTimeout(w.timer)
     w.timer = setTimeout(writeSnapshot, SNAPSHOT_DEBOUNCE_MS)
-  }, [sessionOk, snapKey, binding, feed.items, names.profileOf, socialState, node.hosted, node.online, writeSnapshot])
+  }, [sessionOk, snapKey, binding, feed.items, names.profileOf, socialState, social.pending, node.hosted, node.online, writeSnapshot])
   useEffect(() => () => clearTimeout(writeRef.current.timer), [])
 
   const loadOlder = useCallback(async ({ fromSync = false } = {}) => {
@@ -2421,11 +2643,17 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   const shownItems = useMemo(() => (loadedAt !== null
     ? items
     : snapshotRowsShown(items, blockedKeys, blockLoad, ownKey, (ref) => shownOriginals.get(ref))), [items, loadedAt, blockedKeys, blockLoad, ownKey, shownOriginals])
-  rowsRef.current = shownItems
-  const rowCache = useRowPropsCache(shownItems, feedKey, { h: handlers, social })
-  // Snapshot rows are already filtered, so a blocked reply cannot preview.
-  // Once the feed is live, shownItems is items.
-  const replyPreviewsByRef = useReplyPreviews(shownItems)
+  // Comments fold into their post's card (../feedFold.js); a block re-folds
+  // at once, so a blocked commenter leaves the header and the lines.
+  const { foldOriginal, pending } = social
+  const foldOpts = { originalOf: foldOriginal, pendingOf: pending, ownKey, blocked: blockedKeys }
+  foldOfRef.current = (list) => foldFeed(list, foldOpts).rows
+  const foldRef = useRef(null)
+  const fold = useMemo(() => keepFold(foldFeed(shownItems, foldOpts), foldRef.current, shownItems), [shownItems, foldOriginal, pending, ownKey, blockedKeys])
+  foldRef.current = fold
+  const rows = fold.rows
+  rowsRef.current = rows
+  const rowCache = useRowPropsCache(rows, rowKeyOf, { h: handlers, social })
   // One renderItem for the list's life: FlatList re-renders the cells on
   // extraData, and the rows whose props did not change skip their render.
   const renderRef = useRef(null)
@@ -2433,6 +2661,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   // A repost row is the ORIGINAL post (every action targets it), under the
   // reposter's line; its own text (null) is never shown.
   renderRef.current = ({ item }) => {
+    if (item.kind === 'comentarios') return foldRowView(item, { social, profileOf: names.profileOf, now, ownKey, h: handlers, cache: rowCache })
     if (item.kind === 'repost') {
       const ref = refOf(item.to)
       const repostedBy = { author: item.author, name: item.name, username: item.username }
@@ -2448,9 +2677,9 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
           />
         )
       }
-      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf: names.profileOf, now, ownKey, h: handlers, cache: rowCache, rowKey: feedKey(item), replyPreviews: replyPreviewsByRef.get(refOf(post)) })} />
+      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf: names.profileOf, now, ownKey, h: handlers, cache: rowCache, rowKey: feedKey(item), fold: fold.attached.get(feedKey(item)) || null })} />
     }
-    return <PostRow {...socialRowProps({ post: item, ref: feedKey(item), social, profileOf: names.profileOf, now, ownKey, h: handlers, persist: true, cache: rowCache, rowKey: feedKey(item), replyPreviews: replyPreviewsByRef.get(refOf(item)) })} />
+    return <PostRow {...socialRowProps({ post: item, ref: feedKey(item), social, profileOf: names.profileOf, now, ownKey, h: handlers, persist: true, cache: rowCache, rowKey: feedKey(item), fold: fold.attached.get(feedKey(item)) || null })} />
   }
 
   return (
@@ -2459,8 +2688,8 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
       <RefreshableList
         listRef={listRef}
         onViewableItemsChanged={onViewableItemsChanged}
-        data={shownItems}
-        keyExtractor={feedKey}
+        data={rows}
+        keyExtractor={rowKeyOf}
         renderItem={renderItem}
         extraData={extra}
         ListHeaderComponent={(
@@ -2554,23 +2783,29 @@ export function ARuaPreview ({ snapshot, progress = 0, onScrollFrame }) {
   const blockedKeys = blocks.keys
   const blockLoad = blocks.loadState
   const ownKey = snapshot.owner
-  const rows = useMemo(() => snapshotRowsShown(view.items, blockedKeys, blockLoad, ownKey, view.original), [view, blockedKeys, blockLoad, ownKey])
+  const shown = useMemo(() => snapshotRowsShown(view.items, blockedKeys, blockLoad, ownKey, view.original), [view, blockedKeys, blockLoad, ownKey])
+  // Folded as the live list folds them, so the rows do not jump when the
+  // feed goes live. Nothing is asked here: pendingOf is the seed's.
+  const fold = useMemo(() => foldFeed(shown, { originalOf: view.original, pendingOf: view.pending, ownKey, blocked: blockedKeys }), [shown, view, ownKey, blockedKeys])
+  const rows = fold.rows
   const renderItem = useCallback(({ item }) => {
     let row
-    if (item.kind === 'repost') {
+    if (item.kind === 'comentarios') {
+      row = foldRowView(item, { social: view, profileOf: view.profileOf, now, ownKey, h: PREVIEW_HANDLERS, persist: true })
+    } else if (item.kind === 'repost') {
       const ref = refOf(item.to)
       const repostedBy = { author: item.author, name: item.name, username: item.username }
       const post = view.original(ref)
       row = post
-        ? <PostRow {...socialRowProps({ post, ref, repostedBy, social: view, profileOf: view.profileOf, now, ownKey, h: PREVIEW_HANDLERS })} />
+        ? <PostRow {...socialRowProps({ post, ref, repostedBy, social: view, profileOf: view.profileOf, now, ownKey, h: PREVIEW_HANDLERS, fold: fold.attached.get(feedKey(item)) || null })} />
         : <RepostPlaceholder repostedBy={repostedBy} missing={post === null} transient={false} />
     } else {
-      row = <PostRow {...socialRowProps({ post: item, ref: feedKey(item), social: view, profileOf: view.profileOf, now, ownKey, h: PREVIEW_HANDLERS, persist: true })} />
+      row = <PostRow {...socialRowProps({ post: item, ref: feedKey(item), social: view, profileOf: view.profileOf, now, ownKey, h: PREVIEW_HANDLERS, persist: true, fold: fold.attached.get(feedKey(item)) || null })} />
     }
     // box-only: the row is the touch target and has no handler, so a tap does
     // nothing while a drag still scrolls the list.
     return <View pointerEvents='box-only'>{row}</View>
-  }, [view, now, ownKey])
+  }, [view, now, ownKey, fold])
   const width = (Math.min(1, Math.max(0, Number.isFinite(progress) ? progress : 0)) * 100) + '%'
   return (
     <View style={styles.preview}>
@@ -2581,7 +2816,7 @@ export function ARuaPreview ({ snapshot, progress = 0, onScrollFrame }) {
       <KeptOnlyContext.Provider value>
         <RefreshableList
           data={rows}
-          keyExtractor={feedKey}
+          keyExtractor={rowKeyOf}
           renderItem={renderItem}
           extraData={now}
           contentContainerStyle={{ paddingBottom: bottomPad }}
