@@ -287,6 +287,21 @@ test('tombstoneRanges keeps a range a surviving record shows', async (t) => {
   t.alike(tombstoneRanges(pair, [1, 2]).map((r) => r.start).sort(), [1, 3], 'both halves of a pair')
 })
 
+test('tombstoneRanges ignores a surviving edit of a deleted listing', async (t) => {
+  const { tombstoneRanges } = await load()
+  const core = hex('8')
+  const at = '2026-10-29T00:00:00.000Z'
+  const photo = { core, start: 3, blocks: 1 }
+  const entries = [
+    { seq: 2, record: { type: 'listing', media: [photo] } },
+    { seq: 3, record: { type: 'listing-edit', seq: 2, media: [photo] } },
+    { seq: 5, record: { type: 'delete', seq: 2, at, media: [photo] } }
+  ]
+  t.alike(tombstoneRanges(entries, [2]), [photo], 'the orphan edit keeps nothing live')
+  const other = [{ seq: 2, record: { type: 'listing', media: [photo] } }, { seq: 3, record: { type: 'listing', media: [photo] } }, entries[2]]
+  t.alike(tombstoneRanges([...other.slice(0, 2), { seq: 4, record: { type: 'listing-edit', seq: 3, media: [photo] } }, entries[2]], [2]), [], 'an edit of a live listing still keeps it')
+})
+
 test('tombstoneRanges keeps a link card thumbnail a surviving post shows', async (t) => {
   const { tombstoneRanges } = await load()
   const core = hex('8')
@@ -300,6 +315,20 @@ test('tombstoneRanges keeps a link card thumbnail a surviving post shows', async
   t.alike(tombstoneRanges([gone, live, tomb], [2]), [], 'the live card thumbnail stays')
   const bare = { seq: 4, record: { type: 'post', text: 'live', at, replyTo: null, preview: card(null) } }
   t.alike(tombstoneRanges([gone, bare, tomb], [2]), [thumb], 'a card without an image keeps nothing')
+})
+
+test('tombstoneRanges counts listing and listing-edit photos', async (t) => {
+  const { tombstoneRanges } = await load()
+  const core = hex('9')
+  const at = '2026-10-29T00:00:00.000Z'
+  const photo = { core, start: 3, blocks: 1 }
+  const gone = { seq: 2, record: { type: 'listing', media: [photo] } }
+  const tomb = { seq: 6, record: { type: 'delete', seq: 2, at, media: [photo] } }
+  t.alike(tombstoneRanges([gone, tomb], [2]), [photo], 'a deleted listing photo goes')
+  const edit = { seq: 4, record: { type: 'listing-edit', media: [photo] } }
+  t.alike(tombstoneRanges([gone, edit, tomb], [2]), [], 'a surviving edit keeps the photo')
+  const live = { seq: 3, record: { type: 'listing', media: [photo] } }
+  t.alike(tombstoneRanges([gone, live, tomb], [2]), [], 'a surviving listing keeps the photo')
 })
 
 test('revokeMedia releases the same range in every live cache', async (t) => {

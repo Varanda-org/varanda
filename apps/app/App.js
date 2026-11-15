@@ -187,7 +187,7 @@ import AnunciarScreen from './src/screens/Anunciar'
 import AnuncioEditarScreen from './src/screens/AnuncioEditar'
 import AvaliarScreen from './src/screens/Avaliar'
 import { alertsStore } from './src/feiraAlertsStore'
-import { alertsBadge } from './src/feiraScreen'
+import { alertsBadge, badgeRefreshPlan, runFeiraAlerts } from './src/feiraScreen'
 import { createFeiraEntry, decideEntry, heldIsFeira } from './src/feiraEntry'
 import { useFeiraEntryStart } from './src/useFeiraEntryStart'
 import { captureListing, dropListing, entryStorage, holdFeiraCode } from './src/feiraEntryStore'
@@ -2212,8 +2212,8 @@ function Member () {
     }
   }, [dmReady, dmDotGate, readDmDot, node.dmVersion, stackDepth])
   // --- Feira: the tab dot from saved searches (src/feiraAlerts.js) ---
-  // Only the Feira screen runs the searches, when it is opened; this reads
-  // the counts that run left on the device, so nothing polls here. Counts
+  // The searches run when the Feira opens and on the 15-minute foreground
+  // timer below; this reads the counts they left on the device. Counts
   // are recorded only while the Feira answered as on, so a stored count
   // stands for "on" at the last opening. Same origin rule as Feira.js.
   const feiraAlertsOrigin = installationOrigin() || globalThis.location?.origin || node.accountOrigin
@@ -2227,6 +2227,42 @@ function Member () {
     }, () => {})
     return () => { live = false }
   }, [mode, ready, locked, feiraOnScreen, feiraAlertsOrigin, nodeEpoch])
+  // The dot also refreshes every 15 minutes while the app is in the foreground,
+  // whichever tab is open (badgeRefreshPlan). Background, offline or a Feira
+  // that answered off: no timer and no call. The store throttles the runs.
+  const feiraNodeRef = useRef(node)
+  feiraNodeRef.current = node
+  const feiraOffRef = useRef(null)
+  const feiraRunAt = useRef(null)
+  useEffect(() => {
+    if (mode !== 'hosted' || !ready || locked) return
+    const scopeKey = JSON.stringify([nodeEpoch, feiraAlertsOrigin])
+    if (feiraOffRef.current === scopeKey) return
+    let live = true
+    let timer = null
+    const tick = () => {
+      timer = null
+      if (!live || feiraOffRef.current === scopeKey) return
+      const current = feiraNodeRef.current
+      const plan = badgeRefreshPlan({ now: Date.now(), lastAt: feiraRunAt.current, foreground: current.visible !== false, online: current.online, hosted: current.hosted === true, enabled: true })
+      if (plan.waitMs === null) return
+      if (plan.run) {
+        feiraRunAt.current = Date.now()
+        runFeiraAlerts({ node: current, enabled: true, origin: feiraAlertsOrigin, store: alertsStore, isActive: () => live }).then(async (answer) => {
+          if (!live) return
+          if (answer.off) feiraOffRef.current = scopeKey
+          const value = await alertsStore.load(feiraAlertsOrigin)
+          if (live) setFeiraAlerts({ epoch: nodeEpoch, origin: feiraAlertsOrigin, value })
+        }, () => {})
+      }
+      timer = setTimeout(tick, plan.waitMs)
+    }
+    tick()
+    return () => {
+      live = false
+      if (timer !== null) clearTimeout(timer)
+    }
+  }, [mode, ready, locked, node.visible, node.online, node.hosted, feiraAlertsOrigin, nodeEpoch])
   const feiraBadge = mode === 'hosted' && !locked && !feiraOnScreen && feiraAlerts !== null &&
     feiraAlerts.epoch === nodeEpoch && feiraAlerts.origin === feiraAlertsOrigin &&
     alertsBadge({ node, enabled: true, searches: feiraAlerts.value.searches, counts: feiraAlerts.value.counts })

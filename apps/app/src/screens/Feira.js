@@ -12,7 +12,7 @@ import { alertsStore } from '../feiraAlertsStore'
 import { PARTIAL_NOTE, browseListings, columnsFor, gridRows, placeLabel } from '../feiraBrowse'
 import {
   SEGMENT_OPTIONS, UF_OPTIONS, TEXTS,
-  createFeiraProbe, filterState, filtersDot, loadFeiraPage, mergeRows, partialNoteVisible, placeMissing, rowDecision, runFeiraAlerts, savedSearch, screenState, viewFilters, viewFiltersActive
+  cityHint, createFeiraProbe, filterState, filtersDot, loadFeiraPage, mergeRows, newCountLabel, partialNoteVisible, placeMissing, rowDecision, runFeiraAlerts, savedSearch, screenState, shouldAutoLoad, viewFilters, viewFiltersActive
 } from '../feiraScreen'
 import { newRefs, splitNew, visitKey, visitStep } from '../feiraVisits'
 import { Btn, Field, Soft, useBottomPad } from '../ui'
@@ -20,6 +20,7 @@ import { CategoryTiles } from '../ui/CategoryTiles'
 import { FeiraFilters } from '../ui/FeiraFilters'
 import { FilterChips } from '../ui/FilterChips'
 import { Icon } from '../ui/Icon'
+import { Pill } from '../ui/Pill'
 import { ListingTile } from '../ui/ListingTile'
 import { PlaceSheet } from '../ui/PlaceSheet'
 import { PressScale } from '../ui/PressScale'
@@ -32,7 +33,6 @@ import { useStyles } from '../ui/ThemeProvider'
 import { elevation, fonts, LARGE_TEXT, layout, radius, space, type } from '../ui/theme'
 
 const NO_BLOCKS = new Set()
-const newLabel = (n) => (n === 1 ? '1 novo' : n + ' novos')
 // Submit can fire before the last keystroke has been rendered into state.
 const fieldText = (event, fallback) => {
   const text = event?.nativeEvent?.text
@@ -74,6 +74,7 @@ export default function Feira ({
   const [busy, setBusy] = useState(null)
   const [alertData, setAlertData] = useState(null)
   const [alertNotice, setAlertNotice] = useState('')
+  const [lastHit, setLastHit] = useState(null)
   const [availability, setAvailability] = useState(null)
   const [savedKeys, setSavedKeys] = useState(null)
   const [saveNotice, setSaveNotice] = useState(null)
@@ -162,6 +163,13 @@ export default function Feira ({
     return () => { alive = false }
   }, [locationStore])
 
+  useEffect(() => {
+    if (!locationStore || typeof locationStore.loadHit !== 'function') return
+    let live = true
+    Promise.resolve().then(() => locationStore.loadHit()).then((hit) => { if (live) setLastHit(hit) }, () => {})
+    return () => { live = false }
+  }, [locationStore])
+
   // Anuncio saves through the same store while this screen stays mounted
   // under the stack, so the set is read again on every load, not once. Only
   // the newest read for the current scope lands; a failed read leaves every
@@ -201,10 +209,10 @@ export default function Feira ({
     } else if (more && !answer.off) {
       answer = { ...result, ok: false }
     }
-    setLoaded({ scope, result: answer })
+    setLoaded({ scope, result: answer, pages: more ? (loaded && loaded.scope === scope ? loaded.pages : 1) + 1 : 1 })
     pending.current = null
     setBusy(null)
-  }, [active, locationReady, scope, segment, byAuthor, savedOrigin, alertScope, node, applied, ownKey, acting, blocked, result])
+  }, [active, locationReady, scope, segment, byAuthor, savedOrigin, alertScope, node, applied, ownKey, acting, blocked, result, loaded])
   const loadRef = useRef(load)
   loadRef.current = load
 
@@ -309,6 +317,10 @@ export default function Feira ({
   const showHero = filtering && segment === 'cidade' && locationReady && placeMissing(applied)
   const cityBrowse = filtering && segment === 'cidade' && locationReady && !showHero
   const columns = columnsFor(width, fontScale >= LARGE_TEXT)
+  // Large text: the hero title stops growing at TEXT_CAP, like the top bar's,
+  // and the four steps stack one per line. Unbounded, both broke words in the
+  // middle at the largest sizes ("compra/r", "Anu/ncie").
+  const stackSteps = fontScale >= LARGE_TEXT
   const browsed = browseListings(rows, cityBrowse ? view : viewFilters())
   const gap = GRID_GAP
   const inner = Math.max(0, width)
@@ -327,7 +339,7 @@ export default function Feira ({
   const grid = gridRows(controls && !showHero ? browsed : [], columns)
   const listData = fresh !== null && fresh.fresh.length > 0
     ? [
-        { divider: 'novos', label: newLabel(fresh.fresh.length) + ' desde a última visita' },
+        { divider: 'novos', label: newCountLabel(fresh.fresh.length) + ' desde a última visita' },
         ...gridRows(fresh.fresh, columns),
         ...(fresh.older.length > 0 ? [{ divider: 'antes', label: 'Anteriores' }, ...gridRows(fresh.older, columns)] : [])
       ]
@@ -351,6 +363,18 @@ export default function Feira ({
   // not load, so it keeps the quiet status line instead of a running skeleton.
   const pagePending = active && cityBrowse && !result && state.kind === 'empty'
   const showEmpty = cityBrowse && browsed.length === 0 && result !== null && (state.kind === 'empty' || state.kind === 'ready')
+  const hit = cityHint(lastHit, applied)
+  const autoMore = cityBrowse && shouldAutoLoad({ view, next: result ? result.next : null, pages: loaded ? loaded.pages : 1, ok: result ? result.ok !== false : false, online: node.online, loading: !!loading || !result })
+  useEffect(() => {
+    if (autoMore) loadRef.current(true)
+  }, [autoMore, loaded])
+  // Remember the last city that had listings, to offer it after a typo.
+  const hitFound = cityBrowse && !!result && rows.length > 0
+  useEffect(() => {
+    if (!hitFound || !locationStore || typeof locationStore.saveHit !== 'function') return
+    setLastHit({ uf: applied.uf, city: applied.city })
+    Promise.resolve().then(() => locationStore.saveHit({ uf: applied.uf, city: applied.city })).catch(() => {})
+  }, [hitFound, applied.uf, applied.city, locationStore])
   const showSkeletons = segment !== 'buscas' && browsed.length === 0 && !showHero && (state.kind === 'loading' || pagePending)
   const hideStatus = showEmpty || showSkeletons || (segment === 'buscas' && state.kind === 'empty') || (showHero && (state.kind === 'location' || state.kind === 'loading'))
   const skeletonRows = []
@@ -372,7 +396,7 @@ export default function Feira ({
               ? (
                 <View style={styles.hero}>
                   <View style={styles.heroPad}>
-                    <Text accessibilityRole='header' style={styles.heroTitle}>Onde você quer comprar e vender?</Text>
+                    <Text accessibilityRole='header' style={styles.heroTitle} maxFontSizeMultiplier={TEXT_CAP}>Onde você quer comprar e vender?</Text>
                     <Text style={styles.fieldLabel}>Estado</Text>
                   </View>
                   <FilterChips options={UF_OPTIONS} selected={filters.uf} onSelect={(uf) => { setPlaceError(''); setFilters({ ...filters, uf }) }} />
@@ -381,13 +405,13 @@ export default function Feira ({
                     {placeError ? <Text style={styles.message} accessibilityLiveRegion='polite'>{placeError}</Text> : null}
                     <Btn label='Ver anúncios' onPress={confirmPlace} disabled={!locationReady} block />
                     <Text accessibilityRole='header' style={styles.howTitle}>Como funciona</Text>
-                    <View style={styles.steps}>
+                    <View style={[styles.steps, stackSteps && styles.stepsStacked]}>
                       {[['lapis', 'Anuncie'], ['conversas', 'Converse'], ['ok', 'Combine'], ['estrela', 'Avalie']].map(([icon, label]) => (
-                        <View key={label} style={styles.step}>
+                        <View key={label} style={[styles.step, stackSteps && styles.stepStacked]}>
                           <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>
                             <Icon name={icon} size={18} />
                           </View>
-                          <Text style={styles.stepLabel}>{label}</Text>
+                          <Text style={[styles.stepLabel, stackSteps && styles.stepLabelStacked]}>{label}</Text>
                         </View>
                       ))}
                     </View>
@@ -460,7 +484,7 @@ export default function Feira ({
             {segment === 'buscas'
               ? (
                 <View style={styles.fields}>
-                  <Soft>As contagens mostram o que a consulta desta abertura viu, na primeira página de cada busca. A atualização ocorre ao abrir a Feira ou voltar ao aplicativo, com intervalo mínimo de 15 minutos. Offline, ficam as últimas contagens.</Soft>
+                  <Soft>As contagens mostram o que a consulta desta abertura viu, na primeira página de cada busca (com "+" quando há mais páginas). A atualização ocorre ao abrir a Feira, ao voltar ao aplicativo e a cada 15 minutos com o aplicativo aberto. Offline, ficam as últimas contagens.</Soft>
                   {alerts.searches.length === 0
                     ? (
                       <EmptyState
@@ -476,7 +500,7 @@ export default function Feira ({
                     <View key={saved.id} style={styles.search}>
                       <Pressable accessibilityRole='button' onPress={() => openSearch(saved)} style={styles.select}>
                         <Text style={styles.selectText}>{displayText(saved.label)}</Text>
-                        <Text style={styles.chip}>{newLabel(alerts.counts[saved.id] || 0)}</Text>
+                        <Text style={styles.chip}>{newCountLabel(alerts.counts[saved.id] || 0, (alerts.more || {})[saved.id] === true)}</Text>
                       </Pressable>
                       <Btn label='Remover busca' secondary onPress={() => removeSearch(saved.id)} />
                     </View>
@@ -510,6 +534,13 @@ export default function Feira ({
             secondaryLabel='Trocar cidade'
             onSecondary={() => setPlaceOpen(true)}
           />
+          )
+        : null}
+      {showEmpty && hit
+        ? (
+          <View style={styles.hint}>
+            <Pill label={'Ver anúncios em ' + placeLabel({ city: hit.city, uf: hit.uf })} onPress={() => applyFilters({ ...filters, uf: hit.uf, city: hit.city })} />
+          </View>
           )
         : null}
     </View>
@@ -586,6 +617,9 @@ const makeStyles = (colors) => StyleSheet.create({
   steps: { flexDirection: 'row', gap: space.sm },
   step: { flex: 1, minWidth: 0, alignItems: 'center', gap: space.xs },
   stepLabel: { ...type.chip, color: colors.ink, textAlign: 'center' },
+  stepsStacked: { flexDirection: 'column', alignSelf: 'center', alignItems: 'flex-start' },
+  stepStacked: { flex: 0, flexDirection: 'row', gap: space.sm },
+  stepLabelStacked: { flexShrink: 1, textAlign: 'left' },
   fields: { padding: space.lg, gap: space.sm },
   toolRow: { flexDirection: 'row', gap: space.sm, alignItems: 'center' },
   toolInner: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
@@ -600,6 +634,7 @@ const makeStyles = (colors) => StyleSheet.create({
   chip: { ...type.pill, color: colors.accent, backgroundColor: colors.accentSoft, borderRadius: radius.pill, padding: space.sm, alignSelf: 'flex-start' },
   select: { minHeight: layout.hit, justifyContent: 'center', paddingHorizontal: space.md, borderRadius: radius.sm, borderWidth: 1, borderColor: colors.line },
   selectText: { ...type.postText, color: colors.ink },
+  hint: { alignItems: 'center', paddingHorizontal: space.lg, paddingBottom: space.md },
   note: { paddingHorizontal: space.lg, paddingVertical: space.md },
   message: { ...type.postText, color: colors.soft },
   fab: { position: 'absolute', right: layout.fabRight, width: layout.fabSize, height: layout.fabSize, borderRadius: layout.fabSize / 2, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center', boxShadow: `${elevation.raised} ${colors.shadow}` },

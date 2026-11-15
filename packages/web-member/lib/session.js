@@ -1837,8 +1837,8 @@ function createBrowserSession ({
   }
 
   // diary.peek under its own deadline (page.read's probe). opts: internal
-  // only (listing.ratings asks for the block-0 certificate date); the
-  // diary.peek method never passes it.
+  // only (listing.ratings and the diary.peek method ask for the block-0
+  // certificate date).
   function diaryPeekWithin (params, timeoutMs, opts = null) {
     if (closed) return Promise.reject(rpcError('LOCKED', CLOSED_MESSAGE))
     if (diaryPeeksInFlight >= MAX_DIARY_PEEKS) return Promise.reject(rpcError('USAGE', DIARY_PEEK_BUSY))
@@ -3832,8 +3832,16 @@ function createBrowserSession ({
         throw toRpcError(err, reportInternal)
       }
       if (hidden && profileOnly !== true) throw rpcError('NOT_FOUND', DIARY_HIDDEN)
-      const r = await diaryPeek(params)
-      return profileOnly === true ? { ...r, entries: [], invalid: [], missing: [] } : r
+      let r
+      try {
+        r = await diaryPeekWithin(params, peekTimeoutMs, { cert: true })
+      } catch (err) {
+        // The unread flag is for internal readers, never the client.
+        if (err !== null && typeof err === 'object') delete err.unread
+        throw err
+      }
+      const certDate = hidden || typeof r.certDate !== 'string' ? null : r.certDate
+      return profileOnly === true ? { ...r, entries: [], invalid: [], missing: [], certDate } : { ...r, certDate }
     },
 
     // The member's own block list (docs/rpc.md 5.111). The list is written

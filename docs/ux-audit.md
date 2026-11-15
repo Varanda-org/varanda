@@ -54,12 +54,12 @@ Arquivos: `apps/app/src/screens/Conversa.js`, `apps/app/src/ui/ReplyPreview.js`,
 
 ## 3. Feira
 
-Arquivos: `apps/app/src/screens/Feira.js`, `apps/app/src/feiraScreen.js`, `apps/app/src/ui/ListingCard.js`.
+Arquivos: `apps/app/src/screens/Feira.js`, `apps/app/src/feiraScreen.js`, `apps/app/src/feiraBrowse.js` (grade de anúncios em `gridRows`).
 
 | Id | Onde | Hoje | Mudança proposta | Dono |
 |---|---|---|---|---|
 | UX-15 | `Feira.js:231` a `:238` | UF, cidade, palavras, tipo e categoria ficam num bloco só; a pessoa digita a cidade antes de ver qualquer anúncio. | Mostrar os anúncios primeiro; filtros num painel recolhido com resumo ("São Paulo, SP, Todos"). | feito (PR4) |
-| UX-16 | `Feira.js:233` | Cidade é texto livre; um erro de digitação devolve lista vazia sem dizer por quê. | Sugestões a partir da cidade lembrada e mensagem "nada em <cidade>" com atalho para limpar. A confirmar o texto de vazio. | movido para a issue #446 (Feira), decisão de 2026-11-15 |
+| UX-16 | `Feira.js:233` | Cidade é texto livre; um erro de digitação devolve lista vazia sem dizer por quê. | Sugestões a partir da cidade lembrada e mensagem "nada em <cidade>" com atalho para limpar. A confirmar o texto de vazio. | feito (#446): o vazio tem "Limpar filtros" e "Trocar cidade", e a última cidade com anúncios é oferecida como atalho |
 | UX-17 | `Feira.js:246` | Parágrafo único e longo explica contagens, intervalo de 15 minutos e offline. | Dividir em frases curtas; mover o detalhe técnico para a folha de ajuda (`Help`). | feito (PR4) |
 | UX-18 | `Feira.js:215` | A troca de segmento usa `FilterChips`, o mesmo componente dos filtros: dois níveis de navegação parecem iguais. | Usar `Segmented` para o segmento e chips só para filtro. | feito (já atende): o segmento (Na cidade, Buscas, Meus, Salvos) usa `Segmented` (`Feira.js:370`); `FilterChips` fica só para o estado (UF). Conferido na issue #540 |
 | UX-19 | `Feira.js:247` | "Você ainda não tem buscas salvas neste aparelho" sem ação. | Estado vazio com o passo seguinte: "Busque e salve para ser avisado". | feito (#540): o vazio de Buscas ganhou o botão "Buscar na cidade", que volta ao segmento Na cidade (`Feira.js`) |
