@@ -4,7 +4,7 @@ import { AccessibilityInfo } from 'react-native'
 // it at the moment they act, not per render. While VoiceOver or TalkBack runs,
 // a tap on a post opens at once and never reaches the double tap: VoiceOver
 // turns its own activation of plain text into a synthetic touch, and two of
-// them would like. Post music never starts by itself before an answer.
+// them would like.
 let on = false
 let known = false
 try {

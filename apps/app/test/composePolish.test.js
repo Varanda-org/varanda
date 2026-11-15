@@ -33,7 +33,6 @@ test('settings group every row and keep the existing advanced toggle last', (t) 
     ['{PUSH_LABEL}', '() => { pushStore.togglePush({ node, member }) }'],
     ["'Guardar dados neste aparelho'", 'doPersist'],
     ["'Instalar o app'", "() => onNavigate('instalar')"],
-    ['{MUSIC_AUTO_PREF_LABEL}', 'toggleMusicAuto'],
     ['{PREVIEW_PREF_LABEL}', 'togglePreviews'],
     ["'Avançado'", '() => setAdvanced((v) => !v)'],
     ["'Conexão'", "() => onNavigate('conexao')"],
@@ -63,7 +62,7 @@ test('settings notes have titles and version details are separate accessible ite
   for (const title of ['Avisos neste aparelho', 'Dados neste aparelho']) {
     t.ok(notes.includes('<FlushSectionHeader>' + title + '</FlushSectionHeader>'), title + ' belongs to the appearance group')
   }
-  t.ok(src.includes('caption={PREVIEW_PREF_NOTE}') && src.includes('caption={MUSIC_AUTO_PREF_NOTE}'), 'the two switch notes are captions of their own rows')
+  t.ok(src.includes('caption={PREVIEW_PREF_NOTE}'), 'the switch note is the caption of its own row')
   t.ok(/<\/View>\s*<\/View>\s*$/.test(notes) && src.includes('advanced: { marginTop: space.lg }'), 'notes close inside their group and advanced has normal spacing')
   const footer = src.slice(src.indexOf('<View style={styles.version}'), src.indexOf('</Page>'))
   t.is((footer.match(/aria-live=/g) || []).length, 1, 'one web live region for the footer')
