@@ -445,6 +445,8 @@ function Member () {
   const [buscaPane, setBuscaPane] = useState(0)
   // reply and quote are mutually exclusive.
   const [composer, setComposer] = useState({ open: false, reply: null, quote: null })
+  // Set by Publicar while it uploads or sends.
+  const composerBusyRef = useRef(false)
   // The screens pushed above the tabs (src/nav.js), oldest first.
   const [stack, setStack] = useState(nav.EMPTY)
   const stackRef = useRef(stack)
@@ -1942,9 +1944,14 @@ function Member () {
           // A sheet is open: Back closes it first and the screen stays. The
           // popstate already stepped the history back, so the entries it
           // dropped are pushed again (history depth stays equal to the stack).
-          setComposer((c) => ({ ...c, open: false }))
-          setReport(null)
-          setAjustes(null)
+          // Not while the composer is sending: its own close is a no-op then
+          // (see Publicar), and closing it here would let the post go out
+          // after the sheet is gone.
+          if (!composerBusyRef.current) {
+            setComposer((c) => ({ ...c, open: false }))
+            setReport(null)
+            setAjustes(null)
+          }
           const h = globalThis.history
           const d = nav.depth(stackRef.current)
           if (h && typeof h.pushState === 'function') {
@@ -3999,6 +4006,7 @@ function Member () {
           onSharedDone={(id) => share.done(id)}
           onSharedTaken={(id) => share.taken(id)}
           me={me}
+          busyRef={composerBusyRef}
           onClose={() => setComposer((c) => ({ ...c, open: false }))}
           onClearReply={() => setComposer((c) => ({ ...c, reply: null }))}
           onClearQuote={() => setComposer((c) => ({ ...c, quote: null }))}

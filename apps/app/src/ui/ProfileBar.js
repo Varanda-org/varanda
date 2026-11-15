@@ -16,6 +16,7 @@ import { SunsetBand } from './SunsetBand'
 import { PressScale } from './PressScale'
 import { space, type } from './theme'
 import { useStyles } from './ThemeProvider'
+import { TEXT_CAP } from './Sheet'
 
 export const BAR = 44
 
@@ -132,7 +133,7 @@ export function ProfileBar ({ bar, topInset = 0, title, onBack, tabs, children }
               )
             : null}
           <View style={styles.name} pointerEvents='none'>
-            <Text style={styles.title} numberOfLines={1} accessibilityRole='header'>{title || ''}</Text>
+            <Text style={styles.title} numberOfLines={1} maxFontSizeMultiplier={TEXT_CAP} accessibilityRole='header'>{title || ''}</Text>
           </View>
           {on && children ? <View style={styles.controls} pointerEvents='box-none'>{children}</View> : null}
         </View>
@@ -165,6 +166,8 @@ const makeStyles = (colors) => StyleSheet.create({
     justifyContent: 'center'
   },
   name: { flex: 1 },
+  // The bar is a fixed topInset + BAR tall: the title stops growing at TEXT_CAP
+  // (like every header) so its line fits the bar at the largest text size.
   title: { ...type.sheetTitle, color: '#ffffff' },
   controls: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
   tabs: { backgroundColor: colors.bg, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line }

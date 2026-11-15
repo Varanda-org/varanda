@@ -1116,7 +1116,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   } else if (loadError) {
     empty = <ErrorState message={loadError} onRetry={locked ? () => { commit({ locked: false, loadError: '' }); loadFirst() } : loadFirst} pending={loading || refreshing} />
   } else if (loadedAt === null) {
-    empty = <><SkeletonRow /><SkeletonRow /><SkeletonRow /></>
+    empty = <View>{[0, 1, 2].map((row) => <SkeletonRow key={row} />)}</View>
   } else {
     empty = pageKey
       ? <EmptyState icon='sino' title={PAGE_EMPTY_TITLE} body={PAGE_EMPTY_TEXT} />

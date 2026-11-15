@@ -81,7 +81,7 @@ function GifTile ({ item, size, session, queue, onPress, picking }) {
 
 export function GifPicker ({ open, onClose, onPick, member, origin, request }) {
   return (
-    <Sheet open={open} onClose={onClose} title='GIF'>
+    <Sheet open={open} onClose={onClose} title='GIF' closeLabel='Fechar'>
       {open ? <GifSearch onClose={onClose} onPick={onPick} member={member} origin={origin} request={request} /> : null}
     </Sheet>
   )
