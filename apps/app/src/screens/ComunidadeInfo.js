@@ -44,7 +44,7 @@ import { EmptyState, ErrorState, Skeleton } from '../ui/States'
 import { space, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { NAME_MAX, nameLength } from './NovoGrupo'
-import { WEB_ONLY_MESSAGE } from './Comunidades'
+import { UNAVAILABLE_MESSAGE, UNAVAILABLE_TITLE } from './Comunidades'
 
 const { displayText } = rpc
 const HEX64 = /^[0-9a-f]{64}$/
@@ -290,7 +290,7 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember, onMessage }) 
     return (
       <View style={styles.root}>
         <TopBar title='Informações' onBack={onBack} />
-        <EmptyState icon='cadeira' title='Só na versão web' body={WEB_ONLY_MESSAGE} />
+        <EmptyState icon='cadeira' title={UNAVAILABLE_TITLE} body={UNAVAILABLE_MESSAGE} />
       </View>
     )
   }

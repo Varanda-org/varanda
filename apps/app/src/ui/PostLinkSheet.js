@@ -23,7 +23,7 @@ export function PostLinkSheet ({ open, onClose, onEnter, onHow }) {
     onHow()
   }
   return (
-    <Sheet open={open} onClose={onClose} title={SHEET_TITLE}>
+    <Sheet open={open} onClose={onClose} title={SHEET_TITLE} closeLabel='Fechar'>
       <View style={styles.body}>
         <Soft>{SHEET_BODY}</Soft>
         <ConfirmStack

@@ -3,13 +3,15 @@
 // rendered by the screens through displayText (docs/rpc.md section 10).
 // Design: apps/site/artwork/app-design.md.
 
-import { cloneElement, isValidElement, useCallback, useEffect, useRef, useState } from 'react'
+import { cloneElement, isValidElement, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { ActivityIndicator, AppState, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
 import { PRESSED_OPACITY } from '../pressMotion'
-import { msUntilMidnight } from '../dayClock'
+import { startDayWake } from '../dayClock'
 import { Icon } from './Icon'
+import { ScreenVisible } from './screenVisible'
+import { createVisibleNow } from '../visibleNow'
 import { fonts, layout, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
 
@@ -96,29 +98,59 @@ export function useAction () {
   return { run, pending, error, clearError: () => setError('') }
 }
 
+// Runs the latest `wake` at local midnight and when the app comes back to the
+// foreground (startDayWake in src/dayClock.js).
+function useDayWake (wake) {
+  const latest = useRef(wake)
+  latest.current = wake
+  useEffect(() => startDayWake({
+    clock: Date.now,
+    setTimer: setTimeout,
+    clearTimer: clearTimeout,
+    subscribe: (fn) => {
+      const sub = AppState.addEventListener('change', fn)
+      return () => sub.remove()
+    },
+    onWake: () => latest.current()
+  }), [])
+}
+
 // Date.now(), refreshed every intervalMs (relative times stay current), when
 // the app comes back to the foreground and at local midnight, so "hoje" and
 // "ontem" never go stale.
 export function useNow (intervalMs) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
-    const tick = () => setNow(Date.now())
-    const timer = setInterval(tick, intervalMs)
-    let midnight
-    const arm = () => {
-      clearTimeout(midnight)
-      midnight = setTimeout(() => { tick(); arm() }, msUntilMidnight())
-    }
-    arm()
-    const sub = AppState.addEventListener('change', (state) => {
-      if (state === 'active') { tick(); arm() }
-    })
-    return () => {
-      clearInterval(timer)
-      clearTimeout(midnight)
-      sub.remove()
-    }
+    const timer = setInterval(() => setNow(Date.now()), intervalMs)
+    return () => clearInterval(timer)
   }, [intervalMs])
+  useDayWake(() => setNow(Date.now()))
+  return now
+}
+
+// useNow for a screen that stays mounted while hidden: the interval pauses
+// while ScreenVisible is false and refreshes at once on return. Kept apart
+// from useNow so its default callers do not subscribe to ScreenVisible (a
+// provider flip would render them).
+export function useVisibleNow (intervalMs) {
+  const [now, setNow] = useState(() => Date.now())
+  const visible = useContext(ScreenVisible)
+  const ticker = useRef(null)
+  useEffect(() => {
+    ticker.current = createVisibleNow({
+      intervalMs,
+      clock: Date.now,
+      setTimer: setInterval,
+      clearTimer: clearInterval,
+      onNow: setNow
+    })
+    return ticker.current.stop
+  }, [intervalMs])
+  useEffect(() => {
+    ticker.current.setVisible(visible)
+  }, [visible, intervalMs])
+  // A hidden screen skips midnight and the return: showing it refreshes anyway.
+  useDayWake(() => { if (visible) setNow(Date.now()) })
   return now
 }
 
@@ -276,7 +308,7 @@ export function ConfirmStack ({ confirm, cancel }) {
 // Key, JSON and host fields are `mono`: no capitalisation or correction, and
 // the typed value in the monospace font (an empty field keeps its placeholder
 // in the normal one). Free text (name, bio) keeps the platform defaults.
-export function Field ({ label, value, onChangeText, multiline, maxLength, editable = true, placeholder, mono, lines = 4, onSubmitEditing, returnKeyType, plain }) {
+export function Field ({ label, value, onChangeText, multiline, maxLength, editable = true, placeholder, mono, lines = 4, onSubmitEditing, returnKeyType, keyboardType, plain }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   // plain: a search, typed as is (no capitals, no autocorrect) in the normal font.
@@ -285,6 +317,7 @@ export function Field ({ label, value, onChangeText, multiline, maxLength, edita
   const submit = {}
   if (onSubmitEditing !== undefined) submit.onSubmitEditing = onSubmitEditing
   if (returnKeyType !== undefined) submit.returnKeyType = returnKeyType
+  if (keyboardType !== undefined) submit.keyboardType = keyboardType
   return (
     <View style={styles.field}>
       {label ? <Label>{label}</Label> : null}

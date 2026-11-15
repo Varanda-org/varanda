@@ -396,8 +396,8 @@ test('Mensagem offers Encaminhar and marks forwarded messages without the origin
   t.ok(src.includes("label: 'Encaminhar'"), 'the long press action')
   t.ok(src.includes('const canForward = pageKey === null && unlocked'), 'never as a page')
   t.ok(src.includes('<ForwardSheet'), 'the sheet')
-  t.ok(src.includes('forwarded={!item.deleted && fwdOf.get(item.key) === 1}'), 'fwd 1 from dm.thread shows the line')
-  t.ok(src.includes('dmForwardSource(item.rawText, mediaOf.get(item.key))'), 'expired media maps to an unavailable item')
+  t.ok(src.includes('fwd={fwdOf.get(item.key)}') && src.includes('forwarded={!item.deleted && fwd === 1}'), 'fwd 1 from dm.thread shows the line')
+  t.ok(src.includes('media={mediaOf.get(item.key)}') && src.includes('dmForwardSource(item.rawText, media)'), 'expired media maps to an unavailable item')
   t.ok(src.includes('if (forwardSource !== null) {'), 'no Encaminhar when nothing is left to forward')
   t.absent(src.includes('media: Array.isArray(media) ? media : []'), 'expired media never becomes a plain text forward')
   const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
@@ -439,7 +439,7 @@ test('a message request never loads a provider player', (t) => {
   const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
   t.ok(src.includes("plainCard={folder === 'request'}"), 'Mensagem passes plainCard in a request')
   t.ok(src.includes("deferred={folder === 'request'}"), 'the same row defers its photos')
-  t.ok(/extraData=\{\{[^}]*\bfolder\b/.test(src), 'rows redraw when the request is accepted')
+  t.ok(/const extra = useMemo\(\(\) => \(\{[^}]*\bfolder\b[^}]*\}\), \[[^\]]*\bfolder\b/.test(src) && src.includes('extraData={extra}'), 'rows redraw when the request is accepted')
 })
 
 test('chat screens end the player band at the composer', (t) => {
@@ -683,6 +683,21 @@ test('Conversar is offered only for an open page on a hosted node with pages ena
   t.ok(src.includes("<Pill icon='mensagem' label='Conversar' onPress={openPageConversation}"))
   t.ok(src.includes('onPress={() => onOpenListings(author)}'))
   t.ok(src.includes("const listingsRow = node.hosted === true && !(isPage && lifecycle.moved) && typeof onOpenListings === 'function'"), 'listings require a hosted node and stay hidden on a moved page')
+})
+
+test('Continuar on the page notice hands over only once the sheet is gone', (t) => {
+  const sheetSrc = readFileSync(join(__dirname, '../src/ui/PageNoticeSheet.js'), 'utf8')
+  const baseSrc = readFileSync(join(__dirname, '../src/ui/Sheet.js'), 'utf8')
+  const proceed = sheetSrc.slice(sheetSrc.indexOf('const proceed = () => {'), sheetSrc.indexOf('  return (\n'))
+  t.ok(/pending\.current = onContinue\s+onClose\(\)/.test(proceed), 'Continuar closes the sheet and keeps the press-time onContinue')
+  t.absent(proceed.includes('onContinue()'), 'Continuar never hands over while the sheet is up')
+  t.ok(proceed.includes('if (!shownNow.current || gone.current || pending.current !== null) return'), 'a second press during the slide, or one after the sheet started closing, cannot queue a hand-over')
+  t.ok(/if \(shown\) \{[\s\S]*?pending\.current = null[\s\S]*?return undefined/.test(sheetSrc), 'a reopening drops a hand-over still waiting')
+  t.ok(sheetSrc.includes('onDismiss={flush}'), 'the hand-over waits for the sheet to report it is gone')
+  t.ok(sheetSrc.includes("setTimeout(flush, Platform.OS === 'android' ? 320 : 700)"), 'Android and a dismissal that never reports still hand over')
+  t.ok(baseSrc.includes('export function Sheet ({ open, onClose, onBack, onDismiss,'), 'Sheet takes onDismiss')
+  t.is(baseSrc.split('onDismiss={dismissed}').length - 1, 2, 'both Modals of Sheet report the dismissal')
+  t.ok(baseSrc.includes("if (typeof onDismiss === 'function') onDismiss()"), 'the dismissal reaches the caller')
 })
 
 test('the page conversation notice persists per device and page key on both storage adapters', async (t) => {
@@ -1101,7 +1116,7 @@ test('Mensagem supplies moment context only for private reaction rows', (t) => {
   const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
   t.ok(src.includes('moment={pageKey === null && !item.deleted && isMomentReaction(item)'))
   t.ok(src.includes('author: momentAuthor(item, { peer, ownKey }), seq: item.moment, identity: ownKey, folder'))
-  t.ok(/extraData=\{\{[^}]*\bownKey\b/.test(src), 'identity arrival redraws the row')
+  t.ok(/const extra = useMemo\(\(\) => \(\{[^}]*\bownKey\b[^}]*\}\), \[[^\]]*\bownKey\b/.test(src) && src.includes('extraData={extra}'), 'identity arrival redraws the row')
   const preview = readFileSync(join(__dirname, '../src/ui/MomentReactionPreview.js'), 'utf8')
   t.absent(/VideoPlayer|MusicEmbed|onPress=/.test(preview))
 })
