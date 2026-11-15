@@ -59,7 +59,8 @@ test('Avisos keeps the verified @nome line and shows the snippet apart, in quote
   const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
   t.absent(/snippet \|\| subtitle/.test(source), 'post text never replaces the handle')
   t.ok(source.includes('{subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}'))
-  t.ok(source.includes("{snippet ? <Text style={styles.snippet} numberOfLines={1}>{'“' + snippet + '”'}</Text> : null}"))
+  t.ok(source.includes("? <Text style={styles.snippet} numberOfLines={1}>{'“' + snippet + '”'}</Text>"), 'a cut snippet stays one plain line, in quotes')
+  t.ok(source.includes('<Text style={styles.snippet}>“<MentionText text={snippetOf(item, postText)} />”</Text>'), 'a whole snippet shows its links, in quotes')
   t.ok(/snippet: \{ \.\.\.type\.postMeta, color: colors\.ink \}/.test(source), 'a style apart from the handle')
 })
 

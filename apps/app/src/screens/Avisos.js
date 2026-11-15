@@ -41,7 +41,7 @@ import {
   ACTIVITY_QUIET_TEXT, EMPTY_TEXT, EMPTY_TITLE, NOTICES_FIRST_READ_QUIET_MS, NOTICES_INCOMPLETE_TEXT, NOTICES_OFFLINE_MESSAGE, NOTICES_POLL_MS,
   NOTICES_UNSUPPORTED_MESSAGE, PAGE_EMPTY_TEXT, PAGE_EMPTY_TITLE, PAGE_NOTICES_READ_LINE, PAGE_NOTICES_UNAVAILABLE_TITLE, SEEN_MAX,
   compareNotices, followsReadCovers, followsReadsHere, hasNew, hasPageSeenNamespaces, isLastNoticesPage, isPageNoticesUnavailable, isPageSeenNamespace, isWebOnlyError, markSeenPadded, mergePage, mergeRemoteSeen, noticeIcon, noticeId, noticeKind, noticeLine, noticeParts, noticeRef, noticesNotice,
-  needsAvatar, padSeen, pageNoticesHeader, pageSeenNamespace, parseSeenNamespace, readNotices, remoteFoldPlan, resolveRowAvatars, rowAvatarSource, seenOnScreen, seenUnion, shouldPoll, shouldStartNoticesFirstRead, snippetOf, writeSeenNamespace
+  needsAvatar, padSeen, pageNoticesHeader, pageSeenNamespace, parseSeenNamespace, readNotices, remoteFoldPlan, resolveRowAvatars, rowAvatarSource, seenOnScreen, seenUnion, shouldPoll, shouldStartNoticesFirstRead, snippetCut, snippetOf, writeSeenNamespace
 } from '../notices'
 import { getPeekWarmState, isSeederBusyError, subscribePeekWarm, updatePeekWarmState } from '../peek'
 import { isRef } from '../nav'
@@ -56,6 +56,7 @@ import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
 import { PressScale } from '../ui/PressScale'
+import { MentionText } from '../ui/MentionText'
 import { NOT_HOSTED } from '../pessoas'
 import { HELP } from '../help'
 import { HelpSheet } from '../ui/Help'
@@ -361,6 +362,7 @@ function NoticeRow ({ item, now, unread, postText, picture, onOpenMember, onOpen
   const line = displayText(noticeLine(who, kind))
   const icon = noticeIcon(kind)
   const snippet = displayText(snippetOf(item, postText))
+  const snippetPlain = snippetCut(item, postText)
   // The row is one control: a screen reader hears the verified @nome, the
   // quoted post and the unread state the eye gets from the lines and the dot.
   const spoken = [line, subtitle, snippet ? '“' + snippet + '”' : null, unread ? 'não lido' : null].filter(Boolean).join(', ')
@@ -375,7 +377,13 @@ function NoticeRow ({ item, now, unread, postText, picture, onOpenMember, onOpen
         {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
         {/* Post text never takes the verified @nome's place or style: a post
             that reads "@maria" must not pass as the sender's handle. */}
-        {snippet ? <Text style={styles.snippet} numberOfLines={1}>{'“' + snippet + '”'}</Text> : null}
+        {/* Addresses in the post text are links (fail-closed, ../links); a clamp
+            would hide part of one, so the snippet wraps, and a cut one stays plain. */}
+        {snippet
+          ? snippetPlain
+            ? <Text style={styles.snippet} numberOfLines={1}>{'“' + snippet + '”'}</Text>
+            : <Text style={styles.snippet}>“<MentionText text={snippetOf(item, postText)} />”</Text>
+          : null}
       </View>
       <View style={styles.aside}>
         {time ? <Text style={styles.handle} numberOfLines={1}>{time}</Text> : null}
