@@ -326,7 +326,8 @@ eas build -p ios --profile production --auto-submit
 - Para ligar o fluxo: crie um token de acesso da Expo para a conta `varanda-org`; em Settings > Environments, crie o ambiente `app-store`, com deployment branches só `main` e o segredo `EXPO_TOKEN`; em Settings > Secrets and variables > Actions > Variables, crie `VARANDA_IOS_RELEASE` com o valor `true`. Qualquer outro valor pausa os envios, inclusive pelo Run workflow.
 - O fluxo instala o `eas-cli` 27.2.0 com `--ignore-scripts`, a versão do primeiro build e envio deste perfil. Antes de trocar a versão, rode um build local com a nova.
 - O fluxo define `EXPO_NO_CAPABILITY_SYNC=1`: o build da CI não liga nem desliga capacidades na conta Apple. Uma capacidade nova (em um `*.entitlements` ou em `ios.entitlements` do `app.json`) se liga à mão no Apple Developer e entra num perfil novo com `eas credentials -p ios` antes do push que a leva à `main` (veja "Extensão de compartilhamento do iOS").
-- Cada push em `main` que mexe no app gasta um build iOS da EAS. `apps/cli/test/ios-release.test.js` fixa a forma do fluxo e os perfis do `eas.json`.
+- Se o ambiente `app-store` pede a aprovação de um revisor, só a execução mais nova espera por ela: o job `supersede` cancela as execuções mais antigas que ainda esperam, e uma execução que já tem outra mais nova termina sem build. Uma execução aprovada nunca é cancelada, porque pode já ter posto um build na fila da EAS; a seguinte espera ela terminar.
+- Cada push em `main` que mexe no app gasta um build iOS da EAS. `apps/cli/test/ios-release.test.js` fixa a forma do fluxo e os perfis do `eas.json`, e `apps/cli/test/supersede.test.js` o job `supersede`, igual nos fluxos `deploy`, `ios-release` e `site`.
 
 ## Ficha da App Store (EAS Metadata)
 

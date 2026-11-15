@@ -648,3 +648,21 @@ export function hasPageSeenNamespaces (text) {
     return false
   }
 }
+
+// A follows change reads the list on its own only while the tab is hidden:
+// shown, a follow made on this device reads once through App's `refresh`
+// bump, and one made elsewhere changes no row (only the Seguir de volta
+// pills, which read the follow set). Never while a read is in flight (the
+// next one is deferred or the BUSY retry covers it).
+export function followsReadsHere ({ active, busy }) {
+  return !active && !busy
+}
+
+// How long after a hidden follows read a hidden `refresh` bump counts as the
+// one a follow made on this device sends for the same change, so the next
+// show does not read again. A later bump (a block, a publish) still reads.
+export const FOLLOWS_COVER_MS = 2000
+
+export function followsReadCovers ({ readAt, now }) {
+  return typeof readAt === 'number' && typeof now === 'number' && now >= readAt && now - readAt <= FOLLOWS_COVER_MS
+}

@@ -361,8 +361,12 @@ const escapeAttr = (s) => String(s).replace(/[&<>"']/g, (c) => ESCAPES[c])
 // a CSP that allows no other frame, script or connection. The frame's allow
 // list names no capture feature (microphone, camera, geolocation, display
 // capture), so Permissions Policy blocks getUserMedia before the WebView,
-// which grants the microphone silently on Android, is ever asked. '' for
-// anything that is not a player address from embedOf.
+// which grants the microphone silently on Android, is ever asked. It names no
+// encrypted-media either, so Permissions Policy refuses
+// requestMediaKeySystemAccess inside the frame: the Android WebView would turn
+// that request into a system permission screen, which pauses the app and so
+// closes every player. '' for anything that is not a player address from
+// embedOf.
 export function embedHtml (embed) {
   try {
     if (!embed || typeof embed.embedUrl !== 'string') return ''
@@ -376,7 +380,7 @@ export function embedHtml (embed) {
       '<style>html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:transparent}iframe{display:block;border:0;width:100%;height:100%}</style>' +
       '</head><body>' +
       '<iframe src="' + escapeAttr(embed.embedUrl) + '" title="' + escapeAttr(title) + '" width="100%" height="100%"' +
-      ' allow="clipboard-write; encrypted-media; fullscreen; picture-in-picture"' +
+      ' allow="clipboard-write; fullscreen; picture-in-picture"' +
       ' referrerpolicy="strict-origin-when-cross-origin" sandbox="' + EMBED_SANDBOX + '" allowfullscreen></iframe>' +
       '</body></html>'
   } catch {

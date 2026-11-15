@@ -23,8 +23,9 @@
 // MAX_POST_NOTICES_PER_PAIR rows survive; per author the newest
 // MAX_POST_NOTICES_PER_AUTHOR. Both evict the author's own lowest seq and are
 // not incompleteness: they only forget old notices of one noisy author. The
-// global cap is different: it refuses the new row and marks that author
-// truncated, never evicting another author's rows. Rows whose target is not
+// global cap is different: it refuses the new row and records its pair as
+// cut (incomplete for that pair's target, below), never evicting another
+// author's rows. Rows whose target is not
 // known to be anyone (a key isMember rejects, a name no verified record
 // holds yet) are capped per author and skipped silently beyond it, like the
 // non-member follow targets of notices.js. Every author map is bounded by
@@ -48,6 +49,27 @@
 // tombstone (removePost, docs/protocol.md "Deletion"); only an unfollow
 // cancels a follow. Pending only governs `incomplete`.
 //
+// Incomplete per target, the notices.js rule: a page of target T is
+// incomplete when T itself is pending or tracked and never settled (its
+// names, hence its mention pairs, may not be known yet), when a pending
+// author was never settled since its last
+// removeAuthor (nothing known yet: every target), when a pending author
+// settled before has rows on one of T's pairs (its key, or a name T holds
+// under a usable issuer), or when a row on one of those pairs was refused
+// at the global cap. Each author remembers at most MAX_CUT_PAIRS_PER_AUTHOR
+// refused pairs; one that loses more, an author refused at maxAuthors and
+// the overflow flag keep every page incomplete, as before.
+//
+// Page cost: each pair keeps a lazily built copy of its rows in page order
+// (at most PAGE_CACHE_PAIRS pairs, dropped by any write to that pair; their
+// rows are a subset of the stored rows, so at most maxEdges in all). A page
+// binary-searches the cursor in each of T's pairs and merges them, stopping
+// after limit + 1 rows that pass the filters, so its cost follows the page,
+// not the number of candidates, once the pairs are sorted. The follow and
+// engagement rows other indexes hand in are not ordered: a bounded
+// selection keeps the limit + 1 first after the cursor, one pass and no
+// full sort. Results and cursors are the same as a full sort.
+//
 // Browser-safe: ./records, ./username, ./feed, ./notices-v2 and @varanda/rpc
 // only.
 const { mentionTokens, MENTION_MAX } = require('@varanda/rpc')
@@ -61,6 +83,8 @@ const MAX_POST_NOTICES_PER_PAIR = 32
 const MAX_POST_NOTICES_PER_AUTHOR = 1024
 const POST_NOTICES_MAX_EDGES = 262144
 const MAX_UNRESOLVED_TOKENS_PER_AUTHOR = 64
+const MAX_CUT_PAIRS_PER_AUTHOR = 64
+const PAGE_CACHE_PAIRS = 128
 // The seeder's default maxServed (admission.js MAX_INVENTORY).
 const POST_NOTICES_MAX_AUTHORS = 4096
 
@@ -161,7 +185,17 @@ function createPostNoticeIndex ({
   // username -> Set of authors holding it verifiably.
   const owners = new Map()
   const pending = new Set()
-  const truncated = new Set()
+  // Authors settled at least once since their last removeAuthor.
+  const settled = new Set()
+  // author -> Set of pairs it had a row refused on at the global cap (at
+  // most MAX_CUT_PAIRS_PER_AUTHOR); pair -> Set of those authors; authors
+  // that lost more (every page is incomplete while one is indexed).
+  const cutBy = new Map()
+  const cutOf = new Map()
+  const cutWide = new Set()
+  // pair -> [{ t, key, seq, at, kind }] in page order, built on a page and
+  // dropped by any write to the pair; insertion order is the LRU order.
+  const sorted = new Map()
   // Exact number of stored rows over all authors (private: never returned).
   let edges = 0
 
@@ -245,7 +279,7 @@ function createPostNoticeIndex ({
       if (state.posts.keys().next().value === seq) return
       evictLowest(authorHex)
     } else if (edges >= maxEdges) {
-      truncated.add(authorHex)
+      noteCut(authorHex, pair)
       return
     }
     state = authors.get(authorHex)
@@ -259,6 +293,7 @@ function createPostNoticeIndex ({
       state.posts.set(seq, post)
     }
     post.edges.set(pair, { kind })
+    sorted.delete(pair)
     state.count++
     if (loose) state.loose.add(pair)
     edges++
@@ -316,6 +351,7 @@ function createPostNoticeIndex ({
     const edge = post ? post.edges.get(pair) : undefined
     if (!edge) return
     post.edges.delete(pair)
+    sorted.delete(pair)
     if (post.edges.size === 0) state.posts.delete(seq)
     state.count--
     edges--
@@ -329,6 +365,42 @@ function createPostNoticeIndex ({
       state.loose.delete(pair)
     }
     if (bucket.size === 0) byPair.delete(pair)
+  }
+
+  // A refused row is gone for good (lastSeq), so a cut lasts until
+  // removeAuthor.
+  function noteCut (authorHex, pair) {
+    if (cutWide.has(authorHex)) return
+    let pairs = cutBy.get(authorHex)
+    if (pairs && pairs.has(pair)) return
+    if (pairs && pairs.size >= MAX_CUT_PAIRS_PER_AUTHOR) {
+      cutWide.add(authorHex)
+      return
+    }
+    if (!pairs) {
+      pairs = new Set()
+      cutBy.set(authorHex, pairs)
+    }
+    pairs.add(pair)
+    let who = cutOf.get(pair)
+    if (!who) {
+      who = new Set()
+      cutOf.set(pair, who)
+    }
+    who.add(authorHex)
+  }
+
+  function dropCuts (authorHex) {
+    const pairs = cutBy.get(authorHex)
+    cutBy.delete(authorHex)
+    cutWide.delete(authorHex)
+    if (!pairs) return
+    for (const pair of pairs) {
+      const who = cutOf.get(pair)
+      if (!who) continue
+      who.delete(authorHex)
+      if (who.size === 0) cutOf.delete(pair)
+    }
   }
 
   function foldUsername (authorHex, seq, record) {
@@ -384,6 +456,7 @@ function createPostNoticeIndex ({
       deriveNames(authorHex)
     }
     pending.delete(authorHex)
+    if (tracked.has(authorHex)) settled.add(authorHex)
   }
 
   // Rebuilds the author's names from the verified records of its window,
@@ -435,7 +508,8 @@ function createPostNoticeIndex ({
     deriveNames(authorHex)
     lastSeq.delete(authorHex)
     pending.delete(authorHex)
-    truncated.delete(authorHex)
+    settled.delete(authorHex)
+    dropCuts(authorHex)
     refused.delete(authorHex)
     tracked.delete(authorHex)
   }
@@ -455,80 +529,126 @@ function createPostNoticeIndex ({
   }
 
   function page ({ target, followRows, isBlocked, issuerUsable, after, limit, now, followIncomplete }, extra) {
-    const incomplete = truncated.size > 0 || pending.size > 0 || refused.size > 0 || overflow || followIncomplete === true || (extra !== null && extra.incomplete)
+    const outside = refused.size > 0 || overflow || cutWide.size > 0 || followIncomplete === true || (extra !== null && extra.incomplete)
     const n = clampLimit(limit)
-    if (!isHex64(target)) return { items: [], next: null, incomplete }
+    if (!isHex64(target)) return { items: [], next: null, incomplete: outside }
     const clock = typeof now === 'number' && Number.isFinite(now) ? now : Date.now()
     const cursor = readCursor(after)
 
-    // author -> Map seq -> kind, keeping the highest priority per post.
-    const best = new Map()
-    const put = (author, seq, kind) => {
-      let seqs = best.get(author)
-      if (!seqs) {
-        seqs = new Map()
-        best.set(author, seqs)
-      }
-      const prev = seqs.get(seq)
-      if (prev === undefined || PRIORITY[kind] > PRIORITY[prev]) seqs.set(seq, kind)
-    }
-    const collect = (pair, kindOf) => {
-      const bucket = byPair.get(pair)
-      if (!bucket) return
-      for (const [author, seqs] of bucket) {
-        for (const seq of seqs) {
-          const edge = authors.get(author).posts.get(seq).edges.get(pair)
-          put(author, seq, kindOf(edge))
-        }
-      }
-    }
-    collect(keyPair(target), (edge) => edge.kind)
+    const pairs = [keyPair(target)]
     const held = names.get(target)
     if (held) {
       for (const [username, { issuer }] of held) {
-        if (!usable(issuerUsable, issuer)) continue
-        collect(namePair(username), () => KIND_MENTION)
+        if (usable(issuerUsable, issuer)) pairs.push(namePair(username))
       }
     }
+    const incomplete = outside || pairsIncomplete(target, pairs)
 
-    const rows = []
-    const consider = (key, seq, at, kind) => {
-      const t = Date.parse(at)
-      // Hidden, not deleted: a row too far in the future may show later.
-      if (!Number.isFinite(t) || t - clock > MAX_FUTURE_MS) return
-      if (skip(key, target, isBlocked)) return
-      const row = { t, key, seq, at, kind }
-      // Exclusive cursor: keep only rows strictly later in page order.
-      if (cursor !== null && compareRows(row, cursor) <= 0) return
-      rows.push(row)
-    }
-    for (const [author, seqs] of best) {
-      const posts = authors.get(author).posts
-      for (const [seq, kind] of seqs) consider(author, seq, posts.get(seq).at, kind)
-    }
+    // Hidden, not deleted: a row too far in the future may show later.
+    const shown = (key, t) => Number.isFinite(t) && t - clock <= MAX_FUTURE_MS && !skip(key, target, isBlocked)
+    // Exclusive cursor: keep only rows strictly later in page order.
+    const later = (row) => cursor === null || compareRows(row, cursor) > 0
+
+    const want = n + 1
+    const rows = mergePairs(pairs, cursor, want, shown)
     if (Array.isArray(followRows)) {
-      for (const r of followRows) {
-        try {
-          if (!isPlainObject(r) || !isHex64(r.key) || !isSeq(r.seq) || !isCanonicalIso(r.at)) continue
-          consider(r.key, r.seq, r.at, KIND_FOLLOW)
-        } catch {}
-      }
+      rows.push(...select(followRows, want, (r) => {
+        if (!isPlainObject(r) || !isHex64(r.key) || !isSeq(r.seq) || !isCanonicalIso(r.at)) return null
+        return { t: Date.parse(r.at), key: r.key, seq: r.seq, at: r.at, kind: KIND_FOLLOW }
+      }, shown, later))
     }
     if (extra !== null && Array.isArray(extra.rows)) {
-      for (const r of extra.rows) {
-        try {
-          if (!isPlainObject(r) || !isHex64(r.key) || !isSeq(r.seq) || !isCanonicalIso(r.at)) continue
-          if (!ENGAGEMENT_KINDS.includes(r.kind)) continue
-          consider(r.key, r.seq, r.at, r.kind)
-        } catch {}
-      }
+      rows.push(...select(extra.rows, want, (r) => {
+        if (!isPlainObject(r) || !isHex64(r.key) || !isSeq(r.seq) || !isCanonicalIso(r.at)) return null
+        if (!ENGAGEMENT_KINDS.includes(r.kind)) return null
+        return { t: Date.parse(r.at), key: r.key, seq: r.seq, at: r.at, kind: r.kind }
+      }, shown, later))
     }
+    // At most 3 x (limit + 1) rows: each source gave its first limit + 1, so
+    // the first limit + 1 of all of them are here.
     rows.sort(compareRows)
-    const page = rows.slice(0, n)
-    const items = page.map((r) => ({ key: r.key, seq: r.seq, at: r.at, kind: r.kind }))
+    const items = rows.slice(0, n).map((r) => ({ key: r.key, seq: r.seq, at: r.at, kind: r.kind }))
     const last = items[items.length - 1]
     const next = rows.length > n ? { at: last.at, key: last.key, seq: last.seq } : null
     return { items, next, incomplete }
+  }
+
+  // T's names are derived at settle, so while T itself is pending, or
+  // tracked and never settled, a username record it holds may sit in a block
+  // not folded yet: the pairs of that name are missing from `pairs` and a
+  // mention of it could not be found. A target the index holds nothing of
+  // is the seeder's to flag (a target not served or not gated).
+  function pairsIncomplete (target, pairs) {
+    if (pending.has(target) || (tracked.has(target) && !settled.has(target))) return true
+    for (const pair of pairs) if (cutOf.has(pair)) return true
+    for (const author of pending) {
+      if (!settled.has(author)) return true
+      for (const pair of pairs) {
+        const bucket = byPair.get(pair)
+        if (bucket && bucket.has(author)) return true
+      }
+    }
+    return false
+  }
+
+  // The pair's rows in page order, built once per write to the pair.
+  function sortedRows (pair) {
+    let list = sorted.get(pair)
+    if (list !== undefined) {
+      sorted.delete(pair)
+      sorted.set(pair, list)
+      return list
+    }
+    list = []
+    const bucket = byPair.get(pair)
+    if (bucket) {
+      const mention = pair.startsWith('n:')
+      for (const [author, seqs] of bucket) {
+        const posts = authors.get(author).posts
+        for (const seq of seqs) {
+          const post = posts.get(seq)
+          list.push({ t: Date.parse(post.at), key: author, seq, at: post.at, kind: mention ? KIND_MENTION : post.edges.get(pair).kind })
+        }
+      }
+      list.sort(compareRows)
+    }
+    sorted.set(pair, list)
+    if (sorted.size > PAGE_CACHE_PAIRS) sorted.delete(sorted.keys().next().value)
+    return list
+  }
+
+  // Merges the pairs' sorted rows after the cursor until `want` rows pass
+  // `shown`. One post on several pairs (a reply that also mentions a name)
+  // compares equal on every pair, so its copies come out together and keep
+  // the highest priority kind.
+  function mergePairs (pairs, cursor, want, shown) {
+    const heads = []
+    for (const pair of pairs) {
+      const list = sortedRows(pair)
+      const i = cursor === null ? 0 : upperBound(list, cursor)
+      if (i < list.length) heads.push({ list, i })
+    }
+    const out = []
+    let prev = null
+    while (heads.length > 0) {
+      let best = 0
+      for (let j = 1; j < heads.length; j++) {
+        if (compareRows(heads[j].list[heads[j].i], heads[best].list[heads[best].i]) < 0) best = j
+      }
+      const head = heads[best]
+      const row = head.list[head.i++]
+      if (head.i >= head.list.length) heads.splice(best, 1)
+      if (prev !== null && prev.key === row.key && prev.seq === row.seq) {
+        if (prev.out !== null && PRIORITY[row.kind] > PRIORITY[prev.out.kind]) prev.out.kind = row.kind
+        continue
+      }
+      // The copies of the last row wanted are still merged before stopping.
+      if (out.length >= want) break
+      const copy = shown(row.key, row.t) ? { t: row.t, key: row.key, seq: row.seq, at: row.at, kind: row.kind } : null
+      prev = { key: row.key, seq: row.seq, out: copy }
+      if (copy !== null) out.push(copy)
+    }
+    return out
   }
 }
 
@@ -540,6 +660,46 @@ function usable (issuerUsable, issuer) {
   } catch {
     return false
   }
+}
+
+// First index of a page-ordered list strictly after the cursor.
+function upperBound (list, cursor) {
+  let lo = 0
+  let hi = list.length
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1
+    if (compareRows(list[mid], cursor) <= 0) lo = mid + 1
+    else hi = mid
+  }
+  return lo
+}
+
+// The first `want` rows in page order of an unordered input, one pass:
+// `read` turns an input into a row (null skips it, and so does a throw),
+// then `shown` and `later` filter it. Equal rows keep their input order, as
+// a stable sort would.
+function select (input, want, read, shown, later) {
+  const top = []
+  for (const r of input) {
+    let row
+    try {
+      row = read(r)
+    } catch {
+      continue
+    }
+    if (row === null || !shown(row.key, row.t) || !later(row)) continue
+    if (top.length >= want && compareRows(row, top[top.length - 1]) >= 0) continue
+    let lo = 0
+    let hi = top.length
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1
+      if (compareRows(top[mid], row) <= 0) lo = mid + 1
+      else hi = mid
+    }
+    top.splice(lo, 0, row)
+    if (top.length > want) top.pop()
+  }
+  return top
 }
 
 // Never a row for the target itself, nor for a blocked key; a throwing
@@ -560,6 +720,8 @@ module.exports = {
   MAX_POST_NOTICES_PER_AUTHOR,
   POST_NOTICES_MAX_EDGES,
   MAX_UNRESOLVED_TOKENS_PER_AUTHOR,
+  MAX_CUT_PAIRS_PER_AUTHOR,
+  PAGE_CACHE_PAIRS,
   POST_NOTICES_MAX_AUTHORS,
   createPostNoticeIndex
 }
