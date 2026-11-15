@@ -35,7 +35,7 @@ O que conferir:
 
 ## Como atualizar
 
-Edite os arquivos em `apps/site/public` e abra um pull request. A publicação roda sozinha quando o pull request entra em `main`: o fluxo `.github/workflows/site.yml` roda no push para `main` e no disparo manual (os dois restritos a `main`), envia só `apps/site/public` com `actions/upload-pages-artifact` v5.0.0 e publica com `actions/deploy-pages` v5.0.1 (ambos fixados por SHA). Não há arquivo `CNAME`: o domínio próprio fica nas configurações de Pages do repositório.
+Edite os arquivos em `apps/site/public` e abra um pull request. A publicação roda sozinha quando o pull request entra em `main`: o fluxo `.github/workflows/site.yml` roda no push para `main` e no disparo manual (os dois restritos a `main`), envia só `apps/site/public` com `actions/upload-pages-artifact` v5.0.0 e publica com `actions/deploy-pages` v5.0.1 (ambos fixados por SHA). Não há arquivo `CNAME`: o domínio próprio fica nas configurações de Pages do repositório. Se o ambiente `github-pages` pede a aprovação de um revisor, só a execução mais nova espera por ela: o job `supersede` cancela as execuções mais antigas que ainda esperam, e uma execução que já tem outra mais nova termina sem publicar, para uma página antiga nunca substituir uma nova. Uma publicação que já começou nunca é cancelada.
 
 ## Termos e privacidade
 
