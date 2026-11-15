@@ -1465,6 +1465,19 @@ None of these was performed for this change. Use two browsers (or profiles) with
 - [ ] Native app and `varanda-serve`: the tab shows "Só na versão web" and never errors; no `notices.list` call is made.
 - [ ] Caddy logs show no new route and no new error; the seeder log shows one `peer` event per read.
 
+### Index hardening (issue #230)
+
+- Pending fails closed: a diary marked pending (a read stopped short, a failed block, an `append`, a re-serve) has its follows unpublished until the next commit, so an unfollow behind blocks the seeder could not read never stays listed.
+- Quota share: past `NOTICES_LIGHT_TARGETS` 256 targets an author may not take the last quarter of `NOTICES_MAX_EDGES` (`NOTICES_RESERVE_DIVISOR` 4).
+- `incomplete` per target, in the Avisos page and in Seguidores: a diary that has not committed since it was served marks every page; one that committed before marks only the targets of its fold; a follow refused at a cap marks only that target (`MAX_CUT_TARGETS_PER_AUTHOR` 64, past which every page). The same rule for replies, quotes and mentions (`MAX_CUT_PAIRS_PER_AUTHOR` 64).
+- A notices page merges sorted per-pair lists from the cursor (`PAGE_CACHE_PAIRS` 128) instead of sorting every candidate; likes and reposts scan at most `NOTICE_SCAN_MAX` 16384 edges per request (far-future edges and one engager's edges past its newest 64 take no scan slot; a hidden engager's do) and say `incomplete` when the cap cut rows.
+- Page cache worst case: the `PAGE_CACHE_PAIRS` lists hold a subset of the stored rows, so at most `POST_NOTICES_MAX_EDGES` (about 262k row objects, roughly 30 MB by estimate, not measured), plus `cutOf` bounded by 64 x 4096 pairs.
+- Accepted rule, arrives late: "Alguns avisos ainda podem chegar." covers a diary not read since it was served, a pending diary whose fold or rows touch this member, the member's own diary pending (replies, quotes and mentions; a follows page does not count it), and rows lost at a cap; it does not cover a follow, reply, quote or mention in blocks of an already read diary that the seeder has not reached yet and that touched this member nowhere before: that row arrives at the next read, never as a false notice.
+- Automated: `node packages/core/test/notices.test.js`, `post-notices.test.js`, `engagement.test.js`, `node apps/cli/test/seeder-notices.test.js`, `node apps/cli/test/seeder-post-notices.test.js`.
+- [ ] Not performed. With A following B and C on one seeder: stop A's diary mid-download after its first full read (the seeder log shows the scan short): B's Avisos and B's Seguidores keep A's row out, and only the targets A's fold names say so (Avisos: "Alguns avisos ainda podem chegar."; Seguidores: "A lista pode estar incompleta."); C, whom A does not follow, sees a complete page.
+- Avisos reads once per follow back: with the tab shown the follows event no longer starts its own read (App's `refresh` bump reads or defers behind one in flight); hidden, it still reads in the background and the later show does not read again for that change (a `refresh` bump within `FOLLOWS_COVER_MS` 2 s of that read; a later bump, such as a block, still reads at show). A press that changed nothing (`changed: false`) asks for no reload; `follow.add` is still sent once per press. Accepted: shown, a follow made on another device no longer reads the list at once. The Seguir de volta pills update at once (the follow set is read again on every follows change); the only row that depends on the member's own follows, the follow row of someone now followed back, stays without its pill until the next full read (pull or show).
+- [ ] Not performed. Tap Seguir de volta on one notice with the Avisos tab shown and count `notices.list` reads (seeder log, `peer` events): one, and the list ends with the row gone from the pill.
+
 ## 21. Seeder capacity for the hosted web (PR feat/seeder-web-capacity, 2026-10-27)
 
 ### Summary
@@ -5847,7 +5860,7 @@ Pontos conhecidos, deixados como estão (P3):
 
 - Cabeçalho de publicação e de citação com texto de acessibilidade extra-grande, tela de 320 pt e data de ano anterior: o nome fica com cerca de 80 pt na publicação e 40 pt no cartão de citação; não chega a zero, mas rever se um aparelho mostrar o contrário.
 - Visualizador de foto da conversa: ícones da barra de status escuros sobre o fundo preto no Android (já era assim; a correção pede definir a barra antes de abrir o Modal ou trocar o Modal por uma sobreposição).
-- Texto: "Fechar" e "Cancelar" ainda variam entre telas; "serviço indisponível" e "foto indisponível" em minúscula; marcador monoespaçado do convite; Perfil como folha no Diário e como página nos Ajustes; iniciais do cabeçalho de pedido contra o ícone da lista; o rótulo Denunciar na publicação e no perfil tem tintas diferentes (fixado pelos testes de `postActions`).
+- Texto: "Fechar" e "Cancelar" ainda variam entre telas; "serviço indisponível" e "foto indisponível" em minúscula; Perfil como folha no Diário e como página nos Ajustes; iniciais do cabeçalho de pedido contra o ícone da lista; o rótulo Denunciar na publicação e no perfil tem tintas diferentes (fixado pelos testes de `postActions`).
 - Web: anel de foco do Fechar sem folga; seta de voltar de 40 x 40; foco depois de Escape volta ao topo em vez de à lista; campo da Busca 4 pt abaixo do de Conversas; abas da Busca sem `aria-selected`; foco depois de fechar a Publicar com Escape; o rascunho do Perfil zera ao voltar para a lista de Ajustes (igual com a seta; já era assim).
 - Compartilhar sem origem da instalação mostra "Não foi possível copiar o link." (`communityShare.js`, fora desta PR).
 
@@ -11134,7 +11147,44 @@ node apps/cli/test/post-page.test.js
 - [ ] Link aberto de dentro do WhatsApp e do Instagram (navegador embutido): pendente.
 - [ ] Fonte maior no sistema ou no navegador (ajuste de tamanho do texto, não zoom da página), no Android e no iOS: pendente. A página usa tamanhos em px, como o app.
 
-## 245. Sobras da exclusão de publicações (PR fix/sobras-exclusao-conversa)
+## 245. Players carregam no Android sem tela de permissão (PR fix/android-player-never-loads)
+
+Esta seção confere que os players de YouTube e Spotify carregam no app Android sem a tela de permissão do sistema. O player do Spotify pede acesso a mídia protegida (`requestMediaKeySystemAccess`, Widevine e outros) ao carregar. Com `allowsProtectedMedia` desligado, o react-native-webview transforma esse pedido num pedido de permissão do Android: a tela de permissão abre por cima, o app vai para segundo plano, todos os players fecham, carregam de novo e o pedido volta. Agora o documento do player no app nativo não inclui `encrypted-media` na permissão do quadro, então a Permissions Policy recusa o pedido dentro do quadro, sem chegar ao WebView. O Android já recusava o pedido no fim da tela, então o que toca não muda. Não liga `allowsProtectedMedia`, que daria ao provedor um identificador de DRM do aparelho. A web não muda: o navegador trata o pedido sozinho. Sem mudança de protocolo, RPC, Termos nem dependência.
+
+Ordem: Android (build de debug, emulador), depois iOS e web, com os dados da Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) e quatro publicações de YouTube e quatro de Spotify.
+
+- [x] Android, emulador API 36, build de debug, A Rua com um cartão do Spotify à vista, sem a correção: 7 telas de permissão (`REQUEST_PERMISSIONS` do app) e 7 pausas da `MainActivity` em cerca de 80 s; o primeiro YouTube ficou na capa por cerca de 150 s. Conferido em 2026-11-15.
+- [x] O mesmo, com a correção, por 6 minutos: nenhuma tela de permissão e nenhuma pausa; os dois players trocaram a capa pelo player em cerca de 73 s, numa máquina muito carregada. Os 14 pedidos de mídia protegida de um quadro do Spotify foram recusados pela Permissions Policy. Conferido em 2026-11-15.
+- [x] Com a correção, tocar no Spotify toca a prévia de 30 s, como antes, e tocar no YouTube toca o vídeo. Conferido em 2026-11-15.
+- [ ] No Android do relato (instalação da loja ou APK), A Rua com Spotify e YouTube: os players carregam e nenhuma tela de permissão pisca. Pendente.
+- [ ] iOS, simulador: os players carregam e tocam como antes. Pendente.
+- [ ] Web e PWA: nada muda (o quadro da web mantém `encrypted-media`). Pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A asserção nova (sem `encrypted-media` no documento nativo) falha sem a correção.
+
+```sh
+node apps/app/test/musicEmbed.test.js
+node apps/app/test/embedFrame.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 247. Polimento da Busca, da ajuda e do campo mono (PR fix/polimento-navegacao-sobras)
+
+Fecha três itens da #448, só no app:
+
+- Em "Convidar por @nome" (e em todo campo `mono`), a fonte monoespaçada vale só para o valor digitado: o marcador do campo vazio fica na fonte normal (`Field` em `apps/app/src/ui/index.js`). O tamanho (14) vale para o campo todo, vazio ou não, então a primeira tecla não muda a altura do campo.
+- A ajuda da Busca (`SEARCH_MEMORY` em `apps/app/src/topics.js`) deixou de falar em "memória do navegador enquanto a aba está aberta" e diz "memória, enquanto o app ou a aba está aberto".
+- Na Busca, abrir um perfil, uma publicação ou uma @menção fecha o teclado (`openMember`, `openThread` e `openMention` em `apps/app/src/screens/BuscaGlobal.js`), para ele não ficar por cima da tela que abre.
+
+1. [ ] Android e iOS: em Busca, Contas, digitar um nome e tocar numa pessoa: o perfil abre sem teclado (não realizada ainda).
+2. [ ] Android e iOS: em Busca, Publicações, tocar num autor, numa publicação e numa @menção: sem teclado na tela nova (não realizada ainda).
+3. [ ] Convidar por @nome: o marcador "nome, @nome ou código" aparece na fonte normal e o que se digita, em monoespaçado, sem mudar o tamanho nem a altura do campo na primeira tecla (não realizada ainda).
+4. [ ] Ajuda da Busca no app instalado: o texto não cita o navegador (não realizada ainda).
+
+Testes: `apps/app/test/buscaGlobal.test.js`, `apps/app/test/uiKit.test.js` e `apps/app/test/help.test.js`. Os testes de `Field` e de `BuscaGlobal` conferem o código, não montam a tela.
+
+## 258. Sobras da exclusão de publicações (PR fix/sobras-exclusao-conversa)
 
 Fecha a #228. O que mudou:
 
