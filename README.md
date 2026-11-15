@@ -720,8 +720,8 @@ Diagnóstico: quando o app mostra "A verificação de idade está fora do ar ago
 | `didit-sessao-http-400` ou `-404` com `didit-sessao-campo-workflow_id` | O `VARANDA_DIDIT_WORKFLOW_ID` não existe para essa chave. |
 | `didit-sessao-tempo` ou `didit-sessao-rede` | O servidor não alcançou `verification.didit.me` (rede, DNS, firewall de saída). |
 | `didit-sessao-formato` | O Didit respondeu num formato inesperado: rode o teste de fumaça acima e compare. |
-| `armazenamento-indisponivel` | O `age.json` não pôde ser lido ou gravado no volume `account-data`. |
-| `estado-indisponivel` | O `age-check.json` (quando a verificação foi ligada pela última vez) não pôde ser lido ou gravado no volume `account-data`, ou o diretório e as faixas não puderam ser lidos ao subir; `GET /account/age/since` responde 503 até o arquivo voltar a valer e o serviço reiniciar. |
+| `armazenamento-indisponivel` | O `age.json` não pôde ser lido ou gravado no volume `account-data`. Uma linha por interrupção, não por pedido: de novo só depois que o armazenamento voltar a responder. |
+| `estado-indisponivel` | O `age-check.json` (quando a verificação foi ligada pela última vez) não pôde ser lido ou gravado no volume `account-data`, ou o diretório e as faixas não puderam ser lidos ao subir; `GET /account/age/since` responde 503 até o arquivo voltar a valer. O arquivo é lido de novo, no máximo a cada 30 s, quando alguém pede essa rota, então um arquivo consertado vale sem reiniciar; o diretório e as faixas só são lidos ao subir, e esse caso pede reinício. |
 | `teto-diario` | O teto `VARANDA_DIDIT_DAILY_LIMIT` encheu; volta no dia seguinte. |
 
 Os mesmos motivos, com `didit-decisao-` no lugar de `didit-sessao-`, valem para a leitura do resultado.

@@ -11133,3 +11133,22 @@ node apps/cli/test/post-page.test.js
 - [ ] iOS Safari no aparelho, em claro e em escuro: pendente.
 - [ ] Link aberto de dentro do WhatsApp e do Instagram (navegador embutido): pendente.
 - [ ] Fonte maior no sistema ou no navegador (ajuste de tamanho do texto, não zoom da página), no Android e no iOS: pendente. A página usa tamanhos em px, como o app.
+
+## 248. Sobras da idade lembrada (PR fix/sobras-idade-lotacao)
+
+Parte da #354. O que mudou:
+
+- `age-check.json` que não se lê na partida (#324): `GET /account/age/since` seguia em 503 até reiniciar, mesmo depois de o arquivo voltar a valer. Agora o serviço lê o arquivo de novo (`settleAgeCheck`, com o mesmo guarda do lock), no máximo a cada 30 s e só enquanto o estado estiver indisponível. Uma resposta malformada ou uma exceção mantém o 503. O piso do diretório não é lido de novo: uma faixa registrada depois da partida o baixaria, e os certificados que ele protege foram emitidos sem faixa.
+- Log do armazenamento de idade em falha (#324): `armazenamento-indisponivel` saía uma linha por pedido, que alguém de fora multiplica. Sai uma por interrupção, e de novo só depois que o armazenamento responder uma vez.
+- Teste do `serve` (#324): `account-age.test.js` sobe o comando `account` de verdade, com Didit e `VARANDA_AGE_SINCE`, e confere que o `age-check.json` e o piso do diretório chegam à rota, e que um arquivo ilegível dá 503 sem ser reescrito.
+
+Descartado, com o motivo:
+
+- Janelas dos atestados confiam no relógio do serviço de conta (#324): o emissor assina toda data e o nó confia no emissor; não há fonte independente de tempo no serviço para conferi-lo. O relógio do servidor é premissa de operação (NTP), como para os demais certificados.
+- Política de Privacidade sem a prova de idade que o nó guarda (#324): o texto muda com revisão jurídica e nova versão dos Termos (#44). Fica fora deste PR.
+- Recusa por lotação depois da verificação de idade (#346): apagar ou guardar o registro `{ band, method, checkedAt }` é decisão sobre dados pessoais, e a resposta vai para a seção LGPD de `docs/design.md`. Perguntado no PR; por ora o comportamento não muda.
+
+Passos:
+
+- [ ] `node apps/cli/test/account-age.test.js` passa (os testes novos falham sem a correção).
+- [ ] Com `age-check.json` corrompido e o serviço no ar, `GET /account/age/since` dá 503; depois de restaurar o arquivo, em até 30 s o mesmo pedido dá 200 sem reiniciar. Pendente de conferência num serviço real.

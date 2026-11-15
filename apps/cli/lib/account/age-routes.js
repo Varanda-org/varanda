@@ -87,6 +87,8 @@ const SESSION_TTL_MS = 24 * 3600 * 1000
 const MAX_SESSIONS = 10000
 const DAY_MS = 24 * 3600 * 1000
 const SINCE_RESIGN_MS = 60 * 1000
+// How often a failed age-check.json is read again while the since route is asked.
+const CHECK_RETRY_MS = 30 * 1000
 const FEIRA_AGE_DAILY = 50
 // The paid session for a Feira code, under the /account/feira/* edge handle.
 const FEIRA_AGE_PATH = '/account/feira/idade'
@@ -148,6 +150,7 @@ function createAgeRoutes ({
   since = null,
   issuer = null,
   ageCheck = null,
+  ageCheckRetry = null,
   directoryFloor = null,
   cleanupDelays = CLEANUP_DELAYS_MS
 }) {
@@ -161,6 +164,7 @@ function createAgeRoutes ({
   if (ageCheck !== null && (typeof ageCheck !== 'object' || (ageCheck.ok === true && ageCheck.enabledAt !== null && !isCanonicalIso(ageCheck.enabledAt)))) {
     throw new TypeError('ageCheck must be a settleAgeCheck result or null')
   }
+  if (ageCheckRetry !== null && typeof ageCheckRetry !== 'function') throw new TypeError('ageCheckRetry must be a function or null')
   if (directoryFloor !== null && (typeof directoryFloor !== 'object' || (directoryFloor.ok === true && directoryFloor.floor !== null && !isCanonicalIso(directoryFloor.floor)))) {
     throw new TypeError('directoryFloor must be a directoryFloor result or null')
   }
@@ -222,9 +226,19 @@ function createAgeRoutes ({
     let ok = false
     try { ok = ages.available() === true } catch {}
     if (!ok) {
-      log({ event: 'idade', reason: 'armazenamento-indisponivel' })
+      logStoreDown()
       throw refuse('indisponivel')
     }
+    storeLogged = false
+  }
+
+  // A store that stays down would write one line per request, which an
+  // anonymous caller can multiply: one line per outage, again after it
+  // answers once.
+  let storeLogged = false
+  function logStoreDown () {
+    if (!storeLogged) log({ event: 'idade', reason: 'armazenamento-indisponivel' })
+    storeLogged = true
   }
 
   // Every 503 says why in the log, so the operator can tell a refused key or
@@ -359,8 +373,26 @@ function createAgeRoutes ({
   // store, age-check.json or directory floor refuses instead: null would
   // tell the node to drop the since it already holds.
   let checkLogged = false
+  let checkRetryAt = 0
+  // age-check.json is read again (at most every CHECK_RETRY_MS) while it
+  // cannot answer, so a file the operator repaired serves without a restart.
+  // The directory floor is not: a band recorded since the start would lower
+  // it, and the certificates it guards were issued without one.
+  function retryAgeCheck () {
+    if (ageCheck === null || ageCheck.ok === true || ageCheckRetry === null) return
+    const t = now()
+    if (t - checkRetryAt < CHECK_RETRY_MS && t >= checkRetryAt) return
+    checkRetryAt = t
+    let next
+    try { next = ageCheckRetry() } catch { return }
+    if (next && next.ok === true && typeof next.on === 'boolean' && (next.enabledAt === null || isCanonicalIso(next.enabledAt))) {
+      ageCheck = next
+      checkLogged = false
+    }
+  }
   function effectiveSince () {
     if (!on || since === null || issuer === null) return null
+    retryAgeCheck()
     if ((ageCheck !== null && ageCheck.ok !== true) || (directoryFloor !== null && directoryFloor.ok !== true)) {
       if (!checkLogged) log({ event: 'idade', reason: 'estado-indisponivel' })
       checkLogged = true
@@ -370,9 +402,10 @@ function createAgeRoutes ({
     try {
       first = ages.earliest()
     } catch {
-      log({ event: 'idade', reason: 'armazenamento-indisponivel' })
+      logStoreDown()
       throw refuse('indisponivel')
     }
+    storeLogged = false
     if (first === null) return null
     let effective = since
     const floors = [nextUtcDay(first), ageCheck === null ? null : ageCheck.enabledAt, directoryFloor === null ? null : directoryFloor.floor]

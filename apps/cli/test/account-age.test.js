@@ -9,11 +9,12 @@
 
 const test = require('brittle')
 const http = require('node:http')
+const { spawn } = require('node:child_process')
 const fs = require('node:fs')
 const path = require('node:path')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
-const { createIssuerCert } = require('@varanda/core/lib/cert')
+const { createIssuerCert, saveKeyPairFile } = require('@varanda/core/lib/cert')
 const { signAccountLink } = require('@varanda/core/lib/account-link')
 const { signAge } = require('@varanda/core/lib/age')
 const { signPhone } = require('@varanda/core/lib/phone')
@@ -26,10 +27,10 @@ const { openInvitesStore, inviteId } = require('../lib/account/invites-store')
 const { pairInvites } = require('../lib/account/invites-pair')
 const { FEIRA_AGE_DAILY, FEIRA_AGE_PATH } = require('../lib/account/age-routes')
 const { createDidit } = require('../lib/account/didit')
-const { createAccountServer, COOKIE } = require('../lib/account/server')
+const { createAccountServer, COOKIE, KEY_FILE, CERT_FILE } = require('../lib/account/server')
 const { createAgeRoutes } = require('../lib/account/age-routes')
 const { settleAgeCheck, readAgeCheck, startAgeCheck, directoryFloor } = require('../lib/account/age-check-state')
-const { readEnv } = require('../lib/commands/account')
+const { readEnv, ensureConfig } = require('../lib/commands/account')
 const { UsageError } = require('../lib/cli')
 const { startFakeDidit, loopbackFetch, SESSION_TOKEN } = require('./helpers/fake-didit')
 const { tmpDir } = require('./helpers/net')
@@ -95,7 +96,7 @@ async function waitFor (fn, ms = 3000) {
 // `feira: { perWeek, named = true }` pairs a Feira store (feira-invites.json)
 // with the member invites; the store names the owner through inviterOf
 // (`named: false` removes it).
-async function setup (t, { age = true, phone = false, inviting = false, maxMembers = null, dailyLimit, diditTimeoutMs, burst, since, withIssuer = true, ageCheck, floor, feira = null } = {}) {
+async function setup (t, { age = true, phone = false, inviting = false, maxMembers = null, dailyLimit, diditTimeoutMs, burst, since, withIssuer = true, ageCheck, ageCheckRetry, floor, feira = null } = {}) {
   const dir = path.join(tmpDir(t), 'account')
   const c = { offset: 0, guardOk: true }
   c.now = () => Date.now() + c.offset
@@ -161,6 +162,7 @@ async function setup (t, { age = true, phone = false, inviting = false, maxMembe
   if (dailyLimit !== undefined) opts.ageDailyLimit = dailyLimit
   if (since !== undefined) opts.ageSince = since
   if (ageCheck !== undefined) opts.ageCheck = ageCheck
+  if (ageCheckRetry !== undefined) opts.ageCheckRetry = ageCheckRetry
   // `floor(store, ages, linked)`: the directory floor as a start computes it.
   if (floor !== undefined) opts.ageDirectoryFloor = await floor(store, ages, linked)
   if (burst !== undefined) {
@@ -408,6 +410,56 @@ test('age since route: an unavailable age store is a failure, never null', async
   t.is(r.status, 503)
   t.alike(r.body, { error: 'indisponivel' })
   t.ok(s.logs.includes(JSON.stringify({ event: 'idade', reason: 'armazenamento-indisponivel' })))
+})
+
+test('age since route: a store that stays down logs once per outage, not once per request', async (t) => {
+  const s = await setup(t, { since: SINCE })
+  await s.ages.record({ member: member().hex, band: '18+', method: 'didit', checkedAt: AFTER })
+  const line = JSON.stringify({ event: 'idade', reason: 'armazenamento-indisponivel' })
+  s.ages.fail()
+  for (let i = 0; i < 3; i++) t.is((await s.api('GET', '/account/age/since')).status, 503)
+  t.is(s.logs.filter((l) => l === line).length, 1, 'three failing requests, one line')
+  s.ages.available = () => false
+  t.is((await s.step(member(), 'session')).status, 503)
+  t.is(s.logs.filter((l) => l === line).length, 1, 'the session route shares the same outage')
+})
+
+test('age since route: age-check.json that cannot be read is read again, and a repaired file serves without a restart', async (t) => {
+  const reads = []
+  let result = { ok: false }
+  const s = await setup(t, { since: SINCE, ageCheck: { ok: false }, ageCheckRetry: () => { reads.push(1); return result } })
+  await s.ages.record({ member: member().hex, band: '18+', method: 'didit', checkedAt: BEFORE })
+  t.is((await s.api('GET', '/account/age/since')).status, 503)
+  t.is((await s.api('GET', '/account/age/since')).status, 503, 'within 30 s: not read again')
+  t.is(reads.length, 1)
+  s.c.offset += 31 * 1000
+  t.is((await s.api('GET', '/account/age/since')).status, 503, 'read again, still unusable')
+  t.is(reads.length, 2)
+  t.is(s.logs.filter((l) => l === JSON.stringify({ event: 'idade', reason: 'estado-indisponivel' })).length, 1, 'logged once')
+  s.c.offset += 31 * 1000
+  const later = '2026-11-05T00:00:00.000Z'
+  result = { ok: true, on: true, enabledAt: later }
+  const r = await s.api('GET', '/account/age/since')
+  t.is(r.status, 200)
+  t.is(r.body.since.since, later, 'the repaired file is the floor again')
+  t.is((await s.api('GET', '/account/age/since')).status, 200)
+  t.is(reads.length, 3, 'a usable file is not read again')
+  result = { ok: false }
+  s.c.offset += 120 * 1000
+  t.is((await s.api('GET', '/account/age/since')).status, 200, 'a later failure does not lower what the run already holds')
+  t.is(reads.length, 3)
+})
+
+test('age since route: a retry that answers something malformed or throws keeps the 503', async (t) => {
+  const answers = [() => { throw new Error('boom') }, () => ({ ok: true, on: true, enabledAt: 'ontem' }), () => ({ ok: true })]
+  let i = 0
+  const s = await setup(t, { since: SINCE, ageCheck: { ok: false }, ageCheckRetry: () => answers[i++]() })
+  await s.ages.record({ member: member().hex, band: '18+', method: 'didit', checkedAt: BEFORE })
+  for (let n = 0; n < answers.length; n++) {
+    t.is((await s.api('GET', '/account/age/since')).status, 503)
+    s.c.offset += 31 * 1000
+  }
+  t.is(i, answers.length)
 })
 
 test('age since route: the floor is the next UTC day after the earliest band, even at midnight', async (t) => {
@@ -1434,4 +1486,77 @@ test('Excluir conta: a deleted key opens no Didit session, and an open one is cl
   t.is(again.status, 409)
   t.alike(again.body, { error: 'conta-excluida' })
   t.is(s.creates().length, createsBefore, 'no new paid session')
+})
+
+const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
+const cleanEnv = {}
+for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('VARANDA_')) cleanEnv[k] = v
+
+// Spawns the real `account` command on a free port until it listens.
+async function serveAccount (t, dir, env) {
+  const child = spawn(process.execPath, [BIN, 'account', '--json', '--account-port', '0', '--data', dir], { env: { ...cleanEnv, ...env } })
+  let stdout = ''
+  let stderr = ''
+  child.stdout.on('data', (d) => { stdout += d })
+  child.stderr.on('data', (d) => { stderr += d })
+  const exited = new Promise((resolve) => child.on('close', resolve))
+  t.teardown(() => { child.kill('SIGKILL') }, { force: true })
+  const events = () => stdout.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l) } catch { return null } }).filter(Boolean)
+  const end = Date.now() + 30000
+  while (Date.now() < end && !events().some((e) => e.event === 'ready')) await new Promise((resolve) => setTimeout(resolve, 20))
+  t.ok(events().some((e) => e.event === 'ready'), 'ready: ' + stderr)
+  const port = events().find((e) => e.event === 'listening').port
+  return {
+    since: async () => {
+      const res = await fetch('http://127.0.0.1:' + port + '/account/age/since')
+      return { status: res.status, body: await res.json() }
+    },
+    stop: async () => {
+      child.kill('SIGTERM')
+      await exited
+    }
+  }
+}
+
+test('serve: with the age check and VARANDA_AGE_SINCE on, the age-check file and the directory floor both reach the route', async (t) => {
+  t.timeout(90000)
+  const iss = issuer()
+  const dir = path.join(tmpDir(t), 'account')
+  ensureConfig(dir, iss.association)
+  saveKeyPairFile(path.join(dir, KEY_FILE), iss.keyPair)
+  fs.writeFileSync(path.join(dir, CERT_FILE), JSON.stringify(iss.cert), { mode: 0o600 })
+  const store = openAccountStore(dir)
+  const linked = member()
+  await linkDirect(store, iss, linked, 'ana', SUB)
+  const linkedAt = store.exportLinks().find((l) => l.member === linked.hex).linkedAt
+  await openAgeStore(dir).record({ member: member().hex, band: '18+', method: 'didit', checkedAt: BEFORE })
+  const env = {
+    VARANDA_PUBLIC_ORIGIN: ORIGIN,
+    VARANDA_GOOGLE_CLIENT_ID: 'client-123.apps.googleusercontent.com',
+    VARANDA_GOOGLE_CLIENT_SECRET: 'segredo-de-teste',
+    VARANDA_DIDIT_API_KEY: API_KEY,
+    VARANDA_DIDIT_WORKFLOW_ID: WORKFLOW,
+    VARANDA_AGE_SINCE: SINCE
+  }
+
+  const first = await serveAccount(t, dir, env)
+  const a = await first.since()
+  t.is(a.status, 200)
+  t.is(a.body.since.since, new Date(Date.parse(linkedAt) + 1).toISOString(), 'the unbanded link raises it past the configured since')
+  t.alike(verifyAgeSince(a.body.since, iss.association), { ok: true })
+  t.alike(readAgeCheck(dir).state, { v: 1, on: true, enabledAt: SINCE }, 'the first start records the configured since')
+  await first.stop()
+
+  const later = new Date(Date.parse(linkedAt) + 3600 * 1000).toISOString()
+  fs.writeFileSync(path.join(dir, 'age-check.json'), JSON.stringify({ v: 1, on: true, enabledAt: later }))
+  const second = await serveAccount(t, dir, env)
+  const b = await second.since()
+  t.is(b.status, 200)
+  t.is(b.body.since.since, later, 'the age-check file is the higher floor')
+  await second.stop()
+
+  fs.writeFileSync(path.join(dir, 'age-check.json'), 'not json')
+  const third = await serveAccount(t, dir, env)
+  t.is((await third.since()).status, 503, 'an unreadable file is never a lower since')
+  t.is(fs.readFileSync(path.join(dir, 'age-check.json'), 'utf8'), 'not json', 'left alone')
 })

@@ -668,7 +668,9 @@ function checkRawPost (req, origin) {
 // /account/age/since route serves it while the check is on. `ageCheck` (the
 // settleAgeCheck result of ./age-check-state.js, or null for no floor)
 // keeps that route from serving a since earlier than the last time the check
-// was turned on, and makes it answer 503 when age-check.json is unusable.
+// was turned on, and makes it answer 503 when age-check.json is unusable;
+// `ageCheckRetry` (a function returning a settleAgeCheck result, or null)
+// reads it again while that is so, so a repaired file serves at once.
 // `ageDirectoryFloor` (the directoryFloor result of ./age-check-state.js, or
 // null for none) does the same with the latest certificate of an unbanded
 // link.
@@ -739,6 +741,7 @@ function createAccountServer ({
   ageDailyLimit = 200,
   ageSince = null,
   ageCheck = null,
+  ageCheckRetry = null,
   ageDirectoryFloor = null,
   phoneClient = null,
   phones = null,
@@ -846,6 +849,7 @@ function createAccountServer ({
     dailyLimit: ageDailyLimit,
     since: ageSince,
     ageCheck,
+    ageCheckRetry,
     directoryFloor: ageDirectoryFloor,
     issuer,
     http: { send, sendError, redirect, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
