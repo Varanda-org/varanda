@@ -14,9 +14,8 @@
 // - expanded: shows the full caption without a clamp control (default false).
 // - preview: null | a stored link card (the post's `preview`), drawn by
 //   ./LinkCard from that data only, its thumbnail read like a post photo. A
-//   card whose URL carries an Audius music ref uses ./PostMusic (a sticker
-//   that plays a track or snippet by itself while seen, or ./MusicPlayerCard
-//   for a playlist or with the Ajustes switch off); other allowlisted music
+//   card whose URL carries an Audius music ref uses ./MusicPlayerCard, which
+//   asks nothing until a tap and never plays by itself; other allowlisted music
 //   links (embedOf) use ./MusicEmbedCard. A link only in the text never gets
 //   a player.
 // - replyPreviews: optional [{ key, name, text }], not the link card above.
@@ -60,7 +59,7 @@
 //   browser or the profile, never the conversation. A quote is lifted out only
 //   for a handled mention; its web links stay plain (./QuoteCard).
 
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { AccessibilityInfo, Animated, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { doubleTapPlan, pendingOpen, tapKind } from '../doubleTap'
@@ -82,11 +81,13 @@ import { ClampControl, useClamp } from './ClampText'
 import { Icon } from './Icon'
 import { LinkCard } from './LinkCard'
 import { MusicEmbedCard } from './MusicEmbedCard'
-import PostMusic from './PostMusic'
+import { MusicPlayerCard } from './MusicPlayerCard'
 import { MediaGrid } from './MediaGrid'
 import { tap } from './haptics'
 import { hasMention, MentionText } from './MentionText'
 import { useHosted } from '../node'
+import { closeRow, countRowRender, openRow, perfOn } from '../perfMarks'
+import { PerfListId } from './screenVisible'
 import { QuoteCard, quotePlayerOf } from './QuoteCard'
 import { screenReaderOn } from './screenReader'
 import { LARGE_TEXT, layout, radius, space, type } from './theme'
@@ -193,6 +194,15 @@ function Action ({ label, onPress, disabled, on, count, split, children }) {
   )
 }
 
+// Dev perf only: counts this row's renders per mount (src/perfMarks.js).
+function usePerfRow (key) {
+  const listId = useContext(PerfListId)
+  const token = useRef(null)
+  if (token.current === null) token.current = openRow(key, listId)
+  countRowRender(token.current)
+  useEffect(() => () => closeRow(token.current), [])
+}
+
 function PostRowView ({
   author, name, username, avatar, at, text, replyToName, replyPreviews, media, preview, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending, expanded = false,
@@ -200,6 +210,8 @@ function PostRowView ({
   onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onBlock, onDelete, link, onNotice,
   seq, onMessage, publishable
 }) {
+  // perfOn never changes while the app runs, so this hook call is stable.
+  if (perfOn) usePerfRow((repostedBy ? 'repost:' + String(repostedBy.author) : 'post') + ':' + String(author) + ':' + String(seq))
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const likes = countOf(counts, 'likes')
@@ -459,7 +471,7 @@ function PostRowView ({
   // Outside the row's open area: a tap on the card opens the link, never the conversation.
   const previewNode = !hasMedia && preview && typeof preview === 'object'
     ? music !== null
-      ? <PostMusic card={preview} music={music} />
+      ? <MusicPlayerCard card={preview} music={music} />
       : embed !== null
         ? <MusicEmbedCard embed={embed} card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />
         : <LinkCard card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />

@@ -20,6 +20,7 @@ const cosignRef = read('deploy/seeder/cosign.ref').trim()
 const EM_DASH = String.fromCharCode(0x2014)
 const HEADING = '### Atualização por imagem (pull)'
 const COSIGN_PREFIX = 'ghcr.io/sigstore/cosign/cosign:'
+const VERIFICATION = 'docs/verification/feat-seeder-pull-updater.md'
 
 // The text from the heading up to the next "### " heading, or null.
 function readmeSection (text) {
@@ -154,26 +155,21 @@ test('the section names the files and the marker that update.sh uses', (t) => {
   t.ok(section.includes(marker), 'modo-pull marker')
 })
 
-test('no em dash in the README section, the CHANGELOG entry or verification section 252', (t) => {
+test('no em dash in the README section, the changelog entry or the verification file', (t) => {
   t.is(section.includes(EM_DASH), false, 'README section')
-  const changelog = read('CHANGELOG.md')
-  const top = changelog.indexOf('## [Não lançado]\n\n')
-  t.ok(top > -1, 'CHANGELOG has the Não lançado section')
-  const first = changelog.slice(top + 18, changelog.indexOf('\n- ', top + 18))
-  t.ok(first.includes('feat/seeder-pull-updater'), 'the top entry is the pull-updater entry')
-  t.is(first.includes(EM_DASH), false, 'CHANGELOG entry')
-  const secondFrom = top + 18 + first.length + 1
-  const second = changelog.slice(secondFrom, changelog.indexOf('\n- ', secondFrom + 1))
-  t.ok(second.startsWith('- ') && second.includes('feat/seeder-sealed-secrets'), 'the next entry is the sealed-secrets entry')
-  t.is(second.includes(EM_DASH), false, 'CHANGELOG sealed-secrets entry')
-  const verification = read('docs/verification.md')
-  const at = verification.indexOf('\n## 252. ')
-  t.ok(at > -1, 'verification has section 252')
-  const next = verification.indexOf('\n## ', at + 1)
-  const part = next === -1 ? verification.slice(at) : verification.slice(at, next)
-  t.is(part.includes(EM_DASH), false, 'verification section 252')
-  t.ok(part.startsWith('\n## 252. Versões do semeador por imagem (PRs build/seeder-release-images, feat/seeder-pull-updater, feat/seeder-sealed-secrets)\n'), 'section 252 has its title')
-  t.ok(part.includes('Manage Actions access'), 'section 252 checks the Write access of the packages')
+  const entry = read('docs/changelog/feat-seeder-pull-updater.md')
+  t.ok(entry.startsWith('- Versões por imagem'), 'the changelog entry file holds the pull-updater entry')
+  t.ok(entry.includes('`' + VERIFICATION + '`'), 'the changelog entry cites the verification file')
+  t.is(entry.includes(EM_DASH), false, 'changelog entry')
+  const sealed = read('docs/changelog/feat-seeder-sealed-secrets.md')
+  t.ok(sealed.startsWith('- Credenciais de provedor seladas') && sealed.includes('feat/seeder-sealed-secrets'), 'the sealed-secrets entry file holds its entry')
+  t.ok(sealed.includes('`' + VERIFICATION + '`'), 'the sealed-secrets entry cites the verification file')
+  t.is(sealed.includes(EM_DASH), false, 'sealed-secrets changelog entry')
+  const part = read(VERIFICATION)
+  t.is(part.includes(EM_DASH), false, 'verification file')
+  t.ok(part.startsWith('# Versões do semeador por imagem (PRs build/seeder-release-images, feat/seeder-pull-updater, feat/seeder-sealed-secrets)\n'), 'the verification file has its title')
+  t.ok(part.includes('Manage Actions access'), 'the verification file checks the Write access of the packages')
+  t.ok(section.includes('`' + VERIFICATION + '`'), 'the README maintainer steps cite the verification file')
 })
 
 // The flags of `secrets seal` as the HELP block of cli.js lists them.
@@ -216,18 +212,15 @@ test('the seal command in the section has the flags cli.js lists', (t) => {
   t.ok(command[1].includes('--out deploy/seeder/secrets.sealed.json'), 'and writes the file the bundle carries')
 })
 
-test('section 252 checks the sealed secrets flow', (t) => {
-  const verification = read('docs/verification.md')
-  const at = verification.indexOf('\n## 252. ')
-  const next = verification.indexOf('\n## ', at + 1)
-  const part = next === -1 ? verification.slice(at) : verification.slice(at, next)
+test('the verification file checks the sealed secrets flow', (t) => {
+  const part = read(VERIFICATION)
   for (const needle of ['secrets-key', '/etc/varanda/secrets-key.json', 'efetivo.env', 'não é destinatário', 'docker inspect', 'rollback', 'secrets.test.js']) {
-    t.ok(part.includes(needle), 'section 252 names ' + needle)
+    t.ok(part.includes(needle), 'the verification file names ' + needle)
   }
   t.ok(part.includes('- [ ] 41. ') && part.includes('- [ ] 50. '), 'the sealed checks are numbered 41 to 50')
 })
 
-test('the section and section 252 document the seq of the sealed file as update.sh enforces it', (t) => {
+test('the section and the verification file document the seq of the sealed file as update.sh enforces it', (t) => {
   const floor = shValue('state') + '/segredos/seq'
   t.ok(updateSh.includes('local f="$segredos/seq"'), 'update.sh keeps the floor in segredos/seq')
   t.ok(section.includes(floor), 'the section names the floor file')
@@ -262,11 +255,8 @@ test('the section and section 252 document the seq of the sealed file as update.
   t.ok(section.includes('`erro: assinatura do arquivo selado inválida`'), 'the section shows a known CLI message')
   t.ok(updateSh.includes("'erro: assinatura do arquivo selado inválida'"), 'which update.sh lets into the log')
 
-  const verification = read('docs/verification.md')
-  const at = verification.indexOf('\n## 252. ')
-  const next = verification.indexOf('\n## ', at + 1)
-  const part = next === -1 ? verification.slice(at) : verification.slice(at, next)
-  for (const n of [57, 58, 59, 60, 61]) t.ok(part.includes('- [ ] ' + n + '. '), 'section 252 has item ' + n)
+  const part = read(VERIFICATION)
+  for (const n of [57, 58, 59, 60, 61]) t.ok(part.includes('- [ ] ' + n + '. '), 'the verification file has item ' + n)
   t.ok(part.includes('--seq 1 --out deploy/seeder/secrets.sealed.json'), 'item 43 seals with --seq')
   t.ok(part.includes(refusal.replace('X', '1').replace('Y', '2')), 'item 57 checks the timer refusal')
   t.ok(part.includes('aplicando o arquivo selado com seq 1, menor que o último aplicado 2'), 'item 58 checks the override')
