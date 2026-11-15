@@ -210,6 +210,7 @@ test('push e2e: diary append to one encrypted POST, and every silent path stays 
       pushStore,
       vapid,
       send: (args) => sendPush({ ...args, fetch: push.fetch, now: now() }),
+      delayMs: () => 0,
       relayTokenHash: sha256(relayToken),
       topicKey: TOPIC_KEY
     },

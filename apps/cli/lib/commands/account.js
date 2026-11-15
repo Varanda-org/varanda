@@ -1084,10 +1084,13 @@ async function serve (flags, env) {
   } finally {
     process.off('SIGINT', onSignal)
     process.off('SIGTERM', onSignal)
-    if (listener) await listener.close()
+    // The sweep and the invite loop stop before the listener closes: a tick
+    // in flight may still queue a push, which the close then flushes instead
+    // of leaving a marked slot unsent.
     if (stopDeletionSweep !== null) stopDeletionSweep()
     // A tick in flight writes the drops ledger: it ends before the lock goes.
     if (loop !== null) await loop.stop()
+    if (listener) await listener.close()
     // The page links close before the lock goes: nothing is appended after it.
     await closePageClients(pageClients)
     if (pagesWriter !== null) await pagesWriter.close()
