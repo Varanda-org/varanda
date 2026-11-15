@@ -248,3 +248,10 @@ test('every style Mensagem uses is defined, so the offer sheets keep their margi
   for (const key of used) t.ok(defined.has(key), 'styles.' + key + ' is defined')
   t.ok(/title='Fazer oferta'>\s*<View style=\{styles\.sheet\}>/.test(src), 'the offer sheet body uses styles.sheet')
 })
+
+test('the offer field hints a neutral amount, since the listing price is not known there', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  const field = src.slice(src.indexOf("<Field label='Valor (R$)'"), src.indexOf("<Field label='Valor (R$)'") + 300)
+  t.ok(field.includes("placeholder='0,00'"), 'neutral placeholder')
+  t.absent(field.includes('80,00'), 'no fixed example price')
+})

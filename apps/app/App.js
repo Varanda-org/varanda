@@ -83,7 +83,7 @@ import { pageDmPlan, pageReadKind, pageNoticeSeen } from './src/pageNotice'
 import { pageNoticeStore } from './src/pageNoticeStore'
 import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, passkeyAdd, passkeyStart, seenFinish, seenStart, termsFinish, termsStart } from './src/account'
 import { NOTICES_POLL_MS } from './src/notices'
-import { ackCaughtUp, cleanAvisos, createSeenScheduler, dropSent, rememberSent, reportAvisosSeen, runSeenPass, snapshotBefore } from './src/seenSync'
+import { ackCaughtUp, cleanAvisos, createSeenScheduler, dropSent, rememberSent, reportAvisosSeen, runSeenPass, snapshotOnAnswer } from './src/seenSync'
 import { deletedOf, newReceipt, scheduledOf } from './src/accountDeletion'
 import { enrolWith } from './src/passkeyEnrol'
 import { loadDeletionReceipt, saveDeletionReceipt } from './src/deletionReceiptStore'
@@ -445,6 +445,8 @@ function Member () {
   const [buscaPane, setBuscaPane] = useState(0)
   // reply and quote are mutually exclusive.
   const [composer, setComposer] = useState({ open: false, reply: null, quote: null })
+  // Set by Publicar while it uploads or sends.
+  const composerBusyRef = useRef(false)
   // The screens pushed above the tabs (src/nav.js), oldest first.
   const [stack, setStack] = useState(nav.EMPTY)
   const stackRef = useRef(stack)
@@ -1942,9 +1944,14 @@ function Member () {
           // A sheet is open: Back closes it first and the screen stays. The
           // popstate already stepped the history back, so the entries it
           // dropped are pushed again (history depth stays equal to the stack).
-          setComposer((c) => ({ ...c, open: false }))
-          setReport(null)
-          setAjustes(null)
+          // Not while the composer is sending: its own close is a no-op then
+          // (see Publicar), and closing it here would let the post go out
+          // after the sheet is gone.
+          if (!composerBusyRef.current) {
+            setComposer((c) => ({ ...c, open: false }))
+            setReport(null)
+            setAjustes(null)
+          }
           const h = globalThis.history
           const d = nav.depth(stackRef.current)
           if (h && typeof h.pushState === 'function') {
@@ -2257,11 +2264,11 @@ function Member () {
     if (seenMember === null) return
     const member = seenMember
     const run = async () => {
-      // caughtUp describes the groups as the merge saw them: only the
-      // versions known when the first merge went out are acknowledged, so a
-      // post that arrives after it keeps its dot. Versions restart per node
+      // caughtUp describes the groups as the merge saw them when it
+      // answered: the versions known at that answer are acknowledged, so a
+      // post that lands after it keeps its dot. Versions restart per node
       // epoch, so the epoch is taken with them.
-      const { request, snap } = snapshotBefore(seenRequestRef.current, 'seen.merge', () => ({
+      const { request, snap } = snapshotOnAnswer(seenRequestRef.current, 'seen.merge', () => ({
         versions: groupVersionsRef.current,
         epoch: nodeEpochRef.current
       }))
@@ -2285,7 +2292,7 @@ function Member () {
       if (result.blocksChanged) refreshBlocks().catch(() => {})
       if (result.groupChanged) {
         bumpSeen()
-        const taken = snap.value
+        const taken = { epoch: snap.epoch, versions: snap.versions }
         setGroupSeen((cur) => ackCaughtUp(cur, result.caughtUp, taken))
       }
     }
@@ -3999,6 +4006,7 @@ function Member () {
           onSharedDone={(id) => share.done(id)}
           onSharedTaken={(id) => share.taken(id)}
           me={me}
+          busyRef={composerBusyRef}
           onClose={() => setComposer((c) => ({ ...c, open: false }))}
           onClearReply={() => setComposer((c) => ({ ...c, reply: null }))}
           onClearQuote={() => setComposer((c) => ({ ...c, quote: null }))}

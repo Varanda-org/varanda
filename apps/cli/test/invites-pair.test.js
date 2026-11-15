@@ -298,3 +298,64 @@ test('feiraOwner names the inviter of a valid Feira code, null otherwise, and fa
   t.exception(() => blind.feiraOwner(inviteId(fc)), 'a Feira code with no nameable owner throws')
   t.is(blind.feiraOwner(inviteId(pc)), null)
 })
+
+test('reserve holds a Feira slot per sign-up in flight: concurrent codes never pass the weekly cap', async (t) => {
+  const s = setup(t, { feiraPerWeek: 2 })
+  const { primary, feira, pair } = s.open()
+  const owner = memberKey()
+  const ids = []
+  for (let i = 0; i < 4; i++) ids.push(inviteId((await feira.issue(owner)).code))
+  t.ok(ids.every((id) => pair.check(id) === null), 'all four pass check before any is reserved')
+  const until = s.c.t + 10 * 60 * 1000
+  const won = ids.map((id) => pair.reserve(id, until)).filter(Boolean).length
+  t.is(won, 2, 'only the weekly cap of reservations succeeds')
+  t.is(pair.check(ids[2]), 'convite-invalido', 'the others are refused at once')
+
+  pair.release(ids[0])
+  t.is(pair.reserve(ids[2], until), true, 'a released slot is free again (a failed attempt burns nothing)')
+  t.is(pair.reserve(ids[3], until), false)
+
+  const other = memberKey()
+  const x = inviteId((await feira.issue(other)).code)
+  const y = inviteId((await feira.issue(other)).code)
+  const z = inviteId((await feira.issue(other)).code)
+  t.is(pair.reserve(x, s.c.t + 1000), true)
+  t.is(pair.reserve(y, s.c.t + 1000), true)
+  t.is(pair.reserve(z, s.c.t + 1000), false, 'cap reached')
+  s.c.t += 2000
+  t.is(pair.reserve(z, s.c.t + 1000), true, 'abandoned reservations expire and free the slots')
+  const pc = (await primary.issue(memberKey())).code
+  t.is(pair.reserve(inviteId(pc), s.c.t + HOUR), false, 'a primary code needs no hold')
+})
+
+test('a hold is keyed by its pending row and counts for nothing once that row is gone', async (t) => {
+  const s = setup(t, { feiraPerWeek: 1 })
+  const { feira, pair } = s.open()
+  const owner = memberKey()
+  const a = inviteId((await feira.issue(owner)).code)
+  const b = inviteId((await feira.issue(owner)).code)
+  const rows = new Set(['row-1', 'row-2'])
+  t.is(pair.reserve(a, s.c.t + HOUR, 'row-1', () => rows.has('row-1')), true)
+  t.is(pair.check(b), 'convite-invalido', 'the live row holds the slot')
+  rows.delete('row-1')
+  t.is(pair.check(b), null, 'an evicted, dropped or expired row frees it at once')
+  t.is(pair.reserve(b, s.c.t + HOUR, 'row-2', () => rows.has('row-2')), true)
+  t.is(pair.check(a), 'convite-invalido')
+  pair.release('row-2')
+  t.is(pair.check(a), null, 'release names the row, not the code')
+  t.is(pair.reserve(a, s.c.t + HOUR, 'row-3', () => { throw new Error('x') }), true)
+  t.is(pair.check(b), 'convite-invalido', 'a liveness check that throws keeps the hold')
+  t.exception.all(() => pair.reserve(b, s.c.t + HOUR, 'row-4', 'yes'), /live/, 'live must be a function')
+})
+
+test('consume drops the reservation and the used row keeps counting', async (t) => {
+  const s = setup(t, { feiraPerWeek: 1 })
+  const { feira, pair } = s.open()
+  const owner = memberKey()
+  const a = inviteId((await feira.issue(owner)).code)
+  const b = inviteId((await feira.issue(owner)).code)
+  t.is(pair.reserve(a, s.c.t + HOUR), true)
+  t.is(pair.check(b), 'convite-invalido', 'the slot is held')
+  await pair.consume(a)
+  t.is(pair.check(b), 'convite-invalido', 'now held by the used row')
+})
