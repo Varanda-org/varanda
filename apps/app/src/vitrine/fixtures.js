@@ -269,7 +269,18 @@ const photoPosts = [
   photoPost(members[4], 44, at(5, 12, 40), 'A biblioteca da praça em uma tarde de chuva.', [postPhoto(29, 3)])
 ]
 
-export const feed = [...baseFeed, ...photoPosts]
+// Posts with hashtags for the topic demo, in the feed so a tag can be tapped
+// there. Their text folds to the tokens festajunina, paodequeijo and ceu. The
+// last one has the bare word without the hash, which the Assunto filter drops
+// (a hit must carry the tag) while the Busca still finds it.
+const topicPosts = [
+  photoPost(members[2], 80, at(5, 14, 0), 'Foi uma noite linda de #festajunina na praça! Quadrilha, canjica e muita alegria.', null),
+  photoPost(members[3], 80, at(5, 14, 10), 'Saiu do forno agora: #pãodequeijo quentinho para o café da tarde 🧀', null),
+  photoPost(members[2], 81, at(5, 14, 20), 'Hoje o #Céu estava de um azul que dava vontade de ficar olhando. #festajunina #pãodequeijo', null),
+  photoPost(members[3], 81, at(5, 14, 30), 'Que saudade da festajunina do bairro, com a turma toda reunida.', null)
+]
+
+export const feed = [...baseFeed, ...photoPosts, ...topicPosts]
 
 const ownPost = (n) => feed.filter((post) => post.author === own)[n]
 

@@ -503,3 +503,16 @@ test('live likes and reposts move the counts and the member repost index', async
   t.is(countsOf(request).reposts, base.reposts, 'unrepost returns to the baseline')
   t.alike(memberSeqs(request), before, 'member index returns to the baseline')
 })
+
+test('the topic route answers folded hashtag tokens, including a post with the bare word only', async (t) => {
+  const { fixtures: f, vitrineIndex: respond } = await load()
+  const textOf = (ref) => [...f.feed, ...f.noticePosts].find((p) => refOf(p) === ref).text
+  const festa = respond('/index/topic/festajunina', undefined).items
+  t.ok(festa.length >= 3, 'hashtag posts are found by the folded token')
+  t.ok(festa.some((ref) => textOf(ref).includes('#festajunina')), 'a hit carries the hash')
+  t.ok(festa.some((ref) => !textOf(ref).includes('#')), 'a hit has the bare word only, for the client filter to drop')
+  t.ok(respond('/index/topic/paodequeijo', undefined).items.some((ref) => textOf(ref).includes('#pãodequeijo')), 'accents fold away')
+  t.ok(respond('/index/topic/ceu', undefined).items.some((ref) => textOf(ref).includes('#Céu')), 'case and accents fold away')
+  t.ok(respond('/index/topic/festajunina+paodequeijo', undefined).items.map(textOf).every((x) => /pãodequeijo/.test(x) && /festajunina/.test(x)), 'a phrase needs every token')
+  t.is(respond('/index/topic/naoexiste', undefined).items.length, 0)
+})

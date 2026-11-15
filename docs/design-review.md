@@ -38,6 +38,7 @@ Confira cada tela nas plataformas do ciclo:
 - Membro
 - Diário
 - Posts salvos
+- Assunto (hashtag tocada)
 - Conversas e filtros
 - Mensagem
 - Comunidade
@@ -57,7 +58,7 @@ Cada tela é comparada com estas qualidades de referência:
 - Linhas com avatar à esquerda, como nos apps de mensagem.
 - Balões com cauda, e horários agrupados por remetente e intervalo.
 - Cabeçalhos com ícone, sem texto solto onde um ícone resolve.
-- Alvos de toque de pelo menos 44 pt.
+- Alvos de toque de pelo menos 44 pt. Exceção: um link dentro do texto (um `@nome`, um endereço ou um `#palavra`) segue a linha do texto, e o alvo é o próprio texto.
 - Nenhum texto cortado, sobreposto ou escondido por teclado, entalhe ou barra do sistema.
 
 Para cada tela, escreva uma crítica curta: o que está bom, o que quebra a referência, e qual é a correção proposta.

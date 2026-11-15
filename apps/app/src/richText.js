@@ -42,6 +42,7 @@ function kindOf (c, len) {
   return null
 }
 
+// hashtags.js keeps a copy of this set; keep the two in step.
 export function isSpaceCp (cp) {
   return (cp >= 0x09 && cp <= 0x0d) || cp === 0x20 || cp === 0xa0 || cp === 0x1680 ||
     (cp >= 0x2000 && cp <= 0x200a) || cp === 0x2028 || cp === 0x2029 || cp === 0x202f ||
@@ -49,7 +50,8 @@ export function isSpaceCp (cp) {
 }
 
 // Code-point ranges instead of Unicode property escapes, which Hermes is not
-// known to support (see links.js).
+// known to support (see links.js). hashtags.js keeps a copy of these ranges
+// (plus two letterlike signs); keep the two in step.
 export function isWordCp (cp) {
   if (cp < 0x80) return (cp >= 0x30 && cp <= 0x39) || (cp >= 0x41 && cp <= 0x5a) || (cp >= 0x61 && cp <= 0x7a)
   return (cp >= 0xc0 && cp <= 0x1fff && cp !== 0xd7 && cp !== 0xf7) ||
@@ -59,6 +61,13 @@ export function isWordCp (cp) {
 function classOf (cp) {
   if (isSpaceCp(cp)) return SPACE
   return isWordCp(cp) ? WORD : PUNCT
+}
+
+// A link or mention atom counts as a word against a marker flush before it. A
+// tag starts with '#', which is punctuation in the raw text, so it counts as
+// that: turning tags on must not change how the markers around one pair.
+function atomClass (atom) {
+  return typeof atom.segment.tag === 'string' ? PUNCT : WORD
 }
 
 function classBefore (text, i) {
@@ -96,7 +105,7 @@ function atomsOf (text, segments) {
   for (const segment of segments) {
     const t = segment.text
     if (typeof t !== 'string' || t === '' || !text.startsWith(t, offset)) throw new Error('segments out of step')
-    if (typeof segment.href === 'string' || typeof segment.username === 'string') {
+    if (typeof segment.href === 'string' || typeof segment.username === 'string' || typeof segment.tag === 'string') {
       atoms.push({ start: offset, end: offset + t.length, segment })
     }
     offset += t.length
@@ -252,13 +261,14 @@ function tokenize (text, start, end, atoms, cursor, endClass) {
           break
         }
         if (a.start > p) pieces.push({ type: 'text', text: text.slice(p, a.start) })
-        pieces.push({ type: 'atom', segment: a.segment })
+        // Code is literal, so a '#include' in it is not a tag.
+        pieces.push(typeof a.segment.tag === 'string' ? { type: 'text', text: a.segment.text } : { type: 'atom', segment: a.segment })
         p = a.end
         cursor.at++
       }
       const after = close + 1 === end
         ? tail
-        : cursor.at < atoms.length && atoms[cursor.at].start === close + 1 ? WORD : classOf(text.codePointAt(close + 1))
+        : cursor.at < atoms.length && atoms[cursor.at].start === close + 1 ? atomClass(atoms[cursor.at]) : classOf(text.codePointAt(close + 1))
       if (crossed || after === WORD) {
         cursor.at = saved
         i = j
@@ -278,7 +288,7 @@ function tokenize (text, start, end, atoms, cursor, endClass) {
       continue
     }
     const before = i === start ? SPACE : i === opaqueEnd ? WORD : classBefore(text, i)
-    const after = j === end ? tail : j === nextAtom ? WORD : classOf(text.codePointAt(j))
+    const after = j === end ? tail : j === nextAtom ? atomClass(atom) : classOf(text.codePointAt(j))
     flush(i)
     units.push({
       type: 'delim',
@@ -469,7 +479,7 @@ function plainParagraph (segments, hideFrom) {
   let offset = 0
   for (const s of segments) {
     const end = offset + s.text.length
-    const atom = typeof s.href === 'string' || typeof s.username === 'string'
+    const atom = typeof s.href === 'string' || typeof s.username === 'string' || typeof s.tag === 'string'
     if (atom) {
       spans.push({ ...plainSpan(s.text, s), spoiler: end > hideFrom })
     } else if (offset < hideFrom && hideFrom < end) {
@@ -495,10 +505,10 @@ export function hasRich (text) {
   return typeof text === 'string' && /[*_~|`]/.test(text)
 }
 
-export function parseRich (text) {
+export function parseRich (text, { hashtags = false } = {}) {
   if (typeof text !== 'string' || text === '') return []
   try {
-    const segments = textSegments(text, { mentions: true })
+    const segments = textSegments(text, { mentions: true, hashtags: hashtags === true })
     const atoms = atomsOf(text, segments)
     if (!hasRich(text) || unparsable(text)) return [plainParagraph(segments, barsFrom(text))]
     return parse(text, atoms, SPAN_MAX, false, CODE_MAX)

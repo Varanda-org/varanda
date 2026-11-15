@@ -177,6 +177,9 @@ import { showExplainer } from './src/phoneExplainer'
 import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, parseAppLink, parseAppReturn, waitsForInstallation } from './src/linkReturn'
 import Membro, { canConverseWithPage } from './src/screens/Membro'
 import Depoimentos from './src/screens/Depoimentos'
+import { tagTarget } from './src/hashtagNav'
+import { HashtagContext } from './src/ui/MentionText'
+import Assunto from './src/screens/Assunto'
 import Salvos from './src/screens/Salvos'
 import Momentos from './src/screens/Momentos'
 import Feira from './src/screens/Feira'
@@ -1963,6 +1966,11 @@ function Member () {
     pushScreen({ screen: 'curtidas', key: ref, params: { kind: kind === 'reposts' ? 'reposts' : 'likes' } })
   }, [pushScreen])
   const openSalvos = useCallback(() => pushScreen({ screen: 'salvos' }), [pushScreen])
+  // A tapped #tag. A tag on an Assunto page pushes another entry (its key differs).
+  const openTag = useCallback((tag) => {
+    const target = tagTarget(tag)
+    if (target !== null) pushScreen(target)
+  }, [pushScreen])
   const openGroup = useCallback((group) => {
     pushScreen({ screen: 'grupo', key: typeof group === 'string' ? group.toLowerCase() : group, params: {} })
   }, [pushScreen])
@@ -3456,6 +3464,13 @@ function Member () {
           </StackLayer>
         )
       }
+      if (entry.screen === 'assunto') {
+        return (
+          <StackLayer key={i + ':assunto:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Assunto entry={entry} ownKey={ownKey} onBack={goBack} onReply={startReply} onQuote={startQuote} onReport={setReport} onOpenThread={openThread} onOpenMember={openMember} onOpenMention={mentionHandler} onOpenEngagers={openEngagers} onToast={showToast} />
+          </StackLayer>
+        )
+      }
       if (entry.screen === 'salvos') {
         return (
           <StackLayer key={i + ':salvos:' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
@@ -3891,6 +3906,8 @@ function Member () {
   // The wrapper is unconditional, so it never remounts the screens.
   // The saved posts list (Posts salvos) is read by the post rows and its screen.
   content = <SavedProvider hosted={node.hosted === true} ownKey={ownKey}>{content}</SavedProvider>
+  // Tappable #tags exist only on a hosted node: without a handler the spans stay plain text.
+  content = <HashtagContext.Provider value={node.hosted === true ? openTag : undefined}>{content}</HashtagContext.Provider>
   content = <PostPublicProvider hosted={node.hosted === true} online={node.online} visible={node.visible} open={openPostShare}>{content}</PostPublicProvider>
   // Side insets are applied once here (sidePad); top and bottom by each bar;
   // Modal content (sheets, photo viewer) pads itself. The wrapper is

@@ -200,9 +200,24 @@ test('salvos takes no key', async (t) => {
   for (const key of [A, 'x', 1]) t.absent(validEntry({ screen: 'salvos', key }))
 })
 
+test('assunto is keyed by the folded tag and distinct tags push distinct entries', async (t) => {
+  const { EMPTY, SCREENS, push, top, depth, validEntry } = await loadNav()
+  t.ok(SCREENS.includes('assunto'))
+  for (const key of ['ceu', 'ab', 'a1', 'a'.repeat(32), '2026']) t.ok(validEntry({ screen: 'assunto', key }), key)
+  const bad = [undefined, null, '', 'a', 'a'.repeat(33), 'Ceu', 'céu', '#ceu', 'ce u', 'ce-u', 'ce_u', 'ceu\n', 42, ['ceu'], A, A + ':1']
+  for (const key of bad) t.absent(validEntry({ screen: 'assunto', key }), String(key))
+  const one = push(EMPTY, { screen: 'assunto', key: 'ceu' })
+  t.alike(top(one), { screen: 'assunto', key: 'ceu', params: {} })
+  t.is(push(one, { screen: 'assunto', key: 'ceu' }), one, 'the same tag on top is a no-op')
+  const two = push(one, { screen: 'assunto', key: 'mar' })
+  t.is(depth(two), 2, 'another tag is a new entry')
+  t.is(top(two).key, 'mar')
+  t.is(push(EMPTY, { screen: 'assunto', key: 'Ceu' }), EMPTY, 'an invalid key is refused')
+})
+
 test('grupo and comunidade are keyed by a lowercase hex64 root key', async (t) => {
   const { EMPTY, SCREENS, push, top, validEntry, MAX_DEPTH } = await loadNav()
-  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos', 'salvos'])
+  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos', 'salvos', 'assunto'])
   t.absent(validEntry({ screen: 'cadeira', key: A }))
   t.ok(SCREENS.includes('comunidade'))
   for (const screen of ['grupo', 'comunidade', 'comunidade-info']) {
@@ -337,7 +352,7 @@ test('momentos is keyed by a lowercase hex64 author', async (t) => {
 test('popTo drops back to an index and refuses bounds outside the stack', async (t) => {
   const { EMPTY, MAX_DEPTH, SCREENS, push, pop, popTo, top } = await loadNav()
   t.is(MAX_DEPTH, 20)
-  t.is(SCREENS.length, 22, 'popTo adds no screen id')
+  t.is(SCREENS.length, 23, 'popTo adds no screen id')
   let stack = EMPTY
   for (let i = 1; i <= 4; i++) stack = push(stack, { screen: 'conversa', key: A + ':' + i })
   t.is(popTo(stack, 3), stack, 'the top index is a no-op')

@@ -9,7 +9,8 @@
 // text ends in a code block the trailer gets a line of its own.
 //
 // Props: text (raw), blocks (parseRich(text), optional), onOpenMention(username),
-// onLongPress, style (each paragraph's Text), trailer.
+// onLongPress, style (each paragraph's Text), trailer, hashtags (true at public
+// post call sites only; see MentionText).
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
@@ -18,7 +19,7 @@ import { embedOf } from '../musicEmbed'
 import { parseRich } from '../richText'
 import { copyText } from '../share'
 import { shareNav } from '../shareNav'
-import { SegmentSpan } from './MentionText'
+import { SegmentSpan, useHashtagOpen } from './MentionText'
 import { useStyles } from './ThemeProvider'
 import { radius, space, type } from './theme'
 
@@ -171,11 +172,12 @@ export function cardBesideSpoilers (blocks, card) {
 }
 
 // blocks: the parse of `text` when the caller already has it.
-export function RichText ({ text, blocks: parsed, onOpenMention, onLongPress, style, trailer = null }) {
+export function RichText ({ text, blocks: parsed, onOpenMention, onLongPress, style, trailer = null, hashtags }) {
+  const openTag = useHashtagOpen(hashtags)
   const styles = useStyles(makeStyles)
   // One tap shows every spoiler of this message, for as long as it is mounted.
   const [revealed, setRevealed] = useState(false)
-  const blocks = useMemo(() => (Array.isArray(parsed) ? parsed : parseRich(text)), [parsed, text])
+  const blocks = useMemo(() => (Array.isArray(parsed) ? parsed : parseRich(text, { hashtags: openTag !== undefined })), [parsed, text, openTag])
   const reveal = (e) => {
     if (e && e.stopPropagation) e.stopPropagation()
     setRevealed(true)
@@ -183,7 +185,7 @@ export function RichText ({ text, blocks: parsed, onOpenMention, onLongPress, st
   const spanNode = (span, key) => {
     const look = lookOf(span, styles)
     if (span.atom) {
-      const atom = <SegmentSpan key={key} segment={span.segment} onOpenMention={onOpenMention} onLongPress={onLongPress} />
+      const atom = <SegmentSpan key={key} segment={span.segment} onOpenMention={onOpenMention} onLongPress={onLongPress} onOpenTag={openTag} />
       return look.length > 0 ? <Text key={key} style={look}>{atom}</Text> : atom
     }
     return <Text key={key} style={look} onLongPress={onLongPress}>{displayText(span.text, { multiline: true })}</Text>

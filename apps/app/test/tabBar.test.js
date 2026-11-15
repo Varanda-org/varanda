@@ -51,6 +51,11 @@ test('showPostButton: no "publicar" on Feira nor on its screens', async (t) => {
   }
 })
 
+test('showPostButton: no "publicar" on an Assunto page', async (t) => {
+  const { showPostButton } = await load()
+  for (const tab of ['rua', 'diario', 'busca']) t.absent(showPostButton({ tab, screen: 'assunto' }), tab)
+})
+
 test('showPostButton: no "publicar" on Posts salvos', async (t) => {
   const { showPostButton } = await load()
   for (const tab of ['diario', 'rua', 'feira']) t.absent(showPostButton({ tab, screen: 'salvos' }), tab)
