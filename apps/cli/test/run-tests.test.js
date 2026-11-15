@@ -461,7 +461,12 @@ test('workspaces mode refuses what it cannot pool, before any file runs', async 
     [{ one: COMMON }, ['pkgs/*'], ['--workspaces', '--affected'], '# --affected precisa de uma referência: --affected=<ref> (ex. origin/main)\n'],
     [{ one: COMMON }, ['pkgs/*'], ['--workspaces', '--affected='], '# --affected precisa de uma referência: --affected=<ref> (ex. origin/main)\n'],
     [{ one: COMMON }, ['pkgs/*'], ['--workspaces', '--affected=a', '--affected=b'], '# --affected aceita uma só referência\n'],
-    [{ one: COMMON }, ['pkgs/*'], ['--affected=main'], '# --affected só vale com --workspaces\n']
+    [{ one: COMMON }, ['pkgs/*'], ['--affected=main'], '# --affected só vale com --workspaces\n'],
+    [{ one: COMMON }, ['pkgs/*'], ['--list'], '# --list só vale com --workspaces\n'],
+    [{ one: COMMON }, ['pkgs/*'], ['--workspaces', '--list', '--list'], '# --list aparece mais de uma vez\n'],
+    [{ one: COMMON }, ['pkgs/*'], ['--workspaces', '--list', 'x.test.js'], '# --workspaces não aceita arquivos\n'],
+    [{ one: COMMON }, ['pkgs/*'], ['--workspaces', '--list', '--affected'], '# --affected precisa de uma referência: --affected=<ref> (ex. origin/main)\n'],
+    [{ one: COMMON, two: 'jest' }, ['pkgs/*'], ['--workspaces', '--list'], '# workspace pkgs/two: o script de teste não é este executor (jest)\n']
   ]
   for (const [workspaces, patterns, args, expected] of cases) {
     const { dir, logFile } = tree(t)
@@ -583,6 +588,43 @@ test('--affected: nothing changed, a tree ref, and refs git refuses', async (t) 
     t.is(res.stdout, '# --affected: ' + expected + '\n')
     t.alike(res.ran, [], 'nothing ran')
   }
+})
+
+// --list prints what a run would pool, one workspace per line, and runs nothing.
+async function runList (t, dir, args, env = {}) {
+  const logFile = path.join(dir, 'log-' + Math.random().toString(36).slice(2) + '.jsonl')
+  const res = await runRunner(t, { cwd: dir, logFile, args: ['--workspaces', '--list', ...args], env }).done
+  return { ...res, ran: readLog(logFile) }
+}
+
+test('--list prints the workspaces a run would pool and runs none of them', async (t) => {
+  const { dir } = tree(t)
+  affectedRepo(dir)
+  let res = await runList(t, dir, [])
+  t.is(res.code, 0)
+  t.is(res.stdout, 'pkgs/app\npkgs/cli\npkgs/core\n', 'every workspace with a test script')
+  t.alike(res.ran, [], 'nothing ran')
+  res = await runList(t, dir, [], { VARANDA_TEST_SKIP_WORKSPACES: 'pkgs/cli' })
+  t.is(res.stdout, 'pkgs/app\npkgs/core\n', 'the skip list applies')
+  res = await runList(t, dir, ['--affected=HEAD'])
+  t.is(res.code, 0)
+  t.is(res.stdout, '', 'nothing changed: an empty list')
+  fs.writeFileSync(path.join(dir, 'pkgs/core/index.js'), 'module.exports = 2\n')
+  res = await runList(t, dir, ['--affected=HEAD'])
+  t.is(res.code, 0)
+  t.is(res.stdout, 'pkgs/app\npkgs/core\n', 'core changed and app requires it')
+  t.alike(res.ran, [], 'nothing ran')
+  const flipped = path.join(dir, 'log-flipped.jsonl')
+  const before = await runRunner(t, { cwd: dir, logFile: flipped, args: ['--workspaces', '--affected=HEAD', '--list'] }).done
+  t.is(before.stdout, 'pkgs/app\npkgs/core\n', 'flag order does not matter')
+  fs.writeFileSync(path.join(dir, 'notes.txt'), 'x\n')
+  gitIn(dir, 'checkout', '--', 'pkgs/core/index.js')
+  res = await runList(t, dir, ['--affected=HEAD'])
+  t.is(res.code, 0)
+  t.is(res.stdout, '', 'a change no workspace reaches: an empty list')
+  res = await runList(t, dir, ['--affected=nope'])
+  t.is(res.code, 1, 'an unknown ref fails')
+  t.is(res.stdout, '# --affected: referência desconhecida: nope\n')
 })
 
 test('a pooled run starts unmeasured files first, then the slowest, and records every duration', async (t) => {

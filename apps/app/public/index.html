@@ -10,6 +10,7 @@
     <meta name="color-scheme" content="light dark" />
     <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#101010" />
     <meta name="theme-color" content="#fbf8f3" />
+    <script src="/pre-scheme.js"></script>
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -114,7 +115,7 @@
         #varanda-pre-splash .bar { background: rgba(245,245,245,0.14); }
         #varanda-pre-splash .bar span { background: #5dcaa0; }
       }
-      /* once the bundle runs, html carries the scheme chosen in Ajustes, which can differ from the system's */
+      /* public/pre-scheme.js, then the bundle, put the scheme chosen in Ajustes on html; it can differ from the system's */
       html[data-scheme=light] #varanda-pre-splash { background: #fbf8f3; }
       html[data-scheme=light] #varanda-pre-splash .bar { background: rgba(31,42,36,0.10); }
       html[data-scheme=light] #varanda-pre-splash .bar span { background: #1d6b4f; }
