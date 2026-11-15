@@ -11045,3 +11045,25 @@ node apps/cli/test/post-page.test.js
 - [ ] iOS Safari no aparelho, em claro e em escuro: pendente.
 - [ ] Link aberto de dentro do WhatsApp e do Instagram (navegador embutido): pendente.
 - [ ] Fonte maior no sistema ou no navegador (ajuste de tamanho do texto, não zoom da página), no Android e no iOS: pendente. A página usa tamanhos em px, como o app.
+
+## 240. Anel do seu momento redondo no Android (PR fix/momentos-ring-circle)
+
+Esta seção confere a correção do quadrado cinza atrás da sua foto na faixa de momentos de A Rua, no Android. O seu anel monta como "+" (fundo transparente) e ganha a cor de contorno quando os momentos carregam. No Android, a View transparente era achatada (sem view nativa própria) e, quando virava uma view de verdade, a cor saía sem o raio: um quadrado de 64 pt. A View do anel agora tem `collapsable={false}`. Os outros anéis já montavam com a cor e ficavam redondos. Só o visual: sem mudança de protocolo, RPC, Termos nem dependência.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA, cada um em claro e escuro, com os dados da Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`).
+
+- [x] Android, emulador API 36, build de debug, escuro: antes da correção, o anel "Você" aparecia sobre um quadrado cinza no estado não visto e no visto (abrir o seu momento e fechar). Depois: redondo nos dois estados, também depois de apagar os dados do app e abrir de novo. Conferido em 2026-11-14.
+- [x] Android, claro: o anel visto continua redondo ao trocar o tema com o app aberto. Conferido em 2026-11-14.
+- [x] iOS (simulador iPhone 17 Pro, build de debug) e Chrome na web (390 px, escuro): o anel já era redondo antes da correção e continua igual. Conferido em 2026-11-14.
+- [ ] Aparelho Android com a conta de verdade (foto no avatar), app instalado: o anel "Você" redondo depois de abrir e fechar o seu momento. Pendente.
+- [ ] PWA instalado no Android e no iOS: o anel redondo. Pendente.
+- [ ] Sem momento seu no ar: o selo verde de "+" aparece inteiro, sem corte, no Android, no iOS e na web. Pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A asserção nova (`collapsable` falso na View do anel) falha sem a correção.
+
+```sh
+node apps/app/test/momentosScreen.test.js
+node apps/app/test/screensPolish.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
