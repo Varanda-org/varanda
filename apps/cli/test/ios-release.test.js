@@ -27,7 +27,10 @@ function block (startRe, endRe) {
 }
 
 const job = block(/^ {2}testflight:\s*$/, /^ {2}\S/)
+const supersede = block(/^ {2}supersede:\s*$/, /^ {2}\S/)
 const GUARD = "github\\.repository == 'Varanda-org\\/varanda' && github\\.ref == 'refs\\/heads\\/main' && vars\\.VARANDA_IOS_RELEASE == 'true'"
+// testflight also needs the supersede job's go (apps/cli/test/supersede.test.js).
+const GO = " && needs\\.supersede\\.outputs\\.go == 'true'"
 
 test('ios-release.yml: actions pinned to the commits ci.yml uses', (t) => {
   const pins = {
@@ -48,7 +51,9 @@ test('ios-release.yml: permissions, triggers, concurrency and the one job', (t) 
   const top = block(/^permissions:/, /^\S/)
   const topLines = top.split('\n').slice(1).filter((l) => l.trim() !== '').map((l) => l.trim())
   t.alike(topLines, ['contents: read'], 'top-level permissions are contents: read only')
-  t.absent(/^ {4}permissions:/m.test(code), 'no job widens the permissions')
+  t.is((code.match(/^ {4}permissions:/gm) || []).length, 1, 'only one job has its own permissions')
+  t.ok(/^ {4}permissions:\s*\n {6}actions: write\s*$/m.test(supersede), 'supersede, with actions: write only')
+  t.absent(/^ {4}permissions:/m.test(job), 'testflight keeps contents: read')
 
   const on = block(/^on:/, /^\S/)
   const triggers = (on.match(/^ {2}\S+:/gm) || []).map((s) => s.trim())
@@ -60,12 +65,15 @@ test('ios-release.yml: permissions, triggers, concurrency and the one job', (t) 
   }
   t.absent(/paths-ignore:/.test(on), 'no paths-ignore')
 
-  t.ok(/^ {2}group:\s*ios-release-\$\{\{ github\.ref \}\}\s*$/m.test(code), 'concurrency group is ios-release-<ref>')
-  t.ok(/^ {2}cancel-in-progress:\s*false\s*$/m.test(code), 'cancel-in-progress is false')
+  t.absent(/^concurrency:/m.test(code), 'no workflow concurrency: a run waiting for approval would hold the newer one back')
+  t.ok(/^ {6}group:\s*ios-release-\$\{\{ github\.ref \}\}\s*$/m.test(job), 'testflight concurrency group is ios-release-<ref>')
+  t.ok(/^ {6}cancel-in-progress:\s*false\s*$/m.test(job), 'testflight cancel-in-progress is false')
 
   const jobs = block(/^jobs:/, /^\S/).split('\n').filter((l) => /^ {2}[A-Za-z0-9_-]+:/.test(l)).map((l) => l.trim().replace(/:.*$/, ''))
-  t.alike(jobs, ['testflight'], 'one job, testflight')
-  t.ok(new RegExp('^ {4}if:\\s*' + GUARD + '\\s*$', 'm').test(job), 'repository, branch and variable guard')
+  t.alike(jobs, ['supersede', 'testflight'], 'supersede, then testflight')
+  t.ok(new RegExp('^ {4}if:\\s*' + GUARD + '\\s*$', 'm').test(supersede), 'supersede: repository, branch and variable guard')
+  t.ok(new RegExp('^ {4}if:\\s*' + GUARD + GO + '\\s*$', 'm').test(job), 'testflight: the same guard plus the supersede go')
+  t.ok(/^ {4}needs:\s*supersede\s*$/m.test(job), 'testflight needs supersede')
   t.ok(/^ {4}runs-on:\s*ubuntu-24\.04\s*$/m.test(job), 'runs-on ubuntu-24.04')
   t.ok(/^ {4}timeout-minutes:\s*\d+\s*$/m.test(job), 'has a timeout')
   t.ok(/^ {6}name:\s*app-store\s*$/m.test(job), 'uses the app-store environment')
@@ -120,7 +128,8 @@ test('ios-release.yml: only EXPO_TOKEN and VARANDA_IOS_RELEASE, only in env: or 
       else t.absent(/\$\{\{/.test(l), 'no ${{ inside a run: block: ' + l.trim())
     }
   }
-  for (const bad of ['pull_request', 'workflow_run', 'continue-on-error', 'self-hosted', '<<:', '\u2014']) {
+  t.absent(/\bworkflow_run\b/.test(yml), 'absent: workflow_run')
+  for (const bad of ['pull_request', 'continue-on-error', 'self-hosted', '<<:', '\u2014']) {
     t.absent(yml.includes(bad), 'absent: ' + bad)
   }
 })
