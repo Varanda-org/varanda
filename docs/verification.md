@@ -10969,7 +10969,52 @@ node apps/app/test/wordCheck.test.js
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
 
-## 240. Capa dos players de música antes de carregar (PR feat/music-player-cover)
+## 240. Anel do seu momento redondo no Android (PR fix/momentos-ring-circle)
+
+Esta seção confere a correção do quadrado cinza atrás da sua foto na faixa de momentos de A Rua, no Android. O seu anel monta como "+" (fundo transparente) e ganha a cor de contorno quando os momentos carregam. No Android, a View transparente era achatada (sem view nativa própria) e, quando virava uma view de verdade, a cor saía sem o raio: um quadrado de 64 pt. A View do anel agora tem `collapsable={false}`. Os outros anéis já montavam com a cor e ficavam redondos. Só o visual: sem mudança de protocolo, RPC, Termos nem dependência.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA, cada um em claro e escuro, com os dados da Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`).
+
+- [x] Android, emulador API 36, build de debug, escuro: antes da correção, o anel "Você" aparecia sobre um quadrado cinza no estado não visto e no visto (abrir o seu momento e fechar). Depois: redondo nos dois estados, também depois de apagar os dados do app e abrir de novo. Conferido em 2026-11-14.
+- [x] Android, claro: o anel visto continua redondo ao trocar o tema com o app aberto. Conferido em 2026-11-14.
+- [x] iOS (simulador iPhone 17 Pro, build de debug) e Chrome na web (390 px, escuro): o anel já era redondo antes da correção e continua igual. Conferido em 2026-11-14.
+- [ ] Aparelho Android com a conta de verdade (foto no avatar), app instalado: o anel "Você" redondo depois de abrir e fechar o seu momento. Pendente.
+- [ ] PWA instalado no Android e no iOS: o anel redondo. Pendente.
+- [ ] Sem momento seu no ar: o selo verde de "+" aparece inteiro, sem corte, no Android, no iOS e na web. Pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A asserção nova (`collapsable` falso na View do anel) falha sem a correção.
+
+```sh
+node apps/app/test/momentosScreen.test.js
+node apps/app/test/screensPolish.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 241. Data afastada da pílula "seguir" (PR fix/platform-parity-sweep)
+
+Esta seção confere o espaço entre a data e a pílula "seguir" no topo de uma publicação (Espiadinha e Busca). A face da pílula começa na borda do seu alvo de toque, e o topo reservava só a largura dos botões, sem folga: no Android, "· 5 nov" encostava na pílula e entrava um pouco nela; no iOS, encostava. Agora o topo reserva 8 pt a mais quando há "seguir", também com texto grande. Com só o ⋯ nada muda: o ícone já fica no meio de um alvo mais largo. Só o visual: sem mudança de protocolo, RPC, Termos nem dependência.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web, em escuro, com os dados da Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`).
+
+- [x] Android, emulador API 36, build de debug, escuro, Espiadinha: antes, na linha de Tomás Ferreira, "· 5 nov" encostava na pílula e entrava um pouco nela. Depois: 8 pt entre a data e a pílula em todas as linhas, e o `@nome` corta antes ("@tomas…"). Conferido em 2026-11-14.
+- [x] Android, texto grande (escala 1,3): o nome fica na primeira linha, a data embaixo, e nada encosta na pílula. Conferido em 2026-11-14.
+- [x] iOS, simulador iPhone 17 Pro, build de debug, escuro, Espiadinha: antes, a data encostava na pílula; depois, o mesmo espaço do Android. Conferido em 2026-11-14.
+- [x] Chrome na web, 390 px, escuro, Espiadinha: 8,4 px entre o fim de "· 5 nov" e a pílula em todas as linhas. Conferido em 2026-11-14.
+- [ ] Busca, com uma conta que você não segue: o mesmo espaço. Pendente.
+- [ ] Texto grande no iOS e na web. Pendente.
+- [ ] PWA instalado no Android e no iOS. Pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A asserção nova (`headPad` com 8 pt a mais quando há "seguir") falha sem a correção.
+
+```sh
+node apps/app/test/postLayout.test.js
+node apps/app/test/postOverflow.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 242. Capa dos players de música antes de carregar (PR feat/music-player-cover)
 
 Esta seção confere a capa que o lugar do player do YouTube, do SoundCloud, do Spotify e do Apple Music mostra antes de a página do provedor carregar, e a busca dessa capa ao compor. Ao escrever, quem monta o cartão (o aparelho de quem envia no app nativo, o serviço de conta na web hospedada) guarda como `card.image` a capa do provedor: o `og:image` da página (no app nativo, só quando o host é o da própria página ou um subdomínio estrito de um domínio de imagem do próprio provedor, `COVER_IMAGE_DOMAINS` em `apps/app/src/musicEmbed.js`: `ytimg.com`, `scdn.co`, `sndcdn.com`, `mzstatic.com`; na web, o serviço de conta busca o `og:image` como em qualquer prévia, com as verificações de endereço dele) e, num vídeo do YouTube, lido no endereço canônico (`coverTarget`), a miniatura padrão `https://i.ytimg.com/vi/<id>/mqdefault.jpg` (`youtubeCoverUrl` de `@varanda/rpc`) quando a página ou a imagem dela não dá nenhuma; um cartão feito só com essa miniatura se chama "YouTube". No app nativo são no máximo duas buscas de imagem, sem seguir redirecionamento, com os mesmos limites de antes (5 s, 256 KiB, tipo conferido pelos primeiros bytes); no serviço, a página e no máximo duas imagens, o pedido continua exatamente `{ url }` e a cota é a mesma. A imagem é recodificada no `card.image` de sempre (JPEG, até 320 px por lado, 32752 bytes): o formato dos registros não muda. Ao mostrar, o lugar do player desenha desde o primeiro quadro uma capa parada do tamanho exato do player, só com o cartão guardado (imagem, título, nome do provedor e selo de play; sem imagem, um quadro do provedor com um ícone de música), sem falar com ninguém; o player continua carregando embaixo dela (comportamento da seção 233, sem mudança), aparece num esmaecimento quando fica pronto e a capa sai. Um toque na capa não faz nada; o toque longo abre o menu como antes. Termos e Política na versão 52, com novo aceite. Sem mudança de RPC. A lista abaixo é um roteiro: nada aqui foi marcado como conferido, e o que não foi executado fica pendente.
 
@@ -11017,7 +11062,7 @@ node apps/site/test/legal.test.js
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
 
-## 241. Página pública de uma publicação com cara de feed (PR feat/post-page-feed-style)
+## 243. Página pública de uma publicação com cara de feed (PR feat/post-page-feed-style)
 
 Esta seção confere a página `/p/<D>/<seq>` (`apps/cli/lib/post-page.js`) redesenhada para parecer uma linha de publicação de A Rua: disco com as iniciais numa de cinco cores, nome, @nome e data numa linha, texto, fotos em grade, cartão de link, desenhos de responder, repostar e curtir sem contagem, o botão "Ver na Varanda" embaixo e duas linhas esmaecidas. Continua sem script, sem recurso externo e com um só link. Formato, rotas, RPC e Termos não mudam; `docs/protocol.md` seção 16 passa a descrever o disco de iniciais e os desenhos.
 
