@@ -108,6 +108,18 @@ env_local=''
 ref_chave=''
 # 1: o candidato efetivo.env.novo existe; 0: sem segredos compartilhados.
 segredos_novo=0
+# O seq do arquivo selado do candidato, lido de secrets verify --json (vazio
+# sem conferência).
+segredos_seq=''
+# O seq do arquivo selado que trocar_segredos pôs em uso (vazio quando o
+# ambiente novo não traz segredos compartilhados): vira o piso em
+# $segredos/seq só depois que a troca passou na verificação de saúde.
+seq_trocado=''
+# Uma linha, exatamente o resultado de secrets verify --json.
+verificado_re='^\{"signer":"[0-9a-f]{64}","recipients":[1-9][0-9]*,"seq":([1-9][0-9]{0,9})\}$'
+# As únicas mensagens do CLI com número que vão para o registro.
+linha_quem_sela_re='^erro: lista de quem sela: chave (inválida|repetida) na linha [1-9][0-9]{0,4}$'
+seq_segredos_max=4294967295
 # 1 depois que esta execução (com o lock) começou a abrir segredos: ao_sair
 # apaga o que sobrou de texto aberto. Um comando sem lock nunca apaga.
 segredos_criados=0
@@ -188,7 +200,7 @@ ao_sair() {
   # Texto aberto não sobrevive à execução que o criou (uma saída antecipada
   # ou um TERM). Só esta execução, com o lock, o criou.
   if [ "$segredos_criados" = 1 ]; then
-    rm -rf "$segredos/abrir" "$segredos/efetivo.env.novo" || true
+    rm -rf "$segredos/abrir" "$segredos/efetivo.env.novo" "$segredos/conferir.err" || true
   fi
 }
 
@@ -816,6 +828,95 @@ conferir_perda_segredos() {
   return 0
 }
 
+# ": <linha>" quando a última linha de $1 (o erro padrão de um comando
+# secrets) é uma mensagem conhecida do CLI, sem valor nenhum: uma assinatura
+# fora da lista não se confunde com uma chave errada. Qualquer outra linha,
+# que poderia trazer um valor, nunca vai para o registro.
+mensagem_cli() {
+  local linha=${1##*$'\n'}
+  case $linha in
+    'erro: arquivo selado inválido' | 'erro: arquivo de chave inválido' | \
+      'erro: este arquivo é uma chave de assinatura, não a chave do servidor' | \
+      'erro: versão do arquivo selado desconhecida' | 'erro: arquivo selado sem assinatura' | \
+      'erro: o arquivo selado não foi assinado por uma chave da lista de quem sela' | \
+      'erro: assinatura do arquivo selado inválida' | \
+      'erro: lista de quem sela: nenhuma chave' | 'erro: lista de quem sela: mais de 16 chaves' | \
+      'erro: arquivo selado grande demais: /segredos/selado.json' | \
+      'erro: lista de quem sela grande demais: /segredos/assinantes.txt' | \
+      'erro: o arquivo de chave pode ser lido por outros usuários (use chmod 600): /segredos/chave.json')
+      printf ': %s' "$linha"
+      return 0
+      ;;
+  esac
+  if [[ $linha =~ $linha_quem_sela_re ]]; then
+    printf ': %s' "$linha"
+  fi
+  return 0
+}
+
+# O piso de $segredos/seq na saída (vazio sem o arquivo: o primeiro arquivo
+# selado vale com qualquer seq). Um arquivo que não seja exatamente o número
+# e um LF opcional retorna 1: sem piso legível, nada de arquivo selado novo.
+ler_piso_segredos() {
+  local f="$segredos/seq" n v=''
+  if [ ! -e "$f" ] && [ ! -L "$f" ]; then
+    return 0
+  fi
+  if [ ! -L "$f" ] && [ -f "$f" ] && n=$(wc -c <"$f" | tr -d ' ') && [ "$n" -le 11 ] \
+    && v=$(cat "$f") && [[ $v =~ $seq_re ]] && [ "$v" -le "$seq_segredos_max" ] \
+    && { printf '%s' "$v" | cmp -s - "$f" || printf '%s\n' "$v" | cmp -s - "$f"; }; then
+    printf '%s\n' "$v"
+    return 0
+  fi
+  # Chamada dentro de $(...): o registro vai pelo erro padrão.
+  log "segredos compartilhados: $f não é um número de 1 a $seq_segredos_max num arquivo comum; nada mudou. Para aceitar o seq do próximo arquivo selado, apague $f" >&2
+  return 1
+}
+
+# Com um arquivo selado novo (segredos_novo=1), compara o seq dele com o piso.
+# Igual passa (cada versão traz o mesmo arquivo). Menor com $1=recusar (o
+# timer) recusa a troca, como uma perda de nomes; senão (apply, reconfigure,
+# install) só fica no registro, e o piso desce depois da troca saudável.
+conferir_seq_segredos() {
+  local piso
+  if [ "$segredos_novo" != 1 ]; then
+    return 0
+  fi
+  if ! [[ $segredos_seq =~ $seq_re ]]; then
+    log 'segredos compartilhados: o seq do arquivo selado não foi conferido; nada mudou'
+    return 1
+  fi
+  piso=$(ler_piso_segredos) || return 1
+  if [ -z "$piso" ] || [ "$segredos_seq" -ge "$piso" ]; then
+    return 0
+  fi
+  if [ "$1" = recusar ]; then
+    log "segredos compartilhados: o arquivo selado da nova versão tem seq $segredos_seq, menor que o último aplicado $piso; nada mudou. Para aplicar mesmo assim, rode update.sh apply"
+    return 1
+  fi
+  log "segredos compartilhados: aplicando o arquivo selado com seq $segredos_seq, menor que o último aplicado $piso"
+  return 0
+}
+
+# Depois de uma troca saudável que pôs um arquivo selado em uso: o seq dele
+# vira o piso, gravado com um rename (root, 0600). Sem gravar, o timer
+# aceitaria de novo um arquivo mais velho: fica uma intervenção.
+gravar_piso_segredos() {
+  local f="$segredos/seq"
+  if [ -z "$seq_trocado" ]; then
+    return 0
+  fi
+  if [ ! -d "$f" ] && rm -f "$f.tmp" && (umask 077 && printf '%s\n' "$seq_trocado" >"$f.tmp") \
+    && chmod 0600 "$f.tmp" && mv -f "$f.tmp" "$f"; then
+    log "segredos compartilhados: seq $seq_trocado anotado em $f"
+    seq_trocado=''
+    return 0
+  fi
+  rm -f "$f.tmp" 2>/dev/null || true
+  marcar_intervencao "a versão em uso aplicou o arquivo selado com seq $seq_trocado, mas $f não foi gravado: grave $seq_trocado nele (root, 0600) ou rode update.sh apply"
+  return 1
+}
+
 # O candidato: os bytes de varanda.env, um LF se ele não termina com um, e as
 # linhas abertas só dos nomes que varanda.env deixa ausentes ou vazios (a
 # última atribuição vale, como no compose). Chamada com umask 077: o arquivo
@@ -887,10 +988,12 @@ juntar_segredos() {
 # secrets-signers.txt do mesmo pacote (senão a saída 1), e prepara o candidato $segredos/efetivo.env.novo
 # (segredos_novo=1). Sem arquivo selado, sem chave ou com a saída 3 (este
 # servidor não é destinatário), o candidato é "sem segredos compartilhados"
-# (segredos_novo=0). Qualquer outra falha retorna 1 sem nada mudado.
+# (segredos_novo=0). Com a chave, o seq do arquivo vai para segredos_seq antes
+# de abrir. Qualquer outra falha retorna 1 sem nada mudado.
 preparar_segredos() {
-  local imagem=$1 selado="$2/secrets.sealed.json" assinantes="$2/secrets-signers.txt" trabalho="$segredos/abrir" novo="$segredos/efetivo.env.novo" dm rc=0
+  local imagem=$1 selado="$2/secrets.sealed.json" assinantes="$2/secrets-signers.txt" trabalho="$segredos/abrir" novo="$segredos/efetivo.env.novo" dm rc=0 saida='' erro=''
   segredos_novo=0
+  segredos_seq=''
   if [ -L "$segredos" ] || ! (umask 077 && mkdir -p "$segredos") || ! chmod 0700 "$segredos"; then
     log "$segredos precisa ser um diretório comum"
     return 1
@@ -919,21 +1022,37 @@ preparar_segredos() {
     log "$chave_segredos precisa ser de root, modo 0600; nada mudou"
     return 1
   fi
+  # O seq vem só da conferência da assinatura, sem a chave montada: a saída
+  # é lida até 4 KB e só vale exatamente uma linha do formato esperado. No
+  # registro, o código de saída e, do erro padrão, só uma mensagem conhecida.
+  saida=$(docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 0:0 \
+    --mount "type=bind,source=$selado,target=/segredos/selado.json,readonly" \
+    --mount "type=bind,source=$assinantes,target=/segredos/assinantes.txt,readonly" \
+    "$imagem" secrets verify --file /segredos/selado.json --signers /segredos/assinantes.txt --json 2>"$segredos/conferir.err" |
+    head -c 4096) || rc=$?
+  erro=$(tail -c 4096 "$segredos/conferir.err" 2>/dev/null) || erro=''
+  rm -f "$segredos/conferir.err" || true
+  if [ "$rc" != 0 ] || ! [[ $saida =~ $verificado_re ]] || [ "${BASH_REMATCH[1]}" -gt "$seq_segredos_max" ]; then
+    log "não foi possível conferir o arquivo selado (saída $rc$(mensagem_cli "$erro")); nada mudou"
+    return 1
+  fi
+  segredos_seq=${BASH_REMATCH[1]}
+  saida=''
   # Sempre um diretório novo e vazio: na saída 3 o comando deixa um --out que
   # já existia como estava, e só vale um aberto.env que esta execução gravou.
   if ! mkdir -m 0700 "$trabalho"; then
     log "não foi possível criar $trabalho; nada mudou"
     return 1
   fi
-  # Nada do processo que segurou a chave vai para o registro: a saída do
-  # comando conta só pelo código.
-  docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 0:0 \
+  # Do processo que segurou a chave, só o código de saída e uma mensagem
+  # conhecida do erro padrão (lido até 4 KB) vão para o registro.
+  erro=$(docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 0:0 \
     --mount "type=bind,source=$chave_segredos,target=/segredos/chave.json,readonly" \
     --mount "type=bind,source=$selado,target=/segredos/selado.json,readonly" \
     --mount "type=bind,source=$assinantes,target=/segredos/assinantes.txt,readonly" \
     --mount "type=bind,source=$trabalho,target=/segredos/saida" \
     "$imagem" secrets open --key-file /segredos/chave.json --file /segredos/selado.json \
-    --signers /segredos/assinantes.txt --out /segredos/saida/aberto.env >/dev/null 2>&1 || rc=$?
+    --signers /segredos/assinantes.txt --out /segredos/saida/aberto.env 2>&1 >/dev/null | tail -c 4096) || rc=$?
   case $rc in
     0) ;;
     3)
@@ -943,7 +1062,7 @@ preparar_segredos() {
       ;;
     *)
       rm -rf "$trabalho"
-      log "não foi possível abrir os segredos compartilhados (saída $rc); nada mudou"
+      log "não foi possível abrir os segredos compartilhados (saída $rc$(mensagem_cli "$erro")); nada mudou"
       return 1
       ;;
   esac
@@ -1000,6 +1119,10 @@ trocar_segredos() {
       if [ -f "$ea.velho" ]; then mv -f "$ea.velho" "$ea" || true; fi
     fi
     return 1
+  fi
+  seq_trocado=''
+  if [ "$segredos_novo" = 1 ]; then
+    seq_trocado=$segredos_seq
   fi
   segredos_novo=0
   usar_env "$e"
@@ -1643,6 +1766,10 @@ concluir() {
   apagar_imagens_velhas
   rm -f "$state/disponivel" "$state/preparada" "$state/anterior.velho" "$state/intervencao" \
     "$segredos/efetivo.env.anterior.velho"
+  # Depois de apagar a intervenção: uma falha aqui deixa uma nova.
+  if ! gravar_piso_segredos; then
+    log "aviso: o piso dos segredos compartilhados não foi gravado"
+  fi
   limpar_versoes
   if ! docker image prune -f; then
     log 'aviso: docker image prune falhou'
@@ -1897,7 +2024,7 @@ subir_instalada() {
     descartar_candidato
     return 1
   fi
-  if ! conferir_perda_segredos registrar; then
+  if ! conferir_perda_segredos registrar || ! conferir_seq_segredos registrar; then
     descartar_candidato
     return 1
   fi
@@ -1922,6 +2049,9 @@ subir_instalada() {
     return 1
   fi
   if ! verificar_saude; then
+    return 1
+  fi
+  if ! gravar_piso_segredos; then
     return 1
   fi
 }
@@ -1968,7 +2098,7 @@ cmd_run() {
   # Sozinho, o timer nunca desliga o que vinha do arquivo selado (a
   # verificação de idade da Didit, por exemplo). Sem recusada e sem
   # intervenção: a próxima versão que os traga aplica normalmente.
-  if ! conferir_perda_segredos recusar; then
+  if ! conferir_perda_segredos recusar || ! conferir_seq_segredos recusar; then
     descartar_candidato
     exit 1
   fi
@@ -1996,7 +2126,7 @@ cmd_apply() {
   if ! preparar_versao; then
     exit 1
   fi
-  if ! conferir_perda_segredos registrar; then
+  if ! conferir_perda_segredos registrar || ! conferir_seq_segredos registrar; then
     descartar_candidato
     exit 1
   fi
@@ -2221,6 +2351,11 @@ cmd_install() {
     esac
   fi
   if ! preparar_versao; then
+    exit 1
+  fi
+  # Como num apply: um seq menor que o piso só fica no registro.
+  if ! conferir_seq_segredos registrar; then
+    descartar_candidato
     exit 1
   fi
   if ! printf 'instalado por update.sh em %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >"$marcador"; then

@@ -84,7 +84,7 @@ function setup (t) {
   ].join('\n'), 0o600)
   const recipients = write(dir, 'servers.txt', '# servers\n' + a.publicKey + '  # one\n\n' + b.publicKey.toUpperCase() + '\n')
   const sealedFile = path.join(dir, 'secrets.sealed.json')
-  const r = varanda(['secrets', 'seal', '--file', plain, '--recipients', recipients, '--signing-key', signer.file, '--out', sealedFile])
+  const r = varanda(['secrets', 'seal', '--file', plain, '--recipients', recipients, '--seq', '5', '--signing-key', signer.file, '--out', sealedFile])
   t.is(r.code, 0, 'sealed')
   return { dir, a, b, c, signer, other, signers, values, plain, recipients, sealedFile, sealStdout: r.stdout }
 }
@@ -132,7 +132,8 @@ test('secrets seal and open: round trip with two recipients, others get exit 3',
   const text = fs.readFileSync(s.sealedFile, 'utf8')
   for (const v of Object.values(s.values)) t.absent(text.includes(v), 'no value in clear in the sealed file')
   const body = JSON.parse(text)
-  t.alike(Object.keys(body), ['v', 'recipients', 'iv', 'tag', 'data', 'signer', 'signature'])
+  t.alike(Object.keys(body), ['v', 'seq', 'recipients', 'iv', 'tag', 'data', 'signer', 'signature'])
+  t.is(body.seq, 5, 'the seq given to seal, as a JSON integer')
   t.is(body.v, 1)
   t.is(body.signer, s.signer.publicKey, 'the signer is the sealing key')
   t.is(Buffer.from(body.signature, 'base64').length, 64, 'an Ed25519 signature')
@@ -166,12 +167,12 @@ test('secrets seal and open: round trip with two recipients, others get exit 3',
   const json = varanda(['secrets', 'open', '--key-file', s.a.file, '--file', s.sealedFile, '--signers', s.signers, '--out', path.join(s.dir, 'j.env'), '--json'])
   t.alike(JSON.parse(json.stdout), { written: 3 })
 
-  const existing = varanda(['secrets', 'seal', '--file', s.plain, '--recipients', s.recipients, '--signing-key', s.signer.file, '--out', s.sealedFile])
+  const existing = varanda(['secrets', 'seal', '--file', s.plain, '--recipients', s.recipients, '--seq', '1', '--signing-key', s.signer.file, '--out', s.sealedFile])
   t.is(existing.code, 1, 'seal refuses an existing --out')
   t.is(fs.readFileSync(s.sealedFile, 'utf8'), text, 'the sealed file is untouched')
 
   t.is(varanda(['secrets', 'open', '--file', s.sealedFile, '--signers', s.signers, '--out', outC]).code, 2, '--key-file is required')
-  t.is(varanda(['secrets', 'seal', '--file', s.plain, '--signing-key', s.signer.file, '--out', outC + '.x']).code, 2, '--recipients is required')
+  t.is(varanda(['secrets', 'seal', '--file', s.plain, '--seq', '1', '--signing-key', s.signer.file, '--out', outC + '.x']).code, 2, '--recipients is required')
   t.is(varanda(['secrets', 'open', '--key-file', s.a.file, '--signers', s.signers, '--out', outC]).code, 2, '--file is required')
 })
 
@@ -282,7 +283,7 @@ test('secrets seal: allow-list, refused names, values and recipients', (t) => {
   const seal = (plainText, recipientsFile = recipients) => {
     const plain = write(dir, 'plain-' + (++n) + '.env', plainText, 0o600)
     const out = path.join(dir, 'out-' + n + '.json')
-    const r = varanda(['secrets', 'seal', '--file', plain, '--recipients', recipientsFile, '--signing-key', signer.file, '--out', out])
+    const r = varanda(['secrets', 'seal', '--file', plain, '--recipients', recipientsFile, '--seq', '1', '--signing-key', signer.file, '--out', out])
     r.out = out
     return r
   }
@@ -372,12 +373,15 @@ test('sealed-secrets: canonical payload and recipient AAD', (t) => {
   const parsed = sealed.parseKeyFile(JSON.stringify(key))
   const signing = sealed.generateSigningKeyFile()
   const signer = sealed.parseSigningKeyFile(JSON.stringify(signing))
-  const box = sealed.seal(new Map([['VARANDA_DIDIT_API_KEY', 'k']]), [key.publicKey], signer)
+  const box = sealed.seal(new Map([['VARANDA_DIDIT_API_KEY', 'k']]), [key.publicKey], signer, 4294967295)
   t.alike(sealed.open(JSON.stringify(box), parsed, [signing.publicKey]), new Map([['VARANDA_DIDIT_API_KEY', 'k']]))
-  t.alike(sealed.verify(JSON.stringify(box), [signing.publicKey]), { signer: signing.publicKey, recipients: 1 })
+  t.alike(sealed.verify(JSON.stringify(box), [signing.publicKey]), { signer: signing.publicKey, recipients: 1, seq: 4294967295 })
   t.exception(() => sealed.open(JSON.stringify(box), parsed, []), /lista de quem sela: nenhuma chave/, 'open needs a signer list')
   t.exception(() => sealed.open(JSON.stringify(box), parsed), /lista de quem sela: nenhuma chave/, 'open without a signer list throws')
   t.exception(() => sealed.seal(new Map([['VARANDA_DIDIT_API_KEY', 'k']]), [key.publicKey]), /falta a chave de assinatura/, 'seal needs a signing key')
+  for (const seq of [undefined, 0, -1, 1.5, 4294967296, '1', NaN, 2 ** 53]) {
+    t.exception(() => sealed.seal(new Map([['VARANDA_DIDIT_API_KEY', 'k']]), [key.publicKey], signer, seq), /seq inválido/, 'seal refuses seq ' + String(seq))
+  }
   t.is(sealed.formatEnv(new Map([['VARANDA_GIF_API_KEY', 'b'], ['VARANDA_DIDIT_API_KEY', 'a b']])), "VARANDA_DIDIT_API_KEY='a b'\nVARANDA_GIF_API_KEY='b'\n")
 })
 
@@ -391,7 +395,7 @@ function signedBytesSpec (o) {
   }
   const hex = (h) => Buffer.from(h, 'hex')
   const b64 = (v) => Buffer.from(v, 'base64')
-  const fields = [u32(o.v), u32(o.recipients.length)]
+  const fields = [u32(o.v), u32(o.seq), u32(o.recipients.length)]
   for (const r of o.recipients) fields.push(hex(r.publicKey), hex(r.ephemeral), b64(r.iv), b64(r.tag), b64(r.key))
   fields.push(b64(o.iv), b64(o.tag), b64(o.data), hex(o.signer))
   return Buffer.concat([Buffer.from('varanda-secrets-signature-v1', 'utf8'), ...fields.flatMap((f) => [u32(f.length), f])])
@@ -431,6 +435,7 @@ function forge (payload, recipientHex, signer) {
   const body = gcm(contentKey, Buffer.from(payload, 'utf8'), Buffer.from('varanda-secrets-v1\n' + recipientHex, 'utf8'))
   return signSpec({
     v: 1,
+    seq: 1,
     recipients: [{ publicKey: recipientHex, ephemeral: ephemeralPublic.toString('hex'), iv: wrapped.iv, tag: wrapped.tag, key: wrapped.data }],
     iv: body.iv,
     tag: body.tag,
@@ -501,7 +506,7 @@ test('secrets: --out may not name an input, singular and plural counts', (t) => 
   t.is(fs.readFileSync(s.a.file, 'utf8'), keyBefore, 'the key file is untouched')
   t.is(fs.readFileSync(s.sealedFile, 'utf8'), sealedBefore, 'the sealed file is untouched')
 
-  const sealTo = (out) => varanda(['secrets', 'seal', '--file', s.plain, '--recipients', s.recipients, '--signing-key', s.signer.file, '--out', out])
+  const sealTo = (out) => varanda(['secrets', 'seal', '--file', s.plain, '--recipients', s.recipients, '--seq', '1', '--signing-key', s.signer.file, '--out', out])
   const sealPlain = sealTo(s.plain)
   t.is(sealPlain.code, 2, 'seal --out equal to --file')
   t.ok(sealPlain.stderr.startsWith('uso: --out não pode ser o mesmo arquivo de --file\n'))
@@ -516,7 +521,7 @@ test('secrets: --out may not name an input, singular and plural counts', (t) => 
   const one = write(s.dir, 'one.env', 'VARANDA_GIF_API_KEY=' + value('one') + '\n', 0o600)
   const oneRecipient = write(s.dir, 'one.txt', s.a.publicKey + '\n')
   const oneSealed = path.join(s.dir, 'one.sealed.json')
-  const r = varanda(['secrets', 'seal', '--file', one, '--recipients', oneRecipient, '--signing-key', s.signer.file, '--out', oneSealed])
+  const r = varanda(['secrets', 'seal', '--file', one, '--recipients', oneRecipient, '--seq', '1', '--signing-key', s.signer.file, '--out', oneSealed])
   t.is(r.stdout, '1 nome selado para 1 servidor\n', 'singular')
   t.is(open(path.join(s.dir, 'one-open.env'), s.a.file, oneSealed).stdout, '1 nome gravado\n', 'singular')
   t.is(s.sealStdout, '3 nomes selados para 2 servidores\n', 'plural')
@@ -601,7 +606,7 @@ test('secrets refuses a FIFO as any input without blocking', (t) => {
   const asSealed = varanda(['secrets', 'open', '--key-file', s.a.file, '--file', fifo, '--signers', s.signers, '--out', out])
   t.is(asSealed.code, 1, 'FIFO --file refused')
   t.is(asSealed.stderr, 'erro: arquivo selado não é um arquivo comum: ' + fifo + '\n')
-  const asRecipients = varanda(['secrets', 'seal', '--file', s.plain, '--recipients', fifo, '--signing-key', s.signer.file, '--out', path.join(s.dir, 'f.json')])
+  const asRecipients = varanda(['secrets', 'seal', '--file', s.plain, '--recipients', fifo, '--seq', '1', '--signing-key', s.signer.file, '--out', path.join(s.dir, 'f.json')])
   t.is(asRecipients.code, 1, 'FIFO --recipients refused')
   t.absent(fs.existsSync(out))
 })
@@ -644,7 +649,7 @@ test('secrets: a server key and a signing key are never taken for each other', (
   t.is(asServer.code, 1, 'a signing key as --key-file is refused')
   t.is(asServer.stderr, 'erro: este arquivo é uma chave de assinatura, não a chave do servidor\n')
   const sealedOut = path.join(s.dir, 'x.json')
-  const asSigner = varanda(['secrets', 'seal', '--file', s.plain, '--recipients', s.recipients, '--signing-key', s.a.file, '--out', sealedOut])
+  const asSigner = varanda(['secrets', 'seal', '--file', s.plain, '--recipients', s.recipients, '--seq', '1', '--signing-key', s.a.file, '--out', sealedOut])
   t.is(asSigner.code, 1, 'a server key as --signing-key is refused')
   t.is(asSigner.stderr, 'erro: este arquivo é uma chave de servidor, não uma chave de assinatura\n')
   t.absent(fs.existsSync(sealedOut))
@@ -652,21 +657,21 @@ test('secrets: a server key and a signing key are never taken for each other', (
   const forged = JSON.parse(fs.readFileSync(s.signer.file, 'utf8'))
   forged.publicKey = s.other.publicKey
   const mismatch = write(s.dir, 'mismatch.json', JSON.stringify(forged), 0o600)
-  const r = varanda(['secrets', 'seal', '--file', s.plain, '--recipients', s.recipients, '--signing-key', mismatch, '--out', sealedOut])
+  const r = varanda(['secrets', 'seal', '--file', s.plain, '--recipients', s.recipients, '--seq', '1', '--signing-key', mismatch, '--out', sealedOut])
   t.is(r.code, 1, 'a public key that does not match the secret key is refused')
   t.is(r.stderr, 'erro: arquivo de chave inválido\n')
   const wrongType = JSON.parse(fs.readFileSync(s.signer.file, 'utf8'))
   wrongType.type = 'varanda-secrets-server-key'
-  t.is(varanda(['secrets', 'seal', '--file', s.plain, '--recipients', s.recipients, '--signing-key', write(s.dir, 'type.json', JSON.stringify(wrongType), 0o600), '--out', sealedOut]).stderr, 'erro: arquivo de chave inválido\n', 'another type string is refused')
+  t.is(varanda(['secrets', 'seal', '--file', s.plain, '--recipients', s.recipients, '--seq', '1', '--signing-key', write(s.dir, 'type.json', JSON.stringify(wrongType), 0o600), '--out', sealedOut]).stderr, 'erro: arquivo de chave inválido\n', 'another type string is refused')
 
   fs.chmodSync(s.signer.file, 0o644)
-  const open = varanda(['secrets', 'seal', '--file', s.plain, '--recipients', s.recipients, '--signing-key', s.signer.file, '--out', sealedOut])
+  const open = varanda(['secrets', 'seal', '--file', s.plain, '--recipients', s.recipients, '--seq', '1', '--signing-key', s.signer.file, '--out', sealedOut])
   t.is(open.code, 1, 'a signing key readable by others is refused')
   t.is(open.stderr, 'erro: o arquivo de chave pode ser lido por outros usuários (use chmod 600): ' + s.signer.file + '\n')
   const link = path.join(s.dir, 'signer-link.json')
   fs.chmodSync(s.signer.file, 0o600)
   fs.symlinkSync(s.signer.file, link)
-  t.is(varanda(['secrets', 'seal', '--file', s.plain, '--recipients', s.recipients, '--signing-key', link, '--out', sealedOut]).code, 1, 'a symlinked signing key is refused')
+  t.is(varanda(['secrets', 'seal', '--file', s.plain, '--recipients', s.recipients, '--seq', '1', '--signing-key', link, '--out', sealedOut]).code, 1, 'a symlinked signing key is refused')
   t.absent(fs.existsSync(sealedOut))
 })
 
@@ -687,7 +692,7 @@ test('secrets: seal needs --signing-key, open and verify need --signers', (t) =>
   t.is(varanda(['secrets', 'verify', '--signers', s.signers]).code, 2, 'verify without --file')
   t.is(varanda(['secrets', 'verify', 'extra', '--file', s.sealedFile, '--signers', s.signers]).code, 2, 'no extra positional')
 
-  t.is(varanda(['secrets', 'seal', '--file', s.plain, '--recipients', s.recipients, '--signing-key', s.signer.file, '--out', s.signer.file]).code, 2, 'seal --out equal to --signing-key')
+  t.is(varanda(['secrets', 'seal', '--file', s.plain, '--recipients', s.recipients, '--seq', '1', '--signing-key', s.signer.file, '--out', s.signer.file]).code, 2, 'seal --out equal to --signing-key')
   const sameList = varanda(['secrets', 'open', '--key-file', s.a.file, '--file', s.sealedFile, '--signers', s.signers, '--out', s.signers])
   t.is(sameList.code, 2, 'open --out equal to --signers')
   t.ok(sameList.stderr.startsWith('uso: --out não pode ser o mesmo arquivo de --signers\n'))
@@ -698,10 +703,12 @@ test('secrets verify and open: only a listed signer, checked before decryption',
   const s = setup(t)
   const ok = varanda(['secrets', 'verify', '--file', s.sealedFile, '--signers', s.signers])
   t.is(ok.code, 0)
-  t.is(ok.stdout, 'assinatura válida: ' + s.signer.publicKey + ', 2 servidores\n', 'signer and recipient count')
+  t.is(ok.stdout, 'assinatura válida: ' + s.signer.publicKey + ', seq 5, 2 servidores\n', 'signer, seq and recipient count')
   t.is(ok.stderr, '')
   const json = varanda(['secrets', 'verify', '--file', s.sealedFile, '--signers', s.signers, '--json'])
-  t.alike(JSON.parse(json.stdout), { signer: s.signer.publicKey, recipients: 2 })
+  // The exact line update.sh matches: these keys, in this order, one line.
+  t.is(json.stdout, '{"signer":"' + s.signer.publicKey + '","recipients":2,"seq":5}\n', 'the --json contract')
+  t.is(json.stderr, '')
 
   const onlyOther = write(s.dir, 'only-other.txt', s.other.publicKey + '\n')
   const unlisted = 'erro: o arquivo selado não foi assinado por uma chave da lista de quem sela\n'
@@ -746,8 +753,8 @@ test('secrets verify and open: only a listed signer, checked before decryption',
 
   // A file sealed by another key in the list verifies too.
   const otherSealed = path.join(s.dir, 'other.sealed.json')
-  t.is(varanda(['secrets', 'seal', '--file', s.plain, '--recipients', s.recipients, '--signing-key', s.other.file, '--out', otherSealed]).code, 0)
-  t.is(varanda(['secrets', 'verify', '--file', otherSealed, '--signers', s.signers]).stdout, 'assinatura válida: ' + s.other.publicKey + ', 2 servidores\n')
+  t.is(varanda(['secrets', 'seal', '--file', s.plain, '--recipients', s.recipients, '--seq', '1', '--signing-key', s.other.file, '--out', otherSealed]).code, 0)
+  t.is(varanda(['secrets', 'verify', '--file', otherSealed, '--signers', s.signers]).stdout, 'assinatura válida: ' + s.other.publicKey + ', seq 1, 2 servidores\n')
   t.is(varanda(['secrets', 'verify', '--file', otherSealed, '--signers', write(s.dir, 'only-signer.txt', s.signer.publicKey + '\n')]).code, 1)
 })
 
@@ -779,6 +786,9 @@ test('secrets: a flipped byte in any signed field fails verify and open', (t) =>
     'recipients reordered': [(o) => { o.recipients.reverse() }, badSig],
     'signer swapped for another listed key': [(o) => { o.signer = s.other.publicKey }, badSig],
     'signature byte': [(o) => { o.signature = flipB64(o.signature) }, badSig],
+    'seq raised': [(o) => { o.seq = o.seq + 1 }, badSig],
+    'seq lowered': [(o) => { o.seq = o.seq - 1 }, badSig],
+    'seq low bit of the top byte': [(o) => { o.seq = o.seq + 2 ** 24 }, badSig],
     'signer byte': [(o) => { o.signer = flipHex(o.signer) }, 'erro: o arquivo selado não foi assinado por uma chave da lista de quem sela\n'],
     version: [(o) => { o.v = 2 }, 'erro: versão do arquivo selado desconhecida\n']
   }
@@ -819,7 +829,7 @@ test('secrets: key order and whitespace do not change what is verified', (t) => 
     const file = write(s.dir, 'variant.json', text)
     const v = varanda(['secrets', 'verify', '--file', file, '--signers', s.signers])
     t.is(v.code, 0, name + ': verifies')
-    t.is(v.stdout, 'assinatura válida: ' + s.signer.publicKey + ', 2 servidores\n')
+    t.is(v.stdout, 'assinatura válida: ' + s.signer.publicKey + ', seq 5, 2 servidores\n')
     const out = path.join(s.dir, 'variant-' + name.replace(/\W/g, '') + '.env')
     t.is(varanda(['secrets', 'open', '--key-file', s.b.file, '--file', file, '--signers', s.signers, '--out', out]).code, 0, name + ': opens')
     t.ok(fs.readFileSync(out, 'utf8').includes(s.values.VARANDA_DIDIT_API_KEY))
@@ -855,6 +865,81 @@ test('secrets: signers file parse errors', (t) => {
   if (spawnSync('mkfifo', ['-m', '600', fifo]).status === 0) {
     t.is(varanda(['secrets', 'verify', '--file', s.sealedFile, '--signers', fifo]).code, 1, 'a FIFO --signers is refused without blocking')
   }
+})
+
+test('secrets seal: --seq is required, decimal, 1 to 4294967295', (t) => {
+  const s = setup(t)
+  let n = 0
+  const sealWith = (seqArgs) => {
+    const out = path.join(s.dir, 'seq-' + (++n) + '.json')
+    const r = varanda(['secrets', 'seal', '--file', s.plain, '--recipients', s.recipients, '--signing-key', s.signer.file, ...seqArgs, '--out', out])
+    r.out = out
+    return r
+  }
+  const usageLine = 'uso: informe --seq <n>, um inteiro de 1 a 4294967295\n'
+  const missing = sealWith([])
+  t.is(missing.code, 2, 'seal without --seq')
+  t.ok(missing.stderr.startsWith(usageLine), missing.stderr.split('\n')[0])
+  t.absent(fs.existsSync(missing.out))
+  for (const bad of ['', '0', '00', '01', '-1', '+1', '1.5', '1.0', '1e3', '0x10', ' 1', '1 ', 'abc', '4294967296', '9999999999', '12345678901']) {
+    const r = sealWith(['--seq', bad])
+    t.is(r.code, 2, JSON.stringify(bad) + ' refused')
+    t.ok(r.stderr.startsWith(usageLine), JSON.stringify(bad) + ': ' + r.stderr.split('\n')[0])
+    t.absent(fs.existsSync(r.out), JSON.stringify(bad) + ': nothing written')
+  }
+  for (const [arg, seq] of [['1', 1], ['4294967295', 4294967295], ['1000000000', 1000000000]]) {
+    const r = sealWith(['--seq', arg])
+    t.is(r.code, 0, arg + ' accepted')
+    t.is(JSON.parse(fs.readFileSync(r.out, 'utf8')).seq, seq, arg + ': stored as a JSON integer')
+    const v = varanda(['secrets', 'verify', '--file', r.out, '--signers', s.signers, '--json'])
+    t.is(v.stdout, '{"signer":"' + s.signer.publicKey + '","recipients":2,"seq":' + seq + '}\n', arg + ': verify reports it')
+  }
+})
+
+test('secrets: seq must be a JSON integer from 1 to 4294967295', (t) => {
+  const s = setup(t)
+  const original = JSON.parse(fs.readFileSync(s.sealedFile, 'utf8'))
+  const cases = {
+    'a string': (o) => { o.seq = String(o.seq) },
+    'a float': (o) => { o.seq = o.seq + 0.5 },
+    zero: (o) => { o.seq = 0 },
+    negative: (o) => { o.seq = -5 },
+    'above 2^32 - 1': (o) => { o.seq = 4294967296 },
+    'above 2^32, same low bytes': (o) => { o.seq = o.seq + 4294967296 },
+    null: (o) => { o.seq = null },
+    'an array': (o) => { o.seq = [o.seq] },
+    missing: (o) => { delete o.seq }
+  }
+  for (const [name, mutate] of Object.entries(cases)) {
+    const copy = JSON.parse(JSON.stringify(original))
+    mutate(copy)
+    const file = write(s.dir, 'seq.json', JSON.stringify(copy))
+    const v = varanda(['secrets', 'verify', '--file', file, '--signers', s.signers])
+    t.is(v.code, 1, name + ': verify fails')
+    t.is(v.stderr, 'erro: arquivo selado inválido\n', name + ': refused by the parser')
+    const out = path.join(s.dir, 'seq.env')
+    const o = varanda(['secrets', 'open', '--key-file', s.a.file, '--file', file, '--signers', s.signers, '--out', out])
+    t.is(o.code, 1, name + ': open fails')
+    t.is(o.stderr, 'erro: arquivo selado inválido\n', name + ': open refused by the parser')
+    t.absent(fs.existsSync(out), name + ': nothing written')
+  }
+})
+
+test('secrets verify: an older file still verifies, and its lower seq shows it', (t) => {
+  const s = setup(t)
+  const older = path.join(s.dir, 'older.json')
+  t.is(varanda(['secrets', 'seal', '--file', s.plain, '--recipients', s.recipients, '--seq', '4', '--signing-key', s.signer.file, '--out', older]).code, 0)
+  const now = JSON.parse(varanda(['secrets', 'verify', '--file', s.sealedFile, '--signers', s.signers, '--json']).stdout)
+  const then = JSON.parse(varanda(['secrets', 'verify', '--file', older, '--signers', s.signers, '--json']).stdout)
+  t.alike(Object.keys(now), ['signer', 'recipients', 'seq'], 'the --json keys, in order')
+  t.is(now.seq, 5)
+  t.is(then.seq, 4, 'the replayed file carries its own, lower seq')
+  // Moving a newer seq onto the older file breaks its signature.
+  const forged = JSON.parse(fs.readFileSync(older, 'utf8'))
+  forged.seq = 6
+  const r = varanda(['secrets', 'verify', '--file', write(s.dir, 'forged-seq.json', JSON.stringify(forged)), '--signers', s.signers])
+  t.is(r.code, 1)
+  t.is(r.stderr, 'erro: assinatura do arquivo selado inválida\n')
 })
 
 // The committed sealed file must carry a signature from a key pinned in the

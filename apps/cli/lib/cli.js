@@ -71,7 +71,7 @@ Comandos:
   page group-post            a página publica num grupo (--page, --group, --text)
   secrets key                chave X25519 deste servidor para os segredos (--out; imprime só a pública)
   secrets signing-key        chave Ed25519 de quem sela (--out; imprime só a pública)
-  secrets seal               sela e assina as credenciais compartilhadas (--file, --recipients, --signing-key, --out)
+  secrets seal               sela e assina as credenciais compartilhadas (--file, --recipients, --signing-key, --seq, --out)
   secrets open               confere a assinatura e abre os segredos deste servidor (--key-file, --file, --signers, --out; sai com 3 se não for destinatário)
   secrets verify             confere a assinatura de um arquivo selado, sem chave secreta (--file, --signers)
   help                       esta ajuda
@@ -87,7 +87,7 @@ Opções dos comandos:
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
   --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes --release
-  --recipients --key-file --signing-key --signers
+  --recipients --key-file --signing-key --signers --seq
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
   --blob-bytes: teto do conjunto de mídia das conversas no seed (bytes, padrão 2147483648).`
 
@@ -99,7 +99,7 @@ const stringFlags = new Set([
   '--health-port', '--health-host', '--ws-port', '--ws-host', '--ws-origin',
   '--issuer', '--account-port', '--account-host', '--moderator', '--server', '--join',
   '--page', '--key', '--username', '--group', '--file', '--blob-bytes',
-  '--recipients', '--key-file', '--signing-key', '--signers'
+  '--recipients', '--key-file', '--signing-key', '--signers', '--seq'
 ])
 
 function key (value, message = 'chave inválida') {
@@ -355,6 +355,8 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     keyFile: get('key-file') === null ? null : path.resolve(cwd, get('key-file')),
     signingKey: get('signing-key') === null ? null : path.resolve(cwd, get('signing-key')),
     signers: get('signers') === null ? null : path.resolve(cwd, get('signers')),
+    // Raw: `secrets seal` validates it (commands/secrets.js).
+    seq: get('seq'),
     name: get('name'),
     join: get('join'),
     bio: get('bio'),

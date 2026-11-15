@@ -12,7 +12,7 @@
 // decryption.
 //
 // Sealed file, v1 (JSON, exactly these keys at each level):
-//   { "v": 1,
+//   { "v": 1, "seq": <integer 1 to 4294967295>,
 //     "recipients": [ { "publicKey": <64 hex>, "ephemeral": <64 hex>,
 //                       "iv": <b64 12 B>, "tag": <b64 16 B>, "key": <b64 32 B> }, ... ],
 //     "iv": <b64 12 B>, "tag": <b64 16 B>, "data": <b64>,
@@ -22,10 +22,12 @@
 // fields (parsing is strict: lower-case hex, canonical base64), never from
 // the JSON text, so key order and whitespace do not change what is verified:
 //   UTF-8("varanda-secrets-signature-v1"), then each field below as
-//   uint32be(byte length) || bytes, in this order: v (uint32be, 4 B); the
-//   recipient count (uint32be, 4 B); per recipient in file order publicKey
-//   (32 B), ephemeral (32 B), iv, tag, key; iv; tag; data; signer (32 B).
-//   Every field but `signature` is covered.
+//   uint32be(byte length) || bytes, in this order: v (uint32be, 4 B); seq
+//   (uint32be, 4 B); the recipient count (uint32be, 4 B); per recipient in
+//   file order publicKey (32 B), ephemeral (32 B), iv, tag, key; iv; tag;
+//   data; signer (32 B). Every field but `signature` is covered.
+// seq: an older file stays validly signed forever, so each new seal carries
+// a larger seq and servers never go back to a lower one on the timer.
 // Signers file: the recipients file format (one 64-hex Ed25519 public key
 // per line, # starts a comment), 1 to 16 distinct keys.
 //
@@ -63,8 +65,8 @@ const KEY_BYTES = 32
 const SIGNATURE_BYTES = 64
 const MAX_RECIPIENTS = 64
 const MAX_SIGNERS = 16
-const UNSIGNED_KEYS = ['v', 'recipients', 'iv', 'tag', 'data']
-const SEALED_KEYS = [...UNSIGNED_KEYS, 'signer', 'signature']
+const MAX_SEQ = 4294967295
+const SEALED_KEYS = ['v', 'seq', 'recipients', 'iv', 'tag', 'data', 'signer', 'signature']
 const SERVER_KEY_KEYS = ['v', 'publicKey', 'secretKey']
 const SIGNING_KEY_KEYS = ['v', 'type', 'publicKey', 'secretKey']
 const MAX_VALUE = 4096
@@ -354,11 +356,15 @@ function u32 (n) {
   return buf
 }
 
-// fields: { v, recipients: [{ publicKey: hex, ephemeral, iv, tag, key }],
-// iv, tag, data, signer: hex }, binary fields as Buffers (parseSealed's
+function validSeq (seq) {
+  return typeof seq === 'number' && Number.isSafeInteger(seq) && seq >= 1 && seq <= MAX_SEQ
+}
+
+// fields: { v, seq, recipients: [{ publicKey: hex, ephemeral, iv, tag, key
+// }], iv, tag, data, signer: hex }, binary fields as Buffers (parseSealed's
 // shape). -> the bytes the signature covers (format in the header).
 function signedBytes (fields) {
-  const parts = [u32(fields.v), u32(fields.recipients.length)]
+  const parts = [u32(fields.v), u32(fields.seq), u32(fields.recipients.length)]
   for (const r of fields.recipients) {
     parts.push(Buffer.from(r.publicKey, 'hex'), r.ephemeral, r.iv, r.tag, r.key)
   }
@@ -369,10 +375,11 @@ function signedBytes (fields) {
 }
 
 // secrets: Map name -> value; recipients: array of lower-case hex keys;
-// signingKey: the result of parseSigningKeyFile. -> the v1 object
-// (JSON-ready), signed.
-function seal (secrets, recipients, signingKey) {
+// signingKey: the result of parseSigningKeyFile; seq: 1 to 4294967295. ->
+// the v1 object (JSON-ready), signed.
+function seal (secrets, recipients, signingKey, seq) {
   if (!signingKey || typeof signingKey.publicKey !== 'string' || !HEX64.test(signingKey.publicKey)) throw new Error('falta a chave de assinatura')
+  if (!validSeq(seq)) throw new Error('seq inválido: use um inteiro de 1 a ' + MAX_SEQ)
   const contentKey = crypto.randomBytes(KEY_BYTES)
   const plain = canonicalPayload(secrets)
   try {
@@ -393,10 +400,11 @@ function seal (secrets, recipients, signingKey) {
       return { publicKey: hex, ephemeral: ephemeralPublic, iv: wrapped.iv, tag: wrapped.tag, key: wrapped.data }
     })
     const body = gcmEncrypt(contentKey, plain, recipientsAad(recipients))
-    const fields = { v: VERSION, recipients: entries, iv: body.iv, tag: body.tag, data: body.data, signer: signingKey.publicKey }
+    const fields = { v: VERSION, seq, recipients: entries, iv: body.iv, tag: body.tag, data: body.data, signer: signingKey.publicKey }
     const signature = crypto.sign(null, signedBytes(fields), signingKey.privateKey)
     return {
       v: VERSION,
+      seq,
       recipients: entries.map((r) => ({
         publicKey: r.publicKey,
         ephemeral: r.ephemeral.toString('hex'),
@@ -416,7 +424,7 @@ function seal (secrets, recipients, signingKey) {
   }
 }
 
-// Checks the whole structure, not the signature. -> { v, recipients: [{
+// Checks the whole structure, not the signature. -> { v, seq, recipients: [{
 // publicKey (hex), ephemeral, iv, tag, key }], iv, tag, data, signer (hex),
 // signature }, binary fields as Buffers.
 function parseSealed (text) {
@@ -427,8 +435,9 @@ function parseSealed (text) {
     throw invalidSealed()
   }
   if (isPlainObject(value) && value.v !== VERSION) throw new Error('versão do arquivo selado desconhecida')
-  if (hasExactKeys(value, UNSIGNED_KEYS)) throw new Error('arquivo selado sem assinatura')
+  if (isPlainObject(value) && !Object.prototype.hasOwnProperty.call(value, 'signer') && !Object.prototype.hasOwnProperty.call(value, 'signature')) throw new Error('arquivo selado sem assinatura')
   if (!hasExactKeys(value, SEALED_KEYS)) throw invalidSealed()
+  if (!validSeq(value.seq)) throw invalidSealed()
   if (!Array.isArray(value.recipients) || value.recipients.length === 0 || value.recipients.length > MAX_RECIPIENTS) throw invalidSealed()
   const seen = new Set()
   const recipients = value.recipients.map((entry) => {
@@ -449,7 +458,7 @@ function parseSealed (text) {
   if (typeof value.signer !== 'string' || !HEX64.test(value.signer)) throw invalidSealed()
   const signature = b64(value.signature, SIGNATURE_BYTES)
   if (signature === null) throw invalidSealed()
-  return { v: value.v, recipients, iv, tag, data, signer: value.signer, signature }
+  return { v: value.v, seq: value.seq, recipients, iv, tag, data, signer: value.signer, signature }
 }
 
 // Throws unless the signer is one of `signers` (lower-case hex keys, from
@@ -468,11 +477,12 @@ function checkSignature (sealed, signers) {
   if (!ok) throw new Error('assinatura do arquivo selado inválida')
 }
 
-// Needs no secret key. -> { signer, recipients } (hex, count).
+// Needs no secret key. -> { signer, recipients, seq } (hex, count, seq), in
+// this key order: update.sh parses the JSON line.
 function verify (sealedText, signers) {
   const sealed = parseSealed(sealedText)
   checkSignature(sealed, signers)
-  return { signer: sealed.signer, recipients: sealed.recipients.length }
+  return { signer: sealed.signer, recipients: sealed.recipients.length, seq: sealed.seq }
 }
 
 class NotRecipientError extends Error {
@@ -534,6 +544,7 @@ function formatEnv (secrets) {
 module.exports = {
   ALLOWED,
   VERSION,
+  MAX_SEQ,
   NotRecipientError,
   generateKeyFile,
   generateSigningKeyFile,

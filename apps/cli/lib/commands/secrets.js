@@ -212,16 +212,27 @@ function readSigners (file) {
   return sealed.parseSigners(readInput(file, 'lista de quem sela'))
 }
 
+const SEQ_USAGE = 'informe --seq <n>, um inteiro de 1 a ' + sealed.MAX_SEQ
+
+// Decimal digits only, no sign, no leading zero, at most MAX_SEQ.
+function needSeq (flags) {
+  if (typeof flags.seq !== 'string' || !/^[1-9][0-9]{0,9}$/.test(flags.seq)) throw new UsageError(SEQ_USAGE)
+  const seq = Number(flags.seq)
+  if (seq > sealed.MAX_SEQ) throw new UsageError(SEQ_USAGE)
+  return seq
+}
+
 function seal (flags) {
   const input = oneFile(flags)
   if (!flags.recipients) throw new UsageError('informe --recipients <arquivo>')
   if (!flags.signingKey) throw new UsageError('informe --signing-key <arquivo>')
+  const seq = needSeq(flags)
   const out = needOut(flags)
   refuseExisting(out)
   const signer = sealed.parseSigningKeyFile(readKeyFile(flags.signingKey))
   const recipients = sealed.parseRecipients(readInput(flags.recipients, 'arquivo de destinatários'))
   const secrets = sealed.parsePlainEnv(readInput(input, 'arquivo de segredos'))
-  writeNew(out, JSON.stringify(sealed.seal(secrets, recipients, signer), null, 2) + '\n')
+  writeNew(out, JSON.stringify(sealed.seal(secrets, recipients, signer, seq), null, 2) + '\n')
   print(flags, { names: secrets.size, recipients: recipients.length }, count(secrets.size, 'nome selado', 'nomes selados') + ' para ' + count(recipients.length, 'servidor', 'servidores'))
   return 0
 }
@@ -251,7 +262,7 @@ function verify (flags) {
   const input = oneFile(flags)
   const signers = readSigners(needSigners(flags))
   const result = sealed.verify(readInput(input, 'arquivo selado'), signers)
-  print(flags, result, 'assinatura válida: ' + result.signer + ', ' + count(result.recipients, 'servidor', 'servidores'))
+  print(flags, result, 'assinatura válida: ' + result.signer + ', seq ' + result.seq + ', ' + count(result.recipients, 'servidor', 'servidores'))
   return 0
 }
 

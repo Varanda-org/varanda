@@ -209,7 +209,7 @@ test('the section documents the sealed secrets flow as the code does it', (t) =>
 
 test('the seal command in the section has the flags cli.js lists', (t) => {
   const flags = sealFlags()
-  t.alike(flags, ['--file', '--recipients', '--signing-key', '--out'], 'cli.js lists four flags for secrets seal')
+  t.alike(flags, ['--file', '--recipients', '--signing-key', '--seq', '--out'], 'cli.js lists five flags for secrets seal')
   const command = /`varanda secrets seal ([^`]*)`/.exec(section)
   t.ok(command, 'the section shows the seal command')
   for (const flag of flags) t.ok(command[1].includes(flag + ' '), 'the seal command passes ' + flag)
@@ -225,6 +225,39 @@ test('section 252 checks the sealed secrets flow', (t) => {
     t.ok(part.includes(needle), 'section 252 names ' + needle)
   }
   t.ok(part.includes('- [ ] 41. ') && part.includes('- [ ] 50. '), 'the sealed checks are numbered 41 to 50')
+})
+
+test('the section and section 252 document the seq of the sealed file as update.sh enforces it', (t) => {
+  const floor = shValue('state') + '/segredos/seq'
+  t.ok(updateSh.includes('local f="$segredos/seq"'), 'update.sh keeps the floor in segredos/seq')
+  t.ok(section.includes(floor), 'the section names the floor file')
+  t.ok(section.includes('O `--seq` é um a mais que o do arquivo atual'), 'sealing takes one more than the current seq')
+  t.ok(section.includes('assinatura válida: <assinante>, seq <n>, <n> servidor(es)'), 'the verify line shows the seq')
+  t.ok(cliSource.includes("'--seq'"), 'cli.js takes --seq')
+  t.ok(section.includes('git show origin/main:deploy/seeder/secrets.sealed.json'), 'a reviewer compares with the seq on main')
+  const refusal = 'o arquivo selado da nova versão tem seq X, menor que o último aplicado Y; nada mudou. Para aplicar mesmo assim, rode update.sh apply'
+  t.ok(updateSh.includes(refusal.replace('X', '$segredos_seq').replace('Y', '$piso')), 'update.sh logs the timer refusal')
+  t.ok(section.includes(refusal), 'the section quotes it')
+  t.ok(section.includes('O `update.sh apply` (e o `reconfigure`) aplica mesmo assim'), 'apply takes a lower seq')
+  t.ok(section.includes('secrets verify --json'), 'the seq comes from secrets verify --json')
+  t.ok(updateSh.includes('secrets verify --file /segredos/selado.json --signers /segredos/assinantes.txt --json'), 'which update.sh runs')
+  t.ok(section.includes('não foi possível conferir o arquivo selado (saída N); nada mudou'), 'the verify refusal is quoted')
+  t.ok(updateSh.includes('não foi possível conferir o arquivo selado (saída $rc'), 'and update.sh logs it')
+  t.ok(section.includes('no `run`, vale a regra do timer acima'), 'a non-recipient server goes on only outside the timer rule')
+  t.ok(section.includes('`erro: assinatura do arquivo selado inválida`'), 'the section shows a known CLI message')
+  t.ok(updateSh.includes("'erro: assinatura do arquivo selado inválida'"), 'which update.sh lets into the log')
+
+  const verification = read('docs/verification.md')
+  const at = verification.indexOf('\n## 252. ')
+  const next = verification.indexOf('\n## ', at + 1)
+  const part = next === -1 ? verification.slice(at) : verification.slice(at, next)
+  for (const n of [57, 58, 59, 60]) t.ok(part.includes('- [ ] ' + n + '. '), 'section 252 has item ' + n)
+  t.ok(part.includes('--seq 1 --out deploy/seeder/secrets.sealed.json'), 'item 43 seals with --seq')
+  t.ok(part.includes(refusal.replace('X', '1').replace('Y', '2')), 'item 57 checks the timer refusal')
+  t.ok(part.includes('aplicando o arquivo selado com seq 1, menor que o último aplicado 2'), 'item 58 checks the override')
+  t.ok(updateSh.includes('aplicando o arquivo selado com seq $segredos_seq, menor que o último aplicado $piso'), 'which update.sh logs')
+  t.ok(part.includes('Só num servidor de teste: depois do item 57, `update.sh apply`'), 'the override runs on a test server')
+  t.ok(part.includes('e rode `update.sh apply` (ou use um servidor que nunca recebeu segredos compartilhados'), 'item 45 no longer expects the timer to go on')
 })
 
 test('the new files carry no em dash', (t) => {

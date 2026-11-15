@@ -78,7 +78,7 @@ Comandos:
   page group-post            a página publica num grupo (--page, --group, --text)
   secrets key                chave X25519 deste servidor para os segredos (--out; imprime só a pública)
   secrets signing-key        chave Ed25519 de quem sela (--out; imprime só a pública)
-  secrets seal               sela e assina as credenciais compartilhadas (--file, --recipients, --signing-key, --out)
+  secrets seal               sela e assina as credenciais compartilhadas (--file, --recipients, --signing-key, --seq, --out)
   secrets open               confere a assinatura e abre os segredos deste servidor (--key-file, --file, --signers, --out; sai com 3 se não for destinatário)
   secrets verify             confere a assinatura de um arquivo selado, sem chave secreta (--file, --signers)
   help                       esta ajuda
@@ -94,7 +94,7 @@ Opções dos comandos:
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
   --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes --release
-  --recipients --key-file --signing-key --signers
+  --recipients --key-file --signing-key --signers --seq
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
   --blob-bytes: teto do conjunto de mídia das conversas no seed (bytes, padrão 2147483648).`
 
@@ -266,6 +266,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     keyFile: null,
     signingKey: null,
     signers: null,
+    seq: null,
     name: null,
     join: null,
     bio: null,
@@ -328,6 +329,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     'key-file': ['secrets-key.json', 'keyFile', path.join(root, 'secrets-key.json')],
     'signing-key': ['signing-key.json', 'signingKey', path.join(root, 'signing-key.json')],
     signers: ['secrets-signers.txt', 'signers', path.join(root, 'secrets-signers.txt')],
+    seq: ['7', 'seq', '7'],
     name: ['Ana', 'name', 'Ana'],
     bio: ['uma bio', 'bio', 'uma bio'],
     text: ['olá mundo', 'text', 'olá mundo'],
@@ -373,6 +375,7 @@ test('CLI parser, R5 help and command router', async (t) => {
   t.is(parse(['--key-file', '/k/secrets-key.json']).keyFile, '/k/secrets-key.json')
   t.is(parse(['--signing-key', '/k/signing-key.json']).signingKey, '/k/signing-key.json')
   t.is(parse(['--signers', '/k/secrets-signers.txt']).signers, '/k/secrets-signers.txt')
+  t.is(parse(['--seq', '007']).seq, '007', '--seq stays raw for secrets seal to check')
   t.is(parse([], { VARANDA_DATA: 'env-data' }).dataDir, path.join(root, 'env-data'))
   t.is(parse(['--data', 'flag-data'], { VARANDA_DATA: 'env-data' }).dataDir, path.join(root, 'flag-data'))
   t.is(parse(['--data', ''], { VARANDA_DATA: 'env-data' }).dataDir, path.join(root, 'env-data'))
