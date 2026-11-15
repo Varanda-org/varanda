@@ -83,6 +83,18 @@ export function countsAfter (counts, kind, delta) {
   return { ...counts, [field]: Math.max(0, n + delta) }
 }
 
+// Whether an index answer, read from `started` on, may replace the number on
+// screen for one post: not while a toggle is pending, not after a newer read
+// answered for it, and not after a toggle settled during the read (its number
+// already moved on, and the older answer would undo it and leave the count one too
+// high after a Desfazer). With no number on screen yet there is nothing to keep.
+export function countAnswerApplies ({ pending, answeredAt, touchedAt, started, hasCount }) {
+  if (pending) return false
+  if (answeredAt > started) return false
+  if (touchedAt > started && hasCount) return false
+  return true
+}
+
 // A new Map ref -> counts with the fetched counts (a plain object or a Map,
 // as from indexClient fetchCounts) taking precedence.
 export function mergeCounts (map, fetched) {
