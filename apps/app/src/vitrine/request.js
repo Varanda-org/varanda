@@ -62,6 +62,8 @@ export function createVitrineRequest (fixtures, options) {
   const reactions = { like: new Map(), repost: new Map() }
   const live = []
   const deleted = new Map()
+  // 'from:seq' -> 'kept' | 'declined', the demo's testimonial.decide.
+  const decisions = new Map()
   const logs = new Map()
   const roster = new Map()
   const association = data.association
@@ -505,7 +507,7 @@ export function createVitrineRequest (fixtures, options) {
     // No seen sync offline: a signature the account call never uses, and a
     // merge that changes nothing.
     'seen.sign': () => ({ signature, prevHash: '0'.repeat(64) }),
-    'seen.merge': () => ({ avisos: { own: [], pages: {} }, pending: false, dmChanged: false, groupChanged: false, blocksChanged: false, caughtUp: [] }),
+    'seen.merge': () => ({ avisos: { own: [], pages: {} }, pending: false, dmChanged: false, groupChanged: false, blocksChanged: false, testimonialsChanged: false, caughtUp: [] }),
     'report.sign': signed,
     'appeal.sign': signed,
     'dm.reportSign': signed,
@@ -930,14 +932,30 @@ export function createVitrineRequest (fixtures, options) {
       sealed.set(result.ref, { text, nonce })
       return result
     },
-    'testimonial.pending': () => ({
-      items: testimonialPointersOf(data.own).pending.flatMap(({ from, seq }) => {
+    'testimonial.decide': ({ from, seq, state, ifNew }) => {
+      if (from === data.own) refuse('USAGE', 'referência inválida')
+      const ref = `${from}:${seq}`
+      if (!sealed.has(ref) || !liveEntry(from, seq)) refuse('USAGE', 'depoimento não encontrado')
+      if (state !== 'kept' && state !== 'declined') refuse('USAGE', 'estado inválido')
+      if (ifNew === true && decisions.has(ref)) return { changed: false }
+      if (decisions.get(ref) === state) return { changed: false }
+      decisions.set(ref, state)
+      return { changed: true }
+    },
+    'testimonial.pending': () => {
+      const index = testimonialPointersOf(data.own)
+      const rowsOf = (list) => list.flatMap(({ from, seq }) => {
         const opened = sealed.get(`${from}:${seq}`)
         const block = liveEntry(from, seq)
-        return opened && block ? [{ from, seq, text: opened.text, at: block.record.at }] : []
-      }),
-      incomplete: false
-    }),
+        return opened && block ? [{ from, seq, text: opened.text, at: block.record.at, state: decisions.get(`${from}:${seq}`) }] : []
+      })
+      const row = ({ from, seq, text, at }) => ({ from, seq, text, at })
+      return {
+        items: rowsOf(index.pending).filter((r) => r.state === undefined).map(row),
+        kept: rowsOf(index.unshown).filter((r) => r.state === 'kept').map(row),
+        incomplete: false
+      }
+    },
     'testimonial.show': ({ from, seq }) => {
       const opened = sealed.get(`${from}:${seq}`)
       const block = from === data.own ? null : liveEntry(from, seq)

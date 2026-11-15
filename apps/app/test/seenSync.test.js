@@ -597,3 +597,15 @@ test('blocksChanged: any merge of the pass that brought a change reports it', as
   })
   t.is((await runSeenPass({ member: MEMBER, request: h.request, http: h.http, avisos: AVISOS })).blocksChanged, true)
 })
+
+test('testimonialsChanged: any merge of the pass that brought a change reports it', async (t) => {
+  const { runSeenPass } = await load()
+  const quiet = harness({ read: { hash: null, blob: null }, finish: [], merges: [res(false)] })
+  t.is((await runSeenPass({ member: MEMBER, request: quiet.request, http: quiet.http, avisos: AVISOS })).testimonialsChanged, false)
+  const h = harness({
+    read: { hash: null, blob: null },
+    finish: [{ ok: true, hash: 'hh' }],
+    merges: [res(true, { testimonialsChanged: true }), res(false)]
+  })
+  t.is((await runSeenPass({ member: MEMBER, request: h.request, http: h.http, avisos: AVISOS })).testimonialsChanged, true)
+})

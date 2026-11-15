@@ -1138,7 +1138,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
               onClose={() => setWritingTestimonial(false)}
               onSent={(result) => {
                 if (result && typeof result.ref === 'string') setSentTestimonial(result.ref)
-                if (typeof onToast === 'function') onToast('Depoimento enviado. Aparece quando a pessoa aprovar.')
+                if (typeof onToast === 'function') onToast('Depoimento enviado. Só aparece no perfil se a pessoa escolher mostrar.')
               }}
               onUncertain={() => {
                 setTestimonialUncertain(true)

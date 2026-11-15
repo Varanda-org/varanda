@@ -890,9 +890,22 @@ const SPECS = {
     }
   },
   'testimonial.write': { fields: { to: req(isKey), text: req(str(1, L.MAX_TESTIMONIAL)) }, mutating: true },
-  // Result { items: [{ from, seq, text, at }], incomplete: boolean } (5.100).
+  // Result { items: [{ from, seq, text, at }], kept: [{ from, seq, text, at }],
+  // incomplete: boolean } (5.100).
   'testimonial.pending': { fields: none },
   'testimonial.show': { fields: { from: req(isKey), seq: req(int(1, Number.MAX_SAFE_INTEGER)) }, mutating: true },
+  // Keeps a received testimonial privately or declines it; the decision syncs
+  // across the member's devices in the seen document. ifNew records it only
+  // when none is held for that testimonial.
+  'testimonial.decide': {
+    fields: {
+      from: req(isKey),
+      seq: req(int(1, 4294967295)),
+      state: req((v) => v === 'kept' || v === 'declined'),
+      ifNew: opt(isBool, false)
+    },
+    mutating: true
+  },
   'testimonial.delete': { fields: { to: req((v) => isRef(v, 1)), about: opt(isKey) }, mutating: true },
   'moment.create': { fields: { text: req(str(0, 200)), media: req(isMomentMediaItem), music: opt(isMomentMusic) }, mutating: true },
   'moments.read': { fields: none },

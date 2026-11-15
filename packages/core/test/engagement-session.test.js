@@ -149,10 +149,14 @@ test('the depoimento methods are refused on the node session, nothing written', 
   t.alike(await failure(m.call('testimonial.pending', {})), NO)
   t.alike(await failure(m.call('testimonial.show', { from: OTHER, seq: 3 })), NO)
   t.alike(await failure(m.call('testimonial.delete', { to: m.publicKey + ':1' })), NO)
+  t.alike(await failure(m.call('testimonial.decide', { from: OTHER, seq: 3, state: 'kept' })), NO)
+  t.alike(await failure(m.call('testimonial.decide', { from: OTHER, seq: 3, state: 'declined', ifNew: true })), NO)
   t.alike(await m.call('log.read'), before, 'nothing written')
   t.alike(m.session.internal, [])
   const UNKNOWN = { code: 'USAGE', message: 'parâmetro desconhecido' }
   t.alike(await failure(m.call('testimonial.pending', { extra: 1 })), UNKNOWN)
+  t.alike(await failure(m.call('testimonial.decide', { from: OTHER, seq: 3, state: 'kept', extra: 1 })), UNKNOWN)
+  t.alike(await failure(m.call('testimonial.decide', { from: OTHER, seq: 3, state: 'hidden' })), { code: 'USAGE', message: 'parâmetro inválido: state' })
   t.alike(await failure(m.call('testimonial.write', { to: OTHER, text: 'x'.repeat(401) })), { code: 'USAGE', message: 'parâmetro inválido: text' })
 })
 

@@ -53,6 +53,7 @@ const { presentState, clearRanges } = require('@varanda/core/lib/deletion')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { SEEN_BLOB_BYTES, SEEN_BLOB_B64 } = require('@varanda/core/lib/seen-blob')
 const { normalizeBlocks } = require('@varanda/core/lib/member-block')
+const { normalizeDecisions } = require('@varanda/core/lib/testimonial-decision')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { DIARY_OPTIONS } = require('./diary-options')
 
@@ -1610,6 +1611,27 @@ function writeSeenSync (storage, own, { hash = null, gen = 0 } = {}) {
   return storage.writeJson('seenSync', { v: 1, own, hash, gen })
 }
 
+// kv testimonialDecisions = { v: 1, own: hex64, entries }: the depoimentos
+// the member kept privately or declined (@varanda/core
+// lib/testimonial-decision.js), synced through the seen document. Bound to
+// the own key like seenLocal: another identity's list reads as empty.
+// Identity state: reset() deletes it.
+async function readTestimonialDecisions (storage, own) {
+  const data = await readKv(storage, 'testimonialDecisions')
+  if (!isVersioned(data) || !sameOwn(data, own)) return []
+  return normalizeDecisions(data.entries)
+}
+
+function writeTestimonialDecisions (storage, own, entries) {
+  if (!isHex64(own)) throw new TypeError('chave inválida')
+  const list = normalizeDecisions(entries)
+  return storage.writeJson('testimonialDecisions', list.length === 0 ? null : { v: 1, own, entries: list })
+}
+
+function clearTestimonialDecisions (storage) {
+  return storage.writeJson('testimonialDecisions', null)
+}
+
 // A secretbox under the local dm key (./dm-store.js seal): { nonce, box }.
 // Stamps and queued drops are bearer values (anyone holding one can spend
 // it), so kv holds them only sealed; plaintext entries of the earlier v1
@@ -2053,6 +2075,9 @@ module.exports = {
   writeSeenSync,
   readSeenRemote,
   writeSeenRemote,
+  readTestimonialDecisions,
+  writeTestimonialDecisions,
+  clearTestimonialDecisions,
   readDmStamps,
   writeDmStamps,
   readBlobStamps,

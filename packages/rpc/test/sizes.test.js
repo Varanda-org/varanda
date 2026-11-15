@@ -51,6 +51,9 @@ const {
   DM_MEDIA_CHUNK_BYTES,
   DM_MEDIA_MAX_CHUNKS,
   DM_THREAD_LIMIT_MAX,
+  MAX_TESTIMONIAL,
+  TESTIMONIAL_PENDING_MAX,
+  TESTIMONIAL_KEPT_MAX,
   feira
 } = require('..')
 
@@ -154,10 +157,26 @@ test('seen sync: worst-case request and results fit', (t) => {
     pending: false,
     dmChanged: false,
     groupChanged: false,
+    testimonialsChanged: false,
     caughtUp: Array.from({ length: 512 }, (_, i) => i.toString(16).padStart(64, '0'))
   })
   t.ok(merge < MAX_MESSAGE)
   t.comment('seen.merge worst-case result with 512 caught-up keys: ' + merge + ' bytes')
+})
+
+// testimonial.pending: a testimonial text refuses control characters and
+// lone surrogates, so a 4-byte character is its widest code point.
+test('testimonial.pending: worst-case pending and kept lists fit', (t) => {
+  t.is(TESTIMONIAL_PENDING_MAX, 64)
+  t.is(TESTIMONIAL_KEPT_MAX, 64)
+  const row = { from: HEX, seq: SEQ, text: '\u{1f600}'.repeat(MAX_TESTIMONIAL), at: AT }
+  const bytes = size({
+    items: Array(TESTIMONIAL_PENDING_MAX).fill(row),
+    kept: Array(TESTIMONIAL_KEPT_MAX).fill(row),
+    incomplete: false
+  })
+  t.ok(bytes < MAX_MESSAGE)
+  t.comment('testimonial.pending worst-case result: ' + bytes + ' bytes')
 })
 
 function feedResult (n, ch, preview = true) {

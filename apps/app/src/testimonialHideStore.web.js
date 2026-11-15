@@ -6,4 +6,4 @@ const store = createTestimonialHideStore({
 })
 
 export const loadTestimonialHidden = () => store.load()
-export const hideTestimonial = (id) => store.hide(id)
+export const clearTestimonialHidden = () => store.clear()

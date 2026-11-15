@@ -1,7 +1,6 @@
-// "Agora não" on a pending depoimento: a hide kept on this device only. It
-// writes no record and tells nobody; the writer's sealed block stays where
-// it is and the depoimento can still be shown from another device. Hidden
-// ids are the writer block refs 'from:seq'. Pure: the storage is injected
+// The legacy per-device "Agora não" list, read only for the one-time move
+// into node decisions (migrateHidden). Nothing writes to it any more. Ids
+// are the writer block refs 'from:seq'. Pure: the storage is injected
 // (testimonialHideStore.native.js / .web.js).
 
 export const STORAGE_KEY = 'varanda-testimonial-hidden'
@@ -33,17 +32,44 @@ export function hiddenListOf (value) {
   return out.length > HIDDEN_MAX ? out.slice(out.length - HIDDEN_MAX) : out
 }
 
-export function withHidden (list, id) {
-  const base = hiddenListOf(list)
-  if (!isHideId(id)) return base
-  return hiddenListOf(base.filter((x) => x !== id).concat([id]))
+const SEQ_MAX = 4294967295
+
+// The newest `max` valid ids (the list keeps oldest first) as
+// testimonial.decide params; ifNew leaves an existing decision untouched.
+// With `allowed` (a Set of 'from:seq'), only those ids are kept.
+export function migrationParams (list, max = 64, allowed) {
+  const out = []
+  const ids = hiddenListOf(list)
+  for (let i = ids.length - 1; i >= 0 && out.length < max; i--) {
+    if (allowed && !allowed.has(ids[i])) continue
+    const [from, seq] = ids[i].split(':')
+    if (Number(seq) > SEQ_MAX) continue
+    out.push({ from, seq: Number(seq), state: 'kept', ifNew: true })
+  }
+  return out
 }
 
-// Pending rows (testimonials.js pendingRows) minus the ones hidden here.
-export function visiblePending (rows, hidden) {
-  if (!Array.isArray(rows)) return []
-  const set = hidden instanceof Set ? hidden : new Set(hiddenListOf(hidden))
-  return rows.filter((r) => r && typeof r.ref === 'string' && !set.has(r.ref))
+// One-time move of the per-device hide list into node decisions. A failed
+// decision is never reissued (the node may have applied it), its row just
+// returns to "Para aprovar". `allowed` limits it to refs the current account
+// can see: the list is per device, so after an account switch the other
+// account's refs must not become decisions here.
+export async function migrateHidden ({ load, clear, request, allowed }) {
+  const list = await load()
+  if (!Array.isArray(list) || list.length === 0) return 0
+  // The list is cleared before anything is sent: a crash or a storage
+  // failure afterwards must not make a later run resend a decide that may
+  // have gone out (uncertain). If the clear fails, nothing is sent now.
+  const params = migrationParams(list, 64, allowed)
+  if (await clear() === false) return 0
+  let ok = 0
+  for (const p of params) {
+    try {
+      await request('testimonial.decide', p)
+      ok++
+    } catch {}
+  }
+  return ok
 }
 
 export function createTestimonialHideStore ({ read, write }) {
@@ -58,12 +84,9 @@ export function createTestimonialHideStore ({ read, write }) {
       } catch {}
       return memory === null ? [] : memory.slice()
     },
-    async hide (id) {
-      if (!isHideId(id)) return false
-      const current = memory !== null ? memory : await this.load()
-      memory = withHidden(current, id)
-      const raw = JSON.stringify(memory)
-      const pending = writes.then(() => write(raw)).then(() => true, () => false)
+    async clear () {
+      memory = []
+      const pending = writes.then(() => write('[]')).then(() => true, () => false)
       writes = pending
       return pending
     }

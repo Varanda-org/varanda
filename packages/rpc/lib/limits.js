@@ -21,6 +21,10 @@ const MAX_BIO = 280
 const MAX_TEXT = 1000
 const MAX_TESTIMONIAL = 400
 const TESTIMONIAL_PENDING_MAX = 64
+// Testimonial decisions synced in the member's seen document: kept and
+// declined each keep their newest entries (packages/core/lib/seen-blob.js).
+const TESTIMONIAL_KEPT_MAX = 64
+const TESTIMONIAL_DECLINED_MAX = 64
 const MEDIA_BLOCK_BYTES = 32768
 const MAX_MEDIA_BLOCKS = 8192
 const MAX_MEDIA_PER_POST = 10
@@ -188,6 +192,8 @@ module.exports = {
   MAX_TEXT,
   MAX_TESTIMONIAL,
   TESTIMONIAL_PENDING_MAX,
+  TESTIMONIAL_KEPT_MAX,
+  TESTIMONIAL_DECLINED_MAX,
   MEDIA_BLOCK_BYTES,
   MAX_MEDIA_BLOCKS,
   MAX_MEDIA_PER_POST,

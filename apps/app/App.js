@@ -175,7 +175,7 @@ import TelefoneAviso from './src/screens/TelefoneAviso'
 import { showExplainer } from './src/phoneExplainer'
 import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, parseAppLink, parseAppReturn, waitsForInstallation } from './src/linkReturn'
 import Membro, { canConverseWithPage } from './src/screens/Membro'
-import Depoimentos from './src/screens/Depoimentos'
+import Depoimentos, { testimonialsChanged } from './src/screens/Depoimentos'
 import Momentos from './src/screens/Momentos'
 import Feira from './src/screens/Feira'
 import Anuncio from './src/screens/Anuncio'
@@ -2238,6 +2238,7 @@ function Member () {
       if (result.dmChanged) bumpDm()
       // Another device of the passkey blocked or unblocked someone.
       if (result.blocksChanged) refreshBlocks().catch(() => {})
+      if (result.testimonialsChanged) testimonialsChanged()
       if (result.groupChanged) {
         bumpSeen()
         const taken = snap.value

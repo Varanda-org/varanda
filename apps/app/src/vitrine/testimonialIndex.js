@@ -35,7 +35,15 @@ export function testimonialPointers (entries, deleted, owner) {
     .sort((a, b) => Date.parse(b.record.at) - Date.parse(a.record.at) || compare(a.author, b.author))
     .slice(0, 64)
     .map((e) => ({ from: e.author, seq: e.seq }))
-  return { shown, pending }
+  // Live blocks with no live show of their own (a removed show returns
+  // them), for the ones the member kept.
+  const showing = new Set(shown.map((s) => `${s.from}:${s.wseq}`))
+  const unshown = [...blocks.values()]
+    .filter((e) => !showing.has(`${e.author}:${e.seq}`))
+    .sort((a, b) => Date.parse(b.record.at) - Date.parse(a.record.at) || compare(a.author, b.author))
+    .slice(0, 64)
+    .map((e) => ({ from: e.author, seq: e.seq }))
+  return { shown, pending, unshown }
 }
 
 // A live Vitrine request registers its diaries here, so the route follows
