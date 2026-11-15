@@ -2790,7 +2790,7 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado.
 ### Limites
 
 - Fechar vale por perfil do navegador, não por conta; a nota volta depois de 30 dias. Sem armazenamento, volta na próxima carga.
-- Sair continua sem esperar uma troca dos avisos em andamento, como descrito na seção 38: um Sair no meio de um Ativar pode deixar este navegador inscrito até a próxima leitura. Depois de entrar de novo, a linha e a nota ficam pendentes até essa troca terminar; se o pedido de permissão ficar aberto, elas esperam a resposta, e se uma leitura do navegador travar, até recarregar a página.
+- Sair espera até 3 s uma troca dos avisos em andamento e desliga de novo um "Permitir" tardio quando a troca termina (seção 38, `offHere`). Depois de entrar de novo, a linha e a nota ficam pendentes até essa troca terminar; se o pedido de permissão ficar aberto, elas esperam a resposta, e se uma leitura do navegador travar, até recarregar a página.
 - Uma leitura sem conexão ao abrir Ajustes volta sem chave: a linha mostra o texto de indisponível e a nota some até a próxima leitura, como antes desta mudança. Se o service worker não fica pronto a tempo, a linha mostra o texto de recarregar, também como antes. Como fechar Ajustes não apaga mais o estado, ao reabrir a linha mostra o estado anterior até a leitura nova chegar.
 - Se Sair ou Recomeçar falhar depois de desligar os avisos, a linha continua mostrando o estado anterior até a próxima leitura, como antes desta mudança.
 - Com duas abas abertas, uma não vê a inscrição feita na outra até ler de novo (abrir Ajustes, voltar a conexão, bloquear e desbloquear). Ativar nessa aba recebe do navegador a inscrição que já existe e, se um passo seguinte falhar com recusa, a desfaz, como já acontecia na linha de Ajustes; a nota aumenta essa janela porque a leitura dela vale até a próxima.
@@ -4200,7 +4200,6 @@ Web (Chrome ou Safari, com o nó no navegador ou com o `varanda-serve`):
 ### Não verificado / limites conhecidos
 
 - Nenhuma caixa acima foi executada nesta documentação. Os testes automáticos cobrem só a janela do toque duplo, a abertura pendente e a regra de que um toque duplo com curtida ou republicação pendente da mesma publicação não mostra o coração (`doubleTapPlan`); o pulo, o coração de 64 pt, a vibração e o aviso ainda precisam de aparelho.
-- Um desfazer durante a atualização puxada pode deixar a contagem uma a mais até a próxima atualização.
 - O desfazer atualiza só a tela que mostrou o aviso.
 - Um desfazer enquanto uma curtida da mesma publicação está pendente não entra na fila; o botão de republicar da linha continua desfazendo.
 - Um arrasto que começa fora de qualquer publicação, dentro dos 280 ms, não cancela a abertura da conversa. Tocar numa aba cancela.
@@ -4319,11 +4318,11 @@ Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emula
 
 ## 88. Avisos da página (PR feat/pages-app)
 
-O dono e os administradores leem em Avisos o que chega para a página: quem começou a seguir a página, as respostas, as citações e as menções (sem as curtidas e republicações do canal `notices/3`). O serviço de conta lê os avisos pelo semeador, confere cada linha e responde só ao dono e aos administradores (ação `notices`, leitura assinada, 8 por minuto por página; página mudada de chave responde `movida`). Nenhum Web Push vai para uma página. Contrato em `docs/protocol.md` seção 12 ("Avisos de uma página") e em `docs/rpc.md` (5.84); dados em `docs/design.md` (LGPD).
+O dono e os administradores leem em Avisos o que chega para a página: quem começou a seguir a página, as respostas, as citações, as menções e as curtidas e republicações das publicações da página (canal `notices/3`; um semeador sem ele dá só as quatro primeiras). O serviço de conta lê os avisos pelo semeador, confere cada linha e responde só ao dono e aos administradores (ação `notices`, leitura assinada, 8 por minuto por página; página mudada de chave responde `movida`). Nenhum Web Push vai para uma página. Contrato em `docs/protocol.md` seção 12 ("Avisos de uma página") e em `docs/rpc.md` (5.84); dados em `docs/design.md` (LGPD).
 
 ### Como verificar
 
-Do repositório: `npm run lint`, `npm test` e `npm run demo`. Testes desta etapa: `apps/cli/test/account-pages-notices.test.js` (linhas verificadas, limite por página, administrador removido) e `apps/app/test/notices.test.js`. Não rode nada contra o serviço de produção.
+Do repositório: `npm run lint`, `npm test` e `npm run demo`. Testes desta etapa: `apps/cli/test/account-pages-notices.test.js` (linhas verificadas, limite por página, administrador removido), `apps/cli/test/pages-notices.test.js` (curtida e republicação de uma publicação da página; curtida de publicação de outra pessoa, bloco forjado e autor desconhecido recusados) e `apps/app/test/notices.test.js`. Não rode nada contra o serviço de produção.
 
 ### Checagens humanas (a fazer)
 
@@ -4331,15 +4330,19 @@ Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emula
 
 1. **Seguir a página.** C segue a página; em A e em B, Avisos mostra "começou a seguir a página" com o nome de C.
 2. **Menção.** C publica um texto com o @nome da página; o aviso de menção aparece para A e para B, sem o texto cru de um par fora de `displayText`.
-3. **Quem não administra.** C não vê os avisos da página em nenhuma tela.
-4. **Administrador removido.** A remove B; B deixa de ver os avisos da página no próximo carregamento.
-5. **Limite.** Atualizar Avisos da página mais de 8 vezes em um minuto mostra o limite e nada quebra; passado o minuto, funciona de novo.
-6. **Sem push.** Nenhuma notificação do sistema chega ao aparelho por causa de um aviso da página.
-7. **Página encerrada.** Depois de encerrar a página, Avisos da página responde "Esta página foi encerrada".
+3. **Curtida e republicação.** C curte e republica uma publicação da página; o aviso "curtiu" e o de "republicou" aparecem para A e para B. Uma curtida de C em publicação de outra pessoa não aparece.
+4. **Quem não administra.** C não vê os avisos da página em nenhuma tela.
+5. **Administrador removido.** A remove B; B deixa de ver os avisos da página no próximo carregamento.
+6. **Limite.** Atualizar Avisos da página mais de 8 vezes em um minuto mostra o limite e nada quebra; passado o minuto, funciona de novo.
+7. **Sem push.** Nenhuma notificação do sistema chega ao aparelho por causa de um aviso da página.
+8. **Página encerrada.** Depois de encerrar a página, Avisos da página responde "Esta página foi encerrada".
+9. **Links no trecho.** Numa linha de Avisos (de uma pessoa ou da página) cujo trecho da publicação traz um endereço inteiro (`https://exemplo.com/a`), tocar no endereço abre o navegador e tocar no resto da linha abre a conversa; um trecho cortado em 90 caracteres no meio de um endereço continua texto simples, sem link.
 
 ### Não verificado / limites conhecidos
 
 - Nada foi rodado num navegador nem num aparelho pelo agente.
+- Se o canal v3 não responde e a leitura cai para o v2, a leitura sai com `incomplete` (a nota "alguns avisos ainda podem chegar"), sem teste automático (o semeador do teste sempre responde).
+- Um semeador que não abre `varanda/notices/3` leva a leitura para o v2, sem curtidas nem republicações; esse caminho não tem teste automático (o semeador do teste sempre abre os dois canais).
 - O limite de 8 por minuto por página fica na memória do serviço e recomeça quando ele reinicia.
 - O serviço lê os avisos da página em nome dos administradores (Termos 15).
 
@@ -5844,7 +5847,7 @@ Pontos conhecidos, deixados como estão (P3):
 
 - Cabeçalho de publicação e de citação com texto de acessibilidade extra-grande, tela de 320 pt e data de ano anterior: o nome fica com cerca de 80 pt na publicação e 40 pt no cartão de citação; não chega a zero, mas rever se um aparelho mostrar o contrário.
 - Visualizador de foto da conversa: ícones da barra de status escuros sobre o fundo preto no Android (já era assim; a correção pede definir a barra antes de abrir o Modal ou trocar o Modal por uma sobreposição).
-- Texto: "Fechar" e "Cancelar" ainda variam entre telas; "serviço indisponível" e "foto indisponível" em minúscula; marcador monoespaçado do convite; Perfil como folha no Diário e como página nos Ajustes; iniciais do cabeçalho de pedido contra o ícone da lista; o rótulo Denunciar na publicação e no perfil tem tintas diferentes (fixado pelos testes de `postActions`).
+- Texto: "Fechar" e "Cancelar" ainda variam entre telas; "serviço indisponível" e "foto indisponível" em minúscula; Perfil como folha no Diário e como página nos Ajustes; iniciais do cabeçalho de pedido contra o ícone da lista; o rótulo Denunciar na publicação e no perfil tem tintas diferentes (fixado pelos testes de `postActions`).
 - Web: anel de foco do Fechar sem folga; seta de voltar de 40 x 40; foco depois de Escape volta ao topo em vez de à lista; campo da Busca 4 pt abaixo do de Conversas; abas da Busca sem `aria-selected`; foco depois de fechar a Publicar com Escape; o rascunho do Perfil zera ao voltar para a lista de Ajustes (igual com a seta; já era assim).
 - Compartilhar sem origem da instalação mostra "Não foi possível copiar o link." (`communityShare.js`, fora desta PR).
 
@@ -11131,7 +11134,22 @@ node apps/cli/test/post-page.test.js
 - [ ] Link aberto de dentro do WhatsApp e do Instagram (navegador embutido): pendente.
 - [ ] Fonte maior no sistema ou no navegador (ajuste de tamanho do texto, não zoom da página), no Android e no iOS: pendente. A página usa tamanhos em px, como o app.
 
-## 247. Versões do semeador por imagem (PRs build/seeder-release-images, feat/seeder-pull-updater, feat/seeder-sealed-secrets)
+## 247. Polimento da Busca, da ajuda e do campo mono (PR fix/polimento-navegacao-sobras)
+
+Fecha três itens da #448, só no app:
+
+- Em "Convidar por @nome" (e em todo campo `mono`), a fonte monoespaçada vale só para o valor digitado: o marcador do campo vazio fica na fonte normal (`Field` em `apps/app/src/ui/index.js`). O tamanho (14) vale para o campo todo, vazio ou não, então a primeira tecla não muda a altura do campo.
+- A ajuda da Busca (`SEARCH_MEMORY` em `apps/app/src/topics.js`) deixou de falar em "memória do navegador enquanto a aba está aberta" e diz "memória, enquanto o app ou a aba está aberto".
+- Na Busca, abrir um perfil, uma publicação ou uma @menção fecha o teclado (`openMember`, `openThread` e `openMention` em `apps/app/src/screens/BuscaGlobal.js`), para ele não ficar por cima da tela que abre.
+
+1. [ ] Android e iOS: em Busca, Contas, digitar um nome e tocar numa pessoa: o perfil abre sem teclado (não realizada ainda).
+2. [ ] Android e iOS: em Busca, Publicações, tocar num autor, numa publicação e numa @menção: sem teclado na tela nova (não realizada ainda).
+3. [ ] Convidar por @nome: o marcador "nome, @nome ou código" aparece na fonte normal e o que se digita, em monoespaçado, sem mudar o tamanho nem a altura do campo na primeira tecla (não realizada ainda).
+4. [ ] Ajuda da Busca no app instalado: o texto não cita o navegador (não realizada ainda).
+
+Testes: `apps/app/test/buscaGlobal.test.js`, `apps/app/test/uiKit.test.js` e `apps/app/test/help.test.js`. Os testes de `Field` e de `BuscaGlobal` conferem o código, não montam a tela.
+
+## 252. Versões do semeador por imagem (PRs build/seeder-release-images, feat/seeder-pull-updater, feat/seeder-sealed-secrets)
 
 Esta seção é a lista de primeira execução de quem mantém o repositório, para tudo que nenhum teste local alcança: a assinatura sem chave precisa do token OIDC do GitHub, o envio e a troca de etiqueta no GHCR precisam do registro, e a troca de versão precisa de um servidor de verdade. Os testes locais (`apps/cli/test/update.test.js`, `deploy.test.js` e `readme-pull.test.js`) cobrem os scripts com `docker`, `curl` e `systemctl` de mentira; nada abaixo é coberto por eles. Rode na ordem, num servidor de teste, antes de migrar o primeiro servidor de produção. O passo a passo de quem opera está no README, seção "Atualização por imagem (pull)". A lista é um roteiro, não um registro de execução: toda caixa começa sem marca.
 

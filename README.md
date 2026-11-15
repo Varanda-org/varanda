@@ -1005,7 +1005,7 @@ Passos de quem mantém o repositório:
 4. Settings > Environments > New environment `release-stable`: revisores obrigatórios (quem mantém), sem autorrevisão e implantação só a partir de `main`. Faça isto ANTES de definir `VARANDA_PROMOTE`: o GitHub cria um ambiente que falta sem proteção nenhuma na primeira vez que um job o cita.
 5. Só então defina a variável `VARANDA_PROMOTE` com o valor `true` (liga só o `promote.yml`).
 6. Rode o `promote` (Actions > promote > Run workflow, em `main`, com o SHA de 40 dígitos de um commit já publicado pelo `release`) para a primeira versão `stable`.
-7. Rode a seção 247 de `docs/verification.md` num servidor de teste antes de migrar a produção.
+7. Rode a seção 252 de `docs/verification.md` num servidor de teste antes de migrar a produção.
 
 ### systemd
 

@@ -154,7 +154,7 @@ test('the section names the files and the marker that update.sh uses', (t) => {
   t.ok(section.includes(marker), 'modo-pull marker')
 })
 
-test('no em dash in the README section, the CHANGELOG entry or verification section 247', (t) => {
+test('no em dash in the README section, the CHANGELOG entry or verification section 252', (t) => {
   t.is(section.includes(EM_DASH), false, 'README section')
   const changelog = read('CHANGELOG.md')
   const top = changelog.indexOf('## [Não lançado]\n\n')
@@ -167,13 +167,13 @@ test('no em dash in the README section, the CHANGELOG entry or verification sect
   t.ok(second.startsWith('- ') && second.includes('feat/seeder-sealed-secrets'), 'the next entry is the sealed-secrets entry')
   t.is(second.includes(EM_DASH), false, 'CHANGELOG sealed-secrets entry')
   const verification = read('docs/verification.md')
-  const at = verification.indexOf('\n## 247. ')
-  t.ok(at > -1, 'verification has section 247')
+  const at = verification.indexOf('\n## 252. ')
+  t.ok(at > -1, 'verification has section 252')
   const next = verification.indexOf('\n## ', at + 1)
   const part = next === -1 ? verification.slice(at) : verification.slice(at, next)
-  t.is(part.includes(EM_DASH), false, 'verification section 247')
-  t.ok(part.startsWith('\n## 247. Versões do semeador por imagem (PRs build/seeder-release-images, feat/seeder-pull-updater, feat/seeder-sealed-secrets)\n'), 'section 247 has its title')
-  t.ok(part.includes('Manage Actions access'), 'section 247 checks the Write access of the packages')
+  t.is(part.includes(EM_DASH), false, 'verification section 252')
+  t.ok(part.startsWith('\n## 252. Versões do semeador por imagem (PRs build/seeder-release-images, feat/seeder-pull-updater, feat/seeder-sealed-secrets)\n'), 'section 252 has its title')
+  t.ok(part.includes('Manage Actions access'), 'section 252 checks the Write access of the packages')
 })
 
 // The flags of `secrets seal` as the HELP block of cli.js lists them.
@@ -216,13 +216,13 @@ test('the seal command in the section has the flags cli.js lists', (t) => {
   t.ok(command[1].includes('--out deploy/seeder/secrets.sealed.json'), 'and writes the file the bundle carries')
 })
 
-test('section 247 checks the sealed secrets flow', (t) => {
+test('section 252 checks the sealed secrets flow', (t) => {
   const verification = read('docs/verification.md')
-  const at = verification.indexOf('\n## 247. ')
+  const at = verification.indexOf('\n## 252. ')
   const next = verification.indexOf('\n## ', at + 1)
   const part = next === -1 ? verification.slice(at) : verification.slice(at, next)
   for (const needle of ['secrets-key', '/etc/varanda/secrets-key.json', 'efetivo.env', 'não é destinatário', 'docker inspect', 'rollback', 'secrets.test.js']) {
-    t.ok(part.includes(needle), 'section 247 names ' + needle)
+    t.ok(part.includes(needle), 'section 252 names ' + needle)
   }
   t.ok(part.includes('- [ ] 41. ') && part.includes('- [ ] 50. '), 'the sealed checks are numbered 41 to 50')
 })
