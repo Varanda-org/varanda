@@ -1697,6 +1697,34 @@ async function pushDmCtlQueue (storage, item, prefix = '') {
   return dropped
 }
 
+// kv dmReactPending = { v: 1, items: [{ meta, drops: [box | null, box | null] }] }:
+// the dm.react ops still waiting for a put (docs/rpc.md 5.119), oldest
+// first, at most MAX_DM_REACT_PENDING, the engine's own pending cap, so a
+// reload keeps no more than memory did. meta (the op without its drops) is
+// sealed under the local key, each drop not acked yet under the bytes key
+// derived from it (a drop is past the record bound); an acked drop is null.
+const MAX_DM_REACT_PENDING = 32
+
+function validReactPending (e) {
+  return e !== null && typeof e === 'object' && validBox(e.meta) && Array.isArray(e.drops) && e.drops.length === 2 &&
+    e.drops.every((d) => d === null || validBox(d))
+}
+
+function copyReactPending (e) {
+  return { meta: { nonce: e.meta.nonce, box: e.meta.box }, drops: e.drops.map((d) => d === null ? null : { nonce: d.nonce, box: d.box }) }
+}
+
+async function readDmReactPending (storage) {
+  const data = await readKv(storage, 'dmReactPending')
+  if (!isVersioned(data) || !Array.isArray(data.items)) return []
+  return data.items.filter(validReactPending).slice(-MAX_DM_REACT_PENDING).map(copyReactPending)
+}
+
+function writeDmReactPending (storage, items) {
+  const kept = items.filter(validReactPending).slice(-MAX_DM_REACT_PENDING).map(copyReactPending)
+  return storage.writeJson('dmReactPending', kept.length === 0 ? null : { v: 1, items: kept })
+}
+
 // kv pageSecrets = { v: 1, pages: { <page>: { gen, sealed, legacy, cert, previous? } } }:
 // the Página secrets this identity holds (./page-dm.js), `sealed`,
 // legacy.sealed and each previous[i].sealed a secretbox under the local dm
@@ -1917,7 +1945,7 @@ async function deleteDmData (storage) {
   // seenSync before seenRemote and seenLocal: an interrupted reset must
   // never leave the compare-and-swap cursor without the documents it was
   // taken from.
-  for (const key of ['seenSync', 'seenRemote', 'dmKey', 'dmCursor', 'dmSeen', 'dmStamps', 'blobStamps', 'dmCtlQueue', 'seenLocal']) await storage.writeJson(key, null)
+  for (const key of ['seenSync', 'seenRemote', 'dmKey', 'dmCursor', 'dmSeen', 'dmStamps', 'blobStamps', 'dmCtlQueue', 'dmReactPending', 'seenLocal']) await storage.writeJson(key, null)
 }
 
 // kv ageVerified / ageSince = { v: 1, proof }: the account service's signed
@@ -2062,6 +2090,9 @@ module.exports = {
   readDmCtlQueue,
   writeDmCtlQueue,
   pushDmCtlQueue,
+  readDmReactPending,
+  writeDmReactPending,
+  MAX_DM_REACT_PENDING,
   MAX_DM_CTL_QUEUE,
   DIARY,
   LOCKED,

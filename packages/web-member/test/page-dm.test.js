@@ -1278,3 +1278,28 @@ test('a carried legacy box opens drops to the old page key and files them for th
   await A.web.request('dm.pull')
   t.alike((await A.web.request('dm.thread', { page: K2, peer: C.key })).messages.map((m) => m.text), ['para a chave antiga', 'depois do bloqueio'], 'after unlock too')
 })
+
+test('dm.react tells a Página only from a diary held here: a held one is refused, an unheld peer never waits for a seeder peek', async (t) => {
+  t.timeout(300000)
+  const assoc = generateAssociationKeyPair()
+  const issuerKp = crypto.keyPair()
+  const issuer = { kp: issuerKp, cert: createIssuerCert({ issuer: hex(issuerKp.publicKey) }, assoc) }
+  const seeder = await dmSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url)
+  // A peek the stand-in seeder never answers would hold the call for this long.
+  const C = await memberNode(t, assoc, seeder.url, { peekTimeoutMs: 120000 })
+  const P = await adoptedPage(t, A, { assoc, issuer }, [C])
+  const target = { from: P, id: dmCore.newMessageId() }
+
+  const refused = await errorOf(C.web.request('dm.react', { to: P, target, emoji: '\u{1f44d}' }))
+  t.is(refused && refused.message, 'conversas com uma Página não têm reações', 'a held Página is refused')
+
+  const X = hex(crypto.keyPair().publicKey)
+  C.peeks.set(X, { box: hex(crypto.randomBytes(32)), gen: 1 })
+  let timer
+  const waited = new Promise((resolve) => { timer = setTimeout(() => resolve('waited'), 20000) })
+  const answer = await Promise.race([errorOf(C.web.request('dm.react', { to: X, target: { from: X, id: dmCore.newMessageId() }, emoji: '\u{1f44d}' })), waited])
+  clearTimeout(timer)
+  t.not(answer, 'waited', 'answered without waiting for a peek of the unheld diary')
+  t.is(answer && answer.message, 'mensagem não encontrada', 'past the Página check: the engine answers for the missing message')
+})

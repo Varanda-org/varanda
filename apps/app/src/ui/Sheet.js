@@ -4,7 +4,8 @@
 // Android and web draw a backdrop and a rounded panel. Modal unmounts its
 // children when closed, so callers keep drafts outside the sheet. `background`
 // colours the body down to the bottom edge (home indicator included); it
-// defaults to the card colour.
+// defaults to the card colour. `onDismiss` runs once the sheet has finished
+// leaving where the platform reports it (iOS, web; Android's Modal does not).
 
 import { useContext, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Animated, Modal, PanResponder, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
@@ -19,8 +20,53 @@ import { holdEmbeds } from '../embedLive'
 import { ScreenVisible, SheetDepth } from './screenVisible'
 import { useReduceMotion } from './StackLayer'
 import { claimDrag, dragVerdict } from '../sheetDrag'
+import { sheetHandover } from '../sheetHandover'
 
 export const TEXT_CAP = 1.3
+// Android's Modal never reports a dismissal, so its slide (about 250 ms) is
+// waited out; elsewhere the timer only covers a dismissal that never reports.
+const LEAVE_FALLBACK_MS = Platform.OS === 'android' ? 320 : 700
+
+// The Modal's own visibility under the shared hand-over: `open` asked while
+// another sheet is still leaving shows once that one is gone, and this one
+// counts as leaving from the moment it hides until `dismissed` (its Modal's
+// onDismiss) or the fallback. Leaving is marked in a layout effect, before
+// any request in the same commit, so a sheet closed and another opened by one
+// state change still hand over. A sheet mounted open starts hidden too: in
+// render, a sheet closing in the same commit has not marked itself leaving
+// yet, and the request (a passive effect) runs after every layout effect.
+export function useHandedOpen (open) {
+  const want = !!open
+  const [shown, setShown] = useState(false)
+  const visible = want && shown
+  const was = useRef(visible)
+  const leave = useRef(null)
+  useLayoutEffect(() => {
+    if (was.current && !visible) {
+      if (leave.current) leave.current()
+      leave.current = sheetHandover.leave(LEAVE_FALLBACK_MS)
+    }
+    was.current = visible
+  }, [visible])
+  useEffect(() => {
+    if (!want) {
+      setShown(false)
+      return undefined
+    }
+    return sheetHandover.request(() => setShown(true))
+  }, [want])
+  useEffect(() => () => {
+    if (leave.current) leave.current()
+    leave.current = null
+  }, [])
+  const dismissed = () => {
+    const done = leave.current
+    leave.current = null
+    if (done) done()
+  }
+  return { visible, dismissed }
+}
+
 // The row's 16 pt edge plus 8 pt of air between a side control and the title.
 const TITLE_GAP = 24
 // A title that does not fit beside the side controls shrinks down to this
@@ -212,7 +258,7 @@ function usePanelDrag ({ open, dismissable, onClose, reduceMotion }) {
 
 // `dismissable` false also turns off the native iOS swipe, which can close
 // the page sheet without waiting for onClose (a sheet with a send in flight).
-export function Sheet ({ open, onClose, onBack, title, left, right, background, grabber = true, dismissable = true, children }) {
+export function Sheet ({ open, onClose, onBack, onDismiss, title, left, right, background, grabber = true, dismissable = true, children }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const bodyBackground = background ?? colors.card
@@ -228,13 +274,19 @@ export function Sheet ({ open, onClose, onBack, title, left, right, background, 
   // screen.
   const depth = useContext(SheetDepth)
   useEffect(() => (open ? holdEmbeds() : undefined), [open])
+  const handed = useHandedOpen(open)
+  const dismissed = () => {
+    handed.dismissed()
+    if (typeof onDismiss === 'function') onDismiss()
+  }
   const body = <SheetDepth.Provider value={depth + 1}><ScreenVisible.Provider value={!!open}>{children}</ScreenVisible.Provider></SheetDepth.Provider>
   if (Platform.OS === 'ios') {
     return (
       <Modal
-        visible={!!open}
+        visible={handed.visible}
         animationType={reduceMotion ? 'none' : 'slide'}
         presentationStyle='pageSheet'
+        onDismiss={dismissed}
         // A swipe down has already dismissed the page sheet when this runs,
         // so it always closes (onBack is the Android back button only).
         onRequestClose={onClose}
@@ -254,11 +306,12 @@ export function Sheet ({ open, onClose, onBack, title, left, right, background, 
   const padR = web ? sideInset(insets.right, width, layout.column) : insets.right
   return (
     <Modal
-      visible={!!open}
+      visible={handed.visible}
       animationType={reduceMotion ? 'none' : 'slide'}
       transparent
       statusBarTranslucent
       onRequestClose={typeof onBack === 'function' ? onBack : onClose}
+      onDismiss={dismissed}
     >
       <Backdrop style={styles.backdrop} onClose={onClose} />
       <Animated.View style={[styles.panel, { top: insets.top + layout.sheetTop, transform: [{ translateY: drag.y }] }]} onLayout={drag.handleLayout} {...scrollerFocusProps}>
