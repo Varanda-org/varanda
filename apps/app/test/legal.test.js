@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 54)
+  t.is(LEGAL_VERSION, 55)
   t.is(LEGAL_DATE, '15/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 54, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 55, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '76695c6cb8d81eb0859473033316a4cb5584017ae7e3a0be28d5002f7f59e0c7', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '3f97c75d443f4d8a1ef0cc7dcb09e0987d3191768f95f406e18fd5bee2080890', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -580,6 +580,15 @@ test('legal: version 28 describes the Feira listings, offers and ratings', async
   t.ok(text(PRIVACY).includes('feira-invites.json'))
 })
 
+test('Privacidade: Posts salvos diz do pedido ao semeador, do backup e do Sair', async (t) => {
+  const { PRIVACY } = await load()
+  const p = PRIVACY.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(p.includes('o app pede essas publicações ao semeador'), 'semeador request')
+  t.ok(p.includes('o semeador pode associar essas publicações à sua conta'), 'account linkage')
+  t.ok(p.includes('o iCloud, no iPhone'), 'backup')
+  t.ok(p.includes('continua no aparelho depois de Sair'), 'stays after Sair')
+})
+
 test('legal: version 27 describes the invite card in the link and the messenger preview', async (t) => {
   const { PRIVACY } = await load()
   const text = PRIVACY.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
@@ -691,7 +700,7 @@ test('legal: version 48 describes the public page of a post', async (t) => {
   ]) t.ok(page(PRIVACY).includes(required), 'privacy: ' + required)
 })
 
-test('legal: version 54 lets the recipient keep or refuse a depoimento', async (t) => {
+test('legal: version 55 lets the recipient keep or refuse a depoimento', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   for (const required of [

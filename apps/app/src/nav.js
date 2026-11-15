@@ -17,7 +17,8 @@
 // 'anuncios' (one author's listings, from the profile) is keyed by the
 // author's lowercase hex64 key and takes no params.
 // 'comunidades' (browse and create communities, stacked over the Conversas
-// inbox) and 'pedidos' (the message request folder) take no key either.
+// inbox), 'pedidos' (the message request folder) and 'salvos' (Posts salvos,
+// the saved post refs of this device) take no key either.
 // 'depoimentos' (a profile's depoimentos; for the own key also the ones
 // waiting for approval and the sent ones) is keyed by the owner's hex64.
 // 'momentos' (the full-screen Momentos viewer, starting at one author's
@@ -28,7 +29,7 @@
 // MAX_DEPTH the oldest entry is dropped.
 
 export const MAX_DEPTH = 20
-export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'citacoes', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos'])
+export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'citacoes', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos', 'salvos'])
 
 const HEX32 = /^[0-9a-f]{32}$/
 const HEX64 = /^[0-9a-f]{64}$/
@@ -66,7 +67,7 @@ export function validEntry (entry) {
   }
   if (entry.screen === 'membro' || entry.screen === 'mensagem' || entry.screen === 'grupo' || entry.screen === 'comunidade' || entry.screen === 'comunidade-info') return isAuthorKey(entry.key)
   if (entry.screen === 'seguindo' || entry.screen === 'seguidores' || entry.screen === 'paginaajustes' || entry.screen === 'anuncios' || entry.screen === 'depoimentos' || entry.screen === 'momentos') return isAuthorKey(entry.key)
-  if (entry.screen === 'paginas' || entry.screen === 'novapagina' || entry.screen === 'comunidades' || entry.screen === 'pedidos') return entry.key === undefined || entry.key === null || entry.key === ''
+  if (entry.screen === 'paginas' || entry.screen === 'novapagina' || entry.screen === 'comunidades' || entry.screen === 'pedidos' || entry.screen === 'salvos') return entry.key === undefined || entry.key === null || entry.key === ''
   if (entry.screen === 'citacoes') return isRef(entry.key)
   if (entry.screen === 'curtidas') {
     const params = entry.params

@@ -157,13 +157,28 @@ function blockSet (caps) {
   return value === true || typeof value === 'function'
 }
 
-// Copiar link, then Denunciar, then Bloquear, then Apagar. Share itself is the
+// Salvar or Tirar dos salvos only when the caller opts in (canSave) and the
+// row is a public original post with a real author key and a safe seq: never
+// a private chat or a repost row. caps.saved flips the row to unsave.
+function canSaveRow (item, caps) {
+  if (!caps || typeof caps !== 'object' || caps.canSave !== true) return false
+  if (!item || typeof item !== 'object') return false
+  return !isPrivateChat(item, caps) && isAuthorKey(authorOf(item)) &&
+    Number.isSafeInteger(item.seq) && item.seq >= 1 && !isRepostRow(item)
+}
+
+// Copiar link, then Salvar, then Denunciar, then Bloquear, then Apagar. Share itself is the
 // primary action, so Compartilhar is not a row here. The screen attaches onPress
 // and the delete and block confirmations.
 export function moreActions (item, caps) {
   const rows = []
   const href = shareLink(item, caps)
   if (href !== null) rows.push({ ...action('copy', 'link', 'Copiar link'), href })
+  if (canSaveRow(item, caps)) {
+    rows.push(caps.saved === true
+      ? action('unsave', 'salvar', 'Tirar dos salvos')
+      : action('save', 'salvar', 'Salvar'))
+  }
   if (reportSet(caps) && !ownsAuthor(item, caps)) rows.push(action('report', 'bandeira', 'Denunciar'))
   if (blockSet(caps) && !ownsAuthor(item, caps)) rows.push(action('block', 'bloquear', 'Bloquear'))
   if (canApagar(item, caps)) {

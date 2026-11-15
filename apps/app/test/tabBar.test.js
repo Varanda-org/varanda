@@ -51,6 +51,11 @@ test('showPostButton: no "publicar" on Feira nor on its screens', async (t) => {
   }
 })
 
+test('showPostButton: no "publicar" on Posts salvos', async (t) => {
+  const { showPostButton } = await load()
+  for (const tab of ['diario', 'rua', 'feira']) t.absent(showPostButton({ tab, screen: 'salvos' }), tab)
+})
+
 test('showPostButton: hidden on a profile Depoimentos tab', async (t) => {
   const { showPostButton } = await load()
   t.absent(showPostButton({ tab: 'diario', screen: null, profileTab: 'depoimentos' }))

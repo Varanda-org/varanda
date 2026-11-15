@@ -1173,7 +1173,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
   )
 
   // Before the offline return: hooks run on every render.
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onReply, onQuote, onReport, onMessage }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onReply, onQuote, onReport, onMessage, onNotice: onToast }
   const memberWho = useMemo(() => ({ author, name: header.name, username: header.username }), [author, header.name, header.username])
   const rowCache = useThreadRowCache(posts.items.map(postKey), { handlers, eng })
   // The member's own posts carry the header's identity; the copy is kept per
