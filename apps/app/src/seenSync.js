@@ -187,18 +187,31 @@ export function dropSent (pending, sent) {
   return { own, pages }
 }
 
-// Takes snapshot() once, right before the first `method` call goes out: the
-// group versions the app knew when the node began computing caughtUp. Later
-// than the start of the pass, so a post that arrived during the HTTP round
-// trips and that the downloaded mark covers is acknowledged too.
-export function snapshotBefore (request, method, snapshot) {
-  const snap = { taken: false, value: null }
-  const wrapped = (m, params) => {
-    if (m === method && !snap.taken) {
-      snap.taken = true
-      snap.value = snapshot()
+// Takes snapshot() when a `method` answer carries caughtUp keys, and keeps
+// each key's version at the latest answer that listed it ({ epoch, versions }).
+// The node reads caughtUp as its last step before it answers, and a post that
+// lands after that read reaches the app as groups.changed only after the
+// answer, so the versions held when the answer arrives are covered: a post
+// that arrived during the merge and that the other device read loses its dot
+// as soon as the merge settles. Versions restart per epoch, so an answer in
+// another epoch drops the keys taken before it.
+export function snapshotOnAnswer (request, method, snapshot) {
+  const snap = { epoch: null, versions: null }
+  const wrapped = async (m, params) => {
+    const res = await request(m, params)
+    if (m === method && res && Array.isArray(res.caughtUp) && res.caughtUp.length > 0) {
+      const now = snapshot()
+      if (now && now.versions) {
+        if (snap.versions === null || snap.epoch !== now.epoch) {
+          snap.epoch = now.epoch
+          snap.versions = {}
+        }
+        for (const k of res.caughtUp) {
+          if (typeof k === 'string' && Object.hasOwn(now.versions, k)) snap.versions[k] = now.versions[k]
+        }
+      }
     }
-    return request(m, params)
+    return res
   }
   return { request: wrapped, snap }
 }

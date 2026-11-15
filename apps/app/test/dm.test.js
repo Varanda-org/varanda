@@ -396,8 +396,8 @@ test('Mensagem offers Encaminhar and marks forwarded messages without the origin
   t.ok(src.includes("label: 'Encaminhar'"), 'the long press action')
   t.ok(src.includes('const canForward = pageKey === null && unlocked'), 'never as a page')
   t.ok(src.includes('<ForwardSheet'), 'the sheet')
-  t.ok(src.includes('forwarded={!item.deleted && fwdOf.get(item.key) === 1}'), 'fwd 1 from dm.thread shows the line')
-  t.ok(src.includes('dmForwardSource(item.rawText, mediaOf.get(item.key))'), 'expired media maps to an unavailable item')
+  t.ok(src.includes('fwd={fwdOf.get(item.key)}') && src.includes('forwarded={!item.deleted && fwd === 1}'), 'fwd 1 from dm.thread shows the line')
+  t.ok(src.includes('media={mediaOf.get(item.key)}') && src.includes('dmForwardSource(item.rawText, media)'), 'expired media maps to an unavailable item')
   t.ok(src.includes('if (forwardSource !== null) {'), 'no Encaminhar when nothing is left to forward')
   t.absent(src.includes('media: Array.isArray(media) ? media : []'), 'expired media never becomes a plain text forward')
   const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
@@ -439,7 +439,7 @@ test('a message request never loads a provider player', (t) => {
   const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
   t.ok(src.includes("plainCard={folder === 'request'}"), 'Mensagem passes plainCard in a request')
   t.ok(src.includes("deferred={folder === 'request'}"), 'the same row defers its photos')
-  t.ok(/extraData=\{\{[^}]*\bfolder\b/.test(src), 'rows redraw when the request is accepted')
+  t.ok(/const extra = useMemo\(\(\) => \(\{[^}]*\bfolder\b[^}]*\}\), \[[^\]]*\bfolder\b/.test(src) && src.includes('extraData={extra}'), 'rows redraw when the request is accepted')
 })
 
 test('chat screens end the player band at the composer', (t) => {
@@ -1095,7 +1095,7 @@ test('Mensagem supplies moment context only for private reaction rows', (t) => {
   const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
   t.ok(src.includes('moment={pageKey === null && !item.deleted && isMomentReaction(item)'))
   t.ok(src.includes('author: momentAuthor(item, { peer, ownKey }), seq: item.moment, identity: ownKey, folder'))
-  t.ok(/extraData=\{\{[^}]*\bownKey\b/.test(src), 'identity arrival redraws the row')
+  t.ok(/const extra = useMemo\(\(\) => \(\{[^}]*\bownKey\b[^}]*\}\), \[[^\]]*\bownKey\b/.test(src) && src.includes('extraData={extra}'), 'identity arrival redraws the row')
   const preview = readFileSync(join(__dirname, '../src/ui/MomentReactionPreview.js'), 'utf8')
   t.absent(/VideoPlayer|MusicEmbed|onPress=/.test(preview))
 })

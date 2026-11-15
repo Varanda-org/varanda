@@ -46,7 +46,7 @@ import { buildProfileUrl } from '../profileLink'
 import { installationOrigin } from '../installation'
 import { whoOf } from '../who'
 import { fillState, hideFuture, tilesFromLog } from '../mural'
-import { ErrorText, SectionHeader, Soft, errorText, plainMessage, useAction, useBottomPad, useNow } from '../ui'
+import { ErrorText, SectionHeader, Soft, errorText, plainMessage, useAction, useBottomPad, useVisibleNow } from '../ui'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { PostRow } from '../ui/PostRow'
@@ -70,7 +70,7 @@ import { useFollowCounts } from '../useFollowCounts'
 import { LARGE_TEXT, space, type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
 import Perfil from './Perfil'
-import { CountsNote, RepostPlaceholder, SocialToast, liveBinding, refOf, snapshotRowsShown, socialRowProps, useSocial } from './ARua'
+import { CountsNote, RepostPlaceholder, SocialToast, liveBinding, refOf, snapshotRowsShown, socialRowProps, useRowPropsCache, useSocial } from './ARua'
 import { DeletePrompt, useActing, useDelete } from './Conversa'
 import { TESTIMONIALS_TAB, useTestimonialTab, useTestimonials } from './Depoimentos'
 import { ConfirmMomentDelete, useMoments } from './Momentos'
@@ -104,6 +104,9 @@ export function diarioSeed (snapshot) {
     social: { originals: Object.entries(b.originals), counts: new Map(), liked: [], reposted: [] }
   }
 }
+
+const rowKeyOf = (row) => (row.invalid ? 'i' : 'e') + row.seq
+const muralKeyOf = (row) => 'm' + row.key
 
 function readDiarioSeed (binding, acting) {
   // Vitrine runs with config null, so liveBinding gives no binding there.
@@ -214,6 +217,17 @@ function rowNeeds (rows, publicKey) {
   return { local, shown, need, parents: [...parents], authors: [publicKey] }
 }
 
+// One post object per record: socialRowProps caches by post identity, so a
+// fresh object per render would rebuild every own-post row.
+const ownPosts = new WeakMap()
+function ownPostOf (author, seq, record) {
+  const hit = ownPosts.get(record)
+  if (hit && hit.author === author && hit.seq === seq) return hit
+  const post = postOf(author, seq, record)
+  ownPosts.set(record, post)
+  return post
+}
+
 // A post item (the feed shape) of an own post record.
 function postOf (author, seq, record) {
   return {
@@ -242,7 +256,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
   const names = useNames()
   const outbox = useOutbox()
   const insets = useSafeAreaInsets()
-  const now = useNow(60000)
+  const now = useVisibleNow(60000)
   const bottomPad = useBottomPad()
   const acting = useActing()
   const memberActing = actingAsMember(acting)
@@ -784,17 +798,22 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
   const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onReply, onQuote, onMessage, onDelete: del.offered ? del.ask : undefined }
   // An own repost is the ORIGINAL post under 'Você republicou' (every action
   // targets the original); an own post (or quote) targets itself.
-  const renderItem = ({ item: row }) => {
+  const rowCache = useRowPropsCache(posts, rowKeyOf, { h: handlers, social })
+  // One renderItem for the list's life: it reads the newest render through the ref.
+  const renderRef = useRef(null)
+  const renderItem = useCallback((info) => renderRef.current(info), [])
+  renderRef.current = ({ item: row }) => {
+    const rowKey = rowKeyOf(row)
     const record = row.entry.record
     if (record.type === 'repost') {
       const ref = refOf(record.to)
       const repostedBy = { author: info.publicKey, name: 'Você', username: null }
       const post = social.original(ref)
       if (!post) return <RepostPlaceholder repostedBy={repostedBy} missing={post === null} transient={social.transient(ref)} onRetry={() => social.retry(ref)} />
-      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf, now, ownKey: info.publicKey, h: handlers })} />
+      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf, now, ownKey: info.publicKey, h: handlers, cache: rowCache, rowKey })} />
     }
-    const post = postOf(info.publicKey, row.seq, record)
-    return <PostRow {...socialRowProps({ post, ref: info.publicKey + ':' + row.seq, social, profileOf, now, ownKey: info.publicKey, h: handlers })} />
+    const post = ownPostOf(info.publicKey, row.seq, record)
+    return <PostRow {...socialRowProps({ post, ref: info.publicKey + ':' + row.seq, social, profileOf, now, ownKey: info.publicKey, h: handlers, cache: rowCache, rowKey })} />
   }
 
   const muralCols = fontScale >= LARGE_TEXT ? 2 : 3
@@ -819,7 +838,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
       <RefreshableList
         perfId='diario'
         data={depo ? testimonialTab.items : mural ? muralRows : posts}
-        keyExtractor={depo ? testimonialTab.keyExtractor : mural ? (row) => 'm' + row.key : (row) => (row.invalid ? 'i' : 'e') + row.seq}
+        keyExtractor={depo ? testimonialTab.keyExtractor : mural ? muralKeyOf : rowKeyOf}
         renderItem={depo ? testimonialTab.renderItem : mural ? renderMural : renderItem}
         extraData={depo ? testimonialTab.extraData : extra}
         ListHeaderComponent={header}

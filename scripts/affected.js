@@ -102,7 +102,15 @@ function worktreeTree (root) {
   // worktree, and adding everything would then add the copy being written.
   const index = realIndex + '.affected-' + process.pid
   try {
-    try { fs.copyFileSync(realIndex, index) } catch {}
+    try {
+      fs.copyFileSync(realIndex, index)
+      // The copy keeps the real index's times. Git compares by content an
+      // entry stamped no earlier than the index file (its racy check); with a
+      // fresh mtime on the copy, a same-size rewrite made in the second the
+      // real index was written would look unchanged.
+      const st = fs.statSync(realIndex)
+      fs.utimesSync(index, st.atime, st.mtime)
+    } catch {}
     const env = { ...process.env, GIT_INDEX_FILE: index }
     const added = git(root, ['add', '-A', '--', ':/'], env)
     if (added.error) return added

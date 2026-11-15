@@ -26,7 +26,7 @@
 // installation): `node.hosted === true`. Everything is in memory; nothing is persisted. Strangers'
 // photos stay no-store through socialRowProps (ARua.js) as in the Espiadinha.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { StyleSheet, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
@@ -40,9 +40,10 @@ import {
   SEARCH_INCOMPLETE_NOTE, SEARCH_INDEXING_NOTE, SEARCH_OFFLINE_MESSAGE,
   SEARCH_UNAVAILABLE, assembleSearch, isLastSearchPage, mergeRefs, searchNotice
 } from '../topics'
-import { CountsNote, refOf, socialRowProps, useSocial } from './ARua'
+import { CountsNote, refOf, socialRowProps, useRowPropsCache, useSocial } from './ARua'
+import { pruneRows } from '../namesCache'
 import { peekAll, useFollowSet } from './Conversa'
-import { Soft, errorText, useBottomPad, useNow } from '../ui'
+import { Soft, errorText, useBottomPad, useVisibleNow } from '../ui'
 import { PostRow } from '../ui/PostRow'
 import { PostSheetProvider } from '../ui/PostSheetHost'
 import { HelpNote } from '../ui/Help'
@@ -79,7 +80,10 @@ function BuscaList ({ query, header, ownKey, avatarOf, active, scrollToTop, refr
   const { request } = node
   const social = useSocial({ ownKey, onToast })
   const { ingest } = social
-  const now = useNow(60000)
+  // Busca lives under its tab's ScreenVisible provider (BuscaGlobal.js, nested in
+  // the tab's App.js provider), so the
+  // clock stops while the tab is hidden.
+  const now = useVisibleNow(60000)
   const bottomPad = useBottomPad()
   const hosted = node.hosted === true
   const followSet = useFollowSet(request)
@@ -317,23 +321,57 @@ function BuscaList ({ query, header, ownKey, avatarOf, active, scrollToTop, refr
   const isOwn = (item) => typeof ownKey === 'string' && item.author === ownKey.toLowerCase()
   const known = (item) => follows === null || follows.has(item.author)
   const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onReply, onQuote, onReport }
-  const renderItem = ({ item }) => {
-    const row = socialRowProps({ post: item, ref: itemKey(item), social, profileOf: noProfile, avatarOf, now, ownKey, h: handlers })
+  // One renderItem for the list's life, row props from A Rua's cache, and
+  // like, repost and follow wrappers made once per row: they read the newest
+  // handlers from `ctl` at call time, so a row that skips its render still
+  // acts on the latest state.
+  const rowCache = useRowPropsCache(items, itemKey, { h: handlers, social })
+  const ctl = useRef(null)
+  ctl.current = { follow, onSocialChanged }
+  const wrappers = useRef(null)
+  if (wrappers.current === null) wrappers.current = new Map()
+  useEffect(() => {
+    pruneRows(wrappers.current, items.map(itemKey))
+  }, [items])
+  const wrappersOf = (key, row, item) => {
+    let entry = wrappers.current.get(key)
+    if (!entry) {
+      entry = { item, base: null, onLike: undefined, onRepost: undefined, onFollow: undefined }
+      entry.onFollow = () => ctl.current.follow(entry.item.author, entry.item.name, entry.item.username)
+      wrappers.current.set(key, entry)
+    }
+    entry.item = item
     // `onSocialChanged` (optional): a like or repost toggled here may also be
     // in another list the caller keeps, whose social cache is then stale.
-    const changed = () => { if (typeof onSocialChanged === 'function') onSocialChanged() }
-    const wrap = (fn) => typeof fn === 'function' ? () => { fn(); changed() } : fn
+    const wrap = (fn) => typeof fn === 'function'
+      ? () => { fn(); if (typeof ctl.current.onSocialChanged === 'function') ctl.current.onSocialChanged() }
+      : fn
+    if (entry.base !== row.onLike || entry.baseRepost !== row.onRepost) {
+      entry.base = row.onLike
+      entry.baseRepost = row.onRepost
+      entry.onLike = wrap(row.onLike)
+      entry.onRepost = wrap(row.onRepost)
+    }
+    return entry
+  }
+  const renderRef = useRef(null)
+  const renderItem = useCallback((info) => renderRef.current(info), [])
+  renderRef.current = ({ item }) => {
+    const key = itemKey(item)
+    const row = socialRowProps({ post: item, ref: key, social, profileOf: noProfile, avatarOf, now, ownKey, h: handlers, cache: rowCache, rowKey: key })
+    const { onLike, onRepost, onFollow } = wrappersOf(key, row, item)
     return (
       <PostRow
         {...row}
-        onLike={wrap(row.onLike)}
-        onRepost={wrap(row.onRepost)}
-        onFollow={isOwn(item) || known(item) ? undefined : () => follow(item.author, item.name, item.username)}
+        onLike={onLike}
+        onRepost={onRepost}
+        onFollow={isOwn(item) || known(item) ? undefined : onFollow}
         followPending={following.has(item.author)}
         onReport={reportable(item) ? row.onReport : undefined}
       />
     )
   }
+  const extra = useMemo(() => ({ now, following, follows, social: social.social, avatarOf, ownKey, hosted }), [now, following, follows, social.social, avatarOf, ownKey, hosted])
 
   return (
     <RefreshableList
@@ -341,7 +379,7 @@ function BuscaList ({ query, header, ownKey, avatarOf, active, scrollToTop, refr
       data={items}
       keyExtractor={itemKey}
       renderItem={renderItem}
-      extraData={{ now, following, follows, social: social.social, avatarOf }}
+      extraData={extra}
       ListHeaderComponent={top}
       ListEmptyComponent={empty}
       ListFooterComponent={footer}

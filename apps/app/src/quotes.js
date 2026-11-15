@@ -63,7 +63,7 @@ export function listView (opts) {
   const { hosted, online, unsupported, phase, rows, unconfirmed, error, total, indexing, complete } = isPlain(opts) ? opts : {}
   const count = Array.isArray(rows) ? rows.length : 0
   if (hosted !== true) {
-    return { view: 'web-only', title: 'Só na versão web', body: 'As citações aparecem na versão web, com internet.' }
+    return { view: 'web-only', title: 'Citações indisponíveis', body: 'As citações aparecem no site da associação ou no app ligado à instalação, com internet.' }
   }
   if (unsupported === true) {
     return { view: 'unavailable', title: 'Lista indisponível', body: 'As citações não estão disponíveis nesta conexão.' }
