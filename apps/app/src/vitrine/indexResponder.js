@@ -245,7 +245,9 @@ export function vitrineIndex (url, request) {
   if (route === 'testimonials' && part === undefined) {
     requireProfile(key)
     const { entries, deleted } = testimonialSource()
-    return { ...testimonialPointers(entries, deleted, key), ...flags }
+    // unshown is the demo node's own view; the seeder answer has no such key.
+    const { shown, pending } = testimonialPointers(entries, deleted, key)
+    return { shown, pending, ...flags }
   }
 
   if (route === 'group-search' && part === undefined) {
