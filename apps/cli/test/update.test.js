@@ -125,6 +125,7 @@ docker() {
           si=$(cat "$FIX/open_rc" 2>/dev/null || printf '0')
           # A careless CLI echoing the key file: update.sh must never log it.
           cat "$(mount_source /segredos/chave.json "$@")" >&2
+          if [ -f "$FIX/open_exit" ]; then exit 1; fi
           if [ -f "$FIX/open_err" ]; then cat "$FIX/open_err" >&2; fi
           if [ "$si" = 0 ]; then
             wi=$(mount_source /segredos/saida "$@")
@@ -148,6 +149,7 @@ docker() {
           esac
           # A careless CLI writing to stderr: update.sh drops it.
           printf 'VERIFY-STDERR-CANARY\n' >&2
+          if [ -f "$FIX/verify_exit" ]; then printf 'x\n'; exit 1; fi
           if [ -f "$FIX/verify_err" ]; then cat "$FIX/verify_err" >&2; fi
           if [ -f "$FIX/verify_out" ]; then
             cat "$FIX/verify_out"
@@ -2171,7 +2173,7 @@ test('update.sh: a sha256 that fails or is not 64 lower hex changes nothing', (t
   }
 })
 
-test('update.sh: apply and reconfigure take a lower seq, say so and lower the floor; rollback leaves it', (t) => {
+test('update.sh: apply and reconfigure take a lower seq, say so and lower the floor; rollback raises it back', (t) => {
   if (!hasBash(t)) return
   const { s } = seqServer(t, { seq: 3, floor: floorOf(5) })
   const r = s.run(MAIN + 'cmd_apply')
@@ -2179,11 +2181,11 @@ test('update.sh: apply and reconfigure take a lower seq, say so and lower the fl
   t.ok(r.log.includes('segredos compartilhados: aplicando o arquivo selado com seq 3, menor que o último aplicado 5'), 'logs both seqs')
   t.is(s.read(SEQ_FILE), floorOf(3), 'the floor is the applied seq, even if lower')
 
-  // rollback goes back to the previous release and never touches the floor.
+  // rollback goes back to the previous release and its floor (never lower).
   const rb = s.run(MAIN + 'cmd_rollback')
   t.is(rb.status, 0, 'rollback passes: ' + rb.log)
   t.is(s.read('state/atual'), record(OLD_COMMIT, 1, OLD_SEEDER, OLD_WEB), 'the previous release is back')
-  t.is(s.read(SEQ_FILE), floorOf(3), 'rollback leaves the floor')
+  t.is(s.read(SEQ_FILE), floorOf(5), 'rollback puts back the floor of the env it restores')
 
   // reconfigure reopens the installed bundle with the same rule.
   const c = seqServer(t, { seq: 4, floor: floorOf(9) })
@@ -2276,6 +2278,18 @@ test('update.sh: a corrupt floor refuses on the timer and on apply until it is d
   fs.rmSync(s.p(SEQ_FILE))
   t.is(s.run(MAIN + 'cmd_run').status, 0, 'with the floor deleted the timer applies')
   t.is(s.read(SEQ_FILE), floorOf(2), 'and records the new floor')
+  // The switch notes the floor in effect next to the previous env, so a
+  // corrupt floor refuses even a release without a sealed file.
+  const ns = seqServer(t, { mode: 'auto', seq: 2, floor: 'x\n' })
+  fs.rmSync(ns.s.p('fix/bundle/secrets.sealed.json'))
+  const kept = keepEfetivo(ns.s)
+  const anterior = (s) => s.exists('state/anterior') ? s.read('state/anterior') : null
+  const antBefore = anterior(ns.s)
+  const rn = ns.s.run(MAIN + 'cmd_apply')
+  nothingChanged(t, ns.s, rn, kept.text, 'a corrupt floor and no sealed file')
+  t.ok(rn.log.includes(ns.s.p(SEQ_FILE) + ' não é uma linha "<seq> <sha256>"'), 'names the floor file: ' + rn.log)
+  t.is(anterior(ns.s), antBefore, 'state/anterior is left as it was')
+  t.absent(ns.s.exists('state/segredos/seq.anterior'), 'no previous floor line')
 })
 
 test('update.sh: a release without a sealed file, without the key or not for this server leaves the floor', (t) => {
@@ -2304,40 +2318,161 @@ test('update.sh: a release without a sealed file, without the key or not for thi
   t.absent(d.s.exists(SEQ_FILE), 'no floor is created')
 })
 
-test('update.sh: a floor that cannot be written stops before state/atual with an intervention, and apply records it', (t) => {
+const FAIL_FLOOR = 'chmod() { case $2 in *segredos/seq.tmp) return 1 ;; esac; command chmod "$@"; }\n'
+
+test('update.sh: a floor that cannot be written records the release with an intervention, and apply then writes it', (t) => {
   if (!hasBash(t)) return
   const { s } = seqServer(t, { mode: 'auto', seq: 8, floor: floorOf(5) })
+  const { text } = keepEfetivo(s)
   const before = s.read('state/atual')
-  const failChmod = 'chmod() { case $2 in *segredos/seq.tmp) return 1 ;; esac; command chmod "$@"; }\n'
-  const r = s.run(failChmod + MAIN + 'cmd_run')
+  const r = s.run(FAIL_FLOOR + MAIN + 'cmd_run')
   t.is(r.status, 1, 'the run fails: ' + r.log)
-  t.is(s.read('state/atual'), before, 'state/atual still names the old release')
-  t.absent(r.log.includes('atualizado para ' + COMMIT), 'no success is logged')
+  t.is(s.read('state/atual'), record(COMMIT, 5, SEEDER_REF, WEB_REF), 'the healthy release is recorded as installed')
+  t.is(s.read('state/anterior'), before, 'the old release is the previous one')
+  t.is(s.read('state/segredos/efetivo.env.anterior'), text, 'and its env is the previous env')
+  t.is(s.read('state/segredos/seq.anterior'), floorOf(5), 'with the floor it ran under')
   t.is(s.read(SEQ_FILE), floorOf(5), 'the floor is unchanged')
   t.absent(s.exists(SEQ_FILE + '.tmp'), 'no temporary file left')
   t.ok(s.read('state/intervencao').includes('seq 8, mas ' + s.p(SEQ_FILE) + ' não foi gravado: rode update.sh apply, ou grave nele a linha "8 ' + sha256(SEALED) + '" (root, 0600)'),
     'an intervention names the file, the line and the fix')
+  t.ok(r.log.includes('atualizado para ' + COMMIT + ', mas o piso dos segredos compartilhados não foi gravado; a intervenção continua: rode update.sh apply'), 'says what is left')
   // The next timer run neither goes on nor reports the release as current.
   const again = s.run(MAIN + 'cmd_run')
   t.is(again.status, 1, 'the timer stops on the intervention')
   t.absent(again.log.includes('em dia'), 'it never reports em dia with the stale floor: ' + again.log)
-  t.is(s.read('state/atual'), before, 'state/atual is still the old release')
   t.is(s.read(SEQ_FILE), floorOf(5), 'the floor is still the old one')
+  // apply takes the up-to-date path: the floor, without moving the previous slot.
   const fix = s.run(MAIN + 'cmd_apply')
-  t.is(fix.status, 0, 'apply finishes the switch: ' + fix.log)
-  t.is(s.read(SEQ_FILE), floorOf(8), 'and records the floor')
-  t.is(s.read('state/atual'), record(COMMIT, 5, SEEDER_REF, WEB_REF), 'then state/atual')
+  t.is(fix.status, 0, 'apply writes the floor: ' + fix.log)
+  t.ok(fix.log.includes('intervenção encerrada'), 'through the up-to-date path')
+  t.is(s.read(SEQ_FILE), floorOf(8), 'the floor is the applied file')
   t.absent(s.exists('state/intervencao'), 'the intervention is over')
-  // Up to date with an intervention: a floor write that fails after a healthy
-  // gate says so, not that the gate failed.
+  t.is(s.read('state/anterior'), before, 'the previous release is still the old one')
+  t.is(s.read('state/segredos/efetivo.env.anterior'), text, 'and so is its env')
+  // rollback brings the old env back, and the floor never goes down.
+  const rb = s.run(MAIN + 'cmd_rollback')
+  t.is(rb.status, 0, 'rollback passes: ' + rb.log)
+  t.is(s.read('state/atual'), before, 'the old release is back')
+  t.is(s.read('state/segredos/efetivo.env'), text, 'with its own env')
+  t.is(s.read(SEQ_FILE), floorOf(8), 'the floor stays at the higher seq')
+  t.absent(s.exists('state/segredos/seq.anterior'), 'the previous floor line is gone with the previous slot')
+})
+
+test('update.sh: a floor and an intervention that both cannot be written stop before state/atual', (t) => {
+  if (!hasBash(t)) return
+  const { s } = seqServer(t, { mode: 'auto', seq: 8, floor: floorOf(5) })
+  const before = s.read('state/atual')
+  // A directory where the intervention file goes: it cannot be written.
+  fs.mkdirSync(s.p('state/intervencao'))
+  const r = s.run(FAIL_FLOOR + MAIN + 'cmd_run')
+  t.is(r.status, 1, 'the run fails: ' + r.log)
+  t.is(s.read('state/atual'), before, 'state/atual still names the old release')
+  t.absent(r.log.includes('atualizado para ' + COMMIT), 'no success is logged')
+  t.is(s.read(SEQ_FILE), floorOf(5), 'the floor is unchanged')
+})
+
+test('update.sh: up to date with an intervention, a floor that cannot be written does not blame the health gate', (t) => {
+  if (!hasBash(t)) return
+  const { s } = seqServer(t, { seq: 8 })
+  t.is(s.run(MAIN + 'cmd_apply').status, 0, 'the first apply passes')
   fs.rmSync(s.p(SEQ_FILE))
   s.write('state/intervencao', 'x\n')
-  const em = s.run(failChmod + MAIN + 'cmd_apply')
+  const em = s.run(FAIL_FLOOR + MAIN + 'cmd_apply')
   t.is(em.status, 1, 'apply fails: ' + em.log)
   t.ok(em.log.includes('a versão instalada está saudável, mas o piso dos segredos compartilhados não foi gravado; a intervenção continua'), 'names the floor')
   t.absent(em.log.includes('não passou na verificação'), 'never blames the health gate')
   t.ok(s.read('state/intervencao').includes('seq 8, mas ' + s.p(SEQ_FILE) + ' não foi gravado'), 'the intervention stays, about the floor')
   t.absent(s.exists(SEQ_FILE), 'no floor')
+})
+
+test('update.sh: rollback after a lower-seq apply brings the floor back up, and the timer refuses what is older than the running file', (t) => {
+  if (!hasBash(t)) return
+  const { s } = seqServer(t, { mode: 'auto', seq: 5, floor: floorOf(10) })
+  const { text } = keepEfetivo(s)
+  const a = s.run(MAIN + 'cmd_apply')
+  t.is(a.status, 0, 'an explicit apply of seq 5: ' + a.log)
+  t.is(s.read(SEQ_FILE), floorOf(5), 'lowers the floor')
+  t.is(s.read('state/segredos/seq.anterior'), floorOf(10), 'and keeps the floor of the env it moved aside')
+  t.is(modeOf(s.p('state/segredos/seq.anterior')), 0o600, 'in a 0600 file')
+  const rb = s.run(MAIN + 'cmd_rollback')
+  t.is(rb.status, 0, 'rollback passes: ' + rb.log)
+  t.is(s.read('state/segredos/efetivo.env'), text, 'the seq-10 env runs again')
+  t.is(s.read(SEQ_FILE), floorOf(10), 'and the floor is back at 10')
+  t.ok(rb.log.includes('segredos compartilhados: seq 10 (sha256 ' + sha256(SEALED) + ') anotado em ' + s.p(SEQ_FILE) + ', o da versão anterior'), 'says so')
+  t.absent(s.exists('state/segredos/seq.anterior'), 'no previous floor line left')
+  // A later release on the channel carries seq 7, older than the running 10.
+  s.write('fix/digest', 'sha256:' + H('6', 64) + '\n')
+  s.write('fix/release.json', '{"v":1,"commit":"' + H('2', 40) + '","seq":6,"web":"' + WEB_REF + '"}\n')
+  s.write('fix/seq', '7')
+  const r = s.run(MAIN + 'cmd_run')
+  t.is(r.status, 1, 'the timer refuses it: ' + r.log)
+  t.ok(r.log.includes('o arquivo selado da nova versão tem seq 7, menor que o último aplicado 10'), 'below the restored floor')
+  t.is(s.read(SEQ_FILE), floorOf(10), 'the floor stays')
+})
+
+test('update.sh: rollback never lowers the floor, and the way back keeps the previous floor line', (t) => {
+  if (!hasBash(t)) return
+  // A higher recorded line wins; a lower or equal one leaves the floor.
+  const { s } = seqServer(t, { seq: 9, floor: floorOf(5) })
+  t.is(s.run(MAIN + 'cmd_apply').status, 0, 'apply of seq 9')
+  t.is(s.read('state/segredos/seq.anterior'), floorOf(5), 'the previous floor line is 5')
+  const rb = s.run(MAIN + 'cmd_rollback')
+  t.is(rb.status, 0, 'rollback passes: ' + rb.log)
+  t.is(s.read(SEQ_FILE), floorOf(9), 'a lower recorded line leaves the floor')
+  const e = seqServer(t, { seq: 9, floor: floorOf(5) })
+  t.is(e.s.run(MAIN + 'cmd_apply').status, 0, 'apply of seq 9')
+  e.s.write('state/segredos/seq.anterior', floorOf(9, H('a', 64)), 0o600)
+  t.is(e.s.run(MAIN + 'cmd_rollback').status, 0, 'rollback passes')
+  t.is(e.s.read(SEQ_FILE), floorOf(9), 'an equal seq keeps the current line')
+  // No recorded line: the floor stays.
+  const n = seqServer(t, { seq: 9, floor: floorOf(5) })
+  t.is(n.s.run(MAIN + 'cmd_apply').status, 0, 'apply of seq 9')
+  fs.rmSync(n.s.p('state/segredos/seq.anterior'))
+  t.is(n.s.run(MAIN + 'cmd_rollback').status, 0, 'rollback passes')
+  t.is(n.s.read(SEQ_FILE), floorOf(9), 'the floor stays')
+  // A failed gate: the way back puts the previous slot back as it was.
+  const g = seqServer(t, { seq: 9, floor: floorOf(5) })
+  g.s.write('state/segredos/seq.anterior', floorOf(3), 0o600)
+  g.s.write('state/segredos/efetivo.env.anterior', 'ANTES\n', 0o600)
+  g.s.write('fix/gate_fail_1', '')
+  t.is(g.s.run(MAIN + 'cmd_apply').status, 1, 'the failed gate fails the apply')
+  t.is(g.s.read('state/segredos/seq.anterior'), floorOf(3), 'the previous floor line is back')
+  t.is(g.s.read('state/segredos/efetivo.env.anterior'), 'ANTES\n', 'with its env')
+  t.absent(g.s.exists('state/segredos/seq.anterior.velho'), 'no .velho left')
+  t.is(g.s.read(SEQ_FILE), floorOf(5), 'and the floor is unchanged')
+})
+
+test('update.sh: a malformed previous floor line refuses the rollback and changes nothing', (t) => {
+  if (!hasBash(t)) return
+  for (const [what, body] of [['letters', 'x\n'], ['the seq alone', '10\n'], ['an uppercase hash', floorOf(10, H('A', 64))], ['a directory', null]]) {
+    const { s } = seqServer(t, { seq: 5, floor: floorOf(10) })
+    t.is(s.run(MAIN + 'cmd_apply').status, 0, 'apply of seq 5')
+    const sa = s.p('state/segredos/seq.anterior')
+    fs.rmSync(sa)
+    if (body === null) fs.mkdirSync(sa)
+    else s.write('state/segredos/seq.anterior', body, 0o600)
+    const env = s.read('state/segredos/efetivo.env')
+    const rb = s.run(MAIN + 'cmd_rollback')
+    t.is(rb.status, 1, 'rollback refuses (' + what + ')')
+    t.ok(rb.log.includes(sa + ' não é uma linha "<seq> <sha256>" (seq de 1 a 4294967295, sha256 em 64 hexadecimais minúsculos) num arquivo comum; nada mudou. Para voltar sem mexer no piso, apague ' + sa),
+      'names the file and the fix (' + what + '): ' + rb.log)
+    t.is(s.read('state/atual'), record(COMMIT, 5, SEEDER_REF, WEB_REF), 'atual unchanged (' + what + ')')
+    t.is(s.read('state/segredos/efetivo.env'), env, 'efetivo.env unchanged (' + what + ')')
+    t.is(s.read(SEQ_FILE), floorOf(5), 'the floor unchanged (' + what + ')')
+    t.absent(rb.log.includes('voltando para'), 'no way back started (' + what + ')')
+  }
+})
+
+test('update.sh: an exit while secrets verify or open runs leaves none of their output files', (t) => {
+  if (!hasBash(t)) return
+  for (const step of ['verify', 'open']) {
+    const { s } = seqServer(t, { floor: floorOf(5) })
+    s.write('fix/' + step + '_exit', '')
+    const r = s.run(MAIN + 'cmd_apply')
+    t.is(r.status, 1, 'the run exits (' + step + ')')
+    for (const f of ['conferir.out', 'conferir.err', 'abrir.err']) t.absent(s.exists('state/segredos/' + f), f + ' is gone (' + step + ')')
+    t.absent(s.exists('state/segredos/abrir'), 'no opened directory left (' + step + ')')
+  }
 })
 
 test('update.sh: install over running containers takes a seq below the floor like apply, and lowers it', (t) => {

@@ -118,6 +118,8 @@ segredos_hash=''
 seq_trocado=''
 hash_trocado=''
 hash_re='^[0-9a-f]{64}$'
+# 1 quando a última marcar_intervencao gravou $state/intervencao.
+intervencao_gravada=0
 # O piso: exatamente "<seq> <sha256>" e um LF.
 piso_re='^([1-9][0-9]{0,9}) ([0-9a-f]{64})$'
 # Uma linha, exatamente o resultado de secrets verify --json.
@@ -435,7 +437,10 @@ gravar_estado() {
 # nada; um apply ou rollback explícito que dê certo o apaga.
 marcar_intervencao() {
   local checkout=''
-  printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" >"$state/intervencao" 2>/dev/null || true
+  intervencao_gravada=0
+  if printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" >"$state/intervencao" 2>/dev/null; then
+    intervencao_gravada=1
+  fi
   log "intervenção manual: $1"
   if [ -f "$state/anterior" ] && [ "$(ler_estado "$state/anterior" origem)" = checkout ]; then
     checkout=$(ler_estado "$state/anterior" checkout)
@@ -860,12 +865,11 @@ mensagem_cli() {
   return 0
 }
 
-# O piso de $segredos/seq na saída, "<seq> <sha256>" (vazio sem o arquivo: o
-# primeiro arquivo selado vale com qualquer seq). Um arquivo que não seja
-# exatamente essa linha e um LF retorna 1: sem piso legível, nada de arquivo
-# selado novo.
-ler_piso_segredos() {
-  local f="$segredos/seq" n v=''
+# A linha "<seq> <sha256>" do arquivo $1 na saída (vazio sem o arquivo). Um
+# arquivo que não seja exatamente essa linha e um LF retorna 1, com $2 (o que
+# fazer) no registro.
+ler_linha_piso() {
+  local f=$1 n v=''
   if [ ! -e "$f" ] && [ ! -L "$f" ]; then
     return 0
   fi
@@ -876,7 +880,23 @@ ler_piso_segredos() {
     return 0
   fi
   # Chamada dentro de $(...): o registro vai pelo erro padrão.
-  log "segredos compartilhados: $f não é uma linha \"<seq> <sha256>\" (seq de 1 a $seq_segredos_max, sha256 em 64 hexadecimais minúsculos) num arquivo comum; nada mudou. Para aceitar o seq do próximo arquivo selado, apague $f" >&2
+  log "segredos compartilhados: $f não é uma linha \"<seq> <sha256>\" (seq de 1 a $seq_segredos_max, sha256 em 64 hexadecimais minúsculos) num arquivo comum; nada mudou. $2" >&2
+  return 1
+}
+
+# O piso de $segredos/seq (vazio sem o arquivo: o primeiro arquivo selado vale
+# com qualquer seq). Sem piso legível, nada de arquivo selado novo.
+ler_piso_segredos() {
+  ler_linha_piso "$segredos/seq" "Para aceitar o seq do próximo arquivo selado, apague $segredos/seq"
+}
+
+# Grava a linha $2 em $1 com um rename (root, 0600).
+gravar_linha_piso() {
+  if [[ $2 =~ $piso_re ]] && [ ! -d "$1" ] && rm -f "$1.tmp" && (umask 077 && printf '%s\n' "$2" >"$1.tmp") \
+    && chmod 0600 "$1.tmp" && mv -f "$1.tmp" "$1"; then
+    return 0
+  fi
+  rm -f "$1.tmp" 2>/dev/null || true
   return 1
 }
 
@@ -927,17 +947,36 @@ gravar_piso_segredos() {
   if [ -z "$seq_trocado" ]; then
     return 0
   fi
-  if [[ $seq_trocado =~ $seq_re ]] && [[ $hash_trocado =~ $hash_re ]] && [ ! -d "$f" ] && rm -f "$f.tmp" \
-    && (umask 077 && printf '%s %s\n' "$seq_trocado" "$hash_trocado" >"$f.tmp") \
-    && chmod 0600 "$f.tmp" && mv -f "$f.tmp" "$f"; then
+  if [[ $seq_trocado =~ $seq_re ]] && [[ $hash_trocado =~ $hash_re ]] \
+    && gravar_linha_piso "$f" "$seq_trocado $hash_trocado"; then
     log "segredos compartilhados: seq $seq_trocado (sha256 $hash_trocado) anotado em $f"
     seq_trocado=''
     hash_trocado=''
     return 0
   fi
-  rm -f "$f.tmp" 2>/dev/null || true
   marcar_intervencao "a versão em uso aplicou o arquivo selado com seq $seq_trocado, mas $f não foi gravado: rode update.sh apply, ou grave nele a linha \"$seq_trocado $hash_trocado\" (root, 0600)"
   return 1
+}
+
+# Rollback: o efetivo.env.anterior volta a rodar, e o piso fica no maior entre
+# o atual e a linha anotada com ele em $segredos/seq.anterior (o seq decide;
+# com seq igual, fica o atual). Nunca desce. Roda antes da volta: morrer depois
+# dela deixaria o piso abaixo do arquivo selado que roda.
+subir_piso_anterior() {
+  local sa="$segredos/seq.anterior" f="$segredos/seq" anotado piso
+  anotado=$(ler_linha_piso "$sa" "Para voltar sem mexer no piso, apague $sa") || return 1
+  if [ -z "$anotado" ]; then
+    return 0
+  fi
+  piso=$(ler_piso_segredos) || return 1
+  if [ -n "$piso" ] && [ "${piso%% *}" -ge "${anotado%% *}" ]; then
+    return 0
+  fi
+  if ! gravar_linha_piso "$f" "$anotado"; then
+    log "segredos compartilhados: não foi possível gravar $f com o piso da versão anterior; nada mudou"
+    return 1
+  fi
+  log "segredos compartilhados: seq ${anotado%% *} (sha256 ${anotado#* }) anotado em $f, o da versão anterior"
 }
 
 # O candidato: os bytes de varanda.env, um LF se ele não termina com um, e as
@@ -1122,25 +1161,34 @@ preparar_segredos() {
 }
 
 # O candidato passa a ser o efetivo.env. Com $1=1 (a versão instalada vira a
-# anterior), o efetivo.env atual vira efetivo.env.anterior e o anterior de
-# antes fica em efetivo.env.anterior.velho até concluir. Um arquivo ausente
-# quer dizer "sem segredos compartilhados" e também é levado. Numa falha,
-# desfaz o que trocou e retorna 1.
+# anterior), o efetivo.env atual vira efetivo.env.anterior, o piso em vigor é
+# anotado com ele em seq.anterior, e os anteriores de antes ficam em .velho
+# até concluir. Um arquivo ausente quer dizer "sem segredos compartilhados"
+# (ou sem piso) e também é levado. Numa falha, desfaz o que trocou e retorna 1.
 trocar_segredos() {
-  local e="$segredos/efetivo.env" ea="$segredos/efetivo.env.anterior" passo=0
+  local e="$segredos/efetivo.env" ea="$segredos/efetivo.env.anterior" sa="$segredos/seq.anterior" passo=0 piso=''
   if [ "$1" = 1 ]; then
-    rm -f "$ea.velho" || return 1
-    if [ -f "$ea" ] && ! mv -f "$ea" "$ea.velho"; then
+    piso=$(ler_piso_segredos) || return 1
+    rm -f "$ea.velho" "$sa.velho" || return 1
+    if [ -f "$sa" ] && ! mv -f "$sa" "$sa.velho"; then
       return 1
     fi
     passo=1
-    if [ -f "$e" ]; then
-      mv -f "$e" "$ea" || passo=-1
-    else
-      rm -f "$ea" || passo=-1
+    if [ -f "$ea" ] && ! mv -f "$ea" "$ea.velho"; then
+      passo=-1
+    fi
+    if [ "$passo" = 1 ] && [ -n "$piso" ] && ! gravar_linha_piso "$sa" "$piso"; then
+      passo=-1
+    fi
+    if [ "$passo" = 1 ]; then
+      if [ -f "$e" ]; then
+        mv -f "$e" "$ea" || passo=-1
+      else
+        rm -f "$ea" || passo=-1
+      fi
     fi
     if [ "$passo" = -1 ]; then
-      if [ -f "$ea.velho" ]; then mv -f "$ea.velho" "$ea" || true; fi
+      desfazer_anteriores
       return 1
     fi
     passo=2
@@ -1153,7 +1201,7 @@ trocar_segredos() {
   if [ "$passo" = -2 ]; then
     if [ "$1" = 1 ]; then
       if [ -f "$ea" ]; then mv -f "$ea" "$e" || true; fi
-      if [ -f "$ea.velho" ]; then mv -f "$ea.velho" "$ea" || true; fi
+      desfazer_anteriores
     fi
     return 1
   fi
@@ -1165,6 +1213,15 @@ trocar_segredos() {
   fi
   segredos_novo=0
   usar_env "$e"
+}
+
+# O efetivo.env.anterior e o seq.anterior de antes de trocar_segredos 1
+# voltam do .velho (ou somem, se não havia).
+desfazer_anteriores() {
+  local ea="$segredos/efetivo.env.anterior" sa="$segredos/seq.anterior"
+  if [ -f "$ea.velho" ]; then mv -f "$ea.velho" "$ea" || true; fi
+  rm -f "$sa" || true
+  if [ -f "$sa.velho" ]; then mv -f "$sa.velho" "$sa" || true; fi
 }
 
 # A volta: o efetivo.env da versão anterior (ou nenhum) volta a ser o do
@@ -1795,24 +1852,39 @@ apagar_imagens_velhas() {
 
 # Etapa 7: no ar e saudável. Daqui em diante nada justifica voltar.
 concluir() {
+  local piso_ok=1 depois=''
   # O piso antes de $state/atual: morrer entre os dois só repete a mesma
-  # versão, com seq igual ao piso; uma falha aqui deixa a intervenção.
+  # versão, com seq igual ao piso. Se a gravação falha e a intervenção foi
+  # escrita, a versão nova fica registrada como a instalada (o apply seguinte
+  # passa pelo caminho em dia, que grava o piso sem mexer nos anteriores) e a
+  # intervenção segura o timer; sem nem a intervenção, para antes de atual.
   if ! gravar_piso_segredos; then
-    exit 1
+    if [ "$intervencao_gravada" != 1 ] || [ ! -s "$state/intervencao" ]; then
+      exit 1
+    fi
+    piso_ok=0
+    depois='; depois, rode update.sh apply para gravar o piso dos segredos compartilhados'
   fi
   if ! trocar_atual "$cand_dir"; then
     log "aviso: não foi possível apontar $releases/current para $cand_dir"
   fi
   if ! gravar_estado "$state/atual" "$cand_commit" "$cand_seq" "$cand_seeder" "$cand_web"; then
-    marcar_intervencao "atualizado para $cand_commit e saudável, mas $state/atual não foi gravado: grave-o à mão (commit=, seq=, seeder=, web=)"
+    marcar_intervencao "atualizado para $cand_commit e saudável, mas $state/atual não foi gravado: grave-o à mão (commit=, seq=, seeder=, web=)$depois"
     exit 1
   fi
   apagar_imagens_velhas
-  rm -f "$state/disponivel" "$state/preparada" "$state/anterior.velho" "$state/intervencao" \
-    "$segredos/efetivo.env.anterior.velho"
+  rm -f "$state/disponivel" "$state/preparada" "$state/anterior.velho" \
+    "$segredos/efetivo.env.anterior.velho" "$segredos/seq.anterior.velho"
+  if [ "$piso_ok" = 1 ]; then
+    rm -f "$state/intervencao"
+  fi
   limpar_versoes
   if ! docker image prune -f; then
     log 'aviso: docker image prune falhou'
+  fi
+  if [ "$piso_ok" != 1 ]; then
+    log "atualizado para $cand_commit, mas o piso dos segredos compartilhados não foi gravado; a intervenção continua: rode update.sh apply"
+    exit 1
   fi
   log "atualizado para $cand_commit"
 }
@@ -2022,6 +2094,11 @@ voltar() {
       else
         rm -f "$segredos/efetivo.env.anterior"
       fi
+      if [ -f "$segredos/seq.anterior.velho" ]; then
+        mv -f "$segredos/seq.anterior.velho" "$segredos/seq.anterior"
+      else
+        rm -f "$segredos/seq.anterior"
+      fi
     fi
     log "voltou para a versão anterior; $cand_commit anotada em $state/recusadas"
   fi
@@ -2213,6 +2290,9 @@ cmd_rollback() {
       exit 1
     fi
   fi
+  if ! subir_piso_anterior; then
+    exit 1
+  fi
   trap - ERR
   trap '' INT TERM
   voltar_para_anterior || rc=$?
@@ -2227,7 +2307,8 @@ cmd_rollback() {
         exit 1
       fi
       rm -f "$state/anterior" "$state/anterior.velho" "$state/intervencao" \
-        "$segredos/efetivo.env.anterior" "$segredos/efetivo.env.anterior.velho"
+        "$segredos/efetivo.env.anterior" "$segredos/efetivo.env.anterior.velho" \
+        "$segredos/seq.anterior" "$segredos/seq.anterior.velho"
       if ! trocar_atual "$releases/$r_commit"; then
         log "aviso: não foi possível apontar $releases/current para $r_commit"
       fi
