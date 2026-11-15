@@ -427,3 +427,14 @@ test('locking during a handoff drops its stash without restoring account content
   t.is(h.state.composer.reply, null)
   t.is(h.context.replyDraftStash.current, null)
 })
+
+test('the field text comes from the placeholder prop, defaulting to the old text', () => {
+  const sig = src.slice(src.indexOf('export function ReplyBar'), src.indexOf('\n', src.indexOf('export function ReplyBar')))
+  const field = between(src, '<TextInput', 'onChangeText')
+  const field2 = between(src, 'multiline', 'placeholderTextColor')
+  return Promise.resolve().then(() => {
+    if (!sig.includes("placeholder = 'Escreva uma resposta'")) throw new Error('default placeholder')
+    if (!field2.includes('placeholder={placeholder}') || !field2.includes('accessibilityLabel={placeholder}')) throw new Error('field uses prop')
+    if (field.length === 0) throw new Error('no field')
+  })
+})

@@ -1,17 +1,7 @@
-// Layout for the reply list under one post. The items are already assembled:
-// assembleThread in thread.js is the only trust gate, and nothing here
-// fetches or checks a signature. Depth stops at 1, so a reply of a reply is
-// not inlined. That row carries `deeper`: 0 when it has no replies of its
-// own, a positive count when the count is known, and null when the count is
-// unknown but flagged. The screen offers "Ver conversa" whenever deeper is
-// not 0.
-//
-// `parent` on an expander or a more row is the depth-0 reply item. Its ref
-// (author:seq) is the key of children, counts, open and more. A counts entry
-// that is present but not a usable number (null, or a counts object whose
-// replies is not a number) is unknown but flagged, so the expander still
-// shows. An omitted key is not a flag: a missing count is not zero replies
-// and not an invitation to open.
+// Helpers for the reply rows of the Conversa and the feed. The items are
+// already assembled: assembleThread in thread.js and assembleRoda in roda.js
+// are the trust gates, and nothing here fetches or checks a signature. The
+// thread layout itself (comments and their rodas) is roda.js commentRows.
 //
 // Not the direct-message rows of dm-screen.js, which exports another
 // threadRows. Import this module under its own name.
@@ -44,31 +34,6 @@ function asTarget (value) {
   return target({ author: value.author.toLowerCase(), seq: value.seq })
 }
 
-function read (box, key) {
-  if (box instanceof Map) return box.has(key) ? box.get(key) : undefined
-  if (box instanceof Set) return box.has(key) ? true : undefined
-  if (!isPlain(box)) return undefined
-  return Object.prototype.hasOwnProperty.call(box, key) ? box[key] : undefined
-}
-
-// known: a safe count. flagged: the key is present, so null is not "absent".
-function storedCount (counts, key) {
-  const value = read(counts, key)
-  if (value === undefined) return { known: false, flagged: false }
-  if (isCount(value)) return { known: true, flagged: true, n: value }
-  if (isPlain(value) && isCount(value.replies)) return { known: true, flagged: true, n: value.replies }
-  return { known: false, flagged: true }
-}
-
-function wantsExpander (info) {
-  return info.flagged && (!info.known || info.n > 0)
-}
-
-function childItems (children, key) {
-  const value = read(children, key)
-  return Array.isArray(value) ? value : []
-}
-
 function atMillis (item) {
   if (!isPlain(item) || typeof item.at !== 'string') return null
   const ms = Date.parse(item.at)
@@ -79,7 +44,7 @@ function atMillis (item) {
 // instant, then author, then seq, so a reply sent here keeps its place after
 // a refresh. A missing or unparseable at sorts after a dated one so a
 // clock-less row cannot jump ahead of the thread.
-function compareAtSeq (a, b) {
+export function compareAtSeq (a, b) {
   const ta = atMillis(a)
   const tb = atMillis(b)
   if (ta !== null && tb !== null && ta !== tb) return ta < tb ? -1 : 1
@@ -96,19 +61,6 @@ function compareAtSeq (a, b) {
 function shown (value) {
   if (typeof value !== 'string') return ''
   return rpc.displayText(value).trim()
-}
-
-function deeperOf (counts, children, ref) {
-  const info = storedCount(counts, ref)
-  if (info.known && info.n > 0) return info.n
-  if (info.flagged && !info.known) return null
-  const seen = new Set()
-  for (const item of childItems(children, ref)) {
-    const key = itemRef(item)
-    if (key === null || key === ref || seen.has(key)) continue
-    seen.add(key)
-  }
-  return seen.size
 }
 
 function entriesOf (prev) {
@@ -175,49 +127,6 @@ export function withOwnReply (replies, item) {
   }
   if (!placed) out.push(item)
   return out
-}
-
-export function threadRows (input) {
-  const box = isPlain(input) ? input : {}
-  const rows = []
-  const seen = new Set()
-  const list = Array.isArray(box.replies) ? box.replies : []
-  for (const item of list) {
-    const ref = itemRef(item)
-    if (ref === null || seen.has(ref)) continue
-    seen.add(ref)
-    rows.push({ kind: 'reply', item, depth: 0, key: 'reply:' + ref, deeper: 0 })
-    const info = storedCount(box.counts, ref)
-    const isOpen = read(box.open, ref) === true
-    // An open branch with a known zero still needs its hide control.
-    if (wantsExpander(info) || isOpen) {
-      rows.push({
-        kind: 'expander',
-        parent: item,
-        count: info.known ? info.n : null,
-        open: isOpen,
-        key: 'expander:' + ref
-      })
-    }
-    if (isOpen) {
-      for (const child of childItems(box.children, ref)) {
-        const childRef = itemRef(child)
-        if (childRef === null || seen.has(childRef)) continue
-        seen.add(childRef)
-        rows.push({
-          kind: 'reply',
-          item: child,
-          depth: 1,
-          key: 'reply:' + childRef,
-          deeper: deeperOf(box.counts, box.children, childRef)
-        })
-      }
-    }
-    if (read(box.more, ref) === true) {
-      rows.push({ kind: 'more', parent: item, key: 'more:' + ref })
-    }
-  }
-  return rows
 }
 
 function previewName (item) {
