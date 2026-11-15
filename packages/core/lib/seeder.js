@@ -205,7 +205,10 @@ const { verifyClose, verifyMoved } = require('./page-lifecycle')
 const { parseQuery } = require('./search-text')
 const { createTopicIndex, QUERY_RE, tokensOf } = require('./topic-index')
 const { createFeiraIndex } = require('./feira-index')
-const { verifyConsent, foldListings } = require('./listing')
+// verifyConsent is read off the module at each call (_feiraConsent), so a
+// test can count the checks a rescan repeats.
+const listingLib = require('./listing')
+const { foldListings } = listingLib
 const { foldShare, newestShare, POST_SHARES_PER_DIARY } = require('./post-share')
 const { MAX_FUTURE_MS } = require('./feed')
 const { feira } = require('@varanda/rpc')
@@ -214,6 +217,7 @@ const clock = require('./clock')
 const {
   FrameGuard,
   frameDeadlineFor,
+  frameVictims,
   MAX_HANDSHAKE_FRAME,
   MAX_HANDSHAKE_BYTES,
   MAX_EXTERNAL_FRAME,
@@ -275,6 +279,10 @@ const FEIRA_PENDING_PER_AUTHOR = 300
 const FEIRA_PENDING_MAX = 5000
 // Per rater diary, the first listing-rate seq of each offer id (H1).
 const FEIRA_OFFERS_PER_DIARY = 4096
+// Least time between two Feira rescans of one diary asked by its deletes;
+// it doubles with each rescan up to FEIRA_RESCAN_MAX_MS (_feiraRescanWait).
+const FEIRA_RESCAN_MS = 60000
+const FEIRA_RESCAN_MAX_MS = 3600000
 const FEIRA_TYPES = new Set(['listing', 'listing-edit', 'listing-status', 'listing-rate'])
 const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show'])
 
@@ -284,6 +292,14 @@ const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'p
 // keeps its responder defaults (2 handshake frames of at most
 // MAX_HANDSHAKE_FRAME, then frames of at most MAX_EXTERNAL_FRAME) and gets
 // the seeder-wide budget below (_frameBudget).
+
+// Frame guard time: the monotonic clock (a wall-clock step must not cut an
+// honest frame or extend a deadline) and real timers.
+const FRAME_CLOCK = Object.freeze({
+  now: () => clock.now(),
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (timer) => clearTimeout(timer)
+})
 
 // An external socket with no incoming data for this long after the handshake
 // is dropped (Hypercore keep-alives every 5 s keep a live peer well inside it).
@@ -979,7 +995,10 @@ class Seeder {
   // fill them for everyone (defaults in topic-index.js; no CLI flags).
   // feiraMaxEntries, feiraPerAuthorMax, feiraMaxTerms, feiraMaxPostings,
   // feiraMaxRatings and feiraMaxRatingsPerTarget bound the Feira index
-  // (defaults in feira-index.js; no CLI flags).
+  // (defaults in feira-index.js; no CLI flags). feiraRescanMs is the least
+  // time between two Feira rescans of one diary after a delete (default
+  // FEIRA_RESCAN_MS); it doubles with each rescan up to feiraRescanMaxMs
+  // (default FEIRA_RESCAN_MAX_MS).
   // maxGroupCores bounds the group cores (roots and writers; default
   // maxServed) and maxGroupWriters the writers of one group (default
   // MAX_GROUP_WRITERS); maxGroupInflight the group admissions in flight
@@ -1064,7 +1083,9 @@ class Seeder {
     feiraMaxTerms = undefined,
     feiraMaxPostings = undefined,
     feiraMaxRatings = undefined,
-    feiraMaxRatingsPerTarget = undefined
+    feiraMaxRatingsPerTarget = undefined,
+    feiraRescanMs = FEIRA_RESCAN_MS,
+    feiraRescanMaxMs = FEIRA_RESCAN_MAX_MS
   } = {}) {
     this.maxServed = maxServed
     this.maxMedia = maxMedia === null ? maxServed : maxMedia
@@ -1135,13 +1156,17 @@ class Seeder {
     this._frameMemory = 0
     this._frameGuards = new Set()
     this._frameBudget = {
-      // A reservation that does not fit evicts the slowest charged guard
-      // whose reservation is old enough, then retries once.
+      // The newcomer loses: a reservation that does not fit evicts only
+      // charged guards that are stalled or below the minimum throughput
+      // (never in their first frameEvictAgeMs, never one keeping up), and
+      // only when evicting them makes room; otherwise nobody is evicted and
+      // the requester alone is refused (frameVictims in frame-guard.js).
       reserve: (n, guard) => {
-        if (this._frameMemory + n > this.maxFrameMemory) {
-          const victim = this._frameVictim()
-          if (victim === null) return false
-          victim.evict()
+        const over = this._frameMemory + n - this.maxFrameMemory
+        if (over > 0) {
+          const victims = frameVictims(this._frameGuards, over, this.frameEvictAgeMs)
+          if (victims === null) return false
+          for (const victim of victims) victim.evict()
           if (this._frameMemory + n > this.maxFrameMemory) return false
         }
         this._frameMemory += n
@@ -1238,10 +1263,16 @@ class Seeder {
     // Feira index (header comment): its own queue and startup set too.
     this._feira = createFeiraIndex({ maxEntries: feiraMaxEntries, perAuthorMax: feiraPerAuthorMax, maxTerms: feiraMaxTerms, maxPostings: feiraMaxPostings, maxRatings: feiraMaxRatings, maxRatingsPerTarget: feiraMaxRatingsPerTarget })
     this._feiraQueue = Promise.resolve()
+    this._feiraRescanMs = feiraRescanMs
+    this._feiraRescanMaxMs = feiraRescanMaxMs
     this._feiraStartup = null
     // Verified ratings whose listing is not in STATE yet (_feiraPend):
     // 'rater:seq' -> { target, targetSeq, rater, seq, atMs }, oldest first.
     this._feiraPending = new Map()
+    // The same rows for the ratings a diary's listings had when its rescan
+    // began, outside the pending caps (they were all in the index, so the
+    // index caps bound them), until the rescan pass ends (_feiraRestore).
+    this._feiraKept = new Map()
     this._pushQueue = Promise.resolve()
     this._topicResumeQueued = false
     this._writeQueue = Promise.resolve()
@@ -2157,6 +2188,12 @@ class Seeder {
       feiraQueued: false,
       feiraRetry: null,
       feiraReadFailures: 0,
+      feiraRescan: null,
+      feiraRescanAt: null,
+      feiraRescanAsked: null,
+      feiraRescanLevel: 0,
+      feiraRescanLost: false,
+      feiraRestore: false,
       // Deletion state, rebuilt by every scan from block 1 (in memory only):
       // `deleted` every seq a scanned tombstone removed (monotone: the index
       // cursors skip them), `tombstones` tombstone seq -> target seq and
@@ -2241,7 +2278,8 @@ class Seeder {
       if (entry.dropped || this._closing) return
       if (this._overQuota(core)) this._drop(key, 'quota')
       // The signed length grew: the committed follows may miss the new
-      // blocks until the scan reaches them, so pages say incomplete.
+      // blocks until the scan reaches them, so they are unpublished and
+      // the pages they touch say incomplete (lib/notices.js).
       // The same growth marks the diary active (wall clock: the windows are
       // Brasília calendar days). The synchronous call at the end of _serve
       // sees core.length === activityLength, so a restore, a re-gate or a
@@ -2472,6 +2510,10 @@ class Seeder {
       this._indexDiary(key, entry)
       this._topicDiary(key, entry)
       this._feiraDiary(key, entry)
+      if (entry.feiraRescanLost) {
+        entry.feiraRescanLost = false
+        this._feiraRescanSoon(key, entry)
+      }
       // Growth during the gate returned early from _onGrow.
       this._pushDiary(key, entry)
     }).catch(() => {
@@ -2495,6 +2537,8 @@ class Seeder {
     entry.topicRetry = null
     clearTimeout(entry.feiraRetry)
     entry.feiraRetry = null
+    clearTimeout(entry.feiraRescan)
+    entry.feiraRescan = null
     clearTimeout(entry.pushRetry)
     entry.pushRetry = null
     clearTimeout(entry.rootRetry)
@@ -2551,7 +2595,7 @@ class Seeder {
     // Ratings this diary's listings received were verified when added and
     // their raters are never scanned again: they wait for a re-admission.
     if (this._feira) {
-      for (const row of this._feira.ratingsFor(key)) this._feiraPend(row.target, row.targetSeq, row.rater, row.seq, row.atMs)
+      for (const row of [...this._feira.ratingsFor(key), ...this._feiraTakeKept(key)]) this._feiraPend(row.target, row.targetSeq, row.rater, row.seq, row.atMs)
       this._feira.removeDiary(key)
       this._feiraForget(key, false)
     }
@@ -2770,7 +2814,8 @@ class Seeder {
     // The loop stops at an unknown hole, while the signed length advances
     // before the blocks arrive: publishing a prefix could hide a later
     // unfollow, so only a fold that reached the signed length is committed
-    // (a pending author marks every page `incomplete`).
+    // (a pending author's edges are unpublished, and the pages it may touch
+    // say `incomplete`: lib/notices.js).
     if (entry.scanned >= core.length) {
       this._notices.commit(key)
       this._postNotices.settle(key)
@@ -4792,6 +4837,7 @@ class Seeder {
       for (const key of this._served.keys()) this._feira.removeDiary(key)
       // Every rater is scanned again, so nothing pending is lost.
       this._feiraPending.clear()
+      this._feiraKept.clear()
       this._feiraStartup = new Set([...this._served].filter(([, entry]) => entry.gated).map(([key]) => key))
       for (const [key, entry] of this._served) {
         clearTimeout(entry.feiraRetry)
@@ -4800,6 +4846,7 @@ class Seeder {
         entry.feiraClosed = false
         entry.feiraIndexed = 1
         entry.feiraOffers = new Map()
+        entry.feiraRestore = false
         this._feiraDiary(key, entry)
       }
     }
@@ -5249,6 +5296,10 @@ class Seeder {
         entry.feiraIndexed = i + 1
         entry.feiraReadFailures = 0
       }
+      if (entry.feiraRestore && !stale() && entry.feiraIndexed >= entry.present) {
+        entry.feiraRestore = false
+        this._feiraRestore(key)
+      }
     } finally {
       entry.feiraQueued = false
       if (this._feiraStartup !== null && (entry.feiraReadFailures >= 4 || entry.feiraIndexed >= entry.present)) {
@@ -5352,7 +5403,7 @@ class Seeder {
       if (block === null || block.type !== 'listing-rate') return
       const r = validRecordCopy(block, seq)
       if (r === null || r.to.author === key) return
-      if (!verifyConsent({ listingAuthor: r.to.author, listingSeq: r.to.seq, rater: key, offerId: r.offer, consent: r.consent })) return
+      if (!this._feiraConsent(entry, key, seq, r)) return
       this._feiraFirstOffer(entry, r.offer, seq)
     } catch {}
   }
@@ -5366,18 +5417,57 @@ class Seeder {
     return true
   }
 
-  // A diary left: its pending rows as rater go, and with `asTarget` (a
-  // closed page, which never comes back) those it received too.
+  // verifyConsent of the listing-rate `r` at `seq` of diary `key`. Only a
+  // consented block claims its offer (feiraOffers, capped and kept across
+  // rescans), so a claimed block is never verified twice, and a block whose
+  // offer another seq claimed is refused unverified, as _feiraFirstOffer
+  // would refuse it. Nothing is kept for a block that fails: a diary of junk
+  // ratings holds no state for them.
+  _feiraConsent (entry, key, seq, r) {
+    const first = entry?.feiraOffers.get(r.offer)
+    if (first !== undefined) return first === seq
+    return listingLib.verifyConsent({ listingAuthor: r.to.author, listingSeq: r.to.seq, rater: key, offerId: r.offer, consent: r.consent }) === true
+  }
+
+  // A diary left: its pending (and kept) rows as rater go, and with
+  // `asTarget` (a closed page, which never comes back) those it received too.
   _feiraForget (hex, asTarget) {
-    for (const [id, row] of this._feiraPending) {
-      if (row.rater === hex || (asTarget && row.target === hex)) this._feiraPending.delete(id)
+    for (const table of [this._feiraPending, this._feiraKept]) {
+      for (const [id, row] of table) {
+        if (row.rater === hex || (asTarget && row.target === hex)) table.delete(id)
+      }
     }
   }
 
-  // Pending ratings of one listing, deleted before it entered STATE.
+  // Pending (and kept) ratings of one listing, deleted before it entered
+  // STATE.
   _feiraUnpendTarget (target, targetSeq) {
-    for (const [id, row] of this._feiraPending) {
-      if (row.target === target && row.targetSeq === targetSeq) this._feiraPending.delete(id)
+    for (const table of [this._feiraPending, this._feiraKept]) {
+      for (const [id, row] of table) {
+        if (row.target === target && row.targetSeq === targetSeq) table.delete(id)
+      }
+    }
+  }
+
+  // Takes out the kept rows of ratings `target`'s listings received.
+  _feiraTakeKept (target) {
+    const rows = []
+    for (const [id, row] of this._feiraKept) {
+      if (row.target !== target) continue
+      this._feiraKept.delete(id)
+      rows.push(row)
+    }
+    return rows
+  }
+
+  // The rescan pass of `key` reached its present length: each rating its
+  // listings had when the rescan began goes back to its listing when that
+  // listing is in STATE again, and is dropped otherwise. addRating never
+  // adds one twice, so a row the pass already brought back is a no-op.
+  _feiraRestore (key) {
+    const state = this._feira.state(key)
+    for (const row of this._feiraTakeKept(key)) {
+      if (state.has(row.targetSeq)) this._feira.addRating(row.target, row.targetSeq, row.rater, row.seq, row.atMs)
     }
   }
 
@@ -5424,8 +5514,9 @@ class Seeder {
     if (r.type === 'listing-rate') {
       const to = r.to
       if (to.author === key) return
-      if (!verifyConsent({ listingAuthor: to.author, listingSeq: to.seq, rater: key, offerId: r.offer, consent: r.consent })) return
-      if (!this._feiraFirstOffer(this._served.get(key), r.offer, seq)) return
+      const entry = this._served.get(key)
+      if (!this._feiraConsent(entry, key, seq, r)) return
+      if (!this._feiraFirstOffer(entry, r.offer, seq)) return
       if (this._feira.addRating(to.author, to.seq, key, seq, atMs)) return
       // Diaries are scanned in no set order: the listing may come later.
       if (!this._feira.state(to.author).has(to.seq) && this._feiraPendable(to.author, to.seq)) this._feiraPend(to.author, to.seq, key, seq, atMs)
@@ -5476,18 +5567,94 @@ class Seeder {
     const block = raw === null ? null : decodeBlock(raw)
     if (block !== null && !FEIRA_TYPES.has(block.type)) return
     if (block === null || block.type === 'listing-rate') {
-      this._feira.removeRating(key, target)
-      this._feiraPending.delete(key + ':' + target)
+      // The rating may have replaced an older one of the same pair, gone
+      // from STATE since: only a rescan of this diary brings it back.
+      // removeRating says whether it was indexed, even when the block is
+      // cleared or was never downloaded.
+      const pending = this._feiraPending.delete(key + ':' + target)
+      const kept = this._feiraKept.delete(key + ':' + target)
+      if (this._feira.removeRating(key, target) || pending || kept) this._feiraRescanSoon(key, entry)
     }
     if (block !== null && block.type === 'listing-rate') return
     this._feiraUnpendTarget(key, target)
     const before = this._feira.state(key)
+    const overflowed = this._feira.actionOverflowed(key, target)
     if (!this._feira.markDeleted(key, target)) return
+    // An edit or status window keeps only its newest actions: an older one
+    // it dropped is read again by a rescan of this diary. A deleted root,
+    // or an action of a window that never dropped one, needs none.
+    if (overflowed) this._feiraRescanSoon(key, entry)
     for (const [seq, row] of this._feira.state(key)) {
       const was = before.get(seq)
       if (was === undefined || was.editSeq === row.editSeq) continue
       await this._feiraRekey(key, entry, seq, row.editSeq)
     }
+  }
+
+  // Asks one rescan of this diary from block 1, after the pass in flight.
+  // A delete it skips (its target is in `deleted`) asks nothing, so a rescan
+  // never asks another; requests that come while one waits join it, and
+  // two rescans of a diary are apart by the backoff of _feiraRescanWait.
+  _feiraRescanSoon (key, entry) {
+    if (this._closing) return
+    const wait = this._feiraRescanWait(entry, clock.now())
+    if (entry.feiraRescan) return
+    entry.feiraRescan = setTimeout(() => {
+      const rescan = () => {
+        entry.feiraRescan = null
+        if (entry.dropped || this._closing || this._served.get(key) !== entry) return
+        // A re-gate in flight: asked again once the diary is gated.
+        if (!entry.gated) {
+          entry.feiraRescanLost = true
+          return
+        }
+        this._feiraRescanRan(entry, clock.now())
+        // Ratings this diary's listings received are kept aside, outside
+        // the pending caps, and go back at the end of the pass.
+        for (const row of this._feira.ratingsFor(key)) this._feiraKept.set(row.rater + ':' + row.seq, row)
+        entry.feiraRestore = true
+        this._feira.removeDiary(key)
+        this._feiraForget(key, false)
+        clearTimeout(entry.feiraRetry)
+        entry.feiraRetry = null
+        entry.feiraReadFailures = 0
+        entry.feiraClosed = false
+        entry.feiraIndexed = 1
+        // feiraOffers stays: the same blocks claim the same offers, and a
+        // tombstoned first block keeps its claim (H1).
+        this._feiraDiary(key, entry)
+      }
+      this._feiraQueue = this._feiraQueue.then(rescan, rescan).catch(noop)
+    }, wait)
+    entry.feiraRescan.unref?.()
+  }
+
+  // The least gap between two rescans of a diary: feiraRescanMs, doubled by
+  // each rescan up to feiraRescanMaxMs, so a member who keeps asking pays
+  // ever longer waits.
+  _feiraRescanGap (entry) {
+    const base = this._feiraRescanMs
+    return Math.max(base, Math.min(this._feiraRescanMaxMs, base * 2 ** entry.feiraRescanLevel))
+  }
+
+  // Notes a rescan request at `now` and returns its wait. A whole
+  // feiraRescanMaxMs with neither a request nor a rescan resets the gap, as
+  // for a diary never rescanned.
+  _feiraRescanWait (entry, now) {
+    const last = Math.max(entry.feiraRescanAsked ?? -Infinity, entry.feiraRescanAt ?? -Infinity)
+    if (now - last >= this._feiraRescanMaxMs) {
+      entry.feiraRescanLevel = 0
+      entry.feiraRescanAt = null
+    }
+    entry.feiraRescanAsked = now
+    if (entry.feiraRescanAt === null) return 0
+    return Math.max(0, entry.feiraRescanAt + this._feiraRescanGap(entry) - now)
+  }
+
+  // A rescan of the diary starts at `now`: the gap after the next doubles.
+  _feiraRescanRan (entry, now) {
+    if (entry.feiraRescanAt !== null && this._feiraRescanGap(entry) < this._feiraRescanMaxMs) entry.feiraRescanLevel++
+    entry.feiraRescanAt = now
   }
 
   // Re-reads the content shown for listing `seq` (its edit, or the root)
@@ -6781,23 +6948,6 @@ class Seeder {
     this._attachPeer(socket)
   }
 
-  // The charged FrameGuard with the lowest progress (received / declared)
-  // whose reservation is at least frameEvictAgeMs old, or null.
-  _frameVictim () {
-    const now = Date.now()
-    let victim = null
-    let lowest = Infinity
-    for (const guard of this._frameGuards) {
-      if (now - guard.reservedAt < this.frameEvictAgeMs) continue
-      const p = guard.progress()
-      if (p < lowest) {
-        lowest = p
-        victim = guard
-      }
-    }
-    return victim
-  }
-
   // Admits a member over a raw duplex that is not the swarm (phase 0 spike:
   // a WebSocket). The stream is wrapped as a Noise responder keyed with
   // seeder-key.json, so the member's seeder verification (seederCertForKey
@@ -6846,6 +6996,7 @@ class Seeder {
         this.log({ event: 'peer-dropped', peerKey: key, reason })
       },
       budget: this._frameBudget,
+      clock: FRAME_CLOCK,
       deadlineBaseMs: this.frameDeadlineBaseMs,
       deadlineCapMs: this.frameDeadlineCapMs,
       smallBytes: this.frameSmallBytes
@@ -6998,16 +7149,17 @@ class Seeder {
             }
             return true
           }
-          const engagementRows = this._index.noticeRows(target, Date.now(), visible)
+          const engagement = this._index.noticePage(target, Date.now(), visible)
           const result = this._postNotices.pageV3({
             target,
             followRows: f.rows,
             followIncomplete: f.incomplete,
-            engagementRows,
+            engagementRows: engagement.rows,
             // Not stats().saturated: it turns true at the cap before anything
             // is refused and stays on; a refused block pauses that diary's
             // cursor, which _indexFlags already reports (as indexEngagers).
-            engagementIncomplete: held || !this._indexFlags().complete,
+            // noticePage's own flag: its per-request scan cap cut the rows.
+            engagementIncomplete: held || engagement.incomplete || !this._indexFlags().complete,
             isBlocked,
             issuerUsable: (i) => !revoked.has(i),
             after,

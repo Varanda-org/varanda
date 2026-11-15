@@ -102,6 +102,7 @@ const NO_STAMPS = 'o limite de envio de hoje acabou'
 const BAD_REPLY = 'responda uma mensagem desta conversa'
 const NO_TARGET = 'mensagem não encontrada'
 const REACT_MAX = 'limite de reações para esta mensagem atingido'
+const PAGE_NO_REACTIONS = 'conversas com uma Página não têm reações'
 const NOT_REACTABLE = 'esta mensagem não aceita reações'
 const DIGEST_RE = /^[0-9a-f]{64}$/
 const TOO_LONG = 'mensagem longa demais'
@@ -279,6 +280,10 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // The own membership certificate, read from block 0 once per unlock.
   let ownCert = null
   const pending = new Map()
+  // The reaction ops kv dmReactPending held at an unlock, read into `pending`
+  // once per unlock: { gen, p, done } (restorePending).
+  let restored = null
+  let reactSaveLock = Promise.resolve()
   const linkOpts = { seederUrl, createSocket, association, log: (t) => { try { log(t) } catch {} }, limits: L.link }
   // Both throw while locked: the blob wallet is sealed under the local key.
   const blobs = createBlobClient({
@@ -1460,8 +1465,10 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       })
       if (pending.size >= PENDING_MAX) {
         const oldest = pending.keys().next().value
-        dropEntry(pending.get(oldest))
+        const evicted = pending.get(oldest)
+        dropEntry(evicted)
         pending.delete(oldest)
+        if (evicted.rx !== undefined) saveReactions()
       }
       pending.set(key, entry)
     }
@@ -1529,9 +1536,16 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // (to, target): the same emoji only puts what was not acked; another one
   // is a new op. With none pending, a call whose emoji is already the own
   // reaction ('' with none) sends nothing. -> { ok: true }
-  async function react (own, keyPair, { to, target, emoji }, recipientBox) {
+  // The pending ops also live sealed in kv dmReactPending, so a reload or a
+  // lock keeps them for the user's retry; the node never puts one by itself.
+  // page: the caller read `to` as a Página (its held diary has a roster, a
+  // close or a move): refused before anything is signed or spent, as the
+  // Página would drop the reaction on pull.
+  async function react (own, keyPair, { to, target, emoji }, recipientBox, { page = false } = {}) {
     checkSend(own, to)
+    if (page === true) throw new UsageError(PAGE_NO_REACTIONS)
     await whenLoaded()
+    await restorePending()
     const key = 'rx\n' + to + '\n' + target.from + '\n' + target.id
     let entry = pending.get(key)
     if (entry === undefined || entry.rx.emoji !== emoji) {
@@ -1561,10 +1575,95 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         pending.delete(oldest)
       }
       pending.set(key, entry)
+      // Stored before the put: a reload during it keeps the stamped op.
+      await saveReactions()
     }
-    await deliver(entry)
-    if (pending.get(key) === entry) pending.delete(key)
+    let sent = false
+    try {
+      await deliver(entry)
+      sent = true
+    } finally {
+      if (sent && pending.get(key) === entry) pending.delete(key)
+      await saveReactions()
+    }
     return { ok: true }
+  }
+
+  // Reads kv dmReactPending into `pending`, once per unlock, behind any save
+  // still writing (one started before a lock lands first). An item another
+  // local key sealed (another identity) or tampered with does not open and
+  // is left out. The stored ops go ahead of this unlock's entries, as the
+  // older ones, and none is dropped here, even past PENDING_MAX: only a
+  // later new entry evicts, one at a time, as for any pending entry.
+  function restorePending () {
+    if (restored !== null && restored.gen === generation) return restored.p
+    const gen = generation
+    const r = { gen, p: null, done: false }
+    r.p = reactSaveLock.then(async () => {
+      const items = await store.readDmReactPending(storage)
+      if (gen !== generation) throw new UsageError(LOCKED)
+      const merged = []
+      for (const item of items) {
+        const entry = openReaction(item)
+        if (entry !== null && !pending.has(entry.key)) merged.push([entry.key, entry])
+      }
+      if (merged.length > 0) {
+        const current = [...pending]
+        pending.clear()
+        for (const [k, e] of [...merged, ...current]) pending.set(k, e)
+      }
+      r.done = true
+    })
+    reactSaveLock = r.p.catch(noop)
+    restored = r
+    r.p.catch(() => {
+      if (restored === r) restored = null
+    })
+    return r.p
+  }
+
+  function openReaction (item) {
+    const m = local.open(item.meta)
+    if (m === null || typeof m.key !== 'string' || !m.key.startsWith('rx\n') || !Array.isArray(m.acked) || m.acked.length !== 2 ||
+      !m.acked.every((a) => typeof a === 'boolean')) return null
+    const rx = m.rx
+    if (rx === null || typeof rx !== 'object' || typeof rx.emoji !== 'string' || !Number.isSafeInteger(rx.rev) || rx.rev < 1 ||
+      typeof rx.digest !== 'string' || !DIGEST_RE.test(rx.digest)) return null
+    if (m.row !== null && (typeof m.row !== 'object' || m.row.t !== 'rx')) return null
+    if (m.row === null && m.acked.every(Boolean)) return null
+    const drops = []
+    for (let i = 0; i < 2; i++) {
+      if (m.acked[i]) {
+        drops.push(b4a.alloc(0))
+        continue
+      }
+      const d = item.drops[i] === null ? null : local.openBytes(item.drops[i])
+      if (d === null || d.byteLength !== dm.DM_DROP_BYTES) return null
+      drops.push(d)
+    }
+    return { key: m.key, id: m.id, at: m.at, drops, acked: m.acked, row: m.row, rx: { emoji: rx.emoji, rev: rx.rev, digest: rx.digest }, blobs: [], plains: null }
+  }
+
+  // Writes the reaction ops of `pending` to kv dmReactPending, in order,
+  // after each change; only once this unlock's restore is done, so a write
+  // never drops ops not read back yet. Never throws: memory holds the op
+  // either way.
+  function saveReactions () {
+    const gen = generation
+    const p = reactSaveLock.then(() => {
+      if (gen !== generation || restored === null || restored.gen !== gen || !restored.done) return
+      const items = []
+      for (const e of pending.values()) {
+        if (e.rx === undefined || (e.row === null && e.acked.every(Boolean))) continue
+        items.push({
+          meta: local.seal({ key: e.key, id: e.id, at: e.at, acked: e.acked, row: e.row, rx: e.rx }),
+          drops: e.drops.map((d, i) => e.acked[i] ? null : local.sealBytes(d))
+        })
+      }
+      return store.writeDmReactPending(storage, items)
+    }).catch(() => log('aviso: reação pendente não guardada neste aparelho'))
+    reactSaveLock = p
+    return track(p)
   }
 
   // rev: one past the highest the store or the pending op (pendingRev)

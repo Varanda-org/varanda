@@ -1,0 +1,1 @@
+- Menos renderização nas listas e nas abas (PR `perf/render-isolation`): as abas escondidas deixam de renderizar a cada aviso, selo ou barra que some, e na web o esqueleto de carregamento para de pulsar nas abas fora da tela; a rolagem de A Rua gasta menos trabalho de fundo. Verificação em `docs/verification/perf-render-isolation.md`.

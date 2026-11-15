@@ -85,12 +85,12 @@ test('reaction debounce spends nothing on net no-ops and flushes on teardown', a
 
 // Execute the screen's handlers themselves, with only their I/O and hook setters supplied.
 async function screenReactions (request, reactions = []) {
-  const { dmReactions, reactDebounce, messageKey, dmReactable, withFreshReactions } = await load()
+  const { dmReactions, reactDebounce, messageKey, dmReactable, withFreshReactions, olderPagesToReread } = await load()
   const { applyOptimistic, toggleOf } = await import('../src/reactions.js')
   const clock = fakeClock()
   const item = { from: 'peer', id: 'one', reactions }
   const key = messageKey(item)
-  const context = { live: true, sending: new Set(), unsure: new Map(), settled: new Map(), bases: new Map(), overrides: new Map(), read: 0, debounce: reactDebounce(600, clock) }
+  const context = { live: true, sending: new Set(), unsure: new Map(), removed: new Map(), settled: new Map(), bases: new Map(), overrides: new Map(), read: 0, debounce: reactDebounce(600, clock) }
   const state = { errors: [], reads: 0, painted: new Map() }
   const env = {
     reactionContext: context,
@@ -100,6 +100,7 @@ async function screenReactions (request, reactions = []) {
     dmReactions,
     dmReactable,
     withFreshReactions,
+    olderPagesToReread,
     applyOptimistic,
     toggleOf,
     messageKey,
@@ -229,6 +230,64 @@ test('uncertain reactions allow only explicit retries, replacements and removal'
   t.is(sent.length, 4)
 })
 
+test('a tap on the removed emoji retries an unconfirmed removal instead of reacting again', async (t) => {
+  const sent = []
+  let unsure = true
+  const h = await screenReactions(async (method, params) => {
+    sent.push(params.emoji)
+    if (unsure) throw Object.assign(new Error('não deu para confirmar o envio'), { uncertain: true })
+    return { ok: true }
+  }, [{ emoji: '\u2764\ufe0f', mine: true }])
+  h.toggleReaction(h.key, '\u2764\ufe0f')
+  h.clock.tick(600)
+  await settled()
+  t.alike(sent, [''], 'the removal went out')
+  t.is(h.context.unsure.get(h.key), '')
+  t.absent(h.state.painted.get(h.key).some((r) => r.mine), 'the chip stays removed')
+  unsure = false
+  h.toggleReaction(h.key, '\u2764\ufe0f')
+  h.clock.tick(600)
+  await settled()
+  t.alike(sent, ['', ''], 'the same removal is retried, no new reaction')
+  t.absent(h.context.unsure.has(h.key))
+  t.absent(h.context.removed.has(h.key), 'a confirmed removal forgets the emoji it took away')
+  h.toggleReaction(h.key, '\u{1f44d}')
+  h.clock.tick(600)
+  await settled()
+  t.alike(sent, ['', '', '\u{1f44d}'], 'another emoji is a new reaction')
+})
+
+test('an unconfirmed removal is forgotten once a later op or a fresh read settles it', async (t) => {
+  const unsure = async () => { throw Object.assign(new Error('não deu para confirmar o envio'), { uncertain: true }) }
+  const removing = async () => {
+    const h = await screenReactions(unsure, [{ emoji: '\u2764\ufe0f', mine: true }])
+    h.toggleReaction(h.key, '\u2764\ufe0f')
+    h.clock.tick(600)
+    await settled()
+    t.is(h.context.removed.get(h.key), '\u2764\ufe0f')
+    return h
+  }
+  const a = await removing()
+  a.toggleReaction(a.key, '\u{1f44d}')
+  a.clock.tick(600)
+  await settled()
+  t.is(a.context.unsure.get(a.key), '\u{1f44d}', 'a new unconfirmed op')
+  t.absent(a.context.removed.has(a.key), 'superseded: the removal is no longer the op to retry')
+  const b = await removing()
+  b.commitRead([b.item], ++b.context.read, b.context)
+  t.absent(b.context.unsure.has(b.key))
+  t.absent(b.context.removed.has(b.key), 'a fresh read settles it')
+})
+
+test('a thread read refreshes the newest held older pages, and deeper ones only with a change pending', async (t) => {
+  const { olderPagesToReread, REREAD_OLDER_PAGES } = await load()
+  t.is(REREAD_OLDER_PAGES, 3)
+  const pages = new Map(['p1', 'p2', 'p3', 'p4', 'p5'].map((p) => [p, new Set([p + ':row'])]))
+  t.alike(olderPagesToReread(pages, () => false).map(([b]) => b), ['p1', 'p2', 'p3'], 'newest first, capped')
+  t.alike(olderPagesToReread(pages, (key) => key === 'p5:row').map(([b]) => b), ['p1', 'p2', 'p3', 'p5'], 'a deeper page with a pending change')
+  t.alike(olderPagesToReread(new Map(), () => true), [])
+})
+
 test('a fresh read clears an uncertain reaction even when the own copy is absent', async (t) => {
   let sent = 0
   const h = await screenReactions(async () => {
@@ -289,11 +348,12 @@ test('leaving flushes the last choice once, skips net no-ops and ignores late re
   }
 })
 
-test('older reaction reads isolate a failed cursor and skip pages without pending state', async (t) => {
+test('older reaction reads isolate a failed cursor and refresh the newest held pages and every page with a change pending', async (t) => {
   const { refreshThread, newestOf, messageKey } = await load()
-  const rows = ['failed', 'debounced', 'unsure', 'untouched', 'new'].map((id, i) => ({ from: 'peer', id, at: `2026-11-0${i + 1}T10:00:00Z`, text: id }))
+  const rows = ['failed', 'debounced', 'deep', 'unsure', 'untouched', 'new'].map((id, i) => ({ from: 'peer', id, at: `2026-11-0${i + 1}T10:00:00Z`, text: id }))
   const h = await screenReactions(async () => ({}))
-  h.context.pages = new Map(rows.slice(0, -1).map((row) => [row.id, new Set([messageKey(row)])]))
+  // In load order, newest first, as loadOlder adds them.
+  h.context.pages = new Map(rows.slice(0, -1).reverse().map((row) => [row.id, new Set([messageKey(row)])]))
   h.context.overrides.set(messageKey(rows[0]), [{ emoji: '❤️', mine: true }])
   h.context.debounce.schedule(messageKey(rows[1]), '', '👍', () => {})
   h.context.unsure.set(messageKey(rows[2]), '❤️')
@@ -330,16 +390,21 @@ test('older reaction reads isolate a failed cursor and skip pages without pendin
   const body = src.slice(src.indexOf('  const readThread ='), src.indexOf('  const reactionGate ='))
   const read = runInNewContext(body + '\n;readThread', env)
   await read()
-  t.alike(reads, ['newest', 'failed', 'debounced', 'unsure'])
+  t.alike(reads, ['newest', 'untouched', 'unsure', 'deep', 'debounced', 'failed'], 'the newest three held pages, then the deeper ones with a change pending')
   t.alike(rawRef.current.map((m) => m.id), rows.map((m) => m.id))
   t.is(rawRef.current[0], rows[0], 'failed page stays as it was')
   t.ok(h.context.overrides.has(messageKey(rows[0])), 'failed page keeps its override')
   t.alike(rawRef.current[1].reactions, [{ emoji: '👍', mine: false }])
-  t.alike(rawRef.current[2].reactions, [{ emoji: '👍', mine: false }])
-  t.absent(h.context.unsure.has(messageKey(rows[2])))
-  t.is(rawRef.current[3], rows[3], 'untouched page was not read')
+  t.alike(rawRef.current[3].reactions, [{ emoji: '👍', mine: false }])
+  t.absent(h.context.unsure.has(messageKey(rows[3])))
+  t.alike(rawRef.current[4].reactions, [{ emoji: '👍', mine: false }], 'the other person\'s reaction on a page with nothing pending shows without reopening')
+  // A fourth held page with nothing pending waits for the reopening.
+  h.context.pages.set('older', new Set(['peer:older']))
+  reads.length = 0
+  await read()
+  t.absent(reads.includes('older'), 'past the newest three, a page with nothing pending is not read again')
   t.alike(cursors, [], 'keeps the older pagination cursor')
-  t.alike(errors, [''], 'no thread-level error for an older page')
+  t.alike(errors, ['', ''], 'no thread-level error for an older page')
   let fail
   let loaded = 0
   env.dm = () => new Promise((resolve, reject) => { fail = reject })
@@ -348,7 +413,7 @@ test('older reaction reads isolate a failed cursor and skip pages without pendin
   h.context.live = false
   fail(new Error('offline'))
   await pending
-  t.alike(errors, [''], 'a failed read after unmount changes no state')
+  t.alike(errors, ['', ''], 'a failed read after unmount changes no state')
   t.is(loaded, 0)
 })
 
@@ -383,9 +448,15 @@ test('peer reads are single flight, preserve answers on failure and retry only o
   let fail
   let effect
   const answers = []
-  const context = { live: true, pending: false, answer: null }
+  const context = { live: true, pending: false, answer: null, failures: 0, retry: null }
+  const timers = []
   const env = {
     pageReadKind,
+    peerReadDelay: (await load()).peerReadDelay,
+    setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length },
+    clearTimeout: () => {},
+    setPeerRetry: () => {},
+    peerRetry: 0,
     peer: 'peer',
     peerReadContext: context,
     hosted: true,
@@ -471,13 +542,74 @@ test('DM source pins shared reaction UI, page checks, quiet uncertainty and spoi
   t.ok(src.includes('if (snapshot && cardBesideSpoilers(richBlocks, { url: snapshot.url }) === null) snapshot = null'))
 })
 
+test('a failed person lookup is retried with a growing wait until it answers', async (t) => {
+  const { pageReadKind } = await import('../src/pageNotice.js')
+  const { peerReadDelay } = await load()
+  t.alike([0, 1, 2, 3, 4, 5, 9].map(peerReadDelay), [2000, 4000, 8000, 16000, 32000, 60000, 60000])
+  const src = screen()
+  const body = src.slice(src.indexOf('  const readPeer ='), src.indexOf('  const [reactionOverrides,'))
+  const context = { live: true, pending: false, trailing: false, answer: null, failures: 0, retry: null }
+  const clock = fakeClock()
+  const answers = []
+  let effect
+  let retries = 0
+  let calls = 0
+  let ok = false
+  const env = {
+    peerReadDelay,
+    setTimeout: (fn, ms) => clock.setTimeout(fn, ms),
+    clearTimeout: (id) => clock.clearTimeout(id),
+    setPeerRetry: () => { retries++; effect() },
+    peerRetry: 0,
+    peer: 'peer',
+    peerReadContext: context,
+    hosted: true,
+    unlocked: true,
+    pageKey: null,
+    node: { online: true, visible: true },
+    isTop: true,
+    request: async () => { calls++; if (!ok) throw new Error('offline'); return { page: 'peer', gen: null, owner: null, complete: false } },
+    pageReadKind,
+    setPeerRead: (read) => answers.push(read),
+    useCallback: (fn) => fn,
+    useEffect: (fn) => { effect = fn }
+  }
+  runInNewContext(body + '\n;readPeer', env)
+  effect()
+  await settled()
+  t.is(calls, 1)
+  clock.tick(1999)
+  t.is(calls, 1, 'no tight loop')
+  clock.tick(1)
+  await settled()
+  t.is(calls, 2, 'tried again after 2 s')
+  clock.tick(3999)
+  t.is(calls, 2)
+  ok = true
+  clock.tick(1)
+  await settled()
+  t.is(calls, 3, 'then after 4 s')
+  t.is(answers.length, 1, 'the answer turns the reactions on')
+  clock.tick(120000)
+  await settled()
+  t.is(calls, 3, 'an answered lookup is not repeated')
+  t.is(retries, 2)
+  t.is(context.failures, 0)
+})
+
 async function screenPeer (request) {
   const { pageReadKind } = await import('../src/pageNotice.js')
-  const context = { live: true, pending: false, trailing: false, answer: null }
+  const context = { live: true, pending: false, trailing: false, answer: null, failures: 0, retry: null }
   const answers = []
   const src = screen()
   const body = src.slice(src.indexOf('  const readPeer ='), src.indexOf('  const [reactionOverrides,'))
+  const { peerReadDelay } = await load()
   const read = runInNewContext(body + '\n;readPeer', {
+    peerReadDelay,
+    setTimeout: () => 0,
+    clearTimeout: () => {},
+    setPeerRetry: () => {},
+    peerRetry: 0,
     peer: 'peer',
     peerReadContext: context,
     hosted: true,

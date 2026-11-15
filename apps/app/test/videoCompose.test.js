@@ -184,6 +184,7 @@ async function postHarness ({ request = async () => ({ seq: 1 }), upload, photo 
     ...mod,
     busy: false,
     uploadingRef: { current: false },
+    queueingRef: { current: false },
     video: { draft },
     setCheckError: (value) => { error = value },
     pageRetryRef: { current: null },

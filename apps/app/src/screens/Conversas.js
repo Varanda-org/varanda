@@ -571,6 +571,7 @@ export function Conversas ({
   return (
     <View style={styles.root}>
       <RefreshableList
+        perfId='conversas'
         data={data}
         keyExtractor={(row) => row.key}
         renderItem={renderItem}

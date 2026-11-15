@@ -33,7 +33,7 @@ test('profiles show a skeleton header and rows on the first load', (t) => {
   t.ok(diary.includes('plainBand: { backgroundColor: colors.bg }'))
   const member = read('screens/Membro.js')
   t.ok(member.includes('loading={full && profilePending && !header.name && !header.username}'))
-  for (const src of [diary, member]) t.ok(src.includes('<><SkeletonRow /><SkeletonRow /><SkeletonRow /></>'))
+  for (const src of [diary, member]) t.ok(src.includes('<View>{[0, 1, 2].map((row) => <SkeletonRow key={row} />)}</View>'))
 })
 
 test('header actions and the sticky bar use press feedback', (t) => {
@@ -91,7 +91,7 @@ test('notices explain capability limits and page unavailability', async (t) => {
 
 test('notices use skeleton rows and feedback for both row destinations', (t) => {
   const src = read('screens/Avisos.js')
-  t.ok(src.includes('empty = <><SkeletonRow /><SkeletonRow /><SkeletonRow /></>'))
+  t.ok(src.includes('empty = <View>{[0, 1, 2].map((row) => <SkeletonRow key={row} />)}</View>'))
   const row = src.slice(src.indexOf('function NoticeRow'), src.indexOf('export default function Avisos'))
   t.is((row.match(/<PressScale\s/g) || []).length, 2)
 })
@@ -168,4 +168,18 @@ test('an icon-only action keeps its round size while labelled pills share the ro
   t.ok(src.includes("actionStackedRound: { alignItems: 'flex-start' }"), 'nor stretch when stacked')
   t.ok(src.includes('const round = isIconOnly(action)'), 'decided from the element')
   t.ok(src.includes('round ? styles.actionRound : styles.action'), 'chosen per action')
+})
+
+test('the profile name wraps instead of being cut at large text on a narrow screen', (t) => {
+  const src = read('ui/ProfileHeader.js')
+  const name = src.slice(src.indexOf('{title ? <Text style={styles.name}'), src.indexOf('{subtitle ?'))
+  t.ok(name.length > 0 && !name.includes('numberOfLines') && !name.includes('adjustsFontSizeToFit'), 'no truncation of the name')
+  t.ok(src.includes('name: { ...type.barTitle, fontFamily: fonts.title, color: colors.ink },'), 'a plain text style: a Text in a column wraps on its own')
+})
+
+test('the Editar perfil corner pill stops growing at the header text cap', (t) => {
+  // At the largest system text the uncapped pill grew over the band buttons.
+  const src = read('screens/Diario.js')
+  t.ok(src.includes("import { Sheet, TEXT_CAP } from '../ui/Sheet'"))
+  t.ok(src.includes("corner={<Pill key='edit' label='Editar perfil' onPress={() => setEditing(true)} maxFontSizeMultiplier={TEXT_CAP} />}"))
 })

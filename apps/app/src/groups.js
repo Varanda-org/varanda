@@ -444,7 +444,8 @@ export const EMPTY_PAGES = Object.freeze({ version: '', pages: Object.freeze([])
 // for the newest page). The newest page replaces everything; an older page
 // is kept only when it continues the cursor the store ended on and the read
 // version has not changed. Otherwise it is dropped and `stale` is set: the
-// screen reloads from the newest page.
+// screen reloads from the newest page, then re-reads older pages back to
+// where the person had scrolled (reloadTarget, reloadDone).
 export function applyPage (store, read, before = null) {
   const base = store && Array.isArray(store.pages) ? store : EMPTY_PAGES
   if (!read || typeof read !== 'object' || !Array.isArray(read.items)) return base
@@ -462,6 +463,89 @@ export function applyPage (store, read, before = null) {
 
 export function itemsOf (store) {
   return store && Array.isArray(store.pages) ? mergePages(store.pages) : []
+}
+
+// What a reload has to get back to: the oldest loaded message, and a page
+// budget of one more than was loaded (new messages push it one page deeper).
+// null when only the newest page was loaded.
+export function reloadTarget (store) {
+  if (!store || !Array.isArray(store.pages) || store.pages.length < 2) return null
+  const items = store.pages[store.pages.length - 1].items
+  const oldest = items.length > 0 ? items[items.length - 1] : null
+  if (!oldest || typeof oldest.writer !== 'string') return null
+  return { key: oldest.writer + ':' + oldest.seq, pages: store.pages.length + 1 }
+}
+
+// The reload has got back when the store holds the target message again, has
+// no older page, is stale, or has used the budget (the message may be gone:
+// a blocked author's posts are left out).
+export function reloadDone (store, target) {
+  if (!target || !store || !Array.isArray(store.pages) || store.stale || !store.next) return true
+  if (store.pages.length >= target.pages) return true
+  return store.pages.some((page) => page.items.some((i) => i && i.writer + ':' + i.seq === target.key))
+}
+
+// The fresh newest page over the loaded pages, at once: the older pages stay
+// shown until the reload walk replaces them, so the list never shrinks to one
+// page on the way. New messages push rows out of the newest page; those rows
+// (the old newest page's rows after the last one the fresh page still holds)
+// stay in it, since no cursor of the store reaches them any more. The page
+// count stays, so the walk depth does not grow. An unusable read keeps the
+// store.
+export function mergeNewest (store, read) {
+  const base = store && Array.isArray(store.pages) ? store : EMPTY_PAGES
+  const fresh = applyPage(EMPTY_PAGES, read, null)
+  if (fresh.pages.length === 0) return base
+  if (base.pages.length < 2) return fresh
+  const held = new Set(fresh.pages[0].items.map(keyOf))
+  const old = base.pages[0]
+  let last = -1
+  old.items.forEach((item, i) => { if (held.has(keyOf(item))) last = i })
+  const first = Object.freeze({ items: fresh.pages[0].items.concat(old.items.slice(last + 1)), next: old.next })
+  return Object.freeze({ version: fresh.version, pages: Object.freeze([first, ...base.pages.slice(1)]), next: base.next, stale: false })
+}
+
+function deeperTarget (fromStore, pending) {
+  if (!fromStore) return pending || null
+  if (!pending) return fromStore
+  return pending.pages >= fromStore.pages ? pending : fromStore
+}
+
+// Reloads overlap (a version change, a send, a reaction). Each begin()
+// supersedes the walk before it, which then ends without committing, and the
+// new walk goes at least as deep as the deepest one still pending: the store
+// it starts from may not hold that position again yet. deepen() takes the
+// store after an older page the person loaded during a walk, so the walk
+// reads that far too and its final commit keeps those rows. reset() ends
+// every walk and forgets the position (another identity, no longer a reader).
+export function reloadWalks () {
+  let token = 0
+  let pending = null
+  let active = false
+  return {
+    begin (store) {
+      pending = deeperTarget(reloadTarget(store), pending)
+      token += 1
+      active = true
+      return { token, target: pending }
+    },
+    current: (t) => t === token,
+    target: () => pending,
+    deepen (store) {
+      if (active) pending = deeperTarget(reloadTarget(store), pending)
+    },
+    end (t) {
+      if (t !== token) return false
+      pending = null
+      active = false
+      return true
+    },
+    reset () {
+      token += 1
+      pending = null
+      active = false
+    }
+  }
 }
 
 // --- acting as a page (Páginas) ---

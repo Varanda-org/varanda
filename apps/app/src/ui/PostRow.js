@@ -14,9 +14,8 @@
 // - expanded: shows the full caption without a clamp control (default false).
 // - preview: null | a stored link card (the post's `preview`), drawn by
 //   ./LinkCard from that data only, its thumbnail read like a post photo. A
-//   card whose URL carries an Audius music ref uses ./PostMusic (a sticker
-//   that plays a track or snippet by itself while seen, or ./MusicPlayerCard
-//   for a playlist or with the Ajustes switch off); other allowlisted music
+//   card whose URL carries an Audius music ref uses ./MusicPlayerCard, which
+//   asks nothing until a tap and never plays by itself; other allowlisted music
 //   links (embedOf) use ./MusicEmbedCard. A link only in the text never gets
 //   a player.
 // - replyPreviews: optional [{ key, name, text }], not the link card above.
@@ -60,11 +59,12 @@
 //   browser or the profile, never the conversation. A quote is lifted out only
 //   for a handled mention; its web links stay plain (./QuoteCard).
 
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
-import { AccessibilityInfo, Animated, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
+import { memo, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { Animated, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { doubleTapPlan, pendingOpen, tapKind } from '../doubleTap'
 import { compactTime, formatCount, relativeTime } from '../format'
+import { hitSlopFor } from '../hit'
 import { hasLink, textWithoutHrefs } from '../links'
 import { embedOf, sameMusicPage } from '../musicEmbed'
 import { musicRefOf } from '../music'
@@ -79,16 +79,20 @@ import { replyChip } from '../threadRows'
 import { whoOf } from '../who'
 import { ActionsSheet } from './ActionsSheet'
 import { Avatar } from './Avatar'
-import { ClampControl, useClamp } from './ClampText'
+import { ClampControl, captionEstimate, useClamp } from './ClampText'
 import { Icon } from './Icon'
 import { ReplyPreview } from './ReplyPreview'
 import { LinkCard } from './LinkCard'
 import { MusicEmbedCard } from './MusicEmbedCard'
-import PostMusic from './PostMusic'
+import { MusicPlayerCard } from './MusicPlayerCard'
 import { MediaGrid } from './MediaGrid'
 import { tap } from './haptics'
 import { hasMention, MentionText } from './MentionText'
 import { useHosted } from '../node'
+import { captionWidthNext, headActionsKey, headReserveOf, openedNext, rememberHeadActions, sameSize, seedHeadActions } from '../postRowLayout'
+import { useReduceMotion } from './StackLayer'
+import { closeRow, countRowRender, openRow, perfOn } from '../perfMarks'
+import { PerfListId } from './screenVisible'
 import { QuoteCard, quotePlayerOf } from './QuoteCard'
 import { screenReaderOn } from './screenReader'
 import { LARGE_TEXT, layout, radius, space, type } from './theme'
@@ -104,6 +108,17 @@ const FOLLOW_GUESS = 64
 // (44 - 20) / 2: the 44 pt targets centre on the 20 pt name line, so a post
 // with only ⋯ is no taller than its text.
 const HEAD_LIFT = 12
+// Room the head targets may reach, so a bigger hit area never sits on another
+// target: the row's top padding, the gap under a "republicou" line (split
+// between it and the line below), and the caption's top margin. Below the head
+// that margin is all the room there is: past it the slop would sit on the
+// caption's first line.
+const ROW_PAD_TOP = 16
+const REPOSTED_GAP = 4
+const CAPTION_GAP = 3
+const HEAD_ROOM_BELOW = CAPTION_GAP
+const REPOSTED_ROW = 18
+const REPOSTED_FOLLOW_ROW = 28
 
 const fn = (f) => (typeof f === 'function' ? f : undefined)
 
@@ -151,14 +166,6 @@ function previewLineText (line) {
 const NATIVE_DRIVER = Platform.OS !== 'web'
 const BURST_MS = 600
 
-// Read once for the module, not per row mount: a feed mounts many rows and
-// each query is a bridge call. The listener keeps a changed setting current.
-let reduceMotionOn = false
-try {
-  Promise.resolve(AccessibilityInfo.isReduceMotionEnabled()).then((reduce) => { reduceMotionOn = reduce === true }, () => {})
-  AccessibilityInfo.addEventListener('reduceMotionChanged', (reduce) => { reduceMotionOn = reduce === true })
-} catch {}
-
 // The pop when a toggle turns on: the scale is owned by the row, so the icon
 // keeps it when the bar swaps between its split and plain layouts (the first
 // like gives the count that brings the split in).
@@ -195,6 +202,15 @@ function Action ({ label, onPress, disabled, on, count, split, children }) {
   )
 }
 
+// Dev perf only: counts this row's renders per mount (src/perfMarks.js).
+function usePerfRow (key) {
+  const listId = useContext(PerfListId)
+  const token = useRef(null)
+  if (token.current === null) token.current = openRow(key, listId)
+  countRowRender(token.current)
+  useEffect(() => () => closeRow(token.current), [])
+}
+
 function PostRowView ({
   author, name, username, avatar, at, text, replyToName, level, tag, replyQuote, replyPreviews, media, preview, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending, expanded = false,
@@ -202,6 +218,8 @@ function PostRowView ({
   onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onBlock, onDelete, link, onNotice,
   seq, onMessage, publishable
 }) {
+  // perfOn never changes while the app runs, so this hook call is stable.
+  if (perfOn) usePerfRow((repostedBy ? 'repost:' + String(repostedBy.author) : 'post') + ':' + String(author) + ':' + String(seq))
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const likes = countOf(counts, 'likes')
@@ -221,21 +239,18 @@ function PostRowView ({
   // The body label, the plain text and the label without the text all use it.
   const shownText = useMemo(() => (hasText ? displayText(body, { multiline: true }) : null), [hasText, body])
   const [captionWidth, setCaptionWidth] = useState(undefined)
-  const [headActionsSize, setHeadActionsSize] = useState({ width: 0, height: 0 })
-  // Measure the targets so larger text reserves its actual space in the head.
-  const measureHeadActions = (event) => {
-    const { width, height } = event.nativeEvent.layout
-    setHeadActionsSize((prev) => prev.width === width && prev.height === height ? prev : { width, height })
-  }
+  const [headActionsSize, setHeadActionsSize] = useState(null)
+  const headSeed = useRef(null)
   const { numberOfLines, control, onTextLayout, toggle } = useClamp({
     text: shownText,
     hasMedia,
     width: captionWidth,
     forceExpanded: expanded
   })
+  const { width: windowWidth, fontScale } = useWindowDimensions()
   const measureCaption = (event) => {
-    const width = event.nativeEvent.layout.width
-    setCaptionWidth(Number.isFinite(width) && width > 0 ? width : undefined)
+    const next = captionWidthNext(captionEstimate(windowWidth), event.nativeEvent.layout.width)
+    if (next !== captionWidth) setCaptionWidth(next)
   }
   // compactTime has no word for under a minute or a clock ahead of ours;
   // relativeTime says 'agora' or the date there, never the raw timestamp.
@@ -248,7 +263,6 @@ function PostRowView ({
   // date: iOS shrank it to a clipped sliver ("( · 5 nov"), so it is left out.
   // Android's 1.3 step arrives as 1.2999999523 (a 32-bit float), so the
   // threshold sits just under it.
-  const { fontScale } = useWindowDimensions()
   const handle = who.subtitle && !(fontScale >= LARGE_TEXT) ? displayText(who.subtitle) : null
   const open = fn(onOpen)
   const like = fn(onLike)
@@ -258,6 +272,9 @@ function PostRowView ({
   const burstOpacity = useRef(new Animated.Value(0)).current
   const [burstOn, setBurstOn] = useState(false)
   const [sheet, setSheet] = useState(null)
+  const [opened, setOpened] = useState(null)
+  if (sheet !== null && openedNext(opened, sheet) !== opened) setOpened(openedNext(opened, sheet))
+  const reduceMotionOn = useReduceMotion()
   const rowId = useRef({}).current
   const previousTap = useRef(null)
   useEffect(() => () => pendingOpen.cancelOwn(rowId), [])
@@ -342,7 +359,22 @@ function PostRowView ({
   const headActions = !!fn(onFollow) || hasMore
   // Until the targets report their size, reserve what they usually take, so a
   // row never paints them over the name for a frame.
-  const headReserve = headActionsSize.width > 0 ? headActionsSize : { width: (fn(onFollow) ? FOLLOW_GUESS : 0) + (hasMore ? layout.hit : 0), height: layout.hit }
+  const headKey = headActionsKey(!!fn(onFollow), hasMore, fontScale)
+  headSeed.current = seedHeadActions(headSeed.current, headKey)
+  const headReserve = headReserveOf({
+    key: headKey,
+    measured: headActionsSize,
+    seeded: headSeed.current,
+    guess: { width: (fn(onFollow) ? FOLLOW_GUESS : 0) + (hasMore ? layout.hit : 0), height: layout.hit }
+  })
+  // Measure the targets so larger text reserves its actual space in the head.
+  // A size the first render already reserved is not stored again.
+  const measureHeadActions = (event) => {
+    const { width, height } = event.nativeEvent.layout
+    rememberHeadActions(headKey, { width, height })
+    if (sameSize(headReserve, { width, height })) return
+    setHeadActionsSize({ key: headKey, width, height })
+  }
   // The pill's face starts at the edge of its target, so the date kept no
   // space before it (Android drew them touching). ⋯ sits inside a wider
   // target and needs no gap.
@@ -417,6 +449,23 @@ function PostRowView ({
   // On the reposter's line, never the author's head: that 'seguir' follows the
   // original's author, and under their name it would read as the wrong person.
   const followReposter = reposter ? otherPress(onFollowReposter) : undefined
+  // hitSlop is native only (web ignores it), and it grows the touch area, not
+  // the layout. Name, @handle and date sit side by side, so they grow up and
+  // down only: sideways each would take the neighbour's taps. The slop above
+  // the head reaches into the row's top padding (checked on Android and iOS).
+  const headAbove = reposter ? REPOSTED_GAP / 2 : ROW_PAD_TOP
+  const headRoom = { left: 0, right: 0, top: headAbove, bottom: HEAD_ROOM_BELOW }
+  const nameSlop = hitSlopFor({ height: stackHead ? headReserve.height : type.postName.lineHeight }, headRoom)
+  const metaSlop = hitSlopFor({ height: type.meta.lineHeight }, stackHead ? { ...headRoom, top: 0 } : headRoom)
+  const avatarSlop = hitSlopFor({ width: 40, height: 40 }, { top: headAbove })
+  const repostedRowHeight = followReposter ? REPOSTED_FOLLOW_ROW : REPOSTED_ROW
+  const repostedRoom = (height) => {
+    const slack = (repostedRowHeight - height) / 2
+    return { left: 0, right: 0, top: ROW_PAD_TOP + slack, bottom: REPOSTED_GAP / 2 + slack }
+  }
+  const repostedSlop = hitSlopFor({ height: REPOSTED_ROW }, repostedRoom(REPOSTED_ROW))
+  // "seguir" is about 40 pt wide, with 8 pt of gap to its left.
+  const repostedFollowSlop = { ...hitSlopFor({ height: REPOSTED_FOLLOW_ROW }, repostedRoom(REPOSTED_FOLLOW_ROW)), left: 2, right: 2 }
   const bar = fn(onReply) || fn(onRepost) || fn(onQuote) || fn(onLike) || href !== null
   // Composed label for the post body element: author, reply-to, text, date.
   // The avatar link already provides profile access, so name here is context.
@@ -481,7 +530,7 @@ function PostRowView ({
   // Outside the row's open area: a tap on the card opens the link, never the conversation.
   const previewNode = !hasMedia && preview && typeof preview === 'object'
     ? music !== null
-      ? <PostMusic card={preview} music={music} />
+      ? <MusicPlayerCard card={preview} music={music} />
       : embed !== null
         ? <MusicEmbedCard embed={embed} card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />
         : <LinkCard card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />
@@ -510,7 +559,7 @@ function PostRowView ({
               accessibilityLabel={reposterName + ' republicou'}
               disabled={!openReposter}
               onPress={openReposter}
-              hitSlop={4}
+              hitSlop={repostedSlop}
               style={({ pressed }) => [styles.repostedLink, pressed && openReposter && styles.pressed]}
             >
               <Icon name='republicar' size={14} color={colors.soft} />
@@ -524,7 +573,7 @@ function PostRowView ({
                   accessibilityState={{ disabled: !!followPending }}
                   disabled={!!followPending}
                   onPress={followReposter}
-                  hitSlop={6}
+                  hitSlop={repostedFollowSlop}
                   style={({ pressed }) => [styles.repostedFollow, followPending && styles.disabled, pressed && styles.pressed]}
                 >
                   <Text style={styles.repostedFollowText}>seguir</Text>
@@ -540,6 +589,7 @@ function PostRowView ({
           accessibilityLabel={'ver o perfil de ' + title}
           disabled={!openAuthor}
           onPress={openAuthor}
+          hitSlop={avatarSlop}
           style={({ pressed }) => pressed && openAuthor && styles.pressed}
         >
           <Avatar name={who.avatarName} publicKey={author} size={40} picture={avatar} persist={persistMedia !== false} />
@@ -570,6 +620,7 @@ function PostRowView ({
                   onPress={openAuthor}
                   onLongPress={bodyLongPress}
                   delayLongPress={350}
+                  hitSlop={nameSlop}
                   style={({ pressed }) => [styles.nameBox, handle && styles.nameBeside, stackHead && { width: '100%', paddingRight: headPad, minHeight: headReserve.height, justifyContent: 'center' }, pressed && openAuthor && styles.pressed]}
                 >
                   <Text style={styles.name} numberOfLines={1}>{title}</Text>
@@ -583,7 +634,7 @@ function PostRowView ({
                       onPress={openTap}
                       onLongPress={bodyLongPress}
                       delayLongPress={350}
-                      hitSlop={4}
+                      hitSlop={metaSlop}
                       style={({ pressed }) => [styles.metaBox, pressed && open && styles.pressed]}
                     >
                       <Text style={styles.handle} numberOfLines={1}>{handle}</Text>
@@ -598,7 +649,7 @@ function PostRowView ({
                   onLongPress={bodyLongPress}
                   delayLongPress={350}
                   {...a11yOpen}
-                  hitSlop={4}
+                  hitSlop={metaSlop}
                   style={({ pressed }) => [styles.timeBox, pressed && open && styles.pressed]}
                 >
                   <Text style={styles.time} numberOfLines={1}>{(handle ? '\u00a0· ' : stackHead ? '' : '· ') + time}</Text>
@@ -802,8 +853,8 @@ function PostRowView ({
                 )
               : <View style={styles.previews}>{previewsBody}</View>
             : null}
-          <ActionsSheet open={sheet === 'repost'} onClose={() => setSheet(null)} actions={repostSheet} />
-          <ActionsSheet open={sheet === 'more'} onClose={() => setSheet(null)} actions={moreSheet} />
+          {opened && opened.repost ? <ActionsSheet open={sheet === 'repost'} onClose={() => setSheet(null)} actions={repostSheet} /> : null}
+          {opened && opened.more ? <ActionsSheet open={sheet === 'more'} onClose={() => setSheet(null)} actions={moreSheet} /> : null}
           {burstOn
             ? (
               <Animated.View
@@ -842,14 +893,14 @@ export const PostRow = memo(BlockGate)
 
 const makeStyles = (colors) => StyleSheet.create({
   row: {
-    paddingTop: 16,
+    paddingTop: ROW_PAD_TOP,
     paddingHorizontal: 16,
     paddingBottom: 6,
     borderBottomWidth: 1,
     borderBottomColor: colors.line,
     backgroundColor: colors.bg
   },
-  reposted: { flexDirection: 'row', alignItems: 'center', gap: 8, marginLeft: 26, marginBottom: 4, maxWidth: '100%' },
+  reposted: { flexDirection: 'row', alignItems: 'center', gap: 8, marginLeft: 26, marginBottom: REPOSTED_GAP, maxWidth: '100%' },
   repostedLink: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 1 },
   repostedText: { ...type.replyMark, color: colors.soft, fontWeight: '600', flexShrink: 1 },
   repostedFollow: { flexShrink: 0, minHeight: 28, justifyContent: 'center', paddingHorizontal: 2 },
@@ -907,7 +958,7 @@ const makeStyles = (colors) => StyleSheet.create({
   previews: { marginTop: 8, minHeight: layout.hit, justifyContent: 'center' },
   previewsLabel: { ...type.replyMark, color: colors.soft, fontWeight: '700' },
   previewLine: { ...type.replyMark, color: colors.ink },
-  text: { ...type.postText, color: colors.ink, marginTop: 3 },
+  text: { ...type.postText, color: colors.ink, marginTop: CAPTION_GAP },
   bar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 0, marginBottom: -4, marginLeft: -8, maxWidth: 360 },
   action: { flexDirection: 'row', alignItems: 'center', gap: 5, minHeight: layout.hit, minWidth: 44, paddingHorizontal: 8 },
   // A split pair is as wide as the combined button (8 + icon + gap + digits +

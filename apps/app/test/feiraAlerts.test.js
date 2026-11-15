@@ -109,3 +109,23 @@ test('web adapter persists JSON and reads changes from another store', async (t)
     delete globalThis.localStorage
   }
 })
+
+test('the store keeps the time each city was last shown, per origin, and survives the saved searches changing', async (t) => {
+  const { createAlertsStore } = await load()
+  const d = disk()
+  const store = createAlertsStore(d)
+  t.is((await store.visitCity(O1, 'SP/sao-paulo', 100)).previous, null, 'a first visit has no earlier time')
+  t.is((await store.visitCity(O1, 'SP/sao-paulo', 200)).previous, 100)
+  t.is((await store.visitCity(O1, 'RJ/rio-de-janeiro', 300)).previous, null, 'another city is independent')
+  t.is((await store.visitCity(O2, 'SP/sao-paulo', 400)).previous, null, 'another origin is independent')
+  t.is((await store.visitCity(O1, 'SP/sao-paulo', 150)).previous, 200)
+  t.is((await store.visitCity(O1, 'SP/sao-paulo', 500, false)).previous, 200, 'a read does not move the time')
+  t.is((await store.visitCity(O1, 'SP/sao-paulo', 600)).previous, 200, 'and the stored time stayed')
+  const saved = await store.add(O1, query, 700)
+  await store.markSeen(O1, saved.searches[0].id, 800)
+  await store.recordCounts(O1, [{ id: saved.searches[0].id, seenAtMs: 800, count: 2 }])
+  await store.beginRun(O1, 900)
+  await store.remove(O1, saved.searches[0].id)
+  t.alike((await createAlertsStore(d).load(O1)).visits, { 'SP/sao-paulo': 600, 'RJ/rio-de-janeiro': 300 }, 'kept on disk through every other change')
+  t.is((await store.visitCity('http://invalid.example', 'SP/sao-paulo', 1)).persisted, false)
+})

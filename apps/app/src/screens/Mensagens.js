@@ -410,6 +410,7 @@ export function Mensagens ({ onOpenThread, onBack }) {
     <View style={styles.root}>
       {bar}
       <RefreshableList
+        perfId='mensagens'
         data={unlocked ? sorted : []}
         keyExtractor={(row) => row.peer}
         renderItem={({ item }) => (
