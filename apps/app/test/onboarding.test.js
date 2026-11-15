@@ -146,7 +146,8 @@ test('step titles and hints cover every step', async (t) => {
   const { STEP_TITLES, STEP_HINTS } = await load()
   const steps = ['entrar', 'recuperando', 'idade', 'telefone', 'vinculo', 'identidade', 'certificado', 'carregando', 'perfil', 'pronto']
   t.alike(Object.keys(STEP_TITLES).sort(), steps.slice().sort())
-  for (const s of steps) t.ok(STEP_HINTS[s].length > 0)
+  for (const s of steps.filter((s) => s !== 'entrar')) t.ok(STEP_HINTS[s].length > 0)
+  t.is(STEP_HINTS.entrar, undefined, 'the welcome header carries its own line')
   t.is(STEP_TITLES.idade, 'Confirme sua idade')
   t.is(STEP_HINTS.idade, 'A Varanda é para quem tem 16 anos ou mais. Só a sua faixa de idade fica guardada.')
   t.is(STEP_TITLES.telefone, 'Confirme seu celular')

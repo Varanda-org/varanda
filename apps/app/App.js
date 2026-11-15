@@ -93,6 +93,7 @@ import { usePhoneGate } from './src/usePhoneGate'
 import * as nav from './src/nav'
 import { bindHistory } from './src/history'
 import { STEP_HINTS, STEP_TITLES, onboardingStep } from './src/onboarding'
+import { setupInfoKnown } from './src/setupInfoKnown'
 import { captureInvite, dropInvite, loadInvite, saveInvite } from './src/profileLinkStore'
 import { captureEntryLink, dropEntryLink } from './src/groupLinkStore'
 import { ENTRY_LINK_LABELS, ENTRY_OPEN_TEXT, entryCardText, entryPath } from './src/groupLink'
@@ -495,6 +496,10 @@ function Member () {
     setInfo(i)
     setInfoError('')
   }, [])
+  // Identidade's own node.info failure (the passkey setup reads it there).
+  const takeInfoError = useCallback((text) => setInfoError(text || 'erro'), [])
+  // The key whose account state Escolha seu @nome has read (Identidade LinkCard).
+  const [accountReadKey, setAccountReadKey] = useState(null)
 
   // Browser node: the passkey identity. Every page load starts locked; the
   // tabs show only while it is unlocked and node.info is about that key.
@@ -2974,7 +2979,7 @@ function Member () {
   // Only A Rua as the first screen waits for its details and Momentos; a
   // stacked screen (a link opened at boot) or another tab shows at once.
   const feedReady = ruaFeedReady({ details: feedBoot.details, moments: feedBoot.moments, onRua: tab === 'rua', stacked: topEntry !== null })
-  const cover = coverBoot({ step, passkeyKnown: passkey === null || pkStatus !== null || !!passkey.error, age: ageNeeded, ageError, phone: phone.gate, phoneError: phoneErrorShown, infoKnown: info !== null || infoError !== '', profileSlow: slow, feedReady })
+  const cover = coverBoot({ step, passkeyKnown: passkey === null || pkStatus !== null || !!passkey.error, age: ageNeeded, ageError, phone: phone.gate, phoneError: phoneErrorShown, infoKnown: setupInfoKnown({ step, info, infoError, accountReadKey }), profileSlow: slow, feedReady })
   if (atShell && cover && !bootSettled.current && bootStepRef.current !== step) {
     bootStepRef.current = step
     bootCoverAt.current = Date.now()
@@ -3302,7 +3307,7 @@ function Member () {
             onDismiss: () => { clearPostLink(); setPendingPost(null) }
           }
         : null
-      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} onLinked={takeLinked} onInviteChanged={reloadCard} onPhoneRecheck={recheckPhone} onStepHeld={holdPostStep} invite={inviteProp || entryProp || postProp} feira={{ holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode }} />
+      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} initialInfo={passkey === null ? info : null} onInfo={takeInfo} onInfoError={takeInfoError} onAccountRead={setAccountReadKey} onLinked={takeLinked} onInviteChanged={reloadCard} onPhoneRecheck={recheckPhone} onStepHeld={holdPostStep} invite={inviteProp || entryProp || postProp} feira={{ holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode }} />
     } else if (infoError) {
       body = (
         <Page flush grow padBottom={16}>
