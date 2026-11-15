@@ -279,6 +279,7 @@ export default function Curtidas ({ entry, onBack, onOpenMember }) {
           // One list per tab: a shared one would carry the scroll offset and
           // the end-reached latch over to the other tab.
           key={kind}
+          perfId='curtidas'
           data={rows}
           keyExtractor={(row) => row.author}
           renderItem={({ item }) => <EngagerRow row={item} onOpen={onOpenMember} />}

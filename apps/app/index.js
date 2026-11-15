@@ -1,6 +1,8 @@
 /* global __DEV__ */
 // First, so crypto.getRandomValues exists before any other module loads.
 import './src/cryptoPolyfill'
+// Right after it: the js-entry boot mark (inert unless the dev perf flag is on).
+import './src/perfEntry'
 
 import { registerRootComponent } from 'expo'
 
@@ -9,11 +11,14 @@ import { registerRootComponent } from 'expo'
 import './src/backgroundTask'
 import { sweepMediaCache } from './src/media/display'
 import { trimKept } from './src/media/keep'
+import { bootSpan, monotonicNow, perfOn } from './src/perfMarks'
 import App from './App'
 
 // Photos cached by the last run (some of authors not followed) go before the
 // first render; a no-op on the web.
+const sweepStart = perfOn ? monotonicNow() : 0
 sweepMediaCache()
+if (perfOn) bootSpan('sweep-media-cache', sweepStart, monotonicNow())
 // Caps the kept photos (./src/media/keep) later, off the start path.
 setTimeout(trimKept, 5000)
 
