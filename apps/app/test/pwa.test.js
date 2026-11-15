@@ -48,7 +48,13 @@ test('index.html links the manifest and keeps the Expo template', (t) => {
   t.ok(/<link rel="manifest" href="\/manifest\.webmanifest"/.test(html), 'manifest link')
   t.ok(fs.existsSync(path.join(PUBLIC, 'apple-touch-icon.png')))
   t.is(pngSize(path.join(PUBLIC, 'apple-touch-icon.png')), '180x180')
-  t.absent(/<script/i.test(html), 'no script tag (CSP script-src self)')
+  // CSP script-src 'self': only same-origin files, never inline code.
+  const scripts = [...html.matchAll(/<script([^>]*)>([\s\S]*?)<\/script>/gi)]
+  t.is(scripts.length, (html.match(/<script/gi) || []).length, 'every script tag is closed')
+  for (const [, attrs, body] of scripts) {
+    t.ok(/^ src="\/[\w-]+\.js"$/.test(attrs), 'same-origin src only: ' + attrs)
+    t.is(body, '', 'no inline code')
+  }
   t.ok(html.includes('%LANG_ISO_CODE%'))
   t.ok(html.includes('%WEB_TITLE%'))
   t.ok(html.includes('<div id="root"></div>'))
@@ -145,7 +151,7 @@ test('the service worker is a template outside public/', (t) => {
   t.is(sw.split('cache.match(DM_STATE_KEY)').length - 1, 1, 'the second reads only the DM mute record')
   t.is(sw.split('cache.match(BLOCK_STATE_KEY)').length - 1, 1, 'the third reads only the block list')
   t.ok(sw.includes("new Response(buf, { status: 200, statusText: 'OK', headers })"), 'a cache hit is rebuilt, never returned as stored')
-  t.absent(/<script/i.test(html), 'index.html still has no script tag')
+  t.absent(/<script(?! src="\/[\w-]+\.js"><\/script>)/i.test(html), 'index.html still has no inline script')
 })
 
 test('round 8: html and body never pan or bounce after a screen push', (t) => {

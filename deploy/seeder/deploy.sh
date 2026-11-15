@@ -196,6 +196,16 @@ pegar_lock() {
   fi
 }
 
+# Os dois caminhos usam o mesmo projeto do compose: um deploy por SSH num
+# servidor que já atualiza por imagem reescreveria o checkout e trocaria os
+# contêineres. O marcador é escrito pelo `update.sh install`.
+recusar_pull() {
+  if [ -e "$state/modo-pull" ]; then
+    log 'este servidor atualiza por imagem (deploy/seeder/update.sh); para voltar ao deploy por SSH apague /var/lib/varanda-deploy/modo-pull'
+    exit 1
+  fi
+}
+
 # O SHA testado chega pela entrada padrão (nunca por argumento: o sudoers não
 # aceita nenhum). Vazio quer dizer "implante a ponta" (o caminho manual).
 ler_sha() {
@@ -901,6 +911,7 @@ main() {
   trap ao_sair EXIT
   trap erro_antes ERR
   log "início (pid $$)"
+  recusar_pull
   ler_sha
   escolher_alvo
   conferir_antes

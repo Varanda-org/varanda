@@ -1,0 +1,17 @@
+# Contexto do build de deploy/seeder/Dockerfile.web: só o que
+# `npm run export:web -w apps/app` lê, mais o Caddyfile e o LICENSE.
+*
+!package.json
+!package-lock.json
+!LICENSE
+!packages
+!apps/app
+!apps/cli/package.json
+!apps/site/package.json
+!deploy/seeder/Caddyfile
+**/node_modules
+**/.env
+**/.env.*
+apps/app/ios
+apps/app/android
+apps/app/dist
