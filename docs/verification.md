@@ -10886,54 +10886,6 @@ node apps/site/test/legal.test.js
 node apps/site/scripts/render-calcada.js --check
 ```
 
-## 237. Capa dos players de música antes de carregar (PR feat/music-player-cover)
-
-Esta seção confere a capa que o lugar do player do YouTube, do SoundCloud, do Spotify e do Apple Music mostra antes de a página do provedor carregar, e a busca dessa capa ao compor. Ao escrever, quem monta o cartão (o aparelho de quem envia no app nativo, o serviço de conta na web hospedada) guarda como `card.image` a capa do provedor: o `og:image` da página (no app nativo, só quando o host é o da própria página ou um subdomínio estrito de um domínio de imagem do próprio provedor, `COVER_IMAGE_DOMAINS` em `apps/app/src/musicEmbed.js`: `ytimg.com`, `scdn.co`, `sndcdn.com`, `mzstatic.com`; na web, o serviço de conta busca o `og:image` como em qualquer prévia, com as verificações de endereço dele) e, num vídeo do YouTube, lido no endereço canônico (`coverTarget`), a miniatura padrão `https://i.ytimg.com/vi/<id>/mqdefault.jpg` (`youtubeCoverUrl` de `@varanda/rpc`) quando a página ou a imagem dela não dá nenhuma; um cartão feito só com essa miniatura se chama "YouTube". No app nativo são no máximo duas buscas de imagem, sem seguir redirecionamento, com os mesmos limites de antes (5 s, 256 KiB, tipo conferido pelos primeiros bytes); no serviço, a página e no máximo duas imagens, o pedido continua exatamente `{ url }` e a cota é a mesma. A imagem é recodificada no `card.image` de sempre (JPEG, até 320 px por lado, 32752 bytes): o formato dos registros não muda. Ao mostrar, o lugar do player desenha desde o primeiro quadro uma capa parada do tamanho exato do player, só com o cartão guardado (imagem, título, nome do provedor e selo de play; sem imagem, um quadro do provedor com um ícone de música), sem falar com ninguém; o player continua carregando embaixo dela (comportamento da seção 233, sem mudança), aparece num esmaecimento quando fica pronto e a capa sai. Um toque na capa não faz nada; o toque longo abre o menu como antes. Termos e Política na versão 52, com novo aceite. Sem mudança de RPC. A lista abaixo é um roteiro: nada aqui foi marcado como conferido, e o que não foi executado fica pendente.
-
-Ordem: Android (build de debug) e simulador iOS primeiro, depois web e PWA instalado. Registrar aparelho, sistema e, na web, o navegador, e o resultado de cada item.
-
-Ao compor:
-
-- [ ] a. Publicação nova com um link de cada provedor (um vídeo do YouTube, uma faixa do Spotify, uma do SoundCloud e uma do Apple Music), pelo app nativo: o cartão guardado traz a capa do provedor. Android, iOS: pendente. Resultado: pendente.
-- [ ] b. O mesmo pela web hospedada e pelo PWA: o serviço de conta devolve a capa e ela fica guardada. Web e PWA: pendente. Resultado: pendente.
-- [ ] c. Com a chave **Prévia de links** desligada em Ajustes, nenhuma busca de capa sai (nem da página nem da imagem), conferido no registro de rede ou no proxy. Android, iOS, web: pendente. Resultado: pendente.
-- [ ] d. Um link do YouTube numa conversa privada e num grupo ganha cartão com a miniatura e, com ela, o player e a capa, no app nativo e na web. Android, iOS, web: pendente. Resultado: pendente.
-- [ ] e. Resposta do serviço de conta a partir do endereço do datacenter da associação, para cada provedor (`POST /account/preview` com um link de YouTube, Spotify, SoundCloud e Apple Music): registrar se vem `image` e, no YouTube, se a miniatura entrou e o título é "YouTube" quando a página não deu nenhum. Pendente. Resultado: pendente.
-
-Ao mostrar:
-
-- [ ] f. Nas publicações novas dos itens a e b, a capa aparece na hora, no tamanho do player, e o player aparece por cima num esmaecimento, para os quatro provedores; o esmaecimento nunca descobre um player em branco. Android, iOS, web e PWA: pendente. Resultado: pendente.
-- [ ] g. Uma publicação antiga sem imagem no cartão mostra o quadro do provedor com o ícone de música. Android, iOS, web e PWA: pendente. Resultado: pendente.
-- [ ] h. Com Reduzir movimento ligado, o player aparece de uma vez, sem esmaecimento. Android, iOS, web: pendente. Resultado: pendente.
-- [ ] i. Numa citação de uma publicação com player, a capa e o esmaecimento se comportam como na publicação. Android, iOS, web e PWA: pendente. Resultado: pendente.
-- [ ] j. Na prévia do compositor (Publicar, conversa privada e grupo), o rascunho mostra a capa e o player esmaece no próprio lugar. Android, iOS, web e PWA: pendente. Resultado: pendente.
-- [ ] k. Rolar para longe de um player já carregado e voltar: ele aparece na hora, sem capa e sem um segundo esmaecimento. Android, iOS, web e PWA: pendente. Resultado: pendente.
-- [ ] l. Um toque na capa não faz nada (não abre o link nem o player), e o toque longo abre o menu da publicação ou da mensagem. Android, iOS, web e PWA: pendente. Resultado: pendente.
-- [ ] m. Quem lê não faz nenhum pedido para desenhar a capa: no registro de rede, abrir uma publicação com capa não busca imagem do provedor (só o quadro do player, como na seção 233). Android, iOS, web: pendente. Resultado: pendente.
-- [ ] n. Termos e Política na versão 52: o aceite novo aparece antes de qualquer tela e a versão 51 não vale mais. Android, iOS, web e PWA: pendente. Resultado: pendente.
-- [ ] o. Aparelho Android real (não só o emulador): itens a, f, k e l. Pendente. Resultado: pendente.
-
-Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho:
-
-```sh
-node packages/rpc/test/music-cover.test.js
-node apps/app/test/musicEmbed.test.js
-node apps/app/test/linkCardBuild.test.js
-node apps/app/test/coverBuildWeb.test.js
-node apps/app/test/embedCover.test.js
-node apps/app/test/embedCoverView.test.js
-node apps/app/test/useReveal.test.js
-node apps/app/test/embedLayer.test.js
-node apps/app/test/musicEmbedCard.test.js
-node apps/cli/test/preview-routes.test.js
-node apps/app/test/legal.test.js
-node apps/app/test/terms-version.test.js
-node packages/core/test/terms.test.js
-node apps/site/test/legal.test.js
-```
-
-Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
-
 ## 237. Ícone da Feira: barraca (PR feat/feira-tent-icon)
 
 Esta seção confere o novo ícone da Feira, uma barraca de feira (toldo listrado, bambolim recortado, dois postes e balcão) desenhada com Views na grade de 24, no lugar da sacola de compras. Só o visual: sem mudança de protocolo, RPC, Termos nem dependência.
@@ -11017,35 +10969,6 @@ node apps/app/test/wordCheck.test.js
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
 
-## 237. Página pública de uma publicação com cara de feed (PR feat/post-page-feed-style)
-
-Esta seção confere a página `/p/<D>/<seq>` (`apps/cli/lib/post-page.js`) redesenhada para parecer uma linha de publicação de A Rua: disco com as iniciais numa de cinco cores, nome, @nome e data numa linha, texto, fotos em grade, cartão de link, desenhos de responder, repostar e curtir sem contagem, o botão "Ver na Varanda" embaixo e duas linhas esmaecidas. Continua sem script, sem recurso externo e com um só link. Formato, rotas, RPC e Termos não mudam; `docs/protocol.md` seção 16 passa a descrever o disco de iniciais e os desenhos.
-
-Rodada de 2026-11-14: navegador do painel do app (Chromium), com um servidor de teste na porta 47321 e a CSP de produção do `deploy/seeder/Caddyfile`, fotos de mentira em SVG.
-
-- [x] 375x812 em claro: todas as variantes (texto longo em três parágrafos, curto, 1 a 4 e 10 fotos, vídeo, cartão de link com e sem foto, resposta, citação) batem com a linha de A Rua: disco de 40 com a faixa e as iniciais, cabeça numa linha, grade 4:3 para uma foto e quadrados para 2 a 4, "Mais 6 fotos na Varanda" para 10, disco de play na capa do vídeo, cartão com ícone de link e host, três ícones sem contagem, botão e nota embaixo, duas linhas esmaecidas.
-- [x] 375x812 em escuro: a paleta troca (fundo #101010, botão #5dcaa0 com tinta escura) e o disco de play fica claro sobre o escuro.
-- [x] 1280x800 em claro e em escuro: uma coluna de 640 px centralizada, com o texto da barra alinhado à coluna.
-- [x] 320x640: duas fotos cabem, a cabeça fica numa linha e a nota quebra.
-- [x] 568x320 (celular deitado): a linha e o botão aparecem na primeira tela.
-- [x] 188x406 (375 com zoom de 200%): a cabeça quebrava no meio das palavras, porque só sobravam cerca de 60 px (44 px de margem à direita para o desenho "mais"). Depois da correção (em telas de até 300 px a cabeça usa a largura toda e o desenho "mais" some; a data nunca quebra) passou.
-- [x] Nome de 80 caracteres: a cabeça quebra em várias linhas e o @nome de 38 caracteres quebra no meio a 375 px. Aceito, é caso de borda.
-- [x] Texto hostil (`<"` nas iniciais): as iniciais saem como texto, o título tem o nome escapado e nenhuma marcação rodou.
-- [x] Sem nome e sem @nome: o glifo de pessoa no lugar das iniciais e o título "Publicação na Varanda".
-- [x] Página de reserva (endereço inválido): só a barra, o título e o botão, que leva a `/`.
-- [x] Rede e console: só o documento e `/p/<chave>/321/foto/<1 a 4>`; o console fica vazio, sem violação de CSP.
-
-Testes automáticos desta mudança, a partir da raiz. `apps/cli/test/post-page.test.js` tem 27 testes: iniciais, cores da faixa, ordem dos elementos, SVG inerte, um só bloco de estilo com claro e escuro e tamanho abaixo de 64 KiB. A lista é um roteiro, não um registro de execução.
-
-```sh
-node apps/cli/test/post-page.test.js
-```
-
-- [ ] Android Chrome no aparelho, em claro e em escuro: pendente.
-- [ ] iOS Safari no aparelho, em claro e em escuro: pendente.
-- [ ] Link aberto de dentro do WhatsApp e do Instagram (navegador embutido): pendente.
-- [ ] Fonte maior no sistema ou no navegador (ajuste de tamanho do texto, não zoom da página), no Android e no iOS: pendente. A página usa tamanhos em px, como o app.
-
 ## 240. Anel do seu momento redondo no Android (PR fix/momentos-ring-circle)
 
 Esta seção confere a correção do quadrado cinza atrás da sua foto na faixa de momentos de A Rua, no Android. O seu anel monta como "+" (fundo transparente) e ganha a cor de contorno quando os momentos carregam. No Android, a View transparente era achatada (sem view nativa própria) e, quando virava uma view de verdade, a cor saía sem o raio: um quadrado de 64 pt. A View do anel agora tem `collapsable={false}`. Os outros anéis já montavam com a cor e ficavam redondos. Só o visual: sem mudança de protocolo, RPC, Termos nem dependência.
@@ -11128,3 +11051,80 @@ node apps/app/test/preSplash.test.js
 ```
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 243. Capa dos players de música antes de carregar (PR feat/music-player-cover)
+
+Esta seção confere a capa que o lugar do player do YouTube, do SoundCloud, do Spotify e do Apple Music mostra antes de a página do provedor carregar, e a busca dessa capa ao compor. Ao escrever, quem monta o cartão (o aparelho de quem envia no app nativo, o serviço de conta na web hospedada) guarda como `card.image` a capa do provedor: o `og:image` da página (no app nativo, só quando o host é o da própria página ou um subdomínio estrito de um domínio de imagem do próprio provedor, `COVER_IMAGE_DOMAINS` em `apps/app/src/musicEmbed.js`: `ytimg.com`, `scdn.co`, `sndcdn.com`, `mzstatic.com`; na web, o serviço de conta busca o `og:image` como em qualquer prévia, com as verificações de endereço dele) e, num vídeo do YouTube, lido no endereço canônico (`coverTarget`), a miniatura padrão `https://i.ytimg.com/vi/<id>/mqdefault.jpg` (`youtubeCoverUrl` de `@varanda/rpc`) quando a página ou a imagem dela não dá nenhuma; um cartão feito só com essa miniatura se chama "YouTube". No app nativo são no máximo duas buscas de imagem, sem seguir redirecionamento, com os mesmos limites de antes (5 s, 256 KiB, tipo conferido pelos primeiros bytes); no serviço, a página e no máximo duas imagens, o pedido continua exatamente `{ url }` e a cota é a mesma. A imagem é recodificada no `card.image` de sempre (JPEG, até 320 px por lado, 32752 bytes): o formato dos registros não muda. Ao mostrar, o lugar do player desenha desde o primeiro quadro uma capa parada do tamanho exato do player, só com o cartão guardado (imagem, título, nome do provedor e selo de play; sem imagem, um quadro do provedor com um ícone de música), sem falar com ninguém; o player continua carregando embaixo dela (comportamento da seção 233, sem mudança), aparece num esmaecimento quando fica pronto e a capa sai. Um toque na capa não faz nada; o toque longo abre o menu como antes. Termos e Política na versão 52, com novo aceite. Sem mudança de RPC. A lista abaixo é um roteiro: nada aqui foi marcado como conferido, e o que não foi executado fica pendente.
+
+Ordem: Android (build de debug) e simulador iOS primeiro, depois web e PWA instalado. Registrar aparelho, sistema e, na web, o navegador, e o resultado de cada item.
+
+Ao compor:
+
+- [ ] a. Publicação nova com um link de cada provedor (um vídeo do YouTube, uma faixa do Spotify, uma do SoundCloud e uma do Apple Music), pelo app nativo: o cartão guardado traz a capa do provedor. Android, iOS: pendente. Resultado: pendente.
+- [ ] b. O mesmo pela web hospedada e pelo PWA: o serviço de conta devolve a capa e ela fica guardada. Web e PWA: pendente. Resultado: pendente.
+- [ ] c. Com a chave **Prévia de links** desligada em Ajustes, nenhuma busca de capa sai (nem da página nem da imagem), conferido no registro de rede ou no proxy. Android, iOS, web: pendente. Resultado: pendente.
+- [ ] d. Um link do YouTube numa conversa privada e num grupo ganha cartão com a miniatura e, com ela, o player e a capa, no app nativo e na web. Android, iOS, web: pendente. Resultado: pendente.
+- [ ] e. Resposta do serviço de conta a partir do endereço do datacenter da associação, para cada provedor (`POST /account/preview` com um link de YouTube, Spotify, SoundCloud e Apple Music): registrar se vem `image` e, no YouTube, se a miniatura entrou e o título é "YouTube" quando a página não deu nenhum. Pendente. Resultado: pendente.
+
+Ao mostrar:
+
+- [ ] f. Nas publicações novas dos itens a e b, a capa aparece na hora, no tamanho do player, e o player aparece por cima num esmaecimento, para os quatro provedores; o esmaecimento nunca descobre um player em branco. Android, iOS, web e PWA: pendente. Resultado: pendente.
+- [ ] g. Uma publicação antiga sem imagem no cartão mostra o quadro do provedor com o ícone de música. Android, iOS, web e PWA: pendente. Resultado: pendente.
+- [ ] h. Com Reduzir movimento ligado, o player aparece de uma vez, sem esmaecimento. Android, iOS, web: pendente. Resultado: pendente.
+- [ ] i. Numa citação de uma publicação com player, a capa e o esmaecimento se comportam como na publicação. Android, iOS, web e PWA: pendente. Resultado: pendente.
+- [ ] j. Na prévia do compositor (Publicar, conversa privada e grupo), o rascunho mostra a capa e o player esmaece no próprio lugar. Android, iOS, web e PWA: pendente. Resultado: pendente.
+- [ ] k. Rolar para longe de um player já carregado e voltar: ele aparece na hora, sem capa e sem um segundo esmaecimento. Android, iOS, web e PWA: pendente. Resultado: pendente.
+- [ ] l. Um toque na capa não faz nada (não abre o link nem o player), e o toque longo abre o menu da publicação ou da mensagem. Android, iOS, web e PWA: pendente. Resultado: pendente.
+- [ ] m. Quem lê não faz nenhum pedido para desenhar a capa: no registro de rede, abrir uma publicação com capa não busca imagem do provedor (só o quadro do player, como na seção 233). Android, iOS, web: pendente. Resultado: pendente.
+- [ ] n. Termos e Política na versão 52: o aceite novo aparece antes de qualquer tela e a versão 51 não vale mais. Android, iOS, web e PWA: pendente. Resultado: pendente.
+- [ ] o. Aparelho Android real (não só o emulador): itens a, f, k e l. Pendente. Resultado: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho:
+
+```sh
+node packages/rpc/test/music-cover.test.js
+node apps/app/test/musicEmbed.test.js
+node apps/app/test/linkCardBuild.test.js
+node apps/app/test/coverBuildWeb.test.js
+node apps/app/test/embedCover.test.js
+node apps/app/test/embedCoverView.test.js
+node apps/app/test/useReveal.test.js
+node apps/app/test/embedLayer.test.js
+node apps/app/test/musicEmbedCard.test.js
+node apps/cli/test/preview-routes.test.js
+node apps/app/test/legal.test.js
+node apps/app/test/terms-version.test.js
+node packages/core/test/terms.test.js
+node apps/site/test/legal.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 244. Página pública de uma publicação com cara de feed (PR feat/post-page-feed-style)
+
+Esta seção confere a página `/p/<D>/<seq>` (`apps/cli/lib/post-page.js`) redesenhada para parecer uma linha de publicação de A Rua: disco com as iniciais numa de cinco cores, nome, @nome e data numa linha, texto, fotos em grade, cartão de link, desenhos de responder, repostar e curtir sem contagem, o botão "Ver na Varanda" embaixo e duas linhas esmaecidas. Continua sem script, sem recurso externo e com um só link. Formato, rotas, RPC e Termos não mudam; `docs/protocol.md` seção 16 passa a descrever o disco de iniciais e os desenhos.
+
+Rodada de 2026-11-14: navegador do painel do app (Chromium), com um servidor de teste na porta 47321 e a CSP de produção do `deploy/seeder/Caddyfile`, fotos de mentira em SVG.
+
+- [x] 375x812 em claro: todas as variantes (texto longo em três parágrafos, curto, 1 a 4 e 10 fotos, vídeo, cartão de link com e sem foto, resposta, citação) batem com a linha de A Rua: disco de 40 com a faixa e as iniciais, cabeça numa linha, grade 4:3 para uma foto e quadrados para 2 a 4, "Mais 6 fotos na Varanda" para 10, disco de play na capa do vídeo, cartão com ícone de link e host, três ícones sem contagem, botão e nota embaixo, duas linhas esmaecidas.
+- [x] 375x812 em escuro: a paleta troca (fundo #101010, botão #5dcaa0 com tinta escura) e o disco de play fica claro sobre o escuro.
+- [x] 1280x800 em claro e em escuro: uma coluna de 640 px centralizada, com o texto da barra alinhado à coluna.
+- [x] 320x640: duas fotos cabem, a cabeça fica numa linha e a nota quebra.
+- [x] 568x320 (celular deitado): a linha e o botão aparecem na primeira tela.
+- [x] 188x406 (375 com zoom de 200%): a cabeça quebrava no meio das palavras, porque só sobravam cerca de 60 px (44 px de margem à direita para o desenho "mais"). Depois da correção (em telas de até 300 px a cabeça usa a largura toda e o desenho "mais" some; a data nunca quebra) passou.
+- [x] Nome de 80 caracteres: a cabeça quebra em várias linhas e o @nome de 38 caracteres quebra no meio a 375 px. Aceito, é caso de borda.
+- [x] Texto hostil (`<"` nas iniciais): as iniciais saem como texto, o título tem o nome escapado e nenhuma marcação rodou.
+- [x] Sem nome e sem @nome: o glifo de pessoa no lugar das iniciais e o título "Publicação na Varanda".
+- [x] Página de reserva (endereço inválido): só a barra, o título e o botão, que leva a `/`.
+- [x] Rede e console: só o documento e `/p/<chave>/321/foto/<1 a 4>`; o console fica vazio, sem violação de CSP.
+
+Testes automáticos desta mudança, a partir da raiz. `apps/cli/test/post-page.test.js` tem 27 testes: iniciais, cores da faixa, ordem dos elementos, SVG inerte, um só bloco de estilo com claro e escuro e tamanho abaixo de 64 KiB. A lista é um roteiro, não um registro de execução.
+
+```sh
+node apps/cli/test/post-page.test.js
+```
+
+- [ ] Android Chrome no aparelho, em claro e em escuro: pendente.
+- [ ] iOS Safari no aparelho, em claro e em escuro: pendente.
+- [ ] Link aberto de dentro do WhatsApp e do Instagram (navegador embutido): pendente.
+- [ ] Fonte maior no sistema ou no navegador (ajuste de tamanho do texto, não zoom da página), no Android e no iOS: pendente. A página usa tamanhos em px, como o app.
