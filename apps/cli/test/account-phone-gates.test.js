@@ -130,7 +130,7 @@ async function setup (t, { phone = true } = {}) {
     store,
     issuer: { keyPair: iss.keyPair, cert: iss.cert },
     terms,
-    push: { pushStore, vapid: { ...vapid, subject: ORIGIN }, send: async (args) => { delivered.push(args); return { ok: true } } },
+    push: { pushStore, vapid: { ...vapid, subject: ORIGIN }, delayMs: () => 0, send: async (args) => { delivered.push(args); return { ok: true } } },
     seen: seenStore,
     phoneClient,
     phones,

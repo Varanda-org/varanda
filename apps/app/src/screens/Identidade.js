@@ -61,6 +61,8 @@ import { deviceRandomBytes, newLinkSecret } from '../appLinkSecret'
 import { HELP, SHORT } from '../help'
 import { STEP_HINTS, STEP_TITLES } from '../onboarding'
 import { useOutbox } from '../outboxProvider'
+import { usePush } from '../usePush'
+import { turnOffBeforeSwitch } from '../pushSwitch'
 import { BROWSER_TEXT, KNOWN_LOST_FULL_TEXT, KNOWN_LOST_TEXT, MISSED_TEXT, NONE_FULL_TEXT, NONE_PENDING_TEXT, NONE_TEXT, NOT_SYNCED_TITLE, OTHER_PASSKEY_LABEL, PHONE_BUTTON, PHONE_SIGNIN_BUTTON, RETRY_BUTTON, UNUSABLE_TITLE, notSyncedSteps, unusableSteps } from '../passkeyTrouble'
 import { OPEN_IN_BROWSER_TEXT } from '../profileLink'
 import { INVITE_NEEDED_TEXT, INVITE_READY_TEXT } from '../signupInvite'
@@ -698,6 +700,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
   const styles = useStyles(makeStyles)
   const node = useNode()
   const outbox = useOutbox()
+  const pushStore = usePush()
   const passkey = node.passkey
   const pkStatus = passkey !== null ? passkey.status : null
   const locked = passkey !== null && (pkStatus === null || pkStatus.unlocked !== true)
@@ -1062,6 +1065,12 @@ export default function Identidade ({ active, embedded = false, setup = false, v
     // The press event is truthy and is not a phone choice. The flag set when
     // the EXISTS confirm opened is what the second click has to forward.
     const usePhone = phone === true || (typeof confirmCreate === 'object' && confirmCreate !== null && confirmCreate.phone === true)
+    // Creating over an existing identity replaces it: its push goes off first.
+    // Started here and not awaited, because the ceremony below needs this
+    // click's user activation.
+    if (pkStatus !== null && pkStatus.exists === true && typeof pkStatus.publicKey === 'string') {
+      turnOffBeforeSwitch(pushStore.turnOffPush, { node, member: pkStatus.publicKey })
+    }
     ceremony(() => passkey.unlock(usePhone ? { register: true, phone: true } : { register: true }), true)
   }
   const doComplete = () => ceremony(() => passkey.complete(), true, true)
@@ -1125,7 +1134,9 @@ export default function Identidade ({ active, embedded = false, setup = false, v
       setPkError('não foi possível apagar as publicações que aguardam envio neste aparelho')
       return pkEnd()
     }
-    passkey.reset().then(() => {
+    // Awaited: the next click is a fresh activation, and the old identity's
+    // push must be off before it is deleted. A failure never blocks the reset.
+    turnOffBeforeSwitch(pushStore.turnOffPush, { node, member: oldKey }).then(() => passkey.reset()).then(() => {
       setMismatch(null)
       setAwaitingComplete(false)
       setCreateToo(false)
