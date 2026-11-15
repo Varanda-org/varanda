@@ -1045,7 +1045,9 @@ node apps/cli/scripts/fetch-ai-model.js --dir <dataDir>/ai-model
 
 Numa instalação local, prefira `npm ci --ignore-scripts` (ou defina `ONNXRUNTIME_NODE_INSTALL_CUDA=skip`, que evita o download de artefatos CUDA no linux x64). O CI, o fluxo de deploy, `deploy/seeder/build-web.sh` e a imagem Docker instalam com `--ignore-scripts`: nenhum script de instalação de dependência roda, e os binários nativos usados já vêm nos pacotes.
 
-`account status` mostra `Triagem IA: desligada`, `Triagem IA: <n> precedentes` ou `Triagem IA: indisponível (exemplars.json inválido)`. Inclua `exemplars.json` e `triage.json` no backup do volume `account-data`, junto de `moderation.json` (modo `0600`).
+No Histórico do painel, uma decisão da IA tem o botão Reabrir: a denúncia volta para Abertas e uma pessoa decide; a reabertura fica gravada na própria denúncia (campo `reopened` em `moderation.json`) e a IA nunca a decide de novo. Reabrir não desfaz nada: um bloqueio da IA continua até alguém usar Desbloquear (ou cancelar, enquanto está em Pendentes). O `pull` de moderação não muda. As marcas da triagem ficam em `triage-marks.jsonl`, uma linha por marca nova (uma marca igual não grava nada), compactado de tempos em tempos em `triage.json`.
+
+`account status` mostra `Triagem IA: desligada`, `Triagem IA: <n> precedentes` ou `Triagem IA: indisponível (exemplars.json inválido)`. Inclua `exemplars.json`, `triage.json` e `triage-marks.jsonl` no backup do volume `account-data`, junto de `moderation.json` (modo `0600`).
 
 ##### Avisos push (opcional)
 

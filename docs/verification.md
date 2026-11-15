@@ -1759,14 +1759,14 @@ Cobertura no repositório:
 
 - `apps/cli/test/ai-triage.test.js`: a regra pura (limiares, partida a frio, motivos, texto idêntico).
 - `apps/cli/test/ai-exemplar-store.test.js`: `exemplars.json` (validação total, teto, modelo).
-- `apps/cli/test/ai-ledger.test.js`: `triage.json` (marcas, cache, arquivo corrompido posto de lado).
+- `apps/cli/test/ai-ledger.test.js`: `triage.json` e `triage-marks.jsonl` (marcas, cache, uma marca igual não grava nada, o registro só é reaplicado com o mesmo `log`, uma última linha cortada é ignorada, uma linha ruim no meio põe os dois arquivos de lado, compactação, migração do formato 1; uma falha ao gravar o cabeçalho do registro é tentada de novo uma vez).
 - `apps/cli/test/ai-embedder.test.js`: o embedder com tokenizer e modelo injetados; o modelo real só quando `VARANDA_AI_MODEL_DIR` aponta para um diretório do `fetch-ai-model.js` (não definido no CI).
 - `apps/cli/test/ai-post-route.test.js`: `GET /moderation-post/<D>/<seq>` e `Seeder#postBlock`.
 - `apps/cli/test/ai-read-post.test.js`: a reconferência no serviço de conta.
-- `apps/cli/test/ai-worker.test.js`: modos, tetos, espera crescente, aprendizado.
-- `apps/cli/test/ai-hooks.test.js`: ganchos em `mod-routes.js`; a projeção do painel e do pull traz `actor` e não traz e-mail.
+- `apps/cli/test/ai-worker.test.js`: modos, tetos, espera crescente, aprendizado; uma denúncia reaberta fica com uma pessoa, e só o campo `reopened` já basta; nenhuma sugestão velha numa denúncia reaberta; o teto conta o bloqueio reaberto depois de reiniciar (#229).
+- `apps/cli/test/ai-hooks.test.js`: ganchos em `mod-routes.js`; a projeção do painel e do pull traz `actor` e não traz e-mail; a rota `reopen` (#229).
 - `apps/cli/test/ai-e2e.test.js`: o laço em loopback, da denúncia assinada ao bloqueio no semeador, com embedder falso no lugar do MiniLM.
-- Estendidos: `apps/cli/test/moderation-store.test.js` (`humanReversed`), `mod-apply.test.js` (a marca `(ia)` e a recusa do formato antigo), `account-mod.test.js`, `account.test.js` (ambiente, subida, `status`), `panel.test.js`, `deploy.test.js`, `caddyfile.test.js` (a rota não entra no Caddy) e `cli.test.js`.
+- Estendidos: `apps/cli/test/moderation-store.test.js` (`humanReversed`; `reopen` recusa decisão de pessoa, denúncia aberta e ator IA; o campo `reopened` sobrevive à saída do evento e recusa a IA; um campo malformado torna o arquivo indisponível; uma pessoa que bloqueia uma denúncia reaberta não repete o id no pedido, e o arquivo continua legível; `humanReversed` lembra um bloqueio da IA reaberto e desfeito depois que os eventos saem), `mod-apply.test.js` (a marca `(ia)` e a recusa do formato antigo), `account-mod.test.js`, `account.test.js` (ambiente, subida, `status`), `panel.test.js` (Reabrir só nas linhas decididas pela IA), `deploy.test.js`, `caddyfile.test.js` (a rota não entra no Caddy) e `cli.test.js`.
 
 ### Limites
 
@@ -1776,7 +1776,10 @@ Cobertura no repositório:
 - Cancelar um desbloqueio também conta como "uma pessoa já mexeu nesta conta". A IA só se abstém.
 - Os limiares (0,92, 0,90, 0,12, 20 precedentes de cada lado, 5 diários) são iniciais e devem ser revistos com o Histórico. A checagem com o modelo real (cosseno 0,86 entre paráfrases) indica que a IA age sobretudo em textos quase idênticos.
 - A IA não vê imagens. A comparação com listas de hashes de mídia ilegal (issue #79) continua não existindo.
-- `exemplars.json` inválido (uma linha basta) fica indisponível e nunca é regravado. `triage.json` corrompido é renomeado para `triage.json.corrupt-<ms>` e recriado.
+- `exemplars.json` inválido (uma linha basta) fica indisponível e nunca é regravado. `triage.json` corrompido, ou uma linha ruim no meio de `triage-marks.jsonl`, põe os dois arquivos de lado como `.corrupt-<ms>` e a triagem recomeça sem marcas; uma última linha cortada (queda no meio da gravação) é ignorada.
+- Reabrir (#229) grava na linha da denúncia, em `moderation.json`, o campo `reopened`, que nunca sai, e o evento `reaberto` no registro de eventos (teto de 10000). O sinal que dura é o campo da linha: a IA não decide de novo uma denúncia reaberta mesmo depois que o evento sai do registro ou que os arquivos da triagem são postos de lado. A marca em `triage-marks.jsonl` e o evento são sinais a mais. Um bloqueio da IA reaberto continua contando no teto do dia em que a IA o tomou, também depois de reiniciar o serviço.
+- Reabrir não desfaz nada: um bloqueio da IA continua em Bloqueadas (ou em Pendentes, antes do `mod apply`) até alguém usar Desbloquear ou cancelar. Só uma pessoa com sessão no painel reabre; o processo da IA não chama a rota.
+- Voltar a uma versão anterior do serviço de conta não é seguro: ela não conhece o formato 2 de `triage.json`, o `triage-marks.jsonl`, o evento `reaberto` nem o campo `reopened`. Uma linha com esse campo, ou o evento, faz a versão anterior recusar o `moderation.json` inteiro (indisponível) até o campo e o evento saírem.
 
 ### Verificação humana
 
@@ -1789,6 +1792,8 @@ Cobertura no repositório:
 - [ ] Denúncias `ilegal` e de publicação com fotos ficam abertas.
 - [ ] O log do serviço não tem texto de publicação.
 - [ ] `curl` da rota sem token no semeador dá 404, e pela URL pública (Caddy) também.
+- [ ] No Histórico, uma decisão da IA mostra Reabrir e uma decisão de pessoa não. Reabrir um bloqueio da IA: a denúncia volta para Abertas, o bloqueio continua em Bloqueadas (ou em Pendentes, antes do `mod apply`) e a IA não decide de novo essa denúncia (#229).
+- [ ] `triage-marks.jsonl` ganha uma linha por marca nova; uma triagem repetida sem mudança não acrescenta linha (#229).
 
 ## 28. Estatísticas de uso no painel de moderação (2026-10-27)
 
