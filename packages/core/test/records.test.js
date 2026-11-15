@@ -904,7 +904,7 @@ test('old readers: unknown types stay malformed', async (t) => {
 test('group-join records', async (t) => {
   await testnet(t)
   const { groupJoinRecord, TYPES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY } = records
-  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share'], 'TYPES parity')
+  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall'], 'TYPES parity')
   t.ok(Object.isFrozen(TYPES))
   t.alike([MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY], [512, 64, 32, 16, 80, 8])
   const gj = { type: 'group-join', group: K1, writer: K2, on: true, at: AT }
@@ -1880,4 +1880,60 @@ test('video rules match @varanda/rpc (parity)', (t) => {
     const core = validateRecord({ type: 'moment', text: '', at: AT, media }, 1) === null
     t.is(rpc.validateParams('moment.create', { text: '', media }).ok, core, 'moment ' + JSON.stringify(media))
   }
+})
+
+test('scrap records: recados key sets, text rules and builders', async (t) => {
+  const { scrapRecord, scrapHideRecord, scrapWallRecord, SCRAP_KEYS, SCRAP_HIDE_KEYS, SCRAP_WALL_KEYS, MAX_SCRAP, SCRAP_WALLS } = records
+  t.is(MAX_SCRAP, 400)
+  t.alike([...SCRAP_KEYS], ['type', 'to', 'text', 'replyTo', 'at'])
+  t.alike([...SCRAP_HIDE_KEYS], ['type', 'from', 'seq', 'at'])
+  t.alike([...SCRAP_WALL_KEYS], ['type', 'who', 'at'])
+  t.alike([...SCRAP_WALLS], ['following', 'everyone', 'nobody'])
+
+  const scrap = { type: 'scrap', to: K2, text: 'oi', replyTo: null, at: AT }
+  t.is(validateRecord(scrap, 1), null)
+  t.is(validateRecord(scrap, 0), 'genesis-required')
+  t.is(validateRecord({ ...scrap, replyTo: { author: K1, seq: 3 } }, 1), null)
+  t.alike(scrapRecord({ to: K2, text: 'oi', at: AT }), scrap)
+  t.alike(Object.keys(scrapRecord({ to: K2, text: 'oi', replyTo: { author: K1, seq: 3, extra: 1 } })), SCRAP_KEYS)
+  t.alike(scrapRecord({ to: K2, text: 'oi', replyTo: { author: K1, seq: 3, extra: 1 }, at: AT }).replyTo, { author: K1, seq: 3 })
+  t.is(validateRecord({ ...scrap, extra: 1 }, 1), 'malformed', 'extra key')
+  const noReply = { ...scrap }
+  delete noReply.replyTo
+  t.is(validateRecord(noReply, 1), 'malformed', 'missing replyTo')
+  for (const k of ['A'.repeat(64), K1.slice(1), 1, null]) t.is(validateRecord({ ...scrap, to: k }, 1), 'malformed', 'to ' + k)
+  for (const rt of [{ author: K1 }, { author: K1, seq: 0 }, { author: K1, seq: 1.5 }, { author: 'x', seq: 1 }, { author: K1, seq: 1, extra: 1 }, 'a:1', undefined]) {
+    t.is(validateRecord({ ...scrap, replyTo: rt }, 1), 'malformed', 'replyTo ' + JSON.stringify(rt))
+  }
+
+  t.is(validateRecord({ ...scrap, text: '' }, 1), 'text-length')
+  t.is(validateRecord({ ...scrap, text: 'a'.repeat(400) }, 1), null)
+  t.is(validateRecord({ ...scrap, text: 'a'.repeat(401) }, 1), 'text-length')
+  t.is(validateRecord({ ...scrap, text: '😀'.repeat(400) }, 1), null, 'counts characters')
+  t.is(validateRecord({ ...scrap, text: '😀'.repeat(401) }, 1), 'text-length')
+  t.is(validateRecord({ ...scrap, text: 'a\u0000b' }, 1), 'text-length', 'control character')
+  t.is(validateRecord({ ...scrap, text: 'a\ud800b' }, 1), 'text-length', 'lone surrogate')
+  t.is(validateRecord({ ...scrap, text: 'a\nb' }, 1), null, 'newline allowed')
+  t.is(validateRecord({ ...scrap, text: 5 }, 1), 'text-length')
+  for (const at of ['2026-01-01', '2026-01-01T00:00:00Z', 5, null]) t.is(validateRecord({ ...scrap, at }, 1), 'date-invalid', 'at ' + at)
+
+  const hide = { type: 'scrap-hide', from: K1, seq: 4, at: AT }
+  t.is(validateRecord(hide, 1), null)
+  t.alike(scrapHideRecord({ from: K1, seq: 4, at: AT }), hide)
+  t.is(validateRecord({ ...hide, extra: 1 }, 1), 'malformed')
+  for (const seq of [0, -1, 1.5, '1', null]) t.is(validateRecord({ ...hide, seq }, 1), 'malformed', 'seq ' + seq)
+  for (const from of ['A'.repeat(64), 1, null]) t.is(validateRecord({ ...hide, from }, 1), 'malformed', 'from ' + from)
+  t.is(validateRecord({ ...hide, at: 'x' }, 1), 'date-invalid')
+
+  for (const who of SCRAP_WALLS) {
+    const wall = { type: 'scrap-wall', who, at: AT }
+    t.is(validateRecord(wall, 1), null, who)
+    t.alike(scrapWallRecord({ who, at: AT }), wall)
+  }
+  for (const who of ['', 'Everyone', 'all', 1, null, undefined]) t.is(validateRecord({ type: 'scrap-wall', who, at: AT }, 1), 'malformed', 'who ' + who)
+  t.is(validateRecord({ type: 'scrap-wall', who: 'nobody', at: AT, extra: 1 }, 1), 'malformed')
+  t.is(validateRecord({ type: 'scrap-wall', who: 'nobody', at: 'x' }, 1), 'date-invalid')
+  await t.exception.all(async () => scrapRecord({ to: K2, text: '' }), /text-length/)
+  await t.exception.all(async () => scrapWallRecord({ who: 'x' }), /malformed/)
+  await t.exception.all(async () => scrapHideRecord({ from: K1, seq: 0 }), /malformed/)
 })

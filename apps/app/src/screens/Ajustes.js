@@ -50,6 +50,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { AccessibilityInfo, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
+import { WALL_TITLE } from '../recadosView'
+import { WallSetting } from './Recados'
 import { invitePolicy } from '../account'
 import { useNames } from '../names'
 import { useOutbox } from '../outboxProvider'
@@ -115,6 +117,7 @@ const TITLES = {
   convites: 'Convidar pessoas',
   recurso: 'Recorrer de um bloqueio',
   bloqueados: BLOCK_TEXTS.listTitle,
+  recados: WALL_TITLE,
   excluir: 'Excluir conta'
 }
 
@@ -477,6 +480,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               {showChangePhone ? <Item first={!(account && unlocked)} icon='phone' label='Trocar o celular' onPress={() => { setSaved(''); onNavigate('telefone') }} /> : null}
               {account ? <Item first={!(account && unlocked) && !showChangePhone} icon='shield' label='Recorrer de um bloqueio' onPress={() => onNavigate('recurso')} /> : null}
               {hosted ? <Item first={!account && !showChangePhone} icon='bloquear' label={BLOCK_TEXTS.listTitle} onPress={() => onNavigate('bloqueados')} /> : null}
+              {hosted ? <Item icon='recado' label={WALL_TITLE} onPress={() => onNavigate('recados')} /> : null}
               <Item first={!account && !showChangePhone && !hosted} icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
             </View>
             <FlushSectionHeader>Aparência e avisos</FlushSectionHeader>
@@ -669,6 +673,13 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
           ? (
             <View style={shown('bloqueados')}>
               <Bloqueados active={ready && screen === 'bloqueados'} />
+            </View>
+            )
+          : null}
+        {hosted
+          ? (
+            <View style={shown('recados')}>
+              <WallSetting active={ready && screen === 'recados'} />
             </View>
             )
           : null}

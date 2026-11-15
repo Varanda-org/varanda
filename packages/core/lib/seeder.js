@@ -276,7 +276,7 @@ const FEIRA_PENDING_MAX = 5000
 // Per rater diary, the first listing-rate seq of each offer id (H1).
 const FEIRA_OFFERS_PER_DIARY = 4096
 const FEIRA_TYPES = new Set(['listing', 'listing-edit', 'listing-status', 'listing-rate'])
-const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show'])
+const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show', 'scrap', 'scrap-hide', 'scrap-wall'])
 
 // Frame guard for external streams (acceptStream): see lib/frame-guard.js
 // for the limits, how they were measured, the frame deadlines and the
@@ -5838,6 +5838,65 @@ class Seeder {
       const lists = this._index.testimonials(ownerHex, Date.now(), (hex) => this._indexVisible(hex))
       if (lists === null) return null
       return { shown: lists.shown, pending: lists.pending, ...this._indexFlags() }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/scraps/<owner>[/<cursor>]: pointers to the recados of the
+  // owner's page, { scraps: [{ author, seq, followSeq }], hides, wall, next,
+  // indexing, complete } (engagement-index.js scraps). The wall policy, the
+  // owner's hides, the reply exception and the caps are applied here at read
+  // time, over visible writers only; followSeq is the seq of the owner's
+  // committed live follow of the writer (the follow index), so the node can
+  // peek that block instead of asking again. Null when the owner is not
+  // visible, held (_searchHeld, as in indexFollows) or the cursor is
+  // malformed. A held writer is left out and the answer says complete
+  // false, as in indexEngagers. Fails closed while the owner's own diary is
+  // not fully indexed and scanned (its wall, hides, originals and follows
+  // may be missing): no rows, the hides and wall known so far, complete
+  // false. Keys and seqs only: never the text.
+  indexScraps (ownerHex, cursor = null) {
+    try {
+      if (!this._indexVisible(ownerHex) || this._searchHeld(ownerHex)) return null
+      const v = this._followsVisible()
+      const page = this._index.scraps(ownerHex, Date.now(), {
+        visible: v.visible,
+        followSeq: (hex) => this._notices.followSeq(ownerHex, hex),
+        followed: this._notices.followTargets(ownerHex),
+        cursor
+      })
+      if (page === null) return null
+      const flags = this._indexFlags()
+      if (this._ownerIndexPending(ownerHex)) {
+        return { scraps: [], hides: page.hides, wall: page.wall, next: null, indexing: flags.indexing, complete: false }
+      }
+      return { scraps: page.rows, hides: page.hides, wall: page.wall, next: page.next, indexing: flags.indexing, complete: flags.complete && !page.truncated && !v.held }
+    } catch {
+      return null
+    }
+  }
+
+  // Whether the owner's diary is still being indexed or scanned: before
+  // ready, a rebuild queued or its first pass not over, a cursor paused or
+  // behind the present length, or a scan behind it (follows and tombstones).
+  _ownerIndexPending (hex) {
+    if (!this._ready || this._indexRebuildQueued || this._indexStartup === null || this._indexStartup.has(hex)) return true
+    const entry = this._served.get(hex)
+    if (!entry) return true
+    return entry.indexPaused === true || entry.indexed < entry.present || entry.scanned < entry.present
+  }
+
+  // GET /index/follow/<author>/<target>: { seq, indexing }, seq the block
+  // of the author's committed live follow of target, or null (no follow,
+  // an unfollow, or a target the index may not show or holds); null when
+  // the author is not visible or held. A pointer: the node peeks and
+  // verifies the block.
+  indexFollowSeq (authorHex, targetHex) {
+    try {
+      if (!this._indexVisible(authorHex) || this._searchHeld(authorHex) || typeof targetHex !== 'string' || !HEX64.test(targetHex)) return null
+      const shown = this._indexVisible(targetHex) && !this._searchHeld(targetHex)
+      return { seq: shown ? this._notices.followSeq(authorHex, targetHex) : null, indexing: this._indexFlags().indexing }
     } catch {
       return null
     }

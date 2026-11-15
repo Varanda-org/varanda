@@ -110,6 +110,16 @@ const POST_SHARE_KEYS = Object.freeze(['type', 'seq', 'at'])
 const TESTIMONIAL_KEYS = ['type', 'to', 'gen', 'hash', 'box', 'at']
 const TESTIMONIAL_SHOW_KEYS = ['type', 'from', 'seq', 'text', 'nonce', 'at']
 const MAX_TESTIMONIAL = 400
+// Recados (docs/protocol.md): a scrap left in the writer's own diary on
+// `to`'s page, `replyTo` null or the (author, seq) of the scrap it answers;
+// the page owner hides one with scrap-hide and sets who may write with
+// scrap-wall (latest wins; absent means 'following'). Whether a scrap is
+// admitted is the fold's check (lib/scraps.js).
+const SCRAP_KEYS = Object.freeze(['type', 'to', 'text', 'replyTo', 'at'])
+const SCRAP_HIDE_KEYS = Object.freeze(['type', 'from', 'seq', 'at'])
+const SCRAP_WALL_KEYS = Object.freeze(['type', 'who', 'at'])
+const MAX_SCRAP = 400
+const SCRAP_WALLS = Object.freeze(['following', 'everyone', 'nobody'])
 // Momentos (docs/protocol.md): one photo or short video in the anonymous
 // blob pool, its key and nonce public in the record, shown by readers for 24
 // hours. The media item has the DM media item shape (packages/rpc
@@ -232,6 +242,12 @@ function validTestimonialText (text) {
   if (typeof text !== 'string') return false
   const len = charLength(text)
   return len >= 1 && len <= MAX_TESTIMONIAL && !hasControlChars(text, true) && !hasLoneSurrogate(text)
+}
+
+function validScrapText (text) {
+  if (typeof text !== 'string') return false
+  const len = charLength(text)
+  return len >= 1 && len <= MAX_SCRAP && !hasControlChars(text, true) && !hasLoneSurrogate(text)
 }
 
 function validMomentText (text) {
@@ -523,7 +539,7 @@ function validPageShape (r) {
     isHex64(r.owner) && r.actor === r.owner && validPageAdmins(r.admins, r.owner)
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share'])
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall'])
 
 // Required lazily: lib/group.js requires this module at load time.
 function weakBoxKey (hex) {
@@ -594,6 +610,20 @@ function check (record, seq) {
     if (!hasExactKeys(record, TESTIMONIAL_SHOW_KEYS) || !isHex64(record.from) || !isHex64(record.nonce)) return 'malformed'
     if (!Number.isSafeInteger(record.seq) || record.seq < 1) return 'malformed'
     if (!validTestimonialText(record.text)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'scrap') {
+    if (!hasExactKeys(record, SCRAP_KEYS) || !isHex64(record.to) || !validReplyTo(record.replyTo)) return 'malformed'
+    if (!validScrapText(record.text)) return 'text-length'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'scrap-hide') {
+    if (!hasExactKeys(record, SCRAP_HIDE_KEYS) || !isHex64(record.from)) return 'malformed'
+    if (!Number.isSafeInteger(record.seq) || record.seq < 1) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'scrap-wall') {
+    if (!hasExactKeys(record, SCRAP_WALL_KEYS) || !SCRAP_WALLS.includes(record.who)) return 'malformed'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   if (type === 'moment') {
@@ -747,6 +777,18 @@ function testimonialRecord ({ to, gen, hash, box, at = nowIso() } = {}) {
 
 function testimonialShowRecord ({ from, seq, text, nonce, at = nowIso() } = {}) {
   return build({ type: 'testimonial-show', from, seq, text, nonce, at }, 1)
+}
+
+function scrapRecord ({ to, text, replyTo = null, at = nowIso() } = {}) {
+  return build({ type: 'scrap', to, text, replyTo: copyTarget(replyTo), at }, 1)
+}
+
+function scrapHideRecord ({ from, seq, at = nowIso() } = {}) {
+  return build({ type: 'scrap-hide', from, seq, at }, 1)
+}
+
+function scrapWallRecord ({ who, at = nowIso() } = {}) {
+  return build({ type: 'scrap-wall', who, at }, 1)
 }
 
 // `media` and `music` are copied with exactly their keys (anything else is
@@ -1005,6 +1047,11 @@ module.exports = {
   TESTIMONIAL_KEYS,
   TESTIMONIAL_SHOW_KEYS,
   MAX_TESTIMONIAL,
+  SCRAP_KEYS,
+  SCRAP_HIDE_KEYS,
+  SCRAP_WALL_KEYS,
+  MAX_SCRAP,
+  SCRAP_WALLS,
   MIN_TESTIMONIAL_PLAIN,
   MAX_TESTIMONIAL_PLAIN,
   MAX_TESTIMONIAL_SEALED,
@@ -1034,6 +1081,7 @@ module.exports = {
   hasControlChars,
   charLength,
   validTestimonialText,
+  validScrapText,
   validMomentText,
   validMomentMedia,
   plainCopy,
@@ -1054,6 +1102,9 @@ module.exports = {
   repostRecord,
   testimonialRecord,
   testimonialShowRecord,
+  scrapRecord,
+  scrapHideRecord,
+  scrapWallRecord,
   momentRecord,
   deleteRecord,
   deleteRecords,

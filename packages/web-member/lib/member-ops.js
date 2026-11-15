@@ -58,6 +58,9 @@ const {
   deleteRecords,
   testimonialRecord,
   testimonialShowRecord,
+  scrapRecord,
+  scrapHideRecord,
+  scrapWallRecord,
   momentRecord,
   postShareRecord,
   MAX_TESTIMONIAL,
@@ -841,7 +844,11 @@ const DELETE_KINDS = {
   'testimonial-show': { other: null, wrong: null },
   // momentDelete checks the target first; the blob expires by itself, so no
   // media core is cleared (shownMedia names none for a moment).
-  moment: { other: null, wrong: null }
+  moment: { other: null, wrong: null },
+  // scrapDelete picks the kind from the target, as testimonialDelete does.
+  scrap: { other: null, wrong: null },
+  'scrap-hide': { other: null, wrong: null },
+  'scrap-wall': { other: null, wrong: null }
 }
 
 // The compat pair profileRecords writes: a plain profile immediately
@@ -1342,6 +1349,95 @@ async function testimonialDelete (ctx, { to, about }) {
     const target = recordAt(raw, to.seq)
     if (target === null || (target.type !== 'testimonial' && target.type !== 'testimonial-show')) throw new UsageError('referência inválida')
     if (about !== undefined && (target.type !== 'testimonial' || target.to !== String(about).toLowerCase())) throw new UsageError('referência inválida')
+    return target.type
+  })
+  return recordDelete(ctx, kind, { to })
+}
+
+// ---- recados (docs/protocol.md, docs/rpc.md) ----
+
+const SCRAP_SELF = 'não pode deixar recado para si'
+const SCRAP_HIDE_SELF = 'não pode tirar o próprio recado da sua página'
+const SCRAP_KINDS = ['scrap', 'scrap-hide', 'scrap-wall']
+
+// The live (not tombstoned) records of the own diary's raw entries as
+// { seq, record } copies, ascending.
+function liveOwn (raw) {
+  const deleted = deletedSeqs(raw)
+  const out = []
+  for (const { seq, record } of raw) {
+    if (deleted.has(seq)) continue
+    const copy = validRecordCopy(record, seq)
+    if (copy !== null) out.push({ seq, record: copy })
+  }
+  return out
+}
+
+// The scrap record a write would append -> the record, or
+// 'registro inválido: <reason>': the session builds it before any network
+// read so a bad text is refused first, and scrapWrite builds it again with
+// a fresh `at`.
+function scrapDraft ({ to, text, replyTo = null }) {
+  return buildRecord(() => scrapRecord({ to: String(to).toLowerCase(), text, replyTo }))
+}
+
+// writer: the identity the session checked the wall for; a sign-out and a
+// sign-in as someone else in between is refused, never written under the
+// other key. -> { seq, ref }.
+async function scrapWrite (ctx, { to, text, replyTo = null, writer }) {
+  const key = String(to).toLowerCase()
+  const record = scrapDraft({ to: key, text, replyTo })
+  return publish(ctx, record, (ownHex) => {
+    if (key === ownHex) throw new UsageError(SCRAP_SELF)
+    if (ownHex !== writer) throw new UsageError(store.LOCKED)
+  })
+}
+
+// The page owner takes `from`'s scrap `seq` off its page. Not checked
+// against the writer's block: a hide only ever removes something from the
+// owner's own page, so a hide of a block that is no scrap to the owner hides
+// nothing. A live hide of the same block answers it (changed: false).
+async function scrapHide (ctx, { from, seq }) {
+  const key = String(from).toLowerCase()
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (key === ownHex) throw new UsageError(SCRAP_HIDE_SELF)
+    const existing = liveOwn(await store.readRaw(diary)).find((e) => e.record.type === 'scrap-hide' && e.record.from === key && e.record.seq === seq)
+    if (existing !== undefined) return { seq: existing.seq, ref: formatRef({ author: ownHex, seq: existing.seq }), changed: false }
+    const at = await appendOwn(ctx, diary, buildRecord(() => scrapHideRecord({ from: key, seq })))
+    return { seq: at, ref: formatRef({ author: ownHex, seq: at }), changed: true }
+  })
+}
+
+// Who may write on the own page. The effective wall (the live scrap-wall
+// with the highest block) already saying `who` answers it (changed: false);
+// with none, 'following' is the default but still written, so the choice is
+// explicit on the page.
+async function scrapWall (ctx, { who }) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    const walls = liveOwn(await store.readRaw(diary)).filter((e) => e.record.type === 'scrap-wall')
+    const current = walls.length === 0 ? null : walls[walls.length - 1]
+    if (current !== null && current.record.who === who) return { seq: current.seq, ref: formatRef({ author: ownHex, seq: current.seq }), changed: false }
+    const at = await appendOwn(ctx, diary, buildRecord(() => scrapWallRecord({ who })))
+    return { seq: at, ref: formatRef({ author: ownHex, seq: at }), changed: true }
+  })
+}
+
+// Tombstones the own block `seq`: a scrap (the writer's 'Apagar recado'), a
+// scrap-hide (undo a hide) or a scrap-wall (back to the previous wall). Any
+// other type or a block that is not there answers 'referência inválida'; one
+// already deleted answers its tombstone (recordDelete's result).
+async function scrapDelete (ctx, { seq }) {
+  let to = null
+  const kind = await withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (!Number.isSafeInteger(seq) || seq < 1 || seq >= diary.length) throw new UsageError('referência inválida')
+    to = { author: ownHex, seq }
+    const raw = await store.readRaw(diary)
+    if (seq < raw.length && raw[seq].record === null && deletedSeqs(raw).has(seq)) return 'scrap'
+    const target = recordAt(raw, seq)
+    if (target === null || !SCRAP_KINDS.includes(target.type)) throw new UsageError('referência inválida')
     return target.type
   })
   return recordDelete(ctx, kind, { to })
@@ -5518,6 +5614,11 @@ module.exports = {
   testimonialPendingRows,
   testimonialShow,
   testimonialDelete,
+  scrapDraft,
+  scrapWrite,
+  scrapHide,
+  scrapWall,
+  scrapDelete,
   momentCreate,
   momentDelete,
   momentsRead,

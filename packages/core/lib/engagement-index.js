@@ -53,6 +53,22 @@
 // show whose content the seeder no longer holds at a rebuild is forgotten,
 // and that writer block may be pending again: the app's per-device hide
 // still applies.
+//
+// Recados (docs/protocol.md "Recados"): every live `scrap` is kept as a
+// pointer under its page owner (`to`) and its writer, the owner's live
+// `scrap-hide` blocks and `scrap-wall` blocks under the owner. The wall
+// policy, the hides, the reply exception and the caps are applied at READ
+// time (scraps()), with the rules of lib/scraps.js foldWall: 'nobody' shows
+// nothing; 'everyone' every writer; 'following' a writer the owner follows
+// (the caller's followSeq evidence) and, for any other writer, per live
+// scrap of the owner addressed to that writer, the writer's lowest live
+// reply to it that is dated no earlier than it and not more than
+// MAX_FUTURE_MS ahead (that reply keeps the slot even when hidden). A scrap
+// dated more than MAX_FUTURE_MS ahead is never shown and the owner's hides
+// never are. The caps count admitted rows only: SCRAP_PER_WRITER per
+// writer, then SCRAP_PER_PAGE per page, newest first (at desc, author asc,
+// seq desc). Each request examines at most SCRAP_SCAN pointers (writers
+// included); past it the answer says truncated.
 const { formatRef, parseRef } = require('./records')
 const { commitment } = require('./testimonials')
 
@@ -69,6 +85,12 @@ const NOTICE_ROWS_PER_ENGAGER = 64
 const NOTICE_ROWS_MAX = 4096
 const NOTICE_CACHE_AUTHORS = 16
 const TESTIMONIAL_ROWS = 64
+const SCRAP_PER_WRITER = 20
+const SCRAP_PER_PAGE = 500
+const SCRAP_ROWS = 50
+const SCRAP_HIDES = 1000
+const SCRAP_SCAN = 20000
+const SCRAP_WALLS = new Set(['following', 'everyone', 'nobody'])
 // Same value as lib/feed.js MAX_FUTURE_MS (not imported: this module only
 // requires ./records and ./testimonials). An engager edge dated further ahead is hidden, never
 // removed, and appears once the clock catches up.
@@ -223,6 +245,115 @@ function allVisible () {
   return true
 }
 
+function noFollow () {
+  return null
+}
+
+// Storage order of one (owner, writer) scrap list: ascending (atMs, seq),
+// so the newest pointer is at the end and notFutureTop applies.
+function compareScrapStored (a, b) {
+  if (a.atMs !== b.atMs) return a.atMs < b.atMs ? -1 : 1
+  return a.seq - b.seq
+}
+
+function scrapLowerBound (list, key) {
+  let lo = 0
+  let hi = list.length
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1
+    if (compareScrapStored(list[mid], key) < 0) lo = mid + 1
+    else hi = mid
+  }
+  return lo
+}
+
+// The replies of one writer to one original of a page owner, for the reply
+// exception: ts and seqs in parallel, ascending (t, seq), where t is the raw
+// Date.parse of the reply's at. `t0` is the original's t (null while the
+// original is not indexed) and `from` the first index with ts >= t0
+// (ts.length when t0 is null), so the replies dated no earlier than the
+// original are the suffix from `from`. best[k] is the lowest seq of
+// seqs[from .. from + k]: the not too far ahead ones are a prefix of that
+// suffix, so the winner is one binary search away and a backdated or far
+// future reply costs a read nothing.
+function newReplyList (t0) {
+  return { ts: [], seqs: [], best: [], from: 0, t0 }
+}
+
+function replyLowerBound (list, t, seq) {
+  let lo = 0
+  let hi = list.ts.length
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1
+    if (list.ts[mid] < t || (list.ts[mid] === t && list.seqs[mid] < seq)) lo = mid + 1
+    else hi = mid
+  }
+  return lo
+}
+
+function refreshReplyList (list, t0) {
+  list.t0 = t0
+  let lo = 0
+  let hi = list.ts.length
+  if (t0 === null) lo = hi
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1
+    if (list.ts[mid] < t0) lo = mid + 1
+    else hi = mid
+  }
+  list.from = lo
+  list.best = []
+  let low = Infinity
+  for (let i = lo; i < list.seqs.length; i++) {
+    if (list.seqs[i] < low) low = list.seqs[i]
+    list.best.push(low)
+  }
+}
+
+// best is non-increasing, so each fix-up stops at the first entry the
+// change does not reach: a reply added in seq order (the add contract)
+// touches one entry past its own.
+function replyListInsert (list, t, seq) {
+  const p = replyLowerBound(list, t, seq)
+  list.ts.splice(p, 0, t)
+  list.seqs.splice(p, 0, seq)
+  if (list.t0 === null || t < list.t0) {
+    list.from++
+    return
+  }
+  const k = p - list.from
+  list.best.splice(k, 0, k === 0 ? seq : Math.min(list.best[k - 1], seq))
+  for (let j = k + 1; j < list.best.length && list.best[j] > seq; j++) list.best[j] = seq
+}
+
+function replyListRemove (list, t, seq) {
+  const p = replyLowerBound(list, t, seq)
+  if (list.ts[p] !== t || list.seqs[p] !== seq) return
+  list.ts.splice(p, 1)
+  list.seqs.splice(p, 1)
+  if (p < list.from) {
+    list.from--
+    return
+  }
+  const k = p - list.from
+  list.best.splice(k, 1)
+  for (let j = k; j < list.best.length; j++) {
+    const low = j === 0 ? list.seqs[list.from] : Math.min(list.best[j - 1], list.seqs[list.from + j])
+    if (low === list.best[j]) break
+    list.best[j] = low
+  }
+}
+
+// Answer order of recados rows: at desc, author asc, seq desc. Rows order
+// on the clamped atMs (a date before 1970 counts as 0), so pre-1970 rows
+// may order differently from foldWall's raw Date.parse; such dates are
+// junk and ties still break on author and seq.
+function compareScrapRows (a, b) {
+  if (a.atMs !== b.atMs) return a.atMs > b.atMs ? -1 : 1
+  if (a.author !== b.author) return a.author < b.author ? -1 : 1
+  return b.seq - a.seq
+}
+
 function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets = DEFAULT_MAX_TARGETS, perAuthorMax = DEFAULT_PER_AUTHOR_MAX, onFreed = null } = {}) {
   const cap = Number.isSafeInteger(maxRecords) && maxRecords >= 0 ? maxRecords : DEFAULT_MAX_RECORDS
   const targetCap = Number.isSafeInteger(maxTargets) && maxTargets >= 0 ? maxTargets : DEFAULT_MAX_TARGETS
@@ -260,6 +391,12 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   // by writer so an anonymous /index/testimonials request costs the distinct
   // writers, never every block a writer appended.
   const incoming = new Map()
+  // Owner -> Map<writer, { edges: [{ atMs, seq }] by compareScrapStored,
+  // replies: null | Map<owner scrap seq, reply list (newReplyList)> }>: the live
+  // scraps each writer left on the owner's page (a writer's own page is
+  // never listed), kept across a drop of the owner like `incoming`.
+  // `replies` holds the scraps whose replyTo names a block of the owner.
+  const scrapIn = new Map()
 
   function invalidateNotices (author) {
     noticeCache.delete(author)
@@ -267,7 +404,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   function authorEntry (author) {
     let entry = authors.get(author)
     if (entry === undefined) {
-      entry = { count: 0, timeline: [], posts: new Map(), reposts: new Map(), touched: new Map(), profileSeqs: [], usernameSeqs: [], copiedSeqs: [], engagements: new Map(), testimonials: null, shows: null }
+      entry = { count: 0, timeline: [], posts: new Map(), reposts: new Map(), touched: new Map(), profileSeqs: [], usernameSeqs: [], copiedSeqs: [], engagements: new Map(), testimonials: null, shows: null, scraps: null, scrapsByTo: null, scrapHides: null, hideSeqs: null, hiddenRefs: null, walls: null, wallSeqs: null }
       authors.set(author, entry)
     }
     return entry
@@ -376,8 +513,13 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       if (record === null || typeof record !== 'object') return false
       const type = record.type
       if (type !== 'post' && type !== 'like' && type !== 'repost' && type !== 'profile' && type !== 'username' &&
-          type !== 'testimonial' && type !== 'testimonial-show') return false
+          type !== 'testimonial' && type !== 'testimonial-show' && type !== 'scrap' && type !== 'scrap-hide' &&
+          type !== 'scrap-wall') return false
       if (type === 'testimonial' && (!HEX64.test(record.to) || !HEX64.test(record.hash))) return false
+      if (type === 'scrap' && (!HEX64.test(record.to) || (record.replyTo !== null &&
+          (typeof record.replyTo !== 'object' || !HEX64.test(record.replyTo.author) || !isSeq(record.replyTo.seq))))) return false
+      if (type === 'scrap-hide' && (!HEX64.test(record.from) || !isSeq(record.seq))) return false
+      if (type === 'scrap-wall' && !SCRAP_WALLS.has(record.who)) return false
       if (type === 'testimonial-show' && (!HEX64.test(record.from) || !isSeq(record.seq) ||
           typeof record.text !== 'string' || typeof record.nonce !== 'string')) return false
       let replyTo = type === 'post' && record.replyTo ? formatRef(record.replyTo) : null
@@ -392,7 +534,8 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       const existing = authors.get(author)
       if (existing && (existing.posts.has(seq) || existing.engagements.has(seq) ||
           indexOfSeq(existing.profileSeqs, seq) !== -1 || indexOfSeq(existing.usernameSeqs, seq) !== -1 ||
-          indexOfSeq(existing.copiedSeqs, seq) !== -1 || existing.testimonials?.has(seq) || existing.shows?.has(seq))) return true
+          indexOfSeq(existing.copiedSeqs, seq) !== -1 || existing.testimonials?.has(seq) || existing.shows?.has(seq) ||
+          existing.scraps?.has(seq) || existing.scrapHides?.has(seq) || existing.walls?.has(seq))) return true
       if (records >= cap || (existing ? existing.count : 0) >= authorCap) return false
       // Off operations need no new target; they may free one at the cap.
       const needed = new Set([replyTo, quote, record.on === true ? to : null])
@@ -460,6 +603,25 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
         if (entry.shows === null) entry.shows = new Map()
         entry.shows.set(seq, { from: record.from, wseq: record.seq, commit: tombstoned ? null : commitment(record.from, record.nonce, record.text), removed: tombstoned })
         if (tombstoned) markDeleted(author, seq)
+      } else if (type === 'scrap') {
+        addScrap(entry, author, seq, record)
+      } else if (type === 'scrap-hide') {
+        if (entry.scrapHides === null) {
+          entry.scrapHides = new Map()
+          entry.hideSeqs = []
+          entry.hiddenRefs = new Map()
+        }
+        const hid = record.from + ':' + record.seq
+        entry.scrapHides.set(seq, hid)
+        entry.hideSeqs.splice(lowerBoundSeq(entry.hideSeqs, seq), 0, seq)
+        entry.hiddenRefs.set(hid, (entry.hiddenRefs.get(hid) || 0) + 1)
+      } else if (type === 'scrap-wall') {
+        if (entry.walls === null) {
+          entry.walls = new Map()
+          entry.wallSeqs = []
+        }
+        entry.walls.set(seq, record.who)
+        entry.wallSeqs.splice(lowerBoundSeq(entry.wallSeqs, seq), 0, seq)
       } else if (record.member === author) {
         entry.usernameSeqs.splice(lowerBoundSeq(entry.usernameSeqs, seq), 0, seq)
       } else {
@@ -477,6 +639,83 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     } catch {
       return false
     }
+  }
+
+  // A live scrap of `author` at `seq`: kept under the writer (its own
+  // scraps are also the originals a reply on its page answers) and, unless
+  // left on its own page, under the page owner.
+  function addScrap (entry, author, seq, record) {
+    const to = record.to
+    const atMs = atMillis(record.at)
+    const t = Date.parse(record.at)
+    const rt = record.replyTo !== null && record.replyTo.author === to ? record.replyTo.seq : 0
+    if (entry.scraps === null) {
+      entry.scraps = new Map()
+      entry.scrapsByTo = new Map()
+    }
+    entry.scraps.set(seq, { to, atMs, t, rt })
+    let mine = entry.scrapsByTo.get(to)
+    if (mine === undefined) {
+      mine = new Set()
+      entry.scrapsByTo.set(to, mine)
+    }
+    mine.add(seq)
+    // An original indexed after (or again after) its replies: their list
+    // learns its date.
+    const answers = scrapIn.get(author)?.get(to)?.replies?.get(seq)
+    if (answers !== undefined) refreshReplyList(answers, t)
+    if (to === author) return
+    let owned = scrapIn.get(to)
+    if (owned === undefined) {
+      owned = new Map()
+      scrapIn.set(to, owned)
+    }
+    let rec = owned.get(author)
+    if (rec === undefined) {
+      rec = { edges: [], replies: null }
+      owned.set(author, rec)
+    }
+    const edge = { atMs, seq }
+    // Quadratic insert, bounded like insertSorted: a writer holds at most
+    // perAuthorMax records.
+    rec.edges.splice(scrapLowerBound(rec.edges, edge), 0, edge)
+    if (rt !== 0) {
+      if (rec.replies === null) rec.replies = new Map()
+      let list = rec.replies.get(rt)
+      if (list === undefined) {
+        list = newReplyList(authors.get(to)?.scraps?.get(rt)?.t ?? null)
+        rec.replies.set(rt, list)
+      }
+      replyListInsert(list, t, seq)
+    }
+  }
+
+  // The scrap leaves both places; the next reply of the same writer to the
+  // same original, if any, takes its slot at read time.
+  function dropScrap (entry, author, seq, info) {
+    entry.scraps.delete(seq)
+    const mine = entry.scrapsByTo.get(info.to)
+    if (mine !== undefined) {
+      mine.delete(seq)
+      if (mine.size === 0) entry.scrapsByTo.delete(info.to)
+    }
+    if (entry.scraps.size === 0) {
+      entry.scraps = null
+      entry.scrapsByTo = null
+    }
+    const owned = scrapIn.get(info.to)
+    const rec = owned?.get(author)
+    if (rec === undefined) return
+    const at = scrapLowerBound(rec.edges, { atMs: info.atMs, seq })
+    if (rec.edges[at]?.seq === seq) rec.edges.splice(at, 1)
+    const list = info.rt !== 0 ? rec.replies?.get(info.rt) : undefined
+    if (list !== undefined) {
+      replyListRemove(list, info.t, seq)
+      if (list.seqs.length === 0) rec.replies.delete(info.rt)
+      if (rec.replies.size === 0) rec.replies = null
+    }
+    if (rec.edges.length === 0) owned.delete(author)
+    if (owned.size === 0) scrapIn.delete(info.to)
   }
 
   function markDeleted (author, seq) {
@@ -559,6 +798,34 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
         return true
       }
       let found = false
+      const scrap = entry.scraps === null ? undefined : entry.scraps.get(seq)
+      if (scrap !== undefined) {
+        dropScrap(entry, author, seq, scrap)
+        found = true
+      }
+      const hid = entry.scrapHides === null ? undefined : entry.scrapHides.get(seq)
+      if (hid !== undefined) {
+        entry.scrapHides.delete(seq)
+        entry.hideSeqs.splice(indexOfSeq(entry.hideSeqs, seq), 1)
+        const n = entry.hiddenRefs.get(hid) - 1
+        if (n > 0) entry.hiddenRefs.set(hid, n)
+        else entry.hiddenRefs.delete(hid)
+        if (entry.scrapHides.size === 0) {
+          entry.scrapHides = null
+          entry.hideSeqs = null
+          entry.hiddenRefs = null
+        }
+        found = true
+      }
+      if (entry.walls !== null && entry.walls.has(seq)) {
+        entry.walls.delete(seq)
+        entry.wallSeqs.splice(indexOfSeq(entry.wallSeqs, seq), 1)
+        if (entry.walls.size === 0) {
+          entry.walls = null
+          entry.wallSeqs = null
+        }
+        found = true
+      }
       const testimonial = entry.testimonials === null ? undefined : entry.testimonials.get(seq)
       if (testimonial !== undefined) {
         dropIncoming(testimonial.to, author, seq)
@@ -692,6 +959,12 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
         dropTargetIfEmpty(ref, target)
       }
       for (const t of entry?.testimonials?.values() || EMPTY_LIST) dropWriter(t.to, author)
+      for (const to of entry?.scrapsByTo?.keys() || EMPTY_LIST) {
+        const owned = scrapIn.get(to)
+        if (owned === undefined) continue
+        owned.delete(author)
+        if (owned.size === 0) scrapIn.delete(to)
+      }
       authors.delete(author)
       if (entry !== undefined) {
         if (entry.count === authorCap) fullAuthors--
@@ -1016,6 +1289,165 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     }
   }
 
+  // The recados of `owner`'s page (see the header): { rows: [{ author, seq,
+  // followSeq }] (one page of SCRAP_ROWS, strictly after `cursor`), next:
+  // cursor string | null, hides: the owner's live scrap-hide seqs (newest
+  // SCRAP_HIDES, descending), wall: the seq of its effective scrap-wall or
+  // null, truncated }. `visible(writer)` and `followSeq(writer)` (the seq
+  // of the owner's live follow of that writer, or null) run once per writer
+  // before its caps; a throw hides the writer or means no follow. followSeq
+  // is null on a row admitted by 'everyone' or the reply exception. Null for
+  // a malformed owner, clock or cursor. `followed`, when given, is the
+  // owner's committed live follow targets: under 'following' only those
+  // writers and the ones the owner addressed (reply exception candidates)
+  // are walked, not every writer of the page.
+  function scraps (owner, now, { visible = allVisible, followSeq = noFollow, followed = null, cursor = null } = {}) {
+    try {
+      if (typeof owner !== 'string' || !HEX64.test(owner)) return null
+      if (typeof now !== 'number' || !Number.isFinite(now)) return null
+      const after = parseCursor(cursor)
+      if (after === undefined) return null
+      const shows = (hex) => {
+        try { return visible(hex) === true } catch { return false }
+      }
+      const follows = (hex) => {
+        try {
+          const n = followSeq(hex)
+          return isSeq(n) ? n : null
+        } catch {
+          return null
+        }
+      }
+      const entry = authors.get(owner)
+      const wall = entry?.wallSeqs?.at(-1) ?? null
+      const who = wall === null ? 'following' : entry.walls.get(wall)
+      const hides = []
+      const hideSeqs = entry?.hideSeqs || EMPTY_LIST
+      for (let i = hideSeqs.length - 1; i >= 0 && hides.length < SCRAP_HIDES; i--) hides.push(hideSeqs[i])
+      if (who === 'nobody') return { rows: [], next: null, hides, wall, truncated: false }
+      const hidden = entry?.hiddenRefs || null
+      const isHidden = (writer, seq) => hidden !== null && hidden.has(writer + ':' + seq)
+      let budget = SCRAP_SCAN
+      let truncated = false
+      const spend = () => {
+        if (budget > 0) {
+          budget--
+          return true
+        }
+        truncated = true
+        return false
+      }
+      // Keep only the best SCRAP_PER_PAGE rows, in answer order.
+      const rows = []
+      const keep = (row) => {
+        if (rows.length >= SCRAP_PER_PAGE && compareScrapRows(row, rows[rows.length - 1]) >= 0) return
+        let lo = 0
+        let hi = rows.length
+        while (lo < hi) {
+          const mid = (lo + hi) >>> 1
+          if (compareScrapRows(rows[mid], row) < 0) lo = mid + 1
+          else hi = mid
+        }
+        rows.splice(lo, 0, row)
+        if (rows.length > SCRAP_PER_PAGE) rows.pop()
+      }
+      const inbound = scrapIn.get(owner) || null
+      for (const [writer, rec] of writersOf(entry, inbound, who === 'following' ? followed : null)) {
+        if (!spend()) break
+        if (writer === owner || !shows(writer)) continue
+        const fseq = who === 'everyone' ? null : follows(writer)
+        if (who === 'everyone' || fseq !== null) {
+          const list = rec.edges
+          let taken = 0
+          for (let i = notFutureTop(list, now) - 1; i >= 0 && taken < SCRAP_PER_WRITER; i--) {
+            if (!spend()) break
+            const e = list[i]
+            if (isHidden(writer, e.seq)) continue
+            keep({ atMs: e.atMs, author: writer, seq: e.seq, followSeq: fseq })
+            taken++
+          }
+        } else if (rec.replies !== null) {
+          const answered = replyRows(entry, writer, rec, now, isHidden, spend)
+          answered.sort(compareScrapRows)
+          for (let i = 0; i < answered.length && i < SCRAP_PER_WRITER; i++) keep(answered[i])
+        }
+        if (truncated) break
+      }
+      let start = 0
+      if (after !== null) {
+        const key = { atMs: after.atMs, author: after.author, seq: after.seq }
+        while (start < rows.length && compareScrapRows(rows[start], key) <= 0) start++
+      }
+      const page = rows.slice(start, start + SCRAP_ROWS)
+      const last = page.at(-1)
+      const next = last !== undefined && start + SCRAP_ROWS < rows.length ? edgeCursor(last) : null
+      return { rows: page.map((r) => ({ author: r.author, seq: r.seq, followSeq: r.followSeq })), next, hides, wall, truncated }
+    } catch {
+      return null
+    }
+  }
+
+  // The [writer, rec] pairs scraps() walks: every writer of the page, or,
+  // given `followed`, the followed writers and then the ones the owner
+  // addressed, each once, that wrote on the page. The caller spends one
+  // unit of its budget per pair.
+  function * writersOf (entry, inbound, followed) {
+    if (inbound === null) return
+    if (followed === null || followed === undefined) {
+      yield * inbound
+      return
+    }
+    const seen = new Set()
+    for (const writer of followed) {
+      if (typeof writer !== 'string' || seen.has(writer)) continue
+      seen.add(writer)
+      const rec = inbound.get(writer)
+      if (rec !== undefined) yield [writer, rec]
+    }
+    for (const writer of entry?.scrapsByTo?.keys() || EMPTY_LIST) {
+      if (seen.has(writer)) continue
+      const rec = inbound.get(writer)
+      if (rec !== undefined) yield [writer, rec]
+    }
+  }
+
+  // The reply exception for one writer the owner does not follow: per live
+  // scrap of the owner addressed to `writer`, that writer's lowest live
+  // reply dated no earlier than it and not too far ahead takes the slot;
+  // it is listed unless the owner hid it. Iterates the smaller side and
+  // spends one unit per original plus one per original with replies, never
+  // per reply: the winner is a binary search (newReplyList), so replies a
+  // writer floods before it (backdated or far ahead) cannot exhaust the
+  // budget.
+  function replyRows (entry, writer, rec, now, isHidden, spend) {
+    const out = []
+    const mine = entry?.scrapsByTo?.get(writer)
+    const own = authors.get(writer)
+    if (mine === undefined || own === undefined || own.scraps === null) return out
+    const originals = mine.size <= rec.replies.size ? mine : rec.replies.keys()
+    for (const s of originals) {
+      if (!spend()) break
+      const original = entry.scraps.get(s)
+      const list = rec.replies.get(s)
+      if (original === undefined || original.to !== writer || list === undefined) continue
+      if (!spend()) break
+      // Never taken while the original is live and indexed: addScrap keeps t0.
+      if (list.t0 !== original.t) refreshReplyList(list, original.t)
+      let lo = list.from
+      let hi = list.ts.length
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1
+        if (list.ts[mid] - now > MAX_FUTURE_MS) hi = mid
+        else lo = mid + 1
+      }
+      if (lo === list.from) continue
+      const seq = list.best[lo - 1 - list.from]
+      const info = own.scraps.get(seq)
+      if (info !== undefined && !isHidden(writer, seq)) out.push({ atMs: info.atMs, author: writer, seq, followSeq: null })
+    }
+    return out
+  }
+
   function stats () {
     return { records, targets: targets.size, saturated: records >= cap || targets.size >= targetCap || authorCap === 0 || fullAuthors > 0, maxRecords: cap }
   }
@@ -1028,11 +1460,12 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     deletedRefs.clear()
     noticeCache.clear()
     incoming.clear()
+    scrapIn.clear()
     records = 0
     fullAuthors = 0
   }
 
-  return { add, removePost, removeRecord, removeDiary, post, counts, engagers, member, hints, noticeRows, testimonials, stats, clear }
+  return { add, removePost, removeRecord, removeDiary, post, counts, engagers, member, hints, noticeRows, testimonials, scraps, stats, clear }
 }
 
 module.exports = {
@@ -1048,5 +1481,10 @@ module.exports = {
   NOTICE_ROWS_MAX,
   NOTICE_CACHE_AUTHORS,
   TESTIMONIAL_ROWS,
+  SCRAP_PER_WRITER,
+  SCRAP_PER_PAGE,
+  SCRAP_ROWS,
+  SCRAP_HIDES,
+  SCRAP_SCAN,
   CURSOR_RE
 }

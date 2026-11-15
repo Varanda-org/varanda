@@ -1,7 +1,7 @@
 'use strict'
 
 const test = require('brittle')
-const { MAX_TESTIMONIAL, TESTIMONIAL_PENDING_MAX, MAX_MESSAGE, MAX_ID, utf8ByteLength } = require('..')
+const { MAX_TESTIMONIAL, MAX_SCRAP, TESTIMONIAL_PENDING_MAX, MAX_MESSAGE, MAX_ID, utf8ByteLength } = require('..')
 const { createServerDispatcher, validateResponse, validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PEEK_LIMIT_MAX, NOTICES_LIMIT_DEFAULT, NOTICES_LIMIT_MAX, PROFILE_LIMIT_MAX, ENGAGEMENT_LIMIT_MAX, PEEK_SEQS_MAX, PEEK_TIMEOUT_MS, GROUP_LIMIT_DEFAULT, GROUP_LIMIT_MAX, GROUP_MEMBERS_LIMIT_MAX, MAX_GROUP_NAME, DM_THREAD_LIMIT_MAX } = require('..')
 
 const KEY = 'ab'.repeat(32)
@@ -26,14 +26,14 @@ test('method list and mutating set', (t) => {
     'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moments.read', 'node.close', 'node.info', 'notices.list',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read', 'phone.proof', 'phone.sign',
     'post.create', 'post.delete', 'post.quote', 'post.reply', 'post.share', 'post.shared', 'post.unshare', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
-    'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'username.add'
+    'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
     'block.set', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.react', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
     'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.react', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
     'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'listing.create', 'listing.delete', 'listing.edit', 'listing.rate', 'listing.status', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'node.close', 'page.register', 'post.create', 'post.delete',
     'post.quote', 'post.reply', 'post.share', 'post.unshare',
-    'profile.delete', 'profile.set', 'repost.set', 'sync.start', 'sync.stop', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'username.add'
+    'profile.delete', 'profile.set', 'repost.set', 'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'sync.start', 'sync.stop', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'username.add'
   ])
 })
 
@@ -2737,4 +2737,56 @@ test('post.shared, post.share and post.unshare take one canonical ref and nothin
       t.is(validateParams(method, { to }).message, 'parâmetro inválido: to', method + ' ' + JSON.stringify(to))
     }
   }
+})
+
+const SCRAP_PARAMS = [
+  ['scrap.write', { to: KEY, text: 'oi' }],
+  ['scrap.hide', { from: KEY, seq: 1 }],
+  ['scrap.wall', { who: 'following' }],
+  ['scrap.delete', { seq: 1 }]
+]
+
+test('scrap limits', (t) => {
+  t.is(MAX_SCRAP, 400)
+})
+
+for (const [method, params] of SCRAP_PARAMS) {
+  test(method + ': mutating, required fields and exact params', (t) => {
+    t.is(isMutating(method), true)
+    ok(t, method, params, params)
+    for (const field of Object.keys(params)) {
+      const missing = { ...params }
+      delete missing[field]
+      bad(t, method, missing, 'missing ' + field)
+    }
+    bad(t, method, { ...params, extra: KEY }, 'extra field')
+    for (const invalid of [null, [], 'params', 1, Object.create(params)]) {
+      bad(t, method, invalid, 'invalid params object')
+    }
+  })
+}
+
+test('scrap.write: text bounds and optional replyTo ref', (t) => {
+  ok(t, 'scrap.write', { to: KEY, text: 'a'.repeat(400) })
+  ok(t, 'scrap.write', { to: KEY, text: '😀'.repeat(400) })
+  bad(t, 'scrap.write', { to: KEY, text: '' }, 'empty text')
+  bad(t, 'scrap.write', { to: KEY, text: 'a'.repeat(401) }, 'long text')
+  bad(t, 'scrap.write', { to: KEY, text: 1 }, 'text type')
+  bad(t, 'scrap.write', { to: KEY.toUpperCase(), text: 'oi' }, 'uppercase key')
+  bad(t, 'scrap.write', { to: KEY.slice(1), text: 'oi' }, 'short key')
+  ok(t, 'scrap.write', { to: KEY, text: 'oi', replyTo: KEY + ':3' }, { to: KEY, text: 'oi', replyTo: KEY + ':3' })
+  for (const replyTo of [KEY, KEY + ':0', KEY + ':03', KEY + ':-1', KEY.toUpperCase() + ':1', 5, null, { author: KEY, seq: 1 }]) {
+    bad(t, 'scrap.write', { to: KEY, text: 'oi', replyTo }, 'replyTo ' + JSON.stringify(replyTo))
+  }
+})
+
+test('scrap.hide, scrap.delete and scrap.wall: value rules', (t) => {
+  for (const seq of [0, -1, 1.5, '1', null, Number.MAX_SAFE_INTEGER + 1]) {
+    bad(t, 'scrap.hide', { from: KEY, seq }, 'hide seq ' + seq)
+    bad(t, 'scrap.delete', { seq }, 'delete seq ' + seq)
+  }
+  ok(t, 'scrap.hide', { from: KEY, seq: Number.MAX_SAFE_INTEGER })
+  bad(t, 'scrap.hide', { from: KEY.slice(1), seq: 1 }, 'hide from')
+  for (const who of ['following', 'everyone', 'nobody']) ok(t, 'scrap.wall', { who })
+  for (const who of ['', 'Everyone', 'all', 1, null, ['nobody']]) bad(t, 'scrap.wall', { who }, 'who ' + JSON.stringify(who))
 })

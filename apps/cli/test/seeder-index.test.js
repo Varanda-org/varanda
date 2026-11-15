@@ -2037,3 +2037,149 @@ test('indexTestimonials: pending and shown pointers, revoke and remove in either
   await settleIndex(seeder)
   t.alike(seeder.indexTestimonials(O).pending, [{ from: V, seq: 2 }])
 })
+
+test('indexScraps and indexFollowSeq: wall, hides, reply exception, unfollow, deletes, purge and a rebuild', async (t) => {
+  const { scrapRecord, scrapHideRecord, scrapWallRecord, followRecord } = require('@varanda/core/lib/records')
+  const O = authorKey(1)
+  const W = authorKey(2)
+  const V = authorKey(3)
+  const X = authorKey(4)
+  const U = authorKey(5)
+  const to = (i, extra = {}) => scrapRecord({ to: O, text: 'recado ' + i, at: at(i), ...extra })
+  // O follows W and U, left a scrap on X's page and hides W's second scrap.
+  const ofO = [followRecord({ key: W, on: true, at: at(0) }), followRecord({ key: U, on: true, at: at(1) }), scrapRecord({ to: X, text: 'oi X', at: at(2) }), scrapHideRecord({ from: W, seq: 2, at: at(3) })]
+  const ofW = [to(4), to(5), to(6), deleteRecord({ seq: 3, at: at(7) })]
+  const ofV = [to(8)]
+  const ofX = [to(9, { replyTo: { author: O, seq: 3 } }), to(10, { replyTo: { author: O, seq: 3 } })]
+  const ofU = [to(11)]
+  const { seeder, diary } = scanFixture()
+  const all = [[O, ofO], [W, ofW], [V, ofV], [X, ofX], [U, ofU]]
+  const entries = new Map(all.map(([key, records]) => [key, scannable(seeder, diary(key, records.length, (seq) => records[seq - 1]))]))
+  const pass = async () => {
+    for (const [key] of all) {
+      const entry = entries.get(key)
+      if (!entry || entry.dropped) continue
+      await seeder._runScan(key, entry)
+      seeder._onGrow(key, entry, entry.core.contiguousLength)
+    }
+    await settleIndex(seeder)
+  }
+  const grow = async (records, more) => {
+    records.push(...more)
+    entries.get(O).core.contiguousLength = records.length + 1
+    await pass()
+  }
+  const rows = () => seeder.indexScraps(O).scraps
+  await pass()
+  t.alike(seeder.indexScraps(O), {
+    scraps: [{ author: U, seq: 1, followSeq: 2 }, { author: X, seq: 1, followSeq: null }, { author: W, seq: 1, followSeq: 1 }],
+    hides: [4],
+    wall: null,
+    next: null,
+    indexing: false,
+    complete: true
+  }, 'following: followed writers with their follow block, one reply of X, no hidden, deleted or stranger scrap')
+  t.alike(seeder.indexFollowSeq(O, W), { seq: 1, indexing: false })
+  t.alike(seeder.indexFollowSeq(O, V), { seq: null, indexing: false })
+  t.is(seeder.indexFollowSeq('f'.repeat(64), W), null, 'an author not served is unknown')
+  t.is(seeder.indexFollowSeq(O, 'nope'), null)
+  t.is(seeder.indexScraps(O, 'x'), null, 'a malformed cursor')
+  t.is(seeder.indexScraps('f'.repeat(64)), null, 'an owner not served is unknown')
+
+  await grow(ofO, [followRecord({ key: U, on: false, at: at(12) })]) // 5
+  t.alike(rows(), [{ author: X, seq: 1, followSeq: null }, { author: W, seq: 1, followSeq: 1 }], 'an unfollow takes U out')
+  t.alike(seeder.indexFollowSeq(O, U), { seq: null, indexing: false })
+
+  await grow(ofO, [scrapWallRecord({ who: 'everyone', at: at(13) })]) // 6
+  t.alike(rows().map((r) => r.author + ':' + r.seq), [U + ':1', X + ':2', X + ':1', V + ':1', W + ':1'], 'everyone: every live unhidden scrap, newest first')
+  t.ok(rows().every((r) => r.followSeq === null), 'followSeq null under everyone')
+  t.is(seeder.indexScraps(O).wall, 6)
+
+  await grow(ofO, [deleteRecord({ seq: 4, at: at(14) })]) // 7
+  t.alike(rows().map((r) => r.author + ':' + r.seq), [U + ':1', X + ':2', X + ':1', V + ':1', W + ':2', W + ':1'], 'the deleted hide shows W:2 again')
+  t.alike(seeder.indexScraps(O).hides, [])
+
+  await grow(ofO, [scrapWallRecord({ who: 'nobody', at: at(15) })]) // 8
+  t.alike(seeder.indexScraps(O), { scraps: [], hides: [], wall: 8, next: null, indexing: false, complete: true }, 'nobody')
+  await grow(ofO, [deleteRecord({ seq: 8, at: at(16) })]) // 9
+  t.is(seeder.indexScraps(O).wall, 6, 'a deleted wall falls back')
+
+  seeder._rebuildIndex()
+  const mid = seeder.indexScraps(O)
+  t.alike([mid.scraps, mid.next, mid.complete], [[], null, false], 'between a rebuild and the owner\'s re-index: fail closed')
+  await settleIndex(seeder)
+  t.alike(rows().map((r) => r.author + ':' + r.seq), [U + ':1', X + ':2', X + ':1', V + ':1', W + ':2', W + ':1'], 'the same after a rebuild')
+
+  const owner = seeder._served.get(O)
+  owner.indexPaused = true
+  t.alike(seeder.indexScraps(O), { scraps: [], hides: [], wall: 6, next: null, indexing: false, complete: false }, 'owner paused: no rows, the wall known so far')
+  owner.indexPaused = false
+  owner.core.contiguousLength++
+  t.alike([rows(), seeder.indexScraps(O).complete], [[], false], 'owner behind its present length: no rows')
+  owner.core.contiguousLength--
+  t.is(rows().length, 6, 'caught up: rows again')
+
+  seeder._served.get(V).searchHold = 1
+  const held = seeder.indexScraps(O)
+  t.alike([held.scraps.map((r) => r.author + ':' + r.seq), held.complete], [[U + ':1', X + ':2', X + ':1', W + ':2', W + ':1'], false], 'a held writer is left out and the page is not complete')
+  seeder._served.get(V).searchHold = 0
+  seeder._served.get(W).searchHold = 1
+  t.alike(seeder.indexFollowSeq(O, W), { seq: null, indexing: false }, 'a held target: no seq')
+  seeder._served.get(W).searchHold = 0
+  owner.searchHold = 1
+  t.is(seeder.indexScraps(O), null, 'a held owner is unknown')
+  t.is(seeder.indexFollowSeq(O, W), null, 'a held author is unknown')
+  owner.searchHold = 0
+  t.is(seeder.indexScraps(O).complete, true)
+
+  seeder._isBlocked = (hex) => hex === V
+  t.absent(rows().some((r) => r.author === V), 'a blocked writer is filtered')
+  t.alike(seeder.indexFollowSeq(O, V), { seq: null, indexing: false })
+  seeder._isBlocked = (hex) => hex === O
+  t.is(seeder.indexScraps(O), null, 'a blocked owner is unknown')
+  t.is(seeder.indexFollowSeq(O, W), null)
+  seeder._isBlocked = () => false
+
+  seeder._drop(U, 'blocked')
+  t.absent(rows().some((r) => r.author === U), 'a purged writer leaves at once')
+  seeder._drop(O, 'blocked')
+  t.is(seeder.indexScraps(O), null, 'a purged owner is unknown')
+  t.is(seeder.indexFollowSeq(O, W), null)
+})
+
+test('indexScraps: the caps count admitted writers only and pages carry exclusive cursors', async (t) => {
+  const { scrapRecord, followRecord } = require('@varanda/core/lib/records')
+  const O = authorKey(1)
+  const followed = Array.from({ length: 30 }, (_, i) => authorKey(100 + i))
+  const strangers = Array.from({ length: 30 }, (_, i) => authorKey(200 + i))
+  const ofO = followed.map((key, i) => followRecord({ key, on: true, at: at(i) }))
+  const { seeder, diary } = scanFixture()
+  const o = scannable(seeder, diary(O, ofO.length, (seq) => ofO[seq - 1]))
+  const writers = [...followed, ...strangers].map((key, w) => {
+    // Strangers write newer scraps, which must not crowd anyone out.
+    const base = w >= 30 ? 100000 : 0
+    return [key, diary(key, 25, (seq) => scrapRecord({ to: O, text: 'x', at: at(base + w * 30 + seq) }))]
+  })
+  await seeder._runScan(O, o)
+  seeder._onGrow(O, o, o.core.contiguousLength)
+  for (const [key, entry] of writers) seeder._onGrow(key, entry, entry.core.contiguousLength)
+  await settleIndex(seeder)
+  const seen = []
+  let cursor = null
+  let pages = 0
+  do {
+    const page = seeder.indexScraps(O, cursor)
+    t.ok(page.scraps.length <= 50)
+    seen.push(...page.scraps)
+    cursor = page.next
+    pages++
+  } while (cursor !== null && pages < 20)
+  t.is(pages, 10, 'ten pages of 50')
+  t.is(seen.length, 500, '500 per page owner')
+  t.is(new Set(seen.map((r) => r.author + ':' + r.seq)).size, 500, 'no duplicates')
+  t.ok(seen.every((r) => followed.includes(r.author) && r.followSeq === followed.indexOf(r.author) + 1), 'only followed writers, each with its follow block')
+  const counts = new Map()
+  for (const r of seen) counts.set(r.author, (counts.get(r.author) || 0) + 1)
+  t.ok([...counts.values()].every((n) => n <= 20), 'at most 20 per writer')
+  t.ok(seen.every((r) => r.seq > 5), 'each writer\'s 20 newest')
+})

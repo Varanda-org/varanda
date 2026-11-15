@@ -180,6 +180,7 @@ import Depoimentos from './src/screens/Depoimentos'
 import { tagTarget } from './src/hashtagNav'
 import { HashtagContext } from './src/ui/MentionText'
 import Assunto from './src/screens/Assunto'
+import Recados from './src/screens/Recados'
 import Salvos from './src/screens/Salvos'
 import Momentos from './src/screens/Momentos'
 import Feira from './src/screens/Feira'
@@ -2005,6 +2006,10 @@ function Member () {
     clearTimeout(toastTimer.current); setToast(null)
     pushScreen({ screen: 'momentos', key: key.toLowerCase(), params: {} })
   }, [pushScreen])
+  const openRecados = useCallback((key) => {
+    if (typeof key !== 'string') return
+    pushScreen({ screen: 'recados', key: key.toLowerCase(), params: {} })
+  }, [pushScreen])
   const openTestimonials = useCallback((key) => {
     if (typeof key !== 'string') return
     pushScreen({ screen: 'depoimentos', key: key.toLowerCase(), params: {} })
@@ -3424,6 +3429,7 @@ function Member () {
       onOpenPageSettings: pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? (key) => pushScreen({ screen: 'paginaajustes', key }) : undefined,
       onOpenPeople: openPeople,
       onOpenTestimonials: openTestimonials,
+      onOpenRecados: node.hosted === true ? openRecados : undefined,
       onOpenListings: node.hosted === true ? (author) => pushScreen({ screen: 'anuncios', key: author }) : undefined
     }
     // Pushed screens, plus the one sliding out after a pop under its old index
@@ -3461,6 +3467,13 @@ function Member () {
         return (
           <StackLayer key={i + ':momentos:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
             <Momentos entry={entry} ownKey={ownKey} isTop={i === stack.length - 1} covered={covered} onBack={goBack} onOpenMember={openMember} onMessage={openMessage} onCreate={openMomentComposer} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'recados') {
+        return (
+          <StackLayer key={i + ':recados:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Recados entry={entry} ownKey={ownKey} onBack={goBack} onOpenMember={openMember} onReport={setReport} onToast={showToast} />
           </StackLayer>
         )
       }
@@ -3824,6 +3837,7 @@ function Member () {
                     onOpenTestimonials={openTestimonials}
                     onOpenMomentos={openMomentos}
                     onOpenSalvos={openSalvos}
+                    onOpenRecados={node.hosted === true ? openRecados : undefined}
                   />
                 </ScreenVisible.Provider>
               </View>

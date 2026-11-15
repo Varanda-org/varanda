@@ -2981,3 +2981,149 @@ test('GET /feira-listing: its own budget, so a flood never makes /moderation-pos
   const mod = await groupPostRequest(defaults.port, '/moderation-post/' + FA + '/1')
   t.is(mod.status, 404, 'the moderation route still answers, never 503')
 })
+
+// /index/scraps/<owner>[/<cursor>] and /index/follow/<author>/<target>:
+// pointers only, rebuilt field by field; a bad cursor is 400.
+function scrapsSeeder () {
+  const stub = indexSeeder()
+  stub.indexScraps = async (owner, cursor) => {
+    stub.calls.push(['indexScraps', owner, cursor])
+    if (owner !== A) return null
+    return {
+      scraps: [{ author: B, seq: 4, followSeq: 2, text: 'segredo', at: '2026-01-01T00:00:00.000Z' }, { author: A.replace(/c/g, 'e'), seq: 1, followSeq: null }],
+      hides: [9, 3],
+      wall: 5,
+      next: CURSOR,
+      indexing: false,
+      complete: true,
+      extra: 'x'
+    }
+  }
+  stub.indexFollowSeq = async (author, target) => {
+    stub.calls.push(['indexFollowSeq', author, target])
+    if (author !== A) return null
+    return { seq: target === B ? 7 : null, indexing: true, at: 'x' }
+  }
+  return stub
+}
+
+test('startSeedWs /index/scraps and /index/follow: regexes, pointers only, HEAD, 404, 400 for a bad cursor, 421 and 405', async (t) => {
+  t.timeout(20000)
+  const { INDEX_SCRAPS_RE, INDEX_FOLLOW_RE } = require('../lib/seed-ws')
+  t.is(INDEX_SCRAPS_RE.source, '^\\/index\\/scraps\\/([0-9a-f]{64})(?:\\/([0-9]{1,16}\\.[0-9a-f]{64}\\.[1-9][0-9]{0,14}))?$')
+  t.is(INDEX_FOLLOW_RE.source, '^\\/index\\/follow\\/([0-9a-f]{64})\\/([0-9a-f]{64})$')
+  const seeder = scrapsSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/scraps/' + A
+  const got = await mediaRequest(server.port, url)
+  t.is(got.status, 200)
+  jsonHeaders(t, got)
+  const body = JSON.parse(got.body.toString())
+  t.alike(body, { scraps: [{ author: B, seq: 4, followSeq: 2 }, { author: A.replace(/c/g, 'e'), seq: 1, followSeq: null }], hides: [9, 3], wall: 5, next: CURSOR, indexing: false, complete: true }, 'no text, date or extra field leaves')
+  t.ok(/^[A-Za-z0-9._-]{1,128}$/.test(body.next), 'next fits the client cursor grammar')
+  t.alike(seeder.calls.at(-1), ['indexScraps', A, null])
+  t.is((await mediaRequest(server.port, url + '/' + CURSOR)).status, 200)
+  t.alike(seeder.calls.at(-1), ['indexScraps', A, CURSOR], 'the cursor reaches the seeder as given')
+  const head = await mediaRequest(server.port, url, { method: 'HEAD' })
+  t.is(head.status, 200)
+  t.is(head.headers['content-length'], got.headers['content-length'])
+  t.is(head.body.byteLength, 0)
+  t.is((await mediaRequest(server.port, '/index/scraps/' + 'f'.repeat(64))).status, 404, 'an unknown owner')
+
+  const follow = await mediaRequest(server.port, '/index/follow/' + A + '/' + B)
+  t.is(follow.status, 200)
+  jsonHeaders(t, follow)
+  t.alike(JSON.parse(follow.body.toString()), { seq: 7, indexing: true })
+  t.alike(JSON.parse((await mediaRequest(server.port, '/index/follow/' + A + '/' + A)).body.toString()), { seq: null, indexing: true })
+  t.is((await mediaRequest(server.port, '/index/follow/' + B + '/' + A)).status, 404, 'an unknown author')
+
+  seeder.calls.length = 0
+  const notFound = ['/index/scraps', '/index/scraps/', '/index/scraps/' + 'a'.repeat(63), '/index/scraps/' + 'A'.repeat(64), '/index/scraps/' + A + '?x=1',
+    '/index/scraps/' + 'a'.repeat(65), '/index/follow', '/index/follow/' + A, '/index/follow/' + A + '/', '/index/follow/' + A + '/' + B + '/',
+    '/index/follow/' + A + '/' + B.toUpperCase(), '/index/follow/' + A + '/' + B + '?x', '/index/follow/' + A + '/' + B + '/1']
+  for (const u of notFound) {
+    const r = await mediaRequest(server.port, u)
+    t.is(r.status, 404, u + ' -> 404')
+    t.is(r.body.toString(), 'não encontrado\n')
+  }
+  const badCursor = ['/', '/x', '/' + CURSOR + '/', '/' + CURSOR + '?x=1', '/1700000000000.' + B, '/1700000000000.' + B + '.0', '/1700000000000.' + B.toUpperCase() + '.7',
+    '/' + '9'.repeat(16) + '.' + B + '.7', '/' + '1'.repeat(17) + '.' + B + '.7', '/1700000000000.' + B + '.' + '9'.repeat(16), '/-1.' + B + '.7', '/' + CURSOR + '/x']
+  for (const suffix of badCursor) {
+    const r = await mediaRequest(server.port, url + suffix)
+    t.is(r.status, 400, suffix + ' -> 400')
+    t.is(r.body.toString(), 'pedido inválido\n')
+    t.is(r.headers['cache-control'], 'no-store')
+  }
+  t.is(seeder.calls.length, 0, 'malformed paths never reach the seeder')
+  t.is((await mediaRequest(server.port, url, { host: 'evil.example:' + server.port })).status, 421)
+  for (const method of ['POST', 'PUT', 'DELETE']) {
+    for (const u of [url, url + '/x', '/index/follow/' + A + '/' + B]) {
+      const r = await mediaRequest(server.port, u, { method })
+      t.is(r.status, 405, method + ' ' + u + ' -> 405')
+      t.is(r.headers.allow, 'GET, HEAD')
+    }
+  }
+  t.is(seeder.calls.length, 0)
+})
+
+test('startSeedWs /index/scraps and /index/follow: malformed answers are 404, the worst case fits, both spend the index bucket', async (t) => {
+  t.timeout(20000)
+  const hex = (i) => i.toString(16).padStart(64, '0')
+  const big = Number.MAX_SAFE_INTEGER
+  const worst = {
+    scraps: Array.from({ length: 50 }, (_, i) => ({ author: hex(i), seq: big, followSeq: big })),
+    hides: Array.from({ length: 1000 }, (_, i) => big - i),
+    wall: big,
+    next: '9007199254740991.' + 'f'.repeat(64) + '.' + '9'.repeat(15),
+    indexing: true,
+    complete: false
+  }
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/scraps/' + A
+  t.is((await mediaRequest(server.port, url)).status, 404, 'a seeder without the method')
+  t.is((await mediaRequest(server.port, '/index/follow/' + A + '/' + B)).status, 404, 'a seeder without the method')
+  seeder.indexScraps = async () => worst
+  const got = await mediaRequest(server.port, url)
+  t.is(got.status, 200)
+  t.ok(got.body.byteLength <= INDEX_MAX_BODY, 'worst case is ' + got.body.byteLength + ' bytes')
+  t.alike(JSON.parse(got.body.toString()), worst)
+  const row = { author: B, seq: 1, followSeq: null }
+  const ok = { scraps: [row], hides: [], wall: null, next: null, indexing: false, complete: true }
+  const answers = [
+    { ...ok, scraps: [...worst.scraps, row] },
+    { ...ok, hides: [...worst.hides, 1] },
+    { ...ok, scraps: [row, row] },
+    { ...ok, scraps: [{ ...row, seq: 0 }] },
+    { ...ok, scraps: [{ ...row, author: B.toUpperCase() }] },
+    { ...ok, scraps: [{ ...row, followSeq: 0 }] },
+    { ...ok, scraps: [{ ...row, followSeq: '2' }] },
+    { ...ok, hides: [1.5] },
+    { ...ok, wall: 0 },
+    { ...ok, next: 'x' },
+    { ...ok, next: 7 },
+    { ...ok, scraps: null }
+  ]
+  for (const answer of answers) {
+    seeder.indexScraps = async () => answer
+    t.is((await mediaRequest(server.port, url)).status, 404, JSON.stringify(answer).slice(0, 80))
+  }
+  seeder.indexScraps = async () => { throw new Error('segredo') }
+  const thrown = await mediaRequest(server.port, url)
+  t.is(thrown.status, 404)
+  t.absent(thrown.body.toString().includes('segredo'))
+  for (const seq of [0, 1.5, '3', undefined]) {
+    seeder.indexFollowSeq = async () => ({ seq, indexing: false })
+    t.is((await mediaRequest(server.port, '/index/follow/' + A + '/' + B)).status, 404, 'follow seq ' + seq)
+  }
+
+  const s2 = await startSeedWs({ port: 0, seeder: scrapsSeeder(), index: { rate: 0, burst: 2 } })
+  t.teardown(() => s2.close(), { force: true })
+  t.is((await mediaRequest(s2.port, url)).status, 200, 'scraps spends a token')
+  t.is((await mediaRequest(s2.port, '/index/follow/' + A + '/' + B)).status, 200, 'follow spends a token')
+  const busy = await mediaRequest(s2.port, '/index/member/' + A)
+  t.is(busy.status, 503, 'the shared index bucket is empty')
+  t.is(busy.headers['retry-after'], '1')
+})

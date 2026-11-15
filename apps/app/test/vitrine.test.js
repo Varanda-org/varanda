@@ -136,6 +136,10 @@ const resultKeys = {
   'testimonial.pending': ['items', 'incomplete'],
   'testimonial.show': ['seq', 'ref'],
   'testimonial.delete': ['seq', 'deleted'],
+  'scrap.write': ['seq', 'ref'],
+  'scrap.hide': ['seq', 'ref'],
+  'scrap.wall': ['seq', 'ref'],
+  'scrap.delete': ['seq', 'deleted'],
   'moment.putMedia': ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms'],
   'moment.create': ['seq', 'ref'],
   'moments.read': ['authors', 'own', 'past'],
@@ -188,7 +192,7 @@ test('vitrine fixtures cover the assessment scenarios deterministically', async 
   t.is(new Set(f.conversations.map((c) => c.peer)).size, 8)
   t.is(f.communities.length, 3)
   t.is(f.groups.length, 5)
-  t.is(f.feed.length, 40, '36 base posts and 4 topic posts')
+  t.is(f.feed.length, 41, '36 base posts, one more photo post and 4 topic posts')
   t.is(f.notices.length, 10)
   for (const p of [...f.members, ...f.pages]) {
     t.ok(/^[0-9a-f]{64}$/.test(p.author))
@@ -208,7 +212,7 @@ test('vitrine fixtures cover the assessment scenarios deterministically', async 
   t.is(f.groups.filter((g) => g.items.length === 0).length, 1)
   t.ok(f.groups.some((g) => g.items.some((item) => item.replyTo)))
   t.is(f.feed.filter((p) => p.quote).length, 1)
-  t.is(f.feed.filter((p) => p.media).length, 20)
+  t.is(f.feed.filter((p) => p.media).length, 21)
   t.ok(f.feed.some((p) => p.text.includes('@')))
   t.ok(f.feed.some((p) => p.text.includes('https://')))
   for (const post of f.feed) t.ok(validateParams('post.create', { text: post.text, ...(post.media ? { media: post.media } : {}) }).ok)
@@ -606,6 +610,10 @@ function samples (f) {
     'testimonial.pending': {},
     'testimonial.show': { from: f.members[4].author, seq: 60 },
     'testimonial.delete': { to: `${f.own}:38` },
+    'scrap.write': { to: member, text: 'Oi, Cecília! Passei para deixar um abraço.' },
+    'scrap.hide': { from: f.members[1].author, seq: 90 },
+    'scrap.wall': { who: 'everyone' },
+    'scrap.delete': { seq: 49 },
     'moment.putMedia': { name: '0'.repeat(32) + '.bin', mime: 'image/jpeg', width: 512, height: 512 },
     'moment.create': { text: 'Bom dia, praça!', media: f.diaryRecords.find((e) => e.record.type === 'moment').record.media },
     'moments.read': {},

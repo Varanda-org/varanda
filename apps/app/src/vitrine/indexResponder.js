@@ -33,6 +33,72 @@ const lastWrites = (entries, target) => {
   return [...latest.values()].filter((e) => e.record.on)
 }
 
+// Recados: the seeder's admission at read time, over the live Vitrine state
+// (like the testimonials route), mirroring foldWall in packages/core/lib/scraps.js:
+// deletes, the wall policy, owner hides, scraps dated over 24 h ahead dropped,
+// and the reply exception (one reply per original, the lowest block, even when
+// hidden; the reply no earlier than the original). Caps: 20 per writer, 500
+// per page, over admitted scraps. Pointers only.
+const SCRAP_CLOCK_MS = 3600000
+const MAX_FUTURE_MS = 86400000
+const badRequest = () => { throw Object.assign(new Error('status'), { reason: 'status' }) }
+
+function liveEntries () {
+  const { entries, deleted } = testimonialSource()
+  return entries.filter((e) => !deleted.has(`${e.author}:${e.seq}`))
+}
+
+const liveFollowSeq = (live, author, target) => {
+  const last = live.filter((e) => e.author === author && e.record.type === 'follow' && e.record.key === target).sort((a, b) => b.seq - a.seq)[0]
+  return last && last.record.on ? last.seq : null
+}
+
+function scrapsIndex (owner, cursor) {
+  requireProfile(owner)
+  if (cursor !== undefined && !/^(0|[1-9][0-9]{0,5})$/.test(cursor)) badRequest()
+  const live = liveEntries()
+  const clock = Date.parse(fixtures.now) + SCRAP_CLOCK_MS
+  const ownerLive = live.filter((e) => e.author === owner).sort((a, b) => a.seq - b.seq)
+  const walls = ownerLive.filter((e) => e.record.type === 'scrap-wall')
+  const latest = walls.reduce((best, e) => (best === null || e.seq > best.seq ? e : best), null)
+  const who = latest === null ? 'following' : latest.record.who
+  const hideRows = ownerLive.filter((e) => e.record.type === 'scrap-hide')
+  const hidden = new Set(hideRows.map((e) => `${e.record.from}:${e.record.seq}`))
+  const originals = new Map(ownerLive.filter((e) => e.record.type === 'scrap').map((e) => [e.seq, { to: e.record.to, t: Date.parse(e.record.at) }]))
+  const admitted = []
+  if (who !== 'nobody') {
+    const writers = [...new Set(live.filter((e) => e.record.type === 'scrap' && e.record.to === owner && e.author !== owner).map((e) => e.author))]
+    for (const author of writers) {
+      const replied = new Set()
+      const followSeq = who === 'everyone' ? null : liveFollowSeq(live, owner, author)
+      const mine = live.filter((e) => e.author === author && e.record.type === 'scrap' && e.record.to === owner).sort((a, b) => a.seq - b.seq)
+      const rows = []
+      for (const e of mine) {
+        const t = Date.parse(e.record.at)
+        if (t - clock > MAX_FUTURE_MS) continue
+        let answers = false
+        if (who === 'following') {
+          const rt = e.record.replyTo
+          const original = rt !== null && rt.author === owner ? originals.get(rt.seq) : undefined
+          if (original !== undefined && original.to === author && t >= original.t && !replied.has(rt.seq)) {
+            answers = true
+            replied.add(rt.seq)
+          }
+        }
+        if (hidden.has(`${author}:${e.seq}`)) continue
+        if (who === 'everyone' || followSeq !== null || answers) rows.push({ author, seq: e.seq, followSeq, t })
+      }
+      rows.sort((a, b) => b.t - a.t || b.seq - a.seq)
+      admitted.push(...rows.slice(0, 20))
+    }
+  }
+  admitted.sort((a, b) => b.t - a.t || compare(a.author, b.author) || b.seq - a.seq)
+  const all = admitted.slice(0, 500)
+  const start = cursor === undefined ? 0 : Number(cursor)
+  const scraps = all.slice(start, start + 50).map(({ author, seq, followSeq }) => ({ author, seq, followSeq }))
+  return { scraps, hides: hideRows.map((e) => e.seq).sort((a, b) => b - a).slice(0, 1000), wall: latest === null ? null : latest.seq, next: all.length > start + 50 ? String(start + 50) : null, ...flags }
+}
+
 function notFound () {
   throw Object.assign(new Error('not-found'), { reason: 'not-found' })
 }
@@ -246,6 +312,17 @@ export function vitrineIndex (url, request) {
     requireProfile(key)
     const { entries, deleted } = testimonialSource()
     return { ...testimonialPointers(entries, deleted, key), ...flags }
+  }
+
+  if (route === 'scraps' && cursor === undefined) {
+    if (!isKey(key)) notFound()
+    return scrapsIndex(key, part)
+  }
+
+  if (route === 'follow' && cursor === undefined) {
+    if (!isKey(key) || !isKey(part)) notFound()
+    requireProfile(key)
+    return { seq: liveFollowSeq(liveEntries(), key, part), indexing: false }
   }
 
   if (route === 'group-search' && part === undefined) {

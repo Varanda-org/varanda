@@ -215,9 +215,20 @@ test('assunto is keyed by the folded tag and distinct tags push distinct entries
   t.is(push(EMPTY, { screen: 'assunto', key: 'Ceu' }), EMPTY, 'an invalid key is refused')
 })
 
+test('recados is keyed by the page owner hex64', async (t) => {
+  const { EMPTY, SCREENS, push, top, validEntry } = await loadNav()
+  t.ok(SCREENS.includes('recados'))
+  t.ok(validEntry({ screen: 'recados', key: A }))
+  for (const key of [undefined, null, '', 'ceu', A.toUpperCase(), A + ':1', A.slice(1), 42]) t.absent(validEntry({ screen: 'recados', key }), String(key))
+  const one = push(EMPTY, { screen: 'recados', key: A })
+  t.alike(top(one), { screen: 'recados', key: A, params: {} })
+  t.is(push(one, { screen: 'recados', key: A }), one, 'the same page on top is a no-op')
+  t.is(push(EMPTY, { screen: 'recados', key: 'ceu' }), EMPTY, 'an invalid key is refused')
+})
+
 test('grupo and comunidade are keyed by a lowercase hex64 root key', async (t) => {
   const { EMPTY, SCREENS, push, top, validEntry, MAX_DEPTH } = await loadNav()
-  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos', 'salvos', 'assunto'])
+  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos', 'salvos', 'assunto', 'recados'])
   t.absent(validEntry({ screen: 'cadeira', key: A }))
   t.ok(SCREENS.includes('comunidade'))
   for (const screen of ['grupo', 'comunidade', 'comunidade-info']) {
@@ -352,7 +363,7 @@ test('momentos is keyed by a lowercase hex64 author', async (t) => {
 test('popTo drops back to an index and refuses bounds outside the stack', async (t) => {
   const { EMPTY, MAX_DEPTH, SCREENS, push, pop, popTo, top } = await loadNav()
   t.is(MAX_DEPTH, 20)
-  t.is(SCREENS.length, 23, 'popTo adds no screen id')
+  t.is(SCREENS.length, 24, 'popTo adds no screen id')
   let stack = EMPTY
   for (let i = 1; i <= 4; i++) stack = push(stack, { screen: 'conversa', key: A + ':' + i })
   t.is(popTo(stack, 3), stack, 'the top index is a no-op')

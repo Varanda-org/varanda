@@ -232,7 +232,7 @@ function postOf (author, seq, record) {
   }
 }
 
-export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage, onOpenMomentos, onOpenSalvos, onTabChange }) {
+export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage, onOpenMomentos, onOpenSalvos, onOpenRecados, onTabChange }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const node = useNode()
@@ -695,6 +695,20 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
                   >
                     <Icon name='salvar' size={20} color={colors.soft} />
                     <Text style={styles.salvosText}>{SAVED_ENTRY_LABEL}</Text>
+                    <Icon name='seta' size={20} color={colors.soft} />
+                  </Pressable>
+                  )
+                : null}
+              {node.hosted === true && ownPublicKey && typeof onOpenRecados === 'function'
+                ? (
+                  <Pressable
+                    accessibilityRole='button'
+                    accessibilityLabel='Recados'
+                    onPress={() => onOpenRecados(ownPublicKey)}
+                    style={({ pressed }) => [styles.salvos, pressed && styles.salvosPressed]}
+                  >
+                    <Icon name='recado' size={20} color={colors.soft} />
+                    <Text style={styles.salvosText}>Recados</Text>
                     <Icon name='seta' size={20} color={colors.soft} />
                   </Pressable>
                   )

@@ -37,6 +37,7 @@ const GLYPHS = {
   republicar: 'repeat',
   citar: 'edit-3',
   lixeira: 'trash-2',
+  recado: 'mail',
   lupa: 'search',
   mais: 'more-horizontal',
   compartilhar: 'share',

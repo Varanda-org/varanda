@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 54)
+  t.is(LEGAL_VERSION, 55)
   t.is(LEGAL_DATE, '15/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 54, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 55, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -324,7 +324,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'e1ea4c578c75401442acedf658914a32ae8cb5d56fbe1cfed0ff30b4e927ce54', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'cfe86f0ea0ee91d31132a6ab10d9711ebac4fdbabe2865f0c3a81fd9f4d7b272', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -548,6 +548,15 @@ test('Privacidade: Posts salvos diz do pedido ao semeador, do backup e do Sair',
   t.ok(p.includes('o semeador pode associar essas publicações à sua conta'), 'account linkage')
   t.ok(p.includes('o iCloud, no iPhone'), 'backup')
   t.ok(p.includes('continua no aparelho depois de Sair'), 'stays after Sair')
+})
+
+test('legal: version 55 describes recados', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const all = (d) => d.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(all(TERMS).includes('Um recado é um texto público que você deixa na página de outra pessoa'))
+  t.ok(all(PRIVACY).includes('os recados são públicos: cada um fica no diário de quem o escreveu'))
+  t.ok(all(PRIVACY).includes('o semeador pode associar essas leituras à sua conta'))
+  t.ok(all(PRIVACY).includes('Tirar um recado da sua página e escolher quem pode deixar recado também são registros publicados no seu diário público, visíveis para qualquer pessoa'), 'hide and wall records are public')
 })
 
 test('legal: version 27 describes the invite card in the link and the messenger preview', async (t) => {
