@@ -8,12 +8,14 @@
 // is ready before the person reaches it. At most four frames load app-wide
 // (embedSlots), a cap that drops, never under two, each time the system ends
 // a frame's content process. Nothing autoplays: the person starts the player
-// with its own controls, and nothing is drawn over it. A loaded player stays,
-// playback included, however far the person scrolls, so scrolling back finds
-// the same provider page. In a list (./RefreshableList) the frame is drawn by
-// the list's player layer (./EmbedLayer) over this card's slot, so it
-// outlives the row when the list unmounts it, and the card takes the same
-// frame again when the row comes back. Elsewhere (the composer's draft, a
+// with its own controls, and nothing is drawn over it. A loaded player the
+// person has not touched stays however far the person scrolls, so scrolling
+// back finds the same provider page; one they touched unloads once it is out
+// of the band, so nothing they started plays on after its post left the
+// screen. In a list (./RefreshableList) the frame is drawn by the list's
+// player layer (./EmbedLayer) over this card's slot, so it outlives the row
+// when the list unmounts it, and the card takes the same frame again when the
+// row comes back. Elsewhere (the composer's draft, a
 // header) the card draws the frame itself.
 //
 // The app cannot see play or pause inside the frame, so a frame the person
@@ -24,12 +26,22 @@
 // untouched one stays loaded, parked as the farthest, and gives its slot up
 // as soon as another card asks for it; a lock or the background unloads every
 // frame. Another player starting in the app unloads a touched frame only. A
-// frame also unloads when its row leaves the list or the card leaves a row
-// that stays, and when the system ends its content process. A frame found out
-// of the band on two checks in a row is asked to yield to a card that needs a
-// slot (a card about to come into view asks only an untouched frame at least
-// 400 pt farther away), and yields on its own next check only if that check
-// still finds it out of the band; no card ever changes another card's state.
+// touched frame found out of the band on two fresh checks in a row unloads
+// (embedLeaves), but not in the first 2 s after the touch or after the card
+// took the frame back, and not on a late answer: one missed measurement never
+// closes a playing frame, though four in a row (2 s) count as a fresh hidden
+// one. While a screen reader runs this holds for every frame that was in the
+// band since it loaded. A turned window (native full screen) keeps it; out of
+// full screen, a rotation or a resize across square after the touch (the web
+// or the PWA, an iPad, a large-screen Android that ignores the portrait lock)
+// also counts as turned, so that player stays until another player starts, a lock
+// or a screen change. A frame also unloads when its row leaves the list or
+// the card leaves a row that stays, and when the system ends its content
+// process. A frame found out of the band on two checks in a row is asked to
+// yield to a card that needs a slot (a card about to come into view asks only
+// an untouched frame at least 400 pt farther away), and yields on its own
+// next check only if that check still finds it out of the band; no card ever
+// changes another card's state.
 //
 // Until the provider page has loaded, the slot draws ./EmbedCover at the
 // player's own size, built from stored data only, so the player shows up in
@@ -65,7 +77,7 @@ import {
 import { openExternal } from '../openExternal'
 import { embedKey } from '../embedKeep'
 import { coverLingers } from '../embedCover'
-import { EMBED_IDLE, EMBED_PARKED, EMBED_TICK_MS, EMBED_WAITING, bandGap, embedNear, embedSlots, embedStays, embedStep, embedTouched, embedsHeld, embedsHeldAll, mostlyHidden, onEmbedHold } from '../embedLive'
+import { EMBED_IDLE, EMBED_PARKED, EMBED_TICK_MS, EMBED_WAITING, bandGap, embedLeaves, embedNear, embedSlots, embedStays, embedStep, embedTouched, embedsHeld, embedsHeldAll, mostlyHidden, onEmbedHold } from '../embedLive'
 import { playbackClaimCount } from '../media/chatMedia'
 import { EmbedCover } from './EmbedCover'
 import { EmbedFrame } from './EmbedFrame'
@@ -79,6 +91,10 @@ import { useStyles, useTheme } from './ThemeProvider'
 import { layout, space } from './theme'
 
 const NO_EMBED = Object.freeze({})
+
+// Missed measurements in a row (2 s) that count as one fresh hidden answer
+// for a touched frame: a slot that stops answering must not keep it playing.
+const MISSED_LEAVE = 4
 
 // A tap or a key inside the slot stays there: a quote opens its post on a
 // tap and a chat bubble its actions on a long press.
@@ -105,6 +121,17 @@ function keptReady (host, key) {
   if (!key) return false
   const entry = host.keep.list().find((e) => e.key === key)
   return !!entry && entry.ready === true
+}
+
+// The window shape (wider than tall) a kept frame went live in, as the list
+// recorded it, or null when unknown.
+function keptShape (host, key) {
+  try {
+    const shape = typeof host.shapeOf === 'function' ? host.shapeOf(key) : null
+    return typeof shape === 'boolean' ? shape : null
+  } catch {
+    return null
+  }
 }
 
 // Read at the moment of each decision: the frame can be touched, and a
@@ -178,6 +205,10 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
   const claims = useRef(playbackClaimCount())
   // Whether this card's frame was touched at its last check.
   const touchSeen = useRef(false)
+  // When this card first saw the touch, or took a touched frame back.
+  const touchedAt = useRef(NaN)
+  // Whether the live frame was found in the band since it loaded.
+  const shown = useRef(false)
 
   const fits = width > 0 && width >= embed.minWidth
   const active = visible && !held && fits
@@ -186,9 +217,17 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
   // toward parking, but only a fresh answer may give the slot away.
   // gap is the slot's distance to the band (0 in it, Infinity unknown): a
   // card about to come into view takes a slot only from a holder much
-  // farther away, and a parked holder reports how far it is.
-  const apply = (next, mayYield = true, gap) => {
+  // farther away, and a parked holder reports how far it is. mayLeave lets a
+  // run of missed answers close a touched frame, never yield it.
+  const apply = (next, mayYield = true, gap, mayLeave = mayYield) => {
     if (mayYield && next === EMBED_PARKED && release.current !== null && embedSlots.yielding(release.current, gap, readerTouchNow())) next = EMBED_IDLE
+    if (mayLeave && next === EMBED_PARKED && release.current !== null) {
+      const engaged = embedSlots.engaged(release.current)
+      // A touch that landed after this check began has no stamp yet: it is
+      // a touch just made, not an old one.
+      if (engaged && !Number.isFinite(touchedAt.current)) touchedAt.current = Date.now()
+      if (embedLeaves(engaged, readerTouchNow(), shown.current, Date.now() - touchedAt.current)) next = EMBED_IDLE
+    }
     // A visible request outlives the check that made it: a holder would still
     // yield to it after this card left the band. It goes once, when the card
     // is found out of the band, and the card asks again as a preload.
@@ -221,6 +260,12 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
       done()
     }
     if (next.live && release.current !== null) embedSlots.park(release.current, next === EMBED_PARKED, gap)
+    // The next frame starts with no touch: a stamp left from this one would
+    // make its first touch look old.
+    if (!next.live) {
+      shown.current = false
+      touchedAt.current = NaN
+    }
     const changed = next !== stateRef.current
     stateRef.current = next
     if (alive.current && changed) setState(next)
@@ -281,12 +326,23 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
   // Before the check effect, which would close a parked state with no slot.
   useEffect(() => {
     const kept = key ? host.keep.claim(key) : null
-    setReady(kept !== null && keptReady(host, key))
+    const loaded = kept !== null && keptReady(host, key)
+    setReady(loaded)
     if (kept !== null) {
       release.current = kept.release
       // A touch made while the frame had no card predates the claims checked
       // just below, so it forgives none of them.
       touchSeen.current = embedSlots.engaged(release.current)
+      // The card starts parked with no check, so one hidden answer would
+      // close a touched frame it just took back, maybe still in view.
+      if (touchSeen.current) touchedAt.current = Date.now()
+      // A loaded frame counts as shown, so a screen reader's touch is not
+      // forgotten after a quote reloads.
+      if (loaded) shown.current = true
+      // A row that remounts while native full screen still turns the window
+      // must not take the turned window as the frame's own shape.
+      const shape = keptShape(host, key)
+      if (shape !== null) base.current = shape
       hosted.current = key
       if (!stateRef.current.live) {
         stateRef.current = EMBED_PARKED
@@ -357,6 +413,7 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
     // answer still missing at the next tick counts as hidden.
     let round = 0
     let pending = false
+    let misses = 0
     const check = () => {
       if (cancelled) return
       // Before any early return: an answer from an earlier check, which may
@@ -371,6 +428,10 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
       const touching = embedSlots.engaged(release.current)
       const at = embedSlots.engagedAt(release.current)
       if (touching && !touchSeen.current && Number.isFinite(at)) claims.current = Math.max(claims.current, at)
+      // A stamp belongs to one engagement: a touch the list took over as a
+      // drag ends it, and the next tap gets a grace of its own.
+      if (!touching) touchedAt.current = NaN
+      else if (!touchSeen.current) touchedAt.current = Date.now()
       touchSeen.current = touching
       const allowed = count === claims.current || !touchedNow(release.current)
       claims.current = count
@@ -389,8 +450,10 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
       const turned = (win.width > win.height) !== base.current
       const settle = (hidden, mayYield = true, gap = Infinity, near = false) => {
         pending = false
-        const free = stateRef.current.live || embedSlots.free(gap, readerTouchNow())
-        apply(embedStep(stateRef.current, { hidden, near, allowed, turned, free }), mayYield, gap)
+        if (mayYield) misses = 0
+        const free = stateRef.current.live || embedSlots.free(gap, readerTouchNow(), Date.now())
+        apply(embedStep(stateRef.current, { hidden, near, allowed, turned, free }), mayYield, gap, mayYield || misses >= MISSED_LEAVE)
+        if (hidden === false && stateRef.current.live) shown.current = true
       }
       // A slot near the band counts toward the dwell like a visible one. A
       // hidden slot that only touches the band is 0 pt away, yet still a
@@ -407,7 +470,10 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
         return
       }
       placeFrame()
-      if (missed) settle(true, false)
+      if (missed) {
+        misses++
+        settle(true, false)
+      }
       pending = true
       try {
         view.measureInWindow((x, y, w, h) => {
