@@ -150,6 +150,7 @@ async function momentHarness ({ file = null, request = async () => ({}), putMome
     MEDIA_STALE: 'prepare a mídia de novo',
     isLocked: (err) => err.code === 'LOCKED',
     refusalOf: () => '',
+    previewRefusal: () => '',
     errorText: (err) => err.message,
     momentsChanged: () => {}
   }
@@ -188,6 +189,7 @@ async function postHarness ({ request = async () => ({ seq: 1 }), upload, photo 
     setCheckError: (value) => { error = value },
     pageRetryRef: { current: null },
     refusalOf: () => '',
+    previewRefusal: () => '',
     asPage: null,
     text: '',
     reply,
