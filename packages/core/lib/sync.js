@@ -4756,11 +4756,24 @@ async function runSync ({
     // A throw before `finished` may leave purges in flight: never close the
     // store underneath them.
     while (settling.size > 0) await Promise.allSettled([...settling])
+    // With the swarm gone nothing else arrives: sweep once more before
+    // the store closes.
+    if (clearing) await sweepDeleted(follows)
     if (store) await store.close().catch(noop)
   }
 }
 
+// A deleted block requested before its tombstone was known can land after
+// stopEntry destroyed the range, whose 'download' listener would have
+// cleared it. A failed clear never stops the sweep of the other replicas.
+async function sweepDeleted (follows) {
+  for (const e of follows.values()) {
+    if (e.state === 'active' && e.core && e.deleted && e.deleted.size > 0) await clearDeleted(e.core, e.deleted).catch(noop)
+  }
+}
+
 module.exports = {
+  sweepDeleted,
   readBoundRoots,
   recordBoundRoot,
   runSync,
