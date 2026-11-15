@@ -294,3 +294,16 @@ test('two follow presses on search rows in one tick send once, never toast and k
   await first
   t.alike(following, ['a', null], 'cleared by its own answer')
 })
+
+test('Busca rows are stable: cached props, one renderItem, memoized extraData', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Busca.js'), 'utf8')
+  t.ok(src.includes('cache: rowCache, rowKey: key'), 'row props come from the cache')
+  t.ok(src.includes('useRowPropsCache(items, itemKey, { h: handlers, social })'), 'the cache is owned by the list')
+  t.ok(src.includes('const renderItem = useCallback((info) => renderRef.current(info), [])'), 'renderItem is stable')
+  t.absent(/const renderItem = \(/.test(src), 'no inline renderItem')
+  t.ok(src.includes('const extra = useMemo(() => ({ now, following, follows, social: social.social, avatarOf, ownKey, hosted }), [now, following, follows, social.social, avatarOf, ownKey, hosted])'), 'extraData is memoized and carries ownKey and hosted, which rows read')
+  t.ok(src.includes('extraData={extra}'), 'the list gets the memoized extraData')
+  t.absent(src.includes('onFollow={isOwn(item) || known(item) ? undefined : () =>'), 'no inline follow arrow per render')
+  t.ok(src.includes('ctl.current.follow(') && src.includes('ctl.current.onSocialChanged()'), 'follow and like read the newest handlers at call time')
+  t.ok(src.includes('useVisibleNow(60000)'), 'the clock stops while the tab is hidden')
+})

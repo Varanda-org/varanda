@@ -5,6 +5,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ## [Não lançado]
 
+- Listas estáveis e relógio de minuto pausado (PR `perf/list-rows`): Espiadinha, Diário, Busca, Conversa, Membro e Mensagem deixam de renderizar linhas por mudanças que não são delas, e o relógio de minuto para enquanto a tela está escondida.
 - Linhas de publicação mais leves ao montar (PR `perf/row-mount`): uma linha de publicação renderiza uma vez ao montar em vez de duas, as folhas de ações só montam na primeira abertura e a foto aparece com o driver nativo; na rolagem de A Rua no emulador Android as renderizações caíram cerca de 30% (ver `docs/verification.md` §247).
 - Menos renderização nas listas e nas abas (PR `perf/render-isolation`): as abas escondidas deixam de renderizar a cada aviso, selo ou barra que some, e na web o esqueleto de carregamento para de pulsar nas abas fora da tela; a rolagem de A Rua gasta menos trabalho de fundo.
 - Curtidas e republicações nos Avisos da página (PR `fix/followers-notices-leftovers`): o serviço de conta passa a ler os avisos da página por `varanda/notices/3` e confere cada curtida e republicação de uma publicação da página como confere respostas e menções; com um semeador sem esse canal, continuam as quatro linhas de antes. Sem mudança de RPC nem Termos.
