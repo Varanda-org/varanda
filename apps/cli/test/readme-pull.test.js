@@ -152,7 +152,7 @@ test('the section names the files and the marker that update.sh uses', (t) => {
   t.ok(section.includes(marker), 'modo-pull marker')
 })
 
-test('no em dash in the README section, the CHANGELOG entry or verification section 247', (t) => {
+test('no em dash in the README section, the CHANGELOG entry or verification section 252', (t) => {
   t.is(section.includes(EM_DASH), false, 'README section')
   const changelog = read('CHANGELOG.md')
   const top = changelog.indexOf('## [Não lançado]\n\n')
@@ -161,13 +161,13 @@ test('no em dash in the README section, the CHANGELOG entry or verification sect
   t.ok(first.includes('feat/seeder-pull-updater'), 'the top entry is the pull-updater entry')
   t.is(first.includes(EM_DASH), false, 'CHANGELOG entry')
   const verification = read('docs/verification.md')
-  const at = verification.indexOf('\n## 247. ')
-  t.ok(at > -1, 'verification has section 247')
+  const at = verification.indexOf('\n## 252. ')
+  t.ok(at > -1, 'verification has section 252')
   const next = verification.indexOf('\n## ', at + 1)
   const part = next === -1 ? verification.slice(at) : verification.slice(at, next)
-  t.is(part.includes(EM_DASH), false, 'verification section 247')
-  t.ok(part.startsWith('\n## 247. Versões do semeador por imagem (PRs build/seeder-release-images, feat/seeder-pull-updater)\n'), 'section 247 has its title')
-  t.ok(part.includes('Manage Actions access'), 'section 247 checks the Write access of the packages')
+  t.is(part.includes(EM_DASH), false, 'verification section 252')
+  t.ok(part.startsWith('\n## 252. Versões do semeador por imagem (PRs build/seeder-release-images, feat/seeder-pull-updater)\n'), 'section 252 has its title')
+  t.ok(part.includes('Manage Actions access'), 'section 252 checks the Write access of the packages')
 })
 
 test('the new files carry no em dash', (t) => {

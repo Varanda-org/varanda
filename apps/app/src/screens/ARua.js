@@ -45,7 +45,7 @@ import { replyMarkOf, whoOf } from '../who'
 import { COUNTS_MAX, MAX_COOLDOWN_MS, fetchCounts, fetchMember } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
 import { cheapRepliesMap } from '../threadRows'
-import { applyToggle, countsAfter, diaryPeekSlots, emptyState, mergeCounts, poolMap, secondPassRefs } from '../engagement'
+import { applyToggle, countAnswerApplies, countsAfter, diaryPeekSlots, emptyState, mergeCounts, poolMap, secondPassRefs } from '../engagement'
 import { orderRefs } from '../visibleFirst'
 import { DeletePrompt, actingPageKey, isBusy, isDiaryGone, isSeederDown, memberKeyOf, pageEngagement, readEngagement, setEngagement, useActing, useDelete } from './Conversa'
 import { canDelete } from '../deletion'
@@ -874,15 +874,10 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
         change((prev) => {
           const fetched = {}
           for (const ref of Object.keys(r.value.counts)) {
-            if (prev.pending.has(ref)) continue
-            // A read started after this one already answered for this ref:
-            // an older answer never replaces a newer number.
-            if ((countedRef.current.get(ref) || 0) > started) continue
-            // A toggle that settled while this read was in flight already
-            // moved the number on screen; an answer read before it would
-            // undo that. With no number yet there is nothing to keep.
+            // Pending, a newer answer, or a toggle that settled while this
+            // read was in flight: see countAnswerApplies.
             const touched = Math.max(touchedRef.current.get('liked|' + ref) || 0, touchedRef.current.get('reposted|' + ref) || 0)
-            if (touched > started && prev.counts.has(ref)) continue
+            if (!countAnswerApplies({ pending: prev.pending.has(ref), answeredAt: countedRef.current.get(ref) || 0, touchedAt: touched, started, hasCount: prev.counts.has(ref) })) continue
             fetched[ref] = r.value.counts[ref]
             countedRef.current.set(ref, started)
           }
