@@ -105,7 +105,7 @@ test('feiraCompose: App routes hardware back and Escape through the active guard
   t.ok(/if \(helpOpenRef.current \|\| sheetOpenRef.current\) return false\s+if \(backGuardRef.current\?\.\(\) === true\) return true/.test(hardware))
   const escape = src.slice(src.indexOf('const onKey = (event) =>'), src.indexOf("globalThis.addEventListener('keydown', onKey)"))
   t.ok(/sheetOpenRef.current\) return\s+if \(backGuardRef.current\?\.\(\) === true\) \{\s+event.preventDefault\(\)\s+return/.test(escape))
-  t.ok(src.includes('registerBackGuard={(fn) => registerBackGuard(() => stackRef.current[stackRef.current.length - 1] === entry && fn())}'), 'hidden and departing screens cannot consume back')
+  t.ok(src.includes('const guardRegistrar = entryHandlers.current.for(i + \':anunciar\', { handleRegisterBackGuard: (fn) => registerBackGuard(() => stackRef.current.length - 1 === i && stackRef.current[i].screen === \'anunciar\' && fn()) }).handleRegisterBackGuard') && src.includes('registerBackGuard={guardRegistrar}'), 'hidden and departing screens cannot consume back')
   const match = src.match(/const registerBackGuard = useCallback\(\(fn\) => \{([\s\S]*?)\n {2}\}, \[\]\)/)
   t.ok(match, 'registration returns an owned cleanup')
   if (!match) return

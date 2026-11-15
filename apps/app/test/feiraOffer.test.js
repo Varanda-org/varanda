@@ -24,7 +24,7 @@ test('the listing opens an offer intent and forwards the shared listings capabil
   const mount = src.slice(src.indexOf("if (entry.screen === 'anuncio')"), src.indexOf("if (entry.screen === 'editar-anuncio'"))
   t.ok(mount.includes('const author = entry.key.slice(0, at)'))
   t.ok(mount.includes('author={author}'))
-  t.ok(mount.includes('onOffer={(listing) => openMessage(author, { offer: listing })}'))
+  t.ok(mount.includes('onOffer={entryHandlers.current.for(i + \':anuncio:\' + entry.key, { handleOffer: (listing) => openMessage(author, { offer: listing }) }).handleOffer}'), 'per-entry offer handler opens the message with the listing')
   t.ok(mount.includes('onOpenListings={screenProps.onOpenListings}'))
   const open = src.slice(src.indexOf('const openMessage = useCallback('), src.indexOf('const intentUsed'))
   t.ok(open.includes('options.context || options.offer'), 'either payload creates an intent')
