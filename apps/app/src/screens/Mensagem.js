@@ -72,7 +72,7 @@ import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
 import { listingLinkOf } from '../feiraChat'
 import { parsePriceText, quickReplies } from '../feira'
 import { CONSENT_NOTE, acceptCard, acceptText, buttonState, centsLabel, consentParams, declineCard, declineText, offerCard, offerOfMessage, offerState, offerTarget, proposalText, validCents } from '../feiraOffer'
-import { mergeMessages, newestOf, pageDmClient, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey, quoteTargets, dmReactions, reactDebounce, dmReactionGate, dmReactable, withFreshReactions } from '../dm-screen'
+import { mergeMessages, newestOf, pageDmClient, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey, quoteTargets, dmReactions, reactDebounce, dmReactionGate, dmReactable, withFreshReactions, peerReadDelay, olderPagesToReread } from '../dm-screen'
 import { pageReadKind } from '../pageNotice'
 import { applyOptimistic, reactionChips, toggleOf } from '../reactions'
 import { hasRich, parseRich, plainOf } from '../richText'
@@ -221,19 +221,24 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const quoteHandle = peerWho.subtitle || undefined
 
   const [peerRead, setPeerRead] = useState(null)
-  const peerReadContext = useMemo(() => ({ live: true, pending: false, trailing: false, answer: null }), [request, peer])
+  const [peerRetry, setPeerRetry] = useState(0)
+  const peerReadContext = useMemo(() => ({ live: true, pending: false, trailing: false, answer: null, failures: 0, retry: null }), [request, peer])
   useEffect(() => {
     peerReadContext.live = true
-    return () => { peerReadContext.live = false }
+    return () => {
+      peerReadContext.live = false
+      clearTimeout(peerReadContext.retry)
+    }
   }, [peerReadContext])
   const readPeer = useCallback(async () => {
     if (!hosted || !unlocked || !node.online || pageKey !== null) return
     if (peerReadContext.pending) { peerReadContext.trailing = true; return }
     peerReadContext.pending = true
+    let answered = false
     try {
       for (let attempt = 0; attempt < 2; attempt++) {
         peerReadContext.trailing = false
-        let answered = false
+        answered = false
         try {
           const read = await request('page.read', { key: peer })
           answered = read?.page === peer
@@ -248,15 +253,26 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       peerReadContext.pending = false
       peerReadContext.trailing = false
     }
+    // Unanswered, the reactions stay off: the effect below reads again after
+    // a growing wait, with the conditions of that moment (online, unlocked).
+    clearTimeout(peerReadContext.retry)
+    peerReadContext.retry = null
+    if (answered) peerReadContext.failures = 0
+    else if (peerReadContext.live && peerReadContext.answer === null) {
+      peerReadContext.retry = setTimeout(() => {
+        peerReadContext.retry = null
+        if (peerReadContext.live) setPeerRetry((n) => n + 1)
+      }, peerReadDelay(peerReadContext.failures++))
+    }
   }, [request, peer, peerReadContext, hosted, unlocked, node.online, pageKey])
   useEffect(() => {
     if (isTop && node.visible !== false && peerReadContext.answer === null) readPeer()
-  }, [isTop, node.visible, peerReadContext, readPeer])
+  }, [isTop, node.visible, peerReadContext, readPeer, peerRetry])
 
   const [reactionOverrides, setReactionOverrides] = useState(new Map())
   const [reactionError, setReactionError] = useState('')
   const [reactionPicker, setReactionPicker] = useState(null)
-  const reactionContext = useMemo(() => ({ live: true, sending: new Set(), unsure: new Map(), settled: new Map(), bases: new Map(), overrides: new Map(), pages: new Map(), read: 0, debounce: reactDebounce() }), [peer, ownKey, pageKey, request])
+  const reactionContext = useMemo(() => ({ live: true, sending: new Set(), unsure: new Map(), removed: new Map(), settled: new Map(), bases: new Map(), overrides: new Map(), pages: new Map(), read: 0, debounce: reactDebounce() }), [peer, ownKey, pageKey, request])
   const reactionContextRef = useRef(reactionContext)
   reactionContextRef.current = reactionContext
   useEffect(() => {
@@ -385,6 +401,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       const key = messageKey(item)
       if (context.sending.has(key) || context.debounce.has(key) || started <= (context.settled.get(key) || 0)) continue
       context.unsure.delete(key)
+      context.removed.delete(key)
       context.overrides.delete(key)
     }
     setReactionOverrides(new Map(context.overrides))
@@ -411,9 +428,11 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       setBlocked(r.blocked === true)
       olderErr.current = false
       setLoadError('')
-      // Only reactions change on held older rows; the cursor and scroll order stay.
-      for (const [before, keys] of context.pages) {
-        if (![...keys].some((key) => context.overrides.has(key) || context.debounce.has(key) || context.unsure.has(key))) continue
+      // Only reactions change on held older rows; the cursor and scroll order
+      // stay. The newest held pages are read again, so the other person's
+      // reaction on an older message shows without reopening the conversation.
+      const pending = (key) => context.overrides.has(key) || context.debounce.has(key) || context.unsure.has(key)
+      for (const [before, keys] of olderPagesToReread(context.pages, pending)) {
         const started = ++context.read
         try {
           const older = await dm('dm.thread', { peer, before })
@@ -434,6 +453,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       for (const key of new Set([...context.unsure.keys(), ...context.overrides.keys()])) {
         if (context.sending.has(key) || context.debounce.has(key) || started <= (context.settled.get(key) || 0) || covered.has(key) || failed.has(key)) continue
         context.unsure.delete(key)
+        context.removed.delete(key)
         context.overrides.delete(key)
       }
       setReactionOverrides(new Map(context.overrides))
@@ -493,6 +513,10 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     }
     const target = { from: item.from, id: item.id }
     context.unsure.delete(key)
+    // Any answer settles the last unconfirmed removal: confirmed, failed, or
+    // unconfirmed again (then set anew below).
+    const removed = context.removed.get(key)
+    context.removed.delete(key)
     context.sending.add(key)
     paintReactions(context)
     try {
@@ -502,6 +526,9 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       if (!context.live || context !== reactionContextRef.current) return
       if (unsureSend(err)) {
         context.unsure.set(key, emoji)
+        // The emoji an unconfirmed removal took away: tapping it again is the
+        // retry of that removal (docs/rpc.md 5.119), not a new reaction.
+        if (emoji === '') context.removed.set(key, context.bases.get(key)?.find((r) => r.mine)?.emoji || removed || '')
       } else {
         cancelReaction(context, key)
         setReactionError(errorText(err))
@@ -522,8 +549,9 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     const reactions = context.overrides.get(key) || dmReactions(item.reactions)
     if (!context.bases.has(key)) context.bases.set(key, reactions)
     const starting = context.bases.get(key).find((r) => r.mine)?.emoji || ''
-    const retry = context.unsure.has(key) && context.unsure.get(key) === picked
-    const emoji = retry ? picked : toggleOf(reactions, picked)
+    const unsure = context.unsure.get(key)
+    const retry = context.unsure.has(key) && (unsure === picked || (unsure === '' && picked !== '' && picked === context.removed.get(key)))
+    const emoji = retry ? unsure : toggleOf(reactions, picked)
     context.overrides.set(key, applyOptimistic(reactions, emoji))
     setReactionError('')
     paintReactions(context)

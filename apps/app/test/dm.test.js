@@ -707,7 +707,8 @@ test('Continuar on the page notice hands over only once the sheet is gone', (t) 
   t.ok(sheetSrc.includes('onDismiss={flush}'), 'the hand-over waits for the sheet to report it is gone')
   t.ok(sheetSrc.includes("setTimeout(flush, Platform.OS === 'android' ? 320 : 700)"), 'Android and a dismissal that never reports still hand over')
   t.ok(baseSrc.includes('export function Sheet ({ open, onClose, onBack, onDismiss,'), 'Sheet takes onDismiss')
-  t.is(baseSrc.split('onDismiss={onDismiss}').length - 1, 2, 'both Modals of Sheet report the dismissal')
+  t.is(baseSrc.split('onDismiss={dismissed}').length - 1, 2, 'both Modals of Sheet report the dismissal')
+  t.ok(baseSrc.includes("if (typeof onDismiss === 'function') onDismiss()"), 'the dismissal reaches the caller')
 })
 
 test('the page conversation notice persists per device and page key on both storage adapters', async (t) => {
