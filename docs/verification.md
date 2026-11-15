@@ -11067,3 +11067,26 @@ node apps/app/test/screensPolish.test.js
 ```
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 241. Data afastada da pílula "seguir" (PR fix/platform-parity-sweep)
+
+Esta seção confere o espaço entre a data e a pílula "seguir" no topo de uma publicação (Espiadinha e Busca). A face da pílula começa na borda do seu alvo de toque, e o topo reservava só a largura dos botões, sem folga: no Android, "· 5 nov" encostava na pílula e entrava um pouco nela; no iOS, encostava. Agora o topo reserva 8 pt a mais quando há "seguir", também com texto grande. Com só o ⋯ nada muda: o ícone já fica no meio de um alvo mais largo. Só o visual: sem mudança de protocolo, RPC, Termos nem dependência.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web, em escuro, com os dados da Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`).
+
+- [x] Android, emulador API 36, build de debug, escuro, Espiadinha: antes, na linha de Tomás Ferreira, "· 5 nov" encostava na pílula e entrava um pouco nela. Depois: 8 pt entre a data e a pílula em todas as linhas, e o `@nome` corta antes ("@tomas…"). Conferido em 2026-11-14.
+- [x] Android, texto grande (escala 1,3): o nome fica na primeira linha, a data embaixo, e nada encosta na pílula. Conferido em 2026-11-14.
+- [x] iOS, simulador iPhone 17 Pro, build de debug, escuro, Espiadinha: antes, a data encostava na pílula; depois, o mesmo espaço do Android. Conferido em 2026-11-14.
+- [x] Chrome na web, 390 px, escuro, Espiadinha: 8,4 px entre o fim de "· 5 nov" e a pílula em todas as linhas. Conferido em 2026-11-14.
+- [ ] Busca, com uma conta que você não segue: o mesmo espaço. Pendente.
+- [ ] Texto grande no iOS e na web. Pendente.
+- [ ] PWA instalado no Android e no iOS. Pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A asserção nova (`headPad` com 8 pt a mais quando há "seguir") falha sem a correção.
+
+```sh
+node apps/app/test/postLayout.test.js
+node apps/app/test/postOverflow.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
