@@ -331,6 +331,7 @@ export default function Busca ({ query, header, ownKey, avatarOf, active, scroll
 
   return (
     <RefreshableList
+      perfId='busca'
       data={items}
       keyExtractor={itemKey}
       renderItem={renderItem}
