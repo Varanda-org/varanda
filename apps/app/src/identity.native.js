@@ -74,7 +74,7 @@ const MISSING_TEXT = 'não deu para concluir a criação; tente criar de novo'
 const BAD_ENTRY_TEXT = 'entrada de recuperação inválida'
 const RECOVERY_EXPIRED_TEXT = 'o tempo da recuperação acabou: entre de novo'
 const NO_BOUND_TEXT = 'nenhuma passkey ligada a esta sessão: entre de novo com a passkey'
-const SIGN_IN_FIRST_TEXT = 'essa passkey não pôde ser concluída: entre com a sua passkey ou com o código de recuperação'
+const SIGN_IN_FIRST_TEXT = 'não deu para terminar: entre de novo na sua conta ou com o código de recuperação'
 const RECOVERY_UNDONE_TEXT = 'não deu para concluir a recuperação: entre com o código de novo'
 // packages/web-member/web/node.js LOCKED_MESSAGE.
 const LOCKED_TEXT = 'identidade bloqueada: entre com a passkey'
