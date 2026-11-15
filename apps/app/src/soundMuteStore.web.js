@@ -1,6 +1,6 @@
 let sessionValue = null
 
-export function musicAutoStore () {
+export function soundMuteStore () {
   return {
     getItem (key) {
       if (sessionValue !== null) return sessionValue
