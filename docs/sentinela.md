@@ -6,8 +6,9 @@ Proposta de desenho para "sentinelas", modelos pequenos que rodariam dentro do a
 
 - **Proposta.** Nada foi entregue. Nenhuma tela, nenhum modelo e nenhuma dependência nova estão na `main`.
 - **A regra de `AGENTS.md` continua valendo:** "Não leve inferência para o aparelho nem para o processo que guarda a chave do emissor". Enquanto a manutenção não mudar essa regra (seção 13), nada deste documento entra no app de produção.
-- **A branch tem dois commits:** um de documentação (este arquivo e a linha em `docs/README.md`) e um de spike, só para desenvolvimento: o módulo nativo `apps/app/modules/sentinel-spike` com ONNX Runtime (no iOS, pods `onnxruntime-c` e `onnxruntime-objc` 1.21.0 no `apps/app/ios/Podfile.lock`; no Android, `com.microsoft.onnxruntime:onnxruntime-android` 1.21.1, porque a biblioteca JNI da 1.21.0 (`libonnxruntime4j_jni.so`) não vem alinhada a páginas de 16 KB), os arquivos do bench em `apps/app/src/sentinel/` (helpers, fixture e o executor `runBench.native.js`, com um irmão `runBench.web.js` vazio), o gancho só de desenvolvimento em `apps/app/index.js`, os testes `apps/app/test/sentinelBench.test.js` e `sentinelSpikeModule.test.js`, a linha do podspec em `apps/app/test/hardening.test.js` e o script `apps/cli/scripts/sentinel-fixture.js`. Só o commit de documentação é proposto para a `main`. Juntar o spike à `main` acrescentaria uma dependência nativa a todos os builds de release, porque `apps/app/modules` é autolinkado.
+- **A branch tem dois tipos de commit:** os de documentação (este arquivo e a linha em `docs/README.md`) e os de spike, só para desenvolvimento: o módulo nativo `apps/app/modules/sentinel-spike` com ONNX Runtime (no iOS, pods `onnxruntime-c` e `onnxruntime-objc` 1.21.0 no `apps/app/ios/Podfile.lock`; no Android, `com.microsoft.onnxruntime:onnxruntime-android` 1.21.1, porque a biblioteca JNI da 1.21.0 (`libonnxruntime4j_jni.so`) não vem alinhada a páginas de 16 KB), os arquivos do bench em `apps/app/src/sentinel/` (helpers, fixture e o executor `runBench.native.js`, com um irmão `runBench.web.js` vazio), o gancho só de desenvolvimento em `apps/app/index.js`, os testes `apps/app/test/sentinelBench.test.js` e `sentinelSpikeModule.test.js`, a linha do podspec em `apps/app/test/hardening.test.js`, o script `apps/cli/scripts/sentinel-fixture.js` e, do spike 2, `apps/app/src/sentinel/nliFixture.json` e os scripts `apps/cli/scripts/sentinel-nli-fixture.js`, `sentinel-nli-eval.js` e `sentinel-nli-eval-set.json`. Só os commits de documentação são propostos para a `main`. Juntar o spike à `main` acrescentaria uma dependência nativa a todos os builds de release, porque `apps/app/modules` é autolinkado.
 - **O spike** (seção 12) roda só em build de desenvolvimento, por decisão explícita do mantenedor, nessa branch. Ele mede custo (carga, latência, memória, tamanho) e paridade com o servidor; não mede qualidade de moderação e não tem tela para a pessoa usuária.
+- **O spike 2** testa o caminho NLI zero-shot (seção 7, T-h), o que mais se aproxima do Jev rodando no aparelho, porque o Jev só existe hospedado (T-i). A acurácia em pt-BR se mede no Node com os mesmos pesos (seção 8); o simulador e o emulador conferem paridade dos logits, carga, latência e memória (seção 12). Mesmas travas do spike 1: só build de debug, modelo copiado à mão, nada baixado pelo app. Resultado até aqui: com hipóteses fixas, o NLI zero-shot é fraco em pt-BR e serve no máximo de sinal auxiliar ao lado do embedding com cabeça treinada (seção 8).
 - Fatos de modelos e bibliotecas foram conferidos nas páginas oficiais em 15/11/2026 (seção 16). O que não deu para conferir diz "a conferir". Números de desempenho do app dizem "a medir" até o spike rodar em aparelho. No simulador iOS e no emulador Android ele já rodou (seção 12): provou carga, paridade (cosseno 1,00 contra o servidor) e liberação de memória, não latência de celular.
 
 ## 2. Pedido e decisões já tomadas
@@ -180,15 +181,45 @@ Tamanhos "q8" ou "INT4" são do arquivo publicado quando existe; quando só há 
 - `google/shieldgemma-2b`: licença Gemma, acesso fechado, só inglês segundo o card, quatro tipos de dano (sexual explícito, perigoso, ódio, assédio); o Hugging Face mostra 2.614.341.888 parâmetros.
 - `google/gemma-3-270m` (268.098.176 parâmetros) e `google/gemma-3-1b-it` (999.885.952): licença Gemma, mais de 140 idiomas, contexto de 32 mil tokens. Não são modelos de guarda; precisariam de ajuste fino.
 - `Qwen/Qwen2.5-0.5B-Instruct` (494.032.768 parâmetros) e `Qwen/Qwen3-0.6B` (751.632.384): Apache-2.0. Também precisariam de ajuste fino; cobertura de pt-BR, a conferir.
+- No aparelho, os dois de guarda (Llama Guard 3 1B, inclusive a versão INT4 para celular que o card descreve, e ShieldGemma 2B) ficam entre centenas de MB e mais de 1 GB e custam mais latência e bateria que um codificador ou um NLI (a medir).
 - Runtimes: llama.cpp (MIT) com a ligação React Native `llama.rn` (MIT; o npm mostra hoje `0.13.0-rc.11`, uma pré-versão), LiteRT-LM (Apache-2.0), ExecuTorch (licença BSD) com `react-native-executorch` (MIT).
 
 **T-g. Modelos do sistema.**
 
-- Apple Foundation Models: a documentação da Apple marca o framework a partir do iOS 26.0, e o modelo no aparelho depende de um aparelho com Apple Intelligence (lista de aparelhos e suporte a pt-BR, a conferir). O app aceita iOS 18.0 (`"deploymentTarget": "18.0"` em `app.json`), então uma parte dos aparelhos ficaria sem sentinela.
+- Apple Foundation Models: a documentação da Apple marca o framework a partir do iOS 26.0, e o modelo no aparelho depende de um aparelho com Apple Intelligence (lista de aparelhos e suporte a pt-BR, a conferir). O app aceita iOS 18.0 (`"deploymentTarget": "18.0"` em `app.json`), então uma parte dos aparelhos ficaria sem sentinela. Modelo no aparelho de cerca de 3 bilhões de parâmetros e geração guiada com saída tipada (a conferir na documentação atual).
 - Gemini Nano: roda no serviço AICore do Android, acessado pelas ML Kit GenAI APIs, com termos de serviço adicionais. A página oficial não lista aparelhos; a cobertura é um subconjunto de aparelhos recentes (a conferir), bem menor que `minSdkVersion` 31.
-- A favor: nenhum peso no app, nenhum download nosso. Contra: comportamento muda com atualização do sistema (sem revisão fixa), política de segurança do fornecedor no meio, cobertura desigual entre iPhone e Android e entre aparelhos caros e baratos, que é exatamente onde a moderação não pode ser desigual.
+- A favor: nenhum peso no app, nenhum download nosso. Contra: comportamento muda com atualização do sistema (sem revisão fixa), política de segurança do fornecedor no meio, cobertura desigual entre iPhone e Android e entre aparelhos caros e baratos, que é exatamente onde a moderação não pode ser desigual. A saída é gerada, não uma probabilidade calibrada.
 
-**Codificador classificador contra "mini LLM" gerador.** Um codificador (T-a a T-d) lê o texto uma vez e devolve uma pontuação por categoria: dezenas a pouco mais de cem MB, RAM da ordem do arquivo, e uma passada por publicação (no servidor, o MiniLM roda com prazo de 10 s por texto; no aparelho, a medir). Um gerador de guarda de 0,3 a 1,5 bilhão de parâmetros, mesmo em INT4, pesa centenas de MB a cerca de 1 GB, precisa de RAM do mesmo tamanho mais o cache de atenção, e gera tokens: a resposta "seguro / inseguro S10" custa uma passada de leitura do texto inteiro mais alguns tokens de saída, provavelmente uma ordem de grandeza mais lenta por publicação (a medir). O ganho do gerador é a taxonomia pronta e a política em linguagem natural; a perda é tamanho, RAM, latência, download, e uma FPR publicada em português que não serve para avisar ninguém. Para a v1 a recomendação é um codificador; o gerador só faz sentido no aviso antes de publicar (uma chamada por publicação, não uma por linha), e mesmo assim só com piso de RAM e download opcional.
+**T-h. NLI zero-shot ("Jev leve" no aparelho).**
+
+- Como funciona: a publicação é a premissa e cada categoria dos Termos tem uma hipótese fixa em pt-BR (ofensa ou assédio, conteúdo sexual explícito, ameaça ou violência, discurso de ódio, spam). A avaliação não tem hipótese de controle neutro: um post limpo conta como acerto quando nenhuma categoria passa do corte. A pontuação da categoria é o softmax entre `entailment` e `contradiction`, a receita usual de zero-shot. Sem treino: um sim ou não tipado por categoria, parecido com a pergunta "Noul" do Jev.
+- `MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli`, revisão `0a71e92a985b6e1ad1828cf67ce9c459639c1dca`, MIT. Publica só `onnx/model.onnx` fp32, 428.127.016 bytes, a maior parte na tabela de cerca de 250 mil peças. Quantizado localmente para o spike só na camada de embedding: int8 dinâmico com o onnxruntime 1.32.0 em Python, `quantize_dynamic(..., weight_type=QInt8, op_types_to_quantize=['Gather'])`, sobre o fp32. Resultado: 139.580.898 bytes, sha256 `c15eef0c5b1e987b3190259c2a5c81f9bca023c508002881ade33af3706675c9`.
+- `MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7`, revisão `b5113eb38ab63efdd7f280f8c144ea8b13f978ce`, MIT. O `onnx/model_quantized.onnx` publicado (q8, 338.679.133 bytes) não serve no onnxruntime-node 1.21 (seção 14, decisão 25), então o spike aplica a ele a mesma quantização só de Gather: 538.123.257 bytes, sha256 `9d433ee4019854e340020c20e62903d92d76d9ec25f8fc8d6a7ad4a0f6832bd6`. É a referência mais forte e mais pesada, e roda só no Node: com 538 MB, fica fora do orçamento do aparelho e do bench de celular.
+- Plataforma: ONNX Runtime nativo, o mesmo módulo do spike (seção 12), com par codificado de até 256 tokens e ids de token abaixo de 250.002 (o vocabulário do MiniLM). O tokenizador fica fora do spike, como no spike 1.
+- Custo: uma passada por par (publicação, hipótese), então N categorias custam N passadas por texto. Calibração das pontuações e qualidade em gíria pt-BR: desconhecidas até a seção 8.
+- A favor: começa sem conjunto rotulado e sem treino; mudar uma categoria é mudar uma frase. Contra: N passadas por texto, arquivos grandes (o MiniLM int8 tem 140 MB e o mDeBERTa int8 passa de 500 MB) e nenhuma paridade com o servidor, que não roda NLI.
+
+**T-i. Jev (TypeSafe), só no servidor.**
+
+- Hospedado: um endpoint, `POST /v1/systemone` em `api.typesafe.ai`, com chave de API. Modelos `jev-1.14.0` e `jev-1.13.0`. Entrada de texto e de imagem PNG ou JPEG. Tipos de pergunta: Choice, Score, Noul e Box (Box só na 1.14).
+- Preço: USD 0,042 por milhão de tokens de entrada; a saída não é cobrada. Os mesmos pesos para todas as contas, e a documentação diz que os pedidos dos clientes não treinam o modelo. Retenção zero de dados só no plano enterprise.
+- Pesos para baixar, auto-hospedagem e runtime de celular: nenhum documentado. Não roda no aparelho. Tamanho e parâmetros: não publicados. Licença: os termos de serviço da TypeSafe (a conferir).
+- Uso possível: só no servidor, só em conteúdo público, com contrato de tratamento de dados e retenção zero, e só com decisão da manutenção sob a seção 10. Nunca mensagens diretas nem grupos privados. Também poderia ajudar a rotular um conjunto pt-BR sintético ou público para a seção 8.
+- Contra: o texto sai para um terceiro, o que muda a postura de "nada sai do aparelho" e acrescenta um operador de dados. Não é uma sentinela no aparelho: é outro caminho de triagem no servidor.
+
+**Resumo das opções do spike 2.**
+
+| Opção | Tamanho | Licença | Onde roda | Fonte |
+|---|---|---|---|---|
+| T-i Jev | não publicado (hospedado) | termos da TypeSafe, a conferir | só servidor, por API | docs.typesafe.ai/models.md |
+| T-h MiniLMv2-L6 NLI | fp32 428,1 MB; int8 (só Gather) 139,6 MB | MIT | aparelho (ONNX Runtime) | Hugging Face, revisão fixada, mais o sha256 do int8 |
+| T-h mDeBERTa-v3 NLI | q8 publicado 338,7 MB; int8 (só Gather) 538,1 MB | MIT | no spike, só Node: grande demais para o aparelho | Hugging Face, revisão fixada, mais o sha256 do int8 |
+| T-g Apple Foundation Models | no sistema (cerca de 3B parâmetros, a conferir) | termos da Apple, a conferir | iOS 26 com Apple Intelligence | documentação da Apple |
+| T-g Gemini Nano | no sistema | termos adicionais das ML Kit GenAI APIs | Android com AICore, aparelhos recentes (a conferir) | documentação do Android |
+| T-f Llama Guard 3 1B | INT4 a conferir (estimativa: centenas de MB) | Llama 3.2 Community License | aparelho (llama.cpp, ExecuTorch) | Hugging Face |
+| T-f ShieldGemma 2B | mais de 1 GB (estimativa, pelos 2,6 bilhões de parâmetros) | licença Gemma | aparelho, com RAM alta | Hugging Face |
+
+**Codificador classificador contra "mini LLM" gerador.** Um codificador (T-a a T-d) lê o texto uma vez e devolve uma pontuação por categoria: dezenas a pouco mais de cem MB, RAM da ordem do arquivo, e uma passada por publicação (no servidor, o MiniLM roda com prazo de 10 s por texto; no aparelho, a medir). Um gerador de guarda de 0,3 a 1,5 bilhão de parâmetros, mesmo em INT4, pesa centenas de MB a cerca de 1 GB, precisa de RAM do mesmo tamanho mais o cache de atenção, e gera tokens: a resposta "seguro / inseguro S10" custa uma passada de leitura do texto inteiro mais alguns tokens de saída, provavelmente uma ordem de grandeza mais lenta por publicação (a medir). O ganho do gerador é a taxonomia pronta e a política em linguagem natural; a perda é tamanho, RAM, latência, download, e uma FPR publicada em português que não serve para avisar ninguém. Para a v1 a recomendação é um codificador; o gerador só faz sentido no aviso antes de publicar (uma chamada por publicação, não uma por linha), e mesmo assim só com piso de RAM e download opcional. O NLI zero-shot (T-h) fica no meio: é um codificador, com saída por categoria, mas paga uma passada por categoria, e os arquivos testados vão de 140 MB (o MiniLM int8) a 538 MB (o mDeBERTa int8).
 
 ### Imagem
 
@@ -240,6 +271,35 @@ Recomendação para o spike: ONNX Runtime nativo num módulo local, porque é o 
 - FPR por termo de identidade, em frases neutras.
 - Textos com menos de 8 caracteres e com mais de 128 tokens (o servidor não decide nos dois casos; a sentinela deveria ficar calada também).
 
+**Spike 2 (NLI).**
+
+- A acurácia se mede no Node, com os mesmos pesos que vão ao aparelho, pelo script só de desenvolvimento `apps/cli/scripts/sentinel-nli-eval.js`. A CI não o roda, e ele precisa dos modelos locais.
+- Conjunto: `apps/cli/scripts/sentinel-nli-eval-set.json`, 86 publicações sintéticas curtas em pt-BR: 43 com rótulo de categoria e 43 limpas, 19 destas difíceis de propósito (`p068` a `p086`, limpas mas perto de uma categoria). Os exemplos ofensivos são brandos, sem insulto discriminatório e sem pessoas reais. Isso enfraquece a avaliação: o conjunto não traz a gíria, a ironia nem os casos difíceis da seção 4 (g), e não substitui o conjunto benigno acima.
+- Métricas: AUC por categoria e precisão e recall nos cortes 0,5, 0,7 e 0,9, para os dois modelos e dois jogos de hipóteses (o canônico, na tabela, e um alternativo), mais os falsos positivos nas 19 limpas difíceis e a latência no Node.
+- O aparelho não mede acurácia: confere a paridade dos logits contra `apps/app/src/sentinel/nliFixture.json` (maior diferença absoluta até 1e-3 e o mesmo argmax) e mede carga, latência e memória (seção 12).
+
+| Modelo | Categoria | Positivos | AUC | P / R a 0,5 | P / R a 0,7 | P / R a 0,9 |
+|---|---|---|---|---|---|---|
+| MiniLMv2-L6 int8 | ofensa ou assédio | 13 | 0,90 | 0,22 / 1,00 | 0,33 / 1,00 | 0,44 / 0,62 |
+| MiniLMv2-L6 int8 | conteúdo sexual explícito | 8 | 0,42 | 0,09 / 1,00 | 0,09 / 0,88 | 0,07 / 0,25 |
+| MiniLMv2-L6 int8 | ameaça ou violência | 9 | 0,68 | 0,10 / 1,00 | 0,11 / 1,00 | 0,17 / 0,67 |
+| MiniLMv2-L6 int8 | discurso de ódio | 8 | 0,60 | 0,10 / 0,38 | 0,08 / 0,25 | 0,25 / 0,13 |
+| MiniLMv2-L6 int8 | spam | 9 | 0,33 | 0,00 / 0,00 | 0,00 / 0,00 | sem positivo previsto / 0,00 |
+| mDeBERTa-v3 int8 | ofensa ou assédio | 13 | 0,76 | 0,21 / 0,92 | 0,23 / 0,92 | 0,27 / 0,92 |
+| mDeBERTa-v3 int8 | conteúdo sexual explícito | 8 | 0,51 | 0,08 / 0,75 | 0,08 / 0,63 | 0,10 / 0,63 |
+| mDeBERTa-v3 int8 | ameaça ou violência | 9 | 0,94 | 0,21 / 1,00 | 0,24 / 1,00 | 0,28 / 0,89 |
+| mDeBERTa-v3 int8 | discurso de ódio | 8 | 0,89 | 0,15 / 1,00 | 0,17 / 1,00 | 0,21 / 0,88 |
+| mDeBERTa-v3 int8 | spam | 9 | 0,11 | 0,02 / 0,11 | 0,00 / 0,00 | 0,00 / 0,00 |
+
+Latência no Node por par, tokenização mais inferência, 860 pares (p50 / p95, ms): MiniLMv2-L6 int8 2,5 / 3,6; mDeBERTa-v3 int8 23,4 / 46,4. Node v24.22.1, Apple M4 Pro, onnxruntime-node 1.21 no CPU, threads padrão. Sensível à carga da máquina: uma repetição com o Mac ocupado deu 5,0 / 15,3 e 46,5 / 150,2, com as mesmas tabelas de acerto.
+
+**Leitura.**
+
+- Falsos positivos nas 19 limpas difíceis, em qualquer categoria: MiniLM 19, 19 e 14 nos cortes 0,5, 0,7 e 0,9; mDeBERTa 18, 16 e 13. A maior pontuação por publicação limpa tem mediana 0,91 no MiniLM e 0,93 no mDeBERTa: os dois saturam, e nenhum corte fixo separa limpo de rotulado.
+- O MiniLM só ajuda em ofensa (AUC 0,90). O mDeBERTa ordena bem violência e ódio (0,94 e 0,89), mas com precisão de 0,28 e 0,21 no corte 0,9. Os dois falham em conteúdo sexual (0,42 e 0,51) e em spam (0,33 e 0,11, pior que o acaso).
+- A frase da hipótese pesa muito: com o jogo alternativo, a AUC de ofensa do MiniLM cai de 0,90 para 0,59, e a de ódio do mDeBERTa sobe de 0,89 para 0,92; sexual e spam continuam em 0,54 ou menos nos dois modelos.
+- Conclusão do spike 2: NLI zero-shot com hipóteses fixas não serve sozinho como sentinela. O melhor uso é um sinal auxiliar ao lado do embedding com cabeça treinada (T-a), e mesmo isso só depois do conjunto benigno acima. O conjunto é pequeno (8 a 13 positivos por categoria) e brando, então estas AUCs têm margem de erro larga.
+
 **Imagens.** Usar as métricas publicadas (quando existem) e um conjunto benigno licenciado: praia, amamentação, arte com nudez, imagem médica, academia. Nunca montar, baixar ou guardar material ilegal para teste, nem "para avaliar recall".
 
 ## 9. Entrega dos pesos
@@ -255,6 +315,7 @@ Orçamento proposto: até cerca de 25 MB a mais no download para uma sentinela l
 ## 10. Privacidade e LGPD
 
 - Nada sai do aparelho: nem veredito, nem pontuação, nem contagem. A associação não trata dado novo por causa da sentinela. A denúncia de um toque é a denúncia de hoje.
+- **Jev ou outro serviço hospedado (seção 7, T-i)** quebraria a primeira regra desta seção: o texto da publicação iria para um terceiro. Só seria aceitável no servidor, só para conteúdo público, com contrato de tratamento de dados, retenção zero (na TypeSafe, só no plano enterprise), registro na Política de Privacidade e decisão da manutenção (seção 14, item 22). Mensagens diretas e grupos privados nunca.
 - **Art. 20 da LGPD** (revisão de decisões tomadas unicamente com base em tratamento automatizado): `docs/design.md` já pergunta se a recusa de `wordCheck` conta como decisão automatizada. A sentinela é mais branda (aviso, sem recusa), mas é inferência sobre o conteúdo da pessoa, e o desfoque na entrada é inferência sobre conteúdo de terceiros. A mesma pergunta vai ao parecer jurídico.
 - Quando for entregue: uma versão nova dos Termos e da Política de Privacidade descrevendo a sentinela, as superfícies e o que nunca sai do aparelho, com novo aceite, como o projeto já faz.
 - O cache local de vereditos (seção 4 k) não sai do aparelho, mas é dado pessoal guardado no aparelho sobre o que a pessoa leu: a Política deve dizer que existe, quanto dura e quando some (ao sair e ao excluir a conta).
@@ -325,6 +386,45 @@ Orçamento proposto: até cerca de 25 MB a mais no download para uma sentinela l
 
 **Como estes números foram tirados (15 de novembro de 2026).** Build de debug com `EXPO_PUBLIC_VARANDA_SENTINEL_BENCH=1`, modelo copiado à mão para o sandbox (sha256 conferido). iOS: simulador iPhone 16e, iOS 26.2, num Mac M4 Pro. Android: emulador `sdk_gphone64_arm64`, Android 16, no mesmo Mac, com outros emuladores ligados ao mesmo tempo. Na Tabela A, a primeira carga é a da contagem de 1 thread e as seguintes são as de 2 e 4. Na Tabela B, cada célula sai de 50 inferências medidas depois de 5 de aquecimento, com o tempo nativo da inferência (no p50, o tempo de ida e volta pelo JS soma de 1 a 8 ms; no p95 a diferença chega a cerca de 34 ms no emulador). O laço de 60 s com 1 thread no caso de 66 tokens fez 3.567 inferências no simulador (p50 11,7 ms, p95 12,6 ms) e 525 no emulador (p50 60,7 ms, p95 84,1 ms). O cosseno sai arredondado a duas casas: 1,00 quer dizer pelo menos 0,995, acima do corte de 0,99. A Tabela C é a memória do processo inteiro, em MB (10^6 bytes), na rodada de 1 thread: carregar o modelo soma cerca de 150 MB no simulador e 190 MB no emulador, e descarregar devolve quase tudo (sobram cerca de 17 e 45 MB). Nos dois casos a CPU é a do Mac, então estes números provam carga, paridade e liberação de memória, não a latência num celular. As bibliotecas do ONNX Runtime 1.21.1 no APK têm todos os segmentos `LOAD` alinhados a 2^14 (16 KB), conferido com `llvm-objdump -p`, e `zipalign -c -P 16` passa. O tamanho no iOS, o delta do `.app` e a partida a frio pedem um build com e sem o módulo, e não foram feitos neste spike. Partida a frio, p95 de quadro e todas as linhas de aparelho real ficam "a medir": pedem um celular, assinatura e rolagem manual com `EXPO_PUBLIC_VARANDA_PERF=1`.
 
+### Spike 2, NLI
+
+**Método.** O mesmo módulo, com uma lista fixa no código nativo: `embed` carrega `sentinel/model_quantized.onnx` e `nli` carrega `sentinel/nli_quantized.onnx`. O caminho nunca vem do JS, e o sha256 é conferido antes da carga. A chamada `classify` devolve os logits crus (`logits`, forma [1, k] com k de 2 a 8; os dois modelos NLI dão k = 3) para um par codificado de até 256 tokens; `embed` recusa um modelo NLI e `classify` recusa o embedder. As entradas são os ids de token de 6 pares neutros fixos em `apps/app/src/sentinel/nliFixture.json`, gerado por `apps/cli/scripts/sentinel-nli-fixture.js`, com os logits de referência do Node. A fase NLI roda depois da de embedding e só se os dois modelos estiverem no sandbox (sem o embedder, o bench para antes); a fase de embedding não muda. Os números abaixo vêm de um build feito antes de três ajustes no módulo (o teto de ids de 251.000 para 250.002 e os códigos `MISSING`/`UNSUPPORTED`), que não tocam a inferência; os ids da fixture ficam abaixo de 236.000. Os mesmos limites do spike 1 valem: simulador e emulador provam carga e paridade, não latência de celular. Desvio do plano: só o MiniLM roda no aparelho. O mDeBERTa int8 (538 MB) passa do orçamento do aparelho e fica só na avaliação no Node (seção 8); as linhas dele abaixo dizem "não medido".
+
+**Tabela E, carga, memória e paridade.**
+
+| Plataforma | Modelo | Carga (ms) | Memória após carga (MB) | Maior diferença absoluta dos logits | Argmax igual nos 6 pares |
+|---|---|---|---|---|---|
+| iOS simulador | MiniLMv2-L6 int8 | 168 (1ª carga), 115 a 120 (seguintes) | 441 (antes da carga, 260; após descarga, 273) | até 1e-3 | sim, nas três contagens de threads |
+| iOS simulador | mDeBERTa-v3 int8 | não medido | não medido | não medido | não medido |
+| Android emulador | MiniLMv2-L6 int8 | 6.409 (1ª carga, cache frio), 559 a 851 (seguintes) | 647 (antes da carga, 477; após descarga, 473) | até 1e-3 | sim, nas três contagens de threads |
+| Android emulador | mDeBERTa-v3 int8 | não medido | não medido | não medido | não medido |
+| iPhone real | MiniLMv2-L6 int8 | a medir | a medir | a medir | a medir |
+| iPhone real | mDeBERTa-v3 int8 | não medido | não medido | não medido | não medido |
+| Android real, até 4 GB | MiniLMv2-L6 int8 | a medir | a medir | a medir | a medir |
+| Android real, até 4 GB | mDeBERTa-v3 int8 | não medido | não medido | não medido | não medido |
+
+**Tabela F, inferência por par (ms, p50 / p95), nos 6 pares do fixture.** Cada célula é o maior p50 e o maior p95 dos dois pares daquele tamanho.
+
+| Plataforma | Modelo | Threads | 23 a 24 tokens | 75 a 77 tokens | 135 a 139 tokens |
+|---|---|---|---|---|---|
+| iOS simulador | MiniLMv2-L6 int8 | 1 | 5,9 / 6,1 | 17,5 / 17,8 | 32,3 / 32,5 |
+| iOS simulador | MiniLMv2-L6 int8 | 2 | 3,4 / 3,5 | 9,4 / 9,8 | 17,0 / 18,0 |
+| iOS simulador | MiniLMv2-L6 int8 | 4 | 2,0 / 2,7 | 5,5 / 6,3 | 9,5 / 10,2 |
+| Android emulador | MiniLMv2-L6 int8 | 1 | 60,1 / 456,5 | 103,9 / 131,7 | 194,2 / 228,0 |
+| Android emulador | MiniLMv2-L6 int8 | 2 | 24,3 / 34,1 | 64,5 / 89,4 | 129,5 / 166,2 |
+| Android emulador | MiniLMv2-L6 int8 | 4 | 23,2 / 41,5 | 70,2 / 187,2 | 135,0 / 263,1 |
+| iOS simulador, Android emulador | mDeBERTa-v3 int8 | 1, 2, 4 | não medido | não medido | não medido |
+| iPhone real | MiniLMv2-L6 int8 | 1, 2, 4 | a medir | a medir | a medir |
+| Android real, até 4 GB | MiniLMv2-L6 int8 | 1, 2, 4 | a medir | a medir | a medir |
+| iPhone real, Android real | mDeBERTa-v3 int8 | 1, 2, 4 | não medido | não medido | não medido |
+
+**Como estes números foram tirados (15 de novembro de 2026).** Os mesmos aparelhos virtuais e o mesmo Mac do spike 1 (simulador iPhone 16e com iOS 26.2; emulador `sdk_gphone64_arm64` com Android 16), num build de debug com o `nli_quantized.onnx` de 139.580.898 bytes copiado à mão (sha256 conferido pelo módulo). Cada par: 30 inferências medidas depois de 3 de aquecimento, com o tempo nativo da inferência (no p50, a ida e volta pelo JS soma menos de 1 ms no simulador e de cerca de 1,5 a 7 ms no emulador, com um par fora da curva em 25 ms). A carga é a de 1, 2 e 4 threads, nessa ordem; a fase NLI roda depois da de embedding, então a memória "antes da carga" é a da última descarga do embedder (`memory-unload-t4`), lida antes do laço de 60 s de embedding. Carregar o MiniLM NLI soma cerca de 181 MB no simulador e 170 MB no emulador, e descarregar devolve quase tudo. A paridade é contra os logits do Node: diferença absoluta de até 1e-3 nos 6 pares (`pass=1`, calculado sem arredondar; o valor impresso, `max_abs=0`, arredonda para duas casas e só diz que fica abaixo de 0,005), nas três contagens de threads, nas duas plataformas (o corte era 1e-3). O emulador é ruidoso: os p95 de 1 thread nos pares curtos (cerca de 450 ms) e a primeira carga de 6,4 s, com o cache frio, não dizem nada sobre um celular. Linhas de aparelho real ficam "a medir".
+
+**Limites do spike 2.**
+
+- Os scripts fixam por sha256 os quatro arquivos de cada modelo: o modelo, `tokenizer.json`, `config.json` (que traz a ordem dos rótulos `entailment` e `contradiction`) e `tokenizer_config.json`. No aparelho, o módulo confere só o modelo; o resto do lado do aparelho é a fixture de ids, gerada no computador.
+- Há uma janela entre a conferência do sha256 no código nativo e a leitura do arquivo pelo ONNX Runtime (TOCTOU): o arquivo pode mudar entre as duas. No spike é aceitável (só debug, arquivo no sandbox do app, copiado à mão). Em produção a janela precisa fechar, por exemplo lendo os bytes para a memória, conferindo o hash desses bytes e criando a sessão a partir deles.
+
 ## 13. Proposta de texto para as regras
 
 Nenhum destes arquivos é editado por este documento. É o texto que a manutenção pode adotar se decidir mudar a regra.
@@ -362,22 +462,28 @@ Proposta de adendo a `docs/design.md`, depois do parágrafo da triagem automáti
 13. **Política de dados de treino e avaliação:** quais conjuntos públicos podem ser usados, com que licença, onde ficam, e a regra de que nenhum conteúdo de membro, denúncia ou decisão da moderação vira dado de treino da sentinela.
 14. **Teto de FPR no conjunto benigno** para a sentinela sair (proposta: 1 a 2%) e quem escreve o conjunto benigno.
 15. **Parecer jurídico e versão dos Termos:** art. 20 da LGPD, desfoque de conteúdo de terceiros, nova versão dos Termos e da Política com novo aceite.
-16. **O que entra na `main`:** só o commit de documentação da branch (este arquivo e a linha em `docs/README.md`). O commit do spike (módulo `apps/app/modules/sentinel-spike`, pods `onnxruntime-c` e `onnxruntime-objc` 1.21.0 no `Podfile.lock`, `onnxruntime-android` 1.21.1 no Gradle, arquivos do bench, o gancho em `apps/app/index.js`, os dois testes novos, a linha do podspec em `hardening.test.js` e o script do fixture) fica na branch: `apps/app/modules` é autolinkado nos builds de release, então juntá-lo acrescentaria uma dependência nativa de ML a todos os builds, mesmo desligada. Os binários do ONNX Runtime também não estão fixados por hash de conteúdo: o `Podfile.lock` guarda só o checksum do podspec, não do zip baixado de `download.onnxruntime.ai`, e o Android não tem `verification-metadata.xml`. Uma adoção em produção pede as duas fixações e a exclusão do módulo nos builds de release.
+16. **O que entra na `main`:** só os commits de documentação da branch (este arquivo e a linha em `docs/README.md`). Os commits do spike (módulo `apps/app/modules/sentinel-spike`, pods `onnxruntime-c` e `onnxruntime-objc` 1.21.0 no `Podfile.lock`, `onnxruntime-android` 1.21.1 no Gradle, arquivos do bench, o gancho em `apps/app/index.js`, os dois testes novos, a linha do podspec em `hardening.test.js`, o script do fixture e, do spike 2, o `nliFixture.json` e os scripts `sentinel-nli-fixture.js`, `sentinel-nli-eval.js` e `sentinel-nli-eval-set.json`) ficam na branch: `apps/app/modules` é autolinkado nos builds de release, então juntá-lo acrescentaria uma dependência nativa de ML a todos os builds, mesmo desligada. Os binários do ONNX Runtime também não estão fixados por hash de conteúdo: o `Podfile.lock` guarda só o checksum do podspec, não do zip baixado de `download.onnxruntime.ai`, e o Android não tem `verification-metadata.xml`. Uma adoção em produção pede as duas fixações e a exclusão do módulo nos builds de release.
 17. **Entitlement SensitiveContentAnalysis:** pedir ou não, sabendo que depende de um ajuste que a pessoa liga no sistema.
 18. **Tokenizador em produção:** portar o SentencePiece de 250 mil peças, adotar um vocabulário menor (T-b, T-d) ou um modelo estático (T-e).
 19. **Motivo pré-selecionado na denúncia assistida:** recomendação de nunca pré-selecionar `spam`, o único motivo que `triage.js` bloqueia sozinho (`BLOCK_REASONS`), ou de não pré-selecionar motivo nenhum.
 20. **Cache de vereditos da entrada** (seção 4 k): tamanho máximo, validade, digest com sal, apagado ao sair e ao excluir a conta, e se a web guarda cache ou recalcula sempre.
+21. **NLI zero-shot, embedding mais cabeça, ou os dois** (seção 7, T-h e T-a), depois da avaliação do spike 2 (seção 8) e do conjunto benigno. Os dois juntos somam dois arquivos grandes e dois tokenizadores.
+22. **Jev no servidor:** aceitável ou não sob a LGPD (seção 10), só para conteúdo público, com contrato de tratamento de dados e retenção zero; e se ele pode ajudar a rotular um conjunto sintético ou público para a seção 8.
+23. **Orçamento de tamanho do modelo NLI:** o MiniLMv2-L6 int8 tem 140 MB, muito acima do orçamento de uma sentinela ligada por padrão (cerca de 25 MB, seção 9) e no limite do de uma opcional (cerca de 150 MB), sem contar o embedder de 118 MB se os dois forem juntos (decisão 21). O mDeBERTa-v3 int8, com 538 MB, não cabe em nenhum dos dois.
+24. **Fixação dos modelos NLI quantizados:** a quantização int8 (só Gather, onnxruntime 1.32.0) é feita localmente e não é reprodutível byte a byte entre versões do onnxruntime, então o que fixa o arquivo é o sha256 do arquivo produzido (MiniLM `c15eef0c5b1e987b3190259c2a5c81f9bca023c508002881ade33af3706675c9`, mDeBERTa `9d433ee4019854e340020c20e62903d92d76d9ec25f8fc8d6a7ad4a0f6832bd6`, com a versão do quantizador anotada), não a revisão do Hugging Face sozinha. Uma adoção pede decidir quem produz o arquivo e onde ele fica guardado, e fechar a janela entre a conferência do hash e a carga (seção 12, "Limites do spike 2").
+25. **Quantização int8 e o onnxruntime-node 1.21:** no macOS arm64, o onnxruntime-node 1.21.0 (a versão do serviço de conta; o aparelho usa o ONNX Runtime nativo 1.21) degrada muito os logits de classificadores com MatMul quantizado em int8 dinâmico (`MatMulInteger`): a quantização padrão, a por canal e o q8 publicado do mDeBERTa saíram todos degradados, e os mesmos arquivos rodaram certo no onnxruntime 1.32 em Python. Linux e o runtime nativo do aparelho com MatMul int8 não foram testados. Por isso o spike quantiza só a camada de embedding (Gather), que bate com o fp32 no 1.21, ao custo de tamanho: as camadas do codificador seguem em fp32. O embedder MiniLM-L12 q8 do servidor deu cosseno 0,996 entre o Python 1.32 e o Node 1.21, então parece não ser afetado, mas merece uma conferência própria. Decidir: subir o onnxruntime (no Node e nos pods e no Maven do aparelho) e medir de novo o int8 completo, ou aceitar o Gather só; e conferir o embedder do servidor.
 
 ## 15. Fases, riscos e limites
 
 **Fases propostas.**
 
-1. Este documento e o spike de custo na branch (agora).
-2. Decisões 1 a 7 e 13 da manutenção.
-3. Avaliação offline em pt-BR (seção 8) com os candidatos escolhidos; nenhum código no app.
-4. Se a avaliação passar: aviso antes de publicar, só texto, só superfícies públicas, atrás de uma opção desligada por padrão, com Termos novos.
-5. Depois, se fizer sentido: sinalização na entrada com denúncia assistida.
-6. Imagem, por último, se e quando houver decisão.
+1. Este documento e o spike de custo na branch.
+2. Spike 2, NLI zero-shot, na mesma branch (agora): avaliação no Node com o conjunto sintético, paridade e custo no simulador e no emulador.
+3. Decisões 1 a 7, 13 e 21 a 25 da manutenção.
+4. Avaliação offline em pt-BR (seção 8) com os candidatos escolhidos, incluindo NLI se a decisão 21 o mantiver; nenhum código no app.
+5. Se a avaliação passar: aviso antes de publicar, só texto, só superfícies públicas, atrás de uma opção desligada por padrão, com Termos novos.
+6. Depois, se fizer sentido: sinalização na entrada com denúncia assistida.
+7. Imagem, por último, se e quando houver decisão.
 
 **Riscos.**
 
@@ -386,6 +492,7 @@ Proposta de adendo a `docs/design.md`, depois do parágrafo da triagem automáti
 - Tamanho do app e memória em aparelhos de entrada.
 - Licenças de pesos e de conjuntos de dados incompatíveis com a licença do projeto.
 - A sensação de proteção: pessoas podem achar que a sentinela pega o que não pega.
+- Pontuações NLI zero-shot não vêm calibradas: um corte fixo pode avisar demais numa categoria e de menos em outra.
 
 **Limites.**
 
@@ -424,6 +531,12 @@ Modelos de texto:
 - https://huggingface.co/google/gemma-3-1b-it
 - https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct
 - https://huggingface.co/Qwen/Qwen3-0.6B
+- https://huggingface.co/MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli
+- https://huggingface.co/MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7
+
+Serviço hospedado:
+
+- https://docs.typesafe.ai/models.md
 
 Modelos de imagem:
 
@@ -440,6 +553,7 @@ Modelos do sistema e runtimes:
 
 - https://developer.apple.com/documentation/foundationmodels
 - https://developer.android.com/ai/gemini-nano
+- ML Kit GenAI APIs: página própria, a conferir
 - https://onnxruntime.ai/docs/install/
 - https://github.com/microsoft/onnxruntime
 - https://www.npmjs.com/package/onnxruntime-react-native
@@ -461,4 +575,4 @@ Lei:
 
 - Lei nº 13.709/2018 (LGPD), art. 20: https://www.planalto.gov.br/ccivil_03/_ato2015-2018/2018/lei/l13709.htm
 
-A conferir, sem fonte verificada aqui: tamanho total do Llama Guard 3 1B INT4; lista de aparelhos e suporte a pt-BR do Apple Intelligence e do Gemini Nano; nomes das classes da SensitiveContentAnalysis; métricas publicadas de Marqo e Falconsai; licença dos pesos do OpenNSFW2 e do NudeNet; quantização e implementação em JavaScript do model2vec; API de pacotes de recursos da App Store.
+A conferir, sem fonte verificada aqui: tamanho total do Llama Guard 3 1B INT4; lista de aparelhos e suporte a pt-BR do Apple Intelligence e do Gemini Nano; nomes das classes da SensitiveContentAnalysis; métricas publicadas de Marqo e Falconsai; licença dos pesos do OpenNSFW2 e do NudeNet; quantização e implementação em JavaScript do model2vec; API de pacotes de recursos da App Store; parâmetros e geração guiada do modelo da Apple Foundation Models; arquivo e tamanho da versão INT4 para celular do Llama Guard 3 1B; licença e termos de serviço da TypeSafe.
