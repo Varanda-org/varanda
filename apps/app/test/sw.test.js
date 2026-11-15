@@ -37,6 +37,20 @@ function makeDist () {
     'icon-192.png': Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]),
     'assets/x.ttf': Buffer.from([0, 1, 0, 0, 9]),
     'favicon.ico': Buffer.from([0, 0, 1, 0]),
+    'assets/m.mjs': 'export default 1\n',
+    'assets/d.json': '{"a":1}',
+    'assets/s.css': 'body{}\n',
+    'assets/m.wasm': Buffer.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]),
+    'assets/a.jpg': Buffer.from([0xff, 0xd8, 0xff]),
+    'assets/b.jpeg': Buffer.from([0xff, 0xd8, 0xff, 1]),
+    'assets/c.gif': 'GIF89a',
+    'assets/w.webp': 'RIFF',
+    'assets/v.svg': '<svg xmlns="http://www.w3.org/2000/svg"/>',
+    'assets/f2.woff2': Buffer.from([1, 2]),
+    'assets/f1.woff': Buffer.from([1, 3]),
+    'assets/f.otf': Buffer.from([1, 4]),
+    'assets/t.txt': 'texto\n',
+    'assets/blob.dat': Buffer.from([7, 7]),
     'metadata.json': '{"fileMetadata":{}}'
   }
   for (const [name, content] of Object.entries(files)) {
@@ -55,17 +69,40 @@ function readWorker (dist) {
   }
 }
 
-const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.png': 'image/png', '.ttf': 'font/ttf', '.ico': 'image/x-icon' }
+// The (cabecalhos_seguranca) header snippet of deploy/seeder/Caddyfile, with
+// the domain Caddy fills in: the worker must accept the headers the real
+// server sends, or no release would ever install, and it serves the offline
+// shell with its own copy of them. Lines are trimmed (CRLF, trailing spaces),
+// as in apps/cli/test/caddyfile.test.js.
+function caddyHeaders () {
+  const lines = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'deploy', 'seeder', 'Caddyfile'), 'utf8')
+    .split('\n').map((l) => l.trim())
+  const start = lines.indexOf('(cabecalhos_seguranca) {')
+  if (start < 0 || lines[start + 1] !== 'header {') throw new Error('header snippet not found in deploy/seeder/Caddyfile')
+  const headers = new Map()
+  for (const line of lines.slice(start + 2)) {
+    if (line === '}') break
+    const m = line.match(/^([A-Za-z-]+) "(.*)"$/)
+    if (m) headers.set(m[1].toLowerCase(), m[2].replaceAll('{$VARANDA_DOMAIN}', 'example.test'))
+  }
+  return headers
+}
+const CADDY_HEADERS = caddyHeaders()
+const CADDY_CSP = CADDY_HEADERS.get('content-security-policy')
+const SECURITY = { 'content-security-policy': CADDY_CSP, 'x-content-type-options': 'nosniff' }
+
+const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.png': 'image/png', '.ttf': 'font/ttf', '.ico': 'image/x-icon', '.mjs': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.woff': 'font/woff', '.otf': 'font/otf', '.txt': 'text/plain' }
 
 // A static server over dist with an SPA fallback: a missing file is answered
 // with index.html, 200 text/html (what a hosting without real 404s does).
+// Every answer carries Caddy's security headers, as in production.
 function serveDist (dist) {
   return (pathname) => {
     const file = path.join(dist, pathname)
     if (pathname !== '/' && fs.existsSync(file) && fs.statSync(file).isFile()) {
-      return new Response(fs.readFileSync(file), { status: 200, headers: { 'content-type': TYPES[path.extname(file)] || 'application/octet-stream' } })
+      return new Response(fs.readFileSync(file), { status: 200, headers: { 'content-type': TYPES[path.extname(file)] || 'application/octet-stream', ...SECURITY } })
     }
-    return new Response(fs.readFileSync(path.join(dist, 'index.html')), { status: 200, headers: { 'content-type': TYPES['.html'] } })
+    return new Response(fs.readFileSync(path.join(dist, 'index.html')), { status: 200, headers: { 'content-type': TYPES['.html'], ...SECURITY } })
   }
 }
 
@@ -127,7 +164,7 @@ function loadWorker (code, server, opts = {}) {
     return w.server(new URL(request.url).pathname, request)
   }
   const self = {
-    location: { origin: ORIGIN },
+    location: { origin: ORIGIN, host: 'example.test' },
     addEventListener: (type, fn) => { handlers[type] = fn },
     registration: {
       showNotification: async (title, options) => { w.shown.push({ title, options }) },
@@ -578,8 +615,10 @@ test('navigation: a redirect (opaque redirect) is passed on, not replaced by the
 
 // The Cache API is writable by any same-origin script: an entry planted in the
 // release cache is never served, it is deleted and treated as a miss.
-const poison = (w, pathname, body, type = 'text/javascript') =>
-  w.cache.put(ORIGIN + pathname, new Response(body, { headers: { 'content-type': type } }))
+// An index.html is planted with valid security headers, so that only the
+// check under test can refuse it.
+const poison = (w, pathname, body, type = 'text/javascript', extra = {}) =>
+  w.cache.put(ORIGIN + pathname, new Response(body, { headers: { 'content-type': type, ...extra } }))
 
 test('a poisoned hashed bundle in the cache is not served: network online, 503 offline', async (t) => {
   const { w } = await installed()
@@ -601,7 +640,7 @@ test('a poisoned index.html is not the offline navigation fallback', async (t) =
   const { w, version } = await installed()
   const real = await w.cache.match(ORIGIN + '/index.html')
   // Carries the release meta, but not the release's bytes.
-  await poison(w, '/index.html', '<meta name="varanda-release" content="' + version + '"><script src="/evil.js"></script>', 'text/html')
+  await poison(w, '/index.html', '<meta name="varanda-release" content="' + version + '"><script src="/evil.js"></script>', 'text/html', SECURITY)
   w.server = offline
   const off = await dispatch(w, ORIGIN + '/', { mode: 'navigate' })
   t.is(off.res.status, 503)
@@ -609,7 +648,7 @@ test('a poisoned index.html is not the offline navigation fallback', async (t) =
   t.absent(w.cache.map.has(ORIGIN + '/index.html'), 'deleted')
 
   w.server = status(404, 'nada')
-  await poison(w, '/index.html', 'evil', 'text/html')
+  await poison(w, '/index.html', 'evil', 'text/html', SECURITY)
   const gone = await dispatch(w, ORIGIN + '/perfil', { mode: 'navigate' })
   t.is(gone.res.status, 404, 'the network answer stands')
 
@@ -661,7 +700,7 @@ async function replant (w, pathname, init) {
 
 test('a cached index.html with the right bytes but status 302 is not used', async (t) => {
   const { w } = await installed()
-  await replant(w, '/index.html', { status: 302, headers: { 'content-type': 'text/html', location: 'https://evil.test/' } })
+  await replant(w, '/index.html', { status: 302, headers: { 'content-type': 'text/html', location: 'https://evil.test/', ...SECURITY } })
   w.server = offline
   const off = await dispatch(w, ORIGIN + '/', { mode: 'navigate' })
   t.is(off.res.status, 503)
@@ -670,9 +709,9 @@ test('a cached index.html with the right bytes but status 302 is not used', asyn
   t.absent(w.cache.map.has(ORIGIN + '/index.html'), 'deleted')
 })
 
-test('a planted header on a legitimate entry is dropped, the allowed ones kept', async (t) => {
+test('a planted header on a legitimate index.html is dropped, the shell gets the worker headers', async (t) => {
   const { w, version } = await installed()
-  const csp = "default-src 'self'"
+  const csp = CADDY_CSP
   await replant(w, '/index.html', {
     status: 200,
     headers: {
@@ -699,6 +738,181 @@ test('a planted header on a legitimate entry is dropped, the allowed ones kept',
   t.ok(w.cache.map.has(ORIGIN + '/index.html'), 'the entry itself is valid and kept')
 })
 
+test('planted headers on a cached bundle are dropped, the worker sets the type', async (t) => {
+  const { w } = await installed()
+  await replant(w, BUNDLE, {
+    status: 200,
+    headers: {
+      'content-type': 'text/javascript',
+      location: 'https://evil.test/',
+      refresh: '0;url=https://evil.test/',
+      link: '<https://evil.test/x.js>; rel=preload',
+      'clear-site-data': '"*"'
+    }
+  })
+  w.server = offline
+  const { res } = await dispatch(w, ORIGIN + BUNDLE)
+  t.is(res.status, 200)
+  for (const h of ['location', 'refresh', 'link', 'clear-site-data']) {
+    t.is(res.headers.get(h), null, 'no ' + h)
+  }
+  t.is(res.headers.get('content-type'), 'text/javascript; charset=utf-8', 'constant content-type')
+  t.is(res.headers.get('x-content-type-options'), 'nosniff')
+  t.alike([...res.headers.keys()].sort(), ['content-type', 'x-content-type-options'], 'no other header')
+  t.is(await res.text(), 'console.log("varanda")\n')
+})
+
+// A replanted bundle whose headers would make the browser refuse it (a type
+// that is not a script type plus nosniff, or another charset) is served with
+// the worker's constants, never with the planted ones.
+test('a replanted bundle with a planted type or charset is served with the constant type and nosniff', async (t) => {
+  for (const [label, type] of [['a type with a suffix', 'text/javascriptx'], ['another charset', 'text/javascript; charset=utf-16le'], ['application/javascript', 'application/javascript; charset=utf-16le']]) {
+    for (const p of [BUNDLE, '/varanda-node.js']) {
+      const { w } = await installed()
+      w.server = offline
+      await replant(w, p, { status: 200, headers: { 'content-type': type, 'x-content-type-options': 'nosniff', 'cache-control': 'no-store' } })
+      const { res } = await dispatch(w, ORIGIN + p)
+      if (type === 'text/javascriptx') {
+        t.is(res.status, 503, label + ' ' + p + ': a type outside the family is poisoned')
+        t.absent(w.cache.map.has(ORIGIN + p), label + ' ' + p + ': deleted')
+      } else {
+        t.is(res.status, 200, label + ' ' + p)
+        t.is(res.headers.get('content-type'), 'text/javascript; charset=utf-8', label + ' ' + p + ' constant type')
+        t.is(res.headers.get('x-content-type-options'), 'nosniff')
+        t.is(res.headers.get('cache-control'), null, 'no copied header')
+      }
+    }
+  }
+})
+
+test('a type that is not its extension family, or an extension with no known type, is never served from the cache', async (t) => {
+  const cases = [
+    ['/icon-192.png', 'image/svg+xml'],
+    ['/icon-192.png', 'image/png+xml'],
+    ['/assets/d.json', 'application/jsonx'],
+    ['/assets/m.wasm', 'application/octet-stream'],
+    ['/assets/s.css', 'text/html'],
+    ['/assets/blob.dat', 'application/octet-stream'],
+    ['/assets/blob.dat', 'text/javascript']
+  ]
+  for (const [p, type] of cases) {
+    const { w } = await installed()
+    w.server = offline
+    await replant(w, p, { status: 200, headers: { 'content-type': type, 'x-content-type-options': 'nosniff' } })
+    const { res } = await dispatch(w, ORIGIN + p)
+    t.is(res.status, 503, p + ' as ' + type)
+    t.absent(w.cache.map.has(ORIGIN + p), p + ' as ' + type + ': deleted')
+  }
+  // Online, the network answers instead.
+  const { w } = await installed()
+  await replant(w, '/assets/blob.dat', { status: 200, headers: { 'content-type': 'application/octet-stream' } })
+  w.server = () => new Response('rede', { headers: { 'content-type': 'application/octet-stream' } })
+  const online = await dispatch(w, ORIGIN + '/assets/blob.dat')
+  t.is(await online.res.text(), 'rede')
+})
+
+// An index.html whose headers lost a protection is refused at install and
+// dropped at serve, even with the release's exact bytes (the shell is served
+// with the worker's own headers either way).
+const WEAK_HEADERS = {
+  'weak CSP': { 'content-security-policy': "default-src 'self'", 'x-content-type-options': 'nosniff' },
+  'missing CSP': { 'x-content-type-options': 'nosniff' },
+  'missing nosniff': { 'content-security-policy': CADDY_CSP },
+  'inline scripts allowed': { 'content-security-policy': CADDY_CSP.replace("script-src 'self'", "script-src 'self' 'unsafe-inline'"), 'x-content-type-options': 'nosniff' },
+  'framing allowed': { 'content-security-policy': CADDY_CSP.replace("frame-ancestors 'none'", "frame-ancestors 'self'"), 'x-content-type-options': 'nosniff' },
+  'a second policy': { 'content-security-policy': CADDY_CSP + ", script-src 'self'", 'x-content-type-options': 'nosniff' },
+  'plugins allowed': { 'content-security-policy': CADDY_CSP.replace("object-src 'none'", "object-src 'self'"), 'x-content-type-options': 'nosniff' },
+  'base element allowed': { 'content-security-policy': CADDY_CSP.replace("base-uri 'none'", "base-uri 'self'"), 'x-content-type-options': 'nosniff' },
+  'inline script elements via script-src-elem': { 'content-security-policy': CADDY_CSP + "; script-src-elem 'self' 'unsafe-inline'", 'x-content-type-options': 'nosniff' },
+  'inline handlers via script-src-attr': { 'content-security-policy': CADDY_CSP + "; script-src-attr 'unsafe-inline'", 'x-content-type-options': 'nosniff' },
+  'a vertical tab in script-src': { 'content-security-policy': CADDY_CSP.replace("script-src 'self'", "script-src\x0b'self'"), 'x-content-type-options': 'nosniff' },
+  'a non-breaking space in frame-ancestors': { 'content-security-policy': CADDY_CSP.replace("frame-ancestors 'none'", "frame-ancestors\u00a0'none'"), 'x-content-type-options': 'nosniff' }
+}
+
+test('the CSP of the Caddyfile is the one the test server sends', (t) => {
+  t.ok(CADDY_CSP.includes("frame-ancestors 'none'") && CADDY_CSP.includes('wss://example.test'), 'read from deploy/seeder/Caddyfile, domain filled in')
+})
+
+// The worker's own constants (SHELL_HEADERS in scripts/sw.js), pinned to the
+// header snippet of the Caddyfile: every header of the snippet but HSTS, and
+// nothing else besides the content-type.
+test('the offline shell carries the security headers of the Caddyfile', async (t) => {
+  const { w } = await installed()
+  w.server = offline
+  const { res } = await dispatch(w, ORIGIN + '/', { mode: 'navigate' })
+  t.is(res.status, 200)
+  const expected = new Map(CADDY_HEADERS)
+  t.ok(expected.delete('strict-transport-security'), 'HSTS read from the snippet')
+  t.alike([...expected.keys()].sort(), ['content-security-policy', 'permissions-policy', 'referrer-policy', 'x-content-type-options', 'x-frame-options'], 'the snippet read in full')
+  for (const [name, value] of expected) t.is(res.headers.get(name), value, name + ' as in the Caddyfile')
+  t.is(res.headers.get('content-type'), 'text/html; charset=utf-8')
+  t.alike([...res.headers.keys()].sort(), ['content-type', ...expected.keys()].sort(), 'no other header, no HSTS')
+})
+
+test('the offline shell never takes the headers of its cache entry', async (t) => {
+  const { w, version } = await installed()
+  // Passes headersOk, but loosens everything the check does not cover.
+  const loose = CADDY_CSP.replace("connect-src 'self' wss://example.test", 'connect-src *').replace("img-src 'self' data: blob:", 'img-src *')
+  await replant(w, '/index.html', {
+    status: 200,
+    headers: {
+      'content-type': 'text/html; charset=utf-7',
+      'content-security-policy': loose,
+      'x-content-type-options': 'nosniff',
+      'referrer-policy': 'unsafe-url',
+      'x-frame-options': 'ALLOWALL',
+      'permissions-policy': 'camera=*, microphone=*',
+      'cache-control': 'max-age=31536000'
+    }
+  })
+  w.server = offline
+  const { res } = await dispatch(w, ORIGIN + '/', { mode: 'navigate' })
+  t.is(res.status, 200, 'served: the entry passes the check')
+  t.ok((await res.text()).includes('<meta name="varanda-release" content="' + version + '">'), 'the verified shell')
+  t.is(res.headers.get('content-security-policy'), CADDY_CSP, "the worker's CSP")
+  t.is(res.headers.get('content-type'), 'text/html; charset=utf-8')
+  t.is(res.headers.get('referrer-policy'), CADDY_HEADERS.get('referrer-policy'))
+  t.is(res.headers.get('x-frame-options'), CADDY_HEADERS.get('x-frame-options'))
+  t.is(res.headers.get('permissions-policy'), CADDY_HEADERS.get('permissions-policy'))
+  t.is(res.headers.get('cache-control'), null, 'no cache-control from the entry')
+  t.ok(w.cache.map.has(ORIGIN + '/index.html'), 'the entry is kept')
+})
+
+test('install refuses an index.html with a missing or weak CSP or nosniff', async (t) => {
+  const dist = makeDist()
+  quiet(() => finishWeb(dist))
+  const { code } = readWorker(dist)
+  const real = serveDist(dist)
+  const bytes = fs.readFileSync(path.join(dist, 'index.html'))
+  for (const [label, headers] of Object.entries(WEAK_HEADERS)) {
+    const w = loadWorker(code, (p, r) => p === '/index.html'
+      ? new Response(bytes, { headers: { 'content-type': 'text/html; charset=utf-8', ...headers } })
+      : real(p, r))
+    await t.exception(lifecycle(w, 'install'), /CSP or nosniff/, label + ': install fails')
+    const stored = [...w.caches.stores.values()].reduce((n, c) => n + c.map.size, 0)
+    t.is(stored, 0, label + ': nothing stored')
+  }
+})
+
+test('a cached index.html with a missing or weak CSP or nosniff is a miss and is deleted', async (t) => {
+  for (const [label, headers] of Object.entries(WEAK_HEADERS)) {
+    const { w } = await installed()
+    const bytes = await (await w.cache.match(ORIGIN + '/index.html')).arrayBuffer()
+    const plant = () => w.cache.put(ORIGIN + '/index.html', new Response(bytes, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8', ...headers } }))
+    await plant()
+    w.server = offline
+    const off = await dispatch(w, ORIGIN + '/', { mode: 'navigate' })
+    t.is(off.res.status, 503, label + ': not served offline')
+    t.is(await off.res.text(), 'sem conexão', label)
+    t.absent(w.cache.map.has(ORIGIN + '/index.html'), label + ': deleted')
+
+    await plant()
+    w.server = status(404, 'nada')
+    const gone = await dispatch(w, ORIGIN + '/perfil', { mode: 'navigate' })
+    t.is(gone.res.status, 404, label + ': the network answer stands')
+  }
+})
+
 test('a legitimate bundle stored as text/html (or with no content-type) is poisoned', async (t) => {
   const { w } = await installed()
   await replant(w, BUNDLE, { status: 200, headers: { 'content-type': 'text/html' } })
@@ -720,20 +934,41 @@ test('correct entries are served offline as fresh 200s with their content-type',
   const { w, dist } = await installed()
   w.server = offline
   const expected = {
-    [BUNDLE]: 'text/javascript',
-    '/varanda-node.js': 'text/javascript',
+    [BUNDLE]: 'text/javascript; charset=utf-8',
+    '/varanda-node.js': 'text/javascript; charset=utf-8',
+    '/assets/m.mjs': 'text/javascript; charset=utf-8',
     '/manifest.webmanifest': 'application/manifest+json',
+    '/assets/d.json': 'application/json',
+    '/assets/m.wasm': 'application/wasm',
+    '/assets/s.css': 'text/css; charset=utf-8',
     '/icon-192.png': 'image/png',
+    '/assets/a.jpg': 'image/jpeg',
+    '/assets/b.jpeg': 'image/jpeg',
+    '/assets/c.gif': 'image/gif',
+    '/assets/w.webp': 'image/webp',
+    '/assets/v.svg': 'image/svg+xml',
+    '/favicon.ico': 'image/x-icon',
     '/assets/x.ttf': 'font/ttf',
-    '/favicon.ico': 'image/x-icon'
+    '/assets/f.otf': 'font/otf',
+    '/assets/f1.woff': 'font/woff',
+    '/assets/f2.woff2': 'font/woff2',
+    '/assets/t.txt': 'text/plain; charset=utf-8'
   }
   for (const [p, type] of Object.entries(expected)) {
     const { res } = await dispatch(w, ORIGIN + p)
     t.is(res.status, 200, p)
     t.is(res.headers.get('content-type'), type, p + ' content-type')
+    t.is(res.headers.get('x-content-type-options'), 'nosniff', p + ' nosniff')
+    t.alike([...res.headers.keys()].sort(), ['content-type', 'x-content-type-options'], p + ' no other header')
     t.ok(Buffer.from(await res.arrayBuffer()).equals(fs.readFileSync(path.join(dist, p))), p + ' bytes')
   }
-  onlyPrecache(t, w, dist, 'every entry kept')
+  // An extension with no known type is never answered from the cache.
+  const blob = await dispatch(w, ORIGIN + '/assets/blob.dat')
+  t.is(blob.res.status, 503)
+  t.absent(w.cache.map.has(ORIGIN + '/assets/blob.dat'), 'blob.dat deleted')
+  w.cache.map.delete(ORIGIN + '/assets/blob.dat')
+  const names = readWorker(dist).precache.filter((e) => e.url !== '/assets/blob.dat')
+  t.alike([...w.cache.map.keys()].sort(), names.map((e) => ORIGIN + e.url).sort(), 'every other entry kept')
 })
 
 const ACTOR = 'a'.repeat(64)

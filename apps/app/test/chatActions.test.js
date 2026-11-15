@@ -140,7 +140,8 @@ test('Android avoids the keyboard too (edge to edge: adjustResize no longer resi
   for (const src of [mensagem, grupo, perfil]) t.absent(src.includes("Platform.OS === 'ios' ? 'padding' : undefined"), 'no iOS-only behavior')
   t.ok(mensagem.includes("<KeyboardAvoidingView style={styles.root} behavior='padding' enabled={avoidKeyboard}>"), 'Mensagem pads')
   t.ok(grupo.includes("<KeyboardAvoidingView style={styles.root} behavior='padding' enabled={avoidKeyboard}>"), 'Grupo pads')
-  t.ok(perfil.includes("behavior='padding' keyboardVerticalOffset={top}") && perfil.includes('measureInWindow'), 'Perfil pads by its measured top inside a sheet')
+  const lift = fs.readFileSync(path.join(__dirname, '../src/ui/KeyboardLift.js'), 'utf8')
+  t.ok(perfil.includes('<KeyboardLift measured=') && lift.includes("behavior='padding' keyboardVerticalOffset={top}") && lift.includes('measureInWindow'), 'Perfil pads by its measured top inside a sheet')
 })
 
 test('the composer placeholder is one short word that fits a 320 pt screen', (t) => {

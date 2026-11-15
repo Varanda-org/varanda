@@ -5,9 +5,15 @@
 // screens. Depth 0 never pushes. When a push does not raise the depth above
 // the current history entry's tag (nav.js MAX_DEPTH dropped the oldest
 // screen), the entry is replaced instead of pushed (replaceState), so the
-// history depth always equals the stack depth and no Back press is dead. Tolerates a missing history API (does
-// nothing). `win` is injectable for tests; the global is touched only inside
-// these functions.
+// history depth always equals the stack depth and no Back press is dead.
+// After a reload the stack is empty but the history entries keep their tags:
+// the current one is retagged 0 when bound, and a Back onto a stale tagged
+// entry (a tag above the empty stack) jumps to the entry below the first
+// screen instead of leaving every one of those presses dead. A Forward onto
+// such an entry (the stack is empty, the tag is above it) takes the same jump
+// back, so it never shows a page the app has no screen for. Tolerates a
+// missing history API (does nothing). `win` is injectable for tests; the
+// global is touched only inside these functions.
 
 function depthOfState (state) {
   const d = state && typeof state === 'object' ? state.varanda : 0
@@ -23,6 +29,12 @@ export function bindHistory ({ depthOf, onBack, win = globalThis } = {}) {
     const current = depthOf()
     const target = depthOfState(event ? event.state : null)
     if (target < current) onBack(current - target)
+    else if (current === 0 && target > 0 && history && typeof history.go === 'function') {
+      try { history.go(-target) } catch {}
+    }
+  }
+  if (canPush && typeof history.replaceState === 'function' && depthOfState(history.state) > 0 && depthOf() === 0) {
+    try { history.replaceState({ varanda: 0 }, '') } catch {}
   }
   if (canListen) win.addEventListener('popstate', onPop)
 

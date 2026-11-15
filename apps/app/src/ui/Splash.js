@@ -119,7 +119,7 @@ export function Splash ({ sidePad = 0, edges, progress = 0, onPresented, entered
       fill.current.setValue(p)
       return
     }
-    const anim = Animated.timing(fill.current, { toValue: p, duration: BAR_MS, easing: Easing.out(Easing.quad), useNativeDriver: false, isInteraction: false })
+    const anim = Animated.timing(fill.current, { toValue: p, duration: BAR_MS, easing: Easing.out(Easing.quad), useNativeDriver: native, isInteraction: false })
     anim.start()
     return () => anim.stop()
   }, [progress])
@@ -371,7 +371,7 @@ export function Splash ({ sidePad = 0, edges, progress = 0, onPresented, entered
           <SplashLettering palette={palette} letters={letters.current} />
         </View>
         <Animated.View {...hiddenFromReaders} style={[styles.bar, { opacity: hintOpacity.current }]}>
-          <Animated.View style={[styles.barFill, { width: fill.current.interpolate({ inputRange: [0, 1], outputRange: [0, BAR_WIDTH] }) }]} />
+          <Animated.View style={[styles.barFill, { transform: [{ translateX: fill.current.interpolate({ inputRange: [0, 1], outputRange: [-BAR_WIDTH, 0] }) }] }]} />
         </Animated.View>
       </View>
       <StatusBar style={statusBarStyle(scheme)} />
@@ -395,7 +395,10 @@ const makeStyles = (colors) => StyleSheet.create({
     overflow: 'hidden',
     backgroundColor: colors.line
   },
+  // Full width, slid inside the clipped track: a transform runs off the JS
+  // thread, a width does not. No scaleX, it would stretch the rounded ends.
   barFill: {
+    width: BAR_WIDTH,
     height: 4,
     borderRadius: 2,
     backgroundColor: colors.accent

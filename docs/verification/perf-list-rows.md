@@ -1,6 +1,6 @@
 # Linhas estáveis nas demais listas e relógio de minuto pausado (branch perf/list-rows)
 
-Este arquivo confere o PR4 da rodada de desempenho: Espiadinha, Diário, Busca, Conversa, Membro e Mensagem passam a ter linhas estáveis (tratadores e `extraData` que não mudam a cada renderização da tela), e `useVisibleNow(60000)` (`src/ui/index.js`, `src/visibleNow.js`) pausa o relógio de minuto enquanto a tela está escondida. Ambiente: o das seções 252 a 254 (emulador Android `varanda-perf` sem janela, Vitrine grande e rica, sem nó). Antes é o PR3 (seção 254, logs de T10 no mesmo emulador); depois é esta árvore, com as mudanças ainda sem commit.
+Este arquivo confere o PR4 da rodada de desempenho: Espiadinha, Diário, Busca, Conversa, Membro e Mensagem passam a ter linhas estáveis (tratadores e `extraData` que não mudam a cada renderização da tela), e `useVisibleNow(60000)` (`src/ui/index.js`, `src/visibleNow.js`) pausa o relógio de minuto enquanto a tela está escondida. Ambiente: o da seção 252, de `docs/verification/perf-render-isolation.md` e de `docs/verification/perf-row-mount.md` (emulador Android `varanda-perf` sem janela, Vitrine grande e rica, sem nó). Antes é o PR3 (`docs/verification/perf-row-mount.md`, logs de T10 no mesmo emulador); depois é esta árvore, com as mudanças ainda sem commit.
 
 ```sh
 # a partir de apps/app, Metro novo por célula
