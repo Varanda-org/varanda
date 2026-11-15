@@ -33,7 +33,7 @@ test('profiles show a skeleton header and rows on the first load', (t) => {
   t.ok(diary.includes('plainBand: { backgroundColor: colors.bg }'))
   const member = read('screens/Membro.js')
   t.ok(member.includes('loading={full && profilePending && !header.name && !header.username}'))
-  for (const src of [diary, member]) t.ok(src.includes('<><SkeletonRow /><SkeletonRow /><SkeletonRow /></>'))
+  for (const src of [diary, member]) t.ok(src.includes('<View><SkeletonRow /><SkeletonRow /><SkeletonRow /></View>'))
 })
 
 test('header actions and the sticky bar use press feedback', (t) => {
@@ -91,7 +91,7 @@ test('notices explain capability limits and page unavailability', async (t) => {
 
 test('notices use skeleton rows and feedback for both row destinations', (t) => {
   const src = read('screens/Avisos.js')
-  t.ok(src.includes('empty = <><SkeletonRow /><SkeletonRow /><SkeletonRow /></>'))
+  t.ok(src.includes('empty = <View><SkeletonRow /><SkeletonRow /><SkeletonRow /></View>'))
   const row = src.slice(src.indexOf('function NoticeRow'), src.indexOf('export default function Avisos'))
   t.is((row.match(/<PressScale\s/g) || []).length, 2)
 })

@@ -19,7 +19,7 @@ import { readFollowKeys } from '../follow'
 import { useNames } from '../names'
 import { fetchCounts, fetchMember, fetchPost, COUNTS_MAX } from '../indexClient'
 import { assembleMember, assembleThread, planPeeks } from '../thread'
-import { childLabel, mergeChildren, threadRows, withOwnReply } from '../threadRows'
+import { childLabel, mergeChildren, quietNext, threadRows, withOwnReply } from '../threadRows'
 import { quickReplyPlan, sendTextReply } from '../replySend'
 import { hasLink } from '../links'
 import { refusalOf } from '../wordCheck'
@@ -28,7 +28,8 @@ import { noteLocalWrite } from '../localWrites'
 import { registerLocalCache, cacheGeneration } from '../localCaches'
 import { replyNameOf, whoOf } from '../who'
 import { avatarOf, pickAvatar } from '../media/avatar'
-import { canDelete, isPageRef } from '../deletion'
+import { isPageRef } from '../deletion'
+import { canDeletePost } from '../postActions'
 import { installationOrigin } from '../installation'
 import { postLink } from '../postLink'
 import * as actingStore from '../actingAs'
@@ -39,6 +40,7 @@ import { Btn, ErrorText, Row, Soft, UNCERTAIN, errorText, useAction, useBottomPa
 import { BranchLink } from '../ui/BranchLink'
 import { OfflineNote } from '../ui/OfflineNote'
 import { PostRow } from '../ui/PostRow'
+import { PostSheetProvider } from '../ui/PostSheetHost'
 import { ReplyBar } from '../ui/ReplyBar'
 import { useKeyboardAvoidEnabled, useKeyboardOpen } from '../ui/keyboardAvoid'
 import { EmbedBandBottom } from '../ui/screenVisible'
@@ -61,6 +63,11 @@ const PARENT_GONE_NOTE = 'A publicação respondida está indisponível.'
 const HINT_AUTHORS_MAX = 10
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+// The delete rule lives in postActions.js (canDeletePost).
+export function canDeleteHere (item, ownKey) {
+  return canDeletePost(item, { ownKey, page: actingPageKey() })
+}
 
 export function refOf (author, seq) {
   return author + ':' + seq
@@ -402,14 +409,34 @@ export function useEngagement ({ request, node, onToast }) {
   const touchedRef = useRef(new Map()) // 'liked|<ref>' -> stamp
   const touch = (field, ref) => touchedRef.current.set(field + '|' + ref, ++clockRef.current)
   const readRefs = useRef(new Set())
+  const countsRef = useRef(counts)
+  countsRef.current = counts
 
+  // Returns an undo for a refresh that fails after the clear: the rows stay on
+  // screen, so their counts and own likes come back (a field touched, a ref
+  // read or a count read since wins over the old one).
   const reset = useCallback(() => {
+    const priorState = stateRef.current
+    const priorCounts = countsRef.current
+    const stamp = ++clockRef.current
     setState(emptyState())
     setCounts(new Map())
     // Toggles still in flight keep protecting their refs.
     const kept = new Map()
     for (const [k, v] of touchedRef.current) if (pendingRef.current.has(k.slice(k.indexOf('|') + 1))) kept.set(k, v)
     touchedRef.current = kept
+    return () => {
+      const since = (field, ref) => (touchedRef.current.get(field + '|' + ref) || 0) > stamp
+      const stale = (field, ref) => since(field, ref) || since('read', ref)
+      setState((s) => {
+        const liked = new Set(s.liked)
+        const reposted = new Set(s.reposted)
+        for (const ref of priorState.liked) if (!stale('liked', ref)) liked.add(ref)
+        for (const ref of priorState.reposted) if (!stale('reposted', ref)) reposted.add(ref)
+        return { liked, reposted }
+      })
+      setCounts((m) => new Map([...priorCounts, ...m]))
+    }
   }, [])
   // engagement.read for `refs` (chunks of ENGAGEMENT_MAX); a failure leaves
   // those refs shown as not liked/reposted.
@@ -424,6 +451,7 @@ export function useEngagement ({ request, node, onToast }) {
         if (!alive()) return
         // Read for another identity than the one acted as now.
         if (as !== actingPageKey()) continue
+        for (const ref of part) touch('read', ref)
         const fresh = (field, ref) => !pendingRef.current.has(ref) && !((touchedRef.current.get(field + '|' + ref) || 0) > started)
         setState((s) => {
           const liked = new Set(s.liked)
@@ -547,7 +575,7 @@ export function identityOf (names, author, item) {
 // The PostRow props for an assembled (or seed) post item. `extra` overrides
 // (repostedBy, onOpenReposter, replyToName...).
 export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, handlers, extra = {} }) {
-  const { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete, onMessage } = handlers
+  const { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onReply, onQuote, onReport, onDelete, onMessage } = handlers
   const ref = refOf(item.author, item.seq)
   const who = identityOf(names, item.author, item)
   const hasSeq = Number.isSafeInteger(item.seq) && item.seq >= 1
@@ -607,10 +635,11 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
     onQuote: hasSeq && typeof onQuote === 'function' ? () => onQuote({ ref, name: who.name, username: who.username, text: item.text }) : undefined,
     onOpenLikes: eng && hasSeq && typeof onOpenEngagers === 'function' ? () => onOpenEngagers({ ref, kind: 'likes' }) : undefined,
     onOpenReposts: eng && hasSeq && typeof onOpenEngagers === 'function' ? () => onOpenEngagers({ ref, kind: 'reposts' }) : undefined,
+    onOpenQuotes: eng && hasSeq && typeof onOpenQuotes === 'function' ? () => onOpenQuotes({ ref }) : undefined,
     onLike: eng && hasSeq ? () => eng.toggle('like', ref) : undefined,
     onRepost: eng && hasSeq ? () => eng.toggle('repost', ref) : undefined,
     onReport: reportable ? () => onReport({ author: item.author, name: who.name, username: who.username, seq: item.seq, text: item.text }) : undefined,
-    onDelete: hasSeq && typeof onDelete === 'function' && canDelete(item, typeof ownKey === 'string' ? ownKey.toLowerCase() : null, actingPageKey())
+    onDelete: hasSeq && typeof onDelete === 'function' && canDeleteHere(item, typeof ownKey === 'string' ? ownKey : null)
       ? () => onDelete({ ref, seq: item.seq })
       : undefined,
     seq: hasSeq ? item.seq : undefined,
@@ -733,7 +762,12 @@ const INITIAL = {
   refreshing: false
 }
 
-export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onToast, onDeletedPost, onMessage, composeSignal, onComposeSeen, onPublished }) {
+// One actions sheet for the whole list instead of two per row.
+export default function Conversa (props) {
+  return <PostSheetProvider><ConversaList {...props} /></PostSheetProvider>
+}
+
+function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onToast, onDeletedPost, onMessage, composeSignal, onComposeSeen, onPublished }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
@@ -794,6 +828,8 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
   const peekedRef = useRef(new Map())
   const followsRef = useRef(Promise.resolve(new Set()))
   const genRef = useRef(0)
+  // A quiet read supersedes only another quiet read: bumping genRef would cancel a branch page in flight.
+  const quietRef = useRef(0)
   const commit = useCallback((patch) => {
     viewRef.current = { ...viewRef.current, ...patch }
     setView(viewRef.current)
@@ -833,8 +869,10 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
   const load = useCallback(async (refreshing = false, quiet = false) => {
     if (quiet && (viewRef.current.phase !== 'ready' || viewRef.current.next !== null || viewRef.current.loadingMore || viewRef.current.refreshing)) return
     const loadedChildren = [...childrenRef.current.values()].flat()
-    const mine = ++genRef.current
-    const alive = () => mine === genRef.current
+    const mine = quiet ? genRef.current : ++genRef.current
+    const quietId = quiet ? ++quietRef.current : 0
+    const alive = () => mine === genRef.current && (!quiet || quietId === quietRef.current)
+    let undoReset = null
     if (!quiet) commit(refreshing ? { refreshing: true, error: '' } : { ...INITIAL })
     try {
       let res = await fetchPost(focal)
@@ -854,7 +892,7 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
       const branchRefs = loadedChildren.map((item) => refOf(item.author, item.seq))
       const refs = [focal].concat(index.parent ? [index.parent] : [], index.replies, branchRefs, quiet ? viewRef.current.replies.map((item) => refOf(item.author, item.seq)) : [])
       // engagement.read first: it preempts sync, so it goes before the peeks.
-      if (refreshing && !quiet) reset()
+      if (refreshing && !quiet) undoReset = reset()
       await readOwn(refs, alive)
       if (!alive()) return
       followsRef.current = loadFollows()
@@ -880,6 +918,11 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
         setChildBusy(new Set())
       }
       pruneOwnReplies(index.replies, ownReplies.current)
+      const shown = ownFor(focal, ownReplies.current).reduce(withOwnReply, quiet ? replies.reduce(withOwnReply, viewRef.current.replies) : replies)
+      const unavailableNow = unavailable - (index.parent && !parent ? 1 : 0)
+      const nextAfter = quiet
+        ? quietNext({ indexNext: index.next, total: index.repliesTotal, loaded: shown.length, unavailable: Math.max(viewRef.current.unavailable, unavailableNow) })
+        : index.next
       commit({
         phase: 'ready',
         error: '',
@@ -887,11 +930,11 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
         meta: { indexing: index.indexing, complete: index.complete, repliesTotal: index.repliesTotal },
         parent,
         post,
-        replies: ownFor(focal, ownReplies.current).reduce(withOwnReply, quiet ? replies.reduce(withOwnReply, viewRef.current.replies) : replies),
+        replies: shown,
         // An unavailable parent is not counted as an unavailable reply.
         parentGone: !!index.parent && !parent,
-        unavailable: unavailable - (index.parent && !parent ? 1 : 0),
-        next: quiet ? viewRef.current.next : index.next,
+        unavailable: unavailableNow,
+        next: quiet ? nextAfter : index.next,
         loadingMore: false,
         moreError: ''
       })
@@ -899,6 +942,7 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
       readCounts((parent ? [refOf(parent.author, parent.seq)] : []).concat(replies.map((r) => refOf(r.author, r.seq)), branchRefs), alive)
     } catch (err) {
       if (!alive() || quiet) return
+      if (undoReset) undoReset()
       commit({ phase: (refreshing || quiet) && viewRef.current.phase === 'ready' ? 'ready' : 'error', refreshing: false, loadingMore: false, error: refreshing && viewRef.current.phase === 'ready' ? 'Não foi possível atualizar a conversa.' : isSeederDown(err) ? 'Sem conexão com o servidor agora.' : errorText(err) })
     }
   }, [focal, request, commit, readOwn, readCounts, setCount, reset, loadFollows, learnMany, resolveMany, ownKey])
@@ -1075,7 +1119,7 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
       })
     }
   })
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply: full ? targetReply : onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined, onMessage }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onReply: full ? targetReply : onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined, onMessage }
   const props = (item, extra) => rowProps({ item, names, peeked: peekedRef.current, now, ownKey, follows, eng: full ? eng : null, handlers, extra })
 
   const title = 'Conversa'

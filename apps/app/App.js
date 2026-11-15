@@ -69,6 +69,7 @@ import { sessionStore } from './src/sessionStore'
 import { cacheGeneration, wipeLocalCaches } from './src/localCaches'
 import { registerBackgroundRefresh, unregisterBackgroundRefresh } from './src/backgroundTask'
 import { makeIntent, validIntent } from './src/privateReply'
+import { restoresParked } from './src/replyHandoff'
 import { NamesProvider, useNames } from './src/names'
 import { BlocksProvider, useBlocks } from './src/blocksProvider'
 import { BlockSheet } from './src/ui/BlockSheet'
@@ -165,6 +166,7 @@ import ARua, { ARuaPreview, liveBinding, noteDeleted, previewBinding } from './s
 import Conexao from './src/screens/Conexao'
 import Conversa, { useActing } from './src/screens/Conversa'
 import Curtidas from './src/screens/Curtidas'
+import Citacoes from './src/screens/Citacoes'
 import Denunciar from './src/screens/Denunciar'
 import Diario from './src/screens/Diario'
 import Espiadinha from './src/screens/Espiadinha'
@@ -1816,13 +1818,18 @@ function Member () {
   const [composeSignal, setComposeSignal] = useState(null)
   const replyDraftResolve = useRef(null)
   const replyDraftStash = useRef(null)
+  const replyDraftHandoff = useRef(null)
   const replyHandoffSerial = useRef(0)
   const settleReplyDraft = useCallback((accepted, restore = true) => {
     const resolve = replyDraftResolve.current
     const saved = replyDraftStash.current
+    const handoff = replyDraftHandoff.current
     replyDraftResolve.current = null
     replyDraftStash.current = null
-    if (saved && accepted !== true && restore) setComposer((c) => ({ ...c, ...saved }))
+    replyDraftHandoff.current = null
+    // Only while the composer still holds this hand-off: an older target must
+    // not replace a reply the person opened during the send.
+    if (saved) setComposer((c) => (restoresParked({ accepted, restore, saved, handoff, reply: c.reply }) ? { ...c, ...saved } : c))
     if (resolve) resolve(accepted === true)
   }, [])
   useEffect(() => {
@@ -1843,7 +1850,9 @@ function Member () {
       return new Promise((resolve) => {
         replyDraftResolve.current = resolve
         replyDraftStash.current = saved
-        setComposer({ open: true, reply: { ...r, handoff: ++replyHandoffSerial.current }, quote: null })
+        const handoff = ++replyHandoffSerial.current
+        replyDraftHandoff.current = handoff
+        setComposer({ open: true, reply: { ...r, handoff }, quote: null })
       })
     }
     setComposer({ open: true, reply: r, quote: null })
@@ -1962,6 +1971,9 @@ function Member () {
   }, [pushScreen])
   const openEngagers = useCallback(({ ref, kind } = {}) => {
     pushScreen({ screen: 'curtidas', key: ref, params: { kind: kind === 'reposts' ? 'reposts' : 'likes' } })
+  }, [pushScreen])
+  const openQuotes = useCallback(({ ref } = {}) => {
+    pushScreen({ screen: 'citacoes', key: ref, params: {} })
   }, [pushScreen])
   const openGroup = useCallback((group) => {
     pushScreen({ screen: 'grupo', key: typeof group === 'string' ? group.toLowerCase() : group, params: {} })
@@ -3406,6 +3418,7 @@ function Member () {
       onReport: setReport,
       onOpenThread: openThread,
       onOpenEngagers: openEngagers,
+      onOpenQuotes: openQuotes,
       onOpenMember: openMember,
       onOpenMention: mentionHandler,
       onToast: showToast,
@@ -3591,7 +3604,7 @@ function Member () {
           </StackLayer>
         )
       }
-      const Screen = entry.screen === 'conversa' ? Conversa : entry.screen === 'curtidas' ? Curtidas : Membro
+      const Screen = entry.screen === 'conversa' ? Conversa : entry.screen === 'curtidas' ? Curtidas : entry.screen === 'citacoes' ? Citacoes : Membro
       return (
         <StackLayer key={i + ':' + entry.screen + ':' + entry.key + (entry.screen === 'conversa' && entry.key === threadReload.ref ? ':' + threadReload.n : '')} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
           <Screen entry={entry} {...screenProps} onComposeSeen={() => setComposeSignal(null)} composeSignal={entry.screen === 'conversa' && i === stack.length - 1 ? composeSignal : null} onPublished={onPublished} onTabChange={entry.screen === 'membro' ? (id) => reportProfileTab(i + ':' + entry.key, id) : undefined} />
@@ -3659,6 +3672,7 @@ function Member () {
                     onToast={showToast}
                     onOpenThread={openThread}
                     onOpenEngagers={openEngagers}
+                    onOpenQuotes={openQuotes}
                     onOpenMember={openMember}
                     onOpenMention={mentionHandler}
                     onQuote={startQuote}
@@ -3688,6 +3702,7 @@ function Member () {
                     onReport={setReport}
                     onOpenThread={openThread}
                     onOpenEngagers={openEngagers}
+                    onOpenQuotes={openQuotes}
                     onOpenMember={openMember}
                     onOpenMention={mentionHandler}
                     onQuote={startQuote}
@@ -3715,6 +3730,7 @@ function Member () {
                     onOpenThread={openThread}
                     onOpenMention={mentionHandler}
                     onOpenEngagers={openEngagers}
+                    onOpenQuotes={openQuotes}
                   />
                 </ScreenVisible.Provider>
               </View>
@@ -3790,6 +3806,7 @@ function Member () {
                     onMessage={openMessage}
                     onOpenThread={openThread}
                     onOpenEngagers={openEngagers}
+                    onOpenQuotes={openQuotes}
                     onOpenMember={openMember}
                     onOpenMention={mentionHandler}
                     onQuote={startQuote}

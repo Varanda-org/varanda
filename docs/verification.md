@@ -4921,7 +4921,7 @@ Roteiro da aba Conversas como uma lista só no nó hospedado: busca, filtros, fi
 Regras que os passos conferem:
 
 - A lista traz as conversas privadas e os grupos das comunidades da pessoa, do mais recente para o mais antigo. O cabeçalho tem **+** (Nova conversa), ⓘ (ajuda) e o sino de Avisos.
-- **Buscar conversas** fica acima dos filtros, filtra as linhas carregadas, e o X limpa. Com texto na busca, os fixados somem, e o filtro escolhido continua valendo.
+- **Buscar conversas** fica acima dos filtros, filtra as conversas, e o X limpa. Com texto, a busca lê no aparelho as páginas mais antigas da caixa (até 20 por vez, com uma pausa entre elas); acabada essa conta com páginas sobrando, a lista diz que há conversas mais antigas e oferece **Buscar mais**. Com texto na busca, os fixados somem, e o filtro escolhido continua valendo.
 - Os filtros são **Todas**, **Não lidas** e **Grupos**.
 - Fixados no topo: **Pedidos de mensagem**, com um ponto quando há pedido não lido (nunca um número; em **Não lidas**, só quando há pedido não lido), e **Comunidades**, com uma seta.
 - Cada linha tem avatar (pessoa redonda; grupo e comunidade em quadrado arredondado com iniciais), nome, prévia de uma linha ("Você:" à parte na própria última mensagem; em grupo, "Autor: texto"), hora relativa e um ponto (conversa privada) ou contador (grupo) na cor de destaque. Não há marcas de lido, de entrega nem de digitação.
@@ -4963,6 +4963,16 @@ Limites desta caminhada:
 
 - Na Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`), as conversas são dados de exemplo. Envio, aceite de pedido e busca com conversas reais só se conferem no laboratório hospedado, com duas pessoas, como na seção 94.
 - Nenhuma caixa acima foi executada nesta documentação.
+
+Rodada da issue #442 (parte 1), 2026-11-15:
+
+- [ ] Geral: numa comunidade cujo nome só tem caracteres invisíveis, a linha do grupo geral mostra "Geral".
+- [ ] A linha de uma conversa privada mostra o @nome conferido; para quem você não segue, o nome aparece depois da leitura do nó (nó hospedado e online, até 10 linhas do topo), e sem leitura conferida a linha fica "Pessoa".
+- [ ] Como Página, a própria Página não aparece na lista nem na busca de Nova conversa.
+- [ ] Busca numa caixa de mais de uma página: o esqueleto aparece enquanto as páginas mais antigas chegam, e uma conversa antiga entra no resultado; depois de 20 páginas sem achar, a lista mostra "Nada encontrado nas conversas buscadas até agora." com **Buscar mais**.
+- [ ] Puxar para atualizar depois de rolar várias páginas: as linhas carregadas continuam na lista.
+
+Situação, em 2026-11-15 (Vitrine, Metro na porta 8099, emulador Android API 36, simulador iPhone 17 Pro e painel de navegador): as linhas de conversa privada mostram o @nome nas três plataformas, e a busca filtra as linhas da Vitrine com o estado vazio certo. A Vitrine tem uma página só, nenhuma Página ativa e nenhum nome de comunidade invisível, então a paginação da busca, **Buscar mais**, a atualização depois de várias páginas, a própria Página, a linha "Pessoa" e a linha Geral ficam para o laboratório hospedado. Cada caixa só é marcada quando o alvo foi percorrido por inteiro; nenhuma foi.
 
 ## 101. Balões, respostas e cabeçalhos das conversas (PR feat/chat-bubbles-replies)
 
@@ -5072,7 +5082,7 @@ Regras que os passos conferem:
 - O número de citações não aparece mais na barra (Citar está na folha); o número de republicações não soma citações, para bater com a lista de quem republicou. O leitor de tela anuncia o botão como "republicar ou citar".
 - Na web, os campos arredondados (Busca, a pesquisa de Conversas, Nova conversa e o campo de escrever das conversas) mostram o foco com a borda da pílula na cor de destaque, sem o contorno retangular do navegador. Busca: Enter ou "pesquisar" sempre pesquisa de novo (depois de uma falha, é assim que se tenta outra vez); trocar para Contas cancela a pesquisa de Publicações que esperava a pausa; o teclado não corrige nem põe maiúscula no termo.
 - "Mais" abre "Copiar link" (só quando a publicação tem link público), "Denunciar" (publicações de outros, com a conta conectada) e "Apagar" (publicações próprias, em vermelho, com a confirmação de sempre).
-- "Compartilhar" só aparece quando a publicação tem link público. Hoje nenhuma publicação tem, então o botão não aparece.
+- "Compartilhar" só aparece quando a publicação tem link público. Os links de publicação são conferidos na seção 212.
 - A Rua: "Alguns números podem estar incompletos." é uma nota pequena e suave, não uma linha; a lista deixa espaço para o botão de publicar não cobrir as ações da última publicação; "ver novidades" nunca aparece sobre o estado vazio.
 - Avisos: cada linha tem o selo de ação no avatar, o nome e a ação numa linha, o @nome verificado na linha suave (quando existe) e, numa linha própria, o começo da publicação entre aspas (até 90 caracteres, em outra cor; nunca no lugar do @nome; sem prévia nas linhas de quem começou a seguir), o tempo à direita e um ponto nas linhas não lidas. As prévias vêm do próprio diário no nó; nada é buscado de fora.
 - Busca: campo arredondado com lupa e X. Publicações pesquisa enquanto a pessoa digita (a partir de 2 caracteres, depois de uma pausa curta; respostas antigas são ignoradas) e ao tocar em enter ou em "pesquisar". Contas já pesquisava enquanto digitava.
@@ -5107,9 +5117,17 @@ Como verificar, antes da caminhada, a partir da raiz:
 
 Limites desta caminhada:
 
-- A Vitrine não tem mídia, então a foto de Publicar só se confere com conta hospedada em build nativo.
-- "Compartilhar" fica sem efeito visível até existirem links públicos de publicação (próximo passo).
+- A Vitrine não tem mídia, então a foto de Publicar só se confere com conta hospedada em build nativo; a ordem das fotos fica na seção 151.
+- O link público, "Copiar link" e "Compartilhar" de uma publicação são conferidos na seção 212.
 - Nenhuma caixa acima foi executada nesta documentação.
+
+Rodada da issue #442 (parte 1), 2026-11-15:
+
+- O menu "mais" de uma publicação citada mostra "Ver N citações" (só no nó hospedado, como a lista de curtidas). A lista traz as citações mais recentes, até 50, e só mostra uma citação depois de ler a publicação assinada que cita esta. Cada lista de publicações tem uma só folha de ações, que as linhas dividem.
+- [ ] "Ver N citações" abre a lista em A Rua, Diário, perfil, Espiadinha, Busca e Conversa; tocar numa citação abre a conversa dela. Sem citações, a linha não aparece.
+- [ ] Abrir o "mais" de duas linhas seguidas mostra as ações da linha certa, e Republicar mostra "Desfazer republicação" numa publicação já republicada.
+
+Situação, em 2026-11-15 (Vitrine, Metro na porta 8099, emulador Android API 36, simulador iPhone 17 Pro e painel de navegador): no Diário, o "mais" da publicação republicada abre a folha compartilhada com "Ver 1 citação" nas três plataformas, e a lista Citações mostra a citação conferida. No Android e na web, tocar na citação abre a Conversa dela; na web, o "mais" na Conversa também mostrou "Ver 1 citação". A Rua, perfil, Espiadinha e Busca não foram percorridos, nem a troca entre duas linhas seguidas. Nenhuma caixa foi marcada.
 
 ## 104. Blobs anônimos das conversas: selos, canal, conjunto e rota `/blob` (PR feat/blob-channel)
 
@@ -8701,6 +8719,15 @@ Situação, em 2026-11-12 (Vitrine, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1` na
 - [ ] Chrome, 1280 px, tema escuro (parcial): a Conversa abre na mesma coluna estreita, com a barra fixa embaixo. Defeito: a linha "Respondendo a @nome" da barra sai em preto sobre o fundo escuro (`colors.muted` não existe na paleta, ver `apps/app/src/ui/ReplyBar.js:104`). Corrigido depois: a barra usa só chaves da paleta e `apps/app/test/themeUsage.test.js` agora recusa uma chave que não existe; não reconferido no navegador. Não verificado: o resto dos passos.
 - [ ] Android, AVD `varanda-api36` (parcial, passada de teclado de 2026-11-12, Metro na porta 8090 com o app apontado por `debug_http_host`): passo 1 FALHOU. Com o teclado aberto, a barra fica acima dele mas há uma faixa em branco de cerca de 20 dp entre o fundo da barra e o teclado (captura `v3-shots/and-1-keyboard.png`, repete-se em `and-4-dark-reply.png`). Causa: a margem da área segura de baixo continuava com o teclado aberto. Corrigido e repassado no mesmo dia: a faixa de 20 dp sumiu (`and-1-keyboard-fixed.png`); restou uma tira de cerca de 5 dp na cor da página, que é o respiro de 8 dp sob a barra. Esse respiro passou a ter a cor da barra; essa última mudança não foi reconferida no aparelho. Com o teclado fechado, a barra fica logo acima da área de gestos, sem faixa a mais (`and-2-closed-fixed.png`). Passo 2 passou: ao fechar o teclado a barra volta ao fundo, acima da área segura, sem faixa a mais. Passo 3 passou (7 e 8): "Oi teste" apareceu uma vez no bloco "1 resposta". Passo 4 passou (7 e 18): "Respondendo a @lia_oliveira" e o espaço reservado legíveis no tema escuro. Não verificado: os demais passos, texto grande, leitor de tela, Reduzir movimento.
 - [ ] iOS, simulador iPhone 17 Pro (o iPhone 16e não liga aqui) (parcial, passada de teclado de 2026-11-12, Metro na porta 8090 com `RCT_jsLocation`): passo 1 passou: a barra fica rente ao teclado, inteira, sem faixa em branco nem folga acima (`v3-shots/ios-1-keyboard.png`). Passo 2 (parcial): o teclado de software sumiu ao digitar pelo teclado do Mac e a barra voltou ao fundo acima da área segura (`ios-2-after-send.png`); o fechamento pelo próprio teclado não foi tocado. Passo 3 passou: a resposta apareceu uma vez no bloco "1 resposta" (o texto saiu corrigido para "Ok, teste" pelo autocorretor). Passo 4 passou: "Respondendo a @lia_oliveira" e o espaço reservado legíveis no tema escuro (`ios-3-dark-reply.png`); o escuro veio pela opção Escuro de Ajustes > Aparência, porque com Sistema o app ficou claro com o aparelho em escuro (a conferir). Não verificado: os demais passos, texto grande, leitor de tela, Reduzir movimento.
+
+Rodada da issue #442 (parte 1), 2026-11-15:
+
+- [ ] Falha ao atualizar (rede cortada, puxar): os números e as suas curtidas continuam como estavam.
+- [ ] Depois de responder, "Ver mais respostas" só aparece quando há respostas além das carregadas.
+- [ ] Abrir um ramo e responder logo em seguida: a página do ramo chega e fica.
+- [ ] Com um rascunho guardado na Publicar, responder com link pela barra (abre a Publicar) e descartar: o rascunho antigo volta; se outra resposta foi aberta no meio, ela fica.
+
+Situação, em 2026-11-15: nenhum destes quatro passos foi percorrido. A Vitrine não tem rede para cortar nem índice de respostas que cresça, então eles ficam para o laboratório hospedado; a lógica deles está coberta por `apps/app/test/conversaScreen.test.js` e `apps/app/test/replyHandoff.test.js`.
 
 ## 192. Feira: vitrine, categorias e filtros (PR feat/feira-browse)
 

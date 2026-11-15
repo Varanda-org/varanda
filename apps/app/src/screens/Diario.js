@@ -50,6 +50,7 @@ import { ErrorText, SectionHeader, Soft, errorText, plainMessage, useAction, use
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { PostRow } from '../ui/PostRow'
+import { PostSheetProvider } from '../ui/PostSheetHost'
 import { RefreshableList } from '../ui/RefreshableList'
 import { ShareProfile, shareProfileDirect } from '../ui/ShareProfile'
 import { Sheet } from '../ui/Sheet'
@@ -230,7 +231,12 @@ function postOf (author, seq, record) {
   }
 }
 
-export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage, onOpenMomentos, onTabChange }) {
+// One actions sheet for the whole list instead of two per row.
+export default function Diario (props) {
+  return <PostSheetProvider><DiarioList {...props} /></PostSheetProvider>
+}
+
+function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage, onOpenMomentos, onTabChange }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
@@ -724,7 +730,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   if (data === null) {
     empty = loadError
       ? <ErrorState message={loadError} onRetry={reload} pending={pull.pending} />
-      : <><SkeletonRow /><SkeletonRow /><SkeletonRow /></>
+      : <View><SkeletonRow /><SkeletonRow /><SkeletonRow /></View>
   } else {
     empty = !data.atEnd
       // Older pages remain and none shown so far held a publication: loading
@@ -775,7 +781,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
     }
   })
   // onMessage reaches only reposts of other people's posts: socialRowProps drops it for own posts.
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onMessage, onDelete: del.offered ? del.ask : undefined }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onReply, onQuote, onMessage, onDelete: del.offered ? del.ask : undefined }
   // An own repost is the ORIGINAL post under 'Você republicou' (every action
   // targets the original); an own post (or quote) targets itself.
   const renderItem = ({ item: row }) => {

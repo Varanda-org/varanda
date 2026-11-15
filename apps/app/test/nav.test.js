@@ -78,6 +78,16 @@ test('curtidas is keyed by a post ref with a likes or reposts kind', async (t) =
   t.is(push(one, { screen: 'curtidas', key: A + ':4', params: { kind: 'likes' } }).length, 2)
 })
 
+test('citacoes is keyed by a post ref and takes no kind', async (t) => {
+  const { EMPTY, SCREENS, push, top, validEntry } = await loadNav()
+  t.ok(SCREENS.includes('citacoes'))
+  const entry = { screen: 'citacoes', key: A + ':3', params: {} }
+  t.ok(validEntry(entry))
+  t.absent(validEntry({ screen: 'citacoes', key: A }), 'a bare key is not a post')
+  t.absent(validEntry({ screen: 'citacoes', key: A + ':0' }), 'seq 0')
+  t.alike(top(push(EMPTY, entry)), entry)
+})
+
 test('MAX_DEPTH drops the oldest entry', async (t) => {
   const { EMPTY, MAX_DEPTH, push, top } = await loadNav()
   t.is(MAX_DEPTH, 20)
@@ -195,7 +205,7 @@ test('history.web tolerates a missing history API; native is a no-op', async (t)
 
 test('grupo and comunidade are keyed by a lowercase hex64 root key', async (t) => {
   const { EMPTY, SCREENS, push, top, validEntry, MAX_DEPTH } = await loadNav()
-  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos'])
+  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'citacoes', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos'])
   t.absent(validEntry({ screen: 'cadeira', key: A }))
   t.ok(SCREENS.includes('comunidade'))
   for (const screen of ['grupo', 'comunidade', 'comunidade-info']) {
@@ -330,7 +340,7 @@ test('momentos is keyed by a lowercase hex64 author', async (t) => {
 test('popTo drops back to an index and refuses bounds outside the stack', async (t) => {
   const { EMPTY, MAX_DEPTH, SCREENS, push, pop, popTo, top } = await loadNav()
   t.is(MAX_DEPTH, 20)
-  t.is(SCREENS.length, 21, 'popTo adds no screen id')
+  t.is(SCREENS.length, 22, 'popTo adds no screen id')
   let stack = EMPTY
   for (let i = 1; i <= 4; i++) stack = push(stack, { screen: 'conversa', key: A + ':' + i })
   t.is(popTo(stack, 3), stack, 'the top index is a no-op')

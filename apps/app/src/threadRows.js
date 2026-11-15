@@ -157,6 +157,14 @@ export function mergeChildren (prev, parentKey, items) {
   return out
 }
 
+// A quiet read after a send keeps "no more pages" unless the index now lists
+// more replies than the screen holds: then the first-page cursor reopens
+// loadMore, which skips the refs it already shows.
+export function quietNext ({ indexNext, total, loaded, unavailable }) {
+  if (indexNext === null || indexNext === undefined || !isCount(total)) return null
+  return total > loaded + unavailable ? indexNext : null
+}
+
 export function withOwnReply (replies, item) {
   const list = Array.isArray(replies) ? replies : []
   const ref = itemRef(item)

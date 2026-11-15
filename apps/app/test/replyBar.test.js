@@ -193,9 +193,16 @@ test('Publicar launches the photo picker once per handoff, only on the no-confli
   t.is(publicar.split("reply.attach === 'photo'").length - 1, 1, 'one launch site')
 })
 
+// The pure hand-off rules the sources import; loaded once, before the first harness runs.
+const rules = {}
+test('hand-off rules load', async (t) => {
+  Object.assign(rules, await import('../src/replyHandoff.js'))
+  t.is(typeof rules.restoresParked, 'function')
+})
+
 function handoff (onReplyDraft = () => {}) {
-  let replyDrafts = new Set()
-  const replyDraftsRef = { current: replyDrafts }
+  let lastSettled = 0
+  const lastSettledRef = { current: lastSettled }
   const results = []
   const settleSource = between(publicar, '  const settleReplyDraft =', '\n  // True while')
   const pendingSource = between(publicar, '  const hasReplyDraft =', '  const settleReplyDraft =')
@@ -203,12 +210,12 @@ function handoff (onReplyDraft = () => {}) {
   const seedSource = between(publicar, '    if (!replyDraftPending)', '\n  }, [replyDraftPending')
   const keepSource = between(publicar, '    const keepDraft =', '    const useReplyDraft =')
   const acceptSource = between(publicar, '    const useReplyDraft =', '    return (\n      <Sheet open={open}')
-  const build = new Function('reply', 'open', 'held', 'hasMedia', 'text', 'replyDrafts', 'replyDraftsRef', 'setReplyDrafts', 'onReplyDraft', 'setText', 'onClearReply', 'onClose', 'genRef', 'removeItems', 'liveRef', // eslint-disable-line no-new-func
+  const build = new Function('reply', 'open', 'held', 'hasMedia', 'text', 'lastSettled', 'lastSettledRef', 'setLastSettled', 'handoffSettled', 'settledAfter', 'onReplyDraft', 'setText', 'onClearReply', 'onClose', 'genRef', 'removeItems', 'liveRef', // eslint-disable-line no-new-func
     [pendingSource, conflictSource, settleSource, keepSource, acceptSource].join('\n') +
     '\nreturn { pending: replyDraftPending, conflict: replyDraftConflict, keepDraft, useReplyDraft, seed: () => {' + seedSource + '} }')
   const state = { text: '', clears: 0, closes: 0, removed: [], genRef: { current: 0 } }
-  const render = (reply, { open = true, held = false, hasMedia = false } = {}) => build(reply, open, held, hasMedia, state.text, replyDrafts, replyDraftsRef,
-    (v) => { replyDrafts = v }, (v) => { results.push(v); onReplyDraft(v) }, (v) => { state.text = v },
+  const render = (reply, { open = true, held = false, hasMedia = false } = {}) => build(reply, open, held, hasMedia, state.text, lastSettled, lastSettledRef,
+    (v) => { lastSettled = v }, rules.handoffSettled, rules.settledAfter, (v) => { results.push(v); onReplyDraft(v) }, (v) => { state.text = v },
     () => { state.clears++ }, () => { state.closes++ }, state.genRef, (ids) => state.removed.push(...ids), { current: new Set([1]) })
   return { render, state, results }
 }
@@ -321,6 +328,8 @@ function shell (composer) {
     replyDraftResolve: { current: null },
     replyDraftStash: { current: null },
     replyHandoffSerial: { current: 0 },
+    replyDraftHandoff: { current: null },
+    restoresParked: (...args) => rules.restoresParked(...args),
     setComposer: (value) => {
       state.composer = typeof value === 'function' ? value(state.composer) : value
       context.composer = state.composer
@@ -425,5 +434,17 @@ test('locking during a handoff drops its stash without restoring account content
   h.dismiss(true)
   t.is(await pending, false)
   t.is(h.state.composer.reply, null)
+  t.is(h.context.replyDraftStash.current, null)
+})
+
+test('a reply opened during the hand-off is not replaced by the older parked target', async (t) => {
+  const saved = { reply: { ref: 'old', handoff: 3 }, quote: null }
+  const h = shell({ open: false, ...saved })
+  const pending = h.start({ ref: 'new', draft: 'resposta' })
+  const opened = { ref: 'later', draft: 'x', handoff: h.state.composer.reply.handoff + 1 }
+  h.context.setComposer((c) => ({ ...c, reply: opened }))
+  h.context.settleReplyDraft(false)
+  t.is(await pending, false)
+  t.is(h.state.composer.reply, opened, 'the newer target stays')
   t.is(h.context.replyDraftStash.current, null)
 })

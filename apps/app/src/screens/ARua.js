@@ -48,7 +48,7 @@ import { cheapRepliesMap } from '../threadRows'
 import { applyToggle, countAnswerApplies, countsAfter, diaryPeekSlots, emptyState, mergeCounts, poolMap, secondPassRefs } from '../engagement'
 import { orderRefs } from '../visibleFirst'
 import { DeletePrompt, actingPageKey, isBusy, isDiaryGone, isSeederDown, memberKeyOf, pageEngagement, readEngagement, setEngagement, useActing, useDelete } from './Conversa'
-import { canDelete } from '../deletion'
+import { canDeletePost } from '../postActions'
 import { label as actingLabel } from '../actingAs'
 import { pagesFeedKeys, pagesFollows } from '../pages'
 import { revokeDeletedMedia } from '../media/cache'
@@ -57,6 +57,7 @@ import { Soft, errorText, useBottomPad, useNow } from '../ui'
 import { HelpButton, HelpNote } from '../ui/Help'
 import { Icon } from '../ui/Icon'
 import { PostRow } from '../ui/PostRow'
+import { PostSheetProvider } from '../ui/PostSheetHost'
 import { KeptOnlyContext } from '../ui/MediaView'
 import { TopBar } from '../ui/TopBar'
 import { useChromeMotion } from '../ui/chromeMotion'
@@ -1151,7 +1152,7 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
 }
 
 // The PostRow props of `post` (a post item) whose actions target `ref`.
-// `h`: { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete, onMessage } (each
+// `h`: { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onReply, onQuote, onReport, onDelete, onMessage } (each
 // optional; onOpenMention(username, { author, username }) gets the row author's verified
 // name so a tap on it needs no lookup). A repost passes the ORIGINAL as `post` and `repostedBy`.
 // With `cache` (a Map, see rowPropsCache) and `rowKey`, the same props object
@@ -1203,12 +1204,13 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
     member: fnOf(h.onOpenMember),
     mention: fnOf(h.onOpenMention),
     engagers: fnOf(h.onOpenEngagers),
+    quotes: fnOf(h.onOpenQuotes),
     reply: fnOf(h.onReply),
     quote: fnOf(h.onQuote),
     notify: fnOf(social.notify),
     // Until the own key is known, no post can safely offer a report action.
     // Only the own post itself, never the original of a repost by someone else.
-    delete: fnOf(h.onDelete) && canDelete(post, own, actingPageKey()) && repostedBy === null,
+    delete: fnOf(h.onDelete) && canDeletePost({ author: post.author, seq: post.seq, repostedBy }, { ownKey: own, page: actingPageKey() }),
     report: fnOf(h.onReport) && own !== null && post.author !== own,
     // Someone else's post, not a page's: PostRow adds the hosted check.
     message: fnOf(h.onMessage) && own !== null && String(post.author).toLowerCase() !== own && !(prof && prof.page === true)
@@ -1272,6 +1274,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       onQuote: offers.quote ? () => live.h.onQuote({ ref, name, username, text: post.text }) : undefined,
       onOpenLikes: offers.engagers ? () => live.h.onOpenEngagers({ ref, kind: 'likes' }) : undefined,
       onOpenReposts: offers.engagers ? () => live.h.onOpenEngagers({ ref, kind: 'reposts' }) : undefined,
+      onOpenQuotes: offers.quotes ? () => live.h.onOpenQuotes({ ref }) : undefined,
       onNotice: offers.notify ? live.notice : undefined,
       onLike: live.like,
       onRepost: live.repost,
@@ -1560,7 +1563,7 @@ function startPageFeed (node, page) {
 
 // A Rua of a page: what its newest follows posted, read on demand (page.feed:
 // no cursor, no sync signals), so it is one list with a pull to refresh.
-function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onDeletedPost, onScrollFrame, onUserScroll }) {
+function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onQuote, onToast, onDeletedPost, onScrollFrame, onUserScroll }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
@@ -1671,7 +1674,7 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
       await revokeDeletedMedia(request, [t.seq])
     }
   })
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined }
   // Which handlers exist adds or removes buttons: a change re-renders the rows.
   const offered = Object.keys(handlers).filter((k) => typeof handlers[k] === 'function').join()
   const extra = useMemo(() => ({ profileOf: names.profileOf, now, social: social.social, offered, ownKey }), [names.profileOf, now, social.social, offered, ownKey])
@@ -1771,12 +1774,12 @@ export default function ARua (props) {
   if (acting.kind === 'page') {
     // The core session refuses page.feed, so there is nothing to read here.
     if (node.hosted !== true) return <View style={styles.footer}><Soft>A Rua da página só no app hospedado</Soft></View>
-    return <PageARua {...props} acting={acting} />
+    return <PostSheetProvider><PageARua {...props} acting={acting} /></PostSheetProvider>
   }
-  return <MemberARua {...props} />
+  return <PostSheetProvider><MemberARua {...props} /></PostSheetProvider>
 }
 
-function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onDeletedPost, onBoot, onMessage, onOpenMomentos, onCreateMoment, onScrollFrame, onUserScroll }) {
+function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onQuote, onToast, onDeletedPost, onBoot, onMessage, onOpenMomentos, onCreateMoment, onScrollFrame, onUserScroll }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   // The full hints (per-diary lengths, fresh keys): useNode() keeps only the
@@ -2408,7 +2411,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   // Reply names re-render when the cache changes; relative dates on each tick.
   // Originals, counts, the own state and whether deleting is offered re-render
   // the rows too.
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined, onMessage }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined, onMessage }
   // Which handlers exist adds or removes buttons: a change re-renders the rows.
   const offered = Object.keys(handlers).filter((k) => typeof handlers[k] === 'function').join()
   const extra = useMemo(() => ({ profileOf: names.profileOf, now, social: social.social, offered, ownKey }), [names.profileOf, now, social.social, offered, ownKey])

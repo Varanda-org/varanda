@@ -275,3 +275,63 @@ test('opening a community or group from Comunidades closes the search keyboard',
   t.ok(at('openCommunity').includes('Keyboard.dismiss()'), 'community')
   t.ok(at('openGroup').includes('Keyboard.dismiss()'), 'group')
 })
+
+test('a Geral row whose community name is only invisible characters is titled Geral', async (t) => {
+  const { mergeRows } = await load()
+  const groups = [
+    { group: 'g1', general: true, title: '\u200b\u2060', community: 'c1' },
+    { group: 'g2', general: true, title: '@', community: 'c2' },
+    { group: 'g3', general: false, name: '\u200b', community: 'c3' }
+  ]
+  const rows = mergeRows({ groups })
+  t.alike(rows.map((row) => [row.key, row.title]), [['group:g1', 'Geral'], ['group:g2', 'Geral'], ['group:g3', 'Grupo']])
+})
+
+test('groups without a date sort by the title the row shows', async (t) => {
+  const { mergeRows } = await load()
+  const groups = [
+    { group: 'z', name: 'Zebra' },
+    { group: 'a', name: '\u200bAbelha' },
+    { group: 'b', name: '@Bode' },
+    { group: 'c', name: 'Casa' }
+  ]
+  t.alike(mergeRows({ groups }).map((row) => row.group), ['a', 'b', 'c', 'z'])
+  const same = [{ group: 'y', name: '@Rio' }, { group: 'x', name: 'Rio' }]
+  t.alike(mergeRows({ groups: same }).map((row) => row.group), ['x', 'y'], 'equal shown titles fall back to the key')
+})
+
+test('withoutOwn leaves out the person key and the active Página key, in any case', async (t) => {
+  const { withoutOwn } = await load()
+  const me = 'a'.repeat(64)
+  const page = 'b'.repeat(64)
+  const other = 'c'.repeat(64)
+  t.alike(withoutOwn([me, page, other], [me, page]), [other])
+  t.alike(withoutOwn([me.toUpperCase(), other], [me, null]), [other])
+  t.alike(withoutOwn([{ author: page }, { author: other }], [me, page.toUpperCase()], (h) => h.author), [{ author: other }])
+  t.alike(withoutOwn([me, other], [null, null]), [me, other], 'acting as the person leaves only the own key out')
+  t.alike(withoutOwn(null, [me]), [])
+})
+
+test('the + sheet leaves the active Página out of the recents and the search', (t) => {
+  const sheet = readFileSync(join(__dirname, '../src/screens/NovaConversa.js'), 'utf8')
+  t.ok(sheet.includes("acting.kind === 'page' ? acting.key : null"), 'the Página key joins the own keys')
+  t.ok(sheet.includes('withoutOwn(search.hits, ownKeys') && sheet.includes('.filter((peer) => typeof peer === \'string\'), ownKeys)'), 'hits and recents use them')
+})
+
+test('handleLine gives the verified @nome under a name, cleaned like the title', async (t) => {
+  const { handleLine } = await load()
+  t.is(handleLine({ name: 'Ana Souza', username: 'ana_s' }), '@ana_s')
+  t.is(handleLine({ name: '@maria', username: 'ana_s' }), '@ana_s', 'the name cannot pose as the @nome: only the record shows')
+  t.is(handleLine({ name: null, username: 'ana_s' }), null, 'no name: the title already is the @nome')
+  t.is(handleLine({ name: '\u200b@', username: 'ana_s' }), null)
+  t.is(handleLine({ name: 'Ana', username: null }), null)
+  t.is(handleLine({ name: 'Ana', username: 'Not Valid' }), null, 'an invalid @nome is never shown')
+  t.is(handleLine(undefined), null)
+  t.is(handleLine(null), null)
+})
+
+test('a person row draws the @nome line from the names cache only', (t) => {
+  const row = readFileSync(join(__dirname, '../src/ui/ConversationRow.js'), 'utf8')
+  t.ok(row.includes('const handle = person ? handleLine(profile) : null'), 'a group never has one')
+  t.ok(row.includes('{handle ? <Text style={styles.handle} numberOfLines={1}>'), 'one line, cut like the title')
+})

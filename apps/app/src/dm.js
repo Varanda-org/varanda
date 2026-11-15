@@ -19,9 +19,7 @@ export const LABELS = Object.freeze({
   report: 'Denunciar',
   reply: 'Responder',
   message: 'Mensagem',
-  newMessage: 'Nova mensagem',
   requests: 'Pedidos de mensagem',
-  emptyInbox: 'Nenhuma conversa ainda. Abra o perfil de alguém e toque em Mensagem.',
   emptyRequests: 'Nenhum pedido de mensagem',
   requestNote: 'Até você aceitar, quem enviou não sabe se você leu',
   noBox: 'Esta pessoa ainda não recebe mensagens. Assim que ela abrir o Varanda com a versão nova, dá para escrever.',
@@ -100,10 +98,6 @@ export function tabDot (folders) {
   const box = folders && typeof folders === 'object' ? folders : null
   if (!box) return false
   return hasUnread(box.inbox) || hasUnread(box.requests)
-}
-
-export function requestsDot (requests) {
-  return hasUnread(requests)
 }
 
 // Oldest first, so the newest line sits at the bottom. A replyTo id becomes
