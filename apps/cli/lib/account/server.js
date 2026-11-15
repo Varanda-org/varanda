@@ -1196,7 +1196,10 @@ function createAccountServer ({
   function release (row) {
     if (!inviting || row.invite === null || row.invite === undefined) return
     const entry = held.get(row.invite)
-    if (entry !== undefined && entry.pendingId === row.id) held.delete(row.invite)
+    if (entry !== undefined && entry.pendingId === row.id) {
+      held.delete(row.invite)
+      if (typeof invites.release === 'function') invites.release(row.id)
+    }
   }
 
   // -> { id, takeover } for start, or throws. A reservation whose row is
@@ -1338,6 +1341,9 @@ function createAccountServer ({
       else linking.delete(member)
       if (inviting) {
         finishing.delete(row.id)
+        // The Feira slot is held only while this finish runs: a linked row
+        // now counts as used, a refused one frees it for its retry.
+        if (typeof invites.release === 'function') invites.release(row.id)
         // A row that survived the refusal keeps its code, so a retry works.
         if (store.get(row.id) === null) release(row)
       }
@@ -1367,6 +1373,12 @@ function createAccountServer ({
         forgetApp(row.id)
         throw err
       }
+      // A Feira code holds its inviter's weekly slot from here, after every
+      // proof and in the same synchronous step as the check above (finishRow
+      // awaits nothing before store.finish), so two finishes in flight never
+      // pass the cap together. Unsigned starts hold nothing. finish's
+      // finally releases it, and a hold whose row is gone counts for nothing.
+      if (typeof invites.reserve === 'function') invites.reserve(row.invite, row.expiresAt, row.id, () => store.get(row.id) !== null)
     }
     await finishRow(res, row, signature, true, phone)
   }

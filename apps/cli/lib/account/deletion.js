@@ -62,17 +62,33 @@ function createDeletionSweep ({ accounts, terms = null, ages = null, pushStore =
     if (r.ok !== true) throw new Error('vistos-conflito')
   }
 
+  // Once per file: a corrupt or unreadable file is never read as empty, so
+  // the purge stays pending until the operator fixes or moves it. Names the
+  // file only, never its contents or a member.
+  const warned = new Set()
+  function warnBroken (name, store) {
+    let files = typeof store.brokenFiles === 'function' ? store.brokenFiles() : []
+    if (files.length === 0 && !usable(store)) files = [name]
+    for (const file of files) {
+      if (warned.has(file)) continue
+      warned.add(file)
+      log({ event: 'exclusao', reason: 'arquivo-invalido', file, aviso: 'arquivo ' + file + ' ilegível ou corrompido: a purga de exclusões fica pendente até o operador corrigir ou mover o arquivo' })
+    }
+  }
+
   // -> the number of stores still holding (or unable to answer for) member.
   async function purgeOne (member) {
     let pending = 0
-    for (const [, store, holds, forget] of steps) {
+    for (const [name, store, holds, forget] of steps) {
       if (!usable(store)) {
+        warnBroken(name, store)
         pending++
         continue
       }
       try {
         if (holds(member)) await forget(member)
       } catch {
+        warnBroken(name, store)
         pending++
       }
     }
