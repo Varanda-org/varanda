@@ -11046,7 +11046,52 @@ node apps/cli/test/post-page.test.js
 - [ ] Link aberto de dentro do WhatsApp e do Instagram (navegador embutido): pendente.
 - [ ] Fonte maior no sistema ou no navegador (ajuste de tamanho do texto, não zoom da página), no Android e no iOS: pendente. A página usa tamanhos em px, como o app.
 
-## 240. O splash mostra a apresentação inteira antes da primeira tela (PR fix/splash-full-presentation)
+## 240. Anel do seu momento redondo no Android (PR fix/momentos-ring-circle)
+
+Esta seção confere a correção do quadrado cinza atrás da sua foto na faixa de momentos de A Rua, no Android. O seu anel monta como "+" (fundo transparente) e ganha a cor de contorno quando os momentos carregam. No Android, a View transparente era achatada (sem view nativa própria) e, quando virava uma view de verdade, a cor saía sem o raio: um quadrado de 64 pt. A View do anel agora tem `collapsable={false}`. Os outros anéis já montavam com a cor e ficavam redondos. Só o visual: sem mudança de protocolo, RPC, Termos nem dependência.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA, cada um em claro e escuro, com os dados da Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`).
+
+- [x] Android, emulador API 36, build de debug, escuro: antes da correção, o anel "Você" aparecia sobre um quadrado cinza no estado não visto e no visto (abrir o seu momento e fechar). Depois: redondo nos dois estados, também depois de apagar os dados do app e abrir de novo. Conferido em 2026-11-14.
+- [x] Android, claro: o anel visto continua redondo ao trocar o tema com o app aberto. Conferido em 2026-11-14.
+- [x] iOS (simulador iPhone 17 Pro, build de debug) e Chrome na web (390 px, escuro): o anel já era redondo antes da correção e continua igual. Conferido em 2026-11-14.
+- [ ] Aparelho Android com a conta de verdade (foto no avatar), app instalado: o anel "Você" redondo depois de abrir e fechar o seu momento. Pendente.
+- [ ] PWA instalado no Android e no iOS: o anel redondo. Pendente.
+- [ ] Sem momento seu no ar: o selo verde de "+" aparece inteiro, sem corte, no Android, no iOS e na web. Pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A asserção nova (`collapsable` falso na View do anel) falha sem a correção.
+
+```sh
+node apps/app/test/momentosScreen.test.js
+node apps/app/test/screensPolish.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 241. Data afastada da pílula "seguir" (PR fix/platform-parity-sweep)
+
+Esta seção confere o espaço entre a data e a pílula "seguir" no topo de uma publicação (Espiadinha e Busca). A face da pílula começa na borda do seu alvo de toque, e o topo reservava só a largura dos botões, sem folga: no Android, "· 5 nov" encostava na pílula e entrava um pouco nela; no iOS, encostava. Agora o topo reserva 8 pt a mais quando há "seguir", também com texto grande. Com só o ⋯ nada muda: o ícone já fica no meio de um alvo mais largo. Só o visual: sem mudança de protocolo, RPC, Termos nem dependência.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web, em escuro, com os dados da Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`).
+
+- [x] Android, emulador API 36, build de debug, escuro, Espiadinha: antes, na linha de Tomás Ferreira, "· 5 nov" encostava na pílula e entrava um pouco nela. Depois: 8 pt entre a data e a pílula em todas as linhas, e o `@nome` corta antes ("@tomas…"). Conferido em 2026-11-14.
+- [x] Android, texto grande (escala 1,3): o nome fica na primeira linha, a data embaixo, e nada encosta na pílula. Conferido em 2026-11-14.
+- [x] iOS, simulador iPhone 17 Pro, build de debug, escuro, Espiadinha: antes, a data encostava na pílula; depois, o mesmo espaço do Android. Conferido em 2026-11-14.
+- [x] Chrome na web, 390 px, escuro, Espiadinha: 8,4 px entre o fim de "· 5 nov" e a pílula em todas as linhas. Conferido em 2026-11-14.
+- [ ] Busca, com uma conta que você não segue: o mesmo espaço. Pendente.
+- [ ] Texto grande no iOS e na web. Pendente.
+- [ ] PWA instalado no Android e no iOS. Pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A asserção nova (`headPad` com 8 pt a mais quando há "seguir") falha sem a correção.
+
+```sh
+node apps/app/test/postLayout.test.js
+node apps/app/test/postOverflow.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 242. O splash mostra a apresentação inteira antes da primeira tela (PR fix/splash-full-presentation)
 
 Esta seção confere que o splash só sai depois de mostrar a apresentação inteira: a entrada (o chão, a varanda, a cadeira, as letras e a barra, cerca de 1,3 s) e uma pausa curta na cena pronta, 1,5 s no total (`PRESENTATION_MS` em `apps/app/src/ui/splashMotion.js`). Pode ficar mais enquanto o app carrega, nunca menos. Vale no Android, no iOS, na web e no PWA.
 
