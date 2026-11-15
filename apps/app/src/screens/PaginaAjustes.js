@@ -52,7 +52,7 @@ import { shareNav } from '../shareNav'
 import { MAX_ADMINS, cancelOfferOp, closeOp, inviteOp, moveOp, offerOp, removeOp, rosterRows } from '../pageRoster'
 import { pagesOn } from '../pageGate'
 import * as actingAs from '../actingAs'
-import { Btn, ConfirmStack, ErrorText, Field, Notice, Page, Row, SectionHeader, Soft, errorText, useAction } from '../ui'
+import { Btn, ConfirmStack, ErrorText, Field, Notice, Page, Row, SectionHeader, Soft, errorText, useAction, useNow } from '../ui'
 import { refusalOf } from '../wordCheck'
 import { Avatar } from '../ui/Avatar'
 import { AvatarEditor } from '../ui/AvatarEditor'
@@ -539,7 +539,9 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
     return run(reboxAct, () => held.retry().then(reboxDone, holdRebox), reboxNotice)
   }
 
-  const offerPending = !!status && !!status.offer && Date.parse(status.offer.exp) > Date.now()
+  // Ticks so an offer that expires while the screen is open stops showing as pending.
+  const now = useNow(60000)
+  const offerPending = !!status && !!status.offer && Date.parse(status.offer.exp) > now
 
   const transfer = () => run(transferAct, async () => {
     setConfirm(null)

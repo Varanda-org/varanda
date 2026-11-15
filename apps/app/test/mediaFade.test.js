@@ -44,7 +44,7 @@ test('fade does not change load, keep or retry', (t) => {
   t.absent(loader.includes('Animated'), 'the loader does not fade')
   t.absent(loader.includes('opacity'), 'the loader does not fade')
   t.absent(loader.includes('motion.fast'), 'the loader does not time the fade')
-  t.ok(src.includes('const canFetch = !keptOnly && node !== null && node.hosted === true'))
+  t.ok(src.includes('const canFetch = !keptOnly && hosted === true'))
   t.ok(src.includes('keptStore.keptUrl(kind, author, d)'))
   t.ok(src.includes("keptOnlyUrl('posts', author, descriptor, persist)"))
   t.ok(src.includes("if (keptOnly) return kept !== null ? { state: 'ok', url: kept, retry: undefined } : { state: 'loading', url: null, retry: undefined }"))

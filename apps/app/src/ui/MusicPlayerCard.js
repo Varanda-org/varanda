@@ -6,7 +6,7 @@ import { audiusItem, audiusPlay, audiusReady } from '../account'
 import { MUSIC_FULL_LIST_TEXT, MUSIC_SEEK_TEXT, MUSIC_SOURCE, SNIPPET_BADGE, clampStart, musicErrorText, musicOriginOf, musicPartialText, queueIdle, queueStep, seekReached, snippetEndMs, snippetTick } from '../music'
 import { claimPlayback, playbackEpoch } from '../media/chatMedia'
 import { createStreamPlayer } from '../media/stream'
-import { useHosted, useNode } from '../node'
+import { useHosted, useMemberKey, useNodeHandle } from '../node'
 import { openExternal } from '../openExternal'
 import { OPEN_GRACE_MS, VISIBILITY_MS, mostlyHidden } from '../embedLive'
 import { LinkCard } from './LinkCard'
@@ -321,10 +321,8 @@ function MusicPlayerEntry ({ card, music, onLongPress }) {
 }
 
 function ActiveMusicPlayer ({ card, music, onLongPress, epoch }) {
-  const node = useNode()
-  const member = node.passkey && node.passkey.status && typeof node.passkey.status.publicKey === 'string'
-    ? node.passkey.status.publicKey.toLowerCase()
-    : null
+  const node = useNodeHandle()
+  const member = useMemberKey()
   const enabled = musicOriginOf(node) !== null
   const origin = node.accountOrigin || musicOriginOf(node)
   const request = node.request
