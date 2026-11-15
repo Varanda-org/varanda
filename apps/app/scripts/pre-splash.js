@@ -258,7 +258,7 @@ async function renderPreSplash () {
     '  ' + P + ' .bar { background: rgba(245,245,245,0.14); }',
     '  ' + P + ' .bar span { background: #5dcaa0; }',
     '}',
-    '/* once the bundle runs, html carries the scheme chosen in Ajustes, which can differ from the system\'s */',
+    '/* public/pre-scheme.js, then the bundle, put the scheme chosen in Ajustes on html; it can differ from the system\'s */',
     'html[data-scheme=light] ' + P + ' { background: #fbf8f3; }',
     'html[data-scheme=light] ' + P + ' .bar { background: rgba(31,42,36,0.10); }',
     'html[data-scheme=light] ' + P + ' .bar span { background: #1d6b4f; }',
