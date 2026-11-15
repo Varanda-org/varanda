@@ -16,6 +16,7 @@
 // no passkey PRF is involved, so the worklet host can sync too.
 
 const b4a = require('b4a')
+const crypto = require('hypercore-crypto')
 const seenBlob = require('@varanda/core/lib/seen-blob')
 const { HASH_NONE, blobHash, signSeen } = require('@varanda/core/lib/seen-proof')
 const { blockedKeys, mergeBlocks } = require('@varanda/core/lib/member-block')
@@ -68,12 +69,18 @@ function addTokens (list, tokens, t) {
 // tokens the app supplies, plus the member's own block list (kv memberBlocks).
 //
 // Once the document holds dm tokens, every token marked here since ranks
-// above all of them (one t for the batch, ties broken by token in the
-// trim), else a batch made seconds after a sync interleaves with the synced
-// one and the window cut drops new marks that then never sync. Only the
-// first merge backdates (newest last), so a device seeding thousands of old
-// marks keeps the newest of them.
-function localView (base, dmIds, marks, avisos, now, blocks = []) {
+// above all of them, else a batch made seconds after a sync interleaves with
+// the synced one and the window cut drops new marks that then never sync.
+// Each mark of a batch gets its own second, newest last, so a batch larger
+// than the window keeps its newest marks: one shared t would leave the cut
+// to token order. The first merge backdates (newest last), so a device
+// seeding thousands of old marks keeps the newest of them.
+//
+// held: the avisos tokens a stored or remote document already carried. An
+// offered token the stored document no longer has was cut from the window
+// as too old: it is not stamped as a new mark again, else it would push a
+// newer mark out and come back as new on the other devices.
+function localView (base, dmIds, marks, avisos, now, blocks = [], held = null) {
   const inBase = new Set(base.dm.map((e) => e.token))
   let last = -1
   for (let i = dmIds.length - 1; i >= 0; i--) {
@@ -91,21 +98,66 @@ function localView (base, dmIds, marks, avisos, now, blocks = []) {
   for (let i = 0; i < n; i++) {
     if (seen.has(fresh[i])) continue
     seen.add(fresh[i])
-    const t = top < 0 ? Math.max(0, now - (n - 1 - i)) : Math.min(Math.max(now, top + 1), U32_MAX)
+    const t = top < 0 ? Math.max(0, now - (n - 1 - i)) : Math.min(Math.max(now - (n - 1 - i), top + 1 + i), U32_MAX)
     dm.push({ token: fresh[i], t })
   }
 
   let own = base.avisos.own
   const pages = { ...base.avisos.pages }
   if (avisos) {
-    own = addTokens(own, avisos.own || [], now)
+    const uncut = (list) => held === null ? list : list.filter((tk) => !held.has(tk))
+    own = addTokens(own, uncut(avisos.own || []), now)
     for (const key of Object.keys(avisos.pages || {})) {
-      pages[key] = addTokens(pages[key] || [], avisos.pages[key], now)
+      pages[key] = addTokens(pages[key] || [], uncut(avisos.pages[key]), now)
     }
   }
   const groups = base.groups.slice()
   for (const m of marks) groups.push({ group: m.group, at: m.at, writer: m.writer, seq: m.seq })
   return { gen: base.gen, member: base.member, association: base.association, avisos: { own, pages }, dm, groups, blocks: mergeBlocks(base.blocks, blocks) }
+}
+
+// Every avisos token of a document, own and pages.
+function avisosTokens (doc) {
+  const out = doc.avisos.own.map((e) => e.token)
+  for (const key of Object.keys(doc.avisos.pages)) for (const e of doc.avisos.pages[key]) out.push(e.token)
+  return out
+}
+
+// A uniform integer in [0, n), n <= 65536, by rejection over u16 draws.
+function randomBelow (n) {
+  const limit = Math.floor(65536 / n) * n
+  for (;;) {
+    const r = crypto.randomBytes(2)
+    const x = r[0] | (r[1] << 8)
+    if (x < limit) return x % n
+  }
+}
+
+// kv seenHeld with `cut` added, each in a uniformly random slot, never two
+// in the same slot within one call (a partial Fisher-Yates over the slot
+// indices), so a batch never overwrites itself. An absent list starts as
+// random tokens.
+function addHeld (ids, cut) {
+  const out = ids === null ? [] : ids.slice()
+  while (out.length < store.SEEN_HELD_MAX) out.push(hex(crypto.randomBytes(16)))
+  const have = new Set(out)
+  const fresh = []
+  for (const token of cut) {
+    if (have.has(token)) continue
+    have.add(token)
+    fresh.push(token)
+  }
+  // The newest cut tokens when more than the list holds.
+  const put = fresh.slice(-store.SEEN_HELD_MAX)
+  const slots = Array.from({ length: store.SEEN_HELD_MAX }, (_, i) => i)
+  for (let k = 0; k < put.length; k++) {
+    const j = k + randomBelow(store.SEEN_HELD_MAX - k)
+    const tmp = slots[k]
+    slots[k] = slots[j]
+    slots[j] = tmp
+    out[slots[k]] = put[k]
+  }
+  return out
 }
 
 function sameKeys (a, b) {
@@ -126,8 +178,12 @@ function avisosOut (doc) {
 }
 
 // Remote group marks applied through member-ops groupSeen (the 'group.seen'
-// path) on the cores withCores lends, and the caughtUp keys of the groups
-// whose mark moved (community.info's unread, docs/rpc.md 5.59).
+// path) on the cores withCores lends, and caughtUp(): the caughtUp keys of
+// the groups whose mark moved (community.info's unread, docs/rpc.md 5.59).
+// The merge calls caughtUp() as its last step, right before it answers: a
+// post that lands after that read reaches the app as groups.changed only
+// after the answer (sync.js coalesces it for GROUPS_CHANGED_MS), so the app
+// can acknowledge the versions it holds when the answer arrives.
 // guard() throws when the identity changed since the merge started.
 function groupApplier ({ storage, withCores }) {
   return async function applyGroups (marks, guard) {
@@ -138,7 +194,7 @@ function groupApplier ({ storage, withCores }) {
       return l === undefined || !sameMark(l, m)
     })
     if (todo.length === 0) return { moved: [], caughtUp: [] }
-    return withCores(async (c) => {
+    const moved = await withCores(async (c) => {
       for (const m of todo) {
         guard()
         try {
@@ -149,12 +205,13 @@ function groupApplier ({ storage, withCores }) {
         }
       }
       const after = await store.readGroupSeen(storage)
-      const moved = after.filter((m) => {
+      return after.filter((m) => {
         const l = at.get(m.group)
         return l === undefined || !sameMark(l, m)
       }).map((m) => m.group)
-      return { moved, caughtUp: await caughtUpOf(c, moved) }
     })
+    const caughtUp = moved.length === 0 ? [] : () => withCores((c) => caughtUpOf(c, moved))
+    return { moved, caughtUp }
   }
 }
 
@@ -182,12 +239,17 @@ async function caughtUpOf (c, moved) {
       continue
     }
     const caught = (r) => READER_ROLES.has(r.role) && r.unread === 0
+    // The mark that moved names a post this node lists, so a moved group it
+    // can read has a last. last null there means no post could be read (a
+    // private group without its key yet, the browser locked), and its
+    // unread 0 says nothing.
+    const read = (r) => !groups.includes(r.group) || r.last !== null
     for (const r of info.groups) {
-      if (groups.includes(r.group) && caught(r)) out.push(r.group)
+      if (groups.includes(r.group) && caught(r) && read(r)) out.push(r.group)
     }
     // A group whose core did not load (role null) or an incomplete fold may
     // hide unread posts, so the community is not caught up.
-    if (info.incomplete !== true && info.groups.length > 0 && info.groups.every(caught)) out.push(community)
+    if (info.incomplete !== true && info.groups.length > 0 && info.groups.every((r) => caught(r) && read(r))) out.push(community)
   }
   return out.slice(0, CAUGHT_UP_MAX)
 }
@@ -278,7 +340,9 @@ function createSeenSync ({ storage, association, log = noop, currentOwn = () => 
       const dmIds = await store.readDmSeen(storage)
       const marks = await store.readGroupSeen(storage)
       const heldBlocks = await store.readMemberBlocks(storage)
-      const local = localView(base, dmIds, marks, avisos, now, heldBlocks)
+      const heldIds = await store.readSeenHeld(storage, own)
+      const held = new Set(heldIds || [])
+      const local = localView(base, dmIds, marks, avisos, now, heldBlocks, held)
       local.gen = Math.max(base.gen, Math.min(sync.gen, U32_MAX))
       // Never re-sealed over a newer format, local or remote.
       const untouched = () => ({ avisos: avisosOut(seenBlob.trim(local)), pending: false, dmChanged: false, groupChanged: false, blocksChanged: false, caughtUp: [] })
@@ -329,11 +393,21 @@ function createSeenSync ({ storage, association, log = noop, currentOwn = () => 
 
       const { doc: merged, localOnly } = seenBlob.merge(local, remote)
 
+      // The next kv dmSeen, oldest first, cut by writeDmSeen at MAX_DM_SEEN:
+      // the union with EVERY remote token, not only the ones the shared
+      // window kept. The merged window goes last in its own order. Before
+      // it, the remote tokens it cut go first: each is older than every
+      // token of the window and was never read here, so with the list full
+      // they leave before any local read does. A token cut from the window
+      // is never offered again as a fresh mark, since localView offers only
+      // the ids after the newest one the stored document holds.
       const have = new Set(dmIds)
-      const added = new Set()
-      for (const e of remote.dm) if (!have.has(e.token)) added.add(e.token)
-      for (const e of merged.dm) if (!have.has(e.token)) added.add(e.token)
-      const dmChanged = added.size > 0
+      const window = merged.dm.map((e) => e.token)
+      const inWindow = new Set(window)
+      const remoteOld = []
+      for (const e of remote.dm) if (!have.has(e.token) && !inWindow.has(e.token)) remoteOld.push(e.token)
+      const nextDm = [...remoteOld, ...dmIds.filter((tk) => !inWindow.has(tk)), ...window].slice(-store.MAX_DM_SEEN)
+      const dmChanged = nextDm.some((tk) => !have.has(tk))
 
       let groupChanged = false
       let caughtUp = []
@@ -361,18 +435,20 @@ function createSeenSync ({ storage, association, log = noop, currentOwn = () => 
       // the document could hide a local mark for good if the merge stopped
       // in between. Stopped here instead, the next merge re-adds the remote
       // tokens, which the remote copy still holds.
-      //
-      // It is the union with EVERY remote token, not only the ones the
-      // shared window kept, newest last and cut by writeDmSeen at
-      // MAX_DM_SEEN. The merged window goes last in its own order and the
-      // rest before it, so the window's tokens end newest and a remote
-      // token cut from the window is never offered again as a fresh mark.
       if (dmChanged) {
         guard()
-        const window = merged.dm.map((e) => e.token)
-        const inWindow = new Set(window)
-        const before = [...dmIds, ...added].filter((tk) => !inWindow.has(tk))
-        await store.writeDmSeen(storage, [...before, ...window])
+        await store.writeDmSeen(storage, nextDm)
+      }
+
+      // kv seenHeld goes after the document too: stopped before it, a cut
+      // token may be stamped new once more, never lost. It is written padded
+      // at the first merge of the identity, so its presence says nothing
+      // about whether a token was ever cut.
+      const keptAvisos = new Set(avisosTokens(merged))
+      const cut = [...avisosTokens(local), ...avisosTokens(remote)].filter((tk) => !keptAvisos.has(tk) && !held.has(tk))
+      if (cut.length > 0 || heldIds === null) {
+        guard()
+        await store.writeSeenHeld(storage, own, addHeld(heldIds, cut))
       }
 
       // kv memberBlocks goes after the document for the same reason, and takes
@@ -385,6 +461,11 @@ function createSeenSync ({ storage, association, log = noop, currentOwn = () => 
         await store.writeMemberBlocks(storage, nextBlocks)
       }
 
+      if (typeof caughtUp === 'function') {
+        guard()
+        caughtUp = await caughtUp()
+        guard()
+      }
       return { avisos: avisosOut(merged), pending: ignored ? false : localOnly, dmChanged, groupChanged, blocksChanged, caughtUp }
     } finally {
       key.fill(0)

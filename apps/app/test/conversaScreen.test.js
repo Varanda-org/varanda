@@ -9,7 +9,7 @@ const src = readFileSync(join(__dirname, '../src/screens/Conversa.js'), 'utf8')
 const app = readFileSync(join(__dirname, '../App.js'), 'utf8')
 
 test('Conversa: nested rows use the verified thread gate and reset with the focal ref', (t) => {
-  t.ok(src.includes('threadRows({ replies, ...branches, open, more: childMore })'))
+  t.ok(src.includes('threadRows({ replies: view.replies, ...branches, open, more: childMore })'))
   t.ok(src.includes('assembleThread({ focal: parentKey, index, peeked })'))
   t.ok(src.includes('mergeChildren(previous, parentKey, items)'))
   t.ok(src.includes('setOpen(new Set())') && src.includes('setChildren(new Map())'))
@@ -29,7 +29,22 @@ test('Conversa: full nodes pin ReplyBar and keep the sheet path elsewhere', (t) 
   t.ok(src.includes('{full || sending\n        ? (') && src.includes('<ReplyBar'))
   t.ok(src.includes('onClearTarget={() => setReplyTarget(null)}'))
   t.ok(src.includes('onSend={sendReply}'))
-  t.ok(src.includes('renderItem={({ item: row }) => renderThreadRow(row)}'))
+  t.ok(src.includes('renderItem={renderItem}'))
+})
+
+test('Conversa: thread rows are stable across renders', (t) => {
+  t.absent(/renderItem=\{\(/.test(src), 'no inline renderItem')
+  t.ok(src.includes('const renderItem = useCallback(({ item: row }) => renderRef.current(row), [])'), 'one renderItem through a ref')
+  t.ok(src.includes('renderRef.current = (row) => {'), 'the ref holds the newest row renderer')
+  t.ok(src.includes('extraData={extra}') && src.includes('const extra = useMemo(() => ({ eng, follows, now, childBusy, childErrors, childNext, styles, profileOf: names.profileOf }), [eng, follows, now, childBusy, childErrors, childNext, styles, names.profileOf])') && src.includes('return useMemo(() => ({ state, counts, pending, reset, readOwn, readCounts, setCount, toggle }), [state, counts, pending, reset, readOwn, readCounts, setCount, toggle])'), 'extraData is memoized on what rows read')
+  t.ok(src.includes('const rowCache = useThreadRowCache(rows.map((row) => row.key), { handlers, eng: full ? eng : null })'), 'the list owns a row props cache')
+  t.ok(src.includes('<PostRow {...props(row.item, row.depth === 0 ? DEPTH_ZERO : undefined, row.key)} />'), 'reply rows take cached props')
+  t.ok(src.includes('return cachedRow(cache, rowKey, inputs, latest, build)'), 'rowProps caches through cachedRow')
+  const hooks = src.indexOf('const rowCache = useThreadRowCache(')
+  t.ok(hooks !== -1 && hooks < src.indexOf('if (!full && !sending) {'), 'the list hooks run before the offline return')
+  const screen = src.slice(src.indexOf('export default function Conversa ('), src.indexOf('export function ReplyDock ('))
+  t.absent(screen.includes('useKeyboardOpen()'), 'the keyboard state is not read by the screen')
+  t.ok(/export function ReplyDock \([^)]*\) \{\s*const insets = useSafeAreaInsets\(\)\s*const keyboardOpen = useKeyboardOpen\(\)/.test(src), 'the reply dock owns the keyboard state')
 })
 
 test('Conversa: compose signals focus even when the same stack entry is already on top', (t) => {
@@ -118,7 +133,7 @@ async function sending (options = {}) {
       return { ref: A + ':8', seq: 8 }
     }
   }
-  const send = handler(src, '  const sendReply = async', '  const childMore =', 'sendReply', context)
+  const send = handler(src, '  const sendReply = async', '  renderRef.current = (row) => {', 'sendReply', context)
   return { send, state, context }
 }
 
@@ -270,13 +285,15 @@ test('Conversa children handler: wrong-parent hints are excluded and stale loads
 })
 
 test('Conversa reply chips hide the focal parent only at depth zero', (t) => {
-  t.ok(src.includes('props(row.item, row.depth === 0 ? { replyToName: null, onOpenParent: undefined } : undefined)'))
+  t.ok(src.includes('const DEPTH_ZERO = { replyToName: null, onOpenParent: undefined }'))
+  t.ok(src.includes('props(row.item, row.depth === 0 ? DEPTH_ZERO : undefined, row.key)'))
 })
 
 test('Conversa bar respects the safe area and consumes compose intent once', (t) => {
   t.ok(src.includes("import { useSafeAreaInsets } from 'react-native-safe-area-context'"))
   t.ok(src.includes('const insets = useSafeAreaInsets()'))
-  t.ok(/<View ref=\{barBox\} collapsable=\{false\} style=\{\[styles.barWrap, \{ paddingBottom: keyboardOpen \? 8 : Math.max\(8, insets.bottom\) \}\]\}>\s*<ReplyBar/.test(src), 'the inset is dropped while the keyboard is open')
+  t.ok(src.includes('<View ref={barBox} collapsable={false} style={[style, { paddingBottom: keyboardOpen ? 8 : Math.max(8, insets.bottom) }]}>'), 'the inset is dropped while the keyboard is open')
+  t.ok(/<ReplyDock barBox=\{barBox\} style=\{styles.barWrap\}>\s*<ReplyBar/.test(src), 'the bar sits in the dock')
   t.ok(src.includes('barWrap: { backgroundColor: colors.bg, paddingHorizontal: space.md, paddingTop: space.sm }'), 'the page shows around the floating pill')
   t.ok(src.includes('me={me}') && /export default function Conversa \(\{[^}]*\bme,/.test(src), 'the bar gets the own profile')
   t.ok(app.includes('me: tabMe,'), 'App passes the tab profile to screens')
@@ -284,13 +301,13 @@ test('Conversa bar respects the safe area and consumes compose intent once', (t)
   t.ok(src.includes('nonFocalTarget={replyTarget !== null && replyTarget.ref !== focal}'), 'a reply to another row is flagged')
   t.ok(src.includes('onReply(attach ? { ...target, draft, attach } : { ...target, draft })'), 'attach rides only when given')
   t.ok(/targetReply\(composeSignal.target\)\s*if \(typeof onComposeSeen === 'function'\) onComposeSeen\(\)/.test(src))
-  t.ok(app.includes('onComposeSeen={() => setComposeSignal(null)}'))
+  t.ok(app.includes('onComposeSeen={h.handleComposeSeen}') && app.includes('handleComposeSeen: () => setComposeSignal(null)'))
 })
 
 test('Conversa ends the player band at the reply bar', (t) => {
   t.ok(src.includes("import { EmbedBandBottom } from '../ui/screenVisible'"), 'imports the band context')
   t.ok(src.includes('const barBox = useRef(null)'), 'the bar wrapper ref')
-  t.ok(src.includes('<View ref={barBox} collapsable={false} style={[styles.barWrap'), 'the bar wrapper is measured')
+  t.ok(src.includes('<View ref={barBox} collapsable={false} style={[style,') && src.includes('<ReplyDock barBox={barBox} style={styles.barWrap}>'), 'the bar wrapper is measured')
   t.ok(src.includes('<EmbedBandBottom.Provider value={full || sending ? band : null}>'), 'the list gets the band while the bar shows')
   const opens = src.indexOf('<EmbedBandBottom.Provider')
   const list = src.indexOf('<RefreshableList')
@@ -793,7 +810,7 @@ test('a deletion anywhere drops the reply from every mounted Conversa copy', asy
 
 test('Conversa: reply branch controls are slim text links, not filled pills', (t) => {
   const link = readFileSync(join(__dirname, '../src/ui/BranchLink.js'), 'utf8')
-  const from = src.indexOf('  const renderThreadRow = (row) => {')
+  const from = src.indexOf('  renderRef.current = (row) => {')
   const to = src.indexOf('  const notes = []')
   t.ok(from !== -1 && to > from, 'thread row renderer is present')
   const rowsSrc = src.slice(from, to)

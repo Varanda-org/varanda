@@ -106,7 +106,7 @@ test('App: frames while the bars slide only move the anchor', (t) => {
 })
 
 test('App: A Rua feeds the scroll callbacks', (t) => {
-  const rua = between(app, '<ARua\n', '/>')
+  const rua = between(app, '<ARuaMemo\n', '/>')
   t.ok(rua.includes('onUserScroll={onRuaUserScroll}'))
   t.ok(rua.includes('onScrollFrame={onRuaScrollFrame}'))
 })
@@ -157,4 +157,38 @@ test('App: hidden bars use the shared props and focus on them shows them', (t) =
   t.ok(show.includes('const next = chromeShow(chromeState.current)'))
   t.ok(show.includes('setChromeHidden(false)'))
   t.ok(app.includes('({ progress: chromeProgress, hidden: chromeHidden, show: showChrome })'), 'the bars get show through the context')
+})
+
+// The tabs stay mounted while hidden, so each one is a module-level memo
+// component that gets no fresh function or object from the shell's render.
+test('App: every tab screen is a module-level memo with no inline arrow or object props', (t) => {
+  const tabs = { rua: 'ARuaMemo', espiadinha: 'Espiadinha', busca: 'BuscaGlobal', avisos: 'Avisos', comunidades: 'Conversas', feira: 'Feira', diario: 'Diario' }
+  for (const [id, name] of Object.entries(tabs)) {
+    t.ok(new RegExp('^const ' + name + ' = memo\\(\\w+\\)$', 'm').test(app), name + ' is memoized at module level')
+    const at = app.indexOf("{tabProfiled('" + id + "',")
+    t.ok(at > 0, id + ' is rendered')
+    const open = app.indexOf('<' + name + '\n', at)
+    t.ok(open > at && open < at + 200, id + ' renders ' + name)
+    const element = app.slice(open, app.indexOf('/>', open))
+    t.absent(/=\{\s*\(?[\w{}\s,=]*\)?\s*=>/.test(element), id + ': no inline arrow')
+    t.absent(element.includes('={{'), id + ': no object literal')
+    t.absent(/=\{\[/.test(element), id + ': no array literal')
+  }
+  const shellHandlers = ['startReply', 'startQuote', 'showToast', 'openComposer', 'openMomentComposer', 'onPublished', 'openAvisos']
+  for (const [id, name] of Object.entries(tabs)) {
+    const at = app.indexOf("{tabProfiled('" + id + "',")
+    const open = app.indexOf('<' + name + '\n', at)
+    const element = app.slice(open, app.indexOf('/>', open))
+    for (const fn of shellHandlers) t.absent(new RegExp('=\\{' + fn + '\\}').test(element), id + ': ' + fn + ' goes through h')
+  }
+  for (const [screen, name] of [['mensagem', 'Mensagem'], ['anuncio', 'Anuncio'], ['anunciar', 'Anunciar']]) {
+    const at = app.indexOf('<' + name + (name === 'Mensagem' ? ' ' : '\n'))
+    t.ok(at > 0, screen + ' is mounted')
+    const element = app.slice(at, app.indexOf('/>', at))
+    t.absent(/=\{\s*\(?[\w{}\s,=]*\)?\s*=>/.test(element), screen + ': no inline arrow')
+  }
+  const generic = app.slice(app.indexOf('<Screen entry={entry}'), app.indexOf('/>', app.indexOf('<Screen entry={entry}')))
+  t.absent(/=\{\s*\(?[\w{}\s,=]*\)?\s*=>/.test(generic), 'conversa, curtidas and membro: no inline arrow')
+  t.ok(app.includes("import { createStableHandlerSets, createStableHandlers } from './src/stableHandlers'"))
+  t.ok(app.includes('const tabMe = useMemo('), 'the shared me object is memoized')
 })

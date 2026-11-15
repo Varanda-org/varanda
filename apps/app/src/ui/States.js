@@ -2,12 +2,13 @@
 // and the "new items" pill. Presentational only: callers pass text that has
 // already gone through displayText / errorText. No counts, no media.
 
-import { useEffect, useRef, useState } from 'react'
+import { useContext, useEffect, useRef, useState } from 'react'
 import { Animated, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
 import { ErrorText, Soft, Spinner } from './index'
 import { Icon } from './Icon'
 import { loopTiming } from './loopMotion'
 import { Pill } from './Pill'
+import { ScreenVisible } from './screenVisible'
 import { useReduceMotion } from './StackLayer'
 import { useStyles, useTheme } from './ThemeProvider'
 import { elevation, layout, motion, radius, space, type } from './theme'
@@ -46,7 +47,12 @@ function stopSharedPulse () {
 // Placeholders that share one pulse while the first page loads.
 export function Skeleton ({ rows = 3, children }) {
   const styles = useStyles(makeStyles)
-  const reduce = useReduceMotion()
+  const reduceMotion = useReduceMotion()
+  // A hidden tab or covered screen stays mounted, and a JS-driven Animated
+  // component re-renders on every frame on the web, so it draws still until
+  // its screen is the one being looked at.
+  const seen = useContext(ScreenVisible)
+  const reduce = reduceMotion || !seen
   useEffect(() => {
     if (reduce) return
     startSharedPulse()
@@ -65,7 +71,7 @@ export function Skeleton ({ rows = 3, children }) {
       </View>
     )
   }
-  // A pulse is motion, so reduced motion draws the same blocks still.
+  // A pulse is motion, so reduced motion (or a hidden screen) draws the same blocks still.
   const Block = reduce ? View : Animated.View
   return (
     <Block style={reduce ? null : { opacity: pulse }} accessible={false} importantForAccessibility='no-hide-descendants'>

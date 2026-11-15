@@ -45,7 +45,7 @@ import * as actingAs from '../actingAs'
 import { TEXTS, pagesFollow, pagesFollows, pagesSuccessor } from '../pages'
 import { MAX_HOPS, moveOf, pageMoveView, resolveChain, shownUnderCut, successorOf } from '../pageMove'
 import { rosterRows } from '../pageRoster'
-import { Soft, errorText, useBottomPad, useNow } from '../ui'
+import { Soft, errorText, useBottomPad, useVisibleNow } from '../ui'
 import { FollowPill } from '../ui/FollowPill'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Icon } from '../ui/Icon'
@@ -77,7 +77,7 @@ import { pagesOn } from '../pageGate'
 import { ConfirmTestimonialSheet, RETRACT_TITLE, TESTIMONIALS_TAB, WRITE_UNCERTAIN, WriteTestimonialSheet, ownBlockRef, retractBody, useTestimonialTab, useTestimonials } from './Depoimentos'
 import { ratingRefs, ratings } from '../feiraClient'
 import { MAX_RATED_LISTINGS, RATINGS_NOTE, collectRatings, summaryLabel } from '../feiraReview'
-import { isSeederDown, knownAuthors, memberKeyOf, learnPeeked, peekAll, planWithHints, postAt, refOf, rowProps, useEngagement, useFollowSet } from './Conversa'
+import { isSeederDown, knownAuthors, memberKeyOf, learnPeeked, peekAll, planWithHints, postAt, refOf, rowProps, useEngagement, useFollowSet, useThreadRowCache } from './Conversa'
 import { liveBinding } from './ARua'
 import { buildScreenSnapshot, screenWithoutAuthors } from '../screenSnapshot'
 import { clearScreenSnapshot, loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
@@ -261,12 +261,15 @@ const INITIAL_POSTS = {
   seeded: false
 }
 
+const postKey = (i) => i.kind + ':' + i.seq
+const NO_EXTRA = {}
+
 export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenPageSettings, onOpenPeople, onOpenCommunity, onOpenListings, onOpenTestimonials, onToast, onTabChange }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const node = useNode()
   const names = useNames()
-  const now = useNow(60000)
+  const now = useVisibleNow(60000)
   const bottomPad = useBottomPad()
   const author = entry.key
   const seed = entry.params && entry.params.seed ? entry.params.seed : null
@@ -1121,7 +1124,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
       />
       {profileUrl !== null
         ? (
-          <Sheet open={sharing} onClose={() => setSharing(false)} title='Compartilhar perfil'>
+          <Sheet open={sharing} onClose={() => setSharing(false)} title='Compartilhar perfil' closeLabel='Fechar'>
             <View style={styles.shareBody}>
               <ShareProfile url={profileUrl} onNotice={typeof onToast === 'function' ? (m) => { setSharing(false); onToast(m) } : undefined} />
             </View>
@@ -1163,6 +1166,30 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     </>
   )
 
+  // Before the offline return: hooks run on every render.
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onMessage }
+  const memberWho = useMemo(() => ({ author, name: header.name, username: header.username }), [author, header.name, header.username])
+  const rowCache = useThreadRowCache(posts.items.map(postKey), { handlers, eng })
+  // The member's own posts carry the header's identity; the copy is kept per
+  // post, so the row's cached props stay equal while the names do.
+  const shownRef = useRef(new WeakMap())
+  const withHeader = (post) => {
+    if (post.author !== author) return post
+    const name = post.name || header.name
+    const username = post.username || header.username
+    const hit = shownRef.current.get(post)
+    if (hit && hit.name === name && hit.username === username) return hit.shown
+    const shown = { ...post, name, username }
+    shownRef.current.set(post, { name, username, shown })
+    return shown
+  }
+  // One renderItem for the list's life, whatever the tab: the cells re-render
+  // on extraData, and the post rows whose cached props did not change skip.
+  const renderRef = useRef(null)
+  const renderItem = useCallback((info) => renderRef.current(info), [])
+  const muralCols = fontScale >= LARGE_TEXT ? 2 : 3
+  const extra = useMemo(() => ({ eng, follows, now, header, muralCols, own, isFollowed, profileOf: names.profileOf }), [eng, follows, now, header, muralCols, own, isFollowed, names.profileOf])
+
   if (!full) {
     return (
       <View style={styles.flex}>
@@ -1197,11 +1224,10 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
 
   let empty = null
   if (blockedHere && phase !== 'loading') empty = <EmptyState icon='bloquear' title={BLOCK_TEXTS.profileTitle} body={BLOCK_TEXTS.profileBody} />
-  else if (phase === 'loading') empty = <><SkeletonRow /><SkeletonRow /><SkeletonRow /></>
+  else if (phase === 'loading') empty = <View>{[0, 1, 2].map((row) => <SkeletonRow key={row} />)}</View>
   else if (phase === 'error') empty = <ErrorState message={displayText(error)} onRetry={() => { setTick((n) => n + 1); load(false) }} pending={refreshing} />
   else if (unavailable === 0 && atEnd && !indexing && complete !== false) empty = <EmptyState icon='lapis' title='Nenhuma publicação ainda' body={isPage ? 'As publicações desta Página aparecem aqui.' : 'As publicações desta pessoa aparecem aqui.'} />
 
-  const muralCols = fontScale >= LARGE_TEXT ? 2 : 3
   const muralRows = muralGridRows(muralTiles, muralCols)
   // A failed page shows only the error row with its retry, not Ver mais too.
   const muralState = seeded ? 'loading' : atEnd ? 'end' : (loadingMore || posts.refreshing || (muralFill === 'more' && !moreError && posts.before !== null)) ? 'loading' : moreError ? 'error' : 'capped'
@@ -1238,17 +1264,13 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
         />
         )
 
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onMessage }
-  const memberWho = { author, name: header.name, username: header.username }
-  const renderItem = ({ item }) => {
+  const renderPost = ({ item }) => {
     const peeked = peekedRef.current
     const post = shownPost(item, peeked, seeded ? seedOriginalsRef.current : null)
     if (post === null) return null
-    const extra = item.kind === 'repost' ? { repostedBy: memberWho } : {}
-    // The member's own posts carry the header's identity.
-    const shown = post.author === author ? { ...post, name: post.name || header.name, username: post.username || header.username } : post
-    return <PostRow {...rowProps({ item: shown, names, peeked, now, ownKey, follows, eng, handlers, extra })} />
+    return <PostRow {...rowProps({ item: withHeader(post), names, peeked, now, ownKey, follows, eng, handlers, extra: item.kind === 'repost' ? { repostedBy: memberWho } : NO_EXTRA, cache: rowCache, rowKey: postKey(item) })} />
   }
+  renderRef.current = depo ? testimonialTab.renderItem : mural ? renderMural : renderPost
 
   return (
     <View style={styles.flex}>
@@ -1256,9 +1278,9 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
         <RefreshableList
           perfId='membro'
           data={depo ? testimonialTab.items : phase === 'ready' ? (mural ? muralRows : shownItems) : []}
-          keyExtractor={depo ? testimonialTab.keyExtractor : mural ? (row) => 'm' + row.key : (i) => i.kind + ':' + i.seq}
-          renderItem={depo ? testimonialTab.renderItem : mural ? renderMural : renderItem}
-          extraData={depo ? testimonialTab.extraData : { eng, follows, now, header, profileOf: names.profileOf }}
+          keyExtractor={depo ? testimonialTab.keyExtractor : mural ? (row) => 'm' + row.key : postKey}
+          renderItem={renderItem}
+          extraData={depo ? testimonialTab.extraData : extra}
           ListHeaderComponent={listHeader}
           ListEmptyComponent={depo || (mural && phase === 'ready') ? null : empty}
           ListFooterComponent={depo ? testimonialTab.footer : listFooter}

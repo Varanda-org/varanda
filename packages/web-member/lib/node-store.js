@@ -1591,6 +1591,30 @@ function writeSeenRemote (storage, own, b64) {
   return storage.writeJson('seenRemote', { v: 1, own, blob: b64 })
 }
 
+// kv seenHeld = { v: 1, own: hex64, ids: [hex32] }: the Avisos tokens a seen
+// document carried before its window cut them (lib/seen-sync.js), so an
+// offered one is not stamped as a new mark again. Exactly SEEN_HELD_MAX
+// entries: random tokens fill the free slots and each new token takes a
+// random slot, so kv shows neither how many tokens are real nor their
+// order. Bound to the own key like seenLocal.
+const SEEN_HELD_MAX = 2048
+
+function isSeenHeld (ids) {
+  return Array.isArray(ids) && ids.length === SEEN_HELD_MAX && ids.every((id) => typeof id === 'string' && SEEN_TOKEN_RE.test(id))
+}
+
+async function readSeenHeld (storage, own) {
+  const data = await readKv(storage, 'seenHeld')
+  if (!isVersioned(data) || !sameOwn(data, own) || !isSeenHeld(data.ids)) return null
+  return data.ids
+}
+
+function writeSeenHeld (storage, own, ids) {
+  if (!isHex64(own)) throw new TypeError('chave inválida')
+  if (!isSeenHeld(ids)) throw new TypeError('visto inválido')
+  return storage.writeJson('seenHeld', { v: 1, own, ids })
+}
+
 // kv seenSync = { v: 1, own: hex64, hash: hex64 | null, gen }: the hash of the
 // remote blob last merged (the prevHash of the next compare-and-swap write,
 // null before any) and the local generation.
@@ -1945,7 +1969,7 @@ async function deleteDmData (storage) {
   // seenSync before seenRemote and seenLocal: an interrupted reset must
   // never leave the compare-and-swap cursor without the documents it was
   // taken from.
-  for (const key of ['seenSync', 'seenRemote', 'dmKey', 'dmCursor', 'dmSeen', 'dmStamps', 'blobStamps', 'dmCtlQueue', 'dmReactPending', 'seenLocal']) await storage.writeJson(key, null)
+  for (const key of ['seenSync', 'seenRemote', 'seenHeld', 'dmKey', 'dmCursor', 'dmSeen', 'dmStamps', 'blobStamps', 'dmCtlQueue', 'dmReactPending', 'seenLocal']) await storage.writeJson(key, null)
 }
 
 // kv ageVerified / ageSince = { v: 1, proof }: the account service's signed
@@ -2081,6 +2105,10 @@ module.exports = {
   writeSeenSync,
   readSeenRemote,
   writeSeenRemote,
+  readSeenHeld,
+  writeSeenHeld,
+  SEEN_HELD_MAX,
+  MAX_DM_SEEN,
   readDmStamps,
   writeDmStamps,
   readBlobStamps,

@@ -1626,6 +1626,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
         placeholder={asPage.page && pageVis === null ? 'Carregando o grupo' : (meta.state === 'rekey-pending' || awaitingKey ? (asPage.page ? PAGE_REKEYING_TEXT : REKEY_PENDING_LABEL) : 'Mensagem')}
         accessibilityLabel='mensagem para o grupo'
         reply={replyBar ? { name: replyBar.name, text: replyBar.text, senderKey: replyBar.senderKey, mine: replyBar.mine } : null}
+        onOpenReply={replyBar ? () => scrollToKey(replyKey) : undefined}
         onCancelReply={() => setReplyKey(null)}
         notice={notes}
         ownKey={ownKey}
