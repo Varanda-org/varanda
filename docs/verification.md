@@ -5847,7 +5847,7 @@ Pontos conhecidos, deixados como estão (P3):
 
 - Cabeçalho de publicação e de citação com texto de acessibilidade extra-grande, tela de 320 pt e data de ano anterior: o nome fica com cerca de 80 pt na publicação e 40 pt no cartão de citação; não chega a zero, mas rever se um aparelho mostrar o contrário.
 - Visualizador de foto da conversa: ícones da barra de status escuros sobre o fundo preto no Android (já era assim; a correção pede definir a barra antes de abrir o Modal ou trocar o Modal por uma sobreposição).
-- Texto: "Fechar" e "Cancelar" ainda variam entre telas; "serviço indisponível" e "foto indisponível" em minúscula; marcador monoespaçado do convite; Perfil como folha no Diário e como página nos Ajustes; iniciais do cabeçalho de pedido contra o ícone da lista; o rótulo Denunciar na publicação e no perfil tem tintas diferentes (fixado pelos testes de `postActions`).
+- Texto: "Fechar" e "Cancelar" ainda variam entre telas; "serviço indisponível" e "foto indisponível" em minúscula; Perfil como folha no Diário e como página nos Ajustes; iniciais do cabeçalho de pedido contra o ícone da lista; o rótulo Denunciar na publicação e no perfil tem tintas diferentes (fixado pelos testes de `postActions`).
 - Web: anel de foco do Fechar sem folga; seta de voltar de 40 x 40; foco depois de Escape volta ao topo em vez de à lista; campo da Busca 4 pt abaixo do de Conversas; abas da Busca sem `aria-selected`; foco depois de fechar a Publicar com Escape; o rascunho do Perfil zera ao voltar para a lista de Ajustes (igual com a seta; já era assim).
 - Compartilhar sem origem da instalação mostra "Não foi possível copiar o link." (`communityShare.js`, fora desta PR).
 
@@ -11134,7 +11134,22 @@ node apps/cli/test/post-page.test.js
 - [ ] Link aberto de dentro do WhatsApp e do Instagram (navegador embutido): pendente.
 - [ ] Fonte maior no sistema ou no navegador (ajuste de tamanho do texto, não zoom da página), no Android e no iOS: pendente. A página usa tamanhos em px, como o app.
 
-## 245. Índice do semeador: roda de uma conversa (PR feat/index-roda)
+## 247. Polimento da Busca, da ajuda e do campo mono (PR fix/polimento-navegacao-sobras)
+
+Fecha três itens da #448, só no app:
+
+- Em "Convidar por @nome" (e em todo campo `mono`), a fonte monoespaçada vale só para o valor digitado: o marcador do campo vazio fica na fonte normal (`Field` em `apps/app/src/ui/index.js`). O tamanho (14) vale para o campo todo, vazio ou não, então a primeira tecla não muda a altura do campo.
+- A ajuda da Busca (`SEARCH_MEMORY` em `apps/app/src/topics.js`) deixou de falar em "memória do navegador enquanto a aba está aberta" e diz "memória, enquanto o app ou a aba está aberto".
+- Na Busca, abrir um perfil, uma publicação ou uma @menção fecha o teclado (`openMember`, `openThread` e `openMention` em `apps/app/src/screens/BuscaGlobal.js`), para ele não ficar por cima da tela que abre.
+
+1. [ ] Android e iOS: em Busca, Contas, digitar um nome e tocar numa pessoa: o perfil abre sem teclado (não realizada ainda).
+2. [ ] Android e iOS: em Busca, Publicações, tocar num autor, numa publicação e numa @menção: sem teclado na tela nova (não realizada ainda).
+3. [ ] Convidar por @nome: o marcador "nome, @nome ou código" aparece na fonte normal e o que se digita, em monoespaçado, sem mudar o tamanho nem a altura do campo na primeira tecla (não realizada ainda).
+4. [ ] Ajuda da Busca no app instalado: o texto não cita o navegador (não realizada ainda).
+
+Testes: `apps/app/test/buscaGlobal.test.js`, `apps/app/test/uiKit.test.js` e `apps/app/test/help.test.js`. Os testes de `Field` e de `BuscaGlobal` conferem o código, não montam a tela.
+
+## 248. Índice do semeador: roda de uma conversa (PR feat/index-roda)
 
 Esta seção confere a rota `GET|HEAD /index/roda/<autor>/<seq>[/<cursor>]` do semeador (`Seeder#indexRoda`, `roda` em `packages/core/lib/engagement-index.js`, `INDEX_RODA_RE` e `rodaBody` em `apps/cli/lib/seed-ws.js`). Dada uma resposta, ela devolve a raiz da conversa, o comentário de cima (`top`) e todas as respostas dele, achatadas. O app ainda não chama a rota: isso vem em outro PR. Formato dos registros, RPC e Termos não mudam; `docs/protocol.md` seções 5 ("Seeder engagement index") e 7 ("Seeder index route") descrevem o contrato.
 
@@ -11163,9 +11178,9 @@ Situação:
 - [ ] Contra um semeador real: `curl` de `/index/roda/<autor>/<seq>` numa resposta devolve a raiz, o `top` e as linhas em ordem de pai antes de filho: pendente.
 - [ ] `/index/roda/` com ref de uma publicação que não é resposta responde 404 `não encontrado`: pendente.
 
-## 246. Roda de conversa: comentários em dois níveis (PR feat/roda-conversa)
+## 249. Roda de conversa: comentários em dois níveis (PR feat/roda-conversa)
 
-As respostas viram comentários, como no Instagram e no Facebook, com dois níveis visíveis. Formato dos registros, `replyTo` (um pai exato), RPC e Termos não mudam. O app passa a usar a rota `/index/roda` da seção 245. Esta seção substitui a seção 191 no que diz respeito ao aninhamento ("Ver N respostas" com um nível e "Ver conversa"); a seção 191 fica como registro e não foi editada.
+As respostas viram comentários, como no Instagram e no Facebook, com dois níveis visíveis. Formato dos registros, `replyTo` (um pai exato), RPC e Termos não mudam. O app passa a usar a rota `/index/roda` da seção 248. Esta seção substitui a seção 191 no que diz respeito ao aninhamento ("Ver N respostas" com um nível e "Ver conversa"); a seção 191 fica como registro e não foi editada.
 
 - Contrato de dois níveis (`apps/app/src/roda.js`, `apps/app/src/screens/Conversa.js`): a raiz é a única publicação principal. Nível 1: os comentários, respostas diretas à raiz. Nível 2: sob cada comentário, a roda dele, com todas as respostas da subárvore achatadas, sempre o pai antes dos filhos; cada resposta mais funda leva a citação da mensagem que responde (`rodaQuote`, desenhada com `ReplyPreview`). A roda fica fechada até o toque em "Ver N respostas". Nenhum toque dentro da conversa troca a publicação principal: "Ver conversa" saiu, e as linhas não abrem outra Conversa (uma publicação citada ainda abre a própria conversa).
 - Raiz (`resolveRoot` em `apps/app/src/rodaLoad.js`): a Conversa abre com qualquer publicação da conversa e acha a raiz. Com `/index/roda`, a raiz e o `top` do semeador valem só depois de lidos do diário de cada autor: a raiz tem `replyTo` assinado `null` e o `top` responde à raiz. Sem a rota, a subida segue o `replyTo` assinado, no máximo 8 saltos (`MAX_HOPS`). Um pai ilegível deixa a mensagem mais alta que se pôde ler como linha principal, com a nota de publicação indisponível, e as respostas dela embaixo.
@@ -11193,7 +11208,7 @@ node apps/app/test/themeUsage.test.js
 npx standard apps/app/src/screens/Conversa.js apps/app/src/ui/PostRow.js
 ```
 
-Implantação: o semeador com `/index/roda` (seção 245) vai antes deste app. Diante de um semeador antigo, o app cai nas respostas diretas descritas acima.
+Implantação: o semeador com `/index/roda` (seção 248) vai antes deste app. Diante de um semeador antigo, o app cai nas respostas diretas descritas acima.
 
 Situação. Verificação manual na ordem Android, iOS, web no celular:
 
@@ -11206,12 +11221,12 @@ Situação. Verificação manual na ordem Android, iOS, web no celular:
 - [ ] Com reduzir movimento ligado, deslizar e o destaque funcionam sem animação: pendente.
 - [ ] `npm run lint`, `npm test -- --affected=origin/main` e `npm run demo` passam: a conferir ao executar.
 
-## 247. A Rua: comentários dobrados no cartão da publicação (PR feat/feed-comment-fold)
+## 250. A Rua: comentários dobrados no cartão da publicação (PR feat/feed-comment-fold)
 
 Na A Rua, um comentário deixa de aparecer sozinho com o selo "Respondendo a": ele entra no cartão da publicação a que pertence, com a linha "Ana comentou" em cima e até duas linhas de comentário embaixo. Formato dos registros, `replyTo`, RPC, índice do semeador e Termos não mudam. A dobra é pura (`apps/app/src/feedFold.js`) e só segue o `replyTo` assinado de publicações que o nó já verificou.
 
 - Regras da dobra (`foldFeed`): cada resposta sobe pelo `replyTo` assinado, no máximo 32 saltos (`FOLD_WALK_MAX`), até a raiz, sobre o que já está na lista ou nos originais lidos. Achando a raiz, a resposta entra no cartão dela. O cartão fica no primeiro destes lugares da lista: a própria raiz, a primeira republicação dela ou o primeiro comentário de outra pessoa; quando a raiz ou a republicação vem antes, ela recebe as linhas e não aparece cartão extra. "Ana comentou", "Ana e Bia comentaram" ou "Ana e mais 2 comentaram" (`commentedLabel`) nomeiam quem comentou, do mais novo ao mais antigo; tocar abre o perfil de quem comentou por último. Embaixo vem "Ver todos os N comentários" quando o índice deu a contagem da raiz, não está indexando e N passa das linhas mostradas; fora disso, "Ver comentários". Tocar no cartão abre a raiz; tocar nos comentários abre a raiz com o comentário mais novo em foco (`focus: { ref, top }`). Enquanto a leitura de um ancestral está pedida, a linha mostra "Ana comentou" sobre um cartão carregando. Um par cujo nome aparece como "Você" é mostrado pelo @nome conferido, ou como "Alguém" sem @nome válido, nas linhas, no "comentou" do cartão e no "comentou" sobre o cartão carregando (`previewName`); só os seus comentários ficam com "Você".
-- Onde dobra: a A Rua do membro, a A Rua da página e a prévia de partida a frio (com o que o retrato guardado tem, sem pedir nada, para as linhas não pularem quando o feed fica ao vivo; ali "Ver todos os N comentários" aparece como texto, sem toque, para o cartão ter a mesma altura do ao vivo). Espiadinha, Busca, Diário e Membro continuam com a linha de comentário e o selo: são listas de uma pessoa ou de uma busca, não um feed de conversas, e o Diário segue sendo o registro completo do que você escreveu, com apagar por linha. Tocar nessas linhas abre a raiz com o comentário destacado (seção 246).
+- Onde dobra: a A Rua do membro, a A Rua da página e a prévia de partida a frio (com o que o retrato guardado tem, sem pedir nada, para as linhas não pularem quando o feed fica ao vivo; ali "Ver todos os N comentários" aparece como texto, sem toque, para o cartão ter a mesma altura do ao vivo). Espiadinha, Busca, Diário e Membro continuam com a linha de comentário e o selo: são listas de uma pessoa ou de uma busca, não um feed de conversas, e o Diário segue sendo o registro completo do que você escreveu, com apagar por linha. Tocar nessas linhas abre a raiz com o comentário destacado (seção 249).
 - Comentários seus: viram a linha "Você: ..." quando a raiz está na tela e nunca abrem um cartão sozinhos, nem entram em "Ana comentou".
 - Bloqueio: a dobra roda de novo quando a lista de bloqueio muda, então quem foi bloqueado sai na hora do "comentou" e das linhas. A linha de uma pessoa bloqueada continua escondida pelo `BlockGate` e a raiz de uma pessoa bloqueada não ganha cartão, nem mostra o que uma leitura anterior guardou dela. A leitura de página e as rodadas da dobra não leem publicação de autor bloqueado (o caso da mudança de seguidos está em "Custo de leitura").
 - Pai ilegível: num nó do aparelho (sem `diary.peek`) ou sem rede, a raiz de um desconhecido não é lida; a dobra desiste dela e a linha segue como comentário com o selo. Só enquanto a lista de seguidos ainda não chegou, no começo da leitura, essa linha pode aparecer antes como "comentou" sobre um cartão carregando; assim que a lista chega, só fica carregando o que essa leitura ainda pode pedir (o seu, o de quem você segue e, na web hospedada com rede, até 8 ancestrais de desconhecidos). O mesmo vale para uma cadeia que passa das rodadas abaixo. Essas desistências ficam num conjunto só da dobra (`social.dead`, limpo a cada atualização e quando os seguidos mudam), nunca nos originais compartilhados: uma republicação, uma citação ou o selo de resposta que precise da mesma publicação ainda a lê. Uma falha passageira conta como resposta só dentro da leitura que a pediu; a leitura seguinte pede de novo. Nada disso segura a capa de partida nem a gravação do retrato.
@@ -11245,9 +11260,9 @@ Situação. Verificação manual na ordem Android, iOS, web no celular:
 - [ ] Um comentário de quem você segue numa publicação de um desconhecido que você já curtiu mostra o coração cheio e as contagens, e "Ver todos os N comentários" aparece: pendente.
 - [ ] `npm run lint`, `npm test -- --affected=origin/main` e `npm run demo` passam: a conferir ao executar.
 
-## 248. Vocabulário: comentar e comentário fora da conversa (PR feat/comment-vocabulary)
+## 251. Vocabulário: comentar e comentário fora da conversa (PR feat/comment-vocabulary)
 
-Regra: "comentar" e "comentário" para a resposta a uma publicação (item sem `replyTo`); "responder" e "resposta" só para a resposta a um comentário (item com `replyTo`). O botão de resposta do cartão (`PostRow`, "comentar na publicação de <nome>" ou "responder a <nome>") e o campo da Conversa já seguiam a regra na A Rua, na Conversa, na Espiadinha, na Busca e no Diário (seções 246 e 247). Sem mudança de protocolo, RPC nem Termos.
+Regra: "comentar" e "comentário" para a resposta a uma publicação (item sem `replyTo`); "responder" e "resposta" só para a resposta a um comentário (item com `replyTo`). O botão de resposta do cartão (`PostRow`, "comentar na publicação de <nome>" ou "responder a <nome>") e o campo da Conversa já seguiam a regra na A Rua, na Conversa, na Espiadinha, na Busca e no Diário (seções 249 e 250). Sem mudança de protocolo, RPC nem Termos.
 
 Textos trocados (antes -> depois):
 
