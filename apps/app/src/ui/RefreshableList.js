@@ -45,7 +45,7 @@ import { Profiler, createElement, isValidElement, useCallback, useContext, useEf
 import { Animated, FlatList, Platform, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native'
 import { EMPTY_WHEEL, MIN_SPIN_MS, PULL_THRESHOLD, WHEEL_DECAY_MS, pullDecision, pullState, spinRemaining, wheelPullState } from '../pull'
 import { endStep, nearListEnd, spanEnd } from '../paging'
-import { useNode } from '../node'
+import { useNodeHandle } from '../node'
 import { beginRenderPhase, bootMark, bootMarkOnce, createFrameStats, endRenderPhase, frameLine, frameSummary, monotonicNow, onRenderProfile, perfEnabled, perfOn, rowStatsLine } from '../perfMarks'
 import { SETTLE_MS, claimScroll, createScrollDriver, scrollWanted } from '../perfScroll'
 import { Spinner } from './index'
@@ -141,7 +141,7 @@ export function RefreshableList ({
 }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
-  const node = useNode()
+  const node = useNodeHandle()
   const syncNow = node && node.syncNow
   // Loaded players live in a layer of the list's own scroll content, not in
   // their rows (./EmbedLayer): a row this list unmounts keeps its player.

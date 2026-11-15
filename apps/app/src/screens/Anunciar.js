@@ -30,7 +30,7 @@ import { KeyboardForm } from './Perfil'
 import { CAT_LABELS, UNIT_LABELS } from '../feira'
 import { STEPS, STEP_TITLES, previewListing, stepErrors } from '../anunciarSteps'
 import {
-  ACK_TEXT, MAX_PHOTOS, UNKNOWN_PUBLICATION, destinationOf, emptyForm, holdsPublication, identityOf, kindChoices, photoRoom,
+  ACK_TEXT, MAX_PHOTOS, UNKNOWN_PUBLICATION, destinationOf, emptyForm, holdsPublication, identityOf, kindChoices, maskPriceText, photoRoom,
   photosFor, priceFieldLabel, priceModeChoices, retryUsable, submitListing, unitChoices, updateForm
 } from '../feiraCompose'
 import { validDescriptor } from '../media/fetch'
@@ -44,12 +44,16 @@ import { TopBar } from '../ui/TopBar'
 import { StepLink, Stepper } from '../ui/Stepper'
 import { ListingPhotoGrid } from '../ui/ListingPhotoGrid'
 import { moveById } from '../photoOrder'
+import { removeById, restoreRemoved } from '../photoUndo'
 import { ListingTile } from '../ui/ListingTile'
 import { Sheet } from '../ui/Sheet'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { space } from '../ui/theme'
 
 const { feira, MAX_TEXT } = rpc
+
+// How long "Desfazer" stays after a photo is removed.
+const UNDO_MS = 8000
 
 const hexOf = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
 
@@ -98,6 +102,11 @@ export default function Anunciar ({ initialPlace = null, onBack, registerBackGua
   const [error, setError] = useState('')
   const [field, setField] = useState('')
   const [note, setNote] = useState('')
+  // The photo just removed, { item, index }: kept (with its thumbnail) until
+  // the undo runs out, another photo goes, or the form is left.
+  const [undo, setUndo] = useState(null)
+  const undoRef = useRef(null)
+  const undoTimer = useRef(null)
   // An uncertain send: { retry, identity }. Only a press calls retry.
   const [pending, setPending] = useState(null)
   const alive = useRef(true)
@@ -163,6 +172,7 @@ export default function Anunciar ({ initialPlace = null, onBack, registerBackGua
   }, [identity])
 
   useEffect(() => () => {
+    clearTimeout(undoTimer.current)
     for (const url of thumbsRef.current.values()) revokeUrl(url)
     thumbsRef.current.clear()
   }, [])
@@ -218,11 +228,49 @@ export default function Anunciar ({ initialPlace = null, onBack, registerBackGua
     }
   }
 
-  const removePhoto = (id) => {
-    if (locked) return
+  const dropThumb = (id) => {
     revokeUrl(thumbsRef.current.get(id))
     thumbsRef.current.delete(id)
-    setPhotos((list) => list.filter((p) => p.id !== id))
+  }
+
+  // The undo ends: the thumbnail of the photo that stayed removed is let go.
+  const endUndo = () => {
+    clearTimeout(undoTimer.current)
+    const held = undoRef.current
+    undoRef.current = null
+    setUndo(null)
+    if (held !== null) dropThumb(held.item.id)
+  }
+
+  const removePhoto = (id) => {
+    if (locked) return
+    const { removed } = removeById(photosRef.current, id)
+    if (removed === null) return
+    endUndo()
+    undoRef.current = removed
+    setUndo(removed)
+    undoTimer.current = setTimeout(endUndo, UNDO_MS)
+    setPhotos((list) => removeById(list, id).list)
+  }
+
+  const undoRemove = () => {
+    const held = undoRef.current
+    if (held === null || locked) return
+    clearTimeout(undoTimer.current)
+    undoRef.current = null
+    setUndo(null)
+    if (photosRef.current.length >= MAX_PHOTOS) {
+      dropThumb(held.item.id)
+      return
+    }
+    // A descriptor from before a change of identity must not come back with it.
+    setPhotos((list) => {
+      const next = restoreRemoved(list, held, MAX_PHOTOS)
+      // The list can fill up between the check above and this updater: then the
+      // photo did not come back and nothing else would free its thumbnail.
+      if (!next.some((item) => item && item.id === held.item.id)) dropThumb(held.item.id)
+      return photosFor(next, identityRef.current)
+    })
   }
 
   // The same photo objects in a new order: nothing is encoded or uploaded again.
@@ -261,6 +309,9 @@ export default function Anunciar ({ initialPlace = null, onBack, registerBackGua
   }
 
   const settle = (answer, to) => {
+    clearTimeout(undoTimer.current)
+    undoRef.current = null
+    setUndo(null)
     for (const url of thumbsRef.current.values()) revokeUrl(url)
     thumbsRef.current.clear()
     setPhotos([])
@@ -344,6 +395,14 @@ export default function Anunciar ({ initialPlace = null, onBack, registerBackGua
                   <Label>Fotos</Label>
                   <ListingPhotoGrid photos={photos} max={MAX_PHOTOS} locked={locked} canAdd={canAttach && !encoding} onAdd={attach} onRemove={removePhoto} onMove={movePhoto} />
                   {!canAttach && online && media === null && asPage === null ? <Soft>Fotos só podem ser publicadas na versão web.</Soft> : null}
+                  {undo !== null && !locked
+                    ? (
+                      <View style={styles.undo} accessibilityLiveRegion='polite'>
+                        <Soft>Foto removida.</Soft>
+                        <Pill label='Desfazer' onPress={undoRemove} />
+                      </View>
+                      )
+                    : null}
                   {note !== '' ? <Soft>{note}</Soft> : null}
                 </>
                 )
@@ -372,7 +431,7 @@ export default function Anunciar ({ initialPlace = null, onBack, registerBackGua
                   <Label>{priceFieldLabel(form.kind)}</Label>
                   <Chips options={priceModeChoices(form.kind).map((m) => ({ value: m.mode, label: m.label }))} value={form.priceMode} onPick={(priceMode) => set({ priceMode })} disabled={locked} />
                   {form.priceMode === 'valor'
-                    ? <Field label={procura ? 'Até (R$)' : 'Valor (R$)'} value={form.priceText} onChangeText={(priceText) => set({ priceText })} placeholder='25,00' editable={!locked} />
+                    ? <Field label={procura ? 'Até (R$)' : 'Valor (R$)'} value={form.priceText} onChangeText={(priceText) => set({ priceText: maskPriceText(priceText) })} placeholder='25,00' keyboardType='numeric' editable={!locked} />
                     : null}
                   {fieldError('price')}
                   {units.length > 1
@@ -446,6 +505,7 @@ const makeStyles = (colors) => StyleSheet.create({
   bar: { padding: 16, gap: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line, backgroundColor: colors.bg },
   confirm: { padding: 16, gap: 12 },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  undo: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   ack: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 6 },
   box: { width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: colors.outline, alignItems: 'center', justifyContent: 'center' },
   boxOn: { backgroundColor: colors.accent, borderColor: colors.accent },

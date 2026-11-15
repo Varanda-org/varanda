@@ -35,7 +35,7 @@ import { useEffect, useState } from 'react'
 import { fetch as expoFetch } from 'expo/fetch'
 import { Modal, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { useNode } from '../node'
+import { useNodeHandle } from '../node'
 import { isAppClient } from '../appClient'
 import { chatMediaKey, isVoiceItem, onChatMediaReturn, pinChatMedia, shouldLoad, sourceFor } from '../media/chatMedia'
 import { revokeUrl, urlFromBytes } from '../media/display'
@@ -69,7 +69,7 @@ function itemRatio (item) {
 
 // -> { state: 'held' | 'loading' | 'ok' | 'off', uri, retry, show }
 function useChatSource (ref, identity, deferred) {
-  const node = useNode()
+  const node = useNodeHandle()
   const key = chatMediaKey(identity, ref)
   const [attempt, setAttempt] = useState(0)
   const [tapped, setTapped] = useState(false)

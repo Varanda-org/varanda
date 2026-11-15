@@ -2,6 +2,7 @@ import rpc from '@varanda/rpc'
 import { validOrigin } from './feiraLink.js'
 import { tokensOf } from './topics.js'
 import { CAT_LABELS } from './feira.js'
+import { cleanVisits, previousVisit, recordVisit } from './feiraVisits.js'
 
 const { feira, displayText } = rpc
 export const STORAGE_KEY = 'varanda-feira-alerts'
@@ -10,7 +11,7 @@ export const MAX_SEARCHES = 10
 export const INTERVAL_MS = 15 * 60 * 1000
 const MAX_ORIGINS = 8
 const time = (n) => Number.isSafeInteger(n) && n >= 0
-const empty = () => ({ searches: [], counts: {}, more: {}, lastRun: null })
+const empty = () => ({ searches: [], counts: {}, more: {}, lastRun: null, visits: {} })
 
 function normalize (value) {
   if (!value || !feira.isUf(value.uf)) return null
@@ -74,7 +75,7 @@ function cleanState (value) {
     // "N+": the search had more pages than the count saw. A record without the flag reads as false.
     more[s.id] = value?.more?.[s.id] === true && counts[s.id] > 0
   }
-  return { searches, counts, more, lastRun: time(value?.lastRun) ? value.lastRun : null }
+  return { searches, counts, more, lastRun: time(value?.lastRun) ? value.lastRun : null, visits: cleanVisits(value?.visits) }
 }
 
 function decode (raw) {
@@ -121,6 +122,15 @@ export function createAlertsStore ({ read, write }) {
     add: (origin, value, now = Date.now()) => access(origin, (state) => ({ ...state, ...add(state.searches, value, now) })),
     remove: (origin, id) => access(origin, (state) => cleanState({ ...state, searches: remove(state.searches, id) })),
     markSeen: (origin, id, now = Date.now()) => access(origin, (state) => ({ ...state, searches: markSeen(state.searches, id, now), counts: { ...state.counts, [id]: 0 }, more: { ...state.more, [id]: false } })),
+    // The time a city's list was last shown. With record false it only reads;
+    // the answer's `previous` is the time before this call.
+    visitCity: async (origin, key, now = Date.now(), record = true) => {
+      if (!record) return { previous: previousVisit((await access(origin)).visits, key) }
+      return access(origin, (state) => {
+        const done = recordVisit(state.visits, key, now)
+        return { ...state, visits: done.visits, previous: done.previous }
+      })
+    },
     beginRun: (origin, now) => access(origin, (state) => state.searches.length && plan(now, state.lastRun) ? { ...state, lastRun: now } : null),
     recordCounts: (origin, results) => access(origin, (state) => {
       for (const result of results) {
