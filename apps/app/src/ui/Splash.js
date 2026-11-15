@@ -2,7 +2,7 @@
 // Presentational splash while the app decides its first screen: the street
 // and the sky band rise, the varanda appears beside its araucária, the chair
 // comes up onto its floor (birds cross the sky and a butterfly flutters by
-// the plant, by day only), the logo's hand-drawn letters of the name enter
+// the plant), the logo's hand-drawn letters of the name enter
 // one by one, then the progress bar fades in and pulses while the calçada
 // keeps sliding; the bar's fill follows `progress` (real boot steps,
 // src/splashGate.js bootProgress). On native it stays cream in both schemes
@@ -11,6 +11,10 @@
 // On the web, public/index.html paints its own opaque overlay with the same
 // composition before the bundle runs; this component then stays silent under
 // it and removes it on unmount, so it is neither cut short nor doubled.
+// The splash tells App (onPresented) once its entrance has been seen plus a
+// short rest; on the web that time is measured against the overlay's own clock.
+// A splash that comes back after another screen (intro, Termos) opens on the
+// finished picture instead of replaying the entrance, so it can never be cut.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { AccessibilityInfo, Animated, Easing, Platform, StyleSheet, View, useWindowDimensions } from 'react-native'
@@ -19,7 +23,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { light, statusBarStyle } from '../appearance'
 import { useStyles, useTheme } from './ThemeProvider'
 import { loopTiming } from './loopMotion'
-import { BAR_MS, BAR_WIDTH, FLYERS, SPLASH_LABEL, PULSE_MS, flyerMotion, slideMotion, splashMotion } from './splashMotion'
+import { BAR_MS, BAR_WIDTH, FLYERS, SPLASH_LABEL, PULSE_MS, PRESENTATION_MS, REST_MS, flyerMotion, overlayRemainingMs, slideMotion, splashMotion } from './splashMotion'
 import { sceneLayout, scenePalette, stripLoops } from './splashScene'
 import { SplashLettering, SplashScene, hiddenFromReaders } from './SplashSceneView'
 
@@ -27,7 +31,10 @@ const native = Platform.OS !== 'web'
 
 const unit = (x) => (Number.isFinite(x) ? Math.min(1, Math.max(0, x)) : 0)
 
-export function Splash ({ sidePad = 0, edges, progress = 0 }) {
+export function Splash ({ sidePad = 0, edges, progress = 0, onPresented, entered }) {
+  const onPresentedRef = useRef(onPresented)
+  onPresentedRef.current = onPresented
+  const enteredRef = useRef(entered === true)
   const themed = useStyles(makeStyles)
   const theme = useTheme()
   const styles = nativeStyles || themed
@@ -126,6 +133,19 @@ export function Splash ({ sidePad = 0, edges, progress = 0 }) {
     let loop = null
     let slides = []
     let flights = []
+    let presented = false
+    let presentTimer = null
+    const startedAt = Date.now()
+    const presentIn = (ms) => {
+      if (presented || cancelled) return
+      clearTimeout(presentTimer)
+      presentTimer = setTimeout(() => {
+        if (presented || cancelled) return
+        presented = true
+        onPresentedRef.current?.()
+      }, Math.max(0, ms))
+    }
+    const presentRest = () => presentIn(PRESENTATION_MS - (Date.now() - startedAt))
     const stopAll = () => {
       if (composite) composite.stop()
       if (loop) loop.stop()
@@ -219,27 +239,53 @@ export function Splash ({ sidePad = 0, edges, progress = 0 }) {
       const anim = Animated.parallel(steps)
       composite = anim
       anim.start(({ finished } = {}) => {
-        if (finished !== true || cancelled || reduced) return
+        if (finished !== true || cancelled) return
+        presentIn(REST_MS)
+        if (reduced) return
         startPulse()
       })
       startSlides()
       startFlyers()
     }
+    // Settled but moving: the hint pulses, the strips slide and the flyers fly.
+    // On the 20 s expiry path they restart from 0, a one-off hop against the
+    // overlay's last frame that is acceptable on that failure path.
+    const resumeMoving = () => {
+      reduced = false
+      stillRef.current = false
+      startPulse()
+      startSlides()
+      startFlyers()
+    }
     const skip = () => {
-      if (!cancelled) settle()
+      if (cancelled) return
+      settle()
+      presentRest()
     }
 
     const watchReduceMotion = () => {
       try {
         sub = AccessibilityInfo.addEventListener('reduceMotionChanged', (r) => {
-          if (r === true) settle()
+          if (r === true) {
+            motionOff = true
+            settle()
+            presentRest()
+          }
         })
       } catch {}
     }
+    // An answer to isReduceMotionEnabled() that lands after the listener has
+    // seen Reduce Motion switch on is stale and must not start any motion.
+    let motionOff = false
     let sub = null
     let onExpire = null
     if (shell) {
       settle()
+      let left = PRESENTATION_MS
+      try {
+        left = overlayRemainingMs(typeof shell.getAnimations === 'function' ? shell.getAnimations() : [], PRESENTATION_MS)
+      } catch {}
+      presentIn(left)
       // The overlay hides itself at 20 s; from then on this splash is the
       // visible one, so it must be readable and keep its hint pulse.
       onExpire = (event) => {
@@ -254,34 +300,40 @@ export function Splash ({ sidePad = 0, edges, progress = 0 }) {
           Promise.resolve(AccessibilityInfo.isReduceMotionEnabled()).then((reduce) => {
             if (cancelled || reduced) return
             if (reduce === true) settle()
-            else {
-              startPulse()
-              // The strips and the flyers restart from 0 here: on this 20 s
-              // failure path a one-off hop against the overlay's last frame
-              // is acceptable.
-              startSlides()
-              startFlyers()
-            }
+            else resumeMoving()
           }, skip)
         } catch {
           settle()
         }
       }
       shell.addEventListener('animationend', onExpire)
+    } else if (enteredRef.current) {
+      settle()
+      try {
+        Promise.resolve(AccessibilityInfo.isReduceMotionEnabled()).then((reduce) => {
+          if (cancelled || motionOff || reduce === true) return
+          resumeMoving()
+        }, () => {})
+      } catch {}
+      watchReduceMotion()
     } else {
       try {
         Promise.resolve(AccessibilityInfo.isReduceMotionEnabled()).then((reduce) => {
-          if (cancelled) return
-          if (reduce === true) settle()
-          else play()
+          if (cancelled || motionOff) return
+          if (reduce === true) {
+            settle()
+            presentRest()
+          } else play()
         }, skip)
       } catch {
         settle()
+        presentRest()
       }
       watchReduceMotion()
     }
     return () => {
       cancelled = true
+      clearTimeout(presentTimer)
       stopAll()
       sub?.remove?.()
       if (shell) {
