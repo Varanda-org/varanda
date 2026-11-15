@@ -41,7 +41,7 @@ import { EMBED_IDLE, EMBED_LIVE, EMBED_TICK_MS, embedSlots, embedsHeld, mostlyHi
 import { playbackBusy, playbackEpoch } from '../media/chatMedia'
 import { MUSIC_LIMIT_TEXT, MUSIC_SOURCE, SNIPPET_BADGE, musicInfoLine, musicOriginOf, musicRowLine } from '../music'
 import { musicAutoStore } from '../musicAutoStore'
-import { useHosted, useNode } from '../node'
+import { useHosted, useMemberKey, useNodeHandle, useOnline } from '../node'
 import { openExternal } from '../openExternal'
 import { SOUND_MUTE_LABEL, SOUND_UNMUTE_LABEL, onSoundMute, setSoundMuted, soundMuted } from '../soundMute'
 import { ambientKind, ambientStep, clearMusicAutoHold, holdMusicAuto, markMusicAutoFailed, musicAutoEnabled, musicAutoFailed, musicAutoHeld, onMusicAutoChange, onMusicAutoHold } from '../postMusic'
@@ -73,7 +73,9 @@ export default function PostMusic ({ card, music }) {
 function AmbientMusic ({ card, music }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
-  const node = useNode()
+  const node = useNodeHandle()
+  const member = useMemberKey()
+  const online = useOnline()
   const win = useWindowDimensions()
   const insets = useSafeAreaInsets()
   const tabBarShown = useContext(TabBarShown)
@@ -87,9 +89,6 @@ function AmbientMusic ({ card, music }) {
     return onEmbedHold(sync)
   }, [depth])
 
-  const member = node.passkey && node.passkey.status && typeof node.passkey.status.publicKey === 'string'
-    ? node.passkey.status.publicKey.toLowerCase()
-    : null
   const enabled = musicOriginOf(node) !== null
   const origin = node.accountOrigin || musicOriginOf(node)
   const request = node.request
@@ -160,7 +159,7 @@ function AmbientMusic ({ card, music }) {
     }
   }), [])
 
-  const active = visible && !held && node.online !== false
+  const active = visible && !held && online !== false
 
   useEffect(() => {
     const see = (shown) => {

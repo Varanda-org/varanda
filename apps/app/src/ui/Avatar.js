@@ -20,7 +20,7 @@ import { useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { fetch as expoFetch } from 'expo/fetch'
 import { Image, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
-import { useNode } from '../node'
+import { useHosted } from '../node'
 import { avatarColorOf } from '../format'
 import { avatarKey, fetchAvatarBytes, validAvatar } from '../media/avatar'
 import { createMediaCache, onRevokedRanges, retryDelay } from '../media/cache'
@@ -68,11 +68,11 @@ export function primeAvatar (author, descriptor, blobUrl) {
 
 // -> a blob: or file: URL to draw, or null.
 function useAvatarUrl (publicKey, picture, persist) {
-  const node = useNode()
+  const hosted = useHosted()
   // Kept-only mode (./MediaView.js KeptOnlyContext): the kept copy or the
   // initials, never a fetch.
   const keptOnly = useContext(KeptOnlyContext) === true
-  const canFetch = !keptOnly && node !== null && node.hosted === true
+  const canFetch = !keptOnly && hosted === true
   const keptKey = keptOnly && typeof publicKey === 'string' && validAvatar(picture) ? avatarKey(publicKey, picture) : null
   const kept = useMemo(() => (keptKey !== null ? keptOnlyUrl('avatars', publicKey, picture, persist) : null), [keptKey, publicKey, persist])
   const key = canFetch && typeof publicKey === 'string' && validAvatar(picture) ? avatarKey(publicKey, picture) : null

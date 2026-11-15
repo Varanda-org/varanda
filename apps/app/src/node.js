@@ -110,7 +110,8 @@
 // `signals` folds the sync events into UI hints (syncSignals.js).
 // Contexts: a sync log line or a download hint arrives dozens of times a
 // second while many diaries sync, so neither rides in the useNode() value
-// (which every Avatar, MediaView, LinkCard and screen reads). useSyncLines()
+// (which screens read; rows read useNodeHandle(), useOnline() and
+// useMemberKey(), which ignore the sync flags). useSyncLines()
 // carries the log and useSyncSignals() the folded hints; useNode() keeps
 // sync { active, stopped, starting } and `signals` as a run-flags view
 // (see runFlags) that does not change on download lines. useHosted() is only
@@ -198,6 +199,17 @@ const HostedContext = createContext(false)
 const EMPTY_LINES = Object.freeze([])
 const SyncLinesContext = createContext(EMPTY_LINES)
 const SyncSignalsContext = createContext(EMPTY_SIGNALS)
+// What rows (avatars, photos, link cards, chat media, music cards) need from
+// the node, without the sync, online and visible flags that rebuild the node
+// value: it changes only when hosted, request, media, accountOrigin or
+// syncNow do. It is not an identity signal (request keeps one identity for
+// the whole session): rows keep identities apart through MemberKeyContext
+// and their identity-keyed caches, rendered in the same commit.
+const NodeHandleContext = createContext(null)
+// Primitives, so a flag flip elsewhere does not redraw their readers. Off and
+// none without a provider: nothing plays or asks for an unknown member.
+const OnlineContext = createContext(false)
+const MemberKeyContext = createContext(null)
 
 // The chat media calls a handle may offer besides upload (see the header).
 const CHAT_MEDIA_CALLS = ['putDm', 'putMoment', 'read', 'forgetReadFile', 'clearReadFiles']
@@ -208,6 +220,40 @@ export function useNode () {
 
 export function useHosted () {
   return useContext(HostedContext)
+}
+
+// -> { hosted, request, media, accountOrigin, syncNow } (see NodeHandleContext).
+export function useNodeHandle () {
+  return useContext(NodeHandleContext)
+}
+
+export function useOnline () {
+  return useContext(OnlineContext)
+}
+
+// The unlocked or known member key, lowercased, or null.
+export function useMemberKey () {
+  return useContext(MemberKeyContext)
+}
+
+export function memberKeyOf (passkey) {
+  return passkey && passkey.status && typeof passkey.status.publicKey === 'string'
+    ? passkey.status.publicKey.toLowerCase()
+    : null
+}
+
+function useHandle (hosted, request, media, accountOrigin, syncNow) {
+  return useMemo(() => ({ hosted, request, media, accountOrigin, syncNow }), [hosted, request, media, accountOrigin, syncNow])
+}
+
+function RowContexts ({ handle, online, memberKey, children }) {
+  return (
+    <NodeHandleContext.Provider value={handle}>
+      <OnlineContext.Provider value={online}>
+        <MemberKeyContext.Provider value={memberKey}>{children}</MemberKeyContext.Provider>
+      </OnlineContext.Provider>
+    </NodeHandleContext.Provider>
+  )
 }
 
 // The last sync event and warning lines (at most MAX_SYNC_LINES).
@@ -331,6 +377,7 @@ function VitrineNodeProvider ({ children }) {
     setVisible(isVisible())
     return unsubscribe
   }, [])
+  const syncNow = useCallback(() => Promise.resolve(), [])
   const value = useMemo(() => {
     const done = () => Promise.resolve({})
     // Anything that would change the identity or the connection refuses, so
@@ -398,15 +445,18 @@ function VitrineNodeProvider ({ children }) {
       signals: EMPTY_SIGNALS,
       ackFresh: () => {},
       setAutoSync,
-      syncNow: () => Promise.resolve()
+      syncNow
     }
-  }, [vitrineRequest, groupVersions, followsVersion, getGroupVersion, dmVersion, bumpDm, autoWanted, setAutoSync, visible])
+  }, [vitrineRequest, groupVersions, followsVersion, getGroupVersion, dmVersion, bumpDm, autoWanted, setAutoSync, visible, syncNow])
+  const handle = useHandle(true, vitrineRequest, value.media, value.accountOrigin, syncNow)
   return (
     <HostedContext.Provider value>
       <NodeContext.Provider value={value}>
-        <SyncSignalsContext.Provider value={EMPTY_SIGNALS}>
-          <SyncLinesContext.Provider value={EMPTY_LINES}>{children}</SyncLinesContext.Provider>
-        </SyncSignalsContext.Provider>
+        <RowContexts handle={handle} online memberKey={memberKeyOf(value.passkey)}>
+          <SyncSignalsContext.Provider value={EMPTY_SIGNALS}>
+            <SyncLinesContext.Provider value={EMPTY_LINES}>{children}</SyncLinesContext.Provider>
+          </SyncSignalsContext.Provider>
+        </RowContexts>
       </NodeContext.Provider>
     </HostedContext.Provider>
   )
@@ -1674,12 +1724,17 @@ function LiveNodeProvider ({ children }) {
     phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync: syncView, epoch, request, promote, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, autoSync, signals: runFlags, ackFresh, setAutoSync, syncNow, whenIdle
   }), [phase, config, error, hosted, accountOrigin, hostedSource, online, visible, syncView, epoch, request, promote, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, autoSync, runFlags, ackFresh, setAutoSync, syncNow, whenIdle])
 
+  const handle = useHandle(hosted, request, media, accountOrigin, syncNow)
+  const memberKey = memberKeyOf(passkey)
+
   return (
     <HostedContext.Provider value={hosted}>
       <NodeContext.Provider value={value}>
-        <SyncSignalsContext.Provider value={signals}>
-          <SyncLinesContext.Provider value={sync.lines}>{children}</SyncLinesContext.Provider>
-        </SyncSignalsContext.Provider>
+        <RowContexts handle={handle} online={online} memberKey={memberKey}>
+          <SyncSignalsContext.Provider value={signals}>
+            <SyncLinesContext.Provider value={sync.lines}>{children}</SyncLinesContext.Provider>
+          </SyncSignalsContext.Provider>
+        </RowContexts>
       </NodeContext.Provider>
     </HostedContext.Provider>
   )

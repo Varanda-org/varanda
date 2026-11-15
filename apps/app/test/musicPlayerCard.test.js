@@ -5,6 +5,12 @@ const fs = require('fs')
 const path = require('path')
 const { displayText } = require('@varanda/rpc')
 const source = fs.readFileSync(path.join(__dirname, '../src/ui/MusicPlayerCard.js'), 'utf8')
+// The real member key the provider hands the card (node.js loads React, so
+// only this pure function is taken from its text).
+const nodeSource = fs.readFileSync(path.join(__dirname, '../src/node.js'), 'utf8')
+const memberKeyOfText = nodeSource.slice(nodeSource.indexOf('export function memberKeyOf'), nodeSource.indexOf('function useHandle')).replace('export ', '')
+// eslint-disable-next-line no-new-func
+const memberKeyOf = new Function(memberKeyOfText + '\nreturn memberKeyOf')()
 
 // Like musicPicker.test, execute the controller with account and stream
 // doubles. Native media modules and the public network never load in Node.
@@ -148,7 +154,7 @@ test('idle cards use stored safe text, make no requests and mount the node reade
   const calls = []
   const unexpected = () => { calls.push('request'); throw new Error('idle request') }
   const opened = []
-  const h = await ui({ useHosted: () => true, useNode: unexpected, audiusReady: unexpected, audiusItem: unexpected, audiusPlay: unexpected, createStreamPlayer: unexpected, openExternal: (url) => opened.push(url) })
+  const h = await ui({ useHosted: () => true, useNodeHandle: unexpected, useMemberKey: unexpected, audiusReady: unexpected, audiusItem: unexpected, audiusPlay: unexpected, createStreamPlayer: unexpected, openExternal: (url) => opened.push(url) })
   const card = { title: 'Título\u202e', desc: 'Artista\u0007', url: track().url + '#varanda-musica=s:abc:30' }
   const music = { kind: 'snippet', id: 'abc', start: 30 }
   const props = { card, music }
@@ -252,7 +258,7 @@ test('the round button keeps every accessible name', async (t) => {
 test('the idle card still names Audius and draws no cover request', async (t) => {
   const calls = []
   const unexpected = () => { calls.push('request'); throw new Error('idle request') }
-  const h = await ui({ useNode: unexpected, audiusReady: unexpected, audiusItem: unexpected, audiusPlay: unexpected, createStreamPlayer: unexpected })
+  const h = await ui({ useNodeHandle: unexpected, useMemberKey: unexpected, audiusReady: unexpected, audiusItem: unexpected, audiusPlay: unexpected, createStreamPlayer: unexpected })
   const card = { title: 'Título\u202e', desc: 'Artista\u0007' }
   const tree = h.MusicCardView({ card, music: { kind: 'track' } })
   const row = tree.children[0]
@@ -421,7 +427,8 @@ test('the tap reads the own lowercase key and unmount aborts the active request'
   const calls = []
   let options
   const h = await ui({
-    useNode: () => ({ hosted: true, accountOrigin: 'account-origin', request: 'signer', passkey: { status: { publicKey: 'AB'.repeat(32) } } }),
+    useNodeHandle: () => ({ hosted: true, accountOrigin: 'account-origin', request: 'signer' }),
+    useMemberKey: () => memberKeyOf({ status: { publicKey: 'AB'.repeat(32) } }),
     audiusReady: async () => true,
     audiusItem: async (kind, id, opts) => { options = opts; calls.push([kind, id]); return item.promise },
     audiusPlay: () => calls.push('ticket')
@@ -455,9 +462,10 @@ test('the idle card asks no cover and shows the tile', async (t) => {
 test('after the tap the card asks the cover for the answered item only', async (t) => {
   const item = deferred()
   const covers = []
-  const session = { hosted: true, accountOrigin: 'account-origin', request: 'signer', passkey: { status: { publicKey: 'AB'.repeat(32) } } }
+  const session = { hosted: true, accountOrigin: 'account-origin', request: 'signer' }
   const h = await ui({
-    useNode: () => session,
+    useNodeHandle: () => session,
+    useMemberKey: () => memberKeyOf({ status: { publicKey: 'AB'.repeat(32) } }),
     useMusicCover: (...args) => { covers.push(args); return args[1] && args[1].cover === true ? 'data:image/png;base64,AAAA' : null },
     audiusReady: async () => true,
     audiusItem: async () => item.promise,
@@ -488,7 +496,8 @@ test('an account change never asks a cover for the new member', async (t) => {
   const covers = []
   let publicKey = 'AB'.repeat(32)
   const h = await ui({
-    useNode: () => ({ hosted: true, accountOrigin: 'account-origin', request: 'signer', passkey: { status: { publicKey } } }),
+    useNodeHandle: () => ({ hosted: true, accountOrigin: 'account-origin', request: 'signer' }),
+    useMemberKey: () => memberKeyOf({ status: { publicKey } }),
     useMusicCover: (...args) => { covers.push(args); return null },
     audiusReady: async () => true,
     audiusItem: async () => pending.promise,
@@ -1291,8 +1300,11 @@ test('shared player source keeps IO behind the tap and all provider text escaped
   t.ok(source.includes('job.controller.abort()'))
   t.is([...source.matchAll(/useMusicCover\(/g)].length, 1, 'one cover request, inside the active player')
   t.ok(source.indexOf('useMusicCover(') > source.indexOf('function ActiveMusicPlayer'))
-  t.is([...source.matchAll(/useNode\(\)/g)].length, 1)
-  t.ok(source.indexOf('useNode()') > source.indexOf('function ActiveMusicPlayer'))
+  t.absent(/useNode\(\)/.test(source), 'rows read the handle, not the node value')
+  t.is([...source.matchAll(/useNodeHandle\(\)/g)].length, 1)
+  t.ok(source.indexOf('useNodeHandle()') > source.indexOf('function ActiveMusicPlayer'))
+  t.is([...source.matchAll(/useMemberKey\(\)/g)].length, 1)
+  t.ok(source.indexOf('useMemberKey()') > source.indexOf('function ActiveMusicPlayer'))
   t.ok(source.includes('if (!queue.done) start(epoch, true)'), 'automatic start only on queue ended')
   t.is([...source.matchAll(/start\(epoch/g)].length, 3, 'only press, explicit queue step and ended call start')
   t.is([...source.matchAll(/await (?:job\.)?player\.play\(\)/g)].length, 3, 'start, resume and explicit scrub are the only play paths')

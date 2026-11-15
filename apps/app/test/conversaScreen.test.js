@@ -284,7 +284,7 @@ test('Conversa bar respects the safe area and consumes compose intent once', (t)
   t.ok(src.includes('nonFocalTarget={replyTarget !== null && replyTarget.ref !== focal}'), 'a reply to another row is flagged')
   t.ok(src.includes('onReply(attach ? { ...target, draft, attach } : { ...target, draft })'), 'attach rides only when given')
   t.ok(/targetReply\(composeSignal.target\)\s*if \(typeof onComposeSeen === 'function'\) onComposeSeen\(\)/.test(src))
-  t.ok(app.includes('onComposeSeen={() => setComposeSignal(null)}'))
+  t.ok(app.includes('onComposeSeen={h.handleComposeSeen}') && app.includes('handleComposeSeen: () => setComposeSignal(null)'))
 })
 
 test('Conversa ends the player band at the reply bar', (t) => {

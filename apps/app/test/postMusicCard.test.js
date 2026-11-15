@@ -117,7 +117,9 @@ async function harness (options = {}) {
     EmbedBandBottom: { get: () => null },
     TabBarShown: { get: () => true },
     useHosted: () => env.hosted,
-    useNode: () => ({ hosted: true, online: env.online, accountOrigin: 'https://conta.test', request: env.request, passkey: { status: { publicKey: member } } }),
+    useNodeHandle: () => ({ hosted: true, accountOrigin: 'https://conta.test', request: env.request }),
+    useOnline: () => env.online,
+    useMemberKey: () => member,
     musicAutoStore: () => ({ getItem: (key) => store.has(key) ? store.get(key) : null, setItem: (key, value) => store.set(key, value) }),
     openExternal: (url) => opened.push(url),
     playbackBusy: () => env.busy,
@@ -738,7 +740,9 @@ test('PostMusic source rules', (t) => {
   const measure = between(code, 'view.measureInWindow((x, y, w, h) => {', '} catch {')
   t.ok(measure.includes('settle(mostlyHidden('), 'the step runs inside the measure answer')
 
-  t.ok(code.includes('const active = visible && !held && node.online !== false\n'), 'supervision')
+  t.ok(code.includes('const active = visible && !held && online !== false\n'), 'supervision')
+  t.ok(code.includes('const online = useOnline()'), 'online from its own primitive context')
+  t.absent(/useNode\(\)/.test(code), 'rows read the handle, not the node value')
   const halt = between(code, 'const halt = () => {', '\n    }\n')
   t.ok(halt.includes('controller.current.stop()'), 'halting stops playback')
   t.absent(/screenReaderOn|autoOk/.test(halt) || /screenReaderOn|autoOk/.test(code.slice(code.indexOf('const active'), code.indexOf('\n', code.indexOf('const active')))), 'a screen reader never keeps a song from stopping')
