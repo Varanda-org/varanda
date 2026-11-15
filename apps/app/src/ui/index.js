@@ -258,7 +258,7 @@ export function ConfirmStack ({ confirm, cancel }) {
 
 // Key, JSON and host fields are `mono`: no capitalisation or correction.
 // Free text (name, bio) keeps the platform defaults.
-export function Field ({ label, value, onChangeText, multiline, maxLength, editable = true, placeholder, mono, lines = 4, onSubmitEditing, returnKeyType, plain }) {
+export function Field ({ label, value, onChangeText, multiline, maxLength, editable = true, placeholder, mono, lines = 4, onSubmitEditing, returnKeyType, keyboardType, plain }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   // plain: a search, typed as is (no capitals, no autocorrect) in the normal font.
@@ -267,6 +267,7 @@ export function Field ({ label, value, onChangeText, multiline, maxLength, edita
   const submit = {}
   if (onSubmitEditing !== undefined) submit.onSubmitEditing = onSubmitEditing
   if (returnKeyType !== undefined) submit.returnKeyType = returnKeyType
+  if (keyboardType !== undefined) submit.keyboardType = keyboardType
   return (
     <View style={styles.field}>
       {label ? <Label>{label}</Label> : null}

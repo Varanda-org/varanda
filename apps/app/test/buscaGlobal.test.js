@@ -27,8 +27,8 @@ test('categories and labels', async (t) => {
 
 test('notice and empty texts are exact', async (t) => {
   const b = await load()
-  t.is(b.BUSCA_NOT_HOSTED_TITLE, 'Só na versão web')
-  t.is(b.BUSCA_NOT_HOSTED, 'Nesta versão, a pesquisa de publicações só funciona no site da associação ou no app ligado à instalação.')
+  t.is(b.BUSCA_NOT_HOSTED_TITLE, 'Pesquisa indisponível')
+  t.is(b.BUSCA_NOT_HOSTED, 'A pesquisa de publicações está disponível no site da associação ou no app ligado à instalação.')
   t.is(b.BUSCA_UNAVAILABLE_TITLE, 'Busca indisponível')
   t.is(b.BUSCA_UNAVAILABLE, 'A pesquisa não está disponível nesta conexão.')
   t.alike(b.BUSCA_EMPTY, {
