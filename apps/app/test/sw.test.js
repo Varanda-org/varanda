@@ -1208,6 +1208,27 @@ test('dm wake: a window that answers no (the person left it) gets the notice at 
   t.ok(Date.now() - started < 900, 'without waiting for the acknowledgement timeout')
 })
 
+test('dm wake: the acknowledgement window is 2 s: a slow answer still counts, silence shows the notice after it', async (t) => {
+  const slow = renderedWorker()
+  const late = activeWindow(ORIGIN + '/')
+  late.postMessage = (m, transfer) => {
+    late.messages.push(m)
+    const port = transfer && transfer[0]
+    if (port) setTimeout(() => port.postMessage({ type: 'varanda-dm-wake-ok' }), 1500)
+  }
+  slow.windows = [late]
+  t.alike(await wakeShown(slow), [], 'an answer at 1.5 s still hides the notice')
+
+  const silent = renderedWorker()
+  const mute = activeWindow(ORIGIN + '/')
+  mute.answers = false
+  silent.windows = [mute]
+  const started = Date.now()
+  t.is((await wakeShown(silent)).length, 1, 'silence shows the notice')
+  const waited = Date.now() - started
+  t.ok(waited >= 1900 && waited < 3500, 'after about 2 s, not 1 s (' + waited + ' ms)')
+})
+
 test('dm wake: once a focused window takes the wake, the other app windows are told to re-read', async (t) => {
   const w = renderedWorker()
   const focused = activeWindow(ORIGIN + '/')

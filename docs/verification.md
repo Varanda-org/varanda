@@ -2337,7 +2337,7 @@ Arquivos estendidos:
 - `apps/app/test/sw.test.js`: o aviso, o toque, o ping `varanda-push-ping` e a resposta `{ source: 'varanda-sw', push: 1 }`.
 - `apps/app/test/legal.test.js`: `LEGAL_VERSION` 3.
 
-O resultado de lint, dos testes e da demo fica com o orquestrador e não é repetido aqui. Nenhum teste de navegador cobre a linha de Ajustes nem o fluxo de abrir o aviso a partir da notificação (veja Limites).
+O resultado de lint, dos testes e da demo fica com o orquestrador e não é repetido aqui. Nenhum teste de navegador cobre a linha de Ajustes nem o fluxo de abrir o aviso a partir da notificação (veja Limites). `apps/app/test/push-switch.test.js` cobre a lógica da linha (`pushRowView`) e o desligamento antes de trocar a identidade; `apps/cli/test/account-push.test.js` cobre o atraso aleatório do envio.
 
 ### Verificação manual
 
@@ -2363,13 +2363,15 @@ Nenhuma verificação foi feita ainda. Todos os itens abaixo estão desmarcados 
 - No máximo 4 aparelhos por membro (`PUSH_MAX_PER_MEMBER`). O envio só sai para a lista de hosts (`fcm.googleapis.com`, `updates.push.services.mozilla.com`, `web.push.apple.com` e os sufixos `.push.apple.com`, `.push.services.mozilla.com`, `.notify.windows.com`).
 - Não há tratamento de `pushsubscriptionchange`. Não há citação nem menção no push. Não há push nativo (APNs e FCM do app continuam fora). Não há aviso quando um diário seguido cresce (o TODO de `packages/core/lib/sync.js`).
 - Em `apps/cli/lib/account/push-store.js`, `byDate` compara `createdAt` como texto. Um ISO de ano expandido (`toISOString` fora de 0000 a 9999, no formato `+275760-...`) ordena antes de um ano de quatro dígitos, e o teto pode tratar essa linha como a mais antiga. Uma transferência de `endpoint` para um membro que já tem 4 aparelhos não é recusada: `put` aceita (o comentário de "transferência que não acrescenta membro" vale para `MAX_MEMBERS`) e `cap` descarta a linha mais antiga desse membro.
-- Não há teste automatizado no navegador da linha de Ajustes nem do fluxo de abrir o app a partir do aviso. A cobertura é dos módulos puros, do service worker e do roteiro acima.
+- Não há teste automatizado no navegador da linha de Ajustes nem do fluxo de abrir o app a partir do aviso. A cobertura é dos módulos puros (`pushRowView`, `pushUiState`), do service worker (`notificationclick`, em `apps/app/test/sw.test.js`) e do roteiro acima.
 - Uma resposta, curtida ou republicação cujo post alvo ainda não está legível na réplica do destinatário no semeador (fora do prefixo contíguo, ou uma leitura sem espera que falhou) não vira aviso, e o bloco não é lido de novo (no máximo uma vez).
 - Se um envio volta 410 enquanto o mesmo `endpoint` é registrado de novo com chaves novas, a remoção compara as chaves antes de entrar na fila do `push.json`, e uma janela curta ainda pode apagar o registro novo. O navegador costuma gerar outro `endpoint` ao assinar de novo; religar em Ajustes resolve.
 - Ao ligar, um cancelamento local que passa de 5 s (`UNSUBSCRIBE_MS`) é dado como não confirmado; o navegador ainda pode concluí-lo depois.
 - A limpeza de Sair e Recomeçar espera até 3 s (`LEAVE_WAIT_MS`) uma troca do interruptor em andamento e o interruptor não aceita novo toque durante ela. Se o pedido de permissão ficar aberto além disso, um "Permitir" tardio é desligado de novo quando a troca termina (só o cancelamento local, porque o nó já saiu). Conferir num navegador real com o pedido aberto ainda falta.
-- Todo aviso é preenchido até 1024 bytes antes de cifrar (`PUSH_PAD_TO`, preenchimento do RFC 8188), então o tamanho não mostra o tipo nem o nome. Mas a entrega é imediata: o serviço de push do navegador vê o momento de cada aviso e pode cruzá-lo com os registros públicos dos diários. Não há atraso artificial, por escolha: um atraso deixaria todo aviso mais lento.
-- Os caminhos de `apps/app/src/screens/Identidade.js` que trocam a identidade guardada ("apagar e recomeçar" quando a identidade não confere, "criar mesmo assim") não chamam `disablePush`. Num aparelho compartilhado, a inscrição do navegador pode continuar recebendo os avisos da identidade anterior até ser desligada ou até o serviço de push descartá-la (não confirmado de ponta a ponta).
+- Todo aviso é preenchido até 1024 bytes antes de cifrar (`PUSH_PAD_TO`, preenchimento do RFC 8188), então o tamanho não mostra o tipo nem o nome. Cada aviso espera antes um atraso aleatório e uniforme de 0 a 60 s (`crypto.randomInt`, `PUSH_DELAY_MAX_MS` em `push-routes.js`), sorteado uma vez por aviso e igual para todas as cópias dele, uma por aparelho (o serviço de push não aproveita a mais cedo), decidido pela manutenção em 2026-11-15, para o momento da entrega não coincidir com o do registro público que o causou. O serviço de push do navegador ainda vê o momento (com o atraso) e pode cruzá-lo com os registros públicos, só com menos precisão. A pausa e os tetos são decididos ao enfileirar, então o atraso não duplica nem pula um aviso. Ao fechar o serviço, os envios que ainda esperavam saem na hora (perdem o atraso), sem repetição e dentro de um prazo total de 3 s (`FLUSH_MS`); numa queda sem fechar, esses envios se perdem, e um convite cujo envio se perdeu não é repetido, porque o espaço dele já foi marcado. Ao fechar, a varredura de exclusões e o laço de convites param antes do servidor, e um serviço fechado não tem vaga, então nenhum espaço é marcado depois do fechamento. Um aviso pode levar até cerca de um minuto para chegar, e o texto de Ajustes diz isso.
+- Com o atraso, `MAX_QUEUE` (512) passa a valer como um teto de cerca de 512 avisos por minuto: a fila segura cada envio por até 60 s, e o que não cabe é descartado em silêncio (só o motivo `descartado` no registro, nenhum aviso para a pessoa).
+- Se a pessoa cancela o diálogo da passkey depois de "criar mesmo assim", os avisos já foram desligados para a identidade que continua guardada. Ajustes mostra o estado real ao abrir, e basta ligar de novo.
+- Os caminhos de `apps/app/src/screens/Identidade.js` que trocam a identidade guardada ("apagar e recomeçar" quando a identidade não confere, "criar mesmo assim") agora desligam os avisos da identidade anterior antes de trocar (`turnOffBeforeSwitch`, `apps/app/src/pushSwitch.js`), sem nunca bloquear a troca se o desligamento falha. No "apagar e recomeçar" o desligamento é aguardado; no "criar mesmo assim" ele só é iniciado antes da cerimônia, sem aguardar, porque a cerimônia da passkey precisa da ativação do mesmo toque. Com o aparelho travado, o desligamento pode falhar por falta da chave para a prova, e então a inscrição fica até ser desligada ou descartada pelo serviço de push (não confirmado de ponta a ponta).
 
 ## 39. Abertura do app: splash e cartões (feat/app-startup, 2026-10-29)
 
@@ -2788,7 +2790,7 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado.
 ### Limites
 
 - Fechar vale por perfil do navegador, não por conta; a nota volta depois de 30 dias. Sem armazenamento, volta na próxima carga.
-- Sair continua sem esperar uma troca dos avisos em andamento, como descrito na seção 38: um Sair no meio de um Ativar pode deixar este navegador inscrito até a próxima leitura. Depois de entrar de novo, a linha e a nota ficam pendentes até essa troca terminar; se o pedido de permissão ficar aberto, elas esperam a resposta, e se uma leitura do navegador travar, até recarregar a página.
+- Sair espera até 3 s uma troca dos avisos em andamento e desliga de novo um "Permitir" tardio quando a troca termina (seção 38, `offHere`). Depois de entrar de novo, a linha e a nota ficam pendentes até essa troca terminar; se o pedido de permissão ficar aberto, elas esperam a resposta, e se uma leitura do navegador travar, até recarregar a página.
 - Uma leitura sem conexão ao abrir Ajustes volta sem chave: a linha mostra o texto de indisponível e a nota some até a próxima leitura, como antes desta mudança. Se o service worker não fica pronto a tempo, a linha mostra o texto de recarregar, também como antes. Como fechar Ajustes não apaga mais o estado, ao reabrir a linha mostra o estado anterior até a leitura nova chegar.
 - Se Sair ou Recomeçar falhar depois de desligar os avisos, a linha continua mostrando o estado anterior até a próxima leitura, como antes desta mudança.
 - Com duas abas abertas, uma não vê a inscrição feita na outra até ler de novo (abrir Ajustes, voltar a conexão, bloquear e desbloquear). Ativar nessa aba recebe do navegador a inscrição que já existe e, se um passo seguinte falhar com recusa, a desfaz, como já acontecia na linha de Ajustes; a nota aumenta essa janela porque a leitura dela vale até a próxima.
@@ -4198,7 +4200,6 @@ Web (Chrome ou Safari, com o nó no navegador ou com o `varanda-serve`):
 ### Não verificado / limites conhecidos
 
 - Nenhuma caixa acima foi executada nesta documentação. Os testes automáticos cobrem só a janela do toque duplo, a abertura pendente e a regra de que um toque duplo com curtida ou republicação pendente da mesma publicação não mostra o coração (`doubleTapPlan`); o pulo, o coração de 64 pt, a vibração e o aviso ainda precisam de aparelho.
-- Um desfazer durante a atualização puxada pode deixar a contagem uma a mais até a próxima atualização.
 - O desfazer atualiza só a tela que mostrou o aviso.
 - Um desfazer enquanto uma curtida da mesma publicação está pendente não entra na fila; o botão de republicar da linha continua desfazendo.
 - Um arrasto que começa fora de qualquer publicação, dentro dos 280 ms, não cancela a abertura da conversa. Tocar numa aba cancela.
@@ -4317,11 +4318,11 @@ Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emula
 
 ## 88. Avisos da página (PR feat/pages-app)
 
-O dono e os administradores leem em Avisos o que chega para a página: quem começou a seguir a página, as respostas, as citações e as menções (sem as curtidas e republicações do canal `notices/3`). O serviço de conta lê os avisos pelo semeador, confere cada linha e responde só ao dono e aos administradores (ação `notices`, leitura assinada, 8 por minuto por página; página mudada de chave responde `movida`). Nenhum Web Push vai para uma página. Contrato em `docs/protocol.md` seção 12 ("Avisos de uma página") e em `docs/rpc.md` (5.84); dados em `docs/design.md` (LGPD).
+O dono e os administradores leem em Avisos o que chega para a página: quem começou a seguir a página, as respostas, as citações, as menções e as curtidas e republicações das publicações da página (canal `notices/3`; um semeador sem ele dá só as quatro primeiras). O serviço de conta lê os avisos pelo semeador, confere cada linha e responde só ao dono e aos administradores (ação `notices`, leitura assinada, 8 por minuto por página; página mudada de chave responde `movida`). Nenhum Web Push vai para uma página. Contrato em `docs/protocol.md` seção 12 ("Avisos de uma página") e em `docs/rpc.md` (5.84); dados em `docs/design.md` (LGPD).
 
 ### Como verificar
 
-Do repositório: `npm run lint`, `npm test` e `npm run demo`. Testes desta etapa: `apps/cli/test/account-pages-notices.test.js` (linhas verificadas, limite por página, administrador removido) e `apps/app/test/notices.test.js`. Não rode nada contra o serviço de produção.
+Do repositório: `npm run lint`, `npm test` e `npm run demo`. Testes desta etapa: `apps/cli/test/account-pages-notices.test.js` (linhas verificadas, limite por página, administrador removido), `apps/cli/test/pages-notices.test.js` (curtida e republicação de uma publicação da página; curtida de publicação de outra pessoa, bloco forjado e autor desconhecido recusados) e `apps/app/test/notices.test.js`. Não rode nada contra o serviço de produção.
 
 ### Checagens humanas (a fazer)
 
@@ -4329,15 +4330,19 @@ Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emula
 
 1. **Seguir a página.** C segue a página; em A e em B, Avisos mostra "começou a seguir a página" com o nome de C.
 2. **Menção.** C publica um texto com o @nome da página; o aviso de menção aparece para A e para B, sem o texto cru de um par fora de `displayText`.
-3. **Quem não administra.** C não vê os avisos da página em nenhuma tela.
-4. **Administrador removido.** A remove B; B deixa de ver os avisos da página no próximo carregamento.
-5. **Limite.** Atualizar Avisos da página mais de 8 vezes em um minuto mostra o limite e nada quebra; passado o minuto, funciona de novo.
-6. **Sem push.** Nenhuma notificação do sistema chega ao aparelho por causa de um aviso da página.
-7. **Página encerrada.** Depois de encerrar a página, Avisos da página responde "Esta página foi encerrada".
+3. **Curtida e republicação.** C curte e republica uma publicação da página; o aviso "curtiu" e o de "republicou" aparecem para A e para B. Uma curtida de C em publicação de outra pessoa não aparece.
+4. **Quem não administra.** C não vê os avisos da página em nenhuma tela.
+5. **Administrador removido.** A remove B; B deixa de ver os avisos da página no próximo carregamento.
+6. **Limite.** Atualizar Avisos da página mais de 8 vezes em um minuto mostra o limite e nada quebra; passado o minuto, funciona de novo.
+7. **Sem push.** Nenhuma notificação do sistema chega ao aparelho por causa de um aviso da página.
+8. **Página encerrada.** Depois de encerrar a página, Avisos da página responde "Esta página foi encerrada".
+9. **Links no trecho.** Numa linha de Avisos (de uma pessoa ou da página) cujo trecho da publicação traz um endereço inteiro (`https://exemplo.com/a`), tocar no endereço abre o navegador e tocar no resto da linha abre a conversa; um trecho cortado em 90 caracteres no meio de um endereço continua texto simples, sem link.
 
 ### Não verificado / limites conhecidos
 
 - Nada foi rodado num navegador nem num aparelho pelo agente.
+- Se o canal v3 não responde e a leitura cai para o v2, a leitura sai com `incomplete` (a nota "alguns avisos ainda podem chegar"), sem teste automático (o semeador do teste sempre responde).
+- Um semeador que não abre `varanda/notices/3` leva a leitura para o v2, sem curtidas nem republicações; esse caminho não tem teste automático (o semeador do teste sempre abre os dois canais).
 - O limite de 8 por minuto por página fica na memória do serviço e recomeça quando ele reinicia.
 - O serviço lê os avisos da página em nome dos administradores (Termos 15).
 
@@ -5515,9 +5520,9 @@ Resultado da matriz: a registrar aqui por navegador, com a data e a versão do n
 - O aviso é do navegador. No app instalado não há aviso do sistema, e nada muda ali.
 - Os 120 s são do aparelho que enviou: os outros aparelhos da mesma pessoa recebem o aviso normalmente, porque o servidor não sabe qual deles enviou.
 - A supressão vale só no aparelho, e o marcador não sai dele: nenhum servidor aprende quem enviou.
-- Os limites 1 e 2 acima são conhecidos e não corrigidos nesta parte. A conferência registra o que acontece.
+- Os limites 1 e 2 acima são conhecidos e não corrigidos nesta parte. A conferência registra o que acontece. Aceitos por decisão da manutenção (2026-11-15): (1) os outros aparelhos de quem envia ainda recebem o aviso; (2) o intervalo global de 15 minutos (`DM_WAKE_COOLDOWN_MS`) pode engolir o aviso de uma resposta que chegue dentro dele; (3) a janela de confirmação da janela em foco (abaixo).
 - O serviço de conta manda no máximo um aviso de mensagem a cada 15 minutos para todo mundo (`DM_WAKE_COOLDOWN_MS`, já era assim). Se o primeiro aviso desse intervalo foi o do próprio envio, e por isso não apareceu, uma resposta que chegue depois dos 120 s e antes de acabar o intervalo também não gera aviso; ela aparece no próximo `dm.pull` (ao voltar para o app, ao puxar para atualizar ou a cada 5 minutos com o app visível). Antes desta parte essa resposta também não gerava aviso: só aparecia o aviso do próprio envio.
-- A janela em foco só fica com o aviso se o app responder ao service worker em até 1 s (`DM_WAKE_ACK_MS`); uma aba em foco que não é o app (uma imagem aberta direto, por exemplo) não responde, e o aviso aparece.
+- A janela em foco só fica com o aviso se o app responder ao service worker em até 2 s (`DM_WAKE_ACK_MS`, subiu de 1 s por decisão da manutenção em 2026-11-15; coberto em `apps/app/test/sw.test.js`); uma aba em foco que não é o app (uma imagem aberta direto, por exemplo) não responde, e o aviso aparece.
 - Com a janela em foco, o aviso vira só uma releitura. Se a identidade está travada, a releitura espera o destravar. Se já há um `dm.pull` em andamento, a releitura dele falha e a mensagem aparece no próximo. Mensagens de uma página só aparecem quando a pessoa está agindo como a página, como antes. Uma janela em foco fora da área de membro (a abertura, os Termos, a primeira configuração, ou o começo de um carregamento antes de o app ouvir) não responde ao worker, e o aviso aparece normalmente.
 - Nenhuma caixa executada nesta documentação.
 
