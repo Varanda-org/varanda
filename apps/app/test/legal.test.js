@@ -324,7 +324,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'cfec01f1dbd5a152f0f2bcb1ebb120c645f2e1f57a63be47b19d6a9747a8c339', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'e1ea4c578c75401442acedf658914a32ae8cb5d56fbe1cfed0ff30b4e927ce54', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -545,7 +545,7 @@ test('Privacidade: Posts salvos diz do pedido ao semeador, do backup e do Sair',
   const { PRIVACY } = await load()
   const p = PRIVACY.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   t.ok(p.includes('o app pede essas publicações ao semeador'), 'semeador request')
-  t.ok(p.includes('o semeador pode saber quais publicações o seu aparelho pediu'))
+  t.ok(p.includes('o semeador pode associar essas publicações à sua conta'), 'account linkage')
   t.ok(p.includes('o iCloud, no iPhone'), 'backup')
   t.ok(p.includes('continua no aparelho depois de Sair'), 'stays after Sair')
 })

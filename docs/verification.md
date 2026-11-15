@@ -11153,10 +11153,10 @@ Esta seção confere o menu "mais" de uma publicação (Salvar, Tirar dos salvos
 - [ ] Duas contas no mesmo aparelho (ou duas instalações) têm listas separadas.
 - [ ] Tirar a conta do aparelho esquece a lista, em todas as instalações que o aparelho guardava para essa conta; criar ou entrar de novo começa vazia. Sair da conta ("Sair") não esquece a lista: ela continua no aparelho até a conta ser removida dele.
 - [ ] No celular, a lista pode entrar no backup do próprio aparelho (o iCloud, no iPhone); a Privacidade diz isso e diz que a lista continua no aparelho depois de "Sair".
-- [ ] Rede: nenhuma requisição é feita ao salvar ou ao tirar dos salvos; ao abrir a tela só vêm as leituras de `diary.peek` (o semeador vê quais publicações foram pedidas) e a busca do perfil de até 10 autores no índice (`/index/member/`, para o nome e a foto), e a lista em si não é enviada.
+- [ ] Rede: nenhuma requisição é feita ao salvar ou ao tirar dos salvos; ao abrir a tela só vêm as leituras de `diary.peek` (elas vão pela conexão em que o app já se identificou, então o semeador pode associar as publicações pedidas à conta) e a busca do perfil de até 10 autores no índice (`/index/member/`, para o nome e a foto), e a lista em si não é enviada.
 - [ ] Armazenamento na web: só referências (autor, número, hora), nenhum texto de publicação. No app nativo: o arquivo `varanda-saved-posts.json` nos documentos do app, também só com referências.
 - [ ] Claro e escuro, 375x812 e 1280x800: alvos de toque de 44 pt, sem texto cortado, leitor de tela lê Salvar e Tirar dos salvos.
-- [ ] Os Termos e a Privacidade estão na versão 53 e pedem novo aceite; o texto de Posts salvos na Privacidade diz que o semeador pode saber quais publicações o aparelho pediu.
+- [ ] Os Termos e a Privacidade estão na versão 53 e pedem novo aceite; o texto de Posts salvos na Privacidade diz que o semeador pode associar as publicações pedidas à conta.
 
 ## 246. Hashtags tocáveis (PR feat/hashtags)
 
