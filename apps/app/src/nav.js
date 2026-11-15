@@ -25,13 +25,17 @@
 // 'assunto' (the posts under one hashtag) is keyed by the folded tag, 2 to 32
 // of [a-z0-9], so a tap from one Assunto page to another is a distinct entry.
 // 'recados' (the notes left on one page) is keyed by the page owner's hex64.
+// 'fas' (the fan list of a profile) is keyed by the owner's hex64; the own one
+// opens as the Fãs segment of 'seguindo' (params.segment 'fas'), another
+// person's as this screen. 'melhores-amigos' (the own top friends editor)
+// takes no key.
 // The stack is an immutable (frozen) array, oldest first. Invalid entries are
 // refused by returning the stack unchanged (never throws); pushing the
 // screen that is already on top is a no-op, whatever its params; past
 // MAX_DEPTH the oldest entry is dropped.
 
 export const MAX_DEPTH = 20
-export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos', 'salvos', 'assunto', 'recados'])
+export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos', 'salvos', 'assunto', 'recados', 'fas', 'melhores-amigos'])
 
 const HEX32 = /^[0-9a-f]{32}$/
 const HEX64 = /^[0-9a-f]{64}$/
@@ -70,8 +74,8 @@ export function validEntry (entry) {
     return isRef(entry.key) && typeof params.offer === 'string' && HEX32.test(params.offer)
   }
   if (entry.screen === 'membro' || entry.screen === 'mensagem' || entry.screen === 'grupo' || entry.screen === 'comunidade' || entry.screen === 'comunidade-info') return isAuthorKey(entry.key)
-  if (entry.screen === 'seguindo' || entry.screen === 'seguidores' || entry.screen === 'paginaajustes' || entry.screen === 'anuncios' || entry.screen === 'depoimentos' || entry.screen === 'momentos' || entry.screen === 'recados') return isAuthorKey(entry.key)
-  if (entry.screen === 'paginas' || entry.screen === 'novapagina' || entry.screen === 'comunidades' || entry.screen === 'pedidos' || entry.screen === 'salvos') return entry.key === undefined || entry.key === null || entry.key === ''
+  if (entry.screen === 'seguindo' || entry.screen === 'seguidores' || entry.screen === 'paginaajustes' || entry.screen === 'anuncios' || entry.screen === 'depoimentos' || entry.screen === 'momentos' || entry.screen === 'recados' || entry.screen === 'fas') return isAuthorKey(entry.key)
+  if (entry.screen === 'paginas' || entry.screen === 'novapagina' || entry.screen === 'comunidades' || entry.screen === 'pedidos' || entry.screen === 'salvos' || entry.screen === 'melhores-amigos') return entry.key === undefined || entry.key === null || entry.key === ''
   if (entry.screen === 'assunto') return typeof entry.key === 'string' && TAG.test(entry.key)
   if (entry.screen === 'curtidas') {
     const params = entry.params

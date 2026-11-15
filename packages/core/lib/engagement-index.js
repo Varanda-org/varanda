@@ -17,6 +17,15 @@
 // Perfil rico: the newest live `profile-about` and `mood` seq of each author
 // (profileExtra), like the profile hint: seqs only, a deletion falls back to
 // the previous live block, and each block holds a record slot.
+// Fas e Melhores amigos (lib/fans.js): every live `fan` block holds a record
+// slot under its writer, the last live operation per (writer, key) wins and,
+// when it is on, is published under the key (fans(), fanCount()); a deletion
+// falls back to the previous live operation. A fan of the writer itself
+// takes no slot and is never listed. A writer keeps at most FAN_KEYS_MAX
+// distinct keys: past that, a block naming a new key is skipped without a
+// slot (the list may then be short; counts are seeder claims). The newest
+// live `top-friends` block of an author is profileExtra().top, kept like the
+// about pointer with its keys; one that names its writer takes no slot.
 // Collections are lazy. Budget roughly 250 bytes/record (edge, post/timeline,
 // engager and touched entries, the engagements map, and the profileSeqs,
 // usernameSeqs, copiedSeqs, aboutSeqs and moodSeqs arrays) plus 500
@@ -73,7 +82,7 @@
 // writer, then SCRAP_PER_PAGE per page, newest first (at desc, author asc,
 // seq desc). Each request examines at most SCRAP_SCAN pointers (writers
 // included); past it the answer says truncated.
-const { formatRef, parseRef } = require('./records')
+const { formatRef, parseRef, MAX_TOP_FRIENDS } = require('./records')
 const { commitment } = require('./testimonials')
 
 const DEFAULT_MAX_RECORDS = 1000000
@@ -95,6 +104,10 @@ const SCRAP_ROWS = 50
 const SCRAP_HIDES = 1000
 const SCRAP_SCAN = 20000
 const SCRAP_WALLS = new Set(['following', 'everyone', 'nobody'])
+const FAN_PAGE = 20
+// Same value as lib/notices.js MAX_FOLLOW_TARGETS_PER_AUTHOR (lib/fans.js
+// caps a writer's distinct fan keys with it; not imported, as above).
+const FAN_KEYS_MAX = 4096
 // Same value as lib/feed.js MAX_FUTURE_MS (not imported: this module only
 // requires ./records and ./testimonials). An engager edge dated further ahead is hidden, never
 // removed, and appears once the clock catches up.
@@ -358,6 +371,36 @@ function compareScrapRows (a, b) {
   return b.seq - a.seq
 }
 
+// A top-friends key list as lib/records.js validates it, minus the writer
+// rule (add checks that): at most MAX_TOP_FRIENDS distinct hex keys.
+function validTopKeys (keys) {
+  if (!Array.isArray(keys) || keys.length > MAX_TOP_FRIENDS) return false
+  const seen = new Set()
+  for (const k of keys) {
+    if (typeof k !== 'string' || !HEX64.test(k) || seen.has(k)) return false
+    seen.add(k)
+  }
+  return true
+}
+
+// Index of the first operation of `ops` (ascending seq) at or above `seq`.
+function opLowerBound (ops, seq) {
+  let lo = 0
+  let hi = ops.length
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1
+    if (ops[mid].seq < seq) lo = mid + 1
+    else hi = mid
+  }
+  return lo
+}
+
+// Fan rows: atMs desc, then key asc (lib/notices.js compareRows).
+function compareFanRows (a, b) {
+  if (a.atMs !== b.atMs) return a.atMs > b.atMs ? -1 : 1
+  return a.key < b.key ? -1 : a.key > b.key ? 1 : 0
+}
+
 function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets = DEFAULT_MAX_TARGETS, perAuthorMax = DEFAULT_PER_AUTHOR_MAX, onFreed = null } = {}) {
   const cap = Number.isSafeInteger(maxRecords) && maxRecords >= 0 ? maxRecords : DEFAULT_MAX_RECORDS
   const targetCap = Number.isSafeInteger(maxTargets) && maxTargets >= 0 ? maxTargets : DEFAULT_MAX_TARGETS
@@ -401,6 +444,10 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   // never listed), kept across a drop of the owner like `incoming`.
   // `replies` holds the scraps whose replyTo names a block of the owner.
   const scrapIn = new Map()
+  // Key -> Map<writer, { seq, at }>: the writers whose last live `fan`
+  // operation on that key is on (seq and at of that block), kept across a
+  // drop of the key's own diary like `incoming`.
+  const fanIn = new Map()
 
   function invalidateNotices (author) {
     noticeCache.delete(author)
@@ -408,7 +455,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   function authorEntry (author) {
     let entry = authors.get(author)
     if (entry === undefined) {
-      entry = { count: 0, timeline: [], posts: new Map(), reposts: new Map(), touched: new Map(), profileSeqs: [], usernameSeqs: [], copiedSeqs: [], aboutSeqs: [], moodSeqs: [], engagements: new Map(), testimonials: null, shows: null, scraps: null, scrapsByTo: null, scrapHides: null, hideSeqs: null, hiddenRefs: null, walls: null, wallSeqs: null }
+      entry = { count: 0, timeline: [], posts: new Map(), reposts: new Map(), touched: new Map(), profileSeqs: [], usernameSeqs: [], copiedSeqs: [], aboutSeqs: [], moodSeqs: [], engagements: new Map(), testimonials: null, shows: null, scraps: null, scrapsByTo: null, scrapHides: null, hideSeqs: null, hiddenRefs: null, walls: null, wallSeqs: null, fanSeqs: null, fanOps: null, tops: null, topSeqs: null }
       authors.set(author, entry)
     }
     return entry
@@ -518,12 +565,17 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       const type = record.type
       if (type !== 'post' && type !== 'like' && type !== 'repost' && type !== 'profile' && type !== 'username' &&
           type !== 'testimonial' && type !== 'testimonial-show' && type !== 'scrap' && type !== 'scrap-hide' &&
-          type !== 'scrap-wall' && type !== 'profile-about' && type !== 'mood') return false
+          type !== 'scrap-wall' && type !== 'profile-about' && type !== 'mood' && type !== 'fan' && type !== 'top-friends') return false
       if (type === 'testimonial' && (!HEX64.test(record.to) || !HEX64.test(record.hash))) return false
       if (type === 'scrap' && (!HEX64.test(record.to) || (record.replyTo !== null &&
           (typeof record.replyTo !== 'object' || !HEX64.test(record.replyTo.author) || !isSeq(record.replyTo.seq))))) return false
       if (type === 'scrap-hide' && (!HEX64.test(record.from) || !isSeq(record.seq))) return false
       if (type === 'scrap-wall' && !SCRAP_WALLS.has(record.who)) return false
+      if (type === 'fan' && (typeof record.key !== 'string' || !HEX64.test(record.key) || typeof record.on !== 'boolean' || typeof record.at !== 'string')) return false
+      if (type === 'top-friends' && !validTopKeys(record.keys)) return false
+      // Never self (lib/fans.js): as if never written, no slot.
+      if (type === 'fan' && record.key === author) return true
+      if (type === 'top-friends' && record.keys.includes(author)) return true
       if (type === 'testimonial-show' && (!HEX64.test(record.from) || !isSeq(record.seq) ||
           typeof record.text !== 'string' || typeof record.nonce !== 'string')) return false
       let replyTo = type === 'post' && record.replyTo ? formatRef(record.replyTo) : null
@@ -540,7 +592,9 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
           indexOfSeq(existing.profileSeqs, seq) !== -1 || indexOfSeq(existing.usernameSeqs, seq) !== -1 ||
           indexOfSeq(existing.copiedSeqs, seq) !== -1 || indexOfSeq(existing.aboutSeqs, seq) !== -1 ||
           indexOfSeq(existing.moodSeqs, seq) !== -1 || existing.testimonials?.has(seq) || existing.shows?.has(seq) ||
-          existing.scraps?.has(seq) || existing.scrapHides?.has(seq) || existing.walls?.has(seq))) return true
+          existing.scraps?.has(seq) || existing.scrapHides?.has(seq) || existing.walls?.has(seq) ||
+          existing.fanSeqs?.has(seq) || existing.tops?.has(seq))) return true
+      if (type === 'fan' && existing?.fanOps?.has(record.key) !== true && (existing?.fanOps?.size ?? 0) >= FAN_KEYS_MAX) return true
       if (records >= cap || (existing ? existing.count : 0) >= authorCap) return false
       // Off operations need no new target; they may free one at the cap.
       const needed = new Set([replyTo, quote, record.on === true ? to : null])
@@ -631,6 +685,26 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
         entry.aboutSeqs.splice(lowerBoundSeq(entry.aboutSeqs, seq), 0, seq)
       } else if (type === 'mood') {
         entry.moodSeqs.splice(lowerBoundSeq(entry.moodSeqs, seq), 0, seq)
+      } else if (type === 'fan') {
+        if (entry.fanSeqs === null) {
+          entry.fanSeqs = new Map()
+          entry.fanOps = new Map()
+        }
+        entry.fanSeqs.set(seq, record.key)
+        let ops = entry.fanOps.get(record.key)
+        if (ops === undefined) {
+          ops = []
+          entry.fanOps.set(record.key, ops)
+        }
+        ops.splice(opLowerBound(ops, seq), 0, { seq, at: record.at, on: record.on })
+        publishFan(author, record.key, ops)
+      } else if (type === 'top-friends') {
+        if (entry.tops === null) {
+          entry.tops = new Map()
+          entry.topSeqs = []
+        }
+        entry.tops.set(seq, record.keys.slice())
+        entry.topSeqs.splice(lowerBoundSeq(entry.topSeqs, seq), 0, seq)
       } else if (record.member === author) {
         entry.usernameSeqs.splice(lowerBoundSeq(entry.usernameSeqs, seq), 0, seq)
       } else {
@@ -647,6 +721,23 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       return true
     } catch {
       return false
+    }
+  }
+
+  // The last live operation of `author` on `key` (the end of `ops`, sorted
+  // by seq) decides whether `author` is listed under `key`.
+  function publishFan (author, key, ops) {
+    const last = ops === undefined || ops.length === 0 ? undefined : ops[ops.length - 1]
+    let owned = fanIn.get(key)
+    if (last !== undefined && last.on === true) {
+      if (owned === undefined) {
+        owned = new Map()
+        fanIn.set(key, owned)
+      }
+      owned.set(author, { seq: last.seq, at: last.at })
+    } else if (owned !== undefined) {
+      owned.delete(author)
+      if (owned.size === 0) fanIn.delete(key)
     }
   }
 
@@ -835,6 +926,29 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
         }
         found = true
       }
+      const fanKey = entry.fanSeqs === null ? undefined : entry.fanSeqs.get(seq)
+      if (fanKey !== undefined) {
+        entry.fanSeqs.delete(seq)
+        const ops = entry.fanOps.get(fanKey)
+        const at = opLowerBound(ops, seq)
+        if (ops[at]?.seq === seq) ops.splice(at, 1)
+        if (ops.length === 0) entry.fanOps.delete(fanKey)
+        publishFan(author, fanKey, ops)
+        if (entry.fanSeqs.size === 0) {
+          entry.fanSeqs = null
+          entry.fanOps = null
+        }
+        found = true
+      }
+      if (entry.tops !== null && entry.tops.has(seq)) {
+        entry.tops.delete(seq)
+        entry.topSeqs.splice(indexOfSeq(entry.topSeqs, seq), 1)
+        if (entry.tops.size === 0) {
+          entry.tops = null
+          entry.topSeqs = null
+        }
+        found = true
+      }
       const testimonial = entry.testimonials === null ? undefined : entry.testimonials.get(seq)
       if (testimonial !== undefined) {
         dropIncoming(testimonial.to, author, seq)
@@ -974,6 +1088,12 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
         owned.delete(author)
         if (owned.size === 0) scrapIn.delete(to)
       }
+      for (const key of entry?.fanOps?.keys() || EMPTY_LIST) {
+        const listed = fanIn.get(key)
+        if (listed === undefined) continue
+        listed.delete(author)
+        if (listed.size === 0) fanIn.delete(key)
+      }
       authors.delete(author)
       if (entry !== undefined) {
         if (entry.count === authorCap) fullAuthors--
@@ -995,13 +1115,75 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     return { profileSeq: entry.profileSeqs.at(-1) ?? null, usernameSeq: entry.usernameSeqs.at(-1) ?? null }
   }
 
-  // Perfil rico pointers of `author`: { about, mood }, the seq of its newest
-  // live `profile-about` and `mood` block, null when it has none. The object
-  // is OPEN: later features add pointers to it and readers ignore keys they
-  // do not know. Only seqs are kept: the node reads and verifies the blocks.
+  // Perfil rico pointers of `author`: { about, mood, top }, the seq of its
+  // newest live `profile-about` and `mood` block, null when it has none, and
+  // top { seq, keys } its newest live `top-friends` block (keys a fresh copy)
+  // or null. The object is OPEN: later features add pointers to it and
+  // readers ignore keys they do not know. The node reads and verifies the
+  // blocks.
   function profileExtra (author) {
     const entry = typeof author === 'string' ? authors.get(author) : undefined
-    return { about: entry?.aboutSeqs.at(-1) ?? null, mood: entry?.moodSeqs.at(-1) ?? null }
+    const topSeq = entry?.topSeqs?.at(-1)
+    const top = topSeq === undefined ? null : { seq: topSeq, keys: entry.tops.get(topSeq).slice() }
+    return { about: entry?.aboutSeqs.at(-1) ?? null, mood: entry?.moodSeqs.at(-1) ?? null, top }
+  }
+
+  // The writers whose last live `fan` operation on `author` is on, newest
+  // first (the at clamped at 0 like lib/notices.js followsPage, then key):
+  // { items: [{ key, seq, at }] (at most FAN_PAGE, strictly after `after`
+  // { atMs, key }), next: { atMs, key } | null, total } over the writers
+  // `visible` keeps (a throw hides one); null for a malformed author or
+  // cursor. seq and at point at the writer's own block, which the node
+  // peeks and verifies.
+  function fans (author, { after = null, visible = allVisible } = {}) {
+    try {
+      if (typeof author !== 'string' || !HEX64.test(author)) return null
+      if (after !== null && (typeof after !== 'object' || !Number.isSafeInteger(after.atMs) || after.atMs < 0 ||
+          typeof after.key !== 'string' || !HEX64.test(after.key))) return null
+      const rows = fanRows(author, visible)
+      rows.sort(compareFanRows)
+      const items = []
+      let more = false
+      for (const row of rows) {
+        if (after !== null && compareFanRows(row, after) <= 0) continue
+        if (items.length === FAN_PAGE) {
+          more = true
+          break
+        }
+        items.push(row)
+      }
+      const last = items[items.length - 1]
+      return {
+        items: items.map((r) => ({ key: r.key, seq: r.seq, at: r.at })),
+        next: more ? { atMs: last.atMs, key: last.key } : null,
+        total: rows.length
+      }
+    } catch {
+      return null
+    }
+  }
+
+  // The number of rows fans() would list for `author` in all; 0 on bad input.
+  function fanCount (author, visible = allVisible) {
+    try {
+      if (typeof author !== 'string' || !HEX64.test(author)) return 0
+      return fanRows(author, visible).length
+    } catch {
+      return 0
+    }
+  }
+
+  function fanRows (author, visible) {
+    const rows = []
+    for (const [key, e] of fanIn.get(author) || EMPTY_LIST) {
+      if (key === author) continue
+      let shown = false
+      try {
+        shown = visible(key) === true
+      } catch {}
+      if (shown) rows.push({ atMs: atMillis(e.at), key, seq: e.seq, at: e.at })
+    }
+    return rows
   }
 
   // Totals exclude dropped diaries by construction: removeDiary runs
@@ -1479,11 +1661,12 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     noticeCache.clear()
     incoming.clear()
     scrapIn.clear()
+    fanIn.clear()
     records = 0
     fullAuthors = 0
   }
 
-  return { add, removePost, removeRecord, removeDiary, post, counts, engagers, member, hints, noticeRows, testimonials, scraps, profileExtra, stats, clear }
+  return { add, removePost, removeRecord, removeDiary, post, counts, engagers, member, hints, noticeRows, testimonials, scraps, profileExtra, fans, fanCount, stats, clear }
 }
 
 module.exports = {
@@ -1504,5 +1687,7 @@ module.exports = {
   SCRAP_ROWS,
   SCRAP_HIDES,
   SCRAP_SCAN,
+  FAN_PAGE,
+  FAN_KEYS_MAX,
   CURSOR_RE
 }

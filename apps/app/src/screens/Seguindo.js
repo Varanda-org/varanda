@@ -15,6 +15,10 @@
 //
 // Only the own list is served here (entry.key === ownKey, or no entry): any
 // other key shows 'Disponível em breve.' and makes no request.
+//
+// A hosted node adds a 'Fãs' segment: the own fan list (ui/FansList.js), shown
+// first when the entry carries params.segment === 'fas'. Fas, below, is the
+// same list for another person's profile.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
@@ -30,12 +34,15 @@ import { Avatar } from '../ui/Avatar'
 import { FollowPill } from '../ui/FollowPill'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
+import { FansList } from '../ui/FansList'
 import { RefreshableList } from '../ui/RefreshableList'
 import { SearchField } from '../ui/SearchField'
+import { Segmented } from '../ui/Segmented'
 import { EmptyState, ListFooter, Skeleton } from '../ui/States'
 import { OfflineNote } from '../ui/OfflineNote'
 import { TopBar } from '../ui/TopBar'
 import { TopActions } from '../ui/TopActions'
+import { TEXTS as FANS_TEXTS } from '../fansView.js'
 import { pageBadgeLabel } from './Membro'
 import { type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
@@ -45,6 +52,7 @@ const PAGE = 50
 const NAMES_RETRY_MS = 2500
 // The filter hint stays word for word, inside the field's help button.
 const FILTER_HELP = Object.freeze({ title: 'Sobre o filtro', paragraphs: Object.freeze([FILTER_HINT]) })
+const SEGMENTS = Object.freeze([{ id: 'seguindo', label: FANS_TEXTS.followingSegment }, { id: 'fas', label: FANS_TEXTS.fansSegment }])
 
 // One followed diary. The avatar and name column open the member's profile
 // (`onOpen(followKey, profile)`, optional); 'denunciar' opens the report sheet
@@ -154,6 +162,8 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
   const mine = !entry || typeof entry.key !== 'string' || entry.key.toLowerCase() === own
   const names = useNames()
   const bottomPad = useBottomPad()
+  const hosted = node.hosted === true
+  const [segment, setSegment] = useState(() => (entry && entry.params && entry.params.segment === 'fas' ? 'fas' : 'seguindo'))
   const [keys, setKeys] = useState([])
   const [total, setTotal] = useState(0)
   const [loaded, setLoaded] = useState(false)
@@ -358,6 +368,21 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
     )
   }
 
+  const segments = hosted
+    ? <Segmented options={SEGMENTS} selected={segment} onSelect={setSegment} />
+    : null
+
+  if (hosted && segment === 'fas') {
+    return (
+      <View style={styles.screen}>
+        <TopBar title={FANS_TEXTS.fansTitle} onBack={onBack} right={<TopActions help={HELP.seguindo} />} />
+        {segments}
+        <OfflineNote />
+        <FansList author={own} own isTop={isTop} active={active} onOpenMember={onOpenMember} />
+      </View>
+    )
+  }
+
   const header = (
     <View style={styles.header}>
       <SearchField
@@ -421,6 +446,7 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
   return (
     <View style={styles.screen}>
       <TopBar title='Seguindo' onBack={onBack} right={<TopActions help={HELP.seguindo} />} />
+      {segments}
       <OfflineNote />
       <RefreshableList
         scrollToTopSignal={scrollToTop}
@@ -460,6 +486,21 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
         )}
         ListFooterComponent={footer}
       />
+    </View>
+  )
+}
+
+// The fan list of another person (entry { screen: 'fas', key: author }), a
+// stack screen opened from the 'fãs' count of their profile.
+export function Fas ({ entry, ownKey, isTop = true, active = true, onBack, onOpenMember }) {
+  const styles = useStyles(makeStyles)
+  const author = entry && typeof entry.key === 'string' ? entry.key.toLowerCase() : null
+  const own = typeof ownKey === 'string' && ownKey.toLowerCase() === author
+  return (
+    <View style={styles.screen}>
+      <TopBar title={FANS_TEXTS.fansTitle} onBack={onBack} right={<TopActions help={HELP.seguindo} />} />
+      <OfflineNote />
+      <FansList author={author} own={own} isTop={isTop} active={active} onOpenMember={onOpenMember} />
     </View>
   )
 }

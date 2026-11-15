@@ -201,7 +201,8 @@ import NovaPagina from './src/screens/NovaPagina'
 import PaginaAjustes from './src/screens/PaginaAjustes'
 import * as actingAs from './src/actingAs'
 import Publicar from './src/screens/Publicar'
-import Seguindo from './src/screens/Seguindo'
+import Seguindo, { Fas } from './src/screens/Seguindo'
+import MelhoresAmigos from './src/screens/MelhoresAmigos'
 import Termos from './src/screens/Termos'
 import { ContaExcluida, ExclusaoRecibo } from './src/screens/ExcluirConta'
 import { clearChatMedia, onAppStateChange, screenWatcher, stopBoundPlayback, stopPlayback } from './src/media/chatMedia'
@@ -1995,8 +1996,17 @@ function Member () {
     pushScreen({ screen: 'membro', key, params: { seed: seed || null } })
   }, [pushScreen, clearStack, ownKey])
   const openPeople = useCallback((key, kind) => {
-    if ((kind !== 'seguindo' && kind !== 'seguidores') || typeof key !== 'string') return
-    pushScreen({ screen: kind, key: key.toLowerCase(), params: {} })
+    if ((kind !== 'seguindo' && kind !== 'seguidores' && kind !== 'fas') || typeof key !== 'string') return
+    const lower = key.toLowerCase()
+    // The own fan list is the Fãs segment of the own Seguindo screen.
+    if (kind === 'fas' && lower === ownKey) {
+      pushScreen({ screen: 'seguindo', key: lower, params: { segment: 'fas' } })
+      return
+    }
+    pushScreen({ screen: kind, key: lower, params: {} })
+  }, [pushScreen, ownKey])
+  const openTop = useCallback(() => {
+    pushScreen({ screen: 'melhores-amigos', params: {} })
   }, [pushScreen])
   // The Momentos viewer, starting at one author's ring (hosted only: the
   // strip and the Diário rows that call it render only there).
@@ -3470,6 +3480,20 @@ function Member () {
           </StackLayer>
         )
       }
+      if (entry.screen === 'fas') {
+        return (
+          <StackLayer key={i + ':fas:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Fas entry={entry} ownKey={ownKey} isTop={i === stack.length - 1} active={ready} onBack={goBack} onOpenMember={openMember} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'melhores-amigos') {
+        return (
+          <StackLayer key={i + ':melhores-amigos:' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <MelhoresAmigos ownKey={ownKey} active={ready} onBack={goBack} onToast={showToast} />
+          </StackLayer>
+        )
+      }
       if (entry.screen === 'recados') {
         return (
           <StackLayer key={i + ':recados:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
@@ -3838,6 +3862,7 @@ function Member () {
                     onOpenMomentos={openMomentos}
                     onOpenSalvos={openSalvos}
                     onOpenRecados={node.hosted === true ? openRecados : undefined}
+                    onOpenTop={node.hosted === true ? openTop : undefined}
                   />
                 </ScreenVisible.Provider>
               </View>

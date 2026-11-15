@@ -1,7 +1,7 @@
 'use strict'
 
 const test = require('brittle')
-const { MAX_TESTIMONIAL, MAX_SCRAP, TESTIMONIAL_PENDING_MAX, MAX_MESSAGE, MAX_ID, utf8ByteLength } = require('..')
+const { MAX_TESTIMONIAL, MAX_SCRAP, MAX_TOP_FRIENDS, TESTIMONIAL_PENDING_MAX, MAX_MESSAGE, MAX_ID, utf8ByteLength } = require('..')
 const { createServerDispatcher, validateResponse, validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PEEK_LIMIT_MAX, NOTICES_LIMIT_DEFAULT, NOTICES_LIMIT_MAX, PROFILE_LIMIT_MAX, ENGAGEMENT_LIMIT_MAX, PEEK_SEQS_MAX, PEEK_TIMEOUT_MS, GROUP_LIMIT_DEFAULT, GROUP_LIMIT_MAX, GROUP_MEMBERS_LIMIT_MAX, MAX_GROUP_NAME, DM_THREAD_LIMIT_MAX } = require('..')
 
 const KEY = 'ab'.repeat(32)
@@ -19,21 +19,21 @@ const bad = (t, method, params, label) => {
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
     'account.sign', 'age.proof', 'age.sign', 'appeal.sign', 'block.list', 'block.set', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'diary.peek',
-    'dm.enable', 'dm.list', 'dm.lookup', 'dm.pageDraft', 'dm.pageForget', 'dm.pageGenerate', 'dm.pageLegacyBlocks', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.pageShare', 'dm.pull', 'dm.putMedia', 'dm.react', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
+    'dm.enable', 'dm.list', 'dm.lookup', 'dm.pageDraft', 'dm.pageForget', 'dm.pageGenerate', 'dm.pageLegacyBlocks', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.pageShare', 'dm.pull', 'dm.putMedia', 'dm.react', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'fan.set', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.react', 'group.reactors', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
     'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moments.read', 'node.close', 'node.info', 'notices.list',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read', 'phone.proof', 'phone.sign',
     'post.create', 'post.delete', 'post.quote', 'post.reply', 'post.share', 'post.shared', 'post.unshare', 'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
-    'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'username.add'
+    'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
-    'block.set', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.react', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
+    'block.set', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.react', 'dm.send', 'dm.set', 'fan.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
     'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.react', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
     'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'listing.create', 'listing.delete', 'listing.edit', 'listing.rate', 'listing.status', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'node.close', 'page.register', 'post.create', 'post.delete',
     'post.quote', 'post.reply', 'post.share', 'post.unshare',
-    'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.set', 'repost.set', 'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'sync.start', 'sync.stop', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'username.add'
+    'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.set', 'repost.set', 'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'sync.start', 'sync.stop', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add'
   ])
 })
 
@@ -2867,4 +2867,37 @@ test('profile.mood: one emoji and a short single-line text', (t) => {
   bad(t, 'profile.mood', { emoji: '😀', text: 'a\u2067b' }, 'bidi isolate')
   bad(t, 'profile.mood', { emoji: '😀', text: 5 }, 'text type')
   bad(t, 'profile.mood', { emoji: '😀', text: null }, 'text null')
+})
+
+test('fan.set: mutating, key and on required, exact params', (t) => {
+  t.is(isMutating('fan.set'), true)
+  ok(t, 'fan.set', { key: KEY, on: true }, { key: KEY, on: true })
+  ok(t, 'fan.set', { key: KEY, on: false })
+  bad(t, 'fan.set', { key: KEY }, 'missing on')
+  bad(t, 'fan.set', { on: true }, 'missing key')
+  bad(t, 'fan.set', { key: KEY, on: 1 }, 'on type')
+  bad(t, 'fan.set', { key: KEY, on: 'true' }, 'on string')
+  bad(t, 'fan.set', { key: KEY.toUpperCase(), on: true }, 'uppercase key')
+  bad(t, 'fan.set', { key: KEY.slice(1), on: true }, 'short key')
+  bad(t, 'fan.set', { key: KEY, on: true, extra: 1 }, 'extra field')
+  for (const invalid of [null, [], 'params', 1, Object.create({ key: KEY, on: true })]) bad(t, 'fan.set', invalid, 'invalid params object')
+})
+
+test('top.set: mutating, up to eight distinct keys, empty clears', (t) => {
+  t.is(MAX_TOP_FRIENDS, 8)
+  t.is(isMutating('top.set'), true)
+  const keys = (n) => Array.from({ length: n }, (_, i) => String(i + 1).repeat(64))
+  ok(t, 'top.set', { keys: [] }, { keys: [] })
+  ok(t, 'top.set', { keys: [KEY] }, { keys: [KEY] })
+  ok(t, 'top.set', { keys: keys(8) })
+  bad(t, 'top.set', { keys: keys(9) }, 'nine keys')
+  bad(t, 'top.set', { keys: [KEY, KEY] }, 'duplicate')
+  bad(t, 'top.set', {}, 'missing keys')
+  bad(t, 'top.set', { keys: KEY }, 'string')
+  bad(t, 'top.set', { keys: null }, 'null')
+  bad(t, 'top.set', { keys: [KEY.toUpperCase()] }, 'uppercase key')
+  bad(t, 'top.set', { keys: [KEY.slice(1)] }, 'short key')
+  bad(t, 'top.set', { keys: [5] }, 'key type')
+  bad(t, 'top.set', { keys: [KEY], extra: 1 }, 'extra field')
+  for (const invalid of [null, [], 'params', 1]) bad(t, 'top.set', invalid, 'invalid params object')
 })

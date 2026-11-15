@@ -904,7 +904,7 @@ test('old readers: unknown types stay malformed', async (t) => {
 test('group-join records', async (t) => {
   await testnet(t)
   const { groupJoinRecord, TYPES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY } = records
-  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood'], 'TYPES parity')
+  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends'], 'TYPES parity')
   t.ok(Object.isFrozen(TYPES))
   t.alike([MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY], [512, 64, 32, 16, 80, 8])
   const gj = { type: 'group-join', group: K1, writer: K2, on: true, at: AT }
@@ -1997,4 +1997,49 @@ test('profile-about and mood records: key sets, rules and builders', async (t) =
   for (const text of ['a'.repeat(61), 'a\nb', 'a\u0000b', 'a\ud800b', 'a\u202eb', 5, null]) t.is(validateRecord({ ...mood, text }, 1), 'text-length', 'text ' + JSON.stringify(text))
   for (const at of ['2026-01-01', 5, null]) t.is(validateRecord({ ...mood, at }, 1), 'date-invalid', 'at ' + at)
   await t.exception.all(async () => moodRecord({ emoji: 'x' }), /malformed/)
+})
+
+test('fan and top-friends records: key sets, rules and builders', async (t) => {
+  const { fanRecord, topFriendsRecord, FAN_KEYS, TOP_FRIENDS_KEYS, MAX_TOP_FRIENDS } = records
+  t.alike([...FAN_KEYS], ['type', 'key', 'on', 'at'])
+  t.alike([...TOP_FRIENDS_KEYS], ['type', 'keys', 'at'])
+  t.ok(Object.isFrozen(FAN_KEYS) && Object.isFrozen(TOP_FRIENDS_KEYS))
+  t.is(MAX_TOP_FRIENDS, 8)
+
+  const fan = { type: 'fan', key: K2, on: true, at: AT }
+  t.is(validateRecord(fan, 1), null)
+  t.is(validateRecord({ ...fan, on: false }, 1), null)
+  t.is(validateRecord(fan, 0), 'genesis-required')
+  t.alike(fanRecord({ key: K2, on: true, at: AT }), fan)
+  for (const key of ['A'.repeat(64), K2.slice(1), 1, null]) t.is(validateRecord({ ...fan, key }, 1), 'malformed', 'fan key ' + key)
+  for (const on of [1, 'true', null, undefined]) t.is(validateRecord({ ...fan, on }, 1), 'malformed', 'fan on ' + on)
+  t.is(validateRecord({ ...fan, extra: 1 }, 1), 'malformed')
+  const noOn = { ...fan }
+  delete noOn.on
+  t.is(validateRecord(noOn, 1), 'malformed')
+  for (const at of ['2026-01-01', 5, null]) t.is(validateRecord({ ...fan, at }, 1), 'date-invalid', 'fan at ' + at)
+  await t.exception.all(async () => fanRecord({ key: 'x', on: true }), /malformed/)
+
+  const top = { type: 'top-friends', keys: [K1, K2], at: AT }
+  t.is(validateRecord(top, 1), null)
+  t.is(validateRecord(top, 0), 'genesis-required')
+  t.alike(topFriendsRecord({ keys: [K1, K2], at: AT }), top)
+  t.is(validateRecord({ ...top, keys: [] }, 1), null, 'empty list clears')
+  const eight = Array.from({ length: 8 }, (_, i) => String(i + 1).repeat(64))
+  t.is(validateRecord({ ...top, keys: eight }, 1), null, 'eight at the limit')
+  t.is(validateRecord({ ...top, keys: [...eight, K1] }, 1), 'malformed', 'nine over the limit')
+  t.is(validateRecord({ ...top, keys: [K1, K1] }, 1), 'malformed', 'duplicate')
+  for (const keys of [K1, null, undefined, [K1.toUpperCase()], [5], [K1.slice(1)], { 0: K1, length: 1 }]) {
+    t.is(validateRecord({ ...top, keys }, 1), 'malformed', 'keys ' + JSON.stringify(keys))
+  }
+  t.is(validateRecord({ ...top, extra: 1 }, 1), 'malformed')
+  const noKeys = { ...top }
+  delete noKeys.keys
+  t.is(validateRecord(noKeys, 1), 'malformed')
+  for (const at of ['2026-01-01', 5, null]) t.is(validateRecord({ ...top, at }, 1), 'date-invalid', 'top at ' + at)
+  const source = [K1]
+  const built = topFriendsRecord({ keys: source, at: AT })
+  source.push(K2)
+  t.alike(built.keys, [K1], 'the builder copies the list')
+  await t.exception.all(async () => topFriendsRecord({ keys: [K1, K1] }), /malformed/)
 })

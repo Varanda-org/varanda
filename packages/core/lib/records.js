@@ -14,7 +14,7 @@
 
 const b4a = require('b4a')
 const { validLinkCard, validCardImageBytes, copyLinkCard, CARD_IMAGE_MIME } = require('./link-card')
-const { feira, isMomentMusic, MOMENT_MUSIC_KEYS, profileExtra: PX } = require('@varanda/rpc')
+const { feira, isMomentMusic, MOMENT_MUSIC_KEYS, MAX_TOP_FRIENDS, profileExtra: PX } = require('@varanda/rpc')
 
 const MAX_NAME = 80
 const MAX_BIO = 280
@@ -127,6 +127,13 @@ const SCRAP_WALLS = Object.freeze(['following', 'everyone', 'nobody'])
 // ones of @varanda/rpc (lib/profile-extra.js).
 const PROFILE_ABOUT_KEYS = Object.freeze(['type', 'about', 'city', 'work', 'studies', 'interests', 'birthday', 'theme', 'at'])
 const MOOD_KEYS = Object.freeze(['type', 'emoji', 'text', 'at'])
+// Fas e Melhores amigos (docs/protocol.md): `fan` is a follow-shaped mark,
+// independent of follow, last operation per key wins (lib/fans.js);
+// `top-friends` is the whole list of up to MAX_TOP_FRIENDS distinct keys,
+// latest wins. Never self: the check needs the writer, so lib/fans.js drops
+// it at fold time.
+const FAN_KEYS = Object.freeze(['type', 'key', 'on', 'at'])
+const TOP_FRIENDS_KEYS = Object.freeze(['type', 'keys', 'at'])
 const { THEME_IDS, MAX_ABOUT, MAX_CITY, MAX_WORK, MAX_STUDIES, MAX_INTERESTS, MAX_MOOD_TEXT } = PX
 // Momentos (docs/protocol.md): one photo or short video in the anonymous
 // blob pool, its key and nonce public in the record, shown by readers for 24
@@ -188,6 +195,16 @@ function isPlainObject (v) {
   if (v === null || typeof v !== 'object') return false
   const proto = Object.getPrototypeOf(v)
   return proto === Object.prototype || proto === null
+}
+
+function validTopKeys (keys) {
+  if (!Array.isArray(keys) || keys.length > MAX_TOP_FRIENDS) return false
+  const seen = new Set()
+  for (let i = 0; i < keys.length; i++) {
+    if (!isHex64(keys[i]) || seen.has(keys[i])) return false
+    seen.add(keys[i])
+  }
+  return true
 }
 
 function hasExactKeys (obj, keys) {
@@ -547,7 +564,7 @@ function validPageShape (r) {
     isHex64(r.owner) && r.actor === r.owner && validPageAdmins(r.admins, r.owner)
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood'])
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends'])
 
 // Required lazily: lib/group.js requires this module at load time.
 function weakBoxKey (hex) {
@@ -645,6 +662,14 @@ function check (record, seq) {
   if (type === 'mood') {
     if (!hasExactKeys(record, MOOD_KEYS) || !PX.isMoodEmoji(record.emoji)) return 'malformed'
     if (!PX.isMoodText(record.text)) return 'text-length'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'fan') {
+    if (!hasExactKeys(record, FAN_KEYS) || !isHex64(record.key) || typeof record.on !== 'boolean') return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'top-friends') {
+    if (!hasExactKeys(record, TOP_FRIENDS_KEYS) || !validTopKeys(record.keys)) return 'malformed'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   if (type === 'moment') {
@@ -853,6 +878,14 @@ function momentRecord ({ text = '', media, music = null, at = nowIso() } = {}) {
 
 function mediaCoreRecord ({ key, at = nowIso() } = {}) {
   return build({ type: 'media-core', key, at }, 1)
+}
+
+function fanRecord ({ key, on, at = nowIso() } = {}) {
+  return build({ type: 'fan', key, on, at }, 1)
+}
+
+function topFriendsRecord ({ keys, at = nowIso() } = {}) {
+  return build({ type: 'top-friends', keys: Array.isArray(keys) ? keys.slice() : keys, at }, 1)
 }
 
 function followRecord ({ key, on, at = nowIso() } = {}) {
@@ -1096,6 +1129,9 @@ module.exports = {
   SCRAP_WALLS,
   PROFILE_ABOUT_KEYS,
   MOOD_KEYS,
+  FAN_KEYS,
+  TOP_FRIENDS_KEYS,
+  MAX_TOP_FRIENDS,
   THEME_IDS,
   MAX_ABOUT,
   MAX_CITY,
@@ -1158,6 +1194,8 @@ module.exports = {
   scrapWallRecord,
   profileAboutRecord,
   moodRecord,
+  fanRecord,
+  topFriendsRecord,
   momentRecord,
   deleteRecord,
   deleteRecords,

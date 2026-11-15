@@ -6,7 +6,9 @@
 // its links stay tappable, as in a post.
 // `theme` (a profile theme id, or null for the usual sunset band) recolors the
 // band; `mood` and `about` are the rich-profile slots (MoodChip under the bio,
-// AboutCard after the actions). A header without them is unchanged.
+// AboutCard after the actions); `fan` (the Sou fã button, under the actions)
+// and `top` (the Melhores amigos row, after `about`) are two more. A header
+// without them is unchanged.
 // onTabsLayout gets the tabs slot's { y, height } in the header's own
 // coordinates, so a profile bar can pin a copy of the tabs.
 
@@ -28,7 +30,7 @@ const STACK_SCALE = 1.3
 // instead of taking a share of the row.
 const isIconOnly = (el) => !!el && !!el.props && typeof el.props.icon === 'string' && (typeof el.props.label !== 'string' || el.props.label === '')
 
-export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBack, bandButtons, avatar, title, subtitle, bio, counts, note, actions, more, rows, tabs, corner, theme = null, mood, about, onTabsLayout }) {
+export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBack, bandButtons, avatar, title, subtitle, bio, counts, note, actions, more, rows, tabs, corner, theme = null, mood, about, fan, top, onTabsLayout }) {
   const styles = useStyles(makeStyles)
   const { scheme } = useTheme()
   // On a themed band the back disc is the ink color with the band color as the
@@ -143,7 +145,9 @@ export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBa
                   </View>
                   )
                 : null}
+              {fan ? <View style={styles.fan}>{fan}</View> : null}
               {about ? <View style={styles.about}>{about}</View> : null}
+              {top ? <View style={styles.about}>{top}</View> : null}
             </View>
           </>
           )}
@@ -191,6 +195,7 @@ const makeStyles = (colors) => StyleSheet.create({
   name: { ...type.barTitle, fontFamily: fonts.title, color: colors.ink },
   keyText: { ...type.postMeta, color: colors.soft },
   about: { marginTop: space.md, gap: space.md },
+  fan: { marginTop: space.md, alignSelf: 'stretch' },
   bio: { ...type.postText, color: colors.ink, marginTop: space.sm },
   countsRow: { flexDirection: 'row', flexWrap: 'wrap', columnGap: space.lg, rowGap: space.sm, marginTop: space.sm },
   countLink: { maxWidth: '100%', flexShrink: 1, minHeight: layout.hit, justifyContent: 'center' },

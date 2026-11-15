@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 56)
+  t.is(LEGAL_VERSION, 57)
   t.is(LEGAL_DATE, '15/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 56, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 57, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -324,7 +324,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '749a50029cb7065576d29787a0e6dc60b79120f2e6d68dc3b09eb05ded78e14c', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '9727ba3e879f410e9cb9f0430e43897b64fe2fae1cbb92e9dec2c5025dac4f70', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -572,6 +572,24 @@ test('legal: version 56 describes the rich profile and the Sorte do dia', async 
   t.ok(all(PRIVACY).includes('esse arquivo pode ir para o backup do aparelho no iCloud'), 'sorte seed may be in the iCloud backup')
   t.ok(all(TERMS).includes('marca como apagadas as versões anteriores'), 'a new version marks the earlier one as deleted')
   t.ok(all(PRIVACY).includes('cópias que outras pessoas ou semeadores já buscaram podem continuar existindo'), 'copies may remain')
+})
+
+test('legal: version 57 describes fas and melhores amigos as public records', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const all = (d) => d.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(all(TERMS).includes('Você pode ser fã de uma pessoa, sem precisar segui-la, e escolher até 8 melhores amigos'))
+  t.ok(all(TERMS).includes('são registros públicos no seu diário'), 'public records')
+  t.ok(all(TERMS).includes('só aparece na lista para os outros quando essa pessoa também segue você'), 'follow-back rule')
+  t.ok(all(TERMS).includes('cópias que outras pessoas ou semeadores já buscaram podem continuar existindo'), 'copies may remain')
+  t.ok(all(PRIVACY).includes('ser fã de alguém e a lista de melhores amigos são registros públicos no seu diário, visíveis para qualquer pessoa'), 'public diary records')
+  t.ok(all(PRIVACY).includes('marca como apagadas as listas anteriores'), 'a new list marks the earlier ones as deleted')
+  t.ok(all(PRIVACY).includes('o semeador vê qual perfil ou qual lista de fãs foi aberta e pode associar essa leitura à conta de quem abriu'), 'seeder sees the opened profile and fan list')
+  t.ok(all(PRIVACY).includes('com o aviso de que podem estar incompletos'), 'count wording')
+  t.ok(all(PRIVACY).includes('o semeador mostra o número de fãs que já conhece'), 'known count kept while indexing')
+  t.ok(!all(PRIVACY).includes('4096'), 'no per-diary fan cap claim')
+  t.ok(!all(PRIVACY).includes('não aponta fãs nem melhores amigos'), 'old indexing claim is gone')
+  t.ok(all(TERMS).includes('grava um novo registro que desfaz o anterior, e os registros anteriores, com as suas datas, continuam públicos no diário'), 'unfan keeps earlier records public')
+  t.ok(all(PRIVACY).includes('grava um novo registro que desfaz o anterior, e os registros anteriores, com as suas datas, continuam públicos no diário'), 'unfan keeps earlier records public (privacy)')
 })
 
 test('legal: version 27 describes the invite card in the link and the messenger preview', async (t) => {

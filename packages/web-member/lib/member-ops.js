@@ -63,6 +63,8 @@ const {
   scrapWallRecord,
   profileAboutRecord,
   moodRecord,
+  fanRecord,
+  topFriendsRecord,
   momentRecord,
   postShareRecord,
   MAX_TESTIMONIAL,
@@ -1464,7 +1466,7 @@ async function scrapDelete (ctx, { seq }) {
 
 // ---- perfil rico (docs/protocol.md, docs/rpc.md) ----
 
-// Appends `record` (a profile-about or a mood) and tombstones every earlier
+// Appends `record` (a profile-about, a mood or a top-friends) and tombstones every earlier
 // live version of its type, so a version the author replaced cannot show
 // again on a reader that missed the newer one. With up to APPEND_MAX - 1
 // earlier versions everything is one append, the new record last. With more,
@@ -1506,6 +1508,63 @@ async function profileAbout (ctx, { about, city, work, studies, interests, birth
 // -> { seq, ref }.
 async function moodSet (ctx, { emoji, text = '' }) {
   return publishLatest(ctx, buildRecord(() => moodRecord({ emoji, text })))
+}
+
+// ---- fas e melhores amigos (docs/protocol.md, docs/rpc.md) ----
+
+const FAN_SELF = 'não pode ser fã de si'
+const TOP_SELF = 'não pode listar a si entre os melhores amigos'
+const FAN_BLOCKED = 'você bloqueou esta pessoa'
+
+// Appends the own `fan` record for `key` (follow-shaped, the last one per
+// key wins). The record validator cannot see the writer, so self is refused
+// here; a block only stops turning a fan mark ON (off always goes through,
+// so a fan mark of someone blocked later can still be withdrawn). One
+// record per call, no tombstones. -> { seq, ref }.
+async function fanSet (ctx, { key, on }) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (key === ownHex) throw new UsageError(FAN_SELF)
+    if (on && (await memberBlocks(ctx.storage)).has(key)) throw new UsageError(FAN_BLOCKED)
+    const seq = await appendOwn(ctx, diary, buildRecord(() => fanRecord({ key, on })))
+    return { seq, ref: formatRef({ author: ownHex, seq }) }
+  })
+}
+
+// The keys of the newest live `top-friends` record in the raw entries of the
+// own diary, [] when there is none.
+function latestTopKeys (raw) {
+  const live = liveSeqsOfType(raw, 'top-friends')
+  if (live.length === 0) return []
+  const seq = live[live.length - 1]
+  const copy = validRecordCopy(raw[seq].record, seq)
+  return copy !== null && Array.isArray(copy.keys) ? [...copy.keys] : []
+}
+
+// The keys of the own list in effect (the newest live `top-friends`), [] for
+// none or a diary with no block yet. Read only: the session uses it to let a
+// person already listed stay when the owner blocks them later.
+async function ownTopKeys (ctx) {
+  return withIdentity(ctx, async ({ diary }) => {
+    if (diary.length === 0) return []
+    return latestTopKeys(await store.readRaw(diary))
+  })
+}
+
+// Appends the own `top-friends` record (publishLatest: every earlier live
+// version is tombstoned), [] clears the list. Self is refused, and so is a
+// person this member blocked in `keys` unless that key is already in the
+// list in effect (blocking someone already listed must not lock the list:
+// they may stay, or be dropped). Nothing written on a refusal. -> { seq, ref }.
+async function topSet (ctx, { keys }) {
+  const { ownHex, blocked, listed } = await withIdentity(ctx, async ({ diary, ownHex }) => ({
+    ownHex,
+    blocked: await memberBlocks(ctx.storage),
+    listed: new Set(diary.length === 0 ? [] : latestTopKeys(await store.readRaw(diary)))
+  }))
+  if (keys.includes(ownHex)) throw new UsageError(TOP_SELF)
+  if (keys.some((k) => blocked.has(k) && !listed.has(k))) throw new UsageError(FAN_BLOCKED)
+  return publishLatest(ctx, buildRecord(() => topFriendsRecord({ keys })))
 }
 
 const NOTHING_TO_DELETE = 'nada para apagar'
@@ -5718,6 +5777,9 @@ module.exports = {
   scrapDelete,
   profileAbout,
   moodSet,
+  fanSet,
+  topSet,
+  ownTopKeys,
   profileExtraDelete,
   momentCreate,
   momentDelete,

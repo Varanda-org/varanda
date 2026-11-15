@@ -52,7 +52,7 @@ function fakeClock (start = Date.parse('2026-10-26T12:00:00Z')) {
 
 // Fresh module state per test (no cache, pacer or cooldown leaks between
 // cases); the fetch* functions run on the fake clock.
-const DEPS_AT = { fetchPost: 2, fetchCounts: 1, fetchMember: 2, refetchMember: 1, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1, fetchTestimonials: 1, fetchFeira: 1, fetchFeiraAuthor: 2, fetchFeiraRatings: 2 }
+const DEPS_AT = { fetchPost: 2, fetchCounts: 1, fetchMember: 2, refetchMember: 1, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchFans: 2, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1, fetchTestimonials: 1, fetchFeira: 1, fetchFeiraAuthor: 2, fetchFeiraRatings: 2 }
 async function load () {
   const m = await import('../src/indexClient.js')
   m.resetIndexClient()
@@ -1819,11 +1819,36 @@ test('profileUrl and validProfile: tolerant of unknown keys, strict on known one
   t.is(profileUrl(A.toUpperCase()), '/index/profile/' + A, 'author lowercased')
   for (const author of [null, undefined, '', 'abc', A + 'a', 7]) t.is(profileUrl(author), null, 'author ' + String(author))
   const flags = { indexing: false, complete: true }
-  t.alike(validProfile({ about: 3, mood: null, ...flags }), { about: 3, mood: null, ...flags })
-  t.alike(validProfile({ ...flags }), { about: null, mood: null, ...flags }, 'missing pointers read as null')
-  t.alike(validProfile({ about: 1, mood: 2, later: { x: 1 }, ...flags }), { about: 1, mood: 2, ...flags }, 'unknown keys ignored')
+  t.alike(validProfile({ about: 3, mood: null, ...flags }), { about: 3, mood: null, fans: null, top: null, ...flags })
+  t.alike(validProfile({ ...flags }), { about: null, mood: null, fans: null, top: null, ...flags }, 'missing pointers read as null')
+  t.alike(validProfile({ about: 1, mood: 2, later: { x: 1 }, ...flags }), { about: 1, mood: 2, fans: null, top: null, ...flags }, 'unknown keys ignored')
+  const K = 'b'.repeat(64)
+  const good = { fans: { count: 3, indexing: false }, top: { seq: 5, back: { [K]: 7, ['c'.repeat(64)]: null } } }
+  t.alike(validProfile({ ...good, ...flags }), { about: null, mood: null, ...good, ...flags }, 'fans and top read')
+  t.alike(validProfile({ fans: null, top: null, ...flags }), { about: null, mood: null, fans: null, top: null, ...flags })
+  const many = Object.fromEntries(Array.from({ length: 9 }, (_, i) => [i.toString(16).repeat(64), null]))
+  for (const bad of [{ fans: { count: -1, indexing: false } }, { fans: { count: 1.5, indexing: false } }, { fans: { count: 1 } }, { fans: { count: 1, indexing: false, x: 1 } }, { top: { seq: 0, back: {} } }, { top: { seq: 1 } }, { top: { seq: 1, back: { [K.toUpperCase()]: 1 } } }, { top: { seq: 1, back: { [K]: 0 } } }, { top: { seq: 1, back: many } }, { top: { seq: 1, back: {}, x: 1 } }]) {
+    t.is(validProfile({ ...bad, ...flags }), null, JSON.stringify(bad))
+  }
   for (const bad of [null, [], 'x', { about: 0, ...flags }, { about: 1.5, ...flags }, { mood: '2', ...flags }, { about: 1, mood: Number.MAX_SAFE_INTEGER + 1, ...flags }, { about: 1, indexing: 'no', complete: true }, { about: 1, indexing: false }]) {
     t.is(validProfile(bad), null, JSON.stringify(bad))
   }
   t.alike(await fetchProfile('nope'), { ok: false, reason: 'invalid-input' })
+})
+
+test('fansUrl and validFans: cursor like the followers, rows and flags checked', async (t) => {
+  const { fansUrl, validFans, fetchFans } = await load()
+  const A = 'a'.repeat(64)
+  const B = 'b'.repeat(64)
+  t.is(fansUrl(A), '/index/fans/' + A)
+  t.is(fansUrl(A, { atMs: 5, key: B }), '/index/fans/' + A + '/5.' + B)
+  t.is(fansUrl(A, 'x'), null)
+  t.is(fansUrl('nope'), null)
+  const row = { key: B, seq: 3, at: '2026-01-01T00:00:00.000Z' }
+  const body = { author: A, items: [row], total: 1, next: null, authors: { [B]: { profileSeq: 1, usernameSeq: null } }, indexing: false, complete: true }
+  t.alike(validFans(body, A), body)
+  t.is(validFans({ ...body, kind: 'seguidores' }, A), null, 'no kind')
+  t.is(validFans({ ...body, items: [{ ...row, key: A }] }, A), null, 'never itself')
+  t.is(validFans({ ...body, total: 0 }, A), null)
+  t.alike(await fetchFans('nope', null, {}), { ok: false, reason: 'invalid-input' })
 })

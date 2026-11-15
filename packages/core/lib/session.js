@@ -869,6 +869,16 @@ function createSession ({
       throw new UsageError(PEEK_WEB_ONLY)
     }),
 
+    // Fas e Melhores amigos (docs/rpc.md): written by the browser node only
+    // (the writer's own key and the page check need its reads), the same
+    // refusal, nothing written.
+    'fan.set': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'top.set': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+
     // A momento's photo lives in the browser node's anonymous blob pool
     // (docs/rpc.md 5.113): refused the same way, nothing opened.
     'moment.create': serial(async () => {
