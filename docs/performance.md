@@ -135,8 +135,9 @@ Metas para o conjunto D1, com a mediana de 5 execuções. Os valores de "hoje" s
 | Chrome 4x, laboratório: rajada de 2 minutos | nenhum "pedidos demais em andamento" e nenhum "pedido lento" | a medir |
 | Vitrine grande nativa: primeiro commit da lista | <= 300 ms | M0 iOS: linhas 2,05 s depois de o JavaScript carregar (desenvolvimento). M4: iOS 681 a 690 ms, Android 1070 ms (desenvolvimento), meta não atingida |
 | Vitrine grande nativa: p95 de quadro, rolagem de 60 s | <= 32 ms | M4: iOS 17,1 a 17,3 ms (atingida); Android 31,75 e 38,21 ms (atingida numa execução, não na outra; carga alta) |
+| Vitrine grande rica nativa: renders por linha montada, rolagem de 60 s | 1 | M5: Android 1 (P95 3), iOS 1 (P95 3), web 1 (P95 2); atingida (era 2 no PR1 no Android e no iOS) |
 
-Os números da rodada M5 (iOS: primeiras linhas 2769 ms, p95 de 31,5 a 32,5 ms; Android: primeiras linhas 3465 ms) usam outro método que as linhas M4 (rolagem roteirizada com inversões, origem em `js-entry`, Vitrine rica): não se comparam sem um A/B, e nenhuma meta foi reavaliada.
+Os números da rodada M5 (iOS: primeiras linhas 2769 ms, p95 de 31,5 a 32,5 ms; Android: primeiras linhas 3465 ms) usam outro método que as linhas M4 (rolagem roteirizada com inversões, origem em `js-entry`, Vitrine rica): não se comparam sem um A/B, e nenhuma meta foi reavaliada. Os números da ponta da pilha (seção "M5, resultados": renderizações por linha montada 1 nas três plataformas, iOS p95 de 24,5 a 26,7 ms, Android primeiras linhas 3914 ms desde `js-entry`) usam o mesmo método da linha de base M5; só a meta de renderizações por linha foi avaliada com eles, as demais metas ficam como estão.
 
 As metas são provisórias: podem mudar depois da primeira rodada, com a justificativa anotada na seção Resultados.
 
@@ -387,6 +388,87 @@ Não medido. O build de debug nativo não entra com passkey numa instalação lo
 - Timer único dos players: não roda. Teto 4 contra teto 0 é material no Android (+26% a +46% de ms de render, abas escondidas x2,8), mas o teto 0 (sem players, com as checagens ligadas) custa o mesmo que as linhas sem players. Dominam as WebViews e as renderizações que um player vivo provoca; mudar quando ou quantos players carregam é decisão do mantenedor e mudaria os Termos. No iOS a diferença não aparece.
 - Telas sob demanda na web: não roda. A avaliação do pacote (`EvaluateScript`, 295 a 304 ms de 2440 ms) dá 12% das primeiras linhas no release, abaixo do portão de 15% (18% só no pacote de desenvolvimento, de 429 a 449 ms sobre 2435 a 2486 ms).
 - Nota de projeto do nó do navegador em worker: não roda. A tarefa longa de `varanda-node.js` (290 a 330 ms em 4x) dá de 12% a 14% das primeiras linhas (avaliação do nó), abaixo do portão de 20%.
+
+### M5, resultados (15/11/2026, pilha perf-m5 sobre main@414e19c7)
+
+Pergunta: a regressão nativa desde 11cdb47f acabou? Resposta curta: a rolagem e a memória não são piores que em 11cdb47f, e o custo por renderização caiu; a partida de A Rua no Android continua cerca de 1,8 s mais tarde, e isso é a apresentação do splash, que o mantenedor decidiu (PRs #553 e #597) e que fica. Detalhes e comandos na seção 257 de `docs/verification.md`. Ambiente como na linha de base: builds de desenvolvimento pelo Metro, Vitrine grande, sem nó, emulador Android `varanda-perf` (GPU em software), simulador iPhone 16e, Chrome 4x; carga de 1 min de 6 a 37 (por célula na seção 257). Contadores, não p95 de quadro.
+
+#### Android, A/B contra 11cdb47f (Vitrine grande só texto, mesmo método da linha de base, ABABAB, n = 3)
+
+| Medida | 11cdb47f, mediana [faixa] | pilha (c94b5d5d), mediana [faixa] |
+|---|---|---|
+| `TotalTime` do `am start -W` | 836 [828-914] ms | 902 [867-1199] ms |
+| De `Running "main"` às primeiras linhas | cerca de 1374 [1306-1464] ms (estimado) | 3150 [3108-3305] ms |
+| De `Running "main"` ao fim do splash | 2073 [1999-2242] ms (`grace`) | 7848 [7621-7908] ms (`patience`) |
+| `gfxinfo` p95 / p99 | 73 [65-77] / 113 [85-125] ms | 73 [61-109] / 109 [85-150] ms |
+| `gfxinfo` quadros atrasados | 18,2% [17,4-29,5] | 20,1% [14,9-21,2] |
+
+Onde a pilha ainda é mais lenta: a partida. As primeiras linhas saem cerca de 1,8 s depois (a linha de base mediu 1,8 s também) e o splash termina por `patience`, porque a Vitrine nunca emite `details`. As duas causas estão na linha de base: o shell só monta depois da apresentação inteira do splash (decisão do mantenedor, mantida) e até 3,9 s do `splash-end` são artefato da Vitrine. Esta rodada não separou a parcela de cada uma nem mediu com nó vivo (não medido); nada na pilha mexeu nisso. A origem das marcas de 11cdb47f é estimada (as marcas só saem no toque da aba, e contam do módulo de marcas, cerca de 0,12 s antes de `Running "main"`). Rolagem à mão: sem diferença acima do ruído (p95 73 contra 73 ms).
+
+#### Antes e depois, por plataforma (rolagem roteirizada de 60 s de A Rua, Vitrine rica, n = 3, mediana [faixa])
+
+Android, o antes é o PR1 (f7d08ccc) medido na mesma sessão, ABABAB; a carga subiu a 17 a 33 no fim de todas as execuções, então os ms de render são ruidosos nos dois braços.
+
+| Medida | antes (PR1) | depois (pilha) |
+|---|---|---|
+| `list:rua`, renderizações / ms | 894 [763-953] / 13275 [13221-17019] | 781 [632-969] / 10625 [7367-11371] |
+| renderizações por linha montada (mediana / P95) | 2 / 3 | 1 / 3 |
+| abas escondidas, renderizações / ms | 124 [119-124] / 562,8 [549-645] | 80 [68-80] / 69,9 [62,0-76,8] |
+| parado 60 s, `list:rua` | 5 a 14 (seções 255 e 252) | 7 [7-8] renderizações, 103,3 [99,8-112,1] ms; abas escondidas 0 |
+| `app-commit` / primeiras linhas, desde `js-entry` | 698 [693-743] / 4120 [3573-4242] ms | 728 [726-754] / 3914 [3880-5620] ms |
+
+iOS, o antes é a seção 252 (PR1, carga 7,6 a 11,5; agora 12,4 a 16,7).
+
+| Medida | antes | depois |
+|---|---|---|
+| rica, `list:rua`, renderizações / ms | 1226 / 5773 | 948 [921-956] / 4289 [4146-4369] |
+| rica, abas escondidas, renderizações / ms | 124 / 302 | 86 / 41,5 |
+| rica, renderizações por linha (mediana / P95) | 2 / 3 | 1 / 3 |
+| só texto, `list:rua`, renderizações / ms | 1232 a 1234 / 8077 a 8182 | 829 [823-829] / 5562 [5527-5621] |
+| só texto, abas escondidas, renderizações / ms | 136 a 137 / 343 a 378 | 88 / 58,4 |
+| `app-commit` / primeiras linhas, rica | 605 a 627 / 2789 a 2847 ms | 617 [610-713] / 2809 [2777-3017] ms |
+
+Web, Chrome 4x, rica, desenvolvimento (110 s de rolagem; o antes de A Rua é o PR3, seção 254, porque o PR4 e o PR5 não mexem nela na web): `list:rua` 1604 / 11677 contra 1592 [1583-1601] / 11511 [11386-11836]; seis abas escondidas 82 renderizações e 141 a 161 ms (a linha de base mediu quatro abas em cerca de 3270 renderizações e 5,4 a 5,8 s numa janela de 60 s); renderizações por linha 1 (P95 2); primeiras linhas 2444 [2395-2491] ms desde o início da navegação. PWA instalado: não medido.
+
+#### Memória (soaks)
+
+| Série | início | fim | máximo | inclinação |
+|---|---|---|---|---|
+| Android, PSS do app, 20 min, instrumentado (`PERF`, rica, players) | 453 MB | 1226 MB | 1237 MB | cerca de +30 MB/min, sem platô, quase tudo em Native Heap (Java parado em 13 a 15 MB) |
+| Android, renderizador de WebView dos players, o mesmo soak | 121 MB | 100 MB | 129 MB | sem crescimento, sem recarga nem queda |
+| Android, PSS do app, 9 min no PR1, mesmo soak | 477 MB | 816 MB | | cresce igual (+339 MB contra +342 MB no tip em 9 min): anterior à pilha |
+| Android, controle, `PERF` desligado, só texto, 10 min, tip a09946b9 (n = 1) | 427 MB | 488 MB | | +2,9 MB/min nos minutos 1 a 10, -1,2 nos 5 a 10; cauda parada 493, 494, 495 MB |
+| Android, controle, 11cdb47f (n = 1) | 392 MB | 482 MB | | +5,5 MB/min nos minutos 1 a 10, +5,4 nos 5 a 10 |
+| iOS, RSS do app, parcial | 270 MB | 476 MB | 615 MB (minuto 1) | sem tendência de alta; platô de 440 a 461 MB nos minutos 3 a 8 |
+| iOS, WebContent (6 processos), parcial | 85 MB | 739 MB | 940 MB (minuto 1) | em queda, de 865 a 873 MB (minutos 3 a 8) para 720 a 745 MB (9 a 18) |
+
+Leitura: o tip não é pior que 11cdb47f no controle sem instrumento, então os +30 MB/min do soak instrumentado vêm da instrumentação, das linhas ricas, dos players ou de uma mistura; o controle não os separa. Limites: controle de 10 min, um braço de cada, emulador com GPU em software, build de debug, carga diferente. O soak do iOS é PARCIAL: a rolagem roteirizada rodou só nos minutos 0 a 1, e dos minutos 2 a 20 (cerca de 19 min) o app ficou parado com os players carregados; não é um soak de 20 minutos de rolagem. Sem queda, ANR nem `FATAL` em nenhum.
+
+#### O que cada PR trouxe
+
+- PR2 (seção 253, `perf/render-isolation`): linhas leem contextos estreitos do nó, 27 telas são `memo`, o pulso do `Skeleton` pausa nas abas escondidas, uma só assinatura de movimento reduzido. Efeito visto na ponta: abas escondidas de 124 para 80 renderizações (Android) e 124 para 86 (iOS), e de ~3270 (quatro abas) para 82 (seis abas) na web.
+- PR3 (seção 254, `perf/row-mount`): uma renderização por linha de publicação ao montar. Efeito: renderizações por linha montada de 2 para 1 (mediana) no Android, iOS e web.
+- PR4 (seção 255, `perf/list-rows`): linhas estáveis em Espiadinha, Diário, Busca, Conversa, Membro e Mensagem, e relógio de minuto pausado nas telas escondidas. Efeito: as listas escondidas de 21 a 23 renderizações para 4 a 6 na rolagem de A Rua do Android (medido contra o PR1).
+- PR5 (seção 256, `perf/native-boot`): barra do splash no driver nativo. Efeito esperado e medido: nenhum na partida, acima do ruído (Android `TotalTime` 653 ms, iOS `app-commit` 585 ms).
+- PR1 (seção 252): o instrumento e a linha de base.
+
+#### Tarefas condicionais que não entraram
+
+- Pausa da consulta de prévias de momentos: o portão não pôde ser avaliado, porque a Vitrine não passa por `node.request`. Precisa de um nó vivo.
+- Varredura do cache de mídia fora do primeiro desenho: `sweep-media-cache` 1 a 2 ms no Android e 1 a 17 ms no iOS, abaixo do portão de 20 ms.
+- Inline requires: descartado. Com carga parecida o ganho ficou abaixo da regra de 10% (`TotalTime` empatado, primeiras linhas de 0 a 9%), e os registros de limpeza (snapshots de tela, fotos guardadas) e o preload do nó web passariam a carregar tarde (seção 256).
+- Timer único dos players: dominam as WebViews e as renderizações que um player vivo provoca (+26% a +46% de ms de render no Android); mudar quando ou quantos players carregam é decisão do mantenedor e mudaria os Termos.
+- Telas sob demanda na web: avaliação do pacote 12% das primeiras linhas, abaixo do portão de 15%.
+- Nó do navegador em worker (nota de projeto): 12% a 14% das primeiras linhas, abaixo do portão de 20%.
+
+#### Próximos candidatos
+
+- Relógios de minuto que ainda rodam em A Rua atrás de uma tela empilhada (Conversa, Membro, Mensagem): 4 a 5 renderizações por minuto, cerca de 100 ms (seção 255; `ARua.js` não entrou no PR4).
+- Linhas de Conversa sem memo: `list:conversa` parada renderiza 8 vezes em 60 s (36 ms) e 2 vezes (31 ms) com o teclado aberto (seção 255); não se mediu se uma linha de mensagem renderiza ao digitar, então não há número do ganho.
+- Inline requires com um módulo de boot explícito, medido num build de release: a avaliação dos módulos (`js-entry` a `Running "main"`) é 588 [577-634] ms no debug, cerca de 13% de `Start proc` até as primeiras linhas (cerca de 5,5 s).
+- Duração da apresentação do splash: +1,8 s nas primeiras linhas e +5,8 s no `splash-end` contra 11cdb47f no Android. Decisão do mantenedor (#553 e #597).
+- As WebViews dos players: +26% a +46% de ms de render da lista no Android com players vivos. Decisão do mantenedor.
+- Soaks da Vitrine rica sem `PERF` e dos players sem `PERF`, para achar o que cresce (cerca de +30 MB/min com instrumento, contra +2,9 MB/min no controle de texto).
 
 ### Tarefas que não entraram
 
