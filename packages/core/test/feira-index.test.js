@@ -305,7 +305,7 @@ test('rating admission caps deduped rows per listing author and globally', t => 
   t.ok(ix.addRating(A, 1, key(1), 3, NOW - 1), 'newest rateSeq wins even with an older date and at capacity')
   t.ok(ix.addRating(A, 1, key(1), 2, NOW + 1))
   t.is(ix.stats().ratings, 200)
-  t.ok(ix.removeRating(key(1), 1), 'superseded reference is gone')
+  t.is(ix.removeRating(key(1), 1), false, 'superseded reference is gone')
   t.is(ix.stats().ratings, 200)
   t.ok(ix.removeRating(key(1), 3))
   t.is(ix.stats().ratings, 199)

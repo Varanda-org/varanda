@@ -7,11 +7,14 @@
 // marks it used. Codes and their hashes stay inside the stores; nothing here
 // logs or keeps one.
 //
-// Residue: check and consume are separate steps, so codes of one owner that
-// are redeemed at the same time can all pass check before any is consumed:
-// the owner's weekly Feira cap can be exceeded by the number of sign-ups in
-// flight together (each one still a valid single-use code). The directory
-// link stays the single-use authority for each code.
+// reserve(id, untilMs, holder, live) holds a slot of the owner's weekly
+// Feira cap for a sign-up whose finish is in flight (check and reserve in
+// one synchronous step), so codes redeemed at the same time can never pass
+// the cap together. `holder` names the pending row; consume(id) or
+// release(holder) frees the hold, it lapses at untilMs, and it counts for
+// nothing once live() says the row is gone. A code of the primary store
+// needs no hold. The directory link stays the single-use authority for
+// each code.
 //
 // feiraOwner(id) names the inviter (the quota owner) of a valid Feira code,
 // else null, so the age routes can hold Feira codes to their own paid
@@ -47,6 +50,20 @@ function pairInvites (primary, feira = null) {
     return owner
   }
 
+  function reserve (id, untilMs, holder = id, live = null) {
+    if (primary.check(id) === null || !feira.available()) return false
+    return feira.reserve(id, untilMs, holder, live)
+  }
+
+  function release (holder) {
+    feira.release(holder)
+  }
+
+  // File names of the stores that cannot be read, for the operator's log.
+  function brokenFiles () {
+    return [primary, feira].filter((s) => !s.available()).map((s) => s.fileName)
+  }
+
   async function consume (id) {
     const res = await primary.consume(id)
     if (res.changed || !feira.available()) return res
@@ -73,6 +90,9 @@ function pairInvites (primary, feira = null) {
     holds: (member) => primary.holds(member) || !feira.available() || feira.holds(member),
     check,
     feiraOwner,
+    reserve,
+    release,
+    brokenFiles,
     consume,
     heal,
     summary: (member) => primary.summary(member),

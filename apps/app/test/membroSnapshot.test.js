@@ -126,3 +126,17 @@ test('membro snapshot: page rows and seeded paging', (t) => {
   t.ok(/!seeded && !mural && !depo && !atEnd/.test(CODE), 'no load more under seeded rows')
   t.ok(/const postsReady = posts\.phase === 'ready' && !posts\.seeded/.test(CODE), 'common communities wait for the live page')
 })
+
+test('Membro: post rows are stable across renders', (t) => {
+  const src = withoutComments(MEMBRO)
+  t.absent(/renderItem=\{\(/.test(src) || src.includes('renderItem={depo ?'), 'no renderItem picked or built inline')
+  t.ok(src.includes('const renderItem = useCallback((info) => renderRef.current(info), [])') && src.includes('renderItem={renderItem}'), 'one renderItem through a ref')
+  t.ok(src.includes('renderRef.current = depo ? testimonialTab.renderItem : mural ? renderMural : renderPost'), 'the ref follows the tab')
+  t.ok(src.includes('const extra = useMemo(() => ({ eng, follows, now, header, muralCols, own, isFollowed, profileOf: names.profileOf }), [eng, follows, now, header, muralCols, own, isFollowed, names.profileOf])') && src.includes('extraData={depo ? testimonialTab.extraData : extra}'), 'extraData is memoized')
+  t.ok(src.includes('const rowCache = useThreadRowCache(posts.items.map(postKey), { handlers, eng })'), 'the list owns a row props cache')
+  t.ok(src.includes('cache: rowCache, rowKey: postKey(item)'), 'post rows take cached props')
+  t.ok(src.includes('const memberWho = useMemo('), 'a repost keeps one reposter object')
+  t.ok(src.includes('item: withHeader(post)'), 'own posts keep one header copy')
+  const hooks = src.indexOf('const rowCache = useThreadRowCache(')
+  t.ok(hooks !== -1 && hooks < src.indexOf('\n  if (!full) {'), 'the list hooks run before the offline return')
+})

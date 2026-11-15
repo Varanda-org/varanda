@@ -1,0 +1,1 @@
+- Linhas de publicação mais leves ao montar (PR `perf/row-mount`): uma linha de publicação renderiza uma vez ao montar em vez de duas, as folhas de ações só montam na primeira abertura e a foto aparece com o driver nativo; na rolagem de A Rua no emulador Android as renderizações caíram cerca de 30%. Verificação em `docs/verification/perf-row-mount.md`.
