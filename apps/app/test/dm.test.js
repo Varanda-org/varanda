@@ -902,7 +902,7 @@ async function momentUI (file, options = {}) {
     '@varanda/rpc': { ...rpc, displayText: (text, opts) => { calls.display.push(text); return rpc.displayText(text, opts) } },
     '../momentReaction': reaction,
     '../momentPreviews': previews,
-    '../node': { useNode: () => node },
+    '../node': { useNodeHandle: () => node },
     '../media/display': { urlFromBytes: () => 'blob:moment', revokeUrl: (uri) => calls.revoke.push(uri) },
     '../ui': { Soft: 'Soft' },
     './ThemeProvider': { useStyles: (fn) => fn({}), useTheme: () => ({ colors: {}, scheme: 'light' }) },

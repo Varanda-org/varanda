@@ -780,10 +780,13 @@ function linearExcept (core, deleted) {
 }
 
 // A block whose read failed (it may be a tombstone) is read again after this
-// delay, this many times; after that only on a later step. It stays out of
-// the reported length until it is read.
+// delay, this many times; after that every TOMB_RETRY_SLOW_MS for as long as
+// it stays unread (and on any later step), so a quiet diary does not wait for
+// an event that may never come. It stays out of the reported length until
+// it is read.
 const TOMB_RETRY_MS = 250
 const TOMB_RETRY_MAX = 5
+const TOMB_RETRY_SLOW_MS = 30000
 
 // Newest-first download of a followed diary (trackPresent `newest`): the
 // window is about one A Rua page (FEED_LIMIT_MAX), the head also asks for
@@ -871,7 +874,7 @@ const PERSONAL_GUARD = Object.freeze({
 
 // `pages` false: the diary is known not to be a page (this member's own),
 // so the page guard never reads its genesis blocks.
-function trackPresent (core, { noClear = false, download = true, newest = 0, tailMax = TAIL_MAX, stallMs = HEAD_STALL_MS, pages = true, onScan = noop, onReady = noop, onGrow = noop, onDeleted = noop, onError = noop, onNewest = noop }) {
+function trackPresent (core, { noClear = false, download = true, newest = 0, tailMax = TAIL_MAX, stallMs = HEAD_STALL_MS, retrySlowMs = TOMB_RETRY_SLOW_MS, pages = true, onScan = noop, onReady = noop, onGrow = noop, onDeleted = noop, onError = noop, onNewest = noop }) {
   const tombs = new Map() // seq -> target of each local valid tombstone
   const pageGuard = pages ? pageTargets(core) : PERSONAL_GUARD
   const retry = new Map() // index -> failed reads of a block not yet learned
@@ -914,14 +917,15 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
     for (const index of retry.keys()) len = Math.min(len, index)
     return len
   }
-  // A quiet link still retries the failed reads.
+  // A quiet link still retries the failed reads: quickly at first, then
+  // slowly while any stays unread.
   const later = () => {
-    if (stopped || timer !== null) return
-    if (![...retry.values()].some((failed) => failed < TOMB_RETRY_MAX)) return
+    if (stopped || timer !== null || retry.size === 0) return
+    const fast = [...retry.values()].some((failed) => failed < TOMB_RETRY_MAX)
     timer = setTimeout(() => {
       timer = null
       queue()
-    }, TOMB_RETRY_MS)
+    }, fast ? TOMB_RETRY_MS : retrySlowMs)
   }
   const apply = async (next) => {
     let from = present
@@ -2188,6 +2192,8 @@ async function syncRun ({
       onError: () => {
         if (ended || entry.core !== core) return
         softError('falha ao ler a réplica de ' + key8(entry.key))
+        // A continuous run never returns errorsSoft, so the failure is also an event.
+        emit({ event: 'unreadable', key: entry.key })
         evaluate()
       }
     })

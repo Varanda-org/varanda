@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import { AccessibilityInfo, Animated, StyleSheet, View } from 'react-native'
+import { AccessibilityInfo, Animated, Platform, StyleSheet, View } from 'react-native'
 import { loopTiming } from './loopMotion'
 import { useStyles, useTheme } from './ThemeProvider'
+
+// The native driver is a platform API react-native-web does not have, so this
+// picks the driver, never the behaviour. scaleY runs on it, off the JS thread.
+const native = Platform.select({ web: false, default: true })
 
 const durations = [380, 520, 440]
 
@@ -36,8 +40,8 @@ export function MusicEqualizer ({ playing, color, size = 16 }) {
     const loops = bars.map((value, index) => {
       value.setValue(0.3)
       return Animated.loop(Animated.sequence([
-        Animated.timing(value, loopTiming({ toValue: 1, duration: durations[index], useNativeDriver: false })),
-        Animated.timing(value, loopTiming({ toValue: 0.3, duration: durations[index], useNativeDriver: false }))
+        Animated.timing(value, loopTiming({ toValue: 1, duration: durations[index], useNativeDriver: native })),
+        Animated.timing(value, loopTiming({ toValue: 0.3, duration: durations[index], useNativeDriver: native }))
       ]))
     })
     loops.forEach((loop) => loop.start())

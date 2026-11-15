@@ -83,6 +83,14 @@ function fakeNode (answers = {}) {
 // start answers { nonce }; every other call answers what `then` says.
 const flow = (then, extra = {}) => (n) => n === 1 ? json(200, { nonce: NONCE, ...extra }) : then(n)
 
+test('a pending transfer offer expires on screen without a parent render', (t) => {
+  // App.js memoizes its screens, so a parent render no longer refreshes a
+  // Date.now() read during render: the screen ticks on its own.
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/PaginaAjustes.js'), 'utf8')
+  t.ok(src.includes('const now = useNow(60000)'), 'the screen has its own clock')
+  t.ok(src.includes('Date.parse(status.offer.exp) > now'), 'offerPending compares with that clock')
+})
+
 test('lookupUsername keeps kind, closed and movedTo', async (t) => {
   const { lookupUsername } = await loadAccount()
   stub(t, json(200, { member: P, username: 'padaria', kind: 'page', closed: true, movedTo: K2 }))

@@ -72,14 +72,27 @@ test('the root is never refused for the writer cap, and a pass keeps at most MAX
   t.absent(named(ev, 'group-skipped').some((e) => e.key === group), 'the root is not refused')
   t.ok(await held(c, group), 'the root is stored')
 
+  // Keys sorted after the root: a pass keeps the first MAX_GROUP_WRITERS
+  // items in key order, and a random root cut from it is a probe with no
+  // root, dropped without a 'group-paged'.
   const many = []
-  for (let i = 0; i < MAX_GROUP_WRITERS + 8; i++) many.push({ key: randomKey(), diary: randomKey(), length: 1, seq: 1 })
+  for (let i = 1; i <= MAX_GROUP_WRITERS + 8; i++) many.push({ key: (BigInt('0x' + group) + BigInt(i)).toString(16).padStart(64, '0'), diary: randomKey(), length: 1, seq: 1 })
   injectWriters(seeder, group, many)
   // A fresh reader: the first one now holds the root at rest (not joined).
   const d = await member(assocKp, 'Davi')
   await store.addGroupReplica(d.storage, group)
   const ev2 = []
-  await once(d, url, ev2, { timeoutMs: 20000 })
+  // Nine pages paced one second apart, and the fake writers never pass
+  // their gates: wait for the passes themselves (a re-page too), not for a
+  // once run's deadline.
+  const ac = new AbortController()
+  const run = sync(d, url, ev2, { signal: ac.signal, groupPageMs: 1000 })
+  try {
+    await until(() => named(ev2, 'group-paged').filter((e) => e.group === group).length >= 2, { name: 'group paged twice', timeoutMs: 90000 })
+  } finally {
+    ac.abort()
+    await run
+  }
   const paged = named(ev2, 'group-paged').filter((e) => e.group === group)
   t.ok(paged.length > 0, 'paged')
   for (const e of paged) t.ok(e.count <= MAX_GROUP_WRITERS, 'never more than MAX_GROUP_WRITERS cores')
