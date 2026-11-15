@@ -205,6 +205,17 @@ export function priceText (cents) {
   return whole + ',' + String(cents % 100).padStart(2, '0')
 }
 
+// The price field as a cents mask: every digit typed or pasted counts, the
+// last two are the cents ('2500', 'R$ 25,00' and '25.00' all give '25,00'),
+// and a digit past the ceiling the Feira accepts is dropped. The result is
+// what parsePriceText reads, so what is shown is what is sent.
+export function maskPriceText (text) {
+  if (typeof text !== 'string') return ''
+  let digits = text.replace(/\D/g, '')
+  while (Number(digits) > feira.MAX_PRICE_CENTS) digits = digits.slice(0, -1)
+  return priceText(Number(digits))
+}
+
 const rawPlace = (p) => (p && typeof p === 'object' ? p : {})
 
 // The edit form of a listing (a listing.mine item with `seq`, or a verified
