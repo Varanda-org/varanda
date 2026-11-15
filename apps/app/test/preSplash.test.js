@@ -179,3 +179,54 @@ test('the band and the sun draw the module\'s stops', async (t) => {
   t.ok(lightBlock && lightBlock[1].includes('--vps-sun2: rgba(247, 178, 103, 0.55);'), 'Claro keeps the gold halo')
   t.absent(/\.sol \{[^}]*animation/.test(style), 'the sun stays still')
 })
+
+// public/pre-scheme.js runs in <head> before the overlay paints, in a page with
+// only the two theme-color metas.
+function runPreScheme (stored, { throws = false } = {}) {
+  const vm = require('vm')
+  const path = require('path')
+  const metas = [{ attrs: { name: 'theme-color', media: '(prefers-color-scheme: dark)', content: '#101010' } }, { attrs: { name: 'theme-color', content: '#fbf8f3' } }]
+  for (const m of metas) {
+    m.setAttribute = (k, v) => { m.attrs[k] = v }
+    m.removeAttribute = (k) => { delete m.attrs[k] }
+  }
+  const root = { dataset: {}, style: {} }
+  const sandbox = {
+    localStorage: { getItem: (k) => { if (throws) throw new Error('blocked'); return k === 'varanda-aparencia' ? stored : null } },
+    document: { documentElement: root, querySelectorAll: () => metas }
+  }
+  sandbox.globalThis = sandbox
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'pre-scheme.js'), 'utf8'), sandbox)
+  return { root, metas: metas.map((m) => m.attrs) }
+}
+
+test('index.html loads pre-scheme.js in the head, before the overlay', (t) => {
+  const tag = '<script src="/pre-scheme.js"></script>'
+  const at = html.indexOf(tag)
+  t.ok(at > 0, 'the script tag is there')
+  t.ok(at < html.indexOf('</head>'), 'in the head, so it runs before the body paints')
+  t.ok(at > html.lastIndexOf('<meta name="theme-color"'), 'after the theme-color metas it rewrites')
+})
+
+test('pre-scheme.js puts the manual Aparência choice on html', async (t) => {
+  const { STORAGE_KEY, withMode } = await import('../src/appearance.js')
+  t.is(STORAGE_KEY, 'varanda-aparencia', 'the same key as src/appearanceStore.web.js')
+  const darkRun = runPreScheme(JSON.stringify(withMode('dark')))
+  t.is(darkRun.root.dataset.scheme, 'dark')
+  t.is(darkRun.root.style.colorScheme, 'dark')
+  t.alike(darkRun.metas.map((m) => [m.content, m.media]), [['#101010', undefined], ['#101010', undefined]], 'theme-color follows the choice')
+  const lightRun = runPreScheme(JSON.stringify(withMode('light')))
+  t.is(lightRun.root.dataset.scheme, 'light')
+  t.is(lightRun.root.style.backgroundColor, '#fbf8f3')
+  t.alike(lightRun.metas.map((m) => m.content), ['#fbf8f3', '#fbf8f3'])
+})
+
+test('pre-scheme.js leaves the system mode when nothing usable is stored', async (t) => {
+  const { withMode } = await import('../src/appearance.js')
+  for (const stored of [null, JSON.stringify(withMode('system')), 'not json', '{"v":2,"mode":"dark"}', 'null', '"dark"']) {
+    const run = runPreScheme(stored)
+    t.is(run.root.dataset.scheme, undefined, String(stored))
+    t.is(run.metas[0].media, '(prefers-color-scheme: dark)', 'the media metas stay: ' + stored)
+  }
+  t.is(runPreScheme(null, { throws: true }).root.dataset.scheme, undefined, 'blocked storage does not throw')
+})
