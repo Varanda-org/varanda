@@ -616,7 +616,7 @@ async function actorBlocked (actor) {
 }
 
 // True when the wake was handed to a visible, focused app window instead.
-const DM_WAKE_ACK_MS = 1000
+const DM_WAKE_ACK_MS = 2000
 
 // True only when the window answers on the port. A focused tab that is not
 // the app (an image opened directly, say) never does, so its wake still

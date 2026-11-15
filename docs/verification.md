@@ -2337,7 +2337,7 @@ Arquivos estendidos:
 - `apps/app/test/sw.test.js`: o aviso, o toque, o ping `varanda-push-ping` e a resposta `{ source: 'varanda-sw', push: 1 }`.
 - `apps/app/test/legal.test.js`: `LEGAL_VERSION` 3.
 
-O resultado de lint, dos testes e da demo fica com o orquestrador e não é repetido aqui. Nenhum teste de navegador cobre a linha de Ajustes nem o fluxo de abrir o aviso a partir da notificação (veja Limites).
+O resultado de lint, dos testes e da demo fica com o orquestrador e não é repetido aqui. Nenhum teste de navegador cobre a linha de Ajustes nem o fluxo de abrir o aviso a partir da notificação (veja Limites). `apps/app/test/push-switch.test.js` cobre a lógica da linha (`pushRowView`) e o desligamento antes de trocar a identidade; `apps/cli/test/account-push.test.js` cobre o atraso aleatório do envio.
 
 ### Verificação manual
 
@@ -2363,13 +2363,15 @@ Nenhuma verificação foi feita ainda. Todos os itens abaixo estão desmarcados 
 - No máximo 4 aparelhos por membro (`PUSH_MAX_PER_MEMBER`). O envio só sai para a lista de hosts (`fcm.googleapis.com`, `updates.push.services.mozilla.com`, `web.push.apple.com` e os sufixos `.push.apple.com`, `.push.services.mozilla.com`, `.notify.windows.com`).
 - Não há tratamento de `pushsubscriptionchange`. Não há citação nem menção no push. Não há push nativo (APNs e FCM do app continuam fora). Não há aviso quando um diário seguido cresce (o TODO de `packages/core/lib/sync.js`).
 - Em `apps/cli/lib/account/push-store.js`, `byDate` compara `createdAt` como texto. Um ISO de ano expandido (`toISOString` fora de 0000 a 9999, no formato `+275760-...`) ordena antes de um ano de quatro dígitos, e o teto pode tratar essa linha como a mais antiga. Uma transferência de `endpoint` para um membro que já tem 4 aparelhos não é recusada: `put` aceita (o comentário de "transferência que não acrescenta membro" vale para `MAX_MEMBERS`) e `cap` descarta a linha mais antiga desse membro.
-- Não há teste automatizado no navegador da linha de Ajustes nem do fluxo de abrir o app a partir do aviso. A cobertura é dos módulos puros, do service worker e do roteiro acima.
+- Não há teste automatizado no navegador da linha de Ajustes nem do fluxo de abrir o app a partir do aviso. A cobertura é dos módulos puros (`pushRowView`, `pushUiState`), do service worker (`notificationclick`, em `apps/app/test/sw.test.js`) e do roteiro acima.
 - Uma resposta, curtida ou republicação cujo post alvo ainda não está legível na réplica do destinatário no semeador (fora do prefixo contíguo, ou uma leitura sem espera que falhou) não vira aviso, e o bloco não é lido de novo (no máximo uma vez).
 - Se um envio volta 410 enquanto o mesmo `endpoint` é registrado de novo com chaves novas, a remoção compara as chaves antes de entrar na fila do `push.json`, e uma janela curta ainda pode apagar o registro novo. O navegador costuma gerar outro `endpoint` ao assinar de novo; religar em Ajustes resolve.
 - Ao ligar, um cancelamento local que passa de 5 s (`UNSUBSCRIBE_MS`) é dado como não confirmado; o navegador ainda pode concluí-lo depois.
 - A limpeza de Sair e Recomeçar espera até 3 s (`LEAVE_WAIT_MS`) uma troca do interruptor em andamento e o interruptor não aceita novo toque durante ela. Se o pedido de permissão ficar aberto além disso, um "Permitir" tardio é desligado de novo quando a troca termina (só o cancelamento local, porque o nó já saiu). Conferir num navegador real com o pedido aberto ainda falta.
-- Todo aviso é preenchido até 1024 bytes antes de cifrar (`PUSH_PAD_TO`, preenchimento do RFC 8188), então o tamanho não mostra o tipo nem o nome. Mas a entrega é imediata: o serviço de push do navegador vê o momento de cada aviso e pode cruzá-lo com os registros públicos dos diários. Não há atraso artificial, por escolha: um atraso deixaria todo aviso mais lento.
-- Os caminhos de `apps/app/src/screens/Identidade.js` que trocam a identidade guardada ("apagar e recomeçar" quando a identidade não confere, "criar mesmo assim") não chamam `disablePush`. Num aparelho compartilhado, a inscrição do navegador pode continuar recebendo os avisos da identidade anterior até ser desligada ou até o serviço de push descartá-la (não confirmado de ponta a ponta).
+- Todo aviso é preenchido até 1024 bytes antes de cifrar (`PUSH_PAD_TO`, preenchimento do RFC 8188), então o tamanho não mostra o tipo nem o nome. Cada aviso espera antes um atraso aleatório e uniforme de 0 a 60 s (`crypto.randomInt`, `PUSH_DELAY_MAX_MS` em `push-routes.js`), sorteado uma vez por aviso e igual para todas as cópias dele, uma por aparelho (o serviço de push não aproveita a mais cedo), decidido pela manutenção em 2026-11-15, para o momento da entrega não coincidir com o do registro público que o causou. O serviço de push do navegador ainda vê o momento (com o atraso) e pode cruzá-lo com os registros públicos, só com menos precisão. A pausa e os tetos são decididos ao enfileirar, então o atraso não duplica nem pula um aviso. Ao fechar o serviço, os envios que ainda esperavam saem na hora (perdem o atraso), sem repetição e dentro de um prazo total de 3 s (`FLUSH_MS`); numa queda sem fechar, esses envios se perdem, e um convite cujo envio se perdeu não é repetido, porque o espaço dele já foi marcado. Ao fechar, a varredura de exclusões e o laço de convites param antes do servidor, e um serviço fechado não tem vaga, então nenhum espaço é marcado depois do fechamento. Um aviso pode levar até cerca de um minuto para chegar, e o texto de Ajustes diz isso.
+- Com o atraso, `MAX_QUEUE` (512) passa a valer como um teto de cerca de 512 avisos por minuto: a fila segura cada envio por até 60 s, e o que não cabe é descartado em silêncio (só o motivo `descartado` no registro, nenhum aviso para a pessoa).
+- Se a pessoa cancela o diálogo da passkey depois de "criar mesmo assim", os avisos já foram desligados para a identidade que continua guardada. Ajustes mostra o estado real ao abrir, e basta ligar de novo.
+- Os caminhos de `apps/app/src/screens/Identidade.js` que trocam a identidade guardada ("apagar e recomeçar" quando a identidade não confere, "criar mesmo assim") agora desligam os avisos da identidade anterior antes de trocar (`turnOffBeforeSwitch`, `apps/app/src/pushSwitch.js`), sem nunca bloquear a troca se o desligamento falha. No "apagar e recomeçar" o desligamento é aguardado; no "criar mesmo assim" ele só é iniciado antes da cerimônia, sem aguardar, porque a cerimônia da passkey precisa da ativação do mesmo toque. Com o aparelho travado, o desligamento pode falhar por falta da chave para a prova, e então a inscrição fica até ser desligada ou descartada pelo serviço de push (não confirmado de ponta a ponta).
 
 ## 39. Abertura do app: splash e cartões (feat/app-startup, 2026-10-29)
 
@@ -2788,7 +2790,7 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado.
 ### Limites
 
 - Fechar vale por perfil do navegador, não por conta; a nota volta depois de 30 dias. Sem armazenamento, volta na próxima carga.
-- Sair continua sem esperar uma troca dos avisos em andamento, como descrito na seção 38: um Sair no meio de um Ativar pode deixar este navegador inscrito até a próxima leitura. Depois de entrar de novo, a linha e a nota ficam pendentes até essa troca terminar; se o pedido de permissão ficar aberto, elas esperam a resposta, e se uma leitura do navegador travar, até recarregar a página.
+- Sair espera até 3 s uma troca dos avisos em andamento e desliga de novo um "Permitir" tardio quando a troca termina (seção 38, `offHere`). Depois de entrar de novo, a linha e a nota ficam pendentes até essa troca terminar; se o pedido de permissão ficar aberto, elas esperam a resposta, e se uma leitura do navegador travar, até recarregar a página.
 - Uma leitura sem conexão ao abrir Ajustes volta sem chave: a linha mostra o texto de indisponível e a nota some até a próxima leitura, como antes desta mudança. Se o service worker não fica pronto a tempo, a linha mostra o texto de recarregar, também como antes. Como fechar Ajustes não apaga mais o estado, ao reabrir a linha mostra o estado anterior até a leitura nova chegar.
 - Se Sair ou Recomeçar falhar depois de desligar os avisos, a linha continua mostrando o estado anterior até a próxima leitura, como antes desta mudança.
 - Com duas abas abertas, uma não vê a inscrição feita na outra até ler de novo (abrir Ajustes, voltar a conexão, bloquear e desbloquear). Ativar nessa aba recebe do navegador a inscrição que já existe e, se um passo seguinte falhar com recusa, a desfaz, como já acontecia na linha de Ajustes; a nota aumenta essa janela porque a leitura dela vale até a próxima.
@@ -4198,7 +4200,6 @@ Web (Chrome ou Safari, com o nó no navegador ou com o `varanda-serve`):
 ### Não verificado / limites conhecidos
 
 - Nenhuma caixa acima foi executada nesta documentação. Os testes automáticos cobrem só a janela do toque duplo, a abertura pendente e a regra de que um toque duplo com curtida ou republicação pendente da mesma publicação não mostra o coração (`doubleTapPlan`); o pulo, o coração de 64 pt, a vibração e o aviso ainda precisam de aparelho.
-- Um desfazer durante a atualização puxada pode deixar a contagem uma a mais até a próxima atualização.
 - O desfazer atualiza só a tela que mostrou o aviso.
 - Um desfazer enquanto uma curtida da mesma publicação está pendente não entra na fila; o botão de republicar da linha continua desfazendo.
 - Um arrasto que começa fora de qualquer publicação, dentro dos 280 ms, não cancela a abertura da conversa. Tocar numa aba cancela.
@@ -4317,11 +4318,11 @@ Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emula
 
 ## 88. Avisos da página (PR feat/pages-app)
 
-O dono e os administradores leem em Avisos o que chega para a página: quem começou a seguir a página, as respostas, as citações e as menções (sem as curtidas e republicações do canal `notices/3`). O serviço de conta lê os avisos pelo semeador, confere cada linha e responde só ao dono e aos administradores (ação `notices`, leitura assinada, 8 por minuto por página; página mudada de chave responde `movida`). Nenhum Web Push vai para uma página. Contrato em `docs/protocol.md` seção 12 ("Avisos de uma página") e em `docs/rpc.md` (5.84); dados em `docs/design.md` (LGPD).
+O dono e os administradores leem em Avisos o que chega para a página: quem começou a seguir a página, as respostas, as citações, as menções e as curtidas e republicações das publicações da página (canal `notices/3`; um semeador sem ele dá só as quatro primeiras). O serviço de conta lê os avisos pelo semeador, confere cada linha e responde só ao dono e aos administradores (ação `notices`, leitura assinada, 8 por minuto por página; página mudada de chave responde `movida`). Nenhum Web Push vai para uma página. Contrato em `docs/protocol.md` seção 12 ("Avisos de uma página") e em `docs/rpc.md` (5.84); dados em `docs/design.md` (LGPD).
 
 ### Como verificar
 
-Do repositório: `npm run lint`, `npm test` e `npm run demo`. Testes desta etapa: `apps/cli/test/account-pages-notices.test.js` (linhas verificadas, limite por página, administrador removido) e `apps/app/test/notices.test.js`. Não rode nada contra o serviço de produção.
+Do repositório: `npm run lint`, `npm test` e `npm run demo`. Testes desta etapa: `apps/cli/test/account-pages-notices.test.js` (linhas verificadas, limite por página, administrador removido), `apps/cli/test/pages-notices.test.js` (curtida e republicação de uma publicação da página; curtida de publicação de outra pessoa, bloco forjado e autor desconhecido recusados) e `apps/app/test/notices.test.js`. Não rode nada contra o serviço de produção.
 
 ### Checagens humanas (a fazer)
 
@@ -4329,15 +4330,19 @@ Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emula
 
 1. **Seguir a página.** C segue a página; em A e em B, Avisos mostra "começou a seguir a página" com o nome de C.
 2. **Menção.** C publica um texto com o @nome da página; o aviso de menção aparece para A e para B, sem o texto cru de um par fora de `displayText`.
-3. **Quem não administra.** C não vê os avisos da página em nenhuma tela.
-4. **Administrador removido.** A remove B; B deixa de ver os avisos da página no próximo carregamento.
-5. **Limite.** Atualizar Avisos da página mais de 8 vezes em um minuto mostra o limite e nada quebra; passado o minuto, funciona de novo.
-6. **Sem push.** Nenhuma notificação do sistema chega ao aparelho por causa de um aviso da página.
-7. **Página encerrada.** Depois de encerrar a página, Avisos da página responde "Esta página foi encerrada".
+3. **Curtida e republicação.** C curte e republica uma publicação da página; o aviso "curtiu" e o de "republicou" aparecem para A e para B. Uma curtida de C em publicação de outra pessoa não aparece.
+4. **Quem não administra.** C não vê os avisos da página em nenhuma tela.
+5. **Administrador removido.** A remove B; B deixa de ver os avisos da página no próximo carregamento.
+6. **Limite.** Atualizar Avisos da página mais de 8 vezes em um minuto mostra o limite e nada quebra; passado o minuto, funciona de novo.
+7. **Sem push.** Nenhuma notificação do sistema chega ao aparelho por causa de um aviso da página.
+8. **Página encerrada.** Depois de encerrar a página, Avisos da página responde "Esta página foi encerrada".
+9. **Links no trecho.** Numa linha de Avisos (de uma pessoa ou da página) cujo trecho da publicação traz um endereço inteiro (`https://exemplo.com/a`), tocar no endereço abre o navegador e tocar no resto da linha abre a conversa; um trecho cortado em 90 caracteres no meio de um endereço continua texto simples, sem link.
 
 ### Não verificado / limites conhecidos
 
 - Nada foi rodado num navegador nem num aparelho pelo agente.
+- Se o canal v3 não responde e a leitura cai para o v2, a leitura sai com `incomplete` (a nota "alguns avisos ainda podem chegar"), sem teste automático (o semeador do teste sempre responde).
+- Um semeador que não abre `varanda/notices/3` leva a leitura para o v2, sem curtidas nem republicações; esse caminho não tem teste automático (o semeador do teste sempre abre os dois canais).
 - O limite de 8 por minuto por página fica na memória do serviço e recomeça quando ele reinicia.
 - O serviço lê os avisos da página em nome dos administradores (Termos 15).
 
@@ -5515,9 +5520,9 @@ Resultado da matriz: a registrar aqui por navegador, com a data e a versão do n
 - O aviso é do navegador. No app instalado não há aviso do sistema, e nada muda ali.
 - Os 120 s são do aparelho que enviou: os outros aparelhos da mesma pessoa recebem o aviso normalmente, porque o servidor não sabe qual deles enviou.
 - A supressão vale só no aparelho, e o marcador não sai dele: nenhum servidor aprende quem enviou.
-- Os limites 1 e 2 acima são conhecidos e não corrigidos nesta parte. A conferência registra o que acontece.
+- Os limites 1 e 2 acima são conhecidos e não corrigidos nesta parte. A conferência registra o que acontece. Aceitos por decisão da manutenção (2026-11-15): (1) os outros aparelhos de quem envia ainda recebem o aviso; (2) o intervalo global de 15 minutos (`DM_WAKE_COOLDOWN_MS`) pode engolir o aviso de uma resposta que chegue dentro dele; (3) a janela de confirmação da janela em foco (abaixo).
 - O serviço de conta manda no máximo um aviso de mensagem a cada 15 minutos para todo mundo (`DM_WAKE_COOLDOWN_MS`, já era assim). Se o primeiro aviso desse intervalo foi o do próprio envio, e por isso não apareceu, uma resposta que chegue depois dos 120 s e antes de acabar o intervalo também não gera aviso; ela aparece no próximo `dm.pull` (ao voltar para o app, ao puxar para atualizar ou a cada 5 minutos com o app visível). Antes desta parte essa resposta também não gerava aviso: só aparecia o aviso do próprio envio.
-- A janela em foco só fica com o aviso se o app responder ao service worker em até 1 s (`DM_WAKE_ACK_MS`); uma aba em foco que não é o app (uma imagem aberta direto, por exemplo) não responde, e o aviso aparece.
+- A janela em foco só fica com o aviso se o app responder ao service worker em até 2 s (`DM_WAKE_ACK_MS`, subiu de 1 s por decisão da manutenção em 2026-11-15; coberto em `apps/app/test/sw.test.js`); uma aba em foco que não é o app (uma imagem aberta direto, por exemplo) não responde, e o aviso aparece.
 - Com a janela em foco, o aviso vira só uma releitura. Se a identidade está travada, a releitura espera o destravar. Se já há um `dm.pull` em andamento, a releitura dele falha e a mensagem aparece no próximo. Mensagens de uma página só aparecem quando a pessoa está agindo como a página, como antes. Uma janela em foco fora da área de membro (a abertura, os Termos, a primeira configuração, ou o começo de um carregamento antes de o app ouvir) não responde ao worker, e o aviso aparece normalmente.
 - Nenhuma caixa executada nesta documentação.
 
@@ -10886,54 +10891,6 @@ node apps/site/test/legal.test.js
 node apps/site/scripts/render-calcada.js --check
 ```
 
-## 237. Capa dos players de música antes de carregar (PR feat/music-player-cover)
-
-Esta seção confere a capa que o lugar do player do YouTube, do SoundCloud, do Spotify e do Apple Music mostra antes de a página do provedor carregar, e a busca dessa capa ao compor. Ao escrever, quem monta o cartão (o aparelho de quem envia no app nativo, o serviço de conta na web hospedada) guarda como `card.image` a capa do provedor: o `og:image` da página (no app nativo, só quando o host é o da própria página ou um subdomínio estrito de um domínio de imagem do próprio provedor, `COVER_IMAGE_DOMAINS` em `apps/app/src/musicEmbed.js`: `ytimg.com`, `scdn.co`, `sndcdn.com`, `mzstatic.com`; na web, o serviço de conta busca o `og:image` como em qualquer prévia, com as verificações de endereço dele) e, num vídeo do YouTube, lido no endereço canônico (`coverTarget`), a miniatura padrão `https://i.ytimg.com/vi/<id>/mqdefault.jpg` (`youtubeCoverUrl` de `@varanda/rpc`) quando a página ou a imagem dela não dá nenhuma; um cartão feito só com essa miniatura se chama "YouTube". No app nativo são no máximo duas buscas de imagem, sem seguir redirecionamento, com os mesmos limites de antes (5 s, 256 KiB, tipo conferido pelos primeiros bytes); no serviço, a página e no máximo duas imagens, o pedido continua exatamente `{ url }` e a cota é a mesma. A imagem é recodificada no `card.image` de sempre (JPEG, até 320 px por lado, 32752 bytes): o formato dos registros não muda. Ao mostrar, o lugar do player desenha desde o primeiro quadro uma capa parada do tamanho exato do player, só com o cartão guardado (imagem, título, nome do provedor e selo de play; sem imagem, um quadro do provedor com um ícone de música), sem falar com ninguém; o player continua carregando embaixo dela (comportamento da seção 233, sem mudança), aparece num esmaecimento quando fica pronto e a capa sai. Um toque na capa não faz nada; o toque longo abre o menu como antes. Termos e Política na versão 52, com novo aceite. Sem mudança de RPC. A lista abaixo é um roteiro: nada aqui foi marcado como conferido, e o que não foi executado fica pendente.
-
-Ordem: Android (build de debug) e simulador iOS primeiro, depois web e PWA instalado. Registrar aparelho, sistema e, na web, o navegador, e o resultado de cada item.
-
-Ao compor:
-
-- [ ] a. Publicação nova com um link de cada provedor (um vídeo do YouTube, uma faixa do Spotify, uma do SoundCloud e uma do Apple Music), pelo app nativo: o cartão guardado traz a capa do provedor. Android, iOS: pendente. Resultado: pendente.
-- [ ] b. O mesmo pela web hospedada e pelo PWA: o serviço de conta devolve a capa e ela fica guardada. Web e PWA: pendente. Resultado: pendente.
-- [ ] c. Com a chave **Prévia de links** desligada em Ajustes, nenhuma busca de capa sai (nem da página nem da imagem), conferido no registro de rede ou no proxy. Android, iOS, web: pendente. Resultado: pendente.
-- [ ] d. Um link do YouTube numa conversa privada e num grupo ganha cartão com a miniatura e, com ela, o player e a capa, no app nativo e na web. Android, iOS, web: pendente. Resultado: pendente.
-- [ ] e. Resposta do serviço de conta a partir do endereço do datacenter da associação, para cada provedor (`POST /account/preview` com um link de YouTube, Spotify, SoundCloud e Apple Music): registrar se vem `image` e, no YouTube, se a miniatura entrou e o título é "YouTube" quando a página não deu nenhum. Pendente. Resultado: pendente.
-
-Ao mostrar:
-
-- [ ] f. Nas publicações novas dos itens a e b, a capa aparece na hora, no tamanho do player, e o player aparece por cima num esmaecimento, para os quatro provedores; o esmaecimento nunca descobre um player em branco. Android, iOS, web e PWA: pendente. Resultado: pendente.
-- [ ] g. Uma publicação antiga sem imagem no cartão mostra o quadro do provedor com o ícone de música. Android, iOS, web e PWA: pendente. Resultado: pendente.
-- [ ] h. Com Reduzir movimento ligado, o player aparece de uma vez, sem esmaecimento. Android, iOS, web: pendente. Resultado: pendente.
-- [ ] i. Numa citação de uma publicação com player, a capa e o esmaecimento se comportam como na publicação. Android, iOS, web e PWA: pendente. Resultado: pendente.
-- [ ] j. Na prévia do compositor (Publicar, conversa privada e grupo), o rascunho mostra a capa e o player esmaece no próprio lugar. Android, iOS, web e PWA: pendente. Resultado: pendente.
-- [ ] k. Rolar para longe de um player já carregado e voltar: ele aparece na hora, sem capa e sem um segundo esmaecimento. Android, iOS, web e PWA: pendente. Resultado: pendente.
-- [ ] l. Um toque na capa não faz nada (não abre o link nem o player), e o toque longo abre o menu da publicação ou da mensagem. Android, iOS, web e PWA: pendente. Resultado: pendente.
-- [ ] m. Quem lê não faz nenhum pedido para desenhar a capa: no registro de rede, abrir uma publicação com capa não busca imagem do provedor (só o quadro do player, como na seção 233). Android, iOS, web: pendente. Resultado: pendente.
-- [ ] n. Termos e Política na versão 52: o aceite novo aparece antes de qualquer tela e a versão 51 não vale mais. Android, iOS, web e PWA: pendente. Resultado: pendente.
-- [ ] o. Aparelho Android real (não só o emulador): itens a, f, k e l. Pendente. Resultado: pendente.
-
-Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho:
-
-```sh
-node packages/rpc/test/music-cover.test.js
-node apps/app/test/musicEmbed.test.js
-node apps/app/test/linkCardBuild.test.js
-node apps/app/test/coverBuildWeb.test.js
-node apps/app/test/embedCover.test.js
-node apps/app/test/embedCoverView.test.js
-node apps/app/test/useReveal.test.js
-node apps/app/test/embedLayer.test.js
-node apps/app/test/musicEmbedCard.test.js
-node apps/cli/test/preview-routes.test.js
-node apps/app/test/legal.test.js
-node apps/app/test/terms-version.test.js
-node packages/core/test/terms.test.js
-node apps/site/test/legal.test.js
-```
-
-Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
-
 ## 237. Ícone da Feira: barraca (PR feat/feira-tent-icon)
 
 Esta seção confere o novo ícone da Feira, uma barraca de feira (toldo listrado, bambolim recortado, dois postes e balcão) desenhada com Views na grade de 24, no lugar da sacola de compras. Só o visual: sem mudança de protocolo, RPC, Termos nem dependência.
@@ -11017,7 +10974,138 @@ node apps/app/test/wordCheck.test.js
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
 
-## 237. Página pública de uma publicação com cara de feed (PR feat/post-page-feed-style)
+## 240. Anel do seu momento redondo no Android (PR fix/momentos-ring-circle)
+
+Esta seção confere a correção do quadrado cinza atrás da sua foto na faixa de momentos de A Rua, no Android. O seu anel monta como "+" (fundo transparente) e ganha a cor de contorno quando os momentos carregam. No Android, a View transparente era achatada (sem view nativa própria) e, quando virava uma view de verdade, a cor saía sem o raio: um quadrado de 64 pt. A View do anel agora tem `collapsable={false}`. Os outros anéis já montavam com a cor e ficavam redondos. Só o visual: sem mudança de protocolo, RPC, Termos nem dependência.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA, cada um em claro e escuro, com os dados da Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`).
+
+- [x] Android, emulador API 36, build de debug, escuro: antes da correção, o anel "Você" aparecia sobre um quadrado cinza no estado não visto e no visto (abrir o seu momento e fechar). Depois: redondo nos dois estados, também depois de apagar os dados do app e abrir de novo. Conferido em 2026-11-14.
+- [x] Android, claro: o anel visto continua redondo ao trocar o tema com o app aberto. Conferido em 2026-11-14.
+- [x] iOS (simulador iPhone 17 Pro, build de debug) e Chrome na web (390 px, escuro): o anel já era redondo antes da correção e continua igual. Conferido em 2026-11-14.
+- [ ] Aparelho Android com a conta de verdade (foto no avatar), app instalado: o anel "Você" redondo depois de abrir e fechar o seu momento. Pendente.
+- [ ] PWA instalado no Android e no iOS: o anel redondo. Pendente.
+- [ ] Sem momento seu no ar: o selo verde de "+" aparece inteiro, sem corte, no Android, no iOS e na web. Pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A asserção nova (`collapsable` falso na View do anel) falha sem a correção.
+
+```sh
+node apps/app/test/momentosScreen.test.js
+node apps/app/test/screensPolish.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 241. Data afastada da pílula "seguir" (PR fix/platform-parity-sweep)
+
+Esta seção confere o espaço entre a data e a pílula "seguir" no topo de uma publicação (Espiadinha e Busca). A face da pílula começa na borda do seu alvo de toque, e o topo reservava só a largura dos botões, sem folga: no Android, "· 5 nov" encostava na pílula e entrava um pouco nela; no iOS, encostava. Agora o topo reserva 8 pt a mais quando há "seguir", também com texto grande. Com só o ⋯ nada muda: o ícone já fica no meio de um alvo mais largo. Só o visual: sem mudança de protocolo, RPC, Termos nem dependência.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web, em escuro, com os dados da Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`).
+
+- [x] Android, emulador API 36, build de debug, escuro, Espiadinha: antes, na linha de Tomás Ferreira, "· 5 nov" encostava na pílula e entrava um pouco nela. Depois: 8 pt entre a data e a pílula em todas as linhas, e o `@nome` corta antes ("@tomas…"). Conferido em 2026-11-14.
+- [x] Android, texto grande (escala 1,3): o nome fica na primeira linha, a data embaixo, e nada encosta na pílula. Conferido em 2026-11-14.
+- [x] iOS, simulador iPhone 17 Pro, build de debug, escuro, Espiadinha: antes, a data encostava na pílula; depois, o mesmo espaço do Android. Conferido em 2026-11-14.
+- [x] Chrome na web, 390 px, escuro, Espiadinha: 8,4 px entre o fim de "· 5 nov" e a pílula em todas as linhas. Conferido em 2026-11-14.
+- [ ] Busca, com uma conta que você não segue: o mesmo espaço. Pendente.
+- [ ] Texto grande no iOS e na web. Pendente.
+- [ ] PWA instalado no Android e no iOS. Pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho. A asserção nova (`headPad` com 8 pt a mais quando há "seguir") falha sem a correção.
+
+```sh
+node apps/app/test/postLayout.test.js
+node apps/app/test/postOverflow.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 242. O splash mostra a apresentação inteira antes da primeira tela (PR fix/splash-full-presentation)
+
+Esta seção confere que o splash só sai depois de mostrar a apresentação inteira: a entrada (o chão, a varanda, a cadeira, as letras e a barra, cerca de 1,3 s) e uma pausa curta na cena pronta, 1,5 s no total (`PRESENTATION_MS` em `apps/app/src/ui/splashMotion.js`). Pode ficar mais enquanto o app carrega, nunca menos. Vale no Android, no iOS, na web e no PWA.
+
+O que muda:
+
+- O `Splash` avisa o app (`onPresented`) uma vez, quando a apresentação foi vista: no nativo, 220 ms depois de a entrada terminar; com reduzir movimento, quando a cena parada completa 1,5 s; na web, sob o overlay de `public/index.html`, pelo relógio da própria animação `vps-expire` do overlay, então os 1,5 s contam da pintura da página, não da montagem do app.
+- `holdSplash` (`apps/app/src/splashGate.js`) segura o splash em qualquer fase até esse aviso: com o nó já pronto (A Rua, Entrar), numa falha (Conectar, o formulário da primeira abertura no nativo) e antes da Introdução e dos Termos. A prévia de A Rua guardada no celular também espera (`previewAllowed`). Um teto de 5 s desde a montagem (`SPLASH_CAP_MS`) libera o app se o aviso nunca vier.
+- Um splash que volta depois de a apresentação ter sido vista (por exemplo, depois da Introdução ou dos Termos, com o nó ainda conectando) abre já assentado, com a calçada deslizando, sem repetir a entrada.
+- Esta seção substitui o que as seções 44, 152 e 213 dizem sobre o mínimo de 1,5 s: ele não vale mais só nas fases de carregamento ou com a Introdução e os Termos a seguir, nem conta da montagem do app; agora vale sempre, contado do começo da apresentação. O resto daquelas seções (a paciência de 10 s de Conectar, a espera das primeiras linhas de A Rua e de Momentos, o teto de 5 s do conteúdo) segue igual.
+
+Nada disso envia pedido nem guarda dado. Sem mudança de protocolo, RPC nem Termos.
+
+Ordem: Android (build de debug, emulador), iOS (simulador), depois web e PWA. Abrir o app do zero, com o processo fechado.
+
+Rodada de 2026-11-14: emulador Android `varanda-api36` (Android 16, API 36) e simulador iPhone 16e (iOS 26.2), os dois com o build de debug servido pelo Metro; Chrome sem janela, a 390 px, no servidor de desenvolvimento. No nativo, vídeo da tela a 20 quadros por segundo, contado do primeiro quadro com o pôr do sol até o primeiro quadro da tela seguinte; os primeiros quadros da entrada, com o chão ainda quase transparente, não entram na conta, então a duração real é um pouco maior que a medida. Na web, o tempo entre o início da animação do overlay e a saída dele, no relógio da página.
+
+- [ ] Primeira abertura com os Termos ou a Introdução a seguir: o splash mostra a entrada inteira e a cena pronta antes da tela seguinte, por pelo menos 1,5 s desde o começo da entrada. Emulador Android (build de debug): ok pela ordem, em duas aberturas, lida com um registro temporário no JS (logcat, retirado antes do commit): a entrada terminou (aos 7,3 s e aos 4,4 s do começo), o aviso veio depois (aos 9,5 s e aos 9,1 s) e só então o splash saiu (8 ms e 1,2 s depois do aviso), seguido dos Termos 51. O emulador estava muito lento pela carga da máquina (a entrada de 1,3 s levou de 4 a 7 s) e o gravador de tela dele pegou poucos quadros, então a duração medida em vídeo num aparelho sem carga fica pendente. Simulador iOS: ok, 1,50 s e 1,45 s em duas aberturas, depois os Termos 51; nos quadros, a entrada termina com a barra visível antes da troca. Web: ok, 1500, 1500 e 1517 ms, depois a Introdução. PWA: pendente.
+- [ ] Falha de conexão: a tela Conectar só aparece depois da apresentação. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: ok, com a Introdução já vista e sem semeador no servidor de desenvolvimento, 1500 ms de splash e então Conectar (antes aparecia de imediato). PWA: pendente.
+- [ ] Quem volta com a configuração lembrada e o nó pronto cedo (A Rua ou Entrar): o splash não sai antes de 1,5 s. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Celular com A Rua guardada: a prévia das linhas guardadas só substitui o splash depois da apresentação. Emulador Android (build de debug): pendente. Simulador iOS: pendente.
+- [ ] Reduzir movimento (Android: Remover animações; iOS: Reduzir Movimento; web: `prefers-reduced-motion`): a cena parada fica 1,5 s e então vem a tela seguinte. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: ok, 1516, 1517 e 1517 ms com a preferência emulada. PWA: pendente.
+- [ ] Ligar reduzir movimento no meio da entrada: a cena assenta e para, e fica até completar 1,5 s desde o começo. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente.
+- [ ] Splash que volta depois dos Termos ou da Introdução com o nó ainda conectando: abre assentado, com a calçada deslizando, sem repetir a entrada. Emulador Android (build de debug): pendente. Simulador iOS: pendente. Web: pendente. PWA: pendente.
+- [ ] Web com rede lenta (estrangular no DevTools): o overlay fica até o app ficar pronto e sai sem somar outro 1,5 s depois do bundle. Web: pendente. PWA: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho.
+
+```sh
+node apps/app/test/splashGate.test.js
+node apps/app/test/splashMotion.test.js
+node apps/app/test/splashWiring.test.js
+node apps/app/test/ruaSnapshot.test.js
+node apps/app/test/preSplash.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 243. Capa dos players de música antes de carregar (PR feat/music-player-cover)
+
+Esta seção confere a capa que o lugar do player do YouTube, do SoundCloud, do Spotify e do Apple Music mostra antes de a página do provedor carregar, e a busca dessa capa ao compor. Ao escrever, quem monta o cartão (o aparelho de quem envia no app nativo, o serviço de conta na web hospedada) guarda como `card.image` a capa do provedor: o `og:image` da página (no app nativo, só quando o host é o da própria página ou um subdomínio estrito de um domínio de imagem do próprio provedor, `COVER_IMAGE_DOMAINS` em `apps/app/src/musicEmbed.js`: `ytimg.com`, `scdn.co`, `sndcdn.com`, `mzstatic.com`; na web, o serviço de conta busca o `og:image` como em qualquer prévia, com as verificações de endereço dele) e, num vídeo do YouTube, lido no endereço canônico (`coverTarget`), a miniatura padrão `https://i.ytimg.com/vi/<id>/mqdefault.jpg` (`youtubeCoverUrl` de `@varanda/rpc`) quando a página ou a imagem dela não dá nenhuma; um cartão feito só com essa miniatura se chama "YouTube". No app nativo são no máximo duas buscas de imagem, sem seguir redirecionamento, com os mesmos limites de antes (5 s, 256 KiB, tipo conferido pelos primeiros bytes); no serviço, a página e no máximo duas imagens, o pedido continua exatamente `{ url }` e a cota é a mesma. A imagem é recodificada no `card.image` de sempre (JPEG, até 320 px por lado, 32752 bytes): o formato dos registros não muda. Ao mostrar, o lugar do player desenha desde o primeiro quadro uma capa parada do tamanho exato do player, só com o cartão guardado (imagem, título, nome do provedor e selo de play; sem imagem, um quadro do provedor com um ícone de música), sem falar com ninguém; o player continua carregando embaixo dela (comportamento da seção 233, sem mudança), aparece num esmaecimento quando fica pronto e a capa sai. Um toque na capa não faz nada; o toque longo abre o menu como antes. Termos e Política na versão 52, com novo aceite. Sem mudança de RPC. A lista abaixo é um roteiro: nada aqui foi marcado como conferido, e o que não foi executado fica pendente.
+
+Ordem: Android (build de debug) e simulador iOS primeiro, depois web e PWA instalado. Registrar aparelho, sistema e, na web, o navegador, e o resultado de cada item.
+
+Ao compor:
+
+- [ ] a. Publicação nova com um link de cada provedor (um vídeo do YouTube, uma faixa do Spotify, uma do SoundCloud e uma do Apple Music), pelo app nativo: o cartão guardado traz a capa do provedor. Android, iOS: pendente. Resultado: pendente.
+- [ ] b. O mesmo pela web hospedada e pelo PWA: o serviço de conta devolve a capa e ela fica guardada. Web e PWA: pendente. Resultado: pendente.
+- [ ] c. Com a chave **Prévia de links** desligada em Ajustes, nenhuma busca de capa sai (nem da página nem da imagem), conferido no registro de rede ou no proxy. Android, iOS, web: pendente. Resultado: pendente.
+- [ ] d. Um link do YouTube numa conversa privada e num grupo ganha cartão com a miniatura e, com ela, o player e a capa, no app nativo e na web. Android, iOS, web: pendente. Resultado: pendente.
+- [ ] e. Resposta do serviço de conta a partir do endereço do datacenter da associação, para cada provedor (`POST /account/preview` com um link de YouTube, Spotify, SoundCloud e Apple Music): registrar se vem `image` e, no YouTube, se a miniatura entrou e o título é "YouTube" quando a página não deu nenhum. Pendente. Resultado: pendente.
+
+Ao mostrar:
+
+- [ ] f. Nas publicações novas dos itens a e b, a capa aparece na hora, no tamanho do player, e o player aparece por cima num esmaecimento, para os quatro provedores; o esmaecimento nunca descobre um player em branco. Android, iOS, web e PWA: pendente. Resultado: pendente.
+- [ ] g. Uma publicação antiga sem imagem no cartão mostra o quadro do provedor com o ícone de música. Android, iOS, web e PWA: pendente. Resultado: pendente.
+- [ ] h. Com Reduzir movimento ligado, o player aparece de uma vez, sem esmaecimento. Android, iOS, web: pendente. Resultado: pendente.
+- [ ] i. Numa citação de uma publicação com player, a capa e o esmaecimento se comportam como na publicação. Android, iOS, web e PWA: pendente. Resultado: pendente.
+- [ ] j. Na prévia do compositor (Publicar, conversa privada e grupo), o rascunho mostra a capa e o player esmaece no próprio lugar. Android, iOS, web e PWA: pendente. Resultado: pendente.
+- [ ] k. Rolar para longe de um player já carregado e voltar: ele aparece na hora, sem capa e sem um segundo esmaecimento. Android, iOS, web e PWA: pendente. Resultado: pendente.
+- [ ] l. Um toque na capa não faz nada (não abre o link nem o player), e o toque longo abre o menu da publicação ou da mensagem. Android, iOS, web e PWA: pendente. Resultado: pendente.
+- [ ] m. Quem lê não faz nenhum pedido para desenhar a capa: no registro de rede, abrir uma publicação com capa não busca imagem do provedor (só o quadro do player, como na seção 233). Android, iOS, web: pendente. Resultado: pendente.
+- [ ] n. Termos e Política na versão 52: o aceite novo aparece antes de qualquer tela e a versão 51 não vale mais. Android, iOS, web e PWA: pendente. Resultado: pendente.
+- [ ] o. Aparelho Android real (não só o emulador): itens a, f, k e l. Pendente. Resultado: pendente.
+
+Testes automáticos desta mudança, a partir da raiz, cada arquivo sozinho. Conferem o código, não montam a interface num aparelho:
+
+```sh
+node packages/rpc/test/music-cover.test.js
+node apps/app/test/musicEmbed.test.js
+node apps/app/test/linkCardBuild.test.js
+node apps/app/test/coverBuildWeb.test.js
+node apps/app/test/embedCover.test.js
+node apps/app/test/embedCoverView.test.js
+node apps/app/test/useReveal.test.js
+node apps/app/test/embedLayer.test.js
+node apps/app/test/musicEmbedCard.test.js
+node apps/cli/test/preview-routes.test.js
+node apps/app/test/legal.test.js
+node apps/app/test/terms-version.test.js
+node packages/core/test/terms.test.js
+node apps/site/test/legal.test.js
+```
+
+Na raiz, na ordem da CI, `npm run lint`, `npm test` e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
+
+## 244. Página pública de uma publicação com cara de feed (PR feat/post-page-feed-style)
 
 Esta seção confere a página `/p/<D>/<seq>` (`apps/cli/lib/post-page.js`) redesenhada para parecer uma linha de publicação de A Rua: disco com as iniciais numa de cinco cores, nome, @nome e data numa linha, texto, fotos em grade, cartão de link, desenhos de responder, repostar e curtir sem contagem, o botão "Ver na Varanda" embaixo e duas linhas esmaecidas. Continua sem script, sem recurso externo e com um só link. Formato, rotas, RPC e Termos não mudam; `docs/protocol.md` seção 16 passa a descrever o disco de iniciais e os desenhos.
 
@@ -11046,7 +11134,7 @@ node apps/cli/test/post-page.test.js
 - [ ] Link aberto de dentro do WhatsApp e do Instagram (navegador embutido): pendente.
 - [ ] Fonte maior no sistema ou no navegador (ajuste de tamanho do texto, não zoom da página), no Android e no iOS: pendente. A página usa tamanhos em px, como o app.
 
-## 240. Polimento da Busca, da ajuda e do campo mono (PR fix/polimento-navegacao-sobras)
+## 247. Polimento da Busca, da ajuda e do campo mono (PR fix/polimento-navegacao-sobras)
 
 Fecha três itens da #448, só no app:
 
