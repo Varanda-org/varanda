@@ -1247,7 +1247,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     const extra = item.kind === 'repost' ? { repostedBy: memberWho } : {}
     // The member's own posts carry the header's identity.
     const shown = post.author === author ? { ...post, name: post.name || header.name, username: post.username || header.username } : post
-    return <PostRow {...rowProps({ item: shown, names, peeked, now, ownKey, follows, eng, handlers, extra })} />
+    return <PostRow {...rowProps({ item: shown, names, peeked, now, ownKey, follows, eng, handlers, extra })} level={shown.replyTo ? 'comment' : 'post'} />
   }
 
   return (

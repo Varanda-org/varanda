@@ -83,6 +83,7 @@ test('Conversa: comment copy', (t) => {
   t.ok(src.includes("unavailable === 1 ? '1 comentário indisponível' : String(unavailable) + ' comentários indisponíveis'"))
   t.ok(src.includes("moreError: 'Não foi possível carregar mais comentários.'"))
   t.ok(src.includes("placeholder={toRoot ? 'Escreva um comentário' : undefined}"), 'the bar default stays for a reply')
+  t.ok(src.includes("sendLabel={toRoot ? 'Comentar' : undefined}"), 'send reads Comentar on the post, Responder on a comment')
   t.ok(src.includes("else if ((meta && meta.complete === false) || rodaGaps) notes.push('Algumas respostas podem faltar.')"))
   t.ok(src.includes("roda.loaded && (roda.complete === false || (roda.mode === 'direct' && roda.replies.some("), 'a cut roda, or direct replies with replies of their own')
   t.absent(src.includes('\u2014'))
@@ -392,9 +393,17 @@ test('App quick replies refresh feeds without touching a parked composer', (t) =
   t.is(state.composer, composer)
   t.is(state.version, 4)
   t.is(state.peekVersion, 7)
-  t.is(state.toast, 'resposta publicada')
+  t.is(state.toast, 'publicado', 'the answered level is unknown here')
   published('reply', focal)
   t.is(state.composer.reply, null, 'Publicar still clears its sent context')
+  t.is(state.toast, 'publicado', 'a sent reply of either level gets the neutral toast')
+})
+
+test('App outbox toast is neutral for a queued post or reply', (t) => {
+  const from = app.indexOf('  const lastSent = outbox.lastSent')
+  const effect = app.slice(from, app.indexOf('}, [lastSent])', from))
+  t.ok(from > 0 && effect.includes("showToast('publicado')"))
+  t.absent(app.includes('resposta publicada'), 'no toast names the answered level')
 })
 
 test('Conversa local cache survives a fresh instance and holds at most fifty parents', async (t) => {

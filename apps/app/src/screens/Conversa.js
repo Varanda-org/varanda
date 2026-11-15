@@ -1709,6 +1709,7 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
               me={me}
               nonFocalTarget={replyTarget !== null && !toRoot}
               placeholder={toRoot ? 'Escreva um comentário' : undefined}
+              sendLabel={toRoot ? 'Comentar' : undefined}
               onClearTarget={() => setReplyTarget(null)}
               busy={sending}
               disabled={!target || (!post && !replyTarget)}
