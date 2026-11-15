@@ -4,7 +4,7 @@
 // pull-to-refresh) must not subscribe to the whole node value: it is rebuilt
 // on every sync, online and visible flag, and each flip would redraw every
 // row. They read useHosted(), the node handle (memoized on hosted, request,
-// media, accountOrigin and syncNow only) and two primitive contexts. The
+// media, accountOrigin and syncNow only) and the member key context. The
 // handle is not an identity signal (request keeps one identity for the whole
 // session): music cards and media keep identities apart through the member
 // key context and their identity-keyed caches, rendered in the same commit.
@@ -20,7 +20,7 @@ const between = (src, from, to) => {
   return start >= 0 && end > start ? src.slice(start, end) : ''
 }
 
-const ROWS = ['ui/Avatar.js', 'ui/MediaView.js', 'ui/LinkCard.js', 'ui/ChatMedia.js', 'ui/PostMusic.js', 'ui/MusicPlayerCard.js', 'ui/MomentReactionPreview.js', 'ui/RefreshableList.js']
+const ROWS = ['ui/Avatar.js', 'ui/MediaView.js', 'ui/LinkCard.js', 'ui/ChatMedia.js', 'ui/MusicPlayerCard.js', 'ui/MomentReactionPreview.js', 'ui/RefreshableList.js']
 const node = strip(read('node.js'))
 
 test('no row component reads the whole node value', (t) => {
@@ -39,7 +39,8 @@ test('each row reads only what it uses', (t) => {
     t.ok(strip(read(file)).includes('useNodeHandle()'), file + ' reads the handle')
   }
   t.ok(strip(read('ui/RefreshableList.js')).includes('const syncNow = node && node.syncNow'), 'pull-to-refresh takes syncNow from the handle')
-  for (const file of ['ui/PostMusic.js', 'ui/MusicPlayerCard.js']) {
+  {
+    const file = 'ui/MusicPlayerCard.js'
     const src = strip(read(file))
     t.ok(src.includes('const node = useNodeHandle()'), file + ' reads the handle')
     t.ok(src.includes('const member = useMemberKey()'), file + ' reads the member key primitive')
@@ -48,9 +49,6 @@ test('each row reads only what it uses', (t) => {
     t.ok(src.includes('const request = node.request'), file + ' request from the handle')
     t.absent(src.includes('passkey'), file + ' no longer reads the passkey object')
   }
-  const music = strip(read('ui/PostMusic.js'))
-  t.ok(music.includes('const online = useOnline()'), 'PostMusic reads online from its primitive context')
-  t.ok(music.includes('const active = visible && !held && online !== false'))
 })
 
 test('the handle memo depends on exactly the five fields', (t) => {
@@ -84,26 +82,25 @@ test('the member key is the lowercased public key, or null', (t) => {
   t.is(memberKeyOf({ status: { publicKey: 7 } }), null)
 })
 
-test('both providers supply the handle and both primitives', (t) => {
+test('both providers supply the handle and the member key', (t) => {
   t.ok(node.includes('const NodeHandleContext = createContext(null)'))
-  t.ok(node.includes('const OnlineContext = createContext(false)'), 'offline without a provider')
   t.ok(node.includes('const MemberKeyContext = createContext(null)'), 'no member without a provider')
-  for (const hook of ['useNodeHandle', 'useOnline', 'useMemberKey']) t.ok(node.includes('export function ' + hook + ' ()'), hook + ' exported')
+  for (const hook of ['useNodeHandle', 'useMemberKey']) t.ok(node.includes('export function ' + hook + ' ()'), hook + ' exported')
   const rows = between(node, 'function RowContexts', '\n}\n')
   t.ok(rows.includes('<NodeHandleContext.Provider value={handle}>'))
-  t.ok(rows.includes('<OnlineContext.Provider value={online}>'))
+  t.absent(node.includes('OnlineContext'), 'no online context: no row reads it')
   t.ok(rows.includes('<MemberKeyContext.Provider value={memberKey}>'))
 
   const vitrine = between(node, 'function VitrineNodeProvider', 'function LiveNodeProvider')
   t.ok(vitrine.includes('const syncNow = useCallback(() => Promise.resolve(), [])'), 'a stable vitrine syncNow')
   t.absent(/syncNow: \(\) =>/.test(vitrine), 'no inline syncNow arrow')
   t.ok(vitrine.includes('const handle = useHandle(true, vitrineRequest, value.media, value.accountOrigin, syncNow)'))
-  t.ok(vitrine.includes('<RowContexts handle={handle} online memberKey={memberKeyOf(value.passkey)}>'))
+  t.ok(vitrine.includes('<RowContexts handle={handle} memberKey={memberKeyOf(value.passkey)}>'))
 
   const live = node.slice(node.indexOf('function LiveNodeProvider'))
   t.ok(live.includes('const handle = useHandle(hosted, request, media, accountOrigin, syncNow)'))
   t.ok(live.includes('const memberKey = memberKeyOf(passkey)'), 'the key follows the passkey status, so an account switch reaches it')
-  t.ok(live.includes('<RowContexts handle={handle} online={online} memberKey={memberKey}>'))
+  t.ok(live.includes('<RowContexts handle={handle} memberKey={memberKey}>'))
 })
 
 test('useNode() stays the full node value for screens', (t) => {

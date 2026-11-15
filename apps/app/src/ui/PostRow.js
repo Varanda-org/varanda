@@ -14,9 +14,8 @@
 // - expanded: shows the full caption without a clamp control (default false).
 // - preview: null | a stored link card (the post's `preview`), drawn by
 //   ./LinkCard from that data only, its thumbnail read like a post photo. A
-//   card whose URL carries an Audius music ref uses ./PostMusic (a sticker
-//   that plays a track or snippet by itself while seen, or ./MusicPlayerCard
-//   for a playlist or with the Ajustes switch off); other allowlisted music
+//   card whose URL carries an Audius music ref uses ./MusicPlayerCard, which
+//   asks nothing until a tap and never plays by itself; other allowlisted music
 //   links (embedOf) use ./MusicEmbedCard. A link only in the text never gets
 //   a player.
 // - replyPreviews: optional [{ key, name, text }], not the link card above.
@@ -82,7 +81,7 @@ import { ClampControl, useClamp } from './ClampText'
 import { Icon } from './Icon'
 import { LinkCard } from './LinkCard'
 import { MusicEmbedCard } from './MusicEmbedCard'
-import PostMusic from './PostMusic'
+import { MusicPlayerCard } from './MusicPlayerCard'
 import { MediaGrid } from './MediaGrid'
 import { tap } from './haptics'
 import { hasMention, MentionText } from './MentionText'
@@ -472,7 +471,7 @@ function PostRowView ({
   // Outside the row's open area: a tap on the card opens the link, never the conversation.
   const previewNode = !hasMedia && preview && typeof preview === 'object'
     ? music !== null
-      ? <PostMusic card={preview} music={music} />
+      ? <MusicPlayerCard card={preview} music={music} />
       : embed !== null
         ? <MusicEmbedCard embed={embed} card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />
         : <LinkCard card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />

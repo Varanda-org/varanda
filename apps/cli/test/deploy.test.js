@@ -36,10 +36,13 @@ function block (startRe, endRe) {
 
 const check = block(/^ {2}check:/, /^ {2}\S/)
 const deploy = block(/^ {2}deploy:/, /^ {2}\S/)
+const supersede = block(/^ {2}supersede:/, /^ {2}\S/)
 // The eight test legs, each its own job (no matrix), gated by check.
 const WORKERS = ['core-1', 'core-2', 'cli-1', 'cli-2', 'web-member-1', 'web-member-2', 'web-member-3', 'others']
 const workers = Object.fromEntries(WORKERS.map((id) => [id, block(new RegExp('^ {2}' + id + ':\\s*$'), /^ {2}\S/)]))
 const GUARD = "github\\.repository == 'Varanda-org\\/varanda' && github\\.ref == 'refs\\/heads\\/main' && vars\\.VARANDA_DEPLOY == 'true'"
+// The deploy also needs the supersede job's go (apps/cli/test/supersede.test.js).
+const GO = " && needs\\.supersede\\.outputs\\.go == 'true'"
 
 test('deploy.yml: actions pinned to the expected commits', (t) => {
   const pins = {
@@ -64,13 +67,13 @@ test('deploy.yml: permissions, triggers and job shape', (t) => {
   t.ok(check && deploy, 'check and deploy found')
   for (const id of WORKERS) t.ok(workers[id], id + ' job found')
   const jobs = block(/^jobs:/, /^\S/).split('\n').filter((l) => /^ {2}[A-Za-z0-9_-]+:/.test(l)).map((l) => l.trim().replace(/:.*$/, ''))
-  t.alike(jobs.sort(), [...WORKERS, 'check', 'deploy'].sort(), 'jobs are the eight legs, check and deploy')
+  t.alike(jobs.sort(), [...WORKERS, 'check', 'supersede', 'deploy'].sort(), 'jobs are the eight legs, check, supersede and deploy')
   t.absent(/^\s+strategy:/m.test(code), 'no matrix strategy')
   t.absent(/<<:/.test(code), 'no YAML merge keys')
   t.absent(yml.includes(String.fromCharCode(0x2014)), 'no em dash')
 
   t.ok(/^ {4}permissions:\s*\{\}\s*$/m.test(deploy), 'deploy job has permissions: {}')
-  t.ok(/^ {4}needs:\s*check\s*$/m.test(deploy), 'deploy needs check')
+  t.ok(/^ {4}needs:\s*\[check, supersede\]\s*$/m.test(deploy), 'deploy needs check and supersede')
   t.ok(/^ {4}runs-on:\s*ubuntu-24\.04\s*$/m.test(deploy), 'deploy runs-on ubuntu-24.04')
   t.ok(/^ {4}runs-on:\s*ubuntu-24\.04\s*$/m.test(check), 'check runs-on ubuntu-24.04')
   t.ok(/^ {6}name:\s*producao\s*$/m.test(deploy), 'deploy uses the producao environment')
@@ -97,14 +100,16 @@ test('deploy.yml: permissions, triggers and job shape', (t) => {
   t.ok(/^ {2}workflow_dispatch:/m.test(on), 'workflow_dispatch trigger')
   t.is((on.match(/^ {2}\S+:/gm) || []).length, 2, 'exactly two triggers')
 
-  t.ok(/cancel-in-progress:\s*false/.test(code), 'cancel-in-progress is false')
-  t.ok(/^ {2}group:\s*deploy-\$\{\{ github\.ref \}\}\s*$/m.test(code), 'concurrency group is per ref (deploy-<ref>)')
+  t.absent(/^concurrency:/m.test(code), 'no workflow concurrency: a run waiting for approval would hold the newer one back')
+  t.ok(/^ {6}cancel-in-progress:\s*false\s*$/m.test(deploy), 'deploy cancel-in-progress is false')
+  t.ok(/^ {6}group:\s*deploy-\$\{\{ github\.ref \}\}\s*$/m.test(deploy), 'deploy concurrency group is per ref (deploy-<ref>)')
 })
 
 test('deploy.yml: every job carries the repository, branch and variable guards', (t) => {
   const guard = new RegExp('^ {4}if:\\s*' + GUARD + '\\s*$', 'm')
   for (const id of WORKERS) t.ok(guard.test(workers[id]), id + ' job is guarded')
-  t.ok(guard.test(deploy), 'deploy job is guarded')
+  t.ok(guard.test(supersede), 'supersede job is guarded')
+  t.ok(new RegExp('^ {4}if:\\s*' + GUARD + GO + '\\s*$', 'm').test(deploy), 'deploy job is guarded and needs the supersede go')
   // The gate runs even when a leg failed, was cancelled or was skipped, and
   // fails closed: a skipped check would read as passing.
   t.ok(new RegExp('^\\s+if:\\s*always\\(\\) && ' + GUARD + '\\s*$', 'm').test(check), 'check gate runs always() under the guard')
@@ -132,7 +137,7 @@ test('deploy.yml: secrets and variables are only the expected ones, only in env:
 
 test('deploy.yml: forbidden constructs are absent', (t) => {
   t.absent(/pull_request/.test(code), 'no pull_request or pull_request_target')
-  t.absent(/workflow_run/.test(code), 'no workflow_run')
+  t.absent(/\bworkflow_run\b/.test(code), 'no workflow_run')
   t.absent(/self-hosted/.test(code), 'no self-hosted runner')
   t.absent(/StrictHostKeyChecking=(no|accept-new)/.test(code), 'host key checking is never relaxed')
   t.absent(/StrictHostKeyChecking\s+(no|accept-new)/.test(code), 'no relaxed host key checking (space form)')
