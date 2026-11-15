@@ -65,20 +65,40 @@ Passos no Chrome:
 
 ### Marcas de tempo
 
-Só em desenvolvimento e só no aparelho: as marcas viram linhas `perf: <nome> <ms>` no console e nunca são enviadas nem guardadas. Nomes: `config`, `sync.status`, `identity.status`, `ready`, `req:<método>`, `first-rows`, `details`, `moments`, `splash-end` (com `feedReady`, detalhes e Momentos assentados, ou `patience`, o teto de 5 s; `grace` deixou de ser emitido), `rows-snapshot` e `rows-live` (com sufixo `:diario`, `:membro`, `:conversas` ou `:comunidades` nas telas), `preview-shown`, `media-hash`, `frames` e `tab:<id>`.
+Só em desenvolvimento (`__DEV__`) e só com `EXPO_PUBLIC_VARANDA_PERF=1`: as marcas viram linhas `perf: <nome> <ms> [extra]` no console e nunca são enviadas nem guardadas. Todas contam em ms desde `perf: js-entry 0 origin`, a primeira linha de cada execução (`src/perfEntry.js`, importado logo depois do polyfill de cripto em `index.js`).
 
-### Lista nativa sem conta
+- Partida, impressas na hora: `sweep-media-cache` e `worklet-start` (duração de cada passo), `app-commit` (primeiro commit do React), `first-rows:<perfId>` (primeira vez que a lista tem linhas), `scroll-start:<perfId>` e `scroll-done:<perfId>` (rolagem roteirizada, abaixo).
+- Do nó, uma vez cada: `config`, `sync.status`, `identity.status`, `ready`, `req:<método>` (duração do pedido), `first-rows`, `details`, `moments`, `splash-end` (com `feedReady` ou `patience`), `rows-snapshot` e `rows-live` (com sufixo `:diario`, `:membro`, `:conversas` ou `:comunidades`), `preview-shown`, `media-hash` e `tab:<id>`.
+- Renderização: `perf: render <id> <vezes> <ms somados>` pelo `Profiler` do React (tempo de render, `actualDuration`, não de commit). Ids `tab:<rua|espiadinha|busca|avisos|comunidades|feira|diario>` para cada aba montada e `list:<perfId>` para cada lista. Fora da rolagem roteirizada sai no máximo a cada 5 s; durante ela nada é impresso até o fim, e as linhas levam ` phase=scroll:<perfId>`.
+- Quadros: `perf: frames n= p50= p95= max= over32= list=<perfId> run=scroll rows= mounts= unmounts= rendersPerMountMedian= rendersPerMountP95=`, impressa em `scroll-done`. Com rolagem à mão, a linha sai sem `run=scroll` depois de cada pausa.
+- O contador de linhas (`rows`, `mounts`, `rendersPerMount*`) é mantido por lista (`list=<perfId>`): cada linha `frames` conta só as linhas da própria lista. O custo das abas escondidas que renderizam durante a rolagem aparece nas linhas `render`, não aqui. Não compare as contagens de linhas `frames` de rolagem à mão com as da `run=scroll`.
+- Nós: as marcas do nó (`splash-end` inclusive) só saem quando `details` assenta ou numa troca de aba (`apps/app/App.js`, perto das linhas 3014 a 3026); na Vitrine, `details` não assenta, então elas só saem depois de um toque numa aba. A rolagem roteirizada começa (6,2 a 7,0 s) antes de a cobertura do splash sair (cerca de 7,7 s depois de `js-entry`).
 
-Para a Vitrine grande, sem conta, com 200 linhas extras no feed:
+Resumo de um registro salvo (logcat ou console do Metro): `node apps/app/scripts/perf-summary.js <registro>` dá execuções, marcas, renderizações por execução e quadros (n, mediana, p95, dispersão). Conta uma amostra por lista e por execução: uma linha `run=scroll` vale pela execução; sem ela, as linhas de rolagem à mão da execução são combinadas (p50 e p95 ponderados por n, aproximados). O script só aceita fichas feitas dos caracteres que a harness imprime (letras, dígitos, `: . _ / = -`) e pula qualquer outra linha, então caracteres de controle de um registro nunca chegam ao terminal. O script conta qualquer linha com `perf: `, de qualquer processo: salve o logcat filtrado pelo processo do app (`adb logcat --pid=$(adb shell pidof -s app.varanda.debug)`), porque um filtro de tag sozinho não impede que outro app do aparelho escreva linhas que mudem os números.
+
+### Lista nativa sem conta (Vitrine)
+
+A Vitrine mostra as telas hospedadas com dados de exemplo, sem conta, sem iniciar o worklet do nó e sem sincronização. Variáveis (só em build de desenvolvimento; valem no Metro, então mudar qualquer uma pede reiniciar o Metro com `--clear` e abrir o app de novo; `CI=1 expo start` não observa arquivos):
+
+| Variável | Efeito |
+|---|---|
+| `EXPO_PUBLIC_VARANDA_VITRINE=1` | Telas hospedadas com dados de exemplo. |
+| `EXPO_PUBLIC_VARANDA_VITRINE_LARGE=1` | 200 linhas extras no feed, só texto. |
+| `EXPO_PUBLIC_VARANDA_VITRINE_RICH=1` | Com LARGE: linhas variadas (a cada 50: 5 com uma foto, 2 citações com grade, 2 carrosséis de seis fotos, cartão de link, respostas, citações, republicações). |
+| `EXPO_PUBLIC_VARANDA_VITRINE_EMBEDS=1` | Com LARGE e RICH: 4 de cada 50 linhas viram players de verdade (YouTube, SoundCloud, Spotify, Apple Music), que falam com o provedor. |
+| `EXPO_PUBLIC_VARANDA_PERF=1` | Marcas, renderizações e quadros acima. |
+| `EXPO_PUBLIC_VARANDA_PERF_SCROLL=<perfId>` | Rolagem roteirizada da lista: começa 3 s depois de a lista ter linhas e a tela dela estar visível, dura 60 s a cerca de 1200 px/s, com 4 inversões, e mexe nas barras de A Rua como um dedo (`notifyUserScroll`). Uma vez por execução. Se a tela ficar escondida no meio da rolagem, imprime `perf: scroll-aborted list=<id> hidden`, a execução é descartada (o resumo ignora as linhas de render parciais) e a rolagem não se repete nessa partida. Use só com uma lista visível na abertura (`rua`, o feed de A Rua); para as outras, role à mão com `adb shell input swipe`. |
+
+Exemplo:
 
 ```sh
-EXPO_PUBLIC_VARANDA_VITRINE=1 EXPO_PUBLIC_VARANDA_VITRINE_LARGE=1 EXPO_PUBLIC_VARANDA_PERF=1
+cd apps/app && CI=1 EXPO_PUBLIC_VARANDA_VITRINE=1 EXPO_PUBLIC_VARANDA_VITRINE_LARGE=1 EXPO_PUBLIC_VARANDA_VITRINE_RICH=1 EXPO_PUBLIC_VARANDA_PERF=1 EXPO_PUBLIC_VARANDA_PERF_SCROLL=rua npx expo start --port 8097 --clear
 ```
 
-Essas variáveis valem para o Metro. Depois:
+Depois:
 
-- Emulador Android: `adb shell am start -n app.varanda.debug/app.varanda.MainActivity`
-- Simulador iOS: `xcrun simctl launch booted app.varanda`
+- Emulador Android: `adb reverse tcp:8081 tcp:8097` e `adb shell am start -W -n app.varanda.debug/app.varanda.MainActivity` (o `TotalTime` mede até o primeiro quadro da atividade, antes do JavaScript). Se o app procurar outro Metro, confira `debug_http_host` nas preferências do app de debug.
+- Simulador iOS: `xcrun simctl spawn booted defaults write app.varanda RCT_jsLocation localhost:8097` e `xcrun simctl launch booted app.varanda` (o build de debug procura o Metro na porta 8081; sem a linha `defaults`, suba o Metro na 8081).
 
 ### Outros navegadores e aparelhos (tentativa)
 
@@ -115,6 +135,8 @@ Metas para o conjunto D1, com a mediana de 5 execuções. Os valores de "hoje" s
 | Chrome 4x, laboratório: rajada de 2 minutos | nenhum "pedidos demais em andamento" e nenhum "pedido lento" | a medir |
 | Vitrine grande nativa: primeiro commit da lista | <= 300 ms | M0 iOS: linhas 2,05 s depois de o JavaScript carregar (desenvolvimento). M4: iOS 681 a 690 ms, Android 1070 ms (desenvolvimento), meta não atingida |
 | Vitrine grande nativa: p95 de quadro, rolagem de 60 s | <= 32 ms | M4: iOS 17,1 a 17,3 ms (atingida); Android 31,75 e 38,21 ms (atingida numa execução, não na outra; carga alta) |
+
+Os números da rodada M5 (iOS: primeiras linhas 2769 ms, p95 de 31,5 a 32,5 ms; Android: primeiras linhas 3465 ms) usam outro método que as linhas M4 (rolagem roteirizada com inversões, origem em `js-entry`, Vitrine rica): não se comparam sem um A/B, e nenhuma meta foi reavaliada.
 
 As metas são provisórias: podem mudar depois da primeira rodada, com a justificativa anotada na seção Resultados.
 
@@ -228,6 +250,143 @@ Não medido nesta rodada, e por quê:
 - Tarefas que não rodaram por regra: E11 (a leitura do próprio diário é 8,5% da partida, abaixo de 25%) e E25 (acima). O PR8 foi removido e seu conteúdo está nos PRs de descoberta.
 
 Metas atingidas e não atingidas no nó, com estas medidas: atingidas, leitor publicado, primeiro `feed.read` e `log.read`; não atingidas, segundo `feed.read` (34 contra 15 ms), `profile.read` de 61 autores (201 contra 120 ms, na verificação em JavaScript puro) e leitura depois da concessão (270 contra 100 ms). Nenhuma meta de Chrome 4x ou de celular foi reavaliada.
+
+### M5, linha de base (15/11/2026, branch test/perf-m5-harness sobre main@a64e74d5, contra 11cdb47f)
+
+Pergunta: o app Android e o iOS ficaram mais lentos desde a rodada M4 (PRs #458 a #476, juntados em 11cdb47f)? Onde está o custo hoje, por tela, lista, linha e fase da partida?
+
+Ambiente: Mac M4 Pro (12 núcleos, 48 GB), Node v24.22.1, outras sessões usando a máquina o tempo todo (carga média de 1 min entre 6 e 23, anotada por célula). Só builds de desenvolvimento, servidos pelo Metro. A Vitrine não inicia o nó e não tem sincronização; as fotos dos dados de exemplo são pequenas. Nenhum celular de verdade. Emulador Android `varanda-perf` (API 36, 4 núcleos, 2 GB, GPU em software, SwiftShader), aberto com `-no-window`: com janela, o processo do emulador caiu para cerca de 1 núcleo depois de alguns minutos e todas as execuções travaram (`app-commit` de 3557 a 9030 ms); essas execuções foram descartadas. Simulador iOS iPhone 16e. Registros brutos e scripts em saída local, não versionada.
+
+Regra de decisão desta rodada: contadores (renderizações, ms de render, marcas), não o p95 de quadro, que com esta carga varia mais que 10% entre execuções iguais.
+
+#### Nó, A/B 11cdb47f contra a branch
+
+Mesmo comando nas duas árvores, intercalado A B A B, 3 execuções de cada, cada uma com `--runs 5` (mediana das três medianas, entre colchetes o mínimo e o máximo):
+
+```sh
+node packages/web-member/scripts/startup-bench.js --follows 60 --blocks 150 --own 800 --issued --js-verify --reads --reads-twice --log --steps --early-reads --runs 5 --json --file --lease-gap   # arquivos
+node packages/web-member/scripts/startup-bench.js ... --idb                                                                                                              # IndexedDB
+```
+
+Carga média de 1 min no início de cada execução: entre 13,5 e 20,8.
+
+| Métrica (ms) | arquivos 11cdb47f | arquivos branch | IndexedDB 11cdb47f | IndexedDB branch |
+|---|---|---|---|---|
+| Leitor publicado (`medianMs`) | 6,2 [6,1-7,9] | 6,3 [5,9-6,8] | 23,7 [22,8-26,0] | 22,8 [22,2-24,6] |
+| Primeiro `feed.read` | 28,4 [28,1-30,8] | 28,7 [28,7-33,7] | 34,3 [34,1-35,3] | 35,1 [35,1-35,6] |
+| Segundo `feed.read` | 38,6 [37,0-39,1] | 39,2 [37,0-42,6] | 35,5 [34,6-36,0] | 35,3 [35,3-35,6] |
+| `profile.read` de 61 autores | 175,7 [174,3-199,2] | 184,3 [181,6-188,1] | 183,7 [180,7-187,5] | 184,7 [180,2-185,4] |
+| Segundo `profile.read` | 43,0 [42,6-47,6] | 41,9 [39,4-47,3] | 44,1 [42,5-44,6] | 43,7 [43,2-44,0] |
+| Leitura depois da concessão (`leaseGapReadMs`) | 288,3 [266,0-385,1] | 310,7 [302,2-378,1] | n/d | n/d |
+| Leitura de A Rua antecipada (`earlyFeedReadMs`) | 352,4 [351,8-450,0] | 378,0 [354,1-394,4] | 611,8 [606,4-623,0] | 607,0 [594,4-628,7] |
+| Partida concluída (`startupSettledMs`) | 231,5 [225,6-304,6] | 240,7 [227,3-242,1] | 592,7 [586,4-601,4] | 588,5 [572,7-620,8] |
+
+Veredito do nó: sem regressão. Todas as diferenças ficam dentro da dispersão das próprias execuções (as maiores: `leaseGapReadMs`, +7,8%, e `earlyFeedReadMs` em arquivos, +7,3% (352,4 contra 378,0 ms); `profile.read` em arquivos, +4,9%; as faixas se cruzam). O bench da branch rodou antes do `npm ci`; `web-member` é ligado por workspace e o Hypercore 10 não mudou.
+
+#### Android, A/B da interface (Vitrine grande só texto)
+
+Um só APK de debug (desta branch) e o JavaScript de cada revisão por um Metro próprio (branch na porta 8097, 11cdb47f na 8098, trocado com `adb reverse tcp:8081 tcp:<porta>`). O JavaScript de 11cdb47f roda neste APK sem erro. Variáveis: `VITRINE=1 VITRINE_LARGE=1 PERF=1`, sem rolagem roteirizada (11cdb47f não tem). Por execução: `am start -W`, 12 s, toque em Espiadinha e de volta em A Rua (em 11cdb47f as marcas só saem numa troca de aba), depois 24 arrastos de `adb shell input swipe` (8 para baixo, 8 para cima, 8 para baixo) e `dumpsys gfxinfo`. A B A B, 3 de cada, carga média entre 13,2 e 16,8.
+
+As origens das marcas diferem (11cdb47f conta da criação das marcas em `src/node.js`; a branch, de `js-entry`), então a comparação usa o horário do logcat, contado da linha `Running "main"`, que as duas imprimem.
+
+| Medida | 11cdb47f (3 execuções) | branch (3 execuções) |
+|---|---|---|
+| `TotalTime` do `am start -W` (até o primeiro quadro da atividade, antes do JavaScript) | 699, 699, 645 ms | 766, 797, 666 ms |
+| De `Running "main"` às primeiras linhas de A Rua (`first-rows`) | 1208, 1215, 1036 ms | 3006, 3166, 2885 ms |
+| De `Running "main"` ao fim do splash (`splash-end`) | 1788, 1764, 1597 ms (`grace`) | 7072, 7180, 7132 ms (`patience`) |
+| Quadros da rolagem à mão, p95 da linha `frames` | 43,9 / 42,6 / 48,5 ms | 54,6 / 42,3 / 96,0 ms |
+| `gfxinfo`: quadros / atrasados | 1180/182, 1269/85, 1151/188 | 1245/101, 1314/26, 847/329 |
+
+Veredito: houve regressão, e ela é da partida da interface, não do nó nem da rolagem. As primeiras linhas de A Rua saem cerca de 1,8 s mais tarde (o shell só monta depois da apresentação inteira do splash, 1,5 s, seção 242 de `docs/verification.md`), e o splash cobre A Rua até a paciência de 5 s: a marca `details` nunca sai na Vitrine, então o splash termina por `patience` cerca de 7,1 s depois de `Running "main"`, contra 1,7 s (`grace`, 400 ms depois da primeira página) em 11cdb47f. Num app com conta, a espera extra fica entre os detalhes e Momentos assentados e o teto de 5 s; não foi medida com nó vivo (abaixo). Parte disso é artefato da Vitrine: nos registros da branch, `moments` sai 3755 e 3656 ms depois de `js-entry` (cerca de 3,1 a 3,2 s depois de `Running "main"`) e `details` nunca sai. Até 3,9 s dos 7,1 s do splash (e dos +5,4 s) são a espera por `details`, que só a Vitrine nunca assenta; se `details` assentasse junto com `moments`, o splash terminaria em cerca de 3,2 s (+1,5 s contra 11cdb47f). A rolagem à mão não mostra diferença acima do ruído (uma execução da branch com p95 de 96 ms, as outras duas iguais às de 11cdb47f).
+
+#### Android, custo hoje (branch)
+
+Rolagem roteirizada de A Rua (`PERF_SCROLL=rua`), 60 s, 4 inversões. Linha `frames ... run=scroll` de cada execução; renderizações somadas na fase `scroll:rua`. Mediana [faixa].
+
+| Célula | execuções (carga) | render `list:rua` (vezes / ms) | abas escondidas (vezes / ms) | quadros n / p95 / >32 ms | linhas / montagens / renders por montagem (mediana, p95) |
+|---|---|---|---|---|---|
+| texto | 3 (11,1 a 22,5) | 1230 [1178-1245] / 12686 [12104-12861] | 119 [113-119] / 336 [323-399] | 2800 / 42,2 (execuções 38,7 a 50,1) / 341 | 121 / 476 / 2, 3 |
+| ricas | 3 (8,7 a 10,1) | 1182 [1099-1194] / 9533 [8735-11680] | 124 / 375 [355-415] | 2939 / 41,3 / 285 | 83 / 331 / 2, 3 |
+| ricas + players (teto 4) | 3 (15,6 a 20,9) | 1167 [814-1186] / 13409 [12324-18132] | 353 [225-410] / 1359 [1334-1925] | 2176 / 66,8 (execuções 56,0 a 184,6) / 433 | 77 / 312 / 2, 3 |
+| ricas + players, teto 0 | 2 (21,2 a 22,6) | 1186, 1208 / 9175, 10680 | 124 / 378, 402 | 2663, 2855 / 42,1, 46,7 | 70 a 77 / 295 a 315 / 2, 3 |
+| ricas + players, teto 1 | 2 (14,0 a 14,3) | 1146, 1208 / 11969, 12715 | 304, 358 / 1202, 1379 | 2352, 2474 / 53,1, 58,2 | 70 / 292 a 303 / 2, 3 |
+
+- A lista de A Rua renderiza cerca de 20 vezes por segundo durante a rolagem e soma, em mediana, de 9,5 a 13,4 s de render em 60 s por célula (as execuções vão de 8,7 a 18,1 s; 15% a 22% do tempo). Por montagem de linha: 26,7 ms (texto), 28,8 (ricas), 31,1 (teto 0, a menor de duas execuções; a outra deu 33,9), 41,0 (teto 1) e 43,0 ms (teto 4).
+- Cada aba escondida renderiza cerca de 22 vezes numa rolagem com 4 inversões (as barras mudam a cada inversão): 119 a 124 renderizações, 0,34 a 0,38 s, sem players. Com um player vivo (teto 1 ou mais), as abas escondidas renderizam de 2,5 a 3 vezes mais (304 a 410, de 1,2 a 1,9 s). Feira e Diário são as mais caras.
+- Players: teto 4 contra teto 0, +26% a +46% de ms de render em `list:rua` (13409 contra 10680 e 9175; +31% é o teto 1, 11969 contra 9175), abas escondidas 353 contra 124 renderizações, 18% a 24% menos quadros (2176 contra 2663 e 2855). Teto 0 (cartões montados, com a checagem de 500 ms de cada cartão, sem WebView) custa o mesmo que as linhas ricas sem players (9175 a 10680 contra 8735 a 11680 ms; 124 contra 124 renderizações escondidas): as checagens por cartão não aparecem. O custo vem com o player vivo: as WebViews e as renderizações do app inteiro que um player vivo provoca.
+- Rolagem sem inversões: não medida (a rolagem roteirizada tem 4 inversões fixas e esta tarefa não muda código).
+
+Parado em A Rua por 75 s (ricas + players, sem rolagem): nenhuma renderização de aba escondida depois da partida; A Rua renderizou 14 vezes (188 ms) em duas descargas, a 8,1 s e a 63,1 s depois de `js-entry`. Nenhuma linha `req:`: na Vitrine os pedidos não passam pelo `request` do nó, onde `req:` é marcado, então o `moment.lookup` a cada 15 s não aparece aqui.
+
+Partida a frio (5 execuções, ricas + players, carga 6,4 a 12,6) e a quente (5): `TotalTime` frio 730 [672-769] ms, quente (`HOT`) 100 a 131 ms em quatro das cinco e 622 ms na quinta. Marcas desde `js-entry`: `sweep-media-cache` 1 ms; `worklet-start` não sai na Vitrine (o nó não inicia); `Running "main"` 588 [577-634]; `app-commit` 691 [669-740]; `first-rows:rua` 3465 [3354-3771]. Das primeiras linhas, cerca de 2,8 s são depois do primeiro commit, quase todo o splash.
+
+Processo até o JavaScript (3 partidas a frio com o logcat inteiro, carga 6,9): do `Start proc` do ActivityManager a `js-entry`, 2162 e 1888 ms (a primeira execução, 7328 ms, pegou o Metro montando o pacote e fica de fora); de `js-entry` a `app-commit`, 679 a 703 ms; `TotalTime` 743 e 662 ms. Num build de desenvolvimento, o trecho até `js-entry` inclui baixar o pacote do Metro pelo `adb reverse` e avaliar o JavaScript sem bytecode; num release o pacote é Hermes no aparelho. Release não medido.
+
+#### iOS (simulador iPhone 16e, só a branch)
+
+Mesmas variáveis, Metro na porta 8097, rolagem roteirizada de A Rua, 3 execuções por célula, carga 6,0 a 11,7 (registros do log do Metro). O simulador usa a GPU e a CPU do Mac, então os quadros saem muito melhores que no emulador Android em software; não compare ms entre as duas plataformas.
+
+| Célula | render `list:rua` (vezes / ms) | abas escondidas (vezes / ms) | quadros n / p95 / >32 ms | linhas / montagens |
+|---|---|---|---|---|
+| texto | 1233 [1232-1234] / 8121 [8077-8182] | 136 [136-137] / 345 [343-378] | 3144 / 32,5 / 176 | 118 / 464 |
+| ricas | 1226 [1222-1226] / 5773 [5718-5833] | 124 [124-130] / 302 [298-323] | 3206 / 31,5 / 152 | 70 / 294 |
+| ricas + players (teto 4) | 1409 [1403-1409] / 6018 [5960-6071] | 130 [124-130] / 326 [302-341] | 3211 / 31,5 / 152 | 70 / 289 |
+
+- Partida (5 a frio, uma sem leitura: o recorte do log do Metro veio vazio; e 3 aquecidas, uma por célula): `app-commit` 587 [586-588] ms, `first-rows:rua` 2769 [2765-2783] ms; aquecida 591 a 645 / 2778 a 2839 ms. `sweep-media-cache` de 1 a 17 ms (os maiores na primeira execução de cada Metro).
+- A lista de A Rua custa de 5,7 a 8,2 s de render em 60 s, o mesmo número de renderizações do Android (cerca de 1230). Ms por montagem: 17,5 (texto), 19,6 (ricas), 20,8 (players).
+- Com players, as abas escondidas não renderizam mais que sem eles (130 contra 124), ao contrário do Android, e a lista renderiza 15% mais vezes (1409 contra 1226). Os quadros não mudam.
+- `splash-end` apareceu no log do Metro do iOS numa execução (`splash-end 7461 patience`, com `first-rows` em 2770 e `moments` em 2990 ms), o que apoia a tese do código comum com o Android; nas outras não houve a marca. A/B contra 11cdb47f no iOS: não medido. Em 11cdb47f as marcas só saem numa troca de aba, que pede um toque no simulador, e o orçamento desta tarefa não cobria os toques. A espera do splash vem de código comum (`App.js`), sem ramo por plataforma.
+- Partida aquecida a quente (app em segundo plano): não medida, porque nenhuma marca é impressa sem uma partida nova do JavaScript.
+
+#### Web, Chrome 4x (sem cabeça, 412x915, CPU 4x mais lenta)
+
+Dois pacotes exportados para a pasta temporária (nada dentro do repositório): o de release (`npx expo export --platform web`), que não liga a Vitrine (ela só existe com `__DEV__`) e mostra a entrada com o nó do navegador pré-carregado; e o de desenvolvimento (`npx expo export --platform web --dev`) com `VITRINE=1 VITRINE_LARGE=1 VITRINE_RICH=1 PERF=1 PERF_SCROLL=rua`. Servidos por um servidor estático local, rastro do DevTools nos primeiros 12 ou 25 s, cache HTTP quente, uma execução de aquecimento que aceita os Termos. 3 execuções de cada, carga 6,0 a 8,7.
+
+| Medida, release (entrada, 3 execuções) | ms |
+|---|---|
+| Primeira pintura (`firstContentfulPaint`) | 52, 50, 356 |
+| Avaliação de `varanda-node.js` (um só `EvaluateScript`, uma tarefa longa) | 330, 294, 290 |
+| Avaliação do pacote do app (`EvaluateScript` do `index-*.js`; os `FunctionCall` do mesmo arquivo, 149 a 154 ms, ficam de fora) | 304, 295, 300 |
+| Tarefas longas (50 ms ou mais) nos primeiros 12 s | 2 / 638, 2 / 592, 3 / 821 |
+
+| Medida, Vitrine de desenvolvimento (3 execuções) | valor |
+|---|---|
+| `js-entry` desde a navegação | 193, 193, 206 ms |
+| `app-commit` (desde `js-entry`) | 323, 328, 338 ms |
+| `first-rows:rua` (desde `js-entry`) | 2242, 2244, 2280 ms; desde a navegação 2435 a 2486 ms |
+| Tarefas longas nos primeiros 25 s | 25 / 3678, 25 / 3825, 26 / 4051 ms |
+| Render `list:rua` na rolagem de 60 s | 1849 / 13991, 1831 / 14176, 1834 / 14256 ms |
+| Render das abas escondidas na rolagem | Espiadinha, Avisos, Comunidades e Diário 3245 a 3281 vezes cada; soma 5350, 5828, 5604 ms |
+| Quadros `run=scroll` n / p95 / >32 ms | 3329 / 35,2 / 275; 3280 / 38,3 / 307; 3307 / 36,2 / 291 |
+
+- Na web, quatro abas escondidas renderizam uma vez por quadro o tempo todo, parado inclusive (causa não identificada nesta medição): 158 a 159 renderizações cada antes de a rolagem começar e 300 a 301 por descarga de 5 s durante 40 s depois de ela acabar, cerca de 60 por segundo, em torno de 0,45 s de render a cada 5 s em 4x. Na rolagem de 60 s isso dá cerca de 3270 renderizações por aba (contra cerca de 22 no Android e no iOS), 5,4 a 5,8 s somados, cerca de 40% do render da própria lista de A Rua; os 5,4 a 5,8 s são só a janela de 60 s. No Android parado não houve renderização escondida, então isto é só da web. É o maior custo de interface da web medido aqui.
+- A primeira pintura sai em cerca de 50 ms: o que vem antes dela não pesa.
+- PWA instalado e nó vivo na web: não medidos (o PWA instalado pede uma instalação com conta; o caminho com conta pede passkey). O pacote de release mede a avaliação do script do nó, não a sessão dele.
+
+#### Nó vivo
+
+Não medido. O build de debug nativo não entra com passkey numa instalação local, e a Vitrine não inicia o nó. Por isso o `moment.lookup` a cada 15 s (marca `req:`) e o custo da sincronização no aparelho ficam de fora desta linha de base.
+
+#### Custos em ordem
+
+| # | Custo | Número | Onde |
+|---|---|---|---|
+| 1 | Apresentação inteira do splash antes do shell | primeiras linhas +1,8 s medidos (3,0 s contra 1,2 s desde `Running "main"`); cerca de 2,8 s depois do primeiro commit | Android e iOS (2,77 s desde `js-entry`) e web (2,24 s) |
+| 2 | Splash da Vitrine até a paciência (teto, Vitrine) | `splash-end` 7,1 s depois de `Running "main"` (`patience`) contra 1,7 s (`grace`) em 11cdb47f, +5,4 s; até 3,9 s disso podem ser artefato da Vitrine (cerca de 3,2 s e +1,5 s se `details` assentasse com `moments`) | Android, todas as plataformas pelo código comum |
+| 3 | Render da lista de A Rua na rolagem | 12,7 a 13,4 s em 60 s no Android, 5,8 a 8,1 s no iOS, 14,0 a 14,3 s na web (cerca de 1200 a 1850 commits) | todas |
+| 4 | Abas escondidas renderizando | web: 5,4 a 5,8 s numa janela de 60 s (uma vez por quadro o tempo todo, parado inclusive); Android com player vivo: 1,2 a 1,9 s (x2,8); sem players: 0,3 s | web, Android |
+| 5 | JavaScript antes do primeiro commit | `js-entry` a `app-commit` 691 ms no Android, 587 no iOS, 323 na web 4x; `Start proc` a `js-entry` cerca de 2,0 s no Android de debug | todas |
+| 6 | Players vivos | +26% a +46% de ms de render da lista no Android, 18% a 24% menos quadros | Android |
+| 7 | Avaliação do pacote e do script do nó na web | pacote `EvaluateScript` 295 a 304 ms, `varanda-node.js` 290 a 330 ms (4x) | web |
+
+#### Portões das tarefas condicionais
+
+- Pausa da consulta de prévias de momentos (`moment.lookup` a cada 15 s): não avaliado, portão em aberto (a Vitrine não passa por `node.request`; conferir com nó real). Parado 75 s, nenhuma renderização de aba escondida e nenhuma linha `req:`, mas a busca a cada 15 s não pôde ser vista.
+- Varredura do cache de mídia fora do primeiro desenho: não roda. `sweep-media-cache` 1 a 2 ms no Android, 1 a 17 ms no iOS, 0 ms na web, abaixo do portão de 20 ms. Limite: a varredura só apagou o que as execuções da Vitrine deixaram (fotos pequenas de dados de exemplo, quantidade não registrada); na web, 0 ms é um não-op por desenho (`apps/app/src/media/display.web.js:21`); o iOS chegou a 14 a 17 ms na primeira execução de cada Metro, perto do portão. Cache de instalação real não medido.
+- Inline requires no Metro: roda, mas só fica sob a regra de manutenção (TotalTime e primeiras linhas desde o processo melhoram 10% ou mais em 5 partidas frias intercaladas; build de desenvolvimento, sem bytecode). Base: de `js-entry` a `Running "main"` 588 [577-634] ms (a avaliação dos módulos, o que os inline requires adiam), cerca de 13% de `Start proc` até as primeiras linhas (cerca de 5,5 s). Conferir num release antes de mexer.
+- Timer único dos players: não roda. Teto 4 contra teto 0 é material no Android (+26% a +46% de ms de render, abas escondidas x2,8), mas o teto 0 (sem players, com as checagens ligadas) custa o mesmo que as linhas sem players. Dominam as WebViews e as renderizações que um player vivo provoca; mudar quando ou quantos players carregam é decisão do mantenedor e mudaria os Termos. No iOS a diferença não aparece.
+- Telas sob demanda na web: não roda. A avaliação do pacote (`EvaluateScript`, 295 a 304 ms de 2440 ms) dá 12% das primeiras linhas no release, abaixo do portão de 15% (18% só no pacote de desenvolvimento, de 429 a 449 ms sobre 2435 a 2486 ms).
+- Nota de projeto do nó do navegador em worker: não roda. A tarefa longa de `varanda-node.js` (290 a 330 ms em 4x) dá de 12% a 14% das primeiras linhas (avaliação do nó), abaixo do portão de 20%.
 
 ### Tarefas que não entraram
 

@@ -140,8 +140,8 @@ export function createVitrineRequest (fixtures, options) {
     return { type: 'username', username: p.username, member: p.author, date: data.now, association, issuer: association, issuerDate: data.now, issuerSignature: signature, signature }
   }
 
-  function postRecord ({ text, at, replyTo, quote, media }) {
-    return { type: 'post', text, at, replyTo, ...(quote ? { quote } : {}), ...(media ? { media } : {}) }
+  function postRecord ({ text, at, replyTo, quote, media, preview }) {
+    return { type: 'post', text, at, replyTo, ...(quote ? { quote } : {}), ...(media ? { media } : {}), ...(preview ? { preview } : {}) }
   }
 
   for (const p of profiles) {
@@ -165,7 +165,7 @@ export function createVitrineRequest (fixtures, options) {
   // Timing rows are registered in the author logs so open, peek and delete
   // behave like a fixture post. Reposts have no diary post record.
   if (options && options.large === true) {
-    const rows = largeFeed(data, 200)
+    const rows = largeFeed(data, 200, { rich: options.rich === true, embeds: options.embeds === true })
     data.feed.push(...rows)
     for (const row of rows) {
       if (row.kind !== 'post') continue

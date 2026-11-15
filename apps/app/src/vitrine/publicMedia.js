@@ -17,8 +17,11 @@ const answer = (status, bytes) => ({
 // The descriptor a fixture names at author/core/start/blocks, or null.
 function descriptorOf (author, core, start, blocks) {
   if (!HEX64.test(author) || !HEX64.test(core) || !/^[1-9][0-9]*$/.test(start) || !/^[1-9][0-9]*$/.test(blocks)) return null
+  // The large rich feed (./large.js) shows fixture photos under other
+  // members' names, so a known member or page may name any feed photo.
+  const known = fixtures.members.some((m) => m.author === author) || fixtures.pages.some((m) => m.author === author)
   for (const post of fixtures.feed) {
-    if (post.author !== author || !Array.isArray(post.media)) continue
+    if ((!known && post.author !== author) || !Array.isArray(post.media)) continue
     for (const d of post.media) {
       if (d.core === core && String(d.start) === start && String(d.blocks) === blocks) return d
     }
