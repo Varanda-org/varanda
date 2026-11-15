@@ -29,7 +29,7 @@
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { StyleSheet, Text, useWindowDimensions, View } from 'react-native'
+import { Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { LOG_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { perfMarks, useNode } from '../node'
@@ -50,6 +50,8 @@ import { fillState, hideFuture, tilesFromLog } from '../mural'
 import { ErrorText, SectionHeader, Soft, errorText, plainMessage, useAction, useBottomPad, useVisibleNow } from '../ui'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
+import { useSaved } from '../savedProvider'
+import { SAVED_ENTRY_LABEL } from '../savedView'
 import { PostRow } from '../ui/PostRow'
 import { PostSheetProvider } from '../ui/PostSheetHost'
 import { RefreshableList } from '../ui/RefreshableList'
@@ -68,8 +70,8 @@ import { HelpButton } from '../ui/Help'
 import { HELP } from '../help'
 import { COUNTS_INCOMPLETE_NOTE } from '../pessoas'
 import { useFollowCounts } from '../useFollowCounts'
-import { LARGE_TEXT, space, type } from '../ui/theme'
-import { useStyles } from '../ui/ThemeProvider'
+import { LARGE_TEXT, layout, space, type } from '../ui/theme'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 import Perfil from './Perfil'
 import { CountsNote, RepostPlaceholder, SocialToast, liveBinding, refOf, snapshotRowsShown, socialRowProps, useRowPropsCache, useSocial } from './ARua'
 import { DeletePrompt, useActing, useDelete } from './Conversa'
@@ -254,9 +256,11 @@ export default function Diario (props) {
   return <PostSheetProvider><DiarioList {...props} /></PostSheetProvider>
 }
 
-function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage, onOpenMomentos, onTabChange }) {
+function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage, onOpenMomentos, onOpenSalvos, onTabChange }) {
   const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const node = useNode()
+  const savedList = useSaved()
   const names = useNames()
   const outbox = useOutbox()
   const insets = useSafeAreaInsets()
@@ -709,6 +713,20 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
                 onDelete={setMomentDeleting}
               />
               <CommunitiesBox items={communities} title='Suas comunidades' onOpen={typeof onOpenCommunity === 'function' ? onOpenCommunity : undefined} />
+              {node.hosted === true && savedList.available && typeof onOpenSalvos === 'function'
+                ? (
+                  <Pressable
+                    accessibilityRole='button'
+                    accessibilityLabel={SAVED_ENTRY_LABEL}
+                    onPress={onOpenSalvos}
+                    style={({ pressed }) => [styles.salvos, pressed && styles.salvosPressed]}
+                  >
+                    <Icon name='salvar' size={20} color={colors.soft} />
+                    <Text style={styles.salvosText}>{SAVED_ENTRY_LABEL}</Text>
+                    <Icon name='seta' size={20} color={colors.soft} />
+                  </Pressable>
+                  )
+                : null}
               <View onLayout={(e) => setSegmentedHeight(e.nativeEvent.layout.height)}>
                 <Segmented options={tabs} selected={shownTab} onSelect={setTab} />
               </View>
@@ -933,6 +951,9 @@ const makeStyles = (colors) => StyleSheet.create({
   gear: { ...bandButton(colors), right: 16 },
   gearShifted: { ...bandButton(colors), right: 58 },
   countsNote: { marginTop: space.xs },
+  salvos: { flexDirection: 'row', alignItems: 'center', gap: space.md, minHeight: layout.hit, paddingHorizontal: space.lg },
+  salvosPressed: { opacity: 0.6 },
+  salvosText: { ...type.pill, color: colors.ink, flex: 1 },
   info: { ...bandButton(colors), right: 58 },
   infoShifted: { ...bandButton(colors), right: 100 },
   shareBody: { padding: 16, gap: 12 },

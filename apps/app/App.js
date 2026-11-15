@@ -77,6 +77,7 @@ import { BlockSheet } from './src/ui/BlockSheet'
 import { PageNoticeSheet } from './src/ui/PageNoticeSheet'
 import { PostShareSheet } from './src/ui/PostShareSheet'
 import { PostPublicProvider } from './src/postPublicContext'
+import { SavedProvider, forgetSavedFor } from './src/savedProvider'
 import { POST_OPEN_WAIT_MS, capturePostPath, postAccount, postLink, postOpeningGate, postOpeningWait, postRef, postWaitDelay } from './src/postLink'
 import { clearPostLink, savePostLink, takePostLink } from './src/postLinkStore'
 import { fetchMember } from './src/indexClient'
@@ -180,6 +181,7 @@ import { showExplainer } from './src/phoneExplainer'
 import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, parseAppLink, parseAppReturn, waitsForInstallation } from './src/linkReturn'
 import Membro, { canConverseWithPage } from './src/screens/Membro'
 import DepoimentosScreen from './src/screens/Depoimentos'
+import SalvosScreen from './src/screens/Salvos'
 import MomentosScreen from './src/screens/Momentos'
 import FeiraScreen from './src/screens/Feira'
 import AnuncioScreen from './src/screens/Anuncio'
@@ -229,6 +231,7 @@ const ComunidadeInfo = memo(ComunidadeInfoScreen)
 const Comunidades = memo(ComunidadesScreen)
 const Depoimentos = memo(DepoimentosScreen)
 const Momentos = memo(MomentosScreen)
+const Salvos = memo(SalvosScreen)
 const Mensagens = memo(MensagensScreen)
 const Mensagem = memo(MensagemScreen)
 const Anuncio = memo(AnuncioScreen)
@@ -1420,6 +1423,8 @@ function Member () {
   const dropTermsAndSync = useCallback((m) => {
     dropTermsMember(m)
     if (typeof m !== 'string') return
+    // The account left this device: so does its list of saved posts.
+    forgetSavedFor(m)
     for (const key of [...termsSync.current.keys()]) {
       if (key.startsWith(m + '#')) termsSync.current.delete(key)
     }
@@ -2020,6 +2025,7 @@ function Member () {
   const openEngagers = useCallback(({ ref, kind } = {}) => {
     pushScreen({ screen: 'curtidas', key: ref, params: { kind: kind === 'reposts' ? 'reposts' : 'likes' } })
   }, [pushScreen])
+  const openSalvos = useCallback(() => pushScreen({ screen: 'salvos' }), [pushScreen])
   const openQuotes = useCallback(({ ref } = {}) => {
     pushScreen({ screen: 'citacoes', key: ref, params: {} })
   }, [pushScreen])
@@ -3587,6 +3593,13 @@ function Member () {
           </StackLayer>
         )
       }
+      if (entry.screen === 'salvos') {
+        return (
+          <StackLayer key={i + ':salvos:' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Salvos onBack={goBack} onOpenThread={openThread} onOpenMember={openMember} onToast={h.handleShowToast} />
+          </StackLayer>
+        )
+      }
       if (entry.screen === 'pedidos') {
         return (
           <StackLayer key={i + ':pedidos:' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
@@ -3950,6 +3963,7 @@ function Member () {
                       onOpenPeople={openPeople}
                       onOpenTestimonials={openTestimonials}
                       onOpenMomentos={openMomentos}
+                      onOpenSalvos={openSalvos}
                     />
                   )}
                 </ScreenVisible.Provider>
@@ -4033,6 +4047,8 @@ function Member () {
   if (!coveringBoot) bootSettled.current = true
   // Post rows read whether "Página pública na web" shows (src/postPublicContext).
   // The wrapper is unconditional, so it never remounts the screens.
+  // The saved posts list (Posts salvos) is read by the post rows and its screen.
+  content = <SavedProvider hosted={node.hosted === true} ownKey={ownKey}>{content}</SavedProvider>
   content = <PostPublicProvider hosted={node.hosted === true} online={node.online} visible={node.visible} open={openPostShare}>{content}</PostPublicProvider>
   // Side insets are applied once here (sidePad); top and bottom by each bar;
   // Modal content (sheets, photo viewer) pads itself. The wrapper is

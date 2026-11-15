@@ -3,9 +3,9 @@
 // Sources: docs/design.md (LGPD, moderation, identity), docs/app.md and
 // SECURITY.md. Planned flows must not read as features already available.
 
-export const LEGAL_VERSION = 53
+export const LEGAL_VERSION = 54
 export const LEGAL_DATE = '15/11/2026'
-export const REVIEW_NOTE = 'Versão 53, sujeita a revisão jurídica. Não é parecer jurídico.'
+export const REVIEW_NOTE = 'Versão 54, sujeita a revisão jurídica. Não é parecer jurídico.'
 
 export const TERMS = {
   title: 'Termos de Uso',
@@ -183,7 +183,8 @@ export const PRIVACY = {
         'Uma reação a uma mensagem de grupo é um registro que você publica no grupo, com o emoji, a mensagem a que se refere, a hora e a sua conta como autora. Como as mensagens do grupo, ela também aponta para o registro mais recente do grupo que o seu aparelho já tinha recebido, de qualquer tipo, só para manter a ordem. Num grupo público, a reação e quem reagiu ficam visíveis para quem consegue ler o grupo, nos mesmos lugares que o texto do grupo. Num grupo privado, o emoji e a mensagem a que ele se refere são cifrados como as mensagens, e só os aparelhos dos membros conseguem lê-los; quem guarda uma cópia do grupo, inclusive os semeadores, ainda vê qual conta escreveu o registro, quando e de que tamanho ele é, como em todo registro de um grupo privado; o tamanho pode indicar que é uma reação e qual emoji ela leva. Tirar uma reação publica um registro de remoção; cópias que outras pessoas já receberam podem continuar existindo.',
         'Uma reação numa mensagem direta é enviada como uma mensagem: o emoji, a mensagem a que se refere, a hora e a sua conta como autora vão cifrados de ponta a ponta dentro de um envelope lacrado do mesmo tamanho, e só as duas pessoas da conversa conseguem lê-la. Vale para ela o que vale para as mensagens: o semeador guarda o envelope por até sete dias e não consegue lê-lo nem saber, pelo que guarda, quem escreveu para quem. Cada reação, troca de emoji ou remoção gasta selos de envio como uma mensagem e conta no mesmo limite diário de envio. Tirar a reação envia uma remoção; até ela chegar, a outra pessoa ainda pode ver a reação, e cópias que ela já recebeu podem continuar existindo. As conversas das páginas não têm reações. As conversas continuam sem indicação de leitura, de entrega ou de que alguém está digitando.',
         'Uma reação a um momento é enviada como uma mensagem direta a quem o publicou: leva o emoji, o número do registro do momento no diário dessa pessoa, a hora e a sua conta como remetente, cifrados como qualquer mensagem direta. Nada da foto ou do vídeo é copiado. A conversa mostra uma prévia pequena só enquanto o app ainda mostra o momento. A reação gasta selos de envio como uma mensagem e não pode ser removida. Um app que não foi atualizado não a mostra, e as conversas das páginas não a guardam.',
-        'A formatação do texto das conversas (negrito, itálico, riscado, código e spoiler) é só apresentação: as marcações viajam dentro do texto, com a mesma proteção do resto da mensagem, e nada sobre elas é guardado à parte. O spoiler só cobre o trecho na tela; quem recebe a mensagem recebe o texto inteiro.'
+        'A formatação do texto das conversas (negrito, itálico, riscado, código e spoiler) é só apresentação: as marcações viajam dentro do texto, com a mesma proteção do resto da mensagem, e nada sobre elas é guardado à parte. O spoiler só cobre o trecho na tela; quem recebe a mensagem recebe o texto inteiro.',
+        'Os posts que você salva em Posts salvos ficam só no seu aparelho, como uma lista de referências (de quem é, qual é a publicação e quando você salvou), sem o texto de ninguém e sem avisar a pessoa. A lista não é enviada a ninguém. Quando você abre a tela, o app pede essas publicações ao semeador para conferi-las no diário de quem escreveu, e, como esse pedido vai pela conexão em que o app já se identificou com a sua conta, o semeador pode associar essas publicações à sua conta. No celular, a lista pode entrar no backup do próprio aparelho (o iCloud, no iPhone). Ela continua no aparelho depois de Sair e só é esquecida quando a conta é removida do aparelho.'
       ]
     },
     {
