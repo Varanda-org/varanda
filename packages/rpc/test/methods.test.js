@@ -23,7 +23,7 @@ test('method list and mutating set', (t) => {
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.react', 'group.reactors', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
-    'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moments.read', 'node.close', 'node.info', 'notices.list',
+    'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moments.read', 'node.close', 'node.info', 'notices.list', 'outbox.open', 'outbox.seal',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read', 'phone.proof', 'phone.sign',
     'post.create', 'post.delete', 'post.quote', 'post.reply', 'post.share', 'post.shared', 'post.unshare', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
     'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'username.add'
@@ -1882,6 +1882,43 @@ test('identity.recoveryLookup', (t) => {
   for (const s of ['CD'.repeat(32), 'cd'.repeat(31), '', null]) bad(t, 'identity.recoveryLookup', { kind: 'passkey', secret: s }, 'bad secret')
   bad(t, 'identity.recoveryLookup', { ...pk, member: KEY }, 'extra key')
   bad(t, 'identity.recoveryLookup', { secret: 'cd'.repeat(32) }, 'missing kind')
+})
+
+test('outbox.seal and outbox.open', (t) => {
+  t.absent(isMutating('outbox.seal'))
+  t.absent(isMutating('outbox.open'))
+  const at = '2026-11-15T12:00:00.000Z'
+  const post = { id: '0123456789abcdef', author: KEY, association: 'cd'.repeat(32), kind: 'post', to: null, text: 'oi\nalguém', writtenAt: at }
+  const reply = { ...post, kind: 'reply', to: KEY + ':7' }
+  ok(t, 'outbox.seal', post, post)
+  ok(t, 'outbox.seal', reply, reply)
+  ok(t, 'outbox.seal', { ...post, text: 'x'.repeat(MAX_TEXT) })
+  ok(t, 'outbox.seal', { ...post, text: '\ud800' }, { ...post, text: '\ud800' })
+  bad(t, 'outbox.seal', { ...post, to: KEY + ':7' }, 'post with a target')
+  bad(t, 'outbox.seal', { ...reply, to: null }, 'reply without a target')
+  for (const to of [KEY + ':0', KEY, 'AB'.repeat(32) + ':1', '']) bad(t, 'outbox.seal', { ...reply, to }, 'bad target')
+  for (const id of ['0123456789abcde', '0123456789ABCDEF', '0123456789abcdef0', 1]) bad(t, 'outbox.seal', { ...post, id }, 'bad id')
+  for (const kind of ['quote', '', null]) bad(t, 'outbox.seal', { ...post, kind }, 'bad kind')
+  for (const text of ['', 'x'.repeat(MAX_TEXT + 1), 'a\u202eb', 'a\u0000b', 'a\u2028b', 'a\u0085b', null]) bad(t, 'outbox.seal', { ...post, text }, 'bad text')
+  for (const writtenAt of ['', 'ontem', 'x'.repeat(33), 0]) bad(t, 'outbox.seal', { ...post, writtenAt }, 'bad writtenAt')
+  for (const k of ['author', 'association']) bad(t, 'outbox.seal', { ...post, [k]: 'AB'.repeat(32) }, 'bad ' + k)
+  for (const k of Object.keys(post)) {
+    const { [k]: _, ...rest } = post
+    bad(t, 'outbox.seal', rest, 'missing ' + k)
+  }
+  bad(t, 'outbox.seal', { ...post, box: 'AAAA' }, 'extra key')
+
+  const { to: _to, text: _text, ...fields } = post
+  const open = { box: 'A'.repeat(8736), ...fields }
+  ok(t, 'outbox.open', open, open)
+  ok(t, 'outbox.open', { ...open, box: 'ab-_' })
+  for (const box of ['A'.repeat(8740), 'A'.repeat(8737), 'A'.repeat(5), '', 'AB+/', 'AB==', 1]) bad(t, 'outbox.open', { ...open, box }, 'bad box')
+  bad(t, 'outbox.open', { ...open, text: 'oi' }, 'extra text')
+  bad(t, 'outbox.open', { ...open, to: null }, 'extra to')
+  for (const k of Object.keys(open)) {
+    const { [k]: _, ...rest } = open
+    bad(t, 'outbox.open', rest, 'missing ' + k)
+  }
 })
 
 test('identity.recoveryOpen', (t) => {

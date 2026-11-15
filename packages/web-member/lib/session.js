@@ -326,7 +326,8 @@ const { followSet } = require('@varanda/core/lib/media')
 const { sealMedia, openMedia, validPrivateItem, PRIVATE_ITEM_KEYS, MAX_SEALED_MEDIA_PLAIN_BYTES } = require('@varanda/core/lib/group-media')
 const { signNoticeProof } = require('@varanda/core/lib/notices')
 const store = require('./node-store')
-const { groupKeyPairFromPrf } = require('./passkey')
+const { groupKeyPairFromPrf, outboxKeyFromPrf } = require('./passkey')
+const { sealOutbox, openOutbox, WRONG_AUTHOR: OUTBOX_WRONG_AUTHOR } = require('./outbox-seal')
 const { createGroupKeys } = require('./group-keys')
 const { checkSeederUrl } = require('./seeder-url')
 const { createDmEngine, MOMENT_PHOTO_GONE, BLOCKED: DM_BLOCKED, NO_PAGE_KEY, KEY_MISMATCH: DM_KEY_MISMATCH, USE_PAGE_DRAFT: DM_USE_PAGE_DRAFT } = require('./dm')
@@ -903,6 +904,11 @@ function createBrowserSession ({
   let keyPair = null
   let mediaKeyPair = null
   let groupPrf = null
+  // The outbox key (passkey.js outboxKeyFromPrf), derived from groupPrf on
+  // the first outbox.seal / outbox.open and zero-filled with it; outboxGen
+  // moves on every zeroing, so a derivation that straddles one is dropped.
+  let outboxKey = null
+  let outboxGen = 0
   // The direct message store unlock setKeyPair starts off the chain (it reads
   // and opens every local row): settles once that unlock is done or
   // superseded, never rejects, and is null when none is pending. Every
@@ -1831,8 +1837,8 @@ function createBrowserSession ({
   }
 
   // diary.peek under its own deadline (page.read's probe). opts: internal
-  // only (listing.ratings asks for the block-0 certificate date); the
-  // diary.peek method never passes it.
+  // only (listing.ratings and the diary.peek method ask for the block-0
+  // certificate date).
   function diaryPeekWithin (params, timeoutMs, opts = null) {
     if (closed) return Promise.reject(rpcError('LOCKED', CLOSED_MESSAGE))
     if (diaryPeeksInFlight >= MAX_DIARY_PEEKS) return Promise.reject(rpcError('USAGE', DIARY_PEEK_BUSY))
@@ -2082,6 +2088,35 @@ function createBrowserSession ({
     if (r.changed) wrote(r.seq)
     await pushAfterWrite()
     return { seq: r.seq, on: r.on, changed: r.changed }
+  }
+
+  // The outbox seal of the unlocked identity `author` (docs/rpc.md 5.124
+  // and 5.125): fn(key) runs in the same tick as the last check, so a lock
+  // can never hand it a zeroed key. Off the chain: it reads no storage.
+  async function withOutboxKey (author, fn) {
+    const check = () => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      if (keyPair === null || groupPrf === null) throw new UsageError(store.LOCKED)
+      if (b4a.toString(keyPair.publicKey, 'hex') !== author) throw new UsageError(OUTBOX_WRONG_AUTHOR)
+    }
+    try {
+      check()
+      if (outboxKey === null) {
+        const gen = outboxGen
+        const key = await outboxKeyFromPrf(groupPrf, { hkdf })
+        if (gen !== outboxGen) {
+          key.fill(0)
+          check()
+          throw new UsageError(store.LOCKED)
+        }
+        if (outboxKey === null) outboxKey = key
+        else key.fill(0)
+        check()
+      }
+      return fn(outboxKey)
+    } catch (err) {
+      throw toRpcError(err, reportInternal)
+    }
   }
 
   function checkGroupOperation (epoch, generation) {
@@ -2900,6 +2935,41 @@ function createBrowserSession ({
     }
   })
 
+  // The bounded rule: the service refreshes the roster every
+  // PAGE_ROSTER_REFRESH_BLOCKS blocks, so a verifying roster that new is
+  // the current one; an older one may have been superseded unseen.
+  const pageRosterFresh = (length) => (state) => state.page && state.seq >= length - PAGE_ROSTER_REFRESH_BLOCKS
+
+  // page.read from a diary held here, never the network: { base, result },
+  // result null when the diary is not held.
+  async function pageReadHeld (pageHex) {
+    const local = await serial(async () => {
+      const own = await requireOwnKey()
+      const mod = await member.moderation(storage, cfg.association)
+      let held = null
+      try {
+        held = await withCores(async (c) => {
+          const read = await member.logReadRaw(c, { author: pageHex })
+          return { ...read, forked: pageHex !== own && await replicaForked(c, pageHex) }
+        })
+      } catch (err) {
+        if (messageOf(err) !== NO_LOCAL_DATA) throw err
+      }
+      return { own, revokedIssuers: mod.revokedIssuers, held }
+    })({})
+    const base = { pageHex, own: local.own, association: cfg.association, revokedIssuers: local.revokedIssuers }
+    if (local.held === null) return { base, result: null }
+    // A held diary is read RAW: a tombstone a leaked page key appends
+    // cannot reopen a close nor undo a move or a roster. Every stored block
+    // counts (a followed diary downloads newest-first, its tail past a
+    // gap); only a diary held whole is walked as a chain.
+    // A forked replica answers as the core node's pageRead: no page.
+    if (local.held.forked) throw rpcError('NOT_FOUND', NO_LOCAL_DATA)
+    const { entries, length } = local.held
+    if (entries.length === length) return { base, result: pageReadResult({ ...base, entries, full: true, complete: () => true }) }
+    return { base, result: pageReadResult({ ...base, entries, full: false, complete: pageRosterFresh(length) }) }
+  }
+
   // ---- handlers (docs/rpc.md section 5; params arrive validated) ----
 
   const handlers = {
@@ -3100,6 +3170,15 @@ function createBrowserSession ({
       return { signature }
     }),
 
+    // The app's outbox items (docs/rpc.md 5.124 and 5.125): target and text
+    // sealed under the outbox key, bound to the readable fields. Neither
+    // writes anything.
+    'outbox.seal': ({ id, author, association, kind, to, text, writtenAt }) =>
+      withOutboxKey(author, (key) => ({ box: sealOutbox(key, { id, author, association, kind, to, text, writtenAt }) })),
+
+    'outbox.open': ({ box, id, author, association, kind, writtenAt }) =>
+      withOutboxKey(author, (key) => openOutbox(key, box, { id, author, association, kind, writtenAt })),
+
     // Signs the signup-invite request with the in-memory key (docs/rpc.md
     // 5.30), exactly like terms.sign. The session fills in member and
     // association.
@@ -3278,36 +3357,9 @@ function createBrowserSession ({
     'page.read': async ({ key, full }) => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
       const pageHex = key.toLowerCase()
-      const local = await serial(async () => {
-        const own = await requireOwnKey()
-        const mod = await member.moderation(storage, cfg.association)
-        let held = null
-        try {
-          held = await withCores(async (c) => {
-            const read = await member.logReadRaw(c, { author: pageHex })
-            return { ...read, forked: pageHex !== own && await replicaForked(c, pageHex) }
-          })
-        } catch (err) {
-          if (messageOf(err) !== NO_LOCAL_DATA) throw err
-        }
-        return { own, revokedIssuers: mod.revokedIssuers, held }
-      })({})
-      const base = { pageHex, own: local.own, association: cfg.association, revokedIssuers: local.revokedIssuers }
-      // The bounded rule: the service refreshes the roster every
-      // PAGE_ROSTER_REFRESH_BLOCKS blocks, so a verifying roster that new is
-      // the current one; an older one may have been superseded unseen.
-      const fresh = (length) => (state) => state.page && state.seq >= length - PAGE_ROSTER_REFRESH_BLOCKS
-      // A held diary is read RAW: a tombstone a leaked page key appends
-      // cannot reopen a close nor undo a move or a roster. Every stored block
-      // counts (a followed diary downloads newest-first, its tail past a
-      // gap); only a diary held whole is walked as a chain.
-      if (local.held !== null) {
-        // A forked replica answers as the core node's pageRead: no page.
-        if (local.held.forked) throw rpcError('NOT_FOUND', NO_LOCAL_DATA)
-        const { entries, length } = local.held
-        if (entries.length === length) return pageReadResult({ ...base, entries, full: true, complete: () => true })
-        return pageReadResult({ ...base, entries, full: false, complete: fresh(length) })
-      }
+      const { base, result } = await pageReadHeld(pageHex)
+      if (result !== null) return result
+      const fresh = pageRosterFresh
       try {
         const first = await diaryPeek({ author: pageHex, seqs: [1, 2, 3] })
         const length = first.length
@@ -3780,8 +3832,16 @@ function createBrowserSession ({
         throw toRpcError(err, reportInternal)
       }
       if (hidden && profileOnly !== true) throw rpcError('NOT_FOUND', DIARY_HIDDEN)
-      const r = await diaryPeek(params)
-      return profileOnly === true ? { ...r, entries: [], invalid: [], missing: [] } : r
+      let r
+      try {
+        r = await diaryPeekWithin(params, peekTimeoutMs, { cert: true })
+      } catch (err) {
+        // The unread flag is for internal readers, never the client.
+        if (err !== null && typeof err === 'object') delete err.unread
+        throw err
+      }
+      const certDate = hidden || typeof r.certDate !== 'string' ? null : r.certDate
+      return profileOnly === true ? { ...r, entries: [], invalid: [], missing: [], certDate } : { ...r, certDate }
     },
 
     // The member's own block list (docs/rpc.md 5.111). The list is written
@@ -4098,6 +4158,15 @@ function createBrowserSession ({
         dmEngine.checkSend(await requireDm(), to)
         if ((await member.memberBlocks(storage)).has(to)) throw new UsageError(DM_BLOCKED)
       })({}, ident)
+      // A Página key is known only from its diary held here (the page.read
+      // answer the app's gate reads), never from the network: a reaction to a
+      // peer whose diary is not held does not wait for a seeder peek, goes
+      // through, and the Página drops it on pull.
+      let page = false
+      try {
+        const { result: r } = await pageReadHeld(to.toLowerCase())
+        page = r !== null && (r.gen !== null || r.owner !== null || r.closed === true || (r.movedTo !== null && r.movedTo !== undefined))
+      } catch {}
       let recipient
       try {
         recipient = await dmLookupOf(to)
@@ -4107,7 +4176,7 @@ function createBrowserSession ({
       return serialDm(async (_, epoch) => {
         const own = await requireDm()
         if ((await store.readDmKey(storage)) === null) await dmEnable(epoch)
-        return dmEngine.react(own, keyPair, { to, target, emoji }, recipient.box)
+        return dmEngine.react(own, keyPair, { to, target, emoji }, recipient.box, { page })
       })({}, ident)
     },
 
@@ -4363,6 +4432,9 @@ function createBrowserSession ({
     mediaKeyPair = null
     if (groupPrf !== null) groupPrf.fill(0)
     groupPrf = null
+    outboxGen++
+    if (outboxKey !== null) outboxKey.fill(0)
+    outboxKey = null
     boxKeys.lock()
     dmEngine.lock()
     pageGroupKeys.lock()

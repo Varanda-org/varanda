@@ -128,12 +128,12 @@ const AVISOS_BUSY_MORE = 'Os avisos ainda estão carregando. Tente de novo.'
 // another identity's, a v1 list of follower keys or a v2 list of salted
 // digests) is REMOVED at once, which wipes any old format on the first
 // hosted load. A page list in the same blob is kept. Never throws.
-function loadSeen (namespace) {
+function loadSeen (namespace, ownKey) {
   let ids = []
   let text = null
   try {
     text = loadSeenText()
-    ids = parseSeenNamespace(text, namespace)
+    ids = parseSeenNamespace(text, namespace, ownKey)
   } catch {}
   if (randomBytes === null) {
     // Nothing is written without a random source; an entry this browser
@@ -151,7 +151,7 @@ function loadSeen (namespace) {
   if (ids.length < SEEN_MAX) {
     try {
       ids = padSeen(ids, randomBytes)
-      writeSeen(namespace, ids)
+      writeSeen(namespace, ids, ownKey)
     } catch {}
   }
   return { ids }
@@ -167,11 +167,11 @@ const randomBytes = typeof globalThis.crypto?.getRandomValues === 'function'
 
 // Only ever writes the padded list: exactly SEEN_MAX 32-hex entries.
 // The other namespace (the person, or each page) stays in the same text.
-function writeSeen (namespace, ids) {
+function writeSeen (namespace, ids, ownKey) {
   if (randomBytes === null || ids.length !== SEEN_MAX) return
   if (typeof namespace !== 'string' || namespace.length === 0) return
   try {
-    saveSeenText(writeSeenNamespace(loadSeenText(), namespace, ids))
+    saveSeenText(writeSeenNamespace(loadSeenText(), namespace, ids, ownKey))
   } catch {}
 }
 
@@ -281,23 +281,27 @@ const SNIPPET_TRIES = 2
 // batch at a time and never again for a ref already tried. A failed read just
 // leaves the row without a second line. A read that throws partway keeps the
 // refs it found; the rest get one more try in a later batch, then count as
-// tried, so a seeder that stays down cannot loop.
+// tried, so a seeder that stays down cannot loop. A read that ends without
+// the post leaves the ref blank until the next full reload.
 function useSnippets (items, request, enabled, retryKey) {
   const [texts, setTexts] = useState({})
   const triedRef = useRef(new Set())
   const triesRef = useRef(new Map())
   const exhaustedRef = useRef(new Set())
+  const blankRef = useRef(new Set())
   const [round, setRound] = useState(0)
   // A full reload of the list (loadedAt moves: pull to refresh, a reload on
-  // show) gives refs that ran out of tries one more chance. The 5-minute poll
-  // does not move loadedAt, so it does not retry them.
+  // show) gives every ref still without text one more chance: those that ran
+  // out of tries and those whose read came back without the post. The
+  // 5-minute poll does not move loadedAt, so it does not retry them.
   useEffect(() => {
-    if (exhaustedRef.current.size === 0) return
-    for (const r of exhaustedRef.current) {
+    if (exhaustedRef.current.size === 0 && blankRef.current.size === 0) return
+    for (const r of [...exhaustedRef.current, ...blankRef.current]) {
       triedRef.current.delete(r)
       triesRef.current.delete(r)
     }
     exhaustedRef.current.clear()
+    blankRef.current.clear()
     setRound((n) => n + 1)
   }, [retryKey])
   const refs = enabled ? items.map(snippetRef).filter((r) => r !== null) : []
@@ -330,6 +334,7 @@ function useSnippets (items, request, enabled, retryKey) {
         if (post !== null) found[r] = post.text
         if (post !== null || done.some((p) => chunkHas(p, r))) {
           triedRef.current.add(r)
+          if (post === null) blankRef.current.add(r)
         } else if (failedAt !== null && chunkHas(failedAt, r)) {
           const tries = (triesRef.current.get(r) || 0) + 1
           triesRef.current.set(r, tries)
@@ -613,7 +618,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       badge(!mark && hasNew(list, []))
       return
     }
-    if (seenRef.current === null) seenRef.current = loadSeen(seenNamespace)
+    if (seenRef.current === null) seenRef.current = loadSeen(seenNamespace, ownKeyRef.current)
     const seen = seenRef.current
     // Rows unseen when they first loaded keep their dot while this screen
     // lives, even though opening the tab marks them seen. A row read on
@@ -634,7 +639,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         const { ids, changed } = markSeenPadded(seen.ids, list, randomBytes)
         if (changed) {
           seen.ids = ids
-          writeSeen(seenNamespace, ids)
+          writeSeen(seenNamespace, ids, ownKeyRef.current)
         }
       }
       badge(false)
@@ -647,7 +652,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         const { ids, changed } = mergeRemoteSeen(seen.ids, remote, rows, randomBytes)
         if (changed) {
           seen.ids = ids
-          writeSeen(seenNamespace, ids)
+          writeSeen(seenNamespace, ids, ownKeyRef.current)
         }
       }
       badge(hasNew(list, seenUnion(seen.ids, remote)))
@@ -667,7 +672,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   useEffect(() => {
     const prev = prevNamespaceRef.current
     prevNamespaceRef.current = seenNamespace
-    seenRef.current = hosted && seenNamespace.length > 0 ? loadSeen(seenNamespace) : null
+    seenRef.current = hosted && seenNamespace.length > 0 ? loadSeen(seenNamespace, ownKeyRef.current) : null
     setUnread(new Set())
     lastListRef.current = null
     shownListRef.current = null
@@ -1116,7 +1121,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   } else if (loadError) {
     empty = <ErrorState message={loadError} onRetry={locked ? () => { commit({ locked: false, loadError: '' }); loadFirst() } : loadFirst} pending={loading || refreshing} />
   } else if (loadedAt === null) {
-    empty = <><SkeletonRow /><SkeletonRow /><SkeletonRow /></>
+    empty = <View>{[0, 1, 2].map((row) => <SkeletonRow key={row} />)}</View>
   } else {
     empty = pageKey
       ? <EmptyState icon='sino' title={PAGE_EMPTY_TITLE} body={PAGE_EMPTY_TEXT} />

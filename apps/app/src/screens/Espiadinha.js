@@ -13,7 +13,7 @@
 // read and verified by the node.
 // Word search in posts is the Busca tab's (screens/Busca.js).
 
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { StyleSheet, View } from 'react-native'
 import { FOLLOW_LIMIT_MAX, PEEK_LIMIT_DEFAULT, PEEK_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
@@ -27,9 +27,10 @@ import {
   recordFollow, shouldWarmPeek, skippedText, subscribePeekWarm, updatePeekWarmState, withoutFollowed
 } from '../peek'
 import { whoOf } from '../who'
-import { CountsNote, RepostPlaceholder, refOf, socialRowProps, useSocial } from './ARua'
-import { Soft, errorText, useBottomPad, useNow } from '../ui'
+import { CountsNote, RepostPlaceholder, refOf, socialRowProps, useRowPropsCache, useSocial } from './ARua'
+import { Soft, errorText, useBottomPad, useVisibleNow } from '../ui'
 import { PostRow } from '../ui/PostRow'
+import { PostSheetProvider } from '../ui/PostSheetHost'
 import { HelpNote, HelpSheet } from '../ui/Help'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, SkeletonRow } from '../ui/States'
@@ -41,7 +42,12 @@ const FOLLOW_PAGES_MAX = 9
 
 const noop = () => {}
 
-export default function Espiadinha ({ active, refresh, onReply, onReport, onQuote, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, ownKey, scrollToTop, followsSignal, onFollowsChanged, onPublish, onToast }) {
+// One actions sheet for the whole list instead of two per row.
+export default function Espiadinha (props) {
+  return <PostSheetProvider><EspiadinhaList {...props} /></PostSheetProvider>
+}
+
+function EspiadinhaList ({ active, refresh, onReply, onReport, onQuote, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, ownKey, scrollToTop, followsSignal, onFollowsChanged, onPublish, onToast }) {
   const node = useNode()
   const names = useNames()
   const social = useSocial({ ownKey, onToast })
@@ -49,7 +55,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   // The names cache only for own or followed authors; a stranger's parent
   // waits for its post instead (undefined, never a cached guess).
   const profileOf = (a) => social.persistOf(a) ? names.profileOf(a) : undefined
-  const now = useNow(60000)
+  const now = useVisibleNow(60000)
   const bottomPad = useBottomPad()
   const hosted = node.hosted === true && node.passkey !== null
   const [helpOpen, setHelpOpen] = useState(false)
@@ -516,19 +522,42 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   // row offers 'seguir' before the own key is known (it could be the own
   // one), and, as defence in depth, never on an own-key row.
   const canFollow = (author) => typeof ownKey === 'string' && typeof author === 'string' && author.toLowerCase() !== ownKey.toLowerCase()
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onReply, onQuote, onReport }
   const openReposter = (item) => typeof onOpenMember === 'function'
     ? () => onOpenMember(item.author, { name: item.name, username: item.username })
     : undefined
   // A repost row is the ORIGINAL post (every action targets it) under the
   // reposter's line, as in A Rua; 'denunciar' reports the original. Its
   // 'seguir' sits on the reposter's line and follows the reposter.
-  const rowOf = (item) => {
+  const rowCache = useRowPropsCache(items, peekKey, { h: handlers, social })
+  // 'seguir' per author: one function for the list's life, calling the newest
+  // follow, so the memoized row does not see a new prop on every render.
+  const followRef = useRef(null)
+  followRef.current = follow
+  const followFns = useRef(new Map())
+  const followFn = (author, name, username) => {
+    let entry = followFns.current.get(author)
+    if (!entry) {
+      entry = { args: null, fn: () => followRef.current(entry.args.author, entry.args.name, entry.args.username) }
+      followFns.current.set(author, entry)
+    }
+    entry.args = { author, name, username }
+    return entry.fn
+  }
+  useEffect(() => {
+    const keep = new Set(items.map(item => item.author))
+    for (const author of [...followFns.current.keys()]) if (!keep.has(author)) followFns.current.delete(author)
+  }, [items])
+  // One renderItem for the list's life: FlatList re-renders the cells on
+  // extraData, and the rows whose props did not change skip their render.
+  const renderRef = useRef(null)
+  const renderItem = useCallback((info) => renderRef.current(info), [])
+  renderRef.current = ({ item }) => {
     if (item.kind === 'repost') {
       const ref = refOf(item.to)
       const repostedBy = { author: item.author, name: item.name, username: item.username }
       const post = social.original(ref)
-      const followReposter = canFollow(item.author) ? () => follow(item.author, item.name, item.username) : undefined
+      const followReposter = canFollow(item.author) ? followFn(item.author, item.name, item.username) : undefined
       const reposterPending = following.has(item.author)
       if (!post) {
         return (
@@ -543,7 +572,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
           />
         )
       }
-      const row = socialRowProps({ post, ref, repostedBy, social, profileOf, now, ownKey, h: handlers })
+      const row = socialRowProps({ post, ref, repostedBy, social, profileOf, now, ownKey, h: handlers, cache: rowCache, rowKey: peekKey(item) })
       return (
         <PostRow
           {...row}
@@ -553,18 +582,20 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
         />
       )
     }
-    const row = socialRowProps({ post: item, ref: peekKey(item), social, profileOf, now, ownKey, h: handlers })
+    const row = socialRowProps({ post: item, ref: peekKey(item), social, profileOf, now, ownKey, h: handlers, cache: rowCache, rowKey: peekKey(item) })
     return (
       <PostRow
         {...row}
-        onFollow={canFollow(item.author) ? () => follow(item.author, item.name, item.username) : undefined}
+        onFollow={canFollow(item.author) ? followFn(item.author, item.name, item.username) : undefined}
         followPending={following.has(item.author)}
         onReport={reportable(item) ? row.onReport : undefined}
       />
     )
   }
-  const renderItem = ({ item }) => rowOf(item)
 
+  // Which handlers exist decides which actions a row offers (as `offered` in A Rua).
+  const offered = [onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport].map(fn => typeof fn === 'function' ? 1 : 0).join('')
+  const extra = useMemo(() => ({ now, following, social: social.social, names: names.profileOf, ownKey, offered, hosted }), [now, following, social.social, names.profileOf, ownKey, offered, hosted])
   const shownItems = notice === null ? items : []
   return (
     <>
@@ -573,7 +604,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
         data={shownItems}
         keyExtractor={peekKey}
         renderItem={renderItem}
-        extraData={{ now, following, social: social.social, names: names.profileOf }}
+        extraData={extra}
         ListHeaderComponent={notice === null ? header : null}
         ListEmptyComponent={empty}
         ListFooterComponent={notice === null ? footer : null}

@@ -35,7 +35,8 @@ import { useEffect, useState } from 'react'
 import { fetch as expoFetch } from 'expo/fetch'
 import { Modal, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { useNode } from '../node'
+import { StatusBar, setStatusBarStyle } from 'expo-status-bar'
+import { useNodeHandle } from '../node'
 import { isAppClient } from '../appClient'
 import { chatMediaKey, isVoiceItem, onChatMediaReturn, pinChatMedia, shouldLoad, sourceFor } from '../media/chatMedia'
 import { revokeUrl, urlFromBytes } from '../media/display'
@@ -69,7 +70,7 @@ function itemRatio (item) {
 
 // -> { state: 'held' | 'loading' | 'ok' | 'off', uri, retry, show }
 function useChatSource (ref, identity, deferred) {
-  const node = useNode()
+  const node = useNodeHandle()
   const key = chatMediaKey(identity, ref)
   const [attempt, setAttempt] = useState(0)
   const [tapped, setTapped] = useState(false)
@@ -226,7 +227,14 @@ export function ChatMedia ({ refs, identity, mine = false, deferred = false, onL
   // Back from a background clear the open photo's file is gone: close the
   // viewer (the cell reads again and can be opened anew).
   useEffect(() => onChatMediaReturn(() => setOpen(null)), [])
+  // The viewer is black under a translucent status bar, so it needs light
+  // icons. The Modal window copies the activity's status bar style once, when
+  // it is shown (Android 12+), so a StatusBar inside it changes nothing: the
+  // style is set here, before the Modal shows, and the StatusBar below holds
+  // it on the stack while the photo is open. When it unmounts the stack gives
+  // the screen's own style back.
   const openPhoto = (uri, ratio) => {
+    try { setStatusBarStyle('light', false) } catch {}
     setOpenRatio(ratio)
     setOpen(uri)
   }
@@ -244,6 +252,7 @@ export function ChatMedia ({ refs, identity, mine = false, deferred = false, onL
       {list.map((ref, i) => (
         <Cell key={i} refItem={ref} identity={identity} deferred={deferred === true} cell={layout.cells[i]} count={list.length} index={i} onOpen={openPhoto} onLongPress={onLongPress} />
       ))}
+      {open !== null ? <StatusBar style='light' /> : null}
       <Viewer uri={open} ratio={openRatio} onClose={() => setOpen(null)} />
     </View>
   )

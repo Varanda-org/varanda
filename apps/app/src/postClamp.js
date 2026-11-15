@@ -44,6 +44,17 @@ export function acceptMeasurement ({ prev, count, renderedCap }) {
   return count
 }
 
+// The count to store from a layout event, or undefined to store nothing. A
+// caption the estimate never clamps has nothing to refine, so its layout is
+// not stored (a second render for nothing). A clamped or expanded one keeps
+// every accepted count: one measured while expanded is what later removes a
+// control the collapsed caption does not need.
+export function measurementToStore ({ plan, prev, count, renderedCap }) {
+  if (!plan || (plan.lines === 0 && plan.control === null)) return undefined
+  const next = acceptMeasurement({ prev, count, renderedCap })
+  return next === prev ? undefined : next
+}
+
 // One line per LF paragraph at minimum, so a blank line still takes space.
 // A width or font size that is not laid out yet estimates 0: that must not
 // hide the caption before the row has a width.

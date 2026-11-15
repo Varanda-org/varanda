@@ -503,7 +503,7 @@ test('deletion sweep: purges every store for each deleted key, retries a store t
   t.is(phones.live(m.hex), null, 'the phone row is ended')
   t.alike(phones.reveal(m.hex).map((r) => [r.phone, r.end, r.burned]), [['+5511987654321', 'excluida', false]], 'the seal stays for the retention period')
   t.ok(dropsHeld.has(m.hex))
-  t.alike(logs, [{ event: 'exclusao', reason: 'purga-pendente', count: 1 }])
+  t.alike(logs.filter((e) => e.reason === 'purga-pendente'), [{ event: 'exclusao', reason: 'purga-pendente', count: 1 }])
   dropsUp = true
   t.alike(await sweep.sweep(), { members: 1, pending: 0 })
   t.absent(dropsHeld.has(m.hex), 'purged on the next sweep')
@@ -532,7 +532,8 @@ test('deletion sweep: purges every store for each deleted key, retries a store t
   const brokenSweep = createDeletionSweep({ accounts, phones: brokenPhones, log: (e) => brokenLogs.push(e) })
   t.alike(await brokenSweep.sweep(), { members: 1, pending: 1 }, 'an unavailable phone store is pending, never done')
   t.alike(await brokenSweep.purge(m.hex), { pending: 1 })
-  t.alike(brokenLogs, [{ event: 'exclusao', reason: 'purga-pendente', count: 1 }, { event: 'exclusao', reason: 'purga-pendente', count: 1 }])
+  t.alike(brokenLogs.filter((e) => e.reason === 'purga-pendente'), [{ event: 'exclusao', reason: 'purga-pendente', count: 1 }, { event: 'exclusao', reason: 'purga-pendente', count: 1 }])
+  t.alike(brokenLogs.filter((e) => e.reason === 'arquivo-invalido').map((e) => [e.file, /pendente/.test(e.aviso)]), [['telefone', true]], 'the broken file is named once, with the pending reason')
 })
 
 test('Excluir conta: a new wait sends one push notice; a member who came to own a live page is skipped at the date', async (t) => {
@@ -601,4 +602,27 @@ test('Excluir conta: without a usable passkeys.json every route answers indispon
   t.alike(await call(none, '/account/delete/cancel/start', { member: m.hex }), { error: 'indisponivel' })
   t.alike(await none.runScheduled(), { ran: 0, skipped: 0 })
   t.is(none.scheduled(m.hex), null)
+})
+
+test('a corrupt feira-invites.json keeps the purge pending and says so once, without contents', async (t) => {
+  const { openInvitesStore } = require('../lib/account/invites-store')
+  const { pairInvites } = require('../lib/account/invites-pair')
+  const dir = path.join(tmpDir(t), 'account')
+  fs.mkdirSync(dir, { mode: 0o700 })
+  const secret = 'SEGREDO-NO-ARQUIVO'
+  fs.writeFileSync(path.join(dir, 'feira-invites.json'), '{' + secret, { mode: 0o600 })
+  const primary = openInvitesStore(dir, { perWeek: 3 })
+  const feira = openInvitesStore(dir, { perWeek: 2, file: 'feira-invites.json', capOn: 'use' })
+  const pair = pairInvites(primary, feira)
+  t.is(feira.available(), false, 'a corrupt file is not read as empty')
+  const m = keyPair()
+  const logs = []
+  const sweep = createDeletionSweep({ accounts: { deleted: () => [], purged: async () => {} }, invites: pair, log: (e) => logs.push(e) })
+  t.alike(await sweep.purge(m.hex), { pending: 1 }, 'pending, never done')
+  t.alike(await sweep.purge(m.hex), { pending: 1 })
+  const warns = logs.filter((e) => e.reason === 'arquivo-invalido')
+  t.is(warns.length, 1, 'logged once')
+  t.is(warns[0].file, 'feira-invites.json')
+  t.ok(/pendente/.test(warns[0].aviso) && /operador/.test(warns[0].aviso))
+  t.absent(JSON.stringify(logs).includes(secret) || JSON.stringify(logs).includes(m.hex), 'no contents, no member')
 })

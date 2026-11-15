@@ -1,0 +1,1 @@
+- Barra do splash na camada nativa (PR `perf/native-boot`): o preenchimento da barra de progresso do splash desliza no driver nativo em vez de animar a largura, sem mudar o que a pessoa vê; a partida (`TotalTime` frio na casa de 650 ms no emulador) não muda de forma mensurável. Verificação em `docs/verification/perf-native-boot.md`.

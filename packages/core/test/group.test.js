@@ -2489,7 +2489,7 @@ test('a reaction is replaced by the same diary and removed by an empty emoji', (
   t.alike(reactionsOf(buildGroup(w.input()), p), [{ emoji: THUMBS, count: 2, by: [X, Y] }])
   // Another device of the same diary replaces it: one reaction per diary.
   react(w, wX2, p, HEART, 4)
-  t.alike(reactionsOf(buildGroup(w.input()), p), [{ emoji: HEART, count: 1, by: [X] }, { emoji: THUMBS, count: 1, by: [Y] }])
+  t.alike(reactionsOf(buildGroup(w.input()), p), [{ emoji: THUMBS, count: 1, by: [Y] }, { emoji: HEART, count: 1, by: [X] }])
   react(w, wX, p, '', 5)
   react(w, wY, p, '', 6)
   const g = buildGroup(w.input())
@@ -2497,21 +2497,20 @@ test('a reaction is replaced by the same diary and removed by an empty emoji', (
   t.absent('reactions' in g.posts[0])
 })
 
-test('reactions sort by count then emoji, and by lists diaries in reaction order', (t) => {
+test('reactions sort by count then first use, and by lists diaries in reaction order', (t) => {
   const w = world().add(A, wA).add(X, wX).add(Y, wY)
   const p = post(w, G, 1)
-  react(w, wY, p, HEART, 2)
+  react(w, wY, p, '\u{1f600}', 2)
   react(w, wX, p, THUMBS, 3)
   react(w, wA, p, THUMBS, 4)
-  react(w, G, p, '\u{1f600}', 5)
-  t.alike(reactionsOf(buildGroup(w.input()), p), [
-    { emoji: THUMBS, count: 2, by: [X, A] },
-    { emoji: HEART, count: 1, by: [Y] },
-    { emoji: '\u{1f600}', count: 1, by: [C] }
-  ].sort((a, b) => b.count - a.count || (a.emoji < b.emoji ? -1 : a.emoji > b.emoji ? 1 : 0)))
+  react(w, G, p, HEART, 5)
   const r = reactionsOf(buildGroup(w.input()), p)
-  t.is(r[0].emoji, THUMBS)
-  t.ok(r[1].emoji < r[2].emoji, 'ties by emoji')
+  t.alike(r, [
+    { emoji: THUMBS, count: 2, by: [X, A] },
+    { emoji: '\u{1f600}', count: 1, by: [Y] },
+    { emoji: HEART, count: 1, by: [C] }
+  ])
+  t.ok(HEART < '\u{1f600}', 'the emoji text order would have put the heart first')
 })
 
 test('reactions by non-members, banned or departed diaries are ignored', (t) => {
@@ -2522,7 +2521,7 @@ test('reactions by non-members, banned or departed diaries are ignored', (t) => 
   react(w, wX, p, THUMBS, 3) // never admitted
   react(w, wY, p, THUMBS, 4)
   react(w, wA, p, HEART, 5)
-  t.alike(reactionsOf(buildGroup(w.input()), p), [{ emoji: HEART, count: 1, by: [A] }, { emoji: THUMBS, count: 1, by: [Y] }])
+  t.alike(reactionsOf(buildGroup(w.input()), p), [{ emoji: THUMBS, count: 1, by: [Y] }, { emoji: HEART, count: 1, by: [A] }])
   w.push(G, groupBan({ member: Y, on: true, cuts: [{ writer: wY, seq: w.len(wY) }], at: AT(6) }))
   w.push(wA, groupLeave({ cuts: [{ writer: wA, seq: w.len(wA) }], at: AT(7) }))
   const g = buildGroup(w.input())
@@ -2569,7 +2568,7 @@ test('at most GROUP_REACTIONS_MAX distinct emojis per message, the most chosen k
   t.is(r.length, 12)
   t.alike(r.map((x) => x.emoji).sort(), emojis.slice(0, 12).sort())
   t.alike(r[0], { emoji: emojis[0], count: 2, by: [K(0x20), K(0x40)] })
-  // A diary that clears its reaction frees a slot for the next emoji in emoji order.
+  // A diary that clears its reaction frees a slot for the next emoji first used.
   react(w, K(0x605), p, '', 31)
   const r2 = reactionsOf(buildGroup(w.input()), p)
   t.is(r2.length, 12)
@@ -2577,7 +2576,7 @@ test('at most GROUP_REACTIONS_MAX distinct emojis per message, the most chosen k
   t.absent(r2.some((x) => x.emoji === emojis[13]))
 })
 
-test('the reaction cap counts members per emoji, never the order of `at`', (t) => {
+test('the reaction cap counts members per emoji first; `at` only breaks a tie in count, by first use', (t) => {
   const w = world()
   const p = post(w, G, 1)
   // Twelve diaries, each with its own emoji, all with an earlier `at`.
@@ -2597,13 +2596,41 @@ test('the reaction cap counts members per emoji, never the order of `at`', (t) =
   const r = reactionsOf(buildGroup(w.input()), p)
   t.is(r.length, 12)
   t.alike(r[0], { emoji: shared, count: 2, by: [K(0x40), K(0x41)] }, 'the emoji two members chose is kept, first')
-  // Ties at one member go by emoji: the last of the twelve is the one cut.
+  // Ties at one member go by first use: the last of the twelve is the one cut.
   t.alike(r.slice(1).map((x) => x.emoji), early.slice(0, 11))
   t.absent(r.some((x) => x.emoji === early[11]))
   // The same twelve whatever order the cores are read in.
   const other = w.input()
   other.writers = other.writers.slice().reverse()
   t.alike(reactionsOf(buildGroup(other), p), r)
+})
+
+test('at the reaction cap a tie goes to the emoji first used, not to the emoji text', (t) => {
+  const w = world()
+  const p = post(w, G, 1)
+  const used = []
+  for (let i = 0; i < 12; i++) {
+    const d = K(0x20 + i)
+    const wk = K(0x600 + i)
+    w.add(d, wk)
+    used.push(String.fromCodePoint(0x1f600 + i))
+    react(w, wk, p, used[i], 2 + i)
+  }
+  // One later diary picks an emoji that sorts before all twelve.
+  w.add(K(0x40), K(0x640))
+  react(w, K(0x640), p, HEART, 30)
+  const r = reactionsOf(buildGroup(w.input()), p)
+  t.is(r.length, 12)
+  t.alike(r.map((x) => x.emoji), used, 'the twelve first used are kept, in that order')
+  t.absent(r.some((x) => x.emoji === HEART), 'the late emoji is cut although its text sorts first')
+  t.absent(r.some((x) => 'first' in x), 'no fold detail leaks into the summary')
+  // A replacement moves the diary's reaction to its new place in the order.
+  react(w, K(0x600), p, '\u{1f680}', 31)
+  const r2 = reactionsOf(buildGroup(w.input()), p)
+  t.alike(r2.map((x) => x.emoji), [...used.slice(1), HEART])
+  const other = w.input()
+  other.writers = other.writers.slice().reverse()
+  t.alike(reactionsOf(buildGroup(other), p), r2, 'the same on every replica')
 })
 
 test('concurrent reactions converge on two replicas', (t) => {

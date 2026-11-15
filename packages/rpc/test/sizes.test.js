@@ -215,7 +215,8 @@ function diaryPeekResult (entries, invalid, missing, ch, preview = true) {
     invalid: Array(invalid).fill(SEQ),
     missing: Array(missing).fill(SEQ),
     profile: { name: ch.repeat(MAX_NAME), bio: ch.repeat(MAX_BIO), avatar: WORST_AVATAR },
-    username: 'u'.repeat(20)
+    username: 'u'.repeat(20),
+    certDate: AT
   }
 }
 
@@ -316,9 +317,9 @@ test('diary.peek: every partition of PEEK_SEQS_MAX fits with profile and usernam
     }
   }
   t.is(largest, worst, PEEK_SEQS_MAX + ' quote records dominate all partitions, including ' + PEEK_SEQS_MAX + ' invalid or missing seqs')
-  t.is(largest, 253762)
+  t.is(largest, 253803)
   t.ok(largest <= MAX_MESSAGE)
-  t.is(size(diaryPeekResult(PEEK_SEQS_MAX + 1, 0, 0, '\ud800', false)), 262421)
+  t.is(size(diaryPeekResult(PEEK_SEQS_MAX + 1, 0, 0, '\ud800', false)), 262462)
   t.ok(size(diaryPeekResult(PEEK_SEQS_MAX + 1, 0, 0, '\ud800', false)) > MAX_MESSAGE)
   t.comment('diary.peek worst case at ' + PEEK_SEQS_MAX + ' entries with profile and username: ' + largest + ' bytes')
   // All three arrays full would describe 96 requests, outside the contract.
