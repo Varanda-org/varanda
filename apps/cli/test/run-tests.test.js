@@ -585,6 +585,28 @@ test('--affected: nothing changed, a tree ref, and refs git refuses', async (t) 
   }
 })
 
+test('--affected against a tree sees a same-size rewrite made in the second the index was written', async (t) => {
+  const { dir } = tree(t)
+  affectedRepo(dir)
+  const green = gitIn(dir, 'rev-parse', 'HEAD^{tree}')
+  // Git compares by content an entry stamped no earlier than the index file
+  // (its racy check). Pin the file, its entry and the index to one past
+  // second, then rewrite the file at the same size in that second.
+  const file = path.join(dir, 'pkgs/core/index.js')
+  const second = new Date(1700000000 * 1000)
+  fs.utimesSync(file, second, second)
+  gitIn(dir, 'update-index', '--refresh')
+  fs.utimesSync(path.join(dir, '.git', 'index'), second, second)
+  fs.writeFileSync(file, 'module.exports = 2\n')
+  fs.utimesSync(file, second, second)
+  // No optional locks: a status that rewrote the index would mark the entry
+  // itself and hide what this test is about.
+  t.is(gitWith(dir, { GIT_OPTIONAL_LOCKS: '0' }, 'status', '--porcelain', '--', 'pkgs/core'), 'M pkgs/core/index.js', 'git itself sees the change')
+  const res = await runAffected(t, dir, green)
+  t.is(res.code, 0)
+  t.alike(res.ran, ['app', 'core'], 'the rewrite counts against the tree')
+})
+
 test('a pooled run starts unmeasured files first, then the slowest, and records every duration', async (t) => {
   const { dir, logFile } = tree(t)
   for (const name of ['a', 'b', 'c']) fixture(dir, name, 'done()')
