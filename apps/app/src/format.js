@@ -10,7 +10,7 @@ export function shortKey (key) {
 
 export function avatarColorOf (key) {
   const n = parseInt(String(key).slice(0, 2), 16)
-  return Number.isNaN(n) ? 0 : n % 5
+  return Number.isNaN(n) ? 0 : n % 8
 }
 
 export function relativeTime (at, now = Date.now()) {

@@ -191,7 +191,7 @@ test('ReplyPreview uses one plain quote for display and accessibility', async (t
   const src = read('ui/ReplyPreview.js')
   t.ok(src.includes("import { quoteText } from '../chatPreview'"))
   t.ok(src.includes('const shownText = quoteText(text)'))
-  t.ok(src.includes('<Text style={styles.text} numberOfLines={lines}>{shownText}</Text>'))
+  t.ok(src.includes('<Text style={[styles.text, onMineDark && { color: SOFT_ON_MINE_DARK }]} numberOfLines={lines}>{shownText}</Text>'))
   t.ok(src.includes("accessibilityLabel={(shownName ? shownName + ': ' : '') + shownText}"))
   // Execute the component's displayed expression without loading React Native.
   const match = src.match(/const shownText = ([^\n]+)/)

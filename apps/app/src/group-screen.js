@@ -15,11 +15,11 @@ export function groupRows (items, ownKey, now = Date.now()) {
     // same member within the time limit read as one run, as in WhatsApp.
     const reactions = !row.hidden && byRef.get(row.id)?.reactions
     const summary = Array.isArray(reactions) ? { reactions: reactions.filter((r) => r && typeof r === 'object').map(({ emoji, count, mine }) => ({ emoji, count, mine })) } : {}
-    return { ...row, ...summary, key: row.id, from: row.diary || row.writer, mine, side: mine ? 'mine' : 'theirs' }
+    return { ...row, ...summary, key: row.id, from: row.diary || row.writer, mine }
   }), now)
   return rows.map((row, i) => {
     const shape = bubbleShape(rows, i)
-    return { ...row, shape, showName: shape === 'first' || shape === 'single' }
+    return { ...row, shape }
   })
 }
 

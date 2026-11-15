@@ -1,0 +1,8 @@
+- Sobras das Conversas, parte 2 (fecha a issue #442): os rótulos "hoje" e "ontem" se atualizam à meia-noite e quando o app volta do segundo plano; o botão "ir para o fim" volta a responder ao toque no iOS e na web; no navegador, o mouse volta a selecionar o texto de uma bolha; cada conversa e cada grupo mantêm uma só folha de ações para todas as bolhas, em vez de uma por mensagem; leitores de tela não tratam mais a bolha como um botão que contém outros botões, e as ações seguem no botão da seta e nas ações de acessibilidade. Verificação em `docs/verification/fix-chat-bubble-leftovers.md`.
+- Nomes e avatares no chat usam 8 cores em vez de 5 (ameixa, azul-petróleo e rosa são novas), então menos pessoas dividem a mesma cor; a cor de cada pessoa continua igual nas citações, nas linhas de nome e no avatar. As cores de nome do tema claro ficaram um pouco mais escuras, e uma citação dentro da sua própria bolha no tema escuro usa tons mais claros, para o nome e o texto da citação ficarem legíveis.
+- Compartilhar uma comunidade espera o nome dela carregar (o botão fica desativado até lá), e o título do compartilhamento é sempre o nome da comunidade, nunca "Varanda".
+- O código de demonstração da Vitrine deixou de ser incluído no pacote web de produção; ele só entra em builds de desenvolvimento com a variável de opt-in.
+
+### Corrigido
+
+- Uma mensagem de conversa ou de grupo cujo envio não pôde ser confirmado agora continua na tela como uma bolha sua, esmaecida e com "Enviada", e o campo de texto fica livre. Numa conversa, "Tentar de novo" e "descartar" aparecem logo abaixo dela; num grupo, o aviso com "Conferir" lê o grupo antes de oferecer "Tentar de novo". Nada é reenviado sozinho.

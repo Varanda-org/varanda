@@ -261,6 +261,14 @@ export function sendPlan (hold, text, quoteId, attachments = []) {
   return attachmentSendPlan(hold, text, quoteId, attachments)
 }
 
+// The own faded bubble a send held as uncertain leaves at the end of the
+// chat: the text is shown, never as delivered ('uncertain' only prefixes
+// "Enviada" to the time and fades the bubble). null without a hold.
+export function heldBubble (hold) {
+  if (!hold || typeof hold.text !== 'string' || hold.text === '') return null
+  return { key: 'held', text: hold.text, rawText: hold.text, at: hold.at, status: 'uncertain' }
+}
+
 // Conversas as a page: the screens call the same dm.* names. The page's
 // conversations live on this device (docs/rpc.md 5.114): dm.list, dm.thread
 // and dm.seen read the node with `page`; dm.send and dm.set draft on the

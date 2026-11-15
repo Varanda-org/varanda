@@ -268,7 +268,7 @@ test('the index client statically imports only the enable check and guards the r
   const imports = [...code.matchAll(/\bimport\s+[^\n]+from\s+['"]([^'"]*vitrine\/[^'"]+)['"]/g)].map((m) => m[1])
   t.alike(imports, ['./vitrine/enabled.js'])
   t.ok(/const VITRINE = vitrineEnabled\(\{ EXPO_PUBLIC_VARANDA_VITRINE: process\.env\.EXPO_PUBLIC_VARANDA_VITRINE \}, typeof __DEV__ !== 'undefined' && __DEV__\)/.test(code))
-  t.ok(/if \(VITRINE\) \{\s*const \{ vitrineIndex: respond \} = require\('\.\/vitrine\/indexResponder'\)/.test(code))
+  t.ok(/if \(typeof __DEV__ !== 'undefined' && __DEV__ && process\.env\.EXPO_PUBLIC_VARANDA_VITRINE === '1' && VITRINE\) \{\s*const { vitrineIndex: respond \} = require\('\.\/vitrine\/indexResponder'\)/.test(code))
   t.is((code.match(/require\('\.\/vitrine\/indexResponder'\)/g) || []).length, 1)
   t.ok(/async function getJson \(url, deps = \{\}\) \{\s*if \(VITRINE\) return vitrineIndex\(url\)/.test(code))
 })

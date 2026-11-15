@@ -7,7 +7,7 @@ import { vitrineEnabled } from './vitrine/enabled.js'
 
 const VITRINE = vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE }, typeof __DEV__ !== 'undefined' && __DEV__)
 let vitrineIndex
-if (VITRINE) {
+if (typeof __DEV__ !== 'undefined' && __DEV__ && process.env.EXPO_PUBLIC_VARANDA_VITRINE === '1' && VITRINE) {
   const { vitrineIndex: respond } = require('./vitrine/indexResponder')
   vitrineIndex = (url) => {
     try {

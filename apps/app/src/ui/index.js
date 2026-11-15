@@ -4,10 +4,11 @@
 // Design: apps/site/artwork/app-design.md.
 
 import { cloneElement, isValidElement, useCallback, useEffect, useRef, useState } from 'react'
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
+import { ActivityIndicator, AppState, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
 import { PRESSED_OPACITY } from '../pressMotion'
+import { msUntilMidnight } from '../dayClock'
 import { Icon } from './Icon'
 import { fonts, layout, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
@@ -95,12 +96,28 @@ export function useAction () {
   return { run, pending, error, clearError: () => setError('') }
 }
 
-// Date.now(), refreshed every intervalMs (relative times stay current).
+// Date.now(), refreshed every intervalMs (relative times stay current), when
+// the app comes back to the foreground and at local midnight, so "hoje" and
+// "ontem" never go stale.
 export function useNow (intervalMs) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), intervalMs)
-    return () => clearInterval(timer)
+    const tick = () => setNow(Date.now())
+    const timer = setInterval(tick, intervalMs)
+    let midnight
+    const arm = () => {
+      clearTimeout(midnight)
+      midnight = setTimeout(() => { tick(); arm() }, msUntilMidnight())
+    }
+    arm()
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') { tick(); arm() }
+    })
+    return () => {
+      clearInterval(timer)
+      clearTimeout(midnight)
+      sub.remove()
+    }
   }, [intervalMs])
   return now
 }
