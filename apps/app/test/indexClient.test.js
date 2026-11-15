@@ -1811,3 +1811,19 @@ test('fetchFeira, fetchFeiraAuthor, fetchFeiraRatings: transport, contract, 404 
   t.ok(results.every((r) => r.ok), 'all settle ok')
   t.ok(maxOut <= 2, 'at most 2 in flight: ' + maxOut)
 })
+
+test('profileUrl and validProfile: tolerant of unknown keys, strict on known ones', async (t) => {
+  const { profileUrl, validProfile, fetchProfile } = await load()
+  const A = 'a'.repeat(64)
+  t.is(profileUrl(A), '/index/profile/' + A)
+  t.is(profileUrl(A.toUpperCase()), '/index/profile/' + A, 'author lowercased')
+  for (const author of [null, undefined, '', 'abc', A + 'a', 7]) t.is(profileUrl(author), null, 'author ' + String(author))
+  const flags = { indexing: false, complete: true }
+  t.alike(validProfile({ about: 3, mood: null, ...flags }), { about: 3, mood: null, ...flags })
+  t.alike(validProfile({ ...flags }), { about: null, mood: null, ...flags }, 'missing pointers read as null')
+  t.alike(validProfile({ about: 1, mood: 2, later: { x: 1 }, ...flags }), { about: 1, mood: 2, ...flags }, 'unknown keys ignored')
+  for (const bad of [null, [], 'x', { about: 0, ...flags }, { about: 1.5, ...flags }, { mood: '2', ...flags }, { about: 1, mood: Number.MAX_SAFE_INTEGER + 1, ...flags }, { about: 1, indexing: 'no', complete: true }, { about: 1, indexing: false }]) {
+    t.is(validProfile(bad), null, JSON.stringify(bad))
+  }
+  t.alike(await fetchProfile('nope'), { ok: false, reason: 'invalid-input' })
+})

@@ -60,6 +60,9 @@ import { pageNoticeStore } from '../pageNoticeStore'
 import { pageNoticeKey, pageReadKind } from '../pageNotice'
 import { PressScale } from '../ui/PressScale'
 import { ProfileHeader, ProfileStatus } from '../ui/ProfileHeader'
+import { AboutCard, useProfileExtra } from '../ui/AboutCard'
+import { MoodChip } from '../ui/MoodChip'
+import { extraView } from '../profileExtraView.js'
 import { BAR, ProfileBar, usePinnedTabSelect, useProfileBar } from '../ui/ProfileBar'
 import { LABELS } from '../dm'
 import { COUNTS_INCOMPLETE_NOTE } from '../pessoas'
@@ -849,6 +852,11 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
 
   const who = whoOf({ name: header.name, username: header.username })
   const own = typeof ownKey === 'string' && author === ownKey
+  // Rich profile (hosted only): the about card, the mood while it lives and
+  // the band theme. Nothing is read for a page, a blocked person or without a
+  // hosted node, and a profile without the records looks as it always did.
+  const extra = useProfileExtra({ author, enabled: node.hosted === true && !isPage && !blockedHere, request })
+  const extraShown = extraView(extra.held, now)
   const canReport = full && !own && typeof onReport === 'function' && typeof ownKey === 'string'
   const canBlock = canReport && blocks.available
   const unblock = async () => {
@@ -1065,6 +1073,9 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
         topInset={insets.top}
         onBack={full && bar.interactive ? undefined : onBack}
         bandButtons={null}
+        theme={extraShown.theme}
+        mood={extraShown.mood ? <MoodChip mood={extraShown.mood} now={now} theme={extraShown.theme} /> : null}
+        about={extraShown.about ? <AboutCard about={extraShown.about} theme={extraShown.theme} /> : null}
         rows={blockedHere ? null : <>{listingsRow}{recadosRow}{ratingsRow}</>}
         avatar={{ name: who.avatarName, publicKey: author, picture: header.avatar, persist: own || isFollowed }}
         title={displayText(who.title)}

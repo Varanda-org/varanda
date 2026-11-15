@@ -2427,6 +2427,25 @@ function createBrowserSession ({
     return { seq: r.seq, ref: r.ref, changed: r.changed, deleted: r.deleted }
   }
 
+  // profile.about / profile.mood: part of a write past one append may have
+  // landed (earlier tombstone chunks); count and push it, never retry the
+  // rest, and answer the original error.
+  async function profileExtraWrite (write) {
+    let r
+    try {
+      r = await withStore(write)
+    } catch (err) {
+      if (err !== null && typeof err === 'object' && Number.isSafeInteger(err.written)) {
+        wrote(err.written)
+        try { await pushAfterWrite() } catch {}
+      }
+      throw err
+    }
+    wrote(r.seq)
+    await pushAfterWrite()
+    return { seq: r.seq, ref: r.ref }
+  }
+
   // post.share / post.unshare (docs/rpc.md 5.122, 5.123): the recordDelete
   // path. pushAfterWrite is called even when nothing was written: it still
   // pushes while the seeder has not confirmed the local length.
@@ -3915,6 +3934,32 @@ function createBrowserSession ({
       await requireUnlocked()
       await ensureCaughtUp(epoch)
       const r = await withStore((c) => member.scrapDelete(c, { seq }))
+      if (r.changed) wrote(r.seq)
+      await pushAfterWrite()
+      return { seq: r.seq, deleted: r.deleted }
+    }),
+
+    // The rich profile (docs/rpc.md): appended to the own diary with the
+    // tombstones of every earlier live version (member.publishLatest), never
+    // retried; the newest record wins on every reader.
+    'profile.about': serial(async (params, epoch) => {
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      return profileExtraWrite((c) => member.profileAbout(c, params))
+    }),
+
+    'profile.mood': serial(async ({ emoji, text }, epoch) => {
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      return profileExtraWrite((c) => member.moodSet(c, { emoji, text }))
+    }),
+
+    // Withdraws the rich profile record of `kind`: every live version is
+    // tombstoned (member.profileExtraDelete), never retried.
+    'profile.extra.delete': serial(async ({ kind }, epoch) => {
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      const r = await withStore((c) => member.profileExtraDelete(c, { kind }))
       if (r.changed) wrote(r.seq)
       await pushAfterWrite()
       return { seq: r.seq, deleted: r.deleted }

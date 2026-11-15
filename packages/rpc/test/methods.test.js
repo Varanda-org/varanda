@@ -25,7 +25,7 @@ test('method list and mutating set', (t) => {
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
     'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moments.read', 'node.close', 'node.info', 'notices.list',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read', 'phone.proof', 'phone.sign',
-    'post.create', 'post.delete', 'post.quote', 'post.reply', 'post.share', 'post.shared', 'post.unshare', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
+    'post.create', 'post.delete', 'post.quote', 'post.reply', 'post.share', 'post.shared', 'post.unshare', 'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
     'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
@@ -33,7 +33,7 @@ test('method list and mutating set', (t) => {
     'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.react', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
     'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'listing.create', 'listing.delete', 'listing.edit', 'listing.rate', 'listing.status', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'node.close', 'page.register', 'post.create', 'post.delete',
     'post.quote', 'post.reply', 'post.share', 'post.unshare',
-    'profile.delete', 'profile.set', 'repost.set', 'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'sync.start', 'sync.stop', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'username.add'
+    'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.set', 'repost.set', 'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'sync.start', 'sync.stop', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'username.add'
   ])
 })
 
@@ -2789,4 +2789,82 @@ test('scrap.hide, scrap.delete and scrap.wall: value rules', (t) => {
   bad(t, 'scrap.hide', { from: KEY.slice(1), seq: 1 }, 'hide from')
   for (const who of ['following', 'everyone', 'nobody']) ok(t, 'scrap.wall', { who })
   for (const who of ['', 'Everyone', 'all', 1, null, ['nobody']]) bad(t, 'scrap.wall', { who }, 'who ' + JSON.stringify(who))
+})
+
+const ABOUT = { about: 'Moro em Recife', city: 'Recife', work: 'Professora', studies: 'Letras', interests: 'forró, café', birthday: '03-14', theme: 'mar' }
+const ABOUT_NULL = { about: null, city: null, work: null, studies: null, interests: null, birthday: null, theme: null }
+
+test('profile.about: mutating, seven required nullable fields and exact params', (t) => {
+  t.is(isMutating('profile.about'), true)
+  ok(t, 'profile.about', ABOUT, ABOUT)
+  ok(t, 'profile.about', ABOUT_NULL, ABOUT_NULL)
+  for (const field of Object.keys(ABOUT)) {
+    const missing = { ...ABOUT }
+    delete missing[field]
+    bad(t, 'profile.about', missing, 'missing ' + field)
+    bad(t, 'profile.about', { ...ABOUT, [field]: undefined }, 'undefined ' + field)
+    bad(t, 'profile.about', { ...ABOUT, [field]: 5 }, 'number ' + field)
+    bad(t, 'profile.about', { ...ABOUT, [field]: '' }, 'empty string ' + field + ' (null is empty)')
+  }
+  bad(t, 'profile.about', { ...ABOUT, extra: 1 }, 'extra field')
+  for (const invalid of [null, [], 'params', 1, Object.create(ABOUT)]) bad(t, 'profile.about', invalid, 'invalid params object')
+})
+
+test('profile.about: limits, controls and birthday and theme values', (t) => {
+  for (const [field, max] of [['about', 600], ['city', 60], ['work', 80], ['studies', 80], ['interests', 200]]) {
+    ok(t, 'profile.about', { ...ABOUT, [field]: 'a'.repeat(max) })
+    ok(t, 'profile.about', { ...ABOUT, [field]: '😀'.repeat(max) })
+    bad(t, 'profile.about', { ...ABOUT, [field]: 'a'.repeat(max + 1) }, field + ' too long')
+    bad(t, 'profile.about', { ...ABOUT, [field]: '   ' }, field + ' blank')
+    bad(t, 'profile.about', { ...ABOUT, [field]: 'a\u0000b' }, field + ' control')
+    bad(t, 'profile.about', { ...ABOUT, [field]: 'a\ud800b' }, field + ' lone surrogate')
+    bad(t, 'profile.about', { ...ABOUT, [field]: 'a\u202eb' }, field + ' bidi override')
+  }
+  ok(t, 'profile.about', { ...ABOUT, about: 'a\nb' })
+  for (const field of ['city', 'work', 'studies', 'interests']) bad(t, 'profile.about', { ...ABOUT, [field]: 'a\nb' }, field + ' newline')
+  for (const birthday of ['01-01', '02-29', '12-31', '04-30']) ok(t, 'profile.about', { ...ABOUT, birthday })
+  for (const birthday of ['00-10', '13-01', '01-00', '01-32', '02-30', '04-31', '1-1', '2000-01-01', '01/01', '01-01 ', 5]) {
+    bad(t, 'profile.about', { ...ABOUT, birthday }, 'birthday ' + birthday)
+  }
+  for (const theme of ['varanda', 'floresta', 'mar', 'por-do-sol', 'ipe', 'flor', 'lavanda', 'terra']) ok(t, 'profile.about', { ...ABOUT, theme })
+  for (const theme of ['', 'Mar', 'rosa', 'javascript:1', 5, ['mar']]) bad(t, 'profile.about', { ...ABOUT, theme }, 'theme ' + JSON.stringify(theme))
+})
+
+test('profile.mood: mutating, emoji required, text defaults to empty', (t) => {
+  t.is(isMutating('profile.mood'), true)
+  ok(t, 'profile.mood', { emoji: '😀', text: 'feliz' }, { emoji: '😀', text: 'feliz' })
+  ok(t, 'profile.mood', { emoji: '😀' }, { emoji: '😀', text: '' })
+  ok(t, 'profile.mood', { emoji: '', text: 'só texto' })
+  ok(t, 'profile.mood', { emoji: '', text: '' }, { emoji: '', text: '' })
+  bad(t, 'profile.mood', { text: 'oi' }, 'missing emoji')
+  bad(t, 'profile.mood', { emoji: '😀', extra: 1 }, 'extra field')
+  for (const invalid of [null, [], 'params', 1]) bad(t, 'profile.mood', invalid, 'invalid params object')
+})
+
+test('profile.extra.delete: mutating, kind about or mood and exact params', (t) => {
+  t.is(isMutating('profile.extra.delete'), true)
+  ok(t, 'profile.extra.delete', { kind: 'about' }, { kind: 'about' })
+  ok(t, 'profile.extra.delete', { kind: 'mood' }, { kind: 'mood' })
+  bad(t, 'profile.extra.delete', {}, 'missing kind')
+  t.is(validateParams('profile.extra.delete', {}).message, 'parâmetro obrigatório: kind')
+  for (const kind of ['', 'About', 'profile-about', 'profile', 'theme', 1, null, ['about']]) {
+    bad(t, 'profile.extra.delete', { kind }, 'kind ' + JSON.stringify(kind))
+    t.is(validateParams('profile.extra.delete', { kind }).message, 'parâmetro inválido: kind')
+  }
+  bad(t, 'profile.extra.delete', { kind: 'about', seq: 1 }, 'extra field')
+  for (const invalid of [null, [], 'params', 1, Object.create({ kind: 'about' })]) bad(t, 'profile.extra.delete', invalid, 'invalid params object')
+})
+
+test('profile.mood: one emoji and a short single-line text', (t) => {
+  for (const emoji of ['👨\u200d👩\u200d👧', '🇧🇷', '👍🏽', '1\ufe0f\u20e3']) ok(t, 'profile.mood', { emoji, text: '' })
+  for (const emoji of ['a', '😀😀', 'oi 😀', '😀\u0000', ' ', 5, null, '\u200d']) bad(t, 'profile.mood', { emoji, text: '' }, 'emoji ' + JSON.stringify(emoji))
+  ok(t, 'profile.mood', { emoji: '😀', text: 'a'.repeat(60) })
+  ok(t, 'profile.mood', { emoji: '😀', text: '😀'.repeat(60) })
+  bad(t, 'profile.mood', { emoji: '😀', text: 'a'.repeat(61) }, 'long text')
+  bad(t, 'profile.mood', { emoji: '😀', text: 'a\nb' }, 'newline')
+  bad(t, 'profile.mood', { emoji: '😀', text: 'a\u0000b' }, 'control')
+  bad(t, 'profile.mood', { emoji: '😀', text: 'a\ud800b' }, 'lone surrogate')
+  bad(t, 'profile.mood', { emoji: '😀', text: 'a\u2067b' }, 'bidi isolate')
+  bad(t, 'profile.mood', { emoji: '😀', text: 5 }, 'text type')
+  bad(t, 'profile.mood', { emoji: '😀', text: null }, 'text null')
 })

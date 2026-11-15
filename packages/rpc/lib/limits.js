@@ -21,6 +21,13 @@ const MAX_BIO = 280
 const MAX_TEXT = 1000
 const MAX_TESTIMONIAL = 400
 const MAX_SCRAP = 400
+// Rich profile (profile-about and mood records), same values as records.js.
+const MAX_ABOUT = 600
+const MAX_CITY = 60
+const MAX_WORK = 80
+const MAX_STUDIES = 80
+const MAX_INTERESTS = 200
+const MAX_MOOD_TEXT = 60
 const TESTIMONIAL_PENDING_MAX = 64
 const MEDIA_BLOCK_BYTES = 32768
 const MAX_MEDIA_BLOCKS = 8192
@@ -189,6 +196,12 @@ module.exports = {
   MAX_TEXT,
   MAX_TESTIMONIAL,
   MAX_SCRAP,
+  MAX_ABOUT,
+  MAX_CITY,
+  MAX_WORK,
+  MAX_STUDIES,
+  MAX_INTERESTS,
+  MAX_MOOD_TEXT,
   TESTIMONIAL_PENDING_MAX,
   MEDIA_BLOCK_BYTES,
   MAX_MEDIA_BLOCKS,

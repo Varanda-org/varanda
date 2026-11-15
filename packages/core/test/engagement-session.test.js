@@ -174,6 +174,25 @@ test('the recado methods are refused on the node session, nothing written', asyn
   t.alike(await failure(m.call('scrap.write', { to: OTHER, text: 'x'.repeat(401) })), { code: 'USAGE', message: 'parâmetro inválido: text' })
 })
 
+test('the perfil rico methods are refused on the node session, nothing written', async (t) => {
+  const NO = { code: 'USAGE', message: 'leitura sob demanda só na versão web' }
+  const m = await member(t)
+  const before = await m.call('log.read')
+  const about = { about: 'oi', city: null, work: null, studies: null, interests: null, birthday: '02-29', theme: 'mar' }
+  t.alike(await failure(m.call('profile.about', about)), NO)
+  t.alike(await failure(m.call('profile.mood', { emoji: '😀', text: 'bem' })), NO)
+  t.alike(await failure(m.call('profile.mood', { emoji: '' })), NO)
+  t.alike(await failure(m.call('profile.extra.delete', { kind: 'about' })), NO)
+  t.alike(await failure(m.call('profile.extra.delete', { kind: 'mood' })), NO)
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike(m.session.internal, [])
+  const USAGE = (p) => ({ code: 'USAGE', message: 'parâmetro inválido: ' + p })
+  t.alike(await failure(m.call('profile.about', { ...about, theme: 'neon' })), USAGE('theme'))
+  t.alike(await failure(m.call('profile.about', { ...about, birthday: '02-30' })), USAGE('birthday'))
+  t.alike(await failure(m.call('profile.mood', { emoji: 'ab' })), USAGE('emoji'))
+  t.alike(await failure(m.call('profile.extra.delete', { kind: 'theme' })), USAGE('kind'))
+})
+
 test('the dispatcher rejects unknown params on the new methods', async (t) => {
   const m = await member(t)
   const UNKNOWN = { code: 'USAGE', message: 'parâmetro desconhecido' }

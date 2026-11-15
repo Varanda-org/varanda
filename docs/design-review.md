@@ -49,6 +49,14 @@ Confira cada tela nas plataformas do ciclo:
 - Publicar
 - Ajustes
 - Introdução
+- Perfil rico, só no nó hospedado (Diário, Membro e Editar perfil; confira cada item no claro e no escuro, a 375 pt e a 1280 pt, com texto grande):
+  - Faixa do perfil em tema: os oito temas (Varanda, Floresta, Mar, Pôr do sol, Ipê, Flor, Lavanda e Terra), cada um no claro e no escuro, no Diário e no Membro, com o fio de destaque embaixo, o círculo de voltar e os botões da faixa legíveis, e a barra fixa do topo ainda no pôr do sol. Sem tema, a faixa de sempre.
+  - Pastilha de humor: com emoji e texto, só emoji, só texto, texto longo (sem corte nem sobreposição), "some em N h", no tema e fora dele; no Diário próprio é um botão de 44 pt.
+  - Cartão Sobre mim: texto em várias linhas, só as linhas preenchidas, borda de destaque na cor do tema; sem nada preenchido, o cartão não aparece.
+  - Seletor de tema: "Padrão" e as oito amostras, cada uma com alvo de pelo menos 44 pt, nome embaixo, aro e marca na escolhida, quebra de linha em tela estreita, leitor de tela lendo "Tema <nome>".
+  - Cartão Sorte do dia: só no Diário próprio, abaixo do cartão Sobre mim, sem botão.
+  - Editor (Sobre mim e Humor do dia): os campos e o seletor não ficam atrás do teclado, em Android, iOS e web, com o formulário inteiro ainda alcançável com o teclado aberto.
+  - Apagar sobre mim e Apagar humor: o botão só aparece com um registro, a confirmação cabe sem corte e os botões "Apagar" e "Cancelar" têm 44 pt; os textos de sucesso e de incerteza (com "Conferir") aparecem e depois de apagar o cartão, o tema e a pastilha somem do Diário.
 
 ## Critério de revisão
 

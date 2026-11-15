@@ -1006,6 +1006,21 @@ export function createVitrineRequest (fixtures, options) {
       const n = mediaStart++
       return { id: keyOf(0xe80 + n), key: keyOf(0xf80 + n), nonce: '0'.repeat(46) + (n % 100).toString().padStart(2, '0'), chunks: 1, bytes: 2048, sha256: keyOf(0x880 + n), mime, w: width, h: height, ms: 0 }
     },
+    // Perfil rico (docs/protocol.md): the newest record of each type wins.
+    'profile.about': (params) => append({ type: 'profile-about', about: params.about, city: params.city, work: params.work, studies: params.studies, interests: params.interests, birthday: params.birthday, theme: params.theme, at: stamp() }),
+    'profile.mood': ({ emoji, text }) => append({ type: 'mood', emoji, text: text === undefined ? '' : text, at: stamp() }),
+    // Every live version goes, as on the web node, so none shows again.
+    'profile.extra.delete': ({ kind }) => {
+      const type = kind === 'about' ? 'profile-about' : 'mood'
+      const seqs = logs.get(data.own).filter((e) => e.record.type === type && !deleted.has(`${data.own}:${e.seq}`)).map((e) => e.seq)
+      if (seqs.length === 0) refuse('USAGE', 'nada para apagar')
+      let last
+      for (const seq of seqs) {
+        last = append({ type: 'delete', seq, at: stamp() })
+        deleted.set(`${data.own}:${seq}`, last)
+      }
+      return { seq: last.seq, deleted: seqs }
+    },
     // Only an item the Vitrine media handle's putMoment answered and no
     // moment published yet, as the web node's entry check.
     'moment.create': ({ text, media, music }) => {

@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 55)
+  t.is(LEGAL_VERSION, 56)
   t.is(LEGAL_DATE, '15/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 55, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 56, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -324,7 +324,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'cfe86f0ea0ee91d31132a6ab10d9711ebac4fdbabe2865f0c3a81fd9f4d7b272', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '749a50029cb7065576d29787a0e6dc60b79120f2e6d68dc3b09eb05ded78e14c', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -557,6 +557,21 @@ test('legal: version 55 describes recados', async (t) => {
   t.ok(all(PRIVACY).includes('os recados são públicos: cada um fica no diário de quem o escreveu'))
   t.ok(all(PRIVACY).includes('o semeador pode associar essas leituras à sua conta'))
   t.ok(all(PRIVACY).includes('Tirar um recado da sua página e escolher quem pode deixar recado também são registros publicados no seu diário público, visíveis para qualquer pessoa'), 'hide and wall records are public')
+})
+
+test('legal: version 56 describes the rich profile and the Sorte do dia', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const all = (d) => d.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(all(TERMS).includes('Em Editar perfil você pode preencher, se quiser, um Sobre mim'))
+  t.ok(all(TERMS).includes('Tudo isso é opcional e público'), 'optional and public')
+  t.ok(all(PRIVACY).includes('são opcionais e públicos: cada um é um registro no seu diário, visível para qualquer pessoa'), 'public diary records')
+  t.ok(all(PRIVACY).includes('o aniversário (só o dia e o mês, nunca o ano)'), 'birthday has no year')
+  t.ok(all(PRIVACY).includes('o semeador vê qual perfil foi aberto e pode associar essa leitura à conta de quem abriu'), 'seeder sees the opened profile')
+  t.ok(all(PRIVACY).includes('A Sorte do dia é escolhida no próprio aparelho'), 'sorte on the device')
+  t.ok(all(PRIVACY).includes('não é enviada a ninguém, não usa a rede e não fica no seu diário'), 'sorte sends nothing')
+  t.ok(all(PRIVACY).includes('esse arquivo pode ir para o backup do aparelho no iCloud'), 'sorte seed may be in the iCloud backup')
+  t.ok(all(TERMS).includes('marca como apagadas as versões anteriores'), 'a new version marks the earlier one as deleted')
+  t.ok(all(PRIVACY).includes('cópias que outras pessoas ou semeadores já buscaram podem continuar existindo'), 'copies may remain')
 })
 
 test('legal: version 27 describes the invite card in the link and the messenger preview', async (t) => {

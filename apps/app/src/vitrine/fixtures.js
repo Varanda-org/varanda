@@ -493,4 +493,13 @@ const momentRows = [
 
 export const momentRecords = momentRows.map(([author, seq, text, when, p], i) => ({ author, seq, record: { type: 'moment', text, at: when, media: momentPhoto(i, p) } }))
 
-export const fixtures = { now, own, association, members, incompleteDiaries, applicants, pages, follows, conversations, uncertainSends, communities, groups, feed, noticePosts, notices, diaryRecords: [...diaryRecords, ...testimonialRecords, ...momentRecords, ...scrapRecords], sealed, listings, rates }
+// Perfil rico (docs/protocol.md): profile-about and mood records in the
+// writer's own diary. The moods are inside their 24 hours of `now`.
+export const profileRecords = [
+  { author: members[1].author, seq: 95, record: { type: 'profile-about', about: 'Pedalo pelo bairro todo fim de semana.\nSe quiser pedalar junto, é só chamar.', city: 'Curitiba', work: 'Entregador de pães', studies: null, interests: 'Bicicleta, café e fotografia', birthday: '03-14', theme: 'mar', at: at(4, 10) } },
+  { author: members[1].author, seq: 96, record: { type: 'mood', emoji: '🚲', text: 'Dia de pedalar', at: at(5, 9) } },
+  { author: members[2].author, seq: 95, record: { type: 'profile-about', about: 'Cultivo plantas e boas conversas.', city: 'Florianópolis', work: null, studies: 'Agronomia', interests: 'Jardinagem, chás e livros', birthday: '09-02', theme: 'floresta', at: at(4, 11) } },
+  { author: members[2].author, seq: 96, record: { type: 'mood', emoji: '🌱', text: 'Trocando mudas hoje', at: at(5, 11) } }
+]
+
+export const fixtures = { now, own, association, members, incompleteDiaries, applicants, pages, follows, conversations, uncertainSends, communities, groups, feed, noticePosts, notices, diaryRecords: [...diaryRecords, ...testimonialRecords, ...momentRecords, ...scrapRecords, ...profileRecords], sealed, listings, rates }
