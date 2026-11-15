@@ -36,7 +36,7 @@ const TITLE_FIT_MARGIN = 0.93
 // side controls, measured: with large text "‹ Ajustes" or "Cancelar" grow and a
 // fixed padding let the title run into them. One line, capped growth, shrunk
 // to fit before it is cut.
-function TopRow ({ onClose, title, left, right }) {
+function TopRow ({ onClose, title, left, right, closeLabel }) {
   const styles = useStyles(makeStyles)
   const [sides, setSides] = useState({ left: 0, right: 0, row: 0 })
   const [natural, setNatural] = useState(0)
@@ -83,8 +83,8 @@ function TopRow ({ onClose, title, left, right }) {
         {left !== undefined
           ? left
           : (
-            <Pressable accessibilityRole='button' accessibilityLabel='Cancelar' onPress={onClose} hitSlop={8} style={styles.cancelHit}>
-              <Text style={styles.cancel} maxFontSizeMultiplier={TEXT_CAP}>Cancelar</Text>
+            <Pressable accessibilityRole='button' accessibilityLabel={closeLabel} onPress={onClose} hitSlop={8} style={styles.cancelHit}>
+              <Text style={styles.cancel} maxFontSizeMultiplier={TEXT_CAP}>{closeLabel}</Text>
             </Pressable>
             )}
       </View>
@@ -94,12 +94,12 @@ function TopRow ({ onClose, title, left, right }) {
 }
 
 // Inside the iOS page sheet: its own safe-area insets.
-function IosContent ({ onClose, title, left, right, background, grabber, children }) {
+function IosContent ({ onClose, title, left, right, closeLabel, background, grabber, children }) {
   const styles = useStyles(makeStyles)
   const insets = useSafeAreaInsets()
   return (
     <View style={styles.iosRoot}>
-      <TopRow onClose={onClose} title={title} left={left} right={right} />
+      <TopRow onClose={onClose} title={title} left={left} right={right} closeLabel={closeLabel} />
       {grabber ? <View style={styles.grabberRow} pointerEvents='none'><View style={styles.grabber} /></View> : null}
       <View style={[styles.children, { paddingBottom: insets.bottom, backgroundColor: background }]}>{children}</View>
     </View>
@@ -210,11 +210,13 @@ function usePanelDrag ({ open, dismissable, onClose, reduceMotion }) {
   }
 }
 
+// `closeLabel` is the header's close word: 'Cancelar' where closing discards
+// something typed or picked, 'Fechar' on a sheet that only shows or acts.
 // `dismissable` false also turns off the native iOS swipe, which can close
 // the page sheet without waiting for onClose (a sheet with a send in flight).
 // `onDismiss` runs once the sheet has left the screen, where Modal reports it
 // (iOS and the web; Android's Modal does not).
-export function Sheet ({ open, onClose, onBack, onDismiss, title, left, right, background, grabber = true, dismissable = true, children }) {
+export function Sheet ({ open, onClose, onBack, onDismiss, title, left, right, closeLabel = 'Cancelar', background, grabber = true, dismissable = true, children }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const bodyBackground = background ?? colors.card
@@ -244,7 +246,7 @@ export function Sheet ({ open, onClose, onBack, onDismiss, title, left, right, b
         allowSwipeDismissal={dismissable}
       >
         <SafeAreaProvider>
-          <IosContent onClose={onClose} title={title} left={left} right={right} background={bodyBackground} grabber={grabber}>{body}</IosContent>
+          <IosContent onClose={onClose} title={title} left={left} right={right} closeLabel={closeLabel} background={bodyBackground} grabber={grabber}>{body}</IosContent>
         </SafeAreaProvider>
       </Modal>
     )
@@ -271,7 +273,7 @@ export function Sheet ({ open, onClose, onBack, onDismiss, title, left, right, b
         <View style={[styles.dragHeader, { paddingLeft: padL, paddingRight: padR }]} collapsable={false} {...drag.panHandlers}>
           <View pointerEvents={drag.dragging ? 'none' : 'auto'}>
             {grabber ? <View style={styles.grabberRow} pointerEvents='none'><View style={styles.grabber} /></View> : null}
-            <TopRow onClose={onClose} title={title} left={left} right={right} />
+            <TopRow onClose={onClose} title={title} left={left} right={right} closeLabel={closeLabel} />
           </View>
         </View>
         <View style={[styles.children, { paddingBottom: insets.bottom, paddingLeft: padL, paddingRight: padR, backgroundColor: bodyBackground }]}>{body}</View>
