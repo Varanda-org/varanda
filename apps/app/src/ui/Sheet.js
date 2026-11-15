@@ -212,7 +212,9 @@ function usePanelDrag ({ open, dismissable, onClose, reduceMotion }) {
 
 // `dismissable` false also turns off the native iOS swipe, which can close
 // the page sheet without waiting for onClose (a sheet with a send in flight).
-export function Sheet ({ open, onClose, onBack, title, left, right, background, grabber = true, dismissable = true, children }) {
+// `onDismiss` runs once the sheet has left the screen, where Modal reports it
+// (iOS and the web; Android's Modal does not).
+export function Sheet ({ open, onClose, onBack, onDismiss, title, left, right, background, grabber = true, dismissable = true, children }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const bodyBackground = background ?? colors.card
@@ -238,6 +240,7 @@ export function Sheet ({ open, onClose, onBack, title, left, right, background, 
         // A swipe down has already dismissed the page sheet when this runs,
         // so it always closes (onBack is the Android back button only).
         onRequestClose={onClose}
+        onDismiss={onDismiss}
         allowSwipeDismissal={dismissable}
       >
         <SafeAreaProvider>
@@ -259,6 +262,7 @@ export function Sheet ({ open, onClose, onBack, title, left, right, background, 
       transparent
       statusBarTranslucent
       onRequestClose={typeof onBack === 'function' ? onBack : onClose}
+      onDismiss={onDismiss}
     >
       <Backdrop style={styles.backdrop} onClose={onClose} />
       <Animated.View style={[styles.panel, { top: insets.top + layout.sheetTop, transform: [{ translateY: drag.y }] }]} onLayout={drag.handleLayout} {...scrollerFocusProps}>

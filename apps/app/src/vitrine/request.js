@@ -1023,6 +1023,7 @@ export function createVitrineRequest (fixtures, options) {
       }
       const profile = all.find((e) => e.seq === profileSeq && e.record.type === 'profile')?.record
       const username = all.find((e) => e.seq === usernameSeq && e.record.type === 'username')?.record
+      const cert = all.find((e) => e.seq === 0)?.record
       return {
         key: author,
         length: all[all.length - 1].seq + 1,
@@ -1030,7 +1031,9 @@ export function createVitrineRequest (fixtures, options) {
         invalid,
         missing,
         profile: profile ? { name: profile.name, bio: profile.bio, avatar: profile.avatar || null } : null,
-        username: username ? username.username : null
+        username: username ? username.username : null,
+        // docs/rpc.md 5.27: the date of the block-0 member certificate.
+        certDate: typeof cert?.date === 'string' ? cert.date : null
       }
     }
   }

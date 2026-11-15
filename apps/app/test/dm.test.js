@@ -696,6 +696,20 @@ test('Conversar is offered only for an open page on a hosted node with pages ena
   t.ok(src.includes("const listingsRow = node.hosted === true && !(isPage && lifecycle.moved) && typeof onOpenListings === 'function'"), 'listings require a hosted node and stay hidden on a moved page')
 })
 
+test('Continuar on the page notice hands over only once the sheet is gone', (t) => {
+  const sheetSrc = readFileSync(join(__dirname, '../src/ui/PageNoticeSheet.js'), 'utf8')
+  const baseSrc = readFileSync(join(__dirname, '../src/ui/Sheet.js'), 'utf8')
+  const proceed = sheetSrc.slice(sheetSrc.indexOf('const proceed = () => {'), sheetSrc.indexOf('  return (\n'))
+  t.ok(/pending\.current = onContinue\s+onClose\(\)/.test(proceed), 'Continuar closes the sheet and keeps the press-time onContinue')
+  t.absent(proceed.includes('onContinue()'), 'Continuar never hands over while the sheet is up')
+  t.ok(proceed.includes('if (!shownNow.current || gone.current || pending.current !== null) return'), 'a second press during the slide, or one after the sheet started closing, cannot queue a hand-over')
+  t.ok(/if \(shown\) \{[\s\S]*?pending\.current = null[\s\S]*?return undefined/.test(sheetSrc), 'a reopening drops a hand-over still waiting')
+  t.ok(sheetSrc.includes('onDismiss={flush}'), 'the hand-over waits for the sheet to report it is gone')
+  t.ok(sheetSrc.includes("setTimeout(flush, Platform.OS === 'android' ? 320 : 700)"), 'Android and a dismissal that never reports still hand over')
+  t.ok(baseSrc.includes('export function Sheet ({ open, onClose, onBack, onDismiss,'), 'Sheet takes onDismiss')
+  t.is(baseSrc.split('onDismiss={onDismiss}').length - 1, 2, 'both Modals of Sheet report the dismissal')
+})
+
 test('the page conversation notice persists per device and page key on both storage adapters', async (t) => {
   const { pageNoticeKey, pageNoticeSeen, notePageNotice } = await import('../src/pageNotice.js')
   const seenStore = new Map()

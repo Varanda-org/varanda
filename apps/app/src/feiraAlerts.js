@@ -10,7 +10,7 @@ export const MAX_SEARCHES = 10
 export const INTERVAL_MS = 15 * 60 * 1000
 const MAX_ORIGINS = 8
 const time = (n) => Number.isSafeInteger(n) && n >= 0
-const empty = () => ({ searches: [], counts: {}, lastRun: null })
+const empty = () => ({ searches: [], counts: {}, more: {}, lastRun: null })
 
 function normalize (value) {
   if (!value || !feira.isUf(value.uf)) return null
@@ -67,11 +67,14 @@ export function countNew (page, seenAtMs, now = Date.now()) {
 function cleanState (value) {
   const searches = list(value?.searches)
   const counts = {}
+  const more = {}
   for (const s of searches) {
     const count = value?.counts?.[s.id]
     counts[s.id] = Number.isSafeInteger(count) && count >= 0 ? count : 0
+    // "N+": the search had more pages than the count saw. A record without the flag reads as false.
+    more[s.id] = value?.more?.[s.id] === true && counts[s.id] > 0
   }
-  return { searches, counts, lastRun: time(value?.lastRun) ? value.lastRun : null }
+  return { searches, counts, more, lastRun: time(value?.lastRun) ? value.lastRun : null }
 }
 
 function decode (raw) {
@@ -117,13 +120,16 @@ export function createAlertsStore ({ read, write }) {
     list: async (origin) => (await access(origin)).searches,
     add: (origin, value, now = Date.now()) => access(origin, (state) => ({ ...state, ...add(state.searches, value, now) })),
     remove: (origin, id) => access(origin, (state) => cleanState({ ...state, searches: remove(state.searches, id) })),
-    markSeen: (origin, id, now = Date.now()) => access(origin, (state) => ({ ...state, searches: markSeen(state.searches, id, now), counts: { ...state.counts, [id]: 0 } })),
+    markSeen: (origin, id, now = Date.now()) => access(origin, (state) => ({ ...state, searches: markSeen(state.searches, id, now), counts: { ...state.counts, [id]: 0 }, more: { ...state.more, [id]: false } })),
     beginRun: (origin, now) => access(origin, (state) => state.searches.length && plan(now, state.lastRun) ? { ...state, lastRun: now } : null),
     recordCounts: (origin, results) => access(origin, (state) => {
       for (const result of results) {
         const current = state.searches.find((s) => s.id === result.id)
         // Opening or removing a search while its read is in flight wins.
-        if (current && current.seenAtMs === result.seenAtMs) state.counts[current.id] = result.count
+        if (current && current.seenAtMs === result.seenAtMs) {
+          state.counts[current.id] = result.count
+          state.more[current.id] = result.more === true
+        }
       }
       return cleanState(state)
     })

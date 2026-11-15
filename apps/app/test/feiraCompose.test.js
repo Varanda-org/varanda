@@ -53,6 +53,32 @@ test('feiraCompose: failed advance keeps errors visible beside the actions and a
   t.ok(move.includes('scrollRef.current?.scrollTo({ y: 0, animated: false })'), 'a new step starts at the top')
 })
 
+test('feiraCompose: an edit retires a step error in the bar too, not a publish error with no field', (t) => {
+  const src = source('src/screens/Anunciar.js')
+  const match = src.match(/const clearFieldError = \(\) => \{([\s\S]*?)\n {2}\}/)
+  t.ok(match, 'one helper retires a step error')
+  if (!match) return
+  const run = (field, step) => {
+    const calls = []
+    const stepErrorRef = { current: step }
+    vm.runInNewContext(match[1], { field, stepErrorRef, setError: (v) => calls.push(['error', v]), setField: (v) => calls.push(['field', v]) })
+    calls.push(['step', stepErrorRef.current])
+    return calls
+  }
+  t.alike(run('title', true), [['error', ''], ['field', ''], ['step', false]], 'a step error leaves the bar once the form changes')
+  t.alike(run('', true), [['error', ''], ['field', ''], ['step', false]], 'the word check, a step error with no field, leaves the bar too')
+  t.alike(run('', false), [['field', ''], ['step', false]], 'a publish error with no field (a failed send) stays in the bar')
+  const advance = src.slice(src.indexOf('const advance = () => {'), src.indexOf('// Descriptors are valid only'))
+  t.ok(/stepErrorRef\.current = true\s+setField\(problem\.field\)/.test(advance), 'the step marks its own errors')
+  const publish = src.slice(src.indexOf('const publish = async () => {'), src.indexOf('const retry = async () => {'))
+  t.ok(publish.includes('stepErrorRef.current = false'), 'a publish attempt clears the mark, so its own errors stay')
+  const set = src.slice(src.indexOf('const set = (patch) => {'), src.indexOf('const attach = async'))
+  t.ok(set.includes('clearFieldError()'), 'every form edit goes through it')
+  t.absent(set.includes("setField('')"), 'no edit clears only the inline error')
+  t.is(src.split('onPress={() => { setAck((v) => !v); clearFieldError() }}').length - 1, 1, 'the public confirmation goes through it')
+  t.absent(src.includes("setAck((v) => !v); setField('')"), 'the confirmation never leaves its error in the bar')
+})
+
 test('feiraCompose: review preview is labeled and uses a noninteractive tile', (t) => {
   const src = source('src/screens/Anunciar.js')
   t.ok(/<Label>Prévia<\/Label>\s+<ListingTile listing=\{previewListing\(form\)\} width='100%' \/>/.test(src))

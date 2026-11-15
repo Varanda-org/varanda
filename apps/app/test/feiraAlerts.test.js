@@ -109,3 +109,21 @@ test('web adapter persists JSON and reads changes from another store', async (t)
     delete globalThis.localStorage
   }
 })
+
+test('the "+" flag is stored beside the count, survives a fresh load and old records read as no "+"', async (t) => {
+  const { createAlertsStore } = await load()
+  const { newCountLabel } = await import('../src/feiraScreen.js')
+  let raw = null
+  const store = createAlertsStore({ read: () => raw, write: (value) => { raw = value } })
+  await store.add(O1, query, 100)
+  const id = (await store.load(O1)).searches[0].id
+  await store.recordCounts(O1, [{ id, seenAtMs: 100, count: 3, more: true }])
+  const fresh = await createAlertsStore({ read: () => raw, write: () => {} }).load(O1)
+  t.is(newCountLabel(fresh.counts[id], fresh.more[id]), '3+ novos')
+  const old = JSON.parse(raw)
+  delete old.origins[0].more
+  const legacy = await createAlertsStore({ read: () => JSON.stringify(old), write: () => {} }).load(O1)
+  t.is(newCountLabel(legacy.counts[id], legacy.more[id]), '3 novos')
+  await store.markSeen(O1, id, 200)
+  t.is((await store.load(O1)).more[id], false, 'opening a search clears the flag')
+})

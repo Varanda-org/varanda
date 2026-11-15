@@ -131,7 +131,7 @@ const resultKeys = {
   'feed.read': ['items', 'skipped', 'skippedTruncated', 'future', 'futureTruncated', 'incomplete', 'incompleteTruncated'],
   'notices.list': ['notices', 'next', 'incomplete', 'supported', 'activity'],
   'profile.read': ['profiles', 'missing'],
-  'diary.peek': ['key', 'length', 'entries', 'invalid', 'missing', 'profile', 'username'],
+  'diary.peek': ['key', 'length', 'entries', 'invalid', 'missing', 'profile', 'username', 'certDate'],
   'testimonial.write': ['seq', 'ref'],
   'testimonial.pending': ['items', 'incomplete'],
   'testimonial.show': ['seq', 'ref'],

@@ -2743,10 +2743,10 @@ async function syncRun ({
   // -> the peek result (docs/rpc.md diary.peek). key: lowercase hex64;
   // seqs: the requested seqs (each lands in exactly one of entries, invalid
   // or missing); profileSeq / usernameSeq: the seeder's hints (null = none),
-  // read only for `profile` / `username`; deadline: the session's. opts.cert
-  // (internal, never from diary.peek): the result also carries certDate, the
-  // date of the block-0 certificate (null when unreadable), for the Feira
-  // rule on a rater's membership age.
+  // read only for `profile` / `username`; deadline: the session's. opts.cert:
+  // the result also carries certDate, the date of the block-0 certificate
+  // (null when unreadable or its issuer revoked), for the Feira rule on a
+  // rater's membership age and the seller's line of diary.peek.
   async function peek (l, key, seqs, profileSeq, usernameSeq, deadline, opts = null) {
     if (ending || link !== l || seederLink() !== l) throw unavailable()
     if (isBlockedKey(key)) throw hidden()
@@ -2830,7 +2830,10 @@ async function syncRun ({
     }
     if (raw === null) return null
     const copy = validRecordCopy(decodeBlock(raw), 0)
-    return copy !== null && copy.type === 'member-cert' && copy.cert && typeof copy.cert.date === 'string' ? copy.cert.date : null
+    if (copy === null || copy.type !== 'member-cert' || !copy.cert || typeof copy.cert.date !== 'string') return null
+    // The own diary is never gated: its revoked v2 issuer vouches for no date.
+    if (copy.cert.v === 2 && blocklist.revokedIssuers().has(copy.cert.issuer)) return null
+    return copy.cert.date
   }
 
   function deletedOf (core) {

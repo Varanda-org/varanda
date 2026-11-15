@@ -54,16 +54,16 @@ Arquivos: `apps/app/src/screens/Conversa.js`, `apps/app/src/ui/ReplyPreview.js`,
 
 ## 3. Feira
 
-Arquivos: `apps/app/src/screens/Feira.js`, `apps/app/src/feiraScreen.js`, `apps/app/src/ui/ListingCard.js`.
+Arquivos: `apps/app/src/screens/Feira.js`, `apps/app/src/feiraScreen.js`, `apps/app/src/feiraBrowse.js` (grade de anúncios em `gridRows`).
 
 | Id | Onde | Hoje | Mudança proposta | Dono |
 |---|---|---|---|---|
 | UX-15 | `Feira.js:231` a `:238` | UF, cidade, palavras, tipo e categoria ficam num bloco só; a pessoa digita a cidade antes de ver qualquer anúncio. | Mostrar os anúncios primeiro; filtros num painel recolhido com resumo ("São Paulo, SP, Todos"). | feito (PR4) |
-| UX-16 | `Feira.js:233` | Cidade é texto livre; um erro de digitação devolve lista vazia sem dizer por quê. | Sugestões a partir da cidade lembrada e mensagem "nada em <cidade>" com atalho para limpar. A confirmar o texto de vazio. | feito em parte (PR4): o vazio tem "Limpar filtros" e "Trocar cidade", mas não há sugestão de cidade lembrada |
+| UX-16 | `Feira.js:233` | Cidade é texto livre; um erro de digitação devolve lista vazia sem dizer por quê. | Sugestões a partir da cidade lembrada e mensagem "nada em <cidade>" com atalho para limpar. A confirmar o texto de vazio. | feito (PR4): o vazio tem "Limpar filtros" e "Trocar cidade", e a última cidade com anúncios é oferecida como atalho |
 | UX-17 | `Feira.js:246` | Parágrafo único e longo explica contagens, intervalo de 15 minutos e offline. | Dividir em frases curtas; mover o detalhe técnico para a folha de ajuda (`Help`). | feito (PR4) |
 | UX-18 | `Feira.js:215` | A troca de segmento usa `FilterChips`, o mesmo componente dos filtros: dois níveis de navegação parecem iguais. | Usar `Segmented` para o segmento e chips só para filtro. | adiado: o segmento (Na cidade, Buscas, Meus, Salvos) segue em `FilterChips`, o mesmo componente dos filtros |
 | UX-19 | `Feira.js:247` | "Você ainda não tem buscas salvas neste aparelho" sem ação. | Estado vazio com o passo seguinte: "Busque e salve para ser avisado". | adiado: segue "Você ainda não tem buscas salvas neste aparelho." sem ação |
-| UX-20 | `Feira.js:274` | A lista usa `ListingCard` sem separar "novos desde a última visita". | Marcar o que chegou desde a última abertura. A confirmar com dado da Vitrine. | feito em parte (PR4): "N novos" só nas buscas salvas; a lista não marca o que chegou desde a última visita |
+| UX-20 | `Feira.js:274` | A grade de anúncios (`gridRows`) não separa "novos desde a última visita". | Marcar o que chegou desde a última abertura. A confirmar com dado da Vitrine. | feito em parte (PR4): "N novos" só nas buscas salvas; a lista não marca o que chegou desde a última visita |
 | UX-21 | `Feira.js:294` | O botão flutuante "Anunciar" limita a fonte (`TEXT_CAP`) e pode cobrir o último card. | Reservar espaço no fim da lista (`useBottomPad`) e conferir com fonte 1.3. | feito (PR4) |
 
 ## 4. Anúncio e Anunciar
