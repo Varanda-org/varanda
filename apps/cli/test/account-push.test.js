@@ -140,6 +140,7 @@ async function setup (t, { vapid = true, token = true, push = true, send = null 
           pushStore,
           vapid: keys === null ? null : { ...keys, subject: ORIGIN },
           send: send ?? ((args) => sendPush({ ...args, fetch: fakeFetch, now: c.now() })),
+          delayMs: () => 0,
           relayTokenHash: token ? sha256(relayToken) : null,
           topicKey: TOPIC_KEY
         }
@@ -443,7 +444,7 @@ function routes (relayTokenHash, extra = {}) {
     fromStore: (e) => e,
     keyedWindow: () => () => true
   }
-  const r = createPushRoutes({ association: '0'.repeat(64), accounts: { status: () => ({ linked: false }) }, relayTokenHash, http, ...extra })
+  const r = createPushRoutes({ association: '0'.repeat(64), accounts: { status: () => ({ linked: false }) }, relayTokenHash, delayMs: () => 0, http, ...extra })
   return { r, errors }
 }
 
@@ -928,6 +929,7 @@ test('relay: a capped DM wake counts the rest, rotates where the next one starts
   const r = createPushRoutes({
     association: '0'.repeat(64),
     accounts: { status: () => ({ linked: false }) },
+    delayMs: () => 0,
     relayTokenHash: sha256(token),
     pushStore,
     vapid: {},
@@ -1015,6 +1017,7 @@ async function inviteRoutes (t, { vapid = true, spy = false, hold = false } = {}
   const r = createPushRoutes({
     association: '0'.repeat(64),
     accounts: { status: () => ({ linked: false }) },
+    delayMs: () => 0,
     pushStore,
     vapid: vapid ? { ...keys, subject: ORIGIN } : null,
     send,
@@ -1157,6 +1160,7 @@ test('notifyInvite: room shrinks with queued invite jobs, never past a quarter o
   const relayed = createPushRoutes({
     association: '0'.repeat(64),
     accounts: { status: () => ({ linked: false }) },
+    delayMs: () => 0,
     pushStore: s.pushStore,
     vapid: { ...s.keys, subject: ORIGIN },
     send: () => new Promise(() => {}),
@@ -1221,6 +1225,7 @@ test('notifyInvite: no invite enters once member notices fill half the queue', a
   const relayed = createPushRoutes({
     association: '0'.repeat(64),
     accounts: { status: () => ({ linked: false }) },
+    delayMs: () => 0,
     pushStore: s.pushStore,
     vapid: { ...s.keys, subject: ORIGIN },
     send: () => new Promise(() => {}),
@@ -1271,4 +1276,239 @@ test('notifyInvite: a 410 removes the row; the relay still refuses an invite-dro
   await new Promise((resolve) => setTimeout(resolve, 50))
   t.is(relay.delivered.length, 0, 'the relay never delivers an invite drop')
   cleanLogs(t, relay, [sub.endpoint])
+})
+
+// Privacy delay: every notice waits one random 0 to 60 s, shared by all its copies.
+const HTTP_STUB = { send: () => {}, sendError: () => {}, readJsonBody: async () => ({}), checkPost: () => {}, RouteError: Error, refuse: (c) => new Error(c), fromStore: (e) => e, keyedWindow: () => () => true }
+
+async function delayedRoutes (t, delays, extra = {}) {
+  const s = await inviteRoutes(t, { spy: true })
+  const timers = []
+  const cleared = []
+  const sent = []
+  const logs = []
+  let i = 0
+  const r = createPushRoutes({
+    association: '0'.repeat(64),
+    accounts: { status: () => ({ linked: false }) },
+    pushStore: s.pushStore,
+    vapid: { ...s.keys, subject: ORIGIN },
+    send: async (args) => { sent.push(args.subscription.endpoint); return 'ok' },
+    delayMs: () => delays[i++ % delays.length],
+    setTimer: (fn, ms) => { const h = { fn, ms }; timers.push(h); return h },
+    clearTimer: (h) => cleared.push(h),
+    log: (e) => logs.push(e),
+    now: s.clock.now,
+    http: HTTP_STUB,
+    ...extra
+  })
+  // Time passes and the latest timer fires.
+  const fire = (ms = 60000) => {
+    s.clock.t += ms
+    timers[timers.length - 1].fn()
+  }
+  return { s, r, timers, cleared, sent, logs, fire }
+}
+
+const invite = (s, m) => ({ member: m.hex, topic: INVITE_TOPIC, deadline: s.clock.t + 300000 })
+
+test('push delay: a job waits for its own random time, once, and a stale timer is replaced', async (t) => {
+  const { s, r, timers, cleared, sent, fire } = await delayedRoutes(t, [30000, 5000])
+  const m = member()
+  const n = member()
+  const a = await s.subscribe(m)
+  const b = await s.subscribe(n)
+  t.is(r.notifyInvite(invite(s, m)), 'queued')
+  t.is(r.notifyInvite(invite(s, n)), 'queued')
+  t.is(sent.length, 0, 'nothing is sent at enqueue time')
+  t.is(r.stats().queued, 2)
+  t.is(timers[timers.length - 1].ms, 5000, 'the timer targets the earliest job')
+  fire(5000)
+  await until(() => sent.length === 1, { name: 'first sent' })
+  t.is(sent[0], b.endpoint)
+  t.is(r.stats().queued, 1)
+  fire(25000)
+  await until(() => sent.length === 2, { name: 'second sent' })
+  t.is(sent[1], a.endpoint)
+  t.is(r.stats().queued, 0)
+  t.ok(cleared.length > 0, 'a pending timer is cleared when re-armed')
+  await r.close()
+})
+
+test('push delay: every copy of one notice leaves at the same time, from one draw', async (t) => {
+  let draws = 0
+  const { s, r, sent, fire } = await delayedRoutes(t, [30000], { delayMs: () => { draws++; return 30000 } })
+  const m = member()
+  await s.subscribe(m)
+  await s.subscribe(m)
+  await s.subscribe(m)
+  t.is(r.notifyInvite(invite(s, m)), 'queued')
+  t.is(draws, 1, 'one draw for the three copies of the invite')
+  fire(29999)
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  t.is(sent.length, 0, 'no copy leaves early')
+  fire(1)
+  await until(() => sent.length === 3, { name: 'the three copies sent together' })
+  t.is(r.notifyDeletion({ member: m.hex }), 'queued')
+  t.is(draws, 2, 'one draw for the three copies of the deletion notice')
+  await r.close()
+  t.is(r.room(), 0, 'a closed service claims no invite slot')
+})
+
+test('push delay: a row turned off or re-keyed while its job waits is never sent to', async (t) => {
+  const { s, r, sent, logs, fire } = await delayedRoutes(t, [30000])
+  const m = member()
+  const gone = await s.subscribe(m)
+  const rekeyed = await s.subscribe(m)
+  const moved = await s.subscribe(m)
+  t.is(r.notifyInvite(invite(s, m)), 'queued')
+  await s.pushStore.remove({ member: m.hex, endpoint: gone.endpoint })
+  const fresh = subscription()
+  await s.pushStore.put({ member: m.hex, endpoint: rekeyed.endpoint, p256dh: fresh.p256dh, auth: fresh.auth })
+  const other = member()
+  await s.pushStore.put({ member: other.hex, endpoint: moved.endpoint, p256dh: moved.p256dh, auth: moved.auth })
+  fire()
+  await until(() => r.stats().queued === 0 && r.stats().inFlight === 0 && r.stats().dropped >= 3, { name: 'dropped' })
+  t.is(sent.length, 0, 'nothing was sent')
+  t.is(r.stats().dropped, 3)
+  t.is(logs.filter((e) => e.reason === 'descartado').length, 3)
+  await r.close()
+})
+
+test('push delay: the relay path (/push-event) waits too', async (t) => {
+  const token = 'ef'.repeat(32)
+  const actor = member()
+  const recipient = member()
+  const event = { v: 1, kind: 'like', actor: actor.hex, recipient: recipient.hex, seq: 1, ref: recipient.hex + ':7', name: null }
+  const { s, r, sent, timers, fire } = await delayedRoutes(t, [20000], {
+    relayTokenHash: sha256(token),
+    http: { ...HTTP_STUB, readJsonBody: async () => event }
+  })
+  const sub = await s.subscribe(recipient)
+  await r.handleRelay({ method: 'POST', headers: { authorization: 'Bearer ' + token } }, {})
+  t.is(sent.length, 0, 'not sent at once')
+  t.is(r.stats().queued, 1)
+  t.is(timers[timers.length - 1].ms, 20000)
+  fire(20000)
+  await until(() => sent.length === 1, { name: 'relay sent' })
+  t.is(sent[0], sub.endpoint)
+  await r.close()
+})
+
+test('push delay: a DM wake waits one delay for every subscription', async (t) => {
+  const token = 'fa'.repeat(32)
+  const { s, r, sent, timers, fire } = await delayedRoutes(t, [10000, 40000], {
+    relayTokenHash: sha256(token),
+    http: { ...HTTP_STUB, readJsonBody: async () => ({ v: 1, kind: 'dm-wake' }) }
+  })
+  const a = await s.subscribe(member())
+  const b = await s.subscribe(member())
+  await r.handleRelay({ method: 'POST', headers: { authorization: 'Bearer ' + token } }, {})
+  t.is(sent.length, 0, 'not sent at once')
+  t.is(r.stats().queued, 2)
+  t.is(timers[timers.length - 1].ms, 10000, 'one draw for the whole fan-out')
+  fire(10000)
+  await until(() => sent.length === 2, { name: 'both wakes together' })
+  t.alike(sent.slice().sort(), [a.endpoint, b.endpoint].sort())
+  await r.close()
+})
+
+test('push delay: a deletion notice waits', async (t) => {
+  const { s, r, sent, timers, fire } = await delayedRoutes(t, [15000])
+  const m = member()
+  const sub = await s.subscribe(m)
+  t.is(r.notifyDeletion({ member: m.hex }), 'queued')
+  t.is(sent.length, 0, 'not sent at once')
+  t.is(timers[timers.length - 1].ms, 15000)
+  fire(15000)
+  await until(() => sent.length === 1, { name: 'deletion sent' })
+  t.is(sent[0], sub.endpoint)
+  await r.close()
+})
+
+test('push delay: close sends the jobs still waiting, now, once, and clears the timer', async (t) => {
+  const { s, r, timers, cleared, sent } = await delayedRoutes(t, [40000])
+  const m = member()
+  const sub = await s.subscribe(m)
+  r.notifyInvite(invite(s, m))
+  const pending = timers[timers.length - 1]
+  t.is(sent.length, 0)
+  await r.close()
+  t.ok(cleared.includes(pending), 'timer cleared')
+  t.alike(sent, [sub.endpoint], 'flushed at close')
+  t.is(r.stats().queued, 0)
+  pending.fn()
+  await r.close()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  t.is(sent.length, 1, 'no second send')
+  // A job queued after close is never sent.
+  t.is(r.notifyDeletion({ member: m.hex }), 'queued')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  t.is(sent.length, 1, 'nothing after close')
+})
+
+test('push delay: close flush is bounded and never waits on a send that hangs', async (t) => {
+  const timers = []
+  const hang = await delayedRoutes(t, [40000], { send: () => new Promise(() => {}), setTimer: (fn, ms) => { const h = { fn, ms }; timers.push(h); return h } })
+  const m = member()
+  await hang.s.subscribe(m)
+  hang.r.notifyDeletion({ member: m.hex })
+  const closing = hang.r.close()
+  const limit = timers[timers.length - 1]
+  t.is(limit.ms, 3000, 'bounded by a short total timeout')
+  limit.fn()
+  await closing
+  t.pass('close returned')
+})
+
+test('push delay: the default delay is crypto-random in [0, 60000] and a timer is armed and unref-ed', async (t) => {
+  const { pushDelay, PUSH_DELAY_MAX_MS } = require('../lib/account/push-routes')
+  t.is(PUSH_DELAY_MAX_MS, 60000)
+  const seen = new Set()
+  let min = Infinity
+  let max = -Infinity
+  for (let i = 0; i < 2000; i++) {
+    const d = pushDelay()
+    if (!Number.isInteger(d) || d < 0 || d > 60000) return t.fail('out of range: ' + d)
+    seen.add(d)
+    min = Math.min(min, d)
+    max = Math.max(max, d)
+  }
+  t.ok(seen.size > 1000, 'real variation (' + seen.size + ' distinct)')
+  t.ok(min < 3000 && max > 57000, 'spread over the whole range')
+
+  const s = await inviteRoutes(t, { spy: true })
+  let handle = null
+  const r = createPushRoutes({
+    association: '0'.repeat(64),
+    accounts: { status: () => ({ linked: false }) },
+    pushStore: s.pushStore,
+    vapid: { ...s.keys, subject: ORIGIN },
+    send: async () => 'ok',
+    delayMs: () => 5000,
+    setTimer: (fn, ms) => { handle = { ms, unref () { this.unrefed = true } }; return handle },
+    clearTimer: () => {},
+    log: () => {},
+    now: s.clock.now,
+    http: HTTP_STUB
+  })
+  const m = member()
+  await s.subscribe(m)
+  r.notifyInvite(invite(s, m))
+  t.ok(handle !== null, 'a timer was armed')
+  t.is(handle.ms, 5000)
+  t.ok(handle.unrefed, 'unref-ed')
+  await r.close()
+})
+
+// A tick in flight may still queue a push: it must reach the queue before
+// close() flushes it, or its invite slot is marked and never sent.
+test('serve: the invite loop and the deletion sweep stop before the push queue closes (issue #231)', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'commands', 'account.js'), 'utf8')
+  const close = src.indexOf('await listener.close()')
+  t.ok(close > 0, 'serve() closes the listener')
+  const loop = src.indexOf('await loop.stop()')
+  t.ok(loop > 0 && loop < close, 'the invite loop stops first')
+  const sweep = src.indexOf('if (stopDeletionSweep !== null) stopDeletionSweep()')
+  t.ok(sweep > 0 && sweep < close, 'the deletion sweep stops first')
 })

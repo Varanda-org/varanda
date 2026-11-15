@@ -66,6 +66,11 @@ const PUSH_PAD_TO = 1024
 const INVITE_QUEUE_MAX = Math.floor(MAX_QUEUE / 4)
 
 const sha256 = (value) => nodeCrypto.createHash('sha256').update(value).digest()
+// Privacy delay before every Web Push send (maintainer decision 2026-11-15).
+const PUSH_DELAY_MAX_MS = 60 * 1000
+// Total time close() may spend sending the jobs still waiting.
+const FLUSH_MS = 3000
+const pushDelay = () => nodeCrypto.randomInt(0, PUSH_DELAY_MAX_MS + 1)
 
 function createPushRoutes ({
   association,
@@ -83,6 +88,12 @@ function createPushRoutes ({
   phoneChecked = () => {},
   log = () => {},
   now = Date.now,
+  // Every send waits a uniformly random 0 to PUSH_DELAY_MAX_MS from its
+  // enqueue, so the arrival time of a notice does not line up with the
+  // event that caused it. Injectable for tests (() => 0 sends at once).
+  delayMs = pushDelay,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
   http
 }) {
   const { send: reply, sendError, readJsonBody, checkPost, RouteError, refuse, fromStore, keyedWindow } = http
@@ -117,6 +128,18 @@ function createPushRoutes ({
   // offset rotates which subscriptions a capped fan-out reaches first.
   let wakeAt = null
   let wakeAfter = null
+  let timer = null
+  let closed = false
+
+  // Jobs stay in the queue until their notice's random time (job.at), drawn
+  // once per notice so every copy (one per device) leaves together: a push
+  // service that sees several copies cannot take the earliest. The cooldowns
+  // and budgets are decided at enqueue time, so the delay never double-sends
+  // or skips a notice.
+  function enqueue (job, at) {
+    job.at = at
+    queue.push(job)
+  }
 
   function storeUsable () {
     return pushStore !== null && pushStore.available()
@@ -352,12 +375,13 @@ function createPushRoutes ({
     const body = pushBody({ kind, name: event.name, username })
     const payload = JSON.stringify({ v: 1, kind, body, actor, recipient, ref })
     const topic = nodeCrypto.createHmac('sha256', topicKey).update(id).digest('hex').slice(0, 32)
+    const at = now() + delayMs()
     for (const subscription of subs) {
       if (queue.length >= MAX_QUEUE) {
         dropped++
         continue
       }
-      queue.push({ recipient, subscription, payload, topic })
+      enqueue({ recipient, subscription, payload, topic }, at)
     }
     pump()
   }
@@ -396,9 +420,10 @@ function createPushRoutes ({
     wakeAt = t
     const payload = dmWakePayload()
     const topic = nodeCrypto.createHmac('sha256', topicKey).update('dm-wake ' + t).digest('hex').slice(0, 32)
+    const at = t + delayMs()
     for (let i = 0; i < take; i++) {
       const { member, endpoint, p256dh, auth } = subs[(start + i) % subs.length]
-      queue.push({ recipient: member, subscription: { endpoint, p256dh, auth }, payload, topic })
+      enqueue({ recipient: member, subscription: { endpoint, p256dh, auth }, payload, topic }, at)
     }
     pump()
   }
@@ -406,9 +431,10 @@ function createPushRoutes ({
   // Invites only enter while the queue is under half full: a DM wake may hold
   // the other half (wake), so member notices always keep room of their own.
   // No transport means no room: the loop then claims nothing, so the week's
-  // slots are still sent once push comes back.
+  // slots are still sent once push comes back. A closed service has no room
+  // either: a slot claimed after close() would never be sent.
   function room () {
-    if (vapid === null || !storeUsable()) return 0
+    if (closed || vapid === null || !storeUsable()) return 0
     return Math.max(0, Math.min(INVITE_QUEUE_MAX - invitesQueued, Math.floor(MAX_QUEUE / 2) - queue.length))
   }
 
@@ -430,9 +456,10 @@ function createPushRoutes ({
       return 'dropped'
     }
     const payload = inviteDropPayload()
+    const at = now() + delayMs()
     for (let i = 0; i < subs.length; i++) {
       const { endpoint, p256dh, auth } = subs[i]
-      queue.push({ recipient: member, subscription: { endpoint, p256dh, auth }, payload, topic, deadline })
+      enqueue({ recipient: member, subscription: { endpoint, p256dh, auth }, payload, topic, deadline }, at)
       invitesQueued++
     }
     pump()
@@ -451,16 +478,21 @@ function createPushRoutes ({
     }
     const payload = deletionPayload()
     const topic = nodeCrypto.createHmac('sha256', topicKey).update('delete-scheduled ' + member).digest('hex').slice(0, 32)
+    const at = now() + delayMs()
     for (const { endpoint, p256dh, auth } of subs) {
-      queue.push({ recipient: member, subscription: { endpoint, p256dh, auth }, payload, topic })
+      enqueue({ recipient: member, subscription: { endpoint, p256dh, auth }, payload, topic }, at)
     }
     pump()
     return 'queued'
   }
 
   function pump () {
-    while (inFlight < MAX_IN_FLIGHT && queue.length > 0) {
-      const job = queue.shift()
+    if (closed) return
+    while (inFlight < MAX_IN_FLIGHT) {
+      const t = now()
+      const i = queue.findIndex((j) => j.at <= t)
+      if (i < 0) break
+      const job = queue.splice(i, 1)[0]
       if (job.deadline !== undefined) invitesQueued--
       inFlight++
       deliverOne(job).finally(() => {
@@ -468,6 +500,47 @@ function createPushRoutes ({
         pump()
       })
     }
+    arm()
+  }
+
+  // One timer, for the earliest job not yet due. A full pool re-pumps when
+  // a send ends, so no timer is needed then.
+  function arm () {
+    if (timer !== null) clearTimer(timer)
+    timer = null
+    if (closed || queue.length === 0 || inFlight >= MAX_IN_FLIGHT) return
+    const next = queue.reduce((min, j) => Math.min(min, j.at), Infinity)
+    timer = setTimer(() => {
+      timer = null
+      pump()
+    }, Math.max(0, next - now()))
+    if (timer !== null && typeof timer.unref === 'function') timer.unref()
+  }
+
+  // Service shutdown: jobs still waiting for their delay go out now (the
+  // jitter is lost), best effort and bounded by FLUSH_MS in all, never
+  // retried. Dropping them would lose them for good, and an invite drop's
+  // slot is already claimed.
+  async function close () {
+    if (closed) return
+    closed = true
+    if (timer !== null) clearTimer(timer)
+    timer = null
+    const jobs = queue.splice(0)
+    invitesQueued = 0
+    if (jobs.length === 0) return
+    let limit = null
+    const expired = new Promise((resolve) => {
+      limit = setTimer(resolve, FLUSH_MS)
+      if (limit !== null && typeof limit.unref === 'function') limit.unref()
+    })
+    const worker = async () => {
+      while (jobs.length > 0) await deliverOne(jobs.shift())
+    }
+    const work = Promise.all(Array.from({ length: Math.min(MAX_IN_FLIGHT, jobs.length) }, worker)).catch(() => {})
+    await Promise.race([work, expired])
+    clearTimer(limit)
+    jobs.length = 0
   }
 
   // The row queued may have been turned off (or re-keyed) while the job
@@ -521,7 +594,7 @@ function createPushRoutes ({
     return { nonces: nonces.size, seen: seen.size, queued: queue.length, inFlight, dropped }
   }
 
-  return { owns, handle, handleRelay, stats, notifyInvite, notifyDeletion, room }
+  return { owns, handle, handleRelay, stats, notifyInvite, notifyDeletion, room, close }
 }
 
 module.exports = {
@@ -529,6 +602,8 @@ module.exports = {
   MAX_QUEUE,
   MAX_IN_FLIGHT,
   PUSH_PAD_TO,
+  PUSH_DELAY_MAX_MS,
+  pushDelay,
   INVITE_QUEUE_MAX,
   createPushRoutes
 }
