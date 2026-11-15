@@ -35,7 +35,7 @@ test('unusableSteps for a passkey created here: delete, create again, other brow
   t.is(all.length, 3)
   t.ok(all[0].startsWith('1. Se você não usou essa passkey para entrar em outro aparelho, apague a passkey "Varanda 1e0b24"'))
   t.ok(all[1].startsWith('2. Toque em ' + RETRY_LABEL + ' e crie a passkey outra vez.'))
-  t.ok(all[1].includes('escolha um gerenciador de senhas que sincroniza entre aparelhos (o do celular, do Google ou da Apple)'))
+  t.ok(all[1].includes('escolha um gerenciador de senhas que sincroniza entre aparelhos (o do celular, do Google, da Apple ou outro)'))
   t.is(all[2], '3. Se não der certo, abra o Varanda no Safari ou no Chrome.')
 
   const noId = unusableSteps({ userIds: [], created: true })
@@ -79,7 +79,7 @@ test('unusableSteps on the installed app suggests a synced manager without namin
   const steps = unusableSteps({ userIds: [ID], created: true, native: true })
   t.is(steps.length, 3)
   t.ok(steps[1].startsWith('2. Toque em ' + RETRY_LABEL + ' e crie a passkey outra vez.'))
-  t.ok(steps[1].includes('escolha um gerenciador de senhas que sincroniza entre aparelhos (o do celular, do Google ou da Apple)'))
+  t.ok(steps[1].includes('escolha um gerenciador de senhas que sincroniza entre aparelhos (o do celular, do Google, da Apple ou outro)'))
   t.absent(/Chrome|Safari|Edge|Firefox|navegador/.test(steps[1]))
   t.is(steps[2], '3. Se não der certo, entre pelo site da associação no Chrome.')
   t.alike(unusableSteps({ native: true, withLink: true }), ['1. Toque em ' + RETRY_LABEL + ' e escolha outra passkey do Varanda, se tiver.'])
