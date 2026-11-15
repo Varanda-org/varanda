@@ -2,6 +2,7 @@
 
 O formato segue o [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum foi publicado.
+Cada PR descreve a própria mudança num arquivo de [docs/changelog/](docs/changelog/README.md), e `node scripts/changelog.js` junta esses arquivos à seção "Não lançado" quando uma versão é lançada. Até lá, o que não foi lançado está aqui e nessa pasta.
 
 ## [Não lançado]
 

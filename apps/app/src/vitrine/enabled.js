@@ -12,3 +12,15 @@ export function vitrineEnabled (env, dev) {
 export function vitrineLarge (env, dev) {
   return vitrineEnabled(env, dev) && env.EXPO_PUBLIC_VARANDA_VITRINE_LARGE === '1'
 }
+
+// Rich rows (photos, grids, carousels, link cards, replies) in the large feed,
+// so timing covers the row kinds people see. Same gate: dev bundle only.
+export function vitrineRich (env, dev) {
+  return vitrineEnabled(env, dev) && env.EXPO_PUBLIC_VARANDA_VITRINE_RICH === '1'
+}
+
+// Provider music players (YouTube, SoundCloud, Spotify, Apple Music links) in
+// the rich rows. They load third-party pages, so they need their own opt-in.
+export function vitrineEmbeds (env, dev) {
+  return vitrineEnabled(env, dev) && env.EXPO_PUBLIC_VARANDA_VITRINE_EMBEDS === '1'
+}
