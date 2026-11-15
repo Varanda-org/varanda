@@ -94,6 +94,41 @@ test('acting as a page: Apagar on the page post, Denunciar on anyone else', asyn
   t.alike(labels(moreActions({ author: PAGE, seq: 2 }, { ownKey: ME, page: 'nope', onReport: true })), ['Denunciar'])
 })
 
+test('Salvar and Tirar dos salvos: only with canSave and a valid seq, right after Copiar link', async (t) => {
+  const { moreActions } = await load()
+  const base = { ownKey: ME, onReport: true, link: URL }
+  const item = { author: THEM, seq: 3 }
+  t.alike(labels(moreActions(item, base)), ['Copiar link', 'Denunciar'])
+  t.alike(labels(moreActions(item, { ...base, canSave: true })), ['Copiar link', 'Salvar', 'Denunciar'])
+  t.alike(labels(moreActions(item, { ...base, canSave: true, saved: true })), ['Copiar link', 'Tirar dos salvos', 'Denunciar'])
+  t.alike(ids(moreActions(item, { ...base, canSave: true })), ['copy', 'save', 'report'])
+  t.alike(ids(moreActions(item, { canSave: true, saved: true })), ['unsave'])
+  t.alike(labels(moreActions({ author: THEM }, { ...base, canSave: true })), ['Copiar link', 'Denunciar'])
+  t.alike(labels(moreActions({ author: THEM, seq: 0 }, { ...base, canSave: true })), ['Copiar link', 'Denunciar'])
+  t.alike(labels(moreActions({ author: THEM, seq: '3' }, { ...base, canSave: true })), ['Copiar link', 'Denunciar'])
+})
+
+test('Salvar is refused for private rows, bad authors, unsafe seq and reposts', async (t) => {
+  const { moreActions } = await load()
+  const caps = { ownKey: ME, onReport: true, link: URL, canSave: true }
+  const item = { author: THEM, seq: 3 }
+  t.alike(ids(moreActions(item, caps)), ['copy', 'save', 'report'])
+  t.absent(ids(moreActions({ ...item, dm: true }, caps)).includes('save'), 'dm row')
+  t.absent(ids(moreActions(item, { ...caps, private: true })).includes('save'), 'caps.private')
+  t.absent(ids(moreActions({ author: 'nope', seq: 3 }, caps)).includes('save'), 'bad author')
+  t.absent(ids(moreActions({ author: THEM, seq: Number.MAX_SAFE_INTEGER + 2 }, caps)).includes('save'), 'unsafe seq')
+  t.absent(ids(moreActions({ ...item, type: 'repost' }, caps)).includes('save'), 'repost type')
+  t.absent(ids(moreActions({ ...item, repostedBy: { author: ME, name: 'Eu', username: null } }, caps)).includes('save'), 'row with repostedBy')
+  t.absent(ids(moreActions({ ...item, repostedBy: { author: ME } }, { ...caps, saved: true })).includes('unsave'), 'no unsave on a repost row')
+})
+
+test('row order: copy, save, report, block; own post: copy, save, delete', async (t) => {
+  const { moreActions } = await load()
+  const caps = { ownKey: ME, onReport: true, onBlock: true, link: URL, canSave: true }
+  t.alike(ids(moreActions({ author: THEM, seq: 3 }, caps)), ['copy', 'save', 'report', 'block'])
+  t.alike(ids(moreActions({ author: ME, seq: 4 }, { ...caps, onDelete: () => {} })), ['copy', 'save', 'delete'])
+})
+
 test('a repost row never offers Apagar', async (t) => {
   const { moreActions } = await load()
   const caps = { ownKey: ME, onReport: true, link: URL }

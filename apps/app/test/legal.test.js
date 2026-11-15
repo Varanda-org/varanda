@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 52)
-  t.is(LEGAL_DATE, '14/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 52, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(LEGAL_VERSION, 53)
+  t.is(LEGAL_DATE, '15/11/2026')
+  t.is(REVIEW_NOTE, 'Versão 53, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -324,7 +324,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '2ef3d799a4f53d671c68207d4d44f8a376f4837960a1ab56664e1a60d35e6fe5', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '5bfc88b90e0ddb3f15c015ed7e839881375a9ecb1b82d94f1884fa9918cdfacf', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -539,6 +539,15 @@ test('legal: version 28 describes the Feira listings, offers and ratings', async
   t.ok(text(TERMS).includes('com os limites descritos em Páginas'))
   t.ok(text(PRIVACY).includes('Os anúncios salvos e as buscas salvas ficam só no seu aparelho'))
   t.ok(text(PRIVACY).includes('feira-invites.json'))
+})
+
+test('Privacidade: Posts salvos diz do pedido ao semeador, do backup e do Sair', async (t) => {
+  const { PRIVACY } = await load()
+  const p = PRIVACY.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(p.includes('o app pede essas publicações ao semeador'), 'semeador request')
+  t.ok(p.includes('o semeador pode saber quais publicações o seu aparelho pediu'))
+  t.ok(p.includes('o iCloud, no iPhone'), 'backup')
+  t.ok(p.includes('continua no aparelho depois de Sair'), 'stays after Sair')
 })
 
 test('legal: version 27 describes the invite card in the link and the messenger preview', async (t) => {

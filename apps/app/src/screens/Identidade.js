@@ -48,6 +48,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import { Platform, StyleSheet, TextInput, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
+import { forgetSavedFor } from '../savedProvider'
 import { parseCertificateText } from '../config'
 import { useNode, useNotice } from '../node'
 import { admission, accountStatus, finishLink, formatNextChange, invitePolicy, isUsername, passkeyAdd, passkeyStart, phonePolicy, recoveryPut, recoveryStart, renameFinish, renameStart, startLink } from '../account'
@@ -1137,6 +1138,8 @@ export default function Identidade ({ active, embedded = false, setup = false, v
     // Awaited: the next click is a fresh activation, and the old identity's
     // push must be off before it is deleted. A failure never blocks the reset.
     turnOffBeforeSwitch(pushStore.turnOffPush, { node, member: oldKey }).then(() => passkey.reset()).then(() => {
+      // The old key left this device: so does its list of saved posts.
+      if (typeof oldKey === 'string') forgetSavedFor(oldKey)
       setMismatch(null)
       setAwaitingComplete(false)
       setCreateToo(false)

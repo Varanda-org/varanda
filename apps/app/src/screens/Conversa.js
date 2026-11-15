@@ -547,7 +547,7 @@ export function identityOf (names, author, item) {
 // The PostRow props for an assembled (or seed) post item. `extra` overrides
 // (repostedBy, onOpenReposter, replyToName...).
 export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, handlers, extra = {} }) {
-  const { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete, onMessage } = handlers
+  const { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete, onMessage, onNotice } = handlers
   const ref = refOf(item.author, item.seq)
   const who = identityOf(names, item.author, item)
   const hasSeq = Number.isSafeInteger(item.seq) && item.seq >= 1
@@ -618,6 +618,7 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
     // Before ...extra, so a link a caller passes (an offer's) keeps winning.
     link,
     publishable,
+    onNotice: typeof onNotice === 'function' ? onNotice : undefined,
     ...extra
   }
 }
@@ -1075,7 +1076,7 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
       })
     }
   })
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply: full ? targetReply : onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined, onMessage }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply: full ? targetReply : onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined, onMessage, onNotice: onToast }
   const props = (item, extra) => rowProps({ item, names, peeked: peekedRef.current, now, ownKey, follows, eng: full ? eng : null, handlers, extra })
 
   const title = 'Conversa'
