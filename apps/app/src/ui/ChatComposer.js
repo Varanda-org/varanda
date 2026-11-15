@@ -44,13 +44,15 @@
 // onVoice, so the microphone hides and a recording there is dropped.
 //
 // Props: { value, onChangeText, onSend, sending, sendDisabled, editable,
-//   placeholder, accessibilityLabel, reply, onCancelReply, attach, notice,
+//   placeholder, accessibilityLabel, reply, onCancelReply, onOpenReply, attach, notice,
 //   ownKey, mentions = true, max = MAX_TEXT, onAttach, attachments,
 //   onRemoveAttachment(id), onCancelAttachments, progress, onVoice,
 //   linkDraft }
 //   linkDraft: useLinkDraft's answer (below), drawn above the field while
 //   no photo is staged.
 //   reply: { name, text, senderKey, mine } or null (ReplyPreview props)
+//   onOpenReply: tapping the reply bar, so the screen can scroll to the message
+//   being answered, as a tap on the quote inside a bubble does. Absent: no tap.
 //   attachments: [{ id, status: 'encoding' | 'ready' | 'invalid', thumb, error }]
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
@@ -58,7 +60,8 @@ import { ActivityIndicator, AppState, Image, Keyboard, PanResponder, Platform, P
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { MAX_TEXT, activeMention } from '@varanda/rpc'
 import { countAfterInsert, insertAt } from '../emoji'
-import { cleanPaste, insertCodeBlock, wrapSelection } from '../formatInsert'
+import { cleanPaste, insertCodeBlock, pasteCaret, wrapSelection } from '../formatInsert'
+import { heightFloor } from '../composerHeight'
 import { canRecordMp4, cancelRecording, startRecording, stopRecording } from '../media/audio'
 import { durationLabel, recordPlan, slideToCancel } from '../media/voice'
 import { countChars } from '../format'
@@ -401,6 +404,7 @@ export function ChatComposer ({
   accessibilityLabel = 'mensagem',
   reply = null,
   onCancelReply,
+  onOpenReply,
   attach = null,
   notice = null,
   ownKey = null,
@@ -445,6 +449,7 @@ export function ChatComposer ({
     const measured = measureField(inputRef.current, MIN_HEIGHT, MAX_HEIGHT)
     if (measured !== null) setHeight((was) => (was === measured ? was : measured))
   }, [text])
+  const shownHeight = Math.max(height, heightFloor(text, { line: LINE, pad: PAD_V, maxLines: MAX_LINES }))
   const [emojiOpen, setEmojiOpen] = useState(false)
   const [formatOpen, setFormatOpen] = useState(false)
   const [focused, setFocused] = useState(false)
@@ -564,11 +569,7 @@ export function ChatComposer ({
       next.startsWith(text.slice(0, before.start)) && next.endsWith(text.slice(before.end))) {
       rawCaret = next.length - (text.length - before.end)
     } else {
-      let prefix = 0
-      while (prefix < text.length && prefix < next.length && text[prefix] === next[prefix]) prefix++
-      let suffix = 0
-      while (suffix < text.length - prefix && suffix < next.length - prefix && text[text.length - suffix - 1] === next[next.length - suffix - 1]) suffix++
-      rawCaret = next.length - suffix
+      rawCaret = pasteCaret(text, next, before)
     }
     let start = cleanPaste(next.slice(0, rawCaret)).length
     if (next[rawCaret - 1] === '\r' && next[rawCaret] === '\n') start--
@@ -653,7 +654,7 @@ export function ChatComposer ({
     <View style={[styles.composer, { paddingBottom: bottomPad }]}>
       {notice || null}
       {reply
-        ? <ReplyPreview name={reply.name} handle={reply.handle} text={reply.text} senderKey={reply.senderKey} mine={reply.mine} onCancel={onCancelReply} />
+        ? <ReplyPreview name={reply.name} handle={reply.handle} text={reply.text} senderKey={reply.senderKey} mine={reply.mine} onPress={onOpenReply} onCancel={onCancelReply} />
         : null}
       {staged.length === 0 ? <LinkDraftCard draft={linkDraft} /> : null}
       {staged.length > 0
@@ -732,7 +733,7 @@ export function ChatComposer ({
             : null}
           <TextInput
             ref={inputRef}
-            style={[styles.input, webInputReset, { height }]}
+            style={[styles.input, webInputReset, { height: shownHeight }]}
             onFocus={() => { setFocused(true); setReached(true) }}
             onBlur={() => setFocused(false)}
             value={text}
@@ -751,7 +752,7 @@ export function ChatComposer ({
               if (typeof h !== 'number' || !Number.isFinite(h)) return
               setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, Math.ceil(h))))
             }}
-            scrollEnabled={height >= MAX_HEIGHT}
+            scrollEnabled={shownHeight >= MAX_HEIGHT}
             multiline
             maxLength={max * 2}
             placeholder={placeholder}

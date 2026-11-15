@@ -23,7 +23,7 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { fetch as expoFetch } from 'expo/fetch'
 import { Animated, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
-import { perfMarks, useNode } from '../node'
+import { perfMarks, useHosted } from '../node'
 import { fetchMedia, validDescriptor } from '../media/fetch'
 import { nativeSubtle } from '../media/hash'
 import { perfEnabled } from '../perfMarks'
@@ -79,9 +79,9 @@ export function keptOnlyUrl (kind, author, d, persist) {
 
 // -> { state: 'off' | 'loading' | 'ok' | 'error', url, retry }
 function useMedia (author, descriptor, persist) {
-  const node = useNode()
+  const hosted = useHosted()
   const keptOnly = useContext(KeptOnlyContext) === true
-  const canFetch = !keptOnly && node !== null && node.hosted === true
+  const canFetch = !keptOnly && hosted === true
   const valid = validDescriptor(descriptor)
   const key = valid ? mediaKey(descriptor) : null
   const kept = useMemo(() => (keptOnly && key ? keptOnlyUrl('posts', author, descriptor, persist) : null), [keptOnly, key, author, persist])

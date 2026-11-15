@@ -29,7 +29,7 @@ import { KeyboardForm } from './Perfil'
 import { byAuthor } from '../feiraClient'
 import { CAT_LABELS, KIND_LABELS, UNIT_LABELS } from '../feira'
 import {
-  EDIT_CONFLICT, FIRST_EDIT_NOTE, MAX_PHOTOS, UNKNOWN_EDIT, editModel, firstEdit, holdsPublication, identityOf, keptPhotos, ownerDest,
+  EDIT_CONFLICT, FIRST_EDIT_NOTE, MAX_PHOTOS, UNKNOWN_EDIT, editModel, firstEdit, holdsPublication, identityOf, keptPhotos, maskPriceText, ownerDest,
   photoRoom, photosFor, pickListing, priceFieldLabel, priceModeChoices, retryUsable, submitEdit, unitChoices, updateForm
 } from '../feiraCompose'
 import { validDescriptor } from '../media/fetch'
@@ -39,6 +39,7 @@ import { revokeUrl, urlFromBytes } from '../media/display'
 import { Btn, ErrorText, Field, Label, Soft, Spinner, errorText } from '../ui'
 import { ListingPhotoGrid } from '../ui/ListingPhotoGrid'
 import { moveById } from '../photoOrder'
+import { removeById, restoreRemoved } from '../photoUndo'
 import { Pill } from '../ui/Pill'
 import { TopBar } from '../ui/TopBar'
 import { ErrorState } from '../ui/States'
@@ -48,6 +49,7 @@ import { space } from '../ui/theme'
 const { feira, MAX_TEXT } = rpc
 
 const MAX_LOAD_PAGES = 5
+const UNDO_MS = 8000
 const NOT_OWNER = 'Só quem publicou este anúncio pode editá-lo.'
 
 const hexOf = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
@@ -117,6 +119,11 @@ export default function AnuncioEditar ({ author, seq, me = null, actingPage = nu
   const [error, setError] = useState('')
   const [field, setField] = useState('')
   const [note, setNote] = useState('')
+  // The photo just removed, { item, index }: kept (with its thumbnail) until
+  // the undo runs out, another photo goes, or the form is saved or reloaded.
+  const [undo, setUndo] = useState(null)
+  const undoRef = useRef(null)
+  const undoTimer = useRef(null)
   const [conflict, setConflict] = useState(false)
   // An uncertain send: { retry, identity }. Only a press calls retry.
   const [pending, setPending] = useState(null)
@@ -144,6 +151,9 @@ export default function AnuncioEditar ({ author, seq, me = null, actingPage = nu
     loadModel(nodeRef.current.request, dest, author, seq).then((m) => {
       if (!live) return
       if (m === null) { setLoadError('Este anúncio não está mais disponível.'); return }
+      clearTimeout(undoTimer.current)
+      undoRef.current = null
+      setUndo(null)
       dropThumbs()
       setModel(m)
       setForm(m.form)
@@ -167,7 +177,10 @@ export default function AnuncioEditar ({ author, seq, me = null, actingPage = nu
     setPending((p) => (p !== null && p.identity !== identity ? null : p))
   }, [identity])
 
-  useEffect(() => dropThumbs, [dropThumbs])
+  useEffect(() => () => {
+    clearTimeout(undoTimer.current)
+    dropThumbs()
+  }, [dropThumbs])
 
   if (dest === null) {
     return (
@@ -230,11 +243,49 @@ export default function AnuncioEditar ({ author, seq, me = null, actingPage = nu
     }
   }
 
-  const removePhoto = (id) => {
-    if (locked) return
+  const dropThumb = (id) => {
     revokeUrl(thumbsRef.current.get(id))
     thumbsRef.current.delete(id)
-    setPhotos((list) => list.filter((p) => p.id !== id))
+  }
+
+  // The undo ends: the thumbnail of the photo that stayed removed is let go.
+  const endUndo = () => {
+    clearTimeout(undoTimer.current)
+    const held = undoRef.current
+    undoRef.current = null
+    setUndo(null)
+    if (held !== null) dropThumb(held.item.id)
+  }
+
+  const removePhoto = (id) => {
+    if (locked) return
+    const { removed } = removeById(photosRef.current, id)
+    if (removed === null) return
+    endUndo()
+    undoRef.current = removed
+    setUndo(removed)
+    undoTimer.current = setTimeout(endUndo, UNDO_MS)
+    setPhotos((list) => removeById(list, id).list)
+  }
+
+  const undoRemove = () => {
+    const held = undoRef.current
+    if (held === null || locked) return
+    clearTimeout(undoTimer.current)
+    undoRef.current = null
+    setUndo(null)
+    if (photosRef.current.length >= MAX_PHOTOS) {
+      dropThumb(held.item.id)
+      return
+    }
+    // A descriptor from before a change of identity must not come back with it.
+    setPhotos((list) => {
+      const next = restoreRemoved(list, held, MAX_PHOTOS)
+      // The list can fill up between the check above and this updater: then the
+      // photo did not come back and nothing else would free its thumbnail.
+      if (!next.some((item) => item && item.id === held.item.id)) dropThumb(held.item.id)
+      return photosFor(next, identityRef.current)
+    })
   }
 
   // The same photo objects in a new order: nothing is encoded or uploaded again.
@@ -273,6 +324,9 @@ export default function AnuncioEditar ({ author, seq, me = null, actingPage = nu
   }
 
   const settle = (answer) => {
+    clearTimeout(undoTimer.current)
+    undoRef.current = null
+    setUndo(null)
     dropThumbs()
     setPending(null)
     // A form left before its answer arrived is gone: the late answer must not
@@ -355,7 +409,7 @@ export default function AnuncioEditar ({ author, seq, me = null, actingPage = nu
           <Label>{priceFieldLabel(form.kind)}</Label>
           <Chips options={priceModeChoices(form.kind).map((m) => ({ value: m.mode, label: m.label }))} value={form.priceMode} onPick={(priceMode) => set({ priceMode })} disabled={locked} />
           {form.priceMode === 'valor'
-            ? <Field label={procura ? 'Até (R$)' : 'Valor (R$)'} value={form.priceText} onChangeText={(priceText) => set({ priceText })} placeholder='25,00' editable={!locked} />
+            ? <Field label={procura ? 'Até (R$)' : 'Valor (R$)'} value={form.priceText} onChangeText={(priceText) => set({ priceText: maskPriceText(priceText) })} placeholder='25,00' keyboardType='numeric' editable={!locked} />
             : null}
           {fieldError('price')}
           {units.length > 1
@@ -381,6 +435,14 @@ export default function AnuncioEditar ({ author, seq, me = null, actingPage = nu
 
           <Label>Fotos</Label>
           <ListingPhotoGrid photos={photos} max={MAX_PHOTOS} locked={locked} canAdd={canAttach && !encoding} onAdd={attach} onRemove={removePhoto} onMove={movePhoto} />
+          {undo !== null && !locked
+            ? (
+              <View style={styles.undo} accessibilityLiveRegion='polite'>
+                <Soft>Foto removida.</Soft>
+                <Pill label='Desfazer' onPress={undoRemove} />
+              </View>
+              )
+            : null}
           {photos.length === 0 && model.media.length > 0 ? <Soft>Sem fotos: o anúncio fica sem nenhuma foto.</Soft> : null}
           {!canAttach && online && media === null && !asPage ? <Soft>Fotos novas só podem ser publicadas na versão web.</Soft> : null}
           {note !== '' ? <Soft>{note}</Soft> : null}
@@ -424,5 +486,6 @@ const makeStyles = (colors) => StyleSheet.create({
   center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   body: { padding: 16, gap: 10 },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  undo: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   bar: { padding: 16, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line, backgroundColor: colors.bg }
 })
