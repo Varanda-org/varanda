@@ -164,7 +164,8 @@ export function Mensagem ({ initial, ...props }) {
   const entry = useRef(null)
   entry.current = messageEntry(entry.current, identity + ':' + props.peer, initial)
   // Remounting discards every draft, held send and attachment on a switch.
-  return <ChatSheetProvider><MensagemThread key={identity + ':' + props.peer} {...props} initial={entry.current.initial} /></ChatSheetProvider>
+  // The shared actions sheet remounts too: one left open never outlives its thread.
+  return <ChatSheetProvider key={identity + ':' + props.peer}><MensagemThread {...props} initial={entry.current.initial} /></ChatSheetProvider>
 }
 
 function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, onOpenMention, onReport, onOpenInvite, onOpenListing, onAvaliar, intent, onIntentUsed }) {
@@ -1524,10 +1525,11 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
           ListFooterComponent={hold || reactionError || reactionContext.unsure.size > 0
             ? (
               <View>
-                {hold && heldBubble(hold) !== null
+                {hold
                   ? (
                     <>
-                      <Bubble item={heldBubble(hold)} mine status='uncertain' shape='single' />
+                      {heldBubble(hold) !== null ? <Bubble item={heldBubble(hold)} mine status='uncertain' shape='single' /> : null}
+                      {/* The row stands on the hold alone: a hold always offers a way out. */}
                       <View style={[styles.inline, styles.heldRow]}>
                         <Soft>{LABELS.uncertain}</Soft>
                         {/* A page re-puts only its signed bytes (hold.retry) and never signs

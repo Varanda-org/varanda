@@ -7,11 +7,12 @@ const { runInNewContext } = require('node:vm')
 
 const read = (file) => readFileSync(join(__dirname, '../src', file), 'utf8')
 
-test('the composer is never shorter than its line breaks, so a code block set by code shows its fences', (t) => {
+test('a code block set by code shows its fences: the web measures every text, native sizes the field itself', (t) => {
   const src = read('ui/ChatComposer.js')
-  t.ok(src.includes("import { heightFloor } from '../composerHeight'"), 'uses the pure floor')
-  t.ok(src.includes('const shownHeight = Math.max(height, heightFloor(text, { line: LINE, pad: PAD_V, maxLines: MAX_LINES }))'), 'the measured height, raised to the floor')
-  t.ok(src.includes('{ height: shownHeight }') && src.includes('scrollEnabled={shownHeight >= MAX_HEIGHT}'), 'the field and its scrolling follow it')
+  t.absent(src.includes('heightFloor'), 'no floor from line breaks')
+  t.ok(src.includes('GROWS_ITSELF ? styles.grows : { height }'), 'native has no fixed height, the web its measured one')
+  t.ok(src.includes('grows: { minHeight: MIN_HEIGHT, maxHeight: MAX_HEIGHT }'), 'between one and six lines')
+  t.ok(src.includes('const full = (GROWS_ITSELF ? laidOut : height) >= MAX_HEIGHT - 0.5') && src.includes('scrollEnabled={full}'), 'it scrolls once full')
 })
 
 test('the composer offers six formats in an initially hidden accessible row', (t) => {

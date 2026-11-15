@@ -57,8 +57,10 @@ test('every screen that renders Bubble sits under a ChatSheetProvider', (t) => {
   for (const f of screens) {
     const src = read('screens/' + f)
     t.ok(src.includes("import { ChatSheetProvider } from '../ui/ChatSheetHost'"), f + ' imports it')
-    t.ok(/<ChatSheetProvider>/.test(src), f + ' mounts it')
+    t.ok(/<ChatSheetProvider[ >]/.test(src), f + ' mounts it')
   }
+  const dm = read('screens/Mensagem.js')
+  t.ok(dm.includes("<ChatSheetProvider key={identity + ':' + props.peer}>"), 'a peer or identity switch remounts the DM sheet with its thread')
 })
 
 test('the bubble is not a button: its links and cards are, the chevron stays the only one', (t) => {

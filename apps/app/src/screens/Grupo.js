@@ -583,11 +583,16 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     setCheck({ change, verdict, retry })
   }, [verify])
 
+  // A retry of a held post failed for sure, so it still has not landed: the
+  // faded bubble stays with "Tentar de novo" and "Dispensar", as before the
+  // retry, and nothing is sent until the person taps one.
+  const holdNotLanded = (change, retry) => setCheck({ change, verdict: 'not-landed', retry })
+
   // `text` is the original text: a retry after an uncertain post resends it,
   // never whatever the draft holds by then.
   // A page's statement is signed once. An unknown outcome keeps err.retry (the
   // same signed bytes) for settle's "tentar de novo"; nothing signs again.
-  const pageSend = async (fn, text, sentAt) => {
+  const pageSend = async (fn, text, sentAt, retrying = false) => {
     setPagePending(true)
     setPageError('')
     setSealAgain(null)
@@ -606,12 +611,19 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
         setDraft((d) => (d === text ? '' : d))
         clearFollowed(inFlightRef.current, text)
         setPostHold({ text, at: Date.now() })
-        settle({ action: 'post', diary: asPage.key, text, sentAt }, () => pageSend(err.retry, text, sentAt))
+        settle({ action: 'post', diary: asPage.key, text, sentAt }, () => pageSend(err.retry, text, sentAt, true))
       } else if (sealRaced(err)) {
+        // The page's key changed: the same envelope cannot land. The held
+        // text goes back to the composer and PAGE_SEAL_AGAIN_LABEL seals it anew.
+        if (retrying) {
+          setPostHold(null)
+          setDraft((d) => (d.trim() === '' ? text : d))
+        }
         setSealAgain(text)
         setPageError(pageGroupErrorText(err))
         readNewest().catch(() => {})
       } else {
+        if (retrying) holdNotLanded({ action: 'post', diary: asPage.key, text, sentAt }, () => pageSend(fn, text, sentAt, true))
         setPageError(pageGroupErrorText(err))
       }
       inFlightRef.current = null
@@ -680,7 +692,6 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
       return
     }
     setCheck(null)
-    setPostHold(null)
     const sentAt = Date.now()
     // A retry (heldCard defined) may run after the draft changed: never armed.
     inFlightRef.current = heldCard === undefined ? { text, at: sentAt, followed: false } : null
@@ -704,16 +715,22 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     })
     const followed = inFlightRef.current
     inFlightRef.current = null
+    const replyKeyOf = replyTo ? replyTo.writer + ':' + replyTo.seq : null
     if (r.ok) {
       setDraft((d) => (d === text ? '' : d))
       clearFollowed(followed, text)
-      if (replyTo) setReplyKey((k) => (k === replyTo.writer + ':' + replyTo.seq ? null : k))
+      if (replyKeyOf !== null) setReplyKey((k) => (k === replyKeyOf ? null : k))
+      setPostHold(null)
       readNewest().then(() => scrollToEnd(), () => {})
     } else if (r.uncertain) {
       setDraft((d) => (d === text ? '' : d))
       clearFollowed(followed, text)
+      // As in a conversation, the faded bubble holds the reply too.
+      if (replyKeyOf !== null) setReplyKey((k) => (k === replyKeyOf ? null : k))
       setPostHold({ text, at: Date.now() })
-      settle({ action: 'post', diary: ownKey, text, sentAt, replyKey: replyTo ? replyTo.writer + ':' + replyTo.seq : null }, () => sendPost(text, replyTo, card))
+      settle({ action: 'post', diary: ownKey, text, sentAt, replyKey: replyKeyOf }, () => sendPost(text, replyTo, card))
+    } else if (heldCard !== undefined) {
+      holdNotLanded({ action: 'post', diary: ownKey, text, sentAt, replyKey: replyKeyOf }, () => sendPost(text, replyTo, card))
     }
   }
 

@@ -48,6 +48,29 @@ test('Mensagem: an uncertain send clears the composer and the held text is a fad
   t.absent(/setHold\(\{[^}]*\}\)\s*\n\s*send\(/.test(src), 'no automatic resend')
 })
 
+test('Mensagem: the retry and discard row stands on the hold, the bubble on its text', (t) => {
+  const src = read('screens/Mensagem.js')
+  const footer = src.slice(src.indexOf('ListFooterComponent'), src.indexOf('ListHeaderComponent'))
+  t.absent(footer.includes('{hold && heldBubble(hold) !== null'), 'the row is not hidden with the bubble')
+  t.ok(footer.includes("{heldBubble(hold) !== null ? <Bubble item={heldBubble(hold)} mine status='uncertain' shape='single' /> : null}"))
+})
+
+test('Grupo: a held post leaves only by landing, Dispensar or a seal race, never by a failed retry', (t) => {
+  const src = read('screens/Grupo.js')
+  const send = src.slice(src.indexOf('const sendPost = async'), src.indexOf('const mediaApi ='))
+  t.absent(/setCheck\(null\)\s*\n\s*setPostHold\(null\)/.test(send), 'a retry keeps the faded bubble while it runs')
+  t.ok(send.includes('} else if (heldCard !== undefined) {\n      holdNotLanded('), 'a retry that failed for sure offers Tentar de novo and Dispensar again')
+  t.ok(send.includes('if (r.ok) {') && send.slice(send.indexOf('if (r.ok) {'), send.indexOf('} else if (r.uncertain)')).includes('setPostHold(null)'), 'landing clears it')
+  const uncertain = send.slice(send.indexOf('} else if (r.uncertain)'), send.indexOf('} else if (heldCard !== undefined)'))
+  t.ok(uncertain.includes('setReplyKey((k) => (k === replyKeyOf ? null : k))'), 'the reply moves into the hold, as in a conversation')
+  const page = src.slice(src.indexOf('const pageSend = async'), src.indexOf('// Join or leave as the page'))
+  t.ok(page.includes('() => pageSend(err.retry, text, sentAt, true)'), 'the settle retry is marked')
+  t.ok(page.includes('if (retrying) holdNotLanded('), 'a failed page retry offers the choice again')
+  t.ok(page.includes("setDraft((d) => (d.trim() === '' ? text : d))"), 'a seal race hands the text back to the composer')
+  t.ok(src.includes("<Pill label='Dispensar' onPress={() => { setCheck(null); if (check.change.action === 'post') setPostHold(null) }} />"), 'Dispensar drops the hold')
+  t.absent(/onChangeText=\{\(t\) => \{[^}]*setPostHold/.test(src), 'typing never drops it')
+})
+
 test('no em dash in the sources and the test', (t) => {
   for (const f of ['screens/Mensagem.js', 'screens/Grupo.js', 'ui/Bubble.js', 'dm-screen.js']) t.absent(read(f).includes(String.fromCharCode(0x2014)), f)
   t.absent(fs.readFileSync(__filename, 'utf8').includes(String.fromCharCode(0x2014)))
