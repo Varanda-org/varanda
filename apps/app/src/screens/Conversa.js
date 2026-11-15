@@ -351,11 +351,13 @@ export function useDelete ({ request, node, onToast, onDeleted, recheck, onUncer
     if (r.ok) {
       setTarget(null)
       notify('publicação apagada')
-      // onDeleted finds the parent in the screen's own copy to lower its
-      // count, so the copies are dropped only after it.
+      // onDeleted and the Conversas below find the parent in their own copy
+      // of the replies sent here to lower its count, so those copies are
+      // dropped only after both have run.
       try {
         await onDeleted(target)
       } finally {
+        announceDeleted(refs)
         forgetOwnReplies(refs)
       }
     } else if (r.uncertain) {
@@ -702,6 +704,14 @@ function dropOwnReplies (cache, refs) {
   }
 }
 
+// A Conversa kept open under a newer one never sees a deletion made above it:
+// each mounted copy listens here and drops the post from its own lists.
+const deletionListeners = new Set()
+
+function announceDeleted (refs) {
+  for (const listener of deletionListeners) listener(refs)
+}
+
 // Each mounted Conversa keeps its own copy of the replies it sent; a deletion
 // anywhere (Diário, A Rua, another Conversa) must reach every copy, or a
 // refresh merges the deleted reply back.
@@ -830,6 +840,8 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
   const genRef = useRef(0)
   // A quiet read supersedes only another quiet read: bumping genRef would cancel a branch page in flight.
   const quietRef = useRef(0)
+  const focalRef = useRef(focal)
+  focalRef.current = focal
   const commit = useCallback((patch) => {
     viewRef.current = { ...viewRef.current, ...patch }
     setView(viewRef.current)
@@ -1068,6 +1080,60 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
     return () => { genRef.current += 1 }
   }, [full, load, loadFollows])
 
+  // Drops a deleted post from this screen's own copies (the view, the open
+  // branches, the replies sent from here) and lowers its parent's count.
+  // Runs for a deletion made here and, through announceDeleted, for one made
+  // on another screen above this one in the stack, which would otherwise
+  // show the reply until a reload. Nothing found here means nothing to do.
+  const dropDeleted = useRef(null)
+  dropDeleted.current = (ref, force = false) => {
+    const shown = viewRef.current
+    const held = [...childrenRef.current.values(), ...ownReplies.current.values()].some((items) => items.some((item) => refOf(item.author, item.seq) === ref))
+    const [author, seqText] = ref.split(':')
+    const known = peekedRef.current.get(author)
+    // A quote of the deleted post must not keep showing its text.
+    const quoted = !!known && known.entries.some((e) => e.seq === Number(seqText))
+    const wasReply = shown.replies.some((r) => refOf(r.author, r.seq) === ref)
+    if (!force && !held && !quoted && !wasReply && !(shown.parent && refOf(shown.parent.author, shown.parent.seq) === ref)) return
+    // A load started before the deletion would bring the row back.
+    genRef.current += 1
+    if (known) peekedRef.current.set(author, { ...known, entries: known.entries.filter((e) => e.seq !== Number(seqText)) })
+    const parents = new Set()
+    // A reply shown under the focal post counts against the focal post.
+    if (wasReply) parents.add(focalRef.current)
+    for (const [key, items] of [...childrenRef.current, ...ownReplies.current, ...ownReplyCache]) {
+      if (items.some((item) => refOf(item.author, item.seq) === ref)) parents.add(key)
+    }
+    for (const key of parents) {
+      const count = eng.counts.get(key)
+      const remaining = Math.max(0, (count && Number.isSafeInteger(count.replies) ? count.replies : 0) - 1)
+      setCount(key, { ...count, replies: remaining })
+      if (remaining === 0 && !(childrenRef.current.get(key) || []).concat(ownFor(key, ownReplies.current)).some((item) => refOf(item.author, item.seq) !== ref)) {
+        setOpen((previous) => {
+          const next = new Set(previous)
+          next.delete(key)
+          return next
+        })
+      }
+    }
+    for (const [key, items] of ownReplyCache) ownReplyCache.set(key, items.filter((item) => refOf(item.author, item.seq) !== ref))
+    setChildren((previous) => new Map([...previous].map(([key, items]) => [key, items.filter((item) => refOf(item.author, item.seq) !== ref)])))
+    ownReplies.current = new Map([...ownReplies.current].map(([key, items]) => [key, items.filter((item) => refOf(item.author, item.seq) !== ref)]))
+    const cur = viewRef.current
+    commit({
+      replies: cur.replies.filter((r) => refOf(r.author, r.seq) !== ref),
+      parent: cur.parent && refOf(cur.parent.author, cur.parent.seq) === ref ? null : cur.parent,
+      meta: wasReply && cur.meta ? { ...cur.meta, repliesTotal: Math.max(0, cur.meta.repliesTotal - 1) } : cur.meta,
+      // The loads invalidated above never clear their own flags.
+      loadingMore: false,
+      refreshing: false
+    })
+  }
+  useEffect(() => {
+    const listener = (refs) => { for (const ref of refs) if (ref !== focalRef.current) dropDeleted.current(ref) }
+    deletionListeners.add(listener)
+    return () => { deletionListeners.delete(listener) }
+  }, [])
   const del = useDelete({
     request,
     node,
@@ -1084,39 +1150,7 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
         onBack()
         return
       }
-      // A quote of the deleted post must not keep showing its text.
-      const [author, seqText] = t.ref.split(':')
-      const known = peekedRef.current.get(author)
-      if (known) peekedRef.current.set(author, { ...known, entries: known.entries.filter((e) => e.seq !== Number(seqText)) })
-      const parents = new Set()
-      for (const [key, items] of [...childrenRef.current, ...ownReplies.current, ...ownReplyCache]) {
-        if (items.some((item) => refOf(item.author, item.seq) === t.ref)) parents.add(key)
-      }
-      for (const key of parents) {
-        const count = eng.counts.get(key)
-        const remaining = Math.max(0, (count && Number.isSafeInteger(count.replies) ? count.replies : 0) - 1)
-        setCount(key, { ...count, replies: remaining })
-        if (remaining === 0 && !(childrenRef.current.get(key) || []).concat(ownFor(key, ownReplies.current)).some((item) => refOf(item.author, item.seq) !== t.ref)) {
-          setOpen((previous) => {
-            const next = new Set(previous)
-            next.delete(key)
-            return next
-          })
-        }
-      }
-      for (const [key, items] of ownReplyCache) ownReplyCache.set(key, items.filter((item) => refOf(item.author, item.seq) !== t.ref))
-      setChildren((previous) => new Map([...previous].map(([key, items]) => [key, items.filter((item) => refOf(item.author, item.seq) !== t.ref)])))
-      ownReplies.current = new Map([...ownReplies.current].map(([key, items]) => [key, items.filter((item) => refOf(item.author, item.seq) !== t.ref)]))
-      const cur = viewRef.current
-      const wasReply = cur.replies.some((r) => refOf(r.author, r.seq) === t.ref)
-      commit({
-        replies: cur.replies.filter((r) => refOf(r.author, r.seq) !== t.ref),
-        parent: cur.parent && refOf(cur.parent.author, cur.parent.seq) === t.ref ? null : cur.parent,
-        meta: wasReply && cur.meta ? { ...cur.meta, repliesTotal: Math.max(0, cur.meta.repliesTotal - 1) } : cur.meta,
-        // The loads invalidated above never clear their own flags.
-        loadingMore: false,
-        refreshing: false
-      })
+      dropDeleted.current(t.ref, true)
     }
   })
   const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onReply: full ? targetReply : onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined, onMessage }
