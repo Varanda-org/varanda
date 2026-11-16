@@ -114,7 +114,7 @@ const { stillImageSize } = require('@varanda/core/lib/still-image')
 const store = require('./node-store')
 
 const {
-  buildGroup, groupJoinHistory, diaryGroupKeys, groupCutHistory, groupConfirmHistory, validateGroupHeader, validateWriterHeader,
+  buildGroup, groupJoinHistory, diaryGroupKeys, groupCutHistory, groupConfirmHistory, validateGroupHeader, validateWriterHeader, replacedWriterCut,
   orderKey, compareOrder, MAX_GROUPS_PER_DIARY, MAX_GROUP_CUTS, MAX_GROUP_WRITERS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY
 } = grp
 
@@ -3362,6 +3362,12 @@ async function joinLoaded (ctx, { diary, ownHex, base, g }, member) {
   if (g.private && g.own !== null && g.own.key !== g.group && !usable(g.own.key)) {
     const last = groupJoinHistory(base.ownEntries, g.group).filter((j) => j.writer === g.own.key).pop()
     if (last !== undefined && last.on) await appendOwn(ctx, diary, groupJoinRecord({ group: g.group, writer: g.own.key, on: false }))
+    // The off join keeps its slot in the slot walk: a cut before the new
+    // join gives it back (#350).
+    const held = g.cores.get(g.own.key)
+    const cut = replacedWriterCut(held === undefined ? null : held.entries)
+    const marked = groupCutHistory(base.ownEntries, g.group).some((m) => m.writer === g.own.key && m.cut <= cut)
+    if (last !== undefined && cut !== null && !marked) await appendOwn(ctx, diary, groupCutRecord({ group: g.group, writer: g.own.key, cut }))
     unbound = g.own.key
   }
   // Listed and still writing but not bound (a join cut short): bind it.

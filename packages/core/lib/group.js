@@ -805,6 +805,19 @@ function slotEvents (joins, marks) {
   return { events, gap }
 }
 
+// The cut a diary marks on an own writer it replaces (a boxless writer of a
+// private group), so the slot walk gives its slot back to the new writer:
+// 0 for a header with no rejoin (nothing of it counts), 1 for a header with a
+// rejoin (the generation reads its block 0), else its whole length, so no
+// record it holds stops counting. `entries` are the writer's records from
+// block 0, as held. null when nothing is held.
+function replacedWriterCut (entries) {
+  if (!Array.isArray(entries) || entries.length === 0) return null
+  if (entries.length > 1) return entries.length
+  const head = entries[0] && entries[0].record
+  return head && head.rejoin ? 1 : 0
+}
+
 // The walk of one diary for G (see slotWalkState): { live, frozen,
 // released } as sets of writers, `cut` (writer -> lowest cut, for the
 // writers a cut applied to), `first` (writer -> seq of the join that gave
@@ -3736,6 +3749,7 @@ module.exports = {
   groupConfirmHistory,
   slotWalk,
   slotWalkState,
+  replacedWriterCut,
   slotWalkStep,
   slotWalkResult,
   leaveDigest,

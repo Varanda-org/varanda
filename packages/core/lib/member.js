@@ -2335,8 +2335,16 @@ async function joinLoaded (ctx, identity, loaded, cw) {
   // device's key can open nothing: its binding goes and a new writer with
   // this device's box takes its place.
   const boxStale = loaded.private && !!loaded.local && loaded.local.writer !== group && writerBox(loaded, loaded.local.writer) !== ownBoxPublic(ctx)
-  if (boxStale && (groups.groupJoinHistory(await readAll(diary), group).filter((j) => j.writer === loaded.local.writer).pop() || {}).on) {
-    await appendRecord(diary, groupJoinRecord({ group, writer: loaded.local.writer, on: false }))
+  if (boxStale) {
+    const own = await readAll(diary)
+    const last = groups.groupJoinHistory(own, group).filter((j) => j.writer === loaded.local.writer).pop()
+    if (last && last.on) await appendRecord(diary, groupJoinRecord({ group, writer: loaded.local.writer, on: false }))
+    // The off join keeps its slot in the slot walk: a cut before the new
+    // join gives it back (#350).
+    const held = loaded.input.writers.find((l) => l.key === loaded.local.writer)
+    const cut = groups.replacedWriterCut(held ? held.entries : null)
+    const marked = groups.groupCutHistory(own, group).some((m) => m.writer === loaded.local.writer && m.cut <= cut)
+    if (last && cut !== null && !marked) await appendRecord(diary, groupCutRecord({ group, writer: loaded.local.writer, cut }))
   }
   // A writer the fold no longer takes (retired by a leave of any device, or
   // naming a CW the gate retired) is replaced by a new one naming the live

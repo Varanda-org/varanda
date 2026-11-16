@@ -92,6 +92,36 @@ test('private: a join by key before the root arrives is replaced by a writer wit
   t.alike(texts(await member.groupRead(b, { group })), ['bem-vinda'])
 })
 
+test('private: at the writer cap a boxed rejoin cuts the boxless writer, so the new one counts (#350)', async (t) => {
+  const kp = crypto.keyPair()
+  const a = await person(t, kp, 'Ana')
+  const b = await person(t, kp, 'Bia')
+  const { group } = await createGroup(a, { name: 'Segredo', join: 'open', visibility: 'private' })
+  await exchange(a, b)
+  const s = await store.openStore(b.dataDir)
+  await store.purgeReplica(s, group)
+  await s.close()
+  t.alike(await joinGroup(b, { group }), { state: 'pending' })
+  const local = store.readGroups(b.dataDir).find((g) => g.group === group)
+  const boxless = local.writer
+  for (let i = 1; i < groupLib.MAX_GROUP_WRITERS_PER_DIARY; i++) await plantWriter(b, group, hex(crypto.randomBytes(32)), true)
+  store.writeGroups(b.dataDir, [...store.readGroups(b.dataDir).filter((g) => g.group !== group), local])
+  await exchange(a, b)
+  t.alike(await joinGroup(b, { group }), { state: 'requested' })
+  const fresh = ownWriter(b, group)
+  t.not(fresh, boxless, 'a new writer')
+  const { entries } = await member.logRead(b)
+  t.alike(groupLib.groupCutHistory(entries, group).filter((m) => m.writer === boxless).map((m) => m.cut), [0], 'the header-only boxless writer is cut at 0')
+  const cutAt = entries.findIndex((e) => e.record && e.record.type === 'group-cut' && e.record.writer === boxless)
+  const joinAt = entries.findIndex((e) => e.record && e.record.type === 'group-join' && e.record.writer === fresh)
+  t.ok(cutAt !== -1 && cutAt < joinAt, 'the cut comes before the new join')
+  t.alike(await joinGroup(b, { group }), { state: 'requested' }, 'joining again writes no other cut')
+  const again = await member.logRead(b)
+  t.is(groupLib.groupCutHistory(again.entries, group).filter((m) => m.writer === boxless).length, 1)
+  const walk = groupLib.slotWalk(groupLib.groupJoinHistory(again.entries, group), groupLib.groupCutHistory(again.entries, group), group)
+  t.ok(walk.released.has(boxless) && walk.live.has(fresh), 'the slot walk releases the boxless writer and counts the new one')
+})
+
 test('private: a multi-chunk rotation seals earlier epochs to the distributor only, the last to every entitled writer', async (t) => {
   // MAX_KEY_BASIS + 1 people each join the community, Geral and the group:
   // about 15 s alone, more under the parallel suite.
