@@ -43,14 +43,19 @@ COPY deploy/seeder/Caddyfile /etc/caddy/Caddyfile
 COPY --from=app /src/apps/app/dist /srv/web
 COPY LICENSE /srv/LICENSE
 # O build roda código das dependências: confere o resultado (regra do
-# deploy.sh), tira o .well-known (quem serve é o servidor) e reescreve o
-# version.json do argumento, nunca do que o build gerou (mesmos bytes do
-# well-known.sh). Dono root e modos fixos (0755 diretórios, 0644 arquivos):
-# nada de setuid nem do usuário do build chega aos servidores.
+# deploy.sh e do build-web.sh, inclusive a cópia do nó com o nome da versão
+# marcada no index.html, a que a página carrega), tira o .well-known (quem
+# serve é o servidor) e reescreve o version.json do argumento, nunca do que o
+# build gerou (mesmos bytes do well-known.sh). Dono root e modos fixos (0755
+# diretórios, 0644 arquivos): nada de setuid nem do usuário do build chega aos
+# servidores.
 RUN set -e; \
     for f in index.html varanda-node.js sw.js; do \
       test -f "/srv/web/$f" || { echo "o build não gerou $f" >&2; exit 1; }; \
     done; \
+    versao=$(sed -n 's/.*<meta name="varanda-release" content="\([0-9a-f]\{16\}\)">.*/\1/p' /srv/web/index.html | head -n 1); \
+    { [ -n "$versao" ] && test -f "/srv/web/varanda-node-$versao.js"; } \
+      || { echo 'o build não gerou a marca varanda-release e a cópia varanda-node-<versão>.js' >&2; exit 1; }; \
     if [ -n "$(find /srv/web ! -type f ! -type d -print -quit)" ]; then \
       echo 'o build gerou links simbólicos ou arquivos especiais' >&2; exit 1; \
     fi; \
