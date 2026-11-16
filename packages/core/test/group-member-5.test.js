@@ -87,16 +87,14 @@ test('an admit refuses while the member diary binds a writer not held here', asy
   t.is((await writerEntries(a, group)).length, before, 'nothing written')
 })
 
-test('an admitted member with a writer the admit did not list is requested again and can be admitted again', async (t) => {
+test('an admitted member\'s writer the admit did not list is covered by it, and a new admit lists it', async (t) => {
   const { a, b, group } = await pair(t, 'approval')
   const first = (await writerEntries(b, group)).key
   t.alike(await member.groupAdmit(a, { group, member: b.key, on: true }), { ok: true })
   const second = await otherWriter(b, group, 'ab'.repeat(16), 1)
   await exchange(b, a)
-  t.is((await member.groupRead(a, { group })).items.filter((p) => !p.hidden).length, 0, 'the unlisted writer stays hidden')
-  const requests = await member.groupRequests(a, { group })
-  t.is(requests.total, 1, 'listed for the admins')
-  t.alike(requests.requests.map((r) => r.member), [b.key])
+  t.is((await member.groupRead(a, { group })).items.filter((p) => !p.hidden).length, 1, 'the new device posts under the admission')
+  t.is((await member.groupRequests(a, { group })).total, 0, 'no request for the new device')
   t.alike(await member.groupAdmit(a, { group, member: b.key, on: true }), { ok: true })
   const root = await writerEntries(a, group)
   t.alike(root.entries[root.length - 1].record.cuts.map((c) => c.writer), [first, second].sort())

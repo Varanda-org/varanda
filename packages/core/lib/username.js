@@ -4,7 +4,7 @@
 // records.js validates the shape only and must not import cert.js, so the
 // signature check lives here.
 
-const { validRecordCopy } = require('./records')
+const { validRecordCopyOfType } = require('./records')
 // Called through the module object (not destructured) so tests can count the
 // verifications.
 const cert = require('./cert')
@@ -27,7 +27,7 @@ const cert = require('./cert')
 // makes a record from a revoked issuer invalid like any other failing
 // record: a newest candidate signed by a revoked issuer yields null.
 function latestUsernameRecord (entries, memberHex, associationHex, opts) {
-  return pickUsername(entries, memberHex, associationHex, opts, validRecordCopy)
+  return pickUsername(entries, memberHex, associationHex, opts, validRecordCopyOfType)
 }
 
 // latestUsername over entries whose records are already validRecordCopy
@@ -47,7 +47,7 @@ function pickUsername (entries, memberHex, associationHex, opts, copyOf) {
     let bestSeq = -1
     for (const { seq, record } of entries) {
       if (!Number.isSafeInteger(seq) || seq <= bestSeq) continue
-      const copy = copyOf(record, seq)
+      const copy = copyOf(record, seq, 'username')
       if (copy === null || copy.type !== 'username' || copy.member !== member) continue
       best = copy
       bestSeq = seq
@@ -90,7 +90,7 @@ function heldUsernames (entries, memberHex, associationHex, opts) {
     const bySeq = new Map()
     for (const { seq, record } of entries) {
       if (!Number.isSafeInteger(seq) || bySeq.has(seq)) continue
-      const copy = validRecordCopy(record, seq)
+      const copy = validRecordCopyOfType(record, seq, 'username')
       if (copy === null || copy.type !== 'username' || copy.member !== member) continue
       bySeq.set(seq, copy)
     }

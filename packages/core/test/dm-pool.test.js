@@ -10,10 +10,15 @@ const b4a = require('b4a')
 const hcrypto = require('hypercore-crypto')
 const sodium = require('sodium-universal')
 const { createDmPool, POOL_DIR, VISIT_POOL_DIR, VISIT_RETENTION_MS, VISIT_TOKEN_RETENTION_MS, LOG_FILE, HEAD_FILE, SEQ_FILE, RECORD_BYTES } = require('../lib/dm-pool')
-const { DM_DROP_BYTES, DM_RETENTION_MS, DROP, encodeDrop, newDropId, buildInner, sealInner } = require('../lib/dm')
+const { DM_DROP_BYTES, DM_RETENTION_MS, STAMP_TOKEN_RETENTION_MS, DROP, encodeDrop, newDropId, buildInner, sealInner } = require('../lib/dm')
 const { tmpDir } = require('./helpers/tmp')
 
 const DAY = 86400000
+const RET = DM_RETENTION_MS
+const TOKEN_RET = STAMP_TOKEN_RETENTION_MS
+// Tests of a token hash outliving its record open the pool with a token
+// retention above the record retention, which the defaults no longer give.
+const LONG_TOKENS = 2 * RET
 const GOOD_KID = b4a.from('00112233aabbccdd', 'hex')
 
 function randomBytes (n) {
@@ -105,14 +110,14 @@ test('at max the pool answers cheio', (t) => {
   t.is(pool.size, 2)
 })
 
-test('sweep removes an 8-day-old record and keeps a 1-day-old one; seqs never go back', (t) => {
+test('sweep removes a record past the retention and keeps a 1-day-old one; seqs never go back', (t) => {
   const dir = tmpDir(t)
   const c = clock(1700000000000)
-  const pool = open(t, dir, { now: c.now })
+  const pool = open(t, dir, { now: c.now, tokenRetentionMs: LONG_TOKENS })
   const token = randomBytes(32)
   const old = drop({ token })
   t.alike(pool.submit(old), { seq: 1 })
-  c.t += 7 * DAY
+  c.t += RET
   const young = drop()
   t.alike(pool.submit(young), { seq: 2 })
   c.t += DAY
@@ -130,37 +135,64 @@ test('sweep removes an 8-day-old record and keeps a 1-day-old one; seqs never go
   t.is(pool.submit(drop({ token })), null, 'the same token on new bytes is still refused')
   t.alike(pool.submit(drop()), { seq: 3 })
 
-  c.t += 8 * DAY
+  c.t += RET + DAY
   t.is(pool.sweep(), 2)
   t.is(pool.size, 0)
   pool.close()
-  const again = open(t, dir, { now: c.now })
+  const again = open(t, dir, { now: c.now, tokenRetentionMs: LONG_TOKENS })
   t.is(again.oldestSeq, 4)
   t.alike(again.submit(drop()), { seq: 4 }, 'an empty pool keeps counting')
+})
+
+test('on its defaults a drop is served at 10 days and swept past 14, with its spent token', (t) => {
+  // The 14-day retention is what lets a device offline for two weeks still
+  // pull its drops (issue #351). A spent stamp is still remembered only for
+  // the stamp key acceptance window, 14 days, so it goes with its drop.
+  t.is(DM_RETENTION_MS, 14 * DAY)
+  t.is(STAMP_TOKEN_RETENTION_MS, 14 * DAY)
+  const dir = tmpDir(t)
+  const c = clock(1700000000000)
+  const pool = open(t, dir, { now: c.now })
+  const token = randomBytes(32)
+  const d = drop({ token })
+  t.alike(pool.submit(d), { seq: 1 })
+  c.t += 10 * DAY
+  t.is(pool.sweep(), 0, 'nothing swept at 10 days')
+  const served = pool.page({ after: 0, limit: 8 }).items[0]
+  t.ok(served && b4a.equals(served.bytes, d), 'still served at 10 days')
+  t.is(pool.submit(drop({ token })), null, 'its token is spent')
+  c.t += 4 * DAY
+  t.is(pool.sweep(), 0, 'exactly the retention is still kept')
+  t.is(pool.submit(drop({ token })), null, 'its token is still spent at 14 days')
+  c.t += 1
+  t.is(pool.sweep(), 1, 'swept just past 14 days')
+  t.is(pool.page({ after: 0, limit: 8 }).items.length, 0)
+  const head = JSON.parse(fs.readFileSync(path.join(dir, POOL_DIR, HEAD_FILE), 'utf8'))
+  t.alike(head.tokens, [], 'the token hash goes in the same sweep')
 })
 
 test('spent token hashes outlive their records and keep their ages across reload', (t) => {
   const dir = tmpDir(t)
   const c = clock(1700000000000)
-  const pool = open(t, dir, { now: c.now })
+  const pool = open(t, dir, { now: c.now, tokenRetentionMs: LONG_TOKENS })
   const token = randomBytes(32)
   const h = b4a.toString(hcrypto.hash(token), 'hex')
   t.alike(pool.submit(drop({ token })), { seq: 1 })
-  c.t += 8 * DAY
+  c.t += RET + DAY
   t.is(pool.sweep(), 1, 'the record is swept')
   t.is(pool.size, 0)
-  t.is(pool.submit(drop({ token })), null, 'refused at 8 days')
+  t.is(pool.submit(drop({ token })), null, 'refused past the retention')
   pool.close()
 
   c.t += DAY
-  const again = open(t, dir, { now: c.now })
+  const again = open(t, dir, { now: c.now, tokenRetentionMs: LONG_TOKENS })
   const head = JSON.parse(fs.readFileSync(path.join(dir, POOL_DIR, HEAD_FILE), 'utf8'))
   t.alike(head.tokens, [{ h, at: 1700000000000, kid: '00112233aabbccdd' }], 'reload keeps the original age')
   t.is(again.submit(drop({ token })), null, 'refused after reload')
-  c.t += 6 * DAY
+  c.t += RET - DAY
   t.is(again.sweep(), 0)
   const after = JSON.parse(fs.readFileSync(path.join(dir, POOL_DIR, HEAD_FILE), 'utf8'))
-  t.alike(after.tokens, [], 'gone after 15 days')
+  t.alike(after.tokens, [], 'gone after 29 days')
   t.alike(again.submit(drop({ token })), { seq: 2 }, 'the hash no longer blocks it')
   t.exception.all(() => createDmPool({ dir: tmpDir(t), verifyStamp, retentionMs: 10, tokenRetentionMs: 9 }), /tokenRetentionMs/)
 })
@@ -176,7 +208,7 @@ test('old head.json with bare token hashes migrates, counting from load time', (
   const head = JSON.parse(fs.readFileSync(path.join(dir, POOL_DIR, HEAD_FILE), 'utf8'))
   t.alike(head.tokens, [{ h, at: 1800000000000, kid: null }])
   t.is(pool.submit(drop({ token })), null)
-  c.t += 13 * DAY
+  c.t += TOKEN_RET - DAY
   pool.sweep()
   t.is(pool.submit(drop({ token })), null, 'still spent at 13 days after load')
   t.alike(pool.submit(drop()), { seq: 5 })
@@ -186,20 +218,20 @@ test('a crash right after the compacted log is renamed keeps the swept token spe
   const dir = tmpDir(t)
   const c = clock(1700000000000)
   const crashAt = { step: 'renamed' }
-  const pool = open(t, dir, { now: c.now, fault: (step) => { if (step === crashAt.step) throw new Error('crash') } })
+  const pool = open(t, dir, { now: c.now, tokenRetentionMs: LONG_TOKENS, fault: (step) => { if (step === crashAt.step) throw new Error('crash') } })
   const token = randomBytes(32)
   t.alike(pool.submit(drop({ token })), { seq: 1 })
   c.t += DAY
   const young = drop()
   t.alike(pool.submit(young), { seq: 2 })
-  c.t += 7 * DAY
+  c.t += RET
   t.exception(() => pool.sweep(), /crash/)
   // The rename happened: memory follows the compacted log.
   t.is(pool.size, 1)
   t.is(pool.submit(drop({ token })), null)
   pool.close()
 
-  const again = open(t, dir, { now: c.now })
+  const again = open(t, dir, { now: c.now, tokenRetentionMs: LONG_TOKENS })
   t.is(again.size, 1)
   t.ok(b4a.equals(again.page({ after: 0, limit: 8 }).items[0].bytes, young))
   t.is(again.submit(drop({ token })), null, 'still spent after crash and reload')
@@ -212,7 +244,7 @@ test('a crash before the rename leaves the old log and the old state', (t) => {
   const token = randomBytes(32)
   const old = drop({ token })
   t.alike(pool.submit(old), { seq: 1 })
-  c.t += 8 * DAY
+  c.t += RET + DAY
   t.exception(() => pool.sweep(), /crash/)
   t.is(pool.size, 1, 'nothing swept in memory')
   t.ok(b4a.equals(pool.page({ after: 0, limit: 8 }).items[0].bytes, old))
@@ -272,7 +304,7 @@ test('a failed reopen after compaction breaks the pool: no ack, no page', (t) =>
   pool.submit(drop())
   c.t += DAY
   pool.submit(drop())
-  c.t += 7 * DAY
+  c.t += RET
   t.exception(() => pool.sweep(), /emfile/)
   armed = false
   t.alike(logged, [{ event: 'dm-pool-broken' }])
@@ -400,7 +432,7 @@ test('a sweep rewrites the log only past 1/8 of it or compactAt expired records'
   const logFile = path.join(dir, POOL_DIR, LOG_FILE)
   let renames = 0
   const counting = (step) => { if (step === 'renamed') renames++ }
-  const pool = open(t, dir, { now: c.now, fault: counting })
+  const pool = open(t, dir, { now: c.now, tokenRetentionMs: LONG_TOKENS, fault: counting })
   const old = drop()
   t.alike(pool.submit(old), { seq: 1 })
   c.t += 2 * DAY
@@ -409,7 +441,7 @@ test('a sweep rewrites the log only past 1/8 of it or compactAt expired records'
     young.push(drop())
     pool.submit(young[i])
   }
-  c.t += 6 * DAY + 1
+  c.t += RET - 2 * DAY + 1
   t.is(pool.sweep(), 1, '1 of 9 expired: not past 1/8')
   t.is(renames, 0, 'no rewrite')
   t.is(fs.statSync(logFile).size, 9 * RECORD_BYTES, 'the expired record stays in the file')
@@ -437,7 +469,7 @@ test('a sweep rewrites the log only past 1/8 of it or compactAt expired records'
   small.submit(drop())
   c.t += DAY
   for (let i = 0; i < 9; i++) small.submit(drop())
-  c.t += 7 * DAY - 1
+  c.t += RET - 1
   t.is(small.sweep(), 1)
   t.is(renames, 1, 'compactAt records force the rewrite')
 
@@ -448,7 +480,7 @@ test('a sweep rewrites the log only past 1/8 of it or compactAt expired records'
   p2.submit(drop())
   c.t += DAY
   for (let i = 0; i < 6; i++) p2.submit(drop())
-  c.t += 7 * DAY - 1
+  c.t += RET - 1
   t.is(p2.sweep(), 2, '2 of 8 expired: past 1/8')
   t.is(fs.statSync(path.join(big, POOL_DIR, LOG_FILE)).size, 6 * RECORD_BYTES, 'compacted')
   t.exception.all(() => createDmPool({ dir: tmpDir(t), verifyStamp, compactAt: 0 }), /compactAt/)
@@ -463,8 +495,8 @@ test('a receivedAt more than a day ahead is read as the load time', (t) => {
   c.t = 1700000000000
   const again = open(t, dir, { now: c.now })
   t.is(again.size, 1)
-  c.t += 8 * DAY
-  t.is(again.sweep(), 1, 'it expires 7 days after the load, not 30 days later')
+  c.t += RET + DAY
+  t.is(again.sweep(), 1, 'it expires 14 days after the load, not 30 days later')
   t.is(again.size, 0)
 })
 
@@ -537,7 +569,7 @@ test('spentElsewhere survives a restart of both pools, both ways', (t) => {
 
 test('the visit pool keeps pings 3 days but remembers stamps as long as the dm pool', (t) => {
   t.is(VISIT_RETENTION_MS, 3 * DAY)
-  t.is(VISIT_TOKEN_RETENTION_MS, 2 * DM_RETENTION_MS, 'the dm pool default token retention')
+  t.is(VISIT_TOKEN_RETENTION_MS, STAMP_TOKEN_RETENTION_MS, 'the dm pool default token retention')
   const dir = tmpDir(t)
   const c = clock(1700000000000)
   const kids = new Set(['00112233aabbccdd'])
@@ -560,7 +592,7 @@ test('the visit pool keeps pings 3 days but remembers stamps as long as the dm p
 
   c.t += 3 * DAY + 1
   t.is(visit.sweep(), 1, 'the ping goes after 3 days')
-  t.is(dm.sweep(), 0, 'the dm stays its 7 days')
+  t.is(dm.sweep(), 0, 'the dm stays its 14 days')
   t.is(dm.submit(drop({ token: tv })), null, 'the swept ping still holds its stamp against the dm pool')
 
   kids.clear()
