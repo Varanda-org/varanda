@@ -485,6 +485,24 @@ test('close waits for a pending identity write before releasing the storage', as
   t.alike(await storage.readJson('signedOut'), { v: 1 }, 'the write landed before the close')
 })
 
+test('close saves the verified signature digests after the session and before the storage', async (t) => {
+  const order = []
+  const session = { detach: async () => {}, close: async () => { order.push('session') } }
+  const storage = { async close () { order.push('storage') } }
+  const sigs = Promise.resolve({ async close () { order.push('sigs') } })
+  await createLifecycle({ session, storage, sigs }).close()
+  t.alike(order, ['session', 'sigs', 'storage'])
+
+  order.length = 0
+  const failing = Promise.resolve({ async close () { throw new Error('disco cheio') } })
+  await createLifecycle({ session, storage, sigs: failing }).close()
+  t.alike(order, ['session', 'storage'], 'a failed save still releases the storage')
+
+  order.length = 0
+  await createLifecycle({ session, storage, sigs: Promise.resolve(null) }).close()
+  t.alike(order, ['session', 'storage'], 'no digests when the LOCK was refused')
+})
+
 test('an upload still reading at close never reaches mediaUpload; close does not wait on a sync', async (t) => {
   let mediaUploads = 0
   let sessionClosed = false

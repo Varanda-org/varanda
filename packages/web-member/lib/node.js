@@ -63,11 +63,13 @@
 // and then the storage.
 const { createServerDispatcher, parseMessage, MAX_REQUEST } = require('@varanda/rpc')
 const { createBrowserSession } = require('./session')
+const { keepVerified } = require('./sig-store')
 
 function noop () {}
 
 function createBrowserNode ({ storage, ...options } = {}) {
   const session = createBrowserSession({ storage, ...options })
+  const sigs = keepVerified(storage)
   let current = null
   let closing = null
 
@@ -119,6 +121,7 @@ function createBrowserNode ({ storage, ...options } = {}) {
     closing = (async () => {
       if (current !== null) current.close()
       await session.close()
+      await sigs.close()
       await storage.close()
     })()
     return closing

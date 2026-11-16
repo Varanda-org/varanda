@@ -28,6 +28,7 @@ const { fileNodeStorage } = require('@varanda/web-member/lib/file-storage')
 const { createBrowserSession } = require('@varanda/web-member/lib/session')
 const { duplexSocket } = require('@varanda/web-member/lib/duplex-socket')
 const { hkdfSha256 } = require('@varanda/web-member/lib/hkdf')
+const { keepVerified } = require('@varanda/web-member/lib/sig-store')
 const { MAX_MEDIA_ITEM_BLOCKS, MEDIA_BLOCK_BYTES } = require('@varanda/core/lib/records')
 const { createIdentityHost } = require('./identity-install')
 const { createBareFetch } = require('./bare-fetch')
@@ -99,7 +100,10 @@ function createWebNode (args, { onInternalError } = {}) {
   locking.catch(() => {})
   const ready = () => locking.catch((err) => { throw lockRefusal(err) })
 
-  const lifecycle = createLifecycle({ session, storage, locking })
+  // The verified signature digests are read and written only once this
+  // process holds the LOCK.
+  const sigs = locking.then(() => keepVerified(storage), () => null)
+  const lifecycle = createLifecycle({ session, storage, locking, sigs })
 
   function readCacheFile (name) {
     return readMediaFile({
