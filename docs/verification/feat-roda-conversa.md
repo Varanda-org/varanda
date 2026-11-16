@@ -1,0 +1,42 @@
+# Roda de conversa: comentários em dois níveis (branch feat/roda-conversa)
+
+As respostas viram comentários, como no Instagram e no Facebook, com dois níveis visíveis. Formato dos registros, `replyTo` (um pai exato), RPC e Termos não mudam. O app passa a usar a rota `/index/roda` de `docs/verification/feat-index-roda.md`. Este arquivo substitui a seção 191 no que diz respeito ao aninhamento ("Ver N respostas" com um nível e "Ver conversa"); a seção 191 fica como registro e não foi editada.
+
+- Contrato de dois níveis (`apps/app/src/roda.js`, `apps/app/src/screens/Conversa.js`): a raiz é a única publicação principal. Nível 1: os comentários, respostas diretas à raiz. Nível 2: sob cada comentário, a roda dele, com todas as respostas da subárvore achatadas, sempre o pai antes dos filhos; cada resposta mais funda leva a citação da mensagem que responde (`rodaQuote`, desenhada com `ReplyPreview`). A roda fica fechada até o toque em "Ver N respostas". Nenhum toque dentro da conversa troca a publicação principal: "Ver conversa" saiu, e as linhas não abrem outra Conversa (uma publicação citada ainda abre a própria conversa).
+- Raiz (`resolveRoot` em `apps/app/src/rodaLoad.js`): a Conversa abre com qualquer publicação da conversa e acha a raiz. Com `/index/roda`, a raiz e o `top` do semeador valem só depois de lidos do diário de cada autor: a raiz tem `replyTo` assinado `null` e o `top` responde à raiz. Sem a rota, a subida segue o `replyTo` assinado, no máximo 8 saltos (`MAX_HOPS`). Um pai ilegível deixa a mensagem mais alta que se pôde ler como linha principal, com a nota de publicação indisponível, e as respostas dela embaixo.
+- Prova do alvo: o par `{ root, top }` do semeador não prova, sozinho, que a publicação aberta está sob esse `top` (`proven: false`). A tela abre a roda do `top` e procura o alvo nela, já verificada (`seekTarget`: a página que `resolveRoot` trouxe e mais até 4). Se não achar, chama `resolveRoot` de novo com `climbOnly`, que sobe só pelos registros assinados, sem pedir roda. Uma subida `ok` até a mesma raiz confirma a conversa mostrada; até outra raiz, a tela mostra essa conversa no lugar, com o alvo destacado. Uma subida cortada nos 8 saltos (`cut`) termina num ancestral assinado do alvo: se ele é o `top` ou uma linha que a roda verificada do `top` já tem, a conversa mostrada fica e está confirmada; só fora disso aparece a mensagem mais alta com a nota de começo cortado. Uma raiz não provada nunca é apresentada como a conversa do alvo sem essa conferência. O `focus` passado por quem abre a tela também conta como não provado.
+- Sem conferência, sem conversa (falha fechada): a tela guarda se a raiz está confirmada (`proven` no estado e no resultado guardado). Enquanto não está, a barra de resposta não mira a raiz por padrão (sem alvo, ela fica desligada); responder a uma linha tocada continua valendo, porque cada linha é assinada e conferida por si. Se a subida falha, a raiz do semeador sai da tela e aparece a tela de erro com "Tentar de novo", que abre a publicação do começo, conferência incluída; a subida é só leitura, mas não se repete sozinha. Uma carga ou um apagamento que interrompe a conferência a devolve para a próxima carga pronta, e atualizar a tela com uma raiz ainda não confirmada confere de novo.
+- Portão de confiança (`assembleThread` e `assembleRoda`): o índice só diz onde procurar. Um comentário entra quando o `replyTo` assinado dele é a raiz; uma resposta entra na roda quando o `replyTo` assinado dela é o comentário ou uma resposta já aceita. O campo `to`, o `top` e a ordem da página nunca são usados para aceitar uma linha. Texto de par passa por `displayText`.
+- Semeador sem `/index/roda` (404, motivo `not-found`) ou com outro `top`: a roda mostra só as respostas diretas do comentário, paginadas pelo índice da publicação, sem descer mais; quando alguma delas tem respostas próprias, aparece "Algumas respostas podem faltar.". A mesma nota aparece quando o semeador cortou a roda (`complete: false`).
+- Rótulo fechado: antes de a roda carregar, "Ver N respostas" usa a contagem de respostas diretas de `/index/counts`, que é um piso (as mais fundas não entram nela). Depois de carregar, vale o `total` da roda, nunca abaixo das linhas já na tela.
+- Ordem por página (`commentOrder`): em cada página carregada, primeiro os comentários seus e de quem você segue, depois os outros, cada grupo do mais antigo ao mais novo. As páginas seguintes são acrescentadas no fim e nunca reordenam o que já está na tela. O comentário do alvo vai primeiro (`withAnchor`), mesmo vindo de uma página posterior, sem duplicar. Dentro da roda vale a ordem do semeador sobre os dados assinados (`rodaOrder`), então uma página nova nunca move as linhas já mostradas.
+- Selo "quem publicou" (`AUTHOR_TAG`): marca os comentários e respostas do autor da raiz. A palavra é neutra de propósito: a raiz pode ser de uma pessoa de qualquer gênero ou de uma Página, e "autor" ou "autora" erraria num dos casos. O selo entra no rótulo do leitor de tela.
+- Bloqueio e citação de resposta (`blockedRowView` em `apps/app/src/memberBlocks.js`): depois de bloquear alguém, a citação de uma resposta que responde a essa pessoa passa na hora a "Mensagem indisponível", sem nome, sem a chave de quem enviou e sem o toque, no desenho e no rótulo do leitor de tela, como a citação de publicação de uma pessoa bloqueada.
+- Toque na citação: rola até a mensagem respondida, centralizada, e a destaca por 900 ms (o mesmo padrão da conversa privada: `scrollToIndex` em try/catch e uma segunda tentativa depois de 120 ms, sem `onScrollToIndexFailed`). Uma mensagem fora do trecho carregado é anunciada ("Mensagem fora do trecho carregado") e nada mais acontece. No leitor de tela, a citação fica na camada visual escondida, então o toque vira a ação "mostrar a mensagem respondida" no corpo da linha, ao lado da ação que abre.
+- Abrir por um aviso: a roda do comentário do alvo abre sozinha, a tela procura o alvo (até 4 páginas além da primeira), rola até ele e o destaca. Não achando, a roda fica aberta com "Ver mais respostas". Um alvo que é o próprio comentário só é destacado.
+- Deslizar para responder (`apps/app/src/ui/SwipeReply.js`, sem mudança nele nem em `chatGestures.js`): deslizar para a direita num comentário ou numa resposta mira nela na barra e abre o teclado, como o ícone de responder, que continua. Fica desligado sem o nó cheio, durante um envio e quando a própria linha usa o arrasto horizontal (`canSwipeReply`: carrossel de 2 ou mais fotos, cartão de música com a barra de progresso, linha ainda sem `seq`). O gesto de voltar da borda esquerda captura primeiro (24 px da borda), `swipePlan` ignora começos a menos de 24 px e arrastos que não são ao menos duas vezes mais horizontais que verticais, e `SwipeReply` cede quando outro responder pede o toque, então a rolagem vertical e o puxar para atualizar seguem funcionando. Não há abas deslizantes para disputar o gesto.
+
+Comandos, a partir da raiz:
+
+```sh
+node apps/app/test/conversaScreen.test.js
+node apps/app/test/roda.test.js
+node apps/app/test/rodaLoad.test.js
+node apps/app/test/postLayout.test.js
+node apps/app/test/platformGate.test.js
+node apps/app/test/themeUsage.test.js
+npx standard apps/app/src/screens/Conversa.js apps/app/src/ui/PostRow.js
+```
+
+Implantação: o semeador com `/index/roda` (`docs/verification/feat-index-roda.md`) vai antes deste app. Diante de um semeador antigo, o app cai nas respostas diretas descritas acima.
+
+Situação. Verificação manual na ordem Android, iOS, web no celular:
+
+- [ ] Os comandos acima passam: a conferir ao executar.
+- [ ] Abrir o aviso de uma resposta funda mostra a raiz com essa resposta destacada na roda do comentário dela (Android, iOS, web no celular): pendente.
+- [ ] Tocar na citação rola até a mensagem respondida e a destaca: pendente.
+- [ ] Deslizar para a direita num comentário mira nele e abre o teclado: pendente.
+- [ ] Rolagem vertical, puxar para atualizar, o gesto de voltar pela borda esquerda, um carrossel de 2 fotos, a barra de progresso de um cartão de música e a barra de um vídeo dentro de um comentário seguem funcionando: pendente.
+- [ ] TalkBack e VoiceOver alcançam o ícone de responder e a ação "mostrar a mensagem respondida": pendente.
+- [ ] Com reduzir movimento ligado, deslizar e o destaque funcionam sem animação: pendente.
+- [ ] `npm run lint`, `npm test -- --affected=origin/main` e `npm run demo` passam: a conferir ao executar.

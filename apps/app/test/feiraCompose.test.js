@@ -53,6 +53,32 @@ test('feiraCompose: failed advance keeps errors visible beside the actions and a
   t.ok(move.includes('scrollRef.current?.scrollTo({ y: 0, animated: false })'), 'a new step starts at the top')
 })
 
+test('feiraCompose: an edit retires a step error in the bar too, not a publish error with no field', (t) => {
+  const src = source('src/screens/Anunciar.js')
+  const match = src.match(/const clearFieldError = \(\) => \{([\s\S]*?)\n {2}\}/)
+  t.ok(match, 'one helper retires a step error')
+  if (!match) return
+  const run = (field, step) => {
+    const calls = []
+    const stepErrorRef = { current: step }
+    vm.runInNewContext(match[1], { field, stepErrorRef, setError: (v) => calls.push(['error', v]), setField: (v) => calls.push(['field', v]) })
+    calls.push(['step', stepErrorRef.current])
+    return calls
+  }
+  t.alike(run('title', true), [['error', ''], ['field', ''], ['step', false]], 'a step error leaves the bar once the form changes')
+  t.alike(run('', true), [['error', ''], ['field', ''], ['step', false]], 'the word check, a step error with no field, leaves the bar too')
+  t.alike(run('', false), [['field', ''], ['step', false]], 'a publish error with no field (a failed send) stays in the bar')
+  const advance = src.slice(src.indexOf('const advance = () => {'), src.indexOf('// Descriptors are valid only'))
+  t.ok(/stepErrorRef\.current = true\s+setField\(problem\.field\)/.test(advance), 'the step marks its own errors')
+  const publish = src.slice(src.indexOf('const publish = async () => {'), src.indexOf('const retry = async () => {'))
+  t.ok(publish.includes('stepErrorRef.current = false'), 'a publish attempt clears the mark, so its own errors stay')
+  const set = src.slice(src.indexOf('const set = (patch) => {'), src.indexOf('const attach = async'))
+  t.ok(set.includes('clearFieldError()'), 'every form edit goes through it')
+  t.absent(set.includes("setField('')"), 'no edit clears only the inline error')
+  t.is(src.split('onPress={() => { setAck((v) => !v); clearFieldError() }}').length - 1, 1, 'the public confirmation goes through it')
+  t.absent(src.includes("setAck((v) => !v); setField('')"), 'the confirmation never leaves its error in the bar')
+})
+
 test('feiraCompose: review preview is labeled and uses a noninteractive tile', (t) => {
   const src = source('src/screens/Anunciar.js')
   t.ok(/<Label>Prévia<\/Label>\s+<ListingTile listing=\{previewListing\(form\)\} width='100%' \/>/.test(src))
@@ -105,7 +131,7 @@ test('feiraCompose: App routes hardware back and Escape through the active guard
   t.ok(/if \(helpOpenRef.current \|\| sheetOpenRef.current\) return false\s+if \(backGuardRef.current\?\.\(\) === true\) return true/.test(hardware))
   const escape = src.slice(src.indexOf('const onKey = (event) =>'), src.indexOf("globalThis.addEventListener('keydown', onKey)"))
   t.ok(/sheetOpenRef.current\) return\s+if \(backGuardRef.current\?\.\(\) === true\) \{\s+event.preventDefault\(\)\s+return/.test(escape))
-  t.ok(src.includes('registerBackGuard={(fn) => registerBackGuard(() => stackRef.current[stackRef.current.length - 1] === entry && fn())}'), 'hidden and departing screens cannot consume back')
+  t.ok(src.includes('const guardRegistrar = entryHandlers.current.for(i + \':anunciar\', { handleRegisterBackGuard: (fn) => registerBackGuard(() => stackRef.current.length - 1 === i && stackRef.current[i].screen === \'anunciar\' && fn()) }).handleRegisterBackGuard') && src.includes('registerBackGuard={guardRegistrar}'), 'hidden and departing screens cannot consume back')
   const match = src.match(/const registerBackGuard = useCallback\(\(fn\) => \{([\s\S]*?)\n {2}\}, \[\]\)/)
   t.ok(match, 'registration returns an owned cleanup')
   if (!match) return
@@ -604,7 +630,7 @@ test('feiraCompose: full-screen forms measure the keyboard form on iOS too, shee
   for (const file of ['Anunciar', 'AnuncioEditar']) t.ok(source('src/screens/' + file + '.js').includes('<KeyboardForm inWindow>'), file + ' opts in')
   const perfil = source('src/screens/Perfil.js')
   t.ok(perfil.includes('export function KeyboardForm ({ children, inWindow = false })'), 'default is off')
-  t.ok(perfil.includes("(!inWindow && Platform.OS !== 'android') || !view"), 'without inWindow the Android-only rule stays')
+  t.ok(perfil.includes("measured={inWindow || Platform.OS === 'android'}"), 'without inWindow the Android-only rule stays')
   t.absent(/<KeyboardForm inWindow/.test(source('src/screens/ExcluirConta.js') + source('src/screens/Denunciar.js')), 'sheets are unchanged')
 })
 
@@ -618,4 +644,58 @@ test('feiraCompose: the error is repeated in the bottom bar, above its button', 
   const create = source('src/screens/Anunciar.js')
   t.absent(create.slice(0, create.indexOf('<View style={[styles.bar')).includes("{error !== '' ? <ErrorText>{error}</ErrorText> : null}"), 'Anunciar shows the repeated error once')
   t.ok(source('src/screens/AnuncioEditar.js').includes("{error !== '' && field === '' && !conflict && pending !== null ? <ErrorText>{error}</ErrorText> : null}"), 'Editar keeps the error in the form only while the bar is hidden')
+})
+
+test('feiraCompose: maskPriceText is a cents mask that parsePriceText reads back', async (t) => {
+  const c = await load()
+  const { parsePriceText } = await import('../src/feira.js')
+  t.is(c.maskPriceText(''), '')
+  t.is(c.maskPriceText('abc'), '')
+  t.is(c.maskPriceText('0'), '', 'zeros alone stay empty')
+  t.is(c.maskPriceText('5'), '0,05')
+  t.is(c.maskPriceText('25'), '0,25')
+  t.is(c.maskPriceText('2500'), '25,00')
+  t.is(c.maskPriceText('123456'), '1.234,56')
+  t.is(c.maskPriceText('R$ 1.234,56'), '1.234,56', 'a paste with the symbol')
+  t.is(c.maskPriceText('1234.56'), '1.234,56', 'a paste with a dot')
+  t.is(c.maskPriceText('007'), '0,07', 'leading zeros are dropped')
+  t.is(c.maskPriceText(null), '')
+  for (const text of ['0,05', '25,00', '1.234,56', '1.000.000,00']) t.is(c.maskPriceText(text), text, text + ' is stable')
+  t.is(c.maskPriceText('100000000'), '1.000.000,00', 'the ceiling itself is accepted')
+  t.is(c.maskPriceText('1000000000'), '1.000.000,00', 'a digit past the ceiling is dropped')
+  t.is(c.maskPriceText('99999999999999999999999999'), '999.999,99', 'a huge paste is cut, not wrapped')
+  for (const text of ['5', '2500', '123456', '100000000']) t.is(parsePriceText(c.maskPriceText(text)), Number(text), text + ' parses to the same cents')
+})
+
+test('feiraCompose: Anunciar masks the price and keeps the stored text in the shape validateListingForm reads', (t) => {
+  const src = source('src/screens/Anunciar.js')
+  t.ok(src.includes('onChangeText={(priceText) => set({ priceText: maskPriceText(priceText) })}'), 'the value is masked as it changes')
+  t.ok(/import \{[^}]*maskPriceText[^}]*\} from '..\/feiraCompose'/.test(src), 'imported from the pure module')
+})
+
+test('feiraCompose: removing a photo in Anunciar and in Editar anúncio offers an undo that restores it and frees the thumbnail only when it ends', (t) => {
+  for (const [file, afterSettle] of [['src/screens/Anunciar.js', 'const publish = '], ['src/screens/AnuncioEditar.js', 'const save = ']]) {
+    const src = source(file)
+    t.ok(/import \{ removeById, restoreRemoved \} from '..\/photoUndo'/.test(src), file + ' uses the pure helper')
+    const remove = src.slice(src.indexOf('const removePhoto = '), src.indexOf('const undoRemove = '))
+    t.absent(remove.includes('revokeUrl') || remove.includes('thumbsRef.current.delete') || remove.includes('dropThumb(id)'), file + ': the thumbnail outlives the removal while the undo is open')
+    t.ok(src.includes('const dropThumb') && src.includes('if (held !== null) dropThumb(held.item.id)'), file + ': the thumbnail goes when the undo ends')
+    const undo = src.slice(src.indexOf('const undoRemove = '), src.indexOf('// The same photo objects in a new order'))
+    t.ok(undo.includes('restoreRemoved(list, held, MAX_PHOTOS)') && undo.includes('photosFor('), file + ': restored at its place, for the current identity')
+    const updater = undo.slice(undo.indexOf('setPhotos((list) => {'))
+    t.ok(updater.indexOf('dropThumb(held.item.id)') > updater.indexOf('restoreRemoved(') && updater.includes('!next.some((item) => item && item.id === held.item.id)'), file + ': a photo that did not come back (the list filled up meanwhile) frees its thumbnail inside the updater')
+    t.ok(src.includes("<Pill label='Desfazer' onPress={undoRemove} />") && src.includes('undo !== null && !locked'), file + ': the action shows only while the form is editable')
+    const settle = src.slice(src.indexOf('const settle = '), src.indexOf(afterSettle))
+    t.ok(settle.includes('clearTimeout(undoTimer.current)') && settle.includes('setUndo(null)'), file + ': a saved form drops the undo')
+  }
+})
+
+test('feiraCompose: both price fields use the cents mask and a numeric keyboard', (t) => {
+  const field = source('src/ui/index.js')
+  t.ok(field.includes('keyboardType, plain }') && field.includes('submit.keyboardType = keyboardType'), 'Field forwards keyboardType')
+  for (const file of ['src/screens/Anunciar.js', 'src/screens/AnuncioEditar.js']) {
+    const line = source(file).split('\n').find((l) => l.includes("'Valor (R$)'"))
+    t.ok(line.includes('maskPriceText(priceText)'), file + ' masks the price')
+    t.ok(line.includes("keyboardType='numeric'"), file + ' asks for the numeric keyboard')
+  }
 })

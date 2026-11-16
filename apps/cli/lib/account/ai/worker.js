@@ -26,8 +26,8 @@
 // never hot-loops and a later human decision is picked up. A report that
 // fails forever therefore never starves the ones behind it.
 //
-// What is never done here: unblock, cancel, pull, ack, or anything that signs
-// or publishes. Blocks the AI decides still go through the operator's `mod
+// What is never done here: unblock, cancel, reopen, pull, ack, or anything
+// that signs or publishes. Blocks the AI decides still go through the operator's `mod
 // apply`. Before deciding, the worker abstains when a human already touched
 // the target (humanReversed, any pending change) or the target is already in
 // the published list; those checks run in both modes.
@@ -58,6 +58,13 @@
 //
 // Private message reports (kind 'dm') are human-only too: marked 'dm' once,
 // never read, embedded or learned from.
+//
+// A report a person reopened (the panel's "Reabrir" on an AI decision) is
+// human-only from then on: marked 'reaberto' for good, and its post counts
+// as already decided by the AI, so another report on it is an appeal. The
+// row's own `reopened` marker in moderation.json is what makes this last;
+// the ledger mark and the store's 'reaberto' event are extra signals that
+// can age out. The undone AI decision still counts toward its day's cap.
 //
 // Logging: log({ event: 'triage', reason: <token> }) only. No text, quote,
 // embedding, key, token or e-mail ever reaches the logger or an error.
@@ -94,7 +101,8 @@ const BACKOFF_MS = Object.freeze([5 * 60 * 1000, 60 * 60 * 1000, 6 * 60 * 60 * 1
 // bank change): failed reads, and an embedder failure ('falha-ia').
 const LISTING_CODE = 'anuncio'
 const NOT_A_POST = 'nao-e-publicacao'
-const TERMINAL_CODES = Object.freeze([LISTING_CODE, NOT_A_POST])
+const REOPENED_CODE = 'reaberto'
+const TERMINAL_CODES = Object.freeze([LISTING_CODE, NOT_A_POST, REOPENED_CODE])
 const READ_FAIL_CODES = Object.freeze(['timeout', 'ausente', 'recusado', 'certificado', 'config', 'erro', 'falha-ia'])
 const TOKEN_RE = /^[a-z0-9-]{1,32}$/
 // Reasons whose verified text is embedded and learned from.
@@ -311,6 +319,20 @@ function createWorker ({
     return null
   }
 
+  // Did a person reopen this report after the AI decided it? The row's
+  // `reopened` marker says so for good. Without one (a store that does not
+  // write it), an open row whose ledger mark still holds the AI's own
+  // decision can only be that, and the store's 'reaberto' events cover a
+  // decision whose mark never landed. A store without reopenedIds fails
+  // closed.
+  function reopened (id, row) {
+    if (row !== null && row !== undefined && Object.hasOwn(row, 'reopened')) return true
+    const m = ledger.get(id)
+    if (m !== null && (m.code === 'bloquear' || m.code === 'descartar')) return true
+    if (!isFn(moderation.reopenedIds)) return true
+    return moderation.reopenedIds().includes(id)
+  }
+
   // Was this post (target:seq) already decided in another report, by a
   // human or by the AI? Then a new report is an appeal and goes to a human:
   // the AI must never block a post a moderator dismissed (a second reporter
@@ -422,6 +444,10 @@ function createWorker ({
     if (row === null || row.status !== 'aberta') {
       ledger.mark(id, { code: 'ja-decidida', retryAt: null, suggestion: null, nearest: null })
       return
+    }
+    if (reopened(id, row)) {
+      emit(REOPENED_CODE)
+      return markTerminal(id, REOPENED_CODE)
     }
     // A private message is on no diary: no read, no embed, a human decides.
     // Checked first, before anything reads the row's post fields.
@@ -731,7 +757,14 @@ function createWorker ({
     counts.day = day
     counts.bloquear = 0
     counts.descartar = 0
+    const back = new Set(isFn(moderation.reopenedIds) ? moderation.reopenedIds() : [])
     for (const r of rows) {
+      const marked = Object.hasOwn(r, 'reopened')
+      // A reopened row no longer carries the AI's decision, but its post
+      // stays one the AI decided on, and that decision still counts toward
+      // its day's cap: reopening leaves the AI's block standing.
+      if ((marked || (r.status === 'aberta' && back.has(r.id))) && r.kind === 'post' && r.seq !== null && !isGroupRow(r)) decidedPosts.add(postKey(r))
+      if (marked && dayOf(r.reopened.decidedAt) === day && (r.reopened.action === 'bloquear' || r.reopened.action === 'descartar')) counts[r.reopened.action]++
       if (r.decidedBy !== AI_ACTOR) continue
       if (r.kind === 'post' && r.seq !== null && !isGroupRow(r)) decidedPosts.add(postKey(r))
       if (dayOf(r.decidedAt) === day && (r.status === 'bloquear' || r.status === 'descartar')) counts[r.status]++
@@ -821,12 +854,19 @@ function createWorker ({
   // For the panel's projection of one report (tokens and numbers only).
   function suggestionOf (id) {
     let m
+    let row
     try {
       m = ledger.get(id)
+      row = m === null || m.code === REOPENED_CODE ? null : moderation.get(id)
     } catch {
       return null
     }
     if (m === null) return null
+    // Until the next scan marks it, a reopened row's mark still holds the
+    // AI decision a person undid: never show that as a suggestion.
+    if (row !== null && (Object.hasOwn(row, 'reopened') || (row.status === 'aberta' && (m.code === 'bloquear' || m.code === 'descartar')))) {
+      return { sugestao: null, semelhanca: null, vizinhos: m.exemplars, motivo: REOPENED_CODE, modo: mode }
+    }
     return {
       sugestao: m.suggestion,
       semelhanca: m.nearest === null ? null : Math.round(m.nearest * 100) / 100,

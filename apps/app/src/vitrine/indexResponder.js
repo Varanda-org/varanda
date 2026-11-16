@@ -141,6 +141,69 @@ function edgePage (rows, cursor, limit, order = oldestFirst) {
   return { items: page.map(refOf), next: ordered.length > limit ? edgeCursor(page[page.length - 1]) : null }
 }
 
+// The seeder's roda (packages/core/lib/engagement-index.js): root and top by
+// walking replyTo up, then top's subtree breadth first, each reply keyed at
+// max(own at, its parent's key + 1) so it sorts after its parent, ordered by
+// (key, author, seq) and paged 50 strictly after the cursor. A post that is
+// not a reply, or whose chain breaks or loops, is not-found.
+function roda (ref, cursor) {
+  const post = requirePost(ref)
+  if (!post.replyTo) notFound()
+  const seenUp = new Set([ref])
+  let top = ref
+  let parent = refOf(post.replyTo)
+  let root = null
+  while (root === null) {
+    if (seenUp.has(parent)) notFound()
+    seenUp.add(parent)
+    const p = requirePost(parent)
+    if (p.replyTo) {
+      top = parent
+      parent = refOf(p.replyTo)
+    } else {
+      root = parent
+    }
+  }
+  const kept = []
+  const keyOf = new Map()
+  const seenDown = new Set([top])
+  const queue = [top]
+  for (let i = 0; i < queue.length; i++) {
+    const node = queue[i]
+    const base = keyOf.get(node)
+    for (const child of posts.filter((p) => p.replyTo && refOf(p.replyTo) === node).sort(oldestFirst)) {
+      const childRef = refOf(child)
+      if (seenDown.has(childRef)) continue
+      seenDown.add(childRef)
+      const atMs = base === undefined ? Date.parse(child.at) : Math.max(Date.parse(child.at), base + 1)
+      keyOf.set(childRef, atMs)
+      kept.push({ atMs, author: child.author, seq: child.seq, ref: childRef, to: node })
+      queue.push(childRef)
+    }
+  }
+  const order = (a, b) => a.atMs - b.atMs || compare(a.author, b.author) || a.seq - b.seq
+  kept.sort(order)
+  let start = 0
+  if (cursor !== undefined) {
+    if (!/^[0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}$/.test(cursor)) notFound()
+    const [at, author, seq] = cursor.split('.')
+    const after = { atMs: Number(at), author, seq: Number(seq) }
+    while (start < kept.length && order(kept[start], after) <= 0) start++
+  }
+  const page = kept.slice(start, start + 50)
+  const last = page[page.length - 1]
+  return {
+    ...flags,
+    ref,
+    root,
+    top,
+    items: page.map(({ ref, to }) => ({ ref, to })),
+    next: page.length > 0 && start + page.length < kept.length ? `${last.atMs}.${last.author}.${last.seq}` : null,
+    total: kept.length,
+    authors: authorsOf([ref, root, top, ...page.map((item) => item.ref)].map((r) => r.split(':')[0]))
+  }
+}
+
 function followRows (author, kind) {
   const related = fixtures.diaryRecords.filter(({ author: from, record: r }) => r.type === 'follow' && (kind === 'seguindo' ? from === author : r.key === author))
   return lastWrites(related, (r) => r.key)
@@ -286,6 +349,12 @@ export function vitrineIndex (url, request) {
     return { ...flags, ref, parent, replies: page.items, next: page.next, quotes, likes: c.likes, reposts: c.reposts, repliesTotal: c.replies, quotesTotal: c.quotes, authors: authorsOf([ref, parent, ...page.items, ...quotes].filter(Boolean).map((r) => r.split(':')[0])) }
   }
 
+  if (route === 'roda' && part !== undefined) {
+    const ref = `${key}:${part}`
+    if (!isRef(ref) || part.length > 15) notFound()
+    return roda(ref, cursor)
+  }
+
   if (route === 'counts' && part === undefined) {
     const refs = key.split(',')
     if (refs.length > 31 || !refs.every((ref) => isRef(ref))) notFound()
@@ -374,7 +443,9 @@ export function vitrineIndex (url, request) {
   if (route === 'testimonials' && part === undefined) {
     requireProfile(key)
     const { entries, deleted } = testimonialSource()
-    return { ...testimonialPointers(entries, deleted, key), ...flags }
+    // unshown is the demo node's own view; the seeder answer has no such key.
+    const { shown, pending } = testimonialPointers(entries, deleted, key)
+    return { shown, pending, ...flags }
   }
 
   if (route === 'scraps' && cursor === undefined) {

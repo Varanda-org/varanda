@@ -532,6 +532,10 @@ test('a file the source app hands over is copied or skipped, never read into mem
   t.ok(/done\(\)\s*return\s*}\s*\/\/ Some apps only offer the bytes/.test(handed), 'and the bytes fallback is not reached')
 })
 
+// One exact env name, not a prefix of a longer one, so each flag's ban fails
+// on its own.
+const namesEnv = (text, name) => new RegExp(name + '(?![A-Z0-9_])').test(text)
+
 // The Vitrine (src/vitrine/enabled.js) swaps the node for fixtures. A release
 // bundle has __DEV__ false, and no build config may set the opt-in either.
 test('a release build cannot turn on the Vitrine', async (t) => {
@@ -539,6 +543,9 @@ test('a release build cannot turn on the Vitrine', async (t) => {
   t.is(vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: '1' }, false), false)
   for (const file of ['app.json', 'eas.json', 'metro.config.js', 'index.js', 'App.js']) {
     t.absent(read(file).includes('EXPO_PUBLIC_VARANDA_VITRINE'), file)
+    t.absent(namesEnv(read(file), 'EXPO_PUBLIC_VARANDA_VITRINE'), file + ' vitrine')
+    t.absent(namesEnv(read(file), 'EXPO_PUBLIC_VARANDA_VITRINE_RICH'), file + ' rich')
+    t.absent(namesEnv(read(file), 'EXPO_PUBLIC_VARANDA_VITRINE_EMBEDS'), file + ' embeds')
   }
   for (const file of ['src/node.js', 'src/account.js']) {
     t.ok(read(file).includes("typeof __DEV__ !== 'undefined' && __DEV__)"), file + ' passes __DEV__')
@@ -553,7 +560,12 @@ test('a release build cannot turn on the perf marks or their request hook', asyn
   t.is(perfEnabled({ EXPO_PUBLIC_VARANDA_PERF: '1' }, false), false)
   for (const file of ['app.json', 'eas.json', 'metro.config.js', 'index.js', 'App.js']) {
     t.absent(read(file).includes('EXPO_PUBLIC_VARANDA_PERF'), file)
+    t.absent(namesEnv(read(file), 'EXPO_PUBLIC_VARANDA_PERF'), file + ' perf')
+    t.absent(namesEnv(read(file), 'EXPO_PUBLIC_VARANDA_PERF_SCROLL'), file + ' scroll')
   }
+  t.ok(namesEnv('x EXPO_PUBLIC_VARANDA_PERF_SCROLL=rua', 'EXPO_PUBLIC_VARANDA_PERF_SCROLL'), 'the exact check sees the scroll flag')
+  t.absent(namesEnv('x EXPO_PUBLIC_VARANDA_PERF_SCROLL=rua', 'EXPO_PUBLIC_VARANDA_PERF'), 'and tells it from the perf flag')
+  t.absent(namesEnv('EXPO_PUBLIC_VARANDA_VITRINE_RICH', 'EXPO_PUBLIC_VARANDA_VITRINE_EMBEDS'), 'each vitrine flag on its own')
   t.ok(read('src/node.js').includes("perfEnabled({ EXPO_PUBLIC_VARANDA_PERF: process.env.EXPO_PUBLIC_VARANDA_PERF }, typeof __DEV__ !== 'undefined' && __DEV__)"), 'node.js passes __DEV__')
 })
 

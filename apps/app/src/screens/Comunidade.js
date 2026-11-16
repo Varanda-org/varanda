@@ -43,7 +43,7 @@ import { radius, space, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { shouldOpenQueued } from '../groupRedirect'
 import { NovoGrupo } from './NovoGrupo'
-import { WEB_ONLY_MESSAGE } from './Comunidades'
+import { UNAVAILABLE_MESSAGE, UNAVAILABLE_TITLE } from './Comunidades'
 
 const { displayText } = rpc
 const HEX64 = /^[0-9a-f]{64}$/
@@ -424,7 +424,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
     return (
       <View style={styles.root}>
         <TopBar title='Comunidade' onBack={onBack} />
-        <EmptyState icon='cadeira' title='Só na versão web' body={WEB_ONLY_MESSAGE} />
+        <EmptyState icon='cadeira' title={UNAVAILABLE_TITLE} body={UNAVAILABLE_MESSAGE} />
       </View>
     )
   }
@@ -432,13 +432,14 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   const offline = node.online === false
   const pending = info !== null && info.state === 'pending'
   const indexName = idx.status === 'done' && needIndex && typeof idx.name === 'string' && idx.name !== '' ? displayText(idx.name) : ''
-  const title = info && typeof info.name === 'string' && info.name !== ''
+  const loadedName = info && typeof info.name === 'string' && info.name !== ''
     ? displayText(info.name)
-    : (indexName || 'Comunidade')
+    : indexName
+  const title = loadedName || 'Comunidade'
 
   const share = async () => {
     setShareNote('')
-    setShareNote(await shareCommunity({ community, title }))
+    setShareNote(await shareCommunity({ community, title: loadedName }))
   }
 
   const openGroup = (g) => { if (typeof onOpenGroup === 'function') onOpenGroup(g) }
@@ -616,7 +617,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
         onPress={canInfo ? openInfo : undefined}
         pressLabel={INFO_LABEL}
         right={[
-          { icon: 'compartilhar', label: 'Compartilhar', onPress: share },
+          { icon: 'compartilhar', label: 'Compartilhar', onPress: share, disabled: loadedName === '' },
           canInfo ? { icon: 'info', label: INFO_LABEL, onPress: openInfo } : null
         ]}
       />

@@ -226,6 +226,16 @@ function createFeiraIndex (options = {}) {
     recompute(row)
     return true
   }
+  // Whether `seq` is a status or edit of a listing whose window of that
+  // kind once dropped an older record: deleting it may need that record.
+  function actionOverflowed (author, seq) {
+    if (!hex(author) || !sequence(seq)) return false
+    const d = diaries.get(author)
+    const row = d?.roots.get(d.actions.get(seq))
+    if (!row) return false
+    if (row.statuses.some(item => item.seq === seq) && row.statusOverflowed) return true
+    return row.edits.some(item => item.seq === seq) && row.editOverflowed
+  }
   function markDeleted (author, seq) {
     if (!hex(author) || !sequence(seq)) return false
     const d = diaries.get(author)
@@ -448,7 +458,7 @@ function createFeiraIndex (options = {}) {
     if (!hex(rater) || !sequence(seq)) return false
     const id = ref(rater, seq)
     const row = ratings.get(id)
-    if (!row) return true
+    if (!row) return false
     ratings.delete(id)
     const bucket = targets.get(row.target)
     bucket.delete(ref(rater, row.targetSeq))
@@ -524,6 +534,7 @@ function createFeiraIndex (options = {}) {
     applyEdit: guarded(applyEdit, () => false),
     setStatus: guarded(setStatus, () => false),
     markDeleted: guarded(markDeleted, () => false),
+    actionOverflowed: guarded(actionOverflowed, () => false),
     add: guarded(add, () => false),
     update: guarded(update, () => false),
     remove: guarded(remove, () => false),

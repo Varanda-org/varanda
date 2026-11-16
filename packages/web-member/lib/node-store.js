@@ -53,6 +53,7 @@ const { presentState, clearRanges } = require('@varanda/core/lib/deletion')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { SEEN_BLOB_BYTES, SEEN_BLOB_B64 } = require('@varanda/core/lib/seen-blob')
 const { normalizeBlocks } = require('@varanda/core/lib/member-block')
+const { normalizeDecisions } = require('@varanda/core/lib/testimonial-decision')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { DIARY_OPTIONS } = require('./diary-options')
 
@@ -1633,6 +1634,30 @@ function writeSeenRemote (storage, own, b64) {
   return storage.writeJson('seenRemote', { v: 1, own, blob: b64 })
 }
 
+// kv seenHeld = { v: 1, own: hex64, ids: [hex32] }: the Avisos tokens a seen
+// document carried before its window cut them (lib/seen-sync.js), so an
+// offered one is not stamped as a new mark again. Exactly SEEN_HELD_MAX
+// entries: random tokens fill the free slots and each new token takes a
+// random slot, so kv shows neither how many tokens are real nor their
+// order. Bound to the own key like seenLocal.
+const SEEN_HELD_MAX = 2048
+
+function isSeenHeld (ids) {
+  return Array.isArray(ids) && ids.length === SEEN_HELD_MAX && ids.every((id) => typeof id === 'string' && SEEN_TOKEN_RE.test(id))
+}
+
+async function readSeenHeld (storage, own) {
+  const data = await readKv(storage, 'seenHeld')
+  if (!isVersioned(data) || !sameOwn(data, own) || !isSeenHeld(data.ids)) return null
+  return data.ids
+}
+
+function writeSeenHeld (storage, own, ids) {
+  if (!isHex64(own)) throw new TypeError('chave inválida')
+  if (!isSeenHeld(ids)) throw new TypeError('visto inválido')
+  return storage.writeJson('seenHeld', { v: 1, own, ids })
+}
+
 // kv seenSync = { v: 1, own: hex64, hash: hex64 | null, gen }: the hash of the
 // remote blob last merged (the prevHash of the next compare-and-swap write,
 // null before any) and the local generation.
@@ -1650,6 +1675,27 @@ function writeSeenSync (storage, own, { hash = null, gen = 0 } = {}) {
   if (!isHex64(own)) throw new TypeError('chave inválida')
   if (!validSeenSync(hash, gen)) throw new TypeError('sincronização inválida')
   return storage.writeJson('seenSync', { v: 1, own, hash, gen })
+}
+
+// kv testimonialDecisions = { v: 1, own: hex64, entries }: the depoimentos
+// the member kept privately or declined (@varanda/core
+// lib/testimonial-decision.js), synced through the seen document. Bound to
+// the own key like seenLocal: another identity's list reads as empty.
+// Identity state: reset() deletes it.
+async function readTestimonialDecisions (storage, own) {
+  const data = await readKv(storage, 'testimonialDecisions')
+  if (!isVersioned(data) || !sameOwn(data, own)) return []
+  return normalizeDecisions(data.entries)
+}
+
+function writeTestimonialDecisions (storage, own, entries) {
+  if (!isHex64(own)) throw new TypeError('chave inválida')
+  const list = normalizeDecisions(entries)
+  return storage.writeJson('testimonialDecisions', list.length === 0 ? null : { v: 1, own, entries: list })
+}
+
+function clearTestimonialDecisions (storage) {
+  return storage.writeJson('testimonialDecisions', null)
 }
 
 // A secretbox under the local dm key (./dm-store.js seal): { nonce, box }.
@@ -1737,6 +1783,34 @@ async function pushDmCtlQueue (storage, item, prefix = '') {
   const dropped = Math.max(0, items.length - MAX_DM_CTL_QUEUE)
   await writeDmCtlQueue(storage, items, prefix)
   return dropped
+}
+
+// kv dmReactPending = { v: 1, items: [{ meta, drops: [box | null, box | null] }] }:
+// the dm.react ops still waiting for a put (docs/rpc.md 5.119), oldest
+// first, at most MAX_DM_REACT_PENDING, the engine's own pending cap, so a
+// reload keeps no more than memory did. meta (the op without its drops) is
+// sealed under the local key, each drop not acked yet under the bytes key
+// derived from it (a drop is past the record bound); an acked drop is null.
+const MAX_DM_REACT_PENDING = 32
+
+function validReactPending (e) {
+  return e !== null && typeof e === 'object' && validBox(e.meta) && Array.isArray(e.drops) && e.drops.length === 2 &&
+    e.drops.every((d) => d === null || validBox(d))
+}
+
+function copyReactPending (e) {
+  return { meta: { nonce: e.meta.nonce, box: e.meta.box }, drops: e.drops.map((d) => d === null ? null : { nonce: d.nonce, box: d.box }) }
+}
+
+async function readDmReactPending (storage) {
+  const data = await readKv(storage, 'dmReactPending')
+  if (!isVersioned(data) || !Array.isArray(data.items)) return []
+  return data.items.filter(validReactPending).slice(-MAX_DM_REACT_PENDING).map(copyReactPending)
+}
+
+function writeDmReactPending (storage, items) {
+  const kept = items.filter(validReactPending).slice(-MAX_DM_REACT_PENDING).map(copyReactPending)
+  return storage.writeJson('dmReactPending', kept.length === 0 ? null : { v: 1, items: kept })
 }
 
 // kv pageSecrets = { v: 1, pages: { <page>: { gen, sealed, legacy, cert, previous? } } }:
@@ -1959,7 +2033,7 @@ async function deleteDmData (storage) {
   // seenSync before seenRemote and seenLocal: an interrupted reset must
   // never leave the compare-and-swap cursor without the documents it was
   // taken from.
-  for (const key of ['seenSync', 'seenRemote', 'dmKey', 'dmCursor', 'dmSeen', 'dmStamps', 'blobStamps', 'dmCtlQueue', 'seenLocal']) await storage.writeJson(key, null)
+  for (const key of ['seenSync', 'seenRemote', 'seenHeld', 'dmKey', 'dmCursor', 'dmSeen', 'dmStamps', 'blobStamps', 'dmCtlQueue', 'dmReactPending', 'seenLocal']) await storage.writeJson(key, null)
 }
 
 // kv ageVerified / ageSince = { v: 1, proof }: the account service's signed
@@ -2095,6 +2169,13 @@ module.exports = {
   writeSeenSync,
   readSeenRemote,
   writeSeenRemote,
+  readTestimonialDecisions,
+  writeTestimonialDecisions,
+  clearTestimonialDecisions,
+  readSeenHeld,
+  writeSeenHeld,
+  SEEN_HELD_MAX,
+  MAX_DM_SEEN,
   readDmStamps,
   writeDmStamps,
   readBlobStamps,
@@ -2104,6 +2185,9 @@ module.exports = {
   readDmCtlQueue,
   writeDmCtlQueue,
   pushDmCtlQueue,
+  readDmReactPending,
+  writeDmReactPending,
+  MAX_DM_REACT_PENDING,
   MAX_DM_CTL_QUEUE,
   DIARY,
   LOCKED,

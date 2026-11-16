@@ -7,14 +7,18 @@ import { Platform } from 'react-native'
 // Animation durations in milliseconds.
 export const motion = { fast: 150, normal: 250, press: 90, hold: 1600 }
 
-// Avatar colors by the first key byte mod 5: azul, laranja, amarelo,
-// vermelho, verde.
+// Avatar colors by the first key byte mod 8: azul, laranja, amarelo,
+// vermelho, verde, ameixa, azul-petroleo, rosa. ReplyPreview keeps a name
+// colour per entry, in the same order.
 export const stripes = [
   { bg: '#2576b0', ink: '#ffffff' },
   { bg: '#e8805a', ink: '#1f2a24' },
   { bg: '#f2b705', ink: '#1f2a24' },
   { bg: '#c23528', ink: '#ffffff' },
-  { bg: '#1d6b4f', ink: '#ffffff' }
+  { bg: '#1d6b4f', ink: '#ffffff' },
+  { bg: '#8a4e7a', ink: '#ffffff' },
+  { bg: '#0e7a82', ink: '#ffffff' },
+  { bg: '#b03a6e', ink: '#ffffff' }
 ]
 
 export const sunsetStops = [['#f7b267', 0], ['#e8805a', 0.42], ['#8a4e7a', 0.78], ['#2b2a4a', 1]]

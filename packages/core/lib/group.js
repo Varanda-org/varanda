@@ -2486,20 +2486,25 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
     byDiary.set(x.d, x.emoji)
   }
   for (const [id, byDiary] of reactions) {
-    // The cap keeps the emojis most members chose, ties by emoji: never by
-    // `at`, which each writer picks for itself.
+    // The cap keeps the emojis most members chose. A tie goes to the emoji
+    // first used in the order of the winning reactions (byDiary holds them in
+    // that order): by emoji text, keycaps and symbols that one person picked
+    // took the slots ahead of the emojis everyone uses.
     const groups = new Map()
     for (const [d, emoji] of byDiary) {
       let g = groups.get(emoji)
       if (!g) {
-        g = { emoji, count: 0, by: [] }
+        g = { emoji, count: 0, by: [], first: groups.size }
         groups.set(emoji, g)
       }
       g.count++
       g.by.push(d)
     }
     if (groups.size === 0) continue
-    postById.get(id).reactions = [...groups.values()].sort((a, b) => b.count - a.count || cmp(a.emoji, b.emoji)).slice(0, GROUP_REACTIONS_MAX)
+    postById.get(id).reactions = [...groups.values()]
+      .sort((a, b) => b.count - a.count || a.first - b.first)
+      .slice(0, GROUP_REACTIONS_MAX)
+      .map(({ emoji, count, by }) => ({ emoji, count, by }))
   }
   foldTopics(posts, postById, topicMarks, choices)
 

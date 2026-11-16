@@ -150,6 +150,41 @@ test('the photo editor owns the sheet header while it is open', (t) => {
 
 test('Android: the profile form pads only while the keyboard is open, and back closes only the photo editor', (t) => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Perfil.js'), 'utf8')
-  t.ok(src.includes('keyboardVerticalOffset={top} enabled={avoidKeyboard}') && src.includes('useKeyboardAvoidEnabled()'), 'no blank band after the keyboard closes')
+  const lift = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'ui', 'KeyboardLift.js'), 'utf8')
+  t.ok(src.includes('<KeyboardLift measured=') && lift.includes('keyboardVerticalOffset={top} enabled={avoidKeyboard}') && lift.includes('useKeyboardAvoidEnabled()'), 'no blank band after the keyboard closes')
   t.ok(src.includes('onBack={editor !== null ? closeEditor : undefined}'), 'back in the editor keeps the sheet and its draft')
+})
+
+test('startFields: a kept draft wins over the saved profile, which only fills a fresh open', async (t) => {
+  const { startFields } = await load()
+  const current = { name: 'Ana', bio: 'oi' }
+  t.alike(startFields(null, current), { name: 'Ana', bio: 'oi' })
+  t.alike(startFields(null, undefined), { name: '', bio: '' })
+  t.alike(startFields({ name: 'Ana Maria', bio: '' }, current), { name: 'Ana Maria', bio: '' }, 'an emptied bio is a draft too')
+  t.alike(startFields({ name: 'Ana Maria' }, { name: 'Ana', bio: 'bio nova' }), { name: 'Ana Maria', bio: 'bio nova' }, 'a field never edited follows the saved profile, not the bio of the moment the name was typed')
+  t.alike(startFields({ bio: 'x' }, { name: 'Ana Souza', bio: 'oi' }), { name: 'Ana Souza', bio: 'x' }, 'a name saved elsewhere since is not overwritten by a stale copy')
+})
+
+test('draftFor: a draft typed under another identity is ignored', async (t) => {
+  const { draftFor, startFields } = await load()
+  const kept = { key: 'a', name: 'Ana Maria' }
+  t.alike(draftFor(kept, 'a'), kept)
+  t.is(draftFor(kept, 'b'), null, 'another identity never sees it')
+  t.is(draftFor(null, 'a'), null)
+  const loose = { key: undefined, name: 'x' }
+  t.is(draftFor(loose, undefined), loose, 'a Perfil with no ownKey (onboarding) still keeps its draft')
+  t.is(draftFor(loose, 'a'), null)
+  t.alike(startFields(draftFor(kept, 'b'), { name: 'Bia', bio: '' }), { name: 'Bia', bio: '' })
+})
+
+test('Perfil keeps the typed name and bio when the sheet closes and clears them only on a saved profile', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Perfil.js'), 'utf8')
+  t.absent(/setName\(c\.name/.test(src), 'open no longer resets from current unconditionally')
+  t.ok(src.includes('onChangeText={editName}') && src.includes('onChangeText={editBio}'), 'edits are recorded')
+  t.ok(src.includes('{ ...draftFor(textDraftRef.current, ownKey), key: ownKey, name: value }') && src.includes('{ ...draftFor(textDraftRef.current, ownKey), key: ownKey, bio: value }'), 'the draft keeps only the edited fields, under its identity')
+  t.ok(src.includes('startFields(draftFor(textDraftRef.current, ownKey), currentRef.current)'), 'open ignores a draft of another identity')
+  const finish = src.slice(src.indexOf('const finish = (sent) =>'), src.indexOf('const save = async'))
+  t.ok(finish.includes('textDraftRef.current = null'), 'a successful save clears the draft')
+  const close = src.slice(src.indexOf('if (!shown) {'), src.indexOf('const start = startFields'))
+  t.ok(close.includes('textDraftRef.current = null'), 'a plain profile reported on close was saved, so the draft is cleared')
 })

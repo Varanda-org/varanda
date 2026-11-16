@@ -10,6 +10,7 @@ import { useEffect } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { relativeTime } from '../format'
+import { handleLine } from '../conversas'
 import { OWN_LABEL } from '../groups'
 import { useNames } from '../names'
 import { UNNAMED, readsAs, whoOf } from '../who'
@@ -51,6 +52,7 @@ export function ConversationRow ({ item, now, onPress }) {
   const groupName = person ? UNNAMED : whoOf({ name: typeof item.name === 'string' ? item.name : '' }).title
   const groupTitle = groupName === UNNAMED ? '' : displayText(groupName).trim()
   const title = person ? personTitle(profile) : (groupTitle || 'Sem título')
+  const handle = person ? handleLine(profile) : null
   const avatarName = person ? who.avatarName : title
   const avatar = cached && cached.avatar ? cached.avatar : undefined
   const time = typeof item.at === 'string' ? relativeTime(item.at, now) : null
@@ -77,6 +79,7 @@ export function ConversationRow ({ item, now, onPress }) {
           <Text style={[styles.title, unread && styles.titleUnread]} numberOfLines={1}>{title}</Text>
           {time ? <Text style={[styles.time, unread && styles.timeUnread]}>{time}</Text> : null}
         </View>
+        {handle ? <Text style={styles.handle} numberOfLines={1}>{displayText(handle)}</Text> : null}
         {/* No preview and nothing unread: no empty second line, so the title
             centres against the avatar. */}
         {preview !== '' || unread
@@ -111,6 +114,7 @@ const makeStyles = (colors) => StyleSheet.create({
   titleUnread: { fontWeight: '700' },
   time: { ...type.replyMark, color: colors.soft, flexShrink: 0, textAlign: 'right' },
   timeUnread: { color: colors.accent, fontWeight: '600' },
+  handle: { ...type.postMeta, fontSize: 13, lineHeight: 18, color: colors.soft },
   preview: { ...type.postMeta, fontSize: 14, lineHeight: 20, flex: 1, minWidth: 0, color: colors.soft },
   own: { color: colors.accent, fontWeight: '600' },
   previewUnread: { color: colors.ink, fontWeight: '700' },

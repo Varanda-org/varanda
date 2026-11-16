@@ -2,9 +2,10 @@
 
 // The member's "seen" document synced between devices through the account
 // service: which Avisos, page notices, DM messages and group posts were
-// already seen, and whom the member blocked (lib/member-block.js). The service
-// stores an opaque blob of a fixed size, so it learns neither what was seen nor
-// how much, nor who was blocked.
+// already seen, whom the member blocked (lib/member-block.js) and what they
+// decided about the depoimentos they received (lib/testimonial-decision.js).
+// The service stores an opaque blob of a fixed size, so it learns neither what
+// was seen nor how much, nor who was blocked, nor any decision.
 //
 // Key: seenKeyFromSeed() hashes a domain string, the identity seed
 // (keyPair.secretKey.subarray(0, 32)) and the association and member keys.
@@ -19,27 +20,35 @@
 // It never goes through group-crypto sealRecord, whose input cap is far
 // below SEEN_PLAIN_BYTES.
 //
-// Plaintext (SEEN_PLAIN_BYTES, little-endian), version 2:
-//   u8 version = 2, u8 flags = 0, u32 gen, member 32, association 32,
-//   u16 nAvisos, u8 nPages, u16 nDm, u8 nGroups, u8 nBlocks   (77 bytes)
+// Plaintext (SEEN_PLAIN_BYTES, little-endian), version 3:
+//   u8 version = 3, u8 flags = 0, u32 gen, member 32, association 32,
+//   u16 nAvisos, u8 nPages, u16 nDm, u8 nGroups, u8 nBlocks,
+//   u8 nTestimonials                                          (78 bytes)
 //   nAvisos x token entry
 //   nPages x (page key 32, u8 n, n x token entry)
 //   nDm x token entry
 //   nGroups x (group 32, writer 32, at i64 ms, seq u32)       (76 bytes each)
 //   nBlocks x (key 32, u8 on, u32 t)                          (37 bytes each)
+//   nTestimonials x (from 32, u32 seq, u8 state, u32 t)       (41 bytes each)
 //   random pad up to SEEN_PLAIN_BYTES
 // A token entry is the 16 raw token bytes and u32 t (unix seconds, the time
-// the mark was made). Lists are stored oldest first.
+// the mark was made). A testimonial state is 1 = kept, 2 = declined. Lists
+// are stored oldest first.
 //
-// Version 1 has no nBlocks and no block entries, a 76-byte header and room for
-// more dm tokens. It is still read, and written only as version 2 afterwards.
+// Version 2 has no nTestimonials and no testimonial entries, a 77-byte header
+// and room for more dm tokens (SYNC_DM_MAX_V2). It is still read, and written
+// only as version 3 afterwards: its dm list is cut to the version 3 window.
+//
+// Version 1 has no nBlocks either, a 76-byte header and room for even more dm
+// tokens (SYNC_DM_MAX_V1). It is still read the same way.
 //
 // Document in JS:
 //   { gen, member, association,
 //     avisos: { own: [{ token, t }], pages: { 'page:<hex64>': [{ token, t }] } },
 //     dm: [{ token, t }],
 //     groups: [{ group, at, writer, seq }],
-//     blocks: [{ key, on, t }] }
+//     blocks: [{ key, on, t }],
+//     testimonials: [{ from, seq, state, t }] }
 //
 // Dm tokens are one per incoming message, so the blob is a recency window
 // of the newest marks, not a full copy of the local state.
@@ -49,7 +58,8 @@
 // ahead by compareOrder(orderKey()). The causal position of a post (the
 // rule group.seen applies when the post is listed) needs the group core, so
 // this module cannot use it; a device never moves its own mark backwards
-// when applying the merged one. A block entry keeps the newer time per key.
+// when applying the merged one. A block entry keeps the newer time per key,
+// and a testimonial decision the newer time per testimonial.
 
 const sodium = require('sodium-universal')
 const b4a = require('b4a')
@@ -57,8 +67,11 @@ const crypto = require('hypercore-crypto')
 const { orderKey, compareOrder } = require('./group')
 const { isCanonicalIso } = require('./records')
 const { normalizeBlocks, mergeBlocks } = require('./member-block')
+const { normalizeDecisions, mergeDecisions } = require('./testimonial-decision')
+const { TESTIMONIAL_KEPT_MAX, TESTIMONIAL_DECLINED_MAX } = require('@varanda/rpc')
 
-const SEEN_VERSION = 2
+const SEEN_VERSION = 3
+const SEEN_VERSION_2 = 2
 const SEEN_VERSION_1 = 1
 const SEEN_PLAIN_BYTES = 32768
 const SEEN_NONCE_BYTES = 24
@@ -70,22 +83,33 @@ const SEEN_KEY_BYTES = 32
 const SYNC_AVISOS_MAX = 256
 const SYNC_PAGES_MAX = 4
 const SYNC_PAGE_TOKENS_MAX = 32
-const SYNC_DM_MAX = 520
+const SYNC_DM_MAX = 256
+const SYNC_DM_MAX_V2 = 520
 const SYNC_DM_MAX_V1 = 736
 const SYNC_GROUPS_MAX = 128
 const SYNC_BLOCKS_MAX = 128
+const SYNC_TESTIMONIALS_MAX = 128
 const MERGE_AVISOS_MAX = 256
 const MERGE_PAGE_TOKENS_MAX = 32
 
-const HEADER_BYTES = 77
+const HEADER_BYTES = 78
 const TOKEN_BYTES = 16
 const TOKEN_ENTRY_BYTES = TOKEN_BYTES + 4
 const PAGE_HEAD_BYTES = 33
 const GROUP_ENTRY_BYTES = 76
 const BLOCK_ENTRY_BYTES = 37
+const TESTIMONIAL_ENTRY_BYTES = 41
 const U32_MAX = 4294967295
 const MAX_DATE_MS = 8.64e15
 const TWO_32 = 4294967296
+
+// Every decision normalizeDecisions keeps must fit the window, or a device
+// would read a capped list as a decision undone.
+if (SYNC_TESTIMONIALS_MAX !== TESTIMONIAL_KEPT_MAX + TESTIMONIAL_DECLINED_MAX) {
+  throw new Error('SYNC_TESTIMONIALS_MAX must equal TESTIMONIAL_KEPT_MAX + TESTIMONIAL_DECLINED_MAX')
+}
+
+const TESTIMONIAL_STATES = ['kept', 'declined']
 
 const KEY_DOMAIN = b4a.from('varanda/member-seen/secretbox/v1\n', 'utf8')
 const PAGE_PREFIX = 'page:'
@@ -239,7 +263,20 @@ function normBlocks (list) {
   return normalizeBlocks(list)
 }
 
-function canonical (gen, member, association, own, pagesByKey, dm, groups, blocks) {
+// A document without testimonial decisions reads as an empty list.
+function normTestimonials (list) {
+  if (list === undefined) return []
+  if (!Array.isArray(list)) throw new TypeError('testimonials must be an array')
+  for (const e of list) {
+    if (e === null || typeof e !== 'object' || !isHex64(e.from) || !isU32(e.seq) || e.seq === 0 ||
+        !TESTIMONIAL_STATES.includes(e.state) || !isU32(e.t)) {
+      throw new TypeError('testimonial entries must be { from: hex64, seq: u32 >= 1, state: kept | declined, t: u32 }')
+    }
+  }
+  return normalizeDecisions(list)
+}
+
+function canonical (gen, member, association, own, pagesByKey, dm, groups, blocks, testimonials) {
   return {
     gen,
     member,
@@ -247,7 +284,8 @@ function canonical (gen, member, association, own, pagesByKey, dm, groups, block
     avisos: { own: cutTokens(own, SYNC_AVISOS_MAX), pages: cutPages(pagesByKey) },
     dm: cutTokens(dm, SYNC_DM_MAX),
     groups: groups.length > SYNC_GROUPS_MAX ? groups.slice(groups.length - SYNC_GROUPS_MAX) : groups,
-    blocks: blocks.length > SYNC_BLOCKS_MAX ? blocks.slice(blocks.length - SYNC_BLOCKS_MAX) : blocks
+    blocks: blocks.length > SYNC_BLOCKS_MAX ? blocks.slice(blocks.length - SYNC_BLOCKS_MAX) : blocks,
+    testimonials: testimonials.length > SYNC_TESTIMONIALS_MAX ? testimonials.slice(testimonials.length - SYNC_TESTIMONIALS_MAX) : testimonials
   }
 }
 
@@ -266,12 +304,13 @@ function normalize (doc) {
     pages: normPages(avisos.pages),
     dm: normTokens(doc.dm, 'dm'),
     groups: normGroups(doc.groups),
-    blocks: normBlocks(doc.blocks)
+    blocks: normBlocks(doc.blocks),
+    testimonials: normTestimonials(doc.testimonials)
   }
 }
 
 function capped (n) {
-  return canonical(n.gen, n.member, n.association, n.own, n.pages, n.dm, n.groups, n.blocks)
+  return canonical(n.gen, n.member, n.association, n.own, n.pages, n.dm, n.groups, n.blocks, n.testimonials)
 }
 
 // Validates and puts a document in canonical form within every cap,
@@ -306,6 +345,7 @@ function encode (doc) {
   view.setUint16(off, d.dm.length, true); off += 2
   out[off++] = d.groups.length
   out[off++] = d.blocks.length
+  out[off++] = d.testimonials.length
 
   const putTokens = (list) => {
     for (const e of list) {
@@ -333,6 +373,12 @@ function encode (doc) {
     out[off++] = e.on ? 1 : 0
     view.setUint32(off, e.t, true); off += 4
   }
+  for (const e of d.testimonials) {
+    out.set(b4a.from(e.from, 'hex'), off); off += 32
+    view.setUint32(off, e.seq, true); off += 4
+    out[off++] = e.state === 'kept' ? 1 : 2
+    view.setUint32(off, e.t, true); off += 4
+  }
   if (off < SEEN_PLAIN_BYTES) sodium.randombytes_buf(out.subarray(off))
   return out
 }
@@ -345,7 +391,7 @@ function decode (bytes, expect) {
     if (!(bytes instanceof Uint8Array) || bytes.byteLength !== SEEN_PLAIN_BYTES) return null
     if (!expect || !isHex64(expect.member) || !isHex64(expect.association)) return null
     const version = bytes[0]
-    if (version !== SEEN_VERSION && version !== SEEN_VERSION_1) return { unsupported: true }
+    if (version !== SEEN_VERSION && version !== SEEN_VERSION_2 && version !== SEEN_VERSION_1) return { unsupported: true }
     if (bytes[1] !== 0) return null
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
     const hex = (a, n) => b4a.toString(bytes.subarray(a, a + n), 'hex')
@@ -358,9 +404,11 @@ function decode (bytes, expect) {
     const nPages = bytes[off++]
     const nDm = view.getUint16(off, true); off += 2
     const nGroups = bytes[off++]
-    const nBlocks = version === SEEN_VERSION ? bytes[off++] : 0
-    const dmMax = version === SEEN_VERSION ? SYNC_DM_MAX : SYNC_DM_MAX_V1
-    if (nAvisos > SYNC_AVISOS_MAX || nPages > SYNC_PAGES_MAX || nDm > dmMax || nGroups > SYNC_GROUPS_MAX || nBlocks > SYNC_BLOCKS_MAX) return null
+    const nBlocks = version === SEEN_VERSION_1 ? 0 : bytes[off++]
+    const nTestimonials = version === SEEN_VERSION ? bytes[off++] : 0
+    const dmMax = version === SEEN_VERSION ? SYNC_DM_MAX : version === SEEN_VERSION_2 ? SYNC_DM_MAX_V2 : SYNC_DM_MAX_V1
+    if (nAvisos > SYNC_AVISOS_MAX || nPages > SYNC_PAGES_MAX || nDm > dmMax || nGroups > SYNC_GROUPS_MAX ||
+        nBlocks > SYNC_BLOCKS_MAX || nTestimonials > SYNC_TESTIMONIALS_MAX) return null
 
     const need = (n) => {
       if (off + n > SEEN_PLAIN_BYTES) throw new RangeError('short')
@@ -411,7 +459,18 @@ function decode (bytes, expect) {
       if (on !== 0 && on !== 1) return null
       blocks.push({ key, on: on === 1, t })
     }
-    return canonical(gen, member, association, own, pages, dm, sortGroups(groups), normalizeBlocks(blocks))
+    need(nTestimonials * TESTIMONIAL_ENTRY_BYTES)
+    const testimonials = []
+    for (let i = 0; i < nTestimonials; i++) {
+      const from = hex(off, 32); off += 32
+      const seq = view.getUint32(off, true); off += 4
+      const state = bytes[off++]
+      const t = view.getUint32(off, true); off += 4
+      if (seq === 0 || (state !== 1 && state !== 2)) return null
+      testimonials.push({ from, seq, state: state === 1 ? 'kept' : 'declined', t })
+    }
+    // canonical() cuts a version 1 or 2 dm list to the version 3 window.
+    return canonical(gen, member, association, own, pages, dm, sortGroups(groups), normalizeBlocks(blocks), normalizeDecisions(testimonials))
   } catch {
     return null
   }
@@ -448,7 +507,7 @@ function open (blob, key, expect) {
 }
 
 function contentKey (d) {
-  return JSON.stringify([d.avisos.own, d.avisos.pages, d.dm, d.groups, d.blocks])
+  return JSON.stringify([d.avisos.own, d.avisos.pages, d.dm, d.groups, d.blocks, d.testimonials])
 }
 
 // Compares the trimmed contents; gen is a write counter, not content.
@@ -474,7 +533,8 @@ function merge (local, remote) {
     pages,
     unionTokens(l.dm, r.dm),
     unionGroups(l.groups, r.groups),
-    mergeBlocks(l.blocks, r.blocks)
+    mergeBlocks(l.blocks, r.blocks),
+    mergeDecisions(l.testimonials, r.testimonials)
   )
   return { doc, localOnly: contentKey(doc) !== contentKey(capped(r)) }
 }
@@ -491,8 +551,11 @@ module.exports = {
   SYNC_PAGES_MAX,
   SYNC_PAGE_TOKENS_MAX,
   SYNC_DM_MAX,
+  SYNC_DM_MAX_V2,
+  SYNC_DM_MAX_V1,
   SYNC_GROUPS_MAX,
   SYNC_BLOCKS_MAX,
+  SYNC_TESTIMONIALS_MAX,
   MERGE_AVISOS_MAX,
   MERGE_PAGE_TOKENS_MAX,
   HEADER_BYTES,
@@ -500,6 +563,7 @@ module.exports = {
   PAGE_HEAD_BYTES,
   GROUP_ENTRY_BYTES,
   BLOCK_ENTRY_BYTES,
+  TESTIMONIAL_ENTRY_BYTES,
   seenKeyFromSeed,
   trim,
   encode,

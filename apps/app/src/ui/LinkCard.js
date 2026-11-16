@@ -33,7 +33,7 @@ import { useEffect, useState } from 'react'
 import { fetch as expoFetch } from 'expo/fetch'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { cardUrlHost, displayText } from '@varanda/rpc'
-import { useNode } from '../node'
+import { useNodeHandle } from '../node'
 import { isAppClient } from '../appClient'
 import { openExternal } from '../openExternal'
 import { chatMediaKey, pinChatMedia, sourceFor } from '../media/chatMedia'
@@ -63,7 +63,7 @@ export function chatThumbRef (thumb, image) {
 // The device-local URI of a group or DM card's thumbnail, or null while
 // loading or when it cannot be shown. Pinned while on screen.
 export function useChatThumb (thumb, image) {
-  const node = useNode()
+  const node = useNodeHandle()
   const ref = chatThumbRef(thumb, image)
   const identity = ref !== null ? thumb.identity : null
   const key = ref ? chatMediaKey(identity, ref) : null

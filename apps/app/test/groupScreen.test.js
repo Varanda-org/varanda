@@ -24,13 +24,13 @@ test('groupRows keeps oldest first, stable keys and the input unchanged', async 
   ])
   const rows = groupRows(items, A)
   t.alike(rows.map((r) => r.key), [A + ':1', A + ':2', B + ':1'])
-  t.alike(rows.map((r) => r.side), ['mine', 'mine', 'theirs'])
+  t.alike(rows.map((r) => r.mine), [true, true, false])
   t.alike(rows.map((r) => r.shape), ['first', 'last', 'single'])
-  t.alike(rows.map((r) => r.showName), [true, false, true])
+  t.absent(rows.some((r) => 'side' in r || 'showName' in r), 'no dead side/showName fields')
   t.alike(items.map((i) => i.seq), [1, 2, 1])
-  t.is(groupRows([message(B, 1, 0, { diary: A })], A)[0].side, 'mine', 'ownership follows the diary, not the device writer')
-  t.is(groupRows([message(A, 1, 0, { diary: B })], A)[0].side, 'theirs')
-  t.is(groupRows([message(A, 1, 0, { diary: null })], null)[0].side, 'theirs')
+  t.is(groupRows([message(B, 1, 0, { diary: A })], A)[0].mine, true, 'ownership follows the diary, not the device writer')
+  t.is(groupRows([message(A, 1, 0, { diary: B })], A)[0].mine, false)
+  t.is(groupRows([message(A, 1, 0, { diary: null })], null)[0].mine, false)
   t.alike(groupRows(null, A), [])
   t.alike(groupRows([null, {}], A), [])
   t.is(groupRows([items[0], items[0]], A).length, 1)
@@ -50,8 +50,7 @@ test('groupRows groups by person (diary) and anchors the time limit at the first
   ]
   const rows = groupRows(items.reverse(), A)
   t.alike(rows.map((r) => r.shape), ['first', 'middle', 'last', 'first', 'last', 'single', 'single'], 'a second device of the same diary joins the run')
-  t.alike(rows.map((r) => r.showName), [true, false, false, true, false, true, true])
-  t.alike(rows.map((r) => r.side), ['mine', 'mine', 'mine', 'mine', 'mine', 'theirs', 'mine'])
+  t.alike(rows.map((r) => r.mine), [true, true, true, true, true, false, true])
 })
 
 test('groupRows marks local days and breaks runs at midnight or invalid times', async (t) => {
@@ -69,7 +68,6 @@ test('groupRows marks local days and breaks runs at midnight or invalid times', 
   t.is(rows[2].dayMark, null)
   t.is(rows[3].dayMark, null)
   t.alike(rows.map((r) => r.shape), ['single', 'first', 'last', 'single'])
-  t.alike(rows.map((r) => r.showName), [true, true, false, true])
 })
 
 test('groupRows escapes peer text and discards hidden message content', async (t) => {

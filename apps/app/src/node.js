@@ -110,7 +110,8 @@
 // `signals` folds the sync events into UI hints (syncSignals.js).
 // Contexts: a sync log line or a download hint arrives dozens of times a
 // second while many diaries sync, so neither rides in the useNode() value
-// (which every Avatar, MediaView, LinkCard and screen reads). useSyncLines()
+// (which screens read; rows read useNodeHandle() and useMemberKey(),
+// which ignore the sync flags). useSyncLines()
 // carries the log and useSyncSignals() the folded hints; useNode() keeps
 // sync { active, stopped, starting } and `signals` as a run-flags view
 // (see runFlags) that does not change on download lines. useHosted() is only
@@ -139,7 +140,7 @@ import { createRequestQueue } from './requestQueue'
 import { createAttempts } from './attempts'
 import { noteOwnDmDrop } from './dmWakeMute'
 import { setDmDropObserver } from './pages'
-import { vitrineEnabled, vitrineLarge } from './vitrine/enabled'
+import { vitrineEnabled, vitrineLarge, vitrineRich, vitrineEmbeds } from './vitrine/enabled'
 import { createMarks, devHookRequest, perfEnabled } from './perfMarks'
 import { recoveryFetch } from './account'
 import { NOT_FOUND_TEXT, SERVICE_DOWN_TEXT } from './recovery'
@@ -198,6 +199,16 @@ const HostedContext = createContext(false)
 const EMPTY_LINES = Object.freeze([])
 const SyncLinesContext = createContext(EMPTY_LINES)
 const SyncSignalsContext = createContext(EMPTY_SIGNALS)
+// What rows (avatars, photos, link cards, chat media, music cards) need from
+// the node, without the sync, online and visible flags that rebuild the node
+// value: it changes only when hosted, request, media, accountOrigin or
+// syncNow do. It is not an identity signal (request keeps one identity for
+// the whole session): rows keep identities apart through MemberKeyContext
+// and their identity-keyed caches, rendered in the same commit.
+const NodeHandleContext = createContext(null)
+// A primitive, so a flag flip elsewhere does not redraw its readers. None
+// without a provider: nothing asks for an unknown member.
+const MemberKeyContext = createContext(null)
 
 // The chat media calls a handle may offer besides upload (see the header).
 const CHAT_MEDIA_CALLS = ['putDm', 'putMoment', 'read', 'forgetReadFile', 'clearReadFiles']
@@ -208,6 +219,34 @@ export function useNode () {
 
 export function useHosted () {
   return useContext(HostedContext)
+}
+
+// -> { hosted, request, media, accountOrigin, syncNow } (see NodeHandleContext).
+export function useNodeHandle () {
+  return useContext(NodeHandleContext)
+}
+
+// The unlocked or known member key, lowercased, or null.
+export function useMemberKey () {
+  return useContext(MemberKeyContext)
+}
+
+export function memberKeyOf (passkey) {
+  return passkey && passkey.status && typeof passkey.status.publicKey === 'string'
+    ? passkey.status.publicKey.toLowerCase()
+    : null
+}
+
+function useHandle (hosted, request, media, accountOrigin, syncNow) {
+  return useMemo(() => ({ hosted, request, media, accountOrigin, syncNow }), [hosted, request, media, accountOrigin, syncNow])
+}
+
+function RowContexts ({ handle, memberKey, children }) {
+  return (
+    <NodeHandleContext.Provider value={handle}>
+      <MemberKeyContext.Provider value={memberKey}>{children}</MemberKeyContext.Provider>
+    </NodeHandleContext.Provider>
+  )
 }
 
 // The last sync event and warning lines (at most MAX_SYNC_LINES).
@@ -256,6 +295,10 @@ const noConnection = () => Promise.reject(Object.assign(new Error('sem conexão 
 // The Vitrine (src/vitrine/enabled.js): development bundles only, behind an
 // opt-in env var. The literal member access is what Expo inlines.
 const VITRINE = vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE }, typeof __DEV__ !== 'undefined' && __DEV__)
+// Rich rows and provider players in those timing rows: no effect unless
+// VITRINE_LARGE is on too (vitrine/request.js builds them only then).
+const VITRINE_RICH = vitrineRich({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE, EXPO_PUBLIC_VARANDA_VITRINE_RICH: process.env.EXPO_PUBLIC_VARANDA_VITRINE_RICH }, typeof __DEV__ !== 'undefined' && __DEV__)
+const VITRINE_EMBEDS = vitrineEmbeds({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE, EXPO_PUBLIC_VARANDA_VITRINE_EMBEDS: process.env.EXPO_PUBLIC_VARANDA_VITRINE_EMBEDS }, typeof __DEV__ !== 'undefined' && __DEV__)
 // 200 extra feed rows for timing native list rendering (docs/performance.md).
 const VITRINE_LARGE = vitrineLarge({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE, EXPO_PUBLIC_VARANDA_VITRINE_LARGE: process.env.EXPO_PUBLIC_VARANDA_VITRINE_LARGE }, typeof __DEV__ !== 'undefined' && __DEV__)
 
@@ -266,7 +309,7 @@ const PERF = perfEnabled({ EXPO_PUBLIC_VARANDA_PERF: process.env.EXPO_PUBLIC_VAR
 const marks = createMarks({ enabled: PERF })
 export function perfMarks () { return marks }
 let vitrine = null
-if (VITRINE) {
+if (typeof __DEV__ !== 'undefined' && __DEV__ && process.env.EXPO_PUBLIC_VARANDA_VITRINE === '1' && VITRINE) {
   const { fixtures } = require('./vitrine/fixtures')
   const { createVitrineRequest } = require('./vitrine/request')
   const { saveTermsRecord } = require('./termsStore')
@@ -298,7 +341,7 @@ export function NodeProvider ({ children }) {
 function VitrineNodeProvider ({ children }) {
   // The device clock (vitrine sources never read it): Momentos keep their
   // demo-clock ages, so the 24 h rule on the device still shows them.
-  const [fixtureRequest] = useState(() => vitrine.createVitrineRequest(vitrine.fixtures, { large: VITRINE_LARGE, clock: Date.now }))
+  const [fixtureRequest] = useState(() => vitrine.createVitrineRequest(vitrine.fixtures, { large: VITRINE_LARGE, rich: VITRINE_RICH, embeds: VITRINE_EMBEDS, clock: Date.now }))
   const [dmVersion, setDmVersion] = useState(0)
   const bumpDm = useCallback(() => setDmVersion((n) => n + 1), [])
   const [autoWanted, setAutoWanted] = useState(false)
@@ -327,6 +370,7 @@ function VitrineNodeProvider ({ children }) {
     setVisible(isVisible())
     return unsubscribe
   }, [])
+  const syncNow = useCallback(() => Promise.resolve(), [])
   const value = useMemo(() => {
     const done = () => Promise.resolve({})
     // Anything that would change the identity or the connection refuses, so
@@ -394,15 +438,18 @@ function VitrineNodeProvider ({ children }) {
       signals: EMPTY_SIGNALS,
       ackFresh: () => {},
       setAutoSync,
-      syncNow: () => Promise.resolve()
+      syncNow
     }
-  }, [vitrineRequest, groupVersions, followsVersion, getGroupVersion, dmVersion, bumpDm, autoWanted, setAutoSync, visible])
+  }, [vitrineRequest, groupVersions, followsVersion, getGroupVersion, dmVersion, bumpDm, autoWanted, setAutoSync, visible, syncNow])
+  const handle = useHandle(true, vitrineRequest, value.media, value.accountOrigin, syncNow)
   return (
     <HostedContext.Provider value>
       <NodeContext.Provider value={value}>
-        <SyncSignalsContext.Provider value={EMPTY_SIGNALS}>
-          <SyncLinesContext.Provider value={EMPTY_LINES}>{children}</SyncLinesContext.Provider>
-        </SyncSignalsContext.Provider>
+        <RowContexts handle={handle} memberKey={memberKeyOf(value.passkey)}>
+          <SyncSignalsContext.Provider value={EMPTY_SIGNALS}>
+            <SyncLinesContext.Provider value={EMPTY_LINES}>{children}</SyncLinesContext.Provider>
+          </SyncSignalsContext.Provider>
+        </RowContexts>
       </NodeContext.Provider>
     </HostedContext.Provider>
   )
@@ -1670,12 +1717,17 @@ function LiveNodeProvider ({ children }) {
     phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync: syncView, epoch, request, promote, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, autoSync, signals: runFlags, ackFresh, setAutoSync, syncNow, whenIdle
   }), [phase, config, error, hosted, accountOrigin, hostedSource, online, visible, syncView, epoch, request, promote, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, autoSync, runFlags, ackFresh, setAutoSync, syncNow, whenIdle])
 
+  const handle = useHandle(hosted, request, media, accountOrigin, syncNow)
+  const memberKey = memberKeyOf(passkey)
+
   return (
     <HostedContext.Provider value={hosted}>
       <NodeContext.Provider value={value}>
-        <SyncSignalsContext.Provider value={signals}>
-          <SyncLinesContext.Provider value={sync.lines}>{children}</SyncLinesContext.Provider>
-        </SyncSignalsContext.Provider>
+        <RowContexts handle={handle} memberKey={memberKey}>
+          <SyncSignalsContext.Provider value={signals}>
+            <SyncLinesContext.Provider value={sync.lines}>{children}</SyncLinesContext.Provider>
+          </SyncSignalsContext.Provider>
+        </RowContexts>
       </NodeContext.Provider>
     </HostedContext.Provider>
   )

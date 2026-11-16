@@ -1373,3 +1373,177 @@ test('appeal: an Excluir conta block pending is not appealable and an open appea
   await store.requestDeletion(other)
   await rejects(t, store.addAppeal(appeal(other)), 'conta-excluida', 'no appeal over the owner own request')
 })
+
+test('reopen: refuses an unknown id, an open report, a human decision and the AI or owner as actor', async (t) => {
+  const { dir, store } = setup(t)
+  const open = (await store.add(report(key()))).report
+  const human = (await store.add(report(key()))).report
+  await store.decide(human.id, { decision: 'descartar', by: MOD })
+  const ai = (await store.add(report(key()))).report
+  await store.decide(ai.id, { decision: 'descartar', by: AI_ACTOR })
+  const before = fs.readFileSync(path.join(dir, FILE), 'utf8')
+  await rejects(t, store.reopen('A'.repeat(22), { by: MOD }), 'nao-encontrado', 'unknown id')
+  await rejects(t, store.reopen(42, { by: MOD }), 'nao-encontrado', 'not a string')
+  await rejects(t, store.reopen(open.id, { by: MOD }), 'ja-revertido', 'an open report')
+  await rejects(t, store.reopen(human.id, { by: MOD }), 'sem-permissao', 'a person decided it')
+  await rejects(t, store.reopen(ai.id, { by: AI_ACTOR }), 'pedido-invalido', 'the AI never reopens')
+  await rejects(t, store.reopen(ai.id, { by: OWNER_ACTOR }), 'pedido-invalido', 'nor the owner actor')
+  await rejects(t, store.reopen(ai.id, {}), 'pedido-invalido', 'no actor')
+  await rejects(t, store.reopen(ai.id, { by: 'a\nb' }), 'pedido-invalido', 'a dirty actor')
+  t.is(fs.readFileSync(path.join(dir, FILE), 'utf8'), before, 'no refusal writes')
+  t.is(store.get(ai.id).status, 'descartar')
+})
+
+test('reopen: an AI discard goes back to the open queue with its decision cleared and a reaberto event', async (t) => {
+  const { dir, store, c, open } = setup(t)
+  const r = (await store.add(report(key()))).report
+  await store.decide(r.id, { decision: 'descartar', by: AI_ACTOR, note: 'parecido com casos descartados' })
+  c.t += HOUR
+  const { report: back } = await store.reopen(r.id, { by: MOD })
+  t.is(back.status, 'aberta')
+  t.is(back.decidedBy, null)
+  t.is(back.decidedAt, null)
+  t.is(back.note, '')
+  t.is(back.blocked, null)
+  t.alike(store.list({ status: 'aberta' }).reports.map((x) => x.id), [r.id], 'listed as open again')
+  t.is(store.list({ status: 'decidida' }).reports.length, 0)
+  const last = onDisk(dir).events.at(-1)
+  t.alike(last, { at: new Date(T0 + HOUR).toISOString(), by: MOD, action: 'reaberto', reportId: r.id })
+  t.alike(store.reopenedIds(), [r.id])
+  await rejects(t, store.reopen(r.id, { by: 'outra@example.test' }), 'ja-revertido', 'a second reopen')
+  const again = open()
+  t.is(again.get(r.id).status, 'aberta', 'the reopened row survives a restart')
+  t.alike(again.reopenedIds(), [r.id])
+  t.alike(again.get(r.id).reopened, { at: new Date(T0 + HOUR).toISOString(), action: 'descartar', decidedAt: new Date(T0).toISOString() }, 'the marker names the undone AI decision')
+})
+
+test('reopen: the marker keeps the AI off once the reaberto event aged out', async (t) => {
+  const { dir, store, m, c } = setup(t)
+  const r = (await store.add(report(key()))).report
+  await store.decide(r.id, { decision: 'bloquear', by: AI_ACTOR })
+  c.t += HOUR
+  await store.reopen(r.id, { by: MOD })
+  // Every event about the row gone, as when MAX_EVENTS splices them.
+  const disk = onDisk(dir)
+  disk.events = disk.events.filter((e) => e.reportId !== r.id)
+  fs.writeFileSync(path.join(dir, FILE), JSON.stringify(disk), { mode: 0o600 })
+  const later = openModerationStore(dir, { now: c.now, association: m.association })
+  t.alike(later.reopenedIds(), [r.id], 'still listed as reopened')
+  await rejects(t, later.decide(r.id, { decision: 'bloquear', by: AI_ACTOR }), 'nao-encontrado', 'the AI is refused')
+  t.is(later.get(r.id).status, 'aberta')
+  const { report: done } = await later.decide(r.id, { decision: 'descartar', by: MOD })
+  t.alike(done.reopened, later.get(r.id).reopened, 'a person decision keeps the marker')
+  t.is(done.reopened.action, 'bloquear')
+  const again = openModerationStore(dir, { now: c.now, association: m.association })
+  t.is(again.get(r.id).reopened.action, 'bloquear', 'the marker survives a restart')
+})
+
+test('reopen: a malformed reopened marker makes the store unavailable', async (t) => {
+  const { dir, store, m } = setup(t)
+  const r = (await store.add(report(key()))).report
+  await store.decide(r.id, { decision: 'descartar', by: AI_ACTOR })
+  await store.reopen(r.id, { by: MOD })
+  const disk = onDisk(dir)
+  const row = disk.reports[r.id]
+  const at = row.reopened.at
+  const broken = [
+    { ...row, reopened: null },
+    { ...row, reopened: { at, action: 'descartar' } },
+    { ...row, reopened: { ...row.reopened, extra: 1 } },
+    { ...row, reopened: { ...row.reopened, action: 'aberta' } },
+    { ...row, reopened: { ...row.reopened, at: 'ontem' } },
+    { ...row, reopened: { ...row.reopened, decidedAt: null } },
+    { ...row, status: 'bloquear', decidedBy: AI_ACTOR, decidedAt: at, blocked: 'diario' }
+  ]
+  for (const bad of broken) {
+    fs.writeFileSync(path.join(dir, FILE), JSON.stringify({ ...disk, reports: { [r.id]: bad } }), { mode: 0o600 })
+    const reopened = openModerationStore(dir, { now: () => T0, association: m.association })
+    throwsCode(t, () => reopened.get(r.id), 'indisponivel', JSON.stringify(bad.reopened) + ' ' + bad.decidedBy)
+  }
+  fs.writeFileSync(path.join(dir, FILE), JSON.stringify({ ...disk, reports: { [r.id]: { ...row, status: 'descartar', decidedBy: MOD, decidedAt: at } } }), { mode: 0o600 })
+  t.is(openModerationStore(dir, { now: () => T0, association: m.association }).get(r.id).decidedBy, MOD, 'a person decision on a reopened row is valid')
+})
+
+test('reopen: an AI block stays blocked, nothing is cancelled, published or pulled differently', async (t) => {
+  const { store, m } = setup(t)
+  const target = key()
+  const r = (await store.add(report(target))).report
+  const { change } = await store.decide(r.id, { decision: 'bloquear', by: AI_ACTOR })
+  const pendingBefore = store.pending()
+  await store.reopen(r.id, { by: MOD })
+  t.alike(store.pending(), pendingBefore, 'the AI block change is still pending, untouched')
+  const pulled = await store.pull()
+  t.alike(pulled.changes, [{ id: change.id, op: 'block', member: target, at: change.at, actor: 'ia' }], 'pull is unchanged')
+  await store.ack({ changeIds: [change.id], snapshot: m.snap(1, [target]), moderatorCert: m.cert })
+  t.ok(store.blocked().some((b) => b.member === target), 'still blocked once published')
+  // A published AI block, reopened: still in the list, nothing pending.
+  const other = key()
+  const r2 = (await store.add(report(other))).report
+  const c2 = (await store.decide(r2.id, { decision: 'bloquear', by: AI_ACTOR })).change
+  await store.pull()
+  await store.ack({ changeIds: [c2.id], snapshot: m.snap(2, [target, other]), moderatorCert: m.cert })
+  await store.reopen(r2.id, { by: MOD })
+  t.is(store.pending().changes.length, 0, 'no unblock was queued')
+  t.ok(store.blocked().some((b) => b.member === other), 'the published block stands')
+})
+
+test('reopen: the AI can no longer decide the reopened report; a person can', async (t) => {
+  const { store } = setup(t)
+  const r = (await store.add(report(key()))).report
+  await store.decide(r.id, { decision: 'descartar', by: AI_ACTOR })
+  await store.reopen(r.id, { by: MOD })
+  await rejects(t, store.decide(r.id, { decision: 'bloquear', by: AI_ACTOR }), 'nao-encontrado', 'the AI is refused')
+  t.is(store.get(r.id).status, 'aberta')
+  t.is(store.pending().changes.length, 0, 'no block was queued')
+  if (store.get(r.id).status !== 'aberta') return
+  const { report: done } = await store.decide(r.id, { decision: 'descartar', by: MOD })
+  t.is(done.decidedBy, MOD)
+  await rejects(t, store.reopen(r.id, { by: MOD }), 'sem-permissao', 'a person decision is final here')
+})
+
+test('reopen: a person blocking a reopened AI block report never lists it twice in the change', async (t) => {
+  const { store, open } = setup(t)
+  const target = key()
+  const r = (await store.add(report(target))).report
+  const { change } = await store.decide(r.id, { decision: 'bloquear', by: AI_ACTOR })
+  await store.reopen(r.id, { by: MOD })
+  const res = await store.decide(r.id, { decision: 'bloquear', by: MOD })
+  t.alike(res.change.reportIds, [r.id], 'the unclaimed change keeps the id once')
+  const again = open()
+  t.alike(again.pending().changes.map((x) => [x.id, x.reportIds]), [[change.id, [r.id]]], 'the store reloads usable')
+  t.is(again.get(r.id).status, 'bloquear')
+
+  // Claimed by the operator first: the change is left as pulled.
+  const other = key()
+  const r2 = (await store.add(report(other))).report
+  const c2 = (await store.decide(r2.id, { decision: 'bloquear', by: AI_ACTOR })).change
+  await store.pull()
+  await store.reopen(r2.id, { by: MOD })
+  const res2 = await store.decide(r2.id, { decision: 'bloquear', by: MOD })
+  t.is(res2.change, null, 'a claimed change is not joined')
+  const later = open()
+  t.alike(later.pending().changes.find((x) => x.id === c2.id).reportIds, [r2.id], 'the claimed change keeps the id once')
+})
+
+test('reopen: humanReversed remembers a reopened AI block a person later undid, once its events aged out', async (t) => {
+  const { dir, store, m, c } = setup(t)
+  const target = key()
+  const r = (await store.add(report(target))).report
+  const { change } = await store.decide(r.id, { decision: 'bloquear', by: AI_ACTOR })
+  await store.pull()
+  await store.ack({ changeIds: [change.id], snapshot: m.snap(1, [target]), moderatorCert: m.cert })
+  await store.reopen(r.id, { by: MOD })
+  await store.decide(r.id, { decision: 'descartar', by: MOD })
+  t.is(store.humanReversed(target), false, 'still published')
+  await store.unblock(target, { by: MOD })
+  const all = await store.pull()
+  await store.ack({ changeIds: all.changes.map((x) => x.id), snapshot: m.snap(2, []), moderatorCert: m.cert })
+  t.alike(store.pending().changes, [])
+  // Every event about the member and the row gone, as when MAX_EVENTS splices them.
+  const disk = onDisk(dir)
+  disk.events = disk.events.filter((e) => e.member !== target && e.reportId !== r.id)
+  fs.writeFileSync(path.join(dir, FILE), JSON.stringify(disk), { mode: 0o600 })
+  const later = openModerationStore(dir, { now: c.now, association: m.association })
+  t.is(later.get(r.id).status, 'descartar')
+  t.is(later.humanReversed(target), true, 'the reopened AI block row still counts')
+})

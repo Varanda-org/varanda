@@ -1593,6 +1593,55 @@ test('group.react refusals: a missing or hidden post, a non-member', async (t) =
   t.alike(await lastRecord(a, group), root, 'nothing appended')
 })
 
+test('group.react refusals: a group without its community, a private group awaiting a new key', async (t) => {
+  const { a, b } = await pair()
+  // An orphan: a root no community catalogue lists.
+  const community = await ensureCommunity(a.ctx)
+  const nonce = crypto.randomBytes(32)
+  const kp = await a.ctx.groupKeyPair(new Uint8Array(nonce))
+  const orphan = hex(kp.publicKey)
+  const core = await store.openGroupWriter(a.storage, kp)
+  try {
+    await store.appendGroupRecord(core, grp.groupHeader({ kind: 'group', diary: a.ownHex, community, member: community, join: 'open', name: 'Solto' }), { root: true })
+  } finally {
+    await core.close()
+  }
+  await store.putGroupWriter(a.storage, { group: orphan, key: orphan, nonce: hex(nonce), rootNonce: hex(nonce) })
+  const diary = await store.openDiary(a.storage, a.ctx.keyPair)
+  try {
+    await store.appendRecord(diary, groupJoinRecord({ group: orphan, writer: orphan, on: true }))
+  } finally {
+    await diary.close()
+  }
+  t.is((await ops.groupInfo(a.ctx, { group: orphan })).orphan, true)
+  const solto = await lastRecord(a, orphan)
+  await t.exception(() => ops.groupReact(a.ctx, { group: orphan, target: { writer: orphan, seq: 0 }, emoji: THUMBS }), /grupo sem comunidade/)
+  t.alike(await lastRecord(a, orphan), solto, 'nothing appended')
+
+  // A private group after a leave: rekey-pending until group.rekey.
+  for (const m of [a, b]) {
+    m.ctx.groupKeys = createGroupKeys()
+    await m.ctx.groupKeys.unlock(m.storage, new Uint8Array(m.prf))
+  }
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Segredo', join: 'approval', visibility: 'private' })
+  const { seq } = await ops.groupPost(a.ctx, { group, text: 'segredo' })
+  await shareGroupCore(a, b, group)
+  await shareDiary(a, b)
+  t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'requested' })
+  const w = (await store.readGroupWriters(b.storage))[0].key
+  await shareGroupCore(b, a, w)
+  await shareDiary(b, a)
+  t.alike(await ops.groupAdmit(a.ctx, { group, member: b.ownHex, on: true }), { ok: true })
+  await shareGroupCore(a, b, group)
+  t.alike(await ops.groupLeave(b.ctx, { group }), { state: 'left' })
+  await shareGroupCore(b, a, w)
+  await shareDiary(b, a)
+  t.is((await ops.groupRead(a.ctx, { group })).state, 'rekey-pending')
+  const root = await lastRecord(a, group)
+  await t.exception(() => ops.groupReact(a.ctx, { group, target: { writer: group, seq }, emoji: THUMBS }), /aguardando nova chave/)
+  t.alike(await lastRecord(a, group), root, 'nothing appended')
+})
+
 test('group.react in a private group is sealed', async (t) => {
   const { a } = await pair()
   a.ctx.groupKeys = createGroupKeys()

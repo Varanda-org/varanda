@@ -22,12 +22,14 @@ test('public post: primary is reply, repost, like, share and the repost sheet is
   const caps = { link: URL, onReport: () => {} }
   t.is(shareLink(item, caps), URL)
   t.alike(primaryActions(item, caps), [
-    { id: 'reply', icon: 'resposta', label: 'Responder' },
+    { id: 'reply', icon: 'resposta', label: 'Comentar' },
     { id: 'repost', icon: 'republicar', label: 'Republicar' },
     { id: 'like', icon: 'coracao', label: 'Curtir' },
     { id: 'share', icon: 'compartilhar', label: 'Compartilhar', href: URL }
   ])
   t.absent(ids(primaryActions(item, caps)).includes('quote'), 'quote is not an inline pencil')
+  t.is(primaryActions({ ...item, replyTo: THEM + ':2' }, caps)[0].label, 'Responder', 'a comment is answered, not commented')
+  t.is(primaryActions({ ...item, replyTo: THEM + ':2' }, caps)[0].id, 'reply')
   t.alike(repostActions(item, caps), [
     { id: 'repost', icon: 'republicar', label: 'Republicar' },
     { id: 'quote', icon: 'citar', label: 'Citar' }
@@ -204,6 +206,25 @@ test('callers cannot mutate the input or a previously returned row', async (t) =
   t.alike(labels(moreActions(item, caps)), ['Copiar link', 'Denunciar'])
   t.alike(ids(primaryActions(item, caps)), ['reply', 'repost', 'like', 'share'])
   t.is(JSON.stringify({ item, caps }), before)
+})
+
+test('canDeletePost: the one delete rule covers the A Rua cases', async (t) => {
+  const { canDeletePost } = await load()
+  const caps = { ownKey: ME, page: PAGE }
+  t.ok(canDeletePost({ author: ME, seq: 3, repostedBy: null }, caps), 'own post')
+  t.ok(canDeletePost({ author: PAGE, seq: 3, repostedBy: null }, caps), 'post of the page acted as')
+  t.absent(canDeletePost({ author: THEM, seq: 3, repostedBy: null }, caps), 'someone else')
+  t.absent(canDeletePost({ author: ME, seq: 3, repostedBy: { author: THEM } }, caps), 'a repost row never deletes the original')
+  t.absent(canDeletePost({ author: ME, seq: 0, repostedBy: null }, caps), 'seq below 1')
+  t.absent(canDeletePost({ author: ME, seq: 3, repostedBy: null }, { ownKey: null, page: null }), 'own key not known yet')
+})
+
+test('A Rua decides Apagar through postActions, with no copy of the rule', (t) => {
+  const rua = fs.readFileSync(path.join(__dirname, '../src/screens/ARua.js'), 'utf8')
+  t.absent(rua.includes("from '../deletion'"), 'no deletion import left')
+  t.absent(/\bcanDelete\(/.test(rua), 'no own canDelete call')
+  t.ok(rua.includes("import { canDeletePost } from '../postActions'"))
+  t.ok(rua.includes('canDeletePost({ author: post.author, seq: post.seq, repostedBy }'))
 })
 
 test('sources have no em dash', (t) => {

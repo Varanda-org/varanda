@@ -1,0 +1,372 @@
+# Points the stable channel at a release that release.yml already published,
+# without rebuilding anything.
+#
+# A maintainer runs it by hand on main with the commit to promote. It accepts
+# only a commit on main whose seeder image (ghcr.io/varanda-org/varanda-seeder,
+# tag sha-<commit>) carries a keyless signature from release.yml on main. It
+# then signs that same digest with this workflow's identity (servers on the
+# stable channel require it) and moves :stable by digest, web first and seeder
+# last, reading each tag back from the registry. A seq lower than or equal to
+# the current stable is refused unless allow_older is set (a deliberate
+# rollback); so is a current stable that cannot be read or does not verify
+# under this workflow's identity.
+#
+# Not every commit of main has an image: release.yml runs are queued per ref
+# and a newer push replaces a pending run, and a manual release run builds
+# only the tip. Such a commit is refused with a clear error; publish the tip
+# or choose a commit that was published.
+#
+# cosign runs only as the container pinned in deploy/seeder/cosign.ref.
+# Inputs reach the scripts only through env, and the only secret is the job's
+# own GITHUB_TOKEN.
+#
+# Skipped until the repository variable VARANDA_PROMOTE is exactly "true".
+# VARANDA_RELEASE enables only release.yml, never this workflow.
+#
+# One-time maintainer steps, in this order:
+#   1. Settings > Environments > New environment release-stable: required
+#      reviewers (the maintainers), prevent self-review, deployment branches
+#      limited to main. Do this BEFORE step 3: GitHub creates a missing
+#      environment without any protection the first time a job names it, and
+#      the environment is the approval gate of the stable channel.
+#   2. Packages varanda-seeder and varanda-web: Manage Actions access gives
+#      this repository the Write role.
+#   3. Only then, Settings > Secrets and variables > Actions > Variables:
+#      VARANDA_PROMOTE = true (any other value pauses promotions).
+#
+# Run: Actions > promote > Run workflow on main, commit = the 40-character SHA.
+name: promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: 'Commit on main to promote (40 lower-case hex characters)'
+        required: true
+        type: string
+      allow_older:
+        description: 'Allow a seq lower than or equal to the current stable (rollback)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: promote
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_PROMOTE == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment:
+      name: release-stable
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      COMMIT: ${{ inputs.commit }}
+      ALLOW_OLDER: ${{ inputs.allow_older }}
+      SEEDER: ghcr.io/varanda-org/varanda-seeder
+      WEB: ghcr.io/varanda-org/varanda-web
+      ISSUER: https://token.actions.githubusercontent.com
+      EDGE_IDENTITY: https://github.com/Varanda-org/varanda/.github/workflows/release.yml@refs/heads/main
+      STABLE_IDENTITY: https://github.com/Varanda-org/varanda/.github/workflows/promote.yml@refs/heads/main
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Check the commit
+        run: |
+          if ! [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::o commit precisa ter 40 caracteres hexadecimais minúsculos"
+            exit 1
+          fi
+          if ! git cat-file -e "$COMMIT^{commit}" 2>/dev/null; then
+            echo "::error::o commit $COMMIT não está no repositório"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$COMMIT" origin/main; then
+            echo "::error::o commit $COMMIT não está em origin/main"
+            exit 1
+          fi
+
+      - name: Read the pinned cosign image
+        run: |
+          # Comment and blank lines aside, the file must hold exactly the reference.
+          ref=$(grep -Ev '^[[:space:]]*(#|$)' deploy/seeder/cosign.ref || true)
+          re='^ghcr\.io/sigstore/cosign/cosign:v[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$'
+          if ! [[ "$ref" =~ $re ]]; then
+            echo "::error::deploy/seeder/cosign.ref inválido (ghcr.io/sigstore/cosign/cosign:v<semver>@sha256:<64 hex>)"
+            exit 1
+          fi
+          echo "COSIGN=$ref" >> "$GITHUB_ENV"
+
+      # A private config directory: the cosign container reads it read-only,
+      # and no credential helper of the runner is involved.
+      - name: Log in to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cfg="$RUNNER_TEMP/docker-config"
+          mkdir -p "$cfg"
+          chmod 700 "$cfg"
+          echo "DOCKER_CONFIG=$cfg" >> "$GITHUB_ENV"
+          printf '%s' "$GITHUB_TOKEN" | DOCKER_CONFIG="$cfg" docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Pull the seeder image of the commit
+        run: |
+          # Prints the registry digest of a reference, nothing when the
+          # registry answers that it does not exist, and fails on any other
+          # answer.
+          digest_of() {
+            local err="$RUNNER_TEMP/inspect.err" json d
+            if json="$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$1" 2> "$err")"; then
+              d="$(printf '%s' "$json" | jq -er .digest)" || d=""
+              if ! [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                echo "::error::digest ilegível de $1" >&2
+                return 1
+              fi
+              printf '%s\n' "$d"
+            elif grep -Fxq -- "ERROR: $1: not found" "$err"; then
+              return 0
+            else
+              cat "$err" >&2
+              echo "::error::falha ao consultar $1" >&2
+              return 1
+            fi
+          }
+          if ! digest="$(digest_of "$SEEDER:sha-$COMMIT")"; then
+            exit 1
+          fi
+          if [ -z "$digest" ]; then
+            echo "::error::$SEEDER:sha-$COMMIT não existe: esta versão não foi publicada pelo release; publique a ponta ou escolha um commit publicado"
+            exit 1
+          fi
+          docker pull "$SEEDER@$digest"
+          echo "SEEDER_DIGEST=$digest" >> "$GITHUB_ENV"
+
+      # Only an image built and signed by release.yml on main can be promoted.
+      - name: Verify the release signature
+        run: |
+          docker run --rm --pull missing --user "$(id -u):$(id -g)" --tmpfs /tmp -e HOME=/tmp \
+            -v "$DOCKER_CONFIG:/dockercfg:ro" -e DOCKER_CONFIG=/dockercfg \
+            "$COSIGN" verify \
+            --certificate-identity "$EDGE_IDENTITY" \
+            --certificate-oidc-issuer "$ISSUER" \
+            "$SEEDER@$SEEDER_DIGEST" > /dev/null
+
+      # The current stable counts only when it verifies under this workflow's
+      # identity and its release.json reads; it is verified before it is run.
+      # Only the registry's answer that the tag does not exist means "no
+      # stable yet"; anything else is refused unless allow_older is set.
+      - name: Check release.json and the seq
+        run: |
+          # Prints the registry digest of a reference, nothing when the
+          # registry answers that it does not exist, and fails on any other
+          # answer.
+          digest_of() {
+            local err="$RUNNER_TEMP/inspect.err" json d
+            if json="$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$1" 2> "$err")"; then
+              d="$(printf '%s' "$json" | jq -er .digest)" || d=""
+              if ! [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                echo "::error::digest ilegível de $1" >&2
+                return 1
+              fi
+              printf '%s\n' "$d"
+            elif grep -Fxq -- "ERROR: $1: not found" "$err"; then
+              return 0
+            else
+              cat "$err" >&2
+              echo "::error::falha ao consultar $1" >&2
+              return 1
+            fi
+          }
+          verify_stable () {
+            docker run --rm --pull missing --user "$(id -u):$(id -g)" --tmpfs /tmp -e HOME=/tmp \
+              -v "$DOCKER_CONFIG:/dockercfg:ro" -e DOCKER_CONFIG=/dockercfg \
+              "$COSIGN" verify \
+              --certificate-identity "$STABLE_IDENTITY" \
+              --certificate-oidc-issuer "$ISSUER" \
+              "$1" > /dev/null
+          }
+          re='^\{"v":1,"commit":"([0-9a-f]{40})","seq":([1-9][0-9]{0,9}),"web":"ghcr\.io/varanda-org/varanda-web@(sha256:[0-9a-f]{64})"\}$'
+          # Prints "<commit> <seq> <web digest>" of the image, or fails.
+          read_release () {
+            local f="$RUNNER_TEMP/release-$2.json"
+            docker run --rm --pull never --network none --entrypoint cat "$1" /app/release.json > "$f" || return 1
+            [ "$(wc -l < "$f")" -eq 1 ] || return 1
+            [ -z "$(tail -c 1 "$f")" ] || return 1
+            local line
+            line=$(cat "$f")
+            [[ "$line" =~ $re ]] || return 1
+            echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]} ${BASH_REMATCH[3]}"
+          }
+
+          if ! out=$(read_release "$SEEDER@$SEEDER_DIGEST" new); then
+            echo "::error::/app/release.json da imagem falta ou não está no formato do release"
+            exit 1
+          fi
+          read -r rel_commit seq web_digest <<< "$out"
+          if [ "$rel_commit" != "$COMMIT" ]; then
+            echo "::error::release.json aponta o commit $rel_commit, não $COMMIT"
+            exit 1
+          fi
+
+          stable=unknown
+          stable_seq=""
+          if stable_digest="$(digest_of "$SEEDER:stable")"; then
+            if [ -z "$stable_digest" ]; then
+              stable=none
+            elif verify_stable "$SEEDER@$stable_digest" \
+              && docker pull "$SEEDER@$stable_digest" \
+              && stable_out=$(read_release "$SEEDER@$stable_digest" stable); then
+              read -r _ stable_seq _ <<< "$stable_out"
+              stable=ok
+            fi
+          fi
+          case "$stable" in
+            none)
+              echo "Ainda não há $SEEDER:stable."
+              ;;
+            ok)
+              if [ "$seq" -le "$stable_seq" ]; then
+                if [ "$ALLOW_OLDER" = 'true' ]; then
+                  echo "::warning::seq $seq não é mais novo que o stable atual ($stable_seq); allow_older está ligado"
+                else
+                  echo "::error::seq $seq não é mais novo que o stable atual ($stable_seq); use allow_older para voltar atrás"
+                  exit 1
+                fi
+              fi
+              ;;
+            *)
+              if [ "$ALLOW_OLDER" = 'true' ]; then
+                echo "::warning::o stable atual não pôde ser lido nem verificado; allow_older está ligado"
+              else
+                echo "::error::o stable atual não pôde ser lido nem verificado; use allow_older para substituí-lo"
+                exit 1
+              fi
+              ;;
+          esac
+
+          echo "SEQ=$seq" >> "$GITHUB_ENV"
+          echo "WEB_DIGEST=$web_digest" >> "$GITHUB_ENV"
+
+      # Keyless signature with this workflow's identity; the token request
+      # variables are passed by name, so their values never reach the log.
+      - name: Sign for the stable channel
+        run: |
+          docker run --rm --pull never --user "$(id -u):$(id -g)" --tmpfs /tmp -e HOME=/tmp \
+            -v "$DOCKER_CONFIG:/dockercfg:ro" -e DOCKER_CONFIG=/dockercfg \
+            -e ACTIONS_ID_TOKEN_REQUEST_URL -e ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+            "$COSIGN" sign --yes "$SEEDER@$SEEDER_DIGEST"
+
+      - name: Verify the stable signature
+        run: |
+          docker run --rm --pull never --user "$(id -u):$(id -g)" --tmpfs /tmp -e HOME=/tmp \
+            -v "$DOCKER_CONFIG:/dockercfg:ro" -e DOCKER_CONFIG=/dockercfg \
+            "$COSIGN" verify \
+            --certificate-identity "$STABLE_IDENTITY" \
+            --certificate-oidc-issuer "$ISSUER" \
+            "$SEEDER@$SEEDER_DIGEST" > /dev/null
+
+      # imagetools create defaults to --prefer-index=true, which wraps a single
+      # manifest in a new index and changes the digest; --prefer-index=false
+      # keeps it. Web moves first: servers follow the seeder tag, and the web
+      # image is pinned by digest inside release.json. On a failure the tags
+      # already moved go back to their previous digests.
+      - name: Move the stable tags
+        run: |
+          # Prints the registry digest of a reference, nothing when the
+          # registry answers that it does not exist, and fails on any other
+          # answer.
+          digest_of() {
+            local err="$RUNNER_TEMP/inspect.err" json d
+            if json="$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$1" 2> "$err")"; then
+              d="$(printf '%s' "$json" | jq -er .digest)" || d=""
+              if ! [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                echo "::error::digest ilegível de $1" >&2
+                return 1
+              fi
+              printf '%s\n' "$d"
+            elif grep -Fxq -- "ERROR: $1: not found" "$err"; then
+              return 0
+            else
+              cat "$err" >&2
+              echo "::error::falha ao consultar $1" >&2
+              return 1
+            fi
+          }
+          retag() {
+            docker buildx imagetools create --prefer-index=false -t "$1:stable" "$1@$2"
+          }
+          # move <repo> <digest>: points <repo>:stable at the digest and reads it back.
+          move() {
+            local src got
+            src="$(digest_of "$1@$2")" || return 1
+            if [ "$src" != "$2" ]; then
+              echo "::error::$1@$2 não aparece no registro"
+              return 1
+            fi
+            if ! retag "$1" "$2"; then
+              echo "::error::falha ao mover $1:stable"
+              return 1
+            fi
+            got="$(digest_of "$1:stable")" || got=""
+            if [ "$got" != "$2" ]; then
+              echo "::error::$1:stable aponta para ${got:-nada}, não para $2"
+              return 1
+            fi
+          }
+          # restore <repo> <previous digest or empty>
+          restore() {
+            if [ -n "$2" ]; then
+              retag "$1" "$2" || echo "::error::não foi possível devolver $1:stable para $2; confira à mão"
+            else
+              echo "::error::$1:stable não tinha digest anterior; confira à mão"
+            fi
+          }
+
+          web_prev="$(digest_of "$WEB:stable")" || exit 1
+          seeder_prev="$(digest_of "$SEEDER:stable")" || exit 1
+
+          if ! move "$WEB" "$WEB_DIGEST"; then
+            restore "$WEB" "$web_prev"
+            exit 1
+          fi
+          if ! move "$SEEDER" "$SEEDER_DIGEST"; then
+            restore "$SEEDER" "$seeder_prev"
+            restore "$WEB" "$web_prev"
+            exit 1
+          fi
+
+      - name: Summary
+        run: |
+          {
+            echo "### Canal stable"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| commit | \`$COMMIT\` |"
+            echo "| seq | $SEQ |"
+            echo "| seeder | \`$SEEDER@$SEEDER_DIGEST\` |"
+            echo "| web | \`$WEB@$WEB_DIGEST\` |"
+            echo "| allow_older | $ALLOW_OLDER |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Log out of GHCR
+        if: always()
+        run: |
+          if [ -n "${DOCKER_CONFIG:-}" ] && [ -d "$DOCKER_CONFIG" ]; then
+            docker logout ghcr.io || true
+            rm -rf "$DOCKER_CONFIG"
+          fi

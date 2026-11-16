@@ -51,6 +51,7 @@ function fakeModeration (c) {
   const changes = []
   const decideCalls = []
   const reversed = new Set()
+  const reopened = new Set()
   let snapshot = null
   let decideHook = null
   const api = {
@@ -132,6 +133,19 @@ function fakeModeration (c) {
     },
     humanReversed (member) {
       return reversed.has(member) || changes.some((ch) => ch.member === member && ch.op === 'unblock')
+    },
+    reopenedIds () {
+      return [...reopened]
+    },
+    // The panel's "Reabrir" as the real store does it: the row reopens with
+    // its `reopened` marker and any pending change stays. `event: false` is
+    // a store whose 'reaberto' event already aged out. A test helper only,
+    // never the worker's.
+    personReopens (id, { event = true } = {}) {
+      const row = rows.get(id)
+      const marker = { at: iso(c.t), action: row.status, decidedAt: row.decidedAt }
+      Object.assign(row, { status: 'aberta', decidedBy: null, decidedAt: null, note: '', reopened: marker })
+      if (event) reopened.add(id)
     }
   }
   return api
@@ -1132,4 +1146,167 @@ test('createWorker validates its options; start, onReport and onHumanDecision ne
   env.worker.start()
   await env.worker.idle()
   t.is(env.logs.length, 0)
+})
+
+// A second worker over the same store, bank and ledger: a service restart.
+function restart (t, env, ledger = env.ledger) {
+  const worker = createWorker({
+    mode: 'auto',
+    moderation: env.moderation,
+    exemplars: env.exemplars,
+    ledger,
+    readPost: env.readPost,
+    embed: env.embed,
+    log: (line) => env.logs.push(line),
+    now: env.c.now,
+    modelId: MODEL,
+    gapMs: 0,
+    stopWaitMs: 200
+  })
+  t.teardown(() => worker.stop(), { force: true })
+  return worker
+}
+
+test('a report a person reopened goes to a person: never decided again, across a restart and a lost ledger', async (t) => {
+  const env = setup(t, { mode: 'auto' })
+  env.warm()
+  const r = env.report({}, { text: HAM + ' novo' })
+  env.worker.start()
+  env.worker.onReport(r)
+  await env.worker.idle()
+  t.is(env.moderation.decideCalls.length, 1, 'the AI discarded it')
+  env.moderation.personReopens(r.id)
+  await env.worker.runOnce()
+  t.is(env.moderation.decideCalls.length, 1, 'not decided again')
+  t.is(env.moderation.get(r.id).status, 'aberta')
+  t.is(env.ledger.get(r.id).code, 'reaberto')
+  t.is(env.ledger.get(r.id).retryAt, null, 'terminal')
+  t.is(env.worker.suggestionOf(r.id).motivo, 'reaberto')
+  const reads = env.readPost.calls.length
+  await env.worker.stop()
+  // After a restart the appeal set no longer holds the post (the row lost
+  // decidedBy); the ledger mark keeps the report with a person.
+  const again = restart(t, env)
+  again.start()
+  await again.runOnce()
+  t.is(env.moderation.decideCalls.length, 1, 'not decided after a restart')
+  // A sibling report of the same post is an appeal, not a fresh case.
+  const sibling = env.moderation.addReport({ target: r.target, seq: r.seq })
+  again.onReport(sibling)
+  await again.idle()
+  t.is(env.ledger.get(sibling.id).code, 'recurso')
+  t.is(env.moderation.decideCalls.length, 1)
+  await again.stop()
+  // The ledger lost: the store's reopened ids still keep it with a person.
+  const fresh = restart(t, env, openLedger(path.join(env.dir, 'outro'), { now: env.c.now }))
+  fresh.start()
+  await fresh.runOnce()
+  t.is(env.moderation.decideCalls.length, 1, 'not decided with a fresh ledger')
+  t.is(env.readPost.calls.length, reads, 'never read again')
+  cleanLogs(t, env.logs)
+  t.ok(env.logs.some((l) => l.reason === 'reaberto'), 'logged as a token')
+})
+
+test('a reopened report whose store event aged out is still kept with a person by the ledger mark', async (t) => {
+  const env = setup(t, { mode: 'auto' })
+  env.warm()
+  const r = env.report({}, { text: HAM + ' novo' })
+  env.worker.onReport(r)
+  await env.worker.idle()
+  t.is(env.moderation.decideCalls.length, 1)
+  await env.worker.stop()
+  // Reopened, but the store no longer remembers it (its event aged out).
+  Object.assign(env.moderation.rows.get(r.id), { status: 'aberta', decidedBy: null, decidedAt: null, note: '' })
+  const again = restart(t, env)
+  again.start()
+  await again.runOnce()
+  t.is(env.moderation.decideCalls.length, 1, 'not decided again')
+  t.is(env.ledger.get(r.id).code, 'reaberto')
+})
+
+test('the row marker alone keeps a reopened report with a person: no event, no ledger mark', async (t) => {
+  const env = setup(t, { mode: 'auto' })
+  env.warm()
+  const r = env.report({}, { text: HAM + ' novo' })
+  env.worker.onReport(r)
+  await env.worker.idle()
+  t.is(env.moderation.decideCalls.length, 1, 'the AI discarded it')
+  await env.worker.stop()
+  env.moderation.personReopens(r.id, { event: false })
+  t.alike(env.moderation.reopenedIds(), [], 'the store event is gone')
+  const led = openLedger(path.join(env.dir, 'outro'), { now: env.c.now })
+  const fresh = restart(t, env, led)
+  fresh.start()
+  await fresh.runOnce()
+  t.is(env.moderation.decideCalls.length, 1, 'not decided again')
+  t.is(env.moderation.get(r.id).status, 'aberta')
+  t.is(led.get(r.id).code, 'reaberto', 'marked human-only for good, not just an appeal')
+  t.is(led.get(r.id).retryAt, null)
+  t.is(fresh.suggestionOf(r.id).motivo, 'reaberto')
+  cleanLogs(t, env.logs)
+})
+
+test('a reopened report shows no stale AI suggestion before the next scan', async (t) => {
+  const env = setup(t, { mode: 'auto' })
+  env.warm()
+  const r = env.report({}, { text: SPAM + ' novo' })
+  env.worker.onReport(r)
+  await env.worker.idle()
+  t.is(env.worker.suggestionOf(r.id).sugestao, 'bloquear', 'the AI blocked it')
+  env.moderation.personReopens(r.id)
+  t.is(env.ledger.get(r.id).code, 'bloquear', 'the mark is still the old decision')
+  const s = env.worker.suggestionOf(r.id)
+  t.is(s.sugestao, null, 'no suggestion on the reopened row')
+  t.is(s.semelhanca, null)
+  t.is(s.motivo, 'reaberto')
+  // Even when the row carries no marker (a store that does not write it).
+  delete env.moderation.rows.get(r.id).reopened
+  t.is(env.worker.suggestionOf(r.id).sugestao, null)
+})
+
+test('daily cap: a block a person reopened today still counts after a restart', async (t) => {
+  const env = setup(t, { mode: 'auto' })
+  env.warm()
+  await env.worker.stop()
+  for (let i = 0; i < MAX_AI_BLOCKS_PER_DAY - 1; i++) {
+    env.moderation.addReport({ status: 'bloquear', decidedBy: AI_ACTOR, decidedAt: iso(T0 - 3600 * 1000), note: NOTE_BLOCK })
+  }
+  // The day's last AI block, reopened: the row lost decidedBy, the block stands.
+  env.moderation.addReport({ reopened: { at: iso(T0 - 1800 * 1000), action: 'bloquear', decidedAt: iso(T0 - 3600 * 1000) } })
+  // One from yesterday, reopened, does not count today.
+  env.moderation.addReport({ reopened: { at: iso(T0 - 1800 * 1000), action: 'bloquear', decidedAt: iso(T0 - 36 * 3600 * 1000) } })
+  const again = restart(t, env)
+  again.start()
+  await again.idle()
+  const capped = env.report({}, { text: SPAM + ' novo' })
+  again.onReport(capped)
+  await again.idle()
+  t.is(env.ledger.get(capped.id).code, 'teto-bloquear', 'capped')
+  t.is(env.moderation.get(capped.id).status, 'aberta')
+  t.is(env.moderation.decideCalls.length, 0, 'the AI decided nothing')
+})
+
+test('the worker exposes no reopen and never calls the store one; a store without reopenedIds keeps every report with a person', async (t) => {
+  const env = setup(t, { mode: 'auto' })
+  t.absent('reopen' in env.worker, 'no reopen on the worker surface')
+  const calls = []
+  env.moderation.reopen = () => { calls.push('reopen') }
+  env.warm()
+  const r = env.report({}, { text: HAM + ' novo' })
+  env.worker.onReport(r)
+  await env.worker.idle()
+  env.moderation.personReopens(r.id)
+  await env.worker.runOnce()
+  t.alike(calls, [], 'reopen never called')
+  delete env.moderation.reopen
+  // Fails closed: without reopenedIds the worker cannot tell, so it leaves
+  // the report to a person.
+  const reopenedIds = env.moderation.reopenedIds
+  delete env.moderation.reopenedIds
+  const other = env.report({}, { text: HAM + ' outro' })
+  env.worker.onReport(other)
+  await env.worker.idle()
+  t.is(env.ledger.get(other.id).code, 'reaberto')
+  t.is(env.moderation.decideCalls.length, 1, 'only the first report was decided')
+  env.moderation.reopenedIds = reopenedIds
 })

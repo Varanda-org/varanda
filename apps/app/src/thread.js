@@ -126,7 +126,7 @@ function repostItem (author, seq, record, peek) {
   return { kind: 'repost', author, seq, at: record.at, to, name: profile ? profile.name : null, username, avatar: profile ? profile.avatar : null }
 }
 
-function lookupPost (peeked, ref) {
+export function lookupPost (peeked, ref) {
   const r = typeof ref === 'string' ? parseRef(ref) : null
   if (r === null) return null
   const peek = peekOf(peeked, r.author)

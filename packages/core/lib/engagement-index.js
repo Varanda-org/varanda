@@ -111,7 +111,12 @@ const ENGAGER_PAGE = 20
 const NOTICE_ROWS_PER_ENGAGER = 64
 const NOTICE_ROWS_MAX = 4096
 const NOTICE_CACHE_AUTHORS = 16
+const NOTICE_SCAN_MAX = 16384
 const TESTIMONIAL_ROWS = 64
+const RODA_PAGE = 50
+// One budget per roda() call, spent twice: on the hops of the walk up and on
+// the reply edges examined by the walk down.
+const RODA_SCAN = 1000
 const SCRAP_PER_WRITER = 20
 const SCRAP_PER_PAGE = 500
 const SCRAP_ROWS = 50
@@ -459,11 +464,17 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   // A slower cursor must not resurrect a removed block or its incoming edges.
   const deleted = new Map()
   const deletedRefs = new Set()
-  // noticeRows memo: author -> qualifying edges sorted newest first, before
-  // the per-call filters. The notices channel admits a burst of 512 page
-  // messages then 2/s, so one member rereading Avisos must not rebuild and
-  // sort every edge aimed at its posts each time. Insertion order is the LRU
-  // order. Any write that can change an author's rows drops its entry.
+  // noticeRows memo: author -> { edges, cut, builtAt, wakeAt }: the newest
+  // NOTICE_SCAN_MAX qualifying edges, sorted newest first, after the
+  // viewer-independent filters (far future as of builtAt, the per-engager
+  // cap) and before `visible`, and whether older ones were left out. wakeAt
+  // is when the nearest far-future edge left out stops being future: a read
+  // at or after it, or before builtAt, rebuilds the entry. The notices
+  // channel admits a burst of 512 page messages then 2/s, so one member
+  // rereading Avisos must not rebuild and sort every edge aimed at its posts
+  // each time. Kept after the scan cap, so an entry holds at most
+  // NOTICE_SCAN_MAX edges. Insertion order is the LRU order. Any write that
+  // can change an author's rows drops its entry.
   const noticeCache = new Map()
   // Owner -> Map<writer, edge { atMs, author, seq }>: the newest (highest
   // seq) live `testimonial` of each writer addressed to that owner, kept
@@ -1432,6 +1443,103 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     }
   }
 
+  // The roda (conversation circle) of a reply: the thread root, the
+  // top-level comment `top` under it, and every reply of top's subtree as
+  // { ref, to } (to = the parent ref), flattened so a parent always comes
+  // before its children, at most RODA_PAGE strictly after `cursor`. Nothing
+  // is stored for it: each call walks the stored replyTo links up and the
+  // reply lists down, at most RODA_SCAN hops up and RODA_SCAN edges down,
+  // so a request costs O(min(descendants, RODA_SCAN)) and is recomputed for
+  // every page. Null for a malformed ref or cursor, a post not indexed, a
+  // post that is not a reply, and a walk up that meets a missing, deleted or
+  // hidden post, a cycle (refs are predictable, so two diaries can reply to
+  // each other's future posts) or the bound. `truncated` says the walk down
+  // stopped at the bound with edges left unexamined.
+  function roda (ref, cursor = null, visible = allVisible) {
+    try {
+      const parsed = validRef(ref)
+      if (parsed === null) return null
+      const after = parseCursor(cursor)
+      if (after === undefined) return null
+      if (typeof visible !== 'function') visible = allVisible
+      const entry = authors.get(parsed.author)
+      if (entry === undefined || !visible(parsed.author)) return null
+      const info = entry.posts.get(parsed.seq)
+      if (info === undefined || info.replyTo === null) return null
+      // `root` is only a claim: add() stores replyTo as null when the parent
+      // was already deleted, so an orphaned reply looks like a root here.
+      const seenUp = new Set([ref])
+      let top = ref
+      let parent = info.replyTo
+      let root = null
+      for (let hops = 0; root === null; hops++) {
+        if (hops >= RODA_SCAN || seenUp.has(parent) || deletedRefs.has(parent)) return null
+        seenUp.add(parent)
+        const p = validRef(parent)
+        if (p === null) return null
+        const pinfo = authors.get(p.author)?.posts.get(p.seq)
+        if (pinfo === undefined || !visible(p.author)) return null
+        if (pinfo.replyTo === null) {
+          root = parent
+        } else {
+          top = parent
+          parent = pinfo.replyTo
+        }
+      }
+      // Breadth first from top. The listing key of a node is its own atMs
+      // raised to one past its parent's, so a child dated before its parent
+      // (a skewed or hostile clock) still sorts after it under compareEdges
+      // and the reply cursor grammar.
+      const kept = []
+      const seenDown = new Set([top])
+      const queue = [top]
+      let examined = 0
+      let truncated = false
+      const effOf = new Map()
+      for (let qi = 0; qi < queue.length && !truncated; qi++) {
+        const node = queue[qi]
+        const list = targets.get(node)?.replies || EMPTY_LIST
+        const base = effOf.get(node)
+        for (const edge of list) {
+          if (examined >= RODA_SCAN) {
+            truncated = true
+            break
+          }
+          examined++
+          const child = edgeRef(edge)
+          if (seenDown.has(child)) continue
+          seenDown.add(child)
+          if (!visible(edge.author)) continue
+          const atMs = base === undefined ? edge.atMs : Math.max(edge.atMs, base + 1)
+          effOf.set(child, atMs)
+          kept.push({ atMs, author: edge.author, seq: edge.seq, ref: child, to: node })
+          queue.push(child)
+        }
+      }
+      kept.sort(compareEdges)
+      const start = after === null ? 0 : upperBound(kept, after)
+      const page = kept.slice(start, start + RODA_PAGE)
+      const authorHints = {}
+      const hint = (author) => { if (!(author in authorHints)) authorHints[author] = hints(author) }
+      hint(parsed.author)
+      hint(root.slice(0, 64))
+      hint(top.slice(0, 64))
+      for (const item of page) hint(item.author)
+      return {
+        ref,
+        root,
+        top,
+        items: page.map((item) => ({ ref: item.ref, to: item.to })),
+        next: page.length > 0 && start + page.length < kept.length ? edgeCursor(page[page.length - 1]) : null,
+        total: kept.length,
+        truncated,
+        authors: authorHints
+      }
+    } catch {
+      return null
+    }
+  }
+
   // { [ref]: { replies, likes, reposts, quotes } } for every ref of `refs`
   // whose post is indexed or that has engagement, filtered by `visible`.
   // Every ref is computed ONCE (duplicates collapse) and each computation
@@ -1534,26 +1642,42 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
 
   // Likes and reposts aimed at `author`'s indexed posts, as notice rows
   // { key, seq, at, kind } newest first (atMs desc, key asc, seq desc). The
-  // first read of an author is O(edges aimed at its indexed posts), bounded
-  // by maxRecords, and memoized in noticeCache; later reads are one linear
-  // pass until a write touches that author. The notices channel serves it
-  // only to the key that proved itself, at that channel's message rate.
-  // `visible(engagerHex)` and the future rule run before the caps, so an
-  // engager the seeder hides or a far-future edge cannot evict real ones: a
-  // future edge stays hidden, never removed, as in engagers(). The caps
-  // forget older rows and never count: NOTICE_ROWS_PER_ENGAGER per engager
-  // first, so one engager cannot crowd out the others, then NOTICE_ROWS_MAX
-  // overall. Residual: an edge whose `at` is pre-1970 was clamped to atMs 0
-  // by atMillis, so its ISO string would not round-trip to the signed
-  // record; it is skipped, as a browser would drop it anyway. An `at` of
-  // exactly 1970-01-01T00:00:00.000Z is also stored as atMs 0 and skipped
-  // the same way.
+  // first read of an author collects the edges aimed at its indexed posts
+  // (bounded by maxRecords), drops the far-future ones and those past
+  // NOTICE_ROWS_PER_ENGAGER per engager, and memoizes the newest
+  // NOTICE_SCAN_MAX left in noticeCache; every read, the first included,
+  // then examines at most those NOTICE_SCAN_MAX edges, until a write touches
+  // that author or a far-future edge comes due. The notices channel serves
+  // it only to the key that proved itself, at that channel's message rate.
+  // A far-future edge takes no slot of any cap: it stays hidden, never
+  // removed, as in engagers(), and enters on the first read once the clock
+  // catches up. Neither does one engager's edges beyond its newest
+  // NOTICE_ROWS_PER_ENGAGER. `visible(engagerHex)` is the seeder's and can
+  // change without a write, so it runs on each read, after the scan cap and
+  // before the row caps: a hidden engager never takes a row slot, but its
+  // edges (at most NOTICE_ROWS_PER_ENGAGER each) do count toward the scan
+  // cap. The row caps forget older rows and never count:
+  // NOTICE_ROWS_PER_ENGAGER per engager, so one engager cannot crowd out the
+  // others, then NOTICE_ROWS_MAX overall. The scan cap is different: when it
+  // ends the scan before NOTICE_ROWS_MAX rows and older edges were left out
+  // (hidden engagers holding many of the newest slots, say), rows a visible
+  // engager holds may be missing, and noticePage says `incomplete`.
+  // Residual: an edge whose `at` is pre-1970 was clamped
+  // to atMs 0 by atMillis, so its ISO string would not round-trip to the
+  // signed record; it is skipped, as a browser would drop it anyway. An
+  // `at` of exactly 1970-01-01T00:00:00.000Z is also stored as atMs 0 and
+  // skipped the same way.
   function noticeRows (author, now, visible = allVisible) {
+    return noticePage(author, now, visible).rows
+  }
+
+  // -> { rows, incomplete }: noticeRows plus whether the scan cap cut it.
+  function noticePage (author, now, visible = allVisible) {
     try {
-      if (typeof author !== 'string' || !HEX64.test(author)) return []
-      if (typeof now !== 'number' || !Number.isFinite(now)) return []
+      if (typeof author !== 'string' || !HEX64.test(author)) return { rows: [], incomplete: false }
+      if (typeof now !== 'number' || !Number.isFinite(now)) return { rows: [], incomplete: false }
       if (typeof visible !== 'function') visible = allVisible
-      const edges = noticeEdges(author)
+      const { edges, cut } = noticeEdges(author, now)
       const perEngager = new Map()
       const shown = new Map()
       const rows = []
@@ -1571,20 +1695,21 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
         perEngager.set(edge.key, seen + 1)
         rows.push({ key: edge.key, seq: edge.seq, at: new Date(edge.atMs).toISOString(), kind: edge.kind })
       }
-      return rows
+      return { rows, incomplete: cut && rows.length < NOTICE_ROWS_MAX }
     } catch {
-      return []
+      return { rows: [], incomplete: false }
     }
   }
 
-  function noticeEdges (author) {
+  function noticeEdges (author, now) {
     const cached = noticeCache.get(author)
-    if (cached !== undefined) {
-      noticeCache.delete(author)
+    noticeCache.delete(author)
+    if (cached !== undefined && now >= cached.builtAt && now < cached.wakeAt) {
       noticeCache.set(author, cached)
       return cached
     }
-    const edges = []
+    let edges = []
+    let wakeAt = Infinity
     const entry = authors.get(author)
     const refs = authorTargets.get(author)
     if (entry !== undefined && refs !== undefined) {
@@ -1598,15 +1723,28 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
           if (target[type] === null) continue
           for (const [engager, edge] of target[type]) {
             if (engager === author || edge.atMs === 0) continue
+            if (edge.atMs - now > MAX_FUTURE_MS) {
+              wakeAt = Math.min(wakeAt, edge.atMs - MAX_FUTURE_MS)
+              continue
+            }
             edges.push({ key: engager, seq: edge.seq, atMs: edge.atMs, kind })
           }
         }
       }
       edges.sort(compareNoticeRows)
+      const perEngager = new Map()
+      edges = edges.filter((edge) => {
+        const seen = perEngager.get(edge.key) || 0
+        perEngager.set(edge.key, seen + 1)
+        return seen < NOTICE_ROWS_PER_ENGAGER
+      })
     }
-    noticeCache.set(author, edges)
+    const cut = edges.length > NOTICE_SCAN_MAX
+    if (cut) edges.length = NOTICE_SCAN_MAX
+    const memo = { edges, cut, builtAt: now, wakeAt }
+    noticeCache.set(author, memo)
     if (noticeCache.size > NOTICE_CACHE_AUTHORS) noticeCache.delete(noticeCache.keys().next().value)
-    return edges
+    return memo
   }
 
   // Pointers to the depoimentos of `owner` (see the header): { shown: [{ seq,
@@ -1841,7 +1979,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     fullAuthors = 0
   }
 
-  return { add, removePost, removeRecord, removeDiary, post, counts, engagers, member, hints, noticeRows, testimonials, scraps, profileExtra, fans, fanCount, pollTotals, pollVoters, stats, clear }
+  return { add, removePost, removeRecord, removeDiary, post, roda, counts, engagers, member, hints, noticeRows, noticePage, testimonials, scraps, profileExtra, fans, fanCount, pollTotals, pollVoters, stats, clear }
 }
 
 module.exports = {
@@ -1856,7 +1994,10 @@ module.exports = {
   NOTICE_ROWS_PER_ENGAGER,
   NOTICE_ROWS_MAX,
   NOTICE_CACHE_AUTHORS,
+  NOTICE_SCAN_MAX,
   TESTIMONIAL_ROWS,
+  RODA_PAGE,
+  RODA_SCAN,
   SCRAP_PER_WRITER,
   SCRAP_PER_PAGE,
   SCRAP_ROWS,

@@ -7,6 +7,14 @@ const { runInNewContext } = require('node:vm')
 
 const read = (file) => readFileSync(join(__dirname, '../src', file), 'utf8')
 
+test('a code block set by code shows its fences: the web measures every text, native sizes the field itself', (t) => {
+  const src = read('ui/ChatComposer.js')
+  t.absent(src.includes('heightFloor'), 'no floor from line breaks')
+  t.ok(src.includes('GROWS_ITSELF ? styles.grows : { height }'), 'native has no fixed height, the web its measured one')
+  t.ok(src.includes('grows: { minHeight: MIN_HEIGHT, maxHeight: MAX_HEIGHT }'), 'between one and six lines')
+  t.ok(src.includes('const full = (GROWS_ITSELF ? laidOut : height) >= MAX_HEIGHT - 0.5') && src.includes('scrollEnabled={full}'), 'it scrolls once full')
+})
+
 test('the composer offers six formats in an initially hidden accessible row', (t) => {
   const src = read('ui/ChatComposer.js')
   t.ok(src.includes('const [formatOpen, setFormatOpen] = useState(false)'))
@@ -64,7 +72,7 @@ test('the Aa toggle shares the emoji tool size and touch padding', (t) => {
 })
 
 test('the input cleans pasted TAB and CR and preserves ordinary typing', async (t) => {
-  const { cleanPaste } = await import('../src/formatInsert.js')
+  const { cleanPaste, pasteCaret } = await import('../src/formatInsert.js')
   const src = read('ui/ChatComposer.js')
   const match = src.match(/const changeText = (\(next\) => \{[\s\S]*?\n {2}\})\n\n {2}const pickFormat/)
   t.ok(match, 'the input has a change handler')
@@ -95,6 +103,7 @@ test('the input cleans pasted TAB and CR and preserves ordinary typing', async (
     const input = runInNewContext(match[1], {
       text: previous,
       cleanPaste,
+      pasteCaret,
       change: (text) => received.push(text),
       selRef,
       setCaret: (value) => states.push(['caret', value]),
@@ -191,7 +200,7 @@ test('ReplyPreview uses one plain quote for display and accessibility', async (t
   const src = read('ui/ReplyPreview.js')
   t.ok(src.includes("import { quoteText } from '../chatPreview'"))
   t.ok(src.includes('const shownText = quoteText(text)'))
-  t.ok(src.includes('<Text style={styles.text} numberOfLines={lines}>{shownText}</Text>'))
+  t.ok(src.includes('<Text style={[styles.text, onMineDark && { color: SOFT_ON_MINE_DARK }]} numberOfLines={lines}>{shownText}</Text>'))
   t.ok(src.includes("accessibilityLabel={(shownName ? shownName + ': ' : '') + shownText}"))
   // Execute the component's displayed expression without loading React Native.
   const match = src.match(/const shownText = ([^\n]+)/)

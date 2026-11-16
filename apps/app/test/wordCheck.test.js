@@ -16,7 +16,7 @@ const screen = (name) => fs.readFileSync(path.join(SRC, 'screens', name), 'utf8'
 test('a term matches whole words only, never inside a longer word', async (t) => {
   const { findTerm, indexTerms } = await load()
   const index = indexTerms(['cu'])
-  for (const text of ['cultura', 'curso', 'acu', 'a cultura do cuidado', 'cu1', 'c u']) {
+  for (const text of ['cultura', 'curso', 'acu', 'a cultura do cuidado', 'cu1x', 'c u']) {
     t.is(findTerm(text, index), null, text)
   }
   for (const text of ['cu', 'o cu dele', 'cu!', '(cu)', 'cu\nfim']) {
@@ -63,8 +63,37 @@ test('an @nome is read word by word, split at its underscores', async (t) => {
   const index = indexTerms(['ruim', 'termo ruim'])
   t.is(findTerm('ruim_123', index), 'ruim')
   t.is(findTerm('o_termo_ruim', index), 'termo ruim')
-  t.is(findTerm('ruim123', index), null, 'letters and digits together are one word')
+  t.is(findTerm('ruim123', index), 'ruim', 'digits glued to the end do not hide it')
   t.is(findTerm(null, index), null, 'an @nome that is not valid yet')
+})
+
+test('digits glued to the start or end of a word do not hide a term', async (t) => {
+  const { findTerm, indexTerms } = await load()
+  const index = indexTerms(['cu', 'termo ruim'])
+  for (const text of ['cu1', '2cu', '007cu99', 'o CU2024 dele', 'termo99 ruim', 'termo ruim123', '1termo 2ruim3']) {
+    t.ok(findTerm(text, index) !== null, text)
+  }
+  for (const text of ['cu1x', 'x1cu', 'c1u', '123', '1 2 3', 'curso2', 'termo 7 ruim']) {
+    t.is(findTerm(text, index), null, text)
+  }
+})
+
+test('the title and description of a link preview are checked', async (t) => {
+  const { previewRefusal, publicGroupPreviewRefusal, previewRefusalText, indexTerms, findTerm } = await load()
+  const list = await loadList()
+  const term = list[0]
+  const view = { url: 'https://exemplo.com.br/a', host: 'exemplo.com.br', title: 'Um título', desc: 'fala de ' + term + ' aqui' }
+  t.is(previewRefusal(view), previewRefusalText(term), 'the description')
+  t.is(previewRefusal({ ...view, desc: '', title: term }), previewRefusalText(term), 'the title')
+  t.ok(previewRefusalText(term).includes('prévia'), 'it points at the preview, not at the text')
+  t.is(previewRefusal({ ...view, desc: 'nada demais' }), '')
+  t.is(previewRefusal(null), '', 'no draft card')
+  t.is(previewRefusal('x'), '')
+  t.is(publicGroupPreviewRefusal('public', view), previewRefusalText(term), 'a public group')
+  for (const visibility of ['private', null, undefined, 'unknown']) {
+    t.is(publicGroupPreviewRefusal(visibility, view), '', String(visibility))
+  }
+  t.is(findTerm('x', indexTerms([])), null)
 })
 
 test('what is not text refuses nothing', async (t) => {
@@ -236,4 +265,14 @@ test('a topic title, its poll options and a topic reply are checked like a chat 
 
   const publicar = screen('Publicar.js')
   t.ok(publicar.includes('{ setCheckError(POLL_NEEDS_TEXT); return }'), 'Publicar: an empty poll question says so')
+})
+
+test('a link preview is checked before a public post and a public group message', (t) => {
+  const publicar = screen('Publicar.js')
+  t.ok(publicar.includes('(refusalOf(text, ...(pollDraft !== null ? pollDraft.options : [])) || previewRefusal(linkDraft.view))'), 'Publicar: the draft card is checked with the text')
+  const grupo = screen('Grupo.js')
+  const press = grupo.slice(grupo.indexOf('const sendDraft = () => {'), grupo.indexOf('if (attachments.items.length > 0 && !asPage.page) {'))
+  t.ok(press.includes('publicGroupPreviewRefusal(visibility, linkDraft.view)'), 'Grupo: a public group checks the draft card')
+  t.ok(/setDraftRefusal\(refused\)\s*if \(refused !== ''\) return/.test(press), 'Grupo: a refusal stops the send')
+  t.absent(screen('Mensagem.js').includes('wordCheck'), 'Mensagem stays out')
 })

@@ -34,10 +34,11 @@ test('ReplyBar pins accessible copy, theme, capped text and keyboard handling', 
   for (const text of ['Escreva uma resposta', 'cancelar resposta', 'Responder', 'abrir editor completo']) t.ok(src.includes(text), text)
   t.ok(src.includes("accessibilityLabel='cancelar resposta'"))
   t.ok(src.includes("accessibilityLabel='abrir editor completo'"))
-  t.ok(src.includes("accessibilityLabel='Responder'"))
+  t.ok(src.includes('accessibilityLabel={sendLabel}'))
+  t.ok(src.includes("sendLabel = 'Responder' }"), 'the send label defaults to Responder')
   const line = between(src, '<View style={styles.line}>', '\n      </View>\n      {/*')
-  t.ok(line.includes('<TextInput') && line.includes("accessibilityLabel='Responder'"), 'the pill and the send share one line')
-  t.ok(line.indexOf('<TextInput') < line.indexOf("accessibilityLabel='Responder'"))
+  t.ok(line.includes('<TextInput') && line.includes('accessibilityLabel={sendLabel}'), 'the pill and the send share one line')
+  t.ok(line.indexOf('<TextInput') < line.indexOf('accessibilityLabel={sendLabel}'))
   t.ok(line.includes("accessibilityLabel='abrir editor completo'"), 'expand stays on that line')
   t.ok(src.includes("import { Avatar } from './Avatar'") && src.includes('size={28}') && src.includes('{me ? '), 'the member avatar leads the pill')
   t.ok(src.includes("<Icon name='imagem' size={18} color={colors.soft} />") && src.includes("accessibilityLabel='adicionar foto'"), 'plain photo icon')
@@ -45,7 +46,7 @@ test('ReplyBar pins accessible copy, theme, capped text and keyboard handling', 
   t.ok(src.includes('me = null, nonFocalTarget = false') && src.includes('onAttach'), 'new props')
   t.ok(src.includes('{expanded && target\n'), 'target row only when expanded')
   t.is(src.split('<TextInput').length - 1, 1, 'one input instance in both states')
-  t.ok(src.indexOf('<View style={styles.target}>') < src.indexOf('<TextInput') && src.indexOf('<TextInput') < src.indexOf("accessibilityLabel='Responder'"), 'target above the input, send after the pill')
+  t.ok(src.indexOf('<View style={styles.target}>') < src.indexOf('<TextInput') && src.indexOf('<TextInput') < src.indexOf('accessibilityLabel={sendLabel}'), 'target above the input, send after the pill')
   t.ok(src.includes("bar: { paddingTop: space.sm, gap: space.xs, backgroundColor: 'transparent' }") && src.includes('radius.bubble'), 'transparent bar, round pill')
   t.absent(line.includes('{length}/1000'), 'the counter sits under the line, so the field keeps its width at large text')
   t.ok(src.includes("counter: { ...type.counter, color: colors.soft, alignSelf: 'flex-end' }"))
@@ -57,7 +58,7 @@ test('ReplyBar pins accessible copy, theme, capped text and keyboard handling', 
   t.absent(src.includes('Pill'), 'the tools are plain icons, with no outlined circles')
   const field = between(line, '<View style={[styles.pill', '\n        </View>\n        {hasText')
   t.ok(field.includes('<TextInput') && field.includes("accessibilityLabel='abrir editor completo'") && field.includes("accessibilityLabel='cancelar resposta'"), 'expand and cancel sit inside the pill')
-  t.absent(field.includes("accessibilityLabel='Responder'"), 'send sits beside the pill')
+  t.absent(field.includes('accessibilityLabel={sendLabel}'), 'send sits beside the pill')
   t.ok(src.includes('style={[styles.input, webInputReset, { height: Math.min(height, maxHeight), maxHeight }]}'), 'no browser focus ring inside the rounded field')
   t.ok(src.includes('pillFocused: { borderColor: colors.accent }'), 'focus shows on the pill')
   t.ok(src.includes('backgroundColor: colors.inputOff'))
@@ -95,7 +96,7 @@ test('ReplyBar pins accessible copy, theme, capped text and keyboard handling', 
 
 test('a blur never moves photo or expand: send shows on text alone', (t) => {
   t.ok(src.includes("const hasText = text.trim() !== ''"), 'send condition reads only the text')
-  const sendBlock = src.slice(src.lastIndexOf('{', src.indexOf("accessibilityLabel='Responder'")), src.indexOf("accessibilityLabel='Responder'"))
+  const sendBlock = src.slice(src.lastIndexOf('{', src.indexOf('accessibilityLabel={sendLabel}')), src.indexOf('accessibilityLabel={sendLabel}'))
   t.ok(sendBlock.startsWith('{hasText\n'), 'send renders under hasText')
   t.absent(/focused|expanded/.test(sendBlock), 'focus cannot add or remove send')
 })
@@ -193,9 +194,16 @@ test('Publicar launches the photo picker once per handoff, only on the no-confli
   t.is(publicar.split("reply.attach === 'photo'").length - 1, 1, 'one launch site')
 })
 
+// The pure hand-off rules the sources import; loaded once, before the first harness runs.
+const rules = {}
+test('hand-off rules load', async (t) => {
+  Object.assign(rules, await import('../src/replyHandoff.js'))
+  t.is(typeof rules.restoresParked, 'function')
+})
+
 function handoff (onReplyDraft = () => {}) {
-  let replyDrafts = new Set()
-  const replyDraftsRef = { current: replyDrafts }
+  let lastSettled = 0
+  const lastSettledRef = { current: lastSettled }
   const results = []
   const settleSource = between(publicar, '  const settleReplyDraft =', '\n  // True while')
   const pendingSource = between(publicar, '  const hasReplyDraft =', '  const settleReplyDraft =')
@@ -203,13 +211,14 @@ function handoff (onReplyDraft = () => {}) {
   const seedSource = between(publicar, '    if (!replyDraftPending)', '\n  }, [replyDraftPending')
   const keepSource = between(publicar, '    const keepDraft =', '    const useReplyDraft =')
   const acceptSource = between(publicar, '    const useReplyDraft =', '    return (\n      <Sheet open={open}')
-  const build = new Function('reply', 'open', 'held', 'hasMedia', 'text', 'replyDrafts', 'replyDraftsRef', 'setReplyDrafts', 'onReplyDraft', 'setText', 'onClearReply', 'onClose', 'genRef', 'removeItems', 'liveRef', // eslint-disable-line no-new-func
+  const build = new Function('reply', 'open', 'held', 'hasMedia', 'text', 'lastSettled', 'lastSettledRef', 'setLastSettled', 'handoffSettled', 'settledAfter', 'onReplyDraft', 'setText', 'onClearReply', 'onClose', 'genRef', 'removeItems', 'liveRef', 'discardPost', // eslint-disable-line no-new-func
     [pendingSource, conflictSource, settleSource, keepSource, acceptSource].join('\n') +
     '\nreturn { pending: replyDraftPending, conflict: replyDraftConflict, keepDraft, useReplyDraft, seed: () => {' + seedSource + '} }')
-  const state = { text: '', clears: 0, closes: 0, removed: [], genRef: { current: 0 } }
-  const render = (reply, { open = true, held = false, hasMedia = false } = {}) => build(reply, open, held, hasMedia, state.text, replyDrafts, replyDraftsRef,
-    (v) => { replyDrafts = v }, (v) => { results.push(v); onReplyDraft(v) }, (v) => { state.text = v },
-    () => { state.clears++ }, () => { state.closes++ }, state.genRef, (ids) => state.removed.push(...ids), { current: new Set([1]) })
+  const state = { text: '', clears: 0, closes: 0, discards: 0, removed: [], genRef: { current: 0 } }
+  const render = (reply, { open = true, held = false, hasMedia = false } = {}) => build(reply, open, held, hasMedia, state.text, lastSettled, lastSettledRef,
+    (v) => { lastSettled = v }, rules.handoffSettled, rules.settledAfter, (v) => { results.push(v); onReplyDraft(v) }, (v) => { state.text = v },
+    () => { state.clears++ }, () => { state.closes++ }, state.genRef, (ids) => state.removed.push(...ids), { current: new Set([1]) },
+    () => { state.genRef.current++; state.removed.push(1); state.discards++ })
   return { render, state, results }
 }
 
@@ -295,6 +304,7 @@ test('accepting a conflict replaces attachments and text only when not held', (t
   t.is(h.state.text, reply.draft)
   t.alike(h.results, [true])
   t.alike(h.state.removed, [1])
+  t.is(h.state.discards, 1, 'through discardPost, which also frees the video and the music')
   t.absent(h.render(reply).pending)
 })
 
@@ -321,6 +331,8 @@ function shell (composer) {
     replyDraftResolve: { current: null },
     replyDraftStash: { current: null },
     replyHandoffSerial: { current: 0 },
+    replyDraftHandoff: { current: null },
+    restoresParked: (...args) => rules.restoresParked(...args),
     setComposer: (value) => {
       state.composer = typeof value === 'function' ? value(state.composer) : value
       context.composer = state.composer
@@ -425,5 +437,28 @@ test('locking during a handoff drops its stash without restoring account content
   h.dismiss(true)
   t.is(await pending, false)
   t.is(h.state.composer.reply, null)
+  t.is(h.context.replyDraftStash.current, null)
+})
+
+test('the field text comes from the placeholder prop, defaulting to the old text', () => {
+  const sig = src.slice(src.indexOf('export function ReplyBar'), src.indexOf('\n', src.indexOf('export function ReplyBar')))
+  const field = between(src, '<TextInput', 'onChangeText')
+  const field2 = between(src, 'multiline', 'placeholderTextColor')
+  return Promise.resolve().then(() => {
+    if (!sig.includes("placeholder = 'Escreva uma resposta'")) throw new Error('default placeholder')
+    if (!field2.includes('placeholder={placeholder}') || !field2.includes('accessibilityLabel={placeholder}')) throw new Error('field uses prop')
+    if (field.length === 0) throw new Error('no field')
+  })
+})
+
+test('a reply opened during the hand-off is not replaced by the older parked target', async (t) => {
+  const saved = { reply: { ref: 'old', handoff: 3 }, quote: null }
+  const h = shell({ open: false, ...saved })
+  const pending = h.start({ ref: 'new', draft: 'resposta' })
+  const opened = { ref: 'later', draft: 'x', handoff: h.state.composer.reply.handoff + 1 }
+  h.context.setComposer((c) => ({ ...c, reply: opened }))
+  h.context.settleReplyDraft(false)
+  t.is(await pending, false)
+  t.is(h.state.composer.reply, opened, 'the newer target stays')
   t.is(h.context.replyDraftStash.current, null)
 })

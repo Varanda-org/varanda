@@ -108,7 +108,8 @@ const {
   createEngagementIndex,
   NOTICE_ROWS_PER_ENGAGER,
   NOTICE_ROWS_MAX,
-  NOTICE_CACHE_AUTHORS
+  NOTICE_CACHE_AUTHORS,
+  NOTICE_SCAN_MAX
 } = require('../lib/engagement-index')
 
 const NOW = Date.parse(AT2)
@@ -222,7 +223,7 @@ test('noticeRows: total on bad input and the index surface is unchanged', (t) =>
   for (const [a, n] of [[null, NOW], ['x', NOW], [OWN.toUpperCase(), NOW], [OWN, NaN], [OWN, '1'], [K2, NOW]]) {
     t.alike(ix.noticeRows(a, n), [])
   }
-  t.alike(Object.keys(ix), ['add', 'removePost', 'removeRecord', 'removeDiary', 'post', 'counts', 'engagers', 'member', 'hints', 'noticeRows', 'testimonials', 'scraps', 'profileExtra', 'fans', 'fanCount', 'pollTotals', 'pollVoters', 'stats', 'clear'])
+  t.alike(Object.keys(ix), ['add', 'removePost', 'removeRecord', 'removeDiary', 'post', 'roda', 'counts', 'engagers', 'member', 'hints', 'noticeRows', 'noticePage', 'testimonials', 'scraps', 'profileExtra', 'fans', 'fanCount', 'pollTotals', 'pollVoters', 'stats', 'clear'])
 })
 
 test('noticeRows: hidden engagers do not take cap slots', (t) => {
@@ -349,4 +350,68 @@ test('engagement-index choice: a choice dated more than a day ahead counts and l
   t.alike(ix.pollVoters(OWN, 1, 1, { now: NOW }), { items: [], next: null, total: 0 }, 'never first in quem votou')
   t.alike(ix.pollTotals(OWN, 1, { now: NOW + 1 }), { totals: [0, 2] }, 'counted once within a day')
   t.alike(ix.pollVoters(OWN, 1, 1, { now: NOW + 1 }).items.map((r) => r.key).sort(), [A, B])
+})
+
+test('noticePage: the per-request scan cap marks the rows incomplete only when it cuts', (t) => {
+  t.is(NOTICE_SCAN_MAX, 16384)
+  // One post liked by NOTICE_SCAN_MAX + 10 engagers, newest = highest i.
+  const ix = indexWithPosts()
+  const n = NOTICE_SCAN_MAX + 10
+  for (let i = 1; i <= n; i++) ix.add(hexKey(i), 1, likeRec(1, true, new Date(NOW - (n - i) * 1000).toISOString()))
+  const all = ix.noticePage(OWN, NOW)
+  t.is(all.rows.length, NOTICE_ROWS_MAX)
+  t.is(all.incomplete, false, 'NOTICE_ROWS_MAX reached: the row cap forgets, it is not incompleteness')
+  t.alike(all.rows, ix.noticeRows(OWN, NOW), 'noticeRows is noticePage().rows')
+  // Only the 10 oldest engagers are visible: they lie past the scan cap.
+  let examined = 0
+  const old = (key) => {
+    examined++
+    return parseInt(key, 16) <= 10
+  }
+  const hidden = ix.noticePage(OWN, NOW, old)
+  t.alike(hidden.rows, [], 'never scanned past NOTICE_SCAN_MAX edges')
+  t.is(hidden.incomplete, true, 'the scan cap cut visible rows')
+  t.is(examined, NOTICE_SCAN_MAX, 'one visible call per distinct engager scanned, no more')
+  // Under the cap nothing is cut, whatever is hidden.
+  const small = indexWithPosts()
+  for (let i = 1; i <= 100; i++) small.add(hexKey(i), 1, likeRec(1))
+  t.alike(small.noticePage(OWN, NOW, () => false), { rows: [], incomplete: false })
+  t.alike(small.noticePage('x', NOW), { rows: [], incomplete: false })
+  t.alike(small.noticePage(OWN, NOW, () => { throw new Error('boom') }), { rows: [], incomplete: false })
+  // The memo is kept after the cap and a write still drops it.
+  ix.add(hexKey(n + 1), 1, likeRec(1, true, new Date(NOW + 1000).toISOString()))
+  t.is(ix.noticePage(OWN, NOW).rows[0].key, hexKey(n + 1))
+})
+
+test('noticePage: far-future edges and one engager past its cap take no scan slot', (t) => {
+  // NOTICE_SCAN_MAX + 10 far-future likes, all newer than 10 real ones.
+  const ix = indexWithPosts()
+  const n = NOTICE_SCAN_MAX + 10
+  const far = (i) => new Date(NOW + 2 * 86400000 + i * 1000).toISOString()
+  for (let i = 1; i <= n; i++) ix.add(hexKey(i), 1, likeRec(1, true, far(i)))
+  for (let i = 1; i <= 10; i++) ix.add(hexKey(n + i), 1, likeRec(1, true, new Date(NOW - i * 1000).toISOString()))
+  const p = ix.noticePage(OWN, NOW)
+  t.is(p.rows.length, 10, 'every real row is there')
+  t.is(p.incomplete, false, 'nothing real was cut')
+  t.is(p.rows[0].key, hexKey(n + 1))
+  // Hidden, never removed: once the clock catches up they show, newest first.
+  const later = ix.noticePage(OWN, NOW + 2 * 86400000 + n * 1000)
+  t.is(later.rows.length, NOTICE_ROWS_MAX)
+  t.is(later.rows[0].key, hexKey(n))
+  t.is(later.incomplete, false, 'NOTICE_ROWS_MAX reached')
+  // An earlier clock again hides them (the memo is rebuilt, not reused).
+  t.is(ix.noticePage(OWN, NOW).rows.length, 10)
+
+  // One engager liking NOTICE_SCAN_MAX + 10 posts, all newer than a real
+  // like: only its newest NOTICE_ROWS_PER_ENGAGER enter the scan.
+  const busy = indexWithPosts(NOTICE_SCAN_MAX + 10)
+  for (let i = 1; i <= NOTICE_SCAN_MAX + 10; i++) busy.add(K1, i, likeRec(i, true, new Date(NOW - (NOTICE_SCAN_MAX + 10 - i) * 1000).toISOString()))
+  const old = new Date(NOW - 10 * 86400000).toISOString()
+  busy.add(K2, 1, likeRec(1, true, old))
+  const b = busy.noticePage(OWN, NOW)
+  t.is(b.rows.length, NOTICE_ROWS_PER_ENGAGER + 1)
+  t.alike(b.rows.at(-1), { key: K2, seq: 1, at: old, kind: 'like' }, 'the older real row is still there')
+  t.is(b.incomplete, false)
+  const hiddenK1 = busy.noticePage(OWN, NOW, (key) => key !== K1)
+  t.alike(hiddenK1, { rows: [{ key: K2, seq: 1, at: old, kind: 'like' }], incomplete: false }, 'a hidden busy engager cannot push it out either')
 })

@@ -449,6 +449,7 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
       {segments}
       <OfflineNote />
       <RefreshableList
+        perfId='seguindo'
         scrollToTopSignal={scrollToTop}
         contentContainerStyle={{ paddingBottom: bottomPad }}
         data={shownKeys}

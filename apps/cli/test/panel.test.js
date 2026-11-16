@@ -936,6 +936,82 @@ test('Histórico says pela IA or por uma pessoa, and never shows an e-mail', asy
   t.is(buttons(doc, 'Descartar').length, 0)
 })
 
+test('Histórico: Reabrir only on an AI decision; confirm, POST, and the report is back in Abertas', async (t) => {
+  const doc = fakeDocument()
+  const routes = signedIn([])
+  let reopened = false
+  const aiRow = report({ id: R1, status: 'descartar', actor: 'ia', decidedAt: '2026-10-22T00:00:00.000Z', note: 'IA: parecido' })
+  routes['GET /account/mod/api/reports?estado=decidida'] = () => [200, {
+    reports: reopened
+      ? [report({ id: R2, status: 'descartar', actor: 'pessoa', decidedAt: '2026-10-22T00:00:00.000Z' })]
+      : [aiRow, report({ id: R2, status: 'descartar', actor: 'pessoa', decidedAt: '2026-10-22T00:00:00.000Z' })],
+    truncated: false
+  }]
+  routes['GET /account/mod/api/reports?estado=aberta'] = () => [200, { reports: reopened ? [report({ id: R1 })] : [], truncated: false }]
+  let posted = null
+  routes['POST /account/mod/api/reports/' + R1 + '/reopen'] = (opts) => {
+    posted = opts
+    reopened = true
+    return [200, { report: report({ id: R1 }) }]
+  }
+  const { fetch } = fakeFetch(routes)
+  const asked = []
+  const p = panel.createPanel(env(doc, fetch, { confirm: (q) => { asked.push(q); return true } }))
+  await p.start()
+  buttons(doc, 'Histórico')[0].click()
+  const cards = cardsOf(doc)
+  t.is(buttons(doc, 'Reabrir').length, 1, 'one button, on the AI row only')
+  t.ok(cards[0].textContent.includes('Reabrir'))
+  t.absent(cards[1].textContent.includes('Reabrir'), 'never on a decision a person took')
+  buttons(doc, 'Reabrir')[0].click()
+  await p.settled()
+  t.alike(asked, [panel.TEXT.reopenQuestion])
+  t.ok(asked[0].includes('o bloqueio continua até alguém usar Desbloquear'), 'says the block stays')
+  t.ok(posted, 'reopen was called')
+  t.is(posted.method, 'POST')
+  t.is(posted.credentials, 'same-origin')
+  t.alike(JSON.parse(posted.body), {})
+  t.ok(doc.main.textContent.includes(panel.TEXT.reopened))
+  t.is(buttons(doc, 'Reabrir').length, 0, 'gone from Histórico')
+  buttons(doc, 'Abertas')[0].click()
+  t.is(cardsOf(doc).length, 1, 'the report is in Abertas')
+})
+
+test('Histórico: a declined Reabrir sends nothing; a refusal shows a fixed line, never the token', async (t) => {
+  const doc = fakeDocument()
+  const routes = signedIn([])
+  routes['GET /account/mod/api/reports?estado=decidida'] = () => [200, {
+    reports: [report({ id: R1, status: 'bloquear', actor: 'ia', decidedAt: '2026-10-22T00:00:00.000Z' })],
+    truncated: false
+  }]
+  let posts = 0
+  routes['POST /account/mod/api/reports/' + R1 + '/reopen'] = () => { posts++; return [403, { error: 'sem-permissao' }] }
+  const { fetch } = fakeFetch(routes)
+  let answer = false
+  const p = panel.createPanel(env(doc, fetch, { confirm: () => answer }))
+  await p.start()
+  buttons(doc, 'Histórico')[0].click()
+  buttons(doc, 'Reabrir')[0].click()
+  await p.settled()
+  t.is(posts, 0, 'declined: nothing sent')
+  answer = true
+  buttons(doc, 'Reabrir')[0].click()
+  await p.settled()
+  t.is(posts, 1)
+  t.ok(doc.main.textContent.includes('Só uma decisão da IA pode ser reaberta.'))
+  t.absent(doc.main.textContent.includes('sem-permissao'))
+})
+
+test('Reabrir texts are pt-BR without an em dash; reaberto has its own AI label', async (t) => {
+  const texts = [panel.TEXT.reopen, panel.TEXT.reopenQuestion, panel.TEXT.reopened, panel.AI_REASONS.reaberto]
+  for (const s of texts) {
+    t.is(typeof s, 'string')
+    t.absent(s.includes(String.fromCodePoint(0x2014)), 'no em dash: ' + s)
+  }
+  t.is(panel.TEXT.reopen, 'Reabrir')
+  t.is(panel.aiReasonLabel('reaberto'), panel.AI_REASONS.reaberto)
+})
+
 test('Histórico: mostrar mais appends the next page without reading the other lists again', async (t) => {
   const doc = fakeDocument()
   const routes = signedIn([])

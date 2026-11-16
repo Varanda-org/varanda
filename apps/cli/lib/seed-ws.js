@@ -69,6 +69,11 @@ const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 // methods, a null answer or a throw, the same generic 404. Routes:
 // - /index/post/<author>/<seq>[/<cursor>] (cursor `<atMs>.<author>.<seq>`,
 //   the last reply of the previous page) -> Seeder#indexPost;
+// - /index/roda/<author>/<seq>[/<cursor>] (cursor as for /index/post, the
+//   last row of the previous page) -> Seeder#indexRoda: `{ ref, root, top,
+//   items: [{ ref, to }] (at most 50, parents before children; `to` the
+//   parent ref), next, total, authors, indexing, complete }`, checked key by
+//   key (anything else is the generic 404);
 // - /index/counts/<ref>,<ref>,... (1..INDEX_MAX_REFS refs) -> indexCounts;
 // - /index/member/<author>[/<before>] -> indexMember (its answer carries, for a page only, the
 //   page hint page, closed, moved);
@@ -366,6 +371,16 @@ const BLOB_HEADERS = {
 const INDEX_PREFIX = '/index'
 const INDEX_MAX_REFS = 31
 const INDEX_POST_RE = /^\/index\/post\/([0-9a-f]{64})\/([1-9][0-9]{0,14})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
+const INDEX_RODA_RE = /^\/index\/roda\/([0-9a-f]{64})\/([1-9][0-9]{0,14})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
+// A roda page lists at most RODA_ROWS_MAX messages and hints the authors of
+// those rows plus the asked post, its root and its top.
+const RODA_ROWS_MAX = 50
+const RODA_AUTHORS_MAX = RODA_ROWS_MAX + 3
+const RODA_KEYS = ['authors', 'complete', 'indexing', 'items', 'next', 'ref', 'root', 'top', 'total']
+const RODA_ITEM_KEYS = ['ref', 'to']
+const RODA_HINT_KEYS = ['profileSeq', 'usernameSeq']
+const INDEX_REF_RE = /^[0-9a-f]{64}:[1-9][0-9]{0,14}$/
+const INDEX_CURSOR_RE = /^[0-9]{1,16}\.([0-9a-f]{64})\.([1-9][0-9]{0,14})$/
 // 1..INDEX_MAX_REFS refs `<hex64>:<seq>`, comma-separated, no trailing comma.
 const INDEX_COUNTS_RE = /^\/index\/counts\/([0-9a-f]{64}:[1-9][0-9]{0,14}(?:,[0-9a-f]{64}:[1-9][0-9]{0,14}){0,30})$/
 const INDEX_MEMBER_RE = /^\/index\/member\/([0-9a-f]{64})(?:\/([1-9][0-9]{0,14}))?$/
@@ -512,6 +527,22 @@ const POST_PREVIA_HEADERS = {
 }
 
 const sha256 = (value) => nodeCrypto.createHash('sha256').update(value).digest()
+
+function isPlainObject (o) {
+  if (o === null || typeof o !== 'object' || Array.isArray(o)) return false
+  const proto = Object.getPrototypeOf(o)
+  return proto === Object.prototype || proto === null
+}
+
+// `keys` sorted: the object has exactly these own enumerable keys.
+function exactKeys (o, keys) {
+  if (!isPlainObject(o)) return false
+  const got = Object.keys(o).sort()
+  return got.length === keys.length && got.every((k, i) => k === keys[i])
+}
+
+const isIndexRef = (s) => typeof s === 'string' && INDEX_REF_RE.test(s)
+const isHintSeq = (n) => n === null || (Number.isSafeInteger(n) && n >= 1)
 
 // The secret-stream's per-frame authentication overhead, read from the
 // sodium-secretstream that the installed @hyperswarm/secret-stream (the one
@@ -712,7 +743,7 @@ function refuse (socket, code, reason) {
 // deadlineMs }), for tests; index: the same for the /index limits
 // ({ maxInFlight, rate, burst }). sockets: optional socket cap of the
 // listener (see socketCap). The seeder's indexPost(authorHex, seq,
-// cursor), indexCounts(refs), indexMember(authorHex, before), indexPageEnd(authorHex),
+// cursor), indexRoda(authorHex, seq, cursor), indexCounts(refs), indexMember(authorHex, before), indexPageEnd(authorHex),
 // indexSearch(segment), indexEngagers(kind, authorHex, seq, cursor) and
 // indexTestimonials(ownerHex) ->
 // null | plain object back /index; indexSearch's
@@ -799,6 +830,8 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
   function indexCall (url) {
     let m = INDEX_POST_RE.exec(url)
     if (m) return ['indexPost', [m[1], Number(m[2]), m[3] === undefined ? null : m[3]]]
+    m = INDEX_RODA_RE.exec(url)
+    if (m) return ['indexRoda', [m[1], Number(m[2]), m[3] === undefined ? null : m[3]], rodaBody]
     m = INDEX_ENGAGERS_RE.exec(url)
     if (m) return ['indexEngagers', [m[1], m[2], Number(m[3]), m[4] === undefined ? null : m[4]]]
     m = INDEX_COUNTS_RE.exec(url)
@@ -1058,6 +1091,42 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
   function communityGroupsBody ({ groups, next, indexing, complete }) {
     const rows = communityRows(groups)
     return { groups: rows, next: communityNext(next, rows), indexing, complete }
+  }
+
+  // The roda route is new, so its answer can be checked key by key from the
+  // start: anything unexpected (an extra key, a row too many, a wrong type)
+  // is the generic 404, and the body is rebuilt from fresh objects so
+  // nothing the seeder adds can leak.
+  function rodaBody (answer) {
+    if (!exactKeys(answer, RODA_KEYS)) throw new Error('index')
+    const { ref, root, top, items, next, total, authors, indexing, complete } = answer
+    if (!isIndexRef(ref) || !isIndexRef(root) || !isIndexRef(top)) throw new Error('index')
+    if (!Array.isArray(items) || items.length > RODA_ROWS_MAX) throw new Error('index')
+    const rows = items.map((item) => {
+      if (!exactKeys(item, RODA_ITEM_KEYS)) throw new Error('index')
+      const { ref, to } = item
+      if (!isIndexRef(ref) || !isIndexRef(to)) throw new Error('index')
+      return { ref, to }
+    })
+    // The cursor names the last row listed; readers page from it.
+    if (next !== null) {
+      const c = typeof next === 'string' ? INDEX_CURSOR_RE.exec(next) : null
+      if (c === null || rows.length === 0 || rows[rows.length - 1].ref !== c[1] + ':' + c[2]) throw new Error('index')
+    }
+    if (!Number.isSafeInteger(total) || total < 0) throw new Error('index')
+    if (!isPlainObject(authors)) throw new Error('index')
+    const keys = Object.keys(authors)
+    if (keys.length > RODA_AUTHORS_MAX) throw new Error('index')
+    const hints = {}
+    for (const key of keys) {
+      const h = authors[key]
+      if (!HEX64_RE.test(key) || !exactKeys(h, RODA_HINT_KEYS)) throw new Error('index')
+      const { profileSeq, usernameSeq } = h
+      if (!isHintSeq(profileSeq) || !isHintSeq(usernameSeq)) throw new Error('index')
+      hints[key] = { profileSeq, usernameSeq }
+    }
+    if (typeof indexing !== 'boolean' || typeof complete !== 'boolean') throw new Error('index')
+    return { ref, root, top, items: rows, next, total, authors: hints, indexing, complete }
   }
 
   // A null or non-object answer, a missing method, a throw or a rejection,
@@ -1841,6 +1910,7 @@ module.exports = {
   MEDIA_DEADLINE_MS,
   BLOB_RE,
   INDEX_POST_RE,
+  INDEX_RODA_RE,
   INDEX_COUNTS_RE,
   INDEX_MEMBER_RE,
   INDEX_SEARCH_RE,
