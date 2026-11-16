@@ -14,7 +14,7 @@ Verificações automáticas (arquivos alvo):
 - `apps/site/test/legal.test.js`
 - `npm run lint`, `npm test` (ou `npm test -- --affected=origin/main`) e `npm run demo`.
 
-Resultados: a preencher.
+Resultados (Node 24.22.1, local, 2026-11-16): os arquivos alvo acima passam rodados um a um; `npm run lint` passou; `npm test -- --affected=origin/main` passou em todos os workspaces alcançados; `npm run demo` terminou com "DEMO OK". A conferência no aparelho abaixo segue pendente.
 
 Conferência no aparelho:
 
