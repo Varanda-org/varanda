@@ -2,6 +2,8 @@ import { MAX_MEDIA_PER_POST } from './media/plan.js'
 
 const ID = /^[0-9]{13}-[0-9a-f]{32}$/
 const IMAGES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+// The one video a share can bring (scripts/sw.js SHARE_VIDEO).
+const VIDEO = 'video/mp4'
 // The worker may write three 4000 character fields, each JSON-escaped.
 const MAX_META_CHARS = 1048576
 const MAX_FILE_BYTES = 50 * 1024 * 1024
@@ -41,13 +43,16 @@ export async function peek () {
         const seen = new Set()
         for (const file of meta.files.slice(0, MAX_MEDIA_PER_POST)) {
           try {
-            if (!file || !Number.isSafeInteger(file.n) || file.n < 0 || !IMAGES.has(file.mime) || seen.has(file.n)) continue
+            if (!file || !Number.isSafeInteger(file.n) || file.n < 0 || seen.has(file.n)) continue
+            if (!IMAGES.has(file.mime) && (file.mime !== VIDEO || files.length > 0)) continue
             seen.add(file.n)
             const entry = await cache.match(key.base + file.n)
             if (!entry) continue
             const blob = await entry.blob()
             if (blob.size === 0 || blob.size > MAX_FILE_BYTES) continue
-            files.push(new File([blob], 'foto-' + file.n, { type: file.mime }))
+            files.push(new File([blob], (file.mime === VIDEO ? 'video-' : 'foto-') + file.n, { type: file.mime }))
+            // A video is the whole share's media.
+            if (file.mime === VIDEO) break
           } catch {
             // A read that failed may work on the next peek: offered without
             // its photos, the share would be released as empty. One that never
@@ -62,6 +67,7 @@ export async function peek () {
           text: typeof meta.text === 'string' ? meta.text : '',
           url: typeof meta.url === 'string' ? meta.url : '',
           total: Number.isSafeInteger(meta.total) && meta.total >= 0 ? meta.total : 0,
+          videos: Number.isSafeInteger(meta.videos) && meta.videos >= 0 ? meta.videos : 0,
           files
         }
       } catch {}

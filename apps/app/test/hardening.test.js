@@ -467,10 +467,11 @@ test('the share extension target is built, embedded and versioned like the app',
 
 const plistValue = (xml, key) => (compact(xml).match(new RegExp('<key>' + key + '</key><string>([^<]*)</string>')) || [])[1]
 
-test('the share extension accepts photos, text and one link, with the app\'s versions', (t) => {
+test('the share extension accepts photos, one video, text and one link, with the app\'s versions', (t) => {
   const xml = read(SHARE_INFO_PLIST)
   const plist = compact(xml)
   const rule = '<key>NSExtensionActivationSupportsImageWithMaxCount</key><integer>100</integer>' +
+    '<key>NSExtensionActivationSupportsMovieWithMaxCount</key><integer>1</integer>' +
     '<key>NSExtensionActivationSupportsText</key><true/>' +
     '<key>NSExtensionActivationSupportsWebURLWithMaxCount</key><integer>1</integer>'
   t.ok(plist.includes('<key>NSExtension</key><dict>' +
@@ -478,7 +479,7 @@ test('the share extension accepts photos, text and one link, with the app\'s ver
     '<key>NSExtensionPointIdentifier</key><string>com.apple.share-services</string>' +
     '<key>NSExtensionPrincipalClass</key><string>$(PRODUCT_MODULE_NAME).ShareViewController</string>' +
     '</dict>'), 'NSExtension holds the rule inside NSExtensionAttributes')
-  t.absent(/Movie|NSExtensionActivationSupportsFile|Attachment/.test(plist), 'no movie or file activation key')
+  t.absent(/NSExtensionActivationSupportsFile|Attachment/.test(plist), 'no file activation key')
   t.absent(/SUBQUERY|<key>NSExtensionActivationRule<\/key><string>/.test(plist), 'no predicate string')
   t.is(plistValue(xml, 'CFBundleDisplayName'), 'Varanda')
   for (const key of ['CFBundleShortVersionString', 'CFBundleVersion']) {
@@ -528,8 +529,14 @@ test('a file the source app hands over is copied or skipped, never read into mem
   const load = source.slice(source.indexOf('private func loadImage('), source.indexOf('private func loadURL('))
   const fallback = load.indexOf('provider.loadDataRepresentation')
   const handed = load.slice(load.indexOf('if let url = url {'), fallback)
-  t.ok(fallback > 0 && handed.includes('self.copyFile(url, to: target)'), 'a handed file is copied')
+  t.ok(fallback > 0 && handed.includes('self.copyFile(url, to: target, maxBytes: Self.maxBytes)'), 'a handed file is copied')
   t.ok(/done\(\)\s*return\s*}\s*\/\/ Some apps only offer the bytes/.test(handed), 'and the bytes fallback is not reached')
+  const video = source.slice(source.indexOf('private func loadVideo('), source.indexOf('private func loadURL('))
+  t.ok(video.includes('provider.loadFileRepresentation(forTypeIdentifier: typeId)'), 'a video arrives as a file')
+  t.ok(video.includes('self.copyFile(url, to: target, maxBytes: Self.maxVideoBytes)'), 'copied under its own cap')
+  t.absent(/loadDataRepresentation|loadItem/.test(video), 'never as bytes in memory')
+  t.ok(source.includes('private static let maxVideoBytes: Int64 = 512 * 1024 * 1024'))
+  t.ok(read(SHARE_INTAKE_SWIFT).includes('static let maxVideoBytes: Int64 = 512 * 1024 * 1024'), 'the same cap as the app')
 })
 
 // One exact env name, not a prefix of a longer one, so each flag's ban fails

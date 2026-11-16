@@ -36,8 +36,13 @@
 // waiting for the reader to be published to borrow the run's cores; each
 // answer's time from sync.start is earlyOwnReadMs, earlyProfileReadMs and
 // earlyFeedReadMs. --dm-rows N: N rows over 40 peers are filed in the local
-// direct message store; per run dmUnlockMs (engine.unlock), dmListMs and
-// dmList2Ms (dm.list, first and again), dmThreadMs (dm.thread of one peer).
+// direct message store; per run dmKeyMs (engine.unlock, the key stage),
+// dmUnlockMs (engine.unlock and the row load, engine.loaded), dmListMs and
+// dmList2Ms (dm.list, first and again), dmThreadMs (dm.thread of one peer),
+// then dmFirstPageSummaryMs and dmFirstPageNoSummaryMs: from the start of
+// another unlock to its first dm.list page, with the sealed list summary the
+// first list wrote and with it removed (the page then waits for the rows),
+// both on cores the reads above already opened.
 // --groups G --group-blocks B: G public groups of B blocks over 3 writers
 // (the own diary and two helper members, their cores copied in as a sync
 // would); per run groupListMs, groupList2Ms and communityListMs, the first
@@ -205,24 +210,53 @@ async function fillDm (f, rows) {
   return { prf, peer: peers[0] }
 }
 
-// Unlock, list twice and one thread of the filed rows, timed.
+// Unlock, list twice and one thread of the filed rows, timed; then the
+// first page from the start of an unlock with the sealed list summary and
+// without it.
 async function dmReads (f, dm, url) {
-  const engine = createDmEngine({ storage: f.storage, association: f.association, seederUrl: url, createSocket: () => { throw new Error('sem rede na bancada') } })
+  const engine = createDmEngine({ storage: f.storage, association: f.association, seederUrl: url, createSocket: () => { throw new Error('sem rede na bancada') }, limits: { summaryDelayMs: 0 } })
   const timed = async (fn) => {
     const start = process.hrtime.bigint()
     await fn()
     return Number(process.hrtime.bigint() - start) / 1e6
   }
+  const relock = async () => {
+    engine.lock()
+    await engine.idle()
+  }
   try {
     const out = {}
-    out.dmUnlockMs = await timed(() => engine.unlock(dm.prf))
+    out.dmUnlockMs = await timed(async () => {
+      out.dmKeyMs = await timed(() => engine.unlock(dm.prf))
+      await engine.loaded()
+    })
     out.dmListMs = await timed(() => engine.list(f.ownHex, {}))
     out.dmList2Ms = await timed(() => engine.list(f.ownHex, {}))
     out.dmThreadMs = await timed(() => engine.thread(f.ownHex, { peer: dm.peer }))
+    // The first list wrote the summary (summaryDelayMs 0).
+    const deadline = Date.now() + 10000
+    while ((await f.storage.readJson('dmSummary')) === null) {
+      if (Date.now() > deadline) throw new Error('resumo não gravado')
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    // Both passes on the same warm cores: with the summary, then with it
+    // removed (the list then waits for every row).
+    await relock()
+    out.dmFirstPageSummaryMs = await timed(async () => {
+      await engine.unlock(dm.prf)
+      await engine.list(f.ownHex, {})
+    })
+    await engine.loaded()
+    await relock()
+    await f.storage.writeJson('dmSummary', null)
+    out.dmFirstPageNoSummaryMs = await timed(async () => {
+      await engine.unlock(dm.prf)
+      await engine.list(f.ownHex, {})
+    })
+    await engine.loaded()
     return out
   } finally {
-    engine.lock()
-    await engine.idle()
+    await relock()
   }
 }
 
@@ -671,7 +705,7 @@ async function main () {
     Object.assign(summary, { readerPublishedMs: median((r) => r.readerPublishedMs), startupSettledMs: median((r) => r.startupSettledMs) })
   }
   if (opts.earlyReads) Object.assign(summary, { earlyOwnReadMs: median((r) => r.earlyOwnReadMs), earlyProfileReadMs: median((r) => r.earlyProfileReadMs), earlyFeedReadMs: median((r) => r.earlyFeedReadMs) })
-  if (opts.dmRows > 0) Object.assign(summary, { dmRows: opts.dmRows, dmUnlockMs: median((r) => r.dmUnlockMs), dmListMs: median((r) => r.dmListMs), dmList2Ms: median((r) => r.dmList2Ms), dmThreadMs: median((r) => r.dmThreadMs) })
+  if (opts.dmRows > 0) Object.assign(summary, { dmRows: opts.dmRows, dmKeyMs: median((r) => r.dmKeyMs), dmUnlockMs: median((r) => r.dmUnlockMs), dmListMs: median((r) => r.dmListMs), dmList2Ms: median((r) => r.dmList2Ms), dmThreadMs: median((r) => r.dmThreadMs), dmFirstPageSummaryMs: median((r) => r.dmFirstPageSummaryMs), dmFirstPageNoSummaryMs: median((r) => r.dmFirstPageNoSummaryMs) })
   if (opts.groups > 0) Object.assign(summary, { groups: opts.groups, groupBlocks: opts.groupBlocks, groupListMs: median((r) => r.groupListMs), groupList2Ms: median((r) => r.groupList2Ms), communityListMs: median((r) => r.communityListMs) })
   if (opts.json) {
     process.stdout.write(JSON.stringify({ ...summary, each: runs }) + '\n')
@@ -694,7 +728,10 @@ async function main () {
     lines.push('etapas da partida (medianas): ' + Object.entries(summary.startup.steps).map(([k, v]) => k + ' ' + v + ' ms').join(', '))
   }
   if (opts.earlyReads) lines.push('leituras no início da sincronização (medianas, desde o início): log.read ' + summary.earlyOwnReadMs + ' ms, profile.read ' + summary.earlyProfileReadMs + ' ms, feed.read ' + summary.earlyFeedReadMs + ' ms')
-  if (opts.dmRows > 0) lines.push('mensagens diretas ' + summary.dmRows + ' linhas (medianas): desbloqueio ' + summary.dmUnlockMs + ' ms, lista ' + summary.dmListMs + ' ms, lista de novo ' + summary.dmList2Ms + ' ms, conversa ' + summary.dmThreadMs + ' ms')
+  if (opts.dmRows > 0) {
+    lines.push('mensagens diretas ' + summary.dmRows + ' linhas (medianas): chave ' + summary.dmKeyMs + ' ms, desbloqueio completo ' + summary.dmUnlockMs + ' ms, lista ' + summary.dmListMs + ' ms, lista de novo ' + summary.dmList2Ms + ' ms, conversa ' + summary.dmThreadMs + ' ms')
+    lines.push('primeira página desde o desbloqueio (medianas): com o resumo ' + summary.dmFirstPageSummaryMs + ' ms, sem o resumo ' + summary.dmFirstPageNoSummaryMs + ' ms')
+  }
   if (opts.groups > 0) lines.push('grupos ' + summary.groups + ' x ' + summary.groupBlocks + ' blocos (medianas): lista ' + summary.groupListMs + ' ms, lista de novo ' + summary.groupList2Ms + ' ms, comunidades ' + summary.communityListMs + ' ms')
   lines.push('operações de armazenamento: get ' + summary.storageGets + ', has ' + summary.storageHas + ', leituras ' + summary.storageReads + ', consultas ' + summary.storageStats)
   for (const [name, c] of [['partida', summary.startup], ...Object.entries(summary.phases)]) {

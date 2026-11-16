@@ -71,6 +71,7 @@ class ShareIntakeModule : Module() {
         "text" to share.text,
         "url" to share.url,
         "total" to share.total,
+        "videos" to share.videos,
         "files" to share.files.map { f ->
           mapOf(
             "uri" to "file://" + f.file.absolutePath,

@@ -79,6 +79,7 @@ const GOOD = {
   text: 'texto',
   url: 'https://exemplo.test/a',
   total: 1,
+  videos: 0,
   files: [{ uri: uriFor(ID, '0.jpg'), mimeType: 'image/jpeg', width: 640, height: 480 }]
 }
 
@@ -359,6 +360,34 @@ test('share intake: non-positive sizes are dropped', async (t) => {
   const got = await mod.peek()
   t.alike(got.files, [{ uri: uriFor(ID, '0.jpg'), mimeType: 'image/jpeg', width: 1, height: 2 }])
   t.is(got.total, 1)
+})
+
+test('share intake: a video entry has a video name, no sizes, and counts in videos', async (t) => {
+  fake()
+  const mod = await load()
+  globalThis.__shareNative.peek = () => Promise.resolve(payload({
+    total: 0,
+    files: [
+      entry(ID, '0.mp4', { mimeType: 'video/mp4', width: 0, height: 0 }),
+      entry(ID, '1.jpg', { mimeType: 'video/mp4' }),
+      entry(ID, '2.mov', { mimeType: 'image/jpeg' }),
+      entry(ID, '3.exe', { mimeType: 'video/mp4' }),
+      entry(ID, '4.mov', { mimeType: 'video/quicktime', width: 'x' }),
+      entry(ID, '5.mkv', { mimeType: 'video/x-matroska' })
+    ]
+  }))
+  const got = await mod.peek()
+  t.alike(got.files, [
+    { uri: uriFor(ID, '0.mp4'), mimeType: 'video/mp4' },
+    { uri: uriFor(ID, '4.mov'), mimeType: 'video/quicktime' }
+  ])
+  t.is(got.total, 0, 'a video is not a photo')
+  t.is(got.videos, 2, 'never below the videos kept')
+
+  globalThis.__shareNative.peek = () => Promise.resolve(payload({ total: 0, videos: 1, files: [] }))
+  t.is((await mod.peek()).videos, 1, 'a video that could not be copied still counts')
+  globalThis.__shareNative.peek = () => Promise.resolve(payload({ videos: '1' }))
+  t.is((await mod.peek()).videos, 0)
 })
 
 test('share intake: more than 10 files are cut', async (t) => {

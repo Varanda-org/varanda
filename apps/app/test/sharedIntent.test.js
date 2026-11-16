@@ -149,6 +149,44 @@ test('acceptShare separates over-cap and failed files and passes a web File thro
   t.is(acceptShare(raw(), AT), null, 'an empty share is ignored')
 })
 
+test('acceptShare takes one video when no photo came along and says why one is left out', async (t) => {
+  const { acceptShare } = await load()
+  const clip = { uri: 'file://v/0.mp4', mimeType: 'video/mp4' }
+  let accepted = acceptShare(raw({ files: [clip], videos: 1 }), AT)
+  t.alike(accepted.files, [])
+  t.alike(accepted.video, { uri: 'file://v/0.mp4', mimeType: 'video/mp4', width: undefined, height: undefined })
+  t.is(accepted.videoNote, '')
+  t.is(accepted.failed, 0, 'a video is not a failed photo')
+  t.is(accepted.dropped, 0)
+
+  const web = { type: 'video/mp4', size: 9 }
+  accepted = acceptShare(raw({ files: [web, { type: 'video/mp4', size: 10 }], videos: 2 }), AT)
+  t.is(accepted.video, web, 'the first web video, by reference')
+  t.is(accepted.videoNote, 'extra')
+
+  const photo = { type: 'image/png', size: 4 }
+  accepted = acceptShare(raw({ files: [web, photo], total: 1, videos: 1 }), AT)
+  t.alike(accepted.files, [photo])
+  t.is(accepted.video, null, 'a post holds a video or photos')
+  t.is(accepted.videoNote, 'photos')
+
+  accepted = acceptShare(raw({ text: 'veja', files: [], videos: 1 }), AT)
+  t.is(accepted.video, null)
+  t.is(accepted.videoNote, 'failed', 'offered but not copied')
+  t.is(accepted.failed, 0)
+
+  accepted = acceptShare(raw({ files: [{ mimeType: 'video/mp4' }], text: 'x' }), AT)
+  t.is(accepted.video, null, 'a malformed video entry is not used')
+  t.is(accepted.videoNote, 'failed')
+  t.is(accepted.failed, 0, 'and is not counted as a photo')
+
+  accepted = acceptShare(raw({ videos: 1 }), AT)
+  t.alike([accepted.text, accepted.files, accepted.video, accepted.videoNote], ['', [], null, 'failed'], 'a video that did not arrive still opens the composer to say so')
+  t.is(acceptShare(raw({ videos: 0 }), AT), null, 'nothing to show')
+  accepted = acceptShare(raw({ files: [clip], videos: '3' }), AT)
+  t.is(accepted.videoNote, '', 'a malformed count falls back to the entries')
+})
+
 test('shareStep keeps the newest share and ignores released inbox entries', async (t) => {
   const { EMPTY, shareStep } = await load()
   const first = share('a')
@@ -379,6 +417,17 @@ test('shareNote covers every branch in priority order', async (t) => {
   t.is(shareNote({ hadFiles: false, canAttach: true, noRoom: 0, dropped: 0, failed: 1, kept: true, clipped: true }), 'o texto compartilhado foi cortado em 1000 caracteres. algumas fotos não puderam ser abertas')
   t.is(shareNote({ hadFiles: false, canAttach: true, noRoom: 0, dropped: 0, failed: 1, kept: true, clipped: false }), 'algumas fotos não puderam ser abertas')
   t.is(shareNote({ hadFiles: false, canAttach: true, noRoom: 0, dropped: 0, kept: true, clipped: false }), '')
+})
+
+test('shareNote tells why a shared video is not attached', async (t) => {
+  const { shareNote } = await load()
+  const base = { hadFiles: false, canAttach: true, noRoom: 0, dropped: 0, kept: true, clipped: false }
+  t.is(shareNote({ ...base, hadVideo: true, canVideo: false, kept: false }), 'não dá para anexar vídeos agora')
+  t.is(shareNote({ ...base, hadVideo: true, canVideo: true, kept: false }), 'o texto compartilhado não coube no rascunho')
+  t.is(shareNote({ ...base, hadVideo: true, canVideo: true, videoNote: 'extra' }), 'só o primeiro vídeo foi anexado')
+  t.is(shareNote({ ...base, hadFiles: true, failed: 1, videoNote: 'photos' }), 'algumas fotos não puderam ser abertas. o vídeo ficou de fora, uma publicação leva um vídeo ou fotos')
+  t.is(shareNote({ ...base, kept: false, videoNote: 'failed' }), 'o texto compartilhado não coube no rascunho. o vídeo não pôde ser recebido')
+  t.is(shareNote({ ...base, videoNote: 'constructor' }), '', 'only the known notes')
 })
 
 test('sharedLinkHold holds a link the share brought, and only that', async (t) => {

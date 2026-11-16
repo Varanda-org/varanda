@@ -12,7 +12,7 @@ Como foi feito:
 
 - A lista (`packages/rpc/lib/blocked-terms.js`, antes `apps/app/src/blockedTerms.js`) e a regra (`packages/rpc/lib/word-check.js`, `termInTokens`) ficam em `@varanda/rpc`, que o Metro alcança. A dobra continua de cada lado: `wholeTokens` do app (`apps/app/src/search.js`) e o novo `wholeTokens` de `packages/core/lib/search-text.js`, presos um ao outro pelo teste de paridade de `apps/app/test/search.test.js`.
 - O serviço usa `apps/cli/lib/account/word-check.js` em `store.js` (`validName`), `pages-routes.js` e `pages-groups.js`. O log da recusa é o de sempre: `refused` com o token no vínculo e na troca de @nome de membro, e `pagina` com a ação e o token numa Página. Sem chave, nome, texto ou termo.
-- Termos e Política na versão 65: o parágrafo de conduta dos Termos e a seção Páginas da Política dizem o que o serviço confere e que não guarda o texto recusado.
+- Termos e Política na versão 66: o parágrafo de conduta dos Termos e a seção Páginas da Política dizem o que o serviço confere e que não guarda o texto recusado.
 
 Como verificar, a partir da raiz:
 
@@ -27,7 +27,7 @@ Como verificar, a partir da raiz:
 
 Caminhada no build de debug com a vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`, Metro na 8102), sem conta, em 16/11/2026:
 
-- [x] Ajustes › Termos e privacidade mostra a versão 65 no Android (emulador 5556), no simulador iOS (iPhone 17 Pro) e na web. A frase sobre o serviço de conta no parágrafo de conduta foi lida no Android e na web, e o parágrafo novo de Páginas na Política, na web.
+- [x] Ajustes › Termos e privacidade mostra a versão 65 no Android (emulador 5556), no simulador iOS (iPhone 17 Pro) e na web. A frase sobre o serviço de conta no parágrafo de conduta foi lida no Android e na web, e o parágrafo novo de Páginas na Política, na web. Depois, o #677 levou a versão 65 e este PR passou para a 66, sem mudar o próprio texto; a 66 em Ajustes não foi conferida no aparelho.
 - [x] A conferência no aparelho continua com a lista vinda de `@varanda/rpc`: em Publicar, um termo da lista mostra "Não dá para publicar: ... é um termo que o Varanda não permite em conteúdo público" no Android e no iOS. Na web, a mesma tela e o mesmo módulo; a recusa ficou com `apps/app/test/wordCheck.test.js`.
 
 Fica para a instalação da associação, com conta (o build de debug não entra com passkey numa instalação de produção; veja a issue #224):

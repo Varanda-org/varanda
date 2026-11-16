@@ -100,6 +100,7 @@ test('web intake reads the same stored share twice without consuming it', async 
     text: meta.text,
     url: meta.url,
     total: 4,
+    videos: 0,
     files: []
   })
   t.alike(second, first)
@@ -407,6 +408,39 @@ test('web intake reads the largest metadata the worker can write', async (t) => 
   const meta = store(entries, ID, { title: field, text: field, url: field })
   t.ok(JSON.stringify(meta).length > 65536, 'three escaped 4000 character fields')
   t.is((await web.peek()).text, field)
+})
+
+// The worker keeps one MP4 only when no photo came (scripts/sw.js takeShare);
+// the reader holds the same line, so a video is the whole share's media.
+test('web intake reads one MP4 as the share\'s only media and passes the video count', async (t) => {
+  const { entries } = fake(t)
+  const web = await load()
+  store(entries, ID, {
+    total: 0,
+    videos: 2,
+    files: [
+      { n: 0, mime: 'video/mp4' },
+      { n: 1, mime: 'image/png' },
+      { n: 2, mime: 'video/mp4' }
+    ]
+  })
+  for (const n of [0, 1, 2]) entries.set(key(ID, n), new Response('bytes-' + n))
+  const got = await web.peek()
+  t.alike(got.files.map((file) => [file.name, file.type]), [['video-0', 'video/mp4']])
+  t.is(await got.files[0].text(), 'bytes-0')
+  t.is(got.total, 0)
+  t.is(got.videos, 2)
+  const { acceptShare } = await import('../src/sharedIntent.js')
+  const accepted = acceptShare(got, AT)
+  t.is(accepted.video, got.files[0], 'the composer gets it as the shared video')
+  t.alike(accepted.files, [])
+
+  store(entries, ID, { files: [{ n: 0, mime: 'video/quicktime' }] })
+  t.alike((await web.peek()).files, [], 'only MP4')
+  for (const videos of [-1, 0.5, '1', null]) {
+    store(entries, ID, { text: 'oi', videos })
+    t.is((await web.peek()).videos, 0)
+  }
 })
 
 test('web intake normalizes non-string fields and invalid totals', async (t) => {

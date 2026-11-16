@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 65)
+  t.is(LEGAL_VERSION, 66)
   t.is(LEGAL_DATE, '16/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 65, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 66, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '18a6cef381f491ac583520426ff94788d0495ee65a1e90690911945671caaa43', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'e7f938453994e84c5717866282854bdd5fe9febd3364ccfceb2f9872e5de8385', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -822,7 +822,21 @@ test('legal: version 64 keeps the players off with Prévia de links off and unde
   t.ok(text(PRIVACY).includes('desliga a montagem e o player; os cartões que outras pessoas enviam continuam aparecendo, sem player.'))
 })
 
-test('legal: version 65 says the account service checks a new @nome and what a page publishes', async (t) => {
+test('legal: version 65 keeps what another app shares on the device until Publicar', async (t) => {
+  const { PRIVACY } = await load()
+  const all = PRIVACY.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const required of [
+    'O que outro app compartilha com a Varanda (fotos, um vídeo, texto ou um link) fica só no seu aparelho até você tocar em Publicar',
+    'numa pasta que o app divide com a extensão de compartilhar (o grupo de apps)',
+    'essas pastas ficam fora do backup do aparelho',
+    'O compartilhamento vale por 1 hora',
+    'No Android, a limpeza roda mesmo com o app fechado',
+    'o texto que você escrevia no Publicar fica guardado na aba enquanto o compartilhamento recarrega o app, por até 1 hora, só para a mesma conta'
+  ]) t.ok(all.includes(required), 'privacy: ' + required)
+  t.absent(all.includes('\u2014'), 'no em dash')
+})
+
+test('legal: version 66 says the account service checks a new @nome and what a page publishes', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const all = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   for (const required of [

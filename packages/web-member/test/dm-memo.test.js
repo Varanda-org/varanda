@@ -82,6 +82,7 @@ test('reads with nothing changed fold once; an append, a seen change and a follo
   const { engine, storage, counts, store: local } = engineFor()
   t.teardown(() => engine.close())
   await engine.unlock(crypto.randomBytes(32))
+  await engine.loaded()
   await local().append([msg(local().nextFiled(), { peer: PEERS[0], at: '2026-11-10T09:00:00.000Z' })])
   counts.folds = 0
   counts.snapshots = 0
@@ -124,6 +125,7 @@ test('a block op refolds and dm.thread reads it from the shared ops', async (t) 
   const { engine, counts, store: local } = engineFor()
   t.teardown(() => engine.close())
   await engine.unlock(crypto.randomBytes(32))
+  await engine.loaded()
   await local().append([msg(local().nextFiled(), { peer: PEERS[1], at: '2026-11-10T09:00:00.000Z' })])
   t.absent((await engine.thread(OWN, { peer: PEERS[1] })).blocked)
   const folds = counts.folds
@@ -139,7 +141,9 @@ test('results match an unmemoized engine across messages, ops, deletes, blocks, 
   const r = engineFor({ memo: false })
   t.teardown(() => Promise.all([m.engine.close(), r.engine.close()]))
   await m.engine.unlock(prf)
+  await m.engine.loaded()
   await r.engine.unlock(prf)
+  await r.engine.loaded()
   const rand = prng(20261110)
   const pick = (list) => list[Math.floor(rand() * list.length)]
   let filed = 1
@@ -202,6 +206,7 @@ test('after lock nothing is returned and the memo is empty; a new unlock folds a
   const { engine, counts, store: local } = engineFor()
   t.teardown(() => engine.close())
   await engine.unlock(prf)
+  await engine.loaded()
   await local().append([msg(local().nextFiled(), { peer: PEERS[2], at: '2026-11-10T09:00:00.000Z' })])
   await engine.list(OWN, { folder: 'request' })
   t.is(engine.foldMemoSize, 1)
@@ -214,6 +219,7 @@ test('after lock nothing is returned and the memo is empty; a new unlock folds a
 
   const folds = counts.folds
   await engine.unlock(prf)
+  await engine.loaded()
   t.is((await engine.list(OWN, { folder: 'request' })).conversations.length, 1, 'the rows load again')
   t.is(counts.folds, folds + 1, 'nothing from before the lock is reused')
 })
@@ -235,6 +241,7 @@ test('store: version moves on load, append and lock; ops is shared and frozen pe
   const s = createDmStore({ storage: memoryNodeStorage() })
   const v0 = s.version()
   await s.unlock(new Uint8Array(32).fill(3))
+  await s.loaded()
   const v1 = s.version()
   t.ok(v1 > v0, 'load bumps')
   t.is(s.ops().length, 0)
@@ -254,6 +261,7 @@ test('store: version moves on load, append and lock; ops is shared and frozen pe
   t.exception(() => s.ops(), /bloqueada/)
   t.exception(() => s.seenToken('x'), /bloqueada/)
   await s.unlock(new Uint8Array(32).fill(4))
+  await s.loaded()
   t.not(s.seenToken('x'), token, 'tokens follow the key')
   t.is(s.ops().length, 0, 'another key reads none of the old rows')
   await s.close()

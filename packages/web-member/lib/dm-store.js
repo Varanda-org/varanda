@@ -54,10 +54,10 @@
 // local key (SUMMARY_KEY_DOMAIN) of { v: 1, core, length, follows, seen,
 // inbox, requests }: the first dm.list pages of both folders as the last
 // fold gave them, with the core key and length and the digests of the kv
-// follows and seen texts that fold read. keyStage() settles once unlock()
-// installed the key and read the summary; the rows load after it (loaded(),
-// what unlock() returns), so a first page can answer before every row is
-// opened. The summary is used
+// follows and seen texts that fold read. unlock() (and keyStage()) settles
+// once the key is installed and the summary read; the rows load after it
+// (loaded()), so a first page can answer before every row is opened. The
+// summary is used
 // only while it opens under this key, names this core and its length and
 // the digests are the current ones (summaryFor); anything else is ignored.
 //
@@ -335,7 +335,9 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
 
   // localKey: 32 bytes, copied. A stored core of another key (another
   // identity, or a reset elsewhere) cannot be read with this key and is
-  // replaced by an empty one.
+  // replaced by an empty one. -> the key stage (keyStage()): settles once
+  // the key is installed and the summary read, rejects when that failed.
+  // The rows keep loading after it; whatever needs them awaits loaded().
   function unlock (localKey) {
     if (!(localKey instanceof Uint8Array) || localKey.byteLength !== 32) throw new TypeError('chave inválida')
     const copy = new Uint8Array(32)
@@ -378,7 +380,7 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
     loading = Promise.all([keyed, rowsLoaded]).then(() => {})
     keying.catch(() => {})
     loading.catch(() => {})
-    return loading
+    return keying
   }
 
   // Runs inside serial(), the key installed: the core's length (-1 for a
