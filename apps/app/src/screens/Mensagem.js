@@ -1628,7 +1628,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         // so a second Enter after "Apagar conversa" never deletes by accident.
         actions={[
           { icon: 'fechar', label: 'Cancelar', onPress: () => {} },
-          { icon: 'lixeira', label: 'Apagar', danger: true, description: 'Só neste aparelho. A outra pessoa continua com a cópia dela.', pending: act.pending, onPress: () => decide('deleted') }
+          { icon: 'lixeira', label: 'Apagar', danger: true, description: 'A conversa sai dos seus aparelhos. As fotos saem da memória deles na hora e o texto 15 dias depois, na próxima vez que o app abrir. A outra pessoa continua com a cópia dela.', pending: act.pending, onPress: () => decide('deleted') }
         ]}
       />
     </KeyboardAvoidingView>
