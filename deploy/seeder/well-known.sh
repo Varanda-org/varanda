@@ -137,11 +137,14 @@ versao_web() {
 # página aparece, tudo o que ela carrega (o bundle com hash, a cópia do nó da
 # versão) já está lá. Na ordem do diretório, uma página podia chegar antes do
 # próprio nó e mostrar o erro de conexão. $3 é a opção do cp: -R por padrão;
-# a volta passa -a, para manter dono, modo e data da cópia guardada. Um
-# sw.js ou index.html ausente fica ausente, como numa cópia da pasta inteira.
-# Qualquer cópia que falhe retorna 1.
+# a volta passa -a, para que cada arquivo e pasta dentro de www mantenha dono,
+# modo e data da cópia guardada (a própria pasta www não muda). Um sw.js ou
+# index.html ausente fica ausente, como numa cópia da pasta inteira; uma
+# origem vazia não copia nada, e uma origem que não é pasta retorna 1, sem
+# tocar no destino. Qualquer cópia que falhe retorna 1.
 copiar_app() {
   local dist=$1 destino=$2 opcao=${3:--R} p f
+  [ -d "$dist" ] || return 1
   (
     shopt -s dotglob nullglob
     for p in "$dist"/*; do

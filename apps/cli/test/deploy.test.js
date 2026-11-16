@@ -1045,6 +1045,12 @@ test('well-known.sh: copiar_app copies index.html last and versao_web reads the 
   const none = sh('copiar_app ' + JSON.stringify(empty) + ' ' + JSON.stringify(www) + ' -a\n')
   t.is(none.status, 0, 'an empty source copies: ' + none.stderr)
   t.alike(fs.readdirSync(www), [], 'nothing')
+  // A missing source (a saved www that is gone) fails, like the cp of the
+  // folder it replaces, and leaves the destination as it was.
+  fs.writeFileSync(path.join(www, 'keep'), 'kept')
+  const gone = sh('copiar_app ' + JSON.stringify(path.join(dir, 'absent')) + ' ' + JSON.stringify(www) + ' -a\n')
+  t.not(gone.status, 0, 'a missing source fails copiar_app')
+  t.alike(fs.readdirSync(www), ['keep'], 'and leaves the destination untouched')
 
   const read = (file) => sh('versao_web ' + JSON.stringify(file) + '\n')
   const marked = read(path.join(dist, 'index.html'))
