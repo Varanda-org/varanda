@@ -25,7 +25,7 @@ test('Publicar claims a share before reading its files and lets go only while mo
   const src = read('src/screens/Publicar.js')
   t.ok(/!frozen && !busy && !moment\.pending\)\) return\s*appliedShareRef\.current = shared\.id\s*onSharedTaken\(shared\.id\)/.test(src), 'taken is sent first, and never during a Momento upload')
   t.ok(/\[open, shared && shared\.id, frozen, busy, moment\.pending\]/.test(src), 'the effect runs again when the Momento upload ends')
-  t.ok(/if \(mountedRef\.current\) onSharedDone\(shared\.id\)/.test(src), 'done after unmount would drop files the remount needs')
+  t.ok(/const done = \(failed\) => \{\s*if \(!mountedRef\.current\) return[\s\S]{0,200}?const next = holdShare\(shared\.id, failed\.filter\(\(id\) => sourcesRef\.current\.has\(id\)\)\)\s*if \(next\.done !== null\) \{\s*onSharedDone\(shared\.id\)/.test(src), 'done after unmount would drop files the remount needs, and only photos still kept for a retry hold the share')
   t.ok(/addFiles\(shared\.files,/.test(src), 'shared photos take the picker encode path')
   t.is((src.match(/failed: shared\.failed \|\| 0/g) || []).length, 2, 'both notes count the photos that could not be opened')
 })
@@ -34,7 +34,7 @@ test('Publicar builds no preview for a shared link until the person asks or edit
   const src = read('src/screens/Publicar.js')
   t.ok(src.includes('const shareLinkHeld = linkHeld(linkHold, text)'), 'the hold is read from the pure helper')
   t.ok(/useLinkDraft\(\{ text, enabled: open === true && asPage === null && !shareLinkHeld[ ,]/.test(src), 'a held link never builds')
-  t.ok(src.includes('setLinkHold((hold) => sharedLinkHold(text, merged.text, hold))'), 'applying a share sets the hold, keeping one still in place')
+  t.ok(src.includes('setLinkHold((hold) => sharedLinkHold(current, merged.text, hold))'), 'applying a share sets the hold, keeping one still in place')
   t.ok(/if \(linkHold !== null && linkHold !== text\) setLinkHold\(null\)/.test(src), 'an edit releases it')
   t.ok(/onPress=\{\(\) => setLinkHold\(null\)\}[\s\S]{0,200}Mostrar prévia do link/.test(src), 'the tap releases it')
 })
@@ -47,4 +47,39 @@ test('the shell holds a share off the deleted-account screen and wires taken', (
   t.ok(app.includes('ownKey: shareOwner,\n    gone: passkey !== null && pkStatus !== null && shareOwner === null,'), 'Sair or Recomeçar marks the account as gone')
   t.ok(app.includes('onSharedTaken={(id) => share.taken(id)}'), 'Publicar can claim the share')
   t.ok(app.includes('onSharedDone={(id) => share.done(id)}'), 'Publicar can let it go')
+  t.ok(app.includes('onSharedLoaded={(id) => share.loaded(id)}'), 'Publicar can keep it for a retry')
+  t.ok(app.includes('onSharedFree={(id) => share.free(id)}'), 'and free it later')
+})
+
+// A shared photo that failed to open keeps its file for 'tentar de novo'
+// without blocking the next share, and is freed once nothing needs it.
+test('Publicar keeps a share for a retry and frees it once nothing needs it', (t) => {
+  const src = read('src/screens/Publicar.js')
+  t.ok(/holdRef\.current = next\.hold\s*onSharedLoaded\(shared\.id\)/.test(src), 'a failed photo keeps the share, and the shell lets go of it')
+  t.ok(/addFiles\(shared\.files, [\s\S]{0,400}?\.then\(done, \(\) => done\(\[\]\)\)/.test(src), 'a failed load still lets the share go')
+  t.ok(/const removeItems = \(ids\) => \{[\s\S]*?sourcesRef\.current\.delete\(id\)[\s\S]*?settleShare\(Array\.from\(gone\)\)\s*\}/.test(src), 'removing, publishing or discarding a photo settles the hold')
+  t.ok(/sourcesRef\.current\.delete\(id\)\s*readyItem\(id, encoded\)\s*settleShare\(\[id\]\)/.test(src), 'a retry that opens settles it')
+  t.ok(/if \(!again\) \{\s*sourcesRef\.current\.delete\(id\)\s*settleShare\(\[id\]\)/.test(src), 'a retry that fails for good settles it')
+  t.ok(/if \(holdRef\.current !== null\) freeRef\.current\(holdRef\.current\.id\)\s*holdRef\.current = null\s*\}, \[\]\)/.test(src), 'unmounting (a lock) frees it')
+  t.ok(/if \(holdRef\.current !== null\) \{\s*const old = holdRef\.current[\s\S]*?freeRef\.current\(old\.id\)/.test(src), 'a newer share frees the older one')
+  t.ok(/if \(source === undefined \|\| !liveRef\.current\.has\(id\) \|\| held \|\| encodingAny\) return/.test(src), 'one decode at a time, never while sending')
+  t.ok(/if \(Date\.now\(\) > source\.until\) \{\s*sourcesRef\.current\.delete\(id\)\s*settleShare\(\[id\]\)\s*patch\(id, \{ error: EXPIRED_TEXT, reencode: false \}\)/.test(src), 'past the share expiry the retry ends, since the sweep took the file')
+  t.ok(/\}\)\), shared\.at \+ SHARE_TTL_MS\)\.then\(done/.test(src), 'a shared photo expires with its share')
+  t.ok(/const again = retryableEncode\(error\) && sourcesRef\.current\.has\(id\)/.test(src), 'a retry that ends after a newer share replaced its files offers no other')
+})
+
+test('Publicar keeps the plain post text across a web share reload, for the same account', (t) => {
+  const src = read('src/screens/Publicar.js')
+  t.ok(src.includes("import { dropDraft, takeDraft, watchDraft } from '../draftKeep'"))
+  t.ok(src.includes("keptTextRef.current = !replyProp && !quote && asPage === null ? text : ''"), 'never a reply, a quote or a page post')
+  t.ok(/const kept = takeDraft\(keepOwner\)/.test(src), 'read for this account only')
+  t.ok(/return \(\) => \{\s*stop\(\)\s*dropDraft\(\)\s*\}\s*\}, \[keepOwner\]\)/.test(src), 'a lock or an account change drops it')
+  t.ok(src.indexOf('const kept = takeDraft(keepOwner)') < src.indexOf('const merged = mergeDraft(current, shared.text, MAX_TEXT)'), 'restored before a share in the same commit merges into it')
+  t.ok(/const current = textRef\.current\s*const merged = mergeDraft\(current, shared\.text, MAX_TEXT\)/.test(src), 'the share merges into the restored text')
+})
+
+test('the hook tells once, when the app is ready, that a web share did not fit', (t) => {
+  const hook = read('src/useSharedIntent.js')
+  t.ok(/if \(shareIntake\.takeLost\(\)\) lostRef\.current = true/.test(hook), 'the marker is read on mount')
+  t.ok(/if \(gone === true\) \{\s*lostRef\.current = false\s*return\s*\}\s*if \(ready !== true \|\| locked === true\) return\s*lostRef\.current = false\s*latest\.current\.onToast\(LOST_TEXT\)\s*\}, \[ready, locked, gone\]\)/.test(hook), 'the toast waits for an unlocked, ready app, and never reaches the next account')
 })

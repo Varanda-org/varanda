@@ -62,7 +62,7 @@ function store (entries, id = ID, fields = {}) {
 test('web intake imports without caches and listen stays quiet', async (t) => {
   replaceGlobal(t, 'caches', undefined)
   const web = await load()
-  t.alike(Object.keys(web).sort(), ['clear', 'listen', 'peek', 'release', 'sweep'])
+  t.alike(Object.keys(web).sort(), ['clear', 'listen', 'peek', 'release', 'sweep', 'takeLost'])
   t.is(await web.peek(), null)
   t.is(await web.clear(), undefined)
   t.is(await web.release(ID), undefined)
@@ -481,4 +481,68 @@ test('web intake contains cache failures and continues after a failed deletion',
   t.is(got.id, ID)
   t.is(got.files.length, 1)
   t.is(await got.files[0]?.text(), 'photo')
+})
+
+function fakeAddress (t, url) {
+  const u = new URL(url)
+  const location = { pathname: u.pathname, search: u.search, hash: u.hash }
+  const replaced = []
+  const state = { tab: 1 }
+  replaceGlobal(t, 'location', location)
+  replaceGlobal(t, 'history', {
+    state,
+    replaceState (s, title, next) {
+      replaced.push({ s, next })
+      const n = new URL(next, ORIGIN)
+      location.pathname = n.pathname
+      location.search = n.search
+      location.hash = n.hash
+    }
+  })
+  return { replaced, state, location }
+}
+
+test('web intake takeLost reads the worker marker once and strips it from the address', async (t) => {
+  const { takeLost } = await load()
+  // The address scripts/sw.js SHARE_LOST sends the page to.
+  const { replaced, state } = fakeAddress(t, ORIGIN + '/?compartilhamento=nao-coube')
+  t.is(takeLost(), true, 'lost')
+  t.alike(replaced, [{ s: state, next: '/' }], 'the address goes back to /, history state kept')
+  t.is(takeLost(), false, 'only once')
+  t.is(replaced.length, 1, 'no second rewrite')
+})
+
+test('web intake takeLost keeps the other fields and the hash', async (t) => {
+  const { takeLost } = await load()
+  const { replaced } = fakeAddress(t, ORIGIN + '/x?aviso=1&compartilhamento=nao-coube&b=2#topo')
+  t.is(takeLost(), true)
+  t.alike(replaced.map((r) => r.next), ['/x?aviso=1&b=2#topo'])
+})
+
+test('web intake takeLost ignores other addresses and strips a wrong value without a notice', async (t) => {
+  const { takeLost } = await load()
+  const plain = fakeAddress(t, ORIGIN + '/?aviso=1')
+  t.is(takeLost(), false, 'no marker')
+  t.alike(plain.replaced, [], 'the address is left alone')
+
+  const wrong = fakeAddress(t, ORIGIN + '/?compartilhamento=outro')
+  t.is(takeLost(), false, 'another value is not a lost share')
+  t.alike(wrong.replaced.map((r) => r.next), ['/'], 'but it leaves the address')
+
+  const bare = fakeAddress(t, ORIGIN + '/?compartilhamento')
+  t.is(takeLost(), false)
+  t.alike(bare.replaced.map((r) => r.next), ['/'])
+
+  const empty = fakeAddress(t, ORIGIN + '/')
+  t.is(takeLost(), false)
+  t.alike(empty.replaced, [])
+})
+
+test('web intake takeLost never throws', async (t) => {
+  const { takeLost } = await load()
+  replaceGlobal(t, 'location', undefined)
+  t.is(takeLost(), false, 'no location')
+  replaceGlobal(t, 'location', { pathname: '/', search: '?compartilhamento=nao-coube', hash: '' })
+  replaceGlobal(t, 'history', { state: null, replaceState () { throw new Error('SecurityError') } })
+  t.is(takeLost(), false, 'a refused rewrite reads as no notice')
 })

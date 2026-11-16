@@ -433,12 +433,18 @@ async function storeShare (share, files) {
   }
 }
 
+// Read and stripped by src/shareIntake.web.js takeLost.
+const SHARE_LOST = '/?compartilhamento=nao-coube'
+
 // The answer is always the redirect, also on a malformed or failed share:
-// the person lands in the app either way, never on a browser error page.
+// the person lands in the app either way, never on a browser error page. A
+// share that could not be stored (usually out of quota) lands on SHARE_LOST,
+// so the app says so instead of opening as if nothing was shared.
 async function takeShare (request) {
   // Taken on arrival, before the body is parsed: arrival order decides which
   // share is the newest.
   const at = Date.now()
+  let lost = false
   try {
     const form = await request.formData()
     const title = shareText(form, 'title')
@@ -459,10 +465,14 @@ async function takeShare (request) {
       const share = { v: 1, id, at, title, text, url, total, files: kept.map((k, n) => ({ n, mime: k.mime })) }
       const files = kept.map((k) => k.file)
       shareWrite = shareWrite.catch(() => {}).then(() => storeShare(share, files))
-      await shareWrite
+      try {
+        await shareWrite
+      } catch {
+        lost = true
+      }
     }
   } catch {}
-  return Response.redirect(abs('/'), 303)
+  return Response.redirect(abs(lost ? SHARE_LOST : '/'), 303)
 }
 
 self.addEventListener('install', (event) => {
