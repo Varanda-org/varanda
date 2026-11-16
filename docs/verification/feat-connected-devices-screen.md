@@ -43,6 +43,11 @@ Ordem: Android (build de debug), simulador iOS, depois web e PWA. Registrar apar
 - [ ] "Aparelhos anteriores" aparece só quando há aparelhos de antes da lista, com a explicação, e "Desconectar" (no plural, na folha e na confirmação) funciona. Pendente.
 - [ ] iPad com Safari: o nome sai como "Safari no iPad". Texto grande, tema claro e escuro, largura de celular e alvos de 44 pt. Pendente.
 
+- [ ] Desconexão que parou no meio: a folha continua aberta com "A desconexão ficou incompleta. Toque em Desconectar para tentar de novo." e o botão "Desconectar" segue ativo. Nada é reenviado sozinho. Pendente.
+- [ ] Desconectar um aparelho cujos grupos ainda não tinham nada dele neste celular: o aviso termina com "Alguns grupos ainda não tinham nada desse aparelho aqui." Sem isso (`empty` zero), só "Aparelho desconectado." Pendente.
+- [ ] Num aparelho desconectado, tocar em entrar num grupo ou comunidade mostra "Este aparelho foi desconectado da conta. Toque em Conectar de novo para continuar." junto do aviso fixo com "Conectar de novo". O app não repete a entrada sozinho. Pendente.
+- [ ] Depois de entrar com a passkey (não de uma sessão guardada), "Conectar de novo" funciona. Numa sessão guardada o nó recusa com "para conectar de novo, entre com a passkey" e o app trava pedindo a passkey. Pendente.
+
 ## Não verificado / limites conhecidos
 
 - Depende do PR do nó (`feat/connected-devices`) e do PR do corte no diário (`feat/diary-writer-cut`): sem eles a entrada fica escondida. O evento `devices.changed` ainda precisa estar na lista de eventos do `@varanda/rpc` (vem no PR do nó).
@@ -51,3 +56,4 @@ Ordem: Android (build de debug), simulador iOS, depois web e PWA. Registrar apar
 - O travamento usa o `signOut` da passkey (esquece a sessão guardada). Não há um caminho só de esquecer a sessão: o `signOut` também limpa o compartilhamento pendente e as marcas de momentos vistos deste aparelho ("os dados locais ficam" vale para o diário e as cópias). Ele não desliga as notificações do aparelho, como o "Sair" de Ajustes faz.
 - Não há leitura depois da primeira sincronização: o primeiro fim de sincronização costuma ser o `preempted` causado pela escrita do próprio hello, então não é um sinal de que o diário alcançou. Fica o `devices.changed` e a leitura quando a conta volta.
 - Os Termos e a Privacidade ainda não falam desta lista: a versão sobe na hora do merge.
+- O worklet passa `fresh: !resumed` para `session.setKeyPair` (a sessão do navegador da ramificação do nó lê `fresh`; em `main` a opção extra é ignorada). `identity.install` já leva `resumed`, então `packages/rpc/lib/methods.js` não precisa de campo novo. O único caminho que instala a chave no nó do app é esse worklet.

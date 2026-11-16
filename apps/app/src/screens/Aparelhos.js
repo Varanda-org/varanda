@@ -16,7 +16,7 @@ import { useNode } from '../node'
 import {
   CONFIRM_CANCEL, CONNECTED_SECTION, DEVICES_NOTE, DISCONNECT, DISCONNECTED_SECTION, EMPTY_OTHERS, LOAD_FAILED, NO_NAME, OFF_NOTE,
   PARTLY_DONE, PREVIOUS_NOTE, PREVIOUS_TITLE, RECONNECT, RECONNECT_ACCESSIBILITY, THIS_DEVICE,
-  confirmCopy, deviceStore, disconnectLabel, disconnectParams, otherLabel, readDevices, reconnectDevice, reconnectFailure, rowCaption, shapeList
+  confirmCopy, deviceStore, disconnectDone, disconnectLabel, disconnectParams, otherLabel, readDevices, reconnectDevice, reconnectFailure, rowCaption, shapeList
 } from '../devices'
 import { currentDeviceName, useDeviceState } from '../useDevices'
 import { Btn, ConfirmStack, ErrorText, FlushSectionHeader, Notice, Page, Soft, errorText, useAction } from '../ui'
@@ -119,7 +119,7 @@ export default function Aparelhos ({ active }) {
     const r = await act.run(() => requestRef.current('device.disconnect', disconnectParams(which)))
     if (r.ok) {
       setTarget(null)
-      setDone(confirmCopy(which).done)
+      setDone(disconnectDone(which, r.value))
       load()
     } else if (r.uncertain) {
       setTarget(null)

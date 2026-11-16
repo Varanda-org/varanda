@@ -190,7 +190,7 @@ function createIdentityHost ({ session, storage, hkdf, randomBytes, keys = passk
       // setKeyPair copies both pairs and the PRF synchronously: the local
       // copies are zeroed below. Without the PRF the direct message store
       // and the private group box keys stay locked.
-      const setting = session.setKeyPair(kp, { media, prf })
+      const setting = session.setKeyPair(kp, { media, prf, fresh: !fromSession })
       zeroPair(kp)
       zeroPair(media)
       installed = true

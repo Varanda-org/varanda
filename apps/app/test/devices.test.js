@@ -1,6 +1,7 @@
 import test from 'brittle'
+import { readFileSync } from 'node:fs'
 import {
-  CONFIRM_LINES, DISCONNECTED_CAPTION, NAME_MAX, NO_NAME, RECONNECT_UNCERTAIN, UNNAMED_SELF, confirmCopy, createDeviceStore,
+  CONFIRM_LINES, DISCONNECTED_CAPTION, EMPTY_CUTS_NOTE, INCOMPLETE_MESSAGE, INCOMPLETE_PLAIN, OFF_MESSAGE, OFF_REFUSED_PLAIN, disconnectDone, NAME_MAX, NO_NAME, RECONNECT_UNCERTAIN, UNNAMED_SELF, confirmCopy, createDeviceStore,
   deviceMemberOf, deviceName, deviceStep, notePasskeyUnlock, devicesRowShown, disconnectLabel, disconnectParams, helloDue, otherLabel, readDevices, reconnectDevice,
   reconnectFailure, rowCaption, sendHello, shapeList, shouldForceLock, sinceDate, sinceText, unknownMethod, visibleDevices
 } from '../src/devices.js'
@@ -354,4 +355,32 @@ test('deviceName: iPadOS reports a Mac user agent, touch points tell it apart', 
   t.is(deviceName({ userAgent: mac, maxTouchPoints: 5 }), 'Safari no iPad')
   t.is(deviceName({ userAgent: mac, maxTouchPoints: 0 }), 'Safari no Mac')
   t.is(deviceName({ userAgent: mac }), 'Safari no Mac')
+})
+
+test('disconnectDone: plain done text, plus a note only when some groups were empty', (t) => {
+  t.is(disconnectDone(B, { cut: 3, empty: 0 }), 'Aparelho desconectado.')
+  t.is(disconnectDone(B, { cut: 3 }), 'Aparelho desconectado.')
+  t.is(disconnectDone(B, undefined), 'Aparelho desconectado.')
+  t.is(disconnectDone(B, { cut: 3, empty: 2 }), 'Aparelho desconectado. ' + EMPTY_CUTS_NOTE)
+  t.is(disconnectDone('previous', { cut: 1, empty: 1 }), 'Aparelhos desconectados. ' + EMPTY_CUTS_NOTE)
+  t.absent(EMPTY_CUTS_NOTE.includes(String.fromCharCode(0x2014)))
+})
+
+test('node refusals: incomplete disconnect and a disconnected device get plain words', (t) => {
+  const ui = readFileSync(new URL('../src/ui/index.js', import.meta.url), 'utf8')
+  t.is(INCOMPLETE_MESSAGE, 'a desconexão ficou incompleta: tente de novo')
+  t.is(OFF_MESSAGE, 'este aparelho foi desconectado da conta')
+  t.ok(ui.includes('[INCOMPLETE_MESSAGE]: INCOMPLETE_PLAIN'), 'ui PLAIN maps the incomplete text')
+  t.ok(ui.includes('[OFF_MESSAGE]: OFF_REFUSED_PLAIN'), 'ui PLAIN maps the off refusal')
+  t.ok(INCOMPLETE_PLAIN.includes('Desconectar'), 'points at the button that stays available')
+  t.ok(OFF_REFUSED_PLAIN.includes('Conectar de novo'))
+  const screen = readFileSync(new URL('../src/screens/Aparelhos.js', import.meta.url), 'utf8')
+  t.ok(screen.includes('} else if (r.uncertain) {'), 'only an uncertain outcome closes the sheet as partly done')
+  t.absent(/device\.disconnect[^\n]*(retry|setTimeout)/.test(screen), 'no automatic resend')
+})
+
+test('identity install tells the session whether a passkey ceremony ran in this open', (t) => {
+  const src = readFileSync(new URL('../worklet/identity-install.js', import.meta.url), 'utf8')
+  t.ok(src.includes('session.setKeyPair(kp, { media, prf, fresh: !fromSession })'))
+  t.ok(src.includes('const fromSession = resumed === true'))
 })

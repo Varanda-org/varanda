@@ -38,6 +38,14 @@ export const RECONNECT_UNCERTAIN = 'Pode não ter dado certo. Veja se este apare
 export const CONFIRM_CANCEL = 'Cancelar'
 export const DONE_TOAST = 'Aparelho desconectado.'
 export const PARTLY_DONE = 'Pode ter sido feito só em parte. Confira a lista.'
+// The node's exact refusals (docs/rpc.md): a disconnect that stopped part
+// way (USAGE, never uncertain, so the person may tap again), and a join or
+// write from a device that was disconnected from the account.
+export const INCOMPLETE_MESSAGE = 'a desconexão ficou incompleta: tente de novo'
+export const INCOMPLETE_PLAIN = 'A desconexão ficou incompleta. Toque em Desconectar para tentar de novo.'
+export const OFF_MESSAGE = 'este aparelho foi desconectado da conta'
+export const OFF_REFUSED_PLAIN = 'Este aparelho foi desconectado da conta. Toque em Conectar de novo para continuar.'
+export const EMPTY_CUTS_NOTE = 'Alguns grupos ainda não tinham nada desse aparelho aqui.'
 export const OFF_NOTE = 'Este aparelho foi desconectado da conta'
 export const RECONNECT = 'Conectar de novo'
 export const RECONNECT_ACCESSIBILITY = 'Conectar este aparelho de novo à conta'
@@ -192,6 +200,15 @@ export function confirmCopy (target) {
   return target === 'previous'
     ? { title: PREVIOUS_CONFIRM_TITLE, lines: PREVIOUS_CONFIRM_LINES, done: PREVIOUS_DONE_TOAST }
     : { title: CONFIRM_TITLE, lines: CONFIRM_LINES, done: DONE_TOAST }
+}
+
+// The toast after device.disconnect answered { cut, empty }: the plain done
+// text, plus a short sentence when some groups had nothing from that device
+// on this phone yet (their cut could not be placed here).
+export function disconnectDone (target, result) {
+  const done = confirmCopy(target).done
+  const empty = result !== null && typeof result === 'object' ? result.empty : 0
+  return Number.isInteger(empty) && empty > 0 ? done + ' ' + EMPTY_CUTS_NOTE : done
 }
 
 // The member the device feature works for: the unlocked passkey key (lower
