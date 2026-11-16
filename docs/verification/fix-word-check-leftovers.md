@@ -25,10 +25,10 @@ Como verificar, a partir da raiz:
 - `node apps/app/test/wordCheck.test.js`, `node apps/app/test/pages.test.js`, `node apps/cli/test/page-cli.test.js`, `node apps/app/test/legal.test.js`, `node apps/site/test/legal.test.js`, `node packages/core/test/terms.test.js`.
 - `npm run lint`, `npm test -- --affected=origin/main` e `npm run demo`.
 
-Caminhada no build de debug (Android 5556, simulador iOS iPhone 17 Pro e web em `http://localhost:8102/`), sem conta:
+Caminhada no build de debug com a vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`, Metro na 8102), sem conta, em 16/11/2026:
 
-- [ ] O app abre e mostra os Termos na versão 65, com a frase sobre o serviço de conta no parágrafo de conduta e o parágrafo novo em Páginas na Política.
-- [ ] A conferência no aparelho continua: no rascunho de Publicar (ou onde a tela for alcançável sem conta), um termo da lista mostra a recusa.
+- [x] Ajustes › Termos e privacidade mostra a versão 65 no Android (emulador 5556), no simulador iOS (iPhone 17 Pro) e na web. A frase sobre o serviço de conta no parágrafo de conduta foi lida no Android e na web, e o parágrafo novo de Páginas na Política, na web.
+- [x] A conferência no aparelho continua com a lista vinda de `@varanda/rpc`: em Publicar, um termo da lista mostra "Não dá para publicar: ... é um termo que o Varanda não permite em conteúdo público" no Android e no iOS. Na web, a mesma tela e o mesmo módulo; a recusa ficou com `apps/app/test/wordCheck.test.js`.
 
 Fica para a instalação da associação, com conta (o build de debug não entra com passkey numa instalação de produção; veja a issue #224):
 
