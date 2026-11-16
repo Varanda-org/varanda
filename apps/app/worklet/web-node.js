@@ -178,7 +178,7 @@ function createWebNode (args, { onInternalError } = {}) {
   // are drained after the session closed (it cancels their sync).
   const controls = {
     'identity.install': (params) => identity.install(params),
-    'identity.clear': () => afterLock(() => identity.clear()),
+    'identity.clear': (params) => afterLock(() => identity.clear(params)),
     'identity.status': () => identity.status(),
     'identity.reset': () => afterLock(() => identity.reset()),
     'identity.forget': () => afterLock(() => identity.forget()),
