@@ -78,6 +78,7 @@ import { PageNoticeSheet } from './src/ui/PageNoticeSheet'
 import { PostShareSheet } from './src/ui/PostShareSheet'
 import { PostPublicProvider } from './src/postPublicContext'
 import { SavedProvider, forgetSavedFor } from './src/savedProvider'
+import { forgetReminderKey } from './src/eventRemindersStore'
 import { POST_OPEN_WAIT_MS, capturePostPath, postAccount, postLink, postOpeningGate, postOpeningWait, postRef, postWaitDelay } from './src/postLink'
 import { clearPostLink, savePostLink, takePostLink } from './src/postLinkStore'
 import { fetchMember } from './src/indexClient'
@@ -187,6 +188,7 @@ import AssuntoScreen from './src/screens/Assunto'
 import RecadosScreen from './src/screens/Recados'
 import DepoimentosScreen, { testimonialsChanged } from './src/screens/Depoimentos'
 import SalvosScreen from './src/screens/Salvos'
+import EventosScreen from './src/screens/Eventos'
 import MomentosScreen from './src/screens/Momentos'
 import FeiraScreen from './src/screens/Feira'
 import AnuncioScreen from './src/screens/Anuncio'
@@ -241,6 +243,7 @@ const Momentos = memo(MomentosScreen)
 const Salvos = memo(SalvosScreen)
 const Assunto = memo(AssuntoScreen)
 const Recados = memo(RecadosScreen)
+const Eventos = memo(EventosScreen)
 const Mensagens = memo(MensagensScreen)
 const Mensagem = memo(MensagemScreen)
 const Anuncio = memo(AnuncioScreen)
@@ -1436,6 +1439,8 @@ function Member () {
     if (typeof m !== 'string') return
     // The account left this device: so does its list of saved posts.
     forgetSavedFor(m)
+    // And the event reminders it set (fire and forget).
+    try { Promise.resolve(forgetReminderKey(m)).catch(() => {}) } catch {}
     for (const key of [...termsSync.current.keys()]) {
       if (key.startsWith(m + '#')) termsSync.current.delete(key)
     }
@@ -2098,6 +2103,14 @@ function Member () {
   const openRecados = useCallback((key) => {
     if (typeof key !== 'string') return
     pushScreen({ screen: 'recados', key: key.toLowerCase(), params: {} })
+  }, [pushScreen])
+  const openEventos = useCallback((key) => {
+    if (typeof key !== 'string') return
+    pushScreen({ screen: 'eventos', key: key.toLowerCase(), params: {} })
+  }, [pushScreen])
+  const openAgenda = useCallback((community, groups, truncated) => {
+    if (typeof community !== 'string' || !Array.isArray(groups)) return
+    pushScreen({ screen: 'eventos', key: community.toLowerCase(), params: truncated === true ? { groups, truncated: true } : { groups } })
   }, [pushScreen])
   const openTestimonials = useCallback((key) => {
     if (typeof key !== 'string') return
@@ -3567,6 +3580,8 @@ function Member () {
       handleOpenPageSettings: pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? (key) => pushScreen({ screen: 'paginaajustes', key }) : undefined,
       handleOpenListings: node.hosted === true ? (author) => pushScreen({ screen: 'anuncios', key: author }) : undefined,
       handleOpenRecados: node.hosted === true ? openRecados : undefined,
+      handleOpenEventos: node.hosted === true ? openEventos : undefined,
+      handleOpenAgenda: node.hosted === true ? openAgenda : undefined,
       handleOpenTop: node.hosted === true ? openTop : undefined,
       handleComposeSeen: () => setComposeSignal(null),
       handleOpenInvite: (link) => link.kind === 'grupo' ? openGroup(link.key) : openCommunity(link.key),
@@ -3593,6 +3608,7 @@ function Member () {
       onOpenPeople: openPeople,
       onOpenTestimonials: openTestimonials,
       onOpenRecados: h.handleOpenRecados,
+      onOpenEventos: h.handleOpenEventos,
       onOpenListings: h.handleOpenListings
     }
     // Pushed screens, plus the one sliding out after a pop under its old index
@@ -3608,7 +3624,7 @@ function Member () {
               ? <Grupo group={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenCommunity={openCommunity} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onSeen={bumpSeen} onMessage={openMessage} onOpenTopic={openTopic} />
               : entry.screen === 'comunidade-info'
                 ? <ComunidadeInfo community={entry.key} onBack={goBack} onOpenMember={openMember} onMessage={openMessage} />
-                : <Comunidade community={entry.key} afterGroup={entry.params.group || null} isTop={i === stack.length - 1} seenTick={seenTick} onBack={goBack} onOpenGroup={openGroup} onOpenInfo={openCommunityInfo} />}
+                : <Comunidade community={entry.key} afterGroup={entry.params.group || null} isTop={i === stack.length - 1} seenTick={seenTick} onBack={goBack} onOpenGroup={openGroup} onOpenInfo={openCommunityInfo} onOpenAgenda={h.handleOpenAgenda} />}
           </StackLayer>
         )
       }
@@ -3651,6 +3667,13 @@ function Member () {
         return (
           <StackLayer key={i + ':recados:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
             <Recados entry={entry} ownKey={ownKey} onBack={goBack} onOpenMember={openMember} onReport={setReport} onToast={h.handleShowToast} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'eventos') {
+        return (
+          <StackLayer key={i + ':eventos:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Eventos entry={entry} onBack={goBack} onOpenThread={openThread} onToast={h.handleShowToast} />
           </StackLayer>
         )
       }
@@ -4040,6 +4063,7 @@ function Member () {
                       onOpenMomentos={openMomentos}
                       onOpenSalvos={openSalvos}
                       onOpenRecados={h.handleOpenRecados}
+                      onOpenEventos={h.handleOpenEventos}
                       onOpenTop={h.handleOpenTop}
                     />
                   )}

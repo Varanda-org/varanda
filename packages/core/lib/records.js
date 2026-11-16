@@ -14,7 +14,7 @@
 
 const b4a = require('b4a')
 const { validLinkCard, validCardImageBytes, copyLinkCard, CARD_IMAGE_MIME } = require('./link-card')
-const { feira, isMomentMusic, MOMENT_MUSIC_KEYS, MAX_TOP_FRIENDS, profileExtra: PX, isPoll, isPick, POLL_MIN, POLL_MAX, MAX_POLL_OPTION } = require('@varanda/rpc')
+const { feira, isMomentMusic, MOMENT_MUSIC_KEYS, MAX_TOP_FRIENDS, profileExtra: PX, isPoll, isPick, POLL_MIN, POLL_MAX, MAX_POLL_OPTION, isEvent, event: eventRules } = require('@varanda/rpc')
 
 const MAX_NAME = 80
 const MAX_BIO = 280
@@ -82,6 +82,10 @@ const QUOTE_PREVIEW_KEYS = ['type', 'text', 'at', 'replyTo', 'quote', 'preview']
 // the target is a poll and pick one of its options is the fold's check.
 // Older readers skip both as malformed; the diary stays valid.
 const POST_POLL_KEYS = Object.freeze(['type', 'text', 'at', 'replyTo', 'poll'])
+// Eventos (docs/protocol.md): an event post is a root post whose `event` is
+// { title, start, end, place } (the rules of @varanda/rpc lib/event.js), with
+// no media, preview, quote or poll. Older readers skip it as malformed.
+const POST_EVENT_KEYS = Object.freeze(['type', 'text', 'at', 'replyTo', 'event'])
 const CHOICE_KEYS = Object.freeze(['type', 'to', 'pick', 'at'])
 const ENGAGEMENT_KEYS = ['type', 'to', 'on', 'at']
 const TARGET_KEYS = ['author', 'seq']
@@ -740,6 +744,14 @@ function check (record, seq) {
     if (!isCanonicalIso(at)) return 'date-invalid'
     return replyTo === null ? null : 'reply-invalid'
   }
+  if (hasExactKeys(record, POST_EVENT_KEYS)) {
+    const { text, at, replyTo } = record
+    if (!isEvent(record.event)) return 'event-invalid'
+    if (typeof text !== 'string' || charLength(text) < 1 || charLength(text) > MAX_TEXT) return 'text-length'
+    if (hasControlChars(text, true)) return 'control-chars'
+    if (!isCanonicalIso(at)) return 'date-invalid'
+    return replyTo === null ? null : 'reply-invalid'
+  }
   const withPreview = hasExactKeys(record, POST_PREVIEW_KEYS) || hasExactKeys(record, QUOTE_PREVIEW_KEYS)
   const isQuote = hasExactKeys(record, QUOTE_KEYS) || hasExactKeys(record, QUOTE_MEDIA_KEYS) || hasExactKeys(record, QUOTE_PREVIEW_KEYS)
   const withMedia = hasExactKeys(record, POST_MEDIA_KEYS) || hasExactKeys(record, QUOTE_MEDIA_KEYS)
@@ -820,11 +832,12 @@ function copyTarget (r) {
   return { author: r.author, seq: r.seq }
 }
 
-// `quote`, `media`, `preview` and `poll` are added only when given (a null
-// preview or poll is none). Any two of them together match no key set.
-function postRecord ({ text, replyTo = null, at = nowIso(), media, quote, preview, poll } = {}) {
+// `quote`, `media`, `preview`, `poll` and `event` are added only when given (a
+// null preview, poll or event is none). Any two of them together match no key set.
+function postRecord ({ text, replyTo = null, at = nowIso(), media, quote, preview, poll, event } = {}) {
   const record = { type: 'post', text, at, replyTo }
   if (poll !== undefined && poll !== null) record.poll = Array.isArray(poll) ? poll.slice() : poll
+  if (event !== undefined && event !== null) record.event = eventRules.copyEvent(event)
   if (quote !== undefined) record.quote = copyTarget(quote)
   if (media !== undefined) record.media = Array.isArray(media) ? media.map(copyPostMediaItem) : media
   if (preview !== undefined && preview !== null) record.preview = copyLinkCard(preview, copyDescriptor)
@@ -1159,6 +1172,7 @@ module.exports = {
   TOP_FRIENDS_KEYS,
   MAX_TOP_FRIENDS,
   POST_POLL_KEYS,
+  POST_EVENT_KEYS,
   CHOICE_KEYS,
   POLL_MIN,
   POLL_MAX,

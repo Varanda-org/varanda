@@ -276,7 +276,7 @@ export default function Membro (props) {
   return <PostSheetProvider><MembroList {...props} /></PostSheetProvider>
 }
 
-function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onOpenPageSettings, onOpenPeople, onOpenCommunity, onOpenListings, onOpenTestimonials, onOpenRecados, onToast, onTabChange }) {
+function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onOpenPageSettings, onOpenPeople, onOpenCommunity, onOpenListings, onOpenTestimonials, onOpenRecados, onOpenEventos, onToast, onTabChange }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const node = useNode()
@@ -948,6 +948,15 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
       </PressScale>
       )
     : null
+  const eventosRow = node.hosted === true && !(isPage && lifecycle.moved) && typeof onOpenEventos === 'function'
+    ? (
+      <PressScale accessibilityRole='link' accessibilityLabel='Eventos' onPress={() => onOpenEventos(author)} style={({ pressed }) => [styles.linkRow, pressed && styles.pressed]}>
+        <Icon name='evento' size={20} color={colors.accent} />
+        <Text style={styles.linkText}>Eventos</Text>
+        <Icon name='seta' size={20} color={colors.soft} />
+      </PressScale>
+      )
+    : null
   const ratingsRow = ratingsHosted && !(isPage && lifecycle.moved) && rated && rated.summary.count > 0
     ? (
       <View style={styles.listings}>
@@ -1094,7 +1103,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
         about={extraShown.about ? <AboutCard about={extraShown.about} theme={extraShown.theme} /> : null}
         fan={hostedHere && !own && typeof ownKey === 'string' ? <FanButton author={author} ownKey={ownKey} title={displayText(who.title)} page={isPage} blocked={blockedHere} onToast={typeof onToast === 'function' ? onToast : undefined} /> : null}
         top={hostedHere && !own && topRead.view && (topRead.view.rows.length > 0 || topRead.view.notice) ? <TopFriendsRow rows={topRead.view.rows} notice={topRead.view.notice} onOpen={onOpenMember} loading={topRead.phase === 'loading' && !topRead.view} /> : null}
-        rows={blockedHere ? null : <>{listingsRow}{recadosRow}{ratingsRow}</>}
+        rows={blockedHere ? null : <>{listingsRow}{recadosRow}{eventosRow}{ratingsRow}</>}
         avatar={{ name: who.avatarName, publicKey: author, picture: header.avatar, persist: own || isFollowed }}
         title={displayText(who.title)}
         subtitle={who.subtitle ? displayText(who.subtitle) : null}

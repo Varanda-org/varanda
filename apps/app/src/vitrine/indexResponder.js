@@ -291,9 +291,10 @@ function pollIndex (author, seqText, pickText, cursorText) {
   if (!isKey(author) || !/^[1-9][0-9]{0,14}$/.test(seqText || '')) notFound()
   const seq = Number(seqText)
   const live = liveEntries()
-  const root = live.find((e) => e.author === author && e.seq === seq && e.record.type === 'post' && Array.isArray(e.record.poll))
+  const root = live.find((e) => e.author === author && e.seq === seq && e.record.type === 'post' && (Array.isArray(e.record.poll) || e.record.event))
   if (!root) notFound()
-  const count = root.record.poll.length
+  // An event post is a 2-option poll (going, maybe).
+  const count = Array.isArray(root.record.poll) ? root.record.poll.length : 2
   const picks = new Map()
   for (const e of live.filter((x) => x.record.type === 'choice' && x.record.to.author === author && x.record.to.seq === seq).sort((a, b) => a.seq - b.seq)) {
     const pick = e.record.pick
@@ -367,6 +368,13 @@ export function vitrineIndex (url, request) {
     const seqs = [...new Set([...posts.filter((p) => p.author === key).map((p) => p.seq), ...activeReposts(key, request)])].sort((a, b) => b - a)
     const records = [...fixtures.diaryRecords, ...fixtures.listings, ...fixtures.rates].filter((e) => e.author === key)
     return { ...flags, ...hint(), ...pageHint(key), length: Math.max(2, ...seqs, ...records.map((e) => e.seq)) + 1, posts: seqs.filter((seq) => part === undefined || seq < Number(part)).slice(0, 100), postsTotal: seqs.length }
+  }
+
+  if (route === 'events' && cursor === undefined) {
+    requireProfile(key)
+    if (part !== undefined && !/^[1-9][0-9]*$/.test(part)) notFound()
+    const seqs = posts.filter((p) => p.author === key && p.event).map((p) => p.seq).sort((a, b) => b - a).filter((seq) => part === undefined || seq < Number(part))
+    return { ...flags, posts: seqs.slice(0, 30), next: seqs.length > 30 ? seqs[29] : null, total: seqs.length }
   }
 
   if (route === 'topic' && cursor === undefined) {

@@ -199,6 +199,7 @@ Quatro abas (cinco na versão hospedada) + o botão de publicar + os ajustes. On
 | Perfil | aba Diário › Editar perfil |
 | Publicar | botão de publicar (folha, com a opção Enquete na versão hospedada); responder a partir de qualquer publicação |
 | Tópicos | um grupo público › segmento Tópicos (versão hospedada); abrir um tópico mostra a enquete e as respostas |
+| Eventos | Publicar › Evento (versão hospedada); perfil › aba Eventos; comunidade › Agenda; a faixa de lembrete nas 24 horas antes do início |
 | Curtidas e republicações | número de curtidas ou de republicações na linha da publicação |
 | Sincronizar | Ajustes › Avançado › Sincronização, só leitura |
 | Conexão | Ajustes › Avançado › Conexão (no app nativo, também a tela Conectar da primeira vez) |

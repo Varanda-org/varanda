@@ -2522,6 +2522,74 @@ test('indexPoll and indexPollVoters: totals and voter pages, revote, withdraw, b
   t.is(seeder.indexPoll(O, 1), null, 'a purged author is unknown')
 })
 
+test('indexEvents: event post pointers, cursor, fail closed, held, blocked, deleted and purged; RSVP totals are the poll routes', async (t) => {
+  const { postRecord, choiceRecord } = require('@varanda/core/lib/records')
+  const O = authorKey(1)
+  const F = authorKey(2)
+  const G = authorKey(3)
+  const event = { title: 'Churrasco', start: '2026-12-20T18:00:00.000Z', end: null, place: 'Praça' }
+  const ev = (i) => postRecord({ text: 'Vem', at: at(i), event })
+  const ofO = [ev(0), postRecord({ text: 'oi', at: at(1) }), ev(2), postRecord({ text: 'Qual?', poll: ['a', 'b'], at: at(3) })]
+  const to = { author: O, seq: 1 }
+  const ofF = [choiceRecord({ to, pick: 0, at: at(4) })]
+  const ofG = [choiceRecord({ to, pick: 1, at: at(5) })]
+  const { seeder, diary } = scanFixture()
+  const all = [[O, ofO], [F, ofF], [G, ofG]]
+  const entries = new Map(all.map(([key, records]) => [key, scannable(seeder, diary(key, records.length, (seq) => records[seq - 1]))]))
+  const pass = async () => {
+    for (const [key] of all) {
+      const entry = entries.get(key)
+      if (!entry || entry.dropped) continue
+      await seeder._runScan(key, entry)
+      seeder._onGrow(key, entry, entry.core.contiguousLength)
+    }
+    await settleIndex(seeder)
+  }
+  await pass()
+  t.alike(seeder.indexEvents(O), { posts: [3, 1], next: null, total: 2, indexing: false, complete: true }, 'only the event posts, newest first')
+  t.alike(seeder.indexEvents(O, 3), { posts: [1], next: null, total: 2, indexing: false, complete: true }, 'an exclusive cursor')
+  t.alike(seeder.indexEvents(F), { posts: [], next: null, total: 0, indexing: false, complete: true }, 'an author with none')
+  t.absent(JSON.stringify(seeder.indexEvents(O)).includes('Churrasco'), 'pointers only')
+  t.alike(seeder.indexPoll(O, 1), { totals: [1, 1], indexing: false, complete: true }, 'RSVP totals reuse the poll route')
+  t.alike(seeder.indexPollVoters(O, 1, 1).items.map((r) => r.key), [G], 'and its voters')
+  t.is(seeder.indexPollVoters(O, 1, 2), null, 'only two options')
+
+  for (const bad of [0, -1, 1.5, '1', NaN]) t.is(seeder.indexEvents(O, bad), null, 'a bad cursor: ' + bad)
+  t.is(seeder.indexEvents('f'.repeat(64)), null, 'an author not served is unknown')
+  t.is(seeder.indexEvents('nope'), null)
+
+  // A rebuild fails closed, then the same answer.
+  seeder._rebuildIndex()
+  t.alike(seeder.indexEvents(O), { posts: [], next: null, total: 0, indexing: true, complete: false }, 'between a rebuild and the re-index: no rows')
+  await settleIndex(seeder)
+  t.alike(seeder.indexEvents(O).posts, [3, 1], 'the same after a rebuild')
+
+  // A pending author (paused, or a tombstone scan behind): no rows.
+  const owner = seeder._served.get(O)
+  owner.indexPaused = true
+  t.alike(seeder.indexEvents(O), { posts: [], next: null, total: 0, indexing: true, complete: false }, 'a paused author')
+  owner.indexPaused = false
+  owner.scanned = 0
+  t.alike(seeder.indexEvents(O).posts, [], 'a tombstone scan behind: it may be deleted')
+  owner.scanned = owner.present
+
+  owner.searchHold = 1
+  t.is(seeder.indexEvents(O), null, 'a held author is unknown')
+  owner.searchHold = 0
+  seeder._isBlocked = (hex) => hex === O
+  t.is(seeder.indexEvents(O), null, 'a blocked author is unknown')
+  seeder._isBlocked = () => false
+
+  // A deleted event post leaves the list.
+  ofO.push(deleteRecord({ seq: 3, at: at(6) }))
+  entries.get(O).core.contiguousLength = ofO.length + 1
+  await pass()
+  t.alike(seeder.indexEvents(O).posts, [1], 'a deleted event is gone')
+
+  seeder._drop(O, 'blocked')
+  t.is(seeder.indexEvents(O), null, 'a purged author is unknown')
+})
+
 test('indexScraps: the caps count admitted writers only and pages carry exclusive cursors', async (t) => {
   const { scrapRecord, followRecord } = require('@varanda/core/lib/records')
   const O = authorKey(1)

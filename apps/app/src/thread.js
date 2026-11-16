@@ -112,6 +112,7 @@ function postItem (author, seq, record, peek) {
     // The node validated the card; only stored data, nothing fetched.
     preview: record.preview !== null && typeof record.preview === 'object' ? record.preview : null,
     ...(rpc.isPoll(record.poll) ? { poll: record.poll.slice() } : {}),
+    ...(rpc.isEvent(record.event) ? { event: { title: record.event.title, start: record.event.start, end: record.event.end, place: record.event.place } } : {}),
     name: profile ? profile.name : null,
     username,
     avatar: profile ? profile.avatar : null

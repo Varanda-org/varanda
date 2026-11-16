@@ -145,7 +145,10 @@ export function createVitrineRequest (fixtures, options) {
   const pollEntry = (to) => {
     const target = targetOf(to)
     const entry = liveEntry(target.author, target.seq)
-    return entry && entry.record.type === 'post' && Array.isArray(entry.record.poll) ? { target, entry, options: entry.record.poll } : null
+    if (!entry || entry.record.type !== 'post') return null
+    // An event post is a 2-option poll: pick 0 going, 1 maybe.
+    if (Array.isArray(entry.record.poll)) return { target, entry, options: entry.record.poll }
+    return entry.record.event ? { target, entry, options: ['going', 'maybe'] } : null
   }
   const livePick = (author, target, count) => {
     let live = null
@@ -198,6 +201,30 @@ export function createVitrineRequest (fixtures, options) {
     return root
   }
 
+  // Group events (public groups): g.events lists the roots [{ writer, seq,
+  // event }]; the RSVP is a g.choices vote, pick 0 'vou', 1 'talvez'.
+  const eventTotals = (g, x) => {
+    const picks = new Map()
+    for (const c of g.choices || []) {
+      if (c.writer !== x.writer || c.seq !== x.seq) continue
+      if (c.pick === null) picks.delete(c.diary)
+      else if (c.pick < 2) picks.set(c.diary, c.pick)
+    }
+    const totals = [0, 0]
+    for (const pick of picks.values()) totals[pick]++
+    return { totals, mine: picks.has(data.own) ? picks.get(data.own) : null }
+  }
+
+  // The group.read topic's `event`, as member-ops eventSummary: null or
+  // { writer, seq, title, start, end, place, totals, mine }.
+  const eventSummary = (g, topic) => {
+    const x = (g.events || []).find((e) => e.writer === topic.writer && e.seq === topic.seq)
+    const item = rootItem(g, topic)
+    if (!x || !item || item.hidden) return null
+    const { totals, mine } = eventTotals(g, x)
+    return { writer: x.writer, seq: item.seq, ...x.event, totals, mine }
+  }
+
   // The poll of a visible topic root, as the handler's visiblePost: a missing
   // or hidden post is 'mensagem não encontrada', a visible one without a poll
   // 'enquete não encontrada'.
@@ -213,8 +240,8 @@ export function createVitrineRequest (fixtures, options) {
     return { type: 'username', username: p.username, member: p.author, date: data.now, association, issuer: association, issuerDate: data.now, issuerSignature: signature, signature }
   }
 
-  function postRecord ({ text, at, replyTo, quote, media, preview, poll }) {
-    return { type: 'post', text, at, replyTo, ...(quote ? { quote } : {}), ...(media ? { media } : {}), ...(preview ? { preview } : {}), ...(poll ? { poll: poll.slice() } : {}) }
+  function postRecord ({ text, at, replyTo, quote, media, preview, poll, event }) {
+    return { type: 'post', text, at, replyTo, ...(quote ? { quote } : {}), ...(media ? { media } : {}), ...(preview ? { preview } : {}), ...(poll ? { poll: poll.slice() } : {}), ...(event ? { event: { ...event } } : {}) }
   }
 
   for (const p of profiles) {
@@ -372,10 +399,10 @@ export function createVitrineRequest (fixtures, options) {
   }
 
   function publish (params, kind) {
-    const record = { type: 'post', text: params.text, at: stamp(), replyTo: kind === 'reply' ? targetOf(params.to) : null, ...(kind === 'quote' ? { quote: targetOf(params.to) } : {}), ...(params.media ? { media: params.media } : {}), ...(params.preview ? { preview: params.preview } : {}), ...(params.poll ? { poll: params.poll } : {}) }
+    const record = { type: 'post', text: params.text, at: stamp(), replyTo: kind === 'reply' ? targetOf(params.to) : null, ...(kind === 'quote' ? { quote: targetOf(params.to) } : {}), ...(params.media ? { media: params.media } : {}), ...(params.preview ? { preview: params.preview } : {}), ...(params.poll ? { poll: params.poll } : {}), ...(params.event ? { event: { ...params.event } } : {}) }
     const result = append(record)
     const p = profileOf(data.own)
-    data.feed.push({ kind: 'post', author: data.own, name: p.name, username: p.username, seq: result.seq, at: record.at, text: record.text, replyTo: record.replyTo, quote: record.quote || null, media: record.media || null, preview: record.preview || null, ...(record.poll ? { poll: record.poll.slice() } : {}) })
+    data.feed.push({ kind: 'post', author: data.own, name: p.name, username: p.username, seq: result.seq, at: record.at, text: record.text, replyTo: record.replyTo, quote: record.quote || null, media: record.media || null, preview: record.preview || null, ...(record.poll ? { poll: record.poll.slice() } : {}), ...(record.event ? { event: { ...record.event } } : {}) })
     return kind === 'quote' ? { seq: result.seq } : result
   }
 
@@ -1002,7 +1029,7 @@ export function createVitrineRequest (fixtures, options) {
         incomplete: false,
         sealed: 0,
         epoch: g.visibility === 'private' ? { writer: g.group, seq: g.epoch || 1 } : null,
-        ...(root ? { poll: pollSummary(g, root) } : {}),
+        ...(root ? { poll: pollSummary(g, root), event: eventSummary(g, root) } : {}),
         state: 'ok'
       }
     },
@@ -1010,11 +1037,29 @@ export function createVitrineRequest (fixtures, options) {
       const g = groupOf(group)
       if (g.visibility !== 'public') refuse('USAGE', 'fóruns e enquetes só em grupo público')
       if (!active(g) || !active(communityOf(g.community)) || communityOf(g.community).dropped.includes(group)) refuse('USAGE', 'sem permissão no grupo')
+      const eventRoot = (g.events || []).find((x) => x.writer === target.writer && x.seq === target.seq)
+      if (eventRoot && rootItem(g, eventRoot) && !rootItem(g, eventRoot).hidden) {
+        if (pick !== null && pick >= 2) refuse('USAGE', 'opção inválida')
+        if (!g.choices) g.choices = []
+        g.choices.push({ writer: eventRoot.writer, seq: eventRoot.seq, diary: data.own, pick })
+        return { ok: true }
+      }
       const root = pollRoot(g, target)
       if (pick !== null && pick >= root.poll.length) refuse('USAGE', 'opção inválida')
       if (!g.choices) g.choices = []
       g.choices.push({ writer: root.writer, seq: root.seq, diary: data.own, pick })
       return { ok: true }
+    },
+    'group.events': ({ group, cursor }) => {
+      const g = groupOf(group)
+      if (g.visibility !== 'public') refuse('USAGE', 'eventos só em grupo público')
+      const roots = (g.events || []).map((x) => ({ x, item: rootItem(g, x) })).filter((r) => r.item).sort((a, b) => comparePosition(b.item, a.item, 'writer'))
+      const candidates = roots.filter((r) => !cursor || comparePosition(r.item, cursor, 'writer') < 0)
+      const rows = candidates.slice(0, 30).map(({ x, item }) => {
+        const rsvp = item.hidden ? { totals: [0, 0], mine: null } : eventTotals(g, x)
+        return { writer: item.writer, diary: item.diary, seq: item.seq, at: item.at, text: item.hidden ? '' : item.text, name: item.name, username: item.username, hidden: item.hidden === true, event: item.hidden ? null : { ...x.event }, totals: rsvp.totals, mine: rsvp.mine }
+      })
+      return { items: rows, next: candidates.length > 30 ? groupCursor(rows[rows.length - 1]) : null, incomplete: false }
     },
     'group.topics': ({ group, limit, before }) => {
       const g = groupOf(group)
@@ -1041,6 +1086,16 @@ export function createVitrineRequest (fixtures, options) {
     },
     'group.voters': ({ group, target }) => {
       const g = groupOf(group)
+      const eventRoot = (g.events || []).find((x) => x.writer === target.writer && x.seq === target.seq)
+      if (eventRoot && rootItem(g, eventRoot) && !rootItem(g, eventRoot).hidden) {
+        const picks = new Map()
+        for (const c of g.choices || []) {
+          if (c.writer !== eventRoot.writer || c.seq !== eventRoot.seq) continue
+          if (c.pick === null) picks.delete(c.diary)
+          else if (c.pick < 2) picks.set(c.diary, c.pick)
+        }
+        return { voters: [0, 1].map((pick) => { const by = [...picks].filter(([, p]) => p === pick).map(([voter]) => voter); return { pick, count: by.length, by: by.slice(0, GROUP_VOTERS_MAX) } }) }
+      }
       const root = pollRoot(g, target)
       const picks = groupPicks(g, root)
       const voters = root.poll.map((_, pick) => {
@@ -1060,11 +1115,12 @@ export function createVitrineRequest (fixtures, options) {
       if (item && (!g.seen || comparePosition(item, g.seen, 'writer') > 0)) g.seen = groupCursor(item)
       return { ok: true }
     },
-    'group.post': ({ group, text, replyTo, media, topic, poll }) => {
+    'group.post': ({ group, text, replyTo, media, topic, poll, event }) => {
       const g = groupOf(group)
       // As the web node's groupPost: a topic or a poll (forum) is refused in a
       // private group before the permission check.
       const forum = topic === true || (poll !== null && poll !== undefined)
+      if (event && g.visibility !== 'public') refuse('USAGE', 'eventos só em grupo público')
       if (forum && g.visibility !== 'public') refuse('USAGE', 'fóruns e enquetes só em grupo público')
       if (!active(g) || !active(communityOf(g.community)) || communityOf(g.community).dropped.includes(group)) refuse('USAGE', 'sem permissão no grupo')
       const seq = Math.max(1, ...g.items.filter((item) => item.writer === g.writer).map((item) => item.seq)) + 1
@@ -1073,6 +1129,10 @@ export function createVitrineRequest (fixtures, options) {
       if (forum) {
         if (!g.topics) g.topics = []
         g.topics.push({ writer: g.writer, seq, poll: poll || null })
+      }
+      if (event) {
+        if (!g.events) g.events = []
+        g.events.push({ writer: g.writer, seq, event: { ...event } })
       }
       return { seq }
     },

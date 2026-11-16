@@ -56,6 +56,8 @@
 //   socialRowProps); the context is the post as shown, never sent by itself.
 // - poll: null | the bare options array of a poll post: ./PollCard draws it
 //   (with `author` and `seq`), outside the row's open area.
+// - event: null | the {title, start, end, place} of an event post: ./EventCard
+//   draws it the same way (never together with a poll).
 // - link: a public http(s) URL of the post (postActions.shareLink decides);
 //   without one there is no Compartilhar. onNotice(text) shows the toast of
 //   a copy to the clipboard.
@@ -99,6 +101,7 @@ import { MusicEmbedCard } from './MusicEmbedCard'
 import { MusicPlayerCard } from './MusicPlayerCard'
 import { MediaGrid } from './MediaGrid'
 import { PollCard } from './PollCard'
+import { EventCard } from './EventCard'
 import { tap } from './haptics'
 import { hasHashtag, hasMention, MentionText, useHashtagOpen } from './MentionText'
 import { useHosted } from '../node'
@@ -225,7 +228,7 @@ function usePerfRow (key) {
 }
 
 function PostRowView ({
-  author, name, username, avatar, at, text, poll, replyToName, level, tag, replyQuote, replyPreviews, previewsMore, commentedBy, media, preview, persistMedia = true, now,
+  author, name, username, avatar, at, text, poll, event, replyToName, level, tag, replyQuote, replyPreviews, previewsMore, commentedBy, media, preview, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending, expanded = false,
   onOpen, onOpenAuthor, onOpenParent, onOpenPreviews, onOpenReposter, onFollowReposter, onOpenMention,
   onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onOpenQuotes, onFollow, followPending, onReport, onBlock, onDelete, link, onNotice,
@@ -769,6 +772,7 @@ function PostRowView ({
           {videoAbove ? null : previewNode}
           {quoteOut ? quoteNode : null}
           {Array.isArray(poll) ? <PollCard author={author} seq={seq} poll={poll} /> : null}
+          {!Array.isArray(poll) && event && typeof event === 'object' ? <EventCard author={author} seq={seq} event={event} /> : null}
           {/* After the content, so a screen reader reads the caption before
               them; the position is absolute, so they still draw at the top. */}
           {headActions

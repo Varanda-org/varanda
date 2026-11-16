@@ -39,6 +39,11 @@
 // CHOICE_POLLS_MAX distinct polls and a poll lists at most CHOICE_VOTERS_MAX
 // voters: past either, a block naming a new (voter, poll) pair is skipped
 // without a slot (the totals may then be short; they are seeder claims).
+// Eventos (docs/protocol.md): a live root `post` carrying a valid `event`
+// (the shared isEvent of @varanda/rpc) keeps its seq in a per-author list,
+// no extra record slot (the post holds it), nothing of the event itself:
+// events() answers pointers only, newest seq first, and a deleted post
+// leaves the list. RSVP totals are the poll routes' (picks 0 and 1).
 // Collections are lazy. Budget roughly 250 bytes/record (edge, post/timeline,
 // engager and touched entries, the engagements map, and the profileSeqs,
 // usernameSeqs, copiedSeqs, aboutSeqs and moodSeqs arrays) plus 500
@@ -96,6 +101,7 @@
 // seq desc). Each request examines at most SCRAP_SCAN pointers (writers
 // included); past it the answer says truncated.
 const { formatRef, parseRef, MAX_TOP_FRIENDS, POLL_MIN, POLL_MAX } = require('./records')
+const { isEvent } = require('@varanda/rpc')
 const { commitment } = require('./testimonials')
 const { foldPicks } = require('./polls')
 
@@ -128,6 +134,10 @@ const FAN_PAGE = 20
 // caps a writer's distinct fan keys with it; not imported, as above).
 const FAN_KEYS_MAX = 4096
 const CHOICE_PAGE = 20
+// Same value as GROUP_EVENTS_LIMIT in @varanda/rpc lib/limits.js: the event
+// pointers of one /index/events page.
+const EVENT_PAGE = 30
+const EVENT_RSVP_OPTIONS = 2
 // Distinct polls one voter may hold operations on, and voters one poll lists.
 const CHOICE_POLLS_MAX = 4096
 const CHOICE_VOTERS_MAX = 20000
@@ -421,6 +431,13 @@ function opLowerBound (ops, seq) {
 // The option count of a poll post record (a root post whose `poll` is a
 // dense array of POLL_MIN..POLL_MAX options), else 0. Records here are
 // validated copies (lib/records.js); this only keeps the count.
+// Whether a post record is a diary event post: a root post whose `event`
+// passes the shared rules (@varanda/rpc isEvent). The index keeps only the
+// seq of such a post, never its title, place or dates.
+function isEventPost (record) {
+  return record.replyTo === null && record.event !== undefined && isEvent(record.event)
+}
+
 function pollSize (record) {
   const poll = record.poll
   return record.replyTo === null && Array.isArray(poll) && poll.length >= POLL_MIN && poll.length <= POLL_MAX ? poll.length : 0
@@ -503,7 +520,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   function authorEntry (author) {
     let entry = authors.get(author)
     if (entry === undefined) {
-      entry = { count: 0, timeline: [], posts: new Map(), reposts: new Map(), touched: new Map(), profileSeqs: [], usernameSeqs: [], copiedSeqs: [], aboutSeqs: [], moodSeqs: [], engagements: new Map(), testimonials: null, shows: null, scraps: null, scrapsByTo: null, scrapHides: null, hideSeqs: null, hiddenRefs: null, walls: null, wallSeqs: null, fanSeqs: null, fanOps: null, tops: null, topSeqs: null, choiceSeqs: null, choiceOps: null }
+      entry = { count: 0, timeline: [], posts: new Map(), reposts: new Map(), touched: new Map(), profileSeqs: [], usernameSeqs: [], copiedSeqs: [], aboutSeqs: [], moodSeqs: [], engagements: new Map(), testimonials: null, shows: null, scraps: null, scrapsByTo: null, scrapHides: null, hideSeqs: null, hiddenRefs: null, walls: null, wallSeqs: null, fanSeqs: null, fanOps: null, tops: null, topSeqs: null, choiceSeqs: null, choiceOps: null, eventSeqs: null }
       authors.set(author, entry)
     }
     return entry
@@ -660,8 +677,16 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       if (to !== null) invalidateNotices(to.slice(0, 64))
       const entry = authorEntry(author)
       if (type === 'post') {
-        entry.posts.set(seq, { replyTo, quote, poll: pollSize(record) })
+        const eventPost = isEventPost(record)
+        // An event post takes RSVPs as a two-option poll (0 'vou', 1 'talvez'),
+        // counted by the poll routes.
+        entry.posts.set(seq, { replyTo, quote, poll: eventPost ? EVENT_RSVP_OPTIONS : pollSize(record), event: eventPost })
         addTimeline(entry, seq)
+        if (eventPost) {
+          if (entry.eventSeqs === null) entry.eventSeqs = []
+          const at = lowerBoundSeq(entry.eventSeqs, seq)
+          if (entry.eventSeqs[at] !== seq) entry.eventSeqs.splice(at, 0, seq)
+        }
         const edge = { atMs: atMillis(record.at), author, seq }
         if (replyTo !== null) {
           const target = targetEntry(replyTo)
@@ -935,6 +960,11 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
         }
         entry.posts.delete(seq)
         removeTimeline(entry, seq)
+        if (info.event === true && entry.eventSeqs !== null) {
+          const at = indexOfSeq(entry.eventSeqs, seq)
+          if (at !== -1) entry.eventSeqs.splice(at, 1)
+          if (entry.eventSeqs.length === 0) entry.eventSeqs = null
+        }
         releaseRecord(entry)
       }
       const target = targets.get(ref)
@@ -1640,6 +1670,28 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     }
   }
 
+  // The event posts of an author: seqs descending, strictly below `before`
+  // (exclusive, null = from the newest), at most EVENT_PAGE, as
+  // { posts: [seq], next: seq | null, total }. `next` is the last seq of a
+  // full page with older ones left, the `before` of the next request. Seqs
+  // only: the node reads each block from the diary and verifies it (event
+  // rules, deletion, hiding). Null for a malformed author or cursor; an
+  // author with no event post answers an empty page.
+  function events (author, before = null) {
+    try {
+      if (typeof author !== 'string' || !HEX64.test(author)) return null
+      if (before !== null && before !== undefined && !isSeq(before)) return null
+      const list = authors.get(author)?.eventSeqs ?? EMPTY_LIST
+      const end = before === null || before === undefined ? list.length : lowerBoundSeq(list, before)
+      const posts = []
+      for (let i = end - 1; i >= 0 && posts.length < EVENT_PAGE; i--) posts.push(list[i])
+      const more = end - posts.length > 0
+      return { posts, next: more ? posts[posts.length - 1] : null, total: list.length }
+    } catch {
+      return null
+    }
+  }
+
   // Likes and reposts aimed at `author`'s indexed posts, as notice rows
   // { key, seq, at, kind } newest first (atMs desc, key asc, seq desc). The
   // first read of an author collects the edges aimed at its indexed posts
@@ -1979,7 +2031,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     fullAuthors = 0
   }
 
-  return { add, removePost, removeRecord, removeDiary, post, roda, counts, engagers, member, hints, noticeRows, noticePage, testimonials, scraps, profileExtra, fans, fanCount, pollTotals, pollVoters, stats, clear }
+  return { add, removePost, removeRecord, removeDiary, post, roda, counts, engagers, member, hints, noticeRows, noticePage, testimonials, scraps, profileExtra, fans, fanCount, pollTotals, pollVoters, events, stats, clear }
 }
 
 module.exports = {
@@ -2007,6 +2059,7 @@ module.exports = {
   FAN_KEYS_MAX,
   CHOICE_PAGE,
   CHOICE_POLLS_MAX,
+  EVENT_PAGE,
   CHOICE_VOTERS_MAX,
   CURSOR_RE
 }

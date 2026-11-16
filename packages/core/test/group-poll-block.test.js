@@ -7,7 +7,7 @@
 const test = require('brittle')
 const b4a = require('b4a')
 const { Seeder } = require('../lib/seeder')
-const { groupPost, groupPoll, groupTopic, groupChoice } = require('../lib/group')
+const { groupPost, groupPoll, groupTopic, groupChoice, groupEvent } = require('../lib/group')
 const { writerHeader, encode } = require('./helpers/seeder-groups')
 
 const R = 'a1'.repeat(32)
@@ -100,4 +100,41 @@ test('groupPostBlock: a root post answers its text alone without its own poll, o
   const priv = [writerHeader({ group: R, diary: D, box: null }), groupPost({ text: 'Vamos?' }), groupPoll({ target: OWN, options: ['Sim', 'Não'] })]
   const got = await fake({ visibility: 'private', blocks: priv })(1)
   t.is(got, null, 'a private group never hands out a plaintext root or its poll')
+})
+
+const EV = { title: 'Mutirão da horta', start: '2030-05-01T12:00:00.000Z', end: null, place: 'Praça Central' }
+const ev = (over = {}) => groupEvent({ target: TOPIC, ...EV, ...over })
+
+test('groupPostBlock: a group-event of a public group answers its title and place as texto', async (t) => {
+  const read = fake({ blocks: [header(), groupPost({ text: 'Vamos?' }), ev(), ev({ place: '' })] })
+  t.alike(await read(2), { group: R, diary: D, seq: 2, texto: 'Mutirão da horta\nPraça Central', resposta: { writer: R, seq: 1 } })
+  t.is((await read(3)).texto, 'Mutirão da horta', 'no place: the title alone')
+})
+
+test('groupPostBlock: the same event bytes in a private or unknown-visibility group answer null', async (t) => {
+  const blocks = [header(), groupPost({ text: 'Vamos?' }), ev()]
+  t.is(await fake({ visibility: 'private', blocks })(2), null, 'private')
+  t.is(await fake({ visibility: null, blocks })(2), null, 'unknown')
+  t.is(await fake({ blocks, blocked: true })(2), null, 'blocked')
+  t.is(await fake({ blocks })(2, 'f'.repeat(64)), null, 'not served')
+  t.ok(await fake({ blocks })(2), 'public control')
+  const bad = { ...ev(), title: '' }
+  t.is(await fake({ blocks: [header(), groupPost({ text: 'Vamos?' }), bad] })(2), null, 'a malformed event')
+  const past = { ...ev(), start: '1999-01-01T00:00:00.000Z' }
+  t.is(await fake({ blocks: [header(), groupPost({ text: 'Vamos?' }), past] })(2), null, 'a start out of range')
+})
+
+test('groupPostBlock: a reported root answers its text followed by its event, the lowest seq of poll or event deciding', async (t) => {
+  const OWN = { writer: W, seq: 1 }
+  const own = (over = {}) => groupEvent({ target: OWN, ...EV, ...over })
+  const read = fake({ blocks: [header(), groupPost({ text: 'Vamos?' }), own(), own({ title: 'outro', place: '' })] })
+  t.is((await read(1)).texto, 'Vamos?\nMutirão da horta\nPraça Central', 'the lowest-seq event')
+  const both = fake({ blocks: [header(), groupPost({ text: 'Vamos?' }), groupPoll({ target: OWN, options: ['Sim', 'Não'] }), own()] })
+  t.is((await both(1)).texto, 'Vamos?\nSim\nNão', 'the poll came first')
+  const other = fake({ blocks: [header(), groupPost({ text: 'Vamos?' }), own(), groupPoll({ target: OWN, options: ['Sim', 'Não'] })] })
+  t.is((await other(1)).texto, 'Vamos?\nMutirão da horta\nPraça Central', 'the event came first')
+  const elsewhere = fake({ blocks: [header(), groupPost({ text: 'Vamos?' }), ev()] })
+  t.is((await elsewhere(1)).texto, 'Vamos?', 'an event naming another core is not this root\'s')
+  const priv = fake({ visibility: 'private', blocks: [header(), groupPost({ text: 'Vamos?' }), own()] })
+  t.is(await priv(1), null, 'a private group never hands out a plaintext root or its event')
 })

@@ -105,7 +105,7 @@ const { sealOffer, commitment } = require('@varanda/core/lib/testimonials')
 const grp = require('@varanda/core/lib/group')
 const gc = require('@varanda/core/lib/group-crypto')
 const { validPrivateItem, copyGroupMedia, PRIVATE_ITEM_KEYS, MAX_GROUP_MEDIA } = require('@varanda/core/lib/group-media')
-const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX, GROUP_TOPICS_LIMIT, GROUP_VOTERS_MAX, POLL_MAX, COMMUNITY_LIST_MAX, feira, mediaBounds, videoBounds } = require('@varanda/rpc')
+const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX, GROUP_TOPICS_LIMIT, GROUP_VOTERS_MAX, GROUP_EVENTS_LIMIT, POLL_MAX, COMMUNITY_LIST_MAX, feira, mediaBounds, videoBounds } = require('@varanda/rpc')
 const { livePick } = require('@varanda/core/lib/polls')
 const listing = require('@varanda/core/lib/listing')
 const { POST_SHARES_PER_DIARY, foldShare } = require('@varanda/core/lib/post-share')
@@ -472,8 +472,13 @@ function verifyPostMedia (ctx, media) {
 }
 
 // `poll` (2..4 options, never beside media or a preview: the method table's
-// cross check) writes the poll post key set.
-async function postCreate (ctx, { text, media, preview, poll }) {
+// cross check) writes the poll post key set; `event` (Eventos, the same
+// cross check, never beside a poll either) the event post key set.
+async function postCreate (ctx, { text, media, preview, poll, event }) {
+  if (event !== undefined && event !== null) {
+    if ((poll !== undefined && poll !== null) || hasMedia(media) || (preview !== undefined && preview !== null)) throw new UsageError(EVENT_PARAM_INVALID)
+    return publish(ctx, buildRecord(() => postRecord({ text, event })))
+  }
   if (poll !== undefined && poll !== null) return publish(ctx, buildRecord(() => postRecord({ text, poll })))
   if (hasMedia(media)) await verifyPostMedia(ctx, media)
   if (preview && preview.image !== null) await verifyMedia(ctx, [preview.image])
@@ -3429,11 +3434,20 @@ async function groupLeave (ctx, { group }) {
 // `topic: true` also marks the new post a forum topic (group-topic) and
 // `poll` (with topic only, the method table's cross check) gives it a
 // group-poll, both side records on the same own writer right after the post.
+// `event` (Eventos) gives a root post a group-event right after it (after
+// its group-topic when `topic: true`): never with a poll, a reply, a
+// forward, media, a card or sealed (the method table's cross check, checked
+// again here).
 // Public groups only: a private group refuses before anything is written.
 // The post and its side records go in one atomic append (all or none).
-async function groupPost (ctx, { group, text, replyTo = null, media = null, card = null, fwd = 0, sealed = false, topic = false, poll = null }) {
-  const forum = topic === true || (poll !== null && poll !== undefined)
+async function groupPost (ctx, { group, text, replyTo = null, media = null, card = null, fwd = 0, sealed = false, topic = false, poll = null, event = null }) {
+  const withPoll = poll !== null && poll !== undefined
+  const withEvent = event !== null && event !== undefined
+  const forum = topic === true || withPoll || withEvent
   const withMedia = media !== null && media !== undefined
+  if (withEvent && (withPoll || withMedia || (card !== null && card !== undefined) || (replyTo !== null && replyTo !== undefined) || fwd === 1 || sealed === true)) {
+    throw new UsageError(EVENT_PARAM_INVALID)
+  }
   // Checked before withGroup, which holds the diary open.
   if (withMedia) {
     // A voice note is the only item of its post, never next to photos.
@@ -3442,6 +3456,7 @@ async function groupPost (ctx, { group, text, replyTo = null, media = null, card
   }
   if (card && card.image !== null) await verifyMedia(ctx, [card.image], null, sealed === true ? validPrivateItem : (d) => validateDescriptor(d) === null)
   return withGroup(ctx, group, true, async ({ ownHex, g }) => {
+    if (withEvent && g.private) throw new UsageError(GROUP_EVENT_PUBLIC)
     if (forum && (g.private || sealed === true)) throw new UsageError(GROUP_FORUM_PUBLIC)
     if (sealed === true && !g.private) throw new UsageError(GROUP_SEALED_MEDIA_PUBLIC)
     if ((withMedia || (card && card.image !== null)) && sealed !== true && g.private) throw new UsageError(GROUP_PRIVATE_MEDIA_SEALED)
@@ -3457,10 +3472,12 @@ async function groupPost (ctx, { group, text, replyTo = null, media = null, card
     let seq = -1
     await appendManyToOwnGroupCore(ctx, own, (first) => {
       seq = first
+      const target = { writer: own.key, seq }
       return [
         record,
-        buildRecord(() => grp.groupTopic({ target: { writer: own.key, seq }, seen: g.built.last })),
-        ...(poll !== null && poll !== undefined ? [buildRecord(() => grp.groupPoll({ target: { writer: own.key, seq }, options: poll, seen: g.built.last }))] : [])
+        ...(topic === true || withPoll ? [buildRecord(() => grp.groupTopic({ target, seen: g.built.last }))] : []),
+        ...(withPoll ? [buildRecord(() => grp.groupPoll({ target, options: poll, seen: g.built.last }))] : []),
+        ...(withEvent ? [buildRecord(() => grp.groupEvent({ target, title: event.title, start: event.start, end: event.end, place: event.place, seen: g.built.last }))] : [])
       ]
     })
     return { seq }
@@ -3554,6 +3571,9 @@ const GROUP_FORUM_PUBLIC = 'fóruns e enquetes só em grupo público'
 const GROUP_TOPIC_MISSING = 'tópico não encontrado'
 const GROUP_POLL_MISSING = 'enquete não encontrada'
 const GROUP_PICK_INVALID = 'opção inválida'
+// Eventos (docs/rpc.md).
+const GROUP_EVENT_PUBLIC = 'eventos só em grupo público'
+const EVENT_PARAM_INVALID = 'parâmetro inválido: event'
 
 // A visible post of fold g at `target`: hidden posts and posts of diaries
 // left out of the fold's readers take no reactions and list no reactors.
@@ -3600,9 +3620,9 @@ async function groupChoose (ctx, { group, target, pick }) {
     const own = liveOwnWriter(g, ownHex)
     if (own === null || statusOf(g, ownHex) !== 'member') throw new UsageError(GROUP_FORBIDDEN)
     const post = visiblePost(g, target)
-    const poll = post.topic ? post.topic.poll : null
-    if (!poll) throw new UsageError(GROUP_POLL_MISSING)
-    if (pick !== null && !(pick < poll.options.length)) throw new UsageError(GROUP_PICK_INVALID)
+    const poll = votable(post)
+    if (poll === null) throw new UsageError(GROUP_POLL_MISSING)
+    if (pick !== null && !(pick < poll.by.length)) throw new UsageError(GROUP_PICK_INVALID)
     const current = poll.by.findIndex((list) => list.includes(ownHex))
     if ((current < 0 ? null : current) === pick) return { ok: true }
     requireCounted(g, own.key)
@@ -3617,9 +3637,63 @@ async function groupChoose (ctx, { group, target, pick }) {
 async function groupVoters (ctx, { group, target }) {
   return withGroup(ctx, group, false, async ({ g }) => {
     const post = visiblePost(g, target)
-    const poll = post.topic ? post.topic.poll : null
-    if (!poll) throw new UsageError(GROUP_POLL_MISSING)
-    return { voters: poll.options.map((_, i) => ({ pick: i, count: poll.totals[i], by: poll.by[i].slice(0, GROUP_VOTERS_MAX) })) }
+    const poll = votable(post)
+    if (poll === null) throw new UsageError(GROUP_POLL_MISSING)
+    return { voters: poll.by.map((list, i) => ({ pick: i, count: poll.totals[i], by: list.slice(0, GROUP_VOTERS_MAX) })) }
+  })
+}
+
+// What a vote on a visible post picks from: its topic's poll, or its event
+// (Eventos: an RSVP, 0 going, 1 maybe), each { totals, by } with one entry
+// per option; null when it takes no vote. The fold gives a root one or the
+// other, never both.
+function votable (post) {
+  if (post.topic && post.topic.poll) return post.topic.poll
+  return post.event ? post.event : null
+}
+
+// The events of a public group (docs/rpc.md), newest root first in the
+// causal order, GROUP_EVENTS_LIMIT per page. `cursor` is group.read's
+// exclusive `before` over the event roots. A hidden root keeps its place
+// blanked: no text, no event, no RSVPs (the fold counts none on it).
+async function groupEvents (ctx, { group, cursor = null } = {}) {
+  return withGroup(ctx, group, false, async ({ base, g }) => {
+    if (g.private) throw new UsageError(GROUP_EVENT_PUBLIC)
+    let roots = g.built.posts.filter((p) => g.diaries.get(p.diary) && p.event)
+    if (cursor !== null && cursor !== undefined) {
+      const i = roots.findIndex((p) => p.writer === cursor.writer && p.seq === cursor.seq)
+      if (i >= 0) {
+        roots = roots.slice(0, i)
+      } else {
+        const k = orderKey(cursor.at, cursor.writer, cursor.seq)
+        roots = roots.filter((p) => compareOrder(orderKey(p.at, p.writer, p.seq), k) < 0)
+      }
+    }
+    const start = Math.max(0, roots.length - GROUP_EVENTS_LIMIT)
+    const items = roots.slice(start).reverse().map((p) => {
+      const { name, username } = authorOf(g, p.diary, base.association, base.mod)
+      const e = p.event
+      const shown = !p.hidden
+      const mine = shown ? e.by.findIndex((list) => list.includes(base.ownHex)) : -1
+      return {
+        writer: p.writer,
+        diary: p.diary,
+        seq: p.seq,
+        at: p.at,
+        text: shown ? p.text : '',
+        name,
+        username,
+        hidden: p.hidden,
+        event: shown ? { title: e.title, start: e.start, end: e.end, place: e.place } : null,
+        totals: shown ? e.totals.slice() : [0, 0],
+        mine: mine < 0 ? null : mine
+      }
+    })
+    const oldest = items.length > 0 ? items[items.length - 1] : null
+    return { items, next: start > 0 && oldest !== null ? { at: oldest.at, writer: oldest.writer, seq: oldest.seq } : null, incomplete: g.built.incomplete }
+  }, (p) => {
+    requirePendingOwn(p)
+    return { items: [], next: null, incomplete: true }
   })
 }
 
@@ -3815,13 +3889,13 @@ function groupInvitePolicy (ctx, { group, members }) {
 // shape); a hidden post keeps its place with an empty text.
 // `marks: true` adds each item's topic marker (topicMark); `topic` reads one
 // topic's thread (the root and its replies, marked) and adds the page's poll
-// summary. Neither changes the unmarked page by a byte.
+// summary and event. Neither changes the unmarked page by a byte.
 async function groupRead (ctx, { group, limit = GROUP_LIMIT_DEFAULT, before = null, marks = false, topic = null } = {}) {
   const thread = topic !== null && topic !== undefined
   return withGroup(ctx, group, false, async ({ base, g }) => {
     if (!thread) return { ...readFold(base, g, { limit, before, marks: marks === true }), state: keyState(ctx, g) }
     const root = topicRoot(g, topic)
-    return { ...readFold(base, g, { limit, before, marks: true, topic: root }), poll: pollSummary(root, base.ownHex), state: keyState(ctx, g) }
+    return { ...readFold(base, g, { limit, before, marks: true, topic: root }), poll: pollSummary(root, base.ownHex), event: eventSummary(root, base.ownHex), state: keyState(ctx, g) }
   }, (p) => {
     requirePendingOwn(p)
     if (thread) throw new UsageError(GROUP_TOPIC_MISSING)
@@ -3849,6 +3923,16 @@ function pollSummary (root, ownHex) {
   if (poll === null) return null
   const mine = poll.by.findIndex((list) => list.includes(ownHex))
   return { options: poll.options.slice(), totals: poll.totals.slice(), mine: mine < 0 ? null : mine }
+}
+
+// The topic root's event (Eventos): { writer, seq, title, start, end, place,
+// totals, mine } or null (hidden root, no event). The uncapped `by` lists stay
+// out; group.voters answers who.
+function eventSummary (root, ownHex) {
+  if (root === undefined || root === null || root.hidden || !root.event) return null
+  const e = root.event
+  const mine = e.by.findIndex((list) => list.includes(ownHex))
+  return { writer: root.writer, seq: root.seq, title: e.title, start: e.start, end: e.end, place: e.place, totals: e.totals.slice(), mine: mine < 0 ? null : mine }
 }
 
 // A marked item's topic: null, or { writer, seq, poll } of the topic root it
@@ -6007,6 +6091,7 @@ module.exports = {
   groupChoose,
   groupTopics,
   groupVoters,
+  groupEvents,
   groupBan,
   groupAdmit,
   groupAdmin,

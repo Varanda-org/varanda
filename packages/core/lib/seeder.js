@@ -977,12 +977,14 @@ function readDmStamps (dataDir, log, name = DM_STAMPS_FILE, reason = 'dm-stamps-
   return out
 }
 
-// The options of the poll on root post <seq> of group core <writerHex>, as
-// foldTopics picks it (the lowest-seq group-poll on the root's own core,
-// after the root), looked for in the next MOD_POLL_SCAN local blocks of a
-// public group; null when none is found there. A block not local is
-// skipped: moderation never downloads. The poll may stand without a
-// group-topic mark: its options are the author's signed text either way.
+// The reviewable lines of the poll or the event on root post <seq> of group
+// core <writerHex>, as foldTopics picks it (the lowest-seq group-poll or
+// group-event on the root's own core, after the root: a root carries one or
+// the other, the lowest seq decides), looked for in the next MOD_POLL_SCAN
+// local blocks of a public group; null when none is found there. A poll
+// gives its options, an event its title and, when set, its place. A block not
+// local is skipped: moderation never downloads. The mark may stand without a
+// group-topic: its text is the author's signed text either way.
 async function modRootPoll (core, read, writerHex, seq, root, visibility) {
   if (visibility !== 'public') return null
   const end = Math.min(core.length, seq + 1 + MOD_POLL_SCAN)
@@ -990,12 +992,17 @@ async function modRootPoll (core, read, writerHex, seq, root, visibility) {
     const raw = await read(i)
     if (raw === null) continue
     const r = decodeBlock(raw)
-    if (r === null || r.type !== 'group-poll' || !r.target) continue
+    if (r === null || (r.type !== 'group-poll' && r.type !== 'group-event') || !r.target) continue
     if (r.target.writer !== writerHex || r.target.seq !== seq) continue
     if (validateGroupRecord(r, i, { root, private: false }) !== null) continue
-    return r.options.slice()
+    return r.type === 'group-poll' ? r.options.slice() : eventLines(r)
   }
   return null
+}
+
+// The text of a group-event a reviewer reads: its title, then its place.
+function eventLines (r) {
+  return r.place === '' ? [r.title] : [r.title, r.place]
 }
 
 class Seeder {
@@ -4724,9 +4731,13 @@ class Seeder {
   // A group-poll block of a public group answers the same shape with its
   // options (one per line) as texto and the topic it names as resposta, so
   // a reported poll can be reviewed; in a private group it answers null.
-  // A reported root post of a public group whose own core holds its poll
-  // (modRootPoll) answers its text followed by the poll's options, one per
-  // line, so a report on a topic shows what the poll offers too.
+  // A group-event block of a public group answers the same shape with its
+  // title and place (one per line) as texto and the root it names as
+  // resposta; in a private group it answers null.
+  // A reported root post of a public group whose own core holds its poll or
+  // its event (modRootPoll) answers its text followed by the poll's options
+  // or the event's title and place, one per line, so a report on a root shows
+  // what the poll or the event offers too.
   // A group-sealed block of a group whose verified root header says private
   // answers only { sealed: true, writer, diary, group, seq }: the seeder
   // cannot read it and never hands out the envelope (docs/protocol.md
@@ -4773,6 +4784,21 @@ class Seeder {
           diary: entry.diary,
           seq,
           texto: record.options.join('\n'),
+          resposta: { writer: record.target.writer, seq: record.target.seq }
+        }
+      }
+      if (record.type === 'group-event') {
+        // The event of a root post (public groups only, never sealed): the
+        // reviewer reads its title and place, one per line, and the root it
+        // hangs on as `resposta`. A private or not yet known visibility
+        // answers null.
+        if (visibility !== 'public' || validateGroupRecord(record, seq, { root, private: false }) !== null) return null
+        if (!live() || core.fork !== 0 || this._groupVisibility(entry.group) !== 'public') return null
+        return {
+          group: entry.group,
+          diary: entry.diary,
+          seq,
+          texto: eventLines(record).join('\n'),
           resposta: { writer: record.target.writer, seq: record.target.seq }
         }
       }
@@ -6176,6 +6202,30 @@ class Seeder {
       const page = this._index.member(authorHex, before) || { profileSeq: null, usernameSeq: null, posts: [], postsTotal: 0 }
       const entry = this._served.get(authorHex)
       return { length: entry.present, ...page, ...this._names.hint(authorHex), ...this._indexFlags() }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/events/<author>[/<before>]: pointers to the author's event
+  // posts (Eventos), { posts: [seq], next, total, indexing, complete }, seqs
+  // newest first, strictly below `before` (a seq, exclusive), at most 30 per
+  // page; `next` is the `before` of the following page or null. Seqs only:
+  // the node reads each block from the diary and verifies it (the shared
+  // isEvent, deletion, moderation); the title, place and dates never leave
+  // the diary. RSVP totals and voters are the /index/poll routes, picks 0
+  // and 1. Null when the author is not visible or held (_searchHeld) or the
+  // cursor is malformed. Fails closed while the author's own diary is not
+  // fully indexed and scanned (a tombstone may delete a listed post): no
+  // rows, indexing true, complete false.
+  indexEvents (authorHex, before = null) {
+    try {
+      if (!this._indexVisible(authorHex) || this._searchHeld(authorHex)) return null
+      if (before !== null && (!Number.isSafeInteger(before) || before < 1)) return null
+      if (this._ownerIndexPending(authorHex)) return { posts: [], next: null, total: 0, indexing: true, complete: false }
+      const page = this._index.events(authorHex, before)
+      if (page === null) return null
+      return { posts: page.posts, next: page.next, total: page.total, ...this._indexFlags() }
     } catch {
       return null
     }

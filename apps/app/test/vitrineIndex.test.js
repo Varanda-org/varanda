@@ -32,6 +32,8 @@ test('every index route and cursor returns a deterministic validated fixture bod
     [c.memberUrl(f.own), c.validMemberIndex],
     [c.memberUrl(f.own, 5), (b) => c.validMemberIndex(b, 5)],
     [c.memberUrl(f.pages[0].author), c.validMemberIndex],
+    [c.eventsUrl(f.own), c.validEvents],
+    [c.eventsUrl(f.members[1].author), c.validEvents],
     [c.topicUrl('praca'), c.validTopic],
     [c.topicUrl('praca', cursor), c.validTopic],
     [c.engagersUrl('likes', ref), (b) => c.validEngagers(b, ref, 'likes')],
@@ -669,4 +671,11 @@ test('the roda route answers the seeder shape: root, top and the subtree parents
   t.is(second.next, null)
   t.is(second.total, 55)
   t.alike(fresh(c.rodaUrl(refOf(top))).items, first.items, 'asked for the comment itself')
+})
+
+test('poll route: an event post answers its going and maybe totals', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond, request } = await load()
+  t.alike(c.validPoll(respond(c.pollUrl(f.own, 61)), 2).totals, [0, 0])
+  await request('choice.set', { to: `${f.own}:61`, pick: 0 })
+  t.alike(c.validPoll(respond(c.pollUrl(f.own, 61)), 2).totals, [1, 0], 'an RSVP shows')
 })

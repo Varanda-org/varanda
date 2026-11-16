@@ -116,6 +116,19 @@ const GROUP_TOPICS_LIMIT = 30
 // Diary keys per option in the who-voted answer of a group poll: every
 // option with this many keys fits MAX_MESSAGE with room (test/sizes.test.js).
 const GROUP_VOTERS_MAX = 900
+// Eventos (docs/protocol.md): a diary post's `event` and a group's
+// `group-event` carry a title of 1..MAX_EVENT_TITLE and a place of
+// 0..MAX_EVENT_PLACE code points, a start and an end (null or later than the
+// start) as canonical ISO instants in UTC between EVENT_MIN_MS and
+// EVENT_MAX_MS (2020-01-01 and 2100-01-01), at most EVENT_MAX_SPAN_MS apart.
+const MAX_EVENT_TITLE = 80
+const MAX_EVENT_PLACE = 120
+const EVENT_MIN_MS = Date.UTC(2020, 0, 1)
+const EVENT_MAX_MS = Date.UTC(2100, 0, 1)
+const EVENT_MAX_SPAN_MS = 366 * 86400000
+// group.events: one page of a group's events, a fixed size whose worst case
+// (maximal texts, titles and places) fits MAX_MESSAGE (test/sizes.test.js).
+const GROUP_EVENTS_LIMIT = 30
 const MAX_GROUP_NAME = 80 // same value as records.js
 const MAX_GROUP_CUTS = 16
 const MAX_GROUPS_PER_COMMUNITY = 32
@@ -272,6 +285,12 @@ module.exports = {
   GROUP_MARKED_LIMIT,
   GROUP_TOPICS_LIMIT,
   GROUP_VOTERS_MAX,
+  MAX_EVENT_TITLE,
+  MAX_EVENT_PLACE,
+  EVENT_MIN_MS,
+  EVENT_MAX_MS,
+  EVENT_MAX_SPAN_MS,
+  GROUP_EVENTS_LIMIT,
   MAX_GROUP_NAME,
   MAX_GROUP_CUTS,
   MAX_GROUPS_PER_COMMUNITY,

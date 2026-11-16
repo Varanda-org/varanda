@@ -522,11 +522,11 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
 
   // The topic's title, its poll options and the replies are public text like a
   // chat post: the on-device word check runs before anything is sent.
-  async function createTopic (text, poll) {
-    const refused = publicGroupRefusal('public', text, ...(poll ? poll.options : []))
+  async function createTopic (text, poll, event) {
+    const refused = publicGroupRefusal('public', text, ...(poll ? poll.options : []), ...(event ? [event.title, event.place] : []))
     setTopicRefusal(refused)
     if (refused !== '') return { ok: false }
-    const r = await newTopic.run(() => request('group.post', poll ? { group, text, topic: true, poll: poll.options } : { group, text, topic: true }))
+    const r = await newTopic.run(() => request('group.post', { group, text, topic: true, ...(poll ? { poll: poll.options } : {}), ...(event ? { event } : {}) }))
     if (r.ok) {
       setNewTopicOpen(false)
       loadTopicsRef.current()

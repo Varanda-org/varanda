@@ -185,7 +185,7 @@ test('the check stays on the device and leaves no trace', (t) => {
 test('the composers check before they send', (t) => {
   const publicar = screen('Publicar.js')
   const send = publicar.slice(publicar.lastIndexOf('const send = async () => {'), publicar.indexOf('return sendAsPage()'))
-  t.ok(send.includes('refusalOf(text, ...(pollDraft !== null ? pollDraft.options : []))'), 'Publicar: the draft and the poll options are checked before any send path')
+  t.ok(send.includes('refusalOf(text, ...(pollDraft !== null ? pollDraft.options : []), ...(eventDraft !== null ? eventEditorTexts(eventDraft) : []))'), 'Publicar: the draft, the poll options and the event texts are checked before any send path')
   t.ok(send.includes('setCheckError(refused)'), 'Publicar: the refusal is shown')
   t.ok(/if \(refused !== ''\) \{\s*setCheckError\(refused\)\s*return/.test(send), 'Publicar: a refusal stops the send')
 
@@ -253,8 +253,8 @@ test('direct messages, reports and appeals stay out of the check', (t) => {
 
 test('a topic title, its poll options and a topic reply are checked like a chat post', (t) => {
   const grupo = screen('Grupo.js')
-  const create = grupo.slice(grupo.indexOf('async function createTopic'), grupo.indexOf("request('group.post', poll"))
-  t.ok(create.includes("publicGroupRefusal('public', text, ...(poll ? poll.options : []))"), 'Grupo: title and every option')
+  const create = grupo.slice(grupo.indexOf('async function createTopic'), grupo.indexOf("request('group.post', { group, text, topic: true"))
+  t.ok(create.includes("publicGroupRefusal('public', text, ...(poll ? poll.options : []), ...(event ? [event.title, event.place] : []))"), 'Grupo: title, every option and the event title and place')
   t.ok(create.includes("if (refused !== '') return { ok: false }"), 'Grupo: a refusal sends nothing')
   t.ok(grupo.includes('error={topicRefusal || newTopic.error}'), 'Grupo: the refusal is shown in the sheet')
 
@@ -269,7 +269,7 @@ test('a topic title, its poll options and a topic reply are checked like a chat 
 
 test('a link preview is checked before a public post and a public group message', (t) => {
   const publicar = screen('Publicar.js')
-  t.ok(publicar.includes('(refusalOf(text, ...(pollDraft !== null ? pollDraft.options : [])) || previewRefusal(linkDraft.view))'), 'Publicar: the draft card is checked with the text')
+  t.ok(publicar.includes('(refusalOf(text, ...(pollDraft !== null ? pollDraft.options : []), ...(eventDraft !== null ? eventEditorTexts(eventDraft) : [])) || previewRefusal(linkDraft.view))'), 'Publicar: the draft card is checked with the text')
   const grupo = screen('Grupo.js')
   const press = grupo.slice(grupo.indexOf('const sendDraft = () => {'), grupo.indexOf('if (attachments.items.length > 0 && !asPage.page) {'))
   t.ok(press.includes('publicGroupPreviewRefusal(visibility, linkDraft.view)'), 'Grupo: a public group checks the draft card')

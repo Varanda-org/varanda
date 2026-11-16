@@ -12,6 +12,10 @@
 // The totals are folded by the member's own node, so no seeder-claim notice;
 // the own pick comes from the own diary. "Quem votou" reads group.voters. A vote or a reply answered
 // UNCERTAIN is never resent: the screen re-reads and the person decides.
+//
+// The event: a root may carry one instead of a poll. group.read (topic) returns
+// the root's event as `event` beside `poll` (summary without voter lists), and
+// the screen shows an EventCard; the RSVP counts are the own node's.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { KeyboardAvoidingView, Pressable, StyleSheet, Text, View } from 'react-native'
@@ -27,6 +31,7 @@ import { ErrorText, Soft, errorText, useAction, useNow } from '../ui'
 import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
 import { ChatComposer } from '../ui/ChatComposer'
 import { OfflineNote } from '../ui/OfflineNote'
+import { EventCard } from '../ui/EventCard'
 import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
 import { Sheet } from '../ui/Sheet'
@@ -142,6 +147,7 @@ export function Topico ({ entry, onBack, onReport, isTop = true }) {
   const items = thread.items
   const rootItem = items.find((i) => refOf(i) === rootKey) || null
   const replies = items.filter((i) => refOf(i) !== rootKey)
+  const eventRow = read && read.event && typeof read.event === 'object' && read.event.writer === (root && root.writer) && read.event.seq === (root && root.seq) ? read.event : null
   const poll = read && read.poll && typeof read.poll === 'object' ? read.poll : null
   const card = useMemo(() => (poll === null ? null : pollCard({ poll, totals: poll.totals, own: poll.mine })), [poll])
 
@@ -239,6 +245,9 @@ export function Topico ({ entry, onBack, onReport, isTop = true }) {
             </View>
             )
           : null}
+      {eventRow !== null && card === null && !(rootItem && rootItem.hidden)
+        ? <View style={styles.eventBox}><EventCard author={rootItem && typeof rootItem.diary === 'string' ? rootItem.diary : eventRow.writer} seq={eventRow.seq} event={{ title: eventRow.title, start: eventRow.start, end: eventRow.end, place: eventRow.place }} group={group} writer={eventRow.writer} totals={eventRow.totals} mine={eventRow.mine} onChanged={() => loadRef.current(true)} /></View>
+        : null}
       {card !== null
         ? (
           <View style={styles.pollBox} accessibilityLabel='enquete'>
@@ -356,6 +365,7 @@ const makeStyles = (colors) => StyleSheet.create({
   rootBox: { padding: space.lg, gap: space.xs, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
   rootMeta: { ...type.meta, color: colors.soft },
   rootText: { ...type.postText, color: colors.ink },
+  eventBox: { paddingHorizontal: space.lg, paddingBottom: space.md, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
   pollBox: { padding: space.lg, gap: space.sm, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
   option: {
     minHeight: layout.hit,

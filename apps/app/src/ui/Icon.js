@@ -70,6 +70,8 @@ const GLYPHS = {
   grade: 'grid',
   lista: 'list',
   enquete: 'bar-chart-2',
+  evento: 'calendar',
+  relogio: 'clock',
   mapa: 'map',
   estrela: 'star',
   cat_casa: 'home',

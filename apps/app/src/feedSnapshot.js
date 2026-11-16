@@ -147,7 +147,7 @@ function itemOf (v, strict) {
   }
   const name = v.name === undefined && !strict ? null : v.name
   const username = v.username === undefined && !strict ? null : v.username
-  if (hasOwn(v, 'poll')) return null
+  if (hasOwn(v, 'poll') || hasOwn(v, 'event')) return null
   if (!isHex64(v.author) || !isSeq(v.seq) || !isAt(v.at) || !isName(name) || !isUsername(username)) return null
   const out = { kind: v.kind, author: v.author, name, username, seq: v.seq, at: v.at }
   if (repost) {
@@ -339,7 +339,7 @@ export function buildSnapshot ({ origin, association, owner, items, cursor, prof
     for (const raw of head) {
       // A poll post is not kept (the snapshot has no poll): the snapshot stops
       // there, so it stays a prefix of the feed and the cursor stays exact.
-      if (isPlain(raw) && hasOwn(raw, 'poll')) {
+      if (isPlain(raw) && (hasOwn(raw, 'poll') || hasOwn(raw, 'event'))) {
         whole = false
         break
       }
