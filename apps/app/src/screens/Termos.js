@@ -18,11 +18,15 @@ import { Stepper } from '../ui/Stepper'
 import { useStyles } from '../ui/ThemeProvider'
 import { layout, space, type } from '../ui/theme'
 
-const NEEDED_TEXT = 'Antes de entrar no Varanda, leia e aceite os Termos de Uso e a Política de Privacidade.'
+const NEEDED_TEXT = 'Antes de usar o Varanda, leia e aceite os Termos de Uso e a Política de Privacidade.'
 const ACCOUNT_TEXT = 'Esta conta ainda não aceitou os Termos de Uso e a Política de Privacidade neste aparelho. Leia e aceite para continuar.'
 const SAVED_TEXT = 'Não foi possível guardar o aceite neste aparelho; ele será pedido de novo quando você abrir o Varanda outra vez.'
 const BLOCKED_TEXT = 'Sem aceitar, não é possível entrar no Varanda.'
+// The create gate has Voltar: without accepting, Entrar stays open.
+const BLOCKED_CREATE_TEXT = 'Sem aceitar, não é possível criar uma conta ou uma passkey nova.'
 const ACCEPT_LABEL = 'Aceitar e continuar'
+const BACK_LABEL = 'Voltar'
+const BACK_A11Y = 'Voltar para Entrar sem aceitar'
 
 const SYNC_TEXT = {
   registrado: 'Também registrado na sua conta da associação.',
@@ -42,7 +46,7 @@ function gateTitle (reason) {
 }
 
 function acceptedText (version, acceptedAt) {
-  return 'Você aceitou a versão ' + version + ' em ' + formatAcceptedAt(acceptedAt) + ' neste aparelho.'
+  return 'Você aceitou a versão ' + version + ' em ' + formatAcceptedAt(acceptedAt) + '.'
 }
 
 // No line for null, for 'so-aparelho' (short text plus a help link) or for an unknown state.
@@ -100,7 +104,9 @@ function LegalDoc ({ doc, expanded, onToggle, grouped = false, first = false }) 
   )
 }
 
-export default function Termos ({ gate = false, reason = 'needed', version, acceptedAt = null, saved = true, syncState = null, onAccept }) {
+// onBack (the gate before Criar conta only): a way back to Entrar without
+// accepting, since that gate was opened by a press and not by the entry.
+export default function Termos ({ gate = false, reason = 'needed', version, acceptedAt = null, saved = true, syncState = null, onAccept, onBack = null }) {
   const [openTerms, setOpenTerms] = useState(false)
   const [openPrivacy, setOpenPrivacy] = useState(false)
   const styles = useStyles(makeStyles)
@@ -112,7 +118,7 @@ export default function Termos ({ gate = false, reason = 'needed', version, acce
           title={gateTitle(reason)}
           hint={gateText(reason, version)}
           icon='file-text'
-          actions={<><Btn label={ACCEPT_LABEL} onPress={onAccept} block large /><Soft style={styles.center}>{BLOCKED_TEXT}</Soft></>}
+          actions={<><Btn label={ACCEPT_LABEL} onPress={onAccept} block large />{typeof onBack === 'function' ? <Btn label={BACK_LABEL} accessibilityLabel={BACK_A11Y} onPress={onBack} secondary block large /> : null}<Soft style={styles.center}>{typeof onBack === 'function' ? BLOCKED_CREATE_TEXT : BLOCKED_TEXT}</Soft></>}
         >
           <Soft style={styles.center}>{REVIEW_NOTE}</Soft>
           <Soft style={styles.center}>{'Versão ' + version + ', de ' + LEGAL_DATE}</Soft>

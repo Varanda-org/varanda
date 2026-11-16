@@ -191,7 +191,7 @@ test('testimonial.pending: worst-case pending and kept lists fit', (t) => {
 })
 
 function feedResult (n, ch, preview = true) {
-  const item = { kind: 'post', author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { author: HEX, seq: SEQ }, quote: null, media: preview ? null : MEDIA, preview: preview ? CARD : null }
+  const item = { kind: 'post', author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { author: HEX, seq: SEQ }, quote: null, media: preview ? null : MEDIA, preview: preview ? CARD : null, avatar: WORST_AVATAR }
   return {
     items: Array(n).fill(item),
     skipped: Array(MAX_LIST).fill({ key: HEX, reason: 'untrusted-association' }),
@@ -292,26 +292,27 @@ test('feed quote items are no larger than replies, and reposts are smaller', (t)
 })
 
 test('feed.read: FEED_LIMIT_MAX fits, one more does not', (t) => {
-  // With MAX_MEDIA_PER_POST public descriptors in every item.
-  t.is(FEED_LIMIT_MAX, 26)
+  // With MAX_MEDIA_PER_POST public descriptors and the widest avatar in every item.
+  t.is(FEED_LIMIT_MAX, 25)
   t.is(FEED_INCOMPLETE_MAX, 16)
   for (const ch of WORST) t.ok(size(feedResult(FEED_LIMIT_MAX, ch, false)) <= MAX_MESSAGE, JSON.stringify(ch))
   const worst = size(feedResult(FEED_LIMIT_MAX, '\ud800', false))
-  t.is(worst, 261312)
+  t.is(worst, 258174)
   t.comment('feed worst case at ' + FEED_LIMIT_MAX + ' items: ' + worst + ' bytes')
   const overflow = size(feedResult(FEED_LIMIT_MAX + 1, '\ud800', false))
-  t.is(overflow, 270575)
+  t.is(overflow, 267682)
   t.comment('feed worst case at ' + (FEED_LIMIT_MAX + 1) + ' items: ' + overflow + ' bytes')
   t.ok(overflow > MAX_MESSAGE, 'largest that fits')
   // Lone surrogates are the worst case: one more item of 4-byte characters fits.
   const fourByte = size(feedResult(FEED_LIMIT_MAX + 1, '\u{1f600}', false))
-  t.is(fourByte, 212255)
+  t.is(fourByte, 211522)
   t.comment('feed at ' + (FEED_LIMIT_MAX + 1) + ' items of 4-byte characters: ' + fourByte + ' bytes')
   t.ok(fourByte <= MAX_MESSAGE, 'one more item of 4-byte characters would fit')
 })
 
 test('peek.read: PEEK_LIMIT_MAX fits', (t) => {
   // With MAX_MEDIA_PER_POST public descriptors in every item.
+  t.is(PEEK_LIMIT_MAX, 26)
   for (const ch of WORST) t.ok(size(peekResult(PEEK_LIMIT_MAX, ch, false)) <= MAX_MESSAGE, JSON.stringify(ch))
   t.is(size(peekResult(PEEK_LIMIT_MAX, '\ud800', false)), 247858)
   t.comment('peek worst case at ' + PEEK_LIMIT_MAX + ' items: ' + size(peekResult(PEEK_LIMIT_MAX, '\ud800', false)) + ' bytes')
@@ -650,7 +651,7 @@ test('who reacted: GROUP_REACTORS_MAX keys per emoji fit, one more does not', (t
 
 test('page.feed: maximal media lists fit the shared feed limit', (t) => {
   const result = { items: feedResult(FEED_LIMIT_MAX, '\ud800', false).items, incomplete: false }
-  t.is(size(result), 240911)
+  t.is(size(result), 237773)
   t.ok(size(result) < size(feedResult(FEED_LIMIT_MAX, '\ud800', false)))
   t.ok(size(result) <= MAX_MESSAGE)
 })
@@ -716,7 +717,7 @@ test('a maximal video pair is smaller than ten maximal descriptors: page maxima 
       t.ok(size(withPair(result)(1, ch)) < size(result(1, ch, false)), 'a pair item is smaller than a ten-photo item')
     }
   }
-  t.is(FEED_LIMIT_MAX, 26)
+  t.is(FEED_LIMIT_MAX, 25)
   t.is(LOG_LIMIT_MAX, 30)
   t.is(GROUP_LIMIT_MAX, 26)
   t.is(PEEK_SEQS_MAX, 29)

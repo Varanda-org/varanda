@@ -484,7 +484,7 @@ test('shell and note share the push action and gate on hosted capabilities', (t)
   const app = readFileSync(join(__dirname, '../App.js'), 'utf8')
   const note = readFileSync(join(__dirname, '../src/ui/InviteDropNote.js'), 'utf8')
   const gate = app.match(/const inviteDrop = useInviteDrop\(\{([\s\S]*?)\n {2}\}\)/)[1]
-  for (const clause of ['node.hosted === true', 'node.visible !== false', '!locked', 'pkStatus?.unlocked === true', 'member', 'request: node.request']) t.ok(gate.includes(clause), clause)
+  for (const clause of ['node.hosted === true', 'node.visible !== false', '!locked', 'pkStatus?.unlocked === true', 'termsOk', 'member', 'request: node.request']) t.ok(gate.includes(clause), clause)
   t.absent(gate.includes('Platform.OS'))
   t.ok(/const openInvites = useCallback\(\(\) => \{\s*setAjustes\('convites'\)\s*setInviteNudge\(\(n\) => n \+ 1\)/.test(app))
   t.ok(/intent.kind === 'convite'\) \{\s*openInvites\(\)/.test(app))

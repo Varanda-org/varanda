@@ -14,8 +14,10 @@ const crypto = require('hypercore-crypto')
 const { createIssuerCert } = require('@varanda/core/lib/cert')
 const { signAccountLink } = require('@varanda/core/lib/account-link')
 const { TERMS_VERSION, signTerms } = require('@varanda/core/lib/terms')
+const { signInvite } = require('@varanda/core/lib/invite')
 const { openAccountStore } = require('../lib/account/store')
 const { openTermsStore } = require('../lib/account/terms-store')
+const { openInvitesStore } = require('../lib/account/invites-store')
 const { createAccountServer } = require('../lib/account/server')
 const { tmpDir } = require('./helpers/net')
 
@@ -61,8 +63,9 @@ function directoryBytes (dir) {
 }
 
 // A service with `m` linked (as 'ana') and a terms store on the same dir.
-// `terms: false` passes terms = null; `configured: false` passes issuer null.
-async function setup (t, { configured = true, terms = true, guard, storeOpts = {} } = {}) {
+// `terms: false` passes terms = null; `configured: false` passes issuer null;
+// `inviting: true` adds an invites store (the /account/invites/* routes).
+async function setup (t, { configured = true, terms = true, inviting = false, guard, storeOpts = {} } = {}) {
   const dir = path.join(tmpDir(t), 'account')
   const c = { offset: 0 }
   c.now = () => Date.now() + c.offset
@@ -71,6 +74,7 @@ async function setup (t, { configured = true, terms = true, guard, storeOpts = {
   const m = member()
   await linkDirect(store, iss, m, 'ana')
   const termsStore = terms ? openTermsStore(dir, { now: c.now, ...(guard ? { guard } : {}) }) : null
+  const invites = inviting ? openInvitesStore(dir, { now: c.now, perWeek: 2, isUsed: (id) => store.inviteUsed(id) }) : null
   const logs = []
   const texts = []
   const server = createAccountServer({
@@ -80,6 +84,7 @@ async function setup (t, { configured = true, terms = true, guard, storeOpts = {
     store,
     issuer: configured ? { keyPair: iss.keyPair, cert: iss.cert } : null,
     terms: termsStore,
+    invites,
     log: (e) => logs.push(JSON.stringify(e)),
     now: c.now
   })
@@ -98,6 +103,15 @@ async function setup (t, { configured = true, terms = true, guard, storeOpts = {
     return { status: res.status, body: parsed, text }
   }
 
+  async function get (pathname) {
+    const res = await fetch(base + pathname)
+    const text = await res.text()
+    texts.push(text)
+    let parsed = null
+    try { parsed = JSON.parse(text) } catch {}
+    return { status: res.status, body: parsed, text }
+  }
+
   const start = (who, version = TERMS_VERSION) => post('/account/terms/start', { member: who.hex, version })
   const sign = (who, nonce, version = TERMS_VERSION) => signTerms({ nonce, member: who.hex, association: iss.association, version }, who.kp)
   const finish = (who, nonce, signature) => post('/account/terms/finish', { member: who.hex, nonce, signature })
@@ -109,7 +123,18 @@ async function setup (t, { configured = true, terms = true, guard, storeOpts = {
     return finish(who, started.body.nonce, sign(who, started.body.nonce, version))
   }
 
-  return { dir, c, iss, store, terms: termsStore, m, logs, texts, listener, post, start, sign, finish, accept }
+  const heldStart = (who) => post('/account/terms/held/start', { member: who.hex })
+  const signHeld = (who, nonce, action = 'summary') => signInvite({ action, nonce, member: who.hex, association: iss.association }, who.kp)
+  const heldFinish = (who, nonce, signature, version = TERMS_VERSION) => post('/account/terms/held/finish', { member: who.hex, nonce, signature, version })
+
+  // held/start -> 'summary' signature -> held/finish for `who`.
+  async function held (who, version = TERMS_VERSION) {
+    const started = await heldStart(who)
+    if (started.status !== 200) return started
+    return heldFinish(who, started.body.nonce, signHeld(who, started.body.nonce), version)
+  }
+
+  return { dir, c, iss, store, terms: termsStore, m, logs, texts, listener, post, get, start, sign, finish, accept, heldStart, signHeld, heldFinish, held }
 }
 
 function noPersonalData (t, s) {
@@ -226,7 +251,7 @@ test('terms: the nonce is single-use, bound to its member, expires, and only a t
 
 test('terms: exact Origin and a JSON body are required', async (t) => {
   const s = await setup(t)
-  for (const pathname of ['/account/terms/start', '/account/terms/finish']) {
+  for (const pathname of ['/account/terms/start', '/account/terms/finish', '/account/terms/held/start', '/account/terms/held/finish']) {
     const noOrigin = await s.post(pathname, { member: s.m.hex, version: TERMS_VERSION }, { origin: null })
     t.is(noOrigin.status, 403, pathname + ' without Origin')
     t.alike(noOrigin.body, { error: 'pedido-invalido' })
@@ -304,4 +329,214 @@ test('terms: no terms store, an unavailable one, or a guard lost after the write
   t.is(later.body.version, TERMS_VERSION)
   const restart = await s.start(s.m)
   t.is(restart.status, 200, 'a new nonce again')
+})
+
+test('terms held: a held version answers its date, another answers null; /account/status is unchanged', async (t) => {
+  const s = await setup(t)
+  const statusBefore = await s.get('/account/status?member=' + s.m.hex)
+  t.is(statusBefore.status, 200, statusBefore.text)
+
+  const none = await s.held(s.m)
+  t.is(none.status, 200, none.text)
+  t.alike(none.body, { version: TERMS_VERSION, acceptedAt: null }, 'nothing held yet')
+
+  const accepted = await s.accept(s.m)
+  t.is(accepted.status, 200, accepted.text)
+
+  const started = await s.heldStart(s.m)
+  t.is(started.status, 200, started.text)
+  t.alike(Object.keys(started.body), ['nonce'])
+  t.ok(TOKEN_RE.test(started.body.nonce), 'nonce is 32 bytes base64url')
+  const signature = s.signHeld(s.m, started.body.nonce)
+  const yes = await s.heldFinish(s.m, started.body.nonce, signature)
+  t.is(yes.status, 200, yes.text)
+  t.alike(yes.body, { version: TERMS_VERSION, acceptedAt: accepted.body.acceptedAt })
+  t.absent(yes.text.includes(signature), 'the signature is never echoed')
+
+  if (TERMS_VERSION > 1) {
+    const older = await s.held(s.m, TERMS_VERSION - 1)
+    t.is(older.status, 200, older.text)
+    t.alike(older.body, { version: TERMS_VERSION - 1, acceptedAt: null }, 'an older version not accepted')
+  }
+
+  // Another member's acceptance is never read for this one.
+  const other = member()
+  await linkDirect(s.store, s.iss, other, 'bia', '2222222222222222222222', 'bia@example.test')
+  const otherHeld = await s.held(other)
+  t.is(otherHeld.status, 200, otherHeld.text)
+  t.alike(otherHeld.body, { version: TERMS_VERSION, acceptedAt: null })
+
+  const statusAfter = await s.get('/account/status?member=' + s.m.hex)
+  t.is(statusAfter.status, 200)
+  t.alike(statusAfter.body, statusBefore.body, 'status is the same before and after an acceptance')
+  t.absent(statusAfter.text.includes('acceptedAt'), 'no acceptance date in status')
+  t.absent(Object.keys(statusAfter.body).some((k) => /terms|termos/i.test(k)), 'no terms field in status')
+
+  t.ok(s.logs.includes(JSON.stringify({ event: 'terms', reason: 'lido' })))
+  const allLogs = s.logs.join('\n')
+  t.absent(allLogs.includes(s.m.hex), 'no member key in the logs')
+  t.absent(allLogs.includes(signature), 'no signature in the logs')
+  noPersonalData(t, s)
+})
+
+test('terms held: an unlinked member, no terms store or an unavailable one are refused', async (t) => {
+  const s = await setup(t)
+  const unlinked = await s.heldStart(member())
+  t.is(unlinked.status, 403)
+  t.alike(unlinked.body, { error: 'nao-vinculado' })
+  for (const bad of ['', s.m.hex.toUpperCase(), s.m.hex.slice(1), 42]) {
+    const r = await s.post('/account/terms/held/start', { member: bad })
+    t.is(r.status, 400)
+    t.alike(r.body, { error: 'pedido-invalido' })
+  }
+
+  const none = await setup(t, { terms: false })
+  const r = await none.heldStart(none.m)
+  t.is(r.status, 503)
+  t.alike(r.body, { error: 'indisponivel' })
+
+  // The store fails between start and finish.
+  const bad = await setup(t)
+  const started = await bad.heldStart(bad.m)
+  t.is(started.status, 200)
+  bad.terms.fail()
+  const late = await bad.heldFinish(bad.m, started.body.nonce, bad.signHeld(bad.m, started.body.nonce))
+  t.is(late.status, 503, late.text)
+  t.alike(late.body, { error: 'indisponivel' })
+  const refused = await bad.heldStart(bad.m)
+  t.is(refused.status, 503)
+  t.alike(refused.body, { error: 'indisponivel' })
+
+  // The link goes away between start and finish (Excluir conta): the finish
+  // checks it again and answers nothing about the member.
+  const gone = await setup(t)
+  t.is((await gone.accept(gone.m)).status, 200)
+  const before = await gone.heldStart(gone.m)
+  t.is(before.status, 200)
+  await gone.store.deleteMember(gone.m.hex)
+  const unlinkedLate = await gone.heldFinish(gone.m, before.body.nonce, gone.signHeld(gone.m, before.body.nonce))
+  t.is(unlinkedLate.status, 403, unlinkedLate.text)
+  t.alike(unlinkedLate.body, { error: 'nao-vinculado' })
+})
+
+test('terms held: only its own nonces, single-use, bound to the member, expiring', async (t) => {
+  const s = await setup(t, { inviting: true })
+  const other = member()
+  await linkDirect(s.store, s.iss, other, 'bia', '2222222222222222222222', 'bia@example.test')
+
+  // A nonce minted by /account/terms/start, with a valid 'summary' signature over it.
+  const fromTerms = await s.start(s.m)
+  t.is(fromTerms.status, 200)
+  const r1 = await s.heldFinish(s.m, fromTerms.body.nonce, s.signHeld(s.m, fromTerms.body.nonce))
+  t.is(r1.status, 404)
+  t.alike(r1.body, { error: 'expirado' })
+  t.is((await s.finish(s.m, fromTerms.body.nonce, s.sign(s.m, fromTerms.body.nonce))).status, 200, 'still good for its own route')
+
+  // A nonce minted by /account/invites/start.
+  const fromInvites = await s.post('/account/invites/start', { member: s.m.hex })
+  t.is(fromInvites.status, 200, fromInvites.text)
+  const r2 = await s.heldFinish(s.m, fromInvites.body.nonce, s.signHeld(s.m, fromInvites.body.nonce))
+  t.is(r2.status, 404)
+  t.alike(r2.body, { error: 'expirado' })
+  const summary = await s.post('/account/invites/summary', { member: s.m.hex, nonce: fromInvites.body.nonce, signature: s.signHeld(s.m, fromInvites.body.nonce) })
+  t.is(summary.status, 200, 'still good for its own route: ' + summary.text)
+
+  // And the other way: a held nonce opens neither terms/finish nor invites/summary.
+  const h1 = await s.heldStart(s.m)
+  const t1 = await s.finish(s.m, h1.body.nonce, s.sign(s.m, h1.body.nonce))
+  t.is(t1.status, 404)
+  t.alike(t1.body, { error: 'expirado' })
+  const h2 = await s.heldStart(s.m)
+  const i2 = await s.post('/account/invites/summary', { member: s.m.hex, nonce: h2.body.nonce, signature: s.signHeld(s.m, h2.body.nonce) })
+  t.is(i2.status, 404)
+  t.alike(i2.body, { error: 'expirado' })
+
+  // Spent on its first finish.
+  const a = await s.heldStart(s.m)
+  const sig = s.signHeld(s.m, a.body.nonce)
+  t.is((await s.heldFinish(s.m, a.body.nonce, sig)).status, 200)
+  const replay = await s.heldFinish(s.m, a.body.nonce, sig)
+  t.is(replay.status, 404)
+  t.alike(replay.body, { error: 'expirado' })
+
+  // Issued to `m`, presented by `other` with its own valid signature.
+  const b = await s.heldStart(s.m)
+  const stolen = await s.heldFinish(other, b.body.nonce, s.signHeld(other, b.body.nonce))
+  t.is(stolen.status, 404)
+  t.alike(stolen.body, { error: 'expirado' })
+  const after = await s.heldFinish(s.m, b.body.nonce, s.signHeld(s.m, b.body.nonce))
+  t.is(after.status, 404, 'spent by the other member\'s attempt')
+
+  // TTL: 600 s.
+  const c = await s.heldStart(s.m)
+  s.c.offset += 600 * 1000
+  const expired = await s.heldFinish(s.m, c.body.nonce, s.signHeld(s.m, c.body.nonce))
+  t.is(expired.status, 404)
+  t.alike(expired.body, { error: 'expirado' })
+
+  // Unknown and malformed nonces.
+  t.is((await s.heldFinish(s.m, 'x'.repeat(43), 'a'.repeat(128))).status, 404)
+  t.is((await s.heldFinish(s.m, 'short', 'a'.repeat(128))).status, 404)
+  noPersonalData(t, s)
+})
+
+test('terms held: only a summary signature by the member counts', async (t) => {
+  const s = await setup(t)
+  const other = member()
+
+  const a = await s.heldStart(s.m)
+  const termsSig = await s.heldFinish(s.m, a.body.nonce, s.sign(s.m, a.body.nonce))
+  t.is(termsSig.status, 400)
+  t.alike(termsSig.body, { error: 'assinatura-invalida' }, 'the acceptance statement is not a read proof')
+
+  const b = await s.heldStart(s.m)
+  const issue = await s.heldFinish(s.m, b.body.nonce, s.signHeld(s.m, b.body.nonce, 'issue'))
+  t.is(issue.status, 400)
+  t.alike(issue.body, { error: 'assinatura-invalida' }, 'an invite issue signature is refused')
+
+  const c = await s.heldStart(s.m)
+  const foreign = await s.heldFinish(s.m, c.body.nonce, s.signHeld(other, c.body.nonce))
+  t.is(foreign.status, 400)
+  t.alike(foreign.body, { error: 'assinatura-invalida' }, 'another key\'s signature is refused')
+
+  const d = await s.heldStart(s.m)
+  const malformed = await s.heldFinish(s.m, d.body.nonce, 'zz')
+  t.is(malformed.status, 400)
+  t.alike(malformed.body, { error: 'assinatura-invalida' })
+
+  const ok = await s.held(s.m)
+  t.is(ok.status, 200, 'a summary signature passes: ' + ok.text)
+})
+
+test('terms held: bad versions are refused after the proof and spend the nonce', async (t) => {
+  const s = await setup(t)
+  // `undefined` leaves the field out of the JSON body.
+  for (const version of [0, TERMS_VERSION + 1, String(TERMS_VERSION), 1.5, null, -1, undefined]) {
+    const r = await s.heldStart(s.m)
+    const sig = s.signHeld(s.m, r.body.nonce)
+    const bad = await s.post('/account/terms/held/finish', { member: s.m.hex, nonce: r.body.nonce, signature: sig, version })
+    t.is(bad.status, 400, 'version ' + JSON.stringify(version))
+    t.alike(bad.body, { error: 'pedido-invalido' })
+    const again = await s.heldFinish(s.m, r.body.nonce, sig)
+    t.is(again.status, 404, 'the nonce was spent')
+  }
+})
+
+test('terms held: the 31st verified finish in 10 minutes is refused; invalid signatures charge nothing', async (t) => {
+  const s = await setup(t)
+  for (let i = 0; i < 8; i++) {
+    const r = await s.heldStart(s.m)
+    const bad = await s.heldFinish(s.m, r.body.nonce, 'a'.repeat(128))
+    t.is(bad.status, 400, 'invalid signature ' + i)
+  }
+  for (let i = 0; i < 30; i++) {
+    const ok = await s.held(s.m)
+    if (ok.status !== 200) t.fail('verified finish ' + (i + 1) + ': ' + ok.text)
+  }
+  const over = await s.held(s.m)
+  t.is(over.status, 429)
+  t.alike(over.body, { error: 'pedido-invalido' })
+  t.is((await s.accept(s.m)).status, 200, 'the acceptance window is separate')
+  s.c.offset += 600 * 1000
+  t.is((await s.held(s.m)).status, 200, 'the window restarts')
 })
