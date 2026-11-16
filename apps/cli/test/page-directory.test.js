@@ -14,6 +14,7 @@ const {
   createUsernameRecord
 } = require('@varanda/core/lib/cert')
 const { BLOCKED_TERMS } = require('@varanda/rpc')
+const { isUsername } = require('@varanda/core/lib/account-link')
 const { openAccountStore, COOLDOWN_MS, MAX_PAGE_MOVES, RESERVED, FILE } = require('../lib/account/store')
 const { tmpDir } = require('./helpers/net')
 
@@ -109,7 +110,8 @@ test('the Vitrine handles shown on varanda.app are reserved for pages and people
 
 // A listed term as an @nome (its words joined by '_'), read from the list so
 // this file never spells one.
-const TERM_NAMES = BLOCKED_TERMS.map((term) => term.replace(/ /g, '_')).filter((name) => /^[a-z][a-z0-9_]{2,15}$/.test(name) && !/^[0-9a-f]{6}$/.test(name))
+// At most 10 characters, so the suffixes below still make a valid @nome.
+const TERM_NAMES = BLOCKED_TERMS.map((term) => term.replace(/ /g, '_')).filter((name) => /^[a-z][a-z0-9_]{2,9}$/.test(name) && !/^[0-9a-f]{6}$/.test(name))
 const TERM_NAME = TERM_NAMES[0]
 
 test('a new @nome with a listed term is refused for pages and people', async (t) => {
@@ -119,7 +121,9 @@ test('a new @nome with a listed term is refused for pages and people', async (t)
   await reserve(store, iss, c, page, 'padaria')
   await link(store, iss, person, 'rita')
   c.t += COOLDOWN_MS
+  t.ok(TERM_NAMES.length >= 2, 'the list has names to test with')
   for (const username of [TERM_NAME, TERM_NAME + '_sp', TERM_NAME + '2024']) {
+    t.ok(isUsername(username), username.length + ': a valid @nome but for the term')
     await rejects(t, reserve(store, iss, c, newKey(), username), 'nome-invalido', username.length + ': a new page')
     await rejects(t, rename(store, iss, c, page, username), 'nome-invalido', username.length + ': a page rename')
     throwsCode(t, () => store.start({ member: newKey(), username }), 'nome-invalido', username.length + ': a person')

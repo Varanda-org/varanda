@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'af2ad805c9d8bad83bbd5cc32d5a8fb9aa0363f3f4e4c1ad9002663c3266de24', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '5f02d6b9f4b47563ac8d7fe914e9b4e4f471c90d3b28294945aaa57a77eb2d49', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -819,7 +819,7 @@ test('legal: version 64 says the account service checks a new @nome and what a p
   ]) t.ok(all(TERMS).includes(required), 'terms: ' + required)
   for (const required of [
     'o serviço de conta confere o texto (publicação, resposta, citação, perfil, anúncio e mensagem em grupo público)',
-    'O texto recusado não é guardado, e o registro da recusa tem só o motivo'
+    'O texto recusado não é guardado, e o registro da recusa tem só o tipo do pedido e o motivo'
   ]) t.ok(all(PRIVACY).includes(required), 'privacy: ' + required)
   t.absent(all(TERMS).includes('\u2014') || all(PRIVACY).includes('\u2014'), 'no em dash')
 })

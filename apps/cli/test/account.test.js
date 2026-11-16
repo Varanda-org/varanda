@@ -19,6 +19,7 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { createIssuerCert, certForKey, verifyUsernameRecord } = require('@varanda/core/lib/cert')
 const { signAccountLink } = require('@varanda/core/lib/account-link')
+const { BLOCKED_TERMS } = require('@varanda/rpc')
 const { signPhone, isBrMobile } = require('@varanda/core/lib/phone')
 const { createGoogle } = require('../lib/account/google')
 const { openAccountStore, phoneSub, COOLDOWN_MS, PENDING_TTL_MS } = require('../lib/account/store')
@@ -534,6 +535,11 @@ test('rename: cooldown, key proof over the rename nonce, single-use nonce, old n
   t.alike([unlinked.status, unlinked.body], [404, { error: 'nao-encontrado' }])
   const invalid = await s.api('POST', '/account/rename/start', { body: { member: m.hex, username: 'abc123' } })
   t.alike(invalid.body, { error: 'nome-invalido' })
+  // A listed term (read from the list, never spelled here) is refused before
+  // any signature, so the name is not kept for the finish.
+  const termName = BLOCKED_TERMS.map((term) => term.replace(/ /g, '_')).find((name) => /^[a-z][a-z0-9_]{2,19}$/.test(name) && !/^[0-9a-f]{6}$/.test(name))
+  const listed = await s.api('POST', '/account/rename/start', { body: { member: m.hex, username: termName } })
+  t.alike([listed.status, listed.body], [400, { error: 'nome-invalido' }], 'a listed term')
 
   s.c.offset += COOLDOWN_MS
   const started = await s.api('POST', '/account/rename/start', { body: { member: m.hex, username: 'bia' } })
