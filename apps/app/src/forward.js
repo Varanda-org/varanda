@@ -382,30 +382,40 @@ export const DM_LIST_PAGES = 4
 const MEMBER_ROLES = new Set(['creator', 'admin', 'member'])
 const INFO_AT_ONCE = 4
 
+// A run of dm.list pages from `before` (null: the newest), at most `pages`,
+// a peer already in `seen` skipped (and every new one added). -> {
+// conversations, next }, next the cursor after the last page read, or null
+// once the inbox is read to the end.
+async function readDmPages (request, { before = null, pages, seen }) {
+  const conversations = []
+  let cursor = before
+  for (let i = 0; i < pages; i++) {
+    const r = await request('dm.list', cursor ? { folder: 'inbox', before: cursor } : { folder: 'inbox' })
+    for (const c of (r && Array.isArray(r.conversations) ? r.conversations : [])) {
+      if (!c || !isKey(c.peer) || seen.has(c.peer)) continue
+      seen.add(c.peer)
+      conversations.push(c)
+    }
+    cursor = r && r.next && typeof r.next === 'object' ? r.next : null
+    if (!cursor) break
+  }
+  return { conversations, next: cursor }
+}
+
 // The destination rows, read with request(method, params). dm.list is
-// followed through `next` for up to `pages` pages. A failed dm.list or
+// followed through `next` for up to `pages` pages; `more` is the cursor
+// "Carregar mais" goes on from, or null at the end. A failed dm.list or
 // community.list rejects, so the sheet shows the error and a reload instead
 // of an empty list. A community whose community.info fails or answers
 // incomplete is left out and `partial` says some groups are missing.
-// -> { rows, partial }
-export async function loadForwardDestinations (request, { pages = DM_LIST_PAGES } = {}) {
-  const readDms = async () => {
-    const out = []
-    const seen = new Set()
-    let before
-    for (let i = 0; i < pages; i++) {
-      const r = await request('dm.list', before ? { folder: 'inbox', before } : { folder: 'inbox' })
-      for (const c of (r && Array.isArray(r.conversations) ? r.conversations : [])) {
-        if (!c || !isKey(c.peer) || seen.has(c.peer)) continue
-        seen.add(c.peer)
-        out.push(c)
-      }
-      before = r && r.next && typeof r.next === 'object' ? r.next : null
-      if (!before) break
-    }
-    return out
-  }
-  const [dmConversations, communities] = await Promise.all([readDms(), request('community.list', {})])
+// groups: false (forwarding as a page, which has only Conversas) reads no
+// community.
+// -> { rows, partial, more, dms, groups }
+export async function loadForwardDestinations (request, { pages = DM_LIST_PAGES, groups: withGroups = true } = {}) {
+  const [read, communities] = await Promise.all([
+    readDmPages(request, { pages, seen: new Set() }),
+    withGroups ? request('community.list', {}) : null
+  ])
   const wanted = (communities && Array.isArray(communities.communities) ? communities.communities : [])
     .filter((c) => c && isKey(c.community) && c.state === 'ready' && MEMBER_ROLES.has(c.role))
   const groups = []
@@ -432,7 +442,19 @@ export async function loadForwardDestinations (request, { pages = DM_LIST_PAGES 
       }
     }))
   }
-  return { rows: forwardDestinations({ dmConversations, groups }), partial }
+  const dms = read.conversations
+  return { rows: forwardDestinations({ dmConversations: dms, groups }), partial, more: read.next, dms, groups }
+}
+
+// "Carregar mais": up to `pages` more dm.list pages after `loaded.more`,
+// merged into what loadForwardDestinations (or an earlier call) read; a
+// conversation already listed is not listed twice. A failed read rejects and
+// `loaded` stays as it was. Nothing more to read: `loaded` itself.
+export async function loadMoreForwardDestinations (request, loaded, { pages = DM_LIST_PAGES } = {}) {
+  if (!loaded || !loaded.more || !Array.isArray(loaded.dms) || !Array.isArray(loaded.groups)) return loaded
+  const read = await readDmPages(request, { before: loaded.more, pages, seen: new Set(loaded.dms.map((c) => c.peer)) })
+  const dms = [...loaded.dms, ...read.conversations]
+  return { rows: forwardDestinations({ dmConversations: dms, groups: loaded.groups }), partial: loaded.partial, more: read.next, dms, groups: loaded.groups }
 }
 
 // Whether any chosen destination needs the audience question before its
@@ -444,4 +466,42 @@ export function needsAudience (source, rows) {
     const p = forwardPlan(source, target)
     return p.ok === true && p.confirm === AUDIENCE
   })
+}
+
+// ---- forwarding as a page --------------------------------------------------
+
+// A page's sends go through dm.pageDraft and dm.pageSend (rpc 5.114), which
+// carry text only: a page forward keeps the text and leaves the photos and
+// voice notes out, and says so. -> { source, left }, left the count of items
+// left out, or null when there is no text to forward.
+export const PAGE_MEDIA_LEFT = 'Como página, só o texto é encaminhado: fotos e áudios ficam de fora.'
+
+export function pageForwardSource (source) {
+  if (!source || typeof source !== 'object' || source.kind !== 'dm') return null
+  if (typeof source.text !== 'string' || source.text === '') return null
+  const media = Array.isArray(source.media) ? source.media : []
+  const left = media.filter((m) => !(m && typeof m === 'object' && m.unavailable === true)).length
+  return { source: { kind: 'dm', text: source.text, media: [] }, left }
+}
+
+// Whether the sheet offers "Tentar de novo" for a page destination: only
+// after an uncertain send that kept the page client's own re-put of the same
+// signed draft (dm-screen.js pageDmClient err.retry). A page never resends
+// through retryForward: that would draft and sign a second message.
+export function canRetryPage (entry) {
+  return !!entry && entry.state === 'uncertain' && typeof entry.retry === 'function'
+}
+
+// The explicit "Tentar de novo" of an uncertain page forward: the page
+// client's re-put of the same signed draft, once. -> { phase, retry?,
+// error? }; never rejects.
+export async function retryPageForward ({ retry, uncertain = (err) => !!(err && err.uncertain === true) }) {
+  if (typeof retry !== 'function') return { phase: 'failed', error: new Error('nada para reenviar') }
+  try {
+    await retry()
+    return { phase: 'done' }
+  } catch (error) {
+    if (uncertain(error)) return { phase: 'uncertain', error, retry: typeof error.retry === 'function' ? error.retry : retry }
+    return { phase: 'failed', error }
+  }
 }
