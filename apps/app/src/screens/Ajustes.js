@@ -91,6 +91,9 @@ import Perfil, { KeyboardForm } from './Perfil'
 import Telefone from './Telefone'
 import Recurso from './Recurso'
 import Bloqueados from './Bloqueados'
+import Aparelhos from './Aparelhos'
+import { DEVICES_TITLE, deviceStore, readDevices } from '../devices'
+import { useDeviceState } from '../useDevices'
 import Sincronizar from './Sincronizar'
 import Termos from './Termos'
 
@@ -116,6 +119,7 @@ const TITLES = {
   convites: 'Convidar pessoas',
   recurso: 'Recorrer de um bloqueio',
   bloqueados: BLOCK_TEXTS.listTitle,
+  aparelhos: DEVICES_TITLE,
   recados: WALL_TITLE,
   excluir: 'Excluir conta'
 }
@@ -258,6 +262,15 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
     visitasRequest.current('visits.state', {}).then((r) => { if (live) setVisitas(r) }, () => {})
     return () => { live = false }
   }, [visitasOn, sheetOpen])
+  // Aparelhos conectados (#350): the entry shows only when the node answered
+  // device.list (an unknown-method answer, or no answer yet, hides it). The
+  // read runs on each opening; the answer feeds the store the screen reads.
+  const devices = useDeviceState()
+  const devicesOffered = node.hosted === true && unlocked && devices.offered === true
+  useEffect(() => {
+    if (!sheetOpen || !unlocked || node.hosted !== true || node.phase !== 'ready') return
+    readDevices({ request: visitasRequest.current, store: deviceStore }).catch(() => {})
+  }, [sheetOpen, unlocked, node.hosted, node.phase])
   const policySeq = useRef(0)
   const member = unlocked && typeof passkey.status.publicKey === 'string' ? passkey.status.publicKey : null
   // A core node registers its delegate and accepts the Terms on the page
@@ -504,6 +517,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               {account ? <Item first={!(account && unlocked) && !showChangePhone} icon='shield' label='Recorrer de um bloqueio' onPress={() => onNavigate('recurso')} /> : null}
               {hosted ? <Item first={!account && !showChangePhone} icon='bloquear' label={BLOCK_TEXTS.listTitle} onPress={() => onNavigate('bloqueados')} /> : null}
               {hosted ? <Item icon='recado' label={WALL_TITLE} onPress={() => onNavigate('recados')} /> : null}
+              {devicesOffered ? <Item icon='smartphone' label={DEVICES_TITLE} onPress={() => onNavigate('aparelhos')} /> : null}
               {visitasOn ? <Item icon='olho' label={VISITAS_TITLE} trailingText={visitas === null ? null : (stateOn(visitas) ? ROW_ON : ROW_OFF)} onPress={openVisitasSheet} /> : null}
               <Item first={!account && !showChangePhone && !hosted} icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
             </View>
@@ -724,6 +738,13 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
           ? (
             <View style={shown('bloqueados')}>
               <Bloqueados active={ready && screen === 'bloqueados'} />
+            </View>
+            )
+          : null}
+        {devicesOffered
+          ? (
+            <View style={shown('aparelhos')}>
+              <Aparelhos active={ready && screen === 'aparelhos'} />
             </View>
             )
           : null}

@@ -125,6 +125,9 @@ import { InstallNote } from './src/ui/InstallNote'
 import { InstallCard } from './src/ui/InstallCard'
 import { PushNote } from './src/ui/PushNote'
 import { DeletionNote } from './src/ui/DeletionNote'
+import { DeviceOffNote } from './src/ui/DeviceOffNote'
+import { deviceStore, helloDue, reconnectDevice, sendHello } from './src/devices'
+import { currentDeviceName, useDeviceState } from './src/useDevices'
 import { InviteDropNote } from './src/ui/InviteDropNote'
 import { InviteArrival } from './src/ui/InviteArrival'
 import { InviteCardOpen } from './src/ui/InviteCardOpen'
@@ -2438,6 +2441,26 @@ function Member () {
   useEffect(() => {
     if (seenMember !== null && seenSchedulerRef.current) seenSchedulerRef.current.wake('unlock')
   }, [seenMember, seenGeneration])
+
+  // --- Aparelhos conectados (#350, src/devices.js) ---
+  // Once per app open and member, after the unlock: device.hello with this
+  // device's short name. An unknown method or any failure is silent and never
+  // retried (the next open tries again). The answer feeds the shared store,
+  // which also tells whether the account disconnected this device.
+  const deviceState = useDeviceState()
+  const deviceMemberRef = useRef(null)
+  const helloSentRef = useRef(null)
+  useEffect(() => {
+    if (seenMember === null) return
+    if (deviceMemberRef.current !== seenMember) {
+      deviceMemberRef.current = seenMember
+      deviceStore.reset()
+    }
+    if (!helloDue({ member: seenMember, online: node.online, sent: helloSentRef.current })) return
+    helloSentRef.current = seenMember
+    sendHello({ request: seenRequestRef.current, store: deviceStore, name: currentDeviceName() })
+  }, [seenMember, node.online])
+  const reconnectThisDevice = useCallback(() => reconnectDevice({ request: seenRequestRef.current, store: deviceStore, name: currentDeviceName() }), [])
   // The connection came back: marks made offline go out once the minimum
   // interval allows.
   const seenWasOnlineRef = useRef(node.online)
@@ -3915,6 +3938,9 @@ function Member () {
             : null}
           {scheduledDeletion !== null
             ? <DeletionNote scheduled={scheduledDeletion} onOpen={() => setAjustes('excluir')} inset={tab === 'diario' && node.online !== false} />
+            : null}
+          {deviceState.off && seenMember !== null
+            ? <DeviceOffNote onReconnect={reconnectThisDevice} inset={tab === 'diario' && node.online !== false && scheduledDeletion === null} />
             : null}
           {inviteNoteShown
             ? <InviteDropNote record={inviteDrop.note} onShown={handleInviteShown} onOpen={() => { inviteDrop.dismiss(); openInvites() }} inset={tab === 'diario' && node.online !== false} />
