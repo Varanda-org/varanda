@@ -215,15 +215,32 @@ export function devicesRowShown ({ offered, hasPasskey, unlocked }) {
 // A disconnected device whose identity came from a kept session (resumed,
 // no passkey ceremony in this open) forgets the session and locks, so the
 // passkey is asked again. After a passkey unlock in this open (resumed
-// false), and on a node without a passkey, it only shows the note.
-export function shouldForceLock ({ off, hasPasskey, unlocked, resumed }) {
-  return off === true && hasPasskey === true && unlocked === true && resumed === true
+// false, or `passkeyHere`: a member that unlocked by passkey earlier in this
+// open, since a native reconnect reports resumed again), and on a node
+// without a passkey, it only shows the note.
+export function shouldForceLock ({ off, hasPasskey, unlocked, resumed, passkeyHere }) {
+  return off === true && hasPasskey === true && unlocked === true && resumed === true && passkeyHere !== true
 }
 
-// device.list is read once after the first finished sync of the open for a
-// member: the diary of the own account may not have been there at hello.
-export function afterSyncDue ({ member, stopped, done }) {
-  return typeof member === 'string' && stopped !== null && stopped !== undefined && done !== member
+// Remembers (in `seen`, a Set kept for the open) a member whose identity was
+// unlocked by a passkey ceremony: unlocked with resumed false. Returns
+// whether this member unlocked that way in this open.
+export function notePasskeyUnlock (seen, { member, unlocked, resumed }) {
+  if (typeof member !== 'string') return false
+  if (unlocked === true && resumed === false) seen.add(member)
+  return seen.has(member)
+}
+
+// What the shell does for the member now. 'hello': first time this open
+// (device.hello also answers off). 'read': the member came back (a lock and
+// an unlock, or the first run) and hello is not sent again, so the state is
+// read once (a read, never a retry of a mutating call): an event that came
+// while locked, or the wipe at the lock, would otherwise lose `off`. Null:
+// nothing, or offline.
+export function deviceStep ({ member, online, helloSent, readFor }) {
+  if (typeof member !== 'string' || online === false) return null
+  if (helloSent !== member) return 'hello'
+  return readFor !== member ? 'read' : null
 }
 
 // What a failed reconnect says: plain words, never the "incerto" text.

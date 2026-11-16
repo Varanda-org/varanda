@@ -126,7 +126,7 @@ import { InstallCard } from './src/ui/InstallCard'
 import { PushNote } from './src/ui/PushNote'
 import { DeletionNote } from './src/ui/DeletionNote'
 import { DeviceOffNote } from './src/ui/DeviceOffNote'
-import { afterSyncDue, deviceMemberOf, deviceStore, helloDue, readDevices, reconnectDevice, sendHello, shouldForceLock, visibleDevices } from './src/devices'
+import { deviceMemberOf, deviceStep, deviceStore, notePasskeyUnlock, readDevices, reconnectDevice, sendHello, shouldForceLock, visibleDevices } from './src/devices'
 import { currentDeviceName, useDeviceState } from './src/useDevices'
 import { InviteDropNote } from './src/ui/InviteDropNote'
 import { InviteArrival } from './src/ui/InviteArrival'
@@ -2448,36 +2448,46 @@ function Member () {
   // member, after the unlock: device.hello with this device's short name. An
   // unknown method or any failure is silent and never retried (the next open
   // tries again). The answers (and devices.changed) feed the shared store,
-  // which also tells whether the account disconnected this device.
+  // which also tells whether the account disconnected this device. A member
+  // that comes back after a lock gets one device.list read (hello is not
+  // sent again, and the lock wiped the state); the own diary catching up
+  // later arrives as devices.changed.
   const deviceMember = deviceMemberOf({ ready, termsOk, hasPasskey: passkey !== null, status: pkStatus, ownKey })
   const deviceState = visibleDevices(useDeviceState(), deviceMember)
   const helloSentRef = useRef(null)
-  const afterSyncRef = useRef(null)
-  const deviceStopped = node.sync.stopped
+  const deviceReadRef = useRef(null)
+  const passkeyHereRef = useRef(new Set())
+  const [lockFailed, setLockFailed] = useState(false)
   useEffect(() => {
     deviceStore.bind(deviceMember)
-    if (deviceMember === null) return
-    if (!helloDue({ member: deviceMember, online: node.online, sent: helloSentRef.current })) return
-    helloSentRef.current = deviceMember
-    sendHello({ request: seenRequestRef.current, store: deviceStore, name: currentDeviceName() })
+    if (deviceMember === null) {
+      deviceReadRef.current = null
+      setLockFailed(false)
+      return
+    }
+    const step = deviceStep({ member: deviceMember, online: node.online, helloSent: helloSentRef.current, readFor: deviceReadRef.current })
+    if (step === 'hello') {
+      helloSentRef.current = deviceMember
+      deviceReadRef.current = deviceMember
+      sendHello({ request: seenRequestRef.current, store: deviceStore, name: currentDeviceName() })
+    } else if (step === 'read') {
+      deviceReadRef.current = deviceMember
+      readDevices({ request: seenRequestRef.current, store: deviceStore }).catch(() => {})
+    }
   }, [deviceMember, node.online])
-  // Hello runs before the own diary may have synced: one device.list read
-  // after the first finished sync of the open settles the off flag.
-  useEffect(() => {
-    if (!afterSyncDue({ member: deviceMember, stopped: deviceStopped, done: afterSyncRef.current })) return
-    afterSyncRef.current = deviceMember
-    readDevices({ request: seenRequestRef.current, store: deviceStore }).catch(() => {})
-  }, [deviceMember, deviceStopped])
   // A disconnected device whose identity came from a kept session forgets it
   // and locks: only the passkey opens it again (the unlock screen says why).
-  // After a passkey unlock in this open (resumed false) it only shows the note.
-  const deviceForceLock = deviceMember !== null && shouldForceLock({ off: deviceState.off, hasPasskey: passkey !== null, unlocked: !locked, resumed: !!(pkStatus && pkStatus.resumed === true) })
+  // After a passkey unlock in this open it never locks again, even when a
+  // later reconnect reports resumed again: it only shows the note. If the
+  // sign-out fails the note shows too.
+  const passkeyHere = notePasskeyUnlock(passkeyHereRef.current, { member: deviceMember, unlocked: !locked, resumed: pkStatus ? pkStatus.resumed === true : undefined })
+  const deviceForceLock = deviceMember !== null && shouldForceLock({ off: deviceState.off, hasPasskey: passkey !== null, unlocked: !locked, resumed: !!(pkStatus && pkStatus.resumed === true), passkeyHere })
   useEffect(() => {
     if (!deviceForceLock) return
     deviceStore.forceLock()
-    Promise.resolve(passkey.signOut()).catch(() => {})
+    Promise.resolve(passkey.signOut()).catch(() => setLockFailed(true))
   }, [deviceForceLock])
-  const deviceOffShown = deviceMember !== null && deviceState.off && !deviceForceLock
+  const deviceOffShown = deviceMember !== null && deviceState.off && (!deviceForceLock || lockFailed)
   const reconnectThisDevice = useCallback(() => reconnectDevice({ request: seenRequestRef.current, store: deviceStore, name: currentDeviceName() }), [])
   // The connection came back: marks made offline go out once the minimum
   // interval allows.

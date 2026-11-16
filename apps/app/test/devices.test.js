@@ -1,7 +1,7 @@
 import test from 'brittle'
 import {
-  CONFIRM_LINES, DISCONNECTED_CAPTION, NAME_MAX, NO_NAME, RECONNECT_UNCERTAIN, UNNAMED_SELF, afterSyncDue, confirmCopy, createDeviceStore,
-  deviceMemberOf, deviceName, devicesRowShown, disconnectLabel, disconnectParams, helloDue, otherLabel, readDevices, reconnectDevice,
+  CONFIRM_LINES, DISCONNECTED_CAPTION, NAME_MAX, NO_NAME, RECONNECT_UNCERTAIN, UNNAMED_SELF, confirmCopy, createDeviceStore,
+  deviceMemberOf, deviceName, deviceStep, notePasskeyUnlock, devicesRowShown, disconnectLabel, disconnectParams, helloDue, otherLabel, readDevices, reconnectDevice,
   reconnectFailure, rowCaption, sendHello, shapeList, shouldForceLock, sinceDate, sinceText, unknownMethod, visibleDevices
 } from '../src/devices.js'
 
@@ -100,7 +100,7 @@ test('labels and params', (t) => {
   t.alike(disconnectParams('previous'), { previous: true })
   t.alike(disconnectParams(B), { id: B })
   t.is(CONFIRM_LINES.length, 3)
-  for (const line of CONFIRM_LINES) t.absent(line.includes('—'))
+  for (const line of CONFIRM_LINES) t.absent(line.includes(String.fromCharCode(0x2014)))
 })
 
 function bound (member = A) {
@@ -286,13 +286,54 @@ test('shouldForceLock: only a resumed session of a disconnected device', (t) => 
   t.absent(shouldForceLock({ ...on, unlocked: false }), 'already locked: no loop')
 })
 
-test('afterSyncDue: once per member, after a finished sync', (t) => {
-  const stopped = { runId: 1, reason: 'done', at: 5 }
-  t.ok(afterSyncDue({ member: A, stopped, done: null }))
-  t.absent(afterSyncDue({ member: A, stopped: null, done: null }))
-  t.absent(afterSyncDue({ member: A, stopped, done: A }))
-  t.ok(afterSyncDue({ member: B, stopped, done: A }))
-  t.absent(afterSyncDue({ member: null, stopped, done: null }))
+test('shouldForceLock: a member that unlocked by passkey in this open is never locked again', (t) => {
+  const on = { off: true, hasPasskey: true, unlocked: true, resumed: true }
+  t.ok(shouldForceLock({ ...on, passkeyHere: false }))
+  t.absent(shouldForceLock({ ...on, passkeyHere: true }), 'a later native reconnect reports resumed again')
+})
+
+test('notePasskeyUnlock: remembers a passkey unlock for the open, not a resume', (t) => {
+  const seen = new Set()
+  t.absent(notePasskeyUnlock(seen, { member: A, unlocked: true, resumed: true }), 'kept session')
+  t.absent(notePasskeyUnlock(seen, { member: A, unlocked: false, resumed: false }), 'locked')
+  t.absent(notePasskeyUnlock(seen, { member: null, unlocked: true, resumed: false }))
+  t.ok(notePasskeyUnlock(seen, { member: A, unlocked: true, resumed: false }), 'passkey ceremony')
+  t.ok(notePasskeyUnlock(seen, { member: A, unlocked: true, resumed: true }), 'stays for the open: resumed again after a reconnect')
+  t.absent(notePasskeyUnlock(seen, { member: B, unlocked: true, resumed: true }), 'another member')
+})
+
+test('deviceStep: hello once, then one read when the member comes back', (t) => {
+  t.is(deviceStep({ member: A, online: true, helloSent: null, readFor: null }), 'hello')
+  t.is(deviceStep({ member: A, online: false, helloSent: null, readFor: null }), null, 'offline waits')
+  t.is(deviceStep({ member: A, online: true, helloSent: A, readFor: A }), null, 'nothing more')
+  t.is(deviceStep({ member: A, online: true, helloSent: A, readFor: null }), 'read', 'back after a lock')
+  t.is(deviceStep({ member: null, online: true, helloSent: A, readFor: null }), null)
+  t.is(deviceStep({ member: B, online: true, helloSent: A, readFor: A }), 'hello')
+})
+
+test('forced lock then passkey unlock: the read brings the off notice back', async (t) => {
+  const store = createDeviceStore()
+  const state = { helloSent: null, readFor: null }
+  const reply = { devices: [{ id: A, name: 'X', since: null, on: false, writers: 0, self: true }], off: true }
+  const calls = []
+  const request = async (m) => { calls.push(m); return m === 'device.hello' ? { id: A, registered: false, off: true } : reply }
+  // The shell's step for the current member, as App.js runs it.
+  const run = async (member) => {
+    store.bind(member)
+    if (member === null) { state.readFor = null; return }
+    const step = deviceStep({ member, online: true, helloSent: state.helloSent, readFor: state.readFor })
+    if (step === 'hello') { state.helloSent = member; state.readFor = member; await sendHello({ request, store, name: 'x' }) } else if (step === 'read') { state.readFor = member; await readDevices({ request, store }) }
+  }
+  await run(A)
+  t.ok(store.get().off, 'hello said off')
+  store.forceLock()
+  await run(null)
+  t.ok(store.get().forced)
+  t.absent(store.get().off, 'the lock wiped it')
+  await run(A)
+  t.ok(store.get().off, 'the read after the unlock restored it')
+  t.absent(store.get().forced)
+  t.alike(calls, ['device.hello', 'device.list'])
 })
 
 test('rowCaption and confirmCopy: disconnected rows, plural previous', (t) => {
