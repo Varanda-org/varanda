@@ -256,6 +256,9 @@ test('chatMediaRefs names the DM sender, message and index, and the group diary'
   t.alike(chatMediaRefs('dm', { from: HEX('a'), id: MSG }), [])
   t.alike(chatMediaRefs('group', { media: [a] }), [], 'no diary, no ref')
   t.is(chatMediaRefs('dm', { from: HEX('a'), id: MSG, media: [a, a, a, a, a] }).length, 4)
+  t.alike(chatMediaRefs('dm', { from: HEX('a'), id: MSG, media: [a], page: HEX('c') }), [
+    { kind: 'dm', from: HEX('a'), id: MSG, index: 0, page: HEX('c'), item: a }
+  ], 'a Página\'s message names the page')
   t.alike(itemSize({ w: 3, h: 2 }), { w: 3, h: 2 })
   t.alike(itemSize({ width: 5, height: 4 }), { w: 5, h: 4 })
   t.alike(itemSize(null), { w: null, h: null })
@@ -440,6 +443,16 @@ test('a message request never loads a provider player', (t) => {
   t.ok(src.includes("plainCard={folder === 'request'}"), 'Mensagem passes plainCard in a request')
   t.ok(src.includes("deferred={folder === 'request'}"), 'the same row defers its photos')
   t.ok(/const extra = useMemo\(\(\) => \(\{[^}]*\bfolder\b[^}]*\}\), \[[^\]]*\bfolder\b/.test(src) && src.includes('extraData={extra}'), 'rows redraw when the request is accepted')
+})
+
+test('acting as a Página, its photos and the card thumbnail are read from the Página\'s store', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes('const pageOf = pageKey !== null ? { page: pageKey } : {}'), 'the row knows the Página it acts as')
+  t.ok(src.includes("chatMediaRefs('dm', { from: item.from || (mine ? ownKey : null), id: item.id, media, ...pageOf })"), 'the photo refs carry page: pageKey')
+  t.ok(src.includes("cardThumb={item.deleted ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey, ...pageOf }}"), 'the card thumb too, and the identity stays the person\'s')
+  t.absent(src.includes('pageKey !== null ? undefined'), 'a Página card is never left without its thumb')
+  const card = readFileSync(join(__dirname, '../src/ui/LinkCard.js'), 'utf8')
+  t.ok(card.includes("const page = typeof thumb.page === 'string' ? { page: thumb.page } : {}") && card.includes("index: 'card', ...page, item: image"), 'chatThumbRef carries the page')
 })
 
 test('chat screens end the player band at the composer', (t) => {

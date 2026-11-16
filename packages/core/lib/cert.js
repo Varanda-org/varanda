@@ -450,6 +450,39 @@ function certForKey (cert, keyHex, associationHex, opts) {
   }
 }
 
+// The signatures verifyCert and verifyUsernameRecord check, in their order,
+// as { message, signature, publicKey } for verified.warm: the association's
+// first, then the one by the issuer it signed for. null when the shape does
+// not pass (the real check then says why). Checks nothing itself.
+function certChain (cert) {
+  try {
+    if (validateCertShape(cert) !== null) return null
+    if (cert.v === 2) return issuedChain(cert, certPayloadV2(cert))
+    return [link(certPayload(cert), cert.signature, cert.association)]
+  } catch {
+    return null
+  }
+}
+
+function usernameChain (record) {
+  try {
+    if (validateUsernameRecordShape(record) !== null) return null
+    return issuedChain(record, usernameRecordPayload(record))
+  } catch {
+    return null
+  }
+}
+
+function issuedChain (o, payload) {
+  const delegation = { v: 1, issuer: o.issuer, date: o.issuerDate, association: o.association, signature: o.issuerSignature }
+  if (validateIssuerCertShape(delegation) !== null) return null
+  return [link(issuerCertPayload(delegation), o.issuerSignature, o.association), link(payload, o.signature, o.issuer)]
+}
+
+function link (message, signatureHex, keyHex) {
+  return { message, signature: b4a.from(signatureHex, 'hex'), publicKey: b4a.from(keyHex, 'hex') }
+}
+
 function verifySeederCert (cert, associationHex) {
   try {
     if (validateSeederCertShape(cert) !== null) return { ok: false, reason: 'malformed' }
@@ -622,6 +655,8 @@ module.exports = {
   validateCertShape,
   verifyCert,
   certForKey,
+  certChain,
+  usernameChain,
   checkIssuer,
   verifyIssued,
   validDelegation,

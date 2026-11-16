@@ -95,6 +95,7 @@ const { validateDescriptor, validateMediaHeader, latestMediaCores, followSet, ha
 const { latestUsername, heldUsernames } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { buildFeed } = require('@varanda/core/lib/feed')
+const { warmLogs } = require('./warm-sigs')
 const { foldMoments, ownPast, showingMoment } = require('@varanda/core/lib/moments')
 const { applyDeletes, deletedSeqs, shownMedia, liveMediaRefs, overlaps, clearDeleted, presentLength } = require('@varanda/core/lib/deletion')
 const { engagementState, isLiked, isReposted } = require('@varanda/core/lib/engagement')
@@ -2262,6 +2263,7 @@ async function gatherLogs (ctx) {
     })
     slots.push(read === null ? { key, reason: 'no-cert' } : { key, read })
   }
+  await warmLogs([own, ...slots.filter((s) => s.read).map((s) => ({ key: s.key, entries: s.read.entries }))], association)
   // A snapshot adopted during the reads (the run is live) decides the answer.
   const final = await moderation(ctx.storage, association)
   checkOwnDiary(ctx)
@@ -2329,6 +2331,8 @@ async function profileRead (ctx, { authors }) {
   for (const key of keys) {
     if (key !== own.key && HEX64.test(key)) reads.set(key, await replicaRead(ctx, key, mod))
   }
+  const logs = [...reads].filter(([, read]) => read !== null).map(([key, read]) => ({ key, entries: read.entries }))
+  await warmLogs(own.entries === null ? logs : [own, ...logs], association)
   // A snapshot adopted during the reads (the run is live) decides the answer.
   const final = await moderation(ctx.storage, association)
   if (own.entries !== null) checkOwnDiary(ctx)
