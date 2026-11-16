@@ -18,7 +18,7 @@
 // null), onBack, onSaved({ answer, author, seq }).
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ScrollView, StyleSheet, View } from 'react-native'
+import { Keyboard, ScrollView, StyleSheet, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { sha256 } from '@noble/hashes/sha2.js'
 import rpc from '@varanda/rpc'
@@ -45,6 +45,7 @@ import { TopBar } from '../ui/TopBar'
 import { ErrorState } from '../ui/States'
 import { useStyles } from '../ui/ThemeProvider'
 import { space } from '../ui/theme'
+import { useKeyboardOpen } from '../ui/keyboardAvoid'
 
 const { feira, MAX_TEXT } = rpc
 
@@ -96,6 +97,8 @@ function Chips ({ options, value, onPick, disabled }) {
 export default function AnuncioEditar ({ author, seq, me = null, actingPage = null, onBack, onSaved }) {
   const styles = useStyles(makeStyles)
   const insets = useSafeAreaInsets()
+  // The open keyboard already covers the gesture bar; its inset would leave a band between the bar and the keyboard.
+  const keyboardOpen = useKeyboardOpen()
   const node = useNode()
   const nodeRef = useRef(node)
   nodeRef.current = node
@@ -336,6 +339,8 @@ export default function AnuncioEditar ({ author, seq, me = null, actingPage = nu
 
   const save = async () => {
     if (sendingRef.current || pending !== null || conflict || encoding) return
+    // Saving lowers the keyboard so the result and any error stay reachable.
+    Keyboard.dismiss()
     sendingRef.current = true
     setSending(true)
     setError('')
@@ -470,7 +475,7 @@ export default function AnuncioEditar ({ author, seq, me = null, actingPage = nu
         </ScrollView>
         {pending === null && !conflict
           ? (
-            <View style={[styles.bar, { paddingBottom: insets.bottom + space.md }]}>
+            <View style={[styles.bar, { paddingBottom: keyboardOpen ? space.md : insets.bottom + space.md }]}>
               {error !== '' ? <ErrorText>{error}</ErrorText> : null}
               <Btn label='Salvar' block onPress={save} pending={sending} disabled={!online || encoding} />
             </View>

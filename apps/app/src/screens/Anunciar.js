@@ -18,7 +18,7 @@
 // Props: initialPlace ({ uf, city }), onBack, registerBackGuard, onPublished({ answer, dest }).
 
 import { useEffect, useRef, useState } from 'react'
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { Keyboard, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { sha256 } from '@noble/hashes/sha2.js'
 import rpc from '@varanda/rpc'
@@ -49,6 +49,7 @@ import { ListingTile } from '../ui/ListingTile'
 import { Sheet } from '../ui/Sheet'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { space } from '../ui/theme'
+import { useKeyboardOpen } from '../ui/keyboardAvoid'
 
 const { feira, MAX_TEXT } = rpc
 
@@ -75,6 +76,8 @@ export default function Anunciar ({ initialPlace = null, onBack, registerBackGua
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const insets = useSafeAreaInsets()
+  // The open keyboard already covers the gesture bar; its inset would leave a band between the bar and the keyboard.
+  const keyboardOpen = useKeyboardOpen()
   const node = useNode()
   const nodeRef = useRef(node)
   nodeRef.current = node
@@ -156,6 +159,8 @@ export default function Anunciar ({ initialPlace = null, onBack, registerBackGua
     if (sendingRef.current || encoding) return
     const [problem] = stepErrors(form, STEPS[index], ack)
     if (problem) {
+      // A refusal lowers the keyboard so the field in error and the rest of the step can be reached.
+      Keyboard.dismiss()
       stepErrorRef.current = true
       setField(problem.field)
       setError(problem.error)
@@ -471,7 +476,7 @@ export default function Anunciar ({ initialPlace = null, onBack, registerBackGua
             {pending !== null && typeof pending.retry !== 'function' ? <Soft>{UNKNOWN_PUBLICATION}</Soft> : null}
           </Stepper>
         </ScrollView>
-        <View style={[styles.bar, { paddingBottom: insets.bottom + space.md }]}>
+        <View style={[styles.bar, { paddingBottom: keyboardOpen ? space.md : insets.bottom + space.md }]}>
           {error !== '' ? <ErrorText>{error}</ErrorText> : null}
           {pending !== null
             ? (
