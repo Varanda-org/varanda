@@ -6687,9 +6687,8 @@ Limites desta caminhada:
 
 - Nenhuma caixa acima foi marcada nesta documentação.
 - Letras e números colados (`termo123`) e a prévia de link passam a ser conferidos: veja `docs/verification/fix-conferencia-palavras-sobras.md`.
-- O serviço de conta não conhece a lista, então um @nome só é recusado no app.
-- Um app modificado, um build antigo ou a CLI publicam sem passar por ela. Isso se confere lendo `apps/app/src/wordCheck.js`: o protocolo e o semeador não têm a lista.
-- Ela não lê fotos nem áudio, e grafias diferentes passam.
+- O serviço de conta passou a recusar um @nome novo e o que uma Página publica com um termo da lista; o que fica de fora (publicações de membro por app modificado, build antigo ou CLI; fotos e áudio, issue #79) está em `docs/verification/fix-word-check-leftovers.md`.
+- Grafias diferentes passam.
 
 ## 139. Mensagem em particular numa publicação de Página (PR fix/page-dm-from-posts)
 
@@ -6856,7 +6855,7 @@ Limites desta caminhada:
 
 - Nenhuma caixa acima foi marcada nesta documentação.
 - Os testes por leitura do código não substituem a conferência das telas no aparelho ou no simulador.
-- A lista continua local ao app; um app modificado, um build antigo ou a CLI podem publicar sem essa conferência. Fotos e áudio não são analisados.
+- Momentos e depoimentos são escritos no diário de membro: um app modificado, um build antigo ou a CLI podem publicar sem essa conferência, e fotos e áudio não são analisados. Decisão e limites em `docs/verification/fix-word-check-leftovers.md`.
 
 ## 144. Momentos, Feira e botão de publicar nos depoimentos: ajustes visuais (PR fix/momentos-feira-polish)
 

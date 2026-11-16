@@ -250,7 +250,7 @@ test('Conversa send handler: uncertain and plain failures keep text, with one mu
 
 test('Conversa send handler: refusal, link and page plans never mutate', async (t) => {
   const refused = await sending()
-  const { BLOCKED_TERMS } = await import('../src/blockedTerms.js')
+  const { BLOCKED_TERMS } = require('@varanda/rpc')
   t.is(await refused.send(BLOCKED_TERMS[0]), false)
   t.ok(refused.state.note.includes('não permite'))
   t.is(refused.state.requests.length, 0)

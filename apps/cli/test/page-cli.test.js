@@ -73,6 +73,8 @@ test('page cli: private group tokens read in pt-BR', (t) => {
   t.is(serviceError('privado').token, 'privado')
   t.is(serviceError('sem-caixa').message, 'a página ainda não ativou as Conversas privadas no app')
   t.is(serviceError('sem-caixa', true).uncertain, true)
+  t.is(serviceError('termo-recusado').token, 'termo-recusado', 'the service word check')
+  t.ok(serviceError('termo-recusado').message.startsWith('o texto tem um termo'))
   t.is(serviceError('outro').token, 'indisponivel', 'an unknown token stays indisponivel')
 })
 

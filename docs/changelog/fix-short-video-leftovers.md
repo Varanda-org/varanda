@@ -2,7 +2,7 @@
 
 ### Alterado
 
-- O bloqueio de um diário apaga do semeador a foto ou o vídeo dos momentos dele: no drop de um diário bloqueado, em tempo de execução, na partida ou ao desfazer uma admissão que a lista alcançou no meio, o semeador lê os registros `moment` do diário e remove os blobs que eles nomeiam antes de purgar o núcleo. Uma falha nessa remoção é uma falha de purga: o diário continua listado e a próxima partida tenta de novo. Para quem opera: um diretório de blob que o semeador não consegue remover (permissão, erro de disco) agora para o semeador e impede a partida até ser corrigido. Um diário que copiou ids de momentos de outras pessoas leva esses blobs junto no bloqueio (risco aceito, `docs/protocol.md` seção 13). Termos e Política na versão 66.
+- O bloqueio de um diário apaga do semeador a foto ou o vídeo dos momentos dele: no drop de um diário bloqueado, em tempo de execução, na partida ou ao desfazer uma admissão que a lista alcançou no meio, o semeador lê os registros `moment` do diário e remove os blobs que eles nomeiam antes de purgar o núcleo. Uma falha nessa remoção é uma falha de purga: o diário continua listado e a próxima partida tenta de novo. Para quem opera: um diretório de blob que o semeador não consegue remover (permissão, erro de disco) agora para o semeador e impede a partida até ser corrigido. Um diário que copiou ids de momentos de outras pessoas leva esses blobs junto no bloqueio (risco aceito, `docs/protocol.md` seção 13). Termos e Política na versão 67.
 
 ### Corrigido
 

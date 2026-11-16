@@ -110,6 +110,8 @@ test('pageError maps tokens to pt-BR and everything else to unavailable', async 
   t.is(pageError('midia-invalida').message, 'Foto não aceita')
   t.is(pageError('limite').message, 'Limite atingido')
   t.is(pageError('termos-pendentes').message, 'Aceite os Termos para continuar')
+  t.is(pageError('termo-recusado').code, 'termo-recusado', 'the service word check')
+  t.ok(pageError('termo-recusado').message.startsWith('Não dá para publicar: o texto tem um termo'))
   t.is(pageError('<script>').code, 'indisponivel')
   t.is(pageError('__proto__').code, 'indisponivel')
   t.is(pageError('troca-bloqueada', '2026-01-02T12:00:00.000Z').code, 'troca-bloqueada')
