@@ -282,6 +282,26 @@ test('encodeThumbnail: a header past the photo bounds is dropped before any deco
   t.alike(thumbBox.log, [[{ resize: { width: 1, height: 1 } }]], 'native: one resize from the header size, no full-size probe')
 })
 
+// A JPEG of 640 x 480 stored pixels with an EXIF orientation in its APP1.
+function orientedJpeg (orientation) {
+  const seg = (m, body) => [0xff, m, (body.length + 2) >> 8, (body.length + 2) & 0xff, ...body]
+  const tiff = [0x49, 0x49, 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, orientation, 0, 0, 0, 0, 0, 0, 0]
+  const sof = [8, 0x01, 0xe0, 0x02, 0x80, 3, 1, 0x11, 0, 2, 0x11, 1, 3, 0x11, 1]
+  return new Uint8Array([0xff, 0xd8, ...seg(0xe1, [0x45, 0x78, 0x69, 0x66, 0, 0, ...tiff]), ...seg(0xc0, sof), 0xff, 0xd9])
+}
+
+test('native encodeThumbnail: a JPEG taken sideways is resized to its turned sides', async (t) => {
+  const encNative = await import('../src/media/encode.native.js')
+  thumbBox.log = []
+  const turned = await encNative.encodeThumbnail(orientedJpeg(6), 'image/jpeg')
+  t.alike(thumbBox.log[0], [{ resize: { width: 240, height: 320 } }], 'orientation 6: the decoder turns it first, so the resize keeps the turned sides')
+  t.is(turned.width, 240)
+  t.is(turned.height, 320)
+  thumbBox.log = []
+  await encNative.encodeThumbnail(orientedJpeg(1), 'image/jpeg')
+  t.alike(thumbBox.log[0], [{ resize: { width: 320, height: 240 } }], 'orientation 1: the stored sides')
+})
+
 test('native buildPreview: the body is read as a stream and cancelled past the cap', async (t) => {
   const { buildPreview } = await native()
   let reads = 0
@@ -456,6 +476,54 @@ test('native buildPreview: a redirected or wrong-type thumbnail gives no image',
     t.is(withPage.title, 'Vídeo')
     t.is(withPage.imageBytes, null, name + ': the page card without an image')
   }
+})
+
+test('native buildPreview: a link that redirects goes to the account service of a hosted node', async (t) => {
+  const { buildPreview } = await native()
+  const calls = []
+  const account = {
+    previewPolicy: async () => true,
+    previewFetch: async (url, opts) => {
+      calls.push({ url, opts })
+      return { url: 'https://example.org/longa', host: 'example.org', title: 'Longa', desc: '', imageBytes: PNG, imageMime: 'image/png' }
+    }
+  }
+  const hosted = { member: MEMBER, request: async () => ({}), origin: undefined, account }
+  const moved = [
+    ['a 301', async () => response(301, 'text/html', enc(''), URL1)],
+    ['a 302 with no type', async () => response(302, '', enc(''), URL1)],
+    ['an opaque manual redirect', async () => response(0, '', enc(''), '', { type: 'opaqueredirect' })],
+    ['the transport followed one', async () => response(200, 'text/html', enc(HTML), URL1, { redirected: true })],
+    ['another landing URL', async () => response(200, 'text/html', enc(HTML), 'https://example.org/longa')]
+  ]
+  for (const [name, fetch] of moved) {
+    const p = await buildPreview(URL1, { fetch, ...hosted })
+    t.alike(p, { url: 'https://example.org/longa', host: 'example.org', title: 'Longa', desc: '', imageBytes: PNG, imageMime: 'image/png' }, name + ': the service card')
+  }
+  t.is(calls.length, moved.length, 'one service call per redirect')
+  t.is(calls[0].url, URL1, 'the link as written')
+  t.is(calls[0].opts.member, MEMBER, 'with the member session')
+
+  const direct = await buildPreview(URL1, { fetch: async (url) => url === URL1 ? response(200, 'text/html', enc(HTML), URL1) : response(200, 'image/png', PNG, url), ...hosted })
+  t.is(direct.title, 'Título & mais', 'a page that answers itself is read on the device')
+  t.is(await buildPreview(URL1, { fetch: async () => response(404, 'text/html', enc(HTML), URL1), ...hosted }), null, 'another failure is not a redirect')
+  const imageMoved = await buildPreview(URL1, { fetch: async (url) => url === URL1 ? response(200, 'text/html', enc(HTML), URL1) : response(302, 'image/png', PNG, url), ...hosted })
+  t.is(imageMoved.imageBytes, null, 'a redirected image still gets no thumbnail')
+  t.is(calls.length, moved.length, 'none of these asked the service')
+
+  const short = moved[0][1]
+  t.is(await buildPreview(URL1, { fetch: short, ...hosted, origin: null }), null, 'a node that is not hosted has no service')
+  t.is(await buildPreview(URL1, { fetch: short, ...hosted, member: undefined }), null, 'no member session')
+  t.is(await buildPreview(URL1, { fetch: short, ...hosted, account: { ...account, previewPolicy: async () => false } }), null, 'previews off at the service')
+  t.is(await buildPreview(URL1, { fetch: short, ...hosted, account: { ...account, previewFetch: async () => { throw new Error('limite-previa') } } }), null, 'the service refuses')
+  t.is(calls.length, moved.length)
+
+  const ctl = new AbortController()
+  const late = { ...account, previewFetch: async (url, opts) => { ctl.abort(); return account.previewFetch(url, opts) } }
+  t.is(await buildPreview(URL1, { fetch: short, ...hosted, account: late, signal: ctl.signal }), null, 'aborted while the service answered')
+
+  const consent = await buildPreview(YT_WATCH, { fetch: async (url) => url === YT_WATCH ? response(302, 'text/html', enc(''), url) : response(200, 'image/jpeg', JPEG, url), ...hosted, origin: null })
+  t.alike(consent, { url: YT_WATCH, host: 'www.youtube.com', title: 'YouTube', desc: '', imageBytes: JPEG, imageMime: 'image/jpeg' }, 'with no service, a redirected YouTube page keeps the provider card')
 })
 
 test('native buildPreview: an aborted build of a music link yields null', async (t) => {

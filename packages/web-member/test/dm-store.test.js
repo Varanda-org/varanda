@@ -423,6 +423,33 @@ test('an eviction interrupted after an item is gone never leaves that entry read
   await again.close()
 })
 
+test('a failed read of a cached item misses once and keeps the entry cached', async (t) => {
+  const base = memoryNodeStorage()
+  let failing = null
+  const storage = {
+    ...base,
+    readJson: async (k) => {
+      if (k === failing) throw new Error('falha de leitura')
+      return base.readJson(k)
+    }
+  }
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  await s.putMedia(PEER, ID, [b4a.from('foto-um'), b4a.from('foto-dois')])
+  const name = (await base.readJson('dmMediaIndex')).items[0].n
+  failing = 'dmMedia/' + name + '/1'
+  t.is(await s.getMedia(PEER, ID), null, 'the read that failed is a miss')
+  t.ok(s.hasMedia(PEER, ID), 'the entry is still cached')
+  failing = null
+  const got = await s.getMedia(PEER, ID)
+  t.ok(got !== null && b4a.equals(got[1], b4a.from('foto-dois')), 'the next read opens the intact item')
+  await s.close()
+  const again = createDmStore({ storage })
+  await open(again, key(7))
+  t.ok(again.hasMedia(PEER, ID), 'and it is cached after a reopen')
+  await again.close()
+})
+
 test('a finished entry with a lost item reads as not cached from then on', async (t) => {
   const storage = memoryNodeStorage()
   const s = createDmStore({ storage })
