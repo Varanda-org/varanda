@@ -12,7 +12,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { loadTermsRecord, saveTermsRecord } from './termsStore'
-import { withMember, withSynced, withoutMember } from './terms'
+import { withHeld, withMember, withSynced, withoutMember } from './terms'
 
 export function useTerms (version) {
   const [status, setStatus] = useState('loading')
@@ -74,6 +74,15 @@ export function useTerms (version) {
     commit(withMember(r, version, member, c.at))
   }, [version, commit, takeClaim])
 
+  // An acceptance the account service holds for this member and version
+  // (given on another device). An answer for another version changes
+  // nothing. The claim is not touched: it belongs to this page load's own
+  // acceptance.
+  const acceptHeld = useCallback((member, heldVersion, acceptedAt) => {
+    if (heldVersion !== version) return
+    commit(withHeld(recordRef.current, version, member, acceptedAt))
+  }, [version, commit])
+
   const markSynced = useCallback((member) => {
     commit(withSynced(recordRef.current, member))
   }, [commit])
@@ -82,5 +91,5 @@ export function useTerms (version) {
     commit(withoutMember(recordRef.current, member))
   }, [commit])
 
-  return { status, record, claim, saveFailed, accept, bind, markSynced, dropMember }
+  return { status, record, claim, saveFailed, accept, acceptHeld, bind, markSynced, dropMember }
 }

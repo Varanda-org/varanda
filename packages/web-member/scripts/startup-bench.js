@@ -8,6 +8,7 @@
 //
 //   node scripts/startup-bench.js [--follows N] [--blocks M] [--own K]
 //                                 [--idb | --file] [--issued] [--js-verify]
+//                                 [--no-subtle] [--saved-sigs]
 //                                 [--reads] [--reads-twice] [--log] [--lease-gap]
 //                                 [--steps] [--early-reads] [--dm-rows N]
 //                                 [--groups G --group-blocks B]
@@ -21,6 +22,12 @@
 // issuer and a username record in every diary, as the account service
 // makes them. --js-verify: signatures are checked with sodium-javascript,
 // as the web bundle does (Node's native binding is about 60x faster).
+// --no-subtle: no WebCrypto Ed25519 ahead of the checks (lib/warm-sigs.js),
+// as on a browser without it; otherwise the checks it answered are counted
+// as subtleVerifies. --saved-sigs: before each measured run an unmeasured one
+// fills the digests of the signatures it verified, and the measured run starts
+// with an empty memo and those digests, as a returning visit that kept kv
+// verifiedSigs (lib/sig-store.js).
 // --reads: once the reader is published, the app's first reads run on the
 // lent cores (feed.read limit 20, profile.read of every author,
 // engagement.read), timed one after the other as the node's chain runs
@@ -59,7 +66,7 @@ const crypto = require('hypercore-crypto')
 const { WebSocket } = require('ws')
 const { createCert, createIssuerCert, createIssuedCert, createUsernameRecord, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const { memberCertRecord, followRecord, postRecord } = require('@varanda/core/lib/records')
-const { clearMemo } = require('@varanda/core/lib/verified')
+const { clearMemo, useSubtle, loadDigests, exportDigests, clearDigests } = require('@varanda/core/lib/verified')
 const { createDmStore } = require('../lib/dm-store')
 const { createDmEngine } = require('../lib/dm')
 const { dmLocalKeyFromPrf } = require('../lib/passkey')
@@ -74,7 +81,7 @@ function hex (buf) {
 }
 
 function parseArgs (argv) {
-  const opts = { follows: 50, blocks: 20, own: 200, idb: false, file: false, issued: false, jsVerify: false, reads: false, readsTwice: false, log: false, leaseGap: false, steps: false, earlyReads: false, dmRows: 0, groups: 0, groupBlocks: 0, runs: 3, json: false }
+  const opts = { follows: 50, blocks: 20, own: 200, idb: false, file: false, issued: false, jsVerify: false, noSubtle: false, savedSigs: false, reads: false, readsTwice: false, log: false, leaseGap: false, steps: false, earlyReads: false, dmRows: 0, groups: 0, groupBlocks: 0, runs: 3, json: false }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--idb') opts.idb = true
@@ -82,6 +89,8 @@ function parseArgs (argv) {
     else if (a === '--json') opts.json = true
     else if (a === '--issued') opts.issued = true
     else if (a === '--js-verify') opts.jsVerify = true
+    else if (a === '--no-subtle') opts.noSubtle = true
+    else if (a === '--saved-sigs') opts.savedSigs = true
     else if (a === '--reads') opts.reads = true
     else if (a === '--reads-twice') opts.readsTwice = true
     else if (a === '--log') opts.log = true
@@ -418,9 +427,9 @@ function instrumentStorage (storage, c) {
   return wrap(storage)
 }
 
-function instrument ({ jsVerify }) {
+function instrument ({ jsVerify, noSubtle }) {
   const original = { replicaExists: store.replicaExists, openReplica: store.openReplica, openDiary: store.openDiary }
-  const c = { existence: 0, opens: 0, inflight: 0, peak: 0, ownReads: 0, storageGets: 0, storageHas: 0, storageReads: 0, storageStats: 0, verifies: 0, verifyMs: 0, measuring: false }
+  const c = { existence: 0, opens: 0, inflight: 0, peak: 0, ownReads: 0, storageGets: 0, storageHas: 0, storageReads: 0, storageStats: 0, verifies: 0, verifyMs: 0, subtleVerifies: 0, measuring: false }
   function wrapCore (core, own = false) {
     for (const name of ['get', 'has']) {
       const original = core[name]
@@ -448,6 +457,16 @@ function instrument ({ jsVerify }) {
       c.verifyMs += Number(process.hrtime.bigint() - t) / 1e6
     }
   }
+  const platform = globalThis.crypto && globalThis.crypto.subtle
+  useSubtle(noSubtle || !platform
+    ? null
+    : {
+        importKey: (...args) => platform.importKey(...args),
+        verify: (...args) => {
+          if (c.measuring) c.subtleVerifies++
+          return platform.verify(...args)
+        }
+      })
   store.replicaExists = async function (...args) {
     if (c.measuring) c.existence++
     return original.replicaExists.apply(this, args)
@@ -472,6 +491,8 @@ function instrument ({ jsVerify }) {
     restore () {
       Object.assign(store, original)
       sigCrypto.verify = nativeVerify
+      useSubtle(platform || null)
+      clearDigests()
     }
   }
 }
@@ -566,7 +587,7 @@ async function measure (f, url, c, opts) {
   const { runSync } = require('../lib/sync')
   const storage = f.storage
   clearMemo()
-  Object.assign(c, { existence: 0, opens: 0, inflight: 0, peak: 0, ownReads: 0, storageGets: 0, storageHas: 0, storageReads: 0, storageStats: 0, verifies: 0, verifyMs: 0, measuring: true })
+  Object.assign(c, { existence: 0, opens: 0, inflight: 0, peak: 0, ownReads: 0, storageGets: 0, storageHas: 0, storageReads: 0, storageStats: 0, verifies: 0, verifyMs: 0, subtleVerifies: 0, measuring: true })
   const ac = new AbortController()
   let published = null
   let timings = null
@@ -605,7 +626,7 @@ async function measure (f, url, c, opts) {
   c.measuring = false
   if (published === null) throw new Error('a sincronização terminou sem publicar o leitor: ' + JSON.stringify(result.errors))
   if (readError !== null) throw readError
-  const out = { ms: published, existence: c.existence, opens: c.opens, peakOpens: c.peak, ownReads: c.ownReads, verifies: c.verifies, verifyMs: c.verifyMs, storageGets: c.storageGets, storageHas: c.storageHas, storageReads: c.storageReads, storageStats: c.storageStats, startup, phases }
+  const out = { ms: published, existence: c.existence, opens: c.opens, peakOpens: c.peak, ownReads: c.ownReads, verifies: c.verifies, verifyMs: c.verifyMs, subtleVerifies: c.subtleVerifies, storageGets: c.storageGets, storageHas: c.storageHas, storageReads: c.storageReads, storageStats: c.storageStats, startup, phases }
   if (timings !== null) Object.assign(out, timings)
   Object.assign(out, early)
   if (opts.steps) {
@@ -626,6 +647,23 @@ async function measure (f, url, c, opts) {
   return out
 }
 
+// With --saved-sigs, an unmeasured run first fills the digests, then the
+// measured run starts as a returning visit: empty memo, the digests loaded.
+async function measured (f, url, c, opts) {
+  if (!opts.savedSigs) return measure(f, url, c, opts)
+  clearDigests()
+  loadDigests('')
+  await measure(f, url, c, opts)
+  const saved = exportDigests()
+  clearDigests()
+  loadDigests(saved)
+  try {
+    return { ...await measure(f, url, c, opts), savedDigests: saved.length / 64 }
+  } finally {
+    clearDigests()
+  }
+}
+
 async function main () {
   const opts = parseArgs(process.argv.slice(2))
   const url = 'ws://127.0.0.1:' + (await deadPort()) + '/seeder'
@@ -640,7 +678,7 @@ async function main () {
     for (let i = 0; i < opts.runs; i++) {
       if (!opts.file) {
         const extra = await extraReads(f, url, opts)
-        runs.push({ ...await measure(f, url, probe.counters, opts), ...extra })
+        runs.push({ ...await measured(f, url, probe.counters, opts), ...extra })
         continue
       }
       const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'varanda-startup-bench-'))
@@ -651,7 +689,7 @@ async function main () {
         const f = await prepare(opts, storage)
         instrumentStorage(storage, probe.counters)
         const extra = await extraReads(f, url, opts)
-        runs.push({ ...await measure(f, url, probe.counters, opts), ...extra })
+        runs.push({ ...await measured(f, url, probe.counters, opts), ...extra })
       } finally {
         probe.counters.measuring = false
         try {
@@ -691,7 +729,10 @@ async function main () {
     phases: runs[runs.length - 1].phases,
     certs: opts.issued ? 'v2 + nome de usuário' : 'v1',
     verify: opts.jsVerify ? 'sodium-javascript' : 'nativa',
+    subtle: opts.noSubtle ? 'desligado' : 'ligado',
+    savedDigests: opts.savedSigs ? runs[runs.length - 1].savedDigests : 0,
     verifies: runs[runs.length - 1].verifies,
+    subtleVerifies: runs[runs.length - 1].subtleVerifies,
     verifyMs: median((r) => r.verifyMs)
   }
   if (opts.reads) Object.assign(summary, { feedMs: median((r) => r.feedMs), profileMs: median((r) => r.profileMs), engagementMs: median((r) => r.engagementMs) })
@@ -712,12 +753,12 @@ async function main () {
     return
   }
   const lines = [
-    'seguidos ' + summary.follows + ' x ' + summary.blocks + ' blocos, diário próprio ' + summary.own + ' blocos, ' + summary.storage + ', certificados ' + summary.certs + ', verificação ' + summary.verify + ', ' + summary.runs + ' execuções',
+    'seguidos ' + summary.follows + ' x ' + summary.blocks + ' blocos, diário próprio ' + summary.own + ' blocos, ' + summary.storage + ', certificados ' + summary.certs + ', verificação ' + summary.verify + ', WebCrypto ' + summary.subtle + (opts.savedSigs ? ', ' + summary.savedDigests + ' resumos guardados' : '') + ', ' + summary.runs + ' execuções',
     'até publicar o leitor: mediana ' + summary.medianMs + ' ms, mínimo ' + summary.minMs + ' ms',
     'checagens de existência: ' + summary.existence,
     'réplicas abertas: ' + summary.opens + ' (pico simultâneo ' + summary.peakOpens + ')',
     'leituras de blocos do diário próprio: ' + summary.ownReads,
-    'assinaturas verificadas: ' + summary.verifies + ' (mediana ' + summary.verifyMs + ' ms)'
+    'assinaturas verificadas: ' + summary.verifies + ' (mediana ' + summary.verifyMs + ' ms), pelo WebCrypto: ' + summary.subtleVerifies
   ]
   if (opts.reads) lines.push('primeiras leituras (medianas): feed.read ' + summary.feedMs + ' ms, profile.read ' + summary.profileMs + ' ms, engagement.read ' + summary.engagementMs + ' ms')
   if (opts.readsTwice) lines.push('segundas leituras (medianas): feed.read ' + summary.feed2Ms + ' ms, profile.read ' + summary.profile2Ms + ' ms, engagement.read ' + summary.engagement2Ms + ' ms')

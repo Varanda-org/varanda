@@ -4,7 +4,16 @@
 // (community.list, then community.info), merged newest first like Conversas
 // (forward.js loadForwardDestinations over conversas.js mergeRows). A failed
 // list shows its error and a reload; a community that could not be read is
-// left out with a short note.
+// left out with a short note. "Carregar mais" reads the next dm.list pages
+// (loadMoreForwardDestinations) on a tap.
+//
+// Acting as a page, the caller passes the page's Conversas client as
+// `request` (dm-screen.js pageDmClient): the rows are the page's inbox only,
+// no groups, and each send is one dm.pageDraft and dm.pageSend with the text
+// alone (forward.js pageForwardSource; `mediaLeft` counts the items left out and
+// PAGE_MEDIA_LEFT says so). An uncertain page send keeps the client's re-put
+// of the same signed draft, and "Tentar de novo" calls only that: a page
+// never drafts and signs the message again.
 //
 // Enviar runs the destinations one after the other, in tap order, each with
 // forward.js forwardPlan and runForward: every photo or voice note is read
@@ -28,9 +37,10 @@
 // note must not go through one). runForward wipes them after the upload, and
 // nothing here names the original author.
 //
-// Props: { open, onClose, source, refs, identity }, where source is the
-// forwardPlan source and refs[i] the chatMedia ref of source.media[i]
-// (chatSend.js chatMediaRefs).
+// Props: { open, onClose, source, refs, identity, request?, mediaLeft? }, where
+// source is the forwardPlan source, refs[i] the chatMedia ref of
+// source.media[i] (chatSend.js chatMediaRefs), and request the page client
+// when acting as a page.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { fetch as expoFetch } from 'expo/fetch'
@@ -42,8 +52,8 @@ import { isAppClient } from '../appClient'
 import { whoOf, UNNAMED } from '../who'
 import { UNSURE_SEND } from '../dm'
 import {
-  AUDIENCE_QUESTION, EXPIRED, FORWARD_MAX, canRetry, forwardBusy, forwardPlan, loadForwardDestinations, needsAudience,
-  retryForward, runForward, stateOfPhase, targetOf, toggleSelection
+  AUDIENCE_QUESTION, EXPIRED, FORWARD_MAX, PAGE_MEDIA_LEFT, canRetry, canRetryPage, forwardBusy, forwardPlan, loadForwardDestinations,
+  loadMoreForwardDestinations, needsAudience, retryForward, retryPageForward, runForward, stateOfPhase, targetOf, toggleSelection
 } from '../forward'
 import { createChatMedia, pinChatMedia, sourceFor } from '../media/chatMedia'
 import { readReportAudio as readLocalBytes } from '../media/reportAudio'
@@ -85,17 +95,23 @@ async function readCached (ref, ctx) {
   }
 }
 
-export function ForwardSheet ({ open, onClose, source, refs, identity }) {
+export function ForwardSheet ({ open, onClose, source, refs, identity, request: pageRequest = null, mediaLeft = 0 }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const node = useNode()
-  const request = node.request
+  const pageMode = typeof pageRequest === 'function'
+  const request = pageMode ? pageRequest : node.request
   const names = useNames()
   const { resolveMany, profileOf } = names
   const [rows, setRows] = useState(null)
   const [partial, setPartial] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [reload, setReload] = useState(0)
+  // What the open read so far (loadForwardDestinations), the dm.list cursor
+  // "Carregar mais" goes on from, and that read's own state.
+  const loadedRef = useRef(null)
+  const [more, setMore] = useState(null)
+  const [moreLoad, setMoreLoad] = useState({ pending: false, error: '' })
   const [selected, setSelected] = useState([])
   const [askAudience, setAskAudience] = useState(false)
   // key -> { state, op?, error?, dropped? }
@@ -122,15 +138,40 @@ export function ForwardSheet ({ open, onClose, source, refs, identity }) {
     setRows(null)
     setPartial(false)
     setLoadError('')
-    loadForwardDestinations(request).then(({ rows: list, partial: some }) => {
+    loadedRef.current = null
+    setMore(null)
+    setMoreLoad({ pending: false, error: '' })
+    loadForwardDestinations(request, { groups: !pageMode }).then((loaded) => {
       if (!alive) return
-      setRows(list)
-      setPartial(some)
-      const peers = list.filter((r) => r.kind === 'dm').map((r) => r.peer)
+      loadedRef.current = loaded
+      setRows(loaded.rows)
+      setPartial(loaded.partial)
+      setMore(loaded.more)
+      const peers = loaded.rows.filter((r) => r.kind === 'dm').map((r) => r.peer)
       if (peers.length > 0) resolveMany(peers)
     }, (err) => { if (alive) setLoadError(errorText(err)) })
     return () => { alive = false }
-  }, [open, request, resolveMany, reload])
+  }, [open, request, pageMode, resolveMany, reload])
+
+  // A tap reads the next dm.list pages; an answer for an older read or open
+  // is dropped, and a failed read keeps the rows and says so.
+  const loadMore = () => {
+    const loaded = loadedRef.current
+    if (!loaded || !loaded.more || moreLoad.pending) return
+    const gen = genRef.current
+    setMoreLoad({ pending: true, error: '' })
+    loadMoreForwardDestinations(request, loaded).then((next) => {
+      if (genRef.current !== gen || loadedRef.current !== loaded) return
+      loadedRef.current = next
+      setRows(next.rows)
+      setMore(next.more)
+      setMoreLoad({ pending: false, error: '' })
+      const peers = next.dms.slice(loaded.dms.length).map((c) => c.peer)
+      if (peers.length > 0) resolveMany(peers)
+    }, (err) => {
+      if (genRef.current === gen && loadedRef.current === loaded) setMoreLoad({ pending: false, error: errorText(err) })
+    })
+  }
 
   useEffect(() => () => {
     genRef.current++
@@ -204,7 +245,11 @@ export function ForwardSheet ({ open, onClose, source, refs, identity }) {
         setOne(row.key, { state: 'pending' })
         const r = await runForward({ plan, target, readCache, readSource, media: node.media, request, live, uncertain: unsure })
         if (!live() && r.phase === 'cancelled') break
-        setOne(row.key, { state: stateOfPhase(r.phase), op: r.op, error: r.error ? errorText(r.error) : '', dropped: r.dropped })
+        // A page keeps only the client's re-put of the same signed draft.
+        const kept = pageMode
+          ? { retry: r.phase === 'uncertain' && r.error && typeof r.error.retry === 'function' ? r.error.retry : null }
+          : { op: r.op }
+        setOne(row.key, { state: stateOfPhase(r.phase), ...kept, error: r.error ? errorText(r.error) : '', dropped: r.dropped })
       }
     } finally {
       fresh.clear()
@@ -215,12 +260,19 @@ export function ForwardSheet ({ open, onClose, source, refs, identity }) {
     }
   }
 
+  const retryable = (entry) => (pageMode ? canRetryPage(entry) : canRetry(entry))
+
   // The explicit retry of one uncertain destination: its same request, once.
   const retry = async (key) => {
     const entry = status[key]
-    if (busy || !canRetry(entry)) return
+    if (busy || !retryable(entry)) return
     const setOne = setterFor(genRef.current)
     setOne(key, { ...entry, state: 'pending' })
+    if (pageMode) {
+      const p = await retryPageForward({ retry: entry.retry, uncertain: unsure })
+      setOne(key, { state: stateOfPhase(p.phase), retry: p.retry || null, error: p.error ? errorText(p.error) : '', dropped: entry.dropped })
+      return
+    }
     const r = await retryForward({ op: entry.op, request, uncertain: unsure })
     setOne(key, { state: stateOfPhase(r.phase), op: r.op || entry.op, error: r.error ? errorText(r.error) : '', dropped: entry.dropped })
   }
@@ -277,6 +329,7 @@ export function ForwardSheet ({ open, onClose, source, refs, identity }) {
       <ScrollView contentContainerStyle={styles.list} keyboardShouldPersistTaps='handled'>
         {waitHint && busy ? <View style={styles.pad}><Soft>{WAIT_HINT}</Soft></View> : null}
         {!started ? <View style={styles.pad}><Soft>{'Escolha até ' + FORWARD_MAX + ' conversas.'}</Soft></View> : null}
+        {!started && pageMode && mediaLeft > 0 ? <View style={styles.pad}><Soft>{PAGE_MEDIA_LEFT}</Soft></View> : null}
         {!started && partial ? <View style={styles.pad}><Soft>{PARTIAL_NOTE}</Soft></View> : null}
         {shown.map((row) => {
           const chosen = selected.includes(row.key)
@@ -302,13 +355,23 @@ export function ForwardSheet ({ open, onClose, source, refs, identity }) {
                     <Soft>{STATE_TEXT[entry.state] || ''}</Soft>
                     {entry.dropped ? <Soft>{EXPIRED}</Soft> : null}
                     {entry.state === 'failed' && entry.error ? <ErrorText>{entry.error}</ErrorText> : null}
-                    {canRetry(entry) ? <Pill label='Tentar de novo' onPress={() => retry(row.key)} disabled={busy} /> : null}
+                    {retryable(entry) ? <Pill label='Tentar de novo' onPress={() => retry(row.key)} disabled={busy} /> : null}
                   </View>
                   )
                 : null}
             </View>
           )
         })}
+        {!started && more
+          ? (
+            <View style={styles.pad}>
+              <ErrorText>{moreLoad.error}</ErrorText>
+              <View style={styles.inline}>
+                <Pill label='Carregar mais' onPress={loadMore} pending={moreLoad.pending} />
+              </View>
+            </View>
+            )
+          : null}
         {askAudience
           ? (
             <View style={styles.pad}>

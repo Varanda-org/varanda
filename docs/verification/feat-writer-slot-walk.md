@@ -65,6 +65,13 @@ Resultados da quarta rodada, cada arquivo sozinho com `node <arquivo>`:
 - CLI: `pages-groups` 3/3 (153), `account-pages-groups` 1/1 (49).
 - `npm run lint` limpo. A suíte inteira e `npm run demo` não foram rodados de novo nesta rodada.
 
+Junção com a `main` (#699, #700, #701), cada arquivo sozinho:
+
+- Conflitos: `group.js` (`diaryGroupKeys`: a caminhada desta branch, com o filtro por tipo da #699 para `group-join` e `group-cut`) e `docs/protocol.md` ("Entitled writers": o congelado desta branch e o "auto-covered" da #701; "Diary-bound roots" desta branch e "Automatic device enrolment" da #701).
+- A cobertura automática da #701 só alcança os escritores que a caminhada conta: o 9º além das 8 vagas vivas nunca é coberto, e um liberado não ganha nada (teste novo em `community-fold.test.js`, "slot walk and automatic admission: a writer over the live slots or released is never covered (#350)"; a metade do liberado falha com o `group.js` da `main`). O congelado só conta abaixo do corte (teste da #701 "group-cut and automatic admission", verde na junção).
+- A espera da troca periódica da #700 (`cutUnknownEntitled`) continua valendo com a dobra desta branch: teste novo em `group-private.test.js`, "a hole in an entitled writer's diary holds the periodic rekey under the slot walk; a mark it holds still cuts (#350)". É teste de propriedade da junção, não de regressão.
+- `group` 153/153 (1292), `group-private` 126/126 (886), `community-fold` 116/116 (1099), `group-member` 13/13 (151), `group-rekey` 15/15 (115), `private-rekey` 9/9 (46), `private-member-3` 7/7 (37), `seeder-groups-cuts` 11/11 (282), `seeder-groups` 43/43 (262), `admission-caps` 11/11 (50); no navegador, `private-ops` 24/24 (231), `community-devices` 10/10 (47), `periodic-rekey` 11/11 (85), `device-upkeep-ops` 29/29 (206). `npm run lint` limpo.
+
 Resultados da segunda e da terceira rodada (revisão e decisão sobre o corte 0), cada arquivo sozinho com `node <arquivo>`:
 
 - `community-fold` 112/112 (1051 asserções), `group-private` 121/121 (847), `group-member` 13/13 (151), `group` 147/147 (1237), `seeder-groups-cuts` 11/11 (299), `private-member-3` 7/7 (37), `private-ops` do navegador 24/24 (231).

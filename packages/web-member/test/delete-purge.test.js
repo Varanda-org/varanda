@@ -1274,3 +1274,55 @@ test('a followed replica that cannot be read is also reported as an event, not o
   const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '../lib/sync.js'), 'utf8')
   t.ok(src.includes("softError('falha ao ler a réplica de ' + key8(entry.key))\n        // A continuous run never returns errorsSoft, so the failure is also an event.\n        emit({ event: 'unreadable', key: entry.key })"))
 })
+
+// A Hypercore whose private internals changed shape must lose its block
+// cache instead of keeping it without eviction.
+async function plainCachedCore (t) {
+  const core = new Hypercore(require('random-access-memory'), { valueEncoding: 'json', cache: true })
+  await core.ready()
+  t.teardown(() => core.close(), { force: true })
+  await core.append({ n: 1 })
+  t.ok(core.cache, 'fixture: the core has a block cache')
+  return core
+}
+
+test('a core whose Hypercore internals are missing loses its block cache, sessions included', async (t) => {
+  const breaks = {
+    'no per-files state': (core) => { core.core = undefined },
+    'no state.clear': (core) => { core.core.clear = undefined },
+    'no bitfield.get': (core) => { core.core.bitfield = {} },
+    'no sessions list': (core) => { core.core.sessions = 'not a list' },
+    'a cache without delete': (core) => { core.cache = { get () {}, set () {} } }
+  }
+  for (const [label, brk] of Object.entries(breaks)) {
+    const core = await plainCachedCore(t)
+    const early = core.session()
+    t.teardown(() => early.close(), { force: true })
+    const sessions = core.sessions
+    const { core: state, cache } = core
+    const { clear, bitfield, sessions: stateSessions } = state
+    brk(core)
+    store.evictOnClear(core)
+    t.is(core.cache, null, label + ': the root has no cache')
+    t.ok(sessions.every((s) => s.cache === null), label + ': the open sessions have none')
+    const later = core.session()
+    t.teardown(() => later.close(), { force: true })
+    t.is(later.cache, null, label + ': a later session has none')
+    // Hypercore's own close needs its internals back.
+    core.core = state
+    later.core = state
+    core.cache = cache
+    Object.assign(state, { clear, bitfield, sessions: stateSessions })
+  }
+})
+
+test('a real store core keeps its block cache and a wrapped clear', async (t) => {
+  const { writer } = await ownDiaryWith(t, 2)
+  t.ok(writer.cache, 'the diary core keeps its block cache')
+  t.ok(writer.core[Object.getOwnPropertySymbols(writer.core).find((s) => s.description === 'varanda.evictsOnClear')], 'its clear is wrapped')
+})
+
+test('tripwire: the Hypercore web-member resolves is the version whose internals evictOnClear wraps', (t) => {
+  const pkg = require(require.resolve('hypercore/package.json', { paths: [require('node:path').join(__dirname, '..')] }))
+  t.is(pkg.version, '10.38.2', 'hypercore is 10.38.2 (found ' + pkg.version + '; if this fails, re-check the internals listed in node-store.js evictOnClear (core.core, state.clear, state.bitfield.get, state.sessions, core.cache and how sessions inherit it) before bumping, then update this version)')
+})
