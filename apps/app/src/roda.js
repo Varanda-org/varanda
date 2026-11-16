@@ -279,12 +279,6 @@ export function rodaLabel (n, open) {
   return childLabel(n, open)
 }
 
-export function commentsTitle (n) {
-  if (n === 1) return '1 comentário'
-  if (isCount(n)) return n + ' comentários'
-  return 'Comentários'
-}
-
 // A counts entry: a number or { replies }. flagged: present but unusable.
 function countOf (counts, key) {
   const value = read(counts, key)

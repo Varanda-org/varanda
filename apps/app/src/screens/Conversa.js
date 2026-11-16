@@ -16,7 +16,7 @@
 // The peek, follow and like/repost helpers are exported for Membro.js.
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import { AccessibilityInfo, KeyboardAvoidingView, StyleSheet, Text, View } from 'react-native'
+import { AccessibilityInfo, KeyboardAvoidingView, StyleSheet, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { FOLLOW_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
@@ -25,7 +25,7 @@ import { useNames } from '../names'
 import { fetchCounts, fetchMember, fetchPost, fetchRoda, COUNTS_MAX } from '../indexClient'
 import { assembleMember, assembleThread, planPeeks } from '../thread'
 import { mergeChildren, withOwnReply } from '../threadRows'
-import { AUTHOR_TAG, assembleRoda, canSwipeReply, commentOrder, commentRows, commentsTitle, rodaOrder, withAnchor } from '../roda'
+import { AUTHOR_TAG, assembleRoda, canSwipeReply, commentOrder, commentRows, rodaOrder, withAnchor } from '../roda'
 import { SEEK_PAGES, resolveRoot, seekTarget } from '../rodaLoad'
 import { isRef } from '../nav'
 import { quickReplyPlan, sendTextReply } from '../replySend'
@@ -59,7 +59,7 @@ import { SwipeReply } from '../ui/SwipeReply'
 import { ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
 import { revokeDeletedMedia } from '../media/cache'
-import { space, type } from '../ui/theme'
+import { space } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
 
 // Same value as packages/rpc/lib/limits.js ENGAGEMENT_LIMIT_MAX.
@@ -876,7 +876,7 @@ const SEED_ROW = { onOpen: undefined, onOpenParent: undefined }
 const INITIAL = {
   phase: 'loading', // 'loading' | 'ready' | 'error'
   error: '',
-  meta: null, // { indexing, complete, repliesTotal } of the root
+  meta: null, // { indexing, complete } of the root
   resolved: null, // the resolveRoot result the thread was built from
   root: null, // the main post's ref
   status: null, // 'ok' | 'orphan' (the root answers a post that cannot be read)
@@ -1109,7 +1109,6 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
       peekedRef.current = peeked
       learnPeeked(learnMany, peeked)
       resolveMany([...new Set([post].concat(page).filter(Boolean).flatMap((i) => i.quote ? [i.author, i.quote.author] : [i.author]))])
-      setCount(rootRef, { replies: index.repliesTotal, likes: index.likes, reposts: index.reposts, quotes: index.quotesTotal })
       if (refreshing) {
         putRodas(new Map())
         setRodaErrors(new Map())
@@ -1121,13 +1120,17 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
       }
       pruneOwnReplies(index.replies, ownReplies.current)
       const comments = withAnchor(commentOrder(ownComments.reduce(withOwnReply, page), { follows: followSet, ownKey }), anchor)
+      // The action bar is the only place the screen shows the count, so it
+      // keeps the floor the old header had: an own comment the index has not
+      // counted yet still shows.
+      setCount(rootRef, { replies: Math.max(index.repliesTotal, comments.length), likes: index.likes, reposts: index.reposts, quotes: index.quotesTotal })
       // A refresh keeps an unconfirmed root unconfirmed: its check runs again.
       if (!refreshing || viewRef.current.proven !== true) anchorRef.current = anchorOf(res, focusRef, focusTop)
       commit({
         phase: 'ready',
         error: '',
         refreshing: false,
-        meta: { indexing: index.indexing, complete: index.complete, repliesTotal: index.repliesTotal },
+        meta: { indexing: index.indexing, complete: index.complete },
         resolved: res,
         root: rootRef,
         status: res.status,
@@ -1185,7 +1188,7 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
         comments,
         unavailable: viewRef.current.unavailable + page.unavailable,
         next: index.next === current.next ? null : index.next,
-        meta: { indexing: index.indexing, complete: index.complete, repliesTotal: index.repliesTotal },
+        meta: { indexing: index.indexing, complete: index.complete },
         loadingMore: false
       })
       readCounts(refsOf(comments.slice(before.length)), alive)
@@ -1466,7 +1469,6 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
     ownReplies.current = new Map([...ownReplies.current].map(([key, items]) => [key, items.filter((item) => !gone(item))]))
     commit({
       comments: cur.comments.filter((item) => !gone(item)),
-      meta: wasComment && cur.meta ? { ...cur.meta, repliesTotal: Math.max(0, cur.meta.repliesTotal - 1) } : cur.meta,
       // The loads invalidated above never clear their own flags.
       loadingMore: false,
       refreshing: false
@@ -1597,11 +1599,9 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
         return false
       }
       if (holder !== null) ownReplies.current = mergeChildren(ownReplies.current, holder, [item])
-      // An own comment goes first, as own comments do in each page. The
-      // header count rises with it, as a delete lowers it.
+      // An own comment goes first, as own comments do in each page.
       if (toRoot) {
-        const meta = viewRef.current.meta
-        commit({ comments: [item].concat(viewRef.current.comments), meta: meta ? { ...meta, repliesTotal: meta.repliesTotal + 1 } : meta })
+        commit({ comments: [item].concat(viewRef.current.comments) })
       } else if (holder !== null) {
         const roda = rodasRef.current.get(holder)
         putRodas(new Map(rodasRef.current).set(holder, roda
@@ -1745,11 +1745,11 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
     return !!count && Number.isSafeInteger(count.replies) && count.replies > 0
   }))))
   const notes = []
+  if (phase === 'ready' && !view.post) notes.push('Esta publicação não pôde ser verificada agora.')
   if (error && phase === 'ready') notes.push(error)
   if (phase === 'ready' && status === 'orphan') notes.push(view.cut ? CUT_NOTE : PARENT_GONE_NOTE)
   if (meta && meta.indexing) notes.push('Ainda montando a conversa completa…')
   else if ((meta && meta.complete === false) || rodaGaps) notes.push('Algumas respostas podem faltar.')
-  const hasReplies = (meta ? meta.repliesTotal : 0) > 0 || comments.length > 0
   if (unavailable > 0) notes.push(unavailable === 1 ? '1 comentário indisponível' : String(unavailable) + ' comentários indisponíveis')
 
   const header = (
@@ -1776,23 +1776,13 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
           </>
           )
         : null}
-      {phase === 'ready' && !view.post
-        ? <View style={styles.note}><Soft>Esta publicação não pôde ser verificada agora.</Soft></View>
-        : null}
       {phase === 'error'
         ? <ErrorState message={displayText(error)} onRetry={() => load(false)} />
         : null}
-      {/* No "0 comentários" header over an empty thread; the notes still show. */}
-      {phase === 'ready' && (hasReplies || notes.length > 0)
+      {/* The count is not repeated here: the main post's action bar shows it. */}
+      {phase === 'ready' && notes.length > 0
         ? (
           <View style={styles.repliesHead}>
-            {hasReplies
-              ? (
-                <Text style={styles.repliesTitle} accessibilityRole='header'>
-                  {commentsTitle(Math.max(meta ? meta.repliesTotal : 0, comments.length))}
-                </Text>
-                )
-              : null}
             {notes.map((n) => <Soft key={n}>{n}</Soft>)}
           </View>
           )
@@ -1900,6 +1890,5 @@ const makeStyles = (colors) => StyleSheet.create({
   rowBox: { position: 'relative' },
   // Over the row: PostRow paints an opaque bg, so a tint under it would not show.
   flash: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: colors.accent, opacity: 0.12 },
-  repliesHead: { paddingHorizontal: 16, paddingVertical: 12, gap: 4, borderBottomWidth: 1, borderBottomColor: colors.line },
-  repliesTitle: { ...type.section, color: colors.soft }
+  repliesHead: { paddingHorizontal: 16, paddingVertical: 12, gap: 4, borderBottomWidth: 1, borderBottomColor: colors.line }
 })

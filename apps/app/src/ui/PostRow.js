@@ -19,8 +19,9 @@
 //   links (embedOf) use ./MusicEmbedCard. A link only in the text never gets
 //   a player.
 // - replyPreviews: optional [{ key, name, text }], not the link card above.
-//   Under the action bar, 'Comentários' and one line per preview ('Nome:
-//   texto'), at most two with text. Absent or empty renders nothing. Raw
+//   Under the action bar, one line per preview ('Nome: texto', no visible
+//   label; the button's accessibility label still starts with 'Comentários.'),
+//   at most two with text. Absent or empty renders nothing. Raw
 //   peer strings go through displayText here.
 // - previewsMore: optional string, the last line of that block inside the
 //   same button ('Ver todos os N comentários'), plain text in the same slot
@@ -597,7 +598,6 @@ function PostRowView ({
     ? null
     : (
       <>
-        <Text style={styles.previewsLabel}>Comentários</Text>
         {previewLines.map((line, index) => (
           <Text key={index + ':' + line.key} style={styles.previewLine} numberOfLines={1}>{previewLineText(line)}</Text>
         ))}
@@ -1029,7 +1029,6 @@ const makeStyles = (colors) => StyleSheet.create({
   },
   replyChipText: { ...type.meta, color: colors.soft, flexShrink: 1 },
   previews: { marginTop: 8, minHeight: layout.hit, justifyContent: 'center' },
-  previewsLabel: { ...type.replyMark, color: colors.soft, fontWeight: '700' },
   previewLine: { ...type.replyMark, color: colors.ink },
   text: { ...type.postText, color: colors.ink, marginTop: CAPTION_GAP },
   bar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 0, marginBottom: -4, marginLeft: -8, maxWidth: 360 },
