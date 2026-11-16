@@ -74,15 +74,17 @@ const LOG_LIMIT_DEFAULT = 20
 // (docs/rpc.md section 2, test/sizes.test.js). A post's worst item is its
 // MAX_MEDIA_PER_POST media descriptors, which outweigh a maximal link card.
 const LOG_LIMIT_MAX = 30
-const FEED_LIMIT_DEFAULT = 26
-const FEED_LIMIT_MAX = 26
+// Every FeedItem carries the widest avatar (235 bytes), which 26 maximal items
+// no longer leave room for.
+const FEED_LIMIT_DEFAULT = 25
+const FEED_LIMIT_MAX = 25
 // Keep the incomplete list bounded beside maximal media lists and the other
 // feed metadata (docs/rpc.md section 2, test/sizes.test.js).
 const FEED_INCOMPLETE_MAX = 16
-// A PeekItem adds round and avatar but omits the feed metadata lists, so
-// the feed maximum also fits (docs/rpc.md section 2, test/sizes.test.js).
+// A PeekItem adds round to the avatar every FeedItem carries and omits the
+// feed metadata lists, so 26 still fit (docs/rpc.md section 2, test/sizes.test.js).
 const PEEK_LIMIT_DEFAULT = 26
-const PEEK_LIMIT_MAX = FEED_LIMIT_MAX
+const PEEK_LIMIT_MAX = 26
 // Notices per page: the worst case fits MAX_MESSAGE (test/sizes.test.js).
 const NOTICES_LIMIT_DEFAULT = 30
 const NOTICES_LIMIT_MAX = 64
