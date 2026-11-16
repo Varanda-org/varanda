@@ -744,7 +744,35 @@ test('a banned diary\'s boxless private writer is not reboxed', async (t) => {
   const plan = await ops.deviceUpkeepPlan(b.ctx)
   t.absent(plan.enrol.some((e) => e.root === group), 'a ban is not worked around')
   t.alike(reasons(plan).filter((r) => r[0] === group), [[group, 'status']])
+})
+
+test('a leave on another device whose writer core has not arrived yet is respected too', async (t) => {
+  const { a, b, community, general, group } = await boxlessJoin(t)
+  await copyCore(a, b, group)
+  const keys = [community, general, group, await ownWriter(b, community), await ownWriter(b, general), await ownWriter(b, group)]
+  const x = await secondDevice(t, b, keys, [a])
+  t.alike((await ops.deviceUpkeep(x.ctx, { enrol: [{ root: community }, { root: general }] })).failed, [])
+  t.is((await ops.groupJoin(x.ctx, { group })).state, 'requested')
+  t.is((await ops.groupLeave(x.ctx, { group })).state, 'left')
+  // Only the diary reaches b: its off join is there, x's writer core is not.
+  await syncDiary(x, b)
+  const plan = await ops.deviceUpkeepPlan(b.ctx)
+  t.absent(plan.enrol.some((e) => e.root === group), 'no rebox on the local evidence of the leave')
   t.alike(reasons(plan).filter((r) => r[0] === group), [[group, 'status']])
+  const before = await footprint(b)
+  t.alike((await ops.deviceUpkeep(b.ctx, { enrol: [{ root: group }] })).enrolled, [])
+  t.alike(await footprint(b), before, 'nothing written, no slot spent')
+})
+
+test('a public group\'s boxless writer is never reboxed once its root is held', async (t) => {
+  const { a, members: [b], community } = await world(t, 1)
+  await ops.communityJoin(b.ctx, { community })
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Praia', join: 'open', community })
+  await share(a, b, [community])
+  t.is((await ops.groupJoin(b.ctx, { group, community })).state, 'pending')
+  t.alike(reasons(await ops.deviceUpkeepPlan(b.ctx)), [[group, 'unheld']], 'waited for while the root is unknown')
+  await copyCore(a, b, group)
+  t.alike(await ops.deviceUpkeepPlan(b.ctx), { enrol: [], share: [], skipped: [] }, 'public writers carry no box: nothing to replace')
 })
 
 test('a boxless private writer is skipped as locked without this device\'s box', async (t) => {

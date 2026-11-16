@@ -273,13 +273,15 @@
 //                seeder's page lists an own core at no more than we hold (or
 //                not at all), else 'group-behind { key, length, theirs }';
 //                once per length per link; 'group-writer { group,
-//                writer, private, own }' once per run when a writer core
-//                (never a root) of `group` passed its local check and was
-//                listed (the session's device upkeep plans the key re-share
+//                writer, private, own, account }' once per run when a
+//                writer core (never a root) of `group` passed its local
+//                check and was listed (the session's device upkeep plans
 //                after it): `private` is the root's verified visibility
 //                (false while unknown) and `own` whether this device holds
 //                a writer of its own in `group`, the only case a re-share
-//                can be due.
+//                can be due; `account` whether the writer is bound by the
+//                own diary (another device's writer, which a new device
+//                waits for to enrol).
 //   goals        every run: each group paged in full and each accepted
 //                foreign core at the length its page advertises (as the
 //                follows, G1); once runs also wait for every own group core
@@ -4429,7 +4431,7 @@ async function syncRun ({
       markGroupChanged(ge.group)
       if (ge.key !== ge.group && !writersAnnounced.has(ge.key)) {
         writersAnnounced.add(ge.key)
-        emit({ event: 'group-writer', group: ge.group, writer: ge.key, private: rootVis.get(ge.group) === 'private', own: groupOwn.some((m) => m.group === ge.group) })
+        emit({ event: 'group-writer', group: ge.group, writer: ge.key, private: rootVis.get(ge.group) === 'private', own: groupOwn.some((m) => m.group === ge.group), account: ge.diary === ownHex })
       }
       evaluate()
     }, () => {

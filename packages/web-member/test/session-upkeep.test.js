@@ -397,7 +397,7 @@ test('automatic re-share on the creator\'s device after its diary grows', async 
   // The sync reports each writer core it stores for the first time: the
   // shares a distributor owes need that full plan, which no precheck sees.
   for (const [group, writer] of [[community, await ownWriter(d, community)], [general, await ownWriter(d, general)], [P, dw]]) {
-    live.emit({ event: 'group-writer', group, writer, private: group === P, own: true })
+    live.emit({ event: 'group-writer', group, writer, private: group === P, own: group === P, account: true })
   }
   live.emit({ event: 'own-synced', length: grown })
   const gate = await sync.next(2)
@@ -576,15 +576,15 @@ test('a group-writer event arms the pass afresh, once per writer key', async (t)
 
   const plans = countPlans(t)
   const writer = hex(crypto.randomBytes(32))
-  restarted.emit({ event: 'group-writer', group: community, writer, private: true, own: true })
+  restarted.emit({ event: 'group-writer', group: community, writer, private: false, own: false, account: true })
   const next = await sync.next(2)
   t.ok(restarted.aborted, 'the new writer armed a pass')
   t.is(plans.calls, 1)
-  next.emit({ event: 'group-writer', group: community, writer, private: true, own: true })
+  next.emit({ event: 'group-writer', group: community, writer, private: false, own: false, account: true })
   await pause(150)
   t.absent(next.aborted, 'the same writer key arms nothing')
   t.is(plans.calls, 1)
-  next.emit({ event: 'group-writer', group: community, writer: hex(crypto.randomBytes(32)), private: true, own: true })
+  next.emit({ event: 'group-writer', group: community, writer: hex(crypto.randomBytes(32)), private: false, own: false, account: true })
   await sync.next(3)
   t.is(plans.calls, 2, 'another writer arms again')
   await b.web.request('sync.stop')
@@ -620,6 +620,36 @@ test('a group-writer arms the pass only for a private group this device writes i
   await pause(200)
   t.absent(next.aborted, 'the 65th key arms nothing')
   t.is(plans.calls, 1)
+  await b.web.request('sync.stop')
+  t.alike(b.internal, [])
+})
+
+test('the account\'s writer arriving after a status pass arms the pass, and the new device enrols', async (t) => {
+  const { b, sync, community, group } = await account(t)
+  // The first plan finds the account's writer not held yet: a status skip,
+  // which is no wait for a later sync, so the arming ends.
+  const real = ops.deviceUpkeepPlan
+  let first = true
+  ops.deviceUpkeepPlan = async (...args) => {
+    if (first) {
+      first = false
+      return { enrol: [], share: [], skipped: [{ root: community, reason: 'status', transient: false }] }
+    }
+    return real(...args)
+  }
+  t.teardown(() => { ops.deviceUpkeepPlan = real })
+  await b.web.request('sync.start')
+  const live = await sync.next(0)
+  live.emit({ event: 'own-synced', length: await diaryLength(b) })
+  await until(() => !first, { name: 'the status pass', timeoutMs: 5000 })
+  await pause(150)
+  live.emit({ event: 'groups-changed', group: community })
+  await pause(150)
+  t.is(await ownWriter(b, community), null, 'a disarmed upkeep plans nothing on groups-changed')
+  // The account's writer lands: the sync reports it as a writer the own diary binds.
+  live.emit({ event: 'group-writer', group: community, writer: hex(crypto.randomBytes(32)), private: false, own: false, account: true })
+  await until(async () => (await ownWriter(b, group)) !== null, { name: 'the enrolment', timeoutMs: 5000 })
+  t.ok(await ownWriter(b, community), 'the community writer too')
   await b.web.request('sync.stop')
   t.alike(b.internal, [])
 })
@@ -714,7 +744,7 @@ test('a new own length on an enrolled device does not stop the live run', async 
   t.alike(warningsOf(b), [], 'no warning at all')
 
   // A group-writer still plans in full: shares are invisible to the precheck.
-  run.emit({ event: 'group-writer', group: community, writer: hex(crypto.randomBytes(32)), private: true, own: true })
+  run.emit({ event: 'group-writer', group: community, writer: hex(crypto.randomBytes(32)), private: false, own: false, account: true })
   await sync.next(3)
   t.ok(run.aborted, 'the group-writer preempted the run')
   t.is(plans.calls, 1, 'one full plan')

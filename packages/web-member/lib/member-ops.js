@@ -5723,23 +5723,30 @@ function diaryBinds (ownEntries, root, writer) {
 }
 
 // A bound own writer of a private group that still writes (no leave of its
-// own, not unbound since) and whose header box is not this device's: null
-// from a join before the root arrived, or a box this device does not hold.
-// While locked only a boxless header is certain.
+// own, not unbound since) and whose header box is null (a join before the
+// root arrived). A writer with another box is counted by the fold, so only
+// an explicit tap replaces it.
 function needsRebox (ctx, base, g) {
   const key = g.own.key
   const core = g.cores.get(key)
   if (core === undefined || hasLeave(core.entries)) return false
   const last = groupJoinHistory(base.ownEntries, g.group).filter((j) => j.writer === key).pop()
   if (last === undefined || !last.on) return false
-  const box = boxHexOf(ctx)
-  const have = boxOfWriter(g, key)
-  return box === null ? have === null : have !== box
+  return boxOfWriter(g, key) === null
+}
+
+// Local evidence of a leave or unbind written on another device: the own
+// diary turned off a writer other than this device's. Its writer core may
+// not have arrived, so the fold alone cannot say the diary left.
+function leftElsewhere (base, g) {
+  return groupJoinHistory(base.ownEntries, g.group).some((j) => j.on === false && j.writer !== g.own.key)
 }
 
 // Whether the own writer `entry` of a root this device does not hold yet is
 // a boxless one still writing (the pending join): it will need a rebox when
-// the root arrives. Never throws.
+// the root arrives. The root's visibility is unknown until then, so a public
+// group's writer (always boxless) is waited for too: only the arming is kept,
+// and nothing is planned once the root is held and public. Never throws.
 async function boxlessUnheld (ctx, entry) {
   try {
     const core = await readGroupCore(ctx, entry.key)
@@ -5851,7 +5858,7 @@ async function deviceUpkeepPlan (ctx) {
       if (boxHexOf(ctx) === null) reason = 'locked'
       else if (g.built.orphan) reason = 'orphan'
       else if (g.community === null || g.c === null) reason = 'community-first'
-      else if (!reboxStatus(g, ownHex)) reason = 'status'
+      else if (!reboxStatus(g, ownHex) || leftElsewhere(base, g)) reason = 'status'
       if (reason === null) reason = autoEnrolRoom(g, ownHex)
       if (reason === null && !parentAdmits(g.c, ownHex, planned.has(g.community))) reason = 'community-first'
       if (reason === null) enrol.push({ root: key, kind: 'group', community: g.community, rebox: true })
@@ -5883,10 +5890,12 @@ async function deviceUpkeepPlan (ctx) {
 }
 
 // True when the own diary binds a root this device has no diary-bound own
-// writer for, exactly the enrol and repair candidates of deviceUpkeepPlan,
-// ignoring moderation: it may answer true for a blocked root, never false
-// when the plan could enrol. It cannot see the distributor share step, so
-// a false answer means no enrol and no repair, not an empty share list.
+// writer for, the enrol and repair candidates of deviceUpkeepPlan, ignoring
+// moderation: it may answer true for a blocked root, never false when the
+// plan could enrol or repair. It cannot see the distributor share step, nor
+// a rebox (that needs the boxes of a held root), so a false answer means no
+// enrol and no repair, not an empty share list; the session's
+// 'groups-changed' forces a full plan, which finds the rebox.
 // The session decides when the full plan runs. Only the own diary and the
 // kv writer list are read: a second Hypercore on a group core the live
 // sync holds would corrupt it (see withIdentity).

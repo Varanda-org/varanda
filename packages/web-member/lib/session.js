@@ -155,15 +155,21 @@
 // reload or a new connection from the next own-synced), and once per
 // arming by a 'settled' report after the passes ran out; a failed pass or
 // a failed root queues another within the bound; a 'group-writer' (a writer
-// core stored for the first time in a PRIVATE group this device writes in:
-// the event says both; once per key and at most MAX_UPKEEP_WRITERS keys per
+// core stored for the first time, either in a PRIVATE group this device
+// writes in, or bound by the own diary, i.e. another device's writer: the
+// event says so; once per key and at most MAX_UPKEEP_WRITERS keys per
 // session) arms afresh, so the distributor plans after the new device's
-// writer arrived. A public group has no keys to hand over and a device with
-// no writer there cannot write key blocks, so those events arm nothing;
-// the device's own enrolment follows its own length and 'groups-changed'.
-// A boxless writer of a private group whose root is not held yet (a join
-// before the root arrived) stays a transient 'unheld' skip, so the arming
-// lives until the root's 'groups-changed' plans the rebox; while armed, a
+// writer arrived and a new device enrols once the account's writer it waited
+// for is held. Any other writer (a public group or a foreign diary without an
+// own writer there) has no keys to hand over and changes no plan, so it arms
+// nothing. Where the event is not armed for (cap, locked, once run) a
+// private group with an own writer still leaves upkeepFull set, and
+// `private` is false while the root's visibility is unknown, which the
+// 10-minute full-plan age (UPKEEP_FULL_MAX_AGE_MS) covers.
+// A boxless writer of a root not held yet (a join before the root arrived;
+// the root's visibility is unknown, so a public one too) stays a transient
+// 'unheld' skip, so the arming lives until the root's 'groups-changed' plans
+// the rebox; while armed, a
 // 'groups-changed' (the root or writer a skipped root waited for) queues
 // another pass. A timer (upkeepDelayMs) coalesces a burst into one pass, at
 // most MAX_UPKEEP_PASSES per arming, so a plan the run's cores cannot serve
@@ -1389,8 +1395,10 @@ function createBrowserSession ({
                 // length its join made (or another diary's entitled
                 // writer): a fresh arming, once per writer key. Only a
                 // private group this device writes in can have keys to
-                // hand to it; anything else changes no plan.
-                if (ev.private === true && ev.own === true && typeof ev.writer === 'string' && HEX64.test(ev.writer) && !upkeepWriters.has(ev.writer)) {
+                // hand to it, and a writer the own diary binds (another
+                // device of the account) is what a new device waits for to
+                // enrol; anything else changes no plan.
+                if ((ev.account === true || (ev.private === true && ev.own === true)) && typeof ev.writer === 'string' && HEX64.test(ev.writer) && !upkeepWriters.has(ev.writer)) {
                   if (!once && !internal && keyPair !== null && groupPrf !== null && upkeepWriters.size < MAX_UPKEEP_WRITERS) {
                     upkeepWriters.add(ev.writer)
                     armUpkeep(upkeepLength)

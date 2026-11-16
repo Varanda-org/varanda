@@ -9,7 +9,15 @@ Parte da #350. Duas sobras da participação automática de um aparelho novo da 
    - Também exigidos: identidade desbloqueada (sem a chave, `locked`, transitório), raiz que não é órfã, comunidade-pai que admite (`parentAdmits`), reserva e vagas (`autoEnrolRoom`). O escritor antigo não pode ter saída própria nem ter sido desligado antes.
    - Raiz ainda não guardada: se o escritor próprio ligado é sem chave e ainda escreve, o plano devolve `unheld` (transitório). Assim a passada continua armada e o `groups-changed` da chegada da raiz planeja o rebox.
    - `deviceUpkeepNeeded` (a pré-checagem barata) não mudou: ela não vê chaves.
-2. **Limite do `group-writer` (#320).** `packages/web-member/lib/sync.js` passa a emitir `{ event: 'group-writer', group, writer, private, own }` (visibilidade verificada da raiz e se este aparelho tem escritor próprio no grupo). `packages/web-member/lib/session.js` arma a passada só para grupo privado em que o aparelho escreve, no máximo `MAX_UPKEEP_WRITERS = 64` chaves por sessão (era 512). Um escritor para o qual não se arma (teto, aparelho bloqueado, execução `once` ou interna) mantém `upkeepFull = true`, mas só quando pode haver repasse de chaves (privado com escritor próprio); grupo público ou sem escritor próprio não muda nada. O comentário de cabeçalho do `session.js`, `docs/rpc.md` (5.63) e `docs/protocol.md` (eventos do sync do navegador) descrevem isso. Nenhum outro consumidor de `group-writer` existe em `apps/app/src`, `packages/web-member/lib` ou nos testes além dos de upkeep.
+2. **Limite do `group-writer` (#320).** `packages/web-member/lib/sync.js` passa a emitir `{ event: 'group-writer', group, writer, private, own, account }` (visibilidade verificada da raiz e se este aparelho tem escritor próprio no grupo). `packages/web-member/lib/session.js` arma a passada só para grupo privado em que o aparelho escreve, no máximo `MAX_UPKEEP_WRITERS = 64` chaves por sessão (era 512). Um escritor para o qual não se arma (teto, aparelho bloqueado, execução `once` ou interna) mantém `upkeepFull = true`, mas só quando pode haver repasse de chaves (privado com escritor próprio); grupo público ou sem escritor próprio não muda nada. O comentário de cabeçalho do `session.js`, `docs/rpc.md` (5.63) e `docs/protocol.md` (eventos do sync do navegador) descrevem isso. Nenhum outro consumidor de `group-writer` existe em `apps/app/src`, `packages/web-member/lib` ou nos testes além dos de upkeep.
+
+## Ajustes da revisão
+
+- O evento `group-writer` ganhou `account` (o diário próprio liga o escritor) e a passada também arma por ele: sem isso, um aparelho novo perdia o gatilho quando o escritor da conta chegava depois de uma passada com `status`. Teste: `the account's writer arriving after a status pass arms the pass, and the new device enrols`.
+- Sem rebox quando o diário próprio já desligou, nesta raiz, um escritor que não é deste aparelho (saída em outro aparelho cujo núcleo ainda não chegou). Teste: `a leave on another device whose writer core has not arrived yet is respected too`.
+- Rebox só para `box: null`; uma chave diferente e não nula fica para o toque explícito.
+- `unheld` vale também para raiz pública (a visibilidade é desconhecida sem a raiz); só mantém a passada armada. Teste: `a public group's boxless writer is never reboxed once its root is held`.
+- `AGENTS.md`: a troca do escritor sem chave pelo próprio aparelho entra na exceção das escritas iniciadas pelo nó, como pede a #350.
 
 ## Como verificar
 
@@ -39,11 +47,10 @@ Com só `member-ops.js`, `session.js` e `sync.js` revertidos (`git stash push` d
 - `device-upkeep-ops.test.js`: `tests = 23/27 pass`, `asserts = 177/189 pass`; falham os quatro testes do rebox (24 a 27).
 - `session-upkeep.test.js`: falha o teste `a group-writer arms the pass only for a private group this device writes in, at most 64 keys`, e o do rebox termina com `tempo esgotado: the rebox` (o escritor sem chave nunca é trocado).
 
-Com as mudanças de volta: `device-upkeep-ops.test.js` `tests = 27/27 pass`, `asserts = 189/189 pass`; `session-upkeep.test.js` `tests = 25/25 pass`, `asserts = 148/148 pass`. `npm run lint` sem avisos.
+Com as mudanças de volta: `device-upkeep-ops.test.js` `tests = 29/29 pass`, `asserts = 200/200 pass` (depois dos ajustes da revisão); `session-upkeep.test.js` `tests = 26/26 pass`, `asserts = 151/151 pass`. `npm run lint` sem avisos.
 
 ## Não verificado / limites conhecidos
 
 - Não rodei a suíte inteira nem a demo; só os dois arquivos de teste acima e o lint.
 - Não conferi num navegador real: o rebox foi exercitado com cores por replicação direta e a sincronização simulada, como os demais testes de upkeep.
 - Um grupo público cuja raiz ainda não chegou e cujo escritor próprio é `box: null` (sempre o caso num grupo público) também devolve `unheld` até a raiz chegar, o que só mantém a passada armada dentro dos limites de passadas já existentes.
-- Um escritor com `box` de outra chave (não nulo) num grupo privado também é trocado quando a chave está desbloqueada; bloqueado, só um `box` nulo é tratado como certo.
