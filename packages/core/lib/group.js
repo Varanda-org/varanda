@@ -691,31 +691,6 @@ function cutTable (marks) {
   return { cuts, gaps }
 }
 
-// The lowest position each cut writer may end at, from what OTHER diaries'
-// counted records already rely on (owner decision, #350): the cuts of the
-// applied grants, demotions, admits and bans whose subject is the writer's
-// diary, and the basis refs of counted key blocks valid for sending. So a
-// diary never rewrites, by cutting its own writer, a decision another diary
-// took on top of it (a demoted admin cannot lift its own ban of someone).
-function cutFloors (state, kept) {
-  const diaryOf = new Map()
-  for (const l of kept) if (l.cut !== undefined) diaryOf.set(l.key, l.diary)
-  const floors = new Map()
-  const raise = (w, s) => {
-    if (diaryOf.has(w) && Number.isSafeInteger(s) && s > (floors.get(w) || 0)) floors.set(w, s)
-  }
-  for (const layers of [state.auth.rootAdmin, state.auth.bans, state.auth.admits]) {
-    for (const [d, list] of layers) {
-      for (const e of list) for (const [w, s] of e.cuts) if (diaryOf.get(w) === d) raise(w, s)
-    }
-  }
-  for (const { n, send, out } of state.keyNodes) {
-    if (!send || out || !Array.isArray(n.record.basis)) continue
-    for (const b of n.record.basis) if (diaryOf.get(b.writer) !== n.diary) raise(b.writer, b.seq + 1)
-  }
-  return floors
-}
-
 function groupJoinHistory (entries, group) {
   const out = []
   try {
@@ -1493,7 +1468,7 @@ function buildGroup (input) {
 }
 
 function fold (input) {
-  const bound = bindCut(input, false)
+  const bound = bindCores(input, false)
   if (bound === null) return emptyGroup()
   const { ctx, kept, incomplete, priv } = bound
   const result = priv ? foldPrivate(ctx, kept, input.keys) : { ...foldLogs(ctx, kept), sealed: 0, epoch: null, rekeyPending: false, entitled: [], removals: [] }
@@ -1527,7 +1502,7 @@ function resolveParent (input, G, header) {
 // (same binding rules for both): the root, the writers its diaries bound, at
 // most MAX_GROUP_WRITERS_PER_DIARY per diary and MAX_GROUP_WRITERS in all.
 // Null when the root has no valid header of the kind asked for.
-function bindCores (input, asCommunity, floors = null, known = null) {
+function bindCores (input, asCommunity) {
   const { root, writers, joins } = input || {}
   const now = Number.isFinite(input && input.now) ? input.now : Date.now()
   if (!isPlainObject(root) || !isHex64(root.key)) return null
@@ -1539,7 +1514,7 @@ function bindCores (input, asCommunity, floors = null, known = null) {
   const priv = header.kind === 'group' && header.visibility === 'private'
   const { bound, named, joinSeq, joinRejoin } = readJoins(joins)
   const rootBound = bound.has(creator + ':' + G)
-  const parent = known !== null ? known : asCommunity ? { C: null, orphan: false, incomplete: false } : resolveParent(input.community, G, header)
+  const parent = asCommunity ? { C: null, orphan: false, incomplete: false } : resolveParent(input.community, G, header)
   const C = parent.C
   let incomplete = !rootBound || parent.incomplete
   const marks = cutTable(input.marks)
@@ -1586,14 +1561,13 @@ function bindCores (input, asCommunity, floors = null, known = null) {
       else invalid.add(key)
       continue
     }
-    // A writer its own diary cut (owner decision, #350): its records from
-    // max(cut, 1) on are dropped before folding, raised to what other
-    // diaries' records rely on (cutFloors). Block 0, every leave (a cut never
-    // undoes a leave nor the rejoin naming it) and every key block (kept
-    // valid for reading only, so history stays readable) are never dropped.
+    // A writer its own diary cut (owner decision, #350, "Corte é final"):
+    // its records from max(cut, 1) on are dropped before folding, and no
+    // record of another diary brings them back. Block 0, every leave (a cut
+    // never undoes a leave nor the rejoin naming it) and every key block
+    // (kept valid for reading only, so history stays readable) stay.
     const own = marks.cuts.get(h.diary)
-    let cut = own && own.has(key) ? own.get(key) : Infinity
-    if (cut !== Infinity && floors !== null && floors.has(key)) cut = Math.max(cut, floors.get(key))
+    const cut = own && own.has(key) ? own.get(key) : Infinity
     const end = Math.max(cut, 1)
     const records = cut === Infinity ? log.records : log.records.filter((x) => x.seq < end || x.record.type === 'group-leave' || x.record.type === 'group-key')
     // A CW's generation counts its header's rejoin only when the diary's
@@ -1661,18 +1635,7 @@ function bindCores (input, asCommunity, floors = null, known = null) {
   // those binding a counted writer: nodes must not take the fold as
   // complete about cuts for them.
   const cutUnknown = new Set(sel.kept.filter((l) => marks.gaps.has(l.diary)).map((l) => l.diary))
-  return { ctx, kept: sel.kept, incomplete, priv, parent, cutUnknown }
-}
-
-// bindCores, then, when a counted writer is cut, a first fold finds the
-// positions other diaries' records rely on and the cores are bound again
-// with each cut raised to them (cutFloors). Both passes are pure, so the
-// result stays the same for any delivery order.
-function bindCut (input, asCommunity) {
-  const first = bindCores(input, asCommunity)
-  if (first === null || !first.kept.some((l) => l.cut !== undefined)) return first
-  const floors = cutFloors(foldCore(first.ctx, first.kept).state, first.kept)
-  return floors.size === 0 ? first : bindCores(input, asCommunity, floors, first.parent)
+  return { ctx, kept: sel.kept, incomplete, priv, cutUnknown }
 }
 
 // The generation an admit of diary D observed: the leaves of D its own cuts
@@ -3516,7 +3479,7 @@ function buildCommunity (input) {
 // cwDiary, counted, lastSeq, rootAdminC, bansC, everOn, created, overflow,
 // general, dropped.
 function foldCommunityState (input) {
-  const bound = bindCut(input, true)
+  const bound = bindCores(input, true)
   if (bound === null) return { result: emptyCommunity(), state: null }
   const { ctx, kept, incomplete } = bound
   // An unbound root carries no authority and no catalogue, and its

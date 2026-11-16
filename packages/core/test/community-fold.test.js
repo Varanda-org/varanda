@@ -2451,8 +2451,10 @@ test('group-cut on an own writer: its authority from the cut on stops counting (
   t.absent(r.authorityWriters.has(wA), 'but the writer is cut all the same')
 })
 
-test('group-cut: a demoted or banned admin cutting its own writer never rewrites its past moderation (#350)', (t) => {
-  const setup = ({ cut = null, demote = true, ban = false } = {}) => {
+test('group-cut: accepted limit, a diary that cuts its own writer below its own moderation undoes it (#350)', (t) => {
+  // Owner decision ("Corte é final"): the marked cut is the cut, even below
+  // records the diary already wrote as an admin. Another admin can act again.
+  const setup = ({ cut = null, demote = true, ban = false, reban = false } = {}) => {
     const C = community({ creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }, { diary: X, cw: cwX, status: 'member' }, { diary: Y, cw: cwY, status: 'member' }], creates: [{ by: Z, group: G1 }] })
     const g = groupIn(C, { key: G1, join: 'approval' })
     g.add(A, wA).add(X, wX).add(Y, wY)
@@ -2466,24 +2468,69 @@ test('group-cut: a demoted or banned admin cutting its own writer never rewrites
     if (ban) g.push(G1, groupBan({ member: A, on: true, cuts: [{ writer: wA, seq: g.len(wA) }], at: AT(12) }))
     // Written after the demotion: never counted, cut or not.
     g.push(wA, groupBan({ member: Y, on: true, cuts: [{ writer: wY, seq: g.len(wY) }], at: AT(13) }))
+    if (reban) g.push(G1, groupBan({ member: X, on: true, cuts: [{ writer: wX, seq: g.len(wX) }], at: AT(14) }))
     if (cut !== null) g.mark(A, wA, cut)
     return buildGroup(g.input())
   }
   const control = setup()
   t.is(control.members.get(X), 'banned')
   t.is(control.members.get(Y), 'member')
-  // An admin still in office is shielded from bans and could undo its own
-  // moderation anyway: its cut is not raised.
-  const still = setup({ cut: 1, demote: false })
-  t.alike(cutsOf(still), [[wA, 1]])
-  t.not(still.members.get(X), 'banned')
-  for (const opts of [{ cut: 1 }, { cut: 2 }, { cut: 1, ban: true }, { cut: 0, ban: true }]) {
+  for (const opts of [{ cut: 1, demote: false }, { cut: 1 }, { cut: 1, ban: true }, { cut: 0, ban: true }]) {
     const r = setup(opts)
     const label = JSON.stringify(opts) + ': '
-    t.is(r.members.get(X), 'banned', label + 'its ban of X stays')
-    t.is(r.members.get(Y), 'member', label + 'its admit of Y stays')
-    t.alike(shown(r), shown(control), label + 'what was visible stays visible')
-    t.alike(cutsOf(r), [[wA, 3]], label + 'the cut is raised to the demotion or ban cut')
+    t.alike(cutsOf(r), [[wA, opts.cut]], label + 'the cut is the marked cut')
+    t.not(r.members.get(X), 'banned', label + 'its ban past the cut no longer counts')
+    t.not(r.members.get(Y), 'member', label + 'nor its admit')
+  }
+  const r = setup({ cut: 2 })
+  t.alike(cutsOf(r), [[wA, 2]])
+  t.is(r.members.get(Y), 'member', 'the admit below the cut stands')
+  t.not(r.members.get(X), 'banned', 'the ban past it does not')
+  t.is(setup({ cut: 1, reban: true }).members.get(X), 'banned', 'another admin bans again')
+})
+
+test('group-cut: a cut is final, a demotion or ban listing the held length never revives what it dropped (#350)', (t) => {
+  const setup = ({ cut = true, demote = false, ban = false } = {}) => {
+    const C = community({ creator: Z, members: [A, X, Y].map((d) => ({ diary: d, cw: { [A]: cwA, [X]: cwX, [Y]: cwY }[d], status: 'member' })), creates: [{ by: Z, group: G1 }] })
+    const g = groupIn(C, { key: G1 })
+    g.add(A, wA).add(X, wX).add(Y, wY)
+    g.push(G1, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(5) }))
+    gpost(g, wY, 6)
+    // The lost device, cut at its length 1, bans Y.
+    g.push(wA, groupBan({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(10) }))
+    if (cut) g.mark(A, wA, 1)
+    if (demote) g.push(G1, groupAdmin({ member: A, on: false, cuts: [{ writer: wA, seq: g.len(wA) }], at: AT(11) }))
+    if (ban) g.push(G1, groupBan({ member: A, on: true, cuts: [{ writer: wA, seq: g.len(wA) }], at: AT(12) }))
+    return buildGroup(g.input())
+  }
+  const control = setup({ cut: false })
+  t.is(control.members.get(Y), 'banned', 'control: the device ban counts')
+  for (const opts of [{}, { demote: true }, { ban: true }, { demote: true, ban: true }]) {
+    const r = setup(opts)
+    const label = JSON.stringify(opts) + ': '
+    t.alike(cutsOf(r), [[wA, 1]], label + 'the cut is the marked cut')
+    t.is(r.members.get(Y), 'member', label + 'the ban past the cut stays out')
+    t.alike(shown(r), [wY + ':1'], label + 'and Y post stays visible')
+  }
+})
+
+test('group-cut: a cut is final, an admit with a far cut never voids it (#350)', (t) => {
+  const setup = (far) => {
+    const C = community({ creator: Z, members: [A, X].map((d) => ({ diary: d, cw: d === A ? cwA : cwX, status: 'member' })), creates: [{ by: Z, group: G1 }] })
+    const g = groupIn(C, { key: G1, join: 'approval' })
+    g.add(A, wA).add(X, wX)
+    g.push(G1, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(5) }))
+    g.push(G1, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(6) }))
+    gpost(g, wX, 7)
+    g.mark(X, wX, 1)
+    if (far) g.push(wA, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 2 ** 40 }], at: AT(8) }))
+    return buildGroup(g.input())
+  }
+  for (const far of [false, true]) {
+    const r = setup(far)
+    t.alike(cutsOf(r), [[wX, 1]], 'far ' + far + ': the cut is the marked cut')
+    t.alike(shown(r), [], 'far ' + far + ': the post past the cut stays out')
+    t.is(r.members.get(X), 'member', 'far ' + far)
   }
 })
 

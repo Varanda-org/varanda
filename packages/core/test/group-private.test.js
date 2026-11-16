@@ -531,6 +531,27 @@ test('a diary cut below its own leave keeps the diary left and the removal (#350
   }
 })
 
+test('a cut is final: a basis ref at or past the cut never revives a sealed post, the rotation still works (#350)', (t) => {
+  const rotated = (ref) => {
+    const w = pworld()
+    const cut = w.len(wX)
+    sealedPost(w, wX, w.E1, 20)
+    const basis = ref === null ? [] : [{ writer: wX, seq: ref }]
+    const E2 = w.rotate(wA, [G, wA, wY], { basis, at: 21 })
+    sealedPost(w, wY, E2, 22)
+    return { E2, g: buildGroup(w.input(w.reader(wY), { marks: new Map([[X, [{ writer: wX, cut, seq: 1 }]]]) })) }
+  }
+  for (const ref of [null, 1, 2, 2 ** 40]) {
+    const { g, E2 } = rotated(ref)
+    const label = 'basis ' + (ref === null ? 'none' : ref) + ': '
+    t.alike(g.posts.map((p) => p.text), ['p22'], label + 'the post sealed past the cut stays out')
+    t.alike(cutsOf(g), [[wX, 1]], label + 'the cut is the marked cut')
+    t.is(kidOf(g.epoch), kidOf(E2), label + 'the rotation leaving the cut writer out is the epoch to send under')
+    t.is(g.rekeyPending, false, label)
+    t.ok(!g.entitled.includes(wX), label)
+  }
+})
+
 test('a mark that arrives after the rotation, in any order, gives the same fold (#350)', (t) => {
   const w = pworld()
   w.add(X, wX2)
