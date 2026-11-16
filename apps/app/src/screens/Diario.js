@@ -711,7 +711,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
           bandButtons={bar.interactive ? null : bandControls(false)}
           theme={extraShown.theme}
           mood={extraShown.mood ? <MoodChip mood={extraShown.mood} now={now} theme={extraShown.theme} onPress={node.hosted === true ? () => setEditing(true) : undefined} /> : null}
-          about={<><AboutCard about={extraShown.about} theme={extraShown.theme} /><SorteCard /></>}
+          about={<><AboutCard about={extraShown.about} theme={extraShown.theme} /><SorteCard ownerKey={topOwner} /></>}
           top={node.hosted === true && typeof onOpenTop === 'function'
             ? <TopFriendsRow rows={topRows} mine onEdit={onOpenTop} onOpen={onOpenMember} loading={ownMarks.marks.status === 'loading'} notice={ownMarks.marks.status === 'unsure' && !ownMarks.marks.top ? NOTICES.unreadable : null} />
             : null}

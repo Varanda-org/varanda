@@ -4,8 +4,9 @@
 // postLink.js postOpeningGate): the post as the installation's seeder
 // previews it (../postPreview.js), else a row with no content, drawn the same
 // whether the preview is loading or will never come. Every press in it, and
-// Ver mais, opens ./PostLinkSheet, whose buttons go on to the terms gate as
-// the intro's last card would. Como funciona shows the intro cards and comes
+// Ver mais, opens ./PostLinkSheet, whose buttons go on as the
+// intro's last card would (hosted: to Entrar, with the Terms after it or before
+// Criar conta; otherwise the terms gate). Como funciona shows the intro cards and comes
 // back here; Agora não hides the preview for this load only, leading to the
 // intro on a first visit and otherwise to the Terms and Entrar.
 

@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 64)
+  t.is(LEGAL_VERSION, 65)
   t.is(LEGAL_DATE, '16/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 64, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 65, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '2ec343e54dc55d254408479c9e1bc834330438bec782fc9c62373fb3821c091d', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'd3bbb66a40edd8e6f740b9a0a4bca7f75c940ec2c1c468499366eecd5b6b18a2', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -608,7 +608,6 @@ test('legal: version 58 describes the rich profile and the Sorte do dia', async 
   t.ok(all(PRIVACY).includes('o semeador vê qual perfil foi aberto e pode associar essa leitura à conta de quem abriu'), 'seeder sees the opened profile')
   t.ok(all(PRIVACY).includes('A Sorte do dia é escolhida no próprio aparelho'), 'sorte on the device')
   t.ok(all(PRIVACY).includes('não é enviada a ninguém, não usa a rede e não fica no seu diário'), 'sorte sends nothing')
-  t.ok(all(PRIVACY).includes('esse arquivo pode ir para o backup do aparelho no iCloud'), 'sorte seed may be in the iCloud backup')
   t.ok(all(TERMS).includes('marca como apagadas as versões anteriores'), 'a new version marks the earlier one as deleted')
   t.ok(all(PRIVACY).includes('cópias que outras pessoas ou semeadores já buscaram podem continuar existindo'), 'copies may remain')
 })
@@ -820,4 +819,16 @@ test('legal: version 64 keeps the players off with Prévia de links off and unde
   }
   t.ok(text(TERMS).includes('desliga a montagem das suas prévias e os players do parágrafo seguinte; os cartões que outras pessoas enviam continuam aparecendo, sem player.'))
   t.ok(text(PRIVACY).includes('desliga a montagem e o player; os cartões que outras pessoas enviam continuam aparecendo, sem player.'))
+})
+
+test('legal: version 65 shares the Sorte do dia and the acceptance across devices', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(PRIVACY).includes('a partir da data local e da chave pública da sua conta, por isso é a mesma em todos os aparelhos em que você entra com a mesma passkey'), 'same Sorte on every device')
+  t.absent(text(PRIVACY).includes('backup do aparelho no iCloud'), 'old per-device number is gone')
+  t.ok(text(TERMS).includes('a nova versão é pedida uma vez por conta: quem entra com uma passkey que já existe vê o aceite depois de Entrar'), 'asked once per account, after Entrar')
+  t.ok(text(TERMS).includes('quem cria uma conta aceita antes de criá-la, antes de qualquer dado dela ser enviado.'), 'sign-up accepts before anything of the account is sent')
+  for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes('\u2014'), 'no em dash')
+  t.ok(text(PRIVACY).includes('O serviço só responde para conta vinculada, e responde só a versão e a data desse aceite.'), 'signed check answers only version and date')
+  t.ok(text(PRIVACY).includes('com um pedido assinado pela chave do seu diário'), 'signed by the diary key')
 })

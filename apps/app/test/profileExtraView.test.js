@@ -379,7 +379,7 @@ test('the screens: hosted-gated entry points, themed band only on a theme', (t) 
   const membro = read('screens/Membro.js')
   t.ok(membro.includes('enabled: node.hosted === true && !isPage && !blockedHere'), 'Membro reads nothing off a hosted node, for a page or a blocked person')
   const diario = read('screens/Diario.js')
-  t.ok(diario.includes('<SorteCard />'), 'Sorte on the own Diario')
+  t.ok(diario.includes('<SorteCard ownerKey={topOwner} />'), 'Sorte on the own Diario')
   t.absent(membro.includes('SorteCard'), 'Sorte is not on another person\'s profile')
   for (const file of ['screens/Perfil.js', 'screens/Membro.js', 'screens/Diario.js', 'ui/AboutCard.js', 'ui/MoodChip.js', 'ui/ThemePicker.js', 'ui/SorteCard.js', 'ui/ProfileBand.js', 'profileExtraView.js']) {
     const src = read(file)

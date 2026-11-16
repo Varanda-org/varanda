@@ -43,11 +43,30 @@ test('dateKey uses the local calendar and survives a bad date', async (t) => {
   t.is(dateKey('x'), dateKey(new Date(0)))
 })
 
-test('salts are random 16 hex and validated', async (t) => {
-  const { newSalt, isSalt, sorteDoDia, SORTES } = await load()
-  const s = newSalt()
-  t.ok(isSalt(s))
-  t.not(s, newSalt())
+test('saltOfKey takes the first 16 chars of a lowercase 64-hex key', async (t) => {
+  const { saltOfKey, isSalt } = await load()
+  const key = 'ab'.repeat(32)
+  t.is(saltOfKey(key), 'ab'.repeat(8))
+  t.ok(isSalt(saltOfKey(key)))
+  for (const bad of [key.toUpperCase(), key.slice(0, 63), key + '0', 'zz'.repeat(32), '', 5, null, undefined, {}]) t.is(saltOfKey(bad), null)
+})
+
+test('two keys can give different lines on the same date, one key never does', async (t) => {
+  const { saltOfKey, sorteDoDia } = await load()
+  const a = saltOfKey('0123456789abcdef'.repeat(4))
+  const b = saltOfKey('fedcba9876543210'.repeat(4))
+  const lines = new Set()
+  for (let d = 1; d <= 28; d++) {
+    const date = new Date(2026, 10, d)
+    t.is(sorteDoDia(date, a), sorteDoDia(date, saltOfKey('0123456789abcdef'.repeat(4))))
+    lines.add(sorteDoDia(date, a) === sorteDoDia(date, b))
+  }
+  t.ok(lines.has(false))
+})
+
+test('isSalt validates 16 lowercase hex', async (t) => {
+  const { isSalt, sorteDoDia, SORTES } = await load()
+  t.ok(isSalt(SALT_A))
   for (const bad of [null, 5, '', 'xyz', 'ABCDEF0123456789', SALT_A + '0']) t.is(isSalt(bad), false)
   t.ok(SORTES.includes(sorteDoDia(new Date(2026, 5, 1), undefined)))
 })
@@ -55,4 +74,26 @@ test('salts are random 16 hex and validated', async (t) => {
 test('the module is pure: no network, no account data', async (t) => {
   const code = readFileSync(join(__dirname, '..', 'src', 'sorte.js'), 'utf8')
   t.absent(/fetch|XMLHttpRequest|WebSocket|require\(|from '/.test(code))
+})
+
+test('the salt stores never write the diary or the account, and the card holds no salt state', async (t) => {
+  const src = (...p) => readFileSync(join(__dirname, '..', 'src', ...p), 'utf8')
+  for (const f of ['sorteStore.web.js', 'sorteStore.native.js']) {
+    const code = src(f)
+    t.absent(code.includes('setItem'), f + ': no setItem')
+    t.absent(code.includes('.write('), f + ': no .write(')
+    t.absent(code.includes('.create('), f + ': no .create(')
+  }
+  const card = src('ui', 'SorteCard.js')
+  t.absent(card.includes('useState'), 'SorteCard: no useState')
+  t.absent(card.includes('loadSalt'), 'SorteCard: no loadSalt')
+  t.ok(card.includes('saltOfKey(ownerKey)'), 'SorteCard: salt comes from the diary key')
+  t.ok(card.includes('if (salt === null) return null'), 'SorteCard: no card without a salt')
+})
+
+test('the old per-device salt is forgotten once per load from the root, for everyone', async (t) => {
+  const app = readFileSync(join(__dirname, '..', 'App.js'), 'utf8')
+  t.ok(app.includes("import { forgetSalt } from './src/sorteStore'"))
+  const root = app.slice(app.indexOf('export default function App ('))
+  t.ok(root.includes('useEffect(() => { forgetSalt() }, [])'))
 })
