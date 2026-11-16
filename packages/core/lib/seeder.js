@@ -4039,7 +4039,19 @@ class Seeder {
   _reconcileGroups (diary, entry) {
     if (entry.dropped || !entry.gated || this._closing) return
     for (const [k, b] of [...this._groups]) {
-      if (b === null || b.diary !== diary || !this._groupServed.has(k)) continue
+      if (b === null || b.diary !== diary) continue
+      if (!this._groupServed.has(k)) {
+        // A core still opening: _serveGroup reads the binding's cut, so a
+        // lower one seen now is the range it downloads (a cut 0 waits for
+        // the reconcile that follows the admission).
+        if (k === b.group) continue
+        const cut = groupWalkCut(entry.groupWalks, b.group, k)
+        if (cut !== null && cut >= 1 && (b.cut === undefined || cut < b.cut)) {
+          b.cut = cut
+          this._persist().catch(noop)
+        }
+        continue
+      }
       if (k !== b.group) {
         const cut = groupWalkCut(entry.groupWalks, b.group, k)
         if (cut === 0) {

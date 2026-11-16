@@ -33,7 +33,8 @@ const {
   stored,
   downloaded,
   readGroups,
-  scansDone
+  scansDone,
+  gate
 } = require('./helpers/seeder-groups')
 
 const G = 'aa'.repeat(32)
@@ -389,5 +390,36 @@ test('a cut writer is held to its whole log\'s quota: refused past it at admissi
   await B.cores.w2.append(big())
   t.is((await rejected(events, W2, 'quota')).reason, 'quota', 'dropped once its log passes the quota')
   await until(() => !seeder._groupServed.has(W2), { name: 'W2 fora' })
+  t.is(events.filter((e) => e.event === 'fatal').length, 0)
+})
+
+test('a lower cut seen while a writer core is still opening is the cut it is served at (#350)', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const hold = gate()
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, {
+    associationKey: assoc.hex,
+    admitHook: (key, step) => step === 'open' ? hold.hook(key) : undefined
+  })
+  t.teardown(() => hold.open())
+
+  const { A, B, R, W } = await cutWorld(t, bootstrap, assoc, (R, W) => [groupCutRecord({ group: R, writer: W, cut: 4 })])
+  hold.key = W
+  await admit(A, assoc)
+  await admit(B, assoc)
+  await until(() => hold.entered, { name: 'W abrindo' })
+  t.is(seeder._groups.get(W).cut, 4, 'admitted at its cut')
+  await B.diary.append(groupCutRecord({ group: R, writer: W, cut: 2 }))
+  await until(() => seeder._groups.get(W).cut === 2, { name: 'corte menor na ligação', timeoutMs: 30000 })
+  t.absent(seeder._groupServed.has(W), 'while the core is still opening')
+  await until(() => readGroups(dataDir)[W].cut === 2, { name: 'corte menor persistido' })
+  hold.open()
+  await admitted(events, W)
+  const entry = seeder._groupServed.get(W)
+  t.is(entry.cut, 2, 'served at the lower cut')
+  await until(async () => !entry.cutting && entry.clearedTo === 6 && (await blocksHeld(entry.core, 0, 6)).length === 2, { name: 'W abaixo de 2' })
+  t.alike(await blocksHeld(entry.core, 0, 6), [0, 1])
   t.is(events.filter((e) => e.event === 'fatal').length, 0)
 })
