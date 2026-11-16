@@ -791,7 +791,7 @@ test('round 8: unread label singular, accent date, one list open, no 0 respostas
   const openSection = info.slice(info.indexOf('const openSection'), info.indexOf('const openSection') + 200)
   t.ok(openSection.includes('setPanel(null)'), 'a section closes the panel')
   const conversa = read('Conversa.js')
-  t.ok(conversa.includes("phase === 'ready' && (hasReplies || notes.length > 0)"), 'no header over an empty thread')
+  t.ok(conversa.includes("phase === 'ready' && notes.length > 0"), 'notes only, no count header')
 })
 
 test('a banned or departed person still sees their state on the community info', (t) => {

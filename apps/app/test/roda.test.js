@@ -339,12 +339,8 @@ test('commentRows: the label uses the loaded total over the direct-count floor',
   t.is(rodaLabel(4, true), 'Ocultar respostas')
 })
 
-test('commentsTitle and AUTHOR_TAG', async (t) => {
-  const { commentsTitle, AUTHOR_TAG } = await load()
-  t.is(commentsTitle(1), '1 comentário')
-  t.is(commentsTitle(0), '0 comentários')
-  t.is(commentsTitle(12), '12 comentários')
-  t.is(commentsTitle(null), 'Comentários')
+test('AUTHOR_TAG', async (t) => {
+  const { AUTHOR_TAG } = await load()
   t.is(AUTHOR_TAG, 'quem publicou')
 })
 
