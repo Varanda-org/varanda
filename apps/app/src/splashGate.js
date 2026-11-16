@@ -102,13 +102,15 @@ export function holdBootCover ({ cover, elapsedMs, settled, step } = {}) {
   return elapsed < bootPatienceMs(step)
 }
 
-// A returning member's cold start on the phone may show A Rua's saved rows
-// (./feedSnapshot.js) instead of the splash while the node boots. It is a
+// A returning member's cold start could show A Rua's saved rows
+// (./feedSnapshot.js) instead of the splash while the node boots. Off on
+// every platform now (previewCapable is false in both stores): the preview
+// has no Momentos strip, which popped in once the live feed took over. It is a
 // cover, never a step: it shows only where the splash would, and every gate
 // still decides what comes after it. Any doubt keeps the splash. The preview
 // waits for the presentation too.
 // - snapshot: parsed for this installation and association, with rows;
-// - previewCapable: the store's flag (false on the web);
+// - previewCapable: the store's flag (false on every platform for now);
 // - savedAt within PREVIEW_MAX_AGE_MS and not in the future: an older first
 //   page would show what the member may have left behind days ago;
 // - sessionLive: the native session store holds a live record for exactly
