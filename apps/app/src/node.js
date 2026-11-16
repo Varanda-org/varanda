@@ -146,6 +146,7 @@ import { recoveryFetch } from './account'
 import { NOT_FOUND_TEXT, SERVICE_DOWN_TEXT } from './recovery'
 import { wipeLocalCaches } from './localCaches'
 import * as shareIntake from './shareIntake'
+import { clearMomentSeen } from './momentSeenStore'
 import { cancelBackgroundRefresh, noteForegroundUse, unregisterBackgroundRefresh, whenActive, whenForeground } from './backgroundTask'
 
 const { loadConfig, saveConfig, clearConfig, discoverConfig, hostedPage, canConfigure } = configStore
@@ -1173,6 +1174,8 @@ function LiveNodeProvider ({ children }) {
     // A share waiting in storage was meant for this account; a lock keeps it.
     // Not awaited: the operation below must still go out synchronously.
     if (name === 'signOut' || name === 'reset') shareIntake.clear()
+    // The per-device list of momentos seen was this account's too.
+    if (name === 'signOut' || name === 'reset') clearMomentSeen()
     let pending
     try {
       // A node script without signOut (an older build) locks instead.

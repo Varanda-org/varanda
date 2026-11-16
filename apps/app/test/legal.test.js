@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 62)
-  t.is(LEGAL_DATE, '15/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 62, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(LEGAL_VERSION, 63)
+  t.is(LEGAL_DATE, '16/11/2026')
+  t.is(REVIEW_NOTE, 'Versão 63, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'e04eb353453eb3ec74bc8544b09d108ec333d62baddba02159dfee6da45ca7f6', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'c269c6785edd4dd9ed1cd174eb9c0748ede9331183db1dfaffbe664e89dd60aa', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -795,4 +795,16 @@ test('legal: version 62 describes Visitas as optional, mutual and on the device'
   t.ok(all(PRIVACY).includes('é apagada quando você desliga'), 'privacy: erased when switched off')
   t.ok(all(PRIVACY).includes('nunca acordam ninguém'), 'privacy: never wakes anyone')
   t.absent(all(TERMS).includes('\u2014') || all(PRIVACY).includes('\u2014'), 'no em dash')
+})
+
+test('legal: version 63 puts the momentos seen in the seen block', async (t) => {
+  const { PRIVACY } = await load()
+  const all = PRIVACY.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const required of [
+    'os momentos de outras pessoas que você já viu',
+    'a chave pública de quem publicou, o número do registro e a hora em que você viu, até os 132 mais recentes',
+    'nada do conteúdo do momento vai no bloco, e quem publicou não fica sabendo',
+    'essa lista fica só no aparelho e é apagada quando você sai da conta'
+  ]) t.ok(all.includes(required), 'privacy: ' + required)
+  t.absent(all.includes('\u2014'), 'no em dash')
 })

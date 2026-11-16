@@ -54,6 +54,10 @@ const MAX_VIDEO_DIMENSION = 1920
 const MAX_VIDEO_PIXELS = 2073600
 const MAX_MOMENT_VIDEO_MS = 15000
 const MAX_MOMENT_VIDEO_BYTES = 4194304
+// Momentos the member has seen, synced in the seen document: the newest
+// entries stay (packages/core/lib/seen-blob.js). moments.read answers at most
+// 32 x 4 + 4 live items, and every one fits.
+const MOMENT_SEEN_MAX = 132
 // DM media items: blob descriptors of packages/core/lib/blob.js
 // (BLOB_CHUNK_BYTES, BLOB_MAX_CHUNKS, BLOB_MAC_BYTES; not imported: zero deps)
 // plus mime, w, h and ms (docs/protocol.md section 11).
@@ -267,6 +271,7 @@ module.exports = {
   MAX_VIDEO_PIXELS,
   MAX_MOMENT_VIDEO_MS,
   MAX_MOMENT_VIDEO_BYTES,
+  MOMENT_SEEN_MAX,
   MAX_DM_MEDIA,
   MAX_GROUP_MEDIA,
   DM_MEDIA_CHUNK_BYTES,

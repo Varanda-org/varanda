@@ -32,8 +32,9 @@ export async function saveConfig (config) {
 
 export const canConfigure = webMode === 'browser'
 
-// The cold-start preview that reads this (App.js) is native only
-// (previewCapable is false on the web): nothing is remembered for it here.
+// The cold-start preview that reads this (App.js) never runs on the web
+// (previewCapable is false here, and for now natively too): nothing is
+// remembered for it here.
 export async function rememberedConfig () {
   return null
 }

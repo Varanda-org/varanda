@@ -187,6 +187,7 @@ import { HashtagContext } from './src/ui/MentionText'
 import AssuntoScreen from './src/screens/Assunto'
 import RecadosScreen from './src/screens/Recados'
 import DepoimentosScreen, { testimonialsChanged } from './src/screens/Depoimentos'
+import { refreshMomentSeen } from './src/momentSeenStore'
 import SalvosScreen from './src/screens/Salvos'
 import EventosScreen from './src/screens/Eventos'
 import VisitasScreen from './src/screens/Visitas'
@@ -574,8 +575,9 @@ function Member () {
   const generationRef = useRef(generation)
 
   // --- the cold-start preview (src/splashGate.js previewAllowed) ---
-  // A Rua's saved rows instead of the splash while the node boots, on the
-  // phone only (previewCapable). Read once, and only once the app was active:
+  // A Rua's saved rows instead of the splash while the node boots, only where
+  // previewCapable (now false on every platform: the preview had no Momentos
+  // strip, src/feedSnapshotStore.native.js). Read once, and only once the app was active:
   // the snapshot must parse for this installation and association, and the
   // session store must hold a live record for exactly its owner on this
   // rp.id, the record the resume will use. Any doubt or error: the splash.
@@ -2398,6 +2400,7 @@ function Member () {
       // Another device of the passkey blocked or unblocked someone.
       if (result.blocksChanged) refreshBlocks().catch(() => {})
       if (result.testimonialsChanged) testimonialsChanged()
+      if (result.momentsChanged) refreshMomentSeen().catch(() => {})
       if (result.groupChanged) {
         bumpSeen()
         const taken = { epoch: snap.epoch, versions: snap.versions }
