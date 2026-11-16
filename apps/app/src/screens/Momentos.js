@@ -669,8 +669,11 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
   const tried = useRef(new Set())
   const musicQuota = useRef(false)
   const prepared = ahead.current?.key === itemKey ? ahead.current.handle : handed.current?.key === itemKey ? handed.current.handle : null
-  const preloadStream = music === null
-  const musicSettled = preloadStream || musicStarted || (musicState?.key === itemKey && musicState.phase === 'fallback')
+  const musicFallback = musicState?.key === itemKey && musicState.phase === 'fallback'
+  const musicSettled = music === null || musicStarted || musicFallback
+  // After the 3 s timer the current audio may still be loading: opening the
+  // next one then would race it for the link and for the member's relays.
+  const streamNext = music === null || musicStarted || (musicFallback && musicState.timer !== true)
   useEffect(() => {
     // Cleanups run before setups, so releasing there could cancel a handoff.
     if (ahead.current?.key === itemKey) {
@@ -692,15 +695,15 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
     const pair = itemKey + '>' + nextKey
     if (allowed && nextMusic !== null && itemKey !== '' && photo.phase !== 'loading' && musicSettled && ahead.current === null && !musicQuota.current && !tried.current.has(pair)) {
       tried.current.add(pair)
-      // A playing snippet can occupy both relays while seeking; only POSTs
-      // for the next track and ticket may overlap it.
-      const handle = prepareMomentMusic({ member: own, origin: musicOrigin, request: node.request }, nextMusic, { stream: preloadStream })
+      // The next momento's audio opens once the current one has started,
+      // is unavailable or has none; the service replaces a stale relay at the member cap.
+      const handle = prepareMomentMusic({ member: own, origin: musicOrigin, request: node.request }, nextMusic, { stream: streamNext })
       ahead.current = { key: nextKey, handle, own, origin: musicOrigin, epoch: node.epoch }
       handle.done.then((result) => {
         if (!result.ok && result.code === 'limite-musica') musicQuota.current = true
       })
     }
-  }, [itemKey, nextKey, nextMusic?.id, nextMusic?.start, own, musicOrigin, node.epoch, node.request, musicOn, isTop, covered, node.visible, musicClosed, soundOff, photo.phase, musicSettled, preloadStream])
+  }, [itemKey, nextKey, nextMusic?.id, nextMusic?.start, own, musicOrigin, node.epoch, node.request, musicOn, isTop, covered, node.visible, musicClosed, soundOff, photo.phase, musicSettled, streamNext])
   useEffect(() => () => {
     ahead.current?.handle.release()
     handed.current?.handle.release()
@@ -891,7 +894,7 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
     if (!musicWaiting || paused) return undefined
     // Policy and audio share one budget, spent only while playback can run.
     const started = Date.now()
-    const timer = setTimeout(() => setMusicState({ key: itemKey, phase: 'fallback' }), musicWaitRemaining.current)
+    const timer = setTimeout(() => setMusicState({ key: itemKey, phase: 'fallback', timer: true }), musicWaitRemaining.current)
     return () => {
       clearTimeout(timer)
       musicWaitRemaining.current = Math.max(0, musicWaitRemaining.current - (Date.now() - started))
