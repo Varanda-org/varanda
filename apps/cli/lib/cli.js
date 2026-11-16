@@ -89,7 +89,7 @@ Opções dos comandos:
   --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes --release
   --recipients --key-file --signing-key --signers --seq
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
-  --blob-bytes: teto do conjunto de mídia das conversas no seed (bytes, padrão 2147483648).`
+  --blob-bytes: teto do conjunto de mídia das conversas no seed (bytes, padrão 4294967296).`
 
 const booleanFlags = new Set(['--json', '--once', '--no-publish', '--no-dm', '--new-list', '--yes', '--undo', '--private', '--force', '--release', '--help', '-h'])
 const stringFlags = new Set([

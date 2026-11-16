@@ -40,7 +40,7 @@
 // run it after the key is gone). The plaintext bytes of all entries stay
 // within CACHE_BYTES_MAX: a write past it evicts the oldest entries first,
 // and an item set larger than the whole budget is not cached at all. The
-// message row keeps the descriptors only; the 7-day pool sweep does not
+// message row keeps the descriptors only; the 14-day pool sweep does not
 // touch this cache.
 //
 // prefix: '' for the own store; a Página's store (./page-dm.js) passes

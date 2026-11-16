@@ -197,7 +197,7 @@ test('conversas help states the private-message rules', async (t) => {
   t.alike([...HELP.conversas.paragraphs], [
     'Conversas e grupos de comunidades ficam numa lista só, a mais recente primeiro. Todas mostra a lista inteira; Não lidas e Grupos mostram só parte dela.',
     'Mensagens são textos privados entre duas pessoas, cifrados de ponta a ponta.',
-    'A associação guarda só envelopes lacrados por sete dias e não consegue ver quem escreve para quem.',
+    'A associação guarda só envelopes lacrados por 14 dias e não consegue ver quem escreve para quem.',
     'Quem você segue aparece na lista. Qualquer outra pessoa aparece em Pedidos de mensagem, e a mensagem é enviada antes de você aceitar.',
     'Aceitar ou recusar não avisa a outra pessoa.',
     'Não há confirmação de leitura.',
