@@ -6,7 +6,7 @@ const test = require('brittle')
 const grp = require('../lib/group')
 const {
   REKEY_PERIOD_MS, REKEY_RECORDS, REKEY_MAX_SCALE, REKEY_OTHER_WAIT_MS, REKEY_JITTER_MS, REKEY_CHECK_MS,
-  rekeyScale, rekeyDue, epochFacts, createRekeyGate
+  rekeyScale, rekeyDue, cutUnknownEntitled, epochFacts, createRekeyGate
 } = require('../lib/group-rekey')
 
 const DAY = 24 * 60 * 60 * 1000
@@ -129,6 +129,24 @@ test('backdated envelopes count from the epoch\'s at: a non-opener still waits, 
   t.ok(backdated.at > now, 'not due at once')
   // The opener's count due moment is clamped the same way.
   t.alike(rekeyDue(input({ sealedAts: Array.from({ length: REKEY_RECORDS }, () => 0), now })), { due: true, at: T0, reason: 'count' })
+})
+
+test('a hole in an entitled writer\'s diary keeps a due epoch waiting, and once it fills the epoch rotates', (t) => {
+  const D = 'dd'.repeat(32)
+  const Q = 'cc'.repeat(32)
+  const W = 'ee'.repeat(32)
+  const writers = [{ key: W, diary: D }, { key: 'ff'.repeat(32), diary: Q }]
+  const entitled = new Set([W])
+  t.is(cutUnknownEntitled({ cutUnknown: new Set([D]), writers, entitled }), true, 'the hole is in an entitled writer\'s diary')
+  t.is(cutUnknownEntitled({ cutUnknown: new Set([Q]), writers, entitled }), false, 'a diary binding no entitled writer holds nothing')
+  t.is(cutUnknownEntitled({ cutUnknown: undefined, writers, entitled }), false)
+
+  const now = T0 + REKEY_PERIOD_MS
+  const holed = cutUnknownEntitled({ cutUnknown: new Set([D]), writers, entitled })
+  t.alike(rekeyDue(input({ now, cutUnknown: holed })), { due: false, at: now + REKEY_CHECK_MS, reason: 'cut-unknown' }, 'due, but waits for the next check')
+  t.alike(rekeyDue(input({ now: now - 1, cutUnknown: holed })), { due: false, at: now, reason: 'young' }, 'not due: the hole changes nothing')
+  const filled = cutUnknownEntitled({ cutUnknown: new Set(), writers, entitled })
+  t.alike(rekeyDue(input({ now: now + REKEY_CHECK_MS, cutUnknown: filled })), { due: true, at: now, reason: 'age' }, 'the hole filled: the next check rotates')
 })
 
 test('log reserve: under 10% of blocks or bytes left, no periodic rotation', (t) => {

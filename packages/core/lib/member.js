@@ -2590,11 +2590,13 @@ function periodicDecision (loaded, core, now, jitter) {
   const { view } = loaded
   const facts = rekeyPolicy.epochFacts({ logs: [loaded.input.root, ...loaded.input.writers], counted: view.writers, root: loaded.group, epoch: view.epoch })
   const mine = loaded.secrets === null ? new Set() : loaded.secrets.mine
+  const entitled = entitledWriters(loaded)
   return rekeyPolicy.rekeyDue({
     rekeyPending: view.rekeyPending,
     epoch: view.epoch,
     ...facts,
-    entitled: entitledWriters(loaded).size,
+    entitled: entitled.size,
+    cutUnknown: rekeyPolicy.cutUnknownEntitled({ cutUnknown: view.cutUnknown, writers: loaded.input.writers, entitled }),
     ownEpoch: view.epoch !== null && mine.has(view.epoch.writer),
     now,
     jitter: view.epoch === null ? 0 : jitter(loaded.group, view.epoch),

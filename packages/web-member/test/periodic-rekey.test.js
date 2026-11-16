@@ -238,6 +238,49 @@ test('a failed rotation writes nothing and leaves the group not rekey-pending', 
   t.ok(Number.isSafeInteger((await a.web.request('group.post', { group, text: 'segue' })).seq), 'still posts under the old epoch')
 })
 
+// `from`'s diary blocks [start, end) into `to`'s replica, nothing else: the
+// blocks before start that `to` lacks stay a hole.
+async function copyDiaryRange (from, to, start, end) {
+  const source = await store.openDiary(from.storage)
+  const target = await store.openReplica(to.storage, from.key)
+  const a = source.replicate(true, { keepAlive: false })
+  const b = target.replicate(false, { keepAlive: false })
+  a.pipe(b).pipe(a)
+  try {
+    await target.download({ start, end }).done()
+  } finally {
+    a.destroy()
+    b.destroy()
+    await source.close()
+    await target.close()
+  }
+}
+
+test('a hole in an entitled member\'s diary keeps the periodic rotation waiting, and once it fills it runs', async (t) => {
+  const { a, b, group } = await admitted(t)
+  const ctx = await opsCtx(t, a)
+  const held = await diaryLength(b)
+  await b.web.request('post.create', { text: 'um' })
+  await b.web.request('post.create', { text: 'dois' })
+  // a gets the second post but not the first: a hole that may hide a cut on
+  // the member's writer.
+  await copyDiaryRange(b, a, held + 1, held + 2)
+  const now = Date.now() + REKEY_PERIOD_MS + MINUTE
+  const plan = await ops.periodicRekeyPlan(ctx, { now })
+  t.alike(plan.rekey, [], 'due, but the cut is unknown')
+  t.alike(plan.checked, [group])
+  t.is(plan.next, now + REKEY_CHECK_MS, 'checked again at the next check')
+  t.alike(await ops.periodicRekey(ctx, { groups: [group], now }), { rotated: [], failed: [] })
+  t.is(firstBlocks(await coreRecords(a, group)), 1, 'nothing written')
+
+  await copyDiaryRange(b, a, held, held + 1)
+  const later = now + REKEY_CHECK_MS
+  const filled = await ops.periodicRekeyPlan(ctx, { now: later })
+  t.alike(filled.rekey, [{ group, writer: group }], 'the hole filled: due')
+  t.alike(await ops.periodicRekey(ctx, { groups: filled.rekey, now: later }), { rotated: [group], failed: [] })
+  t.is(firstBlocks(await coreRecords(a, group)), 2, 'rotated once')
+})
+
 test('a plain member never rotates', async (t) => {
   const { b, group } = await admitted(t)
   const ctx = await opsCtx(t, b)

@@ -4654,11 +4654,13 @@ async function periodicDecision (ctx, g, own, now, jitter) {
   const held = await withGroupCore(ctx, own.key, async (core) => ({ length: core.length, bytes: core.byteLength }))
   if (held === null) return { due: false, at: null, reason: 'unheld' }
   const limits = { maxLogBlocks: MAX_LOG_BLOCKS, maxLogBytes: MAX_LOG_BYTES, ...ctx.limits }
+  const entitled = entitledOf(g)
   return rekeyPolicy.rekeyDue({
     rekeyPending: g.built.rekeyPending,
     epoch,
     ...facts,
-    entitled: entitledOf(g).size,
+    entitled: entitled.size,
+    cutUnknown: rekeyPolicy.cutUnknownEntitled({ cutUnknown: g.built.cutUnknown, writers: g.input.writers, entitled }),
     ownEpoch: epoch !== null && g.mine.has(epoch.writer),
     now,
     jitter: epoch === null ? 0 : jitter(g.group, epoch),

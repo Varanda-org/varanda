@@ -54,14 +54,16 @@ function notDue (reason, at = null) {
 // - entitled: how many writers the fold entitles;
 // - ownEpoch: the epoch was opened by a writer of this device;
 // - now: ms; jitter: in [0, 1), fixed per epoch by the caller;
-// - log: { length, bytes, maxBlocks, maxBytes } of the distributor's writer.
+// - log: { length, bytes, maxBlocks, maxBytes } of the distributor's writer;
+// - cutUnknown: a hole in an entitled writer's diary may hide a cut on it
+//   (cutUnknownEntitled): a due epoch waits for the next check instead.
 // Every `at` later than now counts as now, and an envelope's `at` earlier
 // than the epoch's counts as the epoch's: an author can date its envelopes
 // freely, and backdated ones must not make the other distributors skip the
 // tie-break wait. -> { due, at, reason }: due now
 // (`at` the moment it became due), not due until `at`, or not due with
 // `at` null (nothing to wait for: an idle group, no epoch, pending, no room).
-function rekeyDue ({ rekeyPending = false, epoch = null, epochAt = null, sealedAts = [], entitled = 0, ownEpoch = false, now, jitter = 0, log = null } = {}) {
+function rekeyDue ({ rekeyPending = false, epoch = null, epochAt = null, sealedAts = [], entitled = 0, ownEpoch = false, now, jitter = 0, log = null, cutUnknown = false } = {}) {
   if (!Number.isFinite(now)) throw new TypeError('now required')
   if (rekeyPending === true) return notDue('rekey-pending')
   if (epoch === null || typeof epoch !== 'object') return notDue('no-epoch')
@@ -77,8 +79,25 @@ function rekeyDue ({ rekeyPending = false, epoch = null, epochAt = null, sealedA
   const reason = countDue <= ageDue ? 'count' : 'age'
   const j = Number.isFinite(jitter) ? Math.min(Math.max(jitter, 0), 1) : 0
   const at = ownEpoch === true ? dueAt : dueAt + REKEY_OTHER_WAIT_MS + Math.floor(j * REKEY_JITTER_MS)
+  // Run on its own, the check never guesses: the new epoch could be sealed
+  // to a writer its diary already cut.
+  if (now >= at && cutUnknown === true) return notDue('cut-unknown', now + REKEY_CHECK_MS)
   if (now >= at) return { due: true, at, reason }
   return notDue(ownEpoch === true ? 'young' : 'waiting', at)
+}
+
+// Whether a diary the fold reports in `cutUnknown` (a hole in its history
+// as read may hide a cut, docs/protocol.md "Diary cuts on own writers")
+// binds a writer the fold entitles. `writers`: [{ key, diary }] as
+// buildGroup takes them; `entitled`: the fold's entitled writer keys.
+function cutUnknownEntitled ({ cutUnknown, writers, entitled }) {
+  const unknown = new Set(cutUnknown instanceof Set || Array.isArray(cutUnknown) ? cutUnknown : [])
+  if (unknown.size === 0) return false
+  const keys = new Set(entitled instanceof Set || Array.isArray(entitled) ? entitled : [])
+  for (const w of Array.isArray(writers) ? writers : []) {
+    if (w !== null && typeof w === 'object' && keys.has(w.key) && unknown.has(w.diary)) return true
+  }
+  return false
 }
 
 const parseAt = (at) => {
@@ -164,6 +183,7 @@ module.exports = {
   REKEY_LOG_RESERVE,
   rekeyScale,
   rekeyDue,
+  cutUnknownEntitled,
   epochFacts,
   createRekeyGate
 }
