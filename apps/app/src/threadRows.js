@@ -1,4 +1,4 @@
-// Helpers for the reply rows of the Conversa and the feed. The items are
+// Helpers for the reply rows of the Conversa. The items are
 // already assembled: assembleThread in thread.js and assembleRoda in roda.js
 // are the trust gates, and nothing here fetches or checks a signature. The
 // thread layout itself (comments and their rodas) is roda.js commentRows.
@@ -8,7 +8,7 @@
 // Peer name and text pass through displayText before they leave.
 
 import rpc from '@varanda/rpc'
-import { parseRef, target } from './thread.js'
+import { parseRef } from './thread.js'
 
 const isPlain = (o) => !!o && typeof o === 'object' && !Array.isArray(o)
 const isCount = (n) => Number.isSafeInteger(n) && n >= 0
@@ -23,15 +23,6 @@ function canonicalRef (ref) {
 function itemRef (item) {
   if (!isPlain(item) || typeof item.author !== 'string' || !Number.isSafeInteger(item.seq)) return null
   return canonicalRef(item.author + ':' + item.seq)
-}
-
-function asTarget (value) {
-  if (typeof value === 'string') {
-    const ref = canonicalRef(value)
-    return ref === null ? null : parseRef(ref)
-  }
-  if (!isPlain(value) || typeof value.author !== 'string' || !Number.isSafeInteger(value.seq)) return null
-  return target({ author: value.author.toLowerCase(), seq: value.seq })
 }
 
 function atMillis (item) {
@@ -126,73 +117,5 @@ export function withOwnReply (replies, item) {
     out.push(entry)
   }
   if (!placed) out.push(item)
-  return out
-}
-
-function previewName (item) {
-  const name = shown(item && item.name)
-  if (name !== '') return name
-  return shown(item && item.username)
-}
-
-// Replies already sitting in a loaded feed, near the parent, are on screen
-// as their own rows. Only rows further than skipNear away are returned, and
-// nothing is fetched.
-export function cheapReplies (items, ref, options) {
-  const key = canonicalRef(ref)
-  if (key === null) return []
-  return cheapRepliesMap(items, [key], options).get(key) || []
-}
-
-// cheapReplies for many parents in one pass over the list, with the same
-// lines in the same order as one call per ref. A feed keeps every loaded
-// page, so a walk per parent would grow with the square of its length.
-// -> Map(canonical ref -> lines); a ref that is not a valid ref is left out.
-export function cheapRepliesMap (items, refs, options) {
-  const list = Array.isArray(items) ? items : []
-  const opts = isPlain(options) ? options : {}
-  const skipNear = isCount(opts.skipNear) ? opts.skipNear : 5
-  const max = isCount(opts.max) ? opts.max : 2
-  const wanted = new Map()
-  for (const ref of Array.isArray(refs) ? refs : []) {
-    const key = canonicalRef(ref)
-    if (key !== null && !wanted.has(key)) wanted.set(key, { parentAt: [], replies: [] })
-  }
-  const out = new Map()
-  if (wanted.size === 0) return out
-  for (let i = 0; i < list.length; i++) {
-    const row = list[i]
-    // A repost row shows the original, so its place is the parent's place.
-    // A repost wrapper is not a reply, whatever it carries.
-    const repost = isPlain(row) && row.kind === 'repost'
-    const shownRef = repost ? itemRef(row.to) : itemRef(row)
-    const asParent = shownRef === null ? undefined : wanted.get(shownRef)
-    if (asParent !== undefined) asParent.parentAt.push(i)
-    if (repost) continue
-    const to = asTarget(row && row.replyTo)
-    const asReply = to === null ? undefined : wanted.get(to.author + ':' + to.seq)
-    if (asReply !== undefined) asReply.replies.push(i)
-  }
-  for (const [key, { parentAt, replies }] of wanted) {
-    const lines = []
-    out.set(key, lines)
-    if (parentAt.length === 0) continue
-    const seen = new Set()
-    // Both index lists ascend, so one pointer finds the nearest parent row.
-    let p = 0
-    for (const i of replies) {
-      if (lines.length >= max) break
-      while (p < parentAt.length && parentAt[p] < i - skipNear) p++
-      if (p < parentAt.length && parentAt[p] <= i + skipNear) continue
-      const item = list[i]
-      const ref = itemRef(item)
-      if (ref === null || ref === key || seen.has(ref)) continue
-      // A photo-only reply has no line to show; it must not take a slot.
-      const text = typeof item.text === 'string' ? rpc.displayText(item.text, { multiline: true }) : ''
-      if (text.trim() === '') continue
-      seen.add(ref)
-      lines.push({ key: ref, name: previewName(item), text })
-    }
-  }
   return out
 }

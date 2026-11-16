@@ -1,5 +1,5 @@
-// Reply row helpers (threadRows.js): labels, chips, merges, and cheap reply
-// previews taken only from a list already loaded.
+// Reply row helpers (threadRows.js): labels, chips and merges. A Rua's
+// comment previews are feedFold.js now.
 'use strict'
 
 const test = require('brittle')
@@ -47,7 +47,7 @@ test('parseRef, target and sameTarget keep their checks', async (t) => {
 
 test('row module imports the thread helpers and does not fetch', (t) => {
   const src = fs.readFileSync(path.join(__dirname, '../src/threadRows.js'), 'utf8')
-  t.ok(src.includes("import { parseRef, target } from './thread.js'"))
+  t.ok(src.includes("import { parseRef } from './thread.js'"))
   t.is(src.includes("from 'react'"), false)
   t.is(src.includes('react-native'), false)
   t.is(src.includes("from 'node:"), false)
@@ -57,7 +57,7 @@ test('the thread layout lives in roda.js: no nested reply rows here', async (t) 
   const mod = await load()
   t.is(mod.threadRows, undefined, 'commentRows (roda.js) lays out comments and rodas')
   t.is(mod.deeperOf, undefined)
-  t.alike(Object.keys(mod).sort(), ['cheapReplies', 'cheapRepliesMap', 'childLabel', 'compareAtSeq', 'mergeChildren', 'replyChip', 'withOwnReply'])
+  t.alike(Object.keys(mod).sort(), ['childLabel', 'compareAtSeq', 'mergeChildren', 'replyChip', 'withOwnReply'])
 })
 
 test('mergeChildren dedupes by ref, orders by at, author, seq and returns a new map', async (t) => {
@@ -150,104 +150,6 @@ test('replyChip prefers @username, then the name, then a bare label', async (t) 
   t.is(replyChip({ name: 'Ana\u0001' }), 'Respondendo a Ana\ufffd')
   t.is(replyChip({ username: 'ana\u202e' }).includes('\u202e'), false)
   t.is(replyChip({ name: 'Ana\u0001' }).includes('\u0001'), false)
-})
-
-test('cheapReplies takes distant loaded replies and skips the near window', async (t) => {
-  const { cheapReplies } = await load()
-  const parent = post(A, 1, { text: 'foco' })
-  const near = []
-  for (let i = 0; i < 5; i++) {
-    near.push(post(B, i + 1, { replyTo: { author: A, seq: 1 }, text: 'perto' + i, name: 'Perto' }))
-  }
-  const other = post(C, 1, { replyTo: { author: D, seq: 1 }, text: 'outra', name: 'Outra' })
-  const far1 = post(C, 2, { replyTo: { author: A, seq: 1 }, text: 'longe\u0001', name: 'Lia\u202e' })
-  const far2 = post(C, 3, { replyTo: refOf(A, 1), text: 'a\nb', name: null, username: 'lia' })
-  const far3 = post(C, 4, { replyTo: { author: A, seq: 1 }, text: 'extra', name: 'Extra' })
-  const items = [parent, ...near, other, far1, far2, far3]
-  const out = cheapReplies(items, refOf(A, 1))
-  t.is(out.length, 2, 'default max is 2')
-  t.alike(out.map((r) => r.key), [refOf(C, 2), refOf(C, 3)])
-  t.is(out[0].name, 'Lia\ufffd')
-  t.is(out[0].text, 'longe\ufffd')
-  t.is(out[0].name.includes('\u202e'), false)
-  t.is(out[0].text.includes('\u0001'), false)
-  t.is(out[1].name, 'lia')
-  t.is(out[1].text, 'a\nb', 'a line break in the post text stays')
-  t.is(out.some((r) => r.text.startsWith('perto')), false, 'distance 1 to 5 is inside the default window')
-  t.is(out.some((r) => r.key === refOf(C, 1)), false, 'a far row aimed at another post is not a reply here')
-  t.is(typeof out.then, 'undefined')
-
-  const custom = cheapReplies(items, refOf(A, 1), { skipNear: 0, max: 1 })
-  t.alike(custom, [{ key: refOf(B, 1), name: 'Perto', text: 'perto0' }])
-
-  const upper = cheapReplies(items, refOf(A, 1).toUpperCase(), { max: 1 })
-  t.is(upper[0].key, refOf(C, 2))
-
-  t.alike(cheapReplies([far1, far2, far3], refOf(A, 1)), [], 'no parent row, so distance is unknown')
-  t.alike(cheapReplies(items, 'nope'), [])
-  t.alike(cheapReplies(null, refOf(A, 1)), [])
-  t.alike(cheapReplies(items, refOf(A, 1), { max: 0 }), [], 'a max of 0 is a cap, not the default')
-  t.alike(cheapReplies([...items, far1], refOf(A, 1), { max: 4 }).map((r) => r.key), [refOf(C, 2), refOf(C, 3), refOf(C, 4)])
-
-  const ghost = post(A, 1, { text: 'copia' })
-  const echo = post(B, 6, { replyTo: { author: A, seq: 1 }, text: 'eco', name: 'Eco' })
-  const gap = Array.from({ length: 6 }, (_, i) => post(D, i + 30, { text: 'g' }))
-  t.alike(cheapReplies([ghost, ...gap, parent, echo], refOf(A, 1)), [], 'near a later copy of the parent is still near')
-
-  const above = post(B, 9, { replyTo: { author: A, seq: 1 }, text: 'acima', name: 'Bo' })
-  const below = post(C, 9, { replyTo: { author: A, seq: 1 }, text: 'abaixo', name: 'Ca' })
-  const pads = Array.from({ length: 9 }, (_, i) => post(D, i + 1, { text: 'p' }))
-  const after = Array.from({ length: 6 }, (_, i) => post(D, i + 20, { text: 'q' }))
-  const beside = post(B, 7, { replyTo: { author: A, seq: 1 }, text: 'colada', name: 'Bo' })
-  const found = cheapReplies([above, ...pads, parent, beside, ...after, below], refOf(A, 1), { skipNear: 5, max: 3 })
-  t.alike(found.map((r) => r.text), ['acima', 'abaixo'])
-
-  const textReply = post(C, 21, { replyTo: { author: A, seq: 1 }, text: 'texto', name: 'Ca' })
-  const gap6 = Array.from({ length: 6 }, (_, i) => post(D, i + 60, { text: 'r' }))
-  const wrapper = { ...post(D, 50, { text: '' }), kind: 'repost', to: { author: A, seq: 1 } }
-  t.alike(cheapReplies([wrapper, ...gap6, textReply], refOf(A, 1)).map((r) => r.text), ['texto'],
-    'a repost row of the parent marks where the parent is')
-  const photo1 = post(B, 20, { replyTo: { author: A, seq: 1 }, text: '  ', name: 'Foto' })
-  const photo2 = post(B, 21, { replyTo: { author: A, seq: 1 }, text: '', name: 'Foto' })
-  t.alike(cheapReplies([parent, ...gap6, photo1, photo2, textReply], refOf(A, 1)).map((r) => r.text), ['texto'],
-    'photo-only replies do not use up the slots')
-  const wrapReply = { ...post(C, 20, { replyTo: { author: A, seq: 1 }, text: 'nao' }), kind: 'repost', to: { author: D, seq: 99 } }
-  t.alike(cheapReplies([parent, ...gap6, wrapReply, textReply], refOf(A, 1)).map((r) => r.text), ['texto'],
-    'a repost wrapper is not a reply')
-})
-
-test('cheapRepliesMap: one walk for many parents, cheapReplies rules kept', async (t) => {
-  const { cheapReplies, cheapRepliesMap } = await import('../src/threadRows.js')
-  const A = 'a'.repeat(64)
-  const B = 'b'.repeat(64)
-  const C = 'c'.repeat(64)
-  const row = (author, seq, extra = {}) => ({ kind: 'post', author, seq, at: '2026-10-20T10:00:00.000Z', text: author[0] + seq, name: 'N' + seq, ...extra })
-  const pad = (from) => Array.from({ length: 7 }, (_, i) => row(C, from + i))
-  const list = [
-    row(A, 1),
-    ...pad(100),
-    row(B, 1, { replyTo: { author: A, seq: 1 } }),
-    row(B, 2, { replyTo: A.toUpperCase() + ':1' }),
-    row(B, 3, { replyTo: { author: A, seq: 1 }, text: '' }),
-    { ...row(B, 4, { replyTo: { author: A, seq: 1 } }), kind: 'repost', to: { author: A, seq: 2 } },
-    row(B, 8, { replyTo: { author: A, seq: 2 } }),
-    ...pad(200),
-    row(B, 5, { replyTo: { author: A, seq: 2 } }),
-    row(B, 1, { replyTo: { author: A, seq: 1 } }),
-    row(B, 6, { replyTo: { author: A, seq: 1 } }),
-    row(B, 7, { replyTo: { author: A, seq: 3 } })
-  ]
-  const map = cheapRepliesMap(list, [A + ':1', A.toUpperCase() + ':2', A + ':3', 'nada', B + ':1'])
-  const keys = (lines) => (lines || []).map((l) => l.key)
-  t.alike(keys(map.get(A + ':1')), [B + ':1', B + ':2'], 'two lines in list order, a blank skipped')
-  t.alike(keys(map.get(A + ':2')), [B + ':5'], 'a repost row places its original; the reply beside it is a row')
-  t.alike(map.get(A + ':3'), [], 'a parent that is not in the list gets no lines')
-  t.alike(map.get(B + ':1'), [], 'no reply, no lines')
-  t.ok(!map.has('nada') && map.size === 4, 'an invalid ref is left out')
-  t.alike(cheapReplies(list, A.toUpperCase() + ':1'), map.get(A + ':1'), 'cheapReplies is the one-ref case')
-  t.alike(cheapRepliesMap(list, []), new Map())
-  t.alike(cheapRepliesMap(null, [A + ':1']).get(A + ':1'), [])
-  t.alike(keys(cheapRepliesMap(list, [A + ':1'], { max: 3 }).get(A + ':1')), [B + ':1', B + ':2', B + ':6'], 'a repeat of a shown key is skipped')
 })
 
 // Conversa's rowProps with a row cache (Conversa.js loads react-native, so

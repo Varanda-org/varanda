@@ -163,7 +163,7 @@ test('the reply line is a 44 pt replyChip and plain text without onOpenParent', 
   t.ok(chipAt > 0 && chipAt < post.indexOf('{mediaNode}'), 'the chip stays before the photos')
 })
 
-test('reply previews are at most two sanitized lines in one Respostas button', (t) => {
+test('reply previews are at most two sanitized lines in one Comentários button', (t) => {
   t.ok(post.includes('if (!Array.isArray(replyPreviews)) return []'), 'absent or empty renders nothing')
   t.ok(post.includes("if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue"), 'a non-object entry is ignored')
   t.ok(post.includes("if (text === '') continue"), 'an entry with empty text is ignored')
@@ -172,10 +172,10 @@ test('reply previews are at most two sanitized lines in one Respostas button', (
   t.ok(post.includes('return lines.slice(0, 2)'), 'at most two previews')
   t.ok(post.includes("line.name !== '' ? line.name + ': ' + line.text : line.text"), 'Nome: texto')
   t.ok(post.includes('numberOfLines={1}>{previewLineText(line)}</Text>'), 'one line per preview')
-  t.ok(post.includes('<Text style={styles.previewsLabel}>Respostas</Text>'), 'label Respostas')
-  t.ok(post.includes("'Respostas. ' + previewLines.map(previewLineText).join('. ')"), 'the button label starts with Respostas and reads each preview')
+  t.ok(post.includes('<Text style={styles.previewsLabel}>Comentários</Text>'), 'label Comentários')
+  t.ok(post.includes("'Comentários. ' + previewLines.map(previewLineText)") && post.includes('.concat(moreText'), 'the button label starts with Comentários and reads each preview and the more line')
   t.is(post.split('{previewsBody}').length - 1, 2, 'the button and the plain view share one block')
-  const at = post.indexOf('{previewLines.length > 0')
+  const at = post.indexOf('{previewsBody !== null')
   const block = post.slice(at, post.indexOf('<ActionsSheet', Math.max(at, 0)))
   t.ok(
     at > 0 &&
@@ -187,6 +187,28 @@ test('reply previews are at most two sanitized lines in one Respostas button', (
     !block.includes('hitSlop'),
     'one button when onOpenPreviews is set, a plain view when it is absent'
   )
+})
+
+test('commentedBy header and previewsMore line', (t) => {
+  t.ok(post.includes("const moreText = typeof previewsMore === 'string' ? displayText(previewsMore).trim() : ''"), 'previewsMore is sanitized and drawn with or without onOpenPreviews, so the cold-start preview keeps the live height')
+  const at = post.indexOf('{previewsBody !== null')
+  const block = post.slice(at, post.indexOf('<ActionsSheet', Math.max(at, 0)))
+  const pressAt = block.indexOf('onPress={openPreviews}')
+  const plainAt = block.indexOf(': <View style={styles.previews}>{previewsBody}</View>')
+  t.ok(pressAt > 0 && block.indexOf('{previewsBody}', pressAt) < plainAt && plainAt > pressAt, 'the more line sits inside the button with onOpenPreviews and in the plain, unpressable view without it')
+  t.ok(post.includes("previewsBody = previewLines.length === 0 && moreText === ''"), 'the block renders with only previewsMore')
+  const previewsBlock = post.slice(post.indexOf('const previewsBody ='), post.indexOf('  return (', post.indexOf('const previewsBody =')))
+  const linesAt = previewsBlock.indexOf('{previewLines.map(')
+  const moreAt = previewsBlock.indexOf("{moreText !== '' ? <Text style={styles.previewLine} numberOfLines={1}>{moreText}</Text> : null}")
+  t.ok(linesAt > 0 && moreAt > linesAt && moreAt < previewsBlock.lastIndexOf('</>'), 'the more line is last, inside previewsBody')
+  t.ok(previewsBlock.includes('<Text key={index + \':\' + line.key} style={styles.previewLine} numberOfLines={1}>'), 'the more line has the preview lines\' style in both cases')
+  t.ok(post.includes("const commenterLabel = !reposter && commentedBy && typeof commentedBy === 'object' && typeof commentedBy.label === 'string' ? displayText(commentedBy.label).trim() : ''"), 'repostedBy wins, and the label goes through displayText')
+  const header = post.slice(post.indexOf('{reposter'), post.indexOf('<View style={styles.main}>'))
+  const slot = header.indexOf(": commenterLabel !== ''")
+  t.ok(slot > 0 && header.indexOf("<Icon name='resposta' size={14}", slot) > slot && header.indexOf('accessibilityLabel={commenterLabel}', slot) > slot, 'the header sits in the repost slot, with the resposta icon and its label spoken')
+  t.ok(header.includes("accessibilityRole={openCommenter ? 'link' : 'text'}") && post.includes('otherPress(commentedBy && commentedBy.onOpen)'), 'pressable only with onOpen')
+  t.ok(header.slice(slot).includes('hitSlop={repostedSlop}') && !post.includes('COMMENTER_SLOP'), 'the header takes the reposted line\'s computed slop')
+  t.ok(post.includes("const headAbove = reposter || commenterLabel !== '' ? REPOSTED_GAP / 2 : ROW_PAD_TOP"), 'the head slop stops under the comentou line too')
 })
 
 test('reply preview lines: one line each, sanitized, blank and bad entries dropped, at most 2', (t) => {
