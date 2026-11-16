@@ -1682,7 +1682,9 @@ const SPECS = {
     },
     mutating: true
   },
-  'identity.clear': { fields: none, mutating: true },
+  // keepMedia: the lock keeps the sealed cache of opened direct message
+  // media; any other relock wipes it (docs/rpc.md 5.51).
+  'identity.clear': { fields: { keepMedia: opt(isBool) }, mutating: true },
   'identity.status': { fields: none },
   'identity.reset': { fields: none, mutating: true },
   'identity.forget': { fields: none, mutating: true },

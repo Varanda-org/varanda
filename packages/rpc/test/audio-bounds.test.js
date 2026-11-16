@@ -57,10 +57,53 @@ function mdhd (timescale, duration = 0) {
 
 const urlSelf = () => box('url ', flags(1))
 const dref = (...list) => box('dref', [0, 0, 0, 0], be32(list.length), ...list)
+const AAC_RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350]
+
+// An AudioSpecificConfig: object type, core rate (an explicit frequency when
+// no index names it), mono, then frameLengthFlag (frame960) and two zero
+// bits. sbr: the output rate of an explicit SBR (wrapper 5) or PS (29).
+function asc ({ type = 2, rate, frame960 = false, sbr = null, wrapper = 5 }) {
+  const bits = []
+  const put = (v, n) => {
+    for (let i = n - 1; i >= 0; i--) bits.push(Math.floor(v / 2 ** i) % 2)
+  }
+  const putType = (t) => {
+    if (t < 32) return put(t, 5)
+    put(31, 5)
+    put(t - 32, 6)
+  }
+  const putRate = (r) => {
+    const i = AAC_RATES.indexOf(r)
+    if (i >= 0) return put(i, 4)
+    put(15, 4)
+    put(r, 24)
+  }
+  putType(sbr === null ? type : wrapper)
+  putRate(rate)
+  put(1, 4)
+  if (sbr !== null) {
+    putRate(sbr)
+    putType(type)
+  }
+  put(frame960 ? 1 : 0, 1)
+  put(0, 2)
+  while (bits.length % 8) bits.push(0)
+  const out = []
+  for (let i = 0; i < bits.length; i += 8) out.push(parseInt(bits.slice(i, i + 8).join(''), 2))
+  return out
+}
+
 // An ES_Descriptor (tag 3) holding a DecoderConfigDescriptor (tag 4) for
 // objectTypeIndication oti and streamType st, with an AudioSpecificConfig
 // (tag 5), then an SLConfigDescriptor (tag 6).
-const esds = (oti = 0x40, st = 0x05) => box('esds', [0, 0, 0, 0], [0x03, 0x19, 0, 1, 0, 0x04, 0x11, oti, (st << 2) | 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x05, 0x02, 0x12, 0x10, 0x06, 0x01, 0x02])
+// The default AudioSpecificConfig makes an access unit last 1 ms at
+// timescale 1000 (1024 samples at 1024000 Hz), as the runs of one-tick
+// samples most cases use.
+function esds (oti = 0x40, st = 0x05, config = asc({ rate: 1024000 })) {
+  const dc = [oti, (st << 2) | 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x05, config.length, ...config]
+  const es = [0, 1, 0, 0x04, dc.length, ...dc, 0x06, 0x01, 0x02]
+  return box('esds', [0, 0, 0, 0], [0x03, es.length, ...es])
+}
 const mp4a = (...kids) => box('mp4a', new Array(28).fill(0), ...(kids.length ? kids : [esds()]))
 const dOps = () => box('dOps', [0, 2, 0x01, 0x38, ...be32(48000), 0, 0, 0])
 const opus = (...kids) => box('Opus', new Array(28).fill(0), ...(kids.length ? kids : [dOps()]))
@@ -70,6 +113,21 @@ const stts = (runs) => box('stts', [0, 0, 0, 0], be32(runs.length), ...runs.map(
 // A constant sample size of 1 byte, or per-sample sizes when size is 0.
 const stsz = (count, size = 1, list = []) => box('stsz', [0, 0, 0, 0], be32(size), be32(count), ...list.map(be32))
 const samplesOf = (runs) => runs.reduce((n, [c]) => n + c, 0)
+
+// An AudioSpecificConfig whose access units last as long as the runs say,
+// so a track built with the default entry agrees with its decoder: an
+// indexed rate when one fits (20-tick frames at timescale 1000 are 960
+// samples at 48 kHz), an explicit one otherwise.
+function aacFor (runs, timescale) {
+  const n = samplesOf(runs)
+  const ticks = runs.reduce((sum, [c, d]) => sum + c * d, 0)
+  if (n === 0 || ticks === 0) return asc({ rate: 44100 })
+  for (const frame960 of [false, true]) {
+    const rate = (frame960 ? 960 : 1024) * timescale * n / ticks
+    if (AAC_RATES.includes(rate)) return asc({ rate, frame960 })
+  }
+  return asc({ rate: Math.min(0xffffff, Math.max(1, Math.round(1024 * timescale * n / ticks))) })
+}
 // entries: [[first_chunk, samples_per_chunk, sample_description_index = 1], ...]
 const stsc = (list) => box('stsc', [0, 0, 0, 0], be32(list.length), ...list.map(([f, n, d = 1]) => [...be32(f), ...be32(n), ...be32(d)]))
 const stco = (count) => box('stco', [0, 0, 0, 0], be32(count), new Array(count * 4).fill(0))
@@ -86,7 +144,7 @@ function trak ({
   duration = 0,
   runs = [[3, 1000]],
   refs = [urlSelf()],
-  entries = [mp4a()],
+  entries = [mp4a(esds(0x40, 0x05, aacFor(runs, timescale)))],
   extra = [],
   stblExtra = [],
   head = tkhd(id),
@@ -235,8 +293,9 @@ test('audioBounds: structure is checked', (t) => {
 })
 
 // Fragmented MPEG-4, as browser MediaRecorder writes it: mvhd duration 0,
-// an empty stts in moov, moov/mvex, then moof/mdat pairs.
-const fragTrak = (handler, id, timescale = 48000, duration = 0) => trak({ handler, id, timescale, duration, runs: [] })
+// an empty stts in moov, moov/mvex, then moof/mdat pairs. The track is
+// Opus, as browser recorders write, so the fragments' durations stand alone.
+const fragTrak = (handler, id, timescale = 48000, duration = 0) => trak({ handler, id, timescale, duration, runs: [], entries: [opus()] })
 
 const mehd0 = (d) => box('mehd', [0, 0, 0, 0], be32(d))
 const mehd1 = (hi, lo) => box('mehd', [1, 0, 0, 0], be32(hi), be32(lo))
@@ -621,8 +680,10 @@ test('audioBounds: the sample entry carries one AAC or Opus configuration', (t) 
     const es = [0, 1, 0, 0x04, dc.length, ...dc, 0x06, 0x01, 0x02]
     return box('esds', [0, 0, 0, 0], [0x03, es.length, ...es])
   }
-  t.alike(one(mp4a(withDsi([0x05, 0x02, 0x12, 0x10]))), one(mp4a(esds())), 'the builder matches a valid esds')
-  t.ok(one(mp4a(withDsi([0x05, 0x02, 0x12, 0x10]))) !== null, 'a two-byte AudioSpecificConfig passes')
+  t.alike(one(mp4a(withDsi([0x05, 0x05, ...asc({ rate: 1024000 })]))), one(mp4a(esds())), 'the builder matches a valid esds')
+  // AAC LC at 44.1 kHz, stereo, on samples of 1024 ticks at that timescale.
+  const aac44 = (entry) => audioBounds(file({ mvhd: mvhd0(1000, 0), tracks: [{ entries: [entry], timescale: 44100, runs: [[130, 1024]] }] }))
+  t.alike(aac44(mp4a(withDsi([0x05, 0x02, 0x12, 0x10]))), { ms: Math.round(130 * 1024 * 1000 / 44100) }, 'a two-byte AudioSpecificConfig passes')
   t.is(one(mp4a(withDsi([]))), null, 'no DecoderSpecificInfo')
   t.is(one(mp4a(withDsi([0x05, 0x8f, 0xff, 0xff, 0x7f, 0x12, 0x10]))), null, 'a DecoderSpecificInfo declaring 268 MB')
   t.is(one(mp4a(withDsi([0x05, 0x41, ...new Array(65).fill(0x11)]))), null, 'a DecoderSpecificInfo over 64 bytes')
@@ -634,6 +695,52 @@ test('audioBounds: the sample entry carries one AAC or Opus configuration', (t) 
   t.is(one(opus(dOps(), dOps())), null, 'two dOps')
   t.is(one(opus(box('dOps', [0, 2, 0]))), null, 'a truncated dOps')
   t.is(one(opus(esds())), null, 'an esds in an Opus entry')
+})
+
+test('audioBounds: an AAC decoder plays the samples no longer than they say', (t) => {
+  const aac = (config, { timescale = 44100, runs = [[130, 1024]] } = {}) =>
+    audioBounds(file({ mvhd: mvhd0(1000, 0), tracks: [{ entries: [mp4a(esds(0x40, 0x05, config))], timescale, runs }] }))
+  const ms = Math.round(130 * 1024 * 1000 / 44100)
+  t.alike(aac(asc({ rate: 44100 })), { ms }, 'AAC LC at its own rate')
+  t.alike(aac(asc({ type: 1, rate: 44100 })), { ms }, 'AAC Main')
+  t.is(aac(asc({ rate: 8000 })), null, 'a lower rate plays longer than the samples say')
+  t.alike(aac(asc({ rate: 96000 })), { ms }, 'a higher rate plays shorter: nothing plays past the checked ms')
+  // A recorder's capture gap: a two-second delta between 60 s of AAC LC
+  // frames at 44.1 kHz. The decoder plays the frames for less than the
+  // samples say, which is never refused.
+  const gap = [[1292, 1024], [1, 1024 + 88200], [1291, 1024]]
+  t.alike(aac(asc({ rate: 44100 }), { runs: gap }), { ms: Math.round((2584 * 1024 + 88200) * 1000 / 44100) }, 'a capture gap of 2 s in a 60 s note')
+  t.is(aac(asc({ rate: 8000 }), { timescale: 1000, runs: [[6000, 20]] }), null, '120 s of samples an 8 kHz decoder plays for 768 s')
+  t.alike(aac(asc({ rate: 48000, frame960: true }), { timescale: 1000, runs: [[6000, 20]] }), { ms: MAX_AUDIO_MS }, '960-sample frames at 48 kHz last 20 ms')
+  t.is(aac(asc({ rate: 48000 }), { timescale: 48000, runs: [[3000, 960]] }), null, 'without frameLengthFlag a frame is 1024 samples')
+  t.alike(aac(asc({ rate: 44100 }), { timescale: 1000, runs: [[65, 23], [65, 24]] }), { ms: 65 * 47 }, 'rounded deltas at timescale 1000')
+  t.alike(aac(asc({ rate: 51200 }), { timescale: 1000, runs: [[150, 20]] }), { ms: 3000 }, 'an explicit frequency')
+  t.alike(aac(asc({ rate: 22050, sbr: 44100 }), { runs: [[65, 2048]] }), { ms: Math.round(65 * 2048 * 1000 / 44100) }, 'HE-AAC: the core rate decides')
+  t.alike(aac(asc({ rate: 22050, sbr: 44100, wrapper: 29 }), { runs: [[65, 2048]] }), { ms: Math.round(65 * 2048 * 1000 / 44100) }, 'HE-AAC v2')
+  t.is(aac(asc({ rate: 11025, sbr: 22050 }), { runs: [[65, 2048]] }), null, 'HE-AAC at half that core rate')
+  t.alike(aac(asc({ rate: 44100, sbr: 44100 })), { ms }, 'downsampled SBR keeps the core rate')
+  t.alike(aac(asc({ rate: 8000, sbr: 16000 }), { timescale: 8000 }), { ms: 16640 }, 'HE-AAC at 8 kHz: the timing alone passes')
+  t.is(aac(asc({ rate: 8000, sbr: 48000 }), { timescale: 8000 }), null, 'an SBR output rate that is neither the core rate nor twice it')
+  t.is(aac(asc({ rate: 22050, sbr: 0 }), { runs: [[65, 2048]] }), null, 'an SBR output rate of zero')
+  t.is(aac(asc({ type: 42, rate: 44100 })), null, 'USAC, an escaped object type')
+  t.is(aac(asc({ type: 39, rate: 44100 })), null, 'AAC ELD, whose frames are shorter')
+  t.is(aac(asc({ type: 42, rate: 22050, sbr: 44100 })), null, 'SBR over a core that is not AAC')
+  t.is(aac([0x16, 0x88]), null, 'a reserved rate index')
+  t.is(aac([0x17, 0x80]), null, 'an explicit frequency cut short')
+  t.is(aac(asc({ rate: 0 })), null, 'an explicit frequency of zero')
+
+  const slow = file({ mvhd: mvhd0(1000, 0), tracks: [{ entries: [mp4a(esds(0x40, 0x05, asc({ rate: 8000 })))], timescale: 44100, runs: [[130, 1024]] }] })
+  t.is(audioBounds(slow, { metadata: true }), null, 'the sender answers to its decoder too')
+  t.is(stripAudioMetadata(slow), null, 'nothing to strip into a valid note')
+
+  // Fragmented AAC, as Safari's recorder writes it: every fragment counts.
+  const safari = (config) => audioBounds(fragmented({
+    tracks: [trak({ id: 1, timescale: 44100, runs: [], entries: [mp4a(esds(0x40, 0x05, config))] })],
+    mvex: [trex(1, 1024)],
+    moofs: [moof(traf(tfhd(1), trun({ count: 43 }))), moof(traf(tfhd(1), trun({ count: 43 })))]
+  }))
+  t.alike(safari(asc({ rate: 44100 })), { ms: Math.round(86 * 1024 * 1000 / 44100) }, 'fragments at the configured rate')
+  t.is(safari(asc({ rate: 11025 })), null, 'fragments a quarter-rate decoder plays four times as long')
 })
 
 test('audioBounds: a received note carries no metadata or uuid boxes', (t) => {
