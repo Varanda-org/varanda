@@ -79,13 +79,18 @@ test('Conversa: an orphan shows its top-most message at comment level with its r
 
 test('Conversa: comment copy', (t) => {
   t.ok(src.includes("const title = 'Comentários'"))
-  t.ok(src.includes('commentsTitle(Math.max(meta ? meta.repliesTotal : 0, comments.length))'))
+  t.ok(!src.includes('commentsTitle') && !src.includes('repliesTitle'), 'no count line under the main post')
+  t.ok(src.includes("phase === 'ready' && notes.length > 0"))
   t.ok(src.includes("unavailable === 1 ? '1 comentário indisponível' : String(unavailable) + ' comentários indisponíveis'"))
   t.ok(src.includes("moreError: 'Não foi possível carregar mais comentários.'"))
   t.ok(src.includes("placeholder={toRoot ? 'Escreva um comentário' : undefined}"), 'the bar default stays for a reply')
   t.ok(src.includes("sendLabel={toRoot ? 'Comentar' : undefined}"), 'send reads Comentar on the post, Responder on a comment')
   t.ok(src.includes("else if ((meta && meta.complete === false) || rodaGaps) notes.push('Algumas respostas podem faltar.')"))
   t.ok(src.includes("roda.loaded && (roda.complete === false || (roda.mode === 'direct' && roda.replies.some("), 'a cut roda, or direct replies with replies of their own')
+  t.ok(src.includes('replies: Math.max(index.repliesTotal, comments.length)'), 'the root count keeps the floor of what the screen shows')
+  t.ok(src.includes("if (phase === 'ready' && !view.post) notes.push('Esta publicação não pôde ser verificada agora.')"), 'the unverified note sits in the bordered notes block')
+  t.ok(!src.includes('<Soft>Esta publicação não pôde ser verificada agora.</Soft>'))
+  t.ok(!src.includes('meta.repliesTotal'), 'no count state on the screen meta')
   t.absent(src.includes('\u2014'))
 })
 
@@ -199,7 +204,7 @@ async function sending (options = {}) {
     ownReplies: { current: new Map() },
     names: {},
     identityOf: () => ({ name: 'Eu' }),
-    eng: { counts: new Map() },
+    eng: { counts: new Map(options.counts || []) },
     setCount: (key, value) => context.eng.counts.set(key, value),
     viewRef: { current: { root: focal, comments: options.comments || [], resolved: options.resolved || null, meta: options.meta || null } },
     rodasRef: { current: state.rodas },
@@ -1043,7 +1048,7 @@ async function deleting (options) {
     revokeDeletedMedia: () => {},
     onBack: () => { state.back++ },
     focal: options.focal || R,
-    viewRef: { current: { root: R, comments, meta: { repliesTotal: comments.length } } },
+    viewRef: { current: { root: R, comments, meta: { indexing: false, complete: true } } },
     peekedRef: { current: options.peeked || new Map() },
     rodasRef: { current: state.rodas },
     putRodas: (next) => { context.rodasRef.current = next; state.rodas = next },
@@ -1082,7 +1087,6 @@ test('Conversa delete drops the reply and its descendants from the roda, as the 
   t.ok(state.open.has(TOP))
   t.is(own.ownFor(TOP, context.ownReplies.current).length, 0)
   t.alike(refsIn(context.viewRef.current.comments), [TOP])
-  t.is(context.viewRef.current.meta.repliesTotal, 1, 'a reply is not a comment')
 })
 
 test('Conversa delete closes an emptied roda and a deleted comment takes its roda', async (t) => {
@@ -1095,7 +1099,6 @@ test('Conversa delete closes an emptied roda and a deleted comment takes its rod
   await comment.del.onDeleted({ ref: TOP, seq: 2 })
   t.absent(comment.state.rodas.has(TOP))
   t.alike(refsIn(comment.context.viewRef.current.comments), [C + ':3'])
-  t.is(comment.context.viewRef.current.meta.repliesTotal, 1)
   t.is(comment.context.eng.counts.get(R).replies, 1)
   const root = await deleting({ comments: [item(2, 1, B, A)], rodas: new Map() })
   await root.del.onDeleted({ ref: R, seq: 1 })
@@ -1276,11 +1279,9 @@ test('Conversa: an older screen lowers the root count for a comment it only show
     rodas: new Map(),
     counts: [[R, { replies: 3, likes: 1 }]]
   })
-  context.viewRef.current.meta = { repliesTotal: 3 }
   listener(new Set([B + ':8']))
   t.alike(context.eng.counts.get(R), { replies: 2, likes: 1 })
   t.alike(refsIn(context.viewRef.current.comments), [C + ':9'])
-  t.is(context.viewRef.current.meta.repliesTotal, 2)
 })
 
 async function anchorOfLoaded () {
@@ -1716,12 +1717,18 @@ test('Conversa send handler: a deep target no loaded roda holds goes to its reso
   }
 })
 
-test('Conversa send handler: an own comment raises the header count, a failed one does not', async (t) => {
-  const sent = await sending({ meta: { indexing: false, complete: true, repliesTotal: 3 } })
+test('Conversa send handler: an own comment raises the root count, a failed one does not', async (t) => {
+  const meta = { indexing: false, complete: true }
+  const old = item(4, 1, B, A)
+  const sent = await sending({ meta, comments: [old], counts: [[focal, { replies: 3 }]] })
   t.is(await sent.send('comentário'), true)
-  t.is(sent.context.viewRef.current.meta.repliesTotal, 4)
+  t.is(sent.context.eng.counts.get(focal).replies, 4)
+  t.is(sent.context.viewRef.current.comments.length, 2)
+  t.is(sent.context.viewRef.current.comments[1], old, 'the own comment goes first')
   const failed = await sending({
-    meta: { indexing: false, complete: true, repliesTotal: 3 },
+    meta,
+    comments: [old],
+    counts: [[focal, { replies: 3 }]],
     request: async (method) => {
       if (method === 'log.read') return { key: A, entries: [], entriesTruncated: 0 }
       const err = new Error('talvez')
@@ -1730,7 +1737,8 @@ test('Conversa send handler: an own comment raises the header count, a failed on
     }
   })
   t.is(await failed.send('comentário'), false)
-  t.is(failed.context.viewRef.current.meta.repliesTotal, 3, 'an uncertain send leaves the count')
+  t.is(failed.context.eng.counts.get(focal).replies, 3, 'an uncertain send leaves the count')
+  t.alike(failed.context.viewRef.current.comments, [old])
 })
 
 test('Conversa load: the first open tries once more after a lost connection', async (t) => {

@@ -172,7 +172,7 @@ test('reply previews are at most two sanitized lines in one Comentários button'
   t.ok(post.includes('return lines.slice(0, 2)'), 'at most two previews')
   t.ok(post.includes("line.name !== '' ? line.name + ': ' + line.text : line.text"), 'Nome: texto')
   t.ok(post.includes('numberOfLines={1}>{previewLineText(line)}</Text>'), 'one line per preview')
-  t.ok(post.includes('<Text style={styles.previewsLabel}>Comentários</Text>'), 'label Comentários')
+  t.ok(!post.includes('styles.previewsLabel') && !post.includes('>Comentários</Text>'), 'no visible Comentários label: Ana comentou and the lines already say it')
   t.ok(post.includes("'Comentários. ' + previewLines.map(previewLineText)") && post.includes('.concat(moreText'), 'the button label starts with Comentários and reads each preview and the more line')
   t.is(post.split('{previewsBody}').length - 1, 2, 'the button and the plain view share one block')
   const at = post.indexOf('{previewsBody !== null')
