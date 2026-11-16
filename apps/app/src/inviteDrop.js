@@ -83,6 +83,10 @@ export function createInviteDropMonitor ({ policy, start, summary, store, setInt
     try { return seenElsewhere(record) === true } catch { return false }
   }
 
+  function marked (record) {
+    try { onMarked(record) } catch {}
+  }
+
   async function poll (session) {
     if (current !== session || session.busy || unavailable) return
     session.busy = true
@@ -121,6 +125,10 @@ export function createInviteDropMonitor ({ policy, start, summary, store, setInt
         else if (!note || note.resetsAt !== next.resetsAt || note.seenOpened !== next.seenOpened) publish(next)
       } else if (answer.remaining === 0 || answer.mode !== 'sorteio') {
         publish(null)
+      } else if (next && !shownElsewhere(next)) {
+        // Shown here already, but its mark never reached the seen document
+        // (a closed tab, an older build): offered again, at most once.
+        marked(next)
       }
     } catch {
       // A failed read says nothing about the available balance.
@@ -151,7 +159,18 @@ export function createInviteDropMonitor ({ policy, start, summary, store, setInt
     markSeen (record) {
       if (!current || record !== note) return
       if (!remember(record)) return
-      try { onMarked(record) } catch {}
+      marked(record)
+    },
+    // The marks changed: a note another device showed meanwhile goes away.
+    // One already on screen here stays, since its own echoed mark looks the
+    // same as another device's.
+    recheck () {
+      if (note === null) return
+      const shown = seen.get(note.member)
+      if (shown && shown.resetsAt === note.resetsAt && shown.seenOpened >= note.seenOpened) return
+      if (!shownElsewhere(note)) return
+      remember(note)
+      publish(null)
     },
     dismiss () { publish(null) },
     stop

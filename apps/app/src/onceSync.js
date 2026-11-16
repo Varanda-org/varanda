@@ -24,23 +24,30 @@ export function onceMemberFor (syncingMember, member) {
   return member.toLowerCase() === syncingMember ? syncingMember : null
 }
 
-// The invite monitor waits for the first seen pass of a member (answered,
-// failed or timed out) so a mark written by another device is known before
-// its first poll.
+// The answer of seen.onceKey, or null: anything else (an older node, the
+// vitrine, a malformed reply) leaves the marks of that member off.
+export function onceKeyOf (answer) {
+  const key = answer && typeof answer === 'object' ? answer.key : null
+  return typeof key === 'string' && HEX64.test(key) ? key : null
+}
+
+// The invite monitor waits for the first seen pass of a member and for its
+// once key (each answered or failed), or for the timer, so a mark written by
+// another device is known before its first poll.
 export const FIRST_PASS_MS = 4000
 
-export const FIRST_PASS_IDLE = Object.freeze({ member: null, settled: false })
+export const FIRST_PASS_IDLE = Object.freeze({ member: null, pass: false, key: false, settled: false })
 
 export function firstPassStep (state, event) {
   const cur = state && typeof state === 'object' ? state : FIRST_PASS_IDLE
   if (!event || typeof event !== 'object') return cur
   const member = typeof event.member === 'string' && HEX64.test(event.member) ? event.member : null
-  if (event.type === 'member') return cur.member === member ? cur : { member, settled: false }
-  if (event.type === 'settle') {
-    if (member === null || cur.member !== member || cur.settled) return cur
-    return { member, settled: true }
-  }
-  return cur
+  if (event.type === 'member') return cur.member === member ? cur : { member, pass: false, key: false, settled: false }
+  if (event.type !== 'pass' && event.type !== 'key' && event.type !== 'timeout') return cur
+  if (member === null || cur.member !== member || cur.settled) return cur
+  const pass = cur.pass || event.type === 'pass'
+  const key = cur.key || event.type === 'key'
+  return { member, pass, key, settled: event.type === 'timeout' || (pass && key) }
 }
 
 export function firstPassReady (state, member) {

@@ -18,10 +18,11 @@ const BLOB = 'A'.repeat(43744)
 
 const SEEN_NO = { code: 'USAGE', message: 'estado de vistos sincronizado só no navegador' }
 
-// Params the RPC contract accepts (docs/rpc.md 5.95, 5.96, 5.149 and 5.150).
+// Params the RPC contract accepts (docs/rpc.md 5.95, 5.96, 5.149, 5.150 and 5.151).
 const CALLS = [
   ['seen.sign', { nonce: NONCE, action: 'read' }],
   ['seen.merge', { blob: null, avisos: { own: [] }, unchanged: false }],
+  ['seen.onceKey', {}],
   ['moment.seen', { author: 'ab'.repeat(32), seq: 3 }],
   ['moments.seen', {}]
 ]

@@ -520,6 +520,89 @@ test('a throwing seenElsewhere or onMarked changes nothing else', async (t) => {
   t.alike(f.saved, [record()])
 })
 
+test('a note shown here whose mark is not remote is offered again, once per poll at most', async (t) => {
+  const marked = []
+  let elsewhere = false
+  const f = await fixture({ seen: record(), seenElsewhere: () => elsewhere, onMarked: (r) => { marked.push(r); elsewhere = true } })
+  f.update()
+  await flush()
+  t.alike(f.notes, [], 'already shown on this device')
+  t.alike(marked, [record()], 'its mark offered again')
+  await f.c.advance(f.POLL_MS)
+  t.alike(marked, [record()], 'no churn once the registry knows it')
+})
+
+test('no re-offer when the mark is already known, or nothing is on offer', async (t) => {
+  const marked = []
+  const f = await fixture({ seen: record(), seenElsewhere: () => true, onMarked: (r) => marked.push(r) })
+  f.update()
+  await flush()
+  t.alike(marked, [])
+  const g = await fixture({ seen: record(1), onMarked: (r) => marked.push(r) })
+  g.answer(grant(1, 1))
+  g.update()
+  await flush()
+  t.alike(marked, [], 'nothing left this week')
+})
+
+test('recheck dismisses a note another device showed meanwhile', async (t) => {
+  let elsewhere = false
+  const marked = []
+  const f = await fixture({ seenElsewhere: () => elsewhere, onMarked: (r) => marked.push(r) })
+  f.update()
+  await flush()
+  t.alike(f.shown.note, record())
+  f.monitor.recheck()
+  t.alike(f.shown.note, record(), 'no mark yet: stays')
+  elsewhere = true
+  f.monitor.recheck()
+  t.is(f.shown.note, null, 'the late remote mark dismisses it')
+  await flush()
+  t.alike(f.saved, [record()], 'and is remembered here')
+  t.alike(marked, [], 'not marked again from here')
+  f.monitor.recheck()
+  t.is(f.saved.length, 1)
+  await f.c.advance(f.POLL_MS)
+  t.alike(f.notes, [record()], 'not announced again')
+})
+
+async function registryFixture () {
+  const { createOnceRegistry, inviteDropOnceId, onceToken } = await import('../src/onceMarks.js')
+  const key = 'c'.repeat(64)
+  const registry = createOnceRegistry()
+  registry.setKey(MEMBER, key)
+  const f = await fixture({
+    seenElsewhere: (r) => registry.has('invite-drop', MEMBER, inviteDropOnceId(r)),
+    onMarked: (r) => registry.mark('invite-drop', MEMBER, inviteDropOnceId(r))
+  })
+  registry.onChange(() => f.monitor.recheck())
+  const token = onceToken(key, 'invite-drop', MEMBER, inviteDropOnceId(record()))
+  return { f, registry, token }
+}
+
+test('a note on screen stays when its own mark comes back as remote', async (t) => {
+  const { f, registry, token } = await registryFixture()
+  f.update()
+  await flush()
+  t.alike(f.shown.note, record())
+  f.monitor.markSeen(f.shown.note)
+  t.alike(registry.unsynced(MEMBER), [token], 'the mark goes out')
+  registry.delivered(MEMBER, [token])
+  registry.setRemote(MEMBER, [token])
+  f.monitor.recheck()
+  t.alike(f.shown.note, record(), 'still on screen until the person acts')
+})
+
+test('a note not yet on screen goes away when another device showed it', async (t) => {
+  const { f, registry, token } = await registryFixture()
+  f.update()
+  await flush()
+  t.alike(f.shown.note, record())
+  registry.setRemote(MEMBER, [token])
+  t.is(f.shown.note, null, 'withdrawn by the remote mark')
+  t.alike(registry.unsynced(MEMBER), [], 'nothing marked from here')
+})
+
 test('shell and note share the push action and gate on hosted capabilities', (t) => {
   const app = readFileSync(join(__dirname, '../App.js'), 'utf8')
   const note = readFileSync(join(__dirname, '../src/ui/InviteDropNote.js'), 'utf8')

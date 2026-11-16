@@ -651,6 +651,8 @@ export function createVitrineRequest (fixtures, options) {
     // merge that changes nothing.
     'seen.sign': () => ({ signature, prevHash: '0'.repeat(64) }),
     'seen.merge': () => ({ avisos: { own: [], pages: {} }, pending: false, dmChanged: false, groupChanged: false, blocksChanged: false, testimonialsChanged: false, momentsChanged: false, caughtUp: [] }),
+    // No key: the once-marks stay on this device, as with no seen sync.
+    'seen.onceKey': () => ({ key: null }),
     'report.sign': signed,
     'appeal.sign': signed,
     'dm.reportSign': signed,

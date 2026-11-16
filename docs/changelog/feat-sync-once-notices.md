@@ -1,3 +1,3 @@
 ### Alterado
 
-- O aviso antes da primeira mensagem a uma Página e o aviso de convite novo não se repetem mais num segundo aparelho da mesma passkey na instalação hospedada: o aparelho grava uma marca opaca no bloco cifrado de vistos (PR `feat/sync-once-notices`). Termos versão 67. Verificação em `docs/verification/feat-sync-once-notices.md`.
+- O aviso antes da primeira mensagem a uma Página e o aviso de convite novo não se repetem mais num segundo aparelho da mesma passkey na instalação hospedada: o aparelho grava uma marca opaca no bloco cifrado de vistos, derivada com uma chave da própria conta (`seen.onceKey`), que não revela a Página nem o convite (PR `feat/sync-once-notices`). O registro de que o aparelho já mostrou o aviso de uma Página também deixa de levar a chave da página no nome (com a chave da conta, na instalação hospedada) e é apagado ao sair da conta. Termos versão 67. Verificação em `docs/verification/feat-sync-once-notices.md`.
