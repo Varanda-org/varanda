@@ -91,6 +91,7 @@ import { DiarioMoments } from '../ui/MomentosStrip'
 import { useBlocks } from '../blocksProvider'
 import { cacheGeneration } from '../localCaches'
 import { actingAsMember, buildScreenSnapshot } from '../screenSnapshot'
+import { sameSnapshotBinding } from './Comunidades'
 import { clearScreenSnapshot, loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
 
 const BAND = 96
@@ -105,15 +106,17 @@ const SNAPSHOT_DEBOUNCE_MS = 2000
 
 // -> { data, social } to paint from the stored 'diario' snapshot of
 // `binding` (liveBinding) while acting as the member, or null. `data` has the
-// shape of a live page plus `seeded` and `oldest` (the next `before`: the
-// page's technical records were not kept, so the last row does not bound it).
+// shape of a live page plus `seeded`, `stored` (the seqs of the stored rows:
+// older live pages appended later are not under the stored rows' rule) and
+// `oldest` (the next `before`: the page's technical records were not kept, so
+// the last row does not bound it).
 // `social` is a useSocial seed with the stored originals only.
 export function diarioSeed (snapshot) {
   if (snapshot === null || snapshot.body.rows.length === 0) return null
   const b = snapshot.body
   const rows = b.rows.map((r) => ({ seq: r.seq, entry: { seq: r.seq, record: r.record } }))
   return {
-    data: { info: { publicKey: snapshot.owner }, rows, atEnd: b.atEnd, oldest: b.oldest, seeded: true },
+    data: { info: { publicKey: snapshot.owner }, rows, atEnd: b.atEnd, oldest: b.oldest, seeded: true, stored: new Set(rows.map((r) => r.seq)) },
     social: { originals: Object.entries(b.originals), counts: new Map(), liked: [], reposted: [] }
   }
 }
@@ -142,6 +145,32 @@ export function diarioLogOf (data, owner) {
 // Whether `rows` still hold a row deleted in this session (`deleted`: seqs).
 export function holdsDeleted (rows, deleted) {
   return rows.some((row) => !!row.entry && deleted.has(row.seq))
+}
+
+// The seq of the own post `ref` names, or null. Only that entry is deleted:
+// an own repost of it leaves the rows on screen but is still a live entry of
+// the diary, so it must not mark the page as holding a deleted row (that
+// would keep clearing the copy all session).
+export function ownDeletedSeq (ref, owner) {
+  if (typeof ref !== 'string' || typeof owner !== 'string') return null
+  const own = owner.toLowerCase() + ':'
+  if (!ref.toLowerCase().startsWith(own)) return null
+  const seq = Number(ref.slice(own.length))
+  return Number.isSafeInteger(seq) && seq >= 0 ? seq : null
+}
+
+// The stored seqs (`stored`) the block list hides now, by seededSeqsShown.
+// Live rows never: the node already applied the list to them.
+export function hiddenStoredSeqs (rows, stored, blocks, owner, originalOf) {
+  const hidden = new Set()
+  if (!(stored instanceof Set) || stored.size === 0) return hidden
+  const kept = rows.filter((row) => stored.has(row.seq))
+  const allowed = seededSeqsShown(kept, blocks, owner, originalOf)
+  for (const row of kept) {
+    const record = row.entry && row.entry.record
+    if (record && (record.type === 'post' || record.type === 'repost') && !allowed.has(row.seq)) hidden.add(row.seq)
+  }
+  return hidden
 }
 
 // The seqs of the stored rows that may show, by A Rua's rule for its stored
@@ -372,10 +401,13 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
   useEffect(() => {
     if (boot !== null) perfMarks().mark('rows-snapshot:diario')
   }, [])
-  // Stored rows of another owner (sign-out, another diary) never stay.
+  // Stored rows of another binding never stay: another owner (sign-out,
+  // another diary), and another installation or association with the same
+  // key, whose store was already wiped.
+  const seedBindingRef = useRef(binding)
   useEffect(() => {
     const cur = dataRef.current
-    if (cur !== null && cur.seeded && (binding === null || cur.info.publicKey !== binding.owner)) {
+    if (cur !== null && cur.seeded && (!sameSnapshotBinding(seedBindingRef.current, binding) || cur.info.publicKey !== binding.owner)) {
       dataRef.current = null
       setData(null)
     }
@@ -515,7 +547,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
       // it, so a stale page must not restore the deleted content.
       if (mine !== seqRef.current || dataRef.current !== current) return
       const base = dataRef.current
-      setData({ info: base.info, rows: mergeOlderRows(base.rows, log), atEnd: isLastLogPage(log), ...(base.seeded ? { seeded: true } : {}) })
+      setData({ info: base.info, rows: mergeOlderRows(base.rows, log), atEnd: isLastLogPage(log), ...(base.seeded ? { seeded: true, stored: base.stored } : {}) })
       for (const entry of log.entries) {
         const record = entry.record
         if (record && record.type === 'post' && record.replyTo) resolve(record.replyTo.author)
@@ -563,8 +595,8 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
     // Stored rows meet the block list as soon as it is known; live ones come
     // from the node, which already applies it.
     const originals = social.social.originals
-    const allowed = data.seeded === true ? seededSeqsShown(data.rows, blocks, data.info.publicKey, (ref) => originals.get(ref)) : null
-    return data.rows.filter((row) => (isPostRow(row) || (isRepostRow(row) && live.has(row.seq))) && (allowed === null || allowed.has(row.seq)))
+    const hidden = data.seeded === true ? hiddenStoredSeqs(data.rows, data.stored, blocks, data.info.publicKey, (ref) => originals.get(ref)) : null
+    return data.rows.filter((row) => (isPostRow(row) || (isRepostRow(row) && live.has(row.seq))) && (hidden === null || !hidden.has(row.seq)))
   }, [data, blocks, social.social.originals])
 
   const info = data === null ? null : data.info
@@ -878,17 +910,13 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
       const cur = dataRef.current
       if (cur !== null) {
         const rows = deletePostRows(cur.rows, t.ref, cur.info.publicKey)
-        rows.forEach((row, i) => { if (row !== cur.rows[i]) deletedSeqsRef.current.add(row.seq) })
         dataRef.current = { ...cur, rows }
         setData(dataRef.current)
       }
       // The own post's seq, also when its row is not loaded (t.seq is the
-      // tombstone's, never a deleted row).
-      const own = cur !== null && typeof cur.info.publicKey === 'string' ? cur.info.publicKey.toLowerCase() + ':' : null
-      if (own !== null && typeof t.ref === 'string' && t.ref.toLowerCase().startsWith(own)) {
-        const seq = Number(t.ref.slice(own.length))
-        if (Number.isSafeInteger(seq)) deletedSeqsRef.current.add(seq)
-      }
+      // tombstone's, never a deleted row). An own repost of it is not.
+      const deletedSeq = cur !== null ? ownDeletedSeq(t.ref, cur.info.publicKey) : null
+      if (deletedSeq !== null) deletedSeqsRef.current.add(deletedSeq)
       deletionsRef.current++
       armSnapshot()
       if (typeof onDeletedPost === 'function') onDeletedPost()

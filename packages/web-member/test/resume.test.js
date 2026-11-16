@@ -195,6 +195,7 @@ test('the stored session: resume without a passkey, lock keeps it, signOut and r
     const localKey = await dmLocalKeyFromPrf(new Uint8Array(FIXED32))
     try {
       await reader.unlock(localKey)
+      await reader.loaded()
       return reader.snapshot().ops.map((r) => [r.op, r.peer])
     } finally {
       localKey.fill(0)

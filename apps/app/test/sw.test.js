@@ -1813,7 +1813,7 @@ test('dm wake: member notices still show while muted or with a focused window', 
 
 const SHARE = ORIGIN + '/compartilhar'
 const SHARE_PREFIX = ORIGIN + '/__varanda-share/'
-const SHARE_META_KEYS = ['at', 'files', 'id', 'text', 'title', 'total', 'url', 'v']
+const SHARE_META_KEYS = ['at', 'files', 'id', 'text', 'title', 'total', 'url', 'v', 'videos']
 
 const photo = (name, type = 'image/jpeg', bytes = [1, 2, 3]) => new File([Uint8Array.from(bytes)], name, { type })
 
@@ -1915,12 +1915,13 @@ test('share target: 11 photos keep the first 10, total 11', async (t) => {
   t.absent(keys.includes(SHARE_PREFIX + meta.id + '/10'))
 })
 
-test('share target: video, HEIC and oversized files are skipped but counted, text entries are not files', async (t) => {
+test('share target: HEIC and oversized files are skipped but counted, a video beside a photo only counted, text entries are not files', async (t) => {
   const w = renderedWorker()
   const form = shareForm({ fotos: [photo('v.mp4', 'video/mp4'), photo('h.heic', 'image/heic'), photo('ok.png', 'image/png', [5]), 'nao sou foto'] })
   await share(w, form)
   const { keys, meta } = await storedShare(w)
-  t.is(meta.total, 3, 'three file entries offered')
+  t.is(meta.total, 2, 'two photo entries offered')
+  t.is(meta.videos, 1, 'and one video, left out since photos win')
   t.alike(meta.files, [{ n: 0, mime: 'image/png' }], 'only the png, numbered from 0')
   t.alike(keys, [SHARE_PREFIX + meta.id + '/0', SHARE_PREFIX + meta.id + '/meta'])
 
@@ -1934,9 +1935,38 @@ test('share target: video, HEIC and oversized files are skipped but counted, tex
   t.alike(stored.meta.files, [{ n: 0, mime: 'image/gif' }], 'over 50 MiB skipped')
 
   const none = renderedWorker()
-  const { res } = await share(none, shareForm({ text: '   ', fotos: [photo('v.mp4', 'video/mp4')] }))
+  const { res } = await share(none, shareForm({ text: '   ', fotos: [photo('h.heic', 'image/heic')] }))
   redirectsHome(t, res, 'nothing kept')
   t.alike((await storedShare(none)).keys, [], 'blank text and no kept photo store nothing')
+
+  const counted = renderedWorker()
+  await share(counted, shareForm({ text: '   ', fotos: [photo('v.webm', 'video/webm')] }))
+  const left = await storedShare(counted)
+  t.alike([left.meta.videos, left.meta.files], [1, []], 'a video that cannot be kept is stored as a count, so the app says so')
+  t.alike(left.keys, [SHARE_PREFIX + left.meta.id + '/meta'])
+})
+
+// The browser composer takes an MP4 as it is (src/media/videoPrep.web.js), so
+// that is the one video kept; any other is counted, and the app says why.
+test('share target: the first MP4 alone is kept, other videos are only counted', async (t) => {
+  const w = renderedWorker()
+  await share(w, shareForm({ fotos: [photo('a.mov', 'video/quicktime'), photo('b.mp4', 'video/mp4', [7, 8]), photo('c.mp4', 'video/mp4', [9])] }))
+  const { cache, keys, meta } = await storedShare(w)
+  t.is(meta.total, 0, 'no photo offered')
+  t.is(meta.videos, 3)
+  t.alike(meta.files, [{ n: 0, mime: 'video/mp4' }], 'only the first MP4')
+  t.alike(keys, [SHARE_PREFIX + meta.id + '/0', SHARE_PREFIX + meta.id + '/meta'])
+  const file = await cache.match(SHARE_PREFIX + meta.id + '/0')
+  t.is(file.headers.get('content-type'), 'video/mp4')
+  t.alike([...new Uint8Array(await file.arrayBuffer())], [7, 8], 'its own bytes')
+
+  const big = renderedWorker()
+  const huge = { type: 'video/mp4', size: 50 * 1024 * 1024 + 1 }
+  const fake = { get: (name) => name === 'text' ? 'oi' : null, getAll: (name) => name === 'fotos' ? [huge] : [] }
+  await share(big, fake)
+  const stored = await storedShare(big)
+  t.is(stored.meta.videos, 1, 'over 50 MiB counted')
+  t.alike(stored.meta.files, [], 'and not kept')
 })
 
 test('share target: title, text and url are stored separately and cut to 4000 units', async (t) => {

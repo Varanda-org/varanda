@@ -112,9 +112,27 @@ test('snapshot rows: a failed block list leaves only the own rows', (t) => {
   const keys = (rows) => rows.map((i) => i.author.slice(0, 2) + i.seq)
   t.alike(keys(snapshotRowsShown(items, new Set(), 'failed', OWN.toUpperCase(), originalOf)), ['aa2', 'aa13', 'aa1'], 'own rows only, none showing anyone else')
   t.alike(snapshotRowsShown(items, new Set(), 'failed', null, originalOf), [], 'no owner, nothing')
-  t.is(snapshotRowsShown(items, new Set(), 'pending', OWN), items, 'before the answer: as stored (product decision)')
+  t.alike(keys(snapshotRowsShown(items, new Set(), 'pending', OWN, originalOf)), ['aa2', 'aa13', 'aa1'], 'before the answer: own rows only, the others wait (#463, product decision of #539)')
   t.is(snapshotRowsShown(items, new Set(), 'ok', OWN), items)
   t.alike(keys(snapshotRowsShown(items.slice(0, 5).concat(post(OWN, 1)), new Set([BLOCKED]), 'ok', OWN)), ['bb5', 'aa2', 'aa6', 'aa1'], 'a known list drops the blocked author and reposts of them')
+})
+
+test('held placeholders: only while block.list has not answered, at most 3', (t) => {
+  const { heldPlaceholders } = run(fnText(ARUA, 'heldPlaceholders'), ['heldPlaceholders'])
+  const items = [post(FOLLOW, 5), post(BLOCKED, 4), post(OWN, 1), post(FOLLOW, 2), post(FOLLOW, 3)]
+  t.is(heldPlaceholders(items, [items[2]], 'pending'), 3, 'four held, three placeholders')
+  t.is(heldPlaceholders(items.slice(1, 3), [items[2]], 'pending'), 1)
+  t.is(heldPlaceholders(items, items, 'pending'), 0, 'nothing held')
+  t.is(heldPlaceholders(items, [items[2]], 'ok'), 0, 'answered: the rows themselves show')
+  t.is(heldPlaceholders(items, [items[2]], 'failed'), 0, 'failed: nothing to wait for')
+  t.is(heldPlaceholders(null, [], 'pending'), 0)
+})
+
+test('A Rua and its preview show placeholders for the held rows', (t) => {
+  t.ok(/const held = loadedAt === null && shownItems\.length > 0 \? heldPlaceholders\(items, shownItems, blockLoad\) : 0/.test(member), 'A Rua: stored rows only, an empty list keeps its skeleton')
+  t.ok(/ListFooterComponent=\{held > 0 \? <View>\{Array\.from\(\{ length: held \}, \(_, i\) => <SkeletonRow key=\{i\} \/>\)\}\{footer\}<\/View> : footer\}/.test(member))
+  t.ok(/const held = heldPlaceholders\(view\.items, shown, blockLoad\)/.test(preview), 'the cold-start preview')
+  t.ok(/ListFooterComponent=\{held > 0 \?/.test(preview))
 })
 
 test('A Rua and its preview filter stored rows by the load state', (t) => {

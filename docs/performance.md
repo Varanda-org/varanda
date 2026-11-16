@@ -208,7 +208,7 @@ Carga média de 1 min no início das execuções: file 7,91, 7,53, 6,60; idb 5,9
 | Leitura de A Rua antecipada (`earlyFeedReadMs`) | n/d | 368,5 | 590,7 | n/d |
 | Partida concluída (`startupSettledMs`) | n/d | 251 | 570,3 | n/d |
 
-Caso `--dm-rows 5000` (arquivos): `dmUnlockMs` 175,5 e `dmListMs` 11,1 (mediana das três medianas). Antes (E2, `e2-before-E10.json`, outro conjunto de execuções, 3 execuções): o desbloqueio não era medido nesse arquivo; as notas do E2 registram 184 ms com 5000 linhas. O desbloqueio continua terminando depois da carga completa; o resumo selado só tira a espera da primeira página (não medida em separado).
+Caso `--dm-rows 5000` (arquivos): `dmUnlockMs` 175,5 e `dmListMs` 11,1 (mediana das três medianas). Antes (E2, `e2-before-E10.json`, outro conjunto de execuções, 3 execuções): o desbloqueio não era medido nesse arquivo; as notas do E2 registram 184 ms com 5000 linhas. Desde a branch `fix/dm-unlock-leftovers` (parte da #539), `unlock()` do armazém e do motor termina no estágio da chave e a carga das linhas segue depois (`loaded()`); a bancada mede o estágio da chave em `dmKeyMs` e os dois juntos em `dmUnlockMs`, e mede à parte a primeira página desde o início de outro desbloqueio, nos núcleos já abertos pelas leituras anteriores: com o resumo selado (`dmFirstPageSummaryMs`) e sem ele (`dmFirstPageNoSummaryMs`, a página espera todas as linhas). Três execuções de `node packages/web-member/scripts/startup-bench.js --file --dm-rows 5000 --runs 5 --json` no mesmo Mac M4 Pro, Node v24.22.1, com outras sessões rodando (carga média de 1 min 17,89, 33,11 e 31,28 no início): `dmKeyMs` 1,7, `dmUnlockMs` 299,4, `dmListMs` 18,5, primeira página com o resumo 2,5 e sem o resumo 278,6 (mediana das três medianas; medianas de cada execução em `docs/verification/fix-dm-unlock-leftovers.md`). Números do Node num Mac, não de um celular: o que compara é a diferença entre as duas primeiras páginas.
 
 Caso `--groups 20 --group-blocks 200`, no commit da ponta, uma execução com `--runs 5` (saída local, não versionada, carga média 4,65 no início, levou cerca de 10 min): `groupListMs` 764,5, `groupList2Ms` 90,3, `communityListMs` 25,2 e `medianMs` 99,1, iguais aos do E13. As execuções 2 e 3 não foram esperadas. Os números do E13, medidos no PR perf/dm-group-reads (3 execuções, saída local, não versionada sem a memória e saída local, não versionada com ela): `groupList2Ms` 778,2 para 90,2 ms, `groupListMs` 1099,4 para 756,4 ms, `communityListMs` 42,6 para 27,7 ms. Antes do E13 (notas do E2): `groupListMs` 1467,6, `groupList2Ms` 1449,3 e `communityListMs` 59,4 ms. Fica por fazer só repetir o caso duas vezes mais.
 
@@ -242,7 +242,7 @@ Primeiro commit da lista (`first-rows`, mesmas execuções): iOS 686, 690 e 681 
 
 Não medido nesta rodada, e por quê:
 
-- `peek.read` e `notices.list` contra um semeador com descoberta (páginas de candidatos) e contra um com `discovery: false`, no mesmo conjunto: o medidor de carga não tem opção para desligar a descoberta e o conjunto do E8 tem menos de 48 diários, então o lote não corta nada. Fica por medir com um conjunto maior que 48 diários e as duas configurações do semeador.
+- `peek.read` e `notices.list` contra um semeador com descoberta (páginas de candidatos) e contra um com `discovery: false`, no mesmo conjunto: o medidor de carga não tinha opção para desligar a descoberta e o conjunto do E8 tem menos de 48 diários, então o lote não corta nada. Medido depois, com `--no-discovery` e 200 diários: "Espiadinha e Avisos com e sem descoberta", abaixo.
 
 - Chrome com CPU 4x, segunda abertura no laboratório: não rodado nesta tarefa.
 - `rows-snapshot`, `preview-shown` e a tarefa de segundo plano de um membro com conta: o build de debug do emulador e do simulador não entra com passkey em produção ("Limites"). Ficam para o aparelho depois do deploy.
@@ -469,6 +469,42 @@ Leitura: o tip não é pior que 11cdb47f no controle sem instrumento, então os 
 - Duração da apresentação do splash: +1,8 s nas primeiras linhas e +5,8 s no `splash-end` contra 11cdb47f no Android. Decisão do mantenedor (#553 e #597).
 - As WebViews dos players: +26% a +46% de ms de render da lista no Android com players vivos. Decisão do mantenedor.
 - Soaks da Vitrine rica sem `PERF` e dos players sem `PERF`, para achar o que cresce (cerca de +30 MB/min com instrumento, contra +2,9 MB/min no controle de texto).
+
+### Espiadinha e Avisos com e sem descoberta (16/11/2026, branch perf/peek-leftovers sobre main@56ea00f7)
+
+Pergunta: quanto custam `peek.read` e `notices.list` contra um semeador com descoberta (páginas de 48 candidatos) e contra um com `discovery: false`, num conjunto maior que um lote? Verificação em `docs/verification/perf-peek-leftovers.md`.
+
+Ambiente: Node v24.22.1 neste Mac (Apple M4 Pro, 12 núcleos, 48 GB). Não é um celular: o nó é o do navegador (`createBrowserNode`, armazenamento em memória) rodando no Node, com o semeador de `@varanda/core` no mesmo processo, DHT local em 127.0.0.1 e sem Docker. Outras sessões usavam a máquina; a carga média de 1 min no início de cada execução vai na tabela.
+
+Comando (4 leitores, 20 s; `--inventory 200` completa o conjunto com diários pequenos até 200 servidos; cada leitor segue os 20 membros do conjunto, então os outros cerca de 180 são candidatos da Espiadinha, mais que um lote de 48), intercalado com e sem descoberta, 3 execuções de cada:
+
+```sh
+node apps/cli/scripts/content-load.js --clients 4 --duration-ms 20000 --inventory 200 --json
+node apps/cli/scripts/content-load.js --clients 4 --duration-ms 20000 --inventory 200 --no-discovery --json
+```
+
+Mediana das três execuções, entre colchetes o mínimo e o máximo (p50 e p95 de cada execução sobre todas as suas aberturas):
+
+| Métrica | Com descoberta | Sem descoberta |
+|---|---|---|
+| Aberturas completas em 20 s | 408, 384, 412 | 164, 160, 168 |
+| `peek.read` p50 (ms) | 95 [94-101] | 383 [367-388] |
+| `peek.read` p95 (ms) | 111 [111-120] | 443 [435-450] |
+| `peek.read` máximo (ms) | 145 [130-171] | 469 [464-469] |
+| `notices.list` p50 (ms) | 17,6 [17,4-18,4] | 11,6 [11,3-11,7] |
+| `notices.list` p95 (ms) | 27,6 [27,4-31,3] | 21,8 [21,1-23,7] |
+| Bytes recebidos do semeador por abertura, todas as operações (KB) | 192 [192-193] | 525 [525-525] |
+| Falhas, erros internos, fechamentos 1013 | 0 | 0 |
+| Carga de 1 min | 5,8, 5,9, 5,7 | 6,0, 5,2, 5,3 |
+
+Com 100 ms de ida e volta simulados (`--rtt-ms 100 --duration-ms 30000`, n = 1): `peek.read` p50 1598 ms com descoberta e 6092 ms sem (cerca de 3,8 vezes); `notices.list` p50 359 e 361 ms. Carga entre 5,2 e 6,0; a execução sem descoberta rodou junto com a suíte de testes de `packages/web-member`.
+
+Leitura:
+
+- Sem descoberta, `peek.read` leva cerca de 4 vezes mais (p50 383 contra 95 ms) e cada abertura recebe cerca de 2,7 vezes mais bytes do semeador (525 contra 192 KB). O hello traz o inventário inteiro, mas ele explica pouco disso (cerca de 85 bytes por diário, 17 KB para 200); o resto, ao que tudo indica, vem de blocos de mais diários, porque a leitura trabalha sobre todos os candidatos do inventário e não sobre um lote de 48. A divisão exata não foi medida.
+- `notices.list` não usa a descoberta e ficou um pouco mais rápido sem ela (11,6 contra 17,6 ms). Não investigado; uma hipótese é haver menos aberturas por segundo disputando o mesmo processo.
+- Uma primeira série, com carga entre 9,4 e 27,3 e ainda com a reserva de quadro tentada para a #459, deu o mesmo quadro (`peek.read` p50 432 contra 127 ms, 524 contra 196 KB por abertura).
+- Reserva de quadro por pedido encadeado (tentada para a #459 e retirada): com 100 ms de ida e volta, `peek.read` p50 1798 e 1800 ms com ela, 1596 ms com os arquivos de `main` e 1598 ms só com o limite da ligação, que ficou. Cerca de duas idas e voltas a mais por leitura honesta, sem apertar o pior caso, que o limite da ligação já fixa em 16 MiB + 16 x 1 MiB. `notices.list` não mudou (359 ms nos três).
 
 ### Tarefas que não entraram
 

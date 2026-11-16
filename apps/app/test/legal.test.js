@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 65)
+  t.is(LEGAL_VERSION, 66)
   t.is(LEGAL_DATE, '16/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 65, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 66, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'd3bbb66a40edd8e6f740b9a0a4bca7f75c940ec2c1c468499366eecd5b6b18a2', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'fa4e6988bf3482b92639bf34e362771fc3c6a4cee39dc13e2ee3548903275234', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -821,7 +821,21 @@ test('legal: version 64 keeps the players off with Prévia de links off and unde
   t.ok(text(PRIVACY).includes('desliga a montagem e o player; os cartões que outras pessoas enviam continuam aparecendo, sem player.'))
 })
 
-test('legal: version 65 shares the Sorte do dia and the acceptance across devices', async (t) => {
+test('legal: version 65 keeps what another app shares on the device until Publicar', async (t) => {
+  const { PRIVACY } = await load()
+  const all = PRIVACY.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const required of [
+    'O que outro app compartilha com a Varanda (fotos, um vídeo, texto ou um link) fica só no seu aparelho até você tocar em Publicar',
+    'numa pasta que o app divide com a extensão de compartilhar (o grupo de apps)',
+    'essas pastas ficam fora do backup do aparelho',
+    'O compartilhamento vale por 1 hora',
+    'No Android, a limpeza roda mesmo com o app fechado',
+    'o texto que você escrevia no Publicar fica guardado na aba enquanto o compartilhamento recarrega o app, por até 1 hora, só para a mesma conta'
+  ]) t.ok(all.includes(required), 'privacy: ' + required)
+  t.absent(all.includes('\u2014'), 'no em dash')
+})
+
+test('legal: version 66 shares the Sorte do dia and the acceptance across devices', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   t.ok(text(PRIVACY).includes('a partir da data local e da chave pública da sua conta, por isso é a mesma em todos os aparelhos em que você entra com a mesma passkey'), 'same Sorte on every device')

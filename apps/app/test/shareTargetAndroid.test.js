@@ -58,9 +58,10 @@ test('the receiver handles its own configuration changes', (t) => {
   ])
 })
 
-test('the receiver takes exactly SEND image/*, SEND text/plain and SEND_MULTIPLE image/*', (t) => {
+// One video at a time, as a post holds one: no SEND_MULTIPLE video/*.
+test('the receiver takes exactly SEND image/*, SEND text/plain, SEND video/* and SEND_MULTIPLE image/*', (t) => {
   const found = filters(activities(read(MODULE_MANIFEST))[0].body)
-  t.is(found.length, 3, 'three intent filters')
+  t.is(found.length, 4, 'four intent filters')
   for (const f of found) {
     t.alike(f.categories, ['android.intent.category.DEFAULT'], 'each filter has DEFAULT')
     t.is(f.actions.length, 1, 'one action per filter')
@@ -70,21 +71,22 @@ test('the receiver takes exactly SEND image/*, SEND text/plain and SEND_MULTIPLE
   t.alike(pairs, [
     'android.intent.action.SEND image/*',
     'android.intent.action.SEND text/plain',
+    'android.intent.action.SEND video/*',
     'android.intent.action.SEND_MULTIPLE image/*'
   ])
 })
 
-test('the module manifest offers no video, audio, any type or uri list, and asks no permission', (t) => {
+test('the module manifest offers no audio, any type or uri list, and asks no permission', (t) => {
   const xml = uncommented(read(MODULE_MANIFEST))
   const mimeTypes = attrs(xml, 'mimeType')
   t.ok(mimeTypes.length > 0)
+  t.alike(mimeTypes.filter((mime) => mime.startsWith('video/')), ['video/*'], 'video only through the one SEND filter')
   for (const mime of mimeTypes) {
-    t.absent(mime.startsWith('video/'), mime)
     t.absent(mime.startsWith('audio/'), mime)
     t.absent(mime.startsWith('*'), mime)
     t.absent(mime === 'text/uri-list', mime)
   }
-  for (const banned of ['video/', 'audio/', '*/*', 'uri-list', '<uses-permission', '<provider']) {
+  for (const banned of ['audio/', '*/*', 'uri-list', '<uses-permission', '<provider']) {
     t.absent(xml.includes(banned), banned)
   }
 })
@@ -116,7 +118,7 @@ test('the inbox lives outside the cache and is swept with the app closed', (t) =
   t.ok(/fun newest\(context: Context\): Share\? \{\s*(?:\/\/[^\n]*\s*)?if \(adopt\(context\)\) scheduleSweep\(context\)/.test(inbox), 'a share waiting there through an update is read, and swept with the app closed')
   t.ok(/fun sweep\(context: Context, maxAgeMs: Double\) \{[^}]*?return\s*adopt\(context\)/.test(inbox), 'and every sweep empties it')
   t.ok(/private fun adopt\(context: Context\): Boolean \{[\s\S]*?if \(child\.isDirectory && isId\(child\.name\) && File\(child, MANIFEST\)\.isFile\) \{[\s\S]*?if \(!target\.exists\(\) && child\.renameTo\(target\)\) moved = true[\s\S]*?old\.deleteRecursively\(\)\s*return moved/.test(inbox), 'only complete shares move, never over one, and the rest goes')
-  t.ok(/writeManifest\(dir, id, at, title, text, offered\.size, kept\)\s*scheduleSweep\(context\)\s*return id/.test(inbox), 'every stored share schedules the sweep')
+  t.ok(/writeManifest\(dir, id, at, title, text, [^\n]*, kept\)\s*scheduleSweep\(context\)\s*return id/.test(inbox), 'every stored share schedules the sweep')
   t.ok(/if \(!dir\.mkdirs\(\)\) return null\s*(?:\/\/[^\n]*\s*)*scheduleSweep\(context\)/.test(inbox), 'and so does every capture before its copy, so a killed one is swept too')
   t.ok(inbox.includes('enqueueUniqueWork(SWEEP_WORK, ExistingWorkPolicy.REPLACE, request)'), 'one run, moved to after the newest share')
   t.ok(inbox.includes('private const val SWEEP_DELAY_MS = TTL_MS + 60_000L'))
@@ -126,6 +128,21 @@ test('the inbox lives outside the cache and is swept with the app closed', (t) =
   const worker = read(KOTLIN + 'ShareSweepWorker.kt')
   t.ok(worker.includes('class ShareSweepWorker(context: Context, params: WorkerParameters) : Worker(context, params)'))
   t.ok(/override fun doWork\(\): Result \{\s*ShareInbox\.sweep\(applicationContext, ShareInbox\.TTL_MS\.toDouble\(\)\)\s*return Result\.success\(\)/.test(worker), 'it sweeps only what is older than the TTL')
+})
+
+// The type a sender names is never trusted: only an ISO media file is kept,
+// and it is the one video of the share, under its own cap.
+test('a shared video is one sniffed ISO media file under its own cap', (t) => {
+  const inbox = read(KOTLIN + 'ShareInbox.kt')
+  t.ok(inbox.includes('const val MAX_VIDEO_BYTES = 512L * 1024 * 1024'))
+  t.ok(/if \(video\) \{[\s\S]*?val uri = offered\.firstOrNull\(\)[\s\S]*?copyVideo\(context, uri, dir, guard\)/.test(inbox), 'only the first stream of a video share is copied')
+  t.ok(/private fun copyVideo\([^)]*\): SharedFile\? \{\s*if \(uri\.scheme != "content"\) return null\s*if \(isOwnProvider\(context, uri\)\) return null/.test(inbox), 'the same Uri guards as an image')
+  t.ok(/val mime = isoMedia\(part\)\s*if \(mime == null\) \{\s*part\.delete\(\)\s*return null/.test(inbox), 'a file that is not ISO media is dropped')
+  t.ok(inbox.includes('box != "ftyp" || size < 16 -> null'), 'an ftyp box first')
+  t.ok(inbox.includes('private val VIDEO_NAME = Regex("^[0-9]{1,2}\\\\.(mp4|mov)$")'), 'read admits only the two names copyVideo writes')
+  t.ok(/val ok = if \(mime\.startsWith\("video\/"\)\) \{\s*VIDEO_NAME\.matches\(name\)/.test(inbox))
+  t.ok(inbox.includes('.put("videos", videos)'), 'the manifest says how many videos were offered')
+  t.ok(read(KOTLIN + 'ShareIntakeModule.kt').includes('"videos" to share.videos'), 'and peek passes it on')
 })
 
 test('the Kotlin never logs', (t) => {
@@ -176,7 +193,8 @@ test('the capture stalls, cancels, syncs and releases safely', (t) => {
   t.ok(inbox.includes('private const val MAX_LIVE = 16'), 'at most 16 file threads alive in the process')
   t.ok(/if \(live\.incrementAndGet\(\) > MAX_LIVE\) \{\s*live\.decrementAndGet\(\)\s*return false\s*\}\s*val thread = Thread/.test(inbox), 'past the cap the file is skipped before a thread starts')
   t.ok(/Thread\(\{\s*try \{\s*settle\(attempt, work\)\s*\} finally \{\s*live\.decrementAndGet\(\)/.test(inbox), 'a file thread leaves the count only when its work returns')
-  t.ok(/fetch\(context, uri, attempt, guard\)[\s\S]*?private fun fetch\([^)]*\): Boolean \{[\s\S]*?val afd = context\.contentResolver\.openAssetFileDescriptor/.test(inbox), 'the open runs inside the file thread\'s work')
+  t.ok(/fetch\(context, uri, attempt, guard, MAX_BYTES\)[\s\S]*?fetch\(context, uri, attempt, guard, MAX_VIDEO_BYTES\)[\s\S]*?private fun fetch\([^)]*\): Boolean \{[\s\S]*?val afd = context\.contentResolver\.openAssetFileDescriptor/.test(inbox), 'the open runs inside the file thread\'s work, for an image and for a video')
+  t.ok(inbox.includes('if (size > maxBytes) return false'), 'each copy stops at its own cap')
   t.ok(inbox.includes('SystemClock.elapsedRealtime() - attempt.last <= STALL_MS'), 'the capture waits only while the file makes progress')
   t.ok(/finally \{\s*lock\.withLock \{[^}]*if \(!attempt\.finished\) abandon\(attempt\)/.test(inbox), 'a file thread that did not finish is abandoned, not joined')
   t.absent(/\.join\(/.test(inbox), 'no file thread is ever joined')
