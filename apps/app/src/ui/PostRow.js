@@ -48,6 +48,8 @@
 //   particular' in the 'mais' sheet, only on a hosted node. The caller passes
 //   it only for someone else's post that is not a page (rowProps,
 //   socialRowProps); the context is the post as shown, never sent by itself.
+// - poll: null | the bare options array of a poll post: ./PollCard draws it
+//   (with `author` and `seq`), outside the row's open area.
 // - link: a public http(s) URL of the post (postActions.shareLink decides);
 //   without one there is no Compartilhar. onNotice(text) shows the toast of
 //   a copy to the clipboard.
@@ -86,6 +88,7 @@ import { LinkCard } from './LinkCard'
 import { MusicEmbedCard } from './MusicEmbedCard'
 import PostMusic from './PostMusic'
 import { MediaGrid } from './MediaGrid'
+import { PollCard } from './PollCard'
 import { tap } from './haptics'
 import { hasHashtag, hasMention, MentionText, useHashtagOpen } from './MentionText'
 import { useHosted } from '../node'
@@ -196,7 +199,7 @@ function Action ({ label, onPress, disabled, on, count, split, children }) {
 }
 
 function PostRowView ({
-  author, name, username, avatar, at, text, replyToName, replyPreviews, media, preview, persistMedia = true, now,
+  author, name, username, avatar, at, text, poll, replyToName, replyPreviews, media, preview, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending, expanded = false,
   onOpen, onOpenAuthor, onOpenParent, onOpenPreviews, onOpenReposter, onFollowReposter, onOpenMention,
   onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onBlock, onDelete, link, onNotice,
@@ -628,6 +631,7 @@ function PostRowView ({
             : null}
           {videoAbove ? null : previewNode}
           {quoteOut ? quoteNode : null}
+          {Array.isArray(poll) ? <PollCard author={author} seq={seq} poll={poll} /> : null}
           {/* After the content, so a screen reader reads the caption before
               them; the position is absolute, so they still draw at the top. */}
           {headActions

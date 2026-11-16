@@ -254,6 +254,11 @@ const ADMITTED_FILE = 'admitted.json'
 const DM_STAMPS_FILE = 'dm-stamps.json'
 const BLOB_STAMPS_FILE = 'blob-stamps.json'
 const DM_SWEEP_MS = 60000
+// How many blocks after a reported topic root groupPostBlock looks at for
+// the root's poll: group.post writes the root, its group-topic and its
+// group-poll back to back, so the poll sits at seq + 2 unless writes of the
+// same device interleave.
+const MOD_POLL_SCAN = 16
 const DM_STAMP_ROWS_MAX = 100000
 const DM_STAMP_ROW_DAYS = 3
 const DM_STAMP_KEEP_DAYS = 7
@@ -277,7 +282,7 @@ const FEIRA_PENDING_MAX = 5000
 // Per rater diary, the first listing-rate seq of each offer id (H1).
 const FEIRA_OFFERS_PER_DIARY = 4096
 const FEIRA_TYPES = new Set(['listing', 'listing-edit', 'listing-status', 'listing-rate'])
-const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends'])
+const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice'])
 
 // Frame guard for external streams (acceptStream): see lib/frame-guard.js
 // for the limits, how they were measured, the frame deadlines and the
@@ -954,6 +959,27 @@ function readDmStamps (dataDir, log, name = DM_STAMPS_FILE, reason = 'dm-stamps-
     if (Object.keys(row).length > 0) out.set(key, trimStampRow(row))
   }
   return out
+}
+
+// The options of the poll on root post <seq> of group core <writerHex>, as
+// foldTopics picks it (the lowest-seq group-poll on the root's own core,
+// after the root), looked for in the next MOD_POLL_SCAN local blocks of a
+// public group; null when none is found there. A block not local is
+// skipped: moderation never downloads. The poll may stand without a
+// group-topic mark: its options are the author's signed text either way.
+async function modRootPoll (core, read, writerHex, seq, root, visibility) {
+  if (visibility !== 'public') return null
+  const end = Math.min(core.length, seq + 1 + MOD_POLL_SCAN)
+  for (let i = seq + 1; i < end; i++) {
+    const raw = await read(i)
+    if (raw === null) continue
+    const r = decodeBlock(raw)
+    if (r === null || r.type !== 'group-poll' || !r.target) continue
+    if (r.target.writer !== writerHex || r.target.seq !== seq) continue
+    if (validateGroupRecord(r, i, { root, private: false }) !== null) continue
+    return r.options.slice()
+  }
+  return null
 }
 
 class Seeder {
@@ -4650,6 +4676,12 @@ class Seeder {
   // anything else: not served, header not checked yet, the group or the
   // diary blocked, a block not local, another record type, or a change
   // while it read. The text is the author's signed record, not a quote.
+  // A group-poll block of a public group answers the same shape with its
+  // options (one per line) as texto and the topic it names as resposta, so
+  // a reported poll can be reviewed; in a private group it answers null.
+  // A reported root post of a public group whose own core holds its poll
+  // (modRootPoll) answers its text followed by the poll's options, one per
+  // line, so a report on a topic shows what the poll offers too.
   // A group-sealed block of a group whose verified root header says private
   // answers only { sealed: true, writer, diary, group, seq }: the seeder
   // cannot read it and never hands out the envelope (docs/protocol.md
@@ -4685,15 +4717,33 @@ class Seeder {
         if (!live() || core.fork !== 0 || this._groupVisibility(entry.group) !== 'private') return null
         return { sealed: true, writer: writerHex, diary: entry.diary, group: entry.group, seq }
       }
+      if (record.type === 'group-poll') {
+        // A forum poll (public groups only, never sealed): the reviewer reads
+        // its options as the text, one per line, and the topic it hangs on as
+        // `resposta`. A private or not yet known visibility answers null.
+        if (visibility !== 'public' || validateGroupRecord(record, seq, { root, private: false }) !== null) return null
+        if (!live() || core.fork !== 0 || this._groupVisibility(entry.group) !== 'public') return null
+        return {
+          group: entry.group,
+          diary: entry.diary,
+          seq,
+          texto: record.options.join('\n'),
+          resposta: { writer: record.target.writer, seq: record.target.seq }
+        }
+      }
       if (record.type !== 'group-post') return null
       if (validateGroupRecord(record, seq, { root, private: visibility === 'private' }) !== null) return null
       if (!live() || core.fork !== 0) return null
       const reply = record.replyTo
+      // A topic root's title is short; abusive text can sit in its poll, so
+      // its options follow the text, as ai/read-post.js reads a diary poll.
+      const options = reply ? null : await modRootPoll(core, read, writerHex, seq, root, visibility)
+      if (!live() || core.fork !== 0) return null
       return {
         group: entry.group,
         diary: entry.diary,
         seq,
-        texto: record.text,
+        texto: options === null ? record.text : [record.text, ...options].join('\n'),
         resposta: reply ? { writer: reply.writer, seq: reply.seq } : null
       }
     } catch {
@@ -5854,6 +5904,68 @@ class Seeder {
         return true
       },
       left: () => left
+    }
+  }
+
+  // GET /index/poll/<author>/<seq>: the votes of one diary poll, { totals,
+  // indexing, complete }, totals the votes per option (2..4 integers) over
+  // the voters the index may show: the follows gate, and only voters whose
+  // own diary is fully indexed and scanned (_fansShown); such a voter left
+  // out, or a held one, makes complete false. Totals are seeder claims:
+  // the node never trusts them for anything but a hint. While the poll
+  // author's own diary is still being indexed or scanned the poll may not
+  // exist yet (or be deleted by a tombstone not yet applied): totals is [],
+  // indexing true, complete false. Null for an author not shown or held, a
+  // post that is not a live poll post (a deleted one included) and a
+  // malformed seq. Pointers and counts only: the node re-verifies.
+  indexPoll (authorHex, seq) {
+    try {
+      if (!this._indexVisible(authorHex) || this._searchHeld(authorHex) || !Number.isSafeInteger(seq) || seq < 1) return null
+      if (this._ownerIndexPending(authorHex)) return { totals: [], indexing: true, complete: false }
+      const v = this._followsVisible()
+      const shown = this._fansShown(v)
+      const got = this._index.pollTotals(authorHex, seq, { visible: shown.visible })
+      if (got === null) return null
+      const flags = this._indexFlags()
+      return { totals: got.totals, indexing: flags.indexing, complete: flags.complete && !v.held && !shown.left() }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/poll/<author>/<seq>/<pick>[/<atMs>.<key>]: one page of the
+  // voters whose live pick on that poll is `pick`, newest first (at most 20
+  // rows, the cursor and honesty flags of indexFans), with a hint per voter.
+  // seq and at point at the voter's own `choice` block, which the node
+  // peeks and verifies. Null as indexPoll does, and for a pick outside the
+  // poll's options or a malformed cursor; while the poll author's diary is
+  // still pending, no rows and complete false.
+  indexPollVoters (authorHex, seq, pick, cursor = null) {
+    try {
+      if (!this._indexVisible(authorHex) || this._searchHeld(authorHex)) return null
+      if (!Number.isSafeInteger(seq) || seq < 1 || !Number.isSafeInteger(pick) || pick < 0) return null
+      let after = null
+      if (cursor !== null) {
+        if (typeof cursor !== 'string') return null
+        const m = /^(\d{1,16})\.([0-9a-f]{64})$/.exec(cursor)
+        if (m === null) return null
+        const t = Number(m[1])
+        if (!Number.isSafeInteger(t) || t < 0) return null
+        after = { atMs: t, key: m[2] }
+      }
+      if (this._ownerIndexPending(authorHex)) return { items: [], next: null, total: 0, authors: {}, indexing: true, complete: false }
+      const v = this._followsVisible()
+      const shown = this._fansShown(v)
+      const page = this._index.pollVoters(authorHex, seq, pick, { after, visible: shown.visible })
+      if (page === null) return null
+      const authors = {}
+      for (const item of page.items) {
+        if (!(item.key in authors)) authors[item.key] = this._index.hints(item.key)
+      }
+      const flags = this._indexFlags()
+      return { items: page.items, next: page.next, total: page.total, authors, indexing: flags.indexing, complete: flags.complete && !v.held && !shown.left() }
+    } catch {
+      return null
     }
   }
 

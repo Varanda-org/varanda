@@ -232,7 +232,7 @@ test('grupo and comunidade are keyed by a lowercase hex64 root key', async (t) =
   for (const key of [undefined, null, '', 'ceu', A.toUpperCase(), A + ':1']) t.absent(validEntry({ screen: 'fas', key }), String(key))
   t.ok(validEntry({ screen: 'melhores-amigos' }))
   t.absent(validEntry({ screen: 'melhores-amigos', key: A }))
-  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos', 'salvos', 'assunto', 'recados', 'fas', 'melhores-amigos'])
+  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos', 'salvos', 'assunto', 'recados', 'fas', 'melhores-amigos', 'topico'])
   t.absent(validEntry({ screen: 'cadeira', key: A }))
   t.ok(SCREENS.includes('comunidade'))
   for (const screen of ['grupo', 'comunidade', 'comunidade-info']) {
@@ -367,7 +367,7 @@ test('momentos is keyed by a lowercase hex64 author', async (t) => {
 test('popTo drops back to an index and refuses bounds outside the stack', async (t) => {
   const { EMPTY, MAX_DEPTH, SCREENS, push, pop, popTo, top } = await loadNav()
   t.is(MAX_DEPTH, 20)
-  t.is(SCREENS.length, 26, 'popTo adds no screen id')
+  t.is(SCREENS.length, 27, 'popTo adds no screen id')
   let stack = EMPTY
   for (let i = 1; i <= 4; i++) stack = push(stack, { screen: 'conversa', key: A + ':' + i })
   t.is(popTo(stack, 3), stack, 'the top index is a no-op')
@@ -450,4 +450,16 @@ test('anuncios is keyed by a lowercase hex64 author and dedupes', async (t) => {
     t.absent(validEntry({ screen: 'anuncios', key }), String(key))
     t.is(push(EMPTY, { screen: 'anuncios', key }), EMPTY)
   }
+})
+
+test('topico is keyed by the root ref and needs the group key', async (t) => {
+  const { push, validEntry, EMPTY } = await loadNav()
+  const ref = A + ':3'
+  t.ok(validEntry({ screen: 'topico', key: ref, params: { group: A } }))
+  t.absent(validEntry({ screen: 'topico', key: ref }), 'no group')
+  t.absent(validEntry({ screen: 'topico', key: ref, params: { group: 'x' } }), 'bad group')
+  t.absent(validEntry({ screen: 'topico', key: A, params: { group: A } }), 'not a ref')
+  t.absent(validEntry({ screen: 'topico', key: A + ':0', params: { group: A } }), 'seq starts at 1')
+  t.is(push(EMPTY, { screen: 'topico', key: ref, params: { group: A } }).length, 1)
+  t.is(push(EMPTY, { screen: 'topico', key: ref }).length, 0)
 })

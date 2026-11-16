@@ -1250,6 +1250,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       text: post.text,
       media: post.media || null,
       preview: post.preview || null,
+      ...(diaryPost && Array.isArray(post.poll) ? { poll: post.poll } : {}),
       replyToName,
       // Feed posts pass persist: true (own or followed by construction).
       persistMedia: persist === true ? true : social.persistOf(post.author),
@@ -1306,6 +1307,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
     quotePersist: quoteRef !== null ? social.persistOf(post.quote.author) : null,
     replyToName,
     replyPreviews: previews,
+    poll: diaryPost && Array.isArray(post.poll) ? post.poll : null,
     // By value: a refetch answers with new objects for the same numbers.
     counts: counts !== null && typeof counts === 'object',
     replies: counts ? counts.replies : null,

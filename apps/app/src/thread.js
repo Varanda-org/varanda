@@ -111,6 +111,7 @@ function postItem (author, seq, record, peek) {
     media: Array.isArray(record.media) && record.media.length > 0 ? record.media.slice() : null,
     // The node validated the card; only stored data, nothing fetched.
     preview: record.preview !== null && typeof record.preview === 'object' ? record.preview : null,
+    ...(rpc.isPoll(record.poll) ? { poll: record.poll.slice() } : {}),
     name: profile ? profile.name : null,
     username,
     avatar: profile ? profile.avatar : null

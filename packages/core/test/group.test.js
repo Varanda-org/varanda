@@ -7,7 +7,7 @@ const {
   groupHeader, writerHeader, groupPost, groupHide, groupAdmit, groupBan, groupMeta, groupAdmin, groupLeave,
   groupCreateRecord, communityAdmit, communityBan, communityHide, groupInvites,
   groupJoins, groupJoinHistory, diaryGroupKeys, orderKey, compareOrder, isFuture, buildGroup, buildCommunity,
-  GROUP_POST_V2_KEYS, groupKey, groupSealed, sealedInner, groupReact
+  GROUP_POST_V2_KEYS, groupKey, groupSealed, sealedInner, groupReact, groupTopic, groupPoll, groupChoice
 } = require('../lib/group')
 const { groupJoinRecord } = require('../lib/records')
 const { K, BASE, AT, NOW, community: communityOf, groupIn } = require('./helpers/groups')
@@ -184,7 +184,7 @@ test('header shapes', async (t) => {
 })
 
 test('record shapes', async (t) => {
-  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed', 'group-invites', 'group-react'])
+  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed', 'group-invites', 'group-react', 'group-topic', 'group-poll', 'group-choice'])
   const p = groupPost({ text: 'oi', replyTo: { writer: wA, seq: 1, extra: 1 }, seen: { writer: wB, seq: 2 }, at: AT(1) })
   t.alike(p, { type: 'group-post', text: 'oi', replyTo: { writer: wA, seq: 1 }, seen: { writer: wB, seq: 2 }, at: AT(1) })
   t.is(validateGroupRecord(p, 1), null)
@@ -2812,4 +2812,229 @@ test('last never names a reaction', (t) => {
   const g = buildGroup(w.input())
   t.alike(g.last, p)
   t.ok(reactionsOf(g, p))
+})
+
+// Foruns e enquetes: group-topic, group-poll and group-choice side records
+// (public groups only).
+const OPTS = ['sim', 'não', 'talvez']
+const topic = (w, key, target, s) => w.push(key, groupTopic({ target, at: AT(s) }))
+const poll = (w, key, target, s, options = OPTS) => w.push(key, groupPoll({ target, options, at: AT(s) }))
+const choose = (w, key, target, pick, s) => w.push(key, groupChoice({ target, pick, at: AT(s) }))
+const postOf = (g, ref) => g.posts.find((p) => p.writer === ref.writer && p.seq === ref.seq)
+
+test('forum record shapes', async (t) => {
+  t.alike([...GROUP_TYPES].slice(-3), ['group-topic', 'group-poll', 'group-choice'])
+  const target = { writer: wA, seq: 1, x: 1 }
+  const tp = groupTopic({ target, seen: { writer: wX, seq: 2 }, at: AT(1) })
+  t.alike(tp, { type: 'group-topic', target: { writer: wA, seq: 1 }, seen: { writer: wX, seq: 2 }, at: AT(1) })
+  t.alike(Object.keys(tp), ['type', 'target', 'seen', 'at'])
+  const options = ['a', 'b']
+  const pl = groupPoll({ target, options, at: AT(1) })
+  t.alike(Object.keys(pl), ['type', 'target', 'options', 'seen', 'at'])
+  t.not(pl.options, options, 'options are copied')
+  const ch = groupChoice({ target, pick: 1, at: AT(1) })
+  t.alike(Object.keys(ch), ['type', 'target', 'pick', 'seen', 'at'])
+  for (const r of [tp, pl, ch]) {
+    t.is(validateGroupRecord(r, 1), null)
+    t.is(validateGroupRecord({ ...r, extra: 1 }, 1), 'malformed')
+    t.is(validateGroupRecord({ ...r, target: { writer: wA, seq: 0 } }, 1), 'malformed', 'target is a block')
+    t.is(validateGroupRecord({ ...r, target: null }, 1), 'malformed')
+    t.is(validateGroupRecord({ ...r, seen: { writer: wX } }, 1), 'seen-invalid')
+    t.is(validateGroupRecord({ ...r, at: 'x' }, 1), 'date-invalid')
+    t.is(validateGroupRecord(r, 1, { community: true }), 'group-only')
+    t.is(validateGroupRecord(r, 1, { private: true }), 'public-only', 'a private group refuses it in the clear')
+    t.is(validateGroupRecord(r, 1, { sealed: true }), 'public-only', 'never inside an envelope')
+  }
+  for (const bad of [['a'], ['a', 'b', 'c', 'd', 'e'], ['a', 'a'], ['a', ''], 'ab', null, ['a', 1]]) {
+    t.is(validateGroupRecord({ ...pl, options: bad }, 1), 'poll-invalid', JSON.stringify(bad))
+  }
+  t.is(validateGroupRecord({ ...ch, pick: null }, 1), null, 'null withdraws')
+  t.is(validateGroupRecord({ ...ch, pick: 3 }, 1), null)
+  for (const bad of [4, -1, 1.5, '1', true, undefined]) {
+    t.is(validateGroupRecord({ ...ch, pick: bad }, 1), 'pick-invalid', String(bad))
+  }
+  await t.exception.all(async () => groupPoll({ target, options: ['x'], at: AT(1) }), /poll-invalid/)
+  await t.exception.all(async () => groupChoice({ target, pick: 9, at: AT(1) }), /pick-invalid/)
+})
+
+test('a topic counts on a root post of the same diary, any of its cores', (t) => {
+  const w = world().add(X, wX).add(X, wX2).add(Y, wY)
+  const root = post(w, wX, 1)
+  const other = post(w, wY, 2)
+  topic(w, wX2, root, 3)
+  topic(w, wX, other, 4) // foreign target
+  const g = buildGroup(w.input())
+  t.alike(postOf(g, root).topic, { poll: null })
+  t.alike(postOf(g, root).thread, { writer: wX, seq: 1 })
+  t.absent('topic' in postOf(g, other), 'a mark on another diary\'s post is ignored')
+  t.absent('thread' in postOf(g, other))
+})
+
+test('a topic mark on a reply or an unknown post is ignored', (t) => {
+  const w = world().add(Y, wY)
+  const p = post(w, wY, 1)
+  const reply = post(w, wY, 2, { replyTo: p })
+  topic(w, wY, reply, 3)
+  topic(w, wY, { writer: wY, seq: 99 }, 4)
+  const g = buildGroup(w.input())
+  t.absent('topic' in postOf(g, reply))
+  t.absent('topic' in postOf(g, p))
+  t.ok(g.posts.every((x) => !('thread' in x) && !('topic' in x)), 'plain posts keep their exact keys')
+  t.alike(visible(g), [wY + ':1', wY + ':2'], 'side records never become posts')
+})
+
+test('replies and replies to replies belong to the topic thread', (t) => {
+  const w = world().add(X, wX).add(Y, wY)
+  const root = post(w, wY, 1)
+  topic(w, wY, root, 2)
+  const r1 = post(w, wX, 3, { replyTo: root })
+  const r2 = post(w, wY, 4, { replyTo: r1 })
+  const loose = post(w, wX, 5)
+  const r3 = post(w, wX, 6, { replyTo: loose })
+  const g = buildGroup(w.input())
+  for (const ref of [root, r1, r2]) t.alike(postOf(g, ref).thread, { writer: root.writer, seq: root.seq })
+  t.absent('topic' in postOf(g, r1), 'only the root carries topic')
+  t.absent('thread' in postOf(g, loose))
+  t.absent('thread' in postOf(g, r3))
+})
+
+test('the first poll on the root\'s own core wins; a poll needs a topic', (t) => {
+  const w = world().add(X, wX).add(X, wX2).add(Y, wY)
+  const root = post(w, wX, 1)
+  poll(w, wX2, root, 2, ['outro', 'core']) // another device of the author
+  topic(w, wX, root, 3)
+  poll(w, wX, root, 4)
+  poll(w, wX, root, 5, ['depois', 'nunca']) // a duplicate: the first stays
+  poll(w, wY, root, 6, ['alheio', 'x']) // not the author
+  const bare = post(w, wY, 7)
+  poll(w, wY, bare, 8)
+  const g = buildGroup(w.input())
+  t.alike(postOf(g, root).topic.poll, { writer: wX, seq: 3, options: OPTS, totals: [0, 0, 0], by: [[], [], []] })
+  t.absent('topic' in postOf(g, bare), 'a poll alone makes no topic')
+})
+
+test('votes: one per diary, replaced, withdrawn, out of range ignored', (t) => {
+  const w = world().add(X, wX).add(X, wX2).add(Y, wY).add(A, wA)
+  const root = post(w, wY, 1)
+  topic(w, wY, root, 2)
+  poll(w, wY, root, 3)
+  choose(w, wX, root, 0, 4)
+  choose(w, wA, root, 0, 5)
+  choose(w, wY, root, 2, 6)
+  let p = postOf(buildGroup(w.input()), root).topic.poll
+  t.alike(p.totals, [2, 0, 1])
+  t.alike(p.by, [[X, A], [], [Y]], 'by lists diaries in vote order')
+  // Another device of X replaces its vote: one vote per diary.
+  choose(w, wX2, root, 1, 7)
+  p = postOf(buildGroup(w.input()), root).topic.poll
+  t.alike(p.totals, [1, 1, 1])
+  t.alike(p.by, [[A], [X], [Y]])
+  // A pick outside the three options is ignored: the earlier one stays.
+  choose(w, wY, root, 3, 8)
+  t.alike(postOf(buildGroup(w.input()), root).topic.poll.by, [[A], [X], [Y]])
+  // Null withdraws.
+  choose(w, wA, root, null, 9)
+  p = postOf(buildGroup(w.input()), root).topic.poll
+  t.alike(p.totals, [0, 1, 1])
+  t.alike(p.by, [[], [X], [Y]])
+  // A member who leaves takes the vote along, as with reactions; the topic
+  // and its poll stay.
+  w.push(wY, groupLeave({ cuts: [{ writer: wY, seq: w.len(wY) }], at: AT(10) }))
+  const g = buildGroup(w.input())
+  t.is(g.members.get(Y), 'left')
+  t.alike(postOf(g, root).topic, { poll: { writer: wY, seq: 3, options: OPTS, totals: [0, 1, 0], by: [[], [X], []] } })
+})
+
+test('votes on a post with no poll, a reply or a future vote count nowhere', (t) => {
+  const w = world().add(X, wX).add(Y, wY)
+  const root = post(w, wY, 1)
+  topic(w, wY, root, 2)
+  const reply = post(w, wX, 3, { replyTo: root })
+  choose(w, wX, root, 0, 4)
+  choose(w, wX, reply, 0, 5)
+  let g = buildGroup(w.input())
+  t.alike(postOf(g, root).topic, { poll: null })
+  t.absent('topic' in postOf(g, reply))
+  poll(w, wY, root, 6)
+  g = buildGroup(w.input())
+  t.alike(postOf(g, root).topic.poll.totals, [1, 0, 0], 'a vote written before the poll counts once it exists')
+  w.push(wX, groupChoice({ target: root, pick: 2, at: new Date(NOW + 2 * 86400000).toISOString() }))
+  t.alike(postOf(buildGroup(w.input()), root).topic.poll.totals, [1, 0, 0], 'a future vote is ignored')
+  // A reaction on the root still folds beside the poll.
+  react(w, wX, root, THUMBS, 7)
+  g = buildGroup(w.input())
+  t.alike(reactionsOf(g, root), [{ emoji: THUMBS, count: 1, by: [X] }])
+  t.alike(postOf(g, root).topic.poll.totals, [1, 0, 0])
+})
+
+test('a future-dated poll at a lower seq holds the topic pollless until its date', (t) => {
+  const w = world().add(X, wX).add(Y, wY)
+  const root = post(w, wY, 1)
+  topic(w, wY, root, 2)
+  const ahead = NOW + 2 * 86400000
+  w.push(wY, groupPoll({ target: root, options: ['futuro', 'troca'], at: new Date(ahead).toISOString() }))
+  poll(w, wY, root, 4) // a later seq dated now: must not win meanwhile
+  choose(w, wX, root, 2, 5)
+  let g = buildGroup(w.input())
+  t.alike(postOf(g, root).topic, { poll: null }, 'no poll now, never the higher seq')
+  t.alike(postOf(g, root).thread, { writer: wY, seq: 1 }, 'still a topic')
+  // Once the clock reaches it the lower seq is the poll. The vote cast while
+  // poll was null (pick 2) is outside its two options and is ignored; a
+  // vote is on the topic, never on one poll record.
+  g = buildGroup({ ...w.input(), now: ahead })
+  t.alike(postOf(g, root).topic.poll, { writer: wY, seq: 3, options: ['futuro', 'troca'], totals: [0, 0], by: [[], []] })
+  choose(w, wX, root, 1, 6)
+  g = buildGroup({ ...w.input(), now: ahead })
+  t.alike(postOf(g, root).topic.poll.totals, [0, 1], 'an in-range vote counts on that poll')
+})
+
+test('a hidden root hides its topic and poll; an unhide brings them back', (t) => {
+  const w = world().add(X, wX).add(Y, wY)
+  const root = post(w, wY, 1)
+  topic(w, wY, root, 2)
+  poll(w, wY, root, 3)
+  const r1 = post(w, wX, 4, { replyTo: root })
+  choose(w, wX, root, 1, 5)
+  w.push(wY, groupHide({ target: root, on: true, at: AT(6) }))
+  let g = buildGroup(w.input())
+  const p = postOf(g, root)
+  t.ok(p.hidden)
+  // The marks stay on the hidden post (its `hidden` covers them, as for its
+  // text); votes on it do not count.
+  t.alike(p.topic.poll.totals, [0, 0, 0])
+  t.alike(postOf(g, r1).thread, { writer: wY, seq: 1 })
+  w.push(wY, groupHide({ target: root, on: false, at: AT(7) }))
+  g = buildGroup(w.input())
+  t.absent(postOf(g, root).hidden)
+  t.alike(postOf(g, root).topic.poll.totals, [0, 1, 0])
+})
+
+test('an old reader skips the forum records and still reads later posts', (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const Module = require('module')
+  const file = require.resolve('../lib/group')
+  const src = fs.readFileSync(file, 'utf8')
+  const oldSrc = src.replace(/,\n {2}'group-topic': \[[^\]]*\],\n {2}'group-poll': \[[^\]]*\],\n {2}'group-choice': \[[^\]]*\]/, '')
+  t.not(oldSrc, src, 'the types are gone from RECORD_KEYS')
+  const m = new Module(file, module)
+  m.filename = file
+  m.paths = Module._nodeModulePaths(path.dirname(file))
+  m._compile(oldSrc, file)
+  const old = m.exports
+  t.absent(old.GROUP_TYPES.includes('group-topic'))
+  const w = world().add(X, wX).add(Y, wY)
+  const root = post(w, wY, 1)
+  topic(w, wY, root, 2)
+  const pl = poll(w, wY, root, 3)
+  const ch = choose(w, wX, root, 0, 4)
+  post(w, wX, 5, { seen: ch, replyTo: root })
+  post(w, wY, 6, { seen: pl })
+  t.is(old.validateGroupRecord(w.logs.get(wY).entries[2].record, 2), 'malformed')
+  const g = old.buildGroup(w.input())
+  t.alike(visible(g), [wY + ':1', wX + ':2', wY + ':4'])
+  t.absent('topic' in g.posts[0])
+  const now = buildGroup(w.input())
+  t.alike(visible(now), visible(g), 'the new reader shows the same posts')
+  t.alike(postOf(now, root).topic.poll.totals, [1, 0, 0])
 })

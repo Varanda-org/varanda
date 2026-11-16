@@ -64,6 +64,7 @@ const AI_REASONS = {
   contexto: 'depende de contexto',
   midia: 'a publicação tem fotos ou vídeo, que a IA não vê',
   citacao: 'a publicação cita outra',
+  enquete: 'a publicação é uma enquete',
   recurso: 'há um pedido de revisão',
   truncado: 'a publicação foi cortada para a leitura',
   curto: 'texto curto demais para comparar',
@@ -129,6 +130,7 @@ const TEXT = {
   verifiedLabel: 'Publicação lida no semeador',
   verifiedMedia: 'A publicação tem fotos ou vídeo; a IA não vê imagens nem vídeo.',
   verifiedQuote: 'A publicação cita outra; confira no app.',
+  verifiedPoll: 'A publicação é uma enquete; confira as opções no app.',
   aiSuggest: 'Sugestão da IA:',
   aiAbstain: 'A IA não sugeriu nada:',
   byAi: 'pedido pela IA',
@@ -299,12 +301,14 @@ function aiLine (ai) {
 
 // report.publicacao: the post text the server read from the seeder for the
 // AI. Used only when it is a plain object with a string texto of at most
-// VERIFIED_MAX code points and two boolean flags; anything else -> null.
+// VERIFIED_MAX code points and boolean flags (midia, citacao and, from newer
+// servers, enquete: absent means false); anything else -> null.
 function verifiedOf (p) {
   if (p === null || typeof p !== 'object' || Object.getPrototypeOf(p) !== Object.prototype) return null
   if (typeof p.texto !== 'string' || Array.from(p.texto).length > VERIFIED_MAX) return null
   if (typeof p.midia !== 'boolean' || typeof p.citacao !== 'boolean') return null
-  return { texto: p.texto, midia: p.midia, citacao: p.citacao }
+  if (p.enquete !== undefined && typeof p.enquete !== 'boolean') return null
+  return { texto: p.texto, midia: p.midia, citacao: p.citacao, enquete: p.enquete === true }
 }
 
 // report.actor: who decided. A decided report from an older server has no
@@ -726,7 +730,8 @@ function createPanel (env) {
       h('p', { className: 'label', text: TEXT.verifiedLabel }),
       untrusted('blockquote', v.texto),
       v.midia ? h('p', { className: 'ai', text: TEXT.verifiedMedia }) : null,
-      v.citacao ? h('p', { className: 'ai', text: TEXT.verifiedQuote }) : null
+      v.citacao ? h('p', { className: 'ai', text: TEXT.verifiedQuote }) : null,
+      v.enquete ? h('p', { className: 'ai', text: TEXT.verifiedPoll }) : null
     )
   }
 

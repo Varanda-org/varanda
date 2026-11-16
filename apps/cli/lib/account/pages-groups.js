@@ -1437,7 +1437,9 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
       const start = Math.max(0, posts.length - n)
       // rpc.md 5.40's compact summary: the fold's `by` lists would outgrow
       // a read (500 reactors on 32 posts is over 1 MiB), so never forwarded.
-      const items = posts.slice(start).reverse().map(({ reactions, ...x }) => ({
+      // Nor the forum keys: `topic` carries an uncapped voter list and a
+      // hidden root's poll, and group.read's page keeps its bytes.
+      const items = posts.slice(start).reverse().map(({ reactions, topic, thread, ...x }) => ({
         ...x,
         ...(Array.isArray(reactions) && reactions.length > 0 ? { reactions: reactions.map((r) => ({ emoji: r.emoji, count: r.count, mine: r.by.includes(page) })) } : {}),
         text: x.hidden ? '' : x.text,

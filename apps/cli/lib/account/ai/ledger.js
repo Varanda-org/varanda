@@ -12,7 +12,8 @@
 //     reports: { [reportId]: { at, code, retryAt, attempts, exemplars,
 //                              suggestion, nearest } },
 //     reads: { [reportId]: { at, target, seq, contentHash, text, hasMedia,
-//                            hasQuote, textCp, truncated, embedding } } }
+//                            hasQuote, hasPoll, textCp, truncated,
+//                            embedding } } }
 // `reports[id].at` is the time of the last mark; `code` a short token;
 // `attempts` the consecutive failed reads; `retryAt` when to try again (or
 // null); `exemplars` how many precedents the decision saw; `suggestion`
@@ -65,7 +66,9 @@ const CODE_RE = /^[a-z0-9-]{1,32}$/
 const SUGGESTIONS = ['bloquear', 'descartar']
 const FILE_KEYS = ['v', 'reports', 'reads']
 const MARK_KEYS = ['at', 'code', 'retryAt', 'attempts', 'exemplars', 'suggestion', 'nearest']
-const READ_KEYS = ['at', 'target', 'seq', 'contentHash', 'text', 'hasMedia', 'hasQuote', 'textCp', 'truncated', 'embedding']
+const READ_KEYS = ['at', 'target', 'seq', 'contentHash', 'text', 'hasMedia', 'hasQuote', 'hasPoll', 'textCp', 'truncated', 'embedding']
+// A row stored before `hasPoll` existed has every READ_KEYS key but that one.
+const LEGACY_READ_KEYS = READ_KEYS.filter((k) => k !== 'hasPoll')
 
 function fail (code) {
   const err = new Error(code)
@@ -124,9 +127,20 @@ function validRead (r) {
     typeof r.text === 'string' && isCleanText(r.text, true) && Array.from(r.text).length <= MAX_TEXT &&
     typeof r.hasMedia === 'boolean' &&
     typeof r.hasQuote === 'boolean' &&
+    typeof r.hasPoll === 'boolean' &&
     Number.isInteger(r.textCp) && r.textCp >= 0 &&
     typeof r.truncated === 'boolean' &&
     validEmbedding(r.embedding)
+}
+
+// A row written before `hasPoll` existed is read as hasPoll:false. That never
+// loosens a gate: an older worker's records.js knew no poll key set, so it
+// refused a poll post as no post at all (nao-e-publicacao) and stored no row
+// for it; no legacy row is a poll. Only a row of exactly the old shape is
+// upgraded; anything else stays invalid.
+function upgradeRead (r) {
+  if (isPlainObject(r) && !has(r, 'hasPoll') && exactKeys(r, LEGACY_READ_KEYS)) return { ...r, hasPoll: false }
+  return r
 }
 
 function copyRead (r) {
@@ -147,8 +161,9 @@ function fromJson (obj) {
     reports[id] = { ...obj.reports[id] }
   }
   for (const id of readIds) {
-    if (!validId(id) || !validRead(obj.reads[id])) throw bad()
-    reads[id] = copyRead(obj.reads[id])
+    const row = upgradeRead(obj.reads[id])
+    if (!validId(id) || !validRead(row)) throw bad()
+    reads[id] = copyRead(row)
   }
   return { v: VERSION, reports, reads }
 }

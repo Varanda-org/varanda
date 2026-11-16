@@ -830,6 +830,17 @@ test('feed copies link previews on posts, replies and quotes', (t) => {
   t.is(items[3].preview, null)
 })
 
+test('feed carries poll only on poll posts and leaves other items untouched', (t) => {
+  const options = ['Sim', 'Não']
+  const entries = [{ seq: 0, record: cert(KA) }, { seq: 1, record: { ...post('enquete', AT), poll: options } }, { seq: 2, record: post('comum', AT) }]
+  const { items } = buildFeed({ logs: [{ key: KA, entries }], now: NOW })
+  const bySeq = Object.fromEntries(items.map((i) => [i.seq, i]))
+  t.alike(bySeq[1].poll, options)
+  t.not(bySeq[1].poll, options)
+  t.alike(bySeq[2], { kind: 'post', author: KA, name: null, username: null, seq: 2, at: AT, text: 'comum', replyTo: null, quote: null, media: null, preview: null })
+  t.is(Object.keys(bySeq[2]).includes('poll'), false)
+})
+
 test('feira records yield no feed items', (t) => {
   const place = { uf: 'SP', city: 'Recife', bairro: 'Boa Vista' }
   const at = iso(NOW - HOUR)

@@ -2332,6 +2332,127 @@ test('indexProfile and indexFans: fan count and pages, top-friends with follow-b
   t.alike(seeder.indexFans(F).items.map((r) => r.key), [H], 'other authors are unaffected')
 })
 
+test('indexPoll and indexPollVoters: totals and voter pages, revote, withdraw, bad pick, deleted poll, fail closed, held, blocked and purged', async (t) => {
+  const { postRecord, choiceRecord } = require('@varanda/core/lib/records')
+  const O = authorKey(1)
+  const F = authorKey(2)
+  const G = authorKey(3)
+  const H = authorKey(4)
+  const poll = { author: O, seq: 1 }
+  const vote = (pick, i) => choiceRecord({ to: poll, pick, at: at(i) })
+  const ofO = [postRecord({ text: 'Qual?', poll: ['um', 'dois', 'tres'], at: at(0) }), postRecord({ text: 'oi', at: at(1) })]
+  // F votes 0 then changes to 2; G votes 1 then withdraws; H votes 1 and 3 (out of range: ignored).
+  const ofF = [vote(0, 2), vote(2, 3)]
+  const ofG = [vote(1, 4), vote(null, 5)]
+  const ofH = [vote(1, 6), vote(3, 7)]
+  const { seeder, diary } = scanFixture()
+  const all = [[O, ofO], [F, ofF], [G, ofG], [H, ofH]]
+  const entries = new Map(all.map(([key, records]) => [key, scannable(seeder, diary(key, records.length, (seq) => records[seq - 1]))]))
+  const pass = async () => {
+    for (const [key] of all) {
+      const entry = entries.get(key)
+      if (!entry || entry.dropped) continue
+      await seeder._runScan(key, entry)
+      seeder._onGrow(key, entry, entry.core.contiguousLength)
+    }
+    await settleIndex(seeder)
+  }
+  const grow = async (key, records, more) => {
+    records.push(...more)
+    entries.get(key).core.contiguousLength = records.length + 1
+    await pass()
+  }
+  await pass()
+  t.alike(seeder.indexPoll(O, 1), { totals: [0, 1, 1], indexing: false, complete: true }, 'F moved to 2, G withdrew, H kept 1')
+  const hints = { profileSeq: null, usernameSeq: null }
+  t.alike(seeder.indexPollVoters(O, 1, 2), { items: [{ key: F, seq: 2, at: at(3) }], next: null, total: 1, authors: { [F]: hints }, indexing: false, complete: true }, 'a row is the voter\'s own live block')
+  t.alike(seeder.indexPollVoters(O, 1, 1).items, [{ key: H, seq: 1, at: at(6) }], 'the out-of-range pick left the earlier one standing')
+  t.alike(seeder.indexPollVoters(O, 1, 0).items, [], 'nobody holds option 0 any more')
+  t.alike(seeder.indexPollVoters(O, 1, 1, Date.parse(at(6)) + '.' + H).items, [], 'an exclusive cursor')
+
+  // Bad requests and unknown polls.
+  t.is(seeder.indexPollVoters(O, 1, 3), null, 'a pick the poll has no option for')
+  t.is(seeder.indexPollVoters(O, 1, -1), null)
+  t.is(seeder.indexPollVoters(O, 1, 1.5), null)
+  t.is(seeder.indexPollVoters(O, 1, '1'), null)
+  for (const bad of ['x', '1.' + 'A'.repeat(64), '99999999999999999.' + G, 7]) t.is(seeder.indexPollVoters(O, 1, 1, bad), null, 'a malformed cursor: ' + bad)
+  t.is(seeder.indexPoll(O, 2), null, 'a plain post is not a poll')
+  t.is(seeder.indexPollVoters(O, 2, 0), null)
+  t.is(seeder.indexPoll(O, 9), null, 'a post that does not exist')
+  for (const seq of [0, -1, 1.5, '1', null]) t.is(seeder.indexPoll(O, seq), null, 'a bad seq: ' + seq)
+  t.is(seeder.indexPoll(F, 1), null, 'no poll in that diary')
+  t.is(seeder.indexPoll('f'.repeat(64), 1), null, 'an author not served is unknown')
+  t.is(seeder.indexPoll('nope', 1), null)
+
+  // Revote and withdrawal, live; a deleted withdrawal falls back.
+  await grow(F, ofF, [vote(1, 8)]) // F:3
+  t.alike(seeder.indexPoll(O, 1).totals, [0, 2, 0], 'F revoted')
+  await grow(G, ofG, [vote(0, 9)]) // G:3
+  t.alike(seeder.indexPoll(O, 1).totals, [1, 2, 0], 'G voted again after withdrawing')
+  await grow(G, ofG, [deleteRecord({ seq: 3, at: at(10) }), deleteRecord({ seq: 2, at: at(11) })]) // G:4, G:5
+  t.alike(seeder.indexPoll(O, 1).totals, [0, 3, 0], 'deleting the withdrawal brings back the earlier vote')
+  t.alike(seeder.indexPollVoters(O, 1, 1).items.map((r) => r.key), [F, H, G], 'three voters, newest first')
+  t.is(seeder.indexPollVoters(O, 1, 1).total, 3)
+  // A choice dated more than a day ahead is not counted nor listed yet.
+  await grow(H, ofH, [choiceRecord({ to: poll, pick: 0, at: new Date(Date.now() + 2 * 86400000).toISOString() })]) // H:3
+  t.alike(seeder.indexPoll(O, 1).totals, [0, 3, 0], 'a future-dated vote waits for its date')
+  t.alike(seeder.indexPollVoters(O, 1, 0).items, [], 'and is not first in the voter list')
+  t.alike(seeder.indexPollVoters(O, 1, 1).items.map((r) => r.key), [F, H, G], 'H keeps its earlier pick')
+
+  // A rebuild fails closed, then the same answer.
+  seeder._rebuildIndex()
+  t.alike(seeder.indexPoll(O, 1), { totals: [], indexing: true, complete: false }, 'between a rebuild and the re-index: no totals')
+  t.alike(seeder.indexPollVoters(O, 1, 1), { items: [], next: null, total: 0, authors: {}, indexing: true, complete: false })
+  await settleIndex(seeder)
+  t.alike(seeder.indexPoll(O, 1).totals, [0, 3, 0], 'the same after a rebuild')
+
+  // A pending poll author (paused, or a tombstone scan behind): no totals.
+  const owner = seeder._served.get(O)
+  owner.indexPaused = true
+  t.alike(seeder.indexPoll(O, 1), { totals: [], indexing: true, complete: false }, 'a paused author')
+  owner.indexPaused = false
+  owner.scanned = 0
+  t.is(seeder.indexPoll(O, 1).complete, false, 'a tombstone scan behind: it may be deleted')
+  owner.scanned = owner.present
+
+  // A voter whose own diary is pending is left out and the answer says so.
+  seeder._served.get(F).indexPaused = true
+  const pending = seeder.indexPoll(O, 1)
+  t.alike([pending.totals, pending.complete], [[0, 2, 0], false], 'a pending voter is not counted')
+  t.alike(seeder.indexPollVoters(O, 1, 1).items.map((r) => r.key).includes(F), false)
+  t.is(seeder.indexPollVoters(O, 1, 1).complete, false)
+  seeder._served.get(F).indexPaused = false
+  seeder._served.get(F).scanned = 0
+  t.alike(seeder.indexPoll(O, 1).totals, [0, 2, 0], 'a tombstone scan behind: the same')
+  seeder._served.get(F).scanned = seeder._served.get(F).present
+  t.alike(seeder.indexPoll(O, 1).totals, [0, 3, 0], 'caught up: counted again')
+  t.is(seeder.indexPoll(O, 1).complete, true)
+
+  seeder._served.get(G).searchHold = 1
+  const held = seeder.indexPoll(O, 1)
+  t.alike([held.totals, held.complete], [[0, 2, 0], false], 'a held voter is left out and the answer is not complete')
+  seeder._served.get(G).searchHold = 0
+  owner.searchHold = 1
+  t.is(seeder.indexPoll(O, 1), null, 'a held author is unknown')
+  t.is(seeder.indexPollVoters(O, 1, 1), null)
+  owner.searchHold = 0
+
+  seeder._isBlocked = (hex) => hex === G || hex === H
+  t.alike(seeder.indexPoll(O, 1).totals, [0, 1, 0], 'blocked voters are filtered')
+  t.alike(seeder.indexPollVoters(O, 1, 1).items.map((r) => r.key), [F])
+  seeder._isBlocked = (hex) => hex === O
+  t.is(seeder.indexPoll(O, 1), null, 'a blocked author is unknown')
+  seeder._isBlocked = () => false
+
+  // A deleted poll: its votes are not counted any more.
+  await grow(O, ofO, [deleteRecord({ seq: 1, at: at(12) })]) // O:3
+  t.is(seeder.indexPoll(O, 1), null, 'a deleted poll is unknown')
+  t.is(seeder.indexPollVoters(O, 1, 1), null)
+
+  seeder._drop(O, 'blocked')
+  t.is(seeder.indexPoll(O, 1), null, 'a purged author is unknown')
+})
+
 test('indexScraps: the caps count admitted writers only and pages carry exclusive cursors', async (t) => {
   const { scrapRecord, followRecord } = require('@varanda/core/lib/records')
   const O = authorKey(1)

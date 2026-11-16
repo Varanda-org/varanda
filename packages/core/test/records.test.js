@@ -904,7 +904,7 @@ test('old readers: unknown types stay malformed', async (t) => {
 test('group-join records', async (t) => {
   await testnet(t)
   const { groupJoinRecord, TYPES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY } = records
-  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends'], 'TYPES parity')
+  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice'], 'TYPES parity')
   t.ok(Object.isFrozen(TYPES))
   t.alike([MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY], [512, 64, 32, 16, 80, 8])
   const gj = { type: 'group-join', group: K1, writer: K2, on: true, at: AT }
@@ -2042,4 +2042,71 @@ test('fan and top-friends records: key sets, rules and builders', async (t) => {
   source.push(K2)
   t.alike(built.keys, [K1], 'the builder copies the list')
   await t.exception.all(async () => topFriendsRecord({ keys: [K1, K1] }), /malformed/)
+})
+
+test('poll posts and choice records: key sets, rules and builders', async (t) => {
+  const { choiceRecord, POST_POLL_KEYS, CHOICE_KEYS, POLL_MIN, POLL_MAX, MAX_POLL_OPTION } = records
+  t.alike([...POST_POLL_KEYS], ['type', 'text', 'at', 'replyTo', 'poll'])
+  t.alike([...CHOICE_KEYS], ['type', 'to', 'pick', 'at'])
+  t.ok(Object.isFrozen(POST_POLL_KEYS) && Object.isFrozen(CHOICE_KEYS))
+  t.alike([POLL_MIN, POLL_MAX, MAX_POLL_OPTION], [2, 4, 60])
+  t.ok(records.TYPES.includes('choice'))
+
+  const post = { type: 'post', text: 'Vamos?', at: AT, replyTo: null, poll: ['Sim', 'Não'] }
+  t.is(validateRecord(post, 1), null)
+  t.is(validateRecord(post, 0), 'genesis-required')
+  t.is(validateRecord({ ...post, poll: ['a', 'b', 'c', 'd'] }, 1), null, 'four options')
+  t.is(validateRecord({ ...post, poll: ['a'.repeat(60), '\u{1f600}'.repeat(60)] }, 1), null, 'options at the limit')
+  t.alike(postRecord({ text: 'Vamos?', at: AT, poll: ['Sim', 'Não'] }), post)
+  t.alike(Object.keys(postRecord({ text: 'q', at: AT, poll: ['a', 'b'] })), [...POST_POLL_KEYS])
+  t.alike(Object.keys(postRecord({ text: 'q', at: AT, poll: null })), ['type', 'text', 'at', 'replyTo'], 'a null poll is no poll')
+  const source = ['a', 'b']
+  const built = postRecord({ text: 'q', at: AT, poll: source })
+  source.push('c')
+  t.alike(built.poll, ['a', 'b'], 'the builder copies the options')
+
+  for (const poll of [[], ['a'], ['a', 'b', 'c', 'd', 'e'], ['a', 'a'], ['a', ' a '], ['a', ''], ['a', ' '], ['a', 'b\nc'], ['a', 'b'.repeat(61)],
+    ['a', 'b\u0000'], ['a', 'b\ud800'], ['a', 'b\u202e'], ['a', 5], 'a,b', null, { 0: 'a', 1: 'b', length: 2 }]) {
+    t.is(validateRecord({ ...post, poll }, 1), 'poll-invalid', 'poll ' + JSON.stringify(poll))
+  }
+  t.is(validateRecord({ ...post, text: '' }, 1), 'text-length', 'a poll needs its question')
+  t.is(validateRecord({ ...post, text: 'a'.repeat(MAX_TEXT) }, 1), null)
+  t.is(validateRecord({ ...post, text: 'a'.repeat(MAX_TEXT + 1) }, 1), 'text-length')
+  t.is(validateRecord({ ...post, text: 'a\u0000b' }, 1), 'control-chars')
+  t.is(validateRecord({ ...post, text: 'a\nb' }, 1), null, 'a multi-line question')
+  t.is(validateRecord({ ...post, at: '2026-01-01' }, 1), 'date-invalid')
+  t.is(validateRecord({ ...post, replyTo: { author: K1, seq: 1 } }, 1), 'reply-invalid', 'a poll is a root post')
+  t.is(validateRecord({ ...post, extra: 1 }, 1), 'malformed')
+  const media = [{ core: K2, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 10, sha256: K1, width: 1, height: 1 }]
+  t.is(validateRecord({ ...post, media }, 1), 'malformed', 'no media beside a poll')
+  t.is(validateRecord({ ...post, quote: { author: K1, seq: 1 } }, 1), 'malformed', 'no quote beside a poll')
+  await t.exception.all(async () => postRecord({ text: 'q', at: AT, poll: ['a', 'b'], media }), /malformed/)
+  await t.exception.all(async () => postRecord({ text: 'q', at: AT, poll: ['a'] }), /poll-invalid/)
+  await t.exception.all(async () => postRecord({ text: 'q', at: AT, replyTo: { author: K1, seq: 1 }, poll: ['a', 'b'] }), /reply-invalid/)
+  // A copy of the post key sets before Enquetes: an old reader skips a poll
+  // post as malformed, and every other post validates exactly as before.
+  const oldKeys = ['type', 'text', 'at', 'replyTo']
+  t.absent(records.hasExactKeys(post, oldKeys), 'an old reader matches no key set')
+  t.is(validateRecord({ type: 'post', text: 'oi', at: AT, replyTo: null }, 1), null)
+
+  const choice = { type: 'choice', to: { author: K1, seq: 3 }, pick: 1, at: AT }
+  t.is(validateRecord(choice, 1), null)
+  t.is(validateRecord(choice, 0), 'genesis-required')
+  for (const pick of [0, 1, 2, 3, null]) t.is(validateRecord({ ...choice, pick }, 1), null, 'pick ' + pick)
+  for (const pick of [-1, 4, 1.5, '1', true, undefined]) t.is(validateRecord({ ...choice, pick }, 1), 'malformed', 'pick ' + String(pick))
+  for (const to of [{ author: K1, seq: 0 }, { author: K1 }, { author: 'x', seq: 1 }, { author: K1, seq: 1, extra: 1 }, K1 + ':1', null]) {
+    t.is(validateRecord({ ...choice, to }, 1), 'malformed', 'to ' + JSON.stringify(to))
+  }
+  t.is(validateRecord({ ...choice, extra: 1 }, 1), 'malformed')
+  const noPick = { ...choice }
+  delete noPick.pick
+  t.is(validateRecord(noPick, 1), 'malformed', 'pick must be present, null to withdraw')
+  for (const at of ['2026-01-01', 5, null]) t.is(validateRecord({ ...choice, at }, 1), 'date-invalid', 'at ' + at)
+  t.alike(choiceRecord({ to: { author: K1, seq: 3 }, pick: 1, at: AT }), choice)
+  t.alike(choiceRecord({ to: { author: K1, seq: 3 }, pick: null, at: AT }), { ...choice, pick: null })
+  const to = { author: K1, seq: 3 }
+  const copied = choiceRecord({ to, pick: 0, at: AT })
+  to.seq = 9
+  t.is(copied.to.seq, 3, 'the builder copies the target')
+  await t.exception.all(async () => choiceRecord({ to: { author: K1, seq: 3 }, pick: 4 }), /malformed/)
 })

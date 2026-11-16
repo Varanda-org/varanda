@@ -156,7 +156,7 @@ test('the check stays on the device and leaves no trace', (t) => {
 test('the composers check before they send', (t) => {
   const publicar = screen('Publicar.js')
   const send = publicar.slice(publicar.lastIndexOf('const send = async () => {'), publicar.indexOf('return sendAsPage()'))
-  t.ok(send.includes('refusalOf(text)'), 'Publicar: the draft is checked before any send path')
+  t.ok(send.includes('refusalOf(text, ...(pollDraft !== null ? pollDraft.options : []))'), 'Publicar: the draft and the poll options are checked before any send path')
   t.ok(send.includes('setCheckError(refused)'), 'Publicar: the refusal is shown')
   t.ok(/if \(refused !== ''\) \{\s*setCheckError\(refused\)\s*return/.test(send), 'Publicar: a refusal stops the send')
 
@@ -220,4 +220,20 @@ test('direct messages, reports and appeals stay out of the check', (t) => {
   for (const file of ['Mensagem.js', 'Mensagens.js', 'NovaConversa.js', 'Denunciar.js', 'Recurso.js']) {
     t.absent(screen(file).includes('wordCheck'), file)
   }
+})
+
+test('a topic title, its poll options and a topic reply are checked like a chat post', (t) => {
+  const grupo = screen('Grupo.js')
+  const create = grupo.slice(grupo.indexOf('async function createTopic'), grupo.indexOf("request('group.post', poll"))
+  t.ok(create.includes("publicGroupRefusal('public', text, ...(poll ? poll.options : []))"), 'Grupo: title and every option')
+  t.ok(create.includes("if (refused !== '') return { ok: false }"), 'Grupo: a refusal sends nothing')
+  t.ok(grupo.includes('error={topicRefusal || newTopic.error}'), 'Grupo: the refusal is shown in the sheet')
+
+  const topico = screen('Topico.js')
+  const reply = topico.slice(topico.indexOf('async function sendReply'), topico.indexOf("request('group.post'"))
+  t.ok(reply.includes("publicGroupRefusal('public', text)") && reply.includes("if (refused !== '') return"), 'Topico: a reply is checked before it is sent')
+  t.ok(topico.includes('replyRefusal || reply.error'), 'Topico: the refusal is shown')
+
+  const publicar = screen('Publicar.js')
+  t.ok(publicar.includes('{ setCheckError(POLL_NEEDS_TEXT); return }'), 'Publicar: an empty poll question says so')
 })

@@ -163,6 +163,9 @@ function judge (input, opts = {}) {
   // These flags fail closed: anything but an explicit false abstains.
   if (input.hasMedia !== false) return open('midia')
   if (input.hasQuote !== false) return open('citacao')
+  // A poll post (its options are part of what was reported) is always a
+  // human's call; fails closed like the flags above.
+  if (input.hasPoll !== false) return open('enquete')
   if (input.priorAi !== false) return open('recurso')
   if (input.truncated !== false) return open('truncado')
   if (!(typeof input.textCp === 'number' && input.textCp >= MIN_TEXT_CP)) return open('curto')

@@ -23,7 +23,7 @@ export function tabsFor (mode) {
 // Screens that belong to Conversas: a private conversation, a group, a
 // community, the communities list and the request folder open on top of that tab. The publish
 // button is for posts, so it stays hidden on all of them.
-const CONVERSAS_SCREENS = new Set(['mensagem', 'grupo', 'comunidade', 'comunidade-info', 'comunidades', 'pedidos'])
+const CONVERSAS_SCREENS = new Set(['mensagem', 'grupo', 'comunidade', 'comunidade-info', 'comunidades', 'pedidos', 'topico'])
 const FEIRA_SCREENS = new Set(['anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios'])
 
 // Screens with nothing to publish on: the Depoimentos management screen,

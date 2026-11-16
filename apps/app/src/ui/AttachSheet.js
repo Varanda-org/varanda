@@ -29,21 +29,24 @@ import { ActionsSheet } from './ActionsSheet'
 const OPTIONS = [
   { key: 'photo', label: 'Foto', icon: 'imagem', hint: 'da galeria, até 4' },
   { key: 'gif', label: 'GIF', icon: 'imagem', planned: true },
+  { key: 'poll', label: 'Enquete', icon: 'enquete', hint: 'de 2 a 4 opções', planned: true },
   { key: 'audio', label: 'Áudio', icon: 'microfone', planned: true }
 ]
 
 export const ATTACH_OPTIONS = OPTIONS.filter((o) => o.planned !== true)
 
-// The planned GIF slot is the one option a capability turns on.
-export function attachOptions ({ gif = false } = {}) {
-  return OPTIONS.filter((o) => o.planned !== true || (o.key === 'gif' && gif === true))
+// The planned GIF and Enquete slots are the options a capability turns on:
+// the poll is offered only where the node is hosted (`poll`), and never next
+// to media, which the composer that passes it decides.
+export function attachOptions ({ gif = false, poll = false } = {}) {
+  return OPTIONS.filter((o) => o.planned !== true || (o.key === 'gif' && gif === true) || (o.key === 'poll' && poll === true))
 }
 
 // A compact bottom panel as tall as its rows (ActionsSheet), as the chat
 // apps' attach menus are; the picker opens only once the panel is gone, so
 // the system picker never stacks on a closing sheet.
-export function AttachSheet ({ open, onClose, onPick, gif = false }) {
-  const actions = attachOptions({ gif }).map((option) => ({
+export function AttachSheet ({ open, onClose, onPick, gif = false, poll = false }) {
+  const actions = attachOptions({ gif, poll }).map((option) => ({
     icon: option.icon,
     label: option.label,
     onPress: () => onPick(option.key)

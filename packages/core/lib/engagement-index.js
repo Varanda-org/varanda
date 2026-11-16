@@ -26,6 +26,19 @@
 // slot (the list may then be short; counts are seeder claims). The newest
 // live `top-friends` block of an author is profileExtra().top, kept like the
 // about pointer with its keys; one that names its writer takes no slot.
+// Enquetes (lib/polls.js): every live `choice` block holds a record slot
+// under its voter. A poll is a live `post` carrying a valid `poll` key (the
+// option count is kept beside the post); votes are kept per (voter, poll)
+// and the last in-range operation wins (foldPicks): a pick replaces the
+// earlier one, a null pick withdraws it, an out-of-range pick is ignored and
+// a deletion falls back to the previous live operation. An operation dated
+// more than MAX_FUTURE_MS after `now` is kept but neither counted nor listed
+// until its date (lib/polls.js livePick). poll() answers only
+// for a live poll post: votes naming a post that is not a valid poll, or a
+// deleted one, are never counted nor listed. A voter keeps at most
+// CHOICE_POLLS_MAX distinct polls and a poll lists at most CHOICE_VOTERS_MAX
+// voters: past either, a block naming a new (voter, poll) pair is skipped
+// without a slot (the totals may then be short; they are seeder claims).
 // Collections are lazy. Budget roughly 250 bytes/record (edge, post/timeline,
 // engager and touched entries, the engagements map, and the profileSeqs,
 // usernameSeqs, copiedSeqs, aboutSeqs and moodSeqs arrays) plus 500
@@ -82,8 +95,9 @@
 // writer, then SCRAP_PER_PAGE per page, newest first (at desc, author asc,
 // seq desc). Each request examines at most SCRAP_SCAN pointers (writers
 // included); past it the answer says truncated.
-const { formatRef, parseRef, MAX_TOP_FRIENDS } = require('./records')
+const { formatRef, parseRef, MAX_TOP_FRIENDS, POLL_MIN, POLL_MAX } = require('./records')
 const { commitment } = require('./testimonials')
+const { foldPicks } = require('./polls')
 
 const DEFAULT_MAX_RECORDS = 1000000
 const DEFAULT_MAX_TARGETS = 500000
@@ -108,6 +122,10 @@ const FAN_PAGE = 20
 // Same value as lib/notices.js MAX_FOLLOW_TARGETS_PER_AUTHOR (lib/fans.js
 // caps a writer's distinct fan keys with it; not imported, as above).
 const FAN_KEYS_MAX = 4096
+const CHOICE_PAGE = 20
+// Distinct polls one voter may hold operations on, and voters one poll lists.
+const CHOICE_POLLS_MAX = 4096
+const CHOICE_VOTERS_MAX = 20000
 // Same value as lib/feed.js MAX_FUTURE_MS (not imported: this module only
 // requires ./records and ./testimonials). An engager edge dated further ahead is hidden, never
 // removed, and appears once the clock catches up.
@@ -395,6 +413,21 @@ function opLowerBound (ops, seq) {
   return lo
 }
 
+// The option count of a poll post record (a root post whose `poll` is a
+// dense array of POLL_MIN..POLL_MAX options), else 0. Records here are
+// validated copies (lib/records.js); this only keeps the count.
+function pollSize (record) {
+  const poll = record.poll
+  return record.replyTo === null && Array.isArray(poll) && poll.length >= POLL_MIN && poll.length <= POLL_MAX ? poll.length : 0
+}
+
+// A `choice` record: a target block and a pick of null or 0..POLL_MAX-1.
+function validChoice (record) {
+  const to = record.to
+  return to !== null && typeof to === 'object' && typeof to.author === 'string' && HEX64.test(to.author) && isSeq(to.seq) &&
+    (record.pick === null || (Number.isSafeInteger(record.pick) && record.pick >= 0 && record.pick < POLL_MAX)) && typeof record.at === 'string'
+}
+
 // Fan rows: atMs desc, then key asc (lib/notices.js compareRows).
 function compareFanRows (a, b) {
   if (a.atMs !== b.atMs) return a.atMs > b.atMs ? -1 : 1
@@ -448,6 +481,10 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   // operation on that key is on (seq and at of that block), kept across a
   // drop of the key's own diary like `incoming`.
   const fanIn = new Map()
+  // Poll ref -> Map<voter, ops>: the voters holding live `choice` operations
+  // on that post (ops is the voter's own list, ascending seq, shared with its
+  // author entry), kept across a drop of the poll's own diary like fanIn.
+  const pollIn = new Map()
 
   function invalidateNotices (author) {
     noticeCache.delete(author)
@@ -455,7 +492,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   function authorEntry (author) {
     let entry = authors.get(author)
     if (entry === undefined) {
-      entry = { count: 0, timeline: [], posts: new Map(), reposts: new Map(), touched: new Map(), profileSeqs: [], usernameSeqs: [], copiedSeqs: [], aboutSeqs: [], moodSeqs: [], engagements: new Map(), testimonials: null, shows: null, scraps: null, scrapsByTo: null, scrapHides: null, hideSeqs: null, hiddenRefs: null, walls: null, wallSeqs: null, fanSeqs: null, fanOps: null, tops: null, topSeqs: null }
+      entry = { count: 0, timeline: [], posts: new Map(), reposts: new Map(), touched: new Map(), profileSeqs: [], usernameSeqs: [], copiedSeqs: [], aboutSeqs: [], moodSeqs: [], engagements: new Map(), testimonials: null, shows: null, scraps: null, scrapsByTo: null, scrapHides: null, hideSeqs: null, hiddenRefs: null, walls: null, wallSeqs: null, fanSeqs: null, fanOps: null, tops: null, topSeqs: null, choiceSeqs: null, choiceOps: null }
       authors.set(author, entry)
     }
     return entry
@@ -565,7 +602,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       const type = record.type
       if (type !== 'post' && type !== 'like' && type !== 'repost' && type !== 'profile' && type !== 'username' &&
           type !== 'testimonial' && type !== 'testimonial-show' && type !== 'scrap' && type !== 'scrap-hide' &&
-          type !== 'scrap-wall' && type !== 'profile-about' && type !== 'mood' && type !== 'fan' && type !== 'top-friends') return false
+          type !== 'scrap-wall' && type !== 'profile-about' && type !== 'mood' && type !== 'fan' && type !== 'top-friends' && type !== 'choice') return false
       if (type === 'testimonial' && (!HEX64.test(record.to) || !HEX64.test(record.hash))) return false
       if (type === 'scrap' && (!HEX64.test(record.to) || (record.replyTo !== null &&
           (typeof record.replyTo !== 'object' || !HEX64.test(record.replyTo.author) || !isSeq(record.replyTo.seq))))) return false
@@ -573,11 +610,14 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       if (type === 'scrap-wall' && !SCRAP_WALLS.has(record.who)) return false
       if (type === 'fan' && (typeof record.key !== 'string' || !HEX64.test(record.key) || typeof record.on !== 'boolean' || typeof record.at !== 'string')) return false
       if (type === 'top-friends' && !validTopKeys(record.keys)) return false
+      if (type === 'choice' && !validChoice(record)) return false
       // Never self (lib/fans.js): as if never written, no slot.
       if (type === 'fan' && record.key === author) return true
       if (type === 'top-friends' && record.keys.includes(author)) return true
       if (type === 'testimonial-show' && (!HEX64.test(record.from) || !isSeq(record.seq) ||
           typeof record.text !== 'string' || typeof record.nonce !== 'string')) return false
+      const pollRef = type === 'choice' ? record.to.author + ':' + record.to.seq : null
+      if (pollRef !== null && deletedRefs.has(pollRef)) return true
       let replyTo = type === 'post' && record.replyTo ? formatRef(record.replyTo) : null
       let quote = type === 'post' && record.quote ? formatRef(record.quote) : null
       const to = type === 'like' || type === 'repost' ? formatRef(record.to) : null
@@ -593,8 +633,10 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
           indexOfSeq(existing.copiedSeqs, seq) !== -1 || indexOfSeq(existing.aboutSeqs, seq) !== -1 ||
           indexOfSeq(existing.moodSeqs, seq) !== -1 || existing.testimonials?.has(seq) || existing.shows?.has(seq) ||
           existing.scraps?.has(seq) || existing.scrapHides?.has(seq) || existing.walls?.has(seq) ||
-          existing.fanSeqs?.has(seq) || existing.tops?.has(seq))) return true
+          existing.fanSeqs?.has(seq) || existing.tops?.has(seq) || existing.choiceSeqs?.has(seq))) return true
       if (type === 'fan' && existing?.fanOps?.has(record.key) !== true && (existing?.fanOps?.size ?? 0) >= FAN_KEYS_MAX) return true
+      if (type === 'choice' && existing?.choiceOps?.has(pollRef) !== true &&
+          ((existing?.choiceOps?.size ?? 0) >= CHOICE_POLLS_MAX || (pollIn.get(pollRef)?.size ?? 0) >= CHOICE_VOTERS_MAX)) return true
       if (records >= cap || (existing ? existing.count : 0) >= authorCap) return false
       // Off operations need no new target; they may free one at the cap.
       const needed = new Set([replyTo, quote, record.on === true ? to : null])
@@ -607,7 +649,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       if (to !== null) invalidateNotices(to.slice(0, 64))
       const entry = authorEntry(author)
       if (type === 'post') {
-        entry.posts.set(seq, { replyTo, quote })
+        entry.posts.set(seq, { replyTo, quote, poll: pollSize(record) })
         addTimeline(entry, seq)
         const edge = { atMs: atMillis(record.at), author, seq }
         if (replyTo !== null) {
@@ -698,6 +740,19 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
         }
         ops.splice(opLowerBound(ops, seq), 0, { seq, at: record.at, on: record.on })
         publishFan(author, record.key, ops)
+      } else if (type === 'choice') {
+        if (entry.choiceSeqs === null) {
+          entry.choiceSeqs = new Map()
+          entry.choiceOps = new Map()
+        }
+        entry.choiceSeqs.set(seq, pollRef)
+        let ops = entry.choiceOps.get(pollRef)
+        if (ops === undefined) {
+          ops = []
+          entry.choiceOps.set(pollRef, ops)
+        }
+        ops.splice(opLowerBound(ops, seq), 0, { seq, at: record.at, pick: record.pick })
+        publishChoice(author, pollRef, ops)
       } else if (type === 'top-friends') {
         if (entry.tops === null) {
           entry.tops = new Map()
@@ -738,6 +793,22 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     } else if (owned !== undefined) {
       owned.delete(author)
       if (owned.size === 0) fanIn.delete(key)
+    }
+  }
+
+  // The voter's operations on `ref` (ascending seq) are listed under the poll
+  // while it has any.
+  function publishChoice (author, ref, ops) {
+    let owned = pollIn.get(ref)
+    if (ops.length > 0) {
+      if (owned === undefined) {
+        owned = new Map()
+        pollIn.set(ref, owned)
+      }
+      owned.set(author, ops)
+    } else if (owned !== undefined) {
+      owned.delete(author)
+      if (owned.size === 0) pollIn.delete(ref)
     }
   }
 
@@ -940,6 +1011,20 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
         }
         found = true
       }
+      const pollRef = entry.choiceSeqs === null ? undefined : entry.choiceSeqs.get(seq)
+      if (pollRef !== undefined) {
+        entry.choiceSeqs.delete(seq)
+        const ops = entry.choiceOps.get(pollRef)
+        const at = opLowerBound(ops, seq)
+        if (ops[at]?.seq === seq) ops.splice(at, 1)
+        if (ops.length === 0) entry.choiceOps.delete(pollRef)
+        publishChoice(author, pollRef, ops)
+        if (entry.choiceSeqs.size === 0) {
+          entry.choiceSeqs = null
+          entry.choiceOps = null
+        }
+        found = true
+      }
       if (entry.tops !== null && entry.tops.has(seq)) {
         entry.tops.delete(seq)
         entry.topSeqs.splice(indexOfSeq(entry.topSeqs, seq), 1)
@@ -1094,6 +1179,12 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
         listed.delete(author)
         if (listed.size === 0) fanIn.delete(key)
       }
+      for (const ref of entry?.choiceOps?.keys() || EMPTY_LIST) {
+        const listed = pollIn.get(ref)
+        if (listed === undefined) continue
+        listed.delete(author)
+        if (listed.size === 0) pollIn.delete(ref)
+      }
       authors.delete(author)
       if (entry !== undefined) {
         if (entry.count === authorCap) fullAuthors--
@@ -1184,6 +1275,89 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       if (shown) rows.push({ atMs: atMillis(e.at), key, seq: e.seq, at: e.at })
     }
     return rows
+  }
+
+  // The live votes of the poll post `author:seq`: { count, totals, rows } with
+  // count the poll's option count, totals the votes per option (foldPicks)
+  // and rows [{ key, seq, at, pick }] one per voter `visible` keeps (a throw
+  // hides one) that has a live pick; null when that post is not an indexed,
+  // live poll post (a deleted post, a post without a valid `poll`, or one
+  // the index does not hold), or `author` is malformed. seq and at point at
+  // the voter's own block, which the node peeks and verifies. Operations
+  // dated more than MAX_FUTURE_MS after `now` are skipped.
+  function pollRows (author, seq, visible, now) {
+    if (typeof author !== 'string' || !HEX64.test(author) || !isSeq(seq)) return null
+    const ref = author + ':' + seq
+    const count = deletedRefs.has(ref) ? 0 : authors.get(author)?.posts.get(seq)?.poll ?? 0
+    if (count === 0) return null
+    if (typeof visible !== 'function') visible = allVisible
+    const rows = []
+    const flat = []
+    for (const [voter, ops] of pollIn.get(ref) || EMPTY_LIST) {
+      let shown = false
+      try {
+        shown = visible(voter) === true
+      } catch {}
+      if (!shown) continue
+      const due = ops.filter((o) => !(Date.parse(o.at) - now > MAX_FUTURE_MS))
+      const live = foldPicks(due.map((o) => ({ voter, pick: o.pick })), count).picks.get(voter)
+      if (live === undefined) continue
+      // The block that set it: the newest operation holding an in-range pick.
+      let at = due.length - 1
+      while (at > 0 && !(due[at].pick === null || due[at].pick < count)) at--
+      rows.push({ key: voter, seq: due[at].seq, at: due[at].at, pick: live })
+      flat.push({ voter, pick: live })
+    }
+    return { count, totals: foldPicks(flat, count).totals, rows }
+  }
+
+  // The votes of the poll `author:seq` as option totals: { totals } (the
+  // `count` integers of foldPicks) over the voters `visible` keeps; null when
+  // the post is not a live poll post. Counts are seeder claims. `now` (ms,
+  // default Date.now()) as in pollRows.
+  function pollTotals (author, seq, { visible = allVisible, now = Date.now() } = {}) {
+    try {
+      const got = pollRows(author, seq, visible, Number.isFinite(now) ? now : Date.now())
+      return got === null ? null : { totals: got.totals }
+    } catch {
+      return null
+    }
+  }
+
+  // The voters whose live pick on the poll `author:seq` is `pick`, newest
+  // first (the at clamped at 0, then key, as fans()): { items: [{ key, seq,
+  // at }] (at most CHOICE_PAGE, strictly after `after` { atMs, key }), next:
+  // { atMs, key } | null, total } ; null for a malformed author, seq, pick
+  // (an integer in 0..count-1) or cursor, or a post that is not a live poll
+  // post. `now` as in pollTotals.
+  function pollVoters (author, seq, pick, { after = null, visible = allVisible, now = Date.now() } = {}) {
+    try {
+      if (after !== null && (typeof after !== 'object' || !Number.isSafeInteger(after.atMs) || after.atMs < 0 ||
+          typeof after.key !== 'string' || !HEX64.test(after.key))) return null
+      const got = pollRows(author, seq, visible, Number.isFinite(now) ? now : Date.now())
+      if (got === null || !Number.isSafeInteger(pick) || pick < 0 || pick >= got.count) return null
+      const rows = []
+      for (const r of got.rows) if (r.pick === pick) rows.push({ atMs: atMillis(r.at), key: r.key, seq: r.seq, at: r.at })
+      rows.sort(compareFanRows)
+      const items = []
+      let more = false
+      for (const row of rows) {
+        if (after !== null && compareFanRows(row, after) <= 0) continue
+        if (items.length === CHOICE_PAGE) {
+          more = true
+          break
+        }
+        items.push(row)
+      }
+      const last = items[items.length - 1]
+      return {
+        items: items.map((r) => ({ key: r.key, seq: r.seq, at: r.at })),
+        next: more ? { atMs: last.atMs, key: last.key } : null,
+        total: rows.length
+      }
+    } catch {
+      return null
+    }
   }
 
   // Totals exclude dropped diaries by construction: removeDiary runs
@@ -1662,11 +1836,12 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     incoming.clear()
     scrapIn.clear()
     fanIn.clear()
+    pollIn.clear()
     records = 0
     fullAuthors = 0
   }
 
-  return { add, removePost, removeRecord, removeDiary, post, counts, engagers, member, hints, noticeRows, testimonials, scraps, profileExtra, fans, fanCount, stats, clear }
+  return { add, removePost, removeRecord, removeDiary, post, counts, engagers, member, hints, noticeRows, testimonials, scraps, profileExtra, fans, fanCount, pollTotals, pollVoters, stats, clear }
 }
 
 module.exports = {
@@ -1689,5 +1864,8 @@ module.exports = {
   SCRAP_SCAN,
   FAN_PAGE,
   FAN_KEYS_MAX,
+  CHOICE_PAGE,
+  CHOICE_POLLS_MAX,
+  CHOICE_VOTERS_MAX,
   CURSOR_RE
 }

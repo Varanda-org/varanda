@@ -810,7 +810,7 @@ function createModRoutes ({
       // Who decided, never the e-mail (decidedBy stays in the store).
       actor: r.status === 'aberta' ? null : r.decidedBy === AI_ACTOR ? 'ia' : 'pessoa',
       // The triage's suggestion (tokens and numbers) and the verified post
-      // text it read from the seeder ({ texto, midia, citacao }), or null.
+      // text it read from the seeder ({ texto, midia, citacao, enquete }), or null.
       ia: triageView('suggestionOf', r.id),
       publicacao: triageView('verifiedOf', r.id),
       // The public Feira page of a reported listing, on this service's

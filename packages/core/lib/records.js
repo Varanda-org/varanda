@@ -14,7 +14,7 @@
 
 const b4a = require('b4a')
 const { validLinkCard, validCardImageBytes, copyLinkCard, CARD_IMAGE_MIME } = require('./link-card')
-const { feira, isMomentMusic, MOMENT_MUSIC_KEYS, MAX_TOP_FRIENDS, profileExtra: PX } = require('@varanda/rpc')
+const { feira, isMomentMusic, MOMENT_MUSIC_KEYS, MAX_TOP_FRIENDS, profileExtra: PX, isPoll, isPick, POLL_MIN, POLL_MAX, MAX_POLL_OPTION } = require('@varanda/rpc')
 
 const MAX_NAME = 80
 const MAX_BIO = 280
@@ -74,6 +74,15 @@ const QUOTE_MEDIA_KEYS = ['type', 'text', 'at', 'replyTo', 'quote', 'media']
 // exact sets that older readers skip as malformed, as they skip media.
 const POST_PREVIEW_KEYS = ['type', 'text', 'at', 'replyTo', 'preview']
 const QUOTE_PREVIEW_KEYS = ['type', 'text', 'at', 'replyTo', 'quote', 'preview']
+// Enquetes (docs/protocol.md): a poll post is a root post (replyTo null)
+// whose `poll` lists POLL_MIN..POLL_MAX options (the rules of @varanda/rpc
+// lib/poll.js), with no media, preview or quote and no closing date. A
+// `choice` is one public vote on a poll post: pick is an option index or
+// null (withdrawn), the last choice per poll wins (lib/polls.js). Whether
+// the target is a poll and pick one of its options is the fold's check.
+// Older readers skip both as malformed; the diary stays valid.
+const POST_POLL_KEYS = Object.freeze(['type', 'text', 'at', 'replyTo', 'poll'])
+const CHOICE_KEYS = Object.freeze(['type', 'to', 'pick', 'at'])
 const ENGAGEMENT_KEYS = ['type', 'to', 'on', 'at']
 const TARGET_KEYS = ['author', 'seq']
 const DESCRIPTOR_KEYS = Object.freeze(['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height'])
@@ -564,7 +573,7 @@ function validPageShape (r) {
     isHex64(r.owner) && r.actor === r.owner && validPageAdmins(r.admins, r.owner)
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends'])
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice'])
 
 // Required lazily: lib/group.js requires this module at load time.
 function weakBoxKey (hex) {
@@ -672,6 +681,10 @@ function check (record, seq) {
     if (!hasExactKeys(record, TOP_FRIENDS_KEYS) || !validTopKeys(record.keys)) return 'malformed'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
+  if (type === 'choice') {
+    if (!hasExactKeys(record, CHOICE_KEYS) || !validTarget(record.to) || !isPick(record.pick)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
   if (type === 'moment') {
     const withMusic = hasExactKeys(record, MOMENT_MUSIC_RECORD_KEYS)
     if (!withMusic && !hasExactKeys(record, MOMENT_KEYS)) return 'malformed'
@@ -718,6 +731,14 @@ function check (record, seq) {
     if (!validTarget(record.to)) return 'target-invalid'
     if (!/^[0-9a-f]{32}$/.test(record.offer) || !isHex128(record.consent)) return 'malformed'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (hasExactKeys(record, POST_POLL_KEYS)) {
+    const { text, at, replyTo } = record
+    if (!isPoll(record.poll)) return 'poll-invalid'
+    if (typeof text !== 'string' || charLength(text) < 1 || charLength(text) > MAX_TEXT) return 'text-length'
+    if (hasControlChars(text, true)) return 'control-chars'
+    if (!isCanonicalIso(at)) return 'date-invalid'
+    return replyTo === null ? null : 'reply-invalid'
   }
   const withPreview = hasExactKeys(record, POST_PREVIEW_KEYS) || hasExactKeys(record, QUOTE_PREVIEW_KEYS)
   const isQuote = hasExactKeys(record, QUOTE_KEYS) || hasExactKeys(record, QUOTE_MEDIA_KEYS) || hasExactKeys(record, QUOTE_PREVIEW_KEYS)
@@ -799,14 +820,19 @@ function copyTarget (r) {
   return { author: r.author, seq: r.seq }
 }
 
-// `quote`, `media` and `preview` are added only when given (a null preview
-// is no preview). Media and a preview together match no key set.
-function postRecord ({ text, replyTo = null, at = nowIso(), media, quote, preview } = {}) {
+// `quote`, `media`, `preview` and `poll` are added only when given (a null
+// preview or poll is none). Any two of them together match no key set.
+function postRecord ({ text, replyTo = null, at = nowIso(), media, quote, preview, poll } = {}) {
   const record = { type: 'post', text, at, replyTo }
+  if (poll !== undefined && poll !== null) record.poll = Array.isArray(poll) ? poll.slice() : poll
   if (quote !== undefined) record.quote = copyTarget(quote)
   if (media !== undefined) record.media = Array.isArray(media) ? media.map(copyPostMediaItem) : media
   if (preview !== undefined && preview !== null) record.preview = copyLinkCard(preview, copyDescriptor)
   return build(record, 1)
+}
+
+function choiceRecord ({ to, pick, at = nowIso() } = {}) {
+  return build({ type: 'choice', to: copyTarget(to), pick, at }, 1)
 }
 
 function likeRecord ({ to, on, at = nowIso() } = {}) {
@@ -1132,6 +1158,11 @@ module.exports = {
   FAN_KEYS,
   TOP_FRIENDS_KEYS,
   MAX_TOP_FRIENDS,
+  POST_POLL_KEYS,
+  CHOICE_KEYS,
+  POLL_MIN,
+  POLL_MAX,
+  MAX_POLL_OPTION,
   THEME_IDS,
   MAX_ABOUT,
   MAX_CITY,
@@ -1187,6 +1218,7 @@ module.exports = {
   groupConfirmRecord,
   likeRecord,
   repostRecord,
+  choiceRecord,
   testimonialRecord,
   testimonialShowRecord,
   scrapRecord,

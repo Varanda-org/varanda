@@ -153,6 +153,7 @@ import { applyBandMeta } from './src/appearanceStore'
 import Avisos from './src/screens/Avisos'
 import BuscaGlobal from './src/screens/BuscaGlobal'
 import { Grupo } from './src/screens/Grupo'
+import { Topico } from './src/screens/Topico'
 import { Conversas } from './src/screens/Conversas'
 import { Mensagens } from './src/screens/Mensagens'
 import { Comunidades } from './src/screens/Comunidades'
@@ -1976,6 +1977,13 @@ function Member () {
   const openGroup = useCallback((group) => {
     pushScreen({ screen: 'grupo', key: typeof group === 'string' ? group.toLowerCase() : group, params: {} })
   }, [pushScreen])
+  const openTopic = useCallback((group, ref, root) => {
+    if (typeof group !== 'string' || !ref) return
+    // root ({ hidden, text }): what the list already knows of the root, so the
+    // topic opens with its header and reply state before its page loads.
+    const known = root && typeof root.text === 'string' ? { root: { hidden: root.hidden === true, text: root.hidden === true ? '' : root.text } } : {}
+    pushScreen({ screen: 'topico', key: ref.writer + ':' + ref.seq, params: { group: group.toLowerCase(), ...known } })
+  }, [pushScreen])
   const openCommunity = useCallback((community, opts) => {
     pushScreen({ screen: 'comunidade', key: typeof community === 'string' ? community.toLowerCase() : community, params: opts && typeof opts.group === 'string' ? { group: opts.group.toLowerCase() } : {} })
   }, [pushScreen])
@@ -3452,7 +3460,7 @@ function Member () {
         return (
           <StackLayer key={i + ':' + entry.screen + ':' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
             {entry.screen === 'grupo'
-              ? <Grupo group={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenCommunity={openCommunity} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onSeen={bumpSeen} onMessage={openMessage} />
+              ? <Grupo group={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenCommunity={openCommunity} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onSeen={bumpSeen} onMessage={openMessage} onOpenTopic={openTopic} />
               : entry.screen === 'comunidade-info'
                 ? <ComunidadeInfo community={entry.key} onBack={goBack} onOpenMember={openMember} onMessage={openMessage} />
                 : <Comunidade community={entry.key} afterGroup={entry.params.group || null} isTop={i === stack.length - 1} seenTick={seenTick} onBack={goBack} onOpenGroup={openGroup} onOpenInfo={openCommunityInfo} />}
@@ -3498,6 +3506,13 @@ function Member () {
         return (
           <StackLayer key={i + ':recados:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
             <Recados entry={entry} ownKey={ownKey} onBack={goBack} onOpenMember={openMember} onReport={setReport} onToast={showToast} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'topico') {
+        return (
+          <StackLayer key={i + ':topico:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Topico entry={entry} isTop={i === stack.length - 1} onBack={goBack} onReport={setReport} />
           </StackLayer>
         )
       }

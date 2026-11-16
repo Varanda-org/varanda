@@ -40,7 +40,13 @@
 // (the writer is not listed with that diary), sem-mensagem (the writer is
 // listed with that diary but its signed length, or on an older seeder its
 // downloaded length, holds no block `seq`), nao-lida (the seeder did not
-// hand out the message; never cached). Nothing is logged. Concurrent checks of one (group, writer,
+// hand out the message; never cached). The reported block may also be a
+// forum poll (group-poll) of a public group: the seeder then answers its
+// options, one per line, as `texto`, with the same checks and bounds (a poll
+// of a private group is never handed out, so it is nao-lida). A reported
+// topic root of a public group whose own writer holds its poll comes back
+// with the poll's options after its text, one per line. Nothing is
+// logged. Concurrent checks of one (group, writer,
 // diary, seq) share a single read, a definite answer (ok, ausente,
 // nao-membro, sem-mensagem)
 // is reused for cacheMs (60 s by default), and at most MAX_RUNNING reads

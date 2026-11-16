@@ -222,7 +222,7 @@ test('noticeRows: total on bad input and the index surface is unchanged', (t) =>
   for (const [a, n] of [[null, NOW], ['x', NOW], [OWN.toUpperCase(), NOW], [OWN, NaN], [OWN, '1'], [K2, NOW]]) {
     t.alike(ix.noticeRows(a, n), [])
   }
-  t.alike(Object.keys(ix), ['add', 'removePost', 'removeRecord', 'removeDiary', 'post', 'counts', 'engagers', 'member', 'hints', 'noticeRows', 'testimonials', 'scraps', 'profileExtra', 'fans', 'fanCount', 'stats', 'clear'])
+  t.alike(Object.keys(ix), ['add', 'removePost', 'removeRecord', 'removeDiary', 'post', 'counts', 'engagers', 'member', 'hints', 'noticeRows', 'testimonials', 'scraps', 'profileExtra', 'fans', 'fanCount', 'pollTotals', 'pollVoters', 'stats', 'clear'])
 })
 
 test('noticeRows: hidden engagers do not take cap slots', (t) => {
@@ -284,4 +284,69 @@ test('noticeRows: more authors than the cache holds still answer right', (t) => 
       ix.add(hexKey(1000 + round), i, like(hexKey(i)))
     }
   }
+})
+
+// Enquetes in the index: the per-voter and per-poll caps, and future-dated
+// choices.
+const { CHOICE_POLLS_MAX, CHOICE_VOTERS_MAX } = require('../lib/engagement-index')
+const { postRecord, choiceRecord } = require('../lib/records')
+const POLL_P = { author: OWN, seq: 1 }
+const POLL_Q = { author: OWN, seq: 2 }
+const vote = (to, pick, at = AT) => choiceRecord({ to, pick, at })
+
+function indexWithPolls () {
+  const ix = createEngagementIndex()
+  ix.add(OWN, 1, postRecord({ text: 'P?', poll: ['um', 'dois'], at: AT }))
+  ix.add(OWN, 2, postRecord({ text: 'Q?', poll: ['um', 'dois'], at: AT }))
+  return ix
+}
+
+test('engagement-index choice: past CHOICE_POLLS_MAX polls a voter\'s new poll is skipped, a known one still updates', (t) => {
+  const ix = indexWithPolls()
+  const V = hexKey(1)
+  t.ok(ix.add(V, 1, vote(POLL_P, 0)))
+  for (let i = 2; i <= CHOICE_POLLS_MAX; i++) ix.add(V, i, vote({ author: hexKey(1000 + i), seq: 1 }, 0))
+  const records = ix.stats().records
+  t.is(records, 2 + CHOICE_POLLS_MAX)
+  t.ok(ix.add(V, CHOICE_POLLS_MAX + 1, vote(POLL_Q, 1)), 'skipped, the cursor moves on')
+  t.is(ix.stats().records, records, 'no slot taken')
+  t.alike(ix.pollTotals(OWN, 2), { totals: [0, 0] }, 'no pollIn entry for the new pair')
+  t.alike(ix.pollVoters(OWN, 2, 1).items, [])
+  t.ok(ix.add(V, CHOICE_POLLS_MAX + 2, vote(POLL_P, 1)))
+  t.is(ix.stats().records, records + 1, 'a known pair still takes its slot')
+  t.alike(ix.pollTotals(OWN, 1), { totals: [0, 1] }, 'and still updates the pick')
+})
+
+test('engagement-index choice: past CHOICE_VOTERS_MAX voters a new voter is skipped, a known one still updates', (t) => {
+  const ix = indexWithPolls()
+  for (let i = 1; i <= CHOICE_VOTERS_MAX; i++) ix.add(hexKey(i), 1, vote(POLL_P, 0))
+  const records = ix.stats().records
+  t.is(records, 2 + CHOICE_VOTERS_MAX)
+  t.alike(ix.pollTotals(OWN, 1), { totals: [CHOICE_VOTERS_MAX, 0] })
+  const late = hexKey(CHOICE_VOTERS_MAX + 1)
+  t.ok(ix.add(late, 1, vote(POLL_P, 1)), 'skipped, the cursor moves on')
+  t.is(ix.stats().records, records, 'no slot taken')
+  t.alike(ix.pollTotals(OWN, 1), { totals: [CHOICE_VOTERS_MAX, 0] }, 'no pollIn entry for the new pair')
+  t.alike(ix.pollVoters(OWN, 1, 1).items, [])
+  t.ok(ix.add(late, 2, vote(POLL_Q, 1)), 'the same voter on another poll is a new pair under its own cap')
+  t.alike(ix.pollTotals(OWN, 2), { totals: [0, 1] })
+  t.ok(ix.add(hexKey(1), 2, vote(POLL_P, 1)))
+  t.is(ix.stats().records, records + 2, 'a known pair still takes its slot')
+  t.alike(ix.pollTotals(OWN, 1), { totals: [CHOICE_VOTERS_MAX - 1, 1] }, 'and still updates the pick')
+  t.alike(ix.pollVoters(OWN, 1, 1).items, [{ key: hexKey(1), seq: 2, at: AT }])
+})
+
+test('engagement-index choice: a choice dated more than a day ahead counts and lists from its date', (t) => {
+  const ix = indexWithPolls()
+  const ahead = new Date(NOW + 86400001).toISOString()
+  const A = hexKey(1)
+  const B = hexKey(2)
+  ix.add(A, 1, vote(POLL_P, 0))
+  ix.add(A, 2, vote(POLL_P, 1, ahead))
+  ix.add(B, 1, vote(POLL_P, 1, ahead))
+  t.alike(ix.pollTotals(OWN, 1, { now: NOW }), { totals: [1, 0] }, 'the earlier pick stays, a lone future vote is none')
+  t.alike(ix.pollVoters(OWN, 1, 0, { now: NOW }), { items: [{ key: A, seq: 1, at: AT }], next: null, total: 1 })
+  t.alike(ix.pollVoters(OWN, 1, 1, { now: NOW }), { items: [], next: null, total: 0 }, 'never first in quem votou')
+  t.alike(ix.pollTotals(OWN, 1, { now: NOW + 1 }), { totals: [0, 2] }, 'counted once within a day')
+  t.alike(ix.pollVoters(OWN, 1, 1, { now: NOW + 1 }).items.map((r) => r.key).sort(), [A, B])
 })

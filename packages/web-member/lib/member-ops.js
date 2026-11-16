@@ -65,6 +65,7 @@ const {
   moodRecord,
   fanRecord,
   topFriendsRecord,
+  choiceRecord,
   momentRecord,
   postShareRecord,
   MAX_TESTIMONIAL,
@@ -104,7 +105,8 @@ const { sealOffer, commitment } = require('@varanda/core/lib/testimonials')
 const grp = require('@varanda/core/lib/group')
 const gc = require('@varanda/core/lib/group-crypto')
 const { validPrivateItem, copyGroupMedia, PRIVATE_ITEM_KEYS, MAX_GROUP_MEDIA } = require('@varanda/core/lib/group-media')
-const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX, COMMUNITY_LIST_MAX, feira, mediaBounds, videoBounds } = require('@varanda/rpc')
+const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX, GROUP_TOPICS_LIMIT, GROUP_VOTERS_MAX, POLL_MAX, COMMUNITY_LIST_MAX, feira, mediaBounds, videoBounds } = require('@varanda/rpc')
+const { livePick } = require('@varanda/core/lib/polls')
 const listing = require('@varanda/core/lib/listing')
 const { POST_SHARES_PER_DIARY, foldShare } = require('@varanda/core/lib/post-share')
 const { stillImageSize } = require('@varanda/core/lib/still-image')
@@ -469,7 +471,10 @@ function verifyPostMedia (ctx, media) {
   return verifyMedia(ctx, media, inspect, valid, 2)
 }
 
-async function postCreate (ctx, { text, media, preview }) {
+// `poll` (2..4 options, never beside media or a preview: the method table's
+// cross check) writes the poll post key set.
+async function postCreate (ctx, { text, media, preview, poll }) {
+  if (poll !== undefined && poll !== null) return publish(ctx, buildRecord(() => postRecord({ text, poll })))
   if (hasMedia(media)) await verifyPostMedia(ctx, media)
   if (preview && preview.image !== null) await verifyMedia(ctx, [preview.image])
   return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, media, preview } : { text, preview })))
@@ -1531,6 +1536,30 @@ async function fanSet (ctx, { key, on }) {
   })
 }
 
+// Enquetes (docs/rpc.md): the own public vote on the diary poll `to`
+// ({ author, seq }). Whether `to` is a live poll post, pick one of its
+// options and its author not blocked is the session's check (a diary.peek);
+// the block is re-checked here on the chain. One record, never retried.
+// -> { seq }.
+async function choiceSet (ctx, { to, pick }) {
+  return withIdentity(ctx, async ({ diary }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (pick !== null && (await memberBlocks(ctx.storage)).has(to.author)) throw new UsageError(FAN_BLOCKED)
+    return { seq: await appendOwn(ctx, diary, buildRecord(() => choiceRecord({ to, pick }))) }
+  })
+}
+
+// The own live pick on the diary poll `to`, from the own diary alone ->
+// { pick, seq } (both null without one). The poll's option count is not
+// read here: a pick is checked against POLL_MAX, as this node writes only
+// picks it checked against the poll itself.
+async function choiceMine (ctx, { to }) {
+  return withIdentity(ctx, async ({ diary }) => {
+    const live = livePick({ entries: await store.readAll(diary), poll: to, count: POLL_MAX })
+    return live === null ? { pick: null, seq: null } : { pick: live.pick, seq: live.seq }
+  })
+}
+
 // The keys of the newest live `top-friends` record in the raw entries of the
 // own diary, [] when there is none.
 function latestTopKeys (raw) {
@@ -2360,6 +2389,17 @@ async function ownWriterDerived (ctx, entry) {
     return !!kp && kp.publicKey instanceof Uint8Array && hex(kp.publicKey) === entry.key
   } catch {
     return false
+  }
+}
+
+// Several records in one atomic append (all or none), or a function of the
+// first seq returning them; -> the last seq.
+async function appendManyToOwnGroupCore (ctx, entry, records, priv = false) {
+  const core = await openOwnGroupCore(ctx, entry)
+  try {
+    return await store.appendGroupRecords(core, records, { root: entry.key === entry.group, community: entry.kind === 'community', private: priv, limits: ctx.limits })
+  } finally {
+    await core.close()
   }
 }
 
@@ -3386,7 +3426,13 @@ async function groupLeave (ctx, { group }) {
 // sealed: true) in a private group, public descriptors in a public one. The
 // upload is a separate earlier call, so a post that fails here leaves its
 // blocks orphaned in the media core; nothing is retried.
-async function groupPost (ctx, { group, text, replyTo = null, media = null, card = null, fwd = 0, sealed = false }) {
+// `topic: true` also marks the new post a forum topic (group-topic) and
+// `poll` (with topic only, the method table's cross check) gives it a
+// group-poll, both side records on the same own writer right after the post.
+// Public groups only: a private group refuses before anything is written.
+// The post and its side records go in one atomic append (all or none).
+async function groupPost (ctx, { group, text, replyTo = null, media = null, card = null, fwd = 0, sealed = false, topic = false, poll = null }) {
+  const forum = topic === true || (poll !== null && poll !== undefined)
   const withMedia = media !== null && media !== undefined
   // Checked before withGroup, which holds the diary open.
   if (withMedia) {
@@ -3396,6 +3442,7 @@ async function groupPost (ctx, { group, text, replyTo = null, media = null, card
   }
   if (card && card.image !== null) await verifyMedia(ctx, [card.image], null, sealed === true ? validPrivateItem : (d) => validateDescriptor(d) === null)
   return withGroup(ctx, group, true, async ({ ownHex, g }) => {
+    if (forum && (g.private || sealed === true)) throw new UsageError(GROUP_FORUM_PUBLIC)
     if (sealed === true && !g.private) throw new UsageError(GROUP_SEALED_MEDIA_PUBLIC)
     if ((withMedia || (card && card.image !== null)) && sealed !== true && g.private) throw new UsageError(GROUP_PRIVATE_MEDIA_SEALED)
     const own = liveOwnWriter(g, ownHex)
@@ -3403,7 +3450,20 @@ async function groupPost (ctx, { group, text, replyTo = null, media = null, card
     requireCounted(g, own.key)
     let record = buildRecord(() => grp.groupPost({ text, replyTo, fwd, card, media: withMedia ? media : null, seen: g.built.last, sealed: g.private }))
     if (g.private) record = sealForGroup(ctx, g, own.key, record)
-    return { seq: await appendToOwnGroupCore(ctx, own, record, g.private) }
+    if (!forum) return { seq: await appendToOwnGroupCore(ctx, own, record, g.private) }
+    // The post and its side records are one atomic append: seqs root, root+1
+    // (and root+2), as foldTopics expects, and a failure writes none. The side
+    // records name the root at the seq the store gives it.
+    let seq = -1
+    await appendManyToOwnGroupCore(ctx, own, (first) => {
+      seq = first
+      return [
+        record,
+        buildRecord(() => grp.groupTopic({ target: { writer: own.key, seq }, seen: g.built.last })),
+        ...(poll !== null && poll !== undefined ? [buildRecord(() => grp.groupPoll({ target: { writer: own.key, seq }, options: poll, seen: g.built.last }))] : [])
+      ]
+    })
+    return { seq }
   })
 }
 
@@ -3489,6 +3549,11 @@ async function groupHide (ctx, { group, target, on }) {
 }
 
 const GROUP_POST_MISSING = 'mensagem não encontrada'
+// Foruns e enquetes (docs/rpc.md).
+const GROUP_FORUM_PUBLIC = 'fóruns e enquetes só em grupo público'
+const GROUP_TOPIC_MISSING = 'tópico não encontrado'
+const GROUP_POLL_MISSING = 'enquete não encontrada'
+const GROUP_PICK_INVALID = 'opção inválida'
 
 // A visible post of fold g at `target`: hidden posts and posts of diaries
 // left out of the fold's readers take no reactions and list no reactors.
@@ -3523,6 +3588,80 @@ async function groupReact (ctx, { group, target, emoji }) {
     if (g.private) record = sealForGroup(ctx, g, own.key, record)
     await appendToOwnGroupCore(ctx, own, record, g.private)
     return { ok: true }
+  })
+}
+
+// A vote on the poll of a visible topic root (docs/rpc.md): who may post
+// may vote, public groups only. Re-sending the pick the fold already counts
+// writes nothing (the fold's `by` lists are uncapped, so they prove it).
+async function groupChoose (ctx, { group, target, pick }) {
+  return withGroup(ctx, group, true, async ({ ownHex, g }) => {
+    if (g.private) throw new UsageError(GROUP_FORUM_PUBLIC)
+    const own = liveOwnWriter(g, ownHex)
+    if (own === null || statusOf(g, ownHex) !== 'member') throw new UsageError(GROUP_FORBIDDEN)
+    const post = visiblePost(g, target)
+    const poll = post.topic ? post.topic.poll : null
+    if (!poll) throw new UsageError(GROUP_POLL_MISSING)
+    if (pick !== null && !(pick < poll.options.length)) throw new UsageError(GROUP_PICK_INVALID)
+    const current = poll.by.findIndex((list) => list.includes(ownHex))
+    if ((current < 0 ? null : current) === pick) return { ok: true }
+    requireCounted(g, own.key)
+    const record = buildRecord(() => grp.groupChoice({ target: { writer: post.writer, seq: post.seq }, pick, seen: g.built.last }))
+    await appendToOwnGroupCore(ctx, own, record, false)
+    return { ok: true }
+  })
+}
+
+// Who voted on a visible topic's poll: one entry per option (zero counts
+// too), by up to GROUP_VOTERS_MAX diary keys in vote order.
+async function groupVoters (ctx, { group, target }) {
+  return withGroup(ctx, group, false, async ({ g }) => {
+    const post = visiblePost(g, target)
+    const poll = post.topic ? post.topic.poll : null
+    if (!poll) throw new UsageError(GROUP_POLL_MISSING)
+    return { voters: poll.options.map((_, i) => ({ pick: i, count: poll.totals[i], by: poll.by[i].slice(0, GROUP_VOTERS_MAX) })) }
+  })
+}
+
+// The group's topics, newest root first in the causal order (a reply does
+// not bump a topic). replies and last count the visible replies of the
+// thread; a hidden root keeps its place blanked, without a poll. `before`
+// is group.read's exclusive cursor over the roots. A private group has no
+// topics: refused as the other forum methods are.
+async function groupTopics (ctx, { group, limit = GROUP_TOPICS_LIMIT, before = null } = {}) {
+  return withGroup(ctx, group, false, async ({ base, g }) => {
+    if (g.private) throw new UsageError(GROUP_FORUM_PUBLIC)
+    const all = g.built.posts.filter((p) => g.diaries.get(p.diary))
+    const threads = new Map()
+    for (const p of all) {
+      if (!p.thread || p.hidden || (p.thread.writer === p.writer && p.thread.seq === p.seq)) continue
+      const id = p.thread.writer + ':' + p.thread.seq
+      const t = threads.get(id) || { replies: 0, last: null }
+      t.replies++
+      t.last = p.at
+      threads.set(id, t)
+    }
+    let roots = all.filter((p) => p.topic)
+    if (before !== null && before !== undefined) {
+      const i = roots.findIndex((p) => p.writer === before.writer && p.seq === before.seq)
+      if (i >= 0) {
+        roots = roots.slice(0, i)
+      } else {
+        const k = orderKey(before.at, before.writer, before.seq)
+        roots = roots.filter((p) => compareOrder(orderKey(p.at, p.writer, p.seq), k) < 0)
+      }
+    }
+    const start = Math.max(0, roots.length - (limit || GROUP_TOPICS_LIMIT))
+    const items = roots.slice(start).reverse().map((p) => {
+      const t = threads.get(p.writer + ':' + p.seq) || { replies: 0, last: null }
+      const { name, username } = authorOf(g, p.diary, base.association, base.mod)
+      return { writer: p.writer, diary: p.diary, seq: p.seq, at: p.at, text: p.hidden ? '' : p.text, name, username, hidden: p.hidden, replies: t.replies, last: t.last, poll: pollSummary(p, base.ownHex) }
+    })
+    const oldest = items.length > 0 ? items[items.length - 1] : null
+    return { items, next: start > 0 && oldest !== null ? { at: oldest.at, writer: oldest.writer, seq: oldest.seq } : null, incomplete: g.built.incomplete }
+  }, (p) => {
+    requirePendingOwn(p)
+    return { items: [], next: null, incomplete: true }
   })
 }
 
@@ -3674,16 +3813,58 @@ function groupInvitePolicy (ctx, { group, members }) {
 
 // One page backwards over the causal order, newest first (feed.read's
 // shape); a hidden post keeps its place with an empty text.
-async function groupRead (ctx, { group, limit = GROUP_LIMIT_DEFAULT, before = null } = {}) {
-  return withGroup(ctx, group, false, async ({ base, g }) => ({ ...readFold(base, g, { limit, before }), state: keyState(ctx, g) }), (p) => {
+// `marks: true` adds each item's topic marker (topicMark); `topic` reads one
+// topic's thread (the root and its replies, marked) and adds the page's poll
+// summary. Neither changes the unmarked page by a byte.
+async function groupRead (ctx, { group, limit = GROUP_LIMIT_DEFAULT, before = null, marks = false, topic = null } = {}) {
+  const thread = topic !== null && topic !== undefined
+  return withGroup(ctx, group, false, async ({ base, g }) => {
+    if (!thread) return { ...readFold(base, g, { limit, before, marks: marks === true }), state: keyState(ctx, g) }
+    const root = topicRoot(g, topic)
+    return { ...readFold(base, g, { limit, before, marks: true, topic: root }), poll: pollSummary(root, base.ownHex), state: keyState(ctx, g) }
+  }, (p) => {
     requirePendingOwn(p)
+    if (thread) throw new UsageError(GROUP_TOPIC_MISSING)
     return { items: [], next: null, hidden: 0, incomplete: true, sealed: 0, epoch: null, state: 'ok' }
   })
 }
 
+// The topic root post of fold g at `target` (hidden ones too: their thread
+// still reads, blanked), else GROUP_TOPIC_MISSING.
+function topicRoot (g, target) {
+  const post = g.built.posts.find((p) => p.writer === target.writer && p.seq === target.seq)
+  if (post === undefined || !post.topic || !g.diaries.get(post.diary)) throw new UsageError(GROUP_TOPIC_MISSING)
+  return post
+}
+
+// The poll of a topic root a reader may see: none on a hidden root.
+function rootPoll (root) {
+  return root !== undefined && root !== null && !root.hidden && root.topic && root.topic.poll ? root.topic.poll : null
+}
+
+// A poll's page summary: { options, totals, mine } (mine: the option the
+// caller's diary is on, or null), null without a visible poll.
+function pollSummary (root, ownHex) {
+  const poll = rootPoll(root)
+  if (poll === null) return null
+  const mine = poll.by.findIndex((list) => list.includes(ownHex))
+  return { options: poll.options.slice(), totals: poll.totals.slice(), mine: mine < 0 ? null : mine }
+}
+
+// A marked item's topic: null, or { writer, seq, poll } of the topic root it
+// opens or replies under (poll: whether that root shows a poll). A hidden
+// post shows no marker; a reply under a hidden root keeps its thread, with
+// poll false.
+function topicMark (g, p) {
+  if (p.hidden || !p.thread) return null
+  const root = g.built.posts.find((x) => x.writer === p.thread.writer && x.seq === p.thread.seq)
+  return { writer: p.thread.writer, seq: p.thread.seq, poll: rootPoll(root) !== null }
+}
+
 // group.read's page of fold g, without its state.
-function readFold (base, g, { limit, before }) {
-  const all = g.built.posts.filter((p) => g.diaries.get(p.diary))
+function readFold (base, g, { limit, before, marks = false, topic = null }) {
+  let all = g.built.posts.filter((p) => g.diaries.get(p.diary))
+  if (topic !== null) all = all.filter((p) => p.thread && p.thread.writer === topic.writer && p.thread.seq === topic.seq)
   // Older than the cursor: with the cursor post still in the fold, every
   // post before it in the causal order; without it (gone after a sync), each
   // post whose order key (at, writer, seq) is below the cursor's, checked one
@@ -3713,7 +3894,8 @@ function readFold (base, g, { limit, before }) {
     card: p.hidden || !p.card ? null : copyLinkCard(p.card, (d) => ({ ...d })),
     hidden: p.hidden,
     ...reactionSummary(p, base.ownHex),
-    ...authorOf(g, p.diary, base.association, base.mod)
+    ...authorOf(g, p.diary, base.association, base.mod),
+    ...(marks ? { topic: topicMark(g, p) } : {})
   }))
   const oldest = items.length > 0 ? items[items.length - 1] : null
   return {
@@ -5778,6 +5960,8 @@ module.exports = {
   profileAbout,
   moodSet,
   fanSet,
+  choiceSet,
+  choiceMine,
   topSet,
   ownTopKeys,
   profileExtraDelete,
@@ -5820,6 +6004,9 @@ module.exports = {
   groupHide,
   groupReact,
   groupReactors,
+  groupChoose,
+  groupTopics,
+  groupVoters,
   groupBan,
   groupAdmit,
   groupAdmin,

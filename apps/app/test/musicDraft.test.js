@@ -385,6 +385,8 @@ async function sender (overrides = {}) {
     refusalOf: (text) => { state.checked.push(text); return refusalOf(text) },
     text: 'Ouça esta música',
     musicDraft: draft,
+    pollDraft: null,
+    pollOk: true,
     hasMedia: false,
     hasVideo: false,
     video: { draft: { state: { phase: 'empty', file: null } } },
@@ -571,6 +573,7 @@ test('a video waits for the music card to go, like a link preview', async (t) =>
       canVideo: true,
       busy: false,
       frozen: false,
+      pollActive: false,
       setNote: (value) => { note = value },
       video: { draft: { pick: async (selection) => { seen = selection; if (selection.preview) throw new Error('preview') } } },
       pickVideo: () => {},
@@ -595,6 +598,7 @@ test('attaching a photo removes music only after files were picked', async (t) =
       mediaOnline: true,
       busy: false,
       frozen: false,
+      pollActive: false,
       pickImages: async () => files,
       liveRef: { current: new Set() },
       video: { draft: { state: { phase: 'empty' } } },
@@ -624,6 +628,7 @@ test('publishing clears the music draft for posts, replies and quotes', (t) => {
     const published = composerFunction('  const published = (sent, sentReply', '\n  // Keeps the post', 'published', {
       tap: () => {},
       setMusicDraft: (value) => { music = value },
+      setPollDraft: () => {},
       musicTried: { current: new Set([track.url]) },
       setText: () => {},
       video: { draft: { state: { phase: 'empty', file: null } } },
@@ -656,6 +661,7 @@ test('publishing or closing lets the same URL resolve in the next draft', async 
       const published = composerFunction('  const published = (sent, sentReply', '\n  // Keeps the post', 'published', {
         ...r.ctx,
         tap: () => {},
+        setPollDraft: () => {},
         setText: (update) => { r.ctx.text = update(r.ctx.text) },
         onPublished: () => {}
       })

@@ -572,6 +572,20 @@ function appendGroupRecord (core, record, { root = false, community = false, pri
   return enqueueAppend(core, record, validate, limits, GROUP_FULL)
 }
 
+// One atomic append of 1..8 records to a group core: each is validated at
+// its own seq, and either all are appended or none (a forum topic's root post
+// and its side records must land together, at consecutive seqs). `records`
+// may be a function of the seq the first one will get, called inside the
+// per-core queue so the seq cannot move. -> the seq of the last record.
+function appendGroupRecords (core, records, { root = false, community = false, private: priv = false, limits } = {}) {
+  const validate = (plain, seq) => validateGroupRecord(plain, seq, { root: root === true, community: community === true, private: priv === true })
+  const prev = appendQueues.get(queueKey(core)) || Promise.resolve()
+  const run = () => appendManyGroupNow(core, records, validate, { ...DEFAULT_LIMITS, ...limits })
+  const next = prev.then(run, run)
+  appendQueues.set(queueKey(core), next.catch(() => {}))
+  return next
+}
+
 function enqueueAppend (core, record, validate, limits, full) {
   const prev = appendQueues.get(queueKey(core)) || Promise.resolve()
   const run = () => appendNow(core, record, validate, { ...DEFAULT_LIMITS, ...limits }, full)
@@ -634,6 +648,34 @@ async function appendManyNow (core, records, limits) {
         core.length + i >= limits.maxLogBlocks ||
         core.byteLength + bytes > limits.maxLogBytes) {
       throw new Error('limite do diário atingido')
+    }
+    plains.push(plain)
+  }
+  await core.append(plains)
+  return core.length - 1
+}
+
+async function appendManyGroupNow (core, records, validate, limits) {
+  await core.ready()
+  if (core[UNLOCKED] !== true) throw new UsageError(LOCKED)
+  if (typeof records === 'function') records = records(core.length)
+  if (!Array.isArray(records) || records.length < 1 || records.length > 8) throw invalidRecord('malformed')
+  const plains = []
+  let bytes = 0
+  for (let i = 0; i < records.length; i++) {
+    let plain = null
+    try {
+      plain = decodeBlock(b4a.from(JSON.stringify(records[i])))
+    } catch {}
+    if (plain === null) throw invalidRecord('malformed')
+    const reason = validate(plain, core.length + i)
+    if (reason) throw invalidRecord(reason)
+    const blockBytes = b4a.byteLength(JSON.stringify(plain))
+    bytes += blockBytes
+    if (blockBytes > limits.maxBlockBytes ||
+        core.length + i >= limits.maxLogBlocks ||
+        core.byteLength + bytes > limits.maxLogBytes) {
+      throw new Error(GROUP_FULL)
     }
     plains.push(plain)
   }
@@ -2119,6 +2161,7 @@ module.exports = {
   groupCoreExists,
   purgeGroupCore,
   appendGroupRecord,
+  appendGroupRecords,
   readGroupWriters,
   putGroupWriter,
   removeGroupWriter,

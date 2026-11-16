@@ -596,7 +596,8 @@ test('both chats show new arrivals even less than one and a half viewports away'
   for (const file of ['Mensagem', 'Grupo']) {
     const src = source('screens/' + file + '.js')
     const condition = src.match(/\{([^{}\n]+) \? <JumpToEnd/)[1]
-    const env = { awayCount, rows: [{ key: 'seen' }, { key: 'new' }], lastSeenKey: 'seen', showJump: false, away: { current: true } }
+    // inTopics: Grupo hides the cue on its Tópicos tab; Mensagem has no such tab.
+    const env = { awayCount, rows: [{ key: 'seen' }, { key: 'new' }], lastSeenKey: 'seen', showJump: false, away: { current: true }, inTopics: false }
     t.ok(runInNewContext(condition, env), file + ' gives arrivals a cue near the end')
     t.absent(runInNewContext(condition, { ...env, away: { current: false } }), file + ' at the end, a row not yet marked seen shows no cue')
     t.absent(runInNewContext(condition, { ...env, lastSeenKey: 'new' }))

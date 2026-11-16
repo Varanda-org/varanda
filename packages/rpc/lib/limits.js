@@ -96,6 +96,22 @@ const GROUP_REACTIONS_MAX = 12
 // worst case (GROUP_REACTIONS_MAX emojis, each with this many keys) fits
 // MAX_MESSAGE (test/sizes.test.js).
 const GROUP_REACTORS_MAX = 324
+// Polls (docs/protocol.md): a diary post's `poll` and a group topic's
+// `group-poll` carry POLL_MIN..POLL_MAX options of 1..MAX_POLL_OPTION code
+// points; a pick is 0..POLL_MAX - 1 or null.
+const POLL_MIN = 2
+const POLL_MAX = 4
+const MAX_POLL_OPTION = 60
+// group.read with `marks` or `topic` adds a topic marker to every item (and
+// a topic's poll summary to the page), so it caps the page below
+// GROUP_LIMIT_MAX; the unmarked page keeps its bytes (test/sizes.test.js).
+const GROUP_MARKED_LIMIT = 24
+// group.topics: maximal root texts and poll summaries fit MAX_MESSAGE with
+// one item to spare (test/sizes.test.js).
+const GROUP_TOPICS_LIMIT = 30
+// Diary keys per option in the who-voted answer of a group poll: every
+// option with this many keys fits MAX_MESSAGE with room (test/sizes.test.js).
+const GROUP_VOTERS_MAX = 900
 const MAX_GROUP_NAME = 80 // same value as records.js
 const MAX_GROUP_CUTS = 16
 const MAX_GROUPS_PER_COMMUNITY = 32
@@ -244,6 +260,12 @@ module.exports = {
   GROUP_MEMBERS_LIMIT_MAX,
   GROUP_REACTIONS_MAX,
   GROUP_REACTORS_MAX,
+  POLL_MIN,
+  POLL_MAX,
+  MAX_POLL_OPTION,
+  GROUP_MARKED_LIMIT,
+  GROUP_TOPICS_LIMIT,
+  GROUP_VOTERS_MAX,
   MAX_GROUP_NAME,
   MAX_GROUP_CUTS,
   MAX_GROUPS_PER_COMMUNITY,

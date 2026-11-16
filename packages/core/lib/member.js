@@ -83,6 +83,7 @@ const HEX64 = /^[0-9a-fA-F]{64}$/
 const GENESIS_REQUIRED = 'grave o certificado de membro antes de publicar'
 const GROUP_FULL = 'limite do grupo atingido'
 const MEDIA_WEB_ONLY = 'mídia disponível só na versão web'
+const POLL_WEB_ONLY = 'enquete disponível só na versão web'
 const PROFILE_PHOTO_WEB_ONLY = 'perfil com foto: mude o nome e a bio na versão web ou tire a foto'
 const BAD_USERNAME_RECORD = 'registro de nome inválido'
 const OLD_USERNAME_RECORD = 'registro de nome antigo'
@@ -349,7 +350,8 @@ async function profileSet (ctx, { name, bio, avatar }) {
   return { seq }
 }
 
-async function postCreate (ctx, { text, preview }) {
+async function postCreate (ctx, { text, preview, poll }) {
+  if (poll !== undefined) throw new UsageError(POLL_WEB_ONLY)
   if (preview && preview.image !== null) throw new UsageError(MEDIA_WEB_ONLY)
   return publish(ctx, buildRecord(() => postRecord({ text, preview })))
 }
@@ -2740,7 +2742,10 @@ async function groupRead (ctx, { group, limit = 30, before = null }) {
     const start = Math.max(0, posts.length - limit)
     // A hidden post shows neither its text nor its media: a private item
     // carries its key, which must not reach the reader of a hidden post.
-    const items = posts.slice(start).reverse().map(({ media, reactions, ...p }) => ({
+    // The fold's forum keys stay out (as the web node's page): `topic`
+    // carries an uncapped voter list and a hidden root's poll, and the
+    // unmarked page keeps its bytes.
+    const items = posts.slice(start).reverse().map(({ media, reactions, topic, thread, ...p }) => ({
       ...p,
       ...reactionSummary({ reactions }, ownHex),
       text: p.hidden ? '' : p.text,

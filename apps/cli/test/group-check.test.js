@@ -129,6 +129,25 @@ test('group-check: the reported seq must exist on the writer (block 0 is its hea
   t.alike(await check.check({ group: G, writer: W, diary: D, seq: 0 }), { ok: false, code: 'config' })
 })
 
+test('group-check: a reported forum poll reads as its options, one per line, under the same bounds', async (t) => {
+  const f = await fixture(t)
+  f.handler = json(groupBody({ writers: [{ key: W, diary: D, length: 5, seq: 1, left: false }] }))
+  f.post = json({ group: G, diary: D, seq: 3, texto: 'Sim\nN\u00e3o\nTalvez', resposta: { writer: G, seq: 1 } })
+  const r = await createGroupCheck({ token: TOKEN, baseUrl: f.baseUrl }).check({ group: G, writer: W, diary: D, seq: 3 })
+  t.alike(r, { ok: true, root: true, name: 'Horta', creator: OTHER, texto: 'Sim\nN\u00e3o\nTalvez' })
+  t.alike(f.posts, ['/moderation-group-post/' + W + '/3'])
+
+  // Another group or diary, a sealed answer of a public root and an oversized
+  // text are refused exactly as for a group-post.
+  f.post = json({ group: OTHER, diary: D, seq: 3, texto: 'Sim\nN\u00e3o', resposta: { writer: G, seq: 1 } })
+  t.alike(await createGroupCheck({ token: TOKEN, baseUrl: f.baseUrl }).check({ group: G, writer: W, diary: D, seq: 3 }), { ok: false, code: 'recusado' }, 'a poll of another group')
+  f.post = json({ group: G, diary: D, seq: 3, texto: 'x\n'.repeat(9000), resposta: null })
+  t.alike(await createGroupCheck({ token: TOKEN, baseUrl: f.baseUrl }).check({ group: G, writer: W, diary: D, seq: 3 }), { ok: false, code: 'recusado' }, 'oversized')
+  // A private group's poll is never handed out: the seeder answers 404.
+  f.post = (req, res) => res.writeHead(404).end()
+  t.alike(await createGroupCheck({ token: TOKEN, baseUrl: f.baseUrl, cacheMs: 0 }).check({ group: G, writer: W, diary: D, seq: 3 }), { ok: false, code: 'nao-lida' }, 'private group: no poll text')
+})
+
 test('group-check: ok only once the seeder hands out the message itself, of this group and diary, with the token', async (t) => {
   const f = await fixture(t)
   f.handler = json(groupBody({ writers: [{ key: W, diary: D, length: 3, seq: 1, left: false }] }))
