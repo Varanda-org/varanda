@@ -484,7 +484,7 @@ npm run demo -- --keep
 
 Para quem mantém um semeador ligado: comandos de operação, saúde e métricas, serviço supervisionado (Docker Compose ou systemd) e a política de registros. Os arquivos de implantação ficam em `deploy/seeder/`.
 
-`seed --no-dm` desliga as mensagens diretas nesse semeador: ele não abre os canais `varanda/dm/1` nem `varanda/dm-stamp/1`, não guarda o conjunto de envelopes e não emite selos, e o membro vê os dois canais como sem suporte. Sem a opção, os dois canais ficam ligados.
+`seed --no-dm` desliga as mensagens diretas nesse semeador: ele não abre os canais `varanda/dm/1` nem `varanda/dm-stamp/1`, não guarda o conjunto de envelopes e não emite selos, e o membro vê os dois canais como sem suporte. Ele também desliga a pista silenciosa de visitas (`varanda/visit/1`, um repositório à parte, sem acordar ninguém). Sem a opção, os três canais ficam ligados.
 
 Com as mensagens diretas ligadas, o semeador também guarda a mídia cifrada das conversas: o canal anônimo `varanda/blob/1` recebe pedaços selados com selos de mídia, assinados por um par de chaves à parte em `<dados>/blob-postage.json` (mesma rotação de 7 dias e mesmo limite de 14 dias de `dm-postage.json`; um arquivo com a mesma chave das mensagens é recusado e só os selos de mídia param). A contagem diária desses selos fica em `<dados>/blob-stamps.json`, separada de `dm-stamps.json`. Os pedaços ficam em `<dados>/blobs/` por 7 dias, até `--blob-bytes` no total (padrão 2 GiB). `seed --no-dm` desliga também os selos de mídia, o canal e a rota `/blob`.
 

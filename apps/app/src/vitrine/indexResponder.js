@@ -471,7 +471,7 @@ export function vitrineIndex (url, request) {
     const fans = fanRows(key)
     const top = rows('top-friends')[0]
     const back = top ? Object.fromEntries(top.record.keys.map((k) => [k, liveFollowSeq(liveEntries(), k, key)])) : null
-    return { about: latest('profile-about'), mood: latest('mood'), fans: { count: fans.length, indexing: false }, top: top ? { seq: top.seq, back } : null, ...flags }
+    return { about: latest('profile-about'), mood: latest('mood'), visits: latest('visits'), fans: { count: fans.length, indexing: false }, top: top ? { seq: top.seq, back } : null, ...flags }
   }
 
   if (route === 'follow' && cursor === undefined) {

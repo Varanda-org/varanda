@@ -26,14 +26,14 @@ test('method list and mutating set', (t) => {
     'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moments.read', 'node.close', 'node.info', 'notices.list', 'outbox.open', 'outbox.seal',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read', 'phone.proof', 'phone.sign',
     'post.create', 'post.delete', 'post.quote', 'post.reply', 'post.share', 'post.shared', 'post.unshare', 'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
-    'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.decide', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add'
+    'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.decide', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add', 'visits.clear', 'visits.list', 'visits.note', 'visits.set', 'visits.state'
   ])
   t.alike([...MUTATING].sort(), [
     'block.set', 'cert.add', 'choice.set', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.react', 'dm.send', 'dm.set', 'fan.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
     'group.choose', 'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.react', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
     'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'listing.create', 'listing.delete', 'listing.edit', 'listing.rate', 'listing.status', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'node.close', 'page.register', 'post.create', 'post.delete',
     'post.quote', 'post.reply', 'post.share', 'post.unshare',
-    'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.set', 'repost.set', 'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'sync.start', 'sync.stop', 'testimonial.decide', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add'
+    'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.set', 'repost.set', 'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'sync.start', 'sync.stop', 'testimonial.decide', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add', 'visits.clear', 'visits.note', 'visits.set'
   ])
 })
 
@@ -3074,6 +3074,39 @@ test('group.events: { group, cursor? }', (t) => {
   for (const c of [null, KEY, { at: cursor.at, writer: KEY }, { ...cursor, seq: 0 }, { ...cursor, at: '2026-12-24' }, { ...cursor, extra: 1 }]) {
     bad(t, 'group.events', { group: KEY, cursor: c }, 'cursor ' + JSON.stringify(c))
   }
+})
+
+test('visits: limits and the five methods', (t) => {
+  const L = require('..')
+  t.is(L.VISIT_DAILY_MAX, 10)
+  t.is(L.VISIT_PROFILE_DAYS, 7)
+  t.is(L.VISIT_STAMP_RESERVE, 5)
+  t.is(L.VISIT_LIST_MAX, 50)
+  t.is(L.VISIT_KEEP_DAYS, 30)
+  for (const m of ['visits.set', 'visits.clear', 'visits.note']) t.ok(isMutating(m), m + ' mutates')
+  for (const m of ['visits.state', 'visits.list']) t.absent(isMutating(m), m + ' only reads')
+
+  ok(t, 'visits.set', { on: true }, { on: true })
+  ok(t, 'visits.set', { on: false }, { on: false })
+  for (const on of [undefined, null, 1, 0, 'true', 'false', {}, []]) bad(t, 'visits.set', { on }, 'on ' + String(on))
+  bad(t, 'visits.set', {}, 'missing on')
+  bad(t, 'visits.set', { on: true, extra: 1 }, 'extra field')
+
+  for (const m of ['visits.state', 'visits.list', 'visits.clear']) {
+    ok(t, m, {}, {})
+    bad(t, m, { extra: 1 }, 'extra field')
+    bad(t, m, { key: KEY }, 'no key param')
+  }
+
+  ok(t, 'visits.note', { key: KEY }, { key: KEY })
+  bad(t, 'visits.note', {}, 'missing key')
+  for (const key of [KEY.slice(1), KEY + 'a', KEY.toUpperCase(), 'g'.repeat(64), '', null, undefined, 1, [KEY], { key: KEY }]) {
+    bad(t, 'visits.note', { key }, 'key ' + JSON.stringify(key))
+  }
+  bad(t, 'visits.note', { key: KEY, day: '2026-11-03' }, 'no day param: the node chooses it')
+  bad(t, 'visits.note', { key: KEY, extra: 1 }, 'extra field')
+  bad(t, 'visits.note', null, 'null params')
+  bad(t, 'visits.note', [KEY], 'array params')
 })
 
 test('choice.set and choice.mine', (t) => {

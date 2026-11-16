@@ -240,3 +240,25 @@ test('dm-budget: the largest v5 inner fits the fixed frame and core signs the ca
   const bytes = b4a.byteLength(budget.canonicalInnerJson(standin))
   t.ok(bytes + budget.DM_INNER_FRAMING_BYTES <= budget.DM_INNER_BYTES, 'v5 frame ' + (bytes + 66) + ' of ' + budget.DM_INNER_BYTES)
 })
+
+test('dm-budget: v6 is a visit ping with only the keys a recipient needs', (t) => {
+  t.alike(budget.DM_INNER_KEYS_V6, ['v', 'kind', 'id', 'from', 'to', 'day', 'cert'])
+  t.ok(Object.isFrozen(budget.DM_INNER_KEYS_V6))
+  t.absent(budget.DM_INNER_KEYS_V6.includes('text') || budget.DM_INNER_KEYS_V6.includes('media') || budget.DM_INNER_KEYS_V6.includes('replyTo'), 'no content')
+  t.ok(budget.DM_INNER_KEYS_V6.includes('to') && budget.DM_INNER_KEYS_V6.includes('cert'), 'to and cert stay: openInner requires them')
+  const body = { v: 6, kind: 'visit', id: 'a'.repeat(32), from: bia.hex, to: plain.hex, day: '2026-11-03', cert: null }
+  const parsed = JSON.parse(budget.canonicalInnerJson(Object.fromEntries(Object.entries({ ...body, text: 'leak', media: null }).reverse())))
+  t.alike(Object.keys(parsed), budget.DM_INNER_KEYS_V6, 'wire order whatever the caller built, nothing else')
+  t.is(parsed.day, '2026-11-03')
+  // Only the caller asks for v6: innerVersion never picks it.
+  t.is(budget.innerVersion({ media: null, card: null, fwd: 0, replyTo: null }), 1)
+})
+
+test('dm-budget: the largest v6 inner fits one drop', (t) => {
+  const standin = { v: 6, kind: 'visit', id: 'f'.repeat(32), from: 'f'.repeat(64), to: 'e'.repeat(64), day: '2026-11-03', cert: budget.MEMBER_CERT_STANDIN }
+  const bytes = b4a.byteLength(budget.canonicalInnerJson(standin))
+  t.ok(bytes + budget.DM_INNER_FRAMING_BYTES <= budget.DM_INNER_BYTES, 'v6 frame ' + (bytes + 66) + ' of ' + budget.DM_INNER_BYTES)
+  // The sealed frame is fixed-size: a drop is DM_DROP_BYTES whatever the inner.
+  t.is(dm.DM_DROP_BYTES, 5501)
+  t.ok(bytes + budget.DM_INNER_FRAMING_BYTES < dm.DM_DROP_BYTES, 'one drop holds it')
+})

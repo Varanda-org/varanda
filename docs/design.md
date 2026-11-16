@@ -378,6 +378,8 @@ A faixa de comunidades do perfil não cria tratamento novo: no seu Diário ela m
 - **Sair e banir na comunidade.** Sair da comunidade encerra a participação da pessoa em todos os grupos dela, e as mensagens que ela já escreveu continuam visíveis, mas ela perde o poder de moderar; quem volta precisa de um novo escritor e não recupera os antigos. Banir da comunidade oculta as mensagens da pessoa em todos os grupos dela, desde o início, e desbanir as restaura. Ocultar e sair continuam sem apagar nada.
 - **Denúncias.** A denúncia de mensagem de grupo identifica a mensagem pelo escritor, pelo grupo e pela posição, e é decisão humana, nunca triagem com IA. Em grupo privado, a associação não lê o texto: o painel mostra só a citação feita pela denunciante, marcada como cifrada.
 
+**Visitas (hipótese de desenho).** Ver quem visitou o perfil é opcional e começa desligado. É um acordo dos dois lados: um aparelho só envia e só recebe visitas enquanto a própria chave de Visitas estiver ligada, e só envia para quem também a ligou (um registro `visits` público no diário, que diz só ligado ou desligado). A lista de visitantes fica só no aparelho de quem a recebe, nunca no diário nem no servidor, com precisão de dia (sem hora), até 50 pessoas, uma linha por pessoa e por no máximo 30 dias, e é apagada ao desligar. O aviso viaja num canal anônimo próprio, sem acordar ninguém. Limites: um cliente modificado pode receber sem enviar, o semeador já vê qual perfil uma conexão lê, e o horário pode ligar uma leitura de perfil a um aviso que chega pouco depois (detalhes em `docs/protocol.md`, seção 11).
+
 **Direitos dos titulares (Art. 18) numa rede P2P**
 
 - **Acesso e portabilidade:** o diário já está no celular da pessoa; o app exporta tudo num arquivo.

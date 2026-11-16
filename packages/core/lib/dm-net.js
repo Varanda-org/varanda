@@ -33,11 +33,18 @@
 //
 // Lifetime: as notices-net.js. A member handle is single-use per channel;
 // a request timeout is terminal for the channel, never the socket.
+//
+// The quiet visit lane 'varanda/visit/1' (opts.protocol = VISIT_PROTOCOL) is
+// this same channel under another protocol name: the same messages, checks
+// and rate buckets (its own, per channel), its own socket slot, and on the
+// seeder its own pool, which wakes nobody. A seeder from before the lane
+// rejects the open: the member's handle.supported resolves false, and the
+// member treats the lane as unsupported there, never falling back to DMs.
 const b4a = require('b4a')
 const c = require('compact-encoding')
 const clock = require('./clock')
 const { hasExactKeys } = require('./records')
-const { DM_PROTOCOL, DM_DROP_BYTES, DM_PAGE_MAX, DM_MAX_MESSAGE } = require('./dm')
+const { DM_PROTOCOL, VISIT_PROTOCOL, DM_DROP_BYTES, DM_PAGE_MAX, DM_MAX_MESSAGE } = require('./dm')
 
 const MAX_BAD_DM = 5
 const DM_REQUEST_TIMEOUT_MS = 10000
@@ -50,8 +57,45 @@ const DM_PUT_RATE = 8 / 60
 const ACK_REASONS = Object.freeze([null, 'cheio', 'invalido', 'ritmo'])
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
 const DROP_BASE64_LENGTH = Math.ceil(DM_DROP_BYTES / 3) * 4
+// protocol -> { slot: default socket slot, tag: log event prefix }
+const LANES = Object.freeze({
+  [DM_PROTOCOL]: Object.freeze({ slot: '_varandaDm', tag: 'dm' }),
+  [VISIT_PROTOCOL]: Object.freeze({ slot: '_varandaVisit', tag: 'visit' })
+})
+// The dm and visit lanes of one socket share one 'close' listener: the
+// seeder's _attachPeer hangs many channels on the same socket, and one
+// listener per lane would cross the emitter's listener limit (a
+// MaxListenersExceededWarning on every peer). As notices-net.js.
+const CLOSE_HOOKS = Symbol('varanda dm close hooks')
 
 function noop () {}
+
+function onSocketClose (socket, fn) {
+  if (typeof socket.once !== 'function') return
+  let entry = socket[CLOSE_HOOKS]
+  if (entry === undefined) {
+    const hooks = new Set()
+    const listener = () => {
+      if (socket[CLOSE_HOOKS] === entry) delete socket[CLOSE_HOOKS]
+      for (const f of [...hooks]) f()
+    }
+    entry = { hooks, listener }
+    socket[CLOSE_HOOKS] = entry
+    socket.once('close', listener)
+  }
+  entry.hooks.add(fn)
+}
+
+// The last lane gone detaches the shared listener, so a socket whose lanes
+// all ended keeps no listener of this module.
+function offSocketClose (socket, fn) {
+  const entry = socket[CLOSE_HOOKS]
+  if (entry === undefined) return
+  entry.hooks.delete(fn)
+  if (entry.hooks.size > 0) return
+  delete socket[CLOSE_HOOKS]
+  if (typeof socket.off === 'function') socket.off('close', entry.listener)
+}
 
 function tokenBucket (burst, rate) {
   let tokens = burst
@@ -157,9 +201,17 @@ function itemsMessage (result, after, limit, maxBytes) {
 }
 
 function attachDm (socket, opts = {}) {
-  const slot = opts.slot === undefined ? '_varandaDm' : opts.slot
+  const protocol = opts.protocol === undefined ? DM_PROTOCOL : opts.protocol
+  if (!Object.prototype.hasOwnProperty.call(LANES, protocol)) throw new TypeError('invalid protocol')
+  const lane = LANES[protocol]
+  const slot = opts.slot === undefined ? lane.slot : opts.slot
   if (typeof slot !== 'string' || slot === '') throw new TypeError('invalid slot')
-  if (socket && socket[slot]) return socket[slot]
+  if (socket && socket[slot]) {
+    // A slot already taken by the other lane is a caller error: returning
+    // that handle would put a visit into the dm pool, or a dm into the visits.
+    if (socket[slot].protocol !== protocol) throw new TypeError('slot in use by another protocol')
+    return socket[slot]
+  }
 
   const {
     role,
@@ -212,6 +264,7 @@ function attachDm (socket, opts = {}) {
   const handle = {
     socket,
     role,
+    protocol,
     badMessages: 0,
     supported: new Promise((resolve) => { resolveSupported = resolve }),
     close
@@ -222,9 +275,9 @@ function attachDm (socket, opts = {}) {
   }
   socket[slot] = handle
 
-  mux.pair({ protocol: DM_PROTOCOL }, onpair)
+  mux.pair({ protocol }, onpair)
   openChannel()
-  if (typeof socket.once === 'function') socket.once('close', end)
+  onSocketClose(socket, end)
 
   return handle
 
@@ -235,7 +288,7 @@ function attachDm (socket, opts = {}) {
   }
 
   function openChannel () {
-    const ch = mux.createChannel({ protocol: DM_PROTOCOL, onopen, onclose: onchannelclose })
+    const ch = mux.createChannel({ protocol, onopen, onclose: onchannelclose })
     if (ch === null) return
     channel = ch
     answering = false
@@ -269,11 +322,11 @@ function attachDm (socket, opts = {}) {
   function end () {
     if (ended) return
     ended = true
-    mux.unpair({ protocol: DM_PROTOCOL })
+    mux.unpair({ protocol })
     failRequest(new Error('dm channel closed'))
     settle(false)
     if (socket[slot] === handle) delete socket[slot]
-    if (typeof socket.off === 'function') socket.off('close', end)
+    offSocketClose(socket, end)
   }
 
   function close () {
@@ -305,7 +358,7 @@ function attachDm (socket, opts = {}) {
 
   function badMessage () {
     handle.badMessages++
-    if (handle.badMessages > maxBad) drop('dm')
+    if (handle.badMessages > maxBad) drop(lane.tag)
   }
 
   function onraw (buf) {
@@ -346,7 +399,7 @@ function attachDm (socket, opts = {}) {
     }
     if (msg.type === 'page') {
       if (!pages.take()) {
-        drop('dm-page-rate')
+        drop(lane.tag + '-page-rate')
         return
       }
       answerPage(msg)
@@ -367,7 +420,7 @@ function attachDm (socket, opts = {}) {
     try {
       reply = ackFor(await put(b4a.from(msg.drop, 'base64')))
     } catch {
-      log({ event: 'dm-put-failed', reason: 'erro' })
+      log({ event: lane.tag + '-put-failed', reason: 'erro' })
     }
     if (ch !== channel || ended || dropped) return
     answering = false
@@ -381,9 +434,9 @@ function attachDm (socket, opts = {}) {
     let reply = null
     try {
       reply = itemsMessage(await page({ after: msg.after, limit: msg.limit }), msg.after, msg.limit, maxBytes)
-      if (reply === null) log({ event: 'dm-page-invalid' })
+      if (reply === null) log({ event: lane.tag + '-page-invalid' })
     } catch {
-      log({ event: 'dm-page-failed', reason: 'erro' })
+      log({ event: lane.tag + '-page-failed', reason: 'erro' })
     }
     if (ch !== channel || ended || dropped) return
     answering = false
@@ -470,6 +523,7 @@ function attachDm (socket, opts = {}) {
 
 module.exports = {
   DM_PROTOCOL,
+  VISIT_PROTOCOL,
   MAX_BAD_DM,
   DM_REQUEST_TIMEOUT_MS,
   DM_MESSAGE_BURST,

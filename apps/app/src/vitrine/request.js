@@ -98,6 +98,7 @@ export function createVitrineRequest (fixtures, options) {
   let runId = 0
   let sync = { state: 'idle' }
   let dmEnabled = false
+  const visits = { on: data.visits.on, sentToday: data.visits.sentToday, list: data.visits.list.slice() }
   let pullCursor = 0
   let mediaStart = 1
   const age = { ageVerifiedDate: data.now, ageSince: null, ageSinceUntil: null }
@@ -833,6 +834,19 @@ export function createVitrineRequest (fixtures, options) {
       if (state === 'declined' || state === 'deleted') { c.messages = []; c.unread = false; c.accepted = false }
       updateFolder(c)
       return { ok: true }
+    },
+    'visits.set': ({ on }) => {
+      visits.on = on
+      if (!on) visits.list = []
+      return { on }
+    },
+    'visits.state': () => ({ on: visits.on, sentToday: visits.sentToday }),
+    'visits.list': () => ({ visits: visits.list.map((v) => ({ ...v })) }),
+    'visits.clear': () => { visits.list = []; return { ok: true } },
+    'visits.note': ({ key }) => {
+      if (!visits.on || !profileOf(key)) return { queued: false }
+      visits.sentToday++
+      return { queued: true }
     },
     'group.create': createGroup,
     'group.join': ({ group, community }) => {

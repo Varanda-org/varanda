@@ -48,6 +48,11 @@ import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { WALL_TITLE } from '../recadosView'
 import { WallSetting } from './Recados'
+import { closeConsent, initialConsent, openConsent, startConsent, toggleConsent } from '../visits'
+import {
+  CLEARED_TOAST, CONSENT_LINES, CONSENT_ON_LABEL, CONSENT_SWITCH_LABEL, CONSENT_TITLE, OFF_CONFIRM_LABEL, OFF_CONFIRM_TEXT,
+  OFF_CONFIRM_TITLE, OFF_LABEL, ON_TOAST, ROW_OFF, ROW_ON, VISITAS_TITLE, stateOn, visitasAvailable
+} from '../visitasView'
 import { invitePolicy } from '../account'
 import { useNames } from '../names'
 import { useOutbox } from '../outboxProvider'
@@ -207,6 +212,30 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
     if (setPreviewsEnabled(prefStore, next)) setPreviews(next)
   }
   const [confirm, setConfirm] = useState(null) // null | 'sair' | 'recomecar'
+  // Visitas: the node's switch (null until read), the consent sheet and the confirm of switching off.
+  const visitasOn = visitasAvailable({ hosted: node.hosted === true, unlocked })
+  const [visitas, setVisitas] = useState(null)
+  const [consent, setConsent] = useState(initialConsent)
+  const [offAsk, setOffAsk] = useState(false)
+  const visitasAct = useAction()
+  const visitasRequest = useRef(node.request)
+  visitasRequest.current = node.request
+  const openVisitasSheet = () => { visitasAct.clearError(); setConsent(openConsent()) }
+  const closeVisitasSheet = () => { setConsent(closeConsent()); setOffAsk(false) }
+  const turnVisitasOn = async () => {
+    if (consent.busy || !consent.visible) return
+    setConsent(startConsent(consent))
+    const r = await visitasAct.run(() => visitasRequest.current('visits.set', { on: true }))
+    if (r.ok) { setVisitas((v) => ({ ...(v || {}), on: true })); setConsent(closeConsent()); setSaved(ON_TOAST) } else setConsent((c) => ({ ...c, busy: false }))
+  }
+  const turnVisitasOff = async () => {
+    const r = await visitasAct.run(async () => {
+      const set = await visitasRequest.current('visits.set', { on: false })
+      await visitasRequest.current('visits.clear', {})
+      return set
+    })
+    if (r.ok) { setVisitas((v) => ({ ...(v || {}), on: false })); setOffAsk(false); setConsent(closeConsent()); setSaved(CLEARED_TOAST) }
+  }
   const exit = useAction()
   const reset = useAction()
   // Result of asking the browser to keep this origin's data (null: not asked yet).
@@ -223,6 +252,12 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   // the screen before this answer; required false means there is nothing to show.
   const [policy, setPolicy] = useState(null)
   const sheetOpen = screen !== null
+  useEffect(() => {
+    if (!visitasOn || !sheetOpen) return undefined
+    let live = true
+    visitasRequest.current('visits.state', {}).then((r) => { if (live) setVisitas(r) }, () => {})
+    return () => { live = false }
+  }, [visitasOn, sheetOpen])
   const policySeq = useRef(0)
   const member = unlocked && typeof passkey.status.publicKey === 'string' ? passkey.status.publicKey : null
   // A core node registers its delegate and accepts the Terms on the page
@@ -469,8 +504,39 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               {account ? <Item first={!(account && unlocked) && !showChangePhone} icon='shield' label='Recorrer de um bloqueio' onPress={() => onNavigate('recurso')} /> : null}
               {hosted ? <Item first={!account && !showChangePhone} icon='bloquear' label={BLOCK_TEXTS.listTitle} onPress={() => onNavigate('bloqueados')} /> : null}
               {hosted ? <Item icon='recado' label={WALL_TITLE} onPress={() => onNavigate('recados')} /> : null}
+              {visitasOn ? <Item icon='olho' label={VISITAS_TITLE} trailingText={visitas === null ? null : (stateOn(visitas) ? ROW_ON : ROW_OFF)} onPress={openVisitasSheet} /> : null}
               <Item first={!account && !showChangePhone && !hosted} icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
             </View>
+            {visitasOn
+              ? (
+                <>
+                  <Sheet open={screen === 'lista' && consent.open && !offAsk} onClose={closeVisitasSheet} dismissable={!consent.busy && !visitasAct.pending} title={CONSENT_TITLE}>
+                    <ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle={styles.confirm}>
+                      {CONSENT_LINES.map((line) => <Soft key={line}>{line}</Soft>)}
+                      {stateOn(visitas)
+                        ? <Btn label={OFF_LABEL} danger onPress={() => { visitasAct.clearError(); setOffAsk(true) }} />
+                        : (
+                          <>
+                            <SwitchRow label={CONSENT_SWITCH_LABEL} value={consent.visible} onValueChange={() => setConsent(toggleConsent(consent))} disabled={consent.busy} />
+                            <ErrorText>{visitasAct.error}</ErrorText>
+                            <Btn label={CONSENT_ON_LABEL} onPress={turnVisitasOn} pending={consent.busy} disabled={!consent.visible || consent.busy} />
+                          </>
+                          )}
+                    </ScrollView>
+                  </Sheet>
+                  <Sheet open={screen === 'lista' && offAsk} onClose={() => setOffAsk(false)} dismissable={!visitasAct.pending} title={OFF_CONFIRM_TITLE}>
+                    <ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle={styles.confirm}>
+                      <Soft>{OFF_CONFIRM_TEXT}</Soft>
+                      <ErrorText>{visitasAct.error}</ErrorText>
+                      <ConfirmStack
+                        confirm={<Btn label={OFF_CONFIRM_LABEL} danger onPress={turnVisitasOff} pending={visitasAct.pending} />}
+                        cancel={<Btn label='Cancelar' secondary onPress={() => setOffAsk(false)} disabled={visitasAct.pending} />}
+                      />
+                    </ScrollView>
+                  </Sheet>
+                </>
+                )
+              : null}
             <FlushSectionHeader>Aparência e avisos</FlushSectionHeader>
             <View style={styles.group}>
               <Item first icon='sun' label='Aparência' trailingText={MODE_LABELS[mode]} onPress={() => onNavigate('aparencia')} />

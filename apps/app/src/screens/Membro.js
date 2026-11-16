@@ -871,6 +871,14 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
   const extraShown = extraView(rich.held, now)
   const hostedHere = node.hosted === true && !isPage && !blockedHere
   const topRead = useTopFriends({ owner: author, ownKey, index: rich.index, request, enabled: hostedHere && !own })
+  // One visit note per profile view, fire and forget: the node applies every
+  // budget and the switch, a failure is never retried and never shown.
+  const notedRef = useRef(null)
+  useEffect(() => {
+    if (!hostedHere || own || !full || typeof ownKey !== 'string' || typeof author !== 'string' || notedRef.current === author) return
+    notedRef.current = author
+    Promise.resolve().then(() => request('visits.note', { key: author })).catch(() => {})
+  }, [hostedHere, own, full, ownKey, author, request])
   const fansView = fansCountView({ fans: rich.index ? rich.index.fans : null, complete: rich.index ? rich.index.complete : false })
   const canReport = full && !own && typeof onReport === 'function' && typeof ownKey === 'string'
   const canBlock = canReport && blocks.available

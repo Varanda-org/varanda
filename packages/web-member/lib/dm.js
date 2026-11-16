@@ -72,10 +72,24 @@
 // elsewhere (dm.pageDraft, dm.pageSend): this node builds the v3 inner and
 // its digest, holds it in memory and seals it once the signature verifies.
 //
+// Visitas (docs/protocol.md "Quiet visit lane"): a ping is a v6 inner
+// (kind 'visit') sealed to its recipient only (no self copy), queued sealed
+// in the local store (./dm-store.js) and put after a random delay
+// (L.visitDelay, 5 to 15 minutes) with one dm stamp, never one of the last
+// VISIT_STAMP_RESERVE, over the quiet visit lane (./dm-link.js
+// openVisitLink), never the dm channel. A queued ping leaves the queue
+// before its put, so an uncertain put is never repeated; a seeder without
+// the lane takes nothing and the queue waits. Received pings come from the
+// visit pool only (pullVisits), opened with openInner's visit flag, and are
+// filed (sender and day, nothing else) only while the caller says the own
+// switch is on, only for a day that is fresh and not before the switch went
+// on, never from a blocked sender, and once per sender and inner id.
+//
 // Nothing here logs a key, a text or a peer.
 const b4a = require('b4a')
 const hcrypto = require('hypercore-crypto')
 const dm = require('@varanda/core/lib/dm')
+const { DM_PUT_BURST } = require('@varanda/core/lib/dm-net')
 const dmFold = require('@varanda/core/lib/dm-fold')
 const postage = require('@varanda/core/lib/dm-postage')
 const { nowIso, MAX_AUDIO_BYTES, VIDEO_MIME, MAX_MOMENT_VIDEO_MS, MAX_MOMENT_VIDEO_BYTES } = require('@varanda/core/lib/records')
@@ -89,9 +103,10 @@ const { mediaBounds, audioBounds, videoBounds, dmTextBytes, DM_MEDIA_KEYS, AUDIO
 const { sealBlob, createBlobClient, fetchBlob } = require('./blob')
 const sodium = require('./sodium-browser')
 const { dmBoxKeyPairFromPrf, dmLocalKeyFromPrf } = require('./passkey')
-const { createDmStore, SUMMARY_PAGE } = require('./dm-store')
+const { createDmStore, SUMMARY_PAGE, VISIT_QUEUE_MAX, VISIT_SEEN_MAX } = require('./dm-store')
 const { createPageHolder, NO_PAGE_KEY, KEY_MISMATCH } = require('./page-dm')
-const { openDmLink, openStampLink } = require('./dm-link')
+const { openDmLink, openStampLink, openVisitLink } = require('./dm-link')
+const visits = require('@varanda/core/lib/visits')
 const store = require('./node-store')
 
 const LOCKED = store.LOCKED
@@ -123,6 +138,13 @@ const MOMENT_PHOTO_GONE = 'foto indisponível'
 // Sealed blobs kept for a send or a retry (each holds its plaintext and
 // ciphertext in memory).
 const BLOBS_MAX = 8
+// A queued visit ping goes out 5 to 15 minutes later.
+const VISIT_DELAY_MIN_MS = 5 * 60000
+const VISIT_DELAY_SPAN_MS = 10 * 60000
+// A flush puts at most DM_PUT_BURST pings (the seeder's put burst per
+// link); the rest wait this long, the time the seeder's bucket takes to
+// fill again (DM_PUT_RATE, 8 a minute).
+const VISIT_BURST_WAIT_MS = 60000
 const PREVIEW_MAX = 140
 const TOP_UP_EVERY_MS = 600000
 const PENDING_MAX = 32
@@ -236,7 +258,7 @@ function zeroPair (pair) {
 // (dm-link limits), blob (./blob.js createBlobClient limits), fetch
 // (./blob.js fetchBlob limits), fold (the dm-fold fold, to count calls).
 // createStore, fetch and mediaOrigin: tests only.
-function createDmEngine ({ storage, association, seederUrl, createSocket, log = noop, emit = noop, limits = {}, createStore = createDmStore, fetch: fetchImpl, mediaOrigin, hkdf } = {}) {
+function createDmEngine ({ storage, association, seederUrl, createSocket, log = noop, emit = noop, limits = {}, createStore = createDmStore, fetch: fetchImpl, mediaOrigin, hkdf, visitsDue } = {}) {
   const L = {
     issueBurst: ISSUE_BURST,
     issuePaceMs: ISSUE_PACE_MS,
@@ -250,6 +272,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     blob: {},
     fetch: {},
     fold: dmFold.fold,
+    // The delay before a queued visit ping goes out, in ms (tests set it).
+    visitDelay: () => VISIT_DELAY_MIN_MS + Math.floor(Math.random() * (VISIT_DELAY_SPAN_MS + 1)),
     // Tests only: the summary write delay and a gate before the own rows load.
     summaryDelayMs: undefined,
     loadGate: null,
@@ -277,6 +301,13 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   const inflight = new Set()
   let walletLock = Promise.resolve()
   let queueLock = Promise.resolve()
+  // Every read and write of the visit kv values; visitEpoch moves on every
+  // clear and lock, so a pull or flush begun before writes nothing after.
+  let visitLock = Promise.resolve()
+  let visitEpoch = 0
+  let visitTimer = null
+  let visitPulling = false
+  let visitFlushing = null
   // The own membership certificate, read from block 0 once per unlock.
   let ownCert = null
   const pending = new Map()
@@ -345,6 +376,12 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     return p
   }
 
+  function withVisits (fn) {
+    const p = visitLock.then(fn)
+    visitLock = p.catch(noop)
+    return p
+  }
+
   // -> the own certificate for `own`, or throws NO_CERT.
   async function certOf (own) {
     if (ownCert !== null && ownCert.member === own) return ownCert
@@ -366,19 +403,25 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // The stored blocklist snapshot's sets (empty when none verifies).
   async function moderation () {
     try {
-      // The member's own blocks drop a sender as the association's do, also
-      // on a device the conversation op never reached.
-      const own = blockedKeys(await store.readMemberBlocks(storage))
-      const data = await store.readBlocklist(storage)
-      const snapshot = data === null ? null : data.snapshot
-      if (snapshot !== null && verifySnapshot(snapshot, association).ok) {
-        // `association` alone: a page's inbox keeps the association's blocks,
-        // not the member's own.
-        return { blocked: new Set([...blockedSet(snapshot), ...own]), association: blockedSet(snapshot), revokedIssuers: revokedIssuerSet(snapshot) }
-      }
-      return { blocked: own, association: new Set(), revokedIssuers: new Set() }
+      return await moderationStrict()
     } catch {}
     return { blocked: new Set(), association: new Set(), revokedIssuers: new Set() }
+  }
+
+  // As moderation, but a read that fails throws instead of reading as no
+  // blocks: the visit paths file and list nothing then (fail closed).
+  async function moderationStrict () {
+    // The member's own blocks drop a sender as the association's do, also
+    // on a device the conversation op never reached.
+    const own = blockedKeys(await store.readMemberBlocks(storage))
+    const data = await store.readBlocklist(storage)
+    const snapshot = data === null ? null : data.snapshot
+    if (snapshot !== null && verifySnapshot(snapshot, association).ok) {
+      // `association` alone: a page's inbox keeps the association's blocks,
+      // not the member's own.
+      return { blocked: new Set([...blockedSet(snapshot), ...own]), association: blockedSet(snapshot), revokedIssuers: revokedIssuerSet(snapshot) }
+    }
+    return { blocked: own, association: new Set(), revokedIssuers: new Set() }
   }
 
   // Any throw leaves no key material behind: the derived pair and key are
@@ -444,10 +487,14 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       if ((await store.readDmCtlQueue(storage, store.pageDmPrefix(page))).length === 0) continue
       track(pageCtx(page).then((ctx) => flushQueued(ctx)).catch(noop))
     }
+    // Visit pings queued before go out on their own delay.
+    track(scheduleVisits().catch(noop))
   }
 
   function lock () {
     generation++
+    visitEpoch++
+    clearVisitTimer()
     zeroPair(box)
     box = null
     ownCert = null
@@ -1194,11 +1241,12 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   }
 
   // Takes n stamps at once (all or none) -> [{ kid, token, sig }] or null.
-  function takeStamps (n) {
+  // keep: how many usable stamps must stay in the wallet after.
+  function takeStamps (n, keep = 0) {
     return withWallet(async () => {
       const w = await readWallet()
       const usable = w.items.filter((s) => w.kids.length === 0 || w.kids.includes(s.kid))
-      if (usable.length < n) return null
+      if (usable.length < n + keep) return null
       const taken = usable.slice(0, n)
       const spent = new Set(taken.map((s) => s.token))
       await writeWallet({ items: w.items.filter((s) => !spent.has(s.token)), kids: w.kids })
@@ -1992,6 +2040,385 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     return { t: 'rx', id: body.id, peer, from: body.from, to: body.to, target: { from: body.target.from, id: body.target.id, digest: body.target.digest }, emoji: body.emoji, rev: body.rev, at: body.at, mine: body.mine }
   }
 
+  // ---- visitas ----
+
+  function clearVisitTimer () {
+    if (visitTimer !== null) clearTimeout(visitTimer)
+    visitTimer = null
+  }
+
+  // Pings sent today by the own log (the budget's count).
+  async function visitSentToday (now) {
+    requireUnlocked()
+    return visits.sentToday(await withVisits(() => local.visitSent()), now)
+  }
+
+  // Whether one more ping to `to` fits the budgets now (canVisit, with the
+  // queued pings counted against the stamps) -> { ok, reason? }.
+  async function visitBudget (own, to, now) {
+    const sent = await local.visitSent()
+    const queued = await local.visitQueue()
+    if (queued.length >= VISIT_QUEUE_MAX) return { ok: false, reason: 'daily' }
+    return visits.canVisit({ self: own, to, sent, stamps: (await walletSize()) - queued.length, now })
+  }
+
+  // A read-only check before the caller's network reads.
+  async function visitAllowed (own, to, now) {
+    requireUnlocked()
+    if (to === own || !canSend(own, to)) return { ok: false, reason: 'blocked' }
+    return withVisits(() => visitBudget(own, to, now))
+  }
+
+  // Queues one ping to `to` (box: its published dm box, hex) after the
+  // caller's checks (own switch on, dms enabled, the target's verified
+  // flag, not a page). The budget is checked again here, and the sent log
+  // is written before the queue: a ping counts even when it never goes
+  // out. -> { queued }.
+  async function visitQueue (own, keyPair, { to, box: recipientBox, now }) {
+    requireUnlocked()
+    if (to === own || !canSend(own, to)) return { queued: false }
+    const epoch = visitEpoch
+    let cert
+    try {
+      cert = await certOf(own)
+    } catch {
+      return { queued: false }
+    }
+    return withVisits(async () => {
+      if (epoch !== visitEpoch || !unlocked()) return { queued: false }
+      if (!(await visitBudget(own, to, now)).ok) return { queued: false }
+      const day = visits.visitDay(now)
+      let inner = null
+      let sealed
+      try {
+        inner = dm.buildInner({ kind: dm.DM_VISIT_KIND, to, day, cert }, keyPair)
+        sealed = dm.sealInner(inner, recipientBox)
+      } catch {
+        return { queued: false }
+      } finally {
+        if (inner !== null) inner.fill(0)
+      }
+      await local.writeVisitSent(visits.pruneSent([...await local.visitSent(), { to, day }], now))
+      const delay = Math.max(0, Math.floor(Number(L.visitDelay()) || 0))
+      const queued = await local.visitQueue()
+      await local.writeVisitQueue([...queued, { to, day, due: now + delay, sealed: b4a.toString(sealed, 'base64') }])
+      track(scheduleVisits().catch(noop))
+      return { queued: true }
+    })
+  }
+
+  // Arms one timer for the earliest queued ping (no sooner than minMs).
+  // With visitsDue (the session's), the timer hands over to it: the caller
+  // reads the own switch first and flushes only while it is on, so a
+  // switch turned off on another device stops this one's queue. Only an
+  // engine without it (tests) flushes from the timer directly.
+  async function scheduleVisits (minMs = 0) {
+    if (!unlocked()) return
+    const epoch = visitEpoch
+    const queued = await withVisits(() => local.visitQueue())
+    if (epoch !== visitEpoch || !unlocked() || queued.length === 0) return
+    const due = Math.min(...queued.map((q) => q.due))
+    clearVisitTimer()
+    visitTimer = setTimeout(() => {
+      visitTimer = null
+      if (typeof visitsDue !== 'function') {
+        flushVisits()
+        return
+      }
+      try {
+        const p = visitsDue()
+        if (p && typeof p.catch === 'function') p.catch(noop)
+      } catch {}
+    }, Math.min(VISIT_DELAY_MIN_MS + VISIT_DELAY_SPAN_MS, Math.max(minMs, due - Date.now())))
+    if (visitTimer && typeof visitTimer.unref === 'function') visitTimer.unref()
+  }
+
+  // Puts the queued pings that are due, oldest first, over one visit link,
+  // at most DM_PUT_BURST per flush (the seeder refuses more on one link):
+  // the rest stay queued, unstamped, and go VISIT_BURST_WAIT_MS later.
+  // A stale ping (its day no longer fresh) is dropped unsent. Each due ping
+  // leaves the queue and takes its stamp before its put, so no answer, a
+  // refusal or a lost link never puts it again; a lost link stops the
+  // flush and the rest wait. A clear or lock (visitEpoch) seen right
+  // before a put stops the flush: that ping is not sent and nothing more
+  // is spent. No visit link (no seeder, or one without the lane) takes
+  // nothing and leaves the queue as it is: never the dm channel. The
+  // caller checks the own switch first (visitsDue). Single flight; never
+  // throws.
+  function flushVisits () {
+    if (visitFlushing !== null) return visitFlushing
+    const p = track(flushVisitsOnce().catch(noop))
+    visitFlushing = p
+    p.then(() => {
+      if (visitFlushing === p) visitFlushing = null
+    })
+    return p
+  }
+
+  async function flushVisitsOnce () {
+    if (!unlocked()) return
+    const epoch = visitEpoch
+    const now = Date.now()
+    const due = await withVisits(async () => {
+      if (epoch !== visitEpoch || !unlocked()) return []
+      const queued = await local.visitQueue()
+      const fresh = queued.filter((q) => visits.visitDayFresh(q.day, now))
+      if (fresh.length !== queued.length) await local.writeVisitQueue(fresh)
+      return fresh.filter((q) => q.due <= now)
+    })
+    if (due.length === 0) {
+      await scheduleVisits()
+      return
+    }
+    let link
+    try {
+      link = await openVisitLink(linkOpts)
+    } catch (err) {
+      if (err && err.unsupported === true) log('aviso: o semeador não recebe visitas')
+      return
+    }
+    let puts = 0
+    let capped = false
+    try {
+      for (const q of due) {
+        if (puts >= DM_PUT_BURST) {
+          capped = true
+          break
+        }
+        const stamp = await withVisits(async () => {
+          if (epoch !== visitEpoch || !unlocked()) return undefined
+          const queued = await local.visitQueue()
+          if (!queued.some((x) => x.sealed === q.sealed)) return null
+          await local.writeVisitQueue(queued.filter((x) => x.sealed !== q.sealed))
+          const s = await takeStamps(1, visits.VISIT_STAMP_RESERVE)
+          if (s === null) {
+            log('aviso: 1 visita descartada sem selo')
+            return null
+          }
+          return s[0]
+        })
+        if (stamp === undefined) return
+        if (stamp === null) continue
+        if (epoch !== visitEpoch || !unlocked()) return
+        puts++
+        let r
+        try {
+          r = await link.put(dropOf(b4a.from(q.sealed, 'base64'), stamp))
+        } catch {
+          return
+        }
+        if (r && r.ok !== true && (r.reason === 'cheio' || r.reason === 'ritmo')) {
+          // The seeder answered and spent nothing: the stamp goes back and
+          // the ping waits for a later flush.
+          await returnVisit(q, stamp, epoch)
+          log('aviso: 1 visita adiada pelo semeador')
+          capped = true
+          break
+        }
+        if (!r || r.ok !== true) log('aviso: 1 visita recusada pelo semeador')
+      }
+    } finally {
+      link.close()
+    }
+    await scheduleVisits(capped ? VISIT_BURST_WAIT_MS : 0)
+  }
+
+  // A ping the seeder refused with 'cheio' or 'ritmo' (answered, nothing
+  // spent): its stamp back in the wallet, and the ping back at the head of
+  // the queue unless a clear or lock came first. A lost link never comes
+  // here: that put stays spent and is never repeated.
+  async function returnVisit (q, stamp, epoch) {
+    try {
+      await withWallet(async () => {
+        const w = await readWallet()
+        if (w.items.some((s) => s.token === stamp.token)) return
+        await writeWallet({ items: [...w.items, stamp], kids: w.kids })
+      })
+    } catch {}
+    try {
+      await withVisits(async () => {
+        if (epoch !== visitEpoch || !unlocked()) return
+        const queued = await local.visitQueue()
+        if (queued.some((x) => x.sealed === q.sealed)) return
+        await local.writeVisitQueue([q, ...queued])
+      })
+    } catch {}
+  }
+
+  // Wipes the list and the queue when the own `visits` on-record (its seq,
+  // `on`) is not the one they were filed under (the switch went off and on
+  // again on another device of the same passkey, the same day), then files
+  // under `on`. A wipe moves visitEpoch, so a flush or pull under way stops.
+  async function adoptVisitOn (on) {
+    if (!Number.isSafeInteger(on) || on < 0) return
+    await withVisits(async () => {
+      if (!unlocked()) return
+      const had = await local.visitsOn()
+      if (had === on) return
+      if (had !== null) {
+        visitEpoch++
+        clearVisitTimer()
+        await local.clearVisits({ list: true, queue: true })
+      }
+      await local.writeVisits(had === null ? await local.visits() : [], on)
+    })
+  }
+
+  // The rows kept: listVisits (30 days, one per visitor, own and blocked
+  // keys out), and with since none dated before it. An invalid since keeps
+  // nothing.
+  function keptVisits (rows, now, own, blocked, since) {
+    const kept = visits.listVisits(rows, now, { self: own, blocked })
+    if (since === undefined) return kept
+    const floor = visits.isVisitDay(since) ? visits.dayNumber(since) : NaN
+    return kept.filter((r) => visits.dayNumber(r.day) >= floor)
+  }
+
+  // Inside withVisits: rewrites the stored list without the rows no longer
+  // kept (older than 30 days, before since), so they do not stay at rest
+  // until the next ping is filed. -> the rows kept.
+  async function pruneVisits (own, now, blocked, since, epoch) {
+    const rows = await local.visits()
+    const kept = keptVisits(rows, now, own, blocked, since)
+    if (kept.length !== rows.length && epoch === visitEpoch && unlocked()) await local.writeVisits(kept)
+    return kept
+  }
+
+  // Pulls the visit pool from its own cursor and files the pings for the
+  // own key. since: the day the own switch last went on (the caller reads
+  // it from the own diary and calls only while the switch is on); a ping
+  // dated before it is never filed, and a stored row before it or older
+  // than 30 days is dropped at rest. on: the seq of that on-record
+  // (adoptVisitOn). A blocks read that fails files nothing this time.
+  // -> { added, supported }.
+  async function pullVisits (own, { since, on } = {}) {
+    requireUnlocked()
+    if (visitPulling || !visits.isVisitDay(since)) return { added: 0, supported: true }
+    visitPulling = true
+    let added = 0
+    let link = null
+    let epoch = visitEpoch
+    try {
+      await adoptVisitOn(on)
+      epoch = visitEpoch
+      let mod0
+      try {
+        mod0 = await moderationStrict()
+      } catch {
+        return { added: 0, supported: true }
+      }
+      await withVisits(() => pruneVisits(own, Date.now(), mod0.blocked, since, epoch))
+      try {
+        link = await openVisitLink(linkOpts)
+      } catch (err) {
+        if (err && err.unsupported === true) return { added: 0, supported: false }
+        throw new UsageError('sem conexão com o semeador')
+      }
+      let cursor = await withVisits(() => local.visitCursor())
+      let read = 0
+      const floor = visits.dayNumber(since)
+      for (;;) {
+        if (epoch !== visitEpoch || !unlocked()) break
+        const page = await link.page({ after: cursor, limit: L.pageMax })
+        let mod
+        try {
+          mod = await moderationStrict()
+        } catch {
+          break
+        }
+        const ops = local.ops()
+        const now = Date.now()
+        const found = []
+        for (const item of page.items) {
+          read += item.bytes.byteLength
+          const body = openVisitItem(own, item.bytes, mod)
+          if (body === null || !visits.visitDayFresh(body.day, now) || visits.dayNumber(body.day) < floor) continue
+          if (!dmFold.canSend({ self: own, peer: body.from, ops })) continue
+          found.push({ from: body.from, day: body.day, t: local.visitToken(body.from, body.id) })
+        }
+        const filed = await withVisits(async () => {
+          if (epoch !== visitEpoch || !unlocked()) return -1
+          let n = 0
+          if (found.length > 0) {
+            const seen = await local.visitSeen()
+            const known = new Set(seen.map((x) => x.t))
+            const fresh = []
+            for (const f of found) {
+              if (known.has(f.t)) continue
+              known.add(f.t)
+              fresh.push(f)
+            }
+            if (fresh.length > 0) {
+              const rows = keptVisits([...await local.visits(), ...fresh.map((f) => ({ from: f.from, day: f.day }))], now, own, mod.blocked, since)
+              await local.writeVisits(rows)
+              const today = visits.dayNumber(visits.visitDay(now))
+              const keep = [...seen, ...fresh.map((f) => ({ t: f.t, day: f.day }))]
+                .filter((x) => today - visits.dayNumber(x.day) <= visits.VISIT_DAY_SLACK + 1)
+              await local.writeVisitSeen(keep.slice(-VISIT_SEEN_MAX))
+              n = fresh.length
+            }
+          }
+          if (page.items.length > 0) await local.writeVisitCursor(page.items[page.items.length - 1].seq)
+          return n
+        })
+        if (filed < 0) break
+        added += filed
+        if (page.items.length > 0) cursor = page.items[page.items.length - 1].seq
+        if (page.next === null || page.items.length === 0 || read >= L.budgetBytes) break
+      }
+    } finally {
+      visitPulling = false
+      if (link !== null) link.close()
+      if (added > 0) {
+        try { emit('visits.changed', { added }) } catch {}
+      }
+    }
+    return { added, supported: true }
+  }
+
+  // One visit pool item -> the verified v6 body for the own key, or null
+  // (not ours, not a visit, uncertified, a blocked sender).
+  function openVisitItem (own, bytes, mod) {
+    const drop = dm.decodeDrop(bytes)
+    if (drop === null || box === null) return null
+    const inner = dm.openSealed(drop.sealed, box)
+    if (inner === null) return null
+    const body = dm.openInner(inner, own, { association, revokedIssuers: mod.revokedIssuers, visit: true })
+    inner.fill(0)
+    if (body === null || body.kind !== dm.DM_VISIT_KIND || body.mine !== false || body.to !== own) return null
+    if (mod.blocked.has(body.from)) return null
+    return body
+  }
+
+  // The visitors [{ key, at }] (at: the ms of the visit day), the own and
+  // blocked keys left out. since: the day the own switch last went on (the
+  // session always passes it); a row before it is never listed. The rows
+  // not kept are dropped at rest here too. on: as pullVisits. A blocks read
+  // that fails lists nothing this time.
+  async function visitList (own, now, { since, on } = {}) {
+    requireUnlocked()
+    await adoptVisitOn(on)
+    let mod
+    try {
+      mod = await moderationStrict()
+    } catch {
+      return []
+    }
+    const epoch = visitEpoch
+    const rows = await withVisits(() => pruneVisits(own, now, mod.blocked, since, epoch))
+    return rows.map((r) => ({ key: r.from, at: visits.dayMs(r.day) }))
+  }
+
+  // Empties the list (with queue also the pings not sent yet) at once;
+  // needs no key. A pull or flush under way writes nothing after it. all:
+  // every visit kv value (reset). The seen tokens stay otherwise: they name
+  // nobody, and a replayed ping is never filed again after a clear.
+  async function visitClear ({ queue = false, all = false } = {}) {
+    visitEpoch++
+    if (queue || all) clearVisitTimer()
+    await withVisits(() => local.clearVisits({ list: true, queue: queue || all, all }))
+  }
+
   // ---- Páginas (docs/rpc.md 5.114) ----
 
   function pageGenerate (own, identity, params) {
@@ -2551,6 +2978,14 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     setPageMismatch,
     topUp,
     walletSize,
+    visitSentToday,
+    visitAllowed,
+    visitQueue: tracked(visitQueue),
+    flushVisits,
+    pullVisits: tracked(pullVisits),
+    visitList,
+    visitClear: tracked(visitClear),
+    visitAdopt: tracked(adoptVisitOn),
     close,
     get pulling () { return pulling },
     // Tests: how many stores have a remembered fold.

@@ -1369,3 +1369,204 @@ test('inner v5: the largest certificate and the longest reaction fit', (t) => {
   t.is(largest, 1061, 'the largest v5 frame')
   t.ok(largest <= DM_INNER_BYTES)
 })
+
+// Inner v6: a visit ping (docs/protocol.md section 11). Opened only on the
+// quiet visit lane (openInner opts.visit) and only by its recipient.
+const DAY = '2026-11-03'
+const VID = 'e'.repeat(32)
+const V = { association: ASSOC, visit: true }
+
+function visitBody (over = {}) {
+  return { v: 6, kind: 'visit', id: VID, from: ana.hex, to: bia.hex, day: DAY, cert: ana.cert, ...over }
+}
+
+function visit (over = {}, from = ana) {
+  return buildInner({ kind: 'visit', to: bia.hex, day: DAY, cert: from.cert, ...over }, from)
+}
+
+test('inner v6: constants, the rpc key list and round trip', (t) => {
+  t.is(dm.DM_SIG_PREFIX_V6, 'varanda-dm-v6\n')
+  t.is(dm.DM_VISIT_KIND, 'visit')
+  t.alike(dm.INNER_KEYS_V6, ['v', 'kind', 'id', 'from', 'to', 'day', 'cert'])
+  t.alike(dm.INNER_KEYS_V6, require('@varanda/rpc').DM_INNER_KEYS_V6, 'core signs the key list the rpc measures')
+  t.alike(dm.DM_KINDS, ['msg', 'ctl'], 'no new kind for v1 to v5')
+  const inner = visit()
+  t.is(inner.byteLength, DM_INNER_BYTES)
+  t.alike(Object.keys(wireOf(inner)), dm.INNER_KEYS_V6)
+  t.is(wireOf(inner).v, 6)
+  const got = openInner(visit(), bia.hex, V)
+  t.alike(got, { ...visitBody({ id: got.id }), mine: false })
+  t.is(got.day, DAY)
+  t.is(openInner(visit({ id: VID }), bia.hex, V).id, VID)
+  const one = visit()
+  t.is(dm.bodyDigest(openInner(b4a.from(one), bia.hex, V)), dm.frameDigest(one), 'the digest covers the visit')
+  const before = new Date().toISOString().slice(0, 10)
+  const built = wireOf(buildInner({ kind: 'visit', to: bia.hex, cert: ana.cert }, ana)).day
+  const after = new Date().toISOString().slice(0, 10)
+  t.ok(built === before || built === after, 'day defaults to today, UTC')
+})
+
+test('inner v6: only its recipient opens it, and only on the visit lane', (t) => {
+  t.is(openInner(visit(), ana.hex, V), null, 'no self copy')
+  t.is(openInner(visit(), caio.hex, V), null, 'a third party opens nothing')
+  t.is(openInner(visit(), bia.hex, O), null, 'never on the DM path')
+  t.is(openInner(visit(), bia.hex, { ...O, visit: 1 }), null, 'visit must be exactly true')
+  t.is(openInner(visit(), bia.hex, { ...O, visit: 'true' }), null)
+  t.is(openInner(msg(), bia.hex, V), null, 'a message never opens on the visit lane')
+  t.is(openInner(react(), bia.hex, V), null, 'nor a reaction')
+  t.is(openInner(momentReact(), bia.hex, V), null, 'nor a moment reaction')
+  t.is(openInner(buildInner({ kind: 'ctl', op: 'blocked', peer: bia.hex, at: AT }, ana), ana.hex, { ...V }), null, 'nor a ctl')
+  const v3 = pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert })
+  t.is(openInner(v3.inner, bia.hex, V), null, 'nor a Página message')
+})
+
+test('inner v6: a ping re-sealed to a third party opens for nobody', (t) => {
+  const biaBox = boxPair()
+  const caioBox = boxPair()
+  const sealed = sealInner(visit(), biaBox.hex)
+  const plain = openSealed(sealed, biaBox)
+  const leak = b4a.from(plain)
+  t.ok(openInner(plain, bia.hex, V), 'the recipient opens it')
+  // The recipient re-seals the very same signed inner to someone else.
+  const resealed = sealInner(leak, caioBox.hex)
+  const atCaio = openSealed(resealed, caioBox)
+  t.ok(atCaio, 'the envelope opens for the third party')
+  t.is(openInner(b4a.from(atCaio), caio.hex, V), null, 'but the ping is addressed to the recipient only')
+  t.is(openInner(b4a.from(atCaio), caio.hex, O), null, 'nor on the DM path')
+  // Rewriting `to` breaks the sender's signature.
+  const len = (atCaio[0] << 8) | atCaio[1]
+  const json = b4a.toString(atCaio.subarray(2, 2 + len))
+  const swapped = b4a.from(json.replace(bia.hex, caio.hex))
+  t.is(swapped.byteLength, len)
+  const copy = b4a.from(atCaio)
+  copy.set(swapped, 2)
+  t.is(openInner(copy, caio.hex, V), null, 'a rewritten recipient never verifies')
+  // Nor can the recipient sign a fresh ping in the sender's name.
+  t.is(openInner(forge(visitBody({ to: caio.hex }), bia, dm.DM_SIG_PREFIX_V6), caio.hex, V), null, 'signed by the wrong key')
+})
+
+test('inner v6: the certificate must hold for the sender', (t) => {
+  const other = generateAssociationKeyPair()
+  const throwaway = signPair()
+  t.is(openInner(visit({ cert: null }), bia.hex, V), null, 'no certificate')
+  t.is(openInner(visit(), bia.hex, { visit: true }), null, 'no association given')
+  t.is(openInner(visit(), bia.hex, { association: b4a.toString(other.publicKey, 'hex'), visit: true }), null, 'another association')
+  throwaway.cert = createCert({ member: throwaway.hex, date: AT }, other)
+  t.is(openInner(visit({}, throwaway), bia.hex, V), null, 'a cert of another association')
+  t.exception.all(() => visit({ cert: caio.cert }), /mensagem inválida/, 'buildInner refuses a cert of another member')
+  t.ok(openInner(forge(visitBody(), ana, dm.DM_SIG_PREFIX_V6), bia.hex, V), 'the forge helper builds an openable v6')
+  t.is(openInner(forge(visitBody({ cert: caio.cert }), ana, dm.DM_SIG_PREFIX_V6), bia.hex, V), null, 'member !== from')
+  t.is(openInner(forge(visitBody({ cert: { ...ana.cert, signature: 'f'.repeat(128) } }), ana, dm.DM_SIG_PREFIX_V6), bia.hex, V), null, 'bad cert signature')
+  const issued = largestV2Sender()
+  t.ok(openInner(visit({}, issued), bia.hex, V), 'an issued v2 certificate')
+})
+
+test('inner v6: shape rules', (t) => {
+  t.ok(dm.validBody(visitBody()))
+  t.ok(dm.validBody(visitBody({ cert: null })), 'built without a cert, never opened')
+  t.ok(dm.validBody(visitBody({ day: '2024-02-29' })))
+  const { day, ...noDay } = visitBody()
+  t.absent(dm.validBody(noDay), 'a missing key')
+  for (const extra of [{ text: '' }, { at: AT }, { replyTo: null }, { op: null }, { peer: null }, { media: null }, { moment: 1 }, { x: 1 }]) {
+    t.absent(dm.validBody(visitBody(extra)), 'an extra key ' + Object.keys(extra)[0])
+  }
+  for (const d of ['2026-02-30', '2025-02-29', '2026-13-01', '2026-11-3', '26-11-03', '2026-11-03T00:00:00.000Z', ' 2026-11-03', '2026/11/03', '', 20261103, null, undefined, ['2026-11-03']]) {
+    t.absent(dm.validBody(visitBody({ day: d })), 'day ' + JSON.stringify(d))
+  }
+  for (const kind of ['msg', 'ctl', 'react', 'Visit', '', null]) {
+    t.absent(dm.validBody(visitBody({ kind })), 'kind ' + JSON.stringify(kind))
+  }
+  t.absent(dm.validBody(visitBody({ to: ana.hex })), 'to oneself')
+  t.absent(dm.validBody(visitBody({ to: 'B'.repeat(64) })))
+  t.absent(dm.validBody(visitBody({ from: 'nope' })))
+  t.absent(dm.validBody(visitBody({ id: 'A'.repeat(32) })))
+  t.absent(dm.validBody(visitBody({ id: 'a'.repeat(31) })))
+  t.absent(dm.validBody(visitBody({ cert: bia.cert })), 'a certificate of someone else')
+
+  const reordered = { v: 6, kind: 'visit', id: VID, from: ana.hex, day: DAY, to: bia.hex, cert: ana.cert }
+  t.ok(dm.validBody(reordered), 'the same key set')
+  t.is(openInner(forge(reordered, ana, dm.DM_SIG_PREFIX_V6), bia.hex, V), null, 'reordered keys')
+  t.is(openInner(forge(visitBody({ x: 1 }), ana, dm.DM_SIG_PREFIX_V6), bia.hex, V), null, 'an extra key')
+  t.is(openInner(forge(visitBody({ day: '2026-02-30' }), ana, dm.DM_SIG_PREFIX_V6), bia.hex, V), null, 'no such day')
+  const self = visitBody({ to: ana.hex })
+  t.is(openInner(forge(self, ana, dm.DM_SIG_PREFIX_V6), ana.hex, V), null, 'from === to')
+
+  // buildInner refuses rather than drops anything a visit does not carry.
+  for (const [label, over] of [
+    ['text', { text: 'oi' }], ['empty text', { text: '' }], ['at', { at: AT }], ['replyTo', { replyTo: 'b'.repeat(32) }],
+    ['media', { media: [blobItem(1)] }], ['card', { card: dmCard() }], ['fwd', { fwd: 0 }], ['moment', { moment: 7 }],
+    ['op', { op: 'blocked' }], ['peer', { peer: caio.hex }], ['target', { target: boundTo() }], ['emoji', { emoji: HEART }],
+    ['rev', { rev: 1 }], ['v', { v: 6 }], ['bad day', { day: '2026-02-30' }], ['day as ms', { day: Date.parse(AT) }],
+    ['to oneself', { to: ana.hex }], ['no to', { to: undefined }], ['from of another', { from: bia.hex }]
+  ]) {
+    t.exception.all(() => visit(over), /mensagem inválida/, label)
+  }
+  t.ok(visit({ text: undefined, at: undefined }), 'an undefined field is no field')
+  t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'visit', to: bia.hex, at: AT, cert: page.cert }), /mensagem inválida/, 'a Página writes no visit')
+})
+
+test('inner v6: no v1 to v5 body is a visit', (t) => {
+  const prefixes = [DM_SIG_PREFIX, DM_SIG_PREFIX_V2, dm.DM_V3_PREFIX, dm.DM_SIG_PREFIX_V4, dm.DM_SIG_PREFIX_V5, dm.DM_SIG_PREFIX_V6]
+  const old = [
+    wireOf(msg()),
+    wireOf(msg({ fwd: 1 })),
+    wireOf(pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert }).inner),
+    wireOf(react()),
+    wireOf(momentReact())
+  ]
+  for (const body of old) {
+    const visitKind = { ...body, kind: 'visit' }
+    t.absent(dm.validBody(visitKind), 'v' + body.v + ' with kind visit')
+    for (const prefix of prefixes) {
+      t.is(openInner(forge(visitKind, body.from === page.hex ? page : ana, prefix), bia.hex, V), null, 'v' + body.v + ' visit under ' + JSON.stringify(prefix))
+      t.is(openInner(forge(visitKind, body.from === page.hex ? page : ana, prefix), bia.hex, O), null, 'v' + body.v + ' visit on the DM path under ' + JSON.stringify(prefix))
+    }
+  }
+  // A v6 body relabelled to v1..v5 is no valid body and never opens.
+  const wire = visitBody()
+  t.absent(oldValidBody(wire), 'a reader from before v6 drops it')
+  for (const v of [1, 2, 3, 4, 5]) {
+    t.absent(dm.validBody({ ...wire, v }), 'relabelled v' + v)
+    for (const prefix of prefixes) {
+      t.is(openInner(forge({ ...wire, v }, ana, prefix), bia.hex, V), null, 'relabelled v' + v + ' under ' + JSON.stringify(prefix))
+    }
+  }
+  // The real frame, its v byte changed in place.
+  const inner = visit()
+  const len = (inner[0] << 8) | inner[1]
+  const at = b4a.toString(inner.subarray(2, 2 + len)).indexOf('"v":6') + 4
+  for (const v of ['1', '2', '3', '4', '5']) {
+    const copy = b4a.from(inner)
+    copy[2 + at] = v.charCodeAt(0)
+    t.is(openInner(copy, bia.hex, V), null, 'frame relabelled ' + v)
+    t.is(openInner(copy, bia.hex, O), null, 'frame relabelled ' + v + ' on the DM path')
+  }
+})
+
+test('inner v6: its own signature domain', (t) => {
+  const { json, sig } = frameParts(visit())
+  const key = ana.publicKey
+  t.ok(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V6), json]), sig, key))
+  for (const [name, prefix] of [['v1', DM_SIG_PREFIX], ['v2', DM_SIG_PREFIX_V2], ['v4', dm.DM_SIG_PREFIX_V4], ['v5', dm.DM_SIG_PREFIX_V5]]) {
+    t.absent(hcrypto.verify(b4a.concat([b4a.from(prefix), json]), sig, key), 'not under ' + name)
+    t.is(openInner(forge(visitBody(), ana, prefix), bia.hex, V), null, 'a v6 body signed under ' + name)
+  }
+  for (const [name, inner] of [['v1', msg()], ['v2', msg({ fwd: 1 })], ['v4', react()], ['v5', momentReact()]]) {
+    const p = frameParts(inner)
+    t.absent(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V6), p.json]), p.sig, key), name + ' signature under the v6 domain')
+  }
+})
+
+test('inner v6: the largest certificate fits', (t) => {
+  const v1 = signPair()
+  v1.cert = createCert({ member: v1.hex, ageBand: 'a'.repeat(32), method: 'b'.repeat(32), date: AT }, assoc)
+  let largest = 0
+  for (const who of [v1, largestV2Sender()]) {
+    const worst = visit({ cert: who.cert }, who)
+    const len = (worst[0] << 8) | worst[1]
+    largest = Math.max(largest, len + 66)
+    t.is(openInner(worst, bia.hex, V).from, who.hex)
+  }
+  t.is(largest, 947, 'the largest v6 frame')
+  t.ok(largest <= DM_INNER_BYTES)
+})

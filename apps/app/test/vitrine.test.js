@@ -153,6 +153,11 @@ const resultKeys = {
   'top.set': ['seq', 'ref'],
   'profile.about': ['seq', 'ref'],
   'profile.mood': ['seq', 'ref'],
+  'visits.set': ['on'],
+  'visits.state': ['on', 'sentToday'],
+  'visits.list': ['visits'],
+  'visits.clear': ['ok'],
+  'visits.note': ['queued'],
   'profile.extra.delete': ['seq', 'deleted'],
   'moment.putMedia': ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms'],
   'moment.create': ['seq', 'ref'],
@@ -635,6 +640,11 @@ function samples (f) {
     'fan.set': { key: f.members[4].author, on: true },
     'top.set': { keys: [f.members[4].author] },
     'profile.about': { about: 'Café, livros e encontros na praça.', city: 'Curitiba', work: null, studies: null, interests: null, birthday: '05-20', theme: 'varanda' },
+    'visits.set': { on: true },
+    'visits.state': {},
+    'visits.list': {},
+    'visits.clear': {},
+    'visits.note': { key: f.members[1].author },
     'profile.mood': { emoji: '☕', text: 'Café na praça' },
     'profile.extra.delete': { kind: 'about' },
     'moment.putMedia': { name: '0'.repeat(32) + '.bin', mime: 'image/jpeg', width: 512, height: 512 },
@@ -1795,4 +1805,17 @@ test('event RSVP on the diary fixture event and the topic read of a group event'
   t.alike(Object.keys(read), ['items', 'next', 'hidden', 'incomplete', 'sealed', 'epoch', 'poll', 'event', 'state'])
   t.alike(Object.keys(read.event), ['writer', 'seq', 'title', 'start', 'end', 'place', 'totals', 'mine'])
   t.alike(read.event.totals, [0, 0])
+})
+
+test('vitrine visits.list rows are a key and a whole UTC day in ms, from visitors whose switch is on', async (t) => {
+  const { fixtures: f, request } = await load()
+  const { visits } = await request('visits.list', {})
+  t.ok(visits.length > 0, 'the demo list is not empty')
+  for (const v of visits) {
+    t.alike(Object.keys(v).sort(), ['at', 'key'])
+    t.ok(Number.isSafeInteger(v.at) && v.at % 86400000 === 0, 'day precision')
+    t.ok(f.diaryRecords.some((e) => e.author === v.key && e.record.type === 'visits' && e.record.on === true), 'the visitor opted in')
+  }
+  const { groupByDay } = await import('../src/visits.js')
+  t.is(groupByDay(visits, Date.parse(f.now)).reduce((n, g) => n + g.rows.length, 0), visits.length, 'every row renders')
 })

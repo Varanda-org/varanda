@@ -117,6 +117,14 @@
 // 'varanda/blob/1' channel (lib/blob-net.js) on every peer and hands
 // complete blobs' chunks to the HTTP /blob route through blobChunk(). The
 // pool is swept on the DM tick and closed with the seeder.
+// The quiet visit lane comes with dm as well: the anonymous
+// 'varanda/visit/1' channel (lib/dm-net.js with VISIT_PROTOCOL) on every
+// peer and its own pool under <dataDir>/visit-pool/, VISIT_POOL_MAX drops,
+// kept VISIT_RETENTION_MS (3 days) with spent stamps remembered as long as
+// the DM pool does, the DM stamps and kids. A visit pool that fails to open
+// fails start() (fail closed: without it a stamp could be spent twice). A stored visit ping never calls
+// dm.onDrop (no push wake), and a full visit pool refuses visit puts only.
+// A stamp spent in either pool is refused by the other. Swept on the DM tick.
 const fs = require('#fs')
 const path = require('#path')
 const process = require('#process')
@@ -168,8 +176,8 @@ const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./bl
 const { attachBlocklist } = require('./blocklist-net')
 const { createNoticeIndex } = require('./notices')
 const { noteGrowth, countActive } = require('./activity')
-const { DM_STAMPS_PER_DAY, DM_STAMP_PROTOCOL } = require('./dm')
-const { createDmPool } = require('./dm-pool')
+const { DM_STAMPS_PER_DAY, DM_STAMP_PROTOCOL, VISIT_PROTOCOL, VISIT_POOL_MAX } = require('./dm')
+const { createDmPool, VISIT_POOL_DIR, VISIT_RETENTION_MS, VISIT_TOKEN_RETENTION_MS } = require('./dm-pool')
 const { attachDm } = require('./dm-net')
 const { attachDmStamp } = require('./dm-stamp-net')
 const dmPostage = require('./dm-postage')
@@ -290,7 +298,7 @@ const FEIRA_OFFERS_PER_DIARY = 4096
 const FEIRA_RESCAN_MS = 60000
 const FEIRA_RESCAN_MAX_MS = 3600000
 const FEIRA_TYPES = new Set(['listing', 'listing-edit', 'listing-status', 'listing-rate'])
-const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice'])
+const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits'])
 
 // Frame guard for external streams (acceptStream): see lib/frame-guard.js
 // for the limits, how they were measured, the frame deadlines and the
@@ -889,17 +897,18 @@ function dmOptions (dm) {
   if (typeof dm !== 'object' || dm.postage === null || typeof dm.postage !== 'object' || typeof dm.postage.get !== 'function') {
     throw new TypeError('dm.postage.get must be a function')
   }
-  const { postage, stampsPerDay = DM_STAMPS_PER_DAY, onDrop = noop } = dm
+  const { postage, stampsPerDay = DM_STAMPS_PER_DAY, onDrop = noop, visitMax = VISIT_POOL_MAX } = dm
   const { blobPostage = null, blobStampsPerDay = dmPostage.BLOB_STAMPS_PER_DAY, blobBytes = BLOB_POOL_BYTES } = dm
   if (!Number.isSafeInteger(stampsPerDay) || stampsPerDay < 1) throw new TypeError('invalid dm.stampsPerDay')
   if (typeof onDrop !== 'function') throw new TypeError('dm.onDrop must be a function')
+  if (!Number.isSafeInteger(visitMax) || visitMax < 1) throw new TypeError('invalid dm.visitMax')
   if (blobPostage !== null && (typeof blobPostage !== 'object' || typeof blobPostage.get !== 'function')) {
     throw new TypeError('dm.blobPostage.get must be a function')
   }
   if (blobPostage !== null && blobPostage === postage) throw new TypeError('dm.blobPostage must not be dm.postage')
   if (!Number.isSafeInteger(blobStampsPerDay) || blobStampsPerDay < 1) throw new TypeError('invalid dm.blobStampsPerDay')
   if (!Number.isSafeInteger(blobBytes) || blobBytes < BLOB_CHUNK_BYTES) throw new TypeError('invalid dm.blobBytes')
-  return { postage, stampsPerDay, onDrop, blobPostage, blobStampsPerDay, blobBytes }
+  return { postage, stampsPerDay, onDrop, visitMax, blobPostage, blobStampsPerDay, blobBytes }
 }
 
 // The postage keys usable by the seeder, newest first, at most two (the
@@ -1053,7 +1062,8 @@ class Seeder {
   // same shape, a DIFFERENT key file) turns on blob stamps, with
   // blobStampsPerDay = BLOB_STAMPS_PER_DAY, and the blob pool and channel,
   // with blobBytes = BLOB_POOL_BYTES; without it blob requests on the stamp
-  // channel are bad messages and no blob channel is opened.
+  // channel are bad messages and no blob channel is opened. visitMax
+  // (default VISIT_POOL_MAX) caps the visit pool (header comment).
   // noClear (default: VARANDA_NO_CLEAR=1, the rollout kill switch) keeps
   // the bytes of deleted diary blocks and media ranges: they are only
   // hidden, as before byte deletion.
@@ -1149,6 +1159,7 @@ class Seeder {
     this.onPush = onPush
     this._dmOpts = dmOptions(dm)
     this._dm = null
+    this._visit = null
     this._blob = null
     this._dmTimer = null
     this._dmKeys = []
@@ -6283,9 +6294,11 @@ class Seeder {
 
   // GET /index/profile/<author>: pointers to the author's perfil rico blocks,
   // { about: seq | null, mood: seq | null, fans: { count, indexing }, top:
-  // { seq, back: { <friend>: followSeq | null } } | null, indexing, complete }
-  // (engagement-index.js profileExtra, fanCount): the newest live
-  // `profile-about`, `mood` and `top-friends` block. fans.count is the number
+  // { seq, back: { <friend>: followSeq | null } } | null, visits: seq | null,
+  // indexing, complete } (engagement-index.js profileExtra, fanCount): the
+  // newest live `profile-about`, `mood`, `top-friends` and `visits` block
+  // (visits is a pointer only: the node peeks the block and checks on === true,
+  // an off block still has a seq). fans.count is the number
   // of visible fas indexed so far (held ones, and writers whose own diary
   // is pending, left out: _fansShown), a claim like the follower counts;
   // fans.indexing is true while it may still grow (any diary not fully
@@ -6296,7 +6309,7 @@ class Seeder {
   // readers ignore keys they do not know. Null when the author is not
   // visible or held (_searchHeld). Fails closed while the author's own diary
   // is not fully indexed and scanned (the newest block may be missing, a
-  // tombstone not yet applied): about, mood and top null, fans.indexing,
+  // tombstone not yet applied): about, mood, top and visits null, fans.indexing,
   // indexing true and complete false. Seqs only: the node reads and verifies
   // the blocks.
   indexProfile (authorHex) {
@@ -6305,8 +6318,8 @@ class Seeder {
       const v = this._followsVisible()
       const shown = this._fansShown(v)
       const count = this._index.fanCount(authorHex, shown.visible)
-      if (this._ownerIndexPending(authorHex)) return { about: null, mood: null, fans: { count, indexing: true }, top: null, indexing: true, complete: false }
-      const { about, mood, top } = this._index.profileExtra(authorHex)
+      if (this._ownerIndexPending(authorHex)) return { about: null, mood: null, fans: { count, indexing: true }, top: null, visits: null, indexing: true, complete: false }
+      const { about, mood, top, visits } = this._index.profileExtra(authorHex)
       let pointers = null
       if (top !== null) {
         const back = {}
@@ -6317,7 +6330,7 @@ class Seeder {
         pointers = { seq: top.seq, back }
       }
       const flags = this._indexFlags()
-      return { about, mood, fans: { count, indexing: !flags.complete || v.held || shown.left() }, top: pointers, indexing: flags.indexing, complete: true }
+      return { about, mood, fans: { count, indexing: !flags.complete || v.held || shown.left() }, top: pointers, visits, indexing: flags.indexing, complete: true }
     } catch {
       return null
     }
@@ -7518,6 +7531,21 @@ class Seeder {
       }
       this._dmHandles.add(dm)
       release.push(() => this._dmHandles.delete(dm))
+      let visit = null
+      try {
+        visit = attachDm(socket, {
+          role: 'seeder',
+          protocol: VISIT_PROTOCOL,
+          put: (bytes) => this._visitPut(bytes),
+          page: (q) => this._visit.page(q),
+          log: (ev) => this.log(ev)
+        })
+      } catch {
+        socket.destroy()
+        return
+      }
+      this._dmHandles.add(visit)
+      release.push(() => this._dmHandles.delete(visit))
       if (this._blob !== null) {
         let blob = null
         try {
@@ -7625,6 +7653,19 @@ class Seeder {
       onStored: () => {
         try { onDrop() } catch {}
       },
+      spentElsewhere: (h) => this._visit !== null && this._visit.hasSpent(h),
+      log: (ev) => this.log(ev)
+    })
+    // No onStored: a visit ping wakes nobody.
+    this._visit = createDmPool({
+      dir: this.dataDir,
+      name: VISIT_POOL_DIR,
+      max: this._dmOpts.visitMax,
+      retentionMs: VISIT_RETENTION_MS,
+      tokenRetentionMs: VISIT_TOKEN_RETENTION_MS,
+      verifyStamp: (kid, token, sig) => this._verifyStamp(kid, token, sig),
+      isKidAccepted: (kid) => this._dmKidAccepted(kid),
+      spentElsewhere: (h) => this._dm.hasSpent(h),
       log: (ev) => this.log(ev)
     })
     if (this._dmOpts.blobPostage !== null) {
@@ -7713,6 +7754,20 @@ class Seeder {
     const result = this._dm.submit(bytes)
     const reason = result === 'cheio' ? 'cheio' : result !== null && typeof result === 'object' ? 'guardada' : 'invalido'
     this.log({ event: 'dm', reason })
+    return result
+  }
+
+  // As _dmPut, into the visit pool: same keys, its own log event.
+  async _visitPut (bytes) {
+    try {
+      await this._dmPostageKeys()
+    } catch (err) {
+      this.log({ event: 'visit', reason: 'postage' })
+      throw err
+    }
+    const result = this._visit.submit(bytes)
+    const reason = result === 'cheio' ? 'cheio' : result !== null && typeof result === 'object' ? 'guardada' : 'invalido'
+    this.log({ event: 'visit', reason })
     return result
   }
 
@@ -7860,6 +7915,13 @@ class Seeder {
       this._dm.sweep()
     } catch {
       this.log({ event: 'warning', reason: 'dm-sweep-failed' })
+    }
+    if (this._visit !== null) {
+      try {
+        this._visit.sweep()
+      } catch {
+        this.log({ event: 'warning', reason: 'visit-sweep-failed' })
+      }
     }
     if (this._blob !== null) {
       try {
@@ -8015,6 +8077,9 @@ class Seeder {
       }
       if (this._dm !== null) {
         try { this._dm.close() } catch {}
+      }
+      if (this._visit !== null) {
+        try { this._visit.close() } catch {}
       }
       if (this._blob !== null) {
         try { this._blob.close() } catch {}

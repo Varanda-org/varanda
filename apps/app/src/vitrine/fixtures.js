@@ -560,4 +560,20 @@ export const choiceRecords = [
   { author: own, seq: 61, record: { type: 'choice', to: pollPostRef, pick: 0, at: at(5, 14, 48) } }
 ]
 
-export const fixtures = { now, own, association, members, incompleteDiaries, applicants, pages, follows, conversations, uncertainSends, communities, groups, feed, noticePosts, notices, diaryRecords: [...diaryRecords, ...testimonialRecords, ...momentRecords, ...scrapRecords, ...profileRecords, ...fanRecords, ...choiceRecords], sealed, listings, rates }
+// Visitas: every listed visitor turned their own switch on (visits record in
+// their diary); the demo list holds three visits of today and yesterday, at
+// day precision (ms of the UTC day).
+export const visitRecords = [
+  { author: members[1].author, seq: 120, record: { type: 'visits', on: true, at: at(5, 8) } },
+  { author: members[2].author, seq: 121, record: { type: 'visits', on: true, at: at(4, 9) } },
+  { author: members[4].author, seq: 122, record: { type: 'visits', on: true, at: at(3, 20) } }
+]
+
+const visitDayMs = (day) => Date.parse(at(day, 0))
+export const visitList = [
+  { key: members[1].author, at: visitDayMs(5) },
+  { key: members[2].author, at: visitDayMs(5) },
+  { key: members[4].author, at: visitDayMs(4) }
+]
+
+export const fixtures = { now, own, association, members, incompleteDiaries, applicants, pages, follows, conversations, uncertainSends, communities, groups, feed, noticePosts, notices, diaryRecords: [...diaryRecords, ...testimonialRecords, ...momentRecords, ...scrapRecords, ...profileRecords, ...fanRecords, ...choiceRecords, ...visitRecords], sealed, listings, rates, visits: { on: true, sentToday: 1, list: visitList } }

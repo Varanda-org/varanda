@@ -26,6 +26,9 @@
 // slot (the list may then be short; counts are seeder claims). The newest
 // live `top-friends` block of an author is profileExtra().top, kept like the
 // about pointer with its keys; one that names its writer takes no slot.
+// Visitas: the newest live `visits` block of an author is profileExtra().visits,
+// a seq only (the node peeks the block and checks on === true); every live
+// block holds a record slot and a deletion falls back to the previous one.
 // Enquetes (lib/polls.js): every live `choice` block holds a record slot
 // under its voter. A poll is a live `post` carrying a valid `poll` key (the
 // option count is kept beside the post); votes are kept per (voter, poll)
@@ -520,7 +523,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   function authorEntry (author) {
     let entry = authors.get(author)
     if (entry === undefined) {
-      entry = { count: 0, timeline: [], posts: new Map(), reposts: new Map(), touched: new Map(), profileSeqs: [], usernameSeqs: [], copiedSeqs: [], aboutSeqs: [], moodSeqs: [], engagements: new Map(), testimonials: null, shows: null, scraps: null, scrapsByTo: null, scrapHides: null, hideSeqs: null, hiddenRefs: null, walls: null, wallSeqs: null, fanSeqs: null, fanOps: null, tops: null, topSeqs: null, choiceSeqs: null, choiceOps: null, eventSeqs: null }
+      entry = { count: 0, timeline: [], posts: new Map(), reposts: new Map(), touched: new Map(), profileSeqs: [], usernameSeqs: [], copiedSeqs: [], aboutSeqs: [], moodSeqs: [], engagements: new Map(), testimonials: null, shows: null, scraps: null, scrapsByTo: null, scrapHides: null, hideSeqs: null, hiddenRefs: null, walls: null, wallSeqs: null, fanSeqs: null, fanOps: null, tops: null, topSeqs: null, choiceSeqs: null, choiceOps: null, eventSeqs: null, visitSeqs: null }
       authors.set(author, entry)
     }
     return entry
@@ -630,7 +633,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       const type = record.type
       if (type !== 'post' && type !== 'like' && type !== 'repost' && type !== 'profile' && type !== 'username' &&
           type !== 'testimonial' && type !== 'testimonial-show' && type !== 'scrap' && type !== 'scrap-hide' &&
-          type !== 'scrap-wall' && type !== 'profile-about' && type !== 'mood' && type !== 'fan' && type !== 'top-friends' && type !== 'choice') return false
+          type !== 'scrap-wall' && type !== 'profile-about' && type !== 'mood' && type !== 'fan' && type !== 'top-friends' && type !== 'choice' && type !== 'visits') return false
       if (type === 'testimonial' && (!HEX64.test(record.to) || !HEX64.test(record.hash))) return false
       if (type === 'scrap' && (!HEX64.test(record.to) || (record.replyTo !== null &&
           (typeof record.replyTo !== 'object' || !HEX64.test(record.replyTo.author) || !isSeq(record.replyTo.seq))))) return false
@@ -639,6 +642,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       if (type === 'fan' && (typeof record.key !== 'string' || !HEX64.test(record.key) || typeof record.on !== 'boolean' || typeof record.at !== 'string')) return false
       if (type === 'top-friends' && !validTopKeys(record.keys)) return false
       if (type === 'choice' && !validChoice(record)) return false
+      if (type === 'visits' && typeof record.on !== 'boolean') return false
       // Never self (lib/fans.js): as if never written, no slot.
       if (type === 'fan' && record.key === author) return true
       if (type === 'top-friends' && record.keys.includes(author)) return true
@@ -661,7 +665,8 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
           indexOfSeq(existing.copiedSeqs, seq) !== -1 || indexOfSeq(existing.aboutSeqs, seq) !== -1 ||
           indexOfSeq(existing.moodSeqs, seq) !== -1 || existing.testimonials?.has(seq) || existing.shows?.has(seq) ||
           existing.scraps?.has(seq) || existing.scrapHides?.has(seq) || existing.walls?.has(seq) ||
-          existing.fanSeqs?.has(seq) || existing.tops?.has(seq) || existing.choiceSeqs?.has(seq))) return true
+          existing.fanSeqs?.has(seq) || existing.tops?.has(seq) || existing.choiceSeqs?.has(seq) ||
+          (existing.visitSeqs !== null && indexOfSeq(existing.visitSeqs, seq) !== -1))) return true
       if (type === 'fan' && existing?.fanOps?.has(record.key) !== true && (existing?.fanOps?.size ?? 0) >= FAN_KEYS_MAX) return true
       if (type === 'choice' && existing?.choiceOps?.has(pollRef) !== true &&
           ((existing?.choiceOps?.size ?? 0) >= CHOICE_POLLS_MAX || (pollIn.get(pollRef)?.size ?? 0) >= CHOICE_VOTERS_MAX)) return true
@@ -763,6 +768,9 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
         entry.aboutSeqs.splice(lowerBoundSeq(entry.aboutSeqs, seq), 0, seq)
       } else if (type === 'mood') {
         entry.moodSeqs.splice(lowerBoundSeq(entry.moodSeqs, seq), 0, seq)
+      } else if (type === 'visits') {
+        if (entry.visitSeqs === null) entry.visitSeqs = []
+        entry.visitSeqs.splice(lowerBoundSeq(entry.visitSeqs, seq), 0, seq)
       } else if (type === 'fan') {
         if (entry.fanSeqs === null) {
           entry.fanSeqs = new Map()
@@ -1082,6 +1090,14 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
         if (entry.testimonials.size === 0) entry.testimonials = null
         found = true
       }
+      if (entry.visitSeqs !== null) {
+        const at = indexOfSeq(entry.visitSeqs, seq)
+        if (at !== -1) {
+          entry.visitSeqs.splice(at, 1)
+          if (entry.visitSeqs.length === 0) entry.visitSeqs = null
+          found = true
+        }
+      }
       for (const list of [entry.profileSeqs, entry.usernameSeqs, entry.copiedSeqs, entry.aboutSeqs, entry.moodSeqs]) {
         const at = indexOfSeq(list, seq)
         if (at === -1) continue
@@ -1247,17 +1263,19 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     return { profileSeq: entry.profileSeqs.at(-1) ?? null, usernameSeq: entry.usernameSeqs.at(-1) ?? null }
   }
 
-  // Perfil rico pointers of `author`: { about, mood, top }, the seq of its
-  // newest live `profile-about` and `mood` block, null when it has none, and
+  // Perfil rico pointers of `author`: { about, mood, top, visits }, the seq of
+  // its newest live `profile-about` and `mood` block, null when it has none,
   // top { seq, keys } its newest live `top-friends` block (keys a fresh copy)
-  // or null. The object is OPEN: later features add pointers to it and
+  // or null, and visits the seq of its newest live `visits` block (Visitas:
+  // the pointer says nothing about on or off, the node peeks the block and
+  // reads it) or null. The object is OPEN: later features add pointers to it and
   // readers ignore keys they do not know. The node reads and verifies the
   // blocks.
   function profileExtra (author) {
     const entry = typeof author === 'string' ? authors.get(author) : undefined
     const topSeq = entry?.topSeqs?.at(-1)
     const top = topSeq === undefined ? null : { seq: topSeq, keys: entry.tops.get(topSeq).slice() }
-    return { about: entry?.aboutSeqs.at(-1) ?? null, mood: entry?.moodSeqs.at(-1) ?? null, top }
+    return { about: entry?.aboutSeqs.at(-1) ?? null, mood: entry?.moodSeqs.at(-1) ?? null, top, visits: entry?.visitSeqs?.at(-1) ?? null }
   }
 
   // The writers whose last live `fan` operation on `author` is on, newest

@@ -18,8 +18,12 @@ const { certForKey, validateCertShape } = require('./cert')
 const { validateBlobDescriptor, BLOB_MAC_BYTES } = require('./blob')
 const rpc = require('@varanda/rpc')
 const { validLinkCard, validCardImageBytes, CARD_IMAGE_MIME } = require('./link-card')
+const { isVisitDay, visitDay } = require('./visits')
 
 const DM_PROTOCOL = 'varanda/dm/1'
+// The quiet visit lane: the same messages and drops as DM_PROTOCOL, into a
+// separate, smaller seeder pool that never wakes anyone (lib/dm-net.js).
+const VISIT_PROTOCOL = 'varanda/visit/1'
 const DM_STAMP_PROTOCOL = 'varanda/dm-stamp/1'
 const DM_MAX_TEXT = 1000
 // Sized for DM_MAX_TEXT code points of 4-byte characters plus the sender's
@@ -31,6 +35,7 @@ const DM_MAGIC = 'VDM1'
 const DM_VERSION = 1
 const DM_RETENTION_MS = 7 * 86400000
 const DM_POOL_MAX = 20000
+const VISIT_POOL_MAX = 20000
 // One page of base64 drops inside JSON must stay under DM_MAX_MESSAGE.
 const DM_PAGE_MAX = 8
 const DM_PULL_BUDGET_BYTES = 8388608
@@ -51,6 +56,11 @@ const DM_SIG_PREFIX_V4 = 'varanda-dm-v4\n'
 // A reaction to a momento (v5) signs under its own domain too, so it never
 // verifies as a plain message, which would show the emoji with no momento.
 const DM_SIG_PREFIX_V5 = 'varanda-dm-v5\n'
+// A visit ping (v6) signs under its own domain, so no message or reaction
+// signature ever verifies as a visit and no visit signature as a message.
+const DM_SIG_PREFIX_V6 = 'varanda-dm-v6\n'
+// The only kind of a v6 body. Not in DM_KINDS: no v1 to v5 body is a visit.
+const DM_VISIT_KIND = 'visit'
 // A reaction's revision: per (target, reactor) the op with the highest rev wins.
 const DM_REACT_REV_MAX = 1000000
 // The service signs a v3 digest with an expiry it chooses (now + TTL). A drop
@@ -93,6 +103,7 @@ const INNER_KEYS_V2 = rpc.DM_INNER_KEYS_V2
 const INNER_KEYS_V3 = INNER_KEYS_V2
 const INNER_KEYS_V4 = rpc.DM_INNER_KEYS_V4
 const INNER_KEYS_V5 = rpc.DM_INNER_KEYS_V5
+const INNER_KEYS_V6 = rpc.DM_INNER_KEYS_V6
 const DM_TARGET_KEYS = rpc.DM_TARGET_KEYS
 const DM_MEDIA_KEYS = rpc.DM_MEDIA_KEYS
 const BLOB_KEYS = Object.freeze(['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256'])
@@ -113,6 +124,7 @@ const SIG_PREFIX_V2 = b4a.from(DM_SIG_PREFIX_V2, 'utf8')
 const SIG_PREFIX_V3 = b4a.from(DM_V3_PREFIX, 'utf8')
 const SIG_PREFIX_V4 = b4a.from(DM_SIG_PREFIX_V4, 'utf8')
 const SIG_PREFIX_V5 = b4a.from(DM_SIG_PREFIX_V5, 'utf8')
+const SIG_PREFIX_V6 = b4a.from(DM_SIG_PREFIX_V6, 'utf8')
 const MAGIC = b4a.from(DM_MAGIC, 'ascii')
 const HEX32 = /^[0-9a-f]{32}$/
 const HEX64_DIGEST = /^[0-9a-f]{64}$/
@@ -227,9 +239,11 @@ function validDmCard (card) {
 // as earlier builds wrote them) or, in v2 and v3, the bound form
 // { from, id, digest } that names that message's content too; a bound
 // reply needs v2, so v1 keeps the bare id only.
+// v6 is a visit ping (kind 'visit', see validVisit), and only v6 is.
 function validBody (b) {
   if (!isPlainObject(b)) return false
   if (b.v === 4) return validReaction(b)
+  if (b.v === 6) return validVisit(b)
   if (b.v === 1) {
     if (!hasExactKeys(b, INNER_KEYS)) return false
   } else if (b.v === 2) {
@@ -285,12 +299,22 @@ function validReaction (b) {
   return Number.isInteger(b.rev) && b.rev >= 1 && b.rev <= DM_REACT_REV_MAX
 }
 
+// A visit ping: `from` looked at the profile of `to` on `day` (a canonical
+// UTC date, nothing finer). The exact v6 key set and nothing else: no text,
+// no media, no op. `to` is signed, so a recipient that re-seals the inner to
+// a third party hands over a body that opens for nobody but itself.
+function validVisit (b) {
+  if (!hasExactKeys(b, INNER_KEYS_V6) || b.kind !== DM_VISIT_KIND) return false
+  if (!isHex32(b.id) || !isHex64(b.from) || !isHex64(b.to) || b.from === b.to || !isVisitDay(b.day)) return false
+  return b.cert === null || (validateCertShape(b.cert) === null && b.cert.member === b.from)
+}
+
 function canonicalJson (b) {
   return rpc.canonicalDmInnerJson(b)
 }
 
 function sigPrefix (v) {
-  return v === 5 ? SIG_PREFIX_V5 : v === 4 ? SIG_PREFIX_V4 : v === 2 ? SIG_PREFIX_V2 : SIG_PREFIX
+  return v === 6 ? SIG_PREFIX_V6 : v === 5 ? SIG_PREFIX_V5 : v === 4 ? SIG_PREFIX_V4 : v === 2 ? SIG_PREFIX_V2 : SIG_PREFIX
 }
 
 function digestBytes (json) {
@@ -373,8 +397,9 @@ function textBudget (fields) {
 // a bare id or a bound { from, id, digest } (written as v2). A body that
 // needs nothing of v2 is written as v1. A moment (not undefined or null)
 // writes a v5 reaction to that momento of `to`: text is its emoji, and it
-// takes no replyTo, media, card or forward. Returns DM_INNER_BYTES bytes the
-// caller owns (wipe after sealing).
+// takes no replyTo, media, card or forward. A visit is { kind: 'visit', to,
+// day?, id?, cert? } (day defaults to today, UTC) and takes nothing else.
+// Returns DM_INNER_BYTES bytes the caller owns (wipe after sealing).
 function buildInner (fields, signKeyPair) {
   if (!isPlainObject(fields)) throw new TypeError('mensagem inválida')
   if (!isPlainObject(signKeyPair) || !isBytes(signKeyPair.publicKey, 32) || !isBytes(signKeyPair.secretKey, 64)) {
@@ -384,6 +409,7 @@ function buildInner (fields, signKeyPair) {
   if (fields.from !== undefined && fields.from !== from) throw new TypeError('mensagem inválida')
   const kind = fields.kind
   if (kind === 'react') return signInner(reactionBody(fields, from), signKeyPair)
+  if (kind === DM_VISIT_KIND) return signInner(visitBody(fields, from), signKeyPair)
   const media = fields.media === undefined ? null : fields.media
   const card = fields.card === undefined ? null : fields.card
   const fwd = fields.fwd === undefined ? 0 : fields.fwd
@@ -436,6 +462,25 @@ function reactionBody (fields, from) {
     emoji: fields.emoji,
     rev: fields.rev,
     at: fields.at === undefined ? nowIso() : fields.at,
+    cert: fields.cert === undefined ? null : fields.cert
+  }
+}
+
+const VISIT_FIELDS = Object.freeze(['kind', 'to', 'day', 'id', 'cert', 'from'])
+
+// Any other field given is refused, never dropped: a visit is never also a
+// message, and nothing a caller meant to send is silently left out.
+function visitBody (fields, from) {
+  for (const k of Object.keys(fields)) {
+    if (!VISIT_FIELDS.includes(k) && fields[k] !== undefined) throw new TypeError('mensagem inválida')
+  }
+  return {
+    v: 6,
+    kind: DM_VISIT_KIND,
+    id: fields.id === undefined ? newMessageId() : fields.id,
+    from,
+    to: fields.to,
+    day: fields.day === undefined ? visitDay(Date.now()) : fields.day,
     cert: fields.cert === undefined ? null : fields.cert
   }
 }
@@ -515,11 +560,16 @@ function pageInnerStale (body, filedAtMs) {
 // cert.js verifyCert) }. A msg must carry a certificate of that association
 // for `from`, so one member cannot write from throwaway keys. A v3 body also
 // carries `expiresAt` (ms) read from its frame; see pageInnerStale.
+// opts.visit: true on the quiet visit lane (VISIT_PROTOCOL). There only a
+// visit (v6) opens, and elsewhere a visit never does, so a ping put in the
+// DM pool is never filed as a message and a message never as a visit. A
+// visit opens only for its recipient (to === ownKey) with a certificate of
+// the association for `from`; it has no self copy.
 function openInner (buf, ownKey, opts = {}) {
   let json = null
   try {
     if (!isBytes(buf, DM_INNER_BYTES) || !isHex64(ownKey)) return null
-    const { association, revokedIssuers } = isPlainObject(opts) ? opts : {}
+    const { association, revokedIssuers, visit } = isPlainObject(opts) ? opts : {}
     const len = (buf[0] << 8) | buf[1]
     if (len < 2 || len + LEN_BYTES + SIG_BYTES > DM_INNER_BYTES) return null
     json = b4a.from(buf.subarray(LEN_BYTES, LEN_BYTES + len))
@@ -527,6 +577,7 @@ function openInner (buf, ownKey, opts = {}) {
     const text = b4a.toString(json, 'utf8')
     const body = JSON.parse(text)
     if (!validBody(body)) return null
+    if ((body.kind === DM_VISIT_KIND) !== (visit === true)) return null
     // The exact bytes are signed: a reordered or re-escaped JSON is refused.
     if (canonicalJson(body) !== text) return null
     let pad = LEN_BYTES + len + SIG_BYTES
@@ -552,6 +603,7 @@ function openInner (buf, ownKey, opts = {}) {
     }
     if (!isHex64(association) || body.cert === null) return null
     if (!certForKey(body.cert, body.from, association, { revokedIssuers }).ok) return null
+    if (body.kind === DM_VISIT_KIND) return body.to === ownKey ? { ...body, mine: false } : null
     if (body.to === ownKey) return { ...body, ...extra, mine: false }
     if (body.from === ownKey) return { ...body, ...extra, mine: true }
     return null
@@ -634,6 +686,7 @@ function decodeDrop (buf) {
 
 module.exports = Object.freeze({
   DM_PROTOCOL,
+  VISIT_PROTOCOL,
   DM_STAMP_PROTOCOL,
   DM_MAX_TEXT,
   DM_INNER_BYTES,
@@ -644,6 +697,7 @@ module.exports = Object.freeze({
   DM_VERSION,
   DM_RETENTION_MS,
   DM_POOL_MAX,
+  VISIT_POOL_MAX,
   DM_PAGE_MAX,
   DM_PULL_BUDGET_BYTES,
   DM_MAX_MESSAGE,
@@ -657,6 +711,8 @@ module.exports = Object.freeze({
   DM_V3_PREFIX,
   DM_SIG_PREFIX_V4,
   DM_SIG_PREFIX_V5,
+  DM_SIG_PREFIX_V6,
+  DM_VISIT_KIND,
   DM_REACT_REV_MAX,
   DM_V3_TTL_MS,
   DM_V3_STALE_MS,
@@ -672,6 +728,7 @@ module.exports = Object.freeze({
   INNER_KEYS_V3,
   INNER_KEYS_V4,
   INNER_KEYS_V5,
+  INNER_KEYS_V6,
   DM_TARGET_KEYS,
   DM_MEDIA_KEYS,
   DM_MEDIA_MAX,

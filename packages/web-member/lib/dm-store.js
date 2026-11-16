@@ -61,6 +61,22 @@
 // only while it opens under this key, names this core and its length and
 // the digests are the current ones (summaryFor); anything else is ignored.
 //
+// Visitas (docs/protocol.md section 11 "Quiet visit lane"): four kv values,
+// each { v: 1, nonce, box }, the crypto_secretbox under a key derived from
+// the local key (VISITS_KEY_DOMAIN) of compact JSON padded to a
+// VISIT_BUCKET multiple: '<prefix>dmVisits' = { rows: [{ from, day }], on }
+// (the filed visitors; on: the seq of the own `visits` on-record they were
+// filed under, absent when unknown), '<prefix>dmVisitSeen' = { seen: [{ t, day }] } (a keyed
+// token of each filed ping's sender and inner id, so a ping replayed inside
+// the one-day slack is never filed twice, after visits.clear too; kept
+// apart from the list so clearing the list needs no key and keeps them),
+// '<prefix>dmVisitSent' = { rows: [{ to, day }] } (the own sent log the
+// budget reads) and '<prefix>dmVisitQueue' = { items: [{ to, day, due,
+// sealed }] } (pings sealed to their recipient and waiting for their random
+// delay; sealed is base64 of DM_SEALED_BYTES). kv '<prefix>dmVisitCursor' =
+// { v: 1, after } is the visit pool cursor, plain as dmCursor. Nothing here
+// decides who is filed; ./dm.js does.
+//
 // Delete is an op row plus the fold rule (@varanda/core lib/dm-fold.js drops
 // what was filed at or before it): the ciphertext of deleted messages stays
 // in the core until a later compaction, which is not done here.
@@ -68,7 +84,8 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const gc = require('@varanda/core/lib/group-crypto')
 const { copyLinkCard } = require('@varanda/core/lib/link-card')
-const { validDmCard, DM_OPS, DM_AUDIO_MIME, DM_AUDIO_MAX_MS, DM_AUDIO_MAX_BYTES, DM_REACT_REV_MAX } = require('@varanda/core/lib/dm')
+const { validDmCard, DM_OPS, DM_AUDIO_MIME, DM_AUDIO_MAX_MS, DM_AUDIO_MAX_BYTES, DM_REACT_REV_MAX, DM_SEALED_BYTES } = require('@varanda/core/lib/dm')
+const { isVisitDay } = require('@varanda/core/lib/visits')
 const { isReaction } = require('@varanda/rpc')
 const sodium = require('./sodium-browser')
 const store = require('./node-store')
@@ -79,6 +96,19 @@ const MEDIA_KEY_DOMAIN = b4a.from('varanda/member-dm-local/media-key/v1\n', 'utf
 const MEDIA_NAME_DOMAIN = b4a.from('varanda/member-dm-local/media-name/v1\n', 'utf8')
 const BYTES_DOMAIN = b4a.from('varanda/member-dm-local/bytes/v1\n', 'utf8')
 const SUMMARY_KEY_DOMAIN = b4a.from('varanda/member-dm-local/summary-key/v1\n', 'utf8')
+const VISITS_KEY_DOMAIN = b4a.from('varanda/member-dm-local/visits-key/v1\n', 'utf8')
+const VISIT_TOKEN_DOMAIN = b4a.from('varanda/member-dm-local/visit-seen/v1\n', 'utf8')
+const VISITS = 'dmVisits'
+const VISIT_SEEN = 'dmVisitSeen'
+const VISIT_SENT = 'dmVisitSent'
+const VISIT_QUEUE = 'dmVisitQueue'
+const VISIT_CURSOR = 'dmVisitCursor'
+const VISIT_BUCKET = 1024
+// Caps on what a read keeps, whatever kv holds (kv is device-owner writable).
+const VISIT_ROWS_MAX = 200
+const VISIT_SEEN_MAX = 1024
+const VISIT_SENT_MAX = 200
+const VISIT_QUEUE_MAX = 20
 const SUMMARY = 'dmSummary'
 const SUMMARY_DELAY_MS = 1000
 // dm.list's default page size: the summary holds one such page per folder.
@@ -93,6 +123,8 @@ const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
 const HEX64 = /^[0-9a-f]{64}$/
 const HEX32 = /^[0-9a-f]{32}$/
 const LOCKED = 'identidade bloqueada: entre com a passkey'
+// A sealed visit value that is unreadable (storage error or does not open).
+const VISIT_UNREADABLE = 'dados de visitas ilegíveis'
 const ROW_BUCKET = 1024
 const CACHE_BYTES_MAX = 256 * 1048576
 
@@ -800,6 +832,176 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
     })
   }
 
+  // ---- visitas ----
+
+  function visitKey () {
+    return crypto.hash([VISITS_KEY_DOMAIN, key])
+  }
+
+  function sealVisit (value) {
+    const json = JSON.stringify(value)
+    const size = Math.ceil((b4a.byteLength(json) + 1) / VISIT_BUCKET) * VISIT_BUCKET
+    const bytes = b4a.from(json + ' '.repeat(size - b4a.byteLength(json)), 'utf8')
+    const k = visitKey()
+    try {
+      const nonce = b4a.alloc(sodium.crypto_secretbox_NONCEBYTES)
+      sodium.randombytes_buf(nonce)
+      const box = b4a.alloc(bytes.byteLength + sodium.crypto_secretbox_MACBYTES)
+      sodium.crypto_secretbox_easy(box, bytes, nonce, k)
+      return { v: 1, nonce: b4a.toString(nonce, 'hex'), box: b4a.toString(box, 'base64') }
+    } finally {
+      k.fill(0)
+      bytes.fill(0)
+    }
+  }
+
+  function openVisit (data) {
+    if (data === null || typeof data !== 'object' || data.v !== 1 || typeof data.nonce !== 'string' || !HEX48.test(data.nonce) ||
+        typeof data.box !== 'string' || !BASE64.test(data.box)) return null
+    const box = b4a.from(data.box, 'base64')
+    if (box.byteLength <= sodium.crypto_secretbox_MACBYTES) return null
+    const plain = b4a.alloc(box.byteLength - sodium.crypto_secretbox_MACBYTES)
+    const k = visitKey()
+    try {
+      if (!sodium.crypto_secretbox_open_easy(plain, box, b4a.from(data.nonce, 'hex'), k)) return null
+      const value = JSON.parse(b4a.toString(plain, 'utf8'))
+      return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : null
+    } catch {
+      return null
+    } finally {
+      k.fill(0)
+      plain.fill(0)
+    }
+  }
+
+  // Throws while locked. Only an absent value reads as empty: a storage
+  // read error or a value that does not open throws, so the list, the sent
+  // log and the queue never read as empty when they are not, and the caller
+  // refuses to note or file (fails closed).
+  async function readVisit (name) {
+    if (key === null) throw new Error(LOCKED)
+    const data = await storage.readJson(prefix + name)
+    if (key === null) throw new Error(LOCKED)
+    if (data === null || data === undefined) return null
+    const value = openVisit(data)
+    if (value === null) throw new Error(VISIT_UNREADABLE)
+    return value
+  }
+
+  async function writeVisit (name, value) {
+    if (key === null) throw new Error(LOCKED)
+    await storage.writeJson(prefix + name, sealVisit(value))
+  }
+
+  function listOf (value, field, valid, max) {
+    const list = value !== null && Array.isArray(value[field]) ? value[field] : []
+    return list.filter(valid).slice(-max)
+  }
+
+  const validVisitRow = (r) => r !== null && typeof r === 'object' && HEX64.test(r.from) && isVisitDay(r.day)
+  const validSeen = (r) => r !== null && typeof r === 'object' && typeof r.t === 'string' && HEX32.test(r.t) && isVisitDay(r.day)
+  const validSent = (r) => r !== null && typeof r === 'object' && HEX64.test(r.to) && isVisitDay(r.day)
+  const validQueued = (r) => r !== null && typeof r === 'object' && HEX64.test(r.to) && isVisitDay(r.day) &&
+    Number.isSafeInteger(r.due) && r.due >= 0 && typeof r.sealed === 'string' && BASE64.test(r.sealed) &&
+    b4a.byteLength(r.sealed, 'base64') === DM_SEALED_BYTES
+
+  // The filed visitors [{ from, day }]; throws while locked.
+  async function visits () {
+    return listOf(await readVisit(VISITS), 'rows', validVisitRow, VISIT_ROWS_MAX).map((r) => ({ from: r.from, day: r.day }))
+  }
+
+  // The seq of the own `visits` on-record the list was filed under, or null
+  // (none stored); throws while locked or when the value is unreadable.
+  async function visitsOn () {
+    const value = await readVisit(VISITS)
+    return value !== null && Number.isSafeInteger(value.on) && value.on >= 0 ? value.on : null
+  }
+
+  // on: the seq of the own on-record the rows are filed under; undefined
+  // keeps the stored one.
+  async function writeVisits (rows, on) {
+    const clean = rows.filter(validVisitRow).slice(-VISIT_ROWS_MAX).map((r) => ({ from: r.from, day: r.day }))
+    const seq = on === undefined ? await visitsOn() : on
+    await writeVisit(VISITS, Number.isSafeInteger(seq) && seq >= 0 ? { rows: clean, on: seq } : { rows: clean })
+  }
+
+  // The tokens of the pings filed lately [{ t, day }]; throws while locked.
+  async function visitSeen () {
+    return listOf(await readVisit(VISIT_SEEN), 'seen', validSeen, VISIT_SEEN_MAX).map((r) => ({ t: r.t, day: r.day }))
+  }
+
+  async function writeVisitSeen (seen) {
+    const clean = seen.filter(validSeen).slice(-VISIT_SEEN_MAX).map((r) => ({ t: r.t, day: r.day }))
+    await writeVisit(VISIT_SEEN, { seen: clean })
+  }
+
+  // The keyed token of a ping (its signer and inner id): names nobody to a
+  // reader of kv without the passkey.
+  function visitToken (from, id) {
+    if (key === null) throw new Error(LOCKED)
+    return b4a.toString(crypto.hash([VISIT_TOKEN_DOMAIN, key, b4a.from(from + '\n' + id, 'utf8')]), 'hex').slice(0, 32)
+  }
+
+  async function visitSent () {
+    return listOf(await readVisit(VISIT_SENT), 'rows', validSent, VISIT_SENT_MAX).map((r) => ({ to: r.to, day: r.day }))
+  }
+
+  async function writeVisitSent (rows) {
+    const clean = rows.filter(validSent).slice(-VISIT_SENT_MAX).map((r) => ({ to: r.to, day: r.day }))
+    await writeVisit(VISIT_SENT, { rows: clean })
+  }
+
+  async function visitQueue () {
+    const value = await readVisit(VISIT_QUEUE)
+    const items = value !== null && Array.isArray(value.items) ? value.items : []
+    return items.filter(validQueued).slice(0, VISIT_QUEUE_MAX).map((r) => ({ to: r.to, day: r.day, due: r.due, sealed: r.sealed }))
+  }
+
+  // More than VISIT_QUEUE_MAX items keeps the oldest: a ping past the cap is
+  // refused by the caller, never one already waiting dropped for it.
+  async function writeVisitQueue (items) {
+    const clean = items.filter(validQueued).slice(0, VISIT_QUEUE_MAX).map((r) => ({ to: r.to, day: r.day, due: r.due, sealed: r.sealed }))
+    await writeVisit(VISIT_QUEUE, { items: clean })
+  }
+
+  async function visitCursor () {
+    let data = null
+    try {
+      data = await storage.readJson(prefix + VISIT_CURSOR)
+    } catch {}
+    return data !== null && typeof data === 'object' && data.v === 1 && Number.isSafeInteger(data.after) && data.after >= 0 ? data.after : 0
+  }
+
+  function writeVisitCursor (after) {
+    if (!Number.isSafeInteger(after) || after < 0) throw new TypeError('cursor inválido')
+    return storage.writeJson(prefix + VISIT_CURSOR, { v: 1, after })
+  }
+
+  // Needs no key (a switch turned off while the passkey is locked still
+  // empties the list). list: the visitors; queue: the pings not sent yet;
+  // all: every visit kv value, the seen tokens, sent log and cursor too
+  // (reset). With the key, a seen or sent value that does not open is
+  // dropped too, so a clear recovers from it without a reset; a readable
+  // one stays (the seen tokens and the daily budget hold).
+  async function clearVisits ({ list = true, queue: q = false, all = false } = {}) {
+    if (list || all) await storage.writeJson(prefix + VISITS, null)
+    if (q || all) await storage.writeJson(prefix + VISIT_QUEUE, null)
+    if (all) {
+      for (const name of [VISIT_SEEN, VISIT_SENT, VISIT_CURSOR]) await storage.writeJson(prefix + name, null)
+      return
+    }
+    if (!list && !q) return
+    for (const name of [VISIT_SEEN, VISIT_SENT]) {
+      let unreadable = false
+      try {
+        await readVisit(name)
+      } catch (err) {
+        unreadable = err !== null && typeof err === 'object' && err.message === VISIT_UNREADABLE
+      }
+      if (unreadable) await storage.writeJson(prefix + name, null)
+    }
+  }
+
   function idle () {
     return queue
   }
@@ -809,7 +1011,7 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
     return queue
   }
 
-  return { unlock, lock, unlocked, keyReady, keyStage, loaded, summaryFor, saveSummary, nextFiled, append, snapshot, ops, version: currentVersion, hasMessage, hasReaction, reactionRev, hasOp, seenToken, seal, open, sealBytes, openBytes, hasMedia, putMedia, getMedia, wipeCache, idle, close }
+  return { unlock, lock, unlocked, keyReady, keyStage, loaded, summaryFor, saveSummary, nextFiled, append, snapshot, ops, version: currentVersion, hasMessage, hasReaction, reactionRev, hasOp, seenToken, seal, open, sealBytes, openBytes, hasMedia, putMedia, getMedia, wipeCache, visits, visitsOn, writeVisits, visitSeen, writeVisitSeen, visitToken, visitSent, writeVisitSent, visitQueue, writeVisitQueue, visitCursor, writeVisitCursor, clearVisits, idle, close }
 }
 
-module.exports = { createDmStore, SUMMARY_PAGE }
+module.exports = { createDmStore, SUMMARY_PAGE, VISIT_QUEUE_MAX, VISIT_SEEN_MAX }

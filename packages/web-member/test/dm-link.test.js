@@ -16,7 +16,8 @@ const { createSeederCert } = require('@varanda/core/lib/cert')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { attachBlob } = require('@varanda/core/lib/blob-net')
 const { BLOB_FRAME_BYTES } = require('@varanda/core/lib/blob')
-const { openDmLink, openStampLink, openBlobLink } = require('../lib/dm-link')
+const { openDmLink, openStampLink, openBlobLink, openVisitLink } = require('../lib/dm-link')
+const { attachDm } = require('@varanda/core/lib/dm-net')
 const { dmSeeder } = require('./helpers/dm-seeder')
 const { wsStream } = require('../lib/ws-stream')
 
@@ -155,4 +156,71 @@ test('blob link: a seeder of another association is refused before any put; a lo
   t.is(lost && lost.message, 'sem conexão com o semeador', 'an unanswered put fails and is not repeated')
   t.is(hang.puts.length, 1)
   link.close()
+})
+
+// A seeder stand-in with the dm channel and, when `visit`, the quiet visit
+// lane, each over its own recorded in-memory list.
+async function laneSeeder (t, { signer, visit = true }) {
+  const keyPair = crypto.keyPair()
+  const cert = createSeederCert({ seeder: hex(keyPair.publicKey) }, signer)
+  const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await new Promise((resolve) => wss.once('listening', resolve))
+  const seeder = { url: 'ws://127.0.0.1:' + wss.address().port + '/seeder', dm: [], visit: [] }
+  t.teardown(async () => {
+    for (const s of wss.clients) s.terminate()
+    await new Promise((resolve) => wss.close(() => resolve()))
+  }, { force: true })
+  const lane = (list) => ({
+    role: 'seeder',
+    put: (bytes) => {
+      list.push(b4a.from(bytes))
+      return { seq: list.length }
+    },
+    page: ({ after, limit }) => {
+      const items = list.map((bytes, i) => ({ seq: i + 1, bytes })).filter((e) => e.seq > after).slice(0, limit)
+      return { items, next: null, oldest: 1 }
+    }
+  })
+  wss.on('connection', (ws) => {
+    const noise = new NoiseSecretStream(false, wsStream(ws), { keyPair })
+    noise.on('error', noop)
+    noise.once('connect', () => {
+      Hypercore.createProtocolStream(noise)
+      attachDm(noise, lane(seeder.dm))
+      if (visit) attachDm(noise, { ...lane(seeder.visit), protocol: dm.VISIT_PROTOCOL })
+      attachAdmission(noise, { role: 'seeder', cert, have: [] })
+    })
+  })
+  return seeder
+}
+
+test('visit link puts and pages on the visit lane only', async (t) => {
+  t.timeout(60000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await laneSeeder(t, { signer: assoc })
+  const drop = b4a.alloc(dm.DM_DROP_BYTES, 3)
+  const link = await openVisitLink({ seederUrl: seeder.url, createSocket, association: hex(assoc.publicKey) })
+  t.alike(await link.put(drop), { ok: true, reason: null })
+  const page = await link.page({ after: 0, limit: dm.DM_PAGE_MAX })
+  t.is(page.items.length, 1)
+  t.ok(b4a.equals(page.items[0].bytes, drop))
+  await t.exception.all(link.put(new Uint8Array(10)), TypeError, 'a wrong-size drop is a programming error')
+  link.close()
+  t.is(seeder.visit.length, 1)
+  t.is(seeder.dm.length, 0, 'nothing went into the dm pool')
+})
+
+test('visit link: a seeder without the lane is unsupported, and nothing falls back to the dm channel', async (t) => {
+  t.timeout(60000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await laneSeeder(t, { signer: assoc, visit: false })
+  const err = await openVisitLink({ seederUrl: seeder.url, createSocket, association: hex(assoc.publicKey) }).then(() => null, (e) => e)
+  t.ok(err !== null && err.unsupported === true, 'unsupported')
+  t.is(err && err.message, 'semeador sem visitas')
+  t.is(seeder.dm.length, 0)
+  t.is(seeder.visit.length, 0)
+  const other = generateAssociationKeyPair()
+  const wrong = await openVisitLink({ seederUrl: seeder.url, createSocket, association: hex(other.publicKey) }).then(() => null, (e) => e)
+  t.is(wrong && wrong.message, 'sem conexão com o semeador', 'another association is no seeder')
+  t.absent(wrong && wrong.unsupported)
 })

@@ -41,6 +41,7 @@ function eventLine (event) {
     case 'push': return 'push ' + safe(event.reason)
     case 'dm': return 'dm ' + safe(event.reason)
     case 'dm-stamp': return 'dm-stamp ' + safe(event.reason)
+    case 'visit': return 'visit ' + safe(event.reason)
     case 'blob': return 'blob ' + safe(event.reason)
     default: return safe(event.event)
   }

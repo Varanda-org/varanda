@@ -205,6 +205,25 @@ test('the perfil rico methods are refused on the node session, nothing written',
   t.alike(await failure(m.call('top.set', { keys: Array.from({ length: 9 }, (_, i) => String(i).repeat(64)) })), USAGE('keys'))
 })
 
+test('the visitas methods are refused on the node session, nothing written', async (t) => {
+  const NO = { code: 'USAGE', message: 'leitura sob demanda só na versão web' }
+  const m = await member(t)
+  const before = await m.call('log.read')
+  t.alike(await failure(m.call('visits.set', { on: true })), NO)
+  t.alike(await failure(m.call('visits.set', { on: false })), NO)
+  t.alike(await failure(m.call('visits.state', {})), NO)
+  t.alike(await failure(m.call('visits.list', {})), NO)
+  t.alike(await failure(m.call('visits.clear', {})), NO)
+  t.alike(await failure(m.call('visits.note', { key: OTHER })), NO)
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike(m.session.internal, [])
+  const UNKNOWN = { code: 'USAGE', message: 'parâmetro desconhecido' }
+  t.alike(await failure(m.call('visits.set', { on: true, extra: 1 })), UNKNOWN)
+  t.alike(await failure(m.call('visits.note', { key: OTHER, extra: 1 })), UNKNOWN)
+  t.alike(await failure(m.call('visits.set', { on: 'sim' })), { code: 'USAGE', message: 'parâmetro inválido: on' })
+  t.alike(await failure(m.call('visits.note', { key: 'zz' })), { code: 'USAGE', message: 'parâmetro inválido: key' })
+})
+
 test('the enquete methods are refused on the node session, nothing written', async (t) => {
   const NO = { code: 'USAGE', message: 'leitura sob demanda só na versão web' }
   const m = await member(t)
