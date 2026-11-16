@@ -428,6 +428,7 @@ async function sender (overrides = {}) {
       clearError: () => { state.error = null }
     },
     node: { online: true, request: async (method, params) => { state.requests.push({ method, params }); return { seq: 1 } } },
+    webOn: false,
     ...overrides
   }
   const start = source.lastIndexOf('  const send = async () => {')
@@ -634,9 +635,11 @@ test('attaching a photo removes music only after files were picked', async (t) =
 test('publishing clears the music draft for posts, replies and quotes', (t) => {
   for (const quote of [null, target]) {
     let music = draft
+    const ticks = []
     const published = composerFunction('  const published = (sent, sentReply', '\n  // Keeps the post', 'published', {
       tap: () => {},
       setMusicDraft: (value) => { music = value },
+      setWebShare: (value) => { ticks.push(value) },
       setPollDraft: () => {},
       setEventDraft: () => {},
       musicTried: { current: new Set([track.url]) },
@@ -646,6 +649,7 @@ test('publishing clears the music draft for posts, replies and quotes', (t) => {
     })
     published('text', target, [], quote)
     t.is(music, null)
+    t.alike(ticks, [false], 'the web tick never outlives its post')
   }
 })
 
@@ -671,6 +675,7 @@ test('publishing or closing lets the same URL resolve in the next draft', async 
       const published = composerFunction('  const published = (sent, sentReply', '\n  // Keeps the post', 'published', {
         ...r.ctx,
         tap: () => {},
+        setWebShare: () => {},
         setPollDraft: () => {},
         setEventDraft: () => {},
         setText: (update) => { r.ctx.text = update(r.ctx.text) },
@@ -714,4 +719,140 @@ test('publishing or closing lets the same URL resolve in the next draft', async 
 test('photo-only momento music has its own video refusal note', async (t) => {
   const { MUSIC_MOMENT_VIDEO_TEXT } = await rules()
   t.is(MUSIC_MOMENT_VIDEO_TEXT, 'A música vai só com foto: remova a música')
+})
+
+// 'Publicar também na web': the post, then one shareNew, through the real send.
+function webSender (overrides = {}) {
+  const shares = []
+  const order = []
+  const answer = { ref: 'a'.repeat(64) + ':1', result: { state: 'on', shareSeq: 2, message: '' } }
+  const requests = []
+  const node = {
+    online: true,
+    request: async (method, params) => { order.push(method); requests.push({ method, params }); return { seq: 1 } }
+  }
+  return sender({
+    musicDraft: null,
+    text: 'Olá, web',
+    len: 8,
+    webOn: true,
+    self: { publicKey: 'a'.repeat(64) },
+    mountedRef: { current: true },
+    node,
+    shareNew: async (call, author, seq) => { order.push('share'); shares.push([call, author, seq]); return answer },
+    ...overrides
+  }).then((r) => ({ ...r, shares, order, answer, requests: overrides.node ? null : requests }))
+}
+
+test('a ticked post sends one post.create, then one shareNew, and hands its answer to published', async (t) => {
+  const r = await webSender()
+  await r.send()
+  t.alike(r.requests.map((q) => q.method), ['post.create'])
+  t.alike(r.order, ['post.create', 'share'])
+  t.is(r.shares.length, 1)
+  t.is(r.shares[0][0], r.ctx.node.request)
+  t.is(r.shares[0][1], 'a'.repeat(64))
+  t.is(r.shares[0][2], 1)
+  t.is(r.state.published.length, 1)
+  t.is(r.state.published[0][4], r.answer)
+  t.is(r.state.queued.length, 0)
+})
+
+test('a ticked post that hits the write gate is never queued, published or shared', async (t) => {
+  const gate = { online: true, request: async () => { throw new Error('gate') } }
+  const r = await webSender({ node: gate })
+  await r.send()
+  t.is(r.state.queued.length, 0)
+  t.is(r.state.published.length, 0)
+  t.is(r.shares.length, 0)
+  t.is(r.state.error, 'gate')
+  const plain = await webSender({ node: gate, webOn: false })
+  await plain.send()
+  t.is(plain.state.queued.length, 1, 'the same failure unticked waits in the outbox')
+  t.is(plain.shares.length, 0)
+})
+
+test('a share answer that lands after the composer unmounted is dropped', async (t) => {
+  const r = await webSender({ mountedRef: { current: false } })
+  await r.send()
+  t.is(r.shares.length, 1)
+  t.is(r.state.published.length, 1)
+  t.is(r.state.published[0][4], null)
+})
+
+test('an unticked post never shares and passes no web answer', async (t) => {
+  const r = await webSender({ webOn: false })
+  await r.send()
+  t.alike(r.requests.map((q) => q.method), ['post.create'])
+  t.is(r.shares.length, 0)
+  t.is(r.state.published.length, 1)
+  t.is(r.state.published[0][4], null)
+})
+
+test('an uncertain ticked post found in the diary is shared once by its seq, never resent', async (t) => {
+  const calls = []
+  const node = {
+    online: true,
+    request: async (method) => {
+      calls.push(method)
+      if (method !== 'log.read') throw Object.assign(new Error('uncertain'), { uncertain: true })
+      return { entries: [{ seq: 7, record: { type: 'post', text: 'Olá, web', at: new Date().toISOString() } }] }
+    }
+  }
+  const r = await webSender({ node })
+  await r.send()
+  t.alike(calls, ['post.create', 'log.read'])
+  t.is(r.shares.length, 1)
+  t.is(r.shares[0][2], 7)
+  t.is(r.state.published.length, 1)
+  t.is(r.state.published[0][4], r.answer)
+})
+
+test('an uncertain ticked post not found in the diary is neither published nor shared', async (t) => {
+  const node = {
+    online: true,
+    request: async (method) => {
+      if (method !== 'log.read') throw Object.assign(new Error('uncertain'), { uncertain: true })
+      return { entries: [] }
+    }
+  }
+  const r = await webSender({ node })
+  await r.send()
+  t.is(r.shares.length, 0)
+  t.is(r.state.published.length, 0)
+  t.is(r.state.queued.length, 0)
+})
+
+test('an uncertain ticked post found without a usable seq shares nothing by guess', async (t) => {
+  const node = {
+    online: true,
+    request: async (method) => {
+      if (method !== 'log.read') throw Object.assign(new Error('uncertain'), { uncertain: true })
+      return { entries: [{ seq: 'x', record: { type: 'post', text: 'Olá, web', at: new Date().toISOString() } }] }
+    }
+  }
+  const r = await webSender({ node })
+  await r.send()
+  t.is(r.shares.length, 1)
+  t.is(r.shares[0][2], null, 'shareNew gets no seq, so it sends nothing and the shell shows the no-ref toast')
+  t.is(r.state.published.length, 1)
+})
+
+test('a reply or quote never shares, even while the tick is still set', async (t) => {
+  for (const kind of ['reply', 'quote']) {
+    const r = await webSender({ [kind]: target })
+    await r.send()
+    t.is(r.shares.length, 0, kind)
+    t.is(r.state.published.length, 1, kind)
+    t.is(r.state.published[0][4], null, kind)
+  }
+})
+
+test('a share call that throws still publishes the post once and never resends', async (t) => {
+  const r = await webSender({ shareNew: async () => { throw new Error('boom') } })
+  await r.send()
+  t.alike(r.requests.map((q) => q.method), ['post.create'])
+  t.is(r.state.published.length, 1)
+  t.alike(r.state.published[0][4], { ref: null, result: null })
+  t.is(r.state.queued.length, 0)
 })

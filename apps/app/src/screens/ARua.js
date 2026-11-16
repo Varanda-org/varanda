@@ -79,7 +79,10 @@ import { layout, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { MomentosStrip } from '../ui/MomentosStrip'
 import { canPublishMoment, liveAuthors, liveItems, stripShown } from '../momentSeen'
-import { useMomentSeen, useMoments } from './Momentos'
+import { useMomentSeen, useMoments, viewerRings } from './Momentos'
+import { stripWarmRef } from '../momentStripWarm'
+import { momentPhotosFor } from '../momentPhotos'
+import { adoptVideoFile, revokeUrl, urlFromBytes } from '../media/display'
 import { useBlocks } from '../blocksProvider'
 import { installationOrigin } from '../installation'
 import { postLink } from '../postLink'
@@ -243,19 +246,29 @@ export function noteDeleted () {
 
 // `loadMark`: deletionCount when the committed first page read started (null
 // before any). -> whether the snapshot may be written from that page.
+// How many placeholder rows stand for the stored rows snapshotRowsShown
+// holds back while block.list has not answered yet: at most 3, none once it
+// answered (a failed list only keeps own rows, with nothing to wait for).
+export function heldPlaceholders (items, shown, loadState) {
+  if (loadState !== 'pending' || !Array.isArray(items) || !Array.isArray(shown)) return 0
+  return Math.min(3, Math.max(0, items.length - shown.length))
+}
+
 export function snapshotWriteAllowed (loadMark, deletions) {
   return typeof loadMark === 'number' && loadMark === deletions
 }
 
 // Stored rows (A Rua's snapshot, painted before the live first page) under
 // the block list in force: a blocked author's rows, and reposts of them,
-// never show. `loadState` 'failed' (blocksProvider): the list is unknown, so
-// only own rows whose shown content involves no one else stay: an own post
-// with no quote or reply of another author, an own repost of such an own
-// post. `originalOf(ref)` -> the original at hand (post item), if any: its
-// quote card and reply mark show too, one level deep.
+// never show. `loadState` (blocksProvider) 'pending' (before block.list first
+// answers, a block made on another device is not known yet) or 'failed' (the
+// list is unknown): only own rows whose shown content involves no one else
+// stay: an own post with no quote or reply of another author, an own repost
+// of such an own post. The others wait for the answer (heldPlaceholders).
+// `originalOf(ref)` -> the original at hand (post item), if any: its quote
+// card and reply mark show too, one level deep.
 export function snapshotRowsShown (items, blocked, loadState, owner, originalOf) {
-  if (loadState === 'failed') {
+  if (loadState === 'pending' || loadState === 'failed') {
     const own = typeof owner === 'string' ? owner.toLowerCase() : null
     if (own === null) return []
     const isOwn = (t) => !!t && typeof t.author === 'string' && t.author.toLowerCase() === own
@@ -2064,6 +2077,43 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   const { ingest } = social
   const moments = useMoments({ ownKey, active: active !== false, tick: refresh })
   const momentSeen = useMomentSeen()
+  // While A Rua is idle, read the photo of the momento most likely tapped
+  // next (the first unseen ring), so the viewer opens on it at once. Photo
+  // only: music would tell the account service about a momento never opened.
+  const stripWarm = useMemo(() => {
+    if (node.hosted !== true || moments.phase !== 'ready' || !momentSeen.loaded) return null
+    const seenSet = new Set(momentSeen.seen)
+    const rings = viewerRings({ authors: moments.authors, own: moments.own, ownKey, seen: seenSet, now: Date.now() })
+    return stripWarmRef(rings, ownKey, seenSet)
+  }, [node.hosted, moments.phase, moments.authors, moments.own, momentSeen.loaded, momentSeen.seen, ownKey])
+  const stripWarmKey = stripWarm === null ? '' : stripWarm.author + ':' + stripWarm.seq
+  // Latched per epoch: a later sync run resets the run flags, which must not
+  // drop the warmed photo.
+  const stripLatch = useRef({ epoch: null, open: false })
+  if (stripLatch.current.epoch !== node.epoch) stripLatch.current = { epoch: node.epoch, open: false }
+  if (node.online !== false && node.phase === 'ready' && node.signals?.seederVerified === true) stripLatch.current.open = true
+  const stripWarmOpen = stripLatch.current.open
+  const stripWarmRefLatest = useRef(null)
+  stripWarmRefLatest.current = stripWarm
+  useEffect(() => {
+    if (stripWarmKey === '' || node.hosted !== true || active === false || node.visible === false || !stripWarmOpen) return undefined
+    const store = momentPhotosFor(node.media, node.epoch, { urlFromBytes, revokeUrl, adoptVideoFile })
+    if (store === null) return undefined
+    let cancelled = false
+    const wait = node.whenIdle(3000)
+    wait.promise.then(() => {
+      if (cancelled) return
+      const ref = stripWarmRefLatest.current
+      // Index 1, not 0: A Rua shows nothing, so its photo is read-ahead and ages out
+      // at the 5-minute max age like any other (index 0 is spared as on screen).
+      store.want('strip', ref ? [null, ref] : [])
+    })
+    return () => {
+      cancelled = true
+      wait.cancel()
+      store.want('strip', [])
+    }
+  }, [stripWarmKey, stripWarmOpen, node.hosted, node.visible, node.media, node.epoch, node.whenIdle, active])
   const [feed, setFeed] = useState(() => ({
     items: [],
     cursor: null,
@@ -2651,6 +2701,9 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   const shownItems = useMemo(() => (loadedAt !== null
     ? items
     : snapshotRowsShown(items, blockedKeys, blockLoad, ownKey, (ref) => shownOriginals.get(ref))), [items, loadedAt, blockedKeys, blockLoad, ownKey, shownOriginals])
+  // Stored rows of others wait for the first block.list answer: placeholders
+  // stand for them meanwhile (an empty list already shows its skeleton).
+  const held = loadedAt === null && shownItems.length > 0 ? heldPlaceholders(items, shownItems, blockLoad) : 0
   // Comments fold into their post's card (../feedFold.js); a block re-folds
   // at once, so a blocked commenter leaves the header and the lines.
   const { foldOriginal, pending } = social
@@ -2720,7 +2773,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
           </View>
         )}
         ListEmptyComponent={empty}
-        ListFooterComponent={footer}
+        ListFooterComponent={held > 0 ? <View>{Array.from({ length: held }, (_, i) => <SkeletonRow key={i} />)}{footer}</View> : footer}
         contentContainerStyle={{ paddingBottom: bottomPad }}
         onRefresh={handleRefresh}
         refreshing={refreshing}
@@ -2790,11 +2843,13 @@ export function ARuaPreview ({ snapshot, progress = 0, onScrollFrame }) {
     perfMarks().mark('preview-shown')
   }, [])
   // The block list in force, as A Rua applies it to its snapshot rows. Before
-  // the node is up it is still 'pending' and the rows show as stored.
+  // the node is up it is still 'pending': own rows show, others wait.
   const blockedKeys = blocks.keys
   const blockLoad = blocks.loadState
   const ownKey = snapshot.owner
   const shown = useMemo(() => snapshotRowsShown(view.items, blockedKeys, blockLoad, ownKey, view.original), [view, blockedKeys, blockLoad, ownKey])
+  // Others' rows wait for the first block.list answer, as in A Rua.
+  const held = heldPlaceholders(view.items, shown, blockLoad)
   // Folded as the live list folds them, so the rows do not jump when the
   // feed goes live. Nothing is asked here: pendingOf is the seed's.
   const fold = useMemo(() => foldFeed(shown, { originalOf: view.original, pendingOf: view.pending, ownKey, blocked: blockedKeys }), [shown, view, ownKey, blockedKeys])
@@ -2830,6 +2885,7 @@ export function ARuaPreview ({ snapshot, progress = 0, onScrollFrame }) {
           keyExtractor={rowKeyOf}
           renderItem={renderItem}
           extraData={now}
+          ListFooterComponent={held > 0 ? <View>{Array.from({ length: held }, (_, i) => <SkeletonRow key={i} />)}</View> : null}
           contentContainerStyle={{ paddingBottom: bottomPad }}
           onScrollFrame={onScrollFrame}
         />

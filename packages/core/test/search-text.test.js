@@ -18,6 +18,7 @@ const {
   QUERY_RE,
   isValidUsername,
   splitTokens,
+  wholeTokens,
   foldTokens,
   queryTokens,
   queryPath,
@@ -88,6 +89,15 @@ test('truncation and caps', (t) => {
   t.alike(splitTokens('a'.repeat(159) + '\u{1F600}'), ['a'.repeat(20)])
   t.alike(splitTokens('ab\ud800'), ['ab'])
   t.alike(splitTokens('ab\udc00cd'), ['ab', 'cd'])
+})
+
+test('wholeTokens: the folding of splitTokens with no input bound and no cut', (t) => {
+  const many = Array.from({ length: 40 }, (_, i) => 'a' + String.fromCharCode(97 + (i % 26)) + String.fromCharCode(97 + Math.floor(i / 26))).join(' ')
+  t.alike(wholeTokens(many), many.split(' '), 'every token of a text past the input bound')
+  t.alike(wholeTokens('x'.repeat(30)), ['x'.repeat(30)], 'no token cut')
+  t.alike(wholeTokens('Jo' + 'a' + TILDE + 'o da' + ZWSP + ' Silva'), splitTokens('Jo' + 'a' + TILDE + 'o da' + ZWSP + ' Silva'), 'the same folding')
+  t.alike(wholeTokens('ab\udc00cd'), ['ab', 'cd'])
+  for (const value of [null, undefined, 7, {}, ['ab']]) t.alike(wholeTokens(value), [], String(value))
 })
 
 test('foldTokens dedupes, queryTokens does not', (t) => {

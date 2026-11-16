@@ -135,6 +135,59 @@ test('media-hash timing: one line per photo, both paths, result unchanged', asyn
   t.ok(/^js \d+\.\d ms, 4096 B$/.test(lines[0][1]), lines[0][1])
 })
 
+// Every screen that downloads a photo hands fetchMedia the native digest, so
+// no listing, chat, link card, forward or report photo falls back to noble on
+// the phone (#473, #539).
+test('every app media download passes the native digest', (t) => {
+  const fs = require('node:fs')
+  const path = require('node:path')
+  const src = path.join(__dirname, '../src')
+  const read = (rel) => fs.readFileSync(path.join(src, rel), 'utf8')
+  const files = []
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(path.join(src, dir), { withFileTypes: true })) {
+      const rel = path.join(dir, entry.name)
+      if (entry.isDirectory()) walk(rel)
+      else if (rel.endsWith('.js') && !rel.startsWith('media' + path.sep)) files.push(rel)
+    }
+  }
+  walk('.')
+  const callsOf = (code, name) => {
+    const out = []
+    let at = code.indexOf(name + '(')
+    while (at !== -1) {
+      let depth = 0
+      let end = at + name.length
+      for (; end < code.length; end++) {
+        if (code[end] === '(') depth++
+        else if (code[end] === ')' && --depth === 0) break
+      }
+      out.push(code.slice(at, end + 1))
+      at = code.indexOf(name + '(', end)
+    }
+    return out
+  }
+  const hashed = (text) => text.includes('mediaHashDeps()') || text.includes('subtle: nativeSubtle')
+  let seen = 0
+  for (const rel of files) {
+    const code = read(rel)
+    for (const call of [...callsOf(code, 'fetchMedia'), ...callsOf(code, 'fetchAvatarBytes')]) {
+      seen++
+      t.ok(hashed(call), rel + ': ' + call)
+    }
+    for (const line of code.split('\n').filter((l) => l.includes('const fetchDeps = '))) {
+      seen++
+      t.ok(hashed(line), rel + ': ' + line.trim())
+    }
+    for (const call of callsOf(code, 'sourceFor').filter((c) => !c.includes('cachedOnly: true'))) {
+      seen++
+      t.ok(call.includes('fetchDeps'), rel + ': ' + call)
+    }
+  }
+  t.ok(seen >= 10, 'the scan found the download sites (' + seen + ')')
+  t.ok(read('ui/MediaView.js').includes('export const mediaHashDeps = () => (HASH_PERF ? { subtle: nativeSubtle, marks: perfMarks() } : { subtle: nativeSubtle })'))
+})
+
 test('without marks nothing extra runs', async (t) => {
   const { fetchMedia } = await load()
   const bytes = new Uint8Array(4096).fill(4)

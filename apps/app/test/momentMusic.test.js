@@ -126,7 +126,7 @@ async function fixture (t, options = {}) {
   }
   const body = source.slice(source.indexOf('export const momentMusicIdle'), source.indexOf('export function MomentMusic')).replace(/\bexport /g, '')
   // eslint-disable-next-line no-new-func
-  const { createMomentPlayback: create, prepareMomentMusic, PRELOAD_IDLE_MS } = new Function(...Object.keys(deps), body + '\nreturn { createMomentPlayback, prepareMomentMusic, PRELOAD_IDLE_MS }')(...Object.values(deps))
+  const { createMomentPlayback: create, prepareMomentMusic, PRELOAD_IDLE_MS, warmMomentMusicItem } = new Function(...Object.keys(deps), body + '\nreturn { createMomentPlayback, prepareMomentMusic, PRELOAD_IDLE_MS, warmMomentMusicItem }')(...Object.values(deps))
   const session = { member: 'b'.repeat(64), origin: 'node-origin', request: () => {}, ...options.session }
   const music = options.music || { id: 'abc', start: 30 }
   const prepared = options.prepare ? prepareMomentMusic(session, music, options.prepare) : options.prepared
@@ -137,7 +137,7 @@ async function fixture (t, options = {}) {
     onUnavailable: (error) => unavailable.push(error)
   })
   t.teardown(() => playback.release())
-  return { playback, prepared, prepareMomentMusic, PRELOAD_IDLE_MS, deps, music, calls, states, players, timers, unavailable, session, starts: () => starts }
+  return { playback, prepared, prepareMomentMusic, warmMomentMusicItem, PRELOAD_IDLE_MS, deps, music, calls, states, players, timers, unavailable, session, starts: () => starts }
 }
 
 const count = (f, name) => f.calls.filter((c) => c[0] === name).length
@@ -1682,4 +1682,135 @@ test('normal loads keep cancellation codes ended at every asynchronous stage', a
       t.is(count(f, 'release'), key === 'seek' ? 1 : 0)
     }
   }
+})
+
+test('warmMomentMusicItem fetches the item once with reuse and opens no ticket or stream', async (t) => {
+  const f = await fixture(t)
+  const controller = new AbortController()
+  t.is(await f.warmMomentMusicItem(f.session, f.music, { signal: controller.signal }), undefined)
+  t.is(count(f, 'item'), 1)
+  t.is(f.calls[0][3].reuse, true)
+  t.is(f.calls[0][3].signal, controller.signal)
+  t.is(count(f, 'ticket'), 0)
+  t.is(count(f, 'create'), 0)
+})
+
+test('warmMomentMusicItem swallows a failure and does nothing without a ref or origin', async (t) => {
+  const f = await fixture(t, { item: () => { throw new Error('boom') } })
+  t.is(await f.warmMomentMusicItem(f.session, f.music), undefined)
+  t.is(count(f, 'item'), 1)
+  await f.warmMomentMusicItem(f.session, null)
+  await f.warmMomentMusicItem({ ...f.session, origin: null }, f.music)
+  t.is(count(f, 'item'), 1)
+})
+
+test('a warm in flight is shared with the load that follows', async (t) => {
+  const pending = deferred()
+  const f = await fixture(t, { item: () => pending.promise })
+  const warm = f.warmMomentMusicItem(f.session, f.music)
+  const prepared = f.prepareMomentMusic(f.session, f.music, { stream: false })
+  t.teardown(() => prepared.release())
+  await flush()
+  t.is(count(f, 'item'), 1)
+  pending.resolve(track)
+  await warm
+  t.alike(await prepared.done, { ok: true })
+  t.is(count(f, 'item'), 1)
+  t.is(count(f, 'ticket'), 1)
+})
+
+test('upgrade turns a ticket-only preload into one ready player', async (t) => {
+  const f = await fixture(t)
+  const prepared = f.prepareMomentMusic(f.session, f.music, { stream: false })
+  t.teardown(() => prepared.release())
+  await prepared.done
+  t.is(count(f, 'create'), 0)
+  prepared.upgrade()
+  prepared.upgrade()
+  await flush()
+  t.is(count(f, 'create'), 1)
+  t.is(count(f, 'ticket'), 1)
+  t.alike(f.calls.find((c) => c[0] === 'create'), ['create', ticket.url, { origin: ticket.base, preload: 'auto' }])
+  t.alike(f.calls.filter((c) => c[0] === 'seek'), [['seek', 30000]])
+  const result = await prepared.take()
+  t.is(result.stream, f.players[0])
+  t.is(count(f, 'create'), 1)
+})
+
+test('upgrade before done arms itself and builds once the load is ok', async (t) => {
+  const pending = deferred()
+  const f = await fixture(t, { item: () => pending.promise })
+  const prepared = f.prepareMomentMusic(f.session, f.music, { stream: false })
+  t.teardown(() => prepared.release())
+  prepared.upgrade()
+  t.is(count(f, 'create'), 0)
+  pending.resolve(track)
+  await prepared.done
+  await flush()
+  t.is(count(f, 'create'), 1)
+})
+
+test('upgrade builds nothing after take, after release, or near ticket expiry', async (t) => {
+  const f = await fixture(t)
+  const taken = f.prepareMomentMusic(f.session, f.music, { stream: false })
+  await taken.done
+  t.ok(await taken.take())
+  taken.upgrade()
+  const released = f.prepareMomentMusic(f.session, f.music, { stream: false })
+  await released.done
+  released.release()
+  released.upgrade()
+  const soon = f.prepareMomentMusic(f.session, f.music, { stream: false, now: () => Date.parse(ticket.expiresAt) - 30000 })
+  t.teardown(() => soon.release())
+  await soon.done
+  soon.upgrade()
+  await flush()
+  t.is(count(f, 'create'), 0)
+  const streaming = f.prepareMomentMusic(f.session, f.music)
+  t.teardown(() => streaming.release())
+  await streaming.done
+  streaming.upgrade()
+  await flush()
+  t.is(count(f, 'create'), 1)
+})
+
+test('an upgraded player is released with the handle, and no second ticket is asked', async (t) => {
+  const f = await fixture(t)
+  const prepared = f.prepareMomentMusic(f.session, f.music, { stream: false })
+  await prepared.done
+  prepared.upgrade()
+  await flush()
+  t.is(count(f, 'create'), 1)
+  prepared.release()
+  t.is(count(f, 'release'), 1)
+  t.is(count(f, 'ticket'), 1)
+})
+
+test('an upgraded player never taken is released when the idle timer fires', async (t) => {
+  const f = await fixture(t)
+  const prepared = f.prepareMomentMusic(f.session, f.music, { stream: false })
+  await prepared.done
+  prepared.upgrade()
+  await flush()
+  const idle = [...f.timers.values()].filter((x) => x.ms === f.PRELOAD_IDLE_MS)
+  t.is(idle.length, 1)
+  t.is(count(f, 'release'), 0)
+  idle[0].fn()
+  t.is(count(f, 'release'), 1)
+  t.is(count(f, 'ticket'), 1)
+  t.is(count(f, 'create'), 1)
+})
+
+test('an upgraded player whose seek fails is released and take hands over no player', async (t) => {
+  const f = await fixture(t, { seek: async () => { throw new Error('seek failed') } })
+  const prepared = f.prepareMomentMusic(f.session, f.music, { stream: false })
+  await prepared.done
+  prepared.upgrade()
+  await flush()
+  t.is(count(f, 'release'), 1)
+  const result = await prepared.take()
+  t.is(result.ok, true)
+  t.is(result.stream, null)
+  t.is(count(f, 'release'), 1)
+  t.is(count(f, 'ticket'), 1)
 })

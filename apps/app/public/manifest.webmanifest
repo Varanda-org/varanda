@@ -22,7 +22,7 @@
       "text": "text",
       "url": "url",
       "files": [
-        { "name": "fotos", "accept": ["image/jpeg", "image/png", "image/webp", "image/gif"] }
+        { "name": "fotos", "accept": ["image/jpeg", "image/png", "image/webp", "image/gif", "video/mp4"] }
       ]
     }
   }

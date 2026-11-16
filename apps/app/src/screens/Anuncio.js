@@ -47,6 +47,7 @@ import { canShare, copyText, shareUrl } from '../share'
 import { shareNav } from '../shareNav'
 import { ErrorText, Soft, Spinner, errorText, useAction } from '../ui'
 import { MediaGrid } from '../ui/MediaGrid'
+import { mediaHashDeps } from '../ui/MediaView'
 import { Avatar } from '../ui/Avatar'
 import { SellerCard } from '../ui/SellerCard'
 import { StickyBar } from '../ui/StickyBar'
@@ -269,7 +270,7 @@ export default function Anuncio ({
       let photo = null
       if (first) {
         try {
-          photo = { bytes: await fetchMedia(listing.author, first, { fetch: mediaFetch(), persist: false }), mime: first.mime }
+          photo = { bytes: await fetchMedia(listing.author, first, { ...mediaHashDeps(), fetch: mediaFetch(), persist: false }), mime: first.mime }
         } catch {
           photo = null
         }

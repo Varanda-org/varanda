@@ -147,7 +147,7 @@ All are environment variables of the seeder process, `varanda seed`
 | External sockets | `VARANDA_MAX_EXTERNAL` | half of the seeder's 64 connections, 32 | Swarm peers (other seeders, members over the DHT) are never starved by WebSocket readers; beyond it a reader gets 1013 and retries. |
 | Listener sockets | `VARANDA_MAX_SOCKETS` | 128 (external + /media + /index in flight + 64, never below 128) | File descriptors of the one TCP listener (WebSocket, /media, /index, Caddy keep-alive). |
 | Media rate | `VARANDA_MEDIA_RATE`, `VARANDA_MEDIA_BURST` | 64 per second, burst 128 | Disk reads and upload bandwidth of /media; beyond it 503 with Retry-After 1. |
-| Media in flight | `VARANDA_MEDIA_MAX_IN_FLIGHT` | 16 | Memory and open streams of concurrent media responses; slow readers cannot hold more. |
+| Media in flight | `VARANDA_MEDIA_MAX_IN_FLIGHT` | 16 | Memory and open streams of concurrent media responses; slow readers cannot hold more. Momentos read-ahead keeps at most two momento photo reads in flight, with up to 4 chunk GETs each, so up to 8 of these 16 shared in-flight responses. A tap on a momento not yet read starts its read at once, so quick taps can briefly add more. A read with no answer after 30 s stops counting toward the two, but read-ahead pauses while two such reads are still unanswered, and each chunk GET is given up after 30 s. |
 | Index rate | `VARANDA_INDEX_RATE`, `VARANDA_INDEX_BURST` | 32 per second, burst 64 | Event loop time spent answering /index. |
 | Index in flight | `VARANDA_INDEX_MAX_IN_FLIGHT` | 16 | Concurrent /index answers held open. |
 

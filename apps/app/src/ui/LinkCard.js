@@ -39,7 +39,7 @@ import { openExternal } from '../openExternal'
 import { chatMediaKey, pinChatMedia, sourceFor } from '../media/chatMedia'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { Icon } from './Icon'
-import { MediaView } from './MediaView'
+import { MediaView, mediaHashDeps } from './MediaView'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, radius, space } from './theme'
 
@@ -48,7 +48,7 @@ export const LINK_CARD_DISMISS = 'Remover prévia do link'
 
 const THUMB = 64
 const display = { urlFromBytes, revokeUrl }
-const fetchDeps = () => (isAppClient() ? { fetch: expoFetch } : {})
+const fetchDeps = () => ({ ...mediaHashDeps(), ...(isAppClient() ? { fetch: expoFetch } : {}) })
 
 const textOf = (v) => (typeof v === 'string' ? displayText(v).trim() : '')
 

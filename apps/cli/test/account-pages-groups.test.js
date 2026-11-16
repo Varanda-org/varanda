@@ -13,6 +13,7 @@ const { createIssuerCert, generateAssociationKeyPair } = require('@varanda/core/
 const { signRoster, signAccept } = require('@varanda/core/lib/page')
 const { signPage, opHash } = require('@varanda/core/lib/page-proof')
 const { TERMS_VERSION } = require('@varanda/core/lib/terms')
+const { BLOCKED_TERMS } = require('@varanda/rpc')
 const member = require('@varanda/core/lib/member')
 const groupLib = require('@varanda/core/lib/group')
 const groupCrypto = require('@varanda/core/lib/group-crypto')
@@ -211,6 +212,9 @@ test('account pages groups: the page joins and posts through the routes, a remov
   t.ok(forum.items.some((x) => x.text === 'Vamos à feira?'), 'the topic root is listed')
   t.alike(forum.items.filter((x) => 'topic' in x || 'thread' in x).map((x) => x.text), [], 'no topic or thread key on any item')
   t.is((await act(bia, 'group-post', P, { group: G, text: '' })).body.error, 'pedido-invalido', 'the group text bounds hold')
+  // The app's word check, again on the service: a public group post with a
+  // listed term is refused, as the app refuses it before sending.
+  t.is((await settled(bia, 'group-post', P, { group: G, text: 'na praça ' + BLOCKED_TERMS[0].toUpperCase() + '!' }, 'term post')).body.error, 'termo-recusado', 'a listed term in a public group')
 
   // Private groups: the service holds no group box, so a page without the
   // device-held one joins none, and a post there is a device-sealed envelope.

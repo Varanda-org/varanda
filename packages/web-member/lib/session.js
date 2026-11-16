@@ -972,6 +972,16 @@ function createBrowserSession ({
   // the list summary (null when none is pending): dm.list may answer a
   // first page from the summary while the rows still load.
   let dmKeying = null
+  // The dm engine calls withDmReady started OFF the chain and not settled
+  // yet (dm.pull, dm.pageSecrets, dmReadMedia, the uploads, the visit and
+  // testimonial reads) -> the identityTarget each started under. A new PRF
+  // read of the same key waits for that identity's calls before it locks
+  // the engine, so they end as chain steps would; a lock, a reset, another
+  // key or close() never waits, and a call still running meets the lock.
+  const dmCalls = new Map()
+  // The waits for dmCalls (dmCallsDone), woken whenever identityTarget
+  // moves or the session closes (wakeDmWaits).
+  const dmWaitWakes = new Set()
   // The private answer of a dm.list chain step that must wait off the chain.
   const DM_LIST_MISS = Symbol('dm-list-miss')
   // The identity requests are issued for, moved synchronously when an
@@ -984,8 +994,15 @@ function createBrowserSession ({
   let targetKey = null
 
   function retarget (hex) {
-    if (hex === null || hex !== targetKey) identityTarget++
+    if (hex === null || hex !== targetKey) {
+      identityTarget++
+      wakeDmWaits()
+    }
     targetKey = hex
+  }
+
+  function wakeDmWaits () {
+    for (const wake of dmWaitWakes) wake()
   }
   // The private-group box key pair and the epoch keys opened this session,
   // in memory only (./group-keys.js): locked with every identity change,
@@ -2719,17 +2736,53 @@ function createBrowserSession ({
   // for instead of meeting a locked engine.
   // `ident` (identityTarget on the request's arrival) is checked in that
   // same tick: a request whose identity changed meanwhile is locked and
-  // changes nothing.
+  // changes nothing. Once started, the call counts in dmCalls until it
+  // settles (dmCallsDone).
   function withDmReady (ident, fn) {
     if (dmUnlocking === null) {
       checkIdentity(ident)
-      return fn()
+      return dmCall(ident, fn())
     }
     return (async () => {
       for (let p = dmUnlocking; p !== null; p = dmUnlocking) await p
       checkIdentity(ident)
-      return fn()
+      return dmCall(ident, fn())
     })()
+  }
+
+  function dmCall (ident, v) {
+    if (v === null || typeof v !== 'object' || typeof v.then !== 'function') return v
+    const p = Promise.resolve(v)
+    dmCalls.set(p, ident)
+    const done = () => { dmCalls.delete(p) }
+    p.then(done, done)
+    return p
+  }
+
+  // Settles once every dm-key use withDmReady started under `ident` has
+  // settled, or as soon as another identity change is called (retarget) or
+  // the session closes: those lock at once, so a sign-out or a close never
+  // waits for a call to end (it meets the lock instead) and a read it
+  // interrupts returns no plaintext. Awaited on the chain by a setKeyPair
+  // of the same key before it locks the engine: no such call can start
+  // while a change is pending (dmUnlocking is set when it is called), and
+  // none waits on the chain (an engine call never does, see ./dm.js
+  // idle()), so this always ends.
+  async function dmCallsDone (ident) {
+    while (true) {
+      if (closed || ident !== identityTarget) return
+      const running = []
+      for (const [p, i] of dmCalls) if (i === ident) running.push(p)
+      if (running.length === 0) return
+      let wake = null
+      const moved = new Promise((resolve) => { wake = resolve })
+      dmWaitWakes.add(wake)
+      try {
+        await Promise.race([Promise.allSettled(running), moved])
+      } finally {
+        dmWaitWakes.delete(wake)
+      }
+    }
   }
 
   function checkIdentity (ident) {
@@ -2809,7 +2862,16 @@ function createBrowserSession ({
     const current = () => gen === dmUnlockGen && !closed
     try {
       if (!current()) return
-      const unlock = () => current() ? dmEngine.unlock(prf, { onKey: keyed }) : Promise.resolve()
+      // The engine's unlock settles at the key stage (dm.list may answer
+      // from the summary then); this one settles with the row load, which
+      // the other DM requests wait for.
+      const unlock = async () => {
+        if (!current()) return
+        await dmEngine.unlock(prf)
+        if (!dmEngine.keyReady()) return
+        if (current()) keyed()
+        await dmEngine.loaded()
+      }
       await (dmUnlockHook === null ? unlock() : dmUnlockHook(unlock, prf))
     } catch (err) {
       // A superseded unlock can fail on the store its lock wiped: not an error.
@@ -4165,11 +4227,16 @@ function createBrowserSession ({
     'repost.set': serial(async ({ to, on }, epoch) => engagementSet(member.repostSet, { to, on }, epoch)),
 
     // The recipient's dm-key is looked up off the chain (as dm.send), then
-    // the write runs on the chain like post.create. Never retried.
+    // the write runs on the chain like post.create. Both chain steps run
+    // for the identity of the request's arrival (identityTarget): one
+    // installed while the lookup ran (a reset and another key) is locked,
+    // never written for. Never retried.
     'testimonial.write': async ({ to, text }) => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const ident = identityTarget
       const key = to.toLowerCase()
       await serial(async () => {
+        checkIdentity(ident)
         const own = await requireUnlocked()
         if (key === own) throw new UsageError(TESTIMONIAL_SELF)
       })({})
@@ -4180,6 +4247,7 @@ function createBrowserSession ({
         throw toRpcError(err, reportInternal)
       }
       return serial(async (_, epoch) => {
+        checkIdentity(ident)
         await requireUnlocked()
         await ensureCaughtUp(epoch)
         const r = await withStore((c) => member.testimonialWrite(c, { to: key, text, recipient }))
@@ -5268,7 +5336,10 @@ function createBrowserSession ({
     }
     cancelGroups()
     // The same key again (a new PRF read) keeps the requests issued for it.
+    const before = identityTarget
     retarget(b4a.toString(copy.publicKey, 'hex'))
+    const ident = identityTarget
+    const sameKey = ident === before
     const dm = supersedeDmUnlock()
     // The DM store unlock, once started, owns dmPrf; until then it is
     // dropped here (with the wait released) on any way out.
@@ -5285,6 +5356,13 @@ function createBrowserSession ({
       peeking = null
       noticer.abort()
       noticing = null
+      // A dm engine call issued ahead of a new PRF read of the same key ends
+      // first; another key locks at once, as a lock does. The wait runs on
+      // the chain: a slow pull or putMedia holds this re-read and every
+      // request behind it until the call ends (bounded by the call's link
+      // timeouts), the trade-off chosen so the call ends instead of answering
+      // locked. A lock, a reset, another key or close() ends the wait.
+      if (sameKey && dmCalls.size > 0) await dmCallsDone(ident)
       zeroKeyPair()
       // The lock above stops a previous unlock still under way; it settles
       // before this one may start, so its own lock never meets this unlock.
@@ -5942,6 +6020,9 @@ function createBrowserSession ({
   function close () {
     if (closing !== null) return closing
     closed = true
+    // A same-key setKeyPair waiting for a dm call goes on to lock the engine
+    // now, so that call meets the lock instead of holding the close.
+    wakeDmWaits()
     syncIntent = null
     resetUpkeep()
     if (seenChangedTimer !== null) clearTimeout(seenChangedTimer)

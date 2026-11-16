@@ -212,7 +212,7 @@ test('problem names what keeps the card back', async (t) => {
 
 test('a listed term in the name or the message keeps the card from being signed', async (t) => {
   const { cardFields, cardRefusal, initialCompose } = await load()
-  const { BLOCKED_TERMS } = await import('../src/blockedTerms.js')
+  const { BLOCKED_TERMS } = require('@varanda/rpc')
   const { refusalText } = await import('../src/wordCheck.js')
   const term = BLOCKED_TERMS[0]
   const base = { ...initialCompose(), enabled: true, name: 'Ana', message: 'Vem!' }

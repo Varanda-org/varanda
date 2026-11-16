@@ -144,6 +144,37 @@ test('stored file names are digits plus one of six extensions', (t) => {
   t.ok(src.includes('static let maxFiles = 10'))
 })
 
+// The extension names a video by what its sender registered; the app keeps
+// one, and only when the copy starts with an ISO media ftyp box.
+test('a shared video is one sniffed ISO media file under its own cap', (t) => {
+  const src = swift()
+  t.ok(src.includes('static let maxVideoBytes: Int64 = 512 * 1024 * 1024'))
+  const run = body(src, 'func importEntry(')
+  ordered(t, run, [
+    'if isVideoName(name) {',
+    'if stored.contains(where: { $0.mime.hasPrefix("video/") }) { continue }',
+    'try admitVideo(source, into: tmp, index: stored.count)',
+    '} else if let file = try admit(source, into: tmp, index: stored.count) {'
+  ], 'one video, through admitVideo')
+  const admit = body(src, 'func admitVideo(')
+  t.ok(admit.includes('size > 0, size <= maxVideoBytes else { return nil }'), 'the inbox file is capped')
+  ordered(t, admit, [
+    'try fm.copyItem(at: source, to: part)',
+    'copiedAttrs[.type] as? FileAttributeType == .typeRegular,',
+    'copied.int64Value > 0, copied.int64Value <= maxVideoBytes,',
+    'let mime = isoMedia(part) else {'
+  ], 'the copy is checked, then sniffed')
+  t.is((admit.match(/throw error/g) || []).length, 2, 'a failed copy or rename keeps the inbox entry')
+  t.ok(admit.includes('let name = String(index) + (mime == "video/quicktime" ? ".mov" : ".mp4")'), 'named by the sniffed type')
+  const sniff = body(src, 'func isoMedia(')
+  t.ok(sniff.includes('guard String(decoding: bytes[4..<8], as: UTF8.self) == "ftyp", size >= 16 else { return nil }'), 'an ftyp box first')
+  t.ok(src.includes('"^[0-9]{1,2}\\\\.(mp4|mov)$"'), 'read side checks the two names')
+  const stored = body(src, 'func readStored(')
+  t.ok(stored.includes('guard matches(videoNamePattern, name), width >= 0, height >= 0 else { return nil }'))
+  t.ok(stored.includes('guard matches(fileNamePattern, name), mime.hasPrefix("image/"), width > 0, height > 0 else { return nil }'), 'an image still needs its sizes')
+  t.ok(body(src, 'func peek(').includes('"videos": share.videos,'), 'peek says how many videos were offered')
+})
+
 test('uris are built from the plain path, never a percent encoded one', (t) => {
   const src = swift()
   t.ok(src.includes('"uri": "file://" + fileURL.path,'))

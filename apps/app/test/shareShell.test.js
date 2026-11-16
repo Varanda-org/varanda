@@ -68,6 +68,18 @@ test('Publicar keeps a share for a retry and frees it once nothing needs it', (t
   t.ok(/const again = retryableEncode\(error\) && sourcesRef\.current\.has\(id\)/.test(src), 'a retry that ends after a newer share replaced its files offers no other')
 })
 
+// A shared video goes through the gallery's preparation; its file stays
+// until that ends, and the shell is never left holding it.
+test('Publicar prepares a shared video and frees its file when the preparation ends', (t) => {
+  const src = read('src/screens/Publicar.js')
+  const effect = src.slice(src.indexOf('const sharedVideo = shared.video || null'))
+  t.ok(effect.indexOf('video.draft.pick(') < effect.indexOf('if (shared.files.length === 0 || !canAttach)'), 'the video is handled before the photo path')
+  t.ok(/if \(!canVideo\) \{\s*onSharedDone\(shared\.id\)\s*return\s*\}/.test(effect), 'where no video can be attached, the share is let go with the note')
+  t.ok(/if \(video\.draft\.state\.phase !== 'empty'\) \{\s*setNote\(VIDEO_HELD_TEXT\)\s*onSharedDone\(shared\.id\)\s*return\s*\}/.test(effect), 'a draft that already has a video keeps it and says so')
+  t.ok(/const id = shared\.id\s*onSharedLoaded\(id\)\s*video\.draft\.pick\(\{\s*pickVideo: async \(\) => sharedVideo,\s*prepareVideo,/.test(effect), 'the shell lets go before the same preparation as the gallery')
+  t.ok(/video\.draft\.pick\(\{[\s\S]{0,300}?\}\)\.catch\(\(err\) => \{\s*if \(mountedRef\.current\) setNote\(err\.message\)\s*\}\)\.finally\(\(\) => freeRef\.current\(id\)\)/.test(effect), 'its file is freed however the preparation ends, even unmounted')
+})
+
 test('Publicar keeps the plain post text across a web share reload, for the same account', (t) => {
   const src = read('src/screens/Publicar.js')
   t.ok(src.includes("import { dropDraft, takeDraft, watchDraft } from '../draftKeep'"))

@@ -44,7 +44,7 @@ import { chatMediaLayout, itemSize } from '../chatSend'
 import { useEscapeLayer } from './escapeLayer'
 import { holdEmbeds } from '../embedLive'
 import { Icon } from './Icon'
-import { MediaView } from './MediaView'
+import { MediaView, mediaHashDeps } from './MediaView'
 import { ZoomView } from './ZoomView'
 import { VOICE_HEIGHT, VOICE_WIDTH, VoiceBubble } from './VoiceBubble'
 import { useStyles, useTheme } from './ThemeProvider'
@@ -54,7 +54,7 @@ export const MEDIA_UNAVAILABLE = 'Mídia indisponível'
 export const MEDIA_TAP_TO_LOAD = 'Toque para ver a foto'
 
 const display = { urlFromBytes, revokeUrl }
-const fetchDeps = () => (isAppClient() ? { fetch: expoFetch } : {})
+const fetchDeps = () => ({ ...mediaHashDeps(), ...(isAppClient() ? { fetch: expoFetch } : {}) })
 
 // Keeps `uri` from being evicted while it is on screen.
 function usePinned (uri) {

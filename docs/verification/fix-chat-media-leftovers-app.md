@@ -1,6 +1,6 @@
 # Sobras da mídia nas conversas, parte 2 (branch fix/chat-media-leftovers-app)
 
-Segunda parte da #443, que a fecha: o que mora no app, no nó do navegador e no `@varanda/rpc`. A primeira parte (semeador, nó e serviço de conta) está em `docs/verification/fix-chat-media-leftovers.md`. Os Termos e a Política de Privacidade passam à versão 65.
+Segunda parte da #443, que a fecha: o que mora no app, no nó do navegador e no `@varanda/rpc`. A primeira parte (semeador, nó e serviço de conta) está em `docs/verification/fix-chat-media-leftovers.md`. Os Termos e a Política de Privacidade passam à versão 67.
 
 Cada teste de regressão abaixo foi rodado contra o código anterior (o arquivo de `HEAD` no lugar do novo, ou só a correção removida) e falhou; depois, com a correção, passou.
 
@@ -25,7 +25,7 @@ Cada teste de regressão abaixo foi rodado contra o código anterior (o arquivo 
 
 ## Do #388: prévia de link no celular
 
-- [x] No celular, links encurtados ficavam sem prévia. O aparelho continua sem seguir redirecionamentos. Quando a resposta é um redirecionamento (status 0, tipo `opaqueredirect`, 3xx ou `redirected`), o app ligado à instalação da associação (nó hospedado, com membro e `request`) pede a prévia ao serviço de conta, pela mesma rota da web hospedada (`apps/app/src/previewService.js`); sem isso, segue o caminho de antes (a miniatura do YouTube, senão sem prévia). Decisão do mantenedor: pedir ao serviço de conta, com os Termos e a Política na versão 65. Teste "native buildPreview: a link that redirects goes to the account service of a hosted node" (`apps/app/test/linkCardBuild.test.js`); falha com o `previewBuild.native.js` anterior.
+- [x] No celular, links encurtados ficavam sem prévia. O aparelho continua sem seguir redirecionamentos. Quando a resposta é um redirecionamento (status 0, tipo `opaqueredirect`, 3xx ou `redirected`), o app ligado à instalação da associação (nó hospedado, com membro e `request`) pede a prévia ao serviço de conta, pela mesma rota da web hospedada (`apps/app/src/previewService.js`); sem isso, segue o caminho de antes (a miniatura do YouTube, senão sem prévia). Decisão do mantenedor: pedir ao serviço de conta, com os Termos e a Política na versão 67. Teste "native buildPreview: a link that redirects goes to the account service of a hosted node" (`apps/app/test/linkCardBuild.test.js`); falha com o `previewBuild.native.js` anterior.
 - [x] A rotação EXIF podia trocar a proporção. Os decodificadores nativos giram o JPEG pela orientação EXIF antes de redimensionar, e o tamanho do cabeçalho é o guardado: para as orientações 5 a 8 os lados trocam. `encodeThumbnail` usa agora `orientedSize` (`apps/app/src/media/exif.js`). Testes em `apps/app/test/mediaExif.test.js` e "native encodeThumbnail: a JPEG taken sideways is resized to its turned sides" (`apps/app/test/linkCardBuild.test.js`); o segundo falha com o `encode.native.js` anterior.
 - [ ] `expo/fetch` com `redirect: 'manual'` e a rotação do decodificador num aparelho: veja "Aparelhos".
 
@@ -55,7 +55,7 @@ Conferências que precisam de conta, anotadas no checklist da #224:
 - `docs/protocol.md`: o resumo da lista de conversas fica no bloqueio; a conferência do `AudioSpecificConfig` de uma nota de voz AAC; quem lê a página de um cartão de link (o aparelho no app nativo, o serviço de conta na web e depois de um redirecionamento no app) e o cache de mídia aberta entre bloqueios.
 - `docs/design.md`, seção LGPD: as linhas das fotos das mensagens diretas e da prévia de links.
 - `docs/verification.md`: os trechos de limites e as caixas das seções 105, 107, 111 e 117 que este PR e a parte 1 resolveram. As seções 104, 106, 108 e 114 não tinham limite resolvido aqui.
-- Termos e Política na versão 65: `apps/app/src/legal.js`, `packages/core/lib/terms.js`, `apps/site/public/termos/index.html` e `apps/site/public/privacidade/index.html`.
+- Termos e Política na versão 67: `apps/app/src/legal.js`, `packages/core/lib/terms.js`, `apps/site/public/termos/index.html` e `apps/site/public/privacidade/index.html`.
 
 ## Comandos
 

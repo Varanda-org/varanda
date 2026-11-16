@@ -133,7 +133,8 @@ test('perf marks for the stored and the live rows', (t) => {
 })
 
 test('stored reposts meet the block list as soon as it is known', (t) => {
-  t.ok(/data\.seeded === true \? seededSeqsShown\(data\.rows, blocks, data\.info\.publicKey,/.test(screen), 'stored rows only')
+  t.ok(/data\.seeded === true \? hiddenStoredSeqs\(data\.rows, data\.stored, blocks, data\.info\.publicKey,/.test(screen), 'stored rows only')
+  t.ok(/\(hidden === null \|\| !hidden\.has\(row\.seq\)\)/.test(screen))
   t.ok(/\}, \[data, blocks, social\.social\.originals\]\)/.test(screen), 'recomputed when the list changes')
   t.ok(writeSnapshot.includes('blocked: l.blocked') && writeSnapshot.includes('followed: l.persistOf'), 'the build drops blocked and unfollowed originals')
 })
@@ -172,6 +173,7 @@ test('a built diario snapshot seeds rows with the live shape', async (t) => {
   t.ok(seed.data.rows.every((r) => r.entry.seq === r.seq && r.entry.record), 'rows as logRows makes them')
   t.is(seed.data.info.publicKey, OWN)
   t.is(seed.data.seeded, true)
+  t.alike([...seed.data.stored], [9, 6, 5], 'the stored seqs are remembered')
   t.is(seed.data.oldest, 5)
   t.is(seed.data.atEnd, false)
   t.absent('loadedAt' in seed.data)
@@ -264,7 +266,7 @@ function seededRows () {
 test('stored rows under the block list: blocked reposts go, a failed list keeps only own content', (t) => {
   const shown = seededSeqsShown()
   const none = () => undefined
-  t.alike([...shown(seededRows(), { keys: new Set(), loadState: 'pending' }, OWN, none)], [9, 8, 7, 6, 5], 'nothing known: all')
+  t.alike([...shown(seededRows(), { keys: new Set(), loadState: 'pending' }, OWN, none)], [6, 5], 'nothing known yet: only own content, as in A Rua (#463)')
   t.alike([...shown(seededRows(), { keys: new Set([FOLLOW]), loadState: 'ok' }, OWN, none)], [8, 7, 6, 5], 'a blocked author\'s repost goes')
   t.alike([...shown(seededRows(), { keys: new Set(), loadState: 'failed' }, OWN, none)], [6, 5], 'failed list: only own rows naming no one else')
   t.ok(CODE.includes("import { CountsNote, RepostPlaceholder, SocialToast, liveBinding, refOf, snapshotRowsShown, socialRowProps, useRowPropsCache, useSocial } from './ARua'"), 'A Rua\'s rule, reused')
@@ -277,8 +279,51 @@ test('a row deleted in this session is never written back', (t) => {
   t.ok(holdsDeleted(rows, new Set([6])), 'a page read before the deletion still holds it')
   t.absent(holdsDeleted([{ seq: 6, invalid: { seq: 6, reason: 'deleted' } }], new Set([6])), 'a live page without it')
   t.ok(/if \(cur\.seeded \|\| holdsDeleted\(cur\.rows, deletedSeqsRef\.current\)\) \{\s+clearScreenSnapshot\('diario'\)\s+return/.test(writeSnapshot), 'cleared instead of saved')
-  t.ok(/if \(row !== cur\.rows\[i\]\) deletedSeqsRef\.current\.add\(row\.seq\)/.test(screen), 'the rows the deletion changed are kept')
-  t.ok(/if \(Number\.isSafeInteger\(seq\)\) deletedSeqsRef\.current\.add\(seq\)/.test(screen), 'and the own post seq of the ref')
+  t.absent(/deletedSeqsRef\.current\.add\(row\.seq\)/.test(screen), 'an own repost of the deleted post is not marked (#539)')
+  t.ok(/const deletedSeq = cur !== null \? ownDeletedSeq\(t\.ref, cur\.info\.publicKey\) : null\s*if \(deletedSeq !== null\) deletedSeqsRef\.current\.add\(deletedSeq\)/.test(screen), 'only the own post seq of the ref')
+})
+
+test('deleting an own post the page also reposts keeps the copy writable', (t) => {
+  const ownDeletedSeq = helper('ownDeletedSeq')
+  // eslint-disable-next-line no-new-func
+  const holdsDeleted = new Function(fnText(CODE, 'holdsDeleted') + '\nreturn holdsDeleted')()
+  t.is(ownDeletedSeq(OWN + ':6', OWN), 6)
+  t.is(ownDeletedSeq(OWN.toUpperCase() + ':6', OWN), 6, 'any case')
+  t.is(ownDeletedSeq(FOLLOW + ':6', OWN), null, 'not own')
+  t.is(ownDeletedSeq(OWN + ':x', OWN), null)
+  t.is(ownDeletedSeq(null, OWN), null)
+  const deleted = new Set([ownDeletedSeq(OWN + ':6', OWN)])
+  // The next live page: the post is a deleted slot, the own repost of it a live entry.
+  const live = [
+    { seq: 9, entry: { seq: 9, record: { type: 'repost', to: { author: OWN, seq: 6 }, on: true, at: at(9) } } },
+    { seq: 6, invalid: { seq: 6, reason: 'deleted' } }
+  ]
+  t.absent(holdsDeleted(live, deleted), 'the live page can be written again')
+  t.ok(holdsDeleted([{ seq: 6, entry: { seq: 6, record: { type: 'post', text: 'own', at: at(6), replyTo: null } } }], deleted), 'a page read before the deletion still cannot')
+})
+
+test('the block rule of the stored rows never hides live older rows', (t) => {
+  const rowsShown = new Function(fnText(ARUA, 'refOf') + '\n' + fnText(ARUA, 'snapshotRowsShown') + '\nreturn snapshotRowsShown')() // eslint-disable-line no-new-func
+  // eslint-disable-next-line no-new-func
+  const hiddenStoredSeqs = new Function('snapshotRowsShown', fnText(CODE, 'postOf') + '\n' + fnText(CODE, 'seededSeqsShown') + '\n' + fnText(CODE, 'hiddenStoredSeqs') + '\nreturn hiddenStoredSeqs')(rowsShown)
+  const none = () => undefined
+  // The stored page, then an older live page appended after a failed first read.
+  const rows = seededRows().concat([
+    { seq: 4, entry: { seq: 4, record: { type: 'repost', to: { author: FOLLOW, seq: 1 }, on: true, at: at(4) } } },
+    { seq: 3, entry: { seq: 3, record: { type: 'post', text: 'q', at: at(3), replyTo: null, quote: { author: STRANGER, seq: 2 } } } }
+  ])
+  const stored = new Set([9, 8, 7, 6, 5])
+  t.alike([...hiddenStoredSeqs(rows, stored, { keys: new Set(), loadState: 'failed' }, OWN, none)].sort(), [7, 8, 9], 'only stored rows naming someone else')
+  t.alike([...hiddenStoredSeqs(rows, stored, { keys: new Set([FOLLOW]), loadState: 'ok' }, OWN, none)], [9], 'a blocked author\'s stored repost; the live one is the node\'s')
+  t.is(hiddenStoredSeqs(rows, new Set(), { keys: new Set(), loadState: 'failed' }, OWN, none).size, 0, 'no stored rows, nothing hidden')
+  t.is(hiddenStoredSeqs(rows, undefined, { keys: new Set(), loadState: 'failed' }, OWN, none).size, 0)
+  t.ok(/\.\.\.\(base\.seeded \? \{ seeded: true, stored: base\.stored \} : \{\}\)/.test(loadOlder), 'an older page keeps the stored seqs, not more')
+})
+
+test('stored rows go on another installation or association with the same key', (t) => {
+  t.ok(/const seedBindingRef = useRef\(binding\)/.test(screen), 'the binding the boot read used')
+  t.ok(/cur\.seeded && \(!sameSnapshotBinding\(seedBindingRef\.current, binding\) \|\| cur\.info\.publicKey !== binding\.owner\)/.test(screen), 'origin and association too, not only the owner')
+  t.ok(CODE.includes("import { sameSnapshotBinding } from './Comunidades'"))
 })
 
 test('Diario rows come from the props cache through one stable renderItem', (t) => {

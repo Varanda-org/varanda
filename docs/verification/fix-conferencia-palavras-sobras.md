@@ -21,4 +21,4 @@ Limites:
 
 - Nenhuma caixa acima foi marcada nesta documentação; só os testes automatizados rodaram.
 - A imagem do cartão não é lida. Números no meio da palavra e grafias trocadas (`n1gger`) passam.
-- Seguem abertos, e dependem dos mantenedores: o @nome só ser recusado no app (o serviço de conta não tem a lista) e o que fazer com app modificado, build antigo e CLI.
+- O @nome no serviço de conta e o que fazer com app modificado, build antigo e CLI foram decididos depois: veja `docs/verification/fix-word-check-leftovers.md`.

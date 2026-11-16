@@ -75,7 +75,7 @@ test('anunciarSteps: acknowledgement belongs only to review', async (t) => {
 
 test('anunciarSteps: word refusals stay with the step containing the text', async (t) => {
   const { STEPS, stepErrors } = await load()
-  const { BLOCKED_TERMS } = await import('../src/blockedTerms.js')
+  const { BLOCKED_TERMS } = require('@varanda/rpc')
   const { validateListingForm } = await import('../src/feira.js')
   for (const field of ['title', 'text', 'city', 'bairro']) {
     const draft = form({ [field]: BLOCKED_TERMS[0] })

@@ -210,6 +210,7 @@ test('a passkey of another identity keeps the stored message store', async (t) =
   const reader = createDmStore({ storage })
   const localKey = await passkey.dmLocalKeyFromPrf(new Uint8Array(b4a.from(PRF, 'hex')), { hkdf })
   await reader.unlock(localKey)
+  await reader.loaded()
   localKey.fill(0)
   t.alike(reader.snapshot().ops.map((r) => [r.op, r.peer]), [['accepted', peer]], 'the refused passkey left the stored rows in place')
   reader.lock()

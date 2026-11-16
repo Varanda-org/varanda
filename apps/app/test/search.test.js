@@ -14,7 +14,7 @@ const C = 'ef'.repeat(32)
 const D = '12'.repeat(32)
 
 const CONSTANTS = ['TOKEN_MAX', 'NAME_TOKENS_MAX', 'QUERY_TOKENS_MAX', 'QUERY_MIN_CHARS', 'RESULTS_MAX', 'INPUT_MAX']
-const TEXT_FNS = ['isValidUsername', 'splitTokens', 'foldTokens', 'queryTokens', 'queryPath', 'parseQuery', 'isQueryTokens']
+const TEXT_FNS = ['isValidUsername', 'splitTokens', 'wholeTokens', 'foldTokens', 'queryTokens', 'queryPath', 'parseQuery', 'isQueryTokens']
 
 const CORPUS = [
   'João da Silva',

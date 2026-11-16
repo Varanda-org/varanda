@@ -24,7 +24,7 @@ import { NOT_HOSTED } from '../pessoas'
 import {
   PEEK_OFFLINE_MESSAGE, PEEK_SHORT_TEXT, PEEK_WARM_QUIET_MS,
   getPeekWarmState, isExpiredPeekError, isLastPeekPage, isSeederBusyError, isWebOnlyError, mergePage, pageNeeds, peekKey, peekNotice,
-  recordFollow, shouldWarmPeek, skippedText, subscribePeekWarm, updatePeekWarmState, withoutFollowed
+  readLaterPages, recordFollow, shouldWarmPeek, skippedText, subscribePeekWarm, updatePeekWarmState, withoutFollowed
 } from '../peek'
 import { whoOf } from '../who'
 import { CountsNote, RepostPlaceholder, refOf, socialRowProps, useRowPropsCache, useSocial } from './ARua'
@@ -249,28 +249,37 @@ function EspiadinhaList ({ active, refresh, onReply, onReport, onQuote, onOpenTh
     const current = stateRef.current
     if (!active || !hosted || current.loading || current.refreshing || current.loadingMore || current.atEnd || current.expired || current.next === null) return
     const mine = ++seqRef.current
-    const after = current.next
     commit({ loadingMore: true, moreError: '' })
     try {
-      const page = await peek({ limit: PEEK_LIMIT_MAX, after })
-      if (mine !== seqRef.current) return
-      // A cursor that did not move ends the list (compared by value), unless
-      // the page is incomplete: the node's candidate traversal still moved,
-      // and the list's dry-page pause bounds how often it is asked again.
-      const stuck = page.incomplete !== true && page.next !== null && page.next.round === after.round && page.next.at === after.at &&
-        page.next.author === after.author && page.next.seq === after.seq
-      // Later pages may fetch diaries the first page did not reach: keep the
-      // newest counts and never drop an incomplete warning.
-      const meta = stateRef.current.meta
-      const rows = unfollowed(page.items)
-      ingest(pageNeeds(rows))
-      commit({
-        items: unfollowed(mergePage(stateRef.current.items, rows).items),
-        next: page.next,
-        atEnd: isLastPeekPage(page) || stuck,
-        meta: { diaries: page.diaries, skipped: page.skipped, incomplete: meta.incomplete || page.incomplete === true },
-        loadingMore: false
+      // An incomplete page that added nothing reads on from its cursor
+      // (readLaterPages), all within this one load.
+      await readLaterPages({
+        after: current.next,
+        read: (after) => peek({ limit: PEEK_LIMIT_MAX, after }),
+        take: (page, after) => {
+          if (mine !== seqRef.current) return null
+          // A cursor that did not move ends the list (compared by value), unless
+          // the page is incomplete: the node's candidate traversal still moved,
+          // and the list's dry-page pause bounds how often it is asked again.
+          const stuck = page.incomplete !== true && page.next !== null && page.next.round === after.round && page.next.at === after.at &&
+            page.next.author === after.author && page.next.seq === after.seq
+          // Later pages may fetch diaries the first page did not reach: keep the
+          // newest counts and never drop an incomplete warning.
+          const meta = stateRef.current.meta
+          const rows = unfollowed(page.items)
+          ingest(pageNeeds(rows))
+          const merged = mergePage(stateRef.current.items, rows)
+          commit({
+            items: unfollowed(merged.items),
+            next: page.next,
+            atEnd: isLastPeekPage(page) || stuck,
+            meta: { diaries: page.diaries, skipped: page.skipped, incomplete: meta.incomplete || page.incomplete === true }
+          })
+          return activeRef.current ? merged.added : null
+        }
       })
+      if (mine !== seqRef.current) return
+      commit({ loadingMore: false })
     } catch (err) {
       if (mine !== seqRef.current) return
       // An expired snapshot is not a retryable failure ('tentar de novo'

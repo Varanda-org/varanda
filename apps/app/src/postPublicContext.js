@@ -1,5 +1,6 @@
 // Whether the publish row ("Página pública na web") shows on the member's own
-// posts, and how it opens the sheet. Post rows read it with usePostPublic().
+// posts, and how it opens the sheet. Post rows and the composer (Publicar's
+// "Publicar também na web") read it with usePostPublic().
 // Off unless the node is hosted (only the browser node writes a post-share,
 // docs/rpc.md 5.122) and the installation answers that public post pages are
 // on (postPublicPolicy.js). Without a provider, the row stays hidden.
@@ -12,7 +13,8 @@ const OFF = Object.freeze({ enabled: false, open: null })
 
 export const PostPublicContext = createContext(OFF)
 
-// -> { enabled: boolean, open: ((ref) => void) | null }
+// -> { enabled: boolean, open: ((ref) => void) | null }, for post rows and
+// the composer's "Publicar também na web".
 export function usePostPublic () {
   return useContext(PostPublicContext)
 }
