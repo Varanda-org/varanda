@@ -10,12 +10,17 @@
 // Lifecycle: a new release installs in the background and waits until every
 // window of the previous one is closed (no forced activation, no taking over
 // open pages), so an open page never sees its caches change mid-session.
-// Online, navigations and /varanda-node.js always run what the server
-// delivers; the cache only answers when the network does not (offline, or a
-// 404/5xx while a deploy replaces the files). Besides the verified precache of
-// this release, the worker stores only values it builds itself (the DM mute
-// record, the block list, a received share), never a network response, and
-// never serves them.
+// Online, navigations always run what the server delivers; the cached shell
+// only answers when the network does not (offline, or a 404/5xx while a deploy
+// replaces the files). The page loads the node copy named for its own release
+// (/varanda-node-<release>.js, scripts/finish-web.js), a precached file like a
+// hashed bundle: the cached shell of this release runs this release's node,
+// and a page of another release never gets it. /varanda-node.js itself is
+// not precached, so only the network answers it.
+//
+// Besides the verified precache of this release, the worker stores only
+// values it builds itself (the DM mute record, the block list, a received
+// share), never a network response, and never serves them.
 //
 // Every cached response is re-verified before it is returned (verifiedMatch):
 // the Cache API is writable by any same-origin script (window.caches), so a
@@ -327,26 +332,11 @@ async function navigate (request) {
   return (await cached('/index.html')) || res
 }
 
-// /varanda-node.js is not content-hashed: network first, never stored here.
-// The cached copy answers offline, on a failed status or when the server
-// answers with HTML (a missing file behind an SPA fallback).
-async function nodeScript (request) {
-  let res
-  try {
-    res = await fetch(request)
-  } catch {
-    return (await cached('/varanda-node.js')) || text503('sem conexão')
-  }
-  if (res.ok && !isHtml(res)) return res
-  const copy = await cached('/varanda-node.js')
-  if (copy) return copy
-  return isHtml(res) ? text503('tipo inesperado') : res
-}
-
 // Everything else: cache first, otherwise the network, never stored. A miss
 // is a file outside this release's verified precache (e.g. a newer release's
-// bundle, possibly still being written): keeping it could pin a broken file.
-// A cached copy that fails verification is a miss too.
+// bundle or node copy, possibly still being written, or /varanda-node.js):
+// keeping it could pin a broken file. A cached copy that fails verification
+// is a miss too.
 async function cacheFirst (request) {
   const cache = await caches.open(CACHE)
   const hit = await verifiedMatch(cache, request.url)
@@ -501,8 +491,6 @@ self.addEventListener('fetch', (event) => {
     pathname.startsWith(FEIRA_PREFIX) || pathname.startsWith(POST_PAGE_PREFIX)) return
   if (request.mode === 'navigate') {
     event.respondWith(navigate(request))
-  } else if (pathname === '/varanda-node.js') {
-    event.respondWith(nodeScript(request))
   } else {
     event.respondWith(cacheFirst(request))
   }
