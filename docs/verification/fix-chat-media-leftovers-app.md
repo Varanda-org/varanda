@@ -27,7 +27,7 @@ Cada teste de regressão abaixo foi rodado contra o código anterior (o arquivo 
 
 - [x] No celular, links encurtados ficavam sem prévia. O aparelho continua sem seguir redirecionamentos. Quando a resposta é um redirecionamento (status 0, tipo `opaqueredirect`, 3xx ou `redirected`), o app ligado à instalação da associação (nó hospedado, com membro e `request`) pede a prévia ao serviço de conta, pela mesma rota da web hospedada (`apps/app/src/previewService.js`); sem isso, segue o caminho de antes (a miniatura do YouTube, senão sem prévia). Decisão do mantenedor: pedir ao serviço de conta, com os Termos e a Política na versão 67. Teste "native buildPreview: a link that redirects goes to the account service of a hosted node" (`apps/app/test/linkCardBuild.test.js`); falha com o `previewBuild.native.js` anterior.
 - [x] A rotação EXIF podia trocar a proporção. Os decodificadores nativos giram o JPEG pela orientação EXIF antes de redimensionar, e o tamanho do cabeçalho é o guardado: para as orientações 5 a 8 os lados trocam. `encodeThumbnail` usa agora `orientedSize` (`apps/app/src/media/exif.js`). Testes em `apps/app/test/mediaExif.test.js` e "native encodeThumbnail: a JPEG taken sideways is resized to its turned sides" (`apps/app/test/linkCardBuild.test.js`); o segundo falha com o `encode.native.js` anterior.
-- [ ] `expo/fetch` com `redirect: 'manual'` e a rotação do decodificador num aparelho: veja "Aparelhos".
+- [x] `expo/fetch` com `redirect: 'manual'` e a rotação do decodificador num aparelho: conferidos no Android e no iOS (veja "Aparelhos").
 
 ## Do #392: cache de mídia aberta
 
@@ -39,7 +39,13 @@ Cada teste de regressão abaixo foi rodado contra o código anterior (o arquivo 
 
 ## Aparelhos
 
-A preencher na conferência.
+Conferido em 16/11/2026, no build de debug com o Metro do branch na porta 8101 (`EXPO_PUBLIC_VARANDA_VITRINE=1`), primeiro no Android (emulador API 36), depois no simulador iOS (iPhone 17 Pro) e por fim na web. Os módulos foram chamados pelo depurador do Hermes, no próprio app, sem conta:
+
+- `expo/fetch` de `https://google.com/` com `redirect: 'manual'`: no Android, status 301 com `redirected: true`; no iOS, status 301 com `redirected: false`. Nos dois o aparelho não segue o redirecionamento, e o status 3xx já basta para `previewBuild.native.js` pedir a prévia ao serviço de conta.
+- Um JPEG de 320x240 com orientação EXIF 1 e o mesmo com orientação 6: `manipulateAsync` devolve 320x240 e 240x320 nos dois aparelhos, ou seja, o decodificador gira pela orientação. `encodeThumbnail` devolve 320x240 e 240x320, os lados girados que a correção espera.
+- Android e iOS abrem o app até A Rua da vitrine; a web abre os cartões de introdução, sem erro no console.
+
+O pedido real ao serviço de conta depois de um redirecionamento precisa de conta e fica em "Fica devendo".
 
 ## Fica devendo
 
