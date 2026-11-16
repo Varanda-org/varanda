@@ -65,9 +65,11 @@
 // read deadline and one byte budget charged per block as it arrives, in
 // flight or already abandoned, and checked before every request. A row's
 // first get may always go out, a further one only while every get in flight
-// on the link fits under the budget, so in-flight data is bounded by
-// NOTICES_PARALLEL x 4 blocks and the overshoot past the budget stays at one
-// block per row. A block over MAX_BLOCK_BYTES ends its row. A read over
+// on the link fits under the budget, so the overshoot past the budget stays
+// at one block per row. Every byte on the link also counts against the
+// budget plus one frame per row (wire), which bounds the data in flight when
+// a seeder answers with oversized signed blocks. A block over
+// MAX_BLOCK_BYTES ends its row. A read over
 // NOTICES_SLOW_READ_MS writes one local timing line (connection, support and
 // proof, rows). One read at a time.
 const Hypercore = require('hypercore')
@@ -87,7 +89,7 @@ const { memoryStorage } = require('./storage')
 const { pipeline } = require('./block-window')
 const { guardedWsStream } = require('./ws-stream')
 const { readerModeration } = require('./member-ops')
-const { PEEK_CORE_PAGE_SIZE, PEEK_MAX_FRAME, SEEDER_BUSY } = require('./peek')
+const { PEEK_CORE_PAGE_SIZE, PEEK_MAX_FRAME, SEEDER_BUSY, messageBytes } = require('./peek')
 const store = require('./node-store')
 
 const NOTICES_DEADLINE_MS = 25000
@@ -204,7 +206,7 @@ function isEngagement (type) {
 // log(text): warnings. limits: test-only overrides (connectTimeoutMs,
 // deadlineMs, budgetBytes, parallel, blockTimeoutMs, maxBlocksPerRow,
 // maxSeederPages, cacheTtlMs, cacheMax, requestTimeoutMs, windowInflight,
-// maxFrame, lingerMs) and test hooks (now: the slow-read clock;
+// maxFrame, wireMaxBytes, lingerMs) and test hooks (now: the slow-read clock;
 // trace(event): every block get, its outcome, its charge, every accepted
 // block and every admission message the seeder sent).
 function createNoticer ({ storage, association, seederUrl, createSocket, ownKey, sign, seenToken, log = noop, limits = {} } = {}) {
@@ -226,6 +228,8 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     // The link carries bounded notices pages and a few blocks: the peek
     // link's frame bound (./peek.js PEEK_MAX_FRAME) fits it with margin.
     maxFrame: PEEK_MAX_FRAME,
+    // null: budgetBytes + parallel x maxFrame (wire).
+    wireMaxBytes: null,
     windowInflight: NOTICES_WINDOW_INFLIGHT,
     lingerMs: NOTICES_LINGER_MS,
     now: Date.now,
@@ -308,6 +312,10 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       noise.on('error', noop)
       const link = { noise, peer: null, notices: null, noticesV2: null, noticesV3: null, verified: false, owner: run }
       run.link = link
+      socket.addEventListener('message', (event) => {
+        const owner = link.owner
+        if (owner !== null && owner.link === link) wire(owner, messageBytes(event))
+      })
       let settled = false
       const finish = (err) => {
         if (settled) return
@@ -476,6 +484,19 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     } finally {
       release()
       if (run.keyLocks.get(item.key) === mine) run.keyLocks.delete(item.key)
+    }
+  }
+
+  // Counts every byte the seeder sends on the link while a read uses it
+  // (peek.js wire): past the budget plus one frame per row in parallel the
+  // link is cut like a budget cut, so a get cancelled in flight, never
+  // charged, cannot carry bytes the budget does not see.
+  function wire (run, bytes) {
+    run.wire += bytes
+    const max = L.wireMaxBytes === null ? L.budgetBytes + L.parallel * L.maxFrame : L.wireMaxBytes
+    if (run.wire > max && run.link !== null) {
+      run.overBudget = true
+      closeLink(run)
     }
   }
 
@@ -1026,7 +1047,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     // adopts it (same own key) or closes it. chain: set when the read ends
     // with a cursor ({ own, handle, v2, v3 }); stale: a page went unanswered.
     // The budget and the deadline are this read's, whatever link it uses.
-    const run = { link: null, adopting: null, chain: null, stale: false, cores: new Set(), keyLocks: new Map(), aborted: false, lost: false, budget: 0, pending: 0, overBudget: false, incomplete: false, rowsAt: null, proofAt: null, times: { connect: 0, proof: 0, rows: 0 } }
+    const run = { link: null, adopting: null, chain: null, stale: false, cores: new Set(), keyLocks: new Map(), aborted: false, lost: false, budget: 0, wire: 0, pending: 0, overBudget: false, incomplete: false, rowsAt: null, proofAt: null, times: { connect: 0, proof: 0, rows: 0 } }
     current = run
     const parked = claimIdle()
     // A first page always dials: the scroll it starts is a new one.
