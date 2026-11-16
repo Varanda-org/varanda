@@ -6,6 +6,8 @@
 // next load of the composer for the same account. sessionStorage dies with
 // the tab and is not shared with other tabs. Photos are not kept.
 
+import { registerLocalCache } from './localCaches.js'
+
 const KEY = 'varanda.publicarRascunho'
 const TTL_MS = 3600000
 // Far past any post (the field has no cap of its own); longer is not kept.
@@ -22,6 +24,10 @@ function drop (store) {
 export function dropDraft () {
   drop(tabStorage())
 }
+
+// A lock, Sair, Recomeçar or another account wipes the local caches, and the
+// text kept here goes with them: it was the previous person's.
+registerLocalCache({ wipe: dropDraft })
 
 function decode (raw, owner, now) {
   if (typeof raw !== 'string') return ''

@@ -234,19 +234,21 @@ object ShareInbox {
 
   // A complete share still waiting there when the app was updated moves over
   // (same partition, a rename), so the update does not lose it; the rest of
-  // the old directory goes.
-  private fun adopt(context: Context) {
+  // the old directory goes. True when a share moved.
+  private fun adopt(context: Context): Boolean {
     val old = legacyRoot(context)
-    val children = old.listFiles() ?: return
+    val children = old.listFiles() ?: return false
     val dest = root(context)
     dest.mkdirs()
+    var moved = false
     for (child in children) {
       if (child.isDirectory && isId(child.name) && File(child, MANIFEST).isFile) {
         val target = File(dest, child.name)
-        if (!target.exists()) child.renameTo(target)
+        if (!target.exists() && child.renameTo(target)) moved = true
       }
     }
     old.deleteRecursively()
+    return moved
   }
 
   // Off the main thread: it copies up to MAX_FILES streams of MAX_BYTES each.
@@ -260,6 +262,9 @@ object ShareInbox {
     val dir = File(root(context), id)
     try {
       if (!dir.mkdirs()) return null
+      // Before the copy, so a process killed halfway still has its partial
+      // files swept with the app closed.
+      scheduleSweep(context)
       val title = cut(textExtra(intent, Intent.EXTRA_SUBJECT))
       val text = cut(textExtra(intent, Intent.EXTRA_TEXT))
       val offered = if (intent.type?.startsWith("image/", ignoreCase = true) == true) streams(intent) else emptyList()
@@ -291,7 +296,8 @@ object ShareInbox {
   // The newest complete share. Only one share is ever pending, so the older
   // complete ones go; a directory without a manifest is still being written.
   fun newest(context: Context): Share? {
-    adopt(context)
+    // Not from the worker's own sweep: replacing the running work cancels it.
+    if (adopt(context)) scheduleSweep(context)
     val children = root(context).listFiles() ?: return null
     val complete = children
       .filter { it.isDirectory && isId(it.name) && File(it, MANIFEST).isFile }

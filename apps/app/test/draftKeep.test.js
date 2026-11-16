@@ -158,6 +158,15 @@ test('draft keep dropDraft removes the record', async (t) => {
   t.absent(map.has(KEY))
 })
 
+test('draft keep goes with the local caches on a lock, Sair or another account', async (t) => {
+  await load()
+  const { wipeLocalCaches } = await import('../src/localCaches.js')
+  const map = fakeStorage(t)
+  map.set(KEY, record())
+  wipeLocalCaches()
+  t.absent(map.has(KEY), 'the wipe removes the kept text')
+})
+
 test('draft keep on native keeps nothing', async (t) => {
   const native = await loadNative()
   t.alike(Object.keys(native).sort(), ['dropDraft', 'takeDraft', 'watchDraft'])
