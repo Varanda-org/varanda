@@ -3,13 +3,16 @@
 // and after a write says only that it was sent: the node reports what this
 // device wrote, not that the seeder holds it. Publishing never opens a share
 // dialog; Compartilhar and Copiar link act only on their own tap. The caller
-// passes the post's colon ref (`target`) and its public link (`link`).
+// passes the post's colon ref (`target`) and its public link (`link`), and may
+// pass `notice`, taken at the opening and shown with the first read
+// (firstReadView): a 'sent' notice never stands next to the offer to publish.
 
 import { useEffect, useRef, useState } from 'react'
 import { ScrollView, StyleSheet, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { publish, readShared, unpublish } from '../postShare'
+import { firstReadView } from '../postShareCompose'
 import { canShare, copyText, shareUrl } from '../share'
 import { shareNav } from '../shareNav'
 import { Sheet } from './Sheet'
@@ -28,26 +31,27 @@ const LOADING = { phase: 'loading', note: '', error: '' }
 
 // phase: 'loading', 'off', 'on' or 'unknown' (no action is offered while the
 // state is not known: the person closes and opens the sheet again).
-export function PostShareSheet ({ open, target, link, onClose }) {
+export function PostShareSheet ({ open, target, link, notice = '', onClose }) {
   const { request } = useNode()
   const [view, setView] = useState(LOADING)
   const [busy, setBusy] = useState(false)
   const [linkNote, setLinkNote] = useState('')
   const busyRef = useRef(false)
+  const noticeRef = useRef(notice)
+  noticeRef.current = notice
   // Each opening (and each target) is a turn: an answer from an older one is
   // dropped.
   const turn = useRef(0)
 
   useEffect(() => {
     const mine = ++turn.current
+    const lead = noticeRef.current
     setView(LOADING)
     setLinkNote('')
     if (!open || typeof target !== 'string' || typeof request !== 'function') return
     readShared(request, target).then((r) => {
       if (turn.current !== mine) return
-      if (r.state === 'on' || r.state === 'off') setView({ phase: r.state, note: '', error: '' })
-      else if (r.state === 'uncertain') setView({ phase: 'unknown', note: r.message, error: '' })
-      else setView({ phase: 'unknown', note: '', error: r.message })
+      setView(firstReadView(lead, r))
     })
     return () => { turn.current++ }
   }, [open, target, request])

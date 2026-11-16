@@ -76,6 +76,7 @@ import { BlocksProvider, useBlocks } from './src/blocksProvider'
 import { BlockSheet } from './src/ui/BlockSheet'
 import { PageNoticeSheet } from './src/ui/PageNoticeSheet'
 import { PostShareSheet } from './src/ui/PostShareSheet'
+import { webShareAfter } from './src/postShareCompose'
 import { PostPublicProvider } from './src/postPublicContext'
 import { SavedProvider, forgetSavedFor } from './src/savedProvider'
 import { forgetReminderKey } from './src/eventRemindersStore'
@@ -1928,7 +1929,7 @@ function Member () {
     }
     setComposer({ open: true, reply: r, quote: null })
   }
-  const onPublished = (kind, sentRef) => {
+  const onPublished = (kind, sentRef, web = null) => {
     share.requeue()
     // A momento touches no post state: Publicar already told the
     // Momentos readers (momentsChanged).
@@ -1950,6 +1951,16 @@ function Member () {
     setVersion((v) => v + 1)
     setPeekVersion((v) => v + 1)
     showToast('publicado')
+    // "Publicar também na web" already sent its one share request from the
+    // composer: the sheet only shows what the node answered, and nothing is
+    // sent from here. The composer's sheet closes in this same update, and
+    // ui/Sheet.js hands over, so this one shows once that one has left.
+    if (web && kind === 'post') {
+      const after = webShareAfter(web)
+      if (after === null) return
+      if (after.ref === null) return showToast(after.toast)
+      openPostShare(after.ref, after.notice)
+    }
   }
   const startQuote = (q) => setComposer({ open: true, reply: null, quote: q })
 
@@ -2510,7 +2521,14 @@ function Member () {
   const [pageDmAsk, setPageDmAsk] = useState(null)
   // The colon ref of the own post whose "Página pública na web" sheet is open.
   const [shareTarget, setShareTarget] = useState(null)
-  const openPostShare = useCallback((ref) => setShareTarget(nav.isRef(ref) ? ref : null), [])
+  // What the composer says on top of that sheet after its own post.share; a
+  // post row opens it with none. Every opening sets it, so an old one never
+  // shows.
+  const [shareNotice, setShareNotice] = useState('')
+  const openPostShare = useCallback((ref, notice = '') => {
+    setShareNotice(typeof notice === 'string' ? notice : '')
+    setShareTarget(nav.isRef(ref) ? ref : null)
+  }, [])
   // A lock, an unlock or another identity closes it: the post is the old one's.
   useEffect(() => setShareTarget(null), [ownKey, nodeEpoch])
   // Hidden tabs and covered stack entries stay mounted, so playback follows
@@ -4144,6 +4162,7 @@ function Member () {
           open={shareTarget !== null}
           target={shareTarget}
           link={postLink(installationOrigin() || globalThis.location?.origin || null, shareTarget)}
+          notice={shareNotice}
           onClose={() => setShareTarget(null)}
         />
         {/* Avisos is not a tab: the bar keeps the tab it was opened from, and that tab's icon closes it. */}
@@ -4166,63 +4185,67 @@ function Member () {
   // Set only past the early returns, so the intro, the terms and Conexão do
   // not count as the first screen; a patience expiry latches too.
   if (!coveringBoot) bootSettled.current = true
-  // Post rows read whether "Página pública na web" shows (src/postPublicContext).
-  // The wrapper is unconditional, so it never remounts the screens.
   // The saved posts list (Posts salvos) is read by the post rows and its screen.
   content = <SavedProvider hosted={node.hosted === true} ownKey={ownKey}>{content}</SavedProvider>
   // Tappable #tags exist only on a hosted node: without a handler the spans stay plain text.
   content = <HashtagContext.Provider value={node.hosted === true ? openTag : undefined}>{content}</HashtagContext.Provider>
-  content = <PostPublicProvider hosted={node.hosted === true} online={node.online} visible={node.visible} open={openPostShare}>{content}</PostPublicProvider>
   // Side insets are applied once here (sidePad); top and bottom by each bar;
   // Modal content (sheets, photo viewer) pads itself. The wrapper is
   // permanent: a conditional one would remount Identidade at the reveal.
   return (
     <View style={[styles.root, coveringBoot && SPLASH_WRAP, { paddingHorizontal: sidePad }]}>
       {coveringBoot ? bootCover : null}
-      <ChromeMotion.Provider value={chromeMotion}>
-        <View style={coveringBoot ? styles.hidden : styles.flex}>{content}</View>
-      </ChromeMotion.Provider>
-      {/* The terms gate used to unmount these sheets on a hosted lock as a
-          side effect, and a current terms record no longer brings it up. So
-          Publicar is not mounted while locked (its draft and photo go) and
-          Ajustes remounts on every lock and unlock (its cached key goes) but
-          stays reachable at Entrar for the 'Conexão' footer. With the lock
-          effect clearing the composer context, nothing reaches the next
-          account in this tab. */}
-      {!locked && (
-        <Publicar
-          open={composer.open}
-          reply={composer.reply}
-          quote={composer.quote}
-          momentRequest={composer.moment || 0}
-          shared={share.shared}
-          onSharedDone={(id) => share.done(id)}
-          onSharedTaken={(id) => share.taken(id)}
-          onSharedLoaded={(id) => share.loaded(id)}
-          onSharedFree={(id) => share.free(id)}
-          me={me}
-          busyRef={composerBusyRef}
-          onClose={() => setComposer((c) => ({ ...c, open: false }))}
-          onClearReply={() => setComposer((c) => ({ ...c, reply: null }))}
-          onClearQuote={() => setComposer((c) => ({ ...c, quote: null }))}
-          onReplyDraft={settleReplyDraft}
-          onPublished={onPublished}
+      {/* Post rows and the composer (mounted outside `content`) read whether
+          "Página pública na web" shows (src/postPublicContext). It sits after
+          the boot cover, so the root View and the Splash at child 0 are still
+          what the early returns share, and it is unconditional, so it never
+          remounts anything. */}
+      <PostPublicProvider hosted={node.hosted === true} online={node.online} visible={node.visible} open={openPostShare}>
+        <ChromeMotion.Provider value={chromeMotion}>
+          <View style={coveringBoot ? styles.hidden : styles.flex}>{content}</View>
+        </ChromeMotion.Provider>
+        {/* The terms gate used to unmount these sheets on a hosted lock as a
+            side effect, and a current terms record no longer brings it up. So
+            Publicar is not mounted while locked (its draft and photo go) and
+            Ajustes remounts on every lock and unlock (its cached key goes) but
+            stays reachable at Entrar for the 'Conexão' footer. With the lock
+            effect clearing the composer context, nothing reaches the next
+            account in this tab. */}
+        {!locked && (
+          <Publicar
+            open={composer.open}
+            reply={composer.reply}
+            quote={composer.quote}
+            momentRequest={composer.moment || 0}
+            shared={share.shared}
+            onSharedDone={(id) => share.done(id)}
+            onSharedTaken={(id) => share.taken(id)}
+            onSharedLoaded={(id) => share.loaded(id)}
+            onSharedFree={(id) => share.free(id)}
+            me={me}
+            busyRef={composerBusyRef}
+            onClose={() => setComposer((c) => ({ ...c, open: false }))}
+            onClearReply={() => setComposer((c) => ({ ...c, reply: null }))}
+            onClearQuote={() => setComposer((c) => ({ ...c, quote: null }))}
+            onReplyDraft={settleReplyDraft}
+            onPublished={onPublished}
+          />
+        )}
+        <BlockSheet onToast={showToast} />
+        <Denunciar
+          open={report !== null}
+          target={report}
+          onClose={() => setReport(null)}
+          onSent={(text) => {
+            setReport(null)
+            showToast(text)
+          }}
         />
-      )}
-      <BlockSheet onToast={showToast} />
-      <Denunciar
-        open={report !== null}
-        target={report}
-        onClose={() => setReport(null)}
-        onSent={(text) => {
-          setReport(null)
-          showToast(text)
-        }}
-      />
-      <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={navigateAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} scheduledDeletion={scheduledDeletion} onDeletionChanged={refreshAccount} inviteNudge={inviteNudge} onOpenPaginas={!deleteFromAviso && pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? () => pushScreen({ screen: 'paginas' }) : undefined} node={node} member={member} phoneGate={phone.gate} phoneKey={phone.key} phoneChecking={phone.pending} phoneVerified={phone.state === 'verificado' && !phone.error} markVerified={markPhoneVerified} recheckPhone={recheckPhone} />
-      {/* Mounted after the splash, so it wins: while the boot cover shows it
-          follows the splash, which stays cream on native (Splash.js). */}
-      <StatusBar style={coveringBoot ? statusBarStyle(Platform.OS === 'web' || previewOn ? scheme : 'light') : statusBarStyle(scheme, { overBand: light || viewerOnTop })} />
+        <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={navigateAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} scheduledDeletion={scheduledDeletion} onDeletionChanged={refreshAccount} inviteNudge={inviteNudge} onOpenPaginas={!deleteFromAviso && pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? () => pushScreen({ screen: 'paginas' }) : undefined} node={node} member={member} phoneGate={phone.gate} phoneKey={phone.key} phoneChecking={phone.pending} phoneVerified={phone.state === 'verificado' && !phone.error} markVerified={markPhoneVerified} recheckPhone={recheckPhone} />
+        {/* Mounted after the splash, so it wins: while the boot cover shows it
+            follows the splash, which stays cream on native (Splash.js). */}
+        <StatusBar style={coveringBoot ? statusBarStyle(Platform.OS === 'web' || previewOn ? scheme : 'light') : statusBarStyle(scheme, { overBand: light || viewerOnTop })} />
+      </PostPublicProvider>
     </View>
   )
 }
