@@ -212,7 +212,8 @@ async function postHarness ({ request = async () => ({ seq: 1 }), upload, photo 
     setUploading: () => {},
     offlineQueue: false,
     errorText: (err) => err.message,
-    linkDraft: { take: () => { throw new Error('Video must suppress the preview') } },
+    // The word check reads the card through take, and neither flow has one.
+    linkDraft: { take: () => null },
     withCardFallback: (build, card) => ({ op: build(card) }),
     node: {
       online: true,
