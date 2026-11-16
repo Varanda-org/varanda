@@ -13,9 +13,13 @@ const {
   SYNC_PAGES_MAX,
   SYNC_PAGE_TOKENS_MAX,
   SYNC_DM_MAX,
+  SYNC_DM_MAX_V3,
   SYNC_DM_MAX_V2,
   SYNC_DM_MAX_V1,
   SYNC_GROUPS_MAX,
+  SYNC_GROUPS_MAX_V3,
+  SYNC_MOMENTS_MAX,
+  MOMENT_ENTRY_BYTES,
   MERGE_AVISOS_MAX,
   MERGE_PAGE_TOKENS_MAX,
   HEADER_BYTES,
@@ -82,12 +86,18 @@ test('sizes and caps', (t) => {
   t.is(SEEN_BLOB_BYTES, 32808)
   t.is(SEEN_BLOB_B64, 43744)
   t.is(b4a.toString(b4a.alloc(SEEN_BLOB_BYTES), 'base64').length, SEEN_BLOB_B64)
-  t.is(HEADER_BYTES, 78)
-  t.is(SYNC_DM_MAX, 256)
+  t.is(HEADER_BYTES, 79)
+  t.is(SYNC_DM_MAX, 128)
+  t.is(SYNC_DM_MAX_V3, 256)
   t.is(SYNC_DM_MAX_V2, 520)
   t.is(SYNC_DM_MAX_V1, 736)
+  t.is(SYNC_GROUPS_MAX, 92)
+  t.is(SYNC_GROUPS_MAX_V3, 128)
   t.is(SYNC_TESTIMONIALS_MAX, 128)
   t.is(TESTIMONIAL_ENTRY_BYTES, 41)
+  t.is(SYNC_MOMENTS_MAX, 132)
+  t.ok(SYNC_MOMENTS_MAX <= 255, 'nMoments is one byte')
+  t.is(MOMENT_ENTRY_BYTES, 40)
   t.is(MERGE_AVISOS_MAX, 256)
   t.is(MERGE_PAGE_TOKENS_MAX, 32)
   const atCaps = HEADER_BYTES +
@@ -96,8 +106,9 @@ test('sizes and caps', (t) => {
     SYNC_DM_MAX * TOKEN_ENTRY_BYTES +
     SYNC_GROUPS_MAX * GROUP_ENTRY_BYTES +
     SYNC_BLOCKS_MAX * BLOCK_ENTRY_BYTES +
-    SYNC_TESTIMONIALS_MAX * TESTIMONIAL_ENTRY_BYTES
-  t.is(atCaps, 32722)
+    SYNC_TESTIMONIALS_MAX * TESTIMONIAL_ENTRY_BYTES +
+    SYNC_MOMENTS_MAX * MOMENT_ENTRY_BYTES
+  t.is(atCaps, 32707)
   t.ok(atCaps <= SEEN_PLAIN_BYTES)
 })
 
@@ -414,7 +425,7 @@ test('blocks: round trip, a document without them, a bad on byte, a count past t
   badOn[HEADER_BYTES + 32] = 2
   t.is(decode(badOn, EXPECT), null, 'on is 0 or 1')
   const tooMany = b4a.from(bytes)
-  tooMany[HEADER_BYTES - 2] = SYNC_BLOCKS_MAX + 1
+  tooMany[HEADER_BYTES - 3] = SYNC_BLOCKS_MAX + 1
   t.is(decode(tooMany, EXPECT), null)
   t.exception.all(() => encode({ ...emptyDoc(), blocks: [{ key: 'x', on: true, t: 1 }] }), /block entries/)
   t.exception.all(() => encode({ ...emptyDoc(), blocks: 'x' }), /blocks must be/)
@@ -462,7 +473,7 @@ test('blocks: a change makes the merge localOnly, the same list does not', (t) =
   t.is(sameContent({ ...emptyDoc(), blocks: [] }, { ...emptyDoc(), blocks: [{ key, on: true, t: 9 }] }), false)
 })
 
-test('version 1 is still read: no blocks, more dm tokens, cut to the new window, and written back as version 3', (t) => {
+test('version 1 is still read: no blocks, more dm tokens, cut to the new window, and written back as version 4', (t) => {
   // A version 1 plaintext written by hand: its 76-byte header has no nBlocks.
   const n = SYNC_DM_MAX_V1
   const bytes = b4a.alloc(SEEN_PLAIN_BYTES)
@@ -484,11 +495,12 @@ test('version 1 is still read: no blocks, more dm tokens, cut to the new window,
   t.is(doc.gen, 3)
   t.alike(doc.blocks, [])
   t.alike(doc.testimonials, [])
+  t.alike(doc.moments, [])
   t.is(doc.dm.length, SYNC_DM_MAX, 'the newest stay')
   t.is(doc.dm[doc.dm.length - 1].t, 1000 + n - 1)
   const again = encode({ ...doc, blocks: [blockEntry(1, true, 5)] })
   t.is(again[0], SEEN_VERSION)
-  t.is(SEEN_VERSION, 3)
+  t.is(SEEN_VERSION, 4)
   t.alike(decode(again, EXPECT).blocks, [blockEntry(1, true, 5)])
 
   const over = b4a.from(bytes)
@@ -526,18 +538,19 @@ function v2Plain (nDm, blocks = []) {
   return bytes
 }
 
-test('version 2 is still read: blocks kept, no testimonials, dm cut to 256, written back as version 3', (t) => {
+test('version 2 is still read: blocks kept, no testimonials, dm cut to the window, written back as version 4', (t) => {
   const blocks = [blockEntry(1, true, 10), blockEntry(2, false, 20)]
   const bytes = v2Plain(SYNC_DM_MAX_V2, blocks)
   const doc = decode(bytes, EXPECT)
   t.is(doc.gen, 4)
   t.alike(doc.blocks, blocks)
   t.alike(doc.testimonials, [])
+  t.alike(doc.moments, [])
   t.is(doc.dm.length, SYNC_DM_MAX, 'the newest stay')
   t.is(doc.dm[doc.dm.length - 1].t, 1000 + SYNC_DM_MAX_V2 - 1)
   t.is(doc.dm[0].t, 1000 + SYNC_DM_MAX_V2 - SYNC_DM_MAX)
   const again = encode(doc)
-  t.is(again[0], 3, 'written as version 3')
+  t.is(again[0], 4, 'written as version 4')
   t.alike(decode(again, EXPECT), doc)
 
   const key = seenKeyFromSeed(crypto.randomBytes(32), ASSOC, MEMBER)
@@ -559,8 +572,8 @@ test('testimonials: round trip, a document without them, bad state byte, seq 0, 
   t.alike(trim(emptyDoc()).testimonials, [])
 
   const bytes = encode(doc)
-  t.is(bytes[0], 3)
-  t.is(bytes[HEADER_BYTES - 1], 2, 'nTestimonials is the last header byte')
+  t.is(bytes[0], 4)
+  t.is(bytes[HEADER_BYTES - 2], 2, 'nTestimonials comes right before nMoments')
   for (const state of [0, 3, 255]) {
     const bad = b4a.from(bytes)
     bad[HEADER_BYTES + 32 + 4] = state
@@ -570,7 +583,7 @@ test('testimonials: round trip, a document without them, bad state byte, seq 0, 
   new DataView(seq0.buffer, seq0.byteOffset).setUint32(HEADER_BYTES + 32, 0, true)
   t.is(decode(seq0, EXPECT), null, 'seq 0')
   const tooMany = b4a.from(bytes)
-  tooMany[HEADER_BYTES - 1] = SYNC_TESTIMONIALS_MAX + 1
+  tooMany[HEADER_BYTES - 2] = SYNC_TESTIMONIALS_MAX + 1
   t.is(decode(tooMany, EXPECT), null, 'count past the cap')
 
   t.exception.all(() => encode({ ...emptyDoc(), testimonials: 'x' }), /testimonials must be/)
@@ -630,4 +643,153 @@ test('testimonials: the merge keeps the newer decision, kept on a tie, and a cha
   t.is(merge({ ...emptyDoc(), testimonials: [decision(1, 'kept', 9)] }, remote).localOnly, false, 'the same list')
   t.is(merge(emptyDoc(), remote).localOnly, false, 'nothing local')
   t.is(sameContent(emptyDoc(), remote), false)
+})
+
+const keyOfAuthor = (i) => (i + 0x10).toString(16).padStart(64, 'e')
+const seenMoment = (i, t, seq = i + 1) => ({ author: keyOfAuthor(i), seq, t })
+
+// A version 3 plaintext written by hand: a 78-byte header with nTestimonials
+// and no nMoments, nDm dm tokens, nGroups group marks and the given decisions.
+function v3Plain (nDm, nGroups, testimonials = []) {
+  const bytes = b4a.alloc(SEEN_PLAIN_BYTES)
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  bytes[0] = 3
+  view.setUint32(2, 5, true)
+  bytes.set(b4a.from(MEMBER, 'hex'), 6)
+  bytes.set(b4a.from(ASSOC, 'hex'), 38)
+  view.setUint16(70, 0, true)
+  bytes[72] = 0
+  view.setUint16(73, nDm, true)
+  bytes[75] = nGroups
+  bytes[76] = 0
+  bytes[77] = testimonials.length
+  let off = 78
+  for (let i = 0; i < nDm; i++) {
+    bytes.set(b4a.from(i.toString(16).padStart(32, '0'), 'hex'), off); off += 16
+    view.setUint32(off, 1000 + i, true); off += 4
+  }
+  for (let i = 0; i < nGroups; i++) {
+    bytes.set(b4a.from(i.toString(16).padStart(64, '0'), 'hex'), off); off += 32
+    bytes.set(b4a.from('ab'.repeat(32), 'hex'), off); off += 32
+    const ms = Date.UTC(2026, 0, 1) + i * 1000
+    view.setUint32(off, ms % 4294967296, true)
+    view.setInt32(off + 4, Math.floor(ms / 4294967296), true); off += 8
+    view.setUint32(off, i + 1, true); off += 4
+  }
+  for (const e of testimonials) {
+    bytes.set(b4a.from(e.from, 'hex'), off); off += 32
+    view.setUint32(off, e.seq, true); off += 4
+    bytes[off++] = e.state === 'kept' ? 1 : 2
+    view.setUint32(off, e.t, true); off += 4
+  }
+  return bytes
+}
+
+test('version 3 is still read: decisions kept, no moments, dm and groups cut to the new windows, written back as version 4', (t) => {
+  const testimonials = [decision(1, 'kept', 10), decision(2, 'declined', 20)]
+  const bytes = v3Plain(SYNC_DM_MAX_V3, SYNC_GROUPS_MAX_V3, testimonials)
+  const doc = decode(bytes, EXPECT)
+  t.is(doc.gen, 5)
+  t.alike(doc.testimonials, testimonials)
+  t.alike(doc.moments, [])
+  t.is(doc.dm.length, SYNC_DM_MAX, 'the newest dm tokens stay')
+  t.is(doc.dm[0].t, 1000 + SYNC_DM_MAX_V3 - SYNC_DM_MAX)
+  t.is(doc.groups.length, SYNC_GROUPS_MAX, 'the newest group marks stay')
+  t.is(doc.groups[0].seq, SYNC_GROUPS_MAX_V3 - SYNC_GROUPS_MAX + 1)
+  const again = encode(doc)
+  t.is(again[0], 4, 'written as version 4')
+  t.alike(decode(again, EXPECT), doc)
+
+  const key = seenKeyFromSeed(crypto.randomBytes(32), ASSOC, MEMBER)
+  const sodium = require('sodium-universal')
+  const nonce = crypto.randomBytes(SEEN_NONCE_BYTES)
+  const blob = b4a.alloc(SEEN_BLOB_BYTES)
+  blob.set(nonce)
+  sodium.crypto_secretbox_easy(blob.subarray(SEEN_NONCE_BYTES), bytes, nonce, key)
+  t.alike(open(blob, key, EXPECT), doc, 'a sealed version 3 blob opens')
+
+  t.is(decode(v3Plain(SYNC_DM_MAX_V3 + 1, 0), EXPECT), null, 'a version 3 dm count past its own cap')
+  t.is(decode(v3Plain(0, SYNC_GROUPS_MAX_V3 + 1), EXPECT), null, 'a version 3 group count past its own cap')
+  const v4Groups = encode(emptyDoc())
+  v4Groups[75] = SYNC_GROUPS_MAX + 1
+  t.is(decode(v4Groups, EXPECT), null, 'a version 4 group count past the new window')
+  const v4Dm = encode(emptyDoc())
+  new DataView(v4Dm.buffer, v4Dm.byteOffset).setUint16(73, SYNC_DM_MAX + 1, true)
+  t.is(decode(v4Dm, EXPECT), null, 'a version 4 dm count past the new window (129)')
+})
+
+test('moments: round trip, a document without them, seq 0, a count past the cap, bad entries', (t) => {
+  const moments = [seenMoment(1, 10), seenMoment(2, 20)]
+  const doc = { ...emptyDoc(), moments }
+  t.alike(decode(encode(doc), EXPECT).moments, moments)
+  t.alike(decode(encode(emptyDoc()), EXPECT).moments, [], 'none reads as an empty list')
+  t.alike(trim(emptyDoc()).moments, [])
+
+  const bytes = encode(doc)
+  t.is(bytes[0], 4)
+  t.is(bytes[HEADER_BYTES - 1], 2, 'nMoments is the last header byte')
+  t.is(b4a.toString(bytes.subarray(HEADER_BYTES, HEADER_BYTES + 32), 'hex'), keyOfAuthor(1))
+  const seq0 = b4a.from(bytes)
+  new DataView(seq0.buffer, seq0.byteOffset).setUint32(HEADER_BYTES + 32, 0, true)
+  t.is(decode(seq0, EXPECT), null, 'seq 0')
+  const tooMany = b4a.from(bytes)
+  tooMany[HEADER_BYTES - 1] = SYNC_MOMENTS_MAX + 1
+  t.is(decode(tooMany, EXPECT), null, 'count past the cap')
+
+  t.exception.all(() => encode({ ...emptyDoc(), moments: 'x' }), /moments must be/)
+  for (const e of [null, { ...seenMoment(1, 1), author: 'x' }, seenMoment(1, 1, 0), seenMoment(1, -1), seenMoment(1, 1, 4294967296)]) {
+    t.exception.all(() => encode({ ...emptyDoc(), moments: [e] }), /moment entries/)
+  }
+})
+
+test('moments: the window keeps the newest by t', (t) => {
+  const list = []
+  for (let i = 0; i < SYNC_MOMENTS_MAX + 5; i++) list.push(seenMoment(i, 100 + i))
+  const back = decode(encode({ ...emptyDoc(), moments: list }), EXPECT).moments
+  t.is(back.length, SYNC_MOMENTS_MAX)
+  t.is(back[0].t, 105, 'the oldest went first')
+  t.is(back[back.length - 1].t, 100 + SYNC_MOMENTS_MAX + 4)
+})
+
+test('moments: at every cap the document still fits', (t) => {
+  const blocks = []
+  for (let i = 0; i < SYNC_BLOCKS_MAX; i++) blocks.push(blockEntry(i + 1, i % 2 === 0, 100 + i))
+  const testimonials = []
+  for (let i = 0; i < SYNC_TESTIMONIALS_MAX; i++) testimonials.push(decision(i, i % 2 === 0 ? 'kept' : 'declined', 4294967295 - i, 4294967295 - i))
+  const moments = []
+  for (let i = 0; i < SYNC_MOMENTS_MAX; i++) moments.push(seenMoment(i, 4294967295 - i, 4294967295 - i))
+  const doc = { ...fullDoc(), blocks, testimonials, moments }
+  const back = decode(encode(doc), EXPECT)
+  t.alike(back, trim(doc))
+  t.is(back.moments.length, SYNC_MOMENTS_MAX)
+  t.is(back.testimonials.length, SYNC_TESTIMONIALS_MAX)
+  t.is(back.blocks.length, SYNC_BLOCKS_MAX)
+  t.is(back.dm.length, SYNC_DM_MAX)
+  t.is(back.groups.length, SYNC_GROUPS_MAX)
+  const key = seenKeyFromSeed(crypto.randomBytes(32), ASSOC, MEMBER)
+  const blob = seal(doc, key)
+  t.is(blob.byteLength, 32808)
+  t.alike(open(blob, key, EXPECT), trim(doc))
+})
+
+test('moments: the merge is a union keeping the newer t, and a new moment makes it localOnly', (t) => {
+  const a = { ...emptyDoc(), moments: [seenMoment(1, 10), seenMoment(2, 5)] }
+  const b = { ...emptyDoc(), moments: [seenMoment(1, 30), seenMoment(3, 7)] }
+  const ab = merge(a, b).doc
+  t.alike(ab.moments, merge(b, a).doc.moments, 'commutative')
+  t.alike(ab.moments, [seenMoment(2, 5), seenMoment(3, 7), seenMoment(1, 30)], 'union, max t')
+  t.alike(merge(ab, b).doc.moments, ab.moments, 'idempotent')
+
+  const remote = { ...emptyDoc(), moments: [seenMoment(1, 9)] }
+  t.is(merge({ ...emptyDoc(), moments: [seenMoment(2, 1)] }, remote).localOnly, true, 'a new moment')
+  t.is(merge({ ...emptyDoc(), moments: [seenMoment(1, 9)] }, remote).localOnly, false, 'the same list')
+  t.is(merge(emptyDoc(), remote).localOnly, false, 'nothing local')
+  t.is(sameContent(emptyDoc(), remote), false)
+
+  const many = []
+  for (let i = 0; i < SYNC_MOMENTS_MAX; i++) many.push(seenMoment(i, 1000 + i))
+  const merged = merge({ ...emptyDoc(), moments: many }, { ...emptyDoc(), moments: [seenMoment(500, 5000)] }).doc
+  t.is(merged.moments.length, SYNC_MOMENTS_MAX, 'the cap after the union')
+  t.alike(merged.moments[merged.moments.length - 1], seenMoment(500, 5000))
+  t.is(merged.moments[0].t, 1001, 'the oldest left')
 })

@@ -203,6 +203,174 @@ test('web seen store reads and writes localStorage', async (t) => {
   t.alike(JSON.parse(mem.get(STORAGE_KEY)), [C + ':4'])
 })
 
+// A per-device list in memory and a node with or without moments.seen.
+function seenHarness ({ local = null, nodeAnswers = true, failWith = null } = {}) {
+  const box = { raw: local === null ? null : JSON.stringify(local), writes: 0 }
+  const calls = []
+  const held = []
+  const request = async (method, params) => {
+    calls.push([method, params])
+    if (failWith) throw Object.assign(new Error(failWith), { code: 'USAGE' })
+    if (!nodeAnswers) throw Object.assign(new Error('estado de vistos sincronizado só no navegador'), { code: 'USAGE' })
+    if (method === 'moments.seen') return { refs: held.slice() }
+    if (method === 'moment.seen') {
+      const ref = params.author + ':' + params.seq
+      if (held.includes(ref)) return { changed: false }
+      held.push(ref)
+      return { changed: true }
+    }
+    throw new Error('unexpected ' + method)
+  }
+  return {
+    box,
+    calls,
+    held,
+    request,
+    storage: { read: () => box.raw, write: (raw) => { box.writes++; box.raw = raw } }
+  }
+}
+
+test('seen store: a node with moments.seen holds the list, marks go to it, never to the device', async (t) => {
+  const { createMomentSeenStore } = await loadSeen()
+  const h = seenHarness({ local: [] })
+  const store = createMomentSeenStore(h.storage)
+  store.bind({ key: 1, request: h.request })
+  t.alike(await store.load(), [], 'the node list')
+  t.ok(await store.mark(C + ':4'))
+  t.alike(h.held, [C + ':4'], 'marked on the node')
+  t.ok(await store.mark(C + ':4'), 'already seen')
+  t.is(h.calls.filter(([m]) => m === 'moment.seen').length, 1, 'sent once')
+  t.is(h.box.writes, 0, 'nothing written on the device')
+  h.held.push(B + ':2')
+  await store.refresh()
+  t.alike(await store.load(), [C + ':4', B + ':2'], 'refresh reads the node again')
+})
+
+test('seen store: a node without a seen document keeps the device list (capability, not platform)', async (t) => {
+  const { createMomentSeenStore } = await loadSeen()
+  const h = seenHarness({ local: [B + ':1'], nodeAnswers: false })
+  const store = createMomentSeenStore(h.storage)
+  store.bind({ key: 1, request: h.request })
+  t.alike(await store.load(), [B + ':1'], 'the device list')
+  t.ok(await store.mark(C + ':4'))
+  t.alike(JSON.parse(h.box.raw), [B + ':1', C + ':4'], 'written on the device')
+  t.alike(h.calls.map(([m]) => m), ['moments.seen'], 'only the probe went to the node')
+  t.is(await store.migrate(new Set([B + ':1'])), 0, 'nothing to migrate into')
+  t.alike(JSON.parse(h.box.raw), [B + ':1', C + ':4'], 'and the list stays')
+})
+
+test('seen store: a passing failure marks nothing anywhere and asks again later', async (t) => {
+  const { createMomentSeenStore } = await loadSeen()
+  const h = seenHarness({ local: [], failWith: 'identidade bloqueada: entre com a passkey' })
+  const store = createMomentSeenStore(h.storage)
+  store.bind({ key: 1, request: h.request })
+  t.alike(await store.load(), [])
+  t.is(await store.mark(C + ':4'), false, 'no mark')
+  t.is(h.box.writes, 0, 'nothing written on the device')
+  t.ok(h.calls.filter(([m]) => m === 'moments.seen').length >= 2, 'the next load asks the node again')
+})
+
+test('seen store: the device list moves to the node once, cleared first, only answered refs, never resent', async (t) => {
+  const { createMomentSeenStore, migrateMomentSeen } = await loadSeen()
+  const h = seenHarness({ local: [B + ':1', C + ':4', C + ':9'] })
+  const store = createMomentSeenStore(h.storage)
+  store.bind({ key: 1, request: h.request })
+  await store.load()
+  t.is(await store.migrate(new Set([B + ':1', C + ':4'])), 2)
+  t.alike(h.held, [B + ':1', C + ':4'], 'only the moments answered now')
+  t.alike(JSON.parse(h.box.raw), [], 'the device list is cleared')
+  t.alike(await store.load(), [B + ':1', C + ':4'], 'the store reads the node again')
+  h.box.raw = JSON.stringify([C + ':9'])
+  t.is(await store.migrate(new Set([C + ':9'])), 0, 'once per node')
+  t.alike(h.held, [B + ':1', C + ':4'], 'nothing resent')
+
+  const sent = []
+  const failClear = await migrateMomentSeen({ load: () => [B + ':1'], clear: () => false, request: async (m, p) => sent.push(p), allowed: new Set([B + ':1']) })
+  t.is(failClear, 0, 'a failed clear sends nothing')
+  t.alike(sent, [])
+  const many = Array.from({ length: 140 }, (_, i) => B + ':' + (i + 1))
+  await migrateMomentSeen({ load: () => many, clear: () => true, request: async (m, p) => sent.push(p.seq), allowed: new Set(many) })
+  t.alike(sent, many.slice(-132).map((ref) => Number(ref.split(':')[1])), 'the newest 132 go')
+})
+
+test('seen store: a failed mark is forgotten so the next view sends it again', async (t) => {
+  const { createMomentSeenStore } = await loadSeen()
+  const h = seenHarness({ local: [] })
+  const store = createMomentSeenStore(h.storage)
+  store.bind({ key: 1, request: h.request })
+  await store.load()
+  const real = h.request
+  let down = true
+  store.bind({ key: 1, request: async (m, p) => { if (down && m === 'moment.seen') throw new Error('rede'); return real(m, p) } })
+  const heard = []
+  store.subscribe((l) => heard.push(l))
+  t.is(await store.mark(C + ':4'), false)
+  t.alike(await store.load(), [], 'not kept in memory')
+  t.alike(heard[heard.length - 1], [], 'the ring hears it again')
+  down = false
+  t.is(await store.mark(C + ':4'), true, 'the next view sends it')
+  t.alike(h.held, [C + ':4'])
+})
+
+test('seen store: a failed refresh keeps the list; bind with a new key drops the old memory; clear on a node empties the device list', async (t) => {
+  const { createMomentSeenStore } = await loadSeen()
+  const h = seenHarness({ local: [] })
+  const store = createMomentSeenStore(h.storage)
+  let down = false
+  const req = async (m, p) => { if (down && m === 'moments.seen') throw new Error('rede'); return h.request(m, p) }
+  store.bind({ key: 1, request: req })
+  await store.mark(C + ':4')
+  t.alike(await store.load(), [C + ':4'])
+  down = true
+  await store.refresh()
+  t.alike(await store.load(), [C + ':4'], 'a failed read blanks nothing')
+  down = false
+  store.bind({ key: 2, request: async (m) => (m === 'moments.seen' ? { refs: [B + ':1'] } : { changed: true }) })
+  t.alike(await store.load(), [B + ':1'], 'the new identity does not see the old memory')
+  h.box.raw = JSON.stringify([C + ':9'])
+  t.ok(await store.clear())
+  t.alike(JSON.parse(h.box.raw), [], 'clear in node mode empties the device list')
+})
+
+test('seen store: the migration waits for an answer with moments', async (t) => {
+  const { createMomentSeenStore } = await loadSeen()
+  const h = seenHarness({ local: [B + ':1'] })
+  const store = createMomentSeenStore(h.storage)
+  store.bind({ key: 1, request: h.request })
+  await store.load()
+  t.is(await store.migrate(new Set()), 0, 'an empty answer')
+  t.alike(JSON.parse(h.box.raw), [B + ':1'], 'the legacy list stays')
+  t.is(await store.migrate(new Set([B + ':1'])), 1, 'runs on a later answer')
+  t.alike(h.held, [B + ':1'])
+})
+
+test('seen store: a clear empties the device list and, off a node, the screen', async (t) => {
+  const { createMomentSeenStore } = await loadSeen()
+  const h = seenHarness({ local: [B + ':1'] })
+  const store = createMomentSeenStore(h.storage)
+  t.alike(await store.load(), [B + ':1'])
+  const heard = []
+  store.subscribe((list) => heard.push(list))
+  t.ok(await store.clear())
+  t.alike(JSON.parse(h.box.raw), [])
+  t.alike(heard, [[]], 'the screen hears an empty list')
+  t.alike(await store.load(), [])
+})
+
+test('seen store wiring: the hook binds by capability, sign-out clears, a seen pass refreshes', (t) => {
+  const momentos = read('src/screens/Momentos.js')
+  t.ok(momentos.includes('bindMomentSeen(hosted ? { key: node.epoch, request: node.request } : null)'), 'bound on a hosted node, keyed by epoch')
+  t.ok(momentos.includes('migrateMomentSeenOnce(new Set(next.authors.flatMap((a) => a.items.map((item) => item.ref)))).catch(() => {})'), 'migration after a moments.read answer')
+  t.absent(momentos.includes('Platform.OS'), 'no platform gate')
+  const node = read('src/node.js')
+  t.ok(node.includes("if (name === 'signOut' || name === 'reset') clearMomentSeen()"), 'sign-out and reset clear the device list')
+  t.ok(read('App.js').includes('if (result.momentsChanged) refreshMomentSeen().catch(() => {})'), 'a seen pass refreshes the list')
+  for (const rel of ['src/momentSeenStore.web.js', 'src/momentSeenStore.native.js']) {
+    const src = read(rel)
+    for (const name of ['bindMomentSeen', 'refreshMomentSeen', 'migrateMomentSeenOnce', 'clearMomentSeen']) t.ok(src.includes('export const ' + name + ' ='), rel + ' ' + name)
+  }
+})
+
 test('review 1: the viewer runs, marks seen and closes only on top', (t) => {
   const src = read('src/screens/Momentos.js')
   t.ok(src.includes('function Viewer ({ entry, ownKey, isTop = true,'), 'isTop prop')

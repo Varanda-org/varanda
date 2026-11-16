@@ -8,3 +8,7 @@ const store = createMomentSeenStore({
 export const loadMomentSeen = () => store.load()
 export const markMomentSeen = (id) => store.mark(id)
 export const onMomentSeen = (fn) => store.subscribe(fn)
+export const bindMomentSeen = (source) => store.bind(source)
+export const refreshMomentSeen = () => store.refresh()
+export const migrateMomentSeenOnce = (allowed) => store.migrate(allowed)
+export const clearMomentSeen = () => store.clear()
