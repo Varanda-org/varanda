@@ -8,6 +8,9 @@ import android.net.Uri
 import android.os.CancellationSignal
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -19,9 +22,14 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 // Everything another app shares with Varanda lands here as plain files in the
-// app's cache, so the JS side never touches a foreign Uri or its grant. One
-// directory per share; its manifest.json is written last (temporary file and
-// rename), so a directory without one is a capture still in progress.
+// app's own storage, so the JS side never touches a foreign Uri or its grant.
+// One directory per share; its manifest.json is written last (temporary file
+// and rename), so a directory without one is a capture still in progress.
+// Not the cache: Android may empty that while the person is still on the way
+// to the composer, and the share would vanish with no word. noBackupFilesDir
+// is never cleared by the system nor sent to a backup, so every share is
+// swept here instead: by the app (src/useSharedIntent.js) and, with the app
+// closed, by ShareSweepWorker an hour after the capture.
 object ShareInbox {
   const val MAX_FILES = 10
   const val MAX_BYTES = 50L * 1024 * 1024
@@ -29,6 +37,8 @@ object ShareInbox {
   // A file that delivers no byte for this long, counted from its open, is
   // skipped: its open is cancelled, its descriptor closed and its thread left.
   const val STALL_MS = 30_000L
+  // Same as SHARE_TTL_MS in src/sharedIntent.js.
+  const val TTL_MS = 3_600_000L
 
   private const val DIR = "varanda-share"
   private const val MANIFEST = "manifest.json"
@@ -45,6 +55,9 @@ object ShareInbox {
   private val live = AtomicInteger(0)
   private const val MAX_ZERO_READS = 8
   private const val ZERO_READ_PAUSE_MS = 50L
+  private const val SWEEP_WORK = "varanda-share-sweep"
+  // A minute past the TTL, so the share it runs for is old enough to go.
+  private const val SWEEP_DELAY_MS = TTL_MS + 60_000L
   private val ID = Regex("^[0-9]{13}-[0-9a-f]{32}$")
   // A tampered or stale manifest must not point outside its own directory.
   private val FILE_NAME = Regex("^[0-9]{1,2}\\.(jpg|png|gif|webp|heic|img)$")
@@ -214,7 +227,27 @@ object ShareInbox {
 
   fun isId(id: String): Boolean = ID.matches(id)
 
-  private fun root(context: Context): File = File(context.cacheDir, DIR)
+  private fun root(context: Context): File = File(context.noBackupFilesDir, DIR)
+
+  // Where shares were kept before they left the cache.
+  private fun legacyRoot(context: Context): File = File(context.cacheDir, DIR)
+
+  // A complete share still waiting there when the app was updated moves over
+  // (same partition, a rename), so the update does not lose it; the rest of
+  // the old directory goes.
+  private fun adopt(context: Context) {
+    val old = legacyRoot(context)
+    val children = old.listFiles() ?: return
+    val dest = root(context)
+    dest.mkdirs()
+    for (child in children) {
+      if (child.isDirectory && isId(child.name) && File(child, MANIFEST).isFile) {
+        val target = File(dest, child.name)
+        if (!target.exists()) child.renameTo(target)
+      }
+    }
+    old.deleteRecursively()
+  }
 
   // Off the main thread: it copies up to MAX_FILES streams of MAX_BYTES each.
   // A stalled file is skipped and the rest are still copied: each Uri has its
@@ -247,6 +280,7 @@ object ShareInbox {
         return null
       }
       writeManifest(dir, id, at, title, text, offered.size, kept)
+      scheduleSweep(context)
       return id
     } catch (e: Exception) {
       dir.deleteRecursively()
@@ -257,6 +291,7 @@ object ShareInbox {
   // The newest complete share. Only one share is ever pending, so the older
   // complete ones go; a directory without a manifest is still being written.
   fun newest(context: Context): Share? {
+    adopt(context)
     val children = root(context).listFiles() ?: return null
     val complete = children
       .filter { it.isDirectory && isId(it.name) && File(it, MANIFEST).isFile }
@@ -292,9 +327,25 @@ object ShareInbox {
     }
   }
 
+  // Each capture moves the run to an hour after it, so the newest share is
+  // swept even if the app is never opened again. The sweep keeps anything
+  // younger than the TTL, so a run for an older share leaves a newer one.
+  private fun scheduleSweep(context: Context) {
+    try {
+      val request = OneTimeWorkRequestBuilder<ShareSweepWorker>()
+        .setInitialDelay(SWEEP_DELAY_MS, TimeUnit.MILLISECONDS)
+        .build()
+      WorkManager.getInstance(context.applicationContext)
+        .enqueueUniqueWork(SWEEP_WORK, ExistingWorkPolicy.REPLACE, request)
+    } catch (e: Exception) {
+      // WorkManager unavailable: the app's own sweep on its next start.
+    }
+  }
+
   fun sweep(context: Context, maxAgeMs: Double) {
     // NaN or a negative age from JS would otherwise wipe captures in progress.
     if (maxAgeMs.isNaN() || maxAgeMs < 0) return
+    adopt(context)
     val children = root(context).listFiles() ?: return
     val oldest = System.currentTimeMillis() - maxAgeMs.toLong()
     for (child in children) {

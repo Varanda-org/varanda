@@ -4192,6 +4192,8 @@ function Member () {
           shared={share.shared}
           onSharedDone={(id) => share.done(id)}
           onSharedTaken={(id) => share.taken(id)}
+          onSharedLoaded={(id) => share.loaded(id)}
+          onSharedFree={(id) => share.free(id)}
           me={me}
           busyRef={composerBusyRef}
           onClose={() => setComposer((c) => ({ ...c, open: false }))}

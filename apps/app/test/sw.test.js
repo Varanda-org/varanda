@@ -1809,6 +1809,12 @@ function redirectsHome (t, res, label) {
   t.is(res.headers.get('location'), ORIGIN + '/', label + ': to /')
 }
 
+// A share the worker could not store lands where the app tells the person.
+function redirectsLost (t, res, label) {
+  t.is(res.status, 303, label + ': 303')
+  t.is(res.headers.get('location'), ORIGIN + '/?compartilhamento=nao-coube', label + ': to the lost notice')
+}
+
 test('share target: a share with text and one photo is stored, then redirects to /', async (t) => {
   const w = renderedWorker()
   w.now = 1700000000123
@@ -1917,7 +1923,7 @@ test('share target: a failing formData still redirects and stores nothing', asyn
   t.alike((await storedShare(w)).keys, [])
 })
 
-test('share target: a store failing half way leaves nothing and still redirects', async (t) => {
+test('share target: a store failing half way leaves nothing and redirects to the lost notice', async (t) => {
   const w = renderedWorker()
   const open = w.caches.open
   w.caches.open = async (name) => {
@@ -1932,7 +1938,7 @@ test('share target: a store failing half way leaves nothing and still redirects'
     return cache
   }
   const { res } = await share(w, shareForm({ fotos: [photo('a.jpg'), photo('b.jpg')] }))
-  redirectsHome(t, res, 'quota')
+  redirectsLost(t, res, 'quota')
   t.alike((await storedShare(w)).keys, [], 'the first photo is dropped')
 })
 
@@ -1990,7 +1996,7 @@ test('share target: a replacement that fails keeps the saved share whole', async
   failing = true
   w.now += 1
   const { res } = await share(w, shareForm({ text: 'segundo', fotos: [photo('b.png', 'image/png'), photo('c.png', 'image/png')] }))
-  redirectsHome(t, res, 'failed replacement')
+  redirectsLost(t, res, 'failed replacement')
   const after = await storedShare(w)
   t.alike(after.keys, before.keys, 'only the first share is left')
   t.alike(after.meta, before.meta, 'its meta is unchanged')
