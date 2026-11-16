@@ -25,7 +25,10 @@ function streamError (message, code, cause) {
 export const LOAD_WAIT_MS = 20000
 export const SEEK_WAIT_MS = 20000
 export const SEEK_TOLERANCE_MS = 1000
-const SEEK_POLL_MS = 250
+// How often a pending seek reads the position between status updates. The
+// status updateInterval (250 ms) is separate; this only shortens the wait
+// for a seek that lands between two of those updates.
+const SEEK_POLL_MS = 50
 // Without tolerances iOS may land on any keyframe, more than a second off,
 // and the position check would never confirm. Half the tolerance on each
 // side keeps the landing inside it while still letting AVPlayer start from a

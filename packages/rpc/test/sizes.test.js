@@ -166,7 +166,9 @@ test('seen sync: worst-case request and results fit', (t) => {
     pending: false,
     dmChanged: false,
     groupChanged: false,
+    blocksChanged: false,
     testimonialsChanged: false,
+    momentsChanged: false,
     caughtUp: Array.from({ length: 512 }, (_, i) => i.toString(16).padStart(64, '0'))
   })
   t.ok(merge < MAX_MESSAGE)

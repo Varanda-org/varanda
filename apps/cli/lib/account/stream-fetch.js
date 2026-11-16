@@ -23,12 +23,44 @@ const { publicAddress, guardedLookup, httpsTarget, mediaType } = require('./safe
 //   - one deadline up to the final response headers; after that the body is
 //     bounded by `pipeCapped`, or by `readCapped` and the caller's deadline.
 //
-// `request`, `lookup` and `allowAddress` are replaced only by tests, to
-// reach a loopback fixture. Nothing here reads the environment.
+// Connections are kept alive, so a hop to a host already reached skips DNS,
+// TCP and TLS setup. With every default (https.request, dns.lookup,
+// publicAddress) and no `agent`, all fetchers share KEEP_ALIVE below; a test
+// passes its own `agent`; an injected `request`, `lookup` or `allowAddress`
+// with no `agent` dials a new socket per hop (agent: false), so a socket
+// checked under one address rule never serves a fetcher with another. A
+// pooled socket only serves the same host and port: the agent's pool key is
+// host:port (plus local address, family and the TLS options, servername
+// included), never the address, and `lookup` is not part of it, which is why
+// the pool is shared only between fetchers with the same lookup and rule.
+// Every pooled socket went through the guarded lookup when it was dialled.
+// With an agent:
+//
+//   - a redirect's body is drained so its socket goes back to the pool, but
+//     destroyed past REDIRECT_BODY_CAP bytes or REDIRECT_DRAIN_MS;
+//   - a hop whose reused socket fails with ECONNRESET or EPIPE before any
+//     response (the server closed an idle socket as it was picked) is tried
+//     once more on a new socket, same target, headers and redirects left.
+//
+// `request`, `lookup`, `allowAddress` and `agent` are replaced only by tests,
+// to reach a loopback fixture. Nothing here reads the environment.
 
 const RANGE_RE = /^bytes=(\d{1,12})-(\d{0,12})$/
 const FIXED = new Set(['user-agent', 'accept', 'range', 'host'])
 const DEFAULT_CONNECT_MS = 10000
+const REDIRECT_BODY_CAP = 16 * 1024
+const REDIRECT_DRAIN_MS = 1000
+const RETRY_CODES = new Set(['ECONNRESET', 'EPIPE'])
+// How long pipeCapped waits for an upstream's own end after its last byte.
+const UPSTREAM_END_MS = 1000
+
+// The shared pool. Its idle sockets never keep the process alive: Node's
+// Agent#keepSocketAlive unrefs a socket as it enters the free list (and
+// reuse refs it again), and sets its timeout to `timeout`, at which the
+// agent destroys a socket still free. A server's Keep-Alive: timeout hint
+// shortens that. On a busy socket the timeout only emits 'timeout', which
+// nothing here listens to, so it never cuts a relayed body.
+const KEEP_ALIVE = new https.Agent({ keepAlive: true, maxFreeSockets: 8, timeout: 30000 })
 
 // -> null or { start, end } (end null for an open range).
 function parseRange (header) {
@@ -65,10 +97,15 @@ function createStreamFetch ({
   firstTarget,
   nextTarget = httpsTarget,
   userAgent,
-  maxRedirects = 3
+  maxRedirects = 3,
+  agent
 }) {
   if (typeof firstTarget !== 'function') throw new TypeError('firstTarget')
   const socketLookup = guardedLookup(lookup, allowAddress)
+  if (agent === undefined) {
+    const defaults = request === https.request && lookup === dns.lookup && allowAddress === publicAddress
+    agent = defaults ? KEEP_ALIVE : false
+  }
 
   return function open (href, { firstHeaders = {}, range = null, accept, connectMs = DEFAULT_CONNECT_MS } = {}) {
     return new Promise((resolve, reject) => {
@@ -83,7 +120,8 @@ function createStreamFetch ({
         reject(Object.assign(new Error(token), extra))
       }
       const timer = setTimeout(() => fail('prazo'), connectMs)
-      const hop = (location, left, first) => {
+      // `retried` is set on the one new-socket try after a reset.
+      const hop = (location, left, first, retried = false) => {
         const t = first ? firstTarget(location) : nextTarget(location)
         if (!t) return fail('destino')
         let req
@@ -93,7 +131,7 @@ function createStreamFetch ({
             port: t.port,
             path: t.path,
             method: 'GET',
-            agent: false,
+            agent: retried ? false : agent,
             lookup: socketLookup,
             headers: hopHeaders({ userAgent, accept, range, extra: first ? firstHeaders : {} })
           })
@@ -101,8 +139,19 @@ function createStreamFetch ({
           return fail('pedido')
         }
         current = req
-        req.on('error', () => fail('rede'))
+        let responded = false
+        req.on('error', (err) => {
+          // A hop already left behind (a redirect being drained) is not this
+          // open's concern any more.
+          if (current !== req) return
+          if (!responded && !retried && !done && agent !== false && req.reusedSocket && RETRY_CODES.has(err && err.code)) {
+            current = null
+            return hop(location, left, first, true)
+          }
+          fail('rede')
+        })
         req.on('response', (res) => {
+          responded = true
           // A late reset on a body nobody reads yet must not crash the process.
           res.on('error', () => {})
           if (done) return res.destroy()
@@ -117,7 +166,8 @@ function createStreamFetch ({
               return fail('destino')
             }
             current = null
-            req.destroy()
+            if (agent === false) req.destroy()
+            else drainRedirect(req, res)
             return hop(next, left - 1, false)
           }
           if (status !== 200 && status !== 206) {
@@ -138,6 +188,8 @@ function createStreamFetch ({
             url: t.href,
             stream: res,
             destroy () {
+              // After a whole body the socket is back in the pool and both
+              // calls are no-ops on it (Node detaches it from req and res).
               res.destroy()
               req.destroy()
             }
@@ -148,6 +200,34 @@ function createStreamFetch ({
       hop(href, maxRedirects, true)
     })
   }
+}
+
+// Reads a redirect's body to its end, so the agent takes the socket back,
+// unless it passes REDIRECT_BODY_CAP or REDIRECT_DRAIN_MS: then the request
+// and its socket are destroyed. Already resumed by the caller. Its own timer
+// is unrefed and every listener it adds is removed when it settles.
+function drainRedirect (req, res) {
+  let size = 0
+  const settle = () => {
+    clearTimeout(timer)
+    res.removeListener('data', onData)
+    res.removeListener('end', settle)
+    res.removeListener('close', settle)
+  }
+  const cut = () => {
+    settle()
+    res.destroy()
+    req.destroy()
+  }
+  const onData = (chunk) => {
+    size += chunk.length
+    if (size > REDIRECT_BODY_CAP) cut()
+  }
+  const timer = setTimeout(cut, REDIRECT_DRAIN_MS)
+  timer.unref()
+  res.on('data', onData)
+  res.on('end', settle)
+  res.on('close', settle)
 }
 
 // The whole body as one Buffer, or a rejection once it passes `cap` bytes,
@@ -204,8 +284,17 @@ function readCapped (stream, cap) {
 // and a flush deadline of `stallMs` starts, so a client that stops reading
 // cannot hold the socket past them.
 //
+// One exception to destroying the upstream at once: when the cap equals
+// `size` and a chunk fills it exactly, the upstream may be at its own end, so
+// it is left to reach it, and a keep-alive socket goes back to the pool
+// (destroying it before 'end' destroys the socket). It is destroyed as soon
+// as another byte arrives (a body longer than declared, never forwarded), or
+// if no end came within UPSTREAM_END_MS.
+//
 // `onDone(reason, bytes, skipped)` runs exactly once, after `res` finished,
-// closed or was destroyed, so a caller's slot covers the socket's whole life.
+// closed or was destroyed, and after the upstream ended or was destroyed, so
+// a caller's slot covers the socket's whole life and a caller that destroys
+// the upstream in it cannot cut a socket on its way back to the pool.
 // `bytes` is what reached `res`, `skipped` what was discarded of `skip`.
 // reason is 'end', 'cap', 'stall' (no progress, or the flush deadline),
 // 'total', 'upstream' or 'client'.
@@ -220,6 +309,11 @@ function pipeCapped (stream, res, { skip = 0, cap, size = null, stallMs, totalMs
   // Writes not yet handed to the socket; a short end waits for them.
   let unflushed = 0
   let stallTimer = null
+  // Set while a whole body's upstream is left to reach its own end, and
+  // `clientDone` once `res` finished meanwhile: onDone waits for both.
+  let upstreamWait = false
+  let clientDone = false
+  let endTimer = null
   const totalTimer = setTimeout(() => stop('total'), totalMs)
 
   const armStall = () => {
@@ -234,23 +328,41 @@ function pipeCapped (stream, res, { skip = 0, cap, size = null, stallMs, totalMs
     phase = 'done'
     clearTimeout(stallTimer)
     clearTimeout(totalTimer)
+    clearTimeout(endTimer)
     onDone(reason, bytes, skipped)
   }
 
+  // A deadline after `res` already finished a whole body keeps its outcome,
+  // and `res`: only the upstream was still pending.
   function stop (reason) {
     if (phase === 'stop' || phase === 'done') return
     phase = 'stop'
+    upstreamWait = false
     stream.destroy()
-    res.destroy()
-    report(reason)
+    if (!clientDone) res.destroy()
+    report(clientDone ? decided : reason)
   }
 
-  function decide (reason) {
+  // `keepUpstream` leaves the upstream to reach its own end (a whole body).
+  function decide (reason, keepUpstream = false) {
     phase = 'flush'
     decided = reason
     clearTimeout(stallTimer)
     stallTimer = setTimeout(() => stop('stall'), stallMs)
-    stream.destroy()
+    if (!keepUpstream) return stream.destroy()
+    upstreamWait = true
+    endTimer = setTimeout(() => {
+      stream.destroy()
+      upstreamSettled()
+    }, Math.min(UPSTREAM_END_MS, stallMs))
+  }
+
+  // The upstream ended, or was destroyed, while a whole body waited on it.
+  function upstreamSettled () {
+    if (!upstreamWait) return
+    upstreamWait = false
+    clearTimeout(endTimer)
+    if (clientDone && phase === 'flush') report(decided)
   }
 
   // A write callback runs once that write and every earlier one left.
@@ -266,6 +378,11 @@ function pipeCapped (stream, res, { skip = 0, cap, size = null, stallMs, totalMs
   }
 
   stream.on('data', (chunk) => {
+    if (upstreamWait) {
+      // Past a whole body: longer than declared, so cut and never forwarded.
+      stream.destroy()
+      return upstreamSettled()
+    }
     if (phase !== 'relay') return
     if (skipped < skip) {
       const drop = Math.min(skip - skipped, chunk.length)
@@ -278,7 +395,8 @@ function pipeCapped (stream, res, { skip = 0, cap, size = null, stallMs, totalMs
     if (chunk.length >= room) {
       const tail = room > 0 ? chunk.subarray(0, room) : null
       if (tail !== null) bytes += room
-      decide('cap')
+      // A chunk that fills a whole body exactly may be the upstream's last.
+      decide('cap', cap === size && chunk.length === room)
       if (cap === size) {
         if (tail !== null) res.end(tail)
         else res.end()
@@ -307,6 +425,7 @@ function pipeCapped (stream, res, { skip = 0, cap, size = null, stallMs, totalMs
     if (unflushed === 0) stop('upstream')
   }
   stream.on('end', () => {
+    if (upstreamWait) return upstreamSettled()
     if (phase !== 'relay') return
     if (size === null || bytes === size) {
       decide('end')
@@ -316,17 +435,23 @@ function pipeCapped (stream, res, { skip = 0, cap, size = null, stallMs, totalMs
     upstreamCut()
   })
   const upstreamGone = () => {
+    if (upstreamWait) return upstreamSettled()
     if (phase === 'relay') upstreamCut()
   }
   stream.on('error', upstreamGone)
   stream.on('aborted', upstreamGone)
   stream.on('close', upstreamGone)
   res.on('finish', () => {
-    if (phase === 'flush') report(decided)
+    if (phase !== 'flush') return
+    if (!upstreamWait) return report(decided)
+    clientDone = true
+    clearTimeout(stallTimer)
   })
+  // After a finish only the upstream is pending, and its own end or
+  // UPSTREAM_END_MS settles it: a close that follows changes nothing.
   const clientGone = () => {
     if (phase === 'relay') return stop('client')
-    if (phase === 'flush') stop(decided)
+    if (phase === 'flush' && !clientDone) stop(decided)
   }
   res.on('error', clientGone)
   res.on('close', clientGone)
@@ -334,6 +459,8 @@ function pipeCapped (stream, res, { skip = 0, cap, size = null, stallMs, totalMs
 }
 
 module.exports = {
+  // Exported for tests only, to pin which fetchers share it.
+  KEEP_ALIVE,
   createStreamFetch,
   parseRange,
   readCapped,

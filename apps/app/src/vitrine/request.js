@@ -108,6 +108,7 @@ export function createVitrineRequest (fixtures, options) {
   const deleted = new Map()
   // 'from:seq' -> 'kept' | 'declined', the demo's testimonial.decide.
   const decisions = new Map()
+  const momentsSeen = []
   const logs = new Map()
   const roster = new Map()
   const association = data.association
@@ -649,7 +650,7 @@ export function createVitrineRequest (fixtures, options) {
     // No seen sync offline: a signature the account call never uses, and a
     // merge that changes nothing.
     'seen.sign': () => ({ signature, prevHash: '0'.repeat(64) }),
-    'seen.merge': () => ({ avisos: { own: [], pages: {} }, pending: false, dmChanged: false, groupChanged: false, blocksChanged: false, testimonialsChanged: false, caughtUp: [] }),
+    'seen.merge': () => ({ avisos: { own: [], pages: {} }, pending: false, dmChanged: false, groupChanged: false, blocksChanged: false, testimonialsChanged: false, momentsChanged: false, caughtUp: [] }),
     'report.sign': signed,
     'appeal.sign': signed,
     'dm.reportSign': signed,
@@ -1221,6 +1222,14 @@ export function createVitrineRequest (fixtures, options) {
       decisions.set(ref, state)
       return { changed: true }
     },
+    'moment.seen': ({ author, seq }) => {
+      const ref = `${String(author).toLowerCase()}:${seq}`
+      if (momentsSeen.includes(ref)) return { changed: false }
+      momentsSeen.push(ref)
+      if (momentsSeen.length > rpc.MOMENT_SEEN_MAX) momentsSeen.shift()
+      return { changed: true }
+    },
+    'moments.seen': () => ({ refs: momentsSeen.slice() }),
     'testimonial.pending': () => {
       const index = testimonialPointersOf(data.own)
       const rowsOf = (list) => list.flatMap(({ from, seq }) => {
