@@ -1,64 +1,31 @@
-// The check that stops a public text with a listed term (blockedTerms.js)
-// before it is posted, on the device. It reads only what the person is about
-// to publish: no request, no counter, no log and no record of a refusal, so
-// nothing about it ever leaves the device. Direct messages and private groups
-// never reach it (their call sites skip it): checking inside encrypted chat
-// reads as scanning private messages, even with nothing sent anywhere.
+// The check that stops a public text with a listed term
+// (@varanda/rpc lib/blocked-terms.js) before it is posted, on the device. It
+// reads only what the person is about to publish: no request, no counter, no
+// log and no record of a refusal, so nothing about it ever leaves the device.
+// Direct messages and private groups never reach it (their call sites skip
+// it): checking inside encrypted chat reads as scanning private messages,
+// even with nothing sent anywhere.
 //
 // This is a bar in the official app, not a guarantee: a modified client can
-// skip it, and the network rules know nothing about it. Reports and the signed
-// blocklist answer that case. Pure ES module: no React, no Node built-ins.
+// skip it, and the network rules know nothing about it. The account service
+// applies the same list and rule to a new @nome and to what a page publishes
+// through it (apps/cli/lib/account/word-check.js); for the rest, reports and
+// the signed blocklist answer that case. Pure ES module: no React, no Node
+// built-ins.
 
-import { BLOCKED_TERMS } from './blockedTerms.js'
+import rpc from '@varanda/rpc'
 import { wholeTokens } from './search.js'
 
-// first word -> the terms starting with it, each as its list of words.
-export function indexTerms (terms) {
-  const index = new Map()
-  for (const term of terms) {
-    const words = term.split(' ')
-    const rows = index.get(words[0])
-    if (rows) rows.push(words)
-    else index.set(words[0], [words])
-  }
-  return index
-}
+const { termInTokens } = rpc
 
-const DEFAULT_INDEX = indexTerms(BLOCKED_TERMS)
-
-const matchesAt = (tokens, at, words) => {
-  for (let i = 1; i < words.length; i++) {
-    if (tokens[at + i] !== words[i]) return false
-  }
-  return true
-}
-
-const EDGE_DIGITS = /^[0-9]+|[0-9]+$/g
-
-// The same words with the digits glued to their start or end taken off, so
-// "termo123" reads as "termo". A word of digits only stays as it is and still
-// separates the words around it.
-const withoutEdgeDigits = (tokens) => tokens.map((token) => token.replace(EDGE_DIGITS, '') || token)
+export const indexTerms = rpc.indexTerms
 
 // The first listed term in `text`, or null. Compares whole folded words, so a
 // term never matches inside a longer word (digits at the edge of a word are
 // not part of it), and reads the whole text, so a term cannot hide past the
 // bound that search input has.
-export function findTerm (text, index = DEFAULT_INDEX) {
-  const tokens = wholeTokens(text)
-  const found = findIn(tokens, index)
-  return found !== null ? found : findIn(withoutEdgeDigits(tokens), index)
-}
-
-function findIn (tokens, index) {
-  for (let at = 0; at < tokens.length; at++) {
-    const rows = index.get(tokens[at])
-    if (!rows) continue
-    for (const words of rows) {
-      if (matchesAt(tokens, at, words)) return words.join(' ')
-    }
-  }
-  return null
+export function findTerm (text, index) {
+  return termInTokens(wholeTokens(text), index)
 }
 
 // The term comes from the list, never from the text, and is named so a person

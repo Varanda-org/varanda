@@ -1,14 +1,19 @@
+'use strict'
+
 // The terms the official app refuses in public text before it is posted
-// (wordCheck.js). The repository is public and the app ships this file, so
+// (apps/app/src/wordCheck.js), and the account service refuses in a new
+// @nome and in what a page publishes through it (apps/cli/lib/account/
+// word-check.js). The repository is public and the app ships this file, so
 // the list is public. It is not a profanity list. A term belongs here only
 // when it is severe on its own and almost never has an innocent use: anything
 // that needs judgment goes to reports and human moderators instead. Changes go
 // through a normal PR, approved by the list's owner.
 //
 // Format: lowercase ASCII words separated by one space, exactly as wholeTokens
-// (search.js) folds them, so accents are left out. A term with several words
-// matches only those words in a row, and never part of a longer word. An
-// apostrophe separates words: "i'll" is the two words "i" and "ll".
+// (apps/app/src/search.js, @varanda/core/lib/search-text.js) folds them, so
+// accents are left out. A term with several words matches only those words in
+// a row, and never part of a longer word. An apostrophe separates words:
+// "i'll" is the two words "i" and "ll".
 
 // Racial, ethnic and religious slurs.
 const SLURS = [
@@ -82,4 +87,6 @@ const THREATS = [
   'will rape you', 'll rape you', 'ill rape you', 'going to rape you', 'gonna rape you'
 ]
 
-export const BLOCKED_TERMS = Object.freeze([...SLURS, ...ANTI_LGBT, ...HATE, ...MINORS, ...THREATS])
+const BLOCKED_TERMS = Object.freeze([...SLURS, ...ANTI_LGBT, ...HATE, ...MINORS, ...THREATS])
+
+module.exports = { BLOCKED_TERMS }

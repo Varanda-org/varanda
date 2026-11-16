@@ -79,7 +79,10 @@ import { layout, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { MomentosStrip } from '../ui/MomentosStrip'
 import { canPublishMoment, liveAuthors, liveItems, stripShown } from '../momentSeen'
-import { useMomentSeen, useMoments } from './Momentos'
+import { useMomentSeen, useMoments, viewerRings } from './Momentos'
+import { stripWarmRef } from '../momentStripWarm'
+import { momentPhotosFor } from '../momentPhotos'
+import { adoptVideoFile, revokeUrl, urlFromBytes } from '../media/display'
 import { useBlocks } from '../blocksProvider'
 import { installationOrigin } from '../installation'
 import { postLink } from '../postLink'
@@ -2074,6 +2077,43 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   const { ingest } = social
   const moments = useMoments({ ownKey, active: active !== false, tick: refresh })
   const momentSeen = useMomentSeen()
+  // While A Rua is idle, read the photo of the momento most likely tapped
+  // next (the first unseen ring), so the viewer opens on it at once. Photo
+  // only: music would tell the account service about a momento never opened.
+  const stripWarm = useMemo(() => {
+    if (node.hosted !== true || moments.phase !== 'ready' || !momentSeen.loaded) return null
+    const seenSet = new Set(momentSeen.seen)
+    const rings = viewerRings({ authors: moments.authors, own: moments.own, ownKey, seen: seenSet, now: Date.now() })
+    return stripWarmRef(rings, ownKey, seenSet)
+  }, [node.hosted, moments.phase, moments.authors, moments.own, momentSeen.loaded, momentSeen.seen, ownKey])
+  const stripWarmKey = stripWarm === null ? '' : stripWarm.author + ':' + stripWarm.seq
+  // Latched per epoch: a later sync run resets the run flags, which must not
+  // drop the warmed photo.
+  const stripLatch = useRef({ epoch: null, open: false })
+  if (stripLatch.current.epoch !== node.epoch) stripLatch.current = { epoch: node.epoch, open: false }
+  if (node.online !== false && node.phase === 'ready' && node.signals?.seederVerified === true) stripLatch.current.open = true
+  const stripWarmOpen = stripLatch.current.open
+  const stripWarmRefLatest = useRef(null)
+  stripWarmRefLatest.current = stripWarm
+  useEffect(() => {
+    if (stripWarmKey === '' || node.hosted !== true || active === false || node.visible === false || !stripWarmOpen) return undefined
+    const store = momentPhotosFor(node.media, node.epoch, { urlFromBytes, revokeUrl, adoptVideoFile })
+    if (store === null) return undefined
+    let cancelled = false
+    const wait = node.whenIdle(3000)
+    wait.promise.then(() => {
+      if (cancelled) return
+      const ref = stripWarmRefLatest.current
+      // Index 1, not 0: A Rua shows nothing, so its photo is read-ahead and ages out
+      // at the 5-minute max age like any other (index 0 is spared as on screen).
+      store.want('strip', ref ? [null, ref] : [])
+    })
+    return () => {
+      cancelled = true
+      wait.cancel()
+      store.want('strip', [])
+    }
+  }, [stripWarmKey, stripWarmOpen, node.hosted, node.visible, node.media, node.epoch, node.whenIdle, active])
   const [feed, setFeed] = useState(() => ({
     items: [],
     cursor: null,

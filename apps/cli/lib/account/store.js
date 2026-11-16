@@ -217,6 +217,7 @@ const {
   createIssuedCert,
   createUsernameRecord
 } = require('@varanda/core/lib/cert')
+const { findTerm } = require('./word-check')
 
 const FILE = 'directory.json'
 const JOURNAL_PREFIX = 'directory.journal.'
@@ -265,8 +266,10 @@ function randomToken () {
   return crypto.randomBytes(32).toString('base64url')
 }
 
+// A NEW name only: link, rename, page creation and page rename. A name
+// already held is never checked again (a move keeps it as it is).
 function validName (username) {
-  return isUsername(username) && !RESERVED.has(username)
+  return isUsername(username) && !RESERVED.has(username) && findTerm(username) === null
 }
 
 function normalizeMember (member) {
@@ -1692,9 +1695,10 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
       mutable()
       member = normalizeMember(member)
       if (!has(state.links, member)) throw fail('nao-encontrado')
-      if (!validName(username)) throw fail('nome-invalido')
       const link = state.links[member]
+      // Before validName: the name held now is never checked again.
       if (link.username === username) return { record: link.usernameRecord, nextChangeAt: nextChangeAt(link) }
+      if (!validName(username)) throw fail('nome-invalido')
       const t = now()
       if (t < Date.parse(link.usernameChangedAt) + COOLDOWN_MS) {
         throw fail('troca-bloqueada', { nextChangeAt: nextChangeAt(link) })
@@ -1823,9 +1827,9 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
       key = pageKey(key)
       if (!has(state.pages, key)) throw fail('nao-encontrado')
       if (!livePage(state, key)) throw fail('pedido-invalido')
-      if (!validName(username)) throw fail('nome-invalido')
       const page = state.pages[key]
       if (page.username === username) return { record: page.usernameRecord, nextChangeAt: nextChangeAt(page) }
+      if (!validName(username)) throw fail('nome-invalido')
       checkRecord(usernameRecord, key, username)
       const t = now()
       if (t < Date.parse(page.usernameChangedAt) + COOLDOWN_MS) {

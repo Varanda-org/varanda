@@ -24,6 +24,7 @@ const reaction = require('./lib/reaction')
 const profileExtra = require('./lib/profile-extra')
 const poll = require('./lib/poll')
 const event = require('./lib/event')
+const wordCheck = require('./lib/word-check')
 const { tokensEqual } = require('./lib/token')
 const { createServerDispatcher } = require('./lib/server')
 const { createClient } = require('./lib/client')
@@ -115,6 +116,9 @@ module.exports = {
   isReaction: reaction.isReaction,
   REACTION_MAX_POINTS: reaction.REACTION_MAX_POINTS,
   REACTION_MAX_BYTES: reaction.REACTION_MAX_BYTES,
+  BLOCKED_TERMS: wordCheck.BLOCKED_TERMS,
+  indexTerms: wordCheck.indexTerms,
+  termInTokens: wordCheck.termInTokens,
   tokensEqual,
   createServerDispatcher,
   createClient

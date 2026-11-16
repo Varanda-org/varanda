@@ -62,7 +62,7 @@ test('aboutParams refuses what the node would refuse, and listed terms', async (
   t.is(aboutParams({ ...d, city: '\u200b\u200b' }).params.city, null, 'invisible-only text is not sent')
   t.is(aboutParams({ ...d, birthday: '31/02' }).error, TEXTS.badBirthday)
   const wc = await import('../src/wordCheck.js')
-  const { BLOCKED_TERMS } = await import('../src/blockedTerms.js')
+  const { BLOCKED_TERMS } = require('@varanda/rpc')
   const term = BLOCKED_TERMS.find((x) => !x.includes(' '))
   const blocked = aboutParams({ ...d, interests: 'gosto de ' + term })
   t.is(blocked.ok, false)

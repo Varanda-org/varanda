@@ -56,6 +56,7 @@ const groups = require('@varanda/core/lib/group')
 const { keyTag, keyCommit, wipe } = require('@varanda/core/lib/group-crypto')
 const { MAX_PAGE_WRITERS } = require('./pages-store')
 const { parseSeederWs } = require('./pages-writer')
+const { findTerm } = require('./word-check')
 
 const coreDir = path.dirname(require.resolve('@varanda/core/lib/seeder'))
 const NoiseSecretStream = require(require.resolve('@hyperswarm/secret-stream', { paths: [coreDir] }))
@@ -1125,6 +1126,9 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
       const w = liveOwn(page, loaded)
       if (w === null || loaded.view.members.get(page) !== 'member') throw fail('sem-permissao')
       if (!loaded.view.writers.has(w)) throw fail('limite')
+      // A public group only (a private one never got here): the app checks
+      // the same texts before it sends (word-check.js).
+      if (findTerm(text) !== null) throw fail('termo-recusado')
       let record
       try {
         record = groups.groupPost({ text, replyTo, fwd, seen: loaded.view.last })
