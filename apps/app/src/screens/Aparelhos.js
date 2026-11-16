@@ -4,20 +4,22 @@
 // reports writers no device claims, and the disconnected ones last, without
 // actions. Desconectar asks first and is never repeated on its own: a failed
 // device.disconnect shows the node's text, or for an uncertain one says it
-// may be partly done. Device names are peer text and go through displayText.
-// `active`: this screen is showing, so the list is read.
+// may be partly done. While this device is itself disconnected, Desconectar
+// is off and the note with "Conectar de novo" shows. Device names are peer
+// text and go through displayText.
+// `active`: this screen is showing; the list is read each time it shows.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ScrollView, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import {
-  CONFIRM_CANCEL, CONFIRM_LINES, CONFIRM_TITLE, CONNECTED_SECTION, DEVICES_NOTE, DISCONNECT, DISCONNECTED_SECTION, DONE_TOAST,
-  EMPTY_OTHERS, LOAD_FAILED, NO_NAME, PARTLY_DONE, PREVIOUS_NOTE, PREVIOUS_TITLE, THIS_DEVICE,
-  deviceStore, disconnectLabel, disconnectParams, otherLabel, readDevices, shapeList, sinceText
+  CONFIRM_CANCEL, CONNECTED_SECTION, DEVICES_NOTE, DISCONNECT, DISCONNECTED_SECTION, EMPTY_OTHERS, LOAD_FAILED, NO_NAME, OFF_NOTE,
+  PARTLY_DONE, PREVIOUS_NOTE, PREVIOUS_TITLE, RECONNECT, RECONNECT_ACCESSIBILITY, THIS_DEVICE,
+  confirmCopy, deviceStore, disconnectLabel, disconnectParams, otherLabel, readDevices, reconnectDevice, reconnectFailure, rowCaption, shapeList
 } from '../devices'
-import { useDeviceState } from '../useDevices'
-import { Btn, ConfirmStack, ErrorText, FlushSectionHeader, Notice, Page, Soft, useAction } from '../ui'
+import { currentDeviceName, useDeviceState } from '../useDevices'
+import { Btn, ConfirmStack, ErrorText, FlushSectionHeader, Notice, Page, Soft, errorText, useAction } from '../ui'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
@@ -40,6 +42,31 @@ function DeviceRow ({ icon, title, caption, action, onAction, disabled, accessib
   )
 }
 
+// This device is off: one tap, one device.reconnect.
+function OffBox ({ request }) {
+  const styles = useStyles(makeStyles)
+  const act = useAction()
+  const [failure, setFailure] = useState('')
+  const press = async () => {
+    setFailure('')
+    await act.run(async () => {
+      try {
+        await reconnectDevice({ request, store: deviceStore, name: currentDeviceName() })
+      } catch (err) {
+        setFailure(reconnectFailure(err, (m) => errorText({ message: m })))
+        throw err
+      }
+    })
+  }
+  return (
+    <View style={styles.offBox}>
+      <Notice>{OFF_NOTE}</Notice>
+      <ErrorText>{failure}</ErrorText>
+      <Btn label={RECONNECT} accessibilityLabel={RECONNECT_ACCESSIBILITY} onPress={press} pending={act.pending} block />
+    </View>
+  )
+}
+
 export default function Aparelhos ({ active }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
@@ -52,6 +79,7 @@ export default function Aparelhos ({ active }) {
   const [target, setTarget] = useState(null)
   const [done, setDone] = useState('')
   const [partly, setPartly] = useState('')
+  const ready = node.phase === 'ready'
 
   const load = useCallback(async () => {
     try {
@@ -62,14 +90,27 @@ export default function Aparelhos ({ active }) {
     }
   }, [])
 
-  // A fresh read every time the screen shows, and again after a change
-  // elsewhere cleared the list (a reconnect).
+  // Read each time the screen shows, and again when something cleared the
+  // list meanwhile (a reconnect). Leaving forgets the toasts.
+  const shown = useRef(false)
+  const listNull = state.list === null
   useEffect(() => {
-    if (active && node.phase === 'ready' && state.list === null) load()
-  }, [active, node.phase, state.list, load])
+    if (!active) {
+      shown.current = false
+      setDone('')
+      setPartly('')
+      return
+    }
+    if (!ready || state.member === null) return
+    if (!shown.current || listNull) {
+      shown.current = true
+      load()
+    }
+  }, [active, ready, listNull, state.member, load])
 
   const view = shapeList(state.list)
-  const loading = state.list === null && !failed
+  const loading = listNull && !failed
+  const copy = confirmCopy(target)
 
   const close = () => { if (!act.pending) { act.clearError(); setTarget(null) } }
   const disconnect = async () => {
@@ -78,7 +119,7 @@ export default function Aparelhos ({ active }) {
     const r = await act.run(() => requestRef.current('device.disconnect', disconnectParams(which)))
     if (r.ok) {
       setTarget(null)
-      setDone(DONE_TOAST)
+      setDone(confirmCopy(which).done)
       load()
     } else if (r.uncertain) {
       setTarget(null)
@@ -86,17 +127,22 @@ export default function Aparelhos ({ active }) {
       load()
     }
   }
+  const ask = (which) => { act.clearError(); setDone(''); setPartly(''); setTarget(which) }
+  // Off: this device cannot disconnect others until it connects again.
+  const off = view.off || state.off
+  const blocked = node.online === false || off
 
   let body
   if (loading) body = <Skeleton />
-  else if (failed && state.list === null) body = <ErrorState message={LOAD_FAILED} onRetry={load} />
+  else if (failed && listNull) body = <ErrorState message={LOAD_FAILED} onRetry={load} />
   else {
     const own = view.self
     body = (
       <>
+        {off ? <OffBox request={node.request} /> : null}
         <Soft>{DEVICES_NOTE}</Soft>
         <FlushSectionHeader>{THIS_DEVICE}</FlushSectionHeader>
-        <DeviceRow icon='smartphone' title={own !== null && own.name !== null ? displayText(own.name) : THIS_DEVICE} caption={own !== null ? sinceText(own.since) : null} />
+        <DeviceRow icon='smartphone' title={displayText(own !== null && own.name !== null ? own.name : currentDeviceName())} caption={own !== null ? rowCaption(own) : null} />
         <FlushSectionHeader>{CONNECTED_SECTION}</FlushSectionHeader>
         {view.others.length === 0 && view.previous === null ? <Soft>{EMPTY_OTHERS}</Soft> : null}
         {view.others.map((d) => (
@@ -104,11 +150,11 @@ export default function Aparelhos ({ active }) {
             key={d.id}
             icon='smartphone'
             title={d.name === null ? NO_NAME : displayText(otherLabel(d))}
-            caption={sinceText(d.since)}
+            caption={rowCaption(d)}
             action={DISCONNECT}
             accessibilityLabel={disconnectLabel({ name: d.name === null ? null : displayText(d.name) })}
-            disabled={node.online === false}
-            onAction={() => { act.clearError(); setDone(''); setPartly(''); setTarget(d.id) }}
+            disabled={blocked}
+            onAction={() => ask(d.id)}
           />
         ))}
         {view.previous !== null
@@ -119,8 +165,8 @@ export default function Aparelhos ({ active }) {
               caption={PREVIOUS_NOTE}
               action={DISCONNECT}
               accessibilityLabel={DISCONNECT + ' ' + PREVIOUS_TITLE}
-              disabled={node.online === false}
-              onAction={() => { act.clearError(); setDone(''); setPartly(''); setTarget('previous') }}
+              disabled={blocked}
+              onAction={() => ask('previous')}
             />
             )
           : null}
@@ -129,7 +175,7 @@ export default function Aparelhos ({ active }) {
             <>
               <FlushSectionHeader>{DISCONNECTED_SECTION}</FlushSectionHeader>
               {view.disconnected.map((d) => (
-                <DeviceRow key={d.id} icon='smartphone' title={d.name === null ? NO_NAME : displayText(d.name)} caption={sinceText(d.since)} />
+                <DeviceRow key={d.id} icon='smartphone' title={d.name === null ? NO_NAME : displayText(d.name)} caption={rowCaption(d)} />
               ))}
             </>
             )
@@ -143,9 +189,9 @@ export default function Aparelhos ({ active }) {
       <Notice>{done}</Notice>
       <ErrorText>{partly}</ErrorText>
       {body}
-      <Sheet open={active && target !== null} onClose={close} dismissable={!act.pending} title={CONFIRM_TITLE} closeLabel={CONFIRM_CANCEL}>
+      <Sheet open={active && target !== null} onClose={close} dismissable={!act.pending} title={copy.title} closeLabel={CONFIRM_CANCEL}>
         <ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle={styles.confirm}>
-          {CONFIRM_LINES.map((line) => <Soft key={line}>{line}</Soft>)}
+          {copy.lines.map((line) => <Soft key={line}>{line}</Soft>)}
           <ErrorText>{act.error}</ErrorText>
           <ConfirmStack
             confirm={<Btn label={DISCONNECT} danger onPress={disconnect} pending={act.pending} />}
@@ -162,5 +208,6 @@ const makeStyles = (colors) => StyleSheet.create({
   who: { flex: 1, minWidth: 0 },
   name: { ...type.postName, color: colors.ink },
   caption: { ...type.postMeta, color: colors.soft },
-  confirm: { gap: space.md, padding: space.lg }
+  confirm: { gap: space.md, padding: space.lg },
+  offBox: { backgroundColor: colors.warm, borderRadius: 12, padding: space.md, gap: space.sm }
 })

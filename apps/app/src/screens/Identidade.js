@@ -75,6 +75,8 @@ import { dropsHeldInvite } from '../linkReturn'
 import { InvitePaste } from './Idade'
 import { holdUnregistered, releaseUnregistered } from './Passkeys'
 import { KeyboardForm } from './Perfil'
+import { FORCED_LOCK_TEXT } from '../devices'
+import { useDeviceState } from '../useDevices'
 import { Body, Btn, Card, ConfirmStack, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Spinner, Title, errorText, useAction, useNow } from '../ui'
 import { refusalOf } from '../wordCheck'
 import { HelpNote } from '../ui/Help'
@@ -705,6 +707,8 @@ function LinkCard ({ publicKey, memberCert, active, quiet, recovering = false, s
 // opened the root, a creation awaiting 'concluir'), so the shell keeps a post
 // preview from replacing it; false otherwise and on unmount.
 export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, initialInfo = null, onInfo, onInfoError, onAccountRead, onLinked, onInviteChanged, onPhoneRecheck, onStepHeld, invite = null, feira = null }) {
+  // This device was disconnected from the account and the shell locked it (#350).
+  const deviceForced = useDeviceState().forced
   const styles = useStyles(makeStyles)
   const node = useNode()
   const outbox = useOutbox()
@@ -1295,6 +1299,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
       const hasOther = otherRow || phoneOk || !showComplete
       const body = (
         <>
+          {deviceForced ? <View style={styles.noticeBox}><Notice>{FORCED_LOCK_TEXT}</Notice></View> : null}
           {inviteHere
             ? (
               <View style={styles.noticeBox}>

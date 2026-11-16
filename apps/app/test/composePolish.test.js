@@ -55,7 +55,7 @@ test('settings group every row and keep the existing advanced toggle last', (t) 
   }
   t.ok(profile.includes("label='Editar perfil'") && privacy.includes("label='Passkeys e recuperação'") && appearance.includes("label='Aparência'"), 'rows follow their subject')
   t.ok(src.indexOf("label='Sair'") < src.indexOf("label='Avançado'") && src.indexOf("label='Sair'") < src.indexOf("label='Recomeçar'") && src.indexOf("label='Excluir conta'") > src.indexOf("label='Sair'") && src.indexOf("label='Excluir conta'") < src.indexOf("label='Avançado'"), 'account exit rows precede the last advanced group in HEAD order')
-  for (const first of ["first icon='shield' label='Passkeys", "first={!(account && unlocked)} icon='phone'", "first={!(account && unlocked) && !showChangePhone} icon='shield'", "first={!account && !showChangePhone} icon='bloquear'", "first={!account && !showChangePhone && !hosted} icon='file-text'"]) {
+  for (const first of ["first icon='shield' label='Passkeys", "first={!(account && unlocked)} icon='phone'", "first={!(account && unlocked) && !showChangePhone} icon='shield'", "first={!account && !showChangePhone} icon='bloquear'", "first={!showChangePhone && !hosted} icon='smartphone'", "first={!account && !showChangePhone && !hosted && !devicesOffered} icon='file-text'"]) {
     t.ok(privacy.includes(first), 'first visible privacy row has no divider: ' + first)
   }
 })

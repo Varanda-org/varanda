@@ -126,7 +126,7 @@ import { InstallCard } from './src/ui/InstallCard'
 import { PushNote } from './src/ui/PushNote'
 import { DeletionNote } from './src/ui/DeletionNote'
 import { DeviceOffNote } from './src/ui/DeviceOffNote'
-import { deviceStore, helloDue, reconnectDevice, sendHello } from './src/devices'
+import { afterSyncDue, deviceMemberOf, deviceStore, helloDue, readDevices, reconnectDevice, sendHello, shouldForceLock, visibleDevices } from './src/devices'
 import { currentDeviceName, useDeviceState } from './src/useDevices'
 import { InviteDropNote } from './src/ui/InviteDropNote'
 import { InviteArrival } from './src/ui/InviteArrival'
@@ -2443,23 +2443,41 @@ function Member () {
   }, [seenMember, seenGeneration])
 
   // --- Aparelhos conectados (#350, src/devices.js) ---
-  // Once per app open and member, after the unlock: device.hello with this
-  // device's short name. An unknown method or any failure is silent and never
-  // retried (the next open tries again). The answer feeds the shared store,
+  // The member is the unlocked passkey key, or on a node without a passkey
+  // (the core kind) the own key; not hosted-only. Once per app open and
+  // member, after the unlock: device.hello with this device's short name. An
+  // unknown method or any failure is silent and never retried (the next open
+  // tries again). The answers (and devices.changed) feed the shared store,
   // which also tells whether the account disconnected this device.
-  const deviceState = useDeviceState()
-  const deviceMemberRef = useRef(null)
+  const deviceMember = deviceMemberOf({ ready, termsOk, hasPasskey: passkey !== null, status: pkStatus, ownKey })
+  const deviceState = visibleDevices(useDeviceState(), deviceMember)
   const helloSentRef = useRef(null)
+  const afterSyncRef = useRef(null)
+  const deviceStopped = node.sync.stopped
   useEffect(() => {
-    if (seenMember === null) return
-    if (deviceMemberRef.current !== seenMember) {
-      deviceMemberRef.current = seenMember
-      deviceStore.reset()
-    }
-    if (!helloDue({ member: seenMember, online: node.online, sent: helloSentRef.current })) return
-    helloSentRef.current = seenMember
+    deviceStore.bind(deviceMember)
+    if (deviceMember === null) return
+    if (!helloDue({ member: deviceMember, online: node.online, sent: helloSentRef.current })) return
+    helloSentRef.current = deviceMember
     sendHello({ request: seenRequestRef.current, store: deviceStore, name: currentDeviceName() })
-  }, [seenMember, node.online])
+  }, [deviceMember, node.online])
+  // Hello runs before the own diary may have synced: one device.list read
+  // after the first finished sync of the open settles the off flag.
+  useEffect(() => {
+    if (!afterSyncDue({ member: deviceMember, stopped: deviceStopped, done: afterSyncRef.current })) return
+    afterSyncRef.current = deviceMember
+    readDevices({ request: seenRequestRef.current, store: deviceStore }).catch(() => {})
+  }, [deviceMember, deviceStopped])
+  // A disconnected device whose identity came from a kept session forgets it
+  // and locks: only the passkey opens it again (the unlock screen says why).
+  // After a passkey unlock in this open (resumed false) it only shows the note.
+  const deviceForceLock = deviceMember !== null && shouldForceLock({ off: deviceState.off, hasPasskey: passkey !== null, unlocked: !locked, resumed: !!(pkStatus && pkStatus.resumed === true) })
+  useEffect(() => {
+    if (!deviceForceLock) return
+    deviceStore.forceLock()
+    Promise.resolve(passkey.signOut()).catch(() => {})
+  }, [deviceForceLock])
+  const deviceOffShown = deviceMember !== null && deviceState.off && !deviceForceLock
   const reconnectThisDevice = useCallback(() => reconnectDevice({ request: seenRequestRef.current, store: deviceStore, name: currentDeviceName() }), [])
   // The connection came back: marks made offline go out once the minimum
   // interval allows.
@@ -3939,19 +3957,19 @@ function Member () {
           {scheduledDeletion !== null
             ? <DeletionNote scheduled={scheduledDeletion} onOpen={() => setAjustes('excluir')} inset={tab === 'diario' && node.online !== false} />
             : null}
-          {deviceState.off && seenMember !== null
+          {deviceOffShown
             ? <DeviceOffNote onReconnect={reconnectThisDevice} inset={tab === 'diario' && node.online !== false && scheduledDeletion === null} />
             : null}
           {inviteNoteShown
-            ? <InviteDropNote record={inviteDrop.note} onShown={handleInviteShown} onOpen={() => { inviteDrop.dismiss(); openInvites() }} inset={tab === 'diario' && node.online !== false} />
+            ? <InviteDropNote record={inviteDrop.note} onShown={handleInviteShown} onOpen={() => { inviteDrop.dismiss(); openInvites() }} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null} />
             : null}
           {updateReady && !updateDismissed
-            ? <UpdateNote onUpdate={() => { try { if (Platform.OS === 'web') window.location.reload() } catch {} }} onClose={() => setUpdateDismissed(true)} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} />
+            ? <UpdateNote onUpdate={() => { try { if (Platform.OS === 'web') window.location.reload() } catch {} }} onClose={() => setUpdateDismissed(true)} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null && !inviteNoteShown} />
             : installCardOpen && install.card !== 'none'
-              ? <InstallCard kind={install.card} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} onInstall={() => { install.promptInstall(); setInstallCardOpen(false) }} onClose={() => { setInstallCardOpen(false); install.dismissInstall() }} />
+              ? <InstallCard kind={install.card} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null && !inviteNoteShown} onInstall={() => { install.promptInstall(); setInstallCardOpen(false) }} onClose={() => { setInstallCardOpen(false); install.dismissInstall() }} />
               : install.note !== 'none'
-                ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} />
-                : push.note === 'offer' && pushMember !== null && push.member === pushMember ? <PushNote text={push.error || undefined} pending={push.pending} onEnable={() => { push.activatePush({ node, member: pushMember }) }} onClose={() => { push.dismissPush() }} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} /> : null}
+                ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null && !inviteNoteShown} />
+                : push.note === 'offer' && pushMember !== null && push.member === pushMember ? <PushNote text={push.error || undefined} pending={push.pending} onEnable={() => { push.activatePush({ node, member: pushMember }) }} onClose={() => { push.dismissPush() }} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null && !inviteNoteShown} /> : null}
         </Animated.View>
         <TabBarShown.Provider value={!barsHidden}>
           <ScreenCovered.Provider value={covered}>

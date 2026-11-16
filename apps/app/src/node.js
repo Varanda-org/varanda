@@ -147,6 +147,7 @@ import { NOT_FOUND_TEXT, SERVICE_DOWN_TEXT } from './recovery'
 import { wipeLocalCaches } from './localCaches'
 import * as shareIntake from './shareIntake'
 import { clearMomentSeen } from './momentSeenStore'
+import { deviceStore } from './devices'
 import { cancelBackgroundRefresh, noteForegroundUse, unregisterBackgroundRefresh, whenActive, whenForeground } from './backgroundTask'
 
 const { loadConfig, saveConfig, clearConfig, discoverConfig, hostedPage, canConfigure } = configStore
@@ -742,6 +743,12 @@ function LiveNodeProvider ({ children }) {
     }
     if (name === 'groups.changed') {
       setGroupVersions((versions) => bumpGroupVersion(versions, data && data.group))
+      return
+    }
+    // The own diary's device records changed: the node says whether this
+    // device is now disconnected (src/devices.js; the shell reacts).
+    if (name === 'devices.changed') {
+      deviceStore.event(data && data.off === true)
       return
     }
     if (name === 'dm.changed') {

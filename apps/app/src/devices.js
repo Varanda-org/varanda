@@ -23,6 +23,18 @@ export const CONFIRM_LINES = Object.freeze([
   'Os grupos privados trocam a chave.',
   'Ele só volta se alguém com a sua passkey conectar de novo naquele aparelho.'
 ])
+// "Aparelhos anteriores" are several devices: the same promise, in the plural.
+// Per the node they are disconnected too and need the passkey to come back.
+export const PREVIOUS_CONFIRM_TITLE = 'Desconectar aparelhos anteriores'
+export const PREVIOUS_CONFIRM_LINES = Object.freeze([
+  'O que esses aparelhos escreverem depois disso não aparece mais nas comunidades e grupos.',
+  'Os grupos privados trocam a chave.',
+  'Eles só voltam se alguém com a sua passkey conectar de novo em cada um.'
+])
+export const PREVIOUS_DONE_TOAST = 'Aparelhos desconectados.'
+export const DISCONNECTED_CAPTION = 'Desconectado'
+export const FORCED_LOCK_TEXT = 'Este aparelho foi desconectado da conta. Entre com a sua passkey para usar de novo.'
+export const RECONNECT_UNCERTAIN = 'Pode não ter dado certo. Veja se este aparelho continua desconectado e toque de novo se for o caso.'
 export const CONFIRM_CANCEL = 'Cancelar'
 export const DONE_TOAST = 'Aparelho desconectado.'
 export const PARTLY_DONE = 'Pode ter sido feito só em parte. Confira a lista.'
@@ -64,9 +76,10 @@ function browserOf (ua) {
   return null
 }
 
-function systemOf (ua) {
+function systemOf (ua, touches) {
   if (/iPhone/.test(ua)) return 'iPhone'
-  if (/iPad/.test(ua)) return 'iPad'
+  // iPadOS reports a Mac user agent; touch points tell it apart (as install-offer.js does).
+  if (/iPad/.test(ua) || (/Macintosh/.test(ua) && typeof touches === 'number' && touches > 1)) return 'iPad'
   if (/Android/.test(ua)) return 'Android'
   if (/Windows/.test(ua)) return 'Windows'
   if (/CrOS/.test(ua)) return 'ChromeOS'
@@ -78,14 +91,14 @@ function systemOf (ua) {
 // The short name this device sends with device.hello, at most NAME_MAX
 // characters. It follows what the environment reports, never the platform:
 // a browser user agent gives "Chrome no Android"; otherwise the phone's own
-// constants give "Pixel 8" (Android: brand and model) or "iPhone" / "iPad"
-// (iOS: the interface idiom). `env` is { userAgent, constants } with both
-// optional; with nothing usable the name is UNNAMED_SELF.
+// constants give brand and model ("Google Pixel 8", Android) or "iPhone" /
+// "iPad" (iOS: the interface idiom). `env` is { userAgent, maxTouchPoints,
+// constants }, all optional; with nothing usable the name is UNNAMED_SELF.
 export function deviceName (env) {
   const e = env !== null && typeof env === 'object' ? env : {}
   const ua = typeof e.userAgent === 'string' ? e.userAgent : ''
   const browser = browserOf(ua)
-  const system = systemOf(ua)
+  const system = systemOf(ua, e.maxTouchPoints)
   let name = ''
   if (browser !== null && system !== null) name = browser + ' no ' + system
   else if (browser !== null) name = browser
@@ -117,6 +130,13 @@ export function sinceDate (iso) {
 export function sinceText (iso) {
   const date = sinceDate(iso)
   return date === null ? null : 'Conectado desde ' + date
+}
+
+// The caption under a row: "Conectado desde ..." for a connected device,
+// "Desconectado" for one that is not (it was never connected "since" then).
+export function rowCaption (row) {
+  if (row === null || typeof row !== 'object') return null
+  return row.on === false ? DISCONNECTED_CAPTION : sinceText(row.since)
 }
 
 function rowOf (d) {
@@ -166,23 +186,95 @@ export function disconnectParams (target) {
   return { id: target }
 }
 
+// The sheet copy for what is being disconnected: one device, or the
+// "Aparelhos anteriores" (plural).
+export function confirmCopy (target) {
+  return target === 'previous'
+    ? { title: PREVIOUS_CONFIRM_TITLE, lines: PREVIOUS_CONFIRM_LINES, done: PREVIOUS_DONE_TOAST }
+    : { title: CONFIRM_TITLE, lines: CONFIRM_LINES, done: DONE_TOAST }
+}
+
+// The member the device feature works for: the unlocked passkey key (lower
+// case), or on a node without a passkey (the core kind) the own key from
+// node.info. Null while not ready, behind the Terms, locked or unknown.
+export function deviceMemberOf ({ ready, termsOk, hasPasskey, status, ownKey }) {
+  if (ready !== true || termsOk !== true) return null
+  const key = hasPasskey
+    ? (status !== null && typeof status === 'object' && status.unlocked === true ? status.publicKey : null)
+    : ownKey
+  return typeof key === 'string' && HEX64.test(key.toLowerCase()) ? key.toLowerCase() : null
+}
+
+// The Ajustes row: the node offers device.list, and the identity is unlocked
+// when it has a passkey (a node without one has nothing to unlock). It does
+// not depend on `hosted`.
+export function devicesRowShown ({ offered, hasPasskey, unlocked }) {
+  return offered === true && (hasPasskey !== true || unlocked === true)
+}
+
+// A disconnected device whose identity came from a kept session (resumed,
+// no passkey ceremony in this open) forgets the session and locks, so the
+// passkey is asked again. After a passkey unlock in this open (resumed
+// false), and on a node without a passkey, it only shows the note.
+export function shouldForceLock ({ off, hasPasskey, unlocked, resumed }) {
+  return off === true && hasPasskey === true && unlocked === true && resumed === true
+}
+
+// device.list is read once after the first finished sync of the open for a
+// member: the diary of the own account may not have been there at hello.
+export function afterSyncDue ({ member, stopped, done }) {
+  return typeof member === 'string' && stopped !== null && stopped !== undefined && done !== member
+}
+
+// What a failed reconnect says: plain words, never the "incerto" text.
+export function reconnectFailure (err, show) {
+  if (err !== null && typeof err === 'object' && err.uncertain === true) return RECONNECT_UNCERTAIN
+  const message = err !== null && typeof err === 'object' && typeof err.message === 'string' && err.message !== '' ? err.message : 'erro'
+  return show(message)
+}
+
+const FRESH = { member: null, offered: null, off: false, list: null, forced: false }
+
+// The state as seen by `member`: another member's answer is never shown.
+export function visibleDevices (state, member) {
+  return state.member !== null && state.member === member ? state : { ...FRESH, forced: state.forced }
+}
+
 // A tiny store shared by the shell (hello, the notice) and Ajustes (the
-// entry and the screen). offered: null until a call answered, true when the
-// node has the methods, false when it answered unknown method. off: this
-// device was disconnected. list: the last device.list answer, or null.
+// entry and the screen), bound to one member. offered: null until a call
+// answered, true when the node has the methods, false when it answered
+// unknown method. off: this device was disconnected. list: the last
+// device.list answer, or null. forced: the shell locked the identity because
+// this device was disconnected (the unlock screen says so until the next
+// unlock). An answer for another member is dropped.
 export function createDeviceStore () {
-  let state = { offered: null, off: false, list: null }
+  let state = { ...FRESH }
   const listeners = new Set()
+  const commit = (next) => {
+    if (next.member === state.member && next.offered === state.offered && next.off === state.off && next.list === state.list && next.forced === state.forced) return
+    state = next
+    for (const fn of [...listeners]) fn()
+  }
   return {
     get: () => state,
-    set (patch) {
-      const next = { ...state, ...patch }
-      if (next.offered === state.offered && next.off === state.off && next.list === state.list) return
-      state = next
-      for (const fn of [...listeners]) fn()
+    // Binds the store to a member (null: none). A new member starts fresh;
+    // a member appearing clears `forced` (the unlock happened).
+    bind (member) {
+      if (member === state.member) return
+      commit({ ...FRESH, member, forced: member === null ? state.forced : false })
     },
-    reset () {
-      this.set({ offered: null, off: false, list: null })
+    // An answer read for `member`: ignored when the store moved on.
+    answer (member, patch) {
+      if (member === null || member !== state.member) return
+      commit({ ...state, ...patch })
+    },
+    forceLock () {
+      commit({ ...state, forced: true })
+    },
+    // A devices.changed event carries no member: it is for the bound one.
+    event (off) {
+      if (state.member === null) return
+      commit({ ...state, off: off === true })
     },
     subscribe (fn) {
       listeners.add(fn)
@@ -194,13 +286,14 @@ export function createDeviceStore () {
 // device.list: records the answer in the store. Unknown method hides the
 // entry; any other failure keeps what was known and rethrows for the caller.
 export async function readDevices ({ request, store }) {
+  const member = store.get().member
   try {
     const list = await request('device.list', {})
     const shaped = shapeList(list)
-    store.set({ offered: true, off: shaped.off, list })
+    store.answer(member, { offered: true, off: shaped.off, list })
     return shaped
   } catch (err) {
-    if (unknownMethod(err)) store.set({ offered: false, off: false, list: null })
+    if (unknownMethod(err)) store.answer(member, { offered: false, off: false, list: null })
     throw err
   }
 }
@@ -209,24 +302,33 @@ export async function readDevices ({ request, store }) {
 // silent; every other failure is silent too and never retried (the next open
 // tries again).
 export async function sendHello ({ request, store, name }) {
+  const member = store.get().member
   try {
     const r = await request('device.hello', { name })
-    store.set({ offered: true, off: !!r && r.off === true })
+    store.answer(member, { offered: true, off: !!r && r.off === true })
     return true
   } catch (err) {
-    if (unknownMethod(err)) store.set({ offered: false })
+    if (unknownMethod(err)) store.answer(member, { offered: false })
     return false
   }
 }
 
-// device.reconnect: one call. The failure is the caller's to show.
+// device.reconnect: one call. After a failure the list is read once (a read,
+// not a retry) to settle whether this device is still off, and the failure
+// is rethrown for the caller to show.
 export async function reconnectDevice ({ request, store, name }) {
-  await request('device.reconnect', { name })
-  store.set({ off: false, list: null })
+  const member = store.get().member
+  try {
+    await request('device.reconnect', { name })
+  } catch (err) {
+    try { await readDevices({ request, store }) } catch {}
+    throw err
+  }
+  store.answer(member, { off: false, list: null })
 }
 
-// The shell calls this when hello may run: the member is unlocked and
-// online, and this open has not sent it for that member yet.
+// The shell calls this when hello may run: the member is known and online,
+// and this open has not sent it for that member yet.
 export function helloDue ({ member, online, sent }) {
   return typeof member === 'string' && online !== false && sent !== member
 }

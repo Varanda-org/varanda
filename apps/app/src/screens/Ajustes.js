@@ -92,7 +92,7 @@ import Telefone from './Telefone'
 import Recurso from './Recurso'
 import Bloqueados from './Bloqueados'
 import Aparelhos from './Aparelhos'
-import { DEVICES_TITLE, deviceStore, readDevices } from '../devices'
+import { DEVICES_TITLE, deviceStore, devicesRowShown, readDevices } from '../devices'
 import { useDeviceState } from '../useDevices'
 import Sincronizar from './Sincronizar'
 import Termos from './Termos'
@@ -266,11 +266,12 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   // device.list (an unknown-method answer, or no answer yet, hides it). The
   // read runs on each opening; the answer feeds the store the screen reads.
   const devices = useDeviceState()
-  const devicesOffered = node.hosted === true && unlocked && devices.offered === true
+  const devicesOffered = devices.member !== null && devicesRowShown({ offered: devices.offered, hasPasskey, unlocked })
+  const devicesMember = devices.member
   useEffect(() => {
-    if (!sheetOpen || !unlocked || node.hosted !== true || node.phase !== 'ready') return
+    if (!sheetOpen || node.phase !== 'ready' || devicesMember === null || (hasPasskey && !unlocked)) return
     readDevices({ request: visitasRequest.current, store: deviceStore }).catch(() => {})
-  }, [sheetOpen, unlocked, node.hosted, node.phase])
+  }, [sheetOpen, node.phase, devicesMember, hasPasskey, unlocked])
   const policySeq = useRef(0)
   const member = unlocked && typeof passkey.status.publicKey === 'string' ? passkey.status.publicKey : null
   // A core node registers its delegate and accepts the Terms on the page
@@ -517,9 +518,9 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               {account ? <Item first={!(account && unlocked) && !showChangePhone} icon='shield' label='Recorrer de um bloqueio' onPress={() => onNavigate('recurso')} /> : null}
               {hosted ? <Item first={!account && !showChangePhone} icon='bloquear' label={BLOCK_TEXTS.listTitle} onPress={() => onNavigate('bloqueados')} /> : null}
               {hosted ? <Item icon='recado' label={WALL_TITLE} onPress={() => onNavigate('recados')} /> : null}
-              {devicesOffered ? <Item icon='smartphone' label={DEVICES_TITLE} onPress={() => onNavigate('aparelhos')} /> : null}
+              {devicesOffered ? <Item first={!showChangePhone && !hosted} icon='smartphone' label={DEVICES_TITLE} onPress={() => onNavigate('aparelhos')} /> : null}
               {visitasOn ? <Item icon='olho' label={VISITAS_TITLE} trailingText={visitas === null ? null : (stateOn(visitas) ? ROW_ON : ROW_OFF)} onPress={openVisitasSheet} /> : null}
-              <Item first={!account && !showChangePhone && !hosted} icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
+              <Item first={!account && !showChangePhone && !hosted && !devicesOffered} icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
             </View>
             {visitasOn
               ? (
