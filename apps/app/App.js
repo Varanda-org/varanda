@@ -574,8 +574,9 @@ function Member () {
   const generationRef = useRef(generation)
 
   // --- the cold-start preview (src/splashGate.js previewAllowed) ---
-  // A Rua's saved rows instead of the splash while the node boots, on the
-  // phone only (previewCapable). Read once, and only once the app was active:
+  // A Rua's saved rows instead of the splash while the node boots, only where
+  // previewCapable (now false on every platform: the preview had no Momentos
+  // strip, src/feedSnapshotStore.native.js). Read once, and only once the app was active:
   // the snapshot must parse for this installation and association, and the
   // session store must hold a live record for exactly its owner on this
   // rp.id, the record the resume will use. Any doubt or error: the splash.

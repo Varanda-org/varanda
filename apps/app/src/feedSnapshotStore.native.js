@@ -16,8 +16,13 @@ const FILE_NAME = 'varanda-rua-snapshot.json'
 // them equal). Not imported: the store stays free of the snapshot module.
 const MAX_BYTES = 524288
 
-// A Rua paints a snapshot first only where this is true (see the web twin).
-export const previewCapable = true
+// The cold-start preview (App.js, ARuaPreview) is off here too, as on the
+// web: it took the splash's place with saved rows but no Momentos strip,
+// so the strip popped in above them when the live feed took over. The
+// splash now waits for the first rows and Momentos on every platform
+// (src/splashGate.js ruaFeedReady). A Rua still paints its saved rows
+// first under that splash: this flag gates only the App.js preview.
+export const previewCapable = false
 
 function file (suffix = '') {
   return new File(Paths.cache, FILE_NAME + suffix)
