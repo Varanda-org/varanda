@@ -309,7 +309,7 @@ const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const crypto = require('hypercore-crypto')
 const b4a = require('b4a')
-const { decodeBlock, validateRecord, validRecordCopy, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('@varanda/core/lib/records')
+const { decodeBlock, validateRecord, validRecordCopy, PAGE_KEYS, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('@varanda/core/lib/records')
 const { certForKey, seederCertForKey, verifyUsernameRecord } = require('@varanda/core/lib/cert')
 const { attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { createBlocklistState, compareSnapshots } = require('@varanda/core/lib/blocklist')
@@ -811,6 +811,20 @@ async function tombstoneTarget (core, seq) {
     return copy !== null && copy.type === 'delete' ? copy.seq : null
   } catch {
     return undefined
+  }
+}
+
+// The raw block at seq when this replica holds it and it is a page-*
+// record, else null. Local only: a deleted seq is never asked for.
+async function heldPageBlock (core, seq) {
+  try {
+    if (seq >= core.length || !(await core.has(seq))) return null
+    const raw = await core.get(seq, { wait: false, raw: true })
+    if (raw === null || raw === undefined) return null
+    const copy = validRecordCopy(decodeBlock(raw), seq)
+    return copy !== null && Object.prototype.hasOwnProperty.call(PAGE_KEYS, copy.type) ? raw : null
+  } catch {
+    return null
   }
 }
 
@@ -2871,7 +2885,10 @@ async function syncRun ({
     const blocks = new Map() // seq -> raw bytes, or null when absent
     await Promise.all([...wanted].map(async (seq) => {
       let raw = null
-      if (seq < limit && !known.has(seq)) {
+      // The fold ignores a tombstone whose held target is a page-* record
+      // (docs/protocol.md §12), so that block still shows.
+      if (known.has(seq)) raw = await heldPageBlock(core, seq)
+      else if (seq < limit) {
         try {
           raw = await core.get(seq, { raw: true, timeout: budget(deadline) })
         } catch {
