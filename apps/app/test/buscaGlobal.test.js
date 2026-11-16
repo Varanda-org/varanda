@@ -308,6 +308,21 @@ test('two follow presses on search rows in one tick send once, never toast and k
   t.alike(following, ['a', null], 'cleared by its own answer')
 })
 
+test('following a search row hands the seeder\'s page marks to the names cache', async (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', 'BuscaGlobal.js'), 'utf8')
+  const code = src.slice(src.indexOf('const doFollowHit = async (hit) => {'), src.indexOf('const changing ='))
+  const learned = []
+  const follow = { run: async (fn) => ({ ok: true, value: await fn() }) }
+  const node = { request: async () => ({ changed: true }) }
+  const build = new Function('own', 'hitBusy', 'setDone', 'setFollowing', 'follow', 'node', 'markKnown', 'names', 'displayText', 'whoOf', 'onToast', 'FOLLOW_FAILED', 'FOLLOW_UNCERTAIN', 'loadFollows', 'onFollowsChanged', code + '; return doFollowHit') // eslint-disable-line no-new-func
+  const doFollowHit = build('me', { current: false }, () => {}, () => {}, follow, node,
+    () => {}, { learnMany: (entries) => learned.push(...entries) }, (x) => x, () => ({ title: 'Loja' }), () => {}, 'falhou', 'incerto', () => {}, null)
+  await doFollowHit({ author: 'a', name: 'Loja', username: 'loja', page: true, closed: true, moved: false })
+  await doFollowHit({ author: 'b', name: 'Ana', username: 'ana' })
+  t.alike(learned[0], ['a', { name: 'Loja', username: 'loja', page: true, closed: true, moved: false }], 'a page keeps its marks')
+  t.alike(learned[1], ['b', { name: 'Ana', username: 'ana', page: undefined, closed: undefined, moved: undefined }], 'an old seeder sends none')
+})
+
 test('Busca rows are stable: cached props, one renderItem, memoized extraData', (t) => {
   const src = fs.readFileSync(path.join(__dirname, '../src/screens/Busca.js'), 'utf8')
   t.ok(src.includes('cache: rowCache, rowKey: key'), 'row props come from the cache')
