@@ -8,6 +8,7 @@
 // replica, which is how dm.lookup and page.read find it here.
 const test = require('brittle')
 const b4a = require('b4a')
+const Hypercore = require('hypercore')
 const crypto = require('hypercore-crypto')
 const { WebSocket } = require('ws')
 const { createCert, createIssuerCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
@@ -1307,4 +1308,70 @@ test('dm.react tells a Página only from a diary held here: a held one is refuse
   clearTimeout(timer)
   t.not(answer, 'waited', 'answered without waiting for a peek of the unheld diary')
   t.is(answer && answer.message, 'mensagem não encontrada', 'past the Página check: the engine answers for the missing message')
+})
+
+// Which blocks of a Página's dm-local core still hold data.
+// The node closes its core after each operation and the in-memory storage is
+// shared, so a read waits for the node's own housekeeping to settle first.
+async function pageBlocks (storage, page) {
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  const core = new Hypercore(storage.core(store.pageDmPrefix(page) + store.DM_LOCAL), { valueEncoding: 'binary' })
+  await core.ready()
+  const out = []
+  for (let i = 0; i < core.length; i++) out.push((await core.get(i, { wait: false })) !== null)
+  await core.close()
+  return out
+}
+
+test('a deleted Página conversation is compacted when the page store opens and by the hourly pass', async (t) => {
+  t.timeout(TEST_TIMEOUT_MS)
+  const assoc = generateAssociationKeyPair()
+  const issuerKp = crypto.keyPair()
+  const issuer = { kp: issuerKp, cert: createIssuerCert({ issuer: hex(issuerKp.publicKey) }, assoc) }
+  const seeder = await dmSeeder(t, { signer: assoc })
+  // The compaction clock, apart from the real one the rows are filed with.
+  const clock = { ahead: 0 }
+  const A = await memberNode(t, assoc, seeder.url, { syncOptions: { dm: { issuePaceMs: 0, now: () => Date.now() + clock.ahead } } })
+  const C = await memberNode(t, assoc, seeder.url)
+  const pageKp = crypto.keyPair()
+  const P = hex(pageKp.publicKey)
+  const made = await A.web.request('dm.pageGenerate', { page: P, gen: 1, recipients: [{ member: A.key, box: A.box }] })
+  const diary = await pageDiary(t, { assoc, issuer, pageKp, ownerKp: A.keyPair, box: made.box })
+  await hold(diary, A.storage)
+  await hold(diary, C.storage)
+  const self = made.shares[0]
+  await A.web.request('dm.pageSecrets', { page: P, gen: 1, sealed: self.sealed, by: A.key, sig: self.sig, box: made.box, groupBox: made.groupBox, cert: createCert({ member: P }, assoc) })
+  await copyDiary(C, A)
+
+  const send = async (text) => {
+    const d = await A.web.request('dm.pageDraft', { page: P, kind: 'msg', to: C.key, text })
+    await A.web.request('dm.pageSend', { page: P, id: d.id, ...signed(d.digest, pageKp) })
+  }
+  const del = async () => {
+    const d = await A.web.request('dm.pageDraft', { page: P, kind: 'ctl', op: 'deleted', peer: C.key })
+    await A.web.request('dm.pageSend', { page: P, id: d.id, ...signed(d.digest, pageKp) })
+  }
+
+  // The hourly pass of a pull: 20 days later the message block is freed.
+  await send('primeira')
+  await del()
+  await A.web.request('dm.pull')
+  t.alike(await pageBlocks(A.storage, P), [true, true], 'inside the bound the blocks stay')
+  t.alike((await A.web.request('dm.thread', { page: P, peer: C.key })).messages, [], 'hidden by the fold')
+  clock.ahead = 20 * 86400000
+  await A.web.request('dm.pull')
+  await until(async () => (await pageBlocks(A.storage, P)).join() === 'false,true')
+  t.pass('the hourly pass freed the page store, the ctl block stays')
+
+  // The next unlock, 40 days on: the page store frees the rows when it opens.
+  clock.ahead = 0
+  await send('segunda')
+  await del()
+  t.alike(await pageBlocks(A.storage, P), [false, true, true, true], 'fresh rows stay')
+  await A.node.clearKeyPair()
+  clock.ahead = 40 * 86400000
+  await A.node.setKeyPair(A.keyPair, { prf: A.prf })
+  t.ok(await A.web.request('dm.list', { page: P }), 'the page store opens')
+  await until(async () => (await pageBlocks(A.storage, P)).join() === 'false,true,false,true')
+  t.pass('the housekeep on open freed the page store')
 })

@@ -280,6 +280,8 @@ class VideoPrepModule : Module() {
 
     // Settled before the cancel: Transformer.cancel blocks until its own
     // thread answers, so a stuck codec then costs a thread, not the module.
+    // The muxer can still write the output until cancel returns, so the
+    // files are discarded again once it has.
     private fun stop() {
       val t = transformer
       fail("FAILED")
@@ -288,6 +290,7 @@ class VideoPrepModule : Module() {
       } catch (e: Exception) {
         // Already finished.
       }
+      discardUnlessResolved()
     }
 
     // Media3's muxer may write the moov at the end and pre-extend mdat by

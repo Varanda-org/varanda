@@ -26,7 +26,7 @@
 // the outer view, so the dots row below it is never cut.
 
 import { useCallback, useContext, useEffect, useRef, useState } from 'react'
-import { ActivityIndicator, Modal, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
+import { AccessibilityInfo, ActivityIndicator, Modal, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { fetch as expoFetch } from 'expo/fetch'
 import { useEscapeLayer } from './escapeLayer'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
@@ -44,9 +44,12 @@ import { MediaCarousel } from './MediaCarousel'
 import { MediaView, mediaHashDeps } from './MediaView'
 import { OPEN_GRACE_MS, VISIBILITY_MS, holdEmbeds, mostlyHidden } from '../embedLive'
 import { TabBarShown } from './tabBarShown'
+import { screenReaderOn } from './screenReader'
 import { layout } from './theme'
 
 const GAP = 2
+// Long enough for TalkBack and VoiceOver to see the control that just mounted.
+const READER_FOCUS_MS = 250
 
 const stopClick = (e) => { if (e && typeof e.stopPropagation === 'function') e.stopPropagation() }
 // On the web, Enter and Space press the post's Pressable. The inline frame
@@ -255,7 +258,7 @@ function useVideoClip ({ author, video }) {
   return { active: attempt >= 0, phase, uri, start, retry, fail, reset }
 }
 
-function VideoStage ({ uri, full, startMs, playing, muted, setMuted, silent, onSound, blocked, setBlocked, control, onProgress, fail }) {
+function VideoStage ({ uri, label, full, startMs, playing, muted, setMuted, silent, onSound, blocked, setBlocked, control, onProgress, fail }) {
   return (
     <View style={styles.viewerImage}>
       <VideoPlayer
@@ -265,6 +268,7 @@ function VideoStage ({ uri, full, startMs, playing, muted, setMuted, silent, onS
         controls
         fit='contain'
         inline={!full}
+        label={label}
         startMs={startMs}
         style={styles.viewerImage}
         onError={fail}
@@ -297,8 +301,8 @@ function VideoStage ({ uri, full, startMs, playing, muted, setMuted, silent, onS
 }
 
 // The poster owns the press so even a failed image can start the clip inside
-// the post. Its image and marks take no touches and stay out of assistive
-// tech. No player or clip request exists before this explicit tap.
+// the post. Its image and marks stay out of assistive tech. No player or clip
+// request exists before this explicit tap.
 function VideoPoster ({ author, poster, video, persist, onPress }) {
   const seconds = videoSeconds(video && video.ms)
   const label = 'vídeo de ' + seconds + (seconds === 1 ? ' segundo' : ' segundos')
@@ -309,7 +313,10 @@ function VideoPoster ({ author, poster, video, persist, onPress }) {
       onPress={onPress}
       style={({ pressed }) => [styles.videoFrame, pressed && styles.pressed]}
     >
-      <View pointerEvents='none' accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>
+      {/* Nothing in here turns pointer events off: Android counts such a child as
+          hovered without letting it send the hover event, so TalkBack's touch
+          exploration would find nothing on the poster. The button still takes every press. */}
+      <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>
         <MediaView
           author={author}
           descriptor={poster}
@@ -319,7 +326,7 @@ function VideoPoster ({ author, poster, video, persist, onPress }) {
           tapRetry={false}
         />
       </View>
-      <View pointerEvents='none' style={styles.videoOverlay} accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>
+      <View style={styles.videoOverlay} accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>
         <View style={styles.playMark}>
           <Icon name='tocar' size={22} color='#ffffff' />
         </View>
@@ -400,6 +407,9 @@ function VideoTile ({ author, poster, video, persist }) {
   const frame = useRef(null)
   const release = useRef(null)
   const alive = useRef(true)
+  const expandRef = useRef(null)
+  const retryRef = useRef(null)
+  const refocus = useRef(false)
 
   useEffect(() => {
     const sync = () => setSoundOff(soundMuted())
@@ -465,7 +475,25 @@ function VideoTile ({ author, poster, video, persist }) {
     }
   }, [clip.active, full, close, insets.top, insets.bottom, win.height, win.width, tabBarShown])
 
+  // The poster, "Tentar de novo" and the viewer's "fechar" unmount when pressed,
+  // and the screen reader then jumps to an unrelated control. The web player
+  // takes its own focus back (VideoPlayer.web.js), where screenReaderOn is false.
+  useEffect(() => {
+    if (!refocus.current || full) return undefined
+    const target = clip.phase === 'ready' ? expandRef : clip.phase === 'error' ? retryRef : null
+    if (target === null) return undefined
+    refocus.current = false
+    if (!screenReaderOn()) return undefined
+    const timer = setTimeout(() => {
+      try {
+        if (target.current) AccessibilityInfo.sendAccessibilityEvent(target.current, 'focus')
+      } catch {}
+    }, READER_FOCUS_MS)
+    return () => clearTimeout(timer)
+  }, [clip.phase, full])
+
   const start = () => {
+    refocus.current = true
     setMuted(false)
     setBlocked(false)
     setPlaying(true)
@@ -476,6 +504,7 @@ function VideoTile ({ author, poster, video, persist }) {
     release.current = claimPlayback({ pause: close }, { bound: true })
   }
   const retry = () => {
+    refocus.current = true
     setMuted(false)
     setBlocked(false)
     clip.retry()
@@ -491,6 +520,7 @@ function VideoTile ({ author, poster, video, persist }) {
     setFull(true)
   }
   const closeFull = () => {
+    refocus.current = true
     handoff()
     setFull(false)
   }
@@ -538,7 +568,7 @@ function VideoTile ({ author, poster, video, persist }) {
           ? (
             <View style={[styles.videoOverlay, styles.videoStatus]}>
               <Text accessibilityRole='alert' style={styles.videoStatusText}>vídeo indisponível</Text>
-              <Pressable accessibilityRole='button' accessibilityLabel='Tentar de novo' onPress={retry} style={styles.retryBtn}>
+              <Pressable ref={retryRef} accessibilityRole='button' accessibilityLabel='Tentar de novo' onPress={retry} style={styles.retryBtn}>
                 <Text style={styles.retryText}>Tentar de novo</Text>
               </Pressable>
             </View>
@@ -549,6 +579,7 @@ function VideoTile ({ author, poster, video, persist }) {
             <>
               <VideoStage
                 uri={clip.uri}
+                label={label}
                 full={false}
                 startMs={position.current}
                 playing={playing}
@@ -563,7 +594,7 @@ function VideoTile ({ author, poster, video, persist }) {
                 fail={clip.fail}
               />
               <View pointerEvents='box-none' style={styles.videoTools}>
-                <Pressable accessibilityRole='button' accessibilityLabel='ver em tela cheia' onPress={expand} style={styles.expandBtn}>
+                <Pressable ref={expandRef} accessibilityRole='button' accessibilityLabel='ver em tela cheia' onPress={expand} style={styles.expandBtn}>
                   <Icon name='expandir' size={22} color='#ffffff' />
                 </Pressable>
               </View>
@@ -579,6 +610,7 @@ function VideoTile ({ author, poster, video, persist }) {
               <VideoStage
                 full
                 uri={clip.uri}
+                label={label}
                 startMs={position.current}
                 playing={playing}
                 muted={muted}

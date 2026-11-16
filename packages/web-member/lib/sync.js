@@ -197,6 +197,20 @@
 //                again whenever the own diary is caught up (a once run
 //                waits for that scan): a second device of the same passkey
 //                rebuilds its communities and groups from the diary.
+//                A writer the diary newly binds to a root already adopted is
+//                paged at once (that group alone, ahead of the pass in
+//                progress or in a pass of its own; at most MAX_DIARY_CHASES
+//                at a time, within the per-diary writer cap, none for the
+//                writers of the run's first scan) and, while the seeder does
+//                not list it, again after each wait of NEW_WRITER_PAGE_DELAYS
+//                (counted from the previous page; it stops once the writer
+//                is held, listed or unbound; a once run pages once and waits
+//                for a complete page of the group). A
+//                diary block the scan could not read (not downloaded yet, or
+//                a read that threw) is kept (DIARY_HOLES_MAX) and read again
+//                on every scan, when it downloads, and for a throw after
+//                DIARY_READ_RETRY_MS (at most DIARY_READ_RETRIES times); the
+//                joins after it are adopted meanwhile.
 //                Nothing is appended, no writer created.
 //   communities  (protocol v2) the communities of kv 'groupWriters' (kind
 //                'community') and, parent paging, the community each held
@@ -219,7 +233,9 @@
 //                groupPageMs in a continuous run; 'group-paged { group,
 //                count }' after each full pass. A seeder from before groups
 //                (`supported` false) counts as paged. Requests on a link
-//                are spaced GROUP_REQUEST_MS (every group and re-page). A
+//                are spaced GROUP_REQUEST_MS (every group and re-page); a
+//                group asked for first (a new diary writer) is paged before
+//                the next group of the pass. A
 //                page marked `incomplete` is gated but never completes the
 //                pass nor confirms an own core (a once run asks again); a
 //                pass counts only for the link it ran on.
@@ -273,9 +289,15 @@
 //                seeder's page lists an own core at no more than we hold (or
 //                not at all), else 'group-behind { key, length, theirs }';
 //                once per length per link; 'group-writer { group,
-//                writer }' once per run when a writer core (never a root)
-//                of `group` passed its local check and was listed (the
-//                session's device upkeep plans the key re-share after it).
+//                writer, private, own, account }' once per run when a
+//                writer core (never a root) of `group` passed its local
+//                check and was listed (the session's device upkeep plans
+//                after it): `private` is the root's verified visibility
+//                (false while unknown) and `own` whether this device holds
+//                a writer of its own in `group`, the only case a re-share
+//                can be due; `account` whether the writer is bound by the
+//                own diary (another device's writer, which a new device
+//                waits for to enrol).
 //   goals        every run: each group paged in full and each accepted
 //                foreign core at the length its page advertises (as the
 //                follows, G1); once runs also wait for every own group core
@@ -309,13 +331,13 @@ const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const crypto = require('hypercore-crypto')
 const b4a = require('b4a')
-const { decodeBlock, validateRecord, validRecordCopy, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('@varanda/core/lib/records')
+const { decodeBlock, validateRecord, validRecordCopy, PAGE_KEYS, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('@varanda/core/lib/records')
 const { certForKey, seederCertForKey, verifyUsernameRecord } = require('@varanda/core/lib/cert')
 const { attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { createBlocklistState, compareSnapshots } = require('@varanda/core/lib/blocklist')
 const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
 const { attachGroups, GROUPS_LIMIT_MAX } = require('@varanda/core/lib/groups-net')
-const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoinHistory, groupConfirmHistory, buildCommunity, diaryGroupKeys, MAX_GROUP_WRITERS, MAX_GROUP_WRITERS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('@varanda/core/lib/group')
+const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoinHistory, groupConfirmHistory, groupJoins, buildCommunity, diaryGroupKeys, MAX_GROUP_WRITERS, MAX_GROUP_WRITERS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('@varanda/core/lib/group')
 const {
   presentState,
   presentLength,
@@ -354,6 +376,19 @@ const GROUP_PUSH_PAGE_MS = 1000
 // Writer page requests on one link are spaced this much, all groups and
 // every re-page together (the seeder refills 2 messages a second).
 const GROUP_REQUEST_MS = 1000
+// A writer the own diary newly binds to an adopted root is paged at once; the
+// seeder may not have admitted it yet, so while it is not listed the root is
+// paged again after each of these waits, then the regular pass takes over.
+const NEW_WRITER_PAGE_DELAYS = [2000, 5000, 10000]
+// Own diary blocks a group-join scan could not read yet (not downloaded, or
+// a read that threw) are kept up to this many and read again on every scan.
+const DIARY_HOLES_MAX = 256
+// New diary writers chased at once at most (each takes page requests).
+const MAX_DIARY_CHASES = 64
+// A read that threw is retried after this, at most DIARY_READ_RETRIES times
+// per block (a continuous run; a once run reads again only on its next scan).
+const DIARY_READ_RETRY_MS = 5000
+const DIARY_READ_RETRIES = 6
 // A timed-out page request: the channel is opened again after this, doubled
 // on each new timeout of the link up to GROUP_RETRY_MAX_FACTOR times.
 const GROUP_RETRY_MS = 30000
@@ -811,6 +846,20 @@ async function tombstoneTarget (core, seq) {
     return copy !== null && copy.type === 'delete' ? copy.seq : null
   } catch {
     return undefined
+  }
+}
+
+// The raw block at seq when this replica holds it and it is a page-*
+// record, else null. Local only: a deleted seq is never asked for.
+async function heldPageBlock (core, seq) {
+  try {
+    if (seq >= core.length || !(await core.has(seq))) return null
+    const raw = await core.get(seq, { wait: false, raw: true })
+    if (raw === null || raw === undefined) return null
+    const copy = validRecordCopy(decodeBlock(raw), seq)
+    return copy !== null && Object.prototype.hasOwnProperty.call(PAGE_KEYS, copy.type) ? raw : null
+  } catch {
+    return null
   }
 }
 
@@ -1466,7 +1515,11 @@ async function syncRun ({
   const heldAtStart = new Set() // group cores stored when the run started
   const notCommunities = new Set() // parent keys whose root is a group header: never paged again this run
   let changedTimer = null
-  const fold = { cursor: 1, seed: null, ops: new Map(), seen: false, running: false, again: false, joinEntries: [], joinCursor: 1, scanPending: false }
+  const fold = { cursor: 1, seed: null, ops: new Map(), seen: false, running: false, again: false, joinEntries: [], joinCursor: 1, scanPending: false, holes: new Set(), readFails: new Map(), retryTimer: null, holeFilled: false, scanLogged: false }
+  const diaryWriters = new Set() // writers the own diary binds on:true, seen by adoptDiaryGroups
+  const diaryChase = new Map() // new writer of an adopted root -> its re-page timer
+  let diaryLive = new Map() // writer -> root the own diary binds now, as of the last scan
+  let diaryWritersSeeded = false // the first scan only fills diaryWriters
   let lastSettled = { settled: false, mediaPending: false } // last 'settled' verdict
   let holds = 0 // reader holds outstanding
   let drained = Promise.resolve() // resolves when holds reaches 0
@@ -1607,6 +1660,7 @@ async function syncRun ({
       groupsRetryTimer: null, // the channel opens again (retryGroupsLater)
       paging: false,
       pageAgain: false,
+      pageFirst: new Set(), // groups paged before the rest of the pass (a new diary writer)
       pageTimer: null,
       verifiedGate: null, // resolves at onVerified, rejects on an unverified close
       passVerified: noop,
@@ -1875,6 +1929,10 @@ async function syncRun ({
       lastOwnBehind = mark
       emit({ event: 'own-behind', length, theirs: s.theirs })
       return
+    }
+    if (fold.holeFilled) {
+      fold.holeFilled = false
+      scheduleFold()
     }
     if (lastOwnSynced === length) return
     lastOwnSynced = length
@@ -2871,7 +2929,10 @@ async function syncRun ({
     const blocks = new Map() // seq -> raw bytes, or null when absent
     await Promise.all([...wanted].map(async (seq) => {
       let raw = null
-      if (seq < limit && !known.has(seq)) {
+      // The fold ignores a tombstone whose held target is a page-* record
+      // (docs/protocol.md §12), so that block still shows.
+      if (known.has(seq)) raw = await heldPageBlock(core, seq)
+      else if (seq < limit) {
         try {
           raw = await core.get(seq, { raw: true, timeout: budget(deadline) })
         } catch {
@@ -4425,7 +4486,7 @@ async function syncRun ({
       markGroupChanged(ge.group)
       if (ge.key !== ge.group && !writersAnnounced.has(ge.key)) {
         writersAnnounced.add(ge.key)
-        emit({ event: 'group-writer', group: ge.group, writer: ge.key })
+        emit({ event: 'group-writer', group: ge.group, writer: ge.key, private: rootVis.get(ge.group) === 'private', own: groupOwn.some((m) => m.group === ge.group), account: ge.diary === ownHex })
       }
       evaluate()
     }, () => {
@@ -4530,30 +4591,63 @@ async function syncRun ({
     return new Promise((resolve) => { later(resolve, at - now) })
   }
 
+  // Pages one group ahead of the rest: queued in l.pageFirst, which a pass in
+  // progress drains between groups (no extra pass); idle, a pass that pages
+  // only the queued groups runs and leaves the timed pass alone.
+  function pageGroupNow (l, group) {
+    if (l.groups === null || l.groupsUnsupported) return
+    l.pageFirst.add(group)
+    if (!l.paging) pageGroups(l, true)
+  }
+
   // One full pass over every synced group, one request at a time (the
   // channel allows one in flight); a pass asked for meanwhile runs after.
-  async function pageGroups (l) {
+  // `priorityOnly`: only the groups of l.pageFirst (pageGroupNow).
+  async function pageGroups (l, priorityOnly = false) {
     if (l.groups === null || l.groupsUnsupported) return
     if (l.paging) {
       l.pageAgain = true
       return
     }
     l.paging = true
+    let full = !priorityOnly
     try {
+      const alive = () => !(ending || link !== l || l.groupsBroken || l.groupsUnsupported || l.groups === null)
       let again = true
       while (again) {
         l.pageAgain = false
-        for (const g of [...groups.values()]) {
-          if (ending || link !== l || l.groupsBroken || l.groupsUnsupported || l.groups === null) return
-          if (isBlockedKey(g.group)) continue
-          await pageGroup(l, g)
+        // Groups asked for first (l.pageFirst) are paged before the next one
+        // of the pass and not again later in it.
+        const first = new Set()
+        const drainFirst = async () => {
+          while (l.pageFirst.size > 0) {
+            const key = l.pageFirst.values().next().value
+            l.pageFirst.delete(key)
+            const g = groups.get(key)
+            if (g === undefined || isBlockedKey(key)) continue
+            first.add(key)
+            if (!alive()) return false
+            await pageGroup(l, g)
+          }
+          return alive()
+        }
+        if (!await drainFirst()) return
+        if (full) {
+          for (const g of [...groups.values()]) {
+            if (!alive()) return
+            if (isBlockedKey(g.group) || first.has(g.group)) continue
+            await pageGroup(l, g)
+            if (!await drainFirst()) return
+          }
         }
         again = l.pageAgain
+        // A full pass asked for meanwhile runs in full.
+        if (again) full = true
       }
     } finally {
       l.paging = false
     }
-    if (!once && !ending && link === l && !l.groupsBroken) {
+    if (full && !once && !ending && link === l && !l.groupsBroken) {
       clearLater(l.pageTimer)
       l.pageTimer = later(() => {
         l.pageTimer = null
@@ -5040,20 +5134,141 @@ async function syncRun ({
     return length
   }
 
+  // One own diary block of the group-join scan. A block not downloaded yet
+  // or a read that threw is kept in fold.holes (bounded) and read again on
+  // every later scan; later joins never wait behind it.
+  async function readDiaryJoin (seq) {
+    try {
+      if (!(await diary.has(seq))) {
+        noteDiaryHole(seq, false)
+        return
+      }
+      const record = validRecordCopy(decodeBlock(await diary.get(seq, { wait: false, raw: true })), seq)
+      fold.holes.delete(seq)
+      fold.readFails.delete(seq)
+      if (record !== null && record.type === 'group-join') fold.joinEntries.push({ seq, record })
+    } catch {
+      // Once per scan: a diary of failing blocks must not flood the log.
+      if (!ended && !fold.scanLogged) {
+        fold.scanLogged = true
+        log('aviso: falha ao ler os grupos do diário')
+      }
+      noteDiaryHole(seq, true)
+    }
+  }
+
+  function noteDiaryHole (seq, failed) {
+    if (!fold.holes.has(seq) && fold.holes.size >= DIARY_HOLES_MAX) return
+    if (failed) {
+      const n = (fold.readFails.get(seq) || 0) + 1
+      if (n > DIARY_READ_RETRIES) {
+        fold.holes.delete(seq)
+        fold.readFails.delete(seq)
+        return
+      }
+      fold.readFails.set(seq, n)
+      // A once run does not wait: the timer would only outlive its scan.
+      if (!once && !ending && fold.retryTimer === null) {
+        fold.retryTimer = later(() => {
+          fold.retryTimer = null
+          scheduleFold()
+        }, DIARY_READ_RETRY_MS)
+      }
+    }
+    fold.holes.add(seq)
+  }
+
+  // A block of the own diary downloaded while a scan had skipped it: scan
+  // again (filling a hole does not change the length).
+  // While the own diary is behind the seeder the scan waits for checkOwnSync
+  // (as the follow fold does): the fill is remembered for it.
+  function onDiaryDownload (index) {
+    if (!fold.holes.has(index) || ending) return
+    const s = ownSyncState()
+    if (s !== null && s.behind) {
+      fold.holeFilled = true
+      return
+    }
+    scheduleFold()
+  }
+
+  // The on:true writers the own diary binds now to the roots it binds, as
+  // diaryGroupKeys counts them: the root's own key always, then the earliest
+  // MAX_GROUP_WRITERS_PER_DIARY by first join seq. -> Map writer -> group.
+  function liveDiaryWriters (entries, roots) {
+    const first = new Map()
+    for (const { seq, record } of entries) {
+      if (record.type !== 'group-join' || record.on !== true || !roots.has(record.group)) continue
+      let writers = first.get(record.group)
+      if (writers === undefined) first.set(record.group, (writers = new Map()))
+      if (!writers.has(record.writer) || seq < writers.get(record.writer)) writers.set(record.writer, seq)
+    }
+    const allowed = new Set()
+    for (const [group, writers] of first) {
+      let room = MAX_GROUP_WRITERS_PER_DIARY
+      if (writers.has(group)) {
+        allowed.add(group + ':' + group)
+        room--
+      }
+      for (const [writer] of [...writers].sort((a, b) => a[1] - b[1] || (a[0] < b[0] ? -1 : 1))) {
+        if (writer === group) continue
+        if (room-- <= 0) break
+        allowed.add(group + ':' + writer)
+      }
+    }
+    const out = new Map()
+    for (const j of groupJoins(entries).values()) if (allowed.has(j.group + ':' + j.writer)) out.set(j.writer, j.group)
+    return out
+  }
+
+  // Pages `group` for its new diary-bound writer, and again on a short
+  // backoff (NEW_WRITER_PAGE_DELAYS, each wait after the previous page)
+  // while the seeder, which may not have admitted it yet, does not list it;
+  // after that the regular pass finds it. It stops when the writer is held,
+  // listed, or no longer bound (diaryLive, refreshed on every scan).
+  function chaseDiaryWriter (group, writer) {
+    const g = groups.get(group)
+    if (g === undefined || g.replica !== true || diaryChase.has(writer) || diaryChase.size >= MAX_DIARY_CHASES) return
+    if (once) {
+      // The goal stays unmet until a complete page of the group has come.
+      g.pagedOn = null
+      const l = seederLink()
+      if (l !== null) pageGroupNow(l, group)
+      return
+    }
+    const step = (n) => {
+      diaryChase.delete(writer)
+      const cur = groups.get(group)
+      if (ending || cur === undefined || diaryLive.get(writer) !== group || isBlockedKey(group) || isBlockedKey(writer) || rootHeld(writer)) return
+      if (n > 0 && cur.items.has(writer)) return
+      const l = seederLink()
+      if (l !== null) pageGroupNow(l, group)
+      if (n < NEW_WRITER_PAGE_DELAYS.length) diaryChase.set(writer, later(() => step(n + 1), NEW_WRITER_PAGE_DELAYS[n]))
+    }
+    step(0)
+  }
+
   // The roots the own diary binds, from the cursor up to its present length,
   // adopted as they appear (another device of the same identity joined
   // them). Separate from the follow fold: it never sets fold.seen. Every
   // group-join is kept, a later off one unbinds its writer.
   async function adoptDiaryGroups () {
+    fold.scanLogged = false
     let deleted = new Set()
     try {
       const length = ownPresent()
       if (ownTracker !== null) deleted = ownTracker.deleted()
+      for (const seq of [...fold.holes]) {
+        if (deleted.has(seq) || seq >= length) {
+          fold.holes.delete(seq)
+          fold.readFails.delete(seq)
+          continue
+        }
+        await readDiaryJoin(seq)
+      }
       for (let seq = fold.joinCursor; seq < length; seq = ++fold.joinCursor) {
-        if (deleted.has(seq) || !(await diary.has(seq))) continue
-        const record = validRecordCopy(decodeBlock(await diary.get(seq, { wait: false, raw: true })), seq)
-        if (record === null || record.type !== 'group-join') continue
-        fold.joinEntries.push({ seq, record })
+        if (deleted.has(seq)) continue
+        await readDiaryJoin(seq)
       }
     } catch {
       if (!ended) log('aviso: falha ao ler os grupos do diário')
@@ -5062,8 +5277,26 @@ async function syncRun ({
     // scan is marked done next, and the same length is not scanned again.
     try {
       let added = false
-      for (const key of diaryGroupKeys(fold.joinEntries.filter((e) => !deleted.has(e.seq)))) {
-        if (adoptDiaryRoot(key)) added = true
+      const adopted = new Set()
+      const entries = fold.joinEntries.filter((e) => !deleted.has(e.seq))
+      const keys = diaryGroupKeys(entries)
+      for (const key of keys) {
+        if (adoptDiaryRoot(key)) {
+          added = true
+          adopted.add(key)
+        }
+      }
+      // A writer newly bound to a root that was already a replica is not
+      // found by the root's adoption: ask for it now, not at the next pass.
+      // The writers of the first scan are the ones the run started with:
+      // the regular pass asks for them, so none is chased.
+      diaryLive = liveDiaryWriters(entries, new Set(keys))
+      const firstScan = !diaryWritersSeeded
+      diaryWritersSeeded = true
+      for (const [writer, group] of diaryLive) {
+        if (diaryWriters.has(writer)) continue
+        diaryWriters.add(writer)
+        if (!firstScan && !adopted.has(group)) chaseDiaryWriter(group, writer)
       }
       const l = seederLink()
       if (added && l !== null && l.groups !== null) pageGroups(l)
@@ -5100,7 +5333,14 @@ async function syncRun ({
     fold.seed = seed
     fold.cursor = Math.max(1, state.present)
     for (const entry of state.raw) {
-      if (entry.seq < 1 || entry.seq >= state.present || entry.record === null) continue
+      if (entry.seq < 1 || entry.seq >= state.present) continue
+      // A block below the present length that is not here (a hole a
+      // tombstone explains, or a block that does not decode) is read again
+      // when it arrives.
+      if (entry.record === null) {
+        if (!state.deleted.has(entry.seq) && fold.holes.size < DIARY_HOLES_MAX) fold.holes.add(entry.seq)
+        continue
+      }
       const record = validRecordCopy(entry.record, entry.seq)
       if (record !== null && record.type === 'group-join') fold.joinEntries.push({ seq: entry.seq, record })
     }
@@ -5174,6 +5414,7 @@ async function syncRun ({
       },
       onDeleted: () => { revokeOwnMedia() }
     })
+    diary.on('download', onDiaryDownload)
     await ownTracker.ready
     await mediaRevoke
     // What the own diary already holds is folded before any connection.
@@ -5362,6 +5603,7 @@ async function syncRun ({
     timers.clear()
     if (signal) signal.removeEventListener('abort', onAbort)
     if (ownTracker !== null) ownTracker.destroy()
+    if (diary) diary.off('download', onDiaryDownload)
     const l = link
     link = null
     if (l !== null) {

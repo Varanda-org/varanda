@@ -284,6 +284,7 @@ const ANNOUNCE_BURST = 20
 const MAX_BAD_ANNOUNCES = 16
 
 const HEX64 = /^[0-9a-f]{64}$/
+const GROUP_META_BYTES = b4a.from('group-meta')
 // Record types the engagement index reads from a diary's blocks.
 // Pending verified ratings (_feiraPend): per target listing, per rater
 // (MAX_LISTINGS), per target author, and in total.
@@ -352,6 +353,21 @@ async function deletedHole (core, seq) {
   } catch {
     return false
   }
+}
+
+// The blob ids the valid momentos among a diary's local blocks name, deleted
+// or not. A record already cleared, or a block that never arrived, names
+// nothing: its blob expires by itself. A read error throws (fail closed).
+async function momentBlobIds (core) {
+  const ids = new Set()
+  for (let i = 1; i < core.length; i++) {
+    const raw = await core.get(i, { wait: false, raw: true })
+    if (raw === null) continue
+    const block = decodeBlock(raw)
+    const r = block !== null && block.type === 'moment' ? validRecordCopy(block, i) : null
+    if (r !== null) ids.add(r.media.id)
+  }
+  return ids
 }
 
 // Media cores whose deletion counters one diary keeps (a diary entry's
@@ -1292,6 +1308,7 @@ class Seeder {
     this._names = this._createNameIndex()
     this._indexResumeQueued = false
     this._indexQueue = Promise.resolve()
+    this._rootScanQueue = Promise.resolve() // public group root scans (the creator's whole log) run one at a time
     this._indexStartup = null
     // Diaries served at start whose first group scan has not ended: a listed
     // root kept at start only provisionally (a member's live join may keep
@@ -1645,6 +1662,7 @@ class Seeder {
         else this.log({ event: 'rejected', key, reason })
         if (reason === 'revoked-issuer') this._noteRevokedCreator(key, judged.cert)
         try {
+          if (reason === 'blocked') await this._purgeMomentBlobs(key)
           await this._purge(key)
         } catch {
           throw new Error('falha ao limpar diário rejeitado: ' + key8(key))
@@ -2104,7 +2122,10 @@ class Seeder {
       // listed for the next start), un-admit, persist, then refuse.
       await core.close().catch(noop)
       try {
-        if (await this._stored(key)) await this._purge(key)
+        if (await this._stored(key)) {
+          if (this._isBlocked(key)) await this._purgeMomentBlobs(key)
+          await this._purge(key)
+        }
       } catch {
         if (!this._closing) this._fatal(key)
         return
@@ -2677,6 +2698,8 @@ class Seeder {
     const drop = (async () => {
       if (inflight) await inflight.catch(noop)
       try {
+        // A blocked key can settle on another reason first (revoked-issuer).
+        if (reason === 'blocked' || this._isBlocked(key)) await this._purgeMomentBlobs(key)
         await this._purge(key)
       } catch {
         if (!this._closing) this._fatal(key)
@@ -4354,6 +4377,7 @@ class Seeder {
       expected,
       rootScanned: 0,
       rootScanning: false,
+      rootDecoded: 0, // blocks a root scan decoded (past the group-meta prefilter)
       rootRetry: null, // the retry of a failed root block read (_retryRootScan)
       rootReadFailures: 0
     }
@@ -4435,25 +4459,36 @@ class Seeder {
   // (docs/protocol.md section 10, "Protocol v2 admission and scan"):
   // group-meta and group-create (only the community's creator creates
   // groups, so no other core is read). Only after the header verified
-  // locally, so the root's kind is known; a group root is not scanned. One
-  // pass at a time per root; growth during a pass runs another.
+  // locally, so the root's kind is known. A public group's root folds only
+  // its group-meta (a rename); a private root seals its meta and is not
+  // scanned. One pass at a time per root; growth during a pass runs another.
   _scanRoot (key, entry) {
     if (key !== entry.group || !entry.headerOk || entry.rootScanning || entry.dropped || this._closing) return
     const header = this._groupIndex.header(key)
-    if (header === null || header.kind !== 'community') return
+    if (header === null || !this._rootScanned(header)) return
+    const community = header.kind === 'community'
     if (entry.rootScanned === 0) {
       this._groupIndex.resetRoot(key)
       entry.rootScanned = 1
     }
     this._scanGroupCore(key, entry, (block, i) => {
       const t = block.type
-      if (t !== 'group-meta' && t !== 'group-create') return
-      if (validateGroupRecord(block, i, { root: true, community: true }) !== null) return
+      if (t !== 'group-meta' && (t !== 'group-create' || !community)) return
+      if (validateGroupRecord(block, i, { root: true, community }) !== null) return
       this._groupIndex.foldRoot(key, block)
-    })
+    }, { queued: !community, needle: community ? null : GROUP_META_BYTES })
   }
 
-  _scanGroupCore (key, entry, fold) {
+  // Whether a root with this header is scanned: a community's, and a public
+  // group's.
+  _rootScanned (header) {
+    return header.kind === 'community' || (header.kind === 'group' && header.visibility === 'public')
+  }
+
+  // `queued`: wait for the other queued scans (a group root holds the
+  // creator's whole log). `needle`: raw bytes a block must contain to be
+  // decoded at all (a prefilter; `fold` stays the real check).
+  _scanGroupCore (key, entry, fold, { queued = false, needle = null } = {}) {
     const stale = () => entry.dropped || this._closing || this._groupServed.get(key) !== entry
     entry.rootScanning = true
     let failed = false
@@ -4473,6 +4508,8 @@ class Seeder {
         }
         entry.rootScanned = i + 1
         entry.rootReadFailures = 0
+        if (needle !== null && !b4a.includes(raw, needle)) continue
+        entry.rootDecoded++
         let block = null
         try {
           block = decodeBlock(raw)
@@ -4481,7 +4518,15 @@ class Seeder {
         fold(block, i)
       }
     }
-    run().catch(noop).then(() => {
+    const start = () => run().catch(noop)
+    let go
+    if (queued) {
+      go = this._rootScanQueue.then(start, start)
+      this._rootScanQueue = go.catch(noop)
+    } else {
+      go = start()
+    }
+    go.then(() => {
       entry.rootScanning = false
       if (stale()) return
       if (failed) return this._retryRootScan(key, entry)
@@ -6756,7 +6801,12 @@ class Seeder {
     if (!this._ready || this._closing) return true
     for (const k of this._groupReserved.keys()) if (this._groupReservedCounts(k)) return true
     if (this._groupDeferredFor(null) || this._groupFullFor(null)) return true
-    for (const [k, e] of this._groupServed) if (this._groupHeaderPending(k, e)) return true
+    for (const [k, e] of this._groupServed) {
+      if (this._groupHeaderPending(k, e)) return true
+      // A community root scan never changes the search.
+      const h = k === e.group ? this._groupIndex.header(k) : null
+      if (h !== null && h.kind === 'group' && this._rootScanBehind(k)) return true
+    }
     for (const [key, entry] of this._served) {
       if (!entry.dropped && this._groupScanCounts(key, entry)) return true
     }
@@ -6828,6 +6878,8 @@ class Seeder {
       let header = rootServed ? this._groupIndex.header(group) : null
       // No creator unless the header's diary bound the root (_rootBound).
       if (header !== null && !this._rootBound(group, header.diary)) header.diary = null
+      // The renamed name, as the search shows it.
+      if (header !== null && header.kind === 'group' && header.visibility === 'public') header.name = this._groupIndex.nameOf(group)
       let writerServed = false
       for (const [k, e] of this._groupServed) {
         if (k !== group && e.group === group && this._groupCoreVisible(k)) {
@@ -6848,14 +6900,14 @@ class Seeder {
     }
   }
 
-  // Whether a served community root still has catalogue records to fold
-  // (_scanRoot).
+  // Whether a served community root still has catalogue records to fold, or
+  // a public group root renames (_scanRoot).
   _rootScanBehind (key) {
     const e = this._groupServed.get(key)
     if (!e || e.dropped || e.group !== key || !e.headerOk) return false
-    // A group root is never scanned: its cursor stays at 0.
+    // A private group root is never scanned: its cursor stays at 0.
     const header = this._groupIndex.header(key)
-    if (header === null || header.kind !== 'community') return false
+    if (header === null || !this._rootScanned(header)) return false
     return e.rootScanning || e.rootScanned < e.core.contiguousLength
   }
 
@@ -6873,12 +6925,12 @@ class Seeder {
 
   // Whether group root G, named by a create in a community's catalogue, may
   // still change whether it is listed: in admission or its header not
-  // verified yet.
+  // verified yet, or its public root still being scanned for a rename.
   _catalogueRootPending (G) {
     if (this._isBlocked(G)) return false
     if (this._groupIncomplete(G)) return true
     if (!this._groupServed.has(G) && !this._groupReserved.has(G)) return false
-    return !this._groupCoreVisible(G)
+    return !this._groupCoreVisible(G) || this._rootScanBehind(G)
   }
 
   // Whether community root C may be answered: unblocked, served with its
@@ -6977,8 +7029,9 @@ class Seeder {
     }
   }
 
-  // GET /index/group-search/<segment>: public groups whose header name
-  // matches, each with that name as the root header wrote it (peer text,
+  // GET /index/group-search/<segment>: public groups whose name matches
+  // (the root's latest group-meta name, else its header's), each with that
+  // name (peer text,
   // rendered by the client through displayText), served roots only, never a
   // blocked one; null for a malformed segment. Nothing about the query is
   // logged.
@@ -7029,6 +7082,20 @@ class Seeder {
       }
       p.then(settled, settled)
       return p
+    }
+  }
+
+  // A blocked diary's momento blobs go before its log, which is what names
+  // them: on a failure the diary stays listed and the next start scans it
+  // again (the caller's purge failure path).
+  async _purgeMomentBlobs (key) {
+    if (!this._blob) return
+    const core = await openReplica(this.store, key)
+    try {
+      const ids = await momentBlobIds(core)
+      if (ids.size > 0) this._blob.purge(ids)
+    } finally {
+      await core.close().catch(noop)
     }
   }
 
