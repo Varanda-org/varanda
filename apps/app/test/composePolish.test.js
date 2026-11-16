@@ -27,6 +27,7 @@ test('settings group every row and keep the existing advanced toggle last', (t) 
     ["'Recorrer de um bloqueio'", "() => onNavigate('recurso')"],
     ['{BLOCK_TEXTS.listTitle}', "() => onNavigate('bloqueados')"],
     ['{WALL_TITLE}', "() => onNavigate('recados')"],
+    ['{DEVICES_TITLE}', "() => onNavigate('aparelhos')"],
     ['{VISITAS_TITLE}', 'openVisitasSheet'],
     ['{CONSENT_SWITCH_LABEL}', '() => setConsent(toggleConsent(consent))'],
     ["'Convidar pessoas'", "() => onNavigate('convites')"],
