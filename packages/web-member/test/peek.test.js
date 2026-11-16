@@ -1586,3 +1586,50 @@ test('regression: an abort cancels every window get in flight at once, none wait
   const err = await reading
   t.is(err && err.message, 'sem conexão com o semeador', 'the aborted read ended')
 })
+
+// ---- bytes in flight (#459) ----
+
+// cert, profile, a post, two oversized posts, then a tombstone of each: the
+// window reads the tombstones first, so a get of an oversized block already
+// in flight is cancelled and its block, if it arrived, never charged.
+function buriedOversizedAuthor (assoc, name, at, size) {
+  return [
+    (key) => memberCertRecord(createCert({ member: key }, assoc.kp)),
+    () => profileRecord({ name, bio: '' }),
+    () => postRecord({ text: name, at: iso(at) }),
+    () => ({ type: 'post', text: 'x'.repeat(size), at: iso(at + 1), replyTo: null }),
+    () => ({ type: 'post', text: 'y'.repeat(size), at: iso(at + 2), replyTo: null }),
+    () => deleteRecord({ seq: 3 }),
+    () => deleteRecord({ seq: 4 })
+  ]
+}
+
+async function buriedSeeder (t, assoc, count, size) {
+  const now = Date.now()
+  const served = { bytes: 0 }
+  const cores = []
+  for (let i = 0; i < count; i++) {
+    const core = await diary(t, buriedOversizedAuthor(assoc, 'Z' + i, now - (i + 1) * 1000, size))
+    core.on('upload', (index, byteLength) => { served.bytes += byteLength })
+    cores.push(core)
+  }
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores })
+  return { seeder, served }
+}
+
+test('regression: bytes the seeder sends past the wire bound cut the page like the budget', async (t) => {
+  t.timeout(120000)
+  const assoc = association()
+  const size = 100000
+  const { seeder, served } = await buriedSeeder(t, assoc, 30, size)
+  // A budget roomy enough for pipelined gets, whose cancelled blocks are
+  // never charged; only the wire bound sees them.
+  const wireMaxBytes = 500000
+  const parallel = 2
+  const { web, internal } = await webNode(t, assoc, seeder.url, { peek: { pageMaxBytes: 8 * 1048576, parallel, wireMaxBytes } })
+  const page = await web.request('peek.read', {})
+  t.comment('bytes served ' + served.bytes)
+  t.is(page.incomplete, true, 'the wire bound cut the page')
+  t.ok(served.bytes <= 2 * wireMaxBytes + 3 * parallel * size, 'about the wire bound plus what was already in flight')
+  t.alike(internal, [])
+})

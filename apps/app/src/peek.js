@@ -42,6 +42,34 @@ export function isLastPeekPage (page) {
   return page.next === null || (page.items.length === 0 && page.incomplete !== true)
 }
 
+// One read of such a node covers 8 batches of 48 diaries, so a person who
+// follows nearly all of the 384 newest gets incomplete pages with nothing
+// to show. A later page that added nothing to the list then reads on at once
+// from its cursor, at most this many more reads per load, before the list's
+// dry-page pause counts it. A peek read changes no state and a failed one
+// ends the chain, so this never repeats a failed call. The cursor is not
+// compared: an empty page held for candidates carries the cursor it was
+// asked with while the node's candidate traversal moves on, so only max
+// bounds a node that never gets further.
+export const PEEK_EMPTY_FOLLOW_MAX = 3
+
+export function followsEmptyPage ({ page, added, hops, max = PEEK_EMPTY_FOLLOW_MAX }) {
+  return page.incomplete === true && page.next !== null && added === 0 && hops < max
+}
+
+// One load of later pages: read(after) asks for a page; take(page, after)
+// puts it on the list and returns how many rows it added, or null to read no
+// further (a newer read took over, the tab was hidden). A rejected read ends
+// the load and reaches the caller. -> the last page read.
+export async function readLaterPages ({ after, read, take, max = PEEK_EMPTY_FOLLOW_MAX }) {
+  for (let hops = 0; ; hops++) {
+    const page = await read(after)
+    const added = take(page, after)
+    if (added === null || !followsEmptyPage({ page, added, hops, max })) return page
+    after = page.next
+  }
+}
+
 export function withoutAuthor (items, author) {
   return items.filter((item) => item.author !== author)
 }
