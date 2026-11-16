@@ -2999,6 +2999,56 @@ test('a topic mark on a reply or an unknown post is ignored', (t) => {
   t.alike(visible(g), [wY + ':1', wY + ':2'], 'side records never become posts')
 })
 
+// #350: each admit covers the writers of its own generation, so leaving
+// keeps a covered device's earlier records exactly as a listed writer's.
+test('a device the admit covers keeps its records from before a leave, as a listed one; a rejoin needs a new admit', (t) => {
+  const THUMB = [{ emoji: THUMBS, count: 1, by: [X] }]
+  const leaveFrom = (leaver) => {
+    const w = world({ join: 'approval' }).add(X, wX)
+    w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(1) }))
+    const p = post(w, G, 2)
+    w.add(X, wX2, { at: AT(3) })
+    const listed = post(w, wX, 4)
+    const covered = post(w, wX2, 5)
+    topic(w, wX, listed, 6)
+    topic(w, wX2, covered, 7)
+    react(w, wX2, p, THUMBS, 8)
+    const g = buildGroup(w.input())
+    t.alike(visible(g), [G + ':2', wX + ':1', wX2 + ':1'])
+    t.alike(postOf(g, covered).topic, { poll: null })
+    t.alike(reactionsOf(g, p), THUMB)
+    const leave = w.push(leaver, groupLeave({ cuts: [{ writer: wX, seq: w.len(wX) }, { writer: wX2, seq: w.len(wX2) }], at: AT(9) }))
+    return { w, p, listed, covered, leave, g: buildGroup(w.input()) }
+  }
+  const fromListed = leaveFrom(wX)
+  t.is(fromListed.g.members.get(X), 'left')
+  t.alike(visible(fromListed.g), [G + ':2', wX + ':1'], 'the listed writer that left keeps its post')
+  t.alike(postOf(fromListed.g, fromListed.listed).topic, { poll: null })
+  t.is(reactionsOf(fromListed.g, fromListed.p), undefined, 'a reaction needs a member now')
+
+  const { w, p, covered, leave, g } = leaveFrom(wX2)
+  t.is(g.members.get(X), 'left')
+  t.alike(visible(g), [G + ':2', wX2 + ':1'], 'the covered writer that left keeps its post too')
+  t.alike(postOf(g, covered).topic, { poll: null }, 'and its topic mark')
+  t.is(reactionsOf(g, p), undefined, 'a reaction needs a member now')
+
+  const wN = K(0x405)
+  w.add(X, wN, { rejoin: leave, at: AT(10) })
+  post(w, wN, 11)
+  let r = buildGroup(w.input())
+  t.is(r.members.get(X), 'requested', 'the old admit covers no writer of the next generation')
+  t.alike(r.requests, [X])
+  t.alike(visible(r), [G + ':2', wX2 + ':1'], 'the earlier post still stays')
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX2, seq: w.len(wX2) }], at: AT(12) }))
+  post(w, wN, 13)
+  const wN2 = K(0x406)
+  w.add(X, wN2, { rejoin: leave, at: AT(14) })
+  post(w, wN2, 15)
+  r = buildGroup(w.input())
+  t.is(r.members.get(X), 'member')
+  t.alike(visible(r), [G + ':2', wX2 + ':1', wN + ':2', wN2 + ':1'], 'the new admit covers its generation from the admit on; the earlier post stays')
+})
+
 test('replies and replies to replies belong to the topic thread', (t) => {
   const w = world().add(X, wX).add(Y, wY)
   const root = post(w, wY, 1)

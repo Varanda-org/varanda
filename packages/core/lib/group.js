@@ -2400,16 +2400,25 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
   }
 
   // autoAdmit (owner decision, #350): a member's admission covers the new
-  // devices of its diary while it has not left or been banned. A writer of
-  // the diary's current generation by its own header (in a community, a CW
-  // not retired; in a group, no leave and no rejoin, or a rejoin naming the
-  // diary's latest leave) gets, on each positive admit of that generation
-  // not listing it, the cut an admin listing it would have written: its
-  // first record after the admit in causal order, else its next seq. Its
-  // posts before the admission stay unadmitted, and a device from before a
-  // leave never comes back. Its side records (reactions, votes, topic marks)
-  // never become nodes of the order and count from seq 1, as under an admit
-  // listing it with cut 1 (layerAt `side`), still under every other check.
+  // devices of its diary while it has not left or been banned. Each positive
+  // admit covers the writers of its own generation it does not list: those
+  // whose header puts them in the generation the admit observed (admitGen).
+  // A writer's generation comes from its header and the leave it names,
+  // never from order positions: 0 without a rejoin; with a rejoin naming a
+  // leave L of the diary, the leaves L's own cuts observed, L included
+  // (writerGen; a rejoin naming no leave of the diary covers nothing). In C
+  // it is the CW's generation (part.genOf). The covered writer gets the cut
+  // an admin listing it would have written: its first record after the
+  // admit in causal order, else its next seq. Its posts before the admission
+  // stay unadmitted. A later leave ends the cover from the leave on exactly
+  // as for a listed writer (leave withdrawal, and a post after the leave
+  // only counts admits of its generation or later), so its records from
+  // before the leave stay, and an earlier admit never covers a writer of a
+  // later generation (a device back after a leave needs a new admit, and a
+  // device from before a leave is never covered by a later one). Its side
+  // records (reactions, votes, topic marks) never become nodes of the order
+  // and count from seq 1, as under an admit listing it with cut 1 (layerAt
+  // `side`), still under every other check.
   // Under a community, leaving it counts too, decided from headers and the
   // admit's own cuts, never from order positions (a
   // community leave has no causal link to G's admits): never a writer whose
@@ -2418,11 +2427,21 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
   // Auto cuts never prove a leave was seen (sawPrefix and admitGen read
   // `cuts` only). The opened pass of a private group reuses these events.
   if (!auth) {
-    const autoEligible = (w, d) => {
-      if (isC) return !monoRetired.has(w)
-      if (cs !== null && cs.retiredC.has(cwOf.get(w))) return false
-      const list = leavesOf.get(d)
-      return list ? names(w, list[list.length - 1]) : !rejoinRef.has(w)
+    const leaveRef = new Map()
+    for (const list of leavesOf.values()) for (const L of list) leaveRef.set(L.writer + ':' + L.seq, L)
+    const writerGen = (w, d) => {
+      const r = rejoinRef.get(w)
+      if (r === undefined) return 0
+      const L = leaveRef.get(r.writer + ':' + r.seq)
+      if (L === undefined || L.diary !== d) return -1
+      const cuts = cutsMap(L.record.cuts)
+      cuts.set(L.writer, Math.max(cuts.get(L.writer) || 0, L.seq + 1))
+      return admitGen(d, cuts, Infinity)
+    }
+    const genOfWriter = (w, d) => {
+      if (isC) return monoRetired.has(w) ? -1 : (part.genOf.get(w) || 0)
+      if (cs !== null && cs.retiredC.has(cwOf.get(w))) return -1
+      return writerGen(w, d)
     }
     const cwGen = (w) => cwOf.has(w) && cs.genOfC.has(cwOf.get(w)) ? cs.genOfC.get(cwOf.get(w)) : -1
     const sameCGen = (e, w, d) => {
@@ -2438,12 +2457,17 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
       const w = l.key
       const d = l.diary
       const list = admits.get(d)
-      if (w === G || !list || !autoEligible(w, d)) continue
-      const gen = leaves.get(d) || 0
+      if (w === G || !list) continue
+      const gen = genOfWriter(w, d)
+      if (gen < 0) continue
       const mine = seqsOf.get(w) || []
       const next = l.records.length ? l.records[l.records.length - 1].seq + 1 : 1
       for (const e of list) {
-        if (!e.on || e.gen < gen || e.cuts.has(w)) continue
+        if (!e.on || e.gen !== gen || e.cuts.has(w)) continue
+        // Cuts past a leave that sorts after the admit prove it seen
+        // (sawPrefix) without raising admitGen: such an admit's generation
+        // is unclear, and it covers nobody it does not list.
+        if (!isC && sawPrefix(e, d) > gen) continue
         if (cs !== null && !sameCGen(e, w, d)) continue
         const j = firstAbove(mine, e.pos, at)
         e.auto.set(w, j < mine.length ? mine[j].seq : next)
