@@ -49,7 +49,8 @@ register('data:text/javascript,' + encodeURIComponent(hooks), pathToFileURL(__fi
 
 const DIR = 'file:///stub/Documents/'
 const PATH = DIR + 'varanda-outbox.json'
-const WEB_KEY = 'varanda-web-outbox'
+// The web store's key for the sealed queue (src/outboxMigrate.js).
+const WEB_KEY = 'varanda-web-outbox-v2'
 
 const storage = new Map()
 globalThis.localStorage = {
@@ -76,13 +77,21 @@ async function reset () {
 const A = 'a'.repeat(64)
 const B = 'b'.repeat(64)
 const ASSOC = 'c'.repeat(64)
+// Well-formed boxes (the node seals them; see test/outboxSeal.test.js).
+const BOX = 'Qk9Y'.repeat(20)
 
 function sample (outbox) {
   let items = []
-  items = outbox.enqueue(items, { author: A, association: ASSOC, kind: 'post', text: 'olá, mundo', now: 1000, id: '0123456789abcdef' })
-  items = outbox.enqueue(items, { author: A, association: ASSOC, kind: 'reply', to: B + ':3', text: 'resposta\ncom linha', now: 2000, id: 'fedcba9876543210' })
-  items = outbox.enqueue(items, { author: B, association: ASSOC, kind: 'post', text: 'outra pessoa', now: 3000, id: '00000000000000ff' })
+  items = outbox.enqueue(items, { author: A, association: ASSOC, kind: 'post', text: 'olá, mundo', box: BOX, now: 1000, id: '0123456789abcdef' })
+  items = outbox.enqueue(items, { author: A, association: ASSOC, kind: 'reply', to: B + ':3', text: 'resposta\ncom linha', box: BOX + 'AA', now: 2000, id: 'fedcba9876543210' })
+  items = outbox.enqueue(items, { author: B, association: ASSOC, kind: 'post', text: 'outra pessoa', box: BOX + 'BA', now: 3000, id: '00000000000000ff' })
   return outbox.claim(items, '0123456789abcdef', { now: 4000, floorSeq: 7 })
+}
+
+// The same item as stored before the seal (v1, clear target and text).
+function legacy (item, to, text) {
+  const { box, ...rest } = item
+  return { ...rest, v: 1, to, text }
 }
 
 test('native store: available, empty without a file', async (t) => {
@@ -105,36 +114,42 @@ test('round trip: same serialized text as the web store, same items back', async
   t.is(files().has(PATH + '.tmp'), false)
   t.is(files().has(PATH + '.bak'), false)
   t.alike([...files().keys()], [PATH], 'one file, in the document dir, never in the node data dir')
+  for (const text of ['olá, mundo', 'resposta', 'outra pessoa', B + ':3']) {
+    t.absent(files().get(PATH).includes(text), 'not in the file: ' + text)
+  }
 })
 
 test('refuses what the web refuses: malformed, oversized, unknown version', async (t) => {
   const { native, web, outbox } = await load()
   await reset()
   const good = sample(outbox)[1]
+  const old = legacy({ ...good, id: '00000000000000ee' }, B + ':3', 'resposta antiga')
   const bad = [
-    { ...good, id: '0000000000000001', text: 'x'.repeat(outbox.MAX_TEXT + 1) },
-    { ...good, id: '0000000000000002', text: '' },
-    { ...good, id: '0000000000000003', text: 'bidi ‮' },
+    { ...old, id: '0000000000000001', text: 'x'.repeat(outbox.MAX_TEXT + 1) },
+    { ...old, id: '0000000000000002', text: '' },
+    { ...old, id: '0000000000000003', text: 'bidi ‮' },
     { ...good, id: '0000000000000004', author: 'A'.repeat(64) },
     { ...good, id: '0000000000000005', association: 'nope' },
     { ...good, id: 'short' },
     { ...good, id: '0000000000000006', kind: 'quote' },
-    { ...good, id: '0000000000000007', kind: 'post', to: B + ':1' },
-    { ...good, id: '0000000000000008', to: B + ':0' },
-    { ...good, id: '0000000000000009', v: 2 },
+    { ...old, id: '0000000000000007', kind: 'post', to: B + ':1' },
+    { ...old, id: '0000000000000008', to: B + ':0' },
+    { ...good, id: '0000000000000009', v: 3 },
+    { ...good, id: '000000000000000d', box: 'curta' },
+    { ...good, id: '000000000000000e', box: undefined },
     { ...good, id: '000000000000000a', state: 'sent' },
     { ...good, id: '000000000000000b', writtenAt: 'ontem' },
     { ...good, id: '000000000000000c', lastError: null },
     null,
     'texto'
   ]
-  const text = JSON.stringify({ v: 1, items: [...bad, good] })
+  const text = JSON.stringify({ v: 2, items: [...bad, old, good] })
   files().set(PATH, text)
   storage.set(WEB_KEY, text)
-  t.alike(native.loadOutbox(), [good])
+  t.alike(native.loadOutbox(), [old, good])
   t.alike(native.loadOutbox(), web.loadOutbox())
 
-  for (const whole of ['{"v":2,"items":[]}', 'not json', '[]', 'null', '{"v":1,"items":{}}']) {
+  for (const whole of [JSON.stringify({ v: 3, items: [good] }), 'not json', '[]', 'null', '{"v":1,"items":{}}']) {
     files().set(PATH, whole)
     storage.set(WEB_KEY, whole)
     t.alike(native.loadOutbox(), [], 'whole file refused: ' + whole)

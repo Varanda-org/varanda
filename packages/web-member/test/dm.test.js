@@ -616,7 +616,10 @@ function engineWithDmLink (link) {
   const id = require.resolve('../lib/dm')
   const cached = require.cache[id]
   try {
-    transport.openDmLink = async () => link
+    transport.openDmLink = async () => {
+      if (link.offline) throw new Error('offline')
+      return link
+    }
     delete require.cache[id]
     return require('../lib/dm').createDmEngine
   } finally {
@@ -1445,6 +1448,46 @@ test('dm.react between two nodes: one pull files a reaction and a message, peers
   t.alike((await B2.web.request('dm.thread', { peer: A.key })).messages[0].reactions, [{ emoji: '\u2764\ufe0f', mine: false }, { emoji: '\u{1f525}', mine: true }], 'own reaction on the other device')
 })
 
+test('dm.react: two devices of one passkey racing on the same rev converge, and the next op wins everywhere', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url)
+  const B = await memberNode(t, assoc, seeder.url)
+  await copyDiary(A, B)
+  await copyDiary(B, A)
+  const first = await A.web.request('dm.send', { to: B.key, text: 'primeira' })
+  const B2 = await memberNode(t, assoc, seeder.url, { keyPair: B.keyPair, prf: B.prf, enable: false })
+  // The second device takes half of B's stamps (sealed under the passkey's
+  // local key, so they open on both) and B's enabled key generation, as a
+  // device that has read B's diary would: this one never enabled.
+  await store.writeDmKey(B2.storage, (await store.readDmKey(B.storage)).gen)
+  await copyDiary(A, B2)
+  const w = await store.readDmStamps(B.storage)
+  const half = Math.floor(w.items.length / 2)
+  await store.writeDmStamps(B2.storage, { items: w.items.slice(0, half), kids: w.kids })
+  await store.writeDmStamps(B.storage, { items: w.items.slice(half), kids: w.kids })
+  await B.web.request('dm.pull')
+  await B2.web.request('dm.pull')
+  const target = { from: A.key, id: first.id }
+  const mine = async (n, peer) => (await n.web.request('dm.thread', { peer })).messages[0].reactions
+  // Neither device has seen the other's op: both sign rev 1.
+  await B.web.request('dm.react', { to: A.key, target, emoji: '\u{1f44d}' })
+  await B2.web.request('dm.react', { to: A.key, target, emoji: '\u2764\ufe0f' })
+  for (const n of [A, B, B2]) await n.web.request('dm.pull')
+  const onA = await mine(A, B.key)
+  t.is(onA.length, 1, 'one reaction per person')
+  t.ok(['\u{1f44d}', '\u2764\ufe0f'].includes(onA[0].emoji))
+  t.alike(await mine(B, A.key), [{ emoji: onA[0].emoji, mine: true }], 'the tie goes to the same op on every device')
+  t.alike(await mine(B2, A.key), [{ emoji: onA[0].emoji, mine: true }])
+  // A device that has filed the other's op picks a rev past both.
+  await B2.web.request('dm.react', { to: A.key, target, emoji: '\u{1f602}' })
+  for (const n of [A, B]) await n.web.request('dm.pull')
+  t.alike(await mine(A, B.key), [{ emoji: '\u{1f602}', mine: false }], 'the newer op wins on the peer')
+  t.alike(await mine(B, A.key), [{ emoji: '\u{1f602}', mine: true }], 'and on the racing device')
+  t.alike(await mine(B2, A.key), [{ emoji: '\u{1f602}', mine: true }])
+})
+
 test('dm.react between two nodes: the reaction names the message digest both sides store; a message reusing the id on a device without the history does not show it', async (t) => {
   t.timeout(240000)
   const assoc = generateAssociationKeyPair()
@@ -1642,8 +1685,20 @@ test('a reaction drop to a Página is dropped, never filed, and the pull goes on
   await C.web.request('dm.pull')
   t.alike((await C.web.request('dm.thread', { peer: P })).messages.map((x) => x.text), ['da página'])
 
-  // The node does not know a Página key: the app hides reactions there.
-  t.alike(await C.web.request('dm.react', { to: P, target: { from: P, id: draft.id }, emoji: '\u{1f44d}' }), { ok: true })
+  // C holds the Página's diary: the node refuses, before anything is spent.
+  const wallet0 = (await store.readDmStamps(C.storage)).items.length
+  const refused = await errorOf(C.web.request('dm.react', { to: P, target: { from: P, id: draft.id }, emoji: '\u{1f44d}' }))
+  t.is(refused && refused.message, 'conversas com uma Página não têm reações')
+  t.absent(refused && refused.uncertain, 'nothing was sent')
+  t.is((await store.readDmStamps(C.storage)).items.length, wallet0, 'no stamp spent')
+  // A node without that diary cannot tell: a reaction drop it would send is
+  // put by hand here, with one of C's stamps.
+  const key = await dmLocalKeyFromPrf(C.prf)
+  const w = await store.readDmStamps(C.storage)
+  const stamp = { kid: w.items[0].kid, ...gc.openRecord({ nonce: w.items[0].nonce, box: w.items[0].box }, key) }
+  await store.writeDmStamps(C.storage, { items: w.items.slice(1), kids: w.kids })
+  const rx = dmCore.buildInner({ kind: 'react', id: dmCore.newMessageId(), at: new Date().toISOString(), to: P, target: { from: P, id: draft.id, digest: 'ab'.repeat(32) }, emoji: '\u{1f44d}', rev: 1, cert: createCert({ member: C.key }, assoc) }, C.keyPair)
+  t.ok(seeder.pool.submit(dmCore.encodeDrop({ dropId: dmCore.newDropId(), kid: b4a.from(stamp.kid, 'hex'), rsaSig: b4a.from(stamp.sig, 'base64'), token: b4a.from(stamp.token, 'hex'), sealed: dmCore.sealInner(rx, made.box) })), 'the pool takes the reaction drop')
   await C.web.request('dm.send', { to: P, text: 'depois da reação' })
   await A.web.request('dm.pull')
   const rows = (await A.web.request('dm.thread', { page: P, peer: C.key })).messages
@@ -1701,4 +1756,201 @@ test('dm.react: going back to an emoji whose op is still pending makes a newer o
   t.alike(await react('\u{1f44d}'), { ok: true })
   t.is(await wallet(storage), before - 2, 'a new op, not the old one resumed')
   t.alike((await engine.thread(own, { peer })).messages[0].reactions, [{ emoji: '\u{1f44d}', mine: true }], 'the newest rev wins')
+})
+
+const reactPending = async (storage) => ((await storage.readJson('dmReactPending')) || { items: [] }).items
+
+// Replaces the wallet with n fresh stamps sealed under the engine's local key.
+async function refill (s, n) {
+  const sealer = await opener(s.prf)
+  const kid = 'ab'.repeat(8)
+  await store.writeDmStamps(s.storage, { kids: [kid], items: Array.from({ length: n }, () => ({ kid, ...sealer.seal({ token: hex(crypto.randomBytes(32)), sig: b4a.toString(b4a.alloc(dmCore.DROP.SIG_BYTES), 'base64') }) })) })
+}
+
+// A new engine on the same storage and link (a reload), unlocked again.
+async function reloaded (t, s) {
+  await s.engine.close()
+  const engine = engineWithDmLink(s.link)({ storage: s.storage, association: s.association, emit: (name, data) => s.calls.push([name, data]) })
+  t.teardown(() => engine.close(), { force: true })
+  await engine.unlock(s.prf)
+  return engine
+}
+
+test('dm.react: an op whose link did not open survives a reload, sealed, and goes out once on the user retry with no new stamp', async (t) => {
+  const s = await sendingEngine(t, { stamps: 4 })
+  const { storage, link, own, kp, peer, recipientBox } = s
+  const puts = () => s.calls.filter((c) => c[0] === 'put').length
+  const sent = await s.send()
+  const target = { from: own, id: sent.id }
+  const react = (engine, emoji) => engine.react(own, kp, { to: peer, target, emoji }, recipientBox)
+  link.offline = true
+  const err = await errorOf(react(s.engine, '\u{1f44d}'))
+  t.is(err && err.message, 'sem conexão com o semeador')
+  t.is(puts(), 2, 'nothing put')
+  t.is(await wallet(storage), 0, 'its two stamps are in the op')
+  const items = await reactPending(storage)
+  t.is(items.length, 1, 'stored')
+  t.absent(JSON.stringify(items).includes(sent.id), 'no target in clear')
+  t.absent(JSON.stringify(items).includes(peer), 'no peer in clear')
+  const stranger = await opener(crypto.randomBytes(32))
+  t.ok(items.length === 1 && stranger.open(items[0].meta) === null, 'another local key cannot open it')
+
+  const engine = await reloaded(t, s)
+  link.offline = false
+  await engine.idle()
+  t.is(puts(), 2, 'never put on its own after the reload')
+  t.alike(await react(engine, '\u{1f44d}'), { ok: true }, 'the user retry')
+  t.is(puts(), 4, 'its two drops, once')
+  t.is(await wallet(storage), 0, 'no new stamp (none left to spend)')
+  t.alike((await engine.thread(own, { peer })).messages[0].reactions, [{ emoji: '\u{1f44d}', mine: true }])
+  t.is(await storage.readJson('dmReactPending'), null, 'sent: gone from kv')
+  t.alike(await react(engine, '\u{1f44d}'), { ok: true })
+  t.is(puts(), 4, 'a no-op from then on')
+})
+
+test('dm.react: after a lost self-copy ack and a reload, only the user retry puts the self copy, with the same bytes', async (t) => {
+  const s = await sendingEngine(t, { stamps: 4 })
+  const sent = await s.send()
+  const target = { from: s.own, id: sent.id }
+  const react = (engine, emoji) => engine.react(s.own, s.kp, { to: s.peer, target, emoji }, s.recipientBox)
+  const put = s.link.put
+  const putBytes = []
+  s.link.put = async (bytes) => {
+    putBytes.push(bytes)
+    if (putBytes.length === 2) throw new Error('lost ack')
+    return put(bytes)
+  }
+  const err = await errorOf(react(s.engine, '\u{1f44d}'))
+  t.is(err && err.uncertain, true)
+  const engine = await reloaded(t, s)
+  await engine.idle()
+  t.is(putBytes.length, 2, 'not put again on its own')
+  t.alike(await react(engine, '\u{1f44d}'), { ok: true }, 'the pending op beats the no-op rule after the reload')
+  t.is(putBytes.length, 3, 'only the self copy')
+  t.ok(b4a.equals(putBytes[1], putBytes[2]), 'the same bytes')
+  t.is(await s.storage.readJson('dmReactPending'), null)
+})
+
+test('dm.react: a newer emoji before the reload replaces the stored op; the older one is gone', async (t) => {
+  const s = await sendingEngine(t, { stamps: 6 })
+  const puts = () => s.calls.filter((c) => c[0] === 'put').length
+  const sent = await s.send()
+  const target = { from: s.own, id: sent.id }
+  const react = (engine, emoji) => engine.react(s.own, s.kp, { to: s.peer, target, emoji }, s.recipientBox)
+  s.link.offline = true
+  t.is((await errorOf(react(s.engine, '\u{1f44d}'))).message, 'sem conexão com o semeador')
+  t.is((await errorOf(react(s.engine, '❤️'))).message, 'sem conexão com o semeador')
+  t.is((await reactPending(s.storage)).length, 1, 'one op per message')
+  const engine = await reloaded(t, s)
+  s.link.offline = false
+  t.alike(await react(engine, '❤️'), { ok: true })
+  t.is(puts(), 4)
+  t.alike((await engine.thread(s.own, { peer: s.peer })).messages[0].reactions, [{ emoji: '❤️', mine: true }])
+  const err = await errorOf(react(engine, '\u{1f44d}'))
+  t.is(err && err.message, 'o limite de envio de hoje acabou', 'the replaced op is not pending: a new op needs stamps')
+  t.is(puts(), 4)
+})
+
+test('dm.react: a lock keeps the stored op sealed for the next unlock; a reset deletes it', async (t) => {
+  const s = await sendingEngine(t, { stamps: 6 })
+  const puts = () => s.calls.filter((c) => c[0] === 'put').length
+  const sent = await s.send()
+  const target = { from: s.own, id: sent.id }
+  const react = (emoji) => s.engine.react(s.own, s.kp, { to: s.peer, target, emoji }, s.recipientBox)
+  s.link.offline = true
+  await errorOf(react('\u{1f44d}'))
+  s.engine.lock()
+  t.is((await reactPending(s.storage)).length, 1, 'kept, like the ctl queue')
+  t.is((await errorOf(react('\u{1f44d}'))).message, LOCKED)
+  await s.engine.unlock(s.prf)
+  s.link.offline = false
+  t.alike(await react('\u{1f44d}'), { ok: true })
+  t.is(puts(), 4)
+  t.is(await wallet(s.storage), 2, 'no new stamp')
+
+  s.link.offline = true
+  await errorOf(react('❤️'))
+  t.is((await reactPending(s.storage)).length, 1)
+  await s.engine.idle()
+  await store.deleteDmData(s.storage)
+  t.is(await s.storage.readJson('dmReactPending'), null, 'a reset deletes it')
+})
+
+test('dm.react: kv keeps at most 32 pending ops, dropping the oldest', async (t) => {
+  let local = null
+  // The wallet holds at most 64 stamps: 32 ops, then a refill for the 33rd.
+  const s = await sendingEngine(t, { stamps: 64, options: { createStore: (o) => (local = createDmStore(o)) } })
+  const ids = []
+  for (let i = 0; i < 33; i++) {
+    const id = i.toString(16).padStart(32, '0')
+    ids.push(id)
+    await local.append([{ t: 'msg', id, peer: s.peer, from: s.peer, text: 'm' + i, replyTo: null, at: '2026-11-03T09:00:00.000Z', mine: false, digest: hex(crypto.randomBytes(32)), filedAt: local.nextFiled() }])
+  }
+  const react = (engine, id) => engine.react(s.own, s.kp, { to: s.peer, target: { from: s.peer, id }, emoji: '\u{1f44d}' }, s.recipientBox)
+  s.link.offline = true
+  for (const id of ids) {
+    if (id === ids[32]) await refill(s, 2)
+    t.is((await errorOf(react(s.engine, id))).message, 'sem conexão com o semeador')
+  }
+  t.is(await wallet(s.storage), 0)
+  t.is((await reactPending(s.storage)).length, 32)
+  const engine = await reloaded(t, s)
+  s.link.offline = false
+  t.is((await errorOf(react(engine, ids[0]))).message, 'o limite de envio de hoje acabou', 'the oldest was dropped')
+  t.alike(await react(engine, ids[32]), { ok: true }, 'the newest is still pending')
+  t.alike(await react(engine, ids[1]), { ok: true }, 'the second oldest too')
+})
+
+test('dm.react: a restore after a lock waits for a save still writing, so the last change before the lock is kept', async (t) => {
+  const s = await sendingEngine(t, { stamps: 6 })
+  const puts = () => s.calls.filter((c) => c[0] === 'put').length
+  const sent = await s.send()
+  const target = { from: s.own, id: sent.id }
+  const react = (emoji) => s.engine.react(s.own, s.kp, { to: s.peer, target, emoji }, s.recipientBox)
+  s.link.offline = true
+  t.is((await errorOf(react('\u{1f44d}'))).message, 'sem conexão com o semeador')
+  const writeJson = s.storage.writeJson
+  let release = null
+  s.storage.writeJson = async (key, value) => {
+    if (key === 'dmReactPending' && release === null) await new Promise((resolve) => { release = resolve })
+    return writeJson.call(s.storage, key, value)
+  }
+  const first = errorOf(react('❤️'))
+  await until(() => release !== null)
+  s.engine.lock()
+  await s.engine.unlock(s.prf)
+  const retry = errorOf(react('❤️'))
+  // Event-loop turns, not time: without the wait the restore reads kv here.
+  for (let i = 0; i < 50; i++) await new Promise((resolve) => setImmediate(resolve))
+  release()
+  const err = await retry
+  t.is(err && err.message, 'sem conexão com o semeador', 'the retry resumes the newest op, no new one')
+  await first
+  s.link.offline = false
+  t.alike(await react('❤️'), { ok: true })
+  t.is(puts(), 4, 'its two drops, once')
+  t.is(await wallet(s.storage), 0, 'no new stamp')
+  t.alike((await s.engine.thread(s.own, { peer: s.peer })).messages[0].reactions, [{ emoji: '❤️', mine: true }])
+})
+
+test('dm.react: stored ops are merged into a list already holding 32 pending sends, not dropped by the restore', async (t) => {
+  const s = await sendingEngine(t, { stamps: 4 })
+  const puts = () => s.calls.filter((c) => c[0] === 'put').length
+  const sent = await s.send()
+  const target = { from: s.own, id: sent.id }
+  const react = (engine, emoji) => engine.react(s.own, s.kp, { to: s.peer, target, emoji }, s.recipientBox)
+  s.link.offline = true
+  t.is((await errorOf(react(s.engine, '\u{1f44d}'))).message, 'sem conexão com o semeador')
+  const engine = await reloaded(t, s)
+  await refill(s, 64)
+  for (let i = 0; i < 32; i++) {
+    const err = await errorOf(engine.send(s.own, s.kp, { to: s.peer, text: 'p' + i }, s.recipientBox))
+    t.is(err && err.message, 'sem conexão com o semeador')
+  }
+  t.is(await wallet(s.storage), 0, '32 pending sends hold every stamp')
+  s.link.offline = false
+  const err = await errorOf(react(engine, '\u{1f44d}'))
+  t.is(err, null, 'the stored op is still pending')
+  t.is(puts(), 4, 'its two drops, once')
+  t.is((await reactPending(s.storage)).length, 0)
 })

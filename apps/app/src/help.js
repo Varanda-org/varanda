@@ -10,7 +10,7 @@ export const HELP = Object.freeze({
     paragraphs: Object.freeze([
       'Aqui aparecem as publicações de quem você segue, da mais nova para a mais antiga.',
       'Quem você não segue aparece na Espiadinha.',
-      'Os números de curtidas e respostas podem chegar incompletos. Eles não mudam o que foi publicado.'
+      'Os números de curtidas e comentários podem chegar incompletos. Eles não mudam o que foi publicado.'
     ])
   }),
   espiadinha: Object.freeze({

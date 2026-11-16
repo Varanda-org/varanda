@@ -46,7 +46,7 @@
 //   plainCard: true in a message request, where nothing downloads by
 //     itself: the card stays a plain LinkCard and the text keeps its link.
 
-import { cloneElement, isValidElement, useMemo, useState } from 'react'
+import { cloneElement, isValidElement, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { LABELS } from '../dm'
@@ -57,6 +57,7 @@ import { textWithoutHrefs } from '../links'
 import { embedOf, sameMusicPage } from '../musicEmbed'
 import { hasRich, parseRich } from '../richText'
 import { ActionsSheet, usableActions } from './ActionsSheet'
+import { useChatSheet } from './ChatSheetHost'
 import { chatMediaBlock } from './ChatMedia'
 import { Icon } from './Icon'
 import { LinkCard } from './LinkCard'
@@ -98,10 +99,31 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
   const styles = useStyles(makeStyles)
   const { colors, scheme } = useTheme()
   const { width: screen } = useWindowDimensions()
-  const [open, setOpen] = useState(false)
+  // Under a chat list's ChatSheetProvider the sheet is the list's, not the
+  // bubble's; without one (the Vitrine, a lone bubble) the bubble keeps its own.
+  const host = useChatSheet()
+  const [localOpen, setLocalOpen] = useState(false)
+  const owner = useRef({}).current
   const [hover, setHover] = useState(false)
   const [focus, setFocus] = useState(false)
   const rows = usableActions(actions)
+  const sheet = { title: actionsTitle, actions: rows, header: actionsHeader }
+  const sheetRef = useRef(sheet)
+  sheetRef.current = sheet
+  const hostShown = useRef(false)
+  const setOpen = (on) => {
+    if (host === null) setLocalOpen(on)
+    else if (on) {
+      hostShown.current = true
+      host.show(owner, sheetRef.current)
+    } else host.close()
+  }
+  // While this bubble's actions are up in the list's sheet, each render hands
+  // the fresh ones over (the host ignores a bubble that no longer owns it).
+  useEffect(() => {
+    if (host !== null && hostShown.current) host.refresh(owner, sheetRef.current)
+  }, [host, rows, actionsTitle, actionsHeader])
+  const open = localOpen
   const hasAbove = shape === 'middle' || shape === 'last'
   const hasBelow = shape === 'first' || shape === 'middle'
   const last = !hasBelow
@@ -164,8 +186,9 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
               and the screen. Photo and voice bubbles keep their own width. */}
           <View style={hug ? null : styles.stack}>
             <Pressable
-              accessibilityRole={rows.length > 0 ? 'button' : undefined}
-              accessibilityHint={rows.length > 0 ? 'toque longo para ações' : undefined}
+              // No button role: the bubble holds links, a reply preview and
+              // cards that are buttons themselves, and a button inside a button
+              // is unreachable for a screen reader. The chevron is the button.
               accessibilityActions={rows.map((a, i) => ({ name: 'a' + i, label: a.label }))}
               onAccessibilityAction={(e) => {
                 const at = e && e.nativeEvent ? Number(String(e.nativeEvent.actionName).slice(1)) : -1
@@ -175,7 +198,7 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
               onHoverIn={rows.length > 0 ? () => setHover(true) : undefined}
               onHoverOut={rows.length > 0 ? () => setHover(false) : undefined}
               delayLongPress={350}
-              style={[styles.bubble, { backgroundColor: fill }, !mine && styles.bubbleTheirs, corners, hug]}
+              style={[styles.bubble, { backgroundColor: fill }, !mine && styles.bubbleTheirs, corners, hug, status === 'uncertain' && styles.faded]}
             >
               {/* The verified @nome rides beside the free-form name, so a member who
                   copies someone else's display name still shows their own handle. */}
@@ -198,7 +221,7 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
               {quote
                 ? (
                   <View style={[styles.quote, rows.length > 0 && styles.quoteWithChevron]}>
-                    <ReplyPreview name={quote.name} handle={quote.handle} text={quote.text} senderKey={quote.senderKey} mine={quote.mine} onPress={openQuote} onLongPress={rows.length > 0 ? () => setOpen(true) : undefined} />
+                    <ReplyPreview name={quote.name} handle={quote.handle} text={quote.text} senderKey={quote.senderKey} mine={quote.mine} onMine={!!mine} onPress={openQuote} onLongPress={rows.length > 0 ? () => setOpen(true) : undefined} />
                   </View>
                   )
                 : null}
@@ -269,7 +292,7 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
           {below || null}
         </View>
       </View>
-      {rows.length > 0
+      {host === null && rows.length > 0
         ? <ActionsSheet open={open} onClose={() => setOpen(false)} title={actionsTitle} actions={rows} header={actionsHeader} />
         : null}
     </View>
@@ -294,6 +317,8 @@ const makeStyles = (colors) => StyleSheet.create({
     paddingBottom: 7,
     minWidth: 64
   },
+  // An unconfirmed send: dimmed, still readable.
+  faded: { opacity: 0.7 },
   bubbleTheirs: { borderWidth: StyleSheet.hairlineWidth, borderColor: colors.line },
   name: { ...type.counter, marginBottom: 2 },
   handle: { fontWeight: '400', color: colors.soft },

@@ -3,7 +3,7 @@ import { Image, StyleSheet, View } from 'react-native'
 import { isKey } from '@varanda/rpc'
 import { MOMENT_GONE } from '../momentReaction'
 import { sharedPreviews } from '../momentPreviews'
-import { useNode } from '../node'
+import { useNodeHandle } from '../node'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { Soft } from '../ui'
 import { Icon } from './Icon'
@@ -11,7 +11,7 @@ import { useStyles, useTheme } from './ThemeProvider'
 import { radius } from './theme'
 
 export function MomentReactionPreview ({ author, seq, identity, folder }) {
-  const { request, media } = useNode()
+  const { request, media } = useNodeHandle()
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const key = JSON.stringify([identity, author, seq, folder])

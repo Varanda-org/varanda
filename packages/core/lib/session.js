@@ -841,6 +841,9 @@ function createSession ({
     'testimonial.delete': serial(async () => {
       throw new UsageError(PEEK_WEB_ONLY)
     }),
+    'testimonial.decide': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
 
     // Recados read the page owner's wall through the seeder index and
     // diary.peek (docs/rpc.md): refused the same way, nothing opened.

@@ -66,7 +66,7 @@ test('ActionsSheet ignores late header presses after dismissal and resets on ope
   const flush = src.slice(src.indexOf('const flush ='), src.indexOf('useEffect(() => {', src.indexOf('const flush =')))
   t.ok(/pending\.current = null\s+if \(!shownNow\.current\) gone\.current = true\s+if \(typeof fn === 'function'\) fn\(\)/.test(flush), 'flush marks dismissal even without an action, before calling it')
   t.ok(src.includes('shownNow.current = shown'), 'a late iOS dismissal after reopening does not mark the new opening gone')
-  t.ok(/if \(shown\) \{\s+gone\.current = false\s+return undefined\s+\}/.test(src), 'opening clears the dismissal guard')
+  t.ok(/if \(shown\) \{\s+gone\.current = false\s+(?:\/\/[^\n]*\s+)*if \(pending\.current !== null\) flush\(\)\s+return undefined\s+\}/.test(src), 'opening clears the dismissal guard and runs an action pressed during the slide out')
   const closeThen = src.slice(src.indexOf('const closeThen ='), src.indexOf('const run ='))
   t.ok(/if \(gone\.current \|\| pending\.current !== null\) return\s+pending\.current = fn/.test(closeThen), 'late handlers cannot leave a stale pending action')
   t.absent(closeThen.includes('shown'), 'row taps still work during slide-out until flush')

@@ -1264,6 +1264,75 @@ test('indexEngagers: likers and reposters of a served post without blocked, drop
   t.is(seeder.indexEngagers('likes', A, 2), null, 'a post not indexed')
 })
 
+test('indexRoda: root, top and the flattened subtree of a reply, without blocked or dropped authors; a cut walk is not complete', async (t) => {
+  const { seeder, diary } = scanFixture()
+  const [A, B, C, D] = [1, 2, 3, 4].map(authorKey)
+  const records = {
+    [A]: [postRecord({ text: 'raiz', at: at(0) })],
+    [B]: [
+      postRecord({ text: 'topo', at: at(1), replyTo: { author: A, seq: 1 } }),
+      postRecord({ text: 'b2', at: at(2), replyTo: { author: B, seq: 1 } })
+    ],
+    [C]: [
+      postRecord({ text: 'c1', at: at(3), replyTo: { author: B, seq: 2 } }),
+      postRecord({ text: 'c2', at: at(4), replyTo: { author: B, seq: 1 } })
+    ],
+    // RODA_SCAN + 1 direct replies to the top: the walk down stops at the bound.
+    [D]: Array.from({ length: 1001 }, (_, i) => postRecord({ text: 'd' + i, at: at(10 + i), replyTo: { author: A, seq: 2 } }))
+  }
+  records[A].push(postRecord({ text: 'topo2', at: at(5), replyTo: { author: A, seq: 1 } }))
+  const entries = Object.entries(records).map(([key, list]) => [key, diary(key, list.length, (seq) => list[seq - 1])])
+  for (const [key, entry] of entries) seeder._indexDiary(key, entry)
+  await settleIndex(seeder)
+
+  const page = seeder.indexRoda(C, 1)
+  t.alike(Object.keys(page), ['ref', 'root', 'top', 'items', 'next', 'total', 'authors', 'indexing', 'complete'], 'exact shape, no truncated field')
+  t.alike(page, {
+    ref: ref(C, 1),
+    root: ref(A, 1),
+    top: ref(B, 1),
+    items: [{ ref: ref(B, 2), to: ref(B, 1) }, { ref: ref(C, 1), to: ref(B, 2) }, { ref: ref(C, 2), to: ref(B, 1) }],
+    next: null,
+    total: 3,
+    authors: { [C]: { profileSeq: null, usernameSeq: null }, [A]: { profileSeq: null, usernameSeq: null }, [B]: { profileSeq: null, usernameSeq: null } },
+    indexing: false,
+    complete: true
+  })
+  t.alike(seeder.indexRoda(B, 1), { ...page, ref: ref(B, 1), authors: { [B]: page.authors[B], [A]: page.authors[A], [C]: page.authors[C] } }, 'the top answers the same roda')
+
+  seeder._isBlocked = (hex) => hex === C
+  t.is(seeder.indexRoda(C, 1), null, 'a blocked asked author')
+  const blocked = seeder.indexRoda(B, 2)
+  t.alike(blocked.items, [{ ref: ref(B, 2), to: ref(B, 1) }], "the blocked author's replies are absent")
+  t.is(blocked.total, 1)
+  t.absent(C in blocked.authors)
+  seeder._isBlocked = (hex) => hex === B
+  t.is(seeder.indexRoda(C, 1), null, 'a blocked top author')
+  seeder._isBlocked = (hex) => hex === A
+  t.is(seeder.indexRoda(C, 1), null, 'a blocked root author')
+  seeder._isBlocked = () => false
+
+  const cut = seeder.indexRoda(A, 2)
+  t.is(cut.top, ref(A, 2))
+  t.is(cut.total, 1000)
+  t.is(cut.items.length, 50)
+  t.ok(cut.next !== null)
+  t.is(cut.complete, false, 'a walk cut at the bound is not complete')
+  t.is(seeder.indexRoda(A, 2, cut.next).items.length, 50)
+
+  t.is(seeder.indexRoda(A, 1), null, 'a root')
+  t.is(seeder.indexRoda(C, 0), null)
+  t.is(seeder.indexRoda(C, 9), null, 'a post not indexed')
+  t.is(seeder.indexRoda(C, 1, 'nope'), null, 'malformed cursor')
+  t.is(seeder.indexRoda(authorKey(99), 1), null, 'an author not served')
+  t.is(seeder.indexRoda('x', 1), null, 'a malformed author')
+
+  seeder._drop(C, 'blocked')
+  await seeder._drops.get(C)
+  t.is(seeder.indexRoda(C, 1), null, 'a dropped author')
+  t.alike(seeder.indexRoda(B, 1).items, [{ ref: ref(B, 2), to: ref(B, 1) }])
+})
+
 test('200k reply edges: cursor pages and counts have bounded visibility work and latency', (t) => {
   const ix = createEngagementIndex()
   const owner = authorKey(0)

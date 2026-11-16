@@ -131,7 +131,7 @@ export function createCoverCache ({ load, max = 48, parallel = 3 } = {}) {
     }
   }
 
-  // A settled cover only, or null: never loads, queues or waits. For a sticker
+  // A settled cover only, or null: never loads, queues or waits. For a caller
   // that may show a cover already paid for but must not ask for one.
   function peek (kind, id, session) {
     if (!session || typeof session !== 'object') return null

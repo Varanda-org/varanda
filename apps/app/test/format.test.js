@@ -14,10 +14,12 @@ test('shortKey lowercases the key', async (t) => {
 
 test('avatarColorOf', async (t) => {
   const { avatarColorOf } = await load()
-  t.is(avatarColorOf('e905a4'), 3)
-  t.is(avatarColorOf('16aa'), 2)
-  t.is(avatarColorOf('0f11'), 0)
-  t.is(avatarColorOf('eb22'), 0)
+  t.is(avatarColorOf('e905a4'), 0xe9 % 8)
+  t.is(avatarColorOf('16aa'), 0x16 % 8)
+  t.is(avatarColorOf('0f11'), 0x0f % 8)
+  t.is(avatarColorOf('eb22'), 0xeb % 8)
+  t.is(avatarColorOf('07'), 7)
+  t.is(avatarColorOf('08'), 0)
   t.is(avatarColorOf('zz'), 0)
 })
 

@@ -25,8 +25,8 @@ export function JumpToEnd ({ count = 0, onPress }) {
 }
 
 const makeStyles = (colors) => StyleSheet.create({
-  anchor: { height: 0, zIndex: 2, alignItems: 'flex-end' },
-  button: { position: 'absolute', right: 16, bottom: 12, width: 36, height: 36, borderRadius: 18, borderWidth: 1, borderColor: colors.outline, backgroundColor: colors.card, alignItems: 'center', justifyContent: 'center' },
+  anchor: { height: 48, marginTop: -48, zIndex: 2, alignItems: 'flex-end', justifyContent: 'flex-end' },
+  button: { marginRight: 16, marginBottom: 12, width: 36, height: 36, borderRadius: 18, borderWidth: 1, borderColor: colors.outline, backgroundColor: colors.card, alignItems: 'center', justifyContent: 'center' },
   dot: { position: 'absolute', top: 0, right: 0, width: 8, height: 8, borderRadius: 4, backgroundColor: colors.accent },
   pressed: { opacity: 0.65 }
 })

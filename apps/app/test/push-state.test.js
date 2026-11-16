@@ -25,7 +25,7 @@ test('the fixed texts are the approved Portuguese', async (t) => {
   t.is(m.PUSH_LABEL, 'Avisos no aparelho')
   t.is(m.PUSH_ON, 'Ativar avisos neste aparelho')
   t.is(m.PUSH_OFF, 'Desligar avisos neste aparelho')
-  t.is(m.PUSH_HINT, 'Receba um aviso quando alguém seguir você, responder, curtir ou republicar o que você publicou, e quando chegar um convite pra sua varanda. Mostra o nome de quem fez a ação. Só neste aparelho. Um aviso pode levar até cerca de um minuto para chegar, de propósito, para que o horário dele não revele o que você acabou de receber.')
+  t.is(m.PUSH_HINT, 'Receba um aviso quando alguém seguir você, comentar, curtir ou republicar o que você publicou, e quando chegar um convite pra sua varanda. Mostra o nome de quem fez a ação. Só neste aparelho. Um aviso pode levar até cerca de um minuto para chegar, de propósito, para que o horário dele não revele o que você acabou de receber.')
   t.is(m.PUSH_DENIED, 'Os avisos do sistema estão desligados neste aparelho.')
   t.is(m.PUSH_UNAVAILABLE, 'Os avisos ainda não estão disponíveis nesta associação.')
   t.is(m.PUSH_UNSUPPORTED, 'No iPhone e no iPad, os avisos só funcionam com o Varanda na Tela de Início.')

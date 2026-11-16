@@ -25,6 +25,7 @@ import {
 import { Soft, useBottomPad, useNow } from '../ui'
 import { OfflineNote } from '../ui/OfflineNote'
 import { PostRow } from '../ui/PostRow'
+import { PostSheetProvider } from '../ui/PostSheetHost'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
@@ -102,7 +103,12 @@ function GoneRow ({ row, onUnsave }) {
   )
 }
 
-export default function Salvos ({ onBack, onOpenThread, onOpenMember, onToast }) {
+// One actions sheet for the whole list instead of two per row.
+export default function Salvos (props) {
+  return <PostSheetProvider><SalvosList {...props} /></PostSheetProvider>
+}
+
+function SalvosList ({ onBack, onOpenThread, onOpenMember, onToast }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const saved = useSaved()

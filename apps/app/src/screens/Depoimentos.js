@@ -2,9 +2,10 @@
 // above the tabs (App.js stack entry { screen: 'depoimentos', key: owner }).
 // For the own key the screen also lists the ones waiting for approval
 // (testimonial.pending), each with 'Mostrar no perfil' (testimonial.show)
-// and 'Agora não' (a hide on this device only, src/testimonialHide.js: no
-// record), and 'Enviados', the own live testimonial blocks (sentRows) with
-// 'Retirar' (testimonial.delete of that block).
+// 'Guardar só para mim' and 'Recusar' (testimonial.decide, synced across the
+// member's devices; the kept ones list under 'Guardados'), and 'Enviados',
+// the own live testimonial blocks (sentRows) with 'Retirar'
+// (testimonial.delete of that block).
 //
 // The shown rows come from the seeder index (pointers only) and are read
 // with diary.peek: the node verifies every show against the live writer
@@ -24,9 +25,9 @@ import { LOG_LIMIT_MAX, PEEK_SEQS_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
 import { fetchTestimonials } from '../indexClient'
-import { pendingIncomplete, pendingRows, rowsFrom, sentRows } from '../testimonials'
-import { visiblePending } from '../testimonialHide'
-import { hideTestimonial, loadTestimonialHidden } from '../testimonialHideStore'
+import { applyDecisions, keptRows, settleOverrides, pendingIncomplete, pendingRows, rowsFrom, sentMeta, sentRows } from '../testimonials'
+import { migrateHidden } from '../testimonialHide'
+import { clearTestimonialHidden, loadTestimonialHidden } from '../testimonialHideStore'
 import { relativeTime } from '../format'
 import { diaryPeekSlots } from '../engagement'
 import { whoOf } from '../who'
@@ -48,7 +49,7 @@ export const TESTIMONIAL_TEXT_MAX = 400
 // The field's maxLength counts UTF-16 units on the web: 400 code points take
 // up to 800 of them (emoji). The counter and Enviar enforce the real limit.
 export const TESTIMONIAL_FIELD_MAX = 2 * TESTIMONIAL_TEXT_MAX
-export const APPROVAL_NOTE = 'Só aparece no perfil depois que a pessoa aprovar.'
+export const APPROVAL_NOTE = 'Só aparece no perfil se a pessoa escolher mostrar. Você vê só que foi enviado.'
 // Own log pages read for 'Enviados' (LOG_LIMIT_MAX blocks each) per read:
 // the first load and each 'Ver mais'.
 const SENT_PAGES = 8
@@ -65,6 +66,8 @@ export const WRITE_HINT = 'Toque em ⋯ no perfil para escrever um depoimento.'
 export const WRITE_TITLE = 'Escrever depoimento'
 export const RETRACT_TITLE = 'Retirar depoimento?'
 export const REMOVE_TITLE = 'Remover do perfil?'
+export const DECLINE_TITLE = 'Recusar depoimento?'
+export const KEPT_NOTE = 'Só você vê. Quem escreveu não fica sabendo.'
 // The write sheet's counter turns to the warning colour from here.
 export const COUNTER_WARN = 380
 const UNAVAILABLE = 'Depoimentos indisponíveis agora.'
@@ -77,6 +80,8 @@ export const INCOMPLETE_NOTE = 'Alguns depoimentos podem faltar.'
 export const WRITE_UNCERTAIN = 'Não sabemos se o depoimento foi enviado. Confira em Enviados, no seu Diário.'
 
 const HEX64 = /^[0-9a-f]{64}$/
+// The legacy hide list moves to node decisions once per app session.
+let migrationStarted = false
 
 // A failure text for a mutating request: an uncertain one may have been
 // applied, so it says to check before trying again.
@@ -103,6 +108,10 @@ export function tabFooterKind ({ enabled, rowCount, failed, phase, incomplete })
 
 export function pendingLabel (n) {
   return 'Depoimentos para aprovar (' + n + ')'
+}
+
+export function keptLabel (n) {
+  return 'Depoimentos guardados (' + n + ')'
 }
 
 // Code points, as the node counts the 400 limit (not UTF-16 units).
@@ -132,6 +141,11 @@ export function retractBody (name) {
   return named(name) ? 'O depoimento para ' + name + ' deixa de valer e some do perfil da pessoa, se estiver lá.' : RETRACT_BODY
 }
 
+export function declineBody (name) {
+  const who = named(name) ? 'de ' + name : ''
+  return 'O depoimento ' + who + (who ? ' ' : '') + 'some da sua lista em todos os seus aparelhos. Quem escreveu não fica sabendo.'
+}
+
 export function removeBody (name) {
   return named(name) ? 'O depoimento de ' + name + ' deixa de aparecer no seu perfil.' : 'O depoimento deixa de aparecer no seu perfil.'
 }
@@ -145,9 +159,10 @@ export function emptyBody ({ own, canWrite }) {
 // The tab's rows, in order: on the own profile the pinned approval row
 // (N > 0) and 'Enviados'; a failed read that kept rows on screen, with its
 // retry; then every shown depoimento, newest first (rowsFrom's order).
-export function tabItems ({ rows, pendingCount = 0, own, failed = false, error = null, canOpen = false }) {
+export function tabItems ({ rows, pendingCount = 0, keptCount = 0, own, failed = false, error = null, canOpen = false }) {
   const items = []
   if (own && pendingCount > 0 && canOpen) items.push({ kind: 'link', key: 'l:pending', label: pendingLabel(pendingCount), icon: 'mensagem' })
+  if (own && keptCount > 0 && canOpen) items.push({ kind: 'link', key: 'l:kept', label: keptLabel(keptCount), icon: 'olho' })
   if (own && canOpen) items.push({ kind: 'link', key: 'l:sent', label: SENT_LABEL, icon: 'encaminhar' })
   const list = Array.isArray(rows) ? rows : []
   if (failed && list.length > 0) items.push({ kind: 'retry', key: 'e:shown', text: error })
@@ -278,7 +293,8 @@ async function readSentPages (request, start) {
 }
 
 // The data behind the profile tab or the screen. `withPending` (own key)
-// also reads testimonial.pending and the device hides; `withSent` the own
+// also reads testimonial.pending (the legacy device hide list is read only
+// once, for the migration into node decisions); `withSent` the own
 // sent blocks. Nothing runs unless the node is hosted.
 export function useTestimonials (owner, { ownKey = null, withPending = false, withSent = false, tick = 0, active = true } = {}) {
   const node = useNode()
@@ -293,7 +309,8 @@ export function useTestimonials (owner, { ownKey = null, withPending = false, wi
   const changed = useChanged()
   const [state, setState] = useState({ phase: 'idle', rows: [], index: null, error: null })
   const [pending, setPending] = useState({ rows: [], error: null, loaded: false })
-  const [hidden, setHidden] = useState([])
+  const [overrides, setOverrides] = useState(() => new Map())
+  const [decideError, setDecideError] = useState(null)
   const [sent, setSent] = useState({ rows: [], error: null, loaded: false, more: false, loadingMore: false })
   // Every own log page read so far (a delete on a newer page hides a block
   // on an older one) and the cursor of the next 'Ver mais'.
@@ -319,14 +336,32 @@ export function useTestimonials (owner, { ownKey = null, withPending = false, wi
     })
     const tasks = [shown]
     if (withPending) {
-      tasks.push(loadTestimonialHidden().then((list) => { if (live()) setHidden(list) }, () => {}))
       // After the shown reads (which settle either way): testimonial.pending
       // peeks the writers too, so it takes a diaryPeekSlots slot as well.
       tasks.push(shown.then(() => live() ? diaryPeekSlots.run(() => request('testimonial.pending', {})) : null).then((r) => {
         if (!live() || r === null) return
         const rows = pendingRows(r)
-        setPending({ rows, incomplete: pendingIncomplete(r), error: null, loaded: true })
+        const kept = keptRows(r)
+        setOverrides((m) => m.size === 0 ? m : settleOverrides(m, { pending: rows, kept }))
+        setPending({ rows, kept, incomplete: pendingIncomplete(r), error: null, loaded: true })
         resolve(rows.map((p) => p.from))
+        resolve(kept.map((p) => p.from))
+        // Once per app session, on a complete answer: the legacy per-device
+        // hides of this account's undecided items become node decisions,
+        // then every instance reads the lists again.
+        if (!migrationStarted && !pendingIncomplete(r)) {
+          migrationStarted = true
+          const allowed = new Set(rows.map((p) => p.from + ':' + p.seq))
+          let hadHidden = false
+          const loadList = async () => {
+            const list = await loadTestimonialHidden()
+            hadHidden = Array.isArray(list) && list.length > 0
+            return list
+          }
+          migrateHidden({ load: loadList, clear: clearTestimonialHidden, request, allowed }).then((n) => {
+            if (hadHidden || n > 0) testimonialsChanged()
+          }, () => {})
+        }
       }, (err) => {
         if (live()) setPending((p) => ({ ...p, error: errorText(err), loaded: true }))
       }))
@@ -374,13 +409,39 @@ export function useTestimonials (owner, { ownKey = null, withPending = false, wi
   useEffect(() => { load() }, [load, tick, changed, node.epoch])
   useEffect(() => () => { runRef.current++ }, [])
 
-  // 'Agora não': this device only. No request, no record.
-  const notNow = useCallback(async (row) => {
-    setHidden((list) => list.includes(row.ref) ? list : list.concat([row.ref]))
-    await hideTestimonial(row.ref)
-    // Every instance (the Diário's pinned row too) reads the hidden list again.
-    testimonialsChanged()
+  const setOverride = useCallback((ref, value) => {
+    setOverrides((m) => {
+      const next = new Map(m)
+      if (value === null) next.delete(ref)
+      else next.set(ref, value)
+      return next
+    })
   }, [])
+
+  // 'Guardar só para mim' / 'Recusar': one testimonial.decide, shown at once
+  // and dropped on failure. Never sent again by itself (an uncertain failure
+  // says to check first); the lists are read again after any outcome.
+  const decide = useCallback(async (row, decision, { rethrow = false } = {}) => {
+    setOverride(row.ref, decision)
+    setDecideError(null)
+    try {
+      await request('testimonial.decide', { from: row.from, seq: row.seq, state: decision })
+    } catch (err) {
+      setOverrides((m) => {
+        if (m.get(row.ref) !== decision) return m
+        const next = new Map(m)
+        next.delete(row.ref)
+        return next
+      })
+      if (rethrow) throw err
+      setDecideError(failureText(err))
+    } finally {
+      // With rethrow the confirm sheet's mutation notifies once itself.
+      if (!rethrow) testimonialsChanged()
+    }
+  }, [request])
+
+  const decided = applyDecisions({ pending: pending.rows, kept: pending.kept || [] }, overrides)
 
   return {
     enabled,
@@ -390,7 +451,10 @@ export function useTestimonials (owner, { ownKey = null, withPending = false, wi
     error: state.error,
     index: state.index,
     incomplete: state.incomplete === true,
-    pending: visiblePending(pending.rows, hidden),
+    pending: decided.pending,
+    kept: decided.kept,
+    decideError,
+    setOverride,
     pendingIncomplete: pending.incomplete === true,
     pendingError: pending.error,
     pendingLoaded: pending.loaded,
@@ -401,7 +465,7 @@ export function useTestimonials (owner, { ownKey = null, withPending = false, wi
     sentLoadingMore: sent.loadingMore === true,
     loadMoreSent,
     reload: load,
-    notNow
+    decide
   }
 }
 
@@ -560,7 +624,7 @@ export function useTestimonialTab ({ data, own, ownKey, ownerName, canWrite, onO
   // empty or shorter list read as everything.
   const failed = enabled && typeof data.error === 'string' && data.error.length > 0
   const items = enabled
-    ? tabItems({ rows, pendingCount: own ? data.pending.length : 0, own, failed, error: data.error, canOpen: typeof onOpenAll === 'function' })
+    ? tabItems({ rows, pendingCount: own ? data.pending.length : 0, keptCount: own && Array.isArray(data.kept) ? data.kept.length : 0, own, failed, error: data.error, canOpen: typeof onOpenAll === 'function' })
     : []
   const retractRef = own || !enabled ? null : ownBlockRef(data.index, typeof ownKey === 'string' ? ownKey.toLowerCase() : null)
   const handleRetry = enabled ? data.reload : undefined
@@ -652,7 +716,7 @@ function SentRow ({ row, profile, now, onOpenMember, onRetract }) {
         style={({ pressed }) => [styles.sentWho, pressed && styles.pressed]}
       >
         <Text style={styles.name} numberOfLines={2}>{'Para ' + title}</Text>
-        <Text style={styles.meta} numberOfLines={1}>{time}</Text>
+        <Text style={styles.meta} numberOfLines={1}>{sentMeta(time)}</Text>
       </Pressable>
       <MoreButton label={'retirar depoimento para ' + title} actions={[{ icon: 'lixeira', label: 'Retirar', danger: true, onPress: () => onRetract({ ref: row.ref, name: title, about: row.to }) }]} />
     </View>
@@ -669,11 +733,13 @@ export default function Depoimentos ({ entry, ownKey, onBack, onOpenMember, onRe
   const owner = entry.key
   const own = typeof ownKey === 'string' && ownKey.toLowerCase() === owner
   const data = useTestimonials(owner, { ownKey: own ? owner : null, withPending: own, withSent: own })
+  const { setOverride } = data
   const [refreshing, setRefreshing] = useState(false)
   const [removing, setRemoving] = useState(null)
   const [retracting, setRetracting] = useState(null)
   const [showing, setShowing] = useState(null)
   const [showError, setShowError] = useState(null)
+  const [declining, setDeclining] = useState(null)
 
   useEffect(() => {
     if (data.rows.length > 0 && names) names.resolveMany(data.rows.map((r) => r.from))
@@ -693,13 +759,14 @@ export default function Depoimentos ({ entry, ownKey, onBack, onOpenMember, onRe
     setShowError(null)
     try {
       await request('testimonial.show', { from: row.from, seq: row.seq })
+      setOverride(row.ref, 'shown')
     } catch (err) {
       setShowError(failureText(err))
     } finally {
       setShowing(null)
       testimonialsChanged()
     }
-  }, [request, showing])
+  }, [request, showing, setOverride])
 
   const bar = <TopBar title='Depoimentos' onBack={onBack} />
   if (node.hosted !== true) {
@@ -716,10 +783,15 @@ export default function Depoimentos ({ entry, ownKey, onBack, onOpenMember, onRe
   // load when other sections have rows (the empty state would not render).
   const shownFailed = !!data.error && (data.phase === 'ready' || data.phase === 'error')
   if (shownFailed) items.push({ kind: 'retry', key: 'e:shown', text: data.error })
+  if (own && (showError || data.decideError)) items.push({ kind: 'error', key: 'e:show', text: showError || data.decideError })
   if (own && data.pending.length > 0) {
     items.push({ kind: 'title', key: 't:pending', label: 'Para aprovar' })
-    if (showError) items.push({ kind: 'error', key: 'e:show', text: showError })
     for (const row of data.pending) items.push({ kind: 'pending', key: 'p:' + row.ref, row })
+  }
+  if (own && data.kept.length > 0) {
+    items.push({ kind: 'title', key: 't:kept', label: 'Guardados' })
+    items.push({ kind: 'note', key: 'n:kept', text: KEPT_NOTE })
+    for (const row of data.kept) items.push({ kind: 'kept', key: 'k:' + row.ref, row })
   }
   // The seeder was still indexing, or a writer's diary could not be read:
   // say so (with a retry) instead of letting a short or empty list read as
@@ -742,6 +814,7 @@ export default function Depoimentos ({ entry, ownKey, onBack, onOpenMember, onRe
   const renderItem = ({ item }) => {
     if (item.kind === 'title') return <Text style={styles.title}>{item.label}</Text>
     if (item.kind === 'error') return <View style={styles.note}><ErrorText>{item.text}</ErrorText></View>
+    if (item.kind === 'note') return <View style={styles.note}><Soft>{item.text}</Soft></View>
     if (item.kind === 'incomplete') return <View style={styles.more}><Soft>{item.text}</Soft><Pill label='Tentar de novo' onPress={handleRetry} /></View>
     if (item.kind === 'retry') return <View style={styles.more}><ErrorText>{item.text}</ErrorText><Pill label='Tentar de novo' onPress={handleRetry} /></View>
     if (item.kind === 'more') return <View style={styles.more}><Pill label='Ver mais' pending={data.sentLoadingMore} onPress={handleMoreSent} /></View>
@@ -753,7 +826,17 @@ export default function Depoimentos ({ entry, ownKey, onBack, onOpenMember, onRe
       return (
         <TestimonialRow row={row} profile={names ? names.profileOf(row.from) : null} now={now} ownKey={ownKey} onOpenMember={onOpenMember} onReport={onReport}>
           <Pill small label='Mostrar no perfil' filled pending={showing === row.ref} disabled={showing !== null && showing !== row.ref} onPress={() => show(row)} />
-          <Pill small icon='fechar' accessibilityLabel='Agora não' onPress={() => data.notNow(row)} />
+          <Pill small label='Guardar só para mim' onPress={() => data.decide(row, 'kept')} />
+          <Pill small label='Recusar' onPress={() => setDeclining(row)} />
+        </TestimonialRow>
+      )
+    }
+    if (item.kind === 'kept') {
+      const row = item.row
+      return (
+        <TestimonialRow row={row} profile={names ? names.profileOf(row.from) : null} now={now} ownKey={ownKey} onOpenMember={onOpenMember} onReport={onReport}>
+          <Pill small label='Mostrar no perfil' filled pending={showing === row.ref} disabled={showing !== null && showing !== row.ref} onPress={() => show(row)} />
+          <Pill small label='Recusar' onPress={() => setDeclining(row)} />
         </TestimonialRow>
       )
     }
@@ -775,16 +858,17 @@ export default function Depoimentos ({ entry, ownKey, onBack, onOpenMember, onRe
     ? <Skeleton rows={3} />
     : data.phase === 'error'
       ? <ErrorState message={data.error || UNAVAILABLE} onRetry={handleRetry} />
-      : <EmptyState icon='mensagem' title={EMPTY_TITLE} body={own ? 'Quando alguém escrever um depoimento para você, ele aparece aqui para você aprovar.' : 'Os depoimentos que esta pessoa aprovar aparecem aqui.'} />
+      : <EmptyState icon='mensagem' title={EMPTY_TITLE} body={own ? 'Quando alguém escrever um depoimento para você, ele aparece aqui para você decidir.' : 'Os depoimentos que esta pessoa aprovar aparecem aqui.'} />
 
   return (
     <View style={styles.root}>
       {bar}
       <RefreshableList
+        perfId='depoimentos'
         data={items}
         keyExtractor={(item) => item.key}
         renderItem={renderItem}
-        extraData={{ now, showing, profileOf: names ? names.profileOf : null, sentLoadingMore: data.sentLoadingMore }}
+        extraData={{ now, showing, declining, profileOf: names ? names.profileOf : null, sentLoadingMore: data.sentLoadingMore }}
         ListEmptyComponent={empty}
         contentContainerStyle={{ paddingBottom: bottomPad }}
         onRefresh={async () => {
@@ -793,6 +877,14 @@ export default function Depoimentos ({ entry, ownKey, onBack, onOpenMember, onRe
         }}
         refreshing={refreshing}
         atEnd
+      />
+      <ConfirmTestimonialSheet
+        open={declining !== null}
+        title={DECLINE_TITLE}
+        body={declining !== null ? declineBody(writerName(declining)) : null}
+        confirmLabel='Recusar'
+        onConfirm={() => data.decide(declining, 'declined', { rethrow: true })}
+        onClose={() => setDeclining(null)}
       />
       <ConfirmTestimonialSheet
         open={removing !== null}

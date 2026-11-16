@@ -79,18 +79,58 @@ test('kv seenSync: hash and gen round-trip, bound to the own key', async (t) => 
   }
 })
 
-test('deleteDmData clears seenLocal, seenRemote and seenSync with the dm state', async (t) => {
+test('deleteDmData clears seenLocal, seenRemote, seenHeld and seenSync with the dm state', async (t) => {
   const storage = memoryNodeStorage()
   const blob = b4a.toString(crypto.randomBytes(SEEN_BLOB_BYTES), 'base64')
   await nodeStore.writeSeenLocal(storage, PUBLIC_KEY, blob)
   await nodeStore.writeSeenSync(storage, PUBLIC_KEY, { hash: 'ef'.repeat(32), gen: 3 })
   await nodeStore.writeSeenRemote(storage, PUBLIC_KEY, blob)
   await nodeStore.writeDmSeen(storage, ['01'.repeat(16)])
+  const held = new Array(nodeStore.SEEN_HELD_MAX).fill('02'.repeat(16))
+  await nodeStore.writeSeenHeld(storage, PUBLIC_KEY, held)
+  t.alike(await nodeStore.readSeenHeld(storage, PUBLIC_KEY), held)
+  t.is(await nodeStore.readSeenHeld(storage, OTHER_KEY), null, 'bound to the own key')
+  await t.exception.all(async () => nodeStore.writeSeenHeld(storage, PUBLIC_KEY, held.slice(1)), /visto inválido/)
   await nodeStore.deleteDmData(storage)
+  t.is(await nodeStore.readSeenHeld(storage, PUBLIC_KEY), null, 'seenHeld gone')
   t.is(await nodeStore.readSeenLocal(storage, PUBLIC_KEY), null, 'seenLocal gone')
   t.alike(await nodeStore.readSeenSync(storage, PUBLIC_KEY), { hash: null, gen: 0 }, 'seenSync gone')
   t.is(await nodeStore.readSeenRemote(storage, PUBLIC_KEY), null, 'seenRemote gone')
   t.alike(await nodeStore.readDmSeen(storage), [], 'dmSeen gone as before')
+})
+
+test('kv testimonialDecisions: round-trips, bound to the own key, cleared', async (t) => {
+  const storage = memoryNodeStorage()
+  const from = 'ef'.repeat(32)
+  t.alike(await nodeStore.readTestimonialDecisions(storage, PUBLIC_KEY), [], 'absent')
+  const entries = [
+    { from, seq: 3, state: 'declined', t: 20 },
+    { from, seq: 2, state: 'kept', t: 10 }
+  ]
+  await nodeStore.writeTestimonialDecisions(storage, PUBLIC_KEY, entries)
+  t.alike(await nodeStore.readTestimonialDecisions(storage, PUBLIC_KEY), [
+    { from, seq: 2, state: 'kept', t: 10 },
+    { from, seq: 3, state: 'declined', t: 20 }
+  ], 'round trip, canonical order')
+  t.alike(await nodeStore.readTestimonialDecisions(storage, OTHER_KEY), [], 'another own key reads empty')
+  t.alike(await nodeStore.readTestimonialDecisions(storage, 'zz'), [], 'a malformed own key reads empty')
+  t.exception.all(() => nodeStore.writeTestimonialDecisions(storage, 'zz', entries), /chave inválida/, 'a malformed own key is refused on write')
+
+  await storage.writeJson('testimonialDecisions', { v: 1, own: PUBLIC_KEY, entries: [{ from, seq: 0, state: 'kept', t: 1 }, 'x', { from, seq: 4, state: 'kept', t: 5 }] })
+  t.alike(await nodeStore.readTestimonialDecisions(storage, PUBLIC_KEY), [{ from, seq: 4, state: 'kept', t: 5 }], 'bad entries are dropped')
+  for (const bad of [{ v: 2, own: PUBLIC_KEY, entries }, { v: 1, own: PUBLIC_KEY, entries: 'x' }, [entries], 'x', 42]) {
+    await storage.writeJson('testimonialDecisions', bad)
+    t.alike(await nodeStore.readTestimonialDecisions(storage, PUBLIC_KEY), [], 'malformed reads empty')
+  }
+
+  await nodeStore.writeTestimonialDecisions(storage, PUBLIC_KEY, entries)
+  await nodeStore.writeTestimonialDecisions(storage, PUBLIC_KEY, [])
+  t.is(await storage.readJson('testimonialDecisions'), null, 'an empty list deletes the key')
+
+  await nodeStore.writeTestimonialDecisions(storage, PUBLIC_KEY, entries)
+  await nodeStore.clearTestimonialDecisions(storage)
+  t.is(await storage.readJson('testimonialDecisions'), null, 'clear deletes the key')
+  t.alike(await nodeStore.readTestimonialDecisions(storage, PUBLIC_KEY), [], 'and reads empty')
 })
 
 function prfBytes (seed = 7) {

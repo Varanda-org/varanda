@@ -15,7 +15,7 @@ import { Image, Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { photoUrl } from '../postPreview'
 import {
-  A11Y_CARD, A11Y_LIKE, A11Y_MORE, A11Y_OPEN, A11Y_PROFILE, A11Y_REPLY, A11Y_REPOST, VIDEO_LINE,
+  A11Y_ANSWER, A11Y_CARD, A11Y_LIKE, A11Y_MORE, A11Y_OPEN, A11Y_PROFILE, A11Y_REPLY, A11Y_REPOST, VIDEO_LINE,
   PHOTO_RETRY_MS, PHOTO_STALL_MS, TILE_START, morePhotosLine, photoLabel, relationLine, tileMayLoad, tileSettled, tileStep
 } from '../postPreviewCopy'
 import { whoOf } from '../who'
@@ -122,7 +122,7 @@ export function PostLinkPreviewRow ({ model, origin, post, onAsk, skeleton, hidd
             </Action>
           </View>
           <View style={styles.bar}>
-            <Action label={A11Y_REPLY} onPress={ask} off={off}>
+            <Action label={shown && model.relation === 'reply' ? A11Y_ANSWER : A11Y_REPLY} onPress={ask} off={off}>
               <Icon name='resposta' size={ICON} color={colors.soft} />
             </Action>
             <Action label={A11Y_REPOST} onPress={ask} off={off}>

@@ -100,7 +100,14 @@ test('A Rua keys the row cache on what each row shows', (t) => {
   for (const field of ['post,', 'prof,', 'quoteOriginal: q', 'quoteProfile', 'quoteTransient', 'replyToName', 'likes:', 'replies:', 'reposts:', 'quotes:', 'liked:', 'reposted:', 'pending:', 'now,', "'offers.'"]) {
     t.ok(body.includes(field), field)
   }
+  // A folded card re-renders only when its header, lines, more line or focus change.
+  for (const field of ['folded,', 'replyPreviews: previews', 'previewsMore,', 'commentLabel,', 'commenter,', 'focusRef,', 'focusTop,']) {
+    t.ok(body.includes(field), field)
+  }
   t.ok(/cache: rowCache, rowKey: feedKey\(item\)/.test(src), 'A Rua passes its row cache')
+  t.ok(src.includes('cache, rowKey: item.key, fold: item'), 'a fold row is cached under its own key')
+  t.is(src.split('useRowPropsCache(rows, rowKeyOf, { h: handlers, social })').length - 1, 2, 'both live caches prune by the row keys the list shows')
+  t.is(src.split('keyExtractor={rowKeyOf}').length - 1, 3, 'every list keys a fold row by row.key')
   t.ok(src.includes('const renderItem = useCallback((info) => renderRef.current(info), [])'), 'renderItem is stable')
   t.absent(src.includes('await countsDone'), 'the next page does not wait for counts')
   t.ok(src.includes('if (!countAnswerApplies({'), 'the count guard is countAnswerApplies, tested in engagement.test.js')
@@ -345,4 +352,17 @@ test('ARua forwards the scroll callbacks to both live lists', (t) => {
   }
   t.ok(src.includes('onDeletedPost, onScrollFrame, onUserScroll })'), 'the page feed takes both props')
   t.ok(src.includes('onCreateMoment, onScrollFrame, onUserScroll })'), 'the member feed takes both props')
+})
+
+test('the Espiadinha keeps its rows stable between renders', (t) => {
+  const src = read('screens/Espiadinha.js')
+  t.ok(src.includes('const renderItem = useCallback((info) => renderRef.current(info), [])'), 'renderItem is stable')
+  t.absent(/const renderItem = \(/.test(src), 'no inline arrow renderItem')
+  t.ok(/cache: rowCache, rowKey: peekKey\(item\)/.test(src), 'row props come from the cache')
+  t.ok(src.includes('useRowPropsCache(items, peekKey, { h: handlers, social })'), 'the live box carries the newest handlers')
+  t.ok(src.includes('extraData={extra}') && src.includes('const extra = useMemo('), 'extraData is memoized')
+  t.ok(src.includes('ownKey, offered, hosted }), [now, following, social.social, names.profileOf, ownKey, offered, hosted]'), 'extraData carries offered and hosted')
+  t.absent(/\(\) => follow\(item\.author/.test(src), 'follow is not a new arrow per render')
+  t.ok(src.includes('followRef.current = follow'), 'a tap runs the newest follow')
+  t.ok(src.includes('useVisibleNow(60000)'), 'the clock pauses while the tab is hidden')
 })

@@ -7,7 +7,7 @@ import { vitrineEnabled } from './vitrine/enabled.js'
 
 const VITRINE = vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE }, typeof __DEV__ !== 'undefined' && __DEV__)
 let vitrineIndex
-if (VITRINE) {
+if (typeof __DEV__ !== 'undefined' && __DEV__ && process.env.EXPO_PUBLIC_VARANDA_VITRINE === '1' && VITRINE) {
   const { vitrineIndex: respond } = require('./vitrine/indexResponder')
   vitrineIndex = (url) => {
     try {
@@ -39,11 +39,15 @@ if (VITRINE) {
 //    of tripping 429s; a 429 anyway sets one shared cooldown (Retry-After,
 //    honoured in full) during which nothing reaches the network.
 //
-// Routes: /index/post/<author>/<seq>[/<cursor>], /index/counts/<ref>,...,
+// Routes: /index/post/<author>/<seq>[/<cursor>],
+// /index/roda/<author>/<seq>[/<cursor>], /index/counts/<ref>,...,
 // /index/member/<author>[/<before>], /index/topic/<tokens>[/<cursor>],
 // /index/likes/<author>/<seq>[/<cursor>] and
 // /index/reposts/<author>/<seq>[/<cursor>]. Each likes or reposts item is the
 // ref of a like or repost record, which the node still verifies (diary.peek).
+// A roda page lists replies of one comment's subtree as { ref, to } hints,
+// parents before children; the node still verifies each one (diary.peek)
+// and its signed replyTo chain. An older seeder answers it 404 ('not-found').
 // The search tokens are already folded words of [a-z0-9] (2..32 chars, at
 // most 8) joined by a literal '+' (apps/app/src/topics.js searchPath): this
 // module only checks them against the same strict pattern, never folds and
@@ -95,6 +99,7 @@ export const MAX_BODY_BYTES = 65536
 export const TIMEOUT_MS = 8000
 export const COUNTS_MAX = 31
 export const REPLIES_MAX = 50
+export const RODA_MAX = 50
 export const QUOTES_MAX = 50
 export const POSTS_MAX = 100
 export const SEARCH_MAX = 20
@@ -131,6 +136,8 @@ const SEGMENT = /^[a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,3}$/
 const QUERY = /^[a-z0-9]{2,32}(?:\+[a-z0-9]{2,32}){0,7}$/
 
 const POST_KEYS = ['authors', 'complete', 'indexing', 'likes', 'next', 'parent', 'quotes', 'quotesTotal', 'ref', 'replies', 'repliesTotal', 'reposts']
+const RODA_KEYS = ['authors', 'complete', 'indexing', 'items', 'next', 'ref', 'root', 'top', 'total']
+const RODA_ITEM_KEYS = ['ref', 'to']
 const COUNTS_KEYS = ['complete', 'counts', 'indexing']
 const COUNT_KEYS = ['likes', 'quotes', 'replies', 'reposts']
 const MEMBER_KEYS = ['complete', 'indexing', 'length', 'posts', 'postsTotal', 'profileSeq', 'usernameSeq']
@@ -259,6 +266,17 @@ export function postUrl (ref, cursor = null) {
   if (cursor !== null && !isCursor(cursor)) return null
   const [author, seq] = r.split(':')
   return resolveUrl('/index/post/' + author + '/' + seq + (cursor === null ? '' : '/' + cursor))
+}
+
+// The seq is capped at 15 digits, the seeder's route regex: a longer one
+// would come back 404 and read as an older seeder.
+export function rodaUrl (ref, cursor = null) {
+  const r = inputRef(ref)
+  if (r === null) return null
+  const [author, seq] = r.split(':')
+  if (seq.length > 15) return null
+  if (cursor !== null && !isCursor(cursor)) return null
+  return resolveUrl('/index/roda/' + author + '/' + seq + (cursor === null ? '' : '/' + cursor))
 }
 
 // Duplicates are dropped (first occurrence kept); 1..31 distinct refs.
@@ -779,6 +797,47 @@ export function validPostIndex (body, ref) {
   }
 }
 
+// Root and top differ and the asked ref is never the root. Items: <= 50
+// distinct { ref, to }, none the root or the top, none answering itself or
+// the root, and a `to` listed on the same page comes before its child (the
+// seeder sorts every child after its parent). `next` names the last row, as
+// the seeder's cursor does. Authors: exactly one hint for each of the asked,
+// root, top and item authors.
+export function validRoda (body, ref) {
+  if (!hasExactKeys(body, RODA_KEYS)) return null
+  if (!isRef(body.ref) || (ref !== undefined && body.ref !== ref)) return null
+  const { root, top } = body
+  if (!isRef(root) || !isRef(top) || root === top || body.ref === root) return null
+  if (!Array.isArray(body.items) || body.items.length > RODA_MAX) return null
+  const listed = new Set()
+  for (const it of body.items) {
+    if (!hasExactKeys(it, RODA_ITEM_KEYS) || !isRef(it.ref) || !isRef(it.to)) return null
+    listed.add(it.ref)
+  }
+  if (listed.size !== body.items.length) return null
+  const items = []
+  const seen = new Set()
+  for (const it of body.items) {
+    if (it.ref === root || it.ref === top || it.ref === it.to || it.to === root) return null
+    if (listed.has(it.to) && !seen.has(it.to)) return null
+    seen.add(it.ref)
+    items.push({ ref: it.ref, to: it.to })
+  }
+  if (body.next !== null) {
+    if (!isCursor(body.next) || items.length === 0) return null
+    const [, author, seq] = body.next.split('.')
+    if (items[items.length - 1].ref !== author + ':' + seq) return null
+  }
+  if (!isCount(body.total) || body.total < items.length) return null
+  if (typeof body.indexing !== 'boolean' || typeof body.complete !== 'boolean') return null
+  const authors = validAuthors(body.authors)
+  if (authors === null) return null
+  const wanted = new Set([body.ref, root, top, ...items.map((i) => i.ref)].map((r) => r.split(':')[0]))
+  const got = Object.keys(authors)
+  if (got.length !== wanted.size || !got.every((k) => wanted.has(k))) return null
+  return { ref: body.ref, root, top, items, next: body.next, total: body.total, authors, indexing: body.indexing, complete: body.complete }
+}
+
 // `asked`: the requested refs; a ref outside them is refused.
 export function validCounts (body, asked) {
   if (!hasExactKeys(body, COUNTS_KEYS) || !isPlain(body.counts)) return null
@@ -1179,6 +1238,12 @@ export function fetchPost (ref, cursor = null, deps = {}) {
   const url = postUrl(ref, cursor)
   const r = url === null ? null : inputRef(ref)
   return run(url, (body) => validPostIndex(body, r), deps)
+}
+
+export function fetchRoda (ref, cursor = null, deps = {}) {
+  const url = rodaUrl(ref, cursor)
+  const r = url === null ? null : inputRef(ref)
+  return run(url, (body) => validRoda(body, r), deps)
 }
 
 export function fetchCounts (refs, deps = {}) {

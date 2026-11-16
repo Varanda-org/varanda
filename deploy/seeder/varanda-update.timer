@@ -1,0 +1,14 @@
+# Dispara varanda-update.service: três minutos depois do boot e a cada
+# quinze minutos, com até quinze minutos de atraso aleatório, para os
+# servidores não reiniciarem todos no mesmo instante.
+
+[Unit]
+Description=Atualizador por imagem do Varanda, periódico
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=15min
+RandomizedDelaySec=15min
+
+[Install]
+WantedBy=timers.target
