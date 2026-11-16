@@ -47,7 +47,7 @@
 // The message row keeps the media items (blob key included); the plaintext
 // is opened lazily, on the first dm.thread or readMedia of that message,
 // and kept in the store's sealed media cache (./dm-store.js, a total byte
-// budget), which the pool's 7-day sweep does not touch. A thread in the
+// budget), which the pool's 14-day sweep does not touch. A thread in the
 // 'request' folder opens nothing by itself: a stranger's blobs are fetched
 // only on an explicit readMedia (a tap) or once the conversation is
 // accepted. At most OPEN_MAX opens run at once, the rest wait in order; a
@@ -1840,7 +1840,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
 
   // Each held page's scan state for one pull: its store, its boxes (the
   // held gen, the previous ones, then the legacy one) and its pool cursor. A cursor scanned
-  // for another gen starts over (the pool keeps 7 days).
+  // for another gen starts over (the pool keeps 14 days).
   async function pageScans () {
     const out = []
     for (const page of pages.pages()) {

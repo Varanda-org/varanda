@@ -33,8 +33,13 @@ const DM_SEAL_BYTES = 48
 const DM_SEALED_BYTES = DM_INNER_BYTES + DM_SEAL_BYTES
 const DM_MAGIC = 'VDM1'
 const DM_VERSION = 1
-const DM_RETENTION_MS = 7 * 86400000
-const DM_POOL_MAX = 20000
+const DM_RETENTION_MS = 14 * 86400000
+// How long a pool remembers a spent stamp token by default: the stamp key
+// acceptance window (a key rotates every 7 days and the current and previous
+// kids are accepted). It no longer follows the record retention, so the
+// longer DM_RETENTION_MS does not keep spent stamps longer.
+const STAMP_TOKEN_RETENTION_MS = 14 * 86400000
+const DM_POOL_MAX = 40000
 const VISIT_POOL_MAX = 20000
 // One page of base64 drops inside JSON must stay under DM_MAX_MESSAGE.
 const DM_PAGE_MAX = 8
@@ -696,6 +701,7 @@ module.exports = Object.freeze({
   DM_MAGIC,
   DM_VERSION,
   DM_RETENTION_MS,
+  STAMP_TOKEN_RETENTION_MS,
   DM_POOL_MAX,
   VISIT_POOL_MAX,
   DM_PAGE_MAX,
