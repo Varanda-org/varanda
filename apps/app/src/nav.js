@@ -90,7 +90,22 @@ export function validEntry (entry) {
     if (!params || typeof params !== 'object' || Array.isArray(params)) return false
     return isRef(entry.key) && typeof params.offer === 'string' && HEX32.test(params.offer)
   }
-  if (entry.screen === 'membro' || entry.screen === 'mensagem' || entry.screen === 'grupo' || entry.screen === 'comunidade' || entry.screen === 'comunidade-info') return isAuthorKey(entry.key)
+  if (entry.screen === 'mensagem') {
+    // oldPage: the thread belongs to a key the acting Página moved away from.
+    if (!isAuthorKey(entry.key)) return false
+    const params = entry.params
+    if (params === undefined || params === null) return true
+    if (typeof params !== 'object' || Array.isArray(params)) return false
+    return params.oldPage === undefined || isAuthorKey(params.oldPage)
+  }
+  if (entry.screen === 'pedidos') {
+    if (entry.key !== undefined && entry.key !== null && entry.key !== '') return false
+    const params = entry.params
+    if (params === undefined || params === null) return true
+    if (typeof params !== 'object' || Array.isArray(params)) return false
+    return params.oldPage === undefined || isAuthorKey(params.oldPage)
+  }
+  if (entry.screen === 'membro' || entry.screen === 'grupo' || entry.screen === 'comunidade' || entry.screen === 'comunidade-info') return isAuthorKey(entry.key)
   if (entry.screen === 'seguindo' || entry.screen === 'seguidores' || entry.screen === 'paginaajustes' || entry.screen === 'anuncios' || entry.screen === 'momentos' || entry.screen === 'recados' || entry.screen === 'fas') return isAuthorKey(entry.key)
   if (entry.screen === 'depoimentos') {
     const params = entry.params
@@ -99,7 +114,7 @@ export function validEntry (entry) {
     if (typeof params !== 'object' || Array.isArray(params)) return false
     return params.section === undefined || params.section === 'sent'
   }
-  if (entry.screen === 'paginas' || entry.screen === 'novapagina' || entry.screen === 'comunidades' || entry.screen === 'pedidos' || entry.screen === 'salvos' || entry.screen === 'melhores-amigos' || entry.screen === 'visitas') return entry.key === undefined || entry.key === null || entry.key === ''
+  if (entry.screen === 'paginas' || entry.screen === 'novapagina' || entry.screen === 'comunidades' || entry.screen === 'salvos' || entry.screen === 'melhores-amigos' || entry.screen === 'visitas') return entry.key === undefined || entry.key === null || entry.key === ''
   if (entry.screen === 'citacoes') return isRef(entry.key)
   if (entry.screen === 'assunto') return typeof entry.key === 'string' && TAG.test(entry.key)
   if (entry.screen === 'curtidas') {
@@ -127,7 +142,8 @@ export function push (stack, entry) {
   const base = Array.isArray(stack) ? stack : EMPTY
   if (!validEntry(entry)) return base
   const current = top(base)
-  if (current && current.screen === entry.screen && current.key === entry.key) return base
+  const oldOf = (e) => (e.params && typeof e.params === 'object' ? e.params.oldPage : undefined)
+  if (current && current.screen === entry.screen && current.key === entry.key && oldOf(current) === oldOf(entry)) return base
   const next = base.concat([copyEntry(entry)])
   return Object.freeze(next.length > MAX_DEPTH ? next.slice(next.length - MAX_DEPTH) : next)
 }

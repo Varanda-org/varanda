@@ -83,6 +83,7 @@ import { ReactionPicker } from '../ui/ReactionPicker'
 import { olderInitial, olderStep } from '../olderTrigger'
 import { actAs, pagesDm } from '../pages'
 import { pageKeyText, pageMismatchNote } from '../pageSecrets'
+import { OLD_KEY_READONLY, oldThreadClient } from '../pageOldKeys'
 import { pagesOn } from '../pageGate'
 import { cardFits, composePlan, stagedVoice, voiceUploadError } from '../attach-plan'
 import { cardForSend, draftView, freezeSnapshot, linkDraftIdle, linkDraftStep, withCardFallback } from '../linkCard'
@@ -163,13 +164,15 @@ export function Mensagem ({ initial, ...props }) {
   const acting = useActing()
   const identity = (node.passkey?.status?.publicKey || '') + ':' + (acting.kind === 'page' ? acting.key : '')
   const entry = useRef(null)
-  entry.current = messageEntry(entry.current, identity + ':' + props.peer, initial)
+  // A thread of a key the Página moved from is another conversation from the same peer's.
+  const scope = identity + ':' + props.peer + (typeof props.oldPage === 'string' ? ':' + props.oldPage : '')
+  entry.current = messageEntry(entry.current, scope, initial)
   // Remounting discards every draft, held send and attachment on a switch.
   // The shared actions sheet remounts too: one left open never outlives its thread.
-  return <ChatSheetProvider key={identity + ':' + props.peer}><MensagemThread {...props} initial={entry.current.initial} /></ChatSheetProvider>
+  return <ChatSheetProvider key={scope}><MensagemThread {...props} initial={entry.current.initial} /></ChatSheetProvider>
 }
 
-function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, onOpenMention, onReport, onOpenInvite, onOpenListing, onAvaliar, intent, onIntentUsed }) {
+function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenMember, onOpenMention, onReport, onOpenInvite, onOpenListing, onAvaliar, intent, onIntentUsed }) {
   const styles = useStyles(makeStyles)
   const avoidKeyboard = useKeyboardAvoidEnabled()
   // A list row under the composer is not seen, and measureInWindow reports
@@ -195,11 +198,16 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   // origin through the node, and the memo keeps depending on `request` only.
   const nodeRef = useRef(node)
   nodeRef.current = node
+  // A key the Página moved away from: its conversations are read from that
+  // key's store and nothing is sent (pageOldKeys.js). An entry with an oldPage
+  // is always this read-only view, whoever the app acts as afterwards.
+  const old = typeof oldPage === 'string' && /^[0-9a-f]{64}$/.test(oldPage) ? oldPage : null
   const dm = useMemo(() => {
+    if (old !== null) return oldThreadClient({ request, page: old })
     if (pageKey === null) return request
     const sign = async (digest) => pagesDm(nodeRef.current, { member: await memberKeyOf(request, nodeRef.current), page: pageKey, action: 'dm-sign', op: { digest } })
     return pageDmClient({ request, sign, page: pageKey })
-  }, [request, pageKey])
+  }, [request, pageKey, old])
   // A refusal about the page's keys ('chave da página não confere', no key
   // held): the composer stays closed with the reason until the page or the
   // conversation changes.
@@ -473,9 +481,9 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
 
   const reactionGate = dmReactionGate({ read: peerRead, peer, peerKind: pageReadKind(peerRead, peer), pageKey, hosted, unlocked, online: node.online, isTop: true, blocked: blocked || blocks.has(peer), folder })
   const reactionsHidden = reactionGate.hidden
-  const reactionsDisabled = reactionGate.disabled || !isTop
+  const reactionsDisabled = reactionGate.disabled || old !== null || !isTop
   const reactionViewRef = useRef(null)
-  reactionViewRef.current = { disabled: reactionsDisabled, dispatchDisabled: reactionGate.disabled, rawById: new Map(raw.map((m) => [messageKey(m), m])) }
+  reactionViewRef.current = { disabled: reactionsDisabled, dispatchDisabled: reactionGate.disabled || old !== null, rawById: new Map(raw.map((m) => [messageKey(m), m])) }
   reactionContext.view = reactionViewRef.current
   useEffect(() => {
     if (!isTop) reactionContext.debounce.flush()
@@ -1275,12 +1283,12 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     if (!offer || offer.id !== m.id || offer.from !== (m.mine ? me : m.from)) return null
     const buttons = buttonState(offer, me, listing)
     // A page does not rate in v1.
-    const rate = buttons.rate && pageKey === null && node.online !== false && typeof onAvaliar === 'function'
+    const rate = buttons.rate && old === null && pageKey === null && node.online !== false && typeof onAvaliar === 'function'
     return buttons.answer || rate ? { offer, listing, answer: buttons.answer, rate } : null
   }
   const offerBusy = offerAct.pending || offerHold !== null
   // Answers go out only where the composer could send.
-  const canAnswer = folder === 'inbox' && !blocked && node.online !== false && !offerBusy
+  const canAnswer = old === null && folder === 'inbox' && !blocked && node.online !== false && !offerBusy
 
   let blockNote = null
   if (blocked) blockNote = LABELS.blockedSend
@@ -1343,6 +1351,8 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         origin={origin}
         invitable={invitable}
         pageKey={pageKey}
+        mediaPage={old !== null ? old : pageKey}
+        readOnly={old !== null}
         folder={folder}
         ownKey={ownKey}
         peer={peer}
@@ -1360,7 +1370,13 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   // Footers without a field sit on the gesture bar: keep their buttons above it.
   const footer = [styles.composer, { paddingBottom: Math.max(8, insets.bottom) }]
   let composer
-  if (folder === null) {
+  if (old !== null) {
+    composer = (
+      <View style={footer}>
+        <Soft>{OLD_KEY_READONLY}</Soft>
+      </View>
+    )
+  } else if (folder === null) {
     composer = (
       <View style={footer}>
         {loadError ? <ErrorText>{loadError}</ErrorText> : <Skeleton rows={1} />}
@@ -1506,7 +1522,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   let empty = null
   if (!loaded) empty = <Skeleton />
   else if (loadError) empty = <View style={styles.pad}><ErrorText>{loadError}</ErrorText></View>
-  else empty = <EmptyState icon='conversas' title='Nenhuma mensagem' body='Escreva a primeira.' />
+  else empty = <EmptyState icon='conversas' title='Nenhuma mensagem' body={old !== null ? undefined : 'Escreva a primeira.'} />
 
   // The keyboard opens over the bottom composer unless the screen shrinks for
   // it: iOS never resizes, and Android runs edge to edge (targetSdk 36), where
@@ -1521,7 +1537,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         onBack={onBack}
         onPress={open}
         pressLabel='abrir o perfil'
-        right={topRight}
+        right={old !== null ? undefined : topRight}
       />
       <OfflineNote />
       <EmbedBandBottom.Provider value={composer ? band : null}>
@@ -1560,7 +1576,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
           ListEmptyComponent={
             <View>
               {empty}
-              {loaded && !loadError && folder === 'inbox' && blockNote === null && !blocks.has(peer) && node.online !== false && !post.pending && !hold && mediaHold === null && !sendingMedia
+              {loaded && !loadError && old === null && folder === 'inbox' && blockNote === null && !blocks.has(peer) && node.online !== false && !post.pending && !hold && mediaHold === null && !sendingMedia
                 ? <View style={[styles.pad, styles.inline]}>{['Oi', 'Tudo bem?'].map((text) => <Pill key={text} label={text} onPress={() => setDraft((d) => d.trim() ? d + '\n' + text : text)} />)}</View>
                 : null}
             </View>
@@ -1663,7 +1679,7 @@ export function sameMessageRow (prev, next) {
   return true
 }
 
-const MessageRow = memo(function MessageRow ({ item, index, calls, styles, shape, flash, chipsReady, reactionOff, offerKey, card, media, fwd, pageKey, folder, ownKey, peer, quoteName, quoteHandle, canForward, canAnswer, reportable, listable, canMention }) {
+const MessageRow = memo(function MessageRow ({ item, index, calls, styles, shape, flash, chipsReady, reactionOff, offerKey, card, media, fwd, pageKey, mediaPage, readOnly, folder, ownKey, peer, quoteName, quoteHandle, canForward, canAnswer, reportable, listable, canMention }) {
   const { reactionsFor, quoteAuthor, quoteMine, quoteMissing, quoteTarget, offerOfRow, scrollToKey, setReplyTo, setForwarding, toggleReaction, openReactionPicker, onReport, onOpenInvite, onOpenListing, onAvaliar, setConfirming, declineOffer, offerAct } = calls
   const mentionTap = canMention ? calls.mentionTap : undefined
   const mine = item.mine === true
@@ -1673,19 +1689,19 @@ const MessageRow = memo(function MessageRow ({ item, index, calls, styles, shape
   const offerRow = item.deleted || offerKey === null ? null : offerOfRow(index)
   const actions = []
   // As a Página, its items are read from the Página's store on this device.
-  const pageOf = pageKey !== null ? { page: pageKey } : {}
+  const pageOf = mediaPage !== null ? { page: mediaPage } : {}
   const refs = item.deleted ? [] : chatMediaRefs('dm', { from: item.from || (mine ? ownKey : null), id: item.id, media, ...pageOf })
   if (!item.deleted) {
-    actions.push({ icon: 'responder', label: 'Responder', onPress: () => setReplyTo({ id: item.id, text: item.text, mine, name: mine ? OWN_LABEL : quoteName }) })
+    if (!readOnly) actions.push({ icon: 'responder', label: 'Responder', onPress: () => setReplyTo({ id: item.id, text: item.text, mine, name: mine ? OWN_LABEL : quoteName }) })
     actions.push({ icon: 'copiar', label: 'Copiar', onPress: () => { copyText(shareNav(), displayText(item.rawText, { multiline: true })) } })
   }
   // A message with no text whose media expired has nothing to forward, and a
   // page forwards text only.
-  const forwardSource = !item.deleted && canForward ? dmForwardSource(item.rawText, media) : null
+  const forwardSource = !item.deleted && canForward && !readOnly ? dmForwardSource(item.rawText, media) : null
   if (forwardSource !== null && (pageKey === null || pageForwardSource(forwardSource) !== null)) {
     actions.push({ icon: 'encaminhar', label: 'Encaminhar', onPress: () => setForwarding({ source: forwardSource, refs }) })
   }
-  if (!mine && !item.deleted && reportable) {
+  if (!mine && !item.deleted && reportable && !readOnly) {
     actions.push({ icon: 'bandeira', label: LABELS.report, danger: true, onPress: () => onReport({ dm: true, id: item.id, text: item.rawText, author: item.from, ...(Array.isArray(media) ? { media } : {}) }) })
   }
   // Beside Abrir convite the bubble draws plain text and parses nothing,
