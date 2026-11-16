@@ -519,7 +519,8 @@ test('pages-store: reopen equals memory and the file, one sidecar only', async (
   await store.spend(owner, nonce(), 5)
   await store.move(page, key())
   const onDisk = JSON.parse(fs.readFileSync(file, 'utf8'))
-  t.alike(onDisk, store.snapshot(), 'the file equals memory')
+  t.alike({ charges: {}, ...onDisk }, store.snapshot(), 'the file equals memory (an empty charges table is left out)')
+  t.absent('charges' in onDisk, 'no charges key while nothing is charged')
   t.alike(open().snapshot(), store.snapshot(), 'a reopen equals memory')
   t.is(onDisk.seq, 8, 'seq grows by one per write')
   t.is(fs.statSync(file).mode & 0o777, 0o600)
@@ -859,4 +860,65 @@ test('pages-store: a move carries the legacy bundle to K2, with its keys or alon
   await store.move(k2, k3, { dm: withKeys })
   t.alike(store.get(k3).dm.legacyBundle, bundle, 'carried with K3 gen 1 keys')
   t.exception.all(() => store.move(k3, key(), { dm: { ...bare } }), /dm must be/, 'a move never commits an empty gen 0 row')
+})
+
+test('pages-store: charges keep the 2 per 24 h cap across a reopen, a use once, a refund gives it back', async (t) => {
+  const { store, open, file, c } = setup(t)
+  const m = key()
+  const P = key()
+  const [n1, n2, n3] = [nonce(), nonce(), nonce()]
+  t.is(await store.charge(m, n1, P), true)
+  t.is(await store.charge(m, n1, P), false, 'a resend of the same use is not charged again')
+  t.is(await store.charge(m, n2, P), true)
+  await rejects(t, store.charge(m, n3, P), 'limite', 'a third use')
+  await rejects(t, open().charge(m, n3, P), 'limite', 'a reopen keeps the charges')
+  await rejects(t, store.charge(m, n1, key()), 'limite', 'the same nonce on another page is a new use')
+  t.ok(await store.charge(key(), n3, P), 'another owner has its own cap')
+  await rejects(t, store.charge(key(), nonce(), P, { extra: () => false }), 'limite', 'the extra window also refuses')
+  t.is(await store.refund(m, n2, P), true)
+  t.is(await store.refund(m, n2, P), false, 'refunding twice writes nothing')
+  t.is(await store.refund(m, n1, key()), false, 'a refund is per page')
+  t.ok(await open().charge(m, n3, P), 'a refunded use is free again')
+  c.t += DAY + 1000
+  const next = open()
+  const last = nonce()
+  t.ok(await next.charge(m, last, P), 'after 24 h the window is open again')
+  const disk = JSON.parse(fs.readFileSync(file, 'utf8'))
+  t.is(Object.keys(disk.charges).length, 1, 'old charges are dropped on the next write')
+  await next.refund(m, last, P)
+  t.absent('charges' in JSON.parse(fs.readFileSync(file, 'utf8')), 'an empty table is not written')
+})
+
+test('pages-store: a store that cannot write refuses a charge with indisponivel', async (t) => {
+  const { open } = setup(t)
+  const store = open({ writeJson: () => { throw new Error('EIO') } })
+  await rejects(t, store.charge(key(), nonce(), key()), 'indisponivel', 'a failed write')
+})
+
+test('pages-store: a malformed charges row makes the file refuse to open; a file without the key opens', async (t) => {
+  const { store, open, file } = setup(t)
+  const m = key()
+  const P = key()
+  await store.charge(m, nonce(), P)
+  const good = JSON.parse(fs.readFileSync(file, 'utf8'))
+  const id = Object.keys(good.charges)[0]
+  const bad = [
+    { ...good, charges: { [id]: { at: 'ontem', page: P } } },
+    { ...good, charges: { [id]: { at: iso(T0), page: P, extra: 1 } } },
+    { ...good, charges: { [id]: { at: iso(T0) } } },
+    { ...good, charges: { [id]: { at: iso(T0), page: key() } } },
+    { ...good, charges: { [id]: { at: iso(T0), page: 'zz' } } },
+    { ...good, charges: { ['xx' + id]: { at: iso(T0), page: P } } },
+    { ...good, charges: { [m + ':curto:' + P]: { at: iso(T0), page: P } } },
+    { ...good, charges: [] }
+  ]
+  for (const doc of bad) {
+    fs.writeFileSync(file, JSON.stringify(doc), { mode: 0o600 })
+    await rejects(t, open().charge(m, nonce(), P), 'indisponivel', 'a malformed charges row')
+  }
+  const old = { ...good }
+  delete old.charges
+  fs.writeFileSync(file, JSON.stringify(old), { mode: 0o600 })
+  const reopened = open()
+  t.ok(await reopened.charge(m, nonce(), P), 'a file written before charges reads as empty')
 })
