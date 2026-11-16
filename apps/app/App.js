@@ -187,6 +187,7 @@ import { HashtagContext } from './src/ui/MentionText'
 import AssuntoScreen from './src/screens/Assunto'
 import RecadosScreen from './src/screens/Recados'
 import DepoimentosScreen, { testimonialsChanged } from './src/screens/Depoimentos'
+import { refreshMomentSeen } from './src/momentSeenStore'
 import SalvosScreen from './src/screens/Salvos'
 import EventosScreen from './src/screens/Eventos'
 import VisitasScreen from './src/screens/Visitas'
@@ -2398,6 +2399,7 @@ function Member () {
       // Another device of the passkey blocked or unblocked someone.
       if (result.blocksChanged) refreshBlocks().catch(() => {})
       if (result.testimonialsChanged) testimonialsChanged()
+      if (result.momentsChanged) refreshMomentSeen().catch(() => {})
       if (result.groupChanged) {
         bumpSeen()
         const taken = { epoch: snap.epoch, versions: snap.versions }

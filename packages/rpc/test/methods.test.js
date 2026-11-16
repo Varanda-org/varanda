@@ -23,7 +23,7 @@ test('method list and mutating set', (t) => {
     'group.admin', 'group.admit', 'group.ban', 'group.choose', 'group.create', 'group.events', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.react', 'group.reactors', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen', 'group.topics', 'group.voters',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
-    'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moments.read', 'node.close', 'node.info', 'notices.list', 'outbox.open', 'outbox.seal',
+    'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moment.seen', 'moments.read', 'moments.seen', 'node.close', 'node.info', 'notices.list', 'outbox.open', 'outbox.seal',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read', 'phone.proof', 'phone.sign',
     'post.create', 'post.delete', 'post.quote', 'post.reply', 'post.share', 'post.shared', 'post.unshare', 'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
     'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.decide', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add', 'visits.clear', 'visits.list', 'visits.note', 'visits.set', 'visits.state'
@@ -35,6 +35,31 @@ test('method list and mutating set', (t) => {
     'post.quote', 'post.reply', 'post.share', 'post.unshare',
     'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.set', 'repost.set', 'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'sync.start', 'sync.stop', 'testimonial.decide', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add', 'visits.clear', 'visits.note', 'visits.set'
   ])
+})
+
+test('moment.seen and moments.seen: a u32 momento ref, no params, not mutating', (t) => {
+  const { MOMENT_SEEN_MAX } = require('..')
+  t.is(MOMENT_SEEN_MAX, 132)
+  t.absent(isMutating('moment.seen'))
+  t.absent(isMutating('moments.seen'))
+  ok(t, 'moment.seen', { author: KEY, seq: 1 }, { author: KEY, seq: 1 })
+  ok(t, 'moment.seen', { author: KEY, seq: 4294967295 })
+  for (const seq of [0, -1, 1.5, 4294967296, '1', null]) bad(t, 'moment.seen', { author: KEY, seq }, 'seq ' + String(seq))
+  for (const author of ['AB'.repeat(32), 'ab', null]) bad(t, 'moment.seen', { author, seq: 1 })
+  bad(t, 'moment.seen', { author: KEY }, 'missing seq')
+  bad(t, 'moment.seen', { seq: 1 }, 'missing author')
+  bad(t, 'moment.seen', { author: KEY, seq: 1, t: 5 }, 'extra t')
+  ok(t, 'moments.seen', {}, {})
+  bad(t, 'moments.seen', { all: true })
+})
+
+test('moments.seen: the full list fits MAX_MESSAGE', (t) => {
+  const { MOMENT_SEEN_MAX } = require('..')
+  const refs = []
+  for (let i = 0; i < MOMENT_SEEN_MAX; i++) refs.push(KEY + ':4294967295')
+  const bytes = utf8ByteLength(JSON.stringify({ v: 1, id: MAX_ID, ok: true, result: { refs } }))
+  t.ok(bytes < MAX_MESSAGE)
+  t.is(bytes, 10349)
 })
 
 test('testimonial limits', (t) => {

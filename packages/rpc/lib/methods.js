@@ -1636,6 +1636,12 @@ const SPECS = {
       return value.unchanged && value.blob !== null ? 'unchanged só com blob nulo' : null
     }
   },
+  // Marks a momento seen for the member's devices (5.149); an idempotent local
+  // store like dm.seen, synced in the seen document. Result { changed }.
+  'moment.seen': { fields: { author: req(isKey), seq: req(int(1, 4294967295)) } },
+  // Result { refs: ['<author>:<seq>'] }, oldest first, at most MOMENT_SEEN_MAX
+  // (5.150).
+  'moments.seen': { fields: none },
   'group.meta': {
     fields: { group: req(isKey), name: opt(str(1, L.MAX_GROUP_NAME)), join: opt(isGroupJoin) },
     mutating: true,

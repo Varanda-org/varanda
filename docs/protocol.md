@@ -2741,13 +2741,14 @@ chave = BLAKE2b-256( "varanda/member-seen/secretbox/v1\n" || seed || association
 
 O bloco tem `SEEN_BLOB_BYTES` = 32808 bytes: nonce de 24 bytes aleatórios (um por gravação, nunca contador, porque dois aparelhos podem gravar ao mesmo tempo), 16 bytes de MAC e o texto de `SEEN_PLAIN_BYTES` = 32768 bytes, cifrado com `crypto_secretbox_easy`. Em base64 canônico, o campo `blob` de um pedido tem 43744 caracteres. O texto, em little-endian, tem nesta ordem:
 
-- cabeçalho de 78 bytes: `u8` versão = 3, `u8` flags = 0, `u32` gen (contador de gravações, não é conteúdo), membro (32), associação (32), `u16` nAvisos, `u8` nPáginas, `u16` nDm, `u8` nGrupos, `u8` nBloqueios, `u8` nDepoimentos;
+- cabeçalho de 79 bytes: `u8` versão = 4, `u8` flags = 0, `u32` gen (contador de gravações, não é conteúdo), membro (32), associação (32), `u16` nAvisos, `u8` nPáginas, `u16` nDm, `u8` nGrupos, `u8` nBloqueios, `u8` nDepoimentos, `u8` nMomentos;
 - nAvisos entradas de token, as marcas de Avisos do próprio membro;
 - nPáginas blocos de página: chave da página (32), `u8` n e n entradas de token;
 - nDm entradas de token, uma por mensagem direta recebida marcada;
 - nGrupos entradas de grupo de 76 bytes: grupo (32), autor da marca (32), `i64` ms (a hora do post marcado), `u32` seq;
 - nBloqueios entradas de bloqueio de 37 bytes (`packages/core/lib/member-block.js`, rpc.md 5.111): a chave bloqueada (32), `u8` on (1 bloqueada, 0 desbloqueada) e `u32` t, em segundos Unix, a hora da última mudança;
 - nDepoimentos entradas de decisão de 41 bytes (`packages/core/lib/testimonial-decision.js`, rpc.md 5.100): quem escreveu (32), `u32` seq do bloco, `u8` estado (1 guardado só para o membro, 2 recusado) e `u32` t, em segundos Unix, a hora da decisão;
+- nMomentos entradas de momento visto de 40 bytes (`packages/core/lib/moment-seen.js`, rpc.md 5.149 e 5.150): o autor do momento (32), `u32` seq do bloco e `u32` t, em segundos Unix, a hora em que o membro viu o momento. Só diz que o membro viu aquele momento, num dos aparelhos dele; nada é escrito em diário e ninguém fica sabendo;
 - preenchimento aleatório até 32768 bytes.
 
 Uma entrada de token tem 20 bytes: os 16 bytes do token e `u32` t, em segundos Unix, a hora em que a marca foi feita. As listas vão da mais antiga para a mais nova.
@@ -2758,12 +2759,13 @@ Limites, aplicados antes de cifrar:
 | --- | --- |
 | Avisos (tokens próprios) | 256 |
 | Páginas | 4, com até 32 tokens cada |
-| Mensagens diretas | 256 |
-| Grupos | 128 |
+| Mensagens diretas | 128 |
+| Grupos | 92 |
 | Bloqueios | 128 |
 | Decisões de depoimentos | 128 (64 guardados e 64 recusados) |
+| Momentos vistos | 132 (`MOMENT_SEEN_MAX`: `moments.read` mostra no máximo 32 x 4 + 4 momentos vivos) |
 
-No limite, o texto ocupa 32722 bytes e sobra preenchimento. O corte é determinístico: sai primeiro a marca mais antiga (menor t, e entre iguais, o token em ordem); as páginas são ordenadas pela marca mais nova de cada uma e ficam só as 4 mais recentes; os grupos ficam os 128 de hora mais recente; os bloqueios ficam os 128 de maior t (entre iguais, a chave em ordem); as decisões ficam as 64 guardadas e as 64 recusadas de maior t (entre iguais, quem escreveu e o seq em ordem). Por isso o bloco guarda as marcas mais recentes, não todo o histórico: quando ele enche, um aviso antigo pode voltar a aparecer como novo em outro aparelho.
+No limite, o texto ocupa 32707 bytes e sobra preenchimento. Para caber a lista de momentos no mesmo tamanho de bloco, a versão 4 cortou a janela de mensagens diretas de 256 para 128 e a de grupos de 128 para 92. O corte é determinístico: sai primeiro a marca mais antiga (menor t, e entre iguais, o token em ordem); as páginas são ordenadas pela marca mais nova de cada uma e ficam só as 4 mais recentes; os grupos ficam os 92 de hora mais recente; os bloqueios ficam os 128 de maior t (entre iguais, a chave em ordem); as decisões ficam as 64 guardadas e as 64 recusadas de maior t (entre iguais, quem escreveu e o seq em ordem); os momentos vistos ficam os 132 de maior t (entre iguais, o autor e o seq em ordem). Por isso o bloco guarda as marcas mais recentes, não todo o histórico: quando ele enche, um aviso antigo pode voltar a aparecer como novo em outro aparelho.
 
 A decodificação não lança exceção. Um bloco malformado, de outro membro ou com MAC inválido vira "sem bloco" para o aparelho, nunca dado parcial; uma versão que este código não conhece é recusada à parte (`unsupported`), e o aparelho não a usa.
 
@@ -2774,6 +2776,7 @@ A decodificação não lança exceção. Um bloco malformado, de outro membro ou
 - tokens: o mesmo token fica com o maior t;
 - bloqueios: uma entrada por chave, a de maior t; com t igual, vence o bloqueio. Um desbloqueio fica como entrada com on = 0, para a fusão não trazer o bloqueio de volta;
 - decisões de depoimentos: uma por depoimento (`from:seq`), a de maior t; com t igual vence a guardada, o estado que a pessoa ainda pode desfazer. O corte por limite vem depois da união;
+- momentos vistos: uma entrada por momento (`autor:seq`), a de maior t. O corte por limite vem depois da união;
 - grupos: uma marca por grupo, a que está à frente pela ordem do grupo (`compareOrder` sobre `orderKey(at, autor, seq)`, a mesma de `packages/core/lib/group.js`);
 - o corte por limite vem depois da união, para não derrubar uma página ou uma marca à frente que o outro lado ainda tem.
 
@@ -2789,11 +2792,15 @@ Uma entrada de bloqueio que não cabe na janela fica só no aparelho: a lista lo
 
 Limite aceito, decisões: como nos bloqueios, uma lista cheia não tem lápides. Uma decisão que saiu da lista de um aparelho (a mais antiga, no corte) pode voltar de um aparelho que ainda guarda uma decisão mais antiga do mesmo depoimento.
 
-### Versões 1 e 2
+Limite aceito, momentos: um momento visto que saiu da lista de um aparelho no corte pode voltar de outro aparelho que ainda o guarda; isso só mantém o anel como visto. Um momento visto fora da janela volta a aparecer como não visto nos outros aparelhos. O nó nativo (`packages/core`) não tem documento de vistos: lá a lista de momentos vistos continua só no aparelho.
 
-Blocos da versão 2 (gravados antes das decisões de depoimentos) têm cabeçalho de 77 bytes, sem nDepoimentos e com até 520 tokens de mensagens diretas. Este código ainda os lê, como lista vazia de decisões e com os tokens cortados para 256, e grava sempre a versão 3. Um aparelho com código anterior lê a versão 3 como `unsupported`, como já fazia com a 2: não usa o bloco e não grava por cima, e o visto entre aparelhos fica parado nele até a atualização.
+### Versões 1, 2 e 3
 
-Blocos gravados antes dos bloqueios têm versão 1: cabeçalho de 76 bytes, sem nBloqueios, sem entradas de bloqueio e até 736 tokens de mensagens diretas. Este código ainda os lê, como lista vazia de bloqueios e de decisões e com os tokens cortados para 256, e grava sempre a versão 3. O tamanho do bloco não muda, e o serviço não percebe a troca. Um aparelho com código anterior lê a versão 3 como `unsupported`: não usa o bloco e não grava por cima, e o visto entre aparelhos fica parado nele até a atualização.
+Blocos da versão 3 (gravados antes dos momentos vistos) têm cabeçalho de 78 bytes, sem nMomentos, com até 256 tokens de mensagens diretas e até 128 marcas de grupo. Este código ainda os lê, como lista vazia de momentos, com os tokens cortados para 128 e as marcas de grupo para as 92 de hora mais recente, e grava sempre a versão 4. Um aparelho com código anterior lê a versão 4 como `unsupported`, como já fazia com a 3: não usa o bloco e não grava por cima, e o visto entre aparelhos fica parado nele até a atualização. Uma marca de grupo cortada continua valendo no aparelho que a tem.
+
+Blocos da versão 2 (gravados antes das decisões de depoimentos) têm cabeçalho de 77 bytes, sem nDepoimentos e com até 520 tokens de mensagens diretas. Este código ainda os lê, como lista vazia de decisões e de momentos e com os tokens cortados para 128, e grava sempre a versão 4.
+
+Blocos gravados antes dos bloqueios têm versão 1: cabeçalho de 76 bytes, sem nBloqueios, sem entradas de bloqueio e até 736 tokens de mensagens diretas. Este código ainda os lê, como lista vazia de bloqueios, de decisões e de momentos e com os tokens cortados para 128, e grava sempre a versão 4. O tamanho do bloco não muda, e o serviço não percebe a troca.
 
 ### Leitura, escrita e apagamento (`seen-routes.js`)
 
