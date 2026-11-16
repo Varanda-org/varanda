@@ -61,6 +61,12 @@ const DM_SIG_PREFIX_V5 = 'varanda-dm-v5\n'
 const DM_SIG_PREFIX_V6 = 'varanda-dm-v6\n'
 // The only kind of a v6 body. Not in DM_KINDS: no v1 to v5 body is a visit.
 const DM_VISIT_KIND = 'visit'
+// A history copy pointer (v7) signs under its own domain, so no message,
+// reaction, visit or folder op signature verifies as one and the reverse: only
+// the identity key signs it, which a stranger sealing to the public box cannot.
+const DM_SIG_PREFIX_V7 = 'varanda-dm-v7\n'
+// The only kind of a v7 body. Not in DM_KINDS: no v1 to v6 body is a copy.
+const DM_COPY_KIND = 'copy'
 // A reaction's revision: per (target, reactor) the op with the highest rev wins.
 const DM_REACT_REV_MAX = 1000000
 // The service signs a v3 digest with an expiry it chooses (now + TTL). A drop
@@ -104,6 +110,7 @@ const INNER_KEYS_V3 = INNER_KEYS_V2
 const INNER_KEYS_V4 = rpc.DM_INNER_KEYS_V4
 const INNER_KEYS_V5 = rpc.DM_INNER_KEYS_V5
 const INNER_KEYS_V6 = rpc.DM_INNER_KEYS_V6
+const INNER_KEYS_V7 = rpc.DM_INNER_KEYS_V7
 const DM_TARGET_KEYS = rpc.DM_TARGET_KEYS
 const DM_MEDIA_KEYS = rpc.DM_MEDIA_KEYS
 const BLOB_KEYS = Object.freeze(['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256'])
@@ -125,6 +132,7 @@ const SIG_PREFIX_V3 = b4a.from(DM_V3_PREFIX, 'utf8')
 const SIG_PREFIX_V4 = b4a.from(DM_SIG_PREFIX_V4, 'utf8')
 const SIG_PREFIX_V5 = b4a.from(DM_SIG_PREFIX_V5, 'utf8')
 const SIG_PREFIX_V6 = b4a.from(DM_SIG_PREFIX_V6, 'utf8')
+const SIG_PREFIX_V7 = b4a.from(DM_SIG_PREFIX_V7, 'utf8')
 const MAGIC = b4a.from(DM_MAGIC, 'ascii')
 const HEX32 = /^[0-9a-f]{32}$/
 const HEX64_DIGEST = /^[0-9a-f]{64}$/
@@ -240,10 +248,12 @@ function validDmCard (card) {
 // { from, id, digest } that names that message's content too; a bound
 // reply needs v2, so v1 keeps the bare id only.
 // v6 is a visit ping (kind 'visit', see validVisit), and only v6 is.
+// v7 is a history copy pointer (kind 'copy', see validCopy), and only v7 is.
 function validBody (b) {
   if (!isPlainObject(b)) return false
   if (b.v === 4) return validReaction(b)
   if (b.v === 6) return validVisit(b)
+  if (b.v === 7) return validCopy(b)
   if (b.v === 1) {
     if (!hasExactKeys(b, INNER_KEYS)) return false
   } else if (b.v === 2) {
@@ -309,12 +319,22 @@ function validVisit (b) {
   return b.cert === null || (validateCertShape(b.cert) === null && b.cert.member === b.from)
 }
 
+// A history copy pointer: `id` is the copy's id and `copy` the blob
+// descriptor (section 13) of its manifest. from === to is the own key; the
+// reader still checks it against its own key. No certificate: it is a note to
+// the own devices, like a ctl, and opens for the signer's own identity only.
+function validCopy (b) {
+  if (!hasExactKeys(b, INNER_KEYS_V7) || b.kind !== DM_COPY_KIND) return false
+  if (!isHex32(b.id) || !isHex64(b.from) || b.to !== b.from || !isCanonicalIso(b.at)) return false
+  return validateBlobDescriptor(b.copy)
+}
+
 function canonicalJson (b) {
   return rpc.canonicalDmInnerJson(b)
 }
 
 function sigPrefix (v) {
-  return v === 6 ? SIG_PREFIX_V6 : v === 5 ? SIG_PREFIX_V5 : v === 4 ? SIG_PREFIX_V4 : v === 2 ? SIG_PREFIX_V2 : SIG_PREFIX
+  return v === 7 ? SIG_PREFIX_V7 : v === 6 ? SIG_PREFIX_V6 : v === 5 ? SIG_PREFIX_V5 : v === 4 ? SIG_PREFIX_V4 : v === 2 ? SIG_PREFIX_V2 : SIG_PREFIX
 }
 
 function digestBytes (json) {
@@ -410,6 +430,7 @@ function buildInner (fields, signKeyPair) {
   const kind = fields.kind
   if (kind === 'react') return signInner(reactionBody(fields, from), signKeyPair)
   if (kind === DM_VISIT_KIND) return signInner(visitBody(fields, from), signKeyPair)
+  if (kind === DM_COPY_KIND) return signInner(copyBody(fields, from), signKeyPair)
   const media = fields.media === undefined ? null : fields.media
   const card = fields.card === undefined ? null : fields.card
   const fwd = fields.fwd === undefined ? 0 : fields.fwd
@@ -482,6 +503,25 @@ function visitBody (fields, from) {
     to: fields.to,
     day: fields.day === undefined ? visitDay(Date.now()) : fields.day,
     cert: fields.cert === undefined ? null : fields.cert
+  }
+}
+
+const COPY_FIELDS = Object.freeze(['kind', 'id', 'copy', 'at', 'to', 'from'])
+
+// { kind: 'copy', id?, copy, at?, to? }: to is the own key or absent. Any
+// other field is refused, never dropped.
+function copyBody (fields, from) {
+  for (const k of Object.keys(fields)) {
+    if (!COPY_FIELDS.includes(k) && fields[k] !== undefined) throw new TypeError('mensagem inválida')
+  }
+  return {
+    v: 7,
+    kind: DM_COPY_KIND,
+    id: fields.id === undefined ? newMessageId() : fields.id,
+    from,
+    to: fields.to === undefined ? from : fields.to,
+    copy: isPlainObject(fields.copy) ? { id: fields.copy.id, key: fields.copy.key, nonce: fields.copy.nonce, chunks: fields.copy.chunks, bytes: fields.copy.bytes, sha256: fields.copy.sha256 } : fields.copy,
+    at: fields.at === undefined ? nowIso() : fields.at
   }
 }
 
@@ -597,7 +637,7 @@ function openInner (buf, ownKey, opts = {}) {
       if (buf[i] !== 0) return null
     }
     if (!hcrypto.verify(signed, sig, b4a.from(body.from, 'hex'))) return null
-    if (body.kind === 'ctl') {
+    if (body.kind === 'ctl' || body.kind === DM_COPY_KIND) {
       if (body.from !== ownKey) return null
       return { ...body, ...extra, mine: true }
     }
@@ -712,7 +752,9 @@ module.exports = Object.freeze({
   DM_SIG_PREFIX_V4,
   DM_SIG_PREFIX_V5,
   DM_SIG_PREFIX_V6,
+  DM_SIG_PREFIX_V7,
   DM_VISIT_KIND,
+  DM_COPY_KIND,
   DM_REACT_REV_MAX,
   DM_V3_TTL_MS,
   DM_V3_STALE_MS,
@@ -729,6 +771,7 @@ module.exports = Object.freeze({
   INNER_KEYS_V4,
   INNER_KEYS_V5,
   INNER_KEYS_V6,
+  INNER_KEYS_V7,
   DM_TARGET_KEYS,
   DM_MEDIA_KEYS,
   DM_MEDIA_MAX,

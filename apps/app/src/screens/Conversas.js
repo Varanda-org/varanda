@@ -37,6 +37,7 @@ import { FILTERS, FILTER_LABELS, RECENT_MAX, applyFilter, conversasReadsAllowed,
 import { ErrorText, Soft, errorText, useBottomPad, useNow } from '../ui'
 import { ConversationRow, personTitle } from '../ui/ConversationRow'
 import { FilterChips } from '../ui/FilterChips'
+import { HistoryCopyRow, HistoryCopySheet, HistoryImportedNote } from '../ui/HistoryCopy'
 import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
 import { SearchField } from '../ui/SearchField'
@@ -407,6 +408,7 @@ export function Conversas ({
   const [filter, setFilter] = useState('todas')
   const [query, setQuery] = useState('')
   const [creating, setCreating] = useState(false)
+  const [copying, setCopying] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
 
   // Set while rendering: the effects below must see the first show in the
@@ -626,6 +628,7 @@ export function Conversas ({
         onNewCommunity={pageKey === null ? () => setCreating(true) : undefined}
         onNewGroup={typeof onOpenCommunities === 'function' ? () => onOpenCommunities() : undefined}
       />
+      <HistoryCopySheet open={copying} onClose={() => setCopying(false)} />
       <NovaComunidade
         visible={creating}
         onClose={() => { setCreating(false); groupsLoad() }}
@@ -651,6 +654,7 @@ export function Conversas ({
   const header = (
     <View>
       <PageInboxNote pageKey={pageKey} />
+      <HistoryImportedNote />
       <View style={styles.search}>
         <SearchField
           label='buscar conversas'
@@ -686,6 +690,7 @@ export function Conversas ({
           </View>
           )
         : null}
+      {unlocked && ready && pageKey === null ? <HistoryCopyRow onPress={() => setCopying(true)} /> : null}
     </View>
   )
 

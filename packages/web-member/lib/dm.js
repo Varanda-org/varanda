@@ -108,6 +108,7 @@ const { createPageHolder, NO_PAGE_KEY, KEY_MISMATCH } = require('./page-dm')
 const { openDmLink, openStampLink, openVisitLink } = require('./dm-link')
 const visits = require('@varanda/core/lib/visits')
 const store = require('./node-store')
+const { createDmCopy } = require('./dm-copy')
 
 const LOCKED = store.LOCKED
 const SELF_SEND = 'não é possível enviar para si'
@@ -511,6 +512,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     clearPending()
     forgetAllBlobs()
     publicItems.clear()
+    copy.reset()
     dropQueued(false, LOCKED)
     opening.clear()
     gone.clear()
@@ -1833,6 +1835,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     let incomplete = false
     let link = null
     let scans = []
+    // History copy pointers seen in this pull (./dm-copy.js).
+    const pointers = []
     try {
       try {
         link = await openDmLink(linkOpts)
@@ -1855,7 +1859,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         for (const item of page.items) {
           read += item.bytes.byteLength
           const row = openItem(own, item.bytes, ops, rows, mod)
-          if (row !== null) {
+          if (row !== null && row.t === 'copy') {
+            pointers.push(row)
+          } else if (row !== null) {
             // Filed now, on the monotonic clock: a ctl earlier in this page
             // then counts for the items after it (dm-fold ignores a row
             // without filedAt).
@@ -1908,6 +1914,14 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     } finally {
       pulling = false
       if (link !== null) link.close()
+      // The import is reads and local filing only and never fails the pull.
+      // A pointer is noted first, so one the cursor passed is not lost.
+      try {
+        if (gen === generation && unlocked()) {
+          await copy.note(pointers)
+          await copy.importAll(own)
+        }
+      } catch {}
       if (added > 0 || applied > 0) emit('dm.changed', { added })
       for (const p of scans) {
         if (p.added > 0 || p.applied > 0) emit('dm.changed', { added: p.added, page: p.page })
@@ -1991,6 +2005,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (inner === null) return null
     const body = dm.openInner(inner, own, { association, revokedIssuers: mod.revokedIssuers })
     if (body === null || dm.pageInnerStale(body, Date.now())) return null
+    // A history copy pointer is never a row: the pull hands it to ./dm-copy.js.
+    if (body.kind === 'copy') return { t: 'copy', id: body.id, copy: body.copy }
     return rowOf(own, body, ops, batch, mod.blocked, local, dm.bodyDigest(body))
   }
 
@@ -2008,6 +2024,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       if (body === null || dm.pageInnerStale(body, Date.now())) return null
       // A Página conversation has no reactions: a v4 body is never filed.
       if (body.kind === 'react') return null
+      // Nor a history copy pointer (own box only).
+      if (body.kind === 'copy') return null
       // Nor a reaction to a momento (v5): a page sends no momento reactions.
       if (body.v === 5) return null
       // Of the body as signed, before a carried legacy key is renamed.
@@ -2944,6 +2962,35 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
 
   const tracked = (fn) => (...args) => track(fn(...args))
 
+  // History copy to another device (./dm-copy.js).
+  const copy = createDmCopy({
+    storage,
+    local,
+    personal,
+    pages,
+    pageCtx,
+    blobs,
+    blobOrigin,
+    fetchImpl,
+    fetchLimits: L.fetch,
+    linkOpts,
+    openDmLink,
+    takeStamps,
+    topUpDm,
+    dropOf,
+    boxHex,
+    generation: () => generation,
+    unlocked,
+    requireUnlocked,
+    emit,
+    log,
+    mediaItem,
+    refusal,
+    unconfirmed,
+    folded,
+    openMedia
+  })
+
   return {
     unlock,
     lock,
@@ -2972,6 +3019,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     dropPageSummaries,
     set: tracked(set),
     pull: tracked(pull),
+    historyCopy: tracked(copy.historyCopy),
     pageGenerate,
     pageShare,
     pageSecrets: tracked(pageSecrets),

@@ -2019,6 +2019,79 @@ async function deletePageDm (storage, page) {
   for (const key of ['dmCursor', 'dmSeen', 'dmCtlQueue', 'dmLegacyBlocks', 'dmLegacyDone']) await storage.writeJson(prefix + key, null)
 }
 
+// History copy (docs/protocol.md section 11 "History copy"). kv dmCopy =
+// { nonce, box }: the sealed record { made, imported, todo } (copy ids made
+// here, imported here, and pointers opened but not imported yet), under the
+// local store key. kv dmCopyPend = { v: 1, items: [{ k, n }] } is the plain
+// index of the held-back Página stores (k: a random hex16, n: pieces), so a
+// reset finds every entry without the key; kv dmCopyPend/<k>/meta and
+// dmCopyPend/<k>/<index> are sealed under the local key.
+const COPY_PEND_MAX = 16
+const COPY_PIECES_MAX = 64
+const HEX16_NAME_RE = /^[0-9a-f]{16}$/
+
+async function readDmCopy (storage) {
+  const data = await readKv(storage, 'dmCopy')
+  return validLegacySealed(data) ? { nonce: data.nonce, box: data.box } : null
+}
+
+function writeDmCopy (storage, sealed) {
+  if (sealed === null) return storage.writeJson('dmCopy', null)
+  if (!validLegacySealed(sealed)) throw new TypeError('registro inválido')
+  return storage.writeJson('dmCopy', { nonce: sealed.nonce, box: sealed.box })
+}
+
+async function readCopyPend (storage) {
+  const data = await readKv(storage, 'dmCopyPend')
+  if (!isVersioned(data) || !Array.isArray(data.items)) return []
+  return data.items
+    .filter((e) => e !== null && typeof e === 'object' && typeof e.k === 'string' && HEX16_NAME_RE.test(e.k) && Number.isSafeInteger(e.n) && e.n >= 1 && e.n <= COPY_PIECES_MAX)
+    .slice(0, COPY_PEND_MAX)
+    .map((e) => ({ k: e.k, n: e.n }))
+}
+
+function writeCopyPend (storage, items) {
+  if (items.length > COPY_PEND_MAX) throw new UsageError('cópias pendentes demais')
+  for (const e of items) {
+    if (typeof e.k !== 'string' || !HEX16_NAME_RE.test(e.k) || !Number.isSafeInteger(e.n) || e.n < 1 || e.n > COPY_PIECES_MAX) throw new TypeError('cópia inválida')
+  }
+  if (items.length === 0) return storage.writeJson('dmCopyPend', null)
+  return storage.writeJson('dmCopyPend', { v: 1, items: items.map((e) => ({ k: e.k, n: e.n })) })
+}
+
+function copyPieceName (k, i) {
+  if (typeof k !== 'string' || !HEX16_NAME_RE.test(k)) throw new TypeError('cópia inválida')
+  if (i !== 'meta' && !(Number.isSafeInteger(i) && i >= 0 && i < COPY_PIECES_MAX)) throw new TypeError('parte inválida')
+  return 'dmCopyPend/' + k + '/' + i
+}
+
+async function readCopyPiece (storage, k, i) {
+  const data = await readKv(storage, copyPieceName(k, i))
+  return validLegacySealed(data) ? { nonce: data.nonce, box: data.box } : null
+}
+
+function writeCopyPiece (storage, k, i, sealed) {
+  const name = copyPieceName(k, i)
+  if (sealed === null) return storage.writeJson(name, null)
+  if (!validLegacySealed(sealed)) throw new TypeError('parte inválida')
+  return storage.writeJson(name, { nonce: sealed.nonce, box: sealed.box })
+}
+
+// One held-back entry's pieces, then the entry from the index.
+async function deleteCopyPendEntry (storage, k) {
+  const items = await readCopyPend(storage)
+  const e = items.find((x) => x.k === k)
+  if (e !== undefined) for (let i = 0; i < e.n; i++) await storage.writeJson(copyPieceName(k, i), null)
+  await storage.writeJson(copyPieceName(k, 'meta'), null)
+  await writeCopyPend(storage, items.filter((x) => x.k !== k))
+}
+
+// Every held-back entry (reset): named by the plain index alone.
+async function deleteCopyPend (storage) {
+  for (const e of await readCopyPend(storage)) await deleteCopyPendEntry(storage, e.k)
+  await storage.writeJson('dmCopyPend', null)
+}
+
 // kv pageStores = { v: 1, pages: [page] }: every page whose local store this
 // device ever opened, written ahead of the store, so a reset removes a page
 // history whose secrets entry is already gone. Only page keys, no secret.
@@ -2050,11 +2123,12 @@ async function deleteDmData (storage) {
   await storage.writeJson('pageSecrets', null)
   await storage.writeJson('pageMaxGen', null)
   await storage.writeJson('pageStores', null)
+  await deleteCopyPend(storage)
   await storage.deleteCore(DM_LOCAL)
   // seenSync before seenRemote and seenLocal: an interrupted reset must
   // never leave the compare-and-swap cursor without the documents it was
   // taken from.
-  for (const key of ['seenSync', 'seenRemote', 'seenHeld', 'dmKey', 'dmCursor', 'dmSeen', 'dmStamps', 'blobStamps', 'dmCtlQueue', 'dmReactPending', 'seenLocal']) await storage.writeJson(key, null)
+  for (const key of ['seenSync', 'seenRemote', 'seenHeld', 'dmKey', 'dmCursor', 'dmSeen', 'dmStamps', 'blobStamps', 'dmCtlQueue', 'dmReactPending', 'dmCopy', 'seenLocal']) await storage.writeJson(key, null)
 }
 
 // kv ageVerified / ageSince = { v: 1, proof }: the account service's signed
@@ -2159,6 +2233,13 @@ module.exports = {
   readDmCursor,
   writeDmCursor,
   readPageCursor,
+  readDmCopy,
+  writeDmCopy,
+  readCopyPend,
+  writeCopyPend,
+  readCopyPiece,
+  writeCopyPiece,
+  deleteCopyPendEntry,
   readPageLegacy,
   writePageLegacy,
   readPageLegacyChunk,

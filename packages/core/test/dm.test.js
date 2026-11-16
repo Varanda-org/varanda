@@ -1570,3 +1570,66 @@ test('inner v6: the largest certificate fits', (t) => {
   t.is(largest, 947, 'the largest v6 frame')
   t.ok(largest <= DM_INNER_BYTES)
 })
+
+// A history copy pointer (v7): the account's own, to itself.
+const COPY_DESC = { id: 'a'.repeat(64), key: 'b'.repeat(64), nonce: 'c'.repeat(48), chunks: 1, bytes: 100, sha256: 'd'.repeat(64) }
+const CID = 'e'.repeat(32)
+function copyPtr (over = {}, from = ana) {
+  return buildInner({ kind: 'copy', id: CID, copy: COPY_DESC, at: AT, ...over }, from)
+}
+function copyBodyOf (over = {}) {
+  return { v: 7, kind: 'copy', id: CID, from: ana.hex, to: ana.hex, copy: COPY_DESC, at: AT, ...over }
+}
+
+test('inner v7: constants, the rpc key list and round trip', (t) => {
+  t.is(dm.DM_SIG_PREFIX_V7, 'varanda-dm-v7\n')
+  t.is(dm.DM_COPY_KIND, 'copy')
+  t.alike(dm.INNER_KEYS_V7, ['v', 'kind', 'id', 'from', 'to', 'copy', 'at'])
+  t.alike(dm.INNER_KEYS_V7, require('@varanda/rpc').DM_INNER_KEYS_V7)
+  const inner = copyPtr()
+  t.is(inner.byteLength, DM_INNER_BYTES)
+  t.alike(Object.keys(wireOf(inner)), dm.INNER_KEYS_V7)
+  const got = openInner(copyPtr(), ana.hex, O)
+  t.is(got.kind, 'copy')
+  t.is(got.mine, true)
+  t.is(got.id, CID)
+  t.alike(got.copy, COPY_DESC)
+})
+
+test('inner v7: only the owner opens it, never a stranger or the visit lane', (t) => {
+  t.is(openInner(copyPtr(), bia.hex, O), null, 'a recipient that is not the sender')
+  t.is(openInner(copyPtr(), caio.hex, O), null)
+  t.is(openInner(copyPtr(), ana.hex, { ...O, visit: true }), null, 'never on the visit lane')
+  // Signed by Bia, sealed for Ana: from is Bia, to is Ana.
+  t.is(openInner(forge(copyBodyOf({ from: bia.hex, to: ana.hex }), bia, dm.DM_SIG_PREFIX_V7), ana.hex, O), null, 'from must be the opener')
+  // Signed by Bia with from === to === Ana: the signature does not match.
+  t.is(openInner(forge(copyBodyOf(), bia, dm.DM_SIG_PREFIX_V7), ana.hex, O), null, 'signed by another key')
+  t.ok(openInner(forge(copyBodyOf(), ana, dm.DM_SIG_PREFIX_V7), ana.hex, O), 'the owner signature opens')
+})
+
+test('inner v7: shape rules', (t) => {
+  const ok = (over) => openInner(forge(copyBodyOf(over), ana, dm.DM_SIG_PREFIX_V7), ana.hex, O)
+  t.ok(ok({}))
+  t.is(ok({ kind: 'msg' }), null)
+  t.is(ok({ id: 'x' }), null)
+  t.is(ok({ at: 'yesterday' }), null)
+  t.is(ok({ copy: { ...COPY_DESC, bytes: 5 } }), null, 'a bad descriptor')
+  t.is(ok({ copy: { ...COPY_DESC, extra: 1 } }), null)
+  t.is(ok({ extra: 1 }), null, 'exact keys')
+  t.is(ok({ to: bia.hex }), null, 'to is the sender')
+  t.exception.all(() => buildInner({ kind: 'copy', id: CID, copy: COPY_DESC, at: AT, text: 'x' }, ana), /./, 'no other field')
+  t.exception.all(() => copyPtr({ copy: { ...COPY_DESC, bytes: 5 } }))
+})
+
+test('inner v7: its own signature domain', (t) => {
+  const { json, sig } = frameParts(copyPtr())
+  t.ok(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V7), json]), sig, ana.publicKey))
+  for (const [name, prefix] of [['v1', DM_SIG_PREFIX], ['v2', DM_SIG_PREFIX_V2], ['v4', dm.DM_SIG_PREFIX_V4], ['v5', dm.DM_SIG_PREFIX_V5], ['v6', dm.DM_SIG_PREFIX_V6]]) {
+    t.absent(hcrypto.verify(b4a.concat([b4a.from(prefix), json]), sig, ana.publicKey), 'not under ' + name)
+    t.is(openInner(forge(copyBodyOf(), ana, prefix), ana.hex, O), null, 'a v7 body signed under ' + name)
+  }
+  for (const [name, inner] of [['v1', msg()], ['v4', react()]]) {
+    const p = frameParts(inner)
+    t.absent(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V7), p.json]), p.sig, ana.publicKey), name + ' under the v7 domain')
+  }
+})

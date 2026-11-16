@@ -1,0 +1,829 @@
+'use strict'
+
+// Copying the conversation history to another device of the same identity
+// (docs/protocol.md section 11 "History copy", docs/rpc.md 5.151). The
+// browser node's engine (./dm.js) wires this module in with the pieces it
+// owns; nothing here touches the network except through them.
+//
+// The old device (historyCopy, only on the user's dm.historyCopy call):
+//   1. Every store held here (the own one and each held Página's) is read as
+//      rows in filing order, each with its position n. The cached photos of
+//      the own store are sealed again as NEW blobs (a fresh key, so the
+//      original blob and key are never reused) and put, newest first; a row
+//      whose photos travelled points at the new descriptors and carries c: 1.
+//      A photo not cached here, or left out because the weekly copy
+//      allowance ended, stays as it was and is counted.
+//   2. The rows are cut into parts of at most PART_BYTES, each sealed as a
+//      blob and put; a manifest naming the parts is sealed and put the same
+//      way; last, a v7 pointer drop (kind 'copy', signed by the identity key,
+//      sealed to the own box, one dm stamp) is put to the dm pool.
+//   3. Blob stamps come from the copy source first (the seeder's weekly copy
+//      allowance, ./blob.js copySource) and from the daily blob wallet when
+//      the seeder does not answer the kind; a photo is left out, never paid
+//      from the daily wallet, once the weekly allowance itself ended.
+//   A failed call is a normal error and repeats nothing by itself. The user's
+//   retry in the same unlock keeps the copy id, the photos already put (only
+//   their new descriptors are kept), and the sealed parts, manifest and
+//   pointer frames, so a blob or a drop is put again as the SAME bytes (the
+//   pool answers an identical frame as a repeated success) and no stamp is
+//   spent twice. The id is recorded as made here before the pointer is put.
+//
+// Every device (note, importAll), from the pull:
+//   - The pointer opens only under the own box, signed by the own key (core
+//     dm.js openInner, kind 'copy'). A copy id made or imported here is
+//     skipped. Anything else becomes a todo in kv dmCopy (sealed), so a
+//     pointer the cursor already passed is not lost while the blobs are
+//     unreachable; a todo older than DM_RETENTION_MS is dropped.
+//   - The manifest and the parts are fetched (fetchBlob checks the frames,
+//     the sha256 and the secretbox), parsed and every row is checked by the
+//     local store's own row rules plus the sender/recipient rules below.
+//     Only reads are ever repeated: a failure that is not "gone" leaves the
+//     todo for the next pull; a blob gone or invalid ends it.
+//   - Rows are filed BELOW everything the store held when the filing began
+//     (the legacy bundle's horizon, ./dm.js legacyHorizon), in n order, so an
+//     imported 'deleted' never hides a message received here since and a
+//     'deleted' held here still hides the imported older rows. A message is
+//     deduped by sender and id, a ctl by its id, a reaction by its id. A row
+//     the bundle marked seen is marked seen here.
+//   - A Página's store is filed into that page's store when its secrets are
+//     held, else kept sealed (kv dmCopyPend) until they are, or until
+//     DM_RETENTION_MS passes.
+//   - The photos that travelled are fetched in the background (the engine's
+//     openMedia, newest first, within PREFETCH_BYTES_MAX), never for a
+//     conversation in the request folder.
+//
+// Nothing here logs a key, an id, a text or a peer.
+const b4a = require('b4a')
+const hcrypto = require('hypercore-crypto')
+const dm = require('@varanda/core/lib/dm')
+const dmFold = require('@varanda/core/lib/dm-fold')
+const blobCore = require('@varanda/core/lib/blob')
+const { nowIso } = require('@varanda/core/lib/records')
+const { UsageError } = require('@varanda/core/lib/errors')
+const { copyLinkCard } = require('@varanda/core/lib/link-card')
+const { sealBlob, fetchBlob } = require('./blob')
+const { validRow } = require('./dm-store')
+const store = require('./node-store')
+
+const COPY_BUSY = 'cópia de conversas já em andamento'
+const NOTHING = 'não há conversas para copiar'
+const COPY_FAILED = 'não deu para copiar as conversas: tente de novo'
+const NO_STAMPS = 'o limite de envio de hoje acabou'
+const LOCKED = store.LOCKED
+// The messages ./dm.js gives a blob that is gone or does not verify.
+const MEDIA_GONE = 'mídia indisponível'
+const BAD_MEDIA = 'mídia inválida'
+
+const PART_BYTES = 1048576
+// The largest part a reader accepts (a writer cuts at PART_BYTES; a row is
+// far smaller than the slack).
+const PART_PLAIN_MAX = 2 * PART_BYTES
+const PIECE_BYTES = 524288
+const PIECES_MAX = 64
+const PEND_MAX = 16
+const STORES_MAX = 64
+const PARTS_MAX = 256
+const ROWS_MAX = 200000
+const TEXT_MAX = 4000
+const MADE_MAX = 16
+const IMPORTED_MAX = 64
+const TODO_MAX = 8
+const PREFETCH_BYTES_MAX = 64 * 1048576
+const CHUNK_ROWS = 500
+const HEX32 = /^[0-9a-f]{32}$/
+const HEX64 = /^[0-9a-f]{64}$/
+const ISO = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/
+
+function noop () {}
+
+function wipe (b) {
+  if (b instanceof Uint8Array) b.fill(0)
+}
+
+// Left out for lack of stamps: not a failure, counted instead.
+class LeftOut extends Error {}
+// A manifest, part or blob that will never import.
+class Dead extends Error {}
+
+function exactKeys (o, keys) {
+  if (o === null || typeof o !== 'object' || Array.isArray(o)) return false
+  const have = Object.keys(o)
+  return have.length === keys.length && keys.every((k) => have.includes(k))
+}
+
+function isCount (n) {
+  return Number.isSafeInteger(n) && n >= 0
+}
+
+function itemsOf (m) {
+  return Array.isArray(m.media) ? m.media : m.card && m.card.image ? [m.card.image] : []
+}
+
+function mediaBytes (m) {
+  return itemsOf(m).reduce((n, d) => n + (Number.isSafeInteger(d.bytes) ? d.bytes : 0), 0)
+}
+
+function plainDescriptor (d) {
+  return { id: d.id, key: d.key, nonce: d.nonce, chunks: d.chunks, bytes: d.bytes, sha256: d.sha256 }
+}
+
+function validTodo (t) {
+  return t !== null && typeof t === 'object' && typeof t.id === 'string' && HEX32.test(t.id) &&
+    blobCore.validateBlobDescriptor(t.copy) && Number.isSafeInteger(t.seen) && t.seen > 0
+}
+
+function idList (v) {
+  return Array.isArray(v) ? v.filter((x) => typeof x === 'string' && HEX32.test(x)) : []
+}
+
+// env: the engine's pieces (see createDmEngine in ./dm.js).
+function createDmCopy (env) {
+  const { storage, local, blobs } = env
+  let copying = false
+  // The copy being retried by the user in this unlock (see the header).
+  let attempt = null
+  let stateLock = Promise.resolve()
+
+  function withState (fn) {
+    const p = stateLock.then(fn)
+    stateLock = p.catch(noop)
+    return p
+  }
+
+  // ---- the sealed record: made, imported, todo ----
+
+  async function readState () {
+    const empty = { made: [], imported: [], todo: [] }
+    const sealed = await store.readDmCopy(storage)
+    if (sealed === null) return empty
+    const v = local.open(sealed)
+    if (v === null || typeof v !== 'object') return empty
+    return {
+      made: idList(v.made).slice(-MADE_MAX),
+      imported: idList(v.imported).slice(-IMPORTED_MAX),
+      todo: (Array.isArray(v.todo) ? v.todo.filter(validTodo) : []).slice(0, TODO_MAX).map((t) => ({ id: t.id, copy: plainDescriptor(t.copy), seen: t.seen }))
+    }
+  }
+
+  function writeState (s) {
+    return store.writeDmCopy(storage, local.seal({
+      made: s.made.slice(-MADE_MAX),
+      imported: s.imported.slice(-IMPORTED_MAX),
+      todo: s.todo.slice(0, TODO_MAX)
+    }))
+  }
+
+  function updateState (fn) {
+    return withState(async () => {
+      const s = await readState()
+      fn(s)
+      await writeState(s)
+      return s
+    })
+  }
+
+  // ---- making a copy ----
+
+  // The one place the pointer drop is put: the bucketed pool takes the own
+  // box prefix here (docs/protocol.md section 11).
+  async function putPointer (bytes) {
+    let link
+    try {
+      link = await env.openDmLink(env.linkOpts)
+    } catch (err) {
+      if (err instanceof UsageError) throw err
+      throw new UsageError('sem conexão com o semeador')
+    }
+    try {
+      let r
+      try {
+        r = await link.put(bytes)
+      } catch {
+        throw env.unconfirmed()
+      }
+      if (!r.ok) {
+        if (r.reason === 'invalido' && attempt !== null) attempt.pointer = null
+        throw env.refusal(r.reason)
+      }
+    } finally {
+      link.close()
+    }
+  }
+
+  async function putBlob (sealed) {
+    try {
+      await blobs.put(sealed)
+    } catch (err) {
+      if (err && err.uncertain) throw new UsageError(COPY_FAILED)
+      throw err
+    }
+  }
+
+  // A photo: the weekly copy allowance, else the daily wallet only when the
+  // seeder never answered the copy kind; left out (LeftOut) otherwise.
+  async function stampPhoto (sealed, keyPair, source) {
+    try {
+      await blobs.stamp(sealed, keyPair, source)
+      return
+    } catch (err) {
+      if (!(err instanceof UsageError)) throw err
+      if (source.exhausted) throw new LeftOut()
+    }
+    try {
+      await blobs.stamp(sealed, keyPair)
+    } catch (err) {
+      if (err instanceof UsageError) throw new LeftOut()
+      throw err
+    }
+  }
+
+  // Text parts and the manifest must go, so the daily wallet backs them.
+  async function stampRequired (sealed, keyPair, source) {
+    try {
+      await blobs.stamp(sealed, keyPair, source)
+      return
+    } catch (err) {
+      if (!(err instanceof UsageError)) throw err
+    }
+    await blobs.stamp(sealed, keyPair)
+  }
+
+  // The snapshot without the messages and reactions a 'deleted' op already
+  // cut off (dm-fold keeps a row only when it was filed after the op), so a
+  // deleted conversation neither travels nor spends photo allowance. Every
+  // ctl op stays: the fold on the other device needs them.
+  function cutSnap (snap) {
+    const cut = new Map()
+    for (const o of snap.ops) {
+      if (o.op === 'deleted' && !(cut.get(o.peer) >= o.filedAt)) cut.set(o.peer, o.filedAt)
+    }
+    if (cut.size === 0) return snap
+    const live = (r) => !(cut.get(r.peer) >= r.filedAt)
+    return { messages: snap.messages.filter(live), ops: snap.ops, reactions: snap.reactions.filter(live) }
+  }
+
+  function rowsOf (snap) {
+    const rows = [...snap.messages, ...snap.ops, ...snap.reactions]
+    // Stable: equal filing times keep messages, then ops, then reactions.
+    return rows.map((r, i) => ({ r, i })).sort((x, y) => x.r.filedAt - y.r.filedAt || x.i - y.i).map((x) => x.r)
+  }
+
+  function checkGen (gen) {
+    if (gen !== env.generation() || !env.unlocked()) throw new UsageError(LOCKED)
+  }
+
+  // -> { id, messages, photos, notCached, leftOut }
+  async function historyCopy (own, keyPair) {
+    env.requireUnlocked()
+    if (copying) throw new UsageError(COPY_BUSY)
+    copying = true
+    const gen = env.generation()
+    try {
+      return await run(keyPair, gen)
+    } finally {
+      copying = false
+    }
+  }
+
+  async function run (keyPair, gen) {
+    if (attempt === null || attempt.gen !== gen) {
+      attempt = { gen, id: dm.newMessageId(), at: nowIso(), photos: new Map(), stores: null, counts: null, manifest: null, pointer: null }
+    }
+    const a = attempt
+    const source = blobs.copySource(keyPair)
+
+    if (a.stores === null) {
+      const held = [{ page: null, ctx: env.personal }]
+      for (const page of env.pages.pages()) {
+        try {
+          held.push({ page, ctx: await env.pageCtx(page) })
+        } catch {}
+      }
+      checkGen(gen)
+      const snaps = []
+      for (const h of held) {
+        snaps.push({ ...h, snap: cutSnap(h.ctx.local.snapshot()), seenTokens: new Set(await store.readDmSeen(storage, h.ctx.prefix)) })
+      }
+      if (snaps.every((h) => h.snap.messages.length + h.snap.ops.length + h.snap.reactions.length === 0)) throw new UsageError(NOTHING)
+
+      // The photos of the own store, newest first.
+      const cands = []
+      // notCached: photos this device no longer holds; leftOut: photos the
+      // weekly copy allowance did not reach.
+      let notCached = 0
+      let leftOut = 0
+      for (const m of snaps[0].snap.messages) {
+        const items = itemsOf(m)
+        if (items.length === 0) continue
+        if (!local.hasMedia(m.from, m.id)) notCached += items.length
+        else cands.push(m)
+      }
+      cands.sort((x, y) => y.filedAt - x.filedAt)
+      const total = cands.length + 2
+      a.total = total
+      let done = 0
+      env.emit('dm.copyProgress', { done, total })
+      let photos = 0
+      let stop = false
+      for (const m of cands) {
+        checkGen(gen)
+        const key = m.from + '\n' + m.id
+        const items = itemsOf(m)
+        if (stop) {
+          leftOut += items.length
+          continue
+        }
+        let entry = a.photos.get(key)
+        if (entry === undefined) {
+          entry = { slots: items.map(() => ({ sealed: null, desc: null })), media: null }
+          a.photos.set(key, entry)
+        }
+        if (entry.media === null) {
+          const plains = await local.getMedia(m.from, m.id)
+          if (plains === null || plains.length !== items.length) {
+            if (plains !== null) plains.forEach(wipe)
+            notCached += items.length
+            a.photos.delete(key)
+            continue
+          }
+          try {
+            for (let i = 0; i < items.length; i++) {
+              const slot = entry.slots[i]
+              if (slot.desc !== null) continue
+              if (slot.sealed === null) slot.sealed = sealBlob(plains[i])
+              await stampPhoto(slot.sealed, keyPair, source)
+              await putBlob(slot.sealed)
+              slot.desc = plainDescriptor(slot.sealed.descriptor)
+              slot.sealed = null
+            }
+          } catch (err) {
+            if (err instanceof LeftOut) {
+              stop = true
+              leftOut += items.length
+              continue
+            }
+            throw err
+          } finally {
+            plains.forEach(wipe)
+          }
+          entry.media = items.map((d, i) => env.mediaItem({ ...entry.slots[i].desc, mime: d.mime, w: d.w, h: d.h, ms: d.ms }))
+        }
+        photos += items.length
+        done++
+        env.emit('dm.copyProgress', { done, total })
+      }
+      checkGen(gen)
+      a.stores = buildStores(snaps, a.photos)
+      a.counts = { photos, notCached, leftOut }
+    }
+    const total = a.total
+    let done = total - 2
+    let messages = 0
+    for (const s of a.stores) messages += s.rows
+
+    for (const s of a.stores) {
+      for (const part of s.parts) {
+        checkGen(gen)
+        if (part.desc !== null) continue
+        await stampRequired(part.sealed, keyPair, source)
+        await putBlob(part.sealed)
+        part.desc = plainDescriptor(part.sealed.descriptor)
+        part.sealed = null
+      }
+    }
+    if (a.manifest === null) {
+      const json = JSON.stringify({
+        v: 1,
+        id: a.id,
+        at: a.at,
+        stores: a.stores.map((s) => ({ page: s.page, parts: s.parts.map((p) => p.desc), rows: s.rows, ops: s.ops }))
+      })
+      a.manifest = { sealed: sealBlob(b4a.from(json, 'utf8')), desc: null }
+    }
+    if (a.manifest.desc === null) {
+      checkGen(gen)
+      await stampRequired(a.manifest.sealed, keyPair, source)
+      await putBlob(a.manifest.sealed)
+      a.manifest.desc = plainDescriptor(a.manifest.sealed.descriptor)
+      a.manifest.sealed = null
+    }
+    done++
+    env.emit('dm.copyProgress', { done, total })
+
+    if (a.pointer === null) {
+      const inner = dm.buildInner({ kind: 'copy', id: a.id, copy: a.manifest.desc, at: a.at }, keyPair)
+      let sealed
+      try {
+        sealed = dm.sealInner(inner, env.boxHex().box)
+      } finally {
+        inner.fill(0)
+      }
+      let stamps = await env.takeStamps(1)
+      if (stamps === null) {
+        await env.topUpDm(keyPair, { force: true })
+        stamps = await env.takeStamps(1)
+      }
+      if (stamps === null) throw new UsageError(NO_STAMPS)
+      a.pointer = env.dropOf(sealed, stamps[0])
+    }
+    checkGen(gen)
+    // Recorded before the put: this device never imports its own copy.
+    await updateState((s) => { if (!s.made.includes(a.id)) s.made.push(a.id) })
+    await putPointer(a.pointer)
+    done++
+    env.emit('dm.copyProgress', { done, total })
+    attempt = null
+    return { id: a.id, messages, photos: a.counts.photos, notCached: a.counts.notCached, leftOut: a.counts.leftOut }
+  }
+
+  // Rows in filing order with n, the photos that travelled swapped in, then
+  // cut into sealed parts. The row is the store's own plain row without
+  // filedAt (never a key of the store), plus n, seen (a received message
+  // marked seen here) and c (its photos travelled).
+  function buildStores (snaps, photoMap) {
+    const out = []
+    for (const h of snaps) {
+      const rows = []
+      let msgs = 0
+      let ops = 0
+      for (const r of rowsOf(h.snap)) {
+        const row = { ...r }
+        delete row.filedAt
+        const item = { ...row, n: rows.length }
+        if (r.t === 'msg') {
+          msgs++
+          const entry = photoMap.get(r.from + '\n' + r.id)
+          if (h.page === null && entry !== undefined && entry.media !== null) {
+            if (Array.isArray(r.media)) item.media = entry.media.map((d) => ({ ...d }))
+            else if (r.card && r.card.image) item.card = copyLinkCard(r.card, () => ({ ...entry.media[0] }))
+            item.c = 1
+          }
+          if (!r.mine && h.seenTokens.has(h.ctx.local.seenToken(dmFold.seenKey(r.from, r.id)))) item.seen = true
+        } else {
+          ops++
+        }
+        rows.push(item)
+      }
+      out.push({ page: h.page, rows: msgs, ops, parts: rows.length === 0 ? [] : splitParts(h.page, rows) })
+    }
+    return out
+  }
+
+  function splitParts (page, rows) {
+    const parts = []
+    let cur = []
+    let size = 0
+    const flush = () => {
+      if (cur.length === 0) return
+      const json = JSON.stringify({ v: 1, page, rows: cur })
+      parts.push({ sealed: sealBlob(b4a.from(json, 'utf8')), desc: null })
+      cur = []
+      size = 0
+    }
+    for (const row of rows) {
+      const n = b4a.byteLength(JSON.stringify(row)) + 1
+      if (size + n > PART_BYTES) flush()
+      cur.push(row)
+      size += n
+    }
+    flush()
+    return parts
+  }
+
+  // ---- importing a copy ----
+
+  // The pointer rows a pull opened ({ id, copy }) -> todo entries, unless
+  // the id was made or imported here or is already waiting.
+  async function note (pointers) {
+    if (pointers.length === 0) return
+    await updateState((s) => {
+      for (const p of pointers) {
+        if (!HEX32.test(p.id) || !blobCore.validateBlobDescriptor(p.copy)) continue
+        if (s.made.includes(p.id) || s.imported.includes(p.id) || s.todo.some((t) => t.id === p.id)) continue
+        if (s.todo.length >= TODO_MAX) s.todo.shift()
+        s.todo.push({ id: p.id, copy: plainDescriptor(p.copy), seen: Date.now() })
+      }
+    })
+  }
+
+  async function fetchJson (desc) {
+    if (!blobCore.validateBlobDescriptor(desc) || desc.bytes - blobCore.BLOB_MAC_BYTES > PART_PLAIN_MAX) throw new Dead()
+    let r
+    try {
+      r = await fetchBlob(plainDescriptor(desc), env.blobOrigin, { mime: 'application/json', fetch: env.fetchImpl, limits: env.fetchLimits })
+    } catch (err) {
+      const msg = err && err.message
+      if (msg === MEDIA_GONE || msg === BAD_MEDIA) throw new Dead()
+      throw err
+    }
+    try {
+      return JSON.parse(b4a.toString(r.bytes, 'utf8'))
+    } catch {
+      throw new Dead()
+    } finally {
+      wipe(r.bytes)
+    }
+  }
+
+  function validManifest (m, id) {
+    if (!exactKeys(m, ['v', 'id', 'at', 'stores']) || m.v !== 1 || m.id !== id || typeof m.at !== 'string' || !ISO.test(m.at)) return false
+    if (!Array.isArray(m.stores) || m.stores.length < 1 || m.stores.length > STORES_MAX) return false
+    const pages = new Set()
+    for (const s of m.stores) {
+      if (!exactKeys(s, ['page', 'parts', 'rows', 'ops']) || !isCount(s.rows) || !isCount(s.ops)) return false
+      if (s.page !== null && (typeof s.page !== 'string' || !HEX64.test(s.page))) return false
+      if (pages.has(s.page)) return false
+      pages.add(s.page)
+      if (!Array.isArray(s.parts) || s.parts.length < 1 || s.parts.length > PARTS_MAX || !s.parts.every((d) => blobCore.validateBlobDescriptor(d))) return false
+    }
+    return true
+  }
+
+  // A bundle row -> { row, n, seen, c } as the local store would hold it,
+  // or null. self: the diary key of the store (the page's for a Página).
+  function cleanRow (r, self) {
+    if (r === null || typeof r !== 'object' || Array.isArray(r) || !isCount(r.n)) return null
+    const { n, seen, c, ...row } = r
+    if ((seen !== undefined && seen !== true) || (c !== undefined && c !== 1)) return null
+    if (row.t !== 'msg' && row.t !== 'ctl' && row.t !== 'rx') return null
+    if (!validRow({ ...row, filedAt: 0 })) return null
+    if (row.peer === self) return null
+    if (row.t === 'msg') {
+      if (typeof row.text !== 'string' || row.text.length > TEXT_MAX) return null
+      if (row.mine !== (row.from === self)) return null
+      if (!row.mine && row.peer !== row.from) return null
+    } else if (row.t === 'rx') {
+      if (row.mine !== (row.from === self)) return null
+    }
+    return { row, n, seen: seen === true, c: c === 1 }
+  }
+
+  // The filing time everything imported goes below: older than every row
+  // the store held, like the Página legacy bundle's (./dm.js legacyHorizon).
+  function horizonOf (lc) {
+    const { messages, ops, reactions } = lc.snapshot()
+    let min = lc.nextFiled()
+    for (const r of [...messages, ...ops, ...reactions]) if (Number.isFinite(r.filedAt) && r.filedAt < min) min = r.filedAt
+    return min
+  }
+
+  // Files the rows of one store -> { messages, ops, reactions, skipped,
+  // fresh } (fresh: the message rows filed now whose photos travelled).
+  async function fileRows (ctx, self, rawRows) {
+    const lc = ctx.local
+    const items = []
+    const taken = new Set()
+    let skipped = 0
+    for (const r of rawRows) {
+      const c = cleanRow(r, self)
+      if (c === null || taken.has(c.n)) {
+        skipped++
+        continue
+      }
+      taken.add(c.n)
+      items.push(c)
+    }
+    items.sort((x, y) => x.n - y.n)
+    const horizon = horizonOf(lc)
+    const out = []
+    const keys = new Set()
+    const seenIds = []
+    const fresh = []
+    let messages = 0
+    let ops = 0
+    let reactions = 0
+    for (let pos = 0; pos < items.length; pos++) {
+      const { row, seen, c } = items[pos]
+      const filedAt = horizon - items.length + pos
+      const k = row.t + '\n' + (row.from || '') + '\n' + row.id
+      if (keys.has(k)) continue
+      keys.add(k)
+      if (row.t === 'msg') {
+        if (lc.hasMessage(row.from, row.id)) continue
+        messages++
+        if (seen && !row.mine) seenIds.push(lc.seenToken(dmFold.seenKey(row.from, row.id)))
+        if (c && itemsOf(row).length > 0) fresh.push({ ...row, filedAt })
+      } else if (row.t === 'ctl') {
+        if (lc.hasOp(row.id)) continue
+        ops++
+      } else {
+        if (lc.hasReaction(row.from, row.id)) continue
+        reactions++
+      }
+      out.push({ ...row, filedAt })
+    }
+    for (let i = 0; i < out.length; i += CHUNK_ROWS) await lc.append(out.slice(i, i + CHUNK_ROWS))
+    if (seenIds.length > 0) await store.writeDmSeen(storage, [...await store.readDmSeen(storage, ctx.prefix), ...seenIds], ctx.prefix)
+    return { messages, ops, reactions, skipped, fresh }
+  }
+
+  // Newest first, within the prefetch budget, never for a conversation in
+  // the request folder.
+  async function prefetch (own, fresh) {
+    if (fresh.length === 0) return
+    let requests
+    try {
+      requests = new Set((await env.folded(own)).requests.map((c) => c.peer))
+    } catch {
+      return
+    }
+    let budget = PREFETCH_BYTES_MAX
+    for (const m of fresh.sort((x, y) => y.filedAt - x.filedAt)) {
+      if (requests.has(m.peer)) continue
+      budget -= mediaBytes(m)
+      if (budget < 0) break
+      env.openMedia(m, true).catch(noop)
+    }
+  }
+
+  // ---- Página stores that wait for their secrets ----
+
+  async function readPendMeta (k) {
+    const sealed = await store.readCopyPiece(storage, k, 'meta')
+    const v = sealed === null ? null : local.open(sealed)
+    if (v === null || typeof v !== 'object' || typeof v.id !== 'string' || !HEX32.test(v.id) || typeof v.page !== 'string' || !HEX64.test(v.page) || !Number.isSafeInteger(v.seen)) return null
+    return { id: v.id, page: v.page, seen: v.seen }
+  }
+
+  async function hold (id, page, rows) {
+    const bytes = b4a.from(JSON.stringify({ rows }), 'utf8')
+    try {
+      const n = Math.ceil(bytes.byteLength / PIECE_BYTES)
+      if (n < 1 || n > PIECES_MAX) {
+        env.log('aviso: conversas de uma Página grandes demais para guardar')
+        return
+      }
+      const items = await store.readCopyPend(storage)
+      for (const e of items) {
+        const meta = await readPendMeta(e.k)
+        if (meta !== null && meta.id === id && meta.page === page) return
+      }
+      const k = b4a.toString(hcrypto.randomBytes(8), 'hex')
+      while (items.length >= PEND_MAX) await store.deleteCopyPendEntry(storage, items.shift().k)
+      await store.writeCopyPiece(storage, k, 'meta', local.seal({ id, page, seen: Date.now() }))
+      for (let i = 0; i < n; i++) {
+        await store.writeCopyPiece(storage, k, i, local.sealBytes(bytes.subarray(i * PIECE_BYTES, (i + 1) * PIECE_BYTES)))
+      }
+      await store.writeCopyPend(storage, [...(await store.readCopyPend(storage)), { k, n }])
+    } finally {
+      wipe(bytes)
+    }
+  }
+
+  // Files the held-back stores whose page is held now, drops the expired.
+  // -> the messages filed, or -1 when nothing was filed.
+  async function settle () {
+    let messages = 0
+    let any = false
+    for (const e of await store.readCopyPend(storage)) {
+      const meta = await readPendMeta(e.k)
+      if (meta === null || Date.now() - meta.seen > dm.DM_RETENTION_MS) {
+        await store.deleteCopyPendEntry(storage, e.k)
+        continue
+      }
+      if (env.pages.get(meta.page) === null) continue
+      const chunks = []
+      let ok = true
+      for (let i = 0; i < e.n; i++) {
+        const sealed = await store.readCopyPiece(storage, e.k, i)
+        const piece = sealed === null ? null : local.openBytes(sealed)
+        if (piece === null) {
+          ok = false
+          break
+        }
+        chunks.push(piece)
+      }
+      let rows = null
+      if (ok) {
+        const joined = b4a.concat(chunks)
+        try {
+          const v = JSON.parse(b4a.toString(joined, 'utf8'))
+          if (v !== null && typeof v === 'object' && Array.isArray(v.rows)) rows = v.rows
+        } catch {}
+        wipe(joined)
+      }
+      chunks.forEach(wipe)
+      if (rows === null) {
+        await store.deleteCopyPendEntry(storage, e.k)
+        continue
+      }
+      let ctx
+      try {
+        ctx = await env.pageCtx(meta.page)
+      } catch {
+        continue
+      }
+      const f = await fileRows(ctx, meta.page, rows)
+      await store.deleteCopyPendEntry(storage, e.k)
+      messages += f.messages
+      if (f.messages + f.ops + f.reactions > 0) {
+        any = true
+        env.emit('dm.changed', { added: f.messages, page: meta.page })
+      }
+    }
+    return any ? messages : -1
+  }
+
+  async function importOne (own, t) {
+    const manifest = await fetchJson(t.copy)
+    if (!validManifest(manifest, t.id)) throw new Dead()
+    const bundles = []
+    for (const s of manifest.stores) {
+      const rows = []
+      for (const d of s.parts) {
+        const part = await fetchJson(d)
+        if (!exactKeys(part, ['v', 'page', 'rows']) || part.v !== 1 || part.page !== s.page || !Array.isArray(part.rows)) throw new Dead()
+        for (const r of part.rows) rows.push(r)
+        if (rows.length > ROWS_MAX) throw new Dead()
+      }
+      bundles.push({ page: s.page, rows })
+    }
+    let messages = 0
+    let filed = 0
+    for (const b of bundles) {
+      let ctx = null
+      if (b.page === null) ctx = env.personal
+      else if (env.pages.get(b.page) !== null) {
+        try {
+          ctx = await env.pageCtx(b.page)
+        } catch {
+          ctx = null
+        }
+      }
+      if (ctx === null) {
+        await hold(t.id, b.page, b.rows)
+        continue
+      }
+      const f = await fileRows(ctx, b.page === null ? own : b.page, b.rows)
+      messages += f.messages
+      filed += f.messages + f.ops + f.reactions
+      if (f.messages + f.ops + f.reactions > 0) env.emit('dm.changed', b.page === null ? { added: f.messages } : { added: f.messages, page: b.page })
+      if (b.page === null) await prefetch(own, f.fresh)
+    }
+    return { messages, filed }
+  }
+
+  // Imports the todo pointers, oldest first, then settles the held-back
+  // Página stores. Never throws: a failure that is not final keeps its todo
+  // for the next pull.
+  async function importAll (own) {
+    const gen = env.generation()
+    if (env.blobOrigin === null) return
+    let total = 0
+    let any = false
+    try {
+      const s = await withState(readState)
+      for (const t of s.todo) {
+        if (gen !== env.generation() || !env.unlocked()) return
+        if (Date.now() - t.seen > dm.DM_RETENTION_MS) {
+          await updateState((st) => { st.todo = st.todo.filter((x) => x.id !== t.id) })
+          continue
+        }
+        let r
+        try {
+          r = await importOne(own, t)
+        } catch (err) {
+          if (err instanceof Dead) {
+            await updateState((st) => {
+              st.todo = st.todo.filter((x) => x.id !== t.id)
+              if (!st.imported.includes(t.id)) st.imported.push(t.id)
+            })
+            continue
+          }
+          env.log('aviso: cópia de conversas de outro aparelho ainda não importada')
+          break
+        }
+        await updateState((st) => {
+          st.todo = st.todo.filter((x) => x.id !== t.id)
+          if (!st.imported.includes(t.id)) st.imported.push(t.id)
+        })
+        total += r.messages
+        any = any || r.filed > 0
+      }
+      if (gen === env.generation() && env.unlocked()) {
+        const settled = await settle()
+        if (settled >= 0) {
+          total += settled
+          any = true
+        }
+      }
+    } catch {
+      env.log('aviso: cópia de conversas de outro aparelho ainda não importada')
+    }
+    if (any && gen === env.generation()) env.emit('dm.copyImported', { messages: total })
+  }
+
+  function reset () {
+    attempt = null
+  }
+
+  return {
+    historyCopy,
+    note,
+    importAll,
+    reset,
+    get copying () { return copying }
+  }
+}
+
+module.exports = { createDmCopy, COPY_BUSY, NOTHING, COPY_FAILED, PART_BYTES }

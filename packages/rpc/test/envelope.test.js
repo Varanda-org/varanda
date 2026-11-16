@@ -66,7 +66,7 @@ test('response: success and error', (t) => {
 })
 
 test('event names and stop reasons (sync.started and preempted included)', (t) => {
-  t.alike([...EVENTS], ['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed', 'groups.changed', 'dm.changed', 'dm.sending', 'seen.changed', 'dm.pageKeyMismatch'])
+  t.alike([...EVENTS], ['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed', 'groups.changed', 'dm.changed', 'dm.sending', 'seen.changed', 'dm.pageKeyMismatch', 'dm.copyProgress', 'dm.copyImported'])
   t.alike([...STOP_REASONS], ['done', 'stopped', 'preempted', 'timeout', 'error', 'idle'])
   t.is(STOP_REASONS.length, 6)
   t.ok(Object.isFrozen(EVENTS))
@@ -160,6 +160,21 @@ test('event: dm.sending', (t) => {
   t.alike(ev({}).value, { v: 1, event: 'dm.sending', seq: 1, data: {} })
   for (const data of [{ n: 1 }, { added: 0 }, { runId: 1, reason: 'done' }, [], null, 'x']) {
     t.absent(ev(data).ok, JSON.stringify(data))
+  }
+})
+
+test('event: dm.copyProgress and dm.copyImported', (t) => {
+  const p = (data) => validateEvent({ v: 1, event: 'dm.copyProgress', seq: 1, data })
+  t.ok(p({ done: 0, total: 0 }).ok)
+  t.ok(p({ done: 3, total: 10 }).ok)
+  for (const data of [{}, { done: 4, total: 3 }, { done: -1, total: 3 }, { done: 1.5, total: 3 }, { done: 1 }, { done: 1, total: 3, x: 1 }, [], null]) {
+    t.absent(p(data).ok, JSON.stringify(data))
+  }
+  const i = (data) => validateEvent({ v: 1, event: 'dm.copyImported', seq: 1, data })
+  t.ok(i({ messages: 0 }).ok)
+  t.ok(i({ messages: 42 }).ok)
+  for (const data of [{}, { messages: -1 }, { messages: 'a' }, { messages: 1, page: 'ab'.repeat(32) }, [], null]) {
+    t.absent(i(data).ok, JSON.stringify(data))
   }
 })
 

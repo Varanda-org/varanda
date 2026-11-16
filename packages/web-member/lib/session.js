@@ -5038,6 +5038,21 @@ function createBrowserSession ({
       }
     },
 
+    // Copies the conversation history for the other devices of this identity
+    // (docs/rpc.md 5.151). Not on the chain: a copy takes minutes (paced
+    // stamps and puts) and must not hold up sends. One at a time, in the
+    // engine; it runs only on this call and repeats nothing by itself.
+    'dm.historyCopy': async () => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const ident = identityTarget
+      const own = await dmIdentity({}, ident)
+      try {
+        return await withDmReady(ident, () => dmEngine.historyCopy(own, keyPair))
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+    },
+
     // With `page` (5.114) the page's conversations, held under its secrets;
     // the member's own blocks do not apply to them.
     'dm.list': serialDmList(async (params) => {

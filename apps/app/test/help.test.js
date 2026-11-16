@@ -203,6 +203,7 @@ test('conversas help states the private-message rules', async (t) => {
     'Não há confirmação de leitura.',
     'Bloquear interrompe as mensagens nos seus aparelhos.',
     'Apagar remove a conversa só nos seus aparelhos.',
+    'Copiar conversas leva o texto e as fotos guardadas neste aparelho para os seus outros aparelhos que entram com a mesma passkey, e só você consegue abrir.',
     'Uma denúncia envia só a mensagem que você escolheu e a conta de quem enviou, nunca o resto da conversa.',
     'A linha Comunidades serve para achar e criar comunidades.'
   ])

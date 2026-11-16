@@ -1024,4 +1024,4 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
   return { unlock, lock, unlocked, keyReady, keyStage, loaded, summaryFor, saveSummary, nextFiled, append, snapshot, ops, version: currentVersion, hasMessage, hasReaction, reactionRev, hasOp, seenToken, seal, open, sealBytes, openBytes, hasMedia, putMedia, getMedia, wipeCache, visits, visitsOn, writeVisits, visitSeen, writeVisitSeen, visitToken, visitSent, writeVisitSent, visitQueue, writeVisitQueue, visitCursor, writeVisitCursor, clearVisits, idle, close }
 }
 
-module.exports = { createDmStore, SUMMARY_PAGE, VISIT_QUEUE_MAX, VISIT_SEEN_MAX }
+module.exports = { createDmStore, validRow, SUMMARY_PAGE, VISIT_QUEUE_MAX, VISIT_SEEN_MAX }
