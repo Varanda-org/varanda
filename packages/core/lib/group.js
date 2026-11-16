@@ -2405,8 +2405,10 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
   // whose header puts them in the generation the admit observed (admitGen).
   // A writer's generation comes from its header and the leave it names,
   // never from order positions: 0 without a rejoin; with a rejoin naming a
-  // leave L of the diary, the leaves L's own cuts observed, L included
-  // (writerGen; a rejoin naming no leave of the diary covers nothing). In C
+  // leave L of the diary, the leaves observed along its rejoin chain (L and
+  // its cuts, then the leave L's writer rejoined from, and so on), L
+  // included (writerGen; a rejoin naming no leave of the diary covers
+  // nothing). In C
   // it is the CW's generation (part.genOf). The covered writer gets the cut
   // an admin listing it would have written: its first record after the
   // admit in causal order, else its next seq. Its posts before the admission
@@ -2429,14 +2431,31 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
   if (!auth) {
     const leaveRef = new Map()
     for (const list of leavesOf.values()) for (const L of list) leaveRef.set(L.writer + ':' + L.seq, L)
+    // Leaves may cut only their own writer (member.js cleanup paths), so the
+    // generation follows the whole rejoin chain: each leave, its cuts, and
+    // the leave its writer rejoined from, a leave visited at most once.
+    const genOfLeave = new Map()
+    const leaveGen = (L) => {
+      if (genOfLeave.has(L)) return genOfLeave.get(L)
+      const cuts = new Map()
+      const seen = new Set()
+      for (let x = L; x !== undefined && x.diary === L.diary && !seen.has(x);) {
+        seen.add(x)
+        for (const [cw, c] of cutsMap(x.record.cuts)) if (c > (cuts.get(cw) || 0)) cuts.set(cw, c)
+        if (x.seq + 1 > (cuts.get(x.writer) || 0)) cuts.set(x.writer, x.seq + 1)
+        const r = rejoinRef.get(x.writer)
+        x = r === undefined ? undefined : leaveRef.get(r.writer + ':' + r.seq)
+      }
+      const g = admitGen(L.diary, cuts, Infinity)
+      genOfLeave.set(L, g)
+      return g
+    }
     const writerGen = (w, d) => {
       const r = rejoinRef.get(w)
       if (r === undefined) return 0
       const L = leaveRef.get(r.writer + ':' + r.seq)
       if (L === undefined || L.diary !== d) return -1
-      const cuts = cutsMap(L.record.cuts)
-      cuts.set(L.writer, Math.max(cuts.get(L.writer) || 0, L.seq + 1))
-      return admitGen(d, cuts, Infinity)
+      return leaveGen(L)
     }
     const genOfWriter = (w, d) => {
       if (isC) return monoRetired.has(w) ? -1 : (part.genOf.get(w) || 0)

@@ -3049,6 +3049,30 @@ test('a device the admit covers keeps its records from before a leave, as a list
   t.alike(visible(r), [G + ':2', wX2 + ':1', wN + ':2', wN2 + ':1'], 'the new admit covers its generation from the admit on; the earlier post stays')
 })
 
+test('a writer generation follows the whole rejoin chain when leaves cut only their own writer', (t) => {
+  const w = world({ join: 'approval' }).add(X, wX)
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(1) }))
+  const all = [wX]
+  let cur = wX
+  for (let k = 1; k <= 3; k++) {
+    const s = 10 * k
+    const leave = w.push(cur, groupLeave({ cuts: [{ writer: cur, seq: w.len(cur) }], at: AT(s) }))
+    const back = K(0x410 + k)
+    w.add(X, back, { rejoin: leave, at: AT(s + 1) })
+    all.push(back)
+    w.push(G, groupAdmit({ member: X, on: true, cuts: all.map((x) => ({ writer: x, seq: w.len(x) })), at: AT(s + 2) }))
+    const device = K(0x420 + k)
+    w.add(X, device, { rejoin: leave, at: AT(s + 3) })
+    post(w, device, s + 4)
+    const g = buildGroup(w.input())
+    t.is(g.members.get(X), 'member', 'cycle ' + k)
+    t.ok(visible(g).includes(device + ':1'), 'cycle ' + k + ': the re-admit covers the new device')
+    t.absent(g.requests.includes(X), 'cycle ' + k)
+    all.push(device)
+    cur = back
+  }
+})
+
 test('replies and replies to replies belong to the topic thread', (t) => {
   const w = world().add(X, wX).add(Y, wY)
   const root = post(w, wY, 1)
