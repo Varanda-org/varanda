@@ -36,6 +36,17 @@ export function pageNoticeFlags (names) {
   return out
 }
 
+// Only the page-named flags among `names`: removed once the member's key is
+// known (onceMarks.js writes the opaque kind from then on), never converted,
+// as one may be another member's on a shared device.
+export function legacyPageNoticeFlags (names) {
+  const out = []
+  for (const name of names) {
+    if (typeof name === 'string' && name.startsWith(PAGE_NOTICE_PREFIX)) out.push(name)
+  }
+  return out
+}
+
 // Whether the notice for `page` was already shown, as the store tells (this
 // device, or the synced marks). A store that fails reads as not shown: the
 // notice comes again, never silently skipped.

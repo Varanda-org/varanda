@@ -14,6 +14,7 @@ Conferência no aparelho:
 - [ ] Bloquear e desbloquear a A antes da passagem seguinte não perde a marca ainda não enviada: a B não mostra o aviso: pendente.
 - [ ] Com o aviso de convite na tela da B, a marca que chega depois (da A, ou a da própria B de volta) não o fecha: ele fica até a pessoa tocar nele ou fechá-lo, também com um só aparelho: pendente.
 - [ ] Web hospedada, depois do aviso da Página: o localStorage tem uma chave `varanda-once-*` e nenhuma `varanda-page-dm-notice-<página>`: pendente.
+- [ ] Web hospedada com uma chave antiga `varanda-page-dm-notice-<página>` no localStorage: depois de Entrar ela some e nenhuma nova aparece, também depois de mostrar o aviso de uma Página: pendente.
 - [ ] Depois de Sair (e de Recomeçar), não sobra nenhuma entrada `varanda-page-dm-notice-*` nem `varanda-once-*`: no localStorage da web e na pasta de documentos do app nativo: pendente.
 - [ ] Nó core nativo: o aviso continua por aparelho: pendente.
 - [ ] Aparelho bloqueado, ou antes de aceitar os Termos: o aviso aparece como antes: pendente.

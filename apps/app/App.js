@@ -84,7 +84,7 @@ import { clearPostLink, savePostLink, takePostLink } from './src/postLinkStore'
 import { forgetSalt } from './src/sorteStore'
 import { fetchMember } from './src/indexClient'
 import { pageDmPlan, pageReadKind, pageNoticeSeen } from './src/pageNotice'
-import { pageNoticeStore } from './src/pageNoticeStore'
+import { pageNoticeStore, wipeLegacyPageNotices } from './src/pageNoticeStore'
 import { inviteDropOnceId, syncedPageNoticeStore, withOnceTokens } from './src/onceMarks'
 import { FIRST_PASS_IDLE, FIRST_PASS_MS, firstPassStep, inviteWaitsForSeen, onceKeyOf, onceMember, onceMemberFor, onceRegistry, setOnceMember } from './src/onceSync'
 import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, passkeyAdd, passkeyStart, seenFinish, seenStart, termsFinish, termsHeldFinish, termsHeldStart, termsStart } from './src/account'
@@ -2520,7 +2520,12 @@ function Member () {
       .then(() => seenRequestRef.current('seen.onceKey', {}))
       .then((answer) => {
         const key = onceKeyOf(answer)
-        if (live && seenAppearanceRef.current === appearance && seenMemberRef.current === member && key !== null) onceRegistry.setKey(member, key)
+        if (live && seenAppearanceRef.current === appearance && seenMemberRef.current === member && key !== null) {
+          onceRegistry.setKey(member, key)
+          // From here the page notice flags of this install are opaque: the
+          // page-named ones of earlier builds go, never turned into marks.
+          wipeLegacyPageNotices()
+        }
       }, () => {})
       .then(() => { if (live) stepFirstPass({ type: 'key', member }) })
     return () => {
