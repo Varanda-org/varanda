@@ -251,12 +251,6 @@ h1 {
   background-image: url("assets/mar-largo.svg");
   background-repeat: repeat-x;
 }
-.onda--longe {
-  height: 60px;
-  background-image: linear-gradient(180deg, rgba(138, 78, 122, 0.34), rgba(232, 128, 90, 0.1)), url("assets/mar-largo.svg");
-  background-size: 160px 60px;
-  animation: deslizar-longe 26s linear infinite;
-}
 .onda--perto {
   height: 120px;
   background-size: 320px 120px;
@@ -274,7 +268,6 @@ h1 {
 
 @keyframes deslizar-pedras { to { background-position-x: -192px; } }
 @keyframes deslizar { to { background-position-x: -320px; } }
-@keyframes deslizar-longe { to { background-position-x: -160px; } }
 
 .pausar {
   position: absolute;
@@ -632,7 +625,6 @@ h2::after {
   .secao { padding: 104px 0; }
   .cartoes { gap: 22px; }
   .passos { grid-template-columns: repeat(4, 1fr); gap: 24px; }
-  .onda--longe { height: 72px; background-size: 192px 72px; animation-name: deslizar-longe-largo; }
   .onda--perto { height: 150px; background-size: 400px 150px; animation-name: deslizar-largo; }
   .pedras { height: 120px; background-size: 240px 120px; animation-name: deslizar-pedras-largo; }
   .pausar__rotulo { right: 32px; }
@@ -640,4 +632,3 @@ h2::after {
 
 @keyframes deslizar-pedras-largo { to { background-position-x: -240px; } }
 @keyframes deslizar-largo { to { background-position-x: -400px; } }
-@keyframes deslizar-longe-largo { to { background-position-x: -192px; } }

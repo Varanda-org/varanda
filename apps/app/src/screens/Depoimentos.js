@@ -599,8 +599,9 @@ export function WriteTestimonialSheet ({ open, to, name, onClose, onSent, onUnce
         <ScrollView style={styles.flex} contentContainerStyle={styles.sheetBody} keyboardShouldPersistTaps='handled' keyboardDismissMode='interactive'>
           <View style={styles.writeField}>
             <Label>{label}</Label>
-            {/* Field has no height cap: past about six lines the text scrolls
-                inside the box, so the counter and the note stay reachable. */}
+            {/* Its own TextInput because it starts five lines tall and is capped at
+                six (WRITE_MIN_HEIGHT, WRITE_MAX_HEIGHT), so the counter and the
+                note stay reachable. */}
             <TextInput
               style={[styles.writeInput, action.pending && styles.writeInputOff]}
               value={text}

@@ -1,0 +1,1 @@
+- Uma onda só no calçadão da landing (PR `fix/landing-single-wave`): a faixa abaixo da imagem do topo em `varanda.app` mostrava duas ondas pretas, uma fina e tingida em cima da grande, e parecia uma calçada dobrada. A onda de cima sai, e a faixa fica com a areia, a onda grande e as pedras. A imagem de prévia dos links (`og.png`) não muda.

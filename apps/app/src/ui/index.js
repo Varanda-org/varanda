@@ -12,6 +12,8 @@ import { startDayWake } from '../dayClock'
 import { Icon } from './Icon'
 import { ScreenVisible } from './screenVisible'
 import { createVisibleNow } from '../visibleNow'
+import { fieldBounds, fieldFull } from './fieldHeight'
+import { GROWS_ITSELF } from './fieldMeasure'
 import { fonts, layout, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
 
@@ -318,16 +320,28 @@ export function Field ({ label, value, onChangeText, multiline, maxLength, edita
   if (onSubmitEditing !== undefined) submit.onSubmitEditing = onSubmitEditing
   if (returnKeyType !== undefined) submit.returnKeyType = returnKeyType
   if (keyboardType !== undefined) submit.keyboardType = keyboardType
+  // iOS and Android size a multiline field themselves between the two bounds.
+  // Until it is full the field does not scroll its own text (scrollEnabled is
+  // an iOS TextInput prop; Android ignores it and already hands the drag to
+  // the page when the field cannot scroll), so a drag on it scrolls the form;
+  // once full, its text scrolls inside. The web textarea never grows, so it
+  // stays at the minimum, unchanged.
+  const [laidOut, setLaidOut] = useState(0)
+  const bounds = multiline ? fieldBounds(lines) : null
+  const grows = Boolean(multiline) && GROWS_ITSELF
+  const full = grows && fieldFull(laidOut, bounds.maxHeight)
   return (
     <View style={styles.field}>
       {label ? <Label>{label}</Label> : null}
       <TextInput
-        style={[styles.input, multiline && { minHeight: lines * 22 + 20, textAlignVertical: 'top' }, mono && styles.inputMonoSize, mono && value !== '' && styles.inputMono, !editable && styles.inputOff]}
+        style={[styles.input, multiline && { ...bounds, textAlignVertical: 'top' }, mono && styles.inputMonoSize, mono && value !== '' && styles.inputMono, !editable && styles.inputOff]}
         value={value}
         onChangeText={onChangeText}
         multiline={multiline}
         maxLength={maxLength}
         editable={editable}
+        onLayout={grows ? (event) => setLaidOut(event.nativeEvent.layout.height) : undefined}
+        scrollEnabled={grows ? full : undefined}
         placeholder={placeholder}
         placeholderTextColor={colors.placeholder}
         accessibilityLabel={label || placeholder}
