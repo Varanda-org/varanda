@@ -52,6 +52,17 @@ Revisão 2 (reexame de 88447b08): `shownAt` limitado ao relógio de quem importa
 | `packages/web-member/test/blob.test.js` | 47 testes, 405 asserções (era 46 e 399): `copySource.reserve` | |
 | `apps/app/test/historyCopy.test.js` | 5/5, 43 asserções | o texto novo do aviso ("na data em que foram enviadas") |
 
+Revisão 3 (reexame de 6a104269): a reserva dos selos do texto passou a ser feita em lotes de até 256, cada lote numa conexão própria, e `copySource.take` continua numa conexão nova quando o prazo de uma conexão que já comprou algo se esgota (uma recusa, o fim da cota ou uma conexão sem nenhum selo ainda encerra a fonte); entre os lotes a cópia confere o desbloqueio e emite `dm.copyProgress`. Um selo recusado como `invalido` ao enviar um pedaço ou o manifesto zera os selos guardados (`a.held`), para a nova tentativa comprar selos novos (`refusal` agora leva `reason`). As linhas importadas são arquivadas em `horizonte - span + n`, com `span` vindo dos índices do pacote (não das linhas que passam no filtro), então desbloquear um remetente entre uma importação cortada e a nova tentativa não repete um `filedAt`; um `n` de 200000 ou mais deixa de valer. Textos do app: singular e plural concordam ("ficou"/"ficaram", "Ela aparece ... foi enviada"). O texto sobre os selos de cópia no balde de emissão foi corrigido, e `docs/protocol.md` e `docs/rpc.md` descrevem os lotes.
+
+| Arquivo | Testes novos / contagem | Sem a correção |
+|---|---|---|
+| `packages/web-member/test/blob.test.js` | 48 testes, 414 asserções (eram 47 e 405); novo: "a reserve larger than one stamp link goes on over new links, in batches..." (prazo de 1,5 s por conexão, 40 selos pedidos, lotes de 16) | com o `blob.js` da 6a104269: falham 4 asserções (volta com cerca de 13 selos, uma só conexão, sem chamadas entre lotes) |
+| `packages/web-member/test/dm-copy-unit-2.test.js` | 13 testes, 70 asserções (eram 6 e 31; ~0,3 s) | selo guardado não zerado após `invalido`: falha 1 asserção em cada um dos dois testes (pedaço e manifesto); `filedAt` pela posição filtrada: falham 3 asserções do teste do desbloqueio; `stampsNeeded` sem `BLOB_MAC_BYTES`: falham 3 do teste da borda do pedaço; `readState` sem `horizons`: falha 1 do teste da retomada da loja própria (reinício com nova instância); `readPendMeta` sem `horizon`: falha 1 do teste da Página retida; o retorno do lote sem checar o desbloqueio: falha "the reservation goes on while unlocked and stops after a lock" |
+| `apps/app/test/historyCopy.test.js` | 5/5, 44 asserções | os textos singulares novos |
+| `packages/web-member/test/dm-copy-e2e.test.js`, `-2`, `-3`, `-4` | contagens iguais (33, 27, 12, 29) | |
+
+Tempos (`node <arquivo>`, uma vez cada, esta máquina): `blob.test.js` ~57 s; `dm-copy-unit-2` 0,3 s; `dm-copy-unit` 0,1 s; `historyCopy` 0,03 s; `dm-copy-e2e` 74 s; `-2` 65 s; `-3` 73 s; `-4` 60 s.
+
 Importação em um só trabalho: a remoção da junção em `importAll` não foi pega pelo teste 2 do `dm-copy-e2e-2` (a contagem de avisos continuou 1, porque o dedupe também a segura); o teste vale como regressão do resultado, não do mecanismo. O mecanismo (uma só tarefa, uma só leitura do registro) é coberto por `dm-copy-unit-2.test.js`, que falha sem a junção.
 
 O seeder de teste do `blob.test.js` ganhou a opção `copyBudget` (nulo é um semeador de antes do tipo `copy`, que não responde). O teste do semeador antigo cobre a falha de `copySource` e o selo diário que passa a pagar o blob.
@@ -78,4 +89,4 @@ Limites conhecidos (não corrigidos de propósito):
 
 Implante o semeador antes do app. O semeador cria `copy-stamps.json` ao primeiro pedido de selo `copy`; sem ele, um app novo recua para a cota diária de blobs nos textos e deixa as fotos de fora (as fotos nunca usam a cota diária).
 
-O selo `copy` é um selo de blob: 8192 por conta e semana, pagos pelo semeador. Dimensione `--blob-bytes` para isso: uma cópia completa de uma conta com muitas fotos consome essa cota inteira de blobs, e os avisos de cópia têm o próprio balde de emissão (`issues.copy`, o das emissões, não um balde de erros). Qualquer conta admitida pode comprar os 8192 selos da semana sem fazer uma cópia: poucas contas bastam para encher o pool pela janela de retenção (dimensionamento do operador, #224).
+O selo `copy` é um selo de blob: 8192 por conta e semana, pagos pelo semeador. Dimensione `--blob-bytes` para isso: uma cópia completa de uma conta com muitas fotos consome essa cota inteira de blobs, e os selos de cópia têm o próprio balde de emissão (`issues.copy`). Qualquer conta admitida pode comprar os 8192 selos da semana sem fazer uma cópia: poucas contas bastam para encher o pool pela janela de retenção (dimensionamento do operador, #224).

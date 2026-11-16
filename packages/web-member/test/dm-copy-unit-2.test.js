@@ -287,3 +287,252 @@ test('the text needs a stamp per chunk of every part and of the manifest, and on
   // 1.2 MB cut into two parts of 3 and 1 rows: 28 and 10 chunks, one slack each, the manifest.
   t.is(stampsNeeded([big]), 28 + 10 + 2 + 1, 'parts of several chunks')
 })
+
+test('the stamps of a part count its MAC: a part that lands within 16 bytes of a chunk edge needs the next chunk', (t) => {
+  const CHUNK = blobCore.BLOB_CHUNK_BYTES
+  // The part's estimated plain size is its rows' JSON plus a 128 byte
+  // envelope; the sealed blob adds BLOB_MAC_BYTES (16) to it.
+  const rowsOf = (plain) => {
+    const base = b4a.byteLength(JSON.stringify([{ n: 0, t: 'msg', text: '' }]))
+    return [{ n: 0, t: 'msg', text: 'x'.repeat(plain - 128 - base) }]
+  }
+  const partChunks = (plain) => stampsNeeded([rowsOf(plain)]) - 1 - 1
+  t.is(partChunks(CHUNK - 16), 1, 'plain + MAC fills one chunk exactly')
+  t.is(partChunks(CHUNK - 15), 2, 'one byte over once the MAC is counted')
+  t.is(partChunks(CHUNK - 8), 2, 'inside the MAC: without it this would be one chunk')
+  t.is(partChunks(2 * CHUNK - 16), 2)
+  t.is(partChunks(2 * CHUNK - 8), 3)
+  // The estimate never undercounts what sealBlob really makes of the same rows.
+  for (const plain of [CHUNK - 16, CHUNK - 8, 2 * CHUNK - 8]) {
+    const rows = rowsOf(plain)
+    const real = sealBlob(b4a.from(JSON.stringify({ v: 1, page: null, rows }), 'utf8')).descriptor.chunks
+    t.ok(partChunks(plain) >= real, 'at least the chunks the real part has')
+  }
+})
+
+// A stub blob client: the copy source holds three stamps in reserve and
+// buys 'fresh' ones; put refuses the failAt-th frame as invalid ("the
+// seeder's key rotated"), and the call after it stops at its put.
+async function staleHeldRun (t, failAt) {
+  const row = { t: 'msg', id: id('1'), peer: PEER, from: SELF, text: 'oi', replyTo: null, fwd: 0, media: null, card: null, at: AT, mine: true, filedAt: 1700000000001 }
+  const local = {
+    snapshot: () => ({ messages: [row], ops: [], reactions: [] }),
+    seenToken: () => 'f'.repeat(64),
+    hasMedia: () => false,
+    seal: (v) => v,
+    open: (v) => v
+  }
+  const stamped = []
+  let puts = 0
+  const blobs = {
+    copySource: () => ({
+      reserve: async () => [{ token: 'held-0' }, { token: 'held-1' }, { token: 'held-2' }],
+      take: async (n) => Array.from({ length: n }, (_, i) => ({ token: 'fresh-' + i }))
+    }),
+    stamp: async (sealed, keyPair, source) => {
+      for (const s of await source.take(1)) stamped.push(s.token)
+    },
+    put: async () => {
+      puts++
+      if (puts === failAt) throw Object.assign(new UsageError('mídia recusada pelo semeador'), { reason: 'invalido' })
+      if (puts > failAt) throw new UsageError('parou aqui')
+    }
+  }
+  const e = await engine(t, { local, personal: { local, prefix: '', page: null }, blobs })
+  const first = await e.copy.historyCopy(SELF, {}).catch((err) => err)
+  t.ok(first instanceof UsageError && first.message === 'mídia recusada pelo semeador', 'the refused frame fails the copy')
+  const second = await e.copy.historyCopy(SELF, {}).catch((err) => err)
+  t.ok(second instanceof UsageError && second.message === 'parou aqui', 'the retry got as far as its put')
+  return stamped
+}
+
+test('between the batches of the reservation the copy shows progress and stops at a lock', async (t) => {
+  const row = { t: 'msg', id: id('1'), peer: PEER, from: SELF, text: 'oi', replyTo: null, fwd: 0, media: null, card: null, at: AT, mine: true, filedAt: 1700000000001 }
+  const local = {
+    snapshot: () => ({ messages: [row], ops: [], reactions: [] }),
+    seenToken: () => 'f'.repeat(64),
+    hasMedia: () => false,
+    seal: (v) => v,
+    open: (v) => v
+  }
+  let unlocked = true
+  const answers = []
+  const events = []
+  const blobs = {
+    copySource: () => ({
+      reserve: async (n, between) => {
+        answers.push(await between(1))
+        unlocked = false
+        answers.push(await between(2))
+        return []
+      }
+    }),
+    stamp: async () => { throw new Error('nothing is stamped after a lock') },
+    put: async () => { throw new Error('nothing is put after a lock') }
+  }
+  const e = await engine(t, { local, personal: { local, prefix: '', page: null }, blobs, unlocked: () => unlocked, emit: (name, data) => events.push([name, data]) })
+  const err = await e.copy.historyCopy(SELF, {}).catch((x) => x)
+  t.ok(err instanceof UsageError, 'the lock ends the copy')
+  t.alike(answers, [true, false], 'the reservation goes on while unlocked and stops after a lock')
+  t.alike(events[0], ['dm.copyProgress', { done: 0, total: 2 }], 'the sheet leaves "Preparando a cópia" at the first batch')
+})
+
+test('a part refused as invalid drops the held stamps: the retry buys fresh ones', async (t) => {
+  t.alike(await staleHeldRun(t, 1), ['held-0', 'fresh-0'], 'the retry does not stamp from the stale ones')
+})
+
+test('a manifest refused as invalid drops the held stamps too', async (t) => {
+  t.alike(await staleHeldRun(t, 2), ['held-0', 'held-1', 'fresh-0'], 'the manifest retry does not stamp from the stale ones')
+})
+
+test('unblocking a sender between an interrupted import and its retry keeps every filing time unique and in order', async (t) => {
+  const OTHER = 'c'.repeat(64)
+  const H = 1700000000000
+  const rows = [
+    msg('1', 0),
+    msg('2', 1, { peer: OTHER, from: OTHER }),
+    msg('3', 2),
+    msg('4', 3)
+  ]
+  const fresh = async () => {
+    const s = await openStore(t)
+    const { n, ...local } = msg('9', 0)
+    await s.append([{ ...local, filedAt: H }])
+    return s
+  }
+  const times = (s) => Object.fromEntries(s.snapshot().messages.map((m) => [m.id, m.filedAt]))
+
+  // The reference: nobody blocked, nothing interrupted.
+  const done = await fresh()
+  await fileRows({ local: done, prefix: '' }, memoryNodeStorage(), SELF, rows, NO_BLOCKS, { pin: memoryPin(), now: NOW })
+
+  // The first run drops the blocked sender's row and stops after its first
+  // chunk; the retry runs with the sender unblocked.
+  const s = await fresh()
+  const ctx = { local: s, prefix: '' }
+  const pin = memoryPin()
+  const heal = breakAppend(s, 2)
+  const failed = await fileRows(ctx, memoryNodeStorage(), SELF, rows, new Set([OTHER]), { pin, chunkRows: 2, now: NOW }).catch((err) => err)
+  heal()
+  t.ok(failed instanceof Error && failed.message === 'interrompido', 'the first run stopped between two chunks')
+  t.is(s.snapshot().messages.length, 3, 'its first chunk is filed')
+  await fileRows(ctx, memoryNodeStorage(), SELF, rows, NO_BLOCKS, { pin, chunkRows: 2, now: NOW })
+
+  const got = times(s)
+  t.is(Object.keys(got).length, 5, 'every row is filed once')
+  t.is(new Set(Object.values(got)).size, 5, 'no two rows share a filing time')
+  t.alike(got, times(done), 'each row sits where the uninterrupted import put it')
+  t.ok(got[id('1')] < got[id('2')] && got[id('2')] < got[id('3')] && got[id('3')] < got[id('4')], 'the bundle order is kept')
+})
+
+// An in-memory blob host: what a seeder serves of the blobs a copy made.
+function blobHost () {
+  const frames = new Map()
+  const publish = (json) => {
+    const sealed = sealBlob(b4a.from(JSON.stringify(json), 'utf8'))
+    const { chunks, id: blobId } = sealed.descriptor
+    for (let i = 0; i < chunks; i++) {
+      frames.set(blobId + '/' + i, blobCore.encodeChunk({
+        id: sealed.id,
+        index: i,
+        count: chunks,
+        kid: b4a.alloc(8),
+        sig: b4a.alloc(256),
+        token: b4a.alloc(32),
+        bytes: sealed.cipher.subarray(i * blobCore.BLOB_CHUNK_BYTES, (i + 1) * blobCore.BLOB_CHUNK_BYTES)
+      }))
+    }
+    return sealed.descriptor
+  }
+  const fetchImpl = async (url) => {
+    const m = /\/blob\/([0-9a-f]+)\/(\d+)$/.exec(String(url))
+    const frame = m === null ? undefined : frames.get(m[1] + '/' + m[2])
+    return frame === undefined ? new Response('', { status: 404 }) : new Response(frame, { status: 200 })
+  }
+  return { publish, fetchImpl }
+}
+
+// More rows than one filing chunk (500), so an interruption can fall between.
+function bigRows () {
+  return Array.from({ length: 501 }, (_, i) => msg('0', i, { id: String(i + 1).padStart(32, '0') }))
+}
+
+const H0 = 1700000000000
+
+async function seedLocal (s) {
+  const { n, ...local } = msg('9', 0)
+  await s.append([{ ...local, filedAt: H0 }])
+}
+
+const timesOf = (s) => Object.fromEntries(s.snapshot().messages.map((m) => [m.id, m.filedAt]))
+
+// The own store of a copy, imported once, or cut after its first chunk and
+// finished by a new instance over the same storage (a restart).
+async function ownImport (t, interrupt) {
+  const host = blobHost()
+  const part = host.publish({ v: 1, page: null, rows: bigRows() })
+  const manifest = host.publish({ v: 1, id: id('c'), at: AT, stores: [{ page: null, parts: [part], rows: 501, ops: 0 }] })
+  const e = await engine(t, { fetchImpl: host.fetchImpl })
+  await seedLocal(e.s)
+  await e.copy.note([{ id: id('c'), copy: manifest }])
+  if (interrupt) {
+    const heal = breakAppend(e.s, 2)
+    await e.copy.importAll(SELF)
+    heal()
+    const [todo] = await todoOf(e)
+    t.ok(todo && Number.isSafeInteger(todo.horizons.own), 'the horizon was kept with the todo before the first chunk')
+    t.is(e.s.snapshot().messages.length, 501, 'only the first chunk was filed')
+    await createDmCopy(e.env).importAll(SELF)
+  } else {
+    await e.copy.importAll(SELF)
+  }
+  t.is((await todoOf(e)).length, 0, 'the todo is done')
+  t.is(e.s.snapshot().messages.length, 502, 'every row is filed')
+  return timesOf(e.s)
+}
+
+test('an import cut after its first chunk and resumed by a new instance reads the horizon back from the record', async (t) => {
+  const whole = await ownImport(t, false)
+  const resumed = await ownImport(t, true)
+  t.alike(resumed, whole, 'every row sits where the uninterrupted import put it')
+})
+
+// The store of a Página held back until its secrets arrive, then filed:
+// the same, with the horizon kept in the pend entry's meta.
+async function pageImport (t, interrupt) {
+  const PAGE = 'd'.repeat(64)
+  const host = blobHost()
+  const part = host.publish({ v: 1, page: PAGE, rows: bigRows() })
+  const manifest = host.publish({ v: 1, id: id('c'), at: AT, stores: [{ page: PAGE, parts: [part], rows: 501, ops: 0 }] })
+  const pageStore = await openStore(t)
+  await seedLocal(pageStore)
+  let held = false
+  const e = await engine(t, {
+    fetchImpl: host.fetchImpl,
+    pages: { pages: () => [], get: () => (held ? {} : null) },
+    pageCtx: async () => ({ local: pageStore, prefix: 'p' })
+  })
+  await e.copy.note([{ id: id('c'), copy: manifest }])
+  await e.copy.importAll(SELF)
+  t.is((await store.readCopyPend(e.storage)).length, 1, 'the Página store waits sealed')
+  held = true
+  if (interrupt) {
+    const heal = breakAppend(pageStore, 2)
+    await e.copy.importAll(SELF)
+    heal()
+    t.is(pageStore.snapshot().messages.length, 501, 'only the first chunk was filed')
+    t.is((await store.readCopyPend(e.storage)).length, 1, 'the entry waits for the rest')
+    await createDmCopy(e.env).importAll(SELF)
+  } else {
+    await e.copy.importAll(SELF)
+  }
+  t.is((await store.readCopyPend(e.storage)).length, 0, 'the entry is done')
+  t.is(pageStore.snapshot().messages.length, 502, 'every row is filed')
+  return timesOf(pageStore)
+}
+
+test('a held-back Página store cut after its first chunk keeps its horizon in the pend entry', async (t) => {
+  const whole = await pageImport(t, false)
+  const resumed = await pageImport(t, true)
+  t.alike(resumed, whole, 'every row sits where the uninterrupted filing put it')
+})

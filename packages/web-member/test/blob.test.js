@@ -1595,6 +1595,32 @@ test('a copy source reserves what it can: the whole ask, or what is left when th
   t.is((await none.reserve(3)).length, 0, 'a seeder from before the copy kind gives none')
 })
 
+test('a reserve larger than one stamp link goes on over new links, in batches, and the source still serves a take', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await blobSeeder(t, { signer: assoc, copyBudget: 200 })
+  const identity = crypto.keyPair()
+  // About a dozen stamps fit one link: 40 take several, and a batch of 16 is
+  // itself longer than one.
+  const client = clientFor(seeder, { issueBurst: 2, issuePaceMs: 100, copyReserveChunk: 16, link: { stampDeadlineMs: 1500 } })
+  const source = client.copySource(identity, { batch: 8 })
+  const seen = []
+  const held = await source.reserve(40, (n) => { seen.push(n) })
+  t.is(held.length, 40, 'the whole ask, though no link lives long enough for it')
+  t.is(new Set(held.map((s) => s.token)).size, 40, 'every stamp is its own')
+  t.ok(seeder.connections >= 4, 'over several stamp links: ' + seeder.connections)
+  t.alike(seen, [16, 32, 40], 'one call between batches, with what is held so far')
+  t.is(source.exhausted, false)
+  t.is(seeder.blobIssues, 0, 'the daily allowance was never asked')
+  t.is((await source.take(1)).length, 1, 'the source is not failed: a later take still buys')
+
+  // The caller stops the reservation (a lock): nothing more is bought.
+  const issued = seeder.copyIssues
+  const stopped = await client.copySource(identity, { batch: 8 }).reserve(40, () => false)
+  t.is(stopped.length, 16, 'one batch, then stop')
+  t.ok(seeder.copyIssues <= issued + 16 + 8, 'no stamp bought after the stop')
+})
+
 test('a copy source on a seeder from before the copy kind fails with its own reason and the daily wallet still works', async (t) => {
   t.timeout(120000)
   const assoc = generateAssociationKeyPair()

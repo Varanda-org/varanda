@@ -47,7 +47,7 @@ export function resultLines (result) {
   if (!result || !isCount(result.messages) || !isCount(result.photos)) return ['A cópia terminou.']
   const lines = ['Pronto: ' + plural(result.messages, 'mensagem copiada', 'mensagens copiadas') + ' e ' + plural(result.photos, 'foto', 'fotos') + '.']
   if (isCount(result.notCached) && result.notCached > 0) {
-    lines.push(plural(result.notCached, 'foto não estava guardada', 'fotos não estavam guardadas') + ' neste aparelho e ficou de fora.')
+    lines.push(plural(result.notCached, 'foto não estava guardada', 'fotos não estavam guardadas') + ' neste aparelho e ' + (result.notCached === 1 ? 'ficou' : 'ficaram') + ' de fora.')
   }
   if (isCount(result.leftOut) && result.leftOut > 0) {
     lines.push(plural(result.leftOut, 'foto ficou de fora', 'fotos ficaram de fora') + ' porque a cota de cópia de fotos acabou ou o semeador não a oferece. Uma nova cópia começa de novo pelas fotos mais recentes.')
@@ -59,7 +59,7 @@ export function resultLines (result) {
 export function importedText (imported) {
   const n = imported && isCount(imported.messages) ? imported.messages : 0
   if (n === 0) return 'As conversas deste aparelho já estavam em dia.'
-  return plural(n, 'mensagem chegou', 'mensagens chegaram') + ' de outro aparelho seu. Elas aparecem na data em que foram enviadas.'
+  return plural(n, 'mensagem chegou', 'mensagens chegaram') + ' de outro aparelho seu. ' + (n === 1 ? 'Ela aparece na data em que foi enviada.' : 'Elas aparecem na data em que foram enviadas.')
 }
 
 const IDLE = Object.freeze({ progress: null, imported: null })

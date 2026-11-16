@@ -25,8 +25,9 @@
 //      used (ended, an older seeder, no answer, any failure) the photo is left
 //      out and counted, never paid from the daily wallet. The text parts and
 //      the manifest must go, so whatever the reservation did not cover (an
-//      older seeder, no answer, an allowance an earlier copy spent) falls back
-//      to the daily wallet.
+//      older seeder, a refusal or no answer, an allowance an earlier copy
+//      spent) falls back to the daily wallet. The reservation is bought in
+//      batches over several stamp links, so a link's deadline is not a case.
 //   A failed call is a normal error and repeats nothing by itself. The user's
 //   retry in the same unlock keeps the copy id, the photos already put (only
 //   their new descriptors are kept), and the sealed parts, manifest and
@@ -167,7 +168,9 @@ function idList (v) {
 // null. self: the diary key of the store (the page's for a Página). blocked:
 // the senders the store drops on receipt (moderation).
 function cleanRow (r, self, blocked) {
-  if (r === null || typeof r !== 'object' || Array.isArray(r) || !isCount(r.n)) return null
+  // n is the row's index in a store of at most ROWS_MAX rows; a larger one
+  // would only stretch the filing span (and lose integer precision).
+  if (r === null || typeof r !== 'object' || Array.isArray(r) || !isCount(r.n) || r.n >= ROWS_MAX) return null
   const { n, seen, c, ...row } = r
   if ((seen !== undefined && seen !== true) || (c !== undefined && c !== 1)) return null
   if (row.t !== 'msg' && row.t !== 'ctl' && row.t !== 'rx') return null
@@ -276,7 +279,13 @@ async function fileRows (ctx, storage, self, rawRows, blocked, { pin = null, now
   const items = []
   const taken = new Set()
   let skipped = 0
+  // The span the rows are filed across, from the bundle's own indexes and not
+  // from the rows that pass the filter: a sender unblocked between an
+  // interrupted import and its retry must not move a row onto the filing time
+  // of one already filed.
+  let span = 0
   for (const r of rawRows) {
+    if (r !== null && typeof r === 'object' && isCount(r.n) && r.n < ROWS_MAX && r.n + 1 > span) span = r.n + 1
     const c = cleanRow(r, self, blocked)
     if (c === null || taken.has(c.n)) {
       skipped++
@@ -304,9 +313,8 @@ async function fileRows (ctx, storage, self, rawRows, blocked, { pin = null, now
   let messages = 0
   let ops = 0
   let reactions = 0
-  for (let pos = 0; pos < items.length; pos++) {
-    const { row, seen, c } = items[pos]
-    const filedAt = horizon - items.length + pos
+  for (const { row, seen, c, n } of items) {
+    const filedAt = horizon - span + n
     const k = row.t + '\n' + (row.from || '') + '\n' + row.id
     if (keys.has(k)) continue
     keys.add(k)
@@ -428,6 +436,19 @@ function createDmCopy (env) {
     }
   }
 
+  // A part or the manifest: when the seeder refuses a stamp as invalid (its
+  // key rotated since the held ones were bought) every held stamp is stale
+  // too, so they are dropped and the retry buys fresh ones instead of failing
+  // until the held ones run out.
+  async function putRequired (sealed, a) {
+    try {
+      await putBlob(sealed)
+    } catch (err) {
+      if (err && err.reason === 'invalido') a.held = []
+      throw err
+    }
+  }
+
   // A photo: the weekly copy allowance only. When it cannot be used (it
   // ended, an older seeder, no answer, any failure) the photo is left out
   // (LeftOut); a copy never spends the daily blob wallet on a photo.
@@ -520,11 +541,6 @@ function createDmCopy (env) {
       if (snaps.every((h) => h.snap.messages.length + h.snap.ops.length + h.snap.reactions.length === 0)) throw new UsageError(NOTHING)
       const rowSets = snaps.map((h) => itemsOfStore(h, new Map()).rows)
       checkLimits(rowSets, limits)
-      // The text goes first: its stamps are taken from the weekly copy
-      // allowance before any photo can spend it, and kept in the attempt so a
-      // retry reuses them instead of buying again.
-      if (a.held === null) a.held = await source.reserve(stampsNeeded(rowSets))
-
       // The photos of the own store, newest first.
       const cands = []
       // notCached: photos this device no longer holds; leftOut: photos the
@@ -541,6 +557,19 @@ function createDmCopy (env) {
       const total = cands.length + 2
       a.total = total
       let done = 0
+      // The text goes first: its stamps are taken from the weekly copy
+      // allowance before any photo can spend it, and kept in the attempt so a
+      // retry reuses them instead of buying again. A large text takes several
+      // batches (each over its own link): between them the unlock is checked
+      // and the sheet leaves "Preparando a cópia".
+      if (a.held === null) {
+        a.held = await source.reserve(stampsNeeded(rowSets), () => {
+          if (gen !== env.generation() || !env.unlocked()) return false
+          env.emit('dm.copyProgress', { done, total })
+          return true
+        })
+      }
+      checkGen(gen)
       env.emit('dm.copyProgress', { done, total })
       let photos = 0
       let stop = false
@@ -609,7 +638,7 @@ function createDmCopy (env) {
         checkGen(gen)
         if (part.desc !== null) continue
         await stampRequired(part.sealed, keyPair, a.held, source)
-        await putBlob(part.sealed)
+        await putRequired(part.sealed, a)
         part.desc = plainDescriptor(part.sealed.descriptor)
         part.sealed = null
       }
@@ -626,7 +655,7 @@ function createDmCopy (env) {
     if (a.manifest.desc === null) {
       checkGen(gen)
       await stampRequired(a.manifest.sealed, keyPair, a.held, source)
-      await putBlob(a.manifest.sealed)
+      await putRequired(a.manifest.sealed, a)
       a.manifest.desc = plainDescriptor(a.manifest.sealed.descriptor)
       a.manifest.sealed = null
     }

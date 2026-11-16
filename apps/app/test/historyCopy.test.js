@@ -27,10 +27,14 @@ test('the result lines count messages, photos and both kinds of photo left out',
   t.alike(resultLines({ messages: 1, photos: 1, notCached: 0, leftOut: 0 }), ['Pronto: 1 mensagem copiada e 1 foto.'])
   t.alike(resultLines({ messages: 12, photos: 3, notCached: 2, leftOut: 1 }), [
     'Pronto: 12 mensagens copiadas e 3 fotos.',
-    '2 fotos não estavam guardadas neste aparelho e ficou de fora.',
+    '2 fotos não estavam guardadas neste aparelho e ficaram de fora.',
     '1 foto ficou de fora porque a cota de cópia de fotos acabou ou o semeador não a oferece. Uma nova cópia começa de novo pelas fotos mais recentes.'
   ])
   t.absent(resultLines({ messages: 1, photos: 0, notCached: 0, leftOut: 2 }).join(' ').includes('semana que vem'), 'no promise that the oldest photos come later')
+  t.alike(resultLines({ messages: 2, photos: 0, notCached: 1, leftOut: 0 }), [
+    'Pronto: 2 mensagens copiadas e 0 fotos.',
+    '1 foto não estava guardada neste aparelho e ficou de fora.'
+  ])
   t.alike(resultLines(null), ['A cópia terminou.'])
   t.alike(resultLines({ messages: -1, photos: 0 }), ['A cópia terminou.'])
 })
@@ -41,8 +45,8 @@ test('progress and the import notice read plainly', async (t) => {
   t.is(progressText({ done: 9, total: 5 }), 'Copiando: 5 de 5')
   t.is(progressText(null), COPY_STARTING)
   t.is(progressText({ done: 0, total: 0 }), COPY_STARTING)
-  t.is(importedText({ messages: 1 }), '1 mensagem chegou de outro aparelho seu. Elas aparecem na data em que foram enviadas.')
-  t.ok(importedText({ messages: 4 }).startsWith('4 mensagens chegaram'))
+  t.is(importedText({ messages: 1 }), '1 mensagem chegou de outro aparelho seu. Ela aparece na data em que foi enviada.')
+  t.is(importedText({ messages: 4 }), '4 mensagens chegaram de outro aparelho seu. Elas aparecem na data em que foram enviadas.')
   t.ok(importedText({ messages: 0 }).includes('em dia'))
 })
 
