@@ -70,12 +70,14 @@ import { sessionStore } from './src/sessionStore'
 import { cacheGeneration, wipeLocalCaches } from './src/localCaches'
 import { registerBackgroundRefresh, unregisterBackgroundRefresh } from './src/backgroundTask'
 import { makeIntent, validIntent } from './src/privateReply'
+import { restoresParked } from './src/replyHandoff'
 import { NamesProvider, useNames } from './src/names'
 import { BlocksProvider, useBlocks } from './src/blocksProvider'
 import { BlockSheet } from './src/ui/BlockSheet'
 import { PageNoticeSheet } from './src/ui/PageNoticeSheet'
 import { PostShareSheet } from './src/ui/PostShareSheet'
 import { PostPublicProvider } from './src/postPublicContext'
+import { SavedProvider, forgetSavedFor } from './src/savedProvider'
 import { POST_OPEN_WAIT_MS, capturePostPath, postAccount, postLink, postOpeningGate, postOpeningWait, postRef, postWaitDelay } from './src/postLink'
 import { clearPostLink, savePostLink, takePostLink } from './src/postLinkStore'
 import { fetchMember } from './src/indexClient'
@@ -166,6 +168,7 @@ import ARua, { ARuaPreview, liveBinding, noteDeleted, previewBinding } from './s
 import Conexao from './src/screens/Conexao'
 import ConversaScreen, { useActing } from './src/screens/Conversa'
 import CurtidasScreen from './src/screens/Curtidas'
+import CitacoesScreen from './src/screens/Citacoes'
 import Denunciar from './src/screens/Denunciar'
 import DiarioScreen from './src/screens/Diario'
 import EspiadinhaScreen from './src/screens/Espiadinha'
@@ -178,6 +181,7 @@ import { showExplainer } from './src/phoneExplainer'
 import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, parseAppLink, parseAppReturn, waitsForInstallation } from './src/linkReturn'
 import Membro, { canConverseWithPage } from './src/screens/Membro'
 import DepoimentosScreen from './src/screens/Depoimentos'
+import SalvosScreen from './src/screens/Salvos'
 import MomentosScreen from './src/screens/Momentos'
 import FeiraScreen from './src/screens/Feira'
 import AnuncioScreen from './src/screens/Anuncio'
@@ -185,7 +189,7 @@ import AnunciarScreen from './src/screens/Anunciar'
 import AnuncioEditarScreen from './src/screens/AnuncioEditar'
 import AvaliarScreen from './src/screens/Avaliar'
 import { alertsStore } from './src/feiraAlertsStore'
-import { alertsBadge } from './src/feiraScreen'
+import { alertsBadge, badgeRefreshPlan, runFeiraAlerts } from './src/feiraScreen'
 import { createFeiraEntry, decideEntry, heldIsFeira } from './src/feiraEntry'
 import { useFeiraEntryStart } from './src/useFeiraEntryStart'
 import { captureListing, dropListing, entryStorage, holdFeiraCode } from './src/feiraEntryStore'
@@ -227,6 +231,7 @@ const ComunidadeInfo = memo(ComunidadeInfoScreen)
 const Comunidades = memo(ComunidadesScreen)
 const Depoimentos = memo(DepoimentosScreen)
 const Momentos = memo(MomentosScreen)
+const Salvos = memo(SalvosScreen)
 const Mensagens = memo(MensagensScreen)
 const Mensagem = memo(MensagemScreen)
 const Anuncio = memo(AnuncioScreen)
@@ -240,6 +245,7 @@ const PaginaAjustes = memo(PaginaAjustesScreen)
 const Pessoas = memo(PessoasScreen)
 const Conversa = memo(ConversaScreen)
 const Curtidas = memo(CurtidasScreen)
+const Citacoes = memo(CitacoesScreen)
 const MembroMemo = memo(Membro)
 
 // Inlined by Expo at build time; set only for the iOS worklet gate
@@ -1417,6 +1423,8 @@ function Member () {
   const dropTermsAndSync = useCallback((m) => {
     dropTermsMember(m)
     if (typeof m !== 'string') return
+    // The account left this device: so does its list of saved posts.
+    forgetSavedFor(m)
     for (const key of [...termsSync.current.keys()]) {
       if (key.startsWith(m + '#')) termsSync.current.delete(key)
     }
@@ -1858,13 +1866,18 @@ function Member () {
   const [composeSignal, setComposeSignal] = useState(null)
   const replyDraftResolve = useRef(null)
   const replyDraftStash = useRef(null)
+  const replyDraftHandoff = useRef(null)
   const replyHandoffSerial = useRef(0)
   const settleReplyDraft = useCallback((accepted, restore = true) => {
     const resolve = replyDraftResolve.current
     const saved = replyDraftStash.current
+    const handoff = replyDraftHandoff.current
     replyDraftResolve.current = null
     replyDraftStash.current = null
-    if (saved && accepted !== true && restore) setComposer((c) => ({ ...c, ...saved }))
+    replyDraftHandoff.current = null
+    // Only while the composer still holds this hand-off: an older target must
+    // not replace a reply the person opened during the send.
+    if (saved) setComposer((c) => (restoresParked({ accepted, restore, saved, handoff, reply: c.reply }) ? { ...c, ...saved } : c))
     if (resolve) resolve(accepted === true)
   }, [])
   useEffect(() => {
@@ -1885,7 +1898,9 @@ function Member () {
       return new Promise((resolve) => {
         replyDraftResolve.current = resolve
         replyDraftStash.current = saved
-        setComposer({ open: true, reply: { ...r, handoff: ++replyHandoffSerial.current }, quote: null })
+        const handoff = ++replyHandoffSerial.current
+        replyDraftHandoff.current = handoff
+        setComposer({ open: true, reply: { ...r, handoff }, quote: null })
       })
     }
     setComposer({ open: true, reply: r, quote: null })
@@ -2009,6 +2024,10 @@ function Member () {
   }, [pushScreen])
   const openEngagers = useCallback(({ ref, kind } = {}) => {
     pushScreen({ screen: 'curtidas', key: ref, params: { kind: kind === 'reposts' ? 'reposts' : 'likes' } })
+  }, [pushScreen])
+  const openSalvos = useCallback(() => pushScreen({ screen: 'salvos' }), [pushScreen])
+  const openQuotes = useCallback(({ ref } = {}) => {
+    pushScreen({ screen: 'citacoes', key: ref, params: {} })
   }, [pushScreen])
   const openGroup = useCallback((group) => {
     pushScreen({ screen: 'grupo', key: typeof group === 'string' ? group.toLowerCase() : group, params: {} })
@@ -2199,8 +2218,8 @@ function Member () {
     }
   }, [dmReady, dmDotGate, readDmDot, node.dmVersion, stackDepth])
   // --- Feira: the tab dot from saved searches (src/feiraAlerts.js) ---
-  // Only the Feira screen runs the searches, when it is opened; this reads
-  // the counts that run left on the device, so nothing polls here. Counts
+  // The searches run when the Feira opens and on the 15-minute foreground
+  // timer below; this reads the counts they left on the device. Counts
   // are recorded only while the Feira answered as on, so a stored count
   // stands for "on" at the last opening. Same origin rule as Feira.js.
   const feiraAlertsOrigin = installationOrigin() || globalThis.location?.origin || node.accountOrigin
@@ -2214,6 +2233,42 @@ function Member () {
     }, () => {})
     return () => { live = false }
   }, [mode, ready, locked, feiraOnScreen, feiraAlertsOrigin, nodeEpoch])
+  // The dot also refreshes every 15 minutes while the app is in the foreground,
+  // whichever tab is open (badgeRefreshPlan). Background, offline or a Feira
+  // that answered off: no timer and no call. The store throttles the runs.
+  const feiraNodeRef = useRef(node)
+  feiraNodeRef.current = node
+  const feiraOffRef = useRef(null)
+  const feiraRunAt = useRef(null)
+  useEffect(() => {
+    if (mode !== 'hosted' || !ready || locked) return
+    const scopeKey = JSON.stringify([nodeEpoch, feiraAlertsOrigin])
+    if (feiraOffRef.current === scopeKey) return
+    let live = true
+    let timer = null
+    const tick = () => {
+      timer = null
+      if (!live || feiraOffRef.current === scopeKey) return
+      const current = feiraNodeRef.current
+      const plan = badgeRefreshPlan({ now: Date.now(), lastAt: feiraRunAt.current, foreground: current.visible !== false, online: current.online, hosted: current.hosted === true, enabled: true })
+      if (plan.waitMs === null) return
+      if (plan.run) {
+        feiraRunAt.current = Date.now()
+        runFeiraAlerts({ node: current, enabled: true, origin: feiraAlertsOrigin, store: alertsStore, isActive: () => live }).then(async (answer) => {
+          if (!live) return
+          if (answer.off) feiraOffRef.current = scopeKey
+          const value = await alertsStore.load(feiraAlertsOrigin)
+          if (live) setFeiraAlerts({ epoch: nodeEpoch, origin: feiraAlertsOrigin, value })
+        }, () => {})
+      }
+      timer = setTimeout(tick, plan.waitMs)
+    }
+    tick()
+    return () => {
+      live = false
+      if (timer !== null) clearTimeout(timer)
+    }
+  }, [mode, ready, locked, node.visible, node.online, node.hosted, feiraAlertsOrigin, nodeEpoch])
   const feiraBadge = mode === 'hosted' && !locked && !feiraOnScreen && feiraAlerts !== null &&
     feiraAlerts.epoch === nodeEpoch && feiraAlerts.origin === feiraAlertsOrigin &&
     alertsBadge({ node, enabled: true, searches: feiraAlerts.value.searches, counts: feiraAlerts.value.counts })
@@ -3487,6 +3542,7 @@ function Member () {
       onReport: setReport,
       onOpenThread: openThread,
       onOpenEngagers: openEngagers,
+      onOpenQuotes: openQuotes,
       onOpenMember: openMember,
       onOpenMention: mentionHandler,
       onToast: h.handleShowToast,
@@ -3534,6 +3590,13 @@ function Member () {
         return (
           <StackLayer key={i + ':momentos:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
             <Momentos entry={entry} ownKey={ownKey} isTop={i === stack.length - 1} covered={covered} onBack={goBack} onOpenMember={openMember} onMessage={openMessage} onCreate={h.handleOpenMomentComposer} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'salvos') {
+        return (
+          <StackLayer key={i + ':salvos:' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Salvos onBack={goBack} onOpenThread={openThread} onOpenMember={openMember} onToast={h.handleShowToast} />
           </StackLayer>
         )
       }
@@ -3676,7 +3739,7 @@ function Member () {
           </StackLayer>
         )
       }
-      const Screen = entry.screen === 'conversa' ? Conversa : entry.screen === 'curtidas' ? Curtidas : MembroMemo
+      const Screen = entry.screen === 'conversa' ? Conversa : entry.screen === 'curtidas' ? Curtidas : entry.screen === 'citacoes' ? Citacoes : MembroMemo
       return (
         <StackLayer key={i + ':' + entry.screen + ':' + entry.key + (entry.screen === 'conversa' && entry.key === threadReload.ref ? ':' + threadReload.n : '')} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
           <Screen entry={entry} {...screenProps} onComposeSeen={h.handleComposeSeen} composeSignal={entry.screen === 'conversa' && i === stack.length - 1 ? composeSignal : null} onPublished={h.handleOnPublished} onTabChange={entry.screen === 'membro' ? entryHandlers.current.for(i + ':membro:' + entry.key, { handleTabChange: (id) => reportProfileTab(i + ':' + entry.key, id) }).handleTabChange : undefined} />
@@ -3745,6 +3808,7 @@ function Member () {
                       onToast={h.handleShowToast}
                       onOpenThread={openThread}
                       onOpenEngagers={openEngagers}
+                      onOpenQuotes={openQuotes}
                       onOpenMember={openMember}
                       onOpenMention={mentionHandler}
                       onQuote={h.handleStartQuote}
@@ -3773,6 +3837,7 @@ function Member () {
                       onReport={setReport}
                       onOpenThread={openThread}
                       onOpenEngagers={openEngagers}
+                      onOpenQuotes={openQuotes}
                       onOpenMember={openMember}
                       onOpenMention={mentionHandler}
                       onQuote={h.handleStartQuote}
@@ -3802,6 +3867,7 @@ function Member () {
                       onOpenThread={openThread}
                       onOpenMention={mentionHandler}
                       onOpenEngagers={openEngagers}
+                      onOpenQuotes={openQuotes}
                     />
                   )}
                 </ScreenVisible.Provider>
@@ -3885,6 +3951,7 @@ function Member () {
                       onMessage={openMessage}
                       onOpenThread={openThread}
                       onOpenEngagers={openEngagers}
+                      onOpenQuotes={openQuotes}
                       onOpenMember={openMember}
                       onOpenMention={mentionHandler}
                       onQuote={h.handleStartQuote}
@@ -3896,6 +3963,7 @@ function Member () {
                       onOpenPeople={openPeople}
                       onOpenTestimonials={openTestimonials}
                       onOpenMomentos={openMomentos}
+                      onOpenSalvos={openSalvos}
                     />
                   )}
                 </ScreenVisible.Provider>
@@ -3979,6 +4047,8 @@ function Member () {
   if (!coveringBoot) bootSettled.current = true
   // Post rows read whether "Página pública na web" shows (src/postPublicContext).
   // The wrapper is unconditional, so it never remounts the screens.
+  // The saved posts list (Posts salvos) is read by the post rows and its screen.
+  content = <SavedProvider hosted={node.hosted === true} ownKey={ownKey}>{content}</SavedProvider>
   content = <PostPublicProvider hosted={node.hosted === true} online={node.online} visible={node.visible} open={openPostShare}>{content}</PostPublicProvider>
   // Side insets are applied once here (sidePad); top and bottom by each bar;
   // Modal content (sheets, photo viewer) pads itself. The wrapper is

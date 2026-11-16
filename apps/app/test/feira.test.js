@@ -193,21 +193,13 @@ test('view model: an edit is applied over the root, kind from the root', async (
   t.is(f.listingView({ author: A, seq: 4, root: root({ kind: 'procura' }), status: 'vendido' }).statusLabel, 'Encontrado')
 })
 
-test('trust lines: omitted when empty, at most three mutuals', async (t) => {
+test('trust lines: only member since has a data source', async (t) => {
   const f = await load()
   t.alike(f.trustLines({}), [])
   t.alike(f.trustLines(), [])
-  t.alike(f.trustLines({ certDate: 'ontem', verifiedName: '  ', mutuals: ['', 3] }), [])
-  const lines = f.trustLines({
-    certDate: '2026-03-01T01:00:00.000Z',
-    verifiedName: 'Ana Souza',
-    mutuals: ['Bia', 'Caio', 'Dani', 'Edu']
-  })
-  t.alike(lines, [
-    { key: 'memberSince', text: 'Na Varanda desde fevereiro de 2026' },
-    { key: 'verifiedName', text: 'Nome verificado: Ana Souza' },
-    { key: 'mutuals', text: 'Seguido por Bia, Caio e Dani' }
-  ])
-  t.alike(f.trustLines({ mutuals: ['Bia'] }), [{ key: 'mutuals', text: 'Seguido por Bia' }])
-  t.absent(JSON.stringify(f.trustLines({ certDate: AT, verifiedName: 'A', mutuals: ['B'] })).toLowerCase().includes('idade'), 'no age badge')
+  t.alike(f.trustLines({ certDate: 'ontem' }), [])
+  t.alike(f.trustLines({ certDate: '2026-03-01T01:00:00.000Z', verifiedName: 'Ana Souza', mutuals: ['Bia'] }), [
+    { key: 'memberSince', text: 'Na Varanda desde fevereiro de 2026' }
+  ], 'no verified name or mutuals line without a source')
+  t.absent(JSON.stringify(f.trustLines({ certDate: AT })).toLowerCase().includes('idade'), 'no age badge')
 })

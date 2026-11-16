@@ -36,7 +36,8 @@ import { noteLocalWrite } from '../localWrites'
 import { registerLocalCache, cacheGeneration } from '../localCaches'
 import { replyNameOf, whoOf } from '../who'
 import { avatarOf, pickAvatar } from '../media/avatar'
-import { canDelete, isPageRef } from '../deletion'
+import { isPageRef } from '../deletion'
+import { canDeletePost } from '../postActions'
 import { installationOrigin } from '../installation'
 import { postLink } from '../postLink'
 import * as actingStore from '../actingAs'
@@ -47,6 +48,7 @@ import { Btn, ErrorText, Row, Soft, UNCERTAIN, errorText, useAction, useBottomPa
 import { BranchLink } from '../ui/BranchLink'
 import { OfflineNote } from '../ui/OfflineNote'
 import { PostRow } from '../ui/PostRow'
+import { PostSheetProvider } from '../ui/PostSheetHost'
 import { ReplyBar } from '../ui/ReplyBar'
 import { useKeyboardAvoidEnabled, useKeyboardOpen } from '../ui/keyboardAvoid'
 import { EmbedBandBottom } from '../ui/screenVisible'
@@ -78,6 +80,11 @@ const ANCHOR_TRIES = 4
 const FLASH_MS = 900
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+// The delete rule lives in postActions.js (canDeletePost).
+export function canDeleteHere (item, ownKey) {
+  return canDeletePost(item, { ownKey, page: actingPageKey() })
+}
 
 export function refOf (author, seq) {
   return author + ':' + seq
@@ -432,14 +439,34 @@ export function useEngagement ({ request, node, onToast }) {
   const touchedRef = useRef(new Map()) // 'liked|<ref>' -> stamp
   const touch = (field, ref) => touchedRef.current.set(field + '|' + ref, ++clockRef.current)
   const readRefs = useRef(new Set())
+  const countsRef = useRef(counts)
+  countsRef.current = counts
 
+  // Returns an undo for a refresh that fails after the clear: the rows stay on
+  // screen, so their counts and own likes come back (a field touched, a ref
+  // read or a count read since wins over the old one).
   const reset = useCallback(() => {
+    const priorState = stateRef.current
+    const priorCounts = countsRef.current
+    const stamp = ++clockRef.current
     setState(emptyState())
     setCounts(new Map())
     // Toggles still in flight keep protecting their refs.
     const kept = new Map()
     for (const [k, v] of touchedRef.current) if (pendingRef.current.has(k.slice(k.indexOf('|') + 1))) kept.set(k, v)
     touchedRef.current = kept
+    return () => {
+      const since = (field, ref) => (touchedRef.current.get(field + '|' + ref) || 0) > stamp
+      const stale = (field, ref) => since(field, ref) || since('read', ref)
+      setState((s) => {
+        const liked = new Set(s.liked)
+        const reposted = new Set(s.reposted)
+        for (const ref of priorState.liked) if (!stale('liked', ref)) liked.add(ref)
+        for (const ref of priorState.reposted) if (!stale('reposted', ref)) reposted.add(ref)
+        return { liked, reposted }
+      })
+      setCounts((m) => new Map([...priorCounts, ...m]))
+    }
   }, [])
   // engagement.read for `refs` (chunks of ENGAGEMENT_MAX); a failure leaves
   // those refs shown as not liked/reposted.
@@ -454,6 +481,7 @@ export function useEngagement ({ request, node, onToast }) {
         if (!alive()) return
         // Read for another identity than the one acted as now.
         if (as !== actingPageKey()) continue
+        for (const ref of part) touch('read', ref)
         const fresh = (field, ref) => !pendingRef.current.has(ref) && !((touchedRef.current.get(field + '|' + ref) || 0) > started)
         setState((s) => {
           const liked = new Set(s.liked)
@@ -647,10 +675,11 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
       onQuote: hasSeq && has('onQuote') ? () => live.handlers.onQuote({ ref, name: who.name, username: who.username, text: item.text }) : undefined,
       onOpenLikes: eng && hasSeq && has('onOpenEngagers') ? () => live.handlers.onOpenEngagers({ ref, kind: 'likes' }) : undefined,
       onOpenReposts: eng && hasSeq && has('onOpenEngagers') ? () => live.handlers.onOpenEngagers({ ref, kind: 'reposts' }) : undefined,
+      onOpenQuotes: eng && hasSeq && has('onOpenQuotes') ? () => live.handlers.onOpenQuotes({ ref }) : undefined,
       onLike: eng && hasSeq ? () => live.eng.toggle('like', ref) : undefined,
       onRepost: eng && hasSeq ? () => live.eng.toggle('repost', ref) : undefined,
       onReport: reportable ? () => live.handlers.onReport({ author: item.author, name: who.name, username: who.username, seq: item.seq, text: item.text }) : undefined,
-      onDelete: hasSeq && has('onDelete') && canDelete(item, typeof ownKey === 'string' ? ownKey.toLowerCase() : null, acting)
+      onDelete: hasSeq && has('onDelete') && canDeleteHere(item, typeof ownKey === 'string' ? ownKey : null)
         ? () => live.handlers.onDelete({ ref, seq: item.seq })
         : undefined,
       seq: hasSeq ? item.seq : undefined,
@@ -658,6 +687,7 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
       // Before ...extra, so a link a caller passes (an offer's) keeps winning.
       link,
       publishable,
+      onNotice: has('onNotice') ? (notice) => live.handlers.onNotice(notice) : undefined,
       ...extra
     }
   }
@@ -856,7 +886,12 @@ const INITIAL = {
   refreshing: false
 }
 
-export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onToast, onDeletedPost, onMessage, composeSignal, onComposeSeen, onPublished }) {
+// One actions sheet for the whole list instead of two per row.
+export default function Conversa (props) {
+  return <PostSheetProvider><ConversaList {...props} /></PostSheetProvider>
+}
+
+function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onToast, onDeletedPost, onMessage, composeSignal, onComposeSeen, onPublished }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
@@ -993,6 +1028,7 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
   const load = useCallback(async (refreshing = false) => {
     const mine = ++genRef.current
     const alive = () => mine === genRef.current
+    let undoReset = null
     commit(refreshing ? { refreshing: true, error: '' } : { ...INITIAL })
     const failed = (reason) => commit({
       phase: refreshing && viewRef.current.phase === 'ready' ? 'ready' : 'error',
@@ -1046,7 +1082,7 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
       const extra = anchor !== null && anchor !== rootRef && !index.replies.includes(anchor) ? [anchor] : []
       const refs = [rootRef].concat(index.replies, extra)
       // engagement.read first: it preempts sync, so it goes before the peeks.
-      if (refreshing) reset()
+      if (refreshing) undoReset = reset()
       await readOwn(refs, alive)
       if (!alive()) return
       followsRef.current = loadFollows()
@@ -1105,6 +1141,7 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
       readCounts(refsOf(comments), alive)
     } catch (err) {
       if (!alive()) return
+      if (undoReset) undoReset()
       commit({ phase: refreshing && viewRef.current.phase === 'ready' ? 'ready' : 'error', refreshing: false, loadingMore: false, error: refreshing && viewRef.current.phase === 'ready' ? 'Não foi possível atualizar a conversa.' : isSeederDown(err) ? 'Sem conexão com o servidor agora.' : errorText(err) })
     }
   }, [focal, focusRef, focusTop, request, commit, putRodas, readOwn, readCounts, setCount, reset, loadFollows, learnMany, resolveMany, ownKey])
@@ -1456,7 +1493,7 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
       dropDeleted.current(t.ref, true)
     }
   })
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply: full ? targetReply : onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined, onMessage }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onReply: full ? targetReply : onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined, onMessage, onNotice: onToast }
   const props = (item, extra, rowKey) => rowProps({ item, names, peeked: peekedRef.current, now, ownKey, follows, eng: full ? eng : null, handlers, extra, cache: rowKey === undefined ? undefined : rowCache, rowKey })
   // Before the offline return: hooks run on every render.
   const shownRodas = useMemo(() => new Map([...rodas].map(([key, roda]) => [key, rodaOrder(roda.replies, key)])), [rodas])

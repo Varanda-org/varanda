@@ -52,6 +52,7 @@ import { AccessibilityInfo, Image, Keyboard, Platform, Pressable, ScrollView, St
 import { MAX_TEXT, activeMention, displayText } from '@varanda/rpc'
 import { MENTION_MIN_QUERY, insertMention } from '../mentions'
 import { mergeSuggestions } from '../mentionTargets'
+import { handoffSettled, settledAfter } from '../replyHandoff'
 import { useMemberSearch } from '../useMemberSearch'
 import { MentionSuggest } from '../ui/MentionSuggest'
 import { sha256 } from '@noble/hashes/sha2.js'
@@ -96,7 +97,7 @@ import { MusicPicker } from '../ui/MusicPicker'
 import { useMusicAvailable } from '../ui/MusicPlayerCard'
 import { MusicSticker } from '../ui/MusicSticker'
 import { withPreview } from '../attach-plan'
-import { refusalOf } from '../wordCheck'
+import { previewRefusal, refusalOf } from '../wordCheck'
 import { Sheet, TEXT_CAP } from '../ui/Sheet'
 import { tap } from '../ui/haptics'
 import { KeyboardLift } from '../ui/KeyboardLift'
@@ -675,16 +676,18 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const node = useNode()
   const outbox = useOutbox()
   const [text, setText] = useState('')
-  const [replyDrafts, setReplyDrafts] = useState(new Set())
-  const replyDraftsRef = useRef(replyDrafts)
+  // Serials only grow and one hand-off is active at a time, so the highest
+  // settled one stands for all older ones.
+  const [lastSettled, setLastSettled] = useState(0)
+  const lastSettledRef = useRef(lastSettled)
   const hasReplyDraft = reply && typeof reply.draft === 'string'
-  const replyDraftPending = open && hasReplyDraft && !replyDrafts.has(reply.handoff)
+  const replyDraftPending = open && hasReplyDraft && !handoffSettled(lastSettled, reply.handoff)
   const settleReplyDraft = (accepted) => {
-    const prior = replyDraftsRef.current
-    if (prior.has(reply.handoff)) return
-    const next = new Set(prior).add(reply.handoff)
-    replyDraftsRef.current = next
-    setReplyDrafts(next)
+    const prior = lastSettledRef.current
+    if (handoffSettled(prior, reply.handoff)) return
+    const next = settledAfter(prior, reply.handoff)
+    lastSettledRef.current = next
+    setLastSettled(next)
     if (onReplyDraft) onReplyDraft(accepted)
   }
 
@@ -1355,7 +1358,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     // Before every path below (photos, the outbox, a page's signature). The
     // draft is kept, so the person can edit it. A signed post waiting for its
     // retry passed this when it was first sent.
-    const refused = pageRetryRef.current === null ? refusalOf(text) : ''
+    const refused = pageRetryRef.current === null ? (refusalOf(text) || previewRefusal(linkDraft.view)) : ''
     if (refused !== '') {
       setCheckError(refused)
       return

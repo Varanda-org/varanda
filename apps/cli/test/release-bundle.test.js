@@ -19,13 +19,13 @@ const BUNDLE = [
   'compose.yaml', 'compose.web.yaml', 'compose.release.yaml', 'compose.release.web.yaml',
   'Caddyfile', 'update.sh', 'update.conf.example', 'well-known.sh',
   'varanda-update.service', 'varanda-update.timer', 'cosign.ref', '.env.example',
-  'secrets.sealed.json'
+  'secrets.sealed.json', 'secrets-signers.txt'
 ]
 
 const OWNED = [
   'deploy/seeder/Dockerfile', '.dockerignore', 'deploy/seeder/compose.release.yaml',
   'deploy/seeder/compose.release.web.yaml', 'deploy/seeder/cosign.ref',
-  'apps/cli/test/release-bundle.test.js'
+  'deploy/seeder/secrets-signers.txt', 'apps/cli/test/release-bundle.test.js'
 ]
 
 const COMMIT = '0123456789abcdef0123456789abcdef01234567'

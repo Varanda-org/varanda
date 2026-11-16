@@ -29,6 +29,17 @@ export const RATINGS_REFS_MAX = 32
 const HEX64 = /^[0-9a-f]{64}$/
 const isSeq = (n) => Number.isSafeInteger(n) && n >= 1
 
+// The node's certDate (docs/rpc.md 5.27) is still untrusted JSON here: only a
+// canonical ISO string (one that round-trips through Date) counts.
+export function certDateOf (v) {
+  if (typeof v !== 'string' || v.length > 32) return null
+  try {
+    return new Date(v).toISOString() === v ? v : null
+  } catch {
+    return null
+  }
+}
+
 function refParts (ref) {
   const i = typeof ref === 'string' ? ref.indexOf(':') : -1
   if (i < 0) return null
@@ -131,6 +142,7 @@ function mergeInto (merged, peek) {
   if (Array.isArray(peek.missing)) for (const s of peek.missing) merged.missing.push(s)
   if (merged.profile === null && peek.profile && typeof peek.profile === 'object') merged.profile = peek.profile
   if (merged.username === null && typeof peek.username === 'string') merged.username = peek.username
+  if (merged.certDate === null) merged.certDate = certDateOf(peek.certDate)
 }
 
 // Peeks the plan through the app's shared peek slots; a failed call leaves
@@ -138,7 +150,7 @@ function mergeInto (merged, peek) {
 async function peekAll (request, plan, slots) {
   const merged = new Map()
   for (const params of plan) {
-    if (!merged.has(params.author)) merged.set(params.author, { entries: [], invalid: [], missing: [], profile: null, username: null })
+    if (!merged.has(params.author)) merged.set(params.author, { entries: [], invalid: [], missing: [], profile: null, username: null, certDate: null })
     const into = merged.get(params.author)
     try {
       const peek = await slots.run(() => request('diary.peek', params), { front: true })
@@ -180,6 +192,7 @@ export async function hydrate (request, value, deps = {}) {
         ...r.view,
         name: peek && peek.profile && typeof peek.profile.name === 'string' ? rpc.displayText(peek.profile.name) : '',
         username: peek && typeof peek.username === 'string' ? peek.username : null,
+        certDate: peek ? peek.certDate : null,
         page: hint.page === true
       })
     } else if (r.drop === 'mismatch') {

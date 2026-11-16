@@ -82,6 +82,10 @@ export function ActionsSheet ({ open, onClose, title, actions, header }) {
   useEffect(() => {
     if (shown) {
       gone.current = false
+      // Opened again during the slide out (a list's shared sheet another row
+      // opened): the pressed action runs now instead of after this opening,
+      // and the new rows answer.
+      if (pending.current !== null) flush()
       return undefined
     }
     // Modal reports its dismissal on iOS and on the web (where the closing

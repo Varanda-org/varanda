@@ -33,11 +33,24 @@ const matchesAt = (tokens, at, words) => {
   return true
 }
 
+const EDGE_DIGITS = /^[0-9]+|[0-9]+$/g
+
+// The same words with the digits glued to their start or end taken off, so
+// "termo123" reads as "termo". A word of digits only stays as it is and still
+// separates the words around it.
+const withoutEdgeDigits = (tokens) => tokens.map((token) => token.replace(EDGE_DIGITS, '') || token)
+
 // The first listed term in `text`, or null. Compares whole folded words, so a
-// term never matches inside a longer word, and reads the whole text, so a term
-// cannot hide past the bound that search input has.
+// term never matches inside a longer word (digits at the edge of a word are
+// not part of it), and reads the whole text, so a term cannot hide past the
+// bound that search input has.
 export function findTerm (text, index = DEFAULT_INDEX) {
   const tokens = wholeTokens(text)
+  const found = findIn(tokens, index)
+  return found !== null ? found : findIn(withoutEdgeDigits(tokens), index)
+}
+
+function findIn (tokens, index) {
   for (let at = 0; at < tokens.length; at++) {
     const rows = index.get(tokens[at])
     if (!rows) continue
@@ -61,9 +74,28 @@ export function refusalOf (...texts) {
   return ''
 }
 
+// The title and description of a link preview come from the linked site, so the
+// person cannot edit them: the refusal says to drop the preview instead.
+export const previewRefusalText = (term) => 'Não dá para publicar: "' + term + '" aparece na prévia do link, e o Varanda não permite esse termo em conteúdo público. Remova a prévia ou troque o link e tente de novo.'
+
+// The refusal for a draft link card ({ title, desc } or null), or ''.
+export function previewRefusal (view) {
+  if (!view || typeof view !== 'object') return ''
+  for (const text of [view.title, view.desc]) {
+    const term = findTerm(text)
+    if (term !== null) return previewRefusalText(term)
+  }
+  return ''
+}
+
 // The same for a group's message or name: only a group known to be public. A
 // private group is never checked, and neither is one whose visibility is not
 // known yet, which may turn out to be private.
 export function publicGroupRefusal (visibility, ...texts) {
   return visibility === 'public' ? refusalOf(...texts) : ''
+}
+
+// The same for a group's link preview, under the same rule.
+export function publicGroupPreviewRefusal (visibility, view) {
+  return visibility === 'public' ? previewRefusal(view) : ''
 }

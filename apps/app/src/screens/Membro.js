@@ -65,6 +65,7 @@ import { LABELS } from '../dm'
 import { COUNTS_INCOMPLETE_NOTE } from '../pessoas'
 import { useFollowCounts } from '../useFollowCounts'
 import { PostRow } from '../ui/PostRow'
+import { PostSheetProvider } from '../ui/PostSheetHost'
 import { RefreshableList } from '../ui/RefreshableList'
 import { MuralFooter, MuralRow, muralGridRows } from '../ui/MuralGrid'
 import { Segmented } from '../ui/Segmented'
@@ -264,7 +265,12 @@ const INITIAL_POSTS = {
 const postKey = (i) => i.kind + ':' + i.seq
 const NO_EXTRA = {}
 
-export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenPageSettings, onOpenPeople, onOpenCommunity, onOpenListings, onOpenTestimonials, onToast, onTabChange }) {
+// One actions sheet for the whole list instead of two per row.
+export default function Membro (props) {
+  return <PostSheetProvider><MembroList {...props} /></PostSheetProvider>
+}
+
+function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onOpenPageSettings, onOpenPeople, onOpenCommunity, onOpenListings, onOpenTestimonials, onToast, onTabChange }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const node = useNode()
@@ -1167,7 +1173,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   )
 
   // Before the offline return: hooks run on every render.
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onMessage }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onReply, onQuote, onReport, onMessage, onNotice: onToast }
   const memberWho = useMemo(() => ({ author, name: header.name, username: header.username }), [author, header.name, header.username])
   const rowCache = useThreadRowCache(posts.items.map(postKey), { handlers, eng })
   // The member's own posts carry the header's identity; the copy is kept per

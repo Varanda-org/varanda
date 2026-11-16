@@ -4949,7 +4949,7 @@ Roteiro da aba Conversas como uma lista só no nó hospedado: busca, filtros, fi
 Regras que os passos conferem:
 
 - A lista traz as conversas privadas e os grupos das comunidades da pessoa, do mais recente para o mais antigo. O cabeçalho tem **+** (Nova conversa), ⓘ (ajuda) e o sino de Avisos.
-- **Buscar conversas** fica acima dos filtros, filtra as linhas carregadas, e o X limpa. Com texto na busca, os fixados somem, e o filtro escolhido continua valendo.
+- **Buscar conversas** fica acima dos filtros, filtra as conversas, e o X limpa. Com texto, a busca lê no aparelho as páginas mais antigas da caixa (até 20 por vez, com uma pausa entre elas); acabada essa conta com páginas sobrando, a lista diz que há conversas mais antigas e oferece **Buscar mais**. Com texto na busca, os fixados somem, e o filtro escolhido continua valendo.
 - Os filtros são **Todas**, **Não lidas** e **Grupos**.
 - Fixados no topo: **Pedidos de mensagem**, com um ponto quando há pedido não lido (nunca um número; em **Não lidas**, só quando há pedido não lido), e **Comunidades**, com uma seta.
 - Cada linha tem avatar (pessoa redonda; grupo e comunidade em quadrado arredondado com iniciais), nome, prévia de uma linha ("Você:" à parte na própria última mensagem; em grupo, "Autor: texto"), hora relativa e um ponto (conversa privada) ou contador (grupo) na cor de destaque. Não há marcas de lido, de entrega nem de digitação.
@@ -4991,6 +4991,16 @@ Limites desta caminhada:
 
 - Na Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`), as conversas são dados de exemplo. Envio, aceite de pedido e busca com conversas reais só se conferem no laboratório hospedado, com duas pessoas, como na seção 94.
 - Nenhuma caixa acima foi executada nesta documentação.
+
+Rodada da issue #442 (parte 1), 2026-11-15:
+
+- [ ] Geral: numa comunidade cujo nome só tem caracteres invisíveis, a linha do grupo geral mostra "Geral".
+- [ ] A linha de uma conversa privada mostra o @nome conferido; para quem você não segue, o nome aparece depois da leitura do nó (nó hospedado e online, até 10 linhas do topo), e sem leitura conferida a linha fica "Pessoa".
+- [ ] Como Página, a própria Página não aparece na lista nem na busca de Nova conversa.
+- [ ] Busca numa caixa de mais de uma página: o esqueleto aparece enquanto as páginas mais antigas chegam, e uma conversa antiga entra no resultado; depois de 20 páginas sem achar, a lista mostra "Nada encontrado nas conversas buscadas até agora." com **Buscar mais**.
+- [ ] Puxar para atualizar depois de rolar várias páginas: as linhas carregadas continuam na lista.
+
+Situação, em 2026-11-15 (Vitrine, Metro na porta 8099, emulador Android API 36, simulador iPhone 17 Pro e painel de navegador): as linhas de conversa privada mostram o @nome nas três plataformas, e a busca filtra as linhas da Vitrine com o estado vazio certo. A Vitrine tem uma página só, nenhuma Página ativa e nenhum nome de comunidade invisível, então a paginação da busca, **Buscar mais**, a atualização depois de várias páginas, a própria Página, a linha "Pessoa" e a linha Geral ficam para o laboratório hospedado. Cada caixa só é marcada quando o alvo foi percorrido por inteiro; nenhuma foi.
 
 ## 101. Balões, respostas e cabeçalhos das conversas (PR feat/chat-bubbles-replies)
 
@@ -5100,7 +5110,7 @@ Regras que os passos conferem:
 - O número de citações não aparece mais na barra (Citar está na folha); o número de republicações não soma citações, para bater com a lista de quem republicou. O leitor de tela anuncia o botão como "republicar ou citar".
 - Na web, os campos arredondados (Busca, a pesquisa de Conversas, Nova conversa e o campo de escrever das conversas) mostram o foco com a borda da pílula na cor de destaque, sem o contorno retangular do navegador. Busca: Enter ou "pesquisar" sempre pesquisa de novo (depois de uma falha, é assim que se tenta outra vez); trocar para Contas cancela a pesquisa de Publicações que esperava a pausa; o teclado não corrige nem põe maiúscula no termo.
 - "Mais" abre "Copiar link" (só quando a publicação tem link público), "Denunciar" (publicações de outros, com a conta conectada) e "Apagar" (publicações próprias, em vermelho, com a confirmação de sempre).
-- "Compartilhar" só aparece quando a publicação tem link público. Hoje nenhuma publicação tem, então o botão não aparece.
+- "Compartilhar" só aparece quando a publicação tem link público. Os links de publicação são conferidos na seção 212.
 - A Rua: "Alguns números podem estar incompletos." é uma nota pequena e suave, não uma linha; a lista deixa espaço para o botão de publicar não cobrir as ações da última publicação; "ver novidades" nunca aparece sobre o estado vazio.
 - Avisos: cada linha tem o selo de ação no avatar, o nome e a ação numa linha, o @nome verificado na linha suave (quando existe) e, numa linha própria, o começo da publicação entre aspas (até 90 caracteres, em outra cor; nunca no lugar do @nome; sem prévia nas linhas de quem começou a seguir), o tempo à direita e um ponto nas linhas não lidas. As prévias vêm do próprio diário no nó; nada é buscado de fora.
 - Busca: campo arredondado com lupa e X. Publicações pesquisa enquanto a pessoa digita (a partir de 2 caracteres, depois de uma pausa curta; respostas antigas são ignoradas) e ao tocar em enter ou em "pesquisar". Contas já pesquisava enquanto digitava.
@@ -5135,9 +5145,17 @@ Como verificar, antes da caminhada, a partir da raiz:
 
 Limites desta caminhada:
 
-- A Vitrine não tem mídia, então a foto de Publicar só se confere com conta hospedada em build nativo.
-- "Compartilhar" fica sem efeito visível até existirem links públicos de publicação (próximo passo).
+- A Vitrine não tem mídia, então a foto de Publicar só se confere com conta hospedada em build nativo; a ordem das fotos fica na seção 151.
+- O link público, "Copiar link" e "Compartilhar" de uma publicação são conferidos na seção 212.
 - Nenhuma caixa acima foi executada nesta documentação.
+
+Rodada da issue #442 (parte 1), 2026-11-15:
+
+- O menu "mais" de uma publicação citada mostra "Ver N citações" (só no nó hospedado, como a lista de curtidas). A lista traz as citações mais recentes, até 50, e só mostra uma citação depois de ler a publicação assinada que cita esta. Cada lista de publicações tem uma só folha de ações, que as linhas dividem.
+- [ ] "Ver N citações" abre a lista em A Rua, Diário, perfil, Espiadinha, Busca e Conversa; tocar numa citação abre a conversa dela. Sem citações, a linha não aparece.
+- [ ] Abrir o "mais" de duas linhas seguidas mostra as ações da linha certa, e Republicar mostra "Desfazer republicação" numa publicação já republicada.
+
+Situação, em 2026-11-15 (Vitrine, Metro na porta 8099, emulador Android API 36, simulador iPhone 17 Pro e painel de navegador): no Diário, o "mais" da publicação republicada abre a folha compartilhada com "Ver 1 citação" nas três plataformas, e a lista Citações mostra a citação conferida. No Android e na web, tocar na citação abre a Conversa dela; na web, o "mais" na Conversa também mostrou "Ver 1 citação". A Rua, perfil, Espiadinha e Busca não foram percorridos, nem a troca entre duas linhas seguidas. Nenhuma caixa foi marcada.
 
 ## 104. Blobs anônimos das conversas: selos, canal, conjunto e rota `/blob` (PR feat/blob-channel)
 
@@ -6454,7 +6472,8 @@ Caminhada com a Feira ligada numa instalação de teste (semeador com `VARANDA_P
 - [ ] Com as entradas semanais de quem anunciou esgotadas, o cadastro pelo anúncio mostra "Quem anunciou não tem mais entradas nesta semana. Peça um convite a alguém da rede ou tente na próxima semana.".
 - [ ] "Conversar" abre a conversa com o rascunho "Olá! Tenho interesse no seu anúncio "…" na Feira: <link>" e o cartão do link, sem enviar nada. Depois de enviar, o cartão na conversa tem "Ver anúncio", que abre a tela Anúncio.
 - [ ] Quem anunciou toca em "Reservado"; uma segunda pessoa, ao abrir o anúncio (ou puxar para atualizar a lista), vê o selo "Reservado".
-- [ ] Quem anunciou toca em "Apagar" e em "Confirmar: apagar": o anúncio sai de "Meus" e da busca, e a página pública `/f/<diário>/<seq>` responde "Anúncio não encontrado".
+- [ ] Quem anunciou toca em "Apagar" e em "Confirmar: apagar": o anúncio sai de "Meus" e da busca, e a página pública `/f/<diário>/<seq>` responde "Anúncio não encontrado". Ao tocar em "Apagar", a tela avisa: "As avaliações deste anúncio são apagadas com ele e não passam para um anúncio novo." (#446).
+- [ ] Abrir um anúncio com fotos, apagá-lo e voltar à lista: as fotos dele deixam de ser servidas pelo cache de mídia do aparelho, como as de uma publicação apagada (#446, #532).
 - [ ] Agindo como Página, anunciar: o anúncio aparece em "Meus" da Página. Outro membro toca em "Conversar": a conversa é com a Página, e a Página, na caixa dela, vê a mensagem com o cartão do anúncio; a resposta da Página chega ao membro na mesma conversa, com o cartão mantido.
 - [ ] "Denunciar" no anúncio de outra pessoa abre a folha de denúncia com o título do anúncio; enviada, ela aparece no painel de moderação como "anúncio", no filtro "Anúncios", com "Ver anúncio".
 - [ ] No perfil de um membro (e de uma Página) com anúncios, a linha "Anúncios" abre a lista só daquela pessoa, sem abas, filtros nem "Anunciar"; puxar para atualizar funciona e quem não tem anúncios vê "Nenhum anúncio por aqui.".
@@ -6463,7 +6482,8 @@ Limites desta caminhada:
 
 - Nenhuma caixa acima foi executada nesta documentação.
 - Numa conversa da Página, o cartão do anúncio aparece sem miniatura (o app não lê as fotos da caixa da Página).
-- Uma linha velha do índice mostra "Situação desconhecida" até o semeador reler o diário.
+- Depois de um apagamento, uma linha do índice pode mostrar "Situação desconhecida" por cerca de 1 minuto, até o semeador reler o diário (seção 130, #446).
+- Decidido, não é defeito (#446): a avaliação pertence a um anúncio só. Apagar e publicar de novo não leva as avaliações; a confirmação de apagar diz isso.
 
 ## 133. Feira: ofertas, avaliações, edição, buscas salvas e links no app (PR feat/feira-extras)
 
@@ -6497,6 +6517,8 @@ Caminhada com a Feira ligada numa instalação de teste e dois membros de teste 
 - [ ] Editar: quem anunciou toca em "Editar", vê "A primeira versão (título, texto e fotos) continua no seu diário até você apagar o anúncio. A página pública mostra a versão nova.", muda o título e toca em "Salvar": a tela volta para o anúncio com o título novo. O link `/f/<diário>/<seq>` continua o mesmo, e colá-lo num aplicativo de mensagens mostra a prévia nova (a prévia de um link já colado pode ficar em cache no aplicativo).
 - [ ] Conflito: com o mesmo anúncio aberto em "Editar" em dois aparelhos, salvar num e depois no outro mostra "Este anúncio mudou em outro aparelho. Recarregue para editar a versão atual." e "Recarregar" traz a versão atual.
 - [ ] Buscas salvas: na aba Feira, fazer uma busca e tocar em "Salvar busca" ("Busca salva neste aparelho."); outra pessoa publica um anúncio que a busca acha; depois de 15 minutos, abrir a Feira mostra a busca em "Buscas" com "1 novo"; ao sair da aba Feira, a aba ganha o ponto, e abrir a busca zera a contagem e tira o ponto.
+- [ ] Com uma busca salva que tem mais de uma página de anúncios novos, o chip em "Buscas" mostra "N+ novos" (por exemplo "30+ novos"); com uma página só, "N novos" ou "1 novo" (#446).
+- [ ] Ponto sem abrir a Feira: com o app em primeiro plano, online, numa aba que não é a Feira, e uma busca salva que ganhou anúncio novo, o ponto aparece na aba Feira em até cerca de 15 minutos; com o app em segundo plano ou offline, não aparece (#446).
 - [ ] Com 10 buscas salvas, "Salvar busca" mostra "Você já tem 10 buscas salvas. Remova uma para salvar outra.".
 - [ ] App Links (pendente: precisa de um aparelho Android de teste com o build de produção `app.varanda`, porque o `app.varanda.debug` só abre depois de aprovação manual): tocar num link `https://bora.varanda.app/anuncio/<diário>/<seq>` fora do app abre a tela Anúncio no app; um link `/f/…` abre no navegador.
 - [ ] Links universais no iOS (pendente: precisa da implantação republicar o `apple-app-site-association` com `applinks` e de um build assinado com o direito `applinks:bora.varanda.app`): tocar num link `/anuncio/…` no Notas ou no Mensagens abre a tela Anúncio no app.
@@ -6506,8 +6528,8 @@ Caminhada com a Feira ligada numa instalação de teste e dois membros de teste 
 Limites desta caminhada:
 
 - Nenhuma caixa acima foi executada nesta documentação.
-- O ponto da aba Feira reflete o que a última abertura da Feira contou; ele não é atualizado em segundo plano.
-- As contagens olham só a primeira página de cada busca.
+- O ponto da aba Feira é atualizado a cada 15 minutos só enquanto o app está hospedado, online e em primeiro plano, em qualquer aba (#446); em segundo plano ou offline não há consulta e não há aviso push. A atualização respeita o mesmo intervalo mínimo de 15 minutos das contagens.
+- As contagens olham só a primeira página de cada busca; quando a busca tem mais páginas, o chip mostra "N+ novos" (#446).
 
 ## 134. Bloquear uma pessoa (PR feat/member-block)
 
@@ -6664,9 +6686,8 @@ Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e dep
 Limites desta caminhada:
 
 - Nenhuma caixa acima foi marcada nesta documentação.
-- A conferência não cobre o título e a descrição de uma prévia de link, que vêm do site.
+- Letras e números colados (`termo123`) e a prévia de link passam a ser conferidos: veja `docs/verification/fix-conferencia-palavras-sobras.md`.
 - O serviço de conta não conhece a lista, então um @nome só é recusado no app.
-- Um @nome com letras e números colados (`termo123`) conta como uma palavra só e passa.
 - Um app modificado, um build antigo ou a CLI publicam sem passar por ela. Isso se confere lendo `apps/app/src/wordCheck.js`: o protocolo e o semeador não têm a lista.
 - Ela não lê fotos nem áudio, e grafias diferentes passam.
 
@@ -8740,6 +8761,15 @@ Situação, em 2026-11-12 (Vitrine, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1` na
 - [ ] Android, AVD `varanda-api36` (parcial, passada de teclado de 2026-11-12, Metro na porta 8090 com o app apontado por `debug_http_host`): passo 1 FALHOU. Com o teclado aberto, a barra fica acima dele mas há uma faixa em branco de cerca de 20 dp entre o fundo da barra e o teclado (captura `v3-shots/and-1-keyboard.png`, repete-se em `and-4-dark-reply.png`). Causa: a margem da área segura de baixo continuava com o teclado aberto. Corrigido e repassado no mesmo dia: a faixa de 20 dp sumiu (`and-1-keyboard-fixed.png`); restou uma tira de cerca de 5 dp na cor da página, que é o respiro de 8 dp sob a barra. Esse respiro passou a ter a cor da barra; essa última mudança não foi reconferida no aparelho. Com o teclado fechado, a barra fica logo acima da área de gestos, sem faixa a mais (`and-2-closed-fixed.png`). Passo 2 passou: ao fechar o teclado a barra volta ao fundo, acima da área segura, sem faixa a mais. Passo 3 passou (7 e 8): "Oi teste" apareceu uma vez no bloco "1 resposta". Passo 4 passou (7 e 18): "Respondendo a @lia_oliveira" e o espaço reservado legíveis no tema escuro. Não verificado: os demais passos, texto grande, leitor de tela, Reduzir movimento.
 - [ ] iOS, simulador iPhone 17 Pro (o iPhone 16e não liga aqui) (parcial, passada de teclado de 2026-11-12, Metro na porta 8090 com `RCT_jsLocation`): passo 1 passou: a barra fica rente ao teclado, inteira, sem faixa em branco nem folga acima (`v3-shots/ios-1-keyboard.png`). Passo 2 (parcial): o teclado de software sumiu ao digitar pelo teclado do Mac e a barra voltou ao fundo acima da área segura (`ios-2-after-send.png`); o fechamento pelo próprio teclado não foi tocado. Passo 3 passou: a resposta apareceu uma vez no bloco "1 resposta" (o texto saiu corrigido para "Ok, teste" pelo autocorretor). Passo 4 passou: "Respondendo a @lia_oliveira" e o espaço reservado legíveis no tema escuro (`ios-3-dark-reply.png`); o escuro veio pela opção Escuro de Ajustes > Aparência, porque com Sistema o app ficou claro com o aparelho em escuro (a conferir). Não verificado: os demais passos, texto grande, leitor de tela, Reduzir movimento.
 
+Rodada da issue #442 (parte 1), 2026-11-15:
+
+- [ ] Falha ao atualizar (rede cortada, puxar): os números e as suas curtidas continuam como estavam.
+- [ ] Depois de responder, "Ver mais respostas" só aparece quando há respostas além das carregadas.
+- [ ] Abrir um ramo e responder logo em seguida: a página do ramo chega e fica.
+- [ ] Com um rascunho guardado na Publicar, responder com link pela barra (abre a Publicar) e descartar: o rascunho antigo volta; se outra resposta foi aberta no meio, ela fica.
+
+Situação, em 2026-11-15: nenhum destes quatro passos foi percorrido. A Vitrine não tem rede para cortar nem índice de respostas que cresça, então eles ficam para o laboratório hospedado; a lógica deles está coberta por `apps/app/test/conversaScreen.test.js` e `apps/app/test/replyHandoff.test.js`.
+
 ## 192. Feira: vitrine, categorias e filtros (PR feat/feira-browse)
 
 Quarto PR da revisão visual do app. A aba Feira, em Na cidade, ganha um cabeçalho (busca, chip de cidade, botão Filtros e tiles de categoria), uma grade de tiles de anúncio e, sem cidade escolhida, uma vitrine com "Como funciona".
@@ -8751,8 +8781,8 @@ Quarto PR da revisão visual do app. A aba Feira, em Na cidade, ganha um cabeça
 - Filtros (`apps/app/src/ui/FeiraFilters.js`): a folha "Filtros da Feira" tem "Ordenar por" (Recentes, Menor preço, Maior preço), "Faixa de preço" com "De" e "Até" (preço com vírgula, por exemplo 10,50) e "Tipo de anúncio". Preço fora do formato mostra "Confira os preços. Use, por exemplo, 10,50."; início maior que o fim mostra "O preço de início deve ser menor ou igual ao preço final.". "Aplicar" fecha a folha e "Limpar" zera. Com ordem ou faixa ativas o botão Filtros ganha um ponto. Ordem e faixa só reordenam e filtram os anúncios já carregados; quando ainda há mais páginas, a nota "Ordem e faixa de preço valem para os anúncios já carregados" aparece embaixo da grade (a folha mostra a mesma nota sempre).
 - Buscas salvas: "Salvar busca" continua à mão enquanto há uma busca por cidade; a nota "Busca salva neste aparelho." confirma. Em Buscas aparece a busca ("São Paulo/SP · Todos · Todas as categorias", "N novos", "Remover busca") e nunca há esqueletos.
 - Meus e Salvos usam os mesmos tiles. Os anúncios de uma pessoa ou Página (linha "Anúncios" do perfil) aparecem na grade, sem vitrine nem filtros.
-- Vazio e offline: sem resultado, "Nenhum anúncio por aqui ainda." com "Limpar filtros" e "Trocar cidade"; sem rede, "Conecte-se para consultar a Feira."; índice incompleto, "Alguns anúncios podem faltar. Puxe para atualizar.".
-- Limites conhecidos: ordem e faixa de preço só valem para os anúncios já carregados (a nota diz isso); a casca do app limita o conteúdo a 640 px, então a grade tem no máximo 3 colunas (a quarta, de 900 px, não aparece no app); não há busca nacional (UF e cidade são obrigatórias); a marca "novos desde a última visita" só vale na ordem Recentes e por cidade; a Vitrine só tem 6 anúncios e uma página, então a nota de parcial no rodapé não aparece nela.
+- Vazio e offline: sem resultado, "Nenhum anúncio por aqui ainda." com "Limpar filtros" e "Trocar cidade"; sem rede, "Conecte-se para consultar a Feira."; índice incompleto, "Alguns anúncios podem faltar. Puxe para atualizar.". Se a cidade pesquisada não é a última que teve anúncios neste aparelho, o vazio também oferece "Ver anúncios em <cidade>, <UF>", que aplica essa cidade (#446, UX-16); a última cidade com anúncios fica só no aparelho, no mesmo registro da cidade lembrada.
+- Limites conhecidos: com ordem ou faixa de preço ativa, a Feira carrega sozinha até 5 páginas, sem repetir depois de um erro nem offline (#446); passado disso, ordem e faixa só valem para os anúncios já carregados e a nota diz isso; a grade tem no máximo 3 colunas porque a casca do app limita o conteúdo a 640 px (decidido na #515, mantido na #446; a quarta coluna, de 900 px, não aparece no app); não há busca nacional (UF e cidade são obrigatórias); a marca "novos desde a última visita" só vale na ordem Recentes e por cidade; a Vitrine só tem 6 anúncios e uma página, então a nota de parcial no rodapé não aparece nela.
 
 Como verificar, a partir da raiz:
 
@@ -8766,7 +8796,7 @@ Os testes cobrem ordem, faixa, colunas, rótulos e as regras da tela. Não cobre
 
 ### Verificação manual
 
-Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é um nó hospedado com dados de exemplo e dispensa conta. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e, que não liga neste Mac; usa-se o iPhone 17 Pro), Chrome em 390 e em 1280 px. Capturas ficam fora do git.
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é um nó hospedado com dados de exemplo e dispensa conta. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e, ou o iPhone 17 Pro quando o 16e está ocupado), Chrome em 390 e em 1280 px. Capturas ficam fora do git.
 
 1. Abra a Feira sem cidade. Esperado: título, estados, Cidade, "Ver anúncios" e "Como funciona" com os quatro passos.
 2. Escolha SP e "São Paulo". Esperado: o cabeçalho com chip, Filtros e tiles; a grade.
@@ -8781,19 +8811,22 @@ Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é
 11. Buscas sem nenhuma busca salva. Esperado: "Você ainda não tem buscas salvas neste aparelho." com o botão "Buscar na cidade", que volta ao segmento Na cidade.
 12. Marca de visita: abra a lista de uma cidade, saia, deixe chegar anúncios novos e volte (na Vitrine, com anúncios novos de exemplo). Esperado: a lista mostra "N novos desde a última visita", os anúncios novos e "Anteriores" com o resto; só na ordem Recentes e por cidade; na primeira visita a uma cidade nada é marcado.
 
-Situação, em 2026-11-12 (Vitrine, Metro na porta 8090). Cada caixa só é marcada quando o alvo foi percorrido por inteiro.
+Situação, em 2026-11-12 (Vitrine, Metro na porta 8090), com as conferências da #446 em 2026-11-15 (Vitrine, Metro na porta 8099). Cada caixa só é marcada quando o alvo foi percorrido por inteiro.
 
 - [ ] Android, AVD `varanda-api36` (parcial, Metro na porta 8090, `v4-shots/and-*.png`): passo 1 passou (vitrine com os quatro passos, claro); passo 2 passou ("Sao Paulo" casou com "São Paulo"; chip, Filtros, tiles e "Salvar busca"); passo 4 passou (Casa fica selecionada, sem anúncios mostra "Nenhum anúncio por aqui ainda." com "Limpar filtros" e "Trocar cidade"); passo 5 passou (o AVD vem com texto 1,3: 1 coluna; com texto 1,0: 2 colunas); passo 6 passou (Menor preço e De "10,50": grade reordenada, ponto no Filtros, nota na folha); passo 10 (parcial): escuro conferido na tela de vazio, contraste legível. Não percorrido: passo 3 (folha de localização), 7, 8, sem rede, leitor de tela e Reduzir movimento. O AVD voltou a texto 1,3 e ao tema claro.
-- [ ] iOS, iPhone 17 Pro (o iPhone 16e não liga aqui): não percorrido (sem turnos restantes).
+- [ ] Android, AVD `varanda-api36`, #446 (2026-11-15, parcial): o vazio de uma cidade sem anúncios oferece "Ver anúncios em São Paulo, SP", com rótulo na árvore de acessibilidade; Buscas mostra a busca com "0 novos". Com TalkBack ligado, o foco anda pelos campos (contorno no campo Título de Anunciar) e a árvore de acessibilidade tem os rótulos ("Trocar cidade", Filtros, as categorias, os tiles com preço, lugar e selo); a fala não foi ouvida, porque o emulador roda sem áudio. Não percorrido: Reduzir movimento.
+- [ ] iOS, #446 (2026-11-15, parcial; iPhone 16e no começo, iPhone 17 Pro depois): passos 1 a 3 passaram (vitrine sem cidade, "Escolha o estado e escreva a cidade." com Cidade vazia, a folha do chip recarrega a lista, "Sao Paulo" casa com "São Paulo"); passo 4 passou (Casa selecionada, lista refeita, vazio com "Limpar filtros" e "Trocar cidade"); passo 5 passou (texto XXL, escala 1,24: 2 colunas; XXXL, 1,35, depois de reabrir o app: 1 coluna, nada cortado); passo 6 passou (Menor preço e De "10,50": ponto no Filtros, "Limpar" zera); passo 7 passou (busca salva, a nota, Buscas sem esqueletos); passo 8 passou em Meus e Salvos (a grade de um perfil não foi percorrida no iOS); passo 9 passou na cidade sem anúncios (Campinas mostra "Ver anúncios em São Paulo, SP", e o toque lista São Paulo); passo 10: escuro com XXXL passou. Com o maior tamanho de acessibilidade, o título "Onde você quer comprar e vender?" e os rótulos dos quatro passos quebravam no meio da palavra; corrigido neste PR (o título para de crescer no teto do texto grande, como o da barra do topo, e os passos ficam um por linha) e reconferido em XXXL e no maior tamanho. Não percorrido: sem rede (o simulador não tira a rede só do app), Reduzir movimento e VoiceOver, que fica para um iPhone de verdade (#224). Trocar o tamanho do texto com o app aberto corta rótulos até reabrir o app; isso vem de antes deste PR.
 - [ ] Chrome, 390 px (painel de navegador embutido, não o Chrome em si; parcial): passos 1 a 3 (vitrine, chip e folha de localização recarregando a lista), 4 (tiles), 5 (1 coluna em 340 px, 2 em 390), 6 (ordem e ponto do Filtros; a nota de parcial não aparece porque a Vitrine tem uma página só), 7 (busca salva e Buscas sem esqueletos), 8 (Meus, Salvos e a grade de "Anúncios" do perfil de uma Página, sem vitrine nem filtros), 9 (cidade sem anúncios: "Limpar filtros" e "Trocar cidade"), escuro e claro; o rótulo "Trocar cidade, agora Campinas, SP" apareceu na árvore de acessibilidade. Não percorrido: texto grande, offline, Reduzir movimento, leitor de tela de verdade.
 - [ ] Chrome, 1280 px (painel de navegador embutido; parcial): a grade tem 3 colunas dentro da coluna de 640 px (limite conhecido), tile abre o anúncio, Buscas, Meus e Salvos. Não percorrido: o resto dos passos.
+- [ ] Cidade com erro de digitação (por exemplo "Sao Paulx" no lugar de uma cidade que já teve anúncios): o vazio mostra "Ver anúncios em São Paulo, SP"; tocar nele aplica a cidade e lista os anúncios; com a mesma cidade da última vez, o atalho não aparece (#446). Em 2026-11-15, no Android, no iOS e no painel de navegador (390 px): com Campinas, que não teve anúncios, o vazio mostrou "Ver anúncios em São Paulo, SP", e o toque listou São Paulo; o caso da mesma cidade não foi conferido.
+- [ ] Com Menor preço ou uma faixa ativa numa cidade com mais de uma página de anúncios, a lista completa sozinha até 5 páginas e a nota "Ordem e faixa de preço valem para os anúncios já carregados" só fica se ainda houver mais páginas (#446). A Vitrine tem uma página só, então isso não aparece nela; `feiraScreen.test.js` cobre o limite de 5 páginas.
 
 ## 193. Feira: anúncio, criação em passos e oferta (PR feat/feira-listing-flow)
 
 Quinto PR da revisão visual do app. A tela Anúncio ganha um cartão de quem anunciou e uma barra fixa embaixo com as ações; Anunciar passa a ser feito em quatro passos; "Fazer oferta" no anúncio abre a conversa com quem anunciou e a folha da oferta para aquele anúncio.
 
 - Detalhe (`apps/app/src/screens/Anuncio.js`, `apps/app/src/anuncioView.js`): fotos, preço, título, "Compartilhar" e "Salvar" logo abaixo do título e a descrição (o título "Descrição" só aparece quando há texto).
-- Cartão de quem anunciou (`apps/app/src/ui/SellerCard.js`): avatar, nome e, no nó hospedado, "Ver todos os anúncios", que abre a grade de anúncios de quem anunciou.
+- Cartão de quem anunciou (`apps/app/src/ui/SellerCard.js`): avatar, nome, a linha "Na Varanda desde <mês/ano>" e, no nó hospedado, "Ver todos os anúncios", que abre a grade de anúncios de quem anunciou. A linha vem só do certificado de membro de quem anunciou: a data do bloco 0 do diário (`certDate` de `diary.peek`, `docs/rpc.md` 5.27), conferida pelo nó. Sem data (certificado ilegível, emissor revogado ou pessoa bloqueada), a linha some; não há linhas de nome verificado nem de quem você segue, que não têm fonte de dados (#446).
 - Barra fixa (`apps/app/src/ui/StickyBar.js`): para quem vê, "Conversar" e, só em produto ou serviço com preço, "Fazer oferta"; para o dono, só "Editar". As mensagens de ação ("Link copiado.", erro ao salvar, "Não deu para continuar agora. Tente de novo.") aparecem dentro da barra enquanto ela está na tela. Com texto grande, os botões da barra ficam empilhados. O fim do conteúdo nunca fica atrás da barra. Num anúncio de Página, a nota da Página aparece uma vez antes de Conversar ou Fazer oferta.
 - Anunciar em passos (`apps/app/src/screens/Anunciar.js`, `apps/app/src/anunciarSteps.js`): quatro passos (Fotos, O que é, Preço e lugar, Revisão) com "Continuar" e "Voltar"; na Revisão, uma prévia em tile e "Publicar anúncio". Cada passo mostra só os próprios erros. A confirmação "Público na web e em buscadores" fica na Revisão. O botão voltar do Android e o Escape na web voltam um passo; no primeiro passo, com conteúdo, perguntam "Descartar anúncio?" ("Descartar" e "Continuar editando").
 - Oferta (`apps/app/src/App.js`, `apps/app/src/privateReply.js`, `apps/app/src/screens/Mensagem.js`): "Fazer oferta" no anúncio abre a conversa com quem anunciou e a folha "Fazer oferta" para ESTE anúncio, mesmo que a conversa já tenha o link de outro anúncio. Nada é enviado até "Enviar oferta"; fechar a folha não envia nada; voltar e abrir a mesma conversa não reabre a folha.
@@ -8807,6 +8840,7 @@ Como verificar, a partir da raiz:
 - `(cd apps/app && node ../../scripts/run-tests.js test/privateReply.test.js)`
 - `(cd apps/app && node ../../scripts/run-tests.js test/feiraCompose.test.js)`
 - `(cd apps/app && node ../../scripts/run-tests.js test/feiraOffer.test.js)`
+- `(cd apps/app && node ../../scripts/run-tests.js test/dm.test.js)`
 - `(cd apps/app && node ../../scripts/run-tests.js test/themeUsage.test.js)`
 - `(cd apps/app && node ../../scripts/run-tests.js test/platformGate.test.js)`
 
@@ -8814,7 +8848,7 @@ Os testes cobrem as ações da barra por papel, o resumo de quem anunciou, os er
 
 ### Verificação manual
 
-Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é um nó hospedado com dados de exemplo e dispensa conta. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e, que não liga neste Mac; usa-se o iPhone 17 Pro), Chrome em 390 e em 1280 px. Capturas ficam fora do git.
+Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é um nó hospedado com dados de exemplo e dispensa conta. Ordem: Android (AVD `varanda-api36`), iOS (iPhone 16e, ou o iPhone 17 Pro quando o 16e está ocupado), Chrome em 390 e em 1280 px. Capturas ficam fora do git.
 
 1. Abra um anúncio alto de outra pessoa. Esperado: fotos, preço, título, Compartilhar e Salvar, descrição, cartão de quem anunciou; rolando até o fim, a barra fixa não cobre o último conteúdo.
 2. Toque em "Compartilhar". Esperado: "Link copiado." aparece dentro da barra.
@@ -8829,13 +8863,15 @@ Método: `docs/design-review.md`. A Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) é
 11. Desfazer foto: em Anunciar, passo Fotos, e em "Editar anúncio", toque em "Remover foto". Esperado: "Foto removida." com "Desfazer" por 8 s; "Desfazer" devolve a foto ao lugar de onde saiu; passados os 8 s o aviso some; com o limite de fotos cheio, o "Desfazer" não passa dele.
 12. Valor: em Anunciar e em "Editar anúncio", toque no campo Valor. Esperado: teclado numérico; digitar 2500 mostra 25,00 (máscara de centavos); apagar volta pelos centavos.
 
-Situação, em 2026-11-12 (Vitrine, Metro na porta 8090). Cada caixa só é marcada quando o alvo foi percorrido por inteiro; nenhuma foi, por falta de turnos.
+Situação, em 2026-11-12 (Vitrine, Metro na porta 8090), com as conferências da #446 em 2026-11-15 (Vitrine, Metro na porta 8099). Cada caixa só é marcada quando o alvo foi percorrido por inteiro; nenhuma foi ainda.
 
 - [ ] Android, AVD `varanda-api36` (parcial, `v5-shots/a*.png`, `b*.png`, `d*.png`): passo 1 passou no anúncio de Página ("Livros da biblioteca": o AVD vem com texto 1,3, e a barra empilhou "Conversar" e "Fazer oferta"; o cartão mostrou "Ver todos os anúncios", que abriu a grade de quem anunciou, também no escuro); passo 2 só em parte (no Android "Compartilhar" abre a folha de compartilhar do sistema, não a mensagem na barra); passo 4 não percorrido; passo 5 passou para um anúncio de Página (a nota "Conversar com a página" apareceu, "Continuar" abriu a conversa com a folha "Fazer oferta" para "Livros da biblioteca", "Cancelar" fechou a folha, a conversa ficou vazia ("Nenhuma mensagem") e voltar ao anúncio não reabriu a folha); passo 7 passou (nota da Página); passo 8 passou até o passo 2 (Fotos, "O que é", "Escreva um título." só do passo 2, "Voltar" no fim da tela com rolagem); passo 9 passou (voltar do passo 2 vai ao passo 1, e no passo 1 com título digitado pergunta "Descartar anúncio?" com "Descartar" e "Continuar editando"); passo 10 (parcial): escuro e texto grande conferidos. Não percorrido: passos 3 e 4 com conversa que já liga outro anúncio, 6, Preço e lugar, Revisão e "Publicar anúncio", leitor de tela e Reduzir movimento. O AVD voltou ao tema claro.
-- [ ] iOS, iPhone 17 Pro (o iPhone 16e não liga aqui): não percorrido (sem turnos restantes).
+- [ ] Android, AVD `varanda-api36`, #446 (2026-11-15, parcial): "Continuar" na nota da Página abre a folha "Fazer oferta", e depois de "Cancelar" e voltar o anúncio responde aos toques; em Anunciar, preencher o campo pedido tira o erro do campo e da barra; o anúncio de um membro mostra "Na Varanda desde <mês/ano>", e o de uma Página não mostra a linha; apagar um anúncio avisa que as avaliações vão com ele. Com TalkBack ligado, o foco anda pelos campos de Anunciar, e a árvore de acessibilidade tem "Passo 2 de 4", "Continuar" e "Voltar"; a fala não foi ouvida (emulador sem áudio). Não percorrido: Reduzir movimento.
+- [ ] iOS, #446 (2026-11-15, parcial; iPhone 16e no começo, iPhone 17 Pro depois): passo 1 passou; passo 2: "Compartilhar" abre a folha de compartilhar do iOS, sem mensagem na barra (como no Android); passos 3 a 9 passaram (passo 4: o rascunho "Olá! Tenho interesse no seu..." e o cartão do anúncio, nada enviado; passo 5: a folha "Fazer oferta" para este anúncio, "Cancelar" não envia nada; passo 7: a nota da Página uma vez; um anúncio de Página não mostra "Na Varanda desde"). Dois defeitos achados e corrigidos neste PR: depois de "Continuar" na nota da Página, a folha da oferta abria enquanto a nota ainda saía, e ao voltar o anúncio não respondia a nenhum toque (agora a conversa só abre depois que a nota sai da tela; reconferido no iOS e no Android); em Anunciar, o erro de um passo continuava na barra depois de preencher o campo (agora editar tira o erro do campo e da barra; reconferido no Android). Passo 10: com o maior tamanho de acessibilidade, a barra de Anunciar empilha "Continuar" e "Voltar" e o conteúdo dos passos 1 e 2 quebra linha sem cortar; com XXXL, a barra do anúncio empilha "Conversar" e "Fazer oferta". Não percorrido: Reduzir movimento e VoiceOver, que fica para um iPhone de verdade (#224).
 - [ ] Chrome, 390 px (painel de navegador embutido, não o Chrome em si; parcial): passos 1, 2 e 6 num anúncio seu (fotos com pontos, preço, título, "Compartilhar", descrição, cartão com "Ver todos os anúncios", avaliações; a barra tem só "Editar", o fim do conteúdo (Reservado, Vendido, Apagar) fica acima da barra e o endereço do link aparece dentro da barra ao tocar em "Compartilhar", porque o painel não copia). Não percorrido: o resto dos passos, inclusive Anunciar e o Escape.
 - [ ] Chrome, 1280 px: não percorrido.
-- Defeitos: nenhum visto no que foi percorrido. Na folha "Fazer oferta" com texto grande no Android, o conteúdo ficava colado nas bordas da tela (sem margem lateral) e os botões "Enviar oferta" e "Cancelar" ficavam à esquerda com a largura do texto (`v5-shots/a10.png`); corrigido neste PR (margens da folha, `styles.sheet` em `apps/app/src/screens/Mensagem.js`), não reconferido no aparelho.
+- [ ] Abrir o anúncio de um membro com certificado válido: o cartão de quem anunciou mostra "Na Varanda desde <mês/ano>" com o mês e o ano do certificado; de alguém bloqueado por você, a linha não aparece; um anúncio de Página não mostra a linha (#446). Em 2026-11-15, no Android e no iOS, o membro mostrou a linha e a Página não; o caso de alguém bloqueado não foi conferido no aparelho (`anuncioView.test.js` cobre).
+- Defeitos: nenhum visto no que foi percorrido. Na folha "Fazer oferta" com texto grande no Android, o conteúdo ficava colado nas bordas da tela (sem margem lateral) e os botões "Enviar oferta" e "Cancelar" ficavam à esquerda com a largura do texto (`v5-shots/a10.png`); corrigido neste PR (margens da folha, `styles.sheet` em `apps/app/src/screens/Mensagem.js`) e reconferido no iOS com XXXL em 2026-11-15 (margem lateral, botões na largura da folha).
 
 ## 194. Conversas: formatação, blocos de código e spoilers (PR feat/chat-formatting)
 

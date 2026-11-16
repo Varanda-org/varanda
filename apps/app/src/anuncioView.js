@@ -1,5 +1,5 @@
 import rpc from '@varanda/rpc'
-import { catLabel, kindLabel, monthYear, trustLines } from './feira.js'
+import { catLabel, kindLabel, trustLines } from './feira.js'
 
 const { displayText } = rpc
 const peer = (value) => displayText(typeof value === 'string' ? value : '')
@@ -15,13 +15,11 @@ export function stickyActions (listing, { owner = false, canTalk = false, canOff
   return actions
 }
 
-export function sellerSummary ({ name, since, trust } = {}) {
-  const date = monthYear(since)
-  const lines = trustLines(trust || {})
-  if (date !== '') {
-    const rest = lines.filter((line) => line.key !== 'memberSince')
-    lines.splice(0, lines.length, { key: 'memberSince', text: 'Na Varanda desde ' + date }, ...rest)
-  }
+// A Page's block 0 is the certificate the account service issued for the
+// page diary, so its date is when the page was made or moved, not when a
+// person joined: a Page listing gets no member-since line.
+export function sellerSummary ({ name, since, page = false } = {}) {
+  const lines = page === true ? [] : trustLines({ certDate: since })
   const avatarName = peer(name)
   return { name: avatarName || 'Quem anunciou', avatarName, lines }
 }
