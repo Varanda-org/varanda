@@ -479,7 +479,9 @@ test('a key block past a diary cut stays readable, never sendable (#350)', (t) =
   let { g, E2 } = hist(null)
   t.is(kidOf(g.epoch), kidOf(E2))
   t.alike(g.posts.map((p) => p.text), ['p8', 'p9', 'p10'])
-  for (const cut of [1, 2]) {
+  // Cut 0 releases the writer's slot, but its key block still counts (#693
+  // filtering): what was sealed under it stays readable.
+  for (const cut of [0, 1, 2]) {
     ;({ g } = hist(cut))
     t.alike(g.posts.map((p) => p.text), ['p8', 'p9'], 'cut ' + cut + ': the history others sealed stays readable, the cut writer post past the cut does not count')
     t.is(g.sealed, 0, 'cut ' + cut)
@@ -487,14 +489,7 @@ test('a key block past a diary cut stays readable, never sendable (#350)', (t) =
     t.is(g.rekeyPending, true, 'cut ' + cut)
     t.is(g.removals.length, 1, 'cut ' + cut + ': the removal the block covered still counts')
   }
-  // Cut 0 releases the writer: not even its key block counts, so what was
-  // sealed under it stays sealed (the slot walk, #350).
-  ;({ g } = hist(0))
-  t.alike(g.posts.map((p) => p.text), [], 'cut 0: nothing sealed under a released writer opens')
-  t.is(g.sealed, 2, 'cut 0')
-  t.is(g.epoch, null, 'cut 0: the epoch no longer sends')
-  t.is(g.rekeyPending, true, 'cut 0')
-  t.is(g.removals.length, 1, 'cut 0: the removal itself still counts')
+  t.ok(hist(0).g.released.has(wA), 'cut 0: the writer is released')
 })
 
 test('a key block citing a cut community writer stays readable (#350)', (t) => {
@@ -530,19 +525,18 @@ test('a diary cut below its own leave keeps the diary left and the removal (#350
     return { E2, g: buildGroup(w.input(w.reader(wY), extra)) }
   }
   const control = unleave(null)
-  const { g, E2 } = unleave(1)
-  t.is(g.members.get(X), 'left', 'cut 1')
-  t.alike(g.removals, control.g.removals, 'cut 1: the leave is still a requirement')
-  t.is(kidOf(g.epoch), kidOf(E2), 'cut 1: the rotation covering it stays the one to send under')
-  t.alike(g.entitled, control.g.entitled)
-  // Cut 0 releases the writer that holds the leave: nothing of it counts,
-  // the leave included, so the diary is back through its other writer.
-  // Honest nodes never cut 0 a writer that holds a leave (the slot walk,
-  // #350).
-  const released = unleave(0).g
-  t.is(released.members.get(X), 'member', 'cut 0: the leave is gone with its writer')
-  t.alike(released.removals, [], 'cut 0: no leave to cover')
-  t.ok(released.entitled.includes(wX2), 'cut 0: the other writer is entitled again')
+  t.absent(control.g.entitled.includes(wX2), 'control: the other writer of a left diary is entitled to nothing')
+  // Cut 0 releases the writer that holds the leave, but the leave still
+  // counts (#693 filtering): the diary stays left.
+  for (const cut of [0, 1]) {
+    const { g, E2 } = unleave(cut)
+    t.is(g.members.get(X), 'left', 'cut ' + cut)
+    t.alike(g.removals, control.g.removals, 'cut ' + cut + ': the leave is still a requirement')
+    t.ok(g.removals.length > 0)
+    t.is(kidOf(g.epoch), kidOf(E2), 'cut ' + cut + ': the rotation covering it stays the one to send under')
+    t.alike(g.entitled, control.g.entitled)
+    t.absent(g.entitled.includes(wX2), 'cut ' + cut + ': the other writer gets no key')
+  }
 })
 
 test('a cut is final: a basis ref at or past the cut never revives a sealed post, the rotation still works (#350)', (t) => {

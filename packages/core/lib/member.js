@@ -2073,11 +2073,14 @@ function cutLength (log, signed) {
 // fold withdraws an unlisted writer's records from seq 0 on a leave and
 // gives it no authority on a grant. `frozen: false` leaves out the writers
 // a diary cut froze (#350): a new leave or grant never names them (their
-// cut already fixes them), an admission or a demotion does.
+// cut already fixes them), an admission or a demotion does. A writer the
+// walk released (cut 0) is never named: only its block 0, leaves and key
+// blocks count, and up to 16 of them would not fit MAX_GROUP_CUTS.
 function countedCuts (loaded, diary, { signed = false, frozen = true } = {}) {
   const cuts = loaded.view.cuts instanceof Map ? loaded.view.cuts : new Map()
   const still = loaded.view.frozen instanceof Set ? loaded.view.frozen : new Set()
-  return loaded.logs.filter((l) => l.diary === diary && loaded.view.writers.has(l.key) && (frozen || !still.has(l.key)))
+  const released = loaded.view.released instanceof Set ? loaded.view.released : new Set()
+  return loaded.logs.filter((l) => l.diary === diary && loaded.view.writers.has(l.key) && !released.has(l.key) && (frozen || !still.has(l.key)))
     .sort((a, b) => a.key.localeCompare(b.key))
     .map((l) => {
       const seq = cutLength(l, signed)
@@ -2086,16 +2089,17 @@ function countedCuts (loaded, diary, { signed = false, frozen = true } = {}) {
     })
 }
 
-// The writers `diary` binds in this group that the fold would count (the
-// live and frozen writers of its slot walk, group.js slotWalk, a bound root
-// of the creator always among them) and that this node does not hold. Null
-// when the diary itself is not held.
+// The writers `diary` binds in this group that the fold awaits (the live,
+// frozen and released writers of its slot walk, group.js slotWalk: a
+// released one may hold a leave; a bound root of the creator always among
+// them) and that this node does not hold. Null when the diary itself is
+// not held.
 function unheldCountedWriters (loaded, diary) {
   const joins = loaded.input.joins.get(diary)
   if (!joins) return null
   const marks = loaded.input.marks instanceof Map ? loaded.input.marks.get(diary) : undefined
   const walk = groups.slotWalk(joins, marks, loaded.group)
-  const counted = [...walk.live, ...walk.frozen].filter((w) => walk.cut.get(w) !== 0)
+  const counted = [...walk.live, ...walk.frozen, ...walk.released]
   if (diary === loaded.view.creator && walk.rootSlot) counted.unshift(loaded.group)
   const held = new Set(loaded.logs.map((l) => l.key))
   // A private group: a writer the diary unbound (a boxless writer replaced

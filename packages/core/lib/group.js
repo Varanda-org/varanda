@@ -1258,6 +1258,7 @@ function emptyGroup () {
     cuts: new Map(),
     cutUnknown: new Set(),
     frozen: new Set(),
+    released: new Set(),
     slots: new Map(),
     writers: new Set(),
     sealed: 0,
@@ -1524,20 +1525,40 @@ function diaryWalks (joins, marks, G) {
   return out
 }
 
-// Per `diary:writer` pair a walk counts: { cut (Infinity when none),
-// frozen }; `voided`: the pairs a walk refused for good (a join past the
-// cap, a release, a cut at 0).
+// Per `diary:writer` pair a walk counts or released: { cut (Infinity when
+// none), frozen, released }; a released writer gave its slot back but its
+// block 0, leaves and key blocks still count (cut 0). `voided`: the pairs a
+// walk refused for good (a join past the cap).
 function walkSlots (walks) {
   const slot = new Map()
   const voided = new Set()
   for (const [d, wk] of walks) {
-    for (const w of wk.live) slot.set(d + ':' + w, { cut: wk.cut.has(w) ? wk.cut.get(w) : Infinity, frozen: false })
-    for (const w of wk.frozen) slot.set(d + ':' + w, { cut: wk.cut.get(w), frozen: true })
-    for (const w of wk.released) voided.add(d + ':' + w)
+    for (const w of wk.live) slot.set(d + ':' + w, { cut: wk.cut.has(w) ? wk.cut.get(w) : Infinity, frozen: false, released: false })
+    for (const w of wk.frozen) slot.set(d + ':' + w, { cut: wk.cut.get(w), frozen: true, released: false })
+    for (const w of wk.released) slot.set(d + ':' + w, { cut: 0, frozen: true, released: true })
     for (const w of wk.over) voided.add(d + ':' + w)
-    for (const [w, c] of wk.cut) if (c === 0) voided.add(d + ':' + w)
   }
   return { slot, voided }
+}
+
+// The `diary:writer` pairs whose latest join (by diary seq) is off.
+function unboundPairs (joins) {
+  const last = new Map()
+  if (!(joins instanceof Map)) return new Set()
+  for (const [d, list] of joins) {
+    if (!isHex64(d) || !Array.isArray(list)) continue
+    for (let i = 0; i < list.length; i++) {
+      const j = plainCopy(list[i])
+      if (j === null || typeof j.on !== 'boolean' || !isHex64(j.writer)) continue
+      const seq = Number.isSafeInteger(j.seq) && j.seq >= 0 ? j.seq : Infinity
+      const pair = d + ':' + j.writer
+      const prev = last.get(pair)
+      if (prev === undefined || seq > prev.seq || (seq === prev.seq && !j.on)) last.set(pair, { seq, on: j.on })
+    }
+  }
+  const out = new Set()
+  for (const [pair, j] of last) if (!j.on) out.add(pair)
+  return out
 }
 
 // One result row per diary of the walks: how many writers it holds live and
@@ -1674,6 +1695,7 @@ function fold (input) {
   result.incomplete = incomplete
   result.cutUnknown = bound.cutUnknown
   result.frozen = bound.frozen
+  result.released = bound.released
   result.slots = bound.slots
   return result
 }
@@ -1722,8 +1744,8 @@ function bindCores (input, asCommunity) {
   // cut that freed or froze a slot: the fold is not complete about it.
   for (const [, wk] of walks) if (wk.gap && wk.bound) incomplete = true
   // The walk's verdict per writer key: the diary whose walk counts it (live
-  // or frozen) with its cut, and the writers some diary's walk refused for
-  // good (over its cap, released, or cut at 0).
+  // or frozen) or released it, with its cut, and the writers some diary's
+  // walk refused for good (over its cap).
   const { slot, voided } = walkSlots(walks)
 
   const copies = new Map()
@@ -1748,8 +1770,8 @@ function bindCores (input, asCommunity) {
   // Writers whose header is invalid for this core (header-invalid): rejected,
   // never awaited.
   const invalid = new Set()
-  // Writers whose header names a diary whose walk does not count them, or
-  // cut them at 0: never candidates, never awaited.
+  // Writers whose header names a diary whose walk neither counts nor
+  // released them: never candidates, never awaited.
   const uncounted = new Set()
   for (const [key, list] of copies) {
     const log = mergeCopies(list.map((x) => x.log))
@@ -1759,7 +1781,13 @@ function bindCores (input, asCommunity) {
     // header-invalid: a writer's recipient key must match the visibility, and
     // a group writer names its device's community writer where a community
     // writer names none.
-    if ((h.box !== null) !== priv) continue
+    if ((h.box !== null) !== priv) {
+      // A writer cut at 0 with such a header (a boxless writer its diary
+      // replaced) holds nothing that counts: rejected, never awaited.
+      const s0 = slot.get(h.diary + ':' + key)
+      if (s0 !== undefined && s0.cut === 0) invalid.add(key)
+      continue
+    }
     if ((h.member === null) !== asCommunity) {
       invalid.add(key)
       continue
@@ -1771,11 +1799,11 @@ function bindCores (input, asCommunity) {
       else invalid.add(key)
       continue
     }
-    // Only a writer its diary's slot walk counts is a candidate (the walk
-    // replaces the old per-diary cap); one cut at 0 is not either: nothing
-    // of it counts, not even block 0.
+    // Only a writer its diary's slot walk counts or released is a candidate
+    // (the walk replaces the old per-diary cap). One cut at 0 gave its slot
+    // back, but its block 0, leaves and key blocks still count (below).
     const sl = slot.get(h.diary + ':' + key)
-    if (sl === undefined || sl.cut === 0) {
+    if (sl === undefined) {
       uncounted.add(key)
       continue
     }
@@ -1799,6 +1827,7 @@ function bindCores (input, asCommunity) {
       c.held = log.records.length ? log.records[log.records.length - 1].seq : 0
     }
     c.frozen = sl.frozen
+    c.released = sl.released
     if (asCommunity) c.joinRejoin = joinRejoin.get(h.diary + ':' + key) || null
     candidates.set(key, c)
   }
@@ -1807,20 +1836,25 @@ function bindCores (input, asCommunity) {
   const rootRecords = rootBound ? rootLog.records : []
   const rootEntry = { key: G, diary: creator, rejoin: null, at: header.at, ...splitReacts(rootRecords) }
   const { valid, rejected } = checkRejoins(candidates, rootEntry, voided)
-  // Every writer a walk counts with something left to fold must be held,
-  // frozen ones included (a seeder hiding a frozen writer would hide the
-  // leave it holds); a writer no walk counts is never awaited.
+  // Every writer a walk counts or released must be held, frozen and
+  // released ones included (a seeder hiding one would hide the leave it
+  // holds); a writer no walk counts is never awaited. In a private group a
+  // released writer its diary unbound is not: it is the boxless writer a
+  // node replaced, which seeders and sync refuse (header-invalid).
+  const unbound = priv ? unboundPairs(joins) : new Set()
   for (const [pair, sl] of slot) {
     const w = pair.slice(65)
-    if (sl.cut !== 0 && !valid.has(w) && !rejected.has(w) && !invalid.has(w) && !uncounted.has(w)) incomplete = true
+    if (sl.released && unbound.has(pair)) continue
+    if (!valid.has(w) && !rejected.has(w) && !invalid.has(w) && !uncounted.has(w)) incomplete = true
   }
   const capped = [...valid.values()]
   // Over the group cap the creator's and the admins' writers go first, so
   // moderation is never evicted, and banned diaries last; within each tier
-  // frozen writers go after live ones.
+  // frozen writers go after live ones, released ones last.
+  const rank = (c) => c.released ? 2 : c.frozen ? 1 : 0
   const select = (banned, admins) => {
     const tier = (c) => (rootBound && c.diary === creator) ? 0 : admins.has(c.diary) ? 1 : banned.has(c.diary) ? 3 : 2
-    const ranked = capped.slice().sort((a, b) => (tier(a) - tier(b)) || ((a.frozen ? 1 : 0) - (b.frozen ? 1 : 0)) || cmp(a.key, b.key))
+    const ranked = capped.slice().sort((a, b) => (tier(a) - tier(b)) || (rank(a) - rank(b)) || cmp(a.key, b.key))
     const keptKeys = new Set(ranked.slice(0, MAX_GROUP_WRITERS - 1).map((c) => c.key))
     // The cap must not keep a rejoin whose leave it dropped: the fold would
     // never see that leave and would reuse the old admission.
@@ -1863,9 +1897,11 @@ function bindCores (input, asCommunity) {
   // complete about cuts for them.
   const cutUnknown = new Set(sel.kept.filter((l) => marks.gaps.has(l.diary)).map((l) => l.diary))
   // The kept writers the walk froze (counted below their cut, never written
-  // to again), and per diary the walk's slot counts.
+  // to again), released ones included, those it released (block 0, leaves
+  // and key blocks only), and per diary the walk's slot counts.
   const frozen = new Set(sel.kept.filter((l) => l.frozen).map((l) => l.key))
-  return { ctx, kept: sel.kept, incomplete, priv, cutUnknown, frozen, slots: walkCounts(walks) }
+  const released = new Set(sel.kept.filter((l) => l.released).map((l) => l.key))
+  return { ctx, kept: sel.kept, incomplete, priv, cutUnknown, frozen, released, slots: walkCounts(walks) }
 }
 
 // The generation an admit of diary D observed: the leaves of D its own cuts
@@ -3671,6 +3707,7 @@ function emptyCommunity () {
     cuts: new Map(),
     cutUnknown: new Set(),
     frozen: new Set(),
+    released: new Set(),
     slots: new Map(),
     last: null,
     writers: new Set(),
@@ -3721,6 +3758,7 @@ function foldCommunityState (input) {
   result.incomplete = incomplete
   result.cutUnknown = bound.cutUnknown
   result.frozen = bound.frozen
+  result.released = bound.released
   result.slots = bound.slots
   return { result, state: state.community }
 }

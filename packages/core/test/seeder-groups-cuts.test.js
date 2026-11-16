@@ -2,8 +2,9 @@
 
 // The writers a diary cut (#350, docs/protocol.md section 10) at a seeder:
 // the slot walk picks the writers that count (liveGroupJoins), a frozen
-// writer is kept below its cut only, a released one is purged, and a
-// restart recomputes both from admitted.json and the scan.
+// writer is kept below its cut plus its leaves and key blocks, a released
+// one as a stub (block 0, leaves, key blocks), and a restart recomputes both
+// from admitted.json and the scan.
 
 const test = require('brittle')
 const b4a = require('b4a')
@@ -30,7 +31,6 @@ const {
   reader,
   admitted,
   rejected,
-  stored,
   downloaded,
   readGroups,
   scansDone,
@@ -69,7 +69,7 @@ function kept (records) {
   return liveGroupJoins(decls, walks)
 }
 
-test('liveGroupJoins: a cut frees a slot for a 9th writer, never past 8 live and 8 frozen (#350)', (t) => {
+test('liveGroupJoins: a cut frees a slot for a 9th writer, never past 8 live, 8 frozen and 16 stubs (#350)', (t) => {
   const eight = []
   for (let i = 0; i < 8; i++) eight.push(join(key(i)))
   t.absent(kept([...eight, join(key(8))]).has(key(8)), 'control: the 9th is past the cap')
@@ -78,7 +78,8 @@ test('liveGroupJoins: a cut frees a slot for a 9th writer, never past 8 live and
   t.ok(frozen.has(key(0)), 'and the frozen writer stays')
   const released = kept([...eight, cut(key(0), 0), join(key(8))])
   t.ok(released.has(key(8)), 'so does a release')
-  t.absent(released.has(key(0)), 'and the released writer goes')
+  t.ok(released.has(key(0)), 'and the released writer stays, as a stub')
+  t.is(groupWalkCut(diary([...eight, cut(key(0), 0)]).walks, G, key(0)), 0, 'at cut 0')
 
   // Eight frozen, then eight live: the 17th never counts.
   const full = []
@@ -136,7 +137,9 @@ test('liveGroupJoins: a join, cut 0, join loop stops at K releases (#350)', (t) 
   t.is(s.released, MAX_WRITER_RELEASES_PER_DIARY, 'K writers released')
   t.is(s.live, MAX_GROUP_WRITERS_PER_DIARY, 'then cut 0 keeps eight live slots at cut 0')
   t.is(ever.size, MAX_WRITER_RELEASES_PER_DIARY + MAX_GROUP_WRITERS_PER_DIARY, 'the seeder was asked for 24 writers in all')
-  t.is(kept(records).size, 0, 'and keeps none of them now')
+  t.is(kept(records).size, MAX_WRITER_RELEASES_PER_DIARY + MAX_GROUP_WRITERS_PER_DIARY, 'and keeps all 24, every one a stub at cut 0')
+  for (let i = 0; i < 24; i++) t.is(groupWalkCut(walks, G, key(i)), 0)
+  t.absent(kept(records).has(key(24)), 'the 25th was never counted')
   t.is(groupWalkCut(walks, G, key(20)), 0, 'a cut 0 past K still reads as 0')
 })
 
@@ -299,30 +302,45 @@ test('a 9th writer after a freeze is admitted at its cut, a counted writer whose
   t.is(events.filter((e) => e.event === 'fatal').length, 0)
 })
 
-test('a writer its diary cut at 0 is purged and leaves the index (#350)', async (t) => {
+test('a writer its diary released (cut 0) is kept as a stub that serves its leave to a fresh reader (#350)', async (t) => {
   t.timeout(150000)
   const { bootstrap } = await testnet(t)
   const assoc = makeAssociation()
-  const { dataDir } = prepareSeederDir(t, assoc)
+  const { dataDir, publicKey } = prepareSeederDir(t, assoc)
   const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
 
+  // W: header, five posts, a leave (block 6) and one more post.
   const { A, B, R, W } = await cutWorld(t, bootstrap, assoc)
+  await B.cores.w.append(b4a.from(JSON.stringify(groupLeave({ cuts: [{ writer: W, seq: 6 }] }))))
+  await B.cores.w.append(b4a.from(JSON.stringify(groupPost({ text: 'depois da saída' }))))
   await admit(A, assoc)
   await admit(B, assoc)
   await admitted(events, W)
-  await downloaded(seeder, W, 6)
+  await downloaded(seeder, W, 8)
 
   await B.diary.append(groupCutRecord({ group: R, writer: W, cut: 0 }))
-  await rejected(events, W, 'released')
-  await until(async () => seeder._drops.size === 0 && !(W in readGroups(dataDir)) && !(await stored(seeder, W)), { name: 'W purgado' })
-  t.is(seeder._groupIndex.writer(W), null, 'no index row')
+  const entry = seeder._groupServed.get(W)
+  await until(async () => entry.cut === 0 && !entry.cutting && entry.clearedTo === 8 && (await blocksHeld(entry.core, 0, 8)).length === 2, { name: 'W reduzido a um toco' })
+  t.alike(await blocksHeld(entry.core, 0, 8), [0, 6], 'block 0 and the leave only')
+  t.is(readGroups(dataDir)[W].cut, 0, 'the stub is persisted at cut 0')
+  t.ok(seeder._groupIndex.writer(W), 'and stays in the index')
+  t.absent(events.some((e) => e.event === 'group-rejected' && e.key === W), 'never purged')
   await settledFor(seeder, B)
-  t.absent(seeder._groupReserved.has(W), 'and it is not admitted again')
   t.ok(seeder._groupServed.has(R), 'the root stays')
+
+  // B goes; a reader that dials the seeder only gets the leave, verified.
+  await B.swarm.destroy()
+  const r = await reader(t, bootstrap, publicKey)
+  const copy = r.store.get({ key: b4a.from(W, 'hex') })
+  await copy.ready()
+  await until(() => copy.length === 8, { name: 'comprimento assinado no leitor', timeoutMs: 30000 })
+  t.ok(await copy.get(0, { timeout: 15000 }), 'block 0 verified from the seeder')
+  t.is(JSON.parse(b4a.toString(await copy.get(6, { timeout: 15000 }))).type, 'group-leave', 'the leave of a released writer is served, verified')
+  await t.exception(copy.get(1, { timeout: 3000 }), 'a post is not served')
   t.is(events.filter((e) => e.event === 'fatal').length, 0)
 })
 
-test('a restart restores a writer at its persisted cut and the scan lowers it or releases it (#350)', async (t) => {
+test('a restart restores a writer at its persisted cut and the scan lowers it or makes it a stub (#350)', async (t) => {
   t.timeout(240000)
   const { bootstrap } = await testnet(t)
   const assoc = makeAssociation()
@@ -352,11 +370,14 @@ test('a restart restores a writer at its persisted cut and the scan lowers it or
   const entry = second.seeder._groupServed.get(W)
   t.ok(entry, 'W served at ready')
   t.ok(entry.cut === 4 || entry.cut === 2, 'from its persisted cut')
-  await rejected(second.events, W2, 'released')
   await until(async () => entry.cut === 2 && !entry.cutting && (await blocksHeld(entry.core, 0, 6)).length === 2, { name: 'W cortado em 2' })
   t.alike(await blocksHeld(entry.core, 0, 6), [0, 1])
   t.is(readGroups(dataDir)[W].cut, 2, 'the lower cut is persisted')
-  await until(async () => second.seeder._drops.size === 0 && !(W2 in readGroups(dataDir)) && !(await stored(second.seeder, W2)), { name: 'W2 purgado' })
+  const stub = second.seeder._groupServed.get(W2)
+  await until(async () => stub.cut === 0 && !stub.cutting && (await blocksHeld(stub.core, 0, 2)).length === 1, { name: 'W2 reduzido a um toco' })
+  t.alike(await blocksHeld(stub.core, 0, 2), [0], 'W2 released: its block 0 stays')
+  await until(() => readGroups(dataDir)[W2].cut === 0, { name: 'toco persistido' })
+  t.absent(second.events.some((e) => e.event === 'group-rejected' && e.key === W2), 'never purged')
   t.is(second.events.filter((e) => e.event === 'fatal').length, 0)
 })
 

@@ -2958,8 +2958,14 @@ function cutSeq (c, grant) {
   return grant ? Math.max(c.length, c.signed || 0) : c.length
 }
 
+// A writer its diary's slot walk released (#350) still counts for its
+// block 0, leaves and key blocks only: no record names it.
+function releasedWriter (g, writer) {
+  return g.built.released instanceof Set && g.built.released.has(writer)
+}
+
 function cutsFor (g, d, grant = false) {
-  return boundWriters(g, d).filter((writer) => g.built.writers.has(writer)).slice(0, MAX_GROUP_CUTS)
+  return boundWriters(g, d).filter((writer) => g.built.writers.has(writer) && !releasedWriter(g, writer)).slice(0, MAX_GROUP_CUTS)
     .map((writer) => ({ writer, seq: cutSeq(g.cores.get(writer), grant) }))
 }
 
@@ -2970,7 +2976,7 @@ function countedCuts (g, d, grant = false) {
   const out = []
   for (const writer of g.built.writers) {
     const c = g.cores.get(writer)
-    if (c !== undefined && c.diary === d) out.push(writer)
+    if (c !== undefined && c.diary === d && !releasedWriter(g, writer)) out.push(writer)
   }
   return out.sort().map((writer) => ({ writer, seq: cutSeq(g.cores.get(writer), grant) }))
 }

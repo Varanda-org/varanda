@@ -343,6 +343,10 @@ test('countedCuts: a frozen writer stays in admissions at its cut, out of leaves
   t.is(leave.length, 8, 'a leave or a grant names the live ones only')
   t.absent(leave.some((c) => c.writer === ws[0]))
   t.is(groupLib.validateGroupRecord(groupLib.groupLeave({ cuts: leave, at: slot.at(40) }), 1), null, 'so a new leave stays valid')
+  const released = slotLoaded({ cut: 0 })
+  t.ok(released.view.writers.has(ws[0]), 'a released writer still counts for its block 0, leaves and key blocks')
+  t.absent(member.countedCuts(released, X).some((c) => c.writer === ws[0]), 'but no admission names it')
+  t.is(member.countedCuts(released, X).length, 8, 'seven live and the 9th')
 })
 
 test('unheldCountedWriters follows the slot walk (#350)', (t) => {
@@ -351,7 +355,7 @@ test('unheldCountedWriters follows the slot walk (#350)', (t) => {
   t.alike(member.unheldCountedWriters(slotLoaded({ drop: [ninth] }), X), [], 'an unheld writer past the cap is never awaited')
   t.alike(member.unheldCountedWriters(slotLoaded({ cut: 1, drop: [ninth] }), X), [ninth], 'after a freeze the 9th is awaited')
   t.alike(member.unheldCountedWriters(slotLoaded({ cut: 1, drop: [ws[0]] }), X), [ws[0]], 'and so is an unheld frozen writer')
-  t.alike(member.unheldCountedWriters(slotLoaded({ cut: 0, drop: [ws[0]] }), X), [], 'a released writer is never awaited')
+  t.alike(member.unheldCountedWriters(slotLoaded({ cut: 0, drop: [ws[0]] }), X), [ws[0]], 'a released writer is awaited: it may hold a leave')
 })
 
 test('groupCuts: an admit or a ban never names a writer past the diary\'s cut on it (#350)', (t) => {
