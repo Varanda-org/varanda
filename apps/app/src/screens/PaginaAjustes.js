@@ -43,7 +43,7 @@ import { fetchMember } from '../indexClient'
 import { planPeeks } from '../thread'
 import { peekAll, refOf } from './Conversa'
 import { revokeUrl, urlFromBytes } from '../media/display'
-import { PAGE_DM_CORE_ONLY, TEXTS, actAs, pagesAvatar, pagesGroup, pagesClose, pagesDmAdopt, pagesDmAdoptNew, pagesDmAwaitsAdopt, pagesDmBoxRead, pagesDmExpectAdopt, pagesDmForgetAdopt, pagesDmInviteShare, pagesDmPrepare, pagesDmCoreOnly, pagesDmShareTo, pagesMove, pagesOrigin, pagesStart } from '../pages'
+import { PAGE_DM_CORE_ONLY, TEXTS, actAs, pagesAvatar, pagesGroup, pagesClose, pagesDmAdopt, pagesDmAdoptNew, pagesDmAwaitsAdopt, pagesDmBoxRead, pagesDmExpectAdopt, pagesDmForget, pagesDmForgetAdopt, pagesDmInviteShare, pagesDmPrepare, pagesDmCoreOnly, pagesDmShareTo, pagesMove, pagesOrigin, pagesStart } from '../pages'
 import { PAGE_DM_CONFLICT, PAGE_DM_KEY_PENDING, PAGE_DM_ROTATING, PAGE_DM_SEND_KEY, hasDeviceKeys, missingShares, pageKeyText } from '../pageSecrets'
 import { FRESH_FAILED, mergeProfile, profileOp } from '../pageProfile'
 import { usePageMember } from './Paginas'
@@ -578,6 +578,9 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
     const acting = actingAs.get()
     if (acting.kind === 'page' && acting.key === page) actingAs.reset()
     if (kind === 'move' && typeof value === 'string' && KEY_RE.test(value)) setMovedKey(value)
+    // A closed page is final: its keys and conversations leave this device.
+    // A move keeps them, for the old key's conversations.
+    if (kind === 'close') pagesDmForget(node, page).catch(() => {})
     changed()
     return kind === 'close' ? 'Página encerrada.' : 'Pronto: a página mudou para uma nova chave.'
   }

@@ -75,6 +75,11 @@ function movedRecord (s, k1, k2) {
   return page.issuerCountersign({ ...fields, signature: page.signMoved(fields, s.ownerKp) }, s.issuerKp, s.issuerCert)
 }
 
+function forgedMoved (s, k1, k2) {
+  const genuine = movedRecord(s, k1, k2)
+  return { ...genuine, countersignature: (genuine.countersignature[0] === '0' ? '1' : '0') + genuine.countersignature.slice(1) }
+}
+
 function originRecord (s, k2, from, fromSeq) {
   const owner = hex(s.ownerKp.publicKey)
   const fields = { type: 'page-origin', page: k2, from, fromSeq, gen: 1, owner, admins: [], at: AT, nonce: nonce('g'), actor: owner, association: s.assoc }
@@ -406,19 +411,22 @@ async function until (fn, ms) {
   return false
 }
 
-// A page K1 (roster 2, at 3 a page-moved, or a post when `moved` is false,
-// tombstoned at 4, posts after, then a tombstone per seq of `holes`); B
+// A page K1 (roster 2, at 3 a page-moved, a forged one when `moved` is
+// 'forged', or a post when `moved` is false, tombstoned at 4, posts after,
+// `forged` forged page-moved copies, then a tombstone per seq of `holes`); B
 // holds all of it but block 3 and `holes`, and follows K1; K2 is served.
-async function lateScenario (t, bootstrap, { moved = true, posts = 5, holes = [] } = {}) {
+async function lateScenario (t, bootstrap, { moved = true, posts = 5, holes = [], forged = 0 } = {}) {
   const s = trust()
   const k1 = await makeMember(t, s.kp, 0)
   const k2 = await makeMember(t, s.kp, 1)
   const owner = hex(s.ownerKp.publicKey)
   const fields = { type: 'page-roster', page: k1.key, gen: 1, owner, admins: [], prev: null, at: AT, nonce: nonce('r'), association: s.assoc }
   t.is(await append(k1.dir, page.issuerCountersign({ ...fields, signature: page.signRoster(fields, s.ownerKp) }, s.issuerKp, s.issuerCert)), 2)
-  t.is(await append(k1.dir, moved ? movedRecord(s, k1.key, k2.key) : postRecord({ text: 'apagado' })), 3)
+  t.is(await append(k1.dir, moved === 'forged' ? forgedMoved(s, k1.key, k2.key) : moved ? movedRecord(s, k1.key, k2.key) : postRecord({ text: 'apagado' })), 3)
   t.is(await append(k1.dir, deleteRecord({ seq: 3 })), 4)
   for (let i = 0; i < posts; i++) await append(k1.dir, postRecord({ text: 'depois ' + i }))
+  // Forged page-moved copies (bad countersignature) a leaked key appended.
+  for (let i = 0; i < forged; i++) await append(k1.dir, forgedMoved(s, k1.key, k2.key))
   for (const seq of holes) await append(k1.dir, deleteRecord({ seq }))
   t.is(await append(k2.dir, originRecord(s, k2.key, k1.key, 2)), 3)
   const b = await makeMember(t, s.kp, 0)
@@ -484,6 +492,27 @@ test('page migrate: late deleted posts of a page take no pageLate slot and force
   t.ok(await until(() => [3, ...holes].every((i) => spy.calls.heldPageType.includes(i)), 30000), 'the deleted posts arrived late')
   await new Promise((resolve) => setTimeout(resolve, 1000))
   t.is(spy.calls.scanPageAt.length, walked, 'no rescan: a post never rewinds the cursor')
+})
+
+test('page migrate: a rewound walk does not check forged page-moved copies again', async (t) => {
+  t.timeout(180000)
+  const { bootstrap } = await testnet(t)
+  // A forged copy at 3, tombstoned at 4, that B fetches late (a page-*
+  // block), posts 5..6, then forged copies at 7..10.
+  const { k1, b, start, length } = await lateScenario(t, bootstrap, { moved: 'forged', posts: 2, forged: 4 })
+  const spy = spyHas(t, k1.key)
+  await start(b, { maxPageLate: 0 })
+  t.ok(await until(() => spy.calls.scanPageAt.includes(length - 1), 10000), 'the first walk ended')
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  const forgedAt = [7, 8, 9, 10]
+  t.alike(forgedAt.map((i) => spy.calls.scanPageAt.filter((s) => s === i).length), [1, 1, 1, 1], 'each forged copy read once')
+  // The late forged copy at 3 overflows pageLate (max 0) and rewinds the
+  // cursor to it, below the other copies.
+  start(k1)
+  t.ok(await until(() => spy.calls.heldPageType.includes(3), 30000), 'the late page-* block arrived')
+  t.ok(await until(() => spy.calls.scanPageAt.filter((s) => s === 3).length >= 2, 10000), 'the rewound walk read it')
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  t.alike(forgedAt.map((i) => spy.calls.scanPageAt.filter((s) => s === i).length), [1, 1, 1, 1], 'not read again after the rewind')
 })
 
 test('page migrate: two pages that move at once both land in follows.json', async (t) => {
