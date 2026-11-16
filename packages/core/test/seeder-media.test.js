@@ -214,6 +214,7 @@ test('a declared media core with a header naming the diary is admitted, listed, 
   t.alike(readMedia(dataDir), { [K]: { diary: m.key, seq: 2 } })
   t.alike(seeder.mediaKeys(), [K])
   await until(() => seeder._mediaServed.get(K).core.contiguousLength === 4, { name: 'mídia baixada' })
+  await until(() => seeder._mediaServed.get(K).headerOk, { name: 'cabeçalho local conferido' })
   t.is(seeder.stats().mediaCores, 1)
   t.is(seeder.stats().mediaBytes, m.media[0].byteLength)
   t.ok(!events.some((e) => e.event === 'have' && e.key === K), 'no have for a media key')

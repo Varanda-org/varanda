@@ -143,6 +143,12 @@ function settled (seeder, m) {
   }, { name: 'diário processado até ' + m.diary.length })
 }
 
+// mediaRead serves nothing before the seeder's local re-gate of the media
+// core's block 0 (_gateMedia), which runs asynchronously after the download.
+function mediaGated (seeder, K) {
+  return until(() => seeder._mediaServed.get(K)?.headerOk === true, { name: 'mídia conferida' })
+}
+
 async function setup (t, opts) {
   const { bootstrap } = await testnet(t)
   const assoc = makeAssociation()
@@ -336,6 +342,7 @@ test('a tombstone never frees a range a live listing or its edit still shows', a
   await admit(A, assoc)
   await until(() => events.find((e) => e.event === 'media-admitted' && e.key === K), { name: 'mídia admitida', timeoutMs: 30000 })
   await until(() => seeder._mediaServed.get(K)?.core.contiguousLength === 4, { name: 'mídia baixada' })
+  await mediaGated(seeder, K)
   await settled(seeder, A)
 
   await append(A, [
@@ -571,6 +578,7 @@ test('an edit photo stops counting once its root listing is tombstoned', async (
   await admit(A, assoc)
   await until(() => events.find((e) => e.event === 'media-admitted' && e.key === K), { name: 'mídia admitida', timeoutMs: 30000 })
   await until(() => seeder._mediaServed.get(K)?.core.contiguousLength === 3, { name: 'mídia baixada' })
+  await mediaGated(seeder, K)
   await settled(seeder, A)
   t.ok(await seeder.mediaRead(A.key, K, 2, 1), 'the edit photo is served while the listing lives')
   await append(A, [deleteRecord({ seq: 2, at: at(3), media: [{ core: K, start: 1, blocks: 2 }] })])

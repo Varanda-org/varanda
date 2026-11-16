@@ -1,0 +1,3 @@
+### Corrigido
+
+- Sincronização de grupos sem pular quem escreve (PR `test/flaky-under-load`): quando duas verificações de grupo liam o mesmo diário de vínculo na mesma conexão, uma delas podia esperar até o fim do prazo e pular aquele escritor com `timeout` numa sincronização `--once`. Agora a abertura do diário na loja principal (por uma verificação ou por um seguido) espera as leituras em quarentena daquela chave que estão em andamento, e as leituras seguintes passam por ela. Parte da #357, que também deixa estáveis sob carga os testes que falhavam só com a máquina ocupada. Conferência em `docs/verification/test-flaky-under-load.md`. Protocolo: uma frase em "Binding diary comparison (core node)". Sem mudança de formato do bloco, de RPC nem de Termos.
