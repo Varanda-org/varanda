@@ -4640,6 +4640,90 @@ async function groupRekey (ctx, { group }) {
   })
 }
 
+// ---- periodic rotation (docs/protocol.md "Rotation", @varanda/core
+// lib/group-rekey.js): the session's upkeep plans it and writes it. ----
+
+const rekeyPolicy = require('@varanda/core/lib/group-rekey')
+
+// The policy's decision for `g` on this device's distributor writer `own`.
+// jitter(group, epoch) -> [0, 1), fixed per epoch by the caller.
+async function periodicDecision (ctx, g, own, now, jitter) {
+  const epoch = g.built.epoch
+  const logs = [...g.cores].map(([key, c]) => ({ key, entries: c.entries }))
+  const facts = rekeyPolicy.epochFacts({ logs, counted: g.built.writers, root: g.group, epoch })
+  const held = await withGroupCore(ctx, own.key, async (core) => ({ length: core.length, bytes: core.byteLength }))
+  if (held === null) return { due: false, at: null, reason: 'unheld' }
+  const limits = { maxLogBlocks: MAX_LOG_BLOCKS, maxLogBytes: MAX_LOG_BYTES, ...ctx.limits }
+  const entitled = entitledOf(g)
+  return rekeyPolicy.rekeyDue({
+    rekeyPending: g.built.rekeyPending,
+    epoch,
+    ...facts,
+    entitled: entitled.size,
+    cutUnknown: rekeyPolicy.cutUnknownEntitled({ cutUnknown: g.built.cutUnknown, writers: g.input.writers, entitled }),
+    ownEpoch: epoch !== null && g.mine.has(epoch.writer),
+    now,
+    jitter: epoch === null ? 0 : jitter(g.group, epoch),
+    log: { length: held.length, bytes: held.bytes, maxBlocks: limits.maxLogBlocks, maxBytes: limits.maxLogBytes }
+  })
+}
+
+// -> { rekey: [{ group, writer }], checked: [group], next }, read-only: the
+// private groups this unlocked device distributes in whose epoch is due.
+// ready(group) is the caller's check limit; `checked` lists the groups
+// decided, for the caller to mark; `next` is the earliest moment (ms) a
+// group not due yet becomes due, or null.
+async function periodicRekeyPlan (ctx, { now = Date.now(), ready = () => true, jitter = () => 0 } = {}) {
+  const out = { rekey: [], checked: [], next: null }
+  const h = holderOf(ctx)
+  if (h === null || !h.unlocked) return out
+  return withCommunityBase(ctx, false, async ({ ownHex, base }) => {
+    const seen = new Set()
+    for (const e of await store.readGroupWriters(ctx.storage)) {
+      if (e.kind === 'community' || seen.has(e.group) || base.mod.blocked.has(e.group) || !ready(e.group)) continue
+      seen.add(e.group)
+      const g = await loadGroup(ctx, base, e.group)
+      if (g === null || !g.private || g.built.orphan || g.built.community === null || g.c === null) continue
+      const own = distributorOf(g, ownHex)
+      if (own === null) continue
+      out.checked.push(e.group)
+      const d = await periodicDecision(ctx, g, own, now, jitter)
+      if (d.due) out.rekey.push({ group: e.group, writer: own.key })
+      else if (d.at !== null && (out.next === null || d.at < out.next)) out.next = d.at
+    }
+    return out
+  })
+}
+
+// -> { rotated: [group], failed: [{ group, message }] }. Each group is
+// decided again on the current storage (another distributor's epoch may
+// have arrived since the plan), then rotated by group.rekey's path: the
+// history first, then rotateGroup with its eligibility probe and log check,
+// so nothing is written that would leave a sender rekey-pending. Best
+// effort: a failure is reported, never retried here.
+async function periodicRekey (ctx, { groups = [], now = Date.now(), jitter = () => 0 } = {}) {
+  needGroupKeys(ctx)
+  const rotated = []
+  const failed = []
+  for (const group of upkeepKeys(groups, 'group')) {
+    try {
+      const epoch = await withGroup(ctx, group, true, async ({ ownHex, base, g }) => {
+        const own = g.private ? distributorOf(g, ownHex) : null
+        if (own === null || !(await periodicDecision(ctx, g, own, now, jitter)).due) return null
+        // As group.rekey: a failed history hand-off stops the rotation, and
+        // the next check tries both again.
+        await shareHistory(ctx, g, ownHex)
+        return rotateGroup(ctx, await loadGroup(ctx, base, group), ownHex)
+      })
+      if (epoch !== null) rotated.push(group)
+    } catch (err) {
+      if (isNeedsExclusive(err) || isLocked(err)) throw err
+      failed.push({ group, message: err && typeof err.message === 'string' ? err.message : String(err) })
+    }
+  }
+  return { rotated, failed }
+}
+
 // ---- communities (docs/rpc.md 5.57, 5.59, 5.60, 5.62 to 5.69) ----
 // A community C is a root whose header kind is `community`, stored as a
 // group core; each member device writes one community writer (CW: a
@@ -6205,6 +6289,8 @@ module.exports = {
   groupMeta,
   groupInvitePolicy,
   groupRekey,
+  periodicRekeyPlan,
+  periodicRekey,
   canSealTo,
   groupRead,
   pageGroupRead,
