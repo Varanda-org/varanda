@@ -61,4 +61,13 @@ Mesma forma: cada arquivo sozinho, Node 24.22.1. A coluna "fontes antes" usa os 
 
 ## Conferência em aparelho
 
-Pendente: conferir na web (painel do navegador) com uma exportação local servida em HTTPS, e registrar Android e iOS como não aplicáveis (o app nativo leva o nó junto e não usa o service worker).
+Android e iOS: não se aplica. O app nativo leva o nó no próprio pacote e não usa o service worker.
+
+Web: `npm run export:web` desta branch (versão `598e5cf4e41bfa9a`), servido em `http://localhost` por um servidor estático local que manda os cabeçalhos de documento do `Caddyfile` (CSP e `nosniff`, que o precache exige no `index.html`). O app só registra o worker numa instalação hospedada em HTTPS fora de `localhost`, então o registro foi feito à mão com as mesmas opções do `pwa.web.js` (`/sw.js`, escopo `/`, `updateViaCache: 'none'`). O painel do navegador do app não registra service workers (nem chega a buscar o `sw.js`), então a conferência rodou no Chrome 157 sem janela, comandado por CDP, com um perfil temporário apagado depois.
+
+1. Primeira carga: a página tem a marca `varanda-release` `598e5cf4e41bfa9a` e carrega `/varanda-node-598e5cf4e41bfa9a.js` da rede. O worker instala e ativa, e o cache `varanda-shell-598e5cf4e41bfa9a` guarda 13 arquivos, entre eles a cópia do nó com o nome da versão (e não `/varanda-node.js`).
+2. Recarga com rede: a página fica sob o worker e o nó vem dele.
+3. Troca no meio do deploy, simulada no servidor: toda resposta é 404, menos `/varanda-node.js`, que devolve o nó de outra versão. A recarga recebe o `index.html` guardado, que roda o nó guardado da própria versão; o nó da outra versão não roda. Um `fetch('/varanda-node.js')` recebe a resposta da rede (só a rede responde esse nome).
+4. Servidor fora do ar (a conexão cai): a recarga abre o `index.html` guardado com o nó guardado da versão. `/varanda-node.js` e `/varanda-node-0000000000000000.js` respondem 503 do worker, nunca a cópia guardada.
+
+A comparação com a `main` ficou nos testes (`sw.test.js`, acima); a exportação da `main` não rodou no Chrome.
