@@ -70,7 +70,7 @@ export function CommunitiesBox ({ items, total, title, onOpen, onAll }) {
             )
           : null}
       </ScrollView>
-      <Sheet open={all} onClose={() => setAll(false)} title={title}>
+      <Sheet open={all} onClose={() => setAll(false)} title={title} closeLabel='Fechar'>
         <ScrollView style={styles.sheetList}>
           {list.map((item) => (
             <PressScale

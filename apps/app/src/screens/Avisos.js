@@ -40,7 +40,7 @@ import { avatarOf, pickAvatar } from '../media/avatar'
 import {
   ACTIVITY_QUIET_TEXT, EMPTY_TEXT, EMPTY_TITLE, NOTICES_FIRST_READ_QUIET_MS, NOTICES_INCOMPLETE_TEXT, NOTICES_OFFLINE_MESSAGE, NOTICES_POLL_MS,
   NOTICES_UNSUPPORTED_MESSAGE, PAGE_EMPTY_TEXT, PAGE_EMPTY_TITLE, PAGE_NOTICES_READ_LINE, PAGE_NOTICES_UNAVAILABLE_TITLE, SEEN_MAX,
-  compareNotices, hasNew, hasPageSeenNamespaces, isLastNoticesPage, isPageNoticesUnavailable, isPageSeenNamespace, isWebOnlyError, markSeenPadded, mergePage, mergeRemoteSeen, noticeIcon, noticeId, noticeKind, noticeLine, noticeParts, noticeRef, noticesNotice,
+  compareNotices, followsReadCovers, followsReadsHere, hasNew, hasPageSeenNamespaces, isLastNoticesPage, isPageNoticesUnavailable, isPageSeenNamespace, isWebOnlyError, markSeenPadded, mergePage, mergeRemoteSeen, noticeIcon, noticeId, noticeKind, noticeLine, noticeParts, noticeRef, noticesNotice,
   needsAvatar, padSeen, pageNoticesHeader, pageSeenNamespace, parseSeenNamespace, readNotices, remoteFoldPlan, resolveRowAvatars, rowAvatarSource, seenOnScreen, seenUnion, shouldPoll, shouldStartNoticesFirstRead, snippetCut, snippetOf, writeSeenNamespace
 } from '../notices'
 import { getPeekWarmState, isSeederBusyError, subscribePeekWarm, updatePeekWarmState } from '../peek'
@@ -128,12 +128,12 @@ const AVISOS_BUSY_MORE = 'Os avisos ainda estão carregando. Tente de novo.'
 // another identity's, a v1 list of follower keys or a v2 list of salted
 // digests) is REMOVED at once, which wipes any old format on the first
 // hosted load. A page list in the same blob is kept. Never throws.
-function loadSeen (namespace) {
+function loadSeen (namespace, ownKey) {
   let ids = []
   let text = null
   try {
     text = loadSeenText()
-    ids = parseSeenNamespace(text, namespace)
+    ids = parseSeenNamespace(text, namespace, ownKey)
   } catch {}
   if (randomBytes === null) {
     // Nothing is written without a random source; an entry this browser
@@ -151,7 +151,7 @@ function loadSeen (namespace) {
   if (ids.length < SEEN_MAX) {
     try {
       ids = padSeen(ids, randomBytes)
-      writeSeen(namespace, ids)
+      writeSeen(namespace, ids, ownKey)
     } catch {}
   }
   return { ids }
@@ -167,11 +167,11 @@ const randomBytes = typeof globalThis.crypto?.getRandomValues === 'function'
 
 // Only ever writes the padded list: exactly SEEN_MAX 32-hex entries.
 // The other namespace (the person, or each page) stays in the same text.
-function writeSeen (namespace, ids) {
+function writeSeen (namespace, ids, ownKey) {
   if (randomBytes === null || ids.length !== SEEN_MAX) return
   if (typeof namespace !== 'string' || namespace.length === 0) return
   try {
-    saveSeenText(writeSeenNamespace(loadSeenText(), namespace, ids))
+    saveSeenText(writeSeenNamespace(loadSeenText(), namespace, ids, ownKey))
   } catch {}
 }
 
@@ -281,23 +281,27 @@ const SNIPPET_TRIES = 2
 // batch at a time and never again for a ref already tried. A failed read just
 // leaves the row without a second line. A read that throws partway keeps the
 // refs it found; the rest get one more try in a later batch, then count as
-// tried, so a seeder that stays down cannot loop.
+// tried, so a seeder that stays down cannot loop. A read that ends without
+// the post leaves the ref blank until the next full reload.
 function useSnippets (items, request, enabled, retryKey) {
   const [texts, setTexts] = useState({})
   const triedRef = useRef(new Set())
   const triesRef = useRef(new Map())
   const exhaustedRef = useRef(new Set())
+  const blankRef = useRef(new Set())
   const [round, setRound] = useState(0)
   // A full reload of the list (loadedAt moves: pull to refresh, a reload on
-  // show) gives refs that ran out of tries one more chance. The 5-minute poll
-  // does not move loadedAt, so it does not retry them.
+  // show) gives every ref still without text one more chance: those that ran
+  // out of tries and those whose read came back without the post. The
+  // 5-minute poll does not move loadedAt, so it does not retry them.
   useEffect(() => {
-    if (exhaustedRef.current.size === 0) return
-    for (const r of exhaustedRef.current) {
+    if (exhaustedRef.current.size === 0 && blankRef.current.size === 0) return
+    for (const r of [...exhaustedRef.current, ...blankRef.current]) {
       triedRef.current.delete(r)
       triesRef.current.delete(r)
     }
     exhaustedRef.current.clear()
+    blankRef.current.clear()
     setRound((n) => n + 1)
   }, [retryKey])
   const refs = enabled ? items.map(snippetRef).filter((r) => r !== null) : []
@@ -330,6 +334,7 @@ function useSnippets (items, request, enabled, retryKey) {
         if (post !== null) found[r] = post.text
         if (post !== null || done.some((p) => chunkHas(p, r))) {
           triedRef.current.add(r)
+          if (post === null) blankRef.current.add(r)
         } else if (failedAt !== null && chunkHas(failedAt, r)) {
           const tries = (triesRef.current.get(r) || 0) + 1
           triesRef.current.set(r, tries)
@@ -613,7 +618,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       badge(!mark && hasNew(list, []))
       return
     }
-    if (seenRef.current === null) seenRef.current = loadSeen(seenNamespace)
+    if (seenRef.current === null) seenRef.current = loadSeen(seenNamespace, ownKeyRef.current)
     const seen = seenRef.current
     // Rows unseen when they first loaded keep their dot while this screen
     // lives, even though opening the tab marks them seen. A row read on
@@ -634,7 +639,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         const { ids, changed } = markSeenPadded(seen.ids, list, randomBytes)
         if (changed) {
           seen.ids = ids
-          writeSeen(seenNamespace, ids)
+          writeSeen(seenNamespace, ids, ownKeyRef.current)
         }
       }
       badge(false)
@@ -647,7 +652,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         const { ids, changed } = mergeRemoteSeen(seen.ids, remote, rows, randomBytes)
         if (changed) {
           seen.ids = ids
-          writeSeen(seenNamespace, ids)
+          writeSeen(seenNamespace, ids, ownKeyRef.current)
         }
       }
       badge(hasNew(list, seenUnion(seen.ids, remote)))
@@ -667,7 +672,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   useEffect(() => {
     const prev = prevNamespaceRef.current
     prevNamespaceRef.current = seenNamespace
-    seenRef.current = hosted && seenNamespace.length > 0 ? loadSeen(seenNamespace) : null
+    seenRef.current = hosted && seenNamespace.length > 0 ? loadSeen(seenNamespace, ownKeyRef.current) : null
     setUnread(new Set())
     lastListRef.current = null
     shownListRef.current = null
@@ -885,7 +890,11 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     const shown = active && !prev.active
     const reselected = scrollToTop !== prev.scrollToTop
     const changed = refresh !== prev.refresh
-    previous.current = { active, refresh: active ? refresh : prev.refresh, scrollToTop, warmToken: prev.warmToken }
+    // Hidden, a bump is adopted (no read at the next show) only right after a
+    // hidden follows read, which covers it; any other waits for the show.
+    const covered = !active && changed && followsReadCovers({ readAt: followsReadAtRef.current, now: Date.now() })
+    previous.current = { active, refresh: active || covered ? refresh : prev.refresh, scrollToTop, warmToken: prev.warmToken }
+    if (!active && changed) followsReadAtRef.current = null
     if (!active) return
     // A show marks every loaded row seen, so every row must be drawn: a
     // filter left from the last visit would hide a new notice it marks.
@@ -916,15 +925,27 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     }
   }, [active, state.loading, state.refreshing, loadFirst])
 
-  // Follows changed (here or on another device): the list is read again, also
-  // while the tab is not shown.
+  // Follows changed (here or on another device). Hidden, the list is read
+  // again in the background. Shown, this effect stays out: a follow made on
+  // this device reaches App, whose `refresh` bump reads once (each first read
+  // dials the seeder). For one made on another device or by sync, the
+  // Seguir de volta pills read the follow set again below at once; the only
+  // row that depends on the member's own follows, the follow row of someone
+  // now followed back, stays without its pill until the next full read
+  // (pull or show).
   const followsVersion = node.followsVersion
   const followsRef = useRef(followsVersion)
+  const followsReadAtRef = useRef(null)
   useEffect(() => {
     if (followsVersion === followsRef.current) return
     followsRef.current = followsVersion
-    if (!stateRef.current.loading && !stateRef.current.refreshing) loadFirst()
-  }, [followsVersion, loadFirst])
+    const current = stateRef.current
+    if (!followsReadsHere({ active, busy: current.loading || current.refreshing })) return
+    // The refresh bump a follow made here sends next must not read again at
+    // show (followsReadCovers).
+    followsReadAtRef.current = Date.now()
+    loadFirst()
+  }, [followsVersion, active, loadFirst])
 
   // Seguir de volta: the person's own follow set, read as Pessoas does and
   // again on any follow change or another identity. A page never reads it
@@ -952,7 +973,9 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       markFollow(key, true)
       const title = displayText(whoOf({ name: item.name, username: item.username }).title)
       if (typeof onToast === 'function') onToast(r && r.changed === false ? 'Você já segue esta pessoa.' : 'Agora você segue ' + title + '.')
-      if (typeof onFollowsChanged === 'function') onFollowsChanged()
+      // Nothing changed: no reload. Kept otherwise, as the node's follows
+      // event can lag or never come (offline).
+      if (!(r && r.changed === false) && typeof onFollowsChanged === 'function') onFollowsChanged()
     } catch (err) {
       if (typeof onToast === 'function') onToast(errorText(err))
       // The pill stays pending until the set is read again, so it is never
@@ -1098,7 +1121,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   } else if (loadError) {
     empty = <ErrorState message={loadError} onRetry={locked ? () => { commit({ locked: false, loadError: '' }); loadFirst() } : loadFirst} pending={loading || refreshing} />
   } else if (loadedAt === null) {
-    empty = <><SkeletonRow /><SkeletonRow /><SkeletonRow /></>
+    empty = <View>{[0, 1, 2].map((row) => <SkeletonRow key={row} />)}</View>
   } else {
     empty = pageKey
       ? <EmptyState icon='sino' title={PAGE_EMPTY_TITLE} body={PAGE_EMPTY_TEXT} />
@@ -1185,6 +1208,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   return (
     <>
       <RefreshableList
+        perfId='avisos'
         data={shownOnceRef.current ? rows : EMPTY_ROWS}
         keyExtractor={rowKey}
         renderItem={renderItem}

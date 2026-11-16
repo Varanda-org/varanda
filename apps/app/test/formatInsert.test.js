@@ -161,3 +161,118 @@ test('a wrap the parser would not show leaves the text as it was', async (t) => 
   const hidden = wrapSelection(poisoned, { start: 5, end: 10 }, '||')
   t.is(hidden.text, 'oi \u200b ||mundo||', 'but a spoiler there is still hidden')
 })
+
+test('taking formatting off removes only a pair the button would add', async (t) => {
+  const { wrapSelection } = await load()
+  const same = (text, start, end, marker, message) => t.alike(wrapSelection(text, { start, end }, marker), { text, selection: { start, end } }, message)
+  same('@ana_b_c', 5, 6, '_', 'underscores inside a mention are not a pair')
+  same('a_b_c', 2, 3, '_', 'underscores inside a word are not a pair')
+  same('2*3*4', 2, 3, '*', 'asterisks between digits are not a pair')
+  same('veja https://a.com/_x_ ok', 16, 17, '_', 'markers inside a link keep its address')
+  t.alike(wrapSelection('oi _mundo_ bom', { start: 4, end: 9 }, '_'), { text: 'oi mundo bom', selection: { start: 3, end: 8 } }, 'a real pair still comes off')
+  t.alike(wrapSelection('oi _mundo_ bom', { start: 3, end: 10 }, '_'), { text: 'oi mundo bom', selection: { start: 3, end: 8 } }, 'also with the markers inside the selection')
+  t.alike(wrapSelection('a _b_ c_d', { start: 3, end: 4 }, '_'), { text: 'a b c_d', selection: { start: 2, end: 3 } }, 'and a stray underscore elsewhere stays')
+})
+
+test('a second Bloco de código takes the fences off instead of nesting', async (t) => {
+  const { insertCodeBlock } = await load()
+  const { parseRich } = await loadRich()
+  const shape = (text) => parseRich(text).map((b) => b.kind === 'code' ? ['code', b.text] : ['para', b.spans.map((s) => s.text).join('')])
+  const src = 'veja \n```\nx = 1\n```\n ok'
+  t.alike(insertCodeBlock(src, { start: 10, end: 15 }), { text: 'veja \nx = 1\n ok', selection: { start: 6, end: 11 } }, 'a selection inside the block')
+  t.alike(insertCodeBlock(src, { start: 12, end: 12 }), { text: 'veja \nx = 1\n ok', selection: { start: 8, end: 8 } }, 'a caret inside the block')
+  t.alike(insertCodeBlock(src, { start: 6, end: 19 }), { text: 'veja \nx = 1\n ok', selection: { start: 6, end: 11 } }, 'the block selected whole')
+  t.alike(insertCodeBlock('```\n\n```', { start: 4, end: 4 }), { text: '', selection: { start: 0, end: 0 } }, 'the empty block the button adds')
+  const once = insertCodeBlock('veja x = 1 ok', { start: 5, end: 10 })
+  const twice = insertCodeBlock(once.text, once.selection)
+  t.alike(shape(once.text).filter((b) => b[0] === 'code'), [['code', 'x = 1']])
+  t.alike(twice.text, 'veja \nx = 1\n ok', 'the second press undoes the first')
+  t.absent(shape(twice.text).some((b) => b[0] === 'code'))
+  const partial = 'a\n```\nb\n```\nc'
+  t.alike(insertCodeBlock(partial, { start: 0, end: 8 }), { text: partial, selection: { start: 0, end: 8 } }, 'a selection ending inside a block is left alone')
+  t.alike(insertCodeBlock(partial, { start: 6, end: 13 }), { text: partial, selection: { start: 6, end: 13 } }, 'and one starting inside it')
+  const around = insertCodeBlock(partial, { start: 0, end: partial.length })
+  t.alike(shape(around.text), [['code', partial]], 'a selection around a block is wrapped by a longer fence')
+})
+
+test('insertCodeBlock never splits a mention or a link, and unfencing keeps where they point', async (t) => {
+  const { insertCodeBlock } = await load()
+  const { textSegments } = await import('../src/links.js')
+  const dests = (text) => textSegments(text, { mentions: true }).filter((s) => typeof s.href === 'string' || typeof s.username === 'string').map((s) => s.href || '@' + s.username)
+  const unchanged = (text, start, end, why) => t.alike(insertCodeBlock(text, { start, end }), { text, selection: { start, end } }, why)
+  unchanged('oi @ana_b fim', 6, 6, 'a caret inside a mention')
+  unchanged('oi @ana_b fim', 5, 8, 'a selection inside a mention')
+  unchanged('veja https://exemplo.com/a/b ok', 15, 15, 'a caret inside a URL')
+  unchanged('veja https://exemplo.com/a/b ok', 12, 20, 'a selection inside a URL')
+  const mention = 'oi @ana_b fim'
+  const whole = insertCodeBlock(mention, { start: 3, end: 9 })
+  t.is(whole.text, 'oi \n```\n@ana_b\n```\n fim', 'a whole mention still goes into a block')
+  t.alike(dests(whole.text), dests(mention), 'and points where it did')
+  const url = 'veja https://exemplo.com/a ok'
+  const around = insertCodeBlock(url, { start: 5, end: 5 + 'https://exemplo.com/a'.length })
+  t.alike(dests(around.text), dests(url), 'a whole URL keeps its address')
+  const withLinks = 'oi @ana_b veja https://exemplo.com/a\n```\nx = 1\n```\n fim'
+  const open = withLinks.indexOf('x = 1')
+  const un = insertCodeBlock(withLinks, { start: open, end: open + 5 })
+  t.is(un.text, 'oi @ana_b veja https://exemplo.com/a\nx = 1\n fim', 'a block comes off')
+  t.alike(dests(un.text), dests(withLinks), 'the mention and the link outside it point where they did')
+  t.alike(insertCodeBlock('veja x = 1 ok', { start: 5, end: 10 }).text, 'veja \n```\nx = 1\n```\n ok', 'the ordinary case still fences')
+})
+
+test('a fence left open earlier does not split the new block', async (t) => {
+  const { insertCodeBlock } = await load()
+  const { parseRich } = await loadRich()
+  const out = insertCodeBlock('```\nfoo\n', { start: 4, end: 7 })
+  const blocks = parseRich(out.text).filter((b) => b.kind === 'code')
+  t.alike(blocks.map((b) => b.text), ['foo'])
+  t.is(out.text.slice(out.selection.start, out.selection.end), 'foo')
+  const lang = insertCodeBlock('```js\nfoo bar\n', { start: 6, end: 9 })
+  t.alike(parseRich(lang.text).filter((b) => b.kind === 'code').map((b) => b.text), ['foo'])
+})
+
+test('codeBlocks finds the blocks the parser reads', async (t) => {
+  const { codeBlocks } = await load()
+  const { parseRich } = await loadRich()
+  for (const src of [
+    'a\n```js\nx\n```\nb', '```\n```', '```\n\n```', '````\n```\n````', '```\nfoo\n', '```js\n```js\n```\n```js\n``` ',
+    'x ```\ny\n```', '```c\nint\n```\n```\nok\n```\nfim', '```toolongalangname\nx\n```'
+  ]) {
+    t.alike(codeBlocks(src).map((b) => src.slice(b.bodyStart, b.bodyEnd)), parseRich(src).filter((b) => b.kind === 'code').map((b) => b.text), JSON.stringify(src))
+  }
+})
+
+test('the letters of a fence lang are not text, and markers alone in code show no style', async (t) => {
+  const { wrapSelection } = await load()
+  t.alike(wrapSelection('```js\n```\njs', { start: 10, end: 12 }, '*'), { text: '```js\n```\n*js*', selection: { start: 11, end: 13 } }, 'a wrap after a block with a lang')
+  t.alike(wrapSelection('```js\n```\nsjs ', { start: 10, end: 13 }, '_'), { text: '```js\n```\n_sjs_ ', selection: { start: 11, end: 14 } })
+  const same = (text, start, end, marker, message) => t.alike(wrapSelection(text, { start, end }, marker), { text, selection: { start, end } }, message)
+  same('```\n**\n```', 4, 6, '_', 'italic over markers in a block')
+  same('`**`', 1, 3, '_', 'italic over markers in inline code')
+  same('```\nfoo\n```', 4, 7, '`', 'no marker formats inside a block')
+})
+
+test('a caret inside code gets no markers, and one beside it still does', async (t) => {
+  const { wrapSelection, insertCodeBlock } = await load()
+  const same = (text, at, marker, message) => t.alike(wrapSelection(text, { start: at, end: at }, marker), { text, selection: { start: at, end: at } }, message)
+  same('`ab`', 2, '*', 'inline code')
+  same('`ab`', 1, '_', 'just inside the opening tick')
+  same('`ab`', 2, '`', 'a tick inside inline code')
+  same('```\nabc\n```', 5, '_', 'a block')
+  same('```js\nabc\n```', 8, '*', 'a block with a lang')
+  t.alike(wrapSelection('```\nx\n```\n', { start: 10, end: 10 }, '*'), { text: '```\nx\n```\n**', selection: { start: 11, end: 11 } }, 'after a block')
+  t.alike(wrapSelection('`ab` ', { start: 5, end: 5 }, '*'), { text: '`ab` **', selection: { start: 6, end: 6 } }, 'after inline code')
+  t.alike(insertCodeBlock('`ab`', { start: 2, end: 2 }), { text: '`ab`', selection: { start: 2, end: 2 } }, 'a block would split inline code')
+  t.alike(insertCodeBlock('x `a b` y', { start: 0, end: 5 }), { text: 'x `a b` y', selection: { start: 0, end: 5 } }, 'a selection ending inside inline code')
+})
+
+test('pasteCaret keeps the caret at the copy nearest the stored selection when the draft repeats', async (t) => {
+  const { pasteCaret } = await load()
+  t.is(pasteCaret('abab', 'ababab', { start: 0, end: 0 }), 2, 'inserted at the start')
+  t.is(pasteCaret('abab', 'ababab', { start: 2, end: 2 }), 4, 'inserted in the middle')
+  t.is(pasteCaret('abab', 'ababab', { start: 4, end: 4 }), 6, 'inserted at the end')
+  t.is(pasteCaret('abab', 'ababab', null), 6, 'no selection: the last copy')
+  t.is(pasteCaret('abab', 'ababab', { start: 99, end: 99 }), 6, 'an out of range selection is no evidence')
+  t.is(pasteCaret('hello', 'hello\txo', { start: 1, end: 1 }), 8, 'a selection outside the candidates keeps the old answer')
+  t.is(pasteCaret('abXab', 'abXZab', { start: 0, end: 0 }), 4, 'one place only: the selection cannot move it')
+  t.is(pasteCaret('abc', 'ax', null), 2, 'a replacement falls back to the common ends')
+})

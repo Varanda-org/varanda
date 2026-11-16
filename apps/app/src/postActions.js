@@ -64,6 +64,11 @@ function canApagar (item, caps) {
   return canDelete({ author, seq: item.seq }, ownKeyOf(caps), pageKeyOf(caps))
 }
 
+// The one rule for offering Apagar, shared by every screen that draws a post.
+export function canDeletePost (item, caps) {
+  return canApagar(item, caps)
+}
+
 function kindOf (item) {
   if (typeof item.kind === 'string') return item.kind
   if (typeof item.channel === 'string') return item.channel

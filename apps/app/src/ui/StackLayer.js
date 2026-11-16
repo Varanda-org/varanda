@@ -4,9 +4,10 @@
 // the departing screen is kept here, under its old index and key, until its
 // slide ends. Animated and PanResponder only: no extra native modules.
 
-import { useCallback, useContext, useEffect, useRef, useState } from 'react'
+import { useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { AccessibilityInfo, Animated, PanResponder, Platform, StyleSheet, View, useWindowDimensions } from 'react-native'
 import { STACK_MS, claimSwipe, popPlan, pushPlan, stackChange, swipeVerdict } from '../stackMotion'
+import { createReduceMotionStore } from '../reduceMotionStore'
 import { createStackLock } from '../stackLock'
 import { layout } from './theme'
 import { useStyles } from './ThemeProvider'
@@ -34,25 +35,9 @@ export function stackBusy () {
   return holder !== 0 && holder !== handoff
 }
 
+const reduceMotion = createReduceMotionStore(AccessibilityInfo)
 export function useReduceMotion () {
-  const [reduce, setReduce] = useState(false)
-  useEffect(() => {
-    let live = true
-    let sub = null
-    try {
-      Promise.resolve(AccessibilityInfo.isReduceMotionEnabled()).then((value) => {
-        if (live) setReduce(value === true)
-      }, () => {})
-      sub = AccessibilityInfo.addEventListener('reduceMotionChanged', (value) => {
-        if (live) setReduce(value === true)
-      })
-    } catch {}
-    return () => {
-      live = false
-      try { if (sub && typeof sub.remove === 'function') sub.remove() } catch {}
-    }
-  }, [])
-  return reduce
+  return useSyncExternalStore(reduceMotion.subscribe, reduceMotion.get, () => false)
 }
 
 export function useStackMotion (stack) {

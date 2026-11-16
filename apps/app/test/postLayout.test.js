@@ -41,7 +41,7 @@ test('head reserves the measured space of its absolute controls', (t) => {
   t.ok(post.includes('const HEAD_LIFT = 12') && post.includes('<View style={[styles.headActions, !stackHead && { top: -HEAD_LIFT }]}'), 'the 44 pt targets centre on the 20 pt name line')
   t.ok(post.includes('headActions && !stackHead && fn(onFollow) && { minHeight: headReserve.height - HEAD_LIFT }'), 'with seguir, the head is tall enough that its target never covers the caption')
   t.absent(post.includes('minHeight: headReserve.height }'), 'only ⋯: the head adds no height to the post')
-  t.ok(post.includes('const headReserve = headActionsSize.width > 0 ? headActionsSize : { width: (fn(onFollow) ? FOLLOW_GUESS : 0) + (hasMore ? layout.hit : 0), height: layout.hit }'), 'before measurement the targets reserve their usual size, never zero')
+  t.ok(post.includes('measured: headActionsSize,') && post.includes('guess: { width: (fn(onFollow) ? FOLLOW_GUESS : 0) + (hasMore ? layout.hit : 0), height: layout.hit }'), 'before measurement the targets reserve their usual size, never zero')
   t.ok(post.includes('const stackHead = headActions && fontScale >= LARGE_TEXT') && post.includes("headStacked: { flexWrap: 'wrap' }") && post.includes("stackHead && { width: '100%', paddingRight: headPad, minHeight: headReserve.height"), 'at large text the name keeps the first line beside the targets and the date wraps below them')
   t.ok(post.includes('const headActions = !!fn(onFollow) || hasMore'), 'only visible controls reserve space')
   t.ok(/follow: \{[^}]*minHeight: layout\.hit[^}]*minWidth: 44/.test(post), 'follow keeps a 44 pt target')
@@ -92,12 +92,12 @@ test('PostRow places a video before the caption, outside the open area', async (
 })
 
 test('PostRow measures the caption column and forwards the expanded override', (t) => {
-  t.ok(post.includes("import { ClampControl, useClamp } from './ClampText'"))
+  t.ok(post.includes("import { ClampControl, captionEstimate, useClamp } from './ClampText'"))
   t.ok(post.includes('expanded = false'), 'rows clamp by default')
   t.ok(post.includes('const [captionWidth, setCaptionWidth] = useState(undefined)'), 'no zero width before layout')
   t.ok(/useClamp\(\{\s*text: shownText,\s*hasMedia,\s*width: captionWidth,\s*forceExpanded: expanded\s*\}\)/.test(post), 'sanitized caption, media, measured width and forced expansion reach the hook')
   t.ok(post.includes('<View style={styles.body} onLayout={measureCaption}>'), 'measure the text column, not the whole row')
-  t.ok(/const measureCaption = \(event\) => \{\s*const width = event.nativeEvent.layout.width\s*setCaptionWidth\(Number.isFinite\(width\) && width > 0 \? width : undefined\)\s*\}/.test(post), 'invalid or zero widths keep the hook fallback')
+  t.ok(/const measureCaption = \(event\) => \{\s*const next = captionWidthNext\(captionEstimate\(windowWidth\), event.nativeEvent.layout.width\)\s*if \(next !== captionWidth\) setCaptionWidth\(next\)\s*\}/.test(post), 'invalid, zero or estimated widths keep the hook fallback')
 })
 
 test('a clamped caption is plain sanitized Text and expansion restores interaction', (t) => {

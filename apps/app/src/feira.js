@@ -41,7 +41,6 @@ const MONTHS = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'jul
 // Brasília has no daylight saving time: a certificate issued late on the
 // last day of a month still reads as that month for a Brazilian reader.
 const BRASILIA_OFFSET_MS = 3 * 60 * 60 * 1000
-const MAX_MUTUALS = 3
 const HEX64 = /^[0-9a-f]{64}$/
 const PRICE_TEXT = /^(?:R\$\s*)?([0-9]{1,3}(?:\.[0-9]{3})+|[0-9]+)(?:,([0-9]{1,2}))?$/
 
@@ -200,24 +199,12 @@ export function monthYear (iso) {
   return MONTHS[d.getUTCMonth()] + ' de ' + d.getUTCFullYear()
 }
 
-function joinNames (names) {
-  if (names.length <= 1) return names.join('')
-  return names.slice(0, -1).join(', ') + ' e ' + names[names.length - 1]
-}
-
 // The trust lines under a seller: since when the member's certificate is
-// verified, the verified name and at most three people the reader follows
-// who follow them. A line with nothing to say is left out; there is no age
-// badge. -> [{ key, text }].
-export function trustLines ({ certDate, verifiedName, mutuals } = {}) {
+// verified. Only that has a data source; a line with nothing to say is left
+// out, never shown with a placeholder. -> [{ key, text }].
+export function trustLines ({ certDate } = {}) {
   const lines = []
   const since = monthYear(certDate)
   if (since !== '') lines.push({ key: 'memberSince', text: 'Na Varanda desde ' + since })
-  const name = typeof verifiedName === 'string' ? peer(verifiedName.trim()) : ''
-  if (name !== '') lines.push({ key: 'verifiedName', text: 'Nome verificado: ' + name })
-  const names = Array.isArray(mutuals)
-    ? mutuals.filter((n) => typeof n === 'string' && n.trim() !== '').slice(0, MAX_MUTUALS).map((n) => peer(n.trim()))
-    : []
-  if (names.length > 0) lines.push({ key: 'mutuals', text: 'Seguido por ' + joinNames(names) })
   return lines
 }

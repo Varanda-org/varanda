@@ -7,6 +7,13 @@ const { runInNewContext } = require('node:vm')
 
 const read = (file) => readFileSync(join(__dirname, '../src', file), 'utf8')
 
+test('the composer is never shorter than its line breaks, so a code block set by code shows its fences', (t) => {
+  const src = read('ui/ChatComposer.js')
+  t.ok(src.includes("import { heightFloor } from '../composerHeight'"), 'uses the pure floor')
+  t.ok(src.includes('const shownHeight = Math.max(height, heightFloor(text, { line: LINE, pad: PAD_V, maxLines: MAX_LINES }))'), 'the measured height, raised to the floor')
+  t.ok(src.includes('{ height: shownHeight }') && src.includes('scrollEnabled={shownHeight >= MAX_HEIGHT}'), 'the field and its scrolling follow it')
+})
+
 test('the composer offers six formats in an initially hidden accessible row', (t) => {
   const src = read('ui/ChatComposer.js')
   t.ok(src.includes('const [formatOpen, setFormatOpen] = useState(false)'))
@@ -64,7 +71,7 @@ test('the Aa toggle shares the emoji tool size and touch padding', (t) => {
 })
 
 test('the input cleans pasted TAB and CR and preserves ordinary typing', async (t) => {
-  const { cleanPaste } = await import('../src/formatInsert.js')
+  const { cleanPaste, pasteCaret } = await import('../src/formatInsert.js')
   const src = read('ui/ChatComposer.js')
   const match = src.match(/const changeText = (\(next\) => \{[\s\S]*?\n {2}\})\n\n {2}const pickFormat/)
   t.ok(match, 'the input has a change handler')
@@ -95,6 +102,7 @@ test('the input cleans pasted TAB and CR and preserves ordinary typing', async (
     const input = runInNewContext(match[1], {
       text: previous,
       cleanPaste,
+      pasteCaret,
       change: (text) => received.push(text),
       selRef,
       setCaret: (value) => states.push(['caret', value]),

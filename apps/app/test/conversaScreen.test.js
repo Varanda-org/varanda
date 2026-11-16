@@ -9,7 +9,7 @@ const src = readFileSync(join(__dirname, '../src/screens/Conversa.js'), 'utf8')
 const app = readFileSync(join(__dirname, '../App.js'), 'utf8')
 
 test('Conversa: nested rows use the verified thread gate and reset with the focal ref', (t) => {
-  t.ok(src.includes('threadRows({ replies, ...branches, open, more: childMore })'))
+  t.ok(src.includes('threadRows({ replies: view.replies, ...branches, open, more: childMore })'))
   t.ok(src.includes('assembleThread({ focal: parentKey, index, peeked })'))
   t.ok(src.includes('mergeChildren(previous, parentKey, items)'))
   t.ok(src.includes('setOpen(new Set())') && src.includes('setChildren(new Map())'))
@@ -29,7 +29,22 @@ test('Conversa: full nodes pin ReplyBar and keep the sheet path elsewhere', (t) 
   t.ok(src.includes('{full || sending\n        ? (') && src.includes('<ReplyBar'))
   t.ok(src.includes('onClearTarget={() => setReplyTarget(null)}'))
   t.ok(src.includes('onSend={sendReply}'))
-  t.ok(src.includes('renderItem={({ item: row }) => renderThreadRow(row)}'))
+  t.ok(src.includes('renderItem={renderItem}'))
+})
+
+test('Conversa: thread rows are stable across renders', (t) => {
+  t.absent(/renderItem=\{\(/.test(src), 'no inline renderItem')
+  t.ok(src.includes('const renderItem = useCallback(({ item: row }) => renderRef.current(row), [])'), 'one renderItem through a ref')
+  t.ok(src.includes('renderRef.current = (row) => {'), 'the ref holds the newest row renderer')
+  t.ok(src.includes('extraData={extra}') && src.includes('const extra = useMemo(() => ({ eng, follows, now, childBusy, childErrors, childNext, styles, profileOf: names.profileOf }), [eng, follows, now, childBusy, childErrors, childNext, styles, names.profileOf])') && src.includes('return useMemo(() => ({ state, counts, pending, reset, readOwn, readCounts, setCount, toggle }), [state, counts, pending, reset, readOwn, readCounts, setCount, toggle])'), 'extraData is memoized on what rows read')
+  t.ok(src.includes('const rowCache = useThreadRowCache(rows.map((row) => row.key), { handlers, eng: full ? eng : null })'), 'the list owns a row props cache')
+  t.ok(src.includes('<PostRow {...props(row.item, row.depth === 0 ? DEPTH_ZERO : undefined, row.key)} />'), 'reply rows take cached props')
+  t.ok(src.includes('return cachedRow(cache, rowKey, inputs, latest, build)'), 'rowProps caches through cachedRow')
+  const hooks = src.indexOf('const rowCache = useThreadRowCache(')
+  t.ok(hooks !== -1 && hooks < src.indexOf('if (!full && !sending) {'), 'the list hooks run before the offline return')
+  const screen = src.slice(src.indexOf('export default function Conversa ('), src.indexOf('export function ReplyDock ('))
+  t.absent(screen.includes('useKeyboardOpen()'), 'the keyboard state is not read by the screen')
+  t.ok(/export function ReplyDock \([^)]*\) \{\s*const insets = useSafeAreaInsets\(\)\s*const keyboardOpen = useKeyboardOpen\(\)/.test(src), 'the reply dock owns the keyboard state')
 })
 
 test('Conversa: compose signals focus even when the same stack entry is already on top', (t) => {
@@ -118,7 +133,7 @@ async function sending (options = {}) {
       return { ref: A + ':8', seq: 8 }
     }
   }
-  const send = handler(src, '  const sendReply = async', '  const childMore =', 'sendReply', context)
+  const send = handler(src, '  const sendReply = async', '  renderRef.current = (row) => {', 'sendReply', context)
   return { send, state, context }
 }
 
@@ -270,27 +285,29 @@ test('Conversa children handler: wrong-parent hints are excluded and stale loads
 })
 
 test('Conversa reply chips hide the focal parent only at depth zero', (t) => {
-  t.ok(src.includes('props(row.item, row.depth === 0 ? { replyToName: null, onOpenParent: undefined } : undefined)'))
+  t.ok(src.includes('const DEPTH_ZERO = { replyToName: null, onOpenParent: undefined }'))
+  t.ok(src.includes('props(row.item, row.depth === 0 ? DEPTH_ZERO : undefined, row.key)'))
 })
 
 test('Conversa bar respects the safe area and consumes compose intent once', (t) => {
   t.ok(src.includes("import { useSafeAreaInsets } from 'react-native-safe-area-context'"))
   t.ok(src.includes('const insets = useSafeAreaInsets()'))
-  t.ok(/<View ref=\{barBox\} collapsable=\{false\} style=\{\[styles.barWrap, \{ paddingBottom: keyboardOpen \? 8 : Math.max\(8, insets.bottom\) \}\]\}>\s*<ReplyBar/.test(src), 'the inset is dropped while the keyboard is open')
+  t.ok(src.includes('<View ref={barBox} collapsable={false} style={[style, { paddingBottom: keyboardOpen ? 8 : Math.max(8, insets.bottom) }]}>'), 'the inset is dropped while the keyboard is open')
+  t.ok(/<ReplyDock barBox=\{barBox\} style=\{styles.barWrap\}>\s*<ReplyBar/.test(src), 'the bar sits in the dock')
   t.ok(src.includes('barWrap: { backgroundColor: colors.bg, paddingHorizontal: space.md, paddingTop: space.sm }'), 'the page shows around the floating pill')
-  t.ok(src.includes('me={me}') && /export default function Conversa \(\{[^}]*\bme,/.test(src), 'the bar gets the own profile')
+  t.ok(src.includes('me={me}') && /function ConversaList \(\{[^}]*\bme,/.test(src), 'the bar gets the own profile')
   t.ok(app.includes('me: tabMe,'), 'App passes the tab profile to screens')
   t.ok(src.includes("onAttach={(draft) => expandReply(draft, undefined, 'photo')}"), 'the photo button expands with attach')
   t.ok(src.includes('nonFocalTarget={replyTarget !== null && replyTarget.ref !== focal}'), 'a reply to another row is flagged')
   t.ok(src.includes('onReply(attach ? { ...target, draft, attach } : { ...target, draft })'), 'attach rides only when given')
   t.ok(/targetReply\(composeSignal.target\)\s*if \(typeof onComposeSeen === 'function'\) onComposeSeen\(\)/.test(src))
-  t.ok(app.includes('onComposeSeen={() => setComposeSignal(null)}'))
+  t.ok(app.includes('onComposeSeen={h.handleComposeSeen}') && app.includes('handleComposeSeen: () => setComposeSignal(null)'))
 })
 
 test('Conversa ends the player band at the reply bar', (t) => {
   t.ok(src.includes("import { EmbedBandBottom } from '../ui/screenVisible'"), 'imports the band context')
   t.ok(src.includes('const barBox = useRef(null)'), 'the bar wrapper ref')
-  t.ok(src.includes('<View ref={barBox} collapsable={false} style={[styles.barWrap'), 'the bar wrapper is measured')
+  t.ok(src.includes('<View ref={barBox} collapsable={false} style={[style,') && src.includes('<ReplyDock barBox={barBox} style={styles.barWrap}>'), 'the bar wrapper is measured')
   t.ok(src.includes('<EmbedBandBottom.Provider value={full || sending ? band : null}>'), 'the list gets the band while the bar shows')
   const opens = src.indexOf('<EmbedBandBottom.Provider')
   const list = src.indexOf('<RefreshableList')
@@ -319,7 +336,7 @@ test('Conversa quick send uses a quiet read only without pending pages', async (
 
 async function localReplies (registerLocalCache = () => {}) {
   const { withOwnReply } = await import('../src/threadRows.js')
-  return handler(src.replace('export function branchView', 'function branchView'), 'const ownReplyCache =', 'const INITIAL =', '{ branchView, ownFor, cacheOwnReply, ownReplyCache, ownReplyCopies, forgetOwnReplies, dropOwnReplies, pruneOwnReplies }', {
+  return handler(src.replace('export function branchView', 'function branchView'), 'const ownReplyCache =', 'const INITIAL =', '{ branchView, ownFor, cacheOwnReply, ownReplyCache, ownReplyCopies, deletionListeners, announceDeleted, forgetOwnReplies, dropOwnReplies, pruneOwnReplies }', {
     withOwnReply,
     registerLocalCache,
     refOf: (author, seq) => author + ':' + seq
@@ -392,6 +409,7 @@ test('App quick replies refresh feeds without touching a parked composer', (t) =
 })
 
 async function loading (options = {}) {
+  const { quietNext } = await import('../src/threadRows.js')
   const { withOwnReply } = await import('../src/threadRows.js')
   const own = await localReplies()
   const child = item(3, 2)
@@ -405,6 +423,8 @@ async function loading (options = {}) {
     request: async () => {},
     ownKey: A,
     genRef: { current: 0 },
+    quietRef: { current: 0 },
+    quietNext,
     childrenRef: { current: state.children },
     childRequests: { current: new Map() },
     branchGen: { current: 0 },
@@ -422,8 +442,8 @@ async function loading (options = {}) {
       if (options.throws) throw new Error('falhou')
       return options.failure ? { ok: false, reason: 'not-found' } : { ok: true, value: { parent: null, replies: [], next: 'first-page', repliesTotal: 1 } }
     },
-    reset: () => { state.resets++ },
-    readOwn: async () => {},
+    reset: () => { state.resets++; return () => { state.undos = (state.undos || 0) + 1 } },
+    readOwn: async () => { if (options.afterReset) throw new Error('falhou') },
     readCounts: () => {},
     loadFollows: async () => new Set(),
     followsRef: { current: Promise.resolve(new Set()) },
@@ -519,9 +539,13 @@ test('Conversa delete lowers the actual parent count once and removes cached cop
       setOpen: (update) => { state.open = update(state.open) },
       viewRef: { current: { replies: [], parent: null, meta: null } },
       commit: () => {},
-      refOf: (author, seq) => author + ':' + seq
+      refOf: (author, seq) => author + ':' + seq,
+      useRef: (value) => ({ current: value }),
+      useEffect: () => {},
+      deletionListeners: new Set(),
+      focalRef: { current: focal }
     }
-    const del = handler(src, '  const del = useDelete({', '  const handlers =', 'del', context)
+    const del = handler(src, '  const dropDeleted = useRef(null)', '  const handlers =', 'del', context)
     await del.onDeleted({ ref: A + ':8', seq: 8 })
     t.is(context.eng.counts.get(parent).replies, Math.max(0, count - 1))
     t.is(context.eng.counts.get(parent).likes, 4)
@@ -789,7 +813,7 @@ test('a deletion anywhere drops the reply from every mounted Conversa copy', asy
 
 test('Conversa: reply branch controls are slim text links, not filled pills', (t) => {
   const link = readFileSync(join(__dirname, '../src/ui/BranchLink.js'), 'utf8')
-  const from = src.indexOf('  const renderThreadRow = (row) => {')
+  const from = src.indexOf('  renderRef.current = (row) => {')
   const to = src.indexOf('  const notes = []')
   t.ok(from !== -1 && to > from, 'thread row renderer is present')
   const rowsSrc = src.slice(from, to)
@@ -826,4 +850,250 @@ test('Conversa: reply branch controls are slim text links, not filled pills', (t
   t.absent(/outlineStyle|outlineWidth|webInputReset|backgroundColor|borderWidth|Platform/.test(link), 'focus ring and shared platform behavior stay intact')
   t.absent(/\bhitSlop\s*=/.test(link), 'no hitSlop prop; the comment may name it')
   t.absent(link.includes('\u2014'))
+})
+
+test('a refresh that fails after the clear gives the counts and own likes back', async (t) => {
+  const failed = await loading({ afterReset: true })
+  await failed.load(true)
+  t.is(failed.state.resets, 1)
+  t.is(failed.state.undos, 1, 'the cleared engagement is restored')
+  t.is(failed.context.viewRef.current.error, 'Não foi possível atualizar a conversa.')
+  const ok = await loading()
+  await ok.load(true)
+  t.is(ok.state.undos, undefined, 'a refresh that lands keeps the new engagement')
+  const quiet = await loading({ afterReset: true })
+  await quiet.load(false, true)
+  t.is(quiet.state.resets, 0)
+
+  const stateRef = { current: { liked: new Set(['a:1', 'a:2']), reposted: new Set(['a:1']) } }
+  const countsRef = { current: new Map([['a:1', { likes: 3 }], ['a:2', { likes: 1 }]]) }
+  const touchedRef = { current: new Map() }
+  const counts = { current: countsRef.current }
+  const { emptyState } = await import('../src/engagement.js')
+  let current = stateRef.current
+  const reset = handler(src, '  const reset = useCallback(() => {', '  // engagement.read for', 'reset', {
+    useCallback: (fn) => fn,
+    stateRef,
+    countsRef,
+    clockRef: { current: 0 },
+    touchedRef,
+    pendingRef: { current: new Map() },
+    emptyState,
+    setState: (update) => { current = typeof update === 'function' ? update(current) : update },
+    setCounts: (update) => { counts.current = typeof update === 'function' ? update(counts.current) : update }
+  })
+  const undo = reset()
+  t.is(current.liked.size, 0)
+  t.is(counts.current.size, 0)
+  // Read after the clear, and a like toggled after it.
+  counts.current = new Map([['a:1', { likes: 9 }]])
+  touchedRef.current.set('liked|a:2', 99)
+  undo()
+  t.alike([...current.liked], ['a:1'], 'a field touched since the clear is not brought back')
+  t.alike([...current.reposted], ['a:1'])
+  t.alike(counts.current.get('a:1'), { likes: 9 }, 'a fresher count wins')
+  t.alike(counts.current.get('a:2'), { likes: 1 }, 'the old count of a row still on screen returns')
+})
+
+test('a quiet read after a send reopens pagination only when the index gained a page', async (t) => {
+  const { quietNext } = await import('../src/threadRows.js')
+  t.is(quietNext({ indexNext: 'c1', total: 3, loaded: 3, unavailable: 0 }), null, 'everything is held')
+  t.is(quietNext({ indexNext: 'c1', total: 3, loaded: 2, unavailable: 1 }), null, 'unavailable replies count as held')
+  t.is(quietNext({ indexNext: 'c1', total: 4, loaded: 3, unavailable: 0 }), 'c1', 'a reply beyond the held ones')
+  t.is(quietNext({ indexNext: null, total: 9, loaded: 3, unavailable: 0 }), null)
+  t.is(quietNext({ indexNext: 'c1', total: null, loaded: 3, unavailable: 0 }), null)
+  const grown = await loading({ view: { unavailable: 0 }, fetch: async () => ({ ok: true, value: { parent: null, replies: [], next: 'second-page', repliesTotal: 5 } }) })
+  await grown.load(false, true)
+  t.is(grown.context.viewRef.current.next, 'second-page')
+  const same = await loading({ view: { unavailable: 0 } })
+  await same.load(false, true)
+  t.is(same.context.viewRef.current.next, null, 'the held pages stay exhausted when the total matches')
+})
+
+test('a quiet read cannot cancel a branch page in flight, and only another quiet read supersedes it', async (t) => {
+  const quiet = await loading()
+  const before = quiet.context.genRef.current
+  await quiet.load(false, true)
+  t.is(quiet.context.genRef.current, before, 'branch loads compare with genRef, which a quiet read leaves alone')
+  const gates = []
+  const slow = await loading({ fetch: () => new Promise((resolve) => gates.push(() => resolve({ ok: true, value: { parent: null, replies: [], next: 'second-page', repliesTotal: 9 } }))) })
+  const first = slow.load(false, true)
+  const second = slow.load(false, true)
+  gates[1]()
+  await second
+  gates[0]()
+  await first
+  t.is(slow.state.patches.length, 1, 'the older quiet read commits nothing')
+  const refresh = await loading({ fetch: () => new Promise((resolve) => gates.push(() => resolve({ ok: true, value: { parent: null, replies: [], next: null, repliesTotal: 1 } }))) })
+  const pending = refresh.load(false, true)
+  refresh.context.genRef.current++
+  gates[gates.length - 1]()
+  await pending
+  t.is(refresh.state.patches.length, 0, 'a load or delete that bumps genRef still cancels a quiet read')
+})
+
+test('Conversa decides Apagar with the postActions rule and carries no copy', async (t) => {
+  t.absent(/from '\.\.\/deletion'/.test(src) && /import \{[^}]*\bcanDelete\b[^}]*\} from '\.\.\/deletion'/.test(src), 'no canDelete import')
+  t.absent(/(^|[^\w.])canDelete\(/m.test(src), 'no call to the deletion rule')
+  t.ok(src.includes("import { canDeletePost } from '../postActions'"))
+  const { canDeletePost } = await import('../src/postActions.js')
+  let page = null
+  const here = handler(src.replace('export function canDeleteHere', 'function canDeleteHere'), 'function canDeleteHere', 'export function refOf', 'canDeleteHere', { canDeletePost, actingPageKey: () => page })
+  const mine = { kind: 'post', author: A, seq: 3 }
+  t.is(here(mine, A), true)
+  t.is(here(mine, B), false)
+  t.is(here({ ...mine, author: A.toUpperCase() }, A), true, 'the rule lowercases the author')
+  t.is(here({ ...mine, seq: 0 }, A), false)
+  t.is(here({ ...mine, repostedBy: B }, A), false, 'a repost row never offers Apagar')
+  page = B
+  t.is(here({ kind: 'post', author: B, seq: 2 }, A), true, 'the page acted as owns its posts')
+})
+
+test('Conversa: thread rows offer the quotes list on the same gate as likes and reposts', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Conversa.js'), 'utf8')
+  t.ok(/onOpenQuotes: eng && hasSeq && has\('onOpenQuotes'\) \? \(\) => live\.handlers\.onOpenQuotes\(\{ ref \}\)/.test(src), 'row prop gated on engagement and a seq')
+  t.ok(/const handlers = \{[^}]*onOpenQuotes/.test(src), 'the screen hands its handler to the rows')
+  t.ok(/function ConversaList \(\{[^}]*onOpenQuotes/.test(src), 'the screen receives it from App')
+})
+
+test('the undo of a failed refresh never brings back a like a read since the clear cleared', async (t) => {
+  const src = readFileSync(join(__dirname, '..', 'src', 'screens', 'Conversa.js'), 'utf8')
+  const { emptyState, fromRead } = await import('../src/engagement.js')
+  let current = { liked: new Set(['a:1', 'a:2']), reposted: new Set() }
+  const clockRef = { current: 0 }
+  const touchedRef = { current: new Map() }
+  const context = {
+    useCallback: (fn) => fn,
+    stateRef: { get current () { return current } },
+    countsRef: { current: new Map() },
+    clockRef,
+    touchedRef,
+    touch: (field, ref) => touchedRef.current.set(field + '|' + ref, ++clockRef.current),
+    pendingRef: { current: new Map() },
+    readRefs: { current: new Set() },
+    sourceRef: { current: null },
+    request: null,
+    emptyState,
+    fromRead,
+    chunks: (list, size) => [list.slice(0, size)],
+    ENGAGEMENT_MAX: 62,
+    actingPageKey: () => null,
+    readEngagement: async () => ({ liked: ['a:2'], reposted: [] }),
+    setState: (update) => { current = typeof update === 'function' ? update(current) : update },
+    setCounts: () => {}
+  }
+  const reset = handler(src, '  const reset = useCallback(() => {', '  // engagement.read for', 'reset', context)
+  const readOwn = handler(src, '  const readOwn = useCallback(async', '  // Index counts for', 'readOwn', context)
+  const undo = reset()
+  await readOwn(['a:1'])
+  undo()
+  t.absent(current.liked.has('a:1'), 'a like removed elsewhere and read since stays off')
+  t.ok(current.liked.has('a:2'), 'a ref not read since comes back')
+})
+
+test('Conversa: a deletion made on another screen reaches the Conversas still open below it', (t) => {
+  t.ok(src.includes('const deletionListeners = new Set()'))
+  t.ok(src.includes('function announceDeleted (refs) {\n  for (const listener of deletionListeners) listener(refs)\n}'))
+  t.ok(src.includes('announceDeleted(refs)\n        forgetOwnReplies(refs)'), 'the Conversas below still find the reply in their own copy')
+  t.ok(src.includes('deletionListeners.add(listener)') && src.includes('deletionListeners.delete(listener)'), 'a Conversa listens while mounted')
+  t.ok(src.includes('if (ref !== focalRef.current) dropDeleted.current(ref)'), 'the focal post of an older screen is left to its own flow')
+  t.ok(src.includes('dropDeleted.current(t.ref, true)'), 'the screen that deleted always clears its flags')
+  t.ok(src.includes('if (!force && !held && !quoted && !wasReply'), 'a screen that does not show the post stays as it is')
+})
+
+test('Conversa: an older screen drops a reply deleted above it and lowers the parent count', async (t) => {
+  const own = await localReplies()
+  const parent = A + ':2'
+  const gone = item(8, 2)
+  const kept = item(9, 2)
+  const state = { children: new Map([[parent, [gone, kept]]]), open: new Set([parent]) }
+  const context = {
+    ...own,
+    useDelete: (options) => options,
+    request: () => {},
+    node: {},
+    onToast: () => {},
+    load: () => {},
+    genRef: { current: 1 },
+    onDeletedPost: () => { throw new Error('only the screen that deleted counts it') },
+    revokeDeletedMedia: () => {},
+    focal,
+    peekedRef: { current: new Map() },
+    childrenRef: { current: state.children },
+    ownReplies: { current: new Map() },
+    eng: { counts: new Map([[parent, { replies: 2 }]]) },
+    setCount: (key, value) => context.eng.counts.set(key, value),
+    setChildren: (update) => { state.children = update(state.children) },
+    setOpen: (update) => { state.open = update(state.open) },
+    viewRef: { current: { replies: [], parent: null, meta: null } },
+    commit: () => {},
+    refOf: (author, seq) => author + ':' + seq,
+    useRef: (value) => ({ current: value }),
+    useEffect: (fn) => fn(),
+    deletionListeners: new Set(),
+    focalRef: { current: focal }
+  }
+  handler(src, '  const dropDeleted = useRef(null)', '  const handlers =', 'del', context)
+  const [listener] = [...context.deletionListeners]
+  listener(new Set([A + ':8']))
+  t.is(context.eng.counts.get(parent).replies, 1)
+  t.alike(state.children.get(parent).map((row) => row.seq), [9])
+  listener(new Set([A + ':77']))
+  t.is(context.eng.counts.get(parent).replies, 1, 'a post this screen does not hold changes nothing')
+  listener(new Set([focal]))
+  t.is(context.eng.counts.get(parent).replies, 1, 'the focal post is left alone')
+})
+
+function olderScreen (view, peeked, counts) {
+  const state = { commits: [] }
+  const context = {
+    useDelete: (options) => options,
+    request: () => {},
+    node: {},
+    onToast: () => {},
+    load: () => {},
+    genRef: { current: 1 },
+    onDeletedPost: () => {},
+    revokeDeletedMedia: () => {},
+    focal,
+    peekedRef: { current: peeked },
+    childrenRef: { current: new Map() },
+    ownReplies: { current: new Map() },
+    ownReplyCache: new Map(),
+    ownFor: () => [],
+    eng: { counts },
+    setCount: (key, value) => counts.set(key, value),
+    setChildren: () => {},
+    setOpen: () => {},
+    viewRef: { current: view },
+    commit: (patch) => { state.commits.push(patch) },
+    refOf: (author, seq) => author + ':' + seq,
+    useRef: (value) => ({ current: value }),
+    useEffect: (fn) => fn(),
+    deletionListeners: new Set(),
+    focalRef: { current: focal }
+  }
+  handler(src, '  const dropDeleted = useRef(null)', '  const handlers =', 'del', context)
+  return { state, listener: [...context.deletionListeners][0] }
+}
+
+test('Conversa: an older screen that only quotes the deleted post clears the quote', (t) => {
+  const peeked = new Map([[A, { key: A, entries: [{ seq: 8 }, { seq: 9 }] }]])
+  const { state, listener } = olderScreen({ replies: [], parent: null, meta: null }, peeked, new Map())
+  listener(new Set([A + ':8']))
+  t.alike(peeked.get(A).entries.map((e) => e.seq), [9])
+  t.is(state.commits.length, 1, 'the screen renders again')
+  listener(new Set([A + ':77']))
+  t.is(state.commits.length, 1, 'a post that is neither shown nor quoted changes nothing')
+})
+
+test('Conversa: an older screen lowers the focal count for a reply it only showed', (t) => {
+  const counts = new Map([[focal, { replies: 3, likes: 1 }]])
+  const view = { replies: [item(8), item(9)], parent: null, meta: { repliesTotal: 3 } }
+  const { state, listener } = olderScreen(view, new Map(), counts)
+  listener(new Set([A + ':8']))
+  t.is(counts.get(focal).replies, 2)
+  t.is(counts.get(focal).likes, 1)
+  t.alike(state.commits[0].replies.map((r) => r.seq), [9])
+  t.is(state.commits[0].meta.repliesTotal, 2)
 })

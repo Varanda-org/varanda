@@ -186,7 +186,10 @@ function validBy (by) {
 }
 
 function copyReport (r) {
-  return has(r, 'anexo') ? { ...r, anexo: { ...r.anexo } } : { ...r }
+  const out = { ...r }
+  if (has(r, 'anexo')) out.anexo = { ...r.anexo }
+  if (has(r, 'reopened')) out.reopened = { ...r.reopened }
+  return out
 }
 
 function copyChange (c) {
@@ -210,7 +213,7 @@ function emptyState () {
 }
 
 const ID_RE = /^[A-Za-z0-9_-]{22}$/
-const EVENT_ACTIONS = ['bloquear', 'descartar', 'pedido', 'compensado', 'cancelado', 'ja-bloqueada', 'ja-desbloqueada', 'enviado', 'aplicado', 'exclusao', 'recurso-aceito', 'recurso-negado', 'recurso-encerrado']
+const EVENT_ACTIONS = ['bloquear', 'descartar', 'pedido', 'compensado', 'cancelado', 'ja-bloqueada', 'ja-desbloqueada', 'enviado', 'aplicado', 'exclusao', 'recurso-aceito', 'recurso-negado', 'recurso-encerrado', 'reaberto']
 const EVENT_KEYS = ['at', 'by', 'action', 'member', 'reportId', 'appealId', 'changeId', 'seq']
 const APPEAL_KEYS = ['id', 'at', 'member', 'text', 'nonce', 'signature', 'status', 'decidedBy', 'decidedAt', 'note']
 const REPORT_KEYS_V1 = ['id', 'at', 'kind', 'target', 'seq', 'quote', 'reporter', 'reason', 'text', 'nonce', 'signature', 'status', 'decidedBy', 'decidedAt', 'note']
@@ -225,6 +228,19 @@ const REPORT_KEYS = [...REPORT_KEYS_V2_EARLY, 'blocked']
 const REPORT_KEYS_DM = ['id', 'at', 'kind', 'reporter', 'target', 'reason', 'text', 'quote', 'nonce', 'signature', 'status', 'decidedBy', 'decidedAt', 'note', 'blocked']
 const CHANGE_KEYS = ['id', 'op', 'member', 'by', 'at', 'reportIds', 'claimedAt']
 const ANEXO_KEYS = ['sha256', 'mime', 'size']
+// `reopened`, on a row a person sent back with "Reabrir" (absent otherwise,
+// and never removed): when, and the AI decision it undid (`action`, the
+// former `decidedAt`). It keeps the AI off the row for good, whatever ages
+// out of `events` or of the triage ledger.
+const REOPENED_KEYS = ['at', 'action', 'decidedAt']
+
+function validReopened (o) {
+  return isPlainObject(o) &&
+    exactKeys(o, REOPENED_KEYS) &&
+    isCanonicalIso(o.at) &&
+    DECISIONS.includes(o.action) &&
+    isCanonicalIso(o.decidedAt)
+}
 
 function validAnexo (a) {
   return isPlainObject(a) &&
@@ -268,6 +284,12 @@ function validReportRow (id, row) {
     r = { ...row }
     delete r.anexo
     withAnexo = true
+  }
+  if (has(row, 'reopened')) {
+    // The AI never decides a reopened row again.
+    if (!validReopened(row.reopened) || row.decidedBy === AI_ACTOR) return false
+    if (r === row) r = { ...row }
+    delete r.reopened
   }
   if (r.kind === 'dm') {
     // A media-only message quotes nothing: the anexo is the evidence.
@@ -934,6 +956,9 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
       if (typeof id !== 'string' || !has(state.reports, id) || state.reports[id].status !== 'aberta') {
         throw fail('nao-encontrado')
       }
+      // A report a person reopened is theirs: the AI never decides it again,
+      // whatever the worker thinks (answered as if a person decided first).
+      if (by === AI_ACTOR && (has(state.reports[id], 'reopened') || wasReopened(id))) throw fail('nao-encontrado')
       if (!DECISIONS.includes(decision) || !validBy(by)) throw fail('pedido-invalido')
       if (!boundedText(note, NOTE_MAX, true)) throw fail('pedido-invalido')
       if (!BLOCK_TARGETS.includes(block)) throw fail('pedido-invalido')
@@ -951,10 +976,12 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
         if (r.kind === 'igual') {
           // Already blocked (or about to be): the report still joins the
           // member's last block change while the operator has not pulled it.
+          // A reopened report may already be in it (the AI's own block): a
+          // repeated id would make the file unreadable on the next load.
           const i = lastIndexFor(next.pending, blockKey)
           if (i !== -1 && next.pending[i].op === 'block' && next.pending[i].claimedAt === null) {
             const c = next.pending[i]
-            next.pending[i] = { ...c, reportIds: [...c.reportIds, id] }
+            if (!c.reportIds.includes(id)) next.pending[i] = { ...c, reportIds: [...c.reportIds, id] }
             change = next.pending[i]
           }
         }
@@ -963,6 +990,47 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
       persist(next)
       return { report: copyReport(report), change: change === null ? null : copyChange(change) }
     })
+  }
+
+  // The panel's "Reabrir": a person sends a report the AI decided back to
+  // the open queue. Only the row changes. A block the AI asked for stays
+  // (pending or published) until a person uses Desbloquear or cancels the
+  // change: reopening never unblocks, cancels or publishes anything, and
+  // the AI can never call it. The row's `reopened` marker (never removed)
+  // keeps the AI off the row, with the 'reaberto' event as a second signal
+  // (decide() above, reopenedIds() for the worker). -> { report }.
+  function reopen (id, { by } = {}) {
+    return enqueue(() => {
+      usable()
+      if (!validBy(by) || by === AI_ACTOR || by === OWNER_ACTOR) throw fail('pedido-invalido')
+      if (typeof id !== 'string' || !has(state.reports, id)) throw fail('nao-encontrado')
+      const current = state.reports[id]
+      // Already open: another moderator reopened it first.
+      if (current.status === 'aberta') throw fail('ja-revertido')
+      if (current.decidedBy !== AI_ACTOR) throw fail('sem-permissao')
+      const next = cloneState(state)
+      const reopened = { at: iso(now()), action: current.status, decidedAt: current.decidedAt }
+      const report = { ...current, status: 'aberta', decidedBy: null, decidedAt: null, note: '', blocked: null, reopened }
+      next.reports[id] = report
+      event(next, { by, action: 'reaberto', reportId: id })
+      persist(next)
+      return { report: copyReport(report) }
+    })
+  }
+
+  function wasReopened (id) {
+    return state.events.some((e) => e.action === 'reaberto' && e.reportId === id)
+  }
+
+  // Read-only: the ids of the reports a person reopened: every row with a
+  // `reopened` marker, plus any retained 'reaberto' event (MAX_EVENTS). The
+  // triage worker leaves them to a person.
+  function reopenedIds () {
+    usable()
+    const out = new Set()
+    for (const r of Object.values(state.reports)) if (has(r, 'reopened')) out.add(r.id)
+    for (const e of state.events) if (e.action === 'reaberto') out.add(e.reportId)
+    return [...out]
   }
 
   // The panel's "Desbloquear". The member must be in the published list or
@@ -1219,7 +1287,9 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
   //   (c) a report about the member was decided 'bloquear', yet the member
   //       is neither in the published list nor has a pending block: that
   //       block was decided and later undone. Report rows are kept, so this
-  //       survives the truncation of `events` at MAX_EVENTS.
+  //       survives the truncation of `events` at MAX_EVENTS. A row a person
+  //       reopened from an AI 'bloquear' counts too, whatever it says now:
+  //       the AI blocked its `target` (the AI never blocks a group key).
   //   (d) a retained event records a human unblock request: a 'pedido' that
   //       decide() did not write (decide always writes its 'bloquear' event
   //       right before its 'pedido'; unblock() writes the 'pedido' alone), or
@@ -1256,11 +1326,12 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
     if (pendingBlock || blockedSet(state.published.snapshot).has(member)) return false
     for (const r of Object.values(state.reports)) {
       if (r.status === 'bloquear' && blockedKey(r) === member) return true
+      if (has(r, 'reopened') && r.reopened.action === 'bloquear' && r.target === member) return true
     }
     return false
   }
 
-  return { add, addDm, anexoOf, list, get, addAppeal, listAppeals, getAppeal, blockedBy, decideAppeal, decide, unblock, requestDeletion, cancel, pending, pull, ack, newestModeratorDate, blocked, groupKeys, stats, exportRows, humanReversed }
+  return { add, addDm, anexoOf, list, get, addAppeal, listAppeals, getAppeal, blockedBy, decideAppeal, decide, reopen, reopenedIds, unblock, requestDeletion, cancel, pending, pull, ack, newestModeratorDate, blocked, groupKeys, stats, exportRows, humanReversed }
 }
 
 module.exports = {

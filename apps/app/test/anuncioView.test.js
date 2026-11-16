@@ -32,15 +32,17 @@ test('seller summary shares trust lines and the Brasilia month boundary', async 
     name: displayText(name),
     avatarName: displayText(name),
     lines: [
-      { key: 'memberSince', text: 'Na Varanda desde março de 2026' },
-      { key: 'verifiedName', text: 'Nome verificado: Ana' },
-      { key: 'mutuals', text: 'Seguido por Bia' }
+      { key: 'memberSince', text: 'Na Varanda desde março de 2026' }
     ]
   })
   t.alike(sellerSummary(), { name: 'Quem anunciou', avatarName: '', lines: [] })
   t.alike(sellerSummary({ since: 'bad date', trust: null }), { name: 'Quem anunciou', avatarName: '', lines: [] })
   const { trustLines } = await import('../src/feira.js')
-  t.alike(sellerSummary({ trust }).lines, trustLines(trust))
+  t.alike(sellerSummary({ trust }).lines, [], 'trust extras never show')
+  t.alike(sellerSummary({ since: trust.certDate }).lines, trustLines(trust))
+  t.alike(sellerSummary({ name, since: trust.certDate, page: true }).lines, [], 'a Page listing has no member-since line')
+  t.ok(read('screens/Anuncio.js').includes('page: listing.page === true })'), 'the screen passes the Page flag')
+  t.ok(read('screens/Anuncio.js').includes('As avaliações deste anúncio são apagadas com ele'), 'delete prompt says ratings go too')
 })
 
 test('seller avatar keeps the real name separate from its visible fallback', async (t) => {
@@ -151,4 +153,11 @@ test('only the running contact action is busy while all bar actions stay disable
 test('description heading and body share the nonempty text guard', (t) => {
   const src = read('screens/Anuncio.js')
   t.ok(/\{listing.text\s+\? \(\s+<>\s+<Text style=\{styles.section\}>Descrição<\/Text>\s+<Text style=\{styles.text\}>\{listing.text\}<\/Text>\s+<\/>\s+\)\s+: null\}/.test(src), 'empty descriptions render neither heading nor body')
+})
+
+test('the seller line falls back to the verified listing certDate', async (t) => {
+  const src = read('screens/Anuncio.js')
+  t.ok(src.includes('since: trust?.certDate || listing.certDate'), 'Anuncio reads the peek certDate when no trust is passed')
+  const { sellerSummary } = await load()
+  t.alike(sellerSummary({ name: 'Ana', since: '2025-03-04T05:06:07.000Z' }).lines, [{ key: 'memberSince', text: 'Na Varanda desde março de 2025' }])
 })
