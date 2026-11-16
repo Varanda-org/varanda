@@ -1,5 +1,7 @@
 # Build context of the seeder image (deploy/seeder/Dockerfile): only what the
-# CLI needs at run time, plus the LICENSE that ships with it.
+# CLI needs at run time, plus the LICENSE that ships with it and the deploy
+# bundle (/app/deploy/seeder), so a server runs a release without a checkout.
+# Only these deploy files: never .env, www or anything else under deploy/.
 *
 !package.json
 !package-lock.json
@@ -7,6 +9,20 @@
 !packages/core
 !packages/rpc
 !apps/cli
+!deploy/seeder/compose.yaml
+!deploy/seeder/compose.web.yaml
+!deploy/seeder/compose.release.yaml
+!deploy/seeder/compose.release.web.yaml
+!deploy/seeder/Caddyfile
+!deploy/seeder/update.sh
+!deploy/seeder/update.conf.example
+!deploy/seeder/well-known.sh
+!deploy/seeder/varanda-update.service
+!deploy/seeder/varanda-update.timer
+!deploy/seeder/cosign.ref
+!deploy/seeder/.env.example
+!deploy/seeder/secrets.sealed.json
+!deploy/seeder/secrets-signers.txt
 **/node_modules
 **/test
 apps/cli/data

@@ -26,7 +26,7 @@ function makeGroupHeader (opts) {
 }
 const {
   startSeedWs, socketCap, MAX_SOCKETS, MAX_PAYLOAD, MEDIA_MAX_BLOCKS, MEDIA_MAX_IN_FLIGHT, MEDIA_RATE, MEDIA_BURST,
-  INDEX_POST_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_TOPIC_RE, INDEX_ENGAGERS_RE, INDEX_GROUP_RE, INDEX_GROUPS_RE, INDEX_GROUP_SEARCH_RE, INDEX_COMMUNITY_RE, INDEX_COMMUNITY_GROUPS_RE, INDEX_FOLLOW_COUNTS_RE, INDEX_FOLLOWS_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY, GROUP_POST_RE,
+  INDEX_POST_RE, INDEX_RODA_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_TOPIC_RE, INDEX_ENGAGERS_RE, INDEX_GROUP_RE, INDEX_GROUPS_RE, INDEX_GROUP_SEARCH_RE, INDEX_COMMUNITY_RE, INDEX_COMMUNITY_GROUPS_RE, INDEX_FOLLOW_COUNTS_RE, INDEX_FOLLOWS_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY, GROUP_POST_RE,
   INDEX_FEIRA_RE, INDEX_FEIRA_AUTHOR_RE, INDEX_FEIRA_RATINGS_RE, FEIRA_PAGE_RE, FEIRA_FOTO_RE, FEIRA_CAPA_RE, FEIRA_SITEMAP_RE, LISTING_MOD_RE, FEIRA_LISTING_RE
 } = require('../lib/seed-ws')
 
@@ -2980,6 +2980,245 @@ test('GET /feira-listing: its own budget, so a flood never makes /moderation-pos
   t.ok(flood.some((r) => r.status === 503), 'the default Feira budget runs out')
   const mod = await groupPostRequest(defaults.port, '/moderation-post/' + FA + '/1')
   t.is(mod.status, 404, 'the moderation route still answers, never 503')
+})
+
+// --- /index/roda --------------------------------------------------------------
+
+function rodaOf (ref) {
+  return {
+    ref,
+    root: B + ':1',
+    top: B + ':2',
+    items: [{ ref: A + ':13', to: B + ':2' }, { ref, to: A + ':13' }],
+    next: null,
+    total: 2,
+    authors: { [A]: { profileSeq: 1, usernameSeq: null }, [B]: { profileSeq: null, usernameSeq: 3 } },
+    indexing: false,
+    complete: true
+  }
+}
+
+function rodaSeeder (answer = null) {
+  const seeder = indexSeeder()
+  seeder.indexRoda = async (author, seq, cursor) => {
+    seeder.calls.push(['indexRoda', author, seq, cursor])
+    if (answer !== null) return answer()
+    return author === A ? rodaOf(author + ':' + seq) : null
+  }
+  return seeder
+}
+
+test('startSeedWs /index/roda: the regex is INDEX_POST_RE with roda in place of post', (t) => {
+  t.is(INDEX_RODA_RE.source, INDEX_POST_RE.source.replace('\\/post\\/', '\\/roda\\/'))
+  t.is(INDEX_RODA_RE.flags, INDEX_POST_RE.flags)
+  t.ok(INDEX_RODA_RE.test('/index/roda/' + A + '/12'))
+  t.ok(INDEX_RODA_RE.test('/index/roda/' + A + '/12/' + CURSOR))
+  t.absent(INDEX_RODA_RE.test('/index/post/' + A + '/12'))
+  t.absent(INDEX_POST_RE.test('/index/roda/' + A + '/12'))
+})
+
+test('startSeedWs /index/roda: GET answers JSON with the parsed arguments, HEAD sends the headers only, /index/post unchanged', async (t) => {
+  t.timeout(20000)
+  const seeder = rodaSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+
+  const roda = await mediaRequest(server.port, '/index/roda/' + A + '/12')
+  t.is(roda.status, 200)
+  jsonHeaders(t, roda)
+  t.is(roda.headers['content-length'], String(roda.body.byteLength))
+  t.is(roda.body.toString(), JSON.stringify(rodaOf(A + ':12')) + '\n')
+  t.alike(seeder.calls[0], ['indexRoda', A, 12, null], 'no cursor -> null')
+
+  const paged = await mediaRequest(server.port, '/index/roda/' + A + '/12/' + CURSOR)
+  t.is(paged.status, 200)
+  t.alike(seeder.calls[1], ['indexRoda', A, 12, CURSOR], 'the cursor is passed as a string')
+
+  const maxSeq = await mediaRequest(server.port, '/index/roda/' + A + '/' + '9'.repeat(15))
+  t.is(maxSeq.status, 200)
+  t.is(seeder.calls[2][2], 999999999999999, '15 digits stay an exact safe integer')
+
+  const head = await mediaRequest(server.port, '/index/roda/' + A + '/12', { method: 'HEAD' })
+  t.is(head.status, 200)
+  jsonHeaders(t, head)
+  t.is(head.headers['content-length'], roda.headers['content-length'], 'HEAD announces the GET length')
+  t.is(head.body.byteLength, 0, 'HEAD has no body')
+  t.alike(seeder.calls[3], ['indexRoda', A, 12, null])
+
+  t.is((await mediaRequest(server.port, '/index/roda/' + B + '/12')).status, 404, 'null -> 404')
+  t.alike(seeder.calls[4], ['indexRoda', B, 12, null])
+
+  const post = await mediaRequest(server.port, '/index/post/' + A + '/12')
+  t.is(post.status, 200)
+  t.is(post.body.toString(), JSON.stringify(pageOf(A + ':12')) + '\n', '/index/post answers byte for byte as before')
+  t.alike(seeder.calls[5], ['indexPost', A, 12, null], '/index/post still reaches indexPost')
+  t.is(seeder.calls.length, 6)
+})
+
+test('startSeedWs /index/roda: malformed, encoded, uppercase or query paths never reach the seeder and are the same 404', async (t) => {
+  t.timeout(20000)
+  const seeder = rodaSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const bad = [
+    '/index/roda',
+    '/index/roda/',
+    '/index/roda/' + A,
+    '/index/roda/' + A + '/',
+    '/index/roda/' + A + '/12/',
+    '/index/roda/' + A.toUpperCase() + '/12',
+    '/index/Roda/' + A + '/12',
+    '/index/rodas/' + A + '/12',
+    '/index/roda/' + A.slice(1) + '/12',
+    '/index/roda/' + A + 'c/12',
+    '/index/roda/' + A + '/0',
+    '/index/roda/' + A + '/01',
+    '/index/roda/' + A + '/-1',
+    '/index/roda/' + A + '/' + '9'.repeat(16),
+    '/index/roda/' + A + '/12?x=1',
+    '/index/roda/' + A + '/12?',
+    '/index/roda/' + A + '/12/' + CURSOR + '?x=1',
+    '/index/roda/' + A + '/%31',
+    '/index/roda/' + A + '%2F12',
+    '/index/%72oda/' + A + '/12',
+    '/index/roda/' + A + '/12/' + CURSOR + '/',
+    '/index/roda/' + A + '/12/' + CURSOR + '/x',
+    '/index/roda/' + A + '/12/1700000000000.' + B,
+    '/index/roda/' + A + '/12/1700000000000.' + B.toUpperCase() + '.7',
+    '/index/roda/' + A + '/12/1700000000000.' + B + '.0',
+    '/index/roda/' + A + '/12/1700000000000.' + B + '.07',
+    '/index/roda/' + A + '/12/' + '1'.repeat(17) + '.' + B + '.7',
+    '/index/roda/' + A + '/12/x.' + B + '.7'
+  ]
+  for (const url of bad) {
+    const got = await mediaRequest(server.port, url)
+    t.is(got.status, 404, url.slice(0, 40) + '... -> 404')
+    t.is(got.body.toString(), 'não encontrado\n')
+    t.is(got.headers['cache-control'], 'no-store')
+    t.absent(got.body.toString().includes(A.slice(0, 8)), 'no key is echoed')
+  }
+  t.is(seeder.calls.length, 0, 'malformed paths never reach the seeder')
+})
+
+test('startSeedWs /index/roda: Host is checked first (421), other methods are 405 with Allow', async (t) => {
+  t.timeout(20000)
+  const seeder = rodaSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/roda/' + A + '/12'
+  t.is((await mediaRequest(server.port, url, { host: 'evil.example:' + server.port })).status, 421)
+  t.is((await mediaRequest(server.port, url, { method: 'POST', host: 'evil.example:' + server.port })).status, 421)
+  for (const method of ['POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH']) {
+    const got = await mediaRequest(server.port, url, { method })
+    t.is(got.status, 405, method + ' -> 405')
+    t.is(got.headers.allow, 'GET, HEAD')
+  }
+  t.is(seeder.calls.length, 0, 'refused requests never reach the seeder')
+})
+
+test('startSeedWs /index/roda: shares the /index token bucket with the other routes', async (t) => {
+  t.timeout(20000)
+  const seeder = rodaSeeder()
+  const server = await startSeedWs({ port: 0, seeder, index: { rate: 0.001, burst: 2 } })
+  t.teardown(() => server.close(), { force: true })
+  t.is((await mediaRequest(server.port, '/index/post/' + A + '/1')).status, 200)
+  t.is((await mediaRequest(server.port, '/index/roda/' + A + '/1')).status, 200)
+  const over = await mediaRequest(server.port, '/index/roda/' + A + '/1')
+  t.is(over.status, 503, 'the bucket is shared')
+  t.is(over.headers['retry-after'], '1')
+  t.is(seeder.calls.length, 2, 'a refused request never reaches the seeder')
+})
+
+test('startSeedWs /index/roda: an answer off the exact shape is the generic 404, nothing echoed', async (t) => {
+  t.timeout(30000)
+  let answer = null
+  const seeder = rodaSeeder(() => answer)
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/roda/' + A + '/12'
+  const good = () => rodaOf(A + ':12')
+  const row = (i) => ({ ref: A + ':' + (i + 1), to: B + ':2' })
+  const cases = [
+    ['an extra key', { ...good(), secret: 'x' }],
+    ['the post answer\'s parent key', { ...good(), parent: null }],
+    ['a missing key', (() => { const o = good(); delete o.total; return o })()],
+    ['an extra item key', { ...good(), items: [{ ref: A + ':13', to: B + ':2', secret: 'x' }] }],
+    ['an item without to', { ...good(), items: [{ ref: A + ':13' }] }],
+    ['51 items', { ...good(), items: Array.from({ length: 51 }, (_, i) => row(i)) }],
+    ['items not an array', { ...good(), items: { 0: row(0) } }],
+    ['an item ref with a leading zero', { ...good(), items: [{ ref: A + ':013', to: B + ':2' }] }],
+    ['an item ref with uppercase hex', { ...good(), items: [{ ref: A.toUpperCase() + ':13', to: B + ':2' }] }],
+    ['an item to that is not a string', { ...good(), items: [{ ref: A + ':13', to: 2 }] }],
+    ['an item that is an array', { ...good(), items: [[A + ':13', B + ':2']] }],
+    ['an item with a class prototype', { ...good(), items: [Object.assign(Object.create({ x: 1 }), row(0))] }],
+    ['a null root', { ...good(), root: null }],
+    ['a top with seq 0', { ...good(), top: B + ':0' }],
+    ['a ref that is a number', { ...good(), ref: 12 }],
+    ['a next that names another row', { ...good(), next: '1700000000000.' + B + '.7' }],
+    ['a next with no rows', { ...good(), items: [], next: '1700000000000.' + A + '.12' }],
+    ['a malformed next', { ...good(), next: 'x.' + A + '.12' }],
+    ['a next that is an object', { ...good(), next: { atMs: 1, author: A, seq: 12 } }],
+    ['a negative total', { ...good(), total: -1 }],
+    ['a fractional total', { ...good(), total: 1.5 }],
+    ['a string total', { ...good(), total: '2' }],
+    ['an unsafe total', { ...good(), total: 2 ** 53 }],
+    ['an authors array', { ...good(), authors: [] }],
+    ['an uppercase author key', { ...good(), authors: { [A.toUpperCase()]: { profileSeq: 1, usernameSeq: null } } }],
+    ['an author key that is not a key', { ...good(), authors: { secret: { profileSeq: 1, usernameSeq: null } } }],
+    ['an extra hint key', { ...good(), authors: { [A]: { profileSeq: 1, usernameSeq: null, secret: 'x' } } }],
+    ['a missing hint key', { ...good(), authors: { [A]: { profileSeq: 1 } } }],
+    ['a hint of 0', { ...good(), authors: { [A]: { profileSeq: 0, usernameSeq: null } } }],
+    ['a string hint', { ...good(), authors: { [A]: { profileSeq: '1', usernameSeq: null } } }],
+    ['54 author hints', { ...good(), authors: Object.fromEntries(Array.from({ length: 54 }, (_, i) => [i.toString(16).padStart(64, '0'), { profileSeq: 1, usernameSeq: null }])) }],
+    ['a non-boolean indexing', { ...good(), indexing: 0 }],
+    ['a non-boolean complete', { ...good(), complete: 'true' }]
+  ]
+  for (const [label, value] of cases) {
+    answer = value
+    const got = await mediaRequest(server.port, url)
+    t.is(got.status, 404, label + ' -> 404')
+    t.is(got.body.toString(), 'não encontrado\n')
+  }
+  answer = good()
+  t.is((await mediaRequest(server.port, url)).status, 200, 'the exact shape still answers')
+  answer = { ...good(), items: [{ ref: A + ':12', to: B + ':2' }], next: '1700000000000.' + A + '.12' }
+  const next = await mediaRequest(server.port, url)
+  t.is(next.status, 200, 'a next naming the last row answers')
+  t.is(JSON.parse(next.body.toString()).next, '1700000000000.' + A + '.12')
+  answer = Object.assign(Object.create(null), good())
+  t.is((await mediaRequest(server.port, url)).status, 200, 'a null-prototype answer is plain data')
+})
+
+test('startSeedWs /index/roda: the worst-case answer stays within 64 KiB', async (t) => {
+  t.timeout(20000)
+  const hex = (i) => i.toString(16).padStart(64, '0')
+  const seq = '9'.repeat(15)
+  const big = Number(seq)
+  // 50 rows with 15-digit seqs, each by its own author replying to another
+  // new author, and hints for those 50 plus the asked post, root and top,
+  // shaped as engagement-index hints() builds them.
+  const items = Array.from({ length: 50 }, (_, i) => ({ ref: hex(i) + ':' + seq, to: hex(i + 100) + ':' + seq }))
+  const authors = {}
+  for (let i = 0; i < 53; i++) authors[hex(i)] = { profileSeq: big, usernameSeq: big }
+  const worst = {
+    ref: hex(50) + ':' + seq,
+    root: hex(51) + ':' + seq,
+    top: hex(52) + ':' + seq,
+    items,
+    next: '9'.repeat(16) + '.' + hex(49) + '.' + seq,
+    total: Number.MAX_SAFE_INTEGER,
+    authors,
+    indexing: true,
+    complete: false
+  }
+  const seeder = rodaSeeder(() => worst)
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const got = await mediaRequest(server.port, '/index/roda/' + A + '/' + seq)
+  t.is(got.status, 200)
+  t.ok(got.body.byteLength <= INDEX_MAX_BODY, 'worst case is ' + got.body.byteLength + ' bytes <= ' + INDEX_MAX_BODY)
+  t.comment('roda worst case: ' + got.body.byteLength + ' bytes')
+  t.alike(JSON.parse(got.body.toString()), worst)
 })
 
 // /index/scraps/<owner>[/<cursor>] and /index/follow/<author>/<target>:

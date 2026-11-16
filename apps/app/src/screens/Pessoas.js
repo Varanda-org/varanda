@@ -492,6 +492,7 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
       {top}
       <OfflineNote />
       <RefreshableList
+        perfId='pessoas'
         data={shownRows}
         extraData={[personOf, follows, pendingKey, changing]}
         keyExtractor={(row) => row.key}

@@ -5,7 +5,8 @@
 // who follow someone), keyed by a lowercase hex64 key (the key of the person whose
 // list it is, own or another member's), 'curtidas' (who liked or reposted a
 // post, keyed by the post ref, params { kind } with kind 'likes' or
-// 'reposts'), 'grupo' (a group), 'comunidade' (a community) and
+// 'reposts'), 'citacoes' (the posts that quote a post, keyed by the post ref,
+// no params), 'grupo' (a group), 'comunidade' (a community) and
 // 'comunidade-info' (its information page), all keyed by the lowercase
 // hex64 root key. 'conversa' stays the post thread.
 // 'paginas' (the member's pages) and 'novapagina' (create one) take no key;
@@ -35,7 +36,7 @@
 // MAX_DEPTH the oldest entry is dropped.
 
 export const MAX_DEPTH = 20
-export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos', 'salvos', 'assunto', 'recados', 'fas', 'melhores-amigos'])
+export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'citacoes', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos', 'salvos', 'assunto', 'recados', 'fas', 'melhores-amigos'])
 
 const HEX32 = /^[0-9a-f]{32}$/
 const HEX64 = /^[0-9a-f]{64}$/
@@ -76,6 +77,7 @@ export function validEntry (entry) {
   if (entry.screen === 'membro' || entry.screen === 'mensagem' || entry.screen === 'grupo' || entry.screen === 'comunidade' || entry.screen === 'comunidade-info') return isAuthorKey(entry.key)
   if (entry.screen === 'seguindo' || entry.screen === 'seguidores' || entry.screen === 'paginaajustes' || entry.screen === 'anuncios' || entry.screen === 'depoimentos' || entry.screen === 'momentos' || entry.screen === 'recados' || entry.screen === 'fas') return isAuthorKey(entry.key)
   if (entry.screen === 'paginas' || entry.screen === 'novapagina' || entry.screen === 'comunidades' || entry.screen === 'pedidos' || entry.screen === 'salvos' || entry.screen === 'melhores-amigos') return entry.key === undefined || entry.key === null || entry.key === ''
+  if (entry.screen === 'citacoes') return isRef(entry.key)
   if (entry.screen === 'assunto') return typeof entry.key === 'string' && TAG.test(entry.key)
   if (entry.screen === 'curtidas') {
     const params = entry.params

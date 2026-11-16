@@ -12,7 +12,7 @@
 //
 // Props: listing (a verified ../feiraClient row) or author + seq to load it
 // through the author route; me (own key); actingPage (page key or null);
-// trust ({ certDate, verifiedName, mutuals }); name; onBack;
+// trust ({ certDate }); name; onBack;
 // onConversar({ peer, draft, card }); onDenunciar(target); onOpenAuthor(key);
 // onDeleted(listing); onEditar(listing); onAvaliar(listing);
 // onOffer(listing); onOpenListings(author).
@@ -218,7 +218,7 @@ export default function Anuncio ({
   const acts = detailActions(listing, { owner, online })
   const url = shareUrlOf(origin, listing.author, listing.seq)
   const badge = statusBadge(listing)
-  const seller = sellerSummary({ name: name || listing.name, since: trust?.certDate, trust })
+  const seller = sellerSummary({ name: name || listing.name, since: trust?.certDate || listing.certDate, page: listing.page === true })
   const sellerLines = listing.username
     ? [{ key: 'username', text: '@' + displayText(listing.username) }, ...seller.lines]
     : seller.lines
@@ -372,6 +372,7 @@ export default function Anuncio ({
                 {acts.apagar
                   ? <Pill label={confirmDelete ? 'Confirmar: apagar' : 'Apagar'} danger disabled={action.pending} onPress={apagar} />
                   : null}
+                {confirmDelete ? <Soft>As avaliações deste anúncio são apagadas com ele e não passam para um anúncio novo.</Soft> : null}
               </View>
               )
             : null}

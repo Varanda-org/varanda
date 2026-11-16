@@ -21,13 +21,35 @@
 // A fold is invisible to pages until commit() publishes it, so a half-scanned
 // diary never shows a follow its later unfollow would cancel.
 //
-// Member predicate: a follow of a key that isMember says is not a member is
-// nobody's notice, yet it would take index capacity. Each author may store at
-// most MAX_NONMEMBER_TARGETS_PER_AUTHOR such targets; further ones are
-// skipped WITHOUT marking the author truncated, so a handful of diaries
-// following random keys can neither exhaust maxEdges for everyone nor make
-// every page incomplete forever.
+// Share of the global quota: maxPerAuthor (4096) is 1/64 of maxEdges
+// (262144), so one author holds at most 1/64 of the index. Past its first
+// lightTargets (256) entries an author is heavy, and a heavy author takes a
+// new target only while more than maxEdges / NOTICES_RESERVE_DIVISOR (1/4)
+// of the index is free. Heavy authors together therefore fill at most 3/4
+// of it; the last quarter only takes each author's first 256 targets, so a
+// group of diaries following thousands of members cannot leave an ordinary
+// member's follows out. A refusal at either rule is a truncation like the
+// caps above.
 //
+// Fail closed while pending: markPending unpublishes the author's edges
+// until its next commit. A diary that grew past what the seeder holds may
+// hide an unfollow behind a block it withholds; its last committed follow
+// must not keep a stale "começou a seguir você" alive meanwhile.
+//
+// Incomplete per target: a page (or a followers list) of target T is
+// incomplete when a pending author has never committed since its last
+// removeAuthor (nothing is known of whom it follows, so it counts for every
+// target), when a pending author that committed before has a fold entry for
+// T (on or off, committed or folded so far in the current scan), or when an
+// author lost a follow of T at a cap. So a diary stopped mid-download on
+// its first scan (a fresh serve, a restart) keeps every page incomplete, as
+// before; one stopped on a later scan (it grew past the blocks the seeder
+// holds, the common case for an active diary) marks only the targets it is
+// known to touch, whose edges it unpublished. A follow of T in blocks such
+// a diary has not reached yet arrives late, never as a false notice. Each
+// truncated author remembers at most MAX_CUT_TARGETS_PER_AUTHOR
+// targets it lost a follow of; one that loses more marks every page
+// incomplete until removeAuthor, as before this rule.
 // Public follows: by owner decision, follower counts and lists are public.
 // followsPage and followCounts serve who follows an account and whom it
 // follows, from committed state only. The proof-gated notices channel
@@ -45,6 +67,9 @@ const NOTICES_LIMIT_MAX = 64
 const MAX_FOLLOW_TARGETS_PER_AUTHOR = 4096
 const NOTICES_MAX_EDGES = 262144
 const MAX_NONMEMBER_TARGETS_PER_AUTHOR = 64
+const NOTICES_LIGHT_TARGETS = 256
+const NOTICES_RESERVE_DIVISOR = 4
+const MAX_CUT_TARGETS_PER_AUTHOR = 64
 const MAX_NOTICES_MESSAGE = 16384
 const NOTICES_PROTOCOL = 'varanda/notices/1'
 const NOTICE_PROOF_PREFIX = 'varanda-notices-v1\n'
@@ -98,10 +123,12 @@ function readCursor (after) {
   }
 }
 
-function createNoticeIndex ({ maxPerAuthor = MAX_FOLLOW_TARGETS_PER_AUTHOR, maxEdges = NOTICES_MAX_EDGES, isMember = () => true } = {}) {
+function createNoticeIndex ({ maxPerAuthor = MAX_FOLLOW_TARGETS_PER_AUTHOR, maxEdges = NOTICES_MAX_EDGES, lightTargets = Math.min(NOTICES_LIGHT_TARGETS, maxPerAuthor), isMember = () => true } = {}) {
   if (!Number.isSafeInteger(maxPerAuthor) || maxPerAuthor < 0) throw new TypeError('invalid maxPerAuthor')
   if (!Number.isSafeInteger(maxEdges) || maxEdges < 0) throw new TypeError('invalid maxEdges')
+  if (!Number.isSafeInteger(lightTargets) || lightTargets < 0) throw new TypeError('invalid lightTargets')
   if (typeof isMember !== 'function') throw new TypeError('invalid isMember')
+  const reserve = Math.floor(maxEdges / NOTICES_RESERVE_DIVISOR)
 
   // author -> Map target -> { seq, at, on }: the fold being built.
   const folds = new Map()
@@ -116,6 +143,8 @@ function createNoticeIndex ({ maxPerAuthor = MAX_FOLLOW_TARGETS_PER_AUTHOR, maxE
   // author -> Set of targets it has published edges to (for replacement).
   const publishedBy = new Map()
   const pending = new Set()
+  // Authors committed at least once since their last removeAuthor.
+  const committed = new Set()
   const truncated = new Set()
   // author -> number of non-member targets stored in its fold.
   const nonMembers = new Map()
@@ -123,6 +152,12 @@ function createNoticeIndex ({ maxPerAuthor = MAX_FOLLOW_TARGETS_PER_AUTHOR, maxE
   // set as of each author's last commit (what followsPage reads).
   const foldCapped = new Set()
   const capped = new Set()
+  // author -> Set of targets it lost an on: true follow of at a cap, at most
+  // MAX_CUT_TARGETS_PER_AUTHOR; target -> Set of those authors; authors that
+  // lost more (every page is incomplete while one is indexed).
+  const cutBy = new Map()
+  const cutOf = new Map()
+  const cutWide = new Set()
   // Exact number of fold entries over all authors (private: never returned).
   let edges = 0
 
@@ -131,6 +166,7 @@ function createNoticeIndex ({ maxPerAuthor = MAX_FOLLOW_TARGETS_PER_AUTHOR, maxE
   function markPending (authorHex) {
     if (!isHex64(authorHex)) return
     pending.add(authorHex)
+    unpublish(authorHex)
   }
 
   function foldFollow (authorHex, seq, record) {
@@ -174,8 +210,10 @@ function createNoticeIndex ({ maxPerAuthor = MAX_FOLLOW_TARGETS_PER_AUTHOR, maxE
     }
     // Bounded during the scan, not only after it: a new target is refused
     // once either cap is reached, and the author's notices are incomplete.
-    if ((fold ? fold.size : 0) >= maxPerAuthor || edges >= maxEdges) {
+    const size = fold ? fold.size : 0
+    if (size >= maxPerAuthor || edges >= maxEdges || (size >= lightTargets && maxEdges - edges <= reserve)) {
       truncated.add(authorHex)
+      if (on === true) noteCut(authorHex, target)
       return
     }
     if (!member) nonMembers.set(authorHex, outsiders + 1)
@@ -185,6 +223,39 @@ function createNoticeIndex ({ maxPerAuthor = MAX_FOLLOW_TARGETS_PER_AUTHOR, maxE
     }
     fold.set(target, { seq, at, on })
     edges++
+    // The fold now holds this target's latest record: no longer a loss.
+    dropCut(authorHex, target)
+  }
+
+  function noteCut (authorHex, target) {
+    if (cutWide.has(authorHex)) return
+    let targets = cutBy.get(authorHex)
+    if (targets && targets.has(target)) return
+    if (targets && targets.size >= MAX_CUT_TARGETS_PER_AUTHOR) {
+      cutWide.add(authorHex)
+      return
+    }
+    if (!targets) {
+      targets = new Set()
+      cutBy.set(authorHex, targets)
+    }
+    targets.add(target)
+    let authors = cutOf.get(target)
+    if (!authors) {
+      authors = new Set()
+      cutOf.set(target, authors)
+    }
+    authors.add(authorHex)
+  }
+
+  function dropCut (authorHex, target) {
+    const targets = cutBy.get(authorHex)
+    if (!targets || !targets.delete(target)) return
+    if (targets.size === 0) cutBy.delete(authorHex)
+    const authors = cutOf.get(target)
+    if (!authors) return
+    authors.delete(authorHex)
+    if (authors.size === 0) cutOf.delete(target)
   }
 
   function unpublish (authorHex) {
@@ -220,6 +291,7 @@ function createNoticeIndex ({ maxPerAuthor = MAX_FOLLOW_TARGETS_PER_AUTHOR, maxE
     if (foldCapped.has(authorHex)) capped.add(authorHex)
     else capped.delete(authorHex)
     pending.delete(authorHex)
+    committed.add(authorHex)
   }
 
   function removeAuthor (authorHex) {
@@ -235,12 +307,29 @@ function createNoticeIndex ({ maxPerAuthor = MAX_FOLLOW_TARGETS_PER_AUTHOR, maxE
     foldCapped.delete(authorHex)
     capped.delete(authorHex)
     pending.delete(authorHex)
+    committed.delete(authorHex)
     truncated.delete(authorHex)
+    for (const target of [...(cutBy.get(authorHex) || [])]) dropCut(authorHex, target)
+    cutWide.delete(authorHex)
+  }
+
+  // Whether target's followers may be missing a row (see the header): a
+  // pending author never committed, a pending author whose fold touches it,
+  // or a follow of it lost at a cap. O(pending authors), bounded by the
+  // seeder's served-diary limit.
+  function targetIncomplete (target) {
+    if (cutWide.size > 0 || cutOf.has(target)) return true
+    for (const author of pending) {
+      if (!committed.has(author)) return true
+      const fold = folds.get(author)
+      if (fold && fold.has(target)) return true
+    }
+    return false
   }
 
   // -> { items: [{ key, seq, at }], next: null | { at, key }, incomplete }.
   function page ({ target, isBlocked, after = null, limit } = {}) {
-    const incomplete = truncated.size > 0 || pending.size > 0
+    const incomplete = isHex64(target) && targetIncomplete(target)
     const n = clampLimit(limit)
     const followers = isHex64(target) ? published.get(target) : undefined
     if (!followers) return { items: [], next: null, incomplete }
@@ -272,7 +361,7 @@ function createNoticeIndex ({ maxPerAuthor = MAX_FOLLOW_TARGETS_PER_AUTHOR, maxE
   // target in no particular order. The v2 merge needs the whole set at once
   // because its cursor carries three keys, which compareRows cannot order.
   function rowsFor (target, isBlocked) {
-    const incomplete = truncated.size > 0 || pending.size > 0
+    const incomplete = isHex64(target) && targetIncomplete(target)
     const rows = []
     const followers = isHex64(target) ? published.get(target) : undefined
     if (!followers) return { rows, incomplete }
@@ -283,11 +372,11 @@ function createNoticeIndex ({ maxPerAuthor = MAX_FOLLOW_TARGETS_PER_AUTHOR, maxE
     return { rows, incomplete }
   }
 
-  // Any diary still being scanned may add a follower. The global truncated
-  // set is not used: commit never clears it, so every list would stay
-  // incomplete forever.
-  function followersIncomplete () {
-    return pending.size > 0
+  // Per target, as page(): truncated is not read directly, because commit
+  // never clears it and every list would stay incomplete forever; the
+  // follows it lost are in cutOf (or cutWide).
+  function followersIncomplete (author) {
+    return targetIncomplete(author)
   }
 
   function followingIncomplete (author) {
@@ -318,7 +407,7 @@ function createNoticeIndex ({ maxPerAuthor = MAX_FOLLOW_TARGETS_PER_AUTHOR, maxE
   function followsPage ({ author, kind, after = null, limit, visible, now } = {}) {
     let incomplete = false
     if (isHex64(author)) {
-      if (kind === 'seguidores') incomplete = followersIncomplete()
+      if (kind === 'seguidores') incomplete = followersIncomplete(author)
       else if (kind === 'seguindo') incomplete = followingIncomplete(author)
     }
     const empty = { items: [], next: null, total: 0, incomplete }
@@ -382,7 +471,7 @@ function createNoticeIndex ({ maxPerAuthor = MAX_FOLLOW_TARGETS_PER_AUTHOR, maxE
     let seguidores = 0
     for (const row of followRows(author, 'seguindo')) if (keep(row.key, author, visible)) seguindo++
     for (const row of followRows(author, 'seguidores')) if (keep(row.key, author, visible)) seguidores++
-    return { seguindo, seguidores, incomplete: followersIncomplete() || followingIncomplete(author) }
+    return { seguindo, seguidores, incomplete: followersIncomplete(author) || followingIncomplete(author) }
   }
 }
 
@@ -498,6 +587,9 @@ module.exports = {
   MAX_FOLLOW_TARGETS_PER_AUTHOR,
   NOTICES_MAX_EDGES,
   MAX_NONMEMBER_TARGETS_PER_AUTHOR,
+  NOTICES_LIGHT_TARGETS,
+  NOTICES_RESERVE_DIVISOR,
+  MAX_CUT_TARGETS_PER_AUTHOR,
   MAX_NOTICES_MESSAGE,
   NOTICES_PROTOCOL,
   NOTICE_PROOF_PREFIX,

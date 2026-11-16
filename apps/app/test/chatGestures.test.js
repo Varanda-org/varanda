@@ -591,6 +591,14 @@ test('JumpToEnd is a 36 pt button with a 44 pt target, a dot, the count as hint 
   t.ok(src.includes('useReduceMotion'))
 })
 
+test('JumpToEnd anchor has real bounds and lets the list through, so the button stays tappable on iOS and web', (t) => {
+  const src = source('ui/JumpToEnd.js')
+  t.absent(/anchor: \{ height: 0/.test(src), 'a zero-height parent clips touches outside its bounds')
+  t.ok(/anchor: \{ height: [1-9]\d*,/.test(src))
+  t.ok(src.includes("pointerEvents='box-none'"))
+  t.absent(/button: \{ position: 'absolute'/.test(src), 'the button sits in the anchor flow, not outside it')
+})
+
 test('both chats show new arrivals even less than one and a half viewports away', async (t) => {
   const { awayCount } = await import('../src/chatGestures.js')
   for (const file of ['Mensagem', 'Grupo']) {
@@ -606,8 +614,8 @@ test('both chats show new arrivals even less than one and a half viewports away'
 
 test('DM keeps the original quoted-preview condition and group capability wording', (t) => {
   const src = source('screens/Mensagem.js')
-  const start = src.indexOf('          const quoted =')
-  const end = src.indexOf('          const reply =', start)
+  const start = src.indexOf('  const quoted =')
+  const end = src.indexOf('  const reply =', start)
   const env = { quoteAuthor: () => '', quoteMine: () => false, quoteMissing: () => false, quoteHandle: '', peer: 'peer', quoteTarget: () => ({ key: 'one' }), scrollToKey () {} }
   for (const replyTo of [null, undefined, '', 'quote']) {
     const quoted = runInNewContext(src.slice(start, end) + '\nquoted', { ...env, item: { key: 'two', replyTo } })

@@ -23,7 +23,7 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { fetch as expoFetch } from 'expo/fetch'
 import { Animated, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
-import { perfMarks, useNode } from '../node'
+import { perfMarks, useHosted } from '../node'
 import { fetchMedia, validDescriptor } from '../media/fetch'
 import { nativeSubtle } from '../media/hash'
 import { perfEnabled } from '../perfMarks'
@@ -79,9 +79,9 @@ export function keptOnlyUrl (kind, author, d, persist) {
 
 // -> { state: 'off' | 'loading' | 'ok' | 'error', url, retry }
 function useMedia (author, descriptor, persist) {
-  const node = useNode()
+  const hosted = useHosted()
   const keptOnly = useContext(KeptOnlyContext) === true
-  const canFetch = !keptOnly && node !== null && node.hosted === true
+  const canFetch = !keptOnly && hosted === true
   const valid = validDescriptor(descriptor)
   const key = valid ? mediaKey(descriptor) : null
   const kept = useMemo(() => (keptOnly && key ? keptOnlyUrl('posts', author, descriptor, persist) : null), [keptOnly, key, author, persist])
@@ -154,6 +154,9 @@ function useMedia (author, descriptor, persist) {
 // have no such prop, and the web warns if it is passed through.
 const imageFadeOff = Platform.OS === 'android' ? { fadeDuration: 0 } : null
 
+// react-native-web has no native driver and warns if asked.
+const NATIVE_DRIVER = Platform.OS !== 'web'
+
 function startImageFade (opacity, reduceMotion) {
   // Hidden until its own bitmap is ready. Reduced motion snaps to full opacity.
   const duration = reduceMotion ? 0 : motion.fast
@@ -162,12 +165,14 @@ function startImageFade (opacity, reduceMotion) {
     opacity.setValue(toValue)
     return null
   }
-  // JS driver: react-native-web has no native driver and warns if asked.
+  // Native driver off the JS thread so a feed of fades does not cost scroll
+  // frames. The photo and its placeholder share this one value and nothing
+  // JS-driven touches their styles, so the drivers do not mix.
   // isInteraction false: a feed of fades must not hold the list window (loopMotion).
   const run = Animated.timing(opacity, {
     toValue,
     duration,
-    useNativeDriver: false,
+    useNativeDriver: NATIVE_DRIVER,
     isInteraction: false
   })
   run.start()
@@ -184,11 +189,10 @@ function FadingPhoto ({ url, fit, dark, reduceMotion }) {
   // A reduced-motion setting that arrives late settles a fade already running.
   useEffect(() => {
     if (!reduceMotion) return
-    if (fadeRun.current) {
-      fadeRun.current.stop()
-      fadeRun.current = null
-    }
-    opacity.setValue(1)
+    fadeRun.current = null
+    // Natively the stop syncs the JS value to the mid-fade opacity through a
+    // callback, so 1 is set after it, not before.
+    opacity.stopAnimation(() => opacity.setValue(1))
   }, [reduceMotion, opacity])
   useEffect(() => () => {
     if (fadeRun.current) fadeRun.current.stop()

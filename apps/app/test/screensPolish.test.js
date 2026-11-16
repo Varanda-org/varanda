@@ -71,7 +71,7 @@ test('incomplete counts keep their explanation in a shared info button', async (
   }
   t.ok(src.includes('{incomplete ? <Soft>incompleto: algumas publicações podem não ter chegado.</Soft> : null}'), 'the separate publication warning stays')
   const { HELP } = await import('../src/help.js')
-  t.is(HELP.rua.paragraphs[2], 'Os números de curtidas e respostas podem chegar incompletos. Eles não mudam o que foi publicado.', 'the general feed help keeps its distinct sentence')
+  t.is(HELP.rua.paragraphs[2], 'Os números de curtidas e comentários podem chegar incompletos. Eles não mudam o que foi publicado.', 'the general feed help keeps its distinct sentence')
 })
 
 test('shell toast has a 44 point action and extends action lifetime for large text', (t) => {
@@ -246,7 +246,7 @@ test('post search choices distinguish blank, invalid and pending drafts from com
 
 test('unavailable and empty states retain scoped titles, short actions and matching help', (t) => {
   const global = read('screens/BuscaGlobal.js')
-  t.ok(global.includes('title={BUSCA_NOT_HOSTED_TITLE} body={BUSCA_NOT_HOSTED}'), 'the search title stays unchanged')
+  t.ok(global.includes('title={BUSCA_NOT_HOSTED_TITLE} body={BUSCA_NOT_HOSTED}'), 'the search title is the capability one')
   t.ok(global.includes("actionLabel={hosted ? BUSCA_LABEL.contas : 'Digitar código'}"), 'the code action describes focusing the input')
   t.ok(global.includes('body={hosted ? BUSCA_EMPTY.contas : BUSCA_EMPTY_CODE}'), 'the instruction remains in the body')
   const peek = read('screens/Espiadinha.js')

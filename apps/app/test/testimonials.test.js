@@ -145,3 +145,47 @@ test('pendingIncomplete: only an explicit incomplete: true', async (t) => {
   for (const v of [null, undefined, 'x', [], { incomplete: 'true' }, { incomplete: 1 }]) t.is(pendingIncomplete(v), false)
   t.alike(pendingRows({ items: [], incomplete: true }), [], 'pendingRows still takes the new shape')
 })
+
+test('keptRows: validates, dedups and caps like pendingRows; absent kept is empty', async (t) => {
+  const { keptRows, TESTIMONIAL_KEPT_MAX } = await load()
+  const ok = { from: W1, seq: 3, text: 'oi', at: AT1 }
+  t.alike(keptRows({ items: [ok] }), [])
+  t.alike(keptRows({ kept: 'x' }), [])
+  const rows = keptRows({ kept: [ok, ok, { ...ok, seq: 0 }, { ...ok, text: '' }, { ...ok, at: 'x' }, { ...ok, from: 'zz' }, null] })
+  t.alike(rows, [{ ...ok, ref: W1 + ':3' }])
+  const many = Array.from({ length: 80 }, (_, i) => ({ ...ok, seq: i + 1 }))
+  t.is(keptRows({ kept: many }).length, TESTIMONIAL_KEPT_MAX)
+})
+
+test('applyDecisions: kept moves to top, declined and shown drop, unknown ignored', async (t) => {
+  const { applyDecisions } = await load()
+  const row = (from, seq) => ({ from, seq, text: 't', at: AT1, ref: from + ':' + seq })
+  const a = row(W1, 1)
+  const b = row(W2, 2)
+  const c = row(OTHER, 3)
+  const pending = [a, b]
+  const kept = [c]
+  const snap = JSON.stringify({ pending, kept })
+  t.alike(applyDecisions({ pending, kept }, new Map([[a.ref, 'kept']])), { pending: [b], kept: [a, c] })
+  t.alike(applyDecisions({ pending, kept }, new Map([[a.ref, 'declined'], [c.ref, 'shown']])), { pending: [b], kept: [] })
+  t.alike(applyDecisions({ pending, kept }, new Map([['nope:1', 'kept']])), { pending, kept })
+  t.alike(applyDecisions({ pending: [a], kept: [a] }, new Map([[a.ref, 'kept']])).kept, [a], 'no duplicate')
+  t.is(JSON.stringify({ pending, kept }), snap, 'inputs not mutated')
+})
+
+test('sentMeta joins the status and the time', async (t) => {
+  const { sentMeta, SENT_STATUS } = await load()
+  t.is(SENT_STATUS, 'Enviado')
+  t.is(sentMeta('há 2 h'), 'Enviado · há 2 h')
+})
+
+test('settleOverrides drops the overrides a fresh read agrees with', async (t) => {
+  const { settleOverrides } = await import('../src/testimonials.js')
+  const r = (ref) => ({ ref })
+  const o = new Map([['a', 'kept'], ['b', 'kept'], ['c', 'declined'], ['d', 'declined'], ['e', 'shown'], ['f', 'shown']])
+  const out = settleOverrides(o, { pending: [r('d')], kept: [r('a'), r('f')] })
+  t.alike([...out], [['b', 'kept'], ['d', 'declined'], ['f', 'shown']], 'agreeing ones gone, the others stay')
+  t.is(o.size, 6, 'input not mutated')
+  t.is(settleOverrides(null, { pending: [], kept: [] }).size, 0)
+  t.is(settleOverrides(new Map([['x', 'kept']]), {}).size, 1, 'missing lists agree with nothing')
+})

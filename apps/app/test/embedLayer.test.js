@@ -40,7 +40,7 @@ function liftCleanup () {
 // The card's mount effect, without its cleanup, and its first state.
 function liftMount () {
   const body = sliceBetween(cardRaw, '    const kept = key ? host.keep.claim(key) : null', '    // A new key while mounted')
-  const names = ['key', 'host', 'release', 'hosted', 'stateRef', 'setState', 'apply', 'EMBED_PARKED', 'EMBED_IDLE', 'playbackClaimCount', 'claims', 'touchedNow', 'setReady', 'keptReady', 'embedSlots', 'touchSeen']
+  const names = ['key', 'host', 'release', 'hosted', 'stateRef', 'setState', 'apply', 'EMBED_PARKED', 'EMBED_IDLE', 'playbackClaimCount', 'claims', 'touchedNow', 'setReady', 'keptReady', 'embedSlots', 'touchSeen', 'touchedAt', 'shown', 'Date', 'base', 'keptShape']
   return new Function(...names, body) // eslint-disable-line no-new-func
 }
 
@@ -63,7 +63,7 @@ function liftApply () {
   const start = cardRaw.indexOf('  const apply = (')
   const end = cardRaw.indexOf('  useEffect(() => {\n    alive.current = true')
   if (start === -1 || end === -1) throw new Error('apply() not found')
-  const names = ['embedSlots', 'release', 'stateRef', 'base', 'win', 'alive', 'setState', 'EMBED_PARKED', 'EMBED_IDLE', 'EMBED_WAITING', 'hosted', 'host', 'Date', 'readerTouchNow', 'request']
+  const names = ['embedSlots', 'release', 'stateRef', 'base', 'win', 'alive', 'setState', 'EMBED_PARKED', 'EMBED_IDLE', 'EMBED_WAITING', 'hosted', 'host', 'Date', 'readerTouchNow', 'request', 'embedLeaves', 'shown', 'touchedAt']
   return new Function(...names, cardRaw.slice(start, end) + '\nreturn apply') // eslint-disable-line no-new-func
 }
 
@@ -98,6 +98,20 @@ function liftKeptRowKeys () {
   return { rowKeyOf, keptRowKeys: (data, keyExtractor) => fn(rowKeyOf, data, keyExtractor) }
 }
 
+function liftOrphanAwayKeys () {
+  const m = layerRaw.match(/export function orphanAwayKeys \(entries, mounted, touched, turned\) \{([\s\S]*?)\n\}/)
+  if (!m) throw new Error('orphanAwayKeys not found')
+  return new Function('entries', 'mounted', 'touched', 'turned', m[1]) // eslint-disable-line no-new-func
+}
+
+// The host's window shapes and the keep it hands the cards, as written,
+// around the given keep, touchedNow and window.
+function liftShapes (keep, touchedNow, win) {
+  const body = sliceBetween(layerRaw, '  const shapes = new Map()\n', '  const contentChanged = () => {')
+  const fn = new Function('keep', 'touchedNow', 'windowWide', body + '\nreturn { shapes, noteShape, turned, hostKeep }') // eslint-disable-line no-new-func
+  return fn(keep, touchedNow, () => (win.width > 0 && win.height > 0 ? win.width > win.height : null))
+}
+
 function liftOrphanTick () {
   const m = layerRaw.match(/export function orphanTick \(entries, claimsChanged, yielding, engaged\) \{([\s\S]*?)\n\}/)
   if (!m) throw new Error('orphanTick not found')
@@ -105,8 +119,11 @@ function liftOrphanTick () {
 }
 
 // The host's tick, as written, against the given slots, keep and stub
-// screen reader, with the real orphanTick, orphanRowTick and touchedNow.
-async function liftHostTick (slots, keep, reader, playback) {
+// screen reader, with the real orphanTick, orphanAwayKeys, orphanRowTick and
+// touchedNow. opts.rows is the host's mounted rows (none by default) and
+// opts.turned its turned(entry) (never by default). The playback count it saw
+// and the grace counts carry from one tick to the next, as in the host.
+async function liftHostTick (slots, keep, reader, playback, opts = {}) {
   const live = await import('../src/embedLive.js')
   const t = layerRaw.match(/export function touchedNow \(release\) \{([\s\S]*?)\n\}/)
   const r = layerRaw.match(/function readerTouchNow \(\) \{([\s\S]*?)\n\}/)
@@ -115,21 +132,21 @@ async function liftHostTick (slots, keep, reader, playback) {
   const readerFn = new Function('embedTouched', 'screenReaderOn', 'screenReaderKnown', r[1]) // eslint-disable-line no-new-func
   const start = '  const tick = () => {\n'
   const body = sliceBetween(layerRaw, start, '\n  }\n  const sync = () => {').slice(start.length)
-  const names = ['playbackClaimCount', 'seen', 'orphanTick', 'keep', 'embedSlots', 'readerTouchNow', 'touchedNow', 'orphanRowTick', 'rows', 'grace']
-  const fn = new Function(...names, body) // eslint-disable-line no-new-func
-  const orphanTick = liftOrphanTick()
-  const rowTick = liftOrphanRowTick().tick
-  return () => fn(
+  const names = ['playbackClaimCount', 'seen', 'orphanTick', 'keep', 'embedSlots', 'readerTouchNow', 'touchedNow', 'orphanRowTick', 'rows', 'grace', 'orphanAwayKeys', 'turned']
+  const make = new Function(...names, 'return () => {\n' + body + '\n}') // eslint-disable-line no-new-func
+  return make(
     () => playback.count,
     playback.count,
-    orphanTick,
+    liftOrphanTick(),
     keep,
     slots,
     () => readerFn(live.embedTouched, () => reader.on, () => reader.known),
     (release) => touchedFn(live.embedTouched, slots, () => reader.on, () => reader.known, release),
-    rowTick,
+    liftOrphanRowTick().tick,
+    opts.rows instanceof Map ? opts.rows : new Map(),
     new Map(),
-    new Map()
+    liftOrphanAwayKeys(),
+    typeof opts.turned === 'function' ? opts.turned : () => false
   )
 }
 
@@ -183,6 +200,7 @@ async function setup () {
   const readerFn = liftCardHelper('readerTouchNow', [], ['embedTouched', 'screenReaderOn', 'screenReaderKnown'])
   const readerTouchNow = () => readerFn(live.embedTouched, () => reader.on, () => reader.known)
   const keptReadyFn = liftCardHelper('keptReady', ['host', 'key'])
+  const keptShapeFn = liftCardHelper('keptShape', ['host', 'key'])
   const key = embedKey('row-1', undefined, 'https://open.spotify.com/embed/track/x')
   const spec = Object.freeze({ embedUrl: 'https://open.spotify.com/embed/track/x', height: 152, width: 300 })
   // A card live through the host: one slot, one kept entry under key.
@@ -199,8 +217,9 @@ async function setup () {
     }
   }
   const unmount = (c) => liftCleanup()(c.alive, c.stateRef, live.EMBED_WAITING, live.EMBED_IDLE, spied, c.hosted, c.release, host, playbackClaimCount, c.claims, touchedNow)()
-  // real: the card's own apply() instead of a recorder.
-  const mount = (real = false) => {
+  // real: the card's own apply() instead of a recorder. date: the clock both
+  // read.
+  const mount = (real = false, date = Date, wide = false) => {
     const first = liftInitial()(key, host, live.EMBED_PARKED, live.EMBED_IDLE)
     const c = {
       stateRef: { current: first },
@@ -208,6 +227,10 @@ async function setup () {
       hosted: { current: '' },
       claims: { current: playback.count },
       touchSeen: { current: false },
+      touchedAt: { current: NaN },
+      inBand: { current: false },
+      base: { current: wide },
+      win: wide ? { width: 844, height: 390 } : { width: 390, height: 844 },
       alive: { current: true },
       applied: [],
       shown: [],
@@ -216,10 +239,20 @@ async function setup () {
     }
     const setState = (s) => c.shown.push(s)
     const apply = real
-      ? makeApply(spied, c.release, c.stateRef, { current: false }, { width: 390, height: 844 }, c.alive, setState, live.EMBED_PARKED, live.EMBED_IDLE, live.EMBED_WAITING, c.hosted, host, Date, readerTouchNow, { current: '' })
+      ? makeApply(spied, c.release, c.stateRef, c.base, c.win, c.alive, setState, live.EMBED_PARKED, live.EMBED_IDLE, live.EMBED_WAITING, c.hosted, host, date, readerTouchNow, { current: '' }, live.embedLeaves, c.inBand, c.touchedAt)
       : null
     const record = (s) => { c.applied.push(s); if (apply) apply(s) }
-    liftMount()(key, host, c.release, c.hosted, c.stateRef, setState, record, live.EMBED_PARKED, live.EMBED_IDLE, playbackClaimCount, c.claims, touchedNow, (r) => c.ready.push(r), keptReadyFn, spied, c.touchSeen)
+    liftMount()(key, host, c.release, c.hosted, c.stateRef, setState, record, live.EMBED_PARKED, live.EMBED_IDLE, playbackClaimCount, c.claims, touchedNow, (r) => c.ready.push(r), keptReadyFn, spied, c.touchSeen, c.touchedAt, c.inBand, date, c.base, keptShapeFn)
+    // A fresh check's answer after the mount: hidden at gap, through the real
+    // apply, as embedStep turns a hidden sample of a parked card.
+    c.hidden = (gap = 3000) => apply(live.EMBED_PARKED, true, gap)
+    // The card's own check, as written, answered at once out of the band.
+    c.check = () => {
+      const body = sliceBetween(cardRaw, '    let round = 0', '    // The dwell counts ticks')
+      const names = ['playbackClaimCount', 'claims', 'apply', 'EMBED_IDLE', 'embedSlots', 'stateRef', 'base', 'win', 'embedStep', 'slot', 'band', 'alive', 'mostlyHidden', 'bandGap', 'embedNear', 'top', 'bottom', 'cancelled', 'placeFrame', 'release', 'touchedNow', 'readerTouchNow', 'touchSeen', 'touchedAt', 'shown', 'Date', 'MISSED_LEAVE']
+      const env = { playbackClaimCount, claims: c.claims, apply, EMBED_IDLE: live.EMBED_IDLE, embedSlots: spied, stateRef: c.stateRef, base: c.base, win: c.win, embedStep: live.embedStep, slot: { current: { measureInWindow: (answer) => answer(0, 3000, 300, 152) } }, band: null, alive: c.alive, mostlyHidden: live.mostlyHidden, bandGap: live.bandGap, embedNear: live.embedNear, top: 99, bottom: 761, cancelled: false, placeFrame: () => {}, release: c.release, touchedNow, readerTouchNow, touchSeen: c.touchSeen, touchedAt: c.touchedAt, shown: c.inBand, Date: date, MISSED_LEAVE: 4 }
+      new Function(...names, body + '\nreturn check')(...names.map((n) => env[n]))() // eslint-disable-line no-new-func
+    }
     return c
   }
   return { live, slots: spied, keep, key, spec, goLive, unmount, mount, makeApply, host, playback, reader, touchedNow, readerTouchNow, keptReady: keptReadyFn, acquired: () => acquired }
@@ -309,6 +342,7 @@ test('a newcomer takes the slot of an orphan through orphanTick', async (t) => {
   other()
 })
 
+// The window stays turned, so only a preload's request can close the orphan.
 test('an orphan asked by a preload stays while a screen reader runs or is unknown', async (t) => {
   const live = await import('../src/embedLive.js')
   const { createEmbedKeep } = await import('../src/embedKeep.js')
@@ -316,7 +350,7 @@ test('an orphan asked by a preload stays while a screen reader runs or is unknow
   const keep = createEmbedKeep()
   const reader = { on: false, known: true }
   const playback = { count: 0 }
-  const tick = await liftHostTick(slots, keep, reader, playback)
+  const tick = await liftHostTick(slots, keep, reader, playback, { turned: () => true })
   const spec = Object.freeze({ embedUrl: 'https://open.spotify.com/embed/track/x', height: 152, width: 300 })
   const release = slots.acquire()
   keep.show('o', spec, release, 'row-1')
@@ -335,6 +369,246 @@ test('an orphan asked by a preload stays while a screen reader runs or is unknow
   tick()
   t.absent(keep.has('o'), 'with the reader known off, the orphan yields')
   t.is(slots.count(), 0, 'and its slot is free')
+})
+
+test('a running or unknown screen reader closes an orphan whose row is gone', async (t) => {
+  const live = await import('../src/embedLive.js')
+  const { createEmbedKeep } = await import('../src/embedKeep.js')
+  const slots = live.createEmbedSlots(2)
+  const keep = createEmbedKeep()
+  const reader = { on: true, known: true }
+  const tick = await liftHostTick(slots, keep, reader, { count: 0 })
+  const spec = Object.freeze({ embedUrl: 'https://open.spotify.com/embed/track/x', height: 152, width: 300 })
+  keep.show('on', spec, slots.acquire(), 'row-1')
+  keep.show('unknown', spec, slots.acquire(), 'row-2')
+  keep.orphan('on')
+  tick()
+  t.absent(keep.has('on'), 'a running reader counts as a touch')
+  reader.on = false
+  reader.known = false
+  keep.orphan('unknown')
+  tick()
+  t.absent(keep.has('unknown'), 'so does one that has not answered')
+  t.is(slots.count(), 0)
+})
+
+test('orphanAwayKeys', (t) => {
+  const orphanAwayKeys = liftOrphanAwayKeys()
+  const touched = () => {}
+  const untouched = () => {}
+  const entries = [
+    { key: 'gone', orphan: true, row: 'r1', release: touched },
+    { key: 'here', orphan: true, row: 'r2', release: touched },
+    { key: 'still', orphan: true, row: 'r3', release: untouched },
+    { key: 'owned', orphan: false, row: 'r4', release: touched }
+  ]
+  const mounted = (row) => row === 'r2'
+  const isTouched = (release) => release === touched
+  t.alike(orphanAwayKeys(entries, mounted, isTouched), ['gone'], 'only a touched orphan whose row is not mounted')
+  t.alike(orphanAwayKeys(entries, mounted, isTouched, () => false), ['gone'])
+  t.alike(orphanAwayKeys(entries, mounted, isTouched, (entry) => entry.key === 'gone'), [], 'a turned window keeps it')
+  t.alike(orphanAwayKeys(entries, mounted, isTouched, () => { throw new Error('x') }), ['gone'], 'a throwing turned counts as not turned')
+  t.alike(orphanAwayKeys(entries, mounted, isTouched, () => 'yes'), ['gone'], 'only true counts as turned')
+  t.alike(orphanAwayKeys(entries, mounted), ['gone', 'still'], 'a missing touched counts as touched')
+  t.alike(orphanAwayKeys(entries, mounted, () => { throw new Error('x') }), ['gone', 'still'], 'a throwing one too')
+  t.alike(orphanAwayKeys(entries, mounted, () => undefined), ['gone', 'still'], 'only false counts as untouched')
+  t.alike(orphanAwayKeys(entries, undefined, isTouched), ['gone', 'here'], 'a missing mounted counts as not mounted')
+  t.alike(orphanAwayKeys(entries, () => { throw new Error('x') }, isTouched), ['gone', 'here'], 'a throwing one too')
+  t.alike(orphanAwayKeys(entries, () => 1, isTouched), ['gone', 'here'], 'only true counts as mounted')
+  t.alike(orphanAwayKeys(null, mounted, isTouched), [])
+  t.alike(orphanAwayKeys([null, undefined, 1], mounted, isTouched), [])
+  t.ok(/for \(const key of orphanTick\(keep\.list\(\), changed, yielding, touchedNow\)\) keep\.drop\(key\)\s*for \(const key of orphanAwayKeys\(keep\.list\(\), \(row\) => rows\.has\(row\), touchedNow, turned\)\) keep\.drop\(key\)\s*const next = orphanRowTick/.test(layer), 'the host tick drops them before the row grace')
+})
+
+// A touched frame live through the host on row-1, whose release counts its
+// runs, the card's unmount cleanup and the host tick (opts as liftHostTick).
+// The pool knows the frame by its own release, the keep and the card by the
+// counted one.
+async function touchedOrphan (opts = {}) {
+  const s = await setup()
+  const real = s.slots.acquire()
+  let released = 0
+  const release = () => { released++; real() }
+  const own = (r) => (r === release ? real : r)
+  const slots = {
+    ...s.slots,
+    engaged: (r) => s.slots.engaged(own(r)),
+    yielding: (r, ...rest) => s.slots.yielding(own(r), ...rest),
+    park: (r, ...rest) => s.slots.park(own(r), ...rest)
+  }
+  s.slots.engage(real, true)
+  s.keep.show(s.key, s.spec, release, 'row-1')
+  s.keep.place(s.key, { x: 0, y: 10, w: 300, h: 152 })
+  const c = { alive: { current: true }, stateRef: { current: s.live.EMBED_LIVE }, hosted: { current: s.key }, release: { current: release }, claims: { current: s.playback.count } }
+  const unmount = () => liftCleanup()(c.alive, c.stateRef, s.live.EMBED_WAITING, s.live.EMBED_IDLE, slots, c.hosted, c.release, s.host, () => s.playback.count, c.claims, slots.engaged)()
+  const tick = await liftHostTick(slots, s.keep, s.reader, s.playback, opts)
+  return { ...s, frame: release, unmount, tick, released: () => released }
+}
+
+test('a touched orphan whose row unmounted closes on the next host tick', async (t) => {
+  const { keep, key, unmount, slots, tick, released } = await touchedOrphan()
+  t.is(slots.count(), 1)
+  unmount()
+  t.ok(keep.hasOrphan(), 'the unmount still hands the frame to the list')
+  t.is(released(), 0, 'and releases nothing')
+  t.is(slots.count(), 1)
+  tick()
+  t.absent(keep.has(key), 'the next tick closes it, with no grace')
+  t.is(released(), 1, 'its slot is released exactly once')
+  t.is(slots.count(), 0)
+  tick()
+  t.is(released(), 1)
+})
+
+test('a touched orphan whose row stays mounted is taken back by a remounting card', async (t) => {
+  const rows = new Map([['row-1', 1]])
+  const { live, keep, key, frame, unmount, mount, slots, tick, released } = await touchedOrphan({ rows })
+  unmount()
+  tick()
+  t.ok(keep.has(key), 'a quote reloading in a row that stays keeps it for the grace')
+  const back = mount(true)
+  t.is(back.release.current, frame, 'the remounted card takes the same frame')
+  t.is(back.stateRef.current, live.EMBED_PARKED)
+  t.absent(keep.hasOrphan())
+  tick()
+  tick()
+  t.ok(keep.has(key), 'owned again, the host leaves it')
+  t.is(released(), 0)
+  t.is(slots.count(), 1)
+})
+
+test('an untouched orphan whose row is gone stays through the host tick', async (t) => {
+  const { keep, key, goLive, unmount, slots, reader, playback } = await setup()
+  const tick = await liftHostTick(slots, keep, reader, playback)
+  unmount(goLive())
+  for (let i = 0; i < 5; i++) tick()
+  t.ok(keep.has(key), 'it cannot be playing, so it stays loaded')
+  t.is(slots.count(), 1)
+})
+
+test('a turned window keeps a touched orphan whose row is gone until it turns back', async (t) => {
+  const win = { width: 390, height: 844 }
+  const s = await setup()
+  const shapes = liftShapes(s.keep, s.touchedNow, win)
+  const tick = await liftHostTick(s.slots, s.keep, s.reader, s.playback, { turned: shapes.turned })
+  const release = s.slots.acquire()
+  t.ok(shapes.hostKeep.show(s.key, s.spec, release, 'row-1'), 'the card shows through the host keep')
+  shapes.hostKeep.place(s.key, { x: 0, y: 10, w: 300, h: 152 })
+  t.is(shapes.shapes.get(s.key), false, 'it went live upright')
+  s.slots.engage(release, true)
+  win.width = 844
+  win.height = 390
+  shapes.hostKeep.place(s.key, { x: 0, y: 10, w: 844, h: 152 })
+  t.is(shapes.shapes.get(s.key), false, 'a touched frame keeps the shape it went live in')
+  s.keep.orphan(s.key)
+  for (let i = 0; i < 4; i++) tick()
+  t.ok(s.keep.has(s.key), 'native full screen turned the window: the orphan stays')
+  win.width = 390
+  win.height = 844
+  tick()
+  t.absent(s.keep.has(s.key), 'turned back with its row still gone, it closes on the first tick')
+  t.is(s.slots.count(), 0)
+})
+
+test('the host follows the window shape of an untouched frame only', async (t) => {
+  const win = { width: 390, height: 844 }
+  const s = await setup()
+  const shapes = liftShapes(s.keep, s.touchedNow, win)
+  const release = s.slots.acquire()
+  shapes.hostKeep.show(s.key, s.spec, release, 'row-1')
+  win.width = 844
+  win.height = 390
+  shapes.hostKeep.place(s.key, { x: 0, y: 10, w: 300, h: 152 })
+  t.is(shapes.shapes.get(s.key), true, 'an untouched frame re-bases to a real rotation')
+  t.is(shapes.turned(s.keep.list()[0]), false)
+  s.slots.engage(release, true)
+  win.width = 390
+  win.height = 844
+  shapes.hostKeep.show(s.key, { ...s.spec, width: 390 }, release, 'row-1')
+  t.is(shapes.shapes.get(s.key), true, 'a touched one does not')
+  t.is(shapes.turned(s.keep.list()[0]), true)
+  win.width = 0
+  t.is(shapes.turned(s.keep.list()[0]), false, 'an unreadable window counts as not turned')
+  t.is(shapes.turned({ key: 'unknown' }), false, 'so does a frame with no shape')
+  t.ok(layer.includes('keep: hostKeep,'), 'the cards get the host keep')
+  t.ok(layer.includes('for (const key of shapes.keys()) if (!keep.has(key)) shapes.delete(key)'), 'a dropped frame forgets its shape')
+  t.ok(layer.includes("const { width, height } = Dimensions.get('window')"), 'the window the card itself reads')
+})
+
+test('a card that takes a touched frame back gets a fresh grace', async (t) => {
+  const { live, slots, keep, key, goLive, unmount, mount } = await setup()
+  const clock = { now: 50000 }
+  const date = { now: () => clock.now }
+  const c = goLive()
+  slots.engage(c.release.current, true)
+  unmount(c)
+  const back = mount(true, date)
+  t.is(back.stateRef.current, live.EMBED_PARKED, 'it starts parked, with no check')
+  t.is(back.touchedAt.current, clock.now, 'the claim starts the grace')
+  clock.now += live.EMBED_TICK_MS
+  back.hidden()
+  t.is(back.stateRef.current, live.EMBED_PARKED, 'one hidden answer right after the claim does not close it')
+  t.ok(keep.has(key))
+  clock.now += live.OPEN_GRACE_MS
+  back.hidden()
+  t.is(back.stateRef.current, live.EMBED_IDLE, 'past the grace, a hidden answer does')
+  t.absent(keep.has(key))
+  t.is(slots.count(), 0)
+})
+
+test('a card that takes a touched frame back in a turned window keeps the shape it went live in', async (t) => {
+  const { live, slots, keep, key, goLive, unmount, mount, host } = await setup()
+  const clock = { now: 50000 }
+  const date = { now: () => clock.now }
+  const c = goLive()
+  slots.engage(c.release.current, true)
+  unmount(c)
+  host.shapeOf = (k) => (k === key ? false : null)
+  const back = mount(true, date, true)
+  t.is(back.base.current, false, 'the claim takes the upright shape the list recorded')
+  for (let i = 0; i < 8; i++) {
+    clock.now += live.EMBED_TICK_MS
+    back.check()
+  }
+  t.is(back.stateRef.current, live.EMBED_LIVE, 'native full screen keeps it past the grace')
+  t.ok(keep.has(key))
+  back.win.width = 390
+  back.win.height = 844
+  clock.now += live.EMBED_TICK_MS
+  back.check()
+  t.is(back.stateRef.current, live.EMBED_AWAY, 'turned back and out of the band, it is away')
+  clock.now += live.EMBED_TICK_MS
+  back.check()
+  t.is(back.stateRef.current, live.EMBED_IDLE, 'and closes on the second check')
+  t.absent(keep.has(key))
+  t.is(slots.count(), 0)
+  const shape = liftCardHelper('keptShape', ['host', 'key'])
+  t.is(shape({ shapeOf: () => true }, 'k'), true)
+  t.is(shape({ shapeOf: () => 'wide' }, 'k'), null, 'only a boolean counts')
+  t.is(shape({ shapeOf: () => { throw new Error('x') } }, 'k'), null, 'a throwing read counts as unknown')
+  t.is(shape({}, 'k'), null, 'so does a host with no read')
+  t.ok(/shapeOf: \(key\) => \{\s*const shape = shapes\.get\(key\)\s*return typeof shape === 'boolean' \? shape : null\s*\}/.test(layer), 'the host reads the recorded shape')
+})
+
+test('a card that takes a loaded frame back remembers it was shown', async (t) => {
+  const { live, keep, key, goLive, unmount, mount, reader } = await setup()
+  const c = goLive()
+  keep.ready(key)
+  unmount(c)
+  const back = mount(true)
+  t.is(back.inBand.current, true, 'a loaded kept frame counts as shown')
+  reader.on = true
+  back.hidden()
+  t.is(back.stateRef.current, live.EMBED_IDLE, 'so a screen reader closes it out of the band after a quote reload')
+  t.absent(keep.has(key))
+  reader.on = false
+  unmount(goLive())
+  const fresh = mount(true)
+  t.is(fresh.inBand.current, false, 'a kept frame still loading does not')
+  reader.on = true
+  fresh.hidden()
+  t.is(fresh.stateRef.current, live.EMBED_PARKED, 'and stays parked for the screen reader')
+  reader.on = false
 })
 
 test('orphanTick drops every orphan after another player started', async (t) => {
@@ -411,7 +685,7 @@ test('the card shows through the host and places the frame against the content c
   t.ok(card.includes('put({ x: x - o.x, y: y - o.y, w, h })'), 'shifted into the layer')
   t.ok(card.includes('const offContent = host.onContentChange(placeFrame)'))
   t.ok(card.includes('onLayout={() => placeFrame()}'))
-  t.ok(/placeFrame\(\)\s*if \(missed\) settle\(true, false\)/.test(card), 'placed on every check')
+  t.ok(/placeFrame\(\)\s*if \(missed\) \{/.test(card), 'placed on every check')
   t.ok(card.includes('useState(() => keptWidth(host, key))'), 'a returning card is active on its first commit')
 })
 
@@ -429,7 +703,7 @@ test('a hosted card leaving live drops its entry and releases once', async (t) =
   t.is(typeof other, 'function')
   keep.show(key, spec, release, 'row-1')
   const c = { stateRef: { current: live.EMBED_LIVE }, release: { current: release }, hosted: { current: key }, alive: { current: true } }
-  const apply = makeApply(slots, c.release, c.stateRef, { current: false }, { width: 390, height: 844 }, c.alive, () => {}, live.EMBED_PARKED, live.EMBED_IDLE, live.EMBED_WAITING, c.hosted, host, Date, readerTouchNow, { current: '' })
+  const apply = makeApply(slots, c.release, c.stateRef, { current: false }, { width: 390, height: 844 }, c.alive, () => {}, live.EMBED_PARKED, live.EMBED_IDLE, live.EMBED_WAITING, c.hosted, host, Date, readerTouchNow, { current: '' }, live.embedLeaves, { current: false }, { current: NaN })
   apply(live.EMBED_IDLE)
   t.absent(keep.has(key), 'the entry is gone')
   t.is(calls, 1, 'the release runs exactly once')

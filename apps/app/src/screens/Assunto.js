@@ -20,11 +20,12 @@ import {
   SEARCH_INCOMPLETE_NOTE, SEARCH_INDEXING_NOTE, SEARCH_OFFLINE_MESSAGE, SEARCH_UNAVAILABLE, searchNotice
 } from '../topics'
 import { dropBlocked, hasMore, initialTopic, isIncomplete, planTopicPeeks, refreshFailed, runAction, topicPath } from '../topicPage'
-import { refOf, socialRowProps, useSocial } from './ARua'
+import { refOf, socialRowProps, useRowPropsCache, useSocial } from './ARua'
 import { peekAll } from './Conversa'
 import { Btn, Soft, errorText, useBottomPad, useNow } from '../ui'
 import { OfflineNote } from '../ui/OfflineNote'
 import { PostRow } from '../ui/PostRow'
+import { PostSheetProvider } from '../ui/PostSheetHost'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, SkeletonRow } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
@@ -49,7 +50,12 @@ function needs (items) {
   return { local, shown, need, authors: [] }
 }
 
-export default function Assunto ({ entry, ownKey, onBack, onReply, onReport, onQuote, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onToast }) {
+// One actions sheet for the whole list instead of two per row.
+export default function Assunto (props) {
+  return <PostSheetProvider><AssuntoList {...props} /></PostSheetProvider>
+}
+
+function AssuntoList ({ entry, ownKey, onBack, onReply, onReport, onQuote, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onToast }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const { request } = node
@@ -180,9 +186,13 @@ export default function Assunto ({ entry, ownKey, onBack, onReply, onReport, onQ
     // the empty state stays, so the progress shows below it.
     : loading && loadedAt !== null ? <ListFooter loading /> : null
 
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onReply, onQuote, onReport }
+  // Row props from A Rua's cache, as in Busca: a row whose inputs did not
+  // change keeps its props, and its handlers read the newest ones at call time.
+  const rowCache = useRowPropsCache(items, itemKey, { h: handlers, social })
   const renderItem = ({ item }) => {
-    const row = socialRowProps({ post: item, ref: itemKey(item), social, profileOf: noProfile, avatarOf: noProfile, now, ownKey, h: handlers })
+    const key = itemKey(item)
+    const row = socialRowProps({ post: item, ref: key, social, profileOf: noProfile, avatarOf: noProfile, now, ownKey, h: handlers, cache: rowCache, rowKey: key })
     const mine = typeof ownKey === 'string' && item.author === ownKey.toLowerCase()
     return (
       <PostRow

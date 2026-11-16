@@ -36,6 +36,7 @@ import { perfMarks, useNode } from '../node'
 import { useNames } from '../names'
 import { useOutbox } from '../outboxProvider'
 import { UNCERTAIN_MESSAGE } from '../outbox'
+import { canDiscard } from '../outboxSeal'
 import { deletePostRows } from '../deletion'
 import { pinnedContentStyle } from '../profileBar'
 import { revokeDeletedMedia } from '../media/cache'
@@ -46,15 +47,16 @@ import { buildProfileUrl } from '../profileLink'
 import { installationOrigin } from '../installation'
 import { whoOf } from '../who'
 import { fillState, hideFuture, tilesFromLog } from '../mural'
-import { ErrorText, SectionHeader, Soft, errorText, plainMessage, useAction, useBottomPad, useNow } from '../ui'
+import { ErrorText, SectionHeader, Soft, errorText, plainMessage, useAction, useBottomPad, useVisibleNow } from '../ui'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { useSaved } from '../savedProvider'
 import { SAVED_ENTRY_LABEL } from '../savedView'
 import { PostRow } from '../ui/PostRow'
+import { PostSheetProvider } from '../ui/PostSheetHost'
 import { RefreshableList } from '../ui/RefreshableList'
 import { ShareProfile, shareProfileDirect } from '../ui/ShareProfile'
-import { Sheet } from '../ui/Sheet'
+import { Sheet, TEXT_CAP } from '../ui/Sheet'
 import { EmptyState, ErrorState, ListFooter, SkeletonRow } from '../ui/States'
 import { PressScale } from '../ui/PressScale'
 import { ProfileHeader, ProfileStatus } from '../ui/ProfileHeader'
@@ -79,7 +81,7 @@ import { useFollowCounts } from '../useFollowCounts'
 import { LARGE_TEXT, layout, space, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import Perfil from './Perfil'
-import { CountsNote, RepostPlaceholder, SocialToast, liveBinding, refOf, snapshotRowsShown, socialRowProps, useSocial } from './ARua'
+import { CountsNote, RepostPlaceholder, SocialToast, liveBinding, refOf, snapshotRowsShown, socialRowProps, useRowPropsCache, useSocial } from './ARua'
 import { DeletePrompt, useActing, useDelete } from './Conversa'
 import { TESTIMONIALS_TAB, useTestimonialTab, useTestimonials } from './Depoimentos'
 import { ConfirmMomentDelete, useMoments } from './Momentos'
@@ -113,6 +115,9 @@ export function diarioSeed (snapshot) {
     social: { originals: Object.entries(b.originals), counts: new Map(), liked: [], reposted: [] }
   }
 }
+
+const rowKeyOf = (row) => (row.invalid ? 'i' : 'e') + row.seq
+const muralKeyOf = (row) => 'm' + row.key
 
 function readDiarioSeed (binding, acting) {
   // Vitrine runs with config null, so liveBinding gives no binding there.
@@ -159,6 +164,9 @@ function sessionAllowsDiarioSnapshot (passkey, owner) {
   return st !== null && typeof st === 'object' && st.unlocked === true && st.signedOut !== true &&
     typeof st.publicKey === 'string' && st.publicKey.toLowerCase() === owner
 }
+
+// An outbox item whose text is still sealed (not opened since the unlock).
+const SEALED_TEXT = 'Texto protegido até desbloquear.'
 
 // The state line of an outbox item. `held`: queued, but not sent
 // automatically (found in storage from an earlier visit).
@@ -223,6 +231,17 @@ function rowNeeds (rows, publicKey) {
   return { local, shown, need, parents: [...parents], authors: [publicKey] }
 }
 
+// One post object per record: socialRowProps caches by post identity, so a
+// fresh object per render would rebuild every own-post row.
+const ownPosts = new WeakMap()
+function ownPostOf (author, seq, record) {
+  const hit = ownPosts.get(record)
+  if (hit && hit.author === author && hit.seq === seq) return hit
+  const post = postOf(author, seq, record)
+  ownPosts.set(record, post)
+  return post
+}
+
 // A post item (the feed shape) of an own post record.
 function postOf (author, seq, record) {
   return {
@@ -240,7 +259,12 @@ function postOf (author, seq, record) {
   }
 }
 
-export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage, onOpenMomentos, onOpenSalvos, onOpenRecados, onOpenTop, onTabChange }) {
+// One actions sheet for the whole list instead of two per row.
+export default function Diario (props) {
+  return <PostSheetProvider><DiarioList {...props} /></PostSheetProvider>
+}
+
+function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage, onOpenMomentos, onOpenSalvos, onOpenRecados, onTabChange, onOpenTop }) {
   const styles = useStyles(makeStyles)
   const { colors, scheme } = useTheme()
   const node = useNode()
@@ -248,7 +272,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const names = useNames()
   const outbox = useOutbox()
   const insets = useSafeAreaInsets()
-  const now = useNow(60000)
+  const now = useVisibleNow(60000)
   const bottomPad = useBottomPad()
   const acting = useActing()
   const memberActing = actingAsMember(acting)
@@ -612,8 +636,10 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const pending = info && node.config ? outbox.itemsFor(info.publicKey, node.config.association) : []
   // Queued items not approved in this page session (stored before it, or
   // changed in storage since they were approved): they wait for 'enviar',
-  // which approves them exactly as shown here.
-  const held = pending.filter((item) => item.state === 'queued' && !outbox.isAllowed(item))
+  // which approves them exactly as shown here. An item not open yet (its
+  // text still sealed, src/outboxSeal.js) cannot be approved: it shows the
+  // placeholder and no action but 'apagar'.
+  const held = pending.filter((item) => item.state === 'queued' && item.opened && !outbox.isAllowed(item))
   const heldIds = held.map((item) => item.id)
   // The post a queued reply answers, shown before it is approved: the stored
   // target can be changed by any script of this origin, so the person must
@@ -637,22 +663,24 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
           : null}
         {pending.map((item) => (
           <View key={item.id} style={styles.pending}>
-            <Text style={styles.pendingText}>{displayText(item.text, { multiline: true })}</Text>
-            {item.kind === 'reply'
+            <Text style={styles.pendingText}>{item.opened ? displayText(item.text, { multiline: true }) : SEALED_TEXT}</Text>
+            {item.opened && item.kind === 'reply'
               ? <Soft>{'resposta a ' + replyTargetText(item.to)}</Soft>
               : null}
             <Soft>
               {'escrito ' + (relativeTime(item.writtenAt, now) ?? displayText(item.writtenAt)) +
                 ' · a data será a do envio'}
             </Soft>
-            <PendingState item={item} held={heldIds.includes(item.id)} />
-            {item.state !== 'sending'
+            {item.opened || item.state !== 'queued' ? <PendingState item={item} held={heldIds.includes(item.id)} /> : null}
+            {/* An open 'sending' item waits for its reconciliation; one not
+                open in this window is never reconciled here, so it can go. */}
+            {canDiscard(item)
               ? (
                 <View style={styles.pendingActions}>
                   {heldIds.includes(item.id)
                     ? <Pill label='Enviar' onPress={() => outbox.release([item])} />
                     : null}
-                  {!heldIds.includes(item.id) && (item.state === 'uncertain' || item.state === 'failed')
+                  {item.opened && !heldIds.includes(item.id) && (item.state === 'uncertain' || item.state === 'failed')
                     ? <Pill label='Tentar de novo' onPress={() => outbox.retry(item)} />
                     : null}
                   <Pill icon='lixeira' accessibilityLabel='apagar' onPress={() => outbox.discard(item.id)} />
@@ -703,7 +731,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
               }
             : null]}
           note={(followCounts.incomplete && followCounts.seguidores !== null) || (node.hosted === true && fansView.count !== null && fansView.incomplete) ? <View style={styles.countsNote}><Soft>{COUNTS_INCOMPLETE_NOTE}</Soft></View> : null}
-          corner={<Pill key='edit' label='Editar perfil' onPress={() => setEditing(true)} />}
+          corner={<Pill key='edit' label='Editar perfil' onPress={() => setEditing(true)} maxFontSizeMultiplier={TEXT_CAP} />}
           actions={[
             profileUrl !== null ? <Pill key='share' icon='compartilhar' accessibilityLabel='compartilhar perfil' onPress={() => { shareProfileDirect(profileUrl).then((done) => { if (!done) setSharing(true) }) }} /> : null
           ]}
@@ -789,7 +817,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   if (data === null) {
     empty = loadError
       ? <ErrorState message={loadError} onRetry={reload} pending={pull.pending} />
-      : <><SkeletonRow /><SkeletonRow /><SkeletonRow /></>
+      : <View>{[0, 1, 2].map((row) => <SkeletonRow key={row} />)}</View>
   } else {
     empty = !data.atEnd
       // Older pages remain and none shown so far held a publication: loading
@@ -840,20 +868,25 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
     }
   })
   // onMessage reaches only reposts of other people's posts: socialRowProps drops it for own posts.
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onMessage, onDelete: del.offered ? del.ask : undefined }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onReply, onQuote, onMessage, onDelete: del.offered ? del.ask : undefined }
   // An own repost is the ORIGINAL post under 'Você republicou' (every action
   // targets the original); an own post (or quote) targets itself.
-  const renderItem = ({ item: row }) => {
+  const rowCache = useRowPropsCache(posts, rowKeyOf, { h: handlers, social })
+  // One renderItem for the list's life: it reads the newest render through the ref.
+  const renderRef = useRef(null)
+  const renderItem = useCallback((info) => renderRef.current(info), [])
+  renderRef.current = ({ item: row }) => {
+    const rowKey = rowKeyOf(row)
     const record = row.entry.record
     if (record.type === 'repost') {
       const ref = refOf(record.to)
       const repostedBy = { author: info.publicKey, name: 'Você', username: null }
       const post = social.original(ref)
       if (!post) return <RepostPlaceholder repostedBy={repostedBy} missing={post === null} transient={social.transient(ref)} onRetry={() => social.retry(ref)} />
-      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf, now, ownKey: info.publicKey, h: handlers })} />
+      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf, now, ownKey: info.publicKey, h: handlers, cache: rowCache, rowKey })} />
     }
-    const post = postOf(info.publicKey, row.seq, record)
-    return <PostRow {...socialRowProps({ post, ref: info.publicKey + ':' + row.seq, social, profileOf, now, ownKey: info.publicKey, h: handlers })} />
+    const post = ownPostOf(info.publicKey, row.seq, record)
+    return <PostRow {...socialRowProps({ post, ref: info.publicKey + ':' + row.seq, social, profileOf, now, ownKey: info.publicKey, h: handlers, cache: rowCache, rowKey })} />
   }
 
   const muralCols = fontScale >= LARGE_TEXT ? 2 : 3
@@ -876,8 +909,9 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
     <View style={styles.list}>
       <DeletePrompt del={del} />
       <RefreshableList
+        perfId='diario'
         data={depo ? testimonialTab.items : mural ? muralRows : posts}
-        keyExtractor={depo ? testimonialTab.keyExtractor : mural ? (row) => 'm' + row.key : (row) => (row.invalid ? 'i' : 'e') + row.seq}
+        keyExtractor={depo ? testimonialTab.keyExtractor : mural ? muralKeyOf : rowKeyOf}
         renderItem={depo ? testimonialTab.renderItem : mural ? renderMural : renderItem}
         extraData={depo ? testimonialTab.extraData : extra}
         ListHeaderComponent={header}
@@ -932,7 +966,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
       />
       {profileUrl !== null
         ? (
-          <Sheet open={sharing} onClose={() => setSharing(false)} title='Compartilhar perfil'>
+          <Sheet open={sharing} onClose={() => setSharing(false)} title='Compartilhar perfil' closeLabel='Fechar'>
             <View style={styles.shareBody}>
               <ShareProfile url={profileUrl} onNotice={typeof onToast === 'function' ? (m) => { setSharing(false); onToast(m) } : undefined} />
             </View>

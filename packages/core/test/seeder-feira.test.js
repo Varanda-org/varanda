@@ -615,6 +615,227 @@ test('one rating per offer: a later block of the same offer never counts, not ev
   t.alike(refs(seeder.indexFeiraRatings(A.key)), [ref(B.key, 4)], 'another offer is another deal')
 })
 
+function spyRescans (seeder) {
+  const asks = []
+  const original = seeder._feiraRescanSoon
+  seeder._feiraRescanSoon = function (key, entry) {
+    asks.push(key)
+    return original.call(this, key, entry)
+  }
+  Object.defineProperty(asks, 'restore', { value: () => { seeder._feiraRescanSoon = original } })
+  return asks
+}
+
+test('a deleted rating that replaced an older one of the pair brings the older back, by one capped rescan of the rater', async (t) => {
+  t.timeout(120000)
+  const { bootstrap, assoc, seeder } = await setup(t, { feiraRescanMs: 0 })
+  const seller = crypto.keyPair()
+  const A = await member(t, bootstrap, assoc, { keyPair: seller, records: () => [listing('produto', 'Bicicleta', 'esporte', SP, 1)] })
+  await admit(A, assoc)
+  await settled(seeder, A)
+  const rate = (key, offerId, stars, i) => listingRateRecord({ to: { author: A.key, seq: 1 }, offer: offerId, consent: consentFor(seller.secretKey, A.key, 1, key, offerId), stars, at: at(i) })
+  let raterKey = null
+  const B = await member(t, bootstrap, assoc, {
+    records: (key) => {
+      raterKey = key
+      return [rate(key, 'ab'.repeat(16), 5, 2), rate(key, 'cd'.repeat(16), 1, 3)]
+    }
+  })
+  await admit(B, assoc)
+  await settled(seeder, B)
+  t.alike(refs(seeder.indexFeiraRatings(A.key)), [ref(B.key, 2)], 'the newer rating replaced the older')
+
+  await append(B, [deleteRecord({ seq: 2, at: at(4) })])
+  await settled(seeder, B)
+  await until(() => refs(seeder.indexFeiraRatings(A.key))[0] === ref(B.key, 1), { name: 'nota antiga de volta' })
+  t.alike(refs(seeder.indexFeiraRatings(A.key)), [ref(B.key, 1)], 'the older rating is back without a full rescan')
+  const entry = seeder._served.get(B.key)
+  await until(() => entry.feiraRescan === null && !entry.feiraQueued, { name: 'rescan terminado' })
+  const rescannedAt = entry.feiraRescanAt
+  const asks = spyRescans(seeder)
+  const since = Date.now()
+  await until(() => Date.now() - since >= 300, { name: 'janela sem novo rescan' })
+  t.is(asks.length, 0, 'the rescan asked no other rescan')
+  t.is(entry.feiraRescanAt, rescannedAt, 'and none ran')
+  asks.restore()
+
+  // Inside the cap a request waits, and later requests join it.
+  seeder._feiraRescanMs = 1e9
+  await append(B, [rate(raterKey, 'ef'.repeat(16), 3, 5), deleteRecord({ seq: 4, at: at(6) })])
+  await settled(seeder, B)
+  const pending = entry.feiraRescan
+  t.ok(pending, 'a rescan waits for the cap')
+  seeder._feiraRescanSoon(B.key, entry)
+  t.is(entry.feiraRescan, pending, 'a second request joins the waiting one')
+  t.alike(refs(seeder.indexFeiraRatings(A.key)), [], 'nothing rescanned before the cap')
+  clearTimeout(pending)
+  entry.feiraRescan = null
+  seeder._feiraRescanMs = 0
+  seeder._feiraRescanSoon(B.key, entry)
+  await until(() => refs(seeder.indexFeiraRatings(A.key))[0] === ref(B.key, 1), { name: 'nota antiga de volta de novo' })
+  t.alike(refs(seeder.indexFeiraRatings(A.key)), [ref(B.key, 1)])
+})
+
+test('a deleted rating whose block is already cleared still asks the rescan when it was indexed', async (t) => {
+  t.timeout(120000)
+  const { bootstrap, assoc, seeder } = await setup(t, { feiraRescanMs: 1e9 })
+  const seller = crypto.keyPair()
+  const A = await member(t, bootstrap, assoc, { keyPair: seller, records: () => [listing('produto', 'Bicicleta', 'esporte', SP, 1)] })
+  await admit(A, assoc)
+  await settled(seeder, A)
+  const rate = (key, offerId, stars, i) => listingRateRecord({ to: { author: A.key, seq: 1 }, offer: offerId, consent: consentFor(seller.secretKey, A.key, 1, key, offerId), stars, at: at(i) })
+  const B = await member(t, bootstrap, assoc, { records: (key) => [rate(key, 'ab'.repeat(16), 5, 2), rate(key, 'cd'.repeat(16), 1, 3)] })
+  await admit(B, assoc)
+  await settled(seeder, B)
+  t.alike(refs(seeder.indexFeiraRatings(A.key)), [ref(B.key, 2)])
+  const asks = spyRescans(seeder)
+  // The pass reads the tombstone after the target block was cleared.
+  const cleared = { core: { get: async () => null } }
+  await seeder._feiraDelete(B.key, cleared, { seq: 2 })
+  t.alike(asks, [B.key], 'one rescan of the rater')
+  t.alike(refs(seeder.indexFeiraRatings(A.key)), [], 'the deleted rating left the index')
+  await seeder._feiraDelete(B.key, cleared, { seq: 2 })
+  t.alike(asks, [B.key], 'a rating no longer indexed asks nothing')
+  asks.restore()
+})
+
+test('deleting a listing root asks no rescan', async (t) => {
+  t.timeout(120000)
+  const { bootstrap, assoc, seeder } = await setup(t, { feiraRescanMs: 0 })
+  const A = await member(t, bootstrap, assoc, { records: () => [listing('produto', 'Mesa', 'moveis', SP, 1), listing('produto', 'Cadeira', 'moveis', SP, 2)] })
+  await admit(A, assoc)
+  await settled(seeder, A)
+  const asks = spyRescans(seeder)
+  await append(A, [deleteRecord({ seq: 1, at: at(5) })])
+  await settled(seeder, A)
+  t.is(await seeder.listingPublic(A.key, 1), null, 'the deleted listing is gone')
+  t.ok(await seeder.listingPublic(A.key, 2), 'the other listing stays')
+  t.alike(asks, [], 'no rescan of the seller')
+  asks.restore()
+})
+
+test('deleting the newest statuses of a full window brings back the older status by a rescan', async (t) => {
+  t.timeout(120000)
+  const { bootstrap, assoc, seeder } = await setup(t, { feiraRescanMs: 0 })
+  const statuses = [listingStatusRecord({ seq: 1, status: 'vendido', at: at(2) })]
+  for (let i = 0; i < 16; i++) statuses.push(listingStatusRecord({ seq: 1, status: 'reservado', at: at(3 + i) }))
+  const A = await member(t, bootstrap, assoc, { records: () => [listing('produto', 'Mesa', 'moveis', SP, 1), ...statuses] })
+  await admit(A, assoc)
+  await settled(seeder, A)
+  t.is((await seeder.listingPublic(A.key, 1)).status, 'reservado')
+  const deletes = []
+  for (let s = 3; s <= 18; s++) deletes.push(deleteRecord({ seq: s, at: at(20 + s) }))
+  await append(A, deletes)
+  await settled(seeder, A)
+  await until(async () => (await seeder.listingPublic(A.key, 1))?.status === 'vendido', { name: 'situação antiga de volta' })
+  t.is((await seeder.listingPublic(A.key, 1)).status, 'vendido', 'never an unknown status')
+})
+
+test('rescans of one diary back off: the gap doubles up to the cap and resets after a quiet cap', async (t) => {
+  t.timeout(120000)
+  const { seeder } = await setup(t, { feiraRescanMs: 60000, feiraRescanMaxMs: 3600000 })
+  const entry = { feiraRescanAt: null, feiraRescanAsked: null, feiraRescanLevel: 0 }
+  let now = 1000000
+  t.is(seeder._feiraRescanWait(entry, now), 0, 'the first rescan runs at once')
+  seeder._feiraRescanRan(entry, now)
+  // Each time a delete asks one second after the last rescan.
+  const gaps = []
+  for (let i = 0; i < 8; i++) {
+    now += 1000
+    const wait = seeder._feiraRescanWait(entry, now)
+    gaps.push(1000 + wait)
+    now += wait
+    seeder._feiraRescanRan(entry, now)
+  }
+  t.alike(gaps, [60000, 120000, 240000, 480000, 960000, 1920000, 3600000, 3600000], 'the gap doubles up to the cap')
+
+  // A request inside the cap keeps it from resetting.
+  const ran = now
+  now = ran + 1800000
+  t.is(seeder._feiraRescanWait(entry, now), 1800000)
+  now = ran + 3600000
+  t.is(seeder._feiraRescanWait(entry, now), 0)
+  seeder._feiraRescanRan(entry, now)
+  now += 1000
+  t.is(seeder._feiraRescanWait(entry, now), 3599000, 'still the cap')
+
+  // A whole cap with neither a request nor a rescan: back to the start.
+  seeder._feiraRescanRan(entry, now + 3599000)
+  now += 3599000 + 3600000
+  t.is(seeder._feiraRescanWait(entry, now), 0, 'after a quiet cap a request runs at once')
+  seeder._feiraRescanRan(entry, now)
+  now += 1000
+  t.is(seeder._feiraRescanWait(entry, now), 59000, 'and the gap is feiraRescanMs again')
+})
+
+test('a rescan never verifies a claimed rating twice and keeps nothing for a junk one', async (t) => {
+  t.timeout(120000)
+  const listingLib = require('../lib/listing')
+  const verify = listingLib.verifyConsent
+  let checks = 0
+  listingLib.verifyConsent = (...args) => {
+    checks++
+    return verify(...args)
+  }
+  t.teardown(() => { listingLib.verifyConsent = verify })
+  const { bootstrap, assoc, seeder } = await setup(t, { feiraRescanMs: 0 })
+  const seller = crypto.keyPair()
+  const A = await member(t, bootstrap, assoc, { keyPair: seller, records: () => [listing('produto', 'Bicicleta', 'esporte', SP, 1), listing('produto', 'Mesa', 'moveis', SP, 2)] })
+  await admit(A, assoc)
+  await settled(seeder, A)
+  const rate = (key, seq, offerId, i) => listingRateRecord({ to: { author: A.key, seq }, offer: offerId, consent: consentFor(seller.secretKey, A.key, seq, key, offerId), stars: 5, at: at(i) })
+  const stranger = crypto.keyPair()
+  const junk = (key, i) => listingRateRecord({ to: { author: A.key, seq: 1 }, offer: 'ef'.repeat(16), consent: consentFor(stranger.secretKey, A.key, 1, key, 'ef'.repeat(16)), stars: 1, at: at(i) })
+  const B = await member(t, bootstrap, assoc, { records: (key) => [rate(key, 1, 'ab'.repeat(16), 3), rate(key, 2, 'cd'.repeat(16), 4), junk(key, 5)] })
+  await admit(B, assoc)
+  await settled(seeder, B)
+  const rated = refs(seeder.indexFeiraRatings(A.key)).sort()
+  t.alike(rated, [ref(B.key, 1), ref(B.key, 2)])
+  t.is(checks, 3, 'one check per rating block on the first pass')
+  const entry = seeder._served.get(B.key)
+  t.is(entry.feiraConsent, undefined, 'no per-block consent verdicts on the served entry')
+  t.is(entry.feiraOffers.size, 2, 'only the consented blocks claim an offer')
+  for (let i = 0; i < 2; i++) {
+    const before = entry.feiraRescanAt
+    seeder._feiraRescanSoon(B.key, entry)
+    await until(() => entry.feiraRescanAt !== before && entry.feiraRescan === null && !entry.feiraQueued && entry.feiraIndexed >= entry.present, { name: 'rescan ' + (i + 1) })
+  }
+  t.is(checks, 5, 'two rescans verified only the junk block again (nothing kept for it)')
+  t.alike(refs(seeder.indexFeiraRatings(A.key)).sort(), rated, 'and both ratings still count')
+})
+
+test('a rescan keeps every rating whose listing survives, even with the pending cap of its author full', async (t) => {
+  t.timeout(120000)
+  const { bootstrap, assoc, seeder } = await setup(t, { feiraRescanMs: 0 })
+  const seller = crypto.keyPair()
+  const A = await member(t, bootstrap, assoc, { keyPair: seller, records: () => [listing('produto', 'Bicicleta', 'esporte', SP, 1), listing('produto', 'Mesa', 'moveis', SP, 2)] })
+  await admit(A, assoc)
+  await settled(seeder, A)
+  const rate = (key, seq, offerId, i) => listingRateRecord({ to: { author: A.key, seq }, offer: offerId, consent: consentFor(seller.secretKey, A.key, seq, key, offerId), stars: 5, at: at(i) })
+  const B = await member(t, bootstrap, assoc, { records: (key) => [rate(key, 1, 'ab'.repeat(16), 3)] })
+  const C = await member(t, bootstrap, assoc, { records: (key) => [rate(key, 2, 'cd'.repeat(16), 4)] })
+  await admit(B, assoc)
+  await admit(C, assoc)
+  await settled(seeder, B)
+  await settled(seeder, C)
+  const rated = refs(seeder.indexFeiraRatings(A.key)).sort()
+  t.alike(rated, [ref(B.key, 1), ref(C.key, 1)].sort())
+  // Sybil rows of a listing that never comes fill A's pending cap
+  // (FEIRA_PENDING_PER_AUTHOR, 300).
+  for (let i = 0; i < 300; i++) {
+    const rater = (i + 1).toString(16).padStart(64, '0')
+    seeder._feiraPending.set(rater + ':1', { target: A.key, targetSeq: 99, rater, seq: 1, atMs: 1 })
+  }
+  seeder._feiraPend(A.key, 1, 'f'.repeat(64), 7, 1)
+  t.absent(seeder._feiraPending.has('f'.repeat(64) + ':7'), 'the cap refuses a new pending row')
+  const entry = seeder._served.get(A.key)
+  seeder._feiraRescanSoon(A.key, entry)
+  await until(() => entry.feiraRescanAt !== null && entry.feiraRescan === null && !entry.feiraQueued && entry.feiraIndexed >= entry.present, { name: 'rescan do vendedor' })
+  t.alike(refs(seeder.indexFeiraRatings(A.key)).sort(), rated, 'every rating of a surviving listing is back')
+  t.is(seeder._feiraKept.size, 0, 'nothing is left aside')
+  t.is(seeder._feiraPending.size, 300, 'and nothing went through pending')
+})
+
 test('consents for a key the seeder neither serves nor admitted never pend', async (t) => {
   t.timeout(120000)
   const { bootstrap, assoc, seeder } = await setup(t)

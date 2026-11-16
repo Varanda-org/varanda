@@ -32,7 +32,8 @@
 // real DM wake still on screen. Whether Chrome counts a notice closed at once
 // as shown (with the app in the background it may show its own generic
 // notice) is not verified: the manual matrix in docs/verification.md section
-// 112 records it, and its results go back to the owner.
+// 112 records it, and its results go back to the owner. On Android the close
+// is not at once: it waits QUIET_CLOSE_WAIT_MS (see showQuietlyAndClose).
 
 const VERSION = __VARANDA_VERSION__
 const PRECACHE = __VARANDA_PRECACHE__
@@ -109,6 +110,41 @@ function isHtml (res) {
   return (res.headers.get('content-type') || '').toLowerCase().startsWith('text/html')
 }
 
+// /index.html must carry the protections of deploy/seeder/Caddyfile, checked
+// at install (fetchEntry) and again at serve (verifiedMatch), by directive
+// because Caddy fills the domain into connect-src: nosniff; frame-ancestors
+// 'none' (no framing); script-src only 'self' and 'wasm-unsafe-eval' (no
+// inline, eval or other script origin), and no script-src-elem or
+// script-src-attr, which take its place for script elements and inline
+// handlers; object-src 'none' (no plugins); base-uri 'none' (a <base> cannot
+// move the relative script URLs). The browser splits a policy on ';' and on
+// ASCII whitespace only, so a byte outside printable ASCII (a vertical tab, a
+// non-breaking space) refuses the header instead of being read as a
+// separator, and only the space (all Caddy sends) separates tokens. A comma
+// means more than one policy: refused.
+const CSP_EXACT = [['frame-ancestors', ["'none'"]], ['object-src', ["'none'"]], ['base-uri', ["'none'"]]]
+const SCRIPT_SOURCES = new Set(["'self'", "'wasm-unsafe-eval'"])
+const SCRIPT_OVERRIDES = ['script-src-elem', 'script-src-attr']
+
+function headersOk (headers) {
+  if ((headers.get('x-content-type-options') || '').toLowerCase() !== 'nosniff') return false
+  const csp = headers.get('content-security-policy')
+  if (!csp || !/^[\x20-\x7e]*$/.test(csp) || csp.includes(',')) return false
+  const directives = new Map()
+  for (const part of csp.split(';')) {
+    const [name, ...values] = part.toLowerCase().split(' ').filter(Boolean)
+    // The browser enforces the first occurrence of a directive and ignores the rest.
+    if (name && !directives.has(name)) directives.set(name, values)
+  }
+  if (SCRIPT_OVERRIDES.some((name) => directives.has(name))) return false
+  for (const [name, expected] of CSP_EXACT) {
+    const values = directives.get(name)
+    if (!values || values.join(' ') !== expected.join(' ')) return false
+  }
+  const script = directives.get('script-src')
+  return Boolean(script && script.length > 0 && script.every((v) => SCRIPT_SOURCES.has(v)))
+}
+
 function text503 (body) {
   return new Response(body, { status: 503, headers: { 'content-type': 'text/plain; charset=utf-8' } })
 }
@@ -141,6 +177,9 @@ async function fetchEntry (entry) {
   if (entry.sha256 && await sha256hex(await res.clone().arrayBuffer()) !== entry.sha256) {
     throw new Error('precache ' + entry.url + ': content differs from this release')
   }
+  if (entry.url === '/index.html' && !headersOk(res.headers)) {
+    throw new Error('precache /index.html: missing or weak CSP or nosniff')
+  }
   return res
 }
 
@@ -163,41 +202,70 @@ async function dropOldCaches () {
   await Promise.all(names.filter((n) => n.startsWith(PREFIX) && n !== CACHE).map((n) => caches.delete(n)))
 }
 
-// Headers copied from a cache entry into the response the worker returns.
-// The status and headers of a cache entry are attacker-writable just like its
-// body (a same-origin script can store the legitimate bytes with status 302
-// and its own Location, Set-Cookie, Clear-Site-Data, Refresh, Link...), so
-// only these are kept and everything else is dropped.
-const KEEP_HEADERS = ['content-type', 'content-security-policy', 'x-content-type-options', 'referrer-policy', 'x-frame-options', 'permissions-policy', 'cache-control']
+// The offline shell takes none of its entry's headers, not even those that
+// pass headersOk: it is always served with these constants, the document
+// headers of the (cabecalhos_seguranca) snippet of deploy/seeder/Caddyfile,
+// with the domain Caddy fills in taken from the worker's own host.
+// apps/app/test/sw.test.js pins each one to the Caddyfile. HSTS is left out:
+// it only takes effect on a network response.
+const SHELL_CSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN}; frame-src https://www.youtube-nocookie.com https://w.soundcloud.com https://open.spotify.com https://embed.music.apple.com; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
+const SHELL_HEADERS = [
+  ['content-type', 'text/html; charset=utf-8'],
+  ['content-security-policy', SHELL_CSP.split('{$VARANDA_DOMAIN}').join(self.location.host)],
+  ['x-content-type-options', 'nosniff'],
+  ['referrer-policy', 'no-referrer'],
+  ['x-frame-options', 'DENY'],
+  ['permissions-policy', 'camera=(), microphone=(self), geolocation=()']
+]
 
-// Expected content-type family per file extension (header lowercased). A
-// cache entry whose content-type is missing or outside its family is
-// poisoned: .html text/html*; .js *javascript*; .json *json*; .webmanifest
-// application/manifest+json or *json*; .png image/png; .ico image/*; fonts
-// font/*, application/font* or application/octet-stream; any other
-// extension (or none) anything but text/html*.
-const isFont = (t) => t.startsWith('font/') || t.startsWith('application/font') || t === 'application/octet-stream'
-const TYPE_RULES = new Map([
-  ['.html', (t) => t.startsWith('text/html')],
-  ['.js', (t) => t.includes('javascript')],
-  ['.json', (t) => t.includes('json')],
-  ['.webmanifest', (t) => t.startsWith('application/manifest+json') || t.includes('json')],
-  ['.png', (t) => t.startsWith('image/png')],
-  ['.ico', (t) => t.startsWith('image/')],
-  ['.ttf', isFont],
-  ['.otf', isFont],
-  ['.woff', isFont],
-  ['.woff2', isFont]
+// Per file extension: the Content-Type the worker serves (a constant, never
+// the entry's own) and the stored types (MIME essence, lowercased, parameters
+// dropped) a cache entry may carry. The status and headers of a cache entry are
+// attacker-writable just like its body: a same-origin script can store the
+// legitimate bytes with status 302 and its own Location, Set-Cookie,
+// Clear-Site-Data, Refresh, Link, or with a content-type such as
+// text/javascriptx plus nosniff, or charset=utf-16le, that makes the browser
+// refuse the bundle on every load. So no header is copied from an entry: the
+// response gets the constant type of its extension and nosniff. A stored type
+// outside its extension's list is poisoned. An extension with no entry here
+// (or none) is never served from the cache (typeMatches is false: the entry is
+// deleted and the network answers), because there is no safe type to give it.
+const isFont = (e) => e.startsWith('font/') || e.startsWith('application/font') || e.startsWith('application/x-font') || e === 'application/octet-stream'
+const accepts = (...types) => (e) => types.includes(e)
+const JS = ['text/javascript', 'application/javascript', 'application/x-javascript']
+const FILE_TYPES = new Map([
+  ['.html', { type: 'text/html; charset=utf-8', accept: accepts('text/html') }],
+  ['.js', { type: 'text/javascript; charset=utf-8', accept: accepts(...JS) }],
+  ['.mjs', { type: 'text/javascript; charset=utf-8', accept: accepts(...JS) }],
+  ['.json', { type: 'application/json', accept: accepts('application/json') }],
+  ['.webmanifest', { type: 'application/manifest+json', accept: accepts('application/manifest+json', 'application/json') }],
+  ['.wasm', { type: 'application/wasm', accept: accepts('application/wasm') }],
+  ['.css', { type: 'text/css; charset=utf-8', accept: accepts('text/css') }],
+  ['.png', { type: 'image/png', accept: accepts('image/png') }],
+  ['.jpg', { type: 'image/jpeg', accept: accepts('image/jpeg') }],
+  ['.jpeg', { type: 'image/jpeg', accept: accepts('image/jpeg') }],
+  ['.gif', { type: 'image/gif', accept: accepts('image/gif') }],
+  ['.webp', { type: 'image/webp', accept: accepts('image/webp') }],
+  ['.svg', { type: 'image/svg+xml', accept: accepts('image/svg+xml') }],
+  ['.ico', { type: 'image/x-icon', accept: accepts('image/x-icon', 'image/vnd.microsoft.icon', 'image/ico') }],
+  ['.woff2', { type: 'font/woff2', accept: isFont }],
+  ['.woff', { type: 'font/woff', accept: isFont }],
+  ['.ttf', { type: 'font/ttf', accept: isFont }],
+  ['.otf', { type: 'font/otf', accept: isFont }],
+  ['.txt', { type: 'text/plain; charset=utf-8', accept: accepts('text/plain') }]
 ])
-const notHtml = (t) => !t.startsWith('text/html')
 
-function typeMatches (url, type) {
-  if (!type) return false
+function fileType (url) {
   const pathname = new URL(url).pathname
   const name = pathname.slice(pathname.lastIndexOf('/') + 1)
   const dot = name.lastIndexOf('.')
-  const rule = (dot >= 0 && TYPE_RULES.get(name.slice(dot).toLowerCase())) || notHtml
-  return rule(type.toLowerCase())
+  return dot >= 0 ? FILE_TYPES.get(name.slice(dot).toLowerCase()) : undefined
+}
+
+function typeMatches (url, type) {
+  if (!type) return false
+  const entry = fileType(url)
+  return Boolean(entry && entry.accept(type.split(';')[0].trim().toLowerCase()))
 }
 
 // The only way a cached response is read. The install-time check is not
@@ -206,33 +274,35 @@ function typeMatches (url, type) {
 // hashed bundle URL), so a hit is untrusted until its bytes hash to this
 // release's PRECACHE entry. An entry outside the list (there is no runtime
 // caching, so nothing else belongs here), with a stored status other than
-// 200, an opaque/error type, a content-type outside its family (TYPE_RULES)
-// or another hash is deleted and treated as a miss. The stored Response is
-// never returned as is: its status and headers are attacker-writable too, so
-// a fresh 200 is built from the verified bytes with only KEEP_HEADERS.
+// 200, an opaque/error type, a content-type outside its extension's list
+// (FILE_TYPES) or another hash is deleted and treated as a miss. The stored
+// Response is never returned as is: its status and headers are attacker-writable
+// too, so a fresh 200 is built from the verified bytes with no header taken
+// from the entry: SHELL_HEADERS for /index.html, any other entry its extension's
+// constant type plus nosniff. An /index.html whose own headers fail headersOk
+// is still deleted like a wrong hash.
 // Cost: crypto.subtle hashes a few milliseconds per MB, acceptable on each
 // load.
 async function verifiedMatch (cache, url) {
   const hit = await cache.match(url)
   if (!hit) return undefined
+  const shell = url === abs('/index.html')
   const expected = EXPECTED.get(url)
   if (!expected || hit.status !== 200 || BAD_TYPES.has(hit.type) ||
-    !typeMatches(url, hit.headers.get('content-type'))) {
+    !typeMatches(url, hit.headers.get('content-type')) ||
+    (shell && !headersOk(hit.headers))) {
     await cache.delete(url)
     return undefined
   }
   const buf = await hit.arrayBuffer()
   const ok = await sha256hex(buf) === expected &&
-    (url !== abs('/index.html') || new TextDecoder().decode(buf).includes(RELEASE_META))
+    (!shell || new TextDecoder().decode(buf).includes(RELEASE_META))
   if (!ok) {
     await cache.delete(url)
     return undefined
   }
-  const headers = new Headers()
-  for (const name of KEEP_HEADERS) {
-    const value = hit.headers.get(name)
-    if (value !== null) headers.set(name, value)
-  }
+  if (shell) return new Response(buf, { status: 200, statusText: 'OK', headers: new Headers(SHELL_HEADERS) })
+  const headers = new Headers([['content-type', fileType(url).type], ['x-content-type-options', 'nosniff']])
   return new Response(buf, { status: 200, statusText: 'OK', headers })
 }
 
@@ -674,14 +744,37 @@ async function wakeFocusedWindow () {
 }
 
 const DM_WAKE_QUIET_TAG = 'varanda-dm-wake-quiet'
+const QUIET_CLOSE_WAIT_MS = 2000
+let quietShows = 0
 
-// Shown, so the push is not a silent one, then closed at once: no sound, no
-// vibration, and only notices with this tag are closed.
+// Any browser on Android, the installed app included: there a close sent right
+// after showNotification resolved was seen to be lost (see showQuietlyAndClose).
+function postsLate () {
+  try {
+    const ua = self.navigator && self.navigator.userAgent
+    return typeof ua === 'string' && ua.includes('Android')
+  } catch {
+    return false
+  }
+}
+
+// Shown, so the push is not a silent one, then closed: no sound, no
+// vibration, and only notices with this tag are closed. The close is sent at
+// once, except on Android, where it waits QUIET_CLOSE_WAIT_MS: an installed
+// app there left the notice in the tray after an immediate close, most likely
+// because the system posts it asynchronously and the earlier close is lost
+// (inferred from one device report, docs/verification/fix-android-quiet-notice-close.md). A later quiet notice with the same tag replaces this one and closes
+// after its own wait.
 async function showQuietlyAndClose () {
   try {
     await self.registration.showNotification('Varanda', {
       body: DM_WAKE_TEXT, icon: '/icon-192.png', tag: DM_WAKE_QUIET_TAG, renotify: false, silent: true, data: { kind: 'dm-wake' }
     })
+    const mine = ++quietShows
+    if (postsLate()) {
+      await new Promise((resolve) => setTimeout(resolve, QUIET_CLOSE_WAIT_MS))
+      if (mine !== quietShows) return
+    }
     const shown = await self.registration.getNotifications({ tag: DM_WAKE_QUIET_TAG })
     for (const n of shown) {
       try { n.close() } catch {}

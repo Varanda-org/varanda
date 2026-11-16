@@ -10,7 +10,9 @@
 // NovaConversa sheet). Groups are counted as seen only by group.seen when
 // a group opens (Grupo reports it as `seenTick`). dm.pull runs on mount, on
 // pull to refresh and every PULL_EVERY_MS while visible; every pull and every
-// dm.set bump node.dmVersion, which re-reads the inbox. Reads carry a
+// dm.set bump node.dmVersion, which re-reads the inbox back to the depth
+// already loaded (inboxPaging.js); a search pages through the rest of dm.list
+// on the device. Reads carry a
 // generation: an answer older than a newer read is dropped. Acting as a page,
 // the inbox is the page's (useDmRequest) and its groups stay in Comunidades.
 // The group rows paint the stored 'conversasGrupos' snapshot
@@ -26,6 +28,11 @@ import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { perfMarks, useNode } from '../node'
 import { cacheGeneration } from '../localCaches'
 import { useNames } from '../names'
+import { fetchMember } from '../indexClient'
+import { diaryPeekSlots } from '../engagement'
+import { readPeerEntry } from '../peerProfile'
+import { SEARCH_PAGES_MAX, SEARCH_PAGE_GAP_MS, mergeFirstPage, readDepth, settleRefresh, refreshDepth, searchPaging } from '../inboxPaging'
+import { planRowPeeks, runRowPeeks } from '../rowPeek'
 import { FILTERS, FILTER_LABELS, RECENT_MAX, applyFilter, conversasReadsAllowed, communitiesRow, mergeRows, requestsRow } from '../conversas'
 import { ErrorText, Soft, errorText, useBottomPad, useNow } from '../ui'
 import { ConversationRow, personTitle } from '../ui/ConversationRow'
@@ -43,6 +50,8 @@ import { LOCKED_TEXT, PageInboxNote, useDmRequest } from './Mensagens'
 
 export const PULL_EVERY_MS = 5 * 60 * 1000
 export const INFO_AT_ONCE = 4
+const SEARCH_SPENT_EMPTY = 'Nada encontrado nas conversas buscadas até agora. Há conversas mais antigas.'
+const SEARCH_SPENT_MORE = 'Há conversas mais antigas que a busca ainda não leu.'
 export const PARTIAL_TEXT = 'Algumas conversas ainda não carregaram.'
 export const EMPTY_TEXT = 'Nenhuma conversa ainda'
 const EMPTY_BODY = 'Toque em + para escrever para alguém ou criar uma comunidade.'
@@ -205,24 +214,63 @@ function useGroupRows ({ enabled, request, versions, seenTick, binding }) {
 }
 
 // The inbox folder of dm.list, paged like the old Mensagens list.
-function useInbox ({ ready, dm, dmVersion, pageKey }) {
+function useInbox ({ ready, dm, dmVersion, pageKey, needle }) {
   const [state, setState] = useState({ rows: [], next: null, requests: false, loaded: false, error: '' })
   const [loadingMore, setLoadingMore] = useState(false)
   const [pageError, setPageError] = useState('')
   const gen = useRef(0)
   const nextRef = useRef(state.next)
   nextRef.current = state.next
+  // Pages on screen, and the depth the newest refresh set out to read: a
+  // refresh that overlaps another never reads fewer pages than either.
+  const depthRef = useRef(1)
+  const wantRef = useRef(0)
 
   const list = useCallback(async () => {
     const mine = ++gen.current
+    const depth = refreshDepth(depthRef.current, wantRef.current)
+    wantRef.current = depth
+    let first
     try {
-      const r = await dm('dm.list', { folder: 'inbox' })
-      if (mine !== gen.current) return
-      setState({ rows: Array.isArray(r.conversations) ? r.conversations : [], next: r.next || null, requests: r.requests === true, loaded: true, error: '' })
-      setPageError('')
+      first = await dm('dm.list', { folder: 'inbox' })
     } catch (err) {
       if (mine !== gen.current) return
       setState((s) => ({ ...s, loaded: true, error: errorText(err) }))
+      return
+    }
+    if (mine !== gen.current) return
+    const rows = Array.isArray(first.conversations) ? first.conversations : []
+    const requests = first.requests === true
+    if (depth <= 1) {
+      depthRef.current = 1
+      setState({ rows, next: first.next || null, requests, loaded: true, error: '' })
+      setPageError('')
+      return
+    }
+    // The fresh first page goes up over the loaded rows at once; the deeper
+    // pages are read again and swapped in a single time, so the list never
+    // empties or shrinks while the walk runs.
+    setState((s) => ({ ...s, rows: mergeFirstPage(s.rows, rows), requests, loaded: true, error: '' }))
+    setPageError('')
+    try {
+      const deep = await readDepth({
+        first,
+        depth,
+        read: (cursor) => dm('dm.list', { folder: 'inbox', before: cursor }),
+        current: () => mine === gen.current
+      })
+      if (deep === null) return
+      const loadedDepth = depthRef.current
+      depthRef.current = settleRefresh({ rows: [], next: null }, deep, loadedDepth).depth
+      wantRef.current = deep.depth
+      setState((s) => {
+        const out = settleRefresh(s, deep, loadedDepth)
+        return { ...s, rows: out.rows, next: out.next, requests, loaded: true, error: '' }
+      })
+    } catch (err) {
+      if (mine !== gen.current) return
+      wantRef.current = depthRef.current
+      setPageError(errorText(err))
     }
   }, [dm])
 
@@ -232,6 +280,8 @@ function useInbox ({ ready, dm, dmVersion, pageKey }) {
     if (seenPage.current === pageKey) return
     seenPage.current = pageKey
     gen.current++
+    depthRef.current = 1
+    wantRef.current = 0
     setState({ rows: [], next: null, requests: false, loaded: false, error: '' })
     setPageError('')
   }, [pageKey])
@@ -241,11 +291,15 @@ function useInbox ({ ready, dm, dmVersion, pageKey }) {
   }, [ready, dmVersion, list])
 
   // One page at a time; a failed page waits for the footer retry or a pull.
+  // -> 'ok', 'error', 'busy' (a page is already coming), 'stale' (a refresh
+  // moved the list under it) or 'none' (no next page).
   const busy = useRef(false)
   const loadMore = useCallback(async () => {
     const mine = gen.current
     const cursor = nextRef.current
-    if (!cursor || busy.current) return
+    if (!cursor) return 'none'
+    if (busy.current) return 'busy'
+    let result = 'ok'
     busy.current = true
     setLoadingMore(true)
     setPageError('')
@@ -260,15 +314,59 @@ function useInbox ({ ready, dm, dmVersion, pageKey }) {
           const have = new Set(s.rows.map((row) => row.peer))
           return { ...s, rows: s.rows.concat(page.filter((row) => row && !have.has(row.peer))), next: r.next || null }
         })
+        depthRef.current += 1
+      } else {
+        result = 'stale'
       }
     } catch (err) {
       if (mine === gen.current) setPageError(errorText(err))
+      result = 'error'
     }
     busy.current = false
     setLoadingMore(false)
+    return result
   }, [dm])
 
-  return { ...state, list, loadMore, loadingMore, pageError }
+  // A search covers the whole inbox, not only the pages loaded: while text is
+  // typed (`needle`, empty when no search is on or the tab is off screen) and more pages
+  // exist, page through the rest on the device, one page at a time with a
+  // pause between them. Changing the text, clearing it, leaving the screen or
+  // an error ends the walk; the budget is kept across keystrokes and starts
+  // over only when the search ends.
+  const [paging, setPaging] = useState(false)
+  const spent = useRef(0)
+  const [walkRound, setWalkRound] = useState(0)
+  // The person asks to go on after the budget ran out: a new budget.
+  const searchMore = useCallback(() => {
+    spent.current = 0
+    setWalkRound((n) => n + 1)
+  }, [])
+  const hasNext = state.next !== null
+  useEffect(() => {
+    if (needle === '') spent.current = 0
+    if (!ready || needle === '' || !hasNext) return undefined
+    const run = { alive: true }
+    let failed = false
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+    const walk = async () => {
+      setPaging(true)
+      while (run.alive && searchPaging({ needle, next: nextRef.current, pages: spent.current, failed })) {
+        spent.current++
+        if (await loadMore() === 'error') failed = true
+        if (!run.alive) return
+        await wait(SEARCH_PAGE_GAP_MS)
+      }
+      if (run.alive) setPaging(false)
+    }
+    walk()
+    return () => {
+      run.alive = false
+      setPaging(false)
+    }
+  }, [ready, needle, hasNext, pageKey, loadMore, walkRound])
+
+  const searchSpent = needle !== '' && hasNext && !paging && spent.current >= SEARCH_PAGES_MAX
+  return { ...state, list, loadMore, loadingMore, pageError, paging: paging && needle !== '' && !pageError, searchSpent, searchMore }
 }
 
 function matches (text, query) {
@@ -299,7 +397,8 @@ export function Conversas ({
   if (active) shownOnce.current = true
   const allowed = conversasReadsAllowed({ active, shownOnce: shownOnce.current })
 
-  const inbox = useInbox({ ready: ready && allowed, dm, dmVersion: node.dmVersion, pageKey })
+  // Search text reaches the inbox only while the tab is on screen: leaving it ends the paging.
+  const inbox = useInbox({ ready: ready && allowed, dm, dmVersion: node.dmVersion, pageKey, needle: active ? query.trim().toLocaleLowerCase('pt-BR') : '' })
   const acting = useActing()
   const snapshotBinding = memberSnapshotBinding({ node, acting, pageKey })
   const groups = useGroupRows({ enabled: hosted && allowed && pageKey === null, request: node.request, versions: node.groupVersions, seenTick, binding: snapshotBinding })
@@ -388,7 +487,7 @@ export function Conversas ({
   }, [showInbox])
 
   const names = useNames()
-  const { resolveMany, profileOf } = names
+  const { resolveMany, profileOf, learnVerified, forgetVerified, isPeeked, peekScope } = names
   const peers = useMemo(() => inbox.rows.map((r) => r.peer), [inbox.rows])
   useEffect(() => {
     if (peers.length > 0) resolveMany(peers)
@@ -431,6 +530,48 @@ export function Conversas ({
   // The sheet's "Conversas recentes": the loaded private conversations,
   // newest first (mergeRows order).
   const recent = useMemo(() => merged.filter((row) => row.kind === 'dm').slice(0, RECENT_MAX).map((row) => row.peer), [merged])
+
+  // A person the node has no profile for (not followed) is named in the list
+  // the way an open conversation names its header: the index hints, then a
+  // node-verified diary.peek (rowPeek.js). Only the rows near the top, once per
+  // scope, one at a time, and only while this tab is on screen and online;
+  // the core node refuses the peek and the row keeps "Pessoa".
+  const rowPeers = useMemo(() => data.filter((row) => row.kind === 'dm').map((row) => row.peer), [data])
+  const peekLatest = useRef({})
+  peekLatest.current = { rowPeers, profileOf, isPeeked, learnVerified, forgetVerified, request: node.request, peekScope }
+  const peekTried = useRef(new Set())
+  const peekRun = useRef(0)
+  const peekActive = useRef(null)
+  const peekGate = hosted && ready && active && node.visible !== false && node.online !== false
+  useEffect(() => {
+    if (!peekGate) {
+      peekRun.current++
+      peekActive.current = null
+      return undefined
+    }
+    const scope = peekLatest.current.peekScope
+    // A walk of this scope is already running and re-plans on its own.
+    if (peekActive.current !== null && peekActive.current.scope === scope) return undefined
+    const run = ++peekRun.current
+    const current = () => peekRun.current === run && peekLatest.current.peekScope === scope
+    peekActive.current = { run, scope }
+    runRowPeeks({
+      plan: () => planRowPeeks({ peers: peekLatest.current.rowPeers, profileOf: peekLatest.current.profileOf, isPeeked: peekLatest.current.isPeeked, tried: peekTried.current, scope }),
+      tried: peekTried.current,
+      scope,
+      read: (peer) => readPeerEntry(peer, {
+        fetchMember,
+        peek: (params) => diaryPeekSlots.run(() => current() ? peekLatest.current.request('diary.peek', params) : null, { front: true })
+      }),
+      current,
+      learn: (peer, entry) => peekLatest.current.learnVerified([[peer, entry]], scope),
+      forget: (peer) => peekLatest.current.forgetVerified([peer], scope)
+    }).then(() => {
+      if (peekActive.current !== null && peekActive.current.run === run) peekActive.current = null
+    })
+    return undefined
+  }, [peekGate, rowPeers, peekScope])
+  useEffect(() => () => { peekRun.current++ }, [])
 
   const refresh = useCallback(async () => {
     setRefreshing(true)
@@ -542,6 +683,19 @@ export function Conversas ({
         <Pill label={RETRY_LABEL} onPress={() => inbox.loadMore()} />
       </View>
     )
+  } else if (needle !== '' && inbox.paging) {
+    // The search is still paging through older conversations: the same
+    // skeleton as a first load, never "nada encontrado" while pages remain.
+    footer = <View accessible accessibilityLabel='Buscando conversas' accessibilityLiveRegion='polite'>{[0, 1].map((key) => <SkeletonRow key={key} />)}</View>
+  } else if (needle !== '' && inbox.searchSpent) {
+    // The walk spent its budget with older conversations still unread: say so
+    // and let the person go on, never "nada encontrado" while pages remain.
+    footer = (
+      <View style={styles.pad}>
+        <Soft>{items.length === 0 ? SEARCH_SPENT_EMPTY : SEARCH_SPENT_MORE}</Soft>
+        <Pill label='Buscar mais' onPress={() => inbox.searchMore()} />
+      </View>
+    )
   } else if (items.length === 0 && !partial && (ready || needle !== '' || filter === 'grupos')) {
     if (needle !== '') footer = <EmptyState icon='conversas' title='Nenhuma conversa encontrada.' actionLabel='Limpar busca' onAction={() => setQuery('')} />
     else if (filter === 'todas') footer = <EmptyState icon='conversas' title={EMPTY_TEXT} body={EMPTY_BODY} actionLabel={typeof onComposing === 'function' ? 'Nova conversa' : undefined} onAction={typeof onComposing === 'function' ? () => onComposing(true) : undefined} secondaryLabel='Nova comunidade' onSecondary={pageKey === null ? () => setCreating(true) : undefined} />
@@ -571,6 +725,7 @@ export function Conversas ({
   return (
     <View style={styles.root}>
       <RefreshableList
+        perfId='conversas'
         data={data}
         keyExtractor={(row) => row.key}
         renderItem={renderItem}

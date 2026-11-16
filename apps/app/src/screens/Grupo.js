@@ -59,19 +59,20 @@ import { MAX_TEXT, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { countChars } from '../format'
 import { groupRows, replyPreview } from '../group-screen'
-import { pinToEnd } from '../dm-screen'
+import { heldBubble, pinToEnd } from '../dm-screen'
 import { UNNAMED, readsAs, whoOf } from '../who'
 import { copyText } from '../share'
 import { shareNav } from '../shareNav'
 import {
   AS_PAGE_LABEL, DEVICE_APPROVAL_TEXT, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_RESERVE_TEXT, DEVICE_WAIT_TEXT,
   EMPTY_PAGES, OWN_LABEL, PAGE_GROUP_LOADING_TEXT, PAGE_NO_KEY_TEXT, PAGE_JOIN_LABEL, PAGE_LEAVE_LABEL, PAGE_REKEYING_TEXT, PAGE_SEAL_AGAIN_LABEL, PRIVATE_LABEL, REKEY_PENDING_LABEL,
-  applyPage, can, canWriteHere, reserveReachedAny, needsReserveConfirm, itemsOf, knownVisibility, membersLabel, needsDeviceJoin, pageCan, pagePostVisibility, postAsPage, readAsPage, pageGroupErrorText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, roleOf, sealRaced, sealedLabel, visibilityLabel
+  applyPage, mergeNewest, reloadDone, reloadWalks, can, canWriteHere, reserveReachedAny, needsReserveConfirm, itemsOf, knownVisibility, membersLabel, needsDeviceJoin, pageCan, pagePostVisibility, postAsPage, readAsPage, pageGroupErrorText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, roleOf, sealRaced, sealedLabel, visibilityLabel
 } from '../groups'
 import { Btn, ConfirmStack, ErrorText, Notice, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { Avatar } from '../ui/Avatar'
 import { Bubble } from '../ui/Bubble'
+import { ChatSheetProvider } from '../ui/ChatSheetHost'
 import { SwipeReply } from '../ui/SwipeReply'
 import { JumpToEnd } from '../ui/JumpToEnd'
 import { awayCount, jumpVisible } from '../chatGestures'
@@ -102,7 +103,7 @@ import { memberKeyOf, useActing } from './Conversa'
 import { shouldRedirectToCommunity } from '../groupRedirect'
 import { GrupoAjustes } from './GrupoAjustes'
 import { composePlan, stagedVoice, voiceUploadError } from '../attach-plan'
-import { publicGroupRefusal } from '../wordCheck'
+import { publicGroupPreviewRefusal, publicGroupRefusal } from '../wordCheck'
 import { chatMediaRefs, followAutocorrect, mediaPostLanded, retryChatSend, runChatSend, stagedOf } from '../chatSend'
 import { ChatMedia } from '../ui/ChatMedia'
 import { useChatAttachments } from '../ui/AttachSheet'
@@ -126,7 +127,11 @@ const CHECK_NOT_LANDED = 'Não foi aplicado. Você pode tentar de novo.'
 const READERS = ['creator', 'admin', 'member']
 const JOINABLE = [null, 'left', 'pending']
 
-export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage, onOpenMention, onReport, onSeen, isTop = true }) {
+export function Grupo (props) {
+  return <ChatSheetProvider><GrupoScreen {...props} /></ChatSheetProvider>
+}
+
+function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage, onOpenMention, onReport, onSeen, isTop = true }) {
   const styles = useStyles(makeStyles)
   const avoidKeyboard = useKeyboardAvoidEnabled()
   // A list row under the composer is not seen, and measureInWindow reports
@@ -248,6 +253,8 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   const seqRef = useRef(0)
   const storeRef = useRef(store)
   storeRef.current = store
+  const walksRef = useRef(null)
+  if (walksRef.current === null) walksRef.current = reloadWalks()
   const onSeenRef = useRef(onSeen)
   onSeenRef.current = onSeen
   const cutRef = useRef(null)
@@ -278,12 +285,10 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     }
   }, [request, group])
 
-  const commitRead = useCallback((read, before) => {
+  // What a committed read settles besides the store: the overrides it may
+  // clear and, for the newest page, the read's meta.
+  const noteRead = useCallback((read, newest) => {
     const context = reactionContextRef.current
-    setStore((prev) => {
-      const next = applyPage(before === null ? EMPTY_PAGES : prev, read, before)
-      return before !== null && next.stale ? prev : next
-    })
     const unsure = new Map(context.unsure)
     setReactionOverrides((prev) => {
       const next = new Map(prev)
@@ -296,7 +301,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
       }
       return next
     })
-    if (before === null) {
+    if (newest) {
       setMeta({
         sealed: Number.isSafeInteger(read.sealed) ? read.sealed : 0,
         state: typeof read.state === 'string' ? read.state : 'ok',
@@ -305,6 +310,14 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
       })
     }
   }, [])
+
+  const commitRead = useCallback((read, before) => {
+    setStore((prev) => {
+      const next = applyPage(before === null ? EMPTY_PAGES : prev, read, before)
+      return before !== null && next.stale ? prev : next
+    })
+    noteRead(read, before === null)
+  }, [noteRead])
 
   // As a page, the node reads first: a private group is shown from that
   // read; a public one, or one the node has not answered for (the service's
@@ -334,13 +347,63 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   }, [request, group, node, asPage.page, asPage.key])
   const pageVisNow = () => (pageVisRef.current.id === asPage.key + ':' + group ? pageVisRef.current.value : null)
 
+  // The older pages of a reload, re-read into a local copy that replaces the
+  // loaded ones in one commit at the end, so the rows being read never
+  // vanish. A superseded walk commits nothing; a failed or stale older page
+  // ends the walk and keeps the merged list ("Mensagens anteriores" still
+  // reads on from there).
+  const walkOlder = useCallback(async (walk, read) => {
+    const walks = walksRef.current
+    // An older page loaded meanwhile may have deepened the target.
+    const goal = () => walks.current(walk.token) ? walks.target() : walk.target
+    let local = applyPage(EMPTY_PAGES, read, null)
+    const olderReads = []
+    let reached = true
+    while (!reloadDone(local, goal())) {
+      const before = local.next
+      let older = null
+      try {
+        older = await readGroup(before)
+      } catch {}
+      if (!walks.current(walk.token)) return
+      const next = older === null ? null : applyPage(local, older, before)
+      if (next === null || next.stale) {
+        // The merged list stays, old-version pages included (a newly hidden
+        // post shows until then): no list jump, and the next walk corrects it.
+        reached = false
+        break
+      }
+      local = next
+      olderReads.push(older)
+    }
+    const target = goal()
+    if (!walks.end(walk.token) || !reached || target === null) return
+    setStore(local)
+    for (const older of olderReads) noteRead(older, false)
+  }, [readGroup, noteRead])
+
+  // A version reload keeps the reading position. The fresh newest page is
+  // merged over the loaded pages at once, so a message just sent shows and
+  // the caller goes on (scroll, spinner) without waiting for the older pages
+  // the walk re-reads.
   const readNewest = useCallback(async () => {
-    const read = await readGroup()
-    commitRead(read, null)
+    const walks = walksRef.current
+    const walk = walks.begin(storeRef.current)
+    let read
+    try {
+      read = await readGroup()
+    } catch (err) {
+      walks.end(walk.token)
+      throw err
+    }
+    if (!walks.current(walk.token)) return read
+    setStore((prev) => mergeNewest(prev, read))
+    noteRead(read, true)
     const mine = asPage.page ? pageRoleOf(read) : null
     if (mine !== null) setPageRole(mine)
+    walkOlder(walk, read)
     return read
-  }, [readGroup, commitRead, asPage.page])
+  }, [readGroup, noteRead, walkOlder, asPage.page])
 
   // The call carries the newest painted row, so the node marks that post and a
   // message that lands after the paint stays unread. group.seen emits nothing,
@@ -392,6 +455,8 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
         if (mine === seqRef.current) setLoadError(errorText(err))
       }
     } else if (fresh) {
+      walksRef.current.reset()
+      storeRef.current = EMPTY_PAGES
       setStore(EMPTY_PAGES)
     }
     if (mine !== seqRef.current) return
@@ -426,6 +491,9 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   useEffect(() => {
     if (seenPage.current === asPage.key) return
     seenPage.current = asPage.key
+    // The next reload must not walk back to the old identity's position.
+    walksRef.current.reset()
+    storeRef.current = EMPTY_PAGES
     setStore(EMPTY_PAGES)
     setPageRole(null)
     setPageError('')
@@ -453,6 +521,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
       if (next.stale) {
         await readNewest()
       } else {
+        walksRef.current.deepen(next)
         commitRead(read, before)
       }
     } catch (err) {
@@ -514,11 +583,16 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     setCheck({ change, verdict, retry })
   }, [verify])
 
+  // A retry of a held post failed for sure, so it still has not landed: the
+  // faded bubble stays with "Tentar de novo" and "Dispensar", as before the
+  // retry, and nothing is sent until the person taps one.
+  const holdNotLanded = (change, retry) => setCheck({ change, verdict: 'not-landed', retry })
+
   // `text` is the original text: a retry after an uncertain post resends it,
   // never whatever the draft holds by then.
   // A page's statement is signed once. An unknown outcome keeps err.retry (the
   // same signed bytes) for settle's "tentar de novo"; nothing signs again.
-  const pageSend = async (fn, text, sentAt) => {
+  const pageSend = async (fn, text, sentAt, retrying = false) => {
     setPagePending(true)
     setPageError('')
     setSealAgain(null)
@@ -533,13 +607,23 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
       readNewest().then(() => scrollToEnd(), () => {})
     } catch (err) {
       if (err && err.uncertain === true && typeof err.retry === 'function') {
-        setPostHold(text)
-        settle({ action: 'post', diary: asPage.key, text, sentAt }, () => pageSend(err.retry, text, sentAt))
+        // The held text is a faded bubble now: the composer is free.
+        setDraft((d) => (d === text ? '' : d))
+        clearFollowed(inFlightRef.current, text)
+        setPostHold({ text, at: Date.now() })
+        settle({ action: 'post', diary: asPage.key, text, sentAt }, () => pageSend(err.retry, text, sentAt, true))
       } else if (sealRaced(err)) {
+        // The page's key changed: the same envelope cannot land. The held
+        // text goes back to the composer and PAGE_SEAL_AGAIN_LABEL seals it anew.
+        if (retrying) {
+          setPostHold(null)
+          setDraft((d) => (d.trim() === '' ? text : d))
+        }
         setSealAgain(text)
         setPageError(pageGroupErrorText(err))
         readNewest().catch(() => {})
       } else {
+        if (retrying) holdNotLanded({ action: 'post', diary: asPage.key, text, sentAt }, () => pageSend(fn, text, sentAt, true))
         setPageError(pageGroupErrorText(err))
       }
       inFlightRef.current = null
@@ -608,7 +692,6 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
       return
     }
     setCheck(null)
-    setPostHold(null)
     const sentAt = Date.now()
     // A retry (heldCard defined) may run after the draft changed: never armed.
     inFlightRef.current = heldCard === undefined ? { text, at: sentAt, followed: false } : null
@@ -632,14 +715,22 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     })
     const followed = inFlightRef.current
     inFlightRef.current = null
+    const replyKeyOf = replyTo ? replyTo.writer + ':' + replyTo.seq : null
     if (r.ok) {
       setDraft((d) => (d === text ? '' : d))
       clearFollowed(followed, text)
-      if (replyTo) setReplyKey((k) => (k === replyTo.writer + ':' + replyTo.seq ? null : k))
+      if (replyKeyOf !== null) setReplyKey((k) => (k === replyKeyOf ? null : k))
+      setPostHold(null)
       readNewest().then(() => scrollToEnd(), () => {})
     } else if (r.uncertain) {
-      setPostHold(text)
-      settle({ action: 'post', diary: ownKey, text, sentAt, replyKey: replyTo ? replyTo.writer + ':' + replyTo.seq : null }, () => sendPost(text, replyTo, card))
+      setDraft((d) => (d === text ? '' : d))
+      clearFollowed(followed, text)
+      // As in a conversation, the faded bubble holds the reply too.
+      if (replyKeyOf !== null) setReplyKey((k) => (k === replyKeyOf ? null : k))
+      setPostHold({ text, at: Date.now() })
+      settle({ action: 'post', diary: ownKey, text, sentAt, replyKey: replyKeyOf }, () => sendPost(text, replyTo, card))
+    } else if (heldCard !== undefined) {
+      holdNotLanded({ action: 'post', diary: ownKey, text, sentAt, replyKey: replyKeyOf }, () => sendPost(text, replyTo, card))
     }
   }
 
@@ -809,7 +900,8 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     if (mediaHold) return retryMedia()
     // Before every path below (a caption, a page's statement, plain text). The
     // draft is kept, so the person can edit it.
-    const refused = publicGroupRefusal(knownVisibility({ page: asPage.page, info, epoch: meta.epoch, pagePrivate: pageVis === 'private' }), draft)
+    const visibility = knownVisibility({ page: asPage.page, info, epoch: meta.epoch, pagePrivate: pageVis === 'private' })
+    const refused = publicGroupRefusal(visibility, draft) || publicGroupPreviewRefusal(visibility, linkDraft.view)
     setDraftRefusal(refused)
     if (refused !== '') return
     if (attachments.items.length > 0 && !asPage.page) {
@@ -1331,7 +1423,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
           {check.verdict === 'not-landed'
             ? <Pill label='Tentar de novo' filled onPress={() => { setCheck(null); check.retry() }} />
             : <Pill label='Conferir' filled onPress={() => settle(check.change, check.retry)} />}
-          <Pill label='Dispensar' onPress={() => setCheck(null)} />
+          <Pill label='Dispensar' onPress={() => { setCheck(null); if (check.change.action === 'post') setPostHold(null) }} />
         </View>
       </View>
       )
@@ -1548,7 +1640,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     composer = (
       <ChatComposer
         value={draft}
-        onChangeText={(t) => { inFlightRef.current = followAutocorrect(inFlightRef.current, t, Date.now()); setDraft(t); setPostHold(null) }}
+        onChangeText={(t) => { inFlightRef.current = followAutocorrect(inFlightRef.current, t, Date.now()); setDraft(t) }}
         onSend={sendDraft}
         sending={post.pending || pagePending || sendingMedia}
         sendDisabled={!canPost || !node.online || left < 0 || postHold !== null || mediaBlocked}
@@ -1562,6 +1654,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
         placeholder={asPage.page && pageVis === null ? 'Carregando o grupo' : (meta.state === 'rekey-pending' || awaitingKey ? (asPage.page ? PAGE_REKEYING_TEXT : REKEY_PENDING_LABEL) : 'Mensagem')}
         accessibilityLabel='mensagem para o grupo'
         reply={replyBar ? { name: replyBar.name, text: replyBar.text, senderKey: replyBar.senderKey, mine: replyBar.mine } : null}
+        onOpenReply={replyBar ? () => scrollToKey(replyKey) : undefined}
         onCancelReply={() => setReplyKey(null)}
         notice={notes}
         ownKey={ownKey}
@@ -1606,6 +1699,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
       <OfflineNote />
       <EmbedBandBottom.Provider value={composer ? band : null}>
         <RefreshableList
+          perfId='grupo'
           listRef={listRef}
           data={reader ? rows : []}
           keyExtractor={(row) => row.key}
@@ -1621,7 +1715,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
                 : null}
             </View>
           }
-          ListFooterComponent={<View>{reactionError ? <View style={styles.note}><ErrorText>{reactionError}</ErrorText></View> : null}{act.error ? <View style={styles.note}><ErrorText>{act.error}</ErrorText></View> : null}{banNote}{checkNote}</View>}
+          ListFooterComponent={<View>{heldBubble(postHold) !== null ? <Bubble item={heldBubble(postHold)} mine status='uncertain' shape='single' /> : null}{reactionError ? <View style={styles.note}><ErrorText>{reactionError}</ErrorText></View> : null}{act.error ? <View style={styles.note}><ErrorText>{act.error}</ErrorText></View> : null}{banNote}{checkNote}</View>}
           onRefresh={() => { setLookupTick((n) => n + 1); load(true) }}
           refreshing={refreshing}
           keepVisiblePosition

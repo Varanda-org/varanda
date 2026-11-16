@@ -12,7 +12,8 @@ const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const crypto = require('hypercore-crypto')
 const { WebSocketServer, WebSocket } = require('ws')
 const { BLOCK_MAX } = require('@varanda/rpc')
-const { createCert, createSeederCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
+const { createCert, createSeederCert, createModeratorCert, createIssuerCert, createIssuedCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
+const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { memberCertRecord, profileRecord, postRecord, repostRecord, followRecord } = require('@varanda/core/lib/records')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { createBrowserNode } = require('../lib/node')
@@ -304,7 +305,12 @@ test('diary.peek: a blocked author reads as unavailable, except its name and @no
   t.timeout(90000)
   const assoc = association()
   const now = Date.now()
-  const X = await diary(t, [...head(assoc, 'Xis'), () => postRecord({ text: 'de xis', at: iso(now - HOUR) })])
+  const since = '2024-05-06T07:08:09.000Z'
+  const X = await diary(t, [
+    (key) => memberCertRecord(createCert({ member: key, date: since }, assoc.kp)),
+    () => profileRecord({ name: 'Xis', bio: '' }),
+    () => postRecord({ text: 'de xis', at: iso(now - HOUR) })
+  ])
   const x = hex(X.key)
   const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [X] })
   const { web, internal } = await webNode(t, assoc, seeder.url)
@@ -313,6 +319,7 @@ test('diary.peek: a blocked author reads as unavailable, except its name and @no
   const open = await web.request('diary.peek', { author: x, seqs: [2], profileSeq: 1 })
   t.alike(open.entries.map((e) => e.seq), [2])
   t.is(open.profile.name, 'Xis')
+  t.is(open.certDate, since, 'the date of the verified block-0 certificate')
 
   await web.request('block.set', { key: x, on: true })
   const hidden = await errorOf(web.request('diary.peek', { author: x, seqs: [2], profileSeq: 1 }))
@@ -324,11 +331,37 @@ test('diary.peek: a blocked author reads as unavailable, except its name and @no
   t.alike(named.entries, [], 'no post, even with a seq asked')
   t.alike(named.invalid, [])
   t.alike(named.missing, [])
+  t.is(named.certDate, null, 'no membership date for a blocked key')
 
   await web.request('block.set', { key: x, on: false })
   const back = await web.request('diary.peek', { author: x, seqs: [2] })
   t.alike(back.entries.map((e) => e.seq), [2])
   t.alike(internal, [])
+})
+
+test('diary.peek certDate: the own v1 date, and null once the own v2 issuer is revoked', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [] })
+  const v1 = '2023-01-02T03:04:05.000Z'
+  const plain = await webNode(t, assoc, seeder.url, { certify: false })
+  await plain.web.request('cert.add', { cert: createCert({ member: plain.key, date: v1 }, assoc.kp) })
+  await plain.web.request('sync.start', {})
+  t.is((await plain.web.request('diary.peek', { author: plain.key, seqs: [1] })).certDate, v1)
+
+  const issuerKp = crypto.keyPair()
+  const issuerHex = hex(issuerKp.publicKey)
+  const issuerCert = createIssuerCert({ issuer: issuerHex }, assoc.kp)
+  const storage = memoryNodeStorage()
+  const issued = await webNode(t, assoc, seeder.url, { storage, certify: false })
+  await issued.web.request('cert.add', { cert: createIssuedCert({ member: issued.key }, issuerKp, issuerCert) })
+  const modKp = crypto.keyPair()
+  const modCert = createModeratorCert({ moderator: hex(modKp.publicKey) }, assoc.kp)
+  await store.writeBlocklist(storage, createSnapshot({ seq: 1, blocked: [], revokedIssuers: [issuerHex] }, modKp, modCert))
+  await issued.web.request('sync.start', {})
+  t.is((await issued.web.request('diary.peek', { author: issued.key, seqs: [1] })).certDate, null, 'a revoked issuer vouches for no date')
+  t.alike(plain.internal, [])
+  t.alike(issued.internal, [])
 })
 
 // A member node with its conversation keys unlocked.

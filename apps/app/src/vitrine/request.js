@@ -43,6 +43,49 @@ function refuse (code, message) {
   throw new RpcError(code, message, { uncertain: false })
 }
 
+// The demo's outbox "seal": plain base64url (no padding) of the UTF-8 JSON,
+// reversible on purpose. The vitrine holds only public demo data; the real
+// node seals with a key derived from the passkey.
+const B64URL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+
+function toBox (value) {
+  const encoded = encodeURIComponent(JSON.stringify(value))
+  const bytes = []
+  for (let i = 0; i < encoded.length; i++) {
+    if (encoded[i] === '%') {
+      bytes.push(parseInt(encoded.slice(i + 1, i + 3), 16))
+      i += 2
+    } else {
+      bytes.push(encoded.charCodeAt(i))
+    }
+  }
+  let out = ''
+  for (let i = 0; i < bytes.length; i += 3) {
+    const n = (bytes[i] << 16) | ((bytes[i + 1] || 0) << 8) | (bytes[i + 2] || 0)
+    const chars = Math.min(4, Math.ceil(((bytes.length - i) * 4) / 3))
+    for (let j = 0; j < chars; j++) out += B64URL[(n >> (18 - 6 * j)) & 63]
+  }
+  return out
+}
+
+function fromBox (box) {
+  let acc = 0
+  let bits = 0
+  let encoded = ''
+  for (const ch of box) {
+    const v = B64URL.indexOf(ch)
+    if (v < 0) throw new Error('box')
+    acc = (acc << 6) | v
+    bits += 6
+    if (bits >= 8) {
+      bits -= 8
+      encoded += '%' + ((acc >> bits) & 255).toString(16).padStart(2, '0')
+      acc &= (1 << bits) - 1
+    }
+  }
+  return JSON.parse(decodeURIComponent(encoded))
+}
+
 // Like the app's node.request: resolve a result, reject a client error.
 // Each instance owns its state, so reopening a lab scenario resets it.
 export function createVitrineRequest (fixtures, options) {
@@ -62,6 +105,8 @@ export function createVitrineRequest (fixtures, options) {
   const reactions = { like: new Map(), repost: new Map() }
   const live = []
   const deleted = new Map()
+  // 'from:seq' -> 'kept' | 'declined', the demo's testimonial.decide.
+  const decisions = new Map()
   const logs = new Map()
   const roster = new Map()
   const association = data.association
@@ -76,8 +121,9 @@ export function createVitrineRequest (fixtures, options) {
   const groupReactors = new Map()
   const reactionKey = (group, target) => group + ':' + target.writer + ':' + target.seq
   // As the core fold: every member's reaction is kept, and only the 12
-  // emojis with the most reactors (ties by emoji) are shown.
-  const shownReactions = (rows) => rows.slice().sort((a, b) => b.count - a.count || compareText(a.emoji, b.emoji)).slice(0, GROUP_REACTIONS_MAX)
+  // emojis with the most reactors are shown, a tie to the emoji first used
+  // (rows keep that order: a new emoji is appended).
+  const shownReactions = (rows) => rows.map((row, first) => ({ row, first })).sort((a, b) => b.row.count - a.row.count || a.first - b.first).map(({ row }) => row).slice(0, GROUP_REACTIONS_MAX)
   for (const g of data.groups) {
     for (const item of g.items) {
       const others = data.members.filter((m) => m.author !== data.own).map((m) => m.author)
@@ -97,8 +143,8 @@ export function createVitrineRequest (fixtures, options) {
     return { type: 'username', username: p.username, member: p.author, date: data.now, association, issuer: association, issuerDate: data.now, issuerSignature: signature, signature }
   }
 
-  function postRecord ({ text, at, replyTo, quote, media }) {
-    return { type: 'post', text, at, replyTo, ...(quote ? { quote } : {}), ...(media ? { media } : {}) }
+  function postRecord ({ text, at, replyTo, quote, media, preview }) {
+    return { type: 'post', text, at, replyTo, ...(quote ? { quote } : {}), ...(media ? { media } : {}), ...(preview ? { preview } : {}) }
   }
 
   for (const p of profiles) {
@@ -122,7 +168,7 @@ export function createVitrineRequest (fixtures, options) {
   // Timing rows are registered in the author logs so open, peek and delete
   // behave like a fixture post. Reposts have no diary post record.
   if (options && options.large === true) {
-    const rows = largeFeed(data, 200)
+    const rows = largeFeed(data, 200, { rich: options.rich === true, embeds: options.embeds === true })
     data.feed.push(...rows)
     for (const row of rows) {
       if (row.kind !== 'post') continue
@@ -505,7 +551,7 @@ export function createVitrineRequest (fixtures, options) {
     // No seen sync offline: a signature the account call never uses, and a
     // merge that changes nothing.
     'seen.sign': () => ({ signature, prevHash: '0'.repeat(64) }),
-    'seen.merge': () => ({ avisos: { own: [], pages: {} }, pending: false, dmChanged: false, groupChanged: false, blocksChanged: false, caughtUp: [] }),
+    'seen.merge': () => ({ avisos: { own: [], pages: {} }, pending: false, dmChanged: false, groupChanged: false, blocksChanged: false, testimonialsChanged: false, caughtUp: [] }),
     'report.sign': signed,
     'appeal.sign': signed,
     'dm.reportSign': signed,
@@ -555,6 +601,21 @@ export function createVitrineRequest (fixtures, options) {
       const { seq } = append({ ...usernameRecord(p), date: stamp() })
       updateNames()
       return { changed: true, username: p.username, seq }
+    },
+    // Author first: an item of another identity is skipped, never dropped.
+    'outbox.seal': ({ id, author, association, kind, to, text, writtenAt }) => {
+      if (author !== data.own) refuse('USAGE', 'item da fila de saída de outra identidade')
+      return { box: toBox([1, id, author, association, kind, to, text, writtenAt]) }
+    },
+    'outbox.open': ({ box, id, author, association, kind, writtenAt }) => {
+      if (author !== data.own) refuse('USAGE', 'item da fila de saída de outra identidade')
+      let sealed = null
+      try {
+        sealed = fromBox(box)
+      } catch {}
+      if (!Array.isArray(sealed) || sealed.length !== 8 || sealed[0] !== 1 || sealed[1] !== id || sealed[2] !== author ||
+        sealed[3] !== association || sealed[4] !== kind || sealed[7] !== writtenAt) refuse('USAGE', 'item da fila de saída inválido')
+      return { to: sealed[5], text: sealed[6] }
     },
     'post.create': (params) => publish(params, 'post'),
     'post.reply': (params) => publish(params, 'reply'),
@@ -930,14 +991,30 @@ export function createVitrineRequest (fixtures, options) {
       sealed.set(result.ref, { text, nonce })
       return result
     },
-    'testimonial.pending': () => ({
-      items: testimonialPointersOf(data.own).pending.flatMap(({ from, seq }) => {
+    'testimonial.decide': ({ from, seq, state, ifNew }) => {
+      if (from === data.own) refuse('USAGE', 'referência inválida')
+      const ref = `${from}:${seq}`
+      if (!sealed.has(ref) || !liveEntry(from, seq)) refuse('USAGE', 'depoimento não encontrado')
+      if (state !== 'kept' && state !== 'declined') refuse('USAGE', 'estado inválido')
+      if (ifNew === true && decisions.has(ref)) return { changed: false }
+      if (decisions.get(ref) === state) return { changed: false }
+      decisions.set(ref, state)
+      return { changed: true }
+    },
+    'testimonial.pending': () => {
+      const index = testimonialPointersOf(data.own)
+      const rowsOf = (list) => list.flatMap(({ from, seq }) => {
         const opened = sealed.get(`${from}:${seq}`)
         const block = liveEntry(from, seq)
-        return opened && block ? [{ from, seq, text: opened.text, at: block.record.at }] : []
-      }),
-      incomplete: false
-    }),
+        return opened && block ? [{ from, seq, text: opened.text, at: block.record.at, state: decisions.get(`${from}:${seq}`) }] : []
+      })
+      const row = ({ from, seq, text, at }) => ({ from, seq, text, at })
+      return {
+        items: rowsOf(index.pending).filter((r) => r.state === undefined).map(row),
+        kept: rowsOf(index.unshown).filter((r) => r.state === 'kept').map(row),
+        incomplete: false
+      }
+    },
     'testimonial.show': ({ from, seq }) => {
       const opened = sealed.get(`${from}:${seq}`)
       const block = from === data.own ? null : liveEntry(from, seq)
@@ -1080,6 +1157,7 @@ export function createVitrineRequest (fixtures, options) {
       }
       const profile = all.find((e) => e.seq === profileSeq && e.record.type === 'profile')?.record
       const username = all.find((e) => e.seq === usernameSeq && e.record.type === 'username')?.record
+      const cert = all.find((e) => e.seq === 0)?.record
       return {
         key: author,
         length: all[all.length - 1].seq + 1,
@@ -1087,7 +1165,9 @@ export function createVitrineRequest (fixtures, options) {
         invalid,
         missing,
         profile: profile ? { name: profile.name, bio: profile.bio, avatar: profile.avatar || null } : null,
-        username: username ? username.username : null
+        username: username ? username.username : null,
+        // docs/rpc.md 5.27: the date of the block-0 member certificate.
+        certDate: typeof cert?.date === 'string' ? cert.date : null
       }
     }
   }

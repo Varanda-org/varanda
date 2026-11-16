@@ -1,0 +1,24 @@
+# Atualizador por imagem do Varanda (update.sh run), disparado por
+# varanda-update.timer. Instalado por `update.sh install`; passo a passo no
+# README, seção "Atualização por imagem (pull)". O registro fica em
+# /var/lib/varanda-update/update.log; o journal recebe só as linhas de log.
+#   systemctl list-timers varanda-update.timer
+#   journalctl -u varanda-update
+
+[Unit]
+Description=Atualizador por imagem do Varanda
+Documentation=https://github.com/Varanda-org/varanda/blob/main/README.md
+Wants=docker.service network-online.target
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/varanda-release/current/update.sh run
+# Uma troca com verificação de saúde e volta leva alguns minutos.
+TimeoutStartSec=30min
+# Um SIGTERM no meio da troca dispara a volta para a versão anterior, que
+# precisa de tempo para subir e passar na verificação de saúde.
+TimeoutStopSec=15min
+# Só o bash recebe o SIGTERM: os docker que a volta inicia seguem até o fim
+# dela (ou até TimeoutStopSec, quando o resto recebe SIGKILL).
+KillMode=mixed

@@ -13,7 +13,8 @@ export function origin () {
 
 export const shareCommunity = async ({ community, title }) => {
   const path = communityLink(community)
-  if (path === null) return ''
+  // The title is the community's name; callers disable the button until it loads.
+  if (path === null || title === '') return ''
   const base = origin()
   // An empty origin would hand the share sheet a relative path.
   if (base === '') {
@@ -21,6 +22,6 @@ export const shareCommunity = async ({ community, title }) => {
   }
   const url = base + path
   const nav = shareNav()
-  if (canShare(nav) && (await shareUrl(nav, { url, title: title === 'Comunidade' ? 'Varanda' : title })) !== 'failed') return ''
+  if (canShare(nav) && (await shareUrl(nav, { url, title })) !== 'failed') return ''
   return (await copyText(nav, url)) ? 'Link copiado.' : 'Não foi possível copiar o link.'
 }

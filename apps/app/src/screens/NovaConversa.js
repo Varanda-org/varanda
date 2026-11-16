@@ -12,7 +12,8 @@ import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
 import { useMemberSearch } from '../useMemberSearch'
-import { RECENT_MAX } from '../conversas'
+import { RECENT_MAX, withoutOwn } from '../conversas'
+import { useActing } from './Conversa'
 import { UNNAMED, whoOf } from '../who'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
@@ -63,7 +64,10 @@ function Body ({ onOpenThread, onNewCommunity, onNewGroup, recent, autoFocus }) 
   const node = useNode()
   const ownKey = node.passkey && node.passkey.status ? node.passkey.status.publicKey : null
   const search = useMemberSearch({ request: node.request, hosted: node.hosted === true, online: node.online, ownKey })
-  const hits = search.hits.filter((h) => h.author !== ownKey)
+  // Acting as a Página, its own key is as much "me" as the person's.
+  const acting = useActing()
+  const ownKeys = [ownKey, acting.kind === 'page' ? acting.key : null]
+  const hits = withoutOwn(search.hits, ownKeys, (h) => h.author)
   const names = useNames()
   const profileOf = names ? names.profileOf : null
   const listed = search.phase === 'ready' || search.phase === 'loading'
@@ -73,7 +77,7 @@ function Body ({ onOpenThread, onNewCommunity, onNewGroup, recent, autoFocus }) 
     if (names && typeof names.learn === 'function') names.learn(hit.author, { name: hit.name, username: hit.username })
     onOpenThread(hit.author)
   }
-  const recentPeers = (Array.isArray(recent) ? recent : []).filter((peer) => typeof peer === 'string' && peer !== ownKey).slice(0, RECENT_MAX)
+  const recentPeers = withoutOwn((Array.isArray(recent) ? recent : []).filter((peer) => typeof peer === 'string'), ownKeys).slice(0, RECENT_MAX)
   return (
     <ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle={styles.body}>
       <SearchField

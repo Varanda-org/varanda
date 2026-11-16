@@ -39,7 +39,9 @@ const resultKeys = {
   'inviteCard.verify': ['ok', 'reason'],
   'push.sign': ['signature'],
   'seen.sign': ['signature', 'prevHash'],
-  'seen.merge': ['avisos', 'pending', 'dmChanged', 'groupChanged', 'blocksChanged', 'caughtUp'],
+  'outbox.seal': ['box'],
+  'outbox.open': ['to', 'text'],
+  'seen.merge': ['avisos', 'pending', 'dmChanged', 'groupChanged', 'blocksChanged', 'testimonialsChanged', 'caughtUp'],
   'report.sign': ['signature'],
   'appeal.sign': ['signature'],
   'dm.reportSign': ['signature'],
@@ -131,9 +133,10 @@ const resultKeys = {
   'feed.read': ['items', 'skipped', 'skippedTruncated', 'future', 'futureTruncated', 'incomplete', 'incompleteTruncated'],
   'notices.list': ['notices', 'next', 'incomplete', 'supported', 'activity'],
   'profile.read': ['profiles', 'missing'],
-  'diary.peek': ['key', 'length', 'entries', 'invalid', 'missing', 'profile', 'username'],
+  'diary.peek': ['key', 'length', 'entries', 'invalid', 'missing', 'profile', 'username', 'certDate'],
   'testimonial.write': ['seq', 'ref'],
-  'testimonial.pending': ['items', 'incomplete'],
+  'testimonial.pending': ['items', 'kept', 'incomplete'],
+  'testimonial.decide': ['changed'],
   'testimonial.show': ['seq', 'ref'],
   'testimonial.delete': ['seq', 'deleted'],
   'scrap.write': ['seq', 'ref'],
@@ -574,6 +577,7 @@ function samples (f) {
   const to = `${f.own}:3`
   const nonce = 'v'.repeat(43)
   const card = { code: nonce, design: 'cordel', name: 'Ana', message: 'Vem pra praça.', expires: 1800000000 }
+  const queued = { id: '0123456789abcdef', author: f.own, association: 'c'.repeat(64), kind: 'post', writtenAt: '2026-11-15T12:00:00.000Z' }
   const params = {
     'session.open': {},
     'node.info': {},
@@ -613,6 +617,7 @@ function samples (f) {
     'diary.peek': { author: f.own, seqs: [3] },
     'testimonial.write': { to: member, text: 'Uma vizinha de muitas conversas boas.' },
     'testimonial.pending': {},
+    'testimonial.decide': { from: f.members[4].author, seq: 60, state: 'kept' },
     'testimonial.show': { from: f.members[4].author, seq: 60 },
     'testimonial.delete': { to: `${f.own}:38` },
     'scrap.write': { to: member, text: 'Oi, Cecília! Passei para deixar um abraço.' },
@@ -638,6 +643,8 @@ function samples (f) {
     'inviteCard.sign': card,
     'inviteCard.verify': { ...card, member: 'ab'.repeat(32), signature: '0'.repeat(128) },
     'push.sign': { action: 'on', nonce, endpoint: 'https://push.example.org/vitrine', p256dh: 'vitrine', auth: 'vitrine' },
+    'outbox.seal': { ...queued, to: null, text: 'Fica para depois.' },
+    'outbox.open': { ...queued, box: Buffer.from(JSON.stringify([1, queued.id, queued.author, queued.association, queued.kind, null, 'Fica para depois.', queued.writtenAt])).toString('base64url') },
     'seen.sign': { nonce, action: 'read' },
     'seen.merge': { blob: null, avisos: { own: [] }, unchanged: false },
     'report.sign': { nonce, target: member, reason: 'outro' },
@@ -722,6 +729,18 @@ function appSources (dir) {
     return entry.isDirectory() ? appSources(file) : entry.name.endsWith('.js') ? [file] : []
   })
 }
+
+test('the demo outbox seal opens as itself only, and skips another identity', async (t) => {
+  const { fixtures: f, request } = await load()
+  const item = { id: '00000000000000aa', author: f.own, association: 'c'.repeat(64), kind: 'reply', writtenAt: '2026-11-15T12:00:00.000Z' }
+  const text = 'Até já 😀\nde novo'
+  const { box } = await answer(t, request, 'outbox.seal', { ...item, to: `${f.own}:3`, text })
+  t.alike(await answer(t, request, 'outbox.open', { ...item, box }), { to: `${f.own}:3`, text })
+  await refused(t, request, 'outbox.open', { ...item, writtenAt: '2026-11-15T12:00:01.000Z', box }, 'USAGE', 'item da fila de saída inválido')
+  await refused(t, request, 'outbox.open', { ...item, box: 'QUFB' }, 'USAGE', 'item da fila de saída inválido')
+  await refused(t, request, 'outbox.open', { ...item, author: f.members[2].author, box }, 'USAGE', 'item da fila de saída de outra identidade')
+  await refused(t, request, 'outbox.seal', { ...item, author: f.members[2].author, to: `${f.own}:3`, text }, 'USAGE', 'item da fila de saída de outra identidade')
+})
 
 test('every quoted RPC method used by the app has a documented vitrine answer', async (t) => {
   const { fixtures: f, createVitrineRequest } = await load()
@@ -1303,6 +1322,14 @@ test('depoimentos: fixtures validate, pending is shown, removed and revoked', as
   const pending = await call('testimonial.pending', {})
   t.alike(pending.items.map((i) => [i.from, i.seq]), [[bia, 60]], 'only the pending block, never a shown one')
   for (const item of pending.items) keys(t, item, ['from', 'seq', 'text', 'at'])
+  t.alike((await call('testimonial.pending', {})).kept, [], 'nothing kept yet')
+  await refused(t, request, 'testimonial.decide', { from: f.own, seq: 60, state: 'kept' }, 'USAGE', 'referência inválida')
+  await refused(t, request, 'testimonial.decide', { from: bia, seq: 60, state: 'nope' }, 'USAGE', 'parâmetro inválido: state')
+  t.alike(await call('testimonial.decide', { from: bia, seq: 60, state: 'kept' }), { changed: true })
+  t.alike(await call('testimonial.decide', { from: bia, seq: 60, state: 'kept' }), { changed: false }, 'same decision changes nothing')
+  t.alike((await call('testimonial.pending', {})).items, [], 'a kept one leaves the pending list')
+  t.alike((await call('testimonial.pending', {})).kept.map((i) => [i.from, i.seq]), [[bia, 60]])
+  t.alike(await call('testimonial.decide', { from: bia, seq: 60, state: 'declined', ifNew: true }), { changed: false }, 'ifNew keeps the decision')
   await refused(t, request, 'testimonial.show', { from: joao, seq: 3 }, 'USAGE', 'depoimento não encontrado')
   const shown = await call('testimonial.show', { from: bia, seq: 60 })
   t.alike(await call('testimonial.show', { from: bia, seq: 60 }), shown, 'showing again writes nothing')
@@ -1316,6 +1343,7 @@ test('depoimentos: fixtures validate, pending is shown, removed and revoked', as
   t.alike(await call('testimonial.delete', { to: shown.ref }), removed, 'a removed show answers its tombstone')
   t.alike((await call('diary.peek', { author: f.own, seqs: [shown.seq] })).missing, [shown.seq])
   t.alike((await call('testimonial.pending', {})).items, [], 'a removed show never returns to pending')
+  t.alike((await call('testimonial.pending', {})).kept.map((i) => [i.from, i.seq]), [[bia, 60]], 'a kept one returns to kept after its show is removed')
 
   // Lia revokes the one she wrote to João: João's show of it turns invalid.
   await refused(t, request, 'testimonial.delete', { to: `${f.own}:38`, about: cecilia }, 'USAGE', 'referência inválida')
@@ -1566,13 +1594,17 @@ test('group reactions outside the 12 shown stay counted and come back, as in the
   const group = f.groups[0].group
   const target = { writer: item.writer, seq: item.seq }
   const read = async () => (await request('group.read', { group })).items.find((p) => p.writer === target.writer && p.seq === target.seq)
-  // An emoji that sorts first pushes the last of the twelve out of view.
+  // A tie goes to the emoji first used: a 13th emoji is the one cut, even
+  // one whose text sorts before the twelve.
   await answer(t, request, 'group.react', { group, target, emoji: '\u{1f600}' })
   const shown = (await read()).reactions.map((r) => r.emoji)
-  t.alike(shown, ['\u{1f600}', ...twelve.slice(0, 11)])
+  t.alike(shown, twelve)
+  t.absent((await read()).reactions.some((r) => r.mine), 'the own emoji is counted but not shown')
   const who = await answer(t, request, 'group.reactors', { group, target })
   t.alike(who.reactions.map((r) => r.emoji), shown, 'group.reactors lists the same 12')
-  // Taking the reaction back shows the hidden emoji again with its count.
+  // Moving the reaction onto a shown emoji counts it there.
+  await answer(t, request, 'group.react', { group, target, emoji: twelve[11] })
+  t.alike((await read()).reactions[0], { emoji: twelve[11], count: 2, mine: true })
   await answer(t, request, 'group.react', { group, target, emoji: '' })
   t.alike((await read()).reactions, twelve.map((emoji) => ({ emoji, count: 1, mine: false })))
 })
