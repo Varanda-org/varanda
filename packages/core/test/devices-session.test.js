@@ -44,7 +44,7 @@ async function person (t) {
   await client.request('session.open')
   const { publicKey } = await client.request('identity.create')
   await client.request('cert.add', { cert: createCert({ member: publicKey }, kp) })
-  return { ctx: { dataDir, association }, events, call: (method, params) => client.request(method, params) }
+  return { ctx: { dataDir, association }, session, events, call: (method, params) => client.request(method, params) }
 }
 
 // Appends records to the own diary between requests (the session closes
@@ -112,4 +112,26 @@ test('session: a disconnected device is told so, refuses to disconnect, and reco
   t.alike(named(p.events, 'devices.changed'), [{ off: true }, { off: false }])
   const again = await p.call('device.reconnect', { name: 'Celular' }).catch((err) => err)
   t.is(again.message, devices.NOT_OFF)
+})
+
+// detach() lands during the refresh run (or, under load, just before it):
+// either way the run did not finish for this connection, so no mark.
+test('session: a disconnect whose refresh is cut by detach refuses and writes nothing', { timeout: 120000 }, async (t) => {
+  const p = await person(t)
+  await p.call('device.hello', { name: 'Celular' })
+  const lost = rand()
+  const pair = { group: rand(), writer: rand() }
+  const before = await onDiary(p.ctx, async ({ diary, key }) => {
+    await store.appendRecord(diary, groupJoinRecord({ ...pair, on: true }))
+    await store.appendRecord(diary, devices.sealedRecord({ v: 1, id: lost, name: 'Perdido', on: true, writers: [pair] }, key))
+    return diary.length
+  })
+  const pending = p.call('device.disconnect', { id: lost }).catch((err) => err)
+  await new Promise((resolve) => setTimeout(resolve, 2000))
+  await p.session.detach()
+  const e = await pending
+  t.is(e.code, 'USAGE')
+  t.is(e.message, 'conexão encerrada')
+  t.is(await onDiary(p.ctx, async ({ diary }) => diary.length), before, 'no group-cut written')
+  t.alike(named(p.events, 'groups.changed'), [])
 })

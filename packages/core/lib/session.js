@@ -523,13 +523,17 @@ function createSession ({
   // the writer cores up to what the peers hold, so the marks keep what the
   // lost device wrote before the call. A user's run is preempted as by any
   // write and restarted after the call (restartWhenIdle). Skipped while the
-  // app is backgrounded, closed or in the error state.
-  async function refreshGroupCores () {
+  // app is backgrounded, closed or in the error state. A run aborted before
+  // its end (detach, or a stop from outside) refuses as the web node does:
+  // a mark is never raised, so marks over a partial refresh would cut the
+  // lost device short for good. A plain timeout of the bound proceeds.
+  async function refreshGroupCores (epoch) {
     if (closed || errorState || suspended) return
     if (run !== null) await stopRun('preempted')
     startRun({ once: true, timeoutMs: DEVICE_REFRESH_MS, internal: true })
     const r = run
     if (r !== null) await r.done
+    if (epoch !== connection || closed || (r !== null && r.reason !== null)) throw rpcError('USAGE', 'conexão encerrada')
   }
 
   function syncState () {
@@ -952,7 +956,7 @@ function createSession ({
     'device.disconnect': serial(async (params, epoch) => {
       // The refusals first, so a refused call starts no run.
       const { pairs } = await withStore((c) => member.deviceDisconnect(c, params, { write: false }))
-      if (pairs > 0) await refreshGroupCores()
+      if (pairs > 0) await refreshGroupCores(epoch)
       const r = await withStore((c) => member.deviceDisconnect(c, params))
       for (const group of r.groups) send('groups.changed', { group }, epoch)
       return { cut: r.cut, empty: r.empty }

@@ -2602,9 +2602,10 @@ function createBrowserSession ({
   // lent its cores yet, cannot hold them or cannot serve the read skips
   // it (never waits for the run's end and never preempts it); the next
   // length, the upkeep or a device.* call reads again.
-  // `deviceCheckLength` is the length last read for good: a skipped or
-  // failed read leaves it, so the same length is read again on its next
-  // report (and the upkeep pass also says off, see upkeep).
+  // `deviceCheckLength` is the length last read for good. The link reports
+  // each length once, so a skipped or failed read is not read again from
+  // here until a new length: the upkeep pass (see upkeep) reads the device
+  // state again and says off.
   let deviceChecking = false
   let deviceCheckNext = null
   async function deviceCheck (length) {

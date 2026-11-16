@@ -6004,7 +6004,8 @@ async function withDevices (ctx, fn) {
 // From the own diary entries -> { self, off }: this device's id (null
 // before its first hello) and whether it is disconnected (devices.selfOff).
 // { self: null, off: false } while locked: nothing is written then anyway.
-async function deviceStateIn (ctx, entries, ownHex) {
+// A failed read throws (refuseOffDevice); deviceStateIn reads it as on.
+async function deviceStateRead (ctx, entries, ownHex) {
   const keyPair = keyPairOf(ctx)
   if (keyPair === null) return { self: null, off: false }
   let key = null
@@ -6012,10 +6013,16 @@ async function deviceStateIn (ctx, entries, ownHex) {
     key = devices.deviceKey(keyPair.secretKey, b4a.from(ownHex, 'hex'))
     const self = await store.readDeviceId(ctx.storage, ownHex)
     return { self, off: devices.deviceView(entries, key, self, await deviceOwnPairs(ctx)).off }
-  } catch {
-    return { self: null, off: false }
   } finally {
     devices.wipeKey(key)
+  }
+}
+
+async function deviceStateIn (ctx, entries, ownHex) {
+  try {
+    return await deviceStateRead(ctx, entries, ownHex)
+  } catch {
+    return { self: null, off: false }
   }
 }
 
@@ -6029,9 +6036,10 @@ async function deviceOff (ctx) {
 // A disconnected device binds no new writer by hand either (group.join,
 // community.join, group.create, community.create): only device.reconnect,
 // after the passkey, brings it back (rpc.md 5.153). Checked before anything
-// is written; `entries` the own diary entries.
+// is written; `entries` the own diary entries. Fails closed: a failed read
+// of the device state refuses with its own error.
 async function refuseOffDevice (ctx, entries, ownHex) {
-  if ((await deviceStateIn(ctx, entries, ownHex)).off) throw new UsageError(devices.OFF_REFUSED)
+  if ((await deviceStateRead(ctx, entries, ownHex)).off) throw new UsageError(devices.OFF_REFUSED)
 }
 
 function canonicalName (name) {

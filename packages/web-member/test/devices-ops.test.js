@@ -200,6 +200,26 @@ test('no id and a cut current writer: off until reconnect, which re-enrols the c
   await t.exception(ops.deviceReconnect(d.ctx, { name: 'Tablet' }), new RegExp(devices.NOT_OFF))
 })
 
+test('a failed read of the device state refuses a join or create with its own error, and writes nothing', async (t) => {
+  const { d, community, general } = await twoDevices(t, { helloFirst: false })
+  const before = await diaryLength(d)
+  const read = store.readDeviceId
+  store.readDeviceId = async () => { throw new Error('kv quebrado') }
+  try {
+    await t.exception(ops.communityJoin(d.ctx, { community }), /kv quebrado/)
+    await t.exception(ops.groupJoin(d.ctx, { group: general }), /kv quebrado/)
+    await t.exception(ops.groupJoin(d.ctx, { group: rand(), community }), /kv quebrado/, 'a group not held yet')
+    await t.exception(ops.groupCreate(d.ctx, { name: 'Feira', join: 'open', community }), /kv quebrado/)
+    await t.exception(ops.communityCreate(d.ctx, { name: 'Outro', join: 'open' }), /kv quebrado/)
+  } finally {
+    store.readDeviceId = read
+  }
+  t.is(await diaryLength(d), before, 'nothing written')
+  // No device state yet (no hello) is not a failure: the create goes ahead.
+  t.is(await store.readDeviceId(d.storage, d.key), null)
+  await t.execution(ops.communityCreate(d.ctx, { name: 'Outro', join: 'open' }))
+})
+
 test('disconnect half way: the marks written stand and the call says it is incomplete', async (t) => {
   const { a, d, writers } = await twoDevices(t)
   await ops.deviceHello(a.ctx, { name: 'Celular' })
