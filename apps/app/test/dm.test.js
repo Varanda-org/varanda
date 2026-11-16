@@ -881,6 +881,11 @@ async function momentUI (file, options = {}) {
         effects.push(() => { prior?.cleanup?.(); slots[i].cleanup = fn() })
       }
     },
+    useRef (initial) {
+      const i = cursor++
+      if (!slots[i]) slots[i] = { ref: { current: initial } }
+      return slots[i].ref
+    },
     useMemo: (fn) => fn(),
     isValidElement: (value) => !!value?.type,
     cloneElement: (value, props) => element(value.type, { ...value.props, ...props })
@@ -920,6 +925,7 @@ async function momentUI (file, options = {}) {
     '../musicEmbed': {},
     '../richText': { hasRich: () => false },
     './ActionsSheet': { ActionsSheet: 'ActionsSheet', usableActions: (actions) => actions || [] },
+    './ChatSheetHost': { useChatSheet: () => null },
     './ChatMedia': {},
     './LinkCard': {},
     './MentionText': { MentionText: 'MentionText' },
