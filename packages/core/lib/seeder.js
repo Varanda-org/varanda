@@ -849,24 +849,27 @@ const ROOT_DENIALS_HARD = 2 * ROOT_CREATORS_MAX
 // The joins a diary's group cores are kept for, from its newest join per
 // writer (lib/group.js groupJoins) and its slot walk per group (lib/group.js
 // slotWalk, stepped by the scan: `walks` is group -> walk state). Only the
-// writers the walk counts or released qualify (a released one, or one cut
-// at 0, is held whole, like any writer), and the root key
-// G once the diary joined it (the root always counts): one diary declaring
-// hundreds of writers never takes more than MAX_GROUP_WRITERS_PER_DIARY live
-// and MAX_FROZEN_WRITERS_PER_DIARY frozen slots of a group, plus
-// MAX_WRITER_RELEASES_PER_DIARY released ones. The live joins
-// of its first MAX_GROUPS_PER_DIARY groups by diary seq count (the choice
-// of lib/group.js diaryGroupKeys). A counted writer whose newest join is off
-// is kept too, `left`, in those groups and in any group the diary has no
-// live join in: its records below its cut stay in the group's history, and
-// the fold waits for it.
+// writers the walk counts live or frozen, and the root key G once the diary
+// joined it (the root always counts), take one of its groups: one diary
+// declaring hundreds of writers never takes more than
+// MAX_GROUP_WRITERS_PER_DIARY live and MAX_FROZEN_WRITERS_PER_DIARY frozen
+// slots of a group. The live joins of its first MAX_GROUPS_PER_DIARY groups
+// by diary seq count (the choice of lib/group.js diaryGroupKeys). A counted
+// writer whose newest join is off, and a writer the walk released (up to
+// MAX_WRITER_RELEASES_PER_DIARY, whatever its join), are kept too, `left`,
+// in those groups and in any group the diary has no live join in: the fold
+// still counts their records (below the cut, and block 0, leaves and key
+// blocks at any cut) and waits for them, but they never pick a group, fetch
+// a root or support one.
 // writer -> { group, seq, left }.
 function liveGroupJoins (decls, walks = new Map()) {
   const allowed = new Set()
+  const released = new Set()
   for (const [group, s] of walks) {
     if (s.rootSlot) allowed.add(group + ':' + group)
     for (const [writer, st] of s.state) {
-      if (st === 'live' || st === 'frozen' || st === 'released') allowed.add(group + ':' + writer)
+      if (st === 'live' || st === 'frozen') allowed.add(group + ':' + writer)
+      else if (st === 'released') released.add(group + ':' + writer)
     }
   }
   const entries = [...decls].map(([writer, d]) => ({ seq: d.seq, record: { type: 'group-join', group: d.group, writer, on: d.on, at: d.at } }))
@@ -884,8 +887,9 @@ function liveGroupJoins (decls, walks = new Map()) {
     out.set(j.writer, { group: j.group, seq: j.seq, left: false })
   }
   for (const [writer, d] of decls) {
-    if (d.on || writer === d.group || out.has(writer)) continue
-    if (!allowed.has(d.group + ':' + writer)) continue
+    if (writer === d.group || out.has(writer)) continue
+    const pair = d.group + ':' + writer
+    if (!released.has(pair) && (d.on || !allowed.has(pair))) continue
     if (joined.has(d.group) && !groups.has(d.group)) continue
     out.set(writer, { group: d.group, seq: d.seq, left: true })
   }

@@ -17,7 +17,7 @@ const {
   MAX_WRITER_RELEASES_PER_DIARY,
   MAX_GROUPS_PER_DIARY
 } = require('../lib/records')
-const { groupPost, groupLeave } = require('../lib/group')
+const { groupPost, groupLeave, diaryGroupKeys } = require('../lib/group')
 const {
   groupHeader,
   writerHeader,
@@ -76,7 +76,7 @@ test('liveGroupJoins: a cut frees a slot for a 9th writer, never past 8 live, 8 
   t.ok(frozen.has(key(0)), 'and the frozen writer stays')
   const released = kept([...eight, cut(key(0), 0), join(key(8))])
   t.ok(released.has(key(8)), 'so does a release')
-  t.ok(released.has(key(0)), 'and the released writer stays')
+  t.alike(released.get(key(0)), { group: G, seq: 1, left: true }, 'and the released writer stays, left')
   t.is(diary([...eight, cut(key(0), 0)]).walks.get(G).state.get(key(0)), 'released')
 
   // Eight frozen, then eight live: the 17th never counts.
@@ -139,6 +139,26 @@ test('liveGroupJoins: a join, cut 0, join loop stops at K releases (#350)', (t) 
   for (let i = 0; i < 16; i++) t.is(s.state.get(key(i)), 'released')
   for (let i = 16; i < 24; i++) t.ok(s.state.get(key(i)) === 'live' && s.cut.get(key(i)) === 0, 'a cut 0 past K keeps the slot at cut 0')
   t.absent(kept(records).has(key(24)), 'the 25th was never counted')
+})
+
+test('liveGroupJoins: a released writer never takes one of the 64 groups diaryGroupKeys picks (#350)', (t) => {
+  // A group whose only writer is released with its join still on, then
+  // MAX_GROUPS_PER_DIARY ordinary groups.
+  const lone = key(9000)
+  const records = [join(key(8000), true, lone), cut(key(8000), 0, lone)]
+  for (let g = 0; g < MAX_GROUPS_PER_DIARY; g++) records.push(join(key(1000 + g), true, key(5000 + g)))
+  const entries = records.map((r, n) => ({
+    seq: n + 1,
+    record: r.type === 'join' ? groupJoinRecord({ group: r.group, writer: r.writer, on: r.on }) : groupCutRecord({ group: r.group, writer: r.writer, cut: r.cut })
+  }))
+  const picked = diaryGroupKeys(entries)
+  t.is(picked.length, MAX_GROUPS_PER_DIARY)
+  t.absent(picked.includes(lone), 'control: the fold leaves the released-only group out')
+  const out = kept(records)
+  const groups = new Set([...out.values()].filter((j) => !j.left).map((j) => j.group))
+  t.alike([...groups].sort(), [...picked].sort(), 'the seeder picks the same groups')
+  t.alike(out.get(key(1000 + MAX_GROUPS_PER_DIARY - 1)), { group: key(5000 + MAX_GROUPS_PER_DIARY - 1), seq: records.length, left: false }, 'the last ordinary group is kept')
+  t.alike(out.get(key(8000)), { group: lone, seq: 1, left: true }, 'the released writer is kept, left: it fetches no root and supports none')
 })
 
 test('liveGroupJoins: without cuts it keeps what the earliest-join rule kept', (t) => {
