@@ -48,6 +48,7 @@ import { HELP, SHORT } from '../help'
 import { Btn, ErrorText, Field, Label, Soft, errorText, useAction } from '../ui'
 import { HelpNote } from '../ui/Help'
 import { Icon } from '../ui/Icon'
+import { mediaHashDeps } from '../ui/MediaView'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
 import { VoiceBubble } from '../ui/VoiceBubble'
@@ -139,7 +140,7 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
     let live = true
     setAnexo({ status: 'loading' })
     prepareAnexo(ref, {
-      source: (r) => reportMedia.sourceFor(r, { node, identity: member, display }),
+      source: (r) => reportMedia.sourceFor(r, { node, identity: member, display, fetchDeps: mediaHashDeps() }),
       encode: encodeReportImage,
       readBytes: readReportAudio
     }).then((out) => { if (live) setAnexo(out) })

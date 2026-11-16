@@ -88,6 +88,24 @@ test('membro snapshot: the seed waits for follow.list and runs before the live r
   t.is(load.split('loadFollows()').length, 2, 'follow.list is read once per load, as before')
 })
 
+test('membro snapshot: the seed waits for the first block.list answer (#463, #539)', (t) => {
+  const step = new Function(fnText(CODE, 'membroSeedStep') + '\nreturn membroSeedStep')() // eslint-disable-line no-new-func
+  t.is(step('pending'), 'wait', 'held until the node answers')
+  t.is(step('ok'), 'go')
+  t.is(step('failed'), 'skip', 'a failed list shows no stored row')
+  t.is(step(undefined), 'skip')
+  t.ok(/const step = membroSeedStep\(at\.blockLoad\)\s*if \(step === 'wait'\) \{\s*seedWaitRef\.current = \{ followSet, alive \}\s*return\s*\}\s*seedWaitRef\.current = null\s*if \(step !== 'go'\) return/.test(seed), 'held while pending, none unless ok')
+  t.ok(seed.indexOf('membroSeedStep(') < seed.indexOf('membroSnapshotAllowed('), 'before any rule reads the block list')
+  t.ok(/blockLoad: blocks\.loadState/.test(CODE), 'the rules see the load state')
+  t.ok(/if \(membroSeedStep\(blocks\.loadState\) === 'wait'\) return\s*const wait = seedWaitRef\.current\s*seedWaitRef\.current = null\s*if \(wait !== null\) seedSnapshot\(wait\.followSet, wait\.alive\)/.test(CODE), 'the held seed runs once it answers')
+})
+
+test('membro snapshot: stored header and rows go on another installation or association', (t) => {
+  t.ok(/seedBindingRef\.current = binding\s*if \(!headerRef\.current\.verified\) commitHeader\(\{ \.\.\.entry\.header, verified: false \}\)/.test(seed), 'the seed remembers its binding with the header')
+  t.ok(/const firstHeaderRef = useRef\(header\)/.test(CODE))
+  t.ok(/const seededWith = seedBindingRef\.current\s*if \(seededWith === null \|\| sameSnapshotBinding\(seededWith, liveBinding\(ownKey, node\.config\)\)\) return\s*seedBindingRef\.current = null\s*if \(!headerRef\.current\.verified\) commitHeader\(firstHeaderRef\.current\)\s*if \(postsRef\.current\.seeded\) commit\(\{ \.\.\.INITIAL_POSTS \}\)/.test(CODE))
+})
+
 test('membro snapshot: saved only after a live page, still followed, generation guarded', (t) => {
   const live = load.indexOf("perfMarks().mark('rows-live:membro')")
   const arm = load.indexOf('armSnapshotSave(')

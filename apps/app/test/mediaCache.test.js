@@ -610,3 +610,68 @@ test('onEvicted fires on LRU eviction, replacement and clear, never on a range r
   cache.clear()
   t.is(evicted.length, 2, 'unsubscribed')
 })
+
+// A kept-file read that runs into a purge (wipe, author drop, keep-only)
+// must not leave the deleted file's URL in the cache or on screen (#462).
+test('a load running when the cache is cleared is not stored and runs once more', async (t) => {
+  const { createMediaCache } = await load()
+  const revoked = []
+  const evicted = []
+  const cache = createMediaCache({ revoke: (url) => revoked.push(url) })
+  cache.onEvicted((url) => evicted.push(url))
+  const key = hex('a') + ':1:1:' + hex('e')
+  const first = deferred()
+  const urls = [first.promise, Promise.resolve('blob:fresh')]
+  let calls = 0
+  const got = cache.get(key, () => urls[calls++])
+  await tick()
+  t.is(calls, 1, 'the first load is running')
+  cache.clear()
+  first.resolve('file:///kept/deleted')
+  t.is(await got, 'blob:fresh', 'the caller gets the second load')
+  t.is(calls, 2)
+  t.is(cache.peek(key), 'blob:fresh', 'only the second URL is cached')
+  t.alike(revoked, ['file:///kept/deleted'], 'the stale URL is released')
+  t.alike(evicted, ['file:///kept/deleted'], 'and its kept in-use mark too')
+})
+
+test('a load still queued when the cache is cleared runs once', async (t) => {
+  const { createMediaCache } = await load()
+  const cache = createMediaCache({ concurrency: 1 })
+  const ka = hex('a') + ':1:1:' + hex('e')
+  const kb = hex('b') + ':1:1:' + hex('e')
+  const gate = deferred()
+  let bCalls = 0
+  const a = cache.get(ka, () => gate.promise)
+  const b = cache.get(kb, async () => { bCalls++; return 'blob:b' })
+  await tick()
+  t.is(bCalls, 0, 'b waits behind a')
+  cache.clear()
+  gate.resolve('blob:a')
+  t.is(await b, 'blob:b')
+  t.is(bCalls, 1, 'b read nothing before the clear: no second load')
+  t.is(cache.peek(kb), 'blob:b')
+  t.is(await a, 'blob:a', 'a reloads once')
+})
+
+test('a load cleared twice gives up with a retryable error and stores nothing', async (t) => {
+  const { createMediaCache, retryDelay } = await load()
+  const cache = createMediaCache()
+  const key = hex('a') + ':1:1:' + hex('e')
+  const loads = [deferred(), deferred()]
+  let calls = 0
+  const got = cache.get(key, () => loads[calls++].promise)
+  await tick()
+  cache.clear()
+  loads[0].resolve('file:///kept/one')
+  await tick()
+  t.is(calls, 2)
+  cache.clear()
+  loads[1].resolve('file:///kept/two')
+  let err = null
+  try { await got } catch (e) { err = e }
+  t.ok(err && err.retryable === true, 'retryable, so the tile retries on its ladder')
+  t.is(retryDelay(err, 0), 2000)
+  t.is(cache.peek(key), null)
+  t.is(cache.size, 0)
+})
