@@ -146,7 +146,7 @@ test('Identidade feeds the cards: phone transport, created passkeys and a pendin
   t.ok(src.includes('const doUnlock = () => ceremony(() => passkey.unlock({}), false, false, \'plain\')'), 'Entrar is not a creation')
   t.ok(src.includes('const onOtherPasskey = () => ceremony(() => passkey.unlock({ any: true }), false, false, \'other\')'), 'another passkey is not a creation')
   t.ok(src.includes('if (known && mode === \'plain\' && code === \'CANCELLED\' && !NATIVE) return setMissedOnce(true)'), 'one web miss only offers another passkey')
-  t.ok(src.includes('const createFirst = (knownLost && !showComplete) ||'), 'no new creation beside a pending concluir')
+  t.ok(src.includes('const createFirst = ((knownLost || createAccepted) && !showComplete) ||'), 'no new creation beside a pending concluir')
   t.ok(src.includes('if (created && err.created !== false && !cleaned && typeof id === \'string\') setStaleIds'), 'only created passkeys are named')
   t.absent(src.includes('.refused'), 'a stored refusal never names a passkey: it may be the account elsewhere now')
   t.absent(src.includes('deleteStep'), 'the browser-blocked card has no live failure and names nothing')
@@ -170,7 +170,7 @@ test('Identidade: the code recovery card is exclusive and owns its pending creat
   for (const other of ['Entrar com a passkey', 'doComplete', 'onPhonePress', 'CODE_LABEL', 'TextInput', 'onOtherPasskey']) {
     t.absent(card.includes(other), 'no ' + other + ' on the recovery card')
   }
-  t.ok(src.includes("const onFinishComplete = () => ceremony(() => passkey.complete(), true, true, 'finish')"), 'concluir runs in the press')
+  t.ok(src.includes("const onFinishComplete = () => {\n    if (termsFirst()) return\n    ceremony(() => passkey.complete(), true, true, 'finish')"), 'concluir runs in the press')
   const pendingBranch = src.slice(src.indexOf('if (r && r.pending === true) {'), src.indexOf('if (r && r.needsPasskey === true) {'))
   t.absent(pendingBranch.includes('setNeedsPasskey'), 'a pending result keeps needsPasskey')
   t.ok(src.includes("if (mode === 'finish' && err && err.code === 'RECOVERY_BAD') setNeedsPasskey(false)"), 'a dropped root ends the card')

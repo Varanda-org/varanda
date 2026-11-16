@@ -71,38 +71,60 @@ test('termsRecordOf refuses every invalid shape', async (t) => {
 test('termsDecision: the full table', async (t) => {
   const { termsDecision } = await load()
   const r = rec({ [X]: { acceptedAt: T1, synced: false } }, 2)
+  const old = rec({ [X]: { acceptedAt: T1, synced: false } }, 1)
   const claim = { at: T1 }
   const d = (o) => termsDecision({ record: r, version: 2, member: X, claim: null, hosted: true, identityKnown: true, locked: true, ...o })
 
   t.is(d({ identityKnown: false }), 'loading', 'hosted, identity unknown, even with a record')
   t.is(d({ identityKnown: false, record: null }), 'loading')
+  t.is(d({ identityKnown: false, member: null, locked: false }), 'loading', 'loading comes before the first ceremony row')
   t.is(d({ hosted: false, identityKnown: false, member: null }), 'accepted', 'identityKnown only matters when hosted')
 
+  // Member known: the record decides, hosted or not.
   t.is(d({ record: null }), 'needed')
   t.is(d({ record: null, hosted: false }), 'needed')
+  t.is(d({ record: null, claim }), 'needed', 'member known, nothing stored, a claim does not stand in for the record')
   t.is(d({ version: 3 }), 'updated')
-  t.is(d({ version: 3, hosted: false, member: null }), 'updated')
-
-  t.is(d({ member: null }), 'accepted', 'hosted, locked at Entrar, a member accepted this version on this device')
-  t.is(d({ member: null, record: rec({}, 2) }), 'accepted', 'hosted, locked, an acceptance given before sign-in was stored (members empty)')
-  t.is(d({ member: null, record: rec({}, 2), claim }), 'accepted', 'hosted, locked, empty record, claim held')
-  t.is(d({ member: null, record: null }), 'needed', 'hosted, locked, nothing stored')
-  t.is(d({ member: null, record: rec({ [X]: { acceptedAt: T1, synced: false } }, 1) }), 'updated', 'hosted, locked, an older version with members still asks')
-  t.is(d({ member: null, claim }), 'accepted', 'hosted, member null, claim held')
-  t.is(d({ member: null, hosted: false }), 'accepted', 'native, member null, record current')
-  t.is(d({ member: null, hosted: undefined }), 'accepted')
-  t.is(d({ member: null, locked: false }), 'needed', 'hosted, unlocked, key not known yet (first ceremony), no claim')
-  t.is(d({ member: null, locked: false, claim }), 'accepted', 'hosted, unlocked, key not known yet, claim held')
-  t.is(d({ member: null, locked: false, record: rec({}, 2) }), 'needed', 'hosted, unlocked, key not known yet, empty record')
-  t.is(d({ member: null, locked: undefined }), 'needed', 'hosted, member null, locked unknown fails closed')
-  t.is(d({ member: null, hosted: false, locked: false }), 'accepted', 'native, member null, unlocked')
-
+  t.is(d({ version: 3, hosted: false }), 'updated')
+  t.is(d({ version: 3, locked: false }), 'updated')
   t.is(d({}), 'accepted', 'member in record')
   t.is(d({ claim }), 'accepted', 'member in record with a claim')
+  t.is(d({ locked: false }), 'accepted')
   t.is(d({ member: Y }), 'account', 'Sair then another passkey in the same page')
   t.is(d({ member: Y, claim }), 'bind', 'record has X, claim set, member Y')
   t.is(d({ member: Y, hosted: false }), 'account')
   t.is(d({ member: Y, hosted: false, claim }), 'bind')
+
+  // Hosted, locked at Entrar, member unknown: an existing passkey enters
+  // first; the gate (and the held check) comes after Entrar.
+  t.is(d({ member: null }), 'accepted', 'locked, a member accepted this version on this device')
+  t.is(d({ member: null, record: null }), 'accepted', 'locked, nothing stored: the gate waits for Entrar')
+  t.is(d({ member: null, record: old }), 'accepted', 'locked, an older version: the gate waits for Entrar')
+  t.is(d({ member: null, record: rec({}, 2) }), 'accepted', 'locked, an acceptance given before sign-in (members empty)')
+  t.is(d({ member: null, record: null, claim }), 'accepted', 'locked, claim held')
+  t.is(d({ member: undefined, record: null }), 'accepted', 'member undefined counts as unknown')
+
+  // Hosted, unlocked, member unknown (a first passkey ceremony, Criar conta):
+  // only this page load's claim lets it through, whatever is stored.
+  t.is(d({ member: null, locked: false }), 'needed', 'record current, no claim')
+  t.is(d({ member: null, locked: false, record: null }), 'needed', 'nothing stored, no claim')
+  t.is(d({ member: null, locked: false, record: old }), 'needed', 'older version, no claim')
+  t.is(d({ member: null, locked: false, record: rec({}, 2) }), 'needed', 'empty record, no claim')
+  t.is(d({ member: null, locked: false, claim }), 'accepted', 'claim held')
+  t.is(d({ member: null, locked: false, record: null, claim }), 'accepted', 'claim held, record not kept')
+  t.is(d({ member: null, locked: false, record: old, claim }), 'accepted', 'claim held, older record')
+  t.is(d({ member: null, locked: undefined }), 'needed', 'locked unknown fails closed')
+  t.is(d({ member: null, locked: undefined, record: null }), 'needed')
+  t.is(d({ member: null, locked: undefined, claim }), 'accepted')
+
+  // Native/serve, member unknown: unchanged.
+  t.is(d({ member: null, hosted: false }), 'accepted', 'native, record current')
+  t.is(d({ member: null, hosted: undefined }), 'accepted')
+  t.is(d({ member: null, hosted: false, locked: false }), 'accepted', 'native, unlocked')
+  t.is(d({ member: null, hosted: false, record: null }), 'needed', 'native, nothing stored')
+  t.is(d({ member: null, hosted: false, record: null, claim }), 'needed', 'native, nothing stored, claim')
+  t.is(d({ member: null, hosted: undefined, record: old }), 'updated', 'native, older version')
+  t.is(termsDecision(), 'needed', 'no arguments')
 })
 
 test('withMember: fresh on a version change, keeps existing, caps dropping the oldest', async (t) => {
@@ -157,6 +179,123 @@ test('withSynced and withoutMember', async (t) => {
   t.ok(r.members[X], 'input untouched')
   t.is(withoutMember(r, 'ef'.repeat(32)), r)
   t.is(withoutMember(null, X), null)
+})
+
+test('withHeld: synced entry, fresh on a version change, existing kept, capped, invalid inputs refused', async (t) => {
+  const { withHeld, withMember, MAX_MEMBERS, termsRecordOf, termsDecision } = await load()
+  t.alike(withHeld(null, 2, X, T1), rec({ [X]: { acceptedAt: T1, synced: true } }, 2), 'nothing stored')
+  t.alike(withHeld(undefined, 2, X, T1), rec({ [X]: { acceptedAt: T1, synced: true } }, 2))
+
+  const r = rec({ [Y]: { acceptedAt: T1, synced: false } }, 1)
+  t.alike(withHeld(r, 2, X, T2), rec({ [X]: { acceptedAt: T2, synced: true } }, 2), 'another version starts over')
+  t.alike(withHeld(r, 1, X, T2), rec({ [Y]: { acceptedAt: T1, synced: false }, [X]: { acceptedAt: T2, synced: true } }, 1), 'added beside the others')
+  t.alike(r, rec({ [Y]: { acceptedAt: T1, synced: false } }, 1), 'input untouched')
+  t.is(withHeld(r, 1, Y, T2), r, 'an existing entry at that version is kept unchanged')
+  t.is(r.members[Y].synced, false, 'its synced flag is not touched')
+
+  const held = withHeld(null, 2, X, T1)
+  t.ok(termsRecordOf(held), 'a valid record')
+  const dec = (record) => termsDecision({ record, version: 2, member: X, claim: null, hosted: true, identityKnown: true, locked: false })
+  t.is(dec(null), 'needed')
+  t.is(dec(held), 'accepted', 'the held acceptance opens the gate for that member')
+  t.is(termsDecision({ record: held, version: 2, member: Y, claim: null, hosted: true, identityKnown: true, locked: false }), 'account', 'and only for that member')
+  t.is(termsDecision({ record: held, version: 3, member: X, claim: null, hosted: true, identityKnown: true, locked: false }), 'updated', 'and only for that version')
+
+  const bad = [
+    [r, 1, null, T1], [r, 1, undefined, T1], [r, 1, 'AB'.repeat(32), T1], [r, 1, 'ab'.repeat(31), T1], [r, 1, 5, T1],
+    [r, 1, X, null], [r, 1, X, undefined], [r, 1, X, ''], [r, 1, X, 'lixo'], [r, 1, X, '2026-10-27T12:00:00Z'],
+    [r, 1, X, '2026-02-30T12:00:00.000Z'], [r, 1, X, 5],
+    [r, 0, X, T1], [r, 10000, X, T1], [r, 1.5, X, T1], [r, '1', X, T1], [r, null, X, T1]
+  ]
+  for (const args of bad) t.is(withHeld(...args), r, JSON.stringify(args.slice(1)))
+  t.is(withHeld(null, 1, null, T1), null, 'nothing stored and nothing valid: still nothing')
+
+  let full = null
+  // key(5) is the oldest acceptance
+  for (let i = 0; i < MAX_MEMBERS; i++) {
+    const at = new Date(Date.UTC(2026, 0, i === 5 ? 1 : 10 + i)).toISOString()
+    full = withMember(full, 1, key(i), at)
+  }
+  const next = withHeld(full, 1, X, T1)
+  t.is(Object.keys(next.members).length, MAX_MEMBERS)
+  t.alike(next.members[X], { acceptedAt: T1, synced: true })
+  t.absent(next.members[key(5)], 'oldest dropped')
+  const behind = withHeld(full, 1, X, '2025-01-01T00:00:00.000Z')
+  t.ok(behind.members[X], 'the member just added stays even when it is the oldest')
+  t.absent(behind.members[key(5)])
+  t.ok(termsRecordOf(behind))
+})
+
+test('heldKey', async (t) => {
+  const { heldKey } = await load()
+  t.is(heldKey(X, 2), X + '#2')
+})
+
+test('shouldAskHeld: every gate', async (t) => {
+  const { shouldAskHeld } = await load()
+  const ok = { hosted: true, member: X, claim: null, decision: 'needed', online: true, entry: undefined }
+  t.is(shouldAskHeld(ok), true)
+  for (const decision of ['needed', 'updated', 'account']) t.is(shouldAskHeld({ ...ok, decision }), true, decision)
+  t.is(shouldAskHeld({ ...ok, online: undefined }), true, 'unknown online counts as online')
+  t.is(shouldAskHeld({ ...ok, claim: undefined }), true)
+  t.is(shouldAskHeld({ ...ok, entry: null }), true)
+  for (const decision of ['accepted', 'bind', 'loading', undefined, 'x']) t.is(shouldAskHeld({ ...ok, decision }), false, 'decision ' + decision)
+  for (const hosted of [false, undefined, 'true', 1]) t.is(shouldAskHeld({ ...ok, hosted }), false, 'hosted ' + hosted)
+  for (const member of [null, undefined, 'AB'.repeat(32), 'ab'.repeat(31), '']) t.is(shouldAskHeld({ ...ok, member }), false, 'member ' + member)
+  t.is(shouldAskHeld({ ...ok, claim: { at: T1 } }), false, 'claim present')
+  t.is(shouldAskHeld({ ...ok, online: false }), false, 'offline')
+  for (const state of ['asking', 'held', 'none', 'failed', 'timeout']) t.is(shouldAskHeld({ ...ok, entry: { state } }), false, 'asked already: ' + state)
+  t.is(shouldAskHeld(), false)
+})
+
+test('heldGate: waits only while a young question is in flight', async (t) => {
+  const { heldGate, TERMS_HELD_WAIT_MS } = await load()
+  t.is(TERMS_HELD_WAIT_MS, 4000)
+  const asking = { state: 'asking', at: 1000 }
+  for (const decision of ['needed', 'updated', 'account']) t.is(heldGate({ decision, entry: asking, elapsedMs: 0 }), 'wait', decision)
+  t.is(heldGate({ decision: 'needed', entry: asking, elapsedMs: TERMS_HELD_WAIT_MS - 1 }), 'wait')
+  t.is(heldGate({ decision: 'needed', entry: asking, elapsedMs: TERMS_HELD_WAIT_MS }), 'show', 'the wait is over')
+  t.is(heldGate({ decision: 'needed', entry: asking, elapsedMs: 60000 }), 'show')
+  for (const elapsedMs of [-1, NaN, Infinity, undefined, '0', null]) t.is(heldGate({ decision: 'needed', entry: asking, elapsedMs }), 'show', 'elapsed ' + elapsedMs)
+  for (const state of ['held', 'none', 'failed', 'timeout', 'x']) t.is(heldGate({ decision: 'needed', entry: { state }, elapsedMs: 0 }), 'show', state)
+  for (const entry of [undefined, null, 'asking', ['asking']]) t.is(heldGate({ decision: 'needed', entry, elapsedMs: 0 }), 'show', 'entry ' + JSON.stringify(entry))
+  for (const decision of ['accepted', 'bind', 'loading', undefined]) t.is(heldGate({ decision, entry: asking, elapsedMs: 0 }), 'show', 'decision ' + decision)
+  t.is(heldGate(), 'show')
+})
+
+test('heldSettle: only an entry still asking moves; a late held is a timeout; settled entries latch', async (t) => {
+  const { heldSettle, heldGate, TERMS_HELD_WAIT_MS } = await load()
+  const asking = { state: 'asking', at: 1000 }
+  t.alike(heldSettle(asking, 'held', 10), { state: 'held' })
+  t.alike(heldSettle(asking, 'held', TERMS_HELD_WAIT_MS - 1), { state: 'held' })
+  t.alike(heldSettle(asking, 'held', TERMS_HELD_WAIT_MS), { state: 'timeout' }, 'a held answer after the wait is ignored')
+  for (const elapsed of [-1, NaN, undefined]) t.alike(heldSettle(asking, 'held', elapsed), { state: 'timeout' }, 'elapsed ' + elapsed)
+  for (const outcome of ['none', 'failed', 'timeout']) t.alike(heldSettle(asking, outcome, 10), { state: outcome }, outcome)
+  // The App timer may fire a little early, or with no usable elapsed time:
+  // a timeout still ends the wait, so the gate is never left asking.
+  for (const elapsed of [TERMS_HELD_WAIT_MS - 1, 0, -1, NaN, undefined]) {
+    const e = heldSettle(asking, 'timeout', elapsed)
+    t.alike(e, { state: 'timeout' }, 'timeout at ' + elapsed)
+    t.is(heldGate({ decision: 'needed', entry: e, elapsedMs: 0 }), 'show', 'shown after a timeout at ' + elapsed)
+  }
+  t.alike(heldSettle(asking, 'none', TERMS_HELD_WAIT_MS * 2), { state: 'none' })
+  t.is(heldSettle(asking, 'x', 10), asking, 'unknown outcome: unchanged')
+  t.is(heldSettle(asking, undefined, 10), asking)
+
+  // The latch: none, failed and timeout never become held, nor move at all.
+  for (const state of ['none', 'failed', 'timeout', 'held']) {
+    const e = { state }
+    for (const outcome of ['held', 'none', 'failed', 'timeout']) t.is(heldSettle(e, outcome, 0), e, state + ' then ' + outcome)
+  }
+  t.is(heldSettle(undefined, 'held', 0), undefined)
+  t.is(heldSettle(null, 'held', 0), null)
+
+  // A timeout shows the gate, and a held answer arriving afterwards keeps it.
+  const timedOut = heldSettle(asking, 'timeout', TERMS_HELD_WAIT_MS)
+  t.is(heldGate({ decision: 'needed', entry: timedOut, elapsedMs: 0 }), 'show')
+  const late = heldSettle(timedOut, 'held', 0)
+  t.alike(late, { state: 'timeout' })
+  t.is(heldGate({ decision: 'needed', entry: late, elapsedMs: 0 }), 'show')
 })
 
 test('shouldSyncTerms: true only when every gate is open', async (t) => {
@@ -313,14 +452,16 @@ test('termsStore.web: a locked reload keeps the acceptance', async (t) => {
   fakeStorage(t, () => storage)
   const dec = (record, o) => termsDecision({ record, version: 2, member: null, claim: null, hosted: true, identityKnown: true, locked: true, ...o })
 
-  t.is(dec(await loadTermsRecord()), 'needed', 'nothing stored')
+  t.is(dec(await loadTermsRecord()), 'accepted', 'nothing stored: locked, the gate waits for Entrar')
+  t.is(dec(await loadTermsRecord(), { member: X }), 'needed', 'nothing stored, after Entrar')
 
   await saveTermsRecord(rec({ [X]: { acceptedAt: T1, synced: false } }, 2))
   let loaded = await loadTermsRecord()
   t.is(dec(loaded), 'accepted', 'locked reload, member accepted')
   t.is(dec(loaded, { locked: false }), 'needed', 'unlocked before the shell knows the key')
   t.is(dec(loaded, { member: Y }), 'account', 'another account is asked after its passkey')
-  t.is(dec(loaded, { version: 3 }), 'updated', 'a new version asks again')
+  t.is(dec(loaded, { version: 3 }), 'accepted', 'a new version waits for Entrar')
+  t.is(dec(loaded, { version: 3, member: X }), 'updated', 'a new version asks again after Entrar')
 
   const saved = withMember(null, 2, null, T1)
   t.alike(saved, rec({}, 2))
@@ -350,7 +491,8 @@ test('the terms gate keeps its legal words on the shared frame', (t) => {
   for (const word of [
     "const ACCEPT_LABEL = 'Aceitar e continuar'",
     "const BLOCKED_TEXT = 'Sem aceitar, não é possível entrar no Varanda.'",
-    "const NEEDED_TEXT = 'Antes de entrar no Varanda, leia e aceite os Termos de Uso e a Política de Privacidade.'",
+    "const BLOCKED_CREATE_TEXT = 'Sem aceitar, não é possível criar uma conta ou uma passkey nova.'",
+    "const NEEDED_TEXT = 'Antes de usar o Varanda, leia e aceite os Termos de Uso e a Política de Privacidade.'",
     'OptionList', 'block large', "icon='file-text'", 'aria-expanded'
   ]) t.ok(src.includes(word), word)
   t.is(src.split('onPress={onAccept}').length - 1, 1, 'only the accept button accepts')
@@ -364,7 +506,7 @@ test('the terms gate shows the consent sentence above the accept button', (t) =>
   t.ok(gate.includes('<Stepper'), 'the gate renders the Stepper')
   t.ok(gate.includes('hint={gateText(reason, version)}'), 'the gate Stepper renders the consent sentence')
   for (const word of [
-    "const NEEDED_TEXT = 'Antes de entrar no Varanda, leia e aceite os Termos de Uso e a Política de Privacidade.'",
+    "const NEEDED_TEXT = 'Antes de usar o Varanda, leia e aceite os Termos de Uso e a Política de Privacidade.'",
     "const ACCOUNT_TEXT = 'Esta conta ainda não aceitou os Termos de Uso e a Política de Privacidade neste aparelho. Leia e aceite para continuar.'"
   ]) t.ok(src.includes(word), word)
   const start = src.indexOf('function gateText (reason, version) {')
