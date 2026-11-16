@@ -847,6 +847,24 @@ function slotWalk (joins, marks, G) {
   return slotWalkResult(s, gap, bound)
 }
 
+// Whether a new writer the diary joins to G now takes a live slot in its
+// walk, after the events the caller writes first (`extra`, in order:
+// { kind: 'join', writer, on } or { kind: 'cut', writer, cut }), so a node
+// refuses a join the walk would never count before it writes anything.
+// `joins` and `marks`: the diary's groupJoinHistory and groupCutHistory
+// items for G. Never throws (false on bad input).
+function walkHasRoom (joins, marks, G, extra = []) {
+  try {
+    const s = slotWalkState()
+    for (const e of slotEvents(joins, marks).events) slotWalkStep(s, e, G)
+    let seq = s.last
+    for (const e of extra) slotWalkStep(s, { ...e, seq: ++seq }, G)
+    return s.live < MAX_GROUP_WRITERS_PER_DIARY - (s.rootSlot ? 1 : 0)
+  } catch {
+    return false
+  }
+}
+
 function slotWalkResult (s, gap = false, bound = false) {
   const live = new Set()
   const frozen = new Set()
@@ -3763,6 +3781,7 @@ module.exports = {
   replacedWriterCut,
   slotWalkStep,
   slotWalkResult,
+  walkHasRoom,
   leaveDigest,
   orderKey,
   compareOrder,

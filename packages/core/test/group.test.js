@@ -8,7 +8,7 @@ const {
   groupCreateRecord, communityAdmit, communityBan, communityHide, groupInvites,
   groupJoins, groupJoinHistory, diaryGroupKeys, orderKey, compareOrder, isFuture, buildGroup, buildCommunity,
   GROUP_POST_V2_KEYS, groupKey, groupSealed, sealedInner, groupReact, groupTopic, groupPoll, groupChoice,
-  slotWalk, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY
+  slotWalk, walkHasRoom, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY
 } = require('../lib/group')
 const { groupJoinRecord, groupCutRecord } = require('../lib/records')
 const { K, BASE, AT, NOW, community: communityOf, groupIn } = require('./helpers/groups')
@@ -3319,4 +3319,34 @@ test('diaryGroupKeys: a diary cut gives a slot back to a later join (#350)', (t)
   t.alike(diaryGroupKeys([...eight, cut(39, K(0xa000), 1), join(40, ninth)]), [G], 'after a freeze it counts')
   t.alike(diaryGroupKeys([...eight, cut(39, K(0xa000), 0), join(40, ninth)]), [G], 'after a release it counts')
   t.alike(diaryGroupKeys([...eight, join(40, ninth), cut(41, K(0xa000), 0)]), [], 'a cut after the join gives it nothing')
+})
+
+test('walkHasRoom: a new writer counts only where the walk has a live slot, after the caller\'s own events (#350)', (t) => {
+  const G = K(0x7000)
+  const ws = []
+  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY + 1; i++) ws.push(K(0x7100 + i))
+  const joins = (n, from = 1) => ws.slice(0, n).map((writer, i) => ({ writer, on: true, seq: from + i }))
+  t.ok(walkHasRoom([], [], G), 'an empty diary has room')
+  t.ok(walkHasRoom(joins(MAX_GROUP_WRITERS_PER_DIARY - 1), [], G))
+  t.absent(walkHasRoom(joins(MAX_GROUP_WRITERS_PER_DIARY), [], G), 'eight live: full')
+  t.absent(walkHasRoom([{ writer: G, on: true, seq: 0 }, ...joins(MAX_GROUP_WRITERS_PER_DIARY - 1)], [], G), 'the root takes one slot')
+  const full = joins(MAX_GROUP_WRITERS_PER_DIARY)
+  t.absent(walkHasRoom(full, [], G, [{ kind: 'join', writer: ws[0], on: false }]), 'an off join frees nothing')
+  t.ok(walkHasRoom(full, [], G, [{ kind: 'join', writer: ws[0], on: false }, { kind: 'cut', writer: ws[0], cut: 0 }]), 'a cut at 0 releases a slot')
+  t.ok(walkHasRoom(full, [], G, [{ kind: 'cut', writer: ws[0], cut: 3 }]), 'a cut at 3 freezes one')
+  const over = [...full, { writer: ws[MAX_GROUP_WRITERS_PER_DIARY], on: true, seq: 99 }]
+  t.absent(walkHasRoom(over, [], G, [{ kind: 'cut', writer: ws[MAX_GROUP_WRITERS_PER_DIARY], cut: 0 }]), 'cutting a writer the walk never counted frees nothing')
+  // Every release spent: a further cut at 0 keeps the writer's slot.
+  const spent = []
+  const marks = []
+  let seq = 1
+  for (let i = 0; i < MAX_WRITER_RELEASES_PER_DIARY; i++) {
+    const writer = K(0x7300 + i)
+    spent.push({ writer, on: true, seq: seq++ })
+    marks.push({ writer, cut: 0, seq: seq++ })
+  }
+  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) spent.push({ writer: ws[i], on: true, seq: seq++ })
+  t.absent(walkHasRoom(spent, marks, G, [{ kind: 'cut', writer: ws[0], cut: 0 }]), 'no release left: no room')
+  t.ok(walkHasRoom(null, null, G, [null]), 'bad items read as an empty diary, never throwing')
+  t.absent(walkHasRoom(full, [], G, 5), 'a bad event list: no room')
 })

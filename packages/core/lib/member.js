@@ -2335,16 +2335,17 @@ async function joinLoaded (ctx, identity, loaded, cw) {
   // device's key can open nothing: its binding goes and a new writer with
   // this device's box takes its place.
   const boxStale = loaded.private && !!loaded.local && loaded.local.writer !== group && writerBox(loaded, loaded.local.writer) !== ownBoxPublic(ctx)
+  // The off join keeps its slot in the slot walk: a cut before the new join
+  // gives it back (#350). Both are written only once the room check passed.
+  const replace = []
   if (boxStale) {
     const own = await readAll(diary)
     const last = groups.groupJoinHistory(own, group).filter((j) => j.writer === loaded.local.writer).pop()
-    if (last && last.on) await appendRecord(diary, groupJoinRecord({ group, writer: loaded.local.writer, on: false }))
-    // The off join keeps its slot in the slot walk: a cut before the new
-    // join gives it back (#350).
+    if (last && last.on) replace.push({ kind: 'join', writer: loaded.local.writer, on: false })
     const held = loaded.input.writers.find((l) => l.key === loaded.local.writer)
     const cut = groups.replacedWriterCut(held ? held.entries : null)
     const marked = groups.groupCutHistory(own, group).some((m) => m.writer === loaded.local.writer && m.cut <= cut)
-    if (last && cut !== null && !marked) await appendRecord(diary, groupCutRecord({ group, writer: loaded.local.writer, cut }))
+    if (last && cut !== null && !marked) replace.push({ kind: 'cut', writer: loaded.local.writer, cut })
   }
   // A writer the fold no longer takes (retired by a leave of any device, or
   // naming a CW the gate retired) is replaced by a new one naming the live
@@ -2362,9 +2363,16 @@ async function joinLoaded (ctx, identity, loaded, cw) {
   if (!stale && !left && unboundLocal(loaded) && !(await localWriterHasLeave(store, loaded.local))) writerKey = loaded.local.writer
   if (writerKey === null) {
     if (groupWritersFull(loaded.view, group)) throw new UsageError(GROUP_FULL)
-    // The fold counts only the first writers a diary binds: a new one past
-    // that cap would never count.
-    if (boundWriterCount(loaded, ownHex) - (boxStale ? 1 : 0) >= groups.MAX_GROUP_WRITERS_PER_DIARY) throw new UsageError(GROUP_FULL)
+    // The diary's own slot walk, after the off join and the cut above: a
+    // new writer it would not count live never counts.
+    const own = await readAll(diary)
+    if (!groups.walkHasRoom(groups.groupJoinHistory(own, group), groups.groupCutHistory(own, group), group, replace)) throw new UsageError(GROUP_FULL)
+  }
+  for (const e of replace) {
+    if (e.kind === 'join') await appendRecord(diary, groupJoinRecord({ group, writer: e.writer, on: false }))
+    else await appendRecord(diary, groupCutRecord({ group, writer: e.writer, cut: e.cut }))
+  }
+  if (writerKey === null) {
     await makeGroupRoom(ctx, identity, group)
     const rejoin = foldRejoin(loaded.view, ownHex)
     const box = loaded.private ? ownBoxPublic(ctx) : null

@@ -122,6 +122,30 @@ test('private: at the writer cap a boxed rejoin cuts the boxless writer, so the 
   t.ok(walk.released.has(boxless) && walk.live.has(fresh), 'the slot walk releases the boxless writer and counts the new one')
 })
 
+test('private: a full diary whose boxless writer never counted gets GROUP_FULL with nothing written (#350)', async (t) => {
+  const kp = crypto.keyPair()
+  const a = await person(t, kp, 'Ana')
+  const b = await person(t, kp, 'Bia')
+  const { group } = await createGroup(a, { name: 'Segredo', join: 'open', visibility: 'private' })
+  await exchange(a, b)
+  const s = await store.openStore(b.dataDir)
+  await store.purgeReplica(s, group)
+  await s.close()
+  // Eight writers boxed to another key take every slot first.
+  for (let i = 0; i < groupLib.MAX_GROUP_WRITERS_PER_DIARY; i++) await plantWriter(b, group, hex(crypto.randomBytes(32)), true)
+  store.writeGroups(b.dataDir, store.readGroups(b.dataDir).filter((g) => g.group !== group))
+  // The join by key binds a ninth, boxless writer the walk never counts.
+  t.alike(await joinGroup(b, { group }), { state: 'pending' })
+  const boxless = ownWriter(b, group)
+  await exchange(a, b)
+  const before = (await member.logRead(b)).entries.length
+  await t.exception(joinGroup(b, { group }), /limite do grupo atingido/, 'no slot even after cutting the boxless writer')
+  const { entries } = await member.logRead(b)
+  t.is(entries.length, before, 'nothing written: no off join, no cut, no new join')
+  t.alike(groupLib.groupCutHistory(entries, group), [])
+  t.is(ownWriter(b, group), boxless, 'the boxless writer is still the local one')
+})
+
 test('private: a multi-chunk rotation seals earlier epochs to the distributor only, the last to every entitled writer', async (t) => {
   // MAX_KEY_BASIS + 1 people each join the community, Geral and the group:
   // about 15 s alone, more under the parallel suite.
