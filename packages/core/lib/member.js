@@ -76,6 +76,7 @@ const { pageLifecycle, cutEntries, originOf, latestDelegate } = require('./page-
 const { signPage, canonicalOp, opHash: pageOpHash, ACTIONS: PAGE_STATEMENTS } = require('./page-proof')
 const { signTerms } = require('./terms')
 const groupCrypto = require('./group-crypto')
+const devices = require('./devices')
 const { recordBoundRoot } = require('./sync')
 const { COMMUNITY_LIST_MAX, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX, feira } = require('@varanda/rpc')
 
@@ -2257,7 +2258,10 @@ async function pendingJoin (ctx, { group, local }, identity, member = null, kind
     writeGroups(ctx.dataDir, [...localGroups(ctx.dataDir).filter((g) => g.group !== group), { group, writer: writerKey, nonce, kind }])
   }
   const joins = groups.groupJoinHistory(await readAll(diary), group)
-  if (!joins.some((j) => j.writer === writerKey && j.on)) await appendRecord(diary, groupJoinRecord({ group, writer: writerKey, on: true, ...(rejoin ? { rejoin } : {}) }))
+  if (!joins.some((j) => j.writer === writerKey && j.on)) {
+    await appendRecord(diary, groupJoinRecord({ group, writer: writerKey, on: true, ...(rejoin ? { rejoin } : {}) }))
+    await noteDeviceWriter(ctx, diary, group, writerKey)
+  }
   return { state: 'pending' }
 }
 
@@ -2364,6 +2368,7 @@ async function joinLoaded (ctx, identity, loaded, cw) {
     writeGroups(ctx.dataDir, [...localGroups(ctx.dataDir).filter((g) => g.group !== group), { group, writer: writerKey, nonce }])
   }
   await appendRecord(diary, groupJoinRecord({ group, writer: writerKey, on: true }))
+  await noteDeviceWriter(ctx, diary, group, writerKey)
   const next = await loadGroup(ctx, identity, group)
   return groupJoinState(next.view, ownHex, writerKey)
 }
@@ -3205,6 +3210,7 @@ async function communityJoin (ctx, { community }, { affected = null } = {}) {
       // The first on-join signs the header's rejoin: without it the fold
       // takes the CW as generation 0, retired by any earlier leave.
       await ensureJoin(diary, C, writerKey, rejoin)
+      await noteDeviceWriter(ctx, diary, C, writerKey)
       c = await loadCommunity(ctx, identity, C)
     }
     // A root this node cannot bind (its creator's diary not held or not
@@ -3898,6 +3904,181 @@ async function communityList (ctx) {
   })
 }
 
+// ---- connected devices (docs/rpc.md 5.151 to 5.154, lib/devices.js) ----
+
+const DEVICE_FILE = 'device.json'
+
+function deviceFile (dataDir) {
+  return path.join(dataDir, DEVICE_FILE)
+}
+
+// This device's id for the identity `own` (device.json, { v: 1, own, id }),
+// or null: none yet, another identity's, or a torn file.
+function readDeviceId (dataDir, own) {
+  let data = null
+  try {
+    data = storeLib.readJson(deviceFile(dataDir), null)
+  } catch (err) {
+    if (err instanceof SyntaxError) return null
+    throw err
+  }
+  if (data === null || typeof data !== 'object' || data.v !== 1 || data.own !== own) return null
+  return typeof data.id === 'string' && /^[0-9a-f]{64}$/.test(data.id) ? data.id : null
+}
+
+function writeDeviceId (dataDir, own, id) {
+  storeLib.writeJsonAtomic(deviceFile(dataDir), { v: 1, own, id }, 0o600)
+}
+
+// This device's current writers (groups.json) as { group, writer }.
+function deviceOwnPairs (dataDir) {
+  return localGroups(dataDir).map((g) => ({ group: g.group, writer: g.writer }))
+}
+
+// fn({ identity, diary, ownHex, key, self, own, view }) under the device key
+// (wiped afterwards): `self` this device's id or null, `view`
+// devices.deviceView.
+async function withDevices (ctx, fn) {
+  return withIdentity(ctx, async (identity) => {
+    const { diary, ownHex } = identity
+    const key = devices.deviceKey(diary.keyPair.secretKey, diary.key)
+    try {
+      const entries = await readAll(diary)
+      const self = readDeviceId(ctx.dataDir, ownHex)
+      const own = deviceOwnPairs(ctx.dataDir)
+      return await fn({ identity, diary, ownHex, key, self, own, view: devices.deviceView(entries, key, self, own) })
+    } finally {
+      devices.wipeKey(key)
+    }
+  })
+}
+
+function deviceName (name) {
+  const canonical = devices.canonicalDeviceName(name)
+  if (canonical === null) throw new UsageError('nome do aparelho inválido')
+  return canonical
+}
+
+async function appendDevices (diary, records, key) {
+  if (records.length > 0 && diary.length === 0) throw new Error(GENESIS_REQUIRED)
+  for (const inner of records) await appendRecord(diary, devices.sealedRecord(inner, key))
+}
+
+// -> { id, registered, off }: rpc.md 5.151. A disconnected device registers
+// nothing and creates no id (id null when it has none).
+async function deviceHello (ctx, { name }) {
+  const canonical = deviceName(name)
+  return withDevices(ctx, async ({ diary, ownHex, key, self, own, view }) => {
+    if (view.off) return { id: self, registered: false, off: true }
+    let id = self
+    if (id === null) {
+      if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+      id = devices.newDeviceId()
+      writeDeviceId(ctx.dataDir, ownHex, id)
+    }
+    const plan = devices.helloPlan({ fold: view.fold, self: id, id, name: canonical, own, cuts: view.cuts })
+    await appendDevices(diary, plan.records, key)
+    return { id, registered: plan.records.length > 0, off: false }
+  })
+}
+
+// -> { off } for this device (devices.changed).
+async function deviceOff (ctx) {
+  return withDevices(ctx, async ({ view }) => ({ off: view.off }))
+}
+
+// -> rpc.md 5.152.
+async function deviceList (ctx) {
+  return withDevices(ctx, async ({ self, own, view }) => devices.listView({ fold: view.fold, self, linked: view.linked, cuts: view.cuts, own }))
+}
+
+// -> { id, registered: true, off: false }: rpc.md 5.154, only on a
+// disconnected device. The node session has no passkey ceremony to ask for:
+// the device's own data dir holds the identity.
+async function deviceReconnect (ctx, { name }) {
+  const canonical = deviceName(name)
+  return withDevices(ctx, async ({ diary, ownHex, key, self, own, view }) => {
+    const id = devices.newDeviceId()
+    const plan = devices.reconnectPlan({ fold: view.fold, self, id, name: canonical, own, cuts: view.cuts })
+    if (plan.error) throw new UsageError(plan.error)
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    writeDeviceId(ctx.dataDir, ownHex, id)
+    await appendDevices(diary, plan.records, key)
+    return { id, registered: true, off: false }
+  })
+}
+
+// After an own on:true group-join of `writer` in `group`: the device record
+// mapping the pair to this device's id (devices.joinRecord). Never throws
+// and never fails the join: the next device.hello maps what is missing.
+async function noteDeviceWriter (ctx, diary, group, writer) {
+  let key = null
+  try {
+    if (group === writer) return
+    const self = readDeviceId(ctx.dataDir, hex(diary.key))
+    if (self === null) return
+    key = devices.deviceKey(diary.keyPair.secretKey, diary.key)
+    const inner = devices.joinRecord({ fold: devices.foldDevices(await readAll(diary), key), self, group, writer })
+    if (inner !== null) await appendRecord(diary, devices.sealedRecord(inner, key))
+  } catch {
+  } finally {
+    devices.wipeKey(key)
+  }
+}
+
+// The contiguous length held here of writer core `key` (0 when not held).
+async function heldContiguous (store, key) {
+  if (!(await replicaStored(store, key))) return 0
+  const core = store.get({ key: b4a.from(key, 'hex'), writable: false, active: false })
+  try {
+    await core.ready()
+    return core.contiguousLength
+  } finally {
+    await core.close()
+  }
+}
+
+// -> { cut, empty, groups }: rpc.md 5.153. The caller updated the writer
+// cores first (bounded). Each linked pair is marked at the contiguous
+// length held here unless already marked at or below it; then, for `id`,
+// the off record. `groups` lists the roots marked, for the caller's events.
+// Then, best effort, a rotation in each private group this node distributes
+// in (privateSideEffect, as after a ban). A failure after a first write
+// throws devices.PARTIAL: the marks written stand, the call can be made
+// again. `write: false` only runs the refusals -> { pairs }.
+async function deviceDisconnect (ctx, { id = null, previous = false }, { write = true } = {}) {
+  return withDevices(ctx, async ({ identity, diary, key, self, own, view }) => {
+    const plan = devices.disconnectPlan({ fold: view.fold, self, id: typeof id === 'string' ? id.toLowerCase() : null, previous: previous === true, linked: view.linked, own, cuts: view.cuts })
+    if (plan.error) throw new UsageError(plan.error)
+    if (!write) return { pairs: plan.pairs.length }
+    const written = []
+    let cut = 0
+    let empty = 0
+    let wrote = false
+    try {
+      for (const pair of plan.pairs) {
+        const length = await heldContiguous(identity.store, pair.writer)
+        if (devices.alreadyCut(view.cuts, pair, length)) continue
+        await appendRecord(diary, groupCutRecord({ group: pair.group, writer: pair.writer, cut: length }))
+        wrote = true
+        if (!written.includes(pair.group)) written.push(pair.group)
+        cut++
+        if (length === 0) empty++
+      }
+      if (plan.off !== null) {
+        await appendRecord(diary, devices.sealedRecord({ v: 1, id: plan.off, name: null, on: false, writers: [] }, key))
+      }
+    } catch (err) {
+      if (!wrote) throw err
+      const e = new UsageError(devices.PARTIAL)
+      e.cause = err
+      throw e
+    }
+    for (const group of written) await privateSideEffect(ctx, identity, group, true)
+    return { cut, empty, groups: written }
+  })
+}
+
 // The groups of the local list whose root header names `community` (the
 // groups.changed fan-out of a community write); [] when none or on any error.
 async function communityGroups (ctx, { community }) {
@@ -3983,5 +4164,11 @@ module.exports = {
   communityInfo,
   groupSeen,
   communityList,
-  communityGroups
+  communityGroups,
+  deviceHello,
+  deviceList,
+  deviceDisconnect,
+  deviceReconnect,
+  deviceOff,
+  readDeviceId
 }

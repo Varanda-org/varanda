@@ -49,6 +49,8 @@ const BLOCK_WEB_ONLY = 'bloqueio de membros disponível só no navegador'
 const POST_SHARE_WEB_ONLY = 'A página pública de uma publicação só pode ser ligada pelo app ou pelo navegador.'
 // How long downloads in a group are gathered into one groups.changed.
 const GROUPS_CHANGED_MS = 50
+// The bounded update of the writer cores before device.disconnect.
+const DEVICE_REFRESH_MS = 15000
 
 // ---- error mapping (A6) ----
 
@@ -288,6 +290,7 @@ function createSession ({
   // (the member certificate) is append-only, so only `memberCert: true` is cached.
   let ownKey = null
   let certKnown = false
+  let deviceOffSent = false // the last devices.changed `off` sent (none sent: false)
 
   // A run's events carry the connection epoch it started in: once that
   // connection is detached, a run still unwinding reports to nobody, not to
@@ -497,6 +500,34 @@ function createSession ({
     const { publicKey } = await identity()
     if (publicKey === null) throw new Error('identidade não encontrada')
     return publicKey
+  }
+
+  // ---- connected devices ----
+
+  // devices.changed when a device.* call sees this device's state differ
+  // from the last one sent (none sent: false, connected).
+  function noteDeviceOff (off, epoch) {
+    if (typeof off !== 'boolean' || off === deviceOffSent) return
+    deviceOffSent = off
+    send('devices.changed', { off }, epoch)
+  }
+
+  // Before device.disconnect marks the writers: while a continuous run is
+  // wanted, one bounded once run brings the writer cores up to what the
+  // peers hold, so the marks keep what the lost device wrote before the
+  // call. Without a continuous run the node is offline by choice and marks
+  // what it holds.
+  async function refreshGroupCores () {
+    if (syncIntent !== 'continuous' || closed || errorState) return
+    const intent = syncIntent
+    if (run !== null) await stopRun('preempted')
+    startRun({ once: true, timeoutMs: DEVICE_REFRESH_MS })
+    const r = run
+    try {
+      if (r !== null) await r.done
+    } finally {
+      if (!errorState && syncIntent === null) syncIntent = intent
+    }
   }
 
   function syncState () {
@@ -903,6 +934,31 @@ function createSession ({
     }),
     'visits.note': serial(async () => {
       throw new UsageError(PEEK_WEB_ONLY)
+    }),
+
+    // Aparelhos conectados (docs/rpc.md 5.151 to 5.154).
+    'device.hello': serial(async (params, epoch) => {
+      const r = await withStore((c) => member.deviceHello(c, params))
+      noteDeviceOff(r.off, epoch)
+      return r
+    }),
+    'device.list': serial(async (params, epoch) => {
+      const r = await withStore((c) => member.deviceList(c))
+      noteDeviceOff(r.off, epoch)
+      return r
+    }),
+    'device.disconnect': serial(async (params, epoch) => {
+      // The refusals first, so a refused call starts no run.
+      const { pairs } = await withStore((c) => member.deviceDisconnect(c, params, { write: false }))
+      if (pairs > 0) await refreshGroupCores()
+      const r = await withStore((c) => member.deviceDisconnect(c, params))
+      for (const group of r.groups) send('groups.changed', { group }, epoch)
+      return { cut: r.cut, empty: r.empty }
+    }),
+    'device.reconnect': serial(async (params, epoch) => {
+      const r = await withStore((c) => member.deviceReconnect(c, params))
+      noteDeviceOff(false, epoch)
+      return r
     }),
 
     // Foruns e enquetes (docs/rpc.md): a vote checks the poll post with a

@@ -19,6 +19,8 @@
 //   await node.setKeyPair({ publicKey, secretKey }, { media, prf })  // unlock, in memory only;
 //                                // media: this device's media core pair (optional)
 //                                // prf: passkey PRF bytes for group keys (optional)
+//                                // fresh: true after a passkey ceremony in this open,
+//                                // not a kept session (device.reconnect needs it)
 //                                // copied on unlock, zero-filled on lock
 //   await node.clearKeyPair()    // lock (both pairs zero-filled)
 //   await node.identityStatus()  // { exists, publicKey, legacy, unlocked, synced }
