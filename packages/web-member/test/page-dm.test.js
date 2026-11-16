@@ -705,6 +705,7 @@ test('a pull under way never overwrites the cursor restart of an adoption', asyn
   const own = hex(idKp.publicKey)
   const prf = crypto.randomBytes(32)
   await engine.unlock(prf)
+  await engine.loaded()
   const ownBox = hex((await dmBoxKeyPairFromPrf(prf, 1)).publicKey)
   const page = hex(crypto.keyPair().publicKey)
   const made = engine.pageGenerate(own, idKp, { page, gen: 2, recipients: [{ member: own, box: ownBox }] })
@@ -763,6 +764,7 @@ test('a second bundle with the same legacy box during a pull is refused and leav
   const engine = engineWithDmLink(link)({ storage, association: hex(assoc.publicKey), seederUrl: 'ws://127.0.0.1:1/seeder', createSocket: () => { throw new Error('sem rede') } })
   t.teardown(() => engine.close(), { force: true })
   await engine.unlock(prf)
+  await engine.loaded()
   const ownBox = hex((await dmBoxKeyPairFromPrf(prf, 1)).publicKey)
   const made = engine.pageGenerate(own, idKp, { page, gen: 2, recipients: [{ member: own, box: ownBox }] })
   const sh = made.shares[0]
@@ -983,6 +985,7 @@ test('a forget during a pull: the pull stops writing for the page and never open
   const own = hex(idKp.publicKey)
   const prf = crypto.randomBytes(32)
   await engine.unlock(prf)
+  await engine.loaded()
   const ownBox = hex((await dmBoxKeyPairFromPrf(prf, 1)).publicKey)
   const page = hex(crypto.keyPair().publicKey)
   const made = engine.pageGenerate(own, idKp, { page, gen: 1, recipients: [{ member: own, box: ownBox }] })

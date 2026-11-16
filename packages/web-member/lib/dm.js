@@ -292,6 +292,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   const forgetting = new Set()
   let box = null // { publicKey, secretKey, gen }
   let generation = 0
+  // The row load of the last unlock that installed its keys and the work
+  // after it (afterLoad); never rejects unhandled.
+  let ready = Promise.resolve()
   let pulling = false
   let topping = null
   // The earliest time the next unforced top-up may run.
@@ -425,10 +428,11 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   }
 
   // Any throw leaves no key material behind: the derived pair and key are
-  // zeroed and the store locked. Resolves once the rows are loaded; onKey()
-  // runs before that, once the keys are installed and the list summary
-  // read (keyReady()), so dm.list may answer a first page from it.
-  async function unlock (prf, { onKey = null } = {}) {
+  // zeroed and the store locked. Resolves once the keys are installed and
+  // the list summary read (keyReady()), so dm.list may answer a first page
+  // from it; the own rows keep loading, and whatever needs them awaits
+  // loaded() (the operations that read them throw LOCKED until then).
+  async function unlock (prf) {
     const gen = ++generation
     foldMemo.clear()
     let pair = null
@@ -440,17 +444,12 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       pair = await dmBoxKeyPairFromPrf(prf, g, { hkdf })
       key = await dmLocalKeyFromPrf(prf, { hkdf })
       if (gen !== generation) return
-      const full = local.unlock(key)
-      full.catch(noop)
-      await local.keyStage()
+      await local.unlock(key)
       if (gen !== generation) {
         local.lock()
         return
       }
-      if (!local.keyReady()) {
-        await full
-        throw new UsageError(LOCKED)
-      }
+      if (!local.keyReady()) throw new UsageError(LOCKED)
       await pages.unlock(key)
       if (gen !== generation) {
         pages.lock()
@@ -470,9 +469,15 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       if (key !== null) key.fill(0)
       if (!installed) zeroPair(pair)
     }
-    if (onKey !== null && gen === generation) {
-      try { onKey() } catch {}
-    }
+    if (gen !== generation) return
+    ready = track(afterLoad(gen))
+    ready.catch(noop)
+  }
+
+  // The own rows of unlock `gen` loaded: the ctls and visit pings left from
+  // before go out. A failed load locks the engine (no key material outlives
+  // it) and rejects.
+  async function afterLoad (gen) {
     try {
       await local.loaded()
     } catch (err) {
@@ -538,9 +543,11 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     return box !== null && local.keyReady()
   }
 
-  // Settles once the own rows of the current unlock are loaded.
+  // Settles once the own rows of the last unlock that installed its keys
+  // are loaded and the work after the load started; rejects when the load
+  // failed (the engine then locked).
   function loaded () {
-    return local.loaded()
+    return ready
   }
 
   function requireUnlocked () {
@@ -593,14 +600,14 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       const lc = createDmStore({ storage, cacheBytesMax: L.cacheBytesMax, prefix, summaryDelayMs: L.summaryDelayMs })
       const k = pages.localKeyOf(page)
       // The store copies the key before unlock() returns.
-      const full = lc.unlock(k)
+      const ready = lc.unlock(k)
       k.fill(0)
-      s = { local: lc, prefix, page, ready: lc.keyStage() }
+      s = { local: lc, prefix, page, ready }
       pageStores.set(page, s)
       // A failed row load drops the store as a failed key stage does, so
       // the next call starts a fresh unlock instead of meeting a dead one.
       const failed = s
-      full.catch(() => {
+      lc.loaded().catch(() => {
         if (pageStores.get(page) === failed) {
           pageStores.delete(page)
           foldMemo.delete(failed.local)
