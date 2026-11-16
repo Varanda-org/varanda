@@ -1062,6 +1062,8 @@ function createBrowserSession ({
   let rekeyTimerAt = null
   let rekeyPassTimer = null
   let rekeyQueued = false
+  const rekeyDeferred = new Set()
+  let rekeyDeferTimer = null
   // The own length of the last fold the continuous run was restarted for.
   let lastFoldLength = null
   // Last own-sync verdict of a run: the own diary held what the verified
@@ -1393,10 +1395,7 @@ function createBrowserSession ({
                 if (!once && !internal && upkeepRoom()) scheduleUpkeep()
                 // A grown group may make its epoch due (periodicRekeyStep):
                 // a rotation-only pass, at most once an hour per group.
-                if (!once && !internal && keyPair !== null && groupPrf !== null && typeof ev.group === 'string' && rekeyTriggers.ready(ev.group)) {
-                  rekeyTriggers.checked(ev.group)
-                  scheduleRekey()
-                }
+                if (!once && !internal && typeof ev.group === 'string') rekeyGrew(ev.group)
                 return
               case 'group-writer':
                 // A writer stored after the pass that planned on the own
@@ -2401,9 +2400,12 @@ function createBrowserSession ({
   function clearRekeyTimer () {
     if (rekeyTimer !== null) clearTimeout(rekeyTimer)
     if (rekeyPassTimer !== null) clearTimeout(rekeyPassTimer)
+    if (rekeyDeferTimer !== null) clearTimeout(rekeyDeferTimer)
     rekeyTimer = null
     rekeyTimerAt = null
     rekeyPassTimer = null
+    rekeyDeferTimer = null
+    rekeyDeferred.clear()
   }
 
   // Runs a rotation-only pass when the earliest group not due yet becomes
@@ -2420,6 +2422,28 @@ function createBrowserSession ({
       rekeyTimerAt = null
       scheduleRekey()
     }, delay)
+  }
+
+  // A group that grew starts a rotation-only pass at most once an hour;
+  // growth inside its hour is kept and starts one when the hour ends, on a
+  // single timer.
+  function rekeyGrew (group) {
+    if (closed || keyPair === null || groupPrf === null) return
+    if (rekeyTriggers.ready(group)) {
+      rekeyTriggers.checked(group)
+      scheduleRekey()
+      return
+    }
+    rekeyDeferred.add(group)
+    if (rekeyDeferTimer !== null) return
+    let at = Infinity
+    for (const g of rekeyDeferred) at = Math.min(at, rekeyTriggers.readyAt(g))
+    rekeyDeferTimer = setTimeout(() => {
+      rekeyDeferTimer = null
+      const groups = [...rekeyDeferred]
+      rekeyDeferred.clear()
+      for (const g of groups) rekeyGrew(g)
+    }, Math.min(Math.max(at - rekeyClock(), 0), 0x7fffffff))
   }
 
   // A rotation-only pass outside the upkeep's armings: it leaves their

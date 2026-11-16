@@ -4708,9 +4708,9 @@ async function periodicRekey (ctx, { groups = [], now = Date.now(), jitter = () 
       const epoch = await withGroup(ctx, group, true, async ({ ownHex, base, g }) => {
         const own = g.private ? distributorOf(g, ownHex) : null
         if (own === null || !(await periodicDecision(ctx, g, own, now, jitter)).due) return null
-        try {
-          await shareHistory(ctx, g, ownHex)
-        } catch {}
+        // As group.rekey: a failed history hand-off stops the rotation, and
+        // the next check tries both again.
+        await shareHistory(ctx, g, ownHex)
         return rotateGroup(ctx, await loadGroup(ctx, base, group), ownHex)
       })
       if (epoch !== null) rotated.push(group)

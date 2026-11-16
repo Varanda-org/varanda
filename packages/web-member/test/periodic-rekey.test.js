@@ -441,31 +441,39 @@ test('session: a failed rotation is not retried within the hour, and the group s
 })
 
 test('session: a grown group starts a rotation-only pass on the run\'s cores, at most once an hour', async (t) => {
-  let now = Date.now() + REKEY_PERIOD_MS - DAY
-  const { a, sync, group } = await creator(t, () => now, { lendGroups: true })
+  let offset = REKEY_PERIOD_MS - DAY
+  const clock = () => Date.now() + offset
+  const { a, sync, group } = await creator(t, clock, { lendGroups: true })
   const spy = []
   const plan = ops.periodicRekeyPlan
-  ops.periodicRekeyPlan = async function () {
-    const out = await plan.apply(this, arguments)
-    spy.push(out)
-    return out
+  ops.periodicRekeyPlan = async function (c, opts) {
+    spy.push({ now: opts.now })
+    return plan.apply(this, arguments)
   }
   t.teardown(() => { ops.periodicRekeyPlan = plan })
+  const live = () => until(() => sync.last() && !sync.last().aborted && !sync.last().once, { name: 'a live run', timeoutMs: 5000 })
   await armPass(a, sync, await diaryLength(a))
   await until(() => spy.length === 1, { name: 'the first plan', timeoutMs: 5000 })
   await pause(200)
   t.is(firstBlocks(await coreRecords(a, group)), 1, 'not due yet')
 
-  now += DAY + 2 * REKEY_CHECK_MS
-  await until(() => sync.last() && !sync.last().aborted && !sync.last().once, { name: 'a live run', timeoutMs: 5000 })
+  // Due: the first growth starts a pass at once.
+  offset += DAY + 2 * REKEY_CHECK_MS
+  await live()
+  const grew = clock()
   sync.last().emit({ event: 'groups-changed', group })
   await until(async () => firstBlocks(await coreRecords(a, group)) === 2, { name: 'the rotation', timeoutMs: 10000 })
-  await pause(200)
-  const plans = spy.length
+  t.is(spy.length, 2, 'one pass for the growth')
 
-  await until(() => sync.last() && !sync.last().aborted && !sync.last().once, { name: 'a live run', timeoutMs: 5000 })
+  // Two more growths 2 s before that hour ends: one pass, when it ends.
+  await live()
+  offset += grew + REKEY_CHECK_MS - 2000 - clock()
   sync.last().emit({ event: 'groups-changed', group })
-  await pause(300)
-  t.is(spy.length, plans, 'the same group in the same hour arms nothing')
+  await pause(100)
+  sync.last().emit({ event: 'groups-changed', group })
+  await until(() => spy.length === 3, { name: 'the pass when the hour ends', timeoutMs: 10000 })
+  t.ok(spy[2].now >= grew + REKEY_CHECK_MS, 'not before the hour ends')
   await a.web.request('sync.stop')
+  t.is(spy.length, 3, 'two growths, one pass')
+  t.is(firstBlocks(await coreRecords(a, group)), 2, 'still rotated once')
 })

@@ -55,18 +55,21 @@ function notDue (reason, at = null) {
 // - ownEpoch: the epoch was opened by a writer of this device;
 // - now: ms; jitter: in [0, 1), fixed per epoch by the caller;
 // - log: { length, bytes, maxBlocks, maxBytes } of the distributor's writer.
-// Every `at` later than now counts as now. -> { due, at, reason }: due now
+// Every `at` later than now counts as now, and an envelope's `at` earlier
+// than the epoch's counts as the epoch's: an author can date its envelopes
+// freely, and backdated ones must not make the other distributors skip the
+// tie-break wait. -> { due, at, reason }: due now
 // (`at` the moment it became due), not due until `at`, or not due with
 // `at` null (nothing to wait for: an idle group, no epoch, pending, no room).
 function rekeyDue ({ rekeyPending = false, epoch = null, epochAt = null, sealedAts = [], entitled = 0, ownEpoch = false, now, jitter = 0, log = null } = {}) {
   if (!Number.isFinite(now)) throw new TypeError('now required')
   if (rekeyPending === true) return notDue('rekey-pending')
   if (epoch === null || typeof epoch !== 'object') return notDue('no-epoch')
-  const ats = (Array.isArray(sealedAts) ? sealedAts : []).map((a) => Number.isFinite(a) ? Math.min(a, now) : now).sort((a, b) => a - b)
+  const start = Number.isFinite(epochAt) ? Math.min(epochAt, now) : now
+  const ats = (Array.isArray(sealedAts) ? sealedAts : []).map((a) => Number.isFinite(a) ? Math.max(Math.min(a, now), start) : now).sort((a, b) => a - b)
   if (ats.length === 0) return notDue('idle')
   if (log !== null && lowOnLog(log)) return notDue('log-reserve')
   const s = rekeyScale(entitled)
-  const start = Number.isFinite(epochAt) ? Math.min(epochAt, now) : now
   const ageDue = start + REKEY_PERIOD_MS * s
   const n = REKEY_RECORDS * s
   const countDue = ats.length >= n ? ats[n - 1] : Infinity
@@ -128,6 +131,13 @@ function createRekeyGate ({ now = Date.now, random = Math.random, max = REKEY_GA
       if (last === undefined) return true
       const t = now()
       return t < last || t - last >= REKEY_CHECK_MS
+    },
+    // When ready(group) turns true (now, when it already is).
+    readyAt (group) {
+      const last = checks.get(group)
+      const t = now()
+      if (last === undefined || t < last || t - last >= REKEY_CHECK_MS) return t
+      return last + REKEY_CHECK_MS
     },
     checked (group) {
       remember(checks, group, now())

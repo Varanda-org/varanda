@@ -119,6 +119,18 @@ test('tie-break: the opener rotates when due, another distributor waits 48 h plu
   t.alike(counted, { due: false, at: nth + REKEY_OTHER_WAIT_MS, reason: 'waiting' })
 })
 
+test('backdated envelopes count from the epoch\'s at: a non-opener still waits, as with honest dates', (t) => {
+  const now = T0 + DAY
+  const honest = rekeyDue(input({ ownEpoch: false, sealedAts: Array.from({ length: REKEY_RECORDS }, (_, i) => now - REKEY_RECORDS + i), now }))
+  t.is(honest.reason, 'waiting', 'honest dates: waits')
+  t.ok(honest.at > now)
+  const backdated = rekeyDue(input({ ownEpoch: false, sealedAts: Array.from({ length: REKEY_RECORDS }, () => 0), now }))
+  t.alike(backdated, { due: false, at: T0 + REKEY_OTHER_WAIT_MS, reason: 'waiting' }, 'dated 1970: counted at the epoch\'s at, still waiting')
+  t.ok(backdated.at > now, 'not due at once')
+  // The opener's count due moment is clamped the same way.
+  t.alike(rekeyDue(input({ sealedAts: Array.from({ length: REKEY_RECORDS }, () => 0), now })), { due: true, at: T0, reason: 'count' })
+})
+
 test('log reserve: under 10% of blocks or bytes left, no periodic rotation', (t) => {
   const now = T0 + REKEY_PERIOD_MS
   const at10 = { length: 900, bytes: 90000, maxBlocks: 1000, maxBytes: 100000 }
@@ -141,13 +153,18 @@ test('gate: one check per group per hour, a clock going back never locks it', (t
   gate.checked('g')
   t.absent(gate.ready('g'), 'just checked')
   t.ok(gate.ready('h'), 'another group is free')
+  t.is(gate.readyAt('h'), T0, 'free now')
+  t.is(gate.readyAt('g'), T0 + REKEY_CHECK_MS, 'free an hour after the check')
   now += REKEY_CHECK_MS - 1
   t.absent(gate.ready('g'), 'one ms short of the hour')
+  t.is(gate.readyAt('g'), T0 + REKEY_CHECK_MS)
   now += 1
   t.ok(gate.ready('g'), 'an hour later')
+  t.is(gate.readyAt('g'), now)
   gate.checked('g')
   now -= 10 * DAY
   t.ok(gate.ready('g'), 'clock went back')
+  t.is(gate.readyAt('g'), now)
   t.is(gate.now(), now)
 })
 

@@ -2606,12 +2606,15 @@ function periodicDecision (loaded, core, now, jitter) {
 // local group): each group ready(group) allows is listed in `checked`
 // whatever the outcome; where this node distributes and the epoch is due,
 // it rotates by group.rekey's path (the history, then rotateEpoch).
-// -> { checked, rotated, failed: [{ group, message }], next } (next: the
-// earliest moment, ms, a group not due yet becomes due, or null). Best
+// -> { checked, rotated, failed: [{ group, message }], next, public } (next:
+// the earliest moment, ms, a group not due yet becomes due, or null; public:
+// the checked groups that are public, which never need a check). As
+// group.rekey on this node, a failed history hand-off does not stop the
+// rotation (keySideEffect). Best
 // effort: a failure is reported, never retried here, and a rotation is
 // written whole or not at all.
 async function periodicRekey (ctx, { groups: wanted = null, now = Date.now(), ready = () => true, jitter = () => 0 } = {}) {
-  const out = { checked: [], rotated: [], failed: [], next: null }
+  const out = { checked: [], rotated: [], failed: [], next: null, public: [] }
   const local = localGroups(ctx.dataDir).filter((g) => g.kind !== 'community').map((g) => g.group)
   const keys = wanted === null
     ? local
@@ -2621,7 +2624,11 @@ async function periodicRekey (ctx, { groups: wanted = null, now = Date.now(), re
     out.checked.push(group)
     try {
       await withGroup(ctx, group, async (loaded, identity) => {
-        if (!loaded.private || loaded.view.orphan || loaded.view.community === null) return
+        if (!loaded.private) {
+          out.public.push(group)
+          return
+        }
+        if (loaded.view.orphan || loaded.view.community === null) return
         const core = await distributorCore(loaded, identity)
         if (core === null) return
         const d = periodicDecision(loaded, core, now, jitter)

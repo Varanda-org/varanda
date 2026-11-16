@@ -25,7 +25,7 @@ const path = require('#path')
 const { RpcError, isSafeMessage, capList, capSyncResult, clipText, FEED_INCOMPLETE_MAX, MAX_LINE, MAX_ID } = require('@varanda/rpc')
 const member = require('./member')
 const { runSync } = require('./sync')
-const { readConfig, readFollows, storeExists } = require('./store')
+const { readConfig, readFollows, storeExists, readGroups } = require('./store')
 const { validRecordCopy, validateRecord, parseRef, genesisCert, decodeBlock } = require('./records')
 const { certForKey } = require('./cert')
 const { formatEvent, key8 } = require('./sync-format')
@@ -307,6 +307,11 @@ function createSession ({
   let rekeyTimer = null
   let rekeyDueTimer = null
   let rekeyDueAt = 0
+  let rekeyStart = false
+  const rekeyDeferred = new Set()
+  let rekeyDeferTimer = null
+  // Groups a check found public: never private, never checked again.
+  const rekeyPublic = new Set()
 
   // A run's events carry the connection epoch it started in: once that
   // connection is detached, a run still unwinding reports to nobody, not to
@@ -451,18 +456,56 @@ function createSession ({
   // ---- periodic key rotation (lib/group-rekey.js) ----
 
   // Node-initiated and best effort: only while a continuous run is wanted,
-  // at most one check per group an hour, never retried after a failure
-  // before the next check. `groups` null = every local group.
+  // at most one check per group an hour (each check stops and restarts the
+  // run, like a request), never retried after a failure before the next
+  // check. `groups` null = every local group. Only a group the check can
+  // mark counts (a local group that is not a community nor known public),
+  // so a community's growth never stops the run. Growth inside a group's
+  // hour is kept and checked when the hour ends, on one timer.
   function wantRekey (groups) {
     if (closed || syncIntent !== 'continuous') return
     if (groups === null) {
       rekeyAll = true
     } else {
-      for (const g of groups) if (rekeyGate.ready(g)) rekeyWanted.add(g)
+      for (const g of checkable(groups)) {
+        if (rekeyGate.ready(g)) rekeyWanted.add(g)
+        else rekeyDeferred.add(g)
+      }
+      armRekeyDeferred()
     }
     if (rekeyTimer !== null || (!rekeyAll && rekeyWanted.size === 0)) return
     rekeyTimer = setTimeout(rekeyPass, rekeyDelayMs)
     if (typeof rekeyTimer.unref === 'function') rekeyTimer.unref()
+  }
+
+  // The same filter as member.periodicRekey, read from groups.json without
+  // the store.
+  function checkable (groups) {
+    if (groups.length === 0) return []
+    const local = new Set()
+    for (const g of readGroups(dataDir)) {
+      if (g && typeof g.group === 'string' && g.kind !== 'community') local.add(g.group.toLowerCase())
+    }
+    const out = []
+    for (const g of groups) {
+      const key = typeof g === 'string' ? g.toLowerCase() : ''
+      if (local.has(key) && !rekeyPublic.has(key)) out.push(key)
+    }
+    return out
+  }
+
+  function armRekeyDeferred () {
+    if (rekeyDeferTimer !== null || rekeyDeferred.size === 0) return
+    let at = Infinity
+    for (const g of rekeyDeferred) at = Math.min(at, rekeyGate.readyAt(g))
+    const delay = Math.min(Math.max(at - rekeyGate.now(), 0), 0x7fffffff)
+    rekeyDeferTimer = setTimeout(() => {
+      rekeyDeferTimer = null
+      const groups = [...rekeyDeferred]
+      rekeyDeferred.clear()
+      wantRekey(groups)
+    }, delay)
+    if (typeof rekeyDeferTimer.unref === 'function') rekeyDeferTimer.unref()
   }
 
   function armRekeyDue (at) {
@@ -481,10 +524,14 @@ function createSession ({
   function clearRekey () {
     if (rekeyTimer !== null) clearTimeout(rekeyTimer)
     if (rekeyDueTimer !== null) clearTimeout(rekeyDueTimer)
+    if (rekeyDeferTimer !== null) clearTimeout(rekeyDeferTimer)
     rekeyTimer = null
     rekeyDueTimer = null
+    rekeyDeferTimer = null
     rekeyWanted.clear()
+    rekeyDeferred.clear()
     rekeyAll = false
+    rekeyStart = false
   }
 
   function rekeyPass () {
@@ -493,13 +540,18 @@ function createSession ({
     // Never in the way of a request: try again after the queue drains.
     if (suspended || queued > 0) return wantRekey([])
     const groups = rekeyAll ? null : [...rekeyWanted]
+    const start = rekeyStart
     rekeyWanted.clear()
     rekeyAll = false
-    rekeyCheck(groups).catch(noop)
+    rekeyStart = false
+    rekeyCheck({ groups, start }).catch(noop)
   }
 
-  const rekeyCheck = serial(async (groups, epoch) => {
+  const rekeyCheck = serial(async ({ groups, start }, epoch) => {
     if (syncIntent !== 'continuous') return
+    // The start check counts once it runs: a run stopped before it did
+    // leaves the next start free to check.
+    if (start) rekeyGate.checked(REKEY_START)
     const r = await withStore((c) => member.periodicRekey(c, {
       groups,
       now: rekeyGate.now(),
@@ -507,6 +559,7 @@ function createSession ({
       jitter: rekeyGate.jitter
     }))
     for (const g of r.checked) rekeyGate.checked(g)
+    for (const g of r.public) rekeyPublic.add(g)
     for (const g of r.rotated) send('groups.changed', { group: g }, epoch)
     if (r.next !== null) armRekeyDue(r.next)
   })
@@ -1268,7 +1321,7 @@ function createSession ({
       syncIntent = once ? null : 'continuous'
       const runId = startRun({ once, timeoutMs })
       if (!once && rekeyGate.ready(REKEY_START)) {
-        rekeyGate.checked(REKEY_START)
+        rekeyStart = true
         wantRekey(null)
       }
       return { runId }

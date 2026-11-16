@@ -18,13 +18,18 @@ const member = require('../lib/member')
 const { REKEY_PERIOD_MS, REKEY_OTHER_WAIT_MS, REKEY_JITTER_MS, REKEY_CHECK_MS } = require('../lib/group-rekey')
 const { exchange, sync, rootEntries, texts, privateGroup, ownWriter } = require('./helpers/private-member')
 const { newSession, connect, until } = require('./helpers/net')
+const store = require('../lib/store')
 
 const DAY = 24 * 60 * 60 * 1000
 const MINUTE = 60 * 1000
 
 const firstBlocks = (entries) => entries.filter((e) => e.record.type === 'group-key' && e.record.kid === null).length
 
+// Under load the two nodes' setup alone can take about 30 s.
+const SLOW_MS = 180000
+
 async function admitted (t) {
+  t.timeout(SLOW_MS)
   const { kp, a, b, group } = await privateGroup(t)
   await member.groupPost(a, { group, text: 'antes da troca' })
   await member.groupAdmit(a, { group, member: b.key, on: true })
@@ -142,23 +147,36 @@ function continuous () {
 const started = (link) => link.events.filter((e) => e.event === 'sync.started').length
 const settle = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-async function sessionOf (t, a, clock) {
+// `now`: the session's rekey clock.
+async function sessionOf (t, a, now) {
   const session = newSession(t, {
     dataDir: a.dataDir,
     association: a.association,
     bootstrap: ['127.0.0.1:49737'],
-    rekeyClock: () => clock.now,
+    rekeyClock: now,
     rekeyRandom: () => 0,
     rekeyDelayMs: 50
   })
   return connect(t, session)
 }
 
+// Every check the session runs: its clock reading and its groups.
+function spyChecks (t) {
+  const calls = []
+  const real = member.periodicRekey
+  member.periodicRekey = (ctx, opts) => {
+    calls.push({ now: opts.now, groups: opts.groups === null ? null : [...opts.groups] })
+    return real(ctx, opts)
+  }
+  t.teardown(() => { member.periodicRekey = real })
+  return calls
+}
+
 test('core session: a continuous run checks after its start, rotates a due group once and runs on', async (t) => {
   const { a, group } = await admitted(t)
-  const clock = { now: Date.now() + REKEY_PERIOD_MS + MINUTE }
+  const now = Date.now() + REKEY_PERIOD_MS + MINUTE
   continuous()
-  const link = await sessionOf(t, a, clock)
+  const link = await sessionOf(t, a, () => now)
   await link.call('sync.start', { once: false })
   await until(() => link.events.some((e) => e.event === 'groups.changed' && e.data.group === group), { name: 'rotação' })
   await until(() => started(link) === 2, { name: 'a sincronização volta' })
@@ -172,36 +190,80 @@ test('core session: a continuous run checks after its start, rotates a due group
 
 test('core session: a once run never checks', async (t) => {
   const { a, group } = await admitted(t)
-  const clock = { now: Date.now() + REKEY_PERIOD_MS + MINUTE }
+  const now = Date.now() + REKEY_PERIOD_MS + MINUTE
+  const calls = spyChecks(t)
   scripted = async ({ onEvent }) => {
     onEvent({ event: 'group-downloaded', key: group, group, length: 3 })
     return idle()
   }
-  const link = await sessionOf(t, a, clock)
+  const link = await sessionOf(t, a, () => now)
   await link.call('sync.start', { once: true })
   await until(() => link.events.some((e) => e.event === 'sync.stopped'), { name: 'fim' })
   await settle(300)
   t.is(started(link), 1)
+  t.is(calls.length, 0, 'no check')
   t.is(firstBlocks(await rootEntries(a, group)), 1, 'nothing written')
 })
 
-test('core session: a grown group is checked at most once an hour', async (t) => {
+test('core session: growth inside a group\'s hour waits for the hour to end, then one check', async (t) => {
   const { a, group } = await admitted(t)
   const opened = await openedAt(a, group)
-  const clock = { now: opened + MINUTE }
+  // Due half an hour after the start check: that check finds it young.
+  let offset = opened + REKEY_PERIOD_MS - REKEY_CHECK_MS / 2 - Date.now()
+  const now = () => Date.now() + offset
+  const calls = spyChecks(t)
   const live = continuous()
-  const link = await sessionOf(t, a, clock)
+  const link = await sessionOf(t, a, now)
   await link.call('sync.start', { once: false })
-  await until(() => started(link) === 2, { name: 'checagem do início' })
+  await until(() => calls.length === 1 && started(link) === 2, { name: 'checagem do início' })
+  t.is(calls[0].groups, null, 'the start checks every group')
+  t.is(firstBlocks(await rootEntries(a, group)), 1, 'young at the start')
 
-  clock.now = opened + REKEY_PERIOD_MS + MINUTE
+  // Due now, 2 s before the group's hour ends: two growths wait for it.
+  const first = calls[0].now
+  offset += first + REKEY_CHECK_MS - 2000 - now()
   live.onEvent({ event: 'group-downloaded', key: group, group, length: 3 })
-  await settle(300)
-  t.is(started(link), 2, 'checked within the hour: the growth waits')
-
-  clock.now += REKEY_CHECK_MS
+  await settle(100)
   live.onEvent({ event: 'group-downloaded', key: group, group, length: 4 })
-  await until(() => started(link) === 3, { name: 'checagem depois de uma hora' })
+  await until(() => calls.length === 2, { name: 'checagem ao fim da hora' })
+  t.ok(calls[1].now >= first + REKEY_CHECK_MS, 'not before the hour ends')
+  t.alike(calls[1].groups, [group], 'the grown group')
+  await until(() => started(link) === 3, { name: 'a sincronização volta' })
   await link.call('sync.stop')
-  t.is(firstBlocks(await rootEntries(a, group)), 2, 'due and an hour later: rotated')
+  t.is(calls.length, 2, 'two growths, one check')
+  t.is(firstBlocks(await rootEntries(a, group)), 2, 'rotated')
+})
+
+test('core session: a community\'s growth never reaches the check', async (t) => {
+  const { a, group } = await admitted(t)
+  const community = store.readGroups(a.dataDir).find((g) => g.kind === 'community').group
+  const opened = await openedAt(a, group)
+  let offset = opened + MINUTE - Date.now()
+  const now = () => Date.now() + offset
+  const calls = spyChecks(t)
+  const live = continuous()
+  const link = await sessionOf(t, a, now)
+  await link.call('sync.start', { once: false })
+  await until(() => calls.length === 1 && started(link) === 2, { name: 'checagem do início' })
+
+  // Every gate open: the community and the group grow in one burst.
+  offset += 2 * REKEY_CHECK_MS
+  live.onEvent({ event: 'group-downloaded', key: community, group: community, length: 5 })
+  live.onEvent({ event: 'group-downloaded', key: group, group, length: 5 })
+  await until(() => calls.length === 2, { name: 'checagem do grupo' })
+  t.alike(calls[1].groups, [group], 'only the group: a community is never checked, so never marked')
+  await until(() => started(link) === 3, { name: 'a sincronização volta' })
+
+  // The community alone, again and again: no check, no stop.
+  offset += 2 * REKEY_CHECK_MS
+  for (let i = 0; i < 3; i++) {
+    live.onEvent({ event: 'group-downloaded', key: community, group: community, length: 6 + i })
+    await settle(150)
+  }
+  live.onEvent({ event: 'group-downloaded', key: group, group, length: 9 })
+  await until(() => calls.length === 3, { name: 'a próxima checagem do grupo' })
+  t.alike(calls[2].groups, [group])
+  await until(() => started(link) === 4, { name: 'a sincronização volta de novo' })
+  await link.call('sync.stop')
+  t.is(calls.length, 3, 'the community\'s growth stopped the run never')
 })
