@@ -3,6 +3,9 @@
 // `peer` is any peer link (member or seeder); `seederVerified` only the
 // verified seeder link of the current run ('peer seeder <8 hex>'), cleared by
 // an unverified answer, a reconnecting warning and every run start or stop.
+// The echo of a write made on this device ('diário próprio escrito neste
+// aparelho') only moves ownLength, so nothing the person does here reads as
+// news; ownRemote keeps the growth that came from another device.
 
 export const EMPTY_SIGNALS = Object.freeze({
   runId: null,
@@ -16,6 +19,11 @@ export const EMPTY_SIGNALS = Object.freeze({
   newest: {},
   fresh: {},
   ownLength: null,
+  // The greatest own length not written on this device (growth from another
+  // device, or a first length with no local line before it), never
+  // acknowledged (unlike fresh.own, which Diário clears); read through
+  // useSyncSignals().
+  ownRemote: null,
   lastDownloadAt: null,
   startedAt: null,
   idleSince: null
@@ -113,13 +121,33 @@ function foldNext (state, name, data, now) {
       next.newest = { ...state.newest, [key]: n }
     }
   }
+  // Written here: its sincronizado echo follows and is then no growth.
+  const local = /^diário próprio escrito neste aparelho \((0|[1-9][0-9]*)\)$/.exec(line)
+  if (local) {
+    const n = Number(local[1])
+    next.ownLength = Math.max(state.ownLength ?? n, n)
+  }
   const own = /^diário próprio sincronizado \((0|[1-9][0-9]*)\)$/.exec(line)
   if (own) {
     const n = Number(own[1])
-    if (state.ownLength !== null && n > state.ownLength) next.fresh = { ...state.fresh, own: n }
+    if (state.ownLength !== null && n > state.ownLength) {
+      next.fresh = { ...state.fresh, own: n }
+      next.ownRemote = n
+    } else if (state.ownLength === null) {
+      // A first length with no local line before it (after a reconnect the
+      // node announces its own writes again) may hold posts from another
+      // device made while this screen was away; a screen compares it with
+      // what it last loaded.
+      next.ownRemote = n
+    }
     next.ownLength = Math.max(state.ownLength ?? n, n)
   }
   return next
+}
+
+// True when the own diary grew from another device after the length `seen`.
+export function ownGrewElsewhere (state, seen) {
+  return !!state && typeof state.ownRemote === 'number' && typeof seen === 'number' && state.ownRemote > seen
 }
 
 // One flat map for the feed's growth trigger: present lengths under the key,
