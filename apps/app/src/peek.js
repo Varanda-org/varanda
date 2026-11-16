@@ -47,7 +47,10 @@ export function isLastPeekPage (page) {
 // to show. A later page that added nothing to the list then reads on at once
 // from its cursor, at most this many more reads per load, before the list's
 // dry-page pause counts it. A peek read changes no state and a failed one
-// ends the chain, so this never repeats a failed call.
+// ends the chain, so this never repeats a failed call. The cursor is not
+// compared: an empty page held for candidates carries the cursor it was
+// asked with while the node's candidate traversal moves on, so only max
+// bounds a node that never gets further.
 export const PEEK_EMPTY_FOLLOW_MAX = 3
 
 export function followsEmptyPage ({ page, added, hops, max = PEEK_EMPTY_FOLLOW_MAX }) {

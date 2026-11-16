@@ -2,7 +2,7 @@
 
 ### Segurança
 
-- Espiadinha e Avisos no navegador: um semeador que serve blocos assinados acima do tamanho esperado não leva mais o excesso em voo a cerca de 48 MiB numa leitura. Todo byte que o semeador manda na ligação da leitura conta: passado o orçamento mais um quadro (1 MiB) por diário em paralelo, a ligação fecha e a página fica incompleta.
+- Espiadinha e Avisos no navegador: um semeador que serve blocos assinados acima do tamanho esperado não leva mais o excesso em voo numa leitura a até cerca de 48 MiB na Espiadinha (16 diários x 3 blocos de até 1 MiB) e 32 MiB nos Avisos (8 x 4). Todo byte que o semeador manda na ligação da leitura conta: passado o orçamento mais um quadro (1 MiB) por diário em paralelo, a ligação fecha e a página fica incompleta.
 
 ### Corrigido
 
