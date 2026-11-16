@@ -5,7 +5,7 @@
 // Pure: no imports and no globals, so Node tests load it directly.
 
 export const EMPTY_TITLE = 'Ninguém novo por aqui'
-export const EMPTY_TEXT = 'Quando alguém começar a seguir você, responder, citar, mencionar você, curtir ou republicar uma publicação sua, aparece aqui.'
+export const EMPTY_TEXT = 'Quando alguém começar a seguir você, comentar, citar, mencionar você, curtir ou republicar uma publicação sua, aparece aqui.'
 export const NOTICES_OFFLINE_MESSAGE = 'Confira sua internet.'
 export const NOTICES_UNSUPPORTED_MESSAGE = 'Os Avisos ainda não estão disponíveis nesta associação.'
 // activity false: this seeder still speaks the follows-only notices channel.
@@ -514,7 +514,7 @@ export function rowAvatarSource (item, peeked) {
 const PAGE_SEEN_PREFIX = 'page:'
 
 export const PAGE_EMPTY_TITLE = 'Nenhum aviso da página ainda'
-export const PAGE_EMPTY_TEXT = 'Quando alguém seguir a página, responder, citar ou mencionar o @nome dela, aparece aqui.'
+export const PAGE_EMPTY_TEXT = 'Quando alguém seguir a página, comentar, citar ou mencionar o @nome dela, aparece aqui.'
 export const PAGE_NOTICES_UNAVAILABLE_TITLE = 'Avisos da página ainda não disponíveis'
 export const PAGE_SEEN_MAX = 8
 

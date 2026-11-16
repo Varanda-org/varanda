@@ -51,6 +51,18 @@ const {
   DM_MEDIA_CHUNK_BYTES,
   DM_MEDIA_MAX_CHUNKS,
   DM_THREAD_LIMIT_MAX,
+  POLL_MAX,
+  MAX_POLL_OPTION,
+  GROUP_MARKED_LIMIT,
+  GROUP_TOPICS_LIMIT,
+  GROUP_VOTERS_MAX,
+  MAX_EVENT_TITLE,
+  MAX_EVENT_PLACE,
+  GROUP_EVENTS_LIMIT,
+  isEvent,
+  MAX_TESTIMONIAL,
+  TESTIMONIAL_PENDING_MAX,
+  TESTIMONIAL_KEPT_MAX,
   feira
 } = require('..')
 
@@ -154,10 +166,26 @@ test('seen sync: worst-case request and results fit', (t) => {
     pending: false,
     dmChanged: false,
     groupChanged: false,
+    testimonialsChanged: false,
     caughtUp: Array.from({ length: 512 }, (_, i) => i.toString(16).padStart(64, '0'))
   })
   t.ok(merge < MAX_MESSAGE)
   t.comment('seen.merge worst-case result with 512 caught-up keys: ' + merge + ' bytes')
+})
+
+// testimonial.pending: a testimonial text refuses control characters and
+// lone surrogates, so a 4-byte character is its widest code point.
+test('testimonial.pending: worst-case pending and kept lists fit', (t) => {
+  t.is(TESTIMONIAL_PENDING_MAX, 64)
+  t.is(TESTIMONIAL_KEPT_MAX, 64)
+  const row = { from: HEX, seq: SEQ, text: '\u{1f600}'.repeat(MAX_TESTIMONIAL), at: AT }
+  const bytes = size({
+    items: Array(TESTIMONIAL_PENDING_MAX).fill(row),
+    kept: Array(TESTIMONIAL_KEPT_MAX).fill(row),
+    incomplete: false
+  })
+  t.ok(bytes < MAX_MESSAGE)
+  t.comment('testimonial.pending worst-case result: ' + bytes + ' bytes')
 })
 
 function feedResult (n, ch, preview = true) {
@@ -690,4 +718,223 @@ test('a maximal video pair is smaller than ten maximal descriptors: page maxima 
   t.is(LOG_LIMIT_MAX, 30)
   t.is(GROUP_LIMIT_MAX, 26)
   t.is(PEEK_SEQS_MAX, 29)
+})
+
+// Polls (docs/rpc.md): POLL_MAX options of MAX_POLL_OPTION characters, and
+// a summary with the widest counts and a pick. An option refuses lone
+// surrogates and line breaks, so its widest valid character is a 4-byte one;
+// the sizes below use lone surrogates anyway (6 bytes each on the wire), an
+// upper bound of every valid option.
+const pollOf = (ch) => Array.from({ length: POLL_MAX }, (_, i) => String(i) + ch.repeat(MAX_POLL_OPTION - 1))
+const WORST_POLL = pollOf('\ud800')
+const WIDEST_VALID_POLL = pollOf('\u{1f600}')
+
+// mine is null: no vote is the widest value (4 bytes against 1 for an index).
+function worstPollSummary () {
+  return { options: WORST_POLL, totals: Array(POLL_MAX).fill(SEQ), mine: null }
+}
+
+// A poll post is a root post: replyTo null, no media, preview or quote.
+function worstPollPost (ch) {
+  return { type: 'post', text: ch.repeat(MAX_TEXT), at: AT, replyTo: null, poll: WORST_POLL }
+}
+
+test('poll posts: the widest valid poll record is valid and bounded, and smaller than the worst quote', (t) => {
+  t.is(validateRecord({ ...worstPollPost('a'), poll: WORST_POLL }, 1), 'poll-invalid', 'the size bound itself is no valid poll')
+  t.ok(utf8ByteLength(JSON.stringify(WIDEST_VALID_POLL)) <= utf8ByteLength(JSON.stringify(WORST_POLL)), 'the bound covers the widest valid poll')
+  for (const ch of WORST) {
+    const record = { ...worstPollPost(ch), poll: WIDEST_VALID_POLL }
+    t.is(validateRecord(record, 1), null, 'valid core record ' + JSON.stringify(ch))
+    t.ok(validateParams('post.create', { text: record.text, poll: record.poll }).ok, 'valid rpc poll ' + JSON.stringify(ch))
+    t.ok(utf8ByteLength(JSON.stringify(worstPollPost(ch))) < utf8ByteLength(JSON.stringify(worstQuote(ch, false))), 'smaller than a ten-photo quote ' + JSON.stringify(ch))
+  }
+  t.comment('worst poll post record: ' + utf8ByteLength(JSON.stringify(worstPollPost('\ud800'))) + ' bytes')
+})
+
+test('poll posts: feed, peek and log items stay under the page maxima', (t) => {
+  // A FeedItem or PeekItem of a poll post carries `poll` (no media, no
+  // preview); a log entry carries the record.
+  const withPoll = (result) => (n, ch) => {
+    const out = result(n, ch, false)
+    const items = out.items || out.entries
+    for (let i = 0; i < items.length; i++) {
+      const e = items[i]
+      items[i] = e.record ? { ...e, record: worstPollPost(ch) } : { ...e, replyTo: null, quote: null, media: null, preview: null, poll: WORST_POLL }
+    }
+    return out
+  }
+  for (const ch of WORST) {
+    for (const result of [feedResult, peekResult, logResult]) {
+      t.ok(size(withPoll(result)(1, ch)) < size(result(1, ch, false)), 'a poll item is smaller than a ten-photo item ' + JSON.stringify(ch))
+    }
+  }
+  t.ok(size(withPoll(feedResult)(FEED_LIMIT_MAX, '\ud800')) <= MAX_MESSAGE)
+  t.ok(size(withPoll(peekResult)(PEEK_LIMIT_MAX, '\ud800')) <= MAX_MESSAGE)
+  t.ok(size(withPoll(logResult)(LOG_LIMIT_MAX, '\ud800')) <= MAX_MESSAGE)
+})
+
+test('diary.peek: PEEK_SEQS_MAX poll posts fit with profile and username', (t) => {
+  t.is(PEEK_SEQS_MAX, 29)
+  const polls = (ch) => ({ ...diaryPeekResult(0, 0, 0, ch, false), entries: Array(PEEK_SEQS_MAX).fill({ seq: SEQ, record: worstPollPost(ch) }) })
+  for (const ch of WORST) {
+    t.ok(size(polls(ch)) <= MAX_MESSAGE, JSON.stringify(ch))
+    t.ok(size(polls(ch)) < size(diaryPeekResult(PEEK_SEQS_MAX, 0, 0, ch, false)), 'below the quote worst case ' + JSON.stringify(ch))
+  }
+  t.comment('diary.peek at ' + PEEK_SEQS_MAX + ' poll posts: ' + size(polls('\ud800')) + ' bytes')
+})
+
+// The topic marker of a marked group.read item: the root the item opens or
+// belongs to, and whether that root carries a poll.
+const WORST_MARK = { writer: HEX, seq: SEQ, poll: false }
+
+// A marked page: every item carries `topic`, and a topic read also carries
+// the root's poll summary.
+function markedGroupReadResult (n, ch, card = PRIVATE_CARD) {
+  const result = groupReadResult(n, ch, null, card)
+  result.items = result.items.map((item) => ({ ...item, topic: WORST_MARK }))
+  result.poll = worstPollSummary()
+  // A root carries a poll or an event, never both; the event summary is the smaller one.
+  result.event = { writer: HEX, seq: SEQ, ...WORST_EVENT, totals: [SEQ, SEQ], mine: 1 }
+  return result
+}
+
+test('group.read: unmarked pages are unchanged', (t) => {
+  const v = validateParams('group.read', { group: HEX })
+  t.ok(v.ok)
+  t.is(v.value.limit, GROUP_LIMIT_MAX, 'the unmarked default stays GROUP_LIMIT_MAX')
+  t.absent('marks' in v.value)
+  t.is(validateParams('group.read', { group: HEX, marks: false }).value.limit, GROUP_LIMIT_MAX)
+  t.is(size(groupReadResult(GROUP_LIMIT_MAX, '\ud800', null, PRIVATE_CARD)), 261882, 'the same bytes as before marks')
+  t.absent('topic' in groupReadResult(1, '\ud800', null, PRIVATE_CARD).items[0])
+})
+
+test('group.read: GROUP_MARKED_LIMIT marked items with a poll summary fit', (t) => {
+  t.is(GROUP_MARKED_LIMIT, 24)
+  t.is(validateParams('group.read', { group: HEX, marks: true }).value.limit, GROUP_MARKED_LIMIT)
+  t.is(validateParams('group.read', { group: HEX, topic: { writer: HEX, seq: SEQ } }).value.limit, GROUP_MARKED_LIMIT)
+  t.absent(validateParams('group.read', { group: HEX, marks: true, limit: GROUP_MARKED_LIMIT + 1 }).ok)
+  const mark = { ...WORST_MARK, poll: true }
+  t.is(utf8ByteLength(JSON.stringify(mark)), utf8ByteLength(JSON.stringify(WORST_MARK)) - 1, 'poll: false is the widest marker')
+  for (const ch of WORST) {
+    t.ok(size(markedGroupReadResult(GROUP_MARKED_LIMIT, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
+    t.ok(size(markedGroupReadResult(GROUP_MARKED_LIMIT, ch, CARD)) <= MAX_MESSAGE, 'public card ' + JSON.stringify(ch))
+  }
+  const worst = size(markedGroupReadResult(GROUP_MARKED_LIMIT, '\ud800'))
+  t.ok(size(markedGroupReadResult(GROUP_LIMIT_MAX, '\ud800')) > MAX_MESSAGE, 'a marked page of GROUP_LIMIT_MAX items would not fit')
+  t.comment('group.read marked worst case at ' + GROUP_MARKED_LIMIT + ' items: ' + worst + ' bytes, ' + (MAX_MESSAGE - worst) + ' to spare')
+})
+
+// A group.topics item: the root's text and author, its hidden flag, the
+// reply count, the time of the last reply and the poll summary.
+function topicsResult (n, ch) {
+  const item = { writer: HEX, diary: HEX, seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), hidden: false, replies: SEQ, last: AT, poll: worstPollSummary() }
+  return { items: Array(n).fill(item), next: { at: AT, writer: HEX, seq: SEQ }, incomplete: true }
+}
+
+test('group.topics: a full page fits', (t) => {
+  t.is(GROUP_TOPICS_LIMIT, 30)
+  t.is(validateParams('group.topics', { group: HEX }).value.limit, GROUP_TOPICS_LIMIT)
+  t.absent(validateParams('group.topics', { group: HEX, limit: GROUP_TOPICS_LIMIT + 1 }).ok)
+  for (const ch of WORST) t.ok(size(topicsResult(GROUP_TOPICS_LIMIT, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
+  const worst = size(topicsResult(GROUP_TOPICS_LIMIT, '\ud800'))
+  t.is(worst, 251255)
+  t.ok(size(topicsResult(GROUP_TOPICS_LIMIT + 1, '\ud800')) <= MAX_MESSAGE, 'one item to spare')
+  t.ok(size(topicsResult(GROUP_TOPICS_LIMIT + 2, '\ud800')) > MAX_MESSAGE)
+  t.comment('group.topics worst case at ' + GROUP_TOPICS_LIMIT + ' topics: ' + worst + ' bytes')
+})
+
+// The who-voted answer for one group poll: every option, each with
+// GROUP_VOTERS_MAX diary keys.
+function votersResult (k) {
+  return { voters: Array.from({ length: POLL_MAX }, (_, pick) => ({ pick, count: SEQ, by: Array(k).fill(HEX) })) }
+}
+
+test('group.voters: a full page fits', (t) => {
+  t.is(GROUP_VOTERS_MAX, 900)
+  const worst = size(votersResult(GROUP_VOTERS_MAX))
+  t.is(worst, 241427)
+  t.ok(worst <= MAX_MESSAGE)
+  let largest = GROUP_VOTERS_MAX
+  while (size(votersResult(largest + 1)) <= MAX_MESSAGE) largest++
+  t.is(largest, 977, 'the largest list that would fit')
+  t.comment('group.voters worst case at ' + GROUP_VOTERS_MAX + ' keys per option: ' + worst + ' bytes')
+})
+
+// Eventos (docs/rpc.md): a title of MAX_EVENT_TITLE and a place of
+// MAX_EVENT_PLACE characters, an end and a start. Like a poll option, a
+// title or place refuses lone surrogates and line breaks, so the widest valid
+// character is a 4-byte one; the sizes below use lone surrogates anyway (6
+// bytes each on the wire), an upper bound of every valid event. The instants
+// are the 24-byte canonical form, wider than null.
+const WORST_EVENT_INSTANT = '2099-12-31T23:59:59.999Z'
+function eventOf (ch) {
+  return { title: ch.repeat(MAX_EVENT_TITLE), start: WORST_EVENT_INSTANT, end: WORST_EVENT_INSTANT, place: ch.repeat(MAX_EVENT_PLACE) }
+}
+const WORST_EVENT = eventOf('\ud800')
+const WIDEST_VALID_EVENT = { ...eventOf('\u{1f600}'), start: '2099-12-30T23:59:59.999Z' }
+
+// An event post is a root post: replyTo null, no media, preview, quote or poll.
+function worstEventPost (ch) {
+  return { type: 'post', text: ch.repeat(MAX_TEXT), at: AT, replyTo: null, event: eventOf(ch) }
+}
+
+test('event posts: the widest valid event record is valid and bounded, and smaller than the worst quote', (t) => {
+  t.is(isEvent(WORST_EVENT), false, 'the size bound itself is no valid event')
+  t.ok(utf8ByteLength(JSON.stringify(WIDEST_VALID_EVENT)) <= utf8ByteLength(JSON.stringify(WORST_EVENT)), 'the bound covers the widest valid event')
+  for (const ch of WORST) {
+    const record = { ...worstEventPost(ch), event: WIDEST_VALID_EVENT }
+    t.is(validateRecord(record, 1), null, 'valid core record ' + JSON.stringify(ch))
+    t.ok(validateParams('post.create', { text: record.text, event: record.event }).ok, 'valid rpc event ' + JSON.stringify(ch))
+    t.ok(validateParams('group.post', { group: HEX, text: 'a' + ch.repeat(MAX_TEXT - 1), event: record.event }).ok, 'valid group.post event ' + JSON.stringify(ch))
+    t.ok(utf8ByteLength(JSON.stringify(worstEventPost(ch))) < utf8ByteLength(JSON.stringify(worstQuote(ch, false))), 'smaller than a ten-photo quote ' + JSON.stringify(ch))
+  }
+  t.comment('worst event post record: ' + utf8ByteLength(JSON.stringify(worstEventPost('\ud800'))) + ' bytes')
+})
+
+test('event posts: feed, peek and log items stay under the page maxima', (t) => {
+  // A FeedItem or PeekItem of an event post carries `event` (no media, no
+  // preview); a log entry carries the record.
+  const withEvent = (result) => (n, ch) => {
+    const out = result(n, ch, false)
+    const items = out.items || out.entries
+    for (let i = 0; i < items.length; i++) {
+      const e = items[i]
+      items[i] = e.record ? { ...e, record: worstEventPost(ch) } : { ...e, replyTo: null, quote: null, media: null, preview: null, event: eventOf(ch) }
+    }
+    return out
+  }
+  for (const ch of WORST) {
+    for (const result of [feedResult, peekResult, logResult]) {
+      t.ok(size(withEvent(result)(1, ch)) < size(result(1, ch, false)), 'an event item is smaller than a ten-photo item ' + JSON.stringify(ch))
+    }
+  }
+  t.ok(size(withEvent(feedResult)(FEED_LIMIT_MAX, '\ud800')) <= MAX_MESSAGE)
+  t.ok(size(withEvent(peekResult)(PEEK_LIMIT_MAX, '\ud800')) <= MAX_MESSAGE)
+  t.ok(size(withEvent(logResult)(LOG_LIMIT_MAX, '\ud800')) <= MAX_MESSAGE)
+})
+
+test('diary.peek: PEEK_SEQS_MAX event posts fit with profile and username', (t) => {
+  t.is(PEEK_SEQS_MAX, 29)
+  const events = (ch) => ({ ...diaryPeekResult(0, 0, 0, ch, false), entries: Array(PEEK_SEQS_MAX).fill({ seq: SEQ, record: worstEventPost(ch) }) })
+  for (const ch of WORST) {
+    t.ok(size(events(ch)) <= MAX_MESSAGE, JSON.stringify(ch))
+    t.ok(size(events(ch)) < size(diaryPeekResult(PEEK_SEQS_MAX, 0, 0, ch, false)), 'below the quote worst case ' + JSON.stringify(ch))
+  }
+  t.comment('diary.peek at ' + PEEK_SEQS_MAX + ' event posts: ' + size(events('\ud800')) + ' bytes')
+})
+
+// A group.events item: the root's text and author, its hidden flag, the
+// event, the going and maybe totals and the caller's pick (null is widest).
+function eventsResult (n, ch) {
+  const item = { writer: HEX, diary: HEX, seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), hidden: false, event: eventOf(ch), totals: [SEQ, SEQ], mine: null }
+  return { items: Array(n).fill(item), next: { at: AT, writer: HEX, seq: SEQ }, incomplete: true }
+}
+
+test('group.events: a full page fits', (t) => {
+  t.is(GROUP_EVENTS_LIMIT, 30)
+  for (const ch of WORST) t.ok(size(eventsResult(GROUP_EVENTS_LIMIT, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
+  const worst = size(eventsResult(GROUP_EVENTS_LIMIT, '\ud800'))
+  t.ok(worst <= MAX_MESSAGE)
+  t.ok(size(eventsResult(GROUP_EVENTS_LIMIT + 1, '\ud800')) <= MAX_MESSAGE, 'one item to spare')
+  t.comment('group.events worst case at ' + GROUP_EVENTS_LIMIT + ' events: ' + worst + ' bytes')
 })

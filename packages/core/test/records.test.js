@@ -904,7 +904,7 @@ test('old readers: unknown types stay malformed', async (t) => {
 test('group-join records', async (t) => {
   await testnet(t)
   const { groupJoinRecord, TYPES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY } = records
-  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share'], 'TYPES parity')
+  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice'], 'TYPES parity')
   t.ok(Object.isFrozen(TYPES))
   t.alike([MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY], [512, 64, 32, 16, 80, 8])
   const gj = { type: 'group-join', group: K1, writer: K2, on: true, at: AT }
@@ -1880,4 +1880,287 @@ test('video rules match @varanda/rpc (parity)', (t) => {
     const core = validateRecord({ type: 'moment', text: '', at: AT, media }, 1) === null
     t.is(rpc.validateParams('moment.create', { text: '', media }).ok, core, 'moment ' + JSON.stringify(media))
   }
+})
+
+test('scrap records: recados key sets, text rules and builders', async (t) => {
+  const { scrapRecord, scrapHideRecord, scrapWallRecord, SCRAP_KEYS, SCRAP_HIDE_KEYS, SCRAP_WALL_KEYS, MAX_SCRAP, SCRAP_WALLS } = records
+  t.is(MAX_SCRAP, 400)
+  t.alike([...SCRAP_KEYS], ['type', 'to', 'text', 'replyTo', 'at'])
+  t.alike([...SCRAP_HIDE_KEYS], ['type', 'from', 'seq', 'at'])
+  t.alike([...SCRAP_WALL_KEYS], ['type', 'who', 'at'])
+  t.alike([...SCRAP_WALLS], ['following', 'everyone', 'nobody'])
+
+  const scrap = { type: 'scrap', to: K2, text: 'oi', replyTo: null, at: AT }
+  t.is(validateRecord(scrap, 1), null)
+  t.is(validateRecord(scrap, 0), 'genesis-required')
+  t.is(validateRecord({ ...scrap, replyTo: { author: K1, seq: 3 } }, 1), null)
+  t.alike(scrapRecord({ to: K2, text: 'oi', at: AT }), scrap)
+  t.alike(Object.keys(scrapRecord({ to: K2, text: 'oi', replyTo: { author: K1, seq: 3, extra: 1 } })), SCRAP_KEYS)
+  t.alike(scrapRecord({ to: K2, text: 'oi', replyTo: { author: K1, seq: 3, extra: 1 }, at: AT }).replyTo, { author: K1, seq: 3 })
+  t.is(validateRecord({ ...scrap, extra: 1 }, 1), 'malformed', 'extra key')
+  const noReply = { ...scrap }
+  delete noReply.replyTo
+  t.is(validateRecord(noReply, 1), 'malformed', 'missing replyTo')
+  for (const k of ['A'.repeat(64), K1.slice(1), 1, null]) t.is(validateRecord({ ...scrap, to: k }, 1), 'malformed', 'to ' + k)
+  for (const rt of [{ author: K1 }, { author: K1, seq: 0 }, { author: K1, seq: 1.5 }, { author: 'x', seq: 1 }, { author: K1, seq: 1, extra: 1 }, 'a:1', undefined]) {
+    t.is(validateRecord({ ...scrap, replyTo: rt }, 1), 'malformed', 'replyTo ' + JSON.stringify(rt))
+  }
+
+  t.is(validateRecord({ ...scrap, text: '' }, 1), 'text-length')
+  t.is(validateRecord({ ...scrap, text: 'a'.repeat(400) }, 1), null)
+  t.is(validateRecord({ ...scrap, text: 'a'.repeat(401) }, 1), 'text-length')
+  t.is(validateRecord({ ...scrap, text: '😀'.repeat(400) }, 1), null, 'counts characters')
+  t.is(validateRecord({ ...scrap, text: '😀'.repeat(401) }, 1), 'text-length')
+  t.is(validateRecord({ ...scrap, text: 'a\u0000b' }, 1), 'text-length', 'control character')
+  t.is(validateRecord({ ...scrap, text: 'a\ud800b' }, 1), 'text-length', 'lone surrogate')
+  t.is(validateRecord({ ...scrap, text: 'a\nb' }, 1), null, 'newline allowed')
+  t.is(validateRecord({ ...scrap, text: 5 }, 1), 'text-length')
+  for (const at of ['2026-01-01', '2026-01-01T00:00:00Z', 5, null]) t.is(validateRecord({ ...scrap, at }, 1), 'date-invalid', 'at ' + at)
+
+  const hide = { type: 'scrap-hide', from: K1, seq: 4, at: AT }
+  t.is(validateRecord(hide, 1), null)
+  t.alike(scrapHideRecord({ from: K1, seq: 4, at: AT }), hide)
+  t.is(validateRecord({ ...hide, extra: 1 }, 1), 'malformed')
+  for (const seq of [0, -1, 1.5, '1', null]) t.is(validateRecord({ ...hide, seq }, 1), 'malformed', 'seq ' + seq)
+  for (const from of ['A'.repeat(64), 1, null]) t.is(validateRecord({ ...hide, from }, 1), 'malformed', 'from ' + from)
+  t.is(validateRecord({ ...hide, at: 'x' }, 1), 'date-invalid')
+
+  for (const who of SCRAP_WALLS) {
+    const wall = { type: 'scrap-wall', who, at: AT }
+    t.is(validateRecord(wall, 1), null, who)
+    t.alike(scrapWallRecord({ who, at: AT }), wall)
+  }
+  for (const who of ['', 'Everyone', 'all', 1, null, undefined]) t.is(validateRecord({ type: 'scrap-wall', who, at: AT }, 1), 'malformed', 'who ' + who)
+  t.is(validateRecord({ type: 'scrap-wall', who: 'nobody', at: AT, extra: 1 }, 1), 'malformed')
+  t.is(validateRecord({ type: 'scrap-wall', who: 'nobody', at: 'x' }, 1), 'date-invalid')
+  await t.exception.all(async () => scrapRecord({ to: K2, text: '' }), /text-length/)
+  await t.exception.all(async () => scrapWallRecord({ who: 'x' }), /malformed/)
+  await t.exception.all(async () => scrapHideRecord({ from: K1, seq: 0 }), /malformed/)
+})
+
+test('profile-about and mood records: key sets, rules and builders', async (t) => {
+  const { profileAboutRecord, moodRecord, PROFILE_ABOUT_KEYS, MOOD_KEYS, THEME_IDS, MAX_ABOUT, MAX_CITY, MAX_WORK, MAX_STUDIES, MAX_INTERESTS, MAX_MOOD_TEXT } = records
+  t.alike([...PROFILE_ABOUT_KEYS], ['type', 'about', 'city', 'work', 'studies', 'interests', 'birthday', 'theme', 'at'])
+  t.alike([...MOOD_KEYS], ['type', 'emoji', 'text', 'at'])
+  t.is(THEME_IDS.length, 8)
+  t.ok(Object.isFrozen(THEME_IDS))
+  t.alike([MAX_ABOUT, MAX_CITY, MAX_WORK, MAX_STUDIES, MAX_INTERESTS, MAX_MOOD_TEXT], [600, 60, 80, 80, 200, 60])
+
+  const full = { type: 'profile-about', about: 'oi\ntchau', city: 'Recife', work: 'Professora', studies: 'Letras', interests: 'forró', birthday: '02-29', theme: THEME_IDS[0], at: AT }
+  t.is(validateRecord(full, 1), null)
+  t.is(validateRecord(full, 0), 'genesis-required')
+  t.alike(profileAboutRecord({ ...full }), full)
+  const empty = { type: 'profile-about', about: null, city: null, work: null, studies: null, interests: null, birthday: null, theme: null, at: AT }
+  t.is(validateRecord(empty, 1), null, 'all null is valid')
+  t.alike(profileAboutRecord({ at: AT }), empty, 'absent fields become null')
+  t.alike(profileAboutRecord({ about: '', city: '', birthday: '', theme: '', at: AT }), empty, "'' becomes null")
+  t.alike(Object.keys(profileAboutRecord({ at: AT })), PROFILE_ABOUT_KEYS)
+
+  t.is(validateRecord({ ...full, extra: 1 }, 1), 'malformed', 'extra key')
+  const noKey = { ...full }
+  delete noKey.theme
+  t.is(validateRecord(noKey, 1), 'malformed', 'every key must be present')
+  for (const [field, max] of [['about', MAX_ABOUT], ['city', MAX_CITY], ['work', MAX_WORK], ['studies', MAX_STUDIES], ['interests', MAX_INTERESTS]]) {
+    t.is(validateRecord({ ...full, [field]: 'a'.repeat(max) }, 1), null, field + ' at limit')
+    t.is(validateRecord({ ...full, [field]: '😀'.repeat(max) }, 1), null, field + ' counts characters')
+    t.is(validateRecord({ ...full, [field]: 'a'.repeat(max + 1) }, 1), 'text-length', field + ' over limit')
+    t.is(validateRecord({ ...full, [field]: '' }, 1), 'text-length', field + ' empty must be null')
+    t.is(validateRecord({ ...full, [field]: '  ' }, 1), 'text-length', field + ' blank')
+    t.is(validateRecord({ ...full, [field]: 'a\u0000b' }, 1), 'text-length', field + ' control')
+    t.is(validateRecord({ ...full, [field]: 'a\ud800b' }, 1), 'text-length', field + ' lone surrogate')
+    t.is(validateRecord({ ...full, [field]: 'a\u202eb' }, 1), 'text-length', field + ' bidi')
+    t.is(validateRecord({ ...full, [field]: 5 }, 1), 'text-length', field + ' type')
+    t.is(validateRecord({ ...full, [field]: 'a\nb' }, 1), field === 'about' ? null : 'text-length', field + ' newline')
+  }
+  for (const birthday of ['01-01', '02-29', '12-31']) t.is(validateRecord({ ...full, birthday }, 1), null, 'birthday ' + birthday)
+  for (const birthday of ['', '13-01', '00-01', '02-30', '04-31', '1-1', '2000-01-01', 5]) t.is(validateRecord({ ...full, birthday }, 1), 'malformed', 'birthday ' + birthday)
+  for (const theme of THEME_IDS) t.is(validateRecord({ ...full, theme }, 1), null, 'theme ' + theme)
+  for (const theme of ['', 'rosa', 'Mar', 5]) t.is(validateRecord({ ...full, theme }, 1), 'malformed', 'theme ' + theme)
+  for (const at of ['2026-01-01', 5, null]) t.is(validateRecord({ ...full, at }, 1), 'date-invalid', 'at ' + at)
+  await t.exception.all(async () => profileAboutRecord({ about: 'a'.repeat(601) }), /text-length/)
+  await t.exception.all(async () => profileAboutRecord({ theme: 'rosa' }), /malformed/)
+
+  const mood = { type: 'mood', emoji: '😀', text: 'feliz', at: AT }
+  t.is(validateRecord(mood, 1), null)
+  t.is(validateRecord(mood, 0), 'genesis-required')
+  t.alike(moodRecord({ emoji: '😀', text: 'feliz', at: AT }), mood)
+  const clear = { type: 'mood', emoji: '', text: '', at: AT }
+  t.is(validateRecord(clear, 1), null, 'both empty clears')
+  t.alike(moodRecord({ at: AT }), clear)
+  t.is(validateRecord({ ...mood, extra: 1 }, 1), 'malformed')
+  const noEmoji = { ...mood }
+  delete noEmoji.emoji
+  t.is(validateRecord(noEmoji, 1), 'malformed')
+  for (const emoji of ['a', '😀😀', 'oi', 5, null, '\u200d']) t.is(validateRecord({ ...mood, emoji }, 1), 'malformed', 'emoji ' + JSON.stringify(emoji))
+  t.is(validateRecord({ ...mood, text: 'a'.repeat(60) }, 1), null)
+  t.is(validateRecord({ ...mood, text: '😀'.repeat(60) }, 1), null, 'counts characters')
+  for (const text of ['a'.repeat(61), 'a\nb', 'a\u0000b', 'a\ud800b', 'a\u202eb', 5, null]) t.is(validateRecord({ ...mood, text }, 1), 'text-length', 'text ' + JSON.stringify(text))
+  for (const at of ['2026-01-01', 5, null]) t.is(validateRecord({ ...mood, at }, 1), 'date-invalid', 'at ' + at)
+  await t.exception.all(async () => moodRecord({ emoji: 'x' }), /malformed/)
+})
+
+test('fan and top-friends records: key sets, rules and builders', async (t) => {
+  const { fanRecord, topFriendsRecord, FAN_KEYS, TOP_FRIENDS_KEYS, MAX_TOP_FRIENDS } = records
+  t.alike([...FAN_KEYS], ['type', 'key', 'on', 'at'])
+  t.alike([...TOP_FRIENDS_KEYS], ['type', 'keys', 'at'])
+  t.ok(Object.isFrozen(FAN_KEYS) && Object.isFrozen(TOP_FRIENDS_KEYS))
+  t.is(MAX_TOP_FRIENDS, 8)
+
+  const fan = { type: 'fan', key: K2, on: true, at: AT }
+  t.is(validateRecord(fan, 1), null)
+  t.is(validateRecord({ ...fan, on: false }, 1), null)
+  t.is(validateRecord(fan, 0), 'genesis-required')
+  t.alike(fanRecord({ key: K2, on: true, at: AT }), fan)
+  for (const key of ['A'.repeat(64), K2.slice(1), 1, null]) t.is(validateRecord({ ...fan, key }, 1), 'malformed', 'fan key ' + key)
+  for (const on of [1, 'true', null, undefined]) t.is(validateRecord({ ...fan, on }, 1), 'malformed', 'fan on ' + on)
+  t.is(validateRecord({ ...fan, extra: 1 }, 1), 'malformed')
+  const noOn = { ...fan }
+  delete noOn.on
+  t.is(validateRecord(noOn, 1), 'malformed')
+  for (const at of ['2026-01-01', 5, null]) t.is(validateRecord({ ...fan, at }, 1), 'date-invalid', 'fan at ' + at)
+  await t.exception.all(async () => fanRecord({ key: 'x', on: true }), /malformed/)
+
+  const top = { type: 'top-friends', keys: [K1, K2], at: AT }
+  t.is(validateRecord(top, 1), null)
+  t.is(validateRecord(top, 0), 'genesis-required')
+  t.alike(topFriendsRecord({ keys: [K1, K2], at: AT }), top)
+  t.is(validateRecord({ ...top, keys: [] }, 1), null, 'empty list clears')
+  const eight = Array.from({ length: 8 }, (_, i) => String(i + 1).repeat(64))
+  t.is(validateRecord({ ...top, keys: eight }, 1), null, 'eight at the limit')
+  t.is(validateRecord({ ...top, keys: [...eight, K1] }, 1), 'malformed', 'nine over the limit')
+  t.is(validateRecord({ ...top, keys: [K1, K1] }, 1), 'malformed', 'duplicate')
+  for (const keys of [K1, null, undefined, [K1.toUpperCase()], [5], [K1.slice(1)], { 0: K1, length: 1 }]) {
+    t.is(validateRecord({ ...top, keys }, 1), 'malformed', 'keys ' + JSON.stringify(keys))
+  }
+  t.is(validateRecord({ ...top, extra: 1 }, 1), 'malformed')
+  const noKeys = { ...top }
+  delete noKeys.keys
+  t.is(validateRecord(noKeys, 1), 'malformed')
+  for (const at of ['2026-01-01', 5, null]) t.is(validateRecord({ ...top, at }, 1), 'date-invalid', 'top at ' + at)
+  const source = [K1]
+  const built = topFriendsRecord({ keys: source, at: AT })
+  source.push(K2)
+  t.alike(built.keys, [K1], 'the builder copies the list')
+  await t.exception.all(async () => topFriendsRecord({ keys: [K1, K1] }), /malformed/)
+})
+
+test('poll posts and choice records: key sets, rules and builders', async (t) => {
+  const { choiceRecord, POST_POLL_KEYS, CHOICE_KEYS, POLL_MIN, POLL_MAX, MAX_POLL_OPTION } = records
+  t.alike([...POST_POLL_KEYS], ['type', 'text', 'at', 'replyTo', 'poll'])
+  t.alike([...CHOICE_KEYS], ['type', 'to', 'pick', 'at'])
+  t.ok(Object.isFrozen(POST_POLL_KEYS) && Object.isFrozen(CHOICE_KEYS))
+  t.alike([POLL_MIN, POLL_MAX, MAX_POLL_OPTION], [2, 4, 60])
+  t.ok(records.TYPES.includes('choice'))
+
+  const post = { type: 'post', text: 'Vamos?', at: AT, replyTo: null, poll: ['Sim', 'Não'] }
+  t.is(validateRecord(post, 1), null)
+  t.is(validateRecord(post, 0), 'genesis-required')
+  t.is(validateRecord({ ...post, poll: ['a', 'b', 'c', 'd'] }, 1), null, 'four options')
+  t.is(validateRecord({ ...post, poll: ['a'.repeat(60), '\u{1f600}'.repeat(60)] }, 1), null, 'options at the limit')
+  t.alike(postRecord({ text: 'Vamos?', at: AT, poll: ['Sim', 'Não'] }), post)
+  t.alike(Object.keys(postRecord({ text: 'q', at: AT, poll: ['a', 'b'] })), [...POST_POLL_KEYS])
+  t.alike(Object.keys(postRecord({ text: 'q', at: AT, poll: null })), ['type', 'text', 'at', 'replyTo'], 'a null poll is no poll')
+  const source = ['a', 'b']
+  const built = postRecord({ text: 'q', at: AT, poll: source })
+  source.push('c')
+  t.alike(built.poll, ['a', 'b'], 'the builder copies the options')
+
+  for (const poll of [[], ['a'], ['a', 'b', 'c', 'd', 'e'], ['a', 'a'], ['a', ' a '], ['a', ''], ['a', ' '], ['a', 'b\nc'], ['a', 'b'.repeat(61)],
+    ['a', 'b\u0000'], ['a', 'b\ud800'], ['a', 'b\u202e'], ['a', 5], 'a,b', null, { 0: 'a', 1: 'b', length: 2 }]) {
+    t.is(validateRecord({ ...post, poll }, 1), 'poll-invalid', 'poll ' + JSON.stringify(poll))
+  }
+  t.is(validateRecord({ ...post, text: '' }, 1), 'text-length', 'a poll needs its question')
+  t.is(validateRecord({ ...post, text: 'a'.repeat(MAX_TEXT) }, 1), null)
+  t.is(validateRecord({ ...post, text: 'a'.repeat(MAX_TEXT + 1) }, 1), 'text-length')
+  t.is(validateRecord({ ...post, text: 'a\u0000b' }, 1), 'control-chars')
+  t.is(validateRecord({ ...post, text: 'a\nb' }, 1), null, 'a multi-line question')
+  t.is(validateRecord({ ...post, at: '2026-01-01' }, 1), 'date-invalid')
+  t.is(validateRecord({ ...post, replyTo: { author: K1, seq: 1 } }, 1), 'reply-invalid', 'a poll is a root post')
+  t.is(validateRecord({ ...post, extra: 1 }, 1), 'malformed')
+  const media = [{ core: K2, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 10, sha256: K1, width: 1, height: 1 }]
+  t.is(validateRecord({ ...post, media }, 1), 'malformed', 'no media beside a poll')
+  t.is(validateRecord({ ...post, quote: { author: K1, seq: 1 } }, 1), 'malformed', 'no quote beside a poll')
+  await t.exception.all(async () => postRecord({ text: 'q', at: AT, poll: ['a', 'b'], media }), /malformed/)
+  await t.exception.all(async () => postRecord({ text: 'q', at: AT, poll: ['a'] }), /poll-invalid/)
+  await t.exception.all(async () => postRecord({ text: 'q', at: AT, replyTo: { author: K1, seq: 1 }, poll: ['a', 'b'] }), /reply-invalid/)
+  // A copy of the post key sets before Enquetes: an old reader skips a poll
+  // post as malformed, and every other post validates exactly as before.
+  const oldKeys = ['type', 'text', 'at', 'replyTo']
+  t.absent(records.hasExactKeys(post, oldKeys), 'an old reader matches no key set')
+  t.is(validateRecord({ type: 'post', text: 'oi', at: AT, replyTo: null }, 1), null)
+
+  const choice = { type: 'choice', to: { author: K1, seq: 3 }, pick: 1, at: AT }
+  t.is(validateRecord(choice, 1), null)
+  t.is(validateRecord(choice, 0), 'genesis-required')
+  for (const pick of [0, 1, 2, 3, null]) t.is(validateRecord({ ...choice, pick }, 1), null, 'pick ' + pick)
+  for (const pick of [-1, 4, 1.5, '1', true, undefined]) t.is(validateRecord({ ...choice, pick }, 1), 'malformed', 'pick ' + String(pick))
+  for (const to of [{ author: K1, seq: 0 }, { author: K1 }, { author: 'x', seq: 1 }, { author: K1, seq: 1, extra: 1 }, K1 + ':1', null]) {
+    t.is(validateRecord({ ...choice, to }, 1), 'malformed', 'to ' + JSON.stringify(to))
+  }
+  t.is(validateRecord({ ...choice, extra: 1 }, 1), 'malformed')
+  const noPick = { ...choice }
+  delete noPick.pick
+  t.is(validateRecord(noPick, 1), 'malformed', 'pick must be present, null to withdraw')
+  for (const at of ['2026-01-01', 5, null]) t.is(validateRecord({ ...choice, at }, 1), 'date-invalid', 'at ' + at)
+  t.alike(choiceRecord({ to: { author: K1, seq: 3 }, pick: 1, at: AT }), choice)
+  t.alike(choiceRecord({ to: { author: K1, seq: 3 }, pick: null, at: AT }), { ...choice, pick: null })
+  const to = { author: K1, seq: 3 }
+  const copied = choiceRecord({ to, pick: 0, at: AT })
+  to.seq = 9
+  t.is(copied.to.seq, 3, 'the builder copies the target')
+  await t.exception.all(async () => choiceRecord({ to: { author: K1, seq: 3 }, pick: 4 }), /malformed/)
+})
+
+test('event posts: key set, rules and builder', async (t) => {
+  const { POST_EVENT_KEYS, POST_POLL_KEYS } = records
+  t.alike([...POST_EVENT_KEYS], ['type', 'text', 'at', 'replyTo', 'event'])
+  t.ok(Object.isFrozen(POST_EVENT_KEYS))
+  const event = { title: 'Ceia', start: '2026-12-24T20:00:00.000Z', end: '2026-12-24T23:00:00.000Z', place: 'Casa' }
+  const post = { type: 'post', text: 'Venham todos', at: AT, replyTo: null, event }
+  t.is(validateRecord(post, 1), null)
+  t.is(validateRecord({ ...post, event: { ...event, end: null, place: '' } }, 1), null, 'no end, no place')
+  t.alike(postRecord({ text: 'Venham todos', at: AT, event }), post)
+  t.alike(Object.keys(postRecord({ text: 'q', at: AT, event })), [...POST_EVENT_KEYS])
+  t.alike(Object.keys(postRecord({ text: 'q', at: AT, event: null })), ['type', 'text', 'at', 'replyTo'], 'a null event is no event')
+  const source = { ...event }
+  const built = postRecord({ text: 'q', at: AT, event: source })
+  source.title = 'outro'
+  t.is(built.event.title, 'Ceia', 'the builder copies the event')
+  t.alike(Object.keys(built.event), ['title', 'start', 'end', 'place'])
+
+  const bads = [
+    {}, { title: 'a' }, null, 'x', [], 5, { ...event, extra: 1 },
+    { title: event.title, start: event.start, end: event.end }, { title: event.title, start: event.start, place: 'x' },
+    { ...event, title: '' }, { ...event, title: ' ' }, { ...event, title: 'a\nb' }, { ...event, title: 'a'.repeat(81) },
+    { ...event, place: 'a'.repeat(121) }, { ...event, place: 'a\u0000' }, { ...event, place: 5 },
+    { ...event, start: '2026-12-24' }, { ...event, start: '2026-12-24T20:00:00Z' }, { ...event, start: '2019-12-31T23:59:59.999Z' },
+    { ...event, start: '2100-01-01T00:00:00.001Z' }, { ...event, start: 1798142400000 }, { ...event, end: event.start },
+    { ...event, end: '2026-12-24T19:00:00.000Z' }, { ...event, end: '2027-12-26T00:00:00.000Z' }, { ...event, end: undefined }
+  ]
+  for (const bad of bads) t.is(validateRecord({ ...post, event: bad }, 1), 'event-invalid', 'event ' + JSON.stringify(bad))
+  t.is(validateRecord({ ...post, text: '' }, 1), 'text-length', 'an event post needs its text')
+  t.is(validateRecord({ ...post, text: 'a'.repeat(MAX_TEXT) }, 1), null)
+  t.is(validateRecord({ ...post, text: 'a'.repeat(MAX_TEXT + 1) }, 1), 'text-length')
+  t.is(validateRecord({ ...post, text: 'a\u0000b' }, 1), 'control-chars')
+  t.is(validateRecord({ ...post, at: '2026-01-01' }, 1), 'date-invalid')
+  t.is(validateRecord({ ...post, replyTo: { author: K1, seq: 1 } }, 1), 'reply-invalid', 'an event is a root post')
+  t.is(validateRecord({ ...post, extra: 1 }, 1), 'malformed')
+  const media = [{ core: K1, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 10, sha256: K1, width: 1, height: 1 }]
+  t.is(validateRecord({ ...post, media }, 1), 'malformed', 'no media beside an event')
+  t.is(validateRecord({ ...post, quote: { author: K1, seq: 1 } }, 1), 'malformed', 'no quote beside an event')
+  t.is(validateRecord({ ...post, poll: ['a', 'b'] }, 1), 'malformed', 'no poll beside an event')
+  const noEvent = { ...post }
+  delete noEvent.event
+  t.is(validateRecord(noEvent, 1), null, 'without the key it is a plain post')
+  t.absent(records.hasExactKeys(post, ['type', 'text', 'at', 'replyTo']), 'an old reader matches no key set')
+  t.absent(records.hasExactKeys(post, [...POST_POLL_KEYS]), 'not a poll key set')
+  const hostile = { ...post }
+  Object.defineProperty(hostile, 'event', { get () { throw new Error('boom') }, enumerable: true })
+  t.is(validateRecord(hostile, 1), 'malformed', 'a throwing getter is malformed')
+  await t.exception.all(async () => postRecord({ text: 'q', at: AT, event, poll: ['a', 'b'] }), /malformed/)
+  await t.exception.all(async () => postRecord({ text: 'q', at: AT, event, media }), /malformed/)
+  await t.exception.all(async () => postRecord({ text: 'q', at: AT, event, quote: { author: K1, seq: 1 } }), /malformed/)
+  await t.exception.all(async () => postRecord({ text: 'q', at: AT, event: { ...event, end: event.start } }), /event-invalid/)
+  await t.exception.all(async () => postRecord({ text: 'q', at: AT, replyTo: { author: K1, seq: 1 }, event }), /reply-invalid/)
+  await t.exception.all(async () => postRecord({ text: '', at: AT, event }), /text-length/)
 })

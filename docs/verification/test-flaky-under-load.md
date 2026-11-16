@@ -35,7 +35,7 @@ Cinco cópias de um arquivo de rede pesado deixam a máquina mais ocupada que o 
 | `core/test/seeder-delete.test.js` | Corrigido no #649 (`mediaRead`) | Nada | sem mudança | 20/20 |
 | `core/test/community-member.test.js` | O helper `sync` abria e fechava as duas lojas a cada par e fazia a troca entre todos os pares duas vezes: mais de 1 s por par, e um teste com várias sincronizações estourava 30 s até sozinho (#416) | `sync` abre cada loja uma vez e junta tudo pela primeira pessoa; `t.timeout(90000)` nos testes 5, 6, 7, 11 e 25, que levam de 13 a 30 s com a máquina ocupada | 25/262 → 25/262 | 20/20 (o mais lento: 143 s) |
 | `core/test/community-member-leave.test.js` | Arquivo acima de 180 s sob carga, sem nenhum `not ok` (#526) | Dividido em `community-member-leave.test.js` e `-2` a `-5`; usa o novo `sync` | 46/336 → 46/336 | 20/20 em cada parte |
-| `core/test/group-member.test.js` | Cerca de 279 s contra 180 s (#421, #526) | Dividido em `group-member.test.js` e `-2` a `-6`, com o código comum em `helpers/group-member.js` | 57/463 → 57/463 | 20/20 em cada parte |
+| `core/test/group-member.test.js` | Cerca de 279 s contra 180 s (#421, #526) | Dividido em `group-member.test.js` e `-2` a `-6`, com o código comum em `helpers/group-member.js` | 57/463 → 57/463; com o teste de fórum que a `main` acrescentou depois, 58/466, no `-6` | 20/20 em cada parte |
 | `core/test/sync-delete.test.js` | Corrigido no #649 ("D lacks block 3 after its scan") | Nada | sem mudança | 20/20 |
 | `web-member/test/sync-groups.test.js` | Corrigido no #482 ("more than one page of writers is paged in full", "paged, root and its community fetched") | Nada | sem mudança | 20/20 |
 | `web-member/test/e2e-delete-purge.test.js` | Corrigido no #413 | Nada | sem mudança | 20/20 |

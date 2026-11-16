@@ -8,7 +8,7 @@ const groupLib = require('../lib/group')
 const { readBoundRoots } = require('../lib/sync')
 const store = require('../lib/store')
 const member = require('../lib/member')
-const { hex, person, exchange, pair, writerEntries, rejects, FILL, createGroup, joinGroup, THUMBS, HEART } = require('./helpers/group-member')
+const { hex, person, exchange, pair, writerEntries, offlineAppend, rejects, FILL, createGroup, joinGroup, THUMBS, HEART } = require('./helpers/group-member')
 
 test('loading a group records a root its creator bound, and not one it never bound', async (t) => {
   const { b, group } = await pair(t)
@@ -198,4 +198,22 @@ test('group.read sends the compact reaction summary, never the reactor lists', a
   } finally {
     groupLib.buildGroup = build
   }
+})
+
+test('group.read leaves out the fold\'s forum keys: no topic, poll voters or thread, hidden root or not', async (t) => {
+  const { a, b, group } = await pair(t)
+  const root = await member.groupPost(a, { group, text: 'Vamos?' })
+  const target = { writer: group, seq: root.seq }
+  await offlineAppend(a, group, groupLib.groupTopic({ target }))
+  await offlineAppend(a, group, groupLib.groupPoll({ target, options: ['Sim', 'Não'] }))
+  await exchange(a, b)
+  await member.groupPost(b, { group, text: 'Sim!', replyTo: target })
+  await offlineAppend(b, group, groupLib.groupChoice({ target, pick: 0 }))
+  await exchange(b, a)
+  const keys = (page) => page.items.map((p) => [p.text, 'topic' in p, 'thread' in p, 'poll' in p])
+  const read = await member.groupRead(a, { group })
+  t.alike(keys(read), [['Sim!', false, false, false], ['Vamos?', false, false, false]])
+  t.alike(await member.groupHide(a, { group, target, on: true }), { ok: true })
+  const hidden = await member.groupRead(a, { group })
+  t.alike(keys(hidden), [['Sim!', false, false, false], ['', false, false, false]], 'a hidden root shows no poll')
 })

@@ -56,8 +56,8 @@ test('Bubble places RichText outside any Text, so its code blocks are Views besi
 
 test('RichText draws atoms through SegmentSpan and never re-reads span text', (t) => {
   const rich = withoutComments(ui('RichText.js'))
-  t.ok(rich.includes("import { SegmentSpan } from './MentionText'"))
-  t.ok(rich.includes('<SegmentSpan key={key} segment={span.segment} onOpenMention={onOpenMention} onLongPress={onLongPress} />'), 'an atom is the parser segment, drawn as MentionText draws it')
+  t.ok(rich.includes("import { SegmentSpan, useHashtagOpen } from './MentionText'"))
+  t.ok(rich.includes('<SegmentSpan key={key} segment={span.segment} onOpenMention={onOpenMention} onLongPress={onLongPress} onOpenTag={openTag} />'), 'an atom is the parser segment, drawn as MentionText draws it')
   for (const word of ['textSegments', 'findLinks', 'findMentions', 'MentionText ', '<MentionText', 'hasMention', 'linkProps', 'isHttpUrl']) {
     t.absent(rich.includes(word), 'RichText.js has no ' + word)
   }
@@ -67,8 +67,8 @@ test('RichText draws atoms through SegmentSpan and never re-reads span text', (t
 
 test('MentionText draws each segment with SegmentSpan', (t) => {
   const mention = withoutComments(ui('MentionText.js'))
-  t.ok(mention.includes('export function SegmentSpan ({ segment, onOpenMention, onOpenPlain, onLongPress, links = true })'))
-  t.ok(mention.includes('{segments.map((segment, i) => <SegmentSpan key={i} segment={segment} onOpenMention={onOpenMention} onOpenPlain={plain} onLongPress={onLongPress} links={links} />)}'), 'MentionText hands its own segments over')
+  t.ok(mention.includes('export function SegmentSpan ({ segment, onOpenMention, onOpenPlain, onLongPress, links = true, onOpenTag })'))
+  t.ok(mention.includes('{segments.map((segment, i) => <SegmentSpan key={i} segment={segment} onOpenMention={onOpenMention} onOpenPlain={plain} onLongPress={onLongPress} links={links} onOpenTag={openTag} />)}'), 'MentionText hands its own segments over')
   const span = mention.slice(mention.indexOf('export function SegmentSpan'))
   t.ok(span.includes("segment.username !== null && typeof onOpenMention === 'function'"), 'a mention is tappable only with a handler')
   t.ok(span.includes('if (!links || segment.href === null || !isHttpUrl(segment.href))'), 'a link opens only when checked and unclamped')

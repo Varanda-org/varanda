@@ -275,7 +275,7 @@
 // unlock with a dm-key). reset() removes the local store and the dm kv.
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
-const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, PEEK_SEQS_MAX, TESTIMONIAL_PENDING_MAX, FEED_INCOMPLETE_MAX, mediaBounds, audioBounds, stripAudioMetadata, AUDIO_MS_TOLERANCE, videoBounds, stripVideoMetadata, VIDEO_MS_TOLERANCE } = require('@varanda/rpc')
+const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, PEEK_SEQS_MAX, TESTIMONIAL_PENDING_MAX, TESTIMONIAL_KEPT_MAX, TESTIMONIAL_DECLINED_MAX, FEED_INCOMPLETE_MAX, mediaBounds, audioBounds, stripAudioMetadata, AUDIO_MS_TOLERANCE, videoBounds, stripVideoMetadata, VIDEO_MS_TOLERANCE } = require('@varanda/rpc')
 const {
   validRecordCopy,
   validateRecord,
@@ -315,6 +315,7 @@ const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const member = require('./member-ops')
 const { runSync, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE } = require('./sync')
 const { verifyShow } = require('@varanda/core/lib/testimonials')
+const { applyDecision, readRefs, splitRows } = require('@varanda/core/lib/testimonial-decision')
 const { createPeeker } = require('./peek')
 const { createNoticer } = require('./notices')
 const { createPageFeeder } = require('./page-feed')
@@ -330,6 +331,7 @@ const { groupKeyPairFromPrf, outboxKeyFromPrf } = require('./passkey')
 const { sealOutbox, openOutbox, WRONG_AUTHOR: OUTBOX_WRONG_AUTHOR } = require('./outbox-seal')
 const { createGroupKeys } = require('./group-keys')
 const { checkSeederUrl } = require('./seeder-url')
+const { pickCount } = require('@varanda/core/lib/polls')
 const { createDmEngine, MOMENT_PHOTO_GONE, BLOCKED: DM_BLOCKED, NO_PAGE_KEY, KEY_MISMATCH: DM_KEY_MISMATCH, USE_PAGE_DRAFT: DM_USE_PAGE_DRAFT } = require('./dm')
 const { applyBlock, blockedKeys } = require('@varanda/core/lib/member-block')
 const { createSeenSync, groupApplier } = require('./seen-sync')
@@ -339,6 +341,24 @@ const HEX64 = /^[0-9a-fA-F]{64}$/
 const TESTIMONIAL_SELF = 'não pode escrever um depoimento para si'
 // The pointer answer is keys and seqs only: far below this.
 const TESTIMONIAL_INDEX_MAX_CHARS = 256 * 1024
+// Recados (docs/rpc.md): the wall check's refusals, and caps on the two
+// seeder answers it reads (50 rows and 1000 hides fit in about 25 KB).
+const SCRAP_SELF = 'não pode deixar recado para si'
+const SCRAP_PAGE = 'páginas não recebem recados'
+// Fas e Melhores amigos (docs/rpc.md): a page is neither fanned nor listed.
+const FAN_SELF = 'não pode ser fã de si'
+const TOP_SELF = 'não pode listar a si entre os melhores amigos'
+const FAN_PAGE = 'páginas não têm fãs'
+const TOP_PAGE = 'páginas não entram nos melhores amigos'
+// Foruns e enquetes (docs/rpc.md): a vote names a live poll post and one of
+// its options; topics and group polls live in public groups only.
+const CHOICE_NOT_POLL = 'a publicação não é uma enquete'
+const CHOICE_PICK_INVALID = 'opção inválida'
+const FORUM_PUBLIC = 'fóruns e enquetes só em grupo público'
+const SCRAP_FOLLOWING = 'esta pessoa só recebe recados de quem ela segue'
+const SCRAP_NOBODY = 'esta pessoa não está recebendo recados'
+const SCRAP_INDEX_MAX_CHARS = 64 * 1024
+const FOLLOW_INDEX_MAX_CHARS = 1024
 
 // A seeder index body read with a cap: a streamed body is cut off (and the
 // stream cancelled) past `max` bytes, so a seeder cannot make the node buffer
@@ -407,6 +427,28 @@ const OFFER_PAGE = 100
 const RATINGS_TIMEOUT_MS = 20000
 // The race result that says a rater peek ran past the shared deadline.
 const RATINGS_LATE = Symbol('late')
+// testimonial.pending: one deadline from its arrival, the index fetch
+// (itself at most PEEK_TIMEOUT_MS) included, for all its sequential peeks.
+// With the grace below it leaves the opening step and the reply 9 s of the
+// client's 30 s request timeout (DEFAULT_TIMEOUT_MS of @varanda/rpc, which
+// the app's clients use).
+const TESTIMONIAL_PENDING_TIMEOUT_MS = 20000
+// A peek that waits out its own deadline (a cleared block never arrives on
+// a temporary core, and is then `missing`) answers just after it: it is
+// cut only this long past its deadline, so it is not lost.
+const TESTIMONIAL_LATE_GRACE_MS = 1000
+// The race result that says a testimonial peek ran past that deadline.
+const TESTIMONIAL_LATE = Symbol('late')
+// A decided-only block that full-budget peeks reported missing, or whose
+// full-budget peek failed, this many calls in a row (a revoked block never
+// arrives, an unserved writer never answers, and both cost the whole peek
+// every time) is not read again for TESTIMONIAL_DEAD_REF_TTL_MS. One strike
+// alone only moves it to the end, so a single slow read hides nothing; the
+// TTL is short so two bad reads of a live block hide it only briefly.
+const TESTIMONIAL_DEAD_REF_STRIKES = 2
+const TESTIMONIAL_DEAD_REF_TTL_MS = 10 * 60 * 1000
+// The memo of those blocks is bounded; the oldest strike goes first.
+const TESTIMONIAL_DEAD_REF_MAX = 256
 const BAD_PAGE = 'operação de página inválida'
 const PAGE_FEED_BUSY = 'feed de página já em andamento'
 const PAGE_REGISTER_CORE_ONLY = 'registro de página disponível só no nó core'
@@ -442,6 +484,8 @@ const DM_LOOKUP_WINDOWS = 8
 const PEEK_WINDOW = 36
 // diary.peek requests in flight at once.
 const MAX_DIARY_PEEKS = 2
+// How often refusePages looks for a free diary.peek slot.
+const PEEK_SLOT_POLL_MS = 20
 // One deadline for the internal catch-up and push runs.
 const WRITE_GATE_TIMEOUT_MS = 15000
 // The longest a read waits for a starting run to publish its cores
@@ -775,6 +819,7 @@ function readyWithin (ready, ms) {
 // never passes it). writeGateTimeoutMs: their deadline (tests).
 // readerWaitMs: how long a read waits for a starting run's cores (tests).
 // peekTimeoutMs: the diary.peek deadline (tests; the contract's otherwise).
+// testimonialTimeoutMs: the testimonial.pending deadline (tests).
 // dmKeyPeek: tests only, (memberKey) -> { box, gen } in place of the bounded
 // diary.peek scan for a dm-key (the published page key check reads it).
 // leaseHoldMs: the lease (header); 0 = off. leaseGapMs, leaseMediaMaxMs:
@@ -803,6 +848,7 @@ function createBrowserSession ({
   writeGateTimeoutMs = WRITE_GATE_TIMEOUT_MS,
   readerWaitMs = READER_WAIT_MS,
   peekTimeoutMs = PEEK_TIMEOUT_MS,
+  testimonialTimeoutMs = TESTIMONIAL_PENDING_TIMEOUT_MS,
   dmKeyPeek = null,
   ratingsTimeoutMs = RATINGS_TIMEOUT_MS,
   leaseHoldMs = 0,
@@ -2454,6 +2500,25 @@ function createBrowserSession ({
     return { seq: r.seq, ref: r.ref, changed: r.changed, deleted: r.deleted }
   }
 
+  // profile.about / profile.mood: part of a write past one append may have
+  // landed (earlier tombstone chunks); count and push it, never retry the
+  // rest, and answer the original error.
+  async function profileExtraWrite (write) {
+    let r
+    try {
+      r = await withStore(write)
+    } catch (err) {
+      if (err !== null && typeof err === 'object' && Number.isSafeInteger(err.written)) {
+        wrote(err.written)
+        try { await pushAfterWrite() } catch {}
+      }
+      throw err
+    }
+    wrote(r.seq)
+    await pushAfterWrite()
+    return { seq: r.seq, ref: r.ref }
+  }
+
   // post.share / post.unshare (docs/rpc.md 5.122, 5.123): the recordDelete
   // path. pushAfterWrite is called even when nothing was written: it still
   // pushes while the seeder has not confirmed the local length.
@@ -2842,44 +2907,356 @@ function createBrowserSession ({
     return { pointers: out, incomplete }
   }
 
+  // ---- recados (docs/rpc.md) ----
+
+  // GET <path> on this node's own seeder (testimonialPointers' origin rule
+  // and cap) -> the parsed JSON object. Anything else, a 404 for an owner
+  // the seeder does not show included, is SEEDER_UNAVAILABLE.
+  async function seederIndexJson (path, max, timeoutMs = peekTimeoutMs) {
+    let ws
+    try {
+      ws = new URL(cfg.seederUrl)
+    } catch {
+      throw new Error(SEEDER_UNAVAILABLE)
+    }
+    const loopback = ws.hostname === '127.0.0.1' || ws.hostname === 'localhost' || ws.hostname === '[::1]'
+    if (ws.protocol !== 'wss:' && !(ws.protocol === 'ws:' && loopback)) throw new Error(SEEDER_UNAVAILABLE)
+    const url = (ws.protocol === 'wss:' ? 'https://' : 'http://') + ws.host + path
+    const ctl = new AbortController()
+    const timer = setTimeout(() => ctl.abort(), Math.max(1, timeoutMs))
+    let body
+    try {
+      const res = await fetchMedia(url, { cache: 'no-store', credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', signal: ctl.signal })
+      if (!res || res.status !== 200 || res.redirected === true) throw new Error(SEEDER_UNAVAILABLE)
+      body = JSON.parse(await boundedIndexText(res, max))
+    } catch {
+      throw new Error(SEEDER_UNAVAILABLE)
+    } finally {
+      clearTimeout(timer)
+    }
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) throw new Error(SEEDER_UNAVAILABLE)
+    return body
+  }
+
+  const isSeq = (n) => Number.isSafeInteger(n) && n >= 1
+  // scrap.write's evidence deadline: 12 s with the default peek timeout.
+  const scrapEvidenceMs = Math.min(12000, 2 * peekTimeoutMs)
+
+  // Whether `owner`'s wall takes a scrap from `writer` now, with public
+  // evidence only, read off the chain: the seeder names the owner's wall
+  // block and (under 'following') the owner's follow block for the writer;
+  // each is a pointer, peeked and checked here. Returns when admitted;
+  // throws a USAGE refusal when the verified evidence excludes the writer,
+  // and SEEDER_UNAVAILABLE (or the peek's own NOT_FOUND) when evidence
+  // cannot be read or does not verify (a hostile seeder fails closed, never
+  // open). The seeder can only withhold a newer wall, as it can withhold any
+  // block; readers apply the wall again when they show the page.
+  // reply: the parsed replyTo, already checked to name `owner`; it must be a
+  // live scrap of the owner addressed to the writer, and under 'following'
+  // it admits the writer (the reply exception). Whether the writer already
+  // answered that original is not checked here: readers (lib/scraps.js and
+  // the seeder) admit only the first reply per original.
+  // The whole check runs under one deadline (scrapEvidenceMs, well under the
+  // client's timeout): past it the answer is SEEDER_UNAVAILABLE and the
+  // caller writes nothing; a late read is left to settle on its own.
+  async function scrapAdmits (writer, owner, reply) {
+    const deadline = Date.now() + scrapEvidenceMs
+    let timer = null
+    const late = new Promise((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(SEEDER_UNAVAILABLE)), scrapEvidenceMs)
+    })
+    const work = scrapEvidence(writer, owner, reply, deadline)
+    try {
+      return await Promise.race([work, late])
+    } finally {
+      clearTimeout(timer)
+      work.catch(() => {})
+    }
+  }
+
+  async function scrapEvidence (writer, owner, reply, deadline) {
+    const left = () => {
+      const ms = deadline - Date.now()
+      if (ms <= 0) throw new Error(SEEDER_UNAVAILABLE)
+      return ms
+    }
+    const followPath = '/index/follow/' + owner + '/' + writer
+    // Without a reply the follow pointer may be needed: asked beside the
+    // wall, not after it.
+    const early = reply === null ? seederIndexJson(followPath, FOLLOW_INDEX_MAX_CHARS, left()) : null
+    if (early !== null) early.catch(() => {})
+    const index = await seederIndexJson('/index/scraps/' + owner, SCRAP_INDEX_MAX_CHARS, left())
+    const wallSeq = index.wall
+    if (wallSeq !== null && !isSeq(wallSeq)) throw new Error(SEEDER_UNAVAILABLE)
+    // Blocks 1 and 2 tell a page diary (a page-roster there) from a person's.
+    const wanted = new Set([1, 2])
+    if (wallSeq !== null) wanted.add(wallSeq)
+    if (reply !== null) wanted.add(reply.seq)
+    const r = await diaryPeekWithin({ author: owner, seqs: [...wanted].sort((a, b) => a - b) }, Math.min(peekTimeoutMs, left()))
+    const at = (seq) => r.entries.find((e) => e.seq === seq)
+    if (r.entries.some((e) => e.seq <= 2 && e.record.type === 'page-roster')) throw new UsageError(SCRAP_PAGE)
+    // Fails closed: an unread block 1 or 2 inside the diary may be a page's
+    // roster. RESIDUAL: a person whose block 1 or 2 is deleted and cleared
+    // reads the same way, so writing to them answers unavailable.
+    if ([1, 2].some((q) => q < r.length && r.missing.includes(q))) throw new Error(SEEDER_UNAVAILABLE)
+    let who = 'following'
+    if (wallSeq !== null) {
+      const e = at(wallSeq)
+      if (e === undefined || e.record.type !== 'scrap-wall') throw new Error(SEEDER_UNAVAILABLE)
+      who = e.record.who
+    }
+    if (reply !== null) {
+      const e = at(reply.seq)
+      // Not a valid record: not a scrap. Missing or past the length read so
+      // far (not replicated yet, not served in time, or deleted and
+      // cleared) cannot be told apart from absent: unavailable.
+      if (e === undefined && r.invalid.includes(reply.seq)) throw new UsageError('referência inválida')
+      if (e === undefined) throw new Error(SEEDER_UNAVAILABLE)
+      if (e.record.type !== 'scrap' || e.record.to !== writer) throw new UsageError('referência inválida')
+    }
+    if (who === 'nobody') throw new UsageError(SCRAP_NOBODY)
+    if (who === 'everyone' || reply !== null) return
+    const f = await (early !== null ? early : seederIndexJson(followPath, FOLLOW_INDEX_MAX_CHARS, left()))
+    if (f.seq === null) {
+      // A refusal never rests on an index still catching up.
+      if (f.indexing === true) throw new Error(SEEDER_UNAVAILABLE)
+      throw new UsageError(SCRAP_FOLLOWING)
+    }
+    if (!isSeq(f.seq)) throw new Error(SEEDER_UNAVAILABLE)
+    const p = await diaryPeekWithin({ author: owner, seqs: [f.seq] }, Math.min(peekTimeoutMs, left()))
+    const e = p.entries.find((x) => x.seq === f.seq)
+    if (e === undefined || e.record.type !== 'follow' || e.record.key !== writer || e.record.on !== true) throw new Error(SEEDER_UNAVAILABLE)
+  }
+
+  // Refuses (USAGE `message`) a key whose diary is a page: blocks 1 and 2
+  // tell a page diary (a page-roster there) from a person's, peeked as the
+  // recados check does. Fails closed: an unread block 1 or 2 inside the
+  // diary may be a page's roster, so it answers SEEDER_UNAVAILABLE (a
+  // person whose block 1 or 2 is deleted and cleared reads the same way).
+  // A diary with no block past 0 has no roster, so it is no page.
+  async function refusePage (key, message) {
+    return refusePages([key], message)
+  }
+
+  // The same check for several keys under ONE deadline (peekTimeoutMs for the
+  // whole list, not per key): blocks 1 and 2 of every key are peeked one after
+  // the other, each peek getting what is left of the deadline. A single worker
+  // never holds more than one of the MAX_DIARY_PEEKS slots, and when the others
+  // (the app's own diary.peek calls count) fill them it waits for a slot inside
+  // the same deadline instead of failing 'ocupado'. Fails closed: a key that
+  // cannot be ruled out (or the deadline reached first) fails the whole call
+  // with SEEDER_UNAVAILABLE, and a page among them is refused with `message`.
+  async function refusePages (keys, message) {
+    const deadline = Date.now() + peekTimeoutMs
+    const reads = []
+    for (const key of keys) reads.push(await peekBefore(key, [1, 2], deadline))
+    if (reads.some((r) => r.entries.some((e) => e.seq <= 2 && e.record.type === 'page-roster'))) throw new UsageError(message)
+    if (reads.some((r) => [1, 2].some((q) => q < r.length && r.missing.includes(q)))) throw new Error(SEEDER_UNAVAILABLE)
+  }
+
+  // One diary.peek of `seqs` of `author` before `deadline`, waiting for a
+  // free slot (the app's own peeks count) instead of failing 'ocupado';
+  // SEEDER_UNAVAILABLE once the deadline is reached.
+  async function peekBefore (author, seqs, deadline) {
+    for (;;) {
+      const ms = deadline - Date.now()
+      if (ms <= 0) throw new Error(SEEDER_UNAVAILABLE)
+      if (diaryPeeksInFlight >= MAX_DIARY_PEEKS) {
+        await new Promise((resolve) => setTimeout(resolve, Math.min(PEEK_SLOT_POLL_MS, ms)))
+        continue
+      }
+      try {
+        return await diaryPeekWithin({ author, seqs }, ms)
+      } catch (err) {
+        // A slot taken between the check and the peek: wait again.
+        if (err === null || typeof err !== 'object' || err.code !== 'USAGE' || err.message !== DIARY_PEEK_BUSY) throw err
+        await new Promise((resolve) => setTimeout(resolve, Math.min(PEEK_SLOT_POLL_MS, Math.max(1, deadline - Date.now()))))
+      }
+    }
+  }
+
+  // Enquetes: refuses a vote on a post the local fold knows deleted (the own
+  // diary, a followed one or any replica held here, tombstones read raw as
+  // page.read does): a peek of such a block is missing at once (readPeek), so
+  // it would read as SEEDER_UNAVAILABLE. A diary not held here is left to
+  // checkPoll. Runs on the chain (withCores).
+  async function refuseDeletedPoll (to) {
+    let read
+    try {
+      read = await withCores((c) => member.logReadRaw(c, { author: to.author }))
+    } catch (err) {
+      if (messageOf(err) === NO_LOCAL_DATA) return
+      throw err
+    }
+    const entries = read.entries.slice().sort((a, b) => a.seq - b.seq)
+    if (deletedSeqs(entries).has(to.seq)) throw new UsageError(CHOICE_NOT_POLL)
+  }
+
+  // Enquetes: refuses a vote unless block `to.seq` of `to.author`, peeked,
+  // is a poll post with an option `pick`, or an event post (Eventos: an RSVP,
+  // pick 0 'vou' or 1 'talvez'). Fails closed: an unread block
+  // inside the diary (a deleted one too) is SEEDER_UNAVAILABLE. RESIDUAL: a
+  // deleted poll whose bytes the seeder still serves, of a diary not held
+  // here (refuseDeletedPoll), passes; the seeder index and every reader
+  // count no vote on a deleted post (protocol, "Seeder poll index").
+  async function checkPoll (to, pick) {
+    const p = await peekBefore(to.author, [to.seq], Date.now() + peekTimeoutMs)
+    const e = p.entries.find((x) => x.seq === to.seq)
+    if (e === undefined) {
+      if (to.seq < p.length) throw new Error(SEEDER_UNAVAILABLE)
+      throw new UsageError(CHOICE_NOT_POLL)
+    }
+    const count = pickCount(e.record, to.seq)
+    if (count === null) throw new UsageError(CHOICE_NOT_POLL)
+    if (!(pick < count)) throw new UsageError(CHOICE_PICK_INVALID)
+  }
+
   // The DM engine opens each box with its in-memory pair; nothing else
   // sees the key.
   function openTestimonial (box, gen) {
     return dmEngine.openTestimonial(box, gen)
   }
 
-  // Off the chain (each read is a diary.peek). -> { items, incomplete }:
-  // incomplete when the index is not complete or a writer's blocks could
-  // not be read (a failed peek, not an invalid block, which is omitted).
+  // testimonial.pending's decided-only blocks that full peeks reported
+  // missing or failed to read: 'from:seq' -> { strikes, at }, oldest first,
+  // for the own key testimonialDeadOwner. Never stored: a restart reads them
+  // all again.
+  const testimonialDead = new Map()
+  let testimonialDeadOwner = null
+
+  // Off the chain (each read is a diary.peek). -> { items, kept, incomplete }.
+  // Every decided block, kept or declined alike, is read exactly like a
+  // pointer, so the reads never tell the seeder or the writer what was
+  // decided: which blocks are read, and in what order, depends on keys, seqs
+  // and past reads only. The pointer seqs come first (by writer key, seqs
+  // ascending) in chunks of their own, so a dead decided block never delays
+  // them; then the decided-only seqs, the pointer writers' first, each group
+  // by key. A decided-only block a full peek reported missing or failed to
+  // read goes to the end (struck), and after TESTIMONIAL_DEAD_REF_STRIKES
+  // calls is skipped for a while (omitted, as a revoked block is;
+  // testimonialDead, in memory only), so an unserved writer cannot eat the
+  // deadline on every call. All the peeks share one deadline
+  // (TESTIMONIAL_PENDING_TIMEOUT_MS from the arrival), so a writer that
+  // cannot be read cannot hold the answer past the client's timeout; the
+  // chunks left when it passes are not read. incomplete, blind to the
+  // decisions too (the app retries on it, which the seeder would see), when
+  // the index is not complete or a pointer or not yet struck decided-only
+  // chunk failed or was skipped. A struck chunk never sets it, so a revoked
+  // or unserved block is not "Tentar de novo" forever; a missing or invalid
+  // block is simply omitted. Nothing opened is stored: a kept row
+  // is reopened and checked against the live writer block on every call, so
+  // a tombstoned block, a hash mismatch or a box of another dm-key
+  // generation simply drops out. The index answer comes first, as before:
+  // while the seeder is down the kept rows are unavailable too (NOT_FOUND),
+  // never an empty inbox.
   async function testimonialPending (own, ident) {
+    const deadline = Date.now() + testimonialTimeoutMs
     const index = await testimonialPointers(own)
     const pointers = index.pointers
     let incomplete = index.incomplete
-    const shown = await serial(() => withCores((c) => member.testimonialShownKeys(c)))({})
-    const byWriter = new Map()
-    for (const p of pointers) {
-      if (shown.has(p.from + ':' + p.seq)) continue
-      if (!byWriter.has(p.from)) byWriter.set(p.from, [])
-      byWriter.get(p.from).push(p.seq)
+    const { shown, held } = await serial(async () => ({
+      shown: await withCores((c) => member.testimonialShownKeys(c)),
+      held: await store.readTestimonialDecisions(storage, own)
+    }))({})
+    // testimonial.decide refuses the own key; an entry a buggy device synced
+    // would otherwise read the own diary on every call.
+    const decisions = held.filter((e) => e.from !== own)
+    const pointerIds = new Set(pointers.map((p) => p.from + ':' + p.seq))
+    if (testimonialDeadOwner !== own) {
+      testimonialDead.clear()
+      testimonialDeadOwner = own
     }
-    const blocks = []
-    for (const [from, list] of byWriter) {
-      const all = list.sort((a, b) => a - b)
-      for (let i = 0; i < all.length; i += PEEK_SEQS_MAX) {
-        let r
-        try {
-          r = await diaryPeek({ author: from, seqs: all.slice(i, i + PEEK_SEQS_MAX) })
-        } catch {
-          incomplete = true
-          continue
-        }
-        for (const e of r.entries) blocks.push({ from, seq: e.seq, record: e.record })
+    const now = Date.now()
+    const pointerRefs = new Map()
+    const decidedRefs = new Map()
+    const struckRefs = new Map()
+    const group = (groups, r) => {
+      if (!groups.has(r.from)) groups.set(r.from, [])
+      groups.get(r.from).push(r.seq)
+    }
+    for (const r of readRefs(pointers, decisions, shown)) {
+      const id = r.from + ':' + r.seq
+      if (pointerIds.has(id)) {
+        group(pointerRefs, r)
+        continue
       }
+      const dead = testimonialDead.get(id)
+      if (dead === undefined) group(decidedRefs, r)
+      else if (dead.strikes < TESTIMONIAL_DEAD_REF_STRIKES || now - dead.at >= TESTIMONIAL_DEAD_REF_TTL_MS) group(struckRefs, r)
+    }
+    const pointed = new Set(pointers.map((p) => p.from))
+    const byKey = (a, b) => (a < b ? -1 : a > b ? 1 : 0)
+    const chunks = []
+    const chunked = (groups, decidedOnly, struck) => {
+      const writers = [...groups.keys()].sort(byKey)
+      for (const from of writers.filter((k) => pointed.has(k)).concat(writers.filter((k) => !pointed.has(k)))) {
+        const all = groups.get(from).sort((a, b) => a - b)
+        for (let i = 0; i < all.length; i += PEEK_SEQS_MAX) chunks.push({ from, seqs: all.slice(i, i + PEEK_SEQS_MAX), decidedOnly, struck })
+      }
+    }
+    chunked(pointerRefs, false, false)
+    chunked(decidedRefs, true, false)
+    chunked(struckRefs, true, true)
+    const blocks = []
+    for (const { from, seqs, decidedOnly, struck } of chunks) {
+      const left = Math.min(peekTimeoutMs, deadline - Date.now())
+      const r = await testimonialPeek(from, seqs, left)
+      if (r === null && !struck) incomplete = true
+      if (decidedOnly) noteTestimonialPeek(from, seqs, r, left >= peekTimeoutMs)
+      if (r === null) continue
+      for (const e of r.entries) blocks.push({ from, seq: e.seq, record: e.record })
     }
     // Newest first, as the app lists them.
     blocks.sort((a, b) => (a.record.at < b.record.at ? 1 : a.record.at > b.record.at ? -1 : 0))
-    const items = await withDmReady(ident, () => member.testimonialPendingRows(own, blocks, shown, openTestimonial, TESTIMONIAL_PENDING_MAX))
-    return { items, incomplete }
+    const max = TESTIMONIAL_PENDING_MAX + TESTIMONIAL_KEPT_MAX + TESTIMONIAL_DECLINED_MAX
+    const rows = await withDmReady(ident, () => member.testimonialPendingRows(own, blocks, shown, openTestimonial, max))
+    const { items, kept } = splitRows(rows, pointerIds, decisions, { pendingMax: TESTIMONIAL_PENDING_MAX, keptMax: TESTIMONIAL_KEPT_MAX })
+    return { items, kept, incomplete }
+  }
+
+  // A decided-only chunk's peek result r (null when it failed or was not
+  // read): a block that arrived (valid or not) is alive again; one missing
+  // below the core length strikes, and so does every seq of a failed peek
+  // (an unserved writer), but only when the peek had its whole budget, so a
+  // chunk cut short by the shared deadline never marks a live block dead.
+  function noteTestimonialPeek (from, seqs, r, full) {
+    if (r !== null) {
+      for (const e of r.entries) testimonialDead.delete(from + ':' + e.seq)
+      for (const seq of r.invalid || []) testimonialDead.delete(from + ':' + seq)
+    }
+    if (!full) return
+    const struck = r === null ? seqs : (r.missing || []).filter((seq) => r.length > seq)
+    const at = Date.now()
+    for (const seq of struck) {
+      const id = from + ':' + seq
+      const prev = testimonialDead.get(id)
+      testimonialDead.delete(id)
+      testimonialDead.set(id, { strikes: Math.min(TESTIMONIAL_DEAD_REF_STRIKES, prev === undefined ? 1 : prev.strikes + 1), at })
+      if (testimonialDead.size > TESTIMONIAL_DEAD_REF_MAX) testimonialDead.delete(testimonialDead.keys().next().value)
+    }
+  }
+
+  // One chunk of testimonialPending under what is left of its deadline ->
+  // the peek result, or null when it failed or was not read (no time left).
+  // A followed writer's in-flight fetch can wait past `left` inside the
+  // peek, so the deadline is enforced here too (as listing.ratings, with
+  // TESTIMONIAL_LATE_GRACE_MS); the late peek is left to settle on its own
+  // (its rejection is swallowed).
+  async function testimonialPeek (author, seqs, left) {
+    if (left <= 0) return null
+    const peek = diaryPeekWithin({ author, seqs }, left)
+    let timer = null
+    const late = new Promise((resolve) => { timer = setTimeout(resolve, left + TESTIMONIAL_LATE_GRACE_MS, TESTIMONIAL_LATE) })
+    try {
+      const r = await Promise.race([peek, late])
+      if (r !== TESTIMONIAL_LATE) return r
+      peek.catch(() => {})
+      return null
+    } catch {
+      return null
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   // Read the live run's cores so a current dm-key costs no write gate or
@@ -3524,10 +3901,10 @@ function createBrowserSession ({
 
     // `media` (optional): descriptors from mediaUpload, verified by
     // member-ops against the own declared media cores before the append.
-    'post.create': serial(async ({ text, media, preview }, epoch) => {
+    'post.create': serial(async ({ text, media, preview, poll, event }, epoch) => {
       await requireUnlocked()
       await ensureCaughtUp(epoch)
-      const r = await withStore((c) => member.postCreate(c, { text, media, preview }))
+      const r = await withStore((c) => member.postCreate(c, { text, media, preview, poll, event }))
       wrote(r.seq)
       await pushAfterWrite()
       return { seq: r.seq, ref: r.ref }
@@ -3769,10 +4146,218 @@ function createBrowserSession ({
       })({}, ident)
     },
 
+    // kv only, unlocked only (as block.set). The decision stays private to
+    // the member's own devices (it syncs sealed in the seen document): no
+    // core is opened, no record is written and no network call is made, so
+    // neither the writer nor the seeder can learn it. Never retried.
+    'testimonial.decide': serialDm(async ({ from, seq, state, ifNew = false }) => {
+      const own = await requireUnlocked()
+      const key = from.toLowerCase()
+      if (key === own) throw new UsageError('referência inválida')
+      const held = await store.readTestimonialDecisions(storage, own)
+      const { entries, changed } = applyDecision(held, { from: key, seq, state }, Math.floor(Date.now() / 1000), { ifNew: ifNew === true })
+      if (changed) {
+        await store.writeTestimonialDecisions(storage, own, entries)
+        seenChanged()
+      }
+      return { changed }
+    }),
+
     'testimonial.delete': serial(async ({ to, about }, epoch) => {
       const r = await recordDelete(member.testimonialDelete, { to, about }, epoch)
       return { seq: r.seq, deleted: r.deleted }
     }),
+
+    // Recados (docs/rpc.md): self, a person this member blocked and a bad
+    // record are refused before any read; the owner's wall is then checked
+    // off the chain (scrapAdmits), and the write runs on the chain like
+    // post.create, refused again for self and a block. Never retried.
+    'scrap.write': async ({ to, text, replyTo }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const key = to.toLowerCase()
+      let reply = null
+      if (replyTo !== undefined) {
+        reply = parseRef(replyTo)
+        if (reply === null || reply.seq < 1) throw new UsageError('referência inválida')
+      }
+      const refuse = async (own) => {
+        if (key === own) throw new UsageError(SCRAP_SELF)
+        if ((await member.memberBlocks(storage)).has(key)) throw new UsageError(DM_BLOCKED)
+      }
+      const writer = await serial(async () => {
+        const own = await requireUnlocked()
+        await refuse(own)
+        return own
+      })({})
+      if (reply !== null && reply.author !== key) throw new UsageError('referência inválida')
+      try {
+        member.scrapDraft({ to: key, text, replyTo: reply })
+        await scrapAdmits(writer, key, reply)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+      return serial(async (_, epoch) => {
+        await refuse(await requireUnlocked())
+        await ensureCaughtUp(epoch)
+        const r = await withStore((c) => member.scrapWrite(c, { to: key, text, replyTo: reply, writer }))
+        wrote(r.seq)
+        await pushAfterWrite()
+        return { seq: r.seq, ref: r.ref }
+      })({})
+    },
+
+    // The page owner's records: appended on the chain like post.create; one
+    // already in effect answers it and writes nothing.
+    'scrap.hide': serial(async ({ from, seq }, epoch) => {
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      const r = await withStore((c) => member.scrapHide(c, { from, seq }))
+      if (r.changed) wrote(r.seq)
+      await pushAfterWrite()
+      return { seq: r.seq, ref: r.ref }
+    }),
+
+    'scrap.wall': serial(async ({ who }, epoch) => {
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      const r = await withStore((c) => member.scrapWall(c, { who }))
+      if (r.changed) wrote(r.seq)
+      await pushAfterWrite()
+      return { seq: r.seq, ref: r.ref }
+    }),
+
+    // The testimonial.delete path and result: the own scrap, scrap-hide or
+    // scrap-wall at `seq`.
+    'scrap.delete': serial(async ({ seq }, epoch) => {
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      const r = await withStore((c) => member.scrapDelete(c, { seq }))
+      if (r.changed) wrote(r.seq)
+      await pushAfterWrite()
+      return { seq: r.seq, deleted: r.deleted }
+    }),
+
+    // The rich profile (docs/rpc.md): appended to the own diary with the
+    // tombstones of every earlier live version (member.publishLatest), never
+    // retried; the newest record wins on every reader.
+    'profile.about': serial(async (params, epoch) => {
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      return profileExtraWrite((c) => member.profileAbout(c, params))
+    }),
+
+    'profile.mood': serial(async ({ emoji, text }, epoch) => {
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      return profileExtraWrite((c) => member.moodSet(c, { emoji, text }))
+    }),
+
+    // Withdraws the rich profile record of `kind`: every live version is
+    // tombstoned (member.profileExtraDelete), never retried.
+    'profile.extra.delete': serial(async ({ kind }, epoch) => {
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      const r = await withStore((c) => member.profileExtraDelete(c, { kind }))
+      if (r.changed) wrote(r.seq)
+      await pushAfterWrite()
+      return { seq: r.seq, deleted: r.deleted }
+    }),
+
+    // Fas e Melhores amigos (docs/rpc.md). The record validator cannot see
+    // the writer, so self, a person this member blocked and a page are
+    // refused here before anything is written (a blocked or page `key`
+    // only matters turning ON; withdrawing a fan mark never reads). The
+    // page check reads the target's blocks off the chain and fails closed.
+    // Appended like profile.about, never retried.
+    'fan.set': async ({ key: rawKey, on }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const key = rawKey.toLowerCase()
+      const refuse = async (own) => {
+        if (key === own) throw new UsageError(FAN_SELF)
+        if (on && (await member.memberBlocks(storage)).has(key)) throw new UsageError(DM_BLOCKED)
+      }
+      await serial(async () => { await refuse(await requireUnlocked()) })({})
+      try {
+        if (on) await refusePage(key, FAN_PAGE)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+      return serial(async (_, epoch) => {
+        await refuse(await requireUnlocked())
+        await ensureCaughtUp(epoch)
+        return profileExtraWrite((c) => member.fanSet(c, { key, on }))
+      })({})
+    },
+
+    // Enquetes (docs/rpc.md): a public vote, a `choice` record in the own
+    // diary. A pick peeks the poll post first (checkPoll: a live poll, pick
+    // one of its options) and refuses a blocked author; a withdrawal (pick
+    // null) needs no read, as fan.set off, so a vote on a poll deleted since
+    // can still be withdrawn. Appended like fan.set, never retried. -> { seq }.
+    'choice.set': async ({ to: rawTo, pick }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const parsed = parseRef(rawTo)
+      if (parsed === null || parsed.seq < 1) throw new UsageError('referência inválida')
+      const to = { author: parsed.author.toLowerCase(), seq: parsed.seq }
+      const refuse = async () => {
+        if (pick !== null && (await member.memberBlocks(storage)).has(to.author)) throw new UsageError(DM_BLOCKED)
+      }
+      await serial(async () => {
+        await requireUnlocked()
+        await refuse()
+        if (pick !== null) await refuseDeletedPoll(to)
+      })({})
+      try {
+        if (pick !== null) await checkPoll(to, pick)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+      return serial(async (_, epoch) => {
+        await requireUnlocked()
+        await refuse()
+        await ensureCaughtUp(epoch)
+        const r = await profileExtraWrite((c) => member.choiceSet(c, { to, pick }))
+        return { seq: r.seq }
+      })({})
+    },
+
+    // The own live pick on a diary poll, from the own diary alone.
+    'choice.mine': serial(({ to: rawTo }) => {
+      const parsed = parseRef(rawTo)
+      if (parsed === null || parsed.seq < 1) throw new UsageError('referência inválida')
+      return withCores((c) => member.choiceMine(c, { to: { author: parsed.author.toLowerCase(), seq: parsed.seq } }))
+    }),
+
+    'top.set': async ({ keys: rawKeys }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const keys = rawKeys.map((k) => k.toLowerCase())
+      if (new Set(keys).size !== keys.length) throw new UsageError('parâmetro inválido: keys')
+      // A blocked key refuses only when it is new: one already in the list in
+      // effect may stay (blocking someone listed must not lock every edit).
+      // The page check runs on the new keys alone.
+      const added = async (own, read) => {
+        if (keys.includes(own)) throw new UsageError(TOP_SELF)
+        const listed = new Set(await read((c) => member.ownTopKeys(c)))
+        const fresh = keys.filter((k) => !listed.has(k))
+        const blocked = await member.memberBlocks(storage)
+        if (fresh.some((k) => blocked.has(k))) throw new UsageError(DM_BLOCKED)
+        return fresh
+      }
+      const checked = await serial(async () => added(await requireUnlocked(), withCores))({})
+      try {
+        await refusePages(checked, TOP_PAGE)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+      return serial(async (_, epoch) => {
+        const fresh = await added(await requireUnlocked(), withCores)
+        // The list moved since the page check: a key not checked then cannot
+        // be ruled out now (the caller may retry).
+        if (fresh.some((k) => !checked.includes(k))) throw toRpcError(new Error(SEEDER_UNAVAILABLE), reportInternal)
+        await ensureCaughtUp(epoch)
+        return profileExtraWrite((c) => member.topSet(c, { keys }))
+      })({})
+    },
 
     // Momentos (docs/rpc.md 5.113): the item must be one this node's
     // momentPutMedia answered in this unlock; published like post.create.
@@ -4041,6 +4626,8 @@ function createBrowserSession ({
     'group.leave': groupWrite(member.groupLeave),
     'group.post': groupWrite(member.groupPost),
     'group.read': serial((params) => {
+      // A page's groups are private: no topics there.
+      if (params.page !== undefined && (params.marks !== undefined || params.topic !== undefined)) throw new UsageError(FORUM_PUBLIC)
       if (params.page !== undefined) return pageGroupOp(member.pageGroupRead, params)
       return withCores((c) => member.groupRead(c, params))
     }),
@@ -4061,6 +4648,16 @@ function createBrowserSession ({
     'group.hide': groupWrite(member.groupHide, GROUP_AND_COMMUNITY),
     'group.react': groupWrite(member.groupReact),
     'group.reactors': serial((params) => withCores((c) => member.groupReactors(c, params))),
+    // Foruns e enquetes (docs/rpc.md): public groups only, so a page's
+    // (private) groups list no topics.
+    'group.choose': groupWrite(member.groupChoose),
+    'group.topics': serial((params) => {
+      if (params.page !== undefined) throw new UsageError(FORUM_PUBLIC)
+      return withCores((c) => member.groupTopics(c, params))
+    }),
+    'group.voters': serial((params) => withCores((c) => member.groupVoters(c, params))),
+    // Eventos (docs/rpc.md): public groups only, as the forum methods.
+    'group.events': serial((params) => withCores((c) => member.groupEvents(c, params))),
     'group.meta': groupWrite(member.groupMeta),
     // Through the caller's CW when it acts for the community, as group.admit.
     'group.invitePolicy': groupWrite(member.groupInvitePolicy, GROUP_AND_COMMUNITY),
@@ -5102,6 +5699,8 @@ function createBrowserSession ({
     await store.writeFollowsPending(storage, [])
     await store.clearFollowsMigrated(storage)
     await store.writeMemberBlocks(storage, [])
+    await store.clearTestimonialDecisions(storage)
+    testimonialDead.clear()
     zeroKeyPair()
     // A superseded DM unlock (stopped by the lock above) settles before its
     // store goes, as a pull, send or top-up still unwinding.

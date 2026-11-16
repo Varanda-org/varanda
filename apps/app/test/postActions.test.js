@@ -22,12 +22,14 @@ test('public post: primary is reply, repost, like, share and the repost sheet is
   const caps = { link: URL, onReport: () => {} }
   t.is(shareLink(item, caps), URL)
   t.alike(primaryActions(item, caps), [
-    { id: 'reply', icon: 'resposta', label: 'Responder' },
+    { id: 'reply', icon: 'resposta', label: 'Comentar' },
     { id: 'repost', icon: 'republicar', label: 'Republicar' },
     { id: 'like', icon: 'coracao', label: 'Curtir' },
     { id: 'share', icon: 'compartilhar', label: 'Compartilhar', href: URL }
   ])
   t.absent(ids(primaryActions(item, caps)).includes('quote'), 'quote is not an inline pencil')
+  t.is(primaryActions({ ...item, replyTo: THEM + ':2' }, caps)[0].label, 'Responder', 'a comment is answered, not commented')
+  t.is(primaryActions({ ...item, replyTo: THEM + ':2' }, caps)[0].id, 'reply')
   t.alike(repostActions(item, caps), [
     { id: 'repost', icon: 'republicar', label: 'Republicar' },
     { id: 'quote', icon: 'citar', label: 'Citar' }

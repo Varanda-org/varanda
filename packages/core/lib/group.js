@@ -31,7 +31,7 @@ const {
 const { openRecord, wipe, keyTag, keyCommit, MAX_KEY_RECIPIENTS, MAX_SEALED_INNER_BYTES } = require('./group-crypto')
 const { validGroupMedia, copyGroupMedia, copyGroupItem, validPrivateItem } = require('./group-media')
 const { validLinkCard, validCardImageBytes, copyLinkCard, CARD_IMAGE_MIME } = require('./link-card')
-const { isReaction, GROUP_REACTIONS_MAX } = require('@varanda/rpc')
+const { isReaction, GROUP_REACTIONS_MAX, isPoll, isPick, isEvent, event: eventRules } = require('@varanda/rpc')
 
 // Same rule as lib/feed.js (not imported, to keep this module pure).
 const MAX_FUTURE_MS = 86400000
@@ -52,7 +52,11 @@ const RECORD_KEYS = {
   'group-key': ['type', 'kid', 'basis', 'keys', 'auth', 'at'],
   'group-sealed': ['type', 'kid', 'nonce', 'box', 'at'],
   'group-invites': ['type', 'on', 'seen', 'at'],
-  'group-react': ['type', 'target', 'emoji', 'seen', 'at']
+  'group-react': ['type', 'target', 'emoji', 'seen', 'at'],
+  'group-topic': ['type', 'target', 'seen', 'at'],
+  'group-poll': ['type', 'target', 'options', 'seen', 'at'],
+  'group-choice': ['type', 'target', 'pick', 'seen', 'at'],
+  'group-event': ['type', 'target', 'title', 'start', 'end', 'place', 'seen', 'at']
 }
 // A post with media, a link card or a forward (docs/protocol.md section 10):
 // the one other key set of group-post. A card goes with text only (media
@@ -78,11 +82,17 @@ const CW_ADMIN_KEYS = ['type', 'group', 'member', 'on', 'cuts', 'seen', 'at']
 // powers: the community's name and join (`group: null`), and dropping a
 // group from the catalogue (`group-drop`, CW only).
 const CW_META_KEYS = ['type', 'group', 'name', 'join', 'seen', 'at']
-const GROUP_ONLY = new Set(['group-post', 'group-key', 'group-sealed', 'group-react'])
+const GROUP_ONLY = new Set(['group-post', 'group-key', 'group-sealed', 'group-react', 'group-topic', 'group-poll', 'group-choice', 'group-event'])
 const COMMUNITY_ONLY = new Set(['group-create', 'group-drop'])
 // A private group carries these sealed, and only there.
 const SEALED_TYPES = new Set(['group-post', 'group-hide', 'group-meta', 'group-react'])
 const PRIVATE_TYPES = new Set(['group-key', 'group-sealed'])
+// Foruns e enquetes and Eventos: side records of public groups only, never
+// sealed, so a private group (plain or inside an envelope) refuses them.
+const FORUM_TYPES = new Set(['group-topic', 'group-poll', 'group-choice', 'group-event'])
+// Records that travel beside a core's records, never nodes of the causal
+// order (splitReacts).
+const SIDE_TYPES = new Set(['group-react', ...FORUM_TYPES])
 const MAX_KEY_BASIS = 16
 const KEY_ENTRY_KEYS = ['writer', 'sealed']
 const INNER_BINDING = ['writer', 'group', 'kid']
@@ -267,6 +277,7 @@ function checkRecord (record, seq, root, community, priv, sealed) {
   if (community && type === 'group-drop' && root) return 'malformed'
   if (community && GROUP_ONLY.has(type)) return 'group-only'
   if (!community && COMMUNITY_ONLY.has(type)) return 'community-only'
+  if ((priv || sealed) && FORUM_TYPES.has(type)) return 'public-only'
   if (priv && SEALED_TYPES.has(type)) return 'sealed-only'
   if (!priv && PRIVATE_TYPES.has(type)) return 'private-only'
   // Every writer record may name the newest node its author had seen (seq 0
@@ -291,6 +302,20 @@ function checkRecord (record, seq, root, community, priv, sealed) {
     // One emoji, or the empty string that takes the reaction back.
     if (!validRef(record.target, 1)) return 'malformed'
     if (record.emoji !== '' && !isReaction(record.emoji)) return 'emoji-invalid'
+  } else if (type === 'group-topic') {
+    // Marks the target as a topic root; the fold decides whether it counts.
+    if (!validRef(record.target, 1)) return 'malformed'
+  } else if (type === 'group-poll') {
+    if (!validRef(record.target, 1)) return 'malformed'
+    if (!isPoll(record.options)) return 'poll-invalid'
+  } else if (type === 'group-choice') {
+    // One option index, or null that takes the vote back.
+    if (!validRef(record.target, 1)) return 'malformed'
+    if (!isPick(record.pick)) return 'pick-invalid'
+  } else if (type === 'group-event') {
+    // The event of the root post `target`: the rules of @varanda/rpc lib/event.js.
+    if (!validRef(record.target, 1)) return 'malformed'
+    if (!isEvent({ title: record.title, start: record.start, end: record.end, place: record.place })) return 'event-invalid'
   } else if (type === 'group-leave') {
     // The leaving diary's own writers at their observed lengths.
     if (!validCuts(record.cuts, MAX_GROUP_WRITERS_PER_DIARY)) return 'cuts-invalid'
@@ -417,6 +442,28 @@ function groupHide ({ target, on, seen = null, at = nowIso() } = {}) {
 // A reaction to the group-post `target`; emoji '' removes it.
 function groupReact ({ target, emoji, seen = null, at = nowIso() } = {}) {
   return build({ type: 'group-react', target: copyRef(target), emoji, seen: copyRef(seen), at }, 1, false)
+}
+
+// Marks the own root post `target` as a forum topic (public groups only).
+function groupTopic ({ target, seen = null, at = nowIso() } = {}) {
+  return build({ type: 'group-topic', target: copyRef(target), seen: copyRef(seen), at }, 1, false)
+}
+
+// The poll of the topic root `target`: POLL_MIN..POLL_MAX option texts.
+function groupPoll ({ target, options, seen = null, at = nowIso() } = {}) {
+  return build({ type: 'group-poll', target: copyRef(target), options: Array.isArray(options) ? options.slice() : options, seen: copyRef(seen), at }, 1, false)
+}
+
+// A vote on the poll of the topic root `target`; pick null withdraws it.
+function groupChoice ({ target, pick, seen = null, at = nowIso() } = {}) {
+  return build({ type: 'group-choice', target: copyRef(target), pick, seen: copyRef(seen), at }, 1, false)
+}
+
+// The event of the root post `target` (a title, a start, an end or null and a
+// place); RSVPs are group-choice votes on it: 0 going, 1 maybe.
+function groupEvent ({ target, title, start, end = null, place = '', seen = null, at = nowIso() } = {}) {
+  const e = eventRules.copyEvent({ title, start, end, place })
+  return build({ type: 'group-event', target: copyRef(target), title: e.title, start: e.start, end: e.end, place: e.place, seen: copyRef(seen), at }, 1, false)
 }
 
 function groupAdmit ({ member, on, cuts = [], seen = null, at = nowIso() } = {}) {
@@ -771,10 +818,134 @@ function readLog (entries, root, fallback = null, priv = false, asCommunity = fa
 // A reader from before group-react drops such a block as malformed, and a
 // ref naming it resolves to the nearest lower record of its writer. So that
 // every other record orders and folds exactly as there, reactions travel
-// beside a core's records and never become nodes of the causal order.
+// beside a core's records and never become nodes of the causal order. So do
+// the forum side records (group-topic, group-poll, group-choice), for the
+// same reason: an old reader sees the topic as a plain chat post.
 function splitReacts (records) {
-  const reacts = records.filter((x) => x.record.type === 'group-react')
-  return { records: reacts.length === 0 ? records : records.filter((x) => x.record.type !== 'group-react'), reacts }
+  const reacts = records.filter((x) => SIDE_TYPES.has(x.record.type))
+  return { records: reacts.length === 0 ? records : records.filter((x) => !SIDE_TYPES.has(x.record.type)), reacts }
+}
+
+// Foruns e enquetes and Eventos, from the side records foldCore judged
+// eligible (marks: group-topic, group-poll and group-event by the root's own
+// diary on a root post; choices: group-choice of a member now on a shown post).
+//   - A root post is a topic when its author's diary marked it (any of its
+//     cores). It gets `topic: { poll }`, and it and every post whose replyTo
+//     chain reaches it get `thread: { writer, seq }` of the root.
+//   - Its poll is the group-poll with the lowest seq on the root's own writer
+//     core, after the root: an append-only core cannot put a later poll in
+//     front of the votes, nor can another device of the author. Future-dated
+//     polls (isFuture) are candidates too: when the lowest seq is one, the
+//     topic has no poll until its date (never a higher seq meanwhile), so a
+//     poll written ahead cannot later swap the options under the votes. The
+//     votes are on the topic, so while poll is null they show no totals.
+//   - An event is the group-event with the lowest seq on the root's own writer
+//     core, after the root, by the same rule (any root, topic or not; a
+//     future-dated one holds the root eventless until its date). A root
+//     carries a poll or an event, never both: the lowest seq of the two
+//     decides and the other is ignored for good. The event is
+//     `event: { writer, seq, title, start, end, place, totals, by }` with
+//     totals/by in [going, maybe] order, from votes of pick 0 and 1 (a higher
+//     pick is ignored like an out-of-range poll pick).
+//   - Votes fold like reactions: one per member diary, on one writer core the
+//     higher seq, across its cores the later `at`, then writer, then seq. A
+//     pick outside the poll's options is ignored (the earlier pick stays) and
+//     null withdraws. poll = { writer, seq, options, totals, by }, by[i] the
+//     diaries on option i in vote order (totals[i] === by[i].length).
+// Posts with none of this keep their exact keys.
+function foldTopics (posts, postById, marks, choices) {
+  const topics = new Map()
+  for (const { n, id, post } of marks) if (n.record.type === 'group-topic' && !topics.has(id)) topics.set(id, { post, poll: null })
+  // The one poll or event of a root: the lowest seq of either kind (a poll
+  // only on a topic) on the root's own core, after the root.
+  const first = new Map()
+  for (const { n, id, post, future } of marks) {
+    const r = n.record
+    if (r.type !== 'group-poll' && r.type !== 'group-event') continue
+    if (n.writer !== post.writer || n.seq <= post.seq) continue
+    const had = first.get(id)
+    if (had === undefined || n.seq < had.n.seq) first.set(id, { n, post, future })
+  }
+  const events = new Map()
+  for (const [id, { n, post, future }] of first) {
+    if (future) continue
+    const r = n.record
+    if (r.type === 'group-poll') {
+      // A poll is shown only on a topic, but it decides against an event
+      // whether or not the topic mark exists yet: a later mark must never
+      // turn the RSVPs of an event into votes of a poll.
+      const t = topics.get(id)
+      if (t !== undefined) t.poll = { writer: n.writer, seq: n.seq, options: r.options }
+    } else events.set(id, { post, writer: n.writer, seq: n.seq, title: r.title, start: r.start, end: r.end, place: r.place })
+  }
+  if (topics.size === 0 && events.size === 0) return
+  // The options a vote may pick on a root: a poll's, or going and maybe.
+  const slots = (id) => {
+    const t = topics.get(id)
+    if (t !== undefined && t.poll !== null) return t.poll.options.length
+    return events.has(id) ? 2 : 0
+  }
+  const latestOn = new Map()
+  for (const { n, id, d } of choices) {
+    const r = n.record
+    const count = slots(id)
+    if (count === 0 || (r.pick !== null && r.pick >= count)) continue
+    const k = id + ':' + n.writer
+    const had = latestOn.get(k)
+    if (had === undefined || had.seq < n.seq) latestOn.set(k, { id, d, seq: n.seq, pick: r.pick, key: orderKey(r.at, n.writer, n.seq) })
+  }
+  const winners = new Map()
+  for (const x of latestOn.values()) {
+    const k = x.id + ':' + x.d
+    const had = winners.get(k)
+    if (had === undefined || compareOrder(had.key, x.key) < 0) winners.set(k, x)
+  }
+  const votes = new Map()
+  for (const x of [...winners.values()].sort((a, b) => compareOrder(a.key, b.key))) {
+    if (x.pick !== null) pushTo(votes, x.id, x)
+  }
+  for (const [id, t] of topics) {
+    let poll = null
+    if (t.poll !== null) {
+      const by = t.poll.options.map(() => [])
+      for (const x of votes.get(id) || []) by[x.pick].push(x.d)
+      poll = { writer: t.poll.writer, seq: t.poll.seq, options: t.poll.options.slice(), totals: by.map((l) => l.length), by }
+    }
+    t.post.topic = { poll }
+  }
+  for (const [id, e] of events) {
+    const by = [[], []]
+    for (const x of votes.get(id) || []) by[x.pick].push(x.d)
+    e.post.event = { writer: e.writer, seq: e.seq, title: e.title, start: e.start, end: e.end, place: e.place, totals: by.map((l) => l.length), by }
+  }
+  // The thread of every post: the top of its replyTo chain, once per post.
+  const top = new Map()
+  for (const p of posts) {
+    const path = []
+    let cur = p
+    let found = null
+    const seen = new Set()
+    while (cur !== undefined) {
+      const id = cur.writer + ':' + cur.seq
+      if (top.has(id)) {
+        found = top.get(id)
+        break
+      }
+      if (seen.has(id)) break
+      seen.add(id)
+      path.push(id)
+      if (cur.replyTo === null) {
+        found = topics.has(id) ? id : null
+        break
+      }
+      cur = postById.get(cur.replyTo.writer + ':' + cur.replyTo.seq)
+    }
+    for (const id of path) top.set(id, found)
+    if (found !== null) {
+      const root = topics.get(found).post
+      p.thread = { writer: root.writer, seq: root.seq }
+    }
+  }
 }
 
 // A stable text of a plain value, so copies compare whatever their key order.
@@ -2311,15 +2482,35 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
   const postById = new Map()
   for (const p of posts) postById.set(p.writer + ':' + p.seq, p)
   const latestOn = new Map()
+  const topicMarks = []
+  const choices = []
   for (const { n, withdrawn: out, gen } of reactNodes) {
     const r = n.record
     const d = n.diary
-    if (out || isFuture(r.at, now) || memberNow.get(d) !== 'member') continue
+    // A topic or poll stays its author's mark on a post that stays: leaving
+    // later does not turn a topic back into chat. A vote needs a member now,
+    // as a reaction does.
+    const mark = r.type === 'group-topic' || r.type === 'group-poll' || r.type === 'group-event'
+    // A future-dated poll or event stays a candidate (foldTopics): dropping it
+    // would let a later one win now and the lower seq replace it under its votes.
+    const future = isFuture(r.at, now)
+    if (out || (future && r.type !== 'group-poll' && r.type !== 'group-event') || (!mark && memberNow.get(d) !== 'member')) continue
     if (d !== owner && (layerAt(bans.get(d), n.writer, n.seq) ||
       (join === 'approval' && !admittedAt(d, gen, n.writer, n.seq) && !adminOf(n) && !adminC(d)))) continue
     const id = r.target.writer + ':' + r.target.seq
     const post = postById.get(id)
-    if (post === undefined || post.hidden) continue
+    if (post === undefined) continue
+    // A hidden root keeps its marks (its `hidden` hides topic, poll and event with
+    // it, and an unhide brings them back); votes on it never count.
+    if (mark) {
+      if (post.replyTo === null && post.diary === d) topicMarks.push({ n, id, post, future })
+      continue
+    }
+    if (post.hidden) continue
+    if (r.type === 'group-choice') {
+      choices.push({ n, id, d })
+      continue
+    }
     const k = id + ':' + n.writer
     const had = latestOn.get(k)
     if (had === undefined || had.seq < n.seq) latestOn.set(k, { id, d, writer: n.writer, seq: n.seq, emoji: r.emoji, key: orderKey(r.at, n.writer, n.seq) })
@@ -2361,6 +2552,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
       .slice(0, GROUP_REACTIONS_MAX)
       .map(({ emoji, count, by }) => ({ emoji, count, by }))
   }
+  foldTopics(posts, postById, topicMarks, choices)
 
   // C's creator is an admin of C (and so of every group of C) only while
   // it is a member of C: no authority after leaving.
@@ -3246,6 +3438,10 @@ module.exports = {
   groupPost,
   groupHide,
   groupReact,
+  groupTopic,
+  groupPoll,
+  groupChoice,
+  groupEvent,
   groupAdmit,
   groupBan,
   groupMeta,

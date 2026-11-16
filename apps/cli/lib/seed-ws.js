@@ -137,6 +137,58 @@ const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 //   block, `from` / `wseq` and pending rows a writer's testimonial block.
 //   Pointers only, rebuilt here field by field: the text and the sealed
 //   box never leave the seeder; the node reads and verifies every block.
+// - /index/scraps/<owner>[/<cursor>] -> Seeder#indexScraps: `{ scraps:
+//   [{ author, seq, followSeq }], hides: [seq], wall: seq | null, next,
+//   indexing, complete }` (at most 50 rows, newest first; at most 1000
+//   hides). The seeder applies the owner's wall policy, hides, the reply
+//   exception and the caps at read time; followSeq is the owner's follow
+//   block for that writer or null. The cursor is `<atMs>.<author>.<seq>`
+//   (as in /index/post) and `next` the same shape or null; any other
+//   segment after the owner is 400 'pedido inválido', never 404, so a
+//   client tells a bad cursor from an unknown owner.
+// - /index/profile/<author> -> Seeder#indexProfile: `{ about: seq | null,
+//   mood: seq | null, fans: { count, indexing }, top: { seq, back:
+//   { <friend>: seq | null } } | null, indexing, complete }`, the author's
+//   newest live profile-about, mood and top-friends blocks (perfil rico,
+//   melhores amigos), the claimed number of fas and, per listed friend, the
+//   friend's live follow block of the author (at most MAX_TOP_FRIENDS). The
+//   object is open: later features add pointers and readers ignore keys they
+//   do not know, so profileBody keeps only the keys it lists. While the
+//   author's own diary is still being indexed or scanned (fail closed)
+//   about, mood and top are null, indexing and fans.indexing are true and
+//   complete is false; otherwise complete is true and indexing is the global
+//   flag. Pointers only; the node verifies.
+// - /index/fans/<author>[/<atMs>.<key>] -> Seeder#indexFans: `{ author,
+//   items: [{ key, seq, at }], next, total, authors, indexing, complete }`,
+//   the author's fas newest first (at most 20 rows), the rows, cursor and
+//   flags of /index/follows/<author>/seguidores without `kind`; seq and at
+//   point at the fan's own block. Rebuilt here field by field.
+// - /index/poll/<author>/<seq> -> Seeder#indexPoll: `{ totals: [n, ...],
+//   indexing, complete }`, the claimed votes per option of the diary poll
+//   post <seq> of <author> (2..4 integers; `[]` while the author's own diary
+//   is still being indexed, with complete false). Totals are claims: a
+//   client shows them as such and verifies 'quem votou' itself. A post that
+//   is not a live poll post (deleted included) is the generic 404.
+// - /index/poll/<author>/<seq>/<pick>[/<atMs>.<key>] -> Seeder#indexPollVoters:
+//   `{ items: [{ key, seq, at }], next, total, authors, indexing, complete }`,
+//   the voters whose live pick is <pick> (0..3), newest first (at most 20
+//   rows), the rows, cursor and flags of /index/fans without `author`; seq
+//   and at point at the voter's own `choice` block, which the node peeks
+//   and verifies. A pick the poll has no option for is a 404. Rebuilt here
+//   field by field.
+// - /index/events/<author>[/<before>] -> Seeder#indexEvents: `{ posts: [seq],
+//   next, total, indexing, complete }`, the seqs of the author's event posts
+//   (Eventos) newest first, strictly below <before> (a canonical seq, no
+//   leading zero), at most EVENT_ROWS_MAX per page; `next` is the <before> of
+//   the following page or null. Pointers only: the title, place and dates
+//   stay in the diary, which the node reads and verifies (the shared
+//   isEvent). RSVP totals and voters are the /index/poll routes (picks 0 and
+//   1). While the author's own diary is still being indexed or scanned: no
+//   rows, indexing true, complete false. A malformed segment after the
+//   author is the generic 404. Rebuilt here field by field.
+// - /index/follow/<author>/<target> -> Seeder#indexFollowSeq: `{ seq:
+//   seq | null, indexing }`, the author's live follow block of target.
+//   Both rebuilt here field by field; both spend the index budget.
 // Answers are JSON (no-store, nosniff) of at most INDEX_MAX_BODY bytes by
 // construction (page sizes bound every list; apps/cli/test/seed-ws.test.js
 // proves the worst case); HEAD sends the headers only. Load has its own
@@ -360,6 +412,26 @@ const INDEX_FOLLOW_COUNTS_RE = /^\/index\/follows\/([0-9a-f]{64})$/
 const INDEX_FOLLOWS_RE = /^\/index\/follows\/([0-9a-f]{64})\/(seguindo|seguidores)(?:\/([0-9]{1,16}\.[0-9a-f]{64}))?$/
 const INDEX_TESTIMONIALS_RE = /^\/index\/testimonials\/([0-9a-f]{64})$/
 const TESTIMONIAL_ROWS_MAX = 64
+const INDEX_SCRAPS_RE = /^\/index\/scraps\/([0-9a-f]{64})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
+// Any path below an owner's recados that INDEX_SCRAPS_RE refuses: a
+// malformed cursor (400).
+const INDEX_SCRAPS_BAD_RE = /^\/index\/scraps\/[0-9a-f]{64}\//
+const INDEX_PROFILE_RE = /^\/index\/profile\/([0-9a-f]{64})$/
+const INDEX_FANS_RE = /^\/index\/fans\/([0-9a-f]{64})(?:\/([0-9]{1,16}\.[0-9a-f]{64}))?$/
+const FAN_ROWS_MAX = 20
+const INDEX_POLL_RE = /^\/index\/poll\/([0-9a-f]{64})\/([1-9][0-9]{0,14})$/
+const INDEX_POLL_VOTERS_RE = /^\/index\/poll\/([0-9a-f]{64})\/([1-9][0-9]{0,14})\/([0-3])(?:\/([0-9]{1,16}\.[0-9a-f]{64}))?$/
+// Same value as POLL_MAX in @varanda/core/lib/records.js.
+const POLL_OPTIONS_MAX = 4
+// Same value as MAX_TOP_FRIENDS in @varanda/core/lib/records.js.
+const TOP_FRIENDS_MAX = 8
+const INDEX_EVENTS_RE = /^\/index\/events\/([0-9a-f]{64})(?:\/([1-9][0-9]{0,14}))?$/
+// Same value as GROUP_EVENTS_LIMIT in @varanda/rpc lib/limits.js.
+const EVENT_ROWS_MAX = 30
+const INDEX_FOLLOW_RE = /^\/index\/follow\/([0-9a-f]{64})\/([0-9a-f]{64})$/
+const SCRAP_ROWS_MAX = 50
+const SCRAP_HIDES_MAX = 1000
+const BAD_REQUEST = 'pedido inválido\n'
 // Feira: uf (lower case on the wire), city key, kind, category, then optional
 // title words as in INDEX_TOPIC_RE and an optional cursor as in INDEX_POST_RE.
 const INDEX_FEIRA_RE = /^\/index\/feira\/([a-z]{2})\/([a-z0-9]+(?:-[a-z0-9]+)*)\/(todos|produto|servico|procura)\/(todas|[a-z]{2,16})(?:\/([a-z0-9]{2,32}(?:\+[a-z0-9]{2,32}){0,7}))?(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
@@ -367,6 +439,8 @@ const INDEX_FEIRA_AUTHOR_RE = /^\/index\/feira\/autor\/([0-9a-f]{64})(?:\/([0-9]
 const INDEX_FEIRA_RATINGS_RE = /^\/index\/feira\/avaliacoes\/([0-9a-f]{64})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
 const FEIRA_CITY_MIN = 2
 const FEIRA_CITY_MAX = 48
+const SCRAP_CURSOR_RE = /^[0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}$/
+const BAD_CURSOR = Symbol('bad cursor')
 const INDEX_MAX_IN_FLIGHT = 16
 const INDEX_RATE = 32
 const INDEX_BURST = 64
@@ -683,7 +757,7 @@ function refuse (socket, code, reason) {
 // ({ maxInFlight, rate, burst }). sockets: optional socket cap of the
 // listener (see socketCap). The seeder's indexPost(authorHex, seq,
 // cursor), indexRoda(authorHex, seq, cursor), indexCounts(refs), indexMember(authorHex, before), indexPageEnd(authorHex),
-// indexSearch(segment), indexEngagers(kind, authorHex, seq, cursor) and
+// indexSearch(segment), indexEngagers(kind, authorHex, seq, cursor), indexEvents(authorHex, before) and
 // indexTestimonials(ownerHex) ->
 // null | plain object back /index; indexSearch's
 // object is { members: [{ author, profileSeq, usernameSeq, [page, closed, moved] }] (at most 20),
@@ -799,6 +873,22 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (m) return ['indexFollows', [m[1], m[2], m[3] === undefined ? null : m[3]]]
     m = INDEX_TESTIMONIALS_RE.exec(url)
     if (m) return ['indexTestimonials', [m[1]], testimonialsBody]
+    m = INDEX_SCRAPS_RE.exec(url)
+    // The atMs of a cursor fits 16 digits but must stay a safe integer.
+    if (m && (m[2] === undefined || Number.isSafeInteger(Number(m[2].split('.')[0])))) return ['indexScraps', [m[1], m[2] === undefined ? null : m[2]], scrapsBody]
+    if (m || INDEX_SCRAPS_BAD_RE.test(url)) return BAD_CURSOR
+    m = INDEX_PROFILE_RE.exec(url)
+    if (m) return ['indexProfile', [m[1]], profileBody]
+    m = INDEX_FOLLOW_RE.exec(url)
+    if (m) return ['indexFollowSeq', [m[1], m[2]], followSeqBody]
+    m = INDEX_FANS_RE.exec(url)
+    if (m) return ['indexFans', [m[1], m[2] === undefined ? null : m[2]], fansBody]
+    m = INDEX_POLL_RE.exec(url)
+    if (m) return ['indexPoll', [m[1], Number(m[2])], pollBody]
+    m = INDEX_POLL_VOTERS_RE.exec(url)
+    if (m) return ['indexPollVoters', [m[1], Number(m[2]), Number(m[3]), m[4] === undefined ? null : m[4]], pollVotersBody]
+    m = INDEX_EVENTS_RE.exec(url)
+    if (m) return ['indexEvents', [m[1], m[2] === undefined ? null : Number(m[2])], eventsBody]
     // Without a public origin the Feira has no public surface at all.
     if (origin === null) return null
     m = INDEX_FEIRA_AUTHOR_RE.exec(url)
@@ -835,6 +925,142 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       indexing: indexing === true,
       complete: complete === true
     }
+  }
+
+  // Only the pointer fields, checked as the client checks them: an
+  // unexpected row, a duplicate or a cursor of another shape is a 404.
+  function scrapsBody ({ scraps, hides, wall, next, indexing, complete }) {
+    if (!Array.isArray(scraps) || !Array.isArray(hides) || scraps.length > SCRAP_ROWS_MAX || hides.length > SCRAP_HIDES_MAX) throw new Error('index')
+    const seqOk = (n) => Number.isSafeInteger(n) && n >= 1
+    if (wall !== null && !seqOk(wall)) throw new Error('index')
+    if (next !== null && (typeof next !== 'string' || !SCRAP_CURSOR_RE.test(next))) throw new Error('index')
+    const seen = new Set()
+    return {
+      scraps: scraps.map(({ author, seq, followSeq }) => {
+        if (typeof author !== 'string' || !HEX64_RE.test(author) || !seqOk(seq) || (followSeq !== null && !seqOk(followSeq))) throw new Error('index')
+        const ref = author + ':' + seq
+        if (seen.has(ref)) throw new Error('index')
+        seen.add(ref)
+        return { author, seq, followSeq }
+      }),
+      hides: hides.map((seq) => {
+        if (!seqOk(seq)) throw new Error('index')
+        return seq
+      }),
+      wall,
+      next,
+      indexing: indexing === true,
+      complete: complete === true
+    }
+  }
+
+  // The pointer keys known so far; a new key is added here when its feature
+  // ships, an unknown one is never echoed.
+  function profileBody ({ about, mood, fans = null, top = null, indexing, complete }) {
+    const seqOk = (n) => n === null || (Number.isSafeInteger(n) && n >= 1)
+    if (!seqOk(about) || !seqOk(mood)) throw new Error('index')
+    let fanCount = null
+    if (fans !== null) {
+      if (typeof fans !== 'object' || !Number.isSafeInteger(fans.count) || fans.count < 0) throw new Error('index')
+      fanCount = { count: fans.count, indexing: fans.indexing === true }
+    }
+    let pointers = null
+    if (top !== null) {
+      if (typeof top !== 'object' || !Number.isSafeInteger(top.seq) || top.seq < 1 || top.back === null || typeof top.back !== 'object') throw new Error('index')
+      const keys = Object.keys(top.back)
+      if (keys.length > TOP_FRIENDS_MAX) throw new Error('index')
+      const back = {}
+      for (const key of keys) {
+        if (!HEX64_RE.test(key) || !seqOk(top.back[key])) throw new Error('index')
+        back[key] = top.back[key]
+      }
+      pointers = { seq: top.seq, back }
+    }
+    return { about, mood, fans: fanCount, top: pointers, indexing: indexing === true, complete: complete === true }
+  }
+
+  // Only the follower-list fields, checked as the client checks them: a
+  // malformed row, a duplicate key or the author itself is a 404.
+  function fansBody ({ author, items, next, total, authors, indexing, complete }) {
+    const seqOk = (n) => Number.isSafeInteger(n) && n >= 1
+    const hintOk = (n) => n === null || seqOk(n)
+    if (typeof author !== 'string' || !HEX64_RE.test(author) || !Array.isArray(items) || items.length > FAN_ROWS_MAX) throw new Error('index')
+    if (!Number.isSafeInteger(total) || total < items.length || authors === null || typeof authors !== 'object') throw new Error('index')
+    const seen = new Set()
+    const rows = items.map(({ key, seq, at }) => {
+      if (typeof key !== 'string' || !HEX64_RE.test(key) || key === author || seen.has(key) || !seqOk(seq) || typeof at !== 'string' || at.length > 32) throw new Error('index')
+      seen.add(key)
+      return { key, seq, at }
+    })
+    const hints = {}
+    for (const key of seen) {
+      const h = authors[key]
+      if (h === null || typeof h !== 'object' || !hintOk(h.profileSeq) || !hintOk(h.usernameSeq)) throw new Error('index')
+      hints[key] = { profileSeq: h.profileSeq, usernameSeq: h.usernameSeq }
+    }
+    let cursor = null
+    if (next !== null) {
+      if (typeof next !== 'object' || !Number.isSafeInteger(next.atMs) || next.atMs < 0 || typeof next.key !== 'string' || !HEX64_RE.test(next.key)) throw new Error('index')
+      cursor = { atMs: next.atMs, key: next.key }
+    }
+    return { author, items: rows, next: cursor, total, authors: hints, indexing: indexing === true, complete: complete === true }
+  }
+
+  // Claimed totals: at most POLL_OPTIONS_MAX non-negative integers.
+  function pollBody ({ totals, indexing, complete }) {
+    if (!Array.isArray(totals) || totals.length > POLL_OPTIONS_MAX) throw new Error('index')
+    const counts = totals.map((n) => {
+      if (!Number.isSafeInteger(n) || n < 0) throw new Error('index')
+      return n
+    })
+    return { totals: counts, indexing: indexing === true, complete: complete === true }
+  }
+
+  // The voter rows of one pick, checked as the client checks them: a
+  // malformed row or a duplicate key is a 404.
+  function pollVotersBody ({ items, next, total, authors, indexing, complete }) {
+    const seqOk = (n) => Number.isSafeInteger(n) && n >= 1
+    const hintOk = (n) => n === null || seqOk(n)
+    if (!Array.isArray(items) || items.length > FAN_ROWS_MAX) throw new Error('index')
+    if (!Number.isSafeInteger(total) || total < items.length || authors === null || typeof authors !== 'object') throw new Error('index')
+    const seen = new Set()
+    const rows = items.map(({ key, seq, at }) => {
+      if (typeof key !== 'string' || !HEX64_RE.test(key) || seen.has(key) || !seqOk(seq) || typeof at !== 'string' || at.length > 32) throw new Error('index')
+      seen.add(key)
+      return { key, seq, at }
+    })
+    const hints = {}
+    for (const key of seen) {
+      const h = authors[key]
+      if (h === null || typeof h !== 'object' || !hintOk(h.profileSeq) || !hintOk(h.usernameSeq)) throw new Error('index')
+      hints[key] = { profileSeq: h.profileSeq, usernameSeq: h.usernameSeq }
+    }
+    let cursor = null
+    if (next !== null) {
+      if (typeof next !== 'object' || !Number.isSafeInteger(next.atMs) || next.atMs < 0 || typeof next.key !== 'string' || !HEX64_RE.test(next.key)) throw new Error('index')
+      cursor = { atMs: next.atMs, key: next.key }
+    }
+    return { items: rows, next: cursor, total, authors: hints, indexing: indexing === true, complete: complete === true }
+  }
+
+  // Event post pointers: strictly descending seqs, at most EVENT_ROWS_MAX,
+  // and a cursor that is one of them; anything else is a 404.
+  function eventsBody ({ posts, next, total, indexing, complete }) {
+    const seqOk = (n) => Number.isSafeInteger(n) && n >= 1
+    if (!Array.isArray(posts) || posts.length > EVENT_ROWS_MAX || !Number.isSafeInteger(total) || total < posts.length) throw new Error('index')
+    let prev = Infinity
+    const seqs = posts.map((seq) => {
+      if (!seqOk(seq) || seq >= prev) throw new Error('index')
+      prev = seq
+      return seq
+    })
+    if (next !== null && (!seqOk(next) || seqs.length === 0 || next !== seqs[seqs.length - 1])) throw new Error('index')
+    return { posts: seqs, next, total, indexing: indexing === true, complete: complete === true }
+  }
+
+  function followSeqBody ({ seq, indexing }) {
+    if (seq !== null && !(Number.isSafeInteger(seq) && seq >= 1)) throw new Error('index')
+    return { seq, indexing: indexing === true }
   }
 
   // The seeder's group answers flattened into the wire shape. The root
@@ -1573,6 +1799,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'método não permitido\n', { Allow: 'GET, HEAD' })
       const call = indexCall(req.url)
       if (call === null) return send(res, 404, NOT_FOUND)
+      if (call === BAD_CURSOR) return send(res, 400, BAD_REQUEST)
       return serveIndex(req, res, call).catch(() => res.destroy())
     }
     // Without a token this branch does not exist: the path falls through to
@@ -1727,6 +1954,13 @@ module.exports = {
   INDEX_FOLLOW_COUNTS_RE,
   INDEX_FOLLOWS_RE,
   INDEX_TESTIMONIALS_RE,
+  INDEX_SCRAPS_RE,
+  INDEX_PROFILE_RE,
+  INDEX_FANS_RE,
+  INDEX_POLL_RE,
+  INDEX_POLL_VOTERS_RE,
+  INDEX_EVENTS_RE,
+  INDEX_FOLLOW_RE,
   INDEX_FEIRA_RE,
   INDEX_FEIRA_AUTHOR_RE,
   INDEX_FEIRA_RATINGS_RE,

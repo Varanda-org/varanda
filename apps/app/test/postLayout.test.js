@@ -103,8 +103,8 @@ test('PostRow measures the caption column and forwards the expanded override', (
 test('a clamped caption is plain sanitized Text and expansion restores interaction', (t) => {
   t.ok(post.includes('const textOut = hasText && numberOfLines === 0 &&'), 'links and mentions leave the body only when uncapped')
   t.ok(/<Text style=\{styles.text\} numberOfLines=\{numberOfLines\} onTextLayout=\{onTextLayout\}>\{shownText\}<\/Text>/.test(post), 'native layout refines the clamped caption')
-  t.ok(post.includes('<MentionText text={body} onOpenMention={openMention} onOpenPlain={openTap} onLongPress={bodyLongPress} onTextLayout={onTextLayout} style={styles.text} />'), 'uncapped text keeps full interactive links and mentions')
-  t.ok(post.includes('onTextLayout={onTextLayout} style={styles.text} />'), 'the expanded caption with links or mentions is measured too, so collapsing can drop a control it does not need')
+  t.ok(post.includes('<MentionText text={body} onOpenMention={openMention} onOpenPlain={openTap} onLongPress={bodyLongPress} onTextLayout={onTextLayout} style={styles.text} hashtags />'), 'uncapped text keeps full interactive links and mentions')
+  t.ok(post.includes('onTextLayout={onTextLayout} style={styles.text} hashtags />'), 'the expanded caption with links or mentions is measured too, so collapsing can drop a control it does not need')
   const mention = read('MentionText.js')
   t.is(mention.split('onTextLayout={onTextLayout}').length - 1, 2, 'MentionText hands onTextLayout to both of its root Text branches')
 })
@@ -163,7 +163,7 @@ test('the reply line is a 44 pt replyChip and plain text without onOpenParent', 
   t.ok(chipAt > 0 && chipAt < post.indexOf('{mediaNode}'), 'the chip stays before the photos')
 })
 
-test('reply previews are at most two sanitized lines in one Respostas button', (t) => {
+test('reply previews are at most two sanitized lines in one Comentários button', (t) => {
   t.ok(post.includes('if (!Array.isArray(replyPreviews)) return []'), 'absent or empty renders nothing')
   t.ok(post.includes("if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue"), 'a non-object entry is ignored')
   t.ok(post.includes("if (text === '') continue"), 'an entry with empty text is ignored')
@@ -172,10 +172,10 @@ test('reply previews are at most two sanitized lines in one Respostas button', (
   t.ok(post.includes('return lines.slice(0, 2)'), 'at most two previews')
   t.ok(post.includes("line.name !== '' ? line.name + ': ' + line.text : line.text"), 'Nome: texto')
   t.ok(post.includes('numberOfLines={1}>{previewLineText(line)}</Text>'), 'one line per preview')
-  t.ok(post.includes('<Text style={styles.previewsLabel}>Respostas</Text>'), 'label Respostas')
-  t.ok(post.includes("'Respostas. ' + previewLines.map(previewLineText).join('. ')"), 'the button label starts with Respostas and reads each preview')
+  t.ok(post.includes('<Text style={styles.previewsLabel}>Comentários</Text>'), 'label Comentários')
+  t.ok(post.includes("'Comentários. ' + previewLines.map(previewLineText)") && post.includes('.concat(moreText'), 'the button label starts with Comentários and reads each preview and the more line')
   t.is(post.split('{previewsBody}').length - 1, 2, 'the button and the plain view share one block')
-  const at = post.indexOf('{previewLines.length > 0')
+  const at = post.indexOf('{previewsBody !== null')
   const block = post.slice(at, post.indexOf('<ActionsSheet', Math.max(at, 0)))
   t.ok(
     at > 0 &&
@@ -187,6 +187,28 @@ test('reply previews are at most two sanitized lines in one Respostas button', (
     !block.includes('hitSlop'),
     'one button when onOpenPreviews is set, a plain view when it is absent'
   )
+})
+
+test('commentedBy header and previewsMore line', (t) => {
+  t.ok(post.includes("const moreText = typeof previewsMore === 'string' ? displayText(previewsMore).trim() : ''"), 'previewsMore is sanitized and drawn with or without onOpenPreviews, so the cold-start preview keeps the live height')
+  const at = post.indexOf('{previewsBody !== null')
+  const block = post.slice(at, post.indexOf('<ActionsSheet', Math.max(at, 0)))
+  const pressAt = block.indexOf('onPress={openPreviews}')
+  const plainAt = block.indexOf(': <View style={styles.previews}>{previewsBody}</View>')
+  t.ok(pressAt > 0 && block.indexOf('{previewsBody}', pressAt) < plainAt && plainAt > pressAt, 'the more line sits inside the button with onOpenPreviews and in the plain, unpressable view without it')
+  t.ok(post.includes("previewsBody = previewLines.length === 0 && moreText === ''"), 'the block renders with only previewsMore')
+  const previewsBlock = post.slice(post.indexOf('const previewsBody ='), post.indexOf('  return (', post.indexOf('const previewsBody =')))
+  const linesAt = previewsBlock.indexOf('{previewLines.map(')
+  const moreAt = previewsBlock.indexOf("{moreText !== '' ? <Text style={styles.previewLine} numberOfLines={1}>{moreText}</Text> : null}")
+  t.ok(linesAt > 0 && moreAt > linesAt && moreAt < previewsBlock.lastIndexOf('</>'), 'the more line is last, inside previewsBody')
+  t.ok(previewsBlock.includes('<Text key={index + \':\' + line.key} style={styles.previewLine} numberOfLines={1}>'), 'the more line has the preview lines\' style in both cases')
+  t.ok(post.includes("const commenterLabel = !reposter && commentedBy && typeof commentedBy === 'object' && typeof commentedBy.label === 'string' ? displayText(commentedBy.label).trim() : ''"), 'repostedBy wins, and the label goes through displayText')
+  const header = post.slice(post.indexOf('{reposter'), post.indexOf('<View style={styles.main}>'))
+  const slot = header.indexOf(": commenterLabel !== ''")
+  t.ok(slot > 0 && header.indexOf("<Icon name='resposta' size={14}", slot) > slot && header.indexOf('accessibilityLabel={commenterLabel}', slot) > slot, 'the header sits in the repost slot, with the resposta icon and its label spoken')
+  t.ok(header.includes("accessibilityRole={openCommenter ? 'link' : 'text'}") && post.includes('otherPress(commentedBy && commentedBy.onOpen)'), 'pressable only with onOpen')
+  t.ok(header.slice(slot).includes('hitSlop={repostedSlop}') && !post.includes('COMMENTER_SLOP'), 'the header takes the reposted line\'s computed slop')
+  t.ok(post.includes("const headAbove = reposter || commenterLabel !== '' ? REPOSTED_GAP / 2 : ROW_PAD_TOP"), 'the head slop stops under the comentou line too')
 })
 
 test('reply preview lines: one line each, sanitized, blank and bad entries dropped, at most 2', (t) => {
@@ -217,4 +239,59 @@ test('reply preview lines: one line each, sanitized, blank and bad entries dropp
   const ctrl = replyPreviewLines([{ key: 'd:4', name: 'Di', text: 'a‮b' }])
   t.is(ctrl.length, 1)
   t.ok(!ctrl[0].text.includes('‮'), 'a bidi override does not reach the screen')
+})
+
+test('comment props: tag pill, reply quote and the level-driven reply label', (t) => {
+  t.ok(/level, tag, replyQuote/.test(post), 'PostRow takes level, tag and replyQuote')
+  t.ok(post.includes("typeof tag === 'string' ? displayText(tag).trim()"), 'the tag goes through displayText')
+  t.ok(post.includes('tagText || null,'), 'the tag is part of the accessibility label')
+  t.ok(post.includes('{tagText ? <Text style={styles.tag}'), 'the tag pill is drawn after the name')
+  t.ok(post.includes("import { ReplyPreview } from './ReplyPreview'") && post.includes('<ReplyPreview'), 'the quote uses ReplyPreview')
+  t.ok(post.indexOf('{quoteShown') < post.indexOf('\n                : replyToName\n'), 'the quote takes the slot of the reply chip and replaces it')
+  t.ok(post.includes("(level === 'post' ? 'comentar na publicação de ' : 'responder a ') + title"), 'only level post says comentar; undefined keeps responder a')
+  t.absent(/level\s*=\s*replyToName|replyToName\s*\?\s*'comment'/.test(post), 'the level is never inferred from replyToName')
+  t.ok(post.includes('quoteSpoken || (replyToName !== null'), 'screen readers hear the quote in the body label, the hidden layer does not speak it')
+  t.ok(post.includes("'respondendo a ' + (quoteName ? quoteName + ': ' : '') + quoteText(replyQuote.text)"), 'the spoken quote is sanitized like the drawn one')
+})
+
+test('reply quote: screen readers reach its tap through a body action, beside activate', (t) => {
+  const { compileFunction } = require('node:vm')
+  const from = post.indexOf('  const bodyA11y = quotePress')
+  const to = post.indexOf('  const bodyParts = [', from)
+  t.ok(from >= 0 && to > from)
+  const make = (quotePress, a11yOpen) => compileFunction(post.slice(from, to) + '\nreturn bodyA11y', ['quotePress', 'a11yOpen'])(quotePress, a11yOpen)
+  const calls = []
+  const event = (actionName) => ({ nativeEvent: { actionName } })
+  const open = { onAccessibilityTap: () => calls.push('tap'), accessibilityActions: [{ name: 'activate' }], onAccessibilityAction: (e) => calls.push('open:' + e.nativeEvent.actionName) }
+  const both = make(() => calls.push('quote'), open)
+  t.alike(both.accessibilityActions, [{ name: 'activate' }, { name: 'mostrar a mensagem respondida', label: 'mostrar a mensagem respondida' }])
+  t.is(both.onAccessibilityTap, open.onAccessibilityTap, 'the VoiceOver open stays')
+  both.onAccessibilityAction(event('mostrar a mensagem respondida'))
+  both.onAccessibilityAction(event('activate'))
+  t.alike(calls, ['quote', 'open:activate'], 'each action reaches its own handler')
+  const alone = make(() => calls.push('quote2'), null)
+  t.alike(alone.accessibilityActions, [{ name: 'mostrar a mensagem respondida', label: 'mostrar a mensagem respondida' }])
+  alone.onAccessibilityAction(event('activate'))
+  alone.onAccessibilityAction(event('mostrar a mensagem respondida'))
+  t.is(calls[calls.length - 1], 'quote2')
+  t.is(make(undefined, open), open, 'no quote tap, the open actions unchanged')
+  t.is(make(undefined, null), null)
+  t.ok(post.includes("accessibilityHint={open ? 'abre a conversa' : undefined}\n            {...bodyA11y}"), 'on the body element')
+  t.is(post.split('{...a11yOpen}').length - 1, 2, 'the hidden text and time keep the plain open actions')
+})
+
+test('the body of a row with no open is never announced as disabled', (t) => {
+  t.absent(post.includes('mostrarRespondida'), 'VoiceOver speaks the action name, so it is words')
+  const from = post.indexOf('<View style={styles.body} onLayout={measureCaption}>')
+  const to = post.indexOf('{...bodyA11y}', from)
+  const body = post.slice(from, to)
+  t.ok(from >= 0 && to > from)
+  t.absent(/\bdisabled=/.test(body), 'a thread row (no open) with a reply quote or nothing at all is not dimmed')
+  t.ok(body.includes("accessibilityRole={open ? 'link' : 'text'}"), 'with no open it is plain text')
+  t.ok(body.includes('onPress={openTap}') && post.includes('const fn = (f) => (typeof f === \'function\' ? f : undefined)'), 'with no open, openTap is undefined and a tap does nothing')
+})
+
+test('the block gate masks the reply quote as it masks the quote', (t) => {
+  const gate = post.slice(post.indexOf('function BlockGate (props) {'), post.indexOf('export const PostRow = memo(BlockGate)'))
+  t.ok(gate.includes('<PostRowView {...props} quote={view.quote} replyQuote={view.replyQuote} onBlock={onBlock} />'))
 })

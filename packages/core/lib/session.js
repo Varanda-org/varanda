@@ -716,7 +716,8 @@ function createSession ({
 
     // Photos live in media cores only the browser node writes: a post with
     // `media` is refused before anything is opened (like account.sign).
-    'post.create': serial(async ({ text, media, preview }) => {
+    'post.create': serial(async ({ text, media, preview, poll, event }) => {
+      if (poll !== undefined || event !== undefined) throw new UsageError(PEEK_WEB_ONLY)
       if (media !== undefined || (preview && preview.image !== null)) throw new UsageError(MEDIA_WEB_ONLY)
       const r = await withStore((c) => member.postCreate(c, { text, preview }))
       return { seq: r.seq, ref: r.ref }
@@ -841,6 +842,55 @@ function createSession ({
     'testimonial.delete': serial(async () => {
       throw new UsageError(PEEK_WEB_ONLY)
     }),
+    'testimonial.decide': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+
+    // Recados read the page owner's wall through the seeder index and
+    // diary.peek (docs/rpc.md): refused the same way, nothing opened.
+    'scrap.write': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'scrap.hide': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'scrap.wall': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'scrap.delete': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+
+    // The rich profile (docs/rpc.md): written by the browser node only, the
+    // same refusal, nothing written.
+    'profile.about': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'profile.mood': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'profile.extra.delete': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+
+    // Fas e Melhores amigos (docs/rpc.md): written by the browser node only
+    // (the writer's own key and the page check need its reads), the same
+    // refusal, nothing written.
+    'fan.set': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'top.set': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+
+    // Foruns e enquetes (docs/rpc.md): a vote checks the poll post with a
+    // peek the core node does not make; refused, nothing written.
+    'choice.set': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'choice.mine': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
 
     // A momento's photo lives in the browser node's anonymous blob pool
     // (docs/rpc.md 5.113): refused the same way, nothing opened.
@@ -942,6 +992,7 @@ function createSession ({
     'group.post': serial(async (params, epoch) => {
       // The core node seals nothing itself: `sealed` (media or a card
       // thumbnail, rpc.md 5.98) is refused here even beside a text card.
+      if (params.topic !== undefined || params.poll !== undefined || params.event !== undefined) throw new UsageError(PEEK_WEB_ONLY)
       if (params.media !== undefined || params.sealed === true || (params.card && params.card.image !== null)) throw new UsageError(MEDIA_WEB_ONLY)
       const r = await withStore((c) => member.groupPost(c, params))
       send('groups.changed', { group: params.group }, epoch)
@@ -952,6 +1003,8 @@ function createSession ({
     // (browser node), never as this member.
     'group.read': serial((params) => {
       if (params.page !== undefined) throw new UsageError(DM_WEB_ONLY)
+      // Topic marks never go unanswered as a plain page: refused.
+      if (params.marks !== undefined || params.topic !== undefined) throw new UsageError(PEEK_WEB_ONLY)
       return withStore((c) => member.groupRead(c, params))
     }),
     'group.seen': serial((params) => withStore((c) => member.groupSeen(c, params))),
@@ -995,6 +1048,12 @@ function createSession ({
     }),
 
     'group.reactors': serial((params) => withStore((c) => member.groupReactors(c, params))),
+    // Foruns e enquetes: browser node only, as group.seal.
+    'group.choose': serial(async () => { throw new UsageError(PEEK_WEB_ONLY) }),
+    'group.topics': serial(async () => { throw new UsageError(PEEK_WEB_ONLY) }),
+    'group.voters': serial(async () => { throw new UsageError(PEEK_WEB_ONLY) }),
+    // Eventos: browser node only, as the forum methods.
+    'group.events': serial(async () => { throw new UsageError(PEEK_WEB_ONLY) }),
 
     'group.meta': serial(async (params, epoch) => {
       const r = await withStore((c) => member.groupMeta(c, params))

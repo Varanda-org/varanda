@@ -379,7 +379,7 @@ test('e2e: AI triage decides a spam block that mod apply publishes; illegal and 
   t.is(aiRow.actor, 'ia')
   t.is(aiRow.ia.sugestao, 'bloquear')
   t.is(aiRow.ia.modo, 'auto')
-  t.alike(aiRow.publicacao, { texto: SPAM, midia: false, citacao: false }, 'the panel shows the post the seeder holds')
+  t.alike(aiRow.publicacao, { texto: SPAM, midia: false, citacao: false, enquete: false }, 'the panel shows the post the seeder holds')
   const blocked = await api('GET', '/account/mod/api/blocked', { cookie })
   const aiChange = blocked.body.pending.find((c) => c.member === S.key)
   t.ok(aiChange, 'a pending block of S')

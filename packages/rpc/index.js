@@ -21,6 +21,9 @@ const musicCover = require('./lib/music-cover')
 const feira = require('./lib/feira')
 const inviteCard = require('./lib/invite-card')
 const reaction = require('./lib/reaction')
+const profileExtra = require('./lib/profile-extra')
+const poll = require('./lib/poll')
+const event = require('./lib/event')
 const { tokensEqual } = require('./lib/token')
 const { createServerDispatcher } = require('./lib/server')
 const { createClient } = require('./lib/client')
@@ -97,6 +100,16 @@ module.exports = {
   YOUTUBE_COVER_HOST: musicCover.YOUTUBE_COVER_HOST,
   youtubeCoverUrl: musicCover.youtubeCoverUrl,
   feira,
+  profileExtra,
+  THEME_IDS: profileExtra.THEME_IDS,
+  isBirthday: profileExtra.isBirthday,
+  poll,
+  isPoll: poll.isPoll,
+  isPollOption: poll.isPollOption,
+  isPick: poll.isPick,
+  event,
+  isEvent: event.isEvent,
+  isEventInstant: event.isEventInstant,
   ...inviteCard,
   isReaction: reaction.isReaction,
   REACTION_MAX_POINTS: reaction.REACTION_MAX_POINTS,

@@ -60,6 +60,12 @@ import { pageNoticeStore } from '../pageNoticeStore'
 import { pageNoticeKey, pageReadKind } from '../pageNotice'
 import { PressScale } from '../ui/PressScale'
 import { ProfileHeader, ProfileStatus } from '../ui/ProfileHeader'
+import { AboutCard, useProfileExtra } from '../ui/AboutCard'
+import { MoodChip } from '../ui/MoodChip'
+import { FanButton } from '../ui/FanButton'
+import { TopFriendsRow, useTopFriends } from '../ui/TopFriendsRow'
+import { fansCountView } from '../fans.js'
+import { extraView } from '../profileExtraView.js'
 import { BAR, ProfileBar, usePinnedTabSelect, useProfileBar } from '../ui/ProfileBar'
 import { LABELS } from '../dm'
 import { COUNTS_INCOMPLETE_NOTE } from '../pessoas'
@@ -270,7 +276,7 @@ export default function Membro (props) {
   return <PostSheetProvider><MembroList {...props} /></PostSheetProvider>
 }
 
-function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onOpenPageSettings, onOpenPeople, onOpenCommunity, onOpenListings, onOpenTestimonials, onToast, onTabChange }) {
+function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onOpenPageSettings, onOpenPeople, onOpenCommunity, onOpenListings, onOpenTestimonials, onOpenRecados, onOpenEventos, onToast, onTabChange }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const node = useNode()
@@ -858,6 +864,14 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
 
   const who = whoOf({ name: header.name, username: header.username })
   const own = typeof ownKey === 'string' && author === ownKey
+  // Rich profile (hosted only): the about card, the mood while it lives and
+  // the band theme. Nothing is read for a page, a blocked person or without a
+  // hosted node, and a profile without the records looks as it always did.
+  const rich = useProfileExtra({ author, enabled: node.hosted === true && !isPage && !blockedHere, request })
+  const extraShown = extraView(rich.held, now)
+  const hostedHere = node.hosted === true && !isPage && !blockedHere
+  const topRead = useTopFriends({ owner: author, ownKey, index: rich.index, request, enabled: hostedHere && !own })
+  const fansView = fansCountView({ fans: rich.index ? rich.index.fans : null, complete: rich.index ? rich.index.complete : false })
   const canReport = full && !own && typeof onReport === 'function' && typeof ownKey === 'string'
   const canBlock = canReport && blocks.available
   const unblock = async () => {
@@ -925,6 +939,24 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
       </PressScale>
       )
     : null
+  const recadosRow = node.hosted === true && !(isPage && lifecycle.moved) && typeof onOpenRecados === 'function'
+    ? (
+      <PressScale accessibilityRole='link' accessibilityLabel='Recados' onPress={() => onOpenRecados(author)} style={({ pressed }) => [styles.linkRow, pressed && styles.pressed]}>
+        <Icon name='recado' size={20} color={colors.accent} />
+        <Text style={styles.linkText}>Recados</Text>
+        <Icon name='seta' size={20} color={colors.soft} />
+      </PressScale>
+      )
+    : null
+  const eventosRow = node.hosted === true && !(isPage && lifecycle.moved) && typeof onOpenEventos === 'function'
+    ? (
+      <PressScale accessibilityRole='link' accessibilityLabel='Eventos' onPress={() => onOpenEventos(author)} style={({ pressed }) => [styles.linkRow, pressed && styles.pressed]}>
+        <Icon name='evento' size={20} color={colors.accent} />
+        <Text style={styles.linkText}>Eventos</Text>
+        <Icon name='seta' size={20} color={colors.soft} />
+      </PressScale>
+      )
+    : null
   const ratingsRow = ratingsHosted && !(isPage && lifecycle.moved) && rated && rated.summary.count > 0
     ? (
       <View style={styles.listings}>
@@ -980,7 +1012,8 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
       </View>
       )
     : null
-  const countsNote = c.incomplete && (c.seguindo !== null || c.seguidores !== null) ? <View style={styles.countsNote}><Soft>{COUNTS_INCOMPLETE_NOTE}</Soft></View> : null
+  const fansIncomplete = hostedHere && fansView.count !== null && fansView.incomplete
+  const countsNote = (c.incomplete && (c.seguindo !== null || c.seguidores !== null)) || fansIncomplete ? <View style={styles.countsNote}><Soft>{COUNTS_INCOMPLETE_NOTE}</Soft></View> : null
 
   const profileUrl = node.hosted === true && author ? buildProfileUrl({ origin: installationOrigin() || globalThis.location?.origin || null, username: header.verified === true ? header.username || null : null, publicKey: author }) : null
   const asPageFollowing = pageFollows !== null && pageFollows.has(author)
@@ -1065,7 +1098,12 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
         topInset={insets.top}
         onBack={full && bar.interactive ? undefined : onBack}
         bandButtons={null}
-        rows={blockedHere ? null : <>{listingsRow}{ratingsRow}</>}
+        theme={extraShown.theme}
+        mood={extraShown.mood ? <MoodChip mood={extraShown.mood} now={now} theme={extraShown.theme} /> : null}
+        about={extraShown.about ? <AboutCard about={extraShown.about} theme={extraShown.theme} /> : null}
+        fan={hostedHere && !own && typeof ownKey === 'string' ? <FanButton author={author} ownKey={ownKey} title={displayText(who.title)} page={isPage} blocked={blockedHere} onToast={typeof onToast === 'function' ? onToast : undefined} /> : null}
+        top={hostedHere && !own && topRead.view && (topRead.view.rows.length > 0 || topRead.view.notice) ? <TopFriendsRow rows={topRead.view.rows} notice={topRead.view.notice} onOpen={onOpenMember} loading={topRead.phase === 'loading' && !topRead.view} /> : null}
+        rows={blockedHere ? null : <>{listingsRow}{recadosRow}{eventosRow}{ratingsRow}</>}
         avatar={{ name: who.avatarName, publicKey: author, picture: header.avatar, persist: own || isFollowed }}
         title={displayText(who.title)}
         subtitle={who.subtitle ? displayText(who.subtitle) : null}
@@ -1080,7 +1118,14 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
             label: c.seguidores === 1 ? 'seguidor' : 'seguidores',
             value: c.seguidores === null ? null : displayText(String(c.seguidores)),
             onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(author, 'seguidores') : undefined
-          }
+          },
+          hostedHere
+            ? {
+                label: fansView.count === 1 ? 'fã' : 'fãs',
+                value: fansView.count === null ? null : displayText(String(fansView.count)),
+                onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(author, 'fas') : undefined
+              }
+            : null
         ]}
         note={pageNote !== null ? <View>{pageNote}{countsNote}</View> : countsNote}
         actions={[
@@ -1147,7 +1192,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
               onClose={() => setWritingTestimonial(false)}
               onSent={(result) => {
                 if (result && typeof result.ref === 'string') setSentTestimonial(result.ref)
-                if (typeof onToast === 'function') onToast('Depoimento enviado. Aparece quando a pessoa aprovar.')
+                if (typeof onToast === 'function') onToast('Depoimento enviado. Só aparece no perfil se a pessoa escolher mostrar.')
               }}
               onUncertain={() => {
                 setTestimonialUncertain(true)
@@ -1274,7 +1319,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     const peeked = peekedRef.current
     const post = shownPost(item, peeked, seeded ? seedOriginalsRef.current : null)
     if (post === null) return null
-    return <PostRow {...rowProps({ item: withHeader(post), names, peeked, now, ownKey, follows, eng, handlers, extra: item.kind === 'repost' ? { repostedBy: memberWho } : NO_EXTRA, cache: rowCache, rowKey: postKey(item) })} />
+    return <PostRow {...rowProps({ item: withHeader(post), names, peeked, now, ownKey, follows, eng, handlers, extra: item.kind === 'repost' ? { repostedBy: memberWho } : NO_EXTRA, cache: rowCache, rowKey: postKey(item) })} level={post.replyTo ? 'comment' : 'post'} />
   }
   renderRef.current = depo ? testimonialTab.renderItem : mural ? renderMural : renderPost
 

@@ -52,7 +52,7 @@ function fakeClock (start = Date.parse('2026-10-26T12:00:00Z')) {
 
 // Fresh module state per test (no cache, pacer or cooldown leaks between
 // cases); the fetch* functions run on the fake clock.
-const DEPS_AT = { fetchPost: 2, fetchCounts: 1, fetchMember: 2, refetchMember: 1, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1, fetchTestimonials: 1, fetchFeira: 1, fetchFeiraAuthor: 2, fetchFeiraRatings: 2 }
+const DEPS_AT = { fetchPost: 2, fetchRoda: 2, fetchCounts: 1, fetchMember: 2, refetchMember: 1, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchFans: 2, fetchEvents: 2, fetchPoll: 3, fetchPollVoters: 4, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1, fetchTestimonials: 1, fetchFeira: 1, fetchFeiraAuthor: 2, fetchFeiraRatings: 2 }
 async function load () {
   const m = await import('../src/indexClient.js')
   m.resetIndexClient()
@@ -1516,6 +1516,136 @@ test('validTestimonials: exact shape, lowercase keys, positive seqs, caps and no
   t.is(own.pending[0].seq, 6, 'pending copied')
 })
 
+const scrapsBody = (over = {}) => ({
+  scraps: [{ author: B, seq: 9, followSeq: 4 }, { author: C, seq: 7, followSeq: null }],
+  hides: [3, 2],
+  wall: 5,
+  next: null,
+  indexing: false,
+  complete: true,
+  ...over
+})
+
+test('scrapsUrl and followPairUrl: exact paths, lowercase keys, bad input is null', async (t) => {
+  const { scrapsUrl, followPairUrl, fetchScraps, fetchFollowPair, SCRAPS_MAX, SCRAP_HIDES_MAX } = await load()
+  t.is(SCRAPS_MAX, 50)
+  t.is(SCRAP_HIDES_MAX, 1000)
+  t.is(scrapsUrl(A), '/index/scraps/' + A)
+  t.is(scrapsUrl(A.toUpperCase(), '50'), '/index/scraps/' + A + '/50')
+  for (const owner of [A + 'a', 'zz'.repeat(32), A + '/x', '', null, 7]) t.is(scrapsUrl(owner), null, 'owner ' + String(owner))
+  for (const cursor of ['', 'a/b', '../x', '.', '..', '.x', 'a?b', 'x'.repeat(129), 5, {}, [], Symbol('x')]) t.is(scrapsUrl(A, cursor), null, 'cursor ' + String(cursor))
+  t.is(followPairUrl(A, B), '/index/follow/' + A + '/' + B)
+  t.is(followPairUrl(A.toUpperCase(), B.toUpperCase()), '/index/follow/' + A + '/' + B)
+  for (const [x, y] of [[A, 'nope'], ['nope', B], [A, null], [null, null], [A + 'a', B]]) t.is(followPairUrl(x, y), null)
+  let called = false
+  t.alike(await fetchScraps('nope', null, { fetch: async () => { called = true } }), { ok: false, reason: 'invalid-input' })
+  t.alike(await fetchFollowPair(A, 'nope', { fetch: async () => { called = true } }), { ok: false, reason: 'invalid-input' })
+  t.absent(called, 'no request for bad input')
+})
+
+test('validScraps: exact shape, hex writers, int ranges, caps and no repeats', async (t) => {
+  const { validScraps } = await load()
+  t.alike(validScraps(scrapsBody(), A), { rows: scrapsBody().scraps, hides: [3, 2], wall: 5, next: null, indexing: false, complete: true })
+  t.is(validScraps(scrapsBody({ wall: null, next: 'abc.def-1', scraps: [], hides: [] }), A).wall, null)
+  const full = []
+  for (let i = 1; i <= 50; i++) full.push({ author: i.toString(16).padStart(64, '0'), seq: i, followSeq: null })
+  t.ok(validScraps(scrapsBody({ scraps: full }), A), '50 rows pass')
+  const hides = []
+  for (let i = 1; i <= 1000; i++) hides.push(i)
+  t.ok(validScraps(scrapsBody({ hides }), A), '1000 hides pass')
+  const missing = scrapsBody()
+  delete missing.hides
+  const row = (r) => scrapsBody({ scraps: [r] })
+  const bad = [
+    scrapsBody({ extra: 1 }),
+    missing,
+    scrapsBody({ indexing: 'no' }),
+    scrapsBody({ complete: null }),
+    scrapsBody({ scraps: null }),
+    scrapsBody({ scraps: {} }),
+    scrapsBody({ hides: 'x' }),
+    scrapsBody({ scraps: full.concat([{ author: C, seq: 51, followSeq: null }]) }),
+    scrapsBody({ hides: hides.concat([1001]) }),
+    scrapsBody({ wall: 0 }),
+    scrapsBody({ wall: '5' }),
+    scrapsBody({ wall: 1.5 }),
+    scrapsBody({ wall: undefined }),
+    scrapsBody({ next: 7 }),
+    scrapsBody({ next: 'a/b' }),
+    scrapsBody({ next: '.' }),
+    scrapsBody({ next: '..' }),
+    scrapsBody({ next: '' }),
+    scrapsBody({ hides: [0] }),
+    scrapsBody({ hides: [-1] }),
+    scrapsBody({ hides: ['1'] }),
+    scrapsBody({ hides: [1.5] }),
+    scrapsBody({ hides: [Number.MAX_SAFE_INTEGER + 1] }),
+    scrapsBody({ hides: [2, 2] }),
+    row({ author: B, seq: 1 }),
+    row({ author: B, seq: 1, followSeq: null, text: 'oi' }),
+    row({ author: B.toUpperCase(), seq: 1, followSeq: null }),
+    row({ author: B + 'a', seq: 1, followSeq: null }),
+    row({ author: 'zz'.repeat(32), seq: 1, followSeq: null }),
+    row({ author: A, seq: 1, followSeq: null }),
+    row({ author: B, seq: 0, followSeq: null }),
+    row({ author: B, seq: 1.5, followSeq: null }),
+    row({ author: B, seq: '1', followSeq: null }),
+    row({ author: B, seq: Number.MAX_SAFE_INTEGER + 1, followSeq: null }),
+    row({ author: B, seq: 1, followSeq: 0 }),
+    row({ author: B, seq: 1, followSeq: '2' }),
+    row({ author: B, seq: 1, followSeq: undefined }),
+    row(null),
+    row([]),
+    scrapsBody({ scraps: [{ author: B, seq: 1, followSeq: null }, { author: B, seq: 1, followSeq: 2 }] }),
+    null,
+    []
+  ]
+  for (const body of bad) t.is(validScraps(body, A), null, JSON.stringify(body).slice(0, 120))
+  for (const o of [null, undefined, '', 'nope', B.toUpperCase()]) t.is(validScraps(scrapsBody(), o), null, 'owner ' + String(o))
+  const many = []
+  for (let i = 1; i <= 21; i++) many.push({ author: B, seq: i, followSeq: null })
+  t.is(validScraps(scrapsBody({ scraps: many }), A), null, '21 rows of one author')
+  t.ok(validScraps(scrapsBody({ scraps: many.slice(0, 20).concat([{ author: C, seq: 1, followSeq: null }]) }), A), '20 per author pass')
+  const stuck = validScraps(scrapsBody({ next: 'abc' }), A, 'abc')
+  t.is(stuck.next, null, 'a next equal to the cursor stops paging')
+  t.is(stuck.complete, false, 'and marks the read incomplete')
+  t.is(validScraps(scrapsBody({ next: 'abd' }), A, 'abc').next, 'abd')
+  const own = scrapsBody()
+  const copy = validScraps(own, A)
+  copy.rows[0].seq = 99
+  copy.hides[0] = 99
+  t.is(own.scraps[0].seq, 9, 'rows copied')
+  t.is(own.hides[0], 3, 'hides copied')
+})
+
+test('validFollowPair: exact keys, seq null or positive int', async (t) => {
+  const { validFollowPair } = await load()
+  t.alike(validFollowPair({ seq: 4, indexing: false }), { seq: 4, indexing: false })
+  t.alike(validFollowPair({ seq: null, indexing: true }), { seq: null, indexing: true })
+  for (const body of [{ seq: 0, indexing: false }, { seq: '4', indexing: false }, { seq: 1.5, indexing: false }, { seq: -1, indexing: false }, { seq: Number.MAX_SAFE_INTEGER + 1, indexing: false }, { seq: 4 }, { indexing: false }, { seq: undefined, indexing: false }, { seq: 4, indexing: 'no' }, { seq: 4, indexing: false, complete: true }, null, [], 'x']) {
+    t.is(validFollowPair(body), null, JSON.stringify(body))
+  }
+})
+
+test('fetchScraps and fetchFollowPair: request, contract and malformed answers', async (t) => {
+  const { fetchScraps, fetchFollowPair } = await load()
+  const calls = []
+  const res = await fetchScraps(A.toUpperCase(), null, { fetch: async (url, opts) => { calls.push({ url, opts }); return response(JSON.stringify(scrapsBody())) } })
+  t.is(res.ok, true)
+  t.alike(res.value.rows, scrapsBody().scraps)
+  t.is(calls[0].url, '/index/scraps/' + A)
+  t.is(calls[0].opts.method, 'GET')
+  const own = await fetchScraps(A, null, { fetch: async () => response(JSON.stringify(scrapsBody({ scraps: [{ author: A, seq: 1, followSeq: null }] }))) })
+  t.alike(own, { ok: false, reason: 'malformed' }, 'the owner is never a writer')
+  const paged = await fetchScraps(A, 'abc', { fetch: async (url) => { calls.push({ url }); return response(JSON.stringify(scrapsBody({ next: 'abc' }))) } })
+  t.alike([paged.value.next, paged.value.complete], [null, false], 'a next that repeats the cursor stops')
+  t.is(calls[calls.length - 1].url, '/index/scraps/' + A + '/abc')
+  const pair = await fetchFollowPair(A, B, { fetch: async (url) => { calls.push({ url }); return response(JSON.stringify({ seq: 3, indexing: false })) } })
+  t.alike(pair, { ok: true, value: { seq: 3, indexing: false } })
+  t.is(calls[calls.length - 1].url, '/index/follow/' + A + '/' + B)
+  t.alike(await fetchFollowPair(A, B, { fetch: async () => response(JSON.stringify({ seq: 0, indexing: false })) }), { ok: false, reason: 'malformed' })
+})
+
 test('fetchTestimonials: request options, contract and transport', async (t) => {
   const { fetchTestimonials } = await load()
   const calls = []
@@ -1680,4 +1810,322 @@ test('fetchFeira, fetchFeiraAuthor, fetchFeiraRatings: transport, contract, 404 
   const results = await m2.clock.run(Promise.all(all))
   t.ok(results.every((r) => r.ok), 'all settle ok')
   t.ok(maxOut <= 2, 'at most 2 in flight: ' + maxOut)
+})
+
+test('profileUrl and validProfile: tolerant of unknown keys, strict on known ones', async (t) => {
+  const { profileUrl, validProfile, fetchProfile } = await load()
+  const A = 'a'.repeat(64)
+  t.is(profileUrl(A), '/index/profile/' + A)
+  t.is(profileUrl(A.toUpperCase()), '/index/profile/' + A, 'author lowercased')
+  for (const author of [null, undefined, '', 'abc', A + 'a', 7]) t.is(profileUrl(author), null, 'author ' + String(author))
+  const flags = { indexing: false, complete: true }
+  t.alike(validProfile({ about: 3, mood: null, ...flags }), { about: 3, mood: null, fans: null, top: null, ...flags })
+  t.alike(validProfile({ ...flags }), { about: null, mood: null, fans: null, top: null, ...flags }, 'missing pointers read as null')
+  t.alike(validProfile({ about: 1, mood: 2, later: { x: 1 }, ...flags }), { about: 1, mood: 2, fans: null, top: null, ...flags }, 'unknown keys ignored')
+  const K = 'b'.repeat(64)
+  const good = { fans: { count: 3, indexing: false }, top: { seq: 5, back: { [K]: 7, ['c'.repeat(64)]: null } } }
+  t.alike(validProfile({ ...good, ...flags }), { about: null, mood: null, ...good, ...flags }, 'fans and top read')
+  t.alike(validProfile({ fans: null, top: null, ...flags }), { about: null, mood: null, fans: null, top: null, ...flags })
+  const many = Object.fromEntries(Array.from({ length: 9 }, (_, i) => [i.toString(16).repeat(64), null]))
+  for (const bad of [{ fans: { count: -1, indexing: false } }, { fans: { count: 1.5, indexing: false } }, { fans: { count: 1 } }, { fans: { count: 1, indexing: false, x: 1 } }, { top: { seq: 0, back: {} } }, { top: { seq: 1 } }, { top: { seq: 1, back: { [K.toUpperCase()]: 1 } } }, { top: { seq: 1, back: { [K]: 0 } } }, { top: { seq: 1, back: many } }, { top: { seq: 1, back: {}, x: 1 } }]) {
+    t.is(validProfile({ ...bad, ...flags }), null, JSON.stringify(bad))
+  }
+  for (const bad of [null, [], 'x', { about: 0, ...flags }, { about: 1.5, ...flags }, { mood: '2', ...flags }, { about: 1, mood: Number.MAX_SAFE_INTEGER + 1, ...flags }, { about: 1, indexing: 'no', complete: true }, { about: 1, indexing: false }]) {
+    t.is(validProfile(bad), null, JSON.stringify(bad))
+  }
+  t.alike(await fetchProfile('nope'), { ok: false, reason: 'invalid-input' })
+})
+
+test('fansUrl and validFans: cursor like the followers, rows and flags checked', async (t) => {
+  const { fansUrl, validFans, fetchFans } = await load()
+  const A = 'a'.repeat(64)
+  const B = 'b'.repeat(64)
+  t.is(fansUrl(A), '/index/fans/' + A)
+  t.is(fansUrl(A, { atMs: 5, key: B }), '/index/fans/' + A + '/5.' + B)
+  t.is(fansUrl(A, 'x'), null)
+  t.is(fansUrl('nope'), null)
+  const row = { key: B, seq: 3, at: '2026-01-01T00:00:00.000Z' }
+  const body = { author: A, items: [row], total: 1, next: null, authors: { [B]: { profileSeq: 1, usernameSeq: null } }, indexing: false, complete: true }
+  t.alike(validFans(body, A), body)
+  t.is(validFans({ ...body, kind: 'seguidores' }, A), null, 'no kind')
+  t.is(validFans({ ...body, items: [{ ...row, key: A }] }, A), null, 'never itself')
+  t.is(validFans({ ...body, total: 0 }, A), null)
+  t.alike(await fetchFans('nope', null, {}), { ok: false, reason: 'invalid-input' })
+})
+
+test('pollUrl and pollVotersUrl: inputs checked, never a dropped cursor', async (t) => {
+  const { pollUrl, pollVotersUrl } = await load()
+  t.is(pollUrl(A.toUpperCase(), 5), '/index/poll/' + A + '/5')
+  t.is(pollUrl(A, 0), null)
+  t.is(pollUrl(A, 1.5), null)
+  t.is(pollUrl(A, '5'), null)
+  t.is(pollUrl('nope', 5), null)
+  t.is(pollVotersUrl(A, 5, 2), '/index/poll/' + A + '/5/2')
+  t.is(pollVotersUrl(A, 5, 0, { atMs: 7, key: B }), '/index/poll/' + A + '/5/0/7.' + B)
+  for (const pick of [-1, 4, '1', null, 0.5]) t.is(pollVotersUrl(A, 5, pick), null, 'pick ' + String(pick))
+  t.is(pollVotersUrl(A, 5, 0, 'x'), null, 'a bad cursor is null, not dropped')
+  t.is(pollVotersUrl(A, 5, 0, { atMs: 0, key: B }), '/index/poll/' + A + '/5/0/0.' + B, 'atMs 0')
+  t.is(pollVotersUrl(A, 5, 0, { atMs: 7, key: B, x: 1 }), null)
+  t.is(pollVotersUrl(A, 0, 0), null)
+})
+
+test('validPoll: exact keys, 2 to 4 counts, the expected size', async (t) => {
+  const { validPoll, fetchPoll } = await load()
+  const body = { totals: [3, 0, 1], indexing: false, complete: true }
+  t.alike(validPoll(body), body)
+  t.alike(validPoll(body, 3), body)
+  t.is(validPoll(body, 2), null, 'size differs from the poll')
+  const indexing = { totals: [], indexing: true, complete: false }
+  t.alike(validPoll(indexing), indexing, 'no totals while the seeder indexes')
+  t.alike(validPoll(indexing, 3), indexing, 'whatever the expected size')
+  for (const bad of [{ totals: [], indexing: false, complete: true }, { totals: [], indexing: false, complete: false }, { totals: [], indexing: true, complete: true }]) {
+    t.is(validPoll(bad), null, 'empty totals only while indexing: ' + JSON.stringify(bad))
+  }
+  const fresh = validPoll(body)
+  fresh.totals[0] = 9
+  t.is(body.totals[0], 3, 'a copy is returned')
+  for (const bad of [{ ...body, totals: [1] }, { ...body, totals: [1, 2, 3, 4, 5] }, { ...body, totals: [1, -1] }, { ...body, totals: [1, 1.5] }, { ...body, totals: [1, '2'] }, { ...body, totals: [1, null] }, { ...body, totals: { 0: 1, 1: 2, length: 2 } }, { ...body, totals: [1, 2], x: 1 }, { ...body, indexing: 'no' }, { totals: [1, 2], indexing: false }, { ...body, totals: Object.assign([1, 0, 2], { 1: undefined }) }, null, [], 'x']) {
+    t.is(validPoll(bad), null, JSON.stringify(bad))
+  }
+  t.alike(await fetchPoll('nope', 5, 3, {}), { ok: false, reason: 'invalid-input' })
+  t.alike(await fetchPoll(A, 0, 3, {}), { ok: false, reason: 'invalid-input' })
+  for (const bad of [undefined, 1, 5, 2.5, '3', null]) t.alike(await fetchPoll(A, 5, bad, {}), { ok: false, reason: 'invalid-input' }, 'the option count is required: ' + String(bad))
+  const answer = (totals) => ({ fetch: json({ totals, indexing: false, complete: true }) })
+  t.alike(await fetchPoll(A, 5, 3, answer([3, 0, 1])), { ok: true, value: { totals: [3, 0, 1], indexing: false, complete: true } })
+  t.alike(await fetchPoll(A, 5, 3, answer([3, 0, 1, 2])), { ok: false, reason: 'malformed' }, 'a 3-option poll with 4 totals is rejected')
+  t.alike(await fetchPoll(A, 5, 3, answer([3, 0])), { ok: false, reason: 'malformed' }, 'and one with 2')
+})
+
+test('validPollVoters: pointers only, newest first, next names the last row', async (t) => {
+  const { validPollVoters, fetchPollVoters } = await load()
+  const row = (key, at, seq = 3) => ({ key, seq, at })
+  const r1 = row(B, '2026-01-02T00:00:00.000Z')
+  const r2 = row(C, '2026-01-01T00:00:00.000Z', 4)
+  const hints = { [B]: { profileSeq: 3, usernameSeq: null }, [C]: { profileSeq: null, usernameSeq: 5 } }
+  const body = { items: [r1, r2], next: null, total: 2, authors: hints, indexing: false, complete: true }
+  t.alike(validPollVoters(body), body)
+  const empty = { items: [], next: null, total: 0, authors: {}, indexing: true, complete: false }
+  t.alike(validPollVoters(empty), empty, 'an empty page while indexing')
+  t.is(validPollVoters({ ...body, items: [r2, r1] }), null, 'oldest first')
+  t.is(validPollVoters({ ...body, items: [r1, { ...r2, key: B }] }), null, 'a duplicate key')
+  t.is(validPollVoters({ ...body, items: [r1, { ...r2, extra: 1 }] }), null)
+  t.is(validPollVoters({ ...body, items: [{ ...r1, seq: 0 }] }), null)
+  t.is(validPollVoters({ ...body, items: [{ ...r1, at: '2026-01-02' }] }), null)
+  t.is(validPollVoters({ ...body, items: [{ ...r1, key: 'zz' }] }), null)
+  t.is(validPollVoters({ ...body, authors: {} }), null, 'a hint missing for an item')
+  t.is(validPollVoters({ ...body, authors: { ...hints, [A]: hints[B] } }), null, 'a hint for no item')
+  t.is(validPollVoters({ ...body, authors: { [B]: hints[B], [C]: { profileSeq: 0, usernameSeq: null } } }), null, 'a bad hint')
+  t.is(validPollVoters({ ...body, authors: { [B]: hints[B], [C]: { profileSeq: null } } }), null, 'a hint with missing keys')
+  const noAuthors = { ...body }
+  delete noAuthors.authors
+  t.is(validPollVoters(noAuthors), null, 'no authors key')
+  t.is(validPollVoters({ ...body, total: 1 }), null, 'total below the rows')
+  t.is(validPollVoters({ ...body, items: Array.from({ length: 21 }, (_, i) => row(i.toString(16).padStart(64, '0'), '2026-01-02T00:00:00.000Z')), total: 21 }), null, 'over a page')
+  const next = { atMs: Date.parse(r2.at), key: C }
+  t.alike(validPollVoters({ ...body, next, total: 9 }).next, next)
+  const drawn = validPollVoters({ ...body, next, total: 9 })
+  drawn.authors[B].profileSeq = 99
+  t.is(body.authors[B].profileSeq, 3, 'a copy is returned')
+  t.is(validPollVoters({ ...body, next: { atMs: Date.parse(r2.at), key: B }, total: 9 }), null, 'next must name the last row')
+  t.is(validPollVoters({ ...body, items: [], next, total: 9 }), null, 'a cursor with no rows')
+  t.is(validPollVoters({ ...body, next: { atMs: 1, key: C, x: 1 } }), null)
+  t.is(validPollVoters(body, { atMs: Date.parse(r1.at), key: B }), null, 'a row at or before the request cursor')
+  t.ok(validPollVoters({ ...body, items: [r2], authors: { [C]: hints[C] }, total: 2 }, { atMs: Date.parse(r1.at), key: B }), 'after the request cursor')
+  t.alike(await fetchPollVoters(A, 5, 4, null, {}), { ok: false, reason: 'invalid-input' })
+})
+
+// A roda answer asked for A:5, a reply under the comment B:3 of the post C:1.
+const RODA_CURSOR = '1761000000000.' + C + '.8'
+function rodaBody (over = {}) {
+  return {
+    ref: REF,
+    root: C + ':1',
+    top: B + ':3',
+    items: [{ ref: REF, to: B + ':3' }, { ref: C + ':8', to: REF }],
+    next: RODA_CURSOR,
+    total: 7,
+    authors: {
+      [A]: { profileSeq: 1, usernameSeq: null },
+      [B]: { profileSeq: null, usernameSeq: 2 },
+      [C]: { profileSeq: null, usernameSeq: null }
+    },
+    indexing: false,
+    complete: true,
+    ...over
+  }
+}
+
+test('rodaUrl: exact path, input lowercased, everything else refused', async (t) => {
+  const { rodaUrl } = await load()
+  t.is(rodaUrl(REF), '/index/roda/' + A + '/5')
+  t.is(rodaUrl(REF.toUpperCase()), '/index/roda/' + A + '/5', 'input lowercased')
+  t.is(rodaUrl(REF, CURSOR), '/index/roda/' + A + '/5/' + CURSOR)
+  for (const bad of [A + ':0', A + ':05', A, A + ':1/..', 'zz'.repeat(32) + ':1', null, 7, A + ':1234567890123456']) {
+    t.is(rodaUrl(bad), null, 'ref ' + String(bad))
+  }
+  t.is(rodaUrl(A + ':123456789012345'), '/index/roda/' + A + '/123456789012345', '15 digits, as the seeder route')
+  for (const bad of ['x', '1.' + B + '.0', '1.' + B.toUpperCase() + '.1', '12345678901234567.' + B + '.1', CURSOR + '/x', 5]) {
+    t.is(rodaUrl(REF, bad), null, 'cursor ' + String(bad))
+  }
+})
+
+test('validRoda: the exact shape, returned as a fresh copy', async (t) => {
+  const { validRoda, RODA_MAX } = await load()
+  t.is(RODA_MAX, 50)
+  const body = rodaBody()
+  const v = validRoda(body, REF)
+  t.alike(v, rodaBody())
+  t.not(v, body)
+  t.not(v.items, body.items)
+  t.not(v.items[0], body.items[0])
+  t.not(v.authors, body.authors)
+  t.not(v.authors[A], body.authors[A])
+  body.items[0].to = 'changed'
+  body.authors[A].profileSeq = 99
+  t.is(v.items[0].to, B + ':3', 'the copy does not track the input')
+  t.is(v.authors[A].profileSeq, 1)
+  t.ok(validRoda(rodaBody({ ref: B + ':3', items: [], next: null, total: 0, authors: { [B]: { profileSeq: null, usernameSeq: 2 }, [C]: { profileSeq: null, usernameSeq: null } } }), B + ':3'), 'asked for the comment itself, no replies yet')
+  const fifty = Array.from({ length: 50 }, (_, i) => ({ ref: A + ':' + (i + 10), to: B + ':3' }))
+  t.ok(validRoda(rodaBody({ items: fifty, next: null, total: 50 }), REF), '50 rows')
+})
+
+test('fetchRoda: request options, the exact shape and a 404 from an older seeder', async (t) => {
+  const { fetchRoda } = await load()
+  const calls = []
+  const fetch = async (url, opts) => {
+    calls.push({ url, opts })
+    return response(JSON.stringify(rodaBody()))
+  }
+  const res = await fetchRoda(REF.toUpperCase(), CURSOR, { fetch })
+  t.is(res.ok, true)
+  t.alike(res.value, rodaBody())
+  t.is(calls[0].url, '/index/roda/' + A + '/5/' + CURSOR)
+  t.is(calls[0].opts.method, 'GET')
+  t.is(calls[0].opts.credentials, 'omit')
+  t.is(calls[0].opts.redirect, 'error')
+  t.is(calls[0].opts.cache, 'no-store')
+  t.ok(calls[0].opts.signal, 'abortable')
+  t.alike(await fetchRoda(REF, null, { fetch: async () => response('{}', { status: 404 }) }), { ok: false, reason: 'not-found' })
+  t.alike(await fetchRoda(REF, null, { fetch: async () => response('{}', { status: 503 }) }), { ok: false, reason: 'status' })
+  t.alike(await fetchRoda(REF, null, { fetch: async () => response('x'.repeat(65537)) }), { ok: false, reason: 'too-large' })
+  let called = false
+  t.alike(await fetchRoda('nope', null, { fetch: async () => { called = true } }), { ok: false, reason: 'invalid-input' })
+  t.alike(await fetchRoda(REF, 'x', { fetch: async () => { called = true } }), { ok: false, reason: 'invalid-input' })
+  t.absent(called, 'no request for bad input')
+})
+
+test('fetchRoda rejects anything outside the contract', async (t) => {
+  const { fetchRoda } = await load()
+  const top = B + ':3'
+  const many = Array.from({ length: 51 }, (_, i) => ({ ref: A + ':' + (i + 10), to: top }))
+  const bad = [
+    ['extra key', { extra: true }],
+    ['wrong ref', { ref: B + ':5' }],
+    ['ref upper case', { ref: REF.toUpperCase() }],
+    ['root equal to top', { root: top, items: [], next: null, authors: { [A]: rodaBody().authors[A], [B]: rodaBody().authors[B] } }],
+    ['ref equal to root', { root: REF, top: C + ':1', items: [], next: null, authors: { [A]: rodaBody().authors[A], [C]: rodaBody().authors[C] } }],
+    ['bad root', { root: C + ':0' }],
+    ['bad top', { top: 'x' }],
+    ['51 items', { items: many, next: null, total: 51 }],
+    ['items not an array', { items: {} }],
+    ['duplicate item', { items: [{ ref: REF, to: top }, { ref: REF, to: top }], next: null }],
+    ['item equal to top', { items: [{ ref: top, to: REF }], next: null }],
+    ['item equal to root', { items: [{ ref: C + ':1', to: top }], next: null }],
+    ['item ref equal to its to', { items: [{ ref: REF, to: REF }], next: null }],
+    ['item answering the root', { items: [{ ref: REF, to: C + ':1' }], next: null }],
+    ['child before its parent', { items: [{ ref: C + ':8', to: REF }, { ref: REF, to: top }], next: '1.' + A + '.5' }],
+    ['item extra key', { items: [{ ref: REF, to: top, at: 1 }], next: null }],
+    ['item missing to', { items: [{ ref: REF }], next: null }],
+    ['item bad ref', { items: [{ ref: A + ':0', to: top }], next: null }],
+    ['bad cursor', { next: 'x' }],
+    ['cursor with a bad time naming the last row', { next: 'abc.' + C + '.8' }],
+    ['cursor naming another row', { next: '1761000000000.' + A + '.5' }],
+    ['cursor on an empty page', { items: [], next: CURSOR, authors: { [A]: { profileSeq: 1, usernameSeq: null }, [B]: { profileSeq: null, usernameSeq: 2 }, [C]: { profileSeq: null, usernameSeq: null } } }],
+    ['total below length', { total: 1 }],
+    ['total not a count', { total: -1 }],
+    ['indexing not boolean', { indexing: 'no' }],
+    ['complete not boolean', { complete: 1 }],
+    ['authors missing one', { authors: { [A]: { profileSeq: 1, usernameSeq: null }, [C]: { profileSeq: null, usernameSeq: null } } }],
+    ['authors with an unrelated key', { authors: { ...rodaBody().authors, ['12'.repeat(32)]: { profileSeq: null, usernameSeq: null } } }],
+    ['authors upper case', { authors: { ...rodaBody().authors, [A.toUpperCase()]: { profileSeq: 1, usernameSeq: null } } }],
+    ['authors bad hint', { authors: { ...rodaBody().authors, [A]: { profileSeq: 0, usernameSeq: null } } }],
+    ['authors not an object', { authors: [] }]
+  ]
+  for (const [name, over] of bad) {
+    t.alike(await fetchRoda(REF, null, { fetch: json(rodaBody(over)) }), { ok: false, reason: 'malformed' }, name)
+  }
+  const missing = rodaBody()
+  delete missing.top
+  t.is((await fetchRoda(REF, null, { fetch: json(missing) })).reason, 'malformed', 'missing key')
+  for (const body of ['null', '[]', 'not json']) {
+    t.is((await fetchRoda(REF, null, { fetch: async () => response(body) })).reason, 'malformed', body)
+  }
+})
+
+test('fetchRoda shares the scheduler: a 429 on it cools every index request', async (t) => {
+  const m = await load()
+  const { clock } = m
+  const t0 = clock.now()
+  const { calls, fetch } = recorder(clock, (url, n) => {
+    if (n === 1) return tooMany('5')
+    return url.startsWith('/index/roda/') ? response(JSON.stringify(rodaBody())) : response(JSON.stringify(postBody()))
+  })
+  const deps = { ...clock.deps, fetch }
+  const roda = m.fetchRoda(REF, null, deps)
+  const post = clock.later(1000).then(() => m.fetchPost(REF, null, deps))
+  const [a, b] = await clock.run(Promise.all([roda, post]))
+  t.is(a.ok, true, 'retried after the cooldown')
+  t.is(b.ok, true)
+  t.is(calls.length, 3)
+  for (const c of calls.slice(1)) t.ok(c.at >= t0 + 5000, 'no request during the cooldown: ' + (c.at - t0))
+
+  const m2 = await load()
+  let out = 0
+  let maxOut = 0
+  const timed = recorder(m2.clock, async () => {
+    out++
+    maxOut = Math.max(maxOut, out)
+    await m2.clock.later(100)
+    out--
+    return response(JSON.stringify(rodaBody()))
+  })
+  const deps2 = { ...m2.clock.deps, fetch: timed.fetch }
+  const results = await m2.clock.run(Promise.all(Array.from({ length: 24 }, () => m2.fetchRoda(REF, null, deps2))))
+  t.ok(results.every((r) => r.ok), 'all settle ok')
+  t.ok(maxOut <= 2, 'at most 2 in flight: ' + maxOut)
+  let worst = 0
+  for (const c of timed.calls) worst = Math.max(worst, timed.calls.filter((d) => d.at >= c.at && d.at < c.at + 10000).length)
+  t.ok(worst <= 18, 'starts per rolling 10 s: ' + worst)
+})
+
+test('fetchRoda with an installation set goes to that origin only', async (t) => {
+  const { rodaUrl, fetchRoda } = await load()
+  const { setInstallation } = await import('../src/installation.js')
+  t.teardown(() => setInstallation(null))
+  t.ok(setInstallation('https://example.test'))
+  const O = 'https://example.test'
+  t.is(rodaUrl(REF, CURSOR), O + '/index/roda/' + A + '/5/' + CURSOR)
+  t.is(rodaUrl('bad'), null)
+  const urls = []
+  const res = await fetchRoda(REF, null, { fetch: async (url) => { urls.push(url); return response(JSON.stringify(rodaBody())) } })
+  t.is(res.ok, true)
+  t.alike(urls, [O + '/index/roda/' + A + '/5'])
+  setInstallation(null)
+  t.is(rodaUrl(REF), '/index/roda/' + A + '/5', 'relative again once cleared')
+})
+
+test('events: URL builder and body contract', async (t) => {
+  const { eventsUrl, validEvents } = await load()
+  t.is(eventsUrl(A), '/index/events/' + A)
+  t.is(eventsUrl(A, 10), '/index/events/' + A + '/10')
+  for (const bad of ['x', null, A + '/x']) t.is(eventsUrl(bad), null, String(bad))
+  for (const bad of [0, -1, 1.5, '3']) t.is(eventsUrl(A, bad), null, String(bad))
+  const good = { posts: [9, 4], next: null, total: 2, indexing: false, complete: true }
+  t.alike(validEvents(good), good)
+  t.alike(validEvents({ ...good, next: 4 }), { ...good, next: 4 })
+  for (const bad of [null, { ...good, extra: 1 }, { ...good, posts: [4, 9] }, { ...good, posts: [4, 4] }, { ...good, next: 9 }, { ...good, posts: [], next: 3 }, { ...good, total: -1 }, { ...good, indexing: 1 }, { ...good, posts: Array.from({ length: 31 }, (_, i) => 40 - i) }]) {
+    t.is(validEvents(bad), null)
+  }
+  t.is(validEvents(good, 9), null, 'not below before')
+  t.alike(validEvents(good, 10), good)
 })

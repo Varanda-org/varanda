@@ -26,10 +26,14 @@ test('every index route and cursor returns a deterministic validated fixture bod
   const cases = [
     [c.postUrl(ref), (b) => c.validPostIndex(b, ref)],
     [c.postUrl(ref, cursor), (b) => c.validPostIndex(b, ref)],
+    [c.rodaUrl(refOf(reply)), (b) => c.validRoda(b, refOf(reply))],
+    [c.rodaUrl(refOf(reply), cursor), (b) => c.validRoda(b, refOf(reply))],
     [c.countsUrl(f.feed.slice(0, 31).map(refOf)), (b) => c.validCounts(b, f.feed.slice(0, 31).map(refOf))],
     [c.memberUrl(f.own), c.validMemberIndex],
     [c.memberUrl(f.own, 5), (b) => c.validMemberIndex(b, 5)],
     [c.memberUrl(f.pages[0].author), c.validMemberIndex],
+    [c.eventsUrl(f.own), c.validEvents],
+    [c.eventsUrl(f.members[1].author), c.validEvents],
     [c.topicUrl('praca'), c.validTopic],
     [c.topicUrl('praca', cursor), c.validTopic],
     [c.engagersUrl('likes', ref), (b) => c.validEngagers(b, ref, 'likes')],
@@ -50,7 +54,16 @@ test('every index route and cursor returns a deterministic validated fixture bod
     [c.communityGroupsUrl(community, group.group), (b) => c.validCommunityGroups(b, group.group)],
     [c.groupSearchUrl('bicicleta'), c.validGroupSearch],
     [c.testimonialsUrl(f.own), (b) => c.validTestimonials(b, f.own)],
-    [c.testimonialsUrl(f.members[1].author), (b) => c.validTestimonials(b, f.members[1].author)]
+    [c.testimonialsUrl(f.members[1].author), (b) => c.validTestimonials(b, f.members[1].author)],
+    [c.scrapsUrl(f.own), (b) => c.validScraps(b, f.own)],
+    [c.scrapsUrl(f.members[2].author), (b) => c.validScraps(b, f.members[2].author)],
+    [c.profileUrl(f.own), c.validProfile],
+    [c.profileUrl(f.members[2].author), c.validProfile],
+    [c.followPairUrl(f.own, f.members[1].author), c.validFollowPair],
+    [c.fansUrl(f.own), (b) => c.validFans(b, f.own)],
+    [c.pollUrl(f.own, 60), (b) => c.validPoll(b, 3)],
+    [c.pollVotersUrl(f.own, 60, 0), (b) => c.validPollVoters(b)],
+    [c.pollVotersUrl(f.own, 60, 2), (b) => c.validPollVoters(b)]
   ]
   for (const [url, validate] of cases) {
     t.ok(url, 'builder accepts the fixture input')
@@ -59,8 +72,8 @@ test('every index route and cursor returns a deterministic validated fixture bod
     t.alike(respond(url), body, 'deterministic')
     t.alike(respond('https://example.invalid' + url + '?ignored=1#fragment'), body, 'origin and query ignored')
     t.alike(respond(url.slice(1)), body, 'relative path')
-    body.complete = false
-    t.is(respond(url).complete, true, 'fresh response')
+    body.indexing = true
+    t.is(respond(url).indexing, false, 'fresh response')
   }
 })
 
@@ -305,6 +318,7 @@ test('Vitrine fetchers bypass HTTP and the scheduler, and map unknown fixtures t
   const ref = refOf(f.feed[0])
   const calls = [
     () => c.fetchPost(ref, null, deps),
+    () => c.fetchRoda(refOf(f.noticePosts.find((p) => p.replyTo)), null, deps),
     () => c.fetchCounts([ref], deps),
     () => c.fetchMember(f.own, null, deps),
     () => c.fetchTopic('praca', null, deps),
@@ -323,7 +337,7 @@ test('Vitrine fetchers bypass HTTP and the scheduler, and map unknown fixtures t
     for (const call of calls) t.is((await call()).ok, true, 'validated result without HTTP or timers')
   }
   const unknown = 'f'.repeat(64)
-  for (const result of [await c.fetchPost(unknown + ':3', null, deps), await c.fetchMember(unknown, null, deps), await c.fetchGroup(unknown, null, deps), await c.fetchCommunity(unknown, deps)]) {
+  for (const result of [await c.fetchPost(unknown + ':3', null, deps), await c.fetchRoda(unknown + ':3', null, deps), await c.fetchRoda(ref, null, deps), await c.fetchMember(unknown, null, deps), await c.fetchGroup(unknown, null, deps), await c.fetchCommunity(unknown, deps)]) {
     t.alike(result, { ok: false, reason: 'not-found' })
   }
   t.alike(await c.fetchPost('invalid', null, deps), { ok: false, reason: 'invalid-input' })
@@ -354,6 +368,57 @@ test('the testimonials route answers pointers from the live Vitrine state', asyn
   t.alike(respond(c.testimonialsUrl(joao)).shown, [], 'a revoked writer block hides the show')
   const written = await request('testimonial.write', { to: cecilia, text: 'Obrigada pelas mudas!' })
   t.alike(respond(c.testimonialsUrl(cecilia)).pending, [{ from: f.own, seq: written.seq }])
+})
+
+test('the recados routes answer admitted pointers, hides, the wall and the follow seq', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond } = await load()
+  const [joao, cecilia, andre, bia] = [f.members[1].author, f.members[2].author, f.members[3].author, f.members[4].author]
+  const own = () => respond(c.scrapsUrl(f.own))
+  const rows = own().scraps
+  t.is(rows.length, 3, 'two followed writers and one reply')
+  t.alike(rows.find((r) => r.author === joao), { author: joao, seq: 90, followSeq: 7 })
+  t.alike(rows.find((r) => r.author === cecilia), { author: cecilia, seq: 90, followSeq: 8 })
+  t.alike(rows.find((r) => r.author === bia), { author: bia, seq: 90, followSeq: null }, 'admitted by the reply exception')
+  t.alike(own().hides, [])
+  t.is(own().wall, null)
+  t.alike(respond(c.scrapsUrl(joao)).scraps.map((r) => r.author), [], "João follows nobody, so Lia's recado is not admitted")
+  t.alike(respond(c.scrapsUrl(andre)), { scraps: [], hides: [], wall: null, next: null, indexing: false, complete: true })
+  t.alike(respond(c.followPairUrl(f.own, joao)), { seq: 7, indexing: false })
+  t.alike(respond(c.followPairUrl(f.own, bia)), { seq: null, indexing: false })
+  const walled = respond(c.scrapsUrl(cecilia))
+  t.alike(walled.scraps.map((r) => r.author + ':' + r.seq), [bia + ':91', andre + ':90'], 'everyone may write, the hidden one is left out')
+  t.alike(walled.scraps.map((r) => r.followSeq), [null, null])
+  t.alike([walled.hides, walled.wall], [[92], 91])
+  t.exception(() => respond('/index/scraps/' + f.own + '/abc'), /status/, 'a malformed cursor is a 400')
+  t.exception(() => respond('/index/scraps/' + f.own + '/01'), /status/)
+  t.exception(() => respond(c.scrapsUrl('f'.repeat(64))), /not-found/)
+  t.exception(() => respond('/index/follow/' + f.own), /not-found/)
+  t.exception(() => respond(c.followPairUrl('f'.repeat(64), joao)), /not-found/)
+})
+
+test('the recados routes follow the live Vitrine state and page with a cursor', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond, request } = await load()
+  const [joao, cecilia, bia] = [f.members[1].author, f.members[2].author, f.members[4].author]
+  const rows = () => respond(c.scrapsUrl(f.own)).scraps.map((r) => r.author + ':' + r.seq)
+  t.alike(rows(), [bia + ':90', cecilia + ':90', joao + ':90'])
+  await request('scrap.wall', { who: 'nobody' })
+  t.alike(rows(), [], 'nobody shows nothing')
+  t.ok(respond(c.scrapsUrl(f.own)).wall > 0)
+  await request('scrap.wall', { who: 'following' })
+  await request('scrap.hide', { from: bia, seq: 90 })
+  t.alike(rows(), [cecilia + ':90', joao + ':90'], 'a hidden reply leaves the page')
+  t.is(respond(c.scrapsUrl(f.own)).hides.length, 1)
+  await request('follow.remove', { key: cecilia })
+  t.alike(rows(), [joao + ':90'], 'an unfollowed writer is no longer admitted')
+  const written = await request('scrap.write', { to: joao, text: 'Oi, João!' })
+  await request('scrap.delete', { seq: 49 })
+  t.ok(written.seq > 49)
+  t.alike(respond(c.followPairUrl(f.own, cecilia)), { seq: null, indexing: false })
+
+  const wide = respond(c.scrapsUrl(cecilia))
+  t.is(wide.next, null, 'one page holds them all')
+  t.alike(respond('/index/scraps/' + cecilia + '/1').scraps, wide.scraps.slice(1), 'the cursor is an offset into the admitted rows')
+  t.alike(respond('/index/scraps/' + cecilia + '/50').scraps, [], 'past the end is empty')
 })
 
 test('release bundles and development without the opt-in retain HTTP behavior', async (t) => {
@@ -502,4 +567,115 @@ test('live likes and reposts move the counts and the member repost index', async
   await request('repost.set', { to: ref, on: false })
   t.is(countsOf(request).reposts, base.reposts, 'unrepost returns to the baseline')
   t.alike(memberSeqs(request), before, 'member index returns to the baseline')
+})
+
+test('the topic route answers folded hashtag tokens, including a post with the bare word only', async (t) => {
+  const { fixtures: f, vitrineIndex: respond } = await load()
+  const textOf = (ref) => [...f.feed, ...f.noticePosts].find((p) => refOf(p) === ref).text
+  const festa = respond('/index/topic/festajunina', undefined).items
+  t.ok(festa.length >= 3, 'hashtag posts are found by the folded token')
+  t.ok(festa.some((ref) => textOf(ref).includes('#festajunina')), 'a hit carries the hash')
+  t.ok(festa.some((ref) => !textOf(ref).includes('#')), 'a hit has the bare word only, for the client filter to drop')
+  t.ok(respond('/index/topic/paodequeijo', undefined).items.some((ref) => textOf(ref).includes('#pãodequeijo')), 'accents fold away')
+  t.ok(respond('/index/topic/ceu', undefined).items.some((ref) => textOf(ref).includes('#Céu')), 'case and accents fold away')
+  t.ok(respond('/index/topic/festajunina+paodequeijo', undefined).items.map(textOf).every((x) => /pãodequeijo/.test(x) && /festajunina/.test(x)), 'a phrase needs every token')
+  t.is(respond('/index/topic/naoexiste', undefined).items.length, 0)
+})
+
+test('the profile route answers the fan count and the top friends with one pending pick', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond } = await load()
+  const body = c.validProfile(respond(c.profileUrl(f.own)))
+  t.is(body.fans.count, 3)
+  t.is(body.top.seq, 50)
+  const [back, pending] = [f.members[4].author, f.members[1].author]
+  t.is(typeof body.top.back[back], 'number')
+  t.is(body.top.back[pending], null, 'one pick does not follow back')
+  t.is(c.validProfile(respond(c.profileUrl(f.members[2].author))).top, null)
+})
+
+test('poll route: totals and voter pointers follow the live choice records', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond, request } = await load()
+  const poll = { author: f.own, seq: 60 }
+  t.alike(c.validPoll(respond(c.pollUrl(poll.author, poll.seq)), 3).totals, [3, 1, 0], 'the seeded votes: the last choice of each voter')
+  const zero = c.validPollVoters(respond(c.pollVotersUrl(poll.author, poll.seq, 0)))
+  t.is(zero.total, 3)
+  t.alike(zero.items.map((i) => i.key).sort(), [f.own, f.members[1].author, f.members[2].author].sort())
+  t.is(zero.next, null)
+  t.is(c.validPollVoters(respond(c.pollVotersUrl(poll.author, poll.seq, 2))).total, 0)
+  await request('choice.set', { to: `${f.own}:60`, pick: 2 })
+  t.alike(c.validPoll(respond(c.pollUrl(poll.author, poll.seq)), 3).totals, [2, 1, 1], 'a new vote shows')
+  await request('choice.set', { to: `${f.own}:60`, pick: null })
+  t.alike(c.validPoll(respond(c.pollUrl(poll.author, poll.seq)), 3).totals, [2, 1, 0], 'a withdrawal shows')
+  const first = c.validPollVoters(respond(c.pollVotersUrl(poll.author, poll.seq, 0)))
+  const page = respond(c.pollVotersUrl(poll.author, poll.seq, 0, { atMs: Date.parse(first.items[0].at), key: first.items[0].key }))
+  t.ok(c.validPollVoters(page, { atMs: Date.parse(first.items[0].at), key: first.items[0].key }), 'a cursor page validates')
+  for (const url of ['/index/poll/' + f.own + '/3', '/index/poll/' + f.own + '/60/3', '/index/poll/' + f.own + '/60/x', '/index/poll/' + f.own + '/60/0/zz', '/index/poll/' + f.own, '/index/poll/' + f.own + '/60/0/1.' + f.own + '/x', '/index/poll/nope/60', '/index/poll/' + f.own + '/1000000000000000', '/index/poll/' + f.own + '/1000000000000000/0']) {
+    t.exception(() => respond(url), url + ' is not found')
+  }
+})
+
+test('the roda route answers the seeder shape: root, top and the subtree parents first', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond } = await load()
+  const posts = [...f.feed, ...f.noticePosts]
+  for (const reply of posts.filter((p) => p.replyTo)) {
+    const asked = refOf(reply)
+    const body = respond(c.rodaUrl(asked))
+    t.ok(c.validRoda(body, asked), asked + ' passes validRoda')
+    let top = reply
+    while (posts.find((p) => refOf(p) === refOf(top.replyTo)).replyTo) top = posts.find((p) => refOf(p) === refOf(top.replyTo))
+    t.is(body.top, refOf(top))
+    t.is(body.root, refOf(top.replyTo))
+    t.is(body.total, body.items.length)
+  }
+  t.exception(() => respond(c.rodaUrl(refOf(f.feed[0]))), /not-found/, 'a post that is not a reply')
+  t.exception(() => respond(c.rodaUrl('f'.repeat(64) + ':3')), /not-found/, 'an unknown post')
+  t.exception(() => respond('/index/roda/' + f.feed[0].author + '/1234567890123456'), /not-found/, 'a seq past the route grammar')
+  t.exception(() => respond(c.rodaUrl(refOf(posts.find((p) => p.replyTo))) + '/x'), /not-found/, 'a bad cursor')
+
+  // A deeper tree, added to the fixtures only while a fresh responder loads.
+  const root = f.feed[0]
+  const hex = (n) => n.toString(16).padStart(2, '0').repeat(32)
+  const at = (ms) => new Date(Date.parse('2026-11-05T00:00:00.000Z') + ms).toISOString()
+  const reply = (author, seq, ms, to) => ({ author, seq, at: at(ms), text: 'roda', replyTo: { author: to.author, seq: to.seq } })
+  const top = reply(hex(0x50), 1, 1000, root)
+  const c1 = reply(hex(0x60), 1, 5000, top)
+  const c3 = reply(hex(0x40), 1, 5000, top)
+  const c2 = reply(hex(0x30), 1, 2000, c1)
+  const c4 = reply(hex(0x30), 2, 9000, c2)
+  const flat = Array.from({ length: 51 }, (_, i) => reply(hex(0x70), i + 1, 20000 + i, top))
+  const extra = [top, c1, c2, c3, c4, ...flat]
+  f.feed.push(...extra)
+  let fresh
+  try {
+    fresh = (await import('../src/vitrine/indexResponder.js?roda=1')).vitrineIndex
+  } finally {
+    f.feed.splice(f.feed.length - extra.length, extra.length)
+  }
+  const first = fresh(c.rodaUrl(refOf(c4)))
+  t.ok(c.validRoda(first, refOf(c4)), 'the first page passes validRoda')
+  t.is(first.root, refOf(root))
+  t.is(first.top, refOf(top))
+  t.is(first.total, 55)
+  t.is(first.items.length, 50)
+  t.alike(first.items.slice(0, 4), [
+    { ref: refOf(c3), to: refOf(top) },
+    { ref: refOf(c1), to: refOf(top) },
+    { ref: refOf(c2), to: refOf(c1) },
+    { ref: refOf(c4), to: refOf(c2) }
+  ], 'equal times by author, a child dated before its parent still after it')
+  t.alike(Object.keys(first.authors).sort(), [...new Set([c4, root, top, ...extra.slice(0, 50)].map((p) => p.author))].sort())
+  t.is(first.next, Date.parse(flat[45].at) + '.' + flat[45].author + '.' + flat[45].seq, 'next names the last row')
+  const second = fresh(c.rodaUrl(refOf(c4), first.next))
+  t.ok(c.validRoda(second, refOf(c4)), 'the second page passes validRoda')
+  t.alike(second.items, flat.slice(46).map((p) => ({ ref: refOf(p), to: refOf(top) })))
+  t.is(second.next, null)
+  t.is(second.total, 55)
+  t.alike(fresh(c.rodaUrl(refOf(top))).items, first.items, 'asked for the comment itself')
+})
+
+test('poll route: an event post answers its going and maybe totals', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond, request } = await load()
+  t.alike(c.validPoll(respond(c.pollUrl(f.own, 61)), 2).totals, [0, 0])
+  await request('choice.set', { to: `${f.own}:61`, pick: 0 })
+  t.alike(c.validPoll(respond(c.pollUrl(f.own, 61)), 2).totals, [1, 0], 'an RSVP shows')
 })

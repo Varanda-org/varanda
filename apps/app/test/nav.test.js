@@ -217,9 +217,39 @@ test('salvos takes no key', async (t) => {
   for (const key of [A, 'x', 1]) t.absent(validEntry({ screen: 'salvos', key }))
 })
 
+test('assunto is keyed by the folded tag and distinct tags push distinct entries', async (t) => {
+  const { EMPTY, SCREENS, push, top, depth, validEntry } = await loadNav()
+  t.ok(SCREENS.includes('assunto'))
+  for (const key of ['ceu', 'ab', 'a1', 'a'.repeat(32), '2026']) t.ok(validEntry({ screen: 'assunto', key }), key)
+  const bad = [undefined, null, '', 'a', 'a'.repeat(33), 'Ceu', 'céu', '#ceu', 'ce u', 'ce-u', 'ce_u', 'ceu\n', 42, ['ceu'], A, A + ':1']
+  for (const key of bad) t.absent(validEntry({ screen: 'assunto', key }), String(key))
+  const one = push(EMPTY, { screen: 'assunto', key: 'ceu' })
+  t.alike(top(one), { screen: 'assunto', key: 'ceu', params: {} })
+  t.is(push(one, { screen: 'assunto', key: 'ceu' }), one, 'the same tag on top is a no-op')
+  const two = push(one, { screen: 'assunto', key: 'mar' })
+  t.is(depth(two), 2, 'another tag is a new entry')
+  t.is(top(two).key, 'mar')
+  t.is(push(EMPTY, { screen: 'assunto', key: 'Ceu' }), EMPTY, 'an invalid key is refused')
+})
+
+test('recados is keyed by the page owner hex64', async (t) => {
+  const { EMPTY, SCREENS, push, top, validEntry } = await loadNav()
+  t.ok(SCREENS.includes('recados'))
+  t.ok(validEntry({ screen: 'recados', key: A }))
+  for (const key of [undefined, null, '', 'ceu', A.toUpperCase(), A + ':1', A.slice(1), 42]) t.absent(validEntry({ screen: 'recados', key }), String(key))
+  const one = push(EMPTY, { screen: 'recados', key: A })
+  t.alike(top(one), { screen: 'recados', key: A, params: {} })
+  t.is(push(one, { screen: 'recados', key: A }), one, 'the same page on top is a no-op')
+  t.is(push(EMPTY, { screen: 'recados', key: 'ceu' }), EMPTY, 'an invalid key is refused')
+})
+
 test('grupo and comunidade are keyed by a lowercase hex64 root key', async (t) => {
   const { EMPTY, SCREENS, push, top, validEntry, MAX_DEPTH } = await loadNav()
-  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'citacoes', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos', 'salvos'])
+  t.ok(validEntry({ screen: 'fas', key: A }))
+  for (const key of [undefined, null, '', 'ceu', A.toUpperCase(), A + ':1']) t.absent(validEntry({ screen: 'fas', key }), String(key))
+  t.ok(validEntry({ screen: 'melhores-amigos' }))
+  t.absent(validEntry({ screen: 'melhores-amigos', key: A }))
+  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'citacoes', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos', 'salvos', 'assunto', 'recados', 'fas', 'melhores-amigos', 'topico', 'eventos'])
   t.absent(validEntry({ screen: 'cadeira', key: A }))
   t.ok(SCREENS.includes('comunidade'))
   for (const screen of ['grupo', 'comunidade', 'comunidade-info']) {
@@ -354,7 +384,7 @@ test('momentos is keyed by a lowercase hex64 author', async (t) => {
 test('popTo drops back to an index and refuses bounds outside the stack', async (t) => {
   const { EMPTY, MAX_DEPTH, SCREENS, push, pop, popTo, top } = await loadNav()
   t.is(MAX_DEPTH, 20)
-  t.is(SCREENS.length, 23, 'popTo adds no screen id')
+  t.is(SCREENS.length, 29, 'popTo adds no screen id')
   let stack = EMPTY
   for (let i = 1; i <= 4; i++) stack = push(stack, { screen: 'conversa', key: A + ':' + i })
   t.is(popTo(stack, 3), stack, 'the top index is a no-op')
@@ -439,6 +469,18 @@ test('anuncios is keyed by a lowercase hex64 author and dedupes', async (t) => {
   }
 })
 
+test('topico is keyed by the root ref and needs the group key', async (t) => {
+  const { push, validEntry, EMPTY } = await loadNav()
+  const ref = A + ':3'
+  t.ok(validEntry({ screen: 'topico', key: ref, params: { group: A } }))
+  t.absent(validEntry({ screen: 'topico', key: ref }), 'no group')
+  t.absent(validEntry({ screen: 'topico', key: ref, params: { group: 'x' } }), 'bad group')
+  t.absent(validEntry({ screen: 'topico', key: A, params: { group: A } }), 'not a ref')
+  t.absent(validEntry({ screen: 'topico', key: A + ':0', params: { group: A } }), 'seq starts at 1')
+  t.is(push(EMPTY, { screen: 'topico', key: ref, params: { group: A } }).length, 1)
+  t.is(push(EMPTY, { screen: 'topico', key: ref }).length, 0)
+})
+
 test('history.web: after a reload on a deep screen Back is not dead', async (t) => {
   const { bindHistory } = await loadWeb()
   // Three screens deep, then a reload: the stack is empty, the entries keep their tags.
@@ -457,4 +499,17 @@ test('history.web: after a reload on a deep screen Back is not dead', async (t) 
   win.back()
   t.alike(backs, [1], 'and its Back closes it')
   h.unbind()
+})
+
+test('eventos is keyed by a hex64 and takes optional group keys', async (t) => {
+  const { EMPTY, SCREENS, push, top, validEntry } = await loadNav()
+  const key = 'a'.repeat(64)
+  t.ok(SCREENS.includes('eventos'))
+  t.ok(validEntry({ screen: 'eventos', key }))
+  t.ok(validEntry({ screen: 'eventos', key, params: {} }))
+  t.ok(validEntry({ screen: 'eventos', key, params: { groups: [key, 'b'.repeat(64)] } }))
+  t.absent(validEntry({ screen: 'eventos', key: 'xyz' }))
+  t.absent(validEntry({ screen: 'eventos', key, params: { groups: ['xyz'] } }))
+  t.absent(validEntry({ screen: 'eventos', key, params: { groups: new Array(13).fill(key) } }))
+  t.is(top(push(EMPTY, { screen: 'eventos', key })).screen, 'eventos')
 })

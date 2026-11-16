@@ -70,6 +70,7 @@
 // embedding, key, token or e-mail ever reaches the logger or an error.
 
 const { blockedSet } = require('@varanda/core/lib/blocklist')
+const { MAX_TEXT } = require('@varanda/core/lib/records')
 const { MAX_REPORTS } = require('../moderation-store')
 const {
   judge,
@@ -152,6 +153,7 @@ function policyCode (row, read) {
   if (!ACTIONABLE_REASONS.includes(row.reason)) return 'motivo'
   if (read.hasMedia !== false) return 'midia'
   if (read.hasQuote !== false) return 'citacao'
+  if (read.hasPoll !== false) return 'enquete'
   if (read.truncated !== false) return 'truncado'
   if (!(Number.isInteger(read.textCp) && read.textCp >= MIN_TEXT_CP)) return 'curto'
   return null
@@ -387,16 +389,24 @@ function createWorker ({
   }
 
   function putFreshRead (row, r) {
+    const cps = Array.from(r.text)
+    const clipped = r.hasPoll === true && cps.length > MAX_TEXT
     return ledger.putRead(row.id, {
       at: iso(now()),
       target: row.target,
       seq: row.seq,
       contentHash: r.contentHash,
-      text: r.text,
+      text: clipped ? cps.slice(0, MAX_TEXT).join('') : r.text,
       hasMedia: r.hasMedia === true,
+      // Both flags are stored as they are: hasPoll gates the AI exactly as
+      // hasQuote does (policy, bank, learning) and tells the panel which of
+      // the two the post is. A poll's text carries its options (read-post.js);
+      // one longer than the ledger accepts is clipped here and stored as
+      // truncated, so the read is never refused for it.
       hasQuote: r.hasQuote === true,
+      hasPoll: r.hasPoll === true,
       textCp: r.textCp,
-      truncated: r.truncated === true,
+      truncated: r.truncated === true || clipped,
       embedding: null
     })
   }
@@ -488,6 +498,7 @@ function createWorker ({
       reason: row.reason,
       hasMedia: read.hasMedia,
       hasQuote: read.hasQuote,
+      hasPoll: read.hasPoll,
       textCp: read.textCp,
       truncated: read.truncated,
       priorAi: false,
@@ -588,7 +599,7 @@ function createWorker ({
     const read = ledger.read(row.id)
     if (read === null) return false
     if (!(typeof row.decidedAt === 'string' && read.at < row.decidedAt)) return false
-    if (read.hasMedia || read.hasQuote || read.truncated || read.textCp < MIN_TEXT_CP || read.embedding === null) return false
+    if (read.hasMedia || read.hasQuote || read.hasPoll || read.truncated || read.textCp < MIN_TEXT_CP || read.embedding === null) return false
     if (read.target !== row.target || read.seq !== row.seq) return false
     // A block a human has since cancelled or undone must never become a
     // precedent (the reconcile would otherwise re-learn it after onCancel
@@ -874,7 +885,7 @@ function createWorker ({
       return null
     }
     if (r === null) return null
-    return { texto: r.text, midia: r.hasMedia, citacao: r.hasQuote }
+    return { texto: r.text, midia: r.hasMedia, citacao: r.hasQuote, enquete: r.hasPoll }
   }
 
   return { onReport, onHumanDecision, onCancel, onUnblock, suggestionOf, verifiedOf, start, runOnce, idle, stop }

@@ -14,6 +14,14 @@ const { pageLifecycle, cutEntries } = require('./page-lifecycle')
 
 const MAX_FUTURE_MS = 86400000
 
+// An event post's `event` (Eventos, docs/protocol.md) as a spread: a plain
+// copy on event posts only, nothing on any other post (validRecordCopy has
+// checked its shape). Shared with lib/peek.js.
+function postEventOf (post) {
+  const e = post.event
+  return e !== null && typeof e === 'object' ? { event: { title: e.title, start: e.start, end: e.end, place: e.place } } : {}
+}
+
 function shortKey (hex) {
   return hex.slice(0, 8)
 }
@@ -146,7 +154,7 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
       // `media`: a copy of the post's descriptors, or null when it has none.
       const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
       const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
-      rows.push({ t, log, item: { kind: 'post', author: key, name, username: null, seq, at: post.at, text: post.text, replyTo: post.replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null } })
+      rows.push({ t, log, item: { kind: 'post', author: key, name, username: null, seq, at: post.at, text: post.text, replyTo: post.replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, ...(Array.isArray(post.poll) ? { poll: post.poll.slice() } : {}), ...postEventOf(post) } })
     }
     for (const [ref, { seq, at }] of engagementOfCopies(copied).reposted) {
       const t = Date.parse(at)
@@ -257,4 +265,4 @@ function formatFeedItem (item, { width } = {}) {
   return rows.join('\n')
 }
 
-module.exports = { MAX_FUTURE_MS, buildFeed, liveLogCopies, shortKey, formatFeedItem }
+module.exports = { MAX_FUTURE_MS, buildFeed, liveLogCopies, shortKey, formatFeedItem, postEventOf }

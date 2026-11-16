@@ -152,7 +152,7 @@ test('PostRow hides only the music card\'s own link from the shown text', async 
   t.absent(row.includes('<MentionText text={text}'))
   t.ok(row.includes("const hasText = typeof body === 'string' && body !== ''"))
   t.ok(row.includes('const shownText = useMemo(() => (hasText ? displayText(body, { multiline: true }) : null), [hasText, body])'))
-  t.ok(row.includes('const textOut = hasText && numberOfLines === 0 && (hasLink(body) || (!!openMention && hasMention(body)))'))
+  t.ok(row.includes('const textOut = hasText && numberOfLines === 0 && (hasLink(body) || (!!openMention && hasMention(body)) || (tagsOn && hasHashtag(body)))'))
   t.ok(row.includes('const textNode = hasText'), 'an empty shown body draws no text node')
   t.ok(row.includes('onMessage(author, { context: { author, seq, at, text, hasMedia } })'), 'message context keeps the raw text')
   for (const file of ['MentionText.js']) {

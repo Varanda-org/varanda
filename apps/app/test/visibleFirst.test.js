@@ -88,8 +88,13 @@ test("A Rua's resolve orders todo with orderRefs before grouping authors", (t) =
   t.ok(names > body.indexOf('const byAuthor = new Map()') && names < body.indexOf('resolveMany(unnamed)'), 'resolveMany hears the visible authors first')
   t.is(src.split('onViewableItemsChanged={onViewableItemsChanged}').length - 1, 2, 'the member list and the page list report the range')
   t.is(src.split('const visibleRangeRef = useRef(null)').length - 1, 2, 'each live list keeps its own range')
-  t.ok(src.includes('rowsRef.current = shownItems'), 'the member list on screen')
-  t.ok(src.includes('rowsRef.current = items'), 'the page list on screen')
+  // The rows on screen are the folded ones (feedFold.js), in both lists and
+  // in the commit that runs before resolve.
+  t.is(src.split('rowsRef.current = rows\n').length - 1, 2, 'the member list and the page list on screen')
+  t.ok(src.includes('rowsRef.current = foldOfRef.current(feedRef.current.items)'), 'the member commit hands over its folded rows')
+  t.ok(src.includes('rowsRef.current = foldOfRef.current(viewRef.current.items)'), 'the page commit hands over its folded rows')
+  t.is(src.split('foldOfRef.current = (list) => foldFeed(list, foldOpts).rows').length - 1, 2, 'with the same fold options as the render')
+  t.absent(src.includes('rowsRef.current = shownItems') || src.includes('rowsRef.current = items'), 'never the raw items')
   // Ordering does not add, drop or repeat a read.
   t.is(src.split("request('diary.peek'").length - 1, 1, 'one diary.peek call site')
   t.is(src.split('fetchCounts(').length - 1, 1, 'counts stay one fetch path per page')

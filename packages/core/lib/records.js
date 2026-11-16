@@ -14,7 +14,7 @@
 
 const b4a = require('b4a')
 const { validLinkCard, validCardImageBytes, copyLinkCard, CARD_IMAGE_MIME } = require('./link-card')
-const { feira, isMomentMusic, MOMENT_MUSIC_KEYS } = require('@varanda/rpc')
+const { feira, isMomentMusic, MOMENT_MUSIC_KEYS, MAX_TOP_FRIENDS, profileExtra: PX, isPoll, isPick, POLL_MIN, POLL_MAX, MAX_POLL_OPTION, isEvent, event: eventRules } = require('@varanda/rpc')
 
 const MAX_NAME = 80
 const MAX_BIO = 280
@@ -74,6 +74,19 @@ const QUOTE_MEDIA_KEYS = ['type', 'text', 'at', 'replyTo', 'quote', 'media']
 // exact sets that older readers skip as malformed, as they skip media.
 const POST_PREVIEW_KEYS = ['type', 'text', 'at', 'replyTo', 'preview']
 const QUOTE_PREVIEW_KEYS = ['type', 'text', 'at', 'replyTo', 'quote', 'preview']
+// Enquetes (docs/protocol.md): a poll post is a root post (replyTo null)
+// whose `poll` lists POLL_MIN..POLL_MAX options (the rules of @varanda/rpc
+// lib/poll.js), with no media, preview or quote and no closing date. A
+// `choice` is one public vote on a poll post: pick is an option index or
+// null (withdrawn), the last choice per poll wins (lib/polls.js). Whether
+// the target is a poll and pick one of its options is the fold's check.
+// Older readers skip both as malformed; the diary stays valid.
+const POST_POLL_KEYS = Object.freeze(['type', 'text', 'at', 'replyTo', 'poll'])
+// Eventos (docs/protocol.md): an event post is a root post whose `event` is
+// { title, start, end, place } (the rules of @varanda/rpc lib/event.js), with
+// no media, preview, quote or poll. Older readers skip it as malformed.
+const POST_EVENT_KEYS = Object.freeze(['type', 'text', 'at', 'replyTo', 'event'])
+const CHOICE_KEYS = Object.freeze(['type', 'to', 'pick', 'at'])
 const ENGAGEMENT_KEYS = ['type', 'to', 'on', 'at']
 const TARGET_KEYS = ['author', 'seq']
 const DESCRIPTOR_KEYS = Object.freeze(['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height'])
@@ -110,6 +123,31 @@ const POST_SHARE_KEYS = Object.freeze(['type', 'seq', 'at'])
 const TESTIMONIAL_KEYS = ['type', 'to', 'gen', 'hash', 'box', 'at']
 const TESTIMONIAL_SHOW_KEYS = ['type', 'from', 'seq', 'text', 'nonce', 'at']
 const MAX_TESTIMONIAL = 400
+// Recados (docs/protocol.md): a scrap left in the writer's own diary on
+// `to`'s page, `replyTo` null or the (author, seq) of the scrap it answers;
+// the page owner hides one with scrap-hide and sets who may write with
+// scrap-wall (latest wins; absent means 'following'). Whether a scrap is
+// admitted is the fold's check (lib/scraps.js).
+const SCRAP_KEYS = Object.freeze(['type', 'to', 'text', 'replyTo', 'at'])
+const SCRAP_HIDE_KEYS = Object.freeze(['type', 'from', 'seq', 'at'])
+const SCRAP_WALL_KEYS = Object.freeze(['type', 'who', 'at'])
+const MAX_SCRAP = 400
+const SCRAP_WALLS = Object.freeze(['following', 'everyone', 'nobody'])
+// Perfil rico (docs/protocol.md): the profile record stays as it is so older
+// readers keep name and photo. `profile-about` carries every key, null when
+// empty (latest wins); `mood` is an emoji and a short text, both '' to clear
+// it (latest wins), shown by readers for 24 hours. The rules are the shared
+// ones of @varanda/rpc (lib/profile-extra.js).
+const PROFILE_ABOUT_KEYS = Object.freeze(['type', 'about', 'city', 'work', 'studies', 'interests', 'birthday', 'theme', 'at'])
+const MOOD_KEYS = Object.freeze(['type', 'emoji', 'text', 'at'])
+// Fas e Melhores amigos (docs/protocol.md): `fan` is a follow-shaped mark,
+// independent of follow, last operation per key wins (lib/fans.js);
+// `top-friends` is the whole list of up to MAX_TOP_FRIENDS distinct keys,
+// latest wins. Never self: the check needs the writer, so lib/fans.js drops
+// it at fold time.
+const FAN_KEYS = Object.freeze(['type', 'key', 'on', 'at'])
+const TOP_FRIENDS_KEYS = Object.freeze(['type', 'keys', 'at'])
+const { THEME_IDS, MAX_ABOUT, MAX_CITY, MAX_WORK, MAX_STUDIES, MAX_INTERESTS, MAX_MOOD_TEXT } = PX
 // Momentos (docs/protocol.md): one photo or short video in the anonymous
 // blob pool, its key and nonce public in the record, shown by readers for 24
 // hours. The media item has the DM media item shape (packages/rpc
@@ -172,6 +210,16 @@ function isPlainObject (v) {
   return proto === Object.prototype || proto === null
 }
 
+function validTopKeys (keys) {
+  if (!Array.isArray(keys) || keys.length > MAX_TOP_FRIENDS) return false
+  const seen = new Set()
+  for (let i = 0; i < keys.length; i++) {
+    if (!isHex64(keys[i]) || seen.has(keys[i])) return false
+    seen.add(keys[i])
+  }
+  return true
+}
+
 function hasExactKeys (obj, keys) {
   const own = Object.keys(obj)
   return own.length === keys.length && keys.every((k) => Object.prototype.hasOwnProperty.call(obj, k))
@@ -232,6 +280,12 @@ function validTestimonialText (text) {
   if (typeof text !== 'string') return false
   const len = charLength(text)
   return len >= 1 && len <= MAX_TESTIMONIAL && !hasControlChars(text, true) && !hasLoneSurrogate(text)
+}
+
+function validScrapText (text) {
+  if (typeof text !== 'string') return false
+  const len = charLength(text)
+  return len >= 1 && len <= MAX_SCRAP && !hasControlChars(text, true) && !hasLoneSurrogate(text)
 }
 
 function validMomentText (text) {
@@ -523,7 +577,7 @@ function validPageShape (r) {
     isHex64(r.owner) && r.actor === r.owner && validPageAdmins(r.admins, r.owner)
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share'])
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice'])
 
 // Required lazily: lib/group.js requires this module at load time.
 function weakBoxKey (hex) {
@@ -596,6 +650,45 @@ function check (record, seq) {
     if (!validTestimonialText(record.text)) return 'malformed'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
+  if (type === 'scrap') {
+    if (!hasExactKeys(record, SCRAP_KEYS) || !isHex64(record.to) || !validReplyTo(record.replyTo)) return 'malformed'
+    if (!validScrapText(record.text)) return 'text-length'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'scrap-hide') {
+    if (!hasExactKeys(record, SCRAP_HIDE_KEYS) || !isHex64(record.from)) return 'malformed'
+    if (!Number.isSafeInteger(record.seq) || record.seq < 1) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'scrap-wall') {
+    if (!hasExactKeys(record, SCRAP_WALL_KEYS) || !SCRAP_WALLS.includes(record.who)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'profile-about') {
+    if (!hasExactKeys(record, PROFILE_ABOUT_KEYS)) return 'malformed'
+    const { about, city, work, studies, interests, birthday, theme } = record
+    if (!PX.nullable(PX.isAbout)(about) || !PX.nullable(PX.isCity)(city) || !PX.nullable(PX.isWork)(work) ||
+      !PX.nullable(PX.isStudies)(studies) || !PX.nullable(PX.isInterests)(interests)) return 'text-length'
+    if (!PX.nullable(PX.isBirthday)(birthday) || !PX.nullable(PX.isThemeId)(theme)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'mood') {
+    if (!hasExactKeys(record, MOOD_KEYS) || !PX.isMoodEmoji(record.emoji)) return 'malformed'
+    if (!PX.isMoodText(record.text)) return 'text-length'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'fan') {
+    if (!hasExactKeys(record, FAN_KEYS) || !isHex64(record.key) || typeof record.on !== 'boolean') return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'top-friends') {
+    if (!hasExactKeys(record, TOP_FRIENDS_KEYS) || !validTopKeys(record.keys)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'choice') {
+    if (!hasExactKeys(record, CHOICE_KEYS) || !validTarget(record.to) || !isPick(record.pick)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
   if (type === 'moment') {
     const withMusic = hasExactKeys(record, MOMENT_MUSIC_RECORD_KEYS)
     if (!withMusic && !hasExactKeys(record, MOMENT_KEYS)) return 'malformed'
@@ -642,6 +735,22 @@ function check (record, seq) {
     if (!validTarget(record.to)) return 'target-invalid'
     if (!/^[0-9a-f]{32}$/.test(record.offer) || !isHex128(record.consent)) return 'malformed'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (hasExactKeys(record, POST_POLL_KEYS)) {
+    const { text, at, replyTo } = record
+    if (!isPoll(record.poll)) return 'poll-invalid'
+    if (typeof text !== 'string' || charLength(text) < 1 || charLength(text) > MAX_TEXT) return 'text-length'
+    if (hasControlChars(text, true)) return 'control-chars'
+    if (!isCanonicalIso(at)) return 'date-invalid'
+    return replyTo === null ? null : 'reply-invalid'
+  }
+  if (hasExactKeys(record, POST_EVENT_KEYS)) {
+    const { text, at, replyTo } = record
+    if (!isEvent(record.event)) return 'event-invalid'
+    if (typeof text !== 'string' || charLength(text) < 1 || charLength(text) > MAX_TEXT) return 'text-length'
+    if (hasControlChars(text, true)) return 'control-chars'
+    if (!isCanonicalIso(at)) return 'date-invalid'
+    return replyTo === null ? null : 'reply-invalid'
   }
   const withPreview = hasExactKeys(record, POST_PREVIEW_KEYS) || hasExactKeys(record, QUOTE_PREVIEW_KEYS)
   const isQuote = hasExactKeys(record, QUOTE_KEYS) || hasExactKeys(record, QUOTE_MEDIA_KEYS) || hasExactKeys(record, QUOTE_PREVIEW_KEYS)
@@ -723,14 +832,20 @@ function copyTarget (r) {
   return { author: r.author, seq: r.seq }
 }
 
-// `quote`, `media` and `preview` are added only when given (a null preview
-// is no preview). Media and a preview together match no key set.
-function postRecord ({ text, replyTo = null, at = nowIso(), media, quote, preview } = {}) {
+// `quote`, `media`, `preview`, `poll` and `event` are added only when given (a
+// null preview, poll or event is none). Any two of them together match no key set.
+function postRecord ({ text, replyTo = null, at = nowIso(), media, quote, preview, poll, event } = {}) {
   const record = { type: 'post', text, at, replyTo }
+  if (poll !== undefined && poll !== null) record.poll = Array.isArray(poll) ? poll.slice() : poll
+  if (event !== undefined && event !== null) record.event = eventRules.copyEvent(event)
   if (quote !== undefined) record.quote = copyTarget(quote)
   if (media !== undefined) record.media = Array.isArray(media) ? media.map(copyPostMediaItem) : media
   if (preview !== undefined && preview !== null) record.preview = copyLinkCard(preview, copyDescriptor)
   return build(record, 1)
+}
+
+function choiceRecord ({ to, pick, at = nowIso() } = {}) {
+  return build({ type: 'choice', to: copyTarget(to), pick, at }, 1)
 }
 
 function likeRecord ({ to, on, at = nowIso() } = {}) {
@@ -747,6 +862,39 @@ function testimonialRecord ({ to, gen, hash, box, at = nowIso() } = {}) {
 
 function testimonialShowRecord ({ from, seq, text, nonce, at = nowIso() } = {}) {
   return build({ type: 'testimonial-show', from, seq, text, nonce, at }, 1)
+}
+
+function scrapRecord ({ to, text, replyTo = null, at = nowIso() } = {}) {
+  return build({ type: 'scrap', to, text, replyTo: copyTarget(replyTo), at }, 1)
+}
+
+function scrapHideRecord ({ from, seq, at = nowIso() } = {}) {
+  return build({ type: 'scrap-hide', from, seq, at }, 1)
+}
+
+function scrapWallRecord ({ who, at = nowIso() } = {}) {
+  return build({ type: 'scrap-wall', who, at }, 1)
+}
+
+// An empty field is null, whatever way the caller says it (absent, null or '').
+const orNull = (v) => (v === undefined || v === '' ? null : v)
+
+function profileAboutRecord ({ about, city, work, studies, interests, birthday, theme, at = nowIso() } = {}) {
+  return build({
+    type: 'profile-about',
+    about: orNull(about),
+    city: orNull(city),
+    work: orNull(work),
+    studies: orNull(studies),
+    interests: orNull(interests),
+    birthday: orNull(birthday),
+    theme: orNull(theme),
+    at
+  }, 1)
+}
+
+function moodRecord ({ emoji = '', text = '', at = nowIso() } = {}) {
+  return build({ type: 'mood', emoji, text, at }, 1)
 }
 
 // `media` and `music` are copied with exactly their keys (anything else is
@@ -769,6 +917,14 @@ function momentRecord ({ text = '', media, music = null, at = nowIso() } = {}) {
 
 function mediaCoreRecord ({ key, at = nowIso() } = {}) {
   return build({ type: 'media-core', key, at }, 1)
+}
+
+function fanRecord ({ key, on, at = nowIso() } = {}) {
+  return build({ type: 'fan', key, on, at }, 1)
+}
+
+function topFriendsRecord ({ keys, at = nowIso() } = {}) {
+  return build({ type: 'top-friends', keys: Array.isArray(keys) ? keys.slice() : keys, at }, 1)
 }
 
 function followRecord ({ key, on, at = nowIso() } = {}) {
@@ -1005,6 +1161,29 @@ module.exports = {
   TESTIMONIAL_KEYS,
   TESTIMONIAL_SHOW_KEYS,
   MAX_TESTIMONIAL,
+  SCRAP_KEYS,
+  SCRAP_HIDE_KEYS,
+  SCRAP_WALL_KEYS,
+  MAX_SCRAP,
+  SCRAP_WALLS,
+  PROFILE_ABOUT_KEYS,
+  MOOD_KEYS,
+  FAN_KEYS,
+  TOP_FRIENDS_KEYS,
+  MAX_TOP_FRIENDS,
+  POST_POLL_KEYS,
+  POST_EVENT_KEYS,
+  CHOICE_KEYS,
+  POLL_MIN,
+  POLL_MAX,
+  MAX_POLL_OPTION,
+  THEME_IDS,
+  MAX_ABOUT,
+  MAX_CITY,
+  MAX_WORK,
+  MAX_STUDIES,
+  MAX_INTERESTS,
+  MAX_MOOD_TEXT,
   MIN_TESTIMONIAL_PLAIN,
   MAX_TESTIMONIAL_PLAIN,
   MAX_TESTIMONIAL_SEALED,
@@ -1034,6 +1213,7 @@ module.exports = {
   hasControlChars,
   charLength,
   validTestimonialText,
+  validScrapText,
   validMomentText,
   validMomentMedia,
   plainCopy,
@@ -1052,8 +1232,16 @@ module.exports = {
   groupConfirmRecord,
   likeRecord,
   repostRecord,
+  choiceRecord,
   testimonialRecord,
   testimonialShowRecord,
+  scrapRecord,
+  scrapHideRecord,
+  scrapWallRecord,
+  profileAboutRecord,
+  moodRecord,
+  fanRecord,
+  topFriendsRecord,
   momentRecord,
   deleteRecord,
   deleteRecords,

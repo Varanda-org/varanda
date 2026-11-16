@@ -1,12 +1,12 @@
 // Grupo: one group's conversation, pushed above the tabs (nav.js screen
 // 'grupo', keyed by the group root). Props: { group, onBack,
 // onOpenCommunity(community, { group }?), onOpenMember(diary), onMessage(diary), onOpenMention(username),
-// onReport(target), onSeen(group), isTop }, with `target` in Denunciar's shape
+// onReport(target), onSeen(group), onOpenTopic(group, ref, root), isTop }, with `target` in Denunciar's shape
 // { author, name, username, seq, text, group, writer, private }; onSeen runs
 // after every group.seen attempt, answered or not. Only what the person sees
-// is marked seen, up to the newest painted row: the app visible, this screen
-// on top (isTop false: buried under another screen) and the latest read
-// painted. Renders GrupoAjustes itself as a sheet, opened by the header's
+// is marked seen, up to the newest message of the read (a topic reply the chat
+// hides included): the app visible, this screen on top (isTop false: buried
+// under another screen) and the latest read painted. Renders GrupoAjustes itself as a sheet, opened by the header's
 // settings icon or a tap on its titles. onMessage(diary) adds 'Conversar em
 // particular' to another person's message menu (hosted only, never for the
 // own diary); it passes the verified diary key and nothing from the group. The header shows the group's name
@@ -59,6 +59,7 @@ import { MAX_TEXT, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { countChars } from '../format'
 import { groupRows, replyPreview } from '../group-screen'
+import { chatView, seenCut, topicList } from '../forum'
 import { heldBubble, pinToEnd } from '../dm-screen'
 import { UNNAMED, readsAs, whoOf } from '../who'
 import { copyText } from '../share'
@@ -89,6 +90,9 @@ import { Icon } from '../ui/Icon'
 import { MoreButton } from '../ui/MoreButton'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
+import { Segmented } from '../ui/Segmented'
+import { TopicRow } from '../ui/TopicRow'
+import { NewTopicSheet } from '../ui/NewTopicSheet'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmbedBandBottom } from '../ui/screenVisible'
 import { EmptyState, ErrorState, Skeleton } from '../ui/States'
@@ -108,6 +112,7 @@ import { chatMediaRefs, followAutocorrect, mediaPostLanded, retryChatSend, runCh
 import { ChatMedia } from '../ui/ChatMedia'
 import { useChatAttachments } from '../ui/AttachSheet'
 
+const FORUM_TABS = [{ id: 'conversa', label: 'Conversa' }, { id: 'topicos', label: 'Tópicos' }]
 export const WEB_ONLY_TEXT = 'Comunidades disponíveis no site da associação ou no app ligado à instalação.'
 const ORPHAN_TEXT = 'Este grupo não pertence a nenhuma comunidade.'
 const NEED_COMMUNITY = 'entre na comunidade primeiro'
@@ -131,7 +136,7 @@ export function Grupo (props) {
   return <ChatSheetProvider><GrupoScreen {...props} /></ChatSheetProvider>
 }
 
-function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage, onOpenMention, onReport, onSeen, isTop = true }) {
+function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage, onOpenMention, onReport, onSeen, onOpenTopic, isTop = true }) {
   const styles = useStyles(makeStyles)
   const avoidKeyboard = useKeyboardAvoidEnabled()
   // A list row under the composer is not seen, and measureInWindow reports
@@ -272,6 +277,18 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   useEffect(() => { if (writerNow === true) setDeviceJoinSent(false) }, [writerNow])
   useEffect(() => { setDeviceJoinSent(false); setReserveConfirm(false) }, [group])
   const isPrivate = info !== null && info.visibility === 'private'
+  // Foruns: public groups on the hosted node, read as yourself (a page's read
+  // takes no marks). A private group shows no forum option.
+  const forumOn = hosted && !asPage.page && info !== null && info.visibility === 'public'
+  const [forumTab, setForumTab] = useState('conversa')
+  const [topics, setTopics] = useState(null)
+  const [topicsNext, setTopicsNext] = useState(null)
+  const [topicsError, setTopicsError] = useState('')
+  const [topicsLoading, setTopicsLoading] = useState(false)
+  const [newTopicOpen, setNewTopicOpen] = useState(false)
+  const [topicRefusal, setTopicRefusal] = useState('')
+  const topicSeq = useRef(0)
+  const newTopic = useAction()
 
   const loadInfo = useCallback(async () => {
     try {
@@ -326,6 +343,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     const context = reactionContextRef.current
     const started = ++context.read
     const op = before ? { group, before } : { group }
+    if (forumOn) op.marks = true
     if (!asPage.page) {
       const read = await request('group.read', op)
       context.readStarts.set(read, started)
@@ -344,7 +362,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     setPageVisNote(note)
     context.readStarts.set(read, started)
     return read
-  }, [request, group, node, asPage.page, asPage.key])
+  }, [request, group, node, asPage.page, asPage.key, forumOn])
   const pageVisNow = () => (pageVisRef.current.id === asPage.key + ':' + group ? pageVisRef.current.value : null)
 
   // The older pages of a reload, re-read into a local copy that replaces the
@@ -405,8 +423,8 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     return read
   }, [readGroup, noteRead, walkOlder, asPage.page])
 
-  // The call carries the newest painted row, so the node marks that post and a
-  // message that lands after the paint stays unread. group.seen emits nothing,
+  // The call carries the newest message of the read, so the node marks that
+  // post and a message that lands after the paint stays unread. group.seen emits nothing,
   // and a lost answer may have written it, so the caller hears of every
   // attempt, even after a quick back. No cut-off: nothing is sent or told.
   const markSeen = useCallback(async () => {
@@ -467,6 +485,55 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
 
   const loadRef = useRef(load)
   loadRef.current = load
+
+  // The first read may precede group.info: read again, with marks, once the
+  // group is known to be public.
+  const markedOnce = useRef(false)
+  useEffect(() => {
+    if (!forumOn || markedOnce.current) return
+    markedOnce.current = true
+    loadRef.current()
+  }, [forumOn])
+
+  // Tópicos: group.topics is authoritative (newest root first); more come from its cursor.
+  const loadTopics = useCallback(async (more = false) => {
+    if (!forumOn) return
+    const mine = ++topicSeq.current
+    setTopicsLoading(true)
+    setTopicsError('')
+    try {
+      const op = more && topicsNext ? { group, before: topicsNext } : { group }
+      const value = await request('group.topics', op)
+      if (mine !== topicSeq.current) return
+      const items = value && Array.isArray(value.items) ? value.items : []
+      setTopics((prev) => (more && prev ? prev.concat(items) : items))
+      setTopicsNext(value && value.next ? value.next : null)
+    } catch (err) {
+      if (mine === topicSeq.current) setTopicsError(errorText(err))
+    } finally {
+      if (mine === topicSeq.current) setTopicsLoading(false)
+    }
+  }, [forumOn, request, group, topicsNext])
+  const loadTopicsRef = useRef(loadTopics)
+  loadTopicsRef.current = loadTopics
+  useEffect(() => { if (forumOn && forumTab === 'topicos') loadTopicsRef.current() }, [forumOn, forumTab, version, group])
+  useEffect(() => { if (!forumOn) setForumTab('conversa') }, [forumOn])
+  useEffect(() => () => { topicSeq.current += 1 }, [])
+
+  // The topic's title, its poll options and the replies are public text like a
+  // chat post: the on-device word check runs before anything is sent.
+  async function createTopic (text, poll, event) {
+    const refused = publicGroupRefusal('public', text, ...(poll ? poll.options : []), ...(event ? [event.title, event.place] : []))
+    setTopicRefusal(refused)
+    if (refused !== '') return { ok: false }
+    const r = await newTopic.run(() => request('group.post', { group, text, topic: true, ...(poll ? { poll: poll.options } : {}), ...(event ? { event } : {}) }))
+    if (r.ok) {
+      setNewTopicOpen(false)
+      loadTopicsRef.current()
+      loadRef.current()
+    }
+    return { ok: r.ok }
+  }
 
   // Versions restart at 0 with every epoch: any difference means "re-read".
   const seenVersion = useRef(null)
@@ -536,7 +603,13 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   // when the local day changes, even in a quiet group left open.
   const now = useNow(60 * 1000)
   const today = new Date(now).toDateString()
-  const rows = useMemo(() => groupRows(rawItems, ownKey, now), [rawItems, ownKey, today])
+  // With marks the node says which messages open or belong to a topic: a root
+  // shows as a compact card, what is inside a topic stays in Tópicos.
+  const forumView = useMemo(() => (forumOn ? chatView(rawItems) : null), [forumOn, rawItems])
+  const chatItems = useMemo(() => (forumView === null ? rawItems : forumView.map((v) => v.message)), [forumView, rawItems])
+  const topicCards = useMemo(() => new Map((forumView || []).filter((v) => v.kind === 'topic').map((v) => [v.ref, v])), [forumView])
+  const topicRows = useMemo(() => topicList(topics, now), [topics, today, now])
+  const rows = useMemo(() => groupRows(chatItems, ownKey, now), [chatItems, ownKey, today])
   const rowsRef = useRef(rows)
   rowsRef.current = rows
   const rawById = useMemo(() => {
@@ -1109,7 +1182,12 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   }
   const last = rows.length > 0 ? rows[rows.length - 1] : null
   const lastId = last === null ? null : last.id
-  cutRef.current = last !== null && typeof last.at === 'string' ? { at: last.at, writer: last.writer, seq: last.seq } : null
+  // The seen mark follows the newest message the node holds, painted or not: a
+  // reply inside a topic is hidden from the chat, and it must still clear the
+  // unread count without opening the topic.
+  const seenAt = seenCut(rawItems)
+  cutRef.current = seenAt
+  const seenKey = seenAt === null ? null : seenAt.writer + ':' + seenAt.seq
   useEffect(() => {
     if (lastId === null) return
     endPin.current = pinToEnd(endPin.current, { kind: 'newest', newest: lastId })
@@ -1175,10 +1253,10 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   const visible = node.visible !== false
   useEffect(() => {
     if (asPage.page) return
-    if (!visible || !isTop || !reader || lastId === null || loadedAt === null || loadError !== '') return
+    if (!visible || !isTop || !reader || seenKey === null || loadedAt === null || loadError !== '') return
     if (paintedRef.current !== seqRef.current) return
     markSeen()
-  }, [asPage.page, visible, isTop, reader, lastId, loadedAt, loadError, markSeen])
+  }, [asPage.page, visible, isTop, reader, seenKey, loadedAt, loadError, markSeen])
   olderLive.current = { hasNext: reader && !!store.next, loading: loadingMore, failed: moreError !== '', loadOlder }
 
   const nameText = info && typeof info.name === 'string' && info.name !== ''
@@ -1561,6 +1639,15 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
           <Avatar name={who.avatarName} publicKey={row.diary || row.writer} picture={profile && profile.avatar ? profile.avatar : undefined} size={32} persist={false} />
         </Pressable>
         )
+    const card = topicCards.get(row.key)
+    if (card) {
+      return (
+        <TopicRow
+          row={{ key: card.ref, diary: card.message.diary, title: card.title, replies: null, lastReplyLabel: '', poll: card.poll }}
+          onPress={typeof onOpenTopic === 'function' ? () => onOpenTopic(group, { writer: card.message.writer, seq: card.message.seq }, { hidden: false, text: typeof card.message.text === 'string' ? card.message.text : '' }) : undefined}
+        />
+      )
+    }
     const rawRow = rawById.get(row.key || row.id)
     const refs = row.hidden || !rawRow ? [] : chatMediaRefs('group', { diary: rawRow.diary, media: rawRow.media })
     const reply = actionsOf(row).find((action) => action.label === 'Responder')
@@ -1592,6 +1679,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     )
   }
 
+  const inTopics = forumOn && forumTab === 'topicos'
   const canPost = asPage.page
     ? pageCan('post', pageRole) && meta.state === 'ok' && pageVis !== null
     : reader && can('post', role) && meta.state === 'ok' && !orphan && canWriteHere(info)
@@ -1697,46 +1785,70 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
           )
         : null}
       <OfflineNote />
-      <EmbedBandBottom.Provider value={composer ? band : null}>
-        <RefreshableList
-          perfId='grupo'
-          listRef={listRef}
-          data={reader ? rows : []}
-          keyExtractor={(row) => row.key}
-          renderItem={renderItem}
-          extraData={{ role, rawById, names, canPost, replyKey, flashKey, reactionOverrides, reactionsDisabled }}
-          contentContainerStyle={styles.thread}
-          ListHeaderComponent={stateNotes}
-          ListEmptyComponent={
-            <View>
-              {empty}
-              {loadedAt !== null && !loadError && canPost && node.online && node.passkey?.status?.unlocked === true && !post.pending && !pagePending && postHold === null && check === null && mediaHold === null && !sendingMedia
-                ? <View style={[styles.note, styles.inline]}>{['Oi', 'Tudo bem?'].map((text) => <Pill key={text} label={text} onPress={() => setDraft((d) => d.trim() ? d + '\n' + text : text)} />)}</View>
-                : null}
-            </View>
+      {forumOn ? <Segmented options={FORUM_TABS} selected={forumTab} onSelect={setForumTab} /> : null}
+      {forumOn && forumTab === 'topicos'
+        ? (
+          <RefreshableList
+            data={reader ? topicRows : []}
+            keyExtractor={(r) => r.key}
+            renderItem={({ item }) => <TopicRow row={item} onPress={typeof onOpenTopic === 'function' ? () => onOpenTopic(group, { writer: item.writer, seq: item.seq }, { hidden: item.hidden, text: item.text }) : undefined} />}
+            ListHeaderComponent={
+              <View style={styles.note}>
+                {canPost ? <Pill label='Novo tópico' icon='lapis' onPress={() => setNewTopicOpen(true)} disabled={!node.online} /> : null}
+                {topicsError ? <ErrorText>{topicsError}</ErrorText> : null}
+              </View>
+            }
+            ListEmptyComponent={topics === null && topicsLoading ? <Skeleton rows={3} /> : (topics !== null && !topicsError ? <EmptyState icon='conversas' title='Nenhum tópico ainda' body='Abra o primeiro assunto deste grupo.' /> : null)}
+            onRefresh={() => loadTopics()}
+            refreshing={topicsLoading && topics !== null}
+            onLoadMore={topicsNext ? () => loadTopics(true) : undefined}
+            loadingMore={topicsLoading && topics !== null}
+            atEnd={topics !== null && !topicsNext}
+          />
+          )
+        : (
+          <EmbedBandBottom.Provider value={composer ? band : null}>
+            <RefreshableList
+              perfId='grupo'
+              listRef={listRef}
+              data={reader ? rows : []}
+              keyExtractor={(row) => row.key}
+              renderItem={renderItem}
+              extraData={{ role, rawById, names, canPost, replyKey, flashKey, reactionOverrides, reactionsDisabled }}
+              contentContainerStyle={styles.thread}
+              ListHeaderComponent={stateNotes}
+              ListEmptyComponent={
+                <View>
+                  {empty}
+                  {loadedAt !== null && !loadError && canPost && node.online && node.passkey?.status?.unlocked === true && !post.pending && !pagePending && postHold === null && check === null && mediaHold === null && !sendingMedia
+                    ? <View style={[styles.note, styles.inline]}>{['Oi', 'Tudo bem?'].map((text) => <Pill key={text} label={text} onPress={() => setDraft((d) => d.trim() ? d + '\n' + text : text)} />)}</View>
+                    : null}
+                </View>
           }
-          ListFooterComponent={<View>{heldBubble(postHold) !== null ? <Bubble item={heldBubble(postHold)} mine status='uncertain' shape='single' /> : null}{reactionError ? <View style={styles.note}><ErrorText>{reactionError}</ErrorText></View> : null}{act.error ? <View style={styles.note}><ErrorText>{act.error}</ErrorText></View> : null}{banNote}{checkNote}</View>}
-          onRefresh={() => { setLookupTick((n) => n + 1); load(true) }}
-          refreshing={refreshing}
-          keepVisiblePosition
-          onScrollFrame={trackBottom}
-          onContentSizeChange={(width, height) => {
-            const { y, layoutHeight } = scrollFrame.current
-            scrollFrame.current.contentHeight = height
-            setShowJump(jumpVisible({ distanceFromEnd: height - y - layoutHeight, viewport: layoutHeight }))
-            followEnd()
-          }}
-          onUserScroll={userScroll}
-        />
-      </EmbedBandBottom.Provider>
-      {quoteToast ? <View pointerEvents='none' style={styles.quoteToast}><Text accessibilityLiveRegion='polite' style={styles.quoteToastText}>Mensagem fora do trecho carregado</Text></View> : null}
-      {showJump || (away.current && awayCount(rows, lastSeenKey) > 0) ? <JumpToEnd count={awayCount(rows, lastSeenKey)} onPress={scrollToEnd} /> : null}
-      {composer ? <View ref={composerBox} collapsable={false}>{composer}</View> : null}
+              ListFooterComponent={<View>{heldBubble(postHold) !== null ? <Bubble item={heldBubble(postHold)} mine status='uncertain' shape='single' /> : null}{reactionError ? <View style={styles.note}><ErrorText>{reactionError}</ErrorText></View> : null}{act.error ? <View style={styles.note}><ErrorText>{act.error}</ErrorText></View> : null}{banNote}{checkNote}</View>}
+              onRefresh={() => { setLookupTick((n) => n + 1); load(true) }}
+              refreshing={refreshing}
+              keepVisiblePosition
+              onScrollFrame={trackBottom}
+              onContentSizeChange={(width, height) => {
+                const { y, layoutHeight } = scrollFrame.current
+                scrollFrame.current.contentHeight = height
+                setShowJump(jumpVisible({ distanceFromEnd: height - y - layoutHeight, viewport: layoutHeight }))
+                followEnd()
+              }}
+              onUserScroll={userScroll}
+            />
+          </EmbedBandBottom.Provider>
+          )}
+      {quoteToast && !inTopics ? <View pointerEvents='none' style={styles.quoteToast}><Text accessibilityLiveRegion='polite' style={styles.quoteToastText}>Mensagem fora do trecho carregado</Text></View> : null}
+      {!inTopics && (showJump || (away.current && awayCount(rows, lastSeenKey) > 0)) ? <JumpToEnd count={awayCount(rows, lastSeenKey)} onPress={scrollToEnd} /> : null}
+      {composer && !inTopics ? <View ref={composerBox} collapsable={false}>{composer}</View> : null}
       <ReactionPicker
         open={reactionPicker !== null && !reactionsDisabled && !reactionContext.sending.has(reactionPicker) && !reactionContext.unsure.has(reactionPicker)}
         onClose={() => setReactionPicker(null)}
         onPick={(emoji) => { const key = reactionPicker; setReactionPicker(null); if (key !== null) toggleReaction(key, emoji) }}
       />
+      {forumOn ? <NewTopicSheet open={newTopicOpen} onClose={() => { setNewTopicOpen(false); setTopicRefusal('') }} onCreate={createTopic} pending={newTopic.pending} error={topicRefusal || newTopic.error} /> : null}
       <WhoReacted open={whoReacted !== null && !reactionsDisabled} onClose={() => { reactionContext.who++; setWhoReacted(null) }} rows={whoReactedRows} />
       {!asPage.page
         ? (

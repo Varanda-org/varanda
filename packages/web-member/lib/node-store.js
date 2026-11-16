@@ -53,6 +53,7 @@ const { presentState, clearRanges } = require('@varanda/core/lib/deletion')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { SEEN_BLOB_BYTES, SEEN_BLOB_B64 } = require('@varanda/core/lib/seen-blob')
 const { normalizeBlocks } = require('@varanda/core/lib/member-block')
+const { normalizeDecisions } = require('@varanda/core/lib/testimonial-decision')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { DIARY_OPTIONS } = require('./diary-options')
 
@@ -572,6 +573,20 @@ function appendGroupRecord (core, record, { root = false, community = false, pri
   return enqueueAppend(core, record, validate, limits, GROUP_FULL)
 }
 
+// One atomic append of 1..8 records to a group core: each is validated at
+// its own seq, and either all are appended or none (a forum topic's root post
+// and its side records must land together, at consecutive seqs). `records`
+// may be a function of the seq the first one will get, called inside the
+// per-core queue so the seq cannot move. -> the seq of the last record.
+function appendGroupRecords (core, records, { root = false, community = false, private: priv = false, limits } = {}) {
+  const validate = (plain, seq) => validateGroupRecord(plain, seq, { root: root === true, community: community === true, private: priv === true })
+  const prev = appendQueues.get(queueKey(core)) || Promise.resolve()
+  const run = () => appendManyGroupNow(core, records, validate, { ...DEFAULT_LIMITS, ...limits })
+  const next = prev.then(run, run)
+  appendQueues.set(queueKey(core), next.catch(() => {}))
+  return next
+}
+
 function enqueueAppend (core, record, validate, limits, full) {
   const prev = appendQueues.get(queueKey(core)) || Promise.resolve()
   const run = () => appendNow(core, record, validate, { ...DEFAULT_LIMITS, ...limits }, full)
@@ -634,6 +649,34 @@ async function appendManyNow (core, records, limits) {
         core.length + i >= limits.maxLogBlocks ||
         core.byteLength + bytes > limits.maxLogBytes) {
       throw new Error('limite do diário atingido')
+    }
+    plains.push(plain)
+  }
+  await core.append(plains)
+  return core.length - 1
+}
+
+async function appendManyGroupNow (core, records, validate, limits) {
+  await core.ready()
+  if (core[UNLOCKED] !== true) throw new UsageError(LOCKED)
+  if (typeof records === 'function') records = records(core.length)
+  if (!Array.isArray(records) || records.length < 1 || records.length > 8) throw invalidRecord('malformed')
+  const plains = []
+  let bytes = 0
+  for (let i = 0; i < records.length; i++) {
+    let plain = null
+    try {
+      plain = decodeBlock(b4a.from(JSON.stringify(records[i])))
+    } catch {}
+    if (plain === null) throw invalidRecord('malformed')
+    const reason = validate(plain, core.length + i)
+    if (reason) throw invalidRecord(reason)
+    const blockBytes = b4a.byteLength(JSON.stringify(plain))
+    bytes += blockBytes
+    if (blockBytes > limits.maxBlockBytes ||
+        core.length + i >= limits.maxLogBlocks ||
+        core.byteLength + bytes > limits.maxLogBytes) {
+      throw new Error(GROUP_FULL)
     }
     plains.push(plain)
   }
@@ -1634,6 +1677,27 @@ function writeSeenSync (storage, own, { hash = null, gen = 0 } = {}) {
   return storage.writeJson('seenSync', { v: 1, own, hash, gen })
 }
 
+// kv testimonialDecisions = { v: 1, own: hex64, entries }: the depoimentos
+// the member kept privately or declined (@varanda/core
+// lib/testimonial-decision.js), synced through the seen document. Bound to
+// the own key like seenLocal: another identity's list reads as empty.
+// Identity state: reset() deletes it.
+async function readTestimonialDecisions (storage, own) {
+  const data = await readKv(storage, 'testimonialDecisions')
+  if (!isVersioned(data) || !sameOwn(data, own)) return []
+  return normalizeDecisions(data.entries)
+}
+
+function writeTestimonialDecisions (storage, own, entries) {
+  if (!isHex64(own)) throw new TypeError('chave inválida')
+  const list = normalizeDecisions(entries)
+  return storage.writeJson('testimonialDecisions', list.length === 0 ? null : { v: 1, own, entries: list })
+}
+
+function clearTestimonialDecisions (storage) {
+  return storage.writeJson('testimonialDecisions', null)
+}
+
 // A secretbox under the local dm key (./dm-store.js seal): { nonce, box }.
 // Stamps and queued drops are bearer values (anyone holding one can spend
 // it), so kv holds them only sealed; plaintext entries of the earlier v1
@@ -2105,6 +2169,9 @@ module.exports = {
   writeSeenSync,
   readSeenRemote,
   writeSeenRemote,
+  readTestimonialDecisions,
+  writeTestimonialDecisions,
+  clearTestimonialDecisions,
   readSeenHeld,
   writeSeenHeld,
   SEEN_HELD_MAX,
@@ -2178,6 +2245,7 @@ module.exports = {
   groupCoreExists,
   purgeGroupCore,
   appendGroupRecord,
+  appendGroupRecords,
   readGroupWriters,
   putGroupWriter,
   removeGroupWriter,

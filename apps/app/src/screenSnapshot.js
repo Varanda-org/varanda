@@ -196,6 +196,9 @@ function itemOf (v, strict) {
   const repost = v.kind === 'repost'
   if (!repost && v.kind !== 'post') return null
   if (strict && !exactKeys(v, repost ? REPOST_KEYS : POST_KEYS)) return null
+  // A poll post is never kept: the snapshot has no poll, so it is left out and
+  // fetched live (the callers skip a null row).
+  if (hasOwn(v, 'poll') || hasOwn(v, 'event')) return null
   const loose = (x) => (x === undefined && !strict ? null : x)
   const name = loose(v.name)
   const username = loose(v.username)
@@ -236,6 +239,8 @@ function recordOf (v, strict) {
     return { type: 'repost', to, on: v.on, at: v.at }
   }
   if (v.type !== 'post') return null
+  // Same for a poll post record: skipped, never a reason to refuse the page.
+  if (hasOwn(v, 'poll') || hasOwn(v, 'event')) return null
   if (!POST_RECORD_KEYS.every((k) => hasOwn(v, k)) || !keysWithin(v, POST_RECORD_KEYS.concat(POST_RECORD_EXTRA))) return null
   if (typeof v.text !== 'string' || v.text.length > MAX_TEXT_UNITS) return null
   const replyTo = v.replyTo === null ? null : targetOf(v.replyTo, true)

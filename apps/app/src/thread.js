@@ -111,6 +111,8 @@ function postItem (author, seq, record, peek) {
     media: Array.isArray(record.media) && record.media.length > 0 ? record.media.slice() : null,
     // The node validated the card; only stored data, nothing fetched.
     preview: record.preview !== null && typeof record.preview === 'object' ? record.preview : null,
+    ...(rpc.isPoll(record.poll) ? { poll: record.poll.slice() } : {}),
+    ...(rpc.isEvent(record.event) ? { event: { title: record.event.title, start: record.event.start, end: record.event.end, place: record.event.place } } : {}),
     name: profile ? profile.name : null,
     username,
     avatar: profile ? profile.avatar : null
@@ -125,7 +127,7 @@ function repostItem (author, seq, record, peek) {
   return { kind: 'repost', author, seq, at: record.at, to, name: profile ? profile.name : null, username, avatar: profile ? profile.avatar : null }
 }
 
-function lookupPost (peeked, ref) {
+export function lookupPost (peeked, ref) {
   const r = typeof ref === 'string' ? parseRef(ref) : null
   if (r === null) return null
   const peek = peekOf(peeked, r.author)

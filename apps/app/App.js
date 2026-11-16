@@ -78,6 +78,7 @@ import { PageNoticeSheet } from './src/ui/PageNoticeSheet'
 import { PostShareSheet } from './src/ui/PostShareSheet'
 import { PostPublicProvider } from './src/postPublicContext'
 import { SavedProvider, forgetSavedFor } from './src/savedProvider'
+import { forgetReminderKey } from './src/eventRemindersStore'
 import { POST_OPEN_WAIT_MS, capturePostPath, postAccount, postLink, postOpeningGate, postOpeningWait, postRef, postWaitDelay } from './src/postLink'
 import { clearPostLink, savePostLink, takePostLink } from './src/postLinkStore'
 import { fetchMember } from './src/indexClient'
@@ -156,6 +157,7 @@ import { applyBandMeta } from './src/appearanceStore'
 import AvisosScreen from './src/screens/Avisos'
 import BuscaGlobalScreen from './src/screens/BuscaGlobal'
 import { Grupo as GrupoScreen } from './src/screens/Grupo'
+import { Topico as TopicoScreen } from './src/screens/Topico'
 import { Conversas as ConversasScreen } from './src/screens/Conversas'
 import { Mensagens as MensagensScreen } from './src/screens/Mensagens'
 import { Comunidades as ComunidadesScreen } from './src/screens/Comunidades'
@@ -180,8 +182,13 @@ import TelefoneAviso from './src/screens/TelefoneAviso'
 import { showExplainer } from './src/phoneExplainer'
 import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, parseAppLink, parseAppReturn, waitsForInstallation } from './src/linkReturn'
 import Membro, { canConverseWithPage } from './src/screens/Membro'
-import DepoimentosScreen from './src/screens/Depoimentos'
+import { tagTarget } from './src/hashtagNav'
+import { HashtagContext } from './src/ui/MentionText'
+import AssuntoScreen from './src/screens/Assunto'
+import RecadosScreen from './src/screens/Recados'
+import DepoimentosScreen, { testimonialsChanged } from './src/screens/Depoimentos'
 import SalvosScreen from './src/screens/Salvos'
+import EventosScreen from './src/screens/Eventos'
 import MomentosScreen from './src/screens/Momentos'
 import FeiraScreen from './src/screens/Feira'
 import AnuncioScreen from './src/screens/Anuncio'
@@ -201,7 +208,8 @@ import NovaPaginaScreen from './src/screens/NovaPagina'
 import PaginaAjustesScreen from './src/screens/PaginaAjustes'
 import * as actingAs from './src/actingAs'
 import Publicar from './src/screens/Publicar'
-import SeguindoScreen from './src/screens/Seguindo'
+import SeguindoScreen, { Fas as FasScreen } from './src/screens/Seguindo'
+import MelhoresAmigosScreen from './src/screens/MelhoresAmigos'
 import Termos from './src/screens/Termos'
 import { ContaExcluida, ExclusaoRecibo } from './src/screens/ExcluirConta'
 import { clearChatMedia, onAppStateChange, screenWatcher, stopBoundPlayback, stopPlayback } from './src/media/chatMedia'
@@ -226,12 +234,16 @@ const Conversas = memo(ConversasScreen)
 const Feira = memo(FeiraScreen)
 const Diario = memo(DiarioScreen)
 const Grupo = memo(GrupoScreen)
+const Topico = memo(TopicoScreen)
 const Comunidade = memo(ComunidadeScreen)
 const ComunidadeInfo = memo(ComunidadeInfoScreen)
 const Comunidades = memo(ComunidadesScreen)
 const Depoimentos = memo(DepoimentosScreen)
 const Momentos = memo(MomentosScreen)
 const Salvos = memo(SalvosScreen)
+const Assunto = memo(AssuntoScreen)
+const Recados = memo(RecadosScreen)
+const Eventos = memo(EventosScreen)
 const Mensagens = memo(MensagensScreen)
 const Mensagem = memo(MensagemScreen)
 const Anuncio = memo(AnuncioScreen)
@@ -239,6 +251,8 @@ const AnuncioEditar = memo(AnuncioEditarScreen)
 const Avaliar = memo(AvaliarScreen)
 const Anunciar = memo(AnunciarScreen)
 const Seguindo = memo(SeguindoScreen)
+const Fas = memo(FasScreen)
+const MelhoresAmigos = memo(MelhoresAmigosScreen)
 const Paginas = memo(PaginasScreen)
 const NovaPagina = memo(NovaPaginaScreen)
 const PaginaAjustes = memo(PaginaAjustesScreen)
@@ -1425,6 +1439,8 @@ function Member () {
     if (typeof m !== 'string') return
     // The account left this device: so does its list of saved posts.
     forgetSavedFor(m)
+    // And the event reminders it set (fire and forget).
+    try { Promise.resolve(forgetReminderKey(m)).catch(() => {}) } catch {}
     for (const key of [...termsSync.current.keys()]) {
       if (key.startsWith(m + '#')) termsSync.current.delete(key)
     }
@@ -1849,7 +1865,7 @@ function Member () {
     lastSentRef.current = lastSent.n
     setVersion((v) => v + 1)
     setPeekVersion((v) => v + 1)
-    showToast(lastSent.kind === 'reply' ? 'resposta publicada' : 'publicado')
+    showToast('publicado')
   }, [lastSent])
 
   // The follows changed (here or on another device, node.followsVersion): A
@@ -1926,7 +1942,7 @@ function Member () {
     if (kind === 'queued-post' || kind === 'queued-reply') return showToast('Vai sair quando a conexão voltar.')
     setVersion((v) => v + 1)
     setPeekVersion((v) => v + 1)
-    showToast(kind === 'reply' || kind === 'quick-reply' ? 'resposta publicada' : 'publicado')
+    showToast('publicado')
   }
   const startQuote = (q) => setComposer({ open: true, reply: null, quote: q })
 
@@ -2018,19 +2034,31 @@ function Member () {
       try { h.go(-d) } catch {}
     }
   }, [commitStack])
-  const openThread = useCallback(({ ref, seed } = {}) => {
+  const openThread = useCallback(({ ref, seed, focus } = {}) => {
     setComposeSignal(null)
-    pushScreen({ screen: 'conversa', key: ref, params: { seed: seed || null } })
+    pushScreen({ screen: 'conversa', key: ref, params: { seed: seed || null, focus: focus || null } })
   }, [pushScreen])
   const openEngagers = useCallback(({ ref, kind } = {}) => {
     pushScreen({ screen: 'curtidas', key: ref, params: { kind: kind === 'reposts' ? 'reposts' : 'likes' } })
   }, [pushScreen])
   const openSalvos = useCallback(() => pushScreen({ screen: 'salvos' }), [pushScreen])
+  // A tapped #tag. A tag on an Assunto page pushes another entry (its key differs).
+  const openTag = useCallback((tag) => {
+    const target = tagTarget(tag)
+    if (target !== null) pushScreen(target)
+  }, [pushScreen])
   const openQuotes = useCallback(({ ref } = {}) => {
     pushScreen({ screen: 'citacoes', key: ref, params: {} })
   }, [pushScreen])
   const openGroup = useCallback((group) => {
     pushScreen({ screen: 'grupo', key: typeof group === 'string' ? group.toLowerCase() : group, params: {} })
+  }, [pushScreen])
+  const openTopic = useCallback((group, ref, root) => {
+    if (typeof group !== 'string' || !ref) return
+    // root ({ hidden, text }): what the list already knows of the root, so the
+    // topic opens with its header and reply state before its page loads.
+    const known = root && typeof root.text === 'string' ? { root: { hidden: root.hidden === true, text: root.hidden === true ? '' : root.text } } : {}
+    pushScreen({ screen: 'topico', key: ref.writer + ':' + ref.seq, params: { group: group.toLowerCase(), ...known } })
   }, [pushScreen])
   const openCommunity = useCallback((community, opts) => {
     pushScreen({ screen: 'comunidade', key: typeof community === 'string' ? community.toLowerCase() : community, params: opts && typeof opts.group === 'string' ? { group: opts.group.toLowerCase() } : {} })
@@ -2052,8 +2080,17 @@ function Member () {
     pushScreen({ screen: 'membro', key, params: { seed: seed || null } })
   }, [pushScreen, clearStack, ownKey])
   const openPeople = useCallback((key, kind) => {
-    if ((kind !== 'seguindo' && kind !== 'seguidores') || typeof key !== 'string') return
-    pushScreen({ screen: kind, key: key.toLowerCase(), params: {} })
+    if ((kind !== 'seguindo' && kind !== 'seguidores' && kind !== 'fas') || typeof key !== 'string') return
+    const lower = key.toLowerCase()
+    // The own fan list is the Fãs segment of the own Seguindo screen.
+    if (kind === 'fas' && lower === ownKey) {
+      pushScreen({ screen: 'seguindo', key: lower, params: { segment: 'fas' } })
+      return
+    }
+    pushScreen({ screen: kind, key: lower, params: {} })
+  }, [pushScreen, ownKey])
+  const openTop = useCallback(() => {
+    pushScreen({ screen: 'melhores-amigos', params: {} })
   }, [pushScreen])
   // The Momentos viewer, starting at one author's ring (hosted only: the
   // strip and the Diário rows that call it render only there).
@@ -2062,6 +2099,18 @@ function Member () {
     // The publication toast must not outlive the viewer it covered.
     clearTimeout(toastTimer.current); setToast(null)
     pushScreen({ screen: 'momentos', key: key.toLowerCase(), params: {} })
+  }, [pushScreen])
+  const openRecados = useCallback((key) => {
+    if (typeof key !== 'string') return
+    pushScreen({ screen: 'recados', key: key.toLowerCase(), params: {} })
+  }, [pushScreen])
+  const openEventos = useCallback((key) => {
+    if (typeof key !== 'string') return
+    pushScreen({ screen: 'eventos', key: key.toLowerCase(), params: {} })
+  }, [pushScreen])
+  const openAgenda = useCallback((community, groups, truncated) => {
+    if (typeof community !== 'string' || !Array.isArray(groups)) return
+    pushScreen({ screen: 'eventos', key: community.toLowerCase(), params: truncated === true ? { groups, truncated: true } : { groups } })
   }, [pushScreen])
   const openTestimonials = useCallback((key) => {
     if (typeof key !== 'string') return
@@ -2345,6 +2394,7 @@ function Member () {
       if (result.dmChanged) bumpDm()
       // Another device of the passkey blocked or unblocked someone.
       if (result.blocksChanged) refreshBlocks().catch(() => {})
+      if (result.testimonialsChanged) testimonialsChanged()
       if (result.groupChanged) {
         bumpSeen()
         const taken = { epoch: snap.epoch, versions: snap.versions }
@@ -3529,6 +3579,10 @@ function Member () {
       handlePageCreated: (pageKey) => openMember(pageKey, { page: true }),
       handleOpenPageSettings: pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? (key) => pushScreen({ screen: 'paginaajustes', key }) : undefined,
       handleOpenListings: node.hosted === true ? (author) => pushScreen({ screen: 'anuncios', key: author }) : undefined,
+      handleOpenRecados: node.hosted === true ? openRecados : undefined,
+      handleOpenEventos: node.hosted === true ? openEventos : undefined,
+      handleOpenAgenda: node.hosted === true ? openAgenda : undefined,
+      handleOpenTop: node.hosted === true ? openTop : undefined,
       handleComposeSeen: () => setComposeSignal(null),
       handleOpenInvite: (link) => link.kind === 'grupo' ? openGroup(link.key) : openCommunity(link.key),
       handleConversar: ({ peer, draft, card }) => openMessage(peer, { draft, card })
@@ -3553,6 +3607,8 @@ function Member () {
       onOpenPageSettings: h.handleOpenPageSettings,
       onOpenPeople: openPeople,
       onOpenTestimonials: openTestimonials,
+      onOpenRecados: h.handleOpenRecados,
+      onOpenEventos: h.handleOpenEventos,
       onOpenListings: h.handleOpenListings
     }
     // Pushed screens, plus the one sliding out after a pop under its old index
@@ -3565,10 +3621,10 @@ function Member () {
         return (
           <StackLayer key={i + ':' + entry.screen + ':' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
             {entry.screen === 'grupo'
-              ? <Grupo group={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenCommunity={openCommunity} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onSeen={bumpSeen} onMessage={openMessage} />
+              ? <Grupo group={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenCommunity={openCommunity} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onSeen={bumpSeen} onMessage={openMessage} onOpenTopic={openTopic} />
               : entry.screen === 'comunidade-info'
                 ? <ComunidadeInfo community={entry.key} onBack={goBack} onOpenMember={openMember} onMessage={openMessage} />
-                : <Comunidade community={entry.key} afterGroup={entry.params.group || null} isTop={i === stack.length - 1} seenTick={seenTick} onBack={goBack} onOpenGroup={openGroup} onOpenInfo={openCommunityInfo} />}
+                : <Comunidade community={entry.key} afterGroup={entry.params.group || null} isTop={i === stack.length - 1} seenTick={seenTick} onBack={goBack} onOpenGroup={openGroup} onOpenInfo={openCommunityInfo} onOpenAgenda={h.handleOpenAgenda} />}
           </StackLayer>
         )
       }
@@ -3590,6 +3646,48 @@ function Member () {
         return (
           <StackLayer key={i + ':momentos:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
             <Momentos entry={entry} ownKey={ownKey} isTop={i === stack.length - 1} covered={covered} onBack={goBack} onOpenMember={openMember} onMessage={openMessage} onCreate={h.handleOpenMomentComposer} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'fas') {
+        return (
+          <StackLayer key={i + ':fas:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Fas entry={entry} ownKey={ownKey} isTop={i === stack.length - 1} active={ready} onBack={goBack} onOpenMember={openMember} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'melhores-amigos') {
+        return (
+          <StackLayer key={i + ':melhores-amigos:' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <MelhoresAmigos ownKey={ownKey} active={ready} onBack={goBack} onToast={h.handleShowToast} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'recados') {
+        return (
+          <StackLayer key={i + ':recados:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Recados entry={entry} ownKey={ownKey} onBack={goBack} onOpenMember={openMember} onReport={setReport} onToast={h.handleShowToast} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'eventos') {
+        return (
+          <StackLayer key={i + ':eventos:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Eventos entry={entry} onBack={goBack} onOpenThread={openThread} onToast={h.handleShowToast} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'topico') {
+        return (
+          <StackLayer key={i + ':topico:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Topico entry={entry} isTop={i === stack.length - 1} onBack={goBack} onReport={setReport} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'assunto') {
+        return (
+          <StackLayer key={i + ':assunto:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Assunto entry={entry} ownKey={ownKey} onBack={goBack} onReply={h.handleStartReply} onQuote={h.handleStartQuote} onReport={setReport} onOpenThread={openThread} onOpenMember={openMember} onOpenMention={mentionHandler} onOpenEngagers={openEngagers} onOpenQuotes={openQuotes} onToast={h.handleShowToast} />
           </StackLayer>
         )
       }
@@ -3964,6 +4062,9 @@ function Member () {
                       onOpenTestimonials={openTestimonials}
                       onOpenMomentos={openMomentos}
                       onOpenSalvos={openSalvos}
+                      onOpenRecados={h.handleOpenRecados}
+                      onOpenEventos={h.handleOpenEventos}
+                      onOpenTop={h.handleOpenTop}
                     />
                   )}
                 </ScreenVisible.Provider>
@@ -4049,6 +4150,8 @@ function Member () {
   // The wrapper is unconditional, so it never remounts the screens.
   // The saved posts list (Posts salvos) is read by the post rows and its screen.
   content = <SavedProvider hosted={node.hosted === true} ownKey={ownKey}>{content}</SavedProvider>
+  // Tappable #tags exist only on a hosted node: without a handler the spans stay plain text.
+  content = <HashtagContext.Provider value={node.hosted === true ? openTag : undefined}>{content}</HashtagContext.Provider>
   content = <PostPublicProvider hosted={node.hosted === true} online={node.online} visible={node.visible} open={openPostShare}>{content}</PostPublicProvider>
   // Side insets are applied once here (sidePad); top and bottom by each bar;
   // Modal content (sheets, photo viewer) pads itself. The wrapper is

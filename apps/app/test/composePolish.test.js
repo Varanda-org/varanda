@@ -26,6 +26,7 @@ test('settings group every row and keep the existing advanced toggle last', (t) 
     ["'Trocar o celular'", "() => { setSaved(''); onNavigate('telefone') }"],
     ["'Recorrer de um bloqueio'", "() => onNavigate('recurso')"],
     ['{BLOCK_TEXTS.listTitle}', "() => onNavigate('bloqueados')"],
+    ['{WALL_TITLE}', "() => onNavigate('recados')"],
     ["'Convidar pessoas'", "() => onNavigate('convites')"],
     ["'Páginas'", 'openPaginas'],
     ["'Termos e privacidade'", "() => onNavigate('termos')"],

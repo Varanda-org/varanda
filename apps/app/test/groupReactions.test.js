@@ -46,6 +46,7 @@ async function harness (request, { batchStore = false } = {}) {
     setPageRole: () => {},
     useCallback: (fn) => fn,
     asPage: { page: false },
+    forumOn: false,
     node: {},
     applyPage,
     EMPTY_PAGES,

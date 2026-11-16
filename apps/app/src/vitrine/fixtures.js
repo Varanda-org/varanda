@@ -197,6 +197,35 @@ export const groups = ['Geral', 'Passeios de bicicleta', 'Geral', 'Organização
   }
 })
 
+// Fóruns e enquetes: the public group 'Geral' of the reading club (2) holds
+// two topics, the first with a poll, and replies under both. A topic is a
+// root post named in `topics`; `choices` are the group-choice votes.
+const forumRoot = (n, member, minute, text) => ({ writer: key(300 + n), diary: member.author, seq: 2, at: at(5, 13, minute), text, replyTo: null, hidden: false, media: null, name: member.name, username: member.username })
+const forumItems = [
+  forumRoot(0, members[2], 20, 'Qual livro vamos ler no próximo mês?'),
+  { ...forumRoot(1, members[4], 25, 'Voto em contos: dá para ler um por dia.'), replyTo: { writer: key(300), seq: 2 } },
+  { ...forumRoot(2, members[1], 28, 'Romance, para ter tempo de mergulhar.'), replyTo: { writer: key(300), seq: 2 } },
+  forumRoot(3, members[3], 30, 'Sugestões de encontros ao ar livre'),
+  { ...forumRoot(4, members[2], 35, 'Um piquenique no parque, com leitura em voz alta.'), replyTo: { writer: key(303), seq: 2 } }
+]
+groups[2].items.push(...forumItems)
+groups[2].topics = [
+  { writer: key(300), seq: 2, poll: ['Contos', 'Romance', 'Poesia'] },
+  { writer: key(303), seq: 2, poll: null }
+]
+// Evento do grupo: a root post of 'Geral' with an event (g.events), RSVP by
+// group.choose (pick 0 vou, 1 talvez).
+groups[2].items.push(forumRoot(5, members[3], 40, 'Encontro de leitura no parque'))
+groups[2].events = [
+  { writer: key(305), seq: 2, event: { title: 'Encontro de leitura', start: '2026-11-28T17:00:00.000Z', end: null, place: 'Parque central' } }
+]
+groups[2].choices = [
+  { writer: key(300), seq: 2, diary: members[2].author, pick: 0 },
+  { writer: key(300), seq: 2, diary: members[4].author, pick: 0 },
+  { writer: key(300), seq: 2, diary: members[1].author, pick: 1 },
+  { writer: key(300), seq: 2, diary: members[4].author, pick: 2 }
+]
+
 const postTexts = [
   'Um café na varanda para começar o dia. ☕',
   'O passeio de sábado está combinado! @lia_oliveira, vem com a gente?',
@@ -266,10 +295,33 @@ const photoPosts = [
   photoPost(members[4], 41, at(5, 12, 10), '', [postPhoto(23, 0)]),
   photoPost(members[4], 42, at(5, 12, 20), 'Livros novos para o clube.', [postPhoto(24, 2), postPhoto(25, 3)]),
   photoPost(members[4], 43, at(5, 12, 30), '', [postPhoto(26, 1), postPhoto(27, 0), postPhoto(28, 2)]),
-  photoPost(members[4], 44, at(5, 12, 40), 'A biblioteca da praça em uma tarde de chuva.', [postPhoto(29, 3)])
+  photoPost(members[4], 44, at(5, 12, 40), 'A biblioteca da praça em uma tarde de chuva.', [postPhoto(29, 3)]),
+  // After the own scrap block (seq 49): keeps a photo post in the newest own log page.
+  photoPost(members[0], 50, at(5, 12, 50), 'Fim de tarde na praça, depois do café.', [postPhoto(50, 2)])
 ]
 
-export const feed = [...baseFeed, ...photoPosts]
+// Posts with hashtags for the topic demo, in the feed so a tag can be tapped
+// there. Their text folds to the tokens festajunina, paodequeijo and ceu. The
+// last one has the bare word without the hash, which the Assunto filter drops
+// (a hit must carry the tag) while the Busca still finds it.
+const topicPosts = [
+  photoPost(members[2], 80, at(5, 14, 0), 'Foi uma noite linda de #festajunina na praça! Quadrilha, canjica e muita alegria.', null),
+  photoPost(members[3], 80, at(5, 14, 10), 'Saiu do forno agora: #pãodequeijo quentinho para o café da tarde 🧀', null),
+  photoPost(members[2], 81, at(5, 14, 20), 'Hoje o #Céu estava de um azul que dava vontade de ficar olhando. #festajunina #pãodequeijo', null),
+  photoPost(members[3], 81, at(5, 14, 30), 'Que saudade da festajunina do bairro, com a turma toda reunida.', null)
+]
+
+// Enquete do diário: a poll post of the own diary (record key set type, text,
+// at, replyTo, poll) with public votes in the choice records below.
+export const pollPostRef = { author: own, seq: 60 }
+const pollPost = { ...photoPost(members[0], 60, at(5, 14, 40), 'Qual o melhor horário para o próximo mutirão da horta?', null), poll: ['Sábado de manhã', 'Sábado à tarde', 'Domingo'] }
+
+// Evento do diário: a post of the own diary with the `event` key (title, start,
+// end, place), shown under Eventos on the profile.
+export const eventPostRef = { author: own, seq: 61 }
+const eventPost = { ...photoPost(members[0], 61, at(5, 14, 45), 'Mutirão da horta no sábado, tragam luvas!', null), event: { title: 'Mutirão da horta', start: '2026-11-21T12:00:00.000Z', end: '2026-11-21T15:00:00.000Z', place: 'Horta comunitária' } }
+
+export const feed = [...baseFeed, ...photoPosts, ...topicPosts, pollPost, eventPost]
 
 const ownPost = (n) => feed.filter((post) => post.author === own)[n]
 
@@ -396,6 +448,24 @@ export const testimonialRecords = [
   ...showRows.map(([author, seq, i, when]) => ({ author, seq, record: { type: 'testimonial-show', from: sealed[i].author, seq: sealed[i].seq, text: sealed[i].text, nonce: sealed[i].nonce, at: when } }))
 ]
 
+// Recados (docs/protocol.md): scraps in the writer's own diary. Lia's page
+// has two from people she follows and one from Bia, whom she never followed
+// (admitted only by the reply exception: Lia wrote to Bia first, Bia
+// answered). Cecília's page lets everyone write, and she hid João's recado.
+// Lia's own log takes just one scrap block (seq 49); the photo post at seq 50
+// is in the feed fixtures, so each log page (30 blocks) still holds a tile.
+export const scrapRecords = [
+  { author: members[1].author, seq: 90, record: { type: 'scrap', to: own, text: 'Lia, o café de domingo na praça foi ótimo! Vamos repetir?', replyTo: null, at: at(5, 12, 10) } },
+  { author: members[2].author, seq: 90, record: { type: 'scrap', to: own, text: 'Passei aqui para deixar um abraço e umas mudas de hortelã. 🌱', replyTo: null, at: at(5, 12, 40) } },
+  { author: own, seq: 49, record: { type: 'scrap', to: members[4].author, text: 'Bia, quando você pode ir à oficina de compostagem?', replyTo: null, at: at(5, 13, 0) } },
+  { author: members[4].author, seq: 90, record: { type: 'scrap', to: own, text: 'Lia, no sábado de manhã! Levo o livro que combinamos.', replyTo: { author: own, seq: 49 }, at: at(5, 13, 30) } },
+  { author: members[3].author, seq: 90, record: { type: 'scrap', to: members[2].author, text: 'Cecília, adorei as fotos do seu jardim!', replyTo: null, at: at(5, 10, 0) } },
+  { author: members[4].author, seq: 91, record: { type: 'scrap', to: members[2].author, text: 'Troca de mudas no sábado? Eu levo o manjericão.', replyTo: null, at: at(5, 10, 20) } },
+  { author: members[1].author, seq: 91, record: { type: 'scrap', to: members[2].author, text: 'Oi, Cecília! Passando para dar um oi.', replyTo: null, at: at(5, 10, 40) } },
+  { author: members[2].author, seq: 91, record: { type: 'scrap-wall', who: 'everyone', at: at(5, 9, 0) } },
+  { author: members[2].author, seq: 92, record: { type: 'scrap-hide', from: members[1].author, seq: 91, at: at(5, 11, 0) } }
+]
+
 const place = { uf: 'SP', city: 'São Paulo', bairro: 'Vila Mariana' }
 const listing = (author, seq, kind, title, price, unit, cat, media) => ({
   author,
@@ -462,4 +532,32 @@ const momentRows = [
 
 export const momentRecords = momentRows.map(([author, seq, text, when, p], i) => ({ author, seq, record: { type: 'moment', text, at: when, media: momentPhoto(i, p) } }))
 
-export const fixtures = { now, own, association, members, incompleteDiaries, applicants, pages, follows, conversations, uncertainSends, communities, groups, feed, noticePosts, notices, diaryRecords: [...diaryRecords, ...testimonialRecords, ...momentRecords], sealed, listings, rates }
+// Perfil rico (docs/protocol.md): profile-about and mood records in the
+// writer's own diary. The moods are inside their 24 hours of `now`.
+export const profileRecords = [
+  { author: members[1].author, seq: 95, record: { type: 'profile-about', about: 'Pedalo pelo bairro todo fim de semana.\nSe quiser pedalar junto, é só chamar.', city: 'Curitiba', work: 'Entregador de pães', studies: null, interests: 'Bicicleta, café e fotografia', birthday: '03-14', theme: 'mar', at: at(4, 10) } },
+  { author: members[1].author, seq: 96, record: { type: 'mood', emoji: '🚲', text: 'Dia de pedalar', at: at(5, 9) } },
+  { author: members[2].author, seq: 95, record: { type: 'profile-about', about: 'Cultivo plantas e boas conversas.', city: 'Florianópolis', work: null, studies: 'Agronomia', interests: 'Jardinagem, chás e livros', birthday: '09-02', theme: 'floresta', at: at(4, 11) } },
+  { author: members[2].author, seq: 96, record: { type: 'mood', emoji: '🌱', text: 'Trocando mudas hoje', at: at(5, 11) } }
+]
+
+// Fãs e Melhores amigos: three members are fans of the own diary; the own
+// top friends name Bia, who follows back, and João, who does not (pending).
+export const fanRecords = [
+  { author: members[1].author, seq: 97, record: { type: 'fan', key: own, on: true, at: at(5, 8) } },
+  { author: members[2].author, seq: 97, record: { type: 'fan', key: own, on: true, at: at(5, 9) } },
+  { author: members[4].author, seq: 97, record: { type: 'fan', key: own, on: true, at: at(5, 10) } },
+  { author: own, seq: 50, record: { type: 'top-friends', keys: [members[4].author, members[1].author], at: at(5, 11) } }
+]
+
+// Votos da enquete do diário (docs/protocol.md): choice records in each
+// voter's own diary; João changes his mind, so only the last one counts.
+export const choiceRecords = [
+  { author: members[1].author, seq: 110, record: { type: 'choice', to: pollPostRef, pick: 2, at: at(5, 14, 45) } },
+  { author: members[1].author, seq: 111, record: { type: 'choice', to: pollPostRef, pick: 0, at: at(5, 14, 50) } },
+  { author: members[2].author, seq: 110, record: { type: 'choice', to: pollPostRef, pick: 0, at: at(5, 14, 46) } },
+  { author: members[4].author, seq: 110, record: { type: 'choice', to: pollPostRef, pick: 1, at: at(5, 14, 47) } },
+  { author: own, seq: 61, record: { type: 'choice', to: pollPostRef, pick: 0, at: at(5, 14, 48) } }
+]
+
+export const fixtures = { now, own, association, members, incompleteDiaries, applicants, pages, follows, conversations, uncertainSends, communities, groups, feed, noticePosts, notices, diaryRecords: [...diaryRecords, ...testimonialRecords, ...momentRecords, ...scrapRecords, ...profileRecords, ...fanRecords, ...choiceRecords], sealed, listings, rates }

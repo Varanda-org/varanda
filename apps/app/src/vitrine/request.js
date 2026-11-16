@@ -4,7 +4,7 @@ import { sealedTestimonial, signVitrineConsent, testimonialHash, verifyVitrineCo
 import { largeFeed } from './large.js'
 import { testimonialPointers, useTestimonialSource } from './testimonialIndex.js'
 
-const { validateParams, RpcError, feira, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX } = rpc
+const { isRef, validateParams, RpcError, feira, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX, GROUP_VOTERS_MAX } = rpc
 let currentFeira = null
 let currentLive = null
 
@@ -105,6 +105,8 @@ export function createVitrineRequest (fixtures, options) {
   const reactions = { like: new Map(), repost: new Map() }
   const live = []
   const deleted = new Map()
+  // 'from:seq' -> 'kept' | 'declined', the demo's testimonial.decide.
+  const decisions = new Map()
   const logs = new Map()
   const roster = new Map()
   const association = data.association
@@ -137,12 +139,109 @@ export function createVitrineRequest (fixtures, options) {
   }
   const orderedItems = (g) => [...g.items].sort((a, b) => comparePosition(a, b, 'writer'))
 
+  // Enquetes. A diary poll is a live own or fixture post with a `poll` key;
+  // a vote is the voter's last in-range `choice` record naming it (a null pick
+  // withdraws, an out-of-range pick is ignored), as packages/core/lib/polls.js.
+  const pollEntry = (to) => {
+    const target = targetOf(to)
+    const entry = liveEntry(target.author, target.seq)
+    if (!entry || entry.record.type !== 'post') return null
+    // An event post is a 2-option poll: pick 0 going, 1 maybe.
+    if (Array.isArray(entry.record.poll)) return { target, entry, options: entry.record.poll }
+    return entry.record.event ? { target, entry, options: ['going', 'maybe'] } : null
+  }
+  const livePick = (author, target, count) => {
+    let live = null
+    for (const e of logs.get(author) || []) {
+      const r = e.record
+      if (r.type !== 'choice' || r.to.author !== target.author || r.to.seq !== target.seq || deleted.has(`${author}:${e.seq}`)) continue
+      if (r.pick === null) live = null
+      else if (r.pick < count) live = { pick: r.pick, seq: e.seq }
+    }
+    return live
+  }
+
+  // Group topics (public groups only): g.topics lists the roots, g.choices
+  // the votes [{ writer, diary, pick }], the last per voter winning.
+  const rootItem = (g, topic) => g.items.find((p) => p.writer === topic.writer && p.seq === topic.seq)
+  const topicRootOf = (g, item) => {
+    let at = item
+    for (let i = 0; i < 64 && at; i++) {
+      const root = (g.topics || []).find((x) => x.writer === at.writer && x.seq === at.seq)
+      if (root) return root
+      at = at.replyTo ? g.items.find((p) => p.writer === at.replyTo.writer && p.seq === at.replyTo.seq) : null
+    }
+    return null
+  }
+  const groupPicks = (g, topic) => {
+    const picks = new Map()
+    for (const c of g.choices || []) {
+      if (c.writer !== topic.writer || c.seq !== topic.seq) continue
+      if (c.pick === null) picks.delete(c.diary)
+      else if (c.pick < topic.poll.length) picks.set(c.diary, c.pick)
+    }
+    return picks
+  }
+  // A hidden root keeps its place blanked: no poll, no marker, no votes.
+  const pollSummary = (g, topic) => {
+    if (!topic.poll || rootItem(g, topic)?.hidden) return null
+    const picks = groupPicks(g, topic)
+    const totals = topic.poll.map(() => 0)
+    for (const pick of picks.values()) totals[pick]++
+    return { options: topic.poll.slice(), totals, mine: picks.has(data.own) ? picks.get(data.own) : null }
+  }
+  const markOf = (g, item) => {
+    if (item.hidden) return null
+    const root = topicRootOf(g, item)
+    return root ? { writer: root.writer, seq: rootItem(g, root).seq, poll: root.poll !== null && !rootItem(g, root).hidden } : null
+  }
+  const topicTarget = (g, target) => {
+    const root = (g.topics || []).find((x) => x.writer === target.writer && x.seq === target.seq && rootItem(g, x))
+    if (!root) refuse('USAGE', 'tópico não encontrado')
+    return root
+  }
+
+  // Group events (public groups): g.events lists the roots [{ writer, seq,
+  // event }]; the RSVP is a g.choices vote, pick 0 'vou', 1 'talvez'.
+  const eventTotals = (g, x) => {
+    const picks = new Map()
+    for (const c of g.choices || []) {
+      if (c.writer !== x.writer || c.seq !== x.seq) continue
+      if (c.pick === null) picks.delete(c.diary)
+      else if (c.pick < 2) picks.set(c.diary, c.pick)
+    }
+    const totals = [0, 0]
+    for (const pick of picks.values()) totals[pick]++
+    return { totals, mine: picks.has(data.own) ? picks.get(data.own) : null }
+  }
+
+  // The group.read topic's `event`, as member-ops eventSummary: null or
+  // { writer, seq, title, start, end, place, totals, mine }.
+  const eventSummary = (g, topic) => {
+    const x = (g.events || []).find((e) => e.writer === topic.writer && e.seq === topic.seq)
+    const item = rootItem(g, topic)
+    if (!x || !item || item.hidden) return null
+    const { totals, mine } = eventTotals(g, x)
+    return { writer: x.writer, seq: item.seq, ...x.event, totals, mine }
+  }
+
+  // The poll of a visible topic root, as the handler's visiblePost: a missing
+  // or hidden post is 'mensagem não encontrada', a visible one without a poll
+  // 'enquete não encontrada'.
+  const pollRoot = (g, target) => {
+    const item = rootItem(g, target)
+    if (!item || item.hidden) refuse('USAGE', 'mensagem não encontrada')
+    const root = (g.topics || []).find((x) => x.writer === target.writer && x.seq === target.seq)
+    if (!root || !root.poll) refuse('USAGE', 'enquete não encontrada')
+    return root
+  }
+
   function usernameRecord (p) {
     return { type: 'username', username: p.username, member: p.author, date: data.now, association, issuer: association, issuerDate: data.now, issuerSignature: signature, signature }
   }
 
-  function postRecord ({ text, at, replyTo, quote, media, preview }) {
-    return { type: 'post', text, at, replyTo, ...(quote ? { quote } : {}), ...(media ? { media } : {}), ...(preview ? { preview } : {}) }
+  function postRecord ({ text, at, replyTo, quote, media, preview, poll, event }) {
+    return { type: 'post', text, at, replyTo, ...(quote ? { quote } : {}), ...(media ? { media } : {}), ...(preview ? { preview } : {}), ...(poll ? { poll: poll.slice() } : {}), ...(event ? { event: { ...event } } : {}) }
   }
 
   for (const p of profiles) {
@@ -300,10 +399,10 @@ export function createVitrineRequest (fixtures, options) {
   }
 
   function publish (params, kind) {
-    const record = { type: 'post', text: params.text, at: stamp(), replyTo: kind === 'reply' ? targetOf(params.to) : null, ...(kind === 'quote' ? { quote: targetOf(params.to) } : {}), ...(params.media ? { media: params.media } : {}), ...(params.preview ? { preview: params.preview } : {}) }
+    const record = { type: 'post', text: params.text, at: stamp(), replyTo: kind === 'reply' ? targetOf(params.to) : null, ...(kind === 'quote' ? { quote: targetOf(params.to) } : {}), ...(params.media ? { media: params.media } : {}), ...(params.preview ? { preview: params.preview } : {}), ...(params.poll ? { poll: params.poll } : {}), ...(params.event ? { event: { ...params.event } } : {}) }
     const result = append(record)
     const p = profileOf(data.own)
-    data.feed.push({ kind: 'post', author: data.own, name: p.name, username: p.username, seq: result.seq, at: record.at, text: record.text, replyTo: record.replyTo, quote: record.quote || null, media: record.media || null, preview: record.preview || null })
+    data.feed.push({ kind: 'post', author: data.own, name: p.name, username: p.username, seq: result.seq, at: record.at, text: record.text, replyTo: record.replyTo, quote: record.quote || null, media: record.media || null, preview: record.preview || null, ...(record.poll ? { poll: record.poll.slice() } : {}), ...(record.event ? { event: { ...record.event } } : {}) })
     return kind === 'quote' ? { seq: result.seq } : result
   }
 
@@ -549,7 +648,7 @@ export function createVitrineRequest (fixtures, options) {
     // No seen sync offline: a signature the account call never uses, and a
     // merge that changes nothing.
     'seen.sign': () => ({ signature, prevHash: '0'.repeat(64) }),
-    'seen.merge': () => ({ avisos: { own: [], pages: {} }, pending: false, dmChanged: false, groupChanged: false, blocksChanged: false, caughtUp: [] }),
+    'seen.merge': () => ({ avisos: { own: [], pages: {} }, pending: false, dmChanged: false, groupChanged: false, blocksChanged: false, testimonialsChanged: false, caughtUp: [] }),
     'report.sign': signed,
     'appeal.sign': signed,
     'dm.reportSign': signed,
@@ -616,6 +715,23 @@ export function createVitrineRequest (fixtures, options) {
       return { to: sealed[5], text: sealed[6] }
     },
     'post.create': (params) => publish(params, 'post'),
+    // As the web node: a pick needs a live poll and an unblocked author, a
+    // withdrawal (null) needs neither; choice.mine reads the own diary alone.
+    'choice.set': ({ to, pick }) => {
+      const target = targetOf(to)
+      if (pick !== null) {
+        if (blockedKeys.has(target.author)) refuse('USAGE', 'você bloqueou esta pessoa')
+        const poll = pollEntry(to)
+        if (!poll) refuse('USAGE', 'a publicação não é uma enquete')
+        if (pick >= poll.options.length) refuse('USAGE', 'opção inválida')
+      }
+      const { seq } = append({ type: 'choice', to: target, pick, at: stamp() })
+      return { seq }
+    },
+    'choice.mine': ({ to }) => {
+      const live = livePick(data.own, targetOf(to), 4)
+      return { pick: live ? live.pick : null, seq: live ? live.seq : null }
+    },
     'post.reply': (params) => publish(params, 'reply'),
     'post.quote': (params) => publish(params, 'quote'),
     'post.delete': ({ to }) => {
@@ -891,12 +1007,19 @@ export function createVitrineRequest (fixtures, options) {
       const groups = data.groups.filter((g) => !communityOf(g.community).dropped.includes(g.group))
       return { groups: groups.slice(offset, offset + limit).map(groupRow), total: groups.length }
     },
-    'group.read': ({ group, limit, before }) => {
+    'group.read': ({ group, limit, before, marks, topic }) => {
       const g = groupOf(group)
-      const candidates = orderedItems(g).reverse().filter((item) => !before || comparePosition(item, before, 'writer') < 0)
+      let root = null
+      if (topic) {
+        root = topicTarget(g, topic)
+        if (g.visibility !== 'public') refuse('USAGE', 'fóruns e enquetes só em grupo público')
+      }
+      const marked = marks === true || topic !== undefined
+      const candidates = orderedItems(g).reverse().filter((item) => (!before || comparePosition(item, before, 'writer') < 0) && (!root || topicRootOf(g, item) === root))
       const items = candidates.slice(0, limit).map((item) => {
-        if (!item.hidden) return item
-        const { reactions, ...hidden } = item
+        const row = marked ? { ...item, topic: markOf(g, item) } : item
+        if (!item.hidden) return row
+        const { reactions, ...hidden } = row
         return { ...hidden, text: '', media: null, card: null }
       })
       return {
@@ -906,8 +1029,80 @@ export function createVitrineRequest (fixtures, options) {
         incomplete: false,
         sealed: 0,
         epoch: g.visibility === 'private' ? { writer: g.group, seq: g.epoch || 1 } : null,
+        ...(root ? { poll: pollSummary(g, root), event: eventSummary(g, root) } : {}),
         state: 'ok'
       }
+    },
+    'group.choose': ({ group, target, pick }) => {
+      const g = groupOf(group)
+      if (g.visibility !== 'public') refuse('USAGE', 'fóruns e enquetes só em grupo público')
+      if (!active(g) || !active(communityOf(g.community)) || communityOf(g.community).dropped.includes(group)) refuse('USAGE', 'sem permissão no grupo')
+      const eventRoot = (g.events || []).find((x) => x.writer === target.writer && x.seq === target.seq)
+      if (eventRoot && rootItem(g, eventRoot) && !rootItem(g, eventRoot).hidden) {
+        if (pick !== null && pick >= 2) refuse('USAGE', 'opção inválida')
+        if (!g.choices) g.choices = []
+        g.choices.push({ writer: eventRoot.writer, seq: eventRoot.seq, diary: data.own, pick })
+        return { ok: true }
+      }
+      const root = pollRoot(g, target)
+      if (pick !== null && pick >= root.poll.length) refuse('USAGE', 'opção inválida')
+      if (!g.choices) g.choices = []
+      g.choices.push({ writer: root.writer, seq: root.seq, diary: data.own, pick })
+      return { ok: true }
+    },
+    'group.events': ({ group, cursor }) => {
+      const g = groupOf(group)
+      if (g.visibility !== 'public') refuse('USAGE', 'eventos só em grupo público')
+      const roots = (g.events || []).map((x) => ({ x, item: rootItem(g, x) })).filter((r) => r.item).sort((a, b) => comparePosition(b.item, a.item, 'writer'))
+      const candidates = roots.filter((r) => !cursor || comparePosition(r.item, cursor, 'writer') < 0)
+      const rows = candidates.slice(0, 30).map(({ x, item }) => {
+        const rsvp = item.hidden ? { totals: [0, 0], mine: null } : eventTotals(g, x)
+        return { writer: item.writer, diary: item.diary, seq: item.seq, at: item.at, text: item.hidden ? '' : item.text, name: item.name, username: item.username, hidden: item.hidden === true, event: item.hidden ? null : { ...x.event }, totals: rsvp.totals, mine: rsvp.mine }
+      })
+      return { items: rows, next: candidates.length > 30 ? groupCursor(rows[rows.length - 1]) : null, incomplete: false }
+    },
+    'group.topics': ({ group, limit, before }) => {
+      const g = groupOf(group)
+      if (g.visibility !== 'public') refuse('USAGE', 'fóruns e enquetes só em grupo público')
+      const roots = (g.topics || []).map((x) => ({ x, item: rootItem(g, x) })).filter((r) => r.item).sort((a, b) => comparePosition(b.item, a.item, 'writer'))
+      const candidates = roots.filter((r) => !before || comparePosition(r.item, before, 'writer') < 0)
+      const rows = candidates.slice(0, limit).map(({ x, item }) => {
+        const replies = g.items.filter((p) => p !== item && !p.hidden && topicRootOf(g, p) === x).sort((a, b) => comparePosition(a, b, 'writer'))
+        return {
+          writer: item.writer,
+          diary: item.diary,
+          seq: item.seq,
+          at: item.at,
+          text: item.hidden ? '' : item.text,
+          name: item.name,
+          username: item.username,
+          hidden: item.hidden === true,
+          replies: replies.length,
+          last: replies.length ? replies[replies.length - 1].at : null,
+          poll: pollSummary(g, x)
+        }
+      })
+      return { items: rows, next: candidates.length > limit ? groupCursor(rows[rows.length - 1]) : null, incomplete: false }
+    },
+    'group.voters': ({ group, target }) => {
+      const g = groupOf(group)
+      const eventRoot = (g.events || []).find((x) => x.writer === target.writer && x.seq === target.seq)
+      if (eventRoot && rootItem(g, eventRoot) && !rootItem(g, eventRoot).hidden) {
+        const picks = new Map()
+        for (const c of g.choices || []) {
+          if (c.writer !== eventRoot.writer || c.seq !== eventRoot.seq) continue
+          if (c.pick === null) picks.delete(c.diary)
+          else if (c.pick < 2) picks.set(c.diary, c.pick)
+        }
+        return { voters: [0, 1].map((pick) => { const by = [...picks].filter(([, p]) => p === pick).map(([voter]) => voter); return { pick, count: by.length, by: by.slice(0, GROUP_VOTERS_MAX) } }) }
+      }
+      const root = pollRoot(g, target)
+      const picks = groupPicks(g, root)
+      const voters = root.poll.map((_, pick) => {
+        const by = [...picks].filter(([, p]) => p === pick).map(([voter]) => voter)
+        return { pick, count: by.length, by: by.slice(0, GROUP_VOTERS_MAX) }
+      })
+      return { voters }
     },
     'group.info': ({ group }) => {
       const g = groupOf(group)
@@ -920,12 +1115,25 @@ export function createVitrineRequest (fixtures, options) {
       if (item && (!g.seen || comparePosition(item, g.seen, 'writer') > 0)) g.seen = groupCursor(item)
       return { ok: true }
     },
-    'group.post': ({ group, text, replyTo, media }) => {
+    'group.post': ({ group, text, replyTo, media, topic, poll, event }) => {
       const g = groupOf(group)
+      // As the web node's groupPost: a topic or a poll (forum) is refused in a
+      // private group before the permission check.
+      const forum = topic === true || (poll !== null && poll !== undefined)
+      if (event && g.visibility !== 'public') refuse('USAGE', 'eventos só em grupo público')
+      if (forum && g.visibility !== 'public') refuse('USAGE', 'fóruns e enquetes só em grupo público')
       if (!active(g) || !active(communityOf(g.community)) || communityOf(g.community).dropped.includes(group)) refuse('USAGE', 'sem permissão no grupo')
       const seq = Math.max(1, ...g.items.filter((item) => item.writer === g.writer).map((item) => item.seq)) + 1
       const p = profileOf(data.own)
       g.items.push({ writer: g.writer, diary: data.own, seq, at: stamp(), text, replyTo: replyTo || null, hidden: false, media: media || null, name: p.name, username: p.username })
+      if (forum) {
+        if (!g.topics) g.topics = []
+        g.topics.push({ writer: g.writer, seq, poll: poll || null })
+      }
+      if (event) {
+        if (!g.events) g.events = []
+        g.events.push({ writer: g.writer, seq, event: { ...event } })
+      }
       return { seq }
     },
     'community.list': () => {
@@ -989,14 +1197,30 @@ export function createVitrineRequest (fixtures, options) {
       sealed.set(result.ref, { text, nonce })
       return result
     },
-    'testimonial.pending': () => ({
-      items: testimonialPointersOf(data.own).pending.flatMap(({ from, seq }) => {
+    'testimonial.decide': ({ from, seq, state, ifNew }) => {
+      if (from === data.own) refuse('USAGE', 'referência inválida')
+      const ref = `${from}:${seq}`
+      if (!sealed.has(ref) || !liveEntry(from, seq)) refuse('USAGE', 'depoimento não encontrado')
+      if (state !== 'kept' && state !== 'declined') refuse('USAGE', 'estado inválido')
+      if (ifNew === true && decisions.has(ref)) return { changed: false }
+      if (decisions.get(ref) === state) return { changed: false }
+      decisions.set(ref, state)
+      return { changed: true }
+    },
+    'testimonial.pending': () => {
+      const index = testimonialPointersOf(data.own)
+      const rowsOf = (list) => list.flatMap(({ from, seq }) => {
         const opened = sealed.get(`${from}:${seq}`)
         const block = liveEntry(from, seq)
-        return opened && block ? [{ from, seq, text: opened.text, at: block.record.at }] : []
-      }),
-      incomplete: false
-    }),
+        return opened && block ? [{ from, seq, text: opened.text, at: block.record.at, state: decisions.get(`${from}:${seq}`) }] : []
+      })
+      const row = ({ from, seq, text, at }) => ({ from, seq, text, at })
+      return {
+        items: rowsOf(index.pending).filter((r) => r.state === undefined).map(row),
+        kept: rowsOf(index.unshown).filter((r) => r.state === 'kept').map(row),
+        incomplete: false
+      }
+    },
     'testimonial.show': ({ from, seq }) => {
       const opened = sealed.get(`${from}:${seq}`)
       const block = from === data.own ? null : liveEntry(from, seq)
@@ -1004,6 +1228,42 @@ export function createVitrineRequest (fixtures, options) {
       const existing = logs.get(data.own).find((e) => e.record.type === 'testimonial-show' && e.record.from === from && e.record.seq === seq && !deleted.has(`${data.own}:${e.seq}`))
       if (existing) return { seq: existing.seq, ref: `${data.own}:${existing.seq}` }
       return append({ type: 'testimonial-show', from, seq, text: opened.text, nonce: opened.nonce, at: stamp() })
+    },
+    // Recados (docs/protocol.md): records in the own diary; the page owner's
+    // wall and hides are read at the seeder, never here.
+    'scrap.write': ({ to, text, replyTo }) => {
+      if (typeof to !== 'string' || typeof text !== 'string') refuse('USAGE', 'registro inválido: malformed')
+      if (to === data.own) refuse('USAGE', 'não pode deixar recado para si')
+      if (!profileOf(to) && !conversationOf(to)) refuse('USAGE', 'a pessoa ainda não recebe mensagens')
+      const length = [...text].length
+      if (length < 1 || length > 400 || badText(text)) refuse('USAGE', 'registro inválido: malformed')
+      let target = null
+      if (replyTo !== undefined && replyTo !== null) {
+        if (typeof replyTo !== 'string' || !isRef(replyTo)) refuse('USAGE', 'referência inválida')
+        const { author, seq } = targetOf(replyTo)
+        const entry = liveEntry(author, seq)
+        if (author !== to || !entry || entry.record.type !== 'scrap' || entry.record.to !== data.own) refuse('USAGE', 'referência inválida')
+        target = { author, seq }
+      }
+      return append({ type: 'scrap', to, text, replyTo: target, at: stamp() })
+    },
+    'scrap.hide': ({ from, seq }) => {
+      if (from === data.own) refuse('USAGE', 'não pode tirar o próprio recado da sua página')
+      const entry = liveEntry(from, seq)
+      if (!entry || entry.record.type !== 'scrap' || entry.record.to !== data.own) refuse('USAGE', 'recado não encontrado')
+      return append({ type: 'scrap-hide', from, seq, at: stamp() })
+    },
+    'scrap.wall': ({ who }) => {
+      if (!['following', 'everyone', 'nobody'].includes(who)) refuse('USAGE', 'registro inválido: malformed')
+      return append({ type: 'scrap-wall', who, at: stamp() })
+    },
+    'scrap.delete': ({ seq }) => {
+      if (deleted.has(`${data.own}:${seq}`)) return { seq: deleted.get(`${data.own}:${seq}`).seq, deleted: [seq] }
+      const entry = liveEntry(data.own, seq)
+      if (!entry || entry.record.type !== 'scrap') refuse('USAGE', 'referência inválida')
+      const tombstone = append({ type: 'delete', seq, at: stamp() })
+      deleted.set(`${data.own}:${seq}`, tombstone)
+      return { seq: tombstone.seq, deleted: [seq] }
     },
     'testimonial.delete': ({ to, about }) => {
       const target = targetOf(to)
@@ -1028,6 +1288,27 @@ export function createVitrineRequest (fixtures, options) {
     'moment.putMedia': ({ mime, width, height }) => {
       const n = mediaStart++
       return { id: keyOf(0xe80 + n), key: keyOf(0xf80 + n), nonce: '0'.repeat(46) + (n % 100).toString().padStart(2, '0'), chunks: 1, bytes: 2048, sha256: keyOf(0x880 + n), mime, w: width, h: height, ms: 0 }
+    },
+    // Perfil rico (docs/protocol.md): the newest record of each type wins.
+    'profile.about': (params) => append({ type: 'profile-about', about: params.about, city: params.city, work: params.work, studies: params.studies, interests: params.interests, birthday: params.birthday, theme: params.theme, at: stamp() }),
+    'profile.mood': ({ emoji, text }) => append({ type: 'mood', emoji, text: text === undefined ? '' : text, at: stamp() }),
+    // Every live version goes, as on the web node, so none shows again.
+    'profile.extra.delete': ({ kind }) => {
+      const type = kind === 'about' ? 'profile-about' : 'mood'
+      const seqs = logs.get(data.own).filter((e) => e.record.type === type && !deleted.has(`${data.own}:${e.seq}`)).map((e) => e.seq)
+      if (seqs.length === 0) refuse('USAGE', 'nada para apagar')
+      let last
+      for (const seq of seqs) {
+        last = append({ type: 'delete', seq, at: stamp() })
+        deleted.set(`${data.own}:${seq}`, last)
+      }
+      return { seq: last.seq, deleted: seqs }
+    },
+    // Fãs e Melhores amigos (docs/protocol.md): the newest record of each kind wins.
+    'fan.set': ({ key, on }) => append({ type: 'fan', key, on: on === true, at: stamp() }),
+    'top.set': ({ keys }) => {
+      if (!Array.isArray(keys) || keys.length > 8 || new Set(keys).size !== keys.length || keys.includes(data.own)) refuse('USAGE', 'escolha inválida')
+      return append({ type: 'top-friends', keys: [...keys], at: stamp() })
     },
     // Only an item the Vitrine media handle's putMoment answered and no
     // moment published yet, as the web node's entry check.

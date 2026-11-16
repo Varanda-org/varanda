@@ -139,6 +139,17 @@ test('items carry quote and media, and malformed posts are dropped', async (t) =
   t.is(out.unavailable, 2)
 })
 
+test('assembleMember: a poll post keeps its options, a malformed poll is dropped', async (t) => {
+  const { assembleMember } = await load()
+  const peeked = new Map([[A, peek(A, [
+    { seq: 4, record: post('Café ou chá?', null, { poll: ['Café', 'Chá'] }) },
+    { seq: 3, record: post('uma só', null, { poll: ['Café'] }) },
+    { seq: 2, record: post('simples') }
+  ])]])
+  const out = assembleMember({ author: A, index: { posts: [4, 3, 2] }, peeked })
+  t.alike(out.items.map((i) => [i.seq, i.poll]), [[4, ['Café', 'Chá']], [3, undefined], [2, undefined]])
+})
+
 test('assembleMember: posts and reposts in index order', async (t) => {
   const { assembleMember } = await load()
   const peeked = new Map([[A, peek(A, [

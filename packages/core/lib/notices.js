@@ -161,7 +161,7 @@ function createNoticeIndex ({ maxPerAuthor = MAX_FOLLOW_TARGETS_PER_AUTHOR, maxE
   // Exact number of fold entries over all authors (private: never returned).
   let edges = 0
 
-  return { markPending, foldFollow, commit, removeAuthor, page, rowsFor, followsPage, followCounts }
+  return { markPending, foldFollow, commit, removeAuthor, page, rowsFor, followsPage, followCounts, followSeq, followTargets }
 
   function markPending (authorHex) {
     if (!isHex64(authorHex)) return
@@ -444,6 +444,24 @@ function createNoticeIndex ({ maxPerAuthor = MAX_FOLLOW_TARGETS_PER_AUTHOR, maxE
       total: rows.length,
       incomplete
     }
+  }
+
+  // -> the seq of `author`'s committed live follow of `target`, or null (no
+  // follow, an unfollow committed, a self-follow, a removed author, a fold
+  // not committed yet). Recados evidence: the node peeks that block itself.
+  function followSeq (author, target) {
+    if (!isHex64(author) || !isHex64(target) || author === target) return null
+    const followers = published.get(target)
+    const e = followers && followers.get(author)
+    return e ? e.seq : null
+  }
+
+  // -> [target] of `author`'s committed live follows (at most maxPerAuthor),
+  // a fresh array. Recados walk only these writers under 'following'.
+  function followTargets (author) {
+    if (!isHex64(author)) return []
+    const targets = publishedBy.get(author)
+    return targets ? [...targets] : []
   }
 
   // -> { seguindo, seguidores, incomplete } under followsPage's omit rule.

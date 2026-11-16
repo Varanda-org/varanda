@@ -14,6 +14,7 @@ if (typeof __DEV__ !== 'undefined' && __DEV__ && process.env.EXPO_PUBLIC_VARANDA
       return respond(url)
     } catch (err) {
       if (err.reason === 'not-found') throw new Failure('not-found')
+      if (err.reason === 'status') throw new Failure('status')
       throw err
     }
   }
@@ -38,11 +39,15 @@ if (typeof __DEV__ !== 'undefined' && __DEV__ && process.env.EXPO_PUBLIC_VARANDA
 //    of tripping 429s; a 429 anyway sets one shared cooldown (Retry-After,
 //    honoured in full) during which nothing reaches the network.
 //
-// Routes: /index/post/<author>/<seq>[/<cursor>], /index/counts/<ref>,...,
+// Routes: /index/post/<author>/<seq>[/<cursor>],
+// /index/roda/<author>/<seq>[/<cursor>], /index/counts/<ref>,...,
 // /index/member/<author>[/<before>], /index/topic/<tokens>[/<cursor>],
 // /index/likes/<author>/<seq>[/<cursor>] and
 // /index/reposts/<author>/<seq>[/<cursor>]. Each likes or reposts item is the
 // ref of a like or repost record, which the node still verifies (diary.peek).
+// A roda page lists replies of one comment's subtree as { ref, to } hints,
+// parents before children; the node still verifies each one (diary.peek)
+// and its signed replyTo chain. An older seeder answers it 404 ('not-found').
 // The search tokens are already folded words of [a-z0-9] (2..32 chars, at
 // most 8) joined by a literal '+' (apps/app/src/topics.js searchPath): this
 // module only checks them against the same strict pattern, never folds and
@@ -94,6 +99,7 @@ export const MAX_BODY_BYTES = 65536
 export const TIMEOUT_MS = 8000
 export const COUNTS_MAX = 31
 export const REPLIES_MAX = 50
+export const RODA_MAX = 50
 export const QUOTES_MAX = 50
 export const POSTS_MAX = 100
 export const SEARCH_MAX = 20
@@ -107,6 +113,9 @@ export const GROUP_SEARCH_MAX = 20
 export const COMMUNITY_GROUPS_MAX = 32
 export const TESTIMONIALS_MAX = 64
 export const GROUP_NAME_MAX = 80
+export const SCRAPS_MAX = 50
+export const SCRAP_HIDES_MAX = 1000
+export const SCRAP_PER_WRITER_MAX = 20
 // Must equal PAGE in packages/core/lib/feira-index.js.
 export const FEIRA_MAX = 30
 export const MAX_IN_FLIGHT = 2
@@ -127,12 +136,16 @@ const SEGMENT = /^[a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,3}$/
 const QUERY = /^[a-z0-9]{2,32}(?:\+[a-z0-9]{2,32}){0,7}$/
 
 const POST_KEYS = ['authors', 'complete', 'indexing', 'likes', 'next', 'parent', 'quotes', 'quotesTotal', 'ref', 'replies', 'repliesTotal', 'reposts']
+const RODA_KEYS = ['authors', 'complete', 'indexing', 'items', 'next', 'ref', 'root', 'top', 'total']
+const RODA_ITEM_KEYS = ['ref', 'to']
 const COUNTS_KEYS = ['complete', 'counts', 'indexing']
 const COUNT_KEYS = ['likes', 'quotes', 'replies', 'reposts']
 const MEMBER_KEYS = ['complete', 'indexing', 'length', 'posts', 'postsTotal', 'profileSeq', 'usernameSeq']
 const HINT_KEYS = ['profileSeq', 'usernameSeq']
 const SEARCH_KEYS = ['complete', 'indexing', 'members', 'more']
 const HIT_KEYS = ['author', 'profileSeq', 'usernameSeq']
+const EVENTS_KEYS = ['complete', 'indexing', 'next', 'posts', 'total']
+const EVENTS_MAX = 30
 const TOPIC_KEYS = ['authors', 'complete', 'indexing', 'items', 'next']
 const GROUP_KEYS = ['attached', 'community', 'complete', 'creator', 'indexing', 'join', 'kind', 'name', 'next', 'rootServed', 'visibility', 'writers']
 const WRITER_KEYS = ['diary', 'key', 'left', 'length', 'seq', 'signed']
@@ -149,10 +162,19 @@ const ENGAGERS_KEYS = ['authors', 'complete', 'indexing', 'items', 'kind', 'next
 const FOLLOW_COUNTS_KEYS = ['complete', 'indexing', 'seguidores', 'seguindo']
 const FOLLOWS_KEYS = ['author', 'authors', 'complete', 'indexing', 'items', 'kind', 'next', 'total']
 const FOLLOW_ITEM_KEYS = ['at', 'key', 'seq']
+const FANS_COUNT_KEYS = ['count', 'indexing']
+const POLL_KEYS = ['complete', 'indexing', 'totals']
+const POLL_VOTERS_KEYS = ['authors', 'complete', 'indexing', 'items', 'next', 'total']
+const TOP_KEYS = ['back', 'seq']
+const TOP_MAX = 8
 const FOLLOW_CURSOR_KEYS = ['atMs', 'key']
 const TESTIMONIALS_KEYS = ['complete', 'indexing', 'pending', 'shown']
 const SHOWN_KEYS = ['from', 'seq', 'wseq']
 const PENDING_KEYS = ['from', 'seq']
+const SCRAPS_KEYS = ['complete', 'hides', 'indexing', 'next', 'scraps', 'wall']
+const SCRAP_ROW_KEYS = ['author', 'followSeq', 'seq']
+const FOLLOW_PAIR_KEYS = ['indexing', 'seq']
+const SCRAP_CURSOR = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/
 const FEIRA_KEYS = ['authors', 'complete', 'indexing', 'items', 'next']
 const FEIRA_ITEM_KEYS = ['editSeq', 'ref', 'status', 'statusSeq']
 const FEIRA_RATING_KEYS = ['ref']
@@ -177,6 +199,7 @@ const isHex64 = (s) => typeof s === 'string' && HEX64.test(s)
 const isCount = (n) => Number.isSafeInteger(n) && n >= 0
 const isSeq = (n) => Number.isSafeInteger(n) && n >= 1
 const isHint = (n) => n === null || isSeq(n)
+const isPollPick = (n) => Number.isSafeInteger(n) && n >= 0 && n <= 3
 const isFollowKind = (k) => k === 'seguindo' || k === 'seguidores'
 
 function isCanonicalIso (s) {
@@ -253,6 +276,17 @@ export function postUrl (ref, cursor = null) {
   return resolveUrl('/index/post/' + author + '/' + seq + (cursor === null ? '' : '/' + cursor))
 }
 
+// The seq is capped at 15 digits, the seeder's route regex: a longer one
+// would come back 404 and read as an older seeder.
+export function rodaUrl (ref, cursor = null) {
+  const r = inputRef(ref)
+  if (r === null) return null
+  const [author, seq] = r.split(':')
+  if (seq.length > 15) return null
+  if (cursor !== null && !isCursor(cursor)) return null
+  return resolveUrl('/index/roda/' + author + '/' + seq + (cursor === null ? '' : '/' + cursor))
+}
+
 // Duplicates are dropped (first occurrence kept); 1..31 distinct refs.
 export function countsUrl (refs) {
   const list = countsInput(refs)
@@ -308,6 +342,30 @@ export function testimonialsUrl (owner) {
   return o === null ? null : resolveUrl('/index/testimonials/' + o)
 }
 
+// Recados: GET /index/scraps/<owner>[/<cursor>] and
+// GET /index/follow/<author>/<target>. The seeder only points; the node
+// re-reads every pointer.
+export function scrapsUrl (owner, cursor = null) {
+  const o = inputAuthor(owner)
+  if (o === null) return null
+  if (cursor !== null && (typeof cursor !== 'string' || !SCRAP_CURSOR.test(cursor))) return null
+  return resolveUrl('/index/scraps/' + o + (cursor === null ? '' : '/' + cursor))
+}
+
+// Perfil rico: GET /index/profile/<author>. An open object of pointers; a
+// later change adds keys, so a reader ignores the ones it does not know.
+export function profileUrl (author) {
+  const a = inputAuthor(author)
+  return a === null ? null : resolveUrl('/index/profile/' + a)
+}
+
+export function followPairUrl (author, target) {
+  const a = inputAuthor(author)
+  const b = inputAuthor(target)
+  if (a === null || b === null) return null
+  return resolveUrl('/index/follow/' + a + '/' + b)
+}
+
 // An invalid cursor is null, never dropped: dropping it would silently
 // restart the list from the top.
 export function followsUrl (author, kind, cursor = null) {
@@ -315,6 +373,40 @@ export function followsUrl (author, kind, cursor = null) {
   if (a === null || !isFollowKind(kind)) return null
   if (cursor !== null && !isFollowCursor(cursor)) return null
   return resolveUrl('/index/follows/' + a + '/' + kind + (cursor === null ? '' : '/' + cursor.atMs + '.' + cursor.key))
+}
+
+// Fãs: GET /index/fans/<author>[/<cursor>], newest first, the same cursor as
+// the follower list. An invalid cursor is null, never dropped.
+export function fansUrl (author, cursor = null) {
+  const a = inputAuthor(author)
+  if (a === null) return null
+  if (cursor !== null && !isFollowCursor(cursor)) return null
+  return resolveUrl('/index/fans/' + a + (cursor === null ? '' : '/' + cursor.atMs + '.' + cursor.key))
+}
+
+// Eventos: GET /index/events/<author>[/<before>] lists the seqs of the author's
+// event posts, newest first (a seeder claim: the node verifies each post).
+export function eventsUrl (author, before = null) {
+  const a = inputAuthor(author)
+  if (a === null) return null
+  if (before !== null && !isSeq(before)) return null
+  return resolveUrl('/index/events/' + a + (before === null ? '' : '/' + before))
+}
+
+// Enquetes: GET /index/poll/<author>/<seq> answers the totals per option (a
+// seeder claim); .../<pick>[/<cursor>] lists voter pointers for one option,
+// newest first, with the follower-list cursor. An invalid input is null.
+export function pollUrl (author, seq) {
+  const a = inputAuthor(author)
+  if (a === null || !isSeq(seq)) return null
+  return resolveUrl('/index/poll/' + a + '/' + seq)
+}
+
+export function pollVotersUrl (author, seq, pick, cursor = null) {
+  const a = inputAuthor(author)
+  if (a === null || !isSeq(seq) || !isPollPick(pick)) return null
+  if (cursor !== null && !isFollowCursor(cursor)) return null
+  return resolveUrl('/index/poll/' + a + '/' + seq + '/' + pick + (cursor === null ? '' : '/' + cursor.atMs + '.' + cursor.key))
 }
 
 // `segment` is already folded by the caller; it is only checked here.
@@ -754,6 +846,47 @@ export function validPostIndex (body, ref) {
   }
 }
 
+// Root and top differ and the asked ref is never the root. Items: <= 50
+// distinct { ref, to }, none the root or the top, none answering itself or
+// the root, and a `to` listed on the same page comes before its child (the
+// seeder sorts every child after its parent). `next` names the last row, as
+// the seeder's cursor does. Authors: exactly one hint for each of the asked,
+// root, top and item authors.
+export function validRoda (body, ref) {
+  if (!hasExactKeys(body, RODA_KEYS)) return null
+  if (!isRef(body.ref) || (ref !== undefined && body.ref !== ref)) return null
+  const { root, top } = body
+  if (!isRef(root) || !isRef(top) || root === top || body.ref === root) return null
+  if (!Array.isArray(body.items) || body.items.length > RODA_MAX) return null
+  const listed = new Set()
+  for (const it of body.items) {
+    if (!hasExactKeys(it, RODA_ITEM_KEYS) || !isRef(it.ref) || !isRef(it.to)) return null
+    listed.add(it.ref)
+  }
+  if (listed.size !== body.items.length) return null
+  const items = []
+  const seen = new Set()
+  for (const it of body.items) {
+    if (it.ref === root || it.ref === top || it.ref === it.to || it.to === root) return null
+    if (listed.has(it.to) && !seen.has(it.to)) return null
+    seen.add(it.ref)
+    items.push({ ref: it.ref, to: it.to })
+  }
+  if (body.next !== null) {
+    if (!isCursor(body.next) || items.length === 0) return null
+    const [, author, seq] = body.next.split('.')
+    if (items[items.length - 1].ref !== author + ':' + seq) return null
+  }
+  if (!isCount(body.total) || body.total < items.length) return null
+  if (typeof body.indexing !== 'boolean' || typeof body.complete !== 'boolean') return null
+  const authors = validAuthors(body.authors)
+  if (authors === null) return null
+  const wanted = new Set([body.ref, root, top, ...items.map((i) => i.ref)].map((r) => r.split(':')[0]))
+  const got = Object.keys(authors)
+  if (got.length !== wanted.size || !got.every((k) => wanted.has(k))) return null
+  return { ref: body.ref, root, top, items, next: body.next, total: body.total, authors, indexing: body.indexing, complete: body.complete }
+}
+
 // `asked`: the requested refs; a ref outside them is refused.
 export function validCounts (body, asked) {
   if (!hasExactKeys(body, COUNTS_KEYS) || !isPlain(body.counts)) return null
@@ -794,6 +927,23 @@ export function validMemberIndex (body, before = null) {
     complete: body.complete,
     ...hint
   }
+}
+
+// Events: posts <= 30 seqs, strictly descending and below `before` when given;
+// next is null or the last seq of a non-empty page; total a count.
+export function validEvents (body, before = null) {
+  if (!hasExactKeys(body, EVENTS_KEYS)) return null
+  if (typeof body.indexing !== 'boolean' || typeof body.complete !== 'boolean') return null
+  const events = body.posts
+  if (!isCount(body.total)) return null
+  if (!Array.isArray(events) || events.length > EVENTS_MAX) return null
+  let prev = before === null ? Infinity : before
+  for (const seq of events) {
+    if (!isSeq(seq) || seq >= prev) return null
+    prev = seq
+  }
+  if (body.next !== null && (!isSeq(body.next) || events.length === 0 || body.next !== events[events.length - 1])) return null
+  return { posts: events.slice(), next: body.next, total: body.total, indexing: body.indexing, complete: body.complete }
 }
 
 // Items: <= 30 distinct refs (may be empty). Authors: exactly one hint per
@@ -920,6 +1070,140 @@ export function validTestimonials (body, owner = null) {
     pending.push({ from: row.from, seq: row.seq })
   }
   return { shown, pending, indexing: body.indexing, complete: body.complete }
+}
+
+// Pointer rows for readPointers: `scraps` is mapped to `rows`.
+// `owner` is required; `cursor` is the one asked for: a `next` equal to it
+// would page forever, so it is dropped and the read is marked incomplete.
+export function validScraps (body, owner, cursor = null) {
+  if (!isHex64(owner)) return null
+  if (!hasExactKeys(body, SCRAPS_KEYS) || !isFlags(body)) return null
+  if (!Array.isArray(body.scraps) || body.scraps.length > SCRAPS_MAX) return null
+  if (!Array.isArray(body.hides) || body.hides.length > SCRAP_HIDES_MAX) return null
+  if (!isHint(body.wall)) return null
+  if (body.next !== null && (typeof body.next !== 'string' || !SCRAP_CURSOR.test(body.next))) return null
+  const seen = new Set()
+  const perAuthor = new Map()
+  const rows = []
+  for (const row of body.scraps) {
+    if (!hasExactKeys(row, SCRAP_ROW_KEYS) || !isHex64(row.author) || row.author === owner) return null
+    if (!isSeq(row.seq) || !isHint(row.followSeq)) return null
+    const ref = row.author + ':' + row.seq
+    if (seen.has(ref)) return null
+    seen.add(ref)
+    const n = (perAuthor.get(row.author) || 0) + 1
+    if (n > SCRAP_PER_WRITER_MAX) return null
+    perAuthor.set(row.author, n)
+    rows.push({ author: row.author, seq: row.seq, followSeq: row.followSeq })
+  }
+  const hideSeen = new Set()
+  for (const h of body.hides) {
+    if (!isSeq(h) || hideSeen.has(h)) return null
+    hideSeen.add(h)
+  }
+  const stuck = body.next !== null && body.next === cursor
+  return { rows, hides: body.hides.slice(), wall: body.wall, next: stuck ? null : body.next, indexing: body.indexing, complete: stuck ? false : body.complete }
+}
+
+// Tolerant: unknown keys are ignored, the known ones are checked. `about` and
+// `mood` are the seq of the author's latest profile-about and mood record, or
+// null (a key a seeder does not send yet reads as null). The node re-reads
+// the record itself.
+export function validProfile (body) {
+  if (!isPlain(body) || !isFlags(body)) return null
+  const about = body.about === undefined ? null : body.about
+  const mood = body.mood === undefined ? null : body.mood
+  if (!isHint(about) || !isHint(mood)) return null
+  const out = { about, mood, indexing: body.indexing, complete: body.complete }
+  // Fãs and Melhores amigos: strict when present, null when absent.
+  let fans = null
+  if (body.fans !== undefined && body.fans !== null) {
+    if (!hasExactKeys(body.fans, FANS_COUNT_KEYS) || !isCount(body.fans.count) || typeof body.fans.indexing !== 'boolean') return null
+    fans = { count: body.fans.count, indexing: body.fans.indexing }
+  }
+  let top = null
+  if (body.top !== undefined && body.top !== null) {
+    const t = body.top
+    if (!hasExactKeys(t, TOP_KEYS) || !isSeq(t.seq) || !isPlain(t.back)) return null
+    const keys = Object.keys(t.back)
+    if (keys.length > TOP_MAX) return null
+    const back = {}
+    for (const k of keys) {
+      if (!isHex64(k) || !isHint(t.back[k])) return null
+      back[k] = t.back[k]
+    }
+    top = { seq: t.seq, back }
+  }
+  return { ...out, fans, top }
+}
+
+// Same rows, cursor and flags as validFollows, without a `kind`.
+export function validFans (body, author, cursor = null) {
+  if (!isPlain(body) || Object.prototype.hasOwnProperty.call(body, 'kind')) return null
+  const ok = validFollows({ ...body, kind: 'seguidores' }, author, 'seguidores', cursor)
+  if (ok === null) return null
+  const { kind, ...rest } = ok
+  return rest
+}
+
+// Poll totals: one count per option (2..4, or `count` when the caller knows
+// the poll), or [] while the seeder is still indexing (indexing true, complete
+// false). Claims only: nothing here is verified.
+export function validPoll (body, count) {
+  if (!hasExactKeys(body, POLL_KEYS) || !isFlags(body)) return null
+  const t = body.totals
+  if (!Array.isArray(t)) return null
+  if (t.length === 0) {
+    if (body.indexing !== true || body.complete !== false) return null
+    return { totals: [], indexing: true, complete: false }
+  }
+  if (t.length < 2 || t.length > 4 || (count !== undefined && t.length !== count)) return null
+  for (let i = 0; i < t.length; i++) if (!Object.prototype.hasOwnProperty.call(t, i) || !isCount(t[i])) return null
+  return { totals: t.slice(), indexing: body.indexing, complete: body.complete }
+}
+
+// Voter pointers of one option: the rows, order, cursor and `next` rules of
+// validFollows, with one author hint per item key (the node verifies each
+// block).
+export function validPollVoters (body, cursor = null) {
+  if (!hasExactKeys(body, POLL_VOTERS_KEYS) || !isFlags(body)) return null
+  const list = body.items
+  if (!Array.isArray(list) || list.length > FOLLOWS_MAX) return null
+  const seen = new Set()
+  const items = []
+  let prev = isFollowCursor(cursor) ? cursor : null
+  for (const it of list) {
+    if (!hasExactKeys(it, FOLLOW_ITEM_KEYS) || !isHex64(it.key)) return null
+    if (!isSeq(it.seq) || !isCanonicalIso(it.at) || seen.has(it.key)) return null
+    const t = followT(it.at)
+    if (prev !== null && !(t < prev.atMs || (t === prev.atMs && it.key > prev.key))) return null
+    prev = { atMs: t, key: it.key }
+    seen.add(it.key)
+    items.push({ key: it.key, seq: it.seq, at: it.at })
+  }
+  if (body.next !== null) {
+    if (!isFollowCursor(body.next) || items.length === 0) return null
+    const last = items[items.length - 1]
+    if (body.next.key !== last.key || body.next.atMs !== followT(last.at)) return null
+  }
+  if (!isCount(body.total) || body.total < items.length) return null
+  const authors = validAuthors(body.authors)
+  if (authors === null) return null
+  const got = Object.keys(authors)
+  if (got.length !== seen.size || !got.every((k) => seen.has(k))) return null
+  return {
+    items,
+    next: body.next === null ? null : { atMs: body.next.atMs, key: body.next.key },
+    total: body.total,
+    authors,
+    indexing: body.indexing,
+    complete: body.complete
+  }
+}
+
+export function validFollowPair (body) {
+  if (!hasExactKeys(body, FOLLOW_PAIR_KEYS) || typeof body.indexing !== 'boolean' || !isHint(body.seq)) return null
+  return { seq: body.seq, indexing: body.indexing }
 }
 
 // The follow index order: the time clamped at 0, newest first, then key.
@@ -1118,6 +1402,12 @@ export function fetchPost (ref, cursor = null, deps = {}) {
   return run(url, (body) => validPostIndex(body, r), deps)
 }
 
+export function fetchRoda (ref, cursor = null, deps = {}) {
+  const url = rodaUrl(ref, cursor)
+  const r = url === null ? null : inputRef(ref)
+  return run(url, (body) => validRoda(body, r), deps)
+}
+
 export function fetchCounts (refs, deps = {}) {
   const asked = countsInput(refs)
   const url = asked === null ? null : resolveUrl('/index/counts/' + asked.join(','))
@@ -1219,6 +1509,41 @@ export function fetchTestimonials (owner, deps = {}) {
   const url = testimonialsUrl(owner)
   const o = url === null ? null : inputAuthor(owner)
   return run(url, (body) => validTestimonials(body, o), deps)
+}
+
+export function fetchScraps (owner, cursor = null, deps = {}) {
+  const url = scrapsUrl(owner, cursor)
+  const o = url === null ? null : inputAuthor(owner)
+  return run(url, (body) => validScraps(body, o, cursor), deps)
+}
+
+export function fetchProfile (author, deps = {}) {
+  return run(profileUrl(author), validProfile, deps)
+}
+
+export function fetchEvents (author, before = null, deps = {}) {
+  return run(eventsUrl(author, before), (body) => validEvents(body, before), deps)
+}
+
+export function fetchFollowPair (author, target, deps = {}) {
+  return run(followPairUrl(author, target), validFollowPair, deps)
+}
+
+// `count` is the poll's own option count (2..4, from the verified post): the
+// totals must have exactly that many entries, so the caller always passes it.
+export function fetchPoll (author, seq, count, deps = {}) {
+  const sized = Number.isInteger(count) && count >= 2 && count <= 4
+  return run(sized ? pollUrl(author, seq) : null, (body) => validPoll(body, count), deps)
+}
+
+export function fetchPollVoters (author, seq, pick, cursor = null, deps = {}) {
+  return run(pollVotersUrl(author, seq, pick, cursor), (body) => validPollVoters(body, cursor), deps)
+}
+
+export function fetchFans (author, cursor = null, deps = {}) {
+  const url = fansUrl(author, cursor)
+  const a = url === null ? null : inputAuthor(author)
+  return run(url, (body) => validFans(body, a, cursor), deps)
 }
 
 export function fetchFollows (author, kind, cursor = null, deps = {}) {

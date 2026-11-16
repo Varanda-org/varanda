@@ -127,6 +127,20 @@ test('socialRowProps: repost, page diary, other kinds and a missing origin', asy
   t.is(ruaRow(socialRowProps, post(ME, 7)).link, null, 'postLink refuses an origin with a path')
 })
 
+test('a poll post hands its options to the row, only on a diary post', async (t) => {
+  reset()
+  const { socialRowProps, rowProps } = await builders()
+  const poll = ['Sim', 'Não']
+  t.alike(ruaRow(socialRowProps, post(THEM, 4, { poll })).poll, poll, 'A Rua row')
+  t.absent(Object.hasOwn(ruaRow(socialRowProps, post(THEM, 4)), 'poll'), 'a plain post has no poll prop')
+  t.absent(Object.hasOwn(ruaRow(socialRowProps, post(PAGE, 2, { poll }), { ownKey: PAGE }), 'poll'), 'a page\'s diary is no diary post')
+  t.absent(Object.hasOwn(ruaRow(socialRowProps, post(THEM, 4, { poll, kind: 'dm' })), 'poll'), 'a chat item is never a diary post')
+  t.absent(Object.hasOwn(ruaRow(socialRowProps, post(THEM, 4, { poll: 'Sim' })), 'poll'), 'not an array')
+  t.alike(conversaRow(rowProps, post(THEM, 4, { poll })).poll, poll, 'thread and profile rows')
+  t.absent(Object.hasOwn(conversaRow(rowProps, post(THEM, 4)), 'poll'))
+  t.absent(Object.hasOwn(conversaRow(rowProps, post(THEM, 4, { poll, kind: 'dm' })), 'poll'))
+})
+
 test('socialRowProps: never the page acted as', async (t) => {
   reset()
   const { socialRowProps } = await builders()

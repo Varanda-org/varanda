@@ -1,7 +1,7 @@
 'use strict'
 
 const test = require('brittle')
-const { MAX_TESTIMONIAL, TESTIMONIAL_PENDING_MAX, MAX_MESSAGE, MAX_ID, utf8ByteLength } = require('..')
+const { MAX_TESTIMONIAL, MAX_SCRAP, MAX_TOP_FRIENDS, TESTIMONIAL_PENDING_MAX, TESTIMONIAL_KEPT_MAX, TESTIMONIAL_DECLINED_MAX, MAX_MESSAGE, MAX_ID, utf8ByteLength } = require('..')
 const { createServerDispatcher, validateResponse, validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PEEK_LIMIT_MAX, NOTICES_LIMIT_DEFAULT, NOTICES_LIMIT_MAX, PROFILE_LIMIT_MAX, ENGAGEMENT_LIMIT_MAX, PEEK_SEQS_MAX, PEEK_TIMEOUT_MS, GROUP_LIMIT_DEFAULT, GROUP_LIMIT_MAX, GROUP_MEMBERS_LIMIT_MAX, MAX_GROUP_NAME, DM_THREAD_LIMIT_MAX } = require('..')
 
 const KEY = 'ab'.repeat(32)
@@ -18,28 +18,57 @@ const bad = (t, method, params, label) => {
 
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
-    'account.sign', 'age.proof', 'age.sign', 'appeal.sign', 'block.list', 'block.set', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'diary.peek',
-    'dm.enable', 'dm.list', 'dm.lookup', 'dm.pageDraft', 'dm.pageForget', 'dm.pageGenerate', 'dm.pageLegacyBlocks', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.pageShare', 'dm.pull', 'dm.putMedia', 'dm.react', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
-    'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
-    'group.meta', 'group.post', 'group.react', 'group.reactors', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen',
+    'account.sign', 'age.proof', 'age.sign', 'appeal.sign', 'block.list', 'block.set', 'cert.add', 'choice.mine', 'choice.set', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'diary.peek',
+    'dm.enable', 'dm.list', 'dm.lookup', 'dm.pageDraft', 'dm.pageForget', 'dm.pageGenerate', 'dm.pageLegacyBlocks', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.pageShare', 'dm.pull', 'dm.putMedia', 'dm.react', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'fan.set', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
+    'group.admin', 'group.admit', 'group.ban', 'group.choose', 'group.create', 'group.events', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
+    'group.meta', 'group.post', 'group.react', 'group.reactors', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen', 'group.topics', 'group.voters',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
     'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moments.read', 'node.close', 'node.info', 'notices.list', 'outbox.open', 'outbox.seal',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read', 'phone.proof', 'phone.sign',
-    'post.create', 'post.delete', 'post.quote', 'post.reply', 'post.share', 'post.shared', 'post.unshare', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
-    'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'username.add'
+    'post.create', 'post.delete', 'post.quote', 'post.reply', 'post.share', 'post.shared', 'post.unshare', 'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
+    'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.decide', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
-    'block.set', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.react', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
-    'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.react', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
+    'block.set', 'cert.add', 'choice.set', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.react', 'dm.send', 'dm.set', 'fan.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
+    'group.choose', 'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.react', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
     'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'listing.create', 'listing.delete', 'listing.edit', 'listing.rate', 'listing.status', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'node.close', 'page.register', 'post.create', 'post.delete',
     'post.quote', 'post.reply', 'post.share', 'post.unshare',
-    'profile.delete', 'profile.set', 'repost.set', 'sync.start', 'sync.stop', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'username.add'
+    'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.set', 'repost.set', 'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'sync.start', 'sync.stop', 'testimonial.decide', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add'
   ])
 })
 
 test('testimonial limits', (t) => {
   t.is(MAX_TESTIMONIAL, 400)
   t.is(TESTIMONIAL_PENDING_MAX, 64)
+  t.is(TESTIMONIAL_KEPT_MAX, 64)
+  t.is(TESTIMONIAL_DECLINED_MAX, 64)
+})
+
+test('testimonial.decide: kept or declined, u32 seq, optional boolean ifNew', (t) => {
+  t.ok(isMutating('testimonial.decide'))
+  ok(t, 'testimonial.decide', { from: KEY, seq: 1, state: 'kept' }, { from: KEY, seq: 1, state: 'kept', ifNew: false })
+  ok(t, 'testimonial.decide', { from: KEY, seq: 4294967295, state: 'declined', ifNew: true }, { from: KEY, seq: 4294967295, state: 'declined', ifNew: true })
+  ok(t, 'testimonial.decide', { from: KEY, seq: 2, state: 'declined', ifNew: false })
+  for (const field of ['from', 'seq', 'state']) {
+    const missing = { from: KEY, seq: 1, state: 'kept' }
+    delete missing[field]
+    bad(t, 'testimonial.decide', missing, 'missing ' + field)
+  }
+  for (const state of ['hidden', 'shown', 'KEPT', '', null, undefined, 1, true]) {
+    bad(t, 'testimonial.decide', { from: KEY, seq: 1, state }, 'state ' + JSON.stringify(state))
+  }
+  for (const seq of [0, -1, 1.5, 4294967296, Number.MAX_SAFE_INTEGER, '1', null]) {
+    bad(t, 'testimonial.decide', { from: KEY, seq, state: 'kept' }, 'seq ' + String(seq))
+  }
+  for (const from of ['', KEY.toUpperCase(), 'ab'.repeat(31), KEY + ':1', null, 1]) {
+    bad(t, 'testimonial.decide', { from, seq: 1, state: 'kept' })
+  }
+  for (const ifNew of [1, 0, 'true', null, {}]) {
+    bad(t, 'testimonial.decide', { from: KEY, seq: 1, state: 'kept', ifNew }, 'ifNew ' + JSON.stringify(ifNew))
+  }
+  for (const extra of ['extra', 'nonce', 't', 'at', 'on']) {
+    bad(t, 'testimonial.decide', { from: KEY, seq: 1, state: 'kept', [extra]: KEY }, 'extra ' + extra)
+  }
 })
 
 const TESTIMONIAL_PARAMS = [
@@ -116,7 +145,7 @@ test('testimonial results survive RPC response validation', async (t) => {
   const row = { from: KEY, seq, text: '😀'.repeat(400), at: '+275760-09-13T00:00:00.000Z' }
   const results = {
     'testimonial.write': [{ seq, ref: KEY + ':' + seq }],
-    'testimonial.pending': [{ items: [], incomplete: false }, { items: [], incomplete: true }, { items: Array.from({ length: 64 }, () => ({ ...row })), incomplete: false }],
+    'testimonial.pending': [{ items: [], kept: [], incomplete: false }, { items: [], kept: [], incomplete: true }, { items: Array.from({ length: 64 }, () => ({ ...row })), kept: Array.from({ length: 64 }, () => ({ ...row })), incomplete: false }],
     'testimonial.show': [{ seq, ref: KEY + ':' + seq }],
     'testimonial.delete': [{ seq, deleted: [1] }]
   }
@@ -139,7 +168,7 @@ test('testimonial results survive RPC response validation', async (t) => {
       }
       if (method === 'testimonial.pending' && result.items.length === 64) {
         const bytes = utf8ByteLength(JSON.stringify(message))
-        t.is(bytes, 111689, 'maximal four-byte texts, keys, seqs, dates, incomplete flag and envelope')
+        t.is(bytes, 223314, 'maximal pending and kept lists: four-byte texts, keys, seqs, dates, incomplete flag and envelope')
         t.ok(bytes < MAX_MESSAGE, 'pending result fits MAX_MESSAGE')
       }
       dispatcher.close()
@@ -2774,4 +2803,362 @@ test('post.shared, post.share and post.unshare take one canonical ref and nothin
       t.is(validateParams(method, { to }).message, 'parâmetro inválido: to', method + ' ' + JSON.stringify(to))
     }
   }
+})
+
+const SCRAP_PARAMS = [
+  ['scrap.write', { to: KEY, text: 'oi' }],
+  ['scrap.hide', { from: KEY, seq: 1 }],
+  ['scrap.wall', { who: 'following' }],
+  ['scrap.delete', { seq: 1 }]
+]
+
+test('scrap limits', (t) => {
+  t.is(MAX_SCRAP, 400)
+})
+
+for (const [method, params] of SCRAP_PARAMS) {
+  test(method + ': mutating, required fields and exact params', (t) => {
+    t.is(isMutating(method), true)
+    ok(t, method, params, params)
+    for (const field of Object.keys(params)) {
+      const missing = { ...params }
+      delete missing[field]
+      bad(t, method, missing, 'missing ' + field)
+    }
+    bad(t, method, { ...params, extra: KEY }, 'extra field')
+    for (const invalid of [null, [], 'params', 1, Object.create(params)]) {
+      bad(t, method, invalid, 'invalid params object')
+    }
+  })
+}
+
+test('scrap.write: text bounds and optional replyTo ref', (t) => {
+  ok(t, 'scrap.write', { to: KEY, text: 'a'.repeat(400) })
+  ok(t, 'scrap.write', { to: KEY, text: '😀'.repeat(400) })
+  bad(t, 'scrap.write', { to: KEY, text: '' }, 'empty text')
+  bad(t, 'scrap.write', { to: KEY, text: 'a'.repeat(401) }, 'long text')
+  bad(t, 'scrap.write', { to: KEY, text: 1 }, 'text type')
+  bad(t, 'scrap.write', { to: KEY.toUpperCase(), text: 'oi' }, 'uppercase key')
+  bad(t, 'scrap.write', { to: KEY.slice(1), text: 'oi' }, 'short key')
+  ok(t, 'scrap.write', { to: KEY, text: 'oi', replyTo: KEY + ':3' }, { to: KEY, text: 'oi', replyTo: KEY + ':3' })
+  for (const replyTo of [KEY, KEY + ':0', KEY + ':03', KEY + ':-1', KEY.toUpperCase() + ':1', 5, null, { author: KEY, seq: 1 }]) {
+    bad(t, 'scrap.write', { to: KEY, text: 'oi', replyTo }, 'replyTo ' + JSON.stringify(replyTo))
+  }
+})
+
+test('scrap.hide, scrap.delete and scrap.wall: value rules', (t) => {
+  for (const seq of [0, -1, 1.5, '1', null, Number.MAX_SAFE_INTEGER + 1]) {
+    bad(t, 'scrap.hide', { from: KEY, seq }, 'hide seq ' + seq)
+    bad(t, 'scrap.delete', { seq }, 'delete seq ' + seq)
+  }
+  ok(t, 'scrap.hide', { from: KEY, seq: Number.MAX_SAFE_INTEGER })
+  bad(t, 'scrap.hide', { from: KEY.slice(1), seq: 1 }, 'hide from')
+  for (const who of ['following', 'everyone', 'nobody']) ok(t, 'scrap.wall', { who })
+  for (const who of ['', 'Everyone', 'all', 1, null, ['nobody']]) bad(t, 'scrap.wall', { who }, 'who ' + JSON.stringify(who))
+})
+
+const ABOUT = { about: 'Moro em Recife', city: 'Recife', work: 'Professora', studies: 'Letras', interests: 'forró, café', birthday: '03-14', theme: 'mar' }
+const ABOUT_NULL = { about: null, city: null, work: null, studies: null, interests: null, birthday: null, theme: null }
+
+test('profile.about: mutating, seven required nullable fields and exact params', (t) => {
+  t.is(isMutating('profile.about'), true)
+  ok(t, 'profile.about', ABOUT, ABOUT)
+  ok(t, 'profile.about', ABOUT_NULL, ABOUT_NULL)
+  for (const field of Object.keys(ABOUT)) {
+    const missing = { ...ABOUT }
+    delete missing[field]
+    bad(t, 'profile.about', missing, 'missing ' + field)
+    bad(t, 'profile.about', { ...ABOUT, [field]: undefined }, 'undefined ' + field)
+    bad(t, 'profile.about', { ...ABOUT, [field]: 5 }, 'number ' + field)
+    bad(t, 'profile.about', { ...ABOUT, [field]: '' }, 'empty string ' + field + ' (null is empty)')
+  }
+  bad(t, 'profile.about', { ...ABOUT, extra: 1 }, 'extra field')
+  for (const invalid of [null, [], 'params', 1, Object.create(ABOUT)]) bad(t, 'profile.about', invalid, 'invalid params object')
+})
+
+test('profile.about: limits, controls and birthday and theme values', (t) => {
+  for (const [field, max] of [['about', 600], ['city', 60], ['work', 80], ['studies', 80], ['interests', 200]]) {
+    ok(t, 'profile.about', { ...ABOUT, [field]: 'a'.repeat(max) })
+    ok(t, 'profile.about', { ...ABOUT, [field]: '😀'.repeat(max) })
+    bad(t, 'profile.about', { ...ABOUT, [field]: 'a'.repeat(max + 1) }, field + ' too long')
+    bad(t, 'profile.about', { ...ABOUT, [field]: '   ' }, field + ' blank')
+    bad(t, 'profile.about', { ...ABOUT, [field]: 'a\u0000b' }, field + ' control')
+    bad(t, 'profile.about', { ...ABOUT, [field]: 'a\ud800b' }, field + ' lone surrogate')
+    bad(t, 'profile.about', { ...ABOUT, [field]: 'a\u202eb' }, field + ' bidi override')
+  }
+  ok(t, 'profile.about', { ...ABOUT, about: 'a\nb' })
+  for (const field of ['city', 'work', 'studies', 'interests']) bad(t, 'profile.about', { ...ABOUT, [field]: 'a\nb' }, field + ' newline')
+  for (const birthday of ['01-01', '02-29', '12-31', '04-30']) ok(t, 'profile.about', { ...ABOUT, birthday })
+  for (const birthday of ['00-10', '13-01', '01-00', '01-32', '02-30', '04-31', '1-1', '2000-01-01', '01/01', '01-01 ', 5]) {
+    bad(t, 'profile.about', { ...ABOUT, birthday }, 'birthday ' + birthday)
+  }
+  for (const theme of ['varanda', 'floresta', 'mar', 'por-do-sol', 'ipe', 'flor', 'lavanda', 'terra']) ok(t, 'profile.about', { ...ABOUT, theme })
+  for (const theme of ['', 'Mar', 'rosa', 'javascript:1', 5, ['mar']]) bad(t, 'profile.about', { ...ABOUT, theme }, 'theme ' + JSON.stringify(theme))
+})
+
+test('profile.mood: mutating, emoji required, text defaults to empty', (t) => {
+  t.is(isMutating('profile.mood'), true)
+  ok(t, 'profile.mood', { emoji: '😀', text: 'feliz' }, { emoji: '😀', text: 'feliz' })
+  ok(t, 'profile.mood', { emoji: '😀' }, { emoji: '😀', text: '' })
+  ok(t, 'profile.mood', { emoji: '', text: 'só texto' })
+  ok(t, 'profile.mood', { emoji: '', text: '' }, { emoji: '', text: '' })
+  bad(t, 'profile.mood', { text: 'oi' }, 'missing emoji')
+  bad(t, 'profile.mood', { emoji: '😀', extra: 1 }, 'extra field')
+  for (const invalid of [null, [], 'params', 1]) bad(t, 'profile.mood', invalid, 'invalid params object')
+})
+
+test('profile.extra.delete: mutating, kind about or mood and exact params', (t) => {
+  t.is(isMutating('profile.extra.delete'), true)
+  ok(t, 'profile.extra.delete', { kind: 'about' }, { kind: 'about' })
+  ok(t, 'profile.extra.delete', { kind: 'mood' }, { kind: 'mood' })
+  bad(t, 'profile.extra.delete', {}, 'missing kind')
+  t.is(validateParams('profile.extra.delete', {}).message, 'parâmetro obrigatório: kind')
+  for (const kind of ['', 'About', 'profile-about', 'profile', 'theme', 1, null, ['about']]) {
+    bad(t, 'profile.extra.delete', { kind }, 'kind ' + JSON.stringify(kind))
+    t.is(validateParams('profile.extra.delete', { kind }).message, 'parâmetro inválido: kind')
+  }
+  bad(t, 'profile.extra.delete', { kind: 'about', seq: 1 }, 'extra field')
+  for (const invalid of [null, [], 'params', 1, Object.create({ kind: 'about' })]) bad(t, 'profile.extra.delete', invalid, 'invalid params object')
+})
+
+test('profile.mood: one emoji and a short single-line text', (t) => {
+  for (const emoji of ['👨\u200d👩\u200d👧', '🇧🇷', '👍🏽', '1\ufe0f\u20e3']) ok(t, 'profile.mood', { emoji, text: '' })
+  for (const emoji of ['a', '😀😀', 'oi 😀', '😀\u0000', ' ', 5, null, '\u200d']) bad(t, 'profile.mood', { emoji, text: '' }, 'emoji ' + JSON.stringify(emoji))
+  ok(t, 'profile.mood', { emoji: '😀', text: 'a'.repeat(60) })
+  ok(t, 'profile.mood', { emoji: '😀', text: '😀'.repeat(60) })
+  bad(t, 'profile.mood', { emoji: '😀', text: 'a'.repeat(61) }, 'long text')
+  bad(t, 'profile.mood', { emoji: '😀', text: 'a\nb' }, 'newline')
+  bad(t, 'profile.mood', { emoji: '😀', text: 'a\u0000b' }, 'control')
+  bad(t, 'profile.mood', { emoji: '😀', text: 'a\ud800b' }, 'lone surrogate')
+  bad(t, 'profile.mood', { emoji: '😀', text: 'a\u2067b' }, 'bidi isolate')
+  bad(t, 'profile.mood', { emoji: '😀', text: 5 }, 'text type')
+  bad(t, 'profile.mood', { emoji: '😀', text: null }, 'text null')
+})
+
+test('fan.set: mutating, key and on required, exact params', (t) => {
+  t.is(isMutating('fan.set'), true)
+  ok(t, 'fan.set', { key: KEY, on: true }, { key: KEY, on: true })
+  ok(t, 'fan.set', { key: KEY, on: false })
+  bad(t, 'fan.set', { key: KEY }, 'missing on')
+  bad(t, 'fan.set', { on: true }, 'missing key')
+  bad(t, 'fan.set', { key: KEY, on: 1 }, 'on type')
+  bad(t, 'fan.set', { key: KEY, on: 'true' }, 'on string')
+  bad(t, 'fan.set', { key: KEY.toUpperCase(), on: true }, 'uppercase key')
+  bad(t, 'fan.set', { key: KEY.slice(1), on: true }, 'short key')
+  bad(t, 'fan.set', { key: KEY, on: true, extra: 1 }, 'extra field')
+  for (const invalid of [null, [], 'params', 1, Object.create({ key: KEY, on: true })]) bad(t, 'fan.set', invalid, 'invalid params object')
+})
+
+test('top.set: mutating, up to eight distinct keys, empty clears', (t) => {
+  t.is(MAX_TOP_FRIENDS, 8)
+  t.is(isMutating('top.set'), true)
+  const keys = (n) => Array.from({ length: n }, (_, i) => String(i + 1).repeat(64))
+  ok(t, 'top.set', { keys: [] }, { keys: [] })
+  ok(t, 'top.set', { keys: [KEY] }, { keys: [KEY] })
+  ok(t, 'top.set', { keys: keys(8) })
+  bad(t, 'top.set', { keys: keys(9) }, 'nine keys')
+  bad(t, 'top.set', { keys: [KEY, KEY] }, 'duplicate')
+  bad(t, 'top.set', {}, 'missing keys')
+  bad(t, 'top.set', { keys: KEY }, 'string')
+  bad(t, 'top.set', { keys: null }, 'null')
+  bad(t, 'top.set', { keys: [KEY.toUpperCase()] }, 'uppercase key')
+  bad(t, 'top.set', { keys: [KEY.slice(1)] }, 'short key')
+  bad(t, 'top.set', { keys: [5] }, 'key type')
+  bad(t, 'top.set', { keys: [KEY], extra: 1 }, 'extra field')
+  for (const invalid of [null, [], 'params', 1]) bad(t, 'top.set', invalid, 'invalid params object')
+})
+
+test('poll limits', (t) => {
+  const { POLL_MIN, POLL_MAX, MAX_POLL_OPTION, GROUP_MARKED_LIMIT, GROUP_TOPICS_LIMIT, GROUP_VOTERS_MAX } = require('..')
+  t.alike([POLL_MIN, POLL_MAX, MAX_POLL_OPTION], [2, 4, 60])
+  t.is(GROUP_MARKED_LIMIT, 24)
+  t.ok(GROUP_MARKED_LIMIT < GROUP_LIMIT_MAX)
+  t.is(GROUP_TOPICS_LIMIT, 30)
+  t.is(GROUP_VOTERS_MAX, 900)
+})
+
+test('post.create: optional poll, never with media or a preview, text required', (t) => {
+  const poll = ['Sim', 'Não']
+  ok(t, 'post.create', { text: 'Vamos?', poll }, { text: 'Vamos?', poll })
+  ok(t, 'post.create', { text: 'Qual?', poll: ['a', 'b', 'c', 'd'] })
+  ok(t, 'post.create', { text: 'oi' }, { text: 'oi' })
+  bad(t, 'post.create', { text: '', poll }, 'a poll needs its question')
+  bad(t, 'post.create', { text: 'q', poll: ['a'] }, 'one option')
+  bad(t, 'post.create', { text: 'q', poll: ['a', 'b', 'c', 'd', 'e'] }, 'five options')
+  bad(t, 'post.create', { text: 'q', poll: ['a', ' a'] }, 'duplicate after trim')
+  bad(t, 'post.create', { text: 'q', poll: ['a', 'b'.repeat(61)] }, 'option over the limit')
+  bad(t, 'post.create', { text: 'q', poll: ['a', 'b\nc'] }, 'two-line option')
+  bad(t, 'post.create', { text: 'q', poll: null }, 'null poll')
+  bad(t, 'post.create', { text: 'q', poll: 'a,b' }, 'string poll')
+  const media = [{ core: KEY, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 10, sha256: KEY, width: 10, height: 10 }]
+  ok(t, 'post.create', { text: 'q', media })
+  bad(t, 'post.create', { text: 'q', poll, media }, 'poll with media')
+  // Only post.create takes a poll: a reply or a quote never does.
+  bad(t, 'post.reply', { to: KEY + ':1', text: 'q', poll }, 'reply with a poll')
+  bad(t, 'post.quote', { to: KEY + ':1', text: 'q', poll }, 'quote with a poll')
+})
+
+test('post.create: optional event, never with a poll, media or a preview', (t) => {
+  const event = { title: 'Ceia', start: '2026-12-24T20:00:00.000Z', end: null, place: '' }
+  ok(t, 'post.create', { text: 'Venham', event }, { text: 'Venham', event })
+  ok(t, 'post.create', { text: 'Venham', event: { ...event, end: '2026-12-24T23:00:00.000Z', place: 'Casa' } })
+  bad(t, 'post.create', { text: '', event }, 'an event post needs its text')
+  bad(t, 'post.create', { text: 'q', event: null }, 'null event')
+  bad(t, 'post.create', { text: 'q', event: 'x' }, 'string event')
+  bad(t, 'post.create', { text: 'q', event: { ...event, extra: 1 } }, 'extra event key')
+  bad(t, 'post.create', { text: 'q', event: { title: 'a', start: event.start, end: null } }, 'missing place')
+  bad(t, 'post.create', { text: 'q', event: { ...event, title: '' } }, 'empty title')
+  bad(t, 'post.create', { text: 'q', event: { ...event, title: 'a'.repeat(81) } }, 'long title')
+  bad(t, 'post.create', { text: 'q', event: { ...event, place: 'a'.repeat(121) } }, 'long place')
+  bad(t, 'post.create', { text: 'q', event: { ...event, start: '2026-12-24' } }, 'non-canonical start')
+  bad(t, 'post.create', { text: 'q', event: { ...event, end: event.start } }, 'end equals start')
+  bad(t, 'post.create', { text: 'q', event: { ...event, start: '2019-12-31T23:59:59.999Z' } }, 'start out of range')
+  bad(t, 'post.create', { text: 'q', event, poll: ['a', 'b'] }, 'event with a poll')
+  const media = [{ core: KEY, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 10, sha256: KEY, width: 10, height: 10 }]
+  bad(t, 'post.create', { text: 'q', event, media }, 'event with media')
+  bad(t, 'post.create', { text: '', event, media }, 'event with media and no text')
+  // Only post.create takes an event: a reply or a quote never does.
+  bad(t, 'post.reply', { to: KEY + ':1', text: 'q', event }, 'reply with an event')
+  bad(t, 'post.quote', { to: KEY + ':1', text: 'q', event }, 'quote with an event')
+})
+
+test('event params are stored as a plain copy', (t) => {
+  const event = { title: 'Ceia', start: '2026-12-24T20:00:00.000Z', end: null, place: '' }
+  const proxy = new Proxy({ ...event }, { get (o, k) { return k === 'title' ? 'x'.repeat(5000) : o[k] } })
+  for (const [method, params] of [['post.create', { text: 'q', event: proxy }], ['group.post', { group: KEY, text: 'q', event: proxy }]]) {
+    const r = validateParams(method, params)
+    if (r.ok) {
+      t.not(r.value.event, proxy, method + ' does not keep the proxy')
+      t.alike(r.value.event, event, method + ' keeps the checked values')
+      t.is(Object.getPrototypeOf(r.value.event), Object.prototype)
+    } else t.pass(method + ' rejects it')
+  }
+  const given = { ...event }
+  const r = validateParams('post.create', { text: 'q', event: given })
+  t.not(r.value.event, given, 'a copy of a plain event too')
+  t.alike(Object.keys(r.value.event), ['title', 'start', 'end', 'place'])
+})
+
+test('group.post: event on a root post, never with a poll', (t) => {
+  const event = { title: 'Ceia', start: '2026-12-24T20:00:00.000Z', end: null, place: 'Casa' }
+  ok(t, 'group.post', { group: KEY, text: 'Venham', event }, { group: KEY, text: 'Venham', fwd: 0, event })
+  ok(t, 'group.post', { group: KEY, text: 'Venham', event, topic: true })
+  ok(t, 'group.post', { group: KEY, text: 'Venham', event, fwd: 0 })
+  bad(t, 'group.post', { group: KEY, text: '', event }, 'text required')
+  bad(t, 'group.post', { group: KEY, text: 'q', event, poll: ['a', 'b'], topic: true }, 'event with a poll')
+  bad(t, 'group.post', { group: KEY, text: ' ', event }, 'a blank text')
+  bad(t, 'group.post', { group: KEY, text: '\u200b \u3164', event }, 'an invisible-only text')
+  bad(t, 'group.post', { group: KEY, text: '\u200b \u3164', event, topic: true }, 'an invisible-only text on a topic')
+  bad(t, 'group.post', { group: KEY, text: 'q', event, replyTo: { writer: KEY, seq: 1 } }, 'an event is a root')
+  bad(t, 'group.post', { group: KEY, text: 'q', event, fwd: 1 }, 'an event is not a forward')
+  bad(t, 'group.post', { group: KEY, text: 'q', event, sealed: true }, 'an event is not sealed')
+  const media = [{ core: KEY, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 10, sha256: KEY, width: 10, height: 10 }]
+  bad(t, 'group.post', { group: KEY, text: 'q', event, media }, 'event with media')
+  bad(t, 'group.post', { group: KEY, text: 'q', event: null }, 'null event')
+  bad(t, 'group.post', { group: KEY, text: 'q', event: { ...event, end: event.start } }, 'end equals start')
+  bad(t, 'group.post', { group: KEY, text: 'q', event: { ...event, extra: 1 } }, 'extra event key')
+})
+
+test('group.events: { group, cursor? }', (t) => {
+  const { GROUP_EVENTS_LIMIT } = require('..')
+  t.is(GROUP_EVENTS_LIMIT, 30)
+  t.absent(isMutating('group.events'))
+  ok(t, 'group.events', { group: KEY }, { group: KEY })
+  const cursor = { at: '2026-12-24T20:00:00.000Z', writer: KEY, seq: 3 }
+  ok(t, 'group.events', { group: KEY, cursor }, { group: KEY, cursor })
+  bad(t, 'group.events', {}, 'missing group')
+  bad(t, 'group.events', { group: KEY.slice(1) }, 'short group')
+  bad(t, 'group.events', { group: KEY, limit: 5 }, 'no limit param')
+  bad(t, 'group.events', { group: KEY, before: cursor }, 'before is not a param')
+  bad(t, 'group.events', { group: KEY, extra: 1 }, 'extra field')
+  for (const c of [null, KEY, { at: cursor.at, writer: KEY }, { ...cursor, seq: 0 }, { ...cursor, at: '2026-12-24' }, { ...cursor, extra: 1 }]) {
+    bad(t, 'group.events', { group: KEY, cursor: c }, 'cursor ' + JSON.stringify(c))
+  }
+})
+
+test('choice.set and choice.mine', (t) => {
+  t.ok(isMutating('choice.set'))
+  t.absent(isMutating('choice.mine'))
+  const to = KEY + ':7'
+  for (const pick of [0, 1, 2, 3, null]) ok(t, 'choice.set', { to, pick }, { to, pick })
+  for (const pick of [-1, 4, 1.5, '1', true, undefined]) bad(t, 'choice.set', { to, pick }, 'pick ' + String(pick))
+  bad(t, 'choice.set', { to }, 'missing pick')
+  bad(t, 'choice.set', { pick: 0 }, 'missing to')
+  for (const bad2 of [KEY + ':0', KEY, KEY.toUpperCase() + ':1', KEY + ':01', { author: KEY, seq: 1 }]) {
+    bad(t, 'choice.set', { to: bad2, pick: 0 }, 'to ' + JSON.stringify(bad2))
+    bad(t, 'choice.mine', { to: bad2 }, 'mine to ' + JSON.stringify(bad2))
+  }
+  bad(t, 'choice.set', { to, pick: 0, extra: 1 }, 'extra field')
+  ok(t, 'choice.mine', { to }, { to })
+  bad(t, 'choice.mine', {}, 'missing to')
+  bad(t, 'choice.mine', { to, pick: 0 }, 'pick is not a choice.mine param')
+})
+
+test('group.post: topic and poll', (t) => {
+  const poll = ['Sim', 'Não']
+  ok(t, 'group.post', { group: KEY, text: 'Assunto', topic: true }, { group: KEY, text: 'Assunto', fwd: 0, topic: true })
+  ok(t, 'group.post', { group: KEY, text: 'Assunto', topic: true, poll }, { group: KEY, text: 'Assunto', fwd: 0, topic: true, poll })
+  ok(t, 'group.post', { group: KEY, text: 'oi', topic: false }, { group: KEY, text: 'oi', fwd: 0, topic: false })
+  bad(t, 'group.post', { group: KEY, text: 'q', poll }, 'a poll needs topic: true')
+  bad(t, 'group.post', { group: KEY, text: 'q', topic: false, poll }, 'topic false with a poll')
+  bad(t, 'group.post', { group: KEY, text: 'q', topic: true, replyTo: { writer: KEY, seq: 1 } }, 'a topic is a root')
+  bad(t, 'group.post', { group: KEY, text: 'q', topic: true, fwd: 1 }, 'a topic is not a forward')
+  bad(t, 'group.post', { group: KEY, text: 'q', topic: 1 }, 'topic is a boolean')
+  bad(t, 'group.post', { group: KEY, text: 'q', topic: true, poll: ['a'] }, 'one option')
+  bad(t, 'group.post', { group: KEY, text: 'q', topic: true, poll: ['a', 'a '] }, 'duplicate after trim')
+  const media = [{ core: KEY, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 10, sha256: KEY, width: 10, height: 10 }]
+  ok(t, 'group.post', { group: KEY, text: 'Fotos', topic: true, media })
+  bad(t, 'group.post', { group: KEY, text: '', topic: true, media }, 'a topic needs a title')
+  bad(t, 'group.post', { group: KEY, text: '\u200b \u3164', topic: true, media }, 'a topic title cannot be invisible only')
+  bad(t, 'group.post', { group: KEY, text: '   ', topic: true }, 'a topic title cannot be blank')
+  bad(t, 'group.post', { group: KEY, text: 'q', topic: true, poll, media }, 'poll with media')
+  const sealed = [{ core: KEY, mime: 'application/octet-stream', start: 1, blocks: 1, bytes: 32768, sha256: 'cd'.repeat(32), key: 'ef'.repeat(32), nonce: 'ab'.repeat(24), plainMime: 'image/jpeg', plainSha256: KEY, w: 1, h: 1, ms: 0 }]
+  ok(t, 'group.post', { group: KEY, text: 'q', media: sealed, sealed: true })
+  bad(t, 'group.post', { group: KEY, text: 'q', topic: true, media: sealed, sealed: true }, 'a sealed post is never a topic')
+})
+
+test('group.read: marks and topic cap the page at GROUP_MARKED_LIMIT', (t) => {
+  const { GROUP_MARKED_LIMIT } = require('..')
+  const root = { writer: KEY, seq: 3 }
+  ok(t, 'group.read', { group: KEY, marks: true }, { group: KEY, limit: GROUP_MARKED_LIMIT, marks: true })
+  ok(t, 'group.read', { group: KEY, topic: root }, { group: KEY, limit: GROUP_MARKED_LIMIT, topic: root })
+  ok(t, 'group.read', { group: KEY, marks: true, limit: GROUP_MARKED_LIMIT }, { group: KEY, limit: GROUP_MARKED_LIMIT, marks: true })
+  ok(t, 'group.read', { group: KEY, marks: true, limit: 5 }, { group: KEY, limit: 5, marks: true })
+  bad(t, 'group.read', { group: KEY, marks: true, limit: GROUP_MARKED_LIMIT + 1 }, 'marked page over the cap')
+  bad(t, 'group.read', { group: KEY, topic: root, limit: GROUP_LIMIT_MAX }, 'topic page over the cap')
+  ok(t, 'group.read', { group: KEY, marks: false }, { group: KEY, limit: GROUP_LIMIT_DEFAULT, marks: false })
+  ok(t, 'group.read', { group: KEY, marks: false, limit: GROUP_LIMIT_MAX })
+  ok(t, 'group.read', { group: KEY }, { group: KEY, limit: GROUP_LIMIT_DEFAULT })
+  bad(t, 'group.read', { group: KEY, marks: 1 }, 'marks is a boolean')
+  for (const topic of [{ writer: KEY }, { writer: KEY, seq: 0 }, KEY + ':1', null]) bad(t, 'group.read', { group: KEY, topic }, 'topic ' + JSON.stringify(topic))
+})
+
+test('group.choose, group.topics and group.voters', (t) => {
+  const { GROUP_TOPICS_LIMIT } = require('..')
+  const target = { writer: KEY, seq: 2 }
+  t.ok(isMutating('group.choose'))
+  t.absent(isMutating('group.topics'))
+  t.absent(isMutating('group.voters'))
+  for (const pick of [0, 3, null]) ok(t, 'group.choose', { group: KEY, target, pick }, { group: KEY, target, pick })
+  for (const pick of [-1, 4, '0', 0.5]) bad(t, 'group.choose', { group: KEY, target, pick }, 'pick ' + String(pick))
+  bad(t, 'group.choose', { group: KEY, target }, 'missing pick')
+  bad(t, 'group.choose', { group: KEY, pick: 0 }, 'missing target')
+  bad(t, 'group.choose', { target, pick: 0 }, 'missing group')
+  bad(t, 'group.choose', { group: KEY, target: { writer: KEY, seq: 0 }, pick: 0 })
+  bad(t, 'group.choose', { group: KEY, target, pick: 0, emoji: '' })
+
+  const AT = '2026-10-28T12:00:00.000Z'
+  const before = { at: AT, writer: KEY, seq: 9 }
+  ok(t, 'group.topics', { group: KEY }, { group: KEY, limit: GROUP_TOPICS_LIMIT })
+  ok(t, 'group.topics', { group: KEY, page: KEY, limit: 1, before }, { group: KEY, page: KEY, limit: 1, before })
+  bad(t, 'group.topics', {}, 'missing group')
+  bad(t, 'group.topics', { group: KEY, limit: 0 })
+  bad(t, 'group.topics', { group: KEY, limit: GROUP_TOPICS_LIMIT + 1 })
+  bad(t, 'group.topics', { group: KEY, before: { at: AT, writer: KEY } })
+  bad(t, 'group.topics', { group: KEY, marks: true })
+
+  ok(t, 'group.voters', { group: KEY, target }, { group: KEY, target })
+  bad(t, 'group.voters', { group: KEY })
+  bad(t, 'group.voters', { target })
+  bad(t, 'group.voters', { group: KEY, target, pick: 0 })
 })

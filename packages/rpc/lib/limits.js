@@ -20,7 +20,21 @@ const MAX_NAME = 80
 const MAX_BIO = 280
 const MAX_TEXT = 1000
 const MAX_TESTIMONIAL = 400
+const MAX_SCRAP = 400
+// Rich profile (profile-about and mood records), same values as records.js.
+const MAX_ABOUT = 600
+const MAX_CITY = 60
+const MAX_WORK = 80
+const MAX_STUDIES = 80
+const MAX_INTERESTS = 200
+const MAX_MOOD_TEXT = 60
+// Melhores amigos (top-friends record), same value as records.js.
+const MAX_TOP_FRIENDS = 8
 const TESTIMONIAL_PENDING_MAX = 64
+// Testimonial decisions synced in the member's seen document: kept and
+// declined each keep their newest entries (packages/core/lib/seen-blob.js).
+const TESTIMONIAL_KEPT_MAX = 64
+const TESTIMONIAL_DECLINED_MAX = 64
 const MEDIA_BLOCK_BYTES = 32768
 const MAX_MEDIA_BLOCKS = 8192
 const MAX_MEDIA_PER_POST = 10
@@ -86,6 +100,35 @@ const GROUP_REACTIONS_MAX = 12
 // worst case (GROUP_REACTIONS_MAX emojis, each with this many keys) fits
 // MAX_MESSAGE (test/sizes.test.js).
 const GROUP_REACTORS_MAX = 324
+// Polls (docs/protocol.md): a diary post's `poll` and a group topic's
+// `group-poll` carry POLL_MIN..POLL_MAX options of 1..MAX_POLL_OPTION code
+// points; a pick is 0..POLL_MAX - 1 or null.
+const POLL_MIN = 2
+const POLL_MAX = 4
+const MAX_POLL_OPTION = 60
+// group.read with `marks` or `topic` adds a topic marker to every item (and
+// a topic's poll summary to the page), so it caps the page below
+// GROUP_LIMIT_MAX; the unmarked page keeps its bytes (test/sizes.test.js).
+const GROUP_MARKED_LIMIT = 24
+// group.topics: maximal root texts and poll summaries fit MAX_MESSAGE with
+// one item to spare (test/sizes.test.js).
+const GROUP_TOPICS_LIMIT = 30
+// Diary keys per option in the who-voted answer of a group poll: every
+// option with this many keys fits MAX_MESSAGE with room (test/sizes.test.js).
+const GROUP_VOTERS_MAX = 900
+// Eventos (docs/protocol.md): a diary post's `event` and a group's
+// `group-event` carry a title of 1..MAX_EVENT_TITLE and a place of
+// 0..MAX_EVENT_PLACE code points, a start and an end (null or later than the
+// start) as canonical ISO instants in UTC between EVENT_MIN_MS and
+// EVENT_MAX_MS (2020-01-01 and 2100-01-01), at most EVENT_MAX_SPAN_MS apart.
+const MAX_EVENT_TITLE = 80
+const MAX_EVENT_PLACE = 120
+const EVENT_MIN_MS = Date.UTC(2020, 0, 1)
+const EVENT_MAX_MS = Date.UTC(2100, 0, 1)
+const EVENT_MAX_SPAN_MS = 366 * 86400000
+// group.events: one page of a group's events, a fixed size whose worst case
+// (maximal texts, titles and places) fits MAX_MESSAGE (test/sizes.test.js).
+const GROUP_EVENTS_LIMIT = 30
 const MAX_GROUP_NAME = 80 // same value as records.js
 const MAX_GROUP_CUTS = 16
 const MAX_GROUPS_PER_COMMUNITY = 32
@@ -187,7 +230,17 @@ module.exports = {
   MAX_BIO,
   MAX_TEXT,
   MAX_TESTIMONIAL,
+  MAX_SCRAP,
+  MAX_ABOUT,
+  MAX_CITY,
+  MAX_WORK,
+  MAX_STUDIES,
+  MAX_INTERESTS,
+  MAX_MOOD_TEXT,
+  MAX_TOP_FRIENDS,
   TESTIMONIAL_PENDING_MAX,
+  TESTIMONIAL_KEPT_MAX,
+  TESTIMONIAL_DECLINED_MAX,
   MEDIA_BLOCK_BYTES,
   MAX_MEDIA_BLOCKS,
   MAX_MEDIA_PER_POST,
@@ -226,6 +279,18 @@ module.exports = {
   GROUP_MEMBERS_LIMIT_MAX,
   GROUP_REACTIONS_MAX,
   GROUP_REACTORS_MAX,
+  POLL_MIN,
+  POLL_MAX,
+  MAX_POLL_OPTION,
+  GROUP_MARKED_LIMIT,
+  GROUP_TOPICS_LIMIT,
+  GROUP_VOTERS_MAX,
+  MAX_EVENT_TITLE,
+  MAX_EVENT_PLACE,
+  EVENT_MIN_MS,
+  EVENT_MAX_MS,
+  EVENT_MAX_SPAN_MS,
+  GROUP_EVENTS_LIMIT,
   MAX_GROUP_NAME,
   MAX_GROUP_CUTS,
   MAX_GROUPS_PER_COMMUNITY,

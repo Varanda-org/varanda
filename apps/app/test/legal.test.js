@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 54)
+  t.is(LEGAL_VERSION, 61)
   t.is(LEGAL_DATE, '15/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 54, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 61, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '8e955651a420a2a2e26c4a451ec83c7d6970bc3ba9686c05e9f72cd3ee7c835b', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '8795186f8e5930e2ef9e9a98bedfcaa050b3ae35fdca0a20036eb9ce92b64a0a', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -589,6 +589,75 @@ test('Privacidade: Posts salvos diz do pedido ao semeador, do backup e do Sair',
   t.ok(p.includes('continua no aparelho depois de Sair'), 'stays after Sair')
 })
 
+test('legal: version 57 describes recados', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const all = (d) => d.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(all(TERMS).includes('Um recado é um texto público que você deixa na página de outra pessoa'))
+  t.ok(all(PRIVACY).includes('os recados são públicos: cada um fica no diário de quem o escreveu'))
+  t.ok(all(PRIVACY).includes('o semeador pode associar essas leituras à sua conta'))
+  t.ok(all(PRIVACY).includes('Tirar um recado da sua página e escolher quem pode deixar recado também são registros publicados no seu diário público, visíveis para qualquer pessoa'), 'hide and wall records are public')
+})
+
+test('legal: version 58 describes the rich profile and the Sorte do dia', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const all = (d) => d.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(all(TERMS).includes('Em Editar perfil você pode preencher, se quiser, um Sobre mim'))
+  t.ok(all(TERMS).includes('Tudo isso é opcional e público'), 'optional and public')
+  t.ok(all(PRIVACY).includes('são opcionais e públicos: cada um é um registro no seu diário, visível para qualquer pessoa'), 'public diary records')
+  t.ok(all(PRIVACY).includes('o aniversário (só o dia e o mês, nunca o ano)'), 'birthday has no year')
+  t.ok(all(PRIVACY).includes('o semeador vê qual perfil foi aberto e pode associar essa leitura à conta de quem abriu'), 'seeder sees the opened profile')
+  t.ok(all(PRIVACY).includes('A Sorte do dia é escolhida no próprio aparelho'), 'sorte on the device')
+  t.ok(all(PRIVACY).includes('não é enviada a ninguém, não usa a rede e não fica no seu diário'), 'sorte sends nothing')
+  t.ok(all(PRIVACY).includes('esse arquivo pode ir para o backup do aparelho no iCloud'), 'sorte seed may be in the iCloud backup')
+  t.ok(all(TERMS).includes('marca como apagadas as versões anteriores'), 'a new version marks the earlier one as deleted')
+  t.ok(all(PRIVACY).includes('cópias que outras pessoas ou semeadores já buscaram podem continuar existindo'), 'copies may remain')
+})
+
+test('legal: version 59 describes fas and melhores amigos as public records', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const all = (d) => d.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(all(TERMS).includes('Você pode ser fã de uma pessoa, sem precisar segui-la, e escolher até 8 melhores amigos'))
+  t.ok(all(TERMS).includes('são registros públicos no seu diário'), 'public records')
+  t.ok(all(TERMS).includes('só aparece na lista para os outros quando essa pessoa também segue você'), 'follow-back rule')
+  t.ok(all(TERMS).includes('cópias que outras pessoas ou semeadores já buscaram podem continuar existindo'), 'copies may remain')
+  t.ok(all(PRIVACY).includes('ser fã de alguém e a lista de melhores amigos são registros públicos no seu diário, visíveis para qualquer pessoa'), 'public diary records')
+  t.ok(all(PRIVACY).includes('marca como apagadas as listas anteriores'), 'a new list marks the earlier ones as deleted')
+  t.ok(all(PRIVACY).includes('o semeador vê qual perfil ou qual lista de fãs foi aberta e pode associar essa leitura à conta de quem abriu'), 'seeder sees the opened profile and fan list')
+  t.ok(all(PRIVACY).includes('com o aviso de que podem estar incompletos'), 'count wording')
+  t.ok(all(PRIVACY).includes('o semeador mostra o número de fãs que já conhece'), 'known count kept while indexing')
+  t.ok(!all(PRIVACY).includes('4096'), 'no per-diary fan cap claim')
+  t.ok(!all(PRIVACY).includes('não aponta fãs nem melhores amigos'), 'old indexing claim is gone')
+  t.ok(all(TERMS).includes('grava um novo registro que desfaz o anterior, e os registros anteriores, com as suas datas, continuam públicos no diário'), 'unfan keeps earlier records public')
+  t.ok(all(PRIVACY).includes('grava um novo registro que desfaz o anterior, e os registros anteriores, com as suas datas, continuam públicos no diário'), 'unfan keeps earlier records public (privacy)')
+})
+
+test('legal: version 60 describes polls as public votes', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const all = (d) => d.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(all(TERMS).includes('Votar numa enquete é público'), 'votes are public')
+  t.ok(all(TERMS).includes('qualquer pessoa que leia o seu diário ou o grupo pode ver em quem ou em qual opção você votou'), 'anyone who reads the diary or the group sees the vote')
+  t.ok(all(TERMS).includes('O app avisa disso antes do seu primeiro voto'), 'warned before the first vote')
+  t.ok(all(TERMS).includes('Em grupos privados não há tópicos nem enquetes'), 'public groups only')
+  t.ok(all(PRIVACY).includes('votar numa enquete é público'), 'privacy: public votes')
+  t.ok(all(PRIVACY).includes('o semeador vê qual enquete e qual opção foram abertas e pode associar essa leitura à conta de quem abriu'), 'seeder sees the opened poll')
+  t.ok(all(PRIVACY).includes('os registros anteriores, com as suas datas, continuam públicos'), 'withdrawn votes stay public')
+  t.ok(all(PRIVACY).includes('podem estar incompletos'), 'totals are claims')
+  t.absent(all(TERMS).includes('\u2014') || all(PRIVACY).includes('\u2014'), 'no em dash')
+})
+
+test('legal: version 61 describes events and presence answers as public', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const all = (d) => d.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(all(TERMS).includes('Eventos são públicos'), 'events are public')
+  t.ok(all(TERMS).includes('as respostas de presença, Vou e Talvez'), 'presence answers named')
+  t.ok(all(TERMS).includes('Em grupos privados não há eventos'), 'public groups only')
+  t.ok(all(TERMS).includes('O lembrete de um evento fica só no seu aparelho'), 'reminders stay on the device')
+  t.ok(all(PRIVACY).includes('as respostas de presença, Vou e Talvez, são públicos'), 'privacy: public presence')
+  t.ok(all(PRIVACY).includes('Os lembretes de eventos ficam só no aparelho'), 'privacy: reminders on the device')
+  t.ok(all(PRIVACY).includes('os registros anteriores, com as suas datas, continuam públicos'), 'withdrawn answers stay public')
+  t.absent(all(TERMS).includes('\u2014') || all(PRIVACY).includes('\u2014'), 'no em dash')
+})
+
 test('legal: version 27 describes the invite card in the link and the messenger preview', async (t) => {
   const { PRIVACY } = await load()
   const text = PRIVACY.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
@@ -698,4 +767,21 @@ test('legal: version 48 describes the public page of a post', async (t) => {
     'pode guardar o endereço pedido e o endereço de internet (IP)',
     'ficam fora do controle da associação'
   ]) t.ok(page(PRIVACY).includes(required), 'privacy: ' + required)
+})
+
+test('legal: version 55 lets the recipient keep or refuse a depoimento', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const required of [
+    'também pode guardá-lo só para si ou recusá-lo: nos dois casos nada é publicado',
+    'vê apenas que ele foi enviado, não a escolha de quem recebeu'
+  ]) t.ok(text(TERMS).includes(required), 'terms: ' + required)
+  for (const required of [
+    'Se não escolhe, nada é publicado no diário dela.',
+    'também não publica nada e não avisa quem escreveu',
+    'fica guardada só nos seus aparelhos e no bloco cifrado descrito no parágrafo sobre o que você viu (vistos)',
+    'guardados só para você ou recusados',
+    'a chave pública de quem escreveu, o número do registro, a escolha e a hora, até os 64 guardados e os 64 recusados mais recentes',
+    'o texto do depoimento nunca vai no bloco'
+  ]) t.ok(text(PRIVACY).includes(required), 'privacy: ' + required)
 })

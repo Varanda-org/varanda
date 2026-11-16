@@ -16,6 +16,7 @@ const { TERMS_VERSION } = require('@varanda/core/lib/terms')
 const member = require('@varanda/core/lib/member')
 const groupLib = require('@varanda/core/lib/group')
 const groupCrypto = require('@varanda/core/lib/group-crypto')
+const store = require('@varanda/core/lib/store')
 const { person, startSeeder, syncOnce } = require('../../../packages/core/test/helpers/sync-groups')
 const { startSeedWs } = require('../lib/seed-ws')
 const { openAccountStore } = require('../lib/account/store')
@@ -36,6 +37,19 @@ function hex (buf) {
 function newKey () {
   const kp = crypto.keyPair()
   return { kp, hex: hex(kp.publicKey) }
+}
+
+// Appends `record` to ctx's own writer of `group`, as a forum write of the
+// web node would (core has no forum methods).
+async function appendOwn (ctx, group, record) {
+  const s = await store.openStore(ctx.dataDir)
+  try {
+    const local = store.readGroups(ctx.dataDir).find((g) => g.group === group)
+    const writer = await store.openGroupWriter(s, local.nonce)
+    await store.appendRecord(writer, record, { validator: (r, seq) => groupLib.validateGroupRecord(r, seq, { root: local.writer === group }) })
+  } finally {
+    await s.close()
+  }
 }
 
 function googleStub () {
@@ -181,6 +195,21 @@ test('account pages groups: the page joins and posts through the routes, a remov
   t.ok(read.body.items.some((x) => x.text === 'pão quente na praça'), 'an admin reads the group as the page')
   t.is(read.body.role, 'member')
   t.is((await act(bia, 'group-read', P, { group: G, limit: 33 })).body.error, 'pedido-invalido', 'at most 32 a read')
+
+  // The fold's forum keys stay out of the page's read: `topic` carries an
+  // uncapped voter list. The plain post after the poll proves the poll is in.
+  const root = await member.groupPost(a, { group: G, text: 'Vamos à feira?' })
+  const target = { writer: G, seq: root.seq }
+  await appendOwn(a, G, groupLib.groupTopic({ target }))
+  await appendOwn(a, G, groupLib.groupPoll({ target, options: ['Sim', 'Não'] }))
+  await member.groupPost(a, { group: G, text: 'depois da enquete' })
+  await syncOnce(bootstrap, a)
+  const forum = await until(async () => {
+    const r = await act(bia, 'group-read', P, { group: G })
+    return r.status === 200 && r.body.items.some((x) => x.text === 'depois da enquete') ? r.body : null
+  }, { name: 'page reads past the poll', timeoutMs: 180000, intervalMs: 500 })
+  t.ok(forum.items.some((x) => x.text === 'Vamos à feira?'), 'the topic root is listed')
+  t.alike(forum.items.filter((x) => 'topic' in x || 'thread' in x).map((x) => x.text), [], 'no topic or thread key on any item')
   t.is((await act(bia, 'group-post', P, { group: G, text: '' })).body.error, 'pedido-invalido', 'the group text bounds hold')
 
   // Private groups: the service holds no group box, so a page without the

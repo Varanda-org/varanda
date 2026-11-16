@@ -33,6 +33,72 @@ const lastWrites = (entries, target) => {
   return [...latest.values()].filter((e) => e.record.on)
 }
 
+// Recados: the seeder's admission at read time, over the live Vitrine state
+// (like the testimonials route), mirroring foldWall in packages/core/lib/scraps.js:
+// deletes, the wall policy, owner hides, scraps dated over 24 h ahead dropped,
+// and the reply exception (one reply per original, the lowest block, even when
+// hidden; the reply no earlier than the original). Caps: 20 per writer, 500
+// per page, over admitted scraps. Pointers only.
+const SCRAP_CLOCK_MS = 3600000
+const MAX_FUTURE_MS = 86400000
+const badRequest = () => { throw Object.assign(new Error('status'), { reason: 'status' }) }
+
+function liveEntries () {
+  const { entries, deleted } = testimonialSource()
+  return entries.filter((e) => !deleted.has(`${e.author}:${e.seq}`))
+}
+
+const liveFollowSeq = (live, author, target) => {
+  const last = live.filter((e) => e.author === author && e.record.type === 'follow' && e.record.key === target).sort((a, b) => b.seq - a.seq)[0]
+  return last && last.record.on ? last.seq : null
+}
+
+function scrapsIndex (owner, cursor) {
+  requireProfile(owner)
+  if (cursor !== undefined && !/^(0|[1-9][0-9]{0,5})$/.test(cursor)) badRequest()
+  const live = liveEntries()
+  const clock = Date.parse(fixtures.now) + SCRAP_CLOCK_MS
+  const ownerLive = live.filter((e) => e.author === owner).sort((a, b) => a.seq - b.seq)
+  const walls = ownerLive.filter((e) => e.record.type === 'scrap-wall')
+  const latest = walls.reduce((best, e) => (best === null || e.seq > best.seq ? e : best), null)
+  const who = latest === null ? 'following' : latest.record.who
+  const hideRows = ownerLive.filter((e) => e.record.type === 'scrap-hide')
+  const hidden = new Set(hideRows.map((e) => `${e.record.from}:${e.record.seq}`))
+  const originals = new Map(ownerLive.filter((e) => e.record.type === 'scrap').map((e) => [e.seq, { to: e.record.to, t: Date.parse(e.record.at) }]))
+  const admitted = []
+  if (who !== 'nobody') {
+    const writers = [...new Set(live.filter((e) => e.record.type === 'scrap' && e.record.to === owner && e.author !== owner).map((e) => e.author))]
+    for (const author of writers) {
+      const replied = new Set()
+      const followSeq = who === 'everyone' ? null : liveFollowSeq(live, owner, author)
+      const mine = live.filter((e) => e.author === author && e.record.type === 'scrap' && e.record.to === owner).sort((a, b) => a.seq - b.seq)
+      const rows = []
+      for (const e of mine) {
+        const t = Date.parse(e.record.at)
+        if (t - clock > MAX_FUTURE_MS) continue
+        let answers = false
+        if (who === 'following') {
+          const rt = e.record.replyTo
+          const original = rt !== null && rt.author === owner ? originals.get(rt.seq) : undefined
+          if (original !== undefined && original.to === author && t >= original.t && !replied.has(rt.seq)) {
+            answers = true
+            replied.add(rt.seq)
+          }
+        }
+        if (hidden.has(`${author}:${e.seq}`)) continue
+        if (who === 'everyone' || followSeq !== null || answers) rows.push({ author, seq: e.seq, followSeq, t })
+      }
+      rows.sort((a, b) => b.t - a.t || b.seq - a.seq)
+      admitted.push(...rows.slice(0, 20))
+    }
+  }
+  admitted.sort((a, b) => b.t - a.t || compare(a.author, b.author) || b.seq - a.seq)
+  const all = admitted.slice(0, 500)
+  const start = cursor === undefined ? 0 : Number(cursor)
+  const scraps = all.slice(start, start + 50).map(({ author, seq, followSeq }) => ({ author, seq, followSeq }))
+  return { scraps, hides: hideRows.map((e) => e.seq).sort((a, b) => b - a).slice(0, 1000), wall: latest === null ? null : latest.seq, next: all.length > start + 50 ? String(start + 50) : null, ...flags }
+}
+
 function notFound () {
   throw Object.assign(new Error('not-found'), { reason: 'not-found' })
 }
@@ -75,10 +141,80 @@ function edgePage (rows, cursor, limit, order = oldestFirst) {
   return { items: page.map(refOf), next: ordered.length > limit ? edgeCursor(page[page.length - 1]) : null }
 }
 
+// The seeder's roda (packages/core/lib/engagement-index.js): root and top by
+// walking replyTo up, then top's subtree breadth first, each reply keyed at
+// max(own at, its parent's key + 1) so it sorts after its parent, ordered by
+// (key, author, seq) and paged 50 strictly after the cursor. A post that is
+// not a reply, or whose chain breaks or loops, is not-found.
+function roda (ref, cursor) {
+  const post = requirePost(ref)
+  if (!post.replyTo) notFound()
+  const seenUp = new Set([ref])
+  let top = ref
+  let parent = refOf(post.replyTo)
+  let root = null
+  while (root === null) {
+    if (seenUp.has(parent)) notFound()
+    seenUp.add(parent)
+    const p = requirePost(parent)
+    if (p.replyTo) {
+      top = parent
+      parent = refOf(p.replyTo)
+    } else {
+      root = parent
+    }
+  }
+  const kept = []
+  const keyOf = new Map()
+  const seenDown = new Set([top])
+  const queue = [top]
+  for (let i = 0; i < queue.length; i++) {
+    const node = queue[i]
+    const base = keyOf.get(node)
+    for (const child of posts.filter((p) => p.replyTo && refOf(p.replyTo) === node).sort(oldestFirst)) {
+      const childRef = refOf(child)
+      if (seenDown.has(childRef)) continue
+      seenDown.add(childRef)
+      const atMs = base === undefined ? Date.parse(child.at) : Math.max(Date.parse(child.at), base + 1)
+      keyOf.set(childRef, atMs)
+      kept.push({ atMs, author: child.author, seq: child.seq, ref: childRef, to: node })
+      queue.push(childRef)
+    }
+  }
+  const order = (a, b) => a.atMs - b.atMs || compare(a.author, b.author) || a.seq - b.seq
+  kept.sort(order)
+  let start = 0
+  if (cursor !== undefined) {
+    if (!/^[0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}$/.test(cursor)) notFound()
+    const [at, author, seq] = cursor.split('.')
+    const after = { atMs: Number(at), author, seq: Number(seq) }
+    while (start < kept.length && order(kept[start], after) <= 0) start++
+  }
+  const page = kept.slice(start, start + 50)
+  const last = page[page.length - 1]
+  return {
+    ...flags,
+    ref,
+    root,
+    top,
+    items: page.map(({ ref, to }) => ({ ref, to })),
+    next: page.length > 0 && start + page.length < kept.length ? `${last.atMs}.${last.author}.${last.seq}` : null,
+    total: kept.length,
+    authors: authorsOf([ref, root, top, ...page.map((item) => item.ref)].map((r) => r.split(':')[0]))
+  }
+}
+
 function followRows (author, kind) {
   const related = fixtures.diaryRecords.filter(({ author: from, record: r }) => r.type === 'follow' && (kind === 'seguindo' ? from === author : r.key === author))
   return lastWrites(related, (r) => r.key)
     .map(({ author: from, seq, record }) => ({ key: kind === 'seguindo' ? record.key : from, seq, at: record.at }))
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at) || compare(a.key, b.key))
+}
+
+function fanRows (author) {
+  const related = liveEntries().filter(({ record: r }) => r.type === 'fan' && r.key === author)
+  return lastWrites(related, (r) => r.key)
+    .map(({ author: from, seq, record }) => ({ key: from, seq, at: record.at }))
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at) || compare(a.key, b.key))
 }
 
@@ -148,12 +284,53 @@ function feiraIndex (segments, request) {
   return { ...flags, items, next: page.next, authors }
 }
 
+// Enquetes: pointers and totals read from the live choice records (the
+// seeder's claim, like the testimonial route). The last in-range choice of each
+// voter counts and a null pick withdraws it (packages/core/lib/polls.js).
+function pollIndex (author, seqText, pickText, cursorText) {
+  if (!isKey(author) || !/^[1-9][0-9]{0,14}$/.test(seqText || '')) notFound()
+  const seq = Number(seqText)
+  const live = liveEntries()
+  const root = live.find((e) => e.author === author && e.seq === seq && e.record.type === 'post' && (Array.isArray(e.record.poll) || e.record.event))
+  if (!root) notFound()
+  // An event post is a 2-option poll (going, maybe).
+  const count = Array.isArray(root.record.poll) ? root.record.poll.length : 2
+  const picks = new Map()
+  for (const e of live.filter((x) => x.record.type === 'choice' && x.record.to.author === author && x.record.to.seq === seq).sort((a, b) => a.seq - b.seq)) {
+    const pick = e.record.pick
+    if (pick === null) picks.delete(e.author)
+    else if (pick < count) picks.set(e.author, { pick, seq: e.seq, at: e.record.at })
+  }
+  if (pickText === undefined) {
+    const totals = new Array(count).fill(0)
+    for (const v of picks.values()) totals[v.pick]++
+    return { ...flags, totals }
+  }
+  if (!/^[0-3]$/.test(pickText) || Number(pickText) >= count) notFound()
+  let after = null
+  if (cursorText !== undefined) {
+    if (!/^[0-9]+\.[0-9a-f]{64}$/.test(cursorText)) notFound()
+    const [atMs, key] = cursorText.split('.')
+    after = { atMs: Number(atMs), key }
+  }
+  const rows = [...picks].filter(([, v]) => v.pick === Number(pickText)).map(([key, v]) => ({ key, seq: v.seq, at: v.at }))
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at) || compare(a.key, b.key))
+  const remaining = rows.filter((r) => after === null || Date.parse(r.at) < after.atMs || (Date.parse(r.at) === after.atMs && r.key > after.key))
+  const items = remaining.slice(0, 20)
+  const last = items[items.length - 1]
+  return { ...flags, items, next: remaining.length > 20 ? { atMs: Date.parse(last.at), key: last.key } : null, total: rows.length, authors: authorsOf(items.map((r) => r.key)) }
+}
+
 // Only fixture references are returned: screens verify them through diary.peek.
 export function vitrineIndex (url, request) {
   let path
   try { path = new URL(url, 'https://vitrine.invalid').pathname } catch { notFound() }
   const segments = path.split('/')
   if (segments[1] === 'index' && segments[2] === 'feira') return feiraIndex(segments.slice(3), request)
+  if (segments[1] === 'index' && segments[2] === 'poll') {
+    if (segments.length < 5 || segments.length > 7) notFound()
+    return pollIndex(segments[3], segments[4], segments[5], segments[6])
+  }
   const [, index, route, key, part, cursor, ...extra] = segments
   if (index !== 'index' || !key || extra.length) notFound()
 
@@ -173,6 +350,12 @@ export function vitrineIndex (url, request) {
     return { ...flags, ref, parent, replies: page.items, next: page.next, quotes, likes: c.likes, reposts: c.reposts, repliesTotal: c.replies, quotesTotal: c.quotes, authors: authorsOf([ref, parent, ...page.items, ...quotes].filter(Boolean).map((r) => r.split(':')[0])) }
   }
 
+  if (route === 'roda' && part !== undefined) {
+    const ref = `${key}:${part}`
+    if (!isRef(ref) || part.length > 15) notFound()
+    return roda(ref, cursor)
+  }
+
   if (route === 'counts' && part === undefined) {
     const refs = key.split(',')
     if (refs.length > 31 || !refs.every((ref) => isRef(ref))) notFound()
@@ -185,6 +368,13 @@ export function vitrineIndex (url, request) {
     const seqs = [...new Set([...posts.filter((p) => p.author === key).map((p) => p.seq), ...activeReposts(key, request)])].sort((a, b) => b - a)
     const records = [...fixtures.diaryRecords, ...fixtures.listings, ...fixtures.rates].filter((e) => e.author === key)
     return { ...flags, ...hint(), ...pageHint(key), length: Math.max(2, ...seqs, ...records.map((e) => e.seq)) + 1, posts: seqs.filter((seq) => part === undefined || seq < Number(part)).slice(0, 100), postsTotal: seqs.length }
+  }
+
+  if (route === 'events' && cursor === undefined) {
+    requireProfile(key)
+    if (part !== undefined && !/^[1-9][0-9]*$/.test(part)) notFound()
+    const seqs = posts.filter((p) => p.author === key && p.event).map((p) => p.seq).sort((a, b) => b - a).filter((seq) => part === undefined || seq < Number(part))
+    return { ...flags, posts: seqs.slice(0, 30), next: seqs.length > 30 ? seqs[29] : null, total: seqs.length }
   }
 
   if (route === 'topic' && cursor === undefined) {
@@ -209,6 +399,22 @@ export function vitrineIndex (url, request) {
     const items = remaining.slice(0, 20)
     const last = items[items.length - 1]
     return { ...flags, author: key, kind: part, items, total: rows.length, next: remaining.length > 20 ? { atMs: Date.parse(last.at), key: last.key } : null, authors: authorsOf(items.map((r) => r.key)) }
+  }
+
+  if (route === 'fans') {
+    requireProfile(key)
+    const rows = fanRows(key)
+    let after = null
+    const raw = part
+    if (raw !== undefined) {
+      if (!/^[0-9]+\.[0-9a-f]{64}$/.test(raw)) notFound()
+      const [atMs, k] = raw.split('.')
+      after = { atMs: Number(atMs), key: k }
+    }
+    const remaining = rows.filter((r) => after === null || Date.parse(r.at) < after.atMs || (Date.parse(r.at) === after.atMs && r.key > after.key))
+    const items = remaining.slice(0, 20)
+    const last = items[items.length - 1]
+    return { ...flags, author: key, items, total: rows.length, next: remaining.length > 20 ? { atMs: Date.parse(last.at), key: last.key } : null, authors: authorsOf(items.map((r) => r.key)) }
   }
 
   if (route === 'search' && part === undefined) {
@@ -245,7 +451,33 @@ export function vitrineIndex (url, request) {
   if (route === 'testimonials' && part === undefined) {
     requireProfile(key)
     const { entries, deleted } = testimonialSource()
-    return { ...testimonialPointers(entries, deleted, key), ...flags }
+    // unshown is the demo node's own view; the seeder answer has no such key.
+    const { shown, pending } = testimonialPointers(entries, deleted, key)
+    return { shown, pending, ...flags }
+  }
+
+  if (route === 'scraps' && cursor === undefined) {
+    if (!isKey(key)) notFound()
+    return scrapsIndex(key, part)
+  }
+
+  if (route === 'profile' && part === undefined) {
+    requireProfile(key)
+    const latest = (type) => {
+      const rows = liveEntries().filter((e) => e.author === key && e.record.type === type)
+      return rows.length === 0 ? null : Math.max(...rows.map((e) => e.seq))
+    }
+    const rows = (type) => liveEntries().filter((e) => e.author === key && e.record.type === type).sort((a, b) => b.seq - a.seq)
+    const fans = fanRows(key)
+    const top = rows('top-friends')[0]
+    const back = top ? Object.fromEntries(top.record.keys.map((k) => [k, liveFollowSeq(liveEntries(), k, key)])) : null
+    return { about: latest('profile-about'), mood: latest('mood'), fans: { count: fans.length, indexing: false }, top: top ? { seq: top.seq, back } : null, ...flags }
+  }
+
+  if (route === 'follow' && cursor === undefined) {
+    if (!isKey(key) || !isKey(part)) notFound()
+    requireProfile(key)
+    return { seq: liveFollowSeq(liveEntries(), key, part), indexing: false }
   }
 
   if (route === 'group-search' && part === undefined) {

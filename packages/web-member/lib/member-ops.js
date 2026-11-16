@@ -58,6 +58,14 @@ const {
   deleteRecords,
   testimonialRecord,
   testimonialShowRecord,
+  scrapRecord,
+  scrapHideRecord,
+  scrapWallRecord,
+  profileAboutRecord,
+  moodRecord,
+  fanRecord,
+  topFriendsRecord,
+  choiceRecord,
   momentRecord,
   postShareRecord,
   MAX_TESTIMONIAL,
@@ -97,7 +105,8 @@ const { sealOffer, commitment } = require('@varanda/core/lib/testimonials')
 const grp = require('@varanda/core/lib/group')
 const gc = require('@varanda/core/lib/group-crypto')
 const { validPrivateItem, copyGroupMedia, PRIVATE_ITEM_KEYS, MAX_GROUP_MEDIA } = require('@varanda/core/lib/group-media')
-const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX, COMMUNITY_LIST_MAX, feira, mediaBounds, videoBounds } = require('@varanda/rpc')
+const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX, GROUP_TOPICS_LIMIT, GROUP_VOTERS_MAX, GROUP_EVENTS_LIMIT, POLL_MAX, COMMUNITY_LIST_MAX, feira, mediaBounds, videoBounds } = require('@varanda/rpc')
+const { livePick } = require('@varanda/core/lib/polls')
 const listing = require('@varanda/core/lib/listing')
 const { POST_SHARES_PER_DIARY, foldShare } = require('@varanda/core/lib/post-share')
 const { stillImageSize } = require('@varanda/core/lib/still-image')
@@ -462,7 +471,15 @@ function verifyPostMedia (ctx, media) {
   return verifyMedia(ctx, media, inspect, valid, 2)
 }
 
-async function postCreate (ctx, { text, media, preview }) {
+// `poll` (2..4 options, never beside media or a preview: the method table's
+// cross check) writes the poll post key set; `event` (Eventos, the same
+// cross check, never beside a poll either) the event post key set.
+async function postCreate (ctx, { text, media, preview, poll, event }) {
+  if (event !== undefined && event !== null) {
+    if ((poll !== undefined && poll !== null) || hasMedia(media) || (preview !== undefined && preview !== null)) throw new UsageError(EVENT_PARAM_INVALID)
+    return publish(ctx, buildRecord(() => postRecord({ text, event })))
+  }
+  if (poll !== undefined && poll !== null) return publish(ctx, buildRecord(() => postRecord({ text, poll })))
   if (hasMedia(media)) await verifyPostMedia(ctx, media)
   if (preview && preview.image !== null) await verifyMedia(ctx, [preview.image])
   return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, media, preview } : { text, preview })))
@@ -841,7 +858,15 @@ const DELETE_KINDS = {
   'testimonial-show': { other: null, wrong: null },
   // momentDelete checks the target first; the blob expires by itself, so no
   // media core is cleared (shownMedia names none for a moment).
-  moment: { other: null, wrong: null }
+  moment: { other: null, wrong: null },
+  // scrapDelete picks the kind from the target, as testimonialDelete does.
+  scrap: { other: null, wrong: null },
+  'scrap-hide': { other: null, wrong: null },
+  'scrap-wall': { other: null, wrong: null },
+  // The rich profile records: latest wins, so profileExtraDelete names the
+  // newest live one and recordDelete tombstones every live version.
+  'profile-about': { other: null, wrong: null },
+  mood: { other: null, wrong: null }
 }
 
 // The compat pair profileRecords writes: a plain profile immediately
@@ -930,6 +955,20 @@ async function clearAfterDelete (ctx, diary, ownHex, targets, records) {
   }
 }
 
+// Appends `records` in order, at most APPEND_MAX per append -> the last
+// seq. A failed chunk throws with `written`, the highest block already
+// stored by an earlier chunk, so the caller still counts and pushes it.
+async function appendChunked (ctx, diary, records) {
+  let seq = null
+  try {
+    for (let i = 0; i < records.length; i += APPEND_MAX) seq = await appendAll(ctx, diary, records.slice(i, i + APPEND_MAX))
+  } catch (err) {
+    if (seq !== null && err !== null && typeof err === 'object') err.written = seq
+    throw err
+  }
+  return seq
+}
+
 // Tombstones for the caller's own post or profile block `to` -> { seq, ref,
 // changed, deleted } (docs/rpc.md 5.33, 5.34). A compat pair is one version:
 // both tombstones go in one append. A target already deleted writes nothing,
@@ -969,6 +1008,8 @@ async function recordDelete (ctx, kind, { to }) {
     // Every live show of that writer goes: shownRows takes the newest live
     // one, so removing only this one would bring an older one back.
     if (kind === 'testimonial-show') targets = [...new Set([to.seq, ...liveShowSeqs(raw, target.from)])].sort((a, b) => a - b)
+    // Same for the rich profile: latest wins, so every live version goes.
+    if (kind === 'profile-about' || kind === 'mood') targets = [...new Set([to.seq, ...liveSeqsOfType(raw, kind)])].sort((a, b) => a - b)
     if (kind === 'profile') {
       if (target.avatar === undefined && compatPair(target, recordAt(raw, to.seq + 1))) targets = [to.seq, to.seq + 1]
       else if (target.avatar !== undefined && compatPair(recordAt(raw, to.seq - 1), target)) targets = [to.seq - 1, to.seq]
@@ -998,14 +1039,16 @@ async function recordDelete (ctx, kind, { to }) {
         ? await appendOwn(ctx, diary, records[0])
         : await store.appendRecords(diary, records, ctx.limits)
     } else {
-      // Only a writer's many shows get here (a post is at most 3 tombstones,
-      // a profile pair 2). One append takes at most APPEND_MAX records, so the
-      // tombstones go in chunks: every other show of that writer first,
-      // newest first, and the targeted show's in the last chunk. A chunk
-      // that fails throws like any failed write and the client never
-      // resends by itself; while any show of that writer remains, the
-      // target is still live (never cleared by sync), so a repeat of the
-      // same ref reads its `from` again and finishes the rest.
+      // Only a writer's many shows or many rich profile versions get here
+      // (a post is at most 3 tombstones, a profile pair 2). One append takes
+      // at most APPEND_MAX records, so the tombstones go in chunks: every
+      // other version first, newest first, and the targeted one's in the
+      // last chunk. A chunk that fails throws like any failed write and the
+      // client never resends by itself; while any show of that writer
+      // remains, the target is still live (never cleared by sync), so a
+      // repeat of the same ref reads its `from` again and finishes the rest.
+      // A rich profile target is the newest version, so until the last
+      // chunk readers still see it, and a repeat names it again.
       // Ordered by each record's own target, as a target may have several.
       const order = records.map((r, i) => i).sort((a, b) => {
         const sa = records[a].seq
@@ -1015,12 +1058,7 @@ async function recordDelete (ctx, kind, { to }) {
         if (sb === to.seq) return -1
         return sb - sa
       })
-      for (let i = 0; i < order.length; i += APPEND_MAX) {
-        const chunk = order.slice(i, i + APPEND_MAX).map((j) => records[j])
-        seq = chunk.length === 1
-          ? await appendOwn(ctx, diary, chunk[0])
-          : await store.appendRecords(diary, chunk, ctx.limits)
-      }
+      seq = await appendChunked(ctx, diary, order.map((j) => records[j]))
     }
     await clearAfterDelete(ctx, diary, ownHex, pending, records)
     return { seq, ref: formatRef({ author: ownHex, seq }), changed: true, deleted: targets }
@@ -1345,6 +1383,254 @@ async function testimonialDelete (ctx, { to, about }) {
     return target.type
   })
   return recordDelete(ctx, kind, { to })
+}
+
+// ---- recados (docs/protocol.md, docs/rpc.md) ----
+
+const SCRAP_SELF = 'não pode deixar recado para si'
+const SCRAP_HIDE_SELF = 'não pode tirar o próprio recado da sua página'
+const SCRAP_KINDS = ['scrap', 'scrap-hide', 'scrap-wall']
+
+// The live (not tombstoned) records of the own diary's raw entries as
+// { seq, record } copies, ascending.
+function liveOwn (raw) {
+  const deleted = deletedSeqs(raw)
+  const out = []
+  for (const { seq, record } of raw) {
+    if (deleted.has(seq)) continue
+    const copy = validRecordCopy(record, seq)
+    if (copy !== null) out.push({ seq, record: copy })
+  }
+  return out
+}
+
+// The scrap record a write would append -> the record, or
+// 'registro inválido: <reason>': the session builds it before any network
+// read so a bad text is refused first, and scrapWrite builds it again with
+// a fresh `at`.
+function scrapDraft ({ to, text, replyTo = null }) {
+  return buildRecord(() => scrapRecord({ to: String(to).toLowerCase(), text, replyTo }))
+}
+
+// writer: the identity the session checked the wall for; a sign-out and a
+// sign-in as someone else in between is refused, never written under the
+// other key. -> { seq, ref }.
+async function scrapWrite (ctx, { to, text, replyTo = null, writer }) {
+  const key = String(to).toLowerCase()
+  const record = scrapDraft({ to: key, text, replyTo })
+  return publish(ctx, record, (ownHex) => {
+    if (key === ownHex) throw new UsageError(SCRAP_SELF)
+    if (ownHex !== writer) throw new UsageError(store.LOCKED)
+  })
+}
+
+// The page owner takes `from`'s scrap `seq` off its page. Not checked
+// against the writer's block: a hide only ever removes something from the
+// owner's own page, so a hide of a block that is no scrap to the owner hides
+// nothing. A live hide of the same block answers it (changed: false).
+async function scrapHide (ctx, { from, seq }) {
+  const key = String(from).toLowerCase()
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (key === ownHex) throw new UsageError(SCRAP_HIDE_SELF)
+    const existing = liveOwn(await store.readRaw(diary)).find((e) => e.record.type === 'scrap-hide' && e.record.from === key && e.record.seq === seq)
+    if (existing !== undefined) return { seq: existing.seq, ref: formatRef({ author: ownHex, seq: existing.seq }), changed: false }
+    const at = await appendOwn(ctx, diary, buildRecord(() => scrapHideRecord({ from: key, seq })))
+    return { seq: at, ref: formatRef({ author: ownHex, seq: at }), changed: true }
+  })
+}
+
+// Who may write on the own page. The effective wall (the live scrap-wall
+// with the highest block) already saying `who` answers it (changed: false);
+// with none, 'following' is the default but still written, so the choice is
+// explicit on the page.
+async function scrapWall (ctx, { who }) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    const walls = liveOwn(await store.readRaw(diary)).filter((e) => e.record.type === 'scrap-wall')
+    const current = walls.length === 0 ? null : walls[walls.length - 1]
+    if (current !== null && current.record.who === who) return { seq: current.seq, ref: formatRef({ author: ownHex, seq: current.seq }), changed: false }
+    const at = await appendOwn(ctx, diary, buildRecord(() => scrapWallRecord({ who })))
+    return { seq: at, ref: formatRef({ author: ownHex, seq: at }), changed: true }
+  })
+}
+
+// Tombstones the own block `seq`: a scrap (the writer's 'Apagar recado'), a
+// scrap-hide (undo a hide) or a scrap-wall (back to the previous wall). Any
+// other type or a block that is not there answers 'referência inválida'; one
+// already deleted answers its tombstone (recordDelete's result).
+async function scrapDelete (ctx, { seq }) {
+  let to = null
+  const kind = await withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (!Number.isSafeInteger(seq) || seq < 1 || seq >= diary.length) throw new UsageError('referência inválida')
+    to = { author: ownHex, seq }
+    const raw = await store.readRaw(diary)
+    if (seq < raw.length && raw[seq].record === null && deletedSeqs(raw).has(seq)) return 'scrap'
+    const target = recordAt(raw, seq)
+    if (target === null || !SCRAP_KINDS.includes(target.type)) throw new UsageError('referência inválida')
+    return target.type
+  })
+  return recordDelete(ctx, kind, { to })
+}
+
+// ---- perfil rico (docs/protocol.md, docs/rpc.md) ----
+
+// Appends `record` (a profile-about, a mood or a top-friends) and tombstones every earlier
+// live version of its type, so a version the author replaced cannot show
+// again on a reader that missed the newer one. With up to APPEND_MAX - 1
+// earlier versions everything is one append, the new record last. With more,
+// the oldest tombstones go first in chunks and the newest earlier version's
+// tombstone goes with the new record in the final append: a failed chunk
+// leaves that version showing, never an older one or none, and a repeat
+// finds fewer live versions and converges. A failed chunk throws with
+// `written` (appendChunked). -> { seq, ref }.
+async function publishLatest (ctx, record) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    const prior = liveSeqsOfType(await store.readRaw(diary), record.type)
+    const at = nowIso()
+    const tombs = prior.map((seq) => buildRecord(() => deleteRecord({ seq, at })))
+    const cut = Math.max(0, tombs.length - (APPEND_MAX - 1))
+    let written = null
+    let seq
+    try {
+      if (cut > 0) written = await appendChunked(ctx, diary, tombs.slice(0, cut))
+      seq = await appendChunked(ctx, diary, [...tombs.slice(cut), record])
+    } catch (err) {
+      if (written !== null && err !== null && typeof err === 'object' && !Number.isSafeInteger(err.written)) err.written = written
+      throw err
+    }
+    if (prior.length > 0) await clearAfterDelete(ctx, diary, ownHex, prior, tombs)
+    return { seq, ref: formatRef({ author: ownHex, seq }) }
+  })
+}
+
+// Appends the own `profile-about` record: all seven fields, null for empty,
+// the newest one replaces the older (publishLatest). A bad field is
+// 'registro inválido: <reason>' (the session has already checked the
+// shapes). -> { seq, ref }.
+async function profileAbout (ctx, { about, city, work, studies, interests, birthday, theme }) {
+  return publishLatest(ctx, buildRecord(() => profileAboutRecord({ about, city, work, studies, interests, birthday, theme })))
+}
+
+// Appends the own `mood` record (publishLatest); both fields '' clear it.
+// -> { seq, ref }.
+async function moodSet (ctx, { emoji, text = '' }) {
+  return publishLatest(ctx, buildRecord(() => moodRecord({ emoji, text })))
+}
+
+// ---- fas e melhores amigos (docs/protocol.md, docs/rpc.md) ----
+
+const FAN_SELF = 'não pode ser fã de si'
+const TOP_SELF = 'não pode listar a si entre os melhores amigos'
+const FAN_BLOCKED = 'você bloqueou esta pessoa'
+
+// Appends the own `fan` record for `key` (follow-shaped, the last one per
+// key wins). The record validator cannot see the writer, so self is refused
+// here; a block only stops turning a fan mark ON (off always goes through,
+// so a fan mark of someone blocked later can still be withdrawn). One
+// record per call, no tombstones. -> { seq, ref }.
+async function fanSet (ctx, { key, on }) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (key === ownHex) throw new UsageError(FAN_SELF)
+    if (on && (await memberBlocks(ctx.storage)).has(key)) throw new UsageError(FAN_BLOCKED)
+    const seq = await appendOwn(ctx, diary, buildRecord(() => fanRecord({ key, on })))
+    return { seq, ref: formatRef({ author: ownHex, seq }) }
+  })
+}
+
+// Enquetes (docs/rpc.md): the own public vote on the diary poll `to`
+// ({ author, seq }). Whether `to` is a live poll post, pick one of its
+// options and its author not blocked is the session's check (a diary.peek);
+// the block is re-checked here on the chain. One record, never retried.
+// -> { seq }.
+async function choiceSet (ctx, { to, pick }) {
+  return withIdentity(ctx, async ({ diary }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (pick !== null && (await memberBlocks(ctx.storage)).has(to.author)) throw new UsageError(FAN_BLOCKED)
+    return { seq: await appendOwn(ctx, diary, buildRecord(() => choiceRecord({ to, pick }))) }
+  })
+}
+
+// The own live pick on the diary poll `to`, from the own diary alone ->
+// { pick, seq } (both null without one). The poll's option count is not
+// read here: a pick is checked against POLL_MAX, as this node writes only
+// picks it checked against the poll itself.
+async function choiceMine (ctx, { to }) {
+  return withIdentity(ctx, async ({ diary }) => {
+    const live = livePick({ entries: await store.readAll(diary), poll: to, count: POLL_MAX })
+    return live === null ? { pick: null, seq: null } : { pick: live.pick, seq: live.seq }
+  })
+}
+
+// The keys of the newest live `top-friends` record in the raw entries of the
+// own diary, [] when there is none.
+function latestTopKeys (raw) {
+  const live = liveSeqsOfType(raw, 'top-friends')
+  if (live.length === 0) return []
+  const seq = live[live.length - 1]
+  const copy = validRecordCopy(raw[seq].record, seq)
+  return copy !== null && Array.isArray(copy.keys) ? [...copy.keys] : []
+}
+
+// The keys of the own list in effect (the newest live `top-friends`), [] for
+// none or a diary with no block yet. Read only: the session uses it to let a
+// person already listed stay when the owner blocks them later.
+async function ownTopKeys (ctx) {
+  return withIdentity(ctx, async ({ diary }) => {
+    if (diary.length === 0) return []
+    return latestTopKeys(await store.readRaw(diary))
+  })
+}
+
+// Appends the own `top-friends` record (publishLatest: every earlier live
+// version is tombstoned), [] clears the list. Self is refused, and so is a
+// person this member blocked in `keys` unless that key is already in the
+// list in effect (blocking someone already listed must not lock the list:
+// they may stay, or be dropped). Nothing written on a refusal. -> { seq, ref }.
+async function topSet (ctx, { keys }) {
+  const { ownHex, blocked, listed } = await withIdentity(ctx, async ({ diary, ownHex }) => ({
+    ownHex,
+    blocked: await memberBlocks(ctx.storage),
+    listed: new Set(diary.length === 0 ? [] : latestTopKeys(await store.readRaw(diary)))
+  }))
+  if (keys.includes(ownHex)) throw new UsageError(TOP_SELF)
+  if (keys.some((k) => blocked.has(k) && !listed.has(k))) throw new UsageError(FAN_BLOCKED)
+  return publishLatest(ctx, buildRecord(() => topFriendsRecord({ keys })))
+}
+
+const NOTHING_TO_DELETE = 'nada para apagar'
+
+// The seqs of the live (not tombstoned) blocks of `type` in the own diary's
+// raw entries, ascending.
+function liveSeqsOfType (raw, type) {
+  const deleted = deletedSeqs(raw)
+  const out = []
+  for (const { seq, record } of raw) {
+    if (deleted.has(seq)) continue
+    const copy = validRecordCopy(record, seq)
+    if (copy !== null && copy.type === type) out.push(seq)
+  }
+  return out
+}
+
+// Tombstones every live `profile-about` (kind 'about') or `mood` (kind
+// 'mood') of the own diary, so no older version shows again ->
+// recordDelete's { seq, ref, changed, deleted }. With none live it answers
+// NOTHING_TO_DELETE and writes nothing.
+async function profileExtraDelete (ctx, { kind }) {
+  const type = kind === 'about' ? 'profile-about' : kind === 'mood' ? 'mood' : null
+  if (type === null) throw new UsageError('parâmetro inválido: kind')
+  let to = null
+  await withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    const live = liveSeqsOfType(await store.readRaw(diary), type)
+    if (live.length === 0) throw new UsageError(NOTHING_TO_DELETE)
+    to = { author: ownHex, seq: live[live.length - 1] }
+  })
+  return recordDelete(ctx, type, { to })
 }
 
 // ---- media ----
@@ -2108,6 +2394,17 @@ async function ownWriterDerived (ctx, entry) {
     return !!kp && kp.publicKey instanceof Uint8Array && hex(kp.publicKey) === entry.key
   } catch {
     return false
+  }
+}
+
+// Several records in one atomic append (all or none), or a function of the
+// first seq returning them; -> the last seq.
+async function appendManyToOwnGroupCore (ctx, entry, records, priv = false) {
+  const core = await openOwnGroupCore(ctx, entry)
+  try {
+    return await store.appendGroupRecords(core, records, { root: entry.key === entry.group, community: entry.kind === 'community', private: priv, limits: ctx.limits })
+  } finally {
+    await core.close()
   }
 }
 
@@ -3134,8 +3431,23 @@ async function groupLeave (ctx, { group }) {
 // sealed: true) in a private group, public descriptors in a public one. The
 // upload is a separate earlier call, so a post that fails here leaves its
 // blocks orphaned in the media core; nothing is retried.
-async function groupPost (ctx, { group, text, replyTo = null, media = null, card = null, fwd = 0, sealed = false }) {
+// `topic: true` also marks the new post a forum topic (group-topic) and
+// `poll` (with topic only, the method table's cross check) gives it a
+// group-poll, both side records on the same own writer right after the post.
+// `event` (Eventos) gives a root post a group-event right after it (after
+// its group-topic when `topic: true`): never with a poll, a reply, a
+// forward, media, a card or sealed (the method table's cross check, checked
+// again here).
+// Public groups only: a private group refuses before anything is written.
+// The post and its side records go in one atomic append (all or none).
+async function groupPost (ctx, { group, text, replyTo = null, media = null, card = null, fwd = 0, sealed = false, topic = false, poll = null, event = null }) {
+  const withPoll = poll !== null && poll !== undefined
+  const withEvent = event !== null && event !== undefined
+  const forum = topic === true || withPoll || withEvent
   const withMedia = media !== null && media !== undefined
+  if (withEvent && (withPoll || withMedia || (card !== null && card !== undefined) || (replyTo !== null && replyTo !== undefined) || fwd === 1 || sealed === true)) {
+    throw new UsageError(EVENT_PARAM_INVALID)
+  }
   // Checked before withGroup, which holds the diary open.
   if (withMedia) {
     // A voice note is the only item of its post, never next to photos.
@@ -3144,6 +3456,8 @@ async function groupPost (ctx, { group, text, replyTo = null, media = null, card
   }
   if (card && card.image !== null) await verifyMedia(ctx, [card.image], null, sealed === true ? validPrivateItem : (d) => validateDescriptor(d) === null)
   return withGroup(ctx, group, true, async ({ ownHex, g }) => {
+    if (withEvent && g.private) throw new UsageError(GROUP_EVENT_PUBLIC)
+    if (forum && (g.private || sealed === true)) throw new UsageError(GROUP_FORUM_PUBLIC)
     if (sealed === true && !g.private) throw new UsageError(GROUP_SEALED_MEDIA_PUBLIC)
     if ((withMedia || (card && card.image !== null)) && sealed !== true && g.private) throw new UsageError(GROUP_PRIVATE_MEDIA_SEALED)
     const own = liveOwnWriter(g, ownHex)
@@ -3151,7 +3465,22 @@ async function groupPost (ctx, { group, text, replyTo = null, media = null, card
     requireCounted(g, own.key)
     let record = buildRecord(() => grp.groupPost({ text, replyTo, fwd, card, media: withMedia ? media : null, seen: g.built.last, sealed: g.private }))
     if (g.private) record = sealForGroup(ctx, g, own.key, record)
-    return { seq: await appendToOwnGroupCore(ctx, own, record, g.private) }
+    if (!forum) return { seq: await appendToOwnGroupCore(ctx, own, record, g.private) }
+    // The post and its side records are one atomic append: seqs root, root+1
+    // (and root+2), as foldTopics expects, and a failure writes none. The side
+    // records name the root at the seq the store gives it.
+    let seq = -1
+    await appendManyToOwnGroupCore(ctx, own, (first) => {
+      seq = first
+      const target = { writer: own.key, seq }
+      return [
+        record,
+        ...(topic === true || withPoll ? [buildRecord(() => grp.groupTopic({ target, seen: g.built.last }))] : []),
+        ...(withPoll ? [buildRecord(() => grp.groupPoll({ target, options: poll, seen: g.built.last }))] : []),
+        ...(withEvent ? [buildRecord(() => grp.groupEvent({ target, title: event.title, start: event.start, end: event.end, place: event.place, seen: g.built.last }))] : [])
+      ]
+    })
+    return { seq }
   })
 }
 
@@ -3237,6 +3566,14 @@ async function groupHide (ctx, { group, target, on }) {
 }
 
 const GROUP_POST_MISSING = 'mensagem não encontrada'
+// Foruns e enquetes (docs/rpc.md).
+const GROUP_FORUM_PUBLIC = 'fóruns e enquetes só em grupo público'
+const GROUP_TOPIC_MISSING = 'tópico não encontrado'
+const GROUP_POLL_MISSING = 'enquete não encontrada'
+const GROUP_PICK_INVALID = 'opção inválida'
+// Eventos (docs/rpc.md).
+const GROUP_EVENT_PUBLIC = 'eventos só em grupo público'
+const EVENT_PARAM_INVALID = 'parâmetro inválido: event'
 
 // A visible post of fold g at `target`: hidden posts and posts of diaries
 // left out of the fold's readers take no reactions and list no reactors.
@@ -3271,6 +3608,134 @@ async function groupReact (ctx, { group, target, emoji }) {
     if (g.private) record = sealForGroup(ctx, g, own.key, record)
     await appendToOwnGroupCore(ctx, own, record, g.private)
     return { ok: true }
+  })
+}
+
+// A vote on the poll of a visible topic root (docs/rpc.md): who may post
+// may vote, public groups only. Re-sending the pick the fold already counts
+// writes nothing (the fold's `by` lists are uncapped, so they prove it).
+async function groupChoose (ctx, { group, target, pick }) {
+  return withGroup(ctx, group, true, async ({ ownHex, g }) => {
+    if (g.private) throw new UsageError(GROUP_FORUM_PUBLIC)
+    const own = liveOwnWriter(g, ownHex)
+    if (own === null || statusOf(g, ownHex) !== 'member') throw new UsageError(GROUP_FORBIDDEN)
+    const post = visiblePost(g, target)
+    const poll = votable(post)
+    if (poll === null) throw new UsageError(GROUP_POLL_MISSING)
+    if (pick !== null && !(pick < poll.by.length)) throw new UsageError(GROUP_PICK_INVALID)
+    const current = poll.by.findIndex((list) => list.includes(ownHex))
+    if ((current < 0 ? null : current) === pick) return { ok: true }
+    requireCounted(g, own.key)
+    const record = buildRecord(() => grp.groupChoice({ target: { writer: post.writer, seq: post.seq }, pick, seen: g.built.last }))
+    await appendToOwnGroupCore(ctx, own, record, false)
+    return { ok: true }
+  })
+}
+
+// Who voted on a visible topic's poll: one entry per option (zero counts
+// too), by up to GROUP_VOTERS_MAX diary keys in vote order.
+async function groupVoters (ctx, { group, target }) {
+  return withGroup(ctx, group, false, async ({ g }) => {
+    const post = visiblePost(g, target)
+    const poll = votable(post)
+    if (poll === null) throw new UsageError(GROUP_POLL_MISSING)
+    return { voters: poll.by.map((list, i) => ({ pick: i, count: poll.totals[i], by: list.slice(0, GROUP_VOTERS_MAX) })) }
+  })
+}
+
+// What a vote on a visible post picks from: its topic's poll, or its event
+// (Eventos: an RSVP, 0 going, 1 maybe), each { totals, by } with one entry
+// per option; null when it takes no vote. The fold gives a root one or the
+// other, never both.
+function votable (post) {
+  if (post.topic && post.topic.poll) return post.topic.poll
+  return post.event ? post.event : null
+}
+
+// The events of a public group (docs/rpc.md), newest root first in the
+// causal order, GROUP_EVENTS_LIMIT per page. `cursor` is group.read's
+// exclusive `before` over the event roots. A hidden root keeps its place
+// blanked: no text, no event, no RSVPs (the fold counts none on it).
+async function groupEvents (ctx, { group, cursor = null } = {}) {
+  return withGroup(ctx, group, false, async ({ base, g }) => {
+    if (g.private) throw new UsageError(GROUP_EVENT_PUBLIC)
+    let roots = g.built.posts.filter((p) => g.diaries.get(p.diary) && p.event)
+    if (cursor !== null && cursor !== undefined) {
+      const i = roots.findIndex((p) => p.writer === cursor.writer && p.seq === cursor.seq)
+      if (i >= 0) {
+        roots = roots.slice(0, i)
+      } else {
+        const k = orderKey(cursor.at, cursor.writer, cursor.seq)
+        roots = roots.filter((p) => compareOrder(orderKey(p.at, p.writer, p.seq), k) < 0)
+      }
+    }
+    const start = Math.max(0, roots.length - GROUP_EVENTS_LIMIT)
+    const items = roots.slice(start).reverse().map((p) => {
+      const { name, username } = authorOf(g, p.diary, base.association, base.mod)
+      const e = p.event
+      const shown = !p.hidden
+      const mine = shown ? e.by.findIndex((list) => list.includes(base.ownHex)) : -1
+      return {
+        writer: p.writer,
+        diary: p.diary,
+        seq: p.seq,
+        at: p.at,
+        text: shown ? p.text : '',
+        name,
+        username,
+        hidden: p.hidden,
+        event: shown ? { title: e.title, start: e.start, end: e.end, place: e.place } : null,
+        totals: shown ? e.totals.slice() : [0, 0],
+        mine: mine < 0 ? null : mine
+      }
+    })
+    const oldest = items.length > 0 ? items[items.length - 1] : null
+    return { items, next: start > 0 && oldest !== null ? { at: oldest.at, writer: oldest.writer, seq: oldest.seq } : null, incomplete: g.built.incomplete }
+  }, (p) => {
+    requirePendingOwn(p)
+    return { items: [], next: null, incomplete: true }
+  })
+}
+
+// The group's topics, newest root first in the causal order (a reply does
+// not bump a topic). replies and last count the visible replies of the
+// thread; a hidden root keeps its place blanked, without a poll. `before`
+// is group.read's exclusive cursor over the roots. A private group has no
+// topics: refused as the other forum methods are.
+async function groupTopics (ctx, { group, limit = GROUP_TOPICS_LIMIT, before = null } = {}) {
+  return withGroup(ctx, group, false, async ({ base, g }) => {
+    if (g.private) throw new UsageError(GROUP_FORUM_PUBLIC)
+    const all = g.built.posts.filter((p) => g.diaries.get(p.diary))
+    const threads = new Map()
+    for (const p of all) {
+      if (!p.thread || p.hidden || (p.thread.writer === p.writer && p.thread.seq === p.seq)) continue
+      const id = p.thread.writer + ':' + p.thread.seq
+      const t = threads.get(id) || { replies: 0, last: null }
+      t.replies++
+      t.last = p.at
+      threads.set(id, t)
+    }
+    let roots = all.filter((p) => p.topic)
+    if (before !== null && before !== undefined) {
+      const i = roots.findIndex((p) => p.writer === before.writer && p.seq === before.seq)
+      if (i >= 0) {
+        roots = roots.slice(0, i)
+      } else {
+        const k = orderKey(before.at, before.writer, before.seq)
+        roots = roots.filter((p) => compareOrder(orderKey(p.at, p.writer, p.seq), k) < 0)
+      }
+    }
+    const start = Math.max(0, roots.length - (limit || GROUP_TOPICS_LIMIT))
+    const items = roots.slice(start).reverse().map((p) => {
+      const t = threads.get(p.writer + ':' + p.seq) || { replies: 0, last: null }
+      const { name, username } = authorOf(g, p.diary, base.association, base.mod)
+      return { writer: p.writer, diary: p.diary, seq: p.seq, at: p.at, text: p.hidden ? '' : p.text, name, username, hidden: p.hidden, replies: t.replies, last: t.last, poll: pollSummary(p, base.ownHex) }
+    })
+    const oldest = items.length > 0 ? items[items.length - 1] : null
+    return { items, next: start > 0 && oldest !== null ? { at: oldest.at, writer: oldest.writer, seq: oldest.seq } : null, incomplete: g.built.incomplete }
+  }, (p) => {
+    requirePendingOwn(p)
+    return { items: [], next: null, incomplete: true }
   })
 }
 
@@ -3422,16 +3887,68 @@ function groupInvitePolicy (ctx, { group, members }) {
 
 // One page backwards over the causal order, newest first (feed.read's
 // shape); a hidden post keeps its place with an empty text.
-async function groupRead (ctx, { group, limit = GROUP_LIMIT_DEFAULT, before = null } = {}) {
-  return withGroup(ctx, group, false, async ({ base, g }) => ({ ...readFold(base, g, { limit, before }), state: keyState(ctx, g) }), (p) => {
+// `marks: true` adds each item's topic marker (topicMark); `topic` reads one
+// topic's thread (the root and its replies, marked) and adds the page's poll
+// summary and event. Neither changes the unmarked page by a byte.
+async function groupRead (ctx, { group, limit = GROUP_LIMIT_DEFAULT, before = null, marks = false, topic = null } = {}) {
+  const thread = topic !== null && topic !== undefined
+  return withGroup(ctx, group, false, async ({ base, g }) => {
+    if (!thread) return { ...readFold(base, g, { limit, before, marks: marks === true }), state: keyState(ctx, g) }
+    const root = topicRoot(g, topic)
+    return { ...readFold(base, g, { limit, before, marks: true, topic: root }), poll: pollSummary(root, base.ownHex), event: eventSummary(root, base.ownHex), state: keyState(ctx, g) }
+  }, (p) => {
     requirePendingOwn(p)
+    if (thread) throw new UsageError(GROUP_TOPIC_MISSING)
     return { items: [], next: null, hidden: 0, incomplete: true, sealed: 0, epoch: null, state: 'ok' }
   })
 }
 
+// The topic root post of fold g at `target` (hidden ones too: their thread
+// still reads, blanked), else GROUP_TOPIC_MISSING.
+function topicRoot (g, target) {
+  const post = g.built.posts.find((p) => p.writer === target.writer && p.seq === target.seq)
+  if (post === undefined || !post.topic || !g.diaries.get(post.diary)) throw new UsageError(GROUP_TOPIC_MISSING)
+  return post
+}
+
+// The poll of a topic root a reader may see: none on a hidden root.
+function rootPoll (root) {
+  return root !== undefined && root !== null && !root.hidden && root.topic && root.topic.poll ? root.topic.poll : null
+}
+
+// A poll's page summary: { options, totals, mine } (mine: the option the
+// caller's diary is on, or null), null without a visible poll.
+function pollSummary (root, ownHex) {
+  const poll = rootPoll(root)
+  if (poll === null) return null
+  const mine = poll.by.findIndex((list) => list.includes(ownHex))
+  return { options: poll.options.slice(), totals: poll.totals.slice(), mine: mine < 0 ? null : mine }
+}
+
+// The topic root's event (Eventos): { writer, seq, title, start, end, place,
+// totals, mine } or null (hidden root, no event). The uncapped `by` lists stay
+// out; group.voters answers who.
+function eventSummary (root, ownHex) {
+  if (root === undefined || root === null || root.hidden || !root.event) return null
+  const e = root.event
+  const mine = e.by.findIndex((list) => list.includes(ownHex))
+  return { writer: root.writer, seq: root.seq, title: e.title, start: e.start, end: e.end, place: e.place, totals: e.totals.slice(), mine: mine < 0 ? null : mine }
+}
+
+// A marked item's topic: null, or { writer, seq, poll } of the topic root it
+// opens or replies under (poll: whether that root shows a poll). A hidden
+// post shows no marker; a reply under a hidden root keeps its thread, with
+// poll false.
+function topicMark (g, p) {
+  if (p.hidden || !p.thread) return null
+  const root = g.built.posts.find((x) => x.writer === p.thread.writer && x.seq === p.thread.seq)
+  return { writer: p.thread.writer, seq: p.thread.seq, poll: rootPoll(root) !== null }
+}
+
 // group.read's page of fold g, without its state.
-function readFold (base, g, { limit, before }) {
-  const all = g.built.posts.filter((p) => g.diaries.get(p.diary))
+function readFold (base, g, { limit, before, marks = false, topic = null }) {
+  let all = g.built.posts.filter((p) => g.diaries.get(p.diary))
+  if (topic !== null) all = all.filter((p) => p.thread && p.thread.writer === topic.writer && p.thread.seq === topic.seq)
   // Older than the cursor: with the cursor post still in the fold, every
   // post before it in the causal order; without it (gone after a sync), each
   // post whose order key (at, writer, seq) is below the cursor's, checked one
@@ -3461,7 +3978,8 @@ function readFold (base, g, { limit, before }) {
     card: p.hidden || !p.card ? null : copyLinkCard(p.card, (d) => ({ ...d })),
     hidden: p.hidden,
     ...reactionSummary(p, base.ownHex),
-    ...authorOf(g, p.diary, base.association, base.mod)
+    ...authorOf(g, p.diary, base.association, base.mod),
+    ...(marks ? { topic: topicMark(g, p) } : {})
   }))
   const oldest = items.length > 0 ? items[items.length - 1] : null
   return {
@@ -5518,6 +6036,19 @@ module.exports = {
   testimonialPendingRows,
   testimonialShow,
   testimonialDelete,
+  scrapDraft,
+  scrapWrite,
+  scrapHide,
+  scrapWall,
+  scrapDelete,
+  profileAbout,
+  moodSet,
+  fanSet,
+  choiceSet,
+  choiceMine,
+  topSet,
+  ownTopKeys,
+  profileExtraDelete,
   momentCreate,
   momentDelete,
   momentsRead,
@@ -5557,6 +6088,10 @@ module.exports = {
   groupHide,
   groupReact,
   groupReactors,
+  groupChoose,
+  groupTopics,
+  groupVoters,
+  groupEvents,
   groupBan,
   groupAdmit,
   groupAdmin,

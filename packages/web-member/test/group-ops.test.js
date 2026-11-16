@@ -1684,3 +1684,137 @@ test('group.read sends the compact reaction summary, never the reactor lists', a
   t.ok(read.items.every((p) => p.reactions.length === 1 && p.reactions[0].count === 200 && p.reactions[0].mine === false && !('by' in p.reactions[0])))
   t.ok(utf8ByteLength(JSON.stringify(read)) <= MAX_MESSAGE, 'fits one message')
 })
+
+// ---- foruns e enquetes (docs/rpc.md) ----
+
+async function groupRecordAt (m, key, seq) {
+  const core = await store.openGroupCoreReadOnly(m.storage, key)
+  try { return JSON.parse(b4a.toString(await core.get(seq))) } finally { await core.close() }
+}
+
+test('forum: a topic with a poll is the post and its side records on the same writer, read marked and listed', async (t) => {
+  const { a, b } = await pair()
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  await ops.groupPost(a.ctx, { group, text: 'chat' })
+  const { seq } = await ops.groupPost(a.ctx, { group, text: 'Mutirão?', topic: true, poll: ['sábado', 'domingo'] })
+  t.is(seq, 2)
+  const root = { writer: group, seq }
+  t.alike([await groupRecordAt(a, group, 3), await groupRecordAt(a, group, 4)].map((r) => [r.type, r.target]), [['group-topic', root], ['group-poll', root]], 'post, topic, poll in order')
+  const plain = await ops.groupPost(a.ctx, { group, text: 'Regras', topic: true })
+  await ops.groupPost(a.ctx, { group, text: 'resposta', replyTo: root })
+
+  const unmarked = await ops.groupRead(a.ctx, { group })
+  t.ok(unmarked.items.every((p) => !('topic' in p)), 'the default page keeps its keys')
+  t.absent('poll' in unmarked)
+  const marked = await ops.groupRead(a.ctx, { group, marks: true })
+  t.alike(marked.items.map((p) => [p.text, p.topic]), [
+    ['resposta', { writer: group, seq, poll: true }],
+    ['Regras', { writer: group, seq: plain.seq, poll: false }],
+    ['Mutirão?', { writer: group, seq, poll: true }],
+    ['chat', null]
+  ])
+  const thread = await ops.groupRead(a.ctx, { group, topic: root })
+  t.alike(thread.items.map((p) => p.text), ['resposta', 'Mutirão?'], 'root and replies, newest first')
+  t.alike(thread.poll, { options: ['sábado', 'domingo'], totals: [0, 0], mine: null })
+  await t.exception(() => ops.groupRead(a.ctx, { group, topic: { writer: group, seq: 1 } }), /tópico não encontrado/)
+
+  await shareGroupCore(a, b, group)
+  await shareDiary(a, b)
+  t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'member' })
+  t.alike(await ops.groupChoose(b.ctx, { group, target: root, pick: 1 }), { ok: true })
+  const w = (await store.readGroupWriters(b.storage))[0].key
+  const before = (await store.openGroupCoreReadOnly(b.storage, w))
+  const length = before.length
+  await before.close()
+  t.alike(await ops.groupChoose(b.ctx, { group, target: root, pick: 1 }), { ok: true }, 'the same pick again')
+  const after = await store.openGroupCoreReadOnly(b.storage, w)
+  t.is(after.length, length, 'writes nothing')
+  await after.close()
+  await t.exception(() => ops.groupChoose(b.ctx, { group, target: root, pick: 2 }), /opção inválida/)
+  await t.exception(() => ops.groupChoose(b.ctx, { group, target: { writer: group, seq: plain.seq }, pick: 0 }), /enquete não encontrada/)
+  await t.exception(() => ops.groupChoose(b.ctx, { group, target: { writer: group, seq: 1 }, pick: 0 }), /enquete não encontrada/)
+
+  await shareGroupCore(b, a, w)
+  await shareDiary(b, a)
+  t.alike(await ops.groupVoters(a.ctx, { group, target: root }), { voters: [{ pick: 0, count: 0, by: [] }, { pick: 1, count: 1, by: [b.ownHex] }] })
+  await t.exception(() => ops.groupVoters(a.ctx, { group, target: { writer: group, seq: plain.seq } }), /enquete não encontrada/)
+  const topics = await ops.groupTopics(a.ctx, { group })
+  t.alike(topics.items.map((x) => [x.text, x.name, x.replies, x.poll]), [
+    ['Regras', 'Ana', 0, null],
+    ['Mutirão?', 'Ana', 1, { options: ['sábado', 'domingo'], totals: [0, 1], mine: null }]
+  ])
+  t.is(topics.items[1].last, thread.items[0].at)
+  t.is(topics.items[0].last, null)
+  t.alike([topics.next, topics.incomplete], [null, false])
+  const one = await ops.groupTopics(a.ctx, { group, limit: 1 })
+  t.alike(one.items.map((x) => x.text), ['Regras'])
+  t.alike((await ops.groupTopics(a.ctx, { group, limit: 1, before: one.next })).items.map((x) => x.text), ['Mutirão?'])
+  t.is((await ops.groupTopics(b.ctx, { group })).items[1].poll.mine, 1)
+
+  // A hidden root keeps its place blanked: no marker, no poll, no votes.
+  t.alike(await ops.groupHide(a.ctx, { group, target: root, on: true }), { ok: true })
+  const hidden = await ops.groupRead(a.ctx, { group, marks: true })
+  t.alike(hidden.items.find((p) => p.seq === seq && p.writer === group).topic, null)
+  t.alike(hidden.items.find((p) => p.text === 'resposta').topic, { writer: group, seq, poll: false })
+  const blanked = (await ops.groupTopics(a.ctx, { group })).items[1]
+  t.alike([blanked.text, blanked.hidden, blanked.poll], ['', true, null])
+  t.is((await ops.groupRead(a.ctx, { group, topic: root })).poll, null)
+  await t.exception(() => ops.groupVoters(a.ctx, { group, target: root }), /mensagem não encontrada/)
+  await shareGroupCore(a, b, group)
+  await t.exception(() => ops.groupChoose(b.ctx, { group, target: root, pick: 0 }), /mensagem não encontrada/)
+})
+
+test('forum: the topic post and its side records are one atomic append, consecutive seqs', async (t) => {
+  const { a } = await pair()
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  const lengthOf = async () => {
+    const core = await store.openGroupCoreReadOnly(a.storage, group)
+    try { return core.length } finally { await core.close() }
+  }
+  const { seq } = await ops.groupPost(a.ctx, { group, text: 'Mutirão?', topic: true, poll: ['sábado', 'domingo'] })
+  t.is(seq, 1)
+  t.is(await lengthOf(), 4, 'post, topic, poll')
+  const root = { writer: group, seq }
+  const records = [await groupRecordAt(a, group, 1), await groupRecordAt(a, group, 2), await groupRecordAt(a, group, 3)]
+  t.alike(records.map((r) => r.type), ['group-post', 'group-topic', 'group-poll'])
+  t.alike([records[1].target, records[2].target], [root, root], 'side records name the root at seq root')
+  const topicOnly = await ops.groupPost(a.ctx, { group, text: 'Regras', topic: true })
+  t.is(topicOnly.seq, 4)
+  t.alike([await groupRecordAt(a, group, 5)].map((r) => [r.type, r.target]), [['group-topic', { writer: group, seq: 4 }]])
+
+  // An invalid poll writes nothing, not even the post.
+  const before = await lengthOf()
+  await t.exception(() => ops.groupPost(a.ctx, { group, text: 'x', topic: true, poll: ['só uma'] }))
+  t.is(await lengthOf(), before, 'a failing batch writes no record')
+
+  // The store validates every record before the one append: a bad last record
+  // leaves the valid ones out too.
+  const entry = (await store.readGroupWriters(a.storage))[0]
+  const core = await store.openGroupWriter(a.storage, await groupKeyPairFromPrf(a.prf, new Uint8Array(b4a.from(entry.nonce, 'hex'))))
+  try {
+    const ok = grp.groupPost({ text: 'meio', replyTo: null, fwd: 0, card: null, media: null, seen: null, sealed: false })
+    await t.exception(() => store.appendGroupRecords(core, [ok, { type: 'group-topic', target: { writer: 'zz', seq: 1 }, seen: null, at: new Date().toISOString() }], { root: true }), /registro inválido/)
+    t.is(core.length, before, 'none appended')
+    t.is(await store.appendGroupRecords(core, (first) => [ok, grp.groupTopic({ target: { writer: group, seq: first }, seen: null })], { root: true }), before + 1, 'a function of the first seq')
+    t.is(core.length, before + 2)
+  } finally {
+    await core.close()
+  }
+})
+
+test('forum: a private group refuses topics, polls, votes and the topic list before writing', async (t) => {
+  const { a } = await pair()
+  a.ctx.groupKeys = createGroupKeys()
+  await a.ctx.groupKeys.unlock(a.storage, new Uint8Array(a.prf))
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Segredo', join: 'approval', visibility: 'private' })
+  const core = await store.openGroupCoreReadOnly(a.storage, group)
+  const length = core.length
+  await core.close()
+  await t.exception(() => ops.groupPost(a.ctx, { group, text: 'tópico', topic: true }), /fóruns e enquetes só em grupo público/)
+  await t.exception(() => ops.groupPost(a.ctx, { group, text: 'tópico', topic: true, poll: ['a', 'b'] }), /fóruns e enquetes só em grupo público/)
+  await t.exception(() => ops.groupChoose(a.ctx, { group, target: { writer: group, seq: 1 }, pick: 0 }), /fóruns e enquetes só em grupo público/)
+  const again = await store.openGroupCoreReadOnly(a.storage, group)
+  t.is(again.length, length, 'nothing written')
+  await again.close()
+  await t.exception(() => ops.groupTopics(a.ctx, { group }), /fóruns e enquetes só em grupo público/, 'no topic list in a private group')
+})

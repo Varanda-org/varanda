@@ -53,6 +53,7 @@ import { Pill } from '../ui/Pill'
 import { useSaved } from '../savedProvider'
 import { SAVED_ENTRY_LABEL } from '../savedView'
 import { PostRow } from '../ui/PostRow'
+import { ReminderBanner } from '../ui/ReminderBanner'
 import { PostSheetProvider } from '../ui/PostSheetHost'
 import { RefreshableList } from '../ui/RefreshableList'
 import { ShareProfile, shareProfileDirect } from '../ui/ShareProfile'
@@ -60,6 +61,14 @@ import { Sheet, TEXT_CAP } from '../ui/Sheet'
 import { EmptyState, ErrorState, ListFooter, SkeletonRow } from '../ui/States'
 import { PressScale } from '../ui/PressScale'
 import { ProfileHeader, ProfileStatus } from '../ui/ProfileHeader'
+import { AboutCard, useProfileExtra } from '../ui/AboutCard'
+import { useOwnMarks } from '../ui/FanButton'
+import { TopFriendsRow, useTopFriends } from '../ui/TopFriendsRow'
+import { fansCountView, NOTICES } from '../fans.js'
+import { ownTopRows } from '../fansView.js'
+import { MoodChip } from '../ui/MoodChip'
+import { SorteCard } from '../ui/SorteCard'
+import { bandTint, extraView } from '../profileExtraView.js'
 import { MuralFooter, MuralRow, muralGridRows } from '../ui/MuralGrid'
 import { Segmented } from '../ui/Segmented'
 import { CommunitiesBox } from '../ui/CommunitiesBox'
@@ -246,6 +255,8 @@ function postOf (author, seq, record) {
     quote: record.quote || null,
     preview: record.preview || null,
     media: Array.isArray(record.media) && record.media.length > 0 ? record.media : null,
+    ...(Array.isArray(record.poll) ? { poll: record.poll } : {}),
+    ...(record.event && typeof record.event === 'object' ? { event: record.event } : {}),
     name: null,
     username: null
   }
@@ -256,9 +267,9 @@ export default function Diario (props) {
   return <PostSheetProvider><DiarioList {...props} /></PostSheetProvider>
 }
 
-function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage, onOpenMomentos, onOpenSalvos, onTabChange }) {
+function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage, onOpenMomentos, onOpenSalvos, onOpenRecados, onOpenEventos, onTabChange, onOpenTop }) {
   const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
+  const { colors, scheme } = useTheme()
   const node = useNode()
   const savedList = useSaved()
   const names = useNames()
@@ -583,6 +594,16 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
   const bio = profile && profile.bio ? profile.bio : ''
   const profileUrl = node.hosted === true && publicKey ? buildProfileUrl({ origin: installationOrigin() || globalThis.location?.origin || null, username: profile ? profile.username : null, publicKey }) : null
 
+  // Rich profile (hosted only); the Sorte do dia is local and always shown.
+  const rich = useProfileExtra({ author: publicKey || ownPublicKey, enabled: node.hosted === true, request })
+  const extraShown = extraView(rich.held, now)
+  const topOwner = publicKey || ownPublicKey
+  const ownMarks = useOwnMarks({ request, ownKey: topOwner, enabled: node.hosted === true })
+  const topRead = useTopFriends({ owner: topOwner, ownKey: topOwner, index: rich.index, request, enabled: node.hosted === true })
+  const topRows = ownTopRows(ownMarks.marks.top, topRead.view)
+  const fansView = fansCountView({ fans: rich.index ? rich.index.fans : null, complete: rich.index ? rich.index.complete : false })
+  const tint = bandTint(extraShown.theme, scheme)
+
   const bandHeight = insets.top + BAND
   const hasBell = typeof onAvisos === 'function'
   // The Segmented is the tabs View's last child, so its top in the list is
@@ -595,19 +616,22 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
   const listRef = useRef(null)
   const selectPinnedTab = usePinnedTabSelect(bar, listRef, shownTab, setTab)
   // The band's controls, drawn in the header and again in the pinned bar.
+  // On a themed band the control discs are the ink color (the pinned bar keeps
+  // the sunset band and its scrim).
+  const disc = (style, inBar) => (tint !== null && !inBar ? [style, { backgroundColor: tint.disc }] : style)
   const bandControls = (inBar) => (
     <>
-      <HelpButton doc={HELP.diario} color='#ffffff' style={inBar ? styles.barButton : (hasBell ? styles.infoShifted : styles.info)} />
+      <HelpButton doc={HELP.diario} color={tint !== null && !inBar ? tint.icon : '#ffffff'} style={disc(inBar ? styles.barButton : (hasBell ? styles.infoShifted : styles.info), inBar)} />
       <PressScale
         accessibilityRole='button'
         accessibilityLabel='Ajustes'
         hitSlop={8}
         onPress={() => onSettings('lista')}
-        style={inBar ? styles.barButton : (hasBell ? styles.gearShifted : styles.gear)}
+        style={disc(inBar ? styles.barButton : (hasBell ? styles.gearShifted : styles.gear), inBar)}
       >
-        <Icon name='engrenagem' size={20} color='#ffffff' />
+        <Icon name='engrenagem' size={20} color={tint !== null && !inBar ? tint.icon : '#ffffff'} />
       </PressScale>
-      {hasBell ? <BellButton color='#ffffff' badged={avisosNew === true} onPress={onAvisos} style={inBar ? styles.barButton : styles.bell} /> : null}
+      {hasBell ? <BellButton color={tint !== null && !inBar ? tint.icon : '#ffffff'} badged={avisosNew === true} onPress={onAvisos} style={disc(inBar ? styles.barButton : styles.bell, inBar)} /> : null}
     </>
   )
 
@@ -684,6 +708,12 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
           bandHeight={bandHeight}
           topInset={insets.top}
           bandButtons={bar.interactive ? null : bandControls(false)}
+          theme={extraShown.theme}
+          mood={extraShown.mood ? <MoodChip mood={extraShown.mood} now={now} theme={extraShown.theme} onPress={node.hosted === true ? () => setEditing(true) : undefined} /> : null}
+          about={<><AboutCard about={extraShown.about} theme={extraShown.theme} /><SorteCard /></>}
+          top={node.hosted === true && typeof onOpenTop === 'function'
+            ? <TopFriendsRow rows={topRows} mine onEdit={onOpenTop} onOpen={onOpenMember} loading={ownMarks.marks.status === 'loading'} notice={ownMarks.marks.status === 'unsure' && !ownMarks.marks.top ? NOTICES.unreadable : null} />
+            : null}
           avatar={{ name: who.avatarName, publicKey: info.publicKey, picture: profile && profile.avatar, persist: true }}
           title={displayText(who.title)}
           subtitle={who.subtitle ? displayText(who.subtitle) : null}
@@ -696,8 +726,14 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
             label: followCounts.seguidores === 1 ? 'seguidor' : 'seguidores',
             value: followCounts.seguidores === null ? null : displayText(formatCount(followCounts.seguidores)),
             onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(ownPublicKey, 'seguidores') : undefined
-          }]}
-          note={followCounts.incomplete && followCounts.seguidores !== null ? <View style={styles.countsNote}><Soft>{COUNTS_INCOMPLETE_NOTE}</Soft></View> : null}
+          }, node.hosted === true
+            ? {
+                label: fansView.count === 1 ? 'fã' : 'fãs',
+                value: fansView.count === null ? null : displayText(formatCount(fansView.count)),
+                onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(ownPublicKey, 'fas') : undefined
+              }
+            : null]}
+          note={(followCounts.incomplete && followCounts.seguidores !== null) || (node.hosted === true && fansView.count !== null && fansView.incomplete) ? <View style={styles.countsNote}><Soft>{COUNTS_INCOMPLETE_NOTE}</Soft></View> : null}
           corner={<Pill key='edit' label='Editar perfil' onPress={() => setEditing(true)} maxFontSizeMultiplier={TEXT_CAP} />}
           actions={[
             profileUrl !== null ? <Pill key='share' icon='compartilhar' accessibilityLabel='compartilhar perfil' onPress={() => { shareProfileDirect(profileUrl).then((done) => { if (!done) setSharing(true) }) }} /> : null
@@ -712,6 +748,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
                 onOpenOwn={typeof onOpenMomentos === 'function' && ownPublicKey ? () => onOpenMomentos(ownPublicKey) : undefined}
                 onDelete={setMomentDeleting}
               />
+              {node.hosted === true ? <ReminderBanner now={now} onOpenThread={onOpenThread} /> : null}
               <CommunitiesBox items={communities} title='Suas comunidades' onOpen={typeof onOpenCommunity === 'function' ? onOpenCommunity : undefined} />
               {node.hosted === true && savedList.available && typeof onOpenSalvos === 'function'
                 ? (
@@ -723,6 +760,34 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
                   >
                     <Icon name='salvar' size={20} color={colors.soft} />
                     <Text style={styles.salvosText}>{SAVED_ENTRY_LABEL}</Text>
+                    <Icon name='seta' size={20} color={colors.soft} />
+                  </Pressable>
+                  )
+                : null}
+              {node.hosted === true && ownPublicKey && typeof onOpenEventos === 'function'
+                ? (
+                  <Pressable
+                    accessibilityRole='button'
+                    accessibilityLabel='Eventos'
+                    onPress={() => onOpenEventos(ownPublicKey)}
+                    style={({ pressed }) => [styles.salvos, pressed && styles.salvosPressed]}
+                  >
+                    <Icon name='evento' size={20} color={colors.soft} />
+                    <Text style={styles.salvosText}>Eventos</Text>
+                    <Icon name='seta' size={20} color={colors.soft} />
+                  </Pressable>
+                  )
+                : null}
+              {node.hosted === true && ownPublicKey && typeof onOpenRecados === 'function'
+                ? (
+                  <Pressable
+                    accessibilityRole='button'
+                    accessibilityLabel='Recados'
+                    onPress={() => onOpenRecados(ownPublicKey)}
+                    style={({ pressed }) => [styles.salvos, pressed && styles.salvosPressed]}
+                  >
+                    <Icon name='recado' size={20} color={colors.soft} />
+                    <Text style={styles.salvosText}>Recados</Text>
                     <Icon name='seta' size={20} color={colors.soft} />
                   </Pressable>
                   )
@@ -904,6 +969,8 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
         open={editing}
         ownKey={info ? info.publicKey : null}
         current={{ name: (profile && profile.name) || '', bio, avatar: profile ? profile.avatar : undefined }}
+        onExtraSaved={(kind, seq) => rich.apply(kind, seq)}
+        onExtraDeleted={(kind) => rich.drop(kind)}
         onClose={() => setEditing(false)}
         onSaved={(values) => {
           if (info && info.publicKey) {

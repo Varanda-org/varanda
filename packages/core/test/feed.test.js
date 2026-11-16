@@ -6,6 +6,7 @@ const b4a = require('b4a')
 const certModule = require('../lib/cert')
 const { createCert, createIssuerCert, createIssuedCert, createUsernameRecord } = certModule
 const { buildFeed, shortKey, formatFeedItem, MAX_FUTURE_MS } = require('../lib/feed')
+const { diaryPeek, buildPeekPage } = require('../lib/peek')
 const { testnet } = require('./helpers/net')
 const { displayWidth } = require('../lib/safe')
 const { signMoved, signClose, issuerCountersign } = require('../lib/page-lifecycle')
@@ -828,6 +829,40 @@ test('feed copies link previews on posts, replies and quotes', (t) => {
     t.not(item.preview.image, preview.image)
   }
   t.is(items[3].preview, null)
+})
+
+test('feed carries poll only on poll posts and leaves other items untouched', (t) => {
+  const options = ['Sim', 'Não']
+  const entries = [{ seq: 0, record: cert(KA) }, { seq: 1, record: { ...post('enquete', AT), poll: options } }, { seq: 2, record: post('comum', AT) }]
+  const { items } = buildFeed({ logs: [{ key: KA, entries }], now: NOW })
+  const bySeq = Object.fromEntries(items.map((i) => [i.seq, i]))
+  t.alike(bySeq[1].poll, options)
+  t.not(bySeq[1].poll, options)
+  t.alike(bySeq[2], { kind: 'post', author: KA, name: null, username: null, seq: 2, at: AT, text: 'comum', replyTo: null, quote: null, media: null, preview: null })
+  t.is(Object.keys(bySeq[2]).includes('poll'), false)
+})
+
+test('feed and diary peek carry event only on event posts, a copy', (t) => {
+  const event = { title: 'Mutirão', start: '2026-03-07T12:00:00.000Z', end: null, place: 'Praça' }
+  const entries = [{ seq: 0, record: cert(KA) }, { seq: 1, record: { ...post('evento', AT), event } }, { seq: 2, record: post('comum', AT) }, { seq: 3, record: { ...post('ruim', AT), event: { ...event, end: event.start } } }]
+  const { items } = buildFeed({ logs: [{ key: KA, entries }], now: NOW })
+  const bySeq = Object.fromEntries(items.map((i) => [i.seq, i]))
+  t.alike(bySeq[1].event, event)
+  t.not(bySeq[1].event, event)
+  t.alike(Object.keys(bySeq[1].event), ['title', 'start', 'end', 'place'])
+  t.is(Object.keys(bySeq[2]).includes('event'), false)
+  t.absent(bySeq[3], 'an invalid event post is no post')
+  const peeked = diaryPeek({ key: KA, length: 4, entries, fetched: new Set([0, 1, 2, 3]), association: null, now: NOW })
+  const peekBySeq = Object.fromEntries(peeked.posts.map((p) => [p.seq, p]))
+  t.alike(peekBySeq[1].event, event)
+  t.not(peekBySeq[1].event, event)
+  t.is(Object.keys(peekBySeq[2]).includes('event'), false)
+  t.absent(peekBySeq[3])
+  const page = buildPeekPage({ diaries: [{ key: KA, name: null, username: null, posts: peeked.posts, exhausted: true }], limit: 35 })
+  const pageBySeq = Object.fromEntries(page.items.map((i) => [i.seq, i]))
+  t.alike(pageBySeq[1].event, event, 'peek.page carries the event')
+  t.not(pageBySeq[1].event, peekBySeq[1].event)
+  t.is(Object.keys(pageBySeq[2]).includes('event'), false)
 })
 
 test('feira records yield no feed items', (t) => {

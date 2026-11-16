@@ -488,3 +488,39 @@ test('textWithoutHrefs falls back when tidying exposes a link', async (t) => {
     return true
   }), raw, 'a throw after choosing another link returns all the original text')
 })
+
+test('textSegments: hashtags are off by default and leave the output unchanged', async (t) => {
+  const { textSegments } = await load()
+  const text = 'oi #ceu @ana https://a.com/x#frag fim'
+  t.alike(textSegments(text), textSegments(text, { hashtags: false }))
+  t.is(JSON.stringify(textSegments(text, { mentions: true })), JSON.stringify(textSegments(text, { mentions: true, hashtags: false })))
+  for (const s of textSegments(text, { mentions: true })) t.absent('tag' in s)
+  t.alike(textSegments('oi #ceu'), [{ text: 'oi #ceu', username: null, href: null }])
+})
+
+test('textSegments: hashtags option adds the folded tag', async (t) => {
+  const { textSegments } = await load()
+  t.alike(textSegments('oi #Céu e https://a.com/x#frag', { hashtags: true }), [
+    { text: 'oi ', username: null, href: null, tag: null },
+    { text: '#Céu', username: null, href: null, tag: 'ceu' },
+    { text: ' e ', username: null, href: null, tag: null },
+    { text: 'https://a.com/x#frag', username: null, href: 'https://a.com/x#frag', tag: null }
+  ])
+  t.alike(textSegments('#ab', { hashtags: true }), [{ text: '#ab', username: null, href: null, tag: 'ab' }])
+})
+
+test('textSegments: the failure fallback keeps the tag key when hashtags is on', async (t) => {
+  const { textSegments } = await import('../src/links.js')
+  const sort = Array.prototype.sort
+  let on
+  let off
+  try {
+    Array.prototype.sort = function () { throw new Error('boom') } // eslint-disable-line no-extend-native
+    on = textSegments('oi #ceu', { hashtags: true })
+    off = textSegments('oi @ana', { mentions: true })
+  } finally {
+    Array.prototype.sort = sort // eslint-disable-line no-extend-native
+  }
+  t.alike(on, [{ text: 'oi #ceu', username: null, href: null, tag: null }])
+  t.alike(off, [{ text: 'oi @ana', username: null, href: null }], 'the default output has no tag key')
+})

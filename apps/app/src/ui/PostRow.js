@@ -19,9 +19,16 @@
 //   links (embedOf) use ./MusicEmbedCard. A link only in the text never gets
 //   a player.
 // - replyPreviews: optional [{ key, name, text }], not the link card above.
-//   Under the action bar, 'Respostas' and one line per preview ('Nome:
+//   Under the action bar, 'Comentários' and one line per preview ('Nome:
 //   texto'), at most two with text. Absent or empty renders nothing. Raw
 //   peer strings go through displayText here.
+// - previewsMore: optional string, the last line of that block inside the
+//   same button ('Ver todos os N comentários'), plain text in the same slot
+//   without onOpenPreviews. The block also renders when only previewsMore is
+//   set (a photo-only comment).
+// - commentedBy: optional { label, onOpen }: a top line with the resposta
+//   icon, in the slot of repostedBy, which wins when both are given. label
+//   is a display string; empty draws nothing; without onOpen it is plain text.
 // - quote: null | { author, name, username, at, text, media, missing, onOpen }
 //   rendered by ./QuoteCard (one level only).
 // - repostedBy: null | { author, name, username }: a top line 'Nome
@@ -47,6 +54,10 @@
 //   particular' in the 'mais' sheet, only on a hosted node. The caller passes
 //   it only for someone else's post that is not a page (rowProps,
 //   socialRowProps); the context is the post as shown, never sent by itself.
+// - poll: null | the bare options array of a poll post: ./PollCard draws it
+//   (with `author` and `seq`), outside the row's open area.
+// - event: null | the {title, start, end, place} of an event post: ./EventCard
+//   draws it the same way (never together with a poll).
 // - link: a public http(s) URL of the post (postActions.shareLink decides);
 //   without one there is no Compartilhar. onNotice(text) shows the toast of
 //   a copy to the clipboard.
@@ -75,6 +86,7 @@ import { canSavePost, saveNotice, unsaveNotice } from '../savedView'
 import { useBlocks } from '../blocksProvider'
 import { blockedRowView } from '../memberBlocks'
 import { canShare, copyText, shareUrl } from '../share'
+import { quoteText } from '../chatPreview'
 import { shareNav } from '../shareNav'
 import { replyChip } from '../threadRows'
 import { whoOf } from '../who'
@@ -83,12 +95,15 @@ import { usePostSheet } from './PostSheetHost'
 import { Avatar } from './Avatar'
 import { ClampControl, captionEstimate, useClamp } from './ClampText'
 import { Icon } from './Icon'
+import { ReplyPreview } from './ReplyPreview'
 import { LinkCard } from './LinkCard'
 import { MusicEmbedCard } from './MusicEmbedCard'
 import { MusicPlayerCard } from './MusicPlayerCard'
 import { MediaGrid } from './MediaGrid'
+import { PollCard } from './PollCard'
+import { EventCard } from './EventCard'
 import { tap } from './haptics'
-import { hasMention, MentionText } from './MentionText'
+import { hasHashtag, hasMention, MentionText, useHashtagOpen } from './MentionText'
 import { useHosted } from '../node'
 import { captionWidthNext, headActionsKey, headReserveOf, openedNext, rememberHeadActions, sameSize, seedHeadActions } from '../postRowLayout'
 import { useReduceMotion } from './StackLayer'
@@ -213,7 +228,7 @@ function usePerfRow (key) {
 }
 
 function PostRowView ({
-  author, name, username, avatar, at, text, replyToName, replyPreviews, media, preview, persistMedia = true, now,
+  author, name, username, avatar, at, text, poll, event, replyToName, level, tag, replyQuote, replyPreviews, previewsMore, commentedBy, media, preview, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending, expanded = false,
   onOpen, onOpenAuthor, onOpenParent, onOpenPreviews, onOpenReposter, onFollowReposter, onOpenMention,
   onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onOpenQuotes, onFollow, followPending, onReport, onBlock, onDelete, link, onNotice,
@@ -223,6 +238,7 @@ function PostRowView ({
   if (perfOn) usePerfRow((repostedBy ? 'repost:' + String(repostedBy.author) : 'post') + ':' + String(author) + ':' + String(seq))
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
+  const tagsOn = useHashtagOpen(true) !== undefined
   const likes = countOf(counts, 'likes')
   const reposts = countOf(counts, 'reposts')
   const likeText = countLabel(likes)
@@ -484,7 +500,11 @@ function PostRowView ({
   // the layout. Name, @handle and date sit side by side, so they grow up and
   // down only: sideways each would take the neighbour's taps. The slop above
   // the head reaches into the row's top padding (checked on Android and iOS).
-  const headAbove = reposter ? REPOSTED_GAP / 2 : ROW_PAD_TOP
+  const commenterLabel = !reposter && commentedBy && typeof commentedBy === 'object' && typeof commentedBy.label === 'string' ? displayText(commentedBy.label).trim() : ''
+  const openCommenter = otherPress(commentedBy && commentedBy.onOpen)
+  // The 'comentou' line sits in the reposted line's slot, so the head stops
+  // half-way up the gap under either one.
+  const headAbove = reposter || commenterLabel !== '' ? REPOSTED_GAP / 2 : ROW_PAD_TOP
   const headRoom = { left: 0, right: 0, top: headAbove, bottom: HEAD_ROOM_BELOW }
   const nameSlop = hitSlopFor({ height: stackHead ? headReserve.height : type.postName.lineHeight }, headRoom)
   const metaSlop = hitSlopFor({ height: type.meta.lineHeight }, stackHead ? { ...headRoom, top: 0 } : headRoom)
@@ -500,19 +520,42 @@ function PostRowView ({
   const bar = fn(onReply) || fn(onRepost) || fn(onQuote) || fn(onLike) || href !== null
   // Composed label for the post body element: author, reply-to, text, date.
   // The avatar link already provides profile access, so name here is context.
+  const tagText = typeof tag === 'string' ? displayText(tag).trim() : ''
+  const quoteShown = replyQuote && typeof replyQuote === 'object'
+  const quotePress = quoteShown ? otherPress(replyQuote.onPress) : undefined
+  // The quote is drawn inside the hidden visual layer, so the body label speaks it.
+  const quoteName = quoteShown && typeof replyQuote.name === 'string' ? displayText(replyQuote.name).trim() : ''
+  const quoteSpoken = quoteShown ? 'respondendo a ' + (quoteName ? quoteName + ': ' : '') + quoteText(replyQuote.text) : null
+  // ...and its tap, unreachable there, is a custom action on the body,
+  // beside the 'activate' that opens. iOS names the action by `name` and
+  // ignores `label`, so the name is the spoken words.
+  const bodyA11y = quotePress
+    ? {
+        ...a11yOpen,
+        accessibilityActions: (a11yOpen ? a11yOpen.accessibilityActions : []).concat([{ name: 'mostrar a mensagem respondida', label: 'mostrar a mensagem respondida' }]),
+        onAccessibilityAction: (event) => {
+          if (event.nativeEvent.actionName === 'mostrar a mensagem respondida') quotePress()
+          else if (a11yOpen) a11yOpen.onAccessibilityAction(event)
+        }
+      }
+    : a11yOpen
   const bodyParts = [
     title,
-    replyToName !== null ? ('respondendo a ' + displayText(replyToName)) : null,
+    tagText || null,
+    quoteSpoken || (replyToName !== null ? ('respondendo a ' + displayText(replyToName)) : null),
     shownText,
     spokenTime
   ].filter(Boolean)
   const bodyLabel = bodyParts.join('. ')
   const replyLabel = replyToName ? replyChip({ name: replyToName }) : ''
   const previewLines = replyPreviewLines(replyPreviews)
-  const previewsLabel = 'Respostas. ' + previewLines.map(previewLineText).join('. ')
+  // Drawn even without onOpenPreviews (plain text then, as in the cold-start
+  // preview), so the card keeps its height when the live feed replaces it.
+  const moreText = typeof previewsMore === 'string' ? displayText(previewsMore).trim() : ''
+  const previewsLabel = 'Comentários. ' + previewLines.map(previewLineText).concat(moreText === '' ? [] : [moreText]).join('. ')
   const openMention = otherPress(onOpenMention)
   const quoteOn = quote && typeof quote === 'object'
-  const textOut = hasText && numberOfLines === 0 && (hasLink(body) || (!!openMention && hasMention(body)))
+  const textOut = hasText && numberOfLines === 0 && (hasLink(body) || (!!openMention && hasMention(body)) || (tagsOn && hasHashtag(body)))
   // The screen gives a quote its own handler carrying the quoted author.
   const quoteMention = (quoteOn && otherPress(quote.onOpenMention)) || openMention
   const quoteOut = quoteOn && ((typeof quote.text === 'string' && !!quoteMention && hasMention(quote.text)) || quotePlayerOf(quote) !== null)
@@ -520,7 +563,7 @@ function PostRowView ({
   const label = textOut ? bodyParts.filter((part) => part !== shownText).join('. ') : bodyLabel
   const textNode = hasText
     ? textOut
-      ? <MentionText text={body} onOpenMention={openMention} onOpenPlain={openTap} onLongPress={bodyLongPress} onTextLayout={onTextLayout} style={styles.text} />
+      ? <MentionText text={body} onOpenMention={openMention} onOpenPlain={openTap} onLongPress={bodyLongPress} onTextLayout={onTextLayout} style={styles.text} hashtags />
       : (
         <Pressable
           accessibilityRole={open ? 'link' : 'text'}
@@ -550,14 +593,15 @@ function PostRowView ({
   // The body label speaks the caption before the player; this copy is for sight and touch only,
   // hidden from web screen readers by aria-hidden and from native ones by the other two props.
   const textUnder = videoAbove && hasText && !textOut ? <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>{textNode}</View> : null
-  const previewsBody = previewLines.length === 0
+  const previewsBody = previewLines.length === 0 && moreText === ''
     ? null
     : (
       <>
-        <Text style={styles.previewsLabel}>Respostas</Text>
+        <Text style={styles.previewsLabel}>Comentários</Text>
         {previewLines.map((line, index) => (
           <Text key={index + ':' + line.key} style={styles.previewLine} numberOfLines={1}>{previewLineText(line)}</Text>
         ))}
+        {moreText !== '' ? <Text style={styles.previewLine} numberOfLines={1}>{moreText}</Text> : null}
       </>
       )
   return (
@@ -593,7 +637,23 @@ function PostRowView ({
               : null}
           </View>
           )
-        : null}
+        : commenterLabel !== ''
+          ? (
+            <View style={styles.reposted}>
+              <Pressable
+                accessibilityRole={openCommenter ? 'link' : 'text'}
+                accessibilityLabel={commenterLabel}
+                disabled={!openCommenter}
+                onPress={openCommenter}
+                hitSlop={repostedSlop}
+                style={({ pressed }) => [styles.repostedLink, pressed && openCommenter && styles.pressed]}
+              >
+                <Icon name='resposta' size={14} color={colors.soft} />
+                <Text style={styles.repostedText} numberOfLines={1}>{commenterLabel}</Text>
+              </Pressable>
+            </View>
+            )
+          : null}
       <View style={styles.main}>
         <Pressable
           accessibilityRole='link'
@@ -610,16 +670,17 @@ function PostRowView ({
             All visual children are hidden from accessibility; sighted users
             interact with them directly (name, reply-to and text tap targets). */}
         <View style={styles.body} onLayout={measureCaption}>
+          {/* Never disabled: a thread row has no open, and a disabled body
+              would be announced as dimmed; with no handler its taps do nothing. */}
           <Pressable
             onPress={openTap}
             onLongPress={bodyLongPress}
             delayLongPress={350}
-            disabled={!open && !bodyLongPress}
             accessible
             accessibilityRole={open ? 'link' : 'text'}
             accessibilityLabel={label}
             accessibilityHint={open ? 'abre a conversa' : undefined}
-            {...a11yOpen}
+            {...bodyA11y}
           >
             <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
               <View style={[styles.head, stackHead && styles.headStacked, headActions && !stackHead && { paddingRight: headPad }, headActions && !stackHead && fn(onFollow) && { minHeight: headReserve.height - HEAD_LIFT }]}>
@@ -635,6 +696,7 @@ function PostRowView ({
                 >
                   <Text style={styles.name} numberOfLines={1}>{title}</Text>
                 </Pressable>
+                {tagText ? <Text style={styles.tag} numberOfLines={1}>{tagText}</Text> : null}
                 {handle
                   ? (
                     <Pressable
@@ -664,22 +726,32 @@ function PostRowView ({
                   <Text style={styles.time} numberOfLines={1}>{(handle ? '\u00a0· ' : stackHead ? '' : '· ') + time}</Text>
                 </Pressable>
               </View>
-              {replyToName
-                ? openParent
-                  ? (
-                    <Pressable
-                      accessibilityRole='link'
-                      accessibilityLabel={replyLabel}
-                      onPress={openParent}
-                      onLongPress={bodyLongPress}
-                      delayLongPress={350}
-                      style={({ pressed }) => [styles.replyChip, pressed && styles.pressed]}
-                    >
-                      <Text style={styles.replyChipText} numberOfLines={1}>{replyLabel}</Text>
-                    </Pressable>
-                    )
-                  : <Text style={styles.replyChipText} numberOfLines={1}>{replyLabel}</Text>
-                : null}
+              {quoteShown
+                ? (
+                  <ReplyPreview
+                    name={replyQuote.name}
+                    text={replyQuote.text}
+                    senderKey={replyQuote.senderKey}
+                    onPress={quotePress}
+                    lines={2}
+                  />
+                  )
+                : replyToName
+                  ? openParent
+                    ? (
+                      <Pressable
+                        accessibilityRole='link'
+                        accessibilityLabel={replyLabel}
+                        onPress={openParent}
+                        onLongPress={bodyLongPress}
+                        delayLongPress={350}
+                        style={({ pressed }) => [styles.replyChip, pressed && styles.pressed]}
+                      >
+                        <Text style={styles.replyChipText} numberOfLines={1}>{replyLabel}</Text>
+                      </Pressable>
+                      )
+                    : <Text style={styles.replyChipText} numberOfLines={1}>{replyLabel}</Text>
+                  : null}
               {mediaNode}
               {textOut || videoAbove ? null : textNode}
             </View>
@@ -699,6 +771,8 @@ function PostRowView ({
             : null}
           {videoAbove ? null : previewNode}
           {quoteOut ? quoteNode : null}
+          {Array.isArray(poll) ? <PollCard author={author} seq={seq} poll={poll} /> : null}
+          {!Array.isArray(poll) && event && typeof event === 'object' ? <EventCard author={author} seq={seq} event={event} /> : null}
           {/* After the content, so a screen reader reads the caption before
               them; the position is absolute, so they still draw at the top. */}
           {headActions
@@ -733,7 +807,7 @@ function PostRowView ({
               <View style={styles.bar}>
                 {fn(onReply)
                   ? (
-                    <Action label={'responder a ' + title} onPress={otherPress(onReply)} count={countOf(counts, 'replies')}>
+                    <Action label={(level === 'post' ? 'comentar na publicação de ' : 'responder a ') + title} onPress={otherPress(onReply)} count={countOf(counts, 'replies')}>
                       <Icon name='resposta' size={ICON} color={colors.soft} />
                     </Action>
                     )
@@ -835,7 +909,7 @@ function PostRowView ({
               </View>
               )
             : null}
-          {previewLines.length > 0
+          {previewsBody !== null
             ? openPreviews
               ? (
                 <Pressable
@@ -885,7 +959,7 @@ function BlockGate (props) {
   const onBlock = blocks.available && typeof props.onReport === 'function'
     ? () => blocks.ask({ author: props.author, name: props.name, username: props.username })
     : undefined
-  return <PostRowView {...props} quote={view.quote} onBlock={onBlock} />
+  return <PostRowView {...props} quote={view.quote} replyQuote={view.replyQuote} onBlock={onBlock} />
 }
 
 export const PostRow = memo(BlockGate)
@@ -942,6 +1016,16 @@ const makeStyles = (colors) => StyleSheet.create({
     minWidth: layout.hit,
     marginVertical: -6,
     justifyContent: 'center'
+  },
+  tag: {
+    ...type.meta,
+    color: colors.accent,
+    backgroundColor: colors.accentSoft,
+    borderRadius: radius.pill,
+    paddingHorizontal: space.sm,
+    marginLeft: space.sm,
+    overflow: 'hidden',
+    flexShrink: 0
   },
   replyChipText: { ...type.meta, color: colors.soft, flexShrink: 1 },
   previews: { marginTop: 8, minHeight: layout.hit, justifyContent: 'center' },

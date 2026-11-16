@@ -191,6 +191,7 @@ const {
   MAX_GROUP_WRITERS,
   MAX_GROUPS_PER_DIARY,
   MAX_GROUP_WRITERS_PER_DIARY,
+  MAX_TOP_FRIENDS,
   PAGE_KEYS
 } = require('./records')
 const { validateMediaHeader, latestMediaCores } = require('./media')
@@ -257,6 +258,11 @@ const ADMITTED_FILE = 'admitted.json'
 const DM_STAMPS_FILE = 'dm-stamps.json'
 const BLOB_STAMPS_FILE = 'blob-stamps.json'
 const DM_SWEEP_MS = 60000
+// How many blocks after a reported topic root groupPostBlock looks at for
+// the root's poll: group.post writes the root, its group-topic and its
+// group-poll back to back, so the poll sits at seq + 2 unless writes of the
+// same device interleave.
+const MOD_POLL_SCAN = 16
 const DM_STAMP_ROWS_MAX = 100000
 const DM_STAMP_ROW_DAYS = 3
 const DM_STAMP_KEEP_DAYS = 7
@@ -284,7 +290,7 @@ const FEIRA_OFFERS_PER_DIARY = 4096
 const FEIRA_RESCAN_MS = 60000
 const FEIRA_RESCAN_MAX_MS = 3600000
 const FEIRA_TYPES = new Set(['listing', 'listing-edit', 'listing-status', 'listing-rate'])
-const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show'])
+const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice'])
 
 // Frame guard for external streams (acceptStream): see lib/frame-guard.js
 // for the limits, how they were measured, the frame deadlines and the
@@ -969,6 +975,34 @@ function readDmStamps (dataDir, log, name = DM_STAMPS_FILE, reason = 'dm-stamps-
     if (Object.keys(row).length > 0) out.set(key, trimStampRow(row))
   }
   return out
+}
+
+// The reviewable lines of the poll or the event on root post <seq> of group
+// core <writerHex>, as foldTopics picks it (the lowest-seq group-poll or
+// group-event on the root's own core, after the root: a root carries one or
+// the other, the lowest seq decides), looked for in the next MOD_POLL_SCAN
+// local blocks of a public group; null when none is found there. A poll
+// gives its options, an event its title and, when set, its place. A block not
+// local is skipped: moderation never downloads. The mark may stand without a
+// group-topic: its text is the author's signed text either way.
+async function modRootPoll (core, read, writerHex, seq, root, visibility) {
+  if (visibility !== 'public') return null
+  const end = Math.min(core.length, seq + 1 + MOD_POLL_SCAN)
+  for (let i = seq + 1; i < end; i++) {
+    const raw = await read(i)
+    if (raw === null) continue
+    const r = decodeBlock(raw)
+    if (r === null || (r.type !== 'group-poll' && r.type !== 'group-event') || !r.target) continue
+    if (r.target.writer !== writerHex || r.target.seq !== seq) continue
+    if (validateGroupRecord(r, i, { root, private: false }) !== null) continue
+    return r.type === 'group-poll' ? r.options.slice() : eventLines(r)
+  }
+  return null
+}
+
+// The text of a group-event a reviewer reads: its title, then its place.
+function eventLines (r) {
+  return r.place === '' ? [r.title] : [r.title, r.place]
 }
 
 class Seeder {
@@ -4694,6 +4728,16 @@ class Seeder {
   // anything else: not served, header not checked yet, the group or the
   // diary blocked, a block not local, another record type, or a change
   // while it read. The text is the author's signed record, not a quote.
+  // A group-poll block of a public group answers the same shape with its
+  // options (one per line) as texto and the topic it names as resposta, so
+  // a reported poll can be reviewed; in a private group it answers null.
+  // A group-event block of a public group answers the same shape with its
+  // title and place (one per line) as texto and the root it names as
+  // resposta; in a private group it answers null.
+  // A reported root post of a public group whose own core holds its poll or
+  // its event (modRootPoll) answers its text followed by the poll's options
+  // or the event's title and place, one per line, so a report on a root shows
+  // what the poll or the event offers too.
   // A group-sealed block of a group whose verified root header says private
   // answers only { sealed: true, writer, diary, group, seq }: the seeder
   // cannot read it and never hands out the envelope (docs/protocol.md
@@ -4729,15 +4773,48 @@ class Seeder {
         if (!live() || core.fork !== 0 || this._groupVisibility(entry.group) !== 'private') return null
         return { sealed: true, writer: writerHex, diary: entry.diary, group: entry.group, seq }
       }
+      if (record.type === 'group-poll') {
+        // A forum poll (public groups only, never sealed): the reviewer reads
+        // its options as the text, one per line, and the topic it hangs on as
+        // `resposta`. A private or not yet known visibility answers null.
+        if (visibility !== 'public' || validateGroupRecord(record, seq, { root, private: false }) !== null) return null
+        if (!live() || core.fork !== 0 || this._groupVisibility(entry.group) !== 'public') return null
+        return {
+          group: entry.group,
+          diary: entry.diary,
+          seq,
+          texto: record.options.join('\n'),
+          resposta: { writer: record.target.writer, seq: record.target.seq }
+        }
+      }
+      if (record.type === 'group-event') {
+        // The event of a root post (public groups only, never sealed): the
+        // reviewer reads its title and place, one per line, and the root it
+        // hangs on as `resposta`. A private or not yet known visibility
+        // answers null.
+        if (visibility !== 'public' || validateGroupRecord(record, seq, { root, private: false }) !== null) return null
+        if (!live() || core.fork !== 0 || this._groupVisibility(entry.group) !== 'public') return null
+        return {
+          group: entry.group,
+          diary: entry.diary,
+          seq,
+          texto: eventLines(record).join('\n'),
+          resposta: { writer: record.target.writer, seq: record.target.seq }
+        }
+      }
       if (record.type !== 'group-post') return null
       if (validateGroupRecord(record, seq, { root, private: visibility === 'private' }) !== null) return null
       if (!live() || core.fork !== 0) return null
       const reply = record.replyTo
+      // A topic root's title is short; abusive text can sit in its poll, so
+      // its options follow the text, as ai/read-post.js reads a diary poll.
+      const options = reply ? null : await modRootPoll(core, read, writerHex, seq, root, visibility)
+      if (!live() || core.fork !== 0) return null
       return {
         group: entry.group,
         diary: entry.diary,
         seq,
-        texto: record.text,
+        texto: options === null ? record.text : [record.text, ...options].join('\n'),
         resposta: reply ? { writer: reply.writer, seq: reply.seq } : null
       }
     } catch {
@@ -5985,6 +6062,124 @@ class Seeder {
     }
   }
 
+  // GET /index/fans/<author>[/<atMs>.<key>]: one page of the author's fas,
+  // newest first (engagement-index.js fans), with a hint per listed key, the
+  // same cursor, flags and gate as indexFollows: null for an author not shown
+  // or held, or a malformed cursor; a held fan, or one whose own diary is
+  // still pending (_fansShown), is left out and the answer says complete
+  // false. seq and at point at the fan's own `fan` block, which
+  // the node peeks and verifies.
+  indexFans (authorHex, cursor = null) {
+    try {
+      if (!this._indexVisible(authorHex) || this._searchHeld(authorHex)) return null
+      let after = null
+      if (cursor !== null) {
+        if (typeof cursor !== 'string') return null
+        const m = /^(\d{1,16})\.([0-9a-f]{64})$/.exec(cursor)
+        if (m === null) return null
+        const t = Number(m[1])
+        if (!Number.isSafeInteger(t) || t < 0) return null
+        after = { atMs: t, key: m[2] }
+      }
+      const v = this._followsVisible()
+      const shown = this._fansShown(v)
+      const page = this._index.fans(authorHex, { after, visible: shown.visible })
+      if (page === null) return null
+      const authors = {}
+      for (const item of page.items) {
+        if (!(item.key in authors)) authors[item.key] = this._index.hints(item.key)
+      }
+      const flags = this._indexFlags()
+      return { author: authorHex, items: page.items, next: page.next, total: page.total, authors, indexing: flags.indexing, complete: flags.complete && !v.held && !shown.left() }
+    } catch {
+      return null
+    }
+  }
+
+  // The fan writers the index may list: the follows gate, and only writers
+  // whose own diary is fully indexed and scanned. The index publishes a fan
+  // operation as soon as it is indexed, with no commit step, so while a
+  // writer's diary is pending (paused at a cap, a tombstone scan not run) a
+  // superseded `on` could still stand: that writer is left out of the list
+  // and the count, and left() tells whether any was (the answer is then not
+  // complete). Evaluated lazily, so left() is read after the index call.
+  _fansShown (v) {
+    let left = false
+    return {
+      visible: (hex) => {
+        if (!v.visible(hex)) return false
+        if (this._ownerIndexPending(hex)) {
+          left = true
+          return false
+        }
+        return true
+      },
+      left: () => left
+    }
+  }
+
+  // GET /index/poll/<author>/<seq>: the votes of one diary poll, { totals,
+  // indexing, complete }, totals the votes per option (2..4 integers) over
+  // the voters the index may show: the follows gate, and only voters whose
+  // own diary is fully indexed and scanned (_fansShown); such a voter left
+  // out, or a held one, makes complete false. Totals are seeder claims:
+  // the node never trusts them for anything but a hint. While the poll
+  // author's own diary is still being indexed or scanned the poll may not
+  // exist yet (or be deleted by a tombstone not yet applied): totals is [],
+  // indexing true, complete false. Null for an author not shown or held, a
+  // post that is not a live poll post (a deleted one included) and a
+  // malformed seq. Pointers and counts only: the node re-verifies.
+  indexPoll (authorHex, seq) {
+    try {
+      if (!this._indexVisible(authorHex) || this._searchHeld(authorHex) || !Number.isSafeInteger(seq) || seq < 1) return null
+      if (this._ownerIndexPending(authorHex)) return { totals: [], indexing: true, complete: false }
+      const v = this._followsVisible()
+      const shown = this._fansShown(v)
+      const got = this._index.pollTotals(authorHex, seq, { visible: shown.visible })
+      if (got === null) return null
+      const flags = this._indexFlags()
+      return { totals: got.totals, indexing: flags.indexing, complete: flags.complete && !v.held && !shown.left() }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/poll/<author>/<seq>/<pick>[/<atMs>.<key>]: one page of the
+  // voters whose live pick on that poll is `pick`, newest first (at most 20
+  // rows, the cursor and honesty flags of indexFans), with a hint per voter.
+  // seq and at point at the voter's own `choice` block, which the node
+  // peeks and verifies. Null as indexPoll does, and for a pick outside the
+  // poll's options or a malformed cursor; while the poll author's diary is
+  // still pending, no rows and complete false.
+  indexPollVoters (authorHex, seq, pick, cursor = null) {
+    try {
+      if (!this._indexVisible(authorHex) || this._searchHeld(authorHex)) return null
+      if (!Number.isSafeInteger(seq) || seq < 1 || !Number.isSafeInteger(pick) || pick < 0) return null
+      let after = null
+      if (cursor !== null) {
+        if (typeof cursor !== 'string') return null
+        const m = /^(\d{1,16})\.([0-9a-f]{64})$/.exec(cursor)
+        if (m === null) return null
+        const t = Number(m[1])
+        if (!Number.isSafeInteger(t) || t < 0) return null
+        after = { atMs: t, key: m[2] }
+      }
+      if (this._ownerIndexPending(authorHex)) return { items: [], next: null, total: 0, authors: {}, indexing: true, complete: false }
+      const v = this._followsVisible()
+      const shown = this._fansShown(v)
+      const page = this._index.pollVoters(authorHex, seq, pick, { after, visible: shown.visible })
+      if (page === null) return null
+      const authors = {}
+      for (const item of page.items) {
+        if (!(item.key in authors)) authors[item.key] = this._index.hints(item.key)
+      }
+      const flags = this._indexFlags()
+      return { items: page.items, next: page.next, total: page.total, authors, indexing: flags.indexing, complete: flags.complete && !v.held && !shown.left() }
+    } catch {
+      return null
+    }
+  }
+
   // GET /index/counts/<ref,...>: counts for the refs that are indexed (an
   // unknown ref, or one of an author not visible, is omitted).
   indexCounts (refs) {
@@ -6012,6 +6207,30 @@ class Seeder {
     }
   }
 
+  // GET /index/events/<author>[/<before>]: pointers to the author's event
+  // posts (Eventos), { posts: [seq], next, total, indexing, complete }, seqs
+  // newest first, strictly below `before` (a seq, exclusive), at most 30 per
+  // page; `next` is the `before` of the following page or null. Seqs only:
+  // the node reads each block from the diary and verifies it (the shared
+  // isEvent, deletion, moderation); the title, place and dates never leave
+  // the diary. RSVP totals and voters are the /index/poll routes, picks 0
+  // and 1. Null when the author is not visible or held (_searchHeld) or the
+  // cursor is malformed. Fails closed while the author's own diary is not
+  // fully indexed and scanned (a tombstone may delete a listed post): no
+  // rows, indexing true, complete false.
+  indexEvents (authorHex, before = null) {
+    try {
+      if (!this._indexVisible(authorHex) || this._searchHeld(authorHex)) return null
+      if (before !== null && (!Number.isSafeInteger(before) || before < 1)) return null
+      if (this._ownerIndexPending(authorHex)) return { posts: [], next: null, total: 0, indexing: true, complete: false }
+      const page = this._index.events(authorHex, before)
+      if (page === null) return null
+      return { posts: page.posts, next: page.next, total: page.total, ...this._indexFlags() }
+    } catch {
+      return null
+    }
+  }
+
   // GET /index/testimonials/<owner>: pointers to the owner's depoimentos,
   // { shown: [{ seq, from, wseq }], pending: [{ from, seq }], indexing,
   // complete } (engagement-index.js testimonials); null when the owner is
@@ -6023,6 +6242,107 @@ class Seeder {
       const lists = this._index.testimonials(ownerHex, Date.now(), (hex) => this._indexVisible(hex))
       if (lists === null) return null
       return { shown: lists.shown, pending: lists.pending, ...this._indexFlags() }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/scraps/<owner>[/<cursor>]: pointers to the recados of the
+  // owner's page, { scraps: [{ author, seq, followSeq }], hides, wall, next,
+  // indexing, complete } (engagement-index.js scraps). The wall policy, the
+  // owner's hides, the reply exception and the caps are applied here at read
+  // time, over visible writers only; followSeq is the seq of the owner's
+  // committed live follow of the writer (the follow index), so the node can
+  // peek that block instead of asking again. Null when the owner is not
+  // visible, held (_searchHeld, as in indexFollows) or the cursor is
+  // malformed. A held writer is left out and the answer says complete
+  // false, as in indexEngagers. Fails closed while the owner's own diary is
+  // not fully indexed and scanned (its wall, hides, originals and follows
+  // may be missing): no rows, the hides and wall known so far, complete
+  // false. Keys and seqs only: never the text.
+  indexScraps (ownerHex, cursor = null) {
+    try {
+      if (!this._indexVisible(ownerHex) || this._searchHeld(ownerHex)) return null
+      const v = this._followsVisible()
+      const page = this._index.scraps(ownerHex, Date.now(), {
+        visible: v.visible,
+        followSeq: (hex) => this._notices.followSeq(ownerHex, hex),
+        followed: this._notices.followTargets(ownerHex),
+        cursor
+      })
+      if (page === null) return null
+      const flags = this._indexFlags()
+      if (this._ownerIndexPending(ownerHex)) {
+        return { scraps: [], hides: page.hides, wall: page.wall, next: null, indexing: flags.indexing, complete: false }
+      }
+      return { scraps: page.rows, hides: page.hides, wall: page.wall, next: page.next, indexing: flags.indexing, complete: flags.complete && !page.truncated && !v.held }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/profile/<author>: pointers to the author's perfil rico blocks,
+  // { about: seq | null, mood: seq | null, fans: { count, indexing }, top:
+  // { seq, back: { <friend>: followSeq | null } } | null, indexing, complete }
+  // (engagement-index.js profileExtra, fanCount): the newest live
+  // `profile-about`, `mood` and `top-friends` block. fans.count is the number
+  // of visible fas indexed so far (held ones, and writers whose own diary
+  // is pending, left out: _fansShown), a claim like the follower counts;
+  // fans.indexing is true while it may still grow (any diary not fully
+  // indexed, a held fan, a writer left out). back maps every key of the
+  // top-friends block to the seq of that friend's committed live follow of
+  // the author, or null (none, a friend not shown or held): the node peeks
+  // those blocks. The object is OPEN: later features add pointers and
+  // readers ignore keys they do not know. Null when the author is not
+  // visible or held (_searchHeld). Fails closed while the author's own diary
+  // is not fully indexed and scanned (the newest block may be missing, a
+  // tombstone not yet applied): about, mood and top null, fans.indexing,
+  // indexing true and complete false. Seqs only: the node reads and verifies
+  // the blocks.
+  indexProfile (authorHex) {
+    try {
+      if (!this._indexVisible(authorHex) || this._searchHeld(authorHex)) return null
+      const v = this._followsVisible()
+      const shown = this._fansShown(v)
+      const count = this._index.fanCount(authorHex, shown.visible)
+      if (this._ownerIndexPending(authorHex)) return { about: null, mood: null, fans: { count, indexing: true }, top: null, indexing: true, complete: false }
+      const { about, mood, top } = this._index.profileExtra(authorHex)
+      let pointers = null
+      if (top !== null) {
+        const back = {}
+        for (const key of top.keys.slice(0, MAX_TOP_FRIENDS)) {
+          const listed = key !== authorHex && this._indexVisible(key) && !this._searchHeld(key)
+          back[key] = listed ? this._notices.followSeq(key, authorHex) : null
+        }
+        pointers = { seq: top.seq, back }
+      }
+      const flags = this._indexFlags()
+      return { about, mood, fans: { count, indexing: !flags.complete || v.held || shown.left() }, top: pointers, indexing: flags.indexing, complete: true }
+    } catch {
+      return null
+    }
+  }
+
+  // Whether the owner's diary is still being indexed or scanned: before
+  // ready, a rebuild queued or its first pass not over, a cursor paused or
+  // behind the present length, or a scan behind it (follows and tombstones).
+  _ownerIndexPending (hex) {
+    if (!this._ready || this._indexRebuildQueued || this._indexStartup === null || this._indexStartup.has(hex)) return true
+    const entry = this._served.get(hex)
+    if (!entry) return true
+    return entry.indexPaused === true || entry.indexed < entry.present || entry.scanned < entry.present
+  }
+
+  // GET /index/follow/<author>/<target>: { seq, indexing }, seq the block
+  // of the author's committed live follow of target, or null (no follow,
+  // an unfollow, or a target the index may not show or holds); null when
+  // the author is not visible or held. A pointer: the node peeks and
+  // verifies the block.
+  indexFollowSeq (authorHex, targetHex) {
+    try {
+      if (!this._indexVisible(authorHex) || this._searchHeld(authorHex) || typeof targetHex !== 'string' || !HEX64.test(targetHex)) return null
+      const shown = this._indexVisible(targetHex) && !this._searchHeld(targetHex)
+      return { seq: shown ? this._notices.followSeq(authorHex, targetHex) : null, indexing: this._indexFlags().indexing }
     } catch {
       return null
     }

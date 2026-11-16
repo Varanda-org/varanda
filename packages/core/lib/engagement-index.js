@@ -14,12 +14,43 @@
 // per diary. Admission checks precede mutation: a refused add pauses the
 // caller at that seq, never skipping; complete stays false until it resumes.
 // Quotas count all indexed operations, including off toggles and hints.
+// Perfil rico: the newest live `profile-about` and `mood` seq of each author
+// (profileExtra), like the profile hint: seqs only, a deletion falls back to
+// the previous live block, and each block holds a record slot.
+// Fas e Melhores amigos (lib/fans.js): every live `fan` block holds a record
+// slot under its writer, the last live operation per (writer, key) wins and,
+// when it is on, is published under the key (fans(), fanCount()); a deletion
+// falls back to the previous live operation. A fan of the writer itself
+// takes no slot and is never listed. A writer keeps at most FAN_KEYS_MAX
+// distinct keys: past that, a block naming a new key is skipped without a
+// slot (the list may then be short; counts are seeder claims). The newest
+// live `top-friends` block of an author is profileExtra().top, kept like the
+// about pointer with its keys; one that names its writer takes no slot.
+// Enquetes (lib/polls.js): every live `choice` block holds a record slot
+// under its voter. A poll is a live `post` carrying a valid `poll` key (the
+// option count is kept beside the post); votes are kept per (voter, poll)
+// and the last in-range operation wins (foldPicks): a pick replaces the
+// earlier one, a null pick withdraws it, an out-of-range pick is ignored and
+// a deletion falls back to the previous live operation. An operation dated
+// more than MAX_FUTURE_MS after `now` is kept but neither counted nor listed
+// until its date (lib/polls.js livePick). poll() answers only
+// for a live poll post: votes naming a post that is not a valid poll, or a
+// deleted one, are never counted nor listed. A voter keeps at most
+// CHOICE_POLLS_MAX distinct polls and a poll lists at most CHOICE_VOTERS_MAX
+// voters: past either, a block naming a new (voter, poll) pair is skipped
+// without a slot (the totals may then be short; they are seeder claims).
+// Eventos (docs/protocol.md): a live root `post` carrying a valid `event`
+// (the shared isEvent of @varanda/rpc) keeps its seq in a per-author list,
+// no extra record slot (the post holds it), nothing of the event itself:
+// events() answers pointers only, newest seq first, and a deleted post
+// leaves the list. RSVP totals are the poll routes' (picks 0 and 1).
 // Collections are lazy. Budget roughly 250 bytes/record (edge, post/timeline,
 // engager and touched entries, the engagements map, and the profileSeqs,
-// usernameSeqs and copiedSeqs arrays) plus 500 bytes/target (key, target
-// object, map slots and the first used collection): about 500 MB at both
-// defaults, plus small per-diary overhead bounded by the seeder's
-// served-diary limit. The deleted set is held until removeDiary. These are
+// usernameSeqs, copiedSeqs, aboutSeqs and moodSeqs arrays) plus 500
+// bytes/target (key, target object, map slots and the first used
+// collection): about 500 MB at both defaults, plus small per-diary overhead
+// (the five seq arrays start empty on every author entry) bounded by the
+// seeder's served-diary limit. The deleted set is held until removeDiary. These are
 // conservative retained-heap estimates, not a V8/RSS guarantee; collection
 // capacity, string representation and GC headroom vary by runtime. The
 // likers and reposters lists add one edge object per like or repost
@@ -53,8 +84,26 @@
 // show whose content the seeder no longer holds at a rebuild is forgotten,
 // and that writer block may be pending again: the app's per-device hide
 // still applies.
-const { formatRef, parseRef } = require('./records')
+//
+// Recados (docs/protocol.md "Recados"): every live `scrap` is kept as a
+// pointer under its page owner (`to`) and its writer, the owner's live
+// `scrap-hide` blocks and `scrap-wall` blocks under the owner. The wall
+// policy, the hides, the reply exception and the caps are applied at READ
+// time (scraps()), with the rules of lib/scraps.js foldWall: 'nobody' shows
+// nothing; 'everyone' every writer; 'following' a writer the owner follows
+// (the caller's followSeq evidence) and, for any other writer, per live
+// scrap of the owner addressed to that writer, the writer's lowest live
+// reply to it that is dated no earlier than it and not more than
+// MAX_FUTURE_MS ahead (that reply keeps the slot even when hidden). A scrap
+// dated more than MAX_FUTURE_MS ahead is never shown and the owner's hides
+// never are. The caps count admitted rows only: SCRAP_PER_WRITER per
+// writer, then SCRAP_PER_PAGE per page, newest first (at desc, author asc,
+// seq desc). Each request examines at most SCRAP_SCAN pointers (writers
+// included); past it the answer says truncated.
+const { formatRef, parseRef, MAX_TOP_FRIENDS, POLL_MIN, POLL_MAX } = require('./records')
+const { isEvent } = require('@varanda/rpc')
 const { commitment } = require('./testimonials')
+const { foldPicks } = require('./polls')
 
 const DEFAULT_MAX_RECORDS = 1000000
 const DEFAULT_MAX_TARGETS = 500000
@@ -74,6 +123,24 @@ const RODA_PAGE = 50
 // One budget per roda() call, spent twice: on the hops of the walk up and on
 // the reply edges examined by the walk down.
 const RODA_SCAN = 1000
+const SCRAP_PER_WRITER = 20
+const SCRAP_PER_PAGE = 500
+const SCRAP_ROWS = 50
+const SCRAP_HIDES = 1000
+const SCRAP_SCAN = 20000
+const SCRAP_WALLS = new Set(['following', 'everyone', 'nobody'])
+const FAN_PAGE = 20
+// Same value as lib/notices.js MAX_FOLLOW_TARGETS_PER_AUTHOR (lib/fans.js
+// caps a writer's distinct fan keys with it; not imported, as above).
+const FAN_KEYS_MAX = 4096
+const CHOICE_PAGE = 20
+// Same value as GROUP_EVENTS_LIMIT in @varanda/rpc lib/limits.js: the event
+// pointers of one /index/events page.
+const EVENT_PAGE = 30
+const EVENT_RSVP_OPTIONS = 2
+// Distinct polls one voter may hold operations on, and voters one poll lists.
+const CHOICE_POLLS_MAX = 4096
+const CHOICE_VOTERS_MAX = 20000
 // Same value as lib/feed.js MAX_FUTURE_MS (not imported: this module only
 // requires ./records and ./testimonials). An engager edge dated further ahead is hidden, never
 // removed, and appears once the clock catches up.
@@ -228,6 +295,167 @@ function allVisible () {
   return true
 }
 
+function noFollow () {
+  return null
+}
+
+// Storage order of one (owner, writer) scrap list: ascending (atMs, seq),
+// so the newest pointer is at the end and notFutureTop applies.
+function compareScrapStored (a, b) {
+  if (a.atMs !== b.atMs) return a.atMs < b.atMs ? -1 : 1
+  return a.seq - b.seq
+}
+
+function scrapLowerBound (list, key) {
+  let lo = 0
+  let hi = list.length
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1
+    if (compareScrapStored(list[mid], key) < 0) lo = mid + 1
+    else hi = mid
+  }
+  return lo
+}
+
+// The replies of one writer to one original of a page owner, for the reply
+// exception: ts and seqs in parallel, ascending (t, seq), where t is the raw
+// Date.parse of the reply's at. `t0` is the original's t (null while the
+// original is not indexed) and `from` the first index with ts >= t0
+// (ts.length when t0 is null), so the replies dated no earlier than the
+// original are the suffix from `from`. best[k] is the lowest seq of
+// seqs[from .. from + k]: the not too far ahead ones are a prefix of that
+// suffix, so the winner is one binary search away and a backdated or far
+// future reply costs a read nothing.
+function newReplyList (t0) {
+  return { ts: [], seqs: [], best: [], from: 0, t0 }
+}
+
+function replyLowerBound (list, t, seq) {
+  let lo = 0
+  let hi = list.ts.length
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1
+    if (list.ts[mid] < t || (list.ts[mid] === t && list.seqs[mid] < seq)) lo = mid + 1
+    else hi = mid
+  }
+  return lo
+}
+
+function refreshReplyList (list, t0) {
+  list.t0 = t0
+  let lo = 0
+  let hi = list.ts.length
+  if (t0 === null) lo = hi
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1
+    if (list.ts[mid] < t0) lo = mid + 1
+    else hi = mid
+  }
+  list.from = lo
+  list.best = []
+  let low = Infinity
+  for (let i = lo; i < list.seqs.length; i++) {
+    if (list.seqs[i] < low) low = list.seqs[i]
+    list.best.push(low)
+  }
+}
+
+// best is non-increasing, so each fix-up stops at the first entry the
+// change does not reach: a reply added in seq order (the add contract)
+// touches one entry past its own.
+function replyListInsert (list, t, seq) {
+  const p = replyLowerBound(list, t, seq)
+  list.ts.splice(p, 0, t)
+  list.seqs.splice(p, 0, seq)
+  if (list.t0 === null || t < list.t0) {
+    list.from++
+    return
+  }
+  const k = p - list.from
+  list.best.splice(k, 0, k === 0 ? seq : Math.min(list.best[k - 1], seq))
+  for (let j = k + 1; j < list.best.length && list.best[j] > seq; j++) list.best[j] = seq
+}
+
+function replyListRemove (list, t, seq) {
+  const p = replyLowerBound(list, t, seq)
+  if (list.ts[p] !== t || list.seqs[p] !== seq) return
+  list.ts.splice(p, 1)
+  list.seqs.splice(p, 1)
+  if (p < list.from) {
+    list.from--
+    return
+  }
+  const k = p - list.from
+  list.best.splice(k, 1)
+  for (let j = k; j < list.best.length; j++) {
+    const low = j === 0 ? list.seqs[list.from] : Math.min(list.best[j - 1], list.seqs[list.from + j])
+    if (low === list.best[j]) break
+    list.best[j] = low
+  }
+}
+
+// Answer order of recados rows: at desc, author asc, seq desc. Rows order
+// on the clamped atMs (a date before 1970 counts as 0), so pre-1970 rows
+// may order differently from foldWall's raw Date.parse; such dates are
+// junk and ties still break on author and seq.
+function compareScrapRows (a, b) {
+  if (a.atMs !== b.atMs) return a.atMs > b.atMs ? -1 : 1
+  if (a.author !== b.author) return a.author < b.author ? -1 : 1
+  return b.seq - a.seq
+}
+
+// A top-friends key list as lib/records.js validates it, minus the writer
+// rule (add checks that): at most MAX_TOP_FRIENDS distinct hex keys.
+function validTopKeys (keys) {
+  if (!Array.isArray(keys) || keys.length > MAX_TOP_FRIENDS) return false
+  const seen = new Set()
+  for (const k of keys) {
+    if (typeof k !== 'string' || !HEX64.test(k) || seen.has(k)) return false
+    seen.add(k)
+  }
+  return true
+}
+
+// Index of the first operation of `ops` (ascending seq) at or above `seq`.
+function opLowerBound (ops, seq) {
+  let lo = 0
+  let hi = ops.length
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1
+    if (ops[mid].seq < seq) lo = mid + 1
+    else hi = mid
+  }
+  return lo
+}
+
+// The option count of a poll post record (a root post whose `poll` is a
+// dense array of POLL_MIN..POLL_MAX options), else 0. Records here are
+// validated copies (lib/records.js); this only keeps the count.
+// Whether a post record is a diary event post: a root post whose `event`
+// passes the shared rules (@varanda/rpc isEvent). The index keeps only the
+// seq of such a post, never its title, place or dates.
+function isEventPost (record) {
+  return record.replyTo === null && record.event !== undefined && isEvent(record.event)
+}
+
+function pollSize (record) {
+  const poll = record.poll
+  return record.replyTo === null && Array.isArray(poll) && poll.length >= POLL_MIN && poll.length <= POLL_MAX ? poll.length : 0
+}
+
+// A `choice` record: a target block and a pick of null or 0..POLL_MAX-1.
+function validChoice (record) {
+  const to = record.to
+  return to !== null && typeof to === 'object' && typeof to.author === 'string' && HEX64.test(to.author) && isSeq(to.seq) &&
+    (record.pick === null || (Number.isSafeInteger(record.pick) && record.pick >= 0 && record.pick < POLL_MAX)) && typeof record.at === 'string'
+}
+
+// Fan rows: atMs desc, then key asc (lib/notices.js compareRows).
+function compareFanRows (a, b) {
+  if (a.atMs !== b.atMs) return a.atMs > b.atMs ? -1 : 1
+  return a.key < b.key ? -1 : a.key > b.key ? 1 : 0
+}
+
 function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets = DEFAULT_MAX_TARGETS, perAuthorMax = DEFAULT_PER_AUTHOR_MAX, onFreed = null } = {}) {
   const cap = Number.isSafeInteger(maxRecords) && maxRecords >= 0 ? maxRecords : DEFAULT_MAX_RECORDS
   const targetCap = Number.isSafeInteger(maxTargets) && maxTargets >= 0 ? maxTargets : DEFAULT_MAX_TARGETS
@@ -247,7 +475,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   // author -> { count, timeline: [seq] asc (posts and reposts currently on),
   // posts: Map<seq, { replyTo, quote }>, reposts: Map<ref, seq> (the on
   // record per target), touched: Map<ref, active edge count>,
-  // profileSeqs, usernameSeqs, copiedSeqs: [seq] asc,
+  // profileSeqs, usernameSeqs, copiedSeqs, aboutSeqs, moodSeqs: [seq] asc,
   // engagements: Map<seq, { type, to }> }
   const authors = new Map()
   // A slower cursor must not resurrect a removed block or its incoming edges.
@@ -271,6 +499,20 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   // by writer so an anonymous /index/testimonials request costs the distinct
   // writers, never every block a writer appended.
   const incoming = new Map()
+  // Owner -> Map<writer, { edges: [{ atMs, seq }] by compareScrapStored,
+  // replies: null | Map<owner scrap seq, reply list (newReplyList)> }>: the live
+  // scraps each writer left on the owner's page (a writer's own page is
+  // never listed), kept across a drop of the owner like `incoming`.
+  // `replies` holds the scraps whose replyTo names a block of the owner.
+  const scrapIn = new Map()
+  // Key -> Map<writer, { seq, at }>: the writers whose last live `fan`
+  // operation on that key is on (seq and at of that block), kept across a
+  // drop of the key's own diary like `incoming`.
+  const fanIn = new Map()
+  // Poll ref -> Map<voter, ops>: the voters holding live `choice` operations
+  // on that post (ops is the voter's own list, ascending seq, shared with its
+  // author entry), kept across a drop of the poll's own diary like fanIn.
+  const pollIn = new Map()
 
   function invalidateNotices (author) {
     noticeCache.delete(author)
@@ -278,7 +520,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   function authorEntry (author) {
     let entry = authors.get(author)
     if (entry === undefined) {
-      entry = { count: 0, timeline: [], posts: new Map(), reposts: new Map(), touched: new Map(), profileSeqs: [], usernameSeqs: [], copiedSeqs: [], engagements: new Map(), testimonials: null, shows: null }
+      entry = { count: 0, timeline: [], posts: new Map(), reposts: new Map(), touched: new Map(), profileSeqs: [], usernameSeqs: [], copiedSeqs: [], aboutSeqs: [], moodSeqs: [], engagements: new Map(), testimonials: null, shows: null, scraps: null, scrapsByTo: null, scrapHides: null, hideSeqs: null, hiddenRefs: null, walls: null, wallSeqs: null, fanSeqs: null, fanOps: null, tops: null, topSeqs: null, choiceSeqs: null, choiceOps: null, eventSeqs: null }
       authors.set(author, entry)
     }
     return entry
@@ -387,10 +629,23 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       if (record === null || typeof record !== 'object') return false
       const type = record.type
       if (type !== 'post' && type !== 'like' && type !== 'repost' && type !== 'profile' && type !== 'username' &&
-          type !== 'testimonial' && type !== 'testimonial-show') return false
+          type !== 'testimonial' && type !== 'testimonial-show' && type !== 'scrap' && type !== 'scrap-hide' &&
+          type !== 'scrap-wall' && type !== 'profile-about' && type !== 'mood' && type !== 'fan' && type !== 'top-friends' && type !== 'choice') return false
       if (type === 'testimonial' && (!HEX64.test(record.to) || !HEX64.test(record.hash))) return false
+      if (type === 'scrap' && (!HEX64.test(record.to) || (record.replyTo !== null &&
+          (typeof record.replyTo !== 'object' || !HEX64.test(record.replyTo.author) || !isSeq(record.replyTo.seq))))) return false
+      if (type === 'scrap-hide' && (!HEX64.test(record.from) || !isSeq(record.seq))) return false
+      if (type === 'scrap-wall' && !SCRAP_WALLS.has(record.who)) return false
+      if (type === 'fan' && (typeof record.key !== 'string' || !HEX64.test(record.key) || typeof record.on !== 'boolean' || typeof record.at !== 'string')) return false
+      if (type === 'top-friends' && !validTopKeys(record.keys)) return false
+      if (type === 'choice' && !validChoice(record)) return false
+      // Never self (lib/fans.js): as if never written, no slot.
+      if (type === 'fan' && record.key === author) return true
+      if (type === 'top-friends' && record.keys.includes(author)) return true
       if (type === 'testimonial-show' && (!HEX64.test(record.from) || !isSeq(record.seq) ||
           typeof record.text !== 'string' || typeof record.nonce !== 'string')) return false
+      const pollRef = type === 'choice' ? record.to.author + ':' + record.to.seq : null
+      if (pollRef !== null && deletedRefs.has(pollRef)) return true
       let replyTo = type === 'post' && record.replyTo ? formatRef(record.replyTo) : null
       let quote = type === 'post' && record.quote ? formatRef(record.quote) : null
       const to = type === 'like' || type === 'repost' ? formatRef(record.to) : null
@@ -403,7 +658,13 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       const existing = authors.get(author)
       if (existing && (existing.posts.has(seq) || existing.engagements.has(seq) ||
           indexOfSeq(existing.profileSeqs, seq) !== -1 || indexOfSeq(existing.usernameSeqs, seq) !== -1 ||
-          indexOfSeq(existing.copiedSeqs, seq) !== -1 || existing.testimonials?.has(seq) || existing.shows?.has(seq))) return true
+          indexOfSeq(existing.copiedSeqs, seq) !== -1 || indexOfSeq(existing.aboutSeqs, seq) !== -1 ||
+          indexOfSeq(existing.moodSeqs, seq) !== -1 || existing.testimonials?.has(seq) || existing.shows?.has(seq) ||
+          existing.scraps?.has(seq) || existing.scrapHides?.has(seq) || existing.walls?.has(seq) ||
+          existing.fanSeqs?.has(seq) || existing.tops?.has(seq) || existing.choiceSeqs?.has(seq))) return true
+      if (type === 'fan' && existing?.fanOps?.has(record.key) !== true && (existing?.fanOps?.size ?? 0) >= FAN_KEYS_MAX) return true
+      if (type === 'choice' && existing?.choiceOps?.has(pollRef) !== true &&
+          ((existing?.choiceOps?.size ?? 0) >= CHOICE_POLLS_MAX || (pollIn.get(pollRef)?.size ?? 0) >= CHOICE_VOTERS_MAX)) return true
       if (records >= cap || (existing ? existing.count : 0) >= authorCap) return false
       // Off operations need no new target; they may free one at the cap.
       const needed = new Set([replyTo, quote, record.on === true ? to : null])
@@ -416,8 +677,16 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       if (to !== null) invalidateNotices(to.slice(0, 64))
       const entry = authorEntry(author)
       if (type === 'post') {
-        entry.posts.set(seq, { replyTo, quote })
+        const eventPost = isEventPost(record)
+        // An event post takes RSVPs as a two-option poll (0 'vou', 1 'talvez'),
+        // counted by the poll routes.
+        entry.posts.set(seq, { replyTo, quote, poll: eventPost ? EVENT_RSVP_OPTIONS : pollSize(record), event: eventPost })
         addTimeline(entry, seq)
+        if (eventPost) {
+          if (entry.eventSeqs === null) entry.eventSeqs = []
+          const at = lowerBoundSeq(entry.eventSeqs, seq)
+          if (entry.eventSeqs[at] !== seq) entry.eventSeqs.splice(at, 0, seq)
+        }
         const edge = { atMs: atMillis(record.at), author, seq }
         if (replyTo !== null) {
           const target = targetEntry(replyTo)
@@ -471,6 +740,62 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
         if (entry.shows === null) entry.shows = new Map()
         entry.shows.set(seq, { from: record.from, wseq: record.seq, commit: tombstoned ? null : commitment(record.from, record.nonce, record.text), removed: tombstoned })
         if (tombstoned) markDeleted(author, seq)
+      } else if (type === 'scrap') {
+        addScrap(entry, author, seq, record)
+      } else if (type === 'scrap-hide') {
+        if (entry.scrapHides === null) {
+          entry.scrapHides = new Map()
+          entry.hideSeqs = []
+          entry.hiddenRefs = new Map()
+        }
+        const hid = record.from + ':' + record.seq
+        entry.scrapHides.set(seq, hid)
+        entry.hideSeqs.splice(lowerBoundSeq(entry.hideSeqs, seq), 0, seq)
+        entry.hiddenRefs.set(hid, (entry.hiddenRefs.get(hid) || 0) + 1)
+      } else if (type === 'scrap-wall') {
+        if (entry.walls === null) {
+          entry.walls = new Map()
+          entry.wallSeqs = []
+        }
+        entry.walls.set(seq, record.who)
+        entry.wallSeqs.splice(lowerBoundSeq(entry.wallSeqs, seq), 0, seq)
+      } else if (type === 'profile-about') {
+        entry.aboutSeqs.splice(lowerBoundSeq(entry.aboutSeqs, seq), 0, seq)
+      } else if (type === 'mood') {
+        entry.moodSeqs.splice(lowerBoundSeq(entry.moodSeqs, seq), 0, seq)
+      } else if (type === 'fan') {
+        if (entry.fanSeqs === null) {
+          entry.fanSeqs = new Map()
+          entry.fanOps = new Map()
+        }
+        entry.fanSeqs.set(seq, record.key)
+        let ops = entry.fanOps.get(record.key)
+        if (ops === undefined) {
+          ops = []
+          entry.fanOps.set(record.key, ops)
+        }
+        ops.splice(opLowerBound(ops, seq), 0, { seq, at: record.at, on: record.on })
+        publishFan(author, record.key, ops)
+      } else if (type === 'choice') {
+        if (entry.choiceSeqs === null) {
+          entry.choiceSeqs = new Map()
+          entry.choiceOps = new Map()
+        }
+        entry.choiceSeqs.set(seq, pollRef)
+        let ops = entry.choiceOps.get(pollRef)
+        if (ops === undefined) {
+          ops = []
+          entry.choiceOps.set(pollRef, ops)
+        }
+        ops.splice(opLowerBound(ops, seq), 0, { seq, at: record.at, pick: record.pick })
+        publishChoice(author, pollRef, ops)
+      } else if (type === 'top-friends') {
+        if (entry.tops === null) {
+          entry.tops = new Map()
+          entry.topSeqs = []
+        }
+        entry.tops.set(seq, record.keys.slice())
+        entry.topSeqs.splice(lowerBoundSeq(entry.topSeqs, seq), 0, seq)
       } else if (record.member === author) {
         entry.usernameSeqs.splice(lowerBoundSeq(entry.usernameSeqs, seq), 0, seq)
       } else {
@@ -488,6 +813,116 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     } catch {
       return false
     }
+  }
+
+  // The last live operation of `author` on `key` (the end of `ops`, sorted
+  // by seq) decides whether `author` is listed under `key`.
+  function publishFan (author, key, ops) {
+    const last = ops === undefined || ops.length === 0 ? undefined : ops[ops.length - 1]
+    let owned = fanIn.get(key)
+    if (last !== undefined && last.on === true) {
+      if (owned === undefined) {
+        owned = new Map()
+        fanIn.set(key, owned)
+      }
+      owned.set(author, { seq: last.seq, at: last.at })
+    } else if (owned !== undefined) {
+      owned.delete(author)
+      if (owned.size === 0) fanIn.delete(key)
+    }
+  }
+
+  // The voter's operations on `ref` (ascending seq) are listed under the poll
+  // while it has any.
+  function publishChoice (author, ref, ops) {
+    let owned = pollIn.get(ref)
+    if (ops.length > 0) {
+      if (owned === undefined) {
+        owned = new Map()
+        pollIn.set(ref, owned)
+      }
+      owned.set(author, ops)
+    } else if (owned !== undefined) {
+      owned.delete(author)
+      if (owned.size === 0) pollIn.delete(ref)
+    }
+  }
+
+  // A live scrap of `author` at `seq`: kept under the writer (its own
+  // scraps are also the originals a reply on its page answers) and, unless
+  // left on its own page, under the page owner.
+  function addScrap (entry, author, seq, record) {
+    const to = record.to
+    const atMs = atMillis(record.at)
+    const t = Date.parse(record.at)
+    const rt = record.replyTo !== null && record.replyTo.author === to ? record.replyTo.seq : 0
+    if (entry.scraps === null) {
+      entry.scraps = new Map()
+      entry.scrapsByTo = new Map()
+    }
+    entry.scraps.set(seq, { to, atMs, t, rt })
+    let mine = entry.scrapsByTo.get(to)
+    if (mine === undefined) {
+      mine = new Set()
+      entry.scrapsByTo.set(to, mine)
+    }
+    mine.add(seq)
+    // An original indexed after (or again after) its replies: their list
+    // learns its date.
+    const answers = scrapIn.get(author)?.get(to)?.replies?.get(seq)
+    if (answers !== undefined) refreshReplyList(answers, t)
+    if (to === author) return
+    let owned = scrapIn.get(to)
+    if (owned === undefined) {
+      owned = new Map()
+      scrapIn.set(to, owned)
+    }
+    let rec = owned.get(author)
+    if (rec === undefined) {
+      rec = { edges: [], replies: null }
+      owned.set(author, rec)
+    }
+    const edge = { atMs, seq }
+    // Quadratic insert, bounded like insertSorted: a writer holds at most
+    // perAuthorMax records.
+    rec.edges.splice(scrapLowerBound(rec.edges, edge), 0, edge)
+    if (rt !== 0) {
+      if (rec.replies === null) rec.replies = new Map()
+      let list = rec.replies.get(rt)
+      if (list === undefined) {
+        list = newReplyList(authors.get(to)?.scraps?.get(rt)?.t ?? null)
+        rec.replies.set(rt, list)
+      }
+      replyListInsert(list, t, seq)
+    }
+  }
+
+  // The scrap leaves both places; the next reply of the same writer to the
+  // same original, if any, takes its slot at read time.
+  function dropScrap (entry, author, seq, info) {
+    entry.scraps.delete(seq)
+    const mine = entry.scrapsByTo.get(info.to)
+    if (mine !== undefined) {
+      mine.delete(seq)
+      if (mine.size === 0) entry.scrapsByTo.delete(info.to)
+    }
+    if (entry.scraps.size === 0) {
+      entry.scraps = null
+      entry.scrapsByTo = null
+    }
+    const owned = scrapIn.get(info.to)
+    const rec = owned?.get(author)
+    if (rec === undefined) return
+    const at = scrapLowerBound(rec.edges, { atMs: info.atMs, seq })
+    if (rec.edges[at]?.seq === seq) rec.edges.splice(at, 1)
+    const list = info.rt !== 0 ? rec.replies?.get(info.rt) : undefined
+    if (list !== undefined) {
+      replyListRemove(list, info.t, seq)
+      if (list.seqs.length === 0) rec.replies.delete(info.rt)
+      if (rec.replies.size === 0) rec.replies = null
+    }
+    if (rec.edges.length === 0) owned.delete(author)
+    if (owned.size === 0) scrapIn.delete(info.to)
   }
 
   function markDeleted (author, seq) {
@@ -525,6 +960,11 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
         }
         entry.posts.delete(seq)
         removeTimeline(entry, seq)
+        if (info.event === true && entry.eventSeqs !== null) {
+          const at = indexOfSeq(entry.eventSeqs, seq)
+          if (at !== -1) entry.eventSeqs.splice(at, 1)
+          if (entry.eventSeqs.length === 0) entry.eventSeqs = null
+        }
         releaseRecord(entry)
       }
       const target = targets.get(ref)
@@ -570,6 +1010,71 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
         return true
       }
       let found = false
+      const scrap = entry.scraps === null ? undefined : entry.scraps.get(seq)
+      if (scrap !== undefined) {
+        dropScrap(entry, author, seq, scrap)
+        found = true
+      }
+      const hid = entry.scrapHides === null ? undefined : entry.scrapHides.get(seq)
+      if (hid !== undefined) {
+        entry.scrapHides.delete(seq)
+        entry.hideSeqs.splice(indexOfSeq(entry.hideSeqs, seq), 1)
+        const n = entry.hiddenRefs.get(hid) - 1
+        if (n > 0) entry.hiddenRefs.set(hid, n)
+        else entry.hiddenRefs.delete(hid)
+        if (entry.scrapHides.size === 0) {
+          entry.scrapHides = null
+          entry.hideSeqs = null
+          entry.hiddenRefs = null
+        }
+        found = true
+      }
+      if (entry.walls !== null && entry.walls.has(seq)) {
+        entry.walls.delete(seq)
+        entry.wallSeqs.splice(indexOfSeq(entry.wallSeqs, seq), 1)
+        if (entry.walls.size === 0) {
+          entry.walls = null
+          entry.wallSeqs = null
+        }
+        found = true
+      }
+      const fanKey = entry.fanSeqs === null ? undefined : entry.fanSeqs.get(seq)
+      if (fanKey !== undefined) {
+        entry.fanSeqs.delete(seq)
+        const ops = entry.fanOps.get(fanKey)
+        const at = opLowerBound(ops, seq)
+        if (ops[at]?.seq === seq) ops.splice(at, 1)
+        if (ops.length === 0) entry.fanOps.delete(fanKey)
+        publishFan(author, fanKey, ops)
+        if (entry.fanSeqs.size === 0) {
+          entry.fanSeqs = null
+          entry.fanOps = null
+        }
+        found = true
+      }
+      const pollRef = entry.choiceSeqs === null ? undefined : entry.choiceSeqs.get(seq)
+      if (pollRef !== undefined) {
+        entry.choiceSeqs.delete(seq)
+        const ops = entry.choiceOps.get(pollRef)
+        const at = opLowerBound(ops, seq)
+        if (ops[at]?.seq === seq) ops.splice(at, 1)
+        if (ops.length === 0) entry.choiceOps.delete(pollRef)
+        publishChoice(author, pollRef, ops)
+        if (entry.choiceSeqs.size === 0) {
+          entry.choiceSeqs = null
+          entry.choiceOps = null
+        }
+        found = true
+      }
+      if (entry.tops !== null && entry.tops.has(seq)) {
+        entry.tops.delete(seq)
+        entry.topSeqs.splice(indexOfSeq(entry.topSeqs, seq), 1)
+        if (entry.tops.size === 0) {
+          entry.tops = null
+          entry.topSeqs = null
+        }
+        found = true
+      }
       const testimonial = entry.testimonials === null ? undefined : entry.testimonials.get(seq)
       if (testimonial !== undefined) {
         dropIncoming(testimonial.to, author, seq)
@@ -577,7 +1082,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
         if (entry.testimonials.size === 0) entry.testimonials = null
         found = true
       }
-      for (const list of [entry.profileSeqs, entry.usernameSeqs, entry.copiedSeqs]) {
+      for (const list of [entry.profileSeqs, entry.usernameSeqs, entry.copiedSeqs, entry.aboutSeqs, entry.moodSeqs]) {
         const at = indexOfSeq(list, seq)
         if (at === -1) continue
         list.splice(at, 1)
@@ -703,6 +1208,24 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
         dropTargetIfEmpty(ref, target)
       }
       for (const t of entry?.testimonials?.values() || EMPTY_LIST) dropWriter(t.to, author)
+      for (const to of entry?.scrapsByTo?.keys() || EMPTY_LIST) {
+        const owned = scrapIn.get(to)
+        if (owned === undefined) continue
+        owned.delete(author)
+        if (owned.size === 0) scrapIn.delete(to)
+      }
+      for (const key of entry?.fanOps?.keys() || EMPTY_LIST) {
+        const listed = fanIn.get(key)
+        if (listed === undefined) continue
+        listed.delete(author)
+        if (listed.size === 0) fanIn.delete(key)
+      }
+      for (const ref of entry?.choiceOps?.keys() || EMPTY_LIST) {
+        const listed = pollIn.get(ref)
+        if (listed === undefined) continue
+        listed.delete(author)
+        if (listed.size === 0) pollIn.delete(ref)
+      }
       authors.delete(author)
       if (entry !== undefined) {
         if (entry.count === authorCap) fullAuthors--
@@ -722,6 +1245,160 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     const entry = authors.get(author)
     if (entry === undefined) return { profileSeq: null, usernameSeq: null }
     return { profileSeq: entry.profileSeqs.at(-1) ?? null, usernameSeq: entry.usernameSeqs.at(-1) ?? null }
+  }
+
+  // Perfil rico pointers of `author`: { about, mood, top }, the seq of its
+  // newest live `profile-about` and `mood` block, null when it has none, and
+  // top { seq, keys } its newest live `top-friends` block (keys a fresh copy)
+  // or null. The object is OPEN: later features add pointers to it and
+  // readers ignore keys they do not know. The node reads and verifies the
+  // blocks.
+  function profileExtra (author) {
+    const entry = typeof author === 'string' ? authors.get(author) : undefined
+    const topSeq = entry?.topSeqs?.at(-1)
+    const top = topSeq === undefined ? null : { seq: topSeq, keys: entry.tops.get(topSeq).slice() }
+    return { about: entry?.aboutSeqs.at(-1) ?? null, mood: entry?.moodSeqs.at(-1) ?? null, top }
+  }
+
+  // The writers whose last live `fan` operation on `author` is on, newest
+  // first (the at clamped at 0 like lib/notices.js followsPage, then key):
+  // { items: [{ key, seq, at }] (at most FAN_PAGE, strictly after `after`
+  // { atMs, key }), next: { atMs, key } | null, total } over the writers
+  // `visible` keeps (a throw hides one); null for a malformed author or
+  // cursor. seq and at point at the writer's own block, which the node
+  // peeks and verifies.
+  function fans (author, { after = null, visible = allVisible } = {}) {
+    try {
+      if (typeof author !== 'string' || !HEX64.test(author)) return null
+      if (after !== null && (typeof after !== 'object' || !Number.isSafeInteger(after.atMs) || after.atMs < 0 ||
+          typeof after.key !== 'string' || !HEX64.test(after.key))) return null
+      const rows = fanRows(author, visible)
+      rows.sort(compareFanRows)
+      const items = []
+      let more = false
+      for (const row of rows) {
+        if (after !== null && compareFanRows(row, after) <= 0) continue
+        if (items.length === FAN_PAGE) {
+          more = true
+          break
+        }
+        items.push(row)
+      }
+      const last = items[items.length - 1]
+      return {
+        items: items.map((r) => ({ key: r.key, seq: r.seq, at: r.at })),
+        next: more ? { atMs: last.atMs, key: last.key } : null,
+        total: rows.length
+      }
+    } catch {
+      return null
+    }
+  }
+
+  // The number of rows fans() would list for `author` in all; 0 on bad input.
+  function fanCount (author, visible = allVisible) {
+    try {
+      if (typeof author !== 'string' || !HEX64.test(author)) return 0
+      return fanRows(author, visible).length
+    } catch {
+      return 0
+    }
+  }
+
+  function fanRows (author, visible) {
+    const rows = []
+    for (const [key, e] of fanIn.get(author) || EMPTY_LIST) {
+      if (key === author) continue
+      let shown = false
+      try {
+        shown = visible(key) === true
+      } catch {}
+      if (shown) rows.push({ atMs: atMillis(e.at), key, seq: e.seq, at: e.at })
+    }
+    return rows
+  }
+
+  // The live votes of the poll post `author:seq`: { count, totals, rows } with
+  // count the poll's option count, totals the votes per option (foldPicks)
+  // and rows [{ key, seq, at, pick }] one per voter `visible` keeps (a throw
+  // hides one) that has a live pick; null when that post is not an indexed,
+  // live poll post (a deleted post, a post without a valid `poll`, or one
+  // the index does not hold), or `author` is malformed. seq and at point at
+  // the voter's own block, which the node peeks and verifies. Operations
+  // dated more than MAX_FUTURE_MS after `now` are skipped.
+  function pollRows (author, seq, visible, now) {
+    if (typeof author !== 'string' || !HEX64.test(author) || !isSeq(seq)) return null
+    const ref = author + ':' + seq
+    const count = deletedRefs.has(ref) ? 0 : authors.get(author)?.posts.get(seq)?.poll ?? 0
+    if (count === 0) return null
+    if (typeof visible !== 'function') visible = allVisible
+    const rows = []
+    const flat = []
+    for (const [voter, ops] of pollIn.get(ref) || EMPTY_LIST) {
+      let shown = false
+      try {
+        shown = visible(voter) === true
+      } catch {}
+      if (!shown) continue
+      const due = ops.filter((o) => !(Date.parse(o.at) - now > MAX_FUTURE_MS))
+      const live = foldPicks(due.map((o) => ({ voter, pick: o.pick })), count).picks.get(voter)
+      if (live === undefined) continue
+      // The block that set it: the newest operation holding an in-range pick.
+      let at = due.length - 1
+      while (at > 0 && !(due[at].pick === null || due[at].pick < count)) at--
+      rows.push({ key: voter, seq: due[at].seq, at: due[at].at, pick: live })
+      flat.push({ voter, pick: live })
+    }
+    return { count, totals: foldPicks(flat, count).totals, rows }
+  }
+
+  // The votes of the poll `author:seq` as option totals: { totals } (the
+  // `count` integers of foldPicks) over the voters `visible` keeps; null when
+  // the post is not a live poll post. Counts are seeder claims. `now` (ms,
+  // default Date.now()) as in pollRows.
+  function pollTotals (author, seq, { visible = allVisible, now = Date.now() } = {}) {
+    try {
+      const got = pollRows(author, seq, visible, Number.isFinite(now) ? now : Date.now())
+      return got === null ? null : { totals: got.totals }
+    } catch {
+      return null
+    }
+  }
+
+  // The voters whose live pick on the poll `author:seq` is `pick`, newest
+  // first (the at clamped at 0, then key, as fans()): { items: [{ key, seq,
+  // at }] (at most CHOICE_PAGE, strictly after `after` { atMs, key }), next:
+  // { atMs, key } | null, total } ; null for a malformed author, seq, pick
+  // (an integer in 0..count-1) or cursor, or a post that is not a live poll
+  // post. `now` as in pollTotals.
+  function pollVoters (author, seq, pick, { after = null, visible = allVisible, now = Date.now() } = {}) {
+    try {
+      if (after !== null && (typeof after !== 'object' || !Number.isSafeInteger(after.atMs) || after.atMs < 0 ||
+          typeof after.key !== 'string' || !HEX64.test(after.key))) return null
+      const got = pollRows(author, seq, visible, Number.isFinite(now) ? now : Date.now())
+      if (got === null || !Number.isSafeInteger(pick) || pick < 0 || pick >= got.count) return null
+      const rows = []
+      for (const r of got.rows) if (r.pick === pick) rows.push({ atMs: atMillis(r.at), key: r.key, seq: r.seq, at: r.at })
+      rows.sort(compareFanRows)
+      const items = []
+      let more = false
+      for (const row of rows) {
+        if (after !== null && compareFanRows(row, after) <= 0) continue
+        if (items.length === CHOICE_PAGE) {
+          more = true
+          break
+        }
+        items.push(row)
+      }
+      const last = items[items.length - 1]
+      return {
+        items: items.map((r) => ({ key: r.key, seq: r.seq, at: r.at })),
+        next: more ? { atMs: last.atMs, key: last.key } : null,
+        total: rows.length
+      }
+    } catch {
+      return null
+    }
   }
 
   // Totals exclude dropped diaries by construction: removeDiary runs
@@ -993,6 +1670,28 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     }
   }
 
+  // The event posts of an author: seqs descending, strictly below `before`
+  // (exclusive, null = from the newest), at most EVENT_PAGE, as
+  // { posts: [seq], next: seq | null, total }. `next` is the last seq of a
+  // full page with older ones left, the `before` of the next request. Seqs
+  // only: the node reads each block from the diary and verifies it (event
+  // rules, deletion, hiding). Null for a malformed author or cursor; an
+  // author with no event post answers an empty page.
+  function events (author, before = null) {
+    try {
+      if (typeof author !== 'string' || !HEX64.test(author)) return null
+      if (before !== null && before !== undefined && !isSeq(before)) return null
+      const list = authors.get(author)?.eventSeqs ?? EMPTY_LIST
+      const end = before === null || before === undefined ? list.length : lowerBoundSeq(list, before)
+      const posts = []
+      for (let i = end - 1; i >= 0 && posts.length < EVENT_PAGE; i--) posts.push(list[i])
+      const more = end - posts.length > 0
+      return { posts, next: more ? posts[posts.length - 1] : null, total: list.length }
+    } catch {
+      return null
+    }
+  }
+
   // Likes and reposts aimed at `author`'s indexed posts, as notice rows
   // { key, seq, at, kind } newest first (atMs desc, key asc, seq desc). The
   // first read of an author collects the edges aimed at its indexed posts
@@ -1154,6 +1853,165 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     }
   }
 
+  // The recados of `owner`'s page (see the header): { rows: [{ author, seq,
+  // followSeq }] (one page of SCRAP_ROWS, strictly after `cursor`), next:
+  // cursor string | null, hides: the owner's live scrap-hide seqs (newest
+  // SCRAP_HIDES, descending), wall: the seq of its effective scrap-wall or
+  // null, truncated }. `visible(writer)` and `followSeq(writer)` (the seq
+  // of the owner's live follow of that writer, or null) run once per writer
+  // before its caps; a throw hides the writer or means no follow. followSeq
+  // is null on a row admitted by 'everyone' or the reply exception. Null for
+  // a malformed owner, clock or cursor. `followed`, when given, is the
+  // owner's committed live follow targets: under 'following' only those
+  // writers and the ones the owner addressed (reply exception candidates)
+  // are walked, not every writer of the page.
+  function scraps (owner, now, { visible = allVisible, followSeq = noFollow, followed = null, cursor = null } = {}) {
+    try {
+      if (typeof owner !== 'string' || !HEX64.test(owner)) return null
+      if (typeof now !== 'number' || !Number.isFinite(now)) return null
+      const after = parseCursor(cursor)
+      if (after === undefined) return null
+      const shows = (hex) => {
+        try { return visible(hex) === true } catch { return false }
+      }
+      const follows = (hex) => {
+        try {
+          const n = followSeq(hex)
+          return isSeq(n) ? n : null
+        } catch {
+          return null
+        }
+      }
+      const entry = authors.get(owner)
+      const wall = entry?.wallSeqs?.at(-1) ?? null
+      const who = wall === null ? 'following' : entry.walls.get(wall)
+      const hides = []
+      const hideSeqs = entry?.hideSeqs || EMPTY_LIST
+      for (let i = hideSeqs.length - 1; i >= 0 && hides.length < SCRAP_HIDES; i--) hides.push(hideSeqs[i])
+      if (who === 'nobody') return { rows: [], next: null, hides, wall, truncated: false }
+      const hidden = entry?.hiddenRefs || null
+      const isHidden = (writer, seq) => hidden !== null && hidden.has(writer + ':' + seq)
+      let budget = SCRAP_SCAN
+      let truncated = false
+      const spend = () => {
+        if (budget > 0) {
+          budget--
+          return true
+        }
+        truncated = true
+        return false
+      }
+      // Keep only the best SCRAP_PER_PAGE rows, in answer order.
+      const rows = []
+      const keep = (row) => {
+        if (rows.length >= SCRAP_PER_PAGE && compareScrapRows(row, rows[rows.length - 1]) >= 0) return
+        let lo = 0
+        let hi = rows.length
+        while (lo < hi) {
+          const mid = (lo + hi) >>> 1
+          if (compareScrapRows(rows[mid], row) < 0) lo = mid + 1
+          else hi = mid
+        }
+        rows.splice(lo, 0, row)
+        if (rows.length > SCRAP_PER_PAGE) rows.pop()
+      }
+      const inbound = scrapIn.get(owner) || null
+      for (const [writer, rec] of writersOf(entry, inbound, who === 'following' ? followed : null)) {
+        if (!spend()) break
+        if (writer === owner || !shows(writer)) continue
+        const fseq = who === 'everyone' ? null : follows(writer)
+        if (who === 'everyone' || fseq !== null) {
+          const list = rec.edges
+          let taken = 0
+          for (let i = notFutureTop(list, now) - 1; i >= 0 && taken < SCRAP_PER_WRITER; i--) {
+            if (!spend()) break
+            const e = list[i]
+            if (isHidden(writer, e.seq)) continue
+            keep({ atMs: e.atMs, author: writer, seq: e.seq, followSeq: fseq })
+            taken++
+          }
+        } else if (rec.replies !== null) {
+          const answered = replyRows(entry, writer, rec, now, isHidden, spend)
+          answered.sort(compareScrapRows)
+          for (let i = 0; i < answered.length && i < SCRAP_PER_WRITER; i++) keep(answered[i])
+        }
+        if (truncated) break
+      }
+      let start = 0
+      if (after !== null) {
+        const key = { atMs: after.atMs, author: after.author, seq: after.seq }
+        while (start < rows.length && compareScrapRows(rows[start], key) <= 0) start++
+      }
+      const page = rows.slice(start, start + SCRAP_ROWS)
+      const last = page.at(-1)
+      const next = last !== undefined && start + SCRAP_ROWS < rows.length ? edgeCursor(last) : null
+      return { rows: page.map((r) => ({ author: r.author, seq: r.seq, followSeq: r.followSeq })), next, hides, wall, truncated }
+    } catch {
+      return null
+    }
+  }
+
+  // The [writer, rec] pairs scraps() walks: every writer of the page, or,
+  // given `followed`, the followed writers and then the ones the owner
+  // addressed, each once, that wrote on the page. The caller spends one
+  // unit of its budget per pair.
+  function * writersOf (entry, inbound, followed) {
+    if (inbound === null) return
+    if (followed === null || followed === undefined) {
+      yield * inbound
+      return
+    }
+    const seen = new Set()
+    for (const writer of followed) {
+      if (typeof writer !== 'string' || seen.has(writer)) continue
+      seen.add(writer)
+      const rec = inbound.get(writer)
+      if (rec !== undefined) yield [writer, rec]
+    }
+    for (const writer of entry?.scrapsByTo?.keys() || EMPTY_LIST) {
+      if (seen.has(writer)) continue
+      const rec = inbound.get(writer)
+      if (rec !== undefined) yield [writer, rec]
+    }
+  }
+
+  // The reply exception for one writer the owner does not follow: per live
+  // scrap of the owner addressed to `writer`, that writer's lowest live
+  // reply dated no earlier than it and not too far ahead takes the slot;
+  // it is listed unless the owner hid it. Iterates the smaller side and
+  // spends one unit per original plus one per original with replies, never
+  // per reply: the winner is a binary search (newReplyList), so replies a
+  // writer floods before it (backdated or far ahead) cannot exhaust the
+  // budget.
+  function replyRows (entry, writer, rec, now, isHidden, spend) {
+    const out = []
+    const mine = entry?.scrapsByTo?.get(writer)
+    const own = authors.get(writer)
+    if (mine === undefined || own === undefined || own.scraps === null) return out
+    const originals = mine.size <= rec.replies.size ? mine : rec.replies.keys()
+    for (const s of originals) {
+      if (!spend()) break
+      const original = entry.scraps.get(s)
+      const list = rec.replies.get(s)
+      if (original === undefined || original.to !== writer || list === undefined) continue
+      if (!spend()) break
+      // Never taken while the original is live and indexed: addScrap keeps t0.
+      if (list.t0 !== original.t) refreshReplyList(list, original.t)
+      let lo = list.from
+      let hi = list.ts.length
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1
+        if (list.ts[mid] - now > MAX_FUTURE_MS) hi = mid
+        else lo = mid + 1
+      }
+      if (lo === list.from) continue
+      const seq = list.best[lo - 1 - list.from]
+      const info = own.scraps.get(seq)
+      if (info !== undefined && !isHidden(writer, seq)) out.push({ atMs: info.atMs, author: writer, seq, followSeq: null })
+    }
+    return out
+  }
+
   function stats () {
     return { records, targets: targets.size, saturated: records >= cap || targets.size >= targetCap || authorCap === 0 || fullAuthors > 0, maxRecords: cap }
   }
@@ -1166,11 +2024,14 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     deletedRefs.clear()
     noticeCache.clear()
     incoming.clear()
+    scrapIn.clear()
+    fanIn.clear()
+    pollIn.clear()
     records = 0
     fullAuthors = 0
   }
 
-  return { add, removePost, removeRecord, removeDiary, post, roda, counts, engagers, member, hints, noticeRows, noticePage, testimonials, stats, clear }
+  return { add, removePost, removeRecord, removeDiary, post, roda, counts, engagers, member, hints, noticeRows, noticePage, testimonials, scraps, profileExtra, fans, fanCount, pollTotals, pollVoters, events, stats, clear }
 }
 
 module.exports = {
@@ -1189,5 +2050,16 @@ module.exports = {
   TESTIMONIAL_ROWS,
   RODA_PAGE,
   RODA_SCAN,
+  SCRAP_PER_WRITER,
+  SCRAP_PER_PAGE,
+  SCRAP_ROWS,
+  SCRAP_HIDES,
+  SCRAP_SCAN,
+  FAN_PAGE,
+  FAN_KEYS_MAX,
+  CHOICE_PAGE,
+  CHOICE_POLLS_MAX,
+  EVENT_PAGE,
+  CHOICE_VOTERS_MAX,
   CURSOR_RE
 }
