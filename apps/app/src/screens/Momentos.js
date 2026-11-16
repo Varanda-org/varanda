@@ -2,7 +2,7 @@
 // (App.js stack entry { screen: 'momentos', key: author }). It starts at that
 // author's ring and plays the rings in ringOrder (own first, then unseen,
 // then seen), each author's items oldest first, starting at the first one
-// not yet seen on this device. Black in both themes: the subtree reads the
+// not yet seen (the mark syncs across the devices of the same passkey where the node is hosted). Black in both themes: the subtree reads the
 // dark palette, so every control and sheet in it is drawn for black.
 //
 // The photo comes only from the node (node.media.read kind 'moment'): a blob
@@ -22,8 +22,8 @@
 // conversation with the author through the openMessage contract, with the
 // moment as its context. Own moments offer 'Apagar' (moment.delete, after a
 // confirmation; an uncertain answer says so and the action is not offered
-// again on that sheet) and 'Novo momento'. Each item shown is marked seen on
-// this device only (src/momentSeen.js: no record, nobody told).
+// again on that sheet) and 'Novo momento'. Each item shown is marked seen
+// (src/momentSeen.js: no record, nobody told; synced where the node is hosted).
 //
 // Also exported for A Rua and Diário: useMoments (moments.read on a hosted
 // node), useMomentSeen, momentsChanged and the delete confirmation.
@@ -44,7 +44,7 @@ import { soundMuted, setSoundMuted, onSoundMute, SOUND_MUTE_LABEL, SOUND_UNMUTE_
 import { openExternal } from '../openExternal'
 import { MomentMusic, prepareMomentMusic } from '../ui/MomentMusic'
 import { liveAuthors, liveItems, momentsOf } from '../momentSeen'
-import { loadMomentSeen, markMomentSeen, onMomentSeen } from '../momentSeenStore'
+import { bindMomentSeen, loadMomentSeen, markMomentSeen, migrateMomentSeenOnce, onMomentSeen } from '../momentSeenStore'
 import { adoptVideoFile, revokeUrl, urlFromBytes } from '../media/display'
 import VideoPlayer from '../media/VideoPlayer'
 import { relativeTime } from '../format'
@@ -130,7 +130,11 @@ export function useMoments ({ ownKey = null, active = true, tick = 0 } = {}) {
     try {
       const answer = await request('moments.read', {})
       if (run !== runRef.current) return
-      setState({ phase: 'ready', ...momentsOf(answer, own), error: null })
+      const next = momentsOf(answer, own)
+      setState({ phase: 'ready', ...next, error: null })
+      // Once per node: the per-device list of the moments answered now moves
+      // into the seen document (a node without one keeps it here).
+      migrateMomentSeenOnce(new Set(next.authors.flatMap((a) => a.items.map((item) => item.ref)))).catch(() => {})
     } catch (err) {
       if (run === runRef.current) setState((s) => ({ ...s, phase: s.phase === 'ready' ? 'ready' : 'error', error: errorText(err) }))
     }
@@ -140,9 +144,15 @@ export function useMoments ({ ownKey = null, active = true, tick = 0 } = {}) {
   return { ...state, enabled: hosted, phase: hosted ? state.phase : 'off', reload: load }
 }
 
-// The refs seen on this device, kept current across screens.
+// The refs seen, kept current across screens: the node's list on a hosted
+// node that keeps one, this device's otherwise.
 export function useMomentSeen () {
+  const node = useNode()
+  const hosted = node.hosted === true
   const [seen, setSeen] = useState(null)
+  useEffect(() => {
+    bindMomentSeen(hosted ? { key: node.epoch, request: node.request } : null)
+  }, [hosted, node.epoch, node.request])
   useEffect(() => {
     let live = true
     loadMomentSeen().then((list) => { if (live) setSeen(list) }, () => { if (live) setSeen([]) })
@@ -698,7 +708,8 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
     handed.current = null
   }, [])
 
-  // Seen on this device as soon as it is on screen.
+  // Marked seen as soon as it is on screen (synced where the node is hosted,
+  // kept on this device otherwise).
   const { mark } = seenState
   // Only while the viewer is the top screen: under Responder's conversation
   // or a profile it is hidden, so nothing there counts as seen.

@@ -54,6 +54,7 @@ const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { SEEN_BLOB_BYTES, SEEN_BLOB_B64 } = require('@varanda/core/lib/seen-blob')
 const { normalizeBlocks } = require('@varanda/core/lib/member-block')
 const { normalizeDecisions } = require('@varanda/core/lib/testimonial-decision')
+const { normalizeMomentSeen } = require('@varanda/core/lib/moment-seen')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { DIARY_OPTIONS } = require('./diary-options')
 
@@ -1698,6 +1699,26 @@ function clearTestimonialDecisions (storage) {
   return storage.writeJson('testimonialDecisions', null)
 }
 
+// kv momentSeen = { v: 1, own: hex64, entries }: the momentos the member has
+// seen (@varanda/core lib/moment-seen.js), synced through the seen document.
+// Bound to the own key like testimonialDecisions: another identity's list
+// reads as empty. Identity state: reset() deletes it.
+async function readMomentSeen (storage, own) {
+  const data = await readKv(storage, 'momentSeen')
+  if (!isVersioned(data) || !sameOwn(data, own)) return []
+  return normalizeMomentSeen(data.entries)
+}
+
+function writeMomentSeen (storage, own, entries) {
+  if (!isHex64(own)) throw new TypeError('chave inválida')
+  const list = normalizeMomentSeen(entries)
+  return storage.writeJson('momentSeen', list.length === 0 ? null : { v: 1, own, entries: list })
+}
+
+function clearMomentSeen (storage) {
+  return storage.writeJson('momentSeen', null)
+}
+
 // A secretbox under the local dm key (./dm-store.js seal): { nonce, box }.
 // Stamps and queued drops are bearer values (anyone holding one can spend
 // it), so kv holds them only sealed; plaintext entries of the earlier v1
@@ -2172,6 +2193,9 @@ module.exports = {
   readTestimonialDecisions,
   writeTestimonialDecisions,
   clearTestimonialDecisions,
+  readMomentSeen,
+  writeMomentSeen,
+  clearMomentSeen,
   readSeenHeld,
   writeSeenHeld,
   SEEN_HELD_MAX,

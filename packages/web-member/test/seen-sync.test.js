@@ -64,8 +64,8 @@ function sealB64 (id, doc) {
   return b4a.toString(seenBlob.seal(doc, keyOf(id)), 'base64')
 }
 
-function docOf (id, { dm = [], own = [], pages = {}, groups = [], blocks = [], testimonials = [], gen = 1 } = {}) {
-  return { gen, member: id.own, association: id.association, avisos: { own, pages }, dm, groups, blocks, testimonials }
+function docOf (id, { dm = [], own = [], pages = {}, groups = [], blocks = [], testimonials = [], moments = [], gen = 1 } = {}) {
+  return { gen, member: id.own, association: id.association, avisos: { own, pages }, dm, groups, blocks, testimonials, moments }
 }
 
 // Every kv write of `storage` from now on.
@@ -862,7 +862,7 @@ test('session: seen.sign and seen.merge open no diary core; locked refuses and w
 
   const remote = sealB64(s.id, docOf(s.id, { dm: [{ token: tok(1), t: 10 }] }))
   const r = await s.web.request('seen.merge', { blob: remote, avisos: { own: [tok(2)] }, unchanged: false })
-  t.alike(Object.keys(r).sort(), ['avisos', 'blocksChanged', 'caughtUp', 'dmChanged', 'groupChanged', 'pending', 'testimonialsChanged'])
+  t.alike(Object.keys(r).sort(), ['avisos', 'blocksChanged', 'caughtUp', 'dmChanged', 'groupChanged', 'momentsChanged', 'pending', 'testimonialsChanged'])
   t.is(r.dmChanged, true)
   t.alike(r.avisos, { own: [tok(2)], pages: {} })
   const w = await s.web.request('seen.sign', { nonce: NONCE, action: 'write' })
@@ -1078,11 +1078,12 @@ function plainOf (id, b64) {
   return ok ? plain : null
 }
 
-// A version 2 document: the version 3 encoding of a document with no
-// testimonials, minus its nTestimonials byte (offset 77, zero).
+// A version 2 document: the version 4 encoding of a document with no
+// testimonials and no moments, minus its nTestimonials and nMoments bytes
+// (offsets 77 and 78, zero).
 function sealV2 (id, doc) {
-  const v3 = seenBlob.encode(doc)
-  const v2 = b4a.concat([v3.subarray(0, 77), v3.subarray(78), b4a.alloc(1)])
+  const v4 = seenBlob.encode(doc)
+  const v2 = b4a.concat([v4.subarray(0, 77), v4.subarray(79), b4a.alloc(2)])
   v2[0] = 2
   return sealPlain(id, v2)
 }
@@ -1135,7 +1136,7 @@ test('testimonials: a remote that lacks a local entry, or holds an older one, ne
   t.alike(openB64(id, (await d.sign('write')).blob).testimonials, held, 'and written')
 })
 
-test('testimonials: a version 2 document merges, and the next write is version 3', async (t) => {
+test('testimonials: a version 2 document merges, and the next write is version 4', async (t) => {
   const id = identity()
   const d = device(id)
   const W = writerKey(1)
@@ -1143,13 +1144,14 @@ test('testimonials: a version 2 document merges, and the next write is version 3
   const old = sealV2(id, docOf(id, { dm: [{ token: tok(1), t: 10 }], blocks: [{ key: blockKey(1), on: true, t: 50 }] }))
   t.is(plainOf(id, old)[0], 2, 'built as version 2')
   t.alike(openB64(id, old).testimonials, [], 'reads with no testimonials')
+  t.alike(openB64(id, old).dm.map((e) => e.token), [tok(1)], 'the entries sit where version 2 put them')
   const r = await d.merge({ blob: old })
   t.is(r.dmChanged, true, 'the version 2 content applies')
   t.is(r.blocksChanged, true)
   t.is(r.testimonialsChanged, false, 'nothing new')
   t.is(r.pending, true, 'the decision goes up in the new format')
   const w = (await d.sign('write')).blob
-  t.is(plainOf(id, w)[0], 3, 'written as version 3')
+  t.is(plainOf(id, w)[0], 4, 'written as version 4')
   t.alike(openB64(id, w).testimonials, [{ from: W, seq: 2, state: 'kept', t: 100 }])
   t.alike(await store.readTestimonialDecisions(d.storage, id.own), [{ from: W, seq: 2, state: 'kept', t: 100 }])
 })
@@ -1197,4 +1199,81 @@ test('session: testimonial.decide wakes a seen pass, reset clears it, and the do
   const r = await s.web.request('seen.merge', { blob: signed.blob, avisos: { own: [] }, unchanged: false })
   t.is(r.testimonialsChanged, true)
   t.alike((await store.readTestimonialDecisions(s.storage, s.key)).map((e) => [e.from, e.seq, e.state]), [[W, 2, 'kept']])
+})
+
+const authorKey = (i) => (0x40 + i).toString(16).padStart(64, '0')
+const momentRefs = (list) => list.map((e) => e.author + ':' + e.seq)
+
+test('moments: a mark on one device reaches the other once, and is kept per identity', async (t) => {
+  const id = identity()
+  const a = device(id)
+  const b = device(id)
+  const A = authorKey(1)
+
+  await store.writeMomentSeen(a.storage, id.own, [{ author: A, seq: 3, t: 100 }])
+  let r = await a.merge({})
+  t.is(r.pending, true, 'not on the service yet')
+  t.is(r.momentsChanged, false, 'nothing new for this device')
+  const written = (await a.sign('write')).blob
+  t.alike(openB64(id, written).moments, [{ author: A, seq: 3, t: 100 }], 'sealed in the document')
+  r = await a.merge({ blob: written })
+  t.is(r.pending, false)
+
+  r = await b.merge({ blob: written })
+  t.is(r.momentsChanged, true)
+  t.alike(await store.readMomentSeen(b.storage, id.own), [{ author: A, seq: 3, t: 100 }])
+  t.is(r.pending, false, 'nothing to send back')
+  r = await b.merge({ blob: written })
+  t.is(r.momentsChanged, false, 'reported once')
+  r = await b.merge({ unchanged: true })
+  t.is(r.momentsChanged, false, 'and not again on an unchanged pass')
+
+  t.alike(await store.readMomentSeen(b.storage, identity().own), [], 'another identity reads none of it')
+})
+
+test('moments: a remote never removes a local entry, and the union keeps the newest ' + seenBlob.SYNC_MOMENTS_MAX, async (t) => {
+  const id = identity()
+  const d = device(id)
+  const max = seenBlob.SYNC_MOMENTS_MAX
+  const held = Array.from({ length: max }, (_, i) => ({ author: authorKey(i % 7), seq: i + 1, t: 1000 + i }))
+  await store.writeMomentSeen(d.storage, id.own, held)
+  const newer = { author: authorKey(9), seq: 1, t: 5000 }
+  const remote = sealB64(id, docOf(id, { moments: [{ author: held[5].author, seq: held[5].seq, t: 1 }, newer] }))
+  const r = await d.merge({ blob: remote })
+  t.is(r.momentsChanged, true, 'a new moment arrived')
+  const after = await store.readMomentSeen(d.storage, id.own)
+  t.is(after.length, max, 'still at the window')
+  t.alike(momentRefs(after), momentRefs(held.slice(1).concat([newer])), 'the oldest gave way, nothing local was undone')
+  t.is(after.find((e) => e.seq === held[5].seq && e.author === held[5].author).t, held[5].t, 'an older remote time never moves a local one back')
+  t.is(r.pending, true, 'the local entries go up')
+  t.alike(momentRefs(openB64(id, (await d.sign('write')).blob).moments), momentRefs(after), 'and written')
+})
+
+test('session: moment.seen wakes a seen pass, reset clears it, and the document brings it back', async (t) => {
+  t.timeout(60000)
+  const s = await sessionNode(t)
+  const A = authorKey(1)
+  t.alike(await s.web.request('moments.seen'), { refs: [] })
+  t.alike(await s.web.request('moment.seen', { author: A, seq: 4 }), { changed: true })
+  await until(() => s.web.events.some((e) => e.name === 'seen.changed'), 10000)
+  t.ok(s.web.events.some((e) => e.name === 'seen.changed'), 'the pass is woken')
+  t.alike(await s.web.request('moment.seen', { author: A, seq: 4 }), { changed: false }, 'a second mark changes nothing')
+  t.alike(await s.web.request('moments.seen'), { refs: [A + ':4'] })
+  const signed = await s.web.request('seen.sign', { nonce: NONCE, action: 'write' })
+  t.alike(momentRefs(openB64(s.id, signed.blob).moments), [A + ':4'])
+
+  await s.node.reset()
+  t.is(await s.storage.readJson('momentSeen'), null, 'reset deletes the list')
+  await s.node.setKeyPair(s.id.keyPair, { prf: s.prf })
+  await s.web.request('identity.create')
+  t.alike(await s.web.request('moments.seen'), { refs: [] }, 'nothing left after reset')
+  const r = await s.web.request('seen.merge', { blob: signed.blob, avisos: { own: [] }, unchanged: false })
+  t.is(r.momentsChanged, true)
+  t.alike(await s.web.request('moments.seen'), { refs: [A + ':4'] })
+
+  await s.node.clearKeyPair()
+  for (const [method, params] of [['moment.seen', { author: A, seq: 5 }], ['moments.seen', {}]]) {
+    const err = await errorOf(s.web.request(method, params))
+    t.alike([err.code, err.message], ['USAGE', LOCKED], method + ' locked')
+  }
 })

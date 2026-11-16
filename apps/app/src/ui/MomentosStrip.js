@@ -105,7 +105,7 @@ function Ring ({ label, name, unseen, onPress, profile, publicKey, plus }) {
   )
 }
 
-// data: useMoments() output; seen: the refs seen on this device; me: the own
+// data: useMoments() output; seen: the refs seen (synced where the node is hosted, on this device otherwise); me: the own
 // profile; canPublish: canPublishMoment(node).
 export function MomentosStrip ({ hosted, data, seen, ownKey, me, profileOf, canPublish, now = Date.now(), onOpen, onCreate }) {
   const styles = useStyles(makeStyles)
