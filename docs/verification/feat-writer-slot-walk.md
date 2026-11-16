@@ -148,6 +148,7 @@ Saiu deste PR na quarta rodada e volta junto com a leitura esparsa:
 - P1-B: um bloco de chave de G cujo `auth` cita um CW cortado é julgado pelo comprimento guardado do CW; com cópias esparsas, um CW aparado abaixo do `auth.seq` perderia histórico que a cópia inteira lê. A correção (o `auth.seq` contra o comprimento assinado) vem com a leitura esparsa.
 - Teste de ponta a ponta: um leitor novo que só fala com semeadores dobra um escritor esparso como a cópia inteira.
 - Na partida, buscar de novo o que a limpeza já tinha tirado (`clearedTo`) quando o corte subir ou sumir.
+- O semeador guardar o bloco 0 de um escritor sem caixa trocado num grupo privado (hoje recusado como `header-invalid`), para que um leitor que nunca o guardou o rejeite pelo cabeçalho e a dobra fique completa. Fecha o limite do item 7 de "Decisões a confirmar" antes de a #350 fechar.
 
 ## Riscos residuais
 
