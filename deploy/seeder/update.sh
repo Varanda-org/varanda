@@ -1710,9 +1710,11 @@ servido_moderacao() {
 
 # O Caddyfile lido é o do alvo (a versão ou o checkout), e o www também: uma
 # volta compara com o que ela mesma serve. A sonda da moderação roda sempre
-# (todo alvo possível já tem as rotas).
+# (todo alvo possível já tem as rotas). A cópia do nó da versão
+# (varanda-node-<versão>.js, a que a página carrega) sai da marca
+# varanda-release do index.html, como o bundle: um www sem a marca pula a sonda.
 aguardar_web() {
-  local fim=$((SECONDS + 60)) json=0 conta=0 bundle
+  local fim=$((SECONDS + 60)) json=0 conta=0 bundle versao
   if grep -q 'handle /varanda.json' "$caddyfile"; then
     json=1
   fi
@@ -1720,12 +1722,14 @@ aguardar_web() {
     conta=1
   fi
   bundle=$(grep -o '/_expo/static/js/web/index-[0-9a-f]*\.js' "$www/index.html" | head -n 1 || true)
+  versao=$(versao_web "$www/index.html")
   while [ "$SECONDS" -lt "$fim" ]; do
     if servido_igual index.html '' && servido_igual varanda-node.js varanda-node.js \
       && { [ "$json" = 0 ] || servido_json; } \
       && { [ ! -f "$www/sw.js" ] || servido_igual sw.js sw.js; } \
       && { [ ! -f "$www/version.json" ] || servido_igual version.json version.json; } \
       && { [ -z "$bundle" ] || servido_igual "${bundle#/}" "${bundle#/}"; } \
+      && { [ -z "$versao" ] || servido_igual "varanda-node-$versao.js" "varanda-node-$versao.js"; } \
       && { [ "$conta" = 0 ] || servido_conta; } \
       && servido_moderacao; then
       return 0

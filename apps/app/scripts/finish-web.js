@@ -110,7 +110,11 @@ function finishWeb (distDir, templateFile = path.join(__dirname, 'sw.js')) {
   // The release copy has the same bytes, so the same hash; the version
   // covers varanda-node.js under its plain name.
   const nodePath = releaseNodePath(version)
-  entries.find((e) => e.url === NODE_FILE).url = nodePath
+  // requireFiles only checks that the name exists: a directory or a link
+  // there is not listed.
+  const nodeEntry = entries.find((e) => e.url === NODE_FILE)
+  if (!nodeEntry) throw new Error('exportação web inválida: varanda-node.js não é um arquivo comum em ' + distDir)
+  nodeEntry.url = nodePath
   const worker = renderWorker(template.toString('utf8'), { version, assets: entries })
   for (const name of fs.readdirSync(distDir)) {
     if (RELEASE_NODE_RE.test('/' + name) && '/' + name !== nodePath) fs.rmSync(path.join(distDir, name))

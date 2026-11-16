@@ -4,8 +4,9 @@
 # /.well-known/assetlinks.json e o iOS ao declarado em
 # /.well-known/apple-app-site-association. Lido com source por deploy.sh e por
 # build-web.sh, que publicam www cada um do seu jeito: as regras ficam num só
-# lugar para não divergirem. Quem faz source define log (uma linha por
-# chamada).
+# lugar para não divergirem, como as do version.json, da cópia do app para
+# www e da versão marcada no index.html. Quem faz source define log (uma
+# linha por chamada).
 
 # Lê VARANDA_ANDROID_CERT_SHA256 e VARANDA_IOS_APP_ID do .env em $1 (lidos,
 # nunca executados: a última linha, espaço em volta do = aceito, comentário no
@@ -118,4 +119,35 @@ gravar_versao() {
     log "falha ao gravar $arquivo"
     return 1
   fi
+}
+
+# A versão do app web (16 hex) marcada no index.html em $1 (meta
+# varanda-release, apps/app/scripts/finish-web.js), ou nada sem a marca ou
+# sem o arquivo. A página carrega /varanda-node-<versão>.js, a cópia do nó
+# que o export deixa ao lado de varanda-node.js.
+versao_web() {
+  local re='<meta name="varanda-release" content="([0-9a-f]{16})">'
+  if [ -f "$1" ] && [[ $(<"$1") =~ $re ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  fi
+}
+
+# Copia o app gerado em $1 (o dist) para $2, um www já vazio, com o index.html
+# por último, depois do sw.js: quando a página aparece, tudo o que ela carrega
+# (o bundle com hash, a cópia do nó da versão) já está lá. Na ordem do
+# diretório, um index.html novo podia chegar antes do próprio nó e mostrar o
+# erro de conexão. Qualquer cópia que falhe retorna 1.
+copiar_app() {
+  local dist=$1 destino=$2 p
+  (
+    shopt -s dotglob
+    for p in "$dist"/*; do
+      case ${p##*/} in
+        index.html | sw.js) ;;
+        *) cp -R "$p" "$destino/" || exit 1 ;;
+      esac
+    done
+  ) || return 1
+  cp -R "$dist/sw.js" "$destino/sw.js" || return 1
+  cp -R "$dist/index.html" "$destino/index.html"
 }

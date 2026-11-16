@@ -313,6 +313,10 @@ test('finishWeb refuses an incomplete export', (t) => {
     fs.rmSync(path.join(dist, missing))
     t.exception(() => quiet(() => finishWeb(dist)), /falta|nenhum/, 'without ' + missing)
   }
+  const dist = makeDist()
+  fs.rmSync(path.join(dist, 'varanda-node.js'))
+  fs.mkdirSync(path.join(dist, 'varanda-node.js'))
+  t.exception(() => quiet(() => finishWeb(dist)), /varanda-node\.js não é um arquivo comum/, 'a directory named varanda-node.js')
 })
 
 test('install stores every precache path under absolute URLs', async (t) => {

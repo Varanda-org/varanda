@@ -632,8 +632,11 @@ servido_moderacao() {
 # implantação que o traz esta sonda não roda (o shell já carregou o deploy.sh
 # anterior), mas o arquivo é publicado mesmo assim: o build-web.sh novo o
 # grava no dist da cópia e o cp antigo o leva para www.
+# A cópia do nó da versão (varanda-node-<versão>.js, a que a página carrega)
+# sai da marca varanda-release do index.html de www, como o bundle: uma volta
+# para um www sem a marca pula a sonda.
 aguardar_web() {
-  local fim=$((SECONDS + 60)) json=0 conta=0 moderacao=0 bundle
+  local fim=$((SECONDS + 60)) json=0 conta=0 moderacao=0 bundle versao
   if grep -q 'handle /varanda.json' "$root/deploy/seeder/Caddyfile"; then
     json=1
   fi
@@ -645,12 +648,14 @@ aguardar_web() {
     moderacao=1
   fi
   bundle=$(grep -o '/_expo/static/js/web/index-[0-9a-f]*\.js' "$www/index.html" | head -n 1 || true)
+  versao=$(versao_web "$www/index.html")
   while [ "$SECONDS" -lt "$fim" ]; do
     if servido_igual index.html '' && servido_igual varanda-node.js varanda-node.js \
       && { [ "$json" = 0 ] || servido_json; } \
       && { [ ! -f "$www/sw.js" ] || servido_igual sw.js sw.js; } \
       && { [ ! -f "$www/version.json" ] || servido_igual version.json version.json; } \
       && { [ -z "$bundle" ] || servido_igual "${bundle#/}" "${bundle#/}"; } \
+      && { [ -z "$versao" ] || servido_igual "varanda-node-$versao.js" "varanda-node-$versao.js"; } \
       && { [ "$conta" = 0 ] || servido_conta; } \
       && { [ "$moderacao" = 0 ] || servido_moderacao; }; then
       return 0
@@ -753,7 +758,7 @@ publicar_web() {
   # www é um bind mount: troca-se o conteúdo, nunca o diretório.
   www_trocado=1
   find "$www" -mindepth 1 -delete
-  cp -R "$base/src/apps/app/dist/." "$www/"
+  copiar_app "$base/src/apps/app/dist" "$www"
   publicar_associacoes
   # Root refaz os bytes a partir do $target conferido; nunca os lê da cópia.
   gravar_versao "$www" "$target"
