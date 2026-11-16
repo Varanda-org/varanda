@@ -1,0 +1,1 @@
+- Seguir uma Página pela Busca global agora repassa a marca de página do resultado (`page`, `closed`, `moved`) ao cache de nomes, então a Página aparece como Página já na tela seguinte, sem esperar o `page.read` (PR `fix/sobras-paginas-pequenas`, item da #352). Verificação em `docs/verification/fix-sobras-paginas-pequenas.md`. Sem mudança de protocolo, RPC nem Termos.
