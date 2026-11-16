@@ -72,15 +72,27 @@ test('web measurement leaves the scroll of the sheet where it was and restores t
 })
 
 test('native has no measurement: the platform grows the field', async (t) => {
-  const { measureField } = await import('../src/ui/fieldMeasure.native.js')
-  t.is(measureField({ style: {}, scrollHeight: 99 }, 40, 150), null)
+  const native = await import('../src/ui/fieldMeasure.native.js')
+  t.is(native.measureField({ style: {}, scrollHeight: 99 }, 40, 150), null)
+  t.is(native.GROWS_ITSELF, true)
+  const web = await import('../src/ui/fieldMeasure.web.js')
+  t.is(web.GROWS_ITSELF, false)
+})
+
+test('the native chat field has no fixed height: iOS reports a content size only when the frame changes', (t) => {
+  const chat = read('ui/ChatComposer.js')
+  const input = chat.slice(chat.indexOf('<TextInput\n            ref={inputRef}'), chat.indexOf('accessibilityLabel={accessibilityLabel}\n          />'))
+  t.ok(input.includes('style={[styles.input, webInputReset, GROWS_ITSELF ? styles.grows : { height }]}'))
+  t.absent(input.includes('{ height: shownHeight }'), 'a fixed height never grew on iOS')
+  t.ok(input.includes('onLayout={GROWS_ITSELF ? (event) => setLaidOut(event.nativeEvent.layout.height) : undefined}'), 'the laid out height says when it is full')
+  t.ok(input.includes('onContentSizeChange={GROWS_ITSELF\n              ? undefined'), 'the content size only serves the web')
 })
 
 test('the composers measure the field after every text change on the web, before the paint', (t) => {
   const chat = read('ui/ChatComposer.js')
-  t.ok(chat.includes("import { measureField } from './fieldMeasure'"))
+  t.ok(chat.includes("import { GROWS_ITSELF, measureField } from './fieldMeasure'"))
   t.ok(chat.includes('useLayoutEffect(() => {\n    if (text === \'\') setHeight(MIN_HEIGHT)\n    const measured = measureField(inputRef.current, MIN_HEIGHT, MAX_HEIGHT)') && chat.includes('}, [text])'), 'chat field between one and six lines, before the paint')
-  t.ok(chat.includes('onContentSizeChange={(event) => {'), 'native keeps its content-size handler')
+  t.ok(chat.includes('setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, Math.ceil(h))))'), 'the web keeps its content-size handler')
   const post = read('screens/Publicar.js')
   t.ok(post.includes("import { measureField } from '../ui/fieldMeasure'"))
   t.ok(post.includes('useLayoutEffect(() => {\n    if (!GROW_BY_CONTENT || momentMode || !open) return\n    const measured = measureField(inputRef.current, POST_MIN_HEIGHT, Infinity)') && post.includes('}, [text, momentMode, open])'), 'post field, before the paint')

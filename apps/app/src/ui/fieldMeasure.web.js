@@ -10,6 +10,8 @@
 // leaves out (a border on both sides). Null when `el` is not a textarea.
 import { growHeight } from './fieldHeight.js'
 
+export const GROWS_ITSELF = false
+
 function scrollOffsets (el) {
   const saved = []
   for (let node = el.parentElement; node; node = node.parentElement) {

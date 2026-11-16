@@ -315,7 +315,8 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember, onMessage }) 
     return list
   }
 
-  const title = info && typeof info.name === 'string' && info.name !== '' ? displayText(info.name) : 'Comunidade'
+  const loadedName = info && typeof info.name === 'string' && info.name !== '' ? displayText(info.name) : ''
+  const title = loadedName || 'Comunidade'
 
   const cls = classifyFollowInput(adminInput)
   const searchable = cls.kind === 'name' || cls.kind === 'handle'
@@ -404,7 +405,7 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember, onMessage }) 
 
   const share = async () => {
     setShareNote('')
-    setShareNote(await shareCommunity({ community, title }))
+    setShareNote(await shareCommunity({ community, title: loadedName }))
   }
 
   const confirmBox = confirm
@@ -452,7 +453,7 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember, onMessage }) 
         <View style={styles.block}>
           <View style={styles.headActions}>
             {canInvite ? <Pill label='Convidar' onPress={() => setInviting((v) => !v)} /> : null}
-            <Pill icon='compartilhar' accessibilityLabel='Compartilhar' onPress={share} />
+            <Pill icon='compartilhar' accessibilityLabel='Compartilhar' onPress={share} disabled={loadedName === ''} />
             <MoreButton
               title='Comunidade'
               actions={[

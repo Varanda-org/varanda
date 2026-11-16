@@ -72,7 +72,7 @@ import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
 import { listingLinkOf } from '../feiraChat'
 import { parsePriceText, quickReplies } from '../feira'
 import { CONSENT_NOTE, acceptCard, acceptText, buttonState, centsLabel, consentParams, declineCard, declineText, offerCard, offerOfMessage, offerState, offerTarget, proposalText, validCents } from '../feiraOffer'
-import { mergeMessages, newestOf, pageDmClient, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey, quoteTargets, dmReactions, reactDebounce, dmReactionGate, dmReactable, withFreshReactions, peerReadDelay, olderPagesToReread } from '../dm-screen'
+import { heldBubble, mergeMessages, newestOf, pageDmClient, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey, quoteTargets, dmReactions, reactDebounce, dmReactionGate, dmReactable, withFreshReactions, peerReadDelay, olderPagesToReread } from '../dm-screen'
 import { pageReadKind } from '../pageNotice'
 import { applyOptimistic, reactionChips, toggleOf } from '../reactions'
 import { hasRich, parseRich, plainOf } from '../richText'
@@ -91,6 +91,7 @@ import { chatMediaRefs, followAutocorrect, retryChatSend, runChatSend, stagedOf 
 import { Btn, ErrorText, Field, Soft, errorText, useAction, useVisibleNow } from '../ui'
 import { useStyles } from '../ui/ThemeProvider'
 import { Bubble } from '../ui/Bubble'
+import { ChatSheetProvider } from '../ui/ChatSheetHost'
 import { SwipeReply } from '../ui/SwipeReply'
 import { JumpToEnd } from '../ui/JumpToEnd'
 import { awayCount, jumpVisible } from '../chatGestures'
@@ -163,7 +164,8 @@ export function Mensagem ({ initial, ...props }) {
   const entry = useRef(null)
   entry.current = messageEntry(entry.current, identity + ':' + props.peer, initial)
   // Remounting discards every draft, held send and attachment on a switch.
-  return <MensagemThread key={identity + ':' + props.peer} {...props} initial={entry.current.initial} />
+  // The shared actions sheet remounts too: one left open never outlives its thread.
+  return <ChatSheetProvider key={identity + ':' + props.peer}><MensagemThread {...props} initial={entry.current.initial} /></ChatSheetProvider>
 }
 
 function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, onOpenMention, onReport, onOpenInvite, onOpenListing, onAvaliar, intent, onIntentUsed }) {
@@ -847,7 +849,12 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       if (ctx !== null) setContext((c) => (c === ctx ? null : c))
       setHold(null)
     } else if (r.uncertain || (err && err.message === UNSURE_SEND)) {
-      setHold({ text, quoteId, card, typed, ctx, retry: pageKey !== null && err && typeof err.retry === 'function' ? err.retry : null })
+      // The held text is now a faded bubble, so the composer is free for a new
+      // message; sendPlan asks before sending a different one.
+      setDraft((d) => (d === text || d === typed || (followed && d === followed.text) ? '' : d))
+      setReplyTo((rt) => (rt && rt.id === quoteId ? null : rt))
+      if (ctx !== null) setContext((c) => (c === ctx ? null : c))
+      setHold({ text, quoteId, card, typed, ctx, at: Date.now(), retry: pageKey !== null && err && typeof err.retry === 'function' ? err.retry : null })
     } else if (err && err.message === BLOCKED_SEND) {
       setBlocked(true)
     } else if (pageKey !== null && pageKeyText(err) !== '') {
@@ -1422,19 +1429,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
             )
           : null}
         {mediaError || attachments.note ? <ErrorText>{mediaError || attachments.note}</ErrorText> : null}
-        {hold
-          ? (
-            <View style={styles.inline}>
-              <Soft>{LABELS.uncertain}</Soft>
-              {/* A page re-puts only its signed bytes (hold.retry) and never signs
-                  a second message; a personal account sends the same text again. */}
-              {typeof hold.retry === 'function' || pageKey === null
-                ? <Pill label='Tentar de novo' onPress={typeof hold.retry === 'function' ? retryHeld : () => send(hold.text, hold.quoteId, hold.card || null)} pending={post.pending} />
-                : null}
-              <Pill label='descartar' onPress={() => { setHold(null); setAskNew(false) }} />
-            </View>
-            )
-          : <ErrorText>{post.error}</ErrorText>}
+        {hold ? null : <ErrorText>{post.error}</ErrorText>}
         {hold && askNew && pageKey === null
           ? (
             <View style={styles.inline}>
@@ -1527,7 +1522,30 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
           keyExtractor={(row) => row.key}
           renderItem={renderItem}
           extraData={extra}
-          ListFooterComponent={reactionError || reactionContext.unsure.size > 0 ? <View style={styles.pad}><ErrorText>{reactionError}</ErrorText>{reactionContext.unsure.size > 0 ? <Soft>Não deu para confirmar a reação.</Soft> : null}</View> : null}
+          ListFooterComponent={hold || reactionError || reactionContext.unsure.size > 0
+            ? (
+              <View>
+                {hold
+                  ? (
+                    <>
+                      {heldBubble(hold) !== null ? <Bubble item={heldBubble(hold)} mine status='uncertain' shape='single' /> : null}
+                      {/* The row stands on the hold alone: a hold always offers a way out. */}
+                      <View style={[styles.inline, styles.heldRow]}>
+                        <Soft>{LABELS.uncertain}</Soft>
+                        {/* A page re-puts only its signed bytes (hold.retry) and never signs
+                            a second message; a personal account sends the same text again. */}
+                        {typeof hold.retry === 'function' || pageKey === null
+                          ? <Pill label='Tentar de novo' onPress={typeof hold.retry === 'function' ? retryHeld : () => send(hold.text, hold.quoteId, hold.card || null)} pending={post.pending} />
+                          : null}
+                        <Pill label='descartar' onPress={() => { setHold(null); setAskNew(false) }} />
+                      </View>
+                    </>
+                    )
+                  : null}
+                {reactionError || reactionContext.unsure.size > 0 ? <View style={styles.pad}><ErrorText>{reactionError}</ErrorText>{reactionContext.unsure.size > 0 ? <Soft>Não deu para confirmar a reação.</Soft> : null}</View> : null}
+              </View>
+              )
+            : null}
           ListHeaderComponent={next ? <View style={styles.pad}><Pill label='mensagens anteriores' onPress={loadOlder} pending={loadingMore} /></View> : null}
           ListEmptyComponent={
             <View>
@@ -1720,6 +1738,7 @@ const makeStyles = (colors) => StyleSheet.create({
   sheet: { padding: 16, gap: 12 },
   pad: { padding: 12, alignItems: 'center', gap: 6 },
   inline: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
+  heldRow: { justifyContent: 'flex-end', paddingHorizontal: 12, paddingTop: 4 },
   // Accept and decline split the row evenly, like the request bars of other messengers.
   decide: { flexDirection: 'row', gap: 8 },
   decideItem: { flex: 1, alignItems: 'stretch' },

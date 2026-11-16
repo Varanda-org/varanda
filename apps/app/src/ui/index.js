@@ -4,10 +4,11 @@
 // Design: apps/site/artwork/app-design.md.
 
 import { cloneElement, isValidElement, useCallback, useContext, useEffect, useRef, useState } from 'react'
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
+import { ActivityIndicator, AppState, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
 import { PRESSED_OPACITY } from '../pressMotion'
+import { startDayWake } from '../dayClock'
 import { Icon } from './Icon'
 import { ScreenVisible } from './screenVisible'
 import { createVisibleNow } from '../visibleNow'
@@ -97,13 +98,33 @@ export function useAction () {
   return { run, pending, error, clearError: () => setError('') }
 }
 
-// Date.now(), refreshed every intervalMs (relative times stay current).
+// Runs the latest `wake` at local midnight and when the app comes back to the
+// foreground (startDayWake in src/dayClock.js).
+function useDayWake (wake) {
+  const latest = useRef(wake)
+  latest.current = wake
+  useEffect(() => startDayWake({
+    clock: Date.now,
+    setTimer: setTimeout,
+    clearTimer: clearTimeout,
+    subscribe: (fn) => {
+      const sub = AppState.addEventListener('change', fn)
+      return () => sub.remove()
+    },
+    onWake: () => latest.current()
+  }), [])
+}
+
+// Date.now(), refreshed every intervalMs (relative times stay current), when
+// the app comes back to the foreground and at local midnight, so "hoje" and
+// "ontem" never go stale.
 export function useNow (intervalMs) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), intervalMs)
     return () => clearInterval(timer)
   }, [intervalMs])
+  useDayWake(() => setNow(Date.now()))
   return now
 }
 
@@ -128,6 +149,8 @@ export function useVisibleNow (intervalMs) {
   useEffect(() => {
     ticker.current.setVisible(visible)
   }, [visible, intervalMs])
+  // A hidden screen skips midnight and the return: showing it refreshes anyway.
+  useDayWake(() => { if (visible) setNow(Date.now()) })
   return now
 }
 

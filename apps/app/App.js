@@ -183,7 +183,7 @@ import Membro, { canConverseWithPage } from './src/screens/Membro'
 import { tagTarget } from './src/hashtagNav'
 import { HashtagContext } from './src/ui/MentionText'
 import AssuntoScreen from './src/screens/Assunto'
-import DepoimentosScreen from './src/screens/Depoimentos'
+import DepoimentosScreen, { testimonialsChanged } from './src/screens/Depoimentos'
 import SalvosScreen from './src/screens/Salvos'
 import MomentosScreen from './src/screens/Momentos'
 import FeiraScreen from './src/screens/Feira'
@@ -2354,6 +2354,7 @@ function Member () {
       if (result.dmChanged) bumpDm()
       // Another device of the passkey blocked or unblocked someone.
       if (result.blocksChanged) refreshBlocks().catch(() => {})
+      if (result.testimonialsChanged) testimonialsChanged()
       if (result.groupChanged) {
         bumpSeen()
         const taken = { epoch: snap.epoch, versions: snap.versions }

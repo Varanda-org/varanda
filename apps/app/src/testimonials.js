@@ -8,6 +8,10 @@
 const HEX64 = /^[0-9a-f]{64}$/
 
 export const TESTIMONIAL_PENDING_MAX = 64
+export const TESTIMONIAL_KEPT_MAX = 64
+export const SENT_STATUS = 'Enviado'
+
+export const sentMeta = (time) => SENT_STATUS + ' · ' + time
 
 const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
 const isHex64 = (s) => typeof s === 'string' && HEX64.test(s)
@@ -103,11 +107,20 @@ export function sentRows (ownLog, ownKey) {
 // (pendingIncomplete reads the flag). Malformed
 // items are dropped, repeats of one writer block kept once, at most 64.
 export function pendingRows (result) {
-  if (!isObject(result) || !Array.isArray(result.items)) return []
+  return inboxRows(result && result.items, TESTIMONIAL_PENDING_MAX)
+}
+
+// result.kept: the depoimentos kept privately, same row shape as items.
+export function keptRows (result) {
+  return inboxRows(isObject(result) ? result.kept : null, TESTIMONIAL_KEPT_MAX)
+}
+
+function inboxRows (items, max) {
+  if (!Array.isArray(items)) return []
   const seen = new Set()
   const rows = []
-  for (const it of result.items) {
-    if (rows.length >= TESTIMONIAL_PENDING_MAX) break
+  for (const it of items) {
+    if (rows.length >= max) break
     if (!isObject(it) || !isHex64(it.from) || !isSeq(it.seq) || !isText(it.text) || !isCanonicalIso(it.at)) continue
     const ref = it.from + ':' + it.seq
     if (seen.has(ref)) continue
@@ -123,4 +136,43 @@ export function pendingRows (result) {
 // flag reads as complete.
 export function pendingIncomplete (result) {
   return isObject(result) && result.incomplete === true
+}
+
+// The overrides a fresh read already agrees with, dropped so a later change
+// elsewhere (a removed show returning to kept, a decision from another
+// device) is not hidden by a stale one: 'kept' once the ref is in `kept`;
+// 'declined' and 'shown' once it is in neither list. A new Map.
+export function settleOverrides (overrides, { pending, kept }) {
+  const out = new Map()
+  if (!(overrides instanceof Map)) return out
+  const inPending = new Set((Array.isArray(pending) ? pending : []).map((r) => r.ref))
+  const inKept = new Set((Array.isArray(kept) ? kept : []).map((r) => r.ref))
+  for (const [ref, o] of overrides) {
+    if (o === 'kept' && inKept.has(ref)) continue
+    if ((o === 'declined' || o === 'shown') && !inPending.has(ref) && !inKept.has(ref)) continue
+    out.set(ref, o)
+  }
+  return out
+}
+
+// overrides: Map ref -> 'kept' | 'declined' | 'shown', decisions made here
+// that the node has not answered yet. 'kept' moves a pending row to the top
+// of kept; the others drop the row from both lists. Inputs are not mutated.
+export function applyDecisions ({ pending, kept }, overrides) {
+  const p = Array.isArray(pending) ? pending : []
+  const k = Array.isArray(kept) ? kept : []
+  if (!(overrides instanceof Map) || overrides.size === 0) return { pending: p.slice(), kept: k.slice() }
+  const moved = []
+  const outPending = []
+  for (const r of p) {
+    const o = overrides.get(r.ref)
+    if (o === 'kept') moved.push(r)
+    else if (o !== 'declined' && o !== 'shown') outPending.push(r)
+  }
+  const movedRefs = new Set(moved.map((r) => r.ref))
+  const outKept = moved.concat(k.filter((r) => {
+    const o = overrides.get(r.ref)
+    return o !== 'declined' && o !== 'shown' && !movedRefs.has(r.ref)
+  }))
+  return { pending: outPending, kept: outKept }
 }

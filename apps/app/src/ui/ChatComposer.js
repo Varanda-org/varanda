@@ -61,7 +61,6 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { MAX_TEXT, activeMention } from '@varanda/rpc'
 import { countAfterInsert, insertAt } from '../emoji'
 import { cleanPaste, insertCodeBlock, pasteCaret, wrapSelection } from '../formatInsert'
-import { heightFloor } from '../composerHeight'
 import { canRecordMp4, cancelRecording, startRecording, stopRecording } from '../media/audio'
 import { durationLabel, recordPlan, slideToCancel } from '../media/voice'
 import { countChars } from '../format'
@@ -87,7 +86,7 @@ import { MentionSuggest } from './MentionSuggest'
 import { ReplyPreview } from './ReplyPreview'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, radius, space, webInputReset } from './theme'
-import { measureField } from './fieldMeasure'
+import { GROWS_ITSELF, measureField } from './fieldMeasure'
 
 const LINE = 22
 const PAD_V = 9
@@ -441,15 +440,19 @@ export function ChatComposer ({
   // field is measured from its scrollHeight after every change, before the
   // paint (it grows and shrinks between one and MAX_LINES lines):
   // react-native-web fires onContentSizeChange when typing grows the field,
-  // never when deleting shrinks it. Native has no measurement (null) and
-  // relies on onContentSizeChange.
+  // never when deleting shrinks it. iOS and Android size the field
+  // themselves between styles.grows' bounds, from any text, typed or set by
+  // the format row: iOS fires onContentSizeChange only when the frame
+  // changes, so a fixed height never grew there. Their laid out height says
+  // when the field is full and scrolls.
   const inputRef = useRef(null)
   useLayoutEffect(() => {
     if (text === '') setHeight(MIN_HEIGHT)
     const measured = measureField(inputRef.current, MIN_HEIGHT, MAX_HEIGHT)
     if (measured !== null) setHeight((was) => (was === measured ? was : measured))
   }, [text])
-  const shownHeight = Math.max(height, heightFloor(text, { line: LINE, pad: PAD_V, maxLines: MAX_LINES }))
+  const [laidOut, setLaidOut] = useState(MIN_HEIGHT)
+  const full = (GROWS_ITSELF ? laidOut : height) >= MAX_HEIGHT - 0.5
   const [emojiOpen, setEmojiOpen] = useState(false)
   const [formatOpen, setFormatOpen] = useState(false)
   const [focused, setFocused] = useState(false)
@@ -733,7 +736,8 @@ export function ChatComposer ({
             : null}
           <TextInput
             ref={inputRef}
-            style={[styles.input, webInputReset, { height: shownHeight }]}
+            style={[styles.input, webInputReset, GROWS_ITSELF ? styles.grows : { height }]}
+            onLayout={GROWS_ITSELF ? (event) => setLaidOut(event.nativeEvent.layout.height) : undefined}
             onFocus={() => { setFocused(true); setReached(true) }}
             onBlur={() => setFocused(false)}
             value={text}
@@ -747,12 +751,14 @@ export function ChatComposer ({
               setCollapsed(sel.start === sel.end)
               if (forcedSel) setForcedSel(null)
             }}
-            onContentSizeChange={(event) => {
-              const h = event.nativeEvent.contentSize.height
-              if (typeof h !== 'number' || !Number.isFinite(h)) return
-              setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, Math.ceil(h))))
-            }}
-            scrollEnabled={shownHeight >= MAX_HEIGHT}
+            onContentSizeChange={GROWS_ITSELF
+              ? undefined
+              : (event) => {
+                  const h = event.nativeEvent.contentSize.height
+                  if (typeof h !== 'number' || !Number.isFinite(h)) return
+                  setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, Math.ceil(h))))
+                }}
+            scrollEnabled={full}
             multiline
             maxLength={max * 2}
             placeholder={placeholder}
@@ -884,6 +890,7 @@ const makeStyles = (colors) => StyleSheet.create({
     lineHeight: LINE,
     color: colors.ink
   },
+  grows: { minHeight: MIN_HEIGHT, maxHeight: MAX_HEIGHT },
   send: {
     width: SEND,
     height: SEND,

@@ -47,11 +47,11 @@ function vitrineImports (code) {
   return out
 }
 
-// [start, end) of every `if (VITRINE) { ... }` block.
+// [start, end) of every `if (<literal gate> VITRINE) { ... }` block.
 function guardedBlocks (code) {
   const plain = withoutStrings(code)
   const blocks = []
-  for (const m of plain.matchAll(/\bif \(VITRINE\) \{/g)) {
+  for (const m of plain.matchAll(/\bif \((?:typeof __DEV__ !== '\s*' && __DEV__ && process\.env\.EXPO_PUBLIC_VARANDA_VITRINE === '\s*' && )?VITRINE\) \{/g)) {
     let depth = 0
     for (let i = m.index + m[0].length - 1; i < plain.length; i++) {
       if (plain[i] === '{') depth++
@@ -98,6 +98,21 @@ test('every vitrine import is guarded by vitrineEnabled', (t) => {
       }
       t.ok(/^require\s*\(/.test(imp.text), name + ': ' + imp.spec + ' is a require, not a static import')
       t.ok(blocks.some(([start, end]) => imp.index > start && imp.index < end), name + ': ' + imp.spec + ' sits inside if (VITRINE)')
+    }
+  }
+})
+
+// Metro folds the literal __DEV__ and EXPO_PUBLIC_ reads, so a release bundle
+// drops these branches and the fixtures with them; a bare `if (VITRINE)` would
+// keep them (the flag is a function call Metro cannot fold).
+test('every vitrine require sits behind the literal dev gate', (t) => {
+  const GATE = "typeof __DEV__ !== 'undefined' && __DEV__ && process.env.EXPO_PUBLIC_VARANDA_VITRINE === '1' && VITRINE"
+  for (const name of ALLOWED) {
+    const code = withoutComments(fs.readFileSync(path.join(APP, name), 'utf8'))
+    for (const imp of vitrineImports(code)) {
+      if (/\/vitrine\/enabled(\.js)?$/.test(imp.spec)) continue
+      const head = code.slice(0, imp.index).split('if (').pop()
+      t.ok(head.startsWith(GATE + ')'), name + ': ' + imp.spec + ' is gated by the literal expression')
     }
   }
 })
@@ -215,9 +230,9 @@ test('the Vitrine sets its installation origin only inside the guard in node.js'
   const code = withoutComments(fs.readFileSync(path.join(SRC, 'node.js'), 'utf8'))
   const blocks = guardedBlocks(code)
   const at = code.indexOf(literal)
-  const guard = code.indexOf('if (VITRINE) {')
+  const guard = code.indexOf('&& VITRINE) {')
   const provider = code.indexOf('export function NodeProvider')
-  t.ok(at > guard && at < provider, 'the call sits between if (VITRINE) { and export function NodeProvider')
+  t.ok(at > guard && at < provider, 'the call sits between the VITRINE gate and export function NodeProvider')
   t.ok(blocks.some(([start, end]) => at > start && at < end), 'the call sits inside the if (VITRINE) block')
   for (const file of sources(SRC)) {
     if (rel(file) === 'src/node.js') continue

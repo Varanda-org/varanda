@@ -162,7 +162,7 @@ test('theme usage: rounded fields drop the browser focus ring and show focus on 
     t.ok(/searchFocused: \{ borderColor: colors\.accent/.test(src), rel + ': focus shown on the pill')
   }
   const composer = read('ui/ChatComposer.js')
-  t.ok(composer.includes('style={[styles.input, webInputReset, { height: shownHeight }]}'))
+  t.ok(composer.includes('style={[styles.input, webInputReset, GROWS_ITSELF ? styles.grows : { height }]}'))
   t.ok(composer.includes('fieldFocused: { borderColor: colors.accent }'))
 })
 
