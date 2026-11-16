@@ -13,7 +13,7 @@ const { keyPair: signingKeyPair } = require('hypercore-crypto')
 const { testnet, until } = require('./helpers/net')
 const { createSnapshot } = require('../lib/blocklist')
 const { groupJoinRecord, MAX_GROUPS_PER_COMMUNITY } = require('../lib/records')
-const { groupPost, groupCreateRecord, groupAdmin } = require('../lib/group')
+const { groupPost, groupCreateRecord, groupAdmin, groupMeta } = require('../lib/group')
 const {
   hex,
   makeAssociation,
@@ -369,4 +369,30 @@ test('a root create read while the community root is gone is folded once the roo
   await until(() => seeder.indexCommunity(C).complete, { name: 'comunidade completa' })
   t.alike(seeder.indexCommunity(C).groups.map((r) => r.group), [G], 'the create is listed')
   t.is(events.filter((e) => e.event === 'fatal').length, 0)
+})
+
+test('a catalogue row shows the new name of a renamed public group, and is incomplete while that root scan is behind', async (t) => {
+  t.timeout(90000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+
+  const { A, G, C } = await creator(t, bootstrap, assoc)
+  await A.cores.group.append(encode(groupMeta({ name: 'Guarda-sois', join: 'approval' })))
+  await admit(A, assoc)
+  await admitted(events, G)
+  await admitted(events, C)
+  await scanned(seeder, C, 2)
+  await scanned(seeder, G, 3)
+  await until(() => seeder.indexCommunity(C).complete && seeder.indexCommunity(C).groups.length === 1, { name: 'comunidade completa' })
+  t.alike(seeder.indexCommunity(C).groups, [{ group: G, visibility: 'public', join: 'approval', name: 'Guarda-sois', writerCount: 1 }], 'the row has the new name and join')
+  t.is(seeder.indexGroup(G).header.name, 'Guarda-sois', 'and so does the group answer')
+
+  const e = seeder._groupServed.get(G)
+  e.rootScanning = true
+  t.is(seeder.indexCommunity(C).complete, false, 'incomplete while the group root scan is behind')
+  e.rootScanning = false
+  t.is(seeder.indexCommunity(C).complete, true)
+  t.is(events.filter((x) => x.event === 'fatal').length, 0)
 })

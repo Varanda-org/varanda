@@ -137,6 +137,14 @@ function createNameIndex ({ maxAuthors, verifyUsername, verifyPage } = {}) {
         // About its own log only, and verified for it.
         const copy = validRecordCopy(record, seq)
         if (copy === null || copy.page !== author) return true
+        // A copy that could change nothing is not verified: each verify
+        // costs signature checks, and a leaked page key can append many.
+        const known = entries.get(author)
+        if (known !== undefined && known.page) {
+          const end = PAGE_ENDS[type] ?? null
+          if (end === null) return true
+          if ((known.closed || known.moved) && seq >= known.endSeq) return true
+        }
         let ok = false
         try {
           ok = typeof verifyPage === 'function' && verifyPage(author, copy) === true

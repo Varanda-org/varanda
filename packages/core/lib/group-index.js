@@ -19,7 +19,8 @@
 // Communities (docs/protocol.md section 10, "Catalogue hints"): a group
 // header names its parent community for good, and only the community's
 // creator creates groups. For each served community root the seeder folds
-// its group-meta and group-create records once, in log order (foldRoot). A
+// its group-meta and group-create records once, in log order (foldRoot); a
+// public group root folds only its group-meta (a rename). A
 // group is attached while its header names C, its header diary is C's
 // creator and C's root holds a create for it. Like everything here it is a
 // hint: lib/group.js judges each create at its position.
@@ -82,10 +83,23 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     return g
   }
 
-  // What foldRoot folds from a community root: the last group-meta name and
-  // join (metaSeen once one folded).
+  // What foldRoot folds from a community root or a public group root: the
+  // last group-meta name and join (metaSeen once one folded).
   function rootState () {
     return { meta: null, metaJoin: null, metaSeen: false }
+  }
+
+  // The name a public group shows and is found by: the last group-meta its
+  // root folded (null clears it), else its header's. A hint only: no
+  // authority check, as for a community's name.
+  function groupName (g) {
+    if (g.header === null || g.header.visibility !== 'public') return null
+    return g.metaSeen ? g.meta : g.header.name
+  }
+
+  function retoken (g) {
+    const n = g.header !== null && g.header.kind === 'group' ? groupName(g) : (g.header !== null ? g.header.name : null)
+    g.tokens = typeof n === 'string' ? foldTokens(n) : []
   }
 
   function dropCreates (root) {
@@ -220,10 +234,20 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
       }
       const shownName = visibility === 'public' && typeof name === 'string' ? name : null
       g.header = { kind, visibility, join, diary, name: shownName, community, member }
-      g.tokens = shownName === null ? [] : foldTokens(shownName)
+      retoken(g)
       return true
     } catch {
       return false
+    }
+  }
+
+  // The name a public group root shows (see groupName), or null.
+  function nameOf (group) {
+    try {
+      const g = groups.get(group)
+      return g && g.header !== null && g.header.kind === 'group' ? groupName(g) : null
+    } catch {
+      return null
     }
   }
 
@@ -324,7 +348,7 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
         if (!shown(visible, group)) continue
         const members = new Set()
         for (const w of g.writers.values()) if (!w.left) members.add(w.diary)
-        hits.push({ group, name: g.header.name, rank: g.tokens.join(' ') === exact ? 0 : 1, members: members.size })
+        hits.push({ group, name: groupName(g), rank: g.tokens.join(' ') === exact ? 0 : 1, members: members.size })
       }
       hits.sort((a, b) => a.rank - b.rank || b.members - a.members || cmp(a.group, b.group))
       return {
@@ -336,22 +360,27 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     }
   }
 
-  // One record of community root `root` (validated by the caller with
-  // validateGroupRecord, in log order, each once): group-meta and
-  // group-create. Anything else, or a root without a community header,
-  // answers false.
+  // One record of root `root` (validated by the caller with
+  // validateGroupRecord, in log order, each once): group-meta and, for a
+  // community root, group-create. Anything else, or a root that is neither
+  // a community nor a public group, answers false.
   function foldRoot (root, record) {
     try {
       const g = groups.get(root)
-      if (!g || g.header === null || g.header.kind !== 'community' || record === null || typeof record !== 'object') return false
+      if (!g || g.header === null || record === null || typeof record !== 'object') return false
+      // A public group's root folds only its renames; a private root seals
+      // its meta, so it folds nothing.
+      const publicGroup = g.header.kind === 'group' && g.header.visibility === 'public'
+      if (g.header.kind !== 'community' && !publicGroup) return false
       if (record.type === 'group-meta' && (record.name === null || typeof record.name === 'string')) {
         // A cleared name (null) wins too: it hides the header's.
         g.meta = record.name
         g.metaJoin = record.join === 'open' || record.join === 'approval' ? record.join : g.metaJoin
         g.metaSeen = true
+        if (publicGroup) retoken(g)
         return true
       }
-      if (record.type === 'group-create') {
+      if (record.type === 'group-create' && !publicGroup) {
         if (!isHex64(record.group) || record.group === root) return false
         let set = creates.get(root)
         if (set === undefined) {
@@ -376,6 +405,7 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
       if (!g) return false
       Object.assign(g, rootState())
       dropCreates(root)
+      retoken(g)
       return true
     } catch {
       return false
@@ -460,8 +490,8 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
         rows.push({
           group: G,
           visibility: priv ? 'private' : 'public',
-          join: g.header.join,
-          name: priv ? null : g.header.name,
+          join: (!priv && g.metaJoin) || g.header.join,
+          name: priv ? null : groupName(g),
           writerCount: priv ? null : memberCount(g, null)
         })
       }
@@ -482,7 +512,7 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     return { groups: groups.size, writers: writerGroup.size, maxGroups: groupCap, saturated: groups.size >= groupCap }
   }
 
-  return { addWriter, setLeft, removeWriter, removeDiary, removeGroup, setHeader, header, writer, page, groupsOf, search, foldRoot, resetRoot, attached, communityOf, createdIn, community, clear, stats }
+  return { addWriter, setLeft, removeWriter, removeDiary, removeGroup, setHeader, header, nameOf, writer, page, groupsOf, search, foldRoot, resetRoot, attached, communityOf, createdIn, community, clear, stats }
 }
 
 module.exports = {

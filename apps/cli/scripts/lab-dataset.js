@@ -21,8 +21,9 @@ const crypto = require('hypercore-crypto')
 const { WebSocket } = require('ws')
 const { createClient, parseMessage, EVENTS, MAX_MESSAGE } = require('@varanda/rpc')
 const { createIssuedCert, createUsernameRecord } = require('@varanda/core/lib/cert')
-const { createBrowserNode } = require('@varanda/web-member/lib/node')
-const { memoryNodeStorage } = require('@varanda/web-member/lib/node-storage')
+// apps/cli does not depend on packages/web-member, so it is reached by path.
+const { createBrowserNode } = require('../../../packages/web-member/lib/node')
+const { memoryNodeStorage } = require('../../../packages/web-member/lib/node-storage')
 const { makeRandom } = require('../lib/lab-dataset-plan')
 
 const CONCURRENCY = 4
@@ -337,21 +338,20 @@ async function runDataset ({ seederWsUrl, origin, association, issuer, plan, roo
             await syncOnce(web)
           }
         }
-        for (const { c, planned } of joins) {
-          let r = await web.request('community.join', { community: c.community })
-          if (r.state === 'pending') {
-            await syncOnce(web)
-            r = await web.request('community.join', { community: c.community })
-          }
-          if (r.state !== 'member') {
-            log('@' + username + ' não entrou em "' + c.name + '" (' + r.state + ')')
-            continue
-          }
-          c.joined.push(m)
-          for (const p of planned.posts.filter((x) => x.member === m)) await web.request('group.post', { group: c.general, text: p.text })
-        }
-        lengths[m] = await ownLength(web)
-        await pushUntilHeld({ web, key: keys[m], length: lengths[m], photos: [], origin, heldLength })
+        await joinMember({
+          joins,
+          member: m,
+          username,
+          join: (c) => web.request('community.join', { community: c.community }),
+          sync: () => syncOnce(web),
+          post: (c, text) => web.request('group.post', { group: c.general, text }),
+          push: async () => {
+            lengths[m] = await ownLength(web)
+            await pushUntilHeld({ web, key: keys[m], length: lengths[m], photos: [], origin, heldLength })
+          },
+          count: (c) => c.joined.push(m),
+          log
+        })
       } catch (err) {
         log('@' + username + ' nas comunidades: ' + err.message)
       } finally {
@@ -450,4 +450,26 @@ function readerSetup ({ seed, keys, communities }) {
   ].join('\n')
 }
 
-module.exports = { runDataset, readerSetup, photoPng }
+// One member's joins in one task. A join counts only once the push that
+// carries it to the seeder has succeeded; if anything throws before that,
+// nothing is counted, so the member totals never overcount.
+async function joinMember ({ joins, member, username, join, sync, post, push, count, log }) {
+  const joined = []
+  for (const { c, planned } of joins) {
+    let r = await join(c)
+    if (r.state === 'pending') {
+      await sync()
+      r = await join(c)
+    }
+    if (r.state !== 'member') {
+      log('@' + username + ' não entrou em "' + c.name + '" (' + r.state + ')')
+      continue
+    }
+    joined.push(c)
+    for (const p of planned.posts.filter((x) => x.member === member)) await post(c, p.text)
+  }
+  await push()
+  for (const c of joined) count(c)
+}
+
+module.exports = { runDataset, readerSetup, photoPng, joinMember }

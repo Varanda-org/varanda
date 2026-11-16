@@ -59,6 +59,7 @@ function community ({ key = K(0xc0), creator, join = 'open', name = 'Bairro', me
   const c = cores(key)
   const cw = new Map([[creator, key]])
   const confirms = new Map()
+  const marks = new Map()
   const confirmLeave = (diary, wkey, dseq) => {
     const entries = c.logs.get(wkey).entries
     let leave = null
@@ -126,11 +127,19 @@ function community ({ key = K(0xc0), creator, join = 'open', name = 'Bairro', me
       if (!cw.has(diary) || rejoin !== null) cw.set(diary, wkey)
       return wkey
     },
+    // A diary's group-cut mark for C on one of its CWs (records at seq >=
+    // cut stop counting). `seq` is the mark's own seq in the diary.
+    mark (diary, writer, cut, seq) {
+      const list = marks.get(diary) || []
+      list.push({ writer, cut, seq: seq === undefined ? list.length + 1 : seq })
+      marks.set(diary, list)
+      return C
+    },
     rootHeaderFor (group, diary, opts = {}) {
       return groupHeader({ diary, community: key, member: cw.get(diary), name: 'Geral', at: AT(0), ...opts, kind: 'group' })
     },
     input ({ drop = [] } = {}) {
-      return { root: c.logs.get(key), writers: c.writers({ drop }), joins: c.joins, confirms, now: NOW }
+      return { root: c.logs.get(key), writers: c.writers({ drop }), joins: c.joins, confirms, marks, now: NOW }
     }
   }
   return C

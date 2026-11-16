@@ -63,7 +63,8 @@ test('the web composer asks the account preview route', (t) => {
     t.pass('previewBuild.web.js not written yet')
     return
   }
-  t.ok(fs.readFileSync(file, 'utf8').includes("import { previewFetch, previewPolicy } from './account.js'"), 'previewBuild.web.js uses the account preview client')
+  t.ok(fs.readFileSync(file, 'utf8').includes("export { previewViaService as buildPreview } from './previewService.js'"), 'previewBuild.web.js is the shared service build')
+  t.ok(fs.readFileSync(path.join(SRC, 'previewService.js'), 'utf8').includes("import { previewFetch, previewPolicy } from './account.js'"), 'previewService.js uses the account preview client')
   t.ok(fs.readFileSync(path.join(SRC, 'account.js'), 'utf8').includes("call('POST', '/account/preview', { url }"), 'account.js asks /account/preview')
 })
 

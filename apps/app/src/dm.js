@@ -15,7 +15,7 @@ export const LABELS = Object.freeze({
   decline: 'Recusar',
   block: 'Bloquear mensagens',
   unblock: 'Desbloquear mensagens',
-  delete: 'Apagar conversa neste aparelho',
+  delete: 'Apagar conversa',
   report: 'Denunciar',
   reply: 'Responder',
   message: 'Mensagem',
