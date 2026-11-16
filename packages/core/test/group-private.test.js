@@ -407,24 +407,40 @@ test('an epoch distributed before a ban is never eligible after the ban', (t) =>
   t.is(kidOf(g.epoch), kidOf(E3))
 })
 
-test('a pending new device of an admitted diary is never an entitled recipient', (t) => {
+// Owner decision (#350): the admission covers the diary's new devices while
+// it has not left or been banned.
+test('a new device of an admitted diary is entitled without a new admit', (t) => {
   const w = pworld()
   w.add(X, wX2)
   const E2 = w.rotate(G, [G, wA, wX, wX2, wY], { at: 6 })
   const g = buildGroup(w.input(w.reader(wA)))
   t.is(g.members.get(X), 'member')
-  t.ok(g.requests.includes(X), 'the new device waits for an admit')
-  t.is(kidOf(g.epoch), kidOf(w.E1), 'E2 hands the key to a pending writer')
-  t.not(kidOf(g.epoch), kidOf(E2))
-  t.alike(g.entitled, [G, wA, wX, wY].sort(), 'the writers a rotation seals to')
-  const own = buildGroup(w.input(w.reader(wX2)))
-  t.is(own.epoch, null, 'the pending device itself holds only E2, which names it')
-  t.is(own.rekeyPending, true)
-  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }, { writer: wX2, seq: 1 }], at: AT(7) }))
-  const after = buildGroup(w.input(w.reader(wA)))
-  t.is(kidOf(after.epoch), kidOf(E2), 'admitted, E2 becomes eligible')
-  t.alike(after.entitled, [G, wA, wX, wX2, wY].sort())
-  t.is(kidOf(buildGroup(w.input(w.reader(wX2))).epoch), kidOf(E2))
+  t.absent(g.requests.includes(X), 'the new device waits for nobody')
+  t.alike(g.entitled, [G, wA, wX, wX2, wY].sort(), 'the writers a rotation seals to')
+  t.is(kidOf(g.epoch), kidOf(E2), 'E2 hands the key to an entitled writer')
+  t.is(kidOf(buildGroup(w.input(w.reader(wX2))).epoch), kidOf(E2), 'the new device reads E2')
+})
+
+test('a new device of a diary not admitted or banned is never entitled', (t) => {
+  const w = pworld()
+  w.add(Z, wZ)
+  let g = buildGroup(w.input(w.reader(wA)))
+  t.is(g.members.get(Z), 'requested')
+  t.absent(g.entitled.includes(wZ), 'never admitted')
+  w.push(G, groupAdmit({ member: Z, on: true, cuts: [{ writer: wZ, seq: 1 }], at: AT(6) }))
+  w.push(G, groupAdmit({ member: Z, on: false, cuts: [{ writer: wZ, seq: 1 }], at: AT(7) }))
+  const wZ2 = K(0x701)
+  w.add(Z, wZ2, { at: 8 })
+  g = buildGroup(w.input(w.reader(wA)))
+  t.absent(g.entitled.includes(wZ2), 'admission withdrawn')
+  const ban = w.push(G, groupBan({ member: X, on: true, cuts: [{ writer: wX, seq: w.len(wX) }], at: AT(9) }))
+  w.add(X, wX2, { at: 10 })
+  g = buildGroup(w.input(w.reader(wA)))
+  t.absent(g.entitled.includes(wX2), 'banned')
+  w.push(G, groupBan({ member: X, on: false, lifts: ban, cuts: [{ writer: wX, seq: w.len(wX) }], at: AT(11) }))
+  g = buildGroup(w.input(w.reader(wA)))
+  t.ok(g.entitled.includes(wX), 'unbanned on the writer the unban lists')
+  t.absent(g.entitled.includes(wX2), 'not on a device the unban never listed')
 })
 
 test('a community admin receives keys and distributes through auth; a demotion in C ends it, history stays', (t) => {

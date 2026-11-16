@@ -1090,6 +1090,36 @@ test('gate: a request never admitted in C neither posts nor acts in its groups',
   t.alike(shown(buildGroup(go.input())), [wB + ':1'])
 })
 
+// Owner decision (#350): the admission covers the diary's new devices while
+// it has not left or been banned.
+test('gate: a new CW of an admitted member is admitted, and its group writers count', (t) => {
+  const cwX2 = K(0x41)
+  const wX2 = K(0x4001)
+  const wX3 = K(0x4002)
+  const C = community({ creator: Z, join: 'approval', members: [{ diary: X, cw: cwX, status: 'member' }], creates: [{ by: Z, group: G1 }, { by: Z, group: G2 }] })
+  C.addWriter(X, cwX2)
+  const c = comm(C)
+  t.ok(c.admittedCws.has(cwX2), 'no admit lists it')
+  t.alike(c.requests, [])
+  const g = groupIn(C, { key: G1 })
+  g.add(X, wX).add(X, wX2, { cw: cwX2 })
+  gpost(g, wX2, 5)
+  const r = buildGroup(g.input())
+  t.alike(shown(r), [wX2 + ':1'], 'the second device posts in an open group of C')
+  t.ok(r.liveWriters.has(wX2))
+  const a = groupIn(C, { key: G2, join: 'approval' })
+  a.add(X, wX)
+  a.push(G2, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(6) }))
+  a.add(X, wX3, { cw: cwX2, at: AT(7) })
+  gpost(a, wX3, 8)
+  const ra = buildGroup(a.input())
+  t.alike(shown(ra), [wX3 + ':1'], 'and in an approval group of C that admitted it')
+  t.alike(ra.requests, [])
+  C.push(C.key, communityAdmit({ member: X, on: false, cuts: [{ writer: cwX, seq: 1 }], at: C.at() }))
+  t.absent(comm(C).admittedCws.has(cwX2), 'not once the admission is withdrawn')
+  t.alike(shown(buildGroup(g.input())), [])
+})
+
 test('no authority after leaving: a departed admin moderation never counts, with or without a G leave', (t) => {
   const setup = () => {
     const C = community({ creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }, { diary: X, cw: cwX, status: 'member' }, { diary: Y, cw: cwY, status: 'member' }], creates: [{ by: Z, group: G1 }] })

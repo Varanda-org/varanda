@@ -1068,15 +1068,18 @@ function cutsMap (cuts) {
 
 // A layer is a list of { on, cuts, unlisted } in causal order; each event
 // sets the state of every listed writer from its cut on, and of every other
-// writer from `unlisted` (0, or Infinity for an event that skips them). The
-// state of (writer, seq) is the one of the last event, from index `from`,
-// whose cut is at or below seq.
+// writer from `unlisted` (0, or Infinity for an event that skips them). A
+// positive admit may also carry `auto`, the cuts the fold derives for the
+// diary's new devices it does not list (autoAdmit). The state of (writer,
+// seq) is the one of the last event, from index `from`, whose cut is at or
+// below seq.
 function layerAt (events, writer, seq, from = 0) {
   if (!events) return false
   for (let i = events.length - 1; i >= from; i--) {
     const e = events[i]
-    const c = e.cuts.get(writer)
-    if ((c === undefined ? e.unlisted : c) <= seq) return e.on
+    let c = e.cuts.get(writer)
+    if (c === undefined) c = e.auto && e.auto.has(writer) ? e.auto.get(writer) : e.unlisted
+    if (c <= seq) return e.on
   }
   return false
 }
@@ -2312,8 +2315,9 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
         const cuts = cutsMap(r.cuts)
         // A positive admit skips writers its cuts do not list: a backlog
         // writer the admin never saw must not become admitted from seq 0. A
-        // withdrawal still covers every writer.
-        pushTo(admits, r.member, { on: r.on, cuts, unlisted: r.on ? Infinity : 0, gen: admitGen(r.member, cuts, i), by: n.diary })
+        // withdrawal still covers every writer. The diary's later devices
+        // get automatic cuts after the loop (autoAdmit).
+        pushTo(admits, r.member, { on: r.on, cuts, unlisted: r.on ? Infinity : 0, gen: admitGen(r.member, cuts, i), by: n.diary, pos: n.pos, auto: r.on ? new Map() : null })
         if (!r.on) removals.push(n)
         else pushTo(authPos, r.member, n.pos)
         break
@@ -2392,6 +2396,50 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
   if (cwMeta !== null) {
     name = cwMeta.name
     join = cwMeta.join
+  }
+
+  // autoAdmit (owner decision, #350): a member's admission covers the new
+  // devices of its diary while it has not left or been banned. A writer of
+  // the diary's current generation by its own header (in a community, a CW
+  // not retired; in a group, no leave and no rejoin, or a rejoin naming the
+  // diary's latest leave) gets, on each positive admit of that generation
+  // not listing it, the cut an admin listing it would have written: its
+  // first record after the admit in causal order, else its next seq. Its
+  // records before the admission stay unadmitted, and a device from before
+  // a leave never comes back. Under a community, leaving it counts too: only
+  // an admit after the diary's latest community leave covers a writer, and
+  // never one whose CW C retired. Auto cuts never prove a leave was seen
+  // (sawPrefix and admitGen read `cuts` only). The opened pass of a private
+  // group reuses these events.
+  if (!auth) {
+    const autoEligible = (w, d) => {
+      if (isC) return !monoRetired.has(w)
+      if (cs !== null && cs.retiredC.has(cwOf.get(w))) return false
+      const list = leavesOf.get(d)
+      return list ? names(w, list[list.length - 1]) : !rejoinRef.has(w)
+    }
+    const nodesOf = new Map()
+    const leftCAt = new Map()
+    for (const n of order) {
+      if (n.record.type === 'community-leave') leftCAt.set(n.diary, n.pos)
+      else if (!n.virtual && n.seq >= 1) pushTo(nodesOf, n.writer, n)
+    }
+    const at = (n) => n.pos
+    for (const l of kept) {
+      const w = l.key
+      const d = l.diary
+      const list = admits.get(d)
+      if (w === G || !list || !autoEligible(w, d)) continue
+      const gen = leaves.get(d) || 0
+      const since = leftCAt.has(d) ? leftCAt.get(d) : -1
+      const mine = nodesOf.get(w) || []
+      const next = l.records.length ? l.records[l.records.length - 1].seq + 1 : 1
+      for (const e of list) {
+        if (!e.on || e.gen < gen || e.pos < since || e.cuts.has(w)) continue
+        const j = firstAbove(mine, e.pos, at)
+        e.auto.set(w, j < mine.length ? mine[j].seq : next)
+      }
+    }
   }
 
   // A post of generation gen counts the admits of generation >= gen, in
